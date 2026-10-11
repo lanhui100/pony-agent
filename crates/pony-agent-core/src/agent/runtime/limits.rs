@@ -7,9 +7,9 @@ pub(super) const MAX_ALLOWED_TOOL_HOPS_PER_TURN: usize = 4096;
 
 pub(super) const MAX_TOOL_HOPS_ENV: &str = "PONY_AGENT_MAX_TOOL_HOPS_PER_TURN";
 
-pub(super) const DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN: usize = 12;
+pub const DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN: usize = 500;
 
-pub(super) const MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN: usize = 32;
+pub const MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN: usize = 2048;
 
 pub(super) const MAX_TOOL_FOLLOWUPS_ENV: &str = "PONY_AGENT_MAX_TOOL_FOLLOWUPS_PER_TURN";
 
@@ -109,7 +109,7 @@ pub(super) fn tool_followup_limit_override_registry() -> &'static AtomicUsize {
 }
 
 
-pub(super) fn max_tool_followups_per_turn() -> usize {
+pub fn max_tool_followups_per_turn() -> usize {
     #[cfg(test)]
     {
         let override_limit = tool_followup_limit_override_registry().load(AtomicOrdering::SeqCst);
@@ -125,7 +125,7 @@ pub(super) fn max_tool_followups_per_turn() -> usize {
 }
 
 
-pub(super) fn parse_max_tool_followups_per_turn(raw: Option<&str>) -> usize {
+pub fn parse_max_tool_followups_per_turn(raw: Option<&str>) -> usize {
     raw.and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| (1..=MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN).contains(value))
         .unwrap_or(DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN)

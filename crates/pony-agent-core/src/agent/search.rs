@@ -370,6 +370,16 @@ fn build_walker(root: &Path, opts: &SearchOptions) -> ignore::Walk {
         .require_git(opts.require_git)
         .follow_links(false)
         .threads(1);
+
+    // 默认过滤 target/, node_modules/, .git/ 等重型目录，防全局搜索耗尽时延
+    let mut overrides = ignore::overrides::OverrideBuilder::new(root);
+    let _ = overrides.add("!target");
+    let _ = overrides.add("!node_modules");
+    let _ = overrides.add("!.git");
+    if let Ok(built) = overrides.build() {
+        builder.overrides(built);
+    }
+
     builder.build()
 }
 

@@ -5392,7 +5392,9 @@ mod contract_view_tests {
                 "drain_inbox",
                 "team_task_create",
                 "team_task_update",
-                "team_task_list"
+                "team_task_list",
+                "TodoWrite",
+                "TodoList"
             ]
         );
         assert_eq!(
@@ -5423,7 +5425,9 @@ mod contract_view_tests {
                 "drain_inbox",
                 "team_task_create",
                 "team_task_update",
-                "team_task_list"
+                "team_task_list",
+                "todo_write",
+                "todo_list"
             ]
         );
     }
@@ -5447,8 +5451,8 @@ mod contract_view_tests {
             .map(|view| view.name.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(tools.len(), 31, "baseline internal primitive count");
-        assert_eq!(names.len(), 26, "baseline product tool count");
+        assert_eq!(tools.len(), 36, "baseline internal primitive count");
+        assert_eq!(names.len(), 28, "baseline product tool count");
         assert_eq!(
             names,
             vec![
@@ -5477,7 +5481,9 @@ mod contract_view_tests {
                 "drain_inbox",
                 "team_task_create",
                 "team_task_update",
-                "team_task_list"
+                "team_task_list",
+                "TodoWrite",
+                "TodoList"
             ]
         );
         for view in views {
@@ -5625,7 +5631,7 @@ mod contract_view_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 28);
         assert!(registry.resolve("Run").is_some());
         assert!(registry.resolve("workspace.run_command").is_some());
         assert!(registry.resolve("workspace_path_info").is_some());
@@ -5779,9 +5785,11 @@ mod contract_view_tests {
     }
 }
 
-pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
+pub fn canonical_tool_name(name: &str) -> Option<&'static str> {
     match name {
         "Run" => Some(TOOL_WORKSPACE_RUN_COMMAND),
+        "TodoWrite" => Some(TOOL_TODO_WRITE),
+        "TodoList" => Some(TOOL_TODO_LIST),
         // PA-114: the product name `Ask` is now owned by the first-class `ask_user` primitive.
         // `echo_input` keeps resolving to itself below (legacy compat, B2-1).
         "Ask" => Some(TOOL_ASK_USER),

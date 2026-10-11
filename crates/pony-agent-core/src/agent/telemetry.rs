@@ -1,7 +1,7 @@
 use crate::agent::provider::PrefixMutationReason;
 use crate::agent::tools::{
     model_visible_tool_name, product_canonical_tool_name, tool_display_metadata_for_name,
-    tool_error_from_output, ToolCall, ToolPermissionFacts, ToolPlan, ToolPlanStep, ToolResult,
+    tool_error_from_output, ToolCall, ToolError, ToolPermissionFacts, ToolPlan, ToolPlanStep, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -334,12 +334,53 @@ fn tool_activities_after_result(
         parent_activity_id: None,
         artifacts: Some(extract_activity_artifacts(&parsed)),
         error: tool_error_from_output(result.status.as_str(), &parsed)
+            .or_else(|| composite_error_from_children(&parsed))
             .map(|error| serde_json::to_value(error).unwrap_or(Value::Null)),
         capability_invocation: None,
     }];
 
     activities.extend(nested_child_activities(active_call, &parsed));
     activities
+}
+
+fn composite_error_from_children(parsed: &Value) -> Option<ToolError> {
+    let results = parsed.get("results").and_then(Value::as_array)?;
+    for entry in results {
+        let is_ok = entry.get("ok").and_then(Value::as_bool).unwrap_or(true);
+        let agg_status = entry.get("aggregateStatus").and_then(Value::as_str).unwrap_or("ok");
+        if !is_ok || agg_status != "ok" {
+            if let Some(err) = entry.get("error").filter(|e| !e.is_null()) {
+                let code = err.get("code").or_else(|| err.get("kind")).and_then(Value::as_str).unwrap_or("child_failed");
+                let message = err.get("message").and_then(Value::as_str).unwrap_or("子调用执行失败");
+                return Some(ToolError {
+                    kind: code.to_string(),
+                    message: message.to_string(),
+                    details: err.get("details").cloned(),
+                    retryable: err.get("retryable").and_then(Value::as_bool),
+                    source: err.get("source").and_then(Value::as_str).map(ToString::to_string),
+                });
+            } else if let Some(out_err) = entry.get("output").and_then(|o| o.get("error")).filter(|e| !e.is_null()) {
+                let code = out_err.get("code").or_else(|| out_err.get("kind")).and_then(Value::as_str).unwrap_or("child_failed");
+                let message = out_err.get("message").and_then(Value::as_str).unwrap_or("子调用执行失败");
+                return Some(ToolError {
+                    kind: code.to_string(),
+                    message: message.to_string(),
+                    details: out_err.get("details").cloned(),
+                    retryable: out_err.get("retryable").and_then(Value::as_bool),
+                    source: out_err.get("source").and_then(Value::as_str).map(ToString::to_string),
+                });
+            } else if let Some(summary_msg) = entry.get("output").and_then(|o| o.get("summary")).and_then(|s| s.get("text")).and_then(Value::as_str) {
+                return Some(ToolError {
+                    kind: "child_failed".to_string(),
+                    message: summary_msg.to_string(),
+                    details: None,
+                    retryable: None,
+                    source: None,
+                });
+            }
+        }
+    }
+    None
 }
 
 fn tool_activity_id(tool_name: &str, suffix: Option<&str>) -> String {
