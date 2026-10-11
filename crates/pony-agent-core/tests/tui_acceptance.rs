@@ -566,10 +566,10 @@ fn test_tui_runtime_mode_state_transitions() {
 
 #[test]
 fn test_elapsed_seconds_formatting() {
-    assert_eq!(tui::format_elapsed_seconds(0), "0.0s");
-    assert_eq!(tui::format_elapsed_seconds(500), "0.5s");
-    assert_eq!(tui::format_elapsed_seconds(1250), "1.2s");
-    assert_eq!(tui::format_elapsed_seconds(65400), "65.4s");
+    assert_eq!(tui::format_elapsed_seconds(0), "0s");
+    assert_eq!(tui::format_elapsed_seconds(500), "0s");
+    assert_eq!(tui::format_elapsed_seconds(1250), "1s");
+    assert_eq!(tui::format_elapsed_seconds(65400), "65s");
 }
 
 

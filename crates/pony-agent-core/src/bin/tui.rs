@@ -7,16 +7,15 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use pony_agent_core::agent::config::{
-    ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
-    ThinkingParamPattern,
+    ProviderModelCapabilities, ProviderRegistryStore, ProviderSelectionResolver,
+    ResolvedProviderSelection, ThinkingParamPattern,
 };
 use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand, StopTurnCommand,
 };
-use pony_agent_core::agent::graph::GraphRunStore;
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::runtime::{AgentRuntimeBuilder, TurnInput, TurnStreamEvent};
-use pony_agent_core::agent::session::{FileSessionBackend, SessionStore};
+use pony_agent_core::agent::session::SessionStore;
 use pony_agent_core::agent::turn_flow::TurnEventSink;
 use ratatui::{
     backend::CrosstermBackend,
@@ -59,16 +58,112 @@ pub enum UiEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Ready,
+    Connecting,
+    Thinking,
+    Responding,
+    ExecutingTool(String),
+    WaitingApproval,
+    Completed,
+    Failed(String),
+}
+
+pub fn format_elapsed_seconds(ms: u64) -> String {
+    let secs = ms / 1000;
+    format!("{}s", secs)
+}
+
+pub fn clean_tool_name_display(name: &str) -> String {
+    let base = name.split('·').next().unwrap_or(name).trim();
+    let cleaned = base
+        .trim_start_matches('●')
+        .trim_start_matches('✔')
+        .trim();
+    cleaned.to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InteractionMode {
     Normal,
     SelectingSession,
+    SelectingProvider,
+    SelectingModel,
+    AddingProvider,
 }
+
+pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
+    ("/resume", "选择并恢复历史会话"),
+    ("/provider", "管理与切换模型提供商"),
+    ("/models", "切换当前活跃模型"),
+    ("/clear", "清空当前消息上下文"),
+    ("/cost", "查看当前模型与网关配额信息"),
+    ("/help", "查看所有支持的快捷指令"),
+    ("/quit", "安全退出 TUI 界面"),
+];
 
 #[derive(Debug, Clone)]
 pub struct SessionItem {
     pub id: String,
     pub title: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderItem {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelItem {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddingProviderStep {
+    Name,
+    BaseUrl,
+    ApiKey,
+    Commit,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AddProviderForm {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddProviderPayload {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+impl AddProviderPayload {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.id.trim().is_empty() {
+            return Err("Provider ID 不能为空");
+        }
+        if self.name.trim().is_empty() {
+            return Err("Provider 名称不能为空");
+        }
+        let url = self.base_url.trim();
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err("Base URL 必须是以 http:// 或 https:// 开头的合法地址");
+        }
+        match self.protocol.trim().to_lowercase().as_str() {
+            "openai" | "anthropic" | "gemini" | "ollama" => Ok(()),
+            _ => Err("不支持的协议类型"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +174,7 @@ pub struct TuiState {
     pub spinner_tick: usize,
     pub session_id: String,
     pub model: String,
+    pub current_provider_id: String,
     pub gateway_url: String,
     pub workspace: PathBuf,
     pub total_input_tokens: u64,
@@ -89,6 +185,15 @@ pub struct TuiState {
     pub mode: InteractionMode,
     pub session_list: Vec<SessionItem>,
     pub selected_session_index: usize,
+    pub provider_list: Vec<ProviderItem>,
+    pub selected_provider_index: usize,
+    pub model_list: Vec<ModelItem>,
+    pub selected_model_index: usize,
+    pub selected_command_index: usize,
+    pub add_provider_step: AddingProviderStep,
+    pub add_provider_form: AddProviderForm,
+    pub runtime_mode: RuntimeMode,
+    pub turn_started_at: Option<std::time::Instant>,
 }
 
 impl Default for TuiState {
@@ -105,6 +210,7 @@ impl Default for TuiState {
             spinner_tick: 0,
             session_id: format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]),
             model: "gemini-3.8-flash".to_string(),
+            current_provider_id: "ponyllm".to_string(),
             gateway_url: env_gateway,
             workspace: canonical_workspace,
             total_input_tokens: 0,
@@ -115,11 +221,193 @@ impl Default for TuiState {
             mode: InteractionMode::Normal,
             session_list: Vec::new(),
             selected_session_index: 0,
+            provider_list: Vec::new(),
+            selected_provider_index: 0,
+            model_list: Vec::new(),
+            selected_model_index: 0,
+            selected_command_index: 0,
+            add_provider_step: AddingProviderStep::Name,
+            add_provider_form: AddProviderForm::default(),
+            runtime_mode: RuntimeMode::Ready,
+            turn_started_at: None,
         }
     }
 }
 
 impl TuiState {
+    pub fn transition_runtime_mode(&mut self, next: RuntimeMode) {
+        self.runtime_mode = next;
+    }
+
+    pub fn runtime_status_display(&self) -> String {
+        match &self.runtime_mode {
+            RuntimeMode::Ready => "Ready".to_string(),
+            RuntimeMode::Connecting => "准备就绪中...".to_string(),
+            RuntimeMode::Thinking => "正在思考...".to_string(),
+            RuntimeMode::Responding => "正在回复...".to_string(),
+            RuntimeMode::ExecutingTool(name) => format!("执行工具: {}...", name),
+            RuntimeMode::WaitingApproval => "等待确认中...".to_string(),
+            RuntimeMode::Completed => "完成".to_string(),
+            RuntimeMode::Failed(reason) => format!("失败: {}", reason),
+        }
+    }
+    pub fn start_add_provider(&mut self) {
+        self.mode = InteractionMode::AddingProvider;
+        self.add_provider_step = AddingProviderStep::Name;
+        self.add_provider_form = AddProviderForm::default();
+        self.input_buffer.clear();
+    }
+
+    pub fn cancel_add_provider(&mut self) {
+        self.mode = InteractionMode::Normal;
+        self.add_provider_step = AddingProviderStep::Name;
+        self.add_provider_form = AddProviderForm::default();
+        self.input_buffer.clear();
+    }
+
+    pub fn add_provider_input(&mut self, text: &str) {
+        match self.add_provider_step {
+            AddingProviderStep::Name => {
+                self.add_provider_form.name = text.to_string();
+            }
+            AddingProviderStep::BaseUrl => {
+                self.add_provider_form.base_url = text.to_string();
+            }
+            AddingProviderStep::ApiKey => {
+                let trimmed = text.trim();
+                self.add_provider_form.api_key = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+            AddingProviderStep::Commit => {}
+        }
+    }
+
+    pub fn advance_add_provider_step(&mut self) -> Result<(), &'static str> {
+        match self.add_provider_step {
+            AddingProviderStep::Name => {
+                if self.add_provider_form.name.trim().is_empty() {
+                    return Err("Provider 名称不能为空");
+                }
+                self.add_provider_step = AddingProviderStep::BaseUrl;
+                Ok(())
+            }
+            AddingProviderStep::BaseUrl => {
+                let url = self.add_provider_form.base_url.trim();
+                if url.is_empty() {
+                    return Err("Base URL 不能为空");
+                }
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err("Base URL 必须是以 http:// 或 https:// 开头的合法地址");
+                }
+                self.add_provider_step = AddingProviderStep::ApiKey;
+                Ok(())
+            }
+            AddingProviderStep::ApiKey => {
+                self.add_provider_step = AddingProviderStep::Commit;
+                Ok(())
+            }
+            AddingProviderStep::Commit => Ok(()),
+        }
+    }
+
+    pub fn finalize_add_provider(&mut self) -> Option<AddProviderPayload> {
+        let name = self.add_provider_form.name.trim().to_string();
+        let base_url = self.add_provider_form.base_url.trim().to_string();
+        if name.is_empty() || base_url.is_empty() {
+            return None;
+        }
+        let id = name
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), "-")
+            .trim_matches('-')
+            .to_string();
+        let final_id = if id.is_empty() {
+            format!("provider-{}", &uuid::Uuid::new_v4().to_string()[..6])
+        } else {
+            id
+        };
+
+        let payload = AddProviderPayload {
+            id: final_id,
+            name,
+            protocol: "openai".to_string(),
+            base_url,
+            api_key: self.add_provider_form.api_key.clone(),
+        };
+
+        self.mode = InteractionMode::Normal;
+        self.add_provider_step = AddingProviderStep::Name;
+        self.add_provider_form = AddProviderForm::default();
+        Some(payload)
+    }
+
+    pub fn open_provider_selector(&mut self, list: Vec<ProviderItem>) {
+        self.provider_list = list;
+        self.selected_provider_index = 0;
+        self.mode = InteractionMode::SelectingProvider;
+    }
+
+    pub fn cancel_provider_selector(&mut self) {
+        self.mode = InteractionMode::Normal;
+        self.provider_list.clear();
+    }
+
+    pub fn next_provider(&mut self) {
+        if !self.provider_list.is_empty() && self.selected_provider_index + 1 < self.provider_list.len() {
+            self.selected_provider_index += 1;
+        }
+    }
+
+    pub fn prev_provider(&mut self) {
+        if self.selected_provider_index > 0 {
+            self.selected_provider_index -= 1;
+        }
+    }
+
+    pub fn select_current_provider(&mut self) {
+        if !self.provider_list.is_empty() && self.selected_provider_index < self.provider_list.len() {
+            let p = &self.provider_list[self.selected_provider_index];
+            self.current_provider_id = p.id.clone();
+            self.status_text = format!("Switched provider to {}", p.name);
+        }
+        self.mode = InteractionMode::Normal;
+    }
+
+    pub fn open_model_selector(&mut self, list: Vec<ModelItem>) {
+        self.model_list = list;
+        self.selected_model_index = 0;
+        self.mode = InteractionMode::SelectingModel;
+    }
+
+    pub fn cancel_model_selector(&mut self) {
+        self.mode = InteractionMode::Normal;
+        self.model_list.clear();
+    }
+
+    pub fn next_model(&mut self) {
+        if !self.model_list.is_empty() && self.selected_model_index + 1 < self.model_list.len() {
+            self.selected_model_index += 1;
+        }
+    }
+
+    pub fn prev_model(&mut self) {
+        if self.selected_model_index > 0 {
+            self.selected_model_index -= 1;
+        }
+    }
+
+    pub fn select_current_model(&mut self) {
+        if !self.model_list.is_empty() && self.selected_model_index < self.model_list.len() {
+            let m = &self.model_list[self.selected_model_index];
+            self.model = m.id.clone();
+            self.status_text = format!("Switched model to {}", m.name);
+        }
+        self.mode = InteractionMode::Normal;
+    }
+
     pub fn open_session_selector(&mut self, list: Vec<SessionItem>) {
         self.session_list = list;
         self.selected_session_index = 0;
@@ -140,6 +428,19 @@ impl TuiState {
     pub fn prev_session(&mut self) {
         if self.selected_session_index > 0 {
             self.selected_session_index -= 1;
+        }
+    }
+
+    pub fn matching_commands(&self) -> Vec<(&'static str, &'static str)> {
+        if self.input_buffer.starts_with('/') {
+            let filter = self.input_buffer.to_lowercase();
+            AVAILABLE_COMMANDS
+                .iter()
+                .copied()
+                .filter(|(cmd, _)| cmd.to_lowercase().starts_with(&filter))
+                .collect()
+        } else {
+            Vec::new()
         }
     }
     pub fn scroll_up(&mut self, delta: u16) {
@@ -254,47 +555,24 @@ pub fn format_tool_display(
 
 pub fn render_markdown_line(line: &str) -> Vec<Span<'static>> {
     let trimmed = line.trim_start();
-    if trimmed.starts_with("### ") {
-        let clean_text = &trimmed[4..];
-        return vec![
-            Span::styled("### ", Style::default().fg(Color::Rgb(100, 160, 240))),
-            Span::styled(
-                clean_text.to_string(),
-                Style::default()
-                    .fg(Color::Rgb(160, 210, 255))
-                    .add_modifier(Modifier::BOLD),
-            ),
+    let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+    if hash_count > 0 && trimmed[hash_count..].starts_with(' ') {
+        let clean_text = trimmed[hash_count..].trim_start();
+        let (marker_symbol, marker_color, text_color) = match hash_count {
+            1 => ("■ ", Color::Rgb(140, 195, 255), Color::Rgb(220, 235, 255)),
+            2 => ("◆ ", Color::Rgb(120, 180, 255), Color::Rgb(200, 225, 255)),
+            3 => ("▲ ", Color::Rgb(100, 160, 240), Color::Rgb(180, 215, 255)),
+            _ => ("● ", Color::Rgb(90, 145, 225), Color::Rgb(165, 205, 245)),
+        };
+        let mut spans = vec![
+            Span::styled(marker_symbol, Style::default().fg(marker_color).add_modifier(Modifier::BOLD)),
         ];
-    } else if trimmed.starts_with("## ") {
-        let clean_text = &trimmed[3..];
-        return vec![
-            Span::styled("## ", Style::default().fg(Color::Rgb(120, 180, 255))),
-            Span::styled(
-                clean_text.to_string(),
-                Style::default()
-                    .fg(Color::Rgb(180, 220, 255))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
-    } else if trimmed.starts_with("# ") {
-        let clean_text = &trimmed[2..];
-        return vec![
-            Span::styled("# ", Style::default().fg(Color::Rgb(140, 195, 255))),
-            Span::styled(
-                clean_text.to_string(),
-                Style::default()
-                    .fg(Color::Rgb(200, 230, 255))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
-    } else if trimmed.starts_with('#') {
-        let clean_text = trimmed.trim_start_matches('#').trim_start();
-        return vec![Span::styled(
-            clean_text.to_string(),
-            Style::default()
-                .fg(Color::Rgb(160, 210, 255))
-                .add_modifier(Modifier::BOLD),
-        )];
+        let mut content_spans = parse_inline_formatting(clean_text);
+        for s in &mut content_spans {
+            s.style = s.style.fg(text_color).add_modifier(Modifier::BOLD);
+        }
+        spans.extend(content_spans);
+        return spans;
     }
 
     if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
@@ -329,14 +607,13 @@ pub fn render_markdown_line(line: &str) -> Vec<Span<'static>> {
     if trimmed.starts_with("```") {
         let lang = trimmed.trim_start_matches('`').trim();
         let label = if lang.is_empty() {
-            "代码块".to_string()
+            "代码块 ──".to_string()
         } else {
-            format!("代码 [{}]", lang)
+            format!("[{}] ──", lang)
         };
         return vec![
-            Span::styled("  ┌─ ", Style::default().fg(Color::Rgb(80, 90, 115))),
-            Span::styled(label, Style::default().fg(Color::Rgb(140, 160, 195)).add_modifier(Modifier::BOLD)),
-            Span::styled(" ─────────────────────────────────", Style::default().fg(Color::Rgb(60, 70, 90))),
+            Span::styled("  ── ", Style::default().fg(Color::Rgb(70, 80, 100))),
+            Span::styled(label, Style::default().fg(Color::Rgb(140, 160, 195))),
         ];
     }
 
@@ -418,14 +695,21 @@ struct DynamicProviderResolver {
     gateway_url: String,
     api_key: Option<String>,
     model: String,
+    registry: ProviderRegistryStore,
 }
 
 impl ProviderSelectionResolver for DynamicProviderResolver {
     fn resolve_provider_selection(
         &self,
-        _provider_id: Option<&str>,
-        _model_id: Option<&str>,
+        provider_id: Option<&str>,
+        model_id: Option<&str>,
     ) -> ResolvedProviderSelection {
+        if let Some(pid) = provider_id {
+            if pid != "ponyllm" {
+                return self.registry.resolve_selection(Some(pid), model_id);
+            }
+        }
+
         let mut base = self.gateway_url.trim_end_matches('/').to_string();
         if !base.ends_with("/v1") {
             base.push_str("/v1");
@@ -439,7 +723,7 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "PONYLLM_API_KEY".to_string(),
             api_key: self.api_key.clone(),
-            model: self.model.clone(),
+            model: model_id.unwrap_or(&self.model).to_string(),
             temperature: 0.2,
             max_output_tokens: 4096,
             reasoning_effort: None,
@@ -469,21 +753,61 @@ impl TurnEventSink for TuiTurnSink {
                     let _ = self.tx.send(UiEvent::StreamDelta(text));
                 }
             }
+            "turn:tool" => {
+                if let Some(activities) = &payload.tool_activities {
+                    if let Some(act) = activities.last() {
+                        let is_running = act.status == "running" || act.status == "planned";
+                        let desc_text = if !act.description.trim().is_empty() {
+                            Some(act.description.trim())
+                        } else {
+                            act.arguments_text.as_deref().or(act.result_text.as_deref())
+                        };
+                        let short_desc = desc_text.and_then(|d| {
+                            let t = d.trim();
+                            if t.is_empty() {
+                                None
+                            } else if t.len() > 60 {
+                                Some(format!("{}...", &t[..60]))
+                            } else {
+                                Some(t.to_string())
+                            }
+                        });
+                        let formatted = format_tool_display(
+                            &act.name,
+                            act.display_name_zh.as_deref(),
+                            short_desc.as_deref(),
+                            Some(&act.status),
+                        );
+                        if is_running {
+                            let _ = self.tx.send(UiEvent::StreamToolCall(formatted));
+                        } else {
+                            let _ = self.tx.send(UiEvent::StreamToolResult(formatted));
+                        }
+                        return;
+                    }
+                }
+                if let Some(text) = payload.text {
+                    let formatted = format_tool_display("Tool", None, Some(&text), None);
+                    let _ = self.tx.send(UiEvent::StreamToolCall(formatted));
+                }
+            }
             "turn:tool_call" => {
-                let (name, display_zh, detail) = payload
-                    .tool_activities
-                    .as_ref()
-                    .and_then(|a| a.last())
-                    .map(|act| {
-                        (
-                            act.name.clone(),
-                            act.display_name_zh.clone(),
-                            act.description.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| ("Tool".to_string(), None, payload.text.unwrap_or_default()));
-                let formatted = format_tool_display(&name, display_zh.as_deref(), Some(&detail), None);
-                let _ = self.tx.send(UiEvent::StreamToolCall(formatted));
+                if let Some(activities) = &payload.tool_activities {
+                    if let Some(act) = activities.last() {
+                        let formatted = format_tool_display(
+                            &act.name,
+                            act.display_name_zh.as_deref(),
+                            Some(&act.description),
+                            Some(&act.status),
+                        );
+                        let _ = self.tx.send(UiEvent::StreamToolCall(formatted));
+                        return;
+                    }
+                }
+                if let Some(text) = payload.text {
+                    let formatted = format_tool_display("Tool", None, Some(&text), None);
+                    let _ = self.tx.send(UiEvent::StreamToolCall(formatted));
+                }
             }
             "turn:tool_result" => {
                 let (name, display_zh, status, detail) = payload
@@ -491,11 +815,16 @@ impl TurnEventSink for TuiTurnSink {
                     .as_ref()
                     .and_then(|a| a.last())
                     .map(|act| {
+                        let desc = if !act.description.trim().is_empty() {
+                            act.description.clone()
+                        } else {
+                            act.result_text.clone().unwrap_or_default()
+                        };
                         (
                             act.name.clone(),
                             act.display_name_zh.clone(),
                             act.status.clone(),
-                            act.result_text.clone().unwrap_or_default(),
+                            desc,
                         )
                     })
                     .unwrap_or_else(|| ("Tool".to_string(), None, "ok".to_string(), String::new()));
@@ -548,6 +877,7 @@ fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &s
         gateway_url: gateway_url.to_string(),
         api_key,
         model: model.to_string(),
+        registry: ProviderRegistryStore::new(),
     };
 
     let runtime_builder = AgentRuntimeBuilder::desktop()
@@ -567,7 +897,7 @@ fn ui(f: &mut Frame, state: &mut TuiState) {
         .constraints([
             Constraint::Length(1),      // 顶栏 Header
             Constraint::Min(6),         // 聊天视窗
-            Constraint::Length(4),      // 输入容器：1行提示输入 + 1行空隙 + 1行底栏状态
+            Constraint::Length(4),      // 输入容器：3行输入文本区域 + 1行底栏状态
         ])
         .split(f.area());
 
@@ -633,7 +963,7 @@ fn ui(f: &mut Frame, state: &mut TuiState) {
                 MessageRole::ToolCall => {
                     message_lines.push(Line::from(vec![
                         Span::raw("    "),
-                        Span::styled("⚡ ", Style::default().fg(Color::Rgb(240, 190, 80))),
+                        Span::styled("● ", Style::default().fg(Color::Rgb(120, 190, 240))),
                         Span::styled(&msg.content, Style::default().fg(Color::Rgb(165, 175, 195))),
                     ]));
                     prev_is_tool = true;
@@ -658,11 +988,28 @@ fn ui(f: &mut Frame, state: &mut TuiState) {
             }
         }
 
+        // 动态状态占位（在对话历史底部，替换原“正在思考”占位，伴随整数秒耗时）：
         if state.is_streaming {
+            let elapsed_str = if let Some(started) = state.turn_started_at {
+                format!(" {}", format_elapsed_seconds(started.elapsed().as_millis() as u64))
+            } else {
+                String::new()
+            };
             let spinner = spinner_frame(state.spinner_tick);
+            let (status_text, status_color) = match &state.runtime_mode {
+                RuntimeMode::Ready => ("就绪".to_string(), Color::Rgb(140, 210, 160)),
+                RuntimeMode::Connecting => (format!("准备就绪中...{elapsed_str}"), Color::Rgb(120, 185, 255)),
+                RuntimeMode::Thinking => (format!("正在思考...{elapsed_str}"), Color::Rgb(170, 150, 240)),
+                RuntimeMode::Responding => (format!("正在回复...{elapsed_str}"), Color::Rgb(120, 205, 240)),
+                RuntimeMode::ExecutingTool(name) => (format!("执行工具: {}...{elapsed_str}", name), Color::Rgb(240, 180, 80)),
+                RuntimeMode::WaitingApproval => (format!("等待确认中...{elapsed_str}"), Color::Rgb(240, 180, 80)),
+                RuntimeMode::Completed => ("完成".to_string(), Color::Rgb(120, 210, 140)),
+                RuntimeMode::Failed(reason) => (format!("失败: {reason}"), Color::Rgb(240, 100, 100)),
+            };
+
             message_lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(format!("{} 思考执行中...", spinner), Style::default().fg(Color::Rgb(120, 195, 255)).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{} {}", spinner, status_text), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
             ]));
             message_lines.push(Line::raw(""));
         }
@@ -702,20 +1049,20 @@ fn ui(f: &mut Frame, state: &mut TuiState) {
         .scroll((effective_scroll_offset, 0));
     f.render_widget(chat_widget, chunks[1]);
 
-    // 3. Input Box: 极简纯净的深色输入面板，带有清晰的底栏状态指标
-    let input_container_bg = Color::Rgb(26, 29, 38);
-    let prompt_prefix = Span::styled(" ❯ ", Style::default().fg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD));
+    // 3. Input Box: 带有输入框边框与底栏状态
+    let input_container_bg = Color::Rgb(24, 27, 36);
 
     let total_width = chunks[2].width as usize;
     let model_tag = format!("  {}  ", state.model);
-    let (status_text_disp, status_bg, status_fg) = if state.is_streaming {
-        (" ⠋ 执行中 ", Color::Rgb(70, 130, 230), Color::Rgb(255, 255, 255))
-    } else if state.status_text.contains("completed") {
-        (" ✔ 完成 ", Color::Rgb(40, 160, 90), Color::Rgb(255, 255, 255))
-    } else if state.status_text.contains("failed") || state.status_text.contains("Interrupted") {
-        (" ✕ 停止 ", Color::Rgb(200, 60, 60), Color::Rgb(255, 255, 255))
-    } else {
-        (" ● 就绪 ", Color::Rgb(45, 95, 60), Color::Rgb(190, 240, 205))
+
+    let (status_text_disp, status_bg, status_fg) = match &state.runtime_mode {
+        RuntimeMode::Ready => (" ● 就绪 ", Color::Rgb(45, 95, 60), Color::Rgb(190, 240, 205)),
+        RuntimeMode::Connecting | RuntimeMode::Thinking | RuntimeMode::Responding | RuntimeMode::ExecutingTool(_) => {
+            (" ⠋ 执行中 ", Color::Rgb(60, 110, 190), Color::Rgb(255, 255, 255))
+        }
+        RuntimeMode::WaitingApproval => (" ⏸ 待确认 ", Color::Rgb(180, 110, 30), Color::Rgb(255, 245, 200)),
+        RuntimeMode::Completed => (" ✔ 完成 ", Color::Rgb(40, 160, 90), Color::Rgb(255, 255, 255)),
+        RuntimeMode::Failed(_) => (" ✕ 失败 ", Color::Rgb(200, 60, 60), Color::Rgb(255, 255, 255)),
     };
 
     let left_info_len = status_text_disp.chars().count() + 4;
@@ -726,35 +1073,89 @@ fn ui(f: &mut Frame, state: &mut TuiState) {
         1
     };
 
-    let input_lines = vec![
-        Line::from(vec![
+    let cursor_span = if !state.is_streaming {
+        Span::styled("█", Style::default().fg(Color::Rgb(100, 210, 240)))
+    } else {
+        Span::raw("")
+    };
+
+    // 支持3行高度输入展示，单行/多行自然排版
+    let mut input_content_lines: Vec<Line> = Vec::new();
+    let raw_input_lines: Vec<&str> = state.input_buffer.split('\n').collect();
+    if raw_input_lines.is_empty() || (raw_input_lines.len() == 1 && raw_input_lines[0].is_empty()) {
+        input_content_lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("● ", Style::default().fg(Color::Rgb(100, 220, 240))),
-            Span::styled(
-                if state.input_buffer.is_empty() && !state.is_streaming {
-                    "输入指令开始对话，或键入 /resume (恢复会话), /clear, /quit..."
-                } else {
-                    state.input_buffer.as_str()
-                },
-                if state.input_buffer.is_empty() {
-                    Style::default().fg(Color::Rgb(110, 120, 140))
-                } else {
-                    Style::default().fg(Color::Rgb(245, 248, 255))
-                },
-            ),
-        ]),
-        Line::raw(""),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(status_text_disp, Style::default().fg(status_fg).bg(status_bg).add_modifier(Modifier::BOLD)),
-            Span::raw(" ".repeat(pad_spaces)),
-            Span::styled(model_tag, Style::default().fg(Color::Rgb(170, 195, 230)).bg(Color::Rgb(38, 44, 58))),
-            Span::raw("  "),
-        ]),
-    ];
+            Span::styled("> ", Style::default().fg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD)),
+            cursor_span,
+        ]));
+        input_content_lines.push(Line::raw(""));
+        input_content_lines.push(Line::raw(""));
+    } else {
+        for (i, line) in raw_input_lines.iter().take(3).enumerate() {
+            let prefix = if i == 0 {
+                Span::styled("> ", Style::default().fg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled("  ", Style::default().fg(Color::Rgb(100, 210, 240)))
+            };
+            let is_last_displayed = i == raw_input_lines.len().min(3) - 1;
+            input_content_lines.push(Line::from(vec![
+                Span::raw("  "),
+                prefix,
+                Span::styled(*line, Style::default().fg(Color::Rgb(245, 248, 255)).add_modifier(Modifier::BOLD)),
+                if is_last_displayed { cursor_span.clone() } else { Span::raw("") },
+            ]));
+        }
+        while input_content_lines.len() < 3 {
+            input_content_lines.push(Line::raw(""));
+        }
+    }
+
+    let mut input_lines = input_content_lines;
+    input_lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(status_text_disp, Style::default().fg(status_fg).bg(status_bg).add_modifier(Modifier::BOLD)),
+        Span::raw(" ".repeat(pad_spaces)),
+        Span::styled(model_tag, Style::default().fg(Color::Rgb(170, 195, 230)).bg(Color::Rgb(38, 44, 58))),
+        Span::raw("  "),
+    ]));
 
     let input_widget = Paragraph::new(input_lines).style(Style::default().bg(input_container_bg));
     f.render_widget(input_widget, chunks[2]);
+
+    // 斜杠命令自动弹出菜单（当用户输入以 / 开头时实时浮动在输入框上方）
+    let match_cmds = state.matching_commands();
+    if !match_cmds.is_empty() && state.mode == InteractionMode::Normal {
+        let menu_height = (match_cmds.len() as u16 + 2).min(8);
+        let menu_width = 46u16;
+        let menu_x = 4u16;
+        let menu_y = chunks[2].y.saturating_sub(menu_height);
+        let menu_rect = ratatui::layout::Rect::new(menu_x, menu_y, menu_width, menu_height);
+
+        let mut menu_lines = Vec::new();
+        menu_lines.push(Line::from(vec![
+            Span::styled(" 命令提示 ", Style::default().fg(Color::Rgb(15, 20, 30)).bg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled("↑↓选择 · Tab/Enter补全", Style::default().fg(Color::Rgb(130, 140, 165))),
+        ]));
+
+        for (idx, (cmd, desc)) in match_cmds.iter().enumerate() {
+            let is_sel = idx == state.selected_command_index;
+            let (prefix, style, desc_style) = if is_sel {
+                (" ❯ ", Style::default().fg(Color::Rgb(255, 255, 255)).bg(Color::Rgb(45, 75, 130)).add_modifier(Modifier::BOLD), Style::default().fg(Color::Rgb(180, 215, 255)).bg(Color::Rgb(45, 75, 130)))
+            } else {
+                ("   ", Style::default().fg(Color::Rgb(120, 200, 240)), Style::default().fg(Color::Rgb(150, 160, 180)))
+            };
+
+            menu_lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(format!("{:<10}", cmd), style),
+                Span::styled(format!(" {}", desc), desc_style),
+            ]));
+        }
+
+        let menu_popup = Paragraph::new(menu_lines).style(Style::default().bg(Color::Rgb(28, 32, 44)));
+        f.render_widget(menu_popup, menu_rect);
+    }
 
     // 如果处于 SelectingSession 弹窗模式，在中央渲染一个无边界柔和浮动选择面板
     if state.mode == InteractionMode::SelectingSession {
@@ -766,6 +1167,7 @@ fn ui(f: &mut Frame, state: &mut TuiState) {
         let popup_rect = ratatui::layout::Rect::new(popup_x, popup_y, popup_width, popup_height);
 
         let mut lines = Vec::new();
+        f.render_widget(ratatui::widgets::Clear, popup_rect);
         lines.push(Line::from(vec![
             Span::styled(" RESUME SESSION ", Style::default().fg(Color::Rgb(15, 17, 23)).bg(Color::Rgb(140, 180, 255)).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
@@ -796,6 +1198,157 @@ fn ui(f: &mut Frame, state: &mut TuiState) {
                     Span::styled(format!("[{}]", item.id), Style::default().fg(if is_selected { Color::Rgb(40, 50, 70) } else { Color::Rgb(120, 130, 150) })),
                 ]));
             }
+        }
+
+        let popup_bg = Color::Rgb(32, 36, 48);
+        let popup = Paragraph::new(lines).style(Style::default().bg(popup_bg));
+        f.render_widget(popup, popup_rect);
+    }
+
+    // Provider 选择弹窗
+    if state.mode == InteractionMode::SelectingProvider {
+        let area = f.area();
+        let popup_width = area.width.min(68).max(40);
+        let popup_height = area.height.min(18).max(10);
+        let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+        let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_rect = ratatui::layout::Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+        let mut lines = Vec::new();
+        f.render_widget(ratatui::widgets::Clear, popup_rect);
+        lines.push(Line::from(vec![
+            Span::styled(" SELECT PROVIDER ", Style::default().fg(Color::Rgb(15, 17, 23)).bg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled("↑↓ 切换 · Enter 确认 · 'a' 添加新Provider · Esc 取消", Style::default().fg(Color::Rgb(150, 160, 180))),
+        ]));
+        lines.push(Line::raw(""));
+
+        if state.provider_list.is_empty() {
+            lines.push(Line::from(vec![Span::styled("  暂无可用的 Provider 配置。", Style::default().fg(Color::Rgb(140, 145, 160)))]));
+        } else {
+            for (idx, item) in state.provider_list.iter().enumerate() {
+                let is_selected = idx == state.selected_provider_index;
+                let is_active = item.id == state.current_provider_id;
+                let (prefix, row_style) = if is_selected {
+                    (" ❯ ", Style::default().fg(Color::Rgb(15, 20, 25)).bg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD))
+                } else {
+                    ("   ", Style::default().fg(Color::Rgb(220, 225, 240)))
+                };
+
+                let active_badge = if is_active {
+                    Span::styled(" (当前)", Style::default().fg(if is_selected { Color::Rgb(20, 40, 60) } else { Color::Rgb(80, 200, 120) }).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::raw("")
+                };
+
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, row_style),
+                    Span::styled(format!("{:<20}", item.name), row_style),
+                    active_badge,
+                    Span::raw(" "),
+                    Span::styled(format!("[{}]", item.protocol), Style::default().fg(if is_selected { Color::Rgb(40, 50, 70) } else { Color::Rgb(130, 140, 160) })),
+                    Span::raw("  "),
+                    Span::styled(format!("{}", item.base_url), Style::default().fg(if is_selected { Color::Rgb(40, 50, 70) } else { Color::Rgb(100, 110, 130) })),
+                ]));
+            }
+        }
+
+        let popup_bg = Color::Rgb(32, 36, 48);
+        let popup = Paragraph::new(lines).style(Style::default().bg(popup_bg));
+        f.render_widget(popup, popup_rect);
+    }
+
+    // Model 选择弹窗
+    if state.mode == InteractionMode::SelectingModel {
+        let area = f.area();
+        let popup_width = area.width.min(64).max(40);
+        let popup_height = area.height.min(18).max(10);
+        let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+        let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_rect = ratatui::layout::Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+        let mut lines = Vec::new();
+        f.render_widget(ratatui::widgets::Clear, popup_rect);
+        lines.push(Line::from(vec![
+            Span::styled(" SELECT MODEL ", Style::default().fg(Color::Rgb(15, 17, 23)).bg(Color::Rgb(140, 220, 140)).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled("↑↓ 切换 · Enter 确认 · Esc 取消", Style::default().fg(Color::Rgb(150, 160, 180))),
+        ]));
+        lines.push(Line::raw(""));
+
+        if state.model_list.is_empty() {
+            lines.push(Line::from(vec![Span::styled("  当前 Provider 无可选模型。", Style::default().fg(Color::Rgb(140, 145, 160)))]));
+        } else {
+            for (idx, item) in state.model_list.iter().enumerate() {
+                let is_selected = idx == state.selected_model_index;
+                let is_active = item.id == state.model;
+                let (prefix, row_style) = if is_selected {
+                    (" ❯ ", Style::default().fg(Color::Rgb(15, 20, 25)).bg(Color::Rgb(140, 220, 140)).add_modifier(Modifier::BOLD))
+                } else {
+                    ("   ", Style::default().fg(Color::Rgb(220, 225, 240)))
+                };
+
+                let active_badge = if is_active {
+                    Span::styled(" (当前)", Style::default().fg(if is_selected { Color::Rgb(20, 40, 60) } else { Color::Rgb(80, 200, 120) }).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::raw("")
+                };
+
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, row_style),
+                    Span::styled(format!("{:<26}", item.name), row_style),
+                    active_badge,
+                    Span::raw(" "),
+                    Span::styled(format!("[{}]", item.id), Style::default().fg(if is_selected { Color::Rgb(40, 50, 70) } else { Color::Rgb(120, 130, 150) })),
+                ]));
+            }
+        }
+
+        let popup_bg = Color::Rgb(32, 36, 48);
+        let popup = Paragraph::new(lines).style(Style::default().bg(popup_bg));
+        f.render_widget(popup, popup_rect);
+    }
+
+    // AddingProvider 模式分步弹窗渲染
+    if state.mode == InteractionMode::AddingProvider {
+        let area = f.area();
+        let popup_width = area.width.min(68).max(40);
+        let popup_height = 11u16;
+        let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+        let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_rect = ratatui::layout::Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+        f.render_widget(ratatui::widgets::Clear, popup_rect);
+
+        let (step_title, prompt_text) = match state.add_provider_step {
+            AddingProviderStep::Name => ("1/3: 名称", "请输入 Provider 名称 (如 Ollama, OpenRouter):"),
+            AddingProviderStep::BaseUrl => ("2/3: 服务地址", "请输入 Base URL (如 http://127.0.0.1:11434/v1):"),
+            AddingProviderStep::ApiKey => ("3/3: 凭据密钥", "请输入 API Key (本地服务可留空直接回车):"),
+            AddingProviderStep::Commit => ("提交确认", "正在保存 Provider 配置..."),
+        };
+
+        let mut lines = Vec::new();
+        lines.push(Line::from(vec![
+            Span::styled(" ADD PROVIDER ", Style::default().fg(Color::Rgb(15, 17, 23)).bg(Color::Rgb(240, 180, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(format!("步骤 {} · Enter 下一步 · Esc 取消", step_title), Style::default().fg(Color::Rgb(150, 160, 180))),
+        ]));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}", prompt_text), Style::default().fg(Color::Rgb(200, 210, 230))),
+        ]));
+        lines.push(Line::raw(""));
+
+        let input_disp = format!("  ❯ {}█", state.input_buffer);
+        lines.push(Line::from(vec![
+            Span::styled(input_disp, Style::default().fg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD)),
+        ]));
+
+        if !state.status_text.is_empty() && (state.status_text.contains("错误") || state.status_text.contains("不能")) {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled(format!("  [!] {}", state.status_text), Style::default().fg(Color::Rgb(240, 100, 100))),
+            ]));
         }
 
         let popup_bg = Color::Rgb(32, 36, 48);
@@ -852,7 +1405,9 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
             if event::poll(Duration::from_millis(50)).unwrap_or(false) {
                 match event::read() {
                     Ok(Event::Key(key)) => {
-                        let _ = tx_events.send(UiEvent::InputKey(key));
+                        if key.kind == crossterm::event::KeyEventKind::Press {
+                            let _ = tx_events.send(UiEvent::InputKey(key));
+                        }
                     }
                     Ok(Event::Mouse(mouse)) => {
                         use crossterm::event::MouseEventKind;
@@ -1020,6 +1575,135 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
 
+                    // 1b. Provider 选择弹窗模式下的按键处理
+                    if state.mode == InteractionMode::SelectingProvider {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.cancel_provider_selector();
+                            }
+                            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('+') => {
+                                state.start_add_provider();
+                            }
+                            KeyCode::Up => {
+                                state.prev_provider();
+                            }
+                            KeyCode::Down => {
+                                state.next_provider();
+                            }
+                            KeyCode::Enter => {
+                                state.select_current_provider();
+                                state.messages.push(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: format!("已切换提供商为: {}", state.current_provider_id),
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                });
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // 1c. Model 选择弹窗模式下的按键处理
+                    if state.mode == InteractionMode::SelectingModel {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.cancel_model_selector();
+                            }
+                            KeyCode::Up => {
+                                state.prev_model();
+                            }
+                            KeyCode::Down => {
+                                state.next_model();
+                            }
+                            KeyCode::Enter => {
+                                state.select_current_model();
+                                state.messages.push(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: format!("已切换模型为: {}", state.model),
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                });
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // 1d. AddingProvider 模式下的按键处理
+                    if state.mode == InteractionMode::AddingProvider {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.cancel_add_provider();
+                            }
+                            KeyCode::Backspace => {
+                                state.input_buffer.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                state.input_buffer.push(c);
+                            }
+                            KeyCode::Enter => {
+                                let input_val = state.input_buffer.trim().to_string();
+                                state.add_provider_input(&input_val);
+                                state.input_buffer.clear();
+
+                                match state.advance_add_provider_step() {
+                                    Ok(_) => {
+                                        state.status_text.clear();
+                                        if state.add_provider_step == AddingProviderStep::Commit {
+                                            if let Some(payload) = state.finalize_add_provider() {
+                                                // 持久化落地保存至 ProviderRegistryStore
+                                                let registry = ProviderRegistryStore::new();
+                                                let mut view = registry.load_view();
+                                                let new_id = payload.id.clone();
+                                                let new_name = payload.name.clone();
+
+                                                let config_view = pony_agent_core::agent::config::ProviderConfigView {
+                                                    id: new_id.clone(),
+                                                    name: new_name.clone(),
+                                                    protocol: pony_agent_core::agent::provider::ProviderProtocol::OpenAiCompletions,
+                                                    base_url: payload.base_url.clone(),
+                                                    auth_type: pony_agent_core::agent::provider::ProviderAuthType::Auto,
+                                                    api_key_env_var: format!("{}_API_KEY", new_id.to_uppercase().replace('-', "_")),
+                                                    api_key_value: payload.api_key.clone().unwrap_or_default(),
+                                                    api_key_present: payload.api_key.is_some(),
+                                                    supported_protocols: vec![pony_agent_core::agent::provider::ProviderProtocol::OpenAiCompletions],
+                                                    endpoints: vec![],
+                                                    models: vec![],
+                                                    selected_model_id: None,
+                                                };
+                                                view.providers.push(config_view);
+                                                view.selected_provider_id = Some(new_id.clone());
+
+                                                match registry.save_view(view) {
+                                                    Ok(_) => {
+                                                        state.current_provider_id = new_id.clone();
+                                                        state.messages.push(ChatMessage {
+                                                            role: MessageRole::System,
+                                                            content: format!("成功添加并切换至新提供商: {} ({})", new_name, new_id),
+                                                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                                        });
+                                                        state.status_text = format!("Added provider {}", new_name);
+                                                    }
+                                                    Err(e) => {
+                                                        state.messages.push(ChatMessage {
+                                                            role: MessageRole::System,
+                                                            content: format!("保存提供商失败: {}", e),
+                                                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        state.status_text = err.to_string();
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // 2. 仅在正在运行（Streaming）态下 Esc 触发 Interrupt；静态下 Esc 仅用于清空输入缓冲区，不退出程序
                     if key.code == KeyCode::Esc {
                         if state.is_streaming {
@@ -1045,10 +1729,24 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     match key.code {
+                        KeyCode::Tab => {
+                            let match_cmds = state.matching_commands();
+                            if !match_cmds.is_empty() {
+                                let idx = state.selected_command_index.min(match_cmds.len() - 1);
+                                state.input_buffer = match_cmds[idx].0.to_string();
+                            }
+                        }
                         KeyCode::Enter => {
+                            let match_cmds = state.matching_commands();
+                            if !match_cmds.is_empty() && state.input_buffer.starts_with('/') && !state.input_buffer.ends_with(' ') && state.input_buffer != match_cmds[state.selected_command_index.min(match_cmds.len() - 1)].0 {
+                                let idx = state.selected_command_index.min(match_cmds.len() - 1);
+                                state.input_buffer = match_cmds[idx].0.to_string();
+                                continue;
+                            }
                             let input = state.input_buffer.trim().to_string();
                             if !input.is_empty() {
                                 state.input_buffer.clear();
+                                state.selected_command_index = 0;
 
                                 if input == "/resume" {
                                     let raw_sessions = control_plane.list_sessions();
@@ -1064,6 +1762,51 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
                                     continue;
                                 }
 
+                                if input == "/provider" {
+                                    let registry = ProviderRegistryStore::new();
+                                    let view = registry.load_view();
+                                    let items: Vec<ProviderItem> = view
+                                        .providers
+                                        .into_iter()
+                                        .map(|p| ProviderItem {
+                                            id: p.id,
+                                            name: p.name,
+                                            protocol: format!("{:?}", p.protocol).to_lowercase(),
+                                            base_url: p.base_url,
+                                        })
+                                        .collect();
+                                    state.open_provider_selector(items);
+                                    continue;
+                                }
+
+                                if input == "/models" {
+                                    let registry = ProviderRegistryStore::new();
+                                    let view = registry.load_view();
+                                    let current_prov = view
+                                        .providers
+                                        .into_iter()
+                                        .find(|p| p.id == state.current_provider_id)
+                                        .or_else(|| {
+                                            view.selected_provider_id
+                                                .as_ref()
+                                                .and_then(|id| registry.load_view().providers.into_iter().find(|p| &p.id == id))
+                                        });
+
+                                    let items: Vec<ModelItem> = if let Some(p) = current_prov {
+                                        p.models
+                                            .into_iter()
+                                            .map(|m| ModelItem {
+                                                id: m.id,
+                                                name: m.name,
+                                            })
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    state.open_model_selector(items);
+                                    continue;
+                                }
+
                                 // 严格遵从 /quit 或 /exit 退出规范
                                 if input == "/exit" || input == "/quit" {
                                     break;
@@ -1075,7 +1818,7 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
                                 if input == "/help" {
                                     state.messages.push(ChatMessage {
                                         role: MessageRole::System,
-                                        content: "Commands: /resume (select session), /clear, /compact, /cost, /quit".to_string(),
+                                        content: "Commands: /resume (select session), /provider, /models, /clear, /cost, /quit".to_string(),
                                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                                     });
                                     continue;
@@ -1093,12 +1836,16 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
                                 state.is_streaming = true;
                                 state.auto_scroll = true; // 发送新消息时立即恢复自动贴底滚动
                                 state.status_text = "Thinking...".to_string();
+                                state.transition_runtime_mode(RuntimeMode::Connecting);
+                                state.turn_started_at = Some(std::time::Instant::now());
 
                                 let turn_id_str = format!("turn-{}", uuid::Uuid::new_v4());
                                 *current_turn_id.lock().unwrap() = Some(turn_id_str.clone());
 
                                 let cp = control_plane.clone();
                                 let sess_id = state.session_id.clone();
+                                let prov_id = state.current_provider_id.clone();
+                                let mdl_id = state.model.clone();
                                 let tx_stream = tx.clone();
 
                                 std::thread::spawn(move || {
@@ -1109,8 +1856,8 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
                                         input: TurnInput {
                                             message: input,
                                             display_message: None,
-                                            provider_id: Some("ponyllm".to_string()),
-                                            model_id: None,
+                                            provider_id: Some(prov_id),
+                                            model_id: Some(mdl_id),
                                             reasoning_effort: None,
                                             workspace_mode: None,
                                             session_id: Some(sess_id),
@@ -1125,16 +1872,32 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         KeyCode::Char(c) => {
-                            state.input_buffer.push(c);
+                            if c != '\r' && c != '\n' {
+                                state.input_buffer.push(c);
+                            }
                         }
                         KeyCode::Backspace => {
                             state.input_buffer.pop();
                         }
                         KeyCode::Up => {
-                            state.scroll_up(2);
+                            let match_cmds = state.matching_commands();
+                            if !match_cmds.is_empty() {
+                                if state.selected_command_index > 0 {
+                                    state.selected_command_index -= 1;
+                                }
+                            } else {
+                                state.scroll_up(2);
+                            }
                         }
                         KeyCode::Down => {
-                            state.scroll_down(2, u16::MAX);
+                            let match_cmds = state.matching_commands();
+                            if !match_cmds.is_empty() {
+                                if state.selected_command_index + 1 < match_cmds.len() {
+                                    state.selected_command_index += 1;
+                                }
+                            } else {
+                                state.scroll_down(2, u16::MAX);
+                            }
                         }
                         KeyCode::PageUp => {
                             state.scroll_up(10);
@@ -1147,19 +1910,27 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 UiEvent::StreamDelta(delta) => {
                     state.append_assistant_chunk(&delta);
+                    if !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
+                        state.transition_runtime_mode(RuntimeMode::Responding);
+                    }
                 }
                 UiEvent::StreamToolCall(call) => {
+                    let tool_name = clean_tool_name_display(&call);
+                    state.transition_runtime_mode(RuntimeMode::ExecutingTool(tool_name));
                     state.add_or_update_tool_event(&call, false);
                 }
                 UiEvent::StreamToolResult(res) => {
                     state.add_or_update_tool_event(&res, true);
+                    state.transition_runtime_mode(RuntimeMode::Responding);
                 }
                 UiEvent::StreamCompleted => {
                     state.is_streaming = false;
+                    state.transition_runtime_mode(RuntimeMode::Completed);
                     state.status_text = "Turn completed".to_string();
                 }
                 UiEvent::StreamFailed(err) => {
                     state.is_streaming = false;
+                    state.transition_runtime_mode(RuntimeMode::Failed(err.clone()));
                     state.status_text = format!("Turn failed: {}", err);
                     state.messages.push(ChatMessage {
                         role: MessageRole::System,
