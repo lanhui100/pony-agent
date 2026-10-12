@@ -529,24 +529,32 @@ fn build_layered_turn_context(
 
 fn flatten_layered_input_messages(context: &LayeredTurnContext) -> Vec<ProviderMessage> {
     let mut messages = Vec::new();
+    // 稳定系统前缀 (System Prefix)
     messages.extend(context.base_system_messages.clone());
     messages.extend(context.domain_profile_messages.clone());
     messages.extend(context.project_instruction_messages.clone());
     messages.extend(context.memory_messages.clone());
-    messages.extend(context.volatile_context_messages.clone());
+    // 单调历史对话 (Append-only Conversation Carry) 先行，确保长对话 KV Cache 稳定命中
     messages.extend(context.conversation_carry_messages.clone());
+    // 易变上下文 (Volatile Context: 时间/Git分支/Focus/Goal/Skills) 移至历史之后，防止前缀断崖
+    messages.extend(context.volatile_context_messages.clone());
+    // 当前轮次用户易变输入 (Volatile User Input)
     messages.extend(context.volatile_input_messages.clone());
     messages
 }
 
 fn flatten_layered_native_messages(context: &LayeredTurnContext) -> Vec<Value> {
     let mut messages = Vec::new();
+    // 稳定系统前缀 (System Prefix)
     messages.extend(context.native_base_system_messages.clone());
     messages.extend(context.native_domain_profile_messages.clone());
     messages.extend(context.native_project_instruction_messages.clone());
     messages.extend(context.native_memory_messages.clone());
-    messages.extend(context.native_volatile_context_messages.clone());
+    // 单调历史对话 (Append-only Conversation Carry) 先行，确保长对话 KV Cache 稳定命中
     messages.extend(context.native_conversation_carry_messages.clone());
+    // 易变上下文 (Volatile Context: 时间/Git分支/Focus/Goal/Skills) 移至历史之后，防止前缀断崖
+    messages.extend(context.native_volatile_context_messages.clone());
+    // 当前轮次用户易变输入 (Volatile User Input)
     messages.extend(context.native_volatile_input_messages.clone());
     messages
 }
@@ -579,15 +587,15 @@ fn build_request_observation_from_layered_context(
         join_non_empty_sections(&[
             render_native_messages_for_observation(&context.native_project_instruction_messages),
             render_native_messages_for_observation(&context.native_memory_messages),
-            render_native_messages_for_observation(&context.native_volatile_context_messages),
             render_native_messages_for_observation(&context.native_conversation_carry_messages),
+            render_native_messages_for_observation(&context.native_volatile_context_messages),
         ])
     } else {
         join_non_empty_sections(&[
             render_provider_messages_for_observation(&context.project_instruction_messages),
             render_provider_messages_for_observation(&context.memory_messages),
-            render_provider_messages_for_observation(&context.volatile_context_messages),
             render_provider_messages_for_observation(&context.conversation_carry_messages),
+            render_provider_messages_for_observation(&context.volatile_context_messages),
         ])
     };
     let volatile_input_text = if !context.native_volatile_input_messages.is_empty() {
@@ -2295,6 +2303,92 @@ mod tests {
             .observation
             .stable_prefix_text
             .contains("Reply in Chinese unless the user explicitly requests another language."));
+    }
+
+    #[test]
+    fn test_layered_context_message_topology_places_history_before_volatile_context() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "deepseek-chat",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+                ..Default::default()
+            },
+        );
+        let mut session = session_snapshot(
+            vec![
+                TurnHistoryMessage {
+                    role: "user".to_string(),
+                    content: "previous question".to_string(),
+                    attachments: Vec::new(),
+                    ..Default::default()
+                },
+                TurnHistoryMessage {
+                    role: "assistant".to_string(),
+                    content: "previous answer".to_string(),
+                    attachments: Vec::new(),
+                    ..Default::default()
+                },
+            ],
+            vec![
+                json!({ "role": "user", "content": "native user history" }),
+                json!({ "role": "assistant", "content": "native assistant history" }),
+            ],
+            None,
+        );
+        session.env_info = Some(crate::agent::session::EnvironmentInfo {
+            cwd: "/home/dm/pony-agent".to_string(),
+            platform: "linux".to_string(),
+            shell: Some("bash".to_string()),
+            os_version: Some("Linux 6.6".to_string()),
+            current_date: "2026-10-12".to_string(),
+            timezone: Some("UTC".to_string()),
+            is_git_repo: true,
+            git_branch: Some("main".to_string()),
+        });
+
+        let retrieved = builder.retrieve_context_state(
+            "current user input",
+            &[],
+            None,
+            &session,
+            None,
+            None,
+        );
+        let request = builder.build_request("coding", &provider, &retrieved, &[]);
+
+        // 验证拓扑顺序：稳定前缀 -> 历史消息 -> 易变上下文 -> 当前输入
+        let messages = &request.input;
+        let history_idx = messages
+            .iter()
+            .position(|m| m.content.contains("previous question"))
+            .expect("must contain previous question");
+        let volatile_idx = messages
+            .iter()
+            .position(|m| m.content.contains("Environment:"))
+            .expect("must contain Environment volatile note");
+        let user_idx = messages
+            .iter()
+            .position(|m| m.content == "current user input")
+            .expect("must contain current user input");
+
+        assert!(
+            history_idx < volatile_idx,
+            "History ({}) must precede volatile context ({}) for stable prefix KV cache",
+            history_idx,
+            volatile_idx
+        );
+        assert!(
+            volatile_idx < user_idx,
+            "Volatile context ({}) must precede current user input ({})",
+            volatile_idx,
+            user_idx
+        );
     }
 
     #[test]
