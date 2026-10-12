@@ -101,6 +101,7 @@ pub use types::{PlannerGraphDecisionDispatchOutcome, RunTurnFacts, SUSPENDED_TUR
 use blocked_records::*;
 use limits::*;
 pub use limits::{max_tool_followups_per_turn, parse_max_tool_followups_per_turn};
+pub use stream_support::tool_failure_signal;
 use planner_patches::*;
 use stream_support::*;
 use tool_recovery::*;

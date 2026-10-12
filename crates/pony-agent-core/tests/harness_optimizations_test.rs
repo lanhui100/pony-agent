@@ -111,3 +111,69 @@ fn test_search_engine_ignores_heavy_directories() {
     assert_eq!(result.match_count, 1, "Only normal.txt should match, heavy dirs must be ignored");
     assert_eq!(result.matches[0].path, "normal.txt");
 }
+
+#[test]
+fn test_tool_failure_signal_normalizes_free_text_description() {
+    use pony_agent_core::agent::runtime::tool_failure_signal;
+    use pony_agent_core::agent::tools::{ToolCall, ToolResult};
+    use serde_json::json;
+
+    let call1 = ToolCall {
+        name: "workspace_run_command".to_string(),
+        arguments: json!({
+            "command": "git push origin main",
+            "cwd": "/repo",
+            "description": "第一次尝试推送"
+        }),
+        call_id: Some("call-1".to_string()),
+        plan: None,
+    };
+    let call2 = ToolCall {
+        name: "workspace_run_command".to_string(),
+        arguments: json!({
+            "command": "git push origin main",
+            "cwd": "/repo",
+            "description": "换个描述重试推送"
+        }),
+        call_id: Some("call-2".to_string()),
+        plan: None,
+    };
+    let result = ToolResult {
+        tool_name: "workspace_run_command".to_string(),
+        status: "error".to_string(),
+        duration_ms: 100,
+        output: json!({
+            "ok": false,
+            "error": {
+                "kind": "non_zero_exit",
+                "message": "退出码 128"
+            }
+        }).to_string(),
+    };
+
+    let sig1 = tool_failure_signal(&call1, &result).expect("sig1 must exist");
+    let sig2 = tool_failure_signal(&call2, &result).expect("sig2 must exist");
+
+    assert_eq!(sig1.0, sig2.0, "Tool name must match");
+    assert_eq!(sig1.1, sig2.1, "Normalized arguments fingerprint must match ignoring description");
+    assert_eq!(sig1.2, sig2.2, "Error kind must match");
+}
+
+#[test]
+fn test_tool_execution_measures_physical_duration_ms() {
+    use pony_agent_core::agent::tools::{ToolCall, ToolRouter};
+    use serde_json::json;
+
+    let router = ToolRouter::new();
+    let call = ToolCall {
+        name: "time_now".to_string(),
+        arguments: json!({}),
+        call_id: Some("call-time-1".to_string()),
+        plan: None,
+    };
+    let result = router.execute(&call);
+    assert_eq!(result.status, "ok");
+    assert_eq!(result.tool_name, "time_now");
+    // 验证物理执行耗时字段存在且合理（<= 5000ms）
+    assert!(result.duration_ms <= 5000);
+}

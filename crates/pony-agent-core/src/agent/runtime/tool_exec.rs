@@ -37,6 +37,7 @@ impl AgentRuntime {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn execute_capability_tool_call(
         &self,
         tool_call: &ToolCall,
@@ -70,7 +71,11 @@ impl AgentRuntime {
             action.capability.invocation_mode.as_str()
         ));
 
-        let tool_result = self.tool_executor.execute_with_context(&action.tool_call, context);
+        let started_at = std::time::Instant::now();
+        let mut tool_result = self.tool_executor.execute_with_context(&action.tool_call, context);
+        if tool_result.duration_ms == 0 {
+            tool_result.duration_ms = started_at.elapsed().as_millis() as u64;
+        }
         let failure_kind = if let Some(failure_kind) = tool_result_failure_kind(&tool_result) {
             Some(failure_kind)
         } else if is_out_of_scope_tool_result(&tool_result) {
@@ -258,10 +263,10 @@ impl AgentRuntime {
             ));
             return (tool_result, invocation_record, hook_trace_records);
         }
-        let execution = self.execute_capability_tool_call(&ToolCall {
+        let execution = self.execute_capability_tool_call_with_context(&ToolCall {
             arguments: mediation.arguments,
             ..tool_call.clone()
-        });
+        }, context);
         let invocation_record = execution.invocation_record();
         let mut hook_trace_records = mediation.trace_records;
         hook_trace_records

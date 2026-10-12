@@ -39,6 +39,7 @@
 ## 2.5 性能与诊断
 
 - [Trace 诊断与收口报告 (pa_01a12a3f)](analysis/trace-analysis-pa-01a12a3f.md)
+- [Trace 诊断与收口报告 (pa_01a12d88)](analysis/trace-analysis-pa-01a12d88.md)
 - [Turn 完成时 UI 冻结：根因诊断与解决路径](analysis/turn-completion-ui-freeze-diagnosis-2026-06-16.md)
 - [Trace Redteam 审计 (2026-06-01)](analysis/trace-redteam-2026-06-01.md)
 - [上下文构建与缓存策略 canonical spec](../openspec/specs/context-assembly-and-cache-strategy/spec.md)

@@ -387,7 +387,7 @@ pub(super) fn tool_result_control_outcome_pending(tool_result: &ToolResult) -> b
 /// count as failures, so they reset the consecutive counter.
 /// Using the argument fingerprint ensures that trying different arguments (e.g. `pnpm test` then `pnpm build`)
 /// does not trigger a false-positive consecutive failure loop break.
-pub(super) fn tool_failure_signal(
+pub fn tool_failure_signal(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Option<(String, String, String)> {
@@ -402,7 +402,8 @@ pub(super) fn tool_failure_signal(
         .get("kind")
         .or_else(|| error.get("code"))
         .and_then(Value::as_str)?;
-    let arg_fingerprint = tool_call.arguments.to_string();
+    let normalized_args = canonicalize_tool_argument_value(&tool_call.arguments);
+    let arg_fingerprint = normalized_args.to_string();
     Some((tool_call.name.clone(), arg_fingerprint, code.to_string()))
 }
 

@@ -107,6 +107,7 @@ impl ToolExecutor for GovernedToolExecutor {
     }
 
     fn execute_with_context(&self, call: &ToolCall, exec_context: &ToolExecutionContext) -> ToolResult {
+        let started_at = std::time::Instant::now();
         let mut context = self
             .context
             .lock()
@@ -128,6 +129,9 @@ impl ToolExecutor for GovernedToolExecutor {
             &context,
         );
         let mut result = outcome.into_legacy_result(&call.name);
+        if result.duration_ms == 0 {
+            result.duration_ms = started_at.elapsed().as_millis() as u64;
+        }
         // A composite that ran children but failed them all reports an `ok` execution status (its
         // handler returned a value), but its payload marks `ok: false`. Surface the aggregate
         // failure on the legacy `status` so consumers branching on `status != "ok"` do not
