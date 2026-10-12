@@ -129,6 +129,7 @@ describe("AskPanel", () => {
     expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_answer", {
       requestId: "ask-1",
       expectedVersion: 4,
+      version: 4,
       answer: "继续"
     });
     expect(store.pendingAsks).toHaveLength(0);

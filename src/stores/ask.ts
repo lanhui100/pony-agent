@@ -132,6 +132,7 @@ export const useAskStore = defineStore("ask", {
         const result = await safeInvoke<unknown>("ask_answer", {
           requestId: request.requestId,
           expectedVersion: listed.version,
+          version: listed.version,
           answer: answerValue ?? null
         });
         this.removePendingAsk(request.requestId);
@@ -206,7 +207,8 @@ export const useAskStore = defineStore("ask", {
       try {
         const result = await safeInvoke<unknown>("ask_cancel", {
           requestId: request.requestId,
-          expectedVersion: listed.version
+          expectedVersion: listed.version,
+          version: listed.version
         });
         this.removePendingAsk(request.requestId);
         return result;

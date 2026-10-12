@@ -207,26 +207,34 @@ fn ask_list_pending(
     control_plane.list_pending_asks(session_id.as_deref())
 }
 
-/// Answer a pending Ask by stable `request_id` and compare-and-swap `version`, carrying the
-/// user's answer payload.
+/// Answer a pending Ask by stable `request_id` and compare-and-swap `version` (or `expected_version`),
+/// carrying the user's answer payload.
 #[tauri::command]
 fn ask_answer(
     control_plane: State<'_, HostControlPlane>,
     request_id: String,
-    version: u64,
+    version: Option<u64>,
+    expected_version: Option<u64>,
     answer: Value,
 ) -> Result<Value, String> {
-    control_plane.answer_ask(&request_id, version, answer)
+    let ver = expected_version
+        .or(version)
+        .ok_or_else(|| "missing required key `expected_version` or `version`".to_string())?;
+    control_plane.answer_ask(&request_id, ver, answer)
 }
 
-/// Cancel a pending Ask by stable `request_id` and compare-and-swap `version`.
+/// Cancel a pending Ask by stable `request_id` and compare-and-swap `version` (or `expected_version`).
 #[tauri::command]
 fn ask_cancel(
     control_plane: State<'_, HostControlPlane>,
     request_id: String,
-    version: u64,
+    version: Option<u64>,
+    expected_version: Option<u64>,
 ) -> Result<Value, String> {
-    control_plane.cancel_ask(&request_id, version)
+    let ver = expected_version
+        .or(version)
+        .ok_or_else(|| "missing required key `expected_version` or `version`".to_string())?;
+    control_plane.cancel_ask(&request_id, ver)
 }
 
 /// Transition every expired pending request to `Expired`. `now_ms` defaults to the dispatcher

@@ -204,6 +204,15 @@ export interface ReportErrorOptions {
  * 核心上报方法 (Fire-and-Forget，永不阻塞或抛出异常)
  */
 export async function reportError(options: ReportErrorOptions): Promise<void> {
+  // 自动化测试环境严格静音，防止测试模拟异常污染生产/预发 Sentry 监控 (ADR 0028)
+  if (
+    import.meta.env?.MODE === "test" ||
+    Boolean(import.meta.env?.TEST) ||
+    Boolean((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.VITEST)
+  ) {
+    return;
+  }
+
   try {
     const errorType = options.errorType || "Error";
     const rawMessage = options.message || "Unknown error";

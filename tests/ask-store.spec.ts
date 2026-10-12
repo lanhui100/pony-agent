@@ -115,6 +115,7 @@ describe("ask store", () => {
     expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_answer", {
       requestId: "ask-1",
       expectedVersion: 3,
+      version: 3,
       answer: "yes"
     });
     // The request is dropped from the snapshot without calling ask_list_pending again.
@@ -327,7 +328,8 @@ describe("ask store", () => {
     expect(result).toEqual({ requestId: "ask-1" });
     expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_cancel", {
       requestId: "ask-1",
-      expectedVersion: 5
+      expectedVersion: 5,
+      version: 5
     });
     expect(store.pendingAsks).toEqual([]);
     expect(store.cancellingRequestId).toBeNull();
