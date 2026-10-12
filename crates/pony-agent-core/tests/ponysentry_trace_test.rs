@@ -10,9 +10,13 @@
 //!    - 大 Payload 极限处理（超多 turns/tool_calls）
 
 use pony_agent_core::agent::ponysentry::{
-    capture_agent_trace, sanitize, sanitize_json, AgentTracePayload, EvalStatus,
-    PonySentryClient, PonySentryConfig, ToolCallTraceItem, TurnTraceItem,
+    build_agent_trace_from_event, build_session_aggregated_trace_payload, capture_agent_trace,
+    sanitize, sanitize_json, AgentTracePayload, EvalStatus, PonySentryClient, PonySentryConfig,
+    ToolCallTraceItem, TurnTraceItem,
 };
+use pony_agent_core::agent::runtime::TurnStreamEvent;
+use pony_agent_core::agent::session::TurnTraceRecord;
+use pony_agent_core::agent::telemetry::TurnToolActivity;
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -358,4 +362,315 @@ fn test_large_payload_limit_handling() {
     assert_eq!(deserialized.turns.len(), 100);
     assert_eq!(deserialized.turns[0].tool_calls.len(), 10);
     assert_eq!(deserialized.eval_status, EvalStatus::EvalDataset);
+}
+
+// ==========================================
+// 4. L2-T 功能契约与遥测增强测试
+// ==========================================
+
+#[test]
+fn test_contract_started_at_ms_population() {
+    // 1. build_agent_trace_from_event: emitted_at_ms & turn_duration_ms
+    let event = TurnStreamEvent {
+        event_id: Some("evt-1".to_string()),
+        session_id: Some("sess-start-1".to_string()),
+        turn_id: "turn-start-1".to_string(),
+        kind: "turn:completed".to_string(),
+        event_type: None,
+        event_version: None,
+        sequence: Some(1),
+        emitted_at_ms: Some(1700000005000),
+        phase: Some("act".to_string()),
+        text: None,
+        reasoning_content: None,
+        error: None,
+        provider_requested_name: None,
+        provider_name: Some("anthropic".to_string()),
+        provider_protocol: None,
+        provider_model: Some("claude-3-7-sonnet".to_string()),
+        provider_source: None,
+        provider_mode: None,
+        fallback_reason: None,
+        build_context_observation: None,
+        input_tokens: Some(100),
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: Some(50),
+        total_tokens: Some(150),
+        first_token_latency_ms: None,
+        turn_duration_ms: Some(2000),
+        trace_steps: None,
+        trace_timeline: None,
+        tool_activities: None,
+        provider_call_records: None,
+        hook_trace_records: None,
+        session_summary: None,
+        step: Some(0),
+    };
+
+    let trace = build_agent_trace_from_event(&event)
+        .expect("build_agent_trace_from_event must return trace");
+    let turn = &trace.turns[0];
+    assert!(
+        turn.started_at_ms.is_some(),
+        "TurnTraceItem.started_at_ms must not be None when duration and emitted_at_ms are present"
+    );
+    assert_eq!(
+        turn.started_at_ms,
+        Some(1700000005000 - 2000),
+        "started_at_ms must equal emitted_at_ms - duration_ms"
+    );
+
+    // 2. build_session_aggregated_trace_payload: TurnTraceRecord with emitted_at_ms and turn_duration_ms
+    let record = TurnTraceRecord {
+        turn_id: "turn-agg-1".to_string(),
+        session_id: Some("sess-start-1".to_string()),
+        event_id: None,
+        event_type: None,
+        event_version: None,
+        sequence: Some(1),
+        emitted_at_ms: Some(1700000010000),
+        title: "turn 1".to_string(),
+        phase: "completed".to_string(),
+        trace_steps: vec![],
+        trace_timeline: vec![],
+        tool_activities: vec![],
+        provider_call_records: vec![],
+        hook_trace_records: vec![],
+        provider_requested_name: None,
+        provider_name: None,
+        provider_protocol: None,
+        provider_model: None,
+        provider_source: None,
+        provider_mode: None,
+        build_context_observation: None,
+        build_context_observation_ref: None,
+        session_summary: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: Some(10),
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: Some(20),
+        total_tokens: Some(30),
+        first_token_latency_ms: None,
+        turn_duration_ms: Some(3000),
+        input_text: None,
+        output_text: None,
+        updated_at: 1700000010000,
+    };
+
+    let agg_trace = build_session_aggregated_trace_payload("sess-start-1", None, vec![record])
+        .expect("build_session_aggregated_trace_payload must return payload");
+    let agg_turn = &agg_trace.turns[0];
+    assert!(
+        agg_turn.started_at_ms.is_some(),
+        "Aggregated TurnTraceItem.started_at_ms must not be None"
+    );
+    assert_eq!(
+        agg_turn.started_at_ms,
+        Some(1700000010000 - 3000),
+        "Aggregated started_at_ms must equal emitted_at_ms - duration_ms"
+    );
+}
+
+#[test]
+fn test_contract_arguments_summary_compression() {
+    let multi_line_json = "{\n  \"command\": \"cargo build\",\n  \"nested\": {\n    \"flag\": true\n  }\n}";
+    let non_json_text = "raw command string not json: foo bar";
+
+    let tool_activity_json = TurnToolActivity {
+        id: "act-1".to_string(),
+        name: "bash".to_string(),
+        canonical_tool_name: Some("bash".to_string()),
+        display_name_zh: Some("执行命令".to_string()),
+        status: "success".to_string(),
+        description: "run bash".to_string(),
+        arguments_text: Some(multi_line_json.to_string()),
+        result_text: None,
+        duration_seconds: Some(0.5),
+        parent_activity_id: None,
+        artifacts: None,
+        error: None,
+        capability_invocation: None,
+    };
+
+    let tool_activity_non_json = TurnToolActivity {
+        id: "act-2".to_string(),
+        name: "custom_tool".to_string(),
+        canonical_tool_name: Some("custom_tool".to_string()),
+        display_name_zh: Some("自定义工具".to_string()),
+        status: "success".to_string(),
+        description: "run custom tool".to_string(),
+        arguments_text: Some(non_json_text.to_string()),
+        result_text: None,
+        duration_seconds: Some(0.1),
+        parent_activity_id: None,
+        artifacts: None,
+        error: None,
+        capability_invocation: None,
+    };
+
+    let event = TurnStreamEvent {
+        event_id: Some("evt-2".to_string()),
+        session_id: Some("sess-json-compact".to_string()),
+        turn_id: "turn-json-compact".to_string(),
+        kind: "turn:completed".to_string(),
+        event_type: None,
+        event_version: None,
+        sequence: Some(1),
+        emitted_at_ms: Some(1700000000000),
+        phase: Some("act".to_string()),
+        text: None,
+        reasoning_content: None,
+        error: None,
+        provider_requested_name: None,
+        provider_name: None,
+        provider_protocol: None,
+        provider_model: None,
+        provider_source: None,
+        provider_mode: None,
+        fallback_reason: None,
+        build_context_observation: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+        trace_steps: None,
+        trace_timeline: None,
+        tool_activities: Some(vec![tool_activity_json, tool_activity_non_json]),
+        provider_call_records: None,
+        hook_trace_records: None,
+        session_summary: None,
+        step: Some(0),
+    };
+
+    let trace = build_agent_trace_from_event(&event).expect("Trace must be built");
+    let tool_calls = &trace.turns[0].tool_calls;
+    assert_eq!(tool_calls.len(), 2);
+
+    // 1. Multiline JSON should be compacted to single line without extra whitespace
+    assert_eq!(
+        tool_calls[0].arguments_summary.as_deref(),
+        Some("{\"command\":\"cargo build\",\"nested\":{\"flag\":true}}"),
+        "Multi-line JSON arguments_text must be compacted into single-line JSON"
+    );
+
+    // 2. Non-JSON should be preserved as-is or sanitized
+    assert_eq!(
+        tool_calls[1].arguments_summary.as_deref(),
+        Some(non_json_text),
+        "Non-JSON arguments_text must be preserved as-is or sanitized"
+    );
+}
+
+#[test]
+fn test_contract_tags_injection_environment_info() {
+    let event = TurnStreamEvent {
+        event_id: Some("evt-3".to_string()),
+        session_id: Some("sess-tags-1".to_string()),
+        turn_id: "turn-tags-1".to_string(),
+        kind: "turn:completed".to_string(),
+        event_type: None,
+        event_version: None,
+        sequence: Some(1),
+        emitted_at_ms: Some(1700000000000),
+        phase: Some("act".to_string()),
+        text: None,
+        reasoning_content: None,
+        error: None,
+        provider_requested_name: None,
+        provider_name: None,
+        provider_protocol: None,
+        provider_model: None,
+        provider_source: None,
+        provider_mode: None,
+        fallback_reason: None,
+        build_context_observation: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+        trace_steps: None,
+        trace_timeline: None,
+        tool_activities: None,
+        provider_call_records: None,
+        hook_trace_records: None,
+        session_summary: None,
+        step: Some(0),
+    };
+
+    let trace = build_agent_trace_from_event(&event).expect("Trace must be built");
+    assert!(trace.tags.is_some(), "AgentTracePayload.tags must not be None");
+    let tags = trace.tags.unwrap();
+    assert!(
+        tags.contains_key("os"),
+        "tags must contain environment info 'os'"
+    );
+    assert_eq!(
+        tags.get("os").map(String::as_str),
+        Some(std::env::consts::OS),
+        "tags['os'] must match target os"
+    );
+    assert!(
+        tags.contains_key("arch"),
+        "tags must contain environment info 'arch'"
+    );
+    assert_eq!(
+        tags.get("arch").map(String::as_str),
+        Some(std::env::consts::ARCH),
+        "tags['arch'] must match target arch"
+    );
+
+    // Also check build_session_aggregated_trace_payload tags injection
+    let record = TurnTraceRecord {
+        turn_id: "turn-agg-tags".to_string(),
+        session_id: Some("sess-tags-1".to_string()),
+        event_id: None,
+        event_type: None,
+        event_version: None,
+        sequence: Some(1),
+        emitted_at_ms: Some(1700000000000),
+        title: "turn tags".to_string(),
+        phase: "completed".to_string(),
+        trace_steps: vec![],
+        trace_timeline: vec![],
+        tool_activities: vec![],
+        provider_call_records: vec![],
+        hook_trace_records: vec![],
+        provider_requested_name: None,
+        provider_name: None,
+        provider_protocol: None,
+        provider_model: None,
+        provider_source: None,
+        provider_mode: None,
+        build_context_observation: None,
+        build_context_observation_ref: None,
+        session_summary: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+        input_text: None,
+        output_text: None,
+        updated_at: 1700000000000,
+    };
+
+    let agg_trace = build_session_aggregated_trace_payload("sess-tags-1", None, vec![record])
+        .expect("Aggregated trace must be built");
+    assert!(agg_trace.tags.is_some(), "Aggregated AgentTracePayload.tags must not be None");
+    let agg_tags = agg_trace.tags.unwrap();
+    assert_eq!(agg_tags.get("os").map(String::as_str), Some(std::env::consts::OS));
+    assert_eq!(agg_tags.get("arch").map(String::as_str), Some(std::env::consts::ARCH));
 }

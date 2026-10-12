@@ -117,6 +117,47 @@ pub fn is_trace_reportable_terminal(name: &str) -> bool {
     )
 }
 
+/// 紧凑化并脱敏 tool_call 的 arguments_summary。
+/// 若能解析为合法 JSON Value，则经脱敏后序列化为单行紧凑 JSON；
+/// 否则保留原文本并经零信任脱敏过滤。
+#[inline]
+pub fn compact_arguments_summary(raw: &str) -> String {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
+        let sanitized = sanitize_json(&val);
+        serde_json::to_string(&sanitized).unwrap_or_else(|_| sanitize(raw))
+    } else {
+        sanitize(raw)
+    }
+}
+
+/// 计算或回填 turn 的 started_at_ms。
+/// 若已有 started_at_ms 则优先使用；若为 None 且存在 completed_at_ms 与 duration_ms，
+/// 则通过 saturating_sub 倒推填充。
+#[inline]
+pub fn compute_started_at_ms(
+    existing: Option<u64>,
+    completed_at_ms: Option<u64>,
+    duration_ms: Option<u64>,
+) -> Option<u64> {
+    if existing.is_some() {
+        return existing;
+    }
+    match (completed_at_ms, duration_ms) {
+        (Some(c), Some(d)) => Some(c.saturating_sub(d)),
+        _ => None,
+    }
+}
+
+/// 构造运行环境的基本 tags（os, arch, family 等）。
+#[inline]
+pub fn default_runtime_tags() -> HashMap<String, String> {
+    let mut tags = HashMap::new();
+    tags.insert("os".to_string(), std::env::consts::OS.to_string());
+    tags.insert("arch".to_string(), std::env::consts::ARCH.to_string());
+    tags.insert("family".to_string(), std::env::consts::FAMILY.to_string());
+    tags
+}
+
 /// 从终态 TurnStreamEvent 映射并构建 AgentTracePayload
 /// 若 turn_id 为空或 phase 为空（或不在终态定义中），则返回 None
 pub fn build_agent_trace_from_event(
@@ -146,7 +187,7 @@ pub fn build_agent_trace_from_event(
                 .map(|act| ToolCallTraceItem {
                     call_id: Some(act.id.clone()),
                     tool_name: act.name.clone(),
-                    arguments_summary: act.arguments_text.clone(),
+                    arguments_summary: act.arguments_text.as_deref().map(compact_arguments_summary),
                     status: act.status.clone(),
                     duration_ms: act.duration_seconds.map(|d| (d * 1000.0) as u64),
                     // act.error 是 Option<serde_json::Value>：字符串取裸文本（as_str），
@@ -172,7 +213,7 @@ pub fn build_agent_trace_from_event(
         duration_ms: payload.turn_duration_ms,
         error: payload.error.clone(),
         tool_calls,
-        started_at_ms: None,
+        started_at_ms: compute_started_at_ms(None, payload.emitted_at_ms, payload.turn_duration_ms),
         completed_at_ms: payload.emitted_at_ms,
         input_text: None,
         output_text: None,
@@ -197,7 +238,7 @@ pub fn build_agent_trace_from_event(
         release,
         eval_status: EvalStatus::Unreviewed,
         turns: vec![turn_item],
-        tags: None,
+        tags: Some(default_runtime_tags()),
         extra: None,
         total_input_tokens: payload.input_tokens,
         total_output_tokens: payload.output_tokens,
@@ -292,7 +333,7 @@ pub fn build_session_aggregated_trace_payload(
             .map(|act| ToolCallTraceItem {
                 call_id: Some(act.id.clone()),
                 tool_name: act.name.clone(),
-                arguments_summary: act.arguments_text.clone(),
+                arguments_summary: act.arguments_text.as_deref().map(compact_arguments_summary),
                 status: act.status.clone(),
                 duration_ms: act.duration_seconds.map(|d| (d * 1000.0) as u64),
                 error: act.error.as_ref().map(|e| match e {
@@ -314,7 +355,7 @@ pub fn build_session_aggregated_trace_payload(
             duration_ms: trace.turn_duration_ms,
             error: trace.error.clone(),
             tool_calls,
-            started_at_ms: None,
+            started_at_ms: compute_started_at_ms(None, trace.emitted_at_ms, trace.turn_duration_ms),
             completed_at_ms: trace.emitted_at_ms,
             // 对话文本经 PonySentry 脱敏管线处理后写入，避免路径/密钥泄漏。
             input_text: trace.input_text.as_deref().map(sanitize),
@@ -354,7 +395,7 @@ pub fn build_session_aggregated_trace_payload(
         release,
         eval_status: EvalStatus::Unreviewed,
         turns: turn_items,
-        tags: None,
+        tags: Some(default_runtime_tags()),
         extra: None,
         total_input_tokens: Some(total_input_tokens),
         total_output_tokens: Some(total_output_tokens),
