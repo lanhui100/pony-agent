@@ -202,6 +202,15 @@ export function useTraceProjection(options: {
 
   function extractPhysicalContextTokens(turn: TurnTraceRecord | null): number | null {
     if (!turn) return null;
+    // 优先检查权威的 providerCallRecords：倒序寻找最近一次模型调用的真实 inputTokens
+    if (turn.providerCallRecords?.length) {
+      for (let i = turn.providerCallRecords.length - 1; i >= 0; i--) {
+        const record = turn.providerCallRecords[i];
+        if (record && record.inputTokens != null) {
+          return record.inputTokens;
+        }
+      }
+    }
     const entries = turnTimelineCache.value.get(turn.turnId) ?? projectedTurnTimeline(turn);
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
@@ -214,7 +223,13 @@ export function useTraceProjection(options: {
   }
 
   const contextDisplayTokens = computed(() => {
-    // 正在提交中且当前 traceTimeline 有最新模型调用时，优先取正在发生/最近完成的单次调用物理输入
+    // 优先从活跃/最近一轮中提取最后一次实际模型调用的物理 inputTokens（代表最新一次调用的真实上下文占用，避免多跳累加虚高）
+    const physicalTokens = extractPhysicalContextTokens(latestTurn.value);
+    if (physicalTokens != null) {
+      return physicalTokens;
+    }
+
+    // 正在提交中且当前 traceTimeline 有最新模型调用时，回退检查 traceTimeline 中的单次调用物理输入
     if (isSubmitting.value && traceTimeline.value?.length) {
       for (let i = traceTimeline.value.length - 1; i >= 0; i--) {
         const entry = traceTimeline.value[i];
@@ -222,12 +237,6 @@ export function useTraceProjection(options: {
           return entry.inputTokens;
         }
       }
-    }
-
-    // 优先从最近一轮中提取最后一次实际模型调用的物理 inputTokens（避免多跳累加虚高破百）
-    const physicalTokens = extractPhysicalContextTokens(latestTurn.value);
-    if (physicalTokens != null) {
-      return physicalTokens;
     }
 
     if (inputTokens.value != null) return inputTokens.value;

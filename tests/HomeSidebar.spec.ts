@@ -335,7 +335,7 @@ describe("HomeSidebar", () => {
     vi.restoreAllMocks();
   });
 
-  it("右侧栏只保留状态、计划、调试三段，计划仅在非0时出现，不再渲染 Tools 与 Trace（PA-096）", async () => {
+  it("右侧栏只保留状态、计划段，计划仅在非0时出现，不再渲染 Tools、Trace 与 Debug（PA-096）", async () => {
     // 初始 plans 为 0，不显示计划
     let wrapper = await mountSidebar();
     await flushAll();
@@ -344,6 +344,7 @@ describe("HomeSidebar", () => {
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
     expect(wrapper.text()).not.toContain("计划");
     expect(wrapper.text()).not.toContain("Tools");
+    expect(wrapper.text()).not.toContain("DEBUG");
     expect(wrapper.find('[data-testid="tools-panel-toggle"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="trace-panel-toggle"]').exists()).toBe(false);
     wrapper.unmount();
@@ -382,16 +383,32 @@ describe("HomeSidebar", () => {
     wrapperWithPlan.unmount();
   }, 10000);
 
-  it("冻结聚合守护（PA-096 review）：进行中 turn 不计入状态面板轮次数", async () => {
+  it("实时聚合：进行中 turn 的模型调用与 token 即时反映在状态面板", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       isSubmitting: true,
       activeTurnId: "turn-live-aggregate",
+      inputTokens: 1200,
+      outputTokens: 300,
+      traceTimeline: [
+        {
+          id: "call-live-1",
+          turnId: "turn-live-aggregate",
+          sequence: 1,
+          kind: "call_model",
+          label: "CALL MODEL #1",
+          state: "completed",
+          inputTokens: 1200,
+          outputTokens: 300
+        }
+      ],
       turnTraceHistory: [
         createTraceRecord({
           turnId: "turn-settled-aggregate",
           title: "settled aggregate",
           phase: "completed",
+          inputTokens: 800,
+          outputTokens: 200,
           updatedAt: 1000
         })
       ]
@@ -400,12 +417,12 @@ describe("HomeSidebar", () => {
     const wrapper = await mountSidebar();
     await flushAll();
 
-    // liveTurnEnabled 恒 false：活跃 turn 不并入聚合，轮次数保持已结算数
+    // liveTurnEnabled 开启：活跃 turn 并入聚合，轮次数包含进行中
     const turnCountStub = wrapper
       .get('[data-testid="status-panel-toggle"]')
       .element.closest("section")!
       .querySelector<HTMLElement>('.tooltip-stub[data-tooltip="对话轮次数"]');
-    expect(turnCountStub?.textContent?.trim()).toBe("1");
+    expect(turnCountStub?.textContent?.trim()).toBe("2");
   }, 10000);
 
   it("将会话状态收敛到右侧状态栏", async () => {

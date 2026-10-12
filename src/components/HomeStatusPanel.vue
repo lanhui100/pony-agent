@@ -4,7 +4,6 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
-  CircleDollarSign,
   Copy,
   Gauge,
   MessageSquareMore,
@@ -93,37 +92,32 @@ function formatTokenSpeed(value?: number | null) {
     <section class="border-t border-stone-200/60 pt-3 mt-3 space-y-1">
       <div class="rounded-[0.45rem] bg-[#f6f0e8] px-3 py-2 space-y-1.5">
         <!-- Token metrics -->
-        <div class="flex items-center justify-between text-[11px] leading-5 text-stone-600">
-          <span class="inline-flex items-center text-stone-400">
-            <CircleDollarSign class="h-3 w-3" />
-          </span>
-          <span class="inline-flex items-center gap-3">
-            <Tooltip text="输入">
-              <span class="inline-flex items-center gap-1">
-                <ArrowUp class="h-3 w-3 text-stone-400" />
-                {{ formatCompactInteger(inputTokensTotal) || "0" }}
-              </span>
-            </Tooltip>
-            <Tooltip text="输出">
-              <span class="inline-flex items-center gap-1">
-                <ArrowDown class="h-3 w-3 text-stone-400" />
-                {{ formatCompactInteger(outputTokensTotal) || "0" }}
-              </span>
-            </Tooltip>
-            <Tooltip text="缓存读取">
-              <span class="inline-flex items-center gap-1">
-                <Zap class="h-3 w-3 text-stone-400" />
-                {{ formatCompactInteger(cacheHitTokensTotal) || "0" }}
-                <span v-if="cacheHitRatio" class="text-stone-400">· {{ cacheHitRatio }}</span>
-              </span>
-            </Tooltip>
-            <Tooltip text="生成速度">
-              <span class="inline-flex items-center gap-1">
-                <Gauge class="h-3 w-3 text-stone-400" />
-                {{ formatTokenSpeed(tokenGenerationSpeed) }}
-              </span>
-            </Tooltip>
-          </span>
+        <div class="flex items-center justify-around text-[11px] leading-5 text-stone-600">
+          <Tooltip text="输入">
+            <span class="inline-flex items-center gap-1">
+              <ArrowUp class="h-3 w-3 text-stone-400" />
+              {{ formatCompactInteger(inputTokensTotal) || "0" }}
+            </span>
+          </Tooltip>
+          <Tooltip text="输出">
+            <span class="inline-flex items-center gap-1">
+              <ArrowDown class="h-3 w-3 text-stone-400" />
+              {{ formatCompactInteger(outputTokensTotal) || "0" }}
+            </span>
+          </Tooltip>
+          <Tooltip text="缓存读取">
+            <span class="inline-flex items-center gap-1">
+              <Zap class="h-3 w-3 text-stone-400" />
+              {{ formatCompactInteger(cacheHitTokensTotal) || "0" }}
+              <span v-if="cacheHitRatio" class="text-stone-400">· {{ cacheHitRatio }}</span>
+            </span>
+          </Tooltip>
+          <Tooltip text="生成速度">
+            <span class="inline-flex items-center gap-1">
+              <Gauge class="h-3 w-3 text-stone-400" />
+              {{ formatTokenSpeed(tokenGenerationSpeed) }}
+            </span>
+          </Tooltip>
         </div>
       </div>
 

@@ -149,7 +149,6 @@ function emitTimelineScrollDebug(event: string, patch: Record<string, unknown> =
     const nextBuffer = [...(debugWindow.__ponyScrollDebugBuffer ?? []), payload].slice(-200);
     debugWindow.__ponyScrollDebugBuffer = nextBuffer;
     debugWindow.__ponyScrollDebugLatest = payload;
-    window.dispatchEvent(new CustomEvent("pony:workspace-scroll-debug", { detail: payload }));
   }
   console.info("[workspace-scroll]", payload);
 }

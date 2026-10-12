@@ -6,17 +6,15 @@ import { usePlanStore } from "@/stores/plan";
 import { useGoalStore } from "@/stores/goal";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
-import DebugPanel from "@/components/DebugPanel.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import { clearTraceProjectionMemo } from "@/lib/runtime/trace-projection";
 import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProjection";
 
 /**
- * PA-096：右侧栏瘦身为纯对话过程面板（状态 / 计划 / 调试）。
+ * PA-096：右侧栏为纯对话过程面板（状态 / 计划）。
  *
- * - Tools 目录移至配置页（ConfigToolsSection）；Trace 移至观测页（TraceInspector）。
- * - 会话级聚合由共享管线 useTraceProjection 供给；liveTurnEnabled 恒 false——
- *   与原"trace 面板折叠时聚合不含进行中 turn"的行为逐位一致。
+ * - Tools 目录位于配置页（ConfigToolsSection）；Trace 位于观测页（TraceInspector）。
+ * - 状态面板消费活跃/最新调用指标，在每次模型调用发生时即时刷新。
  */
 
 const runtimeStore = useRuntimeStore();
@@ -35,10 +33,10 @@ const {
   sessionOperation
 } = storeToRefs(runtimeStore);
 
-const activePanel = ref<"plan" | "debug" | "">("");
+const activePanel = ref<"plan" | "">("");
 const { copiedKey, copyText, resetCopy, dispose } = useCopyFeedback();
 
-// 状态面板聚合数据源（PA-096-R1 拆分线）：不消费活跃 turn（守卫恒关）。
+// 状态面板消费活跃调用指标（liveTurnEnabled: true），每次模型调用产生时即刻更新
 const {
   contextDisplayTokens,
   currentContextWindowTokens,
@@ -51,7 +49,7 @@ const {
   sessionTokenGenerationSpeed,
   sessionTurnCount,
   showContextUsage
-} = useTraceProjection({ liveTurnEnabled: ref(false) });
+} = useTraceProjection({ liveTurnEnabled: ref(true) });
 
 const sessionStatusSummary = computed(() => {
   if (sessionOperation.value === "initializing") {
@@ -124,11 +122,6 @@ onBeforeUnmount(() => {
           :session-id="sessionId"
           :open="activePanel === 'plan'"
           @toggle="togglePlan()"
-        />
-
-        <DebugPanel
-          :active="activePanel === 'debug'"
-          @toggle="activePanel = activePanel === 'debug' ? '' : 'debug'"
         />
       </div>
     </ScrollArea>
