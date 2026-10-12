@@ -647,9 +647,10 @@ onBeforeUnmount(() => {
                   <PermissionModeIcon
                     :mode="runtimeStore.toolAuthorizationMode ?? 'workspace_write'"
                     :size="13"
-                    class="shrink-0 text-amber-700/80"
+                    class="shrink-0"
+                    :class="(runtimeStore.toolAuthorizationMode === 'full_access') ? 'text-amber-700/80' : 'text-stone-500'"
                   />
-                  <span>{{ currentAuthModeLabel }}</span>
+                  <span :class="(runtimeStore.toolAuthorizationMode === 'full_access') ? 'text-amber-800 font-medium' : ''">{{ currentAuthModeLabel }}</span>
                   <ChevronDown
                     class="h-2.5 w-2.5 shrink-0 text-stone-400"
                     :class="{ 'rotate-180': authMenuOpen }"
@@ -755,8 +756,12 @@ onBeforeUnmount(() => {
                   v-for="item in authModes"
                   :key="item.id"
                   type="button"
-                  class="w-full flex items-center justify-between gap-2.5 px-2 py-1.5 rounded text-left transition hover:bg-stone-100"
-                  :class="runtimeStore.toolAuthorizationMode === item.id ? 'bg-amber-50/80 text-amber-900 font-medium' : 'text-stone-700'"
+                  class="w-full flex items-center justify-between gap-2.5 px-2 py-1.5 rounded text-left transition"
+                  :class="[
+                    runtimeStore.toolAuthorizationMode === item.id
+                      ? (item.id === 'full_access' ? 'text-amber-900 font-medium' : 'text-stone-900 font-medium')
+                      : 'text-stone-600'
+                  ]"
                   :data-testid="`workspace-auth-mode-item-${item.id}`"
                   @click="selectAuthMode(item.id)"
                 >
@@ -764,7 +769,8 @@ onBeforeUnmount(() => {
                     <PermissionModeIcon
                       :mode="item.id"
                       :size="15"
-                      class="mt-0.5 shrink-0 text-amber-700/80"
+                      class="mt-0.5 shrink-0"
+                      :class="item.id === 'full_access' ? 'text-amber-700/80' : 'text-stone-500'"
                     />
                     <div class="flex flex-col min-w-0">
                       <span class="text-[12px] leading-4">{{ item.label }}</span>
@@ -773,7 +779,8 @@ onBeforeUnmount(() => {
                   </div>
                   <Check
                     v-if="runtimeStore.toolAuthorizationMode === item.id"
-                    class="h-3.5 w-3.5 shrink-0 text-amber-700"
+                    class="h-3.5 w-3.5 shrink-0"
+                    :class="item.id === 'full_access' ? 'text-amber-700' : 'text-stone-700'"
                   />
                 </button>
               </div>

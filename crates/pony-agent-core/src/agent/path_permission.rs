@@ -91,9 +91,16 @@ impl PermissionError {
     }
 
     pub fn outside_workspace_write_denied(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        let hint = "[sandbox: escalation available — retry with explicit authorization]";
+        let full_msg = if msg.contains("[sandbox: escalation available") {
+            msg
+        } else {
+            format!("{msg} {hint}")
+        };
         Self {
             code: PermissionErrorCode::OutsideWorkspaceWriteDenied,
-            message: message.into(),
+            message: full_msg,
         }
     }
 
@@ -445,7 +452,7 @@ impl PathPermissionChecker {
             });
         }
 
-        // workspace 外：Read → 授权祖先链；Write → 拒绝。
+        // workspace 外：Read → 授权祖先链；Write → 授权祖先链或拒绝。
         match purpose {
             PathPurpose::Read => {
                 if let Some(entry) = authorizations.find_authorization(&canonical) {
@@ -460,10 +467,19 @@ impl PathPermissionChecker {
                     canonical.display()
                 )))
             }
-            PathPurpose::Write => Err(PermissionError::outside_workspace_write_denied(format!(
-                "写入路径 {} 位于工作区根与受控临时目录之外，已拒绝写入。",
-                canonical.display()
-            ))),
+            PathPurpose::Write => {
+                if let Some(entry) = authorizations.find_authorization(&canonical) {
+                    return Ok(PathPermission {
+                        zone: PermissionZone::AuthorizedExternal,
+                        canonical,
+                        matched_authorization: Some(entry),
+                    });
+                }
+                Err(PermissionError::outside_workspace_write_denied(format!(
+                    "写入路径 {} 位于工作区根与受控临时目录之外，已拒绝写入。",
+                    canonical.display()
+                )))
+            }
         }
     }
 
@@ -862,6 +878,20 @@ mod tests {
             .classify("/outside/a.txt", &root, &PathBuf::from("/ws/.tmp"), &store, PathPurpose::Read)
             .expect_err("revoked read must be denied");
         assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
+
+        // write with authorization is allowed, revoked write is denied with escalation hint
+        store.grant(outside_file.clone()).unwrap();
+        let write_permission = checker
+            .classify("/outside/a.txt", &root, &PathBuf::from("/ws/.tmp"), &store, PathPurpose::Write)
+            .expect("authorized write must be allowed");
+        assert_eq!(write_permission.zone, PermissionZone::AuthorizedExternal);
+
+        assert!(store.revoke(&outside_file));
+        let write_err = checker
+            .classify("/outside/a.txt", &root, &PathBuf::from("/ws/.tmp"), &store, PathPurpose::Write)
+            .expect_err("revoked write must be denied");
+        assert_eq!(write_err.code, PermissionErrorCode::OutsideWorkspaceWriteDenied);
+        assert!(write_err.message.contains("[sandbox: escalation available"));
 
         // 子授权保留：revoke 父不撤销子。
         store.grant(PathBuf::from("/outside/dir")).unwrap();

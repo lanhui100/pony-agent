@@ -6,13 +6,13 @@ use super::*;
 use crate::agent::path_permission::AuthorizedPathEntry;
 
 impl HostControlPlane {
-    /// 显式授权一个路径（仅读）。`scope` 仅接受 `"read"`；`"read-write"` 显式拒绝
-    /// （本轮不提供外部写授权，避免"看似授权实际无效"的静默条目）。
+    /// 显式授权一个路径。`scope` 接受 `"read"` 或 `"read-write"`（或 `"write"`）。
     /// 目标必须存在（canonicalize 成功）才可授权。
     pub fn authorize_path(&self, path: &str, scope: &str) -> Result<AuthorizedPathEntry, String> {
-        if scope.trim() != "read" {
+        let normalized_scope = scope.trim();
+        if normalized_scope != "read" && normalized_scope != "read-write" && normalized_scope != "write" {
             return Err(format!(
-                "authorize_path 暂不支持 scope `{scope}`：本轮仅支持 `read`（外部写授权不在范围内）。"
+                "authorize_path 暂不支持 scope `{scope}`：仅支持 `read` 或 `read-write`。"
             ));
         }
         let trimmed = path.trim();
