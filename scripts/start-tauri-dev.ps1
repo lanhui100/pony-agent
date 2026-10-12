@@ -143,12 +143,65 @@ if (Test-Path -LiteralPath $normalizer) {
   }
 }
 
+$viteProcess = $null
 try {
-  & $tauriShim dev
+  # ── 原生启动 Vite dev server ─────────────────────────────────────────
+  # 避免通过 Node @tauri-apps/cli 管道间接嵌套启动 cargo 导致 Windows Job Object
+  # 约束下 WebView2 报 0x80070578 (无效窗口句柄) 故障。
+  $viteBin = Join-Path $workspace 'node_modules\vite\bin\vite.js'
+  if (Test-Path $viteBin) {
+    Write-Host "[dev] starting Vite dev server directly via node ..."
+    $viteProcess = Start-Process -FilePath "node.exe" -ArgumentList "`"$viteBin`"", "--configLoader", "native" -WorkingDirectory $workspace -PassThru -NoNewWindow
+  } else {
+    Write-Host "[dev] starting Vite dev server via npm ..."
+    $viteProcess = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "dev" -WorkingDirectory $workspace -PassThru -NoNewWindow
+  }
+
+  # 等待 4176 端口就绪（超时 30 秒）
+  $ready = $false
+  for ($i = 0; $i -lt 100; $i++) {
+    try {
+      $tcp = New-Object System.Net.Sockets.TcpClient
+      $iar = $tcp.BeginConnect("127.0.0.1", 4176, $null, $null)
+      $success = $iar.AsyncWaitHandle.WaitOne(300, $false)
+      if ($success -and $tcp.Connected) {
+        $tcp.EndConnect($iar)
+        $tcp.Close()
+        $ready = $true
+        break
+      }
+      $tcp.Close()
+    } catch {}
+    Start-Sleep -Milliseconds 300
+  }
+  if (-not $ready) {
+    throw "Vite dev server failed to start within timeout"
+  }
+  Write-Host "[dev] Vite dev server ready on http://127.0.0.1:4176"
+
+  # ── 原生调起桌面端 ─────────────────────────────────────────────────
+  $cargoPath = Join-Path $HOME '.cargo\bin\cargo.exe'
+  if (-not (Test-Path $cargoPath)) {
+    $cargoPath = 'cargo'
+  }
+  & $cargoPath run --manifest-path "$workspace\src-tauri\Cargo.toml" --no-default-features
 } finally {
   if (Test-Path $pidFile) {
     Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
   }
+  # 确保 Vite 进程退出并释放端口
+  if ($viteProcess -and -not $viteProcess.HasExited) {
+    try {
+      Stop-Process -Id $viteProcess.Id -Force -ErrorAction SilentlyContinue
+    } catch {}
+  }
+  Get-NetTCPConnection -LocalPort 4176 -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique |
+    ForEach-Object {
+      if ($_ -and $_ -ne $PID) {
+        Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+      }
+    }
   # 先停监听（它自身退出前会做一次最终规范化），再兜底规范化一次
   if ($normalizerJob) {
     Stop-Job -Id $normalizerJob -ErrorAction SilentlyContinue
