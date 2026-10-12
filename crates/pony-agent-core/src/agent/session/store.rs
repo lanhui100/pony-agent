@@ -1994,6 +1994,19 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 恢复已归档会话（取消归档）：置 archived=false 并落盘；幂等（重复取消归档为 no-op 成功）。
+    pub fn unarchive_session(&mut self, session_id: &str) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("会话不存在：{session_id}"))?;
+        if session.archived {
+            session.archived = false;
+            self.save_to_backend();
+        }
+        Ok(())
+    }
+
     pub fn resolve_workspace_root(&self, workspace_id: Option<&str>) -> Result<String, String> {
         crate::agent::workspace::resolve_workspace_root(&self.workspaces, workspace_id)
     }

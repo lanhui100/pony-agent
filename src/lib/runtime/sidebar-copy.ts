@@ -13,7 +13,11 @@ export const SIDEBAR_COPY = {
   menuDeleteWorkspace: "删除工作区",
   menuRenameConversation: "重命名对话",
   menuArchiveConversation: "归档对话",
+  menuUnarchiveConversation: "取消归档",
   menuDeleteConversation: "删除对话",
+
+  filterAllSessions: "全部对话（显示已归档）",
+  filterHideArchived: "隐藏已归档",
 
   deleteWorkspaceTitle: "删除工作区",
   deleteWorkspaceDescription: (name: string, count: number): string =>

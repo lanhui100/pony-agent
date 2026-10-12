@@ -40,9 +40,9 @@ function byRecencyThenId(left: SessionOverview, right: SessionOverview): number 
   return left.conversationId < right.conversationId ? -1 : 1;
 }
 
-/** 存活判定：归档过滤的唯一入口（缺省 undefined ⇒ 存活）。 */
-export function isVisibleSession(session: SessionOverview): boolean {
-  return !session.archived;
+/** 存活判定：归档过滤的唯一入口（缺省 undefined ⇒ 存活；showArchived 为 true 时全显示）。 */
+export function isVisibleSession(session: SessionOverview, showArchived = false): boolean {
+  return showArchived || !session.archived;
 }
 
 /**
@@ -51,11 +51,13 @@ export function isVisibleSession(session: SessionOverview): boolean {
  * @param sessions 全量可见候选（含归档，由本函数过滤）
  * @param workspaces 工作区注册表（含 default；default 不产出组行）
  * @param transient 瞬态"新对话"条目（未保存）；target 为其显式创建目标
+ * @param showArchived 是否展示已归档的会话（对齐 DeepSeek Harness 设计）
  */
 export function deriveSidebarTree(
   sessions: SessionOverview[],
   workspaces: SidebarWorkspaceInput[],
-  transient?: { target: string | null; overview: SessionOverview }
+  transient?: { target: string | null; overview: SessionOverview },
+  showArchived = false
 ): SidebarTree {
   const registryIds = new Set(workspaces.map((workspace) => workspace.id));
 
@@ -67,7 +69,7 @@ export function deriveSidebarTree(
   }
 
   for (const session of sessions) {
-    if (!isVisibleSession(session)) continue;
+    if (!isVisibleSession(session, showArchived)) continue;
     const owner = session.workspaceId?.trim() ?? "";
     if (owner === "" || owner === DEFAULT_WORKSPACE_ID || !registryIds.has(owner)) {
       // default / 无归属 / 孤儿 → 平铺区
@@ -93,7 +95,7 @@ export function deriveSidebarTree(
   }
 
   // 瞬态条目：排序完成后钉在所属分区顶部，不参与排序。
-  if (transient && isVisibleSession(transient.overview)) {
+  if (transient && isVisibleSession(transient.overview, showArchived)) {
     const target = transient.target?.trim() ?? "";
     if (target !== "" && target !== DEFAULT_WORKSPACE_ID && grouped.has(target)) {
       grouped.get(target)?.unshift(transient.overview);

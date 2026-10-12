@@ -6,6 +6,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { storeToRefs } from "pinia";
 import {
   Archive,
+  ArchiveRestore,
   ChevronLeft,
   ChevronRight,
   Ellipsis,
@@ -229,15 +230,18 @@ function synthesizedTransient(): SessionOverview | null {
   };
 }
 
+const showArchivedSessions = ref(false);
+
 const tree = computed(() =>
   deriveSidebarTree(
     sessionList.value.filter(
-      (session) => isVisibleSession(session) && session !== provisionalRow.value
+      (session) => isVisibleSession(session, showArchivedSessions.value) && session !== provisionalRow.value
     ),
     workspaceList.value,
     transientEntry.value
       ? { target: sessionWorkspaceId.value, overview: transientEntry.value }
-      : undefined
+      : undefined,
+    showArchivedSessions.value
   )
 );
 
@@ -320,7 +324,9 @@ const sessionMenuItemsCache = computed(() => {
     }
     map.set(session.conversationId, [
       { id: "rename", label: SIDEBAR_COPY.menuRenameConversation, icon: Pencil, disabled: !mutable, disabledTitle: guard },
-      { id: "archive", label: SIDEBAR_COPY.menuArchiveConversation, icon: Archive, disabled: !mutable, disabledTitle: guard },
+      session.archived
+        ? { id: "unarchive", label: SIDEBAR_COPY.menuUnarchiveConversation, icon: ArchiveRestore, disabled: !mutable, disabledTitle: guard }
+        : { id: "archive", label: SIDEBAR_COPY.menuArchiveConversation, icon: Archive, disabled: !mutable, disabledTitle: guard },
       { id: "delete", label: SIDEBAR_COPY.menuDeleteConversation, icon: Trash2, danger: true, disabled: !canDeleteViaMenu(session), disabledTitle: guard }
     ]);
   };
@@ -363,6 +369,9 @@ function onSessionMenuSelect(session: SessionOverview, itemId: string) {
       title: headline,
       sessionId: session.conversationId
     });
+  }
+  if (itemId === "unarchive") {
+    void runtimeStore.unarchiveSession(session.conversationId);
   }
   if (itemId === "delete") {
     openConfirm({
@@ -673,24 +682,51 @@ function confirmPopoverProps(
 
         <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="pr-1.5">
           <section data-testid="session-sidebar-tree">
-            <!-- 一级标题行（不可折叠）+ 右端添加工作区 -->
+            <!-- 一级标题行（不可折叠）+ 选项菜单 + 右端添加工作区 -->
             <div class="flex w-full items-center justify-between gap-2 px-1.5 py-2">
               <div class="flex min-w-0 items-center gap-2 text-[11px] font-medium tracking-[0.12em] text-stone-500 uppercase">
                 <span class="shrink-0">{{ SIDEBAR_COPY.sectionTitle }}</span>
               </div>
-              <TooltipProvider v-if="isTauriRuntime" :delay-duration="300">
-                <Tooltip :text="SIDEBAR_COPY.addWorkspaceTooltip" side="bottom">
+              <div class="flex items-center gap-1">
+                <DropdownMenu
+                  :items="[
+                    {
+                      id: 'toggle-archived',
+                      label: showArchivedSessions ? SIDEBAR_COPY.filterHideArchived : SIDEBAR_COPY.filterAllSessions,
+                      icon: showArchivedSessions ? Archive : ArchiveRestore
+                    }
+                  ]"
+                  align="end"
+                  @select="(itemId) => {
+                    if (itemId === 'toggle-archived') {
+                      showArchivedSessions = !showArchivedSessions;
+                    }
+                  }"
+                >
                   <button
                     class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-600 transition hover:bg-[#f7e3bf] hover:text-stone-950"
                     type="button"
-                    aria-label="添加工作区"
-                    data-testid="workspace-add-button"
-                    @click="openAddWorkspaceFlow"
+                    :title="showArchivedSessions ? SIDEBAR_COPY.filterHideArchived : SIDEBAR_COPY.filterAllSessions"
+                    aria-label="视图选项"
+                    data-testid="sidebar-view-options-button"
                   >
-                    <FolderPlus class="h-4 w-4" />
+                    <Ellipsis class="h-4 w-4" />
                   </button>
-                </Tooltip>
-              </TooltipProvider>
+                </DropdownMenu>
+                <TooltipProvider v-if="isTauriRuntime" :delay-duration="300">
+                  <Tooltip :text="SIDEBAR_COPY.addWorkspaceTooltip" side="bottom">
+                    <button
+                      class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-600 transition hover:bg-[#f7e3bf] hover:text-stone-950"
+                      type="button"
+                      aria-label="添加工作区"
+                      data-testid="workspace-add-button"
+                      @click="openAddWorkspaceFlow"
+                    >
+                      <FolderPlus class="h-4 w-4" />
+                    </button>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
             </div>
 
             <p

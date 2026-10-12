@@ -740,4 +740,25 @@ describe("HomeSessionSidebar（管理操作·Tauri 模式）", () => {
     expect(wrapper.text()).toContain("操作失败：late boom");
     wrapper.unmount();
   });
+
+  it("视图选项支持切换显示/隐藏已归档会话", async () => {
+    seedStandard();
+    const wrapper = mountSidebar();
+    await flushUI();
+
+    // 默认不显示已归档会话
+    expect(wrapper.find('[data-testid="sidebar-view-options-button"]').exists()).toBe(true);
+    // 找到视图选项 DropdownMenu 并触发 toggle-archived
+    const viewOptionsMenu = wrapper.findAllComponents(DropdownMenu).find((m) =>
+      (m.props("items") as DropdownMenuItemSpec[] | undefined)?.some((i) => i.id === "toggle-archived")
+    );
+    expect(viewOptionsMenu).toBeDefined();
+
+    await viewOptionsMenu?.vm.$emit("select", "toggle-archived");
+    await flushUI();
+
+    // 此时切换为隐藏已归档选项
+    expect((viewOptionsMenu?.props("items") as DropdownMenuItemSpec[])[0].label).toBe(SIDEBAR_COPY.filterHideArchived);
+    wrapper.unmount();
+  });
 });

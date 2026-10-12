@@ -680,6 +680,14 @@ fn session_archive(
     control_plane.archive_session(&session_id)
 }
 
+#[tauri::command]
+fn session_unarchive(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+) -> Result<(), String> {
+    control_plane.unarchive_session(&session_id)
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthorizedPathEntryView {
@@ -1144,6 +1152,7 @@ pub fn run() {
             workspace_delete,
             session_rename,
             session_archive,
+            session_unarchive,
             authorize_path,
             revoke_authorization,
             list_authorizations,

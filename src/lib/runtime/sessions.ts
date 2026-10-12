@@ -582,6 +582,21 @@ export function archivePersistedSessionState(sessionId: string) {
   }
 }
 
+export function unarchivePersistedSessionState(sessionId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const cache = loadPersistedRuntimeCache();
+  if (cache.sessions[sessionId]) {
+    cache.sessions[sessionId] = {
+      ...cache.sessions[sessionId]!,
+      archived: false
+    };
+    window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
+  }
+}
+
 export function removePersistedSessionState(sessionId: string) {
   if (typeof window === "undefined") {
     return;

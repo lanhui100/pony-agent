@@ -5550,10 +5550,22 @@ fn archive_is_idempotent_and_projects_flag() {
     // 幂等：重复归档成功且仍为 true。
     store.archive_session("arch").unwrap();
     assert!(find_overview(&store.list_sessions(), "arch").archived);
+
+    // 取消归档（恢复存档）：置 archived=false 并恢复可见
+    store.unarchive_session("arch").unwrap();
+    assert!(
+        !find_overview(&store.list_sessions(), "arch").archived,
+        "取消归档后 overview 投影 archived=false"
+    );
+    // 幂等：重复取消归档成功
+    store.unarchive_session("arch").unwrap();
+    assert!(!find_overview(&store.list_sessions(), "arch").archived);
+
     // 未归档会话恒为 false。
     store.append_turn(Some("live"), "another", "reply", None, Vec::new());
     assert!(!find_overview(&store.list_sessions(), "live").archived);
     assert!(store.archive_session("missing").is_err());
+    assert!(store.unarchive_session("missing").is_err());
 }
 
 #[test]

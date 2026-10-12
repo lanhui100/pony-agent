@@ -74,6 +74,7 @@ function onRenameInput(event: Event) {
     <button
       v-if="!renaming"
       class="min-w-0 flex-1 text-left"
+      :class="session.archived ? 'opacity-60 italic' : ''"
       type="button"
       :data-testid="`session-switch-${session.conversationId}`"
       @click="emit('open-session', session.conversationId)"

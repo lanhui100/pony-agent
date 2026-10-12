@@ -1441,6 +1441,146 @@ describe("runtime session resilience", () => {
     ]);
   });
 
+  it("删除当前会话后点击新建会话，已删除的会话不会再次显示", async () => {
+    const store = useRuntimeStore();
+
+    store.$patch({
+      sessionId: "session-delete-target",
+      sessionList: [
+        {
+          conversationId: "session-delete-target",
+          title: "Delete target",
+          summary: "Target summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 3000
+        },
+        {
+          conversationId: "session-keep",
+          title: "Keep session",
+          summary: "Keep summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 2000
+        }
+      ],
+      phase: "ready",
+      sessionSummary: "Target summary",
+      messages: [
+        createMessage({
+          id: "msg-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "Hello delete"
+        })
+      ]
+    });
+
+    writePersistedSessions({
+      "session-delete-target": {
+        messages: store.messages,
+        turnTraceHistory: [],
+        sessionSummary: "Target summary",
+        providerRequestedName: "test",
+        providerName: "test",
+        providerProtocol: "test",
+        providerModel: "test",
+        providerSource: "test",
+        providerMode: "chat",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null
+      }
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string, payload?: any) => {
+      if (command === "delete_session") {
+        return Promise.resolve([
+          {
+            conversationId: "session-keep",
+            title: "Keep session",
+            summary: "Keep summary",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 2000,
+            workspaceId: null,
+            archived: false
+          }
+        ]);
+      }
+      if (command === "load_session_runtime_view") {
+        return Promise.resolve(
+          createSessionRuntimeView(
+            createSnapshot({
+              conversationId: payload.sessionId,
+              summary: "Keep summary",
+              history: []
+            })
+          )
+        );
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    // 1. 删除当前会话
+    await store.deleteSession("session-delete-target");
+    expect(store.sessionId).toBe("session-keep");
+    expect(store.sessionList.some((s) => s.conversationId === "session-delete-target")).toBe(false);
+
+    // 2. 点击新建会话
+    await store.createSession();
+
+    // 3. 验证已删除的会话绝对不会再次出现在 sessionList 中
+    expect(store.sessionList.some((s) => s.conversationId === "session-delete-target")).toBe(false);
+  });
+
+  it("支持 unarchiveSession 恢复已归档会话", async () => {
+    const store = useRuntimeStore();
+
+    store.$patch({
+      sessionId: "session-1",
+      sessionList: [
+        {
+          conversationId: "session-1",
+          title: "Session 1",
+          summary: "Summary 1",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 3000,
+          archived: true
+        }
+      ],
+      phase: "ready"
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string, payload?: any) => {
+      if (command === "session_unarchive") {
+        return Promise.resolve(null);
+      }
+      if (command === "list_sessions") {
+        return Promise.resolve([
+          {
+            conversationId: "session-1",
+            title: "Session 1",
+            summary: "Summary 1",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 3000,
+            workspaceId: null,
+            archived: false
+          }
+        ]);
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const outcome = await store.unarchiveSession("session-1");
+    expect(outcome.ok).toBe(true);
+    expect(store.sessionList[0].archived).toBe(false);
+  });
+
   it("hydrates assistant history from snapshot content instead of stale persisted markdown text", () => {
     const store = useRuntimeStore();
 

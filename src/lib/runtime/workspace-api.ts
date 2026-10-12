@@ -37,6 +37,11 @@ export async function archiveSession(sessionId: string): Promise<void> {
   await safeInvoke<null>("session_archive", { sessionId });
 }
 
+/** 取消归档（恢复存档，幂等）：分组面重新显示；日志与数据不动。 */
+export async function unarchiveSession(sessionId: string): Promise<void> {
+  await safeInvoke<null>("session_unarchive", { sessionId });
+}
+
 /**
  * 系统目录选择器（tauri-plugin-dialog）：仅允许选择已存在的目录；
  * 用户取消返回 null（≠失败）。与同模块其余封装一致，浏览器模式抛统一降级文案。

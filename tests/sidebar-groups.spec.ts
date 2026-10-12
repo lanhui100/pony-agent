@@ -83,6 +83,20 @@ describe("deriveSidebarTree", () => {
     expect(isVisibleSession({ ...session("x"), archived: undefined })).toBe(true);
   });
 
+  it("支持 showArchived 开关：为 true 时已归档会话重现", () => {
+    const tree = deriveSidebarTree(
+      [
+        session("live", "ws-a", { updatedAtMs: 2000 }),
+        session("hidden", "ws-a", { updatedAtMs: 1000, archived: true })
+      ],
+      registry,
+      undefined,
+      true
+    );
+    expect(tree.workspaces[0].count).toBe(2);
+    expect(tree.workspaces[0].sessions.map((s) => s.conversationId)).toEqual(["live", "hidden"]);
+  });
+
   it("瞬态条目按 target 钉顶：default 目标 → 平铺区顶", () => {
     const transient = { overview: session("transient", null, { title: "新对话" }), target: DEFAULT_WORKSPACE_ID };
     const tree = deriveSidebarTree([session("old")], registry, transient);

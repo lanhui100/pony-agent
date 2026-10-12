@@ -70,4 +70,14 @@ impl HostControlPlane {
             })
             .archive_session(session_id)
     }
+
+    pub fn unarchive_session(&self, session_id: &str) -> Result<(), String> {
+        self.sessions_rwlock
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .unarchive_session(session_id)
+    }
 }

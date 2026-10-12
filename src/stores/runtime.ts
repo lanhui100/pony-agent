@@ -55,6 +55,7 @@ import {
 } from "@/lib/runtime/workspace-constants";
 import {
   archiveSession as invokeArchiveSession,
+  unarchiveSession as invokeUnarchiveSession,
   createWorkspace as invokeCreateWorkspace,
   deleteWorkspace as invokeDeleteWorkspace,
   fetchWorkspaces,
@@ -216,6 +217,7 @@ import {
   persistSessionState,
   persistSessionStateAndRuntimeMaps,
   archivePersistedSessionState,
+  unarchivePersistedSessionState,
   removePersistedSessionState,
   restoreSessionRuntimeSnapshot,
   shouldAcceptTurnEvent
@@ -1029,9 +1031,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         const catalog = await measureHostRead("list_sessions", {
             deletingCount: Object.keys(this.deletingSessionSet).length
           }, () => safeInvoke<SessionOverview[]>("list_sessions"));
-        // 三级树：归档会话由前端过滤（后端恒投影 archived 标志；恢复入口后续迭代）。
+        // 后端 list_sessions 返回所有会话（含 archived: bool）；
+        // sessionList 保留后端全量列表，由前端派生单一树（deriveSidebarTree）根据 showArchived 进行过滤与展示。
         this.sessionList = filterDeletingSessions(
-          catalog.filter((session) => !Boolean(session.archived)),
+          catalog,
           this.deletingSessionSet
         );
         return;
@@ -2155,6 +2158,28 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       }
     },
 
+    async unarchiveSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+      const key = `s-unarchive:${sessionId}`;
+      if (this.sidebarOpInflightSet[key] || this.deletingSessionSet[sessionId]) {
+        return { ok: false };
+      }
+      this.sidebarOpInflightSet[key] = true;
+      try {
+        if (isTauriAvailable()) {
+          await invokeUnarchiveSession(sessionId);
+        } else {
+          unarchivePersistedSessionState(sessionId);
+        }
+        await this.loadSessionCatalog();
+        return { ok: true };
+      } catch (error) {
+        debugLog("session:unarchive:failed", { error: String(error) });
+        return { ok: false, error: String(error) };
+      } finally {
+        delete this.sidebarOpInflightSet[key];
+      }
+    },
+
     activateWorkspace(workspaceId: string) {
       // 仅切换"新会话创建目标"，不隐藏其他组（AC2）；localStorage 单一真相源。
       this.activeWorkspaceId = workspaceId;
@@ -2211,7 +2236,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.sessionId = nextSessionId;
       this.phase = "idle";
       this.sessionError = null;
-      const dedupedCurrentSessionList = this.sessionList.filter((session) => session.conversationId !== nextSessionId);
+      const dedupedCurrentSessionList = filterDeletingSessions(
+        this.sessionList.filter((session) => session.conversationId !== nextSessionId),
+        this.deletingSessionSet
+      );
       // 三级树（裁决①）：创建目标显式化——顶层入口落默认工作区，组内＋传该组 id；
       // 不再读取激活态。目标冻结到会话（submitTurn 以会话归属优先）。
       this.sessionWorkspaceId = targetWorkspace;
@@ -2221,7 +2249,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       };
       this.sessionList = ensureUniqueSessionList([
         transientOverview,
-        ...(currentOverview ? [currentOverview] : []),
+        ...(currentOverview && !this.deletingSessionSet[currentOverview.conversationId] ? [currentOverview] : []),
         ...dedupedCurrentSessionList.filter(
           (session) => session.conversationId !== currentOverview?.conversationId
             && session.conversationId !== previousSessionId
@@ -2307,7 +2335,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             return { ok: true };
           }
 
+          // fallback 切换到新会话前，再次确保 sessionList 移除已删除的 targetSessionId
+          this.sessionList = this.sessionList.filter((session) => session.conversationId !== targetSessionId);
+
           await this.loadSessionState(fallbackSessionId, { refreshCatalog: false });
+          // loadSessionState 可能恢复了某些状态，再次清洗确保 targetSessionId 绝不留在列表中
+          this.sessionList = this.sessionList.filter((session) => session.conversationId !== targetSessionId);
           debugLog("session:delete:fallback", {
             targetSessionId,
             fallbackSessionId
