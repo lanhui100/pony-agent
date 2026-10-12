@@ -269,6 +269,15 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     expect(groupB?.textContent).toContain("1");
   });
 
+  it("无对话时不渲染工作区下方的空提示小字注释", () => {
+    seedTree({ sessions: [] });
+    seedWorkspaces([]);
+    const wrapper = mountSidebar();
+    expect(wrapper.find('[data-testid="session-sidebar-empty"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain(SIDEBAR_COPY.emptyTreeHint);
+    wrapper.unmount();
+  });
+
   it("瞬态新对话按显式目标钉顶：顶层入口落平铺区顶；组内入口落该组顶", async () => {
     seedTree({
       currentId: "fresh",

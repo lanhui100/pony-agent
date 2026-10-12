@@ -1,6 +1,6 @@
 # 0029 工作区外部访问提权机制（基于 DSH 的升权引导与受控授权协议）
 
-Status: proposed
+Status: implemented
 
 ## 候选方案
 

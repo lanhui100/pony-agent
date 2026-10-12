@@ -245,9 +245,6 @@ const tree = computed(() =>
   )
 );
 
-const totalVisibleSessions = computed(
-  () => tree.value.flatZone.length + tree.value.workspaces.reduce((sum, g) => sum + g.count, 0)
-);
 const showAllPartitions = ref(false);
 const hasHiddenSessions = computed(
   () =>
@@ -736,13 +733,7 @@ function confirmPopoverProps(
             >
               {{ workspaceError }}
             </p>
-            <p
-              v-if="totalVisibleSessions === 0"
-              class="px-1.5 py-2 text-[11px] leading-4 text-stone-400"
-              data-testid="session-sidebar-empty"
-            >
-              {{ SIDEBAR_COPY.emptyTreeHint }}
-            </p>
+
 
             <!-- 平铺区 -->
             <div class="space-y-0.5 -mr-1.5 pt-1">
