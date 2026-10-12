@@ -164,4 +164,47 @@ describe("useTraceProjection - contextDisplayTokens computation", () => {
 
     expect(projection.contextDisplayTokens.value).toBe(12_500);
   });
+
+  it("当模型返回 token 与耗时指标时，计算出正确的 sessionTokenGenerationSpeed", () => {
+    const runtimeStore = useRuntimeStore();
+    const turnRecord: TurnTraceRecord = {
+      turnId: "turn-speed",
+      title: "生成速度测试",
+      phase: "completed",
+      traceSteps: [],
+      traceTimeline: [
+        {
+          id: "call-1",
+          turnId: "turn-speed",
+          sequence: 1,
+          kind: "call_model",
+          label: "CALL MODEL #1",
+          state: "completed",
+          inputTokens: 1000,
+          outputTokens: 100,
+          firstTokenLatencyMs: 200,
+          turnDurationMs: 1200
+        }
+      ],
+      toolActivities: [],
+      inputTokens: 1000,
+      outputTokens: 100,
+      firstTokenLatencyMs: 200,
+      turnDurationMs: 1200,
+      updatedAt: Date.now()
+    };
+
+    runtimeStore.$patch({
+      turnTraceHistory: [turnRecord],
+      activeTurnId: null,
+      isSubmitting: false
+    });
+
+    const projection = useTraceProjection({
+      liveTurnEnabled: ref(true)
+    });
+
+    // 100 tokens / ((1200 - 200) / 1000)s = 100 tokens / 1s = 100 t/s
+    expect(projection.sessionTokenGenerationSpeed.value).toBe(100);
+  });
 });

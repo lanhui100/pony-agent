@@ -505,3 +505,62 @@ export function autoCloseBoundaries(content: string): string {
 export async function renderPartialMarkdown(partialContent: string): Promise<string> {
   return renderMarkdown(autoCloseBoundaries(partialContent));
 }
+
+export function splitMarkdownBlocks(content: string): { committed: string[]; tail: string } {
+  if (!content) {
+    return { committed: [], tail: "" };
+  }
+
+  const lines = content.split(/\r?\n/);
+  const blocks: string[] = [];
+  let currentBlockLines: string[] = [];
+  let inCodeFence = false;
+  let codeFenceMarker = "";
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const fenceMatch = line.match(/^\s*([`~]{3,})/);
+
+    if (fenceMatch) {
+      const marker = fenceMatch[1]!;
+      if (!inCodeFence) {
+        inCodeFence = true;
+        codeFenceMarker = marker[0]!;
+      } else if (marker[0] === codeFenceMarker) {
+        inCodeFence = false;
+        codeFenceMarker = "";
+      }
+    }
+
+    currentBlockLines.push(line);
+
+    // 块结束边界判定：在代码栅栏外，当遇到空行且当前块有内容时，作为已稳定提交的 block
+    if (!inCodeFence && line.trim() === "" && currentBlockLines.length > 0) {
+      const blockText = currentBlockLines.join("\n").trim();
+      if (blockText) {
+        blocks.push(blockText);
+      }
+      currentBlockLines = [];
+    }
+  }
+
+  const tail = currentBlockLines.join("\n");
+  return {
+    committed: blocks,
+    tail
+  };
+}
+
+export async function renderStreamingCodeBlockSafe(content: string): Promise<string> {
+  const unclosed = getUnclosedCodeFence(content);
+  if (unclosed) {
+    const lines = content.split(/\r?\n/);
+    const firstLine = lines[0] ?? "";
+    const langMatch = firstLine.match(/^\s*[`~]{3,}\s*([A-Za-z0-9_-]*)/);
+    const lang = langMatch?.[1] ? ` class="language-${langMatch[1]}"` : "";
+    const codeBody = lines.slice(1).join("\n");
+    return `<pre class="code-block-cream"><code${lang}>${escapeHtml(codeBody)}</code></pre>`;
+  }
+
+  return renderMarkdown(content);
+}

@@ -81,7 +81,7 @@ const props = defineProps<{
   setUserMessageRef: (element: Element | ComponentPublicInstance | null) => void;
   setAgentMessageRef: (element: Element | ComponentPublicInstance | null) => void;
   handleMarkdownRenderComplete: (payload: { contentLength: number; streaming: boolean }) => void;
-  shouldUseMarkdownAssistantRendering: (message: ChatMessage | null, content: string) => boolean;
+  shouldUseMarkdownAssistantRendering: (message: ChatMessage | null, content: string, streaming?: boolean) => boolean;
   shouldUseOptimizedAssistantStreaming: (message: ChatMessage | null) => boolean;
   streamingReasoningStable: (reasoningContent: string, assistant: ChatMessage) => string;
   streamingReasoningFade: (reasoningContent: string, assistant: ChatMessage) => string;
@@ -456,7 +456,7 @@ const toolIconByCanonicalName: Record<string, any> = {
             @mouseup="handleSelectionAutoCopy"
           >
             <div
-              v-if="shouldUseMarkdownAssistantRendering(event.assistant, event.content)"
+              v-if="shouldUseMarkdownAssistantRendering(event.assistant, event.content, event.streaming)"
               :class="event.streaming ? 'assistant-streaming-content' : undefined"
               :data-testid="event.streaming ? 'assistant-streaming-flow' : undefined"
             >

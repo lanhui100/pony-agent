@@ -103,4 +103,36 @@ describe("markdown rendering", () => {
     expect(html).toContain("<strong>");
     expect(html).toContain("<code>代码</code>");
   });
+
+  it("splits markdown content into stable committed blocks and tail pending block", async () => {
+    const { splitMarkdownBlocks } = await import("@/lib/markdown");
+    const doc = [
+      "# 标题",
+      "",
+      "这是第一段内容。",
+      "",
+      "```ts",
+      "const a = 1;",
+      "```",
+      "",
+      "这是正在输入的尾部..."
+    ].join("\n");
+
+    const blocks = splitMarkdownBlocks(doc);
+    expect(blocks.committed.length).toBeGreaterThanOrEqual(2);
+    expect(blocks.tail).toBe("这是正在输入的尾部...");
+  });
+
+  it("identifies unclosed code blocks and provides fast raw markup during streaming", async () => {
+    const { renderStreamingCodeBlockSafe } = await import("@/lib/markdown");
+    const unclosed = [
+      "```typescript",
+      "console.log('in streaming');"
+    ].join("\n");
+
+    const html = await renderStreamingCodeBlockSafe(unclosed);
+    // 未闭合流式代码块：包含 code-block 结构并完成安全转义
+    expect(html).toContain("<pre");
+    expect(html).toContain("console.log(&#039;in streaming&#039;);");
+  });
 });

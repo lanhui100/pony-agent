@@ -5,7 +5,8 @@ import {
   isSimpleTextContent,
   markdownRenderEpoch,
   renderMarkdown,
-  renderPartialMarkdown
+  renderPartialMarkdown,
+  splitMarkdownBlocks
 } from "@/lib/markdown";
 
 defineOptions({
@@ -110,8 +111,20 @@ function shouldRenderNow(content: string): boolean {
 
 async function executeRender(version: number) {
   try {
-    const renderFn = props.streaming ? renderPartialMarkdown : renderMarkdown;
-    const html = await renderFn(props.content);
+    let html: string;
+    if (props.streaming) {
+      // 块级增量优化与代码块隔离
+      const { committed, tail } = splitMarkdownBlocks(props.content);
+      if (committed.length > 0) {
+        const committedHtmlList = await Promise.all(committed.map((b) => renderMarkdown(b)));
+        const tailHtml = tail.trim() ? await renderPartialMarkdown(tail) : "";
+        html = [...committedHtmlList, tailHtml].filter(Boolean).join("\n");
+      } else {
+        html = await renderPartialMarkdown(props.content);
+      }
+    } else {
+      html = await renderMarkdown(props.content);
+    }
     if (version !== renderVersion) return;
     renderedHtml.value = html;
     lastRenderedFullContent = props.content;
@@ -165,7 +178,7 @@ function scheduleStreamingRender() {
   }, STREAMING_RENDER_DEBOUNCE_MS);
 }
 
-function scheduleNonStreamingRender() {
+function scheduleNonStreamingRender(immediate = false) {
   cancelScheduledRender();
   const version = ++renderVersion;
   // 不清空 renderedHtml，保持上一次渲染的内容可见，直到新渲染完成
@@ -173,6 +186,11 @@ function scheduleNonStreamingRender() {
 
   if (!renderPending.value || typeof window === "undefined") {
     renderPending.value = false;
+    return;
+  }
+
+  if (immediate) {
+    executeRender(version);
     return;
   }
 
@@ -191,7 +209,7 @@ function scheduleNonStreamingRender() {
     }
 
     window.setTimeout(() => executeRender(version), 0);
-  }, 120);
+  }, 16);
 }
 
 function handleContentChange(content: string) {
@@ -266,9 +284,9 @@ watch(
       unrenderedSuffix.value = "";
       lastPlainTextRenderCompleteAt = 0;
 
-      // Otherwise force a final full render
+      // Otherwise force a final full render immediately
       lastRenderedContentLength = 0;
-      scheduleNonStreamingRender();
+      scheduleNonStreamingRender(true);
     }
   }
 );

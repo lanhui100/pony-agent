@@ -1011,16 +1011,18 @@ function shouldUseOptimizedAssistantStreaming(message: ChatMessage | null) {
 
 const streamingRenderPathLock = new Map<string, boolean>();
 
-function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, _content: string) {
+function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, _content: string, streaming = false) {
   if (!message) {
     return false;
   }
 
-  if (!isAssistantStreaming(message)) {
+  // 非流式状态（包括最终完成消息或非最新轮次的中间消息），统一走 Markdown 渲染
+  if (!streaming && !isAssistantStreaming(message)) {
     streamingRenderPathLock.delete(message.id);
     return true;
   }
 
+  // 如果当前处于流式，但不是流式模式
   if (!shouldUseOptimizedAssistantStreaming(message)) {
     streamingRenderPathLock.delete(message.id);
     return false;

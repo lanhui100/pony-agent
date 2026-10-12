@@ -94,9 +94,8 @@ function formatTokenSpeed(value?: number | null) {
       <div class="rounded-[0.45rem] bg-[#f6f0e8] px-3 py-2 space-y-1.5">
         <!-- Token metrics -->
         <div class="flex items-center justify-between text-[11px] leading-5 text-stone-600">
-          <span class="inline-flex items-center gap-1 text-stone-400">
+          <span class="inline-flex items-center text-stone-400">
             <CircleDollarSign class="h-3 w-3" />
-            <span>Token</span>
           </span>
           <span class="inline-flex items-center gap-3">
             <Tooltip text="输入">

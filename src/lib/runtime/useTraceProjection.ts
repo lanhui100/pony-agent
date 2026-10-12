@@ -38,25 +38,28 @@ function compareTurnTraceOrder(left: TurnTraceRecord, right: TurnTraceRecord) {
 }
 
 /** 单次模型调用生成速度（token/s）：优先按生成期（扣除首 token 延迟）计算。 */
-function entryTokenGenerationSpeed(entry: TraceTimelineEntry): number | null {
+function entryTokenGenerationSpeed(entry: TraceTimelineEntry, turn?: TurnTraceRecord | null): number | null {
   const durationValue =
+    (entry.turnDurationMs != null && entry.turnDurationMs > 0 ? entry.turnDurationMs : null) ??
     (entry.durationMs != null && entry.durationMs > 0 ? entry.durationMs : null) ??
     (entry.durationSeconds != null && entry.durationSeconds > 0 ? Math.round(entry.durationSeconds * 1000) : null) ??
-    (entry.turnDurationMs != null && entry.turnDurationMs > 0 ? entry.turnDurationMs : null) ??
+    (turn?.turnDurationMs != null && turn.turnDurationMs > 0 ? turn.turnDurationMs : null) ??
     null;
 
-  if (entry.outputTokens == null || durationValue == null || durationValue <= 0) {
+  const outputTokens = entry.outputTokens ?? turn?.outputTokens ?? null;
+  if (outputTokens == null || durationValue == null || durationValue <= 0) {
     return null;
   }
 
+  const firstTokenLatencyMs = entry.firstTokenLatencyMs ?? turn?.firstTokenLatencyMs ?? null;
   let durationMs: number;
-  if (entry.firstTokenLatencyMs != null && durationValue - entry.firstTokenLatencyMs > 0) {
-    durationMs = durationValue - entry.firstTokenLatencyMs;
+  if (firstTokenLatencyMs != null && durationValue - firstTokenLatencyMs > 0) {
+    durationMs = durationValue - firstTokenLatencyMs;
   } else {
     durationMs = Math.max(durationValue, 1);
   }
 
-  const speed = entry.outputTokens / (durationMs / 1000);
+  const speed = outputTokens / (durationMs / 1000);
   return Number.isFinite(speed) ? speed : null;
 }
 
@@ -309,7 +312,7 @@ export function useTraceProjection(options: {
       if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
         continue;
       }
-      const speed = entryTokenGenerationSpeed(entry);
+      const speed = entryTokenGenerationSpeed(entry, turn);
       if (speed != null) {
         return speed;
       }

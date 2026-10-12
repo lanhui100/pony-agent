@@ -73,7 +73,7 @@ const modelSubmenuRef = ref<HTMLElement | null>(null);
 const reasoningSubmenuRef = ref<HTMLElement | null>(null);
 
 // 上下文用量接入 (需求 1)
-const { contextDisplayTokens, currentContextWindowTokens } = useTraceProjection({ liveTurnEnabled: ref(false) });
+const { contextDisplayTokens, currentContextWindowTokens } = useTraceProjection({ liveTurnEnabled: ref(true) });
 
 function formatCompactTokenInteger(value?: number | null) {
   if (value == null || !Number.isFinite(value)) { return "0"; }
@@ -83,10 +83,11 @@ function formatCompactTokenInteger(value?: number | null) {
 }
 
 const contextUsagePercentage = computed(() => {
-  if (!contextDisplayTokens.value || !currentContextWindowTokens.value || currentContextWindowTokens.value <= 0) {
+  if (contextDisplayTokens.value == null || !currentContextWindowTokens.value || currentContextWindowTokens.value <= 0) {
     return 0;
   }
-  return Math.min(100, Math.max(0, Math.round((contextDisplayTokens.value / currentContextWindowTokens.value) * 100)));
+  const ratio = (contextDisplayTokens.value / currentContextWindowTokens.value) * 100;
+  return Math.min(100, Math.max(0, ratio < 1 && ratio > 0 ? 1 : Math.round(ratio)));
 });
 
 const contextUsageTooltip = computed(() => {
@@ -96,7 +97,9 @@ const contextUsageTooltip = computed(() => {
   if (!currentContextWindowTokens.value || currentContextWindowTokens.value <= 0) {
     return `上下文用量：${formatCompactTokenInteger(contextDisplayTokens.value)}`;
   }
-  return `上下文用量：${contextUsagePercentage.value}% · ${formatCompactTokenInteger(contextDisplayTokens.value)} / ${formatCompactTokenInteger(currentContextWindowTokens.value)}`;
+  const exactPercentage = ((contextDisplayTokens.value / currentContextWindowTokens.value) * 100);
+  const displayPercent = exactPercentage > 0 && exactPercentage < 1 ? "<1" : String(Math.round(exactPercentage));
+  return `上下文用量：${displayPercent}% · ${formatCompactTokenInteger(contextDisplayTokens.value)} / ${formatCompactTokenInteger(currentContextWindowTokens.value)}`;
 });
 
 const modelSearchQuery = ref("");
