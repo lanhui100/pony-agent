@@ -78,6 +78,7 @@ export type RuntimeState = {
   turnTraceHistory: TurnTraceRecord[];
   eventCursorByTurnId: Record<string, { eventId: string | null; sequence: number | null; emittedAtMs: number | null }>;
   activeTurnId: string | null;
+  activeTurnStartedAtMs?: number | null;
   activeRunId: string | null;
   latestExecutionCheckpoint: ExecutionCheckpoint | null;
   latestGraphRunSubmissionPlan: GraphRunSubmissionPlan | null;

@@ -290,6 +290,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       firstTokenLatencyMs: persisted?.firstTokenLatencyMs ?? null,
       isSubmitting: false,
       activeTurnId: null,
+      activeTurnStartedAtMs: null,
       activeRunId: null,
       latestExecutionCheckpoint: null,
       latestGraphRunSubmissionPlan: null,
@@ -417,16 +418,24 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       return (sessionId: string) => sessionId in state.runningSessionMap;
     },
     agentRuntimeStatus(state): AgentRuntimeStatus | null {
+      if (!state.isSubmitting) {
+        return null;
+      }
       const activeMessage = state.activeTurnId
         ? state.messages.find((m) => m.turnId === state.activeTurnId)
         : null;
       const isStreamingReasoning = Boolean(state.streamBufferReasoning);
+      const hasStreamingContent = Boolean(
+        state.streamBufferText ||
+        (activeMessage && activeMessage.content)
+      );
       return resolveAgentRuntimeStatus({
         isSubmitting: state.isSubmitting,
         phase: state.phase,
         toolActivities: state.toolActivities,
-        turnStartedAt: activeMessage ? Date.now() : null,
-        streamingReasoning: isStreamingReasoning
+        turnStartedAt: state.activeTurnStartedAtMs ?? null,
+        streamingReasoning: isStreamingReasoning,
+        hasStreamingContent
       });
     }
   },
@@ -455,6 +464,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.firstTokenLatencyMs = blankFields.firstTokenLatencyMs;
       this.isSubmitting = false;
       this.activeTurnId = null;
+      this.activeTurnStartedAtMs = null;
       this.activeRunId = null;
       this.latestGraphRunSubmissionPlan = null;
       this.latestGraphRunControlBoundaryEvidence = [];
@@ -4773,6 +4783,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       this.isSubmitting = true;
+      this.activeTurnStartedAtMs = Date.now();
       this.startSubmissionWatchdog(requestId);
       bindFrontendRecorderSession(this.sessionId);
       bindFrontendRecorderTurn(requestId);

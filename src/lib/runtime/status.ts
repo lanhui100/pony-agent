@@ -21,12 +21,20 @@ export interface ResolveRuntimeStatusOptions {
   toolActivities?: ToolActivity[];
   turnStartedAt?: number | null;
   streamingReasoning?: boolean;
+  hasStreamingContent?: boolean;
 }
 
 export function resolveAgentRuntimeStatus(
   options: ResolveRuntimeStatusOptions
 ): AgentRuntimeStatus | null {
-  const { isSubmitting, phase, toolActivities = [], turnStartedAt, streamingReasoning } = options;
+  const {
+    isSubmitting,
+    phase,
+    toolActivities = [],
+    turnStartedAt,
+    streamingReasoning,
+    hasStreamingContent
+  } = options;
 
   if (!isSubmitting) {
     return null;
@@ -44,8 +52,9 @@ export function resolveAgentRuntimeStatus(
   // 2. 检查是否有正在执行的工具
   const runningTool = toolActivities.find((t) => t.status === "running");
   if (runningTool || phase === "calling_tool") {
-    const name = runningTool?.canonicalToolName || runningTool?.name || "tool";
-    const label = `执行工具: ${runningTool?.displayNameZh || name}...`;
+    const name = runningTool?.canonicalToolName || runningTool?.name;
+    const displayName = runningTool?.displayNameZh || name;
+    const label = displayName ? `执行工具: ${displayName}...` : "正在执行工具...";
     return {
       mode: "executing_tool",
       label,
@@ -66,6 +75,13 @@ export function resolveAgentRuntimeStatus(
 
   // 4. 模型回复输出阶段
   if (phase === "calling_model") {
+    if (hasStreamingContent === false) {
+      return {
+        mode: "thinking",
+        label: "思考中...",
+        startTime: turnStartedAt,
+      };
+    }
     return {
       mode: "responding",
       label: "正在回复...",

@@ -40,6 +40,33 @@ describe("resolveAgentRuntimeStatus", () => {
     expect(status?.label).toBe("思考中...");
   });
 
+  it("identifies thinking phase when calling model before first content token arrives", () => {
+    const status = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "calling_model",
+      toolActivities: [],
+      turnStartedAt: Date.now() - 2000,
+      streamingReasoning: false,
+      hasStreamingContent: false,
+    });
+    expect(status).not.toBeNull();
+    expect(status?.mode).toBe("thinking");
+    expect(status?.label).toBe("思考中...");
+  });
+
+  it("identifies executing tool phase with fallback label when tool name is missing", () => {
+    const status = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "calling_tool",
+      toolActivities: [],
+      turnStartedAt: Date.now() - 5000,
+      streamingReasoning: false,
+    });
+    expect(status).not.toBeNull();
+    expect(status?.mode).toBe("executing_tool");
+    expect(status?.label).toBe("正在执行工具...");
+  });
+
   it("identifies responding / generating phase when calling model without reasoning", () => {
     const status = resolveAgentRuntimeStatus({
       isSubmitting: true,
@@ -85,5 +112,23 @@ describe("resolveAgentRuntimeStatus", () => {
     expect(status).not.toBeNull();
     expect(status?.mode).toBe("waiting_approval");
     expect(status?.label).toBe("等待确认授权...");
+  });
+
+  it("preserves fixed startTime instead of drifting across evaluations", () => {
+    const fixedStartTime = 1700000000000;
+    const status1 = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "calling_model",
+      turnStartedAt: fixedStartTime,
+      hasStreamingContent: true,
+    });
+    const status2 = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "calling_model",
+      turnStartedAt: fixedStartTime,
+      hasStreamingContent: true,
+    });
+    expect(status1?.startTime).toBe(fixedStartTime);
+    expect(status2?.startTime).toBe(fixedStartTime);
   });
 });

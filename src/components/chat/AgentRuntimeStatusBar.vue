@@ -63,7 +63,7 @@ const iconComponent = computed(() => {
           ]"
           data-testid="agent-runtime-status-icon"
         />
-        <span class="text-stone-500 font-normal" data-testid="agent-runtime-status-label">
+        <span class="runtime-status-shimmer font-normal" data-testid="agent-runtime-status-label">
           {{ props.status.label }}
         </span>
         <span
@@ -79,6 +79,49 @@ const iconComponent = computed(() => {
 </template>
 
 <style scoped>
+.runtime-status-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(120, 113, 108, 0.7) 0%,
+    rgba(28, 25, 23, 0.95) 50%,
+    rgba(120, 113, 108, 0.7) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer-sweep 2.4s ease-in-out infinite;
+}
+
+@keyframes shimmer-sweep {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+:global(.dark) .runtime-status-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(168, 162, 158, 0.7) 0%,
+    rgba(245, 245, 244, 0.98) 50%,
+    rgba(168, 162, 158, 0.7) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-status-shimmer {
+    background: none;
+    -webkit-text-fill-color: #78716c;
+    color: #78716c;
+    animation: none;
+  }
+}
+
 .status-transition-enter-active,
 .status-transition-leave-active {
   transition: opacity 240ms cubic-bezier(0.2, 0, 0.2, 1), transform 240ms cubic-bezier(0.2, 0, 0.2, 1);

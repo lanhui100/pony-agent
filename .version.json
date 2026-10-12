@@ -2627,13 +2627,25 @@
         }
       ],
       "commit": "c7fd1d9"
+    },
+    {
+      "timestamp": "2026-10-12T08:13:06+08:00",
+      "bumps": [
+        {
+          "to": "0.1.127",
+          "from": "0.1.126",
+          "component": "tauri",
+          "segment": "patch"
+        }
+      ],
+      "commit": "340ec55"
     }
   ],
-  "lastBump": "2026-10-12T08:08:21+08:00",
+  "lastBump": "2026-10-12T08:13:05+08:00",
   "tauri": {
     "major": 0,
     "minor": 1,
-    "patch": 126
+    "patch": 127
   },
   "core": {
     "patch": 115,

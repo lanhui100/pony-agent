@@ -408,6 +408,10 @@ const toolIconByCanonicalName: Record<string, any> = {
 
         <div
           v-else-if="event.kind === 'tools'"
+          v-motion
+          :initial="{ opacity: 0, y: 6 }"
+          :animate="{ opacity: 1, y: 0 }"
+          :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
           class="conversation-tool-panel space-y-0.5"
         >
           <template v-for="tool in event.tools" :key="tool.id">
@@ -429,7 +433,6 @@ const toolIconByCanonicalName: Record<string, any> = {
                 >
                   {{ tool.description }}
                 </span>
-                <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
                 <span class="conversation-tool-status flex shrink-0 items-center gap-1 leading-none">
                   <span class="text-[11px] text-stone-400" :class="tool.durationSeconds != null ? 'visible' : 'invisible'">{{ tool.durationSeconds != null ? (tool.durationSeconds).toFixed(1) + 's' : '0.0s' }}</span>
                   <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
@@ -578,6 +581,11 @@ const toolIconByCanonicalName: Record<string, any> = {
 :deep(.assistant-markdown p) {
   margin: 0 0 1.2em;
   color: inherit;
+}
+
+:deep(.assistant-markdown p:empty) {
+  display: none !important;
+  margin: 0 !important;
 }
 
 :deep(.assistant-markdown p:last-child),

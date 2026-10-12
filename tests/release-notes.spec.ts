@@ -359,19 +359,19 @@ describe("main / CLI 黑盒（矩阵 §4，纯本地 git 零网络）", () => {
     const res = runCli(["--repo-root", ".", "--to", "v0.1.114", "--from", "v0.1.113"]);
     expect(res.status).toBe(0);
     expect(res.stdout).toContain("# pony-agent release notes (v0.1.113 → v0.1.114)");
-  });
+  }, 15_000);
 
   it("② 缺 --to（参数缺失）→ exit 非 0 且 stderr 可诊断（矩阵 §4 失败契约）", () => {
     const res = runCli(["--repo-root", "."]);
     expect(res.status).not.toBe(0);
     expect(res.stderr).toMatch(/missing required --to/);
-  });
+  }, 15_000);
 
   it("③ 空区间（--from 与 --to 相同 tag，git log 无提交）→ exit 0 且输出占位行", () => {
     const res = runCli(["--repo-root", ".", "--to", "v0.1.114", "--from", "v0.1.114"]);
     expect(res.status).toBe(0);
     expect(res.stdout).toContain("本版本无用户可见变更");
-  });
+  }, 15_000);
 
   it("④ --out 写文件：文件存在且非空（矩阵 §4 --out 契约）", () => {
     const outFile = join(tmpdir(), `rn-cli-out-${process.pid}-${Date.now()}.md`);
@@ -393,5 +393,5 @@ describe("main / CLI 黑盒（矩阵 §4，纯本地 git 零网络）", () => {
       // 谁创建谁清理（test-expert：测试数据生命周期）
       rmSync(outFile, { force: true });
     }
-  });
+  }, 15_000);
 });

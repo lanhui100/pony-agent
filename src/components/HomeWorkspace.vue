@@ -568,6 +568,11 @@ function completedPrefixIndex(completedContents: string[], content: string): num
   return -1;
 }
 
+function cleanHopText(text: string): string {
+  if (!text) return "";
+  return text.replace(/^[\r\n]+/, "").replace(/[\r\n]+$/, "");
+}
+
 function modelEntryReasoningContent(
   turn: TurnBucket,
   entry: TraceTimelineEntry,
@@ -581,17 +586,17 @@ function modelEntryReasoningContent(
       modelEntries,
       (modelEntry) => modelEntry.reasoningContent ?? ""
     );
-    return currentReasoning.trim() ? currentReasoning : "";
+    return cleanHopText(currentReasoning);
   }
 
   const traceReasoning = entry.reasoningContent ?? "";
   if (traceReasoning.trim()) {
-    return traceReasoning;
+    return cleanHopText(traceReasoning);
   }
 
   if (turn.assistant && isLatestModelEntry(entry, modelEntries)) {
     const reasoning = assistantReasoning(turn.assistant);
-    return reasoning.trim() ? reasoning : "";
+    return cleanHopText(reasoning);
   }
 
   return "";
@@ -614,16 +619,16 @@ function modelEntryContent(
       (modelEntry) => modelEntry.text ?? "",
       completeContent
     );
-    return currentContent.trim() ? currentContent : "";
+    return cleanHopText(currentContent);
   }
 
   const traceText = entry.text ?? "";
   if (traceText.trim()) {
-    return traceText;
+    return cleanHopText(traceText);
   }
 
   if (turn.assistant && isLatestModelEntry(entry, modelEntries)) {
-    return turn.assistant.content.trim() ? turn.assistant.content : "";
+    return cleanHopText(turn.assistant.content);
   }
 
   return "";
@@ -691,8 +696,8 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       entryIndex++;
     }
   } else if (turn.assistant && shouldShowReasoningBlock(turn.assistant)) {
-    const fallbackReasoning = assistantDisplayedReasoning(turn.assistant).trim();
-    if (fallbackReasoning) {
+    const fallbackReasoning = cleanHopText(assistantDisplayedReasoning(turn.assistant));
+    if (fallbackReasoning.trim()) {
       events.push({
         kind: "reasoning",
         key: `reasoning-${turn.assistant.id}`,
@@ -747,13 +752,14 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     const rawContent = shouldUseOptimizedAssistantStreaming(turn.assistant)
       ? assistantDisplayContent(turn.assistant)
       : turn.assistant.content;
-    if (rawContent.trim()) {
+    const cleanedContent = cleanHopText(rawContent);
+    if (cleanedContent.trim()) {
       events.push({
         kind: "content",
         key: `content-${turn.assistant.id}`,
         order: modelOrder,
         assistant: turn.assistant,
-        content: rawContent,
+        content: cleanedContent,
         streaming: isAssistantStreaming(turn.assistant)
       });
     }
