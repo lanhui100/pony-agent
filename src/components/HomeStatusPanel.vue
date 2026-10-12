@@ -7,7 +7,6 @@ import {
   CircleDollarSign,
   Copy,
   Gauge,
-  Layout,
   MessageSquareMore,
   Orbit,
   ScanSearch,
@@ -47,19 +46,6 @@ function formatCompactInteger(value?: number | null) {
 function formatTokenSpeed(value?: number | null) {
   if (value == null || !Number.isFinite(value)) { return "—"; }
   return `${Math.round(value)} t/s`;
-}
-
-function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: number | null) {
-  if (inputTokens == null) {
-    return "";
-  }
-
-  if (contextWindowTokens == null || contextWindowTokens <= 0) {
-    return formatCompactInteger(inputTokens);
-  }
-
-  const percentage = Math.round((inputTokens / contextWindowTokens) * 100);
-  return `${percentage}% · ${formatCompactInteger(inputTokens)} / ${formatCompactInteger(contextWindowTokens)}`;
 }
 </script>
 
@@ -137,30 +123,6 @@ function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: n
                 <Gauge class="h-3 w-3 text-stone-400" />
                 {{ formatTokenSpeed(tokenGenerationSpeed) }}
               </span>
-            </Tooltip>
-          </span>
-        </div>
-
-        <!-- Context usage -->
-        <div v-if="showContextUsage" class="flex items-center justify-between text-[11px] leading-5 text-stone-500">
-          <span class="inline-flex items-center gap-1">
-            <Tooltip text="上下文窗口用量">
-              <Layout class="h-3 w-3 text-stone-400" />
-            </Tooltip>
-            <span class="text-stone-400">上下文</span>
-          </span>
-          <span class="inline-flex items-center gap-2">
-            <span
-              v-if="contextDisplayTokens && contextWindowTokens"
-              class="inline-block h-1.5 w-16 overflow-hidden rounded-full bg-stone-200"
-            >
-              <span
-                class="block h-full rounded-full bg-stone-400 transition-all"
-                :style="{ width: Math.min(100, (contextDisplayTokens / contextWindowTokens) * 100) + '%' }"
-              />
-            </span>
-            <Tooltip :text="`上下文 · ${formatContextUsage(contextDisplayTokens, contextWindowTokens) || '未知'}`">
-              <span>{{ formatContextUsage(contextDisplayTokens, contextWindowTokens) || "未知" }}</span>
             </Tooltip>
           </span>
         </div>

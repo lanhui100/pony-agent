@@ -7,6 +7,7 @@ import type { ToolAuthorizationMode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { pickFiles } from "@/lib/runtime/file-attachments";
+import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
 import Button from "@/components/ui/Button.vue";
 import Switch from "@/components/ui/Switch.vue";
 import {
@@ -68,6 +69,35 @@ const floatingMenuStyle = ref<Record<string, string>>({
 });
 const modelSubmenuDirection = ref<'left' | 'right'>('right');
 const reasoningSubmenuDirection = ref<'left' | 'right'>('right');
+const modelSubmenuRef = ref<HTMLElement | null>(null);
+const reasoningSubmenuRef = ref<HTMLElement | null>(null);
+
+// 上下文用量接入 (需求 1)
+const { contextDisplayTokens, currentContextWindowTokens } = useTraceProjection({ liveTurnEnabled: ref(false) });
+
+function formatCompactTokenInteger(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) { return "0"; }
+  if (value >= 1_000_000) { return `${Math.round(value / 1_000_000)}M`; }
+  if (value >= 1_000) { return `${Math.round(value / 1_000)}K`; }
+  return String(value);
+}
+
+const contextUsagePercentage = computed(() => {
+  if (!contextDisplayTokens.value || !currentContextWindowTokens.value || currentContextWindowTokens.value <= 0) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, Math.round((contextDisplayTokens.value / currentContextWindowTokens.value) * 100)));
+});
+
+const contextUsageTooltip = computed(() => {
+  if (contextDisplayTokens.value == null) {
+    return "上下文用量：暂无数据";
+  }
+  if (!currentContextWindowTokens.value || currentContextWindowTokens.value <= 0) {
+    return `上下文用量：${formatCompactTokenInteger(contextDisplayTokens.value)}`;
+  }
+  return `上下文用量：${contextUsagePercentage.value}% · ${formatCompactTokenInteger(contextDisplayTokens.value)} / ${formatCompactTokenInteger(currentContextWindowTokens.value)}`;
+});
 
 const modelSearchQuery = ref("");
 const modelSearchDebounced = ref("");
@@ -395,48 +425,55 @@ function updateFloatingMenuPosition() {
   };
 }
 
-function adjustModelSubmenuPosition(button: HTMLElement) {
+async function adjustModelSubmenuPosition(button: HTMLElement) {
+  await nextTick();
   const buttonRect = button.getBoundingClientRect();
   const viewportHeight = window.innerHeight;
+  const submenu = modelSubmenuRef.value;
 
-  // 搜索框头部 + 内容区（最大高度封顶，超出滚动）
-  const searchBoxHeight = 34;
-  const captionHeight = 34;
-  const itemHeight = 30;
-  const padding = 14;
-  const maxContentHeight = 264;
-  const estimatedHeight = Math.min(
-    searchBoxHeight + captionHeight + (providerStore.providers.length * itemHeight) + padding,
-    searchBoxHeight + maxContentHeight + padding
-  );
+  // 实际测量子菜单高度，若尚未挂载则取最大高度 340 兜底
+  const submenuHeight = submenu ? submenu.getBoundingClientRect().height : 340;
+  const spaceBelow = viewportHeight - buttonRect.top - 8;
 
-  const spaceBelow = viewportHeight - buttonRect.bottom - 8;
-
-  if (estimatedHeight > spaceBelow) {
-    const overflow = estimatedHeight - spaceBelow;
-    modelSubmenuStyle.value = { top: `-${overflow}px` };
-  } else {
-    modelSubmenuStyle.value = { top: '0' };
+  let top = 0;
+  if (submenuHeight > spaceBelow) {
+    const overflow = submenuHeight - spaceBelow;
+    // 向上平移，但不得让子菜单顶部超出视口上缘（距顶部至少 8px）
+    const maxShiftUp = Math.max(0, buttonRect.top - 8);
+    top = -Math.min(overflow, maxShiftUp);
   }
+
+  // 视口小屏幕自适应最大高度约束，防止视口高度小于菜单高度时截断
+  const maxAllowedHeight = Math.max(160, viewportHeight - 16);
+  modelSubmenuStyle.value = {
+    top: `${top}px`,
+    maxHeight: `${maxAllowedHeight}px`,
+    display: 'flex',
+    flexDirection: 'column'
+  };
 }
 
-function adjustReasoningSubmenuPosition(button: HTMLElement) {
+async function adjustReasoningSubmenuPosition(button: HTMLElement) {
+  await nextTick();
   const buttonRect = button.getBoundingClientRect();
   const viewportHeight = window.innerHeight;
+  const submenu = reasoningSubmenuRef.value;
 
-  const captionHeight = 28;
-  const itemHeight = 30;
-  const padding = 12;
-  const estimatedHeight = captionHeight + reasoningOptions.length * itemHeight + padding;
+  const submenuHeight = submenu ? submenu.getBoundingClientRect().height : 180;
+  const spaceBelow = viewportHeight - buttonRect.top - 8;
 
-  const spaceBelow = viewportHeight - buttonRect.bottom - 8;
-
-  if (estimatedHeight > spaceBelow) {
-    const overflow = estimatedHeight - spaceBelow;
-    reasoningSubmenuStyle.value = { top: `-${overflow}px` };
-  } else {
-    reasoningSubmenuStyle.value = { top: '0' };
+  let top = 0;
+  if (submenuHeight > spaceBelow) {
+    const overflow = submenuHeight - spaceBelow;
+    const maxShiftUp = Math.max(0, buttonRect.top - 8);
+    top = -Math.min(overflow, maxShiftUp);
   }
+
+  const maxAllowedHeight = Math.max(160, viewportHeight - 16);
+  reasoningSubmenuStyle.value = {
+    top: `${top}px`,
+    maxHeight: `${maxAllowedHeight}px`
+  };
 }
 
 function onModelEnter(event: MouseEvent) {
@@ -626,6 +663,48 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="flex min-w-0 flex-wrap items-center gap-2">
+          <!-- 上下文窗口圆形进度条 (模型左侧) -->
+          <TooltipRoot :delay-duration="200">
+            <TooltipTrigger as-child>
+              <span tabindex="0" class="inline-flex">
+                <div
+                  class="flex items-center justify-center p-0.5 text-stone-400 hover:text-stone-600 transition-colors cursor-help"
+                  data-testid="workspace-context-usage-circle"
+                  aria-label="上下文用量"
+                >
+                  <svg class="h-3.5 w-3.5 -rotate-90 transform" viewBox="0 0 20 20">
+                    <circle
+                      cx="10"
+                      cy="10"
+                      r="7.5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.4"
+                      class="opacity-20"
+                    />
+                    <circle
+                      cx="10"
+                      cy="10"
+                      r="7.5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.4"
+                      stroke-linecap="round"
+                      :stroke-dasharray="2 * Math.PI * 7.5"
+                      :stroke-dashoffset="(2 * Math.PI * 7.5) * (1 - contextUsagePercentage / 100)"
+                      class="transition-all duration-500 ease-out text-stone-500 hover:text-stone-700"
+                    />
+                  </svg>
+                </div>
+              </span>
+            </TooltipTrigger>
+            <TooltipPortal>
+              <TooltipContent side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs text-stone-700 shadow-sm">
+                {{ contextUsageTooltip }}
+              </TooltipContent>
+            </TooltipPortal>
+          </TooltipRoot>
+
           <div ref="menuRef" class="relative">
             <TooltipRoot :delay-duration="300">
               <TooltipTrigger as-child>
@@ -761,6 +840,7 @@ onBeforeUnmount(() => {
                   </button>
                   <div
                     v-if="modelMenuOpen"
+                    ref="modelSubmenuRef"
                     :class="[
                       'composer-menu-panel absolute z-50 min-w-[15rem]',
                       modelSubmenuDirection === 'right' ? 'left-full ml-1' : 'right-full mr-1'
@@ -820,6 +900,7 @@ onBeforeUnmount(() => {
                   </button>
                   <div
                     v-if="reasoningMenuOpen"
+                    ref="reasoningSubmenuRef"
                     :class="[
                       'composer-menu-panel absolute z-50 min-w-[10rem]',
                       reasoningSubmenuDirection === 'right' ? 'left-full ml-1' : 'right-full mr-1'
@@ -1036,6 +1117,8 @@ onBeforeUnmount(() => {
   overflow-x: hidden;
   scrollbar-width: none;
   -ms-overflow-style: none;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .composer-menu-scroll::-webkit-scrollbar {
