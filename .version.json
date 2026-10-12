@@ -2711,13 +2711,37 @@
       ],
       "timestamp": "2026-10-12T16:24:33+08:00",
       "commit": "27055f7"
+    },
+    {
+      "timestamp": "2026-10-12T18:02:00+08:00",
+      "bumps": [
+        {
+          "from": "0.1.133",
+          "segment": "patch",
+          "to": "0.1.134",
+          "component": "tauri"
+        }
+      ],
+      "commit": "28363cf"
+    },
+    {
+      "timestamp": "2026-10-12T18:10:02+08:00",
+      "commit": "121117c",
+      "bumps": [
+        {
+          "segment": "patch",
+          "from": "0.1.134",
+          "to": "0.1.135",
+          "component": "tauri"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-10-12T16:24:33+08:00",
+  "lastBump": "2026-10-12T18:10:01+08:00",
   "tauri": {
     "major": 0,
     "minor": 1,
-    "patch": 133
+    "patch": 135
   },
   "core": {
     "patch": 115,

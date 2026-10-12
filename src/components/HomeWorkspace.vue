@@ -19,7 +19,6 @@ import WorkspaceTurnItem, {
 } from "@/components/chat/WorkspaceTurnItem.vue";
 import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
 import QueuedMessagesBubble from "@/components/chat/QueuedMessagesBubble.vue";
-import AskPanel from "@/components/AskPanel.vue";
 import AgentRuntimeStatusBar from "@/components/chat/AgentRuntimeStatusBar.vue";
 import GoalBar from "@/components/GoalBar.vue";
 
@@ -1665,7 +1664,6 @@ watch(
             <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
           </div>
         </Transition>
-        <AskPanel />
         <div :style="{ height: COMPOSER_BUFFER_PX + 'px' }" aria-hidden="true"></div>
         <div ref="scrollAnchorRef" aria-hidden="true" class="pointer-events-none" style="height:0;width:0"></div>
       </div>

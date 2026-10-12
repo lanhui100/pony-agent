@@ -217,6 +217,7 @@ fn ask_answer(
     expected_version: Option<u64>,
     answer: Value,
 ) -> Result<Value, String> {
+<<<<<<< HEAD
     let ver = expected_version
         .or(version)
         .ok_or_else(|| "missing required key `expected_version` or `version`".to_string())?;

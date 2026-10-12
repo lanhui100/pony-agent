@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ArrowUp, Check, ChevronDown, Paperclip, Search, Square, Undo2, X } from "lucide-vue-next";
+import { ArrowUp, Check, ChevronDown, LoaderCircle, Paperclip, Search, Square, Undo2, X } from "lucide-vue-next";
 import type { ProviderModelConfig, ProviderReasoningEffort } from "@/types/provider";
 import type { ToolAuthorizationMode } from "@/types/runtime";
+import type { PendingAsk } from "@/types/ask-plan";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useAskStore } from "@/stores/ask";
 import { pickFiles } from "@/lib/runtime/file-attachments";
 import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
+import { recordFrontendInstant } from "@/lib/frontend-flight-recorder";
 import Button from "@/components/ui/Button.vue";
 import Switch from "@/components/ui/Switch.vue";
 import {
@@ -543,13 +546,276 @@ function handleClickOutside(event: MouseEvent) {
   }
 }
 
+// ── Ask 交互面板内聚逻辑 ──────────────────────────────────────────
+const askStore = useAskStore();
+
+const activeAsk = computed<PendingAsk | null>(() => {
+  const currentSessionId = runtimeStore.sessionId;
+  if (!askStore.pendingAsks || askStore.pendingAsks.length === 0) {
+    return null;
+  }
+  if (!currentSessionId) {
+    return askStore.pendingAsks[0] ?? null;
+  }
+  return (
+    askStore.pendingAsks.find(
+      (ask) => !ask.sessionId || ask.sessionId === currentSessionId
+    ) ?? askStore.pendingAsks[0] ?? null
+  );
+});
+
+export type ResolvedAskOption = {
+  raw: unknown;
+  label: string;
+  description: string;
+};
+
+function fallbackOptionDescription(label: string, index: number): string {
+  const normalized = label.trim().toLowerCase();
+  if (["继续", "确认", "确定", "是", "yes", "ok", "confirm", "continue"].includes(normalized)) {
+    return "确认并继续推进当前任务";
+  }
+  if (["取消", "否", "终止", "放弃", "no", "cancel", "abort", "stop"].includes(normalized)) {
+    return "中断或放弃当前操作，返回上一状态";
+  }
+  if (["重试", "retry"].includes(normalized)) {
+    return "重新尝试执行当前失败的步骤";
+  }
+  if (["跳过", "skip"].includes(normalized)) {
+    return "略过当前步骤并进入下一流程";
+  }
+  if (index === 0) {
+    return "系统推荐使用的优选方案";
+  }
+  return "备选执行方案";
+}
+
+function resolveAskOptionItem(item: unknown, index: number): ResolvedAskOption {
+  if (typeof item === "object" && item !== null) {
+    const obj = item as Record<string, unknown>;
+    const label =
+      (typeof obj.label === "string" && obj.label.trim()) ||
+      (typeof obj.text === "string" && obj.text.trim()) ||
+      (typeof obj.title === "string" && obj.title.trim()) ||
+      (typeof obj.value === "string" && obj.value.trim()) ||
+      String(index + 1);
+    const description =
+      (typeof obj.description === "string" && obj.description.trim()) ||
+      (typeof obj.desc === "string" && obj.desc.trim()) ||
+      (typeof obj.hint === "string" && obj.hint.trim()) ||
+      (typeof obj.detail === "string" && obj.detail.trim()) ||
+      "";
+    return {
+      raw: item,
+      label,
+      description: description || fallbackOptionDescription(label, index)
+    };
+  }
+
+  const rawStr = typeof item === "string" ? item.trim() : String(item ?? "").trim();
+  return {
+    raw: item,
+    label: rawStr,
+    description: fallbackOptionDescription(rawStr, index)
+  };
+}
+
+const askOptions = computed<ResolvedAskOption[]>(() => {
+  const ask = activeAsk.value;
+  if (!ask || !Array.isArray(ask.options)) {
+    return [];
+  }
+  return ask.options
+    .map((option, index) => resolveAskOptionItem(option, index))
+    .filter((value): value is ResolvedAskOption => value != null && Boolean(value.label));
+});
+
+const selectedOptionIndex = ref<number | null>(null);
+const customOptionInput = ref("");
+const askTextareaInput = ref("");
+
+watch(
+  () => activeAsk.value?.requestId ?? null,
+  () => {
+    selectedOptionIndex.value = null;
+    customOptionInput.value = "";
+    askTextareaInput.value = "";
+  }
+);
+
+const askIsBusy = computed(() => {
+  const ask = activeAsk.value;
+  if (!ask) return false;
+  return (
+    askStore.answeringRequestId === ask.requestId ||
+    askStore.cancellingRequestId === ask.requestId
+  );
+});
+
+const askSubmitDisabled = computed(() => {
+  if (askIsBusy.value) return true;
+  if (!activeAsk.value) return true;
+  if (askOptions.value.length > 0) {
+    if (
+      selectedOptionIndex.value != null &&
+      selectedOptionIndex.value >= 0 &&
+      selectedOptionIndex.value < askOptions.value.length
+    ) {
+      return false;
+    }
+    if (
+      selectedOptionIndex.value === askOptions.value.length ||
+      customOptionInput.value.trim().length > 0
+    ) {
+      return customOptionInput.value.trim().length === 0;
+    }
+    return true;
+  }
+  return askTextareaInput.value.trim().length === 0;
+});
+
+function selectOption(index: number) {
+  selectedOptionIndex.value = index;
+}
+
+async function handleOptionEnter(index: number) {
+  selectedOptionIndex.value = index;
+  await submitAskAnswer();
+}
+
+function recordAskErrorToTrace(ask: PendingAsk | null, errorMessage: string) {
+  if (!errorMessage || !errorMessage.trim()) return;
+  const msg = errorMessage.trim();
+
+  // 1. 记录到前端 Flight Recorder (环形缓冲区诊断 trace)
+  recordFrontendInstant("ask", "ask_panel_error", {
+    requestId: ask?.requestId ?? null,
+    turnId: ask?.turnId ?? null,
+    callId: ask?.callId ?? null,
+    prompt: ask?.prompt ?? null,
+    error: msg
+  });
+
+  // 2. 记录到运行时 Turn Trace 历史与 TraceTimeline (业务轨迹面板)
+  const targetTurnId =
+    ask?.turnId ||
+    runtimeStore.activeTurnId ||
+    (runtimeStore.turnTraceHistory[runtimeStore.turnTraceHistory.length - 1]?.turnId ?? null);
+
+  if (targetTurnId) {
+    const existingTimeline = runtimeStore.resolveTurnTraceTimeline(targetTurnId);
+    const updatedTimeline = existingTimeline ? [...existingTimeline] : [];
+
+    const targetCallId = ask?.callId;
+    let entryFound = false;
+    if (targetCallId) {
+      for (const entry of updatedTimeline) {
+        if (
+          entry.kind === "call_tool" &&
+          (entry.id === targetCallId ||
+            entry.toolActivities?.some(
+              (act) => act.id === targetCallId || act.name === "ask_user" || act.name === "ask"
+            ))
+        ) {
+          entry.state = "error";
+          entry.error = msg;
+          entryFound = true;
+          break;
+        }
+      }
+    }
+
+    if (!entryFound) {
+      const nextSequence = updatedTimeline.length + 1;
+      updatedTimeline.push({
+        id: `ask-error-${Date.now()}`,
+        kind: "call_tool",
+        label: "用户提问交互",
+        state: "error",
+        sequence: nextSequence,
+        error: msg
+      });
+    }
+
+    runtimeStore.commitTurnTraceTimeline(targetTurnId, updatedTimeline, {
+      error: msg
+    });
+  }
+}
+
+watch(
+  () => askStore.error,
+  (newError) => {
+    if (newError && newError.trim() && activeAsk.value) {
+      recordAskErrorToTrace(activeAsk.value, newError.trim());
+    }
+  }
+);
+
+async function submitAskAnswer() {
+  const ask = activeAsk.value;
+  if (!ask || askIsBusy.value) return;
+
+  let answerValue: string | null = null;
+  if (askOptions.value.length > 0) {
+    if (
+      selectedOptionIndex.value != null &&
+      selectedOptionIndex.value >= 0 &&
+      selectedOptionIndex.value < askOptions.value.length
+    ) {
+      const opt = askOptions.value[selectedOptionIndex.value];
+      answerValue = typeof opt.raw === "string" ? opt.raw : opt.label;
+    } else if (
+      selectedOptionIndex.value === askOptions.value.length ||
+      customOptionInput.value.trim().length > 0
+    ) {
+      answerValue = customOptionInput.value.trim() || null;
+    }
+  } else {
+    answerValue = askTextareaInput.value.trim() || null;
+  }
+
+  if (answerValue === null && askOptions.value.length > 0) {
+    return;
+  }
+
+  try {
+    const result = await askStore.answer(ask, answerValue);
+    if (!result && askStore.error) {
+      recordAskErrorToTrace(ask, askStore.error);
+    }
+  } catch (error) {
+    const message = `应答异常：${String(error)}`;
+    recordAskErrorToTrace(ask, message);
+  }
+}
+
+async function cancelActiveAsk() {
+  const ask = activeAsk.value;
+  if (!ask || askIsBusy.value) return;
+  try {
+    const result = await askStore.cancel(ask);
+    if (!result && askStore.error) {
+      recordAskErrorToTrace(ask, askStore.error);
+    }
+  } catch (error) {
+    const message = `取消异常：${String(error)}`;
+    recordAskErrorToTrace(ask, message);
+  }
+}
+
 onMounted(() => {
   window.addEventListener("click", handleClickOutside);
   window.addEventListener("resize", updateFloatingMenuPosition);
   window.addEventListener("scroll", updateFloatingMenuPosition, true);
+  void askStore.refresh();
+  askStore.startPolling();
+  void askStore.startWatchingEvents();
 });
 
 onBeforeUnmount(() => {
+  askStore.stopPolling();
+  askStore.stopWatchingEvents();
   if (modelSearchDebounceTimer) {
     clearTimeout(modelSearchDebounceTimer);
   }
@@ -567,10 +833,147 @@ onBeforeUnmount(() => {
       data-testid="workspace-composer-shell"
       style="pointer-events: auto;"
     >
-      <textarea
-        :value="draftMessage"
-        :disabled="Boolean(sessionOperation)"
-        data-testid="workspace-composer-input"
+      <!-- ASK 模式：直接在对话框的面板中实现，隐藏输入框和下方 action 栏 -->
+      <div v-if="activeAsk" data-testid="composer-ask-container" class="flex flex-col p-2.5 sm:p-3">
+        <!-- 问题 -->
+        <div data-testid="composer-ask-prompt" class="text-[13px] font-semibold leading-[1.6] text-stone-800">
+          {{ activeAsk.prompt || "请回答以下问题：" }}
+        </div>
+
+        <!-- 选项 / 问题回复框 -->
+        <!-- 有选项的按照 1、2、3 的序列垂直排列，最后一个是用户可以输入的选项 -->
+        <div
+          v-if="askOptions.length > 0"
+          data-testid="composer-ask-options"
+          class="mt-2.5 flex flex-col space-y-1.5"
+        >
+          <button
+            v-for="(option, index) in askOptions"
+            :key="index"
+            type="button"
+            :data-testid="`composer-ask-option-item-${index}`"
+            :class="[
+              'flex items-start text-left px-3 py-2 rounded-lg text-[13px] transition-colors cursor-pointer',
+              selectedOptionIndex === index
+                ? 'bg-stone-200/90 text-stone-900 font-medium'
+                : 'bg-stone-100/60 text-stone-700 hover:bg-stone-200/60'
+            ]"
+            :disabled="askIsBusy"
+            @click="selectOption(index)"
+            @keydown.enter.prevent="handleOptionEnter(index)"
+          >
+            <span class="mr-2.5 mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[11px] font-mono font-medium text-stone-500">
+              {{ index + 1 }}
+            </span>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="leading-snug text-stone-800">{{ option.label }}</span>
+                <span
+                  v-if="index === 0"
+                  data-testid="composer-ask-recommended-badge"
+                  class="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-800 select-none"
+                >
+                  推荐
+                </span>
+              </div>
+              <div
+                v-if="option.description"
+                data-testid="composer-ask-option-desc"
+                class="mt-0.5 text-[11px] leading-normal text-stone-400 select-none"
+              >
+                {{ option.description }}
+              </div>
+            </div>
+          </button>
+
+          <!-- 最后一项：用户可以输入的选项 -->
+          <div
+            :class="[
+              'flex items-start px-3 py-2 rounded-lg text-[13px] transition-colors cursor-text',
+              selectedOptionIndex === askOptions.length
+                ? 'bg-stone-200/90 text-stone-900 font-medium'
+                : 'bg-stone-100/60 text-stone-700 hover:bg-stone-200/60'
+            ]"
+            @click="selectedOptionIndex = askOptions.length"
+          >
+            <span class="mr-2.5 mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[11px] font-mono font-medium text-stone-500">
+              {{ askOptions.length + 1 }}
+            </span>
+            <div class="flex-1 min-w-0">
+              <input
+                v-model="customOptionInput"
+                data-testid="composer-ask-custom-input"
+                type="text"
+                placeholder="输入其他内容…"
+                :disabled="askIsBusy"
+                class="w-full bg-transparent text-[13px] leading-snug text-stone-800 placeholder:text-stone-400 outline-none"
+                @focus="selectedOptionIndex = askOptions.length"
+                @input="selectedOptionIndex = askOptions.length"
+                @keydown.enter.prevent="submitAskAnswer"
+              />
+              <div
+                data-testid="composer-ask-custom-desc"
+                class="mt-0.5 text-[11px] leading-normal text-stone-400 select-none"
+              >
+                手动输入补充说明或专属方案
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 用户直接回答没有选项的则是 textarea -->
+        <div v-else class="mt-2.5">
+          <textarea
+            v-model="askTextareaInput"
+            data-testid="composer-ask-textarea"
+            rows="3"
+            placeholder="输入您的回答，按 Enter 发送，Shift+Enter 换行…"
+            :disabled="askIsBusy"
+            class="w-full resize-none rounded-lg bg-stone-100/50 p-2.5 text-[13px] leading-[1.6] text-stone-800 placeholder:text-stone-400 outline-none transition"
+            @keydown.enter.exact.prevent="submitAskAnswer"
+          />
+        </div>
+
+        <!-- 底部栏：极简风格，取消与复用原对话框发送键 -->
+        <div class="mt-3 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="composer-ask-cancel"
+              class="text-[12px] text-stone-400 transition hover:text-stone-600 disabled:opacity-40"
+              :disabled="askIsBusy"
+              @click="cancelActiveAsk"
+            >
+              <LoaderCircle v-if="askStore.cancellingRequestId === activeAsk.requestId" class="mr-1 inline h-3 w-3 animate-spin" />
+              取消
+            </button>
+            <span v-if="askStore.error" class="text-[11px] text-rose-600">
+              {{ askStore.error }}
+            </span>
+          </div>
+
+          <!-- 复用极简的原对话框发送键 -->
+          <Button
+            class="h-8 w-8 rounded-full p-0"
+            size="sm"
+            :disabled="askSubmitDisabled"
+            title="确认发送回答 (Enter)"
+            data-testid="workspace-submit-action"
+            @click="submitAskAnswer"
+          >
+            <LoaderCircle v-if="askStore.answeringRequestId === activeAsk.requestId" class="h-3.5 w-3.5 animate-spin" />
+            <ArrowUp v-else class="h-3.5 w-3.5" />
+            <span class="sr-only">发送</span>
+          </Button>
+        </div>
+      </div>
+
+      <!-- 常规普通模式：原输入框与下方 action 栏 -->
+      <template v-else>
+        <textarea
+          :value="draftMessage"
+          :disabled="Boolean(sessionOperation)"
+          data-testid="workspace-composer-input"
         class="min-h-[82px] w-full resize-none bg-transparent px-0 py-0 text-[13px] leading-[1.55] text-stone-800 outline-none placeholder:text-[12px] placeholder:font-normal placeholder:tracking-[0.01em] placeholder:text-stone-400/70"
         placeholder="输入消息，按 Enter 发送，Shift+Enter 换行。"
         @input="runtimeStore.setDraftMessage(($event.target as HTMLTextAreaElement).value)"
@@ -1006,6 +1409,7 @@ onBeforeUnmount(() => {
           </Button>
         </div>
       </div>
+      </template>
     </div>
   </div>
 </template>
