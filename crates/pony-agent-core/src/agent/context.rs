@@ -272,10 +272,16 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         let native_messages = flatten_layered_native_messages(&layered_context);
         let observation = build_request_observation_from_layered_context(&layered_context);
 
+        let images = if provider.supports_image_input() {
+            retrieved.turn_context.images.clone()
+        } else {
+            Vec::new()
+        };
+
         ProviderRequest {
             model: provider.model().to_string(),
             input: messages,
-            images: retrieved.turn_context.images.clone(),
+            images,
             native_messages,
             observation,
             temperature: provider.temperature(),
@@ -309,13 +315,55 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
     }
 }
 
+fn format_text_only_image_placeholder(image: &TurnInputImage, index: usize) -> String {
+    let name = image
+        .name
+        .as_deref()
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| format!("image_{}", index + 1));
+    format!(
+        "[图片附件 `{}` ({}): 当前模型未启用直接视觉通道。若需检查文件请使用 view_image 等工作区工具]",
+        name, image.mime_type
+    )
+}
+
+fn format_user_message_with_image_placeholders(
+    user_message: &str,
+    images: &[TurnInputImage],
+) -> String {
+    if images.is_empty() {
+        return user_message.to_string();
+    }
+    let placeholders = images
+        .iter()
+        .enumerate()
+        .map(|(i, img)| format_text_only_image_placeholder(img, i))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if user_message.trim().is_empty() {
+        placeholders
+    } else {
+        format!("{}\n\n{}", user_message, placeholders)
+    }
+}
+
 fn build_layered_turn_context(
     graph_name: &str,
     provider: &ProviderManager,
     retrieved: &RetrievedContextState,
     planner_skills: &[SkillDescriptor],
 ) -> LayeredTurnContext {
-    let current_user_message = ProviderMessage::user(retrieved.turn_context.user_message.clone());
+    let effective_user_message_text =
+        if !provider.supports_image_input() && !retrieved.turn_context.images.is_empty() {
+            format_user_message_with_image_placeholders(
+                &retrieved.turn_context.user_message,
+                &retrieved.turn_context.images,
+            )
+        } else {
+            retrieved.turn_context.user_message.clone()
+        };
+    let current_user_message = ProviderMessage::user(effective_user_message_text.clone());
     let base_system_messages = vec![ProviderMessage::system(BASE_SYSTEM_PROMPT)];
     let domain_profile_prompt = infer_domain_profile_prompt(graph_name, &retrieved.turn_context);
     let domain_profile_messages = build_domain_profile_messages(provider, domain_profile_prompt);
@@ -426,7 +474,7 @@ fn build_layered_turn_context(
         ));
         reserved_native_messages.push(json!({
             "role": "user",
-            "content": retrieved.turn_context.user_message.clone()
+            "content": effective_user_message_text.clone()
         }));
         let (native_transcript, native_truncated_count) = {
             // 80% 阈值检查：低于 80% context window 时不截断
@@ -486,7 +534,9 @@ fn build_layered_turn_context(
         );
         native_volatile_input_messages = vec![json!({
             "role": "user",
-            "content": if retrieved.turn_context.images.is_empty() {
+            "content": if !provider.supports_image_input() {
+                Value::String(effective_user_message_text.clone())
+            } else if retrieved.turn_context.images.is_empty() {
                 Value::String(retrieved.turn_context.user_message.clone())
             } else {
                 Value::Array(openai_user_content_blocks(
@@ -2175,6 +2225,59 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("Do not pretend to inspect screenshots"));
+    }
+
+    #[test]
+    fn build_request_projects_images_to_placeholders_for_non_vision_model() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "deepseek-reasoner",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+                ..Default::default()
+            },
+        );
+        let session = session_snapshot(Vec::new(), Vec::new(), None);
+        let retrieved = builder.retrieve_context_state(
+            "请分析这个错误截图",
+            &[TurnInputImage {
+                data_url: "data:image/png;base64,ZmFrZV9pbWFnZV9kYXRh".to_string(),
+                mime_type: "image/png".to_string(),
+                name: Some("error_log.png".to_string()),
+            }],
+            None,
+            &session,
+            None,
+            None,
+        );
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
+
+        // 1. request.images 必须为空，不向网络层传递原始多模态二进制
+        assert!(request.images.is_empty(), "request.images must be stripped for non-vision model");
+
+        // 2. request.input 中的 user 消息必须包含结构化占位句柄，且不含原始 base64
+        let user_input = request
+            .input
+            .iter()
+            .find(|m| matches!(m.role, ProviderRole::User))
+            .expect("should have user message");
+        assert!(user_input.content.contains("error_log.png"));
+        assert!(user_input.content.contains("当前模型未启用直接视觉通道"));
+        assert!(!user_input.content.contains("ZmFrZV9pbWFnZV9kYXRh"));
+
+        // 3. request.native_messages 中的 user 消息也必须是文本形态占位，不能是包含 image_url 的 Array
+        if let Some(user_native) = request.native_messages.iter().find(|m| {
+            m.get("role").and_then(Value::as_str) == Some("user")
+        }) {
+            assert!(user_native.get("content").and_then(Value::as_str).is_some());
+            assert!(user_native.to_string().contains("error_log.png"));
+            assert!(!user_native.to_string().contains("image_url"));
+        }
     }
 
     #[test]

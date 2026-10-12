@@ -340,6 +340,32 @@ describe("runtime store addPendingAttachments", () => {
     expect(att.relativePath).toBe(".tmp/imports/notes.md");
   });
 
+  it("imports images to workspace imports pool in tauri mode", async () => {
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockResolvedValue({
+      path: "C:\\ws\\.tmp\\imports\\photo.png",
+      relativePath: ".tmp/imports/photo.png"
+    });
+    const store = useRuntimeStore();
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const file = new File([png], "photo.png", { type: "image/png" });
+    const { added, errors } = await store.addPendingAttachments([file]);
+    expect(added).toBe(1);
+    expect(errors).toEqual([]);
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith(
+      "import_attachment",
+      expect.objectContaining({
+        name: "photo.png",
+        mimeType: "image/png"
+      })
+    );
+    const att = store.pendingAttachments[0];
+    expect(att.route).toBe("image");
+    expect(att.path).toBe("C:\\ws\\.tmp\\imports\\photo.png");
+    expect(att.relativePath).toBe(".tmp/imports/photo.png");
+    expect(att.dataUrl?.startsWith("data:image/png;base64,")).toBe(true);
+  });
+
   it("adopts the host relativePath only when present (fallback → null)", async () => {
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     // 宿主 fallback（workspace 不可写）→ 返回 path 但 relativePath=null

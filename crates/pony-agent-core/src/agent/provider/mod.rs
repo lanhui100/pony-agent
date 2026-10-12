@@ -430,11 +430,28 @@ impl ProviderManager {
         self.config.protocol.is_openai_family() && self.config.capabilities.supports_reasoning
     }
 
+    fn sanitize_request<'a>(&self, request: &'a ProviderRequest) -> std::borrow::Cow<'a, ProviderRequest> {
+        if !self.supports_image_input() && !request.images.is_empty() {
+            provider_log(format!(
+                "warn: non-vision model {} received {} images; stripping for safety",
+                self.model(),
+                request.images.len()
+            ));
+            let mut req = request.clone();
+            req.images.clear();
+            std::borrow::Cow::Owned(req)
+        } else {
+            std::borrow::Cow::Borrowed(request)
+        }
+    }
+
     pub fn decide_with_tools(
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
     ) -> Result<ProviderDecision, String> {
+        let request_cow = self.sanitize_request(request);
+        let request = request_cow.as_ref();
         provider_log(format!(
             "decision:start requested={} provider={} protocol={} model={} tools={} api_key_present={} ",
             self.config.requested_name,
@@ -495,6 +512,8 @@ impl ProviderManager {
     where
         F: FnMut(ProviderStreamChunk),
     {
+        let request_cow = self.sanitize_request(request);
+        let request = request_cow.as_ref();
         provider_log(format!(
             "decision:start mode=stream requested={} provider={} protocol={} model={} tools={} api_key_present={} ",
             self.config.requested_name,
@@ -568,6 +587,8 @@ impl ProviderManager {
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String> {
+        let request_cow = self.sanitize_request(request);
+        let request = request_cow.as_ref();
         provider_log(format!(
             "followup:start mode=sync requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={} ",
             self.config.requested_name,
@@ -661,6 +682,8 @@ impl ProviderManager {
     where
         F: FnMut(ProviderStreamChunk),
     {
+        let request_cow = self.sanitize_request(request);
+        let request = request_cow.as_ref();
         if !self.config.capabilities.supports_streaming {
             let response = self.continue_with_tool_result(
                 request,
@@ -6526,5 +6549,56 @@ mod tests {
             deltas,
             vec![ProviderStreamChunk::Text("你好世界".to_string())]
         );
+    }
+
+    #[test]
+    fn sanitize_request_strips_images_for_non_vision_model() {
+        let manager = ProviderManager::new(ResolvedProviderSelection {
+            requested_name: "test-deepseek".to_string(),
+            provider_name: "deepseek".to_string(),
+            protocol: ProviderProtocol::OpenAiCompletions,
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: "deepseek-chat".to_string(),
+            temperature: 0.0,
+            max_output_tokens: 4096,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                supports_image_input: false,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::None,
+        });
+
+        let request = ProviderRequest {
+            model: "deepseek-chat".to_string(),
+            input: vec![ProviderMessage::user("请看图".to_string())],
+            images: vec![TurnInputImage {
+                data_url: "data:image/png;base64,abc".to_string(),
+                mime_type: "image/png".to_string(),
+                name: Some("test.png".to_string()),
+            }],
+            native_messages: Vec::new(),
+            observation: Default::default(),
+            temperature: 0.0,
+            max_output_tokens: 4096,
+        };
+
+        let sanitized = manager.sanitize_request(&request);
+        assert!(sanitized.images.is_empty(), "images must be stripped by sanitize_request");
+
+        // 如果模型支持图片，则不剥离
+        let vision_manager = ProviderManager::new(ResolvedProviderSelection {
+            capabilities: ProviderModelCapabilities {
+                supports_image_input: true,
+                ..Default::default()
+            },
+            ..manager.config.clone()
+        });
+        let vision_sanitized = vision_manager.sanitize_request(&request);
+        assert_eq!(vision_sanitized.images.len(), 1, "images must be preserved for vision model");
     }
 }

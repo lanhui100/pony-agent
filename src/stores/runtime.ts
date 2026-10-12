@@ -3059,6 +3059,15 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             // I-2：dataUrl mime 必须与真实内容一致（由嗅探结果派生），防"PNG 内容改名 .jpg"
             attachmentMime = mimeForSniffed(sniffed);
             dataUrl = bytesToDataUrl(bytes, attachmentMime);
+            if (bytes.length > 0) {
+              try {
+                const importResult = await importAttachment(file.name, bytes, attachmentMime, options);
+                path = importResult.path;
+                relativePath = importResult.relativePath ?? null;
+              } catch (importError) {
+                console.warn("[runtime] 图片受控落盘失败，保持内存多模态引用:", importError);
+              }
+            }
           } else {
             if (route === "text") {
               const decoded = new TextDecoder().decode(bytes);
@@ -4716,7 +4725,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         .map((attachment) => ({
           dataUrl: attachment.dataUrl as string,
           mimeType: attachment.mimeType,
-          name: attachment.name
+          name: attachment.relativePath ?? attachment.name
         }));
       const images = [...pendingImages, ...optionsImages];
       const message = this.draftMessage.trim();

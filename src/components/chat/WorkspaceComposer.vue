@@ -337,6 +337,10 @@ const primaryActionTitle = computed(() => {
   return composerAction.value.hint;
 });
 
+const modelSupportsVision = computed(() => {
+  return currentModel.value?.capabilities?.supportsImageInput ?? false;
+});
+
 const attachNotice = ref<string | null>(null);
 
 async function handleAttach() {
@@ -989,9 +993,16 @@ onBeforeUnmount(() => {
             ? 'border-red-200 bg-red-50 text-red-600'
             : 'border-stone-200/80 bg-stone-100/80 text-stone-700'"
           :data-testid="`workspace-attachment-chip-${index}`"
-          :title="attachment.errorDetail ?? attachment.path ?? ''"
+          :title="attachment.errorDetail ?? (attachment.route === 'image' && !modelSupportsVision ? '当前模型未启用视觉通道，图片将以工作区文件引用形式发送供工具检查' : attachment.path ?? '')"
         >
           <span class="truncate">{{ attachment.name }}</span>
+          <span
+            v-if="attachment.route === 'image' && !modelSupportsVision"
+            class="shrink-0 rounded bg-amber-100/80 px-1 py-0.2 text-[10px] text-amber-700"
+            data-testid="workspace-attachment-tag"
+          >
+            工作区引用
+          </span>
           <span class="shrink-0 text-stone-400">{{ formatAttachmentSize(attachment.sizeBytes) }}</span>
           <button
             class="shrink-0 text-stone-400 transition-colors hover:text-stone-600"

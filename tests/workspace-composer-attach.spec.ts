@@ -238,4 +238,23 @@ describe("WorkspaceComposer attachments", () => {
 
     wrapper.unmount();
   });
+
+  it("displays non-vision workspace reference tag on image chip when current model lacks vision", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const file = new File([png], "screenshot.png", { type: "image/png" });
+    tauriMocks.mockPickFiles.mockResolvedValue([file]);
+    // 默认选中的模型 supportsImageInput 为 false
+    const wrapper = mountComposer(createInternalModelNameRegistry());
+
+    await wrapper.find('[data-testid="workspace-attach-button"]').trigger("click");
+    await vi.waitFor(() => {
+      expect(wrapper.find('[data-testid="workspace-attachment-chip-0"]').exists()).toBe(true);
+    });
+
+    const tag = wrapper.find('[data-testid="workspace-attachment-tag"]');
+    expect(tag.exists()).toBe(true);
+    expect(tag.text()).toContain("工作区引用");
+
+    wrapper.unmount();
+  });
 });
