@@ -955,6 +955,14 @@ const shouldShowAgentRuntimeStatus = computed(() => {
   if (!agentRuntimeStatus.value) {
     return false;
   }
+  // 当处于工具草稿/生成中或等待授权阶段时，无论是否有历史消息均需强制展示
+  if (
+    agentRuntimeStatus.value.mode === "tool_drafting" ||
+    agentRuntimeStatus.value.mode === "waiting_approval"
+  ) {
+    return true;
+  }
+  // 当正文真实处于流式打字中时，界面已有清晰物理动态反馈，不重复显示底栏
   if (isAgentStreamingContent.value) {
     return false;
   }

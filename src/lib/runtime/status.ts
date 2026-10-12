@@ -4,6 +4,7 @@ export type AgentRuntimeMode =
   | "connecting"
   | "thinking"
   | "responding"
+  | "tool_drafting"
   | "executing_tool"
   | "waiting_approval";
 
@@ -12,6 +13,7 @@ export interface AgentRuntimeStatus {
   label: string;
   detail?: string;
   toolName?: string;
+  canonicalToolName?: string | null;
   startTime?: number | null;
 }
 
@@ -51,15 +53,41 @@ export function resolveAgentRuntimeStatus(
 
   // 2. 检查是否有正在执行的工具
   const runningTool = toolActivities.find((t) => t.status === "running");
-  if (runningTool || phase === "calling_tool") {
-    const name = runningTool?.canonicalToolName || runningTool?.name;
-    const displayName = runningTool?.displayNameZh || name;
+  if (runningTool) {
+    const name = runningTool.canonicalToolName || runningTool.name;
+    const displayName = runningTool.displayNameZh || name;
     const label = displayName ? `执行工具: ${displayName}...` : "正在执行工具...";
     return {
       mode: "executing_tool",
       label,
-      toolName: runningTool?.name,
-      detail: runningTool?.description,
+      toolName: runningTool.name,
+      canonicalToolName: runningTool.canonicalToolName ?? null,
+      detail: runningTool.description,
+      startTime: turnStartedAt,
+    };
+  }
+
+  // 3. 检查是否有计划中/生成中的工具调用（模型下发 tool_calls 参数中，或 planned 状态）
+  const plannedTool = toolActivities.find((t) => t.status === "planned");
+  if (plannedTool) {
+    const name = plannedTool.canonicalToolName || plannedTool.name;
+    const displayName = plannedTool.displayNameZh || name;
+    const label = displayName ? `准备调用工具: ${displayName}...` : "准备调用工具...";
+    return {
+      mode: "tool_drafting",
+      label,
+      toolName: plannedTool.name,
+      canonicalToolName: plannedTool.canonicalToolName ?? null,
+      detail: plannedTool.description,
+      startTime: turnStartedAt,
+    };
+  }
+
+  // 4. calling_tool 阶段兜底（无 toolActivities 时）
+  if (phase === "calling_tool") {
+    return {
+      mode: "executing_tool",
+      label: "正在执行工具...",
       startTime: turnStartedAt,
     };
   }

@@ -62,6 +62,32 @@ describe("Message Flow Bottom Status Integration", () => {
     expect(messageItems.length).toBe(2);
   });
 
+  it("renders status indicator for tool drafting mode with custom icon", () => {
+    const runtimeStatus: AgentRuntimeStatus = {
+      mode: "tool_drafting",
+      label: "准备调用工具: 执行命令...",
+      toolName: "bash",
+      canonicalToolName: "Run",
+      startTime: Date.now() - 1000,
+    };
+
+    const wrapper = mount(MessageFlowMock, {
+      props: {
+        messages: [{ id: "msg-1", content: "请帮我运行测试" }],
+        runtimeStatus,
+      },
+    });
+
+    const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
+    expect(statusSlot.exists()).toBe(true);
+    expect(statusSlot.find('[data-testid="agent-runtime-status-label"]').text()).toBe(
+      "准备调用工具: 执行命令..."
+    );
+    const icon = statusSlot.find('[data-testid="agent-runtime-status-icon"]');
+    expect(icon.exists()).toBe(true);
+    expect(icon.classes()).toContain("runtime-icon-wiggle");
+  });
+
   it("does not render status indicator when idle", () => {
     const messages = [{ id: "msg-1", content: "对话结束" }];
     const wrapper = mount(MessageFlowMock, {

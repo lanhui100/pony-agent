@@ -103,4 +103,62 @@ describe("Workspace Runtime Status Streaming Behavior", () => {
 
     wrapper.unmount();
   }, 15000);
+
+  it("shows runtime status bar when tool is drafting even if previous assistant message has pending status", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const runtimeStore = useRuntimeStore();
+
+    runtimeStore.sessionId = "sess-1";
+    runtimeStore.activeTurnId = "turn-1";
+    runtimeStore.isSubmitting = true;
+    runtimeStore.currentPhase = "calling_model";
+
+    runtimeStore.messages = [
+      {
+        id: "msg-user-1",
+        turnId: "turn-1",
+        role: "user",
+        content: "读一下文件"
+      },
+      {
+        id: "msg-assistant-1",
+        turnId: "turn-1",
+        role: "assistant",
+        content: "",
+        status: "pending"
+      }
+    ];
+    runtimeStore.toolActivities = [
+      {
+        id: "act-1",
+        turnId: "turn-1",
+        name: "read_file",
+        canonicalToolName: "Read",
+        displayNameZh: "读取文件",
+        status: "planned"
+      }
+    ];
+
+    const wrapper = mount(
+      {
+        components: { HomeWorkspace, TooltipProvider },
+        template: `
+          <TooltipProvider>
+            <HomeWorkspace />
+          </TooltipProvider>
+        `
+      },
+      {
+        global: { plugins: [pinia] },
+        attachTo: document.body
+      }
+    );
+
+    const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
+    expect(statusSlot.exists()).toBe(true);
+    expect(statusSlot.text()).toContain("准备调用工具");
+
+    wrapper.unmount();
+  }, 15000);
 });

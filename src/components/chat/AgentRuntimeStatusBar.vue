@@ -1,7 +1,25 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { formatElapsedSeconds, type AgentRuntimeStatus } from "@/lib/runtime/status";
-import { Loader2, Brain, Wrench, ShieldAlert, Sparkles } from "lucide-vue-next";
+import {
+  Brain,
+  ClipboardList,
+  Compass,
+  FileSearch,
+  FileText,
+  Globe,
+  List,
+  MessageSquareMore,
+  Pen,
+  PenLine,
+  Plug,
+  ScanSearch,
+  Search,
+  ShieldAlert,
+  Sparkles,
+  Terminal,
+  Wrench,
+} from "lucide-vue-next";
 
 interface Props {
   status: AgentRuntimeStatus;
@@ -31,26 +49,74 @@ const elapsedText = computed(() => {
   return formatElapsedSeconds(elapsed);
 });
 
+const toolIconMap: Record<string, any> = {
+  Run: Terminal,
+  Ask: MessageSquareMore,
+  Read: FileText,
+  Search: Search,
+  List: List,
+  Glob: FileSearch,
+  WebFetch: Globe,
+  WebSearch: ScanSearch,
+  MCPResource: Plug,
+  ToolSearch: Wrench,
+  Write: Pen,
+  Edit: PenLine,
+  Plan: ClipboardList,
+};
+
+function resolveToolIcon(canonicalToolName?: string | null, toolName?: string | null) {
+  if (canonicalToolName && toolIconMap[canonicalToolName]) {
+    return toolIconMap[canonicalToolName];
+  }
+  const normalized = (toolName || "").toLowerCase();
+  if (normalized.includes("bash") || normalized.includes("sh") || normalized.includes("command")) return Terminal;
+  if (normalized.includes("read") || normalized.includes("file")) return FileText;
+  if (normalized.includes("write") || normalized.includes("edit")) return PenLine;
+  if (normalized.includes("search") || normalized.includes("find")) return Search;
+  if (normalized.includes("web") || normalized.includes("fetch")) return Globe;
+  return Wrench;
+}
+
 const iconComponent = computed(() => {
   switch (props.status.mode) {
     case "thinking":
       return Brain;
+    case "tool_drafting":
     case "executing_tool":
-      return Wrench;
+      return resolveToolIcon(props.status.canonicalToolName, props.status.toolName);
     case "waiting_approval":
       return ShieldAlert;
     case "connecting":
-      return Loader2;
+      return Compass;
     case "responding":
     default:
       return Sparkles;
+  }
+});
+
+const iconAnimationClass = computed(() => {
+  switch (props.status.mode) {
+    case "connecting":
+      return "animate-spin text-stone-400";
+    case "thinking":
+      return "runtime-icon-pulse text-stone-400";
+    case "tool_drafting":
+      return "runtime-icon-wiggle text-stone-400";
+    case "executing_tool":
+      return "runtime-icon-pulse text-stone-400";
+    case "waiting_approval":
+      return "runtime-icon-alert text-amber-500 dark:text-amber-400";
+    case "responding":
+    default:
+      return "text-stone-400";
   }
 });
 </script>
 
 <template>
   <div
-    class="flex items-center gap-1.5 py-1 text-[12px] text-stone-400 w-fit select-none"
+    class="flex items-center gap-1.5 py-1 text-[12px] text-stone-400 w-fit select-none min-h-[24px]"
     data-testid="agent-runtime-status-bar"
   >
     <Transition name="status-transition" mode="out-in">
@@ -59,7 +125,7 @@ const iconComponent = computed(() => {
           :is="iconComponent"
           :class="[
             'h-3.5 w-3.5 shrink-0',
-            props.status.mode === 'connecting' ? 'animate-spin text-stone-400' : 'text-stone-400'
+            iconAnimationClass
           ]"
           data-testid="agent-runtime-status-icon"
         />
@@ -68,7 +134,7 @@ const iconComponent = computed(() => {
         </span>
         <span
           v-if="elapsedText"
-          class="text-[11px] text-stone-400 tabular-nums"
+          class="text-[11px] text-stone-400 tabular-nums ml-0.5"
           data-testid="agent-runtime-status-elapsed"
         >
           {{ elapsedText }}
@@ -113,6 +179,54 @@ const iconComponent = computed(() => {
   -webkit-text-fill-color: transparent;
 }
 
+/* 柔和呼吸脉冲动效 */
+.runtime-icon-pulse {
+  animation: icon-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes icon-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(0.94);
+  }
+}
+
+/* 工具生成微摆动动效 */
+.runtime-icon-wiggle {
+  animation: icon-wiggle 1.8s ease-in-out infinite;
+  transform-origin: center;
+}
+
+@keyframes icon-wiggle {
+  0%, 100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-10deg);
+  }
+  75% {
+    transform: rotate(10deg);
+  }
+}
+
+/* 审批提醒闪烁动效 */
+.runtime-icon-alert {
+  animation: icon-alert 1.6s ease-in-out infinite;
+}
+
+@keyframes icon-alert {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .runtime-status-shimmer {
     background: none;
@@ -120,11 +234,16 @@ const iconComponent = computed(() => {
     color: #78716c;
     animation: none;
   }
+  .runtime-icon-pulse,
+  .runtime-icon-wiggle,
+  .runtime-icon-alert {
+    animation: none;
+  }
 }
 
 .status-transition-enter-active,
 .status-transition-leave-active {
-  transition: opacity 240ms cubic-bezier(0.2, 0, 0.2, 1), transform 240ms cubic-bezier(0.2, 0, 0.2, 1);
+  transition: opacity 200ms cubic-bezier(0.2, 0, 0.2, 1), transform 200ms cubic-bezier(0.2, 0, 0.2, 1);
 }
 
 .status-transition-enter-from {

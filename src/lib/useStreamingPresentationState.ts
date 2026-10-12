@@ -2,7 +2,7 @@ import { shallowReactive, type ComputedRef, type Ref } from "vue";
 import type { ChatMessage } from "@/types/runtime";
 
 // ─── 逐字连续释放 ───────────────────────────────────────────
-// 每次 tick（60ms）释放 4 个字符，避免长回复在展示层严重滞后。
+// 每次 tick（60ms）释放基础字符，避免长回复在展示层严重滞后。
 const STREAM_RELEASE_CHARS_PER_TICK = 4;
 const STREAM_RELEASE_CHARS_STORAGE_KEY = "pony-agent.stream-render.release-chars";
 
@@ -126,8 +126,11 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
         if ((streamStallTickCountByMessageId[message.id] ?? 0) >= STREAM_STALL_RELEASE_TICKS) {
           currentLength = nextText.length;
         } else {
-          const releaseRate = readReleaseRate();
-          currentLength = Math.min(currentLength + releaseRate, nextText.length);
+          const baseReleaseRate = readReleaseRate();
+          // 如果积压字符过多（>120字符），动态加速释放，避免极端长回复严重滞后
+          const backlog = nextText.length - currentLength;
+          const adaptiveBonus = backlog > 120 ? Math.floor(backlog / 8) : 0;
+          currentLength = Math.min(currentLength + baseReleaseRate + adaptiveBonus, nextText.length);
         }
         streamVisibleLengthByMessageId[message.id] = currentLength;
       }

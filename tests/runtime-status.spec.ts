@@ -131,4 +131,27 @@ describe("resolveAgentRuntimeStatus", () => {
     expect(status1?.startTime).toBe(fixedStartTime);
     expect(status2?.startTime).toBe(fixedStartTime);
   });
+
+  it("identifies tool drafting phase when tool is planned or drafting", () => {
+    const plannedTool: ToolActivity = {
+      id: "tool-plan-1",
+      name: "read_file",
+      canonicalToolName: "Read",
+      displayNameZh: "读取文件",
+      status: "planned",
+      description: "读取 Cargo.toml",
+    };
+    const status = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "calling_model",
+      toolActivities: [plannedTool],
+      turnStartedAt: Date.now() - 1500,
+      streamingReasoning: false,
+      hasStreamingContent: false,
+    });
+    expect(status).not.toBeNull();
+    expect(status?.mode).toBe("tool_drafting");
+    expect(status?.label).toBe("准备调用工具: 读取文件...");
+    expect(status?.canonicalToolName).toBe("Read");
+  });
 });

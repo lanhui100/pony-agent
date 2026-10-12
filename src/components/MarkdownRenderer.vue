@@ -34,16 +34,10 @@ const renderPending = ref(false);
 let renderVersion = 0;
 let renderTimerId: number | null = null;
 let idleCallbackId: number | null = null;
-let lastRenderTime = 0;
 let lastRenderedContentLength = 0;
 let lastRenderedFullContent = "";
 let streamRenderScheduled = false;
 
-const STREAMING_RENDER_DEBOUNCE_MS = 90;
-const STREAMING_RENDER_INTERVAL_MS = 140;
-const STREAMING_FORCE_RENDER_CHARS = 48;
-const STREAMING_TIME_FALLBACK_MS = 900;
-const STREAMING_LENGTH_FALLBACK_CHARS = 320;
 const PLAINTEXT_RENDER_COMPLETE_MIN_INTERVAL_MS = 120;
 const PLAINTEXT_RENDER_COMPLETE_MIN_CHARS = 24;
 let lastPlainTextRenderCompleteAt = 0;
@@ -81,28 +75,12 @@ function shouldRenderNow(content: string): boolean {
     return true;
   }
 
-  if (props.forceMarkdownStreaming && content.length > lastRenderedContentLength) {
-    return true;
-  }
-
-  if (!lastRenderedContentLength && content.length >= STREAMING_FORCE_RENDER_CHARS) {
-    return true;
-  }
-
-  if (content.length - lastRenderedContentLength >= STREAMING_FORCE_RENDER_CHARS) {
+  // 流式模式下只要有新内容到达即可参与刷新，让增量块和尾部平滑过渡
+  if (content.length > lastRenderedContentLength) {
     return true;
   }
 
   if (endsWithNaturalBoundary(content)) {
-    return true;
-  }
-
-  const elapsed = Date.now() - lastRenderTime;
-  if (elapsed >= STREAMING_RENDER_INTERVAL_MS && content.length > lastRenderedContentLength) {
-    return true;
-  }
-
-  if (elapsed >= STREAMING_TIME_FALLBACK_MS && content.length >= STREAMING_LENGTH_FALLBACK_CHARS) {
     return true;
   }
 
@@ -130,7 +108,6 @@ async function executeRender(version: number) {
     lastRenderedFullContent = props.content;
     renderPending.value = false;
     streamRenderScheduled = false;
-    lastRenderTime = Date.now();
     lastRenderedContentLength = props.content.length;
     unrenderedSuffix.value = "";
     emit("render-complete", {
@@ -144,7 +121,6 @@ async function executeRender(version: number) {
     lastRenderedFullContent = props.content;
     renderPending.value = false;
     streamRenderScheduled = false;
-    lastRenderTime = Date.now();
     lastRenderedContentLength = props.content.length;
     unrenderedSuffix.value = props.content;
   }
@@ -160,22 +136,11 @@ function scheduleStreamingRender() {
   streamRenderScheduled = true;
   renderPending.value = true;
 
+  // 流式增量更新采用紧凑微节流，优先通过微任务执行；不再套用长达 1800ms 的 rIC，避免在频繁推流时卡死
   renderTimerId = window.setTimeout(() => {
     renderTimerId = null;
-    const requestIdleCallback = (window as Window & {
-      requestIdleCallback?: (handler: IdleRequestCallback, options?: IdleRequestOptions) => number;
-    }).requestIdleCallback;
-
-    if (typeof requestIdleCallback === "function") {
-      idleCallbackId = requestIdleCallback(() => {
-        idleCallbackId = null;
-        executeRender(version);
-      }, { timeout: 1800 });
-      return;
-    }
-
-    window.setTimeout(() => executeRender(version), 0);
-  }, STREAMING_RENDER_DEBOUNCE_MS);
+    executeRender(version);
+  }, 16);
 }
 
 function scheduleNonStreamingRender(immediate = false) {
@@ -196,19 +161,7 @@ function scheduleNonStreamingRender(immediate = false) {
 
   renderTimerId = window.setTimeout(() => {
     renderTimerId = null;
-    const requestIdleCallback = (window as Window & {
-      requestIdleCallback?: (handler: IdleRequestCallback, options?: IdleRequestOptions) => number;
-    }).requestIdleCallback;
-
-    if (typeof requestIdleCallback === "function") {
-      idleCallbackId = requestIdleCallback(() => {
-        idleCallbackId = null;
-        executeRender(version);
-      }, { timeout: 1800 });
-      return;
-    }
-
-    window.setTimeout(() => executeRender(version), 0);
+    executeRender(version);
   }, 16);
 }
 
