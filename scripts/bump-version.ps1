@@ -303,7 +303,8 @@ if ($bumpTargets -contains "tauri") {
     if ($tauriConfContent -match '(?m)^(\s*"version"\s*:\s*)"\d+\.\d+\.\d+"') {
       $newTauriConf = $tauriConfContent -replace '(?m)^(\s*"version"\s*:\s*)"\d+\.\d+\.\d+"', "`${1}`"$tauriVerStr`""
       if ($newTauriConf -ne $tauriConfContent) {
-        Set-Content -LiteralPath $TauriConf -Value $newTauriConf
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($TauriConf, ($newTauriConf.TrimEnd() + "`n"), $utf8NoBom)
         $changedFiles += $TauriConf
         Write-Host "[bump-version] Synced src-tauri/tauri.conf.json → $tauriVerStr" -ForegroundColor DarkGray
       }

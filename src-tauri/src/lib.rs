@@ -1131,8 +1131,9 @@ pub fn run() {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
-                #[cfg(debug_assertions)]
-                window.open_devtools();
+                // 如需开发时打开 DevTools 调试面板，可解除下行注释或按 F12
+                // #[cfg(debug_assertions)]
+                // window.open_devtools();
             }
             if let Err(e) = platform::setup_tray(app) {
                 eprintln!("[tray-warning] failed to setup tray icon: {e}");
