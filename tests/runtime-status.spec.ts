@@ -154,4 +154,21 @@ describe("resolveAgentRuntimeStatus", () => {
     expect(status?.label).toBe("准备调用工具: 读取文件...");
     expect(status?.canonicalToolName).toBe("Read");
   });
+
+  it("identifies retrying phase when retryAttempt is greater than 0", () => {
+    const status = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "calling_model",
+      toolActivities: [],
+      turnStartedAt: Date.now() - 3000,
+      streamingReasoning: false,
+      retryAttempt: 2,
+      retryMax: 3,
+    });
+    expect(status).not.toBeNull();
+    expect(status?.mode).toBe("retrying");
+    expect(status?.label).toBe("正在重试（2/3）...");
+    expect(status?.retryAttempt).toBe(2);
+    expect(status?.retryMax).toBe(3);
+  });
 });

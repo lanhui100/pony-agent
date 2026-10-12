@@ -6,7 +6,8 @@ export type AgentRuntimeMode =
   | "responding"
   | "tool_drafting"
   | "executing_tool"
-  | "waiting_approval";
+  | "waiting_approval"
+  | "retrying";
 
 export interface AgentRuntimeStatus {
   mode: AgentRuntimeMode;
@@ -15,6 +16,8 @@ export interface AgentRuntimeStatus {
   toolName?: string;
   canonicalToolName?: string | null;
   startTime?: number | null;
+  retryAttempt?: number;
+  retryMax?: number;
 }
 
 export interface ResolveRuntimeStatusOptions {
@@ -24,6 +27,8 @@ export interface ResolveRuntimeStatusOptions {
   turnStartedAt?: number | null;
   streamingReasoning?: boolean;
   hasStreamingContent?: boolean;
+  retryAttempt?: number;
+  retryMax?: number;
 }
 
 export function resolveAgentRuntimeStatus(
@@ -35,11 +40,25 @@ export function resolveAgentRuntimeStatus(
     toolActivities = [],
     turnStartedAt,
     streamingReasoning,
-    hasStreamingContent
+    hasStreamingContent,
+    retryAttempt,
+    retryMax,
   } = options;
 
   if (!isSubmitting) {
     return null;
+  }
+
+  // 0. 重试状态投射
+  if (typeof retryAttempt === "number" && retryAttempt > 0) {
+    const max = retryMax || 3;
+    return {
+      mode: "retrying",
+      label: `正在重试（${retryAttempt}/${max}）...`,
+      startTime: turnStartedAt,
+      retryAttempt,
+      retryMax: max,
+    };
   }
 
   // 1. 优先检查等待用户授权

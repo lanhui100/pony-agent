@@ -13,6 +13,7 @@ import {
   Pen,
   PenLine,
   Plug,
+  RefreshCw,
   ScanSearch,
   Search,
   ShieldAlert,
@@ -80,6 +81,8 @@ function resolveToolIcon(canonicalToolName?: string | null, toolName?: string | 
 
 const iconComponent = computed(() => {
   switch (props.status.mode) {
+    case "retrying":
+      return RefreshCw;
     case "thinking":
       return Brain;
     case "tool_drafting":
@@ -97,6 +100,8 @@ const iconComponent = computed(() => {
 
 const iconAnimationClass = computed(() => {
   switch (props.status.mode) {
+    case "retrying":
+      return "animate-spin text-amber-500 dark:text-amber-400";
     case "connecting":
       return "animate-spin text-stone-400";
     case "thinking":
