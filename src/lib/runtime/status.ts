@@ -156,9 +156,9 @@ export function resolveAgentRuntimeStatus(
 export function formatElapsedSeconds(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) {
-    return `${seconds}s`;
+    return `${seconds}秒`;
   }
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
-  return `${minutes}m ${remainingSeconds}s`;
+  return remainingSeconds > 0 ? `${minutes}分${remainingSeconds}秒` : `${minutes}分钟`;
 }

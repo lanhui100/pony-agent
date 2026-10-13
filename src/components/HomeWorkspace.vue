@@ -931,41 +931,8 @@ function isAssistantStreaming(message: ChatMessage | null) {
   return message?.status === "pending";
 }
 
-const isAgentStreamingContent = computed(() => {
-  const latestTurn = visibleTurns.value[visibleTurns.value.length - 1];
-  if (!latestTurn || !latestTurn.assistant) {
-    return false;
-  }
-  const isActive =
-    (runtimeStore.activeTurnId?.trim() ? runtimeStore.activeTurnId.trim() === latestTurn.turnId : false) ||
-    latestTurn.assistant.status === "pending";
-  if (!isActive) {
-    return false;
-  }
-  if (!isAssistantStreaming(latestTurn.assistant)) {
-    return false;
-  }
-  const events = turnEventsByTurnId.value.get(latestTurn.turnId) ?? [];
-  const hasStreamingContentEvent = events.some((event) => event.kind === "content" && event.streaming);
-  return hasStreamingContentEvent || assistantHasVisibleContent(latestTurn.assistant);
-});
-
 const shouldShowAgentRuntimeStatus = computed(() => {
-  if (!agentRuntimeStatus.value) {
-    return false;
-  }
-  // 当处于工具草稿/生成中或等待授权阶段时，无论是否有历史消息均需强制展示
-  if (
-    agentRuntimeStatus.value.mode === "tool_drafting" ||
-    agentRuntimeStatus.value.mode === "waiting_approval"
-  ) {
-    return true;
-  }
-  // 当正文真实处于流式打字中时，界面已有清晰物理动态反馈，不重复显示底栏
-  if (isAgentStreamingContent.value) {
-    return false;
-  }
-  return true;
+  return Boolean(agentRuntimeStatus.value);
 });
 
 function hasPendingAssistantPresentationWork() {

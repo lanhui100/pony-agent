@@ -47,7 +47,13 @@ onUnmounted(() => {
 const elapsedText = computed(() => {
   if (!props.status.startTime) return null;
   const elapsed = Math.max(0, now.value - props.status.startTime);
-  return formatElapsedSeconds(elapsed);
+  return `，用时 ${formatElapsedSeconds(elapsed)} ···`;
+});
+
+const displayLabel = computed(() => {
+  const raw = props.status.label || "";
+  // 当有耗时显示时，剥离末尾的省略号避免“思考中...，用时 5秒 ···”重复省略号
+  return elapsedText.value ? raw.replace(/[…\.\s]+$/, "") : raw;
 });
 
 const toolIconMap: Record<string, any> = {
@@ -123,6 +129,9 @@ const iconAnimationClass = computed(() => {
   <div
     class="flex items-center gap-1.5 py-1 text-[12px] text-stone-400 w-fit select-none min-h-[24px]"
     data-testid="agent-runtime-status-bar"
+    role="status"
+    aria-live="polite"
+    aria-atomic="true"
   >
     <Transition name="status-transition" mode="out-in">
       <div :key="props.status.mode + '-' + props.status.label" class="flex items-center gap-1.5">
@@ -135,7 +144,7 @@ const iconAnimationClass = computed(() => {
           data-testid="agent-runtime-status-icon"
         />
         <span class="runtime-status-shimmer font-normal" data-testid="agent-runtime-status-label">
-          {{ props.status.label }}
+          {{ displayLabel }}
         </span>
         <span
           v-if="elapsedText"

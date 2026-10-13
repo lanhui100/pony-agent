@@ -71,7 +71,17 @@ pub enum RuntimeMode {
 
 pub fn format_elapsed_seconds(ms: u64) -> String {
     let secs = ms / 1000;
-    format!("{}s", secs)
+    if secs < 60 {
+        format!("{}秒", secs)
+    } else {
+        let mins = secs / 60;
+        let rem_secs = secs % 60;
+        if rem_secs > 0 {
+            format!("{}分{}秒", mins, rem_secs)
+        } else {
+            format!("{}分钟", mins)
+        }
+    }
 }
 
 pub fn clean_tool_name_display(name: &str) -> String {
@@ -990,19 +1000,35 @@ fn ui(f: &mut Frame, state: &mut TuiState) {
 
         // 动态状态占位（在对话历史底部，替换原“正在思考”占位，伴随整数秒耗时）：
         if state.is_streaming {
+            let has_elapsed = state.turn_started_at.is_some();
             let elapsed_str = if let Some(started) = state.turn_started_at {
-                format!(" {}", format_elapsed_seconds(started.elapsed().as_millis() as u64))
+                format!("，用时 {} ···", format_elapsed_seconds(started.elapsed().as_millis() as u64))
             } else {
                 String::new()
             };
             let spinner = spinner_frame(state.spinner_tick);
             let (status_text, status_color) = match &state.runtime_mode {
                 RuntimeMode::Ready => ("就绪".to_string(), Color::Rgb(140, 210, 160)),
-                RuntimeMode::Connecting => (format!("准备就绪中...{elapsed_str}"), Color::Rgb(120, 185, 255)),
-                RuntimeMode::Thinking => (format!("正在思考...{elapsed_str}"), Color::Rgb(170, 150, 240)),
-                RuntimeMode::Responding => (format!("正在回复...{elapsed_str}"), Color::Rgb(120, 205, 240)),
-                RuntimeMode::ExecutingTool(name) => (format!("执行工具: {}...{elapsed_str}", name), Color::Rgb(240, 180, 80)),
-                RuntimeMode::WaitingApproval => (format!("等待确认中...{elapsed_str}"), Color::Rgb(240, 180, 80)),
+                RuntimeMode::Connecting => {
+                    let base = if has_elapsed { "准备就绪中" } else { "准备就绪中..." };
+                    (format!("{base}{elapsed_str}"), Color::Rgb(120, 185, 255))
+                }
+                RuntimeMode::Thinking => {
+                    let base = if has_elapsed { "正在思考" } else { "正在思考..." };
+                    (format!("{base}{elapsed_str}"), Color::Rgb(170, 150, 240))
+                }
+                RuntimeMode::Responding => {
+                    let base = if has_elapsed { "正在回复" } else { "正在回复..." };
+                    (format!("{base}{elapsed_str}"), Color::Rgb(120, 205, 240))
+                }
+                RuntimeMode::ExecutingTool(name) => {
+                    let base = if has_elapsed { format!("执行工具: {name}") } else { format!("执行工具: {name}...") };
+                    (format!("{base}{elapsed_str}"), Color::Rgb(240, 180, 80))
+                }
+                RuntimeMode::WaitingApproval => {
+                    let base = if has_elapsed { "等待确认中" } else { "等待确认中..." };
+                    (format!("{base}{elapsed_str}"), Color::Rgb(240, 180, 80))
+                }
                 RuntimeMode::Completed => ("完成".to_string(), Color::Rgb(120, 210, 140)),
                 RuntimeMode::Failed(reason) => (format!("失败: {reason}"), Color::Rgb(240, 100, 100)),
             };
