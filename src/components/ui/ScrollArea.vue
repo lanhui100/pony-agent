@@ -8,10 +8,16 @@ type ScrollAreaViewportInstance = ComponentPublicInstance<{
   viewportElement?: HTMLElement | { value?: HTMLElement | null };
 }>;
 
-const props = defineProps<{
-  class?: HTMLAttributes["class"];
-  viewportClass?: HTMLAttributes["class"];
-}>();
+const props = withDefaults(
+  defineProps<{
+    class?: HTMLAttributes["class"];
+    viewportClass?: HTMLAttributes["class"];
+    hideScrollbar?: boolean;
+  }>(),
+  {
+    hideScrollbar: false
+  }
+);
 
 const rootClassName = computed(() => cn("relative overflow-hidden", props.class));
 const viewportClassName = computed(() => cn("h-full w-full rounded-[inherit]", props.viewportClass));
@@ -55,7 +61,7 @@ defineExpose({
     <ScrollAreaViewport ref="viewportRef" :class="viewportClassName">
       <slot />
     </ScrollAreaViewport>
-    <ScrollBar orientation="vertical" />
+    <ScrollBar v-if="!hideScrollbar" orientation="vertical" />
     <ScrollAreaCorner class="bg-transparent" />
   </ScrollAreaRoot>
 </template>

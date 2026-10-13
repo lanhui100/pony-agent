@@ -20,6 +20,7 @@ import WorkspaceTurnItem, {
 import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
 import QueuedMessagesBubble from "@/components/chat/QueuedMessagesBubble.vue";
 import AgentRuntimeStatusBar from "@/components/chat/AgentRuntimeStatusBar.vue";
+import TurnDial from "@/components/chat/TurnDial.vue";
 import GoalBar from "@/components/GoalBar.vue";
 
 const SYNTHETIC_KEEP_NODE_PREFIX = "synthetic-keep-";
@@ -87,6 +88,55 @@ const streamDebugState = shallowReactive<Record<string, unknown>>({});
 const streamingRenderOptimizationDisabled = ref(false);
 const terminalTracePhases = new Set(["completed", "failed", "cancelled"]);
 const lastTrustedTraceTimelineByTurnId = new Map<string, TraceTimelineEntry[]>();
+
+const activeTurnIdForDial = ref<string | null>(null);
+
+function handleSelectDialTurn(turnId: string) {
+  const viewport = resolveTimelineViewport();
+  if (!viewport) return;
+  const targetTurnEl = viewport.querySelector(`[data-turn-id="${turnId}"]`) as HTMLElement | null;
+  if (!targetTurnEl) return;
+
+  activeTurnIdForDial.value = turnId;
+  const targetTop = targetTurnEl.offsetTop - 16;
+  viewport.scrollTo({
+    top: Math.max(0, targetTop),
+    behavior: "smooth"
+  });
+}
+
+function updateActiveTurnFromViewport() {
+  const viewport = resolveTimelineViewport();
+  if (!viewport) return;
+
+  const turnElements = viewport.querySelectorAll("[data-turn-id]");
+  if (turnElements.length === 0) return;
+
+  const viewportRect = viewport.getBoundingClientRect();
+  const thresholdY = viewportRect.top + 80;
+
+  let currentTurnId: string | null = null;
+  for (let i = 0; i < turnElements.length; i++) {
+    const el = turnElements[i] as HTMLElement;
+    const rect = el.getBoundingClientRect();
+    if (rect.top <= thresholdY && rect.bottom > viewportRect.top) {
+      currentTurnId = el.getAttribute("data-turn-id");
+    }
+  }
+
+  if (!currentTurnId && turnElements.length > 0) {
+    const firstRect = (turnElements[0] as HTMLElement).getBoundingClientRect();
+    if (firstRect.top > thresholdY) {
+      currentTurnId = turnElements[0]!.getAttribute("data-turn-id");
+    } else {
+      currentTurnId = turnElements[turnElements.length - 1]!.getAttribute("data-turn-id");
+    }
+  }
+
+  if (currentTurnId) {
+    activeTurnIdForDial.value = currentTurnId;
+  }
+}
 
 function resolveTimelineViewport(): HTMLElement | null {
   const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
@@ -1452,6 +1502,10 @@ onMounted(() => {
   scheduleStreamingPresentationTimer();
   window.addEventListener("keydown", handleWindowKeydown);
   window.addEventListener("resize", updateFloatingUiPositions);
+  const viewport = resolveTimelineViewport();
+  if (viewport) {
+    viewport.addEventListener("scroll", updateActiveTurnFromViewport, { passive: true });
+  }
   window.addEventListener("storage", handleStreamingRenderConfigChanged);
   window.addEventListener(STREAM_RENDER_CONFIG_CHANGED_EVENT, handleStreamingRenderConfigChanged);
 });
@@ -1461,6 +1515,10 @@ onBeforeUnmount(() => {
   stopStreamingPresentationTimer();
   window.removeEventListener("keydown", handleWindowKeydown);
   window.removeEventListener("resize", updateFloatingUiPositions);
+  const viewport = resolveTimelineViewport();
+  if (viewport) {
+    viewport.removeEventListener("scroll", updateActiveTurnFromViewport);
+  }
   window.removeEventListener("storage", handleStreamingRenderConfigChanged);
   window.removeEventListener(STREAM_RENDER_CONFIG_CHANGED_EVENT, handleStreamingRenderConfigChanged);
 });
@@ -1594,6 +1652,7 @@ watch(
       ref="timelineScrollAreaRef"
       class="min-h-0 flex-1 rounded-t-[0.6rem]"
       viewport-class="workspace-timeline-viewport px-4 sm:px-5"
+      :hide-scrollbar="true"
     >
       <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[46.4rem] pt-4 sm:pt-5" data-testid="workspace-content-column">
         <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5" @after-leave="handleTurnFlowAfterLeave">
@@ -1635,6 +1694,12 @@ watch(
         <div ref="scrollAnchorRef" aria-hidden="true" class="pointer-events-none" style="height:0;width:0"></div>
       </div>
     </ScrollArea>
+
+    <TurnDial
+      :turns="visibleTurns"
+      :active-turn-id="activeTurnIdForDial"
+      @select-turn="handleSelectDialTurn"
+    />
 
     <button
       v-show="showScrollToBottom"
