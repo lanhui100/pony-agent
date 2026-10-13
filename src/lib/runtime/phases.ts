@@ -296,15 +296,15 @@ export function resolveGraphRunSubmissionFromCheckpoint(
 
   const phase = checkpoint.phase.trim().toLowerCase();
   const status = checkpoint.status.trim().toLowerCase();
-  if (status === "failed" || status === "cancelled" || phase === "failed" || phase === "cancelled") {
-    return null;
+  if (isGraphTerminalPhase(phase) || isGraphTerminalPhase(status)) {
+    return { command: "start_graph_run_stream" as const, runId: null };
   }
 
   if (phase === "paused" || (checkpoint.resumable && status === "ready")) {
     return { command: "resume_graph_run_stream" as const, runId };
   }
 
-  if (phase === "ready" || phase === "waiting_user" || phase === "completed") {
+  if (phase === "ready" || phase === "waiting_user") {
     return { command: "continue_graph_run_stream" as const, runId };
   }
 
