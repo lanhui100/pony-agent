@@ -133,25 +133,20 @@ const iconAnimationClass = computed(() => {
     aria-live="polite"
     aria-atomic="true"
   >
-    <div class="flex items-center gap-1.5">
+    <div class="flex items-center">
       <component
         :is="iconComponent"
         :class="[
-          'h-3.5 w-3.5 shrink-0 transition-colors duration-200',
+          'h-3.5 w-3.5 shrink-0 mr-1.5 transition-colors duration-200',
           iconAnimationClass
         ]"
         data-testid="agent-runtime-status-icon"
       />
-      <span class="runtime-status-shimmer font-normal" data-testid="agent-runtime-status-label">
-        {{ displayLabel }}
-      </span>
-      <span
+      <span class="runtime-status-shimmer font-normal" data-testid="agent-runtime-status-label">{{ displayLabel }}</span><span
         v-if="elapsedText"
-        class="text-[11px] text-stone-400 tabular-nums ml-0.5"
+        class="text-[11px] text-stone-400 tabular-nums"
         data-testid="agent-runtime-status-elapsed"
-      >
-        {{ elapsedText }}
-      </span>
+      >{{ elapsedText }}</span>
     </div>
   </div>
 </template>
