@@ -133,28 +133,26 @@ const iconAnimationClass = computed(() => {
     aria-live="polite"
     aria-atomic="true"
   >
-    <Transition name="status-transition" mode="out-in">
-      <div :key="props.status.mode + '-' + props.status.label" class="flex items-center gap-1.5">
-        <component
-          :is="iconComponent"
-          :class="[
-            'h-3.5 w-3.5 shrink-0',
-            iconAnimationClass
-          ]"
-          data-testid="agent-runtime-status-icon"
-        />
-        <span class="runtime-status-shimmer font-normal" data-testid="agent-runtime-status-label">
-          {{ displayLabel }}
-        </span>
-        <span
-          v-if="elapsedText"
-          class="text-[11px] text-stone-400 tabular-nums ml-0.5"
-          data-testid="agent-runtime-status-elapsed"
-        >
-          {{ elapsedText }}
-        </span>
-      </div>
-    </Transition>
+    <div class="flex items-center gap-1.5">
+      <component
+        :is="iconComponent"
+        :class="[
+          'h-3.5 w-3.5 shrink-0 transition-colors duration-200',
+          iconAnimationClass
+        ]"
+        data-testid="agent-runtime-status-icon"
+      />
+      <span class="runtime-status-shimmer font-normal" data-testid="agent-runtime-status-label">
+        {{ displayLabel }}
+      </span>
+      <span
+        v-if="elapsedText"
+        class="text-[11px] text-stone-400 tabular-nums ml-0.5"
+        data-testid="agent-runtime-status-elapsed"
+      >
+        {{ elapsedText }}
+      </span>
+    </div>
   </div>
 </template>
 
@@ -253,20 +251,5 @@ const iconAnimationClass = computed(() => {
   .runtime-icon-alert {
     animation: none;
   }
-}
-
-.status-transition-enter-active,
-.status-transition-leave-active {
-  transition: opacity 200ms cubic-bezier(0.2, 0, 0.2, 1), transform 200ms cubic-bezier(0.2, 0, 0.2, 1);
-}
-
-.status-transition-enter-from {
-  opacity: 0;
-  transform: translateY(2px);
-}
-
-.status-transition-leave-to {
-  opacity: 0;
-  transform: translateY(-2px);
 }
 </style>
