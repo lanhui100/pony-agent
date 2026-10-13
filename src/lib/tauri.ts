@@ -17,6 +17,28 @@ export function isTauriAvailable() {
   return Boolean(window.__TAURI__ || window.__TAURI_INTERNALS__);
 }
 
+export function sanitizeIpcArgsForTelemetry(args?: Record<string, unknown>): unknown {
+  if (!args || typeof args !== "object") {
+    return args;
+  }
+
+  const sanitized: Record<string, unknown> = { ...args };
+
+  // 剪裁大型嵌套对象，如 input.history 和 input.images
+  if (sanitized.input && typeof sanitized.input === "object") {
+    const inputObj = { ...(sanitized.input as Record<string, unknown>) };
+    if (Array.isArray(inputObj.history)) {
+      inputObj.history = `[PRUNED_HISTORY: ${inputObj.history.length} turns]`;
+    }
+    if (Array.isArray(inputObj.images)) {
+      inputObj.images = `[PRUNED_IMAGES: ${inputObj.images.length} items]`;
+    }
+    sanitized.input = inputObj;
+  }
+
+  return sanitized;
+}
+
 export async function safeInvoke<T>(command: string, args?: Record<string, unknown>) {
   if (!isTauriAvailable()) {
     throw new Error("当前运行在浏览器预览模式，Tauri 后端不可用。");
@@ -37,7 +59,7 @@ export async function safeInvoke<T>(command: string, args?: Record<string, unkno
         message: `IPC command "${command}" failed: ${String(err)}`,
         extra: {
           command,
-          args,
+          args: sanitizeIpcArgsForTelemetry(args) as Record<string, unknown>,
           error: String(err),
         },
         tags: {

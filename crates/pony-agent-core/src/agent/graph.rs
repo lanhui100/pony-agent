@@ -913,7 +913,7 @@ impl GraphRunner {
     }
 }
 
-fn has_unresolved_ask_waits(store: &GraphRunStore, run_id: &str) -> bool {
+pub(crate) fn has_unresolved_ask_waits(store: &GraphRunStore, run_id: &str) -> bool {
     store
         .ask_waits
         .get(run_id)

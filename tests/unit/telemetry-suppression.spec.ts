@@ -33,4 +33,27 @@ describe("telemetry reportError test environment suppression", () => {
     expect(payload.tags?.project).toBe("pony-agent");
     expect(payload.tags?.custom_tag).toBe("foo");
   });
+
+  it("prunes bulky input history in safeInvoke error extra args", async () => {
+    const { sanitizeIpcArgsForTelemetry } = await import("@/lib/tauri");
+    const hugeArgs = {
+      turnId: "123",
+      runId: "run-abc",
+      input: {
+        message: "hello",
+        history: [
+          { role: "user", content: "hi", tokenCount: 5 },
+          { role: "assistant", content: "hello world".repeat(100), reasoningContent: "long reasoning".repeat(50) }
+        ],
+        images: ["data:image/png;base64,1234567890"]
+      }
+    };
+
+    const pruned = sanitizeIpcArgsForTelemetry(hugeArgs) as any;
+    expect(pruned.turnId).toBe("123");
+    expect(pruned.runId).toBe("run-abc");
+    expect(pruned.input.message).toBe("hello");
+    expect(pruned.input.history).toEqual("[PRUNED_HISTORY: 2 turns]");
+    expect(pruned.input.images).toEqual("[PRUNED_IMAGES: 1 items]");
+  });
 });

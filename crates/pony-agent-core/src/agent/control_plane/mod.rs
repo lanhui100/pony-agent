@@ -6072,6 +6072,35 @@ mod tests {
         assert_eq!(waiting_plan.run_id.as_deref(), Some("run-plan-boundary"));
         assert_eq!(waiting_plan.source, "graph_run_reconciled");
 
+        // When a run has unresolved ask waits, it cannot accept continue_graph_run_stream;
+        // resolve_graph_run_submission_plan must not return continue_graph_run_stream with an unusable run.
+        let binding = crate::agent::graph::GraphAskWaitBinding {
+            run_id: "run-plan-boundary".to_string(),
+            request_id: "req-ask-1".to_string(),
+            expected_version: 1,
+            turn_id: "turn-plan-boundary-1".to_string(),
+            session_id: Some("graph-plan-boundary".to_string()),
+            call_id: "call-ask-1".to_string(),
+            tool_name: "ask_user_question".to_string(),
+            assistant_transcript: serde_json::json!({}),
+            created_at_ms: 1000,
+        };
+        control_plane
+            .graph_bind_ask_wait("run-plan-boundary", binding)
+            .expect("should bind ask wait");
+
+        let ask_bound_plan =
+            control_plane.resolve_graph_run_submission_plan(GraphRunSubmissionPlanQuery {
+                session_id: Some("graph-plan-boundary".to_string()),
+                node_id: None,
+                run_id: Some("run-plan-boundary".to_string()),
+            });
+        assert_eq!(
+            ask_bound_plan.command, "start_graph_run_stream",
+            "A run with unresolved ask waits cannot accept a turn, submission plan must self-heal to start_graph_run_stream"
+        );
+        assert_eq!(ask_bound_plan.run_id, None);
+
         server.finish();
     }
 

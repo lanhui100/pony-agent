@@ -429,19 +429,22 @@ impl HostControlPlane {
         &self,
         query: GraphRunSubmissionPlanQuery,
     ) -> GraphRunSubmissionPlan {
-        let run = query
-            .run_id
-            .as_deref()
-            .and_then(|run_id| {
-                self.graph_runs
-                    .lock()
-                    .unwrap_or_else(|e| {
-                        eprintln!("[pony-agent] graph run lock poisoned, recovering: {e}");
-                        e.into_inner()
-                    })
-                    .load_run(run_id)
-            })
-            .or_else(|| self.resolve_graph_run_for_retrieval(None, query.session_id.as_deref()));
+        let (run, has_unresolved_ask_waits) = {
+            let store = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned, recovering: {e}");
+                e.into_inner()
+            });
+            let loaded_run = query
+                .run_id
+                .as_deref()
+                .and_then(|run_id| store.load_run(run_id))
+                .or_else(|| self.resolve_graph_run_for_retrieval(None, query.session_id.as_deref()));
+            let unresolved = loaded_run
+                .as_ref()
+                .map(|r| crate::agent::graph::has_unresolved_ask_waits(&store, &r.id))
+                .unwrap_or(false);
+            (loaded_run, unresolved)
+        };
 
         if let Some(checkpoint) = self.load_execution_checkpoint(ExecutionCheckpointQuery {
             turn_id: None,
@@ -452,8 +455,11 @@ impl HostControlPlane {
                     checkpoint.run_id.as_deref().or(query.run_id.as_deref())
                         == Some(run.id.as_str())
                 });
-                let (command, run_id, source) =
-                    Self::resolve_submission_command_against_run(checkpoint_run, &command);
+                let (command, run_id, source) = if has_unresolved_ask_waits {
+                    ("start_graph_run_stream".to_string(), None, "checkpoint")
+                } else {
+                    Self::resolve_submission_command_against_run(checkpoint_run, &command)
+                };
                 return Self::build_graph_run_submission_plan(
                     command,
                     run_id,
@@ -468,6 +474,14 @@ impl HostControlPlane {
         }
 
         if let Some(run) = run.as_ref() {
+            if has_unresolved_ask_waits {
+                return Self::build_graph_run_submission_plan(
+                    "start_graph_run_stream".to_string(),
+                    None,
+                    "graph_run_reconciled",
+                    None,
+                );
+            }
             if run.phase == GraphRunPhase::Running {
                 return Self::build_graph_run_submission_plan(
                     "continue_graph_run_stream".to_string(),
