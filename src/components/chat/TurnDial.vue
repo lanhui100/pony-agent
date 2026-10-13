@@ -136,10 +136,11 @@ watch(activeIndex, (newIdx) => {
   display: flex;
   align-items: center;
   user-select: none;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .dial-scroller {
+  pointer-events: auto;
   position: relative;
   max-height: min(70vh, 420px);
   overflow-y: auto;

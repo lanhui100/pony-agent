@@ -61,7 +61,10 @@ defineExpose({
     <ScrollAreaViewport ref="viewportRef" :class="viewportClassName">
       <slot />
     </ScrollAreaViewport>
-    <ScrollBar v-if="!hideScrollbar" orientation="vertical" />
+    <ScrollBar
+      orientation="vertical"
+      :class="hideScrollbar ? '!hidden !pointer-events-none' : ''"
+    />
     <ScrollAreaCorner class="bg-transparent" />
   </ScrollAreaRoot>
 </template>
