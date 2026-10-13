@@ -85,15 +85,16 @@ app.use(pinia);
 app.use(MotionPlugin);
 app.mount("#app");
 
-// 优雅淡出 index.html 预加载启动屏（桌面端停留 3s，确保平滑展示不一闪而过）
+// 优雅淡出 index.html 预加载启动屏（保留 3s 品牌展示，结束后立即解绑事件拦截防遮挡）
 if (typeof window !== "undefined") {
   setTimeout(() => {
     const splash = document.getElementById("app-loading-screen");
     if (splash) {
+      splash.style.pointerEvents = "none";
       splash.classList.add("fade-out");
       setTimeout(() => {
         splash.remove();
-      }, 400);
+      }, 350);
     }
   }, 3000);
 }

@@ -2392,6 +2392,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.sessionOperation = "initializing";
       this.sessionError = null;
 
+      // 安全看门狗：防止初始化阶段任何 IPC 挂起导致输入区长期处于 disabled 锁死状态
+      const watchdog = setTimeout(() => {
+        if (this.sessionOperation === "initializing") {
+          this.sessionOperation = null;
+        }
+      }, 3500);
+
       try {
         await this.loadSessionCatalog();
         const restoredRunningMap = loadRunningSessionMap();
@@ -2464,6 +2471,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           error: String(error)
         });
       } finally {
+        clearTimeout(watchdog);
         this.sessionOperation = null;
       }
     },

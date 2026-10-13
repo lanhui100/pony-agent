@@ -25,8 +25,8 @@ async function closeWindow() {
   <div
     v-if="isTauriAvailable()"
     class="flex items-center gap-1.5 select-none"
-    data-tauri-drag-region
     data-testid="window-controls"
+    @mousedown.stop
   >
     <button
       type="button"

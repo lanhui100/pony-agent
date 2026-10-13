@@ -28,9 +28,12 @@
 
 [build]
 target-dir = "target"
-# 限制并发编译任务数，降低 tauri dev 时的 CPU/IO 峰值。
-# 与 start-tauri-dev.ps1 里的 CARGO_BUILD_JOBS=2 保持一致。
-jobs = 2
+# 平衡编译速度与内存占用，避免 8 线程并发重型 crate 时耗尽内存（OOM）
+jobs = 3
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "linker=rust-lld"]
+
 
 [profile.dev]
 # 开启增量编译，加快 dev 迭代速度。
