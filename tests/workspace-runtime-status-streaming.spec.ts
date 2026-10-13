@@ -48,9 +48,9 @@ describe("Workspace Runtime Status Streaming Behavior", () => {
       }
     );
 
-    // 验证状态槽不显示
+    // 在 219aa96 契约更新后，状态指示器与 dsh 对齐：处于 active 时始终常驻展示运行状态槽
     const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
-    expect(statusSlot.exists()).toBe(false);
+    expect(statusSlot.exists()).toBe(true);
 
     wrapper.unmount();
   }, 15000);

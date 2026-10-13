@@ -15,8 +15,8 @@ describe("status.ts Contract & Runtime State Machine Tests", () => {
       const resultSubSecond = formatElapsedSeconds(500);
 
       // Assert
-      expect(resultZero).toBe("0s");
-      expect(resultSubSecond).toBe("0s");
+      expect(resultZero).toBe("0秒");
+      expect(resultSubSecond).toBe("0秒");
     });
 
     it("handles negative elapsed time gracefully by clamping to 0s", () => {
@@ -24,22 +24,22 @@ describe("status.ts Contract & Runtime State Machine Tests", () => {
       const resultNegative = formatElapsedSeconds(-1500);
 
       // Assert
-      expect(resultNegative).toBe("0s");
+      expect(resultNegative).toBe("0秒");
     });
 
     it("formats seconds boundary values under one minute", () => {
       // Arrange & Act & Assert
-      expect(formatElapsedSeconds(1000)).toBe("1s");
-      expect(formatElapsedSeconds(59000)).toBe("59s");
-      expect(formatElapsedSeconds(59999)).toBe("59s");
+      expect(formatElapsedSeconds(1000)).toBe("1秒");
+      expect(formatElapsedSeconds(59000)).toBe("59秒");
+      expect(formatElapsedSeconds(59999)).toBe("59秒");
     });
 
     it("formats minute and seconds boundary transitions", () => {
       // Arrange & Act & Assert
-      expect(formatElapsedSeconds(60000)).toBe("1m 0s");
-      expect(formatElapsedSeconds(61000)).toBe("1m 1s");
-      expect(formatElapsedSeconds(125000)).toBe("2m 5s");
-      expect(formatElapsedSeconds(3600000)).toBe("60m 0s");
+      expect(formatElapsedSeconds(60000)).toBe("1分钟");
+      expect(formatElapsedSeconds(61000)).toBe("1分1秒");
+      expect(formatElapsedSeconds(125000)).toBe("2分5秒");
+      expect(formatElapsedSeconds(3600000)).toBe("60分钟");
     });
   });
 

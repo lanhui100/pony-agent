@@ -19,4 +19,18 @@ describe("telemetry reportError test environment suppression", () => {
     expect(safeInvokeSpy).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it("injects project: 'pony-agent' into reportError payload tags via buildIngestPayload", async () => {
+    const { buildIngestPayload } = await import("@/lib/telemetry");
+    const payload = buildIngestPayload({
+      errorType: "CustomError",
+      message: "something happened",
+      tags: { custom_tag: "foo" }
+    });
+
+    expect(payload).toBeDefined();
+    expect(payload.tags).toBeDefined();
+    expect(payload.tags?.project).toBe("pony-agent");
+    expect(payload.tags?.custom_tag).toBe("foo");
+  });
 });

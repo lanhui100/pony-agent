@@ -538,7 +538,13 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn ponysentry_capture(payload: serde_json::Value) -> Result<(), String> {
+fn ponysentry_capture(mut payload: serde_json::Value) -> Result<(), String> {
+    if let Some(obj) = payload.as_object_mut() {
+        let tags = obj.entry("tags").or_insert_with(|| serde_json::json!({}));
+        if let Some(tags_obj) = tags.as_object_mut() {
+            tags_obj.entry("project").or_insert_with(|| serde_json::json!("pony-agent"));
+        }
+    }
     if let Ok(ingest_payload) = serde_json::from_value::<agent::ponysentry::IngestPayload>(payload.clone()) {
         agent::ponysentry::capture_payload(ingest_payload);
     } else {

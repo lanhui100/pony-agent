@@ -200,6 +200,38 @@ export interface ReportErrorOptions {
   platform?: string;
 }
 
+export function buildIngestPayload(options: ReportErrorOptions): IngestPayload {
+  const errorType = options.errorType || "Error";
+  const rawMessage = options.message || "Unknown error";
+  const sanitizedMsg = sanitizeString(rawMessage);
+
+  const stacktrace =
+    options.frames ||
+    (options.stack ? parseStackTrace(options.stack) : undefined);
+
+  const mergedTags: Record<string, string> = {
+    project: "pony-agent",
+    ...(options.tags ? (deepSanitize(options.tags) as Record<string, string>) : {}),
+  };
+
+  return {
+    platform: options.platform || (isTauriAvailable() ? "tauri" : "vue"),
+    release: APP_RELEASE,
+    environment: APP_ENV,
+    message: sanitizedMsg,
+    exception: {
+      error_type: sanitizeString(errorType),
+      value: sanitizedMsg,
+      stacktrace,
+    },
+    tags: mergedTags,
+    extra: options.extra
+      ? (deepSanitize(options.extra) as Record<string, unknown>)
+      : undefined,
+    breadcrumbs: clearBreadcrumbs(),
+  };
+}
+
 /**
  * 核心上报方法 (Fire-and-Forget，永不阻塞或抛出异常)
  */
@@ -214,32 +246,7 @@ export async function reportError(options: ReportErrorOptions): Promise<void> {
   }
 
   try {
-    const errorType = options.errorType || "Error";
-    const rawMessage = options.message || "Unknown error";
-    const sanitizedMsg = sanitizeString(rawMessage);
-
-    const stacktrace =
-      options.frames ||
-      (options.stack ? parseStackTrace(options.stack) : undefined);
-
-    const payload: IngestPayload = {
-      platform: options.platform || (isTauriAvailable() ? "tauri" : "vue"),
-      release: APP_RELEASE,
-      environment: APP_ENV,
-      message: sanitizedMsg,
-      exception: {
-        error_type: sanitizeString(errorType),
-        value: sanitizedMsg,
-        stacktrace,
-      },
-      tags: options.tags
-        ? (deepSanitize(options.tags) as Record<string, string>)
-        : undefined,
-      extra: options.extra
-        ? (deepSanitize(options.extra) as Record<string, unknown>)
-        : undefined,
-      breadcrumbs: clearBreadcrumbs(),
-    };
+    const payload = buildIngestPayload(options);
 
     // 1. 若处于桌面端环境，优先通过 Tauri IPC 委托给 core 客户端上报
     if (isTauriAvailable()) {

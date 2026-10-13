@@ -1804,6 +1804,15 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       bindFrontendRecorderSession(nextSessionId);
       bindFrontendRecorderTurn(null);
 
+      // 切换会话时同步刷新/过滤 pending ask，防止跨会话请求残留导致 CAS 冲突
+      try {
+        const { useAskStore } = await import("@/stores/ask");
+        const askStore = useAskStore();
+        void askStore.refresh({ sessionId: nextSessionId });
+      } catch {
+        // non-fatal
+      }
+
       // Register current running turn as a background turn before switching away
       const switchingFromRunningTurn = this.isSubmitting && this.activeTurnId != null;
       if (switchingFromRunningTurn && this.activeTurnId) {

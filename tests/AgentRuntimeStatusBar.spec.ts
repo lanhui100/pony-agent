@@ -16,9 +16,9 @@ describe("AgentRuntimeStatusBar", () => {
     });
 
     expect(wrapper.find('[data-testid="agent-runtime-status-bar"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="agent-runtime-status-label"]').text()).toBe("思考中...");
+    expect(wrapper.find('[data-testid="agent-runtime-status-label"]').text()).toBe("思考中");
     expect(wrapper.find('[data-testid="agent-runtime-status-label"]').classes()).toContain("runtime-status-shimmer");
-    expect(wrapper.find('[data-testid="agent-runtime-status-elapsed"]').text()).toMatch(/\d+s/);
+    expect(wrapper.find('[data-testid="agent-runtime-status-elapsed"]').text()).toMatch(/\d+秒/);
   });
 
   it("handles executing tool mode", () => {

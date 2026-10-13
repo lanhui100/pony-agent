@@ -126,6 +126,9 @@ export const useAskStore = defineStore("ask", {
         return null;
       }
 
+      // Optimistically remove from pending asks to prevent duplicate submissions
+      // and immediately disable UI buttons while IPC is inflight.
+      this.removePendingAsk(request.requestId);
       this.answeringRequestId = request.requestId;
       this.error = null;
       try {
@@ -135,7 +138,6 @@ export const useAskStore = defineStore("ask", {
           version: listed.version,
           answer: answerValue ?? null
         });
-        this.removePendingAsk(request.requestId);
         // PA-076 phase-4 P0: `ask_answer` CAS-consumed the dispatcher request; the graph run is
         // still bound at `WaitingUser`. Resume the graph so the terminal result (the answer) is
         // injected into the next turn and the run can continue.
@@ -144,9 +146,14 @@ export const useAskStore = defineStore("ask", {
       } catch (error) {
         const message = `应答失败：${String(error)}`;
         if (isStaleAskError(error)) {
-          // Reconcile the snapshot after a CAS failure, then surface the
-          // mutation error (the reconcile would otherwise clear it).
+          // Reconcile the snapshot after a CAS / replay / expiry failure.
+          // Since the request is already dead/consumed, reconcile from host.
           await this.refresh().catch(() => {});
+        } else {
+          // If it was a network/internal error rather than a stale CAS, restore the ask
+          if (!this.pendingAsks.some((a) => a.requestId === request.requestId)) {
+            this.pendingAsks.push(listed);
+          }
         }
         this.error = message;
         return null;
@@ -202,6 +209,8 @@ export const useAskStore = defineStore("ask", {
         return null;
       }
 
+      // Optimistically remove from pending asks to prevent duplicate cancellations
+      this.removePendingAsk(request.requestId);
       this.cancellingRequestId = request.requestId;
       this.error = null;
       try {
@@ -210,12 +219,15 @@ export const useAskStore = defineStore("ask", {
           expectedVersion: listed.version,
           version: listed.version
         });
-        this.removePendingAsk(request.requestId);
         return result;
       } catch (error) {
         const message = `取消失败：${String(error)}`;
         if (isStaleAskError(error)) {
           await this.refresh().catch(() => {});
+        } else {
+          if (!this.pendingAsks.some((a) => a.requestId === request.requestId)) {
+            this.pendingAsks.push(listed);
+          }
         }
         this.error = message;
         return null;

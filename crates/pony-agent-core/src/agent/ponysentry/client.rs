@@ -96,6 +96,9 @@ impl PonySentryClient {
         let sanitized_extra = extra.map(|ex| sanitize_json(&ex));
         let breadcrumbs = self.take_breadcrumbs();
 
+        let mut tags = HashMap::new();
+        tags.insert("project".to_string(), "pony-agent".to_string());
+
         let payload = IngestPayload {
             platform: "rust".to_string(),
             release: self.config.release.clone(),
@@ -106,7 +109,7 @@ impl PonySentryClient {
                 value: Some(sanitized_msg),
                 stacktrace: None,
             }),
-            tags: None,
+            tags: Some(tags),
             extra: sanitized_extra,
             breadcrumbs: if breadcrumbs.is_empty() {
                 None
@@ -138,6 +141,9 @@ impl PonySentryClient {
         let sanitized_msg = sanitize(&message);
         let breadcrumbs = self.take_breadcrumbs();
 
+        let mut tags = HashMap::new();
+        tags.insert("project".to_string(), "pony-agent".to_string());
+
         let payload = IngestPayload {
             platform: "rust".to_string(),
             release: self.config.release.clone(),
@@ -153,7 +159,7 @@ impl PonySentryClient {
                     in_app: Some(true),
                 }]),
             }),
-            tags: None,
+            tags: Some(tags),
             extra: None,
             breadcrumbs: if breadcrumbs.is_empty() {
                 None

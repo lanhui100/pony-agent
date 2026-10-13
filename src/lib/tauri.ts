@@ -41,6 +41,7 @@ export async function safeInvoke<T>(command: string, args?: Record<string, unkno
           error: String(err),
         },
         tags: {
+          project: "pony-agent",
           source: "tauri_safe_invoke",
           command,
         },

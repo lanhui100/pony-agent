@@ -55,7 +55,7 @@ describe("Message Flow Bottom Status Integration", () => {
     const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
     expect(statusSlot.exists()).toBe(true);
     expect(statusSlot.find('[data-testid="agent-runtime-status-label"]').text()).toBe(
-      "执行工具: bash..."
+      "执行工具: bash"
     );
 
     const messageItems = wrapper.findAll(".message-item");
@@ -81,7 +81,7 @@ describe("Message Flow Bottom Status Integration", () => {
     const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
     expect(statusSlot.exists()).toBe(true);
     expect(statusSlot.find('[data-testid="agent-runtime-status-label"]').text()).toBe(
-      "准备调用工具: 执行命令..."
+      "准备调用工具: 执行命令"
     );
     const icon = statusSlot.find('[data-testid="agent-runtime-status-icon"]');
     expect(icon.exists()).toBe(true);
