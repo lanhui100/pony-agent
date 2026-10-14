@@ -3,13 +3,21 @@
  * C5 锁纪律守卫：`self.graph_runs.lock()` 作用域内的二次加锁调用检测。
  *
  * 契约（.dev-team/contract-matrix-deadlock.md C5）：
- *   任何 `self.graph_runs.lock()` 的作用域内（自加锁点起到其最内层封闭块结束），
- *   不得再调用会二次加锁的方法：
- *     - resolve_graph_run_for_retrieval
- *     - load_graph_run
- *     - load_execution_checkpoint
- *     - load_active_graph_run_for_session
- *   也不得在同一守卫生命周期内再次出现 `self.graph_runs.lock()`（直接自死锁）。
+ *   任何 `self.graph_runs.lock()` 的作用域内（自加锁点起到其守卫释放点），
+ *   不得再调用会二次加锁的方法；也不得在同一守卫生命周期内再次出现
+ *   `self.graph_runs.lock()`（直接自死锁）。
+ *
+ * 禁用调用集合 = 自动发现 ∪ 显式基线（防止白名单过窄漏检）：
+ *   1. **自动发现**：解析扫描根下全部 `*.rs`，对每个 `fn`（含 `pub fn` / 多行签名）
+ *      用花括号配对求出其函数体，凡函数体内出现 `self.graph_runs.lock()` 的方法名
+ *      即视为「会二次加锁」，全部进入禁用集合（当前模块 18 个）。
+ *   2. **显式基线**（4 名，并集下限）：`resolve_graph_run_for_retrieval`、
+ *      `load_graph_run`、`load_execution_checkpoint`、`load_active_graph_run_for_session`。
+ *      其中 `resolve_graph_run_for_retrieval` 与 `load_execution_checkpoint` 自身不直接
+ *      加锁，而是**传递性**加锁（经 load_graph_run / load_active_graph_run_for_session），
+ *      自动发现抓不到，故必须保留为硬基线。
+ *   3. **并集下限门禁**：`自动发现数 < 基线数(4)` ⇒ 判定为脚本自身解析退化（门禁会变松），
+ *      立即 `Exit 2` 拒绝出结论。
  *
  * 判定语义（机械、括号级、无启发式）：
  *   1. 剥离注释（含嵌套块注释）与字符串字面量：按字符等长替换为空格，保证偏移量/行号对齐。
@@ -47,7 +55,14 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const LOCK = 'self.graph_runs.lock()';
-const FORBIDDEN = [
+
+/**
+ * 显式基线（并集下限）：这 4 名是本次死锁契约点名的方法，必须永远在禁用集合内。
+ * 其中 2 名会被自动发现（load_graph_run / load_active_graph_run_for_session），
+ * 另 2 名是**传递性**加锁（resolve_graph_run_for_retrieval / load_execution_checkpoint），
+ * 自动发现抓不到，故作为硬下限保留。自动发现数低于本基线长度即 Exit 2。
+ */
+const BASELINE_FORBIDDEN = [
   'resolve_graph_run_for_retrieval',
   'load_graph_run',
   'load_execution_checkpoint',
@@ -227,15 +242,11 @@ function lineAt(src, index) {
 }
 
 /**
- * 括号级扫描单个源码文本。
- * @param {string} src
- * @returns {{lockLine:number, kind:string, detail:string, callLine:number}[]}
+ * 花括号配对：返回 open 偏移量 -> close 偏移量。
+ * @param {string} code 已剥离注释/字符串的代码
+ * @returns {Map<number, number>}
  */
-function analyzeSource(src) {
-  const code = stripNonCode(src);
-  const violations = [];
-
-  // 花括号配对：open 偏移量 -> close 偏移量
+function braceMap(code) {
   const stack = [];
   const closeOf = new Map();
   for (let i = 0; i < code.length; i += 1) {
@@ -247,6 +258,71 @@ function analyzeSource(src) {
       if (open !== undefined) closeOf.set(open, i);
     }
   }
+  return closeOf;
+}
+
+/**
+ * 自动发现「会获取 self.graph_runs 锁」的方法名。
+ *
+ * 机制：对每个 `fn <name>` 找到其函数体（签名后第一个 `{` 起的配对块），
+ * 若函数体内出现 `self.graph_runs.lock()` 则记入禁用集合。
+ * 防误配：签名区间内不得再出现 `fn` 关键字（否则该 `{` 属于后续函数）。
+ *
+ * @param {string} src 原始源码
+ * @returns {{name:string, line:number}[]}
+ */
+function discoverInSource(src) {
+  const code = stripNonCode(src);
+  const closeOf = braceMap(code);
+  const hits = [];
+  const fnRe = /\bfn\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+  let match;
+  while ((match = fnRe.exec(code)) !== null) {
+    const name = match[1];
+    const brace = code.indexOf('{', match.index + match[0].length);
+    if (brace === -1) continue;
+    if (/\bfn\b/.test(code.slice(match.index + match[0].length, brace))) continue;
+    const bodyEnd = closeOf.get(brace);
+    if (bodyEnd === undefined) continue;
+    if (code.slice(brace, bodyEnd).includes(LOCK)) {
+      hits.push({ name, line: lineAt(src, match.index) });
+    }
+  }
+  return hits;
+}
+
+/**
+ * 对扫描根下全部 `*.rs` 执行自动发现。
+ * @param {string} scanRoot
+ * @returns {{names:string[], sites:Map<string,string[]>}}
+ */
+function discoverLockAcquiringMethods(scanRoot) {
+  const sites = new Map();
+  if (!fs.existsSync(scanRoot)) return { names: [], sites };
+  for (const file of listRustFiles(scanRoot)) {
+    const src = fs.readFileSync(file, 'utf8');
+    const repoRelative = path.relative(REPO_ROOT, file).split(path.sep).join('/');
+    const displayPath = repoRelative.startsWith('..') ? file : repoRelative;
+    for (const { name, line } of discoverInSource(src)) {
+      if (!sites.has(name)) sites.set(name, []);
+      sites.get(name).push(`${displayPath}:${line}`);
+    }
+  }
+  return { names: [...sites.keys()].sort(), sites };
+}
+
+/**
+ * 括号级扫描单个源码文本。
+ * @param {string} src
+ * @param {string[]} forbidden 禁用方法名集合（自动发现 ∪ 基线）
+ * @returns {{lockLine:number, kind:string, detail:string, callLine:number}[]}
+ */
+function analyzeSource(src, forbidden) {
+  const code = stripNonCode(src);
+  const violations = [];
+
+  // 花括号配对：open 偏移量 -> close 偏移量
+  const closeOf = braceMap(code);
 
   const lockPositions = [];
   let cursor = code.indexOf(LOCK);
@@ -269,7 +345,7 @@ function analyzeSource(src) {
     const guardWindow = code.slice(lockIndex, guardEnd);
     const lockLine = lineAt(src, lockIndex);
 
-    for (const name of FORBIDDEN) {
+    for (const name of forbidden) {
       const needle = `self.${name}(`;
       let hit = guardWindow.indexOf(needle);
       while (hit !== -1) {
@@ -301,15 +377,16 @@ function analyzeSource(src) {
 /**
  * @param {string} filePath
  * @param {string} scanRoot
+ * @param {string[]} forbidden
  * @returns {{displayPath:string, relPath:string, violations:object[]}}
  */
-function scanFile(filePath, scanRoot) {
+function scanFile(filePath, scanRoot, forbidden) {
   const src = fs.readFileSync(filePath, 'utf8');
   const repoRelative = path.relative(REPO_ROOT, filePath).split(path.sep).join('/');
   return {
     displayPath: repoRelative.startsWith('..') ? filePath : repoRelative,
     relPath: path.relative(scanRoot, filePath).split(path.sep).join('/'),
-    violations: analyzeSource(src),
+    violations: analyzeSource(src, forbidden),
   };
 }
 
@@ -344,8 +421,29 @@ function classify(entry) {
   return VERIFIED_SAFE.has(exemptionKey(entry)) ? 'P1-SAFE' : 'ERROR';
 }
 
+/**
+ * 解析禁用集合：自动发现 ∪ 显式基线。
+ *
+ * 并集下限门禁：自动发现数 < 基线数 ⇒ 解析退化（门禁会变松）⇒ 直接 Exit 2。
+ * @param {string} scanRoot
+ * @returns {{forbidden:string[], discovered:string[], sites:Map<string,string[]>}}
+ */
+function resolveForbiddenSet(scanRoot) {
+  const { names: discovered, sites } = discoverLockAcquiringMethods(scanRoot);
+  if (discovered.length < BASELINE_FORBIDDEN.length) {
+    console.error(
+      `[lock-scope] SCRIPT-ERROR: auto-discovery degraded (discovered=${discovered.length} < ` +
+        `baseline=${BASELINE_FORBIDDEN.length}); refusing to emit a verdict from a loosened gate. ` +
+        `discovered=[${discovered.join(', ')}]`,
+    );
+    process.exit(2);
+  }
+  const forbidden = [...new Set([...BASELINE_FORBIDDEN, ...discovered])].sort();
+  return { forbidden, discovered, sites };
+}
+
 /** 遍历扫描根下所有 .rs 文件并返回分级后的违规。 */
-function collectViolations(scanRoot) {
+function collectViolations(scanRoot, forbidden) {
   if (!fs.existsSync(scanRoot)) {
     console.error(`scan root not found: ${scanRoot}`);
     process.exit(2);
@@ -354,7 +452,7 @@ function collectViolations(scanRoot) {
   const blocking = [];
   const verifiedSafe = [];
   for (const file of files) {
-    const { displayPath, relPath, violations } = scanFile(file, scanRoot);
+    const { displayPath, relPath, violations } = scanFile(file, scanRoot, forbidden);
     for (const violation of violations) {
       const entry = { displayPath, relPath, ...violation };
       if (classify(entry) === 'ERROR') blocking.push(entry);
@@ -367,6 +465,87 @@ function collectViolations(scanRoot) {
 function runSelfTest() {
   const failing = [];
 
+  // ── 自动发现引擎自检（合成样例，独立于仓库状态）────────────────────────────────────
+  const syntheticModule = `
+impl Foo {
+    fn hidden_lock_helper(&self) -> Option<Bar> {
+        let guard = self.graph_runs.lock().unwrap();
+        guard.load_run("x")
+    }
+    fn multi_line_signature(&self, a: u8) -> Result<(), String>
+    where
+        u8: Copy,
+    {
+        let _guard = self.graph_runs.lock().unwrap();
+        Ok(())
+    }
+    fn no_lock(&self) -> u8 {
+        1
+    }
+    fn mention_only(&self) -> String {
+        "self.graph_runs.lock()".to_string()
+    }
+}
+`;
+  const syntheticNames = discoverInSource(syntheticModule).map((hit) => hit.name).sort();
+  const expectedSynthetic = ['hidden_lock_helper', 'multi_line_signature'];
+  if (JSON.stringify(syntheticNames) !== JSON.stringify(expectedSynthetic)) {
+    failing.push(
+      `discovery must find ${JSON.stringify(expectedSynthetic)} (multi-line signature included, ` +
+        `string literal excluded), got ${JSON.stringify(syntheticNames)}`,
+    );
+  }
+
+  // ── 并集下限门禁自检（解析退化必须 Exit 2 而不是静默变松）──────────────────────────
+  if (!(0 < BASELINE_FORBIDDEN.length)) {
+    failing.push('baseline forbidden list must be non-empty');
+  }
+  const degraded = discoverInSource('fn nothing(&self) {}').length;
+  if (!(degraded < BASELINE_FORBIDDEN.length)) {
+    failing.push('degradation predicate must trigger when discovery finds fewer than the baseline');
+  }
+
+  // ── 真实仓库：自动发现集合 + 用「新发现方法名」构造违规样例 ─────────────────────────
+  const liveRoot = path.join(REPO_ROOT, DEFAULT_SCAN_ROOT);
+  if (!fs.existsSync(liveRoot)) {
+    failing.push(`live scan root missing, cannot validate auto-discovery: ${liveRoot}`);
+  } else {
+    const { names: liveDiscovered } = discoverLockAcquiringMethods(liveRoot);
+    if (liveDiscovered.length < BASELINE_FORBIDDEN.length) {
+      failing.push(
+        `live auto-discovery must find >= ${BASELINE_FORBIDDEN.length} lock-acquiring methods, ` +
+          `got ${liveDiscovered.length}`,
+      );
+    }
+    const widened = liveDiscovered.filter((name) => !BASELINE_FORBIDDEN.includes(name));
+    if (widened.length === 0) {
+      failing.push('auto-discovery must widen the forbidden set beyond the 4-name baseline');
+    } else {
+      const newName = widened[0];
+      const liveUnion = [...new Set([...BASELINE_FORBIDDEN, ...liveDiscovered])].sort();
+      const wideningSample = `
+fn widen(&self) {
+    let guard = self.graph_runs.lock().unwrap();
+    let _ = self.${newName}(query);
+}
+`;
+      const withUnion = analyzeSource(wideningSample, liveUnion);
+      const withBaselineOnly = analyzeSource(wideningSample, BASELINE_FORBIDDEN);
+      if (withUnion.length !== 1 || withUnion[0].kind !== 'forbidden-call') {
+        failing.push(
+          `violation built from newly discovered method \`${newName}\` must be reported by the ` +
+            `union set, got ${JSON.stringify(withUnion)}`,
+        );
+      }
+      if (withBaselineOnly.length !== 0) {
+        failing.push(
+          `baseline-only set must MISS \`${newName}\` (proves the widening is not vacuous), ` +
+            `got ${JSON.stringify(withBaselineOnly)}`,
+        );
+      }
+    }
+  }
+
   // 违规样例：加锁后二次加锁调用 → 必须报违规（证明守卫不是假测试）。
   const violating = `
 fn bad(&self) {
@@ -375,7 +554,7 @@ fn bad(&self) {
     let _ = run;
 }
 `;
-  const violatingHits = analyzeSource(violating);
+  const violatingHits = analyzeSource(violating, BASELINE_FORBIDDEN);
   if (violatingHits.length !== 1 || violatingHits[0].kind !== 'forbidden-call') {
     failing.push(
       `violating sample must report exactly 1 forbidden-call, got ${JSON.stringify(violatingHits)}`,
@@ -394,7 +573,7 @@ fn nested(&self) {
     }
 }
 `;
-  const nestedHits = analyzeSource(nested);
+  const nestedHits = analyzeSource(nested, BASELINE_FORBIDDEN);
   if (nestedHits.length !== 1 || nestedHits[0].kind !== 'forbidden-call') {
     failing.push(`nested sample must report 1 forbidden-call, got ${JSON.stringify(nestedHits)}`);
   }
@@ -407,7 +586,7 @@ fn twice(&self) {
     let _ = (store, again);
 }
 `;
-  const doubleLockHits = analyzeSource(doubleLock);
+  const doubleLockHits = analyzeSource(doubleLock, BASELINE_FORBIDDEN);
   if (doubleLockHits.length !== 1 || doubleLockHits[0].kind !== 'nested-lock') {
     failing.push(`double-lock sample must report 1 nested-lock, got ${JSON.stringify(doubleLockHits)}`);
   }
@@ -424,7 +603,7 @@ fn good(&self) {
     let _ = store;
 }
 `;
-  const cleanHits = analyzeSource(clean);
+  const cleanHits = analyzeSource(clean, BASELINE_FORBIDDEN);
   if (cleanHits.length !== 0) {
     failing.push(`clean sample must report 0 violations, got ${JSON.stringify(cleanHits)}`);
   }
@@ -437,7 +616,7 @@ fn quiet(&self) {
     let _ = note;
 }
 `;
-  const commentedHits = analyzeSource(commented);
+  const commentedHits = analyzeSource(commented, BASELINE_FORBIDDEN);
   if (commentedHits.length !== 0) {
     failing.push(`comment/string sample must report 0 violations, got ${JSON.stringify(commentedHits)}`);
   }
@@ -485,7 +664,8 @@ fn quiet(&self) {
     return 2;
   }
   console.log(
-    '[self-test] PASS: 守卫能对违规样例报错、对合法/注释样例零误报，且豁免表精确到行号/方法',
+    '[self-test] PASS: 自动发现引擎（含多行签名/字符串排除）、并集下限门禁、新发现方法名违规样例、' +
+      '合法/注释/顺序加锁零误报、豁免表精确到行号/方法 —— 全部通过',
   );
   return 0;
 }
@@ -511,13 +691,18 @@ function main() {
       ? path.resolve(process.cwd(), rootArgs[0].slice('--root='.length))
       : path.join(REPO_ROOT, DEFAULT_SCAN_ROOT);
 
-  const { files, blocking: classified, verifiedSafe } = collectViolations(scanRoot);
+  const { forbidden, discovered } = resolveForbiddenSet(scanRoot);
+  const { files, blocking: classified, verifiedSafe } = collectViolations(scanRoot, forbidden);
   const blocking = strict ? [...classified, ...verifiedSafe] : classified;
   const registered = strict ? [] : verifiedSafe;
 
   console.log(
     `[lock-scope] scanned ${files.length} file(s) under ${scanRoot} (mode=${strict ? 'strict' : 'blocking-only'})`,
   );
+  console.log(
+    `[lock-scope] forbidden set: ${forbidden.length} name(s) = baseline ${BASELINE_FORBIDDEN.length} ∪ discovered ${discovered.length}`,
+  );
+  console.log(`[lock-scope] auto-discovered (${discovered.length}): ${discovered.join(', ')}`);
 
   for (const entry of blocking) {
     console.error(

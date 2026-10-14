@@ -430,20 +430,38 @@ impl HostControlPlane {
         query: GraphRunSubmissionPlanQuery,
     ) -> GraphRunSubmissionPlan {
         let (run, has_unresolved_ask_waits) = {
-            let store = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned, recovering: {e}");
-                e.into_inner()
+            // 锁纪律：`self.graph_runs` 是非重入 Mutex，绝不允许在持锁作用域内调用会再次加锁的
+            // 方法（resolve_graph_run_for_retrieval / load_graph_run / load_execution_checkpoint /
+            // load_active_graph_run_for_session）。run_id 命中时，run 快照与 ask-wait 判定必须在
+            // 同一个 guard 内原子完成（避免撕裂读）；只有未命中 fallback 才锁外解析 + 独立短锁判 waits。
+            let hit = query.run_id.as_deref().map(|run_id| {
+                let store = self.graph_runs.lock().unwrap_or_else(|e| {
+                    eprintln!("[pony-agent] graph run lock poisoned (run_id={run_id}): {e}");
+                    e.into_inner()
+                });
+                store.load_run(run_id).map(|run| {
+                    let unresolved = crate::agent::graph::has_unresolved_ask_waits(&store, &run.id);
+                    (run, unresolved)
+                })
             });
-            let loaded_run = query
-                .run_id
-                .as_deref()
-                .and_then(|run_id| store.load_run(run_id))
-                .or_else(|| self.resolve_graph_run_for_retrieval(None, query.session_id.as_deref()));
-            let unresolved = loaded_run
-                .as_ref()
-                .map(|r| crate::agent::graph::has_unresolved_ask_waits(&store, &r.id))
-                .unwrap_or(false);
-            (loaded_run, unresolved)
+            match hit {
+                Some(Some((hit_run, unresolved))) => (Some(hit_run), unresolved),
+                _ => {
+                    let loaded_run =
+                        self.resolve_graph_run_for_retrieval(None, query.session_id.as_deref());
+                    let unresolved = loaded_run
+                        .as_ref()
+                        .map(|r| {
+                            let store = self.graph_runs.lock().unwrap_or_else(|e| {
+                                eprintln!("[pony-agent] graph run lock poisoned (run_id={}, session_id={:?}), recovering: {e}", r.id, query.session_id);
+                                e.into_inner()
+                            });
+                            crate::agent::graph::has_unresolved_ask_waits(&store, &r.id)
+                        })
+                        .unwrap_or(false);
+                    (loaded_run, unresolved)
+                }
+            }
         };
 
         if let Some(checkpoint) = self.load_execution_checkpoint(ExecutionCheckpointQuery {
