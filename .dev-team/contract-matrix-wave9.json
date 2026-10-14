@@ -1,0 +1,179 @@
+{
+  "wave": 9,
+  "classification": "B",
+  "baseline_commit": "a01c2c8",
+  "baseline_commit_full": "a01c2c87588c0b4e808e1adff9bb355dd75e3b79",
+  "artifact": ".dev-team/contract-matrix-wave9.json",
+  "authority": "L2-P protocol agent (task-1). This file is the single frozen contract carrier for wave-9; executors and test-agent MUST reference it and MUST NOT rename any entry in frozen_signatures.",
+  "frozen_at": "wave-9 protocol freeze",
+  "contracts": [
+    {
+      "id": "P0-1",
+      "title": "timeout 类失败指纹归一化（Run 类工具），修复连续失败误判/漏判",
+      "priority": "P0",
+      "files": [
+        "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+        "crates/pony-agent-core/src/agent/runtime/tests.rs"
+      ],
+      "requirement": "`pony_agent_core::agent::runtime::tool_failure_signal(call, result)` 签名保持不变。新增行为：仅当 error code/kind == \"timeout\" 且 tool name 属 Run 类（`Run` / `workspace_run_command` / `workspace.run_command`）时，参数指纹改用归一化参数：(a) 删除 `timeoutMs` 键；(b) 对 `command` 字符串剥离行首 POSIX 内联赋值前缀（形如 `VAR=value `，可出现多个）与行首 `set VAR=value&&` / `set VAR=value &&` 前缀，取剩余核心命令（core command）。非 timeout 或非 Run 类工具必须保持现状，即继续走 `canonicalize_tool_argument_value`。不变量：同一核心命令 + 同一 timeout kind 的连续失败必须产生完全相同的指纹（使 ConsecutiveFailureTracker 能正确累计）。",
+      "acceptance_test": "对 Run 类工具构造 error.kind==\"timeout\" 的 ToolResult，参数分别为 {command:\"pnpm test\", timeoutMs:1000} 与 {command:\"FOO=1 pnpm test\", timeoutMs:60000} 与 {command:\"set FOO=1 && pnpm test\", timeoutMs:500}：三者 tool_failure_signal 返回的指纹必须逐一相等。反例断言：(1) 非 timeout（kind==\"non_zero_exit\"）同参数必须回退到 canonicalize_tool_argument_value 且两指纹不等（因 timeoutMs 保留）；(2) 非 Run 类工具（如 `read_file`）timeout 时必须回退现状；(3) 核心命令不同（\"pnpm test\" vs \"pnpm build\"）必须指纹不等。",
+      "verification_level": "unit (Linux native, cargo test, 可在本机完整类型检查与执行)"
+    },
+    {
+      "id": "P0-2",
+      "title": "run_command 超时错误载荷保留已采集证据",
+      "priority": "P0",
+      "files": [
+        "crates/pony-agent-core/src/agent/tools.rs"
+      ],
+      "requirement": "run_command 超时（deadline 到期）返回的错误载荷 SHALL 保留已采集证据，根级至少包含：`stdout`、`stderr`、`stdoutTruncated`、`stderrTruncated`、`exitCode`、`cleanupError`、`timeoutMs`、`command`；且 `error.kind` 与 `error.code` 必须同时保持字符串 \"timeout\"（双写且值一致，不得改名——既有断言 crates/pony-agent-core/src/agent/tools.rs:9435 附近 `run_command_returns_timeout_error_when_command_exceeds_deadline` 依赖该值）。`cleanupError` 在无清理错误时 SHALL 为 JSON null，不得省略键。证据字段必须与成功路径命名一致（stdout/stderr/stdoutTruncated/stderrTruncated/exitCode/timeoutMs/command），禁止另起别名。",
+      "acceptance_test": "以短 timeoutMs 触发超时（Linux 用 `sleep 5` + timeoutMs=200），断言 status==\"error\"，error.code==\"timeout\" 且 error.kind==\"timeout\"，并逐字段断言 stdout/stderr/stdoutTruncated/stderrTruncated/exitCode/cleanupError/timeoutMs/command 八个键**存在**（`cleanupError` 允许值为 null 但键必须在）。另需一条负例：命令在 deadline 前正常退出时载荷不得出现伪造的 timeout 证据。",
+      "verification_level": "unit+integration (Linux native, cargo test)"
+    },
+    {
+      "id": "P1-1",
+      "title": "超时清理去 or_else 短路 + 存活探针 + environment_unavailable",
+      "priority": "P1",
+      "files": [
+        "crates/pony-agent-core/src/agent/tools.rs",
+        "crates/pony-agent-core/src/agent/process.rs"
+      ],
+      "requirement": "超时分支清理 SHALL 无条件二次调用幂等清理，修复现有 `timeout_cleanup_error.or_else(|| self.process_manager.kill_if_exists(&session_id, &handle).err())`（crates/pony-agent-core/src/agent/tools.rs:2219-2222）的短路缺陷：即无论首次清理是否报错，都必须再执行一次 kill_if_exists 幂等清理，并保留首次的清理错误（首个非 None 错误胜出）。清理后 SHALL 执行存活探针（`ProcessManager::is_tracked(session_id, handle)`，平台无关，不得 cfg 门控）。若探针显示句柄仍被追踪 → error code 由 \"timeout\" 改为新增码 \"environment_unavailable\"，且 hint SHALL 明示「执行环境不可用，已终止本轮工具调用」。探针显示已释放时保持 \"timeout\"。",
+      "acceptance_test": "(1) 注入首次清理失败、二次清理成功的场景，断言返回载荷的 cleanupError 保留首次错误（证明二次清理确实被调用，未短路）；(2) 注入两次清理均失败且 is_tracked 返回 true 的场景，断言 error.code==\"environment_unavailable\" 且 hint 含「执行环境不可用，已终止本轮工具调用」；(3) 正常超时清理成功且 is_tracked 返回 false，断言 error.code 仍为 \"timeout\"（防回归为恒 environment_unavailable）。",
+      "verification_level": "unit+integration (Linux native, cargo test)；is_tracked 必须平台无关以便 Linux 可验证"
+    },
+    {
+      "id": "P1-2",
+      "title": "超时 hint 分类：网络类命令给出网络/认证/代理三类可能 + 自检步骤",
+      "priority": "P1",
+      "files": [
+        "crates/pony-agent-core/src/agent/tools.rs"
+      ],
+      "requirement": "新增纯函数 `fn classify_timeout_hint(command: &str) -> String`（crates/pony-agent-core/src/agent/tools.rs 私有，不得 pub 化、不得改名）。当 command 命中 `push|fetch|clone|pull|ls-remote` 任一子串时，返回的 hint 必须同时含「网络/认证/代理三类可能」的表述与自检步骤：`git ls-remote`、`git config --get remote.origin.url`、SSH 身份自检。未命中时 SHALL 返回现有默认 hint 文案，且该文案必须与当前超时分支既有文案逐字一致，以保证既有测试仍可断言。函数必须是纯函数（无 I/O、无全局状态），供超时分支调用替换现有硬编码 hint。",
+      "acceptance_test": "对 \"git push origin main\" / \"git fetch\" / \"git clone https://x\" / \"git pull\" / \"git ls-remote\" 断言返回 hint 含三类可能与三步自检关键字；对 \"pnpm test\" 断言返回默认文案且与既有超时 hint 字符串完全相等（逐字断言）。",
+      "verification_level": "unit (Linux native, cargo test)"
+    },
+    {
+      "id": "P1-3",
+      "title": "POSIX 内联环境赋值识别（平台无关纯函数，仅 Windows 调用点拒绝）",
+      "priority": "P1",
+      "files": [
+        "crates/pony-agent-core/src/agent/tools.rs"
+      ],
+      "requirement": "新增平台无关纯函数 `fn posix_inline_env_assignment_reason(command: &str) -> Option<String>`（crates/pony-agent-core/src/agent/tools.rs 私有，不得改名）。仅识别「行首 `NAME=value` 赋值后接命令」形态（`NAME=value cmd`），返回的 reason 必须含 `set VAR=value && cmd` 形式的纠正提示。调用点 SHALL 以 `cfg!(windows)` 门控：Linux 上不得拒绝该形态命令（保持现状直通）；Windows 上拒绝时使用新增错误码 \"windows_inline_env_unsupported\"。严禁自动改写用户命令（不得把 `NAME=value cmd` 自动重写为 `set ...`），只允许拒绝 + 提示。",
+      "acceptance_test": "(1) 纯函数单测：\"FOO=1 pnpm test\" → Some(reason 含 `set FOO=1 && pnpm test`)；\"pnpm test\" / \"FOO=1\"（无后续命令）/ \"FOO=1\" 带引号等边界 → None；\"set FOO=1 && pnpm test\" → None。(2) 平台门控断言：在 Linux（本机）执行 `FOO=1 true` 类命令不得返回 windows_inline_env_unsupported（cfg!(windows)==false 分支）。",
+      "verification_level": "unit (Linux native) 对纯函数为 FULL；调用点拒绝分支为 [VERIFY DEGRADED: WINDOWS-ONLY]（见 verification_limits）"
+    },
+    {
+      "id": "P2-1",
+      "title": "Windows Job 时序：CREATE_SUSPENDED → assign_and_verify → ResumeThread，fail-closed",
+      "priority": "P2",
+      "files": [
+        "crates/pony-agent-core/src/agent/process.rs",
+        "crates/pony-agent-core/src/agent/process/windows_job.rs"
+      ],
+      "requirement": "process.rs 的 Windows 路径改为：以 CREATE_SUSPENDED 创建子进程 → Job `assign_and_verify` 成功后 → 才调用 ResumeThread 恢复主线程。ResumeThread 失败必须 fail-closed：清理已创建的子进程与 Job（含 job.close()）、从 tracked 表中移除条目、并向调用方返回错误（不得留下已创建但未恢复/未纳管句柄的进程）。`terminate` 成功路径 SHALL 调用 `job.close()`（crates/pony-agent-core/src/agent/process/windows_job.rs 已有 pub(super) fn close(&self)）。Linux 路径行为不得改变。",
+      "acceptance_test": "Windows-only：注入 ResumeThread 失败，断言返回 Err、tracked_count 回到调用前值、Job 句柄已关闭；断言 terminate 成功路径调用 close()（可经 job handle 已释放断言）。本机 Linux 无法执行该用例。",
+      "verification_level": "[VERIFY DEGRADED: WINDOWS-ONLY]"
+    },
+    {
+      "id": "P2-2",
+      "title": "BASE_SYSTEM_PROMPT 新增单句「回执式」手动执行清单条款",
+      "priority": "P2",
+      "files": [
+        "crates/pony-agent-core/src/agent/context.rs"
+      ],
+      "requirement": "BASE_SYSTEM_PROMPT（crates/pony-agent-core/src/agent/context.rs）新增**单句**条款：仅在运行时手段穷尽后才可向用户派发手动执行清单，且派发时必须逐条列出已尝试的自愈命令与观测结果（退出码/超时）。除该单句外，BASE_SYSTEM_PROMPT 其余文字必须逐字不变（既有断言 context.rs:2607-2610 依赖 \"Read-before-write policy\" / \"physical receipts\" / \"Task planning and execution tracking contract\" / \"todo_write\" 等子串）。",
+      "acceptance_test": "断言 BASE_SYSTEM_PROMPT 含新条款关键子串（运行时手段穷尽 + 逐条列出已尝试的自愈命令 + 退出码/超时）；并断言既有四个子串仍存在（防夹带删改）。新增内容为单句，不得引入第二段或多条编号条款。",
+      "verification_level": "unit (Linux native, cargo test)"
+    }
+  ],
+  "frozen_signatures": [
+    {
+      "name": "tool_failure_signal",
+      "signature": "pub fn tool_failure_signal(tool_call: &ToolCall, tool_result: &ToolResult) -> Option<(String, String, String)>",
+      "location": "crates/pony-agent-core/src/agent/runtime/stream_support.rs:390",
+      "wave9_change": "签名与可见性不变；仅内部参数指纹计算对 Run 类 timeout 走归一化路径"
+    },
+    {
+      "name": "ProcessManager::is_tracked",
+      "signature": "pub(crate) fn is_tracked(&self, session_id: &str, handle: &str) -> bool",
+      "location": "crates/pony-agent-core/src/agent/process.rs（本波新增）",
+      "wave9_change": "新增；必须平台无关（禁止 cfg(windows) 门控），作为 P1-1 存活探针"
+    },
+    {
+      "name": "classify_timeout_hint",
+      "signature": "fn classify_timeout_hint(command: &str) -> String",
+      "location": "crates/pony-agent-core/src/agent/tools.rs（本波新增，私有）",
+      "wave9_change": "新增；纯函数，不得 pub 化"
+    },
+    {
+      "name": "posix_inline_env_assignment_reason",
+      "signature": "fn posix_inline_env_assignment_reason(command: &str) -> Option<String>",
+      "location": "crates/pony-agent-core/src/agent/tools.rs（本波新增，私有）",
+      "wave9_change": "新增；平台无关纯函数，调用点以 cfg!(windows) 门控"
+    },
+    {
+      "name": "error_result_with_evidence",
+      "signature": "fn error_result_with_evidence(tool_name: &str, code: &str, message: String, hint: Option<String>, evidence: Value) -> ToolResult",
+      "location": "crates/pony-agent-core/src/agent/tools.rs（本波新增，私有）",
+      "wave9_change": "新增；把 evidence 对象的键并入错误载荷根级，同时保持 error.code/error.kind 双写一致"
+    },
+    {
+      "name": "tracked_count",
+      "signature": "pub(crate) fn tracked_count(&self) -> usize",
+      "location": "crates/pony-agent-core/src/agent/process.rs:536",
+      "wave9_change": "签名不变；保持既有 #[cfg(all(test, windows))] 门控不变，**不是** P1-1 的存活探针（探针为 is_tracked）"
+    }
+  ],
+  "frozen_signature_names": [
+    "tool_failure_signal",
+    "ProcessManager::is_tracked",
+    "classify_timeout_hint",
+    "posix_inline_env_assignment_reason",
+    "error_result_with_evidence",
+    "tracked_count"
+  ],
+  "error_codes_added": [
+    "environment_unavailable",
+    "windows_inline_env_unsupported"
+  ],
+  "error_codes_added_detail": {
+    "environment_unavailable": "P1-1：超时清理后存活探针仍显示句柄被追踪时使用；hint 明示「执行环境不可用，已终止本轮工具调用」。",
+    "windows_inline_env_unsupported": "P1-3：仅 Windows 调用点（cfg!(windows)）对行首 POSIX 内联赋值形态命令的拒绝码；Linux 不得发出该码。"
+  },
+  "verification_limits": {
+    "host_platform": "linux-x86_64",
+    "rustup_available": false,
+    "windows_cross_compile_available": false,
+    "statement": "本机为 Linux x86_64 且无 rustup，无法交叉编译/类型检查 Windows target；`#[cfg(windows)]` 代码在本机既不参与类型检查也不可执行，因此 P2-1 的验证等级为 [VERIFY DEGRADED: WINDOWS-ONLY]，并作为已知残余风险记录在案，不得据此主张 P2-1 已通过。",
+    "degraded_items": [
+      {
+        "contract": "P2-1",
+        "verification_level": "[VERIFY DEGRADED: WINDOWS-ONLY]",
+        "reason": "本机 Linux x86_64 无 rustup，无 Windows target，`#[cfg(windows)]` 分支（CREATE_SUSPENDED / ResumeThread / Job assign_and_verify / job.close()）无法类型检查，也无法执行 Windows-only 测试。",
+        "residual_risk": "CREATE_SUSPENDED → assign_and_verify → ResumeThread 的时序与 ResumeThread 失败 fail-closed 路径均未经机器验证；terminate 成功路径调用 job.close() 亦未经机器验证。若实现存在句柄泄漏或未恢复线程，本机门禁不会发现。",
+        "compensating_control": "1) 代码评审必须逐行核对 Windows 分支的控制流（创建/恢复/清理三段）；2) 保持 Linux 路径行为零变化并由既有 Linux 测试守护；3) 在 wave-9 交付说明中显式登记该降级，禁止声称 P2-1 已机器验证。"
+      },
+      {
+        "contract": "P1-3",
+        "verification_level": "[VERIFY DEGRADED: WINDOWS-ONLY]（仅调用点拒绝分支）",
+        "reason": "posix_inline_env_assignment_reason 本身为平台无关纯函数，可在 Linux 完整单测；但其调用点由 cfg!(windows) 门控，故 Windows 上「拒绝 + 发出 windows_inline_env_unsupported」这一分支在本机不可执行。",
+        "residual_risk": "Windows 侧拒绝行为与错误码接线未经机器验证。",
+        "compensating_control": "Linux 侧以「不得拒绝」反向断言守护（cfg!(windows)==false 分支可测），Windows 侧接线交由代码评审。"
+      }
+    ]
+  },
+  "nfr_baseline_ref": {
+    "path": ".dev-team/nfr-baseline.json",
+    "schema": ".dev-team/nfr-baseline.schema.json",
+    "lint": ".dev-team/nfr-lint.py",
+    "reconciliation": "task-1 要求的 5 个必填字段（external_call_timeout_ms / retry / concurrency_lock / logging / resource_release）在该文件中均已存在且合规；该文件同时是 wave-8 冻结门禁 nfr-lint.py 的校验实例（additionalProperties=false，逐层未知字段拒绝），故不得裁剪既有字段。本波仅对 resource_release 做**追加式**扩充以登记 wave-9 进程生命周期释放承诺，未新增任何未在 schema 中声明的字段。"
+  },
+  "non_goals": [
+    "不改 BASE_SYSTEM_PROMPT 其余文字（P2-2 仅新增单句，其余逐字不变）",
+    "不自动改写命令（P1-3 只拒绝 + 提示，禁止把 `NAME=value cmd` 自动重写为 `set NAME=value && cmd`）",
+    "不拉长网络命令默认超时（保持既有默认 timeoutMs，仅改进 hint 与指纹归一化）",
+    "不重构无关代码（不触碰非因果关联模块，不得借优化之名扩大改动闭包）"
+  ]
+}

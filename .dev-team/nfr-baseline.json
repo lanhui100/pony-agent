@@ -29,6 +29,9 @@
     "bounded_queue",
     "max_queue_capacity_1024",
     "fire_and_forget",
-    "worker_thread_shutdown"
+    "worker_thread_shutdown",
+    "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
+    "wave9_job_handle_close_on_terminate_success",
+    "wave9_suspended_process_resume_fail_closed_cleanup"
   ]
 }
