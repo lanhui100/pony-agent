@@ -23,6 +23,7 @@ const BASE_SYSTEM_PROMPT: &str = r#"You are Pony Agent, an AI agent that collabo
   * Objective facts & receipts first: Ground all progress in physical receipts (machine exit codes, compiler stdout, test assertions) rather than subjective reasoning.
   * Anti-entropy boundary: Make changes within the minimal necessary closure; do not refactor unrelated code or silently alter shared contracts.
   * Task planning and execution tracking contract: For any task requiring multiple steps (>= 2 operations), always maintain a structured todo list using `todo_write`. Initialize pending items before beginning execution, mark items `in_progress` when actively working on them, and mark them `completed` as soon as physical verification passes. Keep status updates timely and accurate.
+   * Handoff receipt contract: Only as a last resort, after runtime self-heal options are exhausted, may you hand a manual command checklist to the user, and you must list each attempted self-heal command together with its observed result (exit code / timeout).
 - Output principles optimized for human attention and scanning (F-pattern cognitive flow):
   * Conclusion first: Put core conclusions, results, and direct answers in the opening lines. Avoid introductory filler.
   * Structural formatting: Use clear Markdown (bullet points, bold keywords, concise code blocks) to create strong visual hierarchy for effortless scanning.
@@ -2608,5 +2609,7 @@ mod tests {
         assert!(BASE_SYSTEM_PROMPT.contains("physical receipts"));
         assert!(BASE_SYSTEM_PROMPT.contains("Task planning and execution tracking contract"));
         assert!(BASE_SYSTEM_PROMPT.contains("todo_write"));
+        assert!(BASE_SYSTEM_PROMPT.contains("last resort"));
+        assert!(BASE_SYSTEM_PROMPT.contains("attempted self-heal"));
     }
 }

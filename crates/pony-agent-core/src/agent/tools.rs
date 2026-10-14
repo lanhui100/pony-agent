@@ -2017,6 +2017,23 @@ impl ToolRouter {
             );
         }
 
+        // wave-9 P1-3：Windows 专用拦截 —— `cmd` 不支持行首内联 env 赋值。门控为
+        // `cfg!(windows)`（运行时布尔），非 Windows 平台该形态是合法 POSIX 语法，严禁拒绝；
+        // 这里只拒绝并给出纠正提示，绝不自动改写用户命令。
+        if cfg!(windows) {
+            if let Some(reason) = posix_inline_env_assignment_reason(command) {
+                return error_result(
+                    TOOL_WORKSPACE_RUN_COMMAND,
+                    "windows_inline_env_unsupported",
+                    reason,
+                    Some(
+                        "请改写为 `set VAR=value && cmd` 形式后重试；本工具不会自动改写你的命令。"
+                            .to_string(),
+                    ),
+                );
+            }
+        }
+
         let ws_id = self.extract_call_workspace_id(call, context);
         let cwd_input = call
             .arguments
@@ -2222,23 +2239,59 @@ impl ToolRouter {
         }
 
         if timed_out {
-            // The deadline branch already attempted cleanup; retry for idempotent timer races and
-            // retain any native Job/child cleanup error instead of reporting a false termination.
-            let cleanup_error = timeout_cleanup_error
-                .or_else(|| self.process_manager.kill_if_exists(&session_id, &handle).err());
-            let message = match cleanup_error {
-                Some(error) => format!(
-                    "命令执行超过超时上限 {} ms；进程树清理失败：{}。",
-                    timeout_ms, error
-                ),
-                None => format!("命令执行超过超时上限 {} ms，已终止。", timeout_ms),
+            // wave-9 P1-1：无条件二次调用幂等清理。首次 `kill_if_exists` 对**仍在运行**的进程
+            // 只做终止并保留条目（终态可轮询），第二次调用才真正释放条目；旧的 `or_else` 在首次
+            // 清理报错时会短路掉第二次调用，留下被追踪的句柄。此处改为无条件重试，并保留首个
+            // 非 None 清理错误作为证据。
+            let retry_cleanup_error = self
+                .process_manager
+                .kill_if_exists(&session_id, &handle)
+                .err();
+            let cleanup_error = timeout_cleanup_error.or(retry_cleanup_error);
+            // 存活探针（平台无关）：清理后句柄仍被追踪 → 执行环境不可用，本轮工具调用必须终止。
+            let still_tracked = self.process_manager.is_tracked(&session_id, &handle);
+            let (code, message, hint) = if still_tracked {
+                let message = match &cleanup_error {
+                    Some(error) => format!(
+                        "命令执行超过超时上限 {} ms；进程树清理后句柄仍被追踪（清理错误：{}）。",
+                        timeout_ms, error
+                    ),
+                    None => format!(
+                        "命令执行超过超时上限 {} ms；进程树清理后句柄仍被追踪。",
+                        timeout_ms
+                    ),
+                };
+                (
+                    "environment_unavailable",
+                    message,
+                    "执行环境不可用，已终止本轮工具调用；请重启运行环境后重试。".to_string(),
+                )
+            } else {
+                let message = match &cleanup_error {
+                    Some(error) => format!(
+                        "命令执行超过超时上限 {} ms；进程树清理失败：{}。",
+                        timeout_ms, error
+                    ),
+                    None => format!("命令执行超过超时上限 {} ms，已终止。", timeout_ms),
+                };
+                ("timeout", message, classify_timeout_hint(command))
             };
             remove_windows_batch_script(batch_script_path.as_deref());
-            return error_result(
+            return error_result_with_evidence(
                 TOOL_WORKSPACE_RUN_COMMAND,
-                "timeout",
+                code,
                 message,
-                Some("请缩短命令执行时间，或显式传入更大的 timeoutMs。".to_string()),
+                Some(hint),
+                json!({
+                    "command": command,
+                    "timeoutMs": timeout_ms,
+                    "exitCode": exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "stdoutTruncated": stdout_truncated,
+                    "stderrTruncated": stderr_truncated,
+                    "cleanupError": cleanup_error,
+                }),
             );
         }
 
@@ -6394,6 +6447,85 @@ fn denied_run_command_reason(command: &str) -> Option<String> {
         })
 }
 
+/// wave-9 P1-2：超时 hint 分类（私有纯函数，无 I/O、无全局状态、不做命令改写）。
+///
+/// 命中网络类子命令标记（`push`/`fetch`/`clone`/`pull`/`ls-remote`）时，给出「网络/认证/代理」
+/// 三类可能原因与可自检步骤；未命中时逐字返回既有默认文案，保持既有断言可继续成立。
+fn classify_timeout_hint(command: &str) -> String {
+    const NETWORK_COMMAND_MARKERS: [&str; 5] = ["push", "fetch", "clone", "pull", "ls-remote"];
+    if NETWORK_COMMAND_MARKERS
+        .iter()
+        .any(|marker| command.contains(marker))
+    {
+        return "命令疑似网络类操作，超时可能来自网络/认证/代理三类原因之一：请依次自检 `git ls-remote <remote-url>` 是否可连通、`git config --get remote.origin.url` 是否指向预期远端、SSH 身份自检（`ssh -T git@<host>`）是否有效；确认后再重试，或显式传入更大的 timeoutMs。".to_string();
+    }
+    "请缩短命令执行时间，或显式传入更大的 timeoutMs。".to_string()
+}
+
+/// wave-9 P1-3：识别 POSIX 行首内联环境变量赋值形态（私有纯函数，平台无关）。
+///
+/// 仅识别「行首 `NAME=value` 赋值后接真实命令」形态（值可带单/双引号）；单独赋值、非行首赋值
+/// 一律返回 `None`。调用点以 `cfg!(windows)` 门控，非 Windows 平台不得拒绝该合法 POSIX 语法。
+/// 本函数只产出纠正提示，**严禁**自动改写用户命令。
+fn posix_inline_env_assignment_reason(command: &str) -> Option<String> {
+    let trimmed = command.trim_start();
+    let bytes = trimmed.as_bytes();
+    match bytes.first() {
+        Some(byte) if byte.is_ascii_alphabetic() || *byte == b'_' => {}
+        _ => return None,
+    }
+
+    let mut index = 0usize;
+    while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
+        index += 1;
+    }
+    let name = &trimmed[..index];
+    if bytes.get(index) != Some(&b'=') {
+        return None;
+    }
+    index += 1;
+
+    let value_start = index;
+    match bytes.get(index) {
+        Some(quote) if *quote == b'"' || *quote == b'\'' => {
+            let quote = *quote;
+            index += 1;
+            let mut closed = false;
+            while index < bytes.len() {
+                if bytes[index] == quote {
+                    closed = true;
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            if !closed {
+                return None;
+            }
+        }
+        Some(_) => {
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+        }
+        None => return None,
+    }
+    let value = &trimmed[value_start..index];
+
+    // 「赋值后接命令」：赋值之后必须由空白分隔且剩余命令非空。
+    if !matches!(bytes.get(index), Some(byte) if byte.is_ascii_whitespace()) {
+        return None;
+    }
+    let remainder = trimmed[index..].trim();
+    if remainder.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "检测到 POSIX 行首内联环境变量赋值 `{name}={value}`，Windows `cmd` 不支持该语法；请改写为 `set VAR=value && cmd` 形式（例如 `set {name}={value} && {remainder}`）后重试。"
+    ))
+}
+
 fn is_rm_destructive_command(tokens: &[&str]) -> bool {
     if tokens.first().copied() != Some("rm") {
         return false;
@@ -7256,6 +7388,46 @@ fn aborted_result(tool_name: &str, code: &str, message: String) -> ToolResult {
                 "hint": Option::<String>::None,
             }
         })),
+        duration_ms: 0,
+    }
+}
+
+/// wave-9 P0-2：与 [`error_result`] 同构的错误结果，额外把 `evidence` 对象的键**并入载荷根级**。
+///
+/// `error_result` 既有语义保持不变（不含证据键）；本 helper 只服务于「错误必须携带已采集物理
+/// 证据」的场景（run_command 超时）。`evidence` 的键名由调用方保证与成功路径一致（禁止别名）。
+fn error_result_with_evidence(
+    tool_name: &str,
+    code: &str,
+    message: String,
+    hint: Option<String>,
+    evidence: Value,
+) -> ToolResult {
+    let mut payload = json!({
+        "ok": false,
+        "tool": tool_name,
+        "error": {
+            // Stage1 双写（A2）：kind 与 code 并存且值一致。
+            "code": code,
+            "kind": code,
+            "message": message,
+            "hint": hint,
+        },
+        "summary": {
+            "text": message
+        }
+    });
+    if let Some(root) = payload.as_object_mut() {
+        if let Some(evidence) = evidence.as_object() {
+            for (key, value) in evidence {
+                root.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    ToolResult {
+        tool_name: tool_name.to_string(),
+        status: "error".to_string(),
+        output: json_string(payload),
         duration_ms: 0,
     }
 }
@@ -9463,6 +9635,128 @@ mod tests {
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_str),
             Some("timeout")
+        );
+    }
+
+    #[test]
+    fn classify_timeout_hint_classifies_network_commands_and_keeps_default() {
+        let network_hint = classify_timeout_hint("git push origin main");
+        for marker in [
+            "网络/认证/代理",
+            "git ls-remote",
+            "git config --get remote.origin.url",
+            "SSH 身份自检",
+        ] {
+            assert!(
+                network_hint.contains(marker),
+                "网络类超时 hint 必须含 `{marker}`：{network_hint}"
+            );
+        }
+        for command in [
+            "git fetch --all",
+            "git clone https://example.com/x.git",
+            "git pull",
+            "git ls-remote origin",
+        ] {
+            assert!(
+                classify_timeout_hint(command).contains("网络/认证/代理"),
+                "`{command}` 必须命中网络类分类"
+            );
+        }
+
+        let default_hint = classify_timeout_hint("sleep 5");
+        assert_eq!(
+            default_hint, "请缩短命令执行时间，或显式传入更大的 timeoutMs。",
+            "非网络类超时 hint 必须与既有默认文案逐字一致"
+        );
+    }
+
+    #[test]
+    fn posix_inline_env_assignment_reason_detects_only_leading_assignment_with_command() {
+        for command in [
+            "FOO=bar echo hi",
+            "FOO=\"a b\" echo hi",
+            "FOO='a b' echo hi",
+        ] {
+            let reason = posix_inline_env_assignment_reason(command)
+                .unwrap_or_else(|| panic!("`{command}` 必须被识别为行首内联 env 赋值"));
+            assert!(
+                reason.contains("set VAR=value && cmd"),
+                "纠正提示必须给出 `set VAR=value && cmd` 形式：{reason}"
+            );
+        }
+
+        for command in [
+            "echo FOO=bar",
+            "FOO=bar",
+            "--flag=value echo hi",
+            "FOO=\"unterminated echo hi",
+            "   ",
+        ] {
+            assert!(
+                posix_inline_env_assignment_reason(command).is_none(),
+                "`{command}` 不得被识别为行首内联 env 赋值后接命令"
+            );
+        }
+    }
+
+    #[test]
+    fn error_result_with_evidence_merges_evidence_at_payload_root() {
+        let result = error_result_with_evidence(
+            TOOL_WORKSPACE_RUN_COMMAND,
+            "timeout",
+            "命令执行超过超时上限 200 ms，已终止。".to_string(),
+            Some("hint".to_string()),
+            json!({
+                "command": "sleep 5",
+                "timeoutMs": 200,
+                "exitCode": Value::Null,
+                "stdout": "partial",
+                "stderr": "",
+                "stdoutTruncated": false,
+                "stderrTruncated": true,
+                "cleanupError": Value::Null,
+            }),
+        );
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("error output json");
+        assert_eq!(payload.get("ok").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            payload.get("command").and_then(Value::as_str),
+            Some("sleep 5")
+        );
+        assert_eq!(payload.get("timeoutMs").and_then(Value::as_u64), Some(200));
+        assert!(payload.get("exitCode").expect("exitCode 键").is_null());
+        assert!(payload
+            .get("cleanupError")
+            .expect("cleanupError 键")
+            .is_null());
+        assert_eq!(
+            payload.get("stdoutTruncated").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            payload.get("stderrTruncated").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("timeout")
+        );
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("kind"))
+                .and_then(Value::as_str),
+            Some("timeout")
+        );
+        assert!(
+            payload.get("summary").is_some(),
+            "证据合并不得挤掉既有 summary 结构"
         );
     }
 

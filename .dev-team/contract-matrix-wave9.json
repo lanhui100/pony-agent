@@ -6,6 +6,30 @@
   "artifact": ".dev-team/contract-matrix-wave9.json",
   "authority": "L2-P protocol agent (task-1). This file is the single frozen contract carrier for wave-9; executors and test-agent MUST reference it and MUST NOT rename any entry in frozen_signatures.",
   "frozen_at": "wave-9 protocol freeze",
+  "revision": 2,
+  "amendments": [
+    {
+      "id": "AMD-1",
+      "decided_by": "lead",
+      "date": "2026-10-14",
+      "change": "frozen_signatures 中 `tracked_count` 的门控由「保持 #[cfg(all(test, windows))] 不变」改为「放宽为 #[cfg(test)]（仅测试可见性，生产构建无行为变化）」。",
+      "rationale": "task-5 需在 Linux 上验证「kill 后 ProcessManager 无残留条目」，原门控使 tracked_count 在 Linux 不可用。放宽属纯测试可见性调整，非生产行为变更，Lead 一票裁决批准。"
+    },
+    {
+      "id": "AMD-2",
+      "decided_by": "lead",
+      "date": "2026-10-14",
+      "change": "P2-1 的 Windows 恢复实现路径定为 CREATE_SUSPENDED 创建 → `job.assign_and_verify` → `NtResumeProcess(child process handle)`（ntdll，直接使用 child process handle，不再使用 ResumeThread）；声明 new_api_surface = [\"ntdll!NtResumeProcess\"]。",
+      "rationale": "Lead 显式放行该最小新 API 面：原「不得引入新 API 面」约束对本次实现作废。NtResumeProcess 可直接以子进程 handle 恢复，避免依赖 thread handle，减少一次句柄获取与竞态面。Resume 失败仍必须 fail-closed。"
+    },
+    {
+      "id": "AMD-3",
+      "decided_by": "lead",
+      "date": "2026-10-14",
+      "change": "P1-1 的 Linux 侧验收改为「行为存活代理（超时命令后紧接快速命令必须成功）+ crates/pony-agent-core/src/agent/process.rs 内 crate 单测（tracked_count == 0）」。",
+      "rationale": "Linux 无 Job 对象语义，直接断言句柄存活不可移植；改用可观测的行为代理 + crate 单测残留计数，使 P1-1 在 Linux 上获得可执行的机械凭证。"
+    }
+  ],
   "contracts": [
     {
       "id": "P0-1",
@@ -39,8 +63,8 @@
         "crates/pony-agent-core/src/agent/process.rs"
       ],
       "requirement": "超时分支清理 SHALL 无条件二次调用幂等清理，修复现有 `timeout_cleanup_error.or_else(|| self.process_manager.kill_if_exists(&session_id, &handle).err())`（crates/pony-agent-core/src/agent/tools.rs:2219-2222）的短路缺陷：即无论首次清理是否报错，都必须再执行一次 kill_if_exists 幂等清理，并保留首次的清理错误（首个非 None 错误胜出）。清理后 SHALL 执行存活探针（`ProcessManager::is_tracked(session_id, handle)`，平台无关，不得 cfg 门控）。若探针显示句柄仍被追踪 → error code 由 \"timeout\" 改为新增码 \"environment_unavailable\"，且 hint SHALL 明示「执行环境不可用，已终止本轮工具调用」。探针显示已释放时保持 \"timeout\"。",
-      "acceptance_test": "(1) 注入首次清理失败、二次清理成功的场景，断言返回载荷的 cleanupError 保留首次错误（证明二次清理确实被调用，未短路）；(2) 注入两次清理均失败且 is_tracked 返回 true 的场景，断言 error.code==\"environment_unavailable\" 且 hint 含「执行环境不可用，已终止本轮工具调用」；(3) 正常超时清理成功且 is_tracked 返回 false，断言 error.code 仍为 \"timeout\"（防回归为恒 environment_unavailable）。",
-      "verification_level": "unit+integration (Linux native, cargo test)；is_tracked 必须平台无关以便 Linux 可验证"
+      "acceptance_test": "(1) 注入首次清理失败、二次清理成功的场景，断言返回载荷的 cleanupError 保留首次错误（证明二次清理确实被调用，未短路）；(2) 注入两次清理均失败且 is_tracked 返回 true 的场景，断言 error.code==\"environment_unavailable\" 且 hint 含「执行环境不可用，已终止本轮工具调用」；(3) 正常超时清理成功且 is_tracked 返回 false，断言 error.code 仍为 \"timeout\"（防回归为恒 environment_unavailable）。(4) Linux 侧验收（Lead 裁决 AMD-3）：行为存活代理 —— 同一会话内先执行一条必然超时的命令（`sleep 5` + 短 timeoutMs），紧接执行一条快速命令（如 `true` / `echo ok`），断言快速命令必须成功（EXIT 0、status==\"ok\"），证明超时后执行环境仍可用且无残留句柄阻塞；同时 crates/pony-agent-core/src/agent/process.rs 内 crate 单测断言 kill 后 `tracked_count() == 0`。",
+      "verification_level": "unit+integration (Linux native, cargo test)；is_tracked 必须平台无关以便 Linux 可验证；Linux 验收采用行为存活代理 + process.rs crate 单测 tracked_count==0（AMD-3）"
     },
     {
       "id": "P1-2",
@@ -66,14 +90,18 @@
     },
     {
       "id": "P2-1",
-      "title": "Windows Job 时序：CREATE_SUSPENDED → assign_and_verify → ResumeThread，fail-closed",
+      "title": "Windows Job 时序：CREATE_SUSPENDED → assign_and_verify → NtResumeProcess，fail-closed",
       "priority": "P2",
       "files": [
         "crates/pony-agent-core/src/agent/process.rs",
         "crates/pony-agent-core/src/agent/process/windows_job.rs"
       ],
-      "requirement": "process.rs 的 Windows 路径改为：以 CREATE_SUSPENDED 创建子进程 → Job `assign_and_verify` 成功后 → 才调用 ResumeThread 恢复主线程。ResumeThread 失败必须 fail-closed：清理已创建的子进程与 Job（含 job.close()）、从 tracked 表中移除条目、并向调用方返回错误（不得留下已创建但未恢复/未纳管句柄的进程）。`terminate` 成功路径 SHALL 调用 `job.close()`（crates/pony-agent-core/src/agent/process/windows_job.rs 已有 pub(super) fn close(&self)）。Linux 路径行为不得改变。",
-      "acceptance_test": "Windows-only：注入 ResumeThread 失败，断言返回 Err、tracked_count 回到调用前值、Job 句柄已关闭；断言 terminate 成功路径调用 close()（可经 job handle 已释放断言）。本机 Linux 无法执行该用例。",
+      "requirement": "process.rs 的 Windows 路径改为：以 CREATE_SUSPENDED 创建子进程 → Job `assign_and_verify` 成功后 → 才调用 `NtResumeProcess(child process handle)`（ntdll，直接使用子进程 handle）恢复子进程。Resume 失败必须 fail-closed：按序执行 terminate job → kill_and_reap → job.close，并从 tracked 表中移除条目，最终向调用方返回错误（不得留下已创建但未恢复/未纳管句柄的进程）。`terminate` 成功路径 SHALL 调用 `job.close()`（crates/pony-agent-core/src/agent/process/windows_job.rs 已有 pub(super) fn close(&self)）。Linux 路径行为不得改变。",
+      "new_api_surface": [
+        "ntdll!NtResumeProcess"
+      ],
+      "new_api_surface_approved_by": "lead (AMD-2；原「不得引入新 API 面」约束对本次实现作废)",
+      "acceptance_test": "Windows-only：注入 Resume（NtResumeProcess）失败，断言返回 Err、tracked_count 回到调用前值、Job 句柄已关闭（fail-closed 三段 terminate job + kill_and_reap + job.close 均被调用）；断言 terminate 成功路径调用 close()（可经 job handle 已释放断言）。本机 Linux 无法执行该用例。",
       "verification_level": "[VERIFY DEGRADED: WINDOWS-ONLY]"
     },
     {
@@ -123,7 +151,7 @@
       "name": "tracked_count",
       "signature": "pub(crate) fn tracked_count(&self) -> usize",
       "location": "crates/pony-agent-core/src/agent/process.rs:536",
-      "wave9_change": "签名不变；保持既有 #[cfg(all(test, windows))] 门控不变，**不是** P1-1 的存活探针（探针为 is_tracked）"
+      "wave9_change": "签名不变；门控由 #[cfg(all(test, windows))] **放宽为 #[cfg(test)]**（AMD-1：仅测试可见性调整，生产构建无行为变化，使 Linux crate 单测可断言 tracked_count==0）。仍**不是** P1-1 的生产存活探针（生产探针为平台无关的 is_tracked）"
     }
   ],
   "frozen_signature_names": [
@@ -151,9 +179,9 @@
       {
         "contract": "P2-1",
         "verification_level": "[VERIFY DEGRADED: WINDOWS-ONLY]",
-        "reason": "本机 Linux x86_64 无 rustup，无 Windows target，`#[cfg(windows)]` 分支（CREATE_SUSPENDED / ResumeThread / Job assign_and_verify / job.close()）无法类型检查，也无法执行 Windows-only 测试。",
-        "residual_risk": "CREATE_SUSPENDED → assign_and_verify → ResumeThread 的时序与 ResumeThread 失败 fail-closed 路径均未经机器验证；terminate 成功路径调用 job.close() 亦未经机器验证。若实现存在句柄泄漏或未恢复线程，本机门禁不会发现。",
-        "compensating_control": "1) 代码评审必须逐行核对 Windows 分支的控制流（创建/恢复/清理三段）；2) 保持 Linux 路径行为零变化并由既有 Linux 测试守护；3) 在 wave-9 交付说明中显式登记该降级，禁止声称 P2-1 已机器验证。"
+        "reason": "本机 Linux x86_64 无 rustup，无 Windows target，`#[cfg(windows)]` 分支（CREATE_SUSPENDED / ntdll!NtResumeProcess / Job assign_and_verify / job.close()）无法类型检查，也无法执行 Windows-only 测试。",
+        "residual_risk": "CREATE_SUSPENDED → assign_and_verify → NtResumeProcess 的时序、NtResumeProcess 调用签名与返回值判读、以及 Resume 失败 fail-closed 三段（terminate job + kill_and_reap + job.close）均未经机器验证；terminate 成功路径调用 job.close() 亦未经机器验证。若实现存在句柄泄漏或子进程未被恢复，本机门禁不会发现。",
+        "compensating_control": "1) 代码评审必须逐行核对 Windows 分支的控制流（创建/恢复/清理三段）与 NtResumeProcess 的 NTSTATUS 判读；2) 保持 Linux 路径行为零变化并由既有 Linux 测试守护；3) 在 wave-9 交付说明中显式登记该降级与 new_api_surface=[\"ntdll!NtResumeProcess\"]（Lead AMD-2 放行），禁止声称 P2-1 已机器验证。"
       },
       {
         "contract": "P1-3",

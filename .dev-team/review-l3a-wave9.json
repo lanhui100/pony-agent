@@ -1,0 +1,17 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 2252,
+      "rule": "P1-1 存活探针语义放大：is_tracked（仍被追踪）被当成存活判定，首次清理失败 + 二次清理成功时误报 environment_unavailable",
+      "counterexample": "Windows 触发序列（tools.rs:2204/2246 + process.rs:391-424/927-990）：(1) run_command timeoutMs=200 运行一个未按时退出的子进程；(2) tools.rs:2204 首次 kill_if_exists → process.rs:423 terminate → process.rs:116-142 kill_and_reap 在 30×10ms=300ms 预算内未观察到退出 → 返回 Err，且 process.rs:965-969 的 try_wait 仍为 Ok(None)，state 停在 Running，于是 timeout_cleanup_error=Some；(3) tools.rs:2246 第二次 kill_if_exists：process.rs:401-404 读到 Running → process.rs:423 terminate 本次成功（子进程已退出）并返回 Ok(())，但条目移除只写在 process.rs:416-420 的 already_exited 分支，Running 分支从不移除 → 条目仍在 processes map；(4) tools.rs:2252 is_tracked → process.rs:387-389 lookup 成功 → still_tracked=true；(5) tools.rs:2265/2267 返回 code=environment_unavailable + hint「执行环境不可用…请重启运行环境」，而进程树实际已终止、二次清理无任何错误、同一 session 后续命令仍可成功（见 tests/wave9_green_acceptance_test.rs 的存活代理）——一次清理超时失败被放大为环境不可用，模型会误判需要重启运行环境。该分支零测试覆盖（全仓 grep environment_unavailable 仅命中 tools.rs:2265 生产代码），契约验收 (2) 的注入路径亦不可达：FailureInjection{terminate:true} 会在首次失败时经 process.rs:983 close job，使第二次 job.terminate 在 windows_job.rs:118-121 提前返回 Ok(())，条目反被移除。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/process.rs",
+      "line": 423,
+      "rule": "kill_inner 的 Running 分支不释放条目：二次幂等清理成功后条目永久滞留（条目/句柄泄漏，破坏 P1-1 无残留不变量与 AMD-3 的 tracked_count==0）",
+      "counterexample": "承接上一条交错序列第 (3) 步：process.rs:423 直接把 terminate 结果返回、从不 remove；条目移除仅存在于 already_exited 分支（process.rs:416-420）与 shutdown（process.rs:462-466）。而生产代码从不调用 ProcessManager::shutdown（全仓 grep 仅命中 process.rs:1531 与 process.rs:1792 两处测试），legacy_run_session_id（tools.rs:7197）每次 run 生成新 session id，故该条目连同 Arc<ManagedProcess> 内的 Child（Windows 上是一个永不关闭的进程 HANDLE）与两个 BoundedBuffer 会一直保留到 ToolRouter/ProcessManager 被 drop —— 每次触发泄漏一条。process.rs:1085 的新增单测用 echo_command()（sh -lc echo，瞬时退出）无法覆盖该路径：首次 kill 通常直接命中 already_exited 分支，该用例在两条路径下都通过，故不构成该不变量的证据。"
+    }
+  ]
+}

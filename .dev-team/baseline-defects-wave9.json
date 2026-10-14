@@ -1,0 +1,127 @@
+{
+  "wave": 9,
+  "recorded_by": "executor-b",
+  "recorded_at_task": "task-4",
+  "lead_ruling": "选 (a) 不修：该失败与 trace a0fa4c67 的 P0–P2 无因果，属既有基线缺陷；wave-9 最小闭包铁律禁止夹带，必须走独立任务卡/ADR。",
+  "self_correction": {
+    "issued_by": "executor-b",
+    "supersedes": "本文件初稿（及 executor-b 首条 task-4 回执）将 BASE-1 定性为「P0-security 回归，建议 1 行 purpose 门控修复」",
+    "reason": "补证后发现 commit 27055f7 是**刻意的策略变更**：其 commit message 明示「Allow controlled external write authorizations and hint escalation on outside writes」，并新增 docs/decisions/0029-workspace-permission-escalation.md（Status: implemented）作为该变更的 ADR。ADR-0029 决策 2 明确「允许 authorize_path 支持 scope: read-write，使得用户显式批准的外部路径能够被合法写入」。因此「AuthorizedExternal 放行写」是**已实现的既定契约**，而非无意的安全回归；原先建议的 1 行 purpose 门控修复实际会**推翻已 implemented 的 ADR-0029 决策**，不构成最小修复。",
+    "corrected_characterization": "BASE-1 的正确定性是 **契约漂移 / 陈旧回归测试（contract drift）**：a1b75d8 遗留的两条 in-crate 单元测试仍断言 ADR-0029 之前的旧契约「授权外部写必须拒绝 / 授权外部目录不得作为 Run cwd」，在 27055f7 落地新契约后未被同步重基线化，故在纯净 HEAD 即失败。"
+  },
+  "defects": [
+    {
+      "id": "BASE-1",
+      "title": "契约漂移：两条 in-crate 回归测试仍断言 ADR-0029 之前的「授权外部写必须拒绝」旧契约，在纯净 HEAD 即失败",
+      "severity": "P0-security",
+      "severity_reassessment": "Lead 指定的 severity 字段值原样保留以兼容消费方，但请注意：补证 ADR-0029 后，「安全回归」这一读法**不成立**——当前契约（ADR-0029, implemented）刻意允许用户显式授权后的外部写。真实性质为契约漂移 + 陈旧测试；最终定级与处置方向须由 Lead 依 ADR-0029 裁决，executor-b 不再自行定性。",
+      "status": "out-of-scope-for-wave-9",
+      "causality": "pre-existing at HEAD 1530bed; 与 wave-9 的 P0-1/P0-2/P1-1/P1-2/P1-3/P2-1/P2-2 改动无因果",
+      "affected_tests": [
+        "agent::tools::tests::edit_file_rejects_authorized_external_path_with_write_denied",
+        "agent::tools::tests::run_command_rejects_authorized_external_cwd"
+      ],
+      "test_location_note": "两条用例位于 crates/pony-agent-core/src/agent/tools.rs 的模块内 #[cfg(test)]（属 executor-b 写域），**不在**本波冻结的 crates/pony-agent-core/tests/ 目录内。无论归属何处，executor-b 均未修改它们（未为转绿而改测试）。",
+      "evidence": {
+        "baseline_tree": {
+          "source": "git archive HEAD | tar -x -C /tmp/pony-baseline",
+          "commit": "1530bed",
+          "commit_subject": "test(wave-9): freeze functional & adversarial red-phase acceptance tests",
+          "pristine_proof": "sha256(tools.rs) = c7e8b3fb380b1402209c28910b67c0ae2e370f7671e93c2b09ce529914d16422（工作树为 5586b2e79b869b4c3c11341e71b6a2c479ecb9164455ee0e297258fcd9d457f9）",
+          "isolation": "CARGO_TARGET_DIR=/tmp/pony-baseline-target（独立 target，避免与工作树共享 target 导致的测试二进制串用）",
+          "command": "cd /tmp/pony-baseline && CARGO_TARGET_DIR=/tmp/pony-baseline-target cargo test --manifest-path /tmp/pony-baseline/crates/pony-agent-core/Cargo.toml --lib -- agent::tools::tests::run_command_rejects_authorized_external_cwd agent::tools::tests::edit_file_rejects_authorized_external_path_with_write_denied -- --test-threads=1",
+          "exit_code": 101,
+          "test_result_line": "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 0.02s",
+          "panic_1": {
+            "test": "agent::tools::tests::edit_file_rejects_authorized_external_path_with_write_denied",
+            "location": "crates/pony-agent-core/src/agent/tools.rs:9123:9",
+            "assertion_source": "assert_eq!(edit_result.status, \"error\");",
+            "left": "ok",
+            "right": "error"
+          },
+          "panic_2": {
+            "test": "agent::tools::tests::run_command_rejects_authorized_external_cwd",
+            "location": "crates/pony-agent-core/src/agent/tools.rs:9173:9",
+            "assertion_source": "assert_eq!(result.status, \"error\");",
+            "left": "ok",
+            "right": "error"
+          }
+        },
+        "working_tree": {
+          "note": "工作树 = HEAD 1530bed + wave-9 未提交改动（executor-a: process.rs / runtime/stream_support.rs；executor-b: tools.rs / context.rs）",
+          "isolation": "默认 target，且对 crates/pony-agent-core/src/agent/tools.rs 执行 touch 强制重编译，确认执行的是工作树二进制（同次运行中 executor-b 新增的 3 条单测均被列出并通过）",
+          "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --lib -- agent::tools -- --test-threads=1",
+          "exit_code": 101,
+          "test_result_line": "test result: FAILED. 134 passed; 2 failed; 0 ignored; 0 measured; 882 filtered out; finished in 2.86s",
+          "panic_1": {
+            "test": "agent::tools::tests::edit_file_rejects_authorized_external_path_with_write_denied",
+            "location": "crates/pony-agent-core/src/agent/tools.rs:9295:9",
+            "assertion_source": "assert_eq!(edit_result.status, \"error\");",
+            "left": "ok",
+            "right": "error"
+          },
+          "panic_2": {
+            "test": "agent::tools::tests::run_command_rejects_authorized_external_cwd",
+            "location": "crates/pony-agent-core/src/agent/tools.rs:9345:9",
+            "assertion_source": "assert_eq!(result.status, \"error\");",
+            "left": "ok",
+            "right": "error"
+          }
+        },
+        "conclusion": "两侧用例名、断言原文、left/right 值逐字一致，仅行号因 wave-9 插入而整体偏移（9123/9173 → 9295/9345，恒定 +172）；纯净 HEAD 树同样 EXIT 101 → 该失败为既有基线缺陷，非本波因果。",
+        "contamination_caveat": "两个源码树若共享同一 CARGO_TARGET_DIR，同名包（pony-agent-core v0.1.117）的 lib 测试二进制会被互相覆盖，导致 A 树的测试实际执行 B 树的二进制（已实测：共享 target 时基线运行报出工作树行号 9292/9342，反之亦然）。因此上表两侧均使用互斥 target（工作树=默认 target + touch 强制重编；基线=/tmp/pony-baseline-target）。任何后续复验必须同样隔离 target，否则收据无效。"
+      },
+      "root_cause": {
+        "primary": "契约漂移：commit 27055f7 依 ADR-0029 刻意放开授权外部写（path_permission.rs:470-477 在 PathPurpose::Write 命中授权祖先链时返回 PermissionZone::AuthorizedExternal），而 commit a1b75d8 引入的两条 tools.rs 单元测试仍断言旧契约「授权外部写 / 授权外部 cwd 必须拒绝」，未被同步重基线化。",
+        "code_path": [
+          "crates/pony-agent-core/src/agent/path_permission.rs:470-477 —— PathPurpose::Write 分支命中授权祖先链 → 返回 AuthorizedExternal（ADR-0029 新契约）",
+          "crates/pony-agent-core/src/agent/tools.rs:4095 —— classify_workspace_path 对 AuthorizedExternal 一律放行（与 ADR-0029 新契约一致，故本条**不是**缺陷点）",
+          "crates/pony-agent-core/src/agent/tools.rs:9252 / 9318 —— 两条陈旧断言所在用例（工作树行号）"
+        ],
+        "contract_reference": {
+          "adr": "docs/decisions/0029-workspace-permission-escalation.md",
+          "status": "implemented",
+          "decision_2": "允许 authorize_path 支持 scope: \"read-write\"（或 \"write\"），使得用户显式批准的外部路径能够被合法写入。",
+          "commit": "27055f7 feat(security): implement workspace permission escalation and composer ui refinement —— message 明示「Allow controlled external write authorizations and hint escalation on outside writes」",
+          "prior_contract": "a1b75d8 fix(core,pa-080) —— 当时契约：edit 走写判定、授权外部路径写一律拒绝（两条测试即该契约的回归护栏）"
+        },
+        "ordering_proof": "git merge-base --is-ancestor a1b75d8 27055f7 → true；git merge-base --is-ancestor 27055f7 HEAD → true。即 a1b75d8 引入测试 → 27055f7 变更契约（未更新这两条测试）→ HEAD 1530bed 上即失败。",
+        "open_question_for_lead": "run_command 的 cwd 是否属于 ADR-0029「受控外部写授权」的适用范围？（ADR-0029 正文针对路径读写授权，未显式讨论 Run cwd 边界；PA-080 P1-1 曾要求 cwd 必须在 workspace 或受控 tmp 内。）该点需 Lead/ADR 层裁决，executor-b 不自行判定。"
+      },
+      "proposed_disposition": {
+        "executed_in_wave_9": false,
+        "authorization": "Lead 裁决选 (a) 不修，须走独立任务卡/ADR，禁止本波夹带。",
+        "options_for_lead": [
+          {
+            "option": "A. 承认陈旧测试、重基线化",
+            "action": "依 ADR-0029 新契约重写这两条用例断言（授权外部写应放行 / 未授权外部写仍须 outside_workspace_write_denied），作为独立任务卡交付，并同步复核 path_permission.rs:884-895 内部测试。",
+            "note": "必须由非本波实施者（或经 Lead 授权）执行，且不得在 wave-9 内夹带。"
+          },
+          {
+            "option": "B. 维持旧契约、回退策略变更",
+            "action": "撤销/收窄 ADR-0029 对写路径的放开（需先 supersede ADR-0029），再在 tools.rs:4095 补 purpose 门控。",
+            "note": "属跨模块契约与安全策略变更，须新 ADR + 独立红/绿相收据。"
+          },
+          {
+            "option": "C. 仅收窄 Run cwd",
+            "action": "若 Lead 判定 ADR-0029 不覆盖 Run cwd，则仅对 resolve_workspace_dir_for_execution 恢复 workspace/受控 tmp 边界，edit_file 保持新契约。",
+            "note": "最小面变更，但仍属契约变更，须 ADR 记录。"
+          }
+        ],
+        "explicitly_rejected": "executor-b 首稿建议的「tools.rs:4095 加 purpose == Read 门控」已被本文件 self_correction 撤回：该改法会推翻已 implemented 的 ADR-0029 决策，不是最小修复。"
+      },
+      "gate_impact": {
+        "gates_affected": [
+          "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --lib",
+          "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --lib -- agent::tools"
+        ],
+        "statement": "只要 BASE-1 未处置，`cargo test --lib` 与 `--lib -- agent::tools` 均无法达到 EXIT 0（当前 EXIT 101，134 passed / 2 failed）。task-7（绿相独立验收）必须显式豁免这 2 条用例并在 green-phase 报告中记录豁免理由与本文件的基线复现收据；不得把该失败计入 wave-9 因果失败，也不得为转绿而修改已冻结用例或这两条 in-crate 用例。",
+        "unaffected_gates": [
+          "cargo check --manifest-path crates/pony-agent-core/Cargo.toml --tests = EXIT 0",
+          "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test harness_optimizations_test = EXIT 0 (12 passed / 0 failed)",
+          "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test wave9_adversarial_test = EXIT 0 (4 passed / 0 failed)"
+        ]
+      }
+    }
+  ]
+}

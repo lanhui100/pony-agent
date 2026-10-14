@@ -1,0 +1,17 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/process.rs",
+      "line": 713,
+      "rule": "resource_release: wave9_suspended_process_resume_fail_closed_cleanup (P2-1, [VERIFY DEGRADED: WINDOWS-FFI-ISOLATED])",
+      "counterexample": "P2-1 的 resume 失败 fail-closed 三段（process.rs:713 resume_process -> failed_start_cleanup -> process.rs:67-79 job.terminate(1) + job.close() + kill_and_reap）在本机既不能类型检查也不能执行，且唯一声称的隔离收据不可复现：在 /tmp/win-ffi-check 重新执行 `cargo check --target x86_64-pc-windows-msvc` 得 EXIT=101，真实报错 `error[E0463]: can't find crate for `core`` / `= note: the `x86_64-pc-windows-msvc` target may not be installed`；本机 `which rustup` EXIT=1（无 rustup），`rustc --print sysroot`=/usr/lib/rust-1.91 且其 lib/rustlib 仅含 x86_64-unknown-linux-gnu（无 windows target std），/tmp/win-ffi-check 下无 target/ 构建产物。仅 /tmp/win-ffi-check/src/lib.rs 的 sha256=2a1c02f32b3a1bbdc22e26c1701b8240db73fbe74bdf8b0d4ace88dbc4f057a8 与声称值一致（该文件与 process.rs:92-107 的 resume_process 同源），故「EXIT 0」这一物理凭证在本机不成立。该 Release 承诺（句柄/进程/Job 在所有分支释放）无任何机器凭证，按 L3-P 否决制不得放行。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 2265,
+      "rule": "resource_release: wave9_timeout_path_idempotent_cleanup_then_liveness_probe (fail-closed 分支)",
+      "counterexample": "存活探针的 fail-closed 结果分支零机器凭证：`grep -rn \"environment_unavailable\" crates/pony-agent-core/tests crates/pony-agent-core/src` 仅命中生产行 tools.rs:2265（contract-matrix-wave9.json 声明的 error_codes_added 之一），tests/ 与 src/ 内无任何断言引用该码；同时该分支在 Linux 上不可达——process.rs:405-421 的 already_exited 路径恒返回 Ok，terminate() 的 #[cfg(not(windows))] 分支（process.rs:955-968）无条件 Ok，kill_inner 对缺失句柄因 idempotent_missing=true（process.rs:395-397）恒 Ok，故二次 kill_if_exists 之后 is_tracked 在 Linux 上恒为 false，tools.rs:2253-2271 的 environment_unavailable 语义（契约 P1-1 验收 (1)(2)：注入首次清理失败/两次清理均失败且探针为真）无法在本机被任何测试触发，且 ToolRouter.process_manager 为具体类型 ProcessManager（tools.rs:1018）无注入点。故该 Release 承诺仅「清理+探针调用点」这一半有凭证（wave9_green_acceptance_test.rs::run_command_timeout_leaves_no_process_entry EXIT 0），fail-closed 一半无凭证。"
+    }
+  ]
+}

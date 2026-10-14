@@ -354,6 +354,90 @@ pub(super) fn canonicalize_tool_argument_value(value: &Value) -> Value {
     }
 }
 
+/// Run 类工具名（契约 P0-1）：只有这些工具的 `timeout` 失败才做指纹归一化。
+fn is_run_class_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Run" | "workspace_run_command" | "workspace.run_command"
+    )
+}
+
+/// Parse a leading `NAME=value` assignment, returning the remainder after the value.
+/// `NAME` must be a POSIX shell identifier; the value may be bare or double-quoted.
+fn strip_inline_env_assignment(input: &str) -> Option<&str> {
+    let eq = input.find('=')?;
+    let name = &input[..eq];
+    if name.is_empty()
+        || !name.chars().enumerate().all(|(index, ch)| {
+            ch == '_' || ch.is_ascii_alphabetic() || (index > 0 && ch.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    let after_eq = &input[eq + 1..];
+    if let Some(quoted) = after_eq.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        return Some(&quoted[end + 1..]);
+    }
+    let end = after_eq
+        .find(|ch: char| ch.is_whitespace() || ch == '&')
+        .unwrap_or(after_eq.len());
+    if end == 0 {
+        return None;
+    }
+    Some(&after_eq[end..])
+}
+
+/// Strip one leading inline environment-assignment prefix: POSIX `NAME=value ` or Windows
+/// `set NAME=value&&` / `set NAME=value &&` (case-insensitive). Returns the remainder.
+fn strip_one_inline_env_prefix(input: &str) -> Option<&str> {
+    if input
+        .get(..4)
+        .map_or(false, |head| head.eq_ignore_ascii_case("set "))
+    {
+        if let Some(after_value) = strip_inline_env_assignment(&input[4..]) {
+            if let Some(rest) = after_value.trim_start().strip_prefix("&&") {
+                let rest = rest.trim_start();
+                if !rest.is_empty() {
+                    return Some(rest);
+                }
+            }
+        }
+    }
+    let after_value = strip_inline_env_assignment(input)?;
+    let rest = after_value.strip_prefix(|ch: char| ch.is_whitespace())?;
+    if rest.trim().is_empty() {
+        return None;
+    }
+    Some(rest)
+}
+
+/// Repeatedly strip leading inline environment-assignment prefixes (契约 P0-1 归一化规则 b),
+/// so that retries of the same core command share one fingerprint. Returns the trimmed core
+/// command; it may be empty when the whole command consists of prefixes.
+fn strip_leading_inline_env_prefixes(command: &str) -> &str {
+    let mut rest = command.trim();
+    while let Some(next) = strip_one_inline_env_prefix(rest) {
+        rest = next.trim();
+    }
+    rest
+}
+
+/// Run 类工具 `timeout` 失败的参数指纹：删除 `timeoutMs`，并把 `command` 归一化为核心命令。
+fn normalize_run_timeout_argument_value(value: &Value) -> Value {
+    let mut normalized = canonicalize_tool_argument_value(value);
+    if let Value::Object(map) = &mut normalized {
+        map.remove("timeoutMs");
+        if let Some(Value::String(command)) = map.get("command") {
+            let stripped = strip_leading_inline_env_prefixes(command);
+            if !stripped.is_empty() {
+                map.insert("command".to_string(), Value::String(stripped.to_string()));
+            }
+        }
+    }
+    normalized
+}
+
 pub(super) fn tool_call_signature(tool_call: &ToolCall) -> String {
     let normalized = canonicalize_tool_argument_value(&tool_call.arguments);
     format!(
@@ -402,7 +486,11 @@ pub fn tool_failure_signal(
         .get("kind")
         .or_else(|| error.get("code"))
         .and_then(Value::as_str)?;
-    let normalized_args = canonicalize_tool_argument_value(&tool_call.arguments);
+    let normalized_args = if code == "timeout" && is_run_class_tool_name(&tool_call.name) {
+        normalize_run_timeout_argument_value(&tool_call.arguments)
+    } else {
+        canonicalize_tool_argument_value(&tool_call.arguments)
+    };
     let arg_fingerprint = normalized_args.to_string();
     Some((tool_call.name.clone(), arg_fingerprint, code.to_string()))
 }

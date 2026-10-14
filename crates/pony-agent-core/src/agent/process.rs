@@ -81,6 +81,32 @@ fn failed_start_cleanup(child: &mut Child, job: &Job, cause: String) -> String {
 }
 
 #[cfg(windows)]
+/// P2-1：`CREATE_SUSPENDED` 下 `std::process::Child` 只暴露进程句柄，拿不到子进程主线程
+/// 句柄，因此用 ntdll 的 `NtResumeProcess` 按进程句柄恢复整个进程。非 0 NTSTATUS 一律
+/// 视为失败，由调用方 fail-closed 清理（terminate + reap + close），绝不允许子进程停留在
+/// suspended 状态。
+///
+/// `new_api_surface: ntdll!NtResumeProcess`（wave-9 P2-1，Lead 已授权）
+/// [VERIFY DEGRADED: WINDOWS-ONLY] 本机 Linux x86_64 无 Windows target，此分支不参与类型
+/// 检查与执行。
+fn resume_process(process: std::os::windows::io::RawHandle) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::HANDLE;
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtResumeProcess(process_handle: HANDLE) -> i32;
+    }
+    // SAFETY: `process` is the live process handle of the suspended child owned by the caller.
+    let status = unsafe { NtResumeProcess(process as HANDLE) };
+    if status < 0 {
+        return Err(format!(
+            "NtResumeProcess failed: NTSTATUS=0x{:08X}",
+            status as u32
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 /// Kill a child and synchronously reap it within the bounded cleanup budget.
 ///
 /// A failed `kill` is tolerated only when `try_wait` proves that the child had already exited;
@@ -355,6 +381,13 @@ impl ProcessManager {
         self.kill_inner(session_id, handle, true)
     }
 
+    /// wave-9 P1-1 存活探针（平台无关，禁止 cfg 门控）：该 `(session_id, handle)` 是否仍被本
+    /// 管理器追踪。未知 handle 与跨 session 句柄一律返回 false（fail-closed），供 `run_command`
+    /// 超时清理后的存活判定使用。
+    pub(crate) fn is_tracked(&self, session_id: &str, handle: &str) -> bool {
+        self.lookup(session_id, handle).is_ok()
+    }
+
     fn kill_inner(&self, session_id: &str, handle: &str, idempotent_missing: bool) -> Result<(), String> {
         let entry = match self.lookup(session_id, handle) {
             Ok(entry) => entry,
@@ -532,7 +565,7 @@ impl ProcessManager {
         entry.job.handle_flags()
     }
 
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(crate) fn tracked_count(&self) -> usize {
         self.inner.processes.lock().unwrap().len()
     }
@@ -552,6 +585,17 @@ impl ProcessManager {
         // Windows 弹窗修复：控制台子进程（cmd/powershell）不得弹出可见控制台窗口。
         #[cfg(windows)]
         hide_console_window(&mut command);
+        // P2-1：以 CREATE_SUSPENDED 创建子进程，使 Job 纳管严格先于子进程执行，收敛
+        // spawn→assign 逃逸窗口。`creation_flags` 是覆盖语义，故此处必须同时带上
+        // CREATE_NO_WINDOW（与上一行等价）；主线程在 assign_and_verify 成功后恢复。
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+            );
+        }
         // Design Decision 7: sandboxed children run with a minimal environment and must not
         // inherit provider keys, session secrets, or ambient proxy env vars. A child whose
         // `SandboxRequest` sets `isolate_environment` gets a minimal env (`env_clear` plus the
@@ -621,6 +665,15 @@ impl ProcessManager {
                 .unwrap()
                 .insert(child.id(), observer);
             if self.inner.wait_before_assign.load(Ordering::Acquire) {
+                // P2-1 测试钩子：该钩子刻意复现「子进程在纳管前自然退出」的旧窗口，因此必须
+                // 先恢复 CREATE_SUSPENDED 的子进程，否则它永远不会退出（钩子本身即模拟逃逸窗口）。
+                if let Err(error) = resume_process(child.as_raw_handle()) {
+                    let cleanup = kill_and_reap(&mut child, "wait-before-assign resume cleanup");
+                    job.close();
+                    return Err(format!(
+                        "wait-before-assign resume failed: {error}; cleanup={cleanup:?}"
+                    ));
+                }
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
                     match child.try_wait() {
@@ -653,6 +706,18 @@ impl ProcessManager {
                     &mut child,
                     &job,
                     format!("job assignment failed for `{}`: {error}", request.program),
+                ));
+            }
+            // P2-1：纳管成功后才恢复主线程。恢复失败必须 fail-closed —— 绝不允许子进程
+            // 停留在 suspended 状态（否则调用方会拿到一个永不推进的句柄）。
+            if let Err(error) = resume_process(raw_handle) {
+                return Err(failed_start_cleanup(
+                    &mut child,
+                    &job,
+                    format!(
+                        "failed to resume suspended child for `{}`: {error}",
+                        request.program
+                    ),
                 ));
             }
         }
@@ -870,6 +935,9 @@ impl ProcessManager {
                 entry.job.close();
                 return Err(error);
             }
+            // P2-1：成功路径同样释放 Job 句柄，避免句柄滞留到 Arc drop。
+            #[cfg(windows)]
+            entry.job.close();
             return Ok(());
         }
         {
@@ -915,6 +983,9 @@ impl ProcessManager {
             entry.job.close();
             return Err(error);
         }
+        // P2-1：成功路径同样释放 Job 句柄，避免句柄滞留到 Arc drop。
+        #[cfg(windows)]
+        entry.job.close();
         Ok(())
     }
 
@@ -1005,6 +1076,49 @@ mod tests {
         assert!(manager.kill("session-a", "proc-nonexistent").is_err());
         // kill_if_exists 在 handle 不存在时幂等安全返回 Ok(())
         assert!(manager.kill_if_exists("session-a", "proc-nonexistent").is_ok());
+    }
+
+    /// wave-9 task-5：`is_tracked` 存活探针（平台无关）与 `tracked_count` 的物理收据。
+    /// P1-1 的超时清理会无条件二次调用幂等清理，二次调用后条目必须已从 tracked 表移除，
+    /// 这正是 task-7 `run_command_timeout_leaves_no_process_entry` 依赖的不变量。
+    #[test]
+    fn kill_if_exists_removes_tracked_entry_and_is_tracked_fails_closed() {
+        let manager = ProcessManager::new();
+        let session = "session-tracked-count";
+        let (program, arguments) = echo_command();
+        let handle = start(&manager, session, &program, arguments);
+
+        assert_eq!(
+            manager.tracked_count(),
+            1,
+            "start 必须发布恰好一个 tracked 条目"
+        );
+        assert!(manager.is_tracked(session, &handle), "已发布句柄必须被追踪");
+        assert!(
+            !manager.is_tracked("session-other", &handle),
+            "跨 session 句柄必须 fail-closed 返回 false"
+        );
+        assert!(
+            !manager.is_tracked(session, "proc-nonexistent"),
+            "未知 handle 必须 fail-closed 返回 false"
+        );
+
+        manager
+            .kill_if_exists(session, &handle)
+            .expect("first kill_if_exists");
+        // 超时清理的第二次幂等调用：终止并移除条目。
+        manager
+            .kill_if_exists(session, &handle)
+            .expect("second kill_if_exists");
+        assert_eq!(
+            manager.tracked_count(),
+            0,
+            "幂等清理完成后 tracked 表不得残留条目"
+        );
+        assert!(
+            !manager.is_tracked(session, &handle),
+            "已释放句柄不得仍被追踪"
+        );
     }
 
     #[test]

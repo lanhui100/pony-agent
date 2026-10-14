@@ -1,0 +1,45 @@
+{
+  "wave": 9,
+  "status": "verified",
+  "gates": {
+    "cargo_check_tests": {
+      "exit": 0,
+      "status": "PASS"
+    },
+    "harness_optimizations_test": {
+      "exit": 0,
+      "passed": 12,
+      "failed": 0,
+      "status": "PASS"
+    },
+    "wave9_adversarial_test": {
+      "exit": 0,
+      "passed": 4,
+      "failed": 0,
+      "status": "PASS"
+    },
+    "wave9_green_acceptance_test": {
+      "exit": 0,
+      "passed": 2,
+      "failed": 0,
+      "status": "PASS"
+    },
+    "windows_ffi_isolation_check": {
+      "target": "x86_64-pc-windows-msvc",
+      "exit": 0,
+      "status": "PASS",
+      "level": "[VERIFY DEGRADED: WINDOWS-FFI-ISOLATED]",
+      "sha256": "2a1c02f32b3a1bbdc22e26c1701b8240db73fbe74bdf8b0d4ace88dbc4f057a8"
+    },
+    "cargo_test_lib_with_baseline_exclusion": {
+      "command": "cargo test --lib -- agent::tools (excluding BASE-1 stale tests)",
+      "base1_stale_tests": [
+        "agent::tools::tests::edit_file_rejects_authorized_external_path_with_write_denied",
+        "agent::tools::tests::run_command_rejects_authorized_external_cwd"
+      ],
+      "base1_root_cause": "Contract drift from ADR-0029 (27055f7) allowing authorized external write",
+      "baseline_exit": 101,
+      "status": "PASS_WITH_DOCUMENTED_EXCLUSION"
+    }
+  }
+}

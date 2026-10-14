@@ -1,87 +1,49 @@
 {
-  "wave": 8,
+  "wave": 9,
   "status": "completed",
   "task_classification": "B",
-  "reason": "跨语言(Rust core + Tauri 同步命令 + TS 前端)会话页进入链路；命中并发/锁关键字（std::sync::Mutex 重入自死锁），机械分级触发规则强制 >= B 级",
-  "baseline_commit": "506220bc7c1e16204112361cd1011339c4f0a36d",
-  "symptom": "新桌面端界面能进，一进入会话页面即卡死（窗口无响应，主线程 futex 阻塞）",
-  "root_cause": {
-    "file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
-    "lines": "428-447",
-    "summary": "resolve_graph_run_submission_plan 在持有 self.graph_runs 锁时经 .or_else 调用 resolve_graph_run_for_retrieval -> graph_projection.rs:396 load_active_graph_run_for_session -> graph_projection.rs:383 再次 self.graph_runs.lock()（std::sync::Mutex 非重入）-> 同线程自死锁",
-    "introduced_by": "24c064c4ce1cfba85769e4019820a59203e57de7",
-    "trigger": "run_id=None（或指向不存在 run）且 session_id trim 后非空；前端 src/stores/runtime.ts:1053-1057 进入会话页硬编码 runId:null",
-    "runtime_evidence": "主线程 backtrace: load_session_runtime_view -> resolve_graph_run_submission_plan -> Option::or_else -> resolve_graph_run_for_retrieval -> load_active_graph_run_for_session -> std::sync::Mutex::lock -> lock_contended (futex_wait_queue)；窗口停在启动屏不再重绘"
-  },
+  "reason": "涉及进程生命周期、Windows Job Object、断路器指纹与系统核心 Prompt 契约，跨多模块修改",
+  "baseline_commit": "1530bed",
+  "symptom": "Trace a0fa4c67 反映网络超时与 Windows 9009 语法失误导致命令级联超时卡死，断路器失效，Agent 逃避责任甩包给用户",
   "waves": {
-    "8": {
+    "9": {
       "branches": {
-        "deadlock-fix": {
-          "red_commit": "533e7b8",
-          "green_commit": "ba0948e",
-          "closure_commit": "92e198a",
+        "ponysentry-trace-a0fa4c67-fix": {
+          "red_commit": "1530bed",
+          "green_commit": "HEAD",
           "status": "verified",
-          "fix_file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
-          "fix_scope": "1 file changed (锁作用域收敛 + 命中路径单 guard 原子读 + 锁中毒日志补上下文)"
+          "fix_scope": "4 files changed in src (stream_support.rs, tools.rs, process.rs, context.rs) + 3 test files"
         }
       },
       "tasks": {
         "task-1": "protocol: contract matrix & NFR baseline (.dev-team/) — completed",
-        "task-2": "test: red-phase acceptance tests + lock-scope guard — completed",
-        "task-3": "executor: minimal deadlock fix — completed",
-        "task-4": "test: isolate production sessions.db in integration tests — completed",
-        "task-5": "protocol: fix fake-green gates + logging scope + AFTER E2E receipts — completed",
-        "task-6": "executor: L3-P remediation (log context) — completed",
-        "task-7": "executor: TOCTOU fix (single-guard atomic read on run_id hit) — completed",
-        "task-8": "test: guard hardening (auto-discovery of lockers) — completed"
-      },
-      "write_scopes": {
-        "task-1": [".dev-team/"],
-        "task-2": ["crates/pony-agent-core/tests/", "scripts/"],
-        "task-3": ["crates/pony-agent-core/src/agent/control_plane/history_commands.rs"],
-        "task-4": ["crates/pony-agent-core/tests/"],
-        "task-5": [".dev-team/"],
-        "task-6": ["crates/pony-agent-core/src/agent/control_plane/history_commands.rs"],
-        "task-7": ["crates/pony-agent-core/src/agent/control_plane/history_commands.rs"],
-        "task-8": ["scripts/check-graph-run-lock-scope.mjs"]
+        "task-2": "test: red-phase acceptance tests — completed",
+        "task-3": "executor-a: P0-1 断路器指纹归一化 — completed",
+        "task-4": "executor-b: P0-2/P1-1/P1-2/P1-3 (tools.rs) — completed",
+        "task-5": "executor-a: P2-1 Job 逃逸窗口收敛 + is_tracked API — completed",
+        "task-6": "executor-b: P2-2 BASE_SYSTEM_PROMPT 回执式条款 — completed",
+        "task-7": "test: 绿相独立验收与物理收据 — completed",
+        "task-8": "lead: 报告/ADR/任务卡/state 账本收口 — completed",
+        "task-9": "protocol: wave-9 契约修订（tracked_count 门控 + P2-1 API 面） — completed"
       },
       "gates": {
         "red_phase": {
-          "functional": "10 passed / 3 failed (EXIT=101, 5s watchdog timeout)",
-          "adversarial_concurrency": "0 passed / 2 failed (EXIT=101)",
-          "lock_scope_guard": "EXIT=1 (history_commands.rs:441 forbidden-call)"
+          "harness_optimizations_test": "10 passed / 2 failed (EXIT=101)",
+          "wave9_adversarial_test": "1 passed / 3 failed (EXIT=101)"
         },
         "green_phase": {
-          "functional": "13 passed / 0 failed (EXIT=0, 0.31s)",
-          "adversarial_concurrency": "2 passed / 0 failed (EXIT=0)",
-          "lock_scope_guard": "EXIT=0 (0 blocking, 1 registered P1-SAFE)",
-          "lock_discipline_py": "EXIT=0 (blocking=0, p1=1)",
-          "nfr_lint": "EXIT=0 (self-test cases=14 failures=0)",
-          "cargo_check_src_tauri": "EXIT=0",
-          "cargo_test_lib_control_plane": "66 passed / 0 failed (EXIT=0)",
-          "rustfmt_check": "EXIT=0",
-          "frontend_vitest": "74 files / 791 passed (EXIT=0)",
-          "version_sync": "EXIT=0"
-        },
-        "e2e": {
-          "before": "/tmp/pony-run-e2e/shot-30s.png — wchan=futex_wait_queue, DIAG overlay stopped at t=1s",
-          "after": "/tmp/pony-run-e2e-final2/shot-30s.png — VERDICT=RUNNING_OK, wchan=do_poll, DIAG t=1s..t=15s, session page rendered",
-          "toolchain": "--features tauri/custom-protocol (embedded dist) + Xvfb + dbus-run-session + isolated HOME with real sessions.db"
+          "cargo_check_tests": "EXIT=0",
+          "harness_optimizations_test": "12 passed / 0 failed (EXIT=0)",
+          "wave9_adversarial_test": "4 passed / 0 failed (EXIT=0)",
+          "wave9_green_acceptance_test": "2 passed / 0 failed (EXIT=0)",
+          "windows_ffi_isolation_check": "EXIT=0 ([VERIFY DEGRADED: WINDOWS-FFI-ISOLATED])"
         }
       },
-      "reviews": {
-        "l3p_round1": {"file": ".dev-team/review-l3p-deadlock.json", "verdict": "FAIL", "closed_by": "task-5 + task-6"},
-        "l3p_round2": {"file": ".dev-team/review-l3p-deadlock-recheck.json", "verdict": "FAIL", "closed_by": "task-9"},
-        "l3p_round3_final": {"file": ".dev-team/review-l3p-final.json", "verdict": "PASS", "note": "准予放行；三项阻塞整改全部 CLOSED"},
-        "l3_concurrency": {"verdict": "found TOCTOU torn read introduced by T3", "closed_by": "task-7 + task-8"}
-      },
-      "nfr_degraded": [
+      "baseline_defects": [
         {
-          "id": "logging-legacy-eprintln",
-          "baseline_key": "logging.format/trace_id_required",
-          "waiver": "logging_legacy_eprintln_exempt=true",
-          "debt_ref": "PA-119",
-          "expiry": "PA-119 完成时必须重跑本波 L3-P 五问并关闭豁免"
+          "id": "BASE-1",
+          "description": "edit_file_rejects_authorized_external_path_with_write_denied 等2项单测在基线即失败，系 ADR-0029 放开外部写后旧测试未重基线化所致",
+          "status": "documented_in_baseline-defects-wave9.json"
         }
       ]
     }
