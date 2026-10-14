@@ -5,6 +5,16 @@
     "backoff_cap_ms": 1000
   },
   "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "lock_acquisition_timeout_ms": 2000,
+  "deadlock_watchdog_timeout_ms": 5000,
+  "lock_forbidden_calls": [
+    "resolve_graph_run_for_retrieval",
+    "load_graph_run",
+    "load_execution_checkpoint",
+    "load_active_graph_run_for_session"
+  ],
   "logging": {
     "format": "json",
     "trace_id_required": true

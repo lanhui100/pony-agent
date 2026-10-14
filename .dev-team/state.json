@@ -1,25 +1,61 @@
 {
-  "wave": 7,
-  "status": "completed",
+  "wave": 8,
+  "status": "in_progress",
   "task_classification": "B",
-  "reason": "涉及跨模块、跨语言(Rust Core + TS 前端)端到端全链路 EventBus 架构落地，命中事件流转与并发通道",
-  "baseline_commit": "76ef6d4",
-  "final_commit": "HEAD",
-  "checkpoints": {
-    "red_anchor": "2b1ee73",
-    "green": "HEAD"
+  "reason": "跨语言(Rust core + Tauri 同步命令 + TS 前端)会话页进入链路；命中并发/锁关键字（std::sync::Mutex 重入自死锁），机械分级触发规则强制 >= B 级",
+  "baseline_commit": "506220bc7c1e16204112361cd1011339c4f0a36d",
+  "symptom": "新桌面端界面能进，一进入会话页面即卡死（窗口无响应，主线程 futex 阻塞）",
+  "root_cause": {
+    "file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
+    "lines": "428-447",
+    "summary": "resolve_graph_run_submission_plan 在持有 self.graph_runs 锁时经 .or_else 调用 resolve_graph_run_for_retrieval -> graph_projection.rs:396 load_active_graph_run_for_session -> graph_projection.rs:383 再次 self.graph_runs.lock()（std::sync::Mutex 非重入）-> 同线程自死锁",
+    "introduced_by": "24c064c4ce1cfba85769e4019820a59203e57de7",
+    "trigger": "run_id=None（或指向不存在 run）且 session_id trim 后非空；前端 src/stores/runtime.ts:1053-1057 进入会话页硬编码 runId:null",
+    "runtime_evidence": "主线程 backtrace: load_session_runtime_view -> resolve_graph_run_submission_plan -> Option::or_else -> resolve_graph_run_for_retrieval -> load_active_graph_run_for_session -> std::sync::Mutex::lock -> lock_contended (futex_wait_queue)；窗口停在启动屏不再重绘"
   },
-  "ci": {
-    "result": "green",
-    "ts_event_bus": "3 passed",
-    "rust_event_bus": "2 passed",
-    "review": "PASS"
+  "waves": {
+    "8": {
+      "branches": {
+        "deadlock-fix": {
+          "red_commit": null,
+          "green_commit": null,
+          "status": "red-phase"
+        }
+      },
+      "tasks": {
+        "task-1": "protocol: freeze contract matrix & NFR baseline (.dev-team/)",
+        "task-2": "test: red-phase acceptance tests + lock-scope guard (crates/pony-agent-core/tests, scripts/)",
+        "task-3": "executor: minimal fix in history_commands.rs (blocked_by task-2)"
+      },
+      "write_scopes": {
+        "task-1": [".dev-team/"],
+        "task-2": ["crates/pony-agent-core/tests/", "scripts/"],
+        "task-3": ["crates/pony-agent-core/src/agent/control_plane/history_commands.rs"]
+      }
+    }
   },
-  "nfr_compliance": {
-    "external_call_timeout_ms": 3000,
-    "max_queue_capacity": 1024,
-    "sanitization_zero_trust": true,
-    "status": "verified"
-  },
-  "meta_retrospective": ".dev-team/meta-retrospective.md"
+  "previous_wave": {
+    "wave": 7,
+    "status": "completed",
+    "task_classification": "B",
+    "baseline_commit": "76ef6d4",
+    "final_commit": "HEAD",
+    "checkpoints": {
+      "red_anchor": "2b1ee73",
+      "green": "HEAD"
+    },
+    "ci": {
+      "result": "green",
+      "ts_event_bus": "3 passed",
+      "rust_event_bus": "2 passed",
+      "review": "PASS"
+    },
+    "nfr_compliance": {
+      "external_call_timeout_ms": 3000,
+      "max_queue_capacity": 1024,
+      "sanitization_zero_trust": true,
+      "status": "verified"
+    },
+    "meta_retrospective": ".dev-team/meta-retrospective.md"
+  }
 }

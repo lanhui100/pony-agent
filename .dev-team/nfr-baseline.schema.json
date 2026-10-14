@@ -17,7 +17,39 @@
       "additionalProperties": false
     },
     "concurrency_lock": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
+    },
+    "lock_scope_bounded": {
+      "type": "boolean",
+      "const": true
+    },
+    "lock_reentrancy_forbidden": {
+      "type": "boolean",
+      "const": true
+    },
+    "lock_acquisition_timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5000
+    },
+    "deadlock_watchdog_timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5000
+    },
+    "lock_forbidden_calls": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "resolve_graph_run_for_retrieval",
+          "load_graph_run",
+          "load_execution_checkpoint",
+          "load_active_graph_run_for_session"
+        ]
+      }
     },
     "logging": {
       "type": "object",
@@ -37,6 +69,11 @@
     "external_call_timeout_ms",
     "retry",
     "concurrency_lock",
+    "lock_scope_bounded",
+    "lock_reentrancy_forbidden",
+    "lock_acquisition_timeout_ms",
+    "deadlock_watchdog_timeout_ms",
+    "lock_forbidden_calls",
     "logging",
     "resource_release"
   ],
