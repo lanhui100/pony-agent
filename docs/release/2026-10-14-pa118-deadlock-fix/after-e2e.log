@@ -1,0 +1,58 @@
+launcher=1197058
+t=1s pid=1197062 state=S wchan=futex_wait_queue cpu=50.4
+t=2s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=44.8
+t=3s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=35.6
+t=4s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=28.1
+t=5s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=24.5
+t=6s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=20.4
+t=7s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=17.7
+t=8s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=15.5
+t=9s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=13.8
+t=10s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=12.6
+  shot-10s.png
+t=11s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=11.3
+t=12s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=10.5
+t=13s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=9.7
+t=14s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=9.1
+t=15s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=8.5
+t=16s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=8.1
+t=17s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=7.6
+t=18s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=7.2
+t=19s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=6.9
+t=20s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=6.6
+  shot-20s.png
+t=21s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=6.3
+t=22s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=6.0
+t=23s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=5.8
+t=24s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=5.6
+t=25s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=5.4
+t=26s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=5.2
+t=27s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=5.1
+t=28s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=4.9
+t=29s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=4.8
+t=30s pid=1197062 state=S wchan=do_poll.constprop.0 cpu=4.6
+  shot-30s.png
+=== FINAL main-thread verdict ===
+main_thread_wchan=do_poll.constprop.0
+VERDICT=RUNNING_OK
+=== app.log (filtered) ===
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+
+[icon-debug] Decoded embedded icon.png: 512x512
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+

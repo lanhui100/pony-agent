@@ -43,6 +43,18 @@ All locks in `HostControlPlane` and `AgentRuntime` must be acquired in this orde
 
 4. **Tolerate poison on all locks except `runtime`.** All other locks use `unwrap_or_else(|e| { eprintln!(...); e.into_inner() })`.
 
+5. **禁止在持有 `graph_runs` 时调用会再次加锁的方法（非重入 Mutex 作用域纪律，ADR 0032）。**
+   `graph_runs` 是 `std::sync::Mutex`（非重入），下列方法内部会再次 `self.graph_runs.lock()`：
+   `resolve_graph_run_for_retrieval` / `load_graph_run` / `load_execution_checkpoint` /
+   `load_active_graph_run_for_session`（另有 18 个自动发现的 locker）。在 guard 作用域内调用它们会造成
+   **同线程自死锁**——2026-10-14 的桌面端「进入会话页卡死」P0 即由此产生
+   （`resolve_graph_run_submission_plan` 的 `.or_else` 落在 guard 内）。
+   - 命中路径（`run_id` 有值且命中）必须**单 guard 原子完成**「快照 + ask-wait 判定」；
+   - fallback 路径必须**先释放锁**再解析，随后用独立短锁重取所需数据。
+   - 机械门禁：`node scripts/check-graph-run-lock-scope.mjs`（禁用集合 = 基线 4 名 ∪ 自动发现全部 locker；
+     发现数退化即 Exit 2；`--self-test` 含违规/合法/注释/顺序加锁样例）与
+     `python3 .dev-team/check-lock-discipline.py`（独立实现交叉校验）。
+
 ### Known Exception
 
 `load_session_runtime_view` (`control_plane.rs:2831-2839`) acquires `sessions_rwlock.write()` before `runtime.lock()`. This is safe because:

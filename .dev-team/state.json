@@ -18,7 +18,8 @@
       "branches": {
         "deadlock-fix": {
           "red_commit": "533e7b8",
-          "green_commit": "HEAD",
+          "green_commit": "ba0948e",
+          "closure_commit": "92e198a",
           "status": "verified",
           "fix_file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
           "fix_scope": "1 file changed (锁作用域收敛 + 命中路径单 guard 原子读 + 锁中毒日志补上下文)"
@@ -70,7 +71,8 @@
       },
       "reviews": {
         "l3p_round1": {"file": ".dev-team/review-l3p-deadlock.json", "verdict": "FAIL", "closed_by": "task-5 + task-6"},
-        "l3p_round2": {"file": ".dev-team/review-l3p-deadlock-recheck.json", "verdict": "see file"},
+        "l3p_round2": {"file": ".dev-team/review-l3p-deadlock-recheck.json", "verdict": "FAIL", "closed_by": "task-9"},
+        "l3p_round3_final": {"file": ".dev-team/review-l3p-final.json", "verdict": "PASS", "note": "准予放行；三项阻塞整改全部 CLOSED"},
         "l3_concurrency": {"verdict": "found TOCTOU torn read introduced by T3", "closed_by": "task-7 + task-8"}
       },
       "nfr_degraded": [

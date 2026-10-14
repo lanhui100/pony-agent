@@ -1,0 +1,58 @@
+launcher=1181036
+t=1s pid=1181040 state=S wchan=futex_wait_queue cpu=48.5
+t=2s pid=1181040 state=S wchan=futex_wait_queue cpu=35.8
+t=3s pid=1181040 state=S wchan=futex_wait_queue cpu=23.7
+t=4s pid=1181040 state=S wchan=futex_wait_queue cpu=17.9
+t=5s pid=1181040 state=S wchan=futex_wait_queue cpu=14.5
+t=6s pid=1181040 state=S wchan=futex_wait_queue cpu=12.2
+t=7s pid=1181040 state=S wchan=futex_wait_queue cpu=10.6
+t=8s pid=1181040 state=S wchan=futex_wait_queue cpu=9.2
+t=9s pid=1181040 state=S wchan=futex_wait_queue cpu=8.4
+t=10s pid=1181040 state=S wchan=futex_wait_queue cpu=7.6
+  shot-10s.png
+t=11s pid=1181040 state=S wchan=futex_wait_queue cpu=6.9
+t=12s pid=1181040 state=S wchan=futex_wait_queue cpu=6.4
+t=13s pid=1181040 state=S wchan=futex_wait_queue cpu=5.9
+t=14s pid=1181040 state=S wchan=futex_wait_queue cpu=5.6
+t=15s pid=1181040 state=S wchan=futex_wait_queue cpu=5.2
+t=16s pid=1181040 state=S wchan=futex_wait_queue cpu=5.0
+t=17s pid=1181040 state=S wchan=futex_wait_queue cpu=4.7
+t=18s pid=1181040 state=S wchan=futex_wait_queue cpu=4.6
+t=19s pid=1181040 state=S wchan=futex_wait_queue cpu=4.3
+t=20s pid=1181040 state=S wchan=futex_wait_queue cpu=4.1
+  shot-20s.png
+t=21s pid=1181040 state=S wchan=futex_wait_queue cpu=4.0
+t=22s pid=1181040 state=S wchan=futex_wait_queue cpu=3.8
+t=23s pid=1181040 state=S wchan=futex_wait_queue cpu=3.7
+t=24s pid=1181040 state=S wchan=futex_wait_queue cpu=3.6
+t=25s pid=1181040 state=S wchan=futex_wait_queue cpu=3.5
+t=26s pid=1181040 state=S wchan=futex_wait_queue cpu=3.3
+t=27s pid=1181040 state=S wchan=futex_wait_queue cpu=3.2
+t=28s pid=1181040 state=S wchan=futex_wait_queue cpu=3.2
+t=29s pid=1181040 state=S wchan=futex_wait_queue cpu=3.1
+t=30s pid=1181040 state=S wchan=futex_wait_queue cpu=3.0
+  shot-30s.png
+=== FINAL main-thread verdict ===
+main_thread_wchan=futex_wait_queue
+VERDICT=FROZEN_FUTEX
+=== app.log (filtered) ===
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+
+[icon-debug] Decoded embedded icon.png: 512x512
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+

@@ -58,6 +58,11 @@
 - [0026 基础工具体系加固（CAS 乐观并发写守卫与富语义错误自愈协议）](decisions/0026-tool-cas-and-recovery-hint.md)
 - [0027 端到端全链路 EventBus 架构设计](decisions/0027-end-to-end-event-bus-architecture.md)
 - [0028 将 Sentry 问题收集下沉至 Harness 宿主层与 Agent Trace 解耦](decisions/0028-decouple-sentry-issues-to-harness.md)
+- [0032 graph_runs 非重入锁作用域纪律与桌面端会话页卡死修复](decisions/0032-graph-runs-lock-scope-discipline.md)
+
+## 3.1 交付证据归档
+
+- [PA-118 进入会话页卡死修复：同口径实机 E2E 证据（BEFORE/AFTER 截图与驱动日志）](release/2026-10-14-pa118-deadlock-fix/README.md)
 
 ## 4. 开发指南
 
