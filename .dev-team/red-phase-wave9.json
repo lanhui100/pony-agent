@@ -1,0 +1,193 @@
+{
+  "wave": 9,
+  "task": "task-2",
+  "producer": "test-agent (L2-T independent tester)",
+  "phase": "RED (frozen)",
+  "frozen": true,
+  "contract_ref": ".dev-team/contract-matrix-wave9.json",
+  "baseline_commit": "a01c2c8",
+  "baseline_commit_full": "a01c2c87588c0b4e808e1adff9bb355dd75e3b79",
+  "host": {
+    "os": "linux-x86_64",
+    "cargo": "cargo 1.91.1 (ea2d97820 2025-10-10) (built from a source tarball)",
+    "rustup_available": false,
+    "windows_cross_compile_available": false
+  },
+  "gates": [
+    {
+      "id": "compile-gate",
+      "command": "cargo check --manifest-path crates/pony-agent-core/Cargo.toml --tests",
+      "exit_code": 0,
+      "verdict": "PASS",
+      "meaning": "红相必须是断言红而非编译红；error 行数 = 0",
+      "error_line_count": 0,
+      "stdout_tail_20": [
+        "1978 | fn main() {",
+        "     |    ^^^^",
+        "",
+        "warning: `pony-agent-core` (test \"tui_acceptance\") generated 16 warnings",
+        "warning: unused import: `AgentTracePayload`",
+        "  --> crates/pony-agent-core/tests/trace_auto_report_test.rs:11:30",
+        "   |",
+        "11 |     maybe_report_turn_trace, AgentTracePayload, EvalStatus,",
+        "   |                              ^^^^^^^^^^^^^^^^^",
+        "   |",
+        "   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default",
+        "",
+        "warning: unused import: `serde_json::json`",
+        "  --> crates/pony-agent-core/tests/trace_auto_report_test.rs:15:5",
+        "   |",
+        "15 | use serde_json::json;",
+        "   |     ^^^^^^^^^^^^^^^^",
+        "",
+        "warning: `pony-agent-core` (test \"trace_auto_report_test\") generated 2 warnings (run `cargo fix --test \"trace_auto_report_test\"` to apply 2 suggestions)",
+        "    Finished `dev` profile [unoptimized] target(s) in 0.61s"
+      ]
+    },
+    {
+      "id": "functional-red",
+      "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test harness_optimizations_test",
+      "exit_code": 101,
+      "verdict": "RED",
+      "passed": 10,
+      "failed": 2,
+      "ignored": 0,
+      "stdout_tail_20": [
+        "assertion `left == right` failed: 仅 timeoutMs 不同的同一核心命令，指纹必须相同（否则模型加大超时重试即可绕过连续失败断路器）。",
+        " a={\"command\":\"git push origin main\",\"cwd\":\"/repo\",\"timeoutMs\":60000}",
+        " b={\"command\":\"git push origin main\",\"cwd\":\"/repo\",\"timeoutMs\":180000}",
+        "  left: \"{\\\"command\\\":\\\"git push origin main\\\",\\\"cwd\\\":\\\"/repo\\\",\\\"timeoutMs\\\":60000}\"",
+        " right: \"{\\\"command\\\":\\\"git push origin main\\\",\\\"cwd\\\":\\\"/repo\\\",\\\"timeoutMs\\\":180000}\"",
+        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+        "",
+        "---- test_run_command_timeout_payload_keeps_evidence stdout ----",
+        "",
+        "thread 'test_run_command_timeout_payload_keeps_evidence' (3146785) panicked at crates/pony-agent-core/tests/harness_optimizations_test.rs:345:9:",
+        "超时错误载荷根级 stdout 证据键缺失（P0-2 要求保留已采集证据）：{\"error\":{\"code\":\"timeout\",\"hint\":\"请缩短命令执行时间，或显式传入更大的 timeoutMs。\",\"kind\":\"timeout\",\"message\":\"命令执行超过超时上限 200 ms，已终止。\"},\"ok\":false,\"summary\":{\"text\":\"命令执行超过超时上限 200 ms，已终止。\"},\"tool\":\"workspace_run_command\"}",
+        "",
+        "",
+        "failures:",
+        "    test_run_command_timeout_payload_keeps_evidence",
+        "    test_tool_failure_signal_normalizes_network_retry_timeout",
+        "",
+        "test result: FAILED. 10 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s",
+        "",
+        "error: test failed, to rerun pass `--test harness_optimizations_test`"
+      ]
+    },
+    {
+      "id": "adversarial-red",
+      "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test wave9_adversarial_test",
+      "exit_code": 101,
+      "verdict": "RED",
+      "passed": 1,
+      "failed": 3,
+      "ignored": 0,
+      "stdout_tail_20": [
+        "assertion `left == right` failed: 对抗 3 变体面失败：线程 1 的归一化指纹与基线不同，并发重试变体可绕过断路器。",
+        " baseline={\"command\":\"git push origin main\",\"cwd\":\"/repo\",\"timeoutMs\":60000}",
+        " variant ={\"command\":\"git push origin main\",\"cwd\":\"/repo\",\"timeoutMs\":300000}",
+        "  left: \"{\\\"command\\\":\\\"git push origin main\\\",\\\"cwd\\\":\\\"/repo\\\",\\\"timeoutMs\\\":300000}\"",
+        " right: \"{\\\"command\\\":\\\"git push origin main\\\",\\\"cwd\\\":\\\"/repo\\\",\\\"timeoutMs\\\":60000}\"",
+        "",
+        "---- test_adversarial_2_oversized_stdout_timeout_payload_is_intact stdout ----",
+        "",
+        "thread 'test_adversarial_2_oversized_stdout_timeout_payload_is_intact' (3147071) panicked at crates/pony-agent-core/tests/wave9_adversarial_test.rs:158:10:",
+        "超大 stdout 超时载荷必须保留根级 stdout 字符串证据",
+        "",
+        "",
+        "failures:",
+        "    test_adversarial_1_fingerprint_traversal_resists_rephrasing",
+        "    test_adversarial_2_oversized_stdout_timeout_payload_is_intact",
+        "    test_adversarial_3_concurrent_retry_variants_share_one_fingerprint",
+        "",
+        "test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s",
+        "",
+        "error: test failed, to rerun pass `--test wave9_adversarial_test`"
+      ]
+    }
+  ],
+  "red_failing_cases": [
+    {
+      "case": "test_tool_failure_signal_normalizes_network_retry_timeout",
+      "file": "crates/pony-agent-core/tests/harness_optimizations_test.rs",
+      "contract": "P0-1",
+      "observed": "timeoutMs 参与指纹 -> {timeoutMs:60000} != {timeoutMs:180000}"
+    },
+    {
+      "case": "test_run_command_timeout_payload_keeps_evidence",
+      "file": "crates/pony-agent-core/tests/harness_optimizations_test.rs",
+      "contract": "P0-2",
+      "observed": "timeout 走 error_result，载荷根级无 stdout/stderr/stdoutTruncated/stderrTruncated/exitCode/cleanupError/timeoutMs/command"
+    },
+    {
+      "case": "test_adversarial_1_fingerprint_traversal_resists_rephrasing",
+      "file": "crates/pony-agent-core/tests/wave9_adversarial_test.rs",
+      "contract": "P0-1",
+      "observed": "4 种重试变体产生不同指纹，断路器可被措辞/前缀/超时值绕过"
+    },
+    {
+      "case": "test_adversarial_2_oversized_stdout_timeout_payload_is_intact",
+      "file": "crates/pony-agent-core/tests/wave9_adversarial_test.rs",
+      "contract": "P0-2",
+      "observed": "200KB stdout 超时载荷根级无 stdout 证据"
+    },
+    {
+      "case": "test_adversarial_3_concurrent_retry_variants_share_one_fingerprint",
+      "file": "crates/pony-agent-core/tests/wave9_adversarial_test.rs",
+      "contract": "P0-1",
+      "observed": "并发 4 线程变体产生 4 种不同指纹"
+    }
+  ],
+  "green_now_guards": [
+    {
+      "case": "test_tool_failure_signal_keeps_distinct_commands_distinct",
+      "contract": "P0-1",
+      "note": "反向护栏：不同核心命令指纹必须不同"
+    },
+    {
+      "case": "test_tool_failure_signal_falls_back_for_non_timeout_and_non_run",
+      "contract": "P0-1",
+      "note": "反向护栏：非 timeout / 非 Run 类必须回退 canonicalize"
+    },
+    {
+      "case": "test_run_command_success_payload_has_no_timeout_evidence",
+      "contract": "P0-2",
+      "note": "负例：未超时载荷不得出现 timeout 伪证据"
+    },
+    {
+      "case": "test_posix_inline_env_rejected_on_windows_semantics",
+      "contract": "P1-3",
+      "note": "Linux 侧不得拒绝该形态；Windows 分支 [VERIFY DEGRADED: WINDOWS-ONLY]"
+    },
+    {
+      "case": "test_adversarial_3_concurrent_same_signal_fingerprint_is_deterministic",
+      "contract": "P0-1",
+      "note": "同信号并发确定性（现状已确定）"
+    }
+  ],
+  "artifacts": {
+    "crates/pony-agent-core/tests/harness_optimizations_test.rs": {
+      "sha256": "d0160fd8b1fae4b14ac8731ccfc60af8e9f8bb2c62546f98151da4c37025c62a"
+    },
+    "crates/pony-agent-core/tests/wave9_adversarial_test.rs": {
+      "sha256": "980174f41c2bf6ba107d88d01484375e4480306cca613f65847fcb09f068b91f"
+    }
+  },
+  "write_scope_audit": {
+    "src_untouched": true,
+    "modified": [
+      "crates/pony-agent-core/tests/harness_optimizations_test.rs"
+    ],
+    "added": [
+      "crates/pony-agent-core/tests/wave9_adversarial_test.rs"
+    ]
+  },
+  "verification_degraded": [
+    {
+      "contract": "P1-3",
+      "level": "[VERIFY DEGRADED: WINDOWS-ONLY]",
+      "reason": "本机 linux-x86_64 无 rustup，cfg!(windows) 调用点拒绝分支不可编译/不可运行；Linux 侧仅以「不得拒绝」反向断言守护"
+    }
+  ]
+}

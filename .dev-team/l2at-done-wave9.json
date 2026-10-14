@@ -1,0 +1,97 @@
+{
+  "wave": 9,
+  "task": "task-2",
+  "producer": "test-agent (L2-T independent tester)",
+  "status": "completed",
+  "contract_ref": ".dev-team/contract-matrix-wave9.json",
+  "receipt_ref": ".dev-team/red-phase-wave9.json",
+  "test_files": [
+    {
+      "path": "crates/pony-agent-core/tests/harness_optimizations_test.rs",
+      "action": "extended",
+      "sha256": "d0160fd8b1fae4b14ac8731ccfc60af8e9f8bb2c62546f98151da4c37025c62a"
+    },
+    {
+      "path": "crates/pony-agent-core/tests/wave9_adversarial_test.rs",
+      "action": "created",
+      "sha256": "980174f41c2bf6ba107d88d01484375e4480306cca613f65847fcb09f068b91f"
+    }
+  ],
+  "cases": [
+    {
+      "name": "test_tool_failure_signal_normalizes_network_retry_timeout",
+      "kind": "functional",
+      "contract": "P0-1",
+      "red": true
+    },
+    {
+      "name": "test_tool_failure_signal_keeps_distinct_commands_distinct",
+      "kind": "functional-reverse-guard",
+      "contract": "P0-1",
+      "red": false
+    },
+    {
+      "name": "test_tool_failure_signal_falls_back_for_non_timeout_and_non_run",
+      "kind": "functional-reverse-guard",
+      "contract": "P0-1",
+      "red": false
+    },
+    {
+      "name": "test_run_command_timeout_payload_keeps_evidence",
+      "kind": "functional",
+      "contract": "P0-2",
+      "red": true
+    },
+    {
+      "name": "test_run_command_success_payload_has_no_timeout_evidence",
+      "kind": "functional-negative",
+      "contract": "P0-2",
+      "red": false
+    },
+    {
+      "name": "test_posix_inline_env_rejected_on_windows_semantics",
+      "kind": "functional-platform-guard",
+      "contract": "P1-3",
+      "red": false,
+      "degraded": "[VERIFY DEGRADED: WINDOWS-ONLY]"
+    },
+    {
+      "name": "test_adversarial_1_fingerprint_traversal_resists_rephrasing",
+      "kind": "adversarial",
+      "contract": "P0-1",
+      "red": true
+    },
+    {
+      "name": "test_adversarial_2_oversized_stdout_timeout_payload_is_intact",
+      "kind": "adversarial",
+      "contract": "P0-2",
+      "red": true
+    },
+    {
+      "name": "test_adversarial_3_concurrent_same_signal_fingerprint_is_deterministic",
+      "kind": "adversarial",
+      "contract": "P0-1",
+      "red": false
+    },
+    {
+      "name": "test_adversarial_3_concurrent_retry_variants_share_one_fingerprint",
+      "kind": "adversarial",
+      "contract": "P0-1",
+      "red": true
+    }
+  ],
+  "red_phase_exit_codes": {
+    "cargo_check_tests": 0,
+    "harness_optimizations_test": 101,
+    "wave9_adversarial_test": 101
+  },
+  "red_failing_case_count": 5,
+  "case_count": {
+    "harness_optimizations_test": 12,
+    "wave9_adversarial_test": 4,
+    "total": 16
+  },
+  "zero_fake_test_attestation": "每条用例均含真实断言；无 skip / ignore / 吞异常；无纯运行放行用例。",
+  "frozen": true,
+  "note": "测试一经 Lead 冻结即只读；Executor 不得修改本文件与两个测试文件。"
+}
