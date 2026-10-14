@@ -1,0 +1,28 @@
+=== task-5 G3/G7 集成测试口径收据 @ 2026-10-14T06:11:46Z rev=533e7b8 ===
+
+### G3: cargo test --test graph_run_submission_plan_deadlock submission_plan_bounded
+    Finished `test` profile [unoptimized] target(s) in 0.27s
+     Running tests/graph_run_submission_plan_deadlock.rs (target-test/debug/deps/graph_run_submission_plan_deadlock-897b816b62317c16)
+
+running 5 tests
+test c1_submission_plan_bounded_null_run_id_with_active_non_terminal_run ... ok
+test c1_submission_plan_bounded_null_run_id_with_nonempty_session ... ok
+test c1_submission_plan_bounded_regression_null_run_id_and_null_session ... ok
+test c2_submission_plan_bounded_unknown_run_id_with_nonempty_session ... ok
+test c2_submission_plan_bounded_unknown_run_id_with_null_session ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.10s
+
+G3_EXIT=0
+
+### G7: cargo test --test graph_run_submission_plan_deadlock submission_plan_paused
+    Finished `test` profile [unoptimized] target(s) in 0.24s
+     Running tests/graph_run_submission_plan_deadlock.rs (target-test/debug/deps/graph_run_submission_plan_deadlock-897b816b62317c16)
+
+running 2 tests
+test c4_submission_plan_paused_resumable_maps_to_resume_graph_run_stream ... ok
+test c4_submission_plan_paused_with_active_turn_downgrades_to_start_graph_run_stream ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.05s
+
+G7_EXIT=0

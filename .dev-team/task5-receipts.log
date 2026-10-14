@@ -1,0 +1,77 @@
+=== task-5 契约收口物理收据 @ 2026-10-14T06:15:55Z rev=533e7b8 ===
+
+### R10: NFR 基准校验（含 logging 适用范围收窄字段）
+[nfr-lint] jsonschema=4.10.3
+[nfr-lint] schema=/home/dm/pony-agent/.dev-team/nfr-baseline.schema.json
+[nfr-lint] instance=/home/dm/pony-agent/.dev-team/nfr-baseline.json
+[nfr-lint] ok: schema 校验通过；未知字段 0 个；lock_scope_bounded=True lock_reentrancy_forbidden=True lock_acquisition_timeout_ms=2000 deadlock_watchdog_timeout_ms=5000 lock_forbidden_calls=4 logging_scope='new_structured_logging_surface_only' logging_legacy_eprintln_exempt=True logging_debt_ref='PA-119'
+[nfr-lint] RESULT: PASS
+ExitCode=0
+
+### R11: NFR 门禁反例自检（14 例，含 logging 新字段 8 例）
+[nfr-lint] jsonschema=4.10.3
+[nfr-lint] schema=/home/dm/pony-agent/.dev-team/nfr-baseline.schema.json
+[nfr-lint] instance=/home/dm/pony-agent/.dev-team/nfr-baseline.json
+[self-test] PASS valid-baseline-passes expect_ok=True -> no error
+[self-test] PASS unknown-top-level-field-rejected expect_ok=False -> 2 error(s): schema: $: Additional properties are not allowed ('unknown_field_xyz' was unexpected)
+[self-test] PASS unknown-nested-field-rejected expect_ok=False -> 2 error(s): schema: $.logging: Additional properties are not allowed ('extra_sink' was unexpected)
+[self-test] PASS missing-deadlock-watchdog-rejected expect_ok=False -> 2 error(s): schema: $: 'deadlock_watchdog_timeout_ms' is a required property
+[self-test] PASS watchdog-over-5000-rejected expect_ok=False -> 2 error(s): schema: $.deadlock_watchdog_timeout_ms: 6000 is greater than the maximum of 5000
+[self-test] PASS incomplete-forbidden-list-rejected expect_ok=False -> 2 error(s): schema: $.lock_forbidden_calls: ['resolve_graph_run_for_retrieval', 'load_graph_run', 'load_execution_checkpoint'] is too short
+[self-test] PASS unknown-logging-field-rejected expect_ok=False -> 2 error(s): schema: $: Additional properties are not allowed ('logging_sink' was unexpected)
+[self-test] PASS missing-logging-scope-rejected expect_ok=False -> 2 error(s): schema: $: 'logging_scope' is a required property
+[self-test] PASS wrong-logging-scope-rejected expect_ok=False -> 2 error(s): schema: $.logging_scope: 'all_surfaces' is not one of ['new_structured_logging_surface_only']
+[self-test] PASS logging-exempt-false-rejected expect_ok=False -> 2 error(s): schema: $.logging_legacy_eprintln_exempt: True was expected
+[self-test] PASS logging-debt-ref-invalid-rejected expect_ok=False -> 2 error(s): schema: $.logging_debt_ref: 'PA-119' was expected
+[self-test] PASS missing-logging-debt-ref-rejected expect_ok=False -> 2 error(s): schema: $: 'logging_debt_ref' is a required property
+[self-test] PASS dropped-logging-object-rejected expect_ok=False -> 2 error(s): schema: $: 'logging' is a required property
+[self-test] PASS non-json-logging-format-rejected expect_ok=False -> 2 error(s): schema: $.logging.format: 'text' is not one of ['json']
+[nfr-lint] self-test cases=14 failures=0
+ExitCode=0
+
+### R12: C5 锁纪律静态门禁（修复后复跑）
+ok          crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/capability_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/graph_projection.rs
+ok          crates/pony-agent-core/src/agent/control_plane/history_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/message_projection.rs
+WARN(P1)    crates/pony-agent-core/src/agent/control_plane/mod.rs  # 同类遗留项，不阻塞本次放行
+  - L2059 [REENTRANT_CALL] 锁作用域（自 L2039 起）内调用 self.load_execution_checkpoint()，该方法会再次 self.graph_runs.lock() → 同线程自死锁
+ok          crates/pony-agent-core/src/agent/control_plane/path_authorization_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/query_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/trace_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs
+[check-lock-discipline] scanned_files=10 lock_sites=26 blocking_violations=0 registered_p1=1
+[check-lock-discipline] RESULT: GREEN (C5 blocking satisfied; P1 items registered)
+ExitCode=0
+
+### R13: jq 独立交叉校验（顶层键数=13，logging 收窄字段齐备）
+true
+ExitCode=0
+
+### R14: G3/G7 集成测试口径（选中用例数）
+### G3: cargo test --test graph_run_submission_plan_deadlock submission_plan_bounded
+running 5 tests
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.10s
+G3_EXIT=0
+### G7: cargo test --test graph_run_submission_plan_deadlock submission_plan_paused
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.05s
+G7_EXIT=0
+
+### R15: 实机 E2E 证据文件指纹
+0bc68ae44de8ed9d96d919cdef8022cd641c0b255633ac341799098686d87873  /tmp/pony-run-e2e/shot-30s.png
+66f32d3b8316cc50392b6fd70d78236b5539a1bcfd0422b6a2c37963f0142e8b  /tmp/pony-run-e2e-after/shot-30s.png
+ExitCode=0
+
+### R19: v2 最终状态复跑 @ 2026-10-14T06:21:40Z rev=533e7b8
+[nfr-lint] ok: schema 校验通过；未知字段 0 个；lock_scope_bounded=True lock_reentrancy_forbidden=True lock_acquisition_timeout_ms=2000 deadlock_watchdog_timeout_ms=5000 lock_forbidden_calls=4 logging_scope='new_structured_logging_surface_only' logging_legacy_eprintln_exempt=True logging_debt_ref='PA-119'
+[nfr-lint] RESULT: PASS
+nfr-lint ExitCode=0
+[nfr-lint] self-test cases=14 failures=0
+self-test ExitCode=0
+[check-lock-discipline] scanned_files=10 lock_sites=26 blocking_violations=0 registered_p1=1
+[check-lock-discipline] RESULT: GREEN (C5 blocking satisfied; P1 items registered)
+check-lock-discipline ExitCode=0
+true
+jq ExitCode=0

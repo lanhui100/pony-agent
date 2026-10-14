@@ -1,0 +1,20 @@
+=== task-5 G1/G2/G4/G5/G6（--lib 口径）收据 @ 2026-10-14T06:17:24Z rev=533e7b8 ===
+
+### G1+G2+G4+G5+G6: cargo test --lib -- submission_plan_ （应选中 5 例）
+   Compiling pony-agent-core v0.1.116 (/home/dm/pony-agent/crates/pony-agent-core)
+    Finished `test` profile [unoptimized] target(s) in 15.58s
+     Running unittests src/lib.rs (target-test/debug/deps/pony_agent_core-988b3b36562f83fb)
+
+running 8 tests
+test agent::control_plane::tests::submission_plan_does_not_resume_when_run_is_not_resumable ... ok
+test agent::control_plane::tests::submission_plan_falls_back_to_graph_run_when_checkpoint_is_absent ... ok
+test agent::control_plane::tests::submission_plan_prefers_checkpoint_projection_when_available ... ok
+test agent::control_plane::tests::submission_plan_starts_fresh_run_when_recovery_contract_requires_replay ... ok
+test agent::control_plane::tests::submission_plan_switches_with_session_checkpoint_boundary ... ok
+test agent::hooks::tests::submission_plan_envelope_normalizes_graph_run_continue_to_ready_boundary ... ok
+test agent::hooks::tests::submission_plan_envelope_preserves_checkpoint_waiting_user_boundary ... ok
+test agent::hooks::tests::submission_plan_hook_binding_matches_resume_boundary_without_new_command_source ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1006 filtered out; finished in 0.06s
+
+LIB_EXIT=0

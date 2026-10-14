@@ -13,6 +13,14 @@
 
 ## Backlog
 
+- `PA-119` pony-agent-core 结构化日志迁移（P2，Complexity C）
+  说明：`crates/pony-agent-core` 目前无 tracing/log 依赖，诊断输出统一为裸 `eprintln!`（`history_commands.rs` 实测 12 处），不满足 `.dev-team/nfr-baseline.json` 的 `logging{format:json,trace_id_required}`。本次 PA-118 死锁修复按「最小闭包」原则**未**引入日志框架，改以显式豁免落盘（`logging_legacy_eprintln_exempt=true` + `logging_debt_ref="PA-119"`，见 `.dev-team/contract-matrix-deadlock.md` §3.1）。**到期条款：PA-119 完成时必须重跑 PA-118 波次的 L3-P 五问并关闭该豁免**（将 `logging_legacy_eprintln_exempt` 置 false 并重过 `nfr-lint.py --self-test`）。
+- `PA-115` 启动期 host-read 缺有界超时（P2，Complexity A）
+  说明：`src/stores/runtime.ts:2445`（`initializeSessions` 的 `host-read` 分支）await `loadSessionRuntimeViewState` 时**没有** `withTimeout`，而会话切换分支 `:1895` 已使用 `withTimeout(..., HYDRATION_TIMEOUT_MS)`。一旦宿主读取挂起，界面会永久停在「正在加载最近对话…」而无失败可见性。来源：2026-10-14 卡死诊断的浏览器 stub 复现（SIM_MODE=ipc-hang）。与 PA-118 死锁无因果关联（PA-118 是主线程 futex 自死锁），属独立健壮性缺口。
+- `PA-116` 浏览器预览态会话恢复只还原 ≤8 条消息（P3，Complexity A）
+  说明：`src/lib/runtime/messages.ts:341` `buildTurnHistory()` 末尾 `.slice(-8)` → `sessions.ts:440` 构造 `snapshot.history` → `sessions.ts:805` 兼容性判定又用同一截断长度比对（必然相等），导致无 Tauri 时任何恢复会话只显示最后 4 轮。收据：种子 40 turn/80 条，mounted log `messages:80` 而 `renderedTurnNodes:8`。
+- `PA-117` `[workspace-scroll]` 调试日志无开关且 payload 触发强制布局（P3，Complexity A）
+  说明：`src/components/HomeWorkspace.vue:202` 的 `console.info("[workspace-scroll]", payload)` 无 debug 开关，payload 含 `getBoundingClientRect()` 结果（强制同步布局）。160 turn 实测 387 条日志、挂载期一次性开销约 1s；无事件回环（收敛），但在 devtools 打开的 dev 态是可削常数开销。
 - `PA-022` lifecycle hooks pipeline
   说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
 - `PA-026` workflow mode 与用户自定义流程编排
@@ -63,6 +71,10 @@
 
 ## Done
 
+- `PA-118` 进入会话页卡死：`graph_runs` 锁重入自死锁修复（P0，Complexity B）——**已完成（2026-10-14）**
+  说明：用户报「新桌面端界面能进、一进入会话页面即卡死」。根因 = `crates/pony-agent-core/src/agent/control_plane/history_commands.rs:428-447` `resolve_graph_run_submission_plan` 在持有 `self.graph_runs`（`std::sync::Mutex`，非重入）时经 `.or_else` 调用 `resolve_graph_run_for_retrieval` → `graph_projection.rs:396 load_active_graph_run_for_session` → `graph_projection.rs:383` 二次加锁 → 同线程自死锁；由提交 24c064c4 引入。前端进入会话页硬编码 `runId:null`（`src/stores/runtime.ts:1053-1057`）调同步 Tauri 命令 `load_session_runtime_view`（主线程执行）→ 窗口永久冻结。
+  铁证：无头实机主线程 backtrace = `load_session_runtime_view → resolve_graph_run_submission_plan → resolve_graph_run_for_retrieval → load_active_graph_run_for_session → Mutex::lock → lock_contended`；BEFORE 截图 DIAG 覆层停在 `t=1s`（定时器不再触发）且 `wchan=futex_wait_queue`；修复后同一口径 `VERDICT=RUNNING_OK` 且截图渲染出真实会话页。
+  门禁：红相锚定 `533e7b8`（functional 10 passed/3 failed EXIT=101、并发对抗 0/2 EXIT=101、守卫 EXIT=1）→ 修复后 13 passed/0 failed、2 passed/0 failed、守卫 EXIT=0、`--lib control_plane` 66 passed、`cargo check src-tauri` EXIT=0、`npm test` 74 files/791 passed、`version:check` EXIT=0、实机 E2E RUNNING_OK。契约：`.dev-team/contract-matrix-deadlock.md`（C1~C5）；基准：`.dev-team/nfr-baseline.json`；守卫：`scripts/check-graph-run-lock-scope.mjs`（含 `--self-test`）。修复文件：`crates/pony-agent-core/src/agent/control_plane/history_commands.rs`（+17/−6，无夹带）。
 - `PA-103` 桌面端签名更新本地契约（P1，Complexity C）——**本地契约 gate 已完成（2026-10-02）；发布 gate 未开启**
   说明：参考 `dev:~/pproxy/desktop` 的 Tauri signed updater 模式（仅源码/配置参考，非远端运行证据），在 pony-agent 落地 typed adapter + store 状态机 + 配置页 UI + 精确权限（updater:allow-check / allow-download-and-install / process:allow-restart）+ 双门禁模型；`SIGNED_UPDATER_ENABLED=false`、tauri.conf 不提交占位信任锚，生产一键安装保持禁用 fail-closed。验证：version:check PASS（tauri 0.1.94 四处同步）、更新相关 vitest 91/91、全量 592/602（10 skip）最终全绿、typecheck/build/cargo:check PASS。三路 plan 与三路实现审核均条件通过、意见全采纳并复验。OpenSpec change 已归档 `openspec/changes/archive/2026-10-02-signed-desktop-updater/`；ADR 0019（implemented）。任务卡：`03_TASKS/PA-103-signed-desktop-self-update.md`。发布 gate（真实 key/endpoint/签名产物/Windows smoke/prepare_update_exit/活跃 turn 确认）待 release-owner 开启。
 - `PA-102` canonical spec 库存规范化与仓库卫生（P1，Complexity B）

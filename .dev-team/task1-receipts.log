@@ -1,0 +1,79 @@
+=== task-1 物理收据 @ 2026-10-14T05:36:59Z rev=506220b ===
+
+### R1: NFR 基准 schema 校验 (nfr-lint.py)
+[nfr-lint] jsonschema=4.10.3
+[nfr-lint] schema=/home/dm/pony-agent/.dev-team/nfr-baseline.schema.json
+[nfr-lint] instance=/home/dm/pony-agent/.dev-team/nfr-baseline.json
+[nfr-lint] ok: schema 校验通过；未知字段 0 个；lock_scope_bounded=True lock_reentrancy_forbidden=True lock_acquisition_timeout_ms=2000 deadlock_watchdog_timeout_ms=5000 lock_forbidden_calls=4
+[nfr-lint] RESULT: PASS
+ExitCode=0
+
+### R2: NFR 门禁反例自检 (证明非恒真)
+[nfr-lint] jsonschema=4.10.3
+[nfr-lint] schema=/home/dm/pony-agent/.dev-team/nfr-baseline.schema.json
+[nfr-lint] instance=/home/dm/pony-agent/.dev-team/nfr-baseline.json
+[self-test] PASS valid-baseline-passes expect_ok=True -> no error
+[self-test] PASS unknown-top-level-field-rejected expect_ok=False -> 2 error(s): schema: $: Additional properties are not allowed ('unknown_field_xyz' was unexpected)
+[self-test] PASS unknown-nested-field-rejected expect_ok=False -> 2 error(s): schema: $.logging: Additional properties are not allowed ('extra_sink' was unexpected)
+[self-test] PASS missing-deadlock-watchdog-rejected expect_ok=False -> 2 error(s): schema: $: 'deadlock_watchdog_timeout_ms' is a required property
+[self-test] PASS watchdog-over-5000-rejected expect_ok=False -> 2 error(s): schema: $.deadlock_watchdog_timeout_ms: 6000 is greater than the maximum of 5000
+[self-test] PASS incomplete-forbidden-list-rejected expect_ok=False -> 2 error(s): schema: $.lock_forbidden_calls: ['resolve_graph_run_for_retrieval', 'load_graph_run', 'load_execution_checkpoint'] is too short
+[nfr-lint] self-test cases=6 failures=0
+ExitCode=0
+
+### R3: C5 锁纪律静态门禁 (真实仓库)
+ok          crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/capability_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/graph_projection.rs
+FAIL(ERROR) crates/pony-agent-core/src/agent/control_plane/history_commands.rs
+  - L441 [REENTRANT_CALL] 锁作用域（自 L432 起）内调用 self.resolve_graph_run_for_retrieval()，该方法会再次 self.graph_runs.lock() → 同线程自死锁
+ok          crates/pony-agent-core/src/agent/control_plane/message_projection.rs
+WARN(P1)    crates/pony-agent-core/src/agent/control_plane/mod.rs  # 同类遗留项，不阻塞本次放行
+  - L2059 [REENTRANT_CALL] 锁作用域（自 L2039 起）内调用 self.load_execution_checkpoint()，该方法会再次 self.graph_runs.lock() → 同线程自死锁
+ok          crates/pony-agent-core/src/agent/control_plane/path_authorization_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/query_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/trace_commands.rs
+ok          crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs
+[check-lock-discipline] scanned_files=10 lock_sites=25 blocking_violations=1 registered_p1=1
+[check-lock-discipline] RESULT: RED (C5 blocking violation present)
+ExitCode=1
+
+### R4: C5 门禁负向对照夹具 (good -> 期望 0)
+ok          .dev-team/fixtures/lock-discipline/good/history_commands.rs
+[check-lock-discipline] scanned_files=1 lock_sites=2 blocking_violations=0 registered_p1=0
+[check-lock-discipline] RESULT: GREEN (C5 satisfied)
+ExitCode=0
+
+### R5: C5 门禁正向对照夹具 (bad -> 期望 1)
+FAIL(ERROR) .dev-team/fixtures/lock-discipline/bad/history_commands.rs
+  - L13 [REENTRANT_CALL] 锁作用域（自 L10 起）内调用 self.resolve_graph_run_for_retrieval()，该方法会再次 self.graph_runs.lock() → 同线程自死锁
+[check-lock-discipline] scanned_files=1 lock_sites=2 blocking_violations=1 registered_p1=0
+[check-lock-discipline] RESULT: RED (C5 blocking violation present)
+ExitCode=1
+
+### R6: 同线程自死锁机制等价复现 (/tmp, 不触碰仓库 target/)
+-- 复现版（锁作用域内 .or_else 二次加锁）:
+ExitCode=124 (124=5s 硬边界内未返回)
+-- 对照版（锁作用域收敛后）:
+returned=None elapsed=121ns
+ExitCode=0
+
+### R7: dev-nfr-lint.py 存在性检查
+ls: cannot access 'scripts/dev-nfr-lint.py': No such file or directory
+ExitCode=2
+
+### R8: jq 独立工具链交叉校验（等价机械校验）
+false
+ExitCode=1
+
+### R9: 修复后复跑门禁（GREEN 判据预演：仅看 blocking 计数）
+  - L2059 [REENTRANT_CALL] 锁作用域（自 L2039 起）内调用 self.load_execution_checkpoint()，该方法会再次 self.graph_runs.lock() → 同线程自死锁
+[check-lock-discipline] scanned_files=10 lock_sites=25 blocking_violations=1 registered_p1=1
+[check-lock-discipline] RESULT: RED (C5 blocking violation present)
+ExitCode=1
+
+### R8b: jq 交叉校验（修正：顶层键数=10）
+true
+ExitCode=0
+
+注：R8 的 `keys|length)==9` 为编写方笔误（实际顶层键 10 个），已由 R8b 修正并通过；R8 的 ExitCode=1 如实保留以示非伪造。R9 为 RED 基准复跑（修复后应转 0）。

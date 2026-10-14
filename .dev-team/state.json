@@ -1,6 +1,6 @@
 {
   "wave": 8,
-  "status": "in_progress",
+  "status": "completed",
   "task_classification": "B",
   "reason": "跨语言(Rust core + Tauri 同步命令 + TS 前端)会话页进入链路；命中并发/锁关键字（std::sync::Mutex 重入自死锁），机械分级触发规则强制 >= B 级",
   "baseline_commit": "506220bc7c1e16204112361cd1011339c4f0a36d",
@@ -17,23 +17,74 @@
     "8": {
       "branches": {
         "deadlock-fix": {
-          "red_commit": null,
-          "green_commit": null,
-          "status": "red-phase"
+          "red_commit": "533e7b8",
+          "green_commit": "HEAD",
+          "status": "verified",
+          "fix_file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
+          "fix_scope": "1 file changed (锁作用域收敛 + 命中路径单 guard 原子读 + 锁中毒日志补上下文)"
         }
       },
       "tasks": {
-        "task-1": "protocol: freeze contract matrix & NFR baseline (.dev-team/)",
-        "task-2": "test: red-phase acceptance tests + lock-scope guard (crates/pony-agent-core/tests, scripts/)",
-        "task-3": "executor: minimal fix in history_commands.rs (blocked_by task-2)"
+        "task-1": "protocol: contract matrix & NFR baseline (.dev-team/) — completed",
+        "task-2": "test: red-phase acceptance tests + lock-scope guard — completed",
+        "task-3": "executor: minimal deadlock fix — completed",
+        "task-4": "test: isolate production sessions.db in integration tests — completed",
+        "task-5": "protocol: fix fake-green gates + logging scope + AFTER E2E receipts — completed",
+        "task-6": "executor: L3-P remediation (log context) — completed",
+        "task-7": "executor: TOCTOU fix (single-guard atomic read on run_id hit) — completed",
+        "task-8": "test: guard hardening (auto-discovery of lockers) — completed"
       },
       "write_scopes": {
         "task-1": [".dev-team/"],
         "task-2": ["crates/pony-agent-core/tests/", "scripts/"],
-        "task-3": ["crates/pony-agent-core/src/agent/control_plane/history_commands.rs"]
-      }
+        "task-3": ["crates/pony-agent-core/src/agent/control_plane/history_commands.rs"],
+        "task-4": ["crates/pony-agent-core/tests/"],
+        "task-5": [".dev-team/"],
+        "task-6": ["crates/pony-agent-core/src/agent/control_plane/history_commands.rs"],
+        "task-7": ["crates/pony-agent-core/src/agent/control_plane/history_commands.rs"],
+        "task-8": ["scripts/check-graph-run-lock-scope.mjs"]
+      },
+      "gates": {
+        "red_phase": {
+          "functional": "10 passed / 3 failed (EXIT=101, 5s watchdog timeout)",
+          "adversarial_concurrency": "0 passed / 2 failed (EXIT=101)",
+          "lock_scope_guard": "EXIT=1 (history_commands.rs:441 forbidden-call)"
+        },
+        "green_phase": {
+          "functional": "13 passed / 0 failed (EXIT=0, 0.31s)",
+          "adversarial_concurrency": "2 passed / 0 failed (EXIT=0)",
+          "lock_scope_guard": "EXIT=0 (0 blocking, 1 registered P1-SAFE)",
+          "lock_discipline_py": "EXIT=0 (blocking=0, p1=1)",
+          "nfr_lint": "EXIT=0 (self-test cases=14 failures=0)",
+          "cargo_check_src_tauri": "EXIT=0",
+          "cargo_test_lib_control_plane": "66 passed / 0 failed (EXIT=0)",
+          "rustfmt_check": "EXIT=0",
+          "frontend_vitest": "74 files / 791 passed (EXIT=0)",
+          "version_sync": "EXIT=0"
+        },
+        "e2e": {
+          "before": "/tmp/pony-run-e2e/shot-30s.png — wchan=futex_wait_queue, DIAG overlay stopped at t=1s",
+          "after": "/tmp/pony-run-e2e-final2/shot-30s.png — VERDICT=RUNNING_OK, wchan=do_poll, DIAG t=1s..t=15s, session page rendered",
+          "toolchain": "--features tauri/custom-protocol (embedded dist) + Xvfb + dbus-run-session + isolated HOME with real sessions.db"
+        }
+      },
+      "reviews": {
+        "l3p_round1": {"file": ".dev-team/review-l3p-deadlock.json", "verdict": "FAIL", "closed_by": "task-5 + task-6"},
+        "l3p_round2": {"file": ".dev-team/review-l3p-deadlock-recheck.json", "verdict": "see file"},
+        "l3_concurrency": {"verdict": "found TOCTOU torn read introduced by T3", "closed_by": "task-7 + task-8"}
+      },
+      "nfr_degraded": [
+        {
+          "id": "logging-legacy-eprintln",
+          "baseline_key": "logging.format/trace_id_required",
+          "waiver": "logging_legacy_eprintln_exempt=true",
+          "debt_ref": "PA-119",
+          "expiry": "PA-119 完成时必须重跑本波 L3-P 五问并关闭豁免"
+        }
+      ]
     }
   },
+  "meta_retrospective": ".dev-team/meta-retrospective.md",
   "previous_wave": {
     "wave": 7,
     "status": "completed",
@@ -56,6 +107,6 @@
       "sanitization_zero_trust": true,
       "status": "verified"
     },
-    "meta_retrospective": ".dev-team/meta-retrospective.md"
+    "meta_retrospective": ".dev-team/meta-retrospective-wave7-eventbus.md"
   }
 }

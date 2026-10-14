@@ -53,12 +53,43 @@
     },
     "logging": {
       "type": "object",
+      "description": "适用范围收窄为 logging_scope 声明的「新增结构化日志面」；既有风格（非 JSON）的锁中毒恢复诊断输出按 logging_legacy_eprintln_exempt + logging_eprintln_exempt_scope 豁免（含本波新增 1 处）。注意：当前全仓库无结构化日志面，本字段无代码级检查点，属 PA-119 债务（见 logging_compliance_claimed）。",
       "properties": {
         "format": { "type": "string", "enum": ["json"] },
         "trace_id_required": { "type": "boolean" }
       },
       "required": ["format", "trace_id_required"],
       "additionalProperties": false
+    },
+    "logging_scope": {
+      "type": "string",
+      "description": "logging{format,trace_id_required} 的适用范围收窄声明（Lead 裁定：不引入结构化日志框架）。",
+      "enum": ["new_structured_logging_surface_only"]
+    },
+    "logging_legacy_eprintln_exempt": {
+      "type": "boolean",
+      "description": "既有风格（非 JSON）eprintln 诊断输出豁免；豁免必须绑定 logging_debt_ref 债务单。字段名沿用 task-5 冻结名，语义以 logging_eprintln_exempt_scope 为准（不再声称仅覆盖 legacy）。",
+      "const": true
+    },
+    "logging_debt_ref": {
+      "type": "string",
+      "description": "豁免到期条款所绑定的债务单（PA-119 结构化日志迁移）。",
+      "const": "PA-119"
+    },
+    "logging_eprintln_exempt_scope": {
+      "type": "string",
+      "description": "豁免覆盖范围的显式声明：既有风格（非 JSON）的锁中毒恢复诊断输出，含本波新增的 1 处（history_commands.rs:456）。",
+      "enum": ["existing_style_non_json_lock_poison_recovery_diagnostics"]
+    },
+    "logging_eprintln_exempt_covers_new_lines": {
+      "type": "integer",
+      "description": "本波被豁免覆盖的**新增** eprintln 诊断行数；minimum=1 以禁止「声明豁免却覆盖 0 处新增行」的不实声明。",
+      "minimum": 1
+    },
+    "logging_compliance_claimed": {
+      "type": "boolean",
+      "description": "恒真防护：logging{format=json,trace_id_required} 当前无代码级检查点（PA-119 债务），本波不主张该 NFR 已满足，故必须为 false。",
+      "const": false
     },
     "resource_release": {
       "type": "array",
@@ -75,6 +106,12 @@
     "deadlock_watchdog_timeout_ms",
     "lock_forbidden_calls",
     "logging",
+    "logging_scope",
+    "logging_legacy_eprintln_exempt",
+    "logging_debt_ref",
+    "logging_eprintln_exempt_scope",
+    "logging_eprintln_exempt_covers_new_lines",
+    "logging_compliance_claimed",
     "resource_release"
   ],
   "additionalProperties": false

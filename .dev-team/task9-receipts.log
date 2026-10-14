@@ -1,0 +1,180 @@
+=== task-9 收据（干净修订 ba0948e）@ 2026-10-14T06:49:07Z ===
+
+### R20: 干净工作树自证
+-- git log -1:
+ba0948ea2673863deb6379923fdc0ce80427b8cc fix(core): eliminate graph_runs lock reentrancy self-deadlock in resolve_graph_run_submission_plan
+-- [代码域] git status --porcelain -- crates src src-tauri scripts tests:
+[空 => 代码域 clean]
+-- [代码域] git diff HEAD --stat -- crates src src-tauri scripts tests:
+[空 => 代码域 clean]
+-- [全仓] git status --porcelain（仅 .dev-team/ 证据工件 + Lead 的看板为脏）:
+ M .dev-team/contract-matrix-deadlock.md
+ M .dev-team/meta-retrospective.md
+ M .dev-team/nfr-baseline.json
+ M .dev-team/nfr-baseline.schema.json
+ M .dev-team/nfr-lint.py
+ M .dev-team/state.json
+ M management/task-system/01_TASK_BOARD.md
+?? .dev-team/meta-retrospective-wave7-eventbus.md
+?? .dev-team/review-l3p-deadlock.json
+
+### R21: nfr-lint.py（主校验）
+[nfr-lint] jsonschema=4.10.3
+[nfr-lint] schema=/home/dm/pony-agent/.dev-team/nfr-baseline.schema.json
+[nfr-lint] instance=/home/dm/pony-agent/.dev-team/nfr-baseline.json
+[nfr-lint] ok: schema 校验通过；未知字段 0 个；lock_scope_bounded=True lock_reentrancy_forbidden=True lock_acquisition_timeout_ms=2000 deadlock_watchdog_timeout_ms=5000 lock_forbidden_calls=4 logging_scope='new_structured_logging_surface_only' logging_legacy_eprintln_exempt=True logging_debt_ref='PA-119' logging_eprintln_exempt_covers_new_lines=1 logging_compliance_claimed=False
+[nfr-lint] NOTE(logging): logging{format=json,trace_id_required} 当前**无代码级检查点**（全仓库无结构化日志面），属 PA-119 债务；本波**不主张该 NFR 已满足**，仅主张「已显式登记债务 + 有到期条款 + 有恒真防护（logging_compliance_claimed=false）」。禁止把该字段读作恒真放行。
+[nfr-lint] RESULT: PASS
+ExitCode=0
+
+### R22: nfr-lint.py --self-test
+[self-test] PASS logging-compliance-claimed-true-rejected expect_ok=False -> 2 error(s): schema: $.logging_compliance_claimed: False was expected
+[self-test] PASS missing-logging-compliance-claimed-rejected expect_ok=False -> 2 error(s): schema: $: 'logging_compliance_claimed' is a required property
+[nfr-lint] self-test cases=21 failures=0
+ExitCode=0
+
+### R23: nfr-lint.py --mutation-test（钝化 check_logging_scope 后必须失败）
+[nfr-lint] self-test cases=21 failures=1
+[mutation-test] 钝化后 failures=1 failing_cases=['logging-trace-id-false-rejected']
+[mutation-test] PASS 钝化后 1 个用例由 PASS 翻为 FAIL，其中 python 独占分支用例 ['logging-trace-id-false-rejected'] 全部被覆盖
+ExitCode=0
+
+### R24: check-lock-discipline.py（ba0948e）
+ok          crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs
+[check-lock-discipline] scanned_files=10 lock_sites=26 blocking_violations=0 registered_p1=1
+[check-lock-discipline] RESULT: GREEN (C5 blocking satisfied; P1 items registered)
+ExitCode=0
+
+### R25: jq 独立交叉校验（顶层键数=16）
+true
+ExitCode=0
+
+### R26: G1~G7 重跑（干净修订 ba0948e，--target-dir target-test，timeout 包裹）
+
+--- G1: --lib agent::control_plane::tests::submission_plan_prefers_checkpoint_projection_when_available
+test agent::control_plane::tests::submission_plan_prefers_checkpoint_projection_when_available ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.01s
+G1_EXIT=0
+
+--- G2: --lib agent::control_plane::tests::lifecycle_boundary_checkpoint_does_not_override_default_submission_plan
+test agent::control_plane::tests::lifecycle_boundary_checkpoint_does_not_override_default_submission_plan ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.07s
+G2_EXIT=0
+
+--- G4: --lib agent::control_plane::tests::submission_plan_starts_fresh_run_when_recovery_contract_requires_replay
+test agent::control_plane::tests::submission_plan_starts_fresh_run_when_recovery_contract_requires_replay ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.03s
+G4_EXIT=0
+
+--- G5: --lib agent::control_plane::tests::submission_plan_switches_with_session_checkpoint_boundary
+test agent::control_plane::tests::submission_plan_switches_with_session_checkpoint_boundary ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.01s
+G5_EXIT=0
+
+--- G6: --lib --
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1014 filtered out; finished in 0.00s
+G6_EXIT=0
+
+--- G3: --test graph_run_submission_plan_deadlock
+running 13 tests
+test c1_submission_plan_bounded_null_run_id_with_active_non_terminal_run ... ok
+test c1_submission_plan_bounded_null_run_id_with_nonempty_session ... ok
+test c1_submission_plan_bounded_regression_null_run_id_and_null_session ... ok
+test c2_submission_plan_bounded_unknown_run_id_with_nonempty_session ... ok
+test c2_submission_plan_bounded_unknown_run_id_with_null_session ... ok
+test c3_unresolved_ask_wait_self_heals_to_start_graph_run_stream ... ok
+test c4_cancelled_run_maps_to_start_graph_run_stream ... ok
+test c4_completed_run_maps_to_start_graph_run_stream ... ok
+test c4_failed_run_maps_to_start_graph_run_stream ... ok
+test c4_ready_recovery_checkpoint_maps_to_continue_graph_run_stream ... ok
+test c4_submission_plan_paused_resumable_maps_to_resume_graph_run_stream ... ok
+test c4_submission_plan_paused_with_active_turn_downgrades_to_start_graph_run_stream ... ok
+test c4_waiting_user_recovery_checkpoint_maps_to_continue_graph_run_stream ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+G3_EXIT=0
+
+--- G7: --test graph_run_submission_plan_deadlock
+running 13 tests
+test c1_submission_plan_bounded_null_run_id_with_active_non_terminal_run ... ok
+test c1_submission_plan_bounded_null_run_id_with_nonempty_session ... ok
+test c1_submission_plan_bounded_regression_null_run_id_and_null_session ... ok
+test c2_submission_plan_bounded_unknown_run_id_with_nonempty_session ... ok
+test c2_submission_plan_bounded_unknown_run_id_with_null_session ... ok
+test c3_unresolved_ask_wait_self_heals_to_start_graph_run_stream ... ok
+test c4_cancelled_run_maps_to_start_graph_run_stream ... ok
+test c4_completed_run_maps_to_start_graph_run_stream ... ok
+test c4_failed_run_maps_to_start_graph_run_stream ... ok
+test c4_ready_recovery_checkpoint_maps_to_continue_graph_run_stream ... ok
+test c4_submission_plan_paused_resumable_maps_to_resume_graph_run_stream ... ok
+test c4_submission_plan_paused_with_active_turn_downgrades_to_start_graph_run_stream ... ok
+test c4_waiting_user_recovery_checkpoint_maps_to_continue_graph_run_stream ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+G7_EXIT=0
+
+### R26b: G3/G6/G7 重跑（修正参数传递，逐条字面命令）
+
+--- G6: cargo test --lib -- submission_plan_ --test-threads=1
+running 8 tests
+test agent::control_plane::tests::submission_plan_does_not_resume_when_run_is_not_resumable ... ok
+test agent::control_plane::tests::submission_plan_falls_back_to_graph_run_when_checkpoint_is_absent ... ok
+test agent::control_plane::tests::submission_plan_prefers_checkpoint_projection_when_available ... ok
+test agent::control_plane::tests::submission_plan_starts_fresh_run_when_recovery_contract_requires_replay ... ok
+test agent::control_plane::tests::submission_plan_switches_with_session_checkpoint_boundary ... ok
+test agent::hooks::tests::submission_plan_envelope_normalizes_graph_run_continue_to_ready_boundary ... ok
+test agent::hooks::tests::submission_plan_envelope_preserves_checkpoint_waiting_user_boundary ... ok
+test agent::hooks::tests::submission_plan_hook_binding_matches_resume_boundary_without_new_command_source ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1006 filtered out; finished in 0.05s
+G6_EXIT=0
+
+--- G3: cargo test --test graph_run_submission_plan_deadlock submission_plan_bounded -- --test-threads=1
+running 5 tests
+test c1_submission_plan_bounded_null_run_id_with_active_non_terminal_run ... ok
+test c1_submission_plan_bounded_null_run_id_with_nonempty_session ... ok
+test c1_submission_plan_bounded_regression_null_run_id_and_null_session ... ok
+test c2_submission_plan_bounded_unknown_run_id_with_nonempty_session ... ok
+test c2_submission_plan_bounded_unknown_run_id_with_null_session ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.10s
+G3_EXIT=0
+
+--- G7: cargo test --test graph_run_submission_plan_deadlock submission_plan_paused -- --test-threads=1
+running 2 tests
+test c4_submission_plan_paused_resumable_maps_to_resume_graph_run_stream ... ok
+test c4_submission_plan_paused_with_active_turn_downgrades_to_start_graph_run_stream ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.05s
+G7_EXIT=0
+
+### R26c: 集成测试 target 全量（附加信息，13 例）
+running 13 tests
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+ALL13_EXIT=0
+
+### R28: 最终工件状态复跑 @ 2026-10-14T06:57:17Z rev=ba0948e
+[nfr-lint] ok: schema 校验通过；未知字段 0 个；lock_scope_bounded=True lock_reentrancy_forbidden=True lock_acquisition_timeout_ms=2000 deadlock_watchdog_timeout_ms=5000 lock_forbidden_calls=4 logging_scope='new_structured_logging_surface_only' logging_legacy_eprintln_exempt=True logging_debt_ref='PA-119' logging_eprintln_exempt_covers_new_lines=1 logging_compliance_claimed=False
+[nfr-lint] NOTE(logging): logging{format=json,trace_id_required} 当前**无代码级检查点**（全仓库无结构化日志面），属 PA-119 债务；本波**不主张该 NFR 已满足**，仅主张「已显式登记债务 + 有到期条款 + 有恒真防护（logging_compliance_claimed=false）」。禁止把该字段读作恒真放行。
+[nfr-lint] RESULT: PASS
+nfr-lint ExitCode=0
+[nfr-lint] self-test cases=21 failures=0
+self-test ExitCode=0
+[mutation-test] 钝化后 failures=1 failing_cases=['logging-trace-id-false-rejected']
+[mutation-test] PASS 钝化后 1 个用例由 PASS 翻为 FAIL，其中 python 独占分支用例 ['logging-trace-id-false-rejected'] 全部被覆盖
+mutation-test ExitCode=0
+[check-lock-discipline] scanned_files=10 lock_sites=26 blocking_violations=0 registered_p1=1
+[check-lock-discipline] RESULT: GREEN (C5 blocking satisfied; P1 items registered)
+check-lock-discipline ExitCode=0
+true
+jq ExitCode=0
+
+### R29: 写域终检
+-- [代码域] git status --porcelain -- crates src src-tauri scripts tests:
+[空=clean]
+-- [全仓] git status --porcelain:
+ M .dev-team/contract-matrix-deadlock.md
+ M .dev-team/meta-retrospective.md
+ M .dev-team/nfr-baseline.json
+ M .dev-team/nfr-baseline.schema.json
+ M .dev-team/nfr-lint.py
+ M .dev-team/state.json
+ M management/task-system/01_TASK_BOARD.md
+?? .dev-team/meta-retrospective-wave7-eventbus.md
+?? .dev-team/review-l3p-deadlock.json

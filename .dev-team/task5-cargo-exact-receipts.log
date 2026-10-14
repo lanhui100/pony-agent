@@ -1,0 +1,65 @@
+=== task-5 G1/G2/G4/G5 --exact 逐条收据 @ 2026-10-14T06:18:38Z rev=533e7b8 ===
+
+### G1: cargo test --lib submission_plan_prefers_checkpoint_projection_when_available -- --exact
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1014 filtered out; finished in 0.00s
+G1_EXIT=0
+
+### G2: cargo test --lib lifecycle_boundary_checkpoint_does_not_override_default_submission_plan -- --exact
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1014 filtered out; finished in 0.00s
+G2_EXIT=0
+
+### G4: cargo test --lib submission_plan_starts_fresh_run_when_recovery_contract_requires_replay -- --exact
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1014 filtered out; finished in 0.00s
+G4_EXIT=0
+
+### G5: cargo test --lib submission_plan_switches_with_session_checkpoint_boundary -- --exact
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1014 filtered out; finished in 0.00s
+G5_EXIT=0
+
+=== 修正口径验证：去 --exact（子串过滤）与全路径 --exact 对比 ===
+
+### G1: cargo test --lib submission_plan_prefers_checkpoint_projection_when_available （无 --exact，子串过滤）
+test agent::control_plane::tests::submission_plan_prefers_checkpoint_projection_when_available ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.01s
+G1_EXIT=0
+
+### G2: cargo test --lib lifecycle_boundary_checkpoint_does_not_override_default_submission_plan （无 --exact，子串过滤）
+test agent::control_plane::tests::lifecycle_boundary_checkpoint_does_not_override_default_submission_plan ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.07s
+G2_EXIT=0
+
+### G4: cargo test --lib submission_plan_starts_fresh_run_when_recovery_contract_requires_replay （无 --exact，子串过滤）
+test agent::control_plane::tests::submission_plan_starts_fresh_run_when_recovery_contract_requires_replay ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.04s
+G4_EXIT=0
+
+### G5: cargo test --lib submission_plan_switches_with_session_checkpoint_boundary （无 --exact，子串过滤）
+test agent::control_plane::tests::submission_plan_switches_with_session_checkpoint_boundary ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.01s
+G5_EXIT=0
+
+### G1b: 全路径 --exact 口径验证
+test agent::control_plane::tests::submission_plan_prefers_checkpoint_projection_when_available ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.01s
+G1b_EXIT=0
+
+=== 最终冻结口径：全路径 --exact 逐条收据 ===
+
+### G2: cargo test --lib agent::control_plane::tests::lifecycle_boundary_checkpoint_does_not_override_default_submission_plan -- --exact
+test agent::control_plane::tests::lifecycle_boundary_checkpoint_does_not_override_default_submission_plan ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.07s
+G2_EXIT=0
+
+### G4: cargo test --lib agent::control_plane::tests::submission_plan_starts_fresh_run_when_recovery_contract_requires_replay -- --exact
+test agent::control_plane::tests::submission_plan_starts_fresh_run_when_recovery_contract_requires_replay ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.03s
+G4_EXIT=0
+
+### G5: cargo test --lib agent::control_plane::tests::submission_plan_switches_with_session_checkpoint_boundary -- --exact
+test agent::control_plane::tests::submission_plan_switches_with_session_checkpoint_boundary ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 0.01s
+G5_EXIT=0

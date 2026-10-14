@@ -1,0 +1,35 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-deadlock.md",
+      "line": 102,
+      "rule": "物理凭证先决：收据必须可从其声明的仓库修订复现（AGENTS.md 底线 5；契约 §1 与 §5.2 均自述 rev=533e7b8 为「v2 修复后 GREEN」修订）",
+      "counterexample": "契约 §1（L102）声明 rev 533e7b8 下 `blocking_violations=0`、`lock_sites=26`、C5 GREEN，§5.2（L217/L223）把 R12 同样钉在 rev 533e7b8。从纯净 533e7b8 复现得到相反结果：`mkdir -p /tmp/headtree/crates/pony-agent-core/src/agent/control_plane && for f in $(git ls-tree --name-only HEAD crates/pony-agent-core/src/agent/control_plane/); do git show HEAD:$f > /tmp/headtree/$f; done && python3 .dev-team/check-lock-discipline.py --root /tmp/headtree/crates/pony-agent-core/src/agent/control_plane` → `FAIL(ERROR) .../history_commands.rs` / `- L441 [REENTRANT_CALL] 锁作用域（自 L432 起）内调用 self.resolve_graph_run_for_retrieval()` / `scanned_files=10 lock_sites=25 blocking_violations=1 registered_p1=1` / `RESULT: RED (C5 blocking violation present)` / Exit 1。`git status --porcelain` 显示 T3/T6/T7 修复（history_commands.rs 等 7 个文件）全部未提交，工作树 dirty；故 R12 的 lock_sites=26/GREEN 只能来自未提交工作树，全部 v2 收据的 rev=533e7b8 标注为假。"
+    },
+    {
+      "file": ".dev-team/nfr-lint.py",
+      "line": 109,
+      "rule": "零假测试：自检必须覆盖其宣称强制的拒绝分支（AGENTS.md 底线 4；契约 §3.1 第 2 条 L175 宣称 `check_logging_scope()` 额外强制债务单号正则，§5.2 L222 宣称 14 例覆盖 logging 拒绝分支）",
+      "counterexample": "① 契约 L175 的具体主张不成立：schema 对 `logging_debt_ref` 用 `const: \"PA-119\"`（nfr-baseline.schema.json:77），严格强于 python 侧 `^PA-\\d+$` 正则，故正则分支永远不可能独立触发。② 真正由 python 独占强制的唯一分支是 `logging.trace_id_required != true`（schema 只写 `type: boolean`，无 const），而 14 例自检里没有任何一例覆盖它。③ 机械反证（钝化 python 闸门后自检仍全绿）：`python3 - <<'PY'` 加载 .dev-team/nfr-lint.py，先跑 `run_self_test(schema)` 得 `cases=14 failures=0 rc=0`，再把 `nf.check_logging_scope = lambda doc: []` 后重跑，仍 `cases=14 failures=0 rc=0`，`SELFTEST_BLINDSIDE_DETECTED = False`。即删掉该 python 闸门的全部逻辑，自检照样 14/14 放行 → 该分支零负例。④ 枚举反证：900 组 logging 字段取值组合中，python 侧报错而 schema 不报错的组合仅 1 组（`logging.trace_id_required=false`），898 组有 python 报错的组合里 897 组同时被 schema 拒绝。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
+      "line": 456,
+      "rule": "豁免范围必须与声明一致：契约 §3.1 第 3 条（L176）声明豁免仅覆盖 legacy `eprintln!` 诊断输出，`logging_legacy_eprintln_exempt` 不得被援引为新增代码免于 logging 约束的依据",
+      "counterexample": "L439 与 L456 两处 `eprintln!` 中，L439 是既有 legacy 行的改写，但 L456 是本波新增行：`git show HEAD:crates/pony-agent-core/src/agent/control_plane/history_commands.rs | grep -c 'eprintln!'` = 11，工作树 `grep -c 'eprintln!'` = 12，`git diff` 中 L456 以 `+` 出现（T7 把单 guard 拆成两处加锁，随之复制出第二处裸打印）。该新增行被 `logging_legacy_eprintln_exempt=true` 覆盖，与其「legacy」命名及 §3.1 的范围声明不符。"
+    },
+    {
+      "file": ".dev-team/nfr-baseline.json",
+      "line": 22,
+      "rule": "门禁非恒真：NFR 基准字段必须在代码层有可命中的检查点，否则收窄后即恒真放行（本轮已因此否决 v1 的 G1~G7 假绿门禁）",
+      "counterexample": "`logging_scope=\"new_structured_logging_surface_only\"` 把 `logging{format:\"json\",trace_id_required:true}` 的适用范围收窄为「仅新增结构化日志面」。全仓库不存在任何结构化日志面：`grep -rn 'tracing' --include=Cargo.toml .`（排除 target）无输出，`crates/pony-agent-core/Cargo.toml` 无 tracing/log/slog/env_logger 依赖，故不存在任何代码级检查点能命中该字段。nfr-lint.py 只校验 baseline JSON 自身声明了 json，不校验任何一行代码 → 该 NFR 收窄后对代码零约束，构成本轮同一 FAIL 判据下的恒真门禁。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
+      "line": 450,
+      "rule": "并发一致性（P 级、非阻塞）：run 快照与 ask-wait 判定应在同一 guard 内原子读取",
+      "counterexample": "T7 只对 run_id 命中路径做了单 guard 原子读（L437-446）；fallback 路径在 L451 `resolve_graph_run_for_retrieval`（内部加锁后释放）与 L455 独立短锁之间存在 TOCTOU 窗口。而生产路径恰好恒走 fallback：`src/stores/runtime.ts:1056` 硬编码 `runId: null`（契约 P2 已登记）。判为非阻塞的依据（可验证）：`git show 24c064c^:.../history_commands.rs` 该函数无任何 ask-wait 判定（`git log -S 'has_unresolved_ask_waits' -- 同文件` 仅命中 24c064c），且 24c064c..HEAD 该路径必走 `.or_else` 二次加锁自死锁，故 fallback 的原子语义从未可达，T7 未回归任何可达语义。"
+    }
+  ]
+}

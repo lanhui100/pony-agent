@@ -1,0 +1,29 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
+      "line": 441,
+      "rule": "nfr-baseline.json logging.format=json + logging.trace_id_required=true：禁止未带上下文的裸打印",
+      "counterexample": "本次 diff 新增行 `eprintln!(\"[pony-agent] graph run lock poisoned, recovering: {e}\");`（history_commands.rs:441）为纯文本、非 JSON、无 trace_id 字段；同一闭包内 `run_id` 在作用域内、`query.session_id` 可访问，日志却两者都不带。复现：`git diff -- crates/pony-agent-core/src/agent/control_plane/history_commands.rs` 显示该行是新增（`+`），`grep -n 'eprintln!' 同文件` 计数 12（HEAD 为 11，净增 1）；`grep -n tracing crates/pony-agent-core/Cargo.toml` 无任何 tracing 依赖，全仓库无结构化 JSON 日志通道，故该行不可能满足 format=json / trace_id_required。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
+      "line": 451,
+      "rule": "nfr-baseline.json logging.format=json + logging.trace_id_required=true：禁止未带上下文的裸打印",
+      "counterexample": "同一 diff 在同一函数内复制出第二处相同裸打印（history_commands.rs:451），同样无 JSON 结构、无 trace_id、无 run_id/session_id 上下文。复现：`git diff` 中该行为新增行；`grep -c 'eprintln!' history_commands.rs` = 12 vs `git show HEAD:...| grep -c 'eprintln!'` = 11。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-deadlock.md",
+      "line": 119,
+      "rule": "契约 C1/G3 机械门禁非恒真（要求『须选中 ≥1 用例且含 elapsed < 5000ms 断言』）",
+      "counterexample": "按契约逐字执行 G3：`timeout -k 5 300 cargo test -p pony-agent-core --target-dir target-test --lib submission_plan_bounded` → 输出 `running 0 tests` / `test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1014 filtered out`，Exit 0。该门禁恒真：即使删除全部有界性断言仍为绿。根因：有界性用例实际只存在于集成测试 target（crates/pony-agent-core/tests/graph_run_submission_plan_deadlock.rs:190/241/264、graph_run_lock_concurrency_red.rs:167），`--lib` 选不中。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-deadlock.md",
+      "line": 123,
+      "rule": "契约 C4/G7 机械门禁非恒真（要求『须选中 ≥1 用例』）",
+      "counterexample": "按契约逐字执行 G7：`timeout -k 5 300 cargo test -p pony-agent-core --target-dir target-test --lib submission_plan_paused` → `running 0 tests` / `1014 filtered out`，Exit 0。真实用例在集成 target（tests/graph_run_submission_plan_deadlock.rs:459/494），`--lib` 选不中，门禁恒真。"
+    }
+  ]
+}
