@@ -27,7 +27,6 @@ const hasPlanOrTasks = computed(
 const {
   error,
   fallbackReason,
-  isSubmitting,
   sessionError,
   sessionId,
   sessionOperation
@@ -66,10 +65,6 @@ const sessionStatusSummary = computed(() => {
 
   if (sessionError.value?.trim()) {
     return sessionError.value.trim();
-  }
-
-  if (isSubmitting.value) {
-    return "正在等待回复…";
   }
 
   return "";
@@ -114,6 +109,7 @@ onBeforeUnmount(() => {
           :status-summary="sessionStatusSummary"
           :fallback-reason="fallbackReason"
           :error="error"
+          :class="hasPlanOrTasks ? 'border-b border-stone-200/70 pb-4' : ''"
           @copy-session-id="copyText('session-id', sessionId)"
         />
 

@@ -294,7 +294,7 @@ fn trace_step(id: &str, label: &str, state: &str) -> TurnTraceStep {
 
 fn tool_activities_running(active_call: &ToolCall) -> Vec<TurnToolActivity> {
     let mut activities = vec![TurnToolActivity {
-        id: tool_activity_id(&active_call.name, None),
+        id: tool_activity_id(active_call, None),
         name: model_visible_tool_name(&active_call.name).to_string(),
         canonical_tool_name: Some(product_canonical_tool_name(&active_call.name).to_string()),
         display_name_zh: tool_display_metadata_for_name(&active_call.name).display_name_zh,
@@ -320,7 +320,7 @@ fn tool_activities_after_result(
 ) -> Vec<TurnToolActivity> {
     let parsed = parse_tool_output(&result.output);
     let mut activities = vec![TurnToolActivity {
-        id: tool_activity_id(&active_call.name, None),
+        id: tool_activity_id(active_call, None),
         name: model_visible_tool_name(&active_call.name).to_string(),
         canonical_tool_name: Some(product_canonical_tool_name(&active_call.name).to_string()),
         display_name_zh: tool_display_metadata_for_name(&active_call.name).display_name_zh,
@@ -383,10 +383,18 @@ fn composite_error_from_children(parsed: &Value) -> Option<ToolError> {
     None
 }
 
-fn tool_activity_id(tool_name: &str, suffix: Option<&str>) -> String {
-    match suffix {
-        Some(suffix) => format!("tool-{}-{}", tool_name.replace('.', "-"), suffix),
-        None => format!("tool-{}", tool_name.replace('.', "-")),
+fn tool_activity_id(active_call: &ToolCall, suffix: Option<&str>) -> String {
+    if let Some(call_id) = active_call.call_id.as_deref().filter(|s| !s.trim().is_empty()) {
+        match suffix {
+            Some(suffix) => format!("{}-{}", call_id, suffix),
+            None => call_id.to_string(),
+        }
+    } else {
+        let tool_name = &active_call.name;
+        match suffix {
+            Some(suffix) => format!("tool-{}-{}", tool_name.replace('.', "-"), suffix),
+            None => format!("tool-{}", tool_name.replace('.', "-")),
+        }
     }
 }
 
@@ -488,7 +496,7 @@ fn planned_child_activities(active_call: &ToolCall) -> Vec<TurnToolActivity> {
         .into_iter()
         .enumerate()
         .map(|(index, step)| TurnToolActivity {
-            id: tool_activity_id(&active_call.name, Some(&format!("planned-{}", index + 1))),
+            id: tool_activity_id(active_call, Some(&format!("planned-{}", index + 1))),
             name: model_visible_tool_name(&step.name).to_string(),
             canonical_tool_name: Some(product_canonical_tool_name(&step.name).to_string()),
             display_name_zh: tool_display_metadata_for_name(&step.name).display_name_zh,
@@ -498,7 +506,7 @@ fn planned_child_activities(active_call: &ToolCall) -> Vec<TurnToolActivity> {
             arguments_text: Some(pretty_json(&step.arguments)),
             result_text: None,
             duration_seconds: None,
-            parent_activity_id: Some(tool_activity_id(&active_call.name, None)),
+            parent_activity_id: Some(tool_activity_id(active_call, None)),
             artifacts: None,
             error: None,
             capability_invocation: None,
@@ -556,7 +564,7 @@ fn nested_result_to_activity(
         .and_then(Value::as_str);
 
     TurnToolActivity {
-        id: tool_activity_id(&active_call.name, Some(&format!("child-{}", position + 1))),
+        id: tool_activity_id(active_call, Some(&format!("child-{}", position + 1))),
         name: model_visible_tool_name(tool_name).to_string(),
         canonical_tool_name: Some(product_canonical_tool_name(tool_name).to_string()),
         display_name_zh: tool_display_metadata_for_name(tool_name).display_name_zh,
@@ -571,7 +579,7 @@ fn nested_result_to_activity(
         arguments_text: Some(pretty_json(&arguments)),
         result_text: Some(nested_result_text(&output, error_message)),
         duration_seconds,
-        parent_activity_id: Some(tool_activity_id(&active_call.name, None)),
+        parent_activity_id: Some(tool_activity_id(active_call, None)),
         artifacts: Some(extract_activity_artifacts(&output)),
         error: entry.get("error").cloned(),
         capability_invocation: None,

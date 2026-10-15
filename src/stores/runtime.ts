@@ -423,13 +423,16 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       if (!state.isSubmitting) {
         return null;
       }
-      const activeMessage = state.activeTurnId
-        ? state.messages.find((m) => m.turnId === state.activeTurnId)
+      const activeAssistantMessage = state.activeTurnId
+        ? state.messages.find((m) => m.turnId === state.activeTurnId && m.role === "assistant")
         : null;
-      const isStreamingReasoning = Boolean(state.streamBufferReasoning);
+      const isStreamingReasoning = Boolean(
+        state.streamBufferReasoning ||
+        (activeAssistantMessage && activeAssistantMessage.reasoningContent)
+      );
       const hasStreamingContent = Boolean(
         state.streamBufferText ||
-        (activeMessage && activeMessage.content)
+        (activeAssistantMessage && activeAssistantMessage.content)
       );
       return resolveAgentRuntimeStatus({
         isSubmitting: state.isSubmitting,

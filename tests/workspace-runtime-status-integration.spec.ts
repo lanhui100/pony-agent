@@ -62,7 +62,7 @@ describe("Message Flow Bottom Status Integration", () => {
     expect(messageItems.length).toBe(2);
   });
 
-  it("renders status indicator for tool drafting mode with custom icon", () => {
+  it("renders status indicator for tool drafting mode with fixed spinner icon", () => {
     const runtimeStatus: AgentRuntimeStatus = {
       mode: "tool_drafting",
       label: "准备调用工具: 执行命令...",
@@ -85,7 +85,7 @@ describe("Message Flow Bottom Status Integration", () => {
     );
     const icon = statusSlot.find('[data-testid="agent-runtime-status-icon"]');
     expect(icon.exists()).toBe(true);
-    expect(icon.classes()).toContain("runtime-icon-wiggle");
+    expect(icon.classes()).toContain("animate-spin");
   });
 
   it("does not render status indicator when idle", () => {

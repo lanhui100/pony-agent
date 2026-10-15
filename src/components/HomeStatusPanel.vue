@@ -49,7 +49,7 @@ function formatTokenSpeed(value?: number | null) {
 </script>
 
 <template>
-  <section class="border-b border-stone-200/70 pb-16" data-open="true">
+  <section class="pb-16" data-open="true">
     <div class="flex w-full items-center justify-between gap-2 text-left" data-testid="status-panel-toggle">
       <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
         <Tooltip text="状态概览">

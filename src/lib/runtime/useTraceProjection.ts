@@ -308,26 +308,45 @@ export function useTraceProjection(options: {
   const showContextUsage = computed(() => !!latestTurn.value);
 
   // 当前模型生成速度（token/s）：取最近 turn 的最近一次模型调用生成速度，
-  // 缺失时回退到整轮整体速度。
+  // 缺失时倒序寻找之前有生成速度指标的 turn，保证历史会话切换或多轮对话中稳定展现。
   const sessionTokenGenerationSpeed = computed<number | null>(() => {
-    const turn = latestTurn.value;
-    if (!turn) {
+    const turns = orderedTurnTraces.value;
+    if (!turns.length) {
       return null;
     }
 
-    const entries = turnTimelineCache.value.get(turn.turnId) ?? [];
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i];
-      if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
-        continue;
+    for (let t = turns.length - 1; t >= 0; t--) {
+      const turn = turns[t]!;
+      const entries = turnTimelineCache.value.get(turn.turnId) ?? [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i];
+        if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
+          continue;
+        }
+        const speed = entryTokenGenerationSpeed(entry, turn);
+        if (speed != null) {
+          return speed;
+        }
       }
-      const speed = entryTokenGenerationSpeed(entry, turn);
-      if (speed != null) {
-        return speed;
+
+      const turnSpeed = turnTokenSpeed(turn);
+      if (turnSpeed != null) {
+        return turnSpeed;
       }
     }
 
-    return turnTokenSpeed(turn);
+    // 活跃流式中且已有 outputTokens 和耗时指标时（如实时接收到的指标）
+    if (isSubmitting.value && outputTokens.value && outputTokens.value > 0) {
+      const liveDurationMs = firstTokenLatencyMs.value != null && firstTokenLatencyMs.value > 0
+        ? firstTokenLatencyMs.value
+        : null;
+      if (liveDurationMs && liveDurationMs > 0) {
+        const speed = outputTokens.value / (liveDurationMs / 1000);
+        if (Number.isFinite(speed)) return speed;
+      }
+    }
+
+    return null;
   });
 
   return {

@@ -15,10 +15,15 @@ describe("AgentRuntimeStatusBar", () => {
       props: { status },
     });
 
-    expect(wrapper.find('[data-testid="agent-runtime-status-bar"]').exists()).toBe(true);
+    const bar = wrapper.find('[data-testid="agent-runtime-status-bar"]');
+    expect(bar.exists()).toBe(true);
+    expect(bar.classes()).toContain("italic");
     expect(wrapper.find('[data-testid="agent-runtime-status-label"]').text()).toBe("思考中");
     expect(wrapper.find('[data-testid="agent-runtime-status-label"]').classes()).toContain("runtime-status-shimmer");
     expect(wrapper.find('[data-testid="agent-runtime-status-elapsed"]').text()).toMatch(/\d+秒/);
+    const icon = wrapper.find('[data-testid="agent-runtime-status-icon"]');
+    expect(icon.exists()).toBe(true);
+    expect(icon.classes()).toContain("animate-spin");
   });
 
   it("handles executing tool mode", () => {
