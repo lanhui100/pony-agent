@@ -112,10 +112,12 @@ const displayLabel = computed(() => {
         Wave-11 契约 §2.9：纯 CSS「轨道 + 卫星点」微动效，禁止 JS 定时器/rAF 驱动。
         根节点 data-testid=agent-runtime-status-icon + 类 runtime-status-orbit，
         两个直接子节点分别为虚线轨道（慢速反向自转）与卫星点（绕心公转 + 呼吸缩放）。
+        wave-11.2 F5：图标色提升为 stone-500 / dark:stone-300，环 1.5px 且不再降透明度，
+        使虚线环对底色的 WCAG 对比度由不足 3:1 提升到实测 4.11:1（背板 #f2ede6）。
       -->
       <span
         v-else
-        class="runtime-status-orbit relative inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center mr-1.5 text-stone-400"
+        class="runtime-status-orbit relative inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center mr-1.5 text-stone-500 dark:text-stone-300"
         data-testid="agent-runtime-status-icon"
         :data-mode="displayedStatus.mode"
         aria-hidden="true"
@@ -130,9 +132,8 @@ const displayLabel = computed(() => {
         />
       </span>
       <span
-        :key="displayLabel"
         :class="displayedStatus.mode === 'error' ? 'text-rose-600 dark:text-rose-400 not-italic' : 'runtime-status-shimmer text-stone-500 dark:text-stone-300 italic'"
-        class="runtime-status-label-fade min-w-0 truncate font-normal"
+        class="min-w-0 truncate font-normal"
         data-testid="agent-runtime-status-label"
       >{{ displayLabel }}</span><span
         v-if="elapsedText && displayedStatus.mode !== 'error'"
@@ -155,13 +156,12 @@ const displayLabel = computed(() => {
   inset: 0;
   display: block;
   border-radius: 9999px;
-  will-change: transform;
 }
 
 .runtime-status-orbit-ring {
-  border: 1px dashed currentColor;
-  opacity: 0.5;
-  animation: runtime-status-orbit-ring-spin 2200ms linear infinite reverse;
+  /* wave-11.2 F5：1.5px 实心虚线（不再降 opacity），保证对底色对比度 ≥3:1 */
+  border: 1.5px dashed currentColor;
+  animation: runtime-status-orbit-ring-spin 1500ms linear infinite reverse;
 }
 
 .runtime-status-orbit-dot {
@@ -181,9 +181,11 @@ const displayLabel = computed(() => {
   animation: runtime-status-orbit-dot-breathe 1800ms ease-in-out infinite;
 }
 
-/* data-mode 驱动的节奏差异：思考/等待更慢，工具执行更快（全部落在 1200–2400ms） */
+/* data-mode 驱动的节奏差异：思考/等待更慢，工具执行更快。
+   wave-11.2 F6：ring 各 mode 收紧到 1200–1600ms（虚线漂移可辨），
+   dot 保持 1200–2400ms；所有节点所有 mode 均落在 1200–2400ms 内。 */
 .runtime-status-orbit[data-mode="connecting"] .runtime-status-orbit-ring {
-  animation-duration: 2400ms;
+  animation-duration: 1600ms;
 }
 
 .runtime-status-orbit[data-mode="connecting"] .runtime-status-orbit-dot {
@@ -191,7 +193,7 @@ const displayLabel = computed(() => {
 }
 
 .runtime-status-orbit[data-mode="thinking"] .runtime-status-orbit-ring {
-  animation-duration: 2200ms;
+  animation-duration: 1500ms;
 }
 
 .runtime-status-orbit[data-mode="thinking"] .runtime-status-orbit-dot {
@@ -199,7 +201,7 @@ const displayLabel = computed(() => {
 }
 
 .runtime-status-orbit[data-mode="responding"] .runtime-status-orbit-ring {
-  animation-duration: 1800ms;
+  animation-duration: 1400ms;
 }
 
 .runtime-status-orbit[data-mode="responding"] .runtime-status-orbit-dot {
@@ -207,7 +209,7 @@ const displayLabel = computed(() => {
 }
 
 .runtime-status-orbit[data-mode="tool_drafting"] .runtime-status-orbit-ring {
-  animation-duration: 1500ms;
+  animation-duration: 1300ms;
 }
 
 .runtime-status-orbit[data-mode="tool_drafting"] .runtime-status-orbit-dot {
@@ -215,7 +217,7 @@ const displayLabel = computed(() => {
 }
 
 .runtime-status-orbit[data-mode="executing_tool"] .runtime-status-orbit-ring {
-  animation-duration: 1400ms;
+  animation-duration: 1250ms;
 }
 
 .runtime-status-orbit[data-mode="executing_tool"] .runtime-status-orbit-dot {
@@ -223,7 +225,7 @@ const displayLabel = computed(() => {
 }
 
 .runtime-status-orbit[data-mode="waiting_approval"] .runtime-status-orbit-ring {
-  animation-duration: 2400ms;
+  animation-duration: 1600ms;
 }
 
 .runtime-status-orbit[data-mode="waiting_approval"] .runtime-status-orbit-dot {
@@ -271,21 +273,8 @@ const displayLabel = computed(() => {
   }
 }
 
-/* ── 标签交叉淡入（≤ 200ms，避免整行闪跳） ────────────────────── */
-.runtime-status-label-fade {
-  animation: runtime-status-label-in 180ms ease-out;
-}
-
-@keyframes runtime-status-label-in {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
-  }
-}
-
+/* wave-11.2 F3：label 原位替换（不再 :key 重建 + 仅淡入），消除模式切换时的空白帧；
+   持续动效由 .runtime-status-shimmer 承担。 */
 .runtime-status-shimmer {
   font-style: italic;
   font-synthesis: style;
@@ -330,10 +319,6 @@ const displayLabel = computed(() => {
   }
 
   .runtime-status-orbit *::after {
-    animation: none !important;
-  }
-
-  .runtime-status-label-fade {
     animation: none !important;
   }
 

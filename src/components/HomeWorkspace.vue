@@ -995,13 +995,23 @@ const shouldShowAgentRuntimeStatus = computed(() => {
 });
 
 /**
- * Wave-11 契约 §2.3/§2.4：槽位常驻不卸载，仅以 data-visible 切换可见性。
- * data-visible="false" ⟺ 最后一个可见 turn 的 assistant 为 pending 且已有可见流式内容
- * 且当前没有 running/planned 工具活动（思考中/工具执行/等待授权/重试/错误/会话操作保持可见）。
+ * Wave-11 契约 §2.3/§2.4 + wave-11.2 F1（mode-aware，修复 mode-blind 缺陷）：
+ * 槽位常驻不卸载，仅以 data-visible 切换可见性。
+ * 只有 `mode === "responding"`（真正在流式回复）才可能隐藏；其余一切状态
+ * （connecting/thinking/tool_drafting/executing_tool/waiting_approval/retrying/error）
+ * 一律 data-visible="true" —— 例如 sessionOperation="initializing" 且 messages 里残留
+ * pending assistant + 内容时，必须仍显示「正在加载最近对话…」。
+ * 隐藏还需同时满足：无 running/planned 工具活动 且 最后一个可见 turn 的 assistant 为
+ * pending 且已有可见流式内容。
  */
 const isRuntimeStatusVisible = computed(() => {
   if (!agentRuntimeStatus.value) {
     return false;
+  }
+
+  // F1：mode-blind 修复 —— 仅「正在回复」具备隐藏资格
+  if (agentRuntimeStatus.value.mode !== "responding") {
+    return true;
   }
 
   const hasActiveToolActivity = runtimeStore.toolActivities.some(
@@ -1781,14 +1791,15 @@ watch(
           data-testid="workspace-runtime-status-row"
         >
           <div class="mx-auto w-full max-w-[46.4rem] px-4 sm:px-5">
-            <!-- 为右侧 workspace-scroll-to-bottom 按钮预留空间（pr-12 ≈ 3rem） -->
-            <div class="pr-12">
+            <!-- F4（wave-11.2）：为右侧 workspace-scroll-to-bottom 预留空间。
+                 收起态 34px / hover 展开态 110px，故需 pr-[7.5rem]（120px）才不重叠。 -->
+            <div class="pr-[7.5rem]">
               <div
                 class="runtime-status-slot w-full min-w-0"
                 data-testid="workspace-runtime-status-slot"
                 :data-visible="isRuntimeStatusVisible ? 'true' : 'false'"
                 :aria-hidden="isRuntimeStatusVisible ? undefined : 'true'"
-                :style="{ pointerEvents: isRuntimeStatusVisible ? 'auto' : 'none' }"
+                style="pointer-events: none;"
               >
                 <div
                   class="runtime-status-slot-inner"
@@ -1934,5 +1945,11 @@ watch(
 
 .runtime-status-slot-inner-hidden {
   transform: translateY(2px);
+}
+
+/* wave-11.2 F6：隐藏态暂停 orbit 动效，避免不可见时仍持续消耗合成/重绘。 */
+.runtime-status-slot[data-visible="false"] :deep(.runtime-status-orbit),
+.runtime-status-slot[data-visible="false"] :deep(.runtime-status-orbit *) {
+  animation-play-state: paused;
 }
 </style>
