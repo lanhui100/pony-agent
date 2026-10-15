@@ -208,6 +208,7 @@ import {
   ensureUniqueSessionList,
   filterDeletingSessions,
   hasPersistableMessages,
+  hasSelectableSession,
   isPersistedMetadataCompatible,
   isPersistedMessageShapeCompatible,
   loadPersistedRuntimeCache,
@@ -216,6 +217,7 @@ import {
   mergeRuntimeViews,
   persistSessionState,
   persistSessionStateAndRuntimeMaps,
+  pickPreferredSessionId,
   archivePersistedSessionState,
   unarchivePersistedSessionState,
   removePersistedSessionState,
@@ -2448,7 +2450,17 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (persistedCache.failedSet) {
           this.failedSessionSet = { ...persistedCache.failedSet };
         }
-        const preferredSessionId = this.sessionList[0]?.conversationId ?? this.sessionId;
+        // Wave-12.1 C8：冷启动落点必须跳过 archived 会话（catalog 含 archived 项且按 updatedAtMs 降序）。
+        // 存在会话但全部已归档 → 不得打开任何已归档会话，直接进入全新空白会话。
+        if (this.sessionList.length > 0 && !hasSelectableSession(this.sessionList)) {
+          debugLog("session:init:all-archived", {
+            sessionCount: this.sessionList.length
+          });
+          this.enterFreshSession();
+          return;
+        }
+
+        const preferredSessionId = pickPreferredSessionId(this.sessionList, this.sessionId);
         const persisted = loadPersistedRuntimeState(preferredSessionId);
         const strategy = deriveInitStrategy(preferredSessionId, persisted, this.sessionList);
 

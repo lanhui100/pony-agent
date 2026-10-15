@@ -645,6 +645,23 @@ export function mergeRuntimeViews(
   };
 }
 
+/**
+ * Wave-12.1 C8：冷启动/初始化选择落点会话时必须跳过 `archived === true` 的会话。
+ * 返回 `sessionList` 中第一个未归档会话 id（catalog 按 `updatedAtMs` 降序 ⇒ 即最新未归档会话）；
+ * 全部已归档或无会话时返回 `fallback`。
+ */
+export function pickPreferredSessionId(
+  sessionList: SessionOverview[],
+  fallback: string
+): string {
+  return sessionList.find((session) => session.archived !== true)?.conversationId ?? fallback;
+}
+
+/** Wave-12.1 C8：是否存在未归档（可作落点）的会话。 */
+export function hasSelectableSession(sessionList: SessionOverview[]): boolean {
+  return sessionList.some((session) => session.archived !== true);
+}
+
 export function deriveInitStrategy(
   currentSessionId: string,
   persisted: PersistedRuntimeState | null,
@@ -658,8 +675,9 @@ export function deriveInitStrategy(
     }
     return { kind: "host-read", sessionId: currentSessionId, reason: "insufficient-checkpoint" };
   }
-  const targetSessionId = sessionList[0]?.conversationId ?? currentSessionId;
-  if (sessionList.length > 0 || targetSessionId !== DEFAULT_SESSION_ID) {
+  // Wave-12.1 C8：落点必须跳过已归档会话；全部已归档/无会话 → 全新空白会话（empty-fallback）。
+  const targetSessionId = pickPreferredSessionId(sessionList, currentSessionId);
+  if (hasSelectableSession(sessionList) || targetSessionId !== DEFAULT_SESSION_ID) {
     return { kind: "host-read", sessionId: targetSessionId, reason: "no-cache" };
   }
   return { kind: "empty-fallback", sessionId: currentSessionId };
