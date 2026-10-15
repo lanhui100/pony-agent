@@ -1,0 +1,349 @@
+# Wave-11 绿相物理收据 — Executor (task-2)
+
+- 波次：wave-11-status-flow（PA-STATUS-FLOW）
+- 基线 commit：`018bcdc`；红相锚定：`2a83ae7`(tests) + `2cd2e8c`(.dev-team)
+- Executor 写域（仅 3 文件，git diff --numstat 实测）：
+  - `src/components/HomeWorkspace.vue` +84 / -10
+  - `src/components/chat/AgentRuntimeStatusBar.vue` +164 / -45
+  - `src/components/chat/WorkspaceComposer.vue` +2 / -0
+  - 净增：+250 / -55（另：`AgentRuntimeStatusBar.vue` 为整体重写，行数统计为 diff 口径）
+- 未修改：`tests/**`、`.dev-team/contracts/**`、`src/lib/useTimelineAutoScroll.ts`、
+  `src/lib/runtime/status.ts`、`COMPOSER_BUFFER_PX`。无 git 写操作。
+
+## 收据 1 — 组件级验收契约
+
+命令：`npx vitest run tests/acceptance/status-flow-contract.spec.ts`
+原生 EXIT=0
+
+```
+ ✓ tests/acceptance/status-flow-contract.spec.ts (8 tests) 723ms
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+```
+覆盖：槽位常驻同节点复用 / 槽位归属 composer 且不在内容列 / data-visible 五态语义 /
+隐藏态 aria-hidden+pointer-events / 单行 nowrap / 高度类状态无关 / 错误态 AlertCircle 无 orbit /
+reduced-motion 块含 runtime-status-orbit 且 animation:none。
+
+## 收据 2 — 既有状态条单测回归
+
+命令：`npx vitest run tests/AgentRuntimeStatusBar.spec.ts tests/workspace-runtime-status-integration.spec.ts tests/workspace-runtime-status-streaming.spec.ts`
+原生 EXIT=0
+
+```
+ ✓ tests/workspace-runtime-status-integration.spec.ts (5 tests) 56ms
+ ✓ tests/AgentRuntimeStatusBar.spec.ts (4 tests) 53ms
+ ✓ tests/workspace-runtime-status-streaming.spec.ts (3 tests) 267ms
+ Test Files  3 passed (3)
+      Tests  12 passed (12)
+```
+
+## 收据 3 — 类型门禁
+
+命令：`npm run typecheck`（`vue-tsc --noEmit`）
+原生 EXIT=0（无诊断输出）
+
+## 收据 4 — 全量前端单测
+
+命令：`npm run test:unit`
+原生 EXIT=0
+
+```
+ Test Files  76 passed (76)
+      Tests  812 passed | 10 skipped (822)
+```
+基线比对（`.dev-team/evidence/baseline-unit-tests.log`：`75 passed / 804 passed | 10 skipped`）：
+差值 = +1 file / +8 passed，**精确等于**红相新增的 `tests/acceptance/status-flow-contract.spec.ts`（8 tests）。
+无新增失败、无 pre-existing 失败复现。
+
+## 收据 5 — 构建（e2e preview 前置）
+
+命令：`npm run build`
+原生 EXIT=0（`✓ built in 2.47s`）
+
+## 收据 6 — 真实浏览器 e2e
+
+命令：`npx playwright test tests/e2e/status-flow-stability.spec.ts --retries=0`
+原生 EXIT=**1**（未达标，见下）
+
+第一次运行：
+```
+  ✘  1 ... M1/M2/M3：3s 合成长流期间状态条视口 Y 零抖动、流式期隐藏、内容单调上移 (9.6s)
+  ✓  2 ... M4：run 活跃期间插入新消息，状态条视口 Y 位移 ≤ 1px (5.2s)
+  ✓  3 ... M5：orbit 纯 CSS 动效图标契约，且 prefers-reduced-motion 下 animation-name 为 none (4.1s)
+  1 failed / 2 passed
+```
+- **M1 通过**：状态条视口 Y 极差 ≤ 1px、方向反转 = 0（基线 44 次）、槽位高度极差 ≤ 1px。
+- **M2 通过**：流式期 `data-visible=false`、计算 opacity `0`、visibility `hidden`、
+  `aria-hidden=true`、`pointer-events:none`、过渡耗时 ≤ 400ms。
+- **M4 通过**、**M5 通过**（orbit 类/ring+dot/动画时长 1200–2400ms/reduced-motion 全 none/无 snake-spinner）。
+- **M3 失败**（唯一失败断言，`tests/e2e/status-flow-stability.spec.ts:302`）：
+  `expect(contentMotion.maxJump).toBeLessThanOrEqual(32)` → Received **43**。
+
+M3 独立实测（同一断言连续失败 ≥ 3 次，按熔断停止）：
+
+| # | 场景（viewport） | 反转 | 单帧最大位移 |
+| - | :-- | --: | --: |
+| 1 | spec 首跑（1280×720） | 0 | **43.0px** |
+| 2 | spec 复跑（1280×720） | 0 | **43.0px** |
+| 3 | 独立 rAF 探针（1280×720） | 0–2 | **47.0px** |
+| 4 | 独立 rAF 探针（1280×860） | 0 | **38.0px** |
+| 基线 018bcdc（1280×860） | Lead 侦察 | 44 | 85.8px |
+
+### M3 根因（对照实验定位，根因在禁改文件）
+
+**关键环境事实**：冻结 e2e spec 由 `playwright.config.ts` 的 `devices["Desktop Chrome"]`
+驱动，实测 viewport = **1280×720**；而契约 §5 基线与 Lead 侦察脚本用的是 **1280×860**。
+两者不同 → 同一实现在两个高度下结论相反：
+
+| viewport | 独立 rAF 探针 maxJump（5 次） | 结论 |
+| :-- | :-- | :-- |
+| 1280×860 | 24 / 25 / 24 / 24 / 24 px | ≤ 32 通过 |
+| 1280×720（spec 实际） | 215 / 47 / 47 / 47 / 34 px | > 32 失败 |
+
+逐帧证据（1280×720，`/tmp/w11-hh.json`）：跳变帧 `content-column` 高度**完全未变**（1250.9px），
+而 `colTop` 与 `scrollTop` 同步位移 48px（531 → 579）→ 100% 是滚动单帧步长，不是内容重排；
+内容自身每帧增长 23.8px（1 行）属正常。
+
+对照实验（同构建、同合成 3s 流，各 4 次）：
+- 原样：47 / 47 / 47 / 34 px
+- 页内强制 `Element.prototype.scrollTo` → `behavior:"auto"`：48 / 47 / 47 / 52 px（**无改善**）
+→ 排除浏览器原生 smooth `scrollTo`；跳变来自直接赋值 `viewport.scrollTop` 的 rAF lerp。
+
+定位到 `src/lib/useTimelineAutoScroll.ts` 的 `anchorCompensationScroll`（391–414 行）：
+`viewport.scrollTop = lerpStartTop + lerpDistance * eased`，
+`COMPENSATION_SCROLL_LERP_DURATION_MS = 160`、`easeOutScroll(t) = 1-(1-t)^3.2`
+→ 首帧 t≈0.104，eased≈0.297，**首帧位移 = 29.7% × 待补偿距离**；
+距离 ≥ ~108px 时首帧即 > 32px（实测距离 ≈160px → 47px，与观测完全吻合）。
+触发链：内容流式增长 → `ResizeObserver` → `anchor-compensation-scroll` → 160ms lerp 首帧跳变。
+1280×860 下补偿距离稳定 < 108px，故不触发。
+
+契约 §6 非目标已显式规定该文件「除非 M3 断言实测不达标，且需 Lead 一票批准 + 契约演进」，
+Executor 写域与任务书均禁止修改该文件 → **阻塞，等待 Lead 决策**。
+候选最小修法（均在禁改文件内，需 Lead 选择）：① 提高
+`COMPENSATION_SCROLL_LERP_DURATION_MS`（160→320 时首帧占比降至 15.7%）；② 对单帧位移加硬上限
+（最稳健）；③ 降低 `easeOutScroll` 指数。
+
+### 附加环境发现（非本波引入）
+
+`Console Error = 0` 断言存在环境性 flaky：第 3 次 e2e 运行 M5 因
+`"Failed to load resource: the server responded with a status of 403 ()"` 失败。
+探针定位来源：`https://api.github.com/repos/lanhui100/pony-agent/releases/latest`
+（`src/lib/update-check.ts` 启动期更新检查）在本沙箱代理下返回 403 / `net::ERR_ABORTED`。
+前两次运行该断言通过（M4/M5 均 Console Error=0）。与本波 3 文件改动无因果关系。
+
+## 截图凭据（e2e 落盘）
+
+- `.dev-team/evidence/status-flow-streaming-hidden.png`（流式期状态条隐藏）
+- `.dev-team/evidence/status-flow-new-message-stable.png`（新消息插入后稳定）
+- `.dev-team/evidence/status-flow-orbit-icon.png`（orbit 图标 + 状态条位于 composer 上沿）
+
+## 结论
+
+5/6 门禁绿（组件验收、既有回归、typecheck、全量单测、build、e2e M1/M2/M4/M5），
+唯一未达标项 M3 根因在 `src/lib/useTimelineAutoScroll.ts`（本波写域外、契约点名禁改），
+且冻结 spec 实际 viewport（1280×720）与契约 §5 基线（1280×860）不一致。
+等待 Lead 一票批准 + 契约演进，或裁定 M3 阈值/环境口径需 Test Agent 演进。
+
+---
+
+# Wave-11.1 演进后复测（Executor 第二轮，2026-10-15）
+
+Lead 一票批准契约演进 §7（写域扩展：Executor 增加 `src/lib/useTimelineAutoScroll.ts`）。
+实现（仅此一处语义改动，已完成）：
+`handleLatestTurnSignatureChange` 中 `const behavior: ScrollBehavior = isStreamingAssistantUpdate ? "auto" : "smooth";`
+（原为恒定 `"smooth"`；流式 assistant 更新改用 auto，与既有 markdown 流式路径统一）。
+
+运行时验证（页内 `[workspace-scroll]` 事件计数，探针 @4178）：
+`latest-turn-signature:queue-follow-scroll/auto` ×51、`queue-scroll-request/auto` ×51、
+`scroll-to-latest-turn/auto` ×51；流式路径已无 smooth。
+
+## 复测收据
+
+| # | 命令 | 原生 EXIT | 结果 |
+| - | :-- | --: | :-- |
+| 1 | `npx vitest run tests/acceptance/status-flow-contract.spec.ts` | 0 | 8/8 passed |
+| 2 | `npx vitest run tests/AgentRuntimeStatusBar.spec.ts tests/workspace-runtime-status-integration.spec.ts tests/workspace-runtime-status-streaming.spec.ts` | 0 | 12/12 passed |
+| 3 | `npm run typecheck` | 0 | 无诊断 |
+| 4 | `npm run test:unit` | 0 | 76 files / 812 passed / 10 skipped |
+| 5 | `npm run build` | 0 | built in 2.42s |
+| 6 | `npx playwright test tests/e2e/status-flow-stability.spec.ts --retries=0` | **1** | M1/M2/M3a/M3b/M4/M5 + Console Error=0 全绿；**仅 M3c 红** |
+
+e2e 三次独立复跑，M3c 稳定复现（非 flaky）：`48.0 / 48.0 / 48.0 px`，阈值 32px。
+
+## M3c 未达标分析（阈值口径冲突 + 物理下界）
+
+1. **契约与冻结测试的阈值不一致**：契约 §7 规定
+   `|(scrollTop_i − scrollTop_0) − (colScrollHeight_i − colScrollHeight_0)| ≤ 64px`；
+   冻结 spec（Test Agent）实现为 `|scrollTop_i − max(0, columnScrollHeight_i − clientHeight_i)| ≤ 32px`
+   （`tests/e2e/status-flow-stability.spec.ts:38 FOLLOW_LAG_MAX_PX = 32`）。
+   实测 48px → **按契约 64px 为绿，按 spec 32px 为红**。
+2. **32px 低于该度量的物理下界（同 maxJump 同类缺陷）**：独立 rAF 探针 5 次
+   （`/tmp/w11-c-*.json`、`/tmp/w11-lag2.json`）显示，存在「单帧内容列增高 47–48px」的帧
+   （合成流每 60ms 追加一行 ≈23.8px，忙帧合并两行），此时跟随只能在**下一帧**才补偿，
+   该帧采样滞后必然 ≈47.6px > 32px。
+3. **第二类成因（尾段停止跟随）**：`w11-lag2` 中 idx126–136 内容列 1489→1513 后
+   `scrollTop` 恒为 653 不再推进，滞后从 −24 累积到 −48。
+   关联代码：`useTimelineAutoScroll.ts:853` `resize-observer:skip { reason: "recent-stream-follow" }`
+   ——`STREAMING_RESIZE_FALLBACK_WINDOW_MS = 180` 会在流式期抑制最精确的
+   ResizeObserver 逐行跟随信号（实测该事件被 skip 48 次/run）。
+
+## 请求 Lead 决策
+
+- A：将 spec 的 `FOLLOW_LAG_MAX_PX` 对齐契约 §7 的 64px（48 ≤ 64 → 绿；属阈值口径修正，Test Agent 写域）。
+- B：一票批准第二处最小改动（在流式期不抑制 ResizeObserver 跟随，或令流式跟随与内容增长同步提交），
+  由 Executor 实施并全量复跑 e2e。
+- 未获批准前 Executor 不越过「仅此一处语义改动」的授权边界。
+
+---
+
+# Wave-11.2 对抗审核修复复测（Executor 第三轮，2026-10-15）
+
+写域：`HomeWorkspace.vue`、`AgentRuntimeStatusBar.vue`（未触碰 `useTimelineAutoScroll.ts`，
+§7 的 auto-follow 改动已由 Lead 回退，patch 存档 `.dev-team/evidence/reverted-wave11.1-auto-follow.patch`）。
+diff --numstat：`HomeWorkspace.vue +23/-6`、`AgentRuntimeStatusBar.vue +18/-33`。
+
+## 修复项与物理证据
+
+| 项 | 内容 | 证据 |
+| - | :-- | :-- |
+| F1 | `isRuntimeStatusVisible` 改为 mode-aware：`mode !== "responding"` 一律 `data-visible="true"` | 验收 spec 新增 mode-blind 回归用例通过（spec 9/9） |
+| F2 | 槽位恒为 `pointer-events: none`（静态 inline style，不再随可见性恢复命中） | 验收 spec §2.3 断言通过（`element.style.pointerEvents === "none"`） |
+| F3 | 删除 `:key="displayLabel"` 与 `runtime-status-label-fade` 动画 → label 原位替换无空白帧 | `grep -c label-fade` = 0；AgentRuntimeStatusBar.spec 4/4 通过 |
+| F4 | `pr-12`(48px) → `pr-[7.5rem]`(120px) | e2e T-c（320×860 hover 展开按钮）通过，`barRight ≤ buttonLeft` |
+| F5 | 图标色 `text-stone-500 dark:text-stone-300`；环 `border: 1.5px dashed currentColor`，去 `opacity:.5` | 见下方 WCAG 实测 |
+| F6 | 删除 `will-change: transform`；隐藏态 `animation-play-state: paused`；ring 各 mode 收紧 1200–1600ms | 见下方探针数值 |
+
+### F5 对比度实测（真实像素背板 + canvas 归一化前景色）
+
+方法：探针 @4178 取 `getComputedStyle(ring).borderTopColor` 经 canvas `getImageData` 归一化为 sRGB；
+背板取图标下方 12px 处 1×1 截图并用 zlib 解 PNG 取真实像素；按 WCAG 2.x 相对亮度公式计算。
+
+```
+ringRgb        = rgb(121,113,107)   # stone-500，opacity = 1
+backdropPixel  = rgb(242,237,230)   # 1×1 真实截图
+F5_CONTRAST    = { ratio: 4.11, threshold: 3 }   → PASS
+修复前（stone-400 #a8a29e + opacity .5 复合到同背板）≈ 1.43:1 → FAIL
+```
+注：CSS 指定 `border-width: 1.5px`，Blink 对 border-width 取整，`getComputedStyle().borderTopWidth` 读回 `1px`；
+对比度提升来自「去 opacity + 颜色加深」，非线宽。
+
+### F6 探针数值
+
+```
+ringWillChange = "auto"        （原 "transform"）
+ringOpacity    = "1"           （原 "0.5"）
+ringDuration   = "1.25s"       （executing_tool，原 1.4s；全 mode 1200–1600ms）
+dotDuration    = "1.2s"        （全 mode 1200–2400ms）
+```
+隐藏态暂停规则（HomeWorkspace scoped）：
+`.runtime-status-slot[data-visible="false"] :deep(.runtime-status-orbit), … :deep(.runtime-status-orbit *) { animation-play-state: paused; }`
+
+## 门禁收据（全部原生 EXIT）
+
+| # | 命令 | EXIT | 关键 stdout |
+| - | :-- | --: | :-- |
+| 1 | `npx vitest run tests/acceptance/status-flow-contract.spec.ts tests/AgentRuntimeStatusBar.spec.ts tests/workspace-runtime-status-integration.spec.ts tests/workspace-runtime-status-streaming.spec.ts` | 0 | Test Files 4 passed / Tests 21 passed |
+| 2 | `npm run typecheck` | 0 | 无诊断 |
+| 3 | `npm run test:unit` | 0 | 76 files / 813 passed / 10 skipped |
+| 4 | `npm run build` | 0 | ✓ built in 3.19s |
+| 5 | `npx playwright test tests/e2e/status-flow-stability.spec.ts --retries=0` | 0 | **4 passed (26.5s)** |
+
+e2e M3 指标实测（spec 自打印）：
+`[M3-metrics] frames=123 M3a_reversals=0 M3b_overshoot_frames=0 M3b_worst_excess_px=0.0 M3c_follow_lag_px=48.0 upward_travel_px=864.0`
+（阈值：M3a ≤1、M3b =0、M3c ≤64；Console Error = 0）
+
+## 遗留观察（未改，供 Lead 决策）
+
+320px 窄屏下 `agent-runtime-status-elapsed`（`shrink-0`，约 85px）会把 `agent-runtime-status-label`
+挤到 `width: 0`（探针实测 label 宽度 0），状态文案不可读。T-c 只断言不水平重叠，故未拦截。
+契约 §6 非目标声明「≤640px 仅要求不破版」，是否需修由 Lead 裁定。
+
+## 最终门禁复跑（注释微调后，交付态）
+
+- `npm run typecheck` → EXIT=0
+- `npx vitest run`（acceptance + 3 状态条 spec）→ EXIT=0（4 files / 21 tests passed）
+- `npm run build` → EXIT=0（✓ built in 2.51s）
+- `npx playwright test tests/e2e/status-flow-stability.spec.ts --retries=0` → EXIT=0（4 passed / 26.2s）
+  `[M3-metrics] frames=126 M3a_reversals=0 M3b_overshoot_frames=0 M3b_worst_excess_px=0.0 M3c_follow_lag_px=47.0 upward_travel_px=841.0`
+
+---
+
+# Wave-11.2 遗留观察裁定与补充收据（Lead 裁定：320px label 挤窄不修）
+
+**产品包络依据**：`src-tauri/tauri.conf.json:19` 桌面主窗口 `"minWidth": 780`（`minHeight: 560`）
+→ 320px 在桌面端**不可达**。320px 用例（e2e T-c）登记为**防御性越界检查**，不作为验收口径；
+其保留价值 = 机械证明状态条不遮挡 `workspace-scroll-to-bottom`。
+契约 §6「≤640px 仅要求不破版」口径 = 单行不换行 / 无水平溢出 / 不遮挡按钮，320px 下均已满足
+（L3-B 机械取证：`docScrollWidth == clientWidth == 320`）。
+
+## 780×560（桌面最小可达窗口）实测收据
+
+方法：vite preview @4178 + Chromium viewport 780×560，patch `executing_tool` +
+长标签 `displayNameZh = "读取工作区中一个路径非常长的配置文件并解析其中的依赖清单"`，
+读 `[data-testid="agent-runtime-status-label"]` 的 `getBoundingClientRect()` 与 `scrollWidth`。
+
+```json
+{
+  "viewport": { "w": 780, "h": 560 },
+  "labelText": "执行工具: 读取工作区中一个路径非常长的配置文件并解析其中的依赖清单",
+  "labelTextLength": 34,
+  "labelRectWidth": 390.0,
+  "labelScrollWidth": 390,
+  "labelClientWidth": 390,
+  "labelOverflowing": false,
+  "labelWhiteSpace": "nowrap",
+  "labelTextOverflow": "ellipsis",
+  "labelLineCount": 1,
+  "barRect": { "left": 110.4, "right": 600.4, "width": 490.0, "height": 26 },
+  "slotRect": { "left": 110.4, "right": 620.0, "width": 509.6 },
+  "elapsedWidth": 80.0,
+  "docOverflowX": false
+}
+```
+
+结论：label 宽度 **390.0px > 0** 且 `scrollWidth(390) == clientWidth(390)` → **无截断、单行可读**；
+bar 高 26px 恒定；无水平文档溢出。截图凭据 `/tmp/w11-780-label.png`（780×560，人工确认文案完整可读）。
+
+---
+
+# Wave-11.4 F7 回归修复复测（Executor 第四轮，2026-10-15）
+
+**回归**：F1 的 gate 过宽（`mode !== "responding"` 恒可见）。推理模型下 `reasoningContent` 常驻
+（`runtime.ts:583-587`）→ `isStreamingReasoning` 恒真（`runtime.ts:464-467`）→
+`status.ts:120-131` 优先返回 `mode="thinking"` → 整个正文流式期槽位保持可见，R3/M2 失效。
+
+**修法（仅 `HomeWorkspace.vue`，最小）**：
+```ts
+const mode = agentRuntimeStatus.value.mode;
+if (mode !== "responding" && mode !== "thinking") return true;
+```
+diff --numstat：`HomeWorkspace.vue` 本轮 +14/-4（累计 +37/-10）。
+
+## 物理量：浏览器实测 4 变体（vite preview @4178，1280×720）
+
+| 变体 | 场景 | barMode | data-visible | opacity | visibility | label |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| A | pending + `reasoningContent` 常驻 + 正文流式 | thinking | **"false"** | 0 | hidden | 思考中 |
+| B | 同 A 但去掉 `reasoningContent` | responding | "false" | 0 | hidden | 正在回复 |
+| C | thinking 且正文为空（仅推理中） | thinking | "true" | 1 | visible | 思考中 |
+| D | `sessionOperation="initializing"` + 残留 pending 正文 | connecting | "true" | 1 | visible | 正在加载最近对话… |
+
+语义核对逐条成立：connecting/error/waiting_approval/retrying/tool_drafting/executing_tool → 可见；
+thinking+有正文 → 隐藏（F7 修复点）；thinking+无正文 → 可见；responding+有正文 → 隐藏。
+
+## 门禁收据（原生 EXIT）
+
+| # | 命令 | EXIT | 关键 stdout |
+| - | :-- | --: | :-- |
+| 1 | `npx vitest run tests/acceptance/status-flow-contract.spec.ts tests/AgentRuntimeStatusBar.spec.ts tests/workspace-runtime-status-integration.spec.ts tests/workspace-runtime-status-streaming.spec.ts` | 0 | Test Files 4 passed / Tests **23 passed**（含 Test Agent 新增 F7 回归用例，spec 11 tests） |
+| 2 | `npm run test:unit` | 0 | 76 files / **815 passed** / 10 skipped |
+| 3 | `npm run typecheck` | 0 | 无诊断 |
+| 4 | `npm run build` | 0 | ✓ built in 3.01s |
+| 5 | `npx playwright test tests/e2e/status-flow-stability.spec.ts --retries=0` | 0 | **4 passed (26.1s)** |
+
+e2e M3 自打印：`[M3-metrics] frames=125 M3a_reversals=0 M3b_overshoot_frames=0 M3b_worst_excess_px=0.0 M3c_follow_lag_px=47.0 upward_travel_px=841.0`
+（当前 spec 阈值：M3a≤1、M3b=0、M3c≤96）
+
+**环境观测（非本改动引入，如实登记）**：同一命令首跑时机器 load average = 5.50，
+`M3c_follow_lag_px=119.0`（>96）导致 1 failed；机器负载回落后复跑为 47.0px 通过。
+M3c 度量的是自动跟随滚动滞后，F7 只切换绝对定位状态行的可见性、不参与滚动布局，二者无因果。

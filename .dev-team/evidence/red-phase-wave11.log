@@ -1,0 +1,91 @@
+# Wave-11 红相收据 — PA-STATUS-FLOW 状态条布局稳定性与动效契约
+
+- 角色：Test Agent（L2-T，独立测试者，`task-1`）；**未修改任何 `src/**`、未修改契约文件、未执行 git 写操作**
+- 冻结契约：`.dev-team/contracts/wave-11-status-flow.md`
+- UI-NFR：`.dev-team/nfr-baseline-ui-wave11.json`
+- 红相锚定 commit：`018bcdcc7da1289cc98ff46cd1430a019007378b`（= `018bcdc`）
+- 环境：Linux / Node v22.21.0 / vitest 4.1.9 / @playwright/test 1.60.0 / Chromium 149.0.7827.55（headless，默认解析经 Lead 的 `chromium_headless_shell-1223 -> -1228` 符号链接）
+- 浏览器 e2e 服务：由 `playwright.config.ts` 自带 webServer `npm run preview:e2e`（vite preview @127.0.0.1:4175）自动起停，未另起同端口服务
+- 生成时间（UTC）：2026-10-15T05:19:17Z
+
+> 红相定义：在**当前未改动的实现**上，本波次新增/更新的验收测试必须真实失败。
+> 下列每一条均为机器原生 EXIT code，非主观推理。
+
+## 1. 命令与原生 EXIT code
+
+| # | 命令 | 原生 EXIT | 摘要 |
+| :- | :-- | --: | :-- |
+| 1 | `npx vitest run tests/acceptance/status-flow-contract.spec.ts` | **1** | Test Files 1 failed (1) / Tests 5 failed \| 3 passed (8) |
+| 2 | `npx vitest run tests/AgentRuntimeStatusBar.spec.ts tests/workspace-runtime-status-integration.spec.ts tests/workspace-runtime-status-streaming.spec.ts` | **1** | Test Files 3 failed (3) / Tests 5 failed \| 7 passed (12) |
+| 3 | `npm run test:unit` | **1** | Test Files 4 failed \| 72 passed (76) / Tests 10 failed \| 802 passed \| 10 skipped (822) / Duration 24.50s |
+| 4 | `npx playwright test tests/e2e/status-flow-stability.spec.ts --retries=0` | **1** | 3 failed（M1/M2/M3、M4、M5 三条用例全部红相） |
+| 5 | `npx playwright test tests/e2e/browser-preview.spec.ts --retries=0` | **1** | 6 failed（**pre-existing**，见 §4） |
+
+基线对照（Lead 收据，未重跑）：`.dev-team/evidence/baseline-unit-tests.log` = 75 files / 804 passed / 10 skipped / EXIT=0。
+红相相对基线的差异：`-5`（既有用例的旧图标/旧语义断言按新契约收紧后转红）+ `+3`（新增验收用例中已可独立成立的结构守卫）+ `+8` 新增用例总量。
+
+## 2. 失败断言清单（逐条）
+
+### 2.1 新增：`tests/acceptance/status-flow-contract.spec.ts`（5 failed / 3 passed）
+
+| 断言 | 契约 | 失败原因（物理观测） |
+| :-- | :-- | :-- |
+| §2.1 槽位归属 | 状态条不得再位于 `[data-testid="workspace-content-column"]` 内，须归属 composer 区域 | `contentColumn.element.contains(slot.element) === true`（当前实现槽位仍在滚动内容列内） |
+| §2.4 `data-visible` 语义 | 流式有可见内容 → `false`；思考中/工具执行/错误/会话操作 → `true` | `attributes("data-visible") === undefined`（属性尚未存在） |
+| §2.3 隐藏语义 | `data-visible=false` 时 `aria-hidden="true"` 且 `pointer-events: none` | 同上，`data-visible` 缺失 |
+| §2.5 单行 nowrap | 状态条文本链路存在 `whitespace-nowrap`/`truncate` | nowrap 载体数量 = 0 |
+| §2.6/§3 reduced-motion | 样式表 `prefers-reduced-motion: reduce` 块须对 orbit 动效置 `animation: none` | 命中块内容为 `.runtime-status-shimmer{…} .snake-spinner{animation:none} .snake-spinner-path{animation:none}`，不含 `runtime-status-orbit` |
+
+已通过（结构守卫，绿相必须保持通过）：
+- §2.1/§2.2 槽位常驻：流式 → 工具执行切换期间槽位复用**同一 DOM 节点**（无卸载重建）
+- §2.5 高度恒定：5 种状态下状态条根节点高度类集合完全一致
+- §2.8 错误态：`AlertCircle`（`lucide-circle-alert`）保留且不带 `runtime-status-orbit`、标签 `text-rose-600`
+
+### 2.2 更新：既有旧图标契约断言（5 failed）
+
+| 文件:行 | 断言 | 失败原因 |
+| :-- | :-- | :-- |
+| `tests/AgentRuntimeStatusBar.spec.ts:28` | 图标类含 `runtime-status-orbit`（替代 `snake-spinner`） | 实际类为 `h-3.5 w-3.5 shrink-0 …`，无 orbit 类 |
+| `tests/workspace-runtime-status-integration.spec.ts:89` | 同上（tool_drafting 场景） | 同上 |
+| `tests/workspace-runtime-status-streaming.spec.ts:56` | 流式有可见内容时 `data-visible="false"` | `data-visible === undefined` |
+| `tests/workspace-runtime-status-streaming.spec.ts:106` | 工具执行中 `data-visible="true"` | `data-visible === undefined` |
+| `tests/workspace-runtime-status-streaming.spec.ts:166` | planned 工具活动 `data-visible="true"` | `data-visible === undefined` |
+
+### 2.3 新增：`tests/e2e/status-flow-stability.spec.ts`（3 failed，真实 Chromium）
+
+| 用例 | M 断言 | 失败原因（物理观测） |
+| :-- | :-- | :-- |
+| M1/M2/M3（`spec.ts:261`） | **M1** 3s 合成长流期间状态条视口 Y 极差 ≤ 1px、方向反转 = 0 | 实测极差 **392.70px**（四次红相运行 391.55 / 391.92 / 391.84 / 392.70px，与 Lead 基线 539px 极差同量级），断言在 M1 即失败，M2/M3 未执行 |
+| M4（`spec.ts:338`） | **M4** run 活跃期插入新消息，状态条视口 Y 位移 ≤ 1px | 前置断言失败：`data-visible` 期望 `"true"`，实际 `null`（属性未实现） |
+| M5（`spec.ts:447`） | **M5** `runtime-status-orbit` + ring/dot 且 dot `animationName !== "none"`；reduced-motion 下 `none` | 前置断言失败：`data-visible` 期望 `"true"`，实际 `null`（属性未实现） |
+
+红相阶段 M2–M5 的物理量尚未被触达（均被前置契约断言拦住），因此红相无法区分「未实现」与「实现但不达标」；绿相必须逐条通过。
+
+## 3. 测试确定性设计（防 Flaky）
+
+- 逐帧采样统一由页内 `requestAnimationFrame` 收集为数组，**采样结束后离线断言**，不做 `sleep` + 概率等待。
+- 显隐过渡耗时以页内 `performance.now()` 记录 `data-visible=false` 与计算 `opacity==="0"` 两个时刻的差值，避免 Playwright 往返抖动。
+- M1 仅对「无运行中 CSS 动画」的稳态帧断言（`element.getAnimations().length === 0`），从而只排除契约 §2.6 明确允许的 `opacity + translateY(≤4px)` 显隐过渡，不对布局稳定性放水。
+- M3/M4 均带**反假测试守卫**：M3 要求流式内容真实上移 > 200px，M4 要求新消息真实渲染（新 `section[data-turn-id]` + 新用户消息文本可见），否则单调性/位移断言无意义。
+- M4 守卫经**独立探针实测校准**（非推测）：运行中插入新 user turn 时，旧 turn 的 assistant `article` 会因 `shouldShowAgentArticle` 的 last-turn 语义同时卸载，故 `article` 总数恒为 2 而非 +1。原「article 数 +1」守卫属错误假设，已改为按 turn section 断言，避免绿相出现无法通过的假门禁。
+- 采样前显式等待 `#app-loading-screen` 预加载启动屏离场（`main.ts` 中 mount 后 3.35s 移除），否则截图会被启动屏遮挡而失去视觉凭据价值。
+- 不依赖任何侧栏 testid（`session-sidebar-session-list` 等）；仅使用契约 §2.11 冻结的 `workspace-runtime-status-slot` / `agent-runtime-status-bar` / `agent-runtime-status-icon` 与既有 `workspace-content-column`、`workspace-composer-shell`、`assistant-streaming-flow`。
+
+## 4. Pre-existing 缺陷标注（非本任务引入，勿计入红相）
+
+- `tests/e2e/browser-preview.spec.ts`：**6/6 failed**（EXIT=1）。失败原因为基线环境侧栏默认收起导致 `session-sidebar-session-list` 等侧栏断言不可见，与 wave-11 无关。本次独立复现确认仍为 6/6 failed（未尝试修复，符合任务约束）。
+- 参考：`.dev-team/evidence/baseline-e2e-checkpoint.log` = `checkpoint-branch.spec.ts` 6 passed / 2 failed（Lead 已记录）。
+
+## 5. 产物落盘
+
+- 截图（红相运行产生，`.dev-team/evidence/`）：
+  - `status-flow-streaming-hidden.png` — ✅ 已落盘（96KB，1280×720）。3s 合成长流期间的真实画面：用户消息已渲染，而状态条「正在回复，用时 0秒 ···」仍显示在滚动内容列内（即 R3 违规的视觉凭据）。已确认非 index.html 预加载启动屏遮挡（`openHome` 显式等待 `#app-loading-screen` 离场后再采样）。
+  - `status-flow-new-message-stable.png` — 预期红相缺失：M4 在 `data-visible` 前置断言处即失败，未触达截图步骤。
+  - `status-flow-orbit-icon.png` — 预期红相缺失：M5 同上。
+- 本收据：`.dev-team/evidence/red-phase-wave11.log`
+
+## 6. 对 Lead 的请求
+
+1. 请以本收据为红相凭证**锚定红相 commit**（当前 HEAD `018bcdc` + 本波次 `tests/`、`.dev-team/` 未提交改动），随后 Executor 方可写 `src/**`。
+2. 契约 §2.11 仅写「新增 ring/dot 子 testid」而未冻结具体 testid 名称。测试已采用 `[data-testid*="ring"]` / `[data-testid*="dot"]` 的包容性选择器（行为契约优先于命名），建议 Lead 在 Executor 任务书中明确为 `agent-runtime-status-orbit-ring` / `agent-runtime-status-orbit-dot`。
+3. 绿相门禁命令（须全部 EXIT=0）：`npm run test:unit`、`npx playwright test tests/e2e/status-flow-stability.spec.ts`。

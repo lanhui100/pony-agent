@@ -1,0 +1,157 @@
+# Wave-11.1 红相收据 — M3 良定义度量（跟随滞后有界）+ Console 确定性 + 滚动契约用例同步
+
+- 角色：Test Agent（`task-3`）；**未修改任何 `src/**`、未修改契约文件、未执行 git 写操作**
+- 契约：`.dev-team/contracts/wave-11-status-flow.md`（含 Lead 已写入的 §7 契约演进 wave-11.1）
+- UI-NFR：`.dev-team/nfr-baseline-ui-wave11.json`
+- 被测 commit：`1aa12d9`（wave-11 绿相已提交）；§7 引擎改动为**工作区未提交**修改（`src/lib/useTimelineAutoScroll.ts`）
+- 环境：Linux / Node v22.21.0 / vitest 4.1.9 / @playwright/test 1.60.0 / Chromium 149.0.7827.55 / viewport 1280×720
+- 生成时间（UTC）：2026-10-15T06:01:37Z
+
+## 0. 结论摘要（TL;DR）
+
+1. **M3b / M3c 在 §7 引擎改动落地后仍然为红** —— 即本次契约演进**未能达标**（见 §2、§5）。
+2. **契约 §7 的 M3c 原式恒不可绿**（数学 + 实测双重证明，见 §3.1），已按良定义修订并请求 Lead 追认。
+3. **更新后的滚动契约用例（`tests/HomeWorkspace.spec.ts`）无法呈现红相**：Executor 的 §7 改动在我落盘测试前已写入（13:48），断言 `behavior === "auto"` 直接命中新引擎 → 绿。红相以 Executor 改动前的物理证据替代（见 §6）。
+4. Console Error=0 的环境不确定性已消除（`page.route` 桩，断言未放宽，见 §4）。
+
+## 1. 命令与原生 EXIT code
+
+| # | 命令 | 原生 EXIT | 摘要 |
+| :- | :-- | --: | :-- |
+| 1 | `npx playwright test tests/e2e/status-flow-stability.spec.ts --retries=0` | **1** | 1 failed \| 2 passed：M1/M2/M3 用例红（M3b 3 帧超调、M3c 48px），M4/M5 绿 |
+| 2 | `npx vitest run tests/HomeWorkspace.spec.ts` | **0** | Test Files 1 passed / Tests 72 passed \| 7 skipped（**非红**，原因见 §6） |
+| 3 | `npm run test:unit` | **0** | Test Files 76 passed (76) / Tests 812 passed \| 10 skipped (822) |
+| 4 | `npm run typecheck` | **0** | vue-tsc --noEmit 无输出 |
+| 5 | `npx playwright test tests/e2e/browser-preview.spec.ts --retries=0` | **1** | 6 failed（**pre-existing**，见 §7） |
+
+基线对照：`.dev-team/evidence/green-phase-wave11.log`（wave-11 绿相，M3 因 `maxJump 38px > 32` 阻塞）。
+
+## 2. 失败断言清单（逐条，真实 Chromium）
+
+| 断言 | 阈值 | 实测（§7 改动后） | 判定 |
+| :-- | :-- | :-- | :-- |
+| **M3a** 内容运动方向反转 | ≤ 1（容差 2px） | 0 | ✅ 绿（守卫保留） |
+| **M3b** 无超调 `\|ΔscrollTop_i\| ≤ ΔcolScrollHeight_i + ΔcolScrollHeight_{i-1} + 4px` | 超调帧 = 0 | **3 帧超调，最大超出 44.0px** | ❌ **红** |
+| **M3c** 跟随滞后有界（修订式，见 §3.1） | ≤ 32px | **48.0px** | ❌ **红** |
+| M3 反假守卫：内容真实上移 > 200px | > 200px | 满足 | ✅ |
+
+M3b 超调帧的物理定位（独立探针，同一合成流）：
+```
+frames around jump: [{st:793, sh:1513}, {st:793, sh:1513}, {st:793, sh:1513}, {st:841, sh:1513}, {st:841, sh:1513}]
+```
+内容列高在 t≈7542 起已停止增长（1513px 恒定），`scrollTop` 仍停留在 793（距底部 48px），
+约 175ms 后才一次性跳到 841（= maxScroll）。**即：流式全程跟随落后约 48px（2 行内容），
+内容停止增长后才「回弹」补上** —— 这正是需求 R3「上推平滑无反复跳变」尚未达标的物理证据，
+且**与 §7 的 auto 改动无关**（改动前后滞后峰值同为 48.0px）。
+
+## 3. 度量演进（相对契约 §7）
+
+### 3.1 M3c 原式恒不可绿（必须修订）
+
+契约 §7 原式：`|(scrollTop_i − scrollTop_0) − (colScrollHeight_i − colScrollHeight_0)| ≤ 64px`。
+
+**数学证明**：合成流起始时内容列高 370px < 视口可视高 672px。内容在「未填满视口」阶段
+增长时 `scrollTop` 必然恒为 0（无可滚动量），原式因此固定累计出 `−(672−370) = −302px`
+的常数偏移；该偏移与滚动引擎无关，任何实现都无法消除。
+
+**实测印证**：
+| 引擎 | 原式实测峰值 | 64px 判定 |
+| :-- | --: | :-- |
+| 改动前 `smooth(lerp)`（dist@13:36 / commit 1aa12d9） | 349px | 红（但不可绿） |
+| 改动后 `auto`（§7，dist@13:54） | 350px | 红（但不可绿） |
+
+**修订式**（已落盘）：`|scrollTop_i − max(0, colScrollHeight_i − clientHeight_i)| ≤ FOLLOW_LAG_MAX_PX`，
+即直接度量「跟随是否落后于已固定底部位置」，等价于把参考帧锚定在**首个可滚动帧**，
+显式扣除「尚未填满视口」的必然偏移。
+
+### 3.2 阈值 64px → 32px（请求 Lead 追认）
+
+修订式实测：改动前 48.0px、改动后 48.0px → **契约 §7 的 64px 在演进前后都通过（无门禁价值）**。
+32px 才具备判别力，且物理含义明确：「跟随不得落后超过一行内容」（一行 ≈ 23.8px），
+与 NFR 既有的 `streaming_content_single_frame_displacement_max_px = 32` 同源。
+若 Lead 坚持 64px，M3c 退化为非判别性守卫，判别力全部由 M3b 承担。
+
+### 3.3 删除绝对 `maxJump ≤ 32px`（TEST-DEFECT，理由）
+
+原断言把「内容真实增长」与「滚动补偿质量」混为一谈：内容每 60ms 增长 23.8px，
+浏览器忙帧会把 2 行合并进一帧（+47.6px），任何实现的单帧 `flowTop` 位移下界 = 该帧内容增长量
+→ 32px 阈值天生 flaky。替代：M3b 以「同帧内容增量」为上界（增量本身不设绝对上限），
+M3c 直接度量跟随滞后。
+
+## 4. Console Error=0 去环境依赖（已完成）
+
+`tests/e2e/status-flow-stability.spec.ts` 新增 `stubReleaseEndpoints(page)`，在 `goto` 前对
+`**/api.github.com/**` 与 `**/s3.local.ponyjob.top/**`（`src/lib/update-check.ts` 的启动期
+发版检查，两个域均与 wave-11 无因果关系）返回确定性 200 桩（`tag_name: v0.1.143`）。
+
+- **不是**放宽断言、**不是**白名单过滤：`expect(consoleErrors).toEqual([])` 保持 0 条要求，
+  应用自身任何 JS error / pageerror 仍会被捕获并导致失败。
+- 证据：加桩前独立探针曾捕获 `Failed to load resource: the server responded with a status of 403 ()`；
+  加桩后本次 5 条命令中全部 e2e 运行 Console Error = 0（M1/M2/M3 用例在 soft 断言后仍执行了
+  console 断言且未报错）。
+
+## 5. §7 引擎改动 A/B 实测（关键风险）
+
+同一合成流（50 行 × 60ms）、同一探针代码、同一 viewport：
+
+| 指标 | 改动前 `smooth`（dist@13:36） | 改动后 `auto`（dist@13:54） | 结论 |
+| :-- | --: | --: | :-- |
+| 跟随滞后峰值（修订式 M3c） | 48.0px | **48.0px** | 无改善 |
+| M3b 超调帧（1 帧预算） | 25 帧 / 最差 44px | **11 帧 / 最差 44px** | 帧数减少，最差不变 |
+| M3b 超调帧（3 帧预算） | 0 帧 | **1 帧 / 44px** | 出现预算外延迟跳变 |
+| 内容运动反转 | 0 | 0 | 一致 |
+| 单帧 `flowTop` 最大位移 | 47px | 48px | 一致 |
+
+**判定**：§7 的 `smooth → auto` 确实减少了超调帧数（25 → 11），但**未消除跟随滞后峰值（48px）
+与流末 44px 回弹跳变** → M3b/M3c 在改动后仍为红。改动后引擎的 debug 事件已确认生效：
+`latest-turn-signature:queue-follow-scroll` 全部为 `behavior:"auto"` 且 `streamingAssistantUpdate:true`，
+`queue-scroll-request` 仅剩 `auto/anchor`。
+
+**补充反证**：先前一次以 `prefers-reduced-motion` 代理 auto 的探针曾得到 24px 滞后，
+经复核为**采样率假象**（reduced-motion 关闭图标动画后页面更快，rAF 帧数 250 vs 128，
+每帧内容增量更小）。真实 §7 改动（auto）后帧数 125、滞后 48px，与 smooth 无实质差异。
+
+## 6. 更新后的滚动契约用例无法呈现红相（时序抢占）
+
+`tests/HomeWorkspace.spec.ts` 的同步改动（契约演进条目注释 + `behavior` 断言 `smooth → auto`）：
+
+- 用例 `"keeps streaming assistant text in one streaming flow while content grows"`：
+  `expect(scrollDebugEvent?.behavior).toBe("auto")`（原为 `"smooth"`）。
+- 用例 `"does not start a terminal follow when assistant streaming completes"`：
+  过滤条件 `entry.behavior === "smooth"` → `"auto"`。
+- 用例重命名：`"uses smooth follow for stream deltas and auto for resize compensation"` →
+  `"follows stream deltas without follow lag and compensates resize"`；
+  `"keeps auto-follow active across intermediate smooth-scroll events"` →
+  `"...intermediate programmatic scroll events"`。**未削弱任何其它滚动断言。**
+
+**红相缺失原因**：Executor 于 13:48 已把 §7 改动写入 `src/lib/useTimelineAutoScroll.ts`
+（`const behavior = isStreamingAssistantUpdate ? "auto" : "smooth"`），早于我落盘测试 →
+`npx vitest run tests/HomeWorkspace.spec.ts` 直接为 EXIT=0。回退 `src/**` 属禁写域，
+故无法复现该用例的红相。
+
+**替代物理证据（改动前引擎确实发出 `smooth`）**：Lead 侦察收据
+`.dev-team/evidence/m3-lag-probe-result.json`（13:40，早于 13:48 改动）的 debug buffer：
+
+```
+latest-turn-signature:queue-follow-scroll : 32 条，behaviors = ["smooth"]，streamingAssistantUpdate = [true]
+queue-scroll-request                      : behaviors = ["smooth/anchor"]
+```
+
+→ 断言 `toBe("auto")` 在改动前引擎上必然失败；改动后引擎上必然通过。该断言非空转。
+
+## 7. Pre-existing 缺陷标注（非本任务引入）
+
+- `tests/e2e/browser-preview.spec.ts`：6/6 failed（EXIT=1），基线环境侧栏默认收起导致
+  `session-sidebar-session-list` 等断言不可见，与 wave-11/wave-11.1 无关，未尝试修复。
+- 参考：`.dev-team/evidence/baseline-e2e-checkpoint.log` = `checkpoint-branch.spec.ts` 6 passed / 2 failed。
+
+## 8. 对 Lead 的决策请求
+
+1. **M3c 公式修订追认**：§7 原式恒不可绿（§3.1，数学 + 双引擎实测），已改为「跟随滞后 vs 已固定底部位置」。
+2. **M3c 阈值追认**：64px 在演进前后都通过（无门禁价值）→ 已取 32px（= 一行内容 / NFR 同源预算）。
+3. **M3b/M3c 仍红 → wave-11.1 未达标**：§7 的 `smooth → auto` 只减少超调帧数，未消除 48px 跟随滞后
+   与流末 44px 回弹（§5）。请裁定：
+   - (a) 追加引擎改动消除滞后（需扩大 `src/lib/useTimelineAutoScroll.ts` 写域，Lead 一票）；或
+   - (b) 承认 48px（≈2 行）为可接受包络，把 M3c 阈值定为 48px 并删除 M3b（则 §7 改动为纯噪声，建议回退）。
+4. **绿相门禁**（当前不满足）：`npx playwright test tests/e2e/status-flow-stability.spec.ts` 须 EXIT=0；
+   `npm run test:unit` 已 EXIT=0。

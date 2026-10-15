@@ -1,0 +1,265 @@
+(node:1398626) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1398662) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1398662) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[1A[2K[2m[WebServer] [22m(node:1398699) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+
+[1A[2K[2m[WebServer] [22m(node:1398699) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+[1A[2K[2m[WebServer] [22m(node:1398711) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+
+[1A[2K[2m[WebServer] [22m(node:1398711) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+[1A[2K[2m[WebServer] [22m(node:1398711) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+
+[1A[2K[2m[WebServer] [22m(node:1398711) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+Running 8 tests using 1 worker
+
+[1A[2K(node:1398757) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1398757) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K(node:1398757) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1398757) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K[1/8] [chromium] › tests/e2e/checkpoint-branch.spec.ts:294:1 › E2E-CHECKPOINT-001 空工作台下撤回按钮禁用
+[1A[2K(node:1399732) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1399732) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K(node:1399732) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1399732) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K[2/8] (retries) [chromium] › tests/e2e/checkpoint-branch.spec.ts:294:1 › E2E-CHECKPOINT-001 空工作台下撤回按钮禁用 (retry #1)
+[1A[2K  1) [chromium] › tests/e2e/checkpoint-branch.spec.ts:294:1 › E2E-CHECKPOINT-001 空工作台下撤回按钮禁用 ───────
+
+    Error: [2mexpect([22m[31mlocator[39m[2m).[22mtoHaveAttribute[2m([22m[32mexpected[39m[2m)[22m failed
+
+    Locator: getByTestId('workspace-undo-button')
+    Expected pattern: [32m/没有可撤回的操作/[39m
+    Received string:  [31m""[39m
+    Timeout: 15000ms
+
+    Call log:
+    [2m  - Expect "toHaveAttribute" with timeout 15000ms[22m
+    [2m  - waiting for getByTestId('workspace-undo-button')[22m
+    [2m    34 × locator resolved to <button disabled type="button" data-v-ef838ed0="" data-testid="workspace-undo-button" class="checkpoint-icon-button !rounded-full">…</button>[22m
+    [2m       - unexpected value "null"[22m
+
+
+      298 |   await expect(undoButton).toBeVisible();
+      299 |   await expect(undoButton).toBeDisabled();
+    > 300 |   await expect(undoButton).toHaveAttribute("title", /没有可撤回的操作/);
+          |                            ^
+      301 | });
+      302 |
+      303 | test("E2E-CHECKPOINT-002 注入历史数据后撤回按钮可用", async ({ page }) => {
+        at /home/dm/pony-agent/tests/e2e/checkpoint-branch.spec.ts:300:28
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-001-空工作台下撤回按钮禁用-chromium/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-001-空工作台下撤回按钮禁用-chromium/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-001-空工作台下撤回按钮禁用-chromium/error-context.md
+
+    Retry #1 ───────────────────────────────────────────────────────────────────────────────────────
+
+    Error: [2mexpect([22m[31mlocator[39m[2m).[22mtoHaveAttribute[2m([22m[32mexpected[39m[2m)[22m failed
+
+    Locator: getByTestId('workspace-undo-button')
+    Expected pattern: [32m/没有可撤回的操作/[39m
+    Received string:  [31m""[39m
+    Timeout: 15000ms
+
+    Call log:
+    [2m  - Expect "toHaveAttribute" with timeout 15000ms[22m
+    [2m  - waiting for getByTestId('workspace-undo-button')[22m
+    [2m    34 × locator resolved to <button disabled type="button" data-v-ef838ed0="" data-testid="workspace-undo-button" class="checkpoint-icon-button !rounded-full">…</button>[22m
+    [2m       - unexpected value "null"[22m
+
+
+      298 |   await expect(undoButton).toBeVisible();
+      299 |   await expect(undoButton).toBeDisabled();
+    > 300 |   await expect(undoButton).toHaveAttribute("title", /没有可撤回的操作/);
+          |                            ^
+      301 | });
+      302 |
+      303 | test("E2E-CHECKPOINT-002 注入历史数据后撤回按钮可用", async ({ page }) => {
+        at /home/dm/pony-agent/tests/e2e/checkpoint-branch.spec.ts:300:28
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-001-空工作台下撤回按钮禁用-chromium-retry1/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-001-空工作台下撤回按钮禁用-chromium-retry1/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-001-空工作台下撤回按钮禁用-chromium-retry1/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-001-空工作台下撤回按钮禁用-chromium-retry1/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-001-空工作台下撤回按钮禁用-chromium-retry1/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+[1A[2K(node:1402986) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1402986) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K(node:1402986) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1402986) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K[3/8] [chromium] › tests/e2e/checkpoint-branch.spec.ts:303:1 › E2E-CHECKPOINT-002 注入历史数据后撤回按钮可用
+[1A[2K[4/8] [chromium] › tests/e2e/checkpoint-branch.spec.ts:425:1 › E2E-CHECKPOINT-003 撤回按钮在有草稿时禁用
+[1A[2K(node:1404993) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1404993) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K(node:1404993) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1404993) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K[5/8] (retries) [chromium] › tests/e2e/checkpoint-branch.spec.ts:425:1 › E2E-CHECKPOINT-003 撤回按钮在有草稿时禁用 (retry #1)
+[1A[2K  2) [chromium] › tests/e2e/checkpoint-branch.spec.ts:425:1 › E2E-CHECKPOINT-003 撤回按钮在有草稿时禁用 ───────
+
+    Error: [2mexpect([22m[31mlocator[39m[2m).[22mtoBeDisabled[2m([22m[2m)[22m failed
+
+    Locator:  getByTestId('workspace-undo-button')
+    Expected: disabled
+    Received: enabled
+    Timeout:  15000ms
+
+    Call log:
+    [2m  - Expect "toBeDisabled" with timeout 15000ms[22m
+    [2m  - waiting for getByTestId('workspace-undo-button')[22m
+    [2m    34 × locator resolved to <button type="button" data-v-ef838ed0="" data-testid="workspace-undo-button" class="checkpoint-icon-button !rounded-full">…</button>[22m
+    [2m       - unexpected value "enabled"[22m
+
+
+      498 |
+      499 |   const undoButton = page.getByTestId("workspace-undo-button");
+    > 500 |   await expect(undoButton).toBeDisabled();
+          |                            ^
+      501 |   await expect(undoButton).toHaveAttribute("title", /请先处理当前草稿/);
+      502 | });
+      503 |
+        at /home/dm/pony-agent/tests/e2e/checkpoint-branch.spec.ts:500:28
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium/error-context.md
+
+    Retry #1 ───────────────────────────────────────────────────────────────────────────────────────
+
+    Error: [2mexpect([22m[31mlocator[39m[2m).[22mtoBeDisabled[2m([22m[2m)[22m failed
+
+    Locator:  getByTestId('workspace-undo-button')
+    Expected: disabled
+    Received: enabled
+    Timeout:  15000ms
+
+    Call log:
+    [2m  - Expect "toBeDisabled" with timeout 15000ms[22m
+    [2m  - waiting for getByTestId('workspace-undo-button')[22m
+    [2m    34 × locator resolved to <button type="button" data-v-ef838ed0="" data-testid="workspace-undo-button" class="checkpoint-icon-button !rounded-full">…</button>[22m
+    [2m       - unexpected value "enabled"[22m
+
+
+      498 |
+      499 |   const undoButton = page.getByTestId("workspace-undo-button");
+    > 500 |   await expect(undoButton).toBeDisabled();
+          |                            ^
+      501 |   await expect(undoButton).toHaveAttribute("title", /请先处理当前草稿/);
+      502 | });
+      503 |
+        at /home/dm/pony-agent/tests/e2e/checkpoint-branch.spec.ts:500:28
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+[1A[2K(node:1405881) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1405881) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K(node:1405881) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:1405881) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+
+[1A[2K[6/8] [chromium] › tests/e2e/checkpoint-branch.spec.ts:504:1 › E2E-CHECKPOINT-004 用户消息下方的撤回按钮在有历史节点时出现
+[1A[2K[7/8] [chromium] › tests/e2e/checkpoint-branch.spec.ts:520:3 › E2E-CHECKPOINT-005 首轮仅撤回对话可回到初始空状态
+[1A[2K[8/8] [chromium] › tests/e2e/checkpoint-branch.spec.ts:545:3 › E2E-CHECKPOINT-006 首轮仅撤回对话在无显式root时也可回到初始空状态
+[1A[2K[9/8] [chromium] › tests/e2e/checkpoint-branch.spec.ts:520:3 › E2E-CHECKPOINT-005 首轮撤回对话和修改可回到初始空状态
+[1A[2K[10/8] [chromium] › tests/e2e/checkpoint-branch.spec.ts:545:3 › E2E-CHECKPOINT-006 首轮撤回对话和修改在无显式root时也可回到初始空状态
+[1A[2K  2 failed
+    [chromium] › tests/e2e/checkpoint-branch.spec.ts:294:1 › E2E-CHECKPOINT-001 空工作台下撤回按钮禁用 ────────
+    [chromium] › tests/e2e/checkpoint-branch.spec.ts:425:1 › E2E-CHECKPOINT-003 撤回按钮在有草稿时禁用 ────────
+  6 passed (1.7m)
+EXIT=1

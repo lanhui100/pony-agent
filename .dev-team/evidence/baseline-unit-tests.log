@@ -1,0 +1,1411 @@
+(node:1393073) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+> pony-agent@0.1.143 test:unit
+> vitest run
+
+(node:1393085) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393085) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ RUN  v4.1.9 /home/dm/pony-agent
+
+(node:1393130) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393131) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393137) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393143) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393150) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393157) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393171) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393178) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393164) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393185) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393206) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393191) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393199) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393226) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393236) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > shows the target session placeholder and surfaces an error when switching fails without cached state
+[pony-agent][perf] host-read-error {
+  label: 'load_session_runtime_view',
+  elapsedMs: 1.2899890000007872,
+  error: 'Error: snapshot exploded',
+  sessionId: 'session-next',
+  nodeId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > rolls back initializeSessions when loading the latest session fails
+[pony-agent][perf] host-read-error {
+  label: 'load_session_runtime_view',
+  elapsedMs: 0.09988100000009581,
+  error: 'Error: load latest failed',
+  sessionId: 'session-latest',
+  nodeId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > keeps the fallback target but surfaces an error when fallback loading fails
+[pony-agent][perf] host-read-error {
+  label: 'load_session_runtime_view',
+  elapsedMs: 0.09822799999983545,
+  error: 'Error: fallback load failed',
+  sessionId: 'session-fallback',
+  nodeId: null
+}
+
+ ✓ tests/ModelMonitorPage.spec.ts (10 tests) 1045ms
+(node:1393459) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/DropdownMenu.spec.ts (4 tests) 816ms
+     ✓ 打开后渲染全部条目；danger 项带图标  432ms
+(node:1393466) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > forwards image attachments to start_graph_run_stream and records an image summary
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.14960599999994884,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'image-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > forwards workspace mode to start_graph_run_stream input payload
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.0862250000000131,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'workspace-mode-session',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/ConfigGeneralSectionUpdate.spec.ts (11 tests) 742ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > marks the turn as failed when start_graph_run_stream throws immediately
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.18830100000013772,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'tauri-session',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/file-attachments.spec.ts (38 tests) 1476ms
+     ✓ builds an attachment-aware turn and clears pending after send  650ms
+     ✓ sends with only attachments and no text (auto summary)  631ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > applies started, delta and completed stream events to the active turn
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1096800000004805,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: null
+}
+
+(node:1393480) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393487) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/HomeWorkspaceMarkdown.spec.ts > HomeWorkspace markdown rendering > renders assistant markdown as html instead of raw source
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-1" turn= {
+  turnId: 'turn-1',
+  user: {
+    id: 'user-1',
+    turnId: 'turn-1',
+    role: 'user',
+    content: '给我一份 README',
+    status: 'done',
+    tokenCount: null
+  },
+  assistant: {
+    id: 'assistant-1',
+    turnId: 'turn-1',
+    role: 'assistant',
+    content: '```md\n# 标题\n\n> 引用\n\n- 列表项\n\n**加粗**\n```',
+    status: 'done',
+    tokenCount: null,
+    modelName: 'ppx/gpt-5.4'
+  },
+  tools: [],
+  mergedTools: []
+} events= [
+  {
+    kind: 'content',
+    key: 'content-assistant-1',
+    order: 1,
+    assistant: {
+      id: 'assistant-1',
+      turnId: 'turn-1',
+      role: 'assistant',
+      content: '```md\n# 标题\n\n> 引用\n\n- 列表项\n\n**加粗**\n```',
+      status: 'done',
+      tokenCount: null,
+      modelName: 'ppx/gpt-5.4'
+    },
+    content: '```md\n# 标题\n\n> 引用\n\n- 列表项\n\n**加粗**\n```',
+    streaming: false
+  }
+]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Anonymous ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+ ✓ tests/workspace-composer-permissions.spec.ts (3 tests) 815ms
+     ✓ shows confirmation dialog when switching to full_access and updates store upon confirm  452ms
+(node:1393499) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/workspace-composer-attach.spec.ts (7 tests) 1263ms
+stderr | tests/HomeWorkspaceMarkdown.spec.ts > HomeWorkspace markdown rendering > shows plain text while assistant is streaming and renders markdown when streaming completes
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-stream-markdown" turn= {
+  turnId: 'turn-stream-markdown',
+  user: {
+    id: 'user-stream-markdown',
+    turnId: 'turn-stream-markdown',
+    role: 'user',
+    content: '继续',
+    status: 'done',
+    tokenCount: null
+  },
+  assistant: {
+    id: 'assistant-stream-markdown',
+    turnId: 'turn-stream-markdown',
+    role: 'assistant',
+    content: '**流式加粗**',
+    status: 'pending',
+    tokenCount: null,
+    modelName: 'ppx/gpt-5.4'
+  },
+  tools: [],
+  mergedTools: []
+} events= [
+  {
+    kind: 'content',
+    key: 'content-assistant-stream-markdown',
+    order: 2,
+    assistant: {
+      id: 'assistant-stream-markdown',
+      turnId: 'turn-stream-markdown',
+      role: 'assistant',
+      content: '**流式加粗**',
+      status: 'pending',
+      tokenCount: null,
+      modelName: 'ppx/gpt-5.4'
+    },
+    content: '**流式加粗**',
+    streaming: true
+  }
+]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Anonymous ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+ ✓ tests/MarkdownRenderer.spec.ts (11 tests) 2964ms
+     ✓ keeps rendering new markdown content while forceMarkdownStreaming is active  466ms
+     ✓ shows only the unrendered streaming suffix as individual characters  472ms
+     ✓ re-renders the final truthful markdown when streaming ends  458ms
+stderr | tests/HomeWorkspaceMarkdown.spec.ts > HomeWorkspace markdown rendering > shows plain text while assistant is streaming and renders markdown when streaming completes
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-stream-markdown" turn= {
+  turnId: 'turn-stream-markdown',
+  user: {
+    id: 'user-stream-markdown',
+    turnId: 'turn-stream-markdown',
+    role: 'user',
+    content: '继续',
+    status: 'done',
+    tokenCount: null
+  },
+  assistant: {
+    id: 'assistant-stream-markdown',
+    turnId: 'turn-stream-markdown',
+    role: 'assistant',
+    content: '**流式加粗**',
+    status: 'pending',
+    tokenCount: null,
+    modelName: 'ppx/gpt-5.4'
+  },
+  tools: [],
+  mergedTools: []
+} events= [
+  {
+    kind: 'content',
+    key: 'content-assistant-stream-markdown',
+    order: 2,
+    assistant: {
+      id: 'assistant-stream-markdown',
+      turnId: 'turn-stream-markdown',
+      role: 'assistant',
+      content: '**流式加粗**',
+      status: 'pending',
+      tokenCount: null,
+      modelName: 'ppx/gpt-5.4'
+    },
+    content: '**流式加粗**',
+    streaming: true
+  }
+]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Anonymous ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+(node:1393547) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393553) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/HomeWorkspaceMarkdown.spec.ts > HomeWorkspace markdown rendering > shows plain text while assistant is streaming and renders markdown when streaming completes
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-stream-markdown" turn= {
+  turnId: 'turn-stream-markdown',
+  user: {
+    id: 'user-stream-markdown',
+    turnId: 'turn-stream-markdown',
+    role: 'user',
+    content: '继续',
+    status: 'done',
+    tokenCount: null
+  },
+  assistant: {
+    id: 'assistant-stream-markdown',
+    turnId: 'turn-stream-markdown',
+    role: 'assistant',
+    content: '**流式加粗**',
+    status: 'done',
+    tokenCount: null,
+    modelName: 'ppx/gpt-5.4'
+  },
+  tools: [],
+  mergedTools: []
+} events= [
+  {
+    kind: 'content',
+    key: 'content-assistant-stream-markdown',
+    order: 2,
+    assistant: {
+      id: 'assistant-stream-markdown',
+      turnId: 'turn-stream-markdown',
+      role: 'assistant',
+      content: '**流式加粗**',
+      status: 'done',
+      tokenCount: null,
+      modelName: 'ppx/gpt-5.4'
+    },
+    content: '**流式加粗**',
+    streaming: false
+  }
+]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Anonymous ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+stdout | tests/AppRuntimeSmoke.spec.ts > App runtime smoke (real components) > mounts the real home page without runtime errors
+[pony-agent][app] beforeUnmount {
+  href: 'http://localhost:3000/',
+  ts: '2026-10-15T05:06:04.342Z',
+  messages: 0,
+  traces: 0,
+  phase: 'idle'
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > shows finalized output before terminal trace work completes
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.2255120000008901,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: 'run-stream'
+}
+
+stderr | tests/HomeWorkspaceMarkdown.spec.ts > HomeWorkspace markdown rendering > reveals streaming assistant content character by character with continuous release
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-stream" turn= {
+  turnId: 'turn-stream',
+  user: {
+    id: 'user-stream',
+    turnId: 'turn-stream',
+    role: 'user',
+    content: '继续',
+    status: 'done',
+    tokenCount: null
+  },
+  assistant: {
+    id: 'assistant-stream',
+    turnId: 'turn-stream',
+    role: 'assistant',
+    content: 'hello',
+    status: 'pending',
+    tokenCount: null,
+    modelName: 'ppx/gpt-5.4'
+  },
+  tools: [],
+  mergedTools: []
+} events= [
+  {
+    kind: 'content',
+    key: 'content-assistant-stream',
+    order: 2,
+    assistant: {
+      id: 'assistant-stream',
+      turnId: 'turn-stream',
+      role: 'assistant',
+      content: 'hello',
+      status: 'pending',
+      tokenCount: null,
+      modelName: 'ppx/gpt-5.4'
+    },
+    content: 'hello',
+    streaming: true
+  }
+]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Anonymous ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+stderr | tests/HomeWorkspaceMarkdown.spec.ts > HomeWorkspace markdown rendering > reveals streaming assistant content character by character with continuous release
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-stream" turn= {
+  turnId: 'turn-stream',
+  user: {
+    id: 'user-stream',
+    turnId: 'turn-stream',
+    role: 'user',
+    content: '继续',
+    status: 'done',
+    tokenCount: null
+  },
+  assistant: {
+    id: 'assistant-stream',
+    turnId: 'turn-stream',
+    role: 'assistant',
+    content: 'hello',
+    status: 'pending',
+    tokenCount: null,
+    modelName: 'ppx/gpt-5.4'
+  },
+  tools: [],
+  mergedTools: []
+} events= [
+  {
+    kind: 'content',
+    key: 'content-assistant-stream',
+    order: 2,
+    assistant: {
+      id: 'assistant-stream',
+      turnId: 'turn-stream',
+      role: 'assistant',
+      content: 'hello',
+      status: 'pending',
+      tokenCount: null,
+      modelName: 'ppx/gpt-5.4'
+    },
+    content: 'hell',
+    streaming: true
+  }
+]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Anonymous ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+stdout | tests/HomeWorkspaceMarkdown.spec.ts
+[workspace-scroll] {
+  event: 'queue-scroll-request:raf-stuck',
+  at: 1792040765018,
+  streamAutoFollowEnabled: true,
+  scrollQueued: false,
+  isSubmitting: false,
+  programmaticScrollActive: false,
+  programmaticScrollTargetMode: 'anchor',
+  programmaticScrollTargetTop: 0,
+  programmaticScrollUntilMs: 0,
+  userScrollOverrideVersion: 0,
+  lastUserPausedSignature: '',
+  viewportScrollTop: null,
+  viewportScrollHeight: null,
+  viewportClientHeight: null,
+  distanceToBottom: null,
+  anchorTop: 0,
+  anchorBottom: 0,
+  composerTop: 0,
+  anchorToComposerDistance: 0,
+  latestUserTop: 0,
+  latestAgentTop: 0,
+  targetDelta: null,
+  latestVisibleTurnLayoutSignature: 'turn-1|user:user-1|assistant:assistant-1:done|events:content:content-assistant-1',
+  viewportResolved: false,
+  viewportMetricsValid: false,
+  requestId: 3,
+  behavior: 'auto',
+  expectedOverrideVersion: 0,
+  rafId: 1,
+  scheduledScrollRequestId: 3
+}
+[workspace-scroll] {
+  event: 'queue-scroll-request',
+  at: 1792040765019,
+  streamAutoFollowEnabled: true,
+  scrollQueued: true,
+  isSubmitting: false,
+  programmaticScrollActive: false,
+  programmaticScrollTargetMode: 'anchor',
+  programmaticScrollTargetTop: 0,
+  programmaticScrollUntilMs: 0,
+  userScrollOverrideVersion: 0,
+  lastUserPausedSignature: '',
+  viewportScrollTop: null,
+  viewportScrollHeight: null,
+  viewportClientHeight: null,
+  distanceToBottom: null,
+  anchorTop: 0,
+  anchorBottom: 0,
+  composerTop: 0,
+  anchorToComposerDistance: 0,
+  latestUserTop: 0,
+  latestAgentTop: 0,
+  targetDelta: null,
+  latestVisibleTurnLayoutSignature: 'turn-1|user:user-1|assistant:assistant-1:done|events:content:content-assistant-1',
+  viewportResolved: false,
+  viewportMetricsValid: false,
+  requestId: 4,
+  behavior: 'auto',
+  expectedOverrideVersion: 0,
+  targetMode: 'anchor'
+}
+
+ ✓ tests/HomeWorkspaceMarkdown.spec.ts (3 tests) 2327ms
+     ✓ renders assistant markdown as html instead of raw source  835ms
+     ✓ shows plain text while assistant is streaming and renders markdown when streaming completes  1182ms
+     ✓ reveals streaming assistant content character by character with continuous release  302ms
+ ✓ tests/acceptance/blank-session-contract.spec.ts (7 tests) 2696ms
+     ✓ C1 顶层/折叠态新对话按钮：sessionOperation===null 时任何 messages+归属组合都不得带 disabled  551ms
+     ✓ C2 在途 sessionOperation（initializing/switching/deleting）期间顶层按钮必须保持 disabled  562ms
+     ✓ C3 workspace-row-new-<key>：sessionOperation===null 时恒不得带 disabled  596ms
+     ✓ C4 顶层按钮点击目标工作区恒为 DEFAULT_WORKSPACE_ID（spy createSession 入参）  522ms
+(node:1393625) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393632) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > unlocks the UI synchronously on completed while terminal trace projection is deferred
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.21874799999932293,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-output-end',
+  nodeId: null,
+  runId: 'run-output-end'
+}
+
+ ✓ tests/markdown-sanitize.redteam.spec.ts (29 tests) 688ms
+stdout | tests/AppRuntimeSmoke.spec.ts > App runtime smoke (real components) > mounts the real config page models tab (ProviderConfigPage) without runtime errors
+[pony-agent][app] beforeUnmount {
+  href: 'http://localhost:3000/',
+  ts: '2026-10-15T05:06:05.856Z',
+  messages: 0,
+  traces: 0,
+  phase: 'idle'
+}
+
+ ✓ tests/AppRuntimeSmoke.spec.ts (2 tests) 2728ms
+     ✓ mounts the real home page without runtime errors  1211ms
+     ✓ mounts the real config page models tab (ProviderConfigPage) without runtime errors  1504ms
+(node:1393685) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/TraceInspector.spec.ts (22 tests) 3484ms
+     ✓ header 可折叠且折叠后 body 卸载；再次展开恢复内容  309ms
+stdout | tests/workspace-runtime-status-streaming.spec.ts > Workspace Runtime Status Streaming Behavior > does not show runtime status bar when assistant is streaming content
+[workspace-scroll] {
+  event: 'viewport-scroll:near-bottom',
+  at: 1792040765895,
+  streamAutoFollowEnabled: true,
+  scrollQueued: false,
+  isSubmitting: true,
+  programmaticScrollActive: false,
+  programmaticScrollTargetMode: 'anchor',
+  programmaticScrollTargetTop: 0,
+  programmaticScrollUntilMs: 0,
+  userScrollOverrideVersion: 0,
+  lastUserPausedSignature: '',
+  viewportScrollTop: 0,
+  viewportScrollHeight: 0,
+  viewportClientHeight: 0,
+  distanceToBottom: 0,
+  anchorTop: 0,
+  anchorBottom: 0,
+  composerTop: 0,
+  anchorToComposerDistance: 0,
+  latestUserTop: 0,
+  latestAgentTop: 0,
+  targetDelta: 0,
+  latestVisibleTurnLayoutSignature: 'turn-1|user:msg-user-1|assistant:msg-assistant-1:pending|events:content:content-msg-assistant-1',
+  viewportResolved: true,
+  viewportMetricsValid: true
+}
+[workspace-scroll] {
+  event: 'queue-scroll-request',
+  at: 1792040765897,
+  streamAutoFollowEnabled: true,
+  scrollQueued: true,
+  isSubmitting: true,
+  programmaticScrollActive: false,
+  programmaticScrollTargetMode: 'anchor',
+  programmaticScrollTargetTop: 0,
+  programmaticScrollUntilMs: 0,
+  userScrollOverrideVersion: 0,
+  lastUserPausedSignature: '',
+  viewportScrollTop: 0,
+  viewportScrollHeight: 0,
+  viewportClientHeight: 0,
+  distanceToBottom: 0,
+  anchorTop: 0,
+  anchorBottom: 0,
+  composerTop: 0,
+  anchorToComposerDistance: 0,
+  latestUserTop: 0,
+  latestAgentTop: 0,
+  targetDelta: 0,
+  latestVisibleTurnLayoutSignature: 'turn-1|user:msg-user-1|assistant:msg-assistant-1:pending|events:content:content-msg-assistant-1',
+  viewportResolved: true,
+  viewportMetricsValid: true,
+  requestId: 1,
+  behavior: 'auto',
+  expectedOverrideVersion: 0,
+  targetMode: 'anchor'
+}
+
+stderr | tests/workspace-runtime-status-streaming.spec.ts > Workspace Runtime Status Streaming Behavior > does not show runtime status bar when assistant is streaming content
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-1" turn= {
+  turnId: 'turn-1',
+  user: { id: 'msg-user-1', turnId: 'turn-1', role: 'user', content: '你好' },
+  assistant: {
+    id: 'msg-assistant-1',
+    turnId: 'turn-1',
+    role: 'assistant',
+    content: '正在为你生成回答的第一部分...',
+    status: 'pending'
+  },
+  tools: [],
+  mergedTools: []
+} events= [
+  {
+    kind: 'content',
+    key: 'content-msg-assistant-1',
+    order: 2,
+    assistant: {
+      id: 'msg-assistant-1',
+      turnId: 'turn-1',
+      role: 'assistant',
+      content: '正在为你生成回答的第一部分...',
+      status: 'pending'
+    },
+    content: '正在为你生成回答的第一部分...',
+    streaming: true
+  }
+]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Primitive ref=fn<forwardRef> style= { minWidth: undefined } as-child=false  ... > 
+  at <ScrollAreaViewport ref="viewportRef" class="h-full w-full rounded-[inherit] workspace-timeline-viewport px-4 sm:px-5" > 
+  at <Primitive ref=fn<forwardRef> as-child=false as=undefined  ... > 
+  at <ScrollAreaRoot class="relative overflow-hidden min-h-0 flex-1 rounded-t-[0.6rem]" > 
+  at <ScrollArea ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+(node:1393701) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393707) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | tests/workspace-runtime-status-streaming.spec.ts > Workspace Runtime Status Streaming Behavior > shows runtime status bar when executing tool before streaming content
+[workspace-scroll] {
+  event: 'viewport-scroll:near-bottom',
+  at: 1792040766207,
+  streamAutoFollowEnabled: true,
+  scrollQueued: false,
+  isSubmitting: true,
+  programmaticScrollActive: false,
+  programmaticScrollTargetMode: 'anchor',
+  programmaticScrollTargetTop: 0,
+  programmaticScrollUntilMs: 0,
+  userScrollOverrideVersion: 0,
+  lastUserPausedSignature: '',
+  viewportScrollTop: 0,
+  viewportScrollHeight: 0,
+  viewportClientHeight: 0,
+  distanceToBottom: 0,
+  anchorTop: 0,
+  anchorBottom: 0,
+  composerTop: 0,
+  anchorToComposerDistance: 0,
+  latestUserTop: 0,
+  latestAgentTop: 0,
+  targetDelta: 0,
+  latestVisibleTurnLayoutSignature: 'turn-1|user:msg-user-1|assistant:-|events:waiting:waiting-turn-1',
+  viewportResolved: true,
+  viewportMetricsValid: true
+}
+[workspace-scroll] {
+  event: 'queue-scroll-request',
+  at: 1792040766208,
+  streamAutoFollowEnabled: true,
+  scrollQueued: true,
+  isSubmitting: true,
+  programmaticScrollActive: false,
+  programmaticScrollTargetMode: 'anchor',
+  programmaticScrollTargetTop: 0,
+  programmaticScrollUntilMs: 0,
+  userScrollOverrideVersion: 0,
+  lastUserPausedSignature: '',
+  viewportScrollTop: 0,
+  viewportScrollHeight: 0,
+  viewportClientHeight: 0,
+  distanceToBottom: 0,
+  anchorTop: 0,
+  anchorBottom: 0,
+  composerTop: 0,
+  anchorToComposerDistance: 0,
+  latestUserTop: 0,
+  latestAgentTop: 0,
+  targetDelta: 0,
+  latestVisibleTurnLayoutSignature: 'turn-1|user:msg-user-1|assistant:-|events:waiting:waiting-turn-1',
+  viewportResolved: true,
+  viewportMetricsValid: true,
+  requestId: 1,
+  behavior: 'auto',
+  expectedOverrideVersion: 0,
+  targetMode: 'anchor'
+}
+
+stderr | tests/workspace-runtime-status-streaming.spec.ts > Workspace Runtime Status Streaming Behavior > shows runtime status bar when executing tool before streaming content
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-1" turn= {
+  turnId: 'turn-1',
+  user: { id: 'msg-user-1', turnId: 'turn-1', role: 'user', content: '查看文件' },
+  assistant: null,
+  tools: [],
+  mergedTools: []
+} events= [ { kind: 'waiting', key: 'waiting-turn-1', order: 9007199254740989 } ]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Primitive ref=fn<forwardRef> style= { minWidth: undefined } as-child=false  ... > 
+  at <ScrollAreaViewport ref="viewportRef" class="h-full w-full rounded-[inherit] workspace-timeline-viewport px-4 sm:px-5" > 
+  at <Primitive ref=fn<forwardRef> as-child=false as=undefined  ... > 
+  at <ScrollAreaRoot class="relative overflow-hidden min-h-0 flex-1 rounded-t-[0.6rem]" > 
+  at <ScrollArea ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > does not overwrite a newly started turn's global state with a stale terminal projection
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.23390800000015588,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-unlock-first',
+  nodeId: null,
+  runId: null
+}
+
+stdout | tests/workspace-runtime-status-streaming.spec.ts > Workspace Runtime Status Streaming Behavior > shows runtime status bar when tool is drafting even if previous assistant message has pending status
+[workspace-scroll] {
+  event: 'viewport-scroll:near-bottom',
+  at: 1792040766461,
+  streamAutoFollowEnabled: true,
+  scrollQueued: false,
+  isSubmitting: true,
+  programmaticScrollActive: false,
+  programmaticScrollTargetMode: 'anchor',
+  programmaticScrollTargetTop: 0,
+  programmaticScrollUntilMs: 0,
+  userScrollOverrideVersion: 0,
+  lastUserPausedSignature: '',
+  viewportScrollTop: 0,
+  viewportScrollHeight: 0,
+  viewportClientHeight: 0,
+  distanceToBottom: 0,
+  anchorTop: 0,
+  anchorBottom: 0,
+  composerTop: 0,
+  anchorToComposerDistance: 0,
+  latestUserTop: 0,
+  latestAgentTop: 0,
+  targetDelta: 0,
+  latestVisibleTurnLayoutSignature: 'turn-1|user:msg-user-1|assistant:msg-assistant-1:pending|events:waiting:waiting-turn-1',
+  viewportResolved: true,
+  viewportMetricsValid: true
+}
+[workspace-scroll] {
+  event: 'queue-scroll-request',
+  at: 1792040766462,
+  streamAutoFollowEnabled: true,
+  scrollQueued: true,
+  isSubmitting: true,
+  programmaticScrollActive: false,
+  programmaticScrollTargetMode: 'anchor',
+  programmaticScrollTargetTop: 0,
+  programmaticScrollUntilMs: 0,
+  userScrollOverrideVersion: 0,
+  lastUserPausedSignature: '',
+  viewportScrollTop: 0,
+  viewportScrollHeight: 0,
+  viewportClientHeight: 0,
+  distanceToBottom: 0,
+  anchorTop: 0,
+  anchorBottom: 0,
+  composerTop: 0,
+  anchorToComposerDistance: 0,
+  latestUserTop: 0,
+  latestAgentTop: 0,
+  targetDelta: 0,
+  latestVisibleTurnLayoutSignature: 'turn-1|user:msg-user-1|assistant:msg-assistant-1:pending|events:waiting:waiting-turn-1',
+  viewportResolved: true,
+  viewportMetricsValid: true,
+  requestId: 1,
+  behavior: 'auto',
+  expectedOverrideVersion: 0,
+  targetMode: 'anchor'
+}
+
+stderr | tests/workspace-runtime-status-streaming.spec.ts > Workspace Runtime Status Streaming Behavior > shows runtime status bar when tool is drafting even if previous assistant message has pending status
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem key="turn-1" turn= {
+  turnId: 'turn-1',
+  user: {
+    id: 'msg-user-1',
+    turnId: 'turn-1',
+    role: 'user',
+    content: '读一下文件'
+  },
+  assistant: {
+    id: 'msg-assistant-1',
+    turnId: 'turn-1',
+    role: 'assistant',
+    content: '',
+    status: 'pending'
+  },
+  tools: [],
+  mergedTools: []
+} events= [ { kind: 'waiting', key: 'waiting-turn-1', order: 1 } ]  ... > 
+  at <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5"  ... > 
+  at <Primitive ref=fn<forwardRef> style= { minWidth: undefined } as-child=false  ... > 
+  at <ScrollAreaViewport ref="viewportRef" class="h-full w-full rounded-[inherit] workspace-timeline-viewport px-4 sm:px-5" > 
+  at <Primitive ref=fn<forwardRef> as-child=false as=undefined  ... > 
+  at <ScrollAreaRoot class="relative overflow-hidden min-h-0 flex-1 rounded-t-[0.6rem]" > 
+  at <ScrollArea ref="timelineScrollAreaRef" class="min-h-0 flex-1 rounded-t-[0.6rem]" viewport-class="workspace-timeline-viewport px-4 sm:px-5"  ... > 
+  at <HomeWorkspace> 
+  at <TooltipProvider> 
+  at <Anonymous ref="VTU_COMPONENT" > 
+  at <VTUROOT>
+
+ ✓ tests/workspace-runtime-status-streaming.spec.ts (3 tests) 1154ms
+     ✓ does not show runtime status bar when assistant is streaming content  632ms
+ ✓ tests/ConfirmPopover.spec.ts (6 tests) 1611ms
+     ✓ confirm 点击即关闭并回传事件（历史行为不变）  500ms
+     ✓ cancel 关闭且不触发 confirm  309ms
+ ✓ tests/release-notes.spec.ts (29 tests) 1043ms
+(node:1393751) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/ProviderConfigPage.spec.ts (22 tests) 4752ms
+     ✓ collapses away the create card and discards the draft instead of locking (D8)  495ms
+     ✓ opens the create-model card inside the list section and saves through the browser branch  312ms
+     ✓ adds models in batch from the fetched catalog and reports skipped duplicates (D6)  367ms
+     ✓ adds models in batch from the model list header add button modal  301ms
+(node:1393772) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393778) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393785) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > keeps terminal assistant payload stable when output_end and completed carry the same content
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.22581200000058743,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-stale-guard',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > defers persistence for delta stream updates instead of flushing every chunk immediately
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.10145399999964866,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-deferred-persist',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/TelemetryPage.spec.ts (8 tests) 843ms
+(node:1393868) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > prefers canonical event metadata over legacy phase guessing while streaming
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.2592160000003787,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'canonical-phase-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > ignores duplicate or older-sequence stream events once a newer canonical event was accepted
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1117340000000695,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-dedup-session',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/HomeSidebar.spec.ts (8 tests | 2 skipped) 656ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > records model and tool hops in timeline order without merging
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.09666499999912048,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: null
+}
+
+(node:1393881) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > records model and tool hops in timeline order without merging
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.28242000000136613,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-stable-terminal',
+  nodeId: null,
+  runId: 'run-stable-terminal'
+}
+
+ ✓ tests/HomeSessionSidebar.spec.ts (23 tests) 5804ms
+     ✓ default 不渲染组行；其会话平铺置顶；孤儿并入平铺区  302ms
+     ✓ 瞬态新对话按显式目标钉顶：顶层入口落平铺区顶；组内入口落该组顶  439ms
+     ✓ 工作区支持折叠/展开会话列表，状态持久化到 localStorage，新建会话自动展开  625ms
+     ✓ 分区预览上限各自 5 条，「显示全部」一次解除所有分区  373ms
+(node:1393909) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > prefers backend-provided trace timeline over local timeline assembly
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.10864800000126706,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/markdown.spec.ts (9 tests) 210ms
+ ✓ tests/AskPlanPanel.spec.ts (7 tests) 540ms
+(node:1393987) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1393996) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/ConfigGeneralSectionSignedUpdate.spec.ts (5 tests) 507ms
+(node:1394036) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/acceptance/stage-1-ask-user.spec.ts > PA-114 Stage 1 ask_user acceptance (F1) > F1-4 WorkspaceTurnItem routes ask tool rows to AskUserToolCallCard and keeps generic rows
+[Vue warn]: Failed to resolve directive: motion 
+  at <WorkspaceTurnItem turn= {
+  turnId: 'turn-1',
+  user: null,
+  assistant: null,
+  tools: [],
+  mergedTools: []
+} events= [
+  {
+    kind: 'tools',
+    key: 'tools-1',
+    order: 1,
+    tools: [ [Object], [Object] ]
+  }
+] shouldShowAgentArticle=true  ... > 
+  at <VTUROOT>
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > prefers backend-provided trace timeline over local timeline assembly
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.17386199999964447,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'terminal-seq-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > prefers backend-provided trace timeline over local timeline assembly
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.2667009999986476,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: 'run-stream-hops'
+}
+
+ ✓ tests/acceptance/stage-1-ask-user.spec.ts (14 tests) 508ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > keeps tool result text out of conversation-bound call_model entries on multi-hop completion
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.15979599999991478,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-multihop',
+  nodeId: null,
+  runId: null
+}
+
+(node:1394071) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/acceptance/trajectory-integration.spec.ts (4 tests) 412ms
+ ✓ tests/acceptance/stage-2-queued-stack.spec.ts (4 tests) 452ms
+ ✓ tests/App.spec.ts (21 tests) 1429ms
+(node:1394080) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1394092) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1394111) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > keeps tool result text out of conversation-bound call_model entries on multi-hop completion
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.2085189999997965,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: 'run-stream-backend-timeline'
+}
+
+ ✓ tests/GoalBar.spec.ts (3 tests) 152ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > ignores non-provider cache-hit candidates on completion
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1406489999990299,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-accumulated-cache',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/QueuedMessagesBubble.spec.ts (3 tests) 452ms
+(node:1394144) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/workspace-composer-ask.spec.ts (7 tests) 589ms
+(node:1394151) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/acceptance/stage_1_trace_ui.spec.ts (2 tests) 368ms
+(node:1394158) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1394165) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > ignores non-provider cache-hit candidates on completion
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.22299699999894074,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-multihop',
+  nodeId: null,
+  runId: 'run-stream-multihop-tool-result-leak'
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > stores call-level model hops with request kinds from host payload
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.19806900000003225,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-provider-calls',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/update-check.spec.ts (43 tests) 112ms
+ ✓ tests/unit/PermissionElevationCard.spec.ts (3 tests) 189ms
+ ✓ tests/ConfigPage.spec.ts (4 tests) 259ms
+(node:1394215) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1394225) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > stores call-level model hops with request kinds from host payload
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.2811589999982971,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-accumulated-cache',
+  nodeId: null,
+  runId: 'run-stream-accumulated-cache'
+}
+
+(node:1394231) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/update-store.spec.ts (18 tests) 138ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > strips the leading thinking prefix from streamed reasoning content
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1138279999995575,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'reasoning-prefix-session',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/workspace-multihop-flow.spec.ts (1 test) 238ms
+(node:1394252) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/WindowControls.spec.ts (2 tests) 147ms
+(node:1394322) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1394358) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/workspace-turn-item-layout.spec.ts (1 test) 213ms
+ ✓ tests/workspace-runtime-status-integration.spec.ts (5 tests) 208ms
+ ✓ tests/ConfigToolsSection.spec.ts (3 tests) 202ms
+(node:1394462) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/ask-store.spec.ts > ask store > disables concurrent answers while a request is being answered
+Promise returned by `expect(actual).resolves.toBeNull()` was not awaited. Vitest currently auto-awaits hanging assertions at the end of the test, but this will cause the test to fail in the next Vitest major. Please remember to await the assertion.
+    at /home/dm/pony-agent/tests/ask-store.spec.ts:282:19
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > processes streamed turn events after submitting from a historical root checkout
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 2.715887999998813,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-provider-calls',
+  nodeId: null,
+  runId: 'run-stream-provider-calls'
+}
+
+ ✓ tests/ask-store.spec.ts (17 tests) 139ms
+(node:1394539) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1394562) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1394524) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/AgentRuntimeStatusBar.spec.ts (4 tests) 154ms
+(node:1394671) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/workspace-width-alignment.spec.ts (2 tests) 310ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > processes streamed turn events after submitting from a historical root checkout
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.20539300000018557,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'reasoning-prefix-session',
+  nodeId: null,
+  runId: 'run-reasoning'
+}
+
+ ✓ tests/tauri-updater.spec.ts (7 tests) 43ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > does not fail the turn when stream start response omits run id but streamed completion still arrives
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.14186100000006263,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-missing-run-id',
+  nodeId: null,
+  runId: null
+}
+
+(node:1394840) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1394929) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/plan-store.spec.ts > plan store > refuses a second step completion while one is in flight
+Promise returned by `expect(actual).resolves.toBeNull()` was not awaited. Vitest currently auto-awaits hanging assertions at the end of the test, but this will cause the test to fail in the next Vitest major. Please remember to await the assertion.
+    at /home/dm/pony-agent/tests/plan-store.spec.ts:140:19
+
+ ✓ tests/plan-store.spec.ts (10 tests) 79ms
+ ✓ tests/acceptance/desktop_optimization_p1_p5.spec.ts (4 tests) 126ms
+(node:1395090) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/providers.store.spec.ts (10 tests) 60ms
+ ✓ tests/useStreamingPresentationState.spec.ts (14 tests) 68ms
+(node:1395159) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1395185) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/update-signed-store.spec.ts > update store signed updater flow (release-owner gate simulated) > download failure enters error, never relaunches, and clears the uncommitted candidate
+[pony-agent][update] signed install failed Error: https://secret.example/leak
+    at /home/dm/pony-agent/tests/update-signed-store.spec.ts:118:62
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+
+stderr | tests/update-signed-store.spec.ts > update store signed updater flow (release-owner gate simulated) > check failure enters error with a safe message and keeps status retryable
+[pony-agent][update] signed check failed Error: https://upstream.example/x
+    at /home/dm/pony-agent/tests/update-signed-store.spec.ts:132:49
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > does not fail the turn when stream start response omits run id but streamed completion still arrives
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.40938399999868125,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-root-restart',
+  nodeId: 'node-root',
+  runId: 'run-root-restart'
+}
+
+stderr | tests/update-signed-store.spec.ts > update store signed updater flow (release-owner gate simulated) > relaunch failure reports relaunch-failed and keeps the committed candidate
+[pony-agent][update] relaunch failed after committed install Error: relaunch denied
+    at /home/dm/pony-agent/tests/update-signed-store.spec.ts:186:52
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+
+ ✓ tests/update-signed-store.spec.ts (12 tests) 64ms
+(node:1395208) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/open-external-url.spec.ts (6 tests) 41ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > persists runtime-produced hook trace records across streamed event hydration
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.11803499999950873,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'hook-stream-session',
+  nodeId: null,
+  runId: null
+}
+
+(node:1395274) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/frontend-flight-recorder.spec.ts (5 tests | 1 skipped) 73ms
+(node:1395329) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/TurnDial.spec.ts (5 tests) 135ms
+(node:1395390) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1395432) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/Switch.spec.ts (1 test) 141ms
+ ✓ tests/goal-store.spec.ts (3 tests) 28ms
+(node:1395546) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > persists runtime-produced hook trace records across streamed event hydration
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.24482799999896088,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-missing-run-id',
+  nodeId: null,
+  runId: null
+}
+
+ ✓ tests/runtime-status.test.ts (17 tests) 54ms
+ ✓ tests/context-display-tokens.spec.ts (3 tests) 49ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > applies failed stream events to the active turn
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.13025899999774992,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'failed-stream-session',
+  nodeId: null,
+  runId: null
+}
+
+(node:1395608) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > stops the active turn and handles cancelled stream events
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.11487000000124681,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'cancelled-stream-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > ignores stale failed and cancelled terminal events after a newer turn is active
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1811169999964477,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stale-terminal-session',
+  nodeId: null,
+  runId: null
+}
+
+(node:1395663) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > seeds a timeout retrying assistant message when submitting after timeout failure
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1315020000001823,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'timeout-retry-session',
+  nodeId: null,
+  runId: null
+}
+
+(node:1395683) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/workspace-api.spec.ts (3 tests) 25ms
+stderr | tests/runtime-store.spec.ts > runtime session resilience > surfaces error when host read fails for uncached session switch
+[pony-agent][perf] host-read-error {
+  label: 'load_session_runtime_view',
+  elapsedMs: 0.396508999998332,
+  error: 'Error: host read failed',
+  sessionId: 'session-error',
+  nodeId: null
+}
+
+ ✓ tests/runtime-status.spec.ts (11 tests) 20ms
+ ✓ tests/runtime-store.spec.ts (119 tests) 14858ms
+     ✓ completes submitTurn in browser-preview mode and records the turn  638ms
+     ✓ applies started, delta and completed stream events to the active turn  1007ms
+     ✓ shows finalized output before terminal trace work completes  989ms
+     ✓ unlocks the UI synchronously on completed while terminal trace projection is deferred  842ms
+     ✓ does not overwrite a newly started turn's global state with a stale terminal projection  840ms
+     ✓ keeps terminal assistant payload stable when output_end and completed carry the same content  862ms
+     ✓ defers persistence for delta stream updates instead of flushing every chunk immediately  397ms
+     ✓ records model and tool hops in timeline order without merging  858ms
+     ✓ prefers backend-provided trace timeline over local timeline assembly  863ms
+     ✓ keeps tool result text out of conversation-bound call_model entries on multi-hop completion  896ms
+     ✓ ignores non-provider cache-hit candidates on completion  867ms
+     ✓ stores call-level model hops with request kinds from host payload  859ms
+     ✓ starts a fresh browser-preview turn after rollback to initial state without reviving old messages  645ms
+     ✓ processes streamed turn events after submitting from a historical root checkout  989ms
+     ✓ does not fail the turn when stream start response omits run id but streamed completion still arrives  870ms
+     ✓ persists runtime-produced hook trace records across streamed event hydration  873ms
+(node:1395780) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:1395787) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/runtime-queue-steer.spec.ts (4 tests) 47ms
+(node:1395793) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/sidebar-groups.spec.ts (11 tests) 24ms
+(node:1395801) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/settings.store.spec.ts (2 tests) 22ms
+(node:1395829) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/trace-projection.spec.ts (6 tests) 34ms
+ ✓ tests/turn-suspended-contract.spec.ts (1 test) 24ms
+ ✓ tests/check-secrets.spec.ts (9 tests) 31ms
+ ✓ tests/unit/telemetry-suppression.spec.ts (4 tests) 20ms
+ ✓ tests/trace-virtual-scroll.spec.ts (9 tests) 19ms
+ ✓ tests/unit/lib/event-bus.spec.ts (3 tests) 13ms
+ ✓ tests/acceptance/trajectory-stage1.spec.ts (6 tests) 14ms
+ ✓ tests/pre-flight-release-workflow.spec.ts (7 tests) 11ms
+ ✓ tests/tauri-icon-regression.spec.ts (2 tests) 7ms
+ ✓ tests/capabilities.spec.ts (3 tests) 6ms
+ ✓ tests/acceptance/stage-1-cancel-sentinel.spec.ts (3 tests) 10ms
+ ✓ tests/unit/phases-submission.spec.ts (4 tests) 6ms
+ ✓ tests/workspace-event-merge.spec.ts (3 tests) 4ms
+stderr | tests/HomeWorkspace.spec.ts > HomeWorkspace > undo button rolls back to the previous checkpoint
+[undo] rolling back turn: turn-head available checkpoints: 2
+
+stderr | tests/HomeWorkspace.spec.ts > HomeWorkspace > optimistically hides the rolled-back turn while undo checkout is pending
+[undo] rolling back turn: turn-head available checkpoints: 2
+
+stderr | tests/HomeWorkspace.spec.ts > HomeWorkspace > undo button prefers the real branch head parent when the latest checkpoint entry degrades to synthetic
+[undo] rolling back turn: turn-head available checkpoints: 2
+
+stderr | tests/HomeWorkspace.spec.ts > HomeWorkspace > undo button rolls back a synthetic latest turn to the previous real checkpoint
+[undo] rolling back turn: turn-head available checkpoints: 2
+
+stderr | tests/HomeWorkspace.spec.ts > HomeWorkspace > undo button locally keeps the previous turn when all checkpoints are synthetic
+[undo] rolling back turn: turn-head available checkpoints: 2
+
+stderr | tests/HomeWorkspace.spec.ts > HomeWorkspace > undo button remains enabled for the earliest real checkpoint turn
+[undo] rolling back turn: turn-old available checkpoints: 1
+
+stderr | tests/HomeWorkspace.spec.ts > HomeWorkspace > undo button clears the earliest synthetic turn
+[undo] rolling back turn: turn-old available checkpoints: 1
+
+stderr | tests/HomeWorkspace.spec.ts > HomeWorkspace > does not allow composer undo when a draft is present
+[undo] rolling back turn: turn-head available checkpoints: 2
+
+ ✓ tests/HomeWorkspace.spec.ts (79 tests | 7 skipped) 19263ms
+     ✓ disables composer while switching session  474ms
+     ✓ renders pending assistant content as accumulated text and highlights only the latest delta  561ms
+     ✓ keeps a single streaming flow while pending plain text grows  649ms
+     ✓ switches from streaming text to final plain text when assistant completes  587ms
+     ✓ does not auto-scroll again when a pending assistant flips to final plain text without new content  601ms
+     ✓ cleans up stale streaming state when assistant message ids change without changing message count  531ms
+     ✓ requests scroll follow-up when streaming content grows  398ms
+     ✓ re-arms auto-follow when submitting a new turn after user scrolls away  692ms
+     ✓ scrolls a newly sent user message into the timeline instead of only locking the bottom anchor  469ms
+     ✓ keeps auto-follow armed across small streaming content updates  837ms
+     ✓ keeps user scroll override while streaming updates continue  349ms
+     ✓ resumes auto-follow after idle only when new streamed content arrives  352ms
+     ✓ keeps bottom lock through resize-driven streaming growth  315ms
+     ✓ does not reverse-scroll when streaming resize briefly reports a smaller height  370ms
+     ✓ replays deferred resize follow-up after a queued auto-follow completes  498ms
+     ✓ uses smooth follow for stream deltas and auto for resize compensation  626ms
+     ✓ keeps auto-follow active across intermediate smooth-scroll events  474ms
+     ✓ does not reverse-scroll when a streaming delta temporarily lowers the anchor target  602ms
+     ✓ does not start a terminal smooth follow when assistant streaming completes  431ms
+     ✓ shows scroll-to-latest button only when latest user is below viewport  404ms
+     ✓ keeps streaming assistant text in one streaming flow while content grows  480ms
+     ✓ restores the initial empty state when rolling back the first turn  633ms
+     ✓ restores the initial empty state when the first checkpoint has no explicit parent node  580ms
+     ✓ overwrites existing draft text when rollback completes  532ms
+
+ Test Files  75 passed (75)
+      Tests  804 passed | 10 skipped (814)
+   Start at  13:05:56
+   Duration  25.64s (transform 32.96s, setup 0ms, import 112.26s, tests 80.26s, environment 86.86s)
+
+EXIT=0
