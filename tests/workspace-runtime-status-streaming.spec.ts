@@ -49,8 +49,11 @@ describe("Workspace Runtime Status Streaming Behavior", () => {
     );
 
     // 在 219aa96 契约更新后，状态指示器与 dsh 对齐：处于 active 时始终常驻展示运行状态槽
+    // Wave-11 契约（§2.2/§2.4）：槽位常驻不卸载，仅通过 data-visible 切换可见性；
+    // 流式已有可见内容时槽位保留在 DOM 但 data-visible="false"（不再显示状态文案）
     const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
     expect(statusSlot.exists()).toBe(true);
+    expect(statusSlot.attributes("data-visible")).toBe("false");
 
     wrapper.unmount();
   }, 15000);
@@ -99,6 +102,8 @@ describe("Workspace Runtime Status Streaming Behavior", () => {
 
     const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
     expect(statusSlot.exists()).toBe(true);
+    // 工具执行中必须保持可见（§2.4：无可见流式内容 / 有 running 工具活动时不隐藏）
+    expect(statusSlot.attributes("data-visible")).toBe("true");
     expect(statusSlot.text()).toContain("执行工具");
 
     wrapper.unmount();
@@ -157,6 +162,8 @@ describe("Workspace Runtime Status Streaming Behavior", () => {
 
     const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
     expect(statusSlot.exists()).toBe(true);
+    // planned 工具活动属于「有工具活动」→ 必须保持可见（§2.4）
+    expect(statusSlot.attributes("data-visible")).toBe("true");
     expect(statusSlot.text()).toContain("准备调用工具");
 
     wrapper.unmount();

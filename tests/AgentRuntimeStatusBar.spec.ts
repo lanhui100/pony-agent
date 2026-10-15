@@ -23,7 +23,13 @@ describe("AgentRuntimeStatusBar", () => {
     expect(wrapper.find('[data-testid="agent-runtime-status-elapsed"]').text()).toMatch(/\d+秒/);
     const icon = wrapper.find('[data-testid="agent-runtime-status-icon"]');
     expect(icon.exists()).toBe(true);
-    expect(icon.classes()).toContain("snake-spinner");
+    // Wave-11 契约（.dev-team/contracts/wave-11-status-flow.md §1 M5 / §2.9）：
+    // 旧 snake-spinner 由纯 CSS 动效图标 runtime-status-orbit（ring + dot 子节点）替换
+    expect(icon.classes()).toContain("runtime-status-orbit");
+    expect(icon.classes()).not.toContain("snake-spinner");
+    expect(icon.classes()).not.toContain("animate-spin");
+    expect(icon.find('[data-testid*="ring"]').exists()).toBe(true);
+    expect(icon.find('[data-testid*="dot"]').exists()).toBe(true);
   });
 
   it("handles executing tool mode", () => {
@@ -81,6 +87,8 @@ describe("AgentRuntimeStatusBar", () => {
 
     const icon = wrapper.find('[data-testid="agent-runtime-status-icon"]');
     expect(icon.exists()).toBe(true);
+    // 错误态保留 AlertCircle，不带 orbit 动效类，也不残留旧 snake-spinner
     expect(icon.classes()).not.toContain("snake-spinner");
+    expect(icon.classes()).not.toContain("runtime-status-orbit");
   });
 });

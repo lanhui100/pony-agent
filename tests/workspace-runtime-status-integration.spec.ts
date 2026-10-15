@@ -85,7 +85,12 @@ describe("Message Flow Bottom Status Integration", () => {
     );
     const icon = statusSlot.find('[data-testid="agent-runtime-status-icon"]');
     expect(icon.exists()).toBe(true);
-    expect(icon.classes()).toContain("snake-spinner");
+    // Wave-11 契约（§1 M5）：图标改为 runtime-status-orbit（ring + dot），旧 snake-spinner 已移除
+    expect(icon.classes()).toContain("runtime-status-orbit");
+    expect(icon.classes()).not.toContain("snake-spinner");
+    expect(icon.classes()).not.toContain("animate-spin");
+    expect(icon.find('[data-testid*="ring"]').exists()).toBe(true);
+    expect(icon.find('[data-testid*="dot"]').exists()).toBe(true);
   });
 
   it("does not render status indicator when idle", () => {
