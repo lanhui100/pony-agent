@@ -1,0 +1,75 @@
+# Wave-12.1 红相收据 — 冷启动落点不得为已归档会话（C8 / A8 / A9 / A10）
+
+- 角色：Test Agent（L2-T，独立测试者，`task-7`）；**未修改任何 `src/**`、未修改契约文件、未执行 git 写操作**
+- 冻结契约：`.dev-team/contracts/wave-12-session-fallback.md` §6（契约演进 wave-12.1，Lead 一票批准）
+- 需求（用户原始诉求的同族症状）：删除/归档当前对话后不得落到已归档会话——**整页重载后**同样不得打开已归档会话。
+- 缺陷基线：HEAD `ec3d236`（未提交 src 改动 = 无；本波红相锚定即此 commit）
+- Lead 复现脚本：`.dev-team/evidence/repro-cold-start-archived.mjs`（本收据的 e2e 用例即其断言化版本）
+- 环境：Linux / Node v22.21.0 / vitest 4.1.9 / @playwright/test 1.60.0 / Chromium 149.0.7827.55
+- 浏览器 e2e 服务：`playwright.config.ts` 自带 webServer `npm run preview:e2e`（@127.0.0.1:4175），未另起同端口
+- 生成时间（UTC）：2026-10-15T09:38:58Z
+
+## 1. 命令与原生 EXIT code
+
+| # | 命令 | 原生 EXIT | 摘要 |
+| :- | :-- | --: | :-- |
+| 1 | `npx vitest run tests/acceptance/session-fallback-cold-start.spec.ts` | **1** | Test Files 1 failed (1) / Tests **5 failed \| 1 passed** (6) |
+| 2 | `npm run test:unit` | **1** | Test Files 1 failed \| 77 passed (78) / Tests **5 failed \| 823 passed \| 10 skipped** (838) |
+| 3 | `npx playwright test tests/e2e/session-fallback-cold-start.spec.ts --retries=0` | **1** | **1 failed**（A10 真实浏览器链路） |
+
+基线对照：wave-12 绿相 `npm run test:unit` = 77 files / 822 passed / 10 skipped / EXIT=0。
+差异 = `+1` 文件 / `+1` 通过（本 spec 的「无任何会话」守卫）+ `5` 失败 → 823 passed / 5 failed。无其它文件受影响。
+
+## 2. 失败断言清单（须证明 A8/A9/A10 在基线 `ec3d236` 上真实失败）
+
+### 2.1 `tests/acceptance/session-fallback-cold-start.spec.ts`（5 failed / 1 passed）
+
+| 断言 | 契约 | 失败原因（物理观测） |
+| :-- | :-- | :-- |
+| A8 非 Tauri 冷启动（:225） | C8 | `冷启动必须跳过已归档会话: expected 'session-archived-alpha' to be 'session-active-bravo'` —— catalog=[已归档 A(updatedAt 5000, 有本地持久化), 未归档 B(1000)]，`initializeSessions` 落到 A |
+| A8 Tauri 冷启动 / `persisted==null` 分支（:239） | C8 | 同上（A 无本地持久化 → `deriveInitStrategy` 内部 `sessionList[0]` 命中 A） |
+| A8 `deriveInitStrategy` 纯函数（:248） | C8 | `不得把已归档的 sessionList[0] 当作落点: expected 'session-archived-alpha' to be 'session-active-bravo'` —— 直接锁定 `src/lib/runtime/sessions.ts:661` |
+| A9 非 Tauri 全 archived（:264） | C8 | `expected [ { id: 'turn-5000-0', …(6) }, …(1) ] to deeply equal []` —— 恢复了已归档 A 的历史消息 |
+| A9 Tauri 全 archived + 无本地持久化（:279） | C8 | `expected [ Array(2) ] to deeply equal []` —— 同上（host-read 打开了已归档 A） |
+
+已通过（守卫，绿相必须保持通过）：
+- A9 边界「无任何会话」冷启动 → `messages === []`、`phase === "idle"`（基线与演进后均成立）
+
+### 2.2 `tests/e2e/session-fallback-cold-start.spec.ts`（A10，真实 Chromium）
+
+- 用例流程：干净启动 → 发一条消息（`冷启动复现消息 ALPHA-W12-1`）→ 等待 `isSubmitting === false` → `store.archiveSession(A)`
+  （wave-12 行为正确：落点为全新空白会话，已断言）→ **整页重载** → 断言工作区不得显示被归档会话内容。
+- 失败断言（:186）：`expect(page.locator('[data-testid="workspace-content-column"]').getByText(ARCHIVED_MESSAGE)).toHaveCount(0)`
+  → `Expected: 0 / Received: 1`。
+- **物理凭据**：`.dev-team/evidence/session-fallback-cold-start-after-reload.png`
+  —— 重载后工作区显示的是**已归档会话**的用户消息「冷启动复现消息 ALPHA-W12-1」与其助手回复；
+  侧栏无高亮项（`showArchivedSessions=false`，已归档会话不可见）→ 与用户原话「而不是已归档的会话」同族同症状。
+- 归档前对照截图：`.dev-team/evidence/session-fallback-cold-start-before-reload.png`（空态）。
+- Console Error：用例在核心断言处失败，尚未执行到 console 断言；绿相必须为 0。
+
+## 3. 测试确定性设计（防 Flaky）
+
+- store 级用例全部走**非 Tauri 本地持久化分支**或**显式 Tauri mock**，无真实网络；每个用例独立 `createPinia()` + `localStorage.clear()`。
+- e2e 以**条件轮询**等待提交结束（`expect.poll(isSubmitting === false)`，替代复现脚本里的 1500ms 固定 sleep）；
+  重载后用 rAF 帧数等待渲染稳定，无固定时长 sleep。
+- e2e 启动期更新检查（`api.github.com` / `s3.local.ponyjob.top`）以 `page.route` 200 桩替换，
+  使「Console Error = 0」确定性成立；不是白名单过滤。
+- 反假守卫：A10 额外断言「被归档会话仍存在于 catalog 且 `archived === true`」（:197），
+  确保「工作区不显示其内容」不是因为该会话被整体删除而空转；A8 同时断言 `messages` 为 B 的内容。
+
+## 4. 产物落盘
+
+- `tests/acceptance/session-fallback-cold-start.spec.ts`（新增，6 用例：A8×3 / A9×2 + 无会话守卫）
+- `tests/e2e/session-fallback-cold-start.spec.ts`（新增，A10）
+- `.dev-team/evidence/session-fallback-cold-start-before-reload.png`、`session-fallback-cold-start-after-reload.png`
+- 本收据：`.dev-team/evidence/red-phase-wave12-1.log`
+
+## 5. 对 Lead 的请求
+
+1. 请以本收据为红相凭证**锚定红相 commit**（当前 HEAD `ec3d236` + 本波次 `tests/`、`.dev-team/` 未提交改动），随后 Executor 方可写 `src/stores/runtime.ts` 与 `src/lib/runtime/sessions.ts`。
+2. 请在 Executor 任务书中明确 C8 的两处落点：
+   - `src/stores/runtime.ts:2451` `preferredSessionId` 必须跳过 `archived === true`（取第一个未归档项）；
+   - `src/lib/runtime/sessions.ts:661` `deriveInitStrategy` 的 `targetSessionId` 同样跳过 archived；
+   - 全部已归档或无会话 → 进入全新空白会话（`phase === "idle"`、`messages` 空），且 `sessionId` 不得等于任何已归档 id。
+3. 绿相门禁命令（须全部 EXIT=0）：`npx vitest run tests/acceptance/session-fallback-cold-start.spec.ts`、
+   `npm run test:unit`、`npx playwright test tests/e2e/session-fallback-cold-start.spec.ts --retries=0`、`npm run typecheck`。
