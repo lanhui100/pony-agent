@@ -2154,6 +2154,50 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       }
     },
 
+    /**
+     * Wave-12 契约（C1/C2/C7，用户裁定方案 A）：
+     * 删除/归档「当前对话」后一律进入全新空白会话，不切换到任何历史会话（含已归档的）。
+     *
+     * 仅做落点重置：**禁止** persistHistory() / loadSessionState() / switchSession()——
+     * 前者会把被删/归档会话重新落盘，后两者会把历史会话切回来。
+     * resetSessionRuntimeState() 内含 cancelDeferredPersist()，保证旧会话不再被延迟落盘。
+     */
+    enterFreshSession(targetWorkspaceId: string = DEFAULT_WORKSPACE_ID) {
+      const targetWorkspace = targetWorkspaceId?.trim() || DEFAULT_WORKSPACE_ID;
+      const previousSessionId = this.sessionId;
+      const nextSessionId = createNextSessionId([
+        this.sessionId,
+        ...this.sessionList.map((session) => session.conversationId)
+      ]);
+
+      this.resetSessionRuntimeState();
+      this.sessionId = nextSessionId;
+      this.phase = "idle";
+      this.sessionError = null;
+      this.sessionWorkspaceId = targetWorkspace;
+      // F12-1（遥测归属一致性）：与 switchSession 对齐，立即把 flight recorder 重绑到新会话，
+      // 避免归档/删除后到下一次提交之间诊断事件仍归属已删除/已归档的 sessionId。
+      bindFrontendRecorderSession(nextSessionId);
+      bindFrontendRecorderTurn(null);
+
+      const transientOverview: SessionOverview = {
+        ...createTransientSessionOverview(nextSessionId),
+        workspaceId: targetWorkspace === DEFAULT_WORKSPACE_ID ? null : targetWorkspace
+      };
+      this.sessionList = ensureUniqueSessionList([
+        transientOverview,
+        ...filterDeletingSessions(this.sessionList, this.deletingSessionSet).filter(
+          (session) => session.conversationId !== nextSessionId
+        )
+      ]);
+
+      debugLog("session:enter-fresh", {
+        from: previousSessionId,
+        to: nextSessionId,
+        workspaceId: targetWorkspace
+      });
+    },
+
     async archiveSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
       const key = `s-archive:${sessionId}`;
       if (this.sidebarOpInflightSet[key] || this.deletingSessionSet[sessionId]) {
@@ -2181,20 +2225,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         delete this.failedSessionSet[sessionId];
         await this.loadSessionCatalog();
         if (sessionId === this.sessionId) {
-          const remaining = this.sessionList.filter(
-            (session) => session.conversationId !== sessionId
-          );
-          if (remaining.length === 0) {
-            // 空列表特判（对齐 deleteSession）：直接回默认空白，不经 connecting。
-            this.resetSessionRuntimeState();
-            this.sessionId = DEFAULT_SESSION_ID;
-            this.phase = "idle";
-            return { ok: true };
-          }
-          const fallbackSessionId =
-            remaining[0]?.conversationId ?? DEFAULT_SESSION_ID;
-          // 走 switchSession：复用后台 turn 重挂/录制绑定/切换令牌三件事。
-          await this.switchSession(fallbackSessionId);
+          // Wave-12 契约 C1（方案 A）：归档当前会话后一律进入全新空白会话；
+          // 不切换任何历史会话（含已归档的），也不回退 DEFAULT_SESSION_ID。
+          this.enterFreshSession();
         }
         return { ok: true };
       } catch (error) {
@@ -2348,11 +2381,6 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           await this.loadSessionCatalog();
         }
 
-        const fallbackSessionId =
-          this.sessionList.find((session) => session.conversationId !== targetSessionId)?.conversationId ??
-          this.sessionList[0]?.conversationId ??
-          DEFAULT_SESSION_ID;
-
         const shouldLoadFallbackSession =
           deletingActiveEmptySession ||
           this.sessionId === targetSessionId ||
@@ -2365,44 +2393,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return { ok: true };
         }
 
-        this.resetSessionRuntimeState();
-        this.sessionId = fallbackSessionId;
-        this.phase = "connecting";
-        // 三级树 #3：冻结归属随 fallback 同步（与 switchSession 水合一致）。
-        this.sessionWorkspaceId =
-          this.sessionList.find((session) => session.conversationId === fallbackSessionId)
-            ?.workspaceId?.trim() || DEFAULT_WORKSPACE_ID;
-
-        try {
-          if (this.sessionList.length === 0 && fallbackSessionId === DEFAULT_SESSION_ID) {
-            this.phase = "idle";
-            debugLog("session:delete:empty-fallback", {
-              targetSessionId
-            });
-            return { ok: true };
-          }
-
-          // fallback 切换到新会话前，再次确保 sessionList 移除已删除的 targetSessionId
-          this.sessionList = this.sessionList.filter((session) => session.conversationId !== targetSessionId);
-
-          await this.loadSessionState(fallbackSessionId, { refreshCatalog: false });
-          // loadSessionState 可能恢复了某些状态，再次清洗确保 targetSessionId 绝不留在列表中
-          this.sessionList = this.sessionList.filter((session) => session.conversationId !== targetSessionId);
-          debugLog("session:delete:fallback", {
-            targetSessionId,
-            fallbackSessionId
-          });
-        } catch (error) {
-          this.resetSessionRuntimeState();
-          this.sessionId = fallbackSessionId;
-          this.phase = "idle";
-          this.sessionError = `删除对话后加载替代对话失败：${String(error)}`;
-          debugLog("session:delete:fallback-error", {
-            targetSessionId,
-            fallbackSessionId,
-            error: String(error)
-          });
-        }
+        // Wave-12 契约 C2（方案 A）：删除当前会话后一律进入全新空白会话。
+        // 被删会话已由 removePersistedSessionState()/后端删除；此处不得
+        // loadSessionState(历史会话)（会把历史会话切回来），也不得 persistHistory()。
+        this.sessionList = this.sessionList.filter(
+          (session) => session.conversationId !== targetSessionId
+        );
+        this.enterFreshSession();
       } catch (error) {
         if (persistedStateToRestore) {
           persistSessionState(targetSessionId, persistedStateToRestore);
