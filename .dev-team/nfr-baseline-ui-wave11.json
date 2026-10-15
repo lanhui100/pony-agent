@@ -1,0 +1,25 @@
+{
+  "wave": 11,
+  "scope": "frontend-presentation-only",
+  "note": "本波次为纯前端呈现层改动（状态条动效/布局稳定性），无外部网络调用、无后端状态机、无资源句柄；dev-team 后端 NFR schema（external_call_timeout_ms / retry / concurrency_lock / logging / resource_release）不适用，等价 UI-NFR 基准如下，全部为浏览器实测可机械判定项。",
+  "canonical_backend_nfr_applicable": false,
+  "ui_metrics": {
+    "status_row_viewport_y_range_px": 1.0,
+    "status_row_viewport_y_range_scenarios": ["streaming_growth_3s", "new_message_insertion"],
+    "streaming_content_motion_reversals_max": 1,
+    "streaming_content_single_frame_displacement_max_px": 32,
+    "streaming_content_monotonic_tolerance_px": 2.0,
+    "status_slot_height_range_px": 1.0,
+    "console_errors_max": 0,
+    "reduced_motion_animation_name": "none",
+    "icon_animation_duration_ms_range": [1200, 2400],
+    "show_hide_transition_ms_range": [180, 240],
+    "js_driven_frame_animation_allowed": false
+  },
+  "gates": {
+    "unit_tests": "npm run test:unit EXIT=0",
+    "typecheck": "npm run typecheck EXIT=0",
+    "build": "npm run build EXIT=0",
+    "browser_e2e": "npx playwright test tests/e2e/status-flow-stability.spec.ts EXIT=0 + screenshot artifact"
+  }
+}
