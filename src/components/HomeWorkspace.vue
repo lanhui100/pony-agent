@@ -995,22 +995,25 @@ const shouldShowAgentRuntimeStatus = computed(() => {
 });
 
 /**
- * Wave-11 契约 §2.3/§2.4 + wave-11.2 F1（mode-aware，修复 mode-blind 缺陷）：
+ * Wave-11 契约 §2.3/§2.4 + wave-11.2 F1（mode-aware）+ wave-11.4 F7（回归修复）：
  * 槽位常驻不卸载，仅以 data-visible 切换可见性。
- * 只有 `mode === "responding"`（真正在流式回复）才可能隐藏；其余一切状态
- * （connecting/thinking/tool_drafting/executing_tool/waiting_approval/retrying/error）
- * 一律 data-visible="true" —— 例如 sessionOperation="initializing" 且 messages 里残留
- * pending assistant + 内容时，必须仍显示「正在加载最近对话…」。
- * 隐藏还需同时满足：无 running/planned 工具活动 且 最后一个可见 turn 的 assistant 为
- * pending 且已有可见流式内容。
+ * 仅 `responding` 与 `thinking` 两种 mode 具备隐藏资格：
+ *  - 推理模型场景下 `reasoningContent` 常驻 → status.ts 优先返回 `thinking`，
+ *    若只放行 `responding`，整个正文流式期间槽位会恒可见（R3/M2 失效）→ 故一并放行 `thinking`；
+ *  - 其余 mode（connecting/error/waiting_approval/retrying/tool_drafting/executing_tool）
+ *    一律 data-visible="true" —— 例如 sessionOperation="initializing" 且 messages 里残留
+ *    pending assistant + 内容时，必须仍显示「正在加载最近对话…」。
+ * 放行后仍需同时满足：无 running/planned 工具活动 且 最后一个可见 turn 的 assistant 为
+ * pending 且已有可见流式内容（无正文的 `thinking` = 「思考中」保持可见）。
  */
 const isRuntimeStatusVisible = computed(() => {
   if (!agentRuntimeStatus.value) {
     return false;
   }
 
-  // F1：mode-blind 修复 —— 仅「正在回复」具备隐藏资格
-  if (agentRuntimeStatus.value.mode !== "responding") {
+  // F1 + F7：仅「正在回复 / 思考中」两种 mode 具备隐藏资格（其余 mode 恒可见）
+  const mode = agentRuntimeStatus.value.mode;
+  if (mode !== "responding" && mode !== "thinking") {
     return true;
   }
 
