@@ -37,3 +37,15 @@ Pony Agent 对工作区外部访问采取严格的物理防御：
 ## 非目标 (Non-Goals)
 1. 默认开放全盘写权限。
 2. 移除 Windows Job Object 或受限沙箱底层进程隔离。
+
+## 补记（2026-10-15，wave-13）：作用域真正落地并生效
+
+本 ADR 当年落地时，`authorize_path` 只**校验**了 `scope` 字符串，随后调用 `SessionStore::authorize_path(canonical)`（无 scope 参数）→ `AuthorizeStore::grant` 落库，`AuthorizedPathEntry` 也没有 scope 字段。结果是：**任何授权（含 `read`）都同时解除了外部写阻断**，即只读授权被静默升级为可写，与 ADR 第 2 条「受控的 read 与 read-write 作用域」以及 PA-080 对抗用例（`edit_file_rejects_authorized_external_path_with_write_denied`）相冲突。
+
+本次补完（决定本身不变，属实施收口）：
+
+1. `AuthorizedPathEntry` 新增 `scope: PathAuthorizationScope`（`Read` 默认，`#[serde(default)]` 兼容历史持久化数据 → 旧条目保守视为只读）；
+2. `AuthorizeStore` 新增 `grant_with_scope(path, scope)`，`grant(path)` 保持只读语义；
+3. `SessionStore::authorize_path(canonical, scope)` 与 `HostControlPlane::authorize_path(path, scope)` 透传作用域并持久化；
+4. `path_permission::classify` 的 Write 分支**仅**在命中 `read-write` 授权时返回 `AuthorizedExternal`；只读授权一律 `outside_workspace_write_denied`（Fail-Closed）；
+5. 新增对偶用例：`edit_file_allows_authorized_external_path_with_readwrite_scope`（提权能力仍可用）与 `edit_file_rejects_authorized_external_path_with_write_denied`（只读不得写），守住两侧契约。

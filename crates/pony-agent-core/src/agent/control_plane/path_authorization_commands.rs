@@ -9,12 +9,9 @@ impl HostControlPlane {
     /// 显式授权一个路径。`scope` 接受 `"read"` 或 `"read-write"`（或 `"write"`）。
     /// 目标必须存在（canonicalize 成功）才可授权。
     pub fn authorize_path(&self, path: &str, scope: &str) -> Result<AuthorizedPathEntry, String> {
-        let normalized_scope = scope.trim();
-        if normalized_scope != "read" && normalized_scope != "read-write" && normalized_scope != "write" {
-            return Err(format!(
-                "authorize_path 暂不支持 scope `{scope}`：仅支持 `read` 或 `read-write`。"
-            ));
-        }
+        // ADR 0029：read / read-write 作用域必须被**持久化并在判定时生效**，
+        // 不能只校验字符串后忽略（否则只读授权会静默升级为可写）。
+        let normalized_scope = crate::agent::path_permission::PathAuthorizationScope::parse(scope)?;
         let trimmed = path.trim();
         if trimmed.is_empty() {
             return Err("authorize_path 的 path 不能为空。".to_string());
@@ -28,7 +25,7 @@ impl HostControlPlane {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .authorize_path(canonical)
+            .authorize_path(canonical, normalized_scope)
     }
 
     /// 撤销授权（精确路径；子授权保留）。返回是否实际移除。

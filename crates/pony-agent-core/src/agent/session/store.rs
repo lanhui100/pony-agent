@@ -2057,13 +2057,14 @@ impl SessionStore {
         Arc::clone(&self.path_authorizations)
     }
 
-    /// 显式授权一个路径（仅读；目标必须存在）。变更即持久化（store_metadata
-    /// key=`path_authorizations.v1`），重启后生效。
+    /// 显式授权一个路径（目标必须存在），作用域由调用方给出（ADR 0029：read / read-write）。
+    /// 变更即持久化（store_metadata key=`path_authorizations.v1`），重启后生效。
     pub fn authorize_path(
         &mut self,
         canonical: PathBuf,
+        scope: crate::agent::path_permission::PathAuthorizationScope,
     ) -> Result<crate::agent::path_permission::AuthorizedPathEntry, String> {
-        let entry = self.path_authorizations.grant(canonical)?;
+        let entry = self.path_authorizations.grant_with_scope(canonical, scope)?;
         self.save_to_backend();
         Ok(entry)
     }

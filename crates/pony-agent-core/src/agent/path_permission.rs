@@ -121,13 +121,40 @@ pub struct PathPermission {
     pub matched_authorization: Option<AuthorizedPathEntry>,
 }
 
-/// 显式授权的路径条目（仅读）。
+/// 授权作用域（ADR 0029）：`read` 仅解除外部读；`read-write` 额外允许外部写。
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PathAuthorizationScope {
+    /// 只读授权（默认；历史持久化条目缺省即此值）
+    #[default]
+    Read,
+    /// 读写授权（用户显式批准的受控外部写）
+    ReadWrite,
+}
+
+impl PathAuthorizationScope {
+    /// 解析 host `authorize_path` 传入的 scope 字符串（兼容 `write` 别名）。
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim() {
+            "read" => Ok(Self::Read),
+            "read-write" | "write" => Ok(Self::ReadWrite),
+            other => Err(format!(
+                "authorize_path 暂不支持 scope `{other}`：仅支持 `read` 或 `read-write`。"
+            )),
+        }
+    }
+}
+
+/// 显式授权的路径条目。`scope` 缺省为只读（向后兼容既有持久化数据）。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizedPathEntry {
     /// canonical 绝对路径（目录或文件），Windows 去 `\\?\` 前缀
     pub path: PathBuf,
     pub granted_at_ms: u64,
+    /// ADR 0029 作用域；旧数据无该字段 → Read（保守，不放行外部写）
+    #[serde(default)]
+    pub scope: PathAuthorizationScope,
 }
 
 /// 授权存储：内存 `RwLock<HashMap>`，祖先链查找 O(depth)。
@@ -200,10 +227,21 @@ impl AuthorizeStore {
 
     /// 显式授权一个路径（目录或文件）。目标必须存在（canonicalize 成功）才可授权。
     /// 不存在、不可解析 → 拒绝授权（不产生"看似授权实际无效"的条目）。
+    /// 显式授权一个路径（**只读**语义，保持既有调用方行为不变）。
     pub fn grant(&self, canonical: PathBuf) -> Result<AuthorizedPathEntry, String> {
+        self.grant_with_scope(canonical, PathAuthorizationScope::Read)
+    }
+
+    /// 显式授权一个路径并指定作用域（ADR 0029：`read` / `read-write`）。
+    pub fn grant_with_scope(
+        &self,
+        canonical: PathBuf,
+        scope: PathAuthorizationScope,
+    ) -> Result<AuthorizedPathEntry, String> {
         let entry = AuthorizedPathEntry {
             path: canonical,
             granted_at_ms: now_ms(),
+            scope,
         };
         {
             let mut guard = self
@@ -468,12 +506,16 @@ impl PathPermissionChecker {
                 )))
             }
             PathPurpose::Write => {
+                // ADR 0029：只有 **read-write** 作用域的授权才解除外部写阻断；
+                // 只读授权（含历史无 scope 条目）不得升级为写，保持 Fail-Closed。
                 if let Some(entry) = authorizations.find_authorization(&canonical) {
-                    return Ok(PathPermission {
-                        zone: PermissionZone::AuthorizedExternal,
-                        canonical,
-                        matched_authorization: Some(entry),
-                    });
+                    if entry.scope == PathAuthorizationScope::ReadWrite {
+                        return Ok(PathPermission {
+                            zone: PermissionZone::AuthorizedExternal,
+                            canonical,
+                            matched_authorization: Some(entry),
+                        });
+                    }
                 }
                 Err(PermissionError::outside_workspace_write_denied(format!(
                     "写入路径 {} 位于工作区根与受控临时目录之外，已拒绝写入。",
@@ -879,12 +921,32 @@ mod tests {
             .expect_err("revoked read must be denied");
         assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
 
-        // write with authorization is allowed, revoked write is denied with escalation hint
+        // ADR 0029 作用域语义：**只读**授权不得升级为写（Fail-Closed）。
         store.grant(outside_file.clone()).unwrap();
+        let readonly_write_err = checker
+            .classify("/outside/a.txt", &root, &PathBuf::from("/ws/.tmp"), &store, PathPurpose::Write)
+            .expect_err("read-only authorization must NOT permit external write");
+        assert_eq!(
+            readonly_write_err.code,
+            PermissionErrorCode::OutsideWorkspaceWriteDenied
+        );
+        assert!(store.revoke(&outside_file));
+
+        // read-write 授权才解除外部写阻断；撤销后重新阻断并带升权提示。
+        store
+            .grant_with_scope(outside_file.clone(), PathAuthorizationScope::ReadWrite)
+            .unwrap();
         let write_permission = checker
             .classify("/outside/a.txt", &root, &PathBuf::from("/ws/.tmp"), &store, PathPurpose::Write)
-            .expect("authorized write must be allowed");
+            .expect("read-write authorized write must be allowed");
         assert_eq!(write_permission.zone, PermissionZone::AuthorizedExternal);
+        assert_eq!(
+            write_permission
+                .matched_authorization
+                .as_ref()
+                .map(|entry| entry.scope),
+            Some(PathAuthorizationScope::ReadWrite)
+        );
 
         assert!(store.revoke(&outside_file));
         let write_err = checker

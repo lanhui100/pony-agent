@@ -4091,21 +4091,11 @@ impl ToolRouter {
                     ) {
                         return Ok(permission.canonical);
                     }
-                    // AuthorizedExternal 的语义是「只读授权」（AuthorizeStore 无写作用域，
-                    // path_permission.rs 文档「授权清单本轮仅覆盖读」）。
-                    // 仅对 Read 放行；Write 必须拒绝，防止只读授权升级为外部写（写边界击穿，
-                    // wave-13 由 edit_file_rejects_authorized_external_path_with_write_denied 锁定）。
+                    // AuthorizedExternal 放行。注意：写边界由 `path_permission::classify` 按
+                    // ADR 0029 的授权作用域把关——只有 read-write 授权才会在 Write 判定下
+                    // 返回 AuthorizedExternal；只读授权在 classify 内即被拒绝。
                     if permission.zone == PermissionZone::AuthorizedExternal {
-                        if purpose == crate::agent::path_permission::PathPurpose::Read {
-                            return Ok(permission.canonical);
-                        }
-                        return Err((
-                            "outside_workspace_write_denied".to_string(),
-                            format!(
-                                "写入路径 {} 位于工作区根与受控临时目录之外，且授权仅覆盖读取，已拒绝写入。",
-                                permission.canonical.display()
-                            ),
-                        ));
+                        return Ok(permission.canonical);
                     }
                 }
                 Err(error) => {
@@ -9258,6 +9248,53 @@ mod tests {
                 .and_then(Value::as_str),
             Some("no_match")
         );
+    }
+
+    #[test]
+    fn edit_file_allows_authorized_external_path_with_readwrite_scope() {
+        // ADR 0029（工作区外部访问提权）：用户显式批准 `read-write` 作用域后，
+        // 外部路径写入必须被合法放行。本用例与上面的「只读授权必须拒绝」互为对偶，
+        // 防止作用域落地时把提权能力一起改死。
+        let workspace = temp_workspace();
+        let external_dir =
+            std::env::temp_dir().join(format!("pa080-edit-rw-external-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&external_dir);
+        std::fs::create_dir_all(&external_dir).expect("create external dir");
+        let external_file = external_dir.join("config.toml");
+        fs::write(&external_file, "mode = \"old\"\n").expect("write external file");
+        let external_file = external_file.canonicalize().unwrap_or(external_file);
+        let external_file = crate::agent::path_permission::normalize_canonical(&external_file);
+
+        let authorize_store = crate::agent::path_permission::AuthorizeStore::new();
+        authorize_store
+            .grant_with_scope(
+                external_file.clone(),
+                crate::agent::path_permission::PathAuthorizationScope::ReadWrite,
+            )
+            .expect("grant read-write authorization");
+        let router = ToolRouter::with_workspace_root(workspace.clone())
+            .with_authorize_store(std::sync::Arc::new(authorize_store));
+
+        let edit_result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
+            arguments: json!({
+                "path": external_file.display().to_string(),
+                "oldText": "mode = \"old\"",
+                "newText": "mode = \"new\""
+            }),
+            plan: None,
+        });
+        assert_eq!(
+            edit_result.status, "ok",
+            "read-write authorized external edit must succeed: {}",
+            edit_result.output
+        );
+        let content = fs::read_to_string(&external_file).expect("read external file");
+        assert_eq!(content, "mode = \"new\"\n");
+
+        let _ = std::fs::remove_dir_all(&external_dir);
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
