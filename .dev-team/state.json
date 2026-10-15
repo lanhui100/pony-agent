@@ -108,7 +108,8 @@
         "l3a": "FAIL(5 findings)",
         "l3b": "FAIL(4 findings)",
         "l3p": "FAIL(3 findings)",
-        "verdict": "rework-wave-11.2"
+        "verdict": "rework-wave-11.2",
+        "l3r_rework": "FAIL(4 findings) → 全部 RESOLVED（F7 代码回归修复 + 契约阈值/措辞同步 + 注释同步），红绿证明见 f7_red_green_proof"
       },
       "fixes": [
         "F1 mode-consistency",
@@ -131,7 +132,10 @@
         "frozen_e2e": "EXIT=0 (4 passed)",
         "regression_checkpoint": "6 passed/2 failed = baseline",
         "regression_browser_preview": "6 failed = baseline",
-        "receipt": ".dev-team/evidence/final-gates-wave11.log"
+        "receipt": ".dev-team/evidence/final-gates-wave11.log",
+        "frozen_head": "15338bf",
+        "final_gates_v2": ".dev-team/evidence/final-gates-wave11.log（HEAD=15338bf：version:check/typecheck/test:unit 76 files/815 passed/build/e2e 4 passed 全部 EXIT=0）",
+        "f7_red_green_proof": "pre-F7 src + 冻结测试 → 1 failed/10 passed EXIT=1；F7 src → 11 passed EXIT=0"
       },
       "nfr_degraded_debt": 0,
       "deliverables": [

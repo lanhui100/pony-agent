@@ -116,7 +116,7 @@
 
 - **M3a**：内容运动方向反转 ≤ 1（容差 2px）。
 - **M3b**：对每帧 i≥4，`|ΔscrollTop_i| ≤ Σ_{j=0..3} ΔcolScrollHeight_{i−j} + 8px`（4 帧 ≈ 67ms 延迟预算 + 8px 余量；实测原实现 0 超调，余量 8px）。
-- **M3c**：对每帧，`|scrollTop_i − max(0, colScrollHeight_i − clientHeight_i)| ≤ 64px`（契约原式因「未填满视口阶段 scrollTop 恒为 0」固定累计 −302px 常数偏移而恒不可绿，Test Agent 修订式已追认；实测峰值 47px，余量 17px）。
+- **M3c**：对每帧，`|scrollTop_i − max(0, colScrollHeight_i − clientHeight_i)| ≤ 64px`（契约原式因「未填满视口阶段 scrollTop 恒为 0」固定累计 −302px 常数偏移而恒不可绿，Test Agent 修订式已追认；实测峰值 47px，余量 17px）。〔历史记录：阈值后经 §7.3 修订为 96px〕
 - 删除绝对 `maxJump ≤ 32px`（原判定：度量把内容增长与滚动质量混为一谈，TEST-DEFECT）。
 - 非空转证明：M3b/M3c 均能捕获「跟随失效/大跳变」；同场景 A/B 数据表明 K=4 窗口下 auto 版超调 20px、原版 0px，具备判别力。
 
