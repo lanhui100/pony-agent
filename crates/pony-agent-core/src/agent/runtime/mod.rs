@@ -420,4 +420,4 @@ impl AgentRuntime {
 // limits.rs 三个 *_override_registry 亦经 glob 链借用。清理前须先解除双消费方（reviewer-b P2-2）。
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

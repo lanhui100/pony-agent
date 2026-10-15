@@ -599,14 +599,62 @@ struct MockHttpResponse {
     body: String,
 }
 
+
+/// wave-13：mock HTTP server 用例的**进程级串行闸门**（可重入：同一测试线程开多个 server 只持有一次）。
+///
+/// 背景（CI 复现）：`MockHttpServer` 的响应队列与预期请求严格 1:1；CI 负载下 provider 请求可能
+/// 超时并触发**客户端重试**，重试连接在队列耗尽后会被拒绝 → 回合失败 → 事件流断言缺失
+/// （`start_turn_stream_*` / `control_plane` 用例间歇性失败）。串行化 mock 用例消除负载竞争，
+/// 从而消除「超时→重试→队列失配」。仅影响 `#[cfg(test)]` 构建。
+static MOCK_SERVER_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    static MOCK_SERVER_GATE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MOCK_SERVER_GATE_GUARD: std::cell::RefCell<Option<std::sync::MutexGuard<'static, ()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct MockServerGate;
+
+impl MockServerGate {
+    pub(crate) fn acquire() -> Self {
+        MOCK_SERVER_GATE_DEPTH.with(|depth| {
+            if depth.get() == 0 {
+                let guard = MOCK_SERVER_GATE
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                MOCK_SERVER_GATE_GUARD.with(|slot| *slot.borrow_mut() = Some(guard));
+            }
+            depth.set(depth.get() + 1);
+        });
+        Self
+    }
+}
+
+impl Drop for MockServerGate {
+    fn drop(&mut self) {
+        MOCK_SERVER_GATE_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+            if depth.get() == 0 {
+                MOCK_SERVER_GATE_GUARD.with(|slot| {
+                    *slot.borrow_mut() = None;
+                });
+            }
+        });
+    }
+}
+
 struct MockHttpServer {
     base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
     handle: Option<thread::JoinHandle<()>>,
+    /// wave-13：持有串行闸门（drop 时释放），消除并行负载导致的「超时→重试→队列失配」。
+    _gate: MockServerGate,
 }
 
 impl MockHttpServer {
     fn start(responses: Vec<MockHttpResponse>) -> Self {
+        let gate = MockServerGate::acquire();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let address = listener.local_addr().expect("mock server addr");
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -625,6 +673,7 @@ impl MockHttpServer {
             base_url: format!("http://{}/v1", address),
             requests,
             handle: Some(handle),
+            _gate: gate,
         }
     }
 
