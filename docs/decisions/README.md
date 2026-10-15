@@ -61,6 +61,7 @@
 - [0022 桌面端默认工作区基座保持与兜底收敛注册表 default](0022-desktop-default-workspace-registry-convergence.md)
 - [0023 Windows 控制台子进程隐藏窗口与输出代码页解码回退](0023-windows-console-hidden-and-codepage-decode-fallback.md)
 - [0033 运行状态条移出滚动内容流：composer 上沿常驻覆盖层与 streaming 期隐藏](0033-runtime-status-bar-out-of-scroll-flow.md)
+- [0034 删除/归档当前对话后一律进入全新空白会话](0034-fresh-session-after-delete-or-archive.md)
 
 ### 已接替
 
