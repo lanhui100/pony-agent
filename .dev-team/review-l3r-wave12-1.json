@@ -1,0 +1,45 @@
+{
+  "verdict": "PASS",
+  "findings": [],
+  "reviewedAt": "2026-10-15T09:57:52Z",
+  "reviewer": "test-agent (L3-R independent adversarial review; src authored by Executor)",
+  "scope": {
+    "increment": "git diff HEAD -- src/ (+33/-3)",
+    "files": ["src/lib/runtime/sessions.ts", "src/stores/runtime.ts"],
+    "headAtReview": "f065442",
+    "note": "未修改 src/**、tests/**、契约；未运行 e2e（按 Lead 要求避免 4175 端口冲突），仅只读代码 + 运行 vitest/typecheck/build"
+  },
+  "checks": {
+    "1_c8_completeness": "无残留落点。机械证据：①`grep -rn 'sessionList\\[0\\]' src/` → **0 命中**（wave-12.1 前有 runtime.ts:2451 与 sessions.ts:661 两处）；②`preferredSessionId` 全部取值集中在 runtime.ts:2463 `pickPreferredSessionId(this.sessionList, this.sessionId)`，其后 2464-2510 均为同一变量的下游使用；③`deriveInitStrategy` 全仓仅 1 个调用点 runtime.ts:2465，且其 persisted==null 分支已改用 `pickPreferredSessionId` + `hasSelectableSession`（sessions.ts:678-680）；④初始化入口唯一：`initializeSessions` 仅被 App.vue:159 `runStartupTask('sessions', ...)` 调用；⑤其余 `loadSessionState(` 调用点（runtime.ts:1595 消息状态增量回退、1654/1673 历史 checkout 安全网、1890/1910/1922 switchSession、2480/2499 init 策略分支）与 `loadSessionRuntimeViewState(`（1216 由 loadSessionState 传入、1906 switchSession、2472/2488 init）均以**显式请求的 sessionId** 为目标（用户点击切换 / 历史 checkout / 已修复的 init 落点），不存在按位置（[0]）挑会话的旁路 → C8 无遗漏入口。",
+    "2_early_return_safety": "安全。①新分支位于 `try`（runtime.ts:2437 起）内、`return` 之后仍有 `finally`（:2520-2523）= `clearTimeout(watchdog)` + `this.sessionOperation = null` → 看门狗与 initializing 锁均正常收尾；②被跳过的只有 `loadPersistedRuntimeState` / `deriveInitStrategy` / strategy switch（对「全部已归档」正是**必须**跳过者）；③必要收尾不依赖被跳过代码：`enterFreshSession()` → `resetSessionRuntimeState()`（runtime.ts:483-532）已完成 phase='idle'、messages=[]、isSubmitting=false、provider*/sessionSummary/traceSteps/turnTraceHistory 归零，并另设 sessionId / sessionWorkspaceId / sessionList 瞬态行；④`loadRunningSessionMap()`/completedSet/failedSet 恢复发生在新分支**之前**，未被跳过。",
+    "3_pure_function_semantics": "语义正确。①`session.archived !== true`（sessions.ts:652/658）覆盖 `archived: undefined` 与 `archived: false` 两种「未归档」表示（tests/runtime-store.spec.ts 中大量 overview 未带 archived 字段的用例仍全绿，可佐证）；②排序依据成立：非 Tauri 分支 runtime.ts:1085-1086 `.sort((l,r) => r.updatedAtMs - l.updatedAtMs)` 降序；Tauri 分支由后端 `list_sessions` 保证降序 —— crates/pony-agent-core/src/agent/session/store.rs:1654-1659 `sessions.sort_by(|l,r| r.updated_at_ms.cmp(&l.updated_at_ms).then_with(|| l.conversation_id.cmp(&r.conversation_id)))`；两路 catalog 均按 updatedAtMs 降序 → 「第一个未归档」≡「最新未归档」，与 C8 表述一致。",
+    "4_fake_tests": "断言真实可失败。A8（acceptance:225/239/248）与 A9（:264/:279）在 wave-12.1 实现前实测红（red-phase-wave12-1.log：5 failed / 1 passed），且失败信息为 `expected 'session-archived-alpha' to be 'session-active-bravo'` 与恢复已归档会话消息。最小致红改动（思路，未执行）：把 `pickPreferredSessionId` 还原为 `sessionList[0]?.conversationId ?? fallback` → A8×3 与 A9×2 全部转红。A10 反假守卫齐备：e2e spec:196-197 断言 `archivedIds` **仍含**被归档 id（证明不是「会话被删掉所以看不到」）、:200 断言 Console Error===0、:193-195 断言 messages===[] / sessionId!==archivedSessionId / sessionId∉archivedIds / phase==='idle'，另 :172/:181 落盘 before/after 双截图。",
+    "5_receipt_truthfulness": "绿相收据真实。独立复跑：①`npx vitest run` 三个文件 → EXIT=0 / Test Files 3 passed / Tests 132 passed（与收据一致）；②`npm run test:unit` → EXIT=0 / 78 files / 828 passed / 10 skipped（一致）；③`npm run typecheck` → EXIT=0；④`npm run build` → EXIT=0（✓ built in 2.38s）。⑤e2e 按 Lead 要求未复跑；但 after-reload 截图已独立目视核对 = 空态「我能帮你做什么？」+ 侧栏「新对话（未保存）」，无被归档会话内容，与用例断言一致。A/B 对照留痕：收据「处方充分性验证」表明确记录「仅处方两处改动 → e2e EXIT=1（toHaveCount(0) Expected 0 / Received 1）」「处方 + (a) → EXIT=0」，并说明实验后已恢复 (a)。收据亦主动披露 Lead 基线 823 vs 实测 822 的口径差异（差值仍精确可解释），无隐瞒。",
+    "6_behavior_consistency": "结论：无用户可见回归，仅存在一处**既有**（非本波引入）的展示不对称。依据：①「无任何会话」走 `empty-fallback`（runtime.ts:2505-2511）→ sessionId = `pickPreferredSessionId([], this.sessionId)` = 初始 DEFAULT_SESSION_ID('local-dev-session')、sessionList 仍为 []（无瞬态行）、phase='idle'、messages=[]；②「全部已归档」走 `enterFreshSession()` → 新 `pa_*` id + 瞬态「新对话」行 + 保留 archived 行（showArchived=false 时不显示）、phase='idle'、messages=[]。两者均满足 C8（phase idle / messages 空 / 不打开已归档会话），差异仅在 (i) sessionId 取值形态与 (ii) 侧栏是否出现「新对话（未保存）」行。①分支未被本波改动（wave-12.1 只改了落点选择），故不构成回归；且 A9 守卫用例（无会话 → 空态 idle）在演进前后均绿。实际影响：首启用户侧栏为空 vs 全归档用户侧栏有一行「新对话（未保存）」——属既有 UX 不一致，建议后续波次统一（让无会话分支同样 `enterFreshSession()`），不阻塞本波。"
+  },
+  "independentlyReproduced": [
+    { "command": "npx vitest run tests/acceptance/session-fallback-cold-start.spec.ts tests/acceptance/session-fallback-contract.spec.ts tests/runtime-store.spec.ts", "exit": 0, "summary": "Test Files 3 passed / Tests 132 passed" },
+    { "command": "npx vitest run tests/acceptance/session-fallback-cold-start.spec.ts", "exit": 0, "summary": "Test Files 1 passed / Tests 6 passed" },
+    { "command": "npm run test:unit", "exit": 0, "summary": "Test Files 78 passed (78) / Tests 828 passed | 10 skipped (838)" },
+    { "command": "npm run typecheck", "exit": 0, "summary": "vue-tsc --noEmit 无诊断输出" },
+    { "command": "npm run build", "exit": 0, "summary": "✓ built in 2.38s" }
+  ],
+  "nonFatalObservations": [
+    {
+      "id": "OBS-1",
+      "severity": "non-blocking (coverage note)",
+      "file": "src/stores/runtime.ts",
+      "line": 2455,
+      "rule": "新增分支 (a)（sessionList.length>0 && !hasSelectableSession → enterFreshSession）在 **store 级单测中没有直接覆盖**：A9 的非 Tauri 用例中 `this.sessionId` 为 DEFAULT_SESSION_ID 且无持久化，移除 (a) 后 `pickPreferredSessionId` 回退到 DEFAULT_SESSION_ID → `deriveInitStrategy` 判 `targetSessionId === DEFAULT_SESSION_ID && !hasSelectableSession` → empty-fallback，A9 断言仍会通过。",
+      "counterexample": "移除 (a) 且保持其余改动：`npx vitest run tests/acceptance/session-fallback-cold-start.spec.ts` 仍 6 passed；只有 A10（浏览器预览下被归档会话 id 恰为 DEFAULT_SESSION_ID 'local-dev-session'，回退值命中已归档持久化状态）才会红 —— 该对照已由 Executor 在 green-phase-wave12-1.log「处方充分性验证」表中留痕（e2e EXIT=1）。若希望 (a) 具备 store 级判别力，可在 A9 用例中把 store.sessionId 预置为某个已归档 id 后再 initializeSessions。属覆盖增强建议，非缺陷。"
+    },
+    {
+      "id": "OBS-2",
+      "severity": "non-blocking (pre-existing UX asymmetry)",
+      "file": "src/stores/runtime.ts",
+      "line": 2505,
+      "rule": "「无任何会话」的 empty-fallback 分支不生成瞬态会话行（sessionList 保持 []），而「全部已归档」经 enterFreshSession 会生成「新对话（未保存）」行 → 侧栏首启为空 vs 全归档显示一行。",
+      "counterexample": "干净 profile 冷启动（localStorage 无 sessions）→ 侧栏无任何行；将唯一会话归档后冷启动 → 侧栏出现「新对话（未保存）」行。两分支 phase/messages 均满足 C8，差异属 wave-12.1 之前即存在的展示不对称（empty-fallback 未被本波修改），不构成回归。"
+    }
+  ]
+}

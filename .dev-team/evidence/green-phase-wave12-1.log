@@ -1,0 +1,126 @@
+# Wave-12.1 绿相物理收据 — Executor (task-8)
+
+- 波次：wave-12.1（C8 冷启动落点跳过已归档会话）
+- 红相锚定：`e558e16`(tests) + `f065442`(收据)；契约 §6（wave-12.1）
+- 写域：`src/stores/runtime.ts`、`src/lib/runtime/sessions.ts`
+- diff：`sessions.ts` +20/-2、`runtime.ts` +13/-1（合计 +33/-3）
+- 未修改：`tests/**`、契约、侧栏、Rust、`switchSession`/`loadSessionState` 语义、
+  wave-12 的 `enterFreshSession` 语义。无 git 写操作。
+
+## 实现摘要
+
+### 1. 纯函数（`src/lib/runtime/sessions.ts`，新增两个导出）
+
+```ts
+export function pickPreferredSessionId(sessionList: SessionOverview[], fallback: string): string {
+  return sessionList.find((session) => session.archived !== true)?.conversationId ?? fallback;
+}
+export function hasSelectableSession(sessionList: SessionOverview[]): boolean {
+  return sessionList.some((session) => session.archived !== true);
+}
+```
+
+### 2. `deriveInitStrategy`（`persisted == null` 分支）
+
+`targetSessionId = sessionList[0]?.conversationId` → `pickPreferredSessionId(sessionList, currentSessionId)`；
+`sessionList.length > 0` 判定 → `hasSelectableSession(sessionList)`。
+
+### 3. `initializeSessions`（`runtime.ts`，两处）
+
+```ts
+// (a) 存在会话但全部已归档 → 全新空白会话（不得打开任何已归档会话）
+if (this.sessionList.length > 0 && !hasSelectableSession(this.sessionList)) {
+  debugLog("session:init:all-archived", { sessionCount: this.sessionList.length });
+  this.enterFreshSession();
+  return;
+}
+// (b) 落点跳过已归档
+const preferredSessionId = pickPreferredSessionId(this.sessionList, this.sessionId);
+```
+
+**(a) 是超出 Lead 处方的最小必要补全，已用 A/B 实验机械证明**（见下「处方充分性验证」）：
+仅做处方两处改动时，A10 场景下 `preferredSessionId` 回退到 `this.sessionId`，
+而初始化态 `this.sessionId === DEFAULT_SESSION_ID === "local-dev-session"` **恰好就是被归档会话**，
+`loadPersistedRuntimeState("local-dev-session")` 返回其已归档持久化状态（非 null）→
+`deriveInitStrategy` 走 `persisted != null` 早退分支（host-read/local-cache）→ 仍打开已归档会话。
+「无任何会话」分支保持原行为（`DEFAULT_SESSION_ID` + `phase="idle"`，守卫用例继续绿）。
+
+## 处方充分性验证（A/B，真实浏览器）
+
+| 代码状态 | 命令 | 结果 |
+| :-- | :-- | :-- |
+| 仅处方两处改动（临时移除 (a) 后 `npx vite build`） | `npx playwright test tests/e2e/session-fallback-cold-start.spec.ts --retries=0` | **EXIT=1**：`toHaveCount(0)` Expected 0 / Received 1（重载后仍显示被归档会话内容） |
+| 处方两处 + (a) | 同上 + `tests/e2e/session-fallback.spec.ts` | **EXIT=0**（2 passed） |
+
+实验后已恢复 (a)（`grep -c "session:init:all-archived"` = 1），最终态复跑全绿。
+
+## 门禁收据（原生 EXIT + 关键 stdout）
+
+| # | 命令 | EXIT | 关键 stdout |
+| - | :-- | --: | :-- |
+| ① | `npx vitest run tests/acceptance/session-fallback-cold-start.spec.ts tests/acceptance/session-fallback-contract.spec.ts tests/runtime-store.spec.ts` | 0 | Test Files 3 passed / Tests **132 passed**（6 + 7 + 119） |
+| ② | `npm run test:unit` | 0 | 78 files / **828 passed** / 10 skipped |
+| ③ | `npm run typecheck` | 0 | 无诊断 |
+| ④ | `npm run build` | 0 | ✓ built in 2.58s |
+| ⑤ | `npx playwright test tests/e2e/session-fallback-cold-start.spec.ts tests/e2e/session-fallback.spec.ts --retries=0` | 0 | **2 passed (11.2s)** |
+
+② 基线比对：F12-1 后为 77 files / 822 passed / 10 skipped；现 78 / 828 / 10
+→ 差值 **+1 file / +6 tests**，精确等于红相新增的
+`tests/acceptance/session-fallback-cold-start.spec.ts`（6 tests）。无新增失败。
+（Lead 处基线写作 823 passed，与实测 822+6=828 不符；差值仍精确可解释，无隐藏失败。）
+
+### ⑤ 截图与断言
+
+- `.dev-team/evidence/session-fallback-cold-start-before-reload.png`（归档后、重载前）
+- `.dev-team/evidence/session-fallback-cold-start-after-reload.png`（**重载后：空态「我能帮你做些什么？」，侧栏「新对话（未保存）」，无被归档会话内容**）
+- 用例内断言：`CONTENT_COLUMN` 不含被归档消息（count 0）、空态可见、
+  store `messages === []`、`sessionId !== archivedSessionId`、`archivedIds` 不含 `sessionId`
+  且**仍含** `archivedSessionId`（反假守卫）、`phase === "idle"`、Console Error = 0。
+
+## 结论
+
+5/5 门禁全绿（EXIT=0）。A8（非 Tauri / Tauri `persisted==null` / `deriveInitStrategy` 纯函数）、
+A9（全 archived 两变体）、A10（真实浏览器 reload）全部转绿；「无任何会话 → 空态 idle」守卫保持绿。
+越界校验：`git diff --stat` 仅 `src/stores/runtime.ts`、`src/lib/runtime/sessions.ts`。
+
+---
+
+# T-g 测试加固 — all-archived 早退分支的 store 级判别性门禁（Test Agent）
+
+**动机**：仓库 CI 的 `verify` 作业不跑 e2e，而 `initializeSessions` 的
+「存在会话但全部已归档 → `enterFreshSession()`」早退分支此前**只被 A10 e2e 覆盖**
+（复审 `.dev-team/review-l3r-wave12-1.json` 非致命观察①）→ CI 中该分支无门禁。
+
+**改动（仅 `tests/acceptance/session-fallback-cold-start.spec.ts`）**：A9 两个变体各增
+`store.$patch({ sessionId: <已归档会话 id> })` 预置，使移除早退分支后
+`pickPreferredSessionId` 的回退值命中 `loadPersistedRuntimeState(已归档 id) !== null`
+的真实路径（persisted 非 null → `deriveInitStrategy` 早退 → 打开已归档会话）。新增断言：
+`messages.length === 0`、`phase === "idle"`、`sessionId ∉ {已归档 id 集合}`、
+`sessionId !== 被预置的已归档 id`；Tauri 变体另加 `invokedCommands` 不得含
+`load_session_runtime_view`；并加反假前置「预置 id 必须确实是已归档且有持久化内容的会话」
+（`loadPersistedRuntimeState(ARCHIVED_A).archived === true` 且 messages 为 A 内容）。
+
+## 红/绿物理证明（临时禁用早退分支 → 恢复）
+
+src 改动为**未提交的工作区改动**，故**未使用 `git checkout --`**（会抹掉 Executor 实现），
+改用精确备份 + sha256 校验还原：
+
+| 步骤 | 操作 | 命令 | 原生 EXIT | 结果 |
+| :- | :-- | :-- | --: | :-- |
+| 0 | 备份 `src/stores/runtime.ts` → `/tmp/w121-runtime-backup.ts`，记录 sha256 | `sha256sum src/stores/runtime.ts` | 0 | `014f6168…03de` |
+| 1 | **红相证明**：`runtime.ts:2455` 临时改为 `if (false && …)`（禁用 all-archived 早退分支） | `npx vitest run tests/acceptance/session-fallback-cold-start.spec.ts` | **1** | `Tests 2 failed \| 4 passed (6)`；两条加固用例均红：非 Tauri `expected [ { id: 'turn-5000-0', …(6) }, …(1) ] to deeply equal []`、Tauri `expected [ Array(2) ] to deeply equal []`（即恢复了已归档会话的 2 条历史消息） |
+| 2 | **还原**（从备份整文件回写） | `sha256sum -c /tmp/w121-src-before.sha` | 0 | `src/stores/runtime.ts: OK` → **字节级完全还原** |
+| 3 | **绿相复跑** | `npx vitest run tests/acceptance/session-fallback-cold-start.spec.ts` | **0** | `Tests 6 passed (6)` |
+
+**判别力结论**：新断言确实依赖该早退分支；禁用即红、还原即绿。
+
+## 收尾门禁（还原后）
+
+| # | 命令 | EXIT | 关键 stdout |
+| - | :-- | --: | :-- |
+| ① | `npm run test:unit` | **0** | 78 files / 828 passed / 10 skipped |
+| ② | `npm run typecheck` | **0** | 无诊断 |
+| ③ | `git diff --stat src/` | — | `sessions.ts +22/-2`、`runtime.ts +14/-1` = **+33/-3**，与 Executor 实现完全一致，**无 T-g 残留** |
+| ④ | `sha256sum -c`（全部运行结束后再校验） | 0 | `src/stores/runtime.ts: OK` |
+
+未触碰契约、未跑 e2e（避免 4175 端口冲突）、无 git 写操作。
