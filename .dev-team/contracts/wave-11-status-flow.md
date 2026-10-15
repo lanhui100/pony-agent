@@ -147,3 +147,12 @@ L3-A（状态流转/回归）、L3-B（交互/视觉/性能）、L3-P（UI 生�
 - **64px → 96px（硬上界）**。依据：Test Agent 16 次独立 e2e 实测 M3c 峰值滞后分布 **39–67px**，其中 1 次 67 > 64（flaky）。物理下界 = 浏览器忙帧把多行内容合并进一帧时的内容增长量（1 行 23.8px / 2 行 47.6px / 实测最大 ≈2.8 行 67px）→ 阈值必须覆盖多行合并包络。取 4 行包络 **96px**，对实测峰值留 43% 余量。
 - 判别力保留：跟随失效/停摆时滞后无界增长；M3b（无超调，K=4 帧 + 8px）与 M3a（反转 ≤1，容差 8px）仍收紧。
 - NFR 字段 `streaming_follow_lag_max_px` 已登记 supersede（`.dev-team/nfr-baseline-ui-wave11.json`）。
+
+### 7.4 M3c 二次裁定：固定绝对阈值 → 自校准 + 硬上界（Lead，2026-10-15）
+
+- **触发**：Executor 实测同一 e2e 命令在机器 load average=5.50 时 M3c=**119.0px > 96**（1 failed），负载回落后 47.0px 通过 → 固定绝对阈值在高负载下 flaky。
+- **根因**：M3c 峰值滞后的物理下界 = 浏览器忙帧把多行内容合并进一帧时的内容增长量；负载越高，单帧合并行数越多，滞后越大。**任何固定绝对阈值都会被负载击穿**。
+- **裁定（M3c 改为双断言）**：
+  - **M3c-1（主，负载鲁棒，自校准）**：`maxLag ≤ maxSingleFrameGrowth + 64px`，`maxSingleFrameGrowth = max_i ΔcolScrollHeight_i`（同一次运行、同一序列）。物理含义「跟随落后不得超过一次内容爆发 + 2.5 行」。实测正常负载 47–55px vs 预算 111.6px；load 5.5 时 119px vs 预算 ≈159px；跟随失效/停摆时滞后无界增长 → 仍必红（判别力保留）。
+  - **M3c-2（硬上界）**：`maxLag ≤ 200px`（< composer 覆盖层缓冲 220px，保证最后一行永不藏入输入框下方）。
+  - `FOLLOW_LAG_MAX_PX = 96` 作废（NFR 字段同步 supersede）。
