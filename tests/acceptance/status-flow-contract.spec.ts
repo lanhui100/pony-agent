@@ -220,6 +220,54 @@ describe("Wave-11 状态条契约（组件级）", () => {
     expect(wrapper.find(SLOT).attributes("data-visible")).toBe("true");
   });
 
+  // L3-A 审查给出的**可达反例**：会话操作 / 错误态与「末个 turn 的 assistant 为 pending
+  // 且有可见流式内容」同时成立时，槽位必须仍然可见（契约 §2.4：只有「无会话操作、无错误、
+  // 无工具活动」的纯流式窗口才允许隐藏）。既有 patchSessionOperation/patchError 用 messages:[]
+  // 覆盖不到该组合（`runtime.ts` 会话操作窗口 + 缓存 pending assistant）。
+  it("契约 §2.4 反例回归：会话操作/错误态 + 末个 turn 仍有 pending 可见内容 → 槽位必须可见", async () => {
+    const { store, wrapper } = setupWorkspace();
+
+    patchBase(store, {
+      sessionOperation: "initializing",
+      isSubmitting: false,
+      messages: [
+        { id: "w11-so-user", turnId: TURN_ID, role: "user", content: "初始化前的问题" },
+        {
+          id: "w11-so-assistant",
+          turnId: TURN_ID,
+          role: "assistant",
+          content: "已流式输出的可见内容",
+          status: "pending"
+        }
+      ]
+    });
+    await flush();
+    expect(
+      wrapper.find(SLOT).attributes("data-visible"),
+      "sessionOperation=initializing 时槽位必须可见"
+    ).toBe("true");
+
+    patchBase(store, {
+      isSubmitting: false,
+      error: "响应超时，已停止等待",
+      messages: [
+        { id: "w11-err-user", turnId: TURN_ID, role: "user", content: "超时前的问题" },
+        {
+          id: "w11-err-assistant",
+          turnId: TURN_ID,
+          role: "assistant",
+          content: "已流式输出的可见内容",
+          status: "pending"
+        }
+      ]
+    });
+    await flush();
+    expect(
+      wrapper.find(SLOT).attributes("data-visible"),
+      "错误态下槽位必须可见"
+    ).toBe("true");
+  });
+
   it("契约 §2.3 隐藏语义：data-visible=false 时 aria-hidden=true 且 pointer-events 为 none", async () => {
     const { store, wrapper } = setupWorkspace();
 
