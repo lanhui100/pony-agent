@@ -13,7 +13,7 @@
 | :-- | :-- | :-- |
 | R1 图标换掉 loading，改为有趣动效 | M5 | `[data-testid="agent-runtime-status-icon"]` 带类 `runtime-status-orbit`，内含 ring/dot 两个子节点；`getComputedStyle(dot).animationName !== "none"`；`prefers-reduced-motion` 下为 `none`；类名不含 `snake-spinner`/`animate-spin` |
 | R2 新消息出现时状态消息无布局突变 | M1/M4 | 浏览器实测：状态条视口 Y 在「流式增长」与「插入新消息」两种场景下的逐帧位移极差 ≤ 1px（基线：44 次方向反转、±23.8px 抖动） |
-| R3 streaming 期间不显示状态消息 + 上推平滑 | M2/M3a/M3b/M3c | 流式期间 `[data-testid="workspace-runtime-status-slot"]` 的 `data-visible="false"` 且计算 `opacity === "0"`；内容运动方向反转 ≤ 1（容差 8px，见 §7.2）+ 无超调（M3b）+ 跟随滞后 ≤ 64px（M3c） |
+| R3 streaming 期间不显示状态消息 + 上推平滑 | M2/M3a/M3b/M3c | 流式期间 `[data-testid="workspace-runtime-status-slot"]` 的 `data-visible="false"` 且计算 `opacity === "0"`；内容运动方向反转 ≤ 1（容差 8px，见 §7.2）+ 无超调（M3b）+ 跟随滞后 ≤ 96px（M3c，4 行包络；见 §7.3） |
 
 ## 2. DOM / 行为契约（冻结）
 
@@ -30,7 +30,7 @@
 5. **单行不换行**：状态条必须 `white-space: nowrap` + 溢出截断；任何状态下槽位高度恒定（同一 viewport 下极差 ≤ 1px）。
    槽位需为右侧 `workspace-scroll-to-bottom` 按钮预留空间（`padding-right` 或 `max-width: calc(100% - 3.5rem)`）。
 6. **过渡**：显隐为 `opacity` + `translateY(≤4px)`，180–240ms `ease-out`；不得使用 height/max-height 动画。
-7. **标签切换**：label 文本变化需交叉淡入（≤ 200ms），不得出现整行闪跳。
+7. **标签切换**：label 文本变化不得出现整行闪跳（禁止「先消失后出现」的空白帧）；允许原位替换 + 持续 shimmer 动效（wave-11.2 F3 修订：原「交叉淡入 ≤200ms」措辞作废，因 `:key` 重建 + 仅淡入反而产生空白帧）。
 8. **错误态**：`mode === "error"` 保留 `AlertCircle`，不带 orbit 类，且 `data-visible` 语义不变。
 9. **纯 CSS 动效**：图标动画只允许 CSS keyframes（禁止 JS 定时器 / rAF 逐帧驱动）。
 10. **既有约束保持**：状态条根元素类名不含 `bg-*` / `border-*` / `animate-pulse`（既有单测已冻结）。
@@ -40,7 +40,7 @@
 ## 3. UI-NFR 基准（`.dev-team/nfr-baseline-ui-wave11.json`）
 
 - 状态条视口 Y 极差 ≤ 1px（流式 / 新消息插入两场景）。
-- 流式内容：方向反转 ≤ 1（容差 8px）+ 无超调（4 帧预算 + 8px）+ 跟随滞后 ≤ 64px（字段定义见 `.dev-team/nfr-baseline-ui-wave11.json`，原「单帧位移 ≤ 32px」已 supersede，理由见 §7.1/§7.2）。
+- 流式内容：方向反转 ≤ 1（容差 8px）+ 无超调（4 帧预算 + 8px）+ 跟随滞后 ≤ 96px（字段定义见 `.dev-team/nfr-baseline-ui-wave11.json`，原「单帧位移 ≤ 32px」与「64px」均已 supersede，理由见 §7.1/§7.2/§7.3）。
 - 图标轨道环对比度 ≥ 3:1；320px 视口下状态条文本与展开态「滚动到最新」按钮水平不重叠。
 - 浏览器 Console Error = 0；`prefers-reduced-motion: reduce` 下所有图标动画 `animation-name === "none"`。
 - 前端单测 `npm run test:unit` EXIT=0；`npm run typecheck` EXIT=0；`npm run build` EXIT=0。
@@ -89,7 +89,7 @@
 - **度量（M3 替换为良定义三元组）**：
   - **M3a** 内容运动方向反转 ≤ 1（容差 2px）——「反复跳变」守卫（保留）。
   - **M3b** 无超调：每帧 `|ΔscrollTop_i| ≤ ΔcolScrollHeight_i + ΔcolScrollHeight_{i-1} + 4px`。
-  - **M3c** 跟随滞后有界：每帧 `|(scrollTop_i − scrollTop_0) − (colScrollHeight_i − colScrollHeight_0)| ≤ 64px`（当前实现 −179~−208px → 红；演进后必须绿）。
+  - **M3c** 跟随滞后有界：每帧 `|(scrollTop_i − scrollTop_0) − (colScrollHeight_i − colScrollHeight_0)| ≤ 64px`（当前实现 −179~−208px → 红；演进后必须绿）。〔历史记录：阈值后经 §7.3 修订为 96px，公式经 §7.2 追认为 `|scrollTop − max(0, colScrollHeight − clientHeight)|`〕
   - 删除绝对 `maxJump ≤ 32px`（理由见根因 1）。
 - **测试确定性**：e2e 中于 `goto` 前拦截 `api.github.com` 更新检查请求，消除沙箱代理 403 导致的 Console Error 偶发；断言仍要求 0 条 error（不放宽为白名单过滤）。
 - **写域扩展**：Executor 增加 `src/lib/useTimelineAutoScroll.ts`；Test Agent 同步 `tests/HomeWorkspace.spec.ts` 中编码旧 smooth-for-stream 语义的用例。
