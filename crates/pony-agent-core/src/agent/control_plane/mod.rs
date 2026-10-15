@@ -3175,6 +3175,19 @@ mod tests {
             let pending = Arc::new(Mutex::new(responses));
             let pending_for_thread = Arc::clone(&pending);
             let handle = thread::spawn(move || loop {
+                // 队列为空 → 退出（与旧语义一致）。
+                if pending_for_thread.lock().expect("mock response lock").is_empty() {
+                    break;
+                }
+                // 只在**完整成功读取**后才弹出响应：中途断开/accept 失败直接忽略重等，
+                // 保证客户端重试仍能获得队列中的正确响应（消除队列失配型抖动）。
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                };
+                let Some(_body) = read_http_request_body(&mut stream) else {
+                    continue;
+                };
                 let response = {
                     let mut responses = pending_for_thread.lock().expect("mock response lock");
                     if responses.is_empty() {
@@ -3182,8 +3195,6 @@ mod tests {
                     }
                     responses.remove(0)
                 };
-                let (mut stream, _) = listener.accept().expect("accept mock request");
-                let _ = read_http_request_body(&mut stream);
                 write_http_response(&mut stream, response);
             });
 
@@ -3364,17 +3375,20 @@ mod tests {
         }
     }
 
-    fn read_http_request_body(stream: &mut TcpStream) -> String {
+    /// wave-13：与 runtime mock 同构的**优雅失败**读（`None`），避免 CI 负载下客户端提前
+    /// 断开触发 panic 打死 mock 线程，从而导致后续重试连接被拒、用例假失败。
+    fn read_http_request_body(stream: &mut TcpStream) -> Option<String> {
         let mut buffer = Vec::new();
         let mut chunk = [0_u8; 4096];
         let mut header_end = None;
         let mut content_length = 0usize;
 
         loop {
-            let read = stream.read(&mut chunk).expect("read mock request");
-            if read == 0 {
-                break;
-            }
+            let read = match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(_) => return None,
+            };
             buffer.extend_from_slice(&chunk[..read]);
 
             if header_end.is_none() {
@@ -3399,7 +3413,7 @@ mod tests {
         }
 
         let body_start = header_end.unwrap_or(buffer.len());
-        String::from_utf8_lossy(&buffer[body_start..]).to_string()
+        Some(String::from_utf8_lossy(&buffer[body_start..]).to_string())
     }
 
     fn write_http_response(stream: &mut TcpStream, response: MockHttpResponse) {
@@ -3408,10 +3422,8 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             response.content_type, body_len, response.body
         );
-        stream
-            .write_all(payload.as_bytes())
-            .expect("write mock response");
-        stream.flush().expect("flush mock response");
+        let _ = stream.write_all(payload.as_bytes());
+        let _ = stream.flush();
     }
 
     fn json_response(body: serde_json::Value) -> MockHttpResponse {
