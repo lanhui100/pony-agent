@@ -19,7 +19,7 @@ import type {
   SessionRuntimeView,
   SessionSnapshot
 } from "@/types/runtime";
-import { deriveInitStrategy } from "@/lib/runtime/sessions";
+import { deriveInitStrategy, loadPersistedRuntimeState } from "@/lib/runtime/sessions";
 import { useRuntimeStore } from "@/stores/runtime";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -249,7 +249,11 @@ describe("Wave-12.1 冷启动落点契约（C8 / A8 / A9）", () => {
     expect([ARCHIVED_A, ARCHIVED_C]).not.toContain(strategy.sessionId);
   });
 
-  it("A9/C8 非 Tauri 冷启动：catalog 全为 archived → 全新空白会话（不得打开任何已归档会话）", async () => {
+  // T-g 判别性加固（复审非致命观察①，CI `verify` 不跑 e2e，故本分支需 store 级门禁）：
+  // 预置 `sessionId` = 已归档会话 id，使移除 all-archived 早退分支后
+  // `pickPreferredSessionId` 的回退值恰好命中 `loadPersistedRuntimeState(已归档 id) !== null`
+  // 的真实路径（persisted 非 null → deriveInitStrategy 早退 → 打开已归档会话）。
+  it("A9/C8 非 Tauri 冷启动：catalog 全为 archived 且当前 sessionId 即已归档会话 → 全新空白会话", async () => {
     writePersistedSessions({
       [ARCHIVED_A]: persistedSession(A_MESSAGES, { updatedAtMs: 5000, archived: true }),
       [ARCHIVED_C]: persistedSession(["C 已归档会话的问题", "C 已归档会话的回答"], {
@@ -259,24 +263,55 @@ describe("Wave-12.1 冷启动落点契约（C8 / A8 / A9）", () => {
     });
 
     const store = useRuntimeStore();
+    store.$patch({ sessionId: ARCHIVED_A });
+
+    // 反假前置：预置值必须确实是「已归档且有持久化内容」的会话 id，否则本用例退化为普通空态断言
+    const presetPersisted = loadPersistedRuntimeState(ARCHIVED_A);
+    expect(presetPersisted, "预置 id 必须是已归档且有持久化内容的会话").not.toBeNull();
+    expect(presetPersisted?.archived).toBe(true);
+    expect(loadPersistedRuntimeState(ARCHIVED_A)?.messages.map((message) => message.content)).toEqual(
+      A_MESSAGES
+    );
+
     await store.initializeSessions();
 
     expect(store.messages).toEqual([]);
     expect([ARCHIVED_A, ARCHIVED_C]).not.toContain(store.sessionId);
+    expect(store.sessionId, "不得停留在被归档会话 id").not.toBe(ARCHIVED_A);
     expect(store.phase).toBe("idle");
   });
 
-  it("A9/C8 Tauri 冷启动：catalog 全为 archived 且无本地持久化 → 全新空白会话", async () => {
+  it("A9/C8 Tauri 冷启动：catalog 全为 archived 且当前 sessionId 即已归档会话 → 全新空白会话且不加载任何会话视图", async () => {
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     writePersistedSessions({});
-    mockTauriCatalog([overview(ARCHIVED_A, 5000, true), overview(ARCHIVED_C, 4000, true)]);
+
+    const invokedCommands: string[] = [];
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: any) => {
+      invokedCommands.push(command);
+      if (command === "list_sessions") {
+        return [overview(ARCHIVED_A, 5000, true), overview(ARCHIVED_C, 4000, true)] satisfies SessionOverview[];
+      }
+      if (command === "load_session_runtime_view") {
+        return runtimeViewFor(String(payload?.sessionId ?? ""), A_MESSAGES);
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
 
     const store = useRuntimeStore();
+    store.$patch({ sessionId: ARCHIVED_A });
+    // 反假前置：预置 id 与 catalog 中 archived 项一致
+    expect(ARCHIVED_A).not.toBe("");
+
     await store.initializeSessions();
 
     expect(store.messages).toEqual([]);
     expect([ARCHIVED_A, ARCHIVED_C]).not.toContain(store.sessionId);
+    expect(store.sessionId, "不得停留在被归档会话 id").not.toBe(ARCHIVED_A);
     expect(store.phase).toBe("idle");
+    // 不得载入任何已归档会话的运行时视图
+    expect(invokedCommands, "不得为已归档会话发起运行时视图加载").not.toContain(
+      "load_session_runtime_view"
+    );
   });
 
   it("A9 边界：无任何会话时冷启动 → 空态 idle（守卫，基线与演进后均须成立）", async () => {
