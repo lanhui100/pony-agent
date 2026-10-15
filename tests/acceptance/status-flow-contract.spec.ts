@@ -18,6 +18,7 @@ import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import statusBarSource from "@/components/chat/AgentRuntimeStatusBar.vue?raw";
+import { resolveAgentRuntimeStatus } from "@/lib/runtime/status";
 import { useRuntimeStore } from "@/stores/runtime";
 
 const SLOT = '[data-testid="workspace-runtime-status-slot"]';
@@ -95,6 +96,51 @@ function patchThinking(store: RuntimeStore) {
     messages: [
       { id: "w11-user", turnId: TURN_ID, role: "user", content: "请开始回答" },
       { id: "w11-assistant", turnId: TURN_ID, role: "assistant", content: "", status: "pending" }
+    ]
+  });
+}
+
+/**
+ * F7 回归态：`reasoningContent` 已落盘（`streamBufferReasoning` 为空）+ 正文仍在流式。
+ * `resolveAgentRuntimeStatus` 因 `streamingReasoning` 优先于 `phase` 判断而返回 `mode="thinking"`。
+ */
+function patchReasoningStreaming(store: RuntimeStore, content: string) {
+  patchBase(store, {
+    isSubmitting: true,
+    activeTurnId: TURN_ID,
+    activeTurnStartedAtMs: Date.now(),
+    phase: "calling_model",
+    streamBufferReasoning: "",
+    messages: [
+      { id: "w11-user", turnId: TURN_ID, role: "user", content: "请开始回答" },
+      {
+        id: "w11-assistant",
+        turnId: TURN_ID,
+        role: "assistant",
+        content,
+        status: "pending",
+        reasoningContent: "我先思考一下这个问题"
+      }
+    ]
+  });
+}
+
+/** 等待用户授权（mode = waiting_approval，属 F7 白名单外的恒可见 mode）。 */
+function patchWaitingApproval(store: RuntimeStore) {
+  patchBase(store, {
+    isSubmitting: true,
+    activeTurnId: TURN_ID,
+    activeTurnStartedAtMs: Date.now(),
+    phase: "waiting_user",
+    messages: [
+      { id: "w11-user", turnId: TURN_ID, role: "user", content: "执行命令" },
+      {
+        id: "w11-assistant",
+        turnId: TURN_ID,
+        role: "assistant",
+        content: "已流式输出的正文内容",
+        status: "pending"
+      }
     ]
   });
 }
@@ -356,5 +402,76 @@ describe("Wave-11 状态条契约（组件级）", () => {
     const normalized = (block ?? "").replace(/\s+/g, " ");
     expect(normalized).toMatch(/animation(-name)?:\s*none/);
     expect(normalized).toContain("runtime-status-orbit");
+  });
+
+  // 增量复审 T-e（F7）：F1 的 `mode !== "responding"` gate 过宽 —— 当 assistant 已落盘
+  // `reasoningContent` 而正文仍在流式时，`resolveAgentRuntimeStatus` 因 `streamingReasoning`
+  // 优先返回 `mode="thinking"`，旧 gate 会因此让槽位在整个正文流式期保持可见
+  // （R3/M2 对推理模型失效）。F7 把「隐藏资格」收窄为白名单 {responding, thinking}。
+  it("契约 §2.4 F7 回归：reasoningContent 已落盘 + 正文流式中（mode=thinking）→ 槽位必须隐藏", async () => {
+    const { store, wrapper } = setupWorkspace();
+
+    // 反假前置：确认该状态确实投射为 mode="thinking"（否则本用例会退化为重复 M2 的 responding 场景）
+    const projected = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "calling_model",
+      toolActivities: [],
+      turnStartedAt: Date.now(),
+      streamingReasoning: true,
+      hasStreamingContent: true
+    });
+    expect(projected?.mode).toBe("thinking");
+
+    // 主用例：正文已有可见内容 → 必须隐藏
+    patchReasoningStreaming(store, "已流式输出的正文内容");
+    await flush();
+    expect(
+      wrapper.find(SLOT).attributes("data-visible"),
+      "reasoningContent 已落盘且正文流式中时槽位必须隐藏"
+    ).toBe("false");
+
+    // 对照组：同状态但正文为空（纯思考）→ 必须保持可见
+    patchReasoningStreaming(store, "");
+    await flush();
+    expect(
+      wrapper.find(SLOT).attributes("data-visible"),
+      "纯思考（无可见正文）时槽位必须保持可见"
+    ).toBe("true");
+  });
+
+  it("契约 §2.4 F7 白名单：waiting_approval / retrying 不属于可隐藏 mode → 槽位恒可见", async () => {
+    const { store, wrapper } = setupWorkspace();
+
+    // waiting_approval：可经 store 抵达（phase="waiting_user"），且此时正文已有可见内容
+    patchWaitingApproval(store);
+    await flush();
+    const approvalMode = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "waiting_user",
+      toolActivities: [],
+      streamingReasoning: false,
+      hasStreamingContent: true
+    });
+    expect(approvalMode?.mode).toBe("waiting_approval");
+    expect(
+      wrapper.find(SLOT).attributes("data-visible"),
+      "等待授权时槽位必须可见"
+    ).toBe("true");
+
+    // retrying：`resolveAgentRuntimeStatus` 在 retryAttempt>0 时返回 mode="retrying"，
+    // 但 `src/stores/runtime.ts` 的 agentRuntimeStatus getter **不转发** retryAttempt
+    // （全仓仅 `src/lib/runtime/status.ts` 出现该字段）→ 该 mode 无法经 store 抵达槽位路径。
+    // 结合 F7 白名单（mode ∉ {responding, thinking} ⇒ 恒可见），它不可能被隐藏；
+    // 此处锁定 resolver 契约，避免未来接线 retryAttempt 时静默回归。
+    const retryingMode = resolveAgentRuntimeStatus({
+      isSubmitting: true,
+      phase: "calling_model",
+      toolActivities: [],
+      streamingReasoning: false,
+      hasStreamingContent: true,
+      retryAttempt: 1,
+      retryMax: 3
+    });
+    expect(retryingMode?.mode).toBe("retrying");
   });
 });

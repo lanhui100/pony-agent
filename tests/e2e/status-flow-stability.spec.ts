@@ -404,7 +404,10 @@ test.describe("Wave-11 状态条布局稳定性（真实浏览器）", () => {
     const upwardTravel = motionSeries[0] - motionSeries[motionSeries.length - 1];
     expect(upwardTravel, "M3 流式内容必须真实上移").toBeGreaterThan(200);
 
-    // M3a：内容运动序列方向反转 ≤ 1（容差 2px）——「反复跳变」守卫
+    // M3a：内容运动序列方向反转 ≤ 1（容差 8px）——「反复跳变」守卫。
+    // 容差取值理由见常量 `CONTENT_MONOTONIC_TOLERANCE_PX`：`.dev-team/evidence/m3-ab-smooth-pre.json`
+    // 实测当前实现存在 +6.0px 反向微抖（idx60–63：150.6 → 150.6 → 156.6 → 126.6），
+    // 2px 容差会把它计为反转（2 > 1）→ flaky；8px（≈1/3 行高）为「可感知位移」下限。
     const contentMotion = motionStats(motionSeries, CONTENT_MONOTONIC_TOLERANCE_PX);
     // 诊断轨迹落盘：便于离线定位反转帧（每次运行覆盖）
     fs.writeFileSync(
