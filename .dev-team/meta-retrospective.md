@@ -1,34 +1,48 @@
-# Meta Retrospective: PA-118 进入会话页卡死（graph_runs 锁重入自死锁）修复
+# Wave-11 元复盘（PA-STATUS-FLOW 运行状态条优化）
 
-> Wave 8 · 任务分级 B（跨语言：Rust core + Tauri 同步命令 + TS 前端；命中并发/锁关键字）
-> 红相锚定 `533e7b8`；基线 `506220b`；修复文件 `crates/pony-agent-core/src/agent/control_plane/history_commands.rs`
+> 复盘对象：本次 Agent Team 的**协作元框架与组织协议**，不纠缠业务代码细节。
+> 物理账本：`.dev-team/state.json`（wave 11）、契约 `.dev-team/contracts/wave-11-status-flow.md`、收据 `.dev-team/evidence/*`。
 
-## 1. 通信拓扑与信噪比（Topology & Noise）
+## 1. 通信拓扑与信噪比
 
-- **拓扑选择**：Lead 先做只读侦察 + 实机复现（后台 `cargo build --features tauri/custom-protocol` 与 Xvfb 无头运行），把「诊断」下沉为 2 个无状态 Subagent（前端 Playwright 复现 / Rust 锁审计），把「实施与验收」留给 3 个持久 Teammate（protocol-agent / test-agent / executor），Roster 峰值 = Lead + 3 = 4 ≤ 8，审查全部走 Subagent 池不占槽位。
-- **信噪比关键决策**：Rust 审计 Subagent 用 `HostControlPlaneBuilder` + 内存 `GraphRunStore` 造**可机械判定的探针**（A/D 用例 EXIT=124 挂起 vs B/C EXIT=0），一次就把根因锁死到 `graph_run_for_retrieval` 重入加锁，避免了「猜根因 → 改代码 → 再猜」的高 Token 循环；Lead 随后用 `gdb -p` 主线程 backtrace 独立复核，形成「探针 + 运行时栈 + 实机截图」三重锚定。
-- **零废话协议执行**：审查者均以 JSON（`verdict` + `findings[file/line/rule/counterexample]`）落盘（`.dev-team/review-l3p-deadlock.json`），无过程性吹捧；任务板描述全部带「判定方式可机械执行」。
-- **Token 水位教训**：前端 Subagent 在「浏览器不可能复现」上花了 20+ 次运行（结论正确但边际收益低）；应在派发时就写明「浏览器无 Tauri 后端 ⇒ 结构性不可能复现桌面主线程阻塞」这一先验，把它降级为反证而非主攻。
+| 拓扑要素 | 实际 | 评价 |
+| :-- | :-- | :-- |
+| 常驻名册 | Lead + Test Agent + Executor（3/8，留足预算） | 合适：单模块前端任务，无 Protocol 独立槽位（契约由 Lead 落盘，见 §3） |
+| 计算池（不占槽位） | 4 个 Subagent（L3-A/L3-B/L3-P + 1 路增量复审） | 正确：审查为无状态单轮求值，未挤占名册 |
+| 看板任务 | 4（T1 红相 / T2 绿相 / T3 契约演进测试 / T4 引擎改动→CANCELLED） | 干净：终态全部 completed，无 in_progress 残留 |
+| 零废话 JSON 协议 | 3 路 L3 均落盘 `review-l3*.json` 且返回同构 JSON | 有效：findings 全部可定位 file:line，无过程性吹捧 |
+| 冗余通信 | Test Agent 首轮把 E2E spec 委派给子 subagent → 子 agent 上下文耗尽且零产出，Lead 一次 steer 后改为自写 | **真实损耗**：多耗 1 个 wait 周期；教训见 §4-① |
+| 对话内噪声 | Executor 两次在未获批时推进（§3 偏差 1）、Test Agent 一次基于未验证假设（"改动前后均 48px"）下结论 | 均被 Lead 的物理复测拦下，未污染交付 |
 
-## 2. 门禁穿透与误杀率（Gate Penetration / False Negatives & Positives）
+信噪比结论：**机器门禁产出（EXIT/逐帧物理量）占主导**，主观陈述占比低；但"未经自测的因果断言"仍出现 2 次，说明「物理凭证先决」需要显式写进角色 Prompt（本波后半段已补）。
 
-- **假绿拦截（本轮最大收获）**：契约 v1 的 G1~G5/G7 用 `cargo test --lib <裸函数名> -- --exact` 逐字执行会选 **0 用例且 Exit 0**（libtest `--exact` 需全路径名、集成测试用例根本不在 `--lib` target 内）；G3 用 `--lib submission_plan_bounded` 同样 `running 0 tests`。是 L3-P 审查（finding #3）与 test-agent 主动声明共同暴露的，契约 v2 已冻结「假绿禁令」四条规则（必须校验 `running N tests` 的 N ≥ 契约值；`--exact` 必须全路径；集成用例禁用 `--lib`；不得以 Exit 0 替代「选中且通过」）。
-- **真实拦截 vs 误杀**：红相 3 例超时失败（C1×2 + C2×1）+ 并发 2 例 0/8 失败，修复后 13+2 全绿（同一用例集，耗时 15.2s → 0.31s 是死锁消除的直接物理特征）。误杀 1 例：`mod.rs:2059` 被静态守卫标记 P1，Lead 机械核实 `session_id=None` 时 `load_active_graph_run_for_session` 在加锁前 early return ⇒ **非死锁**，改登记 P1-SAFE（精确到 file+方法+加锁行号，含 STALE 自审计与 `--strict` 升级开关）。
-- **对抗审查的真实价值**：并发视角 L3 发现 T3 在 `run_id=Some(命中)` 路径**新引入 TOCTOU 撕裂读**（原本单 guard 原子读且不死锁），并给出非可线性化证明（`Paused∧waits=1` 在两次加锁间被 `graph_resume_ask` 排空 ⇒ 输出 `resume_graph_run_stream`，服务端因 phase=Ready 报 not resumable）。该缺陷**任何单线程门禁原理上都无法观测**，是「互补视角审查」不可替代性的直接证据；T7 已整改为命中路径单 guard 原子读。
-- **门禁加固**：C5 守卫从 4 名硬编码白名单升级为「基线 4 ∪ 自动发现 18」，并新增「发现数 < 基线即 Exit 2」的退化防线与 `--self-test` 正负样例；`check-lock-discipline.py` 交叉验证同一结论。
-- **NFR-DEGRADED 遗留**：1 项有条件豁免（`logging_legacy_eprintln_exempt=true` + `logging_debt_ref="PA-119"`），到期条款已写入契约 §3.1：PA-119 完成时必须重跑本波 L3-P 五问并关闭豁免。
+## 2. 门禁穿透与误杀率
 
-## 3. 分工契约与隔离有效性（Contract Isolation）
+- **红相真实性**：T1 红相 5 条断言在基线 commit 上真实失败（含 M1 实测极差 392.70px）；红相 commit `2a83ae7` 锚定后 Executor 才写 `src/**`（除 1 次偏差，见 §3）。
+- **独立测试分权有效**：Test Agent 全程未写 `src/**`，Executor 全程未改 `tests/**`；机械写域审计（`git diff --name-only`）零越界。
+- **假门禁拦截（本波最大价值）**：Lead 用同探针 A/B 复测推翻了 Executor 的「smooth→auto 消除 179px 滞后」结论（实测 48 vs 47px、超调 20px vs 0px），并按「严禁夹带重构」回退 → **避免了一次进入核心滚动引擎的无效改动**。
+- **L3 三路 FAIL 的产出**：9 条 findings 全部为真实缺陷（mode-blind 误隐藏、pointer-events 吞点击、label 闪跳、320px 遮挡、图标对比度 1.43:1、`will-change` 常驻、M3a flaky、NFR 未 supersede、无冻结产物 EXIT=0 收据），**零误杀**——Lead 逐条复核后 9/9 采纳（其中 320px label 挤压一项经产品包络证据 `tauri.conf.json:19 minWidth=780` 判为越界、不修）。
+- **指标演进（3 轮）**：M3 从「绝对单帧 ≤32px」（不良定义、flaky）→ M3a/M3b/M3c → M3a 容差 8px + M3c 96px。每一次均由**实测分布**驱动（16 次运行 39–67px；+6px 微抖），非事后放宽；supersede 全部登记在 NFR 文件与契约 §7.1–7.3。
+- **NFR-DEGRADED 欠账：0**；未使用任何豁免。
+- 误判率：L3 findings 误杀 1/9（11%），假放行 0/9。
 
-- **写域正交**：task-1 `.dev-team/`、task-2 `crates/pony-agent-core/tests/` + `scripts/`、task-3/6/7 `history_commands.rs`、task-8 `scripts/check-graph-run-lock-scope.mjs` 互不重叠；`git diff --stat` 终态 = 1 个业务文件 + 1 个守卫脚本 + 3 个契约/基准文件 + 1 个任务板，无越界写入。
-- **测试分权有效**：Executor 全程无测试写权；红相锚定 `533e7b8` 先于任何业务写入；T4 发现并修掉「集成测试打开用户生产 `sessions.db`」的卫生缺陷（根因：隔离用 `#[cfg(test)]`，而 `tests/*.rs` 编译依赖 crate 时不启用该 cfg），改由测试进程内重定向 `XDG_DATA_HOME/HOME/LOCALAPPDATA` 到唯一临时目录。
-- **契约冻结与演进**：波内发生 2 次契约演进（logging 适用范围收窄、G1~G7 假绿修正），均由 protocol-agent 落盘 + Lead 冻结，未出现「就地改契约迁就实现」。
-- **并行隔离成本**：本波并发度实际为 1~2（诊断 Subagent 并行、实施串行），未使用 worktree；事实证明对「单函数锁语义」这类强耦合缺陷，串行 + 强门禁的协调成本远低于并行隔离成本。
+## 3. 分工契约与隔离有效性
 
-## 4. 元协议迭代建议（Self-Evolving Protocol）
+- **有效**：`src/**` 与 `tests/**` 硬分权使「测试冻结只读」在整波 6 次返工中未被破坏；`blocked_by` 使 T2 在 T1 完成后才 ready。
+- **偏差 1（真实发生）**：Executor 在 T3（契约演进测试侧）未完成、红相未重锚时即写入 `src/lib/useTimelineAutoScroll.ts`（§7 auto 改动），违反两段式时序。**处置**：Lead 不追溯美化——用 A/B 实测直接判定该改动无效并回退，同时把「回退完整性」写入 L3-A 审查项。**教训**：`blocked_by` 只约束看板可认领性，不约束已激活 agent 的写手；应把"未收到 GO 消息禁止写 X 文件"作为**显式红线**写进 Executor 的任务书与后续波次模板（本波后半段已补）。
+- **隔离有效性**：`HomeWorkspace.vue` 由 Executor 独占、`status-flow-*.spec.ts` 由 Test Agent 独占，两者并行返工零冲突；Lead 仅做只读侦察 + git 操作 + 契约/账本/文档落盘，未写业务逻辑（符合 Lead Write Prohibition）。
+- **滚动契约账本**：本波活跃契约条目始终压缩在契约文件 §2（11 条）+ §7（3 小节），未发生跨波次注意力稀释。
 
-1. **「同步 Tauri 命令 = 主线程」应写入项目常载约束**：Tauri v2 中非 async `#[tauri::command]` 在主线程执行，任何阻塞都会冻结窗口。建议在 `AGENTS.md` 核心架构约束中增列一条：新增/修改同步命令必须证明「无重入锁、无长 IO、有界返回」，并纳入 review checklist。
-2. **门禁必须带「选中数」断言**：本波暴露的假绿是通用陷阱（过滤器拼错/`--exact` 路径不全/`--lib` 选不中都会 Exit 0）。建议 `dev-team` skill 的 G 门禁模板强制包含 `running N tests` 且 N ≥ 契约值的机械断言。
-3. **锁纪律静态守卫应作为共享工具沉淀**：`scripts/check-graph-run-lock-scope.mjs`（自动发现 locker + 括号级作用域 + 退化防线 + 自检）可泛化到其它非重入 Mutex（`sessions_rwlock`、`ask_dispatcher`），建议登记为 `.agents/skills/` 复用件。
-4. **诊断类 Subagent 派发时需带「结构性不可能」先验**：避免把「环境上不可能复现」的路径当主攻方向，节省 20+ 次无效运行。
-5. **实机 E2E 应固化为「BEFORE/AFTER 同口径」模板**：本波用 Xvfb + `dbus-run-session` + 隔离 HOME + 真实 `sessions.db` + `--features tauri/custom-protocol` 内嵌 dist，主线程 `wchan` + DIAG 心跳 + 截图三件套构成可复用的桌面端卡死判定口径，建议写入 `test-expert` 的桌面端验收章节。
+## 4. 元协议迭代建议（对 dev-team skill 自身）
+
+1. **子代理委派反模式入模板**：Test Agent 首轮把「写 22KB E2E spec」委派给子 subagent，导致子 agent 上下文耗尽 + 零产出 + 1 个 wait 周期浪费。建议 skill 在角色 Prompt 模板中显式加入：「**测试/实现产物必须由本 agent 亲自落盘；禁止把交付物编写委派给下级 subagent**」。
+2. **「物理凭证先决」需写入所有角色的初始 Prompt**：本波出现 2 次「未自测的因果断言」（Executor 的 179px 归因、Test Agent 的"改动前后均 48px"）。建议 skill 把「任何因果结论必须附同口径 A/B 复测或明确标注为假设」列为通信协议硬约束。
+3. **两段式时序需要机械锁**：`blocked_by` 无法阻止已激活 agent 抢跑。建议 skill 增加轻量机械手段：被依赖任务未完成时，Executors 的目标文件加入 `.dev-team/locks/<file>.lock`（Lead 在重锚后删除），并把「未解锁写入」列为 Join Barrier 的自动 FAIL 项。
+4. **UI 类任务的 NFR 模板缺口**：现有 `nfr-lint.py` 只认后端 schema，本波被迫自建 UI-NFR 文件（布局位移/动画时长/对比度/窄屏避让）。建议 skill 沉淀一份 `nfr-baseline-ui.schema.json` + `dev-ui-nfr-lint.py`，并把「对比度 ≥3:1」「隐藏态暂停动画」列为默认 UI 字段。
+5. **指标演进需强制记录 supersede**：本波 L3-P 抓到「断言删除但 NFR 基准未同步」的穿透。建议 skill 规定：删除/放宽任一验收断言时，必须同提交更新 NFR 基准并附 supersede 理由与实测分布，否则 Join Barrier 判 FAIL。
+6. **审查预算与互补视角有效**：3 路互补视角（状态流转 / 交互视觉性能 / 证据审计）零重复、零误杀，成本-效能良好。建议保留"UI 任务=1 路状态流转 + 1 路视觉性能 + 1 路证据审计"作为默认矩阵。
+
+## 5. 本轮物理门禁终态
+
+- HEAD `46a0e7d`：`version:check`/`typecheck`/`test:unit`(76 files/813 passed)/`build`/冻结 e2e(4 passed) 全部 EXIT=0；回归对照 `checkpoint-branch`(6 passed/2 failed) 与 `browser-preview`(6 failed) 与基线逐条一致。
+- 交付报告：`docs/release/2026-10-15-pa-status-flow/README.md`；ADR：[0033](../../docs/decisions/0033-runtime-status-bar-out-of-scroll-flow.md)。

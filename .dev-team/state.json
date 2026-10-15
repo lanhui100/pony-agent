@@ -1,6 +1,6 @@
 {
   "wave": 11,
-  "status": "in_progress",
+  "status": "completed",
   "task_classification": "B-lite",
   "reason": "桌面端消息流下方状态条：图标动效替换、布局突变消除、streaming 期间隐藏与平滑上推；纯前端呈现层，3 文件写域",
   "baseline_commit": "018bcdc",
@@ -85,15 +85,10 @@
       "branches": {
         "status-flow-stability": {
           "red_commit": "2a83ae7",
-          "green_commit": "1aa12d9",
-          "status": "evolution-wave-11.1-reverted",
-          "write_scopes": [
-            "src/components/chat/AgentRuntimeStatusBar.vue",
-            "src/components/chat/WorkspaceComposer.vue",
-            "src/components/HomeWorkspace.vue",
-            "tests/"
-          ],
-          "contract_evolution": "wave-11.1: 流式跟随 smooth→auto + M3 度量良定义化（M3a/M3b/M3c）"
+          "green_commit": "46a0e7d",
+          "ledger_commit": "0b8934d",
+          "status": "verified",
+          "fix_scope": "src/components/chat/AgentRuntimeStatusBar.vue, src/components/chat/WorkspaceComposer.vue, src/components/HomeWorkspace.vue"
         }
       },
       "tasks": {
@@ -126,6 +121,23 @@
         "T-b mode-blind regression test",
         "T-c narrow-viewport e2e",
         "T-d final EXIT=0 receipts"
+      ],
+      "status": "completed",
+      "final_gates": {
+        "version_check": "EXIT=0",
+        "typecheck": "EXIT=0",
+        "unit_tests": "EXIT=0 (76 files / 813 passed / 10 skipped)",
+        "build": "EXIT=0",
+        "frozen_e2e": "EXIT=0 (4 passed)",
+        "regression_checkpoint": "6 passed/2 failed = baseline",
+        "regression_browser_preview": "6 failed = baseline",
+        "receipt": ".dev-team/evidence/final-gates-wave11.log"
+      },
+      "nfr_degraded_debt": 0,
+      "deliverables": [
+        "docs/decisions/0033-runtime-status-bar-out-of-scroll-flow.md",
+        "docs/release/2026-10-15-pa-status-flow/README.md",
+        ".dev-team/meta-retrospective.md"
       ]
     }
   },
