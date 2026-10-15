@@ -48,3 +48,27 @@ error: could not compile `pony-agent-core` (test "tui_acceptance") due to 17 pre
 - 不重构 TUI 结构（不把 `tui.rs` 状态/类型搬进 lib）；
 - 不引入 `rust-toolchain.toml` 固定工具链（另开单评估）；
 - 不修 CI 中其它历史问题（如 `Node.js 20 deprecated` 警告）。
+
+## 5. 侦察补全（Lead，2026-10-15）：**完整失败目标矩阵**
+
+Test Agent 独立发现 `cli_acceptance` 同样失败（C1 聚合命令在本机首个失败目标随 cargo 调度顺序变化，CI 日志只呈现其中一个）。Lead 遂对 `crates/pony-agent-core` 的**全部测试目标逐一编译**（`RUSTFLAGS="-D warnings" cargo test --test <name> --no-run`，30 个集成测试目标 + `--lib` + `--bins`），原始矩阵存档 `.dev-team/evidence/lead-recon-target-matrix.txt`：
+
+| 目标 | EXIT | 错误数 | 性质 |
+| :-- | --: | --: | :-- |
+| `tui_acceptance` | 101 | 16 | 15-16 条 bin-as-module `dead_code`（`main`/`run_tui`/`ui`/`build_control_plane`/`TuiTurnSink`/`DynamicProviderResolver`/`ascii_logo`/`add_tool_event`/`open_session_selector` 等） |
+| `cli_acceptance` | 101 | 13 | 1 条**真实** `unused import: CliArgs` + 12 条 bin-as-module `dead_code`（`TerminalSink`/`SessionTracker`/`handle_init`/`print_help`/`main` 等） |
+| `trace_auto_report_test` | 101 | 2 | **真实** `unused import: AgentTracePayload`、`unused import: serde_json::json` |
+| 其余 27 个集成目标 + `--lib` + `--bins` | 0 | 0 | 通过 |
+
+**Windows 专属（本机不可见）**：`src/bin/tui.rs:1402` 的 `log_file` 仅在 `#[cfg(unix)]` 块（`:1403-1408`）内使用 → 非 unix 目标 `unused_variables`。它既影响 `tui_acceptance` 的模块引入，也会在任何**非缓存**的 Windows `cargo check --bins` 上触发，故必须真修（把声明移入 `#[cfg(unix)]` 块），不得仅靠测试侧 allow 掩盖。
+
+## 6. 修正后的写域（Executor）
+
+| 文件 | 处理 |
+| :-- | :-- |
+| `crates/pony-agent-core/src/bin/tui.rs` | C2：`log_file` 声明移入 `#[cfg(unix)]` 块（unix 行为不变） |
+| `crates/pony-agent-core/tests/tui_acceptance.rs` | C3：`mod tui;` 上加最小 lint allow + 注释 |
+| `crates/pony-agent-core/tests/cli_acceptance.rs` | 移除真实 `unused import: CliArgs`；对 bin-as-module `dead_code` 加同款最小 allow + 注释 |
+| `crates/pony-agent-core/tests/trace_auto_report_test.rs` | 移除两处真实 unused import（**不得**用 allow 掩盖） |
+
+**C1 验收命令升级为全目标**：`RUSTFLAGS="-D warnings" cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test --package=pony-agent-core --no-run` 必须 EXIT=0（等价于 CI 步骤的编译面）；并逐一复核上表 3 个曾失败目标 EXIT=0。
