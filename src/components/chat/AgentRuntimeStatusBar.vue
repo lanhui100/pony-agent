@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { AlertCircle } from "lucide-vue-next";
 import { formatElapsedSeconds, type AgentRuntimeStatus } from "@/lib/runtime/status";
 
 interface Props {
@@ -100,8 +101,14 @@ const displayLabel = computed(() => {
     aria-atomic="true"
   >
     <div class="flex items-center">
+      <AlertCircle
+        v-if="displayedStatus.mode === 'error'"
+        class="h-3.5 w-3.5 shrink-0 mr-1.5 text-rose-500"
+        data-testid="agent-runtime-status-icon"
+      />
       <!-- 贪吃蛇式的连续旋转动效图标 -->
       <svg
+        v-else
         class="h-3.5 w-3.5 shrink-0 mr-1.5 text-stone-400 snake-spinner"
         viewBox="0 0 16 16"
         fill="none"
@@ -118,8 +125,12 @@ const displayLabel = computed(() => {
           class="snake-spinner-path"
         />
       </svg>
-      <span class="runtime-status-shimmer text-stone-500 dark:text-stone-300 italic font-normal" data-testid="agent-runtime-status-label">{{ displayLabel }}</span><span
-        v-if="elapsedText"
+      <span
+        :class="displayedStatus.mode === 'error' ? 'text-rose-600 dark:text-rose-400 not-italic' : 'runtime-status-shimmer text-stone-500 dark:text-stone-300 italic'"
+        class="font-normal"
+        data-testid="agent-runtime-status-label"
+      >{{ displayLabel }}</span><span
+        v-if="elapsedText && displayedStatus.mode !== 'error'"
         class="runtime-status-shimmer text-[12px] text-stone-500 dark:text-stone-300 italic font-normal tabular-nums"
         data-testid="agent-runtime-status-elapsed"
       >{{ elapsedText }}</span>

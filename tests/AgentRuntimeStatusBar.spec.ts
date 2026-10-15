@@ -63,4 +63,24 @@ describe("AgentRuntimeStatusBar", () => {
     // 验证去除 animate-pulse
     expect(classList).not.toContain("animate-pulse");
   });
+
+  it("handles error mode with alert icon and distinct text styling", () => {
+    const status: AgentRuntimeStatus = {
+      mode: "error",
+      label: "响应超时，已停止等待",
+      startTime: null,
+    };
+
+    const wrapper = mount(AgentRuntimeStatusBar, {
+      props: { status },
+    });
+
+    const label = wrapper.find('[data-testid="agent-runtime-status-label"]');
+    expect(label.text()).toBe("响应超时，已停止等待");
+    expect(label.classes()).toContain("text-rose-600");
+
+    const icon = wrapper.find('[data-testid="agent-runtime-status-icon"]');
+    expect(icon.exists()).toBe(true);
+    expect(icon.classes()).not.toContain("snake-spinner");
+  });
 });

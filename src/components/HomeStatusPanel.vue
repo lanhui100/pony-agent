@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import {
-  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Check,
@@ -28,9 +27,6 @@ defineProps<{
   showContextUsage: boolean;
   contextDisplayTokens: number | null;
   contextWindowTokens: number | null;
-  statusSummary: string;
-  fallbackReason: string | null;
-  error: string | null;
 }>();
 
 const emit = defineEmits<{ copySessionId: [] }>();
@@ -89,8 +85,8 @@ function formatTokenSpeed(value?: number | null) {
       </div>
     </div>
 
-    <section class="border-t border-stone-200/60 pt-3 mt-3 space-y-1">
-      <div class="rounded-[0.45rem] bg-[#f6f0e8] px-3 py-2 space-y-1.5">
+    <section class="border-t border-stone-200/60 pt-3 mt-3">
+      <div class="rounded-[0.45rem] bg-[#f6f0e8] px-3 py-2">
         <!-- Token metrics -->
         <div class="flex items-center justify-around text-[11px] leading-5 text-stone-600">
           <Tooltip text="输入">
@@ -118,36 +114,6 @@ function formatTokenSpeed(value?: number | null) {
               {{ formatTokenSpeed(tokenGenerationSpeed) }}
             </span>
           </Tooltip>
-        </div>
-      </div>
-
-      <!-- Session status messages -->
-      <div
-        v-if="statusSummary || fallbackReason || error"
-        class="border-t border-stone-200/60 pt-1"
-      >
-        <div class="space-y-0.5">
-          <div
-            v-if="statusSummary"
-            class="flex items-start gap-1.5 text-[11px] leading-4 text-stone-600"
-            data-testid="status-session-summary"
-          >
-            {{ statusSummary }}
-          </div>
-          <p
-            v-if="fallbackReason"
-            class="flex items-start gap-1.5 text-[11px] leading-4 text-amber-800"
-          >
-            <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
-            <span>{{ fallbackReason }}</span>
-          </p>
-          <p
-            v-if="error"
-            class="flex items-start gap-1.5 text-[11px] leading-4 text-rose-700"
-          >
-            <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0 text-rose-500" />
-            <span>{{ error }}</span>
-          </p>
         </div>
       </div>
     </section>

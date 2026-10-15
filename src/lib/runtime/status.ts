@@ -7,7 +7,8 @@ export type AgentRuntimeMode =
   | "tool_drafting"
   | "executing_tool"
   | "waiting_approval"
-  | "retrying";
+  | "retrying"
+  | "error";
 
 export interface AgentRuntimeStatus {
   mode: AgentRuntimeMode;

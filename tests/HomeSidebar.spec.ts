@@ -425,7 +425,7 @@ describe("HomeSidebar", () => {
     expect(turnCountStub?.textContent?.trim()).toBe("2");
   }, 10000);
 
-  it("将会话状态收敛到右侧状态栏", async () => {
+  it("状态面板不再承载会话操作状态（已收敛到底部状态栏）", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: "switching"
@@ -434,10 +434,11 @@ describe("HomeSidebar", () => {
     const wrapper = await mountSidebar();
     await flushAll();
 
-    expect(wrapper.get('[data-testid="status-session-summary"]').text()).toContain("正在切换对话");
+    expect(wrapper.find('[data-testid="status-session-summary"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("正在切换对话");
   });
 
-  it("状态面板保持紧凑布局，受控状态归入消息区", async () => {
+  it("状态面板保持紧凑布局，受控状态与会话状态均归入底部状态栏", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: "switching",
@@ -473,8 +474,8 @@ describe("HomeSidebar", () => {
     expect(statusPanelText).not.toContain("Long-term memory");
     expect(statusPanelText).not.toContain("Goal:");
     expect(statusPanelText).not.toContain("Last file:");
-
-    expect(wrapper.get('[data-testid="status-session-summary"]').text()).toContain("正在切换对话");
+    expect(statusPanelText).not.toContain("正在切换对话");
+    expect(wrapper.find('[data-testid="status-session-summary"]').exists()).toBe(false);
   });
 
   it("状态面板中的 token 标签不显示总计字样", async () => {

@@ -25,11 +25,7 @@ const hasPlanOrTasks = computed(
 );
 
 const {
-  error,
-  fallbackReason,
-  sessionError,
-  sessionId,
-  sessionOperation
+  sessionId
 } = storeToRefs(runtimeStore);
 
 const activePanel = ref<"plan" | "">("");
@@ -49,26 +45,6 @@ const {
   sessionTurnCount,
   showContextUsage
 } = useTraceProjection({ liveTurnEnabled: ref(true) });
-
-const sessionStatusSummary = computed(() => {
-  if (sessionOperation.value === "initializing") {
-    return "正在加载最近对话…";
-  }
-
-  if (sessionOperation.value === "switching") {
-    return "正在切换对话…";
-  }
-
-  if (sessionOperation.value === "deleting") {
-    return "正在删除对话…";
-  }
-
-  if (sessionError.value?.trim()) {
-    return sessionError.value.trim();
-  }
-
-  return "";
-});
 
 function togglePlan() {
   activePanel.value = activePanel.value === "plan" ? "" : "plan";
@@ -106,9 +82,6 @@ onBeforeUnmount(() => {
           :show-context-usage="showContextUsage"
           :context-display-tokens="contextDisplayTokens"
           :context-window-tokens="currentContextWindowTokens"
-          :status-summary="sessionStatusSummary"
-          :fallback-reason="fallbackReason"
-          :error="error"
           :class="hasPlanOrTasks ? 'border-b border-stone-200/70 pb-4' : ''"
           @copy-session-id="copyText('session-id', sessionId)"
         />

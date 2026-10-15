@@ -421,6 +421,41 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     },
     agentRuntimeStatus(state): AgentRuntimeStatus | null {
       if (!state.isSubmitting) {
+        if (state.sessionOperation === "initializing") {
+          return {
+            mode: "connecting",
+            label: "正在加载最近对话…",
+            startTime: null
+          };
+        }
+        if (state.sessionOperation === "switching") {
+          return {
+            mode: "connecting",
+            label: "正在切换对话…",
+            startTime: null
+          };
+        }
+        if (state.sessionOperation === "deleting") {
+          return {
+            mode: "connecting",
+            label: "正在删除对话…",
+            startTime: null
+          };
+        }
+        if (state.sessionError?.trim()) {
+          return {
+            mode: "error",
+            label: state.sessionError.trim(),
+            startTime: null
+          };
+        }
+        if (state.error?.trim() && state.messages.length > 0) {
+          return {
+            mode: "error",
+            label: state.error.trim(),
+            startTime: null
+          };
+        }
         return null;
       }
       const activeAssistantMessage = state.activeTurnId
@@ -703,9 +738,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         );
       assistantMessage.status = "error";
       assistantMessage.errorDetail = "submission_watchdog_timeout";
-      // 确保 content 非空，以便进入历史与模型上下文（buildTurnHistory 过滤空 content）
-      if (!assistantMessage.content || assistantMessage.content.trim().length === 0) {
-        assistantMessage.content = "运行超时：长时间未收到终态事件，已强制解锁。";
+      // 保持消息流纯净：严禁向助手消息内容注入工程内部看门狗文案，保持已接收流式片段或留空
+      if (!assistantMessage.content) {
+        assistantMessage.content = "";
       }
       this.messageRevision = null;
 
@@ -792,7 +827,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.activeTurnId = null;
       this.activeRunId = null;
       this.phase = "failed";
-      this.error = "运行超时：长时间未收到终态事件，已强制解锁。";
+      this.error = "响应超时，已停止等待";
       this.persistHistory();
     },
     clearSubmissionWatchdog() {

@@ -99,4 +99,42 @@ describe("Message Flow Bottom Status Integration", () => {
 
     expect(wrapper.find('[data-testid="workspace-runtime-status-slot"]').exists()).toBe(false);
   });
+
+  it("renders status indicator for session operations (e.g. switching session)", () => {
+    const runtimeStatus: AgentRuntimeStatus = {
+      mode: "connecting",
+      label: "正在切换对话…",
+      startTime: null,
+    };
+
+    const wrapper = mount(MessageFlowMock, {
+      props: {
+        messages: [{ id: "msg-1", content: "前次对话" }],
+        runtimeStatus,
+      },
+    });
+
+    const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
+    expect(statusSlot.exists()).toBe(true);
+    expect(statusSlot.find('[data-testid="agent-runtime-status-label"]').text()).toBe("正在切换对话…");
+  });
+
+  it("renders status indicator for error status at the bottom", () => {
+    const runtimeStatus: AgentRuntimeStatus = {
+      mode: "error",
+      label: "响应超时，已停止等待",
+      startTime: null,
+    };
+
+    const wrapper = mount(MessageFlowMock, {
+      props: {
+        messages: [{ id: "msg-1", content: "长时任务" }],
+        runtimeStatus,
+      },
+    });
+
+    const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
+    expect(statusSlot.exists()).toBe(true);
+    expect(statusSlot.find('[data-testid="agent-runtime-status-label"]').text()).toBe("响应超时，已停止等待");
+  });
 });

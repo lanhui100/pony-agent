@@ -5760,8 +5760,9 @@ describe("runtime session resilience", () => {
       const assistant = store.messages.find((message) => message.id === "assistant-watch");
       expect(assistant?.status).toBe("error");
       expect(assistant?.errorDetail).toBe("submission_watchdog_timeout");
-      // 核心断言 1：content 为空时必须填入兜底错误提示，确保后续 buildTurnHistory 不被过滤而进入上下文
-      expect(assistant?.content).toContain("超时");
+      // 核心断言 1：消息流必须保持纯净，绝不能填入"运行超时：长时间未收到终态事件，已强制解锁。"
+      expect(assistant?.content).toBe("");
+      expect(store.error).toBe("响应超时，已停止等待");
       // 核心断言 2：traceTimeline 必须被终态收敛，call_model 不能悬挂在 active/calling_model 状态
       const callModel = store.traceTimeline.find((entry) => entry.kind === "call_model");
       expect(callModel?.state).toBe("error");
@@ -9214,8 +9215,9 @@ describe("submission watchdog acceptance (red-phase)", () => {
       const assistant = store.messages.find((m) => m.id === "turn-watch-t2-assistant");
       expect(assistant?.status).toBe("error");
       expect(assistant?.errorDetail).toBe("submission_watchdog_timeout");
-      expect(assistant?.content).toBeTruthy();
-      expect(assistant?.content).toContain("超时");
+      // 消息流不应注入内部工程文案
+      expect(assistant?.content).toBe("");
+      expect(store.error).toBe("响应超时，已停止等待");
     } finally {
       vi.useRealTimers();
     }
@@ -9232,22 +9234,16 @@ describe("submission watchdog acceptance (red-phase)", () => {
       store.startSubmissionWatchdog("turn-watch-t3");
       vi.advanceTimersByTime(240_000 + 1);
 
-      // 红点：assistant 消息缺失时，当前实现不创建兜底消息 → 错误完全丢失 → 此断言失败（红）。
+      // 红点：assistant 消息缺失时，当前实现创建兜底消息保持状态对齐
       const fallback = store.messages.find((m) => m.turnId === "turn-watch-t3" && m.role === "assistant");
       expect(fallback).toBeDefined();
       expect(fallback?.status).toBe("error");
       expect(fallback?.errorDetail).toBe("submission_watchdog_timeout");
-      expect(fallback?.content).toBeTruthy();
-      expect(fallback?.content).toContain("超时");
+      expect(fallback?.content).toBe("");
 
       expect(store.isSubmitting).toBe(false);
       expect(store.phase).toBe("failed");
-
-      // 错误必须随 buildTurnHistory 进入模型上下文（issue：assistant 缺失时错误完全丢失）
-      const history = buildTurnHistory(store.messages);
-      expect(
-        history.some((m) => m.role === "assistant" && m.status === "error" && m.content.includes("超时"))
-      ).toBe(true);
+      expect(store.error).toBe("响应超时，已停止等待");
     } finally {
       vi.useRealTimers();
     }
