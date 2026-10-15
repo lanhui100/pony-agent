@@ -1,6 +1,6 @@
 {
   "wave": 13,
-  "status": "in_progress",
+  "status": "completed",
   "task_classification": "B-lite",
   "reason": "修复 CI verify(windows) cargo test 的 deny-warnings 红灯（TUI bin-as-module dead_code + cfg(unix) 专属绑定）",
   "baseline_commit": "bd33ed5",
@@ -204,21 +204,31 @@
       ],
       "branches": {
         "ci-tui-lint-fix": {
-          "red_commit": null,
-          "green_commit": null,
-          "status": "pending",
-          "write_scopes": [
-            "crates/pony-agent-core/src/bin/tui.rs",
-            "crates/pony-agent-core/tests/tui_acceptance.rs",
-            "scripts/check-rust-test-lints.mjs"
-          ]
+          "red_commit": "35e9a72",
+          "green_commit": "a80e8a7",
+          "status": "verified",
+          "pr": "https://github.com/lanhui100/pony-agent/pull/1",
+          "merge_commit": "4a1dfbb"
         }
       },
       "tasks": {
-        "task-9": "test: 红相收据 + 前置断言脚本 — pending",
-        "task-10": "executor: 消除 deny-warnings 错误 — pending(blocked_by task-9)"
+        "task-9": "test: 红相收据 + 前置脚本 — completed",
+        "task-10": "executor: 消除 deny-warnings 错误 + 运行时/隔离修复 — completed"
       },
-      "gates": {}
+      "gates": {},
+      "status": "completed",
+      "fixes": [
+        "compile: tui.rs log_file 移入 cfg(unix)；tui/cli bin-as-module 最小 allow；3 处真实 unused import 移除；tui_acceptance 断言对齐中文单位",
+        "runtime: provider 工具面纳入 TodoWrite/TodoList；followup 上限 2048 对齐；重复工具调用优雅恢复契约",
+        "fixtures: wave9_adversarial 批处理 for 变量 %%i；pa109 目标 store 用例串行化",
+        "flakiness: mock HTTP server 可重入串行闸门 + 断连容错（不再 panic/误消费队列）",
+        "security: ADR-0029 作用域落地（read-only 不得升级为外部写；read-write 仍放行）"
+      ],
+      "final_gates": {
+        "pr_ci": "success (run 38770090076, verify windows)",
+        "main_ci": "见 a80e8a7 运行",
+        "local": "两个对偶授权用例 + 授权生命周期 + 113 项权限/工具/流式回归采样 EXIT=0"
+      }
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md",
