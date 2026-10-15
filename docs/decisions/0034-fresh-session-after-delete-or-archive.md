@@ -27,3 +27,11 @@ Status: implemented
 - **契约**：`.dev-team/contracts/wave-12-session-fallback.md`（C1–C7）与断言 A1–A7；`tests/runtime-store.spec.ts` 中编码旧契约的 4 个用例按新契约改写（含删除「fallback 载入失败」错误分支覆盖——该分支已随链路删除）。
 - **不变项**：非当前会话的删除/归档不导航；归档项仍留在 `sessionList` 且 `archived === true`（unarchive 依赖）；归档内容持久化不被清空；失败仍走 `restoreSessionRuntimeSnapshot` 回滚；侧栏过滤/显示策略、`switchSession`/`loadSessionState` 语义、Rust 后端契约均未改动。
 - **行为差异**：删除/归档当前会话后 `sessionId` 变为新 `pa_*` id（不再回退 `DEFAULT_SESSION_ID`）；工作区回到空态「我能帮你做些什么？」；侧栏出现「新对话 / 未保存」行。
+
+## 补记（wave-12.1，2026-10-15）：冷启动同族落点
+
+同一决定扩展到冷启动路径。真实浏览器复现（`.dev-team/evidence/repro-cold-start-archived.mjs`）：归档当前会话后**整页重载**，应用回到被归档会话并恢复其历史消息——与本次要修的症状同族。
+
+根因：`sessionList` 含 `archived` 项且按 `updatedAtMs` 降序，而两处初始化落点直接取 `sessionList[0]`（`src/stores/runtime.ts` 的 `preferredSessionId`、`src/lib/runtime/sessions.ts` 的 `deriveInitStrategy`）。另有第三处：当落点 id 恰好是被归档会话时，其本地持久化非空会命中 `deriveInitStrategy` 的 `persisted != null` 早退分支，因此仅改两处落点仍会打开已归档会话。
+
+因此新增契约条款 **C8**（`.dev-team/contracts/wave-12-session-fallback.md` §6）：冷启动/初始化选择落点必须跳过 `archived === true`；存在未归档会话时取其中最新者；**全部已归档或无会话**时进入全新空白会话。实现：`pickPreferredSessionId` / `hasSelectableSession` 两个纯函数 + `initializeSessions` 的「存在会话但全部已归档 → `enterFreshSession()`」早退分支（复用同一决定下的既有 helper）。
