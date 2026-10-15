@@ -1,10 +1,10 @@
 {
-  "wave": 11,
-  "status": "completed",
+  "wave": 12,
+  "status": "in_progress",
   "task_classification": "B-lite",
-  "reason": "桌面端消息流下方状态条：图标动效替换、布局突变消除、streaming 期间隐藏与平滑上推；纯前端呈现层，3 文件写域",
-  "baseline_commit": "018bcdc",
-  "symptom": "状态条位于滚动内容列内并被流式增长内容反复推挤：实测 3s 流式期间状态条视口 Y 出现 44 次方向反转、稳态 ±23.8px 抖动；streaming 期间仍显示状态消息",
+  "reason": "删除/归档当前对话后的落点策略改为一律进入全新空白会话（会话生命周期状态机；无外部 IO）",
+  "baseline_commit": "4e4942e",
+  "symptom": "归档当前会话会 switchSession(remaining[0])（可能切到已归档会话）；删除当前会话在单会话时 fallback 计算落到被删会话自身（sessionList[0]），多会话时切到历史会话",
   "waves": {
     "9": {
       "branches": {
@@ -143,6 +143,27 @@
         "docs/release/2026-10-15-pa-status-flow/README.md",
         ".dev-team/meta-retrospective.md"
       ]
+    },
+    "12": {
+      "contract": ".dev-team/contracts/wave-12-session-fallback.md",
+      "decision": "用户裁定方案 A：一律进入全新空白会话",
+      "branches": {
+        "session-fallback-fresh-session": {
+          "red_commit": null,
+          "green_commit": null,
+          "status": "pending",
+          "write_scopes": [
+            "src/stores/runtime.ts",
+            "src/lib/runtime/sessions.ts",
+            "tests/"
+          ]
+        }
+      },
+      "tasks": {
+        "task-5": "test: 红相契约+旧契约改写+浏览器链路 — in_progress",
+        "task-6": "executor: store 落点逻辑 — pending(blocked_by task-5)"
+      },
+      "gates": {}
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md",
