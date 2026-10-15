@@ -1,6 +1,6 @@
 {
   "wave": 12,
-  "status": "in_progress",
+  "status": "completed",
   "task_classification": "B-lite",
   "reason": "删除/归档当前对话后的落点策略改为一律进入全新空白会话（会话生命周期状态机；无外部 IO）",
   "baseline_commit": "4e4942e",
@@ -149,24 +149,51 @@
       "decision": "用户裁定方案 A：一律进入全新空白会话",
       "branches": {
         "session-fallback-fresh-session": {
-          "red_commit": null,
-          "green_commit": null,
-          "status": "pending",
-          "write_scopes": [
-            "src/stores/runtime.ts",
-            "src/lib/runtime/sessions.ts",
-            "tests/"
-          ]
+          "red_commit": "ef6ae24",
+          "green_commit": "6d64ffd",
+          "ledger_commit": "cb12358",
+          "status": "verified",
+          "fix_scope": "src/stores/runtime.ts, src/lib/runtime/sessions.ts"
         }
       },
       "tasks": {
         "task-5": "test: 红相契约+旧契约改写+浏览器链路 — in_progress",
         "task-6": "executor: store 落点逻辑 — pending(blocked_by task-5)",
-        "task-7": "test: wave-12.1 冷启动归档落点红相 — pending",
-        "task-8": "executor: preferredSessionId/deriveInitStrategy 归档过滤 — pending(blocked_by task-7)"
+        "task-7": "test: wave-12.1 冷启动红相 — completed",
+        "task-8": "executor: preferredSessionId/deriveInitStrategy 归档过滤 + all-archived 早退分支 — completed",
+        "task-9": "test: T-g all-archived store 级判别力加固（红绿证明）— completed"
       },
       "gates": {},
-      "contract_evolution": "wave-12.1: 冷启动落点跳过已归档会话（C8/A8-A10），Lead 已浏览器复现"
+      "contract_evolution": "wave-12.1: 冷启动落点跳过已归档会话（C8/A8-A10）— 由独立复审发现、Lead 浏览器复现、红绿锚定后实现",
+      "status": "completed",
+      "final_gates": {
+        "typecheck": "EXIT=0",
+        "unit_tests": "EXIT=0 (78 files / 828 passed / 10 skipped)",
+        "build": "EXIT=0",
+        "e2e_session_fallback": "EXIT=0 (1 passed)",
+        "e2e_cold_start": "EXIT=0 (1 passed)",
+        "receipt": ".dev-team/evidence/final-gates-wave12.log",
+        "frozen_head": "cb12358"
+      },
+      "reviews": {
+        "l3r_wave12": {
+          "verdict": "PASS",
+          "findings": 0
+        },
+        "l3r_wave12_1": {
+          "verdict": "PASS",
+          "findings": 0,
+          "observations": [
+            "all-archived 分支 store 级判别力不足 → 已由 T-g 加固",
+            "首启无会话 vs 全归档侧栏行不对称（既有 UX）"
+          ]
+        }
+      },
+      "deliverables": [
+        "docs/decisions/0034-fresh-session-after-delete-or-archive.md",
+        ".dev-team/contracts/wave-12-session-fallback.md",
+        ".dev-team/meta-retrospective.md"
+      ]
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md",

@@ -1,0 +1,116 @@
+# Wave-12 绿相物理收据 — Executor (task-6)
+
+- 波次：wave-12-session-fallback（PA-SESSION-FALLBACK，用户裁定方案 A）
+- 基线 commit：`4e4942e`（v0.1.144）；红相锚定：`ef6ae24`(tests) + `f98f625`(收据)；契约 `52b7a27`
+- 写域（仅 1 文件）：`src/stores/runtime.ts` +50 / -57（净 -7）
+- 未修改：`tests/**`、契约、`src/lib/runtime/sessions.ts`（未新增导出，现有纯函数已够用）、
+  侧栏组件、Rust 后端、`switchSession`/`loadSessionState` 语义。无 git 写操作。
+
+## 实现摘要（最小闭包）
+
+1. 新增 store action `enterFreshSession(targetWorkspaceId: string = DEFAULT_WORKSPACE_ID)`：
+   `createNextSessionId([原 sessionId, ...sessionList 全部 id])` → `resetSessionRuntimeState()`
+   （内含 `cancelDeferredPersist()`）→ `sessionId = 新 id`、`phase="idle"`、`sessionError=null`、
+   `sessionWorkspaceId=targetWorkspace` → `sessionList = ensureUniqueSessionList([瞬态行, ...filterDeletingSessions(旧列表)])`，
+   瞬态行 = `createTransientSessionOverview(newId)` + `workspaceId = target===DEFAULT ? null : target`。
+   **未调用** `persistHistory()` / `loadSessionState()` / `switchSession()`。
+2. `archiveSession`：`sessionId === 被归档 id` 时，`loadSessionCatalog()` 之后直接 `enterFreshSession()`；
+   删除 `remaining` / `switchSession(remaining[0])` / `DEFAULT_SESSION_ID` 回退分支。
+3. `deleteSession`：`shouldLoadFallbackSession` 为真时，过滤掉 target 后直接 `enterFreshSession()`；
+   删除 `fallbackSessionId` 计算、`loadSessionState(fallback)` 及其 try/catch fallback 错误分支、
+   `sessionWorkspaceId` 同步分支。保留 `deletingActiveEmptySession`、`deletingSessionSet`、
+   `sessionOperation="deleting"` 生命周期、`restoreSessionRuntimeSnapshot` 回滚、
+   `persistedStateToRestore` 回填、`sessionList` 过滤与 `removePersistedSessionState`。
+
+## 门禁收据（原生 EXIT + 关键 stdout）
+
+### ① 验收契约（A1–A6 + C7 边界）
+
+`npx vitest run tests/acceptance/session-fallback-contract.spec.ts` → **EXIT=0**
+
+```
+ ✓ tests/acceptance/session-fallback-contract.spec.ts (7 tests) 32ms
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+```
+覆盖：A1/C1 归档当前（Tauri）、A2/C2 删除当前（Tauri，含「被删项不复活」）、
+A3/C3 非当前不导航、A4/C4 归档内容保全、A5/C5 非 Tauri 本地分支 + C7 空会话边界、
+A6/C6 抛错回滚、A2 边界（唯一空会话删除不停留在被删 id）。
+
+### ② 既有 store 回归（含按新契约改写的用例）
+
+`npx vitest run tests/runtime-store.spec.ts` → **EXIT=0**
+
+```
+ ✓ tests/runtime-store.spec.ts (119 tests) 13777ms
+ Test Files  1 passed (1)
+      Tests  119 passed (119)
+```
+其中 `enters a fresh blank session after deleting the active session (no historical fallback)`
+（旧契约「删除当前会话 → sessionId === session-fallback」已被 Test Agent 按 C2 改写）通过。
+
+### ③ 全量前端单测
+
+`npm run test:unit` → **EXIT=0**
+
+```
+ Test Files  77 passed (77)
+      Tests  822 passed | 10 skipped (832)
+```
+基线比对（`76 files / 815 passed / 10 skipped`）：差值 = **+1 file / +7 tests**，
+精确等于红相新增的 `tests/acceptance/session-fallback-contract.spec.ts`（7 tests）。
+无新增失败、无 pre-existing 失败复现。
+
+### ④ 类型门禁
+
+`npm run typecheck`（`vue-tsc --noEmit`）→ **EXIT=0**（无诊断输出）
+
+### ⑤ 构建
+
+`npm run build` → **EXIT=0**（`✓ built in 2.91s`）
+
+### ⑥ 真实浏览器链路（A7）
+
+`npx playwright test tests/e2e/session-fallback.spec.ts --retries=0` → **EXIT=0**
+
+```
+Running 1 test using 1 worker
+  1 passed (6.6s)
+```
+- 断言：归档当前会话 A → 工作区回到空态「我能帮你做些什么？」且侧栏（未开归档视图）不出现 A；
+  不显示 B 的历史；`Console Error = 0`（测试内以确定性 200 桩替换启动期更新检查外部依赖）。
+- 截图凭据：`.dev-team/evidence/session-fallback-before-archive.png`（归档前）、
+  `.dev-team/evidence/session-fallback-after-archive.png`（归档后）。
+  人工核对：归档后侧栏仅「新对话（未保存）」+「历史会话BRAVO」，中间工作区为空态文案，无 B 历史。
+
+## 结论
+
+6/6 门禁全绿（EXIT=0），A1–A7 全部转绿；A3/A6 结构守卫保持绿（119 项 store 回归无失败）。
+越界校验：`git status` 仅 `src/stores/runtime.ts`（+ 证据截图），未触碰 `tests/**` 与契约。
+
+---
+
+# Wave-12 F12-1 补全（遥测归属一致性）复测
+
+**问题**：`enterFreshSession()` 未重绑 frontend flight recorder，而 `switchSession()` 会
+（`runtime.ts:1842-1843` `bindFrontendRecorderSession(nextSessionId)` + `bindFrontendRecorderTurn(null)`）。
+归档/删除后到下一次提交之间（提交时才在 `:4872` 重绑），诊断事件仍归属已删除/已归档的 sessionId。
+
+**修法（最小，仅 `src/stores/runtime.ts`）**：在 `enterFreshSession` 设置 `this.sessionId = nextSessionId`
+之后补两行（两者已在文件顶部导入，无新增 import）：
+```ts
+bindFrontendRecorderSession(nextSessionId);
+bindFrontendRecorderTurn(null);
+```
+本轮 diff：`src/stores/runtime.ts` 累计 +54/-57（净 -3）。
+
+## 复跑收据（原生 EXIT）
+
+| # | 命令 | EXIT | 关键 stdout |
+| - | :-- | --: | :-- |
+| 1 | `npx vitest run tests/acceptance/session-fallback-contract.spec.ts tests/runtime-store.spec.ts` | 0 | Test Files 2 passed / Tests **126 passed**（7 + 119） |
+| 2 | `npm run test:unit` | 0 | 77 files / **822 passed** / 10 skipped |
+| 3 | `npm run typecheck` | 0 | 无诊断 |
+| 4 | `npx playwright test tests/e2e/session-fallback.spec.ts --retries=0` | 0 | **1 passed (6.9s)**，Console Error = 0 |
+
+（附带 `npm run build` EXIT=0，`✓ built in 3.78s`，e2e preview 前置。）
