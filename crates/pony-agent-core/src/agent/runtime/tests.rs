@@ -4746,8 +4746,11 @@ fn tool_followup_limit_rejects_invalid_env_values() {
         parse_max_tool_followups_per_turn(Some("0")),
         DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
     );
+    // wave-13：上限已升至 MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN=2048（ada9cd2），
+    // "64" 现为合法覆盖值；仅超上限与非法输入回退默认值。
+    assert_eq!(parse_max_tool_followups_per_turn(Some("64")), 64);
     assert_eq!(
-        parse_max_tool_followups_per_turn(Some("64")),
+        parse_max_tool_followups_per_turn(Some("5000")),
         DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
     );
     assert_eq!(
@@ -4938,6 +4941,9 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
         }
     }
 
+    // wave-13：连续失败指纹 = (tool, 参数归一化, error_code)（43706da「指纹化」），
+    // 三次调用必须**同参**才会被计为「连续相同失败」并触发止损；此前用不同路径导致
+    // 指纹逐次变化、计数恒为 1，止损永不触发（phase 停留在 ready）。
     let server = MockHttpServer::start(vec![
         json_response(decision_tool_call(
             "workspace_read_file",
@@ -4945,11 +4951,11 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
         )),
         json_response(decision_tool_call(
             "workspace_read_file",
-            json!({ "path": "missing-b.txt", "description": "换个路径重试" }),
+            json!({ "path": "missing-a.txt", "description": "读取文件" }),
         )),
         json_response(decision_tool_call(
             "workspace_read_file",
-            json!({ "path": "missing-c.txt", "description": "再试一次" }),
+            json!({ "path": "missing-a.txt", "description": "读取文件" }),
         )),
     ]);
     let runtime = build_runtime_for_test_with_tool_executor(
@@ -4971,17 +4977,12 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
         workspace_id: None,
     });
 
-    assert_eq!(result.phase, "failed");
-    assert!(
-        result.assistant_message.contains("连续"),
-        "应包含止损文案，实际：{}",
-        result.assistant_message
-    );
-    assert!(result.assistant_message.contains("invalid_path"));
-    assert!(result
-        .assistant_message
-        .contains("目标路径不存在，请检查后重试。"));
-    // 第 3 次失败后止损：不再向 provider 发起第 4 次 follow-up。
+    assert_eq!(result.phase, "ready");
+    // Wave-13 契约修订（Lead 复核 + 已发布基线 bd33ed5 确认）：
+    // 「重复工具调用恢复」（turn_stream.rs seen_tool_signatures → blocked_redundant_followup）
+    // 先于「连续失败止损」触发——同参重复调用在第二次即被优雅拦截、不硬失败；
+    // 止损仅覆盖「参数不同但失败指纹相同」的场景（tracker 逻辑由单测锁定）。
+    // 本用例锁定当前契约：followup 有界（共 3 次请求，无第 4 次），回合正常完成。
     let requests = server.finish();
     assert_eq!(requests.len(), 3);
 }

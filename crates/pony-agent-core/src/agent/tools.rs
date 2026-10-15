@@ -4091,9 +4091,21 @@ impl ToolRouter {
                     ) {
                         return Ok(permission.canonical);
                     }
-                    // AuthorizedExternal（仅 Read 且命中授权）→ 直接放行。
+                    // AuthorizedExternal 的语义是「只读授权」（AuthorizeStore 无写作用域，
+                    // path_permission.rs 文档「授权清单本轮仅覆盖读」）。
+                    // 仅对 Read 放行；Write 必须拒绝，防止只读授权升级为外部写（写边界击穿，
+                    // wave-13 由 edit_file_rejects_authorized_external_path_with_write_denied 锁定）。
                     if permission.zone == PermissionZone::AuthorizedExternal {
-                        return Ok(permission.canonical);
+                        if purpose == crate::agent::path_permission::PathPurpose::Read {
+                            return Ok(permission.canonical);
+                        }
+                        return Err((
+                            "outside_workspace_write_denied".to_string(),
+                            format!(
+                                "写入路径 {} 位于工作区根与受控临时目录之外，且授权仅覆盖读取，已拒绝写入。",
+                                permission.canonical.display()
+                            ),
+                        ));
                     }
                 }
                 Err(error) => {
