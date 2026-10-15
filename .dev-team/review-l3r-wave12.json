@@ -1,0 +1,81 @@
+{
+  "verdict": "PASS",
+  "findings": [],
+  "reviewedAt": "2026-10-15T09:23:49Z",
+  "reviewer": "test-agent (L3-R independent adversarial review path; not the implementer)",
+  "baseline": {
+    "contract": ".dev-team/contracts/wave-12-session-fallback.md",
+    "contractCommit": "52b7a27",
+    "redPhaseAnchor": ["ef6ae24 (tests)", "f98f625 (red receipts + screenshots)"],
+    "defectBaseline": "4e4942e",
+    "implementationUnderReview": "working tree src/stores/runtime.ts (+54/-57, uncommitted; includes F12-1 recorder rebinding)"
+  },
+  "coverage": {
+    "C1": [
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 116, "evidence": "expectFreshBlankSession(): newId !== replacedId, !previousIds.has(newId), phase==='idle', messages==0, isSubmitting===false, sessionOperation===null, sessionError===null, sessionWorkspaceId===DEFAULT_WORKSPACE_ID, sessionList[0] matchObject{conversationId,title:'新对话',turnCount:0,updatedAtMs:0}" },
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 150, "evidence": "A1 归档当前会话（Tauri）：调用 expectFreshBlankSession + 被归档行 archived===true（:175-177）+ 未调用 load_session_runtime_view（:180）" },
+      { "file": "tests/e2e/session-fallback.spec.ts", "line": 295, "evidence": "A7 真实浏览器复算同一组不变量（sessionWorkspaceId==='default'、瞬态行、archived===true）" }
+    ],
+    "C2": [
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 183, "evidence": "A2 删除当前会话（Tauri）：expectFreshBlankSession（:204）+ 被删项不在 sessionList（:206-209）+ loadPersistedRuntimeState(被删id)===null（:210，即「禁止重新落盘」的机械代理）+ 未调用 load_session_runtime_view（:211）" },
+      { "file": "tests/runtime-store.spec.ts", "line": 1442, "evidence": "改写后的等价断言（sessionId 不在删除前集合、phase idle、messages 空、瞬态行、被删项不在列表、未调用 load_session_runtime_view）" }
+    ],
+    "C3": [
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 214, "evidence": "A3 删除/归档非当前会话 → sessionId / messages(ids) / phase 逐项不变（:236-246）+ 未调用 load_session_runtime_view（:247）" }
+    ],
+    "C4": [
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 250, "evidence": "A4 归档当前会话（Tauri）后 loadPersistedRuntimeState(归档id)?.messages 仍为 ['user:原始问题','assistant:原始回答']（:276-281）" },
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 305, "evidence": "A5 非 Tauri 分支同样复算归档内容保全（:310-313）" }
+    ],
+    "C5": [
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 150, "evidence": "Tauri 分支（isTauriAvailable=true，invoke session_archive/delete_session/list_sessions）" },
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 283, "evidence": "A5 非 Tauri 分支（isTauriAvailable=false，走 archivePersistedSessionState/loadSessionCatalog 本地持久化），断言组与 Tauri 分支同一 helper" }
+    ],
+    "C6": [
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 318, "evidence": "A6 session_archive / delete_session 抛错 → sessionId / messages / phase 回滚，deletingSessionSet==={}，sessionOperation===null（:326-345）" }
+    ],
+    "C7": [
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 348, "evidence": "唯一空会话删除 → sessionId !== 被删 id 且 !== DEFAULT_SESSION_ID，phase idle，messages 空，被删项不在列表（:367-374）" },
+      { "file": "tests/acceptance/session-fallback-contract.spec.ts", "line": 315, "evidence": "A5 后半段：归档后再删除新空会话 → 又一次落入全新会话（连续两次边界）" }
+    ],
+    "A7": [
+      { "file": "tests/e2e/session-fallback.spec.ts", "line": 250, "evidence": "归档 A 后 workspace-empty-state 可见 + 「我能帮你做些什么？」可见（:251）+ 工作区内 A/B 消息计数为 0（:252-259）" },
+      { "file": "tests/e2e/session-fallback.spec.ts", "line": 262, "evidence": "侧栏成对断言：B 标题可见（非空转）+ A 标题计数 0（未开归档视图）" },
+      { "file": "tests/e2e/session-fallback.spec.ts", "line": 306, "evidence": "Console Error === 0（启动期更新检查以 page.route 200 桩替换，非白名单过滤）" }
+    ]
+  },
+  "uncoveredContractClauses": [],
+  "checks": {
+    "1_coverage": "C1–C7 全部有断言覆盖，无遗漏条款。C2 的「禁止重新落盘被删会话」以 loadPersistedRuntimeState(被删id)===null 作机械代理（:210）；C1 的「不得调用 switchSession」以未调用 load_session_runtime_view 作机械代理（:180/:211/:247）。两处均为可失败的真实断言（若实现改回 switchSession/loadSessionState 必红）。",
+    "2_fake_tests": "未发现空转断言。主断言组集中在单一 helper（:116-137），不是只断言 not.toBe(旧值)：同时校验「不在调用前 id 集合」「phase idle」「messages 空」「isSubmitting false」「sessionOperation/sessionError null」「sessionWorkspaceId default」「sessionList[0] 为瞬态行(title/turnCount/updatedAtMs)」。A3/A6 红相即绿但为真实结构守卫：A3 的最小致红改动=去掉 deleteSession 中 `if (!shouldLoadFallbackSession) return` 早退（非当前会话也会被导航）；A6 的最小致红改动=删掉 catch 里的 restoreSessionRuntimeSnapshot / 去掉 archiveSession 的 try 包裹（sessionId/messages 会被改动）。",
+    "3_rewrite": "git diff 52b7a27..HEAD -- tests/runtime-store.spec.ts 逐条核对：4 个用例改写，全部是「旧契约断言 → 新契约断言」的等价替换且断言强度未降低（新增 phase/messages/瞬态行/未调用 load_session_runtime_view）。被删除的「fallback 载入失败 → sessionError」用例属**合理删除**：该分支（deleteSession 内 loadSessionState(fallback) 的 try/catch）已随实现整体移除，新实现 enterFreshSession 为同步纯状态重置、无失败分支；外层错误路径仍由既有用例（delete_session 抛错 → sessionError 含 'delete backend failed'）覆盖，故无净覆盖损失。",
+    "4_regression": "未发现被删/归档会话被重新落盘的路径。① enterFreshSession 不调用 persistHistory/loadSessionState/switchSession；② 其调用的 resetSessionRuntimeState() 首行即 cancelDeferredPersist()（runtime.ts:484），清除可能待触发的 deferredPersistTimerId（scheduleDeferredPersist 的 timeout 体为 persistHistory()，:696-701）；③ persistHistory 一律以 this.sessionId 为目标（:839-841/:888-893），enterFreshSession 之后 this.sessionId 已是新 id，故即便被调用也只会作用到新会话（空消息时 removePersistedSessionState(新id)，无害），不可能复活旧会话；④ deleteSession 的 removePersistedSessionState(target) 仍在最前，非当前会话路径与 `if (!shouldLoadFallbackSession) return {ok:true}` 早退、deletingSessionSet/sessionOperation 生命周期、restoreSessionRuntimeSnapshot 回滚、persistedStateToRestore 回填全部保留。",
+    "5_receipts": "green-phase-wave12.log 的 6 条门禁经独立复跑全部 EXIT=0：acceptance+runtime-store 2 files/126 passed；npm run test:unit 77 files/822 passed/10 skipped；npm run typecheck 无诊断；npm run build ✓ built；npx playwright test tests/e2e/session-fallback.spec.ts 1 passed（dist 17:14 晚于 src 17:12，包含 F12-1）。红相收据 truthful：红相命令 EXIT=1（5 failed|2 passed / 4 failed|115 passed / 9 failed|813 passed / e2e 1 failed），且我本人于实现落地前实测同一组红相结果一致。截图与断言一致：session-fallback-after-archive.png 显示空态「我能帮你做些什么？」+ 侧栏「新对话（未保存）」高亮 + 「历史会话BRAVO」，归档目标 A 不再出现；与 red 相截图（显示会话 B 历史被切入）形成对照。",
+    "6_other_entrypoints": "grep switchSession(/loadSessionState(/fallback 全仓：switchSession 仅剩侧栏用户点击（HomeSessionSidebar.vue:754/:922）；loadSessionState 调用点集中在 initializeSessions(:1593)、switchSession(:1888/:1908/:1920)、initializeSessions 策略分支(:2468/:2487)，删除/归档路径已无。**同类残留（只报告，不修，见 nonFatalObservations[0]）**：initializeSessions 的 preferredSessionId = sessionList[0]（:2453）与 deriveInitStrategy 的 targetSessionId = sessionList[0]（sessions.ts:661）均未过滤 archived，而 sessionList 保留后端全量含 archived 条目（:1072 注释），故冷启动可能落在已归档会话上。该触发路径与「删除/归档落点」无关，不在 C1–C7 范围。"
+  },
+  "independentlyReproduced": [
+    { "command": "npx vitest run tests/acceptance/session-fallback-contract.spec.ts tests/runtime-store.spec.ts", "exit": 0, "summary": "Test Files 2 passed / Tests 126 passed" },
+    { "command": "npm run test:unit", "exit": 0, "summary": "Test Files 77 passed (77) / Tests 822 passed | 10 skipped (832)" },
+    { "command": "npm run typecheck", "exit": 0, "summary": "vue-tsc --noEmit 无诊断输出" },
+    { "command": "npm run build", "exit": 0, "summary": "✓ built in 2.66s" },
+    { "command": "npx playwright test tests/e2e/session-fallback.spec.ts --retries=0", "exit": 0, "summary": "1 passed (6.5s)" }
+  ],
+  "nonFatalObservations": [
+    {
+      "id": "OBS-1",
+      "severity": "non-blocking (out of wave-12 scope; report-only per task item 6)",
+      "file": "src/stores/runtime.ts",
+      "line": 2453,
+      "rule": "冷启动落点未过滤 archived：preferredSessionId = this.sessionList[0]?.conversationId（同族逻辑另见 src/lib/runtime/sessions.ts:661 deriveInitStrategy targetSessionId = sessionList[0]），而 sessionList 保留后端全量条目含 archived（runtime.ts:1072 注释显式说明过滤交由侧栏 deriveSidebarTree 处理）",
+      "counterexample": "sessionList = [A{archived:true, updatedAtMs:3000}, B{archived:false, updatedAtMs:2000}] 且无本地 persisted cache 时启动：preferredSessionId=A → deriveInitStrategy 返回 host-read(A) → 应用直接把已归档会话 A 作为当前会话载入，而侧栏（showArchivedSessions=false）不显示任何高亮行。与 wave-12 修掉的「落到已归档会话」为同一族缺陷，但触发入口是冷启动而非删除/归档，故不阻塞本波次。"
+    },
+    {
+      "id": "OBS-2",
+      "severity": "non-blocking (process/receipt accuracy)",
+      "file": ".dev-team/evidence/green-phase-wave12.log",
+      "line": 0,
+      "rule": "收据「越界校验」行声明 `git status` 仅 src/stores/runtime.ts（+ 证据截图），与实际工作区不符：docs/decisions/0034-fresh-session-after-delete-or-archive.md（新增）与 docs/decisions/README.md（修改）亦被改动，超出契约 §4 声明的 Executor 写域",
+      "counterexample": "git status --porcelain 实测输出含 `M docs/decisions/README.md` 与 `?? docs/decisions/0034-fresh-session-after-delete-or-archive.md`，而 green-phase-wave12.log 的「越界校验」段落未记录。该 ADR 内容经查为合理且必要（仓库 AGENTS.md 要求行为变更须留 ADR，文档含基线复现证据与方案 A–D 取舍），属流程性偏差而非代码缺陷。"
+    }
+  ]
+}

@@ -161,9 +161,12 @@
       },
       "tasks": {
         "task-5": "test: 红相契约+旧契约改写+浏览器链路 — in_progress",
-        "task-6": "executor: store 落点逻辑 — pending(blocked_by task-5)"
+        "task-6": "executor: store 落点逻辑 — pending(blocked_by task-5)",
+        "task-7": "test: wave-12.1 冷启动归档落点红相 — pending",
+        "task-8": "executor: preferredSessionId/deriveInitStrategy 归档过滤 — pending(blocked_by task-7)"
       },
-      "gates": {}
+      "gates": {},
+      "contract_evolution": "wave-12.1: 冷启动落点跳过已归档会话（C8/A8-A10），Lead 已浏览器复现"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md",

@@ -63,3 +63,25 @@
 - **A6**：invoke 抛错 → C6。
 - **A7**：浏览器真实链路（Playwright）：会话 A 有消息 → 归档 A → 工作区显示空态「我能帮你做些什么？」且侧栏不出现 A（未开归档视图）→ 截图 + Console Error = 0。
 - 既有 `tests/runtime-store.spec.ts` 中编码旧契约的断言必须按新契约改写（Test Agent 负责，需在收据中逐条列出）。
+
+## 6. 契约演进 wave-12.1（Lead 一票，2026-10-15）——冷启动落点不得为已归档会话
+
+**触发**：wave-12 独立复审（`.dev-team/review-l3r-wave12.json`）报告同族残留；Lead 已在真实浏览器**复现**（`.dev-team/evidence/repro-cold-start-archived.mjs`）：
+
+1. 干净启动 → 发一条消息（会话 `local-dev-session`）→ 归档当前会话 → 落点正确（全新 `pa_*` 空白会话，空态 ✓）；
+2. **整页重载（冷启动）→ `sessionId` 回到 `local-dev-session`（`archived: true`）并恢复其 2 条历史消息，工作区显示已归档会话内容** —— 与用户原始诉求「而不是已归档的会话」同族同症状。
+
+**根因**：`sessionList` 含 archived 项且按 `updatedAtMs` 降序（`runtime.ts:1085`），而两处初始化落点直接取 `sessionList[0]`：
+- `src/stores/runtime.ts:2451`：`const preferredSessionId = this.sessionList[0]?.conversationId ?? this.sessionId;`
+- `src/lib/runtime/sessions.ts:661`（`deriveInitStrategy`）：`const targetSessionId = sessionList[0]?.conversationId ?? currentSessionId;`
+
+**C8（新增契约）**：冷启动/初始化选择落点会话时必须跳过 `archived === true`：
+- 存在未归档会话 → 选其中 `updatedAtMs` 最大者（即 `sessionList` 中第一个未归档项）；
+- **全部已归档或无会话** → 进入全新空白会话（`phase === "idle"`、`messages` 为空），**不得**打开任何已归档会话。
+
+**A8/A9/A10（新增断言）**：
+- **A8**（store 级）：catalog = [archived A（updatedAt 更高，且有本地缓存）, 未归档 B] → init 后 `sessionId === B` 且 `messages` 为 B 的内容；
+- **A9**（store 级）：catalog 全部 archived → init 后 `messages` 为空、`sessionId` 不等于任何已归档 id、`phase === "idle"`；
+- **A10**（e2e 真实链路）：归档当前会话 → 整页重载 → 工作区**不得**显示被归档会话的历史内容 + Console Error = 0 + 截图。
+
+**写域扩展**：Executor 增加 `src/lib/runtime/sessions.ts`（`deriveInitStrategy` 归档过滤）。
