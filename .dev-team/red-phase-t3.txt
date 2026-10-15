@@ -1,0 +1,28 @@
+   Compiling pony-agent-core v0.1.121 (/home/dm/pony-agent/crates/pony-agent-core)
+    Finished `test` profile [unoptimized] target(s) in 59.77s
+     Running unittests src/lib.rs (target/debug/deps/pony_agent_core-245c439fc1e77f8e)
+
+running 3 tests
+test agent::session::tests::blank_session_non_persistence_r3_truncated_state_stays_persistable ... ok
+test agent::session::tests::blank_session_non_persistence_r1_trace_mutation_must_not_upsert_session_row ... FAILED
+test agent::session::tests::blank_session_non_persistence_r2_real_turn_session_still_persists ... ok
+
+failures:
+
+---- agent::session::tests::blank_session_non_persistence_r1_trace_mutation_must_not_upsert_session_row stdout ----
+[pony-agent][session] loading sessions from SQLite /tmp/pa-blank-np-r1-389439/store.db
+
+thread 'agent::session::tests::blank_session_non_persistence_r1_trace_mutation_must_not_upsert_session_row' (389440) panicked at crates/pony-agent-core/src/agent/session/tests.rs:6626:5:
+assertion `left == right` failed: R1(b)：空白会话经 trace 变更路径后不得在 SQLite sessions 表留下行
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    agent::session::tests::blank_session_non_persistence_r1_trace_mutation_must_not_upsert_session_row
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 1018 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `-p pony-agent-core --lib`
+CARGO_EXIT=101

@@ -6502,3 +6502,238 @@ fn f3_stamp_is_idempotent_noop_for_registered_default_id() {
         Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID)
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T3 红相冻结：空白会话零持久化不变量（RC4 可达性实证）
+//
+// 独立测试者（Test Agent）唯一写权；实施者对本段只读，不得修改。
+// 契约来源：task-3 R1/R2/R3。分级：L2（后端契约 + 真实 SQLite 物理行断言）。
+//
+// 生产事实锚点（逐行复核）：
+//   - store.rs:151-161   SessionStore::new() → SeparateTraceTableMode::WriteSeparate
+//   - store.rs:1884-1928 ensure_session() 在 WriteSeparate 下置 TraceTableAuthoritative
+//   - store.rs:2310-2333 save_to_backend() 有 session_is_persistable 过滤（对照）
+//   - store.rs:2341-2360 save_session_state_to_backend() 首分支**无** session_is_persistable 守卫
+//   - store.rs:2506-2534 persist_session_and_trace_change() 非可持久会话得 Unsupported 后
+//                        **不 return**，继续走到 save_session_to_backend()
+//   - store.rs:4884-4895 session_is_persistable()
+//   - sqlite_session.rs:3262-3290 persist_session_with_trace_mutation() 无条件
+//                        upsert_session_row_tx → INSERT OR REPLACE INTO sessions
+//
+// 本段只新增独立 #[test]，不触碰任何既有测试函数体。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 物理断言辅助：直接打开 SQLite 计数 sessions 表中的目标行（不经过内存投影，
+/// 也不经过 list_sessions 的 session_is_persistable 过滤）。
+fn open_sqlite_session_row_count(db_path: &std::path::Path, session_id: &str) -> i64 {
+    let conn = rusqlite::Connection::open(db_path).expect("打开断言用 SQLite 连接");
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .expect("查询 sqlite_master");
+    if !table_exists {
+        return 0;
+    }
+    conn.query_row(
+        "SELECT COUNT(*) FROM sessions WHERE conversation_id = ?1",
+        [session_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .expect("查询 sessions 表行数")
+}
+
+fn blank_np_temp_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("pa-blank-np-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("创建临时目录");
+    dir
+}
+
+fn blank_np_write_separate_store(db_path: &std::path::Path) -> SessionStore {
+    SessionStore::with_backend(Box::new(
+        crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+            db_path.to_path_buf(),
+            crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+        ),
+    ))
+}
+
+/// R1：空白会话经 trace 变更落库路径后，不得进入 list_sessions，也不得在 SQLite
+/// sessions 表留下物理行。
+#[test]
+fn blank_session_non_persistence_r1_trace_mutation_must_not_upsert_session_row() {
+    let dir = blank_np_temp_dir("r1");
+    let db_path = dir.join("store.db");
+    let session_id = "blank-r1-session";
+
+    let mut store = blank_np_write_separate_store(&db_path);
+
+    // Arrange：生产入口建立全新空会话（WriteSeparate ⇒ TraceTableAuthoritative；
+    // 零 turn / 零 trace / 零 memory / 零 history_nodes）。
+    store.ensure_session(session_id);
+    {
+        let session = store
+            .sessions
+            .get(session_id)
+            .expect("空白会话应已在内存中建立");
+        assert!(
+            session.history.is_empty()
+                && session.turn_trace_history.is_empty()
+                && session.history_nodes.is_empty(),
+            "前置：会话必须是零 history / 零 trace / 零 history_nodes 的空白会话"
+        );
+        assert_eq!(
+            session.trace_migration_state,
+            TraceMigrationState::TraceTableAuthoritative,
+            "前置：WriteSeparate 下新会话应为 TraceTableAuthoritative（ensure_session 语义）"
+        );
+    }
+    assert!(
+        !store
+            .list_sessions()
+            .iter()
+            .any(|s| s.conversation_id == session_id),
+        "前置：空白会话不得出现在 list_sessions"
+    );
+    assert_eq!(
+        open_sqlite_session_row_count(&db_path, session_id),
+        0,
+        "前置：空白会话不得有 SQLite sessions 行"
+    );
+
+    // Act：后台 trace 持久化 worker 的公开落库入口（空 ReplaceAll mutation）。
+    store.persist_trace_mutation_from_worker(
+        session_id,
+        SessionTraceMutation::ReplaceAll {
+            traces: Vec::new(),
+        },
+    );
+
+    // Assert R1(a)：内存目录投影不得包含空白会话。
+    assert!(
+        !store
+            .list_sessions()
+            .iter()
+            .any(|s| s.conversation_id == session_id),
+        "R1(a)：空白会话经 trace 变更路径后仍不得出现在 list_sessions"
+    );
+
+    // Assert R1(b)：真实 SQLite 物理行不得存在。
+    drop(store);
+    assert_eq!(
+        open_sqlite_session_row_count(&db_path, session_id),
+        0,
+        "R1(b)：空白会话经 trace 变更路径后不得在 SQLite sessions 表留下行"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R2 回归护栏：有真实 turn 的会话经**同一条**落库路径后必须仍然持久化，
+/// 防止「补 session_is_persistable 守卫」时把正常会话一并挡掉。
+#[test]
+fn blank_session_non_persistence_r2_real_turn_session_still_persists() {
+    let dir = blank_np_temp_dir("r2");
+    let db_path = dir.join("store.db");
+    let session_id = "real-turn-r2-session";
+
+    let mut store = blank_np_write_separate_store(&db_path);
+
+    // Arrange：写入一个真实 turn 的会话。
+    store.append_turn(Some(session_id), "hello", "reply", None, Vec::new());
+    assert!(
+        store
+            .list_sessions()
+            .iter()
+            .any(|s| s.conversation_id == session_id),
+        "前置：有真实 turn 的会话应可持久化"
+    );
+    assert_eq!(
+        open_sqlite_session_row_count(&db_path, session_id),
+        1,
+        "前置对照：物理断言辅助必须能识别到已落盘行（证明 R1 的 count==0 非空洞）"
+    );
+
+    // Act：与 R1 完全相同的公开落库入口 + 相同的空 mutation 形状。
+    store.persist_trace_mutation_from_worker(
+        session_id,
+        SessionTraceMutation::ReplaceAll {
+            traces: Vec::new(),
+        },
+    );
+
+    // Assert：守卫不得写过头。
+    assert!(
+        store
+            .list_sessions()
+            .iter()
+            .any(|s| s.conversation_id == session_id),
+        "R2：有真实 turn 的会话经同一路径后仍须出现在 list_sessions"
+    );
+    drop(store);
+    assert_eq!(
+        open_sqlite_session_row_count(&db_path, session_id),
+        1,
+        "R2：有真实 turn 的会话必须仍在 SQLite sessions 表中有行"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R3 回归护栏：截断态会话仍须补建 legacy history graph 且保持可持久化
+/// （「截断到初始态仍要落盘」的既有约定，store.rs:3016-3030 与 :4891-4894）。
+#[test]
+fn blank_session_non_persistence_r3_truncated_state_stays_persistable() {
+    let mut store = SessionStore::memory_only();
+    let session_id = "truncated-r3-session";
+
+    // Arrange：真实 turn 会话 → 抹掉 history_nodes，模拟「history 非空但 history_nodes 为空」。
+    store.append_turn(Some(session_id), "hello", "reply", None, Vec::new());
+    {
+        let session = store.sessions.get_mut(session_id).expect("会话应存在");
+        assert!(!session.history.is_empty(), "前置：history 必须非空");
+        session.history_nodes.clear();
+        assert!(
+            session.history_nodes.is_empty(),
+            "前置：history_nodes 必须已清空（截断态）"
+        );
+    }
+
+    // Act：经公开入口触发 ensure_history_graph（snapshot_at 内部调用，store.rs:310-312）。
+    store.snapshot_at(Some(session_id), None, &[]);
+
+    // Assert R3a：changed=true 的可观测效果——为截断态补建 legacy root node。
+    let session = store.sessions.get(session_id).expect("会话应存在");
+    assert!(
+        !session.history_nodes.is_empty(),
+        "R3a：ensure_history_graph 必须为「history 非空但 history_nodes 为空」的截断态补建 legacy root node"
+    );
+    assert!(
+        store
+            .list_sessions()
+            .iter()
+            .any(|s| s.conversation_id == session_id),
+        "R3a：截断态会话必须仍可持久化（出现在 list_sessions）"
+    );
+
+    // Assert R3b：截断到初始态（history 空、trace 空、仅 history graph 非空）仍须可持久化。
+    {
+        let session = store.sessions.get_mut(session_id).expect("会话应存在");
+        session.history.clear();
+        session.turn_trace_history.clear();
+        assert!(
+            !session.history_nodes.is_empty(),
+            "前置：history_nodes 必须非空（截断到初始态）"
+        );
+    }
+    assert!(
+        store
+            .list_sessions()
+            .iter()
+            .any(|s| s.conversation_id == session_id),
+        "R3b：截断到初始态（history/trace 为空、history graph 非空）仍须可持久化"
+    );
+}
