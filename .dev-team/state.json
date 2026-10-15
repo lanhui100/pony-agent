@@ -1,11 +1,42 @@
 {
-  "wave": 9,
+  "wave": 10,
   "status": "completed",
   "task_classification": "B",
-  "reason": "涉及进程生命周期、Windows Job Object、断路器指纹与系统核心 Prompt 契约，跨多模块修改",
-  "baseline_commit": "1530bed",
-  "symptom": "Trace a0fa4c67 反映网络超时与 Windows 9009 语法失误导致命令级联超时卡死，断路器失效，Agent 逃避责任甩包给用户",
+  "reason": "新对话入口可用性缺陷修复与空白新建会话持久化零膨胀保障，涉及前端侧栏及Rust Session持久化层",
+  "baseline_commit": "62d68c4",
+  "symptom": "侧栏顶部新对话及工作区行+在空白新对话时被禁用导致无法点击；后端WriteSeparate模式下存在空白会话SQLite行泄漏",
   "waves": {
+    "10": {
+      "branches": {
+        "new-chat-usability-and-blank-persistence": {
+          "red_commit": "12afca8",
+          "green_commit": "HEAD",
+          "status": "verified",
+          "fix_scope": "src/components/HomeSessionSidebar.vue, src/lib/runtime/sidebar-copy.ts, crates/pony-agent-core/src/agent/session/store.rs"
+        }
+      },
+      "tasks": {
+        "task-1": "test: 前端新对话入口契约红相测试 — completed",
+        "task-2": "executor-fe: 消除侧边栏新对话过度禁用与不对称，文案单源集中 — completed",
+        "task-3": "test: Rust空白会话零持久化红相测试 — completed",
+        "task-4": "executor-be: save_session_state_to_backend补全session_is_persistable守卫 — completed",
+        "task-5": "lead: 汇聚栅栏全量回归+agent-browser E2E+L3-P审核 — completed"
+      },
+      "gates": {
+        "red_phase": {
+          "vitest_acceptance": "4 failed / 3 passed (EXIT=1)",
+          "cargo_test_acceptance": "1 failed / 2 passed (EXIT=101)"
+        },
+        "green_phase": {
+          "vitest_acceptance": "7 passed (EXIT=0)",
+          "npm_test_full": "75 passed / 799 tests passed (EXIT=0)",
+          "vue_tsc": "EXIT=0",
+          "cargo_test_acceptance": "3 passed (EXIT=0)",
+          "cargo_check": "EXIT=0",
+          "e2e_browser": "Console Error=0, Screenshot verified"
+        }
+      }
+    },
     "9": {
       "branches": {
         "ponysentry-trace-a0fa4c67-fix": {

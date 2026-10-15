@@ -498,26 +498,24 @@ const hasPersistableMessages = (list: ChatMessage[]) =>
   );
 
 const canCreateSession = computed(
-  () => !sessionOperation.value && hasPersistableMessages(messages.value)
+  () => !sessionOperation.value
 );
-function canCreateSessionInWorkspace(workspaceId: string): boolean {
-  if (sessionOperation.value) return false;
-  // 若有消息，允许新建；若当前为空白会话且目标工作区不是当前会话工作区，允许重定向到该工作区
-  return hasPersistableMessages(messages.value) || sessionWorkspaceId.value !== workspaceId;
+function canCreateSessionInWorkspace(_workspaceId: string): boolean {
+  return !sessionOperation.value;
 }
 function workspaceRowNewTitle(workspaceId: string): string {
-  if (canCreateSessionInWorkspace(workspaceId)) {
-    return SIDEBAR_COPY.newConversationHere;
+  if (sessionWorkspaceId.value === workspaceId && !hasPersistableMessages(messages.value)) {
+    return SIDEBAR_COPY.workspaceRowAlreadyBlankHint;
   }
-  return "当前已在此工作区的空白新对话中";
+  return SIDEBAR_COPY.newConversationHere;
 }
 const createSessionTitle = computed(() => {
   if (isSubmitting.value) {
-    return "当前对话正在运行；新建空白对话后，运行会转入后台继续。";
+    return SIDEBAR_COPY.newSessionRunningHint;
   }
   return hasPersistableCurrentSession.value
-    ? "新建一个空白对话到默认工作区，并保留当前已存在的历史会话。"
-    : "当前已经是空白新对话，发送首条消息后才会保存到历史。";
+    ? SIDEBAR_COPY.newSessionDefaultHint
+    : SIDEBAR_COPY.newSessionAlreadyBlankHint;
 });
 
 function loadStoredBoolean(key: string, fallback: boolean) {

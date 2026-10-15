@@ -45,7 +45,13 @@ export const SIDEBAR_COPY = {
   confirmFailurePrefix: "操作失败：",
 
   emptyGroupHint: "该工作区暂无对话",
-  emptyTreeHint: "暂无对话；发送第一条消息后会自动保存到当前工作区。"
+  emptyTreeHint: "暂无对话；发送第一条消息后会自动保存到当前工作区。",
+
+  // 新对话操作文案（顶层/折叠/工作区行通用）
+  newSessionRunningHint: "当前对话正在运行；新建空白对话后，运行会转入后台继续。",
+  newSessionDefaultHint: "新建一个空白对话到默认工作区，并保留当前已存在的历史会话。",
+  newSessionAlreadyBlankHint: "当前已经是空白新对话，发送首条消息后才会保存到历史。",
+  workspaceRowAlreadyBlankHint: "当前已在此工作区的空白新对话中"
 } as const;
 
 export function formatSidebarCopy(

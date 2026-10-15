@@ -2340,20 +2340,23 @@ impl SessionStore {
 
     fn save_session_state_to_backend(&self, session_id: &str, session: &SessionState) {
         let prepared = session_state_for_backend(session, self.backend.trace_storage_mode());
-        if matches!(
-            prepared.trace_migration_state,
-            TraceMigrationState::TraceTableAuthoritative
-        ) && matches!(
-            self.backend.persist_session_with_trace_mutation(
-                session_id,
-                &prepared,
-                // PA-090：Authoritative 会话 ReplaceAll 用全量 Union（同主事务路径）。
-                SessionTraceMutation::ReplaceAll {
-                    traces: collect_trace_union(session),
-                },
-            ),
-            SessionBackendMutationResult::Succeeded
-        ) {
+        if session_is_persistable(session)
+            && matches!(
+                prepared.trace_migration_state,
+                TraceMigrationState::TraceTableAuthoritative
+            )
+            && matches!(
+                self.backend.persist_session_with_trace_mutation(
+                    session_id,
+                    &prepared,
+                    // PA-090：Authoritative 会话 ReplaceAll 用全量 Union（同主事务路径）。
+                    SessionTraceMutation::ReplaceAll {
+                        traces: collect_trace_union(session),
+                    },
+                ),
+                SessionBackendMutationResult::Succeeded
+            )
+        {
             return;
         }
         if session_is_persistable(session) && self.backend.upsert_session(session_id, &prepared) {
