@@ -1,0 +1,113 @@
+# Wave-13 绿相物理收据 — Executor (task-10)
+
+- 波次：wave-13-ci-lint（PA-CI-TUI-LINT，deny-warnings 测试目标编译面）
+- 红相锚定：`35e9a72`(冻结门禁脚本) + `7aa7dc0`(红相收据) + `d536d16`(全目标矩阵)
+- 环境指纹：`cargo 1.91.1` / `rustc 1.91.1`（Linux；**无 Windows 工具链**，Windows 专属告警本机不可复现）
+- 写域（4 文件，`git diff --stat` 合计 +24/-9）：
+  - `crates/pony-agent-core/src/bin/tui.rs` +10/-6
+  - `crates/pony-agent-core/tests/cli_acceptance.rs` +7/-1
+  - `crates/pony-agent-core/tests/trace_auto_report_test.rs` +1/-2
+  - `crates/pony-agent-core/tests/tui_acceptance.rs` +6/-0
+- 未修改：`.github/workflows/ci.yml`（未改）、`-D warnings`（未移除）、任何测试目标/用例（未删除、未 ignore）、
+  `tests/**`(TS)、前端源码。无 git 写操作。
+
+## 1. 改动明细（红线合规）
+
+| 文件 | 改动 | 性质 |
+| :-- | :-- | :-- |
+| `src/bin/tui.rs` | `let log_file = log_dir.join("tui-runtime.log");` 由**无条件声明**移入 `#[cfg(unix)] { … }` 块内（现 :1404 块，绑定 :1406） | **真修**（Windows 专属 `unused variable: log_file`） |
+| `tests/cli_acceptance.rs` | **删除** `use cli::{parse_cli_args, CliArgs};` 中的 `CliArgs` → `use cli::parse_cli_args;` | **真修**（真实 unused import，未用 allow 掩盖） |
+| `tests/trace_auto_report_test.rs` | **删除** `AgentTracePayload`（import 列表）与整行 `use serde_json::json;` | **真修**（2 条真实 unused import） |
+| `tests/tui_acceptance.rs` | `mod tui;` 上加 `#[allow(dead_code, unused_imports, unused_variables, unused_mut)]` + 中文理由注释 | bin-as-module 固有产物最小 allow |
+| `tests/cli_acceptance.rs` | `mod cli;` 上加同款最小 allow + 中文理由注释 | 同上 |
+
+未使用 `#![allow(warnings)]`；allow 仅作用于被 include 的 bin 模块内部。
+
+### 红线机械证明：allow 不会掩盖测试文件自身的真实 unused import
+
+两步实验（保留 allow、暂不删除 `CliArgs` 时编译）：
+
+```
+$ RUSTFLAGS="-D warnings" cargo test … --test cli_acceptance --no-run
+error: unused import: `CliArgs`
+  --> crates/pony-agent-core/tests/cli_acceptance.rs:10:27
+error: could not compile `pony-agent-core` (test "cli_acceptance") due to 1 previous error
+EXIT=101
+```
+→ 加 allow 后 12 条 `dead_code` 全部消失，而测试文件自身的 `unused import: CliArgs` **仍然报错**，
+证明 allow 未掩盖真实问题；随后才真正删除该 import。
+
+### Windows 专属 `unused variable: log_file` 的不可复现性与 file:line 依据
+
+- 本机为 Linux（`#[cfg(unix)]` 为真），该告警**不可复现**；改动前 `log_file` 为无条件绑定（旧 :1402），
+  仅在 `#[cfg(unix)]` 分支（旧 :1403-1410）内被读取 → 非 unix 目标必然 `unused variable`。
+- 改动后：绑定位于 `crates/pony-agent-core/src/bin/tui.rs:1406`，其外层 `#[cfg(unix)]` 块起于 :1404；
+  非 unix 目标整块被 cfg 剔除 → **不存在 `log_file` 绑定**，告警在编译期不可能产生。
+- `log_dir`（:1397）仍由无条件语句 `let _ = std::fs::create_dir_all(&log_dir);`（:1401）使用，
+  故非 unix 目标不会新增 `unused variable: log_dir`。
+- 全文件 `cfg` 扫描：4 个写域文件内 `#[cfg(unix)]` 仅此 1 处（`grep -rn "cfg(unix)|cfg(windows)"` 结果唯一），
+  无其它同类「cfg 专属绑定」隐患。
+
+## 2. 门禁收据（原生 EXIT + 关键 stdout）
+
+| # | 命令 | EXIT | 关键 stdout |
+| - | :-- | --: | :-- |
+| ① | `RUSTFLAGS="-D warnings" cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test --package=pony-agent-core --no-run` | **0** | `error` 行数 = **0**；编译 34 个可执行目标（全目标编译面，等价 CI 步骤） |
+| ②a | 同前缀 `--test tui_acceptance --no-run` | **0** | `Finished test profile … in 3.60s`（红相 16 errors → 0） |
+| ②b | 同前缀 `--test cli_acceptance --no-run` | **0** | `Finished … in 3.00s`（红相 13 errors → 0） |
+| ②c | 同前缀 `--test trace_auto_report_test --no-run` | **0** | `Finished … in 3.13s`（红相 2 errors → 0） |
+| ③ | `RUSTFLAGS="-D warnings" cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check --package=pony-agent-core` | **0** | `Finished dev profile … in 0.28s` |
+| ④ | `npm run typecheck` | **0** | 无诊断 |
+| ⑤ | `npm run test:unit` | **0** | 78 files / 828 passed / 10 skipped |
+
+附带守卫：`RUSTFLAGS="-D warnings" cargo check … --bins` → **EXIT=0**（49.02s）：
+证明 bin-as-module 的 allow **未**掩盖真正的 bin 目标告警（bin 目标同样在 `-D warnings` 下零告警）。
+
+## 3. 新发现的 pre-existing 运行时测试失败（超出 task-10 验收面，需 Lead 裁定）
+
+编译面打通后，CI 步骤「Core 单元与集成测试」将**首次真正执行**测试（此前在编译期即失败），
+暴露一处**与本波改动无因果**的历史断言失配：
+
+```
+$ RUSTFLAGS="-D warnings" cargo test … --test tui_acceptance
+test result: FAILED. 19 passed; 1 failed
+thread 'test_elapsed_seconds_formatting' panicked at crates/pony-agent-core/tests/tui_acceptance.rs:575:5:
+assertion `left == right` failed
+  left: "0秒"
+ right: "0s"
+```
+
+- 断言 `assert_eq!(format_elapsed_seconds(0), "0s")` 与实现 `format!("{}秒", secs)`（`src/bin/tui.rs:72-76`）矛盾。
+- **pre-existing 证明**：`git show HEAD:crates/pony-agent-core/tests/tui_acceptance.rs` 第 569-572 行即断言 `"0s"`；
+  `git show HEAD:crates/pony-agent-core/src/bin/tui.rs` 第 72-76 行即返回 `"{}秒"`；
+  本波 `git diff` 对两处**零改动**（`grep -E "format_elapsed_seconds|0s|0秒"` 无命中）。
+- 其余 2 个目标运行时全绿：`cli_acceptance` 5 passed / `trace_auto_report_test` 7 passed。
+- 处置建议（未擅自执行，测试断言归属 Test Agent / Lead）：或按现状实现修订该断言为 `"0秒"` 语义，
+  或恢复实现返回 `"0s"`。**Executor 未改任何断言**。
+
+## 4. 补充：本地全量 `cargo test --package=pony-agent-core`（CI 测试步骤）的局限
+
+为评估「编译打通后 CI 测试步骤是否变绿」，本地额外执行了
+`cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test --package=pony-agent-core`
+（未加 RUSTFLAGS，等价 CI 步骤的运行时面）。结论：**该本地运行不是 Windows CI 的有效代理**，
+其失败集合包含明确的平台专属用例（在 Linux 上必然失败）：
+
+```
+FAILED agent::path_permission::tests::volume_boundary_c_vs_d_is_rejected      # Windows 盘符边界
+FAILED agent::path_permission::tests::win_case_variant_match_and_prefix_confusion  # Windows 大小写路径
+FAILED agent::document_conversion::tests::rejects_paths_outside_workspace
+FAILED agent::provider::tests::{anthropic,openai}_tools_payload_uses_product_tool_surface_for_builtin_tools
+FAILED agent::runtime::tests::start_turn_stream_* / run_turn_*（部分用例 >60s 未收敛）
+```
+
+因此本波只对**平台无关且确定复现**的 `tui_acceptance::test_elapsed_seconds_formatting`
+（§3）作出结论并上报；其余失败不作因果归属，也不在本波处置（超出 task-10 验收面与写域）。
+该本地运行已主动终止（避免无界占用），未产生仓库副作用（仅 `--target-dir` 构建产物）。
+
+=== wave-13 assertion fix red/green (Lead 执行，因独立 Test Agent 连续 3 次子代理失败；机械证明齐全) ===
+RED: cargo test --test tui_acceptance test_elapsed_seconds_formatting → EXIT=101 (left: "0秒" right: "0s")
+GREEN: 同上 → EXIT=0 (1 passed)
+## §6 Lead 收口（2026-10-15）
+- 前置脚本修正：`check-rust-test-lints.mjs` 默认加 `--no-run`（编译面门禁；完整运行面非 Windows 主机不可代理，由 CI 把关）。复跑 → EXIT=0（0 error / 0 dead_code）。
+- 断言对齐（Lead 执行，因独立 Test Agent 连续 3 次子代理失败；机械红/绿证明齐全）：`test_elapsed_seconds_formatting` 4 断言 + 边界用例 `60000→"1分钟"`，红 EXIT=101 → 绿 EXIT=0，全目标 20 passed。
+- 前端门禁：typecheck EXIT=0 / test:unit EXIT=0（78 files / 828 passed / 10 skipped）。
