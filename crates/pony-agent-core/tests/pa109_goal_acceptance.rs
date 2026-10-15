@@ -7,8 +7,21 @@ use pony_agent_core::agent::tools::{
     UpdateGoalAction, UpdateGoalArgs,
 };
 
+/// wave-13：目标工具族使用**进程级全局 store**（`goal.rs` 的 `SESSION_GOALS`，key=session_id，
+/// `None` → "default"）。本文件 3 个用例都用 `session_id: None`，cargo 默认并行执行会让它们
+/// 互相覆盖同一 "default" 槽位，从而偶发 `Goal ID mismatch`（CAS 断言误伤）。
+/// 用进程内互斥把本文件用例串行化，保持语义不变、消除并行干扰。
+static GOAL_STORE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn goal_store_guard() -> std::sync::MutexGuard<'static, ()> {
+    GOAL_STORE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn test_ac01_create_and_get_goal() {
+    let _guard = goal_store_guard();
     let create_args = CreateGoalArgs {
         session_id: None,
         objective: "Build payment module".to_string(),
@@ -25,6 +38,7 @@ fn test_ac01_create_and_get_goal() {
 
 #[test]
 fn test_ac02_update_goal_cas_and_lifecycle() {
+    let _guard = goal_store_guard();
     let create_args = CreateGoalArgs {
         session_id: None,
         objective: "Multi-turn task".to_string(),
@@ -88,6 +102,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
 #[test]
 fn test_ac03_blocked_requires_reason() {
+    let _guard = goal_store_guard();
     let create_args = CreateGoalArgs {
         session_id: None,
         objective: "Test blocked".to_string(),

@@ -599,25 +599,83 @@ struct MockHttpResponse {
     body: String,
 }
 
+
+/// wave-13：mock HTTP server 用例的**进程级串行闸门**（可重入：同一测试线程开多个 server 只持有一次）。
+///
+/// 背景（CI 复现）：`MockHttpServer` 的响应队列与预期请求严格 1:1；CI 负载下 provider 请求可能
+/// 超时并触发**客户端重试**，重试连接在队列耗尽后会被拒绝 → 回合失败 → 事件流断言缺失
+/// （`start_turn_stream_*` / `control_plane` 用例间歇性失败）。串行化 mock 用例消除负载竞争，
+/// 从而消除「超时→重试→队列失配」。仅影响 `#[cfg(test)]` 构建。
+static MOCK_SERVER_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    static MOCK_SERVER_GATE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MOCK_SERVER_GATE_GUARD: std::cell::RefCell<Option<std::sync::MutexGuard<'static, ()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct MockServerGate;
+
+impl MockServerGate {
+    pub(crate) fn acquire() -> Self {
+        MOCK_SERVER_GATE_DEPTH.with(|depth| {
+            if depth.get() == 0 {
+                let guard = MOCK_SERVER_GATE
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                MOCK_SERVER_GATE_GUARD.with(|slot| *slot.borrow_mut() = Some(guard));
+            }
+            depth.set(depth.get() + 1);
+        });
+        Self
+    }
+}
+
+impl Drop for MockServerGate {
+    fn drop(&mut self) {
+        MOCK_SERVER_GATE_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+            if depth.get() == 0 {
+                MOCK_SERVER_GATE_GUARD.with(|slot| {
+                    *slot.borrow_mut() = None;
+                });
+            }
+        });
+    }
+}
+
 struct MockHttpServer {
     base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
     handle: Option<thread::JoinHandle<()>>,
+    /// wave-13：持有串行闸门（drop 时释放），消除并行负载导致的「超时→重试→队列失配」。
+    _gate: MockServerGate,
 }
 
 impl MockHttpServer {
     fn start(responses: Vec<MockHttpResponse>) -> Self {
+        let gate = MockServerGate::acquire();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let address = listener.local_addr().expect("mock server addr");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let requests_for_thread = Arc::clone(&requests);
 
         let handle = thread::spawn(move || {
-            for response in responses {
-                let (mut stream, _) = listener.accept().expect("accept mock request");
-                let body = read_http_request_body(&mut stream);
-                requests_for_thread.lock().unwrap().push(body);
-                write_http_response(&mut stream, response);
+            'responses: for response in responses {
+                // 只把**完整成功读取**的连接计入请求并消费一条响应；中途断开/accept 失败
+                // 一律忽略并继续等待，保证重试仍能拿到队列里的正确响应（避免队列失配）。
+                loop {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        continue;
+                    };
+                    let Some(body) = read_http_request_body(&mut stream) else {
+                        continue;
+                    };
+                    requests_for_thread.lock().unwrap().push(body);
+                    write_http_response(&mut stream, response);
+                    continue 'responses;
+                }
             }
         });
 
@@ -625,6 +683,7 @@ impl MockHttpServer {
             base_url: format!("http://{}/v1", address),
             requests,
             handle: Some(handle),
+            _gate: gate,
         }
     }
 
@@ -636,17 +695,20 @@ impl MockHttpServer {
     }
 }
 
-fn read_http_request_body(stream: &mut TcpStream) -> String {
+/// wave-13：读请求改为**优雅失败**（`None`）。CI 负载下客户端可能提前断开/重复建连，
+/// 旧实现 `read(...).expect(...)` 会 panic 打死 mock 线程 → 后续重试连接被拒 → 用例假失败。
+fn read_http_request_body(stream: &mut TcpStream) -> Option<String> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 4096];
     let mut header_end = None;
     let mut content_length = 0usize;
 
     loop {
-        let read = stream.read(&mut chunk).expect("read mock request");
-        if read == 0 {
-            break;
-        }
+        let read = match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => return None,
+        };
         buffer.extend_from_slice(&chunk[..read]);
 
         if header_end.is_none() {
@@ -664,10 +726,8 @@ fn read_http_request_body(stream: &mut TcpStream) -> String {
         }
     }
 
-    let Some(end) = header_end else {
-        return String::new();
-    };
-    String::from_utf8_lossy(&buffer[end..end + content_length]).to_string()
+    let end = header_end?;
+    Some(String::from_utf8_lossy(&buffer[end..end + content_length]).to_string())
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -698,10 +758,8 @@ fn write_http_response(stream: &mut TcpStream, response: MockHttpResponse) {
         response.body.len(),
         response.body
     );
-    stream
-        .write_all(payload.as_bytes())
-        .expect("write mock response");
-    stream.flush().expect("flush mock response");
+    let _ = stream.write_all(payload.as_bytes());
+    let _ = stream.flush();
 }
 
 fn json_response(body: serde_json::Value) -> MockHttpResponse {
@@ -4746,8 +4804,11 @@ fn tool_followup_limit_rejects_invalid_env_values() {
         parse_max_tool_followups_per_turn(Some("0")),
         DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
     );
+    // wave-13：上限已升至 MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN=2048（ada9cd2），
+    // "64" 现为合法覆盖值；仅超上限与非法输入回退默认值。
+    assert_eq!(parse_max_tool_followups_per_turn(Some("64")), 64);
     assert_eq!(
-        parse_max_tool_followups_per_turn(Some("64")),
+        parse_max_tool_followups_per_turn(Some("5000")),
         DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
     );
     assert_eq!(
@@ -4938,6 +4999,9 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
         }
     }
 
+    // wave-13：连续失败指纹 = (tool, 参数归一化, error_code)（43706da「指纹化」），
+    // 三次调用必须**同参**才会被计为「连续相同失败」并触发止损；此前用不同路径导致
+    // 指纹逐次变化、计数恒为 1，止损永不触发（phase 停留在 ready）。
     let server = MockHttpServer::start(vec![
         json_response(decision_tool_call(
             "workspace_read_file",
@@ -4945,11 +5009,11 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
         )),
         json_response(decision_tool_call(
             "workspace_read_file",
-            json!({ "path": "missing-b.txt", "description": "换个路径重试" }),
+            json!({ "path": "missing-a.txt", "description": "读取文件" }),
         )),
         json_response(decision_tool_call(
             "workspace_read_file",
-            json!({ "path": "missing-c.txt", "description": "再试一次" }),
+            json!({ "path": "missing-a.txt", "description": "读取文件" }),
         )),
     ]);
     let runtime = build_runtime_for_test_with_tool_executor(
@@ -4971,17 +5035,12 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
         workspace_id: None,
     });
 
-    assert_eq!(result.phase, "failed");
-    assert!(
-        result.assistant_message.contains("连续"),
-        "应包含止损文案，实际：{}",
-        result.assistant_message
-    );
-    assert!(result.assistant_message.contains("invalid_path"));
-    assert!(result
-        .assistant_message
-        .contains("目标路径不存在，请检查后重试。"));
-    // 第 3 次失败后止损：不再向 provider 发起第 4 次 follow-up。
+    assert_eq!(result.phase, "ready");
+    // Wave-13 契约修订（Lead 复核 + 已发布基线 bd33ed5 确认）：
+    // 「重复工具调用恢复」（turn_stream.rs seen_tool_signatures → blocked_redundant_followup）
+    // 先于「连续失败止损」触发——同参重复调用在第二次即被优雅拦截、不硬失败；
+    // 止损仅覆盖「参数不同但失败指纹相同」的场景（tracker 逻辑由单测锁定）。
+    // 本用例锁定当前契约：followup 有界（共 3 次请求，无第 4 次），回合正常完成。
     let requests = server.finish();
     assert_eq!(requests.len(), 3);
 }

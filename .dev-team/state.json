@@ -1,10 +1,10 @@
 {
-  "wave": 12,
-  "status": "completed",
+  "wave": 13,
+  "status": "in_progress",
   "task_classification": "B-lite",
-  "reason": "删除/归档当前对话后的落点策略改为一律进入全新空白会话（会话生命周期状态机；无外部 IO）",
-  "baseline_commit": "4e4942e",
-  "symptom": "归档当前会话会 switchSession(remaining[0])（可能切到已归档会话）；删除当前会话在单会话时 fallback 计算落到被删会话自身（sessionList[0]），多会话时切到历史会话",
+  "reason": "修复 CI verify(windows) cargo test 的 deny-warnings 红灯（TUI bin-as-module dead_code + cfg(unix) 专属绑定）",
+  "baseline_commit": "bd33ed5",
+  "symptom": "error: could not compile pony-agent-core (test tui_acceptance) due to 17 previous errors；本地 Linux 复现 16 条（15 dead_code + 汇总行），Windows 多 1 条 unused variable log_file",
   "waves": {
     "9": {
       "branches": {
@@ -194,6 +194,31 @@
         ".dev-team/contracts/wave-12-session-fallback.md",
         ".dev-team/meta-retrospective.md"
       ]
+    },
+    "13": {
+      "contract": ".dev-team/contracts/wave-13-ci-tui-lint.md",
+      "root_cause": "actions-rust-lang/setup-rust-toolchain 默认 RUSTFLAGS=-D warnings；tui_acceptance 把 bin 当模块引入产生 dead_code；tui.rs log_file 仅在 cfg(unix) 内使用",
+      "recon_evidence": [
+        "lead-recon-ci-job-log.txt",
+        "lead-recon-ci-tui-lint.log"
+      ],
+      "branches": {
+        "ci-tui-lint-fix": {
+          "red_commit": null,
+          "green_commit": null,
+          "status": "pending",
+          "write_scopes": [
+            "crates/pony-agent-core/src/bin/tui.rs",
+            "crates/pony-agent-core/tests/tui_acceptance.rs",
+            "scripts/check-rust-test-lints.mjs"
+          ]
+        }
+      },
+      "tasks": {
+        "task-9": "test: 红相收据 + 前置断言脚本 — pending",
+        "task-10": "executor: 消除 deny-warnings 错误 — pending(blocked_by task-9)"
+      },
+      "gates": {}
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md",

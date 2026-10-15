@@ -111,8 +111,11 @@ fn test_adversarial_2_oversized_stdout_timeout_payload_is_intact() {
         .with_sandbox_backend(TestSandboxBackend::available());
 
     // 先灌出约 200KB stdout，再挂起等待超时。
+    // wave-13：Windows 上 Run 会把命令写入 `.cmd` 批处理文件后 `cmd /C <file>` 执行
+    // （tools.rs 的 PA-076 修复），批处理内 for 变量必须写 `%%i`；写成交互式 `%i`
+    // 会让 cmd 立刻报错退出（non_zero_exit），永远走不到超时分支。
     #[cfg(windows)]
-    let command = "for /L %i in (1,1,4000) do @echo wave9-padding-line-0123456789012345678901234567890123456789& ping -n 6 127.0.0.1 >nul";
+    let command = "for /L %%i in (1,1,4000) do @echo wave9-padding-line-0123456789012345678901234567890123456789& ping -n 6 127.0.0.1 >nul";
     #[cfg(not(windows))]
     let command = "yes wave9-padding-line-0123456789012345678901234567890123456789 | head -c 200000; sleep 5";
 

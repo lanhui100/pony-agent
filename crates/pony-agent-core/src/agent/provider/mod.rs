@@ -4653,7 +4653,10 @@ mod tests {
                 "drain_inbox".to_string(),
                 "team_task_create".to_string(),
                 "team_task_update".to_string(),
-                "team_task_list".to_string()
+                "team_task_list".to_string(),
+                // PA-112 todo 工具（ToolExposure::ModelVisible，wave-13 对齐实测表面）。
+                "TodoWrite".to_string(),
+                "TodoList".to_string()
             ]
         );
     }
@@ -4701,7 +4704,10 @@ mod tests {
                 "drain_inbox".to_string(),
                 "team_task_create".to_string(),
                 "team_task_update".to_string(),
-                "team_task_list".to_string()
+                "team_task_list".to_string(),
+                // PA-112 todo 工具（ToolExposure::ModelVisible，wave-13 对齐实测表面）。
+                "TodoWrite".to_string(),
+                "TodoList".to_string()
             ]
         );
         assert!(payload.iter().all(|tool| {
@@ -4715,7 +4721,7 @@ mod tests {
         let last_two = &names[names.len() - 2..];
         assert_eq!(
             last_two,
-            &["team_task_update".to_string(), "team_task_list".to_string()]
+            &["TodoWrite".to_string(), "TodoList".to_string()]
         );
     }
 

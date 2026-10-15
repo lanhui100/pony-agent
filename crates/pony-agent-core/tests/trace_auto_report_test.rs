@@ -8,11 +8,10 @@
 
 use pony_agent_core::agent::ponysentry::{
     build_agent_trace_from_event, is_enabled, is_trace_reportable_terminal,
-    maybe_report_turn_trace, AgentTracePayload, EvalStatus,
+    maybe_report_turn_trace, EvalStatus,
 };
 use pony_agent_core::agent::runtime::TurnStreamEvent;
 use pony_agent_core::agent::telemetry::TurnToolActivity;
-use serde_json::json;
 
 // ==========================================
 // 1. 终态判定策略契约

@@ -1,4 +1,10 @@
+// wave-13：本测试把 `src/bin/tui.rs` 以模块方式 include 进来（bin-as-module），
+// 而 bin 的 `main` 不会被调用，导致该模块内大量仅被 `main` 链路使用的 item 被判为 `dead_code`。
+// 这些 item 在真正的 bin 目标（`cargo check --bins`，同样受 `-D warnings` 约束）中已被完整校验，
+// 故此处仅对「bin-as-module 固有产物」加最小 allow；不使用 `#![allow(warnings)]`，
+// 也不放宽任何测试断言。
 #[path = "../src/bin/tui.rs"]
+#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
 mod tui;
 
 use tui::{MessageRole, TuiState};
@@ -566,10 +572,13 @@ fn test_tui_runtime_mode_state_transitions() {
 
 #[test]
 fn test_elapsed_seconds_formatting() {
-    assert_eq!(tui::format_elapsed_seconds(0), "0s");
-    assert_eq!(tui::format_elapsed_seconds(500), "0s");
-    assert_eq!(tui::format_elapsed_seconds(1250), "1s");
-    assert_eq!(tui::format_elapsed_seconds(65400), "65s");
+    // Wave-13：断言与实现语义对齐（src/bin/tui.rs `format_elapsed_seconds` 使用中文单位，
+    // 与桌面端/前端 formatElapsedSeconds 口径一致）；修复前此处断言英文 "0s" 导致 pre-existing 红灯。
+    assert_eq!(tui::format_elapsed_seconds(0), "0秒");
+    assert_eq!(tui::format_elapsed_seconds(500), "0秒");
+    assert_eq!(tui::format_elapsed_seconds(1250), "1秒");
+    assert_eq!(tui::format_elapsed_seconds(65400), "1分5秒");
+    assert_eq!(tui::format_elapsed_seconds(60000), "1分钟");
 }
 
 
