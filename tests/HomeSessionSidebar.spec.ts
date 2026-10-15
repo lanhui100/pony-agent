@@ -557,7 +557,7 @@ describe("HomeSessionSidebar（管理操作·Tauri 模式）", () => {
     wrapper.unmount();
   });
 
-  it("归档确认文案含不可恢复声明；确认调用 archiveSession", async () => {
+  it("归档确认文案提示可在视图选项中恢复；确认调用 archiveSession", async () => {
     const runtimeStore = seedStandard();
     const spy = vi.spyOn(runtimeStore, "archiveSession").mockResolvedValue({ ok: true });
     const wrapper = mountSidebar();
@@ -565,7 +565,7 @@ describe("HomeSessionSidebar（管理操作·Tauri 模式）", () => {
     rowVm(wrapper, "s-idle").vm.$emit("menu-select", "archive");
     await flushUI();
     const popover = openConfirmOf(wrapper);
-    expect(String(popover.props("description"))).toContain("无法从界面恢复");
+    expect(String(popover.props("description"))).toContain("显示已归档");
     popover.vm.$emit("confirm");
     await flushPromises();
     await flushUI();

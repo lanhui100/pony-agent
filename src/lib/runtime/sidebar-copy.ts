@@ -28,7 +28,7 @@ export const SIDEBAR_COPY = {
 
   archiveTitle: "归档对话",
   archiveDescription:
-    "归档后该对话将从侧边栏消失，当前版本无法从界面恢复（磁盘历史仍在）。",
+    "归档后该对话将从侧边栏隐藏，可在视图选项中切换「显示已归档」随时查看或取消归档。",
   archiveConfirm: "归档对话",
 
   deleteConversationTitle: "删除对话",
