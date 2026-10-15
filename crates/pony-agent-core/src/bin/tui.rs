@@ -1400,6 +1400,7 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
         .join("tui-logs");
     let _ = std::fs::create_dir_all(&log_dir);
     let log_file = log_dir.join("tui-runtime.log");
+    #[cfg(unix)]
     if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
         use std::os::unix::io::AsRawFd;
         let fd = file.as_raw_fd();
