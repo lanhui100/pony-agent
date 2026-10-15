@@ -94,44 +94,49 @@ const displayLabel = computed(() => {
 
 <template>
   <div
-    class="flex items-center gap-1.5 py-1 text-[12px] text-stone-400 w-fit select-none min-h-[24px] italic font-normal"
+    class="flex w-fit max-w-full min-w-0 items-center gap-1.5 whitespace-nowrap py-1 text-[12px] text-stone-400 select-none min-h-[24px] italic font-normal"
     data-testid="agent-runtime-status-bar"
     role="status"
     aria-live="polite"
     aria-atomic="true"
+    :data-mode="displayedStatus.mode"
   >
-    <div class="flex items-center">
+    <div class="flex min-w-0 items-center">
       <AlertCircle
         v-if="displayedStatus.mode === 'error'"
         class="h-3.5 w-3.5 shrink-0 mr-1.5 text-rose-500"
         data-testid="agent-runtime-status-icon"
+        :data-mode="displayedStatus.mode"
       />
-      <!-- 贪吃蛇式的连续旋转动效图标 -->
-      <svg
-        v-else
-        class="h-3.5 w-3.5 shrink-0 mr-1.5 text-stone-400 snake-spinner"
-        viewBox="0 0 16 16"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        data-testid="agent-runtime-status-icon"
-      >
-        <circle
-          cx="8"
-          cy="8"
-          r="6"
-          stroke="currentColor"
-          stroke-width="1.75"
-          stroke-linecap="round"
-          class="snake-spinner-path"
-        />
-      </svg>
+      <!--
+        Wave-11 契约 §2.9：纯 CSS「轨道 + 卫星点」微动效，禁止 JS 定时器/rAF 驱动。
+        根节点 data-testid=agent-runtime-status-icon + 类 runtime-status-orbit，
+        两个直接子节点分别为虚线轨道（慢速反向自转）与卫星点（绕心公转 + 呼吸缩放）。
+      -->
       <span
+        v-else
+        class="runtime-status-orbit relative inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center mr-1.5 text-stone-400"
+        data-testid="agent-runtime-status-icon"
+        :data-mode="displayedStatus.mode"
+        aria-hidden="true"
+      >
+        <span
+          class="runtime-status-orbit-ring"
+          data-testid="agent-runtime-status-orbit-ring"
+        />
+        <span
+          class="runtime-status-orbit-dot"
+          data-testid="agent-runtime-status-orbit-dot"
+        />
+      </span>
+      <span
+        :key="displayLabel"
         :class="displayedStatus.mode === 'error' ? 'text-rose-600 dark:text-rose-400 not-italic' : 'runtime-status-shimmer text-stone-500 dark:text-stone-300 italic'"
-        class="font-normal"
+        class="runtime-status-label-fade min-w-0 truncate font-normal"
         data-testid="agent-runtime-status-label"
       >{{ displayLabel }}</span><span
         v-if="elapsedText && displayedStatus.mode !== 'error'"
-        class="runtime-status-shimmer text-[12px] text-stone-500 dark:text-stone-300 italic font-normal tabular-nums"
+        class="runtime-status-shimmer shrink-0 text-[12px] text-stone-500 dark:text-stone-300 italic font-normal tabular-nums"
         data-testid="agent-runtime-status-elapsed"
       >{{ elapsedText }}</span>
     </div>
@@ -139,38 +144,145 @@ const displayLabel = computed(() => {
 </template>
 
 <style scoped>
-/* 贪吃蛇动效：环形路径伸缩与旋转结合 */
-.snake-spinner {
-  animation: snake-rotate 1.4s linear infinite;
+/* ── 轨道 + 卫星点动效（纯 CSS keyframes） ─────────────────────── */
+.runtime-status-orbit {
+  overflow: visible;
 }
 
-.snake-spinner-path {
-  stroke-dasharray: 28 38;
-  stroke-dashoffset: 0;
-  animation: snake-dash 1.4s ease-in-out infinite;
+.runtime-status-orbit-ring,
+.runtime-status-orbit-dot {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border-radius: 9999px;
+  will-change: transform;
 }
 
-@keyframes snake-rotate {
-  0% {
+.runtime-status-orbit-ring {
+  border: 1px dashed currentColor;
+  opacity: 0.5;
+  animation: runtime-status-orbit-ring-spin 2200ms linear infinite reverse;
+}
+
+.runtime-status-orbit-dot {
+  animation: runtime-status-orbit-dot-orbit 1800ms linear infinite;
+}
+
+.runtime-status-orbit-dot::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  margin-left: -1.5px;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: runtime-status-orbit-dot-breathe 1800ms ease-in-out infinite;
+}
+
+/* data-mode 驱动的节奏差异：思考/等待更慢，工具执行更快（全部落在 1200–2400ms） */
+.runtime-status-orbit[data-mode="connecting"] .runtime-status-orbit-ring {
+  animation-duration: 2400ms;
+}
+
+.runtime-status-orbit[data-mode="connecting"] .runtime-status-orbit-dot {
+  animation-duration: 2200ms;
+}
+
+.runtime-status-orbit[data-mode="thinking"] .runtime-status-orbit-ring {
+  animation-duration: 2200ms;
+}
+
+.runtime-status-orbit[data-mode="thinking"] .runtime-status-orbit-dot {
+  animation-duration: 2000ms;
+}
+
+.runtime-status-orbit[data-mode="responding"] .runtime-status-orbit-ring {
+  animation-duration: 1800ms;
+}
+
+.runtime-status-orbit[data-mode="responding"] .runtime-status-orbit-dot {
+  animation-duration: 1600ms;
+}
+
+.runtime-status-orbit[data-mode="tool_drafting"] .runtime-status-orbit-ring {
+  animation-duration: 1500ms;
+}
+
+.runtime-status-orbit[data-mode="tool_drafting"] .runtime-status-orbit-dot {
+  animation-duration: 1300ms;
+}
+
+.runtime-status-orbit[data-mode="executing_tool"] .runtime-status-orbit-ring {
+  animation-duration: 1400ms;
+}
+
+.runtime-status-orbit[data-mode="executing_tool"] .runtime-status-orbit-dot {
+  animation-duration: 1200ms;
+}
+
+.runtime-status-orbit[data-mode="waiting_approval"] .runtime-status-orbit-ring {
+  animation-duration: 2400ms;
+}
+
+.runtime-status-orbit[data-mode="waiting_approval"] .runtime-status-orbit-dot {
+  animation-duration: 2200ms;
+}
+
+.runtime-status-orbit[data-mode="retrying"] .runtime-status-orbit-ring {
+  animation-duration: 1200ms;
+}
+
+.runtime-status-orbit[data-mode="retrying"] .runtime-status-orbit-dot {
+  animation-duration: 1200ms;
+}
+
+@keyframes runtime-status-orbit-ring-spin {
+  from {
     transform: rotate(0deg);
   }
-  100% {
+
+  to {
     transform: rotate(360deg);
   }
 }
 
-@keyframes snake-dash {
-  0% {
-    stroke-dasharray: 4 34;
-    stroke-dashoffset: 0;
+@keyframes runtime-status-orbit-dot-orbit {
+  from {
+    transform: rotate(0deg);
   }
-  50% {
-    stroke-dasharray: 26 12;
-    stroke-dashoffset: -10;
+
+  to {
+    transform: rotate(360deg);
   }
+}
+
+@keyframes runtime-status-orbit-dot-breathe {
+  0%,
   100% {
-    stroke-dasharray: 4 34;
-    stroke-dashoffset: -38;
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+}
+
+/* ── 标签交叉淡入（≤ 200ms，避免整行闪跳） ────────────────────── */
+.runtime-status-label-fade {
+  animation: runtime-status-label-in 180ms ease-out;
+}
+
+@keyframes runtime-status-label-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
   }
 }
 
@@ -193,6 +305,7 @@ const displayLabel = computed(() => {
   0% {
     background-position: 200% 0;
   }
+
   100% {
     background-position: -200% 0;
   }
@@ -211,18 +324,24 @@ const displayLabel = computed(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .runtime-status-orbit,
+  .runtime-status-orbit * {
+    animation: none !important;
+  }
+
+  .runtime-status-orbit *::after {
+    animation: none !important;
+  }
+
+  .runtime-status-label-fade {
+    animation: none !important;
+  }
+
   .runtime-status-shimmer {
     background: none;
     -webkit-text-fill-color: #78716c;
     color: #78716c;
     animation: none;
   }
-  .snake-spinner {
-    animation: none;
-  }
-  .snake-spinner-path {
-    animation: none;
-  }
 }
 </style>
-

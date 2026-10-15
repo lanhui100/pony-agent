@@ -994,6 +994,34 @@ const shouldShowAgentRuntimeStatus = computed(() => {
   return Boolean(agentRuntimeStatus.value);
 });
 
+/**
+ * Wave-11 契约 §2.3/§2.4：槽位常驻不卸载，仅以 data-visible 切换可见性。
+ * data-visible="false" ⟺ 最后一个可见 turn 的 assistant 为 pending 且已有可见流式内容
+ * 且当前没有 running/planned 工具活动（思考中/工具执行/等待授权/重试/错误/会话操作保持可见）。
+ */
+const isRuntimeStatusVisible = computed(() => {
+  if (!agentRuntimeStatus.value) {
+    return false;
+  }
+
+  const hasActiveToolActivity = runtimeStore.toolActivities.some(
+    (activity) => activity.status === "running" || activity.status === "planned"
+  );
+  if (hasActiveToolActivity) {
+    return true;
+  }
+
+  const latestTurn = visibleTurns.value[visibleTurns.value.length - 1] ?? null;
+  const assistant = latestTurn?.assistant ?? null;
+  if (!assistant || assistant.status !== "pending") {
+    return true;
+  }
+
+  const hasStreamingVisibleContent =
+    assistantHasVisibleContent(assistant) || Boolean(assistant.content.trim());
+  return !hasStreamingVisibleContent;
+});
+
 function hasPendingAssistantPresentationWork() {
   return messages.value.some((message) =>
     message.role === "assistant"
@@ -1694,11 +1722,6 @@ watch(
             :assistant-displayed-reasoning-fade-key="assistantDisplayedReasoningFadeKey"
           />
         </TransitionGroup>
-        <Transition name="status-fade">
-          <div v-if="shouldShowAgentRuntimeStatus && agentRuntimeStatus" class="pt-2 pb-1" data-testid="workspace-runtime-status-slot">
-            <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
-          </div>
-        </Transition>
         <div :style="{ height: COMPOSER_BUFFER_PX + 'px' }" aria-hidden="true"></div>
         <div ref="scrollAnchorRef" aria-hidden="true" class="pointer-events-none" style="height:0;width:0"></div>
       </div>
@@ -1750,6 +1773,33 @@ watch(
             ]"
           ><span class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white">{{ unreadCount > 99 ? '99+' : unreadCount }}</span></span>
         </button>
+      </template>
+      <template #status>
+        <div
+          v-if="shouldShowAgentRuntimeStatus && agentRuntimeStatus"
+          class="pointer-events-none absolute inset-x-0 bottom-full"
+          data-testid="workspace-runtime-status-row"
+        >
+          <div class="mx-auto w-full max-w-[46.4rem] px-4 sm:px-5">
+            <!-- 为右侧 workspace-scroll-to-bottom 按钮预留空间（pr-12 ≈ 3rem） -->
+            <div class="pr-12">
+              <div
+                class="runtime-status-slot w-full min-w-0"
+                data-testid="workspace-runtime-status-slot"
+                :data-visible="isRuntimeStatusVisible ? 'true' : 'false'"
+                :aria-hidden="isRuntimeStatusVisible ? undefined : 'true'"
+                :style="{ pointerEvents: isRuntimeStatusVisible ? 'auto' : 'none' }"
+              >
+                <div
+                  class="runtime-status-slot-inner"
+                  :class="{ 'runtime-status-slot-inner-hidden': !isRuntimeStatusVisible }"
+                >
+                  <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </template>
     </WorkspaceComposer>
   </section>
@@ -1811,6 +1861,11 @@ watch(
     opacity: 1;
     transform: none;
   }
+
+  .runtime-status-slot,
+  .runtime-status-slot-inner {
+    transition: none !important;
+  }
 }
 
 .rollback-progress-overlay {
@@ -1851,14 +1906,33 @@ watch(
   }
 }
 
-:deep(.status-fade-enter-active),
-:deep(.status-fade-leave-active) {
-  transition: opacity 240ms cubic-bezier(0.2, 0, 0.2, 1), transform 240ms cubic-bezier(0.2, 0, 0.2, 1);
+/* Wave-11 §2.3/§2.6：槽位常驻不卸载，仅以 opacity + translateY(≤4px) 200ms ease-out 过渡显隐；
+   translateY 施加在内层，保证槽位自身视口 Y 恒定（M1/M4 极差 ≤ 1px）。 */
+.runtime-status-slot {
+  transition:
+    opacity 200ms ease-out,
+    visibility 0s linear 200ms;
 }
 
-:deep(.status-fade-enter-from),
-:deep(.status-fade-leave-to) {
+.runtime-status-slot[data-visible="true"] {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    opacity 200ms ease-out,
+    visibility 0s linear 0s;
+}
+
+.runtime-status-slot[data-visible="false"] {
   opacity: 0;
+  visibility: hidden;
+}
+
+.runtime-status-slot-inner {
+  transform: translateY(0);
+  transition: transform 200ms ease-out;
+}
+
+.runtime-status-slot-inner-hidden {
   transform: translateY(2px);
 }
 </style>
