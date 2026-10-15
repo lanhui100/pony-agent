@@ -1,0 +1,18 @@
+diff --git a/src/lib/useTimelineAutoScroll.ts b/src/lib/useTimelineAutoScroll.ts
+index cd942ea..3e2908f 100644
+--- a/src/lib/useTimelineAutoScroll.ts
++++ b/src/lib/useTimelineAutoScroll.ts
+@@ -900,9 +900,10 @@ let lastLayoutCompensationAtMs = 0;
+ 
+       const isStreamingAssistantUpdate = isSubmitting.value && latestMessageRole.value === "assistant";
+       const targetMode: ScrollTargetMode = latestMessageRole.value === "user" ? "latest-user" : "anchor";
+-      // 流式更新也使用 smooth (lerp) 而非 auto (instant jump)，
+-      // 避免每 60ms stream tick 瞬间跳转导致的抖动感。
+-      const behavior: ScrollBehavior = "smooth";
++      // Wave-11.1 契约演进（§7）：流式 assistant 更新改用 auto，与 handleMarkdownRenderComplete
++      // 的流式路径统一。smooth(rAF lerp) 会被每次流式事件 cancelScrollLerp() 重启，
++      // 只走完首帧大步长 → 跟随永远滞后（anchorToComposerDistance 稳定 −179~−208px）且单帧跳变。
++      const behavior: ScrollBehavior = isStreamingAssistantUpdate ? "auto" : "smooth";
+       if (isStreamingAssistantUpdate) {
+         lastStreamingFollowQueuedAt = Date.now();
+       }

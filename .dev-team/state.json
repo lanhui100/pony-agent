@@ -84,19 +84,49 @@
       "baseline_evidence": ".dev-team/evidence/baseline-status-flow.json",
       "branches": {
         "status-flow-stability": {
-          "red_commit": null,
-          "green_commit": null,
-          "status": "pending",
+          "red_commit": "2a83ae7",
+          "green_commit": "1aa12d9",
+          "status": "evolution-wave-11.1-reverted",
           "write_scopes": [
             "src/components/chat/AgentRuntimeStatusBar.vue",
             "src/components/chat/WorkspaceComposer.vue",
             "src/components/HomeWorkspace.vue",
             "tests/"
-          ]
+          ],
+          "contract_evolution": "wave-11.1: 流式跟随 smooth→auto + M3 度量良定义化（M3a/M3b/M3c）"
         }
       },
-      "tasks": {},
-      "gates": {}
+      "tasks": {
+        "task-1": "test: 红相验收测试 — completed",
+        "task-2": "executor: 状态条实现（图标/移出滚动流/streaming 隐藏） — completed(待 M3 演进后终验)",
+        "task-3": "test: 契约演进测试侧改动（M3 度量 + Console 确定性 + 滚动用例同步） — in_progress",
+        "task-4": "executor: 流式跟随统一 auto — REVERTED（A/B 实测无收益，patch 存档）"
+      },
+      "gates": {
+        "red_phase": "vitest 10 failed / playwright 3 failed (EXIT=1)",
+        "green_phase_status_bar": "unit EXIT=0 (76 files/812 passed) / typecheck EXIT=0 / build EXIT=0 / e2e M1,M2,M4,M5 绿, M3 红(43px, 度量不良定义)",
+        "m3_root_cause": "follow lerp lag -179~-208px; 单帧 47-48px 追赶爆发",
+        "m3_ab_evidence": ".dev-team/evidence/m3-lag-probe.mjs + .tmp/probe-pre.json/.tmp/probe-post.json（auto 版 M3b 超调 20px vs 原版 0px；滞后峰值 48 vs 47px）"
+      },
+      "contract_evolution": "wave-11.1: M3 度量良定义化（M3a/M3b K=4+8px/M3c 64px）；§7 smooth→auto 经 A/B 实测无因果收益 → 已回退",
+      "review_gates": {
+        "l3a": "FAIL(5 findings)",
+        "l3b": "FAIL(4 findings)",
+        "l3p": "FAIL(3 findings)",
+        "verdict": "rework-wave-11.2"
+      },
+      "fixes": [
+        "F1 mode-consistency",
+        "F2 pointer-events-none",
+        "F3 label-no-flicker",
+        "F4 narrow-viewport-reserve-7.5rem",
+        "F5 icon-ring-contrast>=3:1",
+        "F6 will-change-removed+hidden-pause",
+        "T-a M3a tol 8px",
+        "T-b mode-blind regression test",
+        "T-c narrow-viewport e2e",
+        "T-d final EXIT=0 receipts"
+      ]
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md",
