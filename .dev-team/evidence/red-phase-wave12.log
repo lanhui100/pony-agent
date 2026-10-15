@@ -1,0 +1,91 @@
+# Wave-12 红相收据 — 删除/归档「当前对话」后的落点（PA-SESSION-FALLBACK）
+
+- 角色：Test Agent（L2-T，独立测试者，`task-5`）；**未修改任何 `src/**`、未修改契约文件、未执行 git 写操作**
+- 冻结契约：`.dev-team/contracts/wave-12-session-fallback.md`（C1–C7 / A1–A7）
+- 需求（用户裁定=方案 A）：删除/归档「当前对话」后**一律进入全新空白会话**，不得切换到任何历史会话（含已归档的）。
+- 缺陷基线：`4e4942e`（v0.1.144）。当前 HEAD `52b7a27` = 该 commit + 一条 dev-team 账本提交，
+  `git diff --stat 4e4942e..HEAD -- src/` 为空 → **被测 src 与基线完全一致**。
+- 环境：Linux / Node v22.21.0 / vitest 4.1.9 / @playwright/test 1.60.0 / Chromium 149.0.7827.55
+- 浏览器 e2e 服务：`playwright.config.ts` 自带 webServer `npm run preview:e2e`（@127.0.0.1:4175），未另起同端口
+- 生成时间（UTC）：2026-10-15T08:48:30Z
+
+## 1. 命令与原生 EXIT code
+
+| # | 命令 | 原生 EXIT | 摘要 |
+| :- | :-- | --: | :-- |
+| 1 | `npx vitest run tests/acceptance/session-fallback-contract.spec.ts` | **1** | Test Files 1 failed (1) / Tests **5 failed \| 2 passed** (7) |
+| 2 | `npx vitest run tests/runtime-store.spec.ts` | **1** | Test Files 1 failed (1) / Tests **4 failed \| 115 passed** (119) |
+| 3 | `npm run test:unit` | **1** | Test Files 2 failed \| 75 passed (77) / Tests **9 failed \| 813 passed \| 10 skipped** (832) |
+| 4 | `npx playwright test tests/e2e/session-fallback.spec.ts --retries=0` | **1** | **1 failed**（A7 真实浏览器链路） |
+
+基线对照（task-5 描述）：`npm run test:unit` = 76 files / 815 passed / 10 skipped / EXIT=0。
+差异 = `+1` 文件（新增 acceptance spec，7 用例中 2 通过 5 失败）+ `-4`（既有旧契约用例按新契约改写后转红）→ 813 passed。
+
+## 2. 失败断言清单（须证明 A1/A2/A3/A7 在基线上真实失败）
+
+> 注：任务书要求「A1/A2/A3 与 A7 真实失败」。实测 **A3（非当前会话不导航）在基线上已经是绿的**——
+> 现状代码的 `shouldLoadFallbackSession` 对非当前会话走早退分支，本来就无导航。故 A3 作为**结构守卫**
+> 保留（绿相必须保持绿），红相由 A1/A2/A5/A4 与 A7 承担。此差异如实记录，未人为制造 A3 的假红。
+
+### 2.1 `tests/acceptance/session-fallback-contract.spec.ts`（5 failed / 2 passed）
+
+| 断言 | 契约 | 失败原因（物理观测） |
+| :-- | :-- | :-- |
+| A1 归档当前会话（Tauri） | C1 | `新会话 id 不得出现在调用前的 sessionList 中: expected true to be false` —— 现状 `switchSession(remaining[0])` 把 `sessionId` 切到 `session-other`（**正是调用前 sessionList 里的历史会话**） |
+| A2 删除当前会话（Tauri） | C2 | 同上（切到 `session-other`） |
+| A4 归档后内容保全（含 C1 前置） | C4/C1 | 同上（先触发 C1 失败）；内容保全子断言本身在基线上成立 |
+| A5 非 Tauri 本地分支 | C5 | 同上（切到本地目录中的另一个历史会话） |
+| A2 边界：唯一空会话被删 | C7 | `expected 'local-dev-session' not to be 'local-dev-session'` —— 现状 `fallbackSessionId` 回落到 `sessionList[0]`（**就是被删会话本身**）或 `DEFAULT_SESSION_ID`，`sessionId` 停留在被删 id |
+
+已通过（结构守卫，绿相必须保持通过）：
+- **A3/C3**：删除/归档非当前会话 → `sessionId`/`messages`/`phase` 不变，且不调用 `load_session_runtime_view`
+- **A6/C6**：`session_archive` / `delete_session` 抛错 → `sessionId`/`messages`/`phase` 回滚到调用前快照
+
+### 2.2 既有旧契约用例改写后转红（4 failed）
+
+| 用例（`tests/runtime-store.spec.ts`） | 旧契约断言（改写前） | 新契约断言（改写后） | 基线实测失败信息 |
+| :-- | :-- | :-- | :-- |
+| `loads a fallback session after deleting the active session` → **`enters a fresh blank session after deleting the active session (no historical fallback)`** | `sessionId === "session-fallback"`；`phase === "ready"`；`sessionList === [session-fallback]`；`messages === [user:open fallback, assistant:fallback reply]` | `sessionId ∉ {session-current, session-fallback}`；`phase === "idle"`；`messages === []`；`sessionList[0]` 为瞬态行（`新对话`/`turnCount 0`/`updatedAtMs 0`）；`sessionList` 不含被删项；**未调用 `load_session_runtime_view`** | `expected [ 'session-current', …(1) ] to not include 'session-fallback'` |
+| `删除当前会话后点击新建会话，已删除的会话不会再次显示` | `sessionId === "session-keep"`（删除后切到历史会话） | `sessionId ∉ {session-delete-target, session-keep}`；`phase === "idle"`；`messages === []`；被删项不复活（原断言保留） | `expected 'session-keep' not to be 'session-keep'` |
+| `keeps the fallback target but surfaces an error when fallback loading fails` → **`does not attempt to load a fallback session after deleting the active session`** | `sessionId === "session-fallback"`；`sessionError` 含 `"fallback load failed"`；`sessionList === [session-fallback]` | `sessionId ∉ {session-current, session-fallback}`；`phase === "idle"`；**`sessionError === null`**（不再存在 fallback 载入分支）；`messages === []`；`sessionList[0]` 为瞬态行；**未调用 `load_session_runtime_view`** | `expected 'session-fallback' not to be 'session-fallback'` |
+| `returns from a transient browser-preview session to the saved session when deleted` → **`enters a fresh blank session after deleting a transient browser-preview session`** | `sessionId === "browser-current"`；`phase === "ready"`；`messages === [user:browser message, assistant:browser reply]` | `sessionId ∉ {session-transient, browser-current}`；`phase === "idle"`；`messages === []`；`sessionList[0]` 为瞬态行；`browser-current` **仍在列表中但不得被切入** | `expected 'browser-current' not to be 'browser-current'` |
+
+**未改动**：`tests/runtime-store.spec.ts` 中 :1182（非当前会话删除失败回滚）、:1279（并发非当前删除）、
+:1350（非当前会话乐观移除）等用例本身不编码旧契约，保持原样。
+
+## 3. A7 真实浏览器链路（Playwright，物理凭据）
+
+- 用例：`tests/e2e/session-fallback.spec.ts`（1280×720，vite preview @4175）
+- 场景：预置持久化会话 A（`e2e-wave12-session-alpha`，标题标记 `归档目标ALPHA`）与会话 B（`…bravo`，`历史会话BRAVO`）；
+  侧栏通过 `pony-agent.session-sidebar-collapsed.v1 = "0"` 显式展开（**不依赖侧栏 testid 的可见性假设**）；
+  置当前会话 = A 后执行 `store.archiveSession(A)`（浏览器预览 = 非 Tauri 本地分支）。
+- 失败断言：`expect(page.getByTestId("workspace-empty-state")).toBeVisible()` →
+  `Error: element(s) not found`（EXIT=1）。
+- **物理凭据**：`.dev-team/evidence/session-fallback-after-archive.png`
+  （归档 A 之后：工作区显示的是**会话 B 的历史消息**「这是会话 B 的历史消息，归档 A 后绝不能被切入」，
+  侧栏高亮项为「历史会话BRAVO」，A 已从侧栏消失 → 正是需求所述「切到了历史会话」缺陷的视觉证据）。
+- 另附归档前基线截图：`.dev-team/evidence/session-fallback-before-archive.png`
+- Console Error：本用例在空态断言处失败，尚未执行到 console 断言；绿相必须为 0。
+
+## 4. 测试确定性设计（防 Flaky）
+
+- 全部断言基于 store 状态突变与真实 DOM，无 `sleep` 竞态等待；e2e 用 rAF 帧数等待渲染稳定。
+- e2e 启动期更新检查（`api.github.com` / `s3.local.ponyjob.top`）以 `page.route` 200 桩替换，
+  使「Console Error = 0」确定性成立；**不是**白名单过滤，应用自身 error 仍会导致失败。
+- 侧栏断言成对出现（B 标题可见 + A 标题不可见），避免「侧栏未渲染」造成的空转通过。
+- 每个 store 用例独立 `createPinia()` + `localStorage.clear()`，无跨用例污染。
+
+## 5. 产物落盘
+
+- `tests/acceptance/session-fallback-contract.spec.ts`（新增，7 用例：A1/A2/A3/A4/A5/A6 + C7 边界）
+- `tests/e2e/session-fallback.spec.ts`（新增，A7）
+- `tests/runtime-store.spec.ts`（改写 4 个旧契约用例，逐条见 §2.2）
+- `.dev-team/evidence/session-fallback-before-archive.png`、`session-fallback-after-archive.png`
+- 本收据：`.dev-team/evidence/red-phase-wave12.log`
+
+## 6. 对 Lead 的请求
+
+1. 请以本收据为红相凭证**锚定红相 commit**（当前 HEAD `52b7a27` + 本波次 `tests/`、`.dev-team/` 未提交改动），随后 Executor 方可写 `src/stores/runtime.ts`。
+2. 绿相门禁命令：`npm run test:unit` EXIT=0、`npx playwright test tests/e2e/session-fallback.spec.ts` EXIT=0、`npm run typecheck` EXIT=0。
+3. 请在 Executor 任务书中明确：新会话必须复用 `createTransientSessionOverview`（`title="新对话"`、`turnCount=0`、`updatedAtMs=0`）并置于 `sessionList[0]`，
+   归档项保留 `archived: true`；删除/归档当前会话**不得**调用 `switchSession` / `loadSessionState`。
