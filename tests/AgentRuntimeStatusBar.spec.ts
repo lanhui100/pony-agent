@@ -23,7 +23,7 @@ describe("AgentRuntimeStatusBar", () => {
     expect(wrapper.find('[data-testid="agent-runtime-status-elapsed"]').text()).toMatch(/\d+秒/);
     const icon = wrapper.find('[data-testid="agent-runtime-status-icon"]');
     expect(icon.exists()).toBe(true);
-    expect(icon.classes()).toContain("animate-spin");
+    expect(icon.classes()).toContain("snake-spinner");
   });
 
   it("handles executing tool mode", () => {

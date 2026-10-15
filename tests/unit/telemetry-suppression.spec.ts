@@ -56,4 +56,13 @@ describe("telemetry reportError test environment suppression", () => {
     expect(pruned.input.history).toEqual("[PRUNED_HISTORY: 2 turns]");
     expect(pruned.input.images).toEqual("[PRUNED_IMAGES: 1 items]");
   });
+
+  it("suppresses DIAG and DIAG_STUB diagnostic probe errors in reportError", async () => {
+    const { shouldIgnoreTelemetryError } = await import("@/lib/telemetry");
+    expect(shouldIgnoreTelemetryError("Error: DIAG_STUB_UNIMPLEMENTED:ask_list_pending")).toBe(true);
+    expect(shouldIgnoreTelemetryError("Error: DIAG: sessions.db read failed")).toBe(true);
+    expect(shouldIgnoreTelemetryError("IPC command \"health_check\" failed: Error: DIAG_STUB_UNIMPLEMENTED:health_check")).toBe(true);
+    expect(shouldIgnoreTelemetryError("Network timeout during provider request")).toBe(false);
+    expect(shouldIgnoreTelemetryError("Something crashed")).toBe(false);
+  });
 });

@@ -122,7 +122,7 @@ export function resolveAgentRuntimeStatus(
 
   // 4. 模型回复输出阶段
   if (phase === "calling_model") {
-    if (hasStreamingContent === false) {
+    if (streamingReasoning || hasStreamingContent === false) {
       return {
         mode: "thinking",
         label: "思考中...",

@@ -307,16 +307,33 @@ export function useTraceProjection(options: {
   });
   const showContextUsage = computed(() => !!latestTurn.value);
 
-  // 当前模型生成速度（token/s）：取最近 turn 的最近一次模型调用生成速度，
-  // 缺失时倒序寻找之前有生成速度指标的 turn，保证历史会话切换或多轮对话中稳定展现。
+  // 当前模型生成速度（token/s）：严格取最近一个完成模型调用的生成速度。
+  // 必须只取单次模型调用的实际耗时与实际 outputTokens，严禁流式期间用累计 outputTokens 除以微小延迟导致虚高飙升。
   const sessionTokenGenerationSpeed = computed<number | null>(() => {
     const turns = orderedTurnTraces.value;
     if (!turns.length) {
       return null;
     }
 
+    // 倒序寻找最近一轮包含有效生成速度指标的模型调用
     for (let t = turns.length - 1; t >= 0; t--) {
       const turn = turns[t]!;
+      // 如果当前是流式未结算的活跃轮，且尚未完成该次模型调用（没有稳定的 turnDurationMs），跳过进入已完成轮
+      if (turn.turnId === runtimeActiveTurnId.value && isSubmitting.value) {
+        // 仅当 timeline 中存在已完成（state === 'completed'）的 call_model 条目且带独立耗时时才读取
+        const entries = turnTimelineCache.value.get(turn.turnId) ?? [];
+        for (let i = entries.length - 1; i >= 0; i--) {
+          const entry = entries[i];
+          if (canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.state === "completed") {
+            const speed = entryTokenGenerationSpeed(entry, null);
+            if (speed != null) {
+              return speed;
+            }
+          }
+        }
+        continue;
+      }
+
       const entries = turnTimelineCache.value.get(turn.turnId) ?? [];
       for (let i = entries.length - 1; i >= 0; i--) {
         const entry = entries[i];
@@ -332,17 +349,6 @@ export function useTraceProjection(options: {
       const turnSpeed = turnTokenSpeed(turn);
       if (turnSpeed != null) {
         return turnSpeed;
-      }
-    }
-
-    // 活跃流式中且已有 outputTokens 和耗时指标时（如实时接收到的指标）
-    if (isSubmitting.value && outputTokens.value && outputTokens.value > 0) {
-      const liveDurationMs = firstTokenLatencyMs.value != null && firstTokenLatencyMs.value > 0
-        ? firstTokenLatencyMs.value
-        : null;
-      if (liveDurationMs && liveDurationMs > 0) {
-        const speed = outputTokens.value / (liveDurationMs / 1000);
-        if (Number.isFinite(speed)) return speed;
       }
     }
 

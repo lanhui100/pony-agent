@@ -52,15 +52,22 @@ export async function safeInvoke<T>(command: string, args?: Record<string, unkno
     return await invoke<T>(command, args);
   } catch (err) {
     if (command !== "ponysentry_capture") {
-      addBreadcrumb("ipc", `safeInvoke:${command} failed`, { error: String(err) });
+      const errStr = String(err);
+      addBreadcrumb("ipc", `safeInvoke:${command} failed`, { error: errStr });
+
+      // 诊断与测试桩错误直接静音，不生成 Sentry 垃圾 Issue
+      if (errStr.includes("DIAG_STUB") || errStr.includes("DIAG:")) {
+        throw err;
+      }
+
       // 捕获 IPC 失败异常到 PonySentry (fire-and-forget)
       reportError({
         errorType: "IpcCommandError",
-        message: `IPC command "${command}" failed: ${String(err)}`,
+        message: `IPC command "${command}" failed: ${errStr}`,
         extra: {
           command,
           args: sanitizeIpcArgsForTelemetry(args) as Record<string, unknown>,
-          error: String(err),
+          error: errStr,
         },
         tags: {
           project: "pony-agent",

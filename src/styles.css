@@ -4,7 +4,7 @@
 :root {
   color-scheme: light;
   font-family: "MiSansLatin", "MiSans", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-synthesis: none;
+  font-synthesis: style;
   text-rendering: optimizeLegibility;
 }
 

@@ -232,10 +232,24 @@ export function buildIngestPayload(options: ReportErrorOptions): IngestPayload {
   };
 }
 
+export function shouldIgnoreTelemetryError(message?: string): boolean {
+  if (!message || typeof message !== "string") return false;
+  // 忽略用于离线自测、E2E 诊断以及探针预埋的诊断桩错误，避免污染生产监控
+  if (message.includes("DIAG_STUB") || message.includes("DIAG:")) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * 核心上报方法 (Fire-and-Forget，永不阻塞或抛出异常)
  */
 export async function reportError(options: ReportErrorOptions): Promise<void> {
+  // 过滤内部/E2E诊断探针桩错误
+  if (shouldIgnoreTelemetryError(options.message)) {
+    return;
+  }
+
   // 自动化测试环境严格静音，防止测试模拟异常污染生产/预发 Sentry 监控 (ADR 0028)
   if (
     import.meta.env?.MODE === "test" ||

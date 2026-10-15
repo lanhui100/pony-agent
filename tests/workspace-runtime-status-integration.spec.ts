@@ -85,7 +85,7 @@ describe("Message Flow Bottom Status Integration", () => {
     );
     const icon = statusSlot.find('[data-testid="agent-runtime-status-icon"]');
     expect(icon.exists()).toBe(true);
-    expect(icon.classes()).toContain("animate-spin");
+    expect(icon.classes()).toContain("snake-spinner");
   });
 
   it("does not render status indicator when idle", () => {
