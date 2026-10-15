@@ -2489,6 +2489,8 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
 
     expect(scrollButton.exists()).toBe(true);
+    const composerShell = wrapper.get('[data-testid="workspace-composer-shell"]');
+    expect(composerShell.find('[data-testid="workspace-scroll-to-bottom"]').exists()).toBe(true);
   });
 
   it("keeps streaming assistant text in one streaming flow while content grows", async () => {

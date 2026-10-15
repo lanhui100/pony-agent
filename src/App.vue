@@ -224,7 +224,7 @@ watch(rightSidebarPreferredOpen, (value) => {
               data-testid="home-layout-shell"
             >
               <div class="flex flex-col min-h-0 min-w-0 flex-1">
-                <HomeWorkspace class="min-h-0 flex-1" />
+                <HomeWorkspace :right-sidebar-open="rightSidebarOpen" class="min-h-0 flex-1" />
               </div>
               <div
                 :class="

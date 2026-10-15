@@ -23,6 +23,15 @@ import AgentRuntimeStatusBar from "@/components/chat/AgentRuntimeStatusBar.vue";
 import TurnDial from "@/components/chat/TurnDial.vue";
 import GoalBar from "@/components/GoalBar.vue";
 
+const props = withDefaults(
+  defineProps<{
+    rightSidebarOpen?: boolean;
+  }>(),
+  {
+    rightSidebarOpen: false
+  }
+);
+
 const SYNTHETIC_KEEP_NODE_PREFIX = "synthetic-keep-";
 
 const runtimeStore = useRuntimeStore();
@@ -1698,37 +1707,9 @@ watch(
     <TurnDial
       :turns="visibleTurns"
       :active-turn-id="activeTurnIdForDial"
+      :stick-to-sidebar="rightSidebarOpen"
       @select-turn="handleSelectDialTurn"
     />
-
-    <button
-      v-show="showScrollToBottom"
-      :class="[
-        'absolute right-6 top-1/2 z-20 -translate-y-1/2 flex items-center rounded-full border border-stone-200 bg-white/90 text-[12px] font-medium text-stone-600 backdrop-blur-sm transition-all duration-500 ease-out cursor-pointer',
-        scrollToLatestHovered
-          ? scrollToLatestHoverClass
-          : 'w-[34px] h-[34px] p-0 justify-center gap-0 shadow-[0_2px_8px_rgba(0,0,0,0.08)]'
-      ]"
-      data-testid="workspace-scroll-to-bottom"
-      @click="handleScrollToBottom"
-      @mouseenter="handleScrollToLatestMouseEnter"
-      @mouseleave="handleScrollToLatestMouseLeave"
-    >
-      <ArrowDown class="h-3.5 w-3.5 shrink-0" />
-      <span
-        :class="[
-          'overflow-hidden whitespace-nowrap transition-all duration-500 ease-out',
-          scrollToLatestHovered ? 'max-w-[5em] opacity-100' : 'max-w-0 opacity-0'
-        ]"
-      >滚动到最新</span>
-      <span
-        v-if="unreadCount > 0"
-        :class="[
-          'overflow-hidden whitespace-nowrap transition-all duration-500 ease-out',
-          scrollToLatestHovered ? 'max-w-[3.5em] opacity-100' : 'max-w-0 opacity-0'
-        ]"
-      ><span class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white">{{ unreadCount > 99 ? '99+' : unreadCount }}</span></span>
-    </button>
 
     <WorkspaceComposer
       :show-reasoning-content="showReasoningContent"
@@ -1739,7 +1720,38 @@ watch(
       :handle-undo-last-turn="handleUndoLastTurn"
       :set-composer-shell-ref="setComposerShellRef"
       @update:show-reasoning-content="onShowReasoningContentChange"
-    />
+    >
+      <template #top-right>
+        <button
+          v-show="showScrollToBottom"
+          :class="[
+            'absolute right-0 -top-11 z-20 flex items-center rounded-full border border-stone-200 bg-white/95 text-[12px] font-medium text-stone-600 backdrop-blur-sm transition-all duration-500 ease-out cursor-pointer shadow-[0_2px_8px_rgba(0,0,0,0.08)]',
+            scrollToLatestHovered
+              ? scrollToLatestHoverClass
+              : 'w-[34px] h-[34px] p-0 justify-center gap-0'
+          ]"
+          data-testid="workspace-scroll-to-bottom"
+          @click="handleScrollToBottom"
+          @mouseenter="handleScrollToLatestMouseEnter"
+          @mouseleave="handleScrollToLatestMouseLeave"
+        >
+          <ArrowDown class="h-3.5 w-3.5 shrink-0" />
+          <span
+            :class="[
+              'overflow-hidden whitespace-nowrap transition-all duration-500 ease-out',
+              scrollToLatestHovered ? 'max-w-[5em] opacity-100' : 'max-w-0 opacity-0'
+            ]"
+          >滚动到最新</span>
+          <span
+            v-if="unreadCount > 0"
+            :class="[
+              'overflow-hidden whitespace-nowrap transition-all duration-500 ease-out',
+              scrollToLatestHovered ? 'max-w-[3.5em] opacity-100' : 'max-w-0 opacity-0'
+            ]"
+          ><span class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white">{{ unreadCount > 99 ? '99+' : unreadCount }}</span></span>
+        </button>
+      </template>
+    </WorkspaceComposer>
   </section>
 </template>
 

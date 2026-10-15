@@ -837,6 +837,7 @@ onBeforeUnmount(() => {
       data-testid="workspace-composer-shell"
       style="pointer-events: auto;"
     >
+      <slot name="top-right" />
       <!-- ASK 模式：直接在对话框的面板中实现，隐藏输入框和下方 action 栏 -->
       <div v-if="activeAsk" data-testid="composer-ask-container" class="flex flex-col p-2.5 sm:p-3">
         <!-- 问题 -->

@@ -3,10 +3,16 @@ import { computed, ref, watch, nextTick } from "vue";
 import type { TurnBucket } from "@/components/chat/WorkspaceTurnItem.vue";
 import { formatTurnSummary, type TurnDialSummary } from "./turn-dial-utils";
 
-const props = defineProps<{
-  turns: TurnBucket[];
-  activeTurnId: string | null;
-}>();
+const props = withDefaults(
+  defineProps<{
+    turns: TurnBucket[];
+    activeTurnId: string | null;
+    stickToSidebar?: boolean;
+  }>(),
+  {
+    stickToSidebar: false
+  }
+);
 
 const emit = defineEmits<{
   (e: "select-turn", turnId: string): void;
@@ -76,7 +82,10 @@ watch(activeIndex, (newIdx) => {
 <template>
   <nav
     v-if="turns.length >= 2"
-    class="turn-dial-root"
+    :class="[
+      'turn-dial-root',
+      stickToSidebar ? 'turn-dial-stick' : ''
+    ]"
     aria-label="Turn Navigation Dial"
     @pointerleave="handlePointerLeaveDial"
   >
@@ -137,6 +146,11 @@ watch(activeIndex, (newIdx) => {
   align-items: center;
   user-select: none;
   pointer-events: none;
+  transition: right 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.turn-dial-root.turn-dial-stick {
+  right: 2px;
 }
 
 .dial-scroller {
