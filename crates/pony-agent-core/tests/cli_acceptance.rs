@@ -1,7 +1,13 @@
+// wave-13：本测试把 `src/bin/cli.rs` 以模块方式 include 进来（bin-as-module），
+// 而 bin 的 `main` 不会被调用，导致该模块内仅被 `main` 链路使用的 item 被判为 `dead_code`。
+// 这些 item 在真正的 bin 目标（`cargo check --bins`，同样受 `-D warnings` 约束）中已被完整校验，
+// 故此处仅对「bin-as-module 固有产物」加最小 allow；不使用 `#![allow(warnings)]`。
+// 注意：该 allow 只作用于 `mod cli` 内部，**不会**掩盖本测试文件自身的真实 unused import。
 #[path = "../src/bin/cli.rs"]
+#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
 mod cli;
 
-use cli::{parse_cli_args, CliArgs};
+use cli::parse_cli_args;
 use std::path::PathBuf;
 
 #[test]

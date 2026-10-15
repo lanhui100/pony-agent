@@ -143,6 +143,10 @@ async function main() {
     return 2;
   }
 
+  // Wave-13 修正（Lead 批准，2026-10-15）：本脚本是**本地编译面门禁**，默认加 `--no-run`
+  // 只编译全部测试目标（等价 CI 步骤在 deny-warnings 下的编译面）；完整 `cargo test`
+  // 的运行时面含 Windows 专属用例，在非 Windows 主机上必然失败/超时，不是有效本地代理
+  // （Windows 运行时面由 CI `verify` 作业把关）。需要完整运行面时用 `-- --run` 显式追加。
   const cargoArgs = [
     "test",
     "--manifest-path",
@@ -150,6 +154,7 @@ async function main() {
     "--target-dir",
     options.targetDir,
     `--package=${options.packageName}`,
+    "--no-run",
     ...options.extraArgs
   ];
 

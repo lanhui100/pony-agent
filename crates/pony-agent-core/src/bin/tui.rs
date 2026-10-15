@@ -1399,13 +1399,17 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
         .join(".pony-agent")
         .join("tui-logs");
     let _ = std::fs::create_dir_all(&log_dir);
-    let log_file = log_dir.join("tui-runtime.log");
+    // wave-13：日志文件绑定只在 unix 分支使用（dup2 重定向）。声明移入 #[cfg(unix)] 块内，
+    // 使非 unix 目标（Windows CI）不存在该绑定，避免 `unused variable: log_file`。
     #[cfg(unix)]
-    if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        unsafe {
-            libc::dup2(fd, libc::STDERR_FILENO);
+    {
+        let log_file = log_dir.join("tui-runtime.log");
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+            unsafe {
+                libc::dup2(fd, libc::STDERR_FILENO);
+            }
         }
     }
 
