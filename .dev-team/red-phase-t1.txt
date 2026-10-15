@@ -1,0 +1,98 @@
+(node:315670) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:315689) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:315689) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ RUN  v4.1.9 /home/dm/pony-agent
+
+(node:315731) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ tests/acceptance/blank-session-contract.spec.ts (7 tests | 4 failed) 527ms
+     × C1 顶层/折叠态新对话按钮：sessionOperation===null 时任何 messages+归属组合都不得带 disabled 90ms
+     ✓ C2 在途 sessionOperation（initializing/switching/deleting）期间顶层按钮必须保持 disabled 160ms
+     × C3 workspace-row-new-<key>：sessionOperation===null 时恒不得带 disabled 37ms
+     × C4 顶层按钮点击目标工作区恒为 DEFAULT_WORKSPACE_ID（spy createSession 入参） 94ms
+     × C5 幂等：已处于「空白+归属默认工作区」时点击顶层按钮不得新增瞬态条目、不得写 localStorage 52ms
+     ✓ C6 空白会话零持久化（前端面）：点击 / persistHistory / 切换离开 三种时机新 sessionId 均不得进入 localStorage 83ms
+     ✓ C7 空白会话零持久化（宿主面）：createSession 在空白当前会话上不得发起任何后端 IPC 9ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/acceptance/blank-session-contract.spec.ts > T1 冻结契约：新对话入口可用性 + 空白会话零持久化 > C1 顶层/折叠态新对话按钮：sessionOperation===null 时任何 messages+归属组合都不得带 disabled
+AssertionError: [展开态] 空白会话 + 归属 ws-a（非默认工作区）: expected '' to be undefined
+
+- Expected:
+undefined
+
++ Received:
+""
+
+ ❯ tests/acceptance/blank-session-contract.spec.ts:203:92
+    201|       const expanded = mountSidebar("home", false);
+    202|       await flushUI();
+    203|       expect(disabledAttr(expanded, "session-sidebar-new-chat"), `[展开态…
+       |                                                                                            ^
+    204|       expanded.unmount();
+    205|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  tests/acceptance/blank-session-contract.spec.ts > T1 冻结契约：新对话入口可用性 + 空白会话零持久化 > C3 workspace-row-new-<key>：sessionOperation===null 时恒不得带 disabled
+AssertionError: 空白会话归属 ws-a（行 key 即当前归属） → workspace-row-new-ws-a: expected '' to be undefined
+
+- Expected:
+undefined
+
++ Received:
+""
+
+ ❯ tests/acceptance/blank-session-contract.spec.ts:275:11
+    273|           disabledAttr(wrapper, `workspace-row-new-${key}`),
+    274|           `${scenario.name} → workspace-row-new-${key}`
+    275|         ).toBeUndefined();
+       |           ^
+    276|       }
+    277|       wrapper.unmount();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  tests/acceptance/blank-session-contract.spec.ts > T1 冻结契约：新对话入口可用性 + 空白会话零持久化 > C4 顶层按钮点击目标工作区恒为 DEFAULT_WORKSPACE_ID（spy createSession 入参）
+AssertionError: 空白+ws-a：顶层按钮不得 disabled（否则点击契约不可达）: expected '' to be undefined
+
+- Expected:
+undefined
+
++ Received:
+""
+
+ ❯ tests/acceptance/blank-session-contract.spec.ts:304:81
+    302|     await flushUI();
+    303|     const button = wrapperA.get('[data-testid="session-sidebar-new-cha…
+    304|     expect(button.attributes("disabled"), "空白+ws-a：顶层按钮不得 disabled（否则点…
+       |                                                                                 ^
+    305|     await button.trigger("click");
+    306|     await flushUI();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+ FAIL  tests/acceptance/blank-session-contract.spec.ts > T1 冻结契约：新对话入口可用性 + 空白会话零持久化 > C5 幂等：已处于「空白+归属默认工作区」时点击顶层按钮不得新增瞬态条目、不得写 localStorage
+AssertionError: 点击应抵达 store.createSession（否则幂等断言无意义）: expected "wrappedAction" to be called 1 times, but got 0 times
+ ❯ tests/acceptance/blank-session-contract.spec.ts:347:57
+    345|
+    346|     // Assert（非空洞前提：点击必须真实抵达 store，否则"没有新增"只是禁用按钮造成的假绿）
+    347|     expect(spy, "点击应抵达 store.createSession（否则幂等断言无意义）").toHaveBeenCall…
+       |                                                         ^
+    348|     expect(spy.mock.calls[0]?.[0]).toBe(DEFAULT_WORKSPACE_ID);
+    349|     expect(transientRows().length, "瞬态条目数不得增加（不得出现第二个 updatedAtMs=0 的行…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed | 3 passed (7)
+   Start at  10:10:52
+   Duration  2.95s (transform 1.28s, setup 0ms, import 1.93s, tests 527ms, environment 343ms)
+
+VITEST_EXIT=1
