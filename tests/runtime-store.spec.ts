@@ -1357,7 +1357,9 @@ describe("runtime session resilience", () => {
     expect(store.deletingSessionSet).toEqual({});
   });
 
-  it("loads a fallback session after deleting the active session", async () => {
+  // Wave-12 契约演进（.dev-team/contracts/wave-12-session-fallback.md C2）：
+  // 删除当前会话后**一律进入全新空白会话**，不得载入任何历史 fallback 会话。
+  it("enters a fresh blank session after deleting the active session (no historical fallback)", async () => {
     const store = useRuntimeStore();
     const fallbackSnapshot = createSnapshot({
       conversationId: "session-fallback",
@@ -1370,6 +1372,7 @@ describe("runtime session resilience", () => {
       turnCount: 1,
       updatedAtMs: 2500
     });
+    const invokedCommands: string[] = [];
 
     store.$patch({
       sessionId: "session-current",
@@ -1399,7 +1402,21 @@ describe("runtime session resilience", () => {
     });
 
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      invokedCommands.push(command);
       if (command === "delete_session") {
+        return [
+          {
+            conversationId: "session-fallback",
+            title: "Fallback session",
+            summary: "Recovered summary",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 2500
+          }
+        ] satisfies SessionOverview[];
+      }
+
+      if (command === "list_sessions") {
         return [
           {
             conversationId: "session-fallback",
@@ -1421,24 +1438,22 @@ describe("runtime session resilience", () => {
 
     await store.deleteSession("session-current");
 
-    expect(store.sessionId).toBe("session-fallback");
-    expect(store.phase).toBe("ready");
+    // 全新会话：id ≠ 被删 id，且不在删除前的会话集合中
+    expect(store.sessionId).not.toBe("session-current");
+    expect(["session-current", "session-fallback"]).not.toContain(store.sessionId);
+    expect(store.phase).toBe("idle");
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionError).toBeNull();
-    expect(store.sessionList).toEqual([
-      {
-        conversationId: "session-fallback",
-        title: "Fallback session",
-        summary: "Recovered summary",
-        turnCount: 1,
-        lastReferencedFile: null,
-        updatedAtMs: 2500
-      }
-    ]);
-    expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
-      "user:open fallback",
-      "assistant:fallback reply"
-    ]);
+    expect(store.messages).toEqual([]);
+    expect(store.sessionList[0]).toMatchObject({
+      conversationId: store.sessionId,
+      title: "新对话",
+      turnCount: 0,
+      updatedAtMs: 0
+    });
+    expect(store.sessionList.some((session) => session.conversationId === "session-current")).toBe(false);
+    // 不得切换到历史 fallback 会话
+    expect(invokedCommands).not.toContain("load_session_runtime_view");
   });
 
   it("删除当前会话后点击新建会话，已删除的会话不会再次显示", async () => {
@@ -1524,9 +1539,12 @@ describe("runtime session resilience", () => {
       throw new Error(`unexpected command: ${command}`);
     });
 
-    // 1. 删除当前会话
+    // 1. 删除当前会话（Wave-12 C2：进入全新空白会话，不切到 session-keep）
     await store.deleteSession("session-delete-target");
-    expect(store.sessionId).toBe("session-keep");
+    expect(store.sessionId).not.toBe("session-delete-target");
+    expect(store.sessionId).not.toBe("session-keep");
+    expect(store.phase).toBe("idle");
+    expect(store.messages).toEqual([]);
     expect(store.sessionList.some((s) => s.conversationId === "session-delete-target")).toBe(false);
 
     // 2. 点击新建会话
@@ -2165,8 +2183,11 @@ describe("runtime session resilience", () => {
     expect(persisted.attachmentAssets).toEqual(attachmentAssets);
   });
 
-  it("keeps the fallback target but surfaces an error when fallback loading fails", async () => {
+  // Wave-12 契约演进（C2）：删除当前会话不再尝试载入任何替代会话，
+  // 因此不存在「fallback 载入失败」这一错误分支；必须进入全新空白会话且 sessionError 为 null。
+  it("does not attempt to load a fallback session after deleting the active session", async () => {
     const store = useRuntimeStore();
+    const invokedCommands: string[] = [];
 
     store.$patch({
       sessionId: "session-current",
@@ -2196,7 +2217,21 @@ describe("runtime session resilience", () => {
     });
 
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      invokedCommands.push(command);
       if (command === "delete_session") {
+        return [
+          {
+            conversationId: "session-fallback",
+            title: "Fallback session",
+            summary: "Recovered summary",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 2500
+          }
+        ] satisfies SessionOverview[];
+      }
+
+      if (command === "list_sessions") {
         return [
           {
             conversationId: "session-fallback",
@@ -2218,22 +2253,20 @@ describe("runtime session resilience", () => {
 
     await store.deleteSession("session-current");
 
-    expect(store.sessionId).toBe("session-fallback");
+    expect(store.sessionId).not.toBe("session-current");
+    expect(store.sessionId).not.toBe("session-fallback");
     expect(store.phase).toBe("idle");
     expect(store.sessionOperation).toBeNull();
-    expect(store.sessionError).toContain("fallback load failed");
-    expect(store.sessionList).toEqual([
-      {
-        conversationId: "session-fallback",
-        title: "Fallback session",
-        summary: "Recovered summary",
-        turnCount: 1,
-        lastReferencedFile: null,
-        updatedAtMs: 2500
-      }
-    ]);
+    expect(store.sessionError).toBeNull();
     expect(store.messages).toEqual([]);
     expect(store.turnTraceHistory).toEqual([]);
+    expect(store.sessionList[0]).toMatchObject({
+      conversationId: store.sessionId,
+      title: "新对话",
+      turnCount: 0,
+      updatedAtMs: 0
+    });
+    expect(invokedCommands).not.toContain("load_session_runtime_view");
   });
 
   it("stays idle when initializeSessions finds no saved sessions", async () => {
@@ -3164,7 +3197,7 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
-  it("returns from a transient browser-preview session to the saved session when deleted", async () => {
+  it("enters a fresh blank session after deleting a transient browser-preview session", async () => {
     const store = useRuntimeStore();
 
     tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
@@ -3213,26 +3246,21 @@ describe("runtime session resilience", () => {
 
     await store.deleteSession("session-transient");
 
-    expect(store.sessionId).toBe("browser-current");
-    expect(store.phase).toBe("ready");
+    // Wave-12 C2：删除当前瞬态会话后进入全新空白会话，不得切回历史会话 browser-current
+    expect(store.sessionId).not.toBe("session-transient");
+    expect(store.sessionId).not.toBe("browser-current");
+    expect(store.phase).toBe("idle");
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionError).toBeNull();
-    expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
-      "user:browser message",
-      "assistant:browser reply"
-    ]);
-    expect(store.sessionList).toEqual([
-      {
-        conversationId: "browser-current",
-        title: "browser message",
-        summary: "Browser summary",
-        turnCount: 1,
-        lastReferencedFile: null,
-        updatedAtMs: 4000,
-        workspaceId: null,
-        archived: false
-      }
-    ]);
+    expect(store.messages).toEqual([]);
+    expect(store.sessionList[0]).toMatchObject({
+      conversationId: store.sessionId,
+      title: "新对话",
+      turnCount: 0,
+      updatedAtMs: 0
+    });
+    // 历史会话仍在列表中（未被删除），只是不得被切入
+    expect(store.sessionList.some((session) => session.conversationId === "browser-current")).toBe(true);
   });
 
   it("sorts browser-preview sessions by most recent update time", async () => {
