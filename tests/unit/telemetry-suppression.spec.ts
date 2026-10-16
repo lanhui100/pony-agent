@@ -65,4 +65,26 @@ describe("telemetry reportError test environment suppression", () => {
     expect(shouldIgnoreTelemetryError("Network timeout during provider request")).toBe(false);
     expect(shouldIgnoreTelemetryError("Something crashed")).toBe(false);
   });
+
+  it("suppresses benign ask replay/stale/expiry mutation errors in shouldIgnoreTelemetryError", async () => {
+    const { shouldIgnoreTelemetryError } = await import("@/lib/telemetry");
+    expect(
+      shouldIgnoreTelemetryError(
+        "IPC command \"ask_cancel\" failed: control request `control-000000000000` cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch"
+      )
+    ).toBe(true);
+    expect(
+      shouldIgnoreTelemetryError(
+        "control request `control-000000000001` cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch"
+      )
+    ).toBe(true);
+    expect(
+      shouldIgnoreTelemetryError(
+        "Ask `ask-1` expected version 1 but current version is 2; stale mutation rejected."
+      )
+    ).toBe(true);
+    expect(
+      shouldIgnoreTelemetryError("unknown control request `control-000000000000`")
+    ).toBe(true);
+  });
 });

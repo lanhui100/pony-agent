@@ -241,6 +241,15 @@ export function shouldIgnoreTelemetryError(message?: string): boolean {
   if (message.includes("DIAG_STUB") || message.includes("DIAG:")) {
     return true;
   }
+  // 忽略 Ask 控制请求的重放、过期、已知陈旧版本 CAS 竞争等良性控制流错误
+  if (
+    message.includes("cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch") ||
+    message.includes("stale mutation rejected") ||
+    message.includes("unknown control request") ||
+    message.includes("control request") && message.includes("kind mismatch")
+  ) {
+    return true;
+  }
   return false;
 }
 

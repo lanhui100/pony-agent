@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { addBreadcrumb, reportError } from "./telemetry";
+import { addBreadcrumb, reportError, shouldIgnoreTelemetryError } from "./telemetry";
 
 declare global {
   interface Window {
@@ -56,7 +56,7 @@ export async function safeInvoke<T>(command: string, args?: Record<string, unkno
       addBreadcrumb("ipc", `safeInvoke:${command} failed`, { error: errStr });
 
       // 诊断与测试桩错误直接静音，不生成 Sentry 垃圾 Issue
-      if (errStr.includes("DIAG_STUB") || errStr.includes("DIAG:")) {
+      if (shouldIgnoreTelemetryError(errStr)) {
         throw err;
       }
 
