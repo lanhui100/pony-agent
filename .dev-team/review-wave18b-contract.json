@@ -1,0 +1,24 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/tests/ponysentry_manual_upload_test.rs",
+      "line": 395,
+      "rule": "契约 §11 M13 / §9.2 R6 / 裁定表 F8 要求「env 门控 live 段未满足条件时以 `ignored` 如实上报，不得报 `ok`」——实测 skip 分支仍以 `ok` 上报且 harness 汇总 `0 ignored`，未登记为 harness 级跳过；偏离仅在 .dev-team/red-purity-wave18b.json 内以 JSON 字段自行登记（该文件非 harness）",
+      "counterexample": "$ env -u PONYSENTRY_CLIENT_TOKEN -u PONYSENTRY_ENABLED -u PONYSENTRY_TEST_LIVE -u PONYSENTRY_INGEST_URL CARGO_TARGET_DIR=/tmp/l3-cargo-target cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test ponysentry_manual_upload_test -- --nocapture --test-threads=1  =>  stdout: `test test_upload_trace_to_live_sentry_contract ... [skip] test_upload_trace_to_live_sentry_contract: fail-closed 默认态（enabled=false, token_configured=false）且未显式 PONYSENTRY_TEST_LIVE=1，为避免真实流量打到端点，跳过 live 契约验证。` / `ok` / `test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.03s`（Exit 0）。即：①「拆两段 + 恒跑真断言 + skip 分支自带真断言 + 显式 [skip] 打印」四项已达成（:318-370 恒跑段、:396-401 skip 分支 assert_ne! 真断言）；②但「如实上报 ignored」未达成——`0 ignored` 证明门控段仍被 harness 计为通过，契约「不得报 ok」被违反；③测试文件 :380-385 自述「不使用 #[ignore]（task-5 明令）」，跳过事实只在 .dev-team/red-purity-wave18b.json:297 与 :368-373「裁定口径差异登记 2」以 JSON 字段登记并请求 Lead 升 revision，属登记式偏离，非 harness 级跳过。"
+    },
+    {
+      "file": "management/task-system/00_DASHBOARD.md",
+      "line": 23,
+      "rule": "R7 验收判据「改后重跑同一 `grep -rn \"MAX_SUBAGENT_DEPTH\"`，命中数须与文本陈述一致」未达成：修正文本把「全仓零命中」改成代码域限定（该分句为真），但新增的存在性分句「仅见于任务卡 AC 文案 `03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`」在同一全仓 grep 下为假（8 命中，其中 6 处位于 .dev-team/ 审查档案，另 1 处为该断言行自身）",
+      "counterexample": "$ git grep -n MAX_SUBAGENT_DEPTH  =>  8 行：`.dev-team/contract-matrix-wave18.md:506`、`.dev-team/review-l3-contract-wave18.json:20`、`.dev-team/review-l3-security-wave18.json:7`、`.dev-team/review-l3-security-wave18.json:8`、`.dev-team/wave18b-adjudication.md:22`、`.dev-team/wave18b-adjudication.md:64`、`management/task-system/00_DASHBOARD.md:23`（断言行自身）、`management/task-system/03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`。$ git grep -n MAX_SUBAGENT_DEPTH -- '*.rs' '*.ts'  =>  EXIT=1（0 命中）。$ grep -rn \"MAX_SUBAGENT_DEPTH\" . --exclude-dir=node_modules --exclude-dir=target --exclude-dir=.git  =>  同样 8 命中（EXIT=0）。结论：`00_DASHBOARD.md:23` 中「全仓**代码**（`*.rs`/`*.ts`）`grep -rn \"MAX_SUBAGENT_DEPTH\" --include=*.rs --include=*.ts` 零命中」为真；紧接的「仅见于任务卡 AC 文案 `03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`」为假——除该任务卡外另有 6 处非代码命中（全部在 .dev-team/ 审查档案内），且该行自身因引用标识符而自命中，故该行仍非自洽。正确表述应为「除本行自身与 .dev-team/ 审查档案外，仅见于任务卡 AC 文案 …:26」。"
+    }
+  ],
+  "closure": {
+    "l3_1_f1": "NOT-CLOSED",
+    "l3_2_f1": "CLOSED",
+    "l3_2_f2": "NOT-CLOSED",
+    "l3_2_f3": "NOT-CLOSED",
+    "l3_2_f4": "CLOSED"
+  }
+}

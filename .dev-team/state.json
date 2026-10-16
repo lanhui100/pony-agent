@@ -516,19 +516,21 @@
           "note": "wave-18b 修复全门禁绿：Rust 8/4 + 10/7、vitest 52、vue-tsc 0、secret gate 0 leaks、perf 293ms(1.1MB 单行 15000 hits)"
         },
         "join_barrier": {
-          "status": "partial",
-          "reviews": {
-            "l3-security": "FAIL(1)",
-            "l3-contract": "FAIL(4)",
-            "l3-scanner": "FAIL(5)",
-            "l3p": "FAIL(2)"
+          "status": "round2_failed",
+          "reviews_round2": {
+            "wave18b-scanner": "FAIL(4 new)",
+            "wave18b-contract": "FAIL(2)",
+            "wave18b-l3p": "PASS"
           },
-          "reports": [
-            ".dev-team/review-l3-security-wave18.json",
-            ".dev-team/review-l3-contract-wave18.json",
-            ".dev-team/review-l3-scanner-wave18.json",
-            ".dev-team/review-l3p-wave18.json"
-          ]
+          "closure": {
+            "l3-scanner-f1..f4": "CLOSED",
+            "l3-scanner-f5": "WAIVED-REGISTERED",
+            "l3-1-f1": "NOT-CLOSED(2nd false assertion)",
+            "l3-2-f1": "CLOSED",
+            "l3-2-f2": "NOT-CLOSED(harness wording)",
+            "l3-2-f3": "NOT-CLOSED(harness wording)",
+            "l3-2-f4": "CLOSED"
+          }
         },
         "l3p_five_questions": {
           "status": "FAIL",
@@ -540,7 +542,9 @@
         "wave18xcredentialxL2-T": 0,
         "wave18xcredentialxL2-AT": 0,
         "wave18bxL2-T": 0,
-        "wave18bxL2-AT": 0
+        "wave18bxL2-AT": 0,
+        "wave18cxcredentialxL2-AT": 0,
+        "wave18cxL2-T": 0
       },
       "blast_radius_precheck": {
         "triggered": true,
@@ -565,7 +569,8 @@
         "dev-stub-lint.py / dev-red-purity.py 未随 skill 安装（本波以 JSON 报告替代）",
         "DEBT-W18-R4: package.json:39 secrets:check 用 --staged，脏工作区下 npm run verify 假绿（CI 与 pre-commit/pre-push 已覆盖 --all）",
         "DEBT-W18-R7: 已在本波修复（看板 :23 假断言）",
-        "DEBT-W18-C7: Private Key 豁免由整文件收敛为有界窗口（当前行+最多3行上文）；更严格的块级语义待评估"
+        "DEBT-W18-C7: Private Key 豁免由整文件收敛为有界窗口（当前行+最多3行上文）；更严格的块级语义待评估",
+        "DEBT-W18C-R6: 契约 M13/R6 的 ignored 口径与 task-5 禁 #[ignore] 自相矛盾，Lead 裁定以实质为准（skip 分支真断言 + 显式 [skip] + JSON 登记），r4 统一措辞"
       ],
       "status": "in_progress",
       "evidence_gate_selfcatch": "pre-commit 新规则拦截了 .dev-team/review-l3-scanner-wave18.json 中 3 处真实 token 字面量（补盲生效物理凭证）；已脱敏为占位符并在报告内记录 evidence_redaction_note",

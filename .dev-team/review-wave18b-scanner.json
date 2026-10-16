@@ -1,0 +1,36 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "scripts/check-secrets.mjs",
+      "line": 128,
+      "rule": "NEW-FP (regression introduced by r3-R1 credWord-first guard) | Bare-64-Hex rule: `if (f.credWord) return false;` (:128) runs BEFORE all four exemptions and CRED_WORD_RE (:22) is tested against the WHOLE line, so a legitimate sha256sum/checksum receipt is reported as a leak whenever the same line also carries a credential word (in the path, filename, field name or prose). This violates the wave's binding zero-false-positive constraint (contract §9.2 R1 rationale: '零误报为绑定约束（该门禁跑在 npm run verify 上，任何误报即阻塞全量自检）'), and the FP direction is NOT registered in §4.5 (which registers only the FN residual). Pre-fix d3225c7 = 0 hits; post-fix 139cbba = 1 hit for every form below.",
+      "counterexample": "A) CLI, isolated temp git repo (no workspace writes): P=/tmp/w18b-fp-probe; H=$(python3 -c \"print('c'*64)\"); printf '%s  scripts/rotate-secret.sh\\n' \"$H\" > SHA256SUMS; git add SHA256SUMS; node /home/dm/pony-agent/scripts/check-secrets.mjs --staged  => stdout '[pony-agent] 拦截到未脱敏敏感信息或凭证文件！' + '  - SHA256SUMS:1 [Bare 64-Hex High-Entropy Credential (SHA-256 sized client token)]' + '位置预览: cccc...(64)  scripts/rotate-secret.sh'; STAGED_EXIT=1. Control (same receipt, benign filename): printf '%s  scripts/rotate-token.sh.bak\\n' \"$H\" > SHA256SUMS; git add SHA256SUMS; same command => '[pony-agent] 敏感信息门禁检查通过 (0 leaks detected).'; CTRL_STAGED_EXIT=0. B) API, old vs new: git show d3225c7:scripts/check-secrets.mjs > /tmp/old.mjs; node -e \"Promise.all([import('/tmp/old.mjs'),import('/home/dm/pony-agent/scripts/check-secrets.mjs')]).then(([o,n])=>{const H='c'.repeat(64);for(const c of [H+'  scripts/rotate-secret.sh', JSON.stringify({file:'secrets.json',sha256:H}), '- 密钥指纹(secret fingerprint): '+H])console.log('old='+o.scanTextContent(c,'p').length+' new='+n.scanTextContent(c,'p').length)})\"  => stdout 'old=0 new=1' x3. Also new-only hits: '<64hex>  config/credential-store.json', '<64hex>  scripts/reset-password.sh', '| `<64hex>` | sha256 of SECRET_RULES sample |' (backtick exemption defeated), each hits=1. Any of these lines in a tracked file makes --all/--staged/--pre-push Exit 1 and blocks npm run verify."
+    },
+    {
+      "file": "scripts/check-secrets.mjs",
+      "line": 131,
+      "rule": "NEW-FN / frozen-spec deviation (R2 implemented as VALUE anchoring, not position anchoring) | Contract §4.3-R2 freezes: '豁免 2 仅对「该行首个 64-hex 且其后紧跟空白 + 非空白字符」的那个 hex 生效；豁免 3 仅对「被 | 包裹的独立单元格内」的那个 hex 生效。一行内其他位置的 64-hex 不继承豁免（防止第二个具名凭证被吞）'. The code compares the match VALUE to the single captured value: :131 `if (f.prefixHex === m) return true;` and :132 `if (f.cellHex === m) return true;`, so EVERY occurrence of that same value on the line inherits the exemption. Frozen text requires >=1 hit for the second hex; measured 0. (d3225c7 is also 0, so this is an incomplete closure of the R2 clause, not a new regression; G6 `${H}  PONYSENTRY_CLIENT_TOKEN=${H}` reaches 2 hits only via the R1 credWord guard, not via R2.)",
+      "counterexample": "node -e \"import('/home/dm/pony-agent/scripts/check-secrets.mjs').then(m=>{const H='a'.repeat(64),H2='b'.repeat(64);for(const c of [H+'  '+H, '| '+H+' | '+H+' |', H+'  '+H2, '| '+H+' | '+H2+' |'])console.log(JSON.stringify(c.slice(0,20))+' hits='+m.scanTextContent(c,'p.txt').length)})\"  => stdout: '\"aaaaaaaaaaaaaaaaaaaa\" hits=0' (same value twice, sha256sum shape; frozen R2 => >=1) / '\"| aaaaaaaaaaaaaaaaaa\" hits=0' (same value twice, table row; frozen R2 => >=1) / '\"aaaaaaaaaaaaaaaaaaaa\" hits=1' (distinct values) / '\"| aaaaaaaaaaaaaaaaaa\" hits=1' (distinct values). The only difference is value equality, proving value- not position-anchoring."
+    },
+    {
+      "file": "scripts/check-secrets.mjs",
+      "line": 125,
+      "rule": "NEW-HIGH-DoS (residual quadratic; §4.6 invariant not met, code comment false) | `const line = context.split(\"\\n\").pop();` (:125, inside the Bare-64-Hex isSafe, call site :195) executes once PER REGEX MATCH, i.e. O(window) per match => O(matches x lineLength). §4.6 first bullet freezes '整行处理必须为 O(行长)' and forbids per-match whole-line work; the comment at :49 claims '每 match 仅剩一次 O(窗口) 的行提取，无二次方放大' — false: O(窗口) x O(matches) is the quadratic term. Hoisting the window build to :187 removed only the constant factor.",
+      "counterexample": "node /tmp/w18b-perf3.mjs (one single line of N distinct 64-hex joined by ' ', no credential word, so nothing is exempted): n=15000 bytes=974999 ms=248.5 hits=14999; n=40000 bytes=2599999 ms=1894.7 hits=39999; n=77000 bytes=5004999 ms=34841.9 hits=76999 (run twice: 33736.4 ms and 34841.9 ms); n=154000 bytes=10009999 ms=176568.0 hits=153999. Scaling 1MB->5MB = 5.13x bytes -> 140x time (~n^2.9); 5MB->10MB = 2x -> 5.07x. Root-cause micro-benchmark on the exact expression: node -e \"const s='x'.repeat(5000000);const t=performance.now();for(let i=0;i<200;i++)s.split('\\n').pop();console.log((performance.now()-t)/200+' ms/call')\" => '0.6455 ms/call' x 77000 matches ~= 50 s, matching the measured 34.8 s. Reachability: --all skips files >1MB (:306) so CI (ci.yml:44 `--all`) is capped at ~248 ms/file and is NOT stalled; but --staged/--pre-push (pre-commit/pre-push hooks, no size cap) scan diff-added lines, so one added 10MB single-line file = 176 s hook stall, and 100MB extrapolates to hours (not executed; machine-safety)."
+    },
+    {
+      "file": "scripts/check-secrets.mjs",
+      "line": 22,
+      "rule": "NEW-FN (residual of finding#1/#2; NOT introduced by this fix, but the §4.5 closure claim is overstated) | CRED_WORD_RE (:22) covers only client[_-]?token|access[_-]?token|api[_-]?key|secret|password|passwd|credential|authorization|bearer. Space-separated credential labels ('client token', 'client token:') and the bare word 'token' are not covered, so a credential-labeled Markdown cell still inherits exemption 3 (:132). §4.5 states '豁免项 1/2/3/4 现全部受 credWord 守卫（R1）约束：同行出现凭证语义词即一律判违规，故 r2 记录的「1/2/3 项无守卫导致整行放行」缺口已在 r3 关闭' — that '关闭' claim does not hold for these label forms.",
+      "counterexample": "node -e \"import('/home/dm/pony-agent/scripts/check-secrets.mjs').then(m=>{const H='a'.repeat(64);for(const c of ['| client token | '+H+' |','| token | '+H+' |','| client-token | '+H+' |','| ClientToken | '+H+' |'])console.log(JSON.stringify(c.slice(0,22))+' hits='+m.scanTextContent(c,'p.txt').length)})\"  => stdout: '\"| client token | aaaaa\" hits=0' (credential-labeled cell passes) / '\"| token | aaaaaaaaaa\" hits=0' / '\"| client-token | aaaaa\" hits=1' / '\"| ClientToken | aaaaa\" hits=1'. d3225c7 also yields 0 for the space form, confirming it is a residual, not a regression."
+    }
+  ],
+  "closure": {
+    "finding1": "CLOSED",
+    "finding2": "CLOSED",
+    "finding3": "CLOSED",
+    "finding4": "CLOSED",
+    "finding5": "WAIVED-REGISTERED"
+  }
+}
