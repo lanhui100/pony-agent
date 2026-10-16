@@ -1,0 +1,23 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "applicable": false,
+    "reason": "本波为纯前端渲染层改动（C1 IME 组合态回车守卫 + C2 tabular-nums 字体变体），未新增任何外部 IO 调用（无 fetch / 无 IPC / 无网络 / 无子进程），重试策略无适用对象；不编造 max_attempts / backoff_cap_ms。"
+  },
+  "concurrency_lock": {
+    "applicable": false,
+    "reason": "本波无并发共享可变状态：改动面为 Vue 模板事件守卫与 CSS font-variant-numeric 令牌，未新增锁 / 互斥量 / 共享队列 / 跨线程或跨异步任务共享态；不编造 primitive / scope。"
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "applicable": false,
+    "reason": "本波为纯渲染层改动，未新增任何日志面（无新增 console/log 结构化输出），故本波无 logging 代码级检查点；format=json 与 trace_id=true 仅作为全局基准声明保留，本波不主张该 NFR 已被满足。"
+  },
+  "resource_release": [
+    {
+      "applicable": false,
+      "reason": "本波未新增任何需释放的资源句柄：无文件 / 套接字 / 子进程 / Worker / Timer / 事件订阅新增，亦无既有清理路径变更；不编造 handle / release。"
+    }
+  ]
+}

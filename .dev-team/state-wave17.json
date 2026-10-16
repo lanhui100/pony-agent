@@ -1,0 +1,80 @@
+{
+  "wave": 17,
+  "slug": "ime-guard-and-numeric-jitter",
+  "status": "in_progress",
+  "task_classification": "B-lite",
+  "grading_basis": "机械分级依据：跨 2 个模块域（chat/composer 交互层 + status/trace 展示层）、6 个文件；含交互状态语义（组合态事件）；无网络/线程/锁面变更。沿用 wave-15/16 的 B-lite 先例。",
+  "baseline_commit": "5d7d691",
+  "baseline_receipts": {
+    "typecheck": ".dev-team/evidence/wave-17/baseline.txt — npx vue-tsc --noEmit EXIT=0",
+    "unit": ".dev-team/evidence/wave-17/baseline.txt — npx vitest run EXIT=0, 82 files / 866 passed / 10 skipped",
+    "e2e": ".dev-team/evidence/wave-17/baseline-e2e-v2.txt — npx playwright test EXIT=1, 8 failed / 12 passed（存量缺陷，见 baseline_defects）",
+    "version_check": "npm run version:check EXIT=0"
+  },
+  "baseline_defects": [
+    {
+      "id": "BASE-E2E-1",
+      "description": "tests/e2e/browser-preview.spec.ts 与 checkpoint-branch.spec.ts 在基线即 8 failed / 12 passed（全新构建后复现）。根因：断言 getByTestId('session-sidebar-session-list')，当前侧栏结构已漂移，该 testid 在浏览器预览模式下 element(s) not found。",
+      "status": "documented — 非本波引入，本波不修；C3 走独立 wave-17 浏览器门禁 spec"
+    }
+  ],
+  "source": {
+    "reference_repo": "open-claude-ui (Cajh1/open-claude-ui, Claude Design System 逆向工程示例库, React18 + Tailwind3.4 + Framer Motion)",
+    "local_path": "open-claude-ui/ (已加入 .gitignore)",
+    "adaptation_note": "技术栈不同（本项目 Vue3 + Tailwind v4 CSS-first），仅借鉴语义与常量，不照抄代码"
+  },
+  "plan_reviews": [
+    {"id": "A", "perspective": "interaction-physics", "file": ".dev-team/review-wave17-plan-a.json", "verdict": "FAIL", "outcome": "采纳 S1-ime-guard；S1-single-border/S2-scroll-latch 判已实现；S6 拒绝"},
+    {"id": "B", "perspective": "design-tokens", "file": ".dev-team/review-wave17-plan-b.json", "verdict": "FAIL", "outcome": "采纳 S5-tabular-nums 最小闭包；S5-surface-ladder/S5-hairline 拒绝"},
+    {"id": "C", "perspective": "state-machine-and-risk", "file": ".dev-team/review-wave17-plan-c.json", "verdict": "FAIL", "outcome": "S3-a 判已实现；S3-b 跨层拒绝并转 backlog；S4 两条拒绝"}
+  ],
+  "frozen_scope": {
+    "adopted": ["C1 IME 组合态回车守卫（6 处入口）", "C2 动态数字 tabular-nums 与位宽稳定（8 位点）"],
+    "rejected_count": 9,
+    "rejected_ids": [
+      "S1-single-border (already implemented)",
+      "S2-scroll-latch (already implemented, stronger)",
+      "S3-ask-state-machine (already implemented)",
+      "S3-decision-actions (cross-layer, backend contract absent)",
+      "S4-thinking-mutex (defect does not exist; would regress)",
+      "S4-ambient-glow (already implemented; reference lacks reduced-motion)",
+      "S5-surface-ladder (19-file refactor; invalidates frozen 4.11:1 contrast measurement)",
+      "S5-hairline (already via ring-1; DPR=1 regression)",
+      "S6-diff-resizer (non-causal new feature)"
+    ]
+  },
+  "contract": ".dev-team/contracts/wave-17-ime-and-numeric-jitter.md",
+  "concurrency_note": "共享工作区存在并行会话施工历史（wave-14/15/16）。本波次独立编号 wave-17，禁止 git add . / 全局提交；仅定向暂存本波次文件。git 写主 = Lead。",
+  "tasks": {
+    "task-1": "protocol: NFR wave17 旁路基准 + ime.ts 空桩 + 机械校验 — in_progress (protocol-agent)",
+    "task-2": "test(L2-T): C1/C2/C3 红相验收测试 — in_progress (test-agent)",
+    "task-5": "L2-AT: C4 对抗破坏用例 — in_progress (subagent 92baae63)",
+    "task-3": "executor-a: C1 IME 守卫实现 — blocked_by task-1/task-2/task-5",
+    "task-4": "executor-b: C2 tabular-nums 实现 — blocked_by task-2/task-5"
+  },
+  "write_scopes": {
+    "task-1": [".dev-team/nfr-baseline-wave17.json", ".dev-team/tools/", ".dev-team/wave17-protocol-receipt.md", "src/lib/ime.ts"],
+    "task-2": ["tests/acceptance/wave17/", "tests/e2e/wave17-browser-gate.spec.ts", ".dev-team/wave17-red-receipts.md"],
+    "task-5": ["tests/acceptance/wave17-adversarial/", ".dev-team/wave17-red-receipts-l2at.md"],
+    "task-3": ["src/lib/ime.ts", "src/components/chat/WorkspaceComposer.vue", "src/components/HomeSessionSidebarRow.vue", "src/components/HomeSessionSidebar.vue"],
+    "task-4": ["src/components/HomeStatusPanel.vue", "src/components/HomeTracePanel.vue", "src/components/AskPanel.vue"]
+  },
+  "write_scope_serialization": [
+    {
+      "scope": "src/lib/ime.ts",
+      "tasks": ["task-1", "task-3"],
+      "rule": "显式串行化：task-1 落空桩并冻结签名 → task-3 才可实现（task-3 blocked_by task-1）。非静默降级。"
+    }
+  ],
+  "gates": {
+    "red_phase": null,
+    "green_phase": null
+  },
+  "backlog_registered": [
+    {"id": "PA-130", "title": "孤儿组件 src/components/AskPanel.vue 未被任何生产代码挂载（仅测试引用）", "action": "交由 code-hygiene 专项处理，本波不删除", "owner": "unassigned"},
+    {"id": "PA-131", "title": "S3-b 三阶决议动作阵列（仅本次/永久白名单/拒绝）需跨层新增 Rust verdict 枚举 + allowlist 持久化 + IPC 命令", "action": "独立立项，禁止前端伪造", "owner": "unassigned"},
+    {"id": "PA-132", "title": "S5-a Surface 0-3 设计令牌层迁移（19 文件 / 96 hex 字面量）", "action": "独立立项，需附完整迁移清单 + #f2ede6 对比度重测门禁", "owner": "unassigned"},
+    {"id": "PA-133", "title": "S5-b Retina 0.5px 发丝变体（@custom-variant retina, 1px 回退）", "action": "独立立项，禁止 border-[0.5px]（DPR=1 退化）", "owner": "unassigned"},
+    {"id": "PA-134", "title": "存量 E2E 基线缺陷 BASE-E2E-1（8 failed，session-sidebar-session-list 漂移）", "action": "独立立项修复存量 e2e spec", "owner": "unassigned"}
+  ]
+}

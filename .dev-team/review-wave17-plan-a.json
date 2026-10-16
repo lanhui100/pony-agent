@@ -1,0 +1,103 @@
+{
+  "perspective": "interaction-physics",
+  "verdict": "FAIL",
+  "items": [
+    {
+      "id": "S1-ime-guard",
+      "suggestion": "CJK 双重互锁守卫：!(e.nativeEvent.isComposing || e.keyCode === 229)，杜绝中文输入法选词回车误触发送",
+      "decision": "WORTH_IMPLEMENTING",
+      "evidence": [
+        {"file": "src/components/HomeWorkspace.vue", "line": 1369, "note": "if (event.isComposing || event.keyCode === 229) { return; } —— 主输入框守卫已存在，且先于撤销快捷键与 Enter 提交判定（1384）"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 985, "note": "@keydown=\"handleComposerKeydown\" —— 主 textarea 本身不实现守卫，委托给父级 prop"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 37, "note": "handleComposerKeydown: (event: KeyboardEvent) => void; —— 由 HomeWorkspace.vue:1753 注入，故主路径守卫真实生效"},
+        {"file": "tests/HomeWorkspace.spec.ts", "line": 2806, "note": "it(\"does not submit on Enter during IME composition (isComposing / keyCode 229)\") —— 主路径已被测试冻结，非新增需求"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 868, "note": "@keydown.enter.prevent=\"handleOptionEnter(index)\" → handleOptionEnter(685) → submitAskAnswer(759)：ASK 选项按钮无 IME 守卫，中文选词回车会直接提交答案"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 917, "note": "@keydown.enter.prevent=\"submitAskAnswer\" —— ASK 自定义输入框无 IME 守卫（真实遗漏路径）"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 938, "note": "@keydown.enter.exact.prevent=\"submitAskAnswer\" —— ASK textarea 无 IME 守卫（真实遗漏路径）"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 1368, "note": "@keydown.enter=\"toggleReasoningVisibility\" —— 菜单项既无 IME 守卫也无 .prevent，组合态回车会误切「显示思考」"},
+        {"file": "src/components/HomeSessionSidebarRow.vue", "line": 94, "note": "@keydown.enter.prevent=\"emit('submit-rename')\" —— 会话重命名输入框无 IME 守卫，中文选词回车会提交半成品名称"},
+        {"file": "src/components/HomeSessionSidebar.vue", "line": 828, "note": "@keydown.enter.prevent=\"submitRename\" —— 工作区分组重命名输入框同样无 IME 守卫"},
+        {"file": "src/components/AskPanel.vue", "line": 164, "note": "Input 组件（src/components/ui/Input.vue:34 仅透传 keydown）—— 原建议所述 AskPanel「@keydown.enter」在本仓库不存在，提交仅走 Button @click（175），故此处不是 IME 风险，而是缺少 Enter 提交这一独立功能缺口"}
+      ],
+      "rationale": "主输入框路径已实现且被测试冻结（HomeWorkspace.vue:1369 + tests/HomeWorkspace.spec.ts:2806），但 ASK 模式的 3 个回车提交入口与 2 个重命名输入框共 5 处完全裸奔。Vue 的 .enter 修饰符不检查 isComposing，中文用户在候选词确认时按回车即误提交，属真实缺陷而非优化。",
+      "minimal_closure": "在 5 个已存在的 keydown 处理函数入口各加一行早退守卫，不新增抽象、不引入工具函数、不改模板结构：1) WorkspaceComposer.vue 新增本地 handleEnterGuarded 逻辑——在 handleOptionEnter(685)、submitAskAnswer(759) 两函数首行加 `if (event?.isComposing || event?.keyCode === 229) return;`（需把事件对象作为可选参数从 868/917/938 传入，签名保持向后兼容）；2) 对 1368 的 toggleReasoningVisibility 改为调用一个新的一行包装函数，同样首行守卫并补 .prevent；3) HomeSessionSidebarRow.vue:94 与 HomeSessionSidebar.vue:828 的内联处理器改为调用组件内新增的一行守卫包装函数（守卫通过则原样 emit('submit-rename')/submitRename()）。禁止抽取共享 composable（3 个组件分属不同目录，抽共享会扩大写域与回归面）。",
+      "write_scopes": [
+        "src/components/chat/WorkspaceComposer.vue",
+        "src/components/HomeSessionSidebarRow.vue",
+        "src/components/HomeSessionSidebar.vue",
+        "tests/workspace-composer-ask.spec.ts"
+      ],
+      "risk": "改 submitAskAnswer 签名会牵动 WorkspaceComposer 内 3 处模板调用与既有 workspace-composer-ask.spec.ts 断言，需同步回归；守卫过严（例如误判合成态）会吞掉真实回车提交，必须补「isComposing=false 时仍可提交」的反向用例。"
+    },
+    {
+      "id": "S1-single-border",
+      "suggestion": "单边框原则：输入框内部的附件胶囊、权限徽章、发送按钮移除冗余边框（border-none），避免嵌套边框膨胀",
+      "decision": "ALREADY_IMPLEMENTED",
+      "evidence": [
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 836, "note": "composer shell class = 'relative mx-auto w-full max-w-[46.4rem] rounded-[0.6rem] bg-white/76 px-4 py-3 shadow-[...] backdrop-blur-[8px]' —— 外壳根本没有 border，只有阴影+半透明底，故不存在「嵌套边框」前提"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 1437, "note": ".composer-trigger { border: none; } —— 模型/附件/权限模式等所有内部触发器已显式去边框"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 1624, "note": ".checkpoint-icon-button { border: none; } —— 撤回按钮已去边框（1392 仅叠 !rounded-full）"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 1527, "note": ".composer-search-input { border: none; } —— 浮窗搜索框已去边框，仅保留 1504 的底部分隔线"},
+        {"file": "src/components/ui/Button.vue", "line": 13, "note": "outline 变体 = 'bg-white text-stone-900 hover:bg-amber-50/70' —— 连 outline 变体都不带 border；default/secondary/ghost 同样无 border，故发送按钮（1410）零冗余边框"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 1057, "note": "权限模式触发器 = 'bg-stone-100/70 hover:bg-stone-200/60' 无 border，即「权限徽章」本就符合单边框原则"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 992, "note": "唯一带 border 的内部元素：附件胶囊 'rounded-full border'（993-995 承载 error/normal 状态色）—— 它嵌在无边框外壳里，不属于嵌套，且删除会丧失错误态视觉区分"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 1027, "note": "'border-t border-stone-200/70' 为动作栏功能分隔线，非容器边框，与单边框原则无关"}
+      ],
+      "rationale": "该建议的语义前提是「外层容器有边框、内层子控件再画边框导致双线膨胀」，而 pony-agent 的 composer 外壳是无边框的阴影+毛玻璃方案，内部所有按钮已统一 border:none。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "若机械照搬给附件胶囊加 border-none，会同时抹掉其 error/normal 状态边框（992-995），属视觉回归。"
+    },
+    {
+      "id": "S2-scroll-latch",
+      "suggestion": "流式滚动防抢占：用户主动滚动后 150ms 冷却期内流式输出不强制滚底；40px 容差吸底门限与 subpixel 防虚化",
+      "decision": "ALREADY_IMPLEMENTED",
+      "evidence": [
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 482, "note": "pauseTimelineAutoFollow(): userScrollOverrideVersion += 1; streamAutoFollowEnabled=false; cancelPendingTimelineScroll(...) —— 不是 150ms 冷却，而是「无限期闩锁 + 版本号作废」，比建议方案强得多"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 519, "note": "queueScrollToLatestTurn 在 nextTick 内校验 expectedOverrideVersion !== userScrollOverrideVersion || !streamAutoFollowEnabled.value 即放弃 —— 闩锁期内一切排队的流式滚底被硬性取消"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 576, "note": "rAF 回调内二次校验同一条件 —— 双闸门，防抢占覆盖到帧级"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 657, "note": "navigationLerp 的 lerp() 每帧校验 !streamAutoFollowEnabled.value || expectedOverrideVersion !== userScrollOverrideVersion 即中止 —— 用户滚动能打断进行中的程序化缓动"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 1026, "note": "viewport 监听 wheel / touchstart（1027）/ pointerdown（1028）三类用户意图源，覆盖滚轮、触屏与拖拽滚动条"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 768, "note": "handleTimelineUserScrollIntent(): 记录 lastUserScrollAtMs，非吸底态立即 pauseTimelineAutoFollow() —— 意图检测先于 scroll 事件，无「先被拽走再暂停」的空窗"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 784, "note": "handleTimelineKeyboardIntent 覆盖 ArrowUp/Down/PageUp/PageDown/Home/End/Space 键盘滚动意图，并排除可编辑元素（786-792）—— 建议 2 完全没有这一维"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 30, "note": "AUTO_SCROLL_THRESHOLD_PX = 260（吸底再入容差）与建议的 40px 是不同语义：40px 是 React 侧的紧门限，本仓库取更宽的再入带以避免抖动；另 710 行有 12px 的程序化到位容差，构成双容差"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 842, "note": "scheduleAutoFollowIdleResume(): 3000ms 空闲后、且仅在 isSubmitting && !streamAutoFollowEnabled && contentChangedSincePause && 新 turn 签名 四个条件同时成立才恢复 —— 建议的 150ms 冷却既无空闲恢复也无内容/轮次门控"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 532, "note": "wave-14 同帧补偿：distance ≤ SAME_FRAME_COMPENSATION_MAX_PX(39 行 = 96px) 时在本微任务内直接对齐 scrollTop，消除「先生长后追赶」的一帧位移 —— 建议 2 未涉及此物理层问题"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 33, "note": "SCROLL_LERP_DURATION_MS = 320 + easeOutScroll(41) 自定义缓动 + 34 行 160ms 补偿缓动，替代 CSS smooth scroll"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 1031, "note": "viewportElement.style.scrollBehavior = \"auto\" —— 显式关闭 CSS 平滑滚动，交由 rAF lerp 控制，这正是「subpixel 防虚化」在本栈的等价手段"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 89, "note": "LAYOUT_CHANGE_THROTTLE_MS = 120 微观布局节流，避免 tool/reasoning 增量逐帧触发补偿跳变"},
+        {"file": "src/lib/useTimelineAutoScroll.ts", "line": 36, "note": "AUTO_FOLLOW_MIN_FORWARD_PX = 2 前向最小位移门限 + getForwardOnlyAnchorTargetTop(282) 禁止反向回拉"},
+        {"file": "tests/HomeWorkspace.spec.ts", "line": 2568, "note": "it(\"skips auto-scroll via streaming text updates when user has scrolled away\") —— 防抢占行为已有冻结测试"}
+      ],
+      "rationale": "现有实现是「意图检测 → 版本号作废 + 布尔闩锁 → 排队/帧/缓动三层校验 → 空闲+内容+轮次三重恢复」，并额外具备同帧补偿、键盘意图、前向门限与布局节流。建议 2 的 150ms 时间戳方案是其真子集，照搬会退化为更弱的抢占防护。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "若按建议把无限期闩锁替换为 150ms 冷却，流式期用户滚走后会被立即拽回底部，直接回退 wave-11/14 已实测修复的抖动与抢占问题。"
+    },
+    {
+      "id": "S6-diff-resizer",
+      "suggestion": "流式代码 Diff 视图（行号对齐 + tabular-nums、统一/分栏切换、复制按钮冷却防抖）与双击 50/50 弹性复位分栏 + 拖拽时 iframe pointer shield",
+      "decision": "REJECT",
+      "evidence": [
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 134, "note": "navigator.clipboard.writeText 仅用于整条消息/错误详情复制（100-147 的 autoCopyPill 定时器），前端不存在任何按 hunk/按代码块的 diff 数据源"},
+        {"file": "src/components/MarkdownRenderer.vue", "line": 279, "note": "代码渲染仅 v-html 注入 renderedHtml（293 为非流式路径），无行号容器、无复制按钮挂载点"},
+        {"file": "src/lib/markdown.ts", "line": 562, "note": "代码块产出为 `<pre class=\"code-block-cream\"><code${lang}>...</code></pre>` —— 无行号 span、无复制按钮、无 tabular-nums、无 diff 标记"},
+        {"file": "src/styles.css", "line": 34, "note": ".code-block-cream 仅定义背景/前景色，确认代码块样式层无行号或 gutter 能力"},
+        {"file": "src/App.vue", "line": 34, "note": "const isResizing = ref(false) 只服务于窗口 resize 防抖（75-85），全仓库 grep 'resizer|split-pane|splitPane|ResizablePanel|DiffView|pointer shield' 在 src/ 下零命中，不存在任何分栏拖拽/pointer shield 基础设施"},
+        {"file": "src/components/MarkdownRenderer.vue", "line": 95, "note": "splitMarkdownBlocks 是流式分块增量渲染（性能路径），与「diff 行级增量」语义无关，不可复用为 diff 数据源"}
+      ],
+      "rationale": "前端全仓库无任何 diff 数据源、无文件预览面板、无分栏布局；本项目 Rust 核心负责文件与沙箱，前端契约是「交互界面与状态展示」。实现该建议需新增 Rust 侧 diff 载荷、新面板、新分栏状态与新持久化面，属非因果关联新功能。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "夹带该功能会引入新的跨端契约（diff 载荷格式）与新布局状态，回归面远超交互物理波次边界，且违反「严禁夹带非因果关联新功能」。"
+    }
+  ],
+  "recommended_total_scope": "本轮只做 S1-ime-guard 的遗漏路径补齐：在 WorkspaceComposer.vue 的 handleOptionEnter/submitAskAnswer/toggleReasoningVisibility 与两个重命名输入框共 5 处回车入口加 isComposing||keyCode===229 早退守卫，并补一条反向用例。S1-single-border 与 S2-scroll-latch 已实现（后者现有方案严格强于建议），S6-diff-resizer 整体拒绝，三者写域为空。",
+  "rejected_with_reason": [
+    "S1-single-border：composer 外壳无 border，内部触发器/按钮/搜索框已全部 border:none，不存在嵌套边框膨胀；唯一带边框的附件胶囊承担状态色区分，删除即视觉回归。",
+    "S2-scroll-latch：150ms 冷却 + 40px 门限是现有实现的真子集；现有 482-495 无限期闩锁 + 517/576/657 三层版本校验 + 842-860 三重条件空闲恢复 + 532-549 同帧补偿 + 768/784 滚轮触屏键盘意图，整体更强，照搬即回退。",
+    "S6-diff-resizer：前端零 diff 数据源、零分栏基础设施，前端职责为交互与展示，实现需新增 Rust 侧契约与非因果新功能，超出本波次边界。",
+    "S6 中的「复制按钮冷却防抖」不可单独抽出：全仓库无 diff 视图，该防抖无宿主；代码块级复制按钮属独立微功能，应另立工单而非借 S6 夹带。",
+    "原任务描述中「AskPanel.vue 回答输入框 @keydown.enter」与实际不符：AskPanel.vue:164 的 Input 无任何 keydown 处理器，提交仅由 Button @click（175）触发；此处是「缺少 Enter 提交」的功能缺口，不是 IME 误触风险，不应混入 S1-ime-guard 的守卫补齐范围。"
+  ]
+}

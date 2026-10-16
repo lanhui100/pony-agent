@@ -1,0 +1,80 @@
+{
+  "perspective": "design-tokens",
+  "verdict": "FAIL",
+  "items": [
+    {
+      "id": "S5-surface-ladder",
+      "suggestion": "引入 @theme 设计令牌层 + Surface 0~3 四层微明度阶梯（底板/侧栏/浮层/激活），用微明度差替代纯白纯黑冷硬反差。",
+      "decision": "REJECT",
+      "evidence": [
+        {"file": "src/styles.css", "line": 1, "note": "@import \"tailwindcss\"; 是全仓唯一 CSS 入口。grep '@theme|@custom-variant|@utility|@layer' 命中 0 行 —— 当前不存在任何设计令牌层，全部颜色以 Tailwind 默认色阶与任意值字面量散落。"},
+        {"file": "src/styles.css", "line": 5, "note": "color-scheme: light; 把配色钉死为浅色单模。参考常量中深色一半（#1b1b19/#21211e/#282824/#32322d）在本应用中无任何可达路径。"},
+        {"file": "src/styles.css", "line": 24, "note": "body { color: #2f261d; } —— 全站前景为暖褐，视觉基调明确是【暖】，不是冷灰。与参考库同属暖色系，但暖度来源不同（本项目为米黄/琥珀，参考库为中性暖灰）。"},
+        {"file": "src/components/HomeStatusPanel.vue", "line": 90, "note": "bg-[#f6f0e8] 状态卡片底板（暖米色）—— 事实上的 Surface 2 已存在。"},
+        {"file": "src/components/AskPanel.vue", "line": 117, "note": "border-amber-200/70 bg-[#fdf6e7] 待确认浮层卡片 —— 事实上的 Surface 2 浮层已存在。"},
+        {"file": "src/components/HomeSidebar.vue", "line": 67, "note": "border border-stone-200/70 bg-white/62 侧边栏 —— 事实上的 Surface 1（半透明叠加 + 微边框）已存在。"},
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 737, "note": "height: 0.5px + 线性渐变 transparent→rgba(198,174,147,0.18)→transparent 的 markdown hr —— 已有 sub-pixel 发丝分隔手法。"},
+        {"file": "src/components/chat/AgentRuntimeStatusBar.vue", "line": 117, "note": "wave-11.2 F5 注释记载图标色对比度『实测 4.11:1（背板 #f2ede6）』—— 背板色是被已冻结门禁量化测量过的契约常量；替换 surface 阶梯会直接作废该测量并触发 a11y 回归。"}
+      ],
+      "rationale": "四层阶梯在本项目已【事实上存在】（bg-white/62..97 叠加 bg-stone-50..200 与 #faf6ef/#f6f0e8/#fdf6e7 米色卡片），缺的只是命名，不是分层。建议的实质增量是『在既有 96 个 hex 字面量 + 17 种 bg-white/alpha + 31 种 bg-stone/alpha 之上再叠一层 @theme 抽象』，而迁移面覆盖 19 个文件，属典型熵增而非熵减。且参考阶梯是中性暖灰、本项目是米黄琥珀，照搬常量等于换视觉识别，非令牌化。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "若强行实施：19 个文件 100+ 处颜色字面量需同步迁移，漏迁即出现新旧两套表面并存的双色斑；同时作废 AgentRuntimeStatusBar 背板 #f2ede6 上已冻结的 4.11:1 对比度门禁测量。"
+    },
+    {
+      "id": "S5-hairline",
+      "suggestion": "Retina 高分屏用半透明叠加 0.5px 发丝边框替代粗边线。",
+      "decision": "REJECT",
+      "evidence": [
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 737, "note": "全仓唯一 sub-pixel 线：height: 0.5px 渐变 hr。它是 markdown 语义分隔线，不是边框，且用 height 而非 border-width，不影响盒模型。"},
+        {"file": "src/components/ui/DropdownMenu.vue", "line": 62, "note": "ring-1 ring-stone-900/8 —— 当前浮层发丝边界的事实标准就是 1px 半透明 ring（box-shadow 实现，不占布局），已达成建议想要的全部收益。"},
+        {"file": "src/components/ProviderConfigPage.vue", "line": 1571, "note": "ring-1 ring-stone-200/70 —— 1px 半透明 ring 的另一典型位点。"},
+        {"file": "src/components/chat/WorkspaceComposer.vue", "line": 1476, "note": "box-shadow: 0 0 0 2px rgba(231,229,228,0.95) —— 焦点环已用 box-shadow 而非 border，说明团队已掌握『阴影描边不占布局』手法。"}
+      ],
+      "rationale": "建议描述的收益（半透明叠加、不占布局的细描边）在仓内已通过 ring-1 + rgba 普遍实现（ring-1 命中 14 处，border 命中 276 处）。Tailwind v4 下若要真做 0.5px，正确最小手法是 box-shadow 路径的 ring-[0.5px]（或 shadow-[0_0_0_0.5px_rgba(...)]）而非 border-[0.5px]：后者写的是 border-width，在 DPR=1 屏上会被浏览器取整/次像素抗锯齿，渲染成偏淡的 1px 或位置相关的模糊线，而 Tauri 桌面端 Windows 100% 缩放即 DPR=1，是主流配置。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "全量替换需触碰 276 处 border + 14 处 ring-1，回归面覆盖所有面板/表格/卡片边界；且在 DPR=1（Windows 100% 缩放）上 0.5px box-shadow 会因抗锯齿掉到约 50% 不透明度，边界在主流平台视觉消失。若确需保留能力，应只以 @custom-variant retina (@media (min-resolution: 2dppx)) 形式登记，1px 为默认回退，不批量改写既有位点。"
+    },
+    {
+      "id": "S5-tabular-nums",
+      "suggestion": "所有耗时、Token 计数、进度百分比强制 tabular-nums，杜绝数字跳动引发的横向抖动。",
+      "decision": "WORTH_IMPLEMENTING",
+      "evidence": [
+        {"file": "src/components/chat/AgentRuntimeStatusBar.vue", "line": 140, "note": "全仓唯一 tabular-nums。setInterval 于 :65 每秒写 now.value，elapsedText 在同一 span 原地重渲染（:142）—— 团队已就『原地跳动数字』这一类缺陷做过修复，本建议是该修复的一致性外推。"},
+        {"file": "src/components/AskPanel.vue", "line": 132, "note": "{{ formatExpiry(ask) }} 渲染 '12s 后过期'；formatExpiry 于 :78 调 Date.now()，组件按 store 2500ms 轮询重渲染（src/stores/ask.ts:5），同一文本节点原地变更。该 span 为 shrink-0 且处于 justify-between 行（:128-133），'10s'→'9s' 位数变化会把左侧 askContextLabel 推位 —— 真实抖动。"},
+        {"file": "src/components/HomeStatusPanel.vue", "line": 100, "note": "{{ formatCompactInteger(inputTokensTotal) || \"0\" }} —— 输入上下文占用，随会话实时变化，无 tabular-nums 无 min-width。"},
+        {"file": "src/components/HomeStatusPanel.vue", "line": 106, "note": "{{ formatCompactInteger(outputTokensTotal) || \"0\" }} —— 输出 token 累计，0 → 12K → 1M 位数变化。"},
+        {"file": "src/components/HomeStatusPanel.vue", "line": 112, "note": "{{ formatCompactInteger(cacheHitTokensTotal) || \"0\" }} 与 :113 的 · {{ cacheHitRatio }}（'43%'，1↔2 位数）。"},
+        {"file": "src/components/HomeStatusPanel.vue", "line": 119, "note": "{{ formatTokenSpeed(tokenGenerationSpeed) }} 渲染 '23 t/s'，'—' → 1 位 → 3 位。该行外层为 justify-around（:92），子项按各自 flex 份额居中，宽度变化会移动自身图标+数字对的中心 —— 真实横向抖动。"},
+        {"file": "src/components/HomeStatusPanel.vue", "line": 92, "note": "flex items-center justify-around text-[11px] —— 等分居中布局，任一子项宽度变化都会移动相邻子项位置，是本建议的因果放大器。"},
+        {"file": "src/components/HomeTracePanel.vue", "line": 1528, "note": "{{ item.value }} 渲染 turn 级 输入/输出 token、t/s、首 token 延时 ms（构造于 :834/:837/:840/:846），随 trace 实时更新；外层为 flex flex-nowrap gap-x-3（:1524），宽度变化向右推移后续全部 chip。"},
+        {"file": "src/components/HomeTracePanel.vue", "line": 1590, "note": "{{ item.value }} 渲染 timeline entry 级 token/延时（构造于 :860/:863/:867/:873），外层同样 flex flex-nowrap gap-x-3（:1583）—— 与 :1528 同因。"},
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 437, "note": "反例（判定为非抖动位点）：tool.durationSeconds 为工具结束后落定的单值，且 :437 已用 :class invisible + '0.0s' 占位预留宽度，位数变化不产生位移 —— 已自行缓解，无需改动。"},
+        {"file": "src/components/chat/TurnDial.vue", "line": 101, "note": "反例（判定为非抖动位点）：Turn {{ hoveredSummary.turnNumber }} 仅在悬停时渲染静态序号，无计时器、无原地数值变化。"}
+      ],
+      "rationale": "这是三条建议中唯一【因果关联的真实缺陷修复】：数字在同一文本节点原地变化导致相邻内容横向位移，且团队已在 AgentRuntimeStatusBar.vue:140 就同一缺陷类别做过一次修复，本项只是把该修复补齐到剩余位点。改动面为 3 个文件约 8 行 class，不触碰颜色、布局结构或公共契约，符合最小闭包。注意：仅加 tabular-nums 只消除逐位宽度差，位数变化仍需配合 min-w + 右对齐/居中固定，否则 AskPanel 与 HomeStatusPanel 的推位仍会残留。",
+      "minimal_closure": "1) src/components/AskPanel.vue:130 —— 在 <span v-if=\"formatExpiry(ask)\"> 上追加 class tabular-nums 与 min-w-[5.5rem] justify-end（该 span 当前为 inline-flex shrink-0 items-center gap-1，仅加 tabular-nums 不足以消除 '10s'→'9s' 的位数位移）。2) src/components/HomeStatusPanel.vue:100、106、112、119 —— 在各自承载数字的 <span class=\"inline-flex items-center gap-1\"> 上追加 tabular-nums text-center min-w-[3.5rem] justify-end（:113 的 cacheHitRatio 同 span 一并覆盖）。3) src/components/HomeTracePanel.vue:1526 与 :1588 —— 在承载 {{ item.value }} 的 <span class=\"inline-flex items-center gap-0.5 whitespace-nowrap\"> 上追加 tabular-nums。4) src/components/chat/AgentRuntimeStatusBar.vue:140 保持现状作为参照基线，不改。5) src/components/chat/WorkspaceTurnItem.vue:437 与 src/components/chat/TurnDial.vue:101 明确不改（已缓解 / 无抖动）。不新增 @theme、不改颜色、不改 flex 结构。",
+      "write_scopes": [
+        "src/components/AskPanel.vue",
+        "src/components/HomeStatusPanel.vue",
+        "src/components/HomeTracePanel.vue"
+      ],
+      "risk": "min-w 取值过大会在窄侧栏挤压相邻 chip 造成换行；tabular-nums 对 MiSansLatin 数字等宽生效依赖字体本身含 tnum 特性，需实机核对（styles.css:6 主字体为 MiSansLatin/MiSans）。回归面仅限这 3 个组件的文本宽度，无逻辑与契约变更。"
+    }
+  ],
+  "quantified_evidence": {
+    "color_literals_count": 177,
+    "files_with_hardcoded_colors": 24,
+    "tabular_nums_current_sites": 1,
+    "jitter_risk_sites_found": 8
+  },
+  "recommended_total_scope": "本次仅实施 S5-tabular-nums 的最小闭包：AskPanel.vue:130、HomeStatusPanel.vue:100/106/112/119、HomeTracePanel.vue:1526/1588 三文件八处追加 tabular-nums 并按需补 min-w + 右对齐；这是已存在缺陷类别的补齐，非重构。S5-surface-ladder 与 S5-hairline 均拒绝：前者是覆盖 19 文件、作废 #f2ede6 对比度门禁测量的大范围视觉重构，后者需改写 276 处 border 且在 DPR=1 的 Windows 上视觉退化。两条被拒项如需推进，应各自独立立项并附带完整迁移清单与对比度重测门禁，不得夹带进本波。",
+  "rejected_with_reason": [
+    "S5-surface-ladder —— REJECT：四层微明度阶梯在本项目已事实上存在（bg-white/62..97 叠加 bg-stone-50..200 与 #faf6ef/#f6f0e8/#fdf6e7 米色卡片），缺命名不缺分层；在 96 个 hex 字面量、17 种 bg-white/alpha、31 种 bg-stone/alpha 之上再加 @theme 抽象是熵增而非熵减，且迁移面 19 文件，违反『严禁夹带重构』。参考常量为中性暖灰，本项目为米黄琥珀，照搬等于换视觉识别。深色一半（#1b1b19 等）因 styles.css:5 的 color-scheme: light 全无可达路径。",
+    "S5-hairline —— REJECT：建议收益（半透明、不占布局的细描边）已由 ring-1 + rgba 普遍实现（ring-1 命中 14 处，见 DropdownMenu.vue:62、ProviderConfigPage.vue:1571）。正确手法应为 box-shadow 路径的 ring-[0.5px]，而非 border-[0.5px]（border-width 在 DPR=1 被取整/抗锯齿，Tauri Windows 100% 缩放即 DPR=1）；全量替换需触碰 276 处 border + 14 处 ring-1，回归面过大。仅登记 retina 变体、保留 1px 回退可作为未来 backlog。",
+    "S5-surface-ladder 中的『杜绝纯白纯黑冷硬反差』分句 —— REJECT：仓内 bg-white 纯白命中 55 处（如 HomeSidebar.vue:67 为 bg-white/62 半透明、ProviderConfigPage.vue:1571 为 bg-white 实白），但这是既有视觉决策而非缺陷，且已通过大量半透明叠加弱化；替换为 #fcfcfb 属于无因果收益的视觉变更。",
+    "S5-tabular-nums 的『所有百分比/进度』全域强制 —— 降级：ModelMonitorPage.vue:750/751/830/831/1091/1133 等统计位点为按需加载的静态表格（该页无 setInterval/自动刷新），不存在原地跳动，不纳入本次最小闭包。",
+    "S5-tabular-nums 的『行号』与『倒计时』扩展 —— 不适用：仓内 grep 未发现带 ticker 的行号列或倒计时组件；唯一 TTL 文本为 AskPanel.vue:132，已纳入闭包。"
+  ]
+}

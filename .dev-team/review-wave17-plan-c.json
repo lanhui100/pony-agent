@@ -1,0 +1,94 @@
+{
+  "perspective": "state-machine-and-risk",
+  "verdict": "FAIL",
+  "items": [
+    {
+      "id": "S3-ask-state-machine",
+      "suggestion": "工具决策/Ask 卡片采用严格三态授权闭环 pending_approval → running → success/error",
+      "decision": "ALREADY_IMPLEMENTED",
+      "evidence": [
+        {"file": "src/types/ask-plan.ts", "line": 6, "note": "PendingAskState 已定义 pending | consumed | cancelled | expired 四态（终态集合完整，含 expired）"},
+        {"file": "src/stores/ask.ts", "line": 58, "note": "AskState 含 loading / error / answeringRequestId / cancellingRequestId，构成 pending → 在飞 → 终态/失败的完整状态面"},
+        {"file": "src/stores/ask.ts", "line": 77, "note": "isStaleAskError 显式区分「CAS 终态失败」与「可恢复网络错误」，并在 :221/:300 分别走对账 vs 回填，闭环已闭合"},
+        {"file": "src/components/ask/AskUserToolCallCard.vue", "line": 97, "note": "terminalState 计算属性已把无 pending 匹配的调用收口为 waiting | done | error 三态分支"},
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 437, "note": "工具行已渲染耗时徽标 durationSeconds + pending/done/error 三态图标（:438-440），即建议中的「耗时徽标 + 终态」"},
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 440, "note": "error 态渲染 AlertTriangle 且带 aria-label='工具调用失败'，终态可访问性已具备"}
+      ],
+      "rationale": "前端可表达的 Ask 三态闭环（pending → 在飞 → consumed/cancelled/expired + error）已完整落地并有 stale-CAS 对账分支。唯一的『pending_approval』授权态不属于 Ask 面：后端 ask_control.rs:32-42 只投影 Interaction 类请求，Approval 类请求根本不会到达前端，因此该缺口应归入 S3-decision-actions 而非本项。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "若按建议再引入一套独立的三态状态机，会与 ask.ts 既有 optimistic-remove + 单飞对账语义产生第二真值源，属高回归面改动。"
+    },
+    {
+      "id": "S3-decision-actions",
+      "suggestion": "三阶操作动作阵列（仅本次通过 / 永久白名单 / 拒绝）+ Payload JSON 折叠审查 + 耗时徽标",
+      "decision": "REJECT",
+      "evidence": [
+        {"file": "crates/pony-agent-core/src/agent/ask_control.rs", "line": 74, "note": "ControlRequestAuthorization::for_request 的 answer 字段是 Option<Value>——单一不透明载荷，无 verdict 枚举，无法表达三阶语义"},
+        {"file": "crates/pony-agent-core/src/agent/ask_control.rs", "line": 32, "note": "filter_interaction_requests 只保留 request_kind == Interaction && state == Pending，Approval 类请求被排除，前端拿不到授权决策的数据源"},
+        {"file": "src-tauri/src/lib.rs", "line": 1208, "note": "invoke_handler 中 ask 面仅注册 ask_list_pending / ask_answer / ask_cancel / ask_expire 四条命令，不存在 approval/whitelist 类命令"},
+        {"file": "src-tauri/src/lib.rs", "line": 713, "note": "唯一持久化授权写入路径是 authorize_path，其作用域是文件路径（path + read/write scope），与「MCP 工具级永久白名单」不同构"},
+        {"file": "src/components/ask/PermissionElevationCard.vue", "line": 101, "note": "现有卡片是二阶（批准并信任路径 / 拒绝），调用 authorize_path；它是路径级持久授权，不构成工具级三阶的先例实现"},
+        {"file": "crates/pony-agent-core/src/agent/dispatcher.rs", "line": 92, "note": "PermissionVerdict 是 Allow/Deny/ApprovalRequired/WaitingHost——策略求值结果，不是带持久化的用户决议，不能直接当三阶动作"}
+      ],
+      "rationale": "「永久白名单」在后端无任何工具级持久化落点：ask 面只有不透明 answer 载荷 + cancel，唯一的持久授权 Store 是路径域（path_permission.rs:162 AuthorizeStore）。这属于跨 Rust 核心 + IPC 契约 + 持久化格式的新增功能，远超『前端借鉴语义与常量』的范围。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "若仅在前端伪造第三颗按钮（把 always_allow 塞进 answer: Value），后端只会把它当作工具答案回灌模型，形成『UI 承诺了未发生的授权』的静默谎报——比不做更危险。"
+    },
+    {
+      "id": "S4-thinking-mutex",
+      "suggestion": "生成期间强制展开思考折叠面板并禁用点击折叠（onOpenChange = undefined 互斥锁）",
+      "decision": "REJECT",
+      "evidence": [
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 182, "note": "shouldOpenReasoningBlock 是常量 false（参数以 _message 命名即表明未被使用），:open 绑定值永不变化"},
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 361, "note": ":open=\"shouldOpenReasoningBlock(event.assistant)\" 恒为 false；Vue 仅在前后 vnode prop 值不同时 patch，故用户手动展开后不会被重渲染重置——当前不存在状态失步"},
+        {"file": "src/components/HomeWorkspace.vue", "line": 70, "note": "showReasoningContent 默认 false，是全局用户偏好，而非每次生成的瞬时状态"},
+        {"file": "src/components/HomeWorkspace.vue", "line": 728, "note": "reasoningContent 仅在 showReasoningContent 为真时进入事件流，否则整块思考内容不进 events——强制展开会与显式偏好冲突或成为空操作"},
+        {"file": "src/components/HomeWorkspace.vue", "line": 1525, "note": "该偏好由 localStorage 持久化读取，:1601 写回，属用户显式选择的持久契约"},
+        {"file": "src/components/chat/WorkspaceTurnItem.vue", "line": 367, "note": "reasoning 面板带 style='contain: layout'，为抑制流式重排而设计；强制展开会让其在流式期间持续增长，与该优化目标相反"}
+      ],
+      "rationale": "当前不存在该建议所要修复的状态失步（:open 恒 false 故永不 patch，DOM 展开态由浏览器持有）。强制展开会覆盖一个 localStorage 持久化的显式用户偏好（默认关闭思考），并在流式期间制造无界布局增长，与 contain:layout 及时间线滚动锁存相互对抗。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "强行实施会使流式期间视口持续被推理文本撑开，破坏 useTimelineAutoScroll 的 150ms 用户滚动锁存；同时新增 @click.prevent 拦截会剥夺键盘用户的折叠权（summary 原生语义被劫持）。"
+    },
+    {
+      "id": "S4-ambient-glow",
+      "suggestion": "暖光漫反射 + 非对称贝塞尔曲率扫光，提升推理等待质感",
+      "decision": "REJECT",
+      "evidence": [
+        {"file": "src/components/chat/AgentRuntimeStatusBar.vue", "line": 278, "note": "runtime-status-shimmer 已实现背景渐变扫光（shimmer-sweep 2.4s ease-in-out infinite），且 dark 模式另配渐变（:303）"},
+        {"file": "src/components/chat/AgentRuntimeStatusBar.vue", "line": 263, "note": "runtime-status-orbit-dot-breathe 已实现 0.7↔1.15 scale + 0.55↔1 opacity 的呼吸动效，即建议中的『柔和呼吸』"},
+        {"file": "src/components/chat/AgentRuntimeStatusBar.vue", "line": 315, "note": "prefers-reduced-motion 分支已显式关停 orbit 与 shimmer 并回退为静态色，无障碍契约已建立"},
+        {"file": "src/components/chat/AgentRuntimeStatusBar.vue", "line": 215, "note": "动效节奏已按 data-mode 分档（thinking 1500ms/2000ms、waiting_approval 2200ms、retrying 1200ms），再叠一层氛围光会造成同一区域双动画语义冲突"},
+        {"file": "open-claude-ui/code-examples/ReasoningAmbientGlow.tsx", "line": 217, "note": "参考实现的 AmbientLightFieldCanvas 用 requestAnimationFrame 持续重绘 canvas 焦散光斑"},
+        {"file": "open-claude-ui/code-examples/ReasoningAmbientGlow.tsx", "line": 78, "note": "参考组件使用 box-shadow 光晕 + 多层 blur，box-shadow 属 paint 层动画，不进入合成层"},
+        {"file": "src/styles.css", "line": 62, "note": "项目已对 app-layout-shell/home-layout-shell 预置 will-change: width,height 合成层，继续叠加 will-change/光晕层会抬升常驻显存"}
+      ],
+      "rationale": "shimmer 与呼吸动效在 AgentRuntimeStatusBar 已存在且已做 reduced-motion 回退，重复实现无净收益。参考组件零 prefers-reduced-motion 处理（该文件 grep 命中 0 次），照搬会把 canvas rAF 与 paint 层 box-shadow 动画引入滚动中的时间线，既破坏既有无障碍纪律也带来真实合成开销。",
+      "minimal_closure": null,
+      "write_scopes": [],
+      "risk": "canvas rAF 在 Tauri WebView 内属 JS 主线程逐帧任务，与流式逐字渲染（assistant-streaming-char 每字符一个动画）叠加会直接争抢帧预算；box-shadow 无限动画在长列表滚动时触发重绘。"
+    }
+  ],
+  "backend_contract_gap": "三阶决议动作在后端【不受支持】。(1) crates/pony-agent-core/src/agent/ask_control.rs:47-53 的 answer_ask 只接受 ControlRequestAuthorization，其 answer 字段为 Option<serde_json::Value>（同文件 :74-85），是不透明单载荷，无 verdict 枚举；(2) 同文件 :32-42 的 filter_interaction_requests 只保留 request_kind == Interaction && state == Pending，Approval 类请求被排除，前端不存在授权决策的数据源；(3) src-tauri/src/lib.rs:1208-1211 注册的 ask 面命令仅 ask_list_pending / ask_answer / ask_cancel / ask_expire，无任何 approval/allowlist 命令；(4) 全仓唯一持久化授权写入是 src-tauri/src/lib.rs:713 的 authorize_path → crates/pony-agent-core/src/agent/path_permission.rs:162 AuthorizeStore，作用域为文件路径（path + read/write scope），与「MCP 工具级永久白名单」不同构；(5) crates/pony-agent-core/src/agent/dispatcher.rs:92-97 的 PermissionVerdict（Allow/Deny/ApprovalRequired/WaitingHost）是策略求值结果而非可持久化的用户决议。结论：三阶动作阵列属跨 Rust 核心 + IPC 契约 + 持久化格式的跨层新增功能，应降级为独立 backlog，不得作为前端借鉴项实施。",
+  "vue_porting_risks": [
+    "spring 参数无法『照抄』：Framer Motion spring 无 duration（按物理收敛），而 CSS transition 必须显式给定时长；映射需先由 ζ = c/(2*sqrt(m*k))、ω0 = sqrt(k/m) 求解阻尼比与固有频率，再按 ~3/(ζω0) 估算 settle 时间并拟合 cubic-bezier，任何 stiffness/damping 调整都会静默改变感知时长。",
+    "spring 可中断续速，CSS transition 不可：流式期间 reasoning 面板每帧重算事件，若用 CSS transition 动画其高度/透明度，transition 会在每次重渲染时从当前值以零速度重启，产生持续抖动而非顺滑收敛。",
+    "参考仓库自身的常量是自相矛盾的，直接复制会导入错误预设：open-claude-ui/AGENTS.md 声明 SPRING_SNAPPY = stiffness 600 / damping 30 / mass 0.6，但 open-claude-ui/code-examples/ClaudeMotionPresets.ts:72-77 的 SPRING_SNAPPY 实为 stiffness 320 / damping 28 / mass 1.0，而 stiffness 600 落在同文件 :61-66 的 SPRING_BOUNCY 上（且 AGENTS.md 对 SPRING_HEAVY_SNAP 标注 ζ=1.826，代码实际算得 3.65）。『只借常量』在语义层已不可靠，必须以本仓实测收敛曲线重新标定。",
+    "height: auto 动画并非不可复刻，但需换用本仓既有惯用法：Framer Motion/AnimatePresence 的 height 0→auto 无法用 CSS transition 插值（auto 不可插值），但本仓已有等价低本地方案——src/components/PlanPanel.vue:324-329 与 src/components/ProviderConfigPage.vue:1282 的 grid-template-rows: 0fr → 1fr + transition + motion-reduce:transition-none，应复用而非引入 motion-v 的测量式高度动画。",
+    "motion-v 已存在且能力被低估：package.json:78 已依赖 motion-v ^2.3.0，node_modules/motion-v/dist/es/index.mjs 实际导出 AnimatePresence / LayoutGroup / MotionConfig / useSpring / useAnimate，props.d.ts 亦含 layoutId。因此『无法复刻』的准确范围应缩到：依赖 LayoutGroup + layoutId 的共享元素过渡（时间线 v-for 事件在流式期间绕开 turnEventCache 逐帧重建，key 稳定性与 layout 测量易冲突），以及依赖 AnimatePresence 的退场动画（当前 reasoning 块是原生 <details>，改造会丢失原生 disclosure 语义、键盘操作与页内查找）。",
+    "Tailwind v4 CSS-first 缺设计令牌层：本仓无 tailwind.config.js（已确认不存在），styles.css:1 仅 @import 'tailwindcss'，无 @theme 自定义动画；参考仓库的 cds-shimmer-text-shine / cds-dot-pulse / epitaxy-linear-sweep 等 @keyframes 与 --cds-* 变量、clay 色阶均不存在，照搬 className 会全部失效，需在 @theme 或 <style scoped> 内重建。",
+    "GPU/合成层：既有动效均限定在 transform/opacity 与短文本 background-position（AgentRuntimeStatusBar.vue:278-301）；styles.css:62-68 已占用 will-change 合成层。新增 box-shadow 光晕（paint 层）与 canvas rAF 焦散（主线程逐帧）会与流式逐字动画争抢帧预算，且参考实现 ReasoningAmbientGlow.tsx 内 prefers-reduced-motion 命中 0 次，无任何降级分支。"
+  ],
+  "recommended_total_scope": "本轮不实施 S3/S4 任何一条前端改动。S3-ask-state-machine 判定为已实现，S3-decision-actions 因后端无工具级持久授权契约判定为跨层新增功能，应登记为独立 backlog（需先定义 Rust verdict 枚举 + allowlist 持久化 + IPC 命令）。S4 两条均判定为拒绝：思考互斥锁所要修复的状态失步在当前实现中不存在（shouldOpenReasoningBlock 恒 false，:open 永不 patch），氛围光则与 AgentRuntimeStatusBar 既有 shimmer/呼吸动效重复且无 reduced-motion 保障。",
+  "rejected_with_reason": [
+    "S3-decision-actions『永久白名单』：后端无工具级持久授权落点（ask_control.rs:74-85 只有不透明 answer: Value；src-tauri/src/lib.rs:1208-1211 无 approval 命令），唯一持久 Store 是路径域 AuthorizeStore（path_permission.rs:162）。跨层新增功能，应降级为独立 backlog，不得借前端之名实施。",
+    "S3-decision-actions 的『Payload JSON 折叠审查 + 耗时徽标』子项：耗时徽标已存在于 WorkspaceTurnItem.vue:437；Payload 审查在 WorkspaceComposer.vue:597-625 已有 resolveAskOptionItem 的结构化解析（label/description/推荐徽标）。剩余增量不足以支撑一次独立波次。",
+    "S4-thinking-mutex『生成期间强制展开』：会覆盖 localStorage 持久化的显式用户偏好（HomeWorkspace.vue:70/1525/1601，默认关闭思考），且与 WorkspaceTurnItem.vue:367 的 contain: layout 及流式滚动锁存目标相反。",
+    "S4-thinking-mutex『禁用点击折叠』：即使只取此半条也会剥夺用户折叠长推理以阅读下文的能力，属可用性回归；且它并不修复任何现存缺陷。",
+    "S4-ambient-glow：shimmer（AgentRuntimeStatusBar.vue:278-301）与呼吸（:263-274）均已存在并已做 prefers-reduced-motion 回退（:315-331）；参考实现 ReasoningAmbientGlow.tsx 无任何 reduced-motion 分支，canvas rAF（:217）与 box-shadow 光晕（:78）会引入 paint 层与主线程开销。",
+    "跨栈直接复制 spring 常量：open-claude-ui/AGENTS.md 与 code-examples/ClaudeMotionPresets.ts:61-99 的名称↔参数映射互相矛盾（SNAPPY/BOUNCY 的 stiffness 600 归属对调，HEAVY_SNAP 的 ζ 标注 1.826 vs 实算 3.65），照抄会引入错误物理参数。"
+  ]
+}
