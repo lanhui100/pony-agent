@@ -35,6 +35,8 @@ const COMPENSATION_SCROLL_LERP_DURATION_MS = 160;
 const SCROLL_RAF_STUCK_TIMEOUT_MS = 500;
 const AUTO_FOLLOW_MIN_FORWARD_PX = 2;
 const STREAMING_RESIZE_FALLBACK_WINDOW_MS = 180;
+/// wave-14：流式同帧补偿的最大位移（≈3 行），超过则退回原有缓动路径。
+const SAME_FRAME_COMPENSATION_MAX_PX = 96;
 
 function easeOutScroll(t: number): number {
   return 1 - Math.pow(1 - t, 3.2);
@@ -504,7 +506,8 @@ let lastLayoutCompensationAtMs = 0;
   function queueScrollToLatestTurn(
     behavior: ScrollBehavior = "smooth",
     expectedOverrideVersion = userScrollOverrideVersion,
-    targetMode: ScrollTargetMode = "anchor"
+    targetMode: ScrollTargetMode = "anchor",
+    options: { sameFrame?: boolean } = {}
   ) {
     scheduledScrollRequestId += 1;
     const requestId = scheduledScrollRequestId;
@@ -522,6 +525,30 @@ let lastLayoutCompensationAtMs = 0;
         emit("queue-scroll-request:cancelled-before-raf", { requestId, behavior, expectedOverrideVersion, targetMode });
         return;
       }
+      // wave-14：流式期的**同帧补偿**。内容在同一帧内增长（Vue flush 后本微任务仍早于 paint），
+      // 若把对齐推迟到 rAF，会留下「先生长、后追赶」的一帧位移 —— 状态条位于消息流最下方时
+      // 即表现为逐行 ±1 行的抖动（wave-11 基线实测 44 次方向反转 / ±23.8px）。
+      // 小位移（≤ 3 行）且跟随开启时直接在本微任务内对齐，paint 时已是补偿后的位置。
+      if (options.sameFrame && targetMode === "anchor") {
+        const viewport = getViewport();
+        const metrics = readViewportMetrics(viewport);
+        if (viewport && metrics) {
+          const rawTarget = getForwardOnlyAnchorTargetTop(getAnchorTargetTop(), metrics.scrollTop);
+          const distance = rawTarget - metrics.scrollTop;
+          if (Number.isFinite(distance) && distance > AUTO_FOLLOW_MIN_FORWARD_PX && distance <= SAME_FRAME_COMPENSATION_MAX_PX) {
+            viewport.scrollTop = rawTarget;
+            emit("queue-scroll-request:same-frame-compensation", {
+              requestId,
+              targetMode,
+              distance,
+              scrollTop: rawTarget
+            });
+            scrollQueued.value = false;
+            return;
+          }
+        }
+      }
+
       if (scrollAfterPaintFrameId.value != null) {
         emit("queue-scroll-request:replace-pending-raf", {
           requestId,
@@ -807,7 +834,9 @@ let lastLayoutCompensationAtMs = 0;
     if (payload.streaming) {
       lastStreamingFollowQueuedAt = Date.now();
     }
-    queueScrollToLatestTurn("auto", userScrollOverrideVersion, "anchor");
+    queueScrollToLatestTurn("auto", userScrollOverrideVersion, "anchor", {
+      sameFrame: payload.streaming
+    });
   }
 
   function scheduleAutoFollowIdleResume() {
@@ -913,7 +942,9 @@ let lastLayoutCompensationAtMs = 0;
         behavior,
         streamingAssistantUpdate: isStreamingAssistantUpdate
       });
-      queueScrollToLatestTurn(behavior, userScrollOverrideVersion, targetMode);
+      queueScrollToLatestTurn(behavior, userScrollOverrideVersion, targetMode, {
+        sameFrame: isStreamingAssistantUpdate
+      });
     });
   }
 

@@ -223,7 +223,7 @@ describe("Wave-11 状态条契约（组件级）", () => {
     expect(document.body.contains(streamingElement)).toBe(true);
   });
 
-  it("契约 §2.1 槽位归属：状态条不再位于滚动内容列内，而是归属 composer 区域", async () => {
+  it("契约 §2.1 槽位归属（wave-14 §9/C14-5 反转）：状态条位于滚动内容列内、不再归属 composer 区域", async () => {
     const { store, wrapper } = setupWorkspace();
 
     patchStreaming(store);
@@ -238,16 +238,25 @@ describe("Wave-11 状态条契约（组件级）", () => {
     expect(composerShell.exists()).toBe(true);
     expect(slot.exists()).toBe(true);
 
-    expect(contentColumn.element.contains(slot.element)).toBe(false);
-    expect(composerShell.element.contains(slot.element)).toBe(true);
+    expect(
+      contentColumn.element.contains(slot.element),
+      "状态条必须位于消息流内容列内（消息流最下方）"
+    ).toBe(true);
+    expect(
+      composerShell.element.contains(slot.element),
+      "状态条不得再挂在 composer 区域（wave-11 §2.1 落位已被 §9 反转）"
+    ).toBe(false);
   });
 
-  it("契约 §2.4 data-visible 语义：流式有可见内容→false；思考中/工具执行/错误/会话操作→true", async () => {
+  it("契约 §2.4/§8 C14-1 data-visible 语义：所有活跃状态（含流式）恒为 true", async () => {
     const { store, wrapper } = setupWorkspace();
 
     patchStreaming(store);
     await flush();
-    expect(wrapper.find(SLOT).attributes("data-visible")).toBe("false");
+    expect(
+      wrapper.find(SLOT).attributes("data-visible"),
+      "正文流式期间必须可见（wave-14 用户裁定 A）"
+    ).toBe("true");
 
     patchThinking(store);
     await flush();
@@ -314,25 +323,32 @@ describe("Wave-11 状态条契约（组件级）", () => {
     ).toBe("true");
   });
 
-  it("契约 §2.3 隐藏语义：data-visible=false 时 aria-hidden=true 且 pointer-events 为 none", async () => {
+  it("契约 §2.3/§8 C14-1/C14-2：状态条始终可见（含流式）且 pointer-events 恒为 none", async () => {
     const { store, wrapper } = setupWorkspace();
 
     patchStreaming(store);
     await flush();
 
     const slot = wrapper.find(SLOT);
-    expect(slot.attributes("data-visible")).toBe("false");
-    expect(slot.attributes("aria-hidden")).toBe("true");
+    expect(
+      slot.attributes("data-visible"),
+      "正文流式期间必须可见（wave-14 §8 覆盖 §2.3/§2.4 的隐藏语义）"
+    ).toBe("true");
+    expect(slot.attributes("aria-hidden"), "可见态不得带 aria-hidden").not.toBe("true");
 
-    const pointerEvents = (slot.element as HTMLElement).style.pointerEvents
+    const streamingPointerEvents = (slot.element as HTMLElement).style.pointerEvents
       || window.getComputedStyle(slot.element).pointerEvents;
-    expect(pointerEvents).toBe("none");
+    expect(streamingPointerEvents, "不得吞消息区点击/选中").toBe("none");
 
+    // 工具执行态同样可见 + pointer-events none（状态间语义一致）
     patchToolRunning(store);
     await flush();
     const visibleSlot = wrapper.find(SLOT);
     expect(visibleSlot.attributes("data-visible")).toBe("true");
     expect(visibleSlot.attributes("aria-hidden")).not.toBe("true");
+    const toolPointerEvents = (visibleSlot.element as HTMLElement).style.pointerEvents
+      || window.getComputedStyle(visibleSlot.element).pointerEvents;
+    expect(toolPointerEvents).toBe("none");
   });
 
   it("契约 §2.5 单行不换行：状态条文本链路上存在 nowrap/截断声明且标签文本不含换行", async () => {
@@ -408,7 +424,7 @@ describe("Wave-11 状态条契约（组件级）", () => {
   // `reasoningContent` 而正文仍在流式时，`resolveAgentRuntimeStatus` 因 `streamingReasoning`
   // 优先返回 `mode="thinking"`，旧 gate 会因此让槽位在整个正文流式期保持可见
   // （R3/M2 对推理模型失效）。F7 把「隐藏资格」收窄为白名单 {responding, thinking}。
-  it("契约 §2.4 F7 回归：reasoningContent 已落盘 + 正文流式中（mode=thinking）→ 槽位必须隐藏", async () => {
+  it("契约 §2.4 F7 回归 + §8 C14-1：reasoningContent 已落盘 + 正文流式中（mode=thinking）→ 槽位必须可见", async () => {
     const { store, wrapper } = setupWorkspace();
 
     // 反假前置：确认该状态确实投射为 mode="thinking"（否则本用例会退化为重复 M2 的 responding 场景）
@@ -422,20 +438,20 @@ describe("Wave-11 状态条契约（组件级）", () => {
     });
     expect(projected?.mode).toBe("thinking");
 
-    // 主用例：正文已有可见内容 → 必须隐藏
+    // 主用例：正文已有可见内容 → wave-14 §8 裁定「运行期间始终显示」
     patchReasoningStreaming(store, "已流式输出的正文内容");
     await flush();
     expect(
       wrapper.find(SLOT).attributes("data-visible"),
-      "reasoningContent 已落盘且正文流式中时槽位必须隐藏"
-    ).toBe("false");
+      "reasoningContent 已落盘且正文流式中时槽位必须可见（wave-14 裁定 A）"
+    ).toBe("true");
 
-    // 对照组：同状态但正文为空（纯思考）→ 必须保持可见
+    // 对照组：同状态但正文为空（纯思考）→ 同样可见
     patchReasoningStreaming(store, "");
     await flush();
     expect(
       wrapper.find(SLOT).attributes("data-visible"),
-      "纯思考（无可见正文）时槽位必须保持可见"
+      "纯思考（无可见正文）时槽位必须可见"
     ).toBe("true");
   });
 

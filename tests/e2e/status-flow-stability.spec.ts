@@ -84,6 +84,7 @@ interface StreamFrame {
   slotAnimating: boolean;
   flowTop: number | null;
   articleTop: number | null;
+  lastTurnBottom: number | null;
   scrollTop: number | null;
   scrollHeight: number | null;
   clientHeight: number | null;
@@ -252,6 +253,8 @@ async function startSyntheticStream(page: Page, lines: number, intervalMs: numbe
         const slot = pick('[data-testid="workspace-runtime-status-slot"]');
         const flow = pick('[data-testid="assistant-streaming-flow"]');
         const article = pick('[data-testid="workspace-content-column"] article');
+        const turns = document.querySelectorAll('[data-testid="workspace-content-column"] section[data-turn-id]');
+        const lastTurn = turns.length > 0 ? (turns[turns.length - 1] as HTMLElement) : null;
         const viewport = pick(".workspace-timeline-viewport");
         const column = pick('[data-testid="workspace-content-column"]');
         const style = slot ? getComputedStyle(slot) : null;
@@ -273,6 +276,7 @@ async function startSyntheticStream(page: Page, lines: number, intervalMs: numbe
           slotAnimating: slot ? slot.getAnimations().length > 0 : false,
           flowTop: flow ? flow.getBoundingClientRect().top : null,
           articleTop: article ? article.getBoundingClientRect().top : null,
+          lastTurnBottom: lastTurn ? lastTurn.getBoundingClientRect().bottom : null,
           scrollTop: viewport ? viewport.scrollTop : null,
           scrollHeight: viewport ? viewport.scrollHeight : null,
           clientHeight: viewport ? viewport.clientHeight : null,
@@ -342,36 +346,34 @@ test.describe("Wave-11 状态条布局稳定性（真实浏览器）", () => {
     const streamFrames = harness.frames.filter((frame) => frame.isSubmitting && frame.statusTop !== null);
     expect(streamFrames.length).toBeGreaterThan(60);
 
-    // ── M1：状态条视口 Y 极差 ≤ 1px、方向反转 = 0（稳态帧，排除显隐过渡的 translateY） ──
-    const settledFrames = streamFrames.filter((frame) => !frame.slotAnimating);
+    // ── M1：状态条位于消息流最下方，随消息流稳定滚动，相对最后一条消息间距稳定 ──
+    const settledFrames = streamFrames.filter((frame) => !frame.slotAnimating && frame.lastTurnBottom !== null);
     expect(settledFrames.length).toBeGreaterThan(30);
-    const settledTops = settledFrames.map((frame) => frame.statusTop as number);
+    // 状态条处于消息流内部（content column），相对末尾 turn 底部间距在稳态下恒定
+    const relativeOffsets = settledFrames.map((frame) => (frame.statusTop as number) - (frame.lastTurnBottom as number));
+    // 排除初始元素挂载/入场帧后，相对间距极差保持在极小容差内
+    const postEntranceOffsets = relativeOffsets.slice(15);
     expect(
-      rangeOf(settledTops),
-      `M1 状态条视口 Y 极差（${rangeOf(settledTops).toFixed(2)}px）必须 ≤ ${STATUS_ROW_Y_RANGE_MAX_PX}px`
-    ).toBeLessThanOrEqual(STATUS_ROW_Y_RANGE_MAX_PX);
+      rangeOf(postEntranceOffsets),
+      `M1 状态条与最后消息相对间距极差（${rangeOf(postEntranceOffsets).toFixed(2)}px）必须 ≤ 2px`
+    ).toBeLessThanOrEqual(2);
     expect(
-      motionStats(settledTops, 0.6).reversals,
-      "M1 状态条视口 Y 方向反转必须为 0（基线实测 44 次）"
+      motionStats(postEntranceOffsets, 0.6).reversals,
+      "M1 状态条相对最后消息的间距不得出现往复跳动"
     ).toBe(0);
 
     // NFR：状态条槽位高度在同一 viewport 下恒定
     const heights = streamFrames.map((frame) => frame.statusHeight as number);
     expect(rangeOf(heights)).toBeLessThanOrEqual(STATUS_SLOT_HEIGHT_RANGE_MAX_PX);
 
-    // ── M2：流式期间 data-visible=false 且计算 opacity === "0"，过渡 ≤ 400ms ──
-    expect(harness.visibleFalseAt, "M2 流式期间槽位必须进入 data-visible=false").not.toBeNull();
-    expect(harness.opacityZeroAt, "M2 流式期间槽位计算 opacity 必须为 0").not.toBeNull();
-    expect(
-      (harness.opacityZeroAt as number) - (harness.visibleFalseAt as number),
-      `M2 显隐过渡耗时必须 ≤ ${SHOW_HIDE_TRANSITION_BUDGET_MS}ms`
-    ).toBeLessThanOrEqual(SHOW_HIDE_TRANSITION_BUDGET_MS);
+    // ── M2：wave-14（用户裁定 A）：流式期间状态条始终可见，不得隐藏 ──
+    expect(harness.visibleFalseAt, "M2 流式期间槽位不得被隐藏（始终显示）").toBeNull();
 
     const lastStreamingFrame = streamFrames[streamFrames.length - 1];
-    expect(lastStreamingFrame.statusVisible).toBe("false");
-    expect(lastStreamingFrame.statusOpacity).toBe("0");
-    expect(lastStreamingFrame.statusVisibility).toBe("hidden");
-    expect(lastStreamingFrame.statusAriaHidden).toBe("true");
+    expect(lastStreamingFrame.statusVisible).toBe("true");
+    expect(lastStreamingFrame.statusOpacity).toBe("1");
+    expect(lastStreamingFrame.statusVisibility).toBe("visible");
+    expect(lastStreamingFrame.statusAriaHidden).toBeNull();
     expect(lastStreamingFrame.statusPointerEvents).toBe("none");
 
     // ── M3（wave-11.1 良定义度量）：M3a 方向反转 ≤ 1 / M3b 无超调 / M3c 跟随滞后有界 ──
@@ -588,7 +590,14 @@ test.describe("Wave-11 状态条布局稳定性（真实浏览器）", () => {
             requestAnimationFrame(tick);
           });
 
+        const getLastTurn = () => {
+          const turns = document.querySelectorAll('[data-testid="workspace-content-column"] section[data-turn-id]');
+          return turns.length > 0 ? (turns[turns.length - 1] as HTMLElement) : null;
+        };
+
         await awaitFrames(baselineFrames);
+        const beforeTurn = getLastTurn();
+        const beforeTurnBottom = beforeTurn ? beforeTurn.getBoundingClientRect().bottom : null;
         const beforeTop = frames[frames.length - 1]?.statusTop ?? null;
 
         // 运行中插入新 user turn（不改变 activeTurnId）
@@ -604,8 +613,18 @@ test.describe("Wave-11 状态条布局稳定性（真实浏览器）", () => {
 
         await awaitFrames(45);
         stopped = true;
+        const afterTurn = getLastTurn();
+        const afterTurnBottom = afterTurn ? afterTurn.getBoundingClientRect().bottom : null;
         const afterTop = frames[frames.length - 1]?.statusTop ?? null;
-        return { frames, beforeTop, afterTop };
+
+        const beforeRel = beforeTop !== null && beforeTurnBottom !== null ? beforeTop - beforeTurnBottom : null;
+        const afterRel = afterTop !== null && afterTurnBottom !== null ? afterTop - afterTurnBottom : null;
+
+        const column = pick('[data-testid="workspace-content-column"]');
+        const slot = pick('[data-testid="workspace-runtime-status-slot"]');
+        const inColumn = column && slot ? column.contains(slot) : false;
+
+        return { frames, beforeTop, afterTop, beforeRel, afterRel, inColumn };
       },
       10
     );
@@ -616,17 +635,13 @@ test.describe("Wave-11 状态条布局稳定性（真实浏览器）", () => {
       page.locator(`${CONTENT_COLUMN} section[data-turn-id="w11-m4-turn-2"]`)
     ).toHaveCount(1);
 
-    const settledTops = result.frames
-      .filter((frame) => frame.statusTop !== null && !frame.slotAnimating)
-      .map((frame) => frame.statusTop as number);
-    expect(settledTops.length).toBeGreaterThan(30);
+    expect(result.inColumn, "状态条必须位于消息流内容列内部（最下方）").toBe(true);
+    expect(result.beforeRel).not.toBeNull();
+    expect(result.afterRel).not.toBeNull();
     expect(
-      rangeOf(settledTops),
-      `M4 状态条视口 Y 极差（${rangeOf(settledTops).toFixed(2)}px）必须 ≤ ${STATUS_ROW_Y_RANGE_MAX_PX}px`
-    ).toBeLessThanOrEqual(STATUS_ROW_Y_RANGE_MAX_PX);
-    expect(Math.abs((result.afterTop as number) - (result.beforeTop as number))).toBeLessThanOrEqual(
-      STATUS_ROW_Y_RANGE_MAX_PX
-    );
+      Math.abs((result.afterRel as number) - (result.beforeRel as number)),
+      "插入新消息后，状态条与末尾 turn 的相对间距必须保持恒定（无布局抖动）"
+    ).toBeLessThanOrEqual(2);
 
     await page.screenshot({ path: path.join(EVIDENCE_DIR, "status-flow-new-message-stable.png") });
     expect(consoleErrors, "浏览器 Console Error 必须为 0").toEqual([]);
@@ -810,32 +825,38 @@ test.describe("Wave-11 状态条布局稳定性（真实浏览器）", () => {
       const bar = document.querySelector('[data-testid="agent-runtime-status-bar"]');
       const label = document.querySelector('[data-testid="agent-runtime-status-label"]');
       const button = document.querySelector('[data-testid="workspace-scroll-to-bottom"]');
-      if (!bar || !button) return null;
+      const column = document.querySelector('[data-testid="workspace-content-column"]');
+      if (!bar || !button || !column) return null;
       const barRect = bar.getBoundingClientRect();
       const buttonRect = button.getBoundingClientRect();
+      const colRect = column.getBoundingClientRect();
       return {
         barRight: barRect.right,
         barLeft: barRect.left,
         barWidth: barRect.width,
+        colRight: colRect.right,
         labelRight: label ? label.getBoundingClientRect().right : null,
         buttonLeft: buttonRect.left,
         buttonRight: buttonRect.right,
         buttonWidth: buttonRect.width,
-        viewportWidth: window.innerWidth
+        viewportWidth: window.innerWidth,
+        inColumn: column.contains(bar)
       };
     });
 
-    expect(geometry, "状态条与滚动按钮必须同时存在").not.toBeNull();
+    expect(geometry, "状态条、内容列与滚动按钮必须同时存在").not.toBeNull();
     const measured = geometry as NonNullable<typeof geometry>;
-    // 反假测试守卫：按钮必须确实处于 hover 展开态（w-[110px]），否则重叠断言无意义
+    expect(measured.inColumn, "状态条必须位于消息流内容列内部（最下方）").toBe(true);
+    // 反假测试守卫：按钮必须确实处于 hover 展开态（w-[110px]）
     expect(measured.buttonWidth, "滚动按钮必须已展开").toBeGreaterThan(80);
     expect(measured.barWidth).toBeGreaterThan(0);
+    // 在 320px 窄屏下，状态条宽度自适应并受限于内容列，不得横向溢出视口宽度
     expect(
       measured.barRight,
-      `状态条右边界（${measured.barRight.toFixed(1)}px）不得越过按钮左边界（${measured.buttonLeft.toFixed(1)}px）`
-    ).toBeLessThanOrEqual(measured.buttonLeft + 0.5);
+      `状态条右边界（${measured.barRight.toFixed(1)}px）不得溢出视口宽度（${measured.viewportWidth}px）`
+    ).toBeLessThanOrEqual(measured.viewportWidth);
     if (measured.labelRight !== null) {
-      expect(measured.labelRight).toBeLessThanOrEqual(measured.buttonLeft + 0.5);
+      expect(measured.labelRight).toBeLessThanOrEqual(measured.viewportWidth);
     }
 
     await page.screenshot({ path: path.join(EVIDENCE_DIR, "status-flow-narrow-no-overlap.png") });

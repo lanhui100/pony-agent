@@ -1007,32 +1007,9 @@ const shouldShowAgentRuntimeStatus = computed(() => {
  * pending 且已有可见流式内容（无正文的 `thinking` = 「思考中」保持可见）。
  */
 const isRuntimeStatusVisible = computed(() => {
-  if (!agentRuntimeStatus.value) {
-    return false;
-  }
-
-  // F1 + F7：仅「正在回复 / 思考中」两种 mode 具备隐藏资格（其余 mode 恒可见）
-  const mode = agentRuntimeStatus.value.mode;
-  if (mode !== "responding" && mode !== "thinking") {
-    return true;
-  }
-
-  const hasActiveToolActivity = runtimeStore.toolActivities.some(
-    (activity) => activity.status === "running" || activity.status === "planned"
-  );
-  if (hasActiveToolActivity) {
-    return true;
-  }
-
-  const latestTurn = visibleTurns.value[visibleTurns.value.length - 1] ?? null;
-  const assistant = latestTurn?.assistant ?? null;
-  if (!assistant || assistant.status !== "pending") {
-    return true;
-  }
-
-  const hasStreamingVisibleContent =
-    assistantHasVisibleContent(assistant) || Boolean(assistant.content.trim());
-  return !hasStreamingVisibleContent;
+  // wave-14（用户裁定 A）：只要存在运行态/会话操作状态就始终可见（含最终回答 streaming）。
+  // 防跳动不再依赖隐藏，而由「消息流最下方、随消息流滚动」的落位 + 相对稳定断言保证。
+  return Boolean(agentRuntimeStatus.value);
 });
 
 function hasPendingAssistantPresentationWork() {
@@ -1735,6 +1712,28 @@ watch(
             :assistant-displayed-reasoning-fade-key="assistantDisplayedReasoningFadeKey"
           />
         </TransitionGroup>
+        <!-- wave-14（用户裁定）：状态条位于消息流最下方（紧贴最后一条消息、随消息流滚动），
+             不再固定在输入框上方；运行期间始终可见（含最终回答 streaming）。 -->
+        <div
+          v-if="shouldShowAgentRuntimeStatus && agentRuntimeStatus"
+          class="runtime-status-row w-full min-w-0 pt-2"
+          data-testid="workspace-runtime-status-row"
+        >
+          <div
+            class="runtime-status-slot w-full min-w-0"
+            data-testid="workspace-runtime-status-slot"
+            :data-visible="isRuntimeStatusVisible ? 'true' : 'false'"
+            :aria-hidden="isRuntimeStatusVisible ? undefined : 'true'"
+            style="pointer-events: none;"
+          >
+            <div
+              class="runtime-status-slot-inner"
+              :class="{ 'runtime-status-slot-inner-hidden': !isRuntimeStatusVisible }"
+            >
+              <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
+            </div>
+          </div>
+        </div>
         <div :style="{ height: COMPOSER_BUFFER_PX + 'px' }" aria-hidden="true"></div>
         <div ref="scrollAnchorRef" aria-hidden="true" class="pointer-events-none" style="height:0;width:0"></div>
       </div>
@@ -1786,34 +1785,6 @@ watch(
             ]"
           ><span class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white">{{ unreadCount > 99 ? '99+' : unreadCount }}</span></span>
         </button>
-      </template>
-      <template #status>
-        <div
-          v-if="shouldShowAgentRuntimeStatus && agentRuntimeStatus"
-          class="pointer-events-none absolute inset-x-0 bottom-full"
-          data-testid="workspace-runtime-status-row"
-        >
-          <div class="mx-auto w-full max-w-[46.4rem] px-4 sm:px-5">
-            <!-- F4（wave-11.2）：为右侧 workspace-scroll-to-bottom 预留空间。
-                 收起态 34px / hover 展开态 110px，故需 pr-[7.5rem]（120px）才不重叠。 -->
-            <div class="pr-[7.5rem]">
-              <div
-                class="runtime-status-slot w-full min-w-0"
-                data-testid="workspace-runtime-status-slot"
-                :data-visible="isRuntimeStatusVisible ? 'true' : 'false'"
-                :aria-hidden="isRuntimeStatusVisible ? undefined : 'true'"
-                style="pointer-events: none;"
-              >
-                <div
-                  class="runtime-status-slot-inner"
-                  :class="{ 'runtime-status-slot-inner-hidden': !isRuntimeStatusVisible }"
-                >
-                  <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
       </template>
     </WorkspaceComposer>
   </section>

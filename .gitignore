@@ -6,6 +6,7 @@ claude-code-sourcemap/
 codex-openai/
 reasonix-esengine/
 deepseek-harness/
+open-claude-ui/
 
 src-tauri/target/
 src-tauri/target-codex-*/

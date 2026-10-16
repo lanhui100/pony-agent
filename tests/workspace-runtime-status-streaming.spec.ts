@@ -48,12 +48,10 @@ describe("Workspace Runtime Status Streaming Behavior", () => {
       }
     );
 
-    // 在 219aa96 契约更新后，状态指示器与 dsh 对齐：处于 active 时始终常驻展示运行状态槽
-    // Wave-11 契约（§2.2/§2.4）：槽位常驻不卸载，仅通过 data-visible 切换可见性；
-    // 流式已有可见内容时槽位保留在 DOM 但 data-visible="false"（不再显示状态文案）
+    // Wave-14 契约（§8 C14-1）：状态条在运行期间始终可见（含流式阶段），data-visible="true"
     const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
     expect(statusSlot.exists()).toBe(true);
-    expect(statusSlot.attributes("data-visible")).toBe("false");
+    expect(statusSlot.attributes("data-visible")).toBe("true");
 
     wrapper.unmount();
   }, 15000);
