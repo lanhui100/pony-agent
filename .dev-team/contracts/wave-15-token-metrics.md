@@ -32,7 +32,8 @@
 
 ## 4. 数据面要求（R）
 
-- **R1（Rust·活跃轮）**：`turn:hop_complete` 必须携带本次已完成调用的 `provider_call_records`（当前为 `None`，`turn_stream.rs:728`）。既有累加字段语义**不得变更**（wire 兼容）。
+- **R1（Rust·活跃轮）**：`turn:hop_complete` **与 `turn:output_end`** 必须携带已完成调用的 `provider_call_records`（当前均为 `None`，`turn_stream.rs:728` 与 output_end 发射处；语义 = 截至该事件的**全量 per-call 列表**，消费者取末条，严禁累加）。既有累加字段语义**不得变更**（wire 兼容）。
+  - 依据（红相物理凭证 `.dev-team/evidence/wave15/wire-red.json`）：3 次模型调用只产生 **2 个 hop_complete**（仅"触发工具后续请求"的调用后发），**末次调用完成只发 `output_end`**；records 现仅在 `phase_changed`/`checkpoint_persisted`/`completed` 出现。仅修 hop_complete 会使末次调用的 per-call 值在活跃轮不可得。
 - **R2（Rust·持久化）**：`build_persisted_trace_timeline` 必须让**每条** `call_model` 条目携带其**自身**的 input/output/first_token_latency/duration；整轮聚合只允许落在 `checkpoint_persist`（及轮级记录）上，**严禁**覆盖 per-call 条目。
 - **R3（前端·活跃轮）**：`liveTraceTurn` 必须携带 `providerCallRecords`（per-call），使 S1 不再回退到 store 全局累计值。
 - **R4（前端·store）**：活跃轮 store 的 `inputTokens` / `outputTokens` 语义改为「最近一次已完成调用」的 per-call 值（与 S1 一致）；轮终态 `turn:completed` / `turn:output_end` 的轮级累加字段保持原语义（写入消息级 `tokenCount` 与 `S2`）。
@@ -132,3 +133,17 @@ R2 落地后：**每条** `call_model` 条目携带其自身 input/output/first_
 - `resolveCallGenerationSpeed(record)` 仅承载 **S3 步骤 1**（record 级 + 守卫）；**步骤 2–4** 的 timeline / turn 回退属调用方（`src/lib/runtime/useTraceProjection.ts`）职责，不在本任务空桩面。若 Lead 要求 turn 级 S3 解析器，需新增导出（新契约项，待 Lead 裁定后方可加入）。
 - 空桩期参数名以 `_` 前缀（`_turn` / `_record`）以通过 `tsconfig.json` 的 `noUnusedParameters`；**位置签名、导出名与返回类型不变**，调用方按位置传参不受影响。
 - `TraceTimelineEntry` 未在本模块导入：空桩期无消费者，导入会触发 `noUnusedLocals` 编译错误；S1 步骤 2 实施时由 Executor 直接从 `@/types/runtime` 导入（类型未新增、未变更）。
+
+### 7.10 R1 事件载荷语义（Lead 裁定，2026-xx；修正 7.4 的滞后实现）
+
+**不变量（冻结，机械可判）**：对任意携带 `provider_call_records` 的活跃轮事件（`turn:hop_complete` / `turn:output_end`），其载荷必须同时满足：
+
+- **I1 集合一致**：`Σ records[i].input_tokens == payload.inputTokens`（records 是"截至该事件已完成的全部模型调用"，累加字段由同一批 usage 汇总而来，两者必须同源一致）；output 同理。
+- **I2 末条即最新**：`records.last()` 就是**最近一次已完成**的模型调用（消费者取末条作为 S1/S3 的 per-call 真值）。
+- **I3 有序前缀**：`records` 是"本轮全部调用记录"按调用时序的有序前缀，长度随 hop 单调不减（`len(records_k) == len(records_{k-1}) + 1`，且 `output_end` 的 records 长度 == 调用总数）。
+
+**事实与修正**：`turn_stream.rs` 的 followup 循环中，当前 hop 的模型调用在其记录 `push` 之后才 `emit hop_complete`（push 在 :679、merge 在 :697、emit 在 :705），因此 `hop_complete` 必须携带 **`provider_call_records.clone()` 全量列表**；执行者先前提交的 `provider_call_records[..len-1]`（排除末条）造成**滞后一跳**，违反 I1（红相捕获：hop0 累加 710000 而 records 仅 350000）。
+
+**映射（供测试断言）**：`turn:hop_complete` #k（0-based）在 followup step k 结束时发出，其 `records.last()` = 第 k+1 次调用（0-based 索引 k+1，即 `hopInputs[k+1]`）；`turn:output_end` 的 `records.last()` = 末次调用。
+
+**残余延迟（已知限制，不扩范围）**：初始调用（call #0）完成时无 hop_complete 事件，故其 per-call 值在首个 followup 完成前不会成为"最新已完成调用"的展示值（此窗口内展示上一轮的最近调用值）。登记为 P3，不在本波修复。

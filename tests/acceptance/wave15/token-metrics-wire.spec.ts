@@ -4,8 +4,18 @@
  * 证据来源：`.dev-team/evidence/wave15/wire-red.json`
  *   —— 由 Rust 侧 `crates/pony-agent-core/src/agent/runtime/tests.rs`
  *      `wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_timeline`
- *      在真实 mock SSE 三跳回合中捕获的真实 `TurnStreamEvent` JSON 序列 + 持久化 timeline
- *      （同源冻结副本：`wire-red-frozen.json`，红相首次落盘，不被后续运行覆盖）。
+ *      在真实 mock SSE 三跳回合中捕获的真实 `TurnStreamEvent` JSON 序列 + 持久化 timeline。
+ *
+ * 证据文件角色（三份，不得混用）：
+ *   1. `wire-red-frozen.json` —— **红相冻结凭证**：第一次红相运行落盘后不再改写，
+ *      其 `providerCallRecords` 为 `null`（R1 缺口实况），是"修正后对 pre-fix 代码仍为红"的对照物。
+ *   2. `wire-red.json` —— **最新捕获快照**：Rust 捕获用例每次运行都会覆盖刷新，
+ *      本 spec 读取的即是它。因此绿相门禁顺序硬性要求「先跑 cargo 捕获用例，再跑 vitest」
+ *      （顺序颠倒会读到陈旧/缺失快照 → 结构性失败）。
+ *      红相纯度复证可用环境变量改读冻结快照（只读，不覆盖任何文件）：
+ *        WAVE15_WIRE_PATH=.dev-team/evidence/wave15/wire-red-frozen.json npx vitest run tests/acceptance/wave15/token-metrics-wire.spec.ts
+ *      → 预期 R1/R2 红（冻结快照 per-call 记录为 null / timeline 为 [null,null,1080000]）。
+ *   3. `wire-red-postrust.json` —— executor-rust 侧实施后的额外留档（由实施方落盘，本 spec 不消费）。
  *
  * 协议事实：`turn:hop_complete` 只在「该次模型调用后仍需执行工具」时发出，末次调用走
  * `turn:output_end` / `turn:completed`；三跳回合 = 2 个 hop_complete + 1 个 completed。
@@ -27,7 +37,9 @@ import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
 import { countTurnProviderCalls, resolveCallGenerationSpeed, resolveCurrentContextInputTokens } from "@/lib/runtime/token-metrics";
 import type { ProviderCallCacheRecord, TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
 
-const WIRE_PATH = path.resolve(process.cwd(), ".dev-team/evidence/wave15/wire-red.json");
+const WIRE_PATH = process.env.WAVE15_WIRE_PATH
+  ? path.resolve(process.cwd(), process.env.WAVE15_WIRE_PATH)
+  : path.resolve(process.cwd(), ".dev-team/evidence/wave15/wire-red.json");
 
 type WireEvent = { name: string; payload: Record<string, unknown> };
 
@@ -61,6 +73,12 @@ function readWire(): WireDocument {
 const wire = readWire();
 const hopCompleteEvents = wire.events.filter((event) => event.name === "turn:hop_complete");
 const completedEvent = wire.events.find((event) => event.name === "turn:completed");
+const outputEndEvent = wire.events.find((event) => event.name === "turn:output_end");
+
+function completedOutputEnd(): WireEvent | undefined {
+  return outputEndEvent;
+}
+
 const aggregateInput = wire.expectation.aggregateInputTokens;
 const aggregateOutput = wire.expectation.aggregateOutputTokens;
 const lastHopInput = wire.expectation.hopInputs[wire.expectation.hopInputs.length - 1]!;
@@ -119,22 +137,63 @@ describe("Wave-15 wire-replay（Rust 真实捕获 → 前端 S1/S3 投影）", (
     expect(wire.turnAggregate.outputTokens).toBe(aggregateOutput);
   });
 
-  it("R1：真实 hop_complete 必须携带该跳 per-call 记录（input/output/duration/TTFT 均为自身值）", () => {
+  it("R1（§7.10 I1/I2/I3）：hop_complete/output_end 的 records 是截至该事件的**全量**已完成调用", () => {
     expect(hopCompleteEvents.length).toBe(2);
+
+    // 跨源真值：持久化 timeline 的 per-call 序列（R2）作为有序前缀基准。
+    const persistedPairs = wire.persistedTimeline
+      .filter((entry) => entry.kind === "call_model")
+      .map((entry) => [entry.inputTokens, entry.outputTokens]);
+
+    let previousRecordLen = 0;
     for (let index = 0; index < hopCompleteEvents.length; index++) {
+      const payload = hopCompleteEvents[index]!.payload as { inputTokens?: number | null; outputTokens?: number | null };
       const records = hopRecords(index);
-      expect(records.length).toBeGreaterThan(0);
+
+      // ---- I1 集合一致：Σ records[i].input_tokens == payload.inputTokens（output 同理） ----
+      // 该断言先于 I2/I3，使滞后实现（records[..len-1]）的失败原因落在 I1。
+      const sumInput = records.reduce((sum, record) => sum + (record.inputTokens ?? 0), 0);
+      const sumOutput = records.reduce((sum, record) => sum + (record.outputTokens ?? 0), 0);
+      expect(sumInput).toBe(payload.inputTokens);
+      expect(sumOutput).toBe(payload.outputTokens);
+
+      // ---- I3 有序前缀：长度随 hop 单调 +1（首 hop = 2：call#0 + call#1） ----
+      const expectedRecordLen = index === 0 ? 2 : previousRecordLen + 1;
+      expect(records.length).toBe(expectedRecordLen);
+      previousRecordLen = records.length;
+      expect(records.map((record) => [record.inputTokens, record.outputTokens])).toEqual(
+        persistedPairs.slice(0, records.length)
+      );
+      expect(records[0]?.inputTokens).toBe(wire.expectation.hopInputs[0]);
+
+      // ---- I2 末条即最新已完成调用：hop #k 的末条 = 第 k+1 次调用 ----
       const last = records[records.length - 1]!;
-      expect(last.inputTokens).toBe(wire.expectation.hopInputs[index]);
-      expect(last.outputTokens).toBe(wire.expectation.hopOutputs[index]);
+      expect(last.inputTokens).toBe(wire.expectation.hopInputs[index + 1]);
+      expect(last.outputTokens).toBe(wire.expectation.hopOutputs[index + 1]);
       expect(last.turnDurationMs ?? 0).toBeGreaterThan(0);
       expect(last.firstTokenLatencyMs ?? 0).toBeGreaterThan(0);
       expect(last.latencyKind).toBe("provider_stream");
-      // 严禁携带跨跳累加值（红相实况：hop0=710000 / hop1=1080000）。
-      const redAccumulated = wire.expectation.hopInputs.slice(0, index + 1).reduce((sum, value) => sum + value, 0);
-      expect(last.inputTokens).not.toBe(redAccumulated);
+
+      // 恒等冗余守卫：末条既不是累加值也不是整轮聚合值。
+      expect(last.inputTokens).not.toBe(payload.inputTokens);
       expect(last.inputTokens).not.toBe(aggregateInput);
     }
+
+    // ---- §7.10：turn:output_end 的 records 长度 == 调用总数（3），且满足 I1/I2 ----
+    const outputEndRecords =
+      (completedOutputEnd()?.payload as { providerCallRecords?: ProviderCallCacheRecord[] | null } | undefined)
+        ?.providerCallRecords ?? [];
+    expect(outputEndRecords.length).toBe(3);
+    const outputEndPayload = completedOutputEnd()?.payload as
+      | { inputTokens?: number | null; outputTokens?: number | null }
+      | undefined;
+    expect(outputEndRecords.reduce((sum, record) => sum + (record.inputTokens ?? 0), 0)).toBe(
+      outputEndPayload?.inputTokens
+    );
+    expect(outputEndRecords.reduce((sum, record) => sum + (record.outputTokens ?? 0), 0)).toBe(
+      outputEndPayload?.outputTokens
+    );
+    expect(outputEndRecords[outputEndRecords.length - 1]?.inputTokens).toBe(wire.expectation.hopInputs[2]);
   });
 
   it("R2/T6：真实持久化 timeline 每条 call_model 为自身 per-call 值，聚合只落 checkpoint_persist", () => {
@@ -157,15 +216,14 @@ describe("Wave-15 wire-replay（Rust 真实捕获 → 前端 S1/S3 投影）", (
     expect(resolveCurrentContextInputTokens(turnWithRecords)).toBe(lastHopInput);
     expect(resolveCurrentContextInputTokens(turnWithRecords)).not.toBe(aggregateInput);
 
-    // (b) 仅 hop 事件来源（末次调用无 hop_complete）→ 不得回落到聚合值。
-    //     R1 允许两种合规语义：hop 事件携带「本条调用」记录（末条=360000），
-    //     或携带截至该跳的累计记录（末条=360000）；若实现改为单条伪记录，
-    //     则由 A5 伪聚合守卫降级到 timeline 的最后一条 per-call 值（370000）。
-    //     两种都必须是 per-call 真值，任何一处等于 1080000 即为违反 S4。
+    // (b) 仅 hop 事件来源（末次调用无 hop_complete，由 output_end 承载全量）→ §7.10 要求
+    //     末个 hop_complete 的 records 已是全量前缀，故 S1 必须取到末次调用 370000，
+    //     严禁回落到累加值 1080000。
     const turnFromHops = turnFrom(hopRecords(hopCompleteEvents.length - 1));
+    expect(turnFromHops.providerCallRecords?.length).toBe(3);
     const fromHops = resolveCurrentContextInputTokens(turnFromHops);
+    expect(fromHops).toBe(lastHopInput);
     expect(fromHops).not.toBe(aggregateInput);
-    expect([wire.expectation.hopInputs[1], lastHopInput]).toContain(fromHops);
 
     const store = useRuntimeStore();
     store.$patch({

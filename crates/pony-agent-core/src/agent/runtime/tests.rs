@@ -10326,6 +10326,10 @@ fn wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_t
         .iter()
         .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
         .expect("turn:completed event");
+    let output_end = events
+        .iter()
+        .find_map(|(name, payload)| (name == "turn:output_end").then_some(payload.clone()))
+        .expect("turn:output_end event");
 
     let snapshot = runtime.load_session_snapshot(Some("session-wave15-wire"));
     let trace = snapshot
@@ -10371,37 +10375,103 @@ fn wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_t
         wave15_write_evidence("wire-red-frozen.json", &wire);
     }
 
-    // ---- R1：turn:hop_complete 必须携带本次已完成调用的 per-call 记录 ----
+    // ---- R1（契约 §7.10，不变量 I1/I2/I3）：turn:hop_complete 载荷语义 ----
     // 协议事实：hop_complete 只在「该次模型调用后仍需执行工具」时发出（工具跳），
     // 末次模型调用直接走 turn:output_end / turn:completed；本回合 3 次调用 → 2 个 hop_complete。
+    // 映射（§7.10）：hop_complete #k（0-based）的 records.last() = 第 k+1 次调用。
     assert_eq!(
         hop_events.len(),
         2,
         "三跳回合（其中 2 跳触发工具）必须产生 2 个 turn:hop_complete，实际 {}",
         hop_events.len()
     );
+    let mut previous_record_len = 0_usize;
     for (index, payload) in hop_events.iter().enumerate() {
         let records = payload
             .get("providerCallRecords")
             .and_then(serde_json::Value::as_array)
             .unwrap_or_else(|| {
                 panic!(
-                    "hop {index} 的 turn:hop_complete 未携带 providerCallRecords（契约 R1）；实际载荷: {payload}"
+                    "hop {index} 的 turn:hop_complete 未携带 providerCallRecords（契约 R1/§7.10）；实际载荷: {payload}"
                 )
             });
+
+        // I1 集合一致：Σ records[i].input_tokens == payload.inputTokens（output 同理）。
+        // 该断言必须先于 I2/I3，使滞后实现（records[..len-1]）的失败原因落在 I1。
+        let payload_input = payload
+            .get("inputTokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| panic!("hop {index} 的 turn:hop_complete 必须携带累加 inputTokens"));
+        let payload_output = payload
+            .get("outputTokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| panic!("hop {index} 的 turn:hop_complete 必须携带累加 outputTokens"));
+        let sum_input: u64 = records
+            .iter()
+            .map(|record| {
+                record
+                    .get("inputTokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(|| {
+                        panic!("hop {index} 的 records[{record:?}] 缺少 inputTokens（§7.10 I1）")
+                    })
+            })
+            .sum();
+        let sum_output: u64 = records
+            .iter()
+            .map(|record| {
+                record
+                    .get("outputTokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(|| {
+                        panic!("hop {index} 的 records[{record:?}] 缺少 outputTokens（§7.10 I1）")
+                    })
+            })
+            .sum();
+        assert_eq!(
+            sum_input, payload_input,
+            "hop {index} 违反 §7.10 I1：Σ records[i].input_tokens ({sum_input}) != payload.inputTokens ({payload_input}) \
+             —— records 必须是「截至该事件已完成的全部调用」，禁止排除末条（滞后一跳）"
+        );
+        assert_eq!(
+            sum_output, payload_output,
+            "hop {index} 违反 §7.10 I1：Σ records[i].output_tokens ({sum_output}) != payload.outputTokens ({payload_output})"
+        );
+
+        // I3 有序前缀：长度按 hop 单调 +1（首个 hop 至少含 2 次调用：call#0 + call#1）。
+        let expected_record_len = if index == 0 { 2 } else { previous_record_len + 1 };
+        assert_eq!(
+            records.len(),
+            expected_record_len,
+            "hop {index} 违反 §7.10 I3：records 长度应为 {expected_record_len}（首 hop 起始为 2，之后每 hop +1），实际 {}（上一 hop {previous_record_len}）",
+            records.len()
+        );
+        previous_record_len = records.len();
+
+        // I2 末条即最新已完成调用：hop #k 的末条 = 第 k+1 次调用（hopInputs[k+1]）。
         let last = records
             .last()
             .unwrap_or_else(|| panic!("hop {index} 的 providerCallRecords 为空（契约 R1）"));
         assert_eq!(
             last.get("inputTokens").and_then(serde_json::Value::as_u64),
-            Some(WAVE15_HOP_INPUTS[index]),
-            "hop {index} 的 per-call inputTokens 必须是该跳自身值（严禁跨跳累加）"
+            Some(WAVE15_HOP_INPUTS[index + 1]),
+            "hop {index} 违反 §7.10 I2：末条记录的 inputTokens 必须是第 {} 次调用（{}）",
+            index + 1,
+            WAVE15_HOP_INPUTS[index + 1]
         );
         assert_eq!(
             last.get("outputTokens").and_then(serde_json::Value::as_u64),
-            Some(WAVE15_HOP_OUTPUTS[index]),
-            "hop {index} 的 per-call outputTokens 必须是该跳自身值"
+            Some(WAVE15_HOP_OUTPUTS[index + 1]),
+            "hop {index} 违反 §7.10 I2：末条记录的 outputTokens 必须是第 {} 次调用（{}）",
+            index + 1,
+            WAVE15_HOP_OUTPUTS[index + 1]
         );
+        assert_eq!(
+            records[0].get("inputTokens").and_then(serde_json::Value::as_u64),
+            Some(WAVE15_HOP_INPUTS[0]),
+            "hop {index} 违反 §7.10 I3：records 必须从第 0 次调用起的有序前缀"
+        );
+
         let record_duration = last
             .get("turnDurationMs")
             .and_then(serde_json::Value::as_u64)
@@ -10435,6 +10505,40 @@ fn wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_t
             "hop {index} 的 per-call latencyKind 必须为 provider_stream（TTFT 可信门控 §7.2）"
         );
     }
+
+    // ---- R1（§7.10）turn:output_end 载荷：I1 + I3（长度 == 调用总数） ----
+    let output_end_records = output_end
+        .provider_call_records
+        .as_ref()
+        .expect("turn:output_end 必须携带 provider_call_records（§7.10）");
+    assert_eq!(
+        output_end_records.len(),
+        3,
+        "§7.10 I3：turn:output_end 的 records 长度必须等于调用总数（3）"
+    );
+    let output_end_sum_input: u64 = output_end_records
+        .iter()
+        .map(|record| record.input_tokens.unwrap_or(0))
+        .sum();
+    let output_end_sum_output: u64 = output_end_records
+        .iter()
+        .map(|record| record.output_tokens.unwrap_or(0))
+        .sum();
+    assert_eq!(
+        Some(output_end_sum_input),
+        output_end.input_tokens,
+        "§7.10 I1：turn:output_end 的 Σ records.input_tokens 必须等于其累加 inputTokens"
+    );
+    assert_eq!(
+        Some(output_end_sum_output),
+        output_end.output_tokens,
+        "§7.10 I1：turn:output_end 的 Σ records.output_tokens 必须等于其累加 outputTokens"
+    );
+    assert_eq!(
+        output_end_records.last().and_then(|record| record.input_tokens),
+        Some(WAVE15_HOP_INPUTS[2]),
+        "§7.10 I2：turn:output_end 的末条记录必须是末次调用（370000）"
+    );
 
     // 轮级累加语义（S2）不得被改动；末次调用的 per-call 记录由 turn:completed 承载。
     assert_eq!(completed.input_tokens, Some(WAVE15_AGGREGATE_INPUT));

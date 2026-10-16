@@ -540,15 +540,19 @@ describe("Wave-15 A1–A5 — 对抗（红相纯度：失败必须落在 SUT 栈
 
   it("A4：u64::MAX 级数值 → saturating 语义下不 panic/不溢出，前端无 NaN/Infinity", () => {
     const huge = Number.MAX_SAFE_INTEGER;
+    // 夹具自洽性（TEST-DEFECT 修正）：1 条 record + 空 timeline → countTurnProviderCalls = 1，
+    // §7.6 步骤 1 前置条件（records.length===count）成立 → 命中该 record 的超大值。
+    // 若配 3 条 call_model 条目，count=3 会触发 A5 伪聚合守卫而降级到步骤 2（370000），与本用例意图冲突。
     const turn = completedTurn({
       turnId: "turn-a4-huge",
       inputTokens: huge,
       outputTokens: huge,
       turnDurationMs: huge,
       providerCallRecords: [record({ inputTokens: huge, outputTokens: huge, turnDurationMs: 1_000, firstTokenLatencyMs: 1 })],
-      traceTimeline: persistedThreeHopTimeline()
+      traceTimeline: []
     });
 
+    expect(countTurnProviderCalls(turn)).toBe(1);
     expect(resolveCurrentContextInputTokens(turn)).toBe(huge);
     expect(Number.isFinite(resolveCurrentContextInputTokens(turn) as number)).toBe(true);
 
