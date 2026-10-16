@@ -1,5 +1,13 @@
 # 运行期刷新的捕获文件（每次跑 wave15 Rust 用例都会重写）；冻结凭证见
 # wire-red-frozen.json（红相，recs=None）与 wire-green-frozen.json（绿相，I1 成立）。
-wire-red.json
+#
+# wire-red.json 于 2026-10-16 解除忽略并入库（PA-137）：
+# tests/acceptance/wave15/token-metrics-wire.spec.ts 在 import 期硬依赖该文件，
+# 而 CI 的 `verify` 作业（以及 release 流水线）先跑 `npm run test:unit`、
+# 后跑 `cargo:test:shared`，与 spec 头部声明的「先跑 Rust 捕获用例再跑 vitest」
+# 运行顺序相反 → CI 检出后该文件不存在，spec 抛 WIRE_EVIDENCE_MISSING，主分支与
+# 发版流水线长期红灯。入库该快照使 CI 具备可读证据；其内部一致性由 spec 自身断言
+# （Rust per-call 记录 ↔ 持久化 timeline 跨语言一致），与快照的时间戳取值无关。
+# 本地重跑 Rust 捕获用例仍会覆盖刷新工作区内的该文件。
 wire-red-postrust.json
 wire-red-pre-e1b.json
