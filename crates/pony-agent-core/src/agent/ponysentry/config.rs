@@ -36,10 +36,13 @@ impl PonySentryConfig {
             .ok()
             .filter(|s| !s.trim().is_empty());
 
-        // wave-18 C2：未设 `PONYSENTRY_ENABLED` ⇒ false（默认零 egress）；
+        // wave-18 C2（r3）：未设 / set-but-empty / 纯空白 ⇒ false（fail-closed 零 egress）；
         // 仅显式非 "false"/"0"（含大小写与首尾空白）才为 true。
         let enabled = std::env::var("PONYSENTRY_ENABLED")
-            .map(|s| s.trim().to_lowercase() != "false" && s.trim() != "0")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase() != "false" && s != "0")
             .unwrap_or(false);
 
         let environment = std::env::var("APP_ENV")

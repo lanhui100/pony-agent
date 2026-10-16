@@ -16,6 +16,38 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
+// wave-18 C4（r3）：裸 64-hex 规则的模块级辅助（非导出）。
+// R3：一切与 match 无关的上下文判定按「行」记忆化一次，消除 O(matches × 行长) 二次方。
+const HEX64 = "[0-9a-fA-F]{64}";
+const CRED_WORD_RE = /(client[_-]?token|access[_-]?token|api[_-]?key|secret|password|passwd|credential|authorization|bearer)/;
+const BENIGN_RE = /(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|\bhash\b|校验和|指纹)/;
+const SUMPREFIX_RE = new RegExp(`^\\s*(${HEX64})\\s+\\S`);
+const CELL_RE = new RegExp(`\\|\\s*(${HEX64})\\s*\\|`);
+const BACKTICK_RE = new RegExp("`(" + HEX64 + ")`", "g");
+
+// R3：按「行」记忆化全部与 match 无关的上下文判定；有界缓存（≤4 条）防无界增长。
+const _hexFactsCache = new Map();
+function hexLineFacts(line) {
+  const hit = _hexFactsCache.get(line);
+  if (hit) return hit;
+  const lower = line.toLowerCase();
+  const facts = {
+    credWord: CRED_WORD_RE.test(lower),
+    benignKeyword: BENIGN_RE.test(lower),
+    prefixHex: (SUMPREFIX_RE.exec(line) || [null, null])[1]?.toLowerCase() ?? null,
+    cellHex: (CELL_RE.exec(line) || [null, null])[1]?.toLowerCase() ?? null,
+    backtickHexes: new Set([...line.matchAll(BACKTICK_RE)].map((x) => x[1].toLowerCase())),
+  };
+  if (_hexFactsCache.size >= 4) _hexFactsCache.clear();
+  _hexFactsCache.set(line, facts);
+  return facts;
+}
+
+// C7（r3）：`isSafe` 第二实参语义为「当前行 + 最多 3 行紧邻上文」的有界窗口。
+// 规则本体按 r3 §4.2 冻结形态取窗口最后一行（`context.split("\n").pop()`）；
+// 与 match 无关的整行判定已由 `hexLineFacts` 按行记忆化（R3 §4.6），
+// 故每 match 仅剩一次 O(窗口) 的行提取，无二次方放大。
+
 // 常见敏感前缀与凭证正则
 export const SECRET_RULES = [
   {
@@ -81,28 +113,24 @@ export const SECRET_RULES = [
       return upper.includes("MOCK") || upper.includes("TEST") || upper.includes("DUMMY") || upper.includes("EXAMPLE");
     }
   },
-  // wave-18 C4：裸 64-hex 高熵凭证（SHA-256 尺寸 client token）
-  // 契约基线：`.dev-team/contract-matrix-wave18.md` §4.2 / §4.3 / §4.5。
+  // wave-18 C4（r3）：裸 64-hex 高熵凭证（SHA-256 尺寸 client token）
+  // 契约基线：`.dev-team/contract-matrix-wave18.md` §4.2 / §4.3 / §4.6 / §4.7。
   // 长度窗口严格 64：用 `(?<![0-9a-fA-F])` / `(?![0-9a-fA-F])` 而非 `\b`，
   // 既能命中 `token_<64hex>`，又拒绝 63/65/128 位 hex 长串与 7/8/12/40 位 git SHA。
   {
     name: "Bare 64-Hex High-Entropy Credential (SHA-256 sized client token)",
     regex: /(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])/g,
     isSafe: (match, context = "") => {
-      // 仅按“当前行”判定；scanTextContent 会以全量内容二次调用 isSafe，
-      // 多行上下文一律不参与豁免（防止整文件级放行造成漏报）。
-      if (context.includes("\n")) return false;
-      const line = context;
-      const lower = line.toLowerCase();
-      // 1) 已知非凭证哈希上下文关键字（校验和 / 摘要 / 指纹 / SRI）
-      if (/(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|\bhash\b|校验和|指纹)/.test(lower)) return true;
-      // 2) sha256sum(1) 输出格式：<hex><空白><路径>
-      if (/^[0-9a-f]{64}\s+\S/.test(line.trim())) return true;
-      // 3) Markdown 表格中的独立摘要单元格：| <hex> |
-      if (/\|\s*[0-9a-fA-F]{64}\s*\|/.test(line)) return true;
-      // 4) 反引号独占包裹的摘要（证据收据内联哈希）；同行出现凭证语义词时仍判违规
-      const credWord = /(client[_-]?token|access[_-]?token|api[_-]?key|secret|password|passwd|credential|authorization|bearer)/;
-      if (!credWord.test(lower) && line.includes("`" + match + "`")) return true;
+      // C7：context 为「当前行 + 最多 3 行紧邻上文」的有界窗口；行级判定取最后一行。
+      const line = context.split("\n").pop();
+      const f = hexLineFacts(line); // R3：每行只算一次，之后 O(1)
+      // R1：同行出现凭证语义词 => 一律判违规（优先于豁免 1/2/3/4）
+      if (f.credWord) return false;
+      if (f.benignKeyword) return true; // 豁免 1（已被 R1 守卫）
+      const m = match.toLowerCase();
+      if (f.prefixHex === m) return true;      // 豁免 2：只豁免 sha256sum 前缀位置的那个 hex（R2）
+      if (f.cellHex === m) return true;        // 豁免 3：只豁免 Markdown 独立单元格内的那个 hex（R2）
+      if (f.backtickHexes.has(m)) return true; // 豁免 4
       return false;
     }
   }
@@ -153,13 +181,18 @@ export function scanTextContent(content, filename = "") {
   for (let lineNum = 1; lineNum <= lines.length; lineNum++) {
     const line = lines[lineNum - 1];
 
+    // C7（r3）：context 收窄为「当前行 + 最多 3 行紧邻上文」的有界窗口。
+    // 禁止把整文件内容交给 isSafe（既有 Private Key Block 规则会因此 100% 失明）。
+    // 窗口不含 BEGIN 行之后的内容：私钥 base64 体可能偶然含 "TEST"/"MOCK" 字样。
+    const contextWindow = lines.slice(Math.max(0, lineNum - 4), lineNum).join("\n");
+
     for (const rule of SECRET_RULES) {
       rule.regex.lastIndex = 0;
       let match;
       while ((match = rule.regex.exec(line)) !== null) {
         const secretVal = match[1] || match[0];
-        // 传入当前行或全量内容作为上下文
-        if (rule.isSafe && (rule.isSafe(secretVal, line) || rule.isSafe(secretVal, content))) {
+        // C7：传入有界窗口（当前行 + 最多 3 行紧邻上文），禁止整文件内容。
+        if (rule.isSafe && rule.isSafe(secretVal, contextWindow)) {
           continue;
         }
 

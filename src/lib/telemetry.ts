@@ -19,6 +19,9 @@ export const APP_ENV =
   (import.meta.env?.VITE_APP_ENV as string) ||
   (import.meta.env?.DEV ? "dev" : "production");
 
+// wave-18 C8：ingest 硬超时上限（非导出；对齐 NFR external_call_timeout_ms ≤ 3000ms）
+const INGEST_TIMEOUT_MS = 3000;
+
 export interface Frame {
   filename?: string;
   function?: string;
@@ -286,14 +289,22 @@ export async function reportError(options: ReportErrorOptions): Promise<void> {
       headers["X-Client-Token"] = CLIENT_TOKEN;
     }
 
+    // wave-18 C8：ingest 硬超时 ≤ 3000ms（对齐 NFR external_call_timeout_ms）。
+    // 按 Lead 指定使用 AbortController + setTimeout（不使用其静态 timeout 便捷方法：旧 WebView 兼容风险）。
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), INGEST_TIMEOUT_MS);
     fetch(`${INGEST_URL}/api/v1/ingest`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
       keepalive: true,
-    }).catch((fetchErr) => {
-      console.warn("[ponysentry] fetch ingest silent fail:", fetchErr);
-    });
+      signal: controller.signal,
+    })
+      .catch((fetchErr) => {
+        // 含超时触发的 AbortError：静默吸收，保持 fire-and-forget 语义
+        console.warn("[ponysentry] fetch ingest silent fail:", fetchErr);
+      })
+      .finally(() => clearTimeout(timeoutId));
   } catch (err) {
     // 捕获所有潜在异常，保证遥测永远不影响前端运行
     console.warn("[ponysentry] reportError internal silent error:", err);
