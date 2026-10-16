@@ -223,6 +223,14 @@
         "observed_ratio": { "type": "integer", "minimum": 1 },
         "acceptance_max_ms_single_line_4000_hex": { "type": "integer", "minimum": 1 },
         "review_observed_1mb_single_line_ms": { "type": "integer", "minimum": 1 },
+        "per_match_context_split_forbidden": { "type": "boolean", "const": true },
+        "line_cache_key": { "type": "string", "const": "lineNumber" },
+        "acceptance_max_ms_single_line_5mb": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "acceptance_max_ms_single_line_10mb": { "type": "integer", "minimum": 1, "maximum": 5000 },
+        "r3_observed_1mb_single_line_ms": { "type": "integer", "minimum": 1 },
+        "r3_observed_5mb_single_line_ms": { "type": "integer", "minimum": 1 },
+        "r4_candidate_observed_5mb_single_line_ms": { "type": "integer", "minimum": 1 },
+        "r4_candidate_observed_10mb_single_line_ms": { "type": "integer", "minimum": 1 },
         "evidence": { "type": "string", "minLength": 1 }
       },
       "required": [
@@ -235,6 +243,14 @@
         "observed_ratio",
         "acceptance_max_ms_single_line_4000_hex",
         "review_observed_1mb_single_line_ms",
+        "per_match_context_split_forbidden",
+        "line_cache_key",
+        "acceptance_max_ms_single_line_5mb",
+        "acceptance_max_ms_single_line_10mb",
+        "r3_observed_1mb_single_line_ms",
+        "r3_observed_5mb_single_line_ms",
+        "r4_candidate_observed_5mb_single_line_ms",
+        "r4_candidate_observed_10mb_single_line_ms",
         "evidence"
       ],
       "additionalProperties": false

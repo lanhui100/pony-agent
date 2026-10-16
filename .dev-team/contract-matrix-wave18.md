@@ -2,7 +2,7 @@
 
 - 任务：`task-1`（wave-18 ① 凭证清理 + 扫描器补盲 + 看板修正）
 - Owner：`protocol-agent`（L2-P）
-- 波次 revision：**wave18-r3（冻结；r1 → r2 新增 C5；r2 → r3 修订 C2/C4 + 新增 C6/C7/C8 + 12 项 findings 裁定，变更原因见 §12）**
+- 波次 revision：**wave18-r4（冻结；r1→r2 新增 C5；r2→r3 修订 C2/C4 + 新增 C6/C7/C8；r3→r4 精确化 C4 四条 + R6 口径纠正 + R7 二次修正，变更原因见 §12）**
 - 冻结时间基准：本文件写入时的工作树状态（HEAD 见 §0.3）
 - 写域：仅 `.dev-team/`（只读侦察 + 只写 `.dev-team/`，未改任何业务代码/测试）
 
@@ -26,6 +26,12 @@
 | E10 | `cat vitest.config.ts` + `grep -rn acceptance Cargo.toml crates/*/Cargo.toml src-tauri/Cargo.toml` | 0 / **1** | R2 孤儿文件证据：`vitest.config.ts:20` include 仅 `tests/**/*.spec.ts\|*.test.ts`；全仓 Cargo.toml **零** `acceptance` 命中（grep EXIT=1）；`Cargo.toml:2-5` workspace members 仅 `crates/pony-agent-core`、`src-tauri` |
 | E11 | `grep -rn "INGEST_URL\|CLIENT_TOKEN\|from .*telemetry" src tests` | 0 | C5 调用方面：外部仅 import 函数 `reportError`/`addBreadcrumb`（`src/stores/runtime.ts:3`、`src/lib/tauri.ts:3`、`src/main.ts:6`、`tests/unit/telemetry-suppression.spec.ts:2`）；`INGEST_URL`/`CLIENT_TOKEN` **无外部导入方**（仅 telemetry.ts 内部 `:280-284` 使用） |
 | E12 | `read tests/unit/telemetry-suppression.spec.ts`（68 行全文） | 0 | C5 测试面：`:10-21` 已断言 vitest 下 `fetch`/`safeInvoke` 零调用（由 `:254-260` test-mode 静默守卫达成）→ C5 新测试必须区分机制，见 §5.4 |
+| E13 | `read scripts/check-secrets.mjs`（r3 现行实现，行号重定位） | 0 | r4 findings 证据：`:22` `CRED_WORD_RE`；`:30-44` `hexLineFacts`；`:125` `context.split("\n").pop()`（每 match）；`:128` `if (f.credWord) return false;`（整行优先）；`:131/:132` 值锚定；`:195` 调用点（无 index/lineNum） |
+| E14 | `node -e`（对现行 r3 模块求值）复现 6 项反例 | 0 | S1 新误报 6/7 例 =1（对照 0）；S2 同值重复 =0 / 异值 =1；S4 空格形态 =0 / 连字符驼峰 =1；G1–G6 全 ≥1 |
+| E15 | `node -e`（对现行 r3 模块求值）性能复现 | 0 | 单行 1MB = **244.2 ms**（15000 命中）、2.6MB = **2560.0 ms**、5MB = **27837.9 ms**（评审：248.5 / 1894.7 / 34841.9 ms，同量级） |
+| E16 | `node /tmp/w18c-proto-probe.mjs {regress,fp,spec,c7,repo,perf}` | 0×6 | r4 候选实现：regress 16/16 ≥1、fp 14/14 =0、spec 8/8、c7 3/3、repo 1427 文件 0 命中、perf 5MB = **99.6 ms** / 10MB = **161.1 ms** |
+| E17 | `git grep -n MAX_SUBAGENT_DEPTH`（+ `-- '*.rs' '*.ts'`） | 0 / **1** | R7 二次修正证据：全仓 **10** 命中（8 处 `.dev-team/` 档案 + 该行自身 + 任务卡 `:26`）；代码域 **0** 命中（EXIT=1） |
+| E18 | `read crates/pony-agent-core/tests/ponysentry_manual_upload_test.rs`（R6 现行实现） | 0 | R6 实质闭合证据：恒跑真断言段存在；skip 分支含 `assert_ne!(live_opt_in.as_deref(), Some("1"), ...)` 真断言 + `eprintln!("[skip] ...")`；无 `#[ignore]`；跳过登记于 `.dev-team/red-purity-wave18b.json` |
 
 ### 0.2 全库 64-hex 面（`git ls-files`，排除 `.dev-team/` 与 lockfile）
 
@@ -136,36 +142,64 @@ import { scanTextContent, checkBlockedFilename, isSafeFilename, SECRET_RULES } f
 
 冻结：`SECRET_RULES`（`check-secrets.mjs:20`）、`BLOCKED_FILE_PATTERNS`（`:87`）、`isSafeFilename`（`:98`）、`checkBlockedFilename`（`:106`）、`scanTextContent`（`:118`）、`runChecks`（`:187`）**导出名与签名一律不变**；新规则以 **append 到 `SECRET_RULES` 末尾** 的方式加入（保持既有 7 条规则的匹配顺序与优先级，避免影响 `spec:33/52/62/69/80` 的 `rule` 文案断言）。
 
-### 4.2 冻结规则实现（**wave18-r3 修订版**，逐字交付给 Executor）
+### 4.2 冻结规则实现（**wave18-r4 修订版**，逐字交付给 Executor）
 
-> r3 相对 r2 的三处修订：**R1** 豁免 1/2/3 加 `credWord` 守卫；**R2** 豁免 2/3 只豁免该 hex 本身（位置锚定），不得豁免整行；**R3** 消除 `O(matches × 行长)` 二次方（按行记忆化，详见 §4.6）。同时因 **C7** 把 `isSafe` 的 context 语义改为有界窗口（§7），本规则改为取窗口最后一行。
+> r3 → r4 的四条精确化（依据 `.dev-team/review-wave18b-scanner.json` findings#1–#4）：**R1′** credWord 守卫改**位置敏感**（消除新误报回归）；**R2′** 豁免 2/3 改**位置锚定**（槽位相等，取代值锚定）；**R3′** 消除 `isSafe` 内每 match 的 `context.split("\n").pop()`（真达 O(行长)）；**R4** 凭证语义词正则扩面（空格/驼峰/连字符/裸 `token`）。调用侧同步新增两个实参（`match.index` / `lineNum`，见 §7.3）。
+
+**调用侧（`scanTextContent`，替换 r3 的 `:195`）**
+
+```js
+        // C7：传入有界窗口（当前行 + 最多 3 行紧邻上文），禁止整文件内容。
+        // r4：追加 match.index 与 lineNum，供 64-hex 规则做位置敏感/位置锚定与 O(1) 行记忆化。
+        if (rule.isSafe && rule.isSafe(secretVal, contextWindow, match.index, lineNum)) {
+          continue;
+        }
+```
 
 **模块级辅助（新增，非导出）**
 
 ```js
 const HEX64 = "[0-9a-fA-F]{64}";
-const CRED_WORD_RE = /(client[_-]?token|access[_-]?token|api[_-]?key|secret|password|passwd|credential|authorization|bearer)/;
-const BENIGN_RE = /(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|\bhash\b|校验和|指纹)/;
+// C4-R4（r4）：覆盖 client_token / client-token / client token / clienttoken / ClientToken
+// 与 access token / api key 等空格、连字符、下划线、驼峰形态；含裸 `token`（词尾边界防 tokenizer）。
+const CRED_WORD_RE = /(?:(?:client|access|refresh|id|auth)[\s_-]*)?token\b|api[\s_-]*key\b|secret|password|passwd|credential|authorization|bearer/i;
+const BENIGN_RE = /(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|\bhash\b|校验和|指纹)/i;
 const SUMPREFIX_RE = new RegExp(`^\\s*(${HEX64})\\s+\\S`);
 const CELL_RE = new RegExp(`\\|\\s*(${HEX64})\\s*\\|`);
 const BACKTICK_RE = new RegExp("`(" + HEX64 + ")`", "g");
 
+const firstIdx = (re, line) => {
+  const m = re.exec(line);
+  return m ? m.index : Infinity; // 无命中 => +∞（恒不小于任何 matchIndex）
+};
+const slotStart = (re, line) => {
+  const m = re.exec(line);
+  if (!m) return -1;
+  return m.index + m[0].indexOf(m[1]); // 该「位置槽」在行内的起始下标
+};
+
 // R3：按「行」记忆化全部与 match 无关的上下文判定；有界缓存（≤4 条）防无界增长。
-const _hexFactsCache = new Map();
 function hexLineFacts(line) {
-  const hit = _hexFactsCache.get(line);
-  if (hit) return hit;
-  const lower = line.toLowerCase();
-  const facts = {
-    credWord: CRED_WORD_RE.test(lower),
-    benignKeyword: BENIGN_RE.test(lower),
-    prefixHex: (SUMPREFIX_RE.exec(line) || [null, null])[1]?.toLowerCase() ?? null,
-    cellHex: (CELL_RE.exec(line) || [null, null])[1]?.toLowerCase() ?? null,
+  return {
+    credIdx: firstIdx(CRED_WORD_RE, line),     // 首个凭证语义词下标
+    benignIdx: firstIdx(BENIGN_RE, line),      // 首个良性摘要关键词下标
+    benignAny: BENIGN_RE.test(line),           // 行内是否含良性摘要关键词
+    prefixSlot: slotStart(SUMPREFIX_RE, line), // sha256sum 前缀槽起始下标（-1 = 无）
+    cellSlot: slotStart(CELL_RE, line),        // Markdown 单元格槽起始下标（-1 = 无）
     backtickHexes: new Set([...line.matchAll(BACKTICK_RE)].map((x) => x[1].toLowerCase())),
   };
-  if (_hexFactsCache.size >= 4) _hexFactsCache.clear();
-  _hexFactsCache.set(line, facts);
-  return facts;
+}
+
+// C4-R3'：按 lineNumber 记忆化「当前行 + facts」；isSafe 内不得每 match 重做整行切分。
+const _lineCache = new Map();
+function ctxLineFacts(context, lineNumber) {
+  const hit = _lineCache.get(lineNumber);
+  if (hit && hit.context === context) return hit; // 同对象恒等比较 => O(1)
+  const line = context.split("\n").pop();
+  const entry = { context, line, facts: hexLineFacts(line) };
+  if (_lineCache.size >= 4) _lineCache.clear();
+  _lineCache.set(lineNumber, entry);
+  return entry;
 }
 ```
 
@@ -175,33 +209,40 @@ function hexLineFacts(line) {
   {
     name: "Bare 64-Hex High-Entropy Credential (SHA-256 sized client token)",
     regex: /(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])/g,
-    isSafe: (match, context = "") => {
-      // C7：context 为「当前行 + 最多 3 行紧邻上文」的有界窗口；行级判定取最后一行。
-      const line = context.split("\n").pop();
-      const f = hexLineFacts(line); // R3：每行只算一次，之后 O(1)
-      // R1：同行出现凭证语义词 => 一律判违规（优先于豁免 1/2/3/4）
-      if (f.credWord) return false;
-      if (f.benignKeyword) return true; // 豁免 1（已被 R1 守卫）
+    isSafe: (match, context = "", matchIndex = -1, lineNumber = -1) => {
+      const { facts } = ctxLineFacts(context, lineNumber); // R3'：每行一次，之后 O(1)
       const m = match.toLowerCase();
-      if (f.prefixHex === m) return true;      // 豁免 2：只豁免 sha256sum 前缀位置的那个 hex（R2）
-      if (f.cellHex === m) return true;        // 豁免 3：只豁免 Markdown 独立单元格内的那个 hex（R2）
-      if (f.backtickHexes.has(m)) return true; // 豁免 4
+      // C4-R1'（位置敏感）：仅当凭证语义词位于**该 hex 之前**、且其前**无**良性摘要关键词时判违规。
+      // 目的：摘要收据形态（hex 在前 / 良性关键词在 hex 之前）不得因文件名、字段名或说明文字含
+      // secret/token/credential 等词而误报（消除 r3 新误报回归）。
+      if (facts.credIdx < matchIndex && !(facts.benignIdx < matchIndex)) return false;
+      if (facts.benignAny) return true;                  // 豁免 1：行内良性摘要关键词
+      // C4-R2'（位置锚定）：按**槽位下标**判定，不再按值判定 —— 同行其他位置的同值 hex 不继承豁免。
+      if (matchIndex === facts.prefixSlot) return true;  // 豁免 2：sha256sum 前缀槽
+      if (matchIndex === facts.cellSlot) return true;    // 豁免 3：Markdown 独立单元格槽
+      if (facts.backtickHexes.has(m)) return true;       // 豁免 4：反引号独占包裹
       return false;
     }
   }
 ```
+
+> **实现注意（必须遵守，否则 §4.6/§4.8 判据不成立）**
+> 1. `firstIdx` / `slotStart` 的正则**不得带 `g` 标志**（避免 `lastIndex` 状态污染）；`BACKTICK_RE` 用 `matchAll`（内部克隆正则，不改 `lastIndex`）。
+> 2. `_lineCache` 的键必须是 `lineNumber`（整数），不得用 `context` 字符串作键（5MB 字符串哈希为 O(行长)，会重新引入二次方）。
+> 3. `matchIndex` 是 `rule.regex.exec(line)` 在**当前行**上的下标；`ctxLineFacts` 返回的行与调用侧 `line` 必须同源（由调用侧 `lineNum` 保证）。
 
 ### 4.3 边界语义（冻结）
 
 - 用 `(?<![0-9a-fA-F])` / `(?![0-9a-fA-F])` 而非 `\b`：既能命中 `token_<64hex>`（`_` 是 `\b` 的 word 字符，`\b` 会漏），又拒绝 65/128 位 hex 长串与 40 位 git SHA。
 - 长度窗口严格 64：63/65/128 位一律不命中（见 §4.4 sha 探针）。**R1（r3）**：32-hex 仍不覆盖（§9.1 R1 backlog）。
 - 大小写 hex 均命中（`[0-9a-fA-F]`）。
-- **【r3 新增 R1】凭证语义词优先**：同一行（窗口最后一行）出现 `client_token`/`access_token`/`api_key`/`secret`/`password`/`passwd`/`credential`/`authorization`/`bearer` 任一（大小写不敏感）时，**豁免 1/2/3/4 全部失效**，该行所有 64-hex 一律判违规。
-- **【r3 新增 R2】豁免 2/3 位置锚定**：豁免 2 仅对"该行首个 64-hex 且其后紧跟空白 + 非空白字符"的那个 hex 生效；豁免 3 仅对"被 `|` 包裹的独立单元格内"的那个 hex 生效。**一行内其他位置的 64-hex 不继承豁免**（防止第二个具名凭证被吞）。
-- **【r3 新增】豁免 4** 保留 r2 语义（反引号独占包裹 + 同行无凭证语义词），改为 `Set` 成员判定（R3）。
+- **【r4 修订 R1′】凭证语义词位置敏感（取代 r3 的"整行优先"）**：凭证语义词（形态见 R4）**位于该 64-hex 之前**、且其前**无**良性摘要关键词时 => 该 hex 判违规；反之（语义词在该 hex 之后，或语义词之前已出现良性摘要关键词）**不**触发该守卫，交由豁免 1/2/3/4 判定。语义要点：**摘要收据形态（hex 在前 / 良性关键词在 hex 之前）不得因路径、文件名、字段名或说明文字含 `secret`/`token`/`credential` 等词而误报**。
+- **【r4 修订 R2′】豁免 2/3 改为位置锚定（取代 r3 的值锚定）**：豁免 2 仅当 `match.index === prefixSlot`（sha256sum 前缀槽起始下标）时生效；豁免 3 仅当 `match.index === cellSlot`（Markdown 单元格槽起始下标）时生效。**同一行其他位置的 64-hex（含与槽内值相同的重复值）一律不继承豁免**。
+- **【r4 新增 R4】凭证语义词形态扩面**：`CRED_WORD_RE` 必须覆盖 `client_token`/`client-token`/`client token`/`clienttoken`/`ClientToken`、`access token`、`api key`、裸 `token`（词尾边界，不匹配 `tokenizer`），以及既有 `secret`/`password`/`passwd`/`credential`/`authorization`/`bearer`。
+- **【r3 保留】豁免 4** 语义不变（反引号独占包裹），实现为 `Set` 成员判定。
 - `scanTextContent` 对 `check-secrets.spec.ts` 的文件名整体豁免（`check-secrets.mjs:119-123`）**不得改动**；同时本规则自身对该文件内的样例串也零命中（§4.4 spec 探针在 **无文件名** 条件下运行，即最严苛路径）。
 - `.env.example` 文件名豁免链路（`isSafeFilename` `:98-104` → `checkBlockedFilename` `:106-116`）**不得改动**；**C6** 新增的 `.env.example` 正是依赖该链路才不被文件名规则拦截（但其**内容**仍受 C4 规则约束，见 §6）。
-- **【r3 修订】** `isSafe(match, context)` 的 `context` 语义由"当前行 或 全量文件内容"改为**"当前行 + 最多 3 行紧邻上文"的有界窗口**（C7，§7）。所有规则**禁止**依赖整文件内容做放行判定。
+- **【r4 修订】** `isSafe(match, context, matchIndex, lineNumber)` 的 `context` 语义为**"当前行 + 最多 3 行紧邻上文"的有界窗口**（C7，§7）；`matchIndex` 为该 hex 在**当前行**内的下标；`lineNumber` 用于 O(1) 行记忆化。所有规则**禁止**依赖整文件内容做放行判定。
 
 ### 4.4 零误报物理收据（探针 `/tmp/w18-rule-probe.mjs`，只读，未写仓库）
 
@@ -216,33 +257,100 @@ function hexLineFacts(line) {
 
 > 字段对齐：`.dev-team/nfr-baseline-wave18.json` 的 `wave18_secret_scan_gate.existing_spec_assertions_preserved = 8` 即上表 `spec` 探针的 8 条内容扫描断言（第 9 个 `it` 用例为文件名豁免）。
 
+**r4 候选实现物理收据（探针 `/tmp/w18c-proto-probe.mjs`，只读，未写仓库）**
+
+| 探针 | 覆盖 | 真实输出 | Exit |
+|---|---|---|---|
+| `regress` | §4.7 的 G1–G6（r3 闭合面）+ R4a–R4f（R4 新形态）+ R2a–R2d（R2′ 位置锚定）共 **16** 条，全部要求 ≥1 命中 | 16/16 `PASS`；`probe_failures=0` | **0** |
+| `fp` | §4.8 的 FP1–FP6（review 新误报回归面）+ FP7–FP10（既有良性摘要形态）+ FP11–FP14（git SHA / 63 / 65 位）共 **14** 条，全部要求 0 命中 | 14/14 `PASS`；`probe_failures=0` | **0** |
+| `spec` | §4.4 的 8 条既有 spec 内容断言（r4 规则加入后） | 8/8 `PASS`；`probe_failures=0` | **0** |
+| `c7` | C7 私钥块级豁免三例（真实块=1 / 真实块+远端 `test`=1 / 紧邻 `MOCK`=0） | 3/3 `PASS`；`probe_failures=0` | **0** |
+| `repo` | `git ls-files` 全量 **1427** 个可读文本文件（≤1MB、非二进制），仅 r4 规则 | `r4_rule_hits=0`（当前树 4 处泄漏均已清理），**误报 0** | **0** |
+| `perf` | 单行 5MB / 10MB（distinct 64-hex 以空格连接） | 5MB = **99.6 ms**（判据 ≤2000ms）；10MB = **161.1 ms**（判据 ≤5000ms） | **0** |
+
 ### 4.5 已知边界（诚实登记，非隐藏豁免）
 
-- **【r3 更新】** 豁免项 1/2/3/4 现**全部**受 `credWord` 守卫（R1）约束：同行出现凭证语义词即一律判违规，故 r2 记录的"1/2/3 项无守卫导致整行放行"缺口已在 r3 关闭（对应 findings #5/#6，见 §9.1 A1/A2）。
-- 残余边界（**r3 仍存在，必须如实登记**）：若真实凭证所在行**不含**任何凭证语义词、却含 `sha256`/`hash` 等良性关键词，仍会被豁免 1 放行（例：`const k = "<64hex>" // checksum`）。这是"零误报优先"（门禁跑在 `npm run verify`）与"零漏报"之间的显式取舍；收紧需引入路径/语义白名单，属独立议题（与 R1 backlog 同批评估）。
-- 第 4 项（反引号豁免）是本波为达成"当前树零误报"所必需：当前树有 6 处 `.dev-team/**` 证据收据把摘要写成 `` `<64hex>` ``（`contract-matrix-deadlock.md:282`、`wave17-red-receipts.md:16,17,18,19`），无此豁免则 `check-secrets --all` 在干净树上即 FAIL。
-- 若 Lead/验收认为该豁免过宽，可收紧为"仅 `.dev-team/**` 路径生效"（把路径信息传入 `isSafe` 需扩签名，**会破坏导出面兼容**，故本波不采用）。
+> **r4 纠正（依据 finding#4）**：r3 曾声称"r2 的 1/2/3 项无守卫缺口已在 r3 关闭"。该表述**过头**：r4 之后仍有下列**已知边界**，逐条列出，**不得**再声称已全部关闭。
 
-### 4.6 性能硬约束（**wave18-r3 新增，对应 finding#8**）
-
-- **约束**：整行处理必须为 **O(行长)**；`isSafe` 中**一切与 match 无关**的上下文判定（`credWord`、良性关键词正则、sha256sum 前缀、Markdown 单元格、反引号集合）必须按行**预计算/记忆化一次**（§4.2 的 `hexLineFacts` + 有界缓存）。
-- **禁止**：在 `isSafe` 内对**每个 match** 重复执行 `line.toLowerCase()`、`regex.test(lower)`、`line.includes(...)`、`line.trim()` 等整行级运算。
-- **实测回归证据（r2 实现，独立复现）**：单行 4000 × 64-hex（259,999 B）= **2072.4 ms**；同样数据按行拆分为 4000 行 = **19.7 ms** → **105×** 差距（`/tmp/w18b-probe.mjs`，Exit 1）。评审路实测 1MB 单行 = **133,411.9 ms**（15000 命中）。
-- **验收判据**：修复后同一 4000 × 64-hex 单行用例必须 ≤ **100 ms**（相对 19.7 ms 基线留 5× 余量），且命中数与拆行版本一致；CI secrets 步骤（`ci.yml:44` `--all`，无 step timeout）不得因长行停滞。
-- **缓存有界性**：缓存必须**有界**（≤4 条并清空重填），禁止以行长/内容为键的无界 `Map` 造成内存泄漏。
-
-### 4.7 r3 反例回归用例（**必须命中**，对应 findings #5/#6）
-
-以下 6 条在 r2 实现下**全部 0 命中**（已独立复现，`/tmp/w18b-probe.mjs` Exit 1），r3 修复后**必须 ≥1 命中**；同时 §4.4 的 `sha`/`spec` 探针必须保持全绿（零误报不得回退）：
-
-| # | 输入形态（`H` = 64-hex 字面量） | r2 实测 | r3 要求 |
+| # | 边界类型 | 反例（`H` = 64-hex） | 现状与理由 |
 |---|---|---|---|
-| G1 | ``| PONYSENTRY_CLIENT_TOKEN | H |`` | 0 | ≥1（R1 守卫豁免 3） |
-| G2 | ``| client_token | H |`` | 0 | ≥1（R1） |
-| G3 | `{"client_token":"H","integrity":"sha512-x"}` | 0 | ≥1（R1 守卫豁免 1） |
-| G4 | `{"client_token":"H","checksum":"abc"}` | 0 | ≥1（R1） |
-| G5 | `client_token=H // hash` | 0 | ≥1（R1） |
-| G6 | `H  PONYSENTRY_CLIENT_TOKEN=H` | 0 | ≥1（R1 + R2：第二个 hex 不得被 sha256sum 前缀豁免吞掉） |
+| B1 | **FN**：同行既有良性摘要关键词、又有位于 hex 之前的具名凭证 | `checksum="<H1>" client_token=<H2>` | H2 的 `benignIdx < matchIndex` 使 R1′ 不触发，随后豁免 1 生效 => H2 放行。属"零误报优先"的显式取舍；收紧需按最近邻语义重写豁免 1，属独立议题（backlog，与 §9.2 R1 同批评估） |
+| B2 | **FN**：真实凭证所在行含良性关键词、且无凭证语义词 | `const k = "<H>" // checksum` | 豁免 1 放行。同上取舍 |
+| B3 | **FN**：`token` 之外的泛化标签（如 `apikey`、`passphrase`、`secretkey` 连写形态） | `apikey=<H>` | `CRED_WORD_RE` 的 `api[\s_-]*key\b` 不匹配 `apikey`（无分隔符）。已知窄口，随 B1 同批评估 |
+| B4 | **FP 面（已关闭，留档）**：r3 曾对摘要收据误报 | `<H>  scripts/rotate-secret.sh` | r4 的 R1′ 已修复（§4.8 FP1–FP6 全 0）；留档以便复审对照 |
+| B5 | 反引号豁免（豁免 4）为"当前树零误报"所必需 | 6 处 `.dev-team/**` 收据把摘要写成 `` `<H>` `` | 无此豁免则 `--all` 在干净树即 FAIL；若要收紧为"仅 `.dev-team/**` 生效"需向 `isSafe` 传路径（扩签名，本波不做） |
+
+---
+
+### 4.6 性能硬约束（**wave18-r4 修订，对应 finding#8 与 r4 finding#3**）
+
+- **约束**：整行处理必须为 **O(行长)**。`isSafe` 内**一切与 match 无关**的上下文判定（凭证语义词下标、良性关键词下标、sha256sum 前缀槽、Markdown 单元格槽、反引号集合）必须按行**预计算/记忆化一次**（§4.2 的 `hexLineFacts`）。
+- **禁止（r4 新增，r3 未达成项）**：`isSafe` 内**不得**对每个 match 重复执行 `context.split("\n")`（r3 的 `:125` 即此形态，实测仍为二次方）；行提取必须按 `lineNumber` 记忆化（§4.2 的 `ctxLineFacts`），或改由调用侧传入行。
+- **禁止**：`line.toLowerCase()`、`regex.test(lower)`、`line.includes(...)`、`line.trim()` 等整行级运算出现在每-match 路径上。
+- **实测回归证据（独立复现，r3 现行实现 `scanTextContent`）**：单行 1MB = **244.2 ms**（15000 命中）；2.6MB = **2560.0 ms**；5MB = **27837.9 ms**。评审路另测 10MB = **176,568 ms**（15000 → 154,000 命中，呈 ~n²·⁹）。根因：`context.split("\n").pop()` 每 match 一次（微基准 0.6455 ms/call × 77000 matches ≈ 50 s，与实测同量级）。
+- **冻结验收判据（r4，取代 r3 的 4000×64hex ≤100ms）**：
+  1. 单行 **5MB** ≤ **2000 ms**；
+  2. 单行 **10MB** ≤ **5000 ms**；
+  3. 命中数与拆行版本一致（不得因性能修复而漏报）。
+  - **r4 候选实现实测**：5MB = **99.6 ms**、10MB = **161.1 ms**（均满足，`/tmp/w18c-proto-probe.mjs perf`，Exit 0）。
+- **可达性（必须记录，说明为何钩子风险真实）**：`--all` 跳过 >1MB 文件（`check-secrets.mjs:306`）故 CI（`ci.yml:44`）上限约 248 ms/文件；但 `--staged` / `--pre-push`（pre-commit / pre-push 钩子）**无大小上限**，单个新增 10MB 单行文件即可停摆钩子 176 s。
+- **缓存有界性**：`_lineCache` 必须**有界**（≤4 条并清空重填），键为 `lineNumber`（整数），禁止以 5MB 字符串为键（哈希本身即 O(行长)）。
+
+### 4.7 反例回归用例（**必须命中**：r3 G1–G6 保留 + r4 新增）
+
+**r3 闭合面（r4 必须继续 ≥1 命中，否则视为回归）**
+
+| # | 输入形态（`H` = 64-hex 字面量） | r2 实测 | r4 要求 |
+|---|---|---|---|
+| G1 | ``| PONYSENTRY_CLIENT_TOKEN | H |`` | 0 | ≥1（R1′） |
+| G2 | ``| client_token | H |`` | 0 | ≥1（R1′） |
+| G3 | `{"client_token":"H","integrity":"sha512-x"}` | 0 | ≥1（R1′：良性关键词在 hex 之后，不豁免） |
+| G4 | `{"client_token":"H","checksum":"abc"}` | 0 | ≥1（R1′） |
+| G5 | `client_token=H // hash` | 0 | ≥1（R1′） |
+| G6 | `H  PONYSENTRY_CLIENT_TOKEN=H` | 0 | ≥1（R1′ + R2′：第二个 hex 不得被前缀槽豁免吞掉） |
+
+**r4 新增：R4 形态扩面（**必须 ≥1 命中**，r3 实测全部 0）**
+
+| # | 输入形态 | r3 实测 | r4 要求 |
+|---|---|---|---|
+| G7 | ``| client token | H |`` | 0 | ≥1（R4 空格形态） |
+| G8 | ``| token | H |`` | 0 | ≥1（R4 裸 `token`） |
+| G9 | ``| access token | H |`` | 0 | ≥1（R4） |
+| G10 | ``| api key | H |`` | 0 | ≥1（R4 空格形态） |
+| G11 | ``| ClientToken | H |`` | 1 | ≥1（R4 驼峰，**不得回退**） |
+| G12 | ``| client-token | H |`` | 1 | ≥1（R4 连字符，**不得回退**） |
+
+**r4 新增：R2′ 位置锚定（**必须 ≥1 命中**，r3 实测同值重复 = 0）**
+
+| # | 输入形态 | r3 实测 | r4 要求 |
+|---|---|---|---|
+| G13 | `H  H`（同值重复，sha256sum 形态） | 0 | ≥1（仅前缀槽内那一个豁免） |
+| G14 | ``| H | H |``（同值重复，表格形态） | 0 | ≥1（仅单元格槽内那一个豁免） |
+| G15 | `H  H2`（异值） | 1 | ≥1（不得回退） |
+| G16 | ``| H | H2 |``（异值） | 1 | ≥1（不得回退） |
+
+### 4.8 新误报回归用例（**必须 0 命中**，对应 r4 finding#1）
+
+以下 FP1–FP6 在 **r3 现行实现**下**全部命中 = 1**（已独立复现；FP 方向未被 §4.5 登记，属"零误报"绑定约束的违反）；r4 修复后**必须全部 0 命中**。FP7–FP14 为既有良性形态与长度窗口回归，必须持续 0 命中。
+
+| # | 输入形态 | r3 实测 | r4 要求 |
+|---|---|---|---|
+| FP1 | `H  scripts/rotate-secret.sh`（sha256sum 收据，文件名含 secret） | 1 | **0** |
+| FP2 | `{"file":"secrets.json","sha256":"H"}`（JSON 收据，字段名/文件名含 secret） | 1 | **0**（R1′ 的 `!benignBefore` 分支） |
+| FP3 | `- 密钥指纹(secret fingerprint): H`（说明文字含 secret） | 1 | **0**（同上） |
+| FP4 | `H  config/credential-store.json` | 1 | **0** |
+| FP5 | `H  scripts/reset-password.sh` | 1 | **0** |
+| FP6 | ``| `H` | sha256 of SECRET_RULES sample |``（反引号豁免被 credWord 击穿） | 1 | **0** |
+| FP7 | `checksum = "H"` | 0 | 0 |
+| FP8 | `H  /tmp/pony-run-e2e/shot-30s.png`（sha256sum 输出） | 0 | 0 |
+| FP9 | ``| H |``（纯哈希单元格） | 0 | 0 |
+| FP10 | ``- 修订后 sha256：`H` ``（反引号摘要） | 0 | 0 |
+| FP11 | `commit <40-hex> fix`（git SHA-40） | 0 | 0 |
+| FP12 | `commit 17dca7c fix`（git SHA-7） | 0 | 0 |
+| FP13 | 63 位 hex | 0 | 0 |
+| FP14 | 65 位 hex | 0 | 0 |
+
+> **绑定约束重申（§9.2 R1）**：零误报是**绑定约束**（门禁跑在 `npm run verify` 上，任何误报即阻塞全量自检）。§4.8 的 14 条与 §4.4 的 `sha`/`spec` 探针共同构成 r4 的零误报验收面。
 
 ---
 
@@ -373,7 +481,9 @@ export const CLIENT_TOKEN =
     // 禁止把整文件内容交给 isSafe（既有 Private Key Block 规则会因此 100% 失明）。
     // 窗口不含 BEGIN 行之后的内容：私钥 base64 体可能偶然含 "TEST"/"MOCK" 字样。
     const contextWindow = lines.slice(Math.max(0, lineNum - 4), lineNum).join("\n");
-    if (rule.isSafe && rule.isSafe(secretVal, contextWindow)) {
+    // r4：追加 match.index（位置敏感 R1′ / 位置锚定 R2′）与 lineNum（O(1) 行记忆化 R3′）。
+    //     其余 6 条规则的 isSafe 忽略多余实参，签名向后兼容。
+    if (rule.isSafe && rule.isSafe(secretVal, contextWindow, match.index, lineNum)) {
       continue;
     }
 ```
@@ -383,7 +493,8 @@ export const CLIENT_TOKEN =
 1. **不得**再向 `isSafe` 传入整文件内容（禁止 `content` 作为第二实参）。
 2. 窗口**只向上**取（当前行 + 最多 3 行紧邻上文），**不得**包含当前行之后的内容。
 3. `Private Key Block::isSafe`（`:79-82`）**本体不改**：它接收有界窗口后，`MOCK|TEST|DUMMY|EXAMPLE` 判定自然变为块级。
-4. 其余 6 条前缀规则（`sk-`/`ghp_`/`gho_`/`AKIA`/`glpat-`/`xox`）仅使用 `match`，**不受影响、不得改动**。
+4. 其余 6 条前缀规则（`sk-`/`ghp_`/`gho_`/`AKIA`/`glpat-`/`xox`）仅使用 `match`，**不受影响、不得改动**；追加第 3/4 实参后其 `isSafe` 仍只读第 1 实参。
+5. **【r4 新增】** 第 3/4 实参必须是 `match.index`（当前行内下标）与 `lineNum`（1-based 行号）；**不得**传 `contentWindow` 内下标或其他坐标系（否则 R1′/R2′ 的位置比较失效）。
 5. 64-hex 规则按 §4.2 r3 版读取窗口最后一行（`.split("\n").pop()`）。
 6. 窗口构造必须**每行一次**（O(行长)），不得在每个 match 内重复构造（与 §4.6 一致）。
 
@@ -495,17 +606,31 @@ const INGEST_TIMEOUT_MS = 3000; // ≤ NFR external_call_timeout_ms
 - 裁定：**FIX，移交 T2** 补真断言（至少 1 条可证伪断言：例如断言控制面入口存在/签名或行为契约）。见 §11 M12。
 - 边界说明：该函数为**既有**缺陷（`git show 98bd584` / `d3ae148` 逐字相同），非本波引入；纳入本波仅因它属**本波冻结验收集**。
 
-**R6 — live 用例静默 skip 以 `ok` 上报（移交 T2）**
+**R6 — live 用例静默 skip（**r4 口径纠正**，Lead 裁定：以实质为准，不要求 `#[ignore]`）**
 
-- 事实（`review-l3-contract-wave18.json` finding#2）：`ponysentry_manual_upload_test.rs:151` 起，`:155-181` 三个 early `return`（`:159`/`:169`/`:177` 打印 `[skip] ...`）使默认环境下 `:224-238` 的 201/401/404 断言永不执行，却以 `test ... ok` 上报（等价 `#[ignore]` 但报 `ok`）。
-- 裁定：**FIX，移交 T2**：拆分为 **"恒跑真断言" + "env 门控 live"** 两段；恒跑段必须有真断言（不得零断言通过），live 段须以 `#[ignore]` 或显式 env 门控并如实上报（不得以 `ok` 冒充）。见 §11 M13。
-- 冲突说明：§11 头部"不得跳过"与 M7"授权 env 门控"的冲突，以本裁定为准：**门控允许，但必须以可区分的测试结果上报（`ignored`），且不得使整条用例零断言通过**。
+- 原事实（`review-l3-contract-wave18.json` finding#2）：`ponysentry_manual_upload_test.rs` 原以三个 early `return` 静默 skip，却以 `test ... ok` 上报（等价 `#[ignore]` 但报 `ok`）。
+- **口径矛盾（r4 记录）**：r3 冻结的「M13/R6 须以 `ignored` 如实上报」与 `task-5` §8「不得使用 `#[ignore]`」**自相矛盾**。
+- **Lead 裁定（wave18-r4）：以实质为准**。skip 分支必须满足**全部三项**：
+  1. **自带真断言**（跳过只能是"未显式 opt-in"的结果；若已显式 opt-in 却无可用凭证，属测试配置错误，必须失败）；
+  2. 打印**显式 `[skip]` 标记**（可被 stdout 机械检索）；
+  3. 在 `.dev-team/red-purity-wave18b.json` **登记 harness 级跳过**（含原因与证据）。
+  - **不要求** `#[ignore]`；**不要求** harness 汇总出现 `ignored` 计数。
+- **现行实现已满足三项**（本特派员复核 `ponysentry_manual_upload_test.rs`）：恒跑真断言段 `test_upload_trace_direct_sender_is_fail_closed_without_credentials`；live 用例 skip 分支含 `assert_ne!(live_opt_in.as_deref(), Some("1"), ...)` 真断言并 `eprintln!("[skip] ...")`；文件内自述"不使用 `#[ignore]`（task-5 明令）"；跳过事实登记于 `.dev-team/red-purity-wave18b.json`。
+- **复审裁定**：`review-wave18b-contract.json` 的 F1（该用例）判为 **CLOSED（实质闭合）＋ 措辞纠正** —— 其 `counterexample` 观测到的 `0 ignored` 与 `ok` 不再构成缺陷，因为 `ignored` 已不是本契约的要求。
+- 见 §11 M13（已按本口径改写）。
 
-**R7 — 看板断言为假（自反证）：既有缺陷纳入本波**
+**R7 — 看板断言为假（**r4 二次修正**：第二次假断言）**
 
-- 事实（`review-l3-contract-wave18.json` finding#3 **与** `review-l3-security-wave18.json` finding#1 **两路独立复现**）：`management/task-system/00_DASHBOARD.md:23` 断言"全仓 `grep -rn "MAX_SUBAGENT_DEPTH"` 零命中"，实测 **2 命中**，其中 1 处即该断言行自身，另 1 处为 `management/task-system/03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`（`- **AC-04**: 防护递归深度爆炸（MAX_SUBAGENT_DEPTH ≤ 2）。`）。仅在加 `--include=*.rs --include=*.ts` 时才是 0 命中。
-- 裁定：**FIX（既有缺陷纳入本波）**。正确表述应为"全仓**代码**（`*.rs`/`*.ts`）零命中"；修正后该行必须自洽（改后重跑同一 grep，命中数必须与文本陈述一致）。
-- 说明：该文件不在 `.dev-team/` 写域内，故**本特派员不修改**；裁定与验收判据在此登记，由 Lead 指派执行方（看板修正属 wave-18 ① 的既有任务面）。
+- 第一次事实（r3，`review-l3-contract-wave18.json` finding#3 **与** `review-l3-security-wave18.json` finding#1 两路复现）：`management/task-system/00_DASHBOARD.md:23` 原断言"全仓 `grep -rn "MAX_SUBAGENT_DEPTH"` 零命中"，实测 2 命中（含该断言行自身）。
+- **第二次事实（r4，`review-wave18b-contract.json` finding#2）**：r3 修正后的文本改为「全仓**代码**（`*.rs`/`*.ts`）… 零命中，**仅见于任务卡 AC 文案 `03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`**」——前半句为真，**后半句为假**。
+- **本特派员独立复验（r4 时点）**：`git grep -n MAX_SUBAGENT_DEPTH` → **10 命中**：`.dev-team/contract-matrix-wave18.md:506`、`.dev-team/review-l3-contract-wave18.json:20`、`.dev-team/review-l3-security-wave18.json:7`、`:8`、`.dev-team/review-wave18b-contract.json:13`、`:14`、`.dev-team/wave18b-adjudication.md:22`、`:64`、`management/task-system/00_DASHBOARD.md:23`（该行自身）、`management/task-system/03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`。`git grep -n MAX_SUBAGENT_DEPTH -- '*.rs' '*.ts'` → **EXIT=1（0 命中）**。
+- **冻结修正（表述必须与"改后重跑同一 grep 的命中集合"逐项一致）**，推荐文本：
+  > 全仓**代码**（`*.rs`/`*.ts`）`grep -rn "MAX_SUBAGENT_DEPTH" --include=*.rs --include=*.ts` **零命中**；非代码命中仅见于**本行自身**、`03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26` 的任务卡 AC 文案，以及 `.dev-team/` 下的审查与契约档案（这些档案因引用本标识符而自命中）。
+- **R7 验收判据（可复现且与文本一致）**：
+  1. `git grep -n MAX_SUBAGENT_DEPTH -- '*.rs' '*.ts'` => **EXIT=1**（0 命中）；
+  2. `git grep -n MAX_SUBAGENT_DEPTH | grep -v '^\.dev-team/'` => **恰好 2 行**：`management/task-system/00_DASHBOARD.md:23`（本行自身）与 `management/task-system/03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`；
+  3. 文本中**不得**出现穷举式的"仅见于…"清单（除"本行自身 / 任务卡 / `.dev-team/` 档案"这三类外）；任何新增的非代码命中都必须能被这三类覆盖，否则文本即失真。
+- 说明：该文件不在 `.dev-team/` 写域内，故**本特派员不修改**；裁定与验收判据在此登记，由 Lead 指派执行方。
 
 ---
 
@@ -536,7 +661,7 @@ const INGEST_TIMEOUT_MS = 3000; // ≤ NFR external_call_timeout_ms
 
 ## 11. 旧契约迁移清单（**移交 T2 执行**，逐条）
 
-> 规则：T2 只能"迁移断言以匹配 §1–§8 各冻结契约"，**不得放宽为恒真断言、不得删除测试、不得跳过（`#[ignore]`）**；R6 例外（env 门控须以 `ignored` 如实上报，且不得使整条用例零断言）。
+> 规则：T2 只能"迁移断言以匹配 §1–§8 各冻结契约"，**不得放宽为恒真断言、不得删除测试、不得跳过（`#[ignore]`）**；**R6 例外（r4 口径纠正）**：env 门控 live 段允许跳过，但必须满足 §9.2 R6 的三项实质要求（**自带真断言 + 显式 `[skip]` 打印 + `.dev-team/red-purity-wave18b.json` 登记**）；**不要求** `#[ignore]`，**不要求** harness 出现 `ignored` 计数。
 
 | # | 文件:行 | 现有旧契约断言 | 迁移方向（目标态） | 优先级 |
 |---|---|---|---|---|
@@ -552,7 +677,7 @@ const INGEST_TIMEOUT_MS = 3000; // ≤ NFR external_call_timeout_ms
 | M10 | `tests/unit/telemetry-suppression.spec.ts:10-21` | 断言 vitest 下 `fetch`/`safeInvoke` 零调用（由 test-mode 守卫达成，**对 C5 空洞**，§5.4） | **不得删改既有断言**；**新增** C5 变异敏感断言：`INGEST_URL === ""` + `CLIENT_TOKEN === ""`（未设 env），并按 §5.4 第 2 条做源码静态断言（无 64-hex、无端点硬编码回落） | P0（C5 验收核心） |
 | M11 | `tests/acceptance/ponysentry_telemetry_test.rs`（孤儿死文件，F6/R2） | 不被 cargo 编译、不被 vitest 收集；承载旧契约（`:182` `assert!(default_cfg.enabled)`） | 先按 M4/M5 迁移其断言（消除陈旧契约误导源）；再登记 **dead-file backlog**（删除 或 纳入真实编译目标，待 Lead 决策）。**不得**以"反正不编译"为由跳过迁移 | P1 |
 | M12 | `crates/pony-agent-core/tests/ponysentry_manual_upload_test.rs:137-140`（`test_upload_session_trace_contract_shape`） | **零断言**恒真空通过（R5 / contract finding#1） | 补**真断言**（≥1 条可证伪）：断言控制面入口的存在性/签名/行为契约；**禁止**继续以注释充当测试体 | P0（r3 新增） |
-| M13 | `crates/pony-agent-core/tests/ponysentry_manual_upload_test.rs:151-181`（`test_upload_trace_to_live_sentry_contract`） | `:155-181` 三个 early `return` 静默 skip，却以 `test ... ok` 上报（R6 / contract finding#2） | 拆为**两段**：①"恒跑真断言"段（无 env 依赖，必须有真断言）；②"env 门控 live"段（`#[ignore]` 或显式 env 门控，未满足条件时以 `ignored` 如实上报，**不得**报 `ok`）。两段均不得零断言通过 | P0（r3 新增） |
+| M13 | `crates/pony-agent-core/tests/ponysentry_manual_upload_test.rs:151-181`（`test_upload_trace_to_live_sentry_contract`） | 原以三个 early `return` 静默 skip，却以 `test ... ok` 上报（R6 / contract finding#2） | 拆为**两段**：①"恒跑真断言"段（无 env 依赖，必须有真断言）；②"env 门控 live"段。**r4 口径**：live 段允许跳过，但 skip 分支必须 **自带真断言 + 打印显式 `[skip]` 标记 + 在 `.dev-team/red-purity-wave18b.json` 登记 harness 级跳过**；**不要求** `#[ignore]`，**不要求** harness `ignored` 计数。两段均不得零断言通过 | **CLOSED（实质闭合）**——现行实现已满足三项（见 §9.2 R6） |
 
 **迁移验收硬要求（T2）**：
 1. `npm test`（含 `tests/check-secrets.spec.ts`、`tests/unit/telemetry-suppression.spec.ts` + C5/C8 新增断言）Exit 0；
@@ -567,9 +692,9 @@ const INGEST_TIMEOUT_MS = 3000; // ≤ NFR external_call_timeout_ms
 
 ### 12.1 冻结签名
 
-- 本矩阵为 wave-18 的**唯一契约基线**（当前 revision **`wave18-r3`**）。
-- 任何偏离（新增豁免、改变规则长度窗口、改 `client.rs` 早退、改导出面、改 C5 守卫位置、改 C7 窗口方向/宽度、改 C8 超时上限）都必须走 Lead 裁定并升 revision，不得由实施者就地放宽。
-- 配套产物：`.dev-team/nfr-baseline-wave18.json`、`.dev-team/nfr-baseline.schema.json`（additive-only）、`.dev-team/wave18-tooling-deviation.md`、`.dev-team/wave18b-adjudication.md`（12 项 findings 逐条裁定）。
+- 本矩阵为 wave-18 的**唯一契约基线**（当前 revision **`wave18-r4`**）。
+- 任何偏离（新增豁免、改变规则长度窗口、改 `client.rs` 早退、改导出面、改 C5 守卫位置、改 C7 窗口方向/宽度、改 C8 超时上限、改 C4 的位置锚定/位置敏感语义）都必须走 Lead 裁定并升 revision，不得由实施者就地放宽。
+- 配套产物：`.dev-team/nfr-baseline-wave18.json`、`.dev-team/nfr-baseline.schema.json`（additive-only）、`.dev-team/wave18-tooling-deviation.md`、`.dev-team/wave18b-adjudication.md`（12 项 findings 逐条裁定）、`.dev-team/wave18c-adjudication.md`（r4 的 6 项 findings 逐条裁定）。
 
 ### 12.2 revision 变更记录
 
@@ -578,7 +703,8 @@ const INGEST_TIMEOUT_MS = 3000; // ≤ NFR external_call_timeout_ms
 | `wave18-r1` | 冻结 C1（`default()`）、C2（`from_env()`）、C3（`client.rs` 四处早退沿用）、C4（`check-secrets.mjs` 裸 64-hex 规则）；旧契约迁移清单 M1–M9（r1 编号 §7）；§0 证据 E1–E8 | task-1 初始交付 |
 | `wave18-r2` | **新增 C5（§5，前端 `telemetry.ts` 默认零 egress）**；F1 由"待裁定"改判为"已纳入本波 → C5"；新增 §5.4 非空洞测试要求；新增 F5/F6 与裁定登记 R1/R2/R3；迁移清单新增 M10/M11；新增证据 E9–E12 | **Lead 裁定（wave18-r2）**：F1 第三处泄漏点纳入本波并冻结为 C5；登记 32-hex backlog 与孤儿死文件事实；同步 task-3 已生效要求 |
 | `wave18-r3` | ① **C2 修订**：`PONYSENTRY_ENABLED` set-but-empty/纯空白 => `false`（§2，断言 7/8/9 + 冻结实现形态）；② **C4 三条修订**：R1 豁免 1/2/3 加 `credWord` 守卫、R2 豁免 2/3 位置锚定只豁免该 hex、R3 按行记忆化消除二次方（§4.2/§4.3/§4.6 + §4.7 的 G1–G6 反例用例）；③ **新增 C6**（`.env.example` 部署配置模板，§6）、**C7**（既有私钥规则整文件失明修复 + 反熵边界理由，§7）、**C8**（前端 ingest 硬超时 ≤3000ms，§8）；④ 裁定登记 R4（WAIVE + DEBT-W18-R4）/R5/R6/R7，R1/R2/R3 保留（§9）；⑤ 迁移清单新增 M12/M13 并强化验收（§11）；⑥ 原 §6–§9 顺延为 §9–§12 | **Lead 裁定（wave18-r3）**：4 路 L3/L3-P 审查共 12 项 findings，FIX 8 / WAIVE 1（R4）/ 既有缺陷纳入 1（R7）/ 登记 3（R1–R3） |
-| — | **C4 长度窗口（严格 64 位）与导出面在 r3 中未做修改** | R1：零误报为绑定约束，不得为覆盖 32-hex 而放宽长度窗口；导出面兼容是 §4.1 硬约束 |
+| `wave18-r4` | ① **C4 四条精确化**：R1′ credWord 改**位置敏感**（消除 r3 新误报回归）、R2′ 豁免 2/3 改**位置锚定**（槽位下标，取代值锚定）、R3′ 消除 `isSafe` 内每 match 的 `context.split("\n")`（真达 O(行长)，判据 5MB ≤2000ms / 10MB ≤5000ms）、R4 凭证语义词正则扩面（空格/驼峰/连字符/裸 `token`）（§4.2/§4.3/§4.6/§4.7/§4.8）；② 调用侧新增 `match.index` 与 `lineNum` 实参（§7.3 约束 5）；③ **§4.5 过头表述纠正**：逐条列出 B1–B5 已知边界，不再声称缺口已全部关闭；④ **R6 口径纠正**（以实质为准，不要求 `#[ignore]`/`ignored` 计数）（§9.2 R6 + §11 M13 → CLOSED 实质闭合）；⑤ **R7 二次修正**（表述须与改后 grep 命中集合逐项一致 + 三条可复现验收判据）（§9.2 R7）；⑥ NFR 基线补 `wave18b_scanner_linearity` 新判据（5MB/10MB 上限） | **Lead 裁定（wave18-r4）**：闭合复审 `review-wave18b-scanner.json`（4 项，含 1 项新误报回归）与 `review-wave18b-contract.json`（2 项，含看板第二次假断言），共 6 项 findings，逐条裁定见 `.dev-team/wave18c-adjudication.md` |
+| — | **C4 长度窗口（严格 64 位）、导出面、C2/C5/C6/C7/C8 的语义在 r4 中未做修改** | §9.2 R1：零误报为绑定约束，不得为覆盖 32-hex 而放宽长度窗口；导出面兼容是 §4.1 硬约束；r4 仅精确化 C4 的位置/性能语义并纠正 R6/R7 口径 |
 
 ### 12.3 C7 反熵边界裁定（Lead 裁定原文要点，独立登记）
 
@@ -590,3 +716,15 @@ const INGEST_TIMEOUT_MS = 3000; // ≤ NFR external_call_timeout_ms
 - **最小必要闭包**：改动收敛于 `:162` 一处调用点的上下文实参语义（整文件 → 有界窗口）+ 2 条规则对 context 的读取方式；不改导出面、不改规则条数、不改 CLI、不改既有 6 条前缀规则。
 - **对"1 行级"的如实修正**：字面删除 `|| isSafe(v, content)` 会破坏 `tests/check-secrets.spec.ts:83-92`（mock 私钥标记位于 BEGIN 上一行），实测 `isSafe(BEGIN, BEGIN) === false` → 既有断言由 0 违规变 1 违规。故采用**有界窗口**（当前行 + 最多 3 行紧邻上文），其为满足"不得破坏既有 spec"前提下的最小**必要**闭包（详见 §7.2 与 §7.3）。
 - **反熵声明**：本项不夹带任何与"门禁失明"无因果关联的重构；`Private Key Block::isSafe` 本体逐字保留，仅其**上下文来源**被收窄。
+
+### 12.4 C4-R1′ 对 Lead 裁定的一处**显式细化**（须 Lead 复审确认）
+
+- **Lead 裁定的字面语义**：「credWord 判定必须改为位置敏感 —— 仅当凭证语义词出现在该 64-hex **之前**（用 `match.index` 比较）时才判违规」。
+- **字面语义下的残余误报（本特派员实测，r3 现状）**：以下 2 例中凭证语义词确实位于 hex **之前**，但整行是**合法摘要收据**，按字面语义仍会误报：
+  - FP2 `{"file":"secrets.json","sha256":"<H>"}`（`secrets` 在 hex 之前）
+  - FP3 `- 密钥指纹(secret fingerprint): <H>`（`secret` 在 hex 之前）
+- **本波冻结的细化**：R1′ 判据取 `credWord 在 hex 之前` **且** `良性摘要关键词不在 hex 之前`；即 `if (facts.credIdx < matchIndex && !(facts.benignIdx < matchIndex)) return false;`。
+  - 效果：FP1–FP6 **全部** 0 命中（含 FP2/FP3），G1–G16 全部仍 ≥1 命中（实测见 §4.4/§4.7/§4.8）。
+  - 依据：Lead 在同一裁定中把「消除新误报回归」与「零误报为**绑定约束**（跑在 `npm run verify` 上）」并列；字面语义无法同时满足该绑定约束（FP2/FP3 仍误报），故按**裁定目标**作最小细化。
+- **代价（已登记，不隐藏）**：该细化引入 §4.5 B1 的窄口漏报（同一行既有良性关键词在前、又有具名凭证在前时，后一个 hex 被豁免 1 放行）。
+- **复审请求**：若 Lead 认为该细化超出裁定边界，可回退为字面语义（`credIdx < matchIndex` 即违规），但需接受 FP2/FP3 残余误报 —— 与"零误报为绑定约束"冲突，故本特派员**建议维持细化**。

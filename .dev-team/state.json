@@ -461,7 +461,7 @@
       "status": "completed"
     },
     "18": {
-      "contract": "wave18-r2（.dev-team/contract-matrix-wave18.md）：C1 default() token=None+enabled=false；C2 from_env() token 仅 env、enabled 未设=>false；C3 client.rs 四处早退沿用不改；C4 check-secrets.mjs 追加严格 64 位裸 hex 规则（零误报绑定）；C5 前端 INGEST_URL/CLIENT_TOKEN 仅 env、任一为空即 early-return 零 fetch",
+      "contract": "wave18-r4",
       "task_classification": "C",
       "grading_basis": "跨系统（Rust core + Vue 前端 + Node 门禁脚本）+ 安全敏感（凭据泄漏）+ 协议/契约变更；命中机械分级触发：含外部网络 IO（reqwest / fetch）",
       "baseline_commit": "69c7b0a",
@@ -491,7 +491,8 @@
         "task-3": "executor: 实施凭证契约 + 扫描器规则 + 看板修正 — pending",
         "task-4": "protocol: 契约升版 wave18-r3（C2/C4 修订 + C6/C7/C8 新增 + 12 项裁定）— completed",
         "task-5": "test: wave-18b 红相扩展（26 红相 + 变异收据）— completed",
-        "task-6": "executor: C2/C4/C6/C7/C8 修复 + R7 — completed"
+        "task-6": "executor: C2/C4/C6/C7/C8 修复 + R7 — completed",
+        "task-7": "protocol: 契约升版 wave18-r4（C4 四条精确化 + R6 口径纠正 + R7 二次修正）— completed"
       },
       "gates": {
         "red_phase": {
@@ -579,7 +580,12 @@
         "tests_frozen": "git diff d3225c7..139cbba -- tests/ crates/pony-agent-core/tests/ 为空",
         "perf": "Lead 独立探针 1098889B 单行 15000 hits = 293ms（修复前 133.4s，455x）",
         "gate_selfcatch": "pre-commit 新规则拦截 review-l3-scanner-wave18.json 内 3 处真实 token（补盲生效物理凭证，已脱敏）"
-      }
+      },
+      "lead_adjudications": [
+        "r4 §12.4 C4-R1′ 细化语义 credIdx<matchIndex && !(benignIdx<matchIndex) 已批准（字面语义会对 {\"file\":\"secrets.json\",\"sha256\":\"<H>\"} 误报）",
+        "R7 验收改为集合一致性判据，禁止写死命中数字（实测 8->10 时变）",
+        "R6 口径以实质为准：skip 分支真断言 + 显式 [skip] + JSON 登记，不要求 #[ignore]"
+      ]
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",

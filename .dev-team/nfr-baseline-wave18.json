@@ -98,6 +98,14 @@
     "observed_ratio": 105,
     "acceptance_max_ms_single_line_4000_hex": 100,
     "review_observed_1mb_single_line_ms": 133412,
-    "evidence": "review-l3-scanner-wave18.json finding#4 与 /tmp/w18b-probe.mjs（单行 4000×64hex 259999B = 2072.4 ms vs 拆行 19.7 ms，比值 105×）；本波冻结为 C4-R3（contract-matrix-wave18.md §4.6）"
+    "per_match_context_split_forbidden": true,
+    "line_cache_key": "lineNumber",
+    "acceptance_max_ms_single_line_5mb": 2000,
+    "acceptance_max_ms_single_line_10mb": 5000,
+    "r3_observed_1mb_single_line_ms": 244,
+    "r3_observed_5mb_single_line_ms": 27838,
+    "r4_candidate_observed_5mb_single_line_ms": 100,
+    "r4_candidate_observed_10mb_single_line_ms": 161,
+    "evidence": "review-l3-scanner-wave18.json finding#4 + review-wave18b-scanner.json finding#3（r3 现行实现仍为二次方：1MB=244.2ms / 2.6MB=2560.0ms / 5MB=27837.9ms，本特派员独立复现）与 /tmp/w18c-proto-probe.mjs（r4 候选：5MB=99.6ms / 10MB=161.1ms，判据 5MB<=2000ms、10MB<=5000ms，Exit 0）；本波冻结为 C4-R3'（contract-matrix-wave18.md §4.6）"
   }
 }
