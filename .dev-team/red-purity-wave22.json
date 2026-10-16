@@ -1,0 +1,10 @@
+{
+  "task_id": "task-21",
+  "status": "completed_red_phase_confirmed",
+  "artifacts": [
+    "crates/pony-agent-core/tests/wave22_execution_invariants_contract.rs"
+  ],
+  "evidence": [
+    "cargo test -p pony-agent-core --test wave22_execution_invariants_contract -> FAILED (assertion `left == right` failed: Unobserved file edit must be rejected with fs_not_observed, left: Some('control_outcome_pending'), right: Some('fs_not_observed'))"
+  ]
+}

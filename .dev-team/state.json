@@ -1,6 +1,6 @@
 {
   "wave": 18,
-  "status": "wave21_closed",
+  "status": "all_waves_completed",
   "task_classification": "C",
   "reason": "硬编码 PonySentry 凭证清理（3 处泄漏面）+ 密钥扫描门禁补盲（裸 64-hex 失明）+ 前端默认零 egress 契约 + PA-110 看板治理失真修正",
   "baseline_commit": "69c7b0a",
@@ -586,6 +586,14 @@
     "21": {
       "status": "completed",
       "desc": "激活 WorkspaceHotloader 注入 AGENTS.md 宪法，实装 StdioMcpTransport JSON-RPC"
+    },
+    "22": {
+      "status": "completed",
+      "desc": "读前写硬不变量 fs_not_observed 门禁落地"
+    },
+    "23": {
+      "status": "completed",
+      "desc": "统一 PlanStore 单例绑定消除脑裂"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",

@@ -1886,7 +1886,19 @@ impl ToolRouter {
             }
         };
 
+        // PA-076 wave-22 读前写物理硬不变量：
+        // 若环境未开启遗留宽松模式（PONY_ALLOW_UNOBSERVED_EDIT），任何编辑操作必须校验 expected_hash，
+        // 或者如果既没有 expected_hash 且环境要求观察，则必须通过 fs_not_observed 阻断。
         let expected_hash = call.arguments.get("expectedHash").or_else(|| call.arguments.get("expected_hash")).and_then(Value::as_str);
+        if expected_hash.is_none() && std::env::var("PONY_ALLOW_UNOBSERVED_EDIT").map(|v| v != "1" && v != "true").unwrap_or(true) {
+            return error_result(
+                TOOL_WORKSPACE_EDIT_FILE,
+                "fs_not_observed",
+                format!("文件 {} 尚未被观察（未传入 expectedHash），禁止直接编辑覆盖。", self.display_workspace_relative(&target)),
+                Some("请先调用 workspace_read_file 读取文件并传入预期的内容 hash，确保在最新版本上进行编辑。".to_string()),
+            );
+        }
+
         if let Some(expected) = expected_hash {
             let actual_hash = compute_content_sha256(&original);
             if actual_hash != expected {
