@@ -1,0 +1,32 @@
+### E2E BASELINE 2026-10-16T12:43:34+08:00
+        at /home/dm/pony-agent/tests/e2e/checkpoint-branch.spec.ts:500:28
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results/playwright/checkpoint-branch-E2E-CHECKPOINT-003-撤回按钮在有草稿时禁用-chromium-retry1/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  8 failed
+    [chromium] › tests/e2e/browser-preview.spec.ts:26:1 › P0-E2E-001 启动后展示主工作台与浏览器预览 provider ──────
+    [chromium] › tests/e2e/browser-preview.spec.ts:34:1 › P0-E2E-002 浏览器预览模式可完成流式回放并落入历史 ───────────
+    [chromium] › tests/e2e/browser-preview.spec.ts:46:1 › P0-E2E-003 浏览器预览模式提交后保留可解释的 fallback 会话 ──
+    [chromium] › tests/e2e/browser-preview.spec.ts:56:1 › P0-E2E-004 页面刷新后会恢复已持久化会话 ────────────────
+    [chromium] › tests/e2e/browser-preview.spec.ts:70:1 › P0-E2E-005 可新建空白会话并切回历史会话 ────────────────
+    [chromium] › tests/e2e/browser-preview.spec.ts:93:1 › P1-E2E-001 浏览器预览停止后的会话在刷新后仍保持可解释状态 ───────
+    [chromium] › tests/e2e/checkpoint-branch.spec.ts:294:1 › E2E-CHECKPOINT-001 空工作台下撤回按钮禁用 ────────
+    [chromium] › tests/e2e/checkpoint-branch.spec.ts:425:1 › E2E-CHECKPOINT-003 撤回按钮在有草稿时禁用 ────────
+  12 passed (4.6m)
+E2E_EXIT=1

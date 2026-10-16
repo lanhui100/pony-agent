@@ -1,0 +1,47 @@
+### BASELINE 2026-10-16T12:29:47+08:00 commit=5d7d691
+--- npm run typecheck ---
+(node:2031384) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+TYPECHECK_EXIT=0
+--- npx vitest run ---
+     ✓ renders assistant messages full width and removes user or assistant token footer  352ms
+     ✓ renders pending assistant content as accumulated text and highlights only the latest delta  711ms
+     ✓ shows a jumping-dot waiting state before the first assistant signal arrives  448ms
+     ✓ keeps a single streaming flow while pending plain text grows  753ms
+     ✓ switches from streaming text to final plain text when assistant completes  625ms
+     ✓ does not auto-scroll again when a pending assistant flips to final plain text without new content  669ms
+     ✓ cleans up stale streaming state when assistant message ids change without changing message count  465ms
+     ✓ requests scroll follow-up when streaming content grows  566ms
+     ✓ re-arms auto-follow when submitting a new turn after user scrolls away  883ms
+     ✓ scrolls a newly sent user message into the timeline instead of only locking the bottom anchor  803ms
+     ✓ keeps auto-follow armed across small streaming content updates  989ms
+     ✓ keeps user scroll override while streaming updates continue  498ms
+     ✓ resumes auto-follow after idle only when new streamed content arrives  319ms
+     ✓ keeps bottom lock through resize-driven streaming growth  320ms
+     ✓ does not reverse-scroll when streaming resize briefly reports a smaller height  372ms
+     ✓ replays deferred resize follow-up after a queued auto-follow completes  584ms
+     ✓ uses smooth follow for stream deltas and auto for resize compensation  463ms
+     ✓ keeps auto-follow active across intermediate smooth-scroll events  554ms
+     ✓ does not reverse-scroll when a streaming delta temporarily lowers the anchor target  598ms
+     ✓ does not start a terminal smooth follow when assistant streaming completes  514ms
+     ✓ shows scroll-to-latest button only when latest user is below viewport  507ms
+     ✓ keeps streaming assistant text in one streaming flow while content grows  556ms
+     ✓ skips auto-scroll via streaming text updates when user has scrolled away  416ms
+     ✓ renders assistant tone, reasoning blocks, and tool status badges  493ms
+     ✓ uses the localized tool name instead of its execution detail  307ms
+     ✓ uses a single agent stack gap for reasoning, tools, and content spacing  330ms
+     ✓ orders assistant content and tool calls by their turn timeline instead of pinning tools above content  300ms
+     ✓ uses trace timeline sequence when it is available for agent event ordering  366ms
+     ✓ interleaves model reasoning, assistant content, and tool calls by trace sequence  362ms
+     ✓ matches repeated same-name tools to distinct trace entries when activity ids are unavailable  351ms
+     ✓ renders tool results only as tool cards, never as assistant conversation body (multi-hop return_result)  323ms
+     ✓ restores the initial empty state when rolling back the first turn  747ms
+     ✓ restores the initial empty state when the first checkpoint has no explicit parent node  670ms
+     ✓ overwrites existing draft text when rollback completes  632ms
+
+ Test Files  82 passed (82)
+      Tests  866 passed | 10 skipped (876)
+   Start at  12:30:02
+   Duration  39.06s (transform 75.28s, setup 0ms, import 198.65s, tests 121.70s, environment 128.47s)
+
+VITEST_EXIT=0
