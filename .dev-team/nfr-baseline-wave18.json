@@ -1,0 +1,76 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "lock_acquisition_timeout_ms": 2000,
+  "deadlock_watchdog_timeout_ms": 5000,
+  "lock_forbidden_calls": [
+    "resolve_graph_run_for_retrieval",
+    "load_graph_run",
+    "load_execution_checkpoint",
+    "load_active_graph_run_for_session"
+  ],
+  "logging": {
+    "format": "json",
+    "trace_id_required": true
+  },
+  "logging_scope": "new_structured_logging_surface_only",
+  "logging_legacy_eprintln_exempt": true,
+  "logging_debt_ref": "PA-119",
+  "logging_eprintln_exempt_scope": "existing_style_non_json_lock_poison_recovery_diagnostics",
+  "logging_eprintln_exempt_covers_new_lines": 1,
+  "logging_compliance_claimed": false,
+  "resource_release": [
+    "bounded_queue",
+    "max_queue_capacity_1024",
+    "fire_and_forget",
+    "worker_thread_shutdown",
+    "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
+    "wave9_job_handle_close_on_terminate_success",
+    "wave9_suspended_process_resume_fail_closed_cleanup"
+  ],
+  "wave18_secret_scan_gate": {
+    "applicable": true,
+    "rule_id": "bare-64-hex-high-entropy",
+    "match_min_hex_len": 64,
+    "match_max_hex_len": 64,
+    "must_match_64_hex_literal": true,
+    "repo_scanned_files": 1408,
+    "true_positive_sites": 4,
+    "false_positive_budget": 0,
+    "observed_false_positives": 0,
+    "git_sha_exempt_lengths": [7, 8, 12, 40],
+    "sha256_context_exempt": true,
+    "existing_spec_assertions_preserved": 8,
+    "exports_preserved": [
+      "SECRET_RULES",
+      "BLOCKED_FILE_PATTERNS",
+      "isSafeFilename",
+      "checkBlockedFilename",
+      "scanTextContent",
+      "runChecks"
+    ],
+    "known_limitation": "行级上下文豁免：同行含 sha256/checksum/digest/integrity/hash/fingerprint/computedHash/pristine_proof 词、或 sha256sum 输出格式、或 Markdown 表格独立摘要单元格、或反引号独占包裹且同行无凭证语义词的 64-hex，按非凭证摘要豁免（当前树 6 处 .dev-team 收据行依赖第 4 项）；豁免为行级判定，不构成整文件放行。"
+  },
+  "wave18_egress_default_disabled": {
+    "applicable": true,
+    "default_client_token_is_none": true,
+    "default_enabled": false,
+    "token_env_only_source": "PONYSENTRY_CLIENT_TOKEN",
+    "hardcoded_token_fallback_forbidden": true,
+    "enabled_env_default": false,
+    "enabled_truthy_requires_explicit_non_false": true,
+    "early_return_sites": [
+      "client.rs:91",
+      "client.rs:125",
+      "client.rs:175",
+      "client.rs:193"
+    ],
+    "early_return_sites_unchanged": true
+  }
+}

@@ -1,0 +1,254 @@
+[
+  {
+    "name": "default_config_is_fail_closed",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate.rs",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "cargo test --test ponysentry_credential_gate => FAILED; panicked at ponysentry_credential_gate.rs:115: C1：default().client_token 必须为 None（禁止任何硬编码凭证回落），实测 len=Some(64)"
+  },
+  {
+    "name": "from_env_without_credentials_is_fail_closed",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate.rs",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_credential_gate.rs:142: C2-1：PONYSENTRY_CLIENT_TOKEN 未设时 client_token 必须为 None（禁止回落），实测 len=Some(64)"
+  },
+  {
+    "name": "from_env_blank_token_is_treated_as_unset",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate.rs",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_credential_gate.rs:165: C2-2：纯空白 PONYSENTRY_CLIENT_TOKEN 必须等价于未设 ⇒ None，实测 len=Some(64)"
+  },
+  {
+    "name": "from_env_enabled_resolution_matrix",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate.rs",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_credential_gate.rs:198: C2-3：PONYSENTRY_ENABLED 未设时必须解析为 false"
+  },
+  {
+    "name": "config_source_contains_no_bare_64_hex_literal",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate.rs",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_credential_gate.rs:246: C1-4：config.rs 不得残留任何裸 64-hex 凭证字面量，命中行号 [16, 34]"
+  },
+  {
+    "name": "default_config_yields_zero_egress_and_never_blocks",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate.rs",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_credential_gate.rs:284: F4：default() 必须 enabled=false ⇒ 零 egress，但 capture_* 仍向 127.0.0.1:38229 发起了连接（本地回环出口探针实测 TCP 连接，非推断）"
+  },
+  {
+    "name": "wave18_leak_sites_contain_no_bare_64_hex_literal",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate_adversarial.rs",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_credential_gate_adversarial.rs:94: wave-18 凭证清理未闭环：/home/dm/pony-agent/crates/pony-agent-core/src/agent/ponysentry/config.rs 仍含裸 64-hex 字面量，命中行号 [16, 34]"
+  },
+  {
+    "name": "malformed_env_values_never_resurrect_credential",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate_adversarial.rs",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_credential_gate_adversarial.rs:115: 畸形输入 PONYSENTRY_CLIENT_TOKEN=\"\" 属空白族，必须视为未设 ⇒ None，实测 len=Some(64)"
+  },
+  {
+    "name": "concurrent_env_churn_never_panics_and_stays_fail_closed",
+    "file": "crates/pony-agent-core/tests/ponysentry_credential_gate_adversarial.rs",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "8 个线程（Barrier 同步，8x64 轮并发读写 PONYSENTRY_*）全部命中 ponysentry_credential_gate_adversarial.rs:196: 并发竞态下 client_token 出现非注入来源取值（疑似硬编码回落），len=64；join 处 :210 冒泡 Any { .. }"
+  },
+  {
+    "name": "test_config_contract (旧契约迁移 M1/M2/M3)",
+    "file": "crates/pony-agent-core/tests/ponysentry_telemetry_test.rs",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_telemetry_test.rs:216: C1：default().client_token 必须为 None（硬编码凭证已清除），实测 len=Some(64)"
+  },
+  {
+    "name": "test_breadcrumb_ring_buffer_limit (F4 强化真断言)",
+    "file": "crates/pony-agent-core/tests/ponysentry_telemetry_test.rs",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "panicked at ponysentry_telemetry_test.rs:338: F4：PonySentryConfig::default() 必须为 disabled（fail-closed 默认零 egress）——替代原先“只验证不 panic”的恒真空断言"
+  },
+  {
+    "name": "族1 导出值：未设 VITE_PONYSENTRY_CLIENT_TOKEN 时 CLIENT_TOKEN === \"\"",
+    "file": "tests/telemetry-credential.spec.ts",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected false to be true // Object.is equality（CLIENT_TOKEN === \"\" 为假，实测长度 64；断言只暴露长度不回显凭证本体）"
+  },
+  {
+    "name": "族1 导出值：未设 VITE_PONYSENTRY_INGEST_URL 时 INGEST_URL === \"\"",
+    "file": "tests/telemetry-credential.spec.ts",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected false to be true // Object.is equality（INGEST_URL 回落到硬编码生产端点，长度 28）"
+  },
+  {
+    "name": "族2 静态：src/lib/telemetry.ts 不得含任何裸 64-hex 字面量",
+    "file": "tests/telemetry-credential.spec.ts",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected [ 15 ] to deeply equal []（第 15 行为裸 64-hex 字面量；只回显行号）"
+  },
+  {
+    "name": "族2 静态：CLIENT_TOKEN / INGEST_URL 声明不得含非空字面量回落，也不得硬编码端点",
+    "file": "tests/telemetry-credential.spec.ts",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected true to be false // Object.is equality（hasLiteralFallback(tokenDecl)=true）"
+  },
+  {
+    "name": "族2 静态：reportError 必须在 fetch 之前具备 INGEST_URL/CLIENT_TOKEN 的 early-return 守卫",
+    "file": "tests/telemetry-credential.spec.ts",
+    "layer": "L2-T",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected false to be true // Object.is equality（现有 reportError 无 C5 early-return 守卫，仅 fetch 前存在 if (CLIENT_TOKEN) 头注入分支）"
+  },
+  {
+    "name": "族3 守卫直测：未设 token 时不得发出任何 ingest fetch（零 egress，调用次数 0）",
+    "file": "tests/telemetry-credential.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected \"vi.fn()\" to be called +0 times, but got 1 times（已绕开 test-mode 静默守卫：MODE=production/TEST=\"\"/VITEST=\"\"，故非空洞断言）；同用例另断言 carriesClientTokenHeader(fetchMock)=false（实测该次 fetch 携带 X-Client-Token）"
+  },
+  {
+    "name": "族3 守卫直测：未设 ingest url 时不得发出任何 ingest fetch（C5，调用次数 0）",
+    "file": "tests/telemetry-credential.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected \"vi.fn()\" to be called +0 times, but got 1 times（INGEST_URL 回落到硬编码端点后仍发出未鉴权 ingest 请求）；同用例另断言 carriesClientTokenHeader(fetchMock)=false"
+  },
+  {
+    "name": "① 命中：裸 64-hex 小写凭证（并给出脱敏掩码）",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: AssertionError: expected +0 to be 1 // Object.is equality（补盲前 SECRET_RULES 无裸 hex 规则，真实泄漏完全失明）"
+  },
+  {
+    "name": "① 命中：大写与混合大小写 64-hex",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected +0 to be 1 // Object.is equality（两处断言均 0 命中）"
+  },
+  {
+    "name": "① 命中：hex 夹在注释 / JSON / 下划线前缀标识符中",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected +0 to be 1 // Object.is equality（注释 / JSON / token_<hex> 三种上下文均漏报）"
+  },
+  {
+    "name": "② 兼容：SECRET_RULES 导出面保持既有 7 条规则并追加 64-hex 规则",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "vitest FAIL: expected false to be true // Object.is equality（names 中无 64-hex 规则，规则数为 7）"
+  },
+  {
+    "name": "C5 §5.4 mutation-sensitivity receipt（隔离副本变异，主工作区零改动）",
+    "file": "tests/telemetry-credential.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "HARNESS",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": {
+      "isolation": "git archive HEAD | tar -x -C /tmp/w18-mut + symlink node_modules；主工作区 src/lib/telemetry.ts 的 git hash-object 与 HEAD:src/lib/telemetry.ts 均为 a9e1fb086a3e4e98fcf3882e8b69378f60a1fea8（零残留）",
+      "mutation_A": {
+        "mutation": "恢复硬编码回落（= git HEAD 版 telemetry.ts：INGEST_URL 回落生产端点、CLIENT_TOKEN 回落裸 64-hex）",
+        "cmd": "cd /tmp/w18-mut && npx vitest run tests/telemetry-credential.spec.ts",
+        "exit": 1,
+        "result": "Tests 7 failed | 1 passed (8)",
+        "red_families": [
+          "族1 CLIENT_TOKEN === \"\"",
+          "族1 INGEST_URL === \"\"",
+          "族2 无裸 64-hex 字面量",
+          "族2 无非空字面量回落/无硬编码端点",
+          "族2 early-return 守卫存在",
+          "族3 未设 token → 0 fetch（实测 1 次）",
+          "族3 未设 endpoint → 0 fetch（实测 1 次）"
+        ],
+        "control_green": "族3 反空洞对照（显式注入 → 恰好 1 次 fetch 且带 X-Client-Token）通过，证明零 fetch 断言非整体禁用上报所致的空洞断言"
+      },
+      "control_B": {
+        "mutation": "无变异：把 telemetry.ts 改为 C5 合规实现（INGEST_URL/CLIENT_TOKEN 仅取 env、未设即 \"\"；reportError 内 fetch 之前 early-return）",
+        "cmd": "cd /tmp/w18-mut && npx vitest run tests/telemetry-credential.spec.ts",
+        "exit": 0,
+        "result": "Tests 8 passed (8)",
+        "meaning": "三族断言在 C5 合规实现上全绿 ⇒ A/C 的变红由硬编码回落因果导致，而非断言恒假"
+      },
+      "mutation_C": {
+        "mutation": "在 C5 合规实现基线上重新注入硬编码回落（仅恢复 INGEST_URL/CLIENT_TOKEN 的非空字面量回落，守卫保持不变）",
+        "cmd": "cd /tmp/w18-mut && npx vitest run tests/telemetry-credential.spec.ts",
+        "exit": 1,
+        "result": "Tests 6 failed | 2 passed (8)",
+        "red_families": [
+          "族1 CLIENT_TOKEN === \"\"",
+          "族1 INGEST_URL === \"\"",
+          "族2 无裸 64-hex 字面量",
+          "族2 无非空字面量回落/无硬编码端点",
+          "族3 未设 token → 0 fetch（实测 1 次）",
+          "族3 未设 endpoint → 0 fetch（实测 1 次）"
+        ],
+        "still_green_explained": "族2 early-return 守卫存在 / 族3 反空洞对照 仍绿 —— 该变异未触及守卫与正向链路，符合预期（证明两组断言各自独立敏感）"
+      },
+      "logs": [
+        "/tmp/w18-mut-A.log",
+        "/tmp/w18-mut-B.log",
+        "/tmp/w18-mut-C.log"
+      ]
+    }
+  }
+]

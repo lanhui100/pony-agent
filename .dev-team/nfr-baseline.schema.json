@@ -94,6 +94,85 @@
     "resource_release": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "wave18_secret_scan_gate": {
+      "type": "object",
+      "description": "wave-18 新增（additive-only，未进入顶层 required）：scripts/check-secrets.mjs 裸 64-hex 高熵规则的机械承诺，补充既有前缀规则盲区。",
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "rule_id": { "type": "string", "minLength": 1 },
+        "match_min_hex_len": { "type": "integer", "const": 64 },
+        "match_max_hex_len": { "type": "integer", "const": 64 },
+        "must_match_64_hex_literal": { "type": "boolean", "const": true },
+        "repo_scanned_files": { "type": "integer", "minimum": 1 },
+        "true_positive_sites": { "type": "integer", "minimum": 1 },
+        "false_positive_budget": { "type": "integer", "const": 0 },
+        "observed_false_positives": { "type": "integer", "const": 0 },
+        "git_sha_exempt_lengths": {
+          "type": "array",
+          "minItems": 4,
+          "uniqueItems": true,
+          "items": { "type": "integer" }
+        },
+        "sha256_context_exempt": { "type": "boolean" },
+        "existing_spec_assertions_preserved": { "type": "integer", "minimum": 1 },
+        "exports_preserved": {
+          "type": "array",
+          "minItems": 6,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "known_limitation": { "type": "string", "minLength": 1 }
+      },
+      "required": [
+        "applicable",
+        "rule_id",
+        "match_min_hex_len",
+        "match_max_hex_len",
+        "must_match_64_hex_literal",
+        "repo_scanned_files",
+        "true_positive_sites",
+        "false_positive_budget",
+        "observed_false_positives",
+        "git_sha_exempt_lengths",
+        "sha256_context_exempt",
+        "existing_spec_assertions_preserved",
+        "exports_preserved",
+        "known_limitation"
+      ],
+      "additionalProperties": false
+    },
+    "wave18_egress_default_disabled": {
+      "type": "object",
+      "description": "wave-18 新增（additive-only，未进入顶层 required）：PonySentry 默认零 egress 的机械承诺（client_token 默认 None、enabled 默认 false、token 仅来自环境变量）。",
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "default_client_token_is_none": { "type": "boolean", "const": true },
+        "default_enabled": { "type": "boolean", "const": false },
+        "token_env_only_source": { "type": "string", "const": "PONYSENTRY_CLIENT_TOKEN" },
+        "hardcoded_token_fallback_forbidden": { "type": "boolean", "const": true },
+        "enabled_env_default": { "type": "boolean", "const": false },
+        "enabled_truthy_requires_explicit_non_false": { "type": "boolean", "const": true },
+        "early_return_sites": {
+          "type": "array",
+          "minItems": 4,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "early_return_sites_unchanged": { "type": "boolean", "const": true }
+      },
+      "required": [
+        "applicable",
+        "default_client_token_is_none",
+        "default_enabled",
+        "token_env_only_source",
+        "hardcoded_token_fallback_forbidden",
+        "enabled_env_default",
+        "enabled_truthy_requires_explicit_non_false",
+        "early_return_sites",
+        "early_return_sites_unchanged"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

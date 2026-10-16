@@ -1,10 +1,10 @@
 {
-  "wave": 15,
-  "status": "completed",
-  "task_classification": "B-lite",
-  "reason": "token 指标口径缺陷修复（输入上下文累加 + 生成速度滞后）",
-  "baseline_commit": "3ba3c02",
-  "symptom": "状态栏与输入框上下文按每次 provider 调用累加（多跳虚高）；输出生成速度仅轮次结束可得或恒为 —",
+  "wave": 18,
+  "status": "in_progress",
+  "task_classification": "C",
+  "reason": "硬编码 PonySentry 凭证清理（3 处泄漏面）+ 密钥扫描门禁补盲（裸 64-hex 失明）+ 前端默认零 egress 契约 + PA-110 看板治理失真修正",
+  "baseline_commit": "69c7b0a",
+  "symptom": "64-hex client token 硬编码于 config.rs:16,34 与 src/lib/telemetry.ts:15；from_env()/前端均回落同一 token；enabled 默认 true；check-secrets.mjs 无裸 hex 规则故门禁对真实泄漏完全失明（runChecks violations=0）",
   "waves": {
     "9": {
       "branches": {
@@ -459,6 +459,78 @@
       },
       "concurrency_note": "共享工作区存在并行 wave-15（token 指标）施工会话，本波次独立编号 wave-16，禁止 git add . / 全局提交；仅定向暂存本波次文件",
       "status": "completed"
+    },
+    "18": {
+      "contract": "wave18-r2（.dev-team/contract-matrix-wave18.md）：C1 default() token=None+enabled=false；C2 from_env() token 仅 env、enabled 未设=>false；C3 client.rs 四处早退沿用不改；C4 check-secrets.mjs 追加严格 64 位裸 hex 规则（零误报绑定）；C5 前端 INGEST_URL/CLIENT_TOKEN 仅 env、任一为空即 early-return 零 fetch",
+      "task_classification": "C",
+      "grading_basis": "跨系统（Rust core + Vue 前端 + Node 门禁脚本）+ 安全敏感（凭据泄漏）+ 协议/契约变更；命中机械分级触发：含外部网络 IO（reqwest / fetch）",
+      "baseline_commit": "69c7b0a",
+      "decision": "Lead 裁定：F1 前端第三处泄漏纳入本波（task-3 增写域 src/lib/telemetry.ts）；C-1 32-hex 不作必中（零误报为绑定约束），登记 backlog；C-2 前端零 egress 升为冻结契约 C5；孤儿死文件 tests/acceptance/ponysentry_telemetry_test.rs 迁移断言但本波不删除",
+      "wave_budget": {
+        "executors": 1,
+        "serial": true,
+        "reason": "DAG 为 task-1→task-2→task-3 严格串行，并行 ROI 判定不满足（红相锚定必须先于实现）"
+      },
+      "branches": {
+        "credential": {
+          "red_commit": null,
+          "green_commit": null,
+          "status": "red_frozen",
+          "quarantine": false
+        }
+      },
+      "tasks": {
+        "task-1": "protocol: 冻结凭证契约 + NFR 基线 + 降级记录 — completed（r1→r2 升版含 C5）",
+        "task-2": "test: 双模态红相 + 旧契约双副本迁移 + F1/C5 前端零 egress — completed（22 红相用例 + 变异敏感收据）",
+        "task-3": "executor: 实施凭证契约 + 扫描器规则 + 看板修正 — pending"
+      },
+      "gates": {
+        "red_phase": {
+          "status": "passed",
+          "anchor_commit": null,
+          "lead_independent_recheck": {
+            "rust": "cargo test -p pony-agent-core --test ponysentry_credential_gate --test ponysentry_credential_gate_adversarial → 1 passed; 6 failed; Exit 101（真实 panic）",
+            "frontend": "npx vitest run tests/telemetry-credential.spec.ts → 7 failed | 1 passed",
+            "write_scope_audit": "git status --porcelain 全部落在 .dev-team/ 与 crates/pony-agent-core/tests/ 与 tests/ 内，零越界",
+            "self_interception": "新测试产物 64-hex 命中 0/0/0"
+          },
+          "mutation_receipt": {
+            "isolation": "git archive HEAD → /tmp/w18-mut + symlink node_modules；主工作区 telemetry.ts hash 与 HEAD 相同（零留痕）",
+            "A_restore_fallback": "exit1 7F/1P",
+            "B_c5_compliant": "exit0 8P",
+            "C_reinject": "exit1 6F/2P"
+          }
+        },
+        "green_phase": {
+          "status": "pending"
+        },
+        "join_barrier": {
+          "status": "pending"
+        },
+        "l3p_five_questions": {
+          "status": "pending"
+        }
+      },
+      "counter": {
+        "wave18xcredentialxL2-T": 0,
+        "wave18xcredentialxL2-AT": 0
+      },
+      "blast_radius_precheck": {
+        "triggered": true,
+        "reasons": [
+          "安全敏感：凭据泄漏面",
+          "涉及外部网络 IO",
+          "变更行数预计 < 100 但跨 Rust/前端/Node 三栈"
+        ],
+        "reviewers_planned": 2
+      },
+      "debt": [
+        "32-hex 短凭证扫描规则待独立评估（长度窗口/豁免口径）",
+        "通用 password/DSN 扫描规则待评估（F2 明文 DSN 已止血但门禁未覆盖）",
+        "tests/acceptance/ponysentry_telemetry_test.rs 孤儿死文件（cargo 不编译 + vitest 不收集）待删除或纳入编译目标",
+        "dev-stub-lint.py / dev-red-purity.py 未随 skill 安装（本波以 JSON 报告替代）"
+      ],
+      "status": "in_progress"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
