@@ -25,6 +25,10 @@
   说明：生产用户面 ask 卡片位于 `src/components/chat/WorkspaceComposer.vue`（选项 `:disabled="askIsBusy"`，:866/913/936/949；ADR-0030 已裁定消息流不再渲染 `<AskPanel />`），无 `expiresAtMs` 分支；且其 `:955` 的 `askStore.error` 位于 `v-if="activeAsk"` 内，快照被自动对账清空时卡片与提示文案一同卸载。wave-16 因该文件携带并行会话未提交 WIP（写入无法安全定向提交）**未**纳入本波次，改由 store 兜底（提交时刻过期判定 + `refresh()` 自动对账，卡片 ≤2.5s 内自动移出）。**验收条款**：该文件 WIP 提交后，为 composer ask 卡片补「本地已过期即禁用选项/取消/发送 + 含『过期』提示」，将 error 提示宿主与 `activeAsk` 存活解耦，并新增组件级 vitest（真实断言 disabled 与提示）；重跑 `tests/ask-pending-expiry.spec.ts` 确认 store 兜底未被削弱。
 - `PA-121` `ask_expire` 渲染层可自传宿主时钟（P3，Complexity A，安全加固）
   说明：`src-tauri/src/lib.rs:243` 的 `ask_expire(now_ms: Option<u64>)` 允许渲染层传入 `now_ms`，把**未过期**的 Pending 请求强制转 `Expired`，且 `expire_control_requests` 为全局（跨 session、kind 无关）。经 wave-16 L3 审查 B 判定**不构成新权限提升**（同一渲染层本可直接 `ask_answer`），故本波次未改（避免夹带）。**验收条款**：将 `now_ms` 收敛为宿主时钟（或加会话/请求范围校验），并补 Rust 契约测试证明渲染层自传时钟不能越过 TTL 语义。
+- `PA-122` `[token-metrics]` 事件折叠重建路径在 TurnEnd 覆盖 per-call duration（P2，Complexity A）
+  说明：`crates/pony-agent-core/src/agent/projection.rs:303-307` 的 `settle_timeline` 在 `turn/end` 结算时把**整轮 elapsed** 无条件写入末条 `call_model` 条目的 `turn_duration_ms`，冲掉 `:569` 已落的 per-call duration（历史 PA-094 P2-3）。wave-15 因最小闭包 + 该改动需同步既有冻结内联断言（`projection.rs:1683-1684`）而未纳入（登记于 `.dev-team/state.json` → `wave15-D1`）。**验收条款**：将 `:305` 改为仅在 `is_none()` 时兜底，新增「事件折叠重建后每条 call_model 的 per-call duration 不被整轮值覆盖」的 Rust 断言，并同步修订既有内联断言；重跑 `cargo test -p pony-agent-core --lib agent::` 全绿。
+- `PA-123` `[token-metrics]` 初始调用完成无 hop 事件导致 S1 展示滞后一跳（P3，Complexity A）
+  说明：`crates/pony-agent-core/src/agent/runtime/turn_stream.rs` 的 `turn:hop_complete` 只在「触发工具后续请求」的调用后发出，初始调用（call #0）没有对应 hop 事件；因此 call #0 完成后到首个 followup 完成前，UI 的「最近一次已完成调用」仍指向上一轮的末次调用（wave-15 契约 §7.10 残余延迟）。**验收条款**：在初始调用完成处（工具执行前）发出带 per-call 记录的载体事件（或让 `turn:tool` 携带 `provider_call_records`），使 S1 在初始调用完成瞬间即时更新；补一条真实多跳对比用例（初始调用完成后 `contextDisplayTokens == call#0 input`）并确认事件序列契约向后兼容。
 - `PA-022` lifecycle hooks pipeline
   说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
 - `PA-026` workflow mode 与用户自定义流程编排
