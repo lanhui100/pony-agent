@@ -4,6 +4,46 @@ import type { GraphAskWait, PendingAsk } from "@/types/ask-plan";
 
 export const ASK_POLL_INTERVAL_MS = 2500;
 
+/** User-facing hint for a locally expired Ask (never the bare host CAS text). */
+export const ASK_EXPIRED_MESSAGE = "该请求已过期，已同步最新待处理列表";
+
+/**
+ * Local TTL guard. The host keeps an expired request in `Pending` state (no `ask_expire` call
+ * site), so submitting it is doomed to fail the dispatcher CAS (`now_ms <= expires_at_ms`) with
+ * the generic `cannot be consumed` text. `expiresAtMs <= 0` means "no TTL", not "expired".
+ *
+ * The boundary mirrors the host check exactly: `can_consume` accepts while
+ * `now_ms <= expires_at_ms`, so this guard reports expired only for `expiresAtMs < nowMs` — the
+ * one instant where `expiresAtMs == nowMs` is still host-consumable must not be pre-emptively
+ * blocked, or a live answer would be silently dropped.
+ *
+ * The reference clock is the submit instant (`Date.now()`), never the listing snapshot
+ * (`lastRefreshMs`): polling self-terminates on an empty list, so a later Ask may be listed only
+ * once by a `turn:suspended` refresh and the snapshot clock then freezes. Judging by that frozen
+ * clock misses a request whose TTL elapsed after listing and leaks a doomed CAS (C2-7).
+ */
+export function isAskExpired(
+  ask: Pick<PendingAsk, "expiresAtMs"> | null | undefined,
+  nowMs: number = Date.now()
+): boolean {
+  const expiresAtMs = ask?.expiresAtMs;
+  return typeof expiresAtMs === "number" && expiresAtMs > 0 && expiresAtMs < nowMs;
+}
+
+/**
+ * Single list entry point for the pending-Ask snapshot. `sessionId` is only sent when non-empty so
+ * the host keeps its "all sessions" default for an empty scope.
+ */
+async function listPendingAsks(sessionId?: string): Promise<PendingAsk[]> {
+  const args: Record<string, unknown> = {};
+  const scopedSessionId = sessionId?.trim();
+  if (scopedSessionId) {
+    args.sessionId = scopedSessionId;
+  }
+  const asks = await safeInvoke<PendingAsk[] | null>("ask_list_pending", args);
+  return Array.isArray(asks) ? asks : [];
+}
+
 // `turn:suspended` must be included so a freshly-paused run (Ask pending) surfaces its card even
 // when polling self-terminated with no pending asks (PA-076 phase-4 P1-1).
 const ASK_REFRESH_EVENTS = [
@@ -21,6 +61,8 @@ type AskState = {
   cancellingRequestId: string | null;
   lastRefreshMs: number | null;
   polling: boolean;
+  pollingDesired: boolean;
+  reconcilingExpired: boolean;
   pollTimer: ReturnType<typeof setTimeout> | null;
   watchingEvents: boolean;
   unlistenFns: Array<() => void>;
@@ -56,6 +98,8 @@ export const useAskStore = defineStore("ask", {
     cancellingRequestId: null,
     lastRefreshMs: null,
     polling: false,
+    pollingDesired: false,
+    reconcilingExpired: false,
     pollTimer: null,
     watchingEvents: false,
     unlistenFns: []
@@ -75,7 +119,15 @@ export const useAskStore = defineStore("ask", {
     }
   },
   actions: {
-    /** Refresh the pending-Ask snapshot. Optionally filters by session. */
+    /**
+     * Refresh the pending-Ask snapshot. Optionally filters by session.
+     *
+     * Two self-healing duties hook onto the single list entry point:
+     * - a snapshot holding a locally expired Ask is auto-reconciled (silently, single-flight), since
+     *   the panel disables every control of such a card and the click-path guard is unreachable (C2-6);
+     * - a non-empty snapshot restarts a poll that self-terminated on an empty list, so the snapshot
+     *   clock keeps advancing and reconciliation keeps being driven (C2-8).
+     */
     async refresh(options?: { sessionId?: string | null }): Promise<PendingAsk[]> {
       if (!isTauriAvailable()) {
         this.pendingAsks = [];
@@ -85,15 +137,16 @@ export const useAskStore = defineStore("ask", {
 
       this.loading = true;
       this.error = null;
+      const sessionId = options?.sessionId?.trim();
       try {
-        const args: Record<string, unknown> = {};
-        const sessionId = options?.sessionId?.trim();
-        if (sessionId) {
-          args.sessionId = sessionId;
-        }
-        const asks = await safeInvoke<PendingAsk[] | null>("ask_list_pending", args);
-        this.pendingAsks = Array.isArray(asks) ? asks : [];
+        this.pendingAsks = await listPendingAsks(sessionId);
         this.lastRefreshMs = Date.now();
+        if (!this.reconcilingExpired && this.pendingAsks.some((ask) => isAskExpired(ask))) {
+          await this.reconcileExpiredAsks({ sessionId, surfaceError: false });
+        }
+        if (this.pendingAsks.length > 0 && this.pollingDesired && !this.polling) {
+          this.startPolling();
+        }
         return this.pendingAsks;
       } catch (error) {
         this.error = `刷新待处理请求失败：${String(error)}`;
@@ -101,6 +154,18 @@ export const useAskStore = defineStore("ask", {
       } finally {
         this.loading = false;
       }
+    },
+
+    /**
+     * Optimistic-state protection for a reconcile re-list: never re-populate a request that is
+     * currently being answered/cancelled locally, or the re-list would undo the optimistic removal
+     * and re-enable a doomed CAS (C2-9b).
+     */
+    filterInFlight(asks: PendingAsk[]): PendingAsk[] {
+      return asks.filter(
+        (ask) =>
+          ask.requestId !== this.answeringRequestId && ask.requestId !== this.cancellingRequestId
+      );
     },
 
     /**
@@ -124,6 +189,11 @@ export const useAskStore = defineStore("ask", {
       const listed = this.pendingAsks.find((ask) => ask.requestId === request.requestId);
       if (!listed) {
         return null;
+      }
+      // A locally expired Ask must never reach the host CAS: reconcile instead of submitting.
+      // Judged at the submit instant (C2-7), not against the listing snapshot.
+      if (isAskExpired(listed)) {
+        return this.reconcileExpiredAsk();
       }
 
       // Optimistically remove from pending asks to prevent duplicate submissions
@@ -208,6 +278,10 @@ export const useAskStore = defineStore("ask", {
       if (!listed) {
         return null;
       }
+      // Same local TTL guard as `answer`: reconcile, never submit a doomed CAS (submit instant).
+      if (isAskExpired(listed)) {
+        return this.reconcileExpiredAsk();
+      }
 
       // Optimistically remove from pending asks to prevent duplicate cancellations
       this.removePendingAsk(request.requestId);
@@ -241,6 +315,58 @@ export const useAskStore = defineStore("ask", {
       this.pendingAsks = this.pendingAsks.filter((ask) => ask.requestId !== requestId);
     },
 
+    /**
+     * Reconcile a snapshot holding locally expired Ask(s): expire them host-side, then re-list once
+     * and keep the fresh truth. `refresh()` drives this silently (C2-6/§7.1); the click-path guard
+     * (`answer()`/`cancel()`) drives it with an explicit expiry hint (C2-2).
+     *
+     * Single-flight: concurrent triggers (double click, poll/click overlap) coalesce into one
+     * `ask_expire` (C2-9). The re-list is inlined instead of `refresh()` to prevent recursion.
+     */
+    async reconcileExpiredAsks(options?: {
+      sessionId?: string;
+      surfaceError?: boolean;
+    }): Promise<void> {
+      if (this.reconcilingExpired) {
+        return;
+      }
+      this.reconcilingExpired = true;
+      try {
+        try {
+          await safeInvoke("ask_expire");
+        } catch (error) {
+          // Visible failure, but never a reason to skip the re-list that is the point of reconcile.
+          this.error = `过期处理失败：${String(error)}`;
+        }
+        try {
+          this.pendingAsks = this.filterInFlight(await listPendingAsks(options?.sessionId));
+          this.lastRefreshMs = Date.now();
+        } catch (error) {
+          this.error = `刷新待处理请求失败：${String(error)}`;
+        }
+        // `surfaceError` marks the click path: only a *successful* reconcile earns the plain expiry
+        // hint, so a concrete failure is never masked (C2-2) — and an automatic refresh-driven
+        // reconcile stays silent, or the text would outlive the emptied list (§7.1).
+        if (options?.surfaceError && !this.error) {
+          this.error = ASK_EXPIRED_MESSAGE;
+        }
+      } finally {
+        this.reconcilingExpired = false;
+      }
+    },
+
+    /**
+     * Reconcile an Ask whose local TTL already passed. Kept as its own action so `answer()` and
+     * `cancel()` share one closure that never submits a doomed CAS.
+     */
+    async reconcileExpiredAsk(): Promise<null> {
+      await this.reconcileExpiredAsks({ surfaceError: true });
+      if (!this.error) {
+        this.error = ASK_EXPIRED_MESSAGE;
+      }
+      return null;
+    },
+
     /** Transition expired pending requests and reconcile the snapshot. */
     async expire(): Promise<number | null> {
       if (!isTauriAvailable()) {
@@ -259,9 +385,12 @@ export const useAskStore = defineStore("ask", {
 
     /**
      * Begin lightweight periodic polling. Polling self-terminates once no
-     * pending asks remain, so it never keeps timers alive in an idle app.
+     * pending asks remain, so it never keeps timers alive in an idle app; the
+     * "desired" flag survives that self-termination so `refresh()` can re-arm
+     * the poll when a snapshot becomes non-empty again (C2-8).
      */
     startPolling(intervalMs: number = ASK_POLL_INTERVAL_MS): void {
+      this.pollingDesired = true;
       if (this.polling) {
         return;
       }
@@ -277,19 +406,26 @@ export const useAskStore = defineStore("ask", {
         this.pollTimer = null;
         await this.refresh();
         if (this.pendingAsks.length === 0) {
-          this.stopPolling();
+          this.haltPolling();
           return;
         }
         this.schedulePoll(intervalMs);
       }, intervalMs);
     },
 
-    stopPolling(): void {
+    /** Stop the timer but keep `pollingDesired`, so a later non-empty snapshot can re-arm it. */
+    haltPolling(): void {
       this.polling = false;
       if (this.pollTimer != null) {
         clearTimeout(this.pollTimer);
         this.pollTimer = null;
       }
+    },
+
+    /** Host teardown semantics: this caller no longer wants polling at all. */
+    stopPolling(): void {
+      this.pollingDesired = false;
+      this.haltPolling();
     },
 
     /** Listen to terminal turn events so a freshly-paused run surfaces its ask. */
@@ -324,6 +460,8 @@ export const useAskStore = defineStore("ask", {
 
     reset(): void {
       this.stopPolling();
+      this.pollingDesired = false;
+      this.reconcilingExpired = false;
       this.stopWatchingEvents();
       this.pendingAsks = [];
       this.loading = false;

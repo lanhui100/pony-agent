@@ -1,0 +1,11 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "src/components/AskPanel.vue",
+      "line": 156,
+      "rule": "过期 ask 的对账路径在 UI 上不可达（C2-2 与 C2-4 组合后失效）：唯一会调用 ask_expire 的入口是 store.answer()/cancel() 的前置守卫（src/stores/ask.ts:155、242 -> reconcileExpiredAsk -> expire -> ask_expire），而 askIsLocked 把该 ask 的选项/输入/回答/取消全部禁用（AskPanel.vue:39、156、168、173、183），宿主又没有任何自动 expire 调用点，且 list_pending_asks 不过滤 TTL（ask_control.rs:32-41，只按 kind+Pending）。结果是 TTL 一过，卡片永久滞留、既不能回答也不能取消，hint 文案「正在同步最新待处理列表」所承诺的同步永远不会发生。",
+      "counterexample": "宿主默认 TTL=60_000ms（crates/pony-agent-core/src/agent/budget.rs:74，dispatcher.rs:1235 expires_at_ms=now+60000），过期后 state 仍是 Pending 且不会再变（唯一切换者是 dispatcher.rs:689 expire_control_requests，其生产调用点只有 ask_control.rs:67 -> ask_plan_commands.rs:75 -> src-tauri/src/lib.rs:244 ask_expire，全仓无自动调用，grep -rn \"expire_control_requests\" 仅命中测试与上述链）。复现链：打开 Ask 面板静置 60s -> 下一轮 poll（src/stores/ask.ts:5 ASK_POLL_INTERVAL_MS=2500，ask.ts:312 startPolling）刷新 lastRefreshMs -> AskPanel.vue:28 askIsExpired 变 true -> AskPanel.vue:39 askIsLocked 使 :156/:168/:173/:183 全部 disabled（Executor 自证探针亦记录此翻转：.dev-team/wave16-green-receipts.md 门禁 4「第 2 个 tick 越过 TTL 后…按钮全部 disabled 且 hint 出现」）-> 此后无法再调用 store.answer/cancel，故 ask.ts:282 reconcileExpiredAsk 永不执行（grep -rn \"\\.expire(\" src/ 只命中 ask.ts:283 自身）-> 每次 ask_list_pending 仍返回该 state=Pending 请求（ask_control.rs:39 仅判 state，无 now<=expires_at_ms 判定）-> 卡片永久滞留、请求永不消费/取消，挂起的 run 永久停在 WaitingUser。"
+    }
+  ]
+}

@@ -21,6 +21,10 @@
   说明：`src/lib/runtime/messages.ts:341` `buildTurnHistory()` 末尾 `.slice(-8)` → `sessions.ts:440` 构造 `snapshot.history` → `sessions.ts:805` 兼容性判定又用同一截断长度比对（必然相等），导致无 Tauri 时任何恢复会话只显示最后 4 轮。收据：种子 40 turn/80 条，mounted log `messages:80` 而 `renderedTurnNodes:8`。
 - `PA-117` `[workspace-scroll]` 调试日志无开关且 payload 触发强制布局（P3，Complexity A）
   说明：`src/components/HomeWorkspace.vue:202` 的 `console.info("[workspace-scroll]", payload)` 无 debug 开关，payload 含 `getBoundingClientRect()` 结果（强制同步布局）。160 turn 实测 387 条日志、挂载期一次性开销约 1s；无事件回环（收敛），但在 devtools 打开的 dev 态是可削常数开销。
+- `PA-120` ask 生产面（composer 卡片）过期态禁用与 error 挂载脱耦（P3，Complexity A）
+  说明：生产用户面 ask 卡片位于 `src/components/chat/WorkspaceComposer.vue`（选项 `:disabled="askIsBusy"`，:866/913/936/949；ADR-0030 已裁定消息流不再渲染 `<AskPanel />`），无 `expiresAtMs` 分支；且其 `:955` 的 `askStore.error` 位于 `v-if="activeAsk"` 内，快照被自动对账清空时卡片与提示文案一同卸载。wave-16 因该文件携带并行会话未提交 WIP（写入无法安全定向提交）**未**纳入本波次，改由 store 兜底（提交时刻过期判定 + `refresh()` 自动对账，卡片 ≤2.5s 内自动移出）。**验收条款**：该文件 WIP 提交后，为 composer ask 卡片补「本地已过期即禁用选项/取消/发送 + 含『过期』提示」，将 error 提示宿主与 `activeAsk` 存活解耦，并新增组件级 vitest（真实断言 disabled 与提示）；重跑 `tests/ask-pending-expiry.spec.ts` 确认 store 兜底未被削弱。
+- `PA-121` `ask_expire` 渲染层可自传宿主时钟（P3，Complexity A，安全加固）
+  说明：`src-tauri/src/lib.rs:243` 的 `ask_expire(now_ms: Option<u64>)` 允许渲染层传入 `now_ms`，把**未过期**的 Pending 请求强制转 `Expired`，且 `expire_control_requests` 为全局（跨 session、kind 无关）。经 wave-16 L3 审查 B 判定**不构成新权限提升**（同一渲染层本可直接 `ask_answer`），故本波次未改（避免夹带）。**验收条款**：将 `now_ms` 收敛为宿主时钟（或加会话/请求范围校验），并补 Rust 契约测试证明渲染层自传时钟不能越过 TTL 语义。
 - `PA-022` lifecycle hooks pipeline
   说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
 - `PA-026` workflow mode 与用户自定义流程编排

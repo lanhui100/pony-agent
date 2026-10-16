@@ -12,22 +12,32 @@
 use crate::agent::dispatcher::{
     ControlRequestAuthorization, ControlRequestConsumed, GovernedDispatcher,
 };
-use crate::agent::tool_runtime::{PendingControlRequest, PendingControlRequestKind};
+use crate::agent::tool_runtime::{
+    PendingControlRequest, PendingControlRequestKind, PendingControlRequestState,
+};
 use serde_json::Value;
 
-/// Snapshot of every pending Ask (`Interaction`) request currently awaiting a host answer.
+/// Snapshot of every Ask (`Interaction`) request still awaiting a host answer.
+///
+/// "Pending" is the disposition of the request, not the shape of the store: the dispatcher
+/// retains `Consumed` / `Cancelled` / `Expired` requests, and only requests whose
+/// [`PendingControlRequestState`] is still `Pending` may be surfaced as awaiting an answer.
+/// Re-listing a terminal request would make the host re-submit it and hit the dispatcher CAS.
 pub fn list_pending_asks(dispatcher: &GovernedDispatcher) -> Vec<PendingControlRequest> {
     filter_interaction_requests(dispatcher.pending_requests())
 }
 
-/// Keep only `Interaction`-kind pending requests. Exposed separately so the filtering contract is
-/// directly testable and reusable by host adapters.
+/// Keep only `Interaction`-kind requests that are still [`PendingControlRequestState::Pending`].
+/// Exposed separately so the filtering contract is directly testable and reusable by host adapters.
 pub(crate) fn filter_interaction_requests(
     requests: Vec<PendingControlRequest>,
 ) -> Vec<PendingControlRequest> {
     requests
         .into_iter()
-        .filter(|request| request.request_kind == PendingControlRequestKind::Interaction)
+        .filter(|request| {
+            request.request_kind == PendingControlRequestKind::Interaction
+                && request.state == PendingControlRequestState::Pending
+        })
         .collect()
 }
 
@@ -197,6 +207,37 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].request_id, "ask-1");
         assert_eq!(filtered[0].request_kind, PendingControlRequestKind::Interaction);
+    }
+
+    #[test]
+    fn filter_pending_asks_drops_terminal_interaction_requests() {
+        let mut terminal = Vec::new();
+        for (request_id, state) in [
+            ("ask-consumed", PendingControlRequestState::Consumed),
+            ("ask-cancelled", PendingControlRequestState::Cancelled),
+            ("ask-expired", PendingControlRequestState::Expired),
+        ] {
+            let mut request = pending_request(PendingControlRequestKind::Interaction, request_id);
+            request.state = state;
+            terminal.push(request);
+        }
+        let pending = pending_request(PendingControlRequestKind::Interaction, "ask-pending");
+        // A terminal non-Interaction request must stay excluded for the kind dimension too.
+        let mut terminal_approval =
+            pending_request(PendingControlRequestKind::Approval, "approve-consumed");
+        terminal_approval.state = PendingControlRequestState::Consumed;
+
+        let mut requests = terminal;
+        requests.push(terminal_approval);
+        requests.push(pending);
+
+        let filtered = filter_interaction_requests(requests);
+        assert_eq!(
+            filtered.iter().map(|r| r.request_id.as_str()).collect::<Vec<_>>(),
+            vec!["ask-pending"],
+            "only the still-pending Interaction request may be retained"
+        );
+        assert_eq!(filtered[0].state, PendingControlRequestState::Pending);
     }
 
     #[test]

@@ -13,38 +13,85 @@
       "write_scopes": [
         "crates/pony-agent-core/src/agent/ask_control.rs"
       ],
-      "red_commit": "RED_ANCHOR",
+      "red_commit": "fc15414",
       "green_commit": null,
-      "status": "pending"
+      "status": "green-verified-pending-final-commit"
     },
     "ui-expired-guard": {
-      "owner": "executor-ui",
+      "owner": "executor-ui -> executor-ui2 (第二轮接手：前任上下文耗尽)",
       "task": "task-3",
       "write_scopes": [
         "src/stores/ask.ts",
         "src/components/AskPanel.vue"
       ],
-      "red_commit": "RED_ANCHOR",
+      "red_commit": "fc15414",
       "green_commit": null,
-      "status": "pending"
+      "status": "green-verified-pending-final-commit"
     }
   },
   "tasks": {
-    "task-1": "test(L2-T): 红相验收测试 C1-1~C1-6 / C2-1~C2-4 — completed",
-    "task-2": "executor-core: list_pending_asks 仅返回 Pending Interaction — pending",
-    "task-3": "executor-ui: 过期 ask 禁止提交 + 面板禁用 — pending",
-    "l2at": "L2-AT(subagent): ask_pending_adversarial.rs C4-1~C4-4 — 红相 4/4 FAILED(EXIT=101)"
+    "task-1": "test(L2-T): 红相验收 C1-1~C1-6 / C2-1~C2-10（含 §9 用例机制修订）— completed",
+    "task-2": "executor-core: list_pending_asks 仅返回 Pending Interaction — completed",
+    "task-3": "executor-ui2: 过期判定提交时刻 + refresh 自动对账单飞 + 轮询自愈 + 面板实时时钟 — completed",
+    "l2at": "L2-AT(subagent): C4-1~C4-4 破坏用例 — 红相 4/4 FAILED → 绿相 4/4 PASS"
   },
   "gates": {
     "red_phase": {
       "l2t_rust": "cargo test --test ask_pending_contract → EXIT=101, 0 passed / 6 failed",
-      "l2t_web": "npx vitest run tests/ask-pending-expiry.spec.ts tests/ask-panel-expired.spec.ts → EXIT=1, 4 failed / 4 passed",
+      "l2t_web": "npx vitest run ask-pending-expiry + ask-panel-expired → EXIT=1, 4 failed / 4 passed (首轮)",
       "l2at_rust": "cargo test --test ask_pending_adversarial → EXIT=101, 0 passed / 4 failed",
       "receipts": [
         ".dev-team/wave16-red-receipts.md",
         ".dev-team/wave16-red-receipts-l2at.md"
       ]
-    }
+    },
+    "green_phase": {
+      "rust_contract": "EXIT=0, 6 passed",
+      "rust_adversarial": "EXIT=0, 4 passed",
+      "rust_ask_user_acceptance": "EXIT=0, 9 passed",
+      "rust_dispatcher_matrix": "EXIT=0, 27 passed",
+      "rust_lib_ask_control": "EXIT=0, 9 passed",
+      "rust_lib_control_plane": "EXIT=0, 65 passed",
+      "rust_lib_graph": "EXIT=0, 23 passed",
+      "web_ask_scope": "EXIT=0, 49 passed (5 files)",
+      "typecheck": "EXIT=0",
+      "flake_repeat": "15/15 EXIT=0, FAILURES=0",
+      "full_unit_suite": "1 failed | 81 passed (82 files) —— 唯一失败为并行 wave-14/15 状态条可见性外部在飞变更（tests/workspace-runtime-status-streaming.spec.ts:56）",
+      "version_check": "EXIT=0",
+      "secrets_check": "EXIT=0"
+    },
+    "reviews": {
+      "round1_a": {
+        "file": ".dev-team/review-wave16-a.json",
+        "verdict": "FAIL",
+        "findings": 3,
+        "resolved": "全部修复（C2-7 提交时刻时钟 / C2-6+C2-8 自动对账与轮询自愈 / C2-9 单飞）"
+      },
+      "round1_b": {
+        "file": ".dev-team/review-wave16-b.json",
+        "verdict": "FAIL",
+        "findings": 1,
+        "resolved": "refresh 自动对账 + §7.1 静默（原『对账在 UI 上不可达』）"
+      },
+      "round2_a": {
+        "file": ".dev-team/review-wave16-a2.json",
+        "verdict": "pending"
+      },
+      "round2_b": {
+        "file": ".dev-team/review-wave16-b2.json",
+        "verdict": "pending"
+      }
+    },
+    "deferred": [
+      {
+        "id": "PA-120",
+        "reason": "composer 生产面带并行会话 WIP，写入无法安全定向提交"
+      },
+      {
+        "id": "PA-121",
+        "reason": "ask_expire(now_ms) 既有面加固，最小闭包不夹带"
+      }
+    ]
   },
   "concurrency_note": "共享工作区存在并行 wave-15（token 指标）施工会话，本波次独立编号 wave-16，禁止 git add . / 全局提交；仅定向暂存本波次文件"
 }

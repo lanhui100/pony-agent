@@ -47,6 +47,16 @@ async function flushAsync() {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * Flush pending microtasks without touching the (faked) timer queue, so mounting the panel and the
+ * store's `refresh()` promise chain settle even while `vi.useFakeTimers()` is active.
+ */
+async function flushMicrotasks(rounds = 12) {
+  for (let round = 0; round < rounds; round += 1) {
+    await Promise.resolve();
+  }
+}
+
 async function mountWithAsk(ask: PendingAsk) {
   tauriMocks.mockSafeInvoke.mockResolvedValue([ask]);
   const wrapper = mount(AskPanel);
@@ -138,6 +148,57 @@ describe("AskPanel — expired ask guard", () => {
     expect(wrapper.find('[data-testid="ask-options"]').exists()).toBe(false);
     expect(wrapper.get('[data-testid="ask-answer-submit"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get('[data-testid="ask-cancel-submit"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("过期");
+
+    wrapper.unmount();
+  });
+
+  it("C2-10: the render clock is real time, not the frozen listing snapshot", async () => {
+    // Arrange: `lastRefreshMs` freezes at the listing instant T while the wall clock later moves
+    // past the TTL. A panel that renders from the snapshot keeps the controls live and re-opens the
+    // doomed CAS path. The stale card is injected directly so the C2-6 auto-reconcile cannot clear
+    // it before the clock advance (Lead ruling §9 ②).
+    vi.useFakeTimers();
+    const ask = createPendingAsk({
+      requestId: "ask-1",
+      version: 2,
+      expiresAtMs: Date.now() + 5_000,
+      options: ["是", "否"]
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_list_pending") {
+        return Promise.resolve([ask]);
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useAskStore();
+    store.pendingAsks = [ask];
+    store.lastRefreshMs = Date.now();
+    const wrapper = mount(AskPanel);
+    await flushMicrotasks();
+    await wrapper.vm.$nextTick();
+
+    expect(store.pendingAsks.map((pending) => pending.requestId)).toEqual(["ask-1"]);
+    // Precondition: while the wall clock is still before the TTL the card is fully usable.
+    expect(wrapper.get('[data-testid="ask-answer-submit"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-testid="ask-cancel-submit"]').attributes("disabled")).toBeUndefined();
+
+    // Act: only the wall clock moves (setSystemTime fires no timers), so the snapshot stays stale;
+    // the explicit re-render is what re-evaluates the clock inside the template.
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    wrapper.vm.$forceUpdate();
+    await wrapper.vm.$nextTick();
+
+    // Assert: the card is now visibly expired…
+    expect(wrapper.get('[data-testid="ask-answer-submit"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="ask-cancel-submit"]').attributes("disabled")).toBeDefined();
+    for (const button of wrapper.findAll('[data-testid="ask-options"] button')) {
+      expect(button.attributes("disabled")).toBeDefined();
+    }
+
+    // …and says so, while the stored snapshot timestamp is still the stale one.
+    expect(store.lastRefreshMs).toBeLessThan(Date.now());
     expect(wrapper.text()).toContain("过期");
 
     wrapper.unmount();

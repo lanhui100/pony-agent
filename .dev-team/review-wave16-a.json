@@ -1,0 +1,23 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "src/stores/ask.ts",
+      "line": 154,
+      "rule": "C2-1/C2-2：过期判定用冻结的 lastRefreshMs（列表快照时刻）而非提交时刻；轮询自终止后该时钟永久冻结，守卫漏判，注定失败的 CAS 与裸 cannot be consumed 文案重新出现",
+      "counterexample": "可达路径（非竞态，纯时序）：① WorkspaceComposer 常驻挂载（HomeWorkspace.vue:1749，无 v-if），onMounted 调 refresh+startPolling（WorkspaceComposer.vue:815-816）；② 列表为空时首个 2.5s tick 即 stopPolling（ask.ts:327-330），全仓再无 startPolling 调用点（仅两处 mount 钩子：WorkspaceComposer.vue:816、AskPanel.vue:101，后者无生产挂载点）；③ 模型随后发起 Ask → 后端写 state=Pending、expires_at_ms=now+60_000（budget.rs:74、dispatcher.rs:1235）并发 turn:suspended（crates/pony-agent-core/src/agent/runtime/turn_stream.rs:377）→ 仅由事件监听 refresh()（ask.ts:351-353）列出卡片，lastRefreshMs=T 后不再更新（ask.ts:121）；④ 用户思考超过 60s 再点「回答/取消」：expiresAtMs>T 使 isAskExpired=false（ask.ts:29），守卫在 ask.ts:154（cancel 为 241）放行，仍发出 ask_answer/ask_cancel；宿主 can_consume 因 now_ms<=expires_at_ms 失败（tool_runtime.rs:142-146，报错文案 dispatcher.rs:1272）→ 用户重新看到 C2-2 明令禁止的裸文案「应答失败：control request '…' cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch」。同一冻结时钟使 AskPanel.vue:22-24/28 的渲染禁用与倒计时一并失效（显示“Xs 后过期”永不归零）。冻结用例只覆盖「列出时已过期」（tests/ask-pending-expiry.spec.ts:83-95），无法捕获此路径。最小修复：answer/cancel 守卫改用提交时刻 Date.now()（isAskExpired(listed, Date.now())，严格 < 口径不变，C2-5 边界不受影响），并让 refresh() 在 pendingAsks 非空时重启轮询（或让事件监听在列表非空时 startPolling）以驱动渲染时钟。"
+    },
+    {
+      "file": "src/components/AskPanel.vue",
+      "line": 156,
+      "rule": "C2-4 生效面：过期禁用只落在无生产挂载点的组件上，用户可见的 Ask 卡片无任何按 expiresAtMs 的禁用（视觉上仍可触发 C1 报错）",
+      "counterexample": "AskPanel.vue:156/173/183 的 :disabled=\"askIsLocked(ask)\" 是全仓唯一按 expiresAtMs 禁用提交控件的位置，但生产代码无任何文件 import 该组件（`git grep -n AskPanel -- src` 零命中，仅 tests/*.spec.ts 挂载），且 docs/decisions/0030-composer-integrated-ask-interaction.md:46 已裁定「HomeWorkspace.vue 消息流中不再渲染独立的 <AskPanel />」；真正渲染的卡片在 WorkspaceComposer.vue:866/913/936/949，禁用条件仅 :disabled=\"askIsBusy\"（无 expiresAtMs 分支，src/ 内除 AskPanel.vue 外无 expiresAtMs 消费者）→ 过期请求在用户可见面按钮仍可点，完全依赖 store 守卫兜底，而 finding 1 已证明该守卫在轮询自终止后漏判，于是 C2-4「视觉上不可再触发 C1 报错」在生产链路上不成立。"
+    },
+    {
+      "file": "src/stores/ask.ts",
+      "line": 155,
+      "rule": "并发/重入：过期对账分支绕过 answeringRequestId/cancellingRequestId 忙碌标志，且未做乐观移除与幂等合并，双击即可发起并发 ask_expire + 覆盖式 refresh",
+      "counterexample": "answer() 的忙碌预检在 143-148（cancel 在 230-235），但过期分支在 154-155（cancel 241-242）直接 `return this.reconcileExpiredAsk()`，早于 161/247 置位 answeringRequestId/cancellingRequestId；因此对同一过期卡片连点两次（双击）两次都通过预检，确定性地发出 2 次 ask_expire（ask.ts:299）与 2 次 ask_list_pending，而 refresh() 是整体覆盖写 pendingAsks/lastRefreshMs（ask.ts:120-121），后到响应覆盖先到（含覆盖别的请求刚完成的乐观移除，ask.ts:160/246）。reconcileExpiredAsk 自身也无任何在飞标志或去重（ask.ts:282-290），生产卡片在该窗口内只判 askIsBusy（WorkspaceComposer.vue:866），按钮始终可点 → IPC 次数与点击数成正比。最小修复：进入对账分支前先置 answeringRequestId/cancellingRequestId（并在 finally 清理），或在 reconcileExpiredAsk 内做单飞（in-flight promise 复用）。"
+    }
+  ]
+}

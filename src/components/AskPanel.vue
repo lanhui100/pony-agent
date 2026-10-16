@@ -14,10 +14,29 @@ const drafts = reactive<Record<string, string>>({});
 
 const visibleAsks = computed(() => pendingAsks.value);
 
+/**
+ * Render clock for TTL state: real wall-clock time, re-read on every render/refresh tick. The
+ * listing snapshot clock (`lastRefreshMs`) is deliberately NOT used — polling self-terminates on an
+ * empty list, so a frozen snapshot would keep an already-expired card's controls live (C2-10).
+ */
+function renderNowMs(): number {
+  return Date.now();
+}
+
+function askIsExpired(ask: PendingAsk): boolean {
+  // Same boundary as the store guard / host `can_consume`: expired only once strictly past the TTL.
+  return typeof ask.expiresAtMs === "number" && ask.expiresAtMs > 0 && ask.expiresAtMs < renderNowMs();
+}
+
 function askIsBusy(requestId: string) {
   return (
     answeringRequestId.value === requestId || cancellingRequestId.value === requestId
   );
+}
+
+/** An expired Ask can never be submitted (the host CAS would fail), so lock its controls. */
+function askIsLocked(ask: PendingAsk) {
+  return askIsBusy(ask.requestId) || askIsExpired(ask);
 }
 
 function answerOptions(ask: PendingAsk): string[] {
@@ -56,7 +75,7 @@ function formatExpiry(ask: PendingAsk) {
   if (!ask.expiresAtMs || ask.expiresAtMs <= 0) {
     return "";
   }
-  const remainingMs = ask.expiresAtMs - Date.now();
+  const remainingMs = ask.expiresAtMs - renderNowMs();
   if (remainingMs <= 0) {
     return "已过期";
   }
@@ -119,13 +138,22 @@ onBeforeUnmount(() => {
           {{ ask.prompt || "请回答以下问题。" }}
         </p>
 
+        <p
+          v-if="askIsExpired(ask)"
+          class="mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-amber-900"
+          data-testid="ask-expired-hint"
+        >
+          <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+          <span>该请求已过期，无法再提交；正在同步最新待处理列表。</span>
+        </p>
+
         <div v-if="answerOptions(ask).length > 0" class="mt-2 flex flex-wrap gap-1.5" data-testid="ask-options">
           <button
             v-for="option in answerOptions(ask)"
             :key="option"
             type="button"
             class="rounded-full border border-amber-300/60 bg-white/80 px-2.5 py-1 text-[11px] font-medium text-stone-700 transition hover:bg-amber-100 disabled:pointer-events-none disabled:opacity-50"
-            :disabled="askIsBusy(ask.requestId)"
+            :disabled="askIsLocked(ask)"
             @click="answerWithOption(ask, option)"
           >
             {{ option }}
@@ -137,12 +165,12 @@ onBeforeUnmount(() => {
             v-model="drafts[ask.requestId]"
             class="h-9 flex-1 bg-white/80 text-[12px]"
             :placeholder="ask.prompt || '输入回答…'"
-            :disabled="askIsBusy(ask.requestId)"
+            :disabled="askIsLocked(ask)"
             data-testid="ask-answer-input"
           />
           <Button
             size="sm"
-            :disabled="askIsBusy(ask.requestId)"
+            :disabled="askIsLocked(ask)"
             data-testid="ask-answer-submit"
             @click="answerTyped(ask)"
           >
@@ -152,7 +180,7 @@ onBeforeUnmount(() => {
           <Button
             size="sm"
             variant="ghost"
-            :disabled="askIsBusy(ask.requestId)"
+            :disabled="askIsLocked(ask)"
             data-testid="ask-cancel-submit"
             @click="cancelAsk(ask)"
           >

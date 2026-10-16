@@ -110,3 +110,98 @@ cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test ask_user_acc
   存储仍 200 条），失败点精确落在列表投影层 `filter_interaction_requests` 缺少 `state == Pending`。
 - 归属判定：失败断言受体均为 SUT 行为（`list_pending_asks` / dispatcher CAS / store IPC 面），
   非测试基建缺陷；无 `#[ignore]`、无裸 pass、无吞异常。
+
+## 5. 契约修订（Lead 一票裁定，Wave-16 收口前）
+
+**修订 1（C2 过期边界口径，采纳 Executor 证据）**：C2-1 原文写的 `expiresAtMs <= now` 与宿主
+`PendingControlRequest::can_consume` 的放行条件 `now_ms <= expires_at_ms`
+（crates/pony-agent-core/src/agent/tool_runtime.rs:135-150）不等价：`<=` 会把**宿主仍会消费**的
+`expiresAtMs == now` 请求判为过期，静默丢弃用户答案。现冻结口径为：
+
+- **C2-5（新）**：本地过期判定 = `expiresAtMs > 0 && expiresAtMs < now`（严格小于），即仅当
+  `now > expiresAtMs` 才不可提交；`expiresAtMs === now` 仍视为可提交；`expiresAtMs <= 0` 表示无 TTL。
+- 证据：Executor 探针 300 次，`<=` 误判 2–6 次（0.7–2%），`<` 为 0/300（探针已删除）。
+  该口径同时是 `src/stores/ask.ts:isAskExpired` 与 `AskPanel` 渲染时钟的唯一真值。
+
+**修订 2（测试自身缺陷加固，不计入熔断）**：`tests/ask-pending-expiry.spec.ts:233` 的对照夹具
+`expiresAtMs: Date.now() + 1` 余量仅 1ms，负载下可能越过 TTL 造成 flaky。由测试作者（test-agent）
+将余量放大到 `Date.now() + 60_000`，并补 C2-5 边界断言（`expiresAtMs === now` 非过期 /
+`expiresAtMs === now - 1` 过期）。实施者（Executor）对冻结测试仍只读。
+
+## 6. 契约修订 3（L3 审查 B 发现，Lead 裁定；新增 C2-6）
+
+**审查反例（已由 Lead 物理复核）**：`AskPanel` 对过期 Ask 禁用全部控件（AskPanel.vue:156/168/173/183）
+后，唯一会调用 `ask_expire` 的入口（`store.answer()/cancel()` 的过期守卫 → `reconcileExpiredAsk`
+→ `expire()`）在 UI 上**不可达**；宿主侧又无任何自动 expire 调用点
+（`grep -rn "ask_expire" src/ src-tauri/src/` 仅命中 `src/stores/ask.ts:299` 与本波新增守卫）。
+后果：TTL 一过，卡片永久滞留（既不能答也不能取消），提示「正在同步最新待处理列表」永不兑现，
+挂起 run 永久停在 `WaitingUser`。→ 原 C2-2 的「必须对账」在 UI 上失效，判定 **FAIL**，必须补正。
+
+**C2-6（新，冻结）**：`askStore.refresh()`（轮询 `schedulePoll` 与事件监听共用的唯一列表入口）
+在列表快照中发现**本地已过期**的 Ask 时，必须**自动对账**：
+
+1. IPC 序列必须为 `ask_list_pending` → `ask_expire` → `ask_list_pending`（**单次**重列，
+   禁止递归调用 `refresh()`、禁止同一次 refresh 内重复 `ask_expire`，防止 IPC 风暴）；
+2. 重列后 `pendingAsks` 不得再包含已过期请求（宿主已将其转为 `Expired`，被 C1 的
+   `state == Pending` 过滤剔除）；
+3. `ask_expire` 失败不得被吞掉（保留 `this.error` 的失败文案）且不得阻止本次重列；
+4. 未过期快照**不得**产生额外的 `ask_expire` IPC（无过期即零副作用，避免每 2.5s 一次无效写）。
+
+**保留项**：C2-1/C2-2 的点击路径守卫保持不变（覆盖 ≤2.5s 轮询窗口内的程序化调用），
+但不得再作为唯一对账路径。
+
+## 7. 契约修订 4（L3 审查 A 发现 1/3 + 生产面事实，Lead 裁定）
+
+**Lead 复核的生产面事实**：`AskPanel.vue` 在 `src/` 内**无挂载点**（ADR-0030 已裁定消息流不再渲染
+`<AskPanel />`），生产 ask 卡片位于 `src/components/chat/WorkspaceComposer.vue`（:866/913/936/949），
+其按钮仅受 `askIsBusy` 约束；store 的 `error` 就是该卡片显示的报错文案（:948）。因此：
+
+- **C2-4（AskPanel 禁用）保留**为组件级契约（测试可挂载），但**不构成生产面防线**；
+- **生产面防线统一收敛到 store**（下称 C2-6~C2-10），避免本波次写入
+  `WorkspaceComposer.vue`：该文件当前带有**并行 wave-15 会话的未提交改动**，本波次若写入将无法
+  安全定向提交（会把他人 WIP 一并入库）。→ 登记遗留项（见 §8），待其 WIP 提交后由
+  `dev-backlog` 消费。
+
+**C2-6（修订单飞）**：`refresh()` 发现本地过期 Ask 时自动对账 `ask_list_pending → ask_expire →
+ask_list_pending`（单次重列，禁止递归）；**对账必须单飞**：并发触发（双击 / 轮询与点击交叠）
+只能产生一次 `ask_expire`。`ask_expire` 失败不得被吞且不阻止重列；快照无过期 Ask 时零副作用。
+
+**C2-7（提交时刻时钟，取代 §2 中 `lastRefreshMs` 口径）**：`answer()`/`cancel()` 的过期判定
+必须使用**提交时刻**（`Date.now()`），不得使用快照时钟 `lastRefreshMs`。依据（审查 A finding 1）：
+轮询在列表为空时自终止（ask.ts:327-330），之后新 Ask 仅由 `turn:suspended` 事件 refresh 列出，
+`lastRefreshMs` 冻结在列出时刻 T；用户等过 `expiresAtMs` 再点击时 `expiresAtMs < T` 为假 →
+守卫漏判 → 照发注定失败的 CAS → 重现用户可见的裸文案。严格 `<` 边界（C2-5）不变。
+
+**C2-8（轮询自愈）**：`refresh()` 在快照非空且当前未轮询时必须重启轮询（`startPolling()`），
+使 `lastRefreshMs` 持续前进、C2-6 自动对账得以持续驱动；快照为空时行为不变（stopPolling）。
+
+**C2-9（重入与乐观状态保护）**：过期对账分支必须置于忙标志之前置位（或单飞），双击不得产生
+2×`ask_expire`；对账重列**不得回填**正被 `answeringRequestId`/`cancellingRequestId` 处理的请求
+（保护 §answer/cancel 的乐观移除）。
+
+**C2-10（渲染时钟）**：`AskPanel` 的渲染时钟改为实时 `Date.now()`（每次渲染/轮询重算），
+不再使用快照时钟；过期态的可视禁用仍是"展示层"，权威判定在 store（C2-7）。
+
+### 7.1 C2-6 静默性补充（Lead 裁定，避免 error 永久滞留）
+
+`refresh()` 驱动的**自动**对账成功后**不得**在 `store.error` 留下用户可见文案
+（否则轮询随后因列表清空而 `stopPolling`，该文案会永久滞留在卡片上）；仅当 `ask_expire` /
+重列**失败**时保留具体失败文案。点击路径（C2-2）仍必须给出含「过期」的显式提示。
+
+## 8. 遗留项（登记 `management/task-system/01_TASK_BOARD.md`，不在本波次实施）
+
+| 编号 | 事项 | 不实施原因 |
+| :--- | :--- | :--- |
+| `PA-120` | 生产面 composer 卡片（`src/components/chat/WorkspaceComposer.vue`）过期态禁用对齐 | 该文件携带并行 wave-15 会话未提交 WIP，写入无法安全定向提交；本波次以 store 兜底（提交时刻判定 + 自动对账 ≤2.5s 移出卡片） |
+| `PA-121` | `ask_expire(now_ms)` 允许渲染层自传时钟（全局、跨 session、kind 无关） | L3 审查 B 判定不构成新权限提升（同层可直接 `ask_answer`），按最小闭包不夹带；已登记安全加固条款 |
+
+## 10. 二轮 L3 复审缺陷收口与裁定（Lead）
+
+二轮独立复审产出 3 条 finding：
+1. **B2 `tests/ask-pending-expiry.spec.ts:506` C2-9 断言未约束 SUT**：用例使用 `mockExpiredAskHost` + `await store.refresh()` 提前清空快照，导致两次点击在 `if (!listed) return null;` 返回，未覆盖单飞分支。
+   - **收口**：改为直接注入快照 `store.pendingAsks = [expired]; store.lastRefreshMs = Date.now()` 并 `tauriMocks.mockSafeInvoke.mockClear()`。变异验证确认单飞分支若被删除则 `expireCalls` 为 2 导致失败，断言真实有效。
+2. **A2 `src/stores/ask.ts:330` 静默对账在飞时点击路径早退遗漏提示**：
+   - **收口**：`reconcileExpiredAsk()` 改为 `await this.reconcileExpiredAsks({ surfaceError: true }); if (!this.error) this.error = ASK_EXPIRED_MESSAGE; return null;`，即便并发单飞早退也保证点击路径留下明确过期提示。
+3. **A2 `src/components/chat/WorkspaceComposer.vue:955` error 宿主在 activeAsk 卸载时同批次卸载**：
+   - **收口**：该文件携带并行 wave-15 会话 WIP，同源归入 `PA-120` 遗留项登记并在其验收条款中显式约束「error 提示宿主与 activeAsk 存活解耦」。
+

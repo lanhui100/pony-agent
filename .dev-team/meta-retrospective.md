@@ -37,3 +37,47 @@
 
 - HEAD `cb12358`（+ `9bd2964` 文档）：`typecheck` / `test:unit`(78 files·828 passed·10 skipped) / `build` / 两条 e2e（session-fallback、session-fallback-cold-start）全部 **EXIT=0**。
 - 交付：`src/stores/runtime.ts`（`enterFreshSession` + 冷启动落点）、`src/lib/runtime/sessions.ts`（`pickPreferredSessionId` / `hasSelectableSession` / `deriveInitStrategy`）、ADR [0034](../../docs/decisions/0034-fresh-session-after-delete-or-archive.md)、契约 `.dev-team/contracts/wave-12-session-fallback.md`。
+
+---
+
+# Wave-16 元复盘（Ask 控制请求消费冲突与终态重复列出修复）
+
+> 复盘对象：本次 Agent Team 的**协作元框架与组织协议**。账本：`.dev-team/state-wave16-ask-cas.json`、契约 `.dev-team/contracts/wave-16-ask-cas.md`、收据 `.dev-team/wave16-{red,green}-receipts.md`。
+
+## 1. 通信拓扑与信噪比
+
+| 要素 | 实际 | 评价 |
+| :-- | :-- | :-- |
+| 名册 | Lead + test-agent + executor-core + executor-ui(已退役)/executor-ui2（5/8） | 合适：Rust 列表谓词收窄 + 前端 store 提交时钟与自动对账，责任清晰 |
+| 看板 | task-1（红相验收）/task-2（core 修复）/task-3（ui 修复） | 干净：全部 completed，无 in_progress 残留 |
+| 独立审查 | 2 轮对抗审查（首轮 2 视角均 FAIL 暴露出 4 条实质缺陷；二轮针对单飞断言与早退提示收敛并通过） | 极高价值：精准拦截了「过期无法对账卡死」与「断言未约束 SUT」 |
+| 关键增益 | 审查 A/B 发现「生产卡片无过期触发入口」「快照时钟导致过期漏判」→ 推动 C2-6~C2-10 契约完善 | 避免只修一半（消除终态重列后仍会因 TTL 报同一错误） |
+| 信噪比 | executor-ui 因上下文耗尽未交付，executor-ui2 接手后高精度落地；test-agent 精确配合四轮断言加固 | 高：无互相扯皮推诿，数据与收据机器可核验 |
+
+## 2. 门禁穿透与误杀率
+
+- **红相真实性**：首轮红相 Rust 6 failed / L2-AT 4 failed / vitest 4 failed。红相 commit `fc15414` 物理锚定后 Executor 始写代码。
+- **假测试拦截**：审查 B2 成功揪出 C2-9 用例中因 `mockExpiredAskHost` 提前清空快照导致测试虽绿却未覆盖 SUT 单飞守卫的假断言问题（变异检验确认删除守卫仍绿），经改用快照直注后断言恢复真实验证力。
+- **误杀率**：4 条裁决前失败经 Lead 复核确认为「用例机制与后置新增契约的夹具冲突」，判定为用例缺陷重写而非实现缺陷，免于熔断扣分。
+- **回退/篡改防护**：验收测试冻结后实施者只读无写入权；test-agent 修订测试经 `git diff fc15414` 严格审计证实删除 expect 行为 0，断言强度只增不减。
+
+## 3. 分工契约与隔离有效性
+
+- **跨会话工作区 Hunk 定向隔离**：面对工作区同时存在并行 wave-15（token 指标）未提交 WIP（`WorkspaceComposer.vue` 等），严格杜绝 `git add .`，全流程定向暂存。
+- **写域正交**：executor-core（`ask_control.rs`）与 executor-ui2（`ask.ts`/`AskPanel.vue`）写域互不干扰，零并发冲突。
+- **遗留项规范收口**：发现 `WorkspaceComposer.vue` 生产卡片无法本波次修改后，坚守抗熵增底线不强行跨会话篡改，规范登记为 `PA-120`。
+
+## 4. 元协议迭代建议
+
+1. **并行多会话波次编号预检**：本波次初始编号为 wave-15，与并行会话发生重合，后紧急自愈更名为 wave-16。建议 skill 规定：每次启动波次前必须以 `git log` 与 `state.json` 的最大波次编号 +1。
+2. **上下文容量熔断时一键接手模板**：executor-ui 在长思考中消耗完 context 后，生成具体清晰的规格 prompt 交给 executor-ui2，executor-ui2 一轮即达成全部代码落地。建议在 dev-team skill 中标准化「Executor 耗尽替换」操作指引。
+3. **复合契约下夹具前置隔离律**：当后续契约（如 C2-6 自动对账）会改变前置状态时，早期动作测试（如 C2-1 点击测试）应优先使用直接状态注入而非依赖全链路 refresh，避免夹具副作用冲突。
+
+## 5. 终态
+
+- 门禁全绿：`ask_pending_contract` (6 passed) / `ask_pending_adversarial` (4 passed) / `ask_user_acceptance` (9 passed) / `ask_control lib` (9 passed) / `vitest 5 spec files` (49 passed) / `typecheck` (0 error) / `15 次防 flaky 连跑` (0 failures)。
+- 交付成果：
+  - `crates/pony-agent-core/src/agent/ask_control.rs`（收窄 `filter_interaction_requests` 仅返回 `Pending` 状态）
+  - `src/stores/ask.ts`（提交时刻过期判定、单飞无递归自动对账、轮询自愈三态管理、在飞乐观状态保护）
+  - `src/components/AskPanel.vue`（实时渲染时钟与过期锁定）
+  - 契约与收据：`.dev-team/contracts/wave-16-ask-cas.md`、`.dev-team/wave16-green-receipts.md`、`PA-120 / PA-121` Backlog 登记。
