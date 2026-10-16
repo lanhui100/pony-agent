@@ -1,10 +1,10 @@
 {
-  "wave": 13,
-  "status": "completed",
+  "wave": 14,
+  "status": "in_progress",
   "task_classification": "B-lite",
-  "reason": "修复 CI verify(windows) cargo test 的 deny-warnings 红灯（TUI bin-as-module dead_code + cfg(unix) 专属绑定）",
-  "baseline_commit": "bd33ed5",
-  "symptom": "error: could not compile pony-agent-core (test tui_acceptance) due to 17 previous errors；本地 Linux 复现 16 条（15 dead_code + 汇总行），Windows 多 1 条 unused variable log_file",
+  "reason": "状态条可见性契约反转：运行期间始终可见（含 streaming），防跳动仍由常驻覆盖层承担",
+  "baseline_commit": "3ba3c02",
+  "symptom": "用户实测底部状态信息不显示；诊断确认是 wave-11 §2.4「streaming 期间隐藏」的直接后果（首 token 前约 200ms 可见）",
   "waves": {
     "9": {
       "branches": {
@@ -229,6 +229,26 @@
         "main_ci": "见 a80e8a7 运行",
         "local": "两个对偶授权用例 + 授权生命周期 + 113 项权限/工具/流式回归采样 EXIT=0"
       }
+    },
+    "14": {
+      "contract": ".dev-team/contracts/wave-11-status-flow.md §8",
+      "decision": "用户裁定 A：运行期间始终显示",
+      "branches": {
+        "status-always-visible": {
+          "red_commit": null,
+          "green_commit": null,
+          "status": "pending",
+          "write_scopes": [
+            "src/components/HomeWorkspace.vue",
+            "tests/"
+          ]
+        }
+      },
+      "tasks": {
+        "task-11": "test: 可见性断言改写 + 红相 — pending",
+        "task-12": "executor: 移除隐藏规则 — pending"
+      },
+      "gates": {}
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md",

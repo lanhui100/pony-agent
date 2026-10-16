@@ -156,3 +156,25 @@ L3-A（状态流转/回归）、L3-B（交互/视觉/性能）、L3-P（UI 生�
   - **M3c-1（主，负载鲁棒，自校准）**：`maxLag ≤ maxSingleFrameGrowth + 64px`，`maxSingleFrameGrowth = max_i ΔcolScrollHeight_i`（同一次运行、同一序列）。物理含义「跟随落后不得超过一次内容爆发 + 2.5 行」。实测正常负载 47–55px vs 预算 111.6px；load 5.5 时 119px vs 预算 ≈159px；跟随失效/停摆时滞后无界增长 → 仍必红（判别力保留）。
   - **M3c-2（硬上界）**：`maxLag ≤ 200px`（< composer 覆盖层缓冲 220px，保证最后一行永不藏入输入框下方）。
   - `FOLLOW_LAG_MAX_PX = 96` 作废（NFR 字段同步 supersede）。
+
+## 8. 契约演进 wave-14（用户裁定 A，2026-10-16）：状态条运行期间始终可见
+
+**触发**：用户在 v0.1.146 实测反馈「底部状态信息不显示了」。Lead 诊断（真实浏览器逐帧取证）确认：
+状态条在**思考中/工具执行/等待授权**等阶段正常显示，但「最终回答正文流式输出期间」按 §2.4 有意隐藏
+（`data-visible=false` / opacity 0）；一次真实提交下仅首 token 到达前约 200ms 可见，首 token 后立即隐藏，
+运行结束整体卸载 —— 即「看不到」是 §2.4 隐藏规则的直接后果，非渲染故障。
+
+**用户裁定**：**A —— 运行期间始终显示（含 streaming）**；防跳动由 wave-11 的「composer 上沿常驻覆盖层」机制承担，
+不再依赖隐藏。
+
+**新契约（覆盖 §2.3/§2.4 的隐藏语义）**：
+- **C14-1**：`agentRuntimeStatus != null`（run 活跃或会话操作中）期间，状态条**始终可见**：
+  `data-visible="true"`、计算 `opacity === "1"`、`visibility === "visible"`、无 `aria-hidden`；
+  **包括**「最终回答正文流式（mode=responding）」与「推理已落盘 + 正文流式（mode=thinking）」两种此前被隐藏的场景。
+- **C14-2**：`pointer-events` 仍恒为 `none`（不吞消息区点击/选中）；显隐相关 CSS 不得产出不可见状态。
+- **C14-3**：布局不变量不变 —— 仍是 composer 上沿外侧绝对定位覆盖层；M1（视口 Y 极差 ≤1px）与
+  M4（新消息插入不移动状态条）必须继续通过；M5（orbit 图标）与窄屏避让不变。
+- **C14-4**：运行结束（`isSubmitting === false` 且无会话操作）后槽位仍整体卸载（空闲态不常驻）。
+
+**需同步修订的既有断言**：`tests/e2e/status-flow-stability.spec.ts` 的 M2、`tests/acceptance/status-flow-contract.spec.ts`
+的 §2.3/§2.4 与 T-e、`tests/workspace-runtime-status-streaming.spec.ts` 首例。
