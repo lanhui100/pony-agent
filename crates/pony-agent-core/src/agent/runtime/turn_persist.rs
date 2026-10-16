@@ -149,7 +149,7 @@ impl AgentRuntime {
         session_summary: Option<String>,
         error: Option<String>,
     ) {
-        let trace_timeline = build_persisted_trace_timeline(
+        let trace_timeline = build_persisted_trace_timeline_with_provider_calls(
             user_message,
             phase,
             provider_meta,
@@ -169,6 +169,8 @@ impl AgentRuntime {
             total_tokens,
             first_token_latency_ms,
             turn_duration_ms,
+            // Wave-15 R2：每条 call_model 携带自身 per-call 指标（按调用序号）。
+            &provider_call_records,
         );
         // 内存更新同步（快），SQLite 落库通过后台队列异步执行，
         // 避免 trace（可观测性）写盘阻塞主对话执行路径。
@@ -456,7 +458,7 @@ impl AgentRuntime {
     ) {
         let error_message = error;
         let assistant_message = error_message.clone();
-        let trace_timeline = build_persisted_trace_timeline(
+        let trace_timeline = build_persisted_trace_timeline_with_provider_calls(
             user_message,
             "failed",
             provider_meta,
@@ -476,6 +478,8 @@ impl AgentRuntime {
             None,
             first_token_latency_ms,
             turn_duration_ms,
+            // Wave-15 R2：失败轮同样按序号写入已发生调用的 per-call 指标。
+            &provider_call_records,
         );
         self.sessions
             .write()

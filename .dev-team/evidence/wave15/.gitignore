@@ -1,0 +1,5 @@
+# 运行期刷新的捕获文件（每次跑 wave15 Rust 用例都会重写）；冻结凭证见
+# wire-red-frozen.json（红相，recs=None）与 wire-green-frozen.json（绿相，I1 成立）。
+wire-red.json
+wire-red-postrust.json
+wire-red-pre-e1b.json

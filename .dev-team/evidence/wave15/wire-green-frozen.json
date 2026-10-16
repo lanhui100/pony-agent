@@ -22,7 +22,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111790957,
+        "emittedAtMs": 1792116991552,
         "error": null,
         "eventId": "turn-wave15-wire:1",
         "eventType": "turn.created",
@@ -178,7 +178,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111790958,
+        "emittedAtMs": 1792116991553,
         "error": null,
         "eventId": "turn-wave15-wire:2",
         "eventType": "turn.model_call_started",
@@ -238,13 +238,13 @@
       "payload": {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791025,
+        "emittedAtMs": 1792116991690,
         "error": null,
         "eventId": "turn-wave15-wire:3",
         "eventType": "turn.output_delta",
         "eventVersion": "turn-event-v1",
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 150,
         "hookTraceRecords": null,
         "inputTokens": null,
         "kind": "delta",
@@ -294,7 +294,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791031,
+        "emittedAtMs": 1792116991726,
         "error": null,
         "eventId": "turn-wave15-wire:4",
         "eventType": "turn.trace_updated",
@@ -371,7 +371,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791031,
+        "emittedAtMs": 1792116991726,
         "error": null,
         "eventId": "turn-wave15-wire:5",
         "eventType": "turn.tool_call_started",
@@ -556,7 +556,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791032,
+        "emittedAtMs": 1792116991727,
         "error": null,
         "eventId": "turn-wave15-wire:6",
         "eventType": "turn.tool_call_completed",
@@ -787,7 +787,7 @@
             "cacheHitInputTokens": null,
             "error": null,
             "fallbackReason": null,
-            "firstTokenLatencyMs": 74,
+            "firstTokenLatencyMs": 150,
             "id": "model-6",
             "inputTokens": null,
             "kind": "call_model",
@@ -835,7 +835,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791032,
+        "emittedAtMs": 1792116991727,
         "error": null,
         "eventId": "turn-wave15-wire:7",
         "eventType": "turn.trace_updated",
@@ -912,7 +912,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791032,
+        "emittedAtMs": 1792116991727,
         "error": null,
         "eventId": "turn-wave15-wire:8",
         "eventType": "turn.model_call_started",
@@ -1005,7 +1005,7 @@
       "payload": {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791088,
+        "emittedAtMs": 1792116991963,
         "error": null,
         "eventId": "turn-wave15-wire:9",
         "eventType": "turn.output_delta",
@@ -1044,7 +1044,7 @@
       "payload": {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791089,
+        "emittedAtMs": 1792116991964,
         "error": null,
         "eventId": "turn-wave15-wire:10",
         "eventType": "turn.output_delta",
@@ -1083,19 +1083,48 @@
       "payload": {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791089,
+        "emittedAtMs": 1792116991965,
         "error": null,
         "eventId": "turn-wave15-wire:11",
         "eventType": "turn.hop_complete",
         "eventVersion": "turn-event-v1",
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 150,
         "hookTraceRecords": null,
         "inputTokens": 710000,
         "kind": "hop_complete",
         "outputTokens": 110,
         "phase": "streaming_response",
-        "providerCallRecords": null,
+        "providerCallRecords": [
+          {
+            "cacheHitInputTokens": null,
+            "cacheMissInputTokens": null,
+            "firstTokenLatencyMs": 135,
+            "inputTokens": 350000,
+            "latencyKind": "provider_stream",
+            "outputTokens": 50,
+            "providerMode": "live",
+            "providerSource": "provider_decision_stream",
+            "reasoningTokens": null,
+            "requestKind": "initial_request",
+            "totalTokens": 350050,
+            "turnDurationMs": 137
+          },
+          {
+            "cacheHitInputTokens": null,
+            "cacheMissInputTokens": null,
+            "firstTokenLatencyMs": 229,
+            "inputTokens": 360000,
+            "latencyKind": "provider_stream",
+            "outputTokens": 60,
+            "providerMode": "live",
+            "providerSource": "provider_followup_stream",
+            "reasoningTokens": null,
+            "requestKind": "tool_followup",
+            "totalTokens": 360060,
+            "turnDurationMs": 237
+          }
+        ],
         "providerMode": "live",
         "providerModel": "gpt-5.4",
         "providerName": "test-openai",
@@ -1113,7 +1142,7 @@
         "totalTokens": 710110,
         "traceSteps": null,
         "traceTimeline": null,
-        "turnDurationMs": 138,
+        "turnDurationMs": 426,
         "turnId": "turn-wave15-wire"
       }
     },
@@ -1139,7 +1168,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791090,
+        "emittedAtMs": 1792116991965,
         "error": null,
         "eventId": "turn-wave15-wire:12",
         "eventType": "turn.trace_updated",
@@ -1216,7 +1245,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791090,
+        "emittedAtMs": 1792116991966,
         "error": null,
         "eventId": "turn-wave15-wire:13",
         "eventType": "turn.tool_call_started",
@@ -1544,7 +1573,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791090,
+        "emittedAtMs": 1792116991967,
         "error": null,
         "eventId": "turn-wave15-wire:14",
         "eventType": "turn.tool_call_completed",
@@ -1918,7 +1947,7 @@
             "cacheHitInputTokens": null,
             "error": null,
             "fallbackReason": null,
-            "firstTokenLatencyMs": 74,
+            "firstTokenLatencyMs": 150,
             "id": "model-9",
             "inputTokens": null,
             "kind": "call_model",
@@ -1966,7 +1995,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791090,
+        "emittedAtMs": 1792116991967,
         "error": null,
         "eventId": "turn-wave15-wire:15",
         "eventType": "turn.trace_updated",
@@ -2043,7 +2072,7 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791091,
+        "emittedAtMs": 1792116991967,
         "error": null,
         "eventId": "turn-wave15-wire:16",
         "eventType": "turn.model_call_started",
@@ -2168,7 +2197,7 @@
       "payload": {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791147,
+        "emittedAtMs": 1792116992198,
         "error": null,
         "eventId": "turn-wave15-wire:17",
         "eventType": "turn.output_delta",
@@ -2207,7 +2236,7 @@
       "payload": {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791148,
+        "emittedAtMs": 1792116992200,
         "error": null,
         "eventId": "turn-wave15-wire:18",
         "eventType": "turn.output_delta",
@@ -2246,19 +2275,62 @@
       "payload": {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791148,
+        "emittedAtMs": 1792116992201,
         "error": null,
         "eventId": "turn-wave15-wire:19",
         "eventType": "turn.hop_complete",
         "eventVersion": "turn-event-v1",
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 150,
         "hookTraceRecords": null,
         "inputTokens": 1080000,
         "kind": "hop_complete",
         "outputTokens": 210,
         "phase": "streaming_response",
-        "providerCallRecords": null,
+        "providerCallRecords": [
+          {
+            "cacheHitInputTokens": null,
+            "cacheMissInputTokens": null,
+            "firstTokenLatencyMs": 135,
+            "inputTokens": 350000,
+            "latencyKind": "provider_stream",
+            "outputTokens": 50,
+            "providerMode": "live",
+            "providerSource": "provider_decision_stream",
+            "reasoningTokens": null,
+            "requestKind": "initial_request",
+            "totalTokens": 350050,
+            "turnDurationMs": 137
+          },
+          {
+            "cacheHitInputTokens": null,
+            "cacheMissInputTokens": null,
+            "firstTokenLatencyMs": 229,
+            "inputTokens": 360000,
+            "latencyKind": "provider_stream",
+            "outputTokens": 60,
+            "providerMode": "live",
+            "providerSource": "provider_followup_stream",
+            "reasoningTokens": null,
+            "requestKind": "tool_followup",
+            "totalTokens": 360060,
+            "turnDurationMs": 237
+          },
+          {
+            "cacheHitInputTokens": null,
+            "cacheMissInputTokens": null,
+            "firstTokenLatencyMs": 231,
+            "inputTokens": 370000,
+            "latencyKind": "provider_stream",
+            "outputTokens": 100,
+            "providerMode": "live",
+            "providerSource": "provider_followup_stream",
+            "reasoningTokens": null,
+            "requestKind": "tool_followup",
+            "totalTokens": 370100,
+            "turnDurationMs": 233
+          }
+        ],
         "providerMode": "live",
         "providerModel": "gpt-5.4",
         "providerName": "test-openai",
@@ -2276,7 +2348,7 @@
         "totalTokens": 1080210,
         "traceSteps": null,
         "traceTimeline": null,
-        "turnDurationMs": 197,
+        "turnDurationMs": 661,
         "turnId": "turn-wave15-wire"
       }
     },
@@ -2285,19 +2357,62 @@
       "payload": {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791150,
+        "emittedAtMs": 1792116992203,
         "error": null,
         "eventId": "turn-wave15-wire:20",
         "eventType": "turn.output_end",
         "eventVersion": "turn-event-v1",
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 150,
         "hookTraceRecords": null,
         "inputTokens": 1080000,
         "kind": "output_end",
         "outputTokens": 210,
         "phase": "streaming_response",
-        "providerCallRecords": null,
+        "providerCallRecords": [
+          {
+            "cacheHitInputTokens": null,
+            "cacheMissInputTokens": null,
+            "firstTokenLatencyMs": 135,
+            "inputTokens": 350000,
+            "latencyKind": "provider_stream",
+            "outputTokens": 50,
+            "providerMode": "live",
+            "providerSource": "provider_decision_stream",
+            "reasoningTokens": null,
+            "requestKind": "initial_request",
+            "totalTokens": 350050,
+            "turnDurationMs": 137
+          },
+          {
+            "cacheHitInputTokens": null,
+            "cacheMissInputTokens": null,
+            "firstTokenLatencyMs": 229,
+            "inputTokens": 360000,
+            "latencyKind": "provider_stream",
+            "outputTokens": 60,
+            "providerMode": "live",
+            "providerSource": "provider_followup_stream",
+            "reasoningTokens": null,
+            "requestKind": "tool_followup",
+            "totalTokens": 360060,
+            "turnDurationMs": 237
+          },
+          {
+            "cacheHitInputTokens": null,
+            "cacheMissInputTokens": null,
+            "firstTokenLatencyMs": 231,
+            "inputTokens": 370000,
+            "latencyKind": "provider_stream",
+            "outputTokens": 100,
+            "providerMode": "live",
+            "providerSource": "provider_followup_stream",
+            "reasoningTokens": null,
+            "requestKind": "tool_followup",
+            "totalTokens": 370100,
+            "turnDurationMs": 233
+          }
+        ],
         "providerMode": "live",
         "providerModel": "gpt-5.4",
         "providerName": "test-openai",
@@ -2315,7 +2430,7 @@
         "totalTokens": 1080210,
         "traceSteps": null,
         "traceTimeline": null,
-        "turnDurationMs": 199,
+        "turnDurationMs": 663,
         "turnId": "turn-wave15-wire"
       }
     },
@@ -2341,13 +2456,13 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791150,
+        "emittedAtMs": 1792116992203,
         "error": null,
         "eventId": "turn-wave15-wire:21",
         "eventType": "turn.phase_changed",
         "eventVersion": "turn-event-v1",
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 150,
         "hookTraceRecords": null,
         "inputTokens": 1080000,
         "kind": "phase",
@@ -2357,7 +2472,7 @@
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 66,
+            "firstTokenLatencyMs": 135,
             "inputTokens": 350000,
             "latencyKind": "provider_stream",
             "outputTokens": 50,
@@ -2366,12 +2481,12 @@
             "reasoningTokens": null,
             "requestKind": "initial_request",
             "totalTokens": 350050,
-            "turnDurationMs": 67
+            "turnDurationMs": 137
           },
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 55,
+            "firstTokenLatencyMs": 229,
             "inputTokens": 360000,
             "latencyKind": "provider_stream",
             "outputTokens": 60,
@@ -2380,12 +2495,12 @@
             "reasoningTokens": null,
             "requestKind": "tool_followup",
             "totalTokens": 360060,
-            "turnDurationMs": 56
+            "turnDurationMs": 237
           },
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 56,
+            "firstTokenLatencyMs": 231,
             "inputTokens": 370000,
             "latencyKind": "provider_stream",
             "outputTokens": 100,
@@ -2394,7 +2509,7 @@
             "reasoningTokens": null,
             "requestKind": "tool_followup",
             "totalTokens": 370100,
-            "turnDurationMs": 57
+            "turnDurationMs": 233
           }
         ],
         "providerMode": "live",
@@ -2500,7 +2615,7 @@
           }
         ],
         "traceTimeline": null,
-        "turnDurationMs": 199,
+        "turnDurationMs": 663,
         "turnId": "turn-wave15-wire"
       }
     },
@@ -2526,13 +2641,13 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791150,
+        "emittedAtMs": 1792116992203,
         "error": null,
         "eventId": "turn-wave15-wire:22",
         "eventType": "turn.checkpoint_persisted",
         "eventVersion": "turn-event-v1",
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 150,
         "hookTraceRecords": [],
         "inputTokens": 1080000,
         "kind": "checkpoint",
@@ -2542,7 +2657,7 @@
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 66,
+            "firstTokenLatencyMs": 135,
             "inputTokens": 350000,
             "latencyKind": "provider_stream",
             "outputTokens": 50,
@@ -2551,12 +2666,12 @@
             "reasoningTokens": null,
             "requestKind": "initial_request",
             "totalTokens": 350050,
-            "turnDurationMs": 67
+            "turnDurationMs": 137
           },
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 55,
+            "firstTokenLatencyMs": 229,
             "inputTokens": 360000,
             "latencyKind": "provider_stream",
             "outputTokens": 60,
@@ -2565,12 +2680,12 @@
             "reasoningTokens": null,
             "requestKind": "tool_followup",
             "totalTokens": 360060,
-            "turnDurationMs": 56
+            "turnDurationMs": 237
           },
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 56,
+            "firstTokenLatencyMs": 231,
             "inputTokens": 370000,
             "latencyKind": "provider_stream",
             "outputTokens": 100,
@@ -2579,7 +2694,7 @@
             "reasoningTokens": null,
             "requestKind": "tool_followup",
             "totalTokens": 370100,
-            "turnDurationMs": 57
+            "turnDurationMs": 233
           }
         ],
         "providerMode": "live",
@@ -2685,7 +2800,7 @@
           }
         ],
         "traceTimeline": null,
-        "turnDurationMs": 199,
+        "turnDurationMs": 663,
         "turnId": "turn-wave15-wire"
       }
     },
@@ -2711,13 +2826,13 @@
           "volatileInputText": "[0] user\nwave-15 三跳 token 口径验收"
         },
         "cacheHitInputTokens": null,
-        "emittedAtMs": 1792111791151,
+        "emittedAtMs": 1792116992206,
         "error": null,
         "eventId": "turn-wave15-wire:23",
         "eventType": "turn.completed",
         "eventVersion": "turn-event-v1",
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 150,
         "hookTraceRecords": [
           {
             "blocked": false,
@@ -2800,7 +2915,7 @@
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 66,
+            "firstTokenLatencyMs": 135,
             "inputTokens": 350000,
             "latencyKind": "provider_stream",
             "outputTokens": 50,
@@ -2809,12 +2924,12 @@
             "reasoningTokens": null,
             "requestKind": "initial_request",
             "totalTokens": 350050,
-            "turnDurationMs": 67
+            "turnDurationMs": 137
           },
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 55,
+            "firstTokenLatencyMs": 229,
             "inputTokens": 360000,
             "latencyKind": "provider_stream",
             "outputTokens": 60,
@@ -2823,12 +2938,12 @@
             "reasoningTokens": null,
             "requestKind": "tool_followup",
             "totalTokens": 360060,
-            "turnDurationMs": 56
+            "turnDurationMs": 237
           },
           {
             "cacheHitInputTokens": null,
             "cacheMissInputTokens": null,
-            "firstTokenLatencyMs": 56,
+            "firstTokenLatencyMs": 231,
             "inputTokens": 370000,
             "latencyKind": "provider_stream",
             "outputTokens": 100,
@@ -2837,7 +2952,7 @@
             "reasoningTokens": null,
             "requestKind": "tool_followup",
             "totalTokens": 370100,
-            "turnDurationMs": 57
+            "turnDurationMs": 233
           }
         ],
         "providerMode": "live",
@@ -3000,12 +3115,12 @@
             "cacheHitInputTokens": null,
             "error": null,
             "fallbackReason": null,
-            "firstTokenLatencyMs": 74,
+            "firstTokenLatencyMs": 135,
             "id": "model-3",
-            "inputTokens": null,
+            "inputTokens": 350000,
             "kind": "call_model",
             "label": "CALL MODEL #1",
-            "outputTokens": null,
+            "outputTokens": 50,
             "providerMode": "live",
             "providerModel": "gpt-5.4",
             "providerName": "test-openai",
@@ -3018,8 +3133,8 @@
             "state": "completed",
             "text": "",
             "toolActivities": [],
-            "totalTokens": null,
-            "turnDurationMs": null
+            "totalTokens": 350050,
+            "turnDurationMs": 137
           },
           {
             "buildContextObservation": null,
@@ -3111,12 +3226,12 @@
             "cacheHitInputTokens": null,
             "error": null,
             "fallbackReason": null,
-            "firstTokenLatencyMs": null,
+            "firstTokenLatencyMs": 229,
             "id": "model-6",
-            "inputTokens": null,
+            "inputTokens": 360000,
             "kind": "call_model",
             "label": "CALL MODEL #2",
-            "outputTokens": null,
+            "outputTokens": 60,
             "providerMode": "live",
             "providerModel": "gpt-5.4",
             "providerName": "test-openai",
@@ -3129,8 +3244,8 @@
             "state": "completed",
             "text": "继续读取 tauri.conf.json。",
             "toolActivities": [],
-            "totalTokens": null,
-            "turnDurationMs": null
+            "totalTokens": 360060,
+            "turnDurationMs": 237
           },
           {
             "buildContextObservation": null,
@@ -3222,12 +3337,12 @@
             "cacheHitInputTokens": null,
             "error": null,
             "fallbackReason": null,
-            "firstTokenLatencyMs": 74,
+            "firstTokenLatencyMs": 231,
             "id": "model-9",
-            "inputTokens": 1080000,
+            "inputTokens": 370000,
             "kind": "call_model",
             "label": "CALL MODEL #3",
-            "outputTokens": 210,
+            "outputTokens": 100,
             "providerMode": "live",
             "providerModel": "gpt-5.4",
             "providerName": "test-openai",
@@ -3240,15 +3355,15 @@
             "state": "completed",
             "text": "wave-15 三跳回合已返回最终答案。",
             "toolActivities": [],
-            "totalTokens": 1080210,
-            "turnDurationMs": 199
+            "totalTokens": 370100,
+            "turnDurationMs": 233
           },
           {
             "buildContextObservation": null,
             "cacheHitInputTokens": null,
             "error": null,
             "fallbackReason": null,
-            "firstTokenLatencyMs": 74,
+            "firstTokenLatencyMs": 150,
             "id": "checkpoint-10",
             "inputTokens": 1080000,
             "kind": "checkpoint_persist",
@@ -3267,10 +3382,10 @@
             "text": null,
             "toolActivities": [],
             "totalTokens": 1080210,
-            "turnDurationMs": 199
+            "turnDurationMs": 663
           }
         ],
-        "turnDurationMs": 199,
+        "turnDurationMs": 663,
         "turnId": "turn-wave15-wire"
       }
     }
@@ -3352,12 +3467,12 @@
       "cacheHitInputTokens": null,
       "error": null,
       "fallbackReason": null,
-      "firstTokenLatencyMs": 74,
+      "firstTokenLatencyMs": 135,
       "id": "model-3",
-      "inputTokens": null,
+      "inputTokens": 350000,
       "kind": "call_model",
       "label": "CALL MODEL #1",
-      "outputTokens": null,
+      "outputTokens": 50,
       "providerMode": "live",
       "providerModel": "gpt-5.4",
       "providerName": "test-openai",
@@ -3370,8 +3485,8 @@
       "state": "completed",
       "text": "",
       "toolActivities": [],
-      "totalTokens": null,
-      "turnDurationMs": null
+      "totalTokens": 350050,
+      "turnDurationMs": 137
     },
     {
       "buildContextObservation": null,
@@ -3463,12 +3578,12 @@
       "cacheHitInputTokens": null,
       "error": null,
       "fallbackReason": null,
-      "firstTokenLatencyMs": null,
+      "firstTokenLatencyMs": 229,
       "id": "model-6",
-      "inputTokens": null,
+      "inputTokens": 360000,
       "kind": "call_model",
       "label": "CALL MODEL #2",
-      "outputTokens": null,
+      "outputTokens": 60,
       "providerMode": "live",
       "providerModel": "gpt-5.4",
       "providerName": "test-openai",
@@ -3481,8 +3596,8 @@
       "state": "completed",
       "text": "继续读取 tauri.conf.json。",
       "toolActivities": [],
-      "totalTokens": null,
-      "turnDurationMs": null
+      "totalTokens": 360060,
+      "turnDurationMs": 237
     },
     {
       "buildContextObservation": null,
@@ -3574,12 +3689,12 @@
       "cacheHitInputTokens": null,
       "error": null,
       "fallbackReason": null,
-      "firstTokenLatencyMs": 74,
+      "firstTokenLatencyMs": 231,
       "id": "model-9",
-      "inputTokens": 1080000,
+      "inputTokens": 370000,
       "kind": "call_model",
       "label": "CALL MODEL #3",
-      "outputTokens": 210,
+      "outputTokens": 100,
       "providerMode": "live",
       "providerModel": "gpt-5.4",
       "providerName": "test-openai",
@@ -3592,15 +3707,15 @@
       "state": "completed",
       "text": "wave-15 三跳回合已返回最终答案。",
       "toolActivities": [],
-      "totalTokens": 1080210,
-      "turnDurationMs": 199
+      "totalTokens": 370100,
+      "turnDurationMs": 233
     },
     {
       "buildContextObservation": null,
       "cacheHitInputTokens": null,
       "error": null,
       "fallbackReason": null,
-      "firstTokenLatencyMs": 74,
+      "firstTokenLatencyMs": 150,
       "id": "checkpoint-10",
       "inputTokens": 1080000,
       "kind": "checkpoint_persist",
@@ -3619,7 +3734,7 @@
       "text": null,
       "toolActivities": [],
       "totalTokens": 1080210,
-      "turnDurationMs": 199
+      "turnDurationMs": 663
     }
   ],
   "persistedTurnTrace": {
@@ -3631,7 +3746,7 @@
     "eventType": null,
     "eventVersion": null,
     "fallbackReason": null,
-    "firstTokenLatencyMs": 74,
+    "firstTokenLatencyMs": 150,
     "hookTraceRecords": [
       {
         "blocked": false,
@@ -3715,7 +3830,7 @@
       {
         "cacheHitInputTokens": null,
         "cacheMissInputTokens": null,
-        "firstTokenLatencyMs": 66,
+        "firstTokenLatencyMs": 135,
         "inputTokens": 350000,
         "latencyKind": "provider_stream",
         "outputTokens": 50,
@@ -3724,12 +3839,12 @@
         "reasoningTokens": null,
         "requestKind": "initial_request",
         "totalTokens": 350050,
-        "turnDurationMs": 67
+        "turnDurationMs": 137
       },
       {
         "cacheHitInputTokens": null,
         "cacheMissInputTokens": null,
-        "firstTokenLatencyMs": 55,
+        "firstTokenLatencyMs": 229,
         "inputTokens": 360000,
         "latencyKind": "provider_stream",
         "outputTokens": 60,
@@ -3738,12 +3853,12 @@
         "reasoningTokens": null,
         "requestKind": "tool_followup",
         "totalTokens": 360060,
-        "turnDurationMs": 56
+        "turnDurationMs": 237
       },
       {
         "cacheHitInputTokens": null,
         "cacheMissInputTokens": null,
-        "firstTokenLatencyMs": 56,
+        "firstTokenLatencyMs": 231,
         "inputTokens": 370000,
         "latencyKind": "provider_stream",
         "outputTokens": 100,
@@ -3752,7 +3867,7 @@
         "reasoningTokens": null,
         "requestKind": "tool_followup",
         "totalTokens": 370100,
-        "turnDurationMs": 57
+        "turnDurationMs": 233
       }
     ],
     "providerMode": "live",
@@ -3913,12 +4028,12 @@
         "cacheHitInputTokens": null,
         "error": null,
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 135,
         "id": "model-3",
-        "inputTokens": null,
+        "inputTokens": 350000,
         "kind": "call_model",
         "label": "CALL MODEL #1",
-        "outputTokens": null,
+        "outputTokens": 50,
         "providerMode": "live",
         "providerModel": "gpt-5.4",
         "providerName": "test-openai",
@@ -3931,8 +4046,8 @@
         "state": "completed",
         "text": "",
         "toolActivities": [],
-        "totalTokens": null,
-        "turnDurationMs": null
+        "totalTokens": 350050,
+        "turnDurationMs": 137
       },
       {
         "buildContextObservation": null,
@@ -4024,12 +4139,12 @@
         "cacheHitInputTokens": null,
         "error": null,
         "fallbackReason": null,
-        "firstTokenLatencyMs": null,
+        "firstTokenLatencyMs": 229,
         "id": "model-6",
-        "inputTokens": null,
+        "inputTokens": 360000,
         "kind": "call_model",
         "label": "CALL MODEL #2",
-        "outputTokens": null,
+        "outputTokens": 60,
         "providerMode": "live",
         "providerModel": "gpt-5.4",
         "providerName": "test-openai",
@@ -4042,8 +4157,8 @@
         "state": "completed",
         "text": "继续读取 tauri.conf.json。",
         "toolActivities": [],
-        "totalTokens": null,
-        "turnDurationMs": null
+        "totalTokens": 360060,
+        "turnDurationMs": 237
       },
       {
         "buildContextObservation": null,
@@ -4135,12 +4250,12 @@
         "cacheHitInputTokens": null,
         "error": null,
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 231,
         "id": "model-9",
-        "inputTokens": 1080000,
+        "inputTokens": 370000,
         "kind": "call_model",
         "label": "CALL MODEL #3",
-        "outputTokens": 210,
+        "outputTokens": 100,
         "providerMode": "live",
         "providerModel": "gpt-5.4",
         "providerName": "test-openai",
@@ -4153,15 +4268,15 @@
         "state": "completed",
         "text": "wave-15 三跳回合已返回最终答案。",
         "toolActivities": [],
-        "totalTokens": 1080210,
-        "turnDurationMs": 199
+        "totalTokens": 370100,
+        "turnDurationMs": 233
       },
       {
         "buildContextObservation": null,
         "cacheHitInputTokens": null,
         "error": null,
         "fallbackReason": null,
-        "firstTokenLatencyMs": 74,
+        "firstTokenLatencyMs": 150,
         "id": "checkpoint-10",
         "inputTokens": 1080000,
         "kind": "checkpoint_persist",
@@ -4180,12 +4295,12 @@
         "text": null,
         "toolActivities": [],
         "totalTokens": 1080210,
-        "turnDurationMs": 199
+        "turnDurationMs": 663
       }
     ],
-    "turnDurationMs": 199,
+    "turnDurationMs": 663,
     "turnId": "turn-wave15-wire",
-    "updatedAt": 1792111791150
+    "updatedAt": 1792116992203
   },
   "phase": "red",
   "sessionId": "session-wave15-wire",

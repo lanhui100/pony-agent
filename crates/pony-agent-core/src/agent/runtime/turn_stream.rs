@@ -725,7 +725,11 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
-                None,
+                // Wave-15 R1（契约 §7.10）：hop_complete 携带本次已完成调用的
+                // per-call 记录（有序前缀）。push 在 :679、merge 在 :697、emit 在
+                // :706 属同一迭代——刚 push 的记录就是本次已完成调用，末条即最新；
+                // 既有累加字段语义不变。
+                Some(provider_call_records.clone()),
                 None,
                 None,
                 input.session_id.clone(),
@@ -979,7 +983,9 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
-                None,
+                // Wave-15 R1 扩展：末次调用的 per-call 记录由 turn:output_end 承载
+                // （此时 provider_call_records 已含本次调用；累加字段语义不变）。
+                Some(provider_call_records.clone()),
                 None,
                 None,
                 input.session_id.clone(),
@@ -1154,7 +1160,7 @@ impl AgentRuntime {
                 None,
             );
 
-            let completed_timeline = build_persisted_trace_timeline(
+            let completed_timeline = build_persisted_trace_timeline_with_provider_calls(
                 display_message,
                 "completed",
                 Some(provider_meta),
@@ -1174,6 +1180,8 @@ impl AgentRuntime {
                 persisted.total_tokens,
                 first_token_latency.get(),
                 turn_duration_ms,
+                // Wave-15 R2：per-call 记录按调用序号写入各 call_model 条目。
+                provider_call_records.as_slice(),
             );
             emit_stream_event(
                 sink,
@@ -2412,7 +2420,8 @@ impl AgentRuntime {
             None,
             None,
             None,
-            None,
+            // Wave-15 R1 扩展：单调用轮次输出结束即携带本次调用 per-call 记录。
+            Some(provider_call_records.clone()),
             None,
             None,
             input.session_id.clone(),
@@ -2584,7 +2593,7 @@ impl AgentRuntime {
             None,
         );
 
-        let completed_timeline = build_persisted_trace_timeline(
+        let completed_timeline = build_persisted_trace_timeline_with_provider_calls(
             display_message.as_str(),
             "completed",
             Some(&provider_meta),
@@ -2604,6 +2613,8 @@ impl AgentRuntime {
             persisted.total_tokens,
             first_token_latency_ms,
             turn_duration_ms,
+            // Wave-15 R2：单调用轮次的 per-call 记录同样按序号写入。
+            &provider_call_records,
         );
         emit_stream_event(
             sink,

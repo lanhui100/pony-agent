@@ -7,7 +7,12 @@ import {
   canonicalTraceTimelineKind,
   turnTimeline as projectedTurnTimeline
 } from "@/lib/runtime/trace-projection";
-import { resolveProviderReturnedCacheHitInputTokens } from "@/lib/runtime/trace";
+import { cloneProviderCallRecords, resolveProviderReturnedCacheHitInputTokens } from "@/lib/runtime/trace";
+import {
+  countTurnProviderCalls,
+  resolveCallGenerationSpeed,
+  resolveCurrentContextInputTokens
+} from "@/lib/runtime/token-metrics";
 
 export { canonicalTraceTimelineKind, projectedTurnTimeline };
 
@@ -37,30 +42,20 @@ function compareTurnTraceOrder(left: TurnTraceRecord, right: TurnTraceRecord) {
   return left.turnId.localeCompare(right.turnId);
 }
 
-/** 单次模型调用生成速度（token/s）：优先按生成期（扣除首 token 延迟）计算。 */
-function entryTokenGenerationSpeed(entry: TraceTimelineEntry, turn?: TurnTraceRecord | null): number | null {
-  const durationValue =
-    (entry.turnDurationMs != null && entry.turnDurationMs > 0 ? entry.turnDurationMs : null) ??
-    (entry.durationMs != null && entry.durationMs > 0 ? entry.durationMs : null) ??
-    (entry.durationSeconds != null && entry.durationSeconds > 0 ? Math.round(entry.durationSeconds * 1000) : null) ??
-    (turn?.turnDurationMs != null && turn.turnDurationMs > 0 ? turn.turnDurationMs : null) ??
-    null;
-
-  const outputTokens = entry.outputTokens ?? turn?.outputTokens ?? null;
-  if (outputTokens == null || durationValue == null || durationValue <= 0) {
-    return null;
-  }
-
-  const firstTokenLatencyMs = entry.firstTokenLatencyMs ?? turn?.firstTokenLatencyMs ?? null;
-  let durationMs: number;
-  if (firstTokenLatencyMs != null && durationValue - firstTokenLatencyMs > 0) {
-    durationMs = durationValue - firstTokenLatencyMs;
-  } else {
-    durationMs = Math.max(durationValue, 1);
-  }
-
-  const speed = outputTokens / (durationMs / 1000);
-  return Number.isFinite(speed) ? speed : null;
+/**
+ * S3 步骤 2：该轮 `call_model` 条目的 per-call 生成速度。
+ *
+ * `TraceTimelineEntry` 无 `latencyKind` 字段（§7.3），条目 TTFT 沿用既有 per-call 语义
+ * （R2 落地后条目携带自身 first_token_latency_ms），因此按 `provider_stream` 参与抵扣。
+ */
+function entryCallGenerationSpeed(entry: TraceTimelineEntry): number | null {
+  return resolveCallGenerationSpeed({
+    requestKind: "initial_request",
+    outputTokens: entry.outputTokens ?? null,
+    turnDurationMs: entry.turnDurationMs ?? null,
+    firstTokenLatencyMs: entry.firstTokenLatencyMs ?? null,
+    latencyKind: "provider_stream"
+  });
 }
 
 /** 整轮整体速度兜底（turn 级 outputTokens / turnDurationMs）。 */
@@ -118,6 +113,7 @@ export function useTraceProjection(options: {
 
   const {
     activeTurnId: runtimeActiveTurnId,
+    activeProviderCallRecords,
     error,
     fallbackReason,
     firstTokenLatencyMs,
@@ -178,6 +174,8 @@ export function useTraceProjection(options: {
       outputTokens: outputTokens.value,
       totalTokens: totalTokens.value,
       firstTokenLatencyMs: firstTokenLatencyMs.value,
+      // R3：活跃轮携带 per-call 记录，使 S1/S3 不再回退到 store 全局累计值。
+      providerCallRecords: cloneProviderCallRecords(activeProviderCallRecords.value),
       updatedAt: Date.now()
     };
   });
@@ -200,48 +198,9 @@ export function useTraceProjection(options: {
 
   const retrievedSessionContext = computed(() => retrievedContext.value?.sessionContext ?? null);
 
-  function extractPhysicalContextTokens(turn: TurnTraceRecord | null): number | null {
-    if (!turn) return null;
-    // 优先检查权威的 providerCallRecords：倒序寻找最近一次模型调用的真实 inputTokens
-    if (turn.providerCallRecords?.length) {
-      for (let i = turn.providerCallRecords.length - 1; i >= 0; i--) {
-        const record = turn.providerCallRecords[i];
-        if (record && record.inputTokens != null) {
-          return record.inputTokens;
-        }
-      }
-    }
-    const entries = turnTimelineCache.value.get(turn.turnId) ?? projectedTurnTimeline(turn);
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i];
-      if (canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.inputTokens != null) {
-        return entry.inputTokens;
-      }
-    }
-    // 若没有 call_model 条目指标，则回退到 turn 级 inputTokens
-    return turn.inputTokens ?? null;
-  }
-
-  const contextDisplayTokens = computed(() => {
-    // 优先从活跃/最近一轮中提取最后一次实际模型调用的物理 inputTokens（代表最新一次调用的真实上下文占用，避免多跳累加虚高）
-    const physicalTokens = extractPhysicalContextTokens(latestTurn.value);
-    if (physicalTokens != null) {
-      return physicalTokens;
-    }
-
-    // 正在提交中且当前 traceTimeline 有最新模型调用时，回退检查 traceTimeline 中的单次调用物理输入
-    if (isSubmitting.value && traceTimeline.value?.length) {
-      for (let i = traceTimeline.value.length - 1; i >= 0; i--) {
-        const entry = traceTimeline.value[i];
-        if (canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.inputTokens != null) {
-          return entry.inputTokens;
-        }
-      }
-    }
-
-    if (inputTokens.value != null) return inputTokens.value;
-    return null;
-  });
+  // S1（§7.6 冻结解析序）：当前上下文占用 = 最近一次已完成模型调用的 per-call input。
+  // 多调用轮且无任何 per-call 来源时返回 null（S4 纪律），严禁回退整轮累加值。
+  const contextDisplayTokens = computed(() => resolveCurrentContextInputTokens(latestTurn.value));
   const currentContextWindowTokens = computed(
     () =>
       retrievedSessionContext.value?.contextWindowTokens ??
@@ -307,48 +266,53 @@ export function useTraceProjection(options: {
   });
   const showContextUsage = computed(() => !!latestTurn.value);
 
-  // 当前模型生成速度（token/s）：严格取最近一个完成模型调用的生成速度。
-  // 必须只取单次模型调用的实际耗时与实际 outputTokens，严禁流式期间用累计 outputTokens 除以微小延迟导致虚高飙升。
-  const sessionTokenGenerationSpeed = computed<number | null>(() => {
-    const turns = orderedTurnTraces.value;
-    if (!turns.length) {
-      return null;
-    }
-
-    // 倒序寻找最近一轮包含有效生成速度指标的模型调用
-    for (let t = turns.length - 1; t >= 0; t--) {
-      const turn = turns[t]!;
-      // 如果当前是流式未结算的活跃轮，且尚未完成该次模型调用（没有稳定的 turnDurationMs），跳过进入已完成轮
-      if (turn.turnId === runtimeActiveTurnId.value && isSubmitting.value) {
-        // 仅当 timeline 中存在已完成（state === 'completed'）的 call_model 条目且带独立耗时时才读取
-        const entries = turnTimelineCache.value.get(turn.turnId) ?? [];
-        for (let i = entries.length - 1; i >= 0; i--) {
-          const entry = entries[i];
-          if (canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.state === "completed") {
-            const speed = entryTokenGenerationSpeed(entry, null);
-            if (speed != null) {
-              return speed;
-            }
-          }
-        }
+  /**
+   * S3（§7.6 冻结解析序，步骤 2–4 属调用方职责，§7.8）：
+   * 1) 最后一条已完成 provider call record（record 级解析 + 守卫在 token-metrics）；
+   * 2) 否则该轮最后一条 `call_model` 条目的 per-call 指标；
+   * 3) 否则仅当轮内 provider call 数 ≤ 1 时回退 turn 级 output/duration；
+   * 4) 否则 null（严禁用整轮累加 output / elapsed 计算）。
+   */
+  function resolveTurnCallGenerationSpeed(turn: TurnTraceRecord): number | null {
+    const records = turn.providerCallRecords ?? [];
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i];
+      if (!record) {
         continue;
       }
-
-      const entries = turnTimelineCache.value.get(turn.turnId) ?? [];
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const entry = entries[i];
-        if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
-          continue;
-        }
-        const speed = entryTokenGenerationSpeed(entry, turn);
-        if (speed != null) {
-          return speed;
-        }
+      const speed = resolveCallGenerationSpeed(record);
+      if (speed != null) {
+        return speed;
       }
+    }
 
-      const turnSpeed = turnTokenSpeed(turn);
-      if (turnSpeed != null) {
-        return turnSpeed;
+    const entries = turnTimelineCache.value.get(turn.turnId) ?? projectedTurnTimeline(turn);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]!;
+      if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
+        continue;
+      }
+      const speed = entryCallGenerationSpeed(entry);
+      if (speed != null) {
+        return speed;
+      }
+    }
+
+    if (countTurnProviderCalls(turn) <= 1) {
+      return turnTokenSpeed(turn);
+    }
+
+    return null;
+  }
+
+  // 当前模型生成速度（token/s）：最近一次已完成模型调用的 per-call 生成速度。
+  // 活跃轮只要收到该次调用的 per-call 记录即可产出，不等 turn:completed。
+  const sessionTokenGenerationSpeed = computed<number | null>(() => {
+    const turns = orderedTurnTraces.value;
+    for (let t = turns.length - 1; t >= 0; t--) {
+      const speed = resolveTurnCallGenerationSpeed(turns[t]!);
+      if (speed != null) {
+        return speed;
       }
     }
 

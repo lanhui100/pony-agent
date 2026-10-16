@@ -32,6 +32,7 @@ import type {
   HistoryStateAuditSummary,
   MessageStateDelta,
   MessageStateSnapshot,
+  ProviderCallCacheRecord,
   QueueDeliveryMode,
   ToolAuthorizationMode,
   QueuedMessageItem,
@@ -292,6 +293,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       outputTokens: persisted?.outputTokens ?? null,
       totalTokens: persisted?.totalTokens ?? null,
       firstTokenLatencyMs: persisted?.firstTokenLatencyMs ?? null,
+      /** R4/Wave-15：活跃轮 per-call 记录（最近一次模型调用的物理指标来源，非累加）。 */
+      activeProviderCallRecords: [] as ProviderCallCacheRecord[],
       isSubmitting: false,
       activeTurnId: null,
       activeTurnStartedAtMs: null,
@@ -504,6 +507,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = blankFields.outputTokens;
       this.totalTokens = blankFields.totalTokens;
       this.firstTokenLatencyMs = blankFields.firstTokenLatencyMs;
+      this.activeProviderCallRecords = [];
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.activeTurnStartedAtMs = null;
@@ -1408,6 +1412,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = restoredState?.outputTokens ?? blankFields.outputTokens;
       this.totalTokens = restoredState?.totalTokens ?? blankFields.totalTokens;
       this.firstTokenLatencyMs = restoredState?.firstTokenLatencyMs ?? blankFields.firstTokenLatencyMs;
+      this.activeProviderCallRecords = [];
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
       // 优化（PA-089）：切换会话时 traceTimeline 深拷贝延迟到 rIC——
@@ -1496,6 +1501,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
+      this.activeProviderCallRecords = [];
       this.clearSubmissionWatchdog();
       this.isSubmitting = false;
       this.activeTurnId = null;
@@ -2875,6 +2881,33 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.persistHistory();
       }
     },
+    /**
+     * R4/Wave-15：以事件携带的 per-call 记录维护「活跃轮最近一次已完成模型调用」的物理指标。
+     *
+     * - `reset=true`（新轮开始）：先复位列表；事件未携带记录时列表保持为空。
+     * - 携带记录时整体覆盖（不累加、幂等），并把活跃轮 `inputTokens` / `outputTokens`
+     *   置为该列表**末条**的 per-call 值。
+     * - 未携带记录时不触碰既有 token 值（严禁回退整轮累加值）。
+     */
+    applyActiveProviderCallRecords(
+      records: ProviderCallCacheRecord[] | null | undefined,
+      reset = false
+    ): void {
+      if (reset) {
+        this.activeProviderCallRecords = [];
+      }
+      if (records?.length) {
+        this.activeProviderCallRecords = cloneProviderCallRecords(records);
+      }
+
+      const lastRecord = this.activeProviderCallRecords[this.activeProviderCallRecords.length - 1];
+      if (lastRecord?.inputTokens != null) {
+        this.inputTokens = lastRecord.inputTokens;
+      }
+      if (lastRecord?.outputTokens != null) {
+        this.outputTokens = lastRecord.outputTokens;
+      }
+    },
     applyOutputEnd(payload: TurnStreamEvent) {
       this.flushBufferedStreamText(payload.turnId);
 
@@ -2906,8 +2939,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.providerSource = payload.providerSource ?? this.providerSource;
       this.providerMode = payload.providerMode ?? this.providerMode;
       this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
-      this.inputTokens = payload.inputTokens ?? this.inputTokens;
-      this.outputTokens = payload.outputTokens ?? this.outputTokens;
+      // R4/Wave-15：活跃轮 input/output 口径改为该次调用的 per-call 值（无记录时保持既有值）。
+      this.applyActiveProviderCallRecords(payload.providerCallRecords);
       this.totalTokens = payload.totalTokens ?? this.totalTokens;
       this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
       this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
@@ -3392,6 +3425,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.outputTokens = payload.outputTokens ?? this.outputTokens;
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+        // Wave-15 R4：新轮开始 → 复位上一轮残留的 per-call 记录（事件携带记录时以事件为准）。
+        this.applyActiveProviderCallRecords(payload.providerCallRecords, true);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
         this.publishTraceTimeline(resolveEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
@@ -3530,6 +3565,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
         this.flushPendingTraceTimeline();
+        // Wave-15 R4：携带 per-call 记录的事件（wire 实况：phase_changed 携带全量 3 条）刷新活跃轮记录。
+        this.applyActiveProviderCallRecords(payload.providerCallRecords);
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -3567,6 +3604,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
         this.flushPendingTraceTimeline();
+        // Wave-15 R4：携带 per-call 记录的事件刷新活跃轮记录。
+        this.applyActiveProviderCallRecords(payload.providerCallRecords);
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -3695,14 +3734,15 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.commitTurnEventCursor(payload);
         this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
-        this.inputTokens = payload.inputTokens ?? this.inputTokens;
-        this.outputTokens = payload.outputTokens ?? this.outputTokens;
+        // R4/Wave-15：hop 完成即产出该次调用的 per-call 值（不等 turn:completed）；无记录时保持既有值。
+        this.applyActiveProviderCallRecords(payload.providerCallRecords);
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         debugLog("event:hop_complete", {
           turnId: payload.turnId,
           inputTokens: payload.inputTokens ?? null,
-          outputTokens: payload.outputTokens ?? null
+          outputTokens: payload.outputTokens ?? null,
+          providerCallRecordCount: payload.providerCallRecords?.length ?? 0
         });
       });
 
@@ -3759,6 +3799,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.flushBufferedStreamText(payload.turnId);
         // terminal 事件：先冲刷节流挂起的 timeline，保证最终态完整
         this.flushPendingTraceTimeline();
+        // Wave-15 R4：终态事件（wire 实况携带全量 per-call 记录）刷新活跃轮记录。
+        this.applyActiveProviderCallRecords(payload.providerCallRecords);
 
         const completedPayloadRecord = payload as Record<string, unknown>;
 
@@ -4679,6 +4721,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
+      this.activeProviderCallRecords = [];
       this.fallbackReason = BROWSER_PREVIEW_FALLBACK_REASON;
 
       await wait(120);
@@ -4903,6 +4946,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
+      this.activeProviderCallRecords = [];
       this.traceSteps = createSubmitTraceSteps();
       this.publishTraceTimeline(applyProviderPatchToTraceTimeline(
         createDefaultTraceTimeline(),

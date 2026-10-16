@@ -1,0 +1,12 @@
+{
+  "verdict": "PASS",
+  "findings": [],
+  "reviewer_perspective": "L3-B 协议一致性/解析器漂移/口径契约",
+  "scope": "wave-15 S1/S3/R1/R2 契约实现与 UI 接线",
+  "checks": [
+    "S1 严禁返回跨跳累加值；RC3 伪聚合记录前置拦截严密；单调用轮次走步骤 1 正确",
+    "S3 record.turnDurationMs 按单次调用耗时使用；TTFT 仅 provider_stream 抵扣；畸形耗时防护无 NaN/Infinity/负数",
+    "R2 序号对齐与 records 为空时的 legacy 行为保持",
+    "hop_complete/output_end 均携带 provider_call_records；状态栏「输入」与圆环同源（S1）"
+  ]
+}

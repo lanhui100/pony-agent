@@ -19,7 +19,8 @@ defineProps<{
   modelCallCount: number;
   toolCallCount: number;
   copied: boolean;
-  inputTokensTotal: number;
+  /** Wave-15 S1：当前上下文占用（最近一次模型调用 input_tokens），无 per-call 来源时为 null（显示 0）。 */
+  inputTokensTotal: number | null;
   outputTokensTotal: number;
   cacheHitTokensTotal: number;
   cacheHitRatio: string;
@@ -89,12 +90,16 @@ function formatTokenSpeed(value?: number | null) {
       <div class="rounded-[0.45rem] bg-[#f6f0e8] px-3 py-2">
         <!-- Token metrics -->
         <div class="flex items-center justify-around text-[11px] leading-5 text-stone-600">
-          <Tooltip text="输入">
-            <span class="inline-flex items-center gap-1">
+          <!-- Wave-15 S1：「输入」口径 = 当前上下文占用（最近一次模型调用的 input_tokens），
+               非会话累计（S2 保留在消息级 tokenCount / 统计汇总）。 -->
+          <span class="inline-flex items-center gap-1">
+            <Tooltip text="输入">
               <ArrowUp class="h-3 w-3 text-stone-400" />
-              {{ formatCompactInteger(inputTokensTotal) || "0" }}
-            </span>
-          </Tooltip>
+            </Tooltip>
+            <Tooltip text="上下文输入（最近一次模型调用）">
+              <span>{{ formatCompactInteger(inputTokensTotal) || "0" }}</span>
+            </Tooltip>
+          </span>
           <Tooltip text="输出">
             <span class="inline-flex items-center gap-1">
               <ArrowDown class="h-3 w-3 text-stone-400" />

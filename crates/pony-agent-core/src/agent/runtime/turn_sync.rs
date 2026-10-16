@@ -905,7 +905,7 @@ impl AgentRuntime {
             &terminal_envelope,
         );
 
-        let trace_timeline = build_persisted_trace_timeline(
+        let trace_timeline = build_persisted_trace_timeline_with_provider_calls(
             display_message.as_str(),
             "completed",
             Some(&provider_meta),
@@ -925,6 +925,8 @@ impl AgentRuntime {
             persisted.total_tokens,
             first_token_latency_ms,
             turn_duration_ms,
+            // Wave-15 R2：同步入口同一序号映射（初始调用 + followup）。
+            &provider_call_records,
         );
 
         let mut result = TurnResult {

@@ -512,6 +512,8 @@ pub(super) fn build_stream_progress_trace_timeline(
     timeline
 }
 
+/// Wave-15 R2：legacy 兼容入口（无 per-call provider 记录）——签名保持不变，
+/// 薄委托给 `build_persisted_trace_timeline_with_provider_calls(..., &[])`。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_persisted_trace_timeline(
     _user_message: &str,
@@ -533,6 +535,59 @@ pub(super) fn build_persisted_trace_timeline(
     total_tokens: Option<u64>,
     first_token_latency_ms: Option<u64>,
     turn_duration_ms: Option<u64>,
+) -> Vec<TraceTimelineEntry> {
+    build_persisted_trace_timeline_with_provider_calls(
+        _user_message,
+        phase,
+        provider_meta,
+        provider_source,
+        provider_mode,
+        build_context_observation,
+        tool_activities,
+        completed_model_hops,
+        return_text,
+        return_reasoning_content,
+        fallback_reason,
+        error,
+        input_tokens,
+        cache_hit_input_tokens,
+        reasoning_tokens,
+        output_tokens,
+        total_tokens,
+        first_token_latency_ms,
+        turn_duration_ms,
+        &[],
+    )
+}
+
+/// Wave-15 R2：带 per-call provider 记录的 timeline 构建器。每条 `call_model`
+/// 条目按序号（= 模型调用序号，与 `provider_call_records` 构造顺序一致：初始调用
+/// 在前、每次 tool followup 递增）写入其**自身** input/cache/reasoning/output/
+/// total/TTFT/duration；整轮聚合只允许由 `checkpoint_persist`（及轮级记录）承载，
+/// **严禁**覆盖 per-call 条目。`provider_call_records` 为空时保留 legacy 行为
+/// （末条 call_model 承接整轮聚合）。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_persisted_trace_timeline_with_provider_calls(
+    _user_message: &str,
+    phase: &str,
+    provider_meta: Option<&ProviderEventMeta>,
+    provider_source: Option<&str>,
+    provider_mode: Option<&str>,
+    build_context_observation: Option<&BuildContextObservation>,
+    tool_activities: &[TurnToolActivity],
+    completed_model_hops: &[ModelHopTraceContent],
+    return_text: Option<&str>,
+    return_reasoning_content: Option<&str>,
+    fallback_reason: Option<&str>,
+    error: Option<&str>,
+    input_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    provider_call_records: &[ProviderCallCacheRecord],
 ) -> Vec<TraceTimelineEntry> {
     let terminal_state = timeline_state_for_phase(phase);
     let tool_hops = top_level_tool_activities(tool_activities);
@@ -610,6 +665,10 @@ pub(super) fn build_persisted_trace_timeline(
 
     for model_index in 0..model_hops {
         let completed_model_hop = completed_model_hops.get(model_index);
+        // Wave-15 R2：本条 call_model 对应的 per-call provider 记录（按调用序号）；
+        // records 为空（legacy）或条目数多于记录数时为 None——此时该条目不带
+        // per-call 指标，绝不回填整轮聚合值。
+        let per_call = provider_call_records.get(model_index);
         let state = if phase == "failed" && model_index + 1 == model_hops {
             "error".to_string()
         } else if phase == "cancelled" && model_index + 1 == model_hops {
@@ -636,17 +695,20 @@ pub(super) fn build_persisted_trace_timeline(
             reasoning_content: completed_model_hop.and_then(|hop| hop.reasoning_content.clone()),
             fallback_reason: None,
             error: None,
-            input_tokens: None,
-            cache_hit_input_tokens: None,
-            reasoning_tokens: None,
-            output_tokens: None,
-            total_tokens: None,
-            first_token_latency_ms: if model_index == 0 {
-                first_token_latency_ms
-            } else {
-                None
+            input_tokens: per_call.and_then(|record| record.input_tokens),
+            cache_hit_input_tokens: per_call.and_then(|record| record.cache_hit_input_tokens),
+            reasoning_tokens: per_call.and_then(|record| record.reasoning_tokens),
+            output_tokens: per_call.and_then(|record| record.output_tokens),
+            total_tokens: per_call.and_then(|record| record.total_tokens),
+            // TTFT：优先 per-call 自身值（§7.2 仅 provider_stream 有值）；
+            // 无记录时沿用 legacy——首条承接轮级首 token 延迟，其余 None。
+            first_token_latency_ms: match per_call.and_then(|record| record.first_token_latency_ms) {
+                Some(latency) => Some(latency),
+                None if model_index == 0 => first_token_latency_ms,
+                None => None,
             },
-            turn_duration_ms: None,
+            // 本次调用耗时（ProviderCallCacheRecord.turn_duration_ms 即 per-call 语义）。
+            turn_duration_ms: per_call.and_then(|record| record.turn_duration_ms),
         });
         sequence += 1;
 
@@ -746,13 +808,18 @@ pub(super) fn build_persisted_trace_timeline(
         last_model_entry.reasoning_content = return_reasoning_content.map(str::to_string);
         last_model_entry.fallback_reason = fallback_reason.map(str::to_string);
         last_model_entry.error = error.map(str::to_string);
-        last_model_entry.input_tokens = input_tokens;
-        last_model_entry.cache_hit_input_tokens = cache_hit_input_tokens;
-        last_model_entry.reasoning_tokens = reasoning_tokens;
-        last_model_entry.output_tokens = output_tokens;
-        last_model_entry.total_tokens = total_tokens;
-        last_model_entry.first_token_latency_ms = first_token_latency_ms;
-        last_model_entry.turn_duration_ms = turn_duration_ms;
+        // Wave-15 R2：整轮聚合只允许落在 `checkpoint_persist`（及轮级记录）上。
+        // 有 per-call 记录时，末条 call_model 保留循环中写入的自身指标，
+        // **严禁**被整轮聚合覆盖；无记录（legacy）时保持原行为不变。
+        if provider_call_records.is_empty() {
+            last_model_entry.input_tokens = input_tokens;
+            last_model_entry.cache_hit_input_tokens = cache_hit_input_tokens;
+            last_model_entry.reasoning_tokens = reasoning_tokens;
+            last_model_entry.output_tokens = output_tokens;
+            last_model_entry.total_tokens = total_tokens;
+            last_model_entry.first_token_latency_ms = first_token_latency_ms;
+            last_model_entry.turn_duration_ms = turn_duration_ms;
+        }
     }
 
     if phase == "completed" {

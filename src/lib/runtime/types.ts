@@ -14,6 +14,7 @@ import type {
   HistoryCursorMode,
   HistoryNode,
   HistoryStateAuditSummary,
+  ProviderCallCacheRecord,
   RetrievedContextState,
   RunControlAuditSummary,
   RuntimePhase,
@@ -66,6 +67,8 @@ export type RuntimeState = {
   outputTokens: number | null;
   totalTokens: number | null;
   firstTokenLatencyMs: number | null;
+  /** Wave-15 R4：活跃轮 per-call 记录（最近一次已完成模型调用的物理指标来源，非累加）。 */
+  activeProviderCallRecords: ProviderCallCacheRecord[];
   isSubmitting: boolean;
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];

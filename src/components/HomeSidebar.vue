@@ -37,7 +37,6 @@ const {
   currentContextWindowTokens,
   sessionCacheHitRatio,
   sessionCacheHitTokensTotal,
-  sessionInputTokensTotal,
   sessionModelCallCount,
   sessionOutputTokensTotal,
   sessionToolCallCount,
@@ -68,13 +67,14 @@ onBeforeUnmount(() => {
   <aside class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/62">
     <ScrollArea class="min-h-0 flex-1" viewport-class="px-4 pt-10 pb-4">
       <div class="flex min-h-full flex-col gap-3">
+        <!-- Wave-15 S1：状态栏「输入」= 当前上下文占用（最近一次模型调用）；S2 会话累计口径保留在 sessionInputTokensTotal。 -->
         <HomeStatusPanel
           :session-id="sessionId"
           :turn-count="sessionTurnCount"
           :model-call-count="sessionModelCallCount"
           :tool-call-count="sessionToolCallCount"
           :copied="copiedKey === 'session-id'"
-          :input-tokens-total="sessionInputTokensTotal"
+          :input-tokens-total="contextDisplayTokens"
           :output-tokens-total="sessionOutputTokensTotal"
           :cache-hit-tokens-total="sessionCacheHitTokensTotal"
           :cache-hit-ratio="sessionCacheHitRatio"
