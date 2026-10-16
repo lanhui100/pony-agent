@@ -474,15 +474,24 @@
       "branches": {
         "credential": {
           "red_commit": "d3ae148",
+          "green_commit": "f1d1a3f",
+          "status": "green_round1_review_failed",
+          "quarantine": false
+        },
+        "credential-fix": {
+          "red_commit": null,
           "green_commit": null,
-          "status": "red_frozen",
+          "status": "in_progress",
           "quarantine": false
         }
       },
       "tasks": {
         "task-1": "protocol: 冻结凭证契约 + NFR 基线 + 降级记录 — completed（r1→r2 升版含 C5）",
         "task-2": "test: 双模态红相 + 旧契约双副本迁移 + F1/C5 前端零 egress — completed（22 红相用例 + 变异敏感收据）",
-        "task-3": "executor: 实施凭证契约 + 扫描器规则 + 看板修正 — pending"
+        "task-3": "executor: 实施凭证契约 + 扫描器规则 + 看板修正 — pending",
+        "task-4": "protocol: 契约升版 wave18-r3（C2/C4 修订 + C6/C7/C8 新增 + 12 项裁定）— completed",
+        "task-5": "test: wave-18b 红相扩展（8 项 FIX）— in_progress",
+        "task-6": "executor: C2/C4/C6/C7/C8 修复 + R7 看板修正 — pending"
       },
       "gates": {
         "red_phase": {
@@ -502,13 +511,29 @@
           }
         },
         "green_phase": {
-          "status": "pending"
+          "status": "passed_round1",
+          "commit": "f1d1a3f",
+          "note": "task-3 实现全门禁绿；4 路 L3/L3-P 审查判 12 项 findings -> 进入 wave-18b 修复增量"
         },
         "join_barrier": {
-          "status": "pending"
+          "status": "partial",
+          "reviews": {
+            "l3-security": "FAIL(1)",
+            "l3-contract": "FAIL(4)",
+            "l3-scanner": "FAIL(5)",
+            "l3p": "FAIL(2)"
+          },
+          "reports": [
+            ".dev-team/review-l3-security-wave18.json",
+            ".dev-team/review-l3-contract-wave18.json",
+            ".dev-team/review-l3-scanner-wave18.json",
+            ".dev-team/review-l3p-wave18.json"
+          ]
         },
         "l3p_five_questions": {
-          "status": "pending"
+          "status": "FAIL",
+          "findings": 2,
+          "adjudication": "Q1 fetch 硬超时 -> C8 FIX；Q5 缺 .env.example -> C6 FIX"
         }
       },
       "counter": {
@@ -528,9 +553,13 @@
         "32-hex 短凭证扫描规则待独立评估（长度窗口/豁免口径）",
         "通用 password/DSN 扫描规则待评估（F2 明文 DSN 已止血但门禁未覆盖）",
         "tests/acceptance/ponysentry_telemetry_test.rs 孤儿死文件（cargo 不编译 + vitest 不收集）待删除或纳入编译目标",
-        "dev-stub-lint.py / dev-red-purity.py 未随 skill 安装（本波以 JSON 报告替代）"
+        "dev-stub-lint.py / dev-red-purity.py 未随 skill 安装（本波以 JSON 报告替代）",
+        "DEBT-W18-R4: package.json:39 secrets:check 用 --staged，脏工作区下 npm run verify 假绿（CI 与 pre-commit/pre-push 已覆盖 --all）",
+        "DEBT-W18-R7: 已在本波修复（看板 :23 假断言）",
+        "DEBT-W18-C7: Private Key 豁免由整文件收敛为有界窗口（当前行+最多3行上文）；更严格的块级语义待评估"
       ],
-      "status": "in_progress"
+      "status": "in_progress",
+      "evidence_gate_selfcatch": "pre-commit 新规则拦截了 .dev-team/review-l3-scanner-wave18.json 中 3 处真实 token 字面量（补盲生效物理凭证）；已脱敏为占位符并在报告内记录 evidence_redaction_note"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
