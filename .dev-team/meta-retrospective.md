@@ -123,3 +123,73 @@
 - 红相锚定 `f38b6b9`（tag `wave-15-red`）→ 重锚 `3475e53`；绿相 `5901ef4`（tag `wave-15`）。
 - 门禁：wave15 Rust 0 / 既有 Rust 回归 0 / `cargo check` 0 / `vue-tsc --noEmit` 0 / wave15 vitest 0（20 passed）/ 目标回归 0（46 passed,2 skipped）/ 全量 vitest 865 passed（唯一失败归因并发波次）/ 真实 Chrome 烟测 Console Error=0 + 2 截图。
 - 交付：`turn_stream.rs`(R1×2) / `trace_timeline.rs`(R2) / `turn_persist.rs` / `turn_sync.rs` / `token-metrics.ts`(S1/S3/S4) / `useTraceProjection.ts`(R3) / `stores/runtime.ts`(R4) / `HomeSidebar.vue` / `HomeStatusPanel.vue` / ADR 0035 / `docs/release/2026-10-16-wave15-token-metrics/`。
+
+---
+
+# Wave-17 元复盘（IME 组合态回车守卫 + 动态数字位宽稳定）
+
+> 复盘对象：本次 Agent Team 的**协作元框架与组织协议**。账本：`.dev-team/state-wave17.json`、契约 `.dev-team/contracts/wave-17-ime-and-numeric-jitter.md`、收据 `.dev-team/wave17-{red,green}-receipts.md` 与 `.dev-team/wave17-red-receipts-l2at.md`。
+> 名册：Lead + protocol-agent + test-agent + executor-a + executor-b（5/8）；Subagent 池派发 7 次（方案对抗 3 + L2-AT 1 + L3 互补 2 + L3-P 1）。
+> 熔断事件 0；NFR-DEGRADED 欠账 0。
+
+## 1. 通信拓扑与信噪比
+
+| 要素 | 实际 | 评价 |
+| :-- | :-- | :-- |
+| 拓扑公理映射 | 有状态（Protocol/Test/2×Executor）→ Teammate 上板；无状态封闭求值（方案对抗 3 + L2-AT 1 + L3 2 + L3-P 1）→ Subagent | **零失误**：7 路 Subagent 未占常驻槽位，名册 5/8 |
+| 零废话协议 | 7 路 Subagent 全部返回严格 JSON，机器 Schema 校验 `SCHEMA_ALL_OK=true` | **优**：零句吹捧；L3-B 每条 finding 附可复现探针（如 `PROBE-B {"inlineGuard":true,"extractedGuard":false}`），Lead 无需追问 |
+| 方案评审前置收益 | 3 路对抗评审把 6 条建议砍到 2 类缺陷，**否决 9 个子项**（4 项已实现 / 1 项跨层 / 2 项大范围重构 / 1 项非功能） | **本波最大收益**：避免约 19 文件 / 96 处颜色字面量的无收益重构 |
+| 结构性浪费① | 方案评审 C 路（状态机与风险）与 A 路结论高度重叠（都判「已实现」） | 3 路 → 有效独立结论 2.3 路；视角按「建议条目」而非「技术面」切分导致重叠 |
+| 结构性浪费② | L3-B 3 条 finding 全部裁决「接受不改」 | 3 findings / 0 修复；但 2 条转化为 backlog PA-135/136，属债务显式化而非纯噪声 |
+| 结构性浪费③ | L2-AT Subagent **无 `team_task_*` 工具**，无法 claim/complete | Lead 代收口 1 次（见 §4.3） |
+| Token 产出比 | `src/` 净产出 101 行；过程产物 ≈ 20 倍 | 对「跨模块契约 + 用户可见行为」可接受（产出 1 篇 ADR + 7 条 backlog）；同类缺陷反复出现应走 A 级快速路径 |
+
+## 2. 门禁穿透与误杀率
+
+**核心结论：独立测试分权制真实生效——3 次拦截全部指向 Lead 或 Test Agent 自己的产出，0 条实现缺陷。**
+
+| # | 拦截者 | 被拦截对象 | 机械证据 | 性质 |
+| :-- | :-- | :-- | :-- | :-- |
+| 1 | **Test Agent** | **Lead 编写的契约 C2-2** | 原口径「9→12→1234 宽度变化 ≤0.5px」物理不可满足：基线 Δ=17px，注入 `tabular-nums` 后 Δ=21px；等位数异字形才可归零（Δ=4px→0） | 契约缺陷 **REV-1** |
+| 2 | **Executor A** | **Test Agent 冻结的 L2-AT 用例** | `toBe(rawObject)` 对 Pinia reactive Proxy 恒假；仓库外探针 `{"activeAskIsProxy":true,"toRawActiveAskIsRaw":true,"deepEqual":true}` | 测试缺陷 **REV-2** |
+| 3 | **Lead（目视）** | **Test Agent 的 C3-3 物理凭据** | 截图实为启动闪屏；原断言仅「文件存在且 >10KB」，**无法证伪拍到闪屏** | 测试缺陷 **REV-3** |
+
+- **假绿风险与被堵住的具体形态**：
+  - REV-3 是方法论级发现——`existsSync + size>10KB` 形式的「物理凭据」可被**完全无关的画面**满足；Playwright `toBeVisible()` 对**被全屏遮罩覆盖**的元素仍判可见。修复不是加断言数量，而是引入**遮挡命中证伪器**（`document.elementFromPoint()`）：闪屏在场时命中 `div#app-loading-screen`（会真红），移除后命中 `textarea`。
+  - REV-2 的隐蔽性——该断言在红相时被前置的 `toHaveBeenCalledTimes(100)` 失败掩盖，**从未执行**。红相收据「12 条断言失败」看似健康，实则掩盖一条恒假断言。→ **红相失败会掩盖同用例后续断言缺陷**，绿相必须重审可证伪性，而非只看「全绿」。
+- **红相未被测试修订污染的机械证明**：Lead 用 `git worktree add --detach /tmp/w17-redverify wave-17-red-anchor` 拉出红相工作树，放入 REV-2 修订后的 spec 复跑 → `12 failed / 2 passed, EXIT=1`。**把「测试修订是否削弱红相」从主观判断升级为机械事实**，是本波最关键的防腐化动作；工作树已 `remove --force` 回收。
+- **假红/误杀率**：L3-A 0 findings、L3-P 0 findings、L3-B 3 条全 NON-BLOCKING 且裁决「接受不改」→ 误杀率 0，零修复产出率 3/3。
+- **blast-radius 触发分析**：union diff 101 行（超阈值 1 行）即触发「≥2 路互补 L3 + 1 路 L3-P」。对纯前端 class/事件绑定成本偏高，但 L3-A 的真实 Chromium 探针（`@keydown.enter.prevent` → `{enter:1, click:0}`）是排除「双提交」风险的**唯一机械证据**，不可取消 → **阈值保持不动**，改为允许审查强度分级（§4.6）。
+- **存量基线缺陷暴露**：`npm run test:e2e` 在基线即 **8 failed / 12 passed**（全新构建后复现，`session-sidebar-session-list` 漂移）。规范 e2e 门禁长期红灯，任何依赖它的波次被迫降级。登记 PA-134。→ 教训：**基线必须先跑一遍规范门禁并登记既有失败**。
+
+## 3. 分工契约与隔离有效性
+
+- **写域隔离机械审计通过**：越界文件 **0**。task-3（C1，4 文件）与 task-4（C2，3 文件）文件集交集为空，k=2 并行零冲突。
+- **`src/lib/ime.ts` 跨任务共享被显式串行化**：task-1（Protocol 落空桩 + 冻结签名）→ task-3（Executor 实现）。看板自动报 `writeScopeWarnings: ["write scopes overlap with task-1"]`，Lead 据此把 task-1 补入 task-3 的 `blocked_by`，**未静默降级**——「advisory 写域 + 显式串行化声明」的正确用法。
+- **`tests/**` 与 `src/**` 硬分权保持**：Test Agent 全程未写 `src/`，Executor 全程未写 `tests/`。
+- **并行 ROI**：收益（两正交缺陷类窗口重叠，省约一个执行周期）略大于成本（两份全量 vitest 并发、`dist/` 共享产物竞争）。若缺陷类只有 1 个或共享文件，应降级 WIP=1。
+- **跨会话共享工作区风险真实发生（3 类）**：
+  1. **我的 `.gitignore` 编辑被吸入他人提交**——`git log -S"open-claude-ui/" -- .gitignore` 证实该改动最终出现在并行会话提交 `5888d36` 中。结果无害但说明「未上板而行文件写入 = 非法竞争」在共享工作区下判据过松。
+  2. **8 个 `.dev-team/evidence/*` 被并行会话持续改写**，Phase 4「`git status --porcelain` 必须为空」**物理不可满足**。处置：全程定向 `git add <显式路径>` + 每次提交前 `git diff --cached --name-only` 机械核验「并行会话文件数 = 0」（2 次提交实测均为 0），门禁降级记录 `[HYGIENE DEGRADED: PARALLEL-SESSION ARTIFACTS]`。
+  3. **`dist/` 是共享产物**：`playwright.config.ts` 的 `webServer.command = npm run preview:e2e` **只 preview 不构建**，裸跑 `npx playwright test` 会测到过期产物 → **假绿**。Lead 向 Executor B 发出更正，统一为 `npm run build && npx playwright test <file>`。
+- **契约修订全部走同一入口**：REV-1（锚定前澄清）/ REV-2、REV-3（锚定后测试缺陷修订）均记入契约 §6，含触发、根因、裁决、影响面、熔断计数归属，**无「改测试不改记录」的暗改**。
+- **信息过度下发控制**：Executor 只拿到自身 3~4 个文件路径 + 契约对应小节 + **测试的结构选择器约束**（后者至关重要，见 §4.4），未拿到契约全文与方案评审过程。
+
+## 4. 元协议迭代建议
+
+1. **【高优先】skill 声明的机械校验脚本未随 skill 分发**：SKILL.md 要求运行 `dev-stub-lint.py` / `dev-nfr-lint.py` / `dev-red-purity.py` / `dev-docs-lint.py`，并规定「脚本缺失时严禁人工目检放行并先安装」，但 `/home/dm/.agents/skills/dev-team/` **只有 SKILL.md**，且无安装路径。本波 Protocol Agent 自建 `validate-nfr-baseline.mjs`（含 8 组反例 `--self-test`）与 `validate-stub-purity.mjs` 作等价门禁。建议：随 skill 分发脚本，**或**在 SKILL.md 明确「等价自建必须含反例自检以证明门禁非恒真」并强制标注 `[GATE DEGRADED: TOOL-MISSING → INLINE-EQUIVALENT]`。
+2. **【高优先】NFR 基准必须默认落旁路文件，禁止覆盖既有基准**：本项目 `.dev-team/nfr-baseline.json` 是 PA-118 冻结的 16 键基准，被项目自有 `nfr-lint.py`、`docs/release/2026-10-14-pa118-deadlock-fix/`、ADR 0024 与两个 Rust 死锁测试注释共同引用。Protocol Agent 主动升级冲突，Lead 裁定落 `nfr-baseline-wave17.json` 并机械证明既有基准零字节改动 + 项目 16 键 lint 回归 `EXIT=0`。建议 SKILL.md 改为：**若基准已存在则默认落 `nfr-baseline-<wave>.json`**，收据须同时跑「项目既有 lint 回归」与「本波校验」。
+3. **【中优先】Subagent 池成员可能无任务板工具，Lead 必须代收口**：L2-AT Subagent 回报「本会话无 `team_task_get` / 任务板工具」，无法 claim/complete。建议 SKILL.md 补充「凡下沉至 Subagent 池的任务，Lead 负责派发前 claim、收到回执后 complete」，并在派发 prompt 中显式告知。
+4. **【高优先】UI 物理凭据必须含证伪断言，文件存在性不算凭据**：REV-3 教训。建议在「前端真实链路与环境验收门禁」增加硬性条款——截图凭据必须含至少一条**遮挡/视口证伪断言**（`document.elementFromPoint()` 命中目标自身或后代，或 `toBeInViewport()`）；**禁止**仅以「文件存在 + 大小阈值」作凭据；应用存在启动遮罩时必须显式等待其从 DOM 移除，且**先断言其曾经存在**（否则「等待消失」在遮罩从不出现的环境下是恒真空等待）。
+5. **【高优先】红相失败会掩盖同用例后续断言缺陷 → 绿相必须重审可证伪性**：REV-2 教训。建议绿相门禁增加独立动作——「对每条红相失败用例，核查其后续未执行断言在绿相下是否**真能证伪**（至少 1 条负向/诱饵自检）；仅当全用例具备证伪能力时才允许绿相收口」。
+6. **【中优先】blast-radius 触发后的审查强度可分级，但不得取消**：101 行纯前端 diff 触发 3 次 Subagent 审查（成本偏高），但 L3-A 探针不可取消。建议：diff **100% 为 CSS class / 纯谓词 / 模板事件绑定**且零状态机/IO/持久化时，L3-B 降级为固定 5 项 checklist，L3-A 与 L3-P 保持全量；**禁止**以任何理由裁剪 L3-P。
+7. **【中优先】前端 e2e 门禁命令必须显式包含构建步骤**：`webServer.command` 可能只 `vite preview` 不构建，裸跑即假绿。建议 SKILL.md 增加条款：前端 e2e 门禁命令必须显式含构建步骤且显式指定待跑文件，避免存量失败污染 EXIT 码。
+8. **【中优先】Phase 4「工作区整洁度归零」需增加并行会话豁免通道**：`git status --porcelain` 全空在多会话共享工作区下物理不可满足。建议改为「**属于本波 write_scopes 的文件必须为空**；非本波文件须逐条给出归属证据（mtime 早于本波首次写入 / 未被任何本波任务 write_scopes 覆盖）并标注 `[HYGIENE DEGRADED: PARALLEL-SESSION ARTIFACTS]`」，同时把「提交前核验 staged 清单中并行会话文件数 = 0」列为强制动作。
+9. **【中优先】冻结测试的结构选择器约束必须随任务书下发给 Executor**：本波 `tabular-nums-contract.spec.ts` 依赖「恰好 3 个 / 恰好 4 个 `span.inline-flex`」等结构锚点，Lead 在 Executor B 任务书中显式列出这些约束（禁止新增同级 `span.inline-flex`、禁止改 `div.flex.items-center.justify-around` 的 class 组合），使 C2 一次通过。建议 SKILL.md 在「冻结测试 → Executor」交接清单中固定一行「测试的结构锚点与不可破坏的 class 组合」。
+
+## 5. 终态
+
+- 红相锚定 `f060c8d`（tag `wave-17-red-anchor`）→ 绿相检查点 `49fd118`（tag `wave-17`）。
+- 门禁：`vue-tsc --noEmit` 0 / wave17 冻结验收 31 passed 0 / 全量单测 897 passed（85 files，基线 866）/ 真实 Chromium 门禁 4 passed 且 Console Error=0 / `version:check` 0 / 本波 NFR 校验 0 / 项目 16 键 NFR lint 回归 0 / flake 复跑 3×0。
+- 交付：`src/lib/ime.ts`（新增接缝）+ `WorkspaceComposer.vue` / `HomeSessionSidebarRow.vue` / `HomeSessionSidebar.vue`（C1 六处入口）+ `HomeStatusPanel.vue` / `HomeTracePanel.vue` / `AskPanel.vue`（C2 八位点）；ADR [0036](../../docs/decisions/0036-ime-composition-enter-guard-and-numeric-width-stability.md)；`docs/release/2026-10-16-wave17-ime-guard-numeric-jitter/NFR-COMPLIANCE.md`。
+- 债务显式化：PA-130 ~ PA-136（含存量 e2e 基线红灯 PA-134、存量守卫粒度缺陷 PA-135）。

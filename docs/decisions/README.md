@@ -63,6 +63,7 @@
 - [0033 运行状态条移出滚动内容流：composer 上沿常驻覆盖层与 streaming 期隐藏](0033-runtime-status-bar-out-of-scroll-flow.md)
 - [0034 删除/归档当前对话后一律进入全新空白会话](0034-fresh-session-after-delete-or-archive.md)
 - [0035 Token 指标口径：输入上下文取单次调用、生成速度按调用级即时产出](0035-token-metrics-per-call-semantics.md)
+- [0036 IME 组合态回车守卫与动态数字位宽稳定](0036-ime-composition-enter-guard-and-numeric-width-stability.md)
 
 ### 已接替
 

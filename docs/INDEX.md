@@ -60,10 +60,12 @@
 - [0027 端到端全链路 EventBus 架构设计](decisions/0027-end-to-end-event-bus-architecture.md)
 - [0028 将 Sentry 问题收集下沉至 Harness 宿主层与 Agent Trace 解耦](decisions/0028-decouple-sentry-issues-to-harness.md)
 - [0032 graph_runs 非重入锁作用域纪律与桌面端会话页卡死修复](decisions/0032-graph-runs-lock-scope-discipline.md)
+- [0036 IME 组合态回车守卫与动态数字位宽稳定](decisions/0036-ime-composition-enter-guard-and-numeric-width-stability.md)
 
 ## 3.1 交付证据归档
 
 - [PA-118 进入会话页卡死修复：同口径实机 E2E 证据（BEFORE/AFTER 截图与驱动日志）](release/2026-10-14-pa118-deadlock-fix/README.md)
+- [Wave-17 IME 组合态回车守卫 + 动态数字抖动消除：NFR 达标报告](release/2026-10-16-wave17-ime-guard-numeric-jitter/NFR-COMPLIANCE.md)
 
 ## 4. 开发指南
 
