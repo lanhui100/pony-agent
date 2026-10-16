@@ -14,8 +14,8 @@
         "crates/pony-agent-core/src/agent/ask_control.rs"
       ],
       "red_commit": "fc15414",
-      "green_commit": null,
-      "status": "green-verified-pending-final-commit"
+      "green_commit": "f66b1f5",
+      "status": "verified"
     },
     "ui-expired-guard": {
       "owner": "executor-ui -> executor-ui2 (第二轮接手：前任上下文耗尽)",
@@ -25,8 +25,8 @@
         "src/components/AskPanel.vue"
       ],
       "red_commit": "fc15414",
-      "green_commit": null,
-      "status": "green-verified-pending-final-commit"
+      "green_commit": "f66b1f5",
+      "status": "verified"
     }
   },
   "tasks": {
@@ -75,11 +75,11 @@
       },
       "round2_a": {
         "file": ".dev-team/review-wave16-a2.json",
-        "verdict": "pending"
+        "verdict": "PASS"
       },
       "round2_b": {
         "file": ".dev-team/review-wave16-b2.json",
-        "verdict": "pending"
+        "verdict": "PASS"
       }
     },
     "deferred": [
@@ -93,5 +93,6 @@
       }
     ]
   },
-  "concurrency_note": "共享工作区存在并行 wave-15（token 指标）施工会话，本波次独立编号 wave-16，禁止 git add . / 全局提交；仅定向暂存本波次文件"
+  "concurrency_note": "共享工作区存在并行 wave-15（token 指标）施工会话，本波次独立编号 wave-16，禁止 git add . / 全局提交；仅定向暂存本波次文件",
+  "status": "completed"
 }
