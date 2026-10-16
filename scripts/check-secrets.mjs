@@ -16,37 +16,51 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-// wave-18 C4（r3）：裸 64-hex 规则的模块级辅助（非导出）。
-// R3：一切与 match 无关的上下文判定按「行」记忆化一次，消除 O(matches × 行长) 二次方。
+// wave-18 C4（r4）：裸 64-hex 规则的模块级辅助（非导出）。
+// R3′：一切与 match 无关的上下文判定按「行」记忆化一次（键为 lineNumber），
+// 行提取亦按行记忆化，消除 O(matches × 行长) 二次方。
 const HEX64 = "[0-9a-fA-F]{64}";
-const CRED_WORD_RE = /(client[_-]?token|access[_-]?token|api[_-]?key|secret|password|passwd|credential|authorization|bearer)/;
-const BENIGN_RE = /(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|\bhash\b|校验和|指纹)/;
+// C4-R4（r4）：覆盖 client_token / client-token / client token / clienttoken / ClientToken
+// 与 access token / api key 等空格、连字符、下划线、驼峰形态；含裸 `token`（词尾边界防 tokenizer）。
+const CRED_WORD_RE = /(?:(?:client|access|refresh|id|auth)[\s_-]*)?token\b|api[\s_-]*key\b|secret|password|passwd|credential|authorization|bearer/i;
+const BENIGN_RE = /(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|\bhash\b|校验和|指纹)/i;
 const SUMPREFIX_RE = new RegExp(`^\\s*(${HEX64})\\s+\\S`);
 const CELL_RE = new RegExp(`\\|\\s*(${HEX64})\\s*\\|`);
 const BACKTICK_RE = new RegExp("`(" + HEX64 + ")`", "g");
 
+const firstIdx = (re, line) => {
+  const m = re.exec(line);
+  return m ? m.index : Infinity; // 无命中 => +∞（恒不小于任何 matchIndex）
+};
+const slotStart = (re, line) => {
+  const m = re.exec(line);
+  if (!m) return -1;
+  return m.index + m[0].indexOf(m[1]); // 该「位置槽」在行内的起始下标
+};
+
 // R3：按「行」记忆化全部与 match 无关的上下文判定；有界缓存（≤4 条）防无界增长。
-const _hexFactsCache = new Map();
 function hexLineFacts(line) {
-  const hit = _hexFactsCache.get(line);
-  if (hit) return hit;
-  const lower = line.toLowerCase();
-  const facts = {
-    credWord: CRED_WORD_RE.test(lower),
-    benignKeyword: BENIGN_RE.test(lower),
-    prefixHex: (SUMPREFIX_RE.exec(line) || [null, null])[1]?.toLowerCase() ?? null,
-    cellHex: (CELL_RE.exec(line) || [null, null])[1]?.toLowerCase() ?? null,
+  return {
+    credIdx: firstIdx(CRED_WORD_RE, line),     // 首个凭证语义词下标
+    benignIdx: firstIdx(BENIGN_RE, line),      // 首个良性摘要关键词下标
+    benignAny: BENIGN_RE.test(line),           // 行内是否含良性摘要关键词
+    prefixSlot: slotStart(SUMPREFIX_RE, line), // sha256sum 前缀槽起始下标（-1 = 无）
+    cellSlot: slotStart(CELL_RE, line),        // Markdown 单元格槽起始下标（-1 = 无）
     backtickHexes: new Set([...line.matchAll(BACKTICK_RE)].map((x) => x[1].toLowerCase())),
   };
-  if (_hexFactsCache.size >= 4) _hexFactsCache.clear();
-  _hexFactsCache.set(line, facts);
-  return facts;
 }
 
-// C7（r3）：`isSafe` 第二实参语义为「当前行 + 最多 3 行紧邻上文」的有界窗口。
-// 规则本体按 r3 §4.2 冻结形态取窗口最后一行（`context.split("\n").pop()`）；
-// 与 match 无关的整行判定已由 `hexLineFacts` 按行记忆化（R3 §4.6），
-// 故每 match 仅剩一次 O(窗口) 的行提取，无二次方放大。
+// C4-R3'：按 lineNumber 记忆化「当前行 + facts」；isSafe 内不得每 match 重做整行切分。
+const _lineCache = new Map();
+function ctxLineFacts(context, lineNumber) {
+  const hit = _lineCache.get(lineNumber);
+  if (hit && hit.context === context) return hit; // 同对象恒等比较 => O(1)
+  const line = context.split("\n").pop();
+  const entry = { context, line, facts: hexLineFacts(line) };
+  if (_lineCache.size >= 4) _lineCache.clear();
+  _lineCache.set(lineNumber, entry);
+  return entry;
+}
 
 // 常见敏感前缀与凭证正则
 export const SECRET_RULES = [
@@ -113,24 +127,25 @@ export const SECRET_RULES = [
       return upper.includes("MOCK") || upper.includes("TEST") || upper.includes("DUMMY") || upper.includes("EXAMPLE");
     }
   },
-  // wave-18 C4（r3）：裸 64-hex 高熵凭证（SHA-256 尺寸 client token）
-  // 契约基线：`.dev-team/contract-matrix-wave18.md` §4.2 / §4.3 / §4.6 / §4.7。
+  // wave-18 C4（r4）：裸 64-hex 高熵凭证（SHA-256 尺寸 client token）
+  // 契约基线：`.dev-team/contract-matrix-wave18.md` §4.2 / §4.3 / §4.6 / §4.7 / §4.8。
   // 长度窗口严格 64：用 `(?<![0-9a-fA-F])` / `(?![0-9a-fA-F])` 而非 `\b`，
   // 既能命中 `token_<64hex>`，又拒绝 63/65/128 位 hex 长串与 7/8/12/40 位 git SHA。
   {
     name: "Bare 64-Hex High-Entropy Credential (SHA-256 sized client token)",
     regex: /(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])/g,
-    isSafe: (match, context = "") => {
-      // C7：context 为「当前行 + 最多 3 行紧邻上文」的有界窗口；行级判定取最后一行。
-      const line = context.split("\n").pop();
-      const f = hexLineFacts(line); // R3：每行只算一次，之后 O(1)
-      // R1：同行出现凭证语义词 => 一律判违规（优先于豁免 1/2/3/4）
-      if (f.credWord) return false;
-      if (f.benignKeyword) return true; // 豁免 1（已被 R1 守卫）
+    isSafe: (match, context = "", matchIndex = -1, lineNumber = -1) => {
+      const { facts } = ctxLineFacts(context, lineNumber); // R3'：每行一次，之后 O(1)
       const m = match.toLowerCase();
-      if (f.prefixHex === m) return true;      // 豁免 2：只豁免 sha256sum 前缀位置的那个 hex（R2）
-      if (f.cellHex === m) return true;        // 豁免 3：只豁免 Markdown 独立单元格内的那个 hex（R2）
-      if (f.backtickHexes.has(m)) return true; // 豁免 4
+      // C4-R1'（位置敏感）：仅当凭证语义词位于**该 hex 之前**、且其前**无**良性摘要关键词时判违规。
+      // 目的：摘要收据形态（hex 在前 / 良性关键词在 hex 之前）不得因文件名、字段名或说明文字含
+      // secret/token/credential 等词而误报（消除 r3 新误报回归）。
+      if (facts.credIdx < matchIndex && !(facts.benignIdx < matchIndex)) return false;
+      if (facts.benignAny) return true;                  // 豁免 1：行内良性摘要关键词
+      // C4-R2'（位置锚定）：按**槽位下标**判定，不再按值判定 —— 同行其他位置的同值 hex 不继承豁免。
+      if (matchIndex === facts.prefixSlot) return true;  // 豁免 2：sha256sum 前缀槽
+      if (matchIndex === facts.cellSlot) return true;    // 豁免 3：Markdown 独立单元格槽
+      if (facts.backtickHexes.has(m)) return true;       // 豁免 4：反引号独占包裹
       return false;
     }
   }
@@ -192,7 +207,9 @@ export function scanTextContent(content, filename = "") {
       while ((match = rule.regex.exec(line)) !== null) {
         const secretVal = match[1] || match[0];
         // C7：传入有界窗口（当前行 + 最多 3 行紧邻上文），禁止整文件内容。
-        if (rule.isSafe && rule.isSafe(secretVal, contextWindow)) {
+        // r4：追加 match.index（位置敏感 R1′ / 位置锚定 R2′）与 lineNum（O(1) 行记忆化 R3′）。
+        //     其余 6 条规则的 isSafe 忽略多余实参，签名向后兼容。
+        if (rule.isSafe && rule.isSafe(secretVal, contextWindow, match.index, lineNum)) {
           continue;
         }
 
