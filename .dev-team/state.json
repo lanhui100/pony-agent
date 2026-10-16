@@ -473,7 +473,7 @@
       },
       "branches": {
         "credential": {
-          "red_commit": null,
+          "red_commit": "PENDING_SELF",
           "green_commit": null,
           "status": "red_frozen",
           "quarantine": false

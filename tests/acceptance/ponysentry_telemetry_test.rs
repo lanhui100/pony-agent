@@ -13,6 +13,32 @@ use pony_agent_core::agent::ponysentry::{
 };
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard};
+
+/// wave-18：本文件是 `crates/pony-agent-core/tests/ponysentry_telemetry_test.rs` 的**孤儿副本**
+/// （未被任何 Cargo.toml `[[test]]` 引用、cargo/vitest 均不收集）。为防陈旧旧契约误导，
+/// 其断言必须与主文件同步迁移到 wave-18 冻结契约（contract-matrix-wave18.md §7 M4/M5）。
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+const MANAGED_ENV_KEYS: [&str; 5] = [
+    "PONYSENTRY_CLIENT_TOKEN",
+    "PONYSENTRY_ENABLED",
+    "PONYSENTRY_INGEST_URL",
+    "APP_ENV",
+    "APP_RELEASE",
+];
+
+fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn clear_managed_env() {
+    for key in MANAGED_ENV_KEYS {
+        std::env::remove_var(key);
+    }
+}
 
 #[test]
 fn test_ingest_payload_serialization_contract() {
@@ -173,14 +199,71 @@ fn test_sanitizer_json_recursive_redaction() {
     assert_eq!(sanitized["list"][1]["info"], "public");
 }
 
+/// wave-18 C1/C2 契约迁移（与主文件 `crates/pony-agent-core/tests/ponysentry_telemetry_test.rs`
+/// 的 `test_config_contract` 保持**同步**，消除 F3 双副本漂移）：
+/// - 默认配置不提供凭证、默认禁用；
+/// - `from_env()` token 仅来自 env，未设/空白即 `None`（禁止硬编码回落）；
+/// - 补“未设 env”的反向断言与 `enabled` 真值表。
 #[test]
 fn test_config_contract() {
+    let _guard = lock_env();
+    clear_managed_env();
+
+    // --- C1：default() fail-closed ---
     let default_cfg = PonySentryConfig::default();
     assert_eq!(default_cfg.endpoint, "https://sentry.ponyjob.top");
     assert_eq!(default_cfg.environment, "dev");
     assert_eq!(default_cfg.release, env!("CARGO_PKG_VERSION"));
-    assert!(default_cfg.enabled);
+    assert!(
+        default_cfg.client_token.is_none(),
+        "C1：default().client_token 必须为 None（硬编码凭证已清除），实测 len={:?}",
+        default_cfg.client_token.as_ref().map(|token| token.len())
+    );
+    assert!(
+        !default_cfg.enabled,
+        "C1：default().enabled 必须为 false（fail-closed 默认零 egress）"
+    );
 
+    // --- C2-1/C2-3：未设 env 的反向断言（不得回落硬编码） ---
+    let unset_cfg = PonySentryConfig::from_env();
+    assert!(
+        unset_cfg.client_token.is_none(),
+        "C2-1：PONYSENTRY_CLIENT_TOKEN 未设时必须为 None，实测 len={:?}",
+        unset_cfg.client_token.as_ref().map(|token| token.len())
+    );
+    assert!(
+        !unset_cfg.enabled,
+        "C2-3：PONYSENTRY_ENABLED 未设时必须为 false"
+    );
+
+    // --- C2-2：纯空白 token 等价于未设 ---
+    std::env::set_var("PONYSENTRY_CLIENT_TOKEN", "   ");
+    let blank_cfg = PonySentryConfig::from_env();
+    assert!(
+        blank_cfg.client_token.is_none(),
+        "C2-2：纯空白 PONYSENTRY_CLIENT_TOKEN 必须等价于未设 ⇒ None"
+    );
+    std::env::remove_var("PONYSENTRY_CLIENT_TOKEN");
+
+    // --- C2-4/C2-5：enabled 真值表 ---
+    let enabled_cases: [(&str, bool); 6] = [
+        ("false", false),
+        ("FALSE", false),
+        (" false ", false),
+        ("0", false),
+        ("true", true),
+        ("1", true),
+    ];
+    for (raw, expected) in enabled_cases {
+        std::env::set_var("PONYSENTRY_ENABLED", raw);
+        assert_eq!(
+            PonySentryConfig::from_env().enabled,
+            expected,
+            "C2-4/5：PONYSENTRY_ENABLED={raw:?} 真值解析不符合冻结契约"
+        );
+    }
+
+    // --- 显式 env 取值链路保持不变（既有断言保留） ---
     std::env::set_var("PONYSENTRY_INGEST_URL", "http://10.43.94.160:3000");
     std::env::set_var("PONYSENTRY_CLIENT_TOKEN", "test-token-123");
     std::env::set_var("PONYSENTRY_ENABLED", "false");
@@ -193,10 +276,7 @@ fn test_config_contract() {
     assert_eq!(env_cfg.environment, "staging");
 
     // Clean up
-    std::env::remove_var("PONYSENTRY_INGEST_URL");
-    std::env::remove_var("PONYSENTRY_CLIENT_TOKEN");
-    std::env::remove_var("PONYSENTRY_ENABLED");
-    std::env::remove_var("APP_ENV");
+    clear_managed_env();
 }
 
 #[test]
@@ -251,6 +331,21 @@ fn test_breadcrumb_ring_buffer_limit() {
 
     // Module-level functions should also be operable
     init(PonySentryConfig::default());
+
+    // wave-18 F4 强化（与主文件同步）：默认 enabled=false ⇒ init(default()) 为禁用态，
+    // 补真断言防止退化为“只验证不 panic”的恒真空断言。
+    assert!(
+        !pony_agent_core::agent::ponysentry::is_enabled(),
+        "F4：PonySentryConfig::default() 必须为 disabled（fail-closed 默认零 egress）"
+    );
+
     add_breadcrumb("ui", "User clicked submit", None);
+
+    let capture_started = std::time::Instant::now();
     capture_error("UiError", "Button state mismatch", None);
+    assert!(
+        capture_started.elapsed() < std::time::Duration::from_millis(100),
+        "F4：禁用态下模块级 capture_error 必须 fire-and-forget 不阻塞，实测 {:?}",
+        capture_started.elapsed()
+    );
 }

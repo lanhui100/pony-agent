@@ -139,14 +139,60 @@ fn test_upload_session_trace_contract_shape() {
     // 该入口在 tauri 命令层（src-tauri/src/lib.rs upload_session_trace）暴露。
 }
 
+/// wave-18 M6/M7/F2 迁移（contract-matrix-wave18.md §7）：
+/// - **M6**：默认配置不再提供 client token（硬编码凭证已清除），删除原
+///   `assert!(config.client_token.is_some(), ...)` 断言；
+/// - **M7**：本用例原依赖默认 token 打**生产端点** `sentry.ponyjob.top` 并断言 201 Created，
+///   现改为**显式 env 门控 + 无凭证即跳过**：默认零 egress，绝不打生产；
+///   网络失败不再静默吞掉（原 `if let Ok(response)` 会掩盖失败）；
+/// - **F2 止血**：清理步骤中的明文 postgres DSN 已移除，改从 `PONYSENTRY_TEST_DSN` 读取，
+///   未设即跳过该清理步骤。通用 password 规则属后续 backlog，不在本波给扫描器扩面。
 #[test]
 fn test_upload_trace_to_live_sentry_contract() {
-    let rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
-    rt.block_on(async {
-        // 验证向生产或测试 Ingest 上报 Trace 时的网络契约：带上默认 token 时能成功通过鉴权
-        let config = pony_agent_core::agent::ponysentry::PonySentryConfig::default();
-        assert!(config.client_token.is_some(), "Default config must provide client token for sentry auth");
+    let config = pony_agent_core::agent::ponysentry::PonySentryConfig::from_env();
 
+    // 无凭证即跳过：默认配置不再内置凭证（wave-18 fail-closed）
+    let token = match config.client_token.clone() {
+        Some(token) if !token.trim().is_empty() => token,
+        _ => {
+            eprintln!(
+                "[skip] test_upload_trace_to_live_sentry_contract: 未提供 PONYSENTRY_CLIENT_TOKEN，\
+                 默认配置不再内置凭证（wave-18 fail-closed），跳过 live 契约验证。"
+            );
+            return;
+        }
+    };
+
+    // 显式 opt-in 门禁：未显式开启则跳过，禁止默认向生产端点发送真实流量
+    if std::env::var("PONYSENTRY_TEST_LIVE").ok().as_deref() != Some("1") {
+        eprintln!(
+            "[skip] test_upload_trace_to_live_sentry_contract: PONYSENTRY_TEST_LIVE != 1，\
+             为避免真实流量打到生产端点，跳过 live 契约验证。"
+        );
+        return;
+    }
+
+    if !config.enabled {
+        eprintln!(
+            "[skip] test_upload_trace_to_live_sentry_contract: PONYSENTRY_ENABLED=false，\
+             上报路径已禁用，跳过 live 契约验证。"
+        );
+        return;
+    }
+
+    // F2：清理用 DSN 只能来自环境变量（仓库内不得出现明文凭证）
+    let cleanup_dsn = std::env::var("PONYSENTRY_TEST_DSN")
+        .ok()
+        .filter(|dsn| !dsn.trim().is_empty());
+    if cleanup_dsn.is_none() {
+        eprintln!(
+            "[skip-cleanup] test_upload_trace_to_live_sentry_contract: PONYSENTRY_TEST_DSN 未设，\
+             跳过上报记录清理步骤（谁创建谁清理的前提是提供隔离库 DSN）。"
+        );
+    }
+
+    let rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
+    rt.block_on(async move {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
@@ -160,33 +206,43 @@ fn test_upload_trace_to_live_sentry_contract() {
             "release": "0.1.107"
         });
 
-        let mut req = client.post(&trace_url).header("Content-Type", "application/json");
-        if let Some(ref token) = config.client_token {
-            req = req.header("X-Client-Token", token);
-        }
+        let resp = client
+            .post(&trace_url)
+            .header("Content-Type", "application/json")
+            .header("X-Client-Token", &token)
+            .json(&trace_payload)
+            .send()
+            .await;
 
-        let resp = req.json(&trace_payload).send().await;
-        if let Ok(response) = resp {
-            assert_ne!(
-                response.status(),
-                reqwest::StatusCode::UNAUTHORIZED,
-                "Trace upload must not be unauthorized with default client token"
-            );
-            assert_ne!(
-                response.status(),
-                reqwest::StatusCode::NOT_FOUND,
-                "Trace route /api/v1/traces must not return 404 Not Found"
-            );
-            assert_eq!(
-                response.status(),
-                reqwest::StatusCode::CREATED,
-                "Trace upload should return 201 Created on live sentry"
-            );
-            // 谁创建谁清理：清理测试上报生成的临时 trace 记录
+        let response = match resp {
+            Ok(response) => response,
+            Err(err) => panic!(
+                "live sentry trace upload failed (显式 opt-in 下不得静默吞掉网络失败): {err}"
+            ),
+        };
+
+        assert_ne!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "Trace upload must not be unauthorized with the explicitly provided client token"
+        );
+        assert_ne!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "Trace route /api/v1/traces must not return 404 Not Found"
+        );
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::CREATED,
+            "Trace upload should return 201 Created on live sentry"
+        );
+
+        // 谁创建谁清理：仅在显式提供隔离库 DSN 时清理测试上报生成的临时 trace 记录
+        if let Some(dsn) = cleanup_dsn {
             let created_body: serde_json::Value = response.json().await.unwrap();
             if let Some(trace_id) = created_body.get("id").and_then(|v| v.as_str()) {
                 let _ = std::process::Command::new("psql")
-                    .arg("postgresql://job_copilot:8siud3siDW9s02k33edsFAGDDFSDFllidsk9987sddj@127.0.0.1:30543/ponysentry")
+                    .arg(dsn)
                     .arg("-c")
                     .arg(format!("DELETE FROM traces WHERE id = '{trace_id}';"))
                     .output();
