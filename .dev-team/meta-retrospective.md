@@ -81,3 +81,45 @@
   - `src/stores/ask.ts`（提交时刻过期判定、单飞无递归自动对账、轮询自愈三态管理、在飞乐观状态保护）
   - `src/components/AskPanel.vue`（实时渲染时钟与过期锁定）
   - 契约与收据：`.dev-team/contracts/wave-16-ask-cas.md`、`.dev-team/wave16-green-receipts.md`、`PA-120 / PA-121` Backlog 登记。
+
+---
+
+# Wave-15 元复盘（Token 指标口径：输入上下文单次调用化 + 生成速度调用级即时化）
+
+> 完整版：`.dev-team/meta-retrospective-wave15.md`。账本 `.dev-team/state.json`（wave 15）、契约 `.dev-team/contracts/wave-15-token-metrics.md`、收据 `.dev-team/wave15-green-receipts.md`。
+
+## 1. 通信拓扑与信噪比
+
+- 名册 Lead + Protocol + Test + Executor-Rust + Executor-Frontend（5 常驻 ≤ 8）；侦察 3 路与审查 3 路（L3-A/L3-B/L3-P）全部走 Subagent 计算池，未占常驻槽位。
+- 看板 7 任务全部 completed。3 路只读侦察在**任何代码写入前**以 `file:line + 原文引用` 锁定 5 条根因（RC1–RC5），是本波最大增益。
+- 噪声：Lead 先自行深读约 10 次才派生侦察，存在重复侦察；自动续轮 + 3 次模型切换拉长会话（改进项见 §4-⑤）。
+
+## 2. 门禁穿透与误杀率
+
+- 红相真实：`cargo test --lib wave15_multihop` Exit 101、`vitest run tests/acceptance/wave15` Exit 1（17 failed/3 passed），纯度分类 13 例 SUT 空桩 + 4 例 SUT 断言、基建失败 0。
+- **本波最高价值事件（假绿拦截）**：executor-rust 首版 hop_complete 写成 `records[..len-1]`（滞后一跳），与当时冻结用例的错误映射同向 → 套件 20/20 全绿。Test Agent 主动上报 P2 异常，Lead 裁定不变量 I1（`Σrecords == payload 累加`）并重锚红相，再修实现转绿。**结论：当测试与实现共享同一误读时，绿相会穿透门禁**，须加阴性对照（§4-①）。
+- 用例自缺陷 2 处（A4 夹具互斥、wire R1 基线自指）由 Executor 上报、Lead 复核、Test Agent 以 TEST-DEFECT 修正，pre-fix 复跑证明红相纯度未损（14 failed/14）。
+- 审查 3 路（含 L3-P 五问否决制）全 PASS、0 findings；误杀 0，但假阴性率未测。NFR 欠账 0；债务 `wave15-D1` / `wave15-P3` 显式登记。
+
+## 3. 分工契约与隔离有效性
+
+- 双 Executor 写域完全正交（Rust runtime vs 前端投影/store/组件）；`tests.rs` 由 Test Agent 独占。
+- R2 采用「保留旧签名 + 新增 `*_with_provider_calls` 薄委托」，零跨域编译阻塞、legacy 行为与既有断言零变化。
+- 唯一越界 `src/lib/runtime/types.ts`（仅类型字段）经 Lead 核准为衍生豁免；根因是 Lead 任务卡路径笔误。
+- 并发多会话共享工作区（wave-16 ask-cas 同树写入）：坚持定向 `git add`、零全局 git 写操作；全量套件唯一失败被准确归因到对方未提交的 `HomeWorkspace.vue`。
+- 契约 3 次演进（§7.6 / §7.10 / ADR 0035）全部由实证驱动，无漂移式改约。
+
+## 4. 元协议迭代建议
+
+1. **绿相阴性对照（mutation negative control）**：Join Barrier 前对 SUT 施加一次单行语义突变，冻结套件必须转红，否则判定门禁失效。可机械化，成本 ≈1 次测试运行。
+2. **指标/事件载荷契约必填「集合一致性不变量」**：如 `Σ per-item == aggregate`，仅写"应携带"无法约束实现顺序。
+3. **`TEST-DEFECT` 上报通道正式化**：Executor 发现冻结用例矛盾必须停手上报，严禁改测或降级断言。
+4. **波次编号与写域预检前置**：开局以 git log + state.json 最大编号 +1，并扫描未提交改动识别并发写域。
+5. **Lead 侦察预算纪律**：先派生只读侦察拿全景，Lead 只复核 crux 行。
+6. **审查灵敏度抽检**：0 findings 时做一次低成本阴性对照，区分"真干净"与"审查过松"。
+
+## 5. 终态
+
+- 红相锚定 `f38b6b9`（tag `wave-15-red`）→ 重锚 `3475e53`；绿相 `5901ef4`（tag `wave-15`）。
+- 门禁：wave15 Rust 0 / 既有 Rust 回归 0 / `cargo check` 0 / `vue-tsc --noEmit` 0 / wave15 vitest 0（20 passed）/ 目标回归 0（46 passed,2 skipped）/ 全量 vitest 865 passed（唯一失败归因并发波次）/ 真实 Chrome 烟测 Console Error=0 + 2 截图。
+- 交付：`turn_stream.rs`(R1×2) / `trace_timeline.rs`(R2) / `turn_persist.rs` / `turn_sync.rs` / `token-metrics.ts`(S1/S3/S4) / `useTraceProjection.ts`(R3) / `stores/runtime.ts`(R4) / `HomeSidebar.vue` / `HomeStatusPanel.vue` / ADR 0035 / `docs/release/2026-10-16-wave15-token-metrics/`。

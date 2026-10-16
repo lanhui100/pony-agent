@@ -1,6 +1,6 @@
 {
   "wave": 15,
-  "status": "in_progress",
+  "status": "completed",
   "task_classification": "B-lite",
   "reason": "token 指标口径缺陷修复（输入上下文累加 + 生成速度滞后）",
   "baseline_commit": "3ba3c02",
@@ -272,9 +272,9 @@
       },
       "branches": {
         "rust-metrics": {
-          "red_commit": null,
-          "green_commit": null,
-          "status": "pending",
+          "red_commit": "f38b6b9",
+          "green_commit": "5901ef4",
+          "status": "verified",
           "owner": "executor-rust",
           "task": "task-3",
           "write_scopes": [
@@ -286,9 +286,9 @@
           ]
         },
         "frontend-metrics": {
-          "red_commit": null,
-          "green_commit": null,
-          "status": "pending",
+          "red_commit": "f38b6b9",
+          "green_commit": "5901ef4",
+          "status": "verified",
           "owner": "executor-frontend",
           "task": "task-4",
           "write_scopes": [
@@ -303,12 +303,48 @@
         }
       },
       "tasks": {
-        "task-1": "protocol: NFR baseline + token-metrics.ts 空桩 — pending",
-        "task-2": "test: 红相验收测试（前端 vitest + Rust mock SSE + wire 证据） — pending",
-        "task-3": "executor-rust: R1 hop_complete per-call records + R2 timeline per-call 指标 — pending",
-        "task-4": "executor-frontend: S1/S3 实现 + R3/R4 接线 — pending"
+        "task-1": "protocol: NFR baseline + token-metrics.ts 空桩 — completed",
+        "task-2": "test: 红相验收测试（前端+wire 跨语言） — completed",
+        "task-3": "executor-rust: R1 hop_complete/outout_end per-call records + R2 timeline per-call 条目 — completed",
+        "task-4": "executor-frontend: S1/S3/S4 实现 + R3/R4 接线 — completed",
+        "task-5": "test-defect: A4 夹具矛盾 + wire R1 基线自指修正 — completed",
+        "task-6": "test: §7.10 R1 不变量（I1/I2/I3）重锚红相 — completed",
+        "task-7": "executor-rust: hop_complete 全量 per-call 记录（修正滞后一跳） — completed"
       },
-      "gates": {},
+      "gates": {
+        "red_phase": {
+          "cargo_wave15": "Exit 101 (I1: Σ350000 != payload 710000)",
+          "vitest_wave15": "Exit 1 (17 failed/3 passed)",
+          "purity": "SUT 13 stub throw + 4 assertion, infra 0"
+        },
+        "reanchor_7_10": {
+          "cargo_wave15": "Exit 101",
+          "vitest_wave15": "Exit 1",
+          "frozen_red_receipt": ".dev-team/evidence/wave15/wire-red-frozen.json"
+        },
+        "green_phase": {
+          "cargo_wave15": "Exit 0 (1 passed)",
+          "cargo_regression_accumulate": "Exit 0",
+          "cargo_regression_timeline": "Exit 0",
+          "cargo_check": "Exit 0",
+          "vue_tsc": "Exit 0",
+          "vitest_wave15": "Exit 0 (20 passed)",
+          "vitest_regression_5files": "Exit 0 (46 passed, 2 skipped)",
+          "vitest_full": "865 passed / 1 failed（失败归因并发波次 HomeWorkspace.vue 未提交改动）",
+          "browser_smoke": "Exit 0, consoleErrors=0, contextUsageCircle=true, 2 PNG",
+          "green_capture": ".dev-team/evidence/wave15/wire-green-frozen.json"
+        },
+        "l3_reviews": {
+          "l3a_concurrency_state": "PASS",
+          "l3b_protocol_contract": "PASS",
+          "l3p_prod_readiness": "PASS",
+          "schema_validation": "Exit 0"
+        },
+        "blast_radius": {
+          "union_diff": "329 insertions / 159 deletions (>100 → 强制 ≥2 路互补审查)",
+          "write_scope_audit": "10 源文件 + 2 类测试文件全部在声明范围内；1 处衍生豁免已核准"
+        }
+      },
       "counter": {
         "L2T_failures": {},
         "L2AT_failures": {}
@@ -323,7 +359,8 @@
           "owner": "TBD",
           "due": "下一个指标波次"
         }
-      }
+      },
+      "status": "completed"
     },
     "16": {
       "contract": ".dev-team/contracts/wave-16-ask-cas.md",
@@ -424,7 +461,7 @@
       "status": "completed"
     }
   },
-  "meta_retrospective": ".dev-team/meta-retrospective.md",
+  "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
   "previous_wave": {
     "wave": 7,
     "status": "completed",
