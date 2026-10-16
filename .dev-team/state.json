@@ -1,10 +1,10 @@
 {
-  "wave": 14,
+  "wave": 15,
   "status": "in_progress",
   "task_classification": "B-lite",
-  "reason": "状态条可见性契约反转：运行期间始终可见（含 streaming），防跳动仍由常驻覆盖层承担",
+  "reason": "token 指标口径缺陷修复（输入上下文累加 + 生成速度滞后）",
   "baseline_commit": "3ba3c02",
-  "symptom": "用户实测底部状态信息不显示；诊断确认是 wave-11 §2.4「streaming 期间隐藏」的直接后果（首 token 前约 200ms 可见）",
+  "symptom": "状态栏与输入框上下文按每次 provider 调用累加（多跳虚高）；输出生成速度仅轮次结束可得或恒为 —",
   "waves": {
     "9": {
       "branches": {
@@ -248,7 +248,132 @@
         "task-11": "test: 可见性断言改写 + 红相 — pending",
         "task-12": "executor: 移除隐藏规则 — pending"
       },
-      "gates": {}
+      "gates": {},
+      "top_level_snapshot": {
+        "status": "in_progress",
+        "task_classification": "B-lite",
+        "reason": "状态条可见性契约反转：运行期间始终可见（含 streaming），防跳动仍由常驻覆盖层承担",
+        "baseline_commit": "3ba3c02",
+        "symptom": "用户实测底部状态信息不显示；诊断确认是 wave-11 §2.4「streaming 期间隐藏」的直接后果（首 token 前约 200ms 可见）"
+      },
+      "status": "deferred",
+      "deferred_reason": "用户重定向至 token 指标缺陷修复（wave-15）；wave-14 施工未开始（all pending），保留计划待后续恢复"
+    },
+    "15": {
+      "contract": ".dev-team/contracts/wave-15-token-metrics.md",
+      "task_classification": "B",
+      "grading_basis": "跨 Rust 运行时 ↔ 前端投影协议语义（wire 事件 + 投影口径）；单特性域，无数据迁移/安全面；机械分级依据：模块数>1、接口数>1",
+      "baseline_commit": "3ba3c02",
+      "decision": "用户裁定：状态栏「输入」= 当前上下文占用（最近一次模型调用 input_tokens，跨跳不累加）；输入框上下文圆环同源；生成速度改为单次调用完成即产出",
+      "wave_budget": {
+        "max_l3_reviews": 2,
+        "l3p_required": true,
+        "l2at_scripts": 3
+      },
+      "branches": {
+        "rust-metrics": {
+          "red_commit": null,
+          "green_commit": null,
+          "status": "pending",
+          "owner": "executor-rust",
+          "task": "task-3",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+            "crates/pony-agent-core/src/agent/runtime/trace_timeline.rs",
+            "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+            "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+            "crates/pony-agent-core/src/agent/projection.rs"
+          ]
+        },
+        "frontend-metrics": {
+          "red_commit": null,
+          "green_commit": null,
+          "status": "pending",
+          "owner": "executor-frontend",
+          "task": "task-4",
+          "write_scopes": [
+            "src/lib/runtime/token-metrics.ts",
+            "src/lib/runtime/useTraceProjection.ts",
+            "src/stores/runtime.ts",
+            "src/components/HomeSidebar.vue",
+            "src/components/HomeStatusPanel.vue",
+            "src/lib/runtime/trace.ts",
+            "src/types/runtime.ts"
+          ]
+        }
+      },
+      "tasks": {
+        "task-1": "protocol: NFR baseline + token-metrics.ts 空桩 — pending",
+        "task-2": "test: 红相验收测试（前端 vitest + Rust mock SSE + wire 证据） — pending",
+        "task-3": "executor-rust: R1 hop_complete per-call records + R2 timeline per-call 指标 — pending",
+        "task-4": "executor-frontend: S1/S3 实现 + R3/R4 接线 — pending"
+      },
+      "gates": {},
+      "counter": {
+        "L2T_failures": {},
+        "L2AT_failures": {}
+      },
+      "blast_radius_precheck": "union diff 预计 >100 行（Rust 1 文件 + trace_timeline 签名 + 前端 3-6 文件）→ 强制 ≥2 路互补 L3 审查（A 并发/状态流转，B 协议一致性/契约漂移）",
+      "debt": {
+        "wave15-D1": {
+          "title": "projection.rs TurnEnd settle 覆盖 per-call duration（PA-094 P2-3 遗留）",
+          "evidence": "crates/pony-agent-core/src/agent/projection.rs:303-307 覆盖 per-call entry.turn_duration_ms 为整轮 elapsed（:569 先写正确值）",
+          "impact": "仅影响「事件折叠重建 + 无 providerCallRecords」轮次的 S3 timeline 回退（冷启动 by_turn_records 重建的 per-call 记录完好）",
+          "decision": "本波不改（最小闭包 + 改动需同步既有冻结内联断言投影用例）；登记为 P2 后续工单",
+          "owner": "TBD",
+          "due": "下一个指标波次"
+        }
+      }
+    },
+    "16": {
+      "contract": ".dev-team/contracts/wave-16-ask-cas.md",
+      "standalone_ledger": ".dev-team/state-wave16-ask-cas.json",
+      "task_classification": "B-lite",
+      "grading_basis": "跨 Rust 控制平面列表契约 ↔ 前端 store/组件交互；单缺陷域，无线程/网络/安全面变更；机械分级依据：模块数>1、契约面变更（ask_list_pending 投影语义）",
+      "baseline_commit": "7e8bdb5",
+      "symptom": "用户在选择选项后点「回答/取消」出现「取消失败：control request 'control-0000000000' cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch」",
+      "root_cause": "GovernedDispatcher::pending_requests() 返回全部（含终态）控制请求；ask_control::filter_interaction_requests 仅按 kind 过滤、未按 state==Pending 过滤 → 已消费 Ask 被 ask_list_pending 重新列出，前端 2.5s 轮询使卡片以 version=2 复活；二次提交时 require_current_version 预检通过而 dispatcher CAS 以 state!=Pending 拒绝，落通用文案。次生同文案路径：TTL(60s) 过期但 state 仍 Pending（ask_expire 全仓无调用点）",
+      "branches": {
+        "core-list-pending-only": {
+          "owner": "executor-core",
+          "task": "task-2",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/ask_control.rs"
+          ],
+          "red_commit": "RED_ANCHOR",
+          "green_commit": null,
+          "status": "pending"
+        },
+        "ui-expired-guard": {
+          "owner": "executor-ui",
+          "task": "task-3",
+          "write_scopes": [
+            "src/stores/ask.ts",
+            "src/components/AskPanel.vue"
+          ],
+          "red_commit": "RED_ANCHOR",
+          "green_commit": null,
+          "status": "pending"
+        }
+      },
+      "tasks": {
+        "task-1": "test(L2-T): 红相验收测试 C1-1~C1-6 / C2-1~C2-4 — completed",
+        "task-2": "executor-core: list_pending_asks 仅返回 Pending Interaction — pending",
+        "task-3": "executor-ui: 过期 ask 禁止提交 + 面板禁用 — pending",
+        "l2at": "L2-AT(subagent): ask_pending_adversarial.rs C4-1~C4-4 — 红相 4/4 FAILED(EXIT=101)"
+      },
+      "gates": {
+        "red_phase": {
+          "l2t_rust": "cargo test --test ask_pending_contract → EXIT=101, 0 passed / 6 failed",
+          "l2t_web": "npx vitest run tests/ask-pending-expiry.spec.ts tests/ask-panel-expired.spec.ts → EXIT=1, 4 failed / 4 passed",
+          "l2at_rust": "cargo test --test ask_pending_adversarial → EXIT=101, 0 passed / 4 failed",
+          "receipts": [
+            ".dev-team/wave16-red-receipts.md",
+            ".dev-team/wave16-red-receipts-l2at.md"
+          ]
+        }
+      },
+      "concurrency_note": "共享工作区存在并行 wave-15（token 指标）施工会话，本波次独立编号 wave-16，禁止 git add . / 全局提交；仅定向暂存本波次文件"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md",
