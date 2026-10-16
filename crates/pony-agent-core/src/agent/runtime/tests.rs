@@ -10144,3 +10144,360 @@ mod parity {
         );
     }
 }
+
+// ============================================================================
+// Wave-15 契约验收（Test Agent 唯一编写方）
+//
+// 契约：.dev-team/contracts/wave-15-token-metrics.md
+//   R1：`turn:hop_complete` 必须携带本次已完成调用的 `provider_call_records`（per-call）
+//   R2：持久化 timeline 每条 `call_model` 条目携带**自身** input/output/TTFT/duration，
+//       整轮聚合只落在 `checkpoint_persist`（及轮级记录）
+//   T6：多跳轮持久化 timeline 的 per-call 断言
+//
+// 红相纪律：断言失败必须来自 SUT（`turn_stream.rs` hop 事件构造、`trace_timeline.rs`
+// 持久化构建器）。本测试同时把捕获到的真实 `TurnStreamEvent` 序列 + 持久化 timeline
+// 落盘 `.dev-team/evidence/wave15/wire-red.json`（先落盘后断言，红相亦留物理凭证）。
+// ============================================================================
+
+const WAVE15_HOP_INPUTS: [u64; 3] = [350_000, 360_000, 370_000];
+const WAVE15_HOP_OUTPUTS: [u64; 3] = [50, 60, 100];
+const WAVE15_HOP_TTFT_MS: [u64; 3] = [150, 180, 200];
+const WAVE15_AGGREGATE_INPUT: u64 = 1_080_000;
+const WAVE15_AGGREGATE_OUTPUT: u64 = 210;
+
+fn wave15_evidence_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(".dev-team")
+        .join("evidence")
+        .join("wave15")
+}
+
+fn wave15_write_evidence(file_name: &str, document: &serde_json::Value) {
+    let dir = wave15_evidence_dir();
+    fs::create_dir_all(&dir).expect("create wave15 evidence dir");
+    let path = dir.join(file_name);
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(document).expect("serialize wave15 wire document"),
+    )
+    .unwrap_or_else(|error| panic!("write {} failed: {error}", path.display()));
+}
+
+#[test]
+fn wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_timeline() {
+    let final_text = "wave-15 三跳回合已返回最终答案。";
+    let server = MockHttpServer::start(vec![
+        sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "需要先执行 workspace_list_files。",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 350000,
+                    "completion_tokens": 50,
+                    "total_tokens": 350050
+                }
+            }),
+        ]),
+        sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "目录已找到。"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "继续读取 tauri.conf.json。"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_workspace_read_file",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_read_file",
+                                        "arguments": "{\"path\":\"tauri.conf.json\"}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 360000,
+                    "completion_tokens": 60,
+                    "total_tokens": 360060
+                }
+            }),
+        ]),
+        sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "已经整理完最终结果。"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "content": final_text
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 370000,
+                    "completion_tokens": 100,
+                    "total_tokens": 370100
+                }
+            }),
+        ]),
+    ]);
+    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let sink = RecordingTurnEventSink::new();
+
+    runtime.start_turn_stream(
+        &sink,
+        "turn-wave15-wire".to_string(),
+        TurnInput {
+            message: "wave-15 三跳 token 口径验收".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("session-wave15-wire".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        },
+    );
+
+    let events = sink.events.borrow();
+    let hop_events: Vec<serde_json::Value> = events
+        .iter()
+        .filter(|(name, _)| name == "turn:hop_complete")
+        .map(|(_, payload)| serde_json::to_value(payload).expect("serialize hop event"))
+        .collect();
+    let completed = events
+        .iter()
+        .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+        .expect("turn:completed event");
+
+    let snapshot = runtime.load_session_snapshot(Some("session-wave15-wire"));
+    let trace = snapshot
+        .turn_trace_history
+        .last()
+        .expect("wave15 persisted trace")
+        .clone();
+
+    // ---- 物理凭证：真实 wire 事件序列 + 持久化 timeline（先落盘后断言） ----
+    let wire_events: Vec<serde_json::Value> = events
+        .iter()
+        .map(|(name, payload)| {
+            json!({
+                "name": name,
+                "payload": serde_json::to_value(payload).expect("serialize wave15 event"),
+            })
+        })
+        .collect();
+    let wire = json!({
+        "wave": "wave-15",
+        "phase": "red",
+        "turnId": "turn-wave15-wire",
+        "sessionId": "session-wave15-wire",
+        "expectation": {
+            "hopInputs": WAVE15_HOP_INPUTS,
+            "hopOutputs": WAVE15_HOP_OUTPUTS,
+            "hopFirstTokenLatencyMs": WAVE15_HOP_TTFT_MS,
+            "aggregateInputTokens": WAVE15_AGGREGATE_INPUT,
+            "aggregateOutputTokens": WAVE15_AGGREGATE_OUTPUT,
+        },
+        "turnAggregate": {
+            "inputTokens": completed.input_tokens,
+            "outputTokens": completed.output_tokens,
+            "totalTokens": completed.total_tokens,
+        },
+        "events": wire_events,
+        "persistedTimeline": serde_json::to_value(&trace.trace_timeline)
+            .expect("serialize persisted timeline"),
+        "persistedTurnTrace": serde_json::to_value(&trace).expect("serialize persisted trace"),
+    });
+    wave15_write_evidence("wire-red.json", &wire);
+    if !wave15_evidence_dir().join("wire-red-frozen.json").exists() {
+        wave15_write_evidence("wire-red-frozen.json", &wire);
+    }
+
+    // ---- R1：turn:hop_complete 必须携带本次已完成调用的 per-call 记录 ----
+    // 协议事实：hop_complete 只在「该次模型调用后仍需执行工具」时发出（工具跳），
+    // 末次模型调用直接走 turn:output_end / turn:completed；本回合 3 次调用 → 2 个 hop_complete。
+    assert_eq!(
+        hop_events.len(),
+        2,
+        "三跳回合（其中 2 跳触发工具）必须产生 2 个 turn:hop_complete，实际 {}",
+        hop_events.len()
+    );
+    for (index, payload) in hop_events.iter().enumerate() {
+        let records = payload
+            .get("providerCallRecords")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| {
+                panic!(
+                    "hop {index} 的 turn:hop_complete 未携带 providerCallRecords（契约 R1）；实际载荷: {payload}"
+                )
+            });
+        let last = records
+            .last()
+            .unwrap_or_else(|| panic!("hop {index} 的 providerCallRecords 为空（契约 R1）"));
+        assert_eq!(
+            last.get("inputTokens").and_then(serde_json::Value::as_u64),
+            Some(WAVE15_HOP_INPUTS[index]),
+            "hop {index} 的 per-call inputTokens 必须是该跳自身值（严禁跨跳累加）"
+        );
+        assert_eq!(
+            last.get("outputTokens").and_then(serde_json::Value::as_u64),
+            Some(WAVE15_HOP_OUTPUTS[index]),
+            "hop {index} 的 per-call outputTokens 必须是该跳自身值"
+        );
+        let record_duration = last
+            .get("turnDurationMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| {
+                panic!("hop {index} 的 per-call turnDurationMs（本次调用耗时）必须存在")
+            });
+        assert!(
+            record_duration > 0,
+            "hop {index} 的 per-call turnDurationMs 必须为有效正值"
+        );
+        let record_ttft = last
+            .get("firstTokenLatencyMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| panic!("hop {index} 的 per-call firstTokenLatencyMs 必须存在"));
+        assert!(
+            record_ttft > 0,
+            "hop {index} 的 per-call firstTokenLatencyMs 必须为有效正值"
+        );
+        // per-call TTFT 不可能大于该 hop 事件携带的轮级 TTFT（后者从整轮起点计）。
+        let turn_level_ttft = payload
+            .get("firstTokenLatencyMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        assert!(
+            record_ttft <= turn_level_ttft,
+            "hop {index} 的 per-call TTFT ({record_ttft}ms) 不得大于轮级 TTFT ({turn_level_ttft}ms)"
+        );
+        assert_eq!(
+            last.get("latencyKind"),
+            Some(&serde_json::to_value(ProviderLatencyKind::ProviderStream).unwrap()),
+            "hop {index} 的 per-call latencyKind 必须为 provider_stream（TTFT 可信门控 §7.2）"
+        );
+    }
+
+    // 轮级累加语义（S2）不得被改动；末次调用的 per-call 记录由 turn:completed 承载。
+    assert_eq!(completed.input_tokens, Some(WAVE15_AGGREGATE_INPUT));
+    assert_eq!(completed.output_tokens, Some(WAVE15_AGGREGATE_OUTPUT));
+    assert_eq!(trace.input_tokens, Some(WAVE15_AGGREGATE_INPUT));
+    let completed_records = completed
+        .provider_call_records
+        .as_ref()
+        .expect("turn:completed 必须携带 provider_call_records（R5 既有语义）");
+    assert_eq!(completed_records.len(), 3, "三跳轮应留下 3 条 per-call 记录");
+    for (index, record) in completed_records.iter().enumerate() {
+        assert_eq!(
+            record.input_tokens,
+            Some(WAVE15_HOP_INPUTS[index]),
+            "第 {index} 条 per-call 记录的 input_tokens 必须是该次调用自身值"
+        );
+        assert_eq!(
+            record.output_tokens,
+            Some(WAVE15_HOP_OUTPUTS[index]),
+            "第 {index} 条 per-call 记录的 output_tokens 必须是该次调用自身值"
+        );
+    }
+
+    // ---- R2 / T6：持久化 timeline 每条 call_model 为自身值，聚合只落 checkpoint_persist ----
+    let model_entries: Vec<_> = trace
+        .trace_timeline
+        .iter()
+        .filter(|entry| entry.kind.as_str() == "call_model")
+        .collect();
+    assert_eq!(
+        model_entries.len(),
+        3,
+        "三跳轮持久化 timeline 必须含 3 条 call_model 条目"
+    );
+    for (index, entry) in model_entries.iter().enumerate() {
+        assert_eq!(
+            entry.input_tokens,
+            Some(WAVE15_HOP_INPUTS[index]),
+            "第 {index} 条 call_model 的 input_tokens 必须是其自身调用值（R2 / RC2）"
+        );
+        assert_eq!(
+            entry.output_tokens,
+            Some(WAVE15_HOP_OUTPUTS[index]),
+            "第 {index} 条 call_model 的 output_tokens 必须是其自身调用值（R2 / RC2）"
+        );
+        assert!(
+            entry.turn_duration_ms.is_some_and(|value| value > 0),
+            "第 {index} 条 call_model 必须携带自身 turn_duration_ms（R2）"
+        );
+    }
+    assert_ne!(
+        model_entries[2].input_tokens,
+        Some(WAVE15_AGGREGATE_INPUT),
+        "末条 call_model 严禁被整轮聚合覆盖（RC2）"
+    );
+
+    let checkpoint = trace
+        .trace_timeline
+        .iter()
+        .find(|entry| entry.kind.as_str() == "checkpoint_persist")
+        .expect("completed 轮必须存在 checkpoint_persist 条目承载整轮聚合");
+    assert_eq!(checkpoint.input_tokens, Some(WAVE15_AGGREGATE_INPUT));
+    assert_eq!(checkpoint.output_tokens, Some(WAVE15_AGGREGATE_OUTPUT));
+
+    let _ = server.finish();
+}

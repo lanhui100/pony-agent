@@ -1,0 +1,109 @@
+{
+  "wave": "wave-15",
+  "task": "task-2 / T-T1",
+  "role": "test-agent",
+  "phase": "red",
+  "contract": ".dev-team/contracts/wave-15-token-metrics.md",
+  "sut_stub": "src/lib/runtime/token-metrics.ts（空桩 throw NotImplemented，3 导出：resolveCurrentContextInputTokens / resolveCallGenerationSpeed / countTurnProviderCalls）",
+  "deliverables": {
+    "frontend_red_spec": "tests/acceptance/wave15/token-metrics-red.spec.ts（14 用例：T1-T6 + A1-A5a/b + A5 守卫）",
+    "wire_replay_spec": "tests/acceptance/wave15/token-metrics-wire.spec.ts（6 用例：跨语言 R1/R2/S1/S2/S3 一致性）",
+    "rust_capture_test": "crates/pony-agent-core/src/agent/runtime/tests.rs::wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_timeline（仅追加，未改既有断言）",
+    "browser_smoke_script": "tests/acceptance/wave15/browser-smoke.mjs（playwright-core + channel:chrome + vite dev）",
+    "wire_evidence": ".dev-team/evidence/wave15/wire-red.json（本次运行快照）+ wire-red-frozen.json（红相冻结副本，不被后续覆盖）"
+  },
+  "receipts": [
+    {
+      "id": "R-cargo",
+      "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test -p pony-agent-core --lib wave15_multihop -- --nocapture",
+      "exit_code": 101,
+      "expected": "red（预期失败）",
+      "tail": "panicked at tests.rs:10388: hop 0 的 turn:hop_complete 未携带 providerCallRecords（契约 R1）；实际载荷 providerCallRecords=null, inputTokens=710000, outputTokens=110, turnDurationMs=138 | test result: FAILED. 0 passed; 1 failed; 1023 filtered out",
+      "log": ".dev-team/evidence/wave15/red-phase-cargo.log"
+    },
+    {
+      "id": "R-vitest",
+      "cmd": "npx vitest run tests/acceptance/wave15",
+      "exit_code": 1,
+      "expected": "red（预期失败）",
+      "tail": "Test Files 2 failed (2) | Tests 17 failed | 3 passed (20) | Duration 1.51s",
+      "log": ".dev-team/evidence/wave15/red-phase-vitest.log"
+    },
+    {
+      "id": "R-anchor",
+      "cmd": "npx vitest run tests/context-display-tokens.spec.ts",
+      "exit_code": 0,
+      "expected": "green（契约 §7.7 回归锚点必须保持全绿）",
+      "tail": "Test Files 1 passed (1) | Tests 3 passed (3)",
+      "log": ".dev-team/evidence/wave15/red-phase-regression-anchor.log"
+    },
+    {
+      "id": "R-browser",
+      "cmd": "node tests/acceptance/wave15/browser-smoke.mjs",
+      "exit_code": 0,
+      "expected": "green（真实浏览器物理凭证）",
+      "tail": "{\"ok\":true,\"consoleErrors\":[],\"pageErrors\":[],\"appLayoutShell\":true,\"composerInput\":true,\"contextUsageCircle\":true,\"circleStrokeDashoffset\":\"47.12388980384689\",\"streamingFallbackRendered\":true}",
+      "log": ".dev-team/evidence/wave15/red-phase-browser-smoke.log",
+      "screenshots": [
+        ".dev-team/evidence/wave15/browser-smoke-red.png",
+        ".dev-team/evidence/wave15/browser-smoke-red-streaming.png"
+      ]
+    }
+  ],
+  "red_classification": {
+    "method": "异常类型 × traceback 归属（SUT 栈 vs 测试基建栈）",
+    "sut_stub_throw": {
+      "error": "Error: NotImplemented",
+      "frames": [
+        "src/lib/runtime/token-metrics.ts:16 (resolveCurrentContextInputTokens)",
+        "src/lib/runtime/token-metrics.ts:23 (resolveCallGenerationSpeed)",
+        "src/lib/runtime/token-metrics.ts:30 (countTurnProviderCalls)"
+      ],
+      "cases": ["T1", "T3", "T5", "T6", "A1", "A2", "A3(记录级)", "A4", "A5-a", "A5-b", "A5-守卫", "wire-S1", "wire-S3"]
+    },
+    "sut_assertion_failures": [
+      { "case": "T2", "assertion": "contextDisplayTokens expected 370000 got 1080000", "owner": "src/lib/runtime/useTraceProjection.ts (RC4/R3)" },
+      { "case": "T4", "assertion": "sessionTokenGenerationSpeed expected 100 got null", "owner": "src/lib/runtime/useTraceProjection.ts (RC5/R3)" },
+      { "case": "wire-R1", "assertion": "hop_complete providerCallRecords 长度 expected >0 got 0", "owner": "crates/.../turn_stream.rs (R1)" },
+      { "case": "wire-R2", "assertion": "持久化 timeline call_model inputTokens expected [350000,360000,370000] got [null,null,1080000]", "owner": "crates/.../trace_timeline.rs (RC2/R2)" },
+      { "case": "cargo-R1", "assertion": "hop 0 providerCallRecords is null", "owner": "crates/.../turn_stream.rs (R1)" }
+    ],
+    "test_infra_failures": [],
+    "infra_scan": "grep -nE 'Cannot find module|Failed to resolve import|SyntaxError|TypeError|ReferenceError|WIRE_EVIDENCE_MISSING' → 0 hits",
+    "anchors_still_green": ["证据结构自检（2 hop + 3 call_model + 3 per-call 记录）", "S2 回归：wire 整轮累加口径不变", "T3-投影：已完成三跳轮速度 100 t/s"]
+  },
+  "acceptance_mapping": {
+    "T1": "red spec T1（resolver 370000 且 != 1080000 + 圆环分子）",
+    "T2": "red spec T2（真实 turn:hop_complete ingress → contextDisplayTokens 370000 / 二次 hop 380000）",
+    "T3": "red spec T3（record 级 100 t/s + 退化/守卫分支）",
+    "T4": "red spec T4（活跃轮中间 hop 完成即产出 100，非 null/非整轮值）",
+    "T5": "red spec T5（records 空 + 条目无指标 + count=3 → S1 null）",
+    "T6": "red spec T6/R2 + rust 用例（timeline 每条 call_model 自身指标 + checkpoint_persist 聚合）+ wire-R2",
+    "A1": "all-None usage → null，无 NaN/崩溃",
+    "A2": "TTFT≥duration / duration=0 / -5 / null / TTFT null / buffered_response·unknown 门控（§7.2 不抵扣 TTFT）",
+    "A3": "重复同 step 记录 + 二次 hop_complete 重放 → 值幂等 370000 / 速度 100",
+    "A4": "Number.MAX_SAFE_INTEGER 级数值 → 无 NaN/Infinity",
+    "A5": "裁定 A 变体：a) records=1/条目=3 无指标 → null；b) 同 records + 条目带 per-call → 370000；守卫：3/3 与 1/1 均走步骤 1"
+  },
+  "browser_e2e": {
+    "feasible": true,
+    "chain": "playwright-core chromium.launch({channel:'chrome'}) + vite dev (127.0.0.1:4183) + browser-preview 兜底运行时",
+    "console_errors": 0,
+    "page_errors": 0,
+    "asserted": ["app-layout-shell", "workspace-composer-input", "workspace-context-usage-circle", "提交后 browser-preview 流式回放渲染"],
+    "coverage_boundary": "无 Tauri 宿主 → 无真实 provider usage；圆环 stroke-dashoffset=47.12(=2πr, 0%) 为空数据态，浏览器侧不承担 S1/S3 数值验证（由 wire-replay 承担）",
+    "native_playwright_blocked": "npx playwright test 不可用：@playwright/test 1.60 需 chromium-1228 完整版未下载"
+  },
+  "regressions": {
+    "context-display-tokens.spec.ts": "未修改，3 断言全绿（S2=1080000 / 单调用回退 12500 / 速度 100 t/s）",
+    "existing_rust_assertions": "tests.rs 仅追加新用例，未改 :4678 / :6346 / :6759 等既有断言",
+    "concurrent_wave": "wave-15-ask-cas 未提交改动（ask_control.rs / ask.ts / AskPanel.vue / HomeWorkspace.vue / WorkspaceComposer.vue / useTimelineAutoScroll.ts / status-flow-contract.spec.ts）与本次无交集；tests.rs 为唯一共享文件（仅尾部追加）"
+  },
+  "risks": [
+    "R1 的 hop_complete 记录语义存在两种合规实现（仅本条调用 / 截至该跳累计），wire-S1(b) 已按『两者皆可但必须 per-call』断言，避免误伤",
+    "A5 依赖 Lead 裁定 A（records.length>1 || ==countTurnProviderCalls 才允许步骤 1）；若实现未加该守卫，A5-a/A5-b 将持续红",
+    "Rust capture 用例落盘路径依赖 CARGO_MANIFEST_DIR/../../.dev-team/evidence/wave15；evidence 目录（含 wire-red.json）必须保留在 git 索引外/内由 Lead 决定，缺失会导致 wire spec 抛 WIRE_EVIDENCE_MISSING（基建红）",
+    "wire 速度期望值由实测 turnDurationMs=52ms / TTFT=51ms 推导（≈100000 t/s），已改为运行时动态计算，不做硬编码",
+    "projection.rs:303-307 TurnEnd 覆盖 per-call duration 属 wave15-D1，本次未断言该路径（按 Lead 裁定）"
+  ]
+}
