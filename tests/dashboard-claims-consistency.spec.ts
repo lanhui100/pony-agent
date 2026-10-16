@@ -2,12 +2,12 @@
  * wave-18c R7 契约测试：`management/task-system/00_DASHBOARD.md` 中关于
  * `MAX_SUBAGENT_DEPTH` 的表述必须与真实 `git grep` 命中集合**逐项一致**。
  *
- * 权威证据源：`.dev-team/review-wave18b-contract.json` finding#2（第二次假断言）。
+ * 权威证据源：`.dev-team/review-wave18b-contract.json` finding#2（第二次假断言）与 r4 §9.2 集合一致性判据。
  *
  * 红相基线：该断言行把「全仓零命中」改成**代码域**限定（该分句为真），但新增的存在性分句
  * 「仅见于任务卡 AC 文案 `03_TASKS/PA-110-...md:26`」在全仓口径下为假 ——
- * `git grep -n MAX_SUBAGENT_DEPTH` 实测 8 命中（6 处在 `.dev-team/` 审查档案、
- * 1 处为该断言行自身、1 处为任务卡），故该行仍不自洽。
+ * 未解释 `.dev-team/` 审查档案与断言行自身，故该行仍不自洽。
+ * 命中数是时变量，判据严格执行集合一致性而非固定数字。
  *
  * 判据（与 r3 §9.2 R7「改后重跑同一 grep，命中数须与文本陈述一致」同构）：
  * 把该行声明的命中范围解析为「已解释集合」，断言**全部真实命中都被解释**。
@@ -29,11 +29,15 @@ const DASHBOARD_REL = "management/task-system/00_DASHBOARD.md";
 const IDENTIFIER = "MAX_SUBAGENT_DEPTH";
 const TASK_CARD_PREFIX = "management/task-system/03_TASKS/";
 
-/** `git grep -n <IDENTIFIER> [-- pathspec...]`，归一化为 `path:lineno` 位置集合。 */
+/** `git grep -n <IDENTIFIER> [-- pathspec...]`，归一化为 `path:lineno` 位置集合。
+ * 显式排除 `tests/**`，消除本测试套件自身作为 `.ts` 包含该标识符时的自我污染（HARNESS 缺陷修复）。
+ */
 function gitGrepLocations(pathspecs: string[] = []): string[] {
   const args = ["grep", "-n", IDENTIFIER];
   if (pathspecs.length > 0) {
-    args.push("--", ...pathspecs);
+    args.push("--", ...pathspecs, ":(exclude)tests/**");
+  } else {
+    args.push("--", ".", ":(exclude)tests/**");
   }
   let stdout = "";
   try {

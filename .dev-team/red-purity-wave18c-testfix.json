@@ -1,0 +1,13 @@
+{
+  "task_id": "task-10",
+  "status": "completed",
+  "defect_summary": "tests/dashboard-claims-consistency.spec.ts 自身为 .ts 文件并包含 MAX_SUBAGENT_DEPTH 字面量 5 处，导致 R7-1/R7-4 在执行 git grep -- '*.rs' '*.ts' 时将自身纳入被测集合，造成测试自我污染和恒 FAIL。",
+  "fix_details": [
+    "在 gitGrepLocations 函数实现中，追加 ':(exclude)tests/**'，彻底排除测试代码对源码事实断言的自我污染。",
+    "顶部注释去除写死的静态命中数字（原写 8 命中），对齐 r4 §9.2 集合一致性判据。"
+  ],
+  "evidence": {
+    "normal_test": "npx vitest run tests/dashboard-claims-consistency.spec.ts -> EXIT 0 (4 passed)",
+    "mutation_test": "回退 00_DASHBOARD.md:23 至旧假断言，执行测试 -> EXIT 1 (R7-2 真实红相失败，unexplained 19 处命中)，证明测试具有完全可变异敏感性，非恒真断言。"
+  }
+}
