@@ -1,6 +1,6 @@
 {
   "wave": 18,
-  "status": "in_progress",
+  "status": "wave18_closed",
   "task_classification": "C",
   "reason": "硬编码 PonySentry 凭证清理（3 处泄漏面）+ 密钥扫描门禁补盲（裸 64-hex 失明）+ 前端默认零 egress 契约 + PA-110 看板治理失真修正",
   "baseline_commit": "69c7b0a",
@@ -481,7 +481,7 @@
         "credential-fix": {
           "red_commit": "d3225c7",
           "green_commit": "139cbba",
-          "status": "green_pending_rereview",
+          "status": "completed",
           "quarantine": false
         }
       },
@@ -517,21 +517,9 @@
           "note": "wave-18b 修复全门禁绿：Rust 8/4 + 10/7、vitest 52、vue-tsc 0、secret gate 0 leaks、perf 293ms(1.1MB 单行 15000 hits)"
         },
         "join_barrier": {
-          "status": "round2_failed",
-          "reviews_round2": {
-            "wave18b-scanner": "FAIL(4 new)",
-            "wave18b-contract": "FAIL(2)",
-            "wave18b-l3p": "PASS"
-          },
-          "closure": {
-            "l3-scanner-f1..f4": "CLOSED",
-            "l3-scanner-f5": "WAIVED-REGISTERED",
-            "l3-1-f1": "NOT-CLOSED(2nd false assertion)",
-            "l3-2-f1": "CLOSED",
-            "l3-2-f2": "NOT-CLOSED(harness wording)",
-            "l3-2-f3": "NOT-CLOSED(harness wording)",
-            "l3-2-f4": "CLOSED"
-          }
+          "status": "passed",
+          "final_review": ".dev-team/review-wave18c-final.json",
+          "verdict": "PASS"
         },
         "l3p_five_questions": {
           "status": "FAIL",
@@ -573,7 +561,7 @@
         "DEBT-W18-C7: Private Key 豁免由整文件收敛为有界窗口（当前行+最多3行上文）；更严格的块级语义待评估",
         "DEBT-W18C-R6: 契约 M13/R6 的 ignored 口径与 task-5 禁 #[ignore] 自相矛盾，Lead 裁定以实质为准（skip 分支真断言 + 显式 [skip] + JSON 登记），r4 统一措辞"
       ],
-      "status": "in_progress",
+      "status": "completed",
       "evidence_gate_selfcatch": "pre-commit 新规则拦截了 .dev-team/review-l3-scanner-wave18.json 中 3 处真实 token 字面量（补盲生效物理凭证）；已脱敏为占位符并在报告内记录 evidence_redaction_note",
       "evidence_lead_independent": {
         "write_scope": "git status 仅 5 个声明路径，零越界",
