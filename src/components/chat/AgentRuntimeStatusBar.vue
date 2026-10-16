@@ -274,41 +274,48 @@ const displayLabel = computed(() => {
 }
 
 /* wave-11.2 F3：label 原位替换（不再 :key 重建 + 仅淡入），消除模式切换时的空白帧；
-   持续动效由 .runtime-status-shimmer 承担。 */
+   持续动效由 .runtime-status-shimmer（文字扫光效果）承担。
+   通过 text-fill-color: transparent + background-clip: text 让高亮光束横向匀速扫过文字。 */
 .runtime-status-shimmer {
   font-style: italic;
   font-synthesis: style;
   background: linear-gradient(
     90deg,
-    rgba(120, 113, 108, 0.7) 0%,
-    rgba(28, 25, 23, 0.95) 50%,
-    rgba(120, 113, 108, 0.7) 100%
+    rgba(120, 113, 108, 0.45) 0%,
+    rgba(120, 113, 108, 0.45) 35%,
+    rgba(28, 25, 23, 1) 50%,
+    rgba(120, 113, 108, 0.45) 65%,
+    rgba(120, 113, 108, 0.45) 100%
   );
-  background-size: 200% 100%;
+  background-size: 250% 100%;
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: shimmer-sweep 2.4s ease-in-out infinite;
+  animation: shimmer-sweep 2.2s ease-in-out infinite;
 }
 
 @keyframes shimmer-sweep {
   0% {
-    background-position: 200% 0;
+    background-position: 100% 0;
   }
 
   100% {
-    background-position: -200% 0;
+    background-position: -150% 0;
   }
 }
 
 :global(.dark) .runtime-status-shimmer {
   background: linear-gradient(
     90deg,
-    rgba(168, 162, 158, 0.7) 0%,
-    rgba(245, 245, 244, 0.98) 50%,
-    rgba(168, 162, 158, 0.7) 100%
+    rgba(168, 162, 158, 0.45) 0%,
+    rgba(168, 162, 158, 0.45) 35%,
+    rgba(255, 255, 255, 1) 50%,
+    rgba(168, 162, 158, 0.45) 65%,
+    rgba(168, 162, 158, 0.45) 100%
   );
-  background-size: 200% 100%;
+  background-size: 250% 100%;
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
