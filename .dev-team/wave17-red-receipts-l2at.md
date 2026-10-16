@@ -179,3 +179,84 @@ stdout 摘要（连续 3 次运行结果完全一致）：
 - [x] 每条断言均绑定真实状态突变：store action 调用次数与实参、Vue `emitted` 载荷、选中态 class 突变、守卫返回值
 - [x] 断言失败原因全部为 `AssertionError`（12/12），无 setup/import 失败
 - [x] 测试数据生命周期：`afterEach` 清空 `document.body`（Teleport 目标）+ `vi.restoreAllMocks()`；无临时文件/无外部服务/无真实凭据（全部 `mockResolvedValue`）
+
+---
+
+## 6. REV-L2AT-1（2026-10-16，绿相阶段）：冻结测试缺陷修订 —— 身份断言 `toBe` 恒假
+
+> 修订执行者：test-agent（L2-T）。Lead 授权**最小解冻**，仅限本文件 2 处身份断言 + 负向自检 + 注释；
+> 未放宽 `toHaveBeenCalledTimes(100)`、未改其他断言、未碰 `tests/acceptance/wave17/**`、未碰 `src/**`。
+
+### 6.1 缺陷与位置
+
+| 位置 | 原断言 | 失败形态 |
+| :--- | :--- | :--- |
+| `:582` | `expect(call[0]).toBe(ask)` | `Received: serializes to the same string`（`toBe` 恒假） |
+| `:609` | `answerSpy.mock.calls.every((call) => call[0] === ask && ...)` | 恒为 `false` |
+
+**根因**：`ask` 经 `WorkspaceComposer.vue` 的 `activeAsk` computed 从 Pinia state 读出，提交给
+`askStore.answer` 的是 **Vue reactive Proxy**；本 spec 持有的是 `createPendingAsk()` 返回的
+**原始对象** → `Object.is(proxy, raw) === false`。
+
+**独立复现（本次修订执行者的探针，非转述）**：用仓库 node_modules 的 `pinia` + `vue` 建最小 store，
+把原始对象塞进 `state.pendingAsks` 再读回，原始 stdout：
+
+```
+{
+  "storeSlotIsRaw": false,
+  "storeSlotIsProxy": true,
+  "storeSlotIsReactive": true,
+  "computedIsRaw": false,
+  "computedIsProxy": true,
+  "toRawSlotIsRaw": true,
+  "toRawComputedIsRaw": true,
+  "deepEqual": true
+}
+decoyMakesIdentityAssertionThrow = true
+toRaw(proxy) === raw           = true
+```
+
+与 executor-a 的探针报告逐字段一致（`storeSlotIsRaw:false` / `activeAskIsProxy:true` /
+`toRawActiveAskIsRaw:true` / `deepEqual:true`）→ 缺陷成立，且**不是**推断。
+
+### 6.2 修订内容（语义强度不降）
+
+- `import { nextTick } from "vue"` → `import { nextTick, toRaw } from "vue"`（`toRaw` 为修订所必需）。
+- `:582` → `expect(toRaw(call[0]), "…").toBe(ask)`。
+- `:609` → `answerSpy.mock.calls.every((call) => toRaw(call[0]) === ask && call[1] === "候选词")`。
+- **为何强度不降**：`toRaw` 只剥离 reactive 包装，比对方式仍是**引用同一性**（`Object.is`），
+  不是退化为浅比较或深比较。证据：`toRaw(proxy) === raw` 为 `true` 当且仅当二者指向同一原始对象；
+  换成诱饵对象即翻转为 `false`（见 6.3）。
+
+### 6.3 负向自检（防"恒真断言"，Lead 强制要求）
+
+两处修订均内联加入负向自检，证明断言**具备证伪能力**：
+
+| 位置 | 自检 | 结论 |
+| :--- | :--- | :--- |
+| `:582` 后 | 用诱饵 `createPendingAsk({ requestId: "ask-decoy" })` 作期望值 → `expect(() => expect(toRaw(call[0])).toBe(decoyAsk)).toThrow()` | **通过**：诱饵使身份断言抛错，断言非恒真 |
+| `:609` 后 | `answerSpy.mock.calls.every((call) => toRaw(call[0]) === decoyAsk)` 必须为 `false` | **通过**：诱饵使判据翻转为 false，判据非恒真 |
+
+独立复现：`decoyMakesIdentityAssertionThrow = true`（见 6.1 探针 stdout）。
+
+### 6.4 红相有效性论证（为何原缺陷不影响红相证据）
+
+红相时 `C4-3` 用例先在 `:577` `expect(answerSpy).toHaveBeenCalledTimes(100)` 失败
+（实测 `got 200 times`），执行链在 `:582` 的**身份断言之前**即中断 → 该身份断言**从未被执行**，
+故原红相证据（`200 vs 100`）完全不受此缺陷污染。修订属**绿相阶段的测试自身缺陷修复**，
+不改变红相结论、不需要重新锚定红相。
+
+### 6.5 修订后物理收据
+
+```
+$ npx vitest run tests/acceptance/wave17-adversarial/ime-guard-adversarial.spec.ts
+EXIT=0
+ ✓ tests/acceptance/wave17-adversarial/ime-guard-adversarial.spec.ts (14 tests) 443ms
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+```
+
+- 修订前 sha256：`e646a862ef6d43c2196ba1af2fb816eda2820f13118c683a04ed24c2bd329c59`
+- **修订后 sha256**：`deb46683943b7507598eeb4e905aaa1bf27259ca768c00169ac2c0b649eeb7c9`
+- 前置条件：executor-a 已实现并接线守卫（`src/lib/ime.ts` 真实现 + 6 处入口调用 `isImeComposingEvent`）。
+

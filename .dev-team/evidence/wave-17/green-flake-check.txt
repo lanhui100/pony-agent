@@ -1,0 +1,12 @@
+=== RUN 1 ===
+ Test Files  3 passed (3)
+      Tests  31 passed (31)
+RUN1_EXIT=0
+=== RUN 2 ===
+ Test Files  3 passed (3)
+      Tests  31 passed (31)
+RUN2_EXIT=0
+=== RUN 3 ===
+ Test Files  3 passed (3)
+      Tests  31 passed (31)
+RUN3_EXIT=0

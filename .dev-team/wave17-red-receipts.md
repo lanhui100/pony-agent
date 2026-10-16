@@ -15,8 +15,8 @@
 | :--- | :--- | :--- |
 | `tests/acceptance/wave17/ime-composition-guard.spec.ts` | C1-1 ~ C1-8 + C1-5 反向断言 + 事件透传探针 | `c9e94f124cf6e3ae60f7e43a0d366d67c5310beb5679b735f48ad94bd0a197fa` |
 | `tests/acceptance/wave17/tabular-nums-contract.spec.ts` | C2-1 / C2-3 / C2-4 class 契约层 | `f2ca6327bfc0f732d60e053e59772aebdea0b3b2c3fca4aeaa29ecba0f83bc06` |
-| `tests/e2e/wave17-browser-gate.spec.ts` | C3-1 / C3-2 / C3-3 + C2-2a/b/c/d 真实浏览器物理测量 | `79ff24706e12f3850228b4f5a5adc15e580db7d476502f35e924ed2b96965cf5` |
-| `.dev-team/evidence/wave-17/wave17-browser-gate-home.png` | C3-3 关键旅程截图（141,523 字节） | 运行时生成 |
+| `tests/e2e/wave17-browser-gate.spec.ts` | C3-1 / C3-2 / C3-3（REV-3 修订）+ C2-2a/b/c/d 真实浏览器物理测量 | `f0e130b2ea2ad817566640b547e53d8b5709b2bdc5a3ea08689501bf95333660`（REV-3 后；REV-1 后为 `79ff24706e12f3850228b4f5a5adc15e580db7d476502f35e924ed2b96965cf5`） |
+| `.dev-team/evidence/wave-17/wave17-browser-gate-home.png` | C3-3 关键旅程截图（REV-3 后重拍：1280×720，85,132 字节，工作区可见） | `64d9de9638de88d7cb34476eb3695a9eedf77716dcd23d82827ab7fbf2c73786` |
 
 ---
 
@@ -124,7 +124,7 @@ AssertionError: 格式倒计时位（AskPanel）… 实际链路：
 
 ## 4. C3 浏览器真实链路门禁收据（Playwright / chromium）
 
-### 4.1 REV-1 后的最终口径（当前冻结版本）
+### 4.1 REV-1 后的口径（红相锚定时的历史记录；C3-3 已于 REV-3 修订，见 §8）
 
 ```
 $ npx playwright test tests/e2e/wave17-browser-gate.spec.ts --reporter=list
@@ -243,7 +243,88 @@ Lead 同时明确：**C2-5 从未禁止 `min-width`**，本 Agent 原先"与 C2-
 
 上述 3 个测试文件 + 本收据经 Lead 红相锚定后即**冻结只读**。
 
-**冻结前已授权的解冻事件（共 1 次，已用毕）**：REV-1 口径修订 —— Lead 批准对
-`tests/e2e/wave17-browser-gate.spec.ts` 做最小增量（对齐 §6 REV-1 命名 + 补 C2-2c 相邻位位移断言）。
-其余两个 acceptance spec 未解冻、未修改。锚定后任何进一步修改均需 Lead 再次明确批准。
+**冻结前已授权的解冻事件（共 2 次，均已用毕）**：
+1. **REV-1** 口径修订 —— Lead 批准对 `tests/e2e/wave17-browser-gate.spec.ts` 做最小增量
+   （对齐 §6 REV-1 命名 + 补 C2-2c 相邻位位移断言）。
+2. **REV-3** C3-3 物理截图凭据修订 —— 见 §8。
+
+其余两个 acceptance spec（`ime-composition-guard.spec.ts` / `tabular-nums-contract.spec.ts`）
+全程未解冻、未修改，sha256 保持锚定值。锚定后任何进一步修改均需 Lead 再次明确批准。
+
+---
+
+## 8. REV-3（绿相阶段）：C3-3 物理截图凭据不成立 → 修订并重拍
+
+**提出者**：Lead 在 Join Barrier 目视复核时发现。**归属**：测试自身缺陷（豁免熔断计数）。
+
+### 8.1 缺陷事实
+
+旧版 C3-3 产出的 `.dev-team/evidence/wave-17/wave17-browser-gate-home.png`（1280×720，141,523 字节）
+画面是**启动闪屏**（PONY AGENT + 加载进度条），完全没有工作区外壳 / 侧栏 / 输入框。
+该文件**不构成**契约 §2 C3-3 要求的「关键旅程真实截图」。
+
+**根因**：
+- `index.html:17` 静态注入 `#app-loading-screen`（`position:fixed; inset:0; z-index:999999` 全屏遮罩）。
+- `src/main.ts:91-96`：挂载后 `setTimeout(3000)` 加 `fade-out`，再 350ms 后 `splash.remove()`。
+- Playwright `toBeVisible()` 对**被覆盖但未隐藏**的元素仍判"可见" → C3-1/C3-2 断言成立，
+  但 `openHome()` 返回时闪屏仍在最上层 → 截图拍到闪屏。
+- 旧断言只校验「文件存在且 >10KB」，**无法证伪「拍到的是闪屏」** → 该用例是弱证据。
+
+### 8.2 修订内容（仅 C3-3 用例；C3-1/C3-2、C1、C2 断言未动）
+
+1. **闪屏前置存在性确认**（防空等待）：导航后紧贴 `domcontentloaded` 断言
+   `expect(splash).toHaveCount(1)`。若闪屏从不出现，下方 `toHaveCount(0)` 会恒真 → 假测试；
+   此断言使该退化路径不可能静默通过。
+2. **显式等待闪屏移除**（无硬编码 sleep）：截图前 `await expect(splash).toHaveCount(0)`。
+3. **证伪组合**：截图前断言 composer 同时满足 可见 + `toBeEnabled()` + `toBeInViewport()`
+   + 持有本次填入文本；`app-layout-shell` `toBeInViewport()`；右侧栏 `data-open="true"`。
+4. **遮挡命中测试（核心证伪器）**：`document.elementFromPoint()` 取 composer 与
+   `app-layout-shell` **中心点最上层可命中元素**，断言命中元素属于目标自身或其后代。
+   闪屏不是 `#app` 的后代且为全屏遮罩 → 若它覆盖画面，命中结果必然是闪屏，断言失败。
+5. 截图后复核 `splash` 仍 `toHaveCount(0)`。
+
+### 8.3 证伪器有效性物理实测（决定性）
+
+独立 Playwright 探针，同一构建产物、viewport 1280×720：
+
+```
+WHILE_SPLASH_PRESENT = {"splashCount":1,"composer":{"ok":false,"hit":"div#app-loading-screen"},"shell":{"ok":false,"hit":"h1"}}
+AFTER_SPLASH_REMOVED = {"splashCount":0,"composer":{"ok":true,"hit":"textarea"},"shell":{"ok":true,"hit":"section"}}
+FALSIFIER_HAS_TEETH = true
+GREEN_CONDITION_OK  = true
+```
+
+- 闪屏存在时：composer 中心点最上层命中 `div#app-loading-screen`、shell 中心点命中闪屏内 `h1`
+  → `ok=false`。**证明修订后的 C3-3 在旧缺陷现场会真红**，该断言具备真实证伪能力（非恒真）。
+- 闪屏移除后：命中 `textarea` / `section`（工作区自身）→ `ok=true`，绿相成立。
+
+### 8.4 修订后物理收据
+
+```
+$ npm run build            → EXIT=0（dist/index.html md5 581d0ac4b884941f8c836cea744bfbbd，构建确定性一致）
+$ npx playwright test tests/e2e/wave17-browser-gate.spec.ts --reporter=list
+EXIT=0
+  ✓ C3-1: 真实 Chromium 加载构建产物，核心旅程可达 (836ms)
+  ✓ C3-2: 首页加载 + 一次真实提交旅程全程 Console Error = 0 且未捕获异常 = 0 (3.9s)
+  ✓ C3-3: 关键旅程截图落盘 .dev-team/evidence/wave-17/（须拍到工作区，非启动闪屏） (4.1s)
+  ✓ C2-2: HomeStatusPanel 指标位 tabular-nums 计算样式 + 等位数宽度稳定 + 相邻位左边缘不位移 (766ms)
+  4 passed (11.7s)
+```
+
+- 修订后 spec sha256：`f0e130b2ea2ad817566640b547e53d8b5709b2bdc5a3ea08689501bf95333660`
+- 新截图 sha256：`64d9de9638de88d7cb34476eb3695a9eedf77716dcd23d82827ab7fbf2c73786`
+  （1280×720，85,132 字节；连跑两次字节级一致 → 截图确定性）
+
+### 8.5 目视结论（本次修订执行者自检）
+
+新截图画面内容逐区确认：
+
+| 区域 | 目视所见 |
+| :--- | :--- |
+| **左侧栏** | `Pony Agent` 品牌行 + 折叠按钮；`+ 新对话` 入口；`工作区` 分组（含 `···` 菜单）；会话行 `新对话 / 未保存`（选中态高亮）；底部 `设置` 入口 |
+| **中间消息区** | 空态标题「我能帮你做些什么？」 |
+| **底部 composer** | 输入框内文本 **`wave-17 evidence screenshot`**；工具行 `工作区修改`、`GPT 5.4 默认`、发送按钮 |
+| **右侧状态栏** | `状态` 面板：`0 / 0 / 0 / 0` 四个计数 + token 指标行 `↑0 ↓0 ⚡0 ◷—`（与 C2 修订后的位点结构一致） |
+| **启动闪屏** | **完全不可见**（全屏遮罩已从 DOM 移除） |
+
 

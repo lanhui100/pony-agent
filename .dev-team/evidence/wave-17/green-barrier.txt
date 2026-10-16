@@ -1,0 +1,33 @@
+### WAVE-17 GREEN BARRIER 2026-10-16T14:44:22+08:00 HEAD=f060c8d
+--- 1. typecheck ---
+(node:2991718) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+TYPECHECK_EXIT=0
+--- 2. wave17 acceptance (C1+C2+C4) ---
+ ✓ tests/acceptance/wave17/ime-composition-guard.spec.ts (11 tests) 392ms
+ ✓ tests/acceptance/wave17-adversarial/ime-guard-adversarial.spec.ts (14 tests) 477ms
+
+ Test Files  3 passed (3)
+      Tests  31 passed (31)
+   Start at  14:44:31
+   Duration  3.37s (transform 2.99s, setup 0ms, import 6.29s, tests 1.26s, environment 1.25s)
+
+WAVE17_EXIT=0
+--- 3. full unit regression ---
+
+ Test Files  85 passed (85)
+      Tests  897 passed | 10 skipped (907)
+   Start at  14:44:36
+   Duration  28.82s (transform 40.45s, setup 0ms, import 137.48s, tests 97.41s, environment 106.17s)
+
+FULL_EXIT=0
+--- 4. version check ---
+(Use `node --trace-warnings ...` to show where the warning was created)
+[check-version-sync] Core version ok: 0.1.121
+[check-version-sync] Tauri version ok (4 places in sync): 0.1.146
+[check-version-sync] PASSED: All version files are synchronized.
+VERSION_EXIT=0
+--- 5. NFR baseline validator ---
+NFR_EXIT=0
+--- 6. stub purity (post-implementation, expect FAIL: stub replaced by impl) ---
+STUB_EXIT=1

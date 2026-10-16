@@ -1,0 +1,51 @@
+{
+  "verdict": "PASS",
+  "five_questions": [
+    {
+      "q": 1,
+      "baseline_field": "external_call_timeout_ms",
+      "baseline_value": "3000 (applicable:false)",
+      "code_evidence": "机械核验 union-diff-src.patch 全部 70 行新增行（grep '^+' 排除 '+++' 头）：fetch(|axios|XMLHttpRequest|.invoke(|invoke<|tauri|EventSource|WebSocket|sendBeacon|http://|https://|setTimeout|setInterval|requestAnimationFrame|child_process|exec(|spawn(|process.env|AbortController|signal:|timeout → 0 命中。diff 新增面仅两类：(a) src/lib/ime.ts:23-29 纯谓词 isImeComposingEvent（无 IO，见 Q3 全文读取）；(b) Vue 模板 class/事件绑定改写，hunk 为 AskPanel @@-127、HomeSessionSidebar @@-30/-121/-825、HomeSessionSidebarRow @@-6/-67/-91、HomeStatusPanel @@-65/-92、HomeTracePanel @@-1523/-1531/-1585/-1601、WorkspaceComposer @@-11/-528/-682/-756/-865/-914/-935/-1365。基准 applicable:false 与实现一致，且为机械实测而非照抄声明。",
+      "machine_checked": true,
+      "non_machine": false,
+      "result": "PASS"
+    },
+    {
+      "q": 2,
+      "baseline_field": "logging (format=json / trace_id=true; applicable:false)",
+      "baseline_value": "json / true (applicable:false)",
+      "code_evidence": "patch 全文 grep -i 'catch' → 0 命中（既无裸 catch{} 也无任何 try/catch，故不存在吞异常）；新增行 grep console.|logger|.log(|.warn(|.error(|trace_id|traceId|JSON.stringify → 0 命中，本波未新增任何日志面，与 applicable:false 一致。src/lib/ime.ts:24-27 的 `return false` 早退是契约文档化的边界穿透路径（.dev-team/contracts/wave-17-ime-and-numeric-jitter.md §2 C1『不得抛异常』），非异常吞噬（无 try/catch 包裹）。7 个变更文件内空 catch 计数实测均为 0（src/lib/ime.ts、src/components/chat/WorkspaceComposer.vue、HomeSessionSidebarRow.vue、HomeSessionSidebar.vue、HomeStatusPanel.vue、HomeTracePanel.vue、AskPanel.vue）。无无上下文裸打印。",
+      "machine_checked": true,
+      "non_machine": false,
+      "result": "PASS"
+    },
+    {
+      "q": 3,
+      "baseline_field": "resource_release",
+      "baseline_value": "applicable:false",
+      "code_evidence": "新增行 grep addEventListener|removeEventListener|setInterval|setTimeout|requestAnimationFrame|new Worker|.subscribe|onMounted|onBeforeUnmount|watch(|createObjectURL|FileReader|.observe( → 0 命中。逐项核对任务点名的两处：(a) isImeComposingEvent —— 全文读取 src/lib/ime.ts（共 29 行）确认无全局监听、无定时器、无句柄，grep 侧效标记 → 0 命中；(b) WorkspaceComposer.vue 新增 3 个包装（:533-536 toggleReasoningVisibilityOnEnter、:692-694 handleOptionEnter、:771-774 submitAskAnswerOnEnter）均为『谓词早退 + 委托原函数』，无定时器/句柄。该文件现存定时器与监听位于 :111/:118（modelSearchDebounceTimer）与 :829-831（window.addEventListener ×3），经 `diff <(git diff -- src/) union-diff-src.patch` = IDENTICAL_TO_WORKTREE 证明其不在本波 diff 新增行内，属既有代码。patch 中 WorkspaceComposer @@-865/-914/-935/-1365 四处 hunk 头显示 onBeforeUnmount(() => { 仅为 git 函数上下文启发式，hunk 实体内容全是模板 class/@keydown 绑定，未触碰任何清理路径。",
+      "machine_checked": true,
+      "non_machine": false,
+      "result": "PASS"
+    },
+    {
+      "q": 4,
+      "baseline_field": "concurrency_lock",
+      "baseline_value": "applicable:false",
+      "code_evidence": "机械部分：4 个回车包装在单次回车下的调用路径数实测为 1 —— 每个元素仅一条 @keydown.enter 绑定（WorkspaceComposer.vue:885 handleOptionEnter(index,$event)、:934 submitAskAnswerOnEnter($event)、:955 submitAskAnswerOnEnter($event)、:1385 toggleReasoningVisibilityOnEnter($event)；HomeSessionSidebar.vue:835 submitRenameOnEnter($event)；HomeSessionSidebarRow.vue:101 onRenameEnter($event)），全库 grep 无并行 @keyup.enter/@keypress.enter 重复绑定（keyup 命中 0）；包装体仅新增 `if (isImeComposingEvent(event)) return;` 早退（patch @@-682/-528/-756/-121/-67），不产生第二条提交路径；既有重入/幂等闸门未改动：WorkspaceComposer.vue:778 `if (!ask || askIsBusy.value) return;`、HomeSessionSidebar.vue:132 `if (!renamingKey.value || renamingBusy.value) return;`。关键不变式：<button> 上的 @keydown.enter.prevent 在改动前后均保留（patch @@-682 显示 `-@keydown.enter.prevent=\"handleOptionEnter(index)\"` → `+@keydown.enter.prevent=\"handleOptionEnter(index, $event)\"`），浏览器 Enter→合成 click 仍被抑制，故 1 次回车仍为 1 次提交。non-machine 说明：`Enter→click 合成抑制` 属浏览器语义推断（已由 .dev-team/evidence/wave-17/green-browser-gate.txt 的 4 passed 真实 Chromium 门禁侧证，但非 grep 可判定）。:1385 新增的 .prevent 落在 div[tabindex=0]（role=menuitem，:1382-1385），div 不合成 click，未引入重复触发。",
+      "machine_checked": true,
+      "non_machine": true,
+      "result": "PASS"
+    },
+    {
+      "q": 5,
+      "baseline_field": "config/self-check",
+      "baseline_value": "基准表中不存在该键（nfr-baseline-wave17.json 实测仅 5 键：external_call_timeout_ms, retry, concurrency_lock, logging, resource_release）",
+      "code_evidence": "机械核验：json.load 键列表 → 无 config/self-check 条目，故不引入基准表之外的自定标准，仅核验『是否新增配置读取』。新增行 grep import.meta.env|localStorage|sessionStorage|readConfig|loadConfig|config.|getItem|getSetting|featureFlag|process.env → 0 命中。diff 新增字面量仅两类：Tailwind class 令牌（tabular-nums / min-w-[2.25rem] / min-w-[4rem] / min-w-[5.5rem] / text-right）与 data-testid 测试钩子（HomeStatusPanel.vue:72/78/84/98/107/113/122），二者均非配置项，无需模板与自检。AskPanel.vue:130 为 class 改写。",
+      "machine_checked": true,
+      "non_machine": false,
+      "result": "PASS"
+    }
+  ],
+  "findings": []
+}

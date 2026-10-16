@@ -1523,7 +1523,7 @@ function resolveBuildContextObservation(
               </div>
               <div v-if="buildTurnMetricItems(turn).length" class="pl-[1.125rem] flex flex-nowrap items-center gap-x-3 text-[10px] leading-[1.15] text-stone-400">
                 <Tooltip v-for="item in buildTurnMetricItems(turn)" :key="item.tooltip" :text="item.tooltip">
-                  <span class="inline-flex items-center gap-0.5 whitespace-nowrap">
+                  <span class="inline-flex items-center gap-0.5 whitespace-nowrap tabular-nums">
                     <component :is="item.icon" class="h-3 w-3" />
                     {{ item.value }}
                   </span>
@@ -1531,7 +1531,7 @@ function resolveBuildContextObservation(
               </div>
             </div>
             <div class="flex items-center gap-1">
-              <span v-if="turnDurationText(turn)" class="shrink-0 whitespace-nowrap text-[10px] leading-[1.3] text-stone-400">
+              <span v-if="turnDurationText(turn)" class="shrink-0 whitespace-nowrap tabular-nums text-[10px] leading-[1.3] text-stone-400">
                 {{ turnDurationText(turn) }}
               </span>
               <button
@@ -1585,7 +1585,7 @@ function resolveBuildContextObservation(
                           :key="`${turn.turnId}-${entry.id}-${item.tooltip}`"
                           :text="item.tooltip"
                         >
-                          <span class="inline-flex items-center gap-0.5 whitespace-nowrap text-stone-400">
+                          <span class="inline-flex items-center gap-0.5 whitespace-nowrap tabular-nums text-stone-400">
                             <component :is="item.icon" class="h-3 w-3" />
                             {{ item.value }}
                           </span>
@@ -1601,7 +1601,7 @@ function resolveBuildContextObservation(
                   </div>
 
                   <div class="flex items-center gap-1">
-                    <span v-if="timelineDurationText(turn, entry)" class="shrink-0 whitespace-nowrap text-[10px] leading-[1.3] text-stone-400">
+                    <span v-if="timelineDurationText(turn, entry)" class="shrink-0 whitespace-nowrap tabular-nums text-[10px] leading-[1.3] text-stone-400">
                       {{ timelineDurationText(turn, entry) }}
                     </span>
                     <button

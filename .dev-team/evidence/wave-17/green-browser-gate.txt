@@ -1,0 +1,26 @@
+### BROWSER GATE (canonical, fresh build) 2026-10-16T14:45:18+08:00
+[33m[INEFFECTIVE_DYNAMIC_IMPORT] [0msrc/stores/ask.ts is dynamically imported by src/stores/runtime.ts but also statically imported by src/components/ask/AskUserToolCallCard.vue?vue&type=script&setup=true&lang.ts, src/components/chat/WorkspaceComposer.vue?vue&type=script&setup=true&lang.ts, dynamic import will not move module into another chunk.
+
+✓ built in 2.63s
+BUILD_EXIT=0
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+[2m[WebServer] [22m(node:2999247) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+[2m[WebServer] [22m(node:2999247) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+[2m[WebServer] [22m(node:2999247) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+Running 4 tests using 1 worker
+
+(node:2999346) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2999346) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:2999346) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2999346) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  ✓  1 [chromium] › tests/e2e/wave17-browser-gate.spec.ts:60:1 › C3-1: 真实 Chromium 加载构建产物，核心旅程可达（app-layout-shell + home-layout-shell + workspace-composer-input） (762ms)
+  ✓  2 [chromium] › tests/e2e/wave17-browser-gate.spec.ts:72:1 › C3-2: 首页加载 + 一次真实提交旅程全程 Console Error = 0 且未捕获异常 = 0 (3.7s)
+  ✓  3 [chromium] › tests/e2e/wave17-browser-gate.spec.ts:98:1 › C3-3: 关键旅程截图落盘 .dev-team/evidence/wave-17/ (849ms)
+  ✓  4 [chromium] › tests/e2e/wave17-browser-gate.spec.ts:169:1 › C2-2: HomeStatusPanel 指标位 tabular-nums 计算样式 + 等位数宽度稳定 + 相邻位左边缘不位移 (723ms)
+
+  4 passed (7.8s)
+BROWSER_GATE_EXIT=0

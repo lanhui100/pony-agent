@@ -65,22 +65,25 @@ function formatTokenSpeed(value?: number | null) {
             <component :is="copied ? Check : Copy" class="h-3 w-3" />
           </button>
         </Tooltip>
+        <!-- Wave-17 C2：计数位数字原地变化（9 → 12 → 345）会横向推移相邻位点。
+             修法：承载 span 自身 `tabular-nums` + 固定最小宽度预留 4 位数字空间，
+             位数变化只消耗预留宽度，不移动图标与相邻位点。 -->
         <Tooltip text="对话轮次数">
-          <span class="inline-flex items-center gap-1">
+          <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-turn-count">
             <MessageSquareMore class="h-3 w-3 text-stone-400" />
-            {{ turnCount }}
+            <span class="inline-block min-w-[2.25rem] text-right">{{ turnCount }}</span>
           </span>
         </Tooltip>
         <Tooltip text="模型调用次数">
-          <span class="inline-flex items-center gap-1">
+          <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-model-call-count">
             <Orbit class="h-3 w-3 text-stone-400" />
-            {{ modelCallCount }}
+            <span class="inline-block min-w-[2.25rem] text-right">{{ modelCallCount }}</span>
           </span>
         </Tooltip>
         <Tooltip text="工具调用次数">
-          <span class="inline-flex items-center gap-1">
+          <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-tool-call-count">
             <Wrench class="h-3 w-3 text-stone-400" />
-            {{ toolCallCount }}
+            <span class="inline-block min-w-[2.25rem] text-right">{{ toolCallCount }}</span>
           </span>
         </Tooltip>
       </div>
@@ -92,29 +95,31 @@ function formatTokenSpeed(value?: number | null) {
         <div class="flex items-center justify-around text-[11px] leading-5 text-stone-600">
           <!-- Wave-15 S1：「输入」口径 = 当前上下文占用（最近一次模型调用的 input_tokens），
                非会话累计（S2 保留在消息级 tokenCount / 统计汇总）。 -->
-          <span class="inline-flex items-center gap-1">
+          <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-input-tokens">
             <Tooltip text="输入">
               <ArrowUp class="h-3 w-3 text-stone-400" />
             </Tooltip>
             <Tooltip text="上下文输入（最近一次模型调用）">
-              <span>{{ formatCompactInteger(inputTokensTotal) || "0" }}</span>
+              <span class="inline-block min-w-[2.25rem] text-right">{{ formatCompactInteger(inputTokensTotal) || "0" }}</span>
             </Tooltip>
           </span>
           <Tooltip text="输出">
-            <span class="inline-flex items-center gap-1">
+            <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-output-tokens">
               <ArrowDown class="h-3 w-3 text-stone-400" />
-              {{ formatCompactInteger(outputTokensTotal) || "0" }}
+              <span class="inline-block min-w-[2.25rem] text-right">{{ formatCompactInteger(outputTokensTotal) || "0" }}</span>
             </span>
           </Tooltip>
           <Tooltip text="缓存读取">
-            <span class="inline-flex items-center gap-1">
+            <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-cache-tokens">
               <Zap class="h-3 w-3 text-stone-400" />
-              {{ formatCompactInteger(cacheHitTokensTotal) || "0" }}
-              <span v-if="cacheHitRatio" class="text-stone-400">· {{ cacheHitRatio }}</span>
+              <span class="inline-block min-w-[2.25rem] text-right">{{ formatCompactInteger(cacheHitTokensTotal) || "0" }}</span>
+              <span v-if="cacheHitRatio" class="inline-block min-w-[2.25rem] text-right text-stone-400">· {{ cacheHitRatio }}</span>
             </span>
           </Tooltip>
+          <!-- 速度位在无数据时渲染 "—"（无数字文本节点），故预留宽度落在承载 span 自身，
+               使其在 9 / 12 / 1234 三档（含注入探针）下宽度恒定。 -->
           <Tooltip text="生成速度">
-            <span class="inline-flex items-center gap-1">
+            <span class="inline-flex min-w-[4rem] items-center gap-1 tabular-nums" data-testid="status-metric-token-speed">
               <Gauge class="h-3 w-3 text-stone-400" />
               {{ formatTokenSpeed(tokenGenerationSpeed) }}
             </span>

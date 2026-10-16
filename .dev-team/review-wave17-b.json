@@ -1,0 +1,23 @@
+{
+  "verdict": "PASS",
+  "findings": [
+    {
+      "file": "src/lib/ime.ts",
+      "line": 27,
+      "rule": "[NON-BLOCKING] 解析器一致性：与项目既有等价内联判定存在语义漂移（判定集合非全等）",
+      "counterexample": "内联基准 src/components/HomeWorkspace.vue:1369 为 `if (event.isComposing || event.keyCode === 229)`（真值判定），新接缝 src/lib/ime.ts:28 为 `event.isComposing === true || event.keyCode === 229`（严格判定），且第 27 行额外加了 `event instanceof KeyboardEvent` 闸门。复现（我在临时探针 tests/tmp-review-wave17-probe.spec.ts 中实跑，运行后已删除）：(a) 同 realm 的 4 组 KeyboardEvent（isComposing=true / keyCode=229 / isComposing=false / keyCode=13）两者 100% 一致（探针输出 PROBE-A 全部 parity:true）；(b) 跨 realm 事件——`const f=document.createElement('iframe');document.body.appendChild(f);const ev=new f.contentWindow.KeyboardEvent('keydown',{key:'Enter'});Object.defineProperty(ev,'isComposing',{value:true});Object.defineProperty(ev,'keyCode',{value:229})`，实测 PROBE-B = {\"sameRealmInstance\":false,\"inlineGuard\":true,\"extractedGuard\":false}，即内联判定为 true（吞掉），新接缝返回 false（放行）；(c) `isComposing` 被置为真值非布尔（如 1）时 PROBE-C = {\"inlineGuard\":true,\"extractedGuard\":false}。影响面评估：本仓 `grep -rn \"iframe|<webview|createEvent\" src/` 零命中，全部调用点（WorkspaceComposer.vue:534/693/772、HomeSessionSidebarRow.vue:74、HomeSessionSidebar.vue:127）的事件均由 Vue 原生 `@keydown` 派发、必为同 realm 实例，故当前无实际可达放行路径；风险仅在窗口/未来引入跨 realm 事件源时兑现。建议将第 27 行改为鸭子类型（如 `typeof (event as KeyboardEvent).isComposing === \"boolean\"` 或直接真值判定）以与 HomeWorkspace.vue:1369 判定集合对齐。"
+    },
+    {
+      "file": "src/components/HomeWorkspace.vue",
+      "line": 1369,
+      "rule": "[NON-BLOCKING] 守卫粒度：keyCode===229 守卫作用于全部按键组合（非仅 Enter），组合态期间吞掉 Ctrl/Cmd+Z 撤销",
+      "counterexample": "第 1367-1370 行 `function handleComposerKeydown(event: KeyboardEvent) { if (event.isComposing || event.keyCode === 229) { return; } }` 在**任何**键之前无条件早退，其后的 isUndoShortcut 分支（1372-1379，`event.key.toLowerCase()===\"z\" && (ctrlKey||metaKey)`）因此不可达。复现：`const ev=new KeyboardEvent('keydown',{key:'z',keyCode:229,ctrlKey:true,bubbles:true,cancelable:true}); textarea.dispatchEvent(ev)` → 守卫返回，`handleUndoLastTurn()`（定义于 :1346，仅由 :1376 与本分支外的按钮调用）不被调用，撤销静默失效；同一形状的 `{key:'s',keyCode:229,altKey:true}` 亦吞掉 Alt+S 排队/插队切换（:1396 起）。前提条件为外部知识 [EXTERNAL-KNOWLEDGE]：Windows Sogou/微软拼音等 IME 在组合期间对**所有**按键上报 keyCode 229（含 Ctrl 组合键），而 keyCode 在组合态结束后仍会停留在 229，参见 https://stackoverflow.com/questions/25043934/is-it-ok-to-ignore-keydown-events-with-keycode-229 与 W3C WCAG 关于 keydown 未守 IME 组合态的失败技术提案 https://github.com/w3c/wcag/issues/5075 。非本波引入（基线 :1369 即为该形状，本次 union diff 未改动该文件），且不构成「本应被拦截却放行」的放行面，故非致命；建议将守卫收窄为「仅当 `event.key === \"Enter\"` 时按组合态吞掉」，或把 isUndoShortcut 判定提前到守卫之前。"
+    },
+    {
+      "file": "tests/acceptance/wave17/ime-composition-guard.spec.ts",
+      "line": 288,
+      "rule": "[NON-BLOCKING] 测试证伪能力：C1-4（keyCode===229 等价）缺反向（防吞）断言，永久无法提交类回归无守卫",
+      "counterexample": "C1-4 用例（:288-328）只断言 keyCode=229 时 `answerSpy` 未被调用（:303-306、:323-326），**没有**配套的「同一位点在 keyCode=229 消失后必须恢复提交」断言；而 C1-1/C1-2/C1-3 各自由 C1-5（:330-372）覆盖反向面、C1-6/C1-7 各自在同名用例内自带反向断言（:497-504、:663-668）。可复现的证伪缺口（按断言集合逐条核对，未篡改冻结测试）：本波没有任何一条断言要求「某个事件形状下 keyCode=229 的判定必须为 false」。反向面 C1-5（:330-372）注入的是 `isComposing:false`（keyCode 缺省为 0），C1-8 反向面（:435）注入的是无 keyCode 的普通 KeyboardEvent，C4-3 反向压力（:649-658）注入的是 `isComposing:false,keyCode:13`。因此若实现把 `keyCode===229` 扩大为 `keyCode>=229`、或误把某些真实回车事件判为 229（如 WebKit 系历史行为），本波 31 条用例可全绿而用户侧表现为「特定平台永久无法回车提交」。影响：可用性 DoS（永久无法提交）在本波冻结测试下**不可被发现**。建议补一条 `keyCode=229` 事件之后紧跟非组合回车的配对断言（或在 e2e 门禁中加一条真实键盘 Enter 提交断言）。"
+    }
+  ]
+}

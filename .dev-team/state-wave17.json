@@ -67,14 +67,50 @@
     }
   ],
   "gates": {
-    "red_phase": null,
-    "green_phase": null
+    "red_phase": {
+      "l2t": "npx vitest run tests/acceptance/wave17 -> EXIT=1, 27 failed / 4 passed (3 files / 31 tests); 全部 AssertionError，零 import/setup 失败",
+      "l2at": "npx vitest run tests/acceptance/wave17-adversarial -> EXIT=1, 12 failed / 2 passed (14 tests), 连跑 3 次一致；C4-1/C4-2/C4-3 全红",
+      "e2e_gate": "npx playwright test tests/e2e/wave17-browser-gate.spec.ts -> EXIT=1, 3 passed (C3-1/2/3) / 1 failed (C2-2: fontVariantNumeric 实际 normal)",
+      "anchor_commit": "f060c8d",
+      "anchor_tag": "wave-17-red-anchor",
+      "receipts": [".dev-team/wave17-red-receipts.md", ".dev-team/wave17-red-receipts-l2at.md"]
+    },
+    "green_phase": {
+      "typecheck": "EXIT=0",
+      "wave17_acceptance": "EXIT=0, 3 files / 31 passed",
+      "full_unit_regression": "EXIT=0, 85 files / 897 passed / 10 skipped (baseline 82 files / 866 passed)",
+      "browser_gate": "npm run build && npx playwright test tests/e2e/wave17-browser-gate.spec.ts -> EXIT=0, 4 passed; Console Error=0; pageerror=0; 截图 sha256 64d9de96…",
+      "version_check": "EXIT=0",
+      "nfr_validator": "EXIT=0",
+      "project_nfr_lint_16key": "EXIT=0 (frozen baseline zero-byte change)",
+      "flake_repeat": "3/3 EXIT=0, 31 passed",
+      "red_anchor_physical_reverify": "隔离 worktree @ wave-17-red-anchor + REV-2 修订后 spec -> 12 failed / 2 passed, EXIT=1（证明测试修订未削弱红相）",
+      "receipts": [".dev-team/wave17-green-receipts.md", ".dev-team/evidence/wave-17/green-barrier-final.txt", ".dev-team/evidence/wave-17/green-browser-gate.txt", ".dev-team/evidence/wave-17/green-flake-check.txt"]
+    },
+    "join_barrier": {
+      "write_scope_audit": "PASS — 越界文件 0；task-3/task-4 文件集交集为空",
+      "blast_radius": "union diff 101 行 > 100 -> 机械触发 >=2 路互补 L3 审查（已执行）",
+      "blast_keywords_hit": 0,
+      "l3_a": {"file": ".dev-team/review-wave17-a.json", "perspective": "concurrency/state-flow", "verdict": "PASS", "findings": 0},
+      "l3_b": {"file": ".dev-team/review-wave17-b.json", "perspective": "security/protocol-consistency", "verdict": "PASS", "findings": 3, "all_non_blocking": true},
+      "l3_p": {"file": ".dev-team/review-wave17-l3p.json", "verdict": "PASS", "findings": 0},
+      "review_schema_machine_check": "SCHEMA_ALL_OK=true, fatalFindings=0"
+    }
   },
+  "contract_revisions": [
+    {"id": "REV-1", "phase": "pre-red-anchor", "summary": "C2-2 拆 a/b/c/d：tabular-nums 只统一等位数字形宽度，位数重排须由容器 min-w 吸收", "breaker_counted": false, "reason": "契约缺陷（原口径物理不可满足，实测 Δ=17px→21px）"},
+    {"id": "REV-2", "phase": "green", "summary": "L2-AT 两处 toBe(rawObject) 恒假（Pinia reactive Proxy）→ toRaw 身份等价 + 诱饵负向自检", "breaker_counted": false, "reason": "用例自身缺陷重写豁免"},
+    {"id": "REV-3", "phase": "join-barrier", "summary": "C3-3 截图拍到启动闪屏 → 补闪屏移除等待 + elementFromPoint 遮挡命中证伪器", "breaker_counted": false, "reason": "用例自身缺陷重写豁免"}
+  ],
+  "nfr_degraded": [],
   "backlog_registered": [
     {"id": "PA-130", "title": "孤儿组件 src/components/AskPanel.vue 未被任何生产代码挂载（仅测试引用）", "action": "交由 code-hygiene 专项处理，本波不删除", "owner": "unassigned"},
     {"id": "PA-131", "title": "S3-b 三阶决议动作阵列（仅本次/永久白名单/拒绝）需跨层新增 Rust verdict 枚举 + allowlist 持久化 + IPC 命令", "action": "独立立项，禁止前端伪造", "owner": "unassigned"},
     {"id": "PA-132", "title": "S5-a Surface 0-3 设计令牌层迁移（19 文件 / 96 hex 字面量）", "action": "独立立项，需附完整迁移清单 + #f2ede6 对比度重测门禁", "owner": "unassigned"},
     {"id": "PA-133", "title": "S5-b Retina 0.5px 发丝变体（@custom-variant retina, 1px 回退）", "action": "独立立项，禁止 border-[0.5px]（DPR=1 退化）", "owner": "unassigned"},
-    {"id": "PA-134", "title": "存量 E2E 基线缺陷 BASE-E2E-1（8 failed，session-sidebar-session-list 漂移）", "action": "独立立项修复存量 e2e spec", "owner": "unassigned"}
-  ]
+    {"id": "PA-134", "title": "存量 E2E 基线缺陷 BASE-E2E-1（8 failed，session-sidebar-session-list 漂移）", "action": "独立立项修复存量 e2e spec", "owner": "unassigned"},
+    {"id": "PA-135", "title": "HomeWorkspace.vue:1369 守卫粒度过宽：组合态吞掉 Ctrl/Cmd+Z 撤销与 Alt+S（存量缺陷，L3-B 发现）", "action": "独立立项：守卫应仅作用于 Enter 提交路径，不应无条件早退", "owner": "unassigned"},
+    {"id": "PA-136", "title": "解析器一致性：src/lib/ime.ts:27 严格判定 vs HomeWorkspace.vue:1369 真值判定（当前不可达）", "action": "若未来引入 iframe/webview 跨 realm 事件源，须先对齐两者", "owner": "unassigned"}
+  ],
+  "status": "completed"
 }

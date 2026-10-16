@@ -11,6 +11,7 @@ import { useAskStore } from "@/stores/ask";
 import { pickFiles } from "@/lib/runtime/file-attachments";
 import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
 import { recordFrontendInstant } from "@/lib/frontend-flight-recorder";
+import { isImeComposingEvent } from "@/lib/ime";
 import Button from "@/components/ui/Button.vue";
 import Switch from "@/components/ui/Switch.vue";
 import {
@@ -528,6 +529,12 @@ function toggleReasoningVisibility() {
   reasoningMenuOpen.value = false;
 }
 
+/** IME 组合态（选词确认）回车不得切换「显示思考」，否则会误触菜单项。 */
+function toggleReasoningVisibilityOnEnter(event: KeyboardEvent) {
+  if (isImeComposingEvent(event)) return;
+  toggleReasoningVisibility();
+}
+
 function handleShowReasoningSwitch(value: boolean) {
   emit("update:showReasoningContent", value);
 }
@@ -682,7 +689,8 @@ function selectOption(index: number) {
   selectedOptionIndex.value = index;
 }
 
-async function handleOptionEnter(index: number) {
+async function handleOptionEnter(index: number, event?: KeyboardEvent) {
+  if (isImeComposingEvent(event)) return;
   selectedOptionIndex.value = index;
   await submitAskAnswer();
 }
@@ -755,6 +763,15 @@ watch(
     }
   }
 );
+
+/**
+ * ASK 回车提交包装：IME 组合态（拼音/假名选词确认）的回车必须被吞掉。
+ * 不改动 `submitAskAnswer` 自身签名（其仍被 `@click` 直接引用）。
+ */
+function submitAskAnswerOnEnter(event: KeyboardEvent) {
+  if (isImeComposingEvent(event)) return;
+  void submitAskAnswer();
+}
 
 async function submitAskAnswer() {
   const ask = activeAsk.value;
@@ -865,7 +882,7 @@ onBeforeUnmount(() => {
             ]"
             :disabled="askIsBusy"
             @click="selectOption(index)"
-            @keydown.enter.prevent="handleOptionEnter(index)"
+            @keydown.enter.prevent="handleOptionEnter(index, $event)"
           >
             <span class="mr-2.5 mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[11px] font-mono font-medium text-stone-500">
               {{ index + 1 }}
@@ -914,7 +931,7 @@ onBeforeUnmount(() => {
                 class="w-full bg-transparent text-[13px] leading-snug text-stone-800 placeholder:text-stone-400 outline-none"
                 @focus="selectedOptionIndex = askOptions.length"
                 @input="selectedOptionIndex = askOptions.length"
-                @keydown.enter.prevent="submitAskAnswer"
+                @keydown.enter.prevent="submitAskAnswerOnEnter($event)"
               />
               <div
                 data-testid="composer-ask-custom-desc"
@@ -935,7 +952,7 @@ onBeforeUnmount(() => {
             placeholder="输入您的回答，按 Enter 发送，Shift+Enter 换行…"
             :disabled="askIsBusy"
             class="w-full resize-none rounded-lg bg-stone-100/50 p-2.5 text-[13px] leading-[1.6] text-stone-800 placeholder:text-stone-400 outline-none transition"
-            @keydown.enter.exact.prevent="submitAskAnswer"
+            @keydown.enter.exact.prevent="submitAskAnswerOnEnter($event)"
           />
         </div>
 
@@ -1365,7 +1382,7 @@ onBeforeUnmount(() => {
                   tabindex="0"
                   data-testid="reasoning-visibility-toggle"
                   @click="toggleReasoningVisibility"
-                  @keydown.enter="toggleReasoningVisibility"
+                  @keydown.enter.prevent="toggleReasoningVisibilityOnEnter($event)"
                 >
                   <div class="flex min-w-0 flex-col">
                     <span>显示思考</span>

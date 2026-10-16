@@ -95,25 +95,101 @@ test("C3-2: 首页加载 + 一次真实提交旅程全程 Console Error = 0 且�
 
 // ── C3-3：关键旅程截图落盘 ─────────────────────────────────────────────────
 
-test("C3-3: 关键旅程截图落盘 .dev-team/evidence/wave-17/", async ({ page }) => {
+test("C3-3: 关键旅程截图落盘 .dev-team/evidence/wave-17/（须拍到工作区，非启动闪屏）", async ({ page }) => {
   // Arrange
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
+  const splash = page.locator("#app-loading-screen");
 
-  // Act
-  await openHome(page);
+  // Act 1：导航后**立即**确认启动闪屏存在。
+  //   闪屏由 `index.html` 静态注入（`position:fixed; inset:0; z-index:999999` 全屏遮罩），
+  //   故在 DOMContentLoaded 时刻必然在 DOM 中。此断言不可省：
+  //   若闪屏元素从不出现，下方 `toHaveCount(0)` 会恒真 —— 那就是空等待式的假测试。
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(
+    splash,
+    "启动闪屏必须先存在于 DOM，否则下方『等待闪屏移除』退化为恒真的空等待（假测试）"
+  ).toHaveCount(1);
+
+  // Act 2：核心旅程可达（与 openHome 一致；此处内联以保证闪屏前置断言紧贴导航、无时序竞争）。
+  await expect(page.getByTestId("app-layout-shell")).toBeVisible();
+  await expect(page.getByTestId("home-layout-shell")).toBeVisible();
+  await expect(page.getByTestId("workspace-composer-input")).toBeVisible();
   await page.getByTestId("workspace-composer-input").fill("wave-17 evidence screenshot");
-  await expect(page.getByTestId("workspace-composer-input")).toHaveValue("wave-17 evidence screenshot");
 
+  // Act 3（REV-3 核心修订）：显式等待闪屏从 DOM 移除。
+  //   `src/main.ts` 在挂载后 `setTimeout(3000)` 加 `fade-out`，再 350ms 后 `splash.remove()`。
+  //   移除前截图只会拍到闪屏 —— Playwright 的 `toBeVisible()` 对**被覆盖但未隐藏**的元素仍判为
+  //   可见，故 C3-1/C3-2 的断言成立并不蕴含"画面是工作区"。
+  //   此处用显式条件轮询（无硬编码 sleep）；若闪屏因任何原因不被移除，本用例超时失败，
+  //   而不是拍下一张假凭据。
+  await expect(
+    splash,
+    "启动闪屏必须在截图前从 DOM 移除（REV-3：全屏 fixed 遮罩会被 toBeVisible 判为『未隐藏』，导致截图拍到闪屏）"
+  ).toHaveCount(0);
+
+  // Act 4（证伪组合 · 为何能证伪"拍到的是闪屏"）：
+  //   ① `#app-loading-screen` count = 0 → 全屏遮罩已不在 DOM，物理上不可能被绘制到截图里；
+  //   ② composer 同时满足 可见 + 可交互（`toBeEnabled` 走 actionability 检查）+ 处于视口内
+  //      + 持有本次填入文本 → 证明工作区已真实布局进视口且输入链路可用，
+  //      而不是"被遮罩盖住但 DOM 仍可见"这一 Playwright 可见性盲区；
+  //   ③ `app-layout-shell` 处于视口内 + 右侧栏 `data-open=true` → 证明三栏布局已展开
+  //      （截图中应出现左侧栏与右侧状态栏区域）。
+  const composer = page.getByTestId("workspace-composer-input");
+  await expect(composer).toBeVisible();
+  await expect(composer).toBeEnabled();
+  await expect(composer).toBeInViewport();
+  await expect(composer).toHaveValue("wave-17 evidence screenshot");
+  await expect(page.getByTestId("app-layout-shell")).toBeInViewport();
+  await expect(page.getByTestId("home-right-sidebar-shell")).toHaveAttribute("data-open", "true");
+
+  // Act 4b（遮挡命中测试 · 直接证伪"画面被全屏遮罩覆盖"）：
+  //   `document.elementFromPoint(x, y)` 返回该坐标处**最上层**的可命中元素。
+  //   启动闪屏是 `position:fixed; inset:0; z-index:999999` 的全屏遮罩，且**不是** `#app` /
+  //   `app-layout-shell` 的后代；若它仍覆盖画面，命中结果必然是该遮罩本身，
+  //   于是 `el.contains(top)` / `top.contains(el)` 均为 false → 本断言失败。
+  //   这正是 Playwright `toBeVisible()` 的盲区（元素被覆盖但仍判"可见"），
+  //   也正是旧版 C3-3 拍下闪屏却全绿的原因 —— 故此条命中测试具备**真实证伪能力**。
+  const occlusionProbe = await page.evaluate(() => {
+    const hitTest = (selector: string) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return { ok: false, hit: "(目标元素不存在)" };
+      }
+      const rect = element.getBoundingClientRect();
+      const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (!top) {
+        return { ok: false, hit: "(该坐标无命中元素)" };
+      }
+      return {
+        ok: top === element || element.contains(top) || top.contains(element),
+        hit: `${top.tagName.toLowerCase()}${top.id ? `#${top.id}` : ""}`
+      };
+    };
+    return {
+      composer: hitTest('[data-testid="workspace-composer-input"]'),
+      shell: hitTest('[data-testid="app-layout-shell"]')
+    };
+  });
+  expect(
+    occlusionProbe.composer.ok,
+    `composer 中心点最上层可命中元素必须属于 composer 自身（证明无全屏遮罩覆盖）；实际命中：${occlusionProbe.composer.hit}`
+  ).toBe(true);
+  expect(
+    occlusionProbe.shell.ok,
+    `app-layout-shell 中心点最上层可命中元素必须属于工作区外壳（证明无全屏遮罩覆盖）；实际命中：${occlusionProbe.shell.hit}`
+  ).toBe(true);
+
+  // Act 5：截图
   const screenshotPath = path.join(EVIDENCE_DIR, "wave17-browser-gate-home.png");
   await page.screenshot({ path: screenshotPath });
 
-  // Assert：物理文件必须存在且非空（不能只断言"截图函数没抛错"）。
+  // Assert 1：物理文件必须存在且非空（不能只断言"截图函数没抛错"）。
   expect(fs.existsSync(screenshotPath), `截图必须落盘：${screenshotPath}`).toBe(true);
   const sizeBytes = fs.statSync(screenshotPath).size;
   expect(sizeBytes, `截图必须非空（> 10KB），实际 ${sizeBytes} 字节`).toBeGreaterThan(10 * 1024);
 
-  // Assert：截图内容对得上关键旅程 —— 输入框仍持有刚填入的文本。
-  await expect(page.getByTestId("workspace-composer-input")).toHaveValue("wave-17 evidence screenshot");
+  // Assert 2（截图后复核）：截图期间遮罩不得重新出现 / 仍然存在。
+  await expect(splash, "截图后启动闪屏仍不得存在于 DOM").toHaveCount(0);
 });
 
 // ── C2-2：真实浏览器物理宽度稳定性测量 ─────────────────────────────────────

@@ -25,7 +25,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
-import { nextTick } from "vue";
+import { nextTick, toRaw } from "vue";
 import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import SessionRow from "@/components/HomeSessionSidebarRow.vue";
@@ -579,9 +579,32 @@ describe("C4-3 确定性并发（固定 200 次交替注入，零 sleep / 零随
     );
 
     for (const call of answerSpy.mock.calls) {
-      expect(call[0]).toBe(ask);
+      // ── 冻结测试缺陷修订（Lead 授权最小解冻，仅本处 + 下方第二处身份断言）──────────────
+      // 缺陷：`ask` 经 `WorkspaceComposer.vue` 的 `activeAsk` computed 从 Pinia state 读出，
+      // 提交给 store 的是 **Vue reactive Proxy**；本 spec 持有的却是 `createPendingAsk()`
+      // 返回的**原始对象** → `Object.is(proxy, raw) === false`，`toBe` 恒假
+      // （失败形态：`Received: serializes to the same string`）。
+      // 探针实测（executor-a）：`{"storeSlotIsRaw":false,"activeAskIsRaw":false,
+      //   "activeAskIsProxy":true,"toRawActiveAskIsRaw":true,"deepEqual":true}`。
+      // 修订：改为 `toRaw` **身份等价** —— 先剥离 reactive 包装再按引用比对，语义强度不降
+      // （仍是同一对象的引用同一性，不是浅比较/深比较的弱化）。
+      // 红相有效性不受影响：红相时本断言之前已先在 `toHaveBeenCalledTimes(100)` 失败
+      // （`got 200 times`），身份断言从未被执行。
+      expect(
+        toRaw(call[0]),
+        "提交的必须是同一个 ask 对象（剥离 reactive 包装后按引用比对）"
+      ).toBe(ask);
       expect(call[1]).toBe("候选词");
     }
+
+    // 负向自检（防"恒真断言"）：证明上面这条身份断言**具备证伪能力** ——
+    // 把期望值换成另一个 ask（诱饵）时，断言必须抛错。
+    // 缺此自检，`toBe` 类身份断言可能因对象恒等性退化而悄悄变成恒真。
+    const decoyAsk = createPendingAsk({ requestId: "ask-decoy" });
+    expect(
+      () => expect(toRaw(answerSpy.mock.calls[0]![0])).toBe(decoyAsk),
+      "负向自检：诱饵 ask 必须使身份断言失败（否则该断言是恒真的假测试）"
+    ).toThrow();
 
     wrapper.unmount();
   });
@@ -606,7 +629,19 @@ describe("C4-3 确定性并发（固定 200 次交替注入，零 sleep / 零随
     expect(answerSpy, "第二轮提交计数必须与第一轮完全一致").toHaveBeenCalledTimes(
       EXPECTED_SUBMITS
     );
-    expect(answerSpy.mock.calls.every((call) => call[0] === ask && call[1] === "候选词")).toBe(true);
+    // 冻结测试缺陷修订（Lead 授权最小解冻，第二处身份断言）：同 `:582` —— 提交实参是
+    // reactive Proxy，须 `toRaw` 后再按引用比对，否则 `every` 判据恒为 false。
+    expect(
+      answerSpy.mock.calls.every((call) => toRaw(call[0]) === ask && call[1] === "候选词")
+    ).toBe(true);
+
+    // 负向自检（防"恒真/恒假断言"）：把判据中的期望对象换成诱饵 ask 时，`every` 必须翻转为
+    // false —— 证明该判据真的在比对对象身份，而不是恒真或恒假。
+    const decoyAsk = createPendingAsk({ requestId: "ask-decoy" });
+    expect(
+      answerSpy.mock.calls.every((call) => toRaw(call[0]) === decoyAsk),
+      "负向自检：诱饵 ask 必须使身份判据为 false（否则该判据是恒真的假测试）"
+    ).toBe(false);
 
     wrapper.unmount();
   });

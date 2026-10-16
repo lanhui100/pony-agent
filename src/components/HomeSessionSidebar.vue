@@ -30,6 +30,7 @@ import { useRuntimeStore } from "@/stores/runtime";
 import { useUpdateStore } from "@/stores/update";
 import { deriveSidebarTree, isVisibleSession } from "@/lib/runtime/sidebar-groups";
 import { SIDEBAR_COPY, formatSidebarCopy } from "@/lib/runtime/sidebar-copy";
+import { isImeComposingEvent } from "@/lib/ime";
 import { DEFAULT_WORKSPACE_ID } from "@/lib/runtime/workspace-constants";
 import { isTauriAvailable } from "@/lib/tauri";
 import { pickExistingDirectory } from "@/lib/runtime/workspace-api";
@@ -119,6 +120,12 @@ function startRename(key: string, currentName: string) {
 function cancelRename() {
   renamingKey.value = null;
   renameError.value = "";
+}
+
+/** IME 组合态（选词确认）回车不得提交重命名。 */
+function submitRenameOnEnter(event: KeyboardEvent) {
+  if (isImeComposingEvent(event)) return;
+  submitRename();
 }
 
 async function submitRename() {
@@ -825,7 +832,7 @@ function confirmPopoverProps(
                     :disabled="renamingBusy"
                     data-testid="workspace-rename-input"
                     @click.stop
-                    @keydown.enter.prevent="submitRename"
+                    @keydown.enter.prevent="submitRenameOnEnter($event)"
                     @keydown.esc.prevent="cancelRename"
                   />
                   <span v-else class="truncate">{{ group.name }}</span>

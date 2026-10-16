@@ -127,7 +127,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="flex items-center gap-2 text-[10px] leading-4 text-stone-500">
             <span v-if="askContextLabel(ask)" class="truncate">{{ askContextLabel(ask) }}</span>
-            <span v-if="formatExpiry(ask)" class="inline-flex shrink-0 items-center gap-1">
+            <span v-if="formatExpiry(ask)" class="inline-flex min-w-[5.5rem] shrink-0 items-center justify-end gap-1 tabular-nums">
               <Clock3 class="h-3 w-3" />
               {{ formatExpiry(ask) }}
             </span>

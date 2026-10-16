@@ -119,3 +119,37 @@ task-3 与 task-4 文件集**交集为空**；二者共享 `npm run typecheck` /
 
 **未采纳**：坚持原字面口径 —— 该口径永不可绿，会迫使实施者伪造证据或引入超范围改动。
 
+### REV-2（2026-10-16，绿相阶段）：L2-AT 身份断言缺陷修订
+
+**触发**：Executor A 在绿相阶段发现 `tests/acceptance/wave17-adversarial/ime-guard-adversarial.spec.ts` 两处身份断言恒假，并给出物理探针证据。
+
+**现象**：`:582` `expect(call[0]).toBe(ask)` 与 `:609` `answerSpy.mock.calls.every(call => call[0] === ask)` 失败，形态 `Received: serializes to the same string`。
+
+**根因（探针实测，非推断）**：`ask` 经 `WorkspaceComposer.vue:563` 的 `activeAsk` computed 从 Pinia state 读取，返回 **Vue reactive Proxy**；spec 持有 `createPendingAsk()` 的**原始对象**，`Object.is(proxy, raw) === false`。探针报告：`{"storeSlotIsRaw":false,"activeAskIsRaw":false,"activeAskIsProxy":true,"toRawActiveAskIsRaw":true,"deepEqual":true}`。
+
+**红相有效性论证（关键）**：该 spec 在红相时先于 `toHaveBeenCalledTimes(100)` 失败（`expected 100 times, but got 200 times`），身份断言**从未被执行**，故 C4-3 的红相证据不因此缺陷失效。Lead 在 Join Barrier 以 `git worktree` 从 tag `wave-17-red-anchor` 复跑修订后 spec 做物理复核。
+
+**裁决**：
+- **采纳**：修订为 `toRaw` 身份等价或深等价（二选一），且必须保留证伪能力（提交了错误 ask 时断言须失败）。
+- **拒绝**：在 `submitAskAnswer` 内加 `toRaw(ask)` —— 属与 C1 因果无关的行为变更，违反「严禁夹带重构」。
+
+**熔断计数**：按 skill 规定，**用例自身缺陷重写豁免熔断计数**。
+
+**影响面**：仅 2 处断言；C1/C2/C3 与契约语义均不变。
+
+### REV-3（2026-10-16，Join Barrier 阶段）：C3-3 物理截图凭据不成立
+
+**触发**：Lead 在 Join Barrier 目视复核 `.dev-team/evidence/wave-17/wave17-browser-gate-home.png`，发现画面为**启动闪屏**（PONY AGENT + 加载进度条），无工作区外壳、无侧栏、无输入框。
+
+**根因（Lead 定位）**：
+- `index.html:17` 注入 `#app-loading-screen` 全屏闪屏遮罩（`position:fixed` 覆盖层）。
+- `src/main.ts:91-96`：应用挂载后 `classList.add("fade-out")` → 过渡结束才 `splash.remove()`。
+- Playwright `toBeVisible()` 对「被覆盖但未隐藏」的元素仍判可见 → C3-1/C3-2 断言成立，但 `openHome()` 返回时闪屏仍覆盖在最上层，故截图拍到闪屏。
+- 原 C3-3 断言仅校验「文件存在且 >10KB」，**无法证伪「拍到闪屏」** → 弱证据，不满足「物理凭证先决」。
+
+**裁决**：修订 C3-3，在截图前显式等待 `#app-loading-screen` 从 DOM 移除，并补充具备**证伪能力**的断言（防止再次拍到闪屏）。属**测试自身缺陷重写，豁免熔断计数**。
+
+**影响面**：仅 C3-3 用例；C3-1/C3-2/C1/C2 断言不变。
+
+
+

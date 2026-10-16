@@ -6,6 +6,7 @@ import { Ellipsis } from "lucide-vue-next";
 import DropdownMenu from "@/components/ui/DropdownMenu.vue";
 import type { DropdownMenuItemSpec } from "@/components/ui/DropdownMenu.vue";
 import { SIDEBAR_COPY, formatSidebarCopy } from "@/lib/runtime/sidebar-copy";
+import { isImeComposingEvent } from "@/lib/ime";
 import type { SessionOverview } from "@/types/runtime";
 
 defineOptions({ name: "SessionRow" });
@@ -67,6 +68,12 @@ watch(() => props.session.updatedAtMs, refreshTime);
 function onRenameInput(event: Event) {
   emit("update:renameDraft", (event.target as HTMLInputElement).value);
 }
+
+/** IME 组合态（选词确认）回车不得提交重命名。 */
+function onRenameEnter(event: KeyboardEvent) {
+  if (isImeComposingEvent(event)) return;
+  emit("submit-rename");
+}
 </script>
 
 <template>
@@ -91,7 +98,7 @@ function onRenameInput(event: Event) {
       :disabled="renamingBusy"
       data-testid="session-rename-input"
       @input="onRenameInput"
-      @keydown.enter.prevent="emit('submit-rename')"
+      @keydown.enter.prevent="onRenameEnter($event)"
       @keydown.esc.prevent="emit('cancel-rename')"
     />
     <span v-if="!renaming" class="shrink-0 text-[10px] text-stone-400">{{ timeLabel }}</span>

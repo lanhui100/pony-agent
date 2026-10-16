@@ -1,0 +1,21 @@
+### WAVE-17 FINAL GREEN GATE 2026-10-16T14:59:38+08:00 HEAD=f060c8d
+--- typecheck ---
+(node:3092298) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+TYPECHECK_EXIT=0
+--- wave17 acceptance (C1+C2+C4) ---
+ Test Files  3 passed (3)
+      Tests  31 passed (31)
+WAVE17_EXIT=0
+--- full unit regression ---
+ Test Files  85 passed (85)
+      Tests  897 passed | 10 skipped (907)
+FULL_EXIT=0
+--- version check ---
+[check-version-sync] Tauri version ok (4 places in sync): 0.1.146
+[check-version-sync] PASSED: All version files are synchronized.
+VERSION_EXIT=0
+--- NFR validator ---
+NFR_EXIT=0
+--- project 16-key nfr lint (frozen baseline regression) ---
+PROJECT_NFRLINT_EXIT=0
