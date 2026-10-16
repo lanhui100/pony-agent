@@ -7,12 +7,12 @@ import { isTauriAvailable, safeInvoke } from "./tauri";
 
 import packageJson from "../../package.json";
 
+// wave-18 C5：默认零 egress —— ingest 端点与客户端凭证**仅**取自环境变量，
+// 未配置即空串（禁止任何硬编码回落）。两者任一为空时 `reportError` 早退，不发 fetch。
 export const INGEST_URL =
-  (import.meta.env?.VITE_PONYSENTRY_INGEST_URL as string) ||
-  "https://sentry.ponyjob.top";
+  (import.meta.env?.VITE_PONYSENTRY_INGEST_URL as string) || "";
 export const CLIENT_TOKEN =
-  (import.meta.env?.VITE_PONYSENTRY_CLIENT_TOKEN as string) ||
-  "6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24";
+  (import.meta.env?.VITE_PONYSENTRY_CLIENT_TOKEN as string) || "";
 export const APP_RELEASE =
   (import.meta.env?.VITE_APP_RELEASE as string) || packageJson.version || "0.1.118";
 export const APP_ENV =
@@ -274,6 +274,11 @@ export async function reportError(options: ReportErrorOptions): Promise<void> {
     }
 
     // 2. 浏览器环境或 IPC 降级：直接 HTTP POST 到 Ingest
+    //    wave-18 C5：ingest 端点 / client token 未配置（空串）时零 egress ——
+    //    不发起 fetch，也不携带 X-Client-Token 头。
+    if (!INGEST_URL || !CLIENT_TOKEN) {
+      return;
+    }
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };

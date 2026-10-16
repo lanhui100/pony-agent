@@ -473,7 +473,7 @@
       },
       "branches": {
         "credential": {
-          "red_commit": "PENDING_SELF",
+          "red_commit": "d3ae148",
           "green_commit": null,
           "status": "red_frozen",
           "quarantine": false
@@ -486,8 +486,8 @@
       },
       "gates": {
         "red_phase": {
-          "status": "passed",
-          "anchor_commit": null,
+          "status": "passed_anchored",
+          "anchor_commit": "d3ae148",
           "lead_independent_recheck": {
             "rust": "cargo test -p pony-agent-core --test ponysentry_credential_gate --test ponysentry_credential_gate_adversarial → 1 passed; 6 failed; Exit 101（真实 panic）",
             "frontend": "npx vitest run tests/telemetry-credential.spec.ts → 7 failed | 1 passed",

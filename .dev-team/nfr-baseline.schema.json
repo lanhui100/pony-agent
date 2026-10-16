@@ -159,7 +159,9 @@
           "uniqueItems": true,
           "items": { "type": "string" }
         },
-        "early_return_sites_unchanged": { "type": "boolean", "const": true }
+        "early_return_sites_unchanged": { "type": "boolean", "const": true },
+        "set_but_empty_is_false": { "type": "boolean", "const": true },
+        "blank_only_is_false": { "type": "boolean", "const": true }
       },
       "required": [
         "applicable",
@@ -170,7 +172,70 @@
         "enabled_env_default",
         "enabled_truthy_requires_explicit_non_false",
         "early_return_sites",
-        "early_return_sites_unchanged"
+        "early_return_sites_unchanged",
+        "set_but_empty_is_false",
+        "blank_only_is_false"
+      ],
+      "additionalProperties": false
+    },
+    "wave18b_external_call_timeout_landing": {
+      "type": "object",
+      "description": "wave-18b 新增（additive-only，未进入顶层 required）：external_call_timeout_ms 在前端 telemetry.ts ingest fetch 的落地承诺（C8）。",
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3000 },
+        "timeout_ms_upper_bound": { "type": "integer", "const": 3000 },
+        "sites": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "mechanism": { "type": "string", "minLength": 1 },
+        "signal_attached_to_fetch": { "type": "boolean", "const": true },
+        "clear_timeout_after_settle_required": { "type": "boolean", "const": true },
+        "abort_signal_timeout_forbidden": { "type": "boolean", "const": true },
+        "evidence": { "type": "string", "minLength": 1 }
+      },
+      "required": [
+        "applicable",
+        "timeout_ms",
+        "timeout_ms_upper_bound",
+        "sites",
+        "mechanism",
+        "signal_attached_to_fetch",
+        "clear_timeout_after_settle_required",
+        "abort_signal_timeout_forbidden",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "wave18b_scanner_linearity": {
+      "type": "object",
+      "description": "wave-18b 新增（additive-only，未进入顶层 required）：裸 64-hex 规则的整行线性时间承诺（C4-R3，对应 review-l3-scanner finding#4 二次方 DoS）。",
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "per_match_whole_line_work_forbidden": { "type": "boolean", "const": true },
+        "context_precompute_per_line_required": { "type": "boolean", "const": true },
+        "cache_bounded_max_entries": { "type": "integer", "minimum": 1 },
+        "observed_single_line_4000_hex_ms": { "type": "integer", "minimum": 1 },
+        "observed_split_lines_4000_hex_ms": { "type": "integer", "minimum": 1 },
+        "observed_ratio": { "type": "integer", "minimum": 1 },
+        "acceptance_max_ms_single_line_4000_hex": { "type": "integer", "minimum": 1 },
+        "review_observed_1mb_single_line_ms": { "type": "integer", "minimum": 1 },
+        "evidence": { "type": "string", "minLength": 1 }
+      },
+      "required": [
+        "applicable",
+        "per_match_whole_line_work_forbidden",
+        "context_precompute_per_line_required",
+        "cache_bounded_max_entries",
+        "observed_single_line_4000_hex_ms",
+        "observed_split_lines_4000_hex_ms",
+        "observed_ratio",
+        "acceptance_max_ms_single_line_4000_hex",
+        "review_observed_1mb_single_line_ms",
+        "evidence"
       ],
       "additionalProperties": false
     }

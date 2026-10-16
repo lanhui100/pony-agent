@@ -71,6 +71,33 @@
       "client.rs:175",
       "client.rs:193"
     ],
-    "early_return_sites_unchanged": true
+    "early_return_sites_unchanged": true,
+    "set_but_empty_is_false": true,
+    "blank_only_is_false": true
+  },
+  "wave18b_external_call_timeout_landing": {
+    "applicable": true,
+    "timeout_ms": 3000,
+    "timeout_ms_upper_bound": 3000,
+    "sites": [
+      "src/lib/telemetry.ts:reportError ingest fetch"
+    ],
+    "mechanism": "AbortController + setTimeout + clearTimeout",
+    "signal_attached_to_fetch": true,
+    "clear_timeout_after_settle_required": true,
+    "abort_signal_timeout_forbidden": true,
+    "evidence": "review-l3p-wave18.json finding#1：grep -nE 'AbortController|AbortSignal|setTimeout|signal' src/lib/telemetry.ts => 零命中 EXIT=1；本波冻结为 C8（contract-matrix-wave18.md §8）"
+  },
+  "wave18b_scanner_linearity": {
+    "applicable": true,
+    "per_match_whole_line_work_forbidden": true,
+    "context_precompute_per_line_required": true,
+    "cache_bounded_max_entries": 4,
+    "observed_single_line_4000_hex_ms": 2072,
+    "observed_split_lines_4000_hex_ms": 20,
+    "observed_ratio": 105,
+    "acceptance_max_ms_single_line_4000_hex": 100,
+    "review_observed_1mb_single_line_ms": 133412,
+    "evidence": "review-l3-scanner-wave18.json finding#4 与 /tmp/w18b-probe.mjs（单行 4000×64hex 259999B = 2072.4 ms vs 拆行 19.7 ms，比值 105×）；本波冻结为 C4-R3（contract-matrix-wave18.md §4.6）"
   }
 }

@@ -13,8 +13,10 @@ impl Default for PonySentryConfig {
     fn default() -> Self {
         Self {
             endpoint: "https://sentry.ponyjob.top".to_string(),
-            client_token: Some("6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24".to_string()),
-            enabled: true,
+            // wave-18 C1：默认 fail-closed —— 不得内置任何凭证，默认零 egress。
+            // 凭证的唯一合法来源是环境变量（见 `from_env()`）。
+            client_token: None,
+            enabled: false,
             environment: "dev".to_string(),
             release: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -28,14 +30,17 @@ impl PonySentryConfig {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "https://sentry.ponyjob.top".to_string());
 
+        // wave-18 C2：token 仅来自 `PONYSENTRY_CLIENT_TOKEN`；未设或纯空白 ⇒ None。
+        // 禁止任何硬编码回落（默认零凭证 / fail-closed）。
         let client_token = std::env::var("PONYSENTRY_CLIENT_TOKEN")
             .ok()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| Some("6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24".to_string()));
+            .filter(|s| !s.trim().is_empty());
 
+        // wave-18 C2：未设 `PONYSENTRY_ENABLED` ⇒ false（默认零 egress）；
+        // 仅显式非 "false"/"0"（含大小写与首尾空白）才为 true。
         let enabled = std::env::var("PONYSENTRY_ENABLED")
             .map(|s| s.trim().to_lowercase() != "false" && s.trim() != "0")
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         let environment = std::env::var("APP_ENV")
             .ok()

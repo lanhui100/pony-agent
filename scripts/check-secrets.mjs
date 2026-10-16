@@ -80,6 +80,31 @@ export const SECRET_RULES = [
       const upper = context.toUpperCase();
       return upper.includes("MOCK") || upper.includes("TEST") || upper.includes("DUMMY") || upper.includes("EXAMPLE");
     }
+  },
+  // wave-18 C4：裸 64-hex 高熵凭证（SHA-256 尺寸 client token）
+  // 契约基线：`.dev-team/contract-matrix-wave18.md` §4.2 / §4.3 / §4.5。
+  // 长度窗口严格 64：用 `(?<![0-9a-fA-F])` / `(?![0-9a-fA-F])` 而非 `\b`，
+  // 既能命中 `token_<64hex>`，又拒绝 63/65/128 位 hex 长串与 7/8/12/40 位 git SHA。
+  {
+    name: "Bare 64-Hex High-Entropy Credential (SHA-256 sized client token)",
+    regex: /(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])/g,
+    isSafe: (match, context = "") => {
+      // 仅按“当前行”判定；scanTextContent 会以全量内容二次调用 isSafe，
+      // 多行上下文一律不参与豁免（防止整文件级放行造成漏报）。
+      if (context.includes("\n")) return false;
+      const line = context;
+      const lower = line.toLowerCase();
+      // 1) 已知非凭证哈希上下文关键字（校验和 / 摘要 / 指纹 / SRI）
+      if (/(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|\bhash\b|校验和|指纹)/.test(lower)) return true;
+      // 2) sha256sum(1) 输出格式：<hex><空白><路径>
+      if (/^[0-9a-f]{64}\s+\S/.test(line.trim())) return true;
+      // 3) Markdown 表格中的独立摘要单元格：| <hex> |
+      if (/\|\s*[0-9a-fA-F]{64}\s*\|/.test(line)) return true;
+      // 4) 反引号独占包裹的摘要（证据收据内联哈希）；同行出现凭证语义词时仍判违规
+      const credWord = /(client[_-]?token|access[_-]?token|api[_-]?key|secret|password|passwd|credential|authorization|bearer)/;
+      if (!credWord.test(lower) && line.includes("`" + match + "`")) return true;
+      return false;
+    }
   }
 ];
 

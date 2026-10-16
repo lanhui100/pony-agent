@@ -1,0 +1,17 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "src/lib/telemetry.ts",
+      "line": 289,
+      "rule": "external_call_timeout_ms<=3000（Q1 外部调用超时）：前端 ingest fetch 未设 AbortSignal/硬超时，属无界外部调用，突破基准上限",
+      "counterexample": "命令1：grep -nE \"AbortSignal|signal|setTimeout|timeout|AbortController\" src/lib/telemetry.ts ; echo EXIT=$?  => 无输出；EXIT=1（零命中）\n命令2：sed -n '289,296p' src/lib/telemetry.ts =>\n    fetch(`${INGEST_URL}/api/v1/ingest`, {\n      method: \"POST\",\n      headers,\n      body: JSON.stringify(payload),\n      keepalive: true,\n    }).catch((fetchErr) => {\n      console.warn(\"[ponysentry] fetch ingest silent fail:\", fetchErr);\n    });\n（init 仅 method/headers/body/keepalive，无 signal/AbortSignal；无任何超时中断手段）\n达标对照面：crates/pony-agent-core/src/agent/ponysentry/client.rs:287-288 与 :331-332 均为 reqwest::Client::builder().timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))，client.rs:14 const REQUEST_TIMEOUT_SECS: u64 = 3 => 3000ms，达标。\n作用域事实（不隐藏）：git diff d3ae148 -- src/lib/telemetry.ts 的 hunk 仅 @@ -7,12 +7,12 @@ 与 @@ -274,6 +274,11 @@；本波新增行只有 :10-11 注释、:13/:15 常量回落改 \"\"、:277-281 守卫，:289 的 fetch 调用行本波未改动。按 Q1 指定范围（本波契约面 C5 的前端上报路径）判定为未设硬超时。"
+    },
+    {
+      "file": ".env.example",
+      "line": 0,
+      "rule": "config/self-check（Q5 配置与自检）：仓库无 .env.example 或等价配置模板，部署方无从得知必须设 PONYSENTRY_ENABLED=true / PONYSENTRY_CLIENT_TOKEN / VITE_PONYSENTRY_CLIENT_TOKEN",
+      "counterexample": "命令1：ls .env.example ; echo EXIT=$? => ls: cannot access '.env.example': No such file or directory ；EXIT=2\n命令2：git ls-files | grep -E '^[.]env' ; echo EXIT=$? => 无输出；EXIT=1（全库无任何被跟踪的 .env 模板文件；scripts/check-secrets.mjs:119-123 对 .env.example/.env.template/.env.sample 做文件名豁免，但该文件不存在）\n命令3：grep -rn \"PONYSENTRY_ENABLED\" . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=target --exclude-dir=target-test --exclude-dir=.dev-team --include=*.rs --include=*.ts --include=*.vue --include=*.md --include=*.yml --include=*.json --include=*.toml --include=*.mjs ; echo EXIT=$? => 26 行命中全部落在消费方 crates/pony-agent-core/src/agent/ponysentry/config.rs:39,41 与 tests/*、crates/pony-agent-core/tests/*、tests/acceptance/*（测试），零条面向部署方的文档或模板；EXIT=0\n命令4：git diff d3ae148 -- management/task-system/00_DASHBOARD.md => 本波看板改动仅为 PA-104~111 阶段事实更正，未新增任何环境变量说明\n唯一仓库可见配置注入点（不构成模板）：.github/workflows/release.yml:25-26 仅注入 PONYSENTRY_CLIENT_TOKEN 与 VITE_PONYSENTRY_CLIENT_TOKEN（官方 CI 构建用），未记录 PONYSENTRY_ENABLED；而本波已把 enabled 默认值翻转为 false（config.rs:43 .unwrap_or(false)），部署方在仓库内无任何线索得知须显式置 PONYSENTRY_ENABLED=true 才能恢复上报。\n基准字段说明：python3 打印 .dev-team/nfr-baseline-wave18.json 顶层键，及 grep -nE \"self|config|template\" .dev-team/nfr-baseline.schema.json ; echo EXIT=$? => 无输出，EXIT=1，即基准表内不存在 config/self-check 字段；故按 Q5 给定判据（开箱即用配置模板与自检机制）判定，且不给出降级理由（本波正是把凭证/开关唯一来源改为环境变量，模板缺失直接阻断部署可用性）。"
+    }
+  ]
+}

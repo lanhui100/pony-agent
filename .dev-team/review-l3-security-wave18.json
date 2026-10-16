@@ -1,0 +1,11 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "management/task-system/00_DASHBOARD.md",
+      "line": 23,
+      "rule": "看板事实更正的机械断言为假：声称『全仓 grep -rn \"MAX_SUBAGENT_DEPTH\" 零命中』，实测 2 命中，且该断言所在行自身即命中（自反证）",
+      "counterexample": "$ grep -rn \"MAX_SUBAGENT_DEPTH\" . 2>/dev/null | grep -v node_modules | grep -v '^\\./target'\n./management/task-system/00_DASHBOARD.md:23:  > **事实更正（wave-18，2026-10-16）**：原表述“已全部实现，进入 Review”与任务卡状态记录不符。……其中 **PA-110 仍处 Phase 1 契约冻结**，且其 **AC-01（`subagent` 隔离子会话）与 AC-04（`MAX_SUBAGENT_DEPTH ≤ 2` 递归深度防护）在代码中不存在**（全仓 `grep -rn \"MAX_SUBAGENT_DEPTH\"` 零命中；`crates/pony-agent-core/src/agent/orchestration.rs` 无隔离子会话实现）。\n./management/task-system/03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26:- **AC-04**: 防护递归深度爆炸（MAX_SUBAGENT_DEPTH ≤ 2）。\nexit=0  → 命中 2 处（非 0），其中 1 处就是写下“零命中”这一断言的本行；被同一句话引为依据的 PA-110 任务卡 :26 亦命中。"
+    }
+  ]
+}

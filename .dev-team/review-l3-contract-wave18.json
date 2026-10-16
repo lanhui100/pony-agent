@@ -1,0 +1,29 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/tests/ponysentry_manual_upload_test.rs",
+      "line": 137,
+      "rule": "假测试 / 无断言放行（AGENTS.md 底线 4：严禁无断言测试）",
+      "counterexample": "`cargo test -p pony-agent-core --test ponysentry_manual_upload_test test_upload_session_trace_contract_shape` => `test test_upload_session_trace_contract_shape ... ok` / `test result: ok. 1 passed; 0 failed` Exit 0。函数体 137-140 全文仅为两行注释（`// 契约：控制面 upload_session_trace 返回 async fn(&str) -> Result<usize, String>...`），零 assert/expect/panic/unwrap；`git show 98bd584:...` 与 `git show d3ae148:...` 该函数逐字相同（非本波引入，但属本波冻结验收集且本波未收敛）。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/ponysentry_manual_upload_test.rs",
+      "line": 155,
+      "rule": "假测试 / 默认跳过（契约 §8 迁移规则：不得跳过测试；默认 CI 下该用例零断言通过）",
+      "counterexample": "`env -u PONYSENTRY_CLIENT_TOKEN -u PONYSENTRY_TEST_LIVE cargo test -p pony-agent-core --test ponysentry_manual_upload_test test_upload_trace_to_live_sentry_contract -- --nocapture` => stdout `[skip] test_upload_trace_to_live_sentry_contract: 未提供 PONYSENTRY_CLIENT_TOKEN，默认配置不再内置凭证（wave-18 fail-closed），跳过 live 契约验证。` + `test test_upload_trace_to_live_sentry_contract ... ok` + `test result: ok. 1 passed; 0 failed` Exit 0。:155-181 三个 early `return` 使默认环境下 224-238 的 201/401/404 断言永不执行（契约 M7 授权 env 门控，但 §8 头部禁止跳过，二者冲突时当前实现选择了等价于 `#[ignore]` 的静默 skip，且以 `ok` 而非 `ignored` 上报）。"
+    },
+    {
+      "file": "management/task-system/00_DASHBOARD.md",
+      "line": 23,
+      "rule": "实现 diff 内新增事实断言为假（自反证；task-1 交付物为「看板修正」，修正文本自身必须为真）",
+      "counterexample": "该行断言「全仓 `grep -rn \"MAX_SUBAGENT_DEPTH\"` 零命中」。实测 `git grep -n MAX_SUBAGENT_DEPTH` => 2 命中：`management/task-system/00_DASHBOARD.md:23`（断言行自身）与 `management/task-system/03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`（`- **AC-04**: 防护递归深度爆炸（MAX_SUBAGENT_DEPTH ≤ 2）。`）。仅当加 `--include=*.rs --include=*.ts` 时才是 0 命中（`grep -rn \"MAX_SUBAGENT_DEPTH\" --include=*.rs --include=*.ts .` => 0 行）。正确表述应为「全仓代码（*.rs/*.ts）零命中」。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ponysentry/config.rs",
+      "line": 41,
+      "rule": "C2 真值表覆盖缺口 / fail-open 边界（`enabled` 未设=>false 仅对 unset 成立，set-but-empty 反为 true；实现逐字符合冻结表达式，缺口在冻结契约与测试覆盖面）",
+      "counterexample": "在隔离副本 `/tmp/l3-w18` 追加探针（主工作区零改动）后运行 `CARGO_TARGET_DIR=/tmp/l3-cargo-target cargo test --manifest-path /tmp/l3-w18/crates/pony-agent-core/Cargo.toml --test ponysentry_credential_gate l3_probe_blank_enabled_is_fail_open -- --nocapture` => `L3PROBE blank PONYSENTRY_ENABLED => enabled=true`（断言 `!cfg.enabled` 失败，Exit 101）。根因：:41-43 `std::env::var(\"PONYSENTRY_ENABLED\").map(|s| s.trim().to_lowercase() != \"false\" && s.trim() != \"0\").unwrap_or(false)` 对 `Some(\"\")` 返回 true，`.unwrap_or(false)` 只兜住 unset。冻结真值表（§2 断言 4/5）与 `ponysentry_credential_gate.rs:204-211`、`ponysentry_credential_gate_adversarial.rs:142` 的真值/畸形用例均未覆盖 `PONYSENTRY_ENABLED=\"\"`（`.env` 中 `PONYSENTRY_ENABLED=` 为常见写法）；同波 C5 前端对空串按未设处理（`telemetry.ts:13-15`），前后端语义不对称。"
+    }
+  ]
+}

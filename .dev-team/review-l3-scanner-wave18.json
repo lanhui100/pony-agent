@@ -1,0 +1,36 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "scripts/check-secrets.mjs",
+      "line": 102,
+      "rule": "FATAL-FN | 64-hex rule: exemption #3 (Markdown table cell) exempts the WHOLE line and has no credential-word guard (unlike exemption #4 at :104-105) -> real credential in a table row is fully missed",
+      "counterexample": "node -e 'import(\"/home/dm/pony-agent/scripts/check-secrets.mjs\").then(m=>{const H=\"<REDACTED-WAVE18-LIVE-TOKEN>\";console.log(m.scanTextContent(\"| PONYSENTRY_CLIENT_TOKEN | \"+H+\" |\",\"\").length)})'  -> stdout: 0 (expected >=1). Also: scanTextContent(\"| client_token | <64hex> |\") = 0 hits. The cell contains the credential-naming word `client_token`, but the credWord guard at :104 is only consulted by exemption #4, so a documented/leaked token listed in any Markdown table row passes the gate (CI runs `node scripts/check-secrets.mjs --all`)."
+    },
+    {
+      "file": "scripts/check-secrets.mjs",
+      "line": 98,
+      "rule": "FATAL-FN | 64-hex rule: exemption #1 (sha256/checksum/integrity/digest/hash/fingerprint keywords) and #2 (sha256sum line prefix at :100) exempt the WHOLE line with no credential-word guard -> one-line JSON/JS containing a token plus a checksum field is fully missed",
+      "counterexample": "node -e 'import(\"/home/dm/pony-agent/scripts/check-secrets.mjs\").then(m=>{const H=\"<REDACTED-WAVE18-LIVE-TOKEN>\";for(const c of [\"{\\\"client_token\\\":\\\"\"+H+\"\\\",\\\"integrity\\\":\\\"sha512-x\\\"}\",\"{\\\"client_token\\\":\\\"\"+H+\"\\\",\\\"checksum\\\":\\\"abc\\\"}\",\"client_token=\"+H+\" // hash\"])console.log(m.scanTextContent(c,\"\").length)})'  -> stdout: 0 / 0 / 0 (expected >=1 each). Exemption #2 is worse: `H + \"  PONYSENTRY_CLIENT_TOKEN=\" + H` -> 0 hits, i.e. one leading 64-hex + whitespace makes the entire line (including a second, named token) exempt. Contract §4.5 registers this window but states items 1/2/3 lack the guard; the new rule therefore has a demonstrable false-negative surface."
+    },
+    {
+      "file": "scripts/check-secrets.mjs",
+      "line": 162,
+      "rule": "FATAL-FN (pre-existing, unchanged by this wave) | scanTextContent calls isSafe(secretVal, line) || isSafe(secretVal, content); the 'Private Key Block' rule isSafe (:79-82) does context.toUpperCase().includes('MOCK'|'TEST'|'DUMMY'|'EXAMPLE') on the WHOLE-FILE argument -> the rule is permanently disabled (100% miss) in any file that mentions test/mock/dummy/example anywhere",
+      "counterexample": "Isolated temp repo probe (/tmp/w18-chain-probe.sh, no writes to the workspace): k.txt = '-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEA0fakedata\\n-----END RSA PRIVATE KEY-----\\n// unit test fixture' -> `node scripts/check-secrets.mjs --staged` stdout '敏感信息门禁检查通过 (0 leaks detected).' STAGED_EXIT=0 and `node scripts/check-secrets.mjs --all` ALL_EXIT=0 (gate blind). Removing only the line containing 'test' -> STAGED_EXIT=1 with '[Private Key Block] k.txt:1'. Direct API form: scanTextContent(pk + '// this is a test fixture','').filter(v=>v.rule==='Private Key Block').length = 0 vs 1 without the word. A real private key committed next to any 'test'/'example' mention bypasses both pre-commit and CI --all."
+    },
+    {
+      "file": "scripts/check-secrets.mjs",
+      "line": 96,
+      "rule": "HIGH-DoS | new-rule isSafe does per-match whole-line work (line 96 line.toLowerCase(), line 98 regex.test(lower), line 105 line.includes(...)) -> O(matches x lineLength) quadratic blowup on long single lines; measured 133.4 s for one 1MB line, plus 15000 reported violations (log flood)",
+      "counterexample": "node /tmp/w18-perf-threshold.mjs -> '1MB single-line minified JSON with 15000 64-hex' = 133411.9 ms, hits=15000, bytes=1128891; 'single line, 4000 x `64hex`' (268 KB) = 4958.4 ms; 'single line, 4000 x bare 64hex' (260 KB) = 2941.3 ms; same data as separate lines = 29.1 ms (4600x faster). /tmp/w18-perf-probe.mjs: '1MB line: backtick+64hex repeated' = 143356 ms; '1MB line: sha256 kw + hex repeated' = 36862 ms. Current tree is unaffected (`/usr/bin/time node scripts/check-secrets.mjs --all` = 0.69 s, longest tracked line 114 KB), but any tracked minified/bundle/source-map file with a long line and many hashes stalls or times out the CI secrets step (ci.yml runs --all with no step timeout). Not classic regex backtracking: the 64-hex regex itself is linear; the quadratic cost is the per-match context scan."
+    },
+    {
+      "file": "package.json",
+      "line": 39,
+      "rule": "MEDIUM-CHAIN | `npm run verify` (line 41) runs `secrets:check` = `node scripts/check-secrets.mjs --staged`; with a clean index the staged mode has zero inputs, so the documented full self-check ('全量合规自检', AGENTS.md §3) reports a vacuous PASS on a worktree that contains a leak; only ci.yml's separate `--all` step and the pre-commit hook cover it",
+      "counterexample": "Isolated temp repo probe (/tmp/w18-chain-probe.sh): cfg.ts committed clean, then rewritten to `export const CLIENT_TOKEN = \"<REDACTED-WAVE18-LIVE-TOKEN>\";` while UNSTAGED -> `node scripts/check-secrets.mjs --staged` stdout '敏感信息门禁检查通过 (0 leaks detected).' STAGED_EXIT=0, whereas `node scripts/check-secrets.mjs --all` on the same tree prints the violation and ALL_EXIT=1. Same on the real workspace: `node scripts/check-secrets.mjs --staged` = STAGED_EXIT=0 with an empty index (git diff --cached --name-only = ''), i.e. the verify-chain secret step scanned 0 files. Mitigating facts verified: the active .git/hooks/pre-commit calls `node scripts/check-secrets.mjs --staged` and .git/hooks/pre-push calls `--pre-push` (both load all 8 SECRET_RULES; scripts/git-guard.ps1:97 does the same), and ci.yml runs `node scripts/check-secrets.mjs --all`, so a leak must be staged to reach a commit -- the gap is only that `npm run verify` itself gives a false green on an unstaged worktree."
+    }
+  ],
+  "evidence_redaction_note": "Lead 于 wave-18 提交前脱敏：本报告 3 处 counterexample 原内嵌真实 PonySentry token 字面量，已替换为 <REDACTED-WAVE18-LIVE-TOKEN>。语义与可复现性不变（占位符等价替换），脱敏动作本身即新补盲规则生效的物理凭证：pre-commit 门禁曾拦截本文件提交。"
+}
