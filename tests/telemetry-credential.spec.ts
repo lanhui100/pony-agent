@@ -106,6 +106,8 @@ function carriesClientTokenHeader(fetchMock: ReturnType<typeof stubFetchMock>): 
 }
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.resetModules();
@@ -239,5 +241,108 @@ describe("wave-18 C5 §5.4: 前端 PonySentry 凭证门禁（变异敏感断言�
     expect(String(call[0])).toContain("/api/v1/ingest");
     const headers = (call[1]?.headers ?? {}) as Record<string, string>;
     expect(headers["X-Client-Token"]).toBe("test-token-123");
+  });
+
+  // -------------------------------------------------------------------------
+  // wave-18b C8：前端 ingest 硬超时（≤3000ms，AbortController + setTimeout + signal）
+  // 契约基线：.dev-team/contract-matrix-wave18.md wave18-r3 §8（§8.1 冻结实现形态 / §8.2 冻结断言）
+  // 权威证据源：.dev-team/review-l3p-wave18.json finding#1
+  // 红相基线：`grep -nE "AbortController|AbortSignal|setTimeout|signal" src/lib/telemetry.ts`
+  //           零命中 => ingest fetch 无界外部调用，突破 external_call_timeout_ms ≤ 3000。
+  // -------------------------------------------------------------------------
+
+  it("C8-1 静态：fetch 必须挂载 AbortController + setTimeout + clearTimeout + signal（不得用 AbortSignal.timeout）", () => {
+    // Arrange
+    const source = fs.readFileSync(TELEMETRY_SOURCE_PATH, "utf8");
+
+    // Act / Assert：断言布尔而非直接 match 片段，失败输出不泄露源码
+    expect(source.includes("new AbortController()")).toBe(true);
+    expect(source.includes("setTimeout(")).toBe(true);
+    expect(source.includes("clearTimeout(")).toBe(true);
+    expect(/signal\s*:\s*controller\.signal/.test(source)).toBe(true);
+    // §8.1 约束 2：禁止 AbortSignal.timeout（旧 WebView 兼容风险）
+    expect(source.includes("AbortSignal.timeout")).toBe(false);
+    // §8.1 约束 3：clearTimeout 必须挂在 fetch settle 之后（.finally），否则超时永不生效
+    expect(/\.finally\(\s*\(\)\s*=>\s*clearTimeout\(/.test(source)).toBe(true);
+  });
+
+  it("C8-2 静态：INGEST_TIMEOUT_MS 必须存在、≤3000 且为非导出常量", () => {
+    // Arrange
+    const source = fs.readFileSync(TELEMETRY_SOURCE_PATH, "utf8");
+
+    // Act
+    const match = source.match(/const\s+INGEST_TIMEOUT_MS\s*=\s*(\d+)/);
+
+    // Assert
+    expect(match, "必须存在模块级常量 `const INGEST_TIMEOUT_MS = <number>`").not.toBeNull();
+    expect(Number(match?.[1])).toBeLessThanOrEqual(3000);
+    // §8.1 约束 5：不得新增导出符号
+    expect(source.includes("export const INGEST_TIMEOUT_MS")).toBe(false);
+  });
+
+  it("C8-3 行为：关闭 test-mode 静默后，ingest fetch 的 init 必须携带 AbortSignal", async () => {
+    // Arrange
+    enableBrowserEgressPath();
+    vi.stubEnv("VITE_PONYSENTRY_CLIENT_TOKEN", "test-token-123");
+    vi.stubEnv("VITE_PONYSENTRY_INGEST_URL", "http://127.0.0.1:9");
+    const fetchMock = stubFetchMock();
+    const telemetry = await loadTelemetryFresh();
+
+    // Act
+    await telemetry.reportError({ message: "wave18b c8 signal probe" });
+
+    // Assert
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    const signal = init?.signal as AbortSignal | undefined;
+    expect(signal != null, "ingest fetch 的 init 必须携带 `signal`（C8 冻结断言 1）").toBe(true);
+    expect(typeof signal?.addEventListener).toBe("function");
+    expect(signal?.aborted).toBe(false);
+  });
+
+  it("C8-4 行为：超时触发后 AbortError 必须被既有 .catch 吸收（无未捕获拒绝、仍 fire-and-forget）", async () => {
+    // Arrange：解除 test-mode 静默 + 关闭 Tauri 分支，使断言落在真实 fetch 分支
+    enableBrowserEgressPath();
+    vi.stubEnv("VITE_PONYSENTRY_CLIENT_TOKEN", "test-token-123");
+    vi.stubEnv("VITE_PONYSENTRY_INGEST_URL", "http://127.0.0.1:9");
+    vi.useFakeTimers();
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // fetch 桩：仅在 signal 存在时才会因 abort 而 reject（未挂 signal => 永不 settle）
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal as AbortSignal | undefined;
+        if (!signal) return;
+        signal.addEventListener("abort", () => {
+          reject(
+            Object.assign(new Error("The operation was aborted."), { name: "AbortError" })
+          );
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const telemetry = await loadTelemetryFresh();
+
+    // Act
+    await telemetry.reportError({ message: "wave18b c8 timeout probe" });
+    await vi.advanceTimersByTimeAsync(3000);
+    await Promise.resolve();
+
+    // Assert
+    process.off("unhandledRejection", onUnhandled);
+    expect(unhandled).toEqual([]);
+    const warnedAbort = warnSpy.mock.calls.some((call) =>
+      call.some((arg) => (arg as { name?: string } | undefined)?.name === "AbortError")
+    );
+    expect(
+      warnedAbort,
+      "超时触发（AbortError）必须被既有 `.catch` 静默吸收（console.warn），不得抛未捕获异常"
+    ).toBe(true);
   });
 });

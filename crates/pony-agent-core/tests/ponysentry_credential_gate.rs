@@ -201,13 +201,15 @@ fn from_env_enabled_resolution_matrix() {
     );
 
     // 显式真值表（保留 config.rs 既有解析表达式语义）
-    let cases: [(&str, bool); 6] = [
+    let cases: [(&str, bool); 8] = [
         ("false", false),
         ("FALSE", false),
         (" false ", false),
         ("0", false),
+        ("  0  ", false),
         ("true", true),
-        ("1", true),
+        ("TRUE", true),
+        (" true ", true),
     ];
     for (raw, expected) in cases {
         std::env::set_var("PONYSENTRY_ENABLED", raw);
@@ -215,6 +217,53 @@ fn from_env_enabled_resolution_matrix() {
         assert_eq!(
             config.enabled, expected,
             "C2-4/5：PONYSENTRY_ENABLED={raw:?} 的真值解析不符合冻结契约"
+        );
+    }
+
+    clear_managed_env();
+}
+
+/// wave18-r3 §2 冻结断言 7/8/9（C2 fail-closed 边界，`review-l3-contract` finding#4）。
+///
+/// `PONYSENTRY_ENABLED` **set-but-empty / 纯空白**必须与 unset 同义 ⇒ `false`。
+/// 红相基线：`config.rs` 的
+/// `.map(|s| s.trim().to_lowercase() != "false" && s.trim() != "0").unwrap_or(false)`
+/// 使 `Some("")` / `Some("   ")` / `Some("\t")` 落进 `map` 闭包 ⇒ **true**（fail-open 缺口）。
+#[test]
+fn from_env_enabled_set_but_empty_is_fail_closed() {
+    let _guard = lock_env();
+    clear_managed_env();
+
+    // §2 断言 7：set-but-empty / 纯空白 ⇒ false（与 unset 同义）
+    let blank_cases: [(&str, &str); 4] = [
+        ("空串", ""),
+        ("空格串", "   "),
+        ("制表符", "\t"),
+        ("换行符", "\n"),
+    ];
+    for (label, raw) in blank_cases {
+        std::env::set_var("PONYSENTRY_ENABLED", raw);
+        let config = PonySentryConfig::from_env();
+        assert!(
+            !config.enabled,
+            "C2-r3 断言 7（fail-closed）：PONYSENTRY_ENABLED 为{label}（set-but-empty）时必须为 false，\
+             不得因落进 map 闭包而 fail-open 为 true"
+        );
+    }
+
+    // §2 断言 8：trim 先行 —— 空白包裹不得改变显式值语义
+    let padded_cases: [(&str, &str, bool); 4] = [
+        ("空白包裹 0", "  0  ", false),
+        ("空白包裹 false", " false ", false),
+        ("空白包裹 true", " true ", true),
+        ("制表符包裹 1", "\t1\t", true),
+    ];
+    for (label, raw, expected) in padded_cases {
+        std::env::set_var("PONYSENTRY_ENABLED", raw);
+        let config = PonySentryConfig::from_env();
+        assert_eq!(
+            config.enabled, expected,
+            "C2-r3 断言 8：PONYSENTRY_ENABLED 为{label}（{raw:?}）时必须解析为 {expected}（先 trim 再判）"
         );
     }
 

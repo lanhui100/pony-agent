@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, it, expect } from "vitest";
 import {
   scanTextContent,
   checkBlockedFilename,
@@ -212,5 +215,158 @@ MIIEowIBAAKCAQEA0Y1+xyz...
         )
       ).toEqual([]);
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // wave-18b C4-r3（R1 豁免守卫 / R2 位置锚定 / R3 线性化）+ C7 私钥块级豁免
+  // 契约基线：.dev-team/contract-matrix-wave18.md wave18-r3 §4.2 / §4.3 / §4.6 / §4.7 / §7
+  // 权威证据源：.dev-team/review-l3-scanner-wave18.json finding#1/#2/#3/#4
+  // 红相基线：r2 实现的豁免 1/2/3 无 credWord 守卫且按“整行”放行（G1–G6 全 0 命中）；
+  //           私钥规则以整文件内容判定 TEST|MOCK|DUMMY|EXAMPLE（100% 失明）；
+  //           每 match 重复整行运算 => O(matches × 行长) 二次方。
+  // ---------------------------------------------------------------------------
+  describe("wave-18b C4-r3 + C7", () => {
+    const hex64 = (seed: string): string => seed.repeat(4); // 16 * 4 = 64
+    const LOW = hex64("0123456789abcdef");
+    const ALT = hex64("fedcba9876543210");
+    const BACKTICK = String.fromCharCode(96);
+
+    // ---- §4.7 G1–G6：必须命中（r2 实现下全部 0 命中） ----
+
+    it("G1 必须命中：| PONYSENTRY_CLIENT_TOKEN | <64hex> |（R1 守卫豁免 3）", () => {
+      expect(scanTextContent(`| PONYSENTRY_CLIENT_TOKEN | ${LOW} |`).length).toBe(1);
+    });
+
+    it("G2 必须命中：| client_token | <64hex> |（R1）", () => {
+      expect(scanTextContent(`| client_token | ${LOW} |`).length).toBe(1);
+    });
+
+    it("G3 必须命中：{\"client_token\":\"<64hex>\",\"integrity\":\"sha512-x\"}（R1 守卫豁免 1）", () => {
+      expect(
+        scanTextContent(`{"client_token":"${LOW}","integrity":"sha512-x"}`).length
+      ).toBe(1);
+    });
+
+    it("G4 必须命中：{\"client_token\":\"<64hex>\",\"checksum\":\"abc\"}（R1）", () => {
+      expect(scanTextContent(`{"client_token":"${LOW}","checksum":"abc"}`).length).toBe(1);
+    });
+
+    it("G5 必须命中：client_token=<64hex> // hash（R1）", () => {
+      expect(scanTextContent(`client_token=${LOW} // hash`).length).toBe(1);
+    });
+
+    it("G6 必须命中：<64hex>  PONYSENTRY_CLIENT_TOKEN=<64hex>（R1 + R2：第二个 hex 不得被吞）", () => {
+      // R2 位置锚定：豁免 2（sha256sum 前缀）只能豁免该行首个 hex；
+      // 且 R1 规定同行出现凭证语义词时全部豁免失效 => 一行两个 hex 必须两条都命中。
+      expect(scanTextContent(`${LOW}  PONYSENTRY_CLIENT_TOKEN=${ALT}`).length).toBe(2);
+    });
+
+    it("R2 必须命中：无凭证语义词时，一行内第二个 hex 不得继承豁免（sha256sum 前缀 / Markdown 单元格）", () => {
+      // §4.3 R2：豁免 2/3 位置锚定，只豁免该位置的那个 hex；一行内其他位置的 64-hex 不继承豁免。
+      // 本用例刻意不含任何凭证语义词，以**隔离 R2**（G6 在 R1 生效后由 R1 主导，无法单独证伪 R2）。
+      expect(scanTextContent(`${LOW}  crates/foo.rs ${ALT}`).length).toBe(1);
+      expect(scanTextContent(`| ${LOW} | ${ALT} |`).length).toBe(1);
+    });
+
+    // ---- 反向：无凭证语义词的纯摘要上下文必须仍 0 命中（零误报不得回退） ----
+
+    it("反向 0 命中：无凭证语义词的纯摘要上下文（checksum / sha256sum / 单元格 / 反引号 / computedHash / fingerprint）", () => {
+      const cases: Array<[string, string]> = [
+        ["checksum = \"<hex>\"", `checksum = "${LOW}"`],
+        ["sha256sum 输出行", `${LOW}  crates/pony-agent-core/src/lib.rs`],
+        ["Markdown 纯哈希单元格", `| ${LOW} |`],
+        ["反引号独占摘要", `- 收据：${BACKTICK}${LOW}${BACKTICK}`],
+        ["computedHash", `"computedHash": "${LOW}"`],
+        ["fingerprint", `fingerprint: ${LOW}`],
+      ];
+      const offenders = cases
+        .filter(([, content]) => scanTextContent(content).length !== 0)
+        .map(([label]) => label);
+      expect(offenders).toEqual([]);
+    });
+
+    // ---- C7 §7.4：私钥块级豁免（隔离临时目录，不污染仓库） ----
+
+    const PK_BEGIN = "-----BEGIN RSA PRIVATE KEY-----";
+    const PK_END = "-----END RSA PRIVATE KEY-----";
+    const PK_BODY = "MIIEowIBAAKCAQEA0Y1";
+    const REAL_BLOCK = `${PK_BEGIN}\n${PK_BODY}\n${PK_END}`;
+
+    let fixtureDir = "";
+
+    beforeAll(() => {
+      fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "w18b-secrets-"));
+    });
+
+    afterAll(() => {
+      if (fixtureDir) {
+        fs.rmSync(fixtureDir, { recursive: true, force: true });
+      }
+    });
+
+    /** 写入隔离临时文件并按其真实路径扫描（谁创建谁清理，禁止污染仓库）。 */
+    function scanFixture(name: string, content: string) {
+      const filePath = path.join(fixtureDir, name);
+      fs.writeFileSync(filePath, content, "utf8");
+      return scanTextContent(fs.readFileSync(filePath, "utf8"), filePath);
+    }
+
+    it("C7-1 真实私钥块 + 同文件远端出现 test 字样 => 仍必须命中（当前 100% 漏报）", () => {
+      const hits = scanFixture("real-key-with-remote-test.env.txt", `${REAL_BLOCK}\n// unit test fixture`);
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      expect(hits[0].rule).toContain("Private Key Block");
+    });
+
+    it("C7-2 私钥 base64 体中偶然含 TEST 字样 => 不得因此豁免", () => {
+      const hits = scanFixture(
+        "real-key-body-test.env.txt",
+        `${PK_BEGIN}\nMIIEowTESTAAKCAQEA0Y1\n${PK_END}`
+      );
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("C7-3 多私钥块：前一块 mock 豁免、后一块真实 => 真实块必须命中（无首块歧义）", () => {
+      const content = `// MOCK TEST KEY\n${REAL_BLOCK}\n\n\n\n${REAL_BLOCK}`;
+      const hits = scanFixture("multi-block.env.txt", content);
+      expect(hits.length).toBe(1);
+    });
+
+    it("C7-4 反向：// MOCK TEST KEY 紧邻 BEGIN 上一行 => 必须仍 0 命中（spec:83-92 不得破坏）", () => {
+      expect(scanFixture("mock-key.env.txt", `// MOCK TEST KEY\n${REAL_BLOCK}`).length).toBe(0);
+    });
+
+    it("C7-5 反向：// EXAMPLE KEY 紧邻 BEGIN 上一行 => 必须仍 0 命中", () => {
+      expect(scanFixture("example-key.env.txt", `// EXAMPLE KEY\n${REAL_BLOCK}`).length).toBe(0);
+    });
+
+    // ---- §4.6 性能硬约束（R3 线性化） ----
+
+    it("C4-3 性能：4000×64hex 单行必须 ≤100ms，且命中数与拆行版本一致（§4.6 验收判据）", () => {
+      const parts = Array.from({ length: 4000 }, () => LOW);
+      const singleLine = parts.join(",");
+      const splitLines = parts.join("\n");
+
+      const started = performance.now();
+      const singleHits = scanTextContent(singleLine);
+      const elapsed = performance.now() - started;
+
+      expect(singleHits.length).toBe(4000);
+      expect(elapsed).toBeLessThanOrEqual(100);
+      expect(scanTextContent(splitLines).length).toBe(4000);
+    }, 120_000);
+
+    it("C4-3 性能：约 1MB 单行 15000×64hex 必须 <3000ms，且命中数正确（不得为 0 或洪水式重复）", () => {
+      const parts = Array.from({ length: 15000 }, () => LOW);
+      const singleLine = parts.join(",");
+      // 纯 ASCII：length === 字节数；975,000 B ≈ 1MB
+      expect(singleLine.length).toBeGreaterThanOrEqual(900_000);
+
+      const started = performance.now();
+      const hits = scanTextContent(singleLine);
+      const elapsed = performance.now() - started;
+
+      expect(hits.length).toBe(15000);
+      expect(elapsed).toBeLessThan(3000);
+    }, 300_000);
   });
 });

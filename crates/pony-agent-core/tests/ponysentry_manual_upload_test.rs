@@ -11,10 +11,99 @@
 
 use pony_agent_core::agent::ponysentry::{
     build_agent_trace_payloads_from_turns, build_session_aggregated_trace_payload,
-    build_session_trace_payloads_sharded, AgentTracePayload, EvalStatus,
+    build_session_trace_payloads_sharded, init as ponysentry_init,
+    send_agent_trace_direct, AgentTracePayload, EvalStatus, PonySentryConfig,
 };
 use pony_agent_core::agent::session::TurnTraceRecord;
 use pony_agent_core::agent::telemetry::TurnToolActivity;
+use std::io::ErrorKind;
+use std::net::TcpListener;
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+/// wave-18b：本文件内触碰进程级 env / 全局 ponysentry 客户端的用例统一串行化，
+/// 保证 fail-closed 契约断言的确定性（不依赖测试线程调度运气）。
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+const MANAGED_ENV_KEYS: [&str; 4] = [
+    "PONYSENTRY_CLIENT_TOKEN",
+    "PONYSENTRY_ENABLED",
+    "PONYSENTRY_INGEST_URL",
+    "PONYSENTRY_TEST_LIVE",
+];
+
+fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn clear_managed_env() {
+    for key in MANAGED_ENV_KEYS {
+        std::env::remove_var(key);
+    }
+}
+
+/// 读取仓库内源码文件（相对 `crates/pony-agent-core` 的路径）。
+fn read_repo_source(relative_to_crate_root: &str) -> String {
+    let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_to_crate_root);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("契约证据源必须可读（{path}）：{err}"))
+}
+
+/// 取 `source` 中 `needle` 之后最多 `len` 个字符的片段（用于签名/委派形状断言）。
+fn slice_after<'a>(source: &'a str, needle: &str, len: usize) -> Option<&'a str> {
+    source
+        .find(needle)
+        .map(|index| &source[index..(index + len).min(source.len())])
+}
+
+/// 本地回环“出口探针”线程：在 `budget` 内等待 TCP 连接，若收到则读空请求并回 `201 Created`
+/// （使 `send_trace_direct_http` 走成功分支），最后返回“是否观测到出口连接”。
+///
+/// 采用非阻塞 accept + 固定轮询间隔 + 硬截止时间，禁止无界 sleep 概率等待。
+fn spawn_egress_probe(budget: Duration) -> (u16, std::thread::JoinHandle<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback egress probe");
+    listener
+        .set_nonblocking(true)
+        .expect("egress probe must be non-blocking");
+    let port = listener
+        .local_addr()
+        .expect("probe local_addr")
+        .port();
+
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _addr)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match std::io::Read::read(&mut stream, &mut buf) {
+                            Ok(0) => break,
+                            Ok(_) => continue,
+                            Err(_) => break,
+                        }
+                    }
+                    let _ = std::io::Write::write_all(
+                        &mut stream,
+                        b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    let _ = std::io::Write::flush(&mut stream);
+                    return true;
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return false,
+            }
+        }
+        false
+    });
+
+    (port, handle)
+}
 
 fn sample_turn() -> TurnTraceRecord {
     TurnTraceRecord {
@@ -133,10 +222,151 @@ fn test_auto_report_removed_from_emit_event() {
     );
 }
 
+/// wave-18b §11 M12（`review-l3-contract-wave18.json` finding#1，R5）：
+/// 原函数体仅两行注释、**零断言**恒真空通过。此处补**真断言**：
+/// 1. 控制面入口形状契约（`src-tauri/src/lib.rs` 的 `#[tauri::command] upload_session_trace`
+///    => `Result<usize, String>` 且委派给 `control_plane.upload_session_trace`）；
+/// 2. 控制面实现把直发错误经 `?` 向上传播（fail-closed 不得吞错）；
+/// 3. 行为契约：**set-but-empty `PONYSENTRY_ENABLED` 必须视为未启用**（C2-r3 fail-closed），
+///    无凭证时 `send_agent_trace_direct` 必须返回 `Err` 且**零网络出口**。
 #[test]
 fn test_upload_session_trace_contract_shape() {
-    // 契约：控制面 upload_session_trace 返回 async fn(&str) -> Result<usize, String>（上报 turn 数量）。
-    // 该入口在 tauri 命令层（src-tauri/src/lib.rs upload_session_trace）暴露。
+    let _guard = lock_env();
+    clear_managed_env();
+
+    // ---- 1) 控制面入口形状（tauri 命令层） ----
+    let lib_rs = read_repo_source("../../src-tauri/src/lib.rs");
+    let entry = slice_after(&lib_rs, "async fn upload_session_trace(", 400)
+        .expect("src-tauri/src/lib.rs 必须暴露 `async fn upload_session_trace(`");
+    assert!(
+        entry.contains("-> Result<usize, String>"),
+        "控制面入口 `upload_session_trace` 必须返回 `Result<usize, String>`（上报 turn 数），实际签名片段：{entry}"
+    );
+    assert!(
+        entry.contains("control_plane.upload_session_trace(&session_id).await"),
+        "控制面入口必须委派给 `HostControlPlane::upload_session_trace`，实际片段：{entry}"
+    );
+
+    // ---- 2) 控制面实现：错误必须经 `?` 传播（不得吞掉 fail-closed 错误） ----
+    let control_plane_rs =
+        read_repo_source("src/agent/control_plane/query_commands.rs");
+    assert!(
+        control_plane_rs.contains(
+            "pub async fn upload_session_trace(&self, session_id: &str) -> Result<usize, String>"
+        ),
+        "控制面实现签名必须为 `pub async fn upload_session_trace(&self, session_id: &str) -> Result<usize, String>`"
+    );
+    assert!(
+        control_plane_rs.contains("send_agent_trace_direct(payload).await?;"),
+        "控制面实现必须用 `?` 传播直发错误（fail-closed 不得静默吞错）"
+    );
+
+    // ---- 3) 行为契约：set-but-empty enabled ⇒ 未启用 ⇒ 无凭证时 Err + 零 egress ----
+    let (port, probe) = spawn_egress_probe(Duration::from_secs(3));
+    std::env::set_var("PONYSENTRY_INGEST_URL", format!("http://127.0.0.1:{port}"));
+    // set-but-empty：C2-r3 冻结为“与 unset 同义 ⇒ false”
+    std::env::set_var("PONYSENTRY_ENABLED", "");
+    std::env::remove_var("PONYSENTRY_CLIENT_TOKEN");
+
+    let config = PonySentryConfig::from_env();
+    assert!(
+        !config.enabled,
+        "C2-r3：set-but-empty PONYSENTRY_ENABLED 必须解析为 false（fail-closed），\
+         否则控制面直发路径会在无凭证时仍尝试上报"
+    );
+    assert!(
+        config.client_token.is_none(),
+        "未设置 PONYSENTRY_CLIENT_TOKEN 时 client_token 必须为 None"
+    );
+
+    ponysentry_init(config);
+    let payload = build_session_aggregated_trace_payload(
+        "sess-fail-closed-shape",
+        None,
+        vec![sample_turn()],
+    )
+    .expect("sample_turn 必须能构造出聚合 payload");
+
+    let rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
+    let result = rt.block_on(send_agent_trace_direct(payload));
+    let egress_observed = probe.join().unwrap_or(false);
+
+    assert!(
+        result.is_err(),
+        "未配置凭证（且 set-but-empty enabled 必须视为未启用）时，`send_agent_trace_direct` 必须 \
+         fail-closed 返回 Err，实际返回：{result:?}"
+    );
+    assert!(
+        !egress_observed,
+        "fail-closed 路径必须零网络出口，但本地回环探针在 127.0.0.1:{port} 观测到了 TCP 连接"
+    );
+
+    clear_managed_env();
+}
+
+/// wave-18b R6(a)（`review-l3-contract-wave18.json` finding#2 / §11 M13 恒跑真断言段）：
+/// **无 env 依赖、恒跑**的真断言 —— 未配置 `PONYSENTRY_CLIENT_TOKEN` 时
+/// `send_agent_trace_direct` 必须返回 `Err` 且不得发起任何网络请求。
+///
+/// 覆盖两种「未启用」输入：
+/// 1. 显式 `PONYSENTRY_ENABLED=false`；
+/// 2. **set-but-empty `PONYSENTRY_ENABLED=""`**（C2-r3 fail-closed 边界 —— 当前实现
+///    落进 `map` 闭包 ⇒ true，故本用例在当前代码上真实失败）。
+///
+/// 与 M12 的区别：本用例只聚焦“零网络出口 + Err”这一物理事实（本地回环出口探针），
+/// 不依赖任何控制面源码形状断言。
+#[test]
+fn test_upload_trace_direct_sender_is_fail_closed_without_credentials() {
+    let _guard = lock_env();
+    clear_managed_env();
+
+    let rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
+
+    // ---- 场景 1：显式 PONYSENTRY_ENABLED=false ----
+    let (port, probe) = spawn_egress_probe(Duration::from_secs(2));
+    std::env::set_var("PONYSENTRY_INGEST_URL", format!("http://127.0.0.1:{port}"));
+    std::env::set_var("PONYSENTRY_ENABLED", "false");
+    std::env::remove_var("PONYSENTRY_CLIENT_TOKEN");
+
+    ponysentry_init(PonySentryConfig::from_env());
+    let payload =
+        build_session_aggregated_trace_payload("sess-no-credential", None, vec![sample_turn()])
+            .expect("sample_turn 必须能构造出聚合 payload");
+    let result = rt.block_on(send_agent_trace_direct(payload));
+    let egress_observed = probe.join().unwrap_or(false);
+
+    assert!(
+        result.is_err(),
+        "未配置 PONYSENTRY_CLIENT_TOKEN 时必须 fail-closed 返回 Err，实际返回：{result:?}"
+    );
+    assert!(
+        !egress_observed,
+        "未配置凭证时不得发起网络请求，但本地回环探针在 127.0.0.1:{port} 观测到了 TCP 连接"
+    );
+
+    // ---- 场景 2：set-but-empty PONYSENTRY_ENABLED（C2-r3 冻结断言 7） ----
+    let (port2, probe2) = spawn_egress_probe(Duration::from_secs(2));
+    std::env::set_var("PONYSENTRY_INGEST_URL", format!("http://127.0.0.1:{port2}"));
+    std::env::set_var("PONYSENTRY_ENABLED", "");
+    std::env::remove_var("PONYSENTRY_CLIENT_TOKEN");
+
+    ponysentry_init(PonySentryConfig::from_env());
+    let payload2 =
+        build_session_aggregated_trace_payload("sess-set-but-empty", None, vec![sample_turn()])
+            .expect("sample_turn 必须能构造出聚合 payload");
+    let result2 = rt.block_on(send_agent_trace_direct(payload2));
+    let egress_observed2 = probe2.join().unwrap_or(false);
+
+    assert!(
+        result2.is_err(),
+        "set-but-empty PONYSENTRY_ENABLED 必须与 unset 同义（未启用）⇒ 无凭证时返回 Err，实际返回：{result2:?}"
+    );
+    assert!(
+        !egress_observed2,
+        "set-but-empty PONYSENTRY_ENABLED 必须 fail-closed 零 egress，但本地回环探针在 127.0.0.1:{port2} 观测到了 TCP 连接"
+    );
+
+    clear_managed_env();
 }
 
 /// wave-18 M6/M7/F2 迁移（contract-matrix-wave18.md §7）：
@@ -147,38 +377,50 @@ fn test_upload_session_trace_contract_shape() {
 ///   网络失败不再静默吞掉（原 `if let Ok(response)` 会掩盖失败）；
 /// - **F2 止血**：清理步骤中的明文 postgres DSN 已移除，改从 `PONYSENTRY_TEST_DSN` 读取，
 ///   未设即跳过该清理步骤。通用 password 规则属后续 backlog，不在本波给扫描器扩面。
+/// - **wave-18b M13 / R6（`review-l3-contract-wave18.json` finding#2）**：原实现用三个 early
+///   `return` 静默 skip，却以 `test ... ok` 上报（等价 `#[ignore]` 但报 `ok`）。现改为：
+///   **skip 分支自带真断言**（跳过只能是“未显式 opt-in”的结果；若已显式 opt-in 却无可用
+///   凭证，属测试配置错误必须失败），并打印显式 `[skip]` 标记；恒跑真断言段见
+///   `test_upload_trace_direct_sender_is_fail_closed_without_credentials` 与
+///   `test_upload_session_trace_contract_shape`。不使用 `#[ignore]`（task-5 明令）。
 #[test]
 fn test_upload_trace_to_live_sentry_contract() {
+    let _guard = lock_env();
     let config = pony_agent_core::agent::ponysentry::PonySentryConfig::from_env();
+    let live_opt_in = std::env::var("PONYSENTRY_TEST_LIVE").ok();
 
-    // 无凭证即跳过：默认配置不再内置凭证（wave-18 fail-closed）
-    let token = match config.client_token.clone() {
-        Some(token) if !token.trim().is_empty() => token,
-        _ => {
-            eprintln!(
-                "[skip] test_upload_trace_to_live_sentry_contract: 未提供 PONYSENTRY_CLIENT_TOKEN，\
-                 默认配置不再内置凭证（wave-18 fail-closed），跳过 live 契约验证。"
-            );
-            return;
-        }
-    };
-
-    // 显式 opt-in 门禁：未显式开启则跳过，禁止默认向生产端点发送真实流量
-    if std::env::var("PONYSENTRY_TEST_LIVE").ok().as_deref() != Some("1") {
+    // ---- M13 恒跑真断言：skip 分支不得零断言通过 ----
+    // 跳过只能是「未显式 opt-in」的结果；若已显式 PONYSENTRY_TEST_LIVE=1 却因
+    // 无凭证/未启用而无法验证，属测试配置错误，必须失败而非静默报 ok（R6）。
+    if !config.enabled || config.client_token.is_none() {
+        assert_ne!(
+            live_opt_in.as_deref(),
+            Some("1"),
+            "已显式 PONYSENTRY_TEST_LIVE=1，但 PONYSENTRY_CLIENT_TOKEN 未配置或 enabled=false：\
+             live 契约无法验证，属测试配置错误，不得以静默 skip 冒充 ok（R6/M13）"
+        );
         eprintln!(
-            "[skip] test_upload_trace_to_live_sentry_contract: PONYSENTRY_TEST_LIVE != 1，\
-             为避免真实流量打到生产端点，跳过 live 契约验证。"
+            "[skip] test_upload_trace_to_live_sentry_contract: fail-closed 默认态\
+             （enabled={}, token_configured={}）且未显式 PONYSENTRY_TEST_LIVE=1，\
+             为避免真实流量打到端点，跳过 live 契约验证。",
+            config.enabled,
+            config.client_token.is_some()
         );
         return;
     }
 
-    if !config.enabled {
-        eprintln!(
-            "[skip] test_upload_trace_to_live_sentry_contract: PONYSENTRY_ENABLED=false，\
-             上报路径已禁用，跳过 live 契约验证。"
-        );
-        return;
-    }
+    // 已具备凭证与启用态 ⇒ 必须显式 opt-in（禁止默认把真实流量打到端点）
+    assert_eq!(
+        live_opt_in.as_deref(),
+        Some("1"),
+        "已配置凭证且 enabled=true 时必须显式 PONYSENTRY_TEST_LIVE=1 才允许 live 契约验证"
+    );
+
+    let token = config
+        .client_token
+        .clone()
+        .filter(|token| !token.trim().is_empty())
+        .expect("上面的 fail-closed 分支已保证 token 存在且非空白");
 
     // F2：清理用 DSN 只能来自环境变量（仓库内不得出现明文凭证）
     let cleanup_dsn = std::env::var("PONYSENTRY_TEST_DSN")
