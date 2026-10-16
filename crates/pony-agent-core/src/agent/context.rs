@@ -773,12 +773,22 @@ fn provider_semistable_context_note(
     graph_name: &str,
     retrieved: &RetrievedContextState,
 ) -> SemistableContextSection {
-    SemistableContextSection {
-        note: format!(
-            "Session label: graph={} / session={}",
-            graph_name, retrieved.session_context.conversation_id
-        ),
+    let mut note = format!(
+        "Session label: graph={} / session={}",
+        graph_name, retrieved.session_context.conversation_id
+    );
+
+    // PA wave-21: 激活 WorkspaceHotloader，动态注入项目宪法规则 (AGENTS.md / CLAUDE.md)
+    let hotloader = crate::agent::workspace_hotloader::WorkspaceHotloader::new();
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Some((constitution, _)) = hotloader.resolve_constitution(&current_dir) {
+        if !constitution.trim().is_empty() {
+            note.push_str("\n\n=== Project Instructions (AGENTS.md) ===\n");
+            note.push_str(&constitution);
+        }
     }
+
+    SemistableContextSection { note }
 }
 
 fn build_volatile_context_messages(

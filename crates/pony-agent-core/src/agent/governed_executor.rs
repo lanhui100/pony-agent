@@ -171,7 +171,12 @@ pub fn build_governed_executor_with_sandbox_backend(
     );
     let clock: Arc<dyn RuntimeClock> = Arc::new(SystemClock);
     let dispatcher = GovernedDispatcher::new(registry.clone(), clock);
-    dispatcher.register_policy_evaluator(Arc::new(LegacyCompatiblePolicyEvaluator));
+    if std::env::var("PONY_LEGACY_POLICY_ALLOW_ALL")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+    {
+        dispatcher.register_policy_evaluator(Arc::new(LegacyCompatiblePolicyEvaluator));
+    }
     // Legacy-compatible budgets: the switch must reproduce the legacy ToolRouter's lack of
     // tool-level output-byte/deadline caps (phase-4..7 review P1-2), not silently regress large
     // reads/batches. The governed path still enforces cancellation + child-call budgets.

@@ -1,0 +1,11 @@
+{
+  "task_id": "task-12",
+  "status": "completed_red_phase_confirmed",
+  "artifacts": [
+    "crates/pony-agent-core/tests/permission_fail_closed_contract.rs"
+  ],
+  "evidence": [
+    "cargo test -p pony-agent-core --test permission_fail_closed_contract -> FAILED (assertion `left == right` failed, left: Null, right: 'control_outcome_pending')",
+    "证明当前 governed_executor 使用 LegacyCompatiblePolicyEvaluator 直接放行写操作，未按 Fail-Closed 产出 approval 挂起请求。"
+  ]
+}

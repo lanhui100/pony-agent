@@ -5900,6 +5900,9 @@ pub fn canonical_tool_name(name: &str) -> Option<&'static str> {
         TOOL_TEAM_TASK_LIST => Some(TOOL_TEAM_TASK_LIST),
         TOOL_TODO_WRITE => Some(TOOL_TODO_WRITE),
         TOOL_TODO_LIST => Some(TOOL_TODO_LIST),
+        TOOL_CREATE_GOAL | "create.goal" => Some(TOOL_CREATE_GOAL),
+        TOOL_GET_GOAL | "get.goal" => Some(TOOL_GET_GOAL),
+        TOOL_UPDATE_GOAL | "update.goal" => Some(TOOL_UPDATE_GOAL),
         _ => None,
     }
 }
@@ -6136,18 +6139,11 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         TOOL_PLAN_CONTROL => ToolExposure::ModelVisible,
         TOOL_VIEW_IMAGE => ToolExposure::ModelVisible,
         TOOL_WORKSPACE_READ_DOCUMENT => ToolExposure::ModelVisible,
-        TOOL_SUBAGENT
-        | TOOL_WORKFLOW
-        | TOOL_SPAWN_TEAMMATE
-        | TOOL_LIST_AGENTS
-        | TOOL_SEND_MESSAGE
-        | TOOL_INTERRUPT_AGENT
-        | TOOL_DRAIN_INBOX
-        | TOOL_TEAM_TASK_CREATE
-        | TOOL_TEAM_TASK_UPDATE
-        | TOOL_TEAM_TASK_LIST
-        | TOOL_TODO_WRITE
-        | TOOL_TODO_LIST => ToolExposure::ModelVisible,
+        TOOL_TODO_WRITE
+        | TOOL_TODO_LIST
+        | TOOL_CREATE_GOAL
+        | TOOL_GET_GOAL
+        | TOOL_UPDATE_GOAL => ToolExposure::ModelVisible,
         _ => ToolExposure::Internal,
     }
 }

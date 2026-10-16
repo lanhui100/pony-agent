@@ -223,6 +223,20 @@ fn ask_answer(
     control_plane.answer_ask(&request_id, ver, answer)
 }
 
+/// Approve an Approval control request by stable `request_id` and compare-and-swap `version` (or `expected_version`).
+#[tauri::command]
+fn control_approve_request(
+    control_plane: State<'_, HostControlPlane>,
+    request_id: String,
+    version: Option<u64>,
+    expected_version: Option<u64>,
+) -> Result<Value, String> {
+    let ver = expected_version
+        .or(version)
+        .ok_or_else(|| "missing required key `expected_version` or `version`".to_string())?;
+    control_plane.approve_control_request(&request_id, ver)
+}
+
 /// Cancel a pending Ask by stable `request_id` and compare-and-swap `version` (or `expected_version`).
 #[tauri::command]
 fn ask_cancel(
@@ -1207,6 +1221,7 @@ pub fn run() {
             fail_turn_for_watchdog,
             ask_list_pending,
             ask_answer,
+            control_approve_request,
             ask_cancel,
             ask_expire,
             plan_create,

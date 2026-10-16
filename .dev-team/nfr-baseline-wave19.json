@@ -1,0 +1,32 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "lock_acquisition_timeout_ms": 2000,
+  "deadlock_watchdog_timeout_ms": 5000,
+  "lock_forbidden_calls": [
+    "resolve_graph_run_for_retrieval",
+    "load_graph_run",
+    "load_execution_checkpoint",
+    "load_active_graph_run_for_session"
+  ],
+  "logging": {
+    "format": "json",
+    "trace_id_required": true
+  },
+  "logging_scope": "new_structured_logging_surface_only",
+  "logging_legacy_eprintln_exempt": true,
+  "logging_debt_ref": "PA-119",
+  "logging_eprintln_exempt_scope": "existing_style_non_json_lock_poison_recovery_diagnostics",
+  "logging_eprintln_exempt_covers_new_lines": 1,
+  "logging_compliance_claimed": false,
+  "resource_release": [
+    "bounded_queue",
+    "max_queue_cap"
+  ]
+}

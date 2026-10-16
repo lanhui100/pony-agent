@@ -51,6 +51,25 @@ impl HostControlPlane {
             .map_err(|error| format!("failed to serialize answer result: {error}"))
     }
 
+    /// Approve an Approval control request by stable `request_id` with a compare-and-swap `expected_version`.
+    pub fn approve_control_request(
+        &self,
+        request_id: &str,
+        expected_version: u64,
+    ) -> Result<Value, String> {
+        let pending = self
+            .ask_dispatcher
+            .pending_request(request_id)
+            .ok_or_else(|| format!("unknown control request `{request_id}`"))?;
+        require_current_version(&pending, expected_version)?;
+        let authorization = ControlRequestAuthorization::for_request(&pending, None);
+        let consumed = self
+            .ask_dispatcher
+            .approve_control_request(request_id, &authorization)?;
+        serde_json::to_value(&consumed)
+            .map_err(|error| format!("failed to serialize approve result: {error}"))
+    }
+
     /// Cancel an Ask request by stable `request_id` with a compare-and-swap `expected_version`.
     pub fn cancel_ask(
         &self,

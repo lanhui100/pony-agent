@@ -391,6 +391,75 @@ impl McpTransport for FakeMcpTransport {
     }
 }
 
+/// Standard I/O Process-based MCP Transport
+pub struct StdioMcpTransport {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+}
+
+impl StdioMcpTransport {
+    pub fn new(command: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            command: command.into(),
+            args,
+            env: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl McpTransport for StdioMcpTransport {
+    fn execute(&self, request: &McpTransportRequest) -> Result<McpTransportResponse, String> {
+        use std::process::{Command, Stdio};
+        use std::io::{BufRead, BufReader, Write};
+
+        let mut child = Command::new(&self.command)
+            .args(&self.args)
+            .envs(&self.env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn MCP process `{}`: {e}", self.command))?;
+
+        let mut stdin = child.stdin.take().ok_or("Failed to open child stdin")?;
+        let stdout = child.stdout.take().ok_or("Failed to open child stdout")?;
+
+        let rpc_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": operation_key(&request.operation),
+            "params": {
+                "source_id": request.source_id,
+                "arguments": request.arguments
+            }
+        });
+
+        let mut payload = serde_json::to_string(&rpc_req).map_err(|e| e.to_string())?;
+        payload.push('\n');
+
+        stdin.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
+        drop(stdin);
+
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+
+        let rpc_res: Value = serde_json::from_str(&line)
+            .map_err(|e| format!("Invalid JSON-RPC response `{line}`: {e}"))?;
+
+        if let Some(err) = rpc_res.get("error") {
+            return Err(format!("MCP error: {err}"));
+        }
+
+        let result = rpc_res.get("result").cloned().unwrap_or(Value::Null);
+        Ok(McpTransportResponse {
+            content: result,
+            truncated: false,
+        })
+    }
+}
+
 fn operation_key(operation: &McpResourceOperation) -> &'static str {
     match operation {
         McpResourceOperation::ListResources => "list_resources",

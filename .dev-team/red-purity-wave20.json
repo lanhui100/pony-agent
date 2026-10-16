@@ -1,0 +1,10 @@
+{
+  "task_id": "task-15",
+  "status": "completed_red_phase_confirmed",
+  "artifacts": [
+    "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs"
+  ],
+  "evidence": [
+    "cargo test -p pony-agent-core --test tool_surface_wave20_contract -> 2 failed (subagent must not be exposed to models, create_goal canonical resolution is None)"
+  ]
+}
