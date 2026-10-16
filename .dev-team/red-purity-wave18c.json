@@ -1,0 +1,240 @@
+[
+  {
+    "schema_note": "wave-18c red-purity 报告。classification：valid_red（当前代码真实失败）/ green_baseline_guard（当前已满足的真断言护栏，非红相）/ test_defect（既有测试缺陷）。所有条目含真实命令与原生失败原语；64-hex 一律运行时构造，报告内不出现完整字面量。",
+    "wave": "wave-18c",
+    "task_id": "task-8",
+    "contract_baseline": ".dev-team/contract-matrix-wave18.md revision wave18-r4（§4.2 C4-R1′/R2′/R3′/R4 + §4.3 + §4.6 + §4.7 G1–G16 + §4.8 FP1–FP14 + §9.2 R7 三条判据）+ .dev-team/wave18c-adjudication.md（6/6 findings：FIX 5 + CLOSED 1）",
+    "authoritative_evidence_sources": [
+      ".dev-team/review-wave18b-scanner.json（finding#1 新误报回归 / #2 值锚定 / #3 残余二次方 / #4 CRED_WORD_RE 缺口）",
+      ".dev-team/review-wave18b-contract.json（finding#1 R6 口径 / #2 看板第二次假断言）"
+    ],
+    "name": "wave18c-baseline-meta",
+    "layer": "L2-AT",
+    "raise_point": "HARNESS",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": false,
+    "evidence": "r4 已落盘（matrix revision wave18-r4 + wave18c-adjudication.md 存在）。本波按 task-8 描述 + r4 冻结面执行，口径无冲突（唯一冲突项为既有 G6 计数，已由 Lead 裁定 A 解决，见下方登记）。"
+  },
+
+  {
+    "name": "R1′/§4.8 必须 0 命中：新误报回归面 FP1–FP6（摘要收据 + 同行凭证语义词）",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "npx vitest run tests/check-secrets.spec.ts => FAIL; AssertionError: expected [ …(8) ] to deeply equal []（9 条形态中 8 条被误报：FP1 rotate-secret.sh / FP2 secrets.json+sha256 / FP3 密钥指纹(secret fingerprint) / FP4 credential-store.json / FP5 reset-password.sh / FP6 反引号摘要+SECRET_RULES 说明 / 同族 token-rotation.md 之外 2 条）。FP7–FP14（既有良性形态与长度窗口）当前已 0 命中，见下条护栏。"
+  },
+  {
+    "name": "R1′/§4.8 必须 0 命中：既有良性形态与长度窗口回归 FP7–FP14（不得回退）",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok（checksum / sha256sum 输出 / 纯哈希单元格 / 反引号摘要 / git SHA-40 / git SHA-7 / 63 位 / 65 位 全部 0 命中）。作用：与 FP1–FP6 共同构成 r4 §4.8 的零误报验收面，防止 R1′ 修复过度。"
+  },
+  {
+    "name": "R1′ 位置敏感判据：语义词在 hex 之前必须命中，在 hex 之后（收据文件名）必须 0 命中",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "AssertionError: 输入 <64hex>  secret.txt 必须 0 命中: expected 1 to be +0（同一语义词 secret，仅位置不同；`secret = \"<64hex>\"` 侧已通过意图断言：命中条数 1 且 masked === maskedOf(LOW)）"
+  },
+  {
+    "name": "R1′ 必须 ≥1 命中（防过度纠正）：凭证语义词位于 hex 之前的各类形态",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok（client_token= / JSON client_token / | PONYSENTRY_CLIENT_TOKEN | / api_key: / secret = 五态全部命中且经 expectCaughtSecret 校验 masked 与规则名）。"
+  },
+
+  {
+    "name": "G1–G5 必须命中（R1′，含意图断言）",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok。**意图断言已补**（Lead 要求 3）：每条均经 expectCaughtSecret(hits, [LOW], …) 校验 ① 命中条数 ② 命中的 hex 掩码 === maskedOf(LOW)（抓到的是行内那个 hex，不是别的 token）③ 命中规则名含 64-hex。"
+  },
+  {
+    "name": "G6 意图断言：<64hex>  PONYSENTRY_CLIENT_TOKEN=<64hex> 中被捕获的必须是第二个（具名 token）",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "AssertionError: expected [ …(2) ] to deeply equal [ Array(1) ]（当前 r3 整行守卫下 H1 与 H2 双双被判违规 = 2 条；r4 R1′ 位置敏感后应仅捕获 H2）。断言内容：count ≥1 + hits.map(masked) === [maskedOf(ALT)] + hits 中不得出现 maskedOf(LOW)。**计数口径已按 Lead 裁定 A 由 `=== 2` 对齐 r4 §4.7 原文「≥1」**，同时按裁定要求加强为「抓到的是 H2 而非 H1」的意图断言（非放宽）。"
+  },
+  {
+    "name": "G7–G12 必须命中（R4 空格/连字符/驼峰/裸 token，含意图断言）",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "AssertionError: 输入 | client token | <64hex> | 命中的 hex 取值不符合预期（期望 1 条）: expected [] to deeply equal [ Array(1) ]（4 条空格/裸 token 形态 0 命中）。ClientToken / client-token 两态当前已命中（r3 即满足，不得回退）。意图断言：expectCaughtSecret(hits, [LOW], …) 校验 masked 与规则名。"
+  },
+  {
+    "name": "G13/G14 必须恰好 1 命中：同一 hex 重复出现时仅「非槽位」那一个被捕获",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "AssertionError: <64hex>  <64hex>: expected +0 to be 1（r3 值锚定 ⇒ 0 命中）。**count-only 披露**：同值重复时 check-secrets 返回的违规对象只含 masked（前4+星号+后4），两个同值出现位置的 masked 完全相同，公开 API 无法做位置归属 ⇒ 本条只能断言条数。但 `=== 1` 已排除 0（值锚定全豁免）与 2（槽位亦被判违规），位置归属由 G15/G16 的 masked 断言独立证明。"
+  },
+  {
+    "name": "G15/G16 意图断言：异值重复时被捕获的必须是第二个（非槽位）hex",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok（r3 下异值即为 1 命中，属不得回退项）。经 expectCaughtSecret(hits, [ALT], …) 断言 masked === maskedOf(ALT) ⇒ 证明豁免按**位置**（前缀槽/单元格槽）而非按值生效。"
+  },
+  {
+    "name": "R2′ 反向：单 hex 的合法摘要槽仍必须 0 命中（防过度纠正）",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok（<64hex>  path/to/file.txt 与 | <64hex> | 均 0 命中）。"
+  },
+  {
+    "name": "R4 反向：无凭证语义词的表格单元格仍必须 0 命中",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok（| commit sha | / | digest | / | checksum | / | file | 四态 0 命中）。"
+  },
+
+  {
+    "name": "R3′ 性能：单行 5MB（77000×64hex 互不相同）必须 ≤2000ms 且命中数正确",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "AssertionError: expected 30068.509989000002 to be less than or equal to 2000（hits=76999 正确；输入 5,004,999 B）。独立探针复现 31.7s。"
+  },
+  {
+    "name": "R3′ 性能：单行 10MB（154000×64hex 互不相同）必须 ≤5000ms 且命中数正确",
+    "file": "tests/check-secrets.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "AssertionError: expected 159920.84846200002 to be less than or equal to 5000（hits=153999 正确；输入 10,009,999 B）。"
+  },
+
+  {
+    "name": "R7-2 排他性分句必须为真：全部真实命中都必须被该行的命中范围声明所解释",
+    "file": "tests/dashboard-claims-consistency.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": "npx vitest run tests/dashboard-claims-consistency.spec.ts => FAIL; AssertionError: expected [ …(13) ] to deeply equal []（`git grep -n MAX_SUBAGENT_DEPTH` 实测 13 命中；断言行只声明「仅见于任务卡 :26」，未声明 `.dev-team/` 审查档案与自命中两类，故 12 处未被解释）。判据按 r4 §9.2 R7「集合一致性而非固定数字」实现：命中数是时变量（评审路 8 → r4 时点 10 → 本次 13）。"
+  },
+  {
+    "name": "R7-1 代码域分句必须为真（r4 §9.2 判据 ①）",
+    "file": "tests/dashboard-claims-consistency.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok：断言行含 `--include=*.rs` 且 `git grep -n MAX_SUBAGENT_DEPTH -- '*.rs' '*.ts'` 实测 0 命中（EXIT=1）。"
+  },
+  {
+    "name": "R7-3 防回退：行内每一处「零命中」声明都必须带代码域限定",
+    "file": "tests/dashboard-claims-consistency.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok。作用：防止退回 r3 的「全仓 grep 零命中」原始假断言。"
+  },
+  {
+    "name": "R7-4 排除 `.dev-team/` 后命中恰好 2 处（r4 §9.2 判据 ②）",
+    "file": "tests/dashboard-claims-consistency.spec.ts",
+    "layer": "L2-AT",
+    "raise_point": "SUT",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": true,
+    "evidence": "同次运行 ... ok：非 `.dev-team/` 命中恰为 2 处 = 断言行自身 + `management/task-system/03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26`。作用：把 r4 判据 ② 机械化为集合口径断言（不依赖固定总数）。"
+  },
+
+  {
+    "name": "C4-R1′/R2′/R3′/R4 变异敏感收据（隔离副本 /tmp/w18c-tree，主工作区零改动）",
+    "layer": "L2-AT",
+    "raise_point": "HARNESS",
+    "classification": "valid_red",
+    "mutation_sensitive": true,
+    "evidence": {
+      "isolation": "git archive HEAD → /tmp/w18c-tree + overlay 当前工作树 tests/check-secrets.spec.ts；控制组为 **r4 §4.2/§4.3/§4.6/§7.3 逐字实现**（由 /tmp/w18c-r4-build.mjs 从现行 scripts/check-secrets.mjs 精确变换生成，仅落在 /tmp）。主工作区 scripts/check-secrets.mjs 的 git hash-object 与 HEAD 均为 9804018de36133bc58bfe42bbf622318a22c4e85（零留痕）。",
+      "control_r4_verbatim": {
+        "cmd": "cd /tmp/w18c-tree && npx vitest run tests/check-secrets.spec.ts",
+        "exit": 0,
+        "result": "Tests 45 passed (45)（34 条既有 + 11 条 wave-18c 全绿）",
+        "meaning": "r4 冻结实现可同时满足全部 45 条断言（含 G6 意图断言、FP1–FP14、G7–G16、5MB/10MB 性能判据）⇒ 红相由实现缺陷因果导致，非断言恒假；同时构成 task-9 的实施可行性证明。"
+      },
+      "mutation_1_r1p": {
+        "mutation": "R1′ 退回 r3 整行守卫：`facts.credIdx < matchIndex && !(facts.benignIdx < matchIndex)` → `facts.credIdx < Infinity`",
+        "cmd": "cd /tmp/w18c-tree && npx vitest run tests/check-secrets.spec.ts -t \"R1′\"",
+        "exit": 1,
+        "result": "Tests 2 failed | 9 passed（红：FP1–FP6 面、位置敏感判据）"
+      },
+      "mutation_2_r2p": {
+        "mutation": "R2′ 取消位置锚定：`matchIndex === facts.prefixSlot` → `facts.prefixSlot >= 0`（cellSlot 同理）",
+        "cmd": "cd /tmp/w18c-tree && npx vitest run tests/check-secrets.spec.ts -t \"R2′\"",
+        "exit": 1,
+        "result": "Tests 4 failed | 7 passed（红：R2′ 恰好 1 命中、R2′ 异值意图断言；另 R3′ 5MB/10MB 因命中数=0 同时变红——交叉印证命中数断言非空洞）"
+      },
+      "mutation_3_r3p": {
+        "mutation": "精确复现 r3 残余二次方：facts 仍按行记忆化，但每个 match 重做 `context.split(\"\\n\").pop()`",
+        "cmd": "cd /tmp/w18c-tree && npx vitest run tests/check-secrets.spec.ts -t \"单行 5MB\"",
+        "exit": 1,
+        "result": "Tests 1 failed | 44 skipped；AssertionError: expected 30501.323986 to be less than or equal to 2000"
+      },
+      "mutation_4_r4": {
+        "mutation": "CRED_WORD_RE 退回 r3 备选（保留 /i 以隔离扩面维度）：去掉空格/驼峰/裸 token 形态",
+        "cmd": "cd /tmp/w18c-tree && npx vitest run tests/check-secrets.spec.ts -t \"空格分隔或裸 token\"",
+        "exit": 1,
+        "result": "Tests 1 failed | 44 skipped（红：R4 必须 ≥1 命中）"
+      },
+      "logs": [
+        "/tmp/w18c-r4-ctrl.log",
+        "/tmp/w18c-mut-r1p.log",
+        "/tmp/w18c-mut-r2p.log",
+        "/tmp/w18c-mut-r3p.log",
+        "/tmp/w18c-mut-r4.log"
+      ]
+    }
+  },
+
+  {
+    "name": "登记：既有 G6 计数与 r4 R1′ 的冲突及 Lead 裁定 A 的落实",
+    "layer": "L2-T",
+    "raise_point": "HARNESS",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": false,
+    "evidence": "物理收据（r4 逐字实现全量探针 /tmp/w18c-r4-probe.mjs）：G6 在 r4 下 hits=1，而 wave-18b 的 `toBe(2)` 期望 2 ⇒ 不可兼容。r4 §4.7 原文对 G1–G6 的要求均为「≥1 命中」，`=== 2` 系 wave-18b 自行加严。Lead 裁定 **A**：计数对齐 `toBeGreaterThanOrEqual(1)`，并**加强**为「被捕获的必须是 H2（具名 token）、H1 不得被捕获」的意图断言。已落实；未采用 (B)（改回整行守卫会重新引入 FP1/FP4/FP5 误报族）。"
+  },
+  {
+    "name": "登记：count-only 断言披露（Lead 要求 3 的复核结果）",
+    "layer": "L2-AT",
+    "raise_point": "HARNESS",
+    "classification": "green_baseline_guard",
+    "mutation_sensitive": false,
+    "evidence": "G1–G12、G15/G16、R1′、R2′ 反向、R4 均已补意图断言（masked === maskedOf(期望值) + 规则名含 64-hex）。**唯一 count-only 条目：G13/G14**（同值重复 `<H>  <H>` / `| <H> | <H> |`）——原因：check-secrets 返回的违规对象仅含 `masked`（前4+星号+后4），两处同值出现的 masked 完全相同，公开 API 无法做位置归属；该条以 `=== 1` 排除 0/2 两种错误，位置归属由 G15/G16（异值 + masked 断言）独立证明。其余用例无空洞风险。"
+  }
+]

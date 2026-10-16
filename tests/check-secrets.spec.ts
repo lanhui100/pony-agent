@@ -10,6 +10,39 @@ import {
   runChecks
 } from "../scripts/check-secrets.mjs";
 
+/** 与 `check-secrets.mjs` 的 masked 生成规则一致：前 4 位 + 星号 + 后 4 位。 */
+function maskedOfSecretValue(value: string): string {
+  return value.substring(0, 4) + "*".repeat(value.length - 8) + value.substring(value.length - 4);
+}
+
+/** 失败信息中不出现完整 64-hex 字面量（避免证据二次泄漏）。 */
+function redactHexes(content: string, hexes: string[]): string {
+  return hexes.reduce((acc, hex) => acc.replaceAll(hex, "<64hex>"), content);
+}
+
+/**
+ * **意图断言**（防"只数条数、不验目标"的空洞断言）：不仅要求命中条数，
+ * 还逐条校验命中的**是哪一个 hex**（掩码）与**哪一条规则**。
+ * `expectedValues` 按命中顺序给出预期被捕获的 hex 取值；`contextLabel` 必须已脱敏。
+ */
+function expectCaughtSecret(
+  hits: Array<{ rule: string; masked: string }>,
+  expectedValues: string[],
+  contextLabel: string
+): void {
+  const wanted = expectedValues.map(maskedOfSecretValue);
+  expect(
+    hits.map((hit) => hit.masked),
+    `输入 ${contextLabel} 命中的 hex 取值不符合预期（期望 ${wanted.length} 条）`
+  ).toEqual(wanted);
+  expect(
+    hits.every((hit) => hit.rule.toLowerCase().includes("64-hex")),
+    `输入 ${contextLabel} 的命中必须来自 64-hex 规则，实际：${hits
+      .map((hit) => hit.rule)
+      .join(" | ")}`
+  ).toBe(true);
+}
+
 describe("check-secrets gate verification", () => {
   describe("Blocked Filenames", () => {
     it("should block sensitive files like .env and private keys", () => {
@@ -234,38 +267,60 @@ MIIEowIBAAKCAQEA0Y1+xyz...
     // ---- §4.7 G1–G6：必须命中（r2 实现下全部 0 命中） ----
 
     it("G1 必须命中：| PONYSENTRY_CLIENT_TOKEN | <64hex> |（R1 守卫豁免 3）", () => {
-      expect(scanTextContent(`| PONYSENTRY_CLIENT_TOKEN | ${LOW} |`).length).toBe(1);
+      const content = `| PONYSENTRY_CLIENT_TOKEN | ${LOW} |`;
+      const hits = scanTextContent(content);
+      expect(hits.length).toBe(1);
+      expectCaughtSecret(hits, [LOW], redactHexes(content, [LOW, ALT]));
     });
 
     it("G2 必须命中：| client_token | <64hex> |（R1）", () => {
-      expect(scanTextContent(`| client_token | ${LOW} |`).length).toBe(1);
+      const content = `| client_token | ${LOW} |`;
+      const hits = scanTextContent(content);
+      expect(hits.length).toBe(1);
+      expectCaughtSecret(hits, [LOW], redactHexes(content, [LOW, ALT]));
     });
 
     it("G3 必须命中：{\"client_token\":\"<64hex>\",\"integrity\":\"sha512-x\"}（R1 守卫豁免 1）", () => {
-      expect(
-        scanTextContent(`{"client_token":"${LOW}","integrity":"sha512-x"}`).length
-      ).toBe(1);
+      const content = `{"client_token":"${LOW}","integrity":"sha512-x"}`;
+      const hits = scanTextContent(content);
+      expect(hits.length).toBe(1);
+      expectCaughtSecret(hits, [LOW], redactHexes(content, [LOW, ALT]));
     });
 
     it("G4 必须命中：{\"client_token\":\"<64hex>\",\"checksum\":\"abc\"}（R1）", () => {
-      expect(scanTextContent(`{"client_token":"${LOW}","checksum":"abc"}`).length).toBe(1);
+      const content = `{"client_token":"${LOW}","checksum":"abc"}`;
+      const hits = scanTextContent(content);
+      expect(hits.length).toBe(1);
+      expectCaughtSecret(hits, [LOW], redactHexes(content, [LOW, ALT]));
     });
 
     it("G5 必须命中：client_token=<64hex> // hash（R1）", () => {
-      expect(scanTextContent(`client_token=${LOW} // hash`).length).toBe(1);
+      const content = `client_token=${LOW} // hash`;
+      const hits = scanTextContent(content);
+      expect(hits.length).toBe(1);
+      expectCaughtSecret(hits, [LOW], redactHexes(content, [LOW, ALT]));
     });
 
-    it("G6 必须命中：<64hex>  PONYSENTRY_CLIENT_TOKEN=<64hex>（R1 + R2：第二个 hex 不得被吞）", () => {
-      // R2 位置锚定：豁免 2（sha256sum 前缀）只能豁免该行首个 hex；
-      // 且 R1 规定同行出现凭证语义词时全部豁免失效 => 一行两个 hex 必须两条都命中。
-      expect(scanTextContent(`${LOW}  PONYSENTRY_CLIENT_TOKEN=${ALT}`).length).toBe(2);
+    it("G6 意图断言：<64hex>  PONYSENTRY_CLIENT_TOKEN=<64hex> 中被捕获的必须是第二个（具名 token）", () => {
+      const content = `${LOW}  PONYSENTRY_CLIENT_TOKEN=${ALT}`;
+      const hits = scanTextContent(content);
+      // 计数口径：r3/r4 契约 §4.7 原文均为「≥1 命中」。
+      // （wave-18b 曾自行加严为 `=== 2`；r4 R1′ 改位置敏感守卫后该行仅第二个 hex 判违规，
+      //  Lead 裁定 A：计数对齐契约原文，改为 ≥1，并补下方「抓到哪一个」的意图断言。）
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      // 意图断言：H1 落在 sha256sum 前缀槽被合法豁免；被捕获的必须是 H2（具名 token），H1 不得被捕获
+      expect(hits.map((hit) => hit.masked)).toEqual([maskedOfSecretValue(ALT)]);
+      expect(hits.some((hit) => hit.masked === maskedOfSecretValue(LOW))).toBe(false);
     });
 
     it("R2 必须命中：无凭证语义词时，一行内第二个 hex 不得继承豁免（sha256sum 前缀 / Markdown 单元格）", () => {
       // §4.3 R2：豁免 2/3 位置锚定，只豁免该位置的那个 hex；一行内其他位置的 64-hex 不继承豁免。
       // 本用例刻意不含任何凭证语义词，以**隔离 R2**（G6 在 R1 生效后由 R1 主导，无法单独证伪 R2）。
-      expect(scanTextContent(`${LOW}  crates/foo.rs ${ALT}`).length).toBe(1);
-      expect(scanTextContent(`| ${LOW} | ${ALT} |`).length).toBe(1);
+      // 意图断言：被捕获的必须是第二个（非槽位）hex。
+      const sumPrefix = `${LOW}  crates/foo.rs ${ALT}`;
+      const cell = `| ${LOW} | ${ALT} |`;
+      expectCaughtSecret(scanTextContent(sumPrefix), [ALT], redactHexes(sumPrefix, [LOW, ALT]));
+      expectCaughtSecret(scanTextContent(cell), [ALT], redactHexes(cell, [LOW, ALT]));
     });
 
     // ---- 反向：无凭证语义词的纯摘要上下文必须仍 0 命中（零误报不得回退） ----
@@ -368,5 +423,185 @@ MIIEowIBAAKCAQEA0Y1+xyz...
       expect(hits.length).toBe(15000);
       expect(elapsed).toBeLessThan(3000);
     }, 300_000);
+  });
+
+  // ---------------------------------------------------------------------------
+  // wave-18c C4-R1′ / R2′ / R3′ / R4（r4 修订的红相扩展）
+  // 权威证据源：
+  //   .dev-team/review-wave18b-scanner.json finding#1（NEW-FP 回归）
+  //   finding#2（R2 实现为「值锚定」而非「位置锚定」）
+  //   finding#3（NEW-HIGH-DoS 残余二次方）
+  //   finding#4（CRED_WORD_RE 空格分隔语义词缺口）
+  // 红相基线（当前 r3 实现）：
+  //   R1′ 语义词在 hex **之后**（sha256sum 收据的路径/文件名）时被误判违规；
+  //   R2′ `f.prefixHex === m` / `f.cellHex === m` 按**值**豁免，同值第二个 hex 被吞；
+  //   R3′ `context.split("\n").pop()` 每 match 执行一次 ⇒ O(matches × 行长)；
+  //   R4  `client token` / `access token` / `api key` / 裸 `token` 不在 CRED_WORD_RE 内。
+  // ---------------------------------------------------------------------------
+  describe("wave-18c C4-R1′/R2′/R3′/R4", () => {
+    const hex64 = (seed: string): string => seed.repeat(4); // 16 * 4 = 64
+    const LOW = hex64("0123456789abcdef");
+    const ALT = hex64("fedcba9876543210");
+
+    /** 生成互不相同的 64-hex（避免「值锚定」把同值全部豁免而掩盖命中数判别力）。 */
+    function distinctHex64(index: number): string {
+      return index.toString(16).padStart(8, "0").repeat(8);
+    }
+
+    /** 失败信息中不出现完整 64-hex 字面量（避免证据二次泄漏）。 */
+    function mask(content: string): string {
+      return redactHexes(content, [LOW, ALT]);
+    }
+
+    // ---- C4-R1′ 新误报回归（r4 §4.8 FP1–FP6，必须 0 命中；r3 实测全部 = 1） ----
+
+    it("R1′/§4.8 必须 0 命中：新误报回归面 FP1–FP6（摘要收据 + 同行凭证语义词）", () => {
+      const BACKTICK = String.fromCharCode(96);
+      const cases: Array<[string, string]> = [
+        ["FP1 sha256sum 收据，文件名含 secret", `${LOW}  scripts/rotate-secret.sh`],
+        ["FP2 JSON 收据，字段名/文件名含 secret", `{"file":"secrets.json","sha256":"${LOW}"}`],
+        ["FP3 说明文字含 secret", `- 密钥指纹(secret fingerprint): ${LOW}`],
+        ["FP4 收据路径含 credential", `${LOW}  config/credential-store.json`],
+        ["FP5 收据路径含 password", `${LOW}  scripts/reset-password.sh`],
+        ["FP6 反引号摘要 + 同行说明含 SECRET", `| ${BACKTICK}${LOW}${BACKTICK} | sha256 of SECRET_RULES sample |`],
+        ["同族边界：token-rotation.md", `${LOW}  docs/token-rotation.md`],
+        ["同族边界：credential-store.ts", `${LOW}  src/credential-store.ts`],
+        ["同族边界：a/b/secret.key", `${LOW}  a/b/secret.key`],
+      ];
+      const offenders = cases
+        .filter(([, content]) => scanTextContent(content, "").length !== 0)
+        .map(([label, content]) => `${label} :: ${mask(content)}`);
+      expect(offenders).toEqual([]);
+    });
+
+    it("R1′/§4.8 必须 0 命中：既有良性形态与长度窗口回归 FP7–FP14（不得回退）", () => {
+      const BACKTICK = String.fromCharCode(96);
+      const cases: Array<[string, string]> = [
+        ["FP7 checksum 上下文", `checksum = "${LOW}"`],
+        ["FP8 sha256sum 输出（无凭证词路径）", `${LOW}  /tmp/pony-run-e2e/shot-30s.png`],
+        ["FP9 纯哈希单元格", `| ${LOW} |`],
+        ["FP10 反引号摘要", `- 修订后 sha256：${BACKTICK}${LOW}${BACKTICK}`],
+        ["FP11 git SHA-40", `commit ${"a".repeat(40)} fix`],
+        ["FP12 git SHA-7", "commit 17dca7c fix"],
+        ["FP13 63 位 hex", `x=${"a".repeat(63)}`],
+        ["FP14 65 位 hex", `x=${"a".repeat(64)}a`],
+      ];
+      const offenders = cases
+        .filter(([, content]) => scanTextContent(content, "").length !== 0)
+        .map(([label, content]) => `${label} :: ${mask(content)}`);
+      expect(offenders).toEqual([]);
+    });
+
+    it("R1′ 位置敏感判据：语义词在 hex 之前必须命中，在 hex 之后（收据文件名）必须 0 命中", () => {
+      // 同一语义词 `secret`，仅位置不同 ⇒ 判定必须相反
+      const before = `secret = "${LOW}"`;
+      const after = `${LOW}  secret.txt`;
+      expectCaughtSecret(scanTextContent(before, ""), [LOW], mask(before));
+      expect(scanTextContent(after, "").length, `输入 ${mask(after)} 必须 0 命中`).toBe(0);
+    });
+
+    it("R1′ 必须 ≥1 命中（防过度纠正）：凭证语义词位于 hex 之前的各类形态", () => {
+      const cases = [
+        `client_token=${LOW}`,
+        `{"client_token":"${LOW}"}`,
+        `| PONYSENTRY_CLIENT_TOKEN | ${LOW} |`,
+        `api_key: ${LOW}`,
+        `secret = "${LOW}"`,
+      ];
+      for (const content of cases) {
+        // 意图断言：命中的必须是行内那个 hex，且来自 64-hex 规则
+        expectCaughtSecret(scanTextContent(content, ""), [LOW], mask(content));
+      }
+    });
+
+    // ---- C4-R2′ 位置锚定（豁免 2/3 只豁免「该位置」的那个 hex） ----
+
+    it("R2′ 必须恰好 1 命中：同一 hex 重复出现时，仅「非槽位」那一个被捕获（第二个不得继承豁免）", () => {
+      // 同值重复 ⇒ 掩码无法区分位置；但「恰好 1 条」已排除 0（值锚定全豁免）与 2（槽位也被判违规），
+      // 位置归属由下方异值用例（G15/G16 形态）的掩码断言证明。
+      const sameSumPrefix = `${LOW}  ${LOW}`;
+      const sameCell = `| ${LOW} | ${LOW} |`;
+      expect(scanTextContent(sameSumPrefix, "").length, mask(sameSumPrefix)).toBe(1);
+      expect(scanTextContent(sameCell, "").length, mask(sameCell)).toBe(1);
+    });
+
+    it("R2′ 意图断言：异值重复时，被捕获的必须是第二个（非槽位）hex —— 证明按位置而非按值锚定", () => {
+      const sumPrefix = `${LOW}  ${ALT}`;
+      const cell = `| ${LOW} | ${ALT} |`;
+      expectCaughtSecret(scanTextContent(sumPrefix, ""), [ALT], mask(sumPrefix));
+      expectCaughtSecret(scanTextContent(cell, ""), [ALT], mask(cell));
+    });
+
+    it("R2′ 反向：单 hex 的合法摘要槽仍必须 0 命中（防过度纠正）", () => {
+      expect(scanTextContent(`${LOW}  path/to/file.txt`, "").length).toBe(0);
+      expect(scanTextContent(`| ${LOW} |`, "").length).toBe(0);
+    });
+
+    // ---- C4-R4 残余漏报（空格分隔 / 裸 token 语义词） ----
+
+    it("R4 必须 ≥1 命中：空格分隔或裸 token 的凭证标签单元格", () => {
+      const cases = [
+        `| client token | ${LOW} |`,
+        `| access token | ${LOW} |`,
+        `| api key | ${LOW} |`,
+        `| token | ${LOW} |`,
+      ];
+      for (const content of cases) {
+        // 意图断言：命中必须落在行内那个 hex 上
+        expectCaughtSecret(scanTextContent(content, ""), [LOW], mask(content));
+      }
+    });
+
+    it("R4 反向：无凭证语义词的表格单元格仍必须 0 命中（防过度纠正 / 零误报不回退）", () => {
+      const cases = [
+        `| commit sha | ${LOW} |`,
+        `| digest | ${LOW} |`,
+        `| checksum | ${LOW} |`,
+        `| file | ${LOW} |`,
+      ];
+      const offenders = cases
+        .filter((content) => scanTextContent(content, "").length !== 0)
+        .map(mask);
+      expect(offenders).toEqual([]);
+    });
+
+    // ---- C4-R3′ 性能硬约束（消除残余二次方） ----
+
+    it("R3′ 性能：单行 5MB（77000×64hex 互不相同）必须 ≤2000ms 且命中数正确", () => {
+      const count = 77000;
+      const parts = new Array<string>(count);
+      for (let index = 0; index < count; index += 1) {
+        parts[index] = distinctHex64(index);
+      }
+      const singleLine = parts.join(" ");
+      // 5,004,999 B ≈ 5MB；纯 ASCII ⇒ length === 字节数
+      expect(singleLine.length).toBeGreaterThanOrEqual(5_000_000);
+
+      const started = performance.now();
+      const violations = scanTextContent(singleLine, "");
+      const elapsed = performance.now() - started;
+
+      // 首个 hex 位于 sha256sum 前缀槽（合法豁免），其余 count-1 条必须全部命中
+      expect(violations.length).toBe(count - 1);
+      expect(elapsed).toBeLessThanOrEqual(2000);
+    }, 300_000);
+
+    it("R3′ 性能：单行 10MB（154000×64hex 互不相同）必须 ≤5000ms 且命中数正确", () => {
+      const count = 154000;
+      const parts = new Array<string>(count);
+      for (let index = 0; index < count; index += 1) {
+        parts[index] = distinctHex64(index);
+      }
+      const singleLine = parts.join(" ");
+      // 10,009,999 B ≈ 10MB
+      expect(singleLine.length).toBeGreaterThanOrEqual(10_000_000);
+
+      const started = performance.now();
+      const violations = scanTextContent(singleLine, "");
+      const elapsed = performance.now() - started;
+
+      expect(violations.length).toBe(count - 1);
+      expect(elapsed).toBeLessThanOrEqual(5000);
+    }, 900_000);
   });
 });
