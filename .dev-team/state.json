@@ -231,8 +231,8 @@
       }
     },
     "14": {
-      "contract": ".dev-team/contracts/wave-11-status-flow.md §8",
-      "decision": "用户裁定 A：运行期间始终显示",
+      "contract": ".dev-team/contracts/wave-11-status-flow.md §8（可见性）+ §9（落位）",
+      "decision": "用户裁定：A 运行期间始终可见（含 streaming） + B 落位回到消息流最下方（反转 wave-11 钉在输入框上方）",
       "branches": {
         "status-always-visible": {
           "red_commit": null,
