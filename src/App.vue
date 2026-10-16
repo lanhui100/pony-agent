@@ -8,6 +8,7 @@ import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import WindowControls from "@/components/WindowControls.vue";
 import TelemetryPage from "@/components/telemetry/TelemetryPage.vue";
 import ConfigPage from "@/components/config/ConfigPage.vue";
+import AppStartupScreen from "@/components/AppStartupScreen.vue";
 import Tooltip from "@/components/ui/Tooltip.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
@@ -21,6 +22,8 @@ const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "pony-agent.ui.right-sidebar-open";
 const AUTO_CLOSE_RIGHT_SIDEBAR_WIDTH = 1000;
 const AUTO_COLLAPSE_LEFT_SIDEBAR_WIDTH = 820;
 const currentPage = ref<AppPage>("home");
+const isInitializing = ref(true);
+const startupStageText = ref("正在加载工作区与模型引擎...");
 // PA-096：配置页 tab 为会话内受控状态。两个一级键（模型配置/设置）本身是
 // 显式目的地，应用启动后总从 home 开始——持久化该值只会产生只写不读的死状态。
 const configTab = ref<ConfigTab>("general");
@@ -156,7 +159,9 @@ onMounted(async () => {
     // PA-099：更新角标水合（缓存恢复零网络；过期时后台补查不阻塞本链）。
     runStartupTask("updateCheck", () => updateStore.initialize())
   ]);
+  startupStageText.value = "正在恢复会话状态...";
   await runStartupTask("sessions", () => runtimeStore.initializeSessions());
+  isInitializing.value = false;
 });
 
 onBeforeUnmount(() => {
@@ -281,6 +286,12 @@ watch(rightSidebarPreferredOpen, (value) => {
           </Transition>
         </section>
       </section>
+
+      <!-- 启动全屏毛玻璃与初始化过渡屏 -->
+      <AppStartupScreen
+        :is-initializing="isInitializing"
+        :stage-text="startupStageText"
+      />
     </main>
   </TooltipProvider>
 </template>

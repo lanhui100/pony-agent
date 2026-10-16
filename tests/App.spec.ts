@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { defineComponent, h, nextTick } from "vue";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import App from "@/App.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
@@ -551,6 +551,13 @@ describe("App", () => {
 
       expect(leftSidebar.exists()).toBe(true);
       expect(rightSidebarShell.exists()).toBe(true);
+    });
+
+    it("renders and dismisses the app startup screen upon mounted initialization", async () => {
+      const wrapper = mountApp();
+      // 在挂载完成异步任务链执行完毕后，启动遮罩关闭
+      await flushPromises();
+      expect(wrapper.find('[data-testid="app-startup-screen"]').exists()).toBe(false);
     });
   });
 });
