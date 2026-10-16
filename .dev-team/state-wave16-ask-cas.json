@@ -1,0 +1,50 @@
+{
+  "contract": ".dev-team/contracts/wave-16-ask-cas.md",
+  "standalone_ledger": ".dev-team/state-wave16-ask-cas.json",
+  "task_classification": "B-lite",
+  "grading_basis": "跨 Rust 控制平面列表契约 ↔ 前端 store/组件交互；单缺陷域，无线程/网络/安全面变更；机械分级依据：模块数>1、契约面变更（ask_list_pending 投影语义）",
+  "baseline_commit": "7e8bdb5",
+  "symptom": "用户在选择选项后点「回答/取消」出现「取消失败：control request 'control-0000000000' cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch」",
+  "root_cause": "GovernedDispatcher::pending_requests() 返回全部（含终态）控制请求；ask_control::filter_interaction_requests 仅按 kind 过滤、未按 state==Pending 过滤 → 已消费 Ask 被 ask_list_pending 重新列出，前端 2.5s 轮询使卡片以 version=2 复活；二次提交时 require_current_version 预检通过而 dispatcher CAS 以 state!=Pending 拒绝，落通用文案。次生同文案路径：TTL(60s) 过期但 state 仍 Pending（ask_expire 全仓无调用点）",
+  "branches": {
+    "core-list-pending-only": {
+      "owner": "executor-core",
+      "task": "task-2",
+      "write_scopes": [
+        "crates/pony-agent-core/src/agent/ask_control.rs"
+      ],
+      "red_commit": "RED_ANCHOR",
+      "green_commit": null,
+      "status": "pending"
+    },
+    "ui-expired-guard": {
+      "owner": "executor-ui",
+      "task": "task-3",
+      "write_scopes": [
+        "src/stores/ask.ts",
+        "src/components/AskPanel.vue"
+      ],
+      "red_commit": "RED_ANCHOR",
+      "green_commit": null,
+      "status": "pending"
+    }
+  },
+  "tasks": {
+    "task-1": "test(L2-T): 红相验收测试 C1-1~C1-6 / C2-1~C2-4 — completed",
+    "task-2": "executor-core: list_pending_asks 仅返回 Pending Interaction — pending",
+    "task-3": "executor-ui: 过期 ask 禁止提交 + 面板禁用 — pending",
+    "l2at": "L2-AT(subagent): ask_pending_adversarial.rs C4-1~C4-4 — 红相 4/4 FAILED(EXIT=101)"
+  },
+  "gates": {
+    "red_phase": {
+      "l2t_rust": "cargo test --test ask_pending_contract → EXIT=101, 0 passed / 6 failed",
+      "l2t_web": "npx vitest run tests/ask-pending-expiry.spec.ts tests/ask-panel-expired.spec.ts → EXIT=1, 4 failed / 4 passed",
+      "l2at_rust": "cargo test --test ask_pending_adversarial → EXIT=101, 0 passed / 4 failed",
+      "receipts": [
+        ".dev-team/wave16-red-receipts.md",
+        ".dev-team/wave16-red-receipts-l2at.md"
+      ]
+    }
+  },
+  "concurrency_note": "共享工作区存在并行 wave-15（token 指标）施工会话，本波次独立编号 wave-16，禁止 git add . / 全局提交；仅定向暂存本波次文件"
+}
