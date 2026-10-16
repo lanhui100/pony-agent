@@ -2903,13 +2903,25 @@
           "segment": "patch"
         }
       ]
+    },
+    {
+      "commit": "",
+      "timestamp": "2026-10-16T07:54:21.317Z",
+      "bumps": [
+        {
+          "from": "0.1.146",
+          "to": "0.1.147",
+          "component": "tauri",
+          "segment": "patch"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-10-15T23:17:56.540Z",
+  "lastBump": "2026-10-16T07:54:21.317Z",
   "tauri": {
     "major": 0,
     "minor": 1,
-    "patch": 146
+    "patch": 147
   },
   "core": {
     "patch": 121,
