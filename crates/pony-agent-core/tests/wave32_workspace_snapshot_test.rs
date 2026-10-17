@@ -8,12 +8,9 @@
 //!    时，能将工作区被修改的文件内容逐字节准确恢复至快照记录状态。
 //! 5. 对不存在快照或无效 node_id 的回滚请求，失败并返回结构化错误。
 
-use pony_agent_core::agent::session::{
-    HistoryCheckoutMode, HistoryNode, HistoryNodeKind, WorkspaceRef, WorkspaceRefKind,
-};
+use pony_agent_core::agent::session::WorkspaceRefKind;
 use pony_agent_core::agent::session::WorkspaceSnapshotManager;
 use std::fs;
-use std::path::PathBuf;
 
 #[test]
 fn test_workspace_snapshot_capture_and_rewind_roundtrip() {

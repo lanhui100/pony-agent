@@ -4,6 +4,9 @@ mod store;
 #[cfg(test)]
 mod tests;
 mod types;
+pub mod workspace_snapshot;
+
+pub use workspace_snapshot::WorkspaceSnapshotManager;
 
 pub use backend::{
     PersistCommand, PersistCommandOutcome, SeparateTraceTableMode, SessionBackend,

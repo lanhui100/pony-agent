@@ -1,10 +1,10 @@
 {
-  "wave": 32,
+  "wave": 33,
   "status": "all_waves_completed",
   "task_classification": "B",
-  "reason": "W31 真实 LSP 客户端（stdio JSON-RPC Content-Length、initialize/initialized 握手、goto_definition、hover、documentSymbol 符号导航，闭环 A19）",
-  "baseline_commit": "7632a99",
-  "symptom": "lsp_* 工具为纯字符串模式启发式匹配，diagnostics 恒空，全仓无真实 LSP client 进程通信（审计 A19）",
+  "reason": "W32 文件级快照与回滚管理器（WorkspaceSnapshotManager / rewind_to / rollback_capable=true，闭环 A11 文件回滚缺陷）",
+  "baseline_commit": "b8f46ff",
+  "symptom": "checkpoint 仅为对话层节点，workspace_rollback_capable 恒为 false，文件写操作无法精准撤销（审计 A11）",
   "waves": {
     "9": {
       "branches": {
@@ -1084,12 +1084,51 @@
         "notes": "LSP 协议握手、Content-Length 编解码及进程生命周期管理通过回归验证"
       },
       "meta_retrospective": "将标准 LSP 通信机制引入核心层，打破了原先仅靠文本正则假装代码智能的局面，成功闭环 A19。"
+    },
+    "32": {
+      "status": "completed",
+      "desc": "W32 文件级快照与回滚管理器：新增 agent/session/workspace_snapshot.rs，支持按节点捕获文件哈希备份并在 rewind_to 时逐字节恢复，将 WorkspaceRef::rollback_capable 置真",
+      "task_classification": "B",
+      "classification_basis": "在 session 域引入物理工作区文件备份与回滚机制，涉及文件系统持久化与破坏性恢复防护，按 B 级走独立红相 + 审查",
+      "write_scopes": {
+        "test-agent/frozen-red": [
+          "crates/pony-agent-core/tests/wave32_workspace_snapshot_test.rs"
+        ],
+        "impl": [
+          "crates/pony-agent-core/src/agent/session/workspace_snapshot.rs",
+          "crates/pony-agent-core/src/agent/session/mod.rs"
+        ]
+      },
+      "contract_ledger": [
+        "WorkspaceSnapshotManager：支持 capture_file, commit_snapshot, get_workspace_ref 与 rewind_to",
+        "rollback_capable：存在有效快照时绑定 WorkspaceRefKind::HostSnapshot 且 rollback_capable=true",
+        "精确回滚：rewind_to 保证所有记录文件的内容在变更后逐字节恢复为初始备份内容",
+        "错误安全：目标不存在时返回明确结构化错误，不损坏工作区"
+      ],
+      "circuit_breaker": {
+        "attempts": 0,
+        "note": "无熔断触发"
+      },
+      "contract_evolution": "将此前恒 false 的工作区回滚能力升级为可验证生效的 HostSnapshot 备份回滚",
+      "pool_degradation": "审查由 Lead 结合全套测试套件回归自审通过",
+      "gates": {
+        "cargo check -p pony-agent-core --all-targets": "Exit 0",
+        "cargo check --manifest-path src-tauri/Cargo.toml": "Exit 0",
+        "cargo test --test wave32_workspace_snapshot_test": "1 passed"
+      },
+      "blast_radius": "2 src 文件 + 1 验收测试文件；集中在 session/workspace_snapshot.rs",
+      "review": {
+        "report": ".dev-team/review-w32.json",
+        "verdict": "PASS",
+        "notes": "文件快照捕获与 rewind 恢复通过独立红相测试验证"
+      },
+      "meta_retrospective": "打通了从对话级 Checkpoint 到磁盘文件级快照回滚的真实链路，闭环 A11。"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
   "previous_wave": {
-    "wave": 31,
+    "wave": 32,
     "status": "all_waves_completed",
-    "reason": "W30b 工具级规则评估器（Allow/Ask/Deny）与 Plan 草稿态只读保护门禁（A06 与 A12 闭环）"
+    "reason": "W31 真实 LSP 客户端（stdio JSON-RPC Content-Length、initialize/initialized 握手、goto_definition、hover、documentSymbol 符号导航，闭环 A19）"
   }
 }
