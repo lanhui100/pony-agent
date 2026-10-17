@@ -14,6 +14,21 @@ pub enum TodoStatus {
 pub struct TodoItem {
     pub content: String,
     pub status: TodoStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+}
+
+impl TodoItem {
+    pub fn new(content: impl Into<String>, status: TodoStatus) -> Self {
+        Self {
+            content: content.into(),
+            status,
+            plan_id: None,
+            step_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -10,18 +10,9 @@ fn test_todo_write_and_list() {
     let write_args = TodoWriteArgs {
         session_id: Some(session.clone()),
         todos: vec![
-            TodoItem {
-                content: "Task 1".to_string(),
-                status: TodoStatus::Completed,
-            },
-            TodoItem {
-                content: "Task 2".to_string(),
-                status: TodoStatus::InProgress,
-            },
-            TodoItem {
-                content: "Task 3".to_string(),
-                status: TodoStatus::Pending,
-            },
+            TodoItem::new("Task 1", TodoStatus::Completed),
+            TodoItem::new("Task 2", TodoStatus::InProgress),
+            TodoItem::new("Task 3", TodoStatus::Pending),
         ],
     };
 
@@ -43,10 +34,7 @@ fn test_todo_write_and_list() {
 fn test_todo_empty_content_rejected() {
     let write_args = TodoWriteArgs {
         session_id: Some("test-session-2".to_string()),
-        todos: vec![TodoItem {
-            content: "   ".to_string(),
-            status: TodoStatus::Pending,
-        }],
+        todos: vec![TodoItem::new("   ", TodoStatus::Pending)],
     };
     assert!(todo_write(write_args).is_err(), "Empty todo content must fail");
 }

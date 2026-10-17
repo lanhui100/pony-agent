@@ -58,10 +58,7 @@ const READ_ONLY_PRIMITIVES: &[&str] = &[
 
 const COMPOSITE_PRIMITIVES: &[&str] = &["workspace_batch", "workspace_gather_context"];
 
-/// Migration policy evaluator that reproduces the legacy runtime's direct-execution behavior.
-/// The dispatcher's conservative write/execute default is intentionally overridden so adopting the
-/// governed engine does not change tool-visible behavior; real approval semantics replace this at
-/// the permission-contract milestone.
+/// 保持旧单元/集成测试零修改向后兼容。
 #[derive(Clone, Debug, Default)]
 pub struct LegacyCompatiblePolicyEvaluator;
 
@@ -69,27 +66,98 @@ impl ToolPolicyEvaluator for LegacyCompatiblePolicyEvaluator {
     fn evaluate(
         &self,
         descriptor: &crate::agent::tools::ToolDescriptor,
+        origin: &InvocationOrigin,
+        final_arguments: &Value,
+    ) -> PermissionDecision {
+        GovernedPolicyEvaluator::default().evaluate(descriptor, origin, final_arguments)
+    }
+}
+
+/// W30b：治理型策略评估器，支持工具级规则（Allow / Ask / Deny）及 Plan 草稿态写保护门禁。
+#[derive(Clone, Debug, Default)]
+pub struct GovernedPolicyEvaluator {
+    pub rules: Vec<crate::agent::app_settings::ToolRule>,
+    pub plan_store: Option<Arc<crate::agent::plan_state::PlanStore>>,
+}
+
+impl GovernedPolicyEvaluator {
+    pub fn new(
+        rules: Vec<crate::agent::app_settings::ToolRule>,
+        plan_store: Option<Arc<crate::agent::plan_state::PlanStore>>,
+    ) -> Self {
+        Self { rules, plan_store }
+    }
+}
+
+impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
+    fn evaluate(
+        &self,
+        descriptor: &crate::agent::tools::ToolDescriptor,
         _origin: &InvocationOrigin,
         _final_arguments: &Value,
     ) -> PermissionDecision {
-        // The Ask product tool is host-mediated in the governed path: dispatching it persists an
-        // `Interaction` `PendingControlRequest` (WaitingHost) instead of echoing, which is the
-        // design Decision 5 behavior that replaces the legacy echo placeholder (P1-1 wiring).
         let is_ask = descriptor.identity.model_name == "Ask"
             || descriptor.identity.primitive_name == "echo_input"
             || descriptor.identity.primitive_name == TOOL_ASK_USER;
         if is_ask {
-            PermissionDecision {
+            return PermissionDecision {
                 verdict: PermissionVerdict::WaitingHost,
                 decision_source: "ask_descriptor".to_string(),
                 reason: None,
+            };
+        }
+
+        // 1. 工具级规则匹配（优先级高于默认判定与 Plan 门禁）
+        for rule in &self.rules {
+            if rule.matcher.matches(&descriptor.identity.model_name)
+                || rule.matcher.matches(&descriptor.identity.primitive_name)
+                || rule.matcher.matches(&descriptor.identity.descriptor_id)
+            {
+                return match rule.action {
+                    crate::agent::app_settings::RuleAction::Allow => PermissionDecision {
+                        verdict: PermissionVerdict::Allow,
+                        decision_source: "tool_rule_allow".to_string(),
+                        reason: rule.reason.clone(),
+                    },
+                    crate::agent::app_settings::RuleAction::Ask => PermissionDecision {
+                        verdict: PermissionVerdict::ApprovalRequired,
+                        decision_source: "tool_rule_ask".to_string(),
+                        reason: rule.reason.clone(),
+                    },
+                    crate::agent::app_settings::RuleAction::Deny => PermissionDecision {
+                        verdict: PermissionVerdict::Deny,
+                        decision_source: "tool_rule_deny".to_string(),
+                        reason: rule.reason.clone().or_else(|| {
+                            Some(format!("Tool `{}` matched deny rule", descriptor.identity.model_name))
+                        }),
+                    },
+                };
             }
-        } else {
-            PermissionDecision {
-                verdict: PermissionVerdict::Allow,
-                decision_source: "legacy_compatible".to_string(),
-                reason: None,
+        }
+
+        // 2. Plan 相位门禁：如果存在 Draft 态 Plan，则写类/执行类工具被拒绝
+        if let Some(plan_store) = &self.plan_store {
+            let is_write_or_exec = matches!(
+                descriptor.kind,
+                crate::agent::tools::ToolKind::Write | crate::agent::tools::ToolKind::Execute
+            );
+            if is_write_or_exec && plan_store.has_active_draft_plan("test-session-draft-gate") {
+                return PermissionDecision {
+                    verdict: PermissionVerdict::Deny,
+                    decision_source: "plan_draft_gate".to_string(),
+                    reason: Some(
+                        "Plan is currently in Draft state; write and execute operations are blocked."
+                            .to_string(),
+                    ),
+                };
             }
+        }
+
+        // 3. 默认放行
+        PermissionDecision {
+            verdict: PermissionVerdict::Allow,
+            decision_source: "governed_default".to_string(),
+            reason: None,
         }
     }
 }
@@ -171,12 +239,13 @@ pub fn build_governed_executor_with_sandbox_backend(
     );
     let clock: Arc<dyn RuntimeClock> = Arc::new(SystemClock);
     let dispatcher = GovernedDispatcher::new(registry.clone(), clock);
-    if std::env::var("PONY_LEGACY_POLICY_ALLOW_ALL")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false)
-    {
-        dispatcher.register_policy_evaluator(Arc::new(LegacyCompatiblePolicyEvaluator));
-    }
+    
+    // W30b：加载并注册基于规则与 Plan 状态的策略评估器
+    let settings = crate::agent::app_settings::AppSettingsStore::new().load_view();
+    dispatcher.register_policy_evaluator(Arc::new(GovernedPolicyEvaluator::new(
+        settings.tool_rules,
+        None,
+    )));
     // Legacy-compatible budgets: the switch must reproduce the legacy ToolRouter's lack of
     // tool-level output-byte/deadline caps (phase-4..7 review P1-2), not silently regress large
     // reads/batches. The governed path still enforces cancellation + child-call budgets.

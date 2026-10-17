@@ -14,8 +14,8 @@
 | W27b MCP 生产接线 | ⏳ 待办（配置解析 + 注册表注入 + 动态工具面 + HTTP/SSE） | — | — |
 | W28 并发执行引擎 | 🟡 部分完成（引擎完成，A01 未闭环） | `0d8a3f1` 红相 / 本轮实现 | wave28 8/8；parallel_tools 单测 6/6；provider 53/53；check Exit 0；src-tauri Exit 0；L3 审查 3 major 已修 |
 | W28b provider 多调用接入 | ⏳ 待办（`ProviderDecision.tool_calls: Vec` + turn_sync/turn_stream 多 hop 循环改造） | — | — |
-| W30a 外部命令 Hooks | 🟡 部分完成（A07 闭环，A06/A12 待办） | `0c3132e` 红相 / 本轮实现 | wave30 8/8；hook_commands 单测 8/8；hooks 29/29；check Exit 0；src-tauri Exit 0；L3 审查 1 blocker/6 major 已修 |
-| W30b 权限规则与 Plan 门禁 | ⏳ 待办（A06 工具级 allow/deny 规则 + A12 plan 只读门禁） | — | — |
+| W30a 外部命令 Hooks | ✅ 完成 | `0c3132e` 红相 / `a3f1829` 提交 | wave30 8/8；hook_commands 单测 8/8；hooks 29/29；check Exit 0；src-tauri Exit 0 |
+| W30b 权限规则与 Plan 门禁 | ✅ 完成（A06/A12 闭环） | `e931f7d` 红相 / 本轮实现 | wave30b 3/3；pa112 2/2；ask_* 9/9；check Exit 0；src-tauri Exit 0；L3 审查 PASS |
 
 ## 一、总原则（不可协商）
 

@@ -16,11 +16,50 @@ impl Default for WorkspaceMode {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleAction {
+    Allow,
+    Ask,
+    Deny,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum ToolRuleMatcher {
+    Exact(String),
+    Prefix(String),
+    Regex(String),
+}
+
+impl ToolRuleMatcher {
+    pub fn matches(&self, tool_name: &str) -> bool {
+        match self {
+            Self::Exact(target) => tool_name == target,
+            Self::Prefix(prefix) => tool_name.starts_with(prefix),
+            Self::Regex(pattern) => {
+                regex::Regex::new(pattern).map(|r| r.is_match(tool_name)).unwrap_or(false)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolRule {
+    pub matcher: ToolRuleMatcher,
+    pub action: RuleAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     #[serde(default)]
     pub workspace_mode: WorkspaceMode,
+    #[serde(default)]
+    pub tool_rules: Vec<ToolRule>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,12 +67,15 @@ pub struct AppSettings {
 struct AppSettingsStorage {
     #[serde(default)]
     workspace_mode: WorkspaceMode,
+    #[serde(default)]
+    tool_rules: Vec<ToolRule>,
 }
 
 impl From<AppSettingsStorage> for AppSettings {
     fn from(value: AppSettingsStorage) -> Self {
         Self {
             workspace_mode: value.workspace_mode,
+            tool_rules: value.tool_rules,
         }
     }
 }
@@ -42,6 +84,7 @@ impl From<AppSettings> for AppSettingsStorage {
     fn from(value: AppSettings) -> Self {
         Self {
             workspace_mode: value.workspace_mode,
+            tool_rules: value.tool_rules,
         }
     }
 }
@@ -81,6 +124,7 @@ impl AppSettingsStore {
 
         AppSettingsStorage {
             workspace_mode: WorkspaceMode::default(),
+            tool_rules: Vec::new(),
         }
     }
 

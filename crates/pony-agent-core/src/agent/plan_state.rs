@@ -333,6 +333,37 @@ impl PlanStore {
         Ok(plan.clone())
     }
 
+    /// Explicitly transition plan from `Draft` to `Executing` phase to unlock write operations.
+    pub fn start_execution(
+        &self,
+        session_id: &str,
+        plan_id: &str,
+        expected_revision: u64,
+    ) -> Result<Plan, PlanError> {
+        let mut inner = self.inner.lock().expect("plan store poisoned");
+        let plan = self.locate_mut(&mut inner, session_id, plan_id)?;
+        self.require_revision(plan, expected_revision)?;
+        if plan.lifecycle != PlanLifecycleState::Draft {
+            return Err(PlanError::IllegalTransition(format!(
+                "plan `{plan_id}` is in state `{:?}`, cannot transition to Executing",
+                plan.lifecycle
+            )));
+        }
+        plan.lifecycle = PlanLifecycleState::Executing;
+        plan.revision = plan.revision.saturating_add(1);
+        Ok(plan.clone())
+    }
+
+    /// Check if the session currently has an active plan in `Draft` state.
+    pub fn has_active_draft_plan(&self, session_id: &str) -> bool {
+        let inner = self.inner.lock().expect("plan store poisoned");
+        if let Some(session_plans) = inner.plans.get(session_id) {
+            session_plans.values().any(|p| p.lifecycle == PlanLifecycleState::Draft)
+        } else {
+            false
+        }
+    }
+
     /// Abort a `Draft` or `Executing` plan. Aborting an already-`Completed`/`Aborted` plan is an
     /// [`PlanError::IllegalTransition`].
     pub fn abort(
