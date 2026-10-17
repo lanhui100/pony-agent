@@ -1,0 +1,337 @@
+(node:4178066) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+> pony-agent@0.1.149 build
+> vue-tsc --noEmit && vite build
+
+(node:4178533) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+vite v8.1.0 building client environment for production...
+(node:4178533) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[2Ktransforming...✓ 615 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/assets/MiSans-Medium.89-DUsf0xu0.woff2                4.09 kB
+dist/assets/MiSans-Semibold.89-el46QQMl.woff2              4.12 kB
+dist/assets/MiSans-Medium.90-BjlajxQ6.woff2                4.16 kB
+dist/assets/MiSans-Semibold.90-CLH3cNpJ.woff2              4.19 kB
+dist/assets/MiSans-Regular.91-kirgOMMD.woff2               4.28 kB
+dist/assets/MiSans-Semibold.vietnamese-CSIHwrnD.woff2      4.30 kB
+dist/index.html                                            4.30 kB │ gzip:   1.84 kB
+dist/assets/MiSans-Medium.vietnamese-jBEafVy3.woff2        4.36 kB
+dist/assets/MiSans-Semibold.91-cZgTWOVz.woff2              4.62 kB
+dist/assets/MiSans-Medium.91-Dtiw-I1a.woff2                4.65 kB
+dist/assets/MiSans-Regular.21-CUa-xSMP.woff2               4.90 kB
+dist/assets/MiSans-Medium.21-D53gPFFw.woff2                4.93 kB
+dist/assets/MiSans-Semibold.21-BHgoNMJm.woff2              4.96 kB
+dist/assets/MiSans-Regular.cyrillic-Bza3EgM7.woff2         5.89 kB
+dist/assets/MiSans-Medium.cyrillic-CvN8mt06.woff2          6.03 kB
+dist/assets/MiSans-Semibold.cyrillic-C-pez0yi.woff2        6.08 kB
+dist/assets/MiSans-Regular.86-DAXhAkzM.woff2               6.48 kB
+dist/assets/MiSans-Semibold.86-vNRkt4OG.woff2              6.73 kB
+dist/assets/MiSans-Medium.86-Cj0BFgLk.woff2                6.76 kB
+dist/assets/MiSans-Regular.99-CFSuNEOB.woff2               7.39 kB
+dist/assets/MiSans-Semibold.99-DuBvSCPS.woff2              7.75 kB
+dist/assets/MiSans-Medium.99-CrkerapT.woff2                7.82 kB
+dist/assets/pony-brand-icon-famgKOzq.png                   8.54 kB
+dist/assets/MiSans-Regular.85-CHnO2Oqm.woff2              10.48 kB
+dist/assets/MiSans-Semibold.85-BgHORE3b.woff2             10.52 kB
+dist/assets/MiSans-Medium.85-DpoP31QW.woff2               10.54 kB
+dist/assets/MiSans-Regular.latin-ext-Cdsz7MBH.woff2       10.90 kB
+dist/assets/MiSans-Medium.latin-ext-Df6oRTEk.woff2        11.53 kB
+dist/assets/MiSans-Semibold.latin-ext-CumwITfu.woff2      11.61 kB
+dist/assets/MiSans-Regular.latin-6fLlhbke.woff2           12.60 kB
+dist/assets/MiSans-Semibold.latin-B1cWvqaW.woff2          13.13 kB
+dist/assets/MiSans-Medium.latin-BKHeB3Kp.woff2            13.23 kB
+dist/assets/MiSans-Medium.80-BNvii1ld.woff2               14.45 kB
+dist/assets/MiSans-Regular.80-B1_m85Nz.woff2              14.48 kB
+dist/assets/MiSans-Semibold.80-CxmGJWA7.woff2             14.50 kB
+dist/assets/MiSans-Medium.84-Cab4fHzw.woff2               14.62 kB
+dist/assets/MiSans-Semibold.84-BNAr93Tl.woff2             14.63 kB
+dist/assets/MiSans-Regular.84-DUww37P2.woff2              14.66 kB
+dist/assets/MiSans-Regular.41-DIShkJ5H.woff2              16.58 kB
+dist/assets/MiSans-Medium.41-ltFNIINK.woff2               16.59 kB
+dist/assets/MiSans-Semibold.41-By4mqImx.woff2             16.61 kB
+dist/assets/MiSans-Medium.77-D_ug5Wxv.woff2               17.14 kB
+dist/assets/MiSans-Regular.77-COA2OyW3.woff2              17.24 kB
+dist/assets/MiSans-Semibold.77-ms3woOsO.woff2             17.30 kB
+dist/assets/MiSans-Medium.73-sJqvUETR.woff2               17.51 kB
+dist/assets/MiSans-Regular.73-PGpoC3QE.woff2              17.59 kB
+dist/assets/MiSans-Semibold.73-BLdYaLUi.woff2             17.68 kB
+dist/assets/MiSans-Regular.119-BrH8kEJX.woff2             17.75 kB
+dist/assets/MiSans-Medium.64-R61rV480.woff2               17.96 kB
+dist/assets/MiSans-Semibold.64-2eOmthcA.woff2             17.96 kB
+dist/assets/MiSans-Regular.64-Bo7MatSF.woff2              18.04 kB
+dist/assets/MiSans-Semibold.119-B1RieOQ1.woff2            18.35 kB
+dist/assets/MiSans-Medium.119-Bs6Hqs1M.woff2              18.43 kB
+dist/assets/MiSans-Regular.79-Dr-8uNak.woff2              18.50 kB
+dist/assets/MiSans-Medium.79-CILdNLl3.woff2               18.58 kB
+dist/assets/MiSans-Semibold.79-CQLHz8rA.woff2             18.82 kB
+dist/assets/MiSans-Medium.65-DZ0b7vIX.woff2               19.07 kB
+dist/assets/MiSans-Semibold.65-Cwp25slV.woff2             19.10 kB
+dist/assets/MiSans-Regular.65-Cb4RZHs6.woff2              19.14 kB
+dist/assets/MiSans-Regular.70-Bwz7sBey.woff2              19.28 kB
+dist/assets/MiSans-Regular.51-JMSgCyhL.woff2              19.30 kB
+dist/assets/MiSans-Semibold.51-B1lmnvzn.woff2             19.34 kB
+dist/assets/MiSans-Medium.70-DkqrT4D1.woff2               19.35 kB
+dist/assets/MiSans-Medium.51-CopSInuF.woff2               19.36 kB
+dist/assets/MiSans-Semibold.70-Ba5MKUw_.woff2             19.40 kB
+dist/assets/MiSans-Regular.118-DWxLsXLk.woff2             19.95 kB
+dist/assets/MiSans-Medium.118-BqxYNu5N.woff2              19.96 kB
+dist/assets/MiSans-Semibold.118-BUn864mY.woff2            19.96 kB
+dist/assets/MiSans-Regular.53-mj7jB0QE.woff2              19.98 kB
+dist/assets/MiSans-Semibold.53-C39Qyacu.woff2             20.04 kB
+dist/assets/MiSans-Medium.53-CYBEPlsr.woff2               20.07 kB
+dist/assets/MiSans-Semibold.60-DGY0OPOA.woff2             20.18 kB
+dist/assets/MiSans-Regular.60-CEMo4QPI.woff2              20.32 kB
+dist/assets/MiSans-Medium.60-CfLaYVHl.woff2               20.38 kB
+dist/assets/MiSans-Semibold.82-CxpTQB5A.woff2             20.42 kB
+dist/assets/MiSans-Medium.82-BN6Z2J2J.woff2               20.43 kB
+dist/assets/MiSans-Regular.82-BzbsF8Ru.woff2              20.45 kB
+dist/assets/MiSans-Regular.83-CtPsbfr_.woff2              20.46 kB
+dist/assets/MiSans-Semibold.83-CI_6eGmw.woff2             20.51 kB
+dist/assets/MiSans-Medium.81-DOKwPEHQ.woff2               20.54 kB
+dist/assets/MiSans-Semibold.81-BsaNRY1N.woff2             20.54 kB
+dist/assets/MiSans-Medium.83-CCVNIxLw.woff2               20.56 kB
+dist/assets/MiSans-Regular.81-YcOTU-sr.woff2              20.62 kB
+dist/assets/MiSans-Semibold.68-CyPS0Vmf.woff2             20.89 kB
+dist/assets/MiSans-Medium.68-cqnu-JYk.woff2               20.90 kB
+dist/assets/MiSans-Regular.68-COLWid_N.woff2              20.92 kB
+dist/assets/MiSans-Regular.72-qK9hMIdW.woff2              21.04 kB
+dist/assets/MiSans-Medium.72-EODbZY8H.woff2               21.16 kB
+dist/assets/MiSans-Medium.42-Cq83rHhI.woff2               21.20 kB
+dist/assets/MiSans-Regular.42-DtzzGMty.woff2              21.22 kB
+dist/assets/MiSans-Semibold.72-BR9mKeij.woff2             21.22 kB
+dist/assets/MiSans-Semibold.61-LwblZWnF.woff2             21.29 kB
+dist/assets/MiSans-Medium.40-fKVOuiv9.woff2               21.32 kB
+dist/assets/MiSans-Regular.40-DMZUmi4A.woff2              21.32 kB
+dist/assets/MiSans-Semibold.36-DVBd4nWI.woff2             21.34 kB
+dist/assets/MiSans-Regular.36-WxFg36QP.woff2              21.35 kB
+dist/assets/MiSans-Medium.36-CDdzbIY6.woff2               21.35 kB
+dist/assets/MiSans-Regular.61-Dd5bj1eb.woff2              21.36 kB
+dist/assets/MiSans-Medium.61-B_3GkSFO.woff2               21.37 kB
+dist/assets/MiSans-Regular.71-BcMfSiQd.woff2              21.38 kB
+dist/assets/MiSans-Semibold.42-Dzx0zTOe.woff2             21.40 kB
+dist/assets/MiSans-Medium.71-r922IRyo.woff2               21.46 kB
+dist/assets/MiSans-Regular.35-CcTZlNSE.woff2              21.48 kB
+dist/assets/MiSans-Semibold.71-DsqjMuqp.woff2             21.49 kB
+dist/assets/MiSans-Semibold.40-DD4HuouY.woff2             21.55 kB
+dist/assets/MiSans-Regular.27-B8T59QYi.woff2              21.61 kB
+dist/assets/MiSans-Regular.43-CSchqeNQ.woff2              21.62 kB
+dist/assets/MiSans-Medium.27-Dvxdf7MC.woff2               21.66 kB
+dist/assets/MiSans-Semibold.35-BR18sxY6.woff2             21.66 kB
+dist/assets/MiSans-Semibold.27-BIEB4j6E.woff2             21.68 kB
+dist/assets/MiSans-Medium.35-CaTV5v9R.woff2               21.70 kB
+dist/assets/MiSans-Semibold.63-BvaNrgL8.woff2             21.74 kB
+dist/assets/MiSans-Medium.43-DOkgHHfH.woff2               21.82 kB
+dist/assets/MiSans-Semibold.75-CFedbv6E.woff2             21.82 kB
+dist/assets/MiSans-Semibold.43-CgcTmPWh.woff2             21.84 kB
+dist/assets/MiSans-Medium.63-D533_GaH.woff2               21.92 kB
+dist/assets/MiSans-Medium.75-CFWs8a3k.woff2               21.93 kB
+dist/assets/MiSans-Regular.50-CFMzW9SB.woff2              22.01 kB
+dist/assets/MiSans-Regular.32-D8CxR-yF.woff2              22.02 kB
+dist/assets/MiSans-Semibold.50-DQSOF-iE.woff2             22.02 kB
+dist/assets/MiSans-Medium.50-1ccu2VEF.woff2               22.05 kB
+dist/assets/MiSans-Regular.63-CQXRd58F.woff2              22.08 kB
+dist/assets/MiSans-Regular.75-Det8sBuX.woff2              22.12 kB
+dist/assets/MiSans-Medium.32-B5YtYGcx.woff2               22.14 kB
+dist/assets/MiSans-Regular.76-DbrOL2r3.woff2              22.17 kB
+dist/assets/MiSans-Medium.76-D4srwH8d.woff2               22.21 kB
+dist/assets/MiSans-Semibold.32-BEMyovyf.woff2             22.22 kB
+dist/assets/MiSans-Semibold.76-BBZoJ8nn.woff2             22.25 kB
+dist/assets/MiSans-Regular.28-C4AQixJw.woff2              22.26 kB
+dist/assets/MiSans-Regular.34-CmKwd_K4.woff2              22.37 kB
+dist/assets/MiSans-Semibold.34-pnz6mRCo.woff2             22.42 kB
+dist/assets/MiSans-Regular.117-DskzVFXA.woff2             22.45 kB
+dist/assets/MiSans-Regular.78-VPGHkzMw.woff2              22.47 kB
+dist/assets/MiSans-Semibold.116-zF36IvnS.woff2            22.48 kB
+dist/assets/MiSans-Semibold.117-DrjmKiS_.woff2            22.48 kB
+dist/assets/MiSans-Medium.117-Ypo5GsvH.woff2              22.48 kB
+dist/assets/MiSans-Medium.28-D3yR4Xd9.woff2               22.52 kB
+dist/assets/MiSans-Semibold.28-fvJGqKZv.woff2             22.54 kB
+dist/assets/MiSans-Medium.34-Dcs95nMy.woff2               22.56 kB
+dist/assets/MiSans-Medium.78-DavhKdSP.woff2               22.60 kB
+dist/assets/MiSans-Semibold.78-BaguaUql.woff2             22.61 kB
+dist/assets/MiSans-Regular.33-DODN5kIs.woff2              22.65 kB
+dist/assets/MiSans-Regular.116-B32q-lcG.woff2             22.66 kB
+dist/assets/MiSans-Medium.55-BgqGu1cm.woff2               22.67 kB
+dist/assets/MiSans-Regular.55-aaVqR1XL.woff2              22.68 kB
+dist/assets/MiSans-Semibold.33-B4hur3bs.woff2             22.69 kB
+dist/assets/MiSans-Medium.116-DINn1Ipk.woff2              22.74 kB
+dist/assets/MiSans-Medium.33-D6z7Db6f.woff2               22.76 kB
+dist/assets/MiSans-Semibold.55-B2467HmR.woff2             22.76 kB
+dist/assets/MiSans-Regular.48-CiE7e-Md.woff2              22.77 kB
+dist/assets/MiSans-Medium.48-Ccrr4Nlp.woff2               22.96 kB
+dist/assets/MiSans-Regular.31-Akg2FU-R.woff2              23.07 kB
+dist/assets/MiSans-Semibold.48-D_Qzi-ow.woff2             23.09 kB
+dist/assets/MiSans-Semibold.31-DiO6a4LX.woff2             23.17 kB
+dist/assets/MiSans-Semibold.59-BwIRZDmS.woff2             23.36 kB
+dist/assets/MiSans-Regular.59-D0BNcL7Y.woff2              23.37 kB
+dist/assets/MiSans-Medium.59-Cgs2B2yh.woff2               23.49 kB
+dist/assets/MiSans-Medium.31-YrFnq_7C.woff2               23.58 kB
+dist/assets/MiSans-Regular.66-DBcUXCgO.woff2              23.68 kB
+dist/assets/MiSans-Semibold.66-QhT9sURI.woff2             23.72 kB
+dist/assets/MiSans-Medium.66-CkNy_l-7.woff2               23.80 kB
+dist/assets/MiSans-Regular.37-D-3Ayqj7.woff2              23.84 kB
+dist/assets/MiSans-Regular.44-DhrJWzgd.woff2              23.89 kB
+dist/assets/MiSans-Regular.54-C6iUpc0W.woff2              23.96 kB
+dist/assets/MiSans-Regular.39-B2VXuVWs.woff2              23.98 kB
+dist/assets/MiSans-Semibold.37-BH7w70y2.woff2             23.99 kB
+dist/assets/MiSans-Medium.54-Dk0jpn2w.woff2               24.00 kB
+dist/assets/MiSans-Medium.44-DPD-fbHc.woff2               24.01 kB
+dist/assets/MiSans-Medium.39-BZsXY_Xo.woff2               24.01 kB
+dist/assets/MiSans-Semibold.54-Bl7h3PlB.woff2             24.01 kB
+dist/assets/MiSans-Medium.37-lKDxRxRb.woff2               24.06 kB
+dist/assets/MiSans-Semibold.44-LQuqd087.woff2             24.13 kB
+dist/assets/MiSans-Regular.52-DZyIJTTP.woff2              24.15 kB
+dist/assets/MiSans-Semibold.52-BE-o6C0y.woff2             24.17 kB
+dist/assets/MiSans-Semibold.39-BuOw8dRO.woff2             24.19 kB
+dist/assets/MiSans-Medium.115-C0Q0FsIQ.woff2              24.26 kB
+dist/assets/MiSans-Semibold.115-AywcsgqK.woff2            24.29 kB
+dist/assets/MiSans-Medium.52-DFf7ttsb.woff2               24.29 kB
+dist/assets/MiSans-Regular.115-DeQMhIE8.woff2             24.29 kB
+dist/assets/MiSans-Regular.49-DZ6aMhnC.woff2              24.34 kB
+dist/assets/MiSans-Medium.49-B26mLlxz.woff2               24.39 kB
+dist/assets/MiSans-Semibold.49-W1TGNsEi.woff2             24.40 kB
+dist/assets/MiSans-Regular.26-BQl946LB.woff2              24.72 kB
+dist/assets/MiSans-Semibold.26-BQh0U2SS.woff2             24.74 kB
+dist/assets/MiSans-Medium.114-DS1eEZvO.woff2              24.76 kB
+dist/assets/MiSans-Regular.114-qiXVqWne.woff2             24.78 kB
+dist/assets/MiSans-Medium.26-CnMPBH8G.woff2               24.79 kB
+dist/assets/MiSans-Semibold.114-BhX6WoEd.woff2            24.88 kB
+dist/assets/MiSans-Semibold.29-ir5mwDNN.woff2             25.21 kB
+dist/assets/MiSans-Regular.29-B8TJCHfx.woff2              25.26 kB
+dist/assets/MiSans-Regular.112-BOu6REoS.woff2             25.37 kB
+dist/assets/MiSans-Regular.38-jctnj9jB.woff2              25.42 kB
+dist/assets/MiSans-Medium.29-CqStNJDJ.woff2               25.43 kB
+dist/assets/MiSans-Medium.113-Bnowxlfm.woff2              25.45 kB
+dist/assets/MiSans-Regular.113-Bz_dKHV7.woff2             25.50 kB
+dist/assets/MiSans-Semibold.112-DK74BbHL.woff2            25.51 kB
+dist/assets/MiSans-Regular.57-CYaOQ-dB.woff2              25.55 kB
+dist/assets/MiSans-Semibold.113-DhzemY-U.woff2            25.56 kB
+dist/assets/MiSans-Semibold.38-DFPvSZ34.woff2             25.56 kB
+dist/assets/MiSans-Medium.112-CCLIJbTg.woff2              25.57 kB
+dist/assets/MiSans-Medium.38-BJDPgeTF.woff2               25.70 kB
+dist/assets/MiSans-Medium.57-DuVmJ8ya.woff2               25.70 kB
+dist/assets/MiSans-Medium.74-LuSRVeSu.woff2               25.71 kB
+dist/assets/MiSans-Semibold.57-DrIt7b07.woff2             25.74 kB
+dist/assets/MiSans-Regular.56-DeeADe8F.woff2              25.76 kB
+dist/assets/MiSans-Medium.56-CRZ3Wz6O.woff2               25.78 kB
+dist/assets/MiSans-Regular.74-DiZ-98Hl.woff2              25.80 kB
+dist/assets/MiSans-Semibold.74-gk-i7dt6.woff2             25.83 kB
+dist/assets/MiSans-Medium.67-DHWNuv6B.woff2               25.88 kB
+dist/assets/MiSans-Regular.67-D4CXEaiM.woff2              25.88 kB
+dist/assets/MiSans-Semibold.67-DSgEeljw.woff2             25.96 kB
+dist/assets/MiSans-Medium.101-BGYTD6NE.woff2              25.97 kB
+dist/assets/MiSans-Semibold.56-qlsIsw_R.woff2             25.98 kB
+dist/assets/MiSans-Regular.101-CXlIJW01.woff2             25.98 kB
+dist/assets/MiSans-Semibold.101-CIVQ-4xr.woff2            25.99 kB
+dist/assets/MiSans-Medium.109-B9lWNdIf.woff2              26.28 kB
+dist/assets/MiSans-Regular.109-CbaROmOG.woff2             26.28 kB
+dist/assets/MiSans-Semibold.109-BqZf0Dr9.woff2            26.28 kB
+dist/assets/MiSans-Regular.62-B7bH60kp.woff2              26.38 kB
+dist/assets/MiSans-Regular.110-Bc3yptOu.woff2             26.50 kB
+dist/assets/MiSans-Semibold.62-BgfhICPU.woff2             26.50 kB
+dist/assets/MiSans-Medium.110-37SSJI9N.woff2              26.51 kB
+dist/assets/MiSans-Regular.69-C0Gerezt.woff2              26.54 kB
+dist/assets/MiSans-Medium.62-BN_rfYbw.woff2               26.54 kB
+dist/assets/MiSans-Semibold.110-DJRwX0Ow.woff2            26.58 kB
+dist/assets/MiSans-Regular.102-D2_mgN3i.woff2             26.58 kB
+dist/assets/MiSans-Semibold.104-CbqTTS-q.woff2            26.62 kB
+dist/assets/MiSans-Medium.104-B7SDMVj-.woff2              26.65 kB
+dist/assets/MiSans-Semibold.102-BDtspx05.woff2            26.68 kB
+dist/assets/MiSans-Medium.69-CUcxOquv.woff2               26.69 kB
+dist/assets/MiSans-Semibold.107-clnB0Gme.woff2            26.69 kB
+dist/assets/MiSans-Medium.102-DOY9L0eI.woff2              26.70 kB
+dist/assets/MiSans-Regular.104-CYrAAH4L.woff2             26.70 kB
+dist/assets/MiSans-Medium.107-CREJnudK.woff2              26.74 kB
+dist/assets/MiSans-Regular.107-BCne9lIc.woff2             26.76 kB
+dist/assets/MiSans-Semibold.69-L0bIzG1u.woff2             26.86 kB
+dist/assets/MiSans-Regular.47-BBitW9d0.woff2              26.93 kB
+dist/assets/MiSans-Regular.30-_IHq36t6.woff2              26.95 kB
+dist/assets/MiSans-Regular.46-Dc34X9TY.woff2              26.98 kB
+dist/assets/MiSans-Medium.47-aRyR3lxO.woff2               27.05 kB
+dist/assets/MiSans-Semibold.47-CLBe3OY2.woff2             27.05 kB
+dist/assets/MiSans-Medium.46-C4a_T8Ha.woff2               27.20 kB
+dist/assets/MiSans-Semibold.46-B6luZMG2.woff2             27.21 kB
+dist/assets/MiSans-Medium.23-BjnW7Ygy.woff2               27.26 kB
+dist/assets/MiSans-Regular.23-CrcGsaXM.woff2              27.32 kB
+dist/assets/MiSans-Semibold.111-MFu3xuz1.woff2            27.34 kB
+dist/assets/MiSans-Regular.58-DtWCmzbT.woff2              27.37 kB
+dist/assets/MiSans-Medium.111-DqtEq4tT.woff2              27.40 kB
+dist/assets/MiSans-Regular.111-DBOeffWx.woff2             27.41 kB
+dist/assets/MiSans-Semibold.105-CKBvVkHA.woff2            27.41 kB
+dist/assets/MiSans-Semibold.23-Bi0xHi5s.woff2             27.44 kB
+dist/assets/MiSans-Regular.105-e4rIK9r_.woff2             27.46 kB
+dist/assets/MiSans-Medium.58-CzV0fjP0.woff2               27.50 kB
+dist/assets/MiSans-Regular.106-xbz6xNAv.woff2             27.53 kB
+dist/assets/MiSans-Medium.105-DAanhxP1.woff2              27.58 kB
+dist/assets/MiSans-Medium.106-ef7Z9qlL.woff2              27.61 kB
+dist/assets/MiSans-Semibold.58-D1oepip8.woff2             27.63 kB
+dist/assets/MiSans-Semibold.106-C2hNGWk9.woff2            27.71 kB
+dist/assets/MiSans-Semibold.30-DOljyL16.woff2             27.71 kB
+dist/assets/MiSans-Regular.108-Cf3RgNLP.woff2             27.74 kB
+dist/assets/MiSans-Semibold.103-CJKEclMl.woff2            27.74 kB
+dist/assets/MiSans-Medium.30-COpiBLwe.woff2               27.75 kB
+dist/assets/MiSans-Regular.25-C1lnRDtC.woff2              27.82 kB
+dist/assets/MiSans-Medium.103-CVsC5lJs.woff2              27.83 kB
+dist/assets/MiSans-Medium.108-9zlkbRFd.woff2              27.85 kB
+dist/assets/MiSans-Semibold.108-7DWogH7s.woff2            27.88 kB
+dist/assets/MiSans-Regular.103-C4o-wcgD.woff2             27.90 kB
+dist/assets/MiSans-Medium.25-Dtrui428.woff2               28.08 kB
+dist/assets/MiSans-Semibold.25-R2O00yyp.woff2             28.09 kB
+dist/assets/MiSans-Semibold.100-BtBQ5Cc5.woff2            28.33 kB
+dist/assets/MiSans-Regular.100-DhYTvPin.woff2             28.36 kB
+dist/assets/MiSans-Medium.100-CPa3EDCN.woff2              28.38 kB
+dist/assets/MiSans-Regular.24-Dw7ThR-d.woff2              28.69 kB
+dist/assets/MiSans-Medium.24-1PwLJ4Iq.woff2               28.79 kB
+dist/assets/MiSans-Semibold.24-CK-j3qXY.woff2             28.99 kB
+dist/assets/MiSans-Regular.22-BdOfjKqg.woff2              29.52 kB
+dist/assets/MiSans-Medium.22-5GcG7bSh.woff2               29.76 kB
+dist/assets/MiSans-Regular.45-B8ub-qc1.woff2              30.10 kB
+dist/assets/MiSans-Semibold.22-DBplPU7h.woff2             30.15 kB
+dist/assets/MiSans-Medium.45-VWqPikl_.woff2               30.39 kB
+dist/assets/MiSans-Semibold.45-BWwJzqSJ.woff2             30.66 kB
+dist/assets/MiSansLatin-Regular-FJz7mAit.woff2            50.36 kB
+dist/assets/MiSansLatin-Medium-DqQDnleW.woff2             54.55 kB
+dist/assets/MiSansLatin-Semibold-DWB_xgBb.woff2           55.48 kB
+dist/assets/index-DGTgJh9G.css                           453.47 kB │ gzip: 181.01 kB
+dist/assets/dist-js-B1MWuITl.js                            0.16 kB │ gzip:   0.16 kB
+dist/assets/window-B5vlXYL3.js                            13.13 kB │ gzip:   3.14 kB
+dist/assets/index-BYemC3mz.js                          1,026.74 kB │ gzip: 297.44 kB
+
+[31m[INVALID_ANNOTATION] [0mA comment "/* #__PURE__ */" in "node_modules/@vueuse/core/dist/index.js" contains an annotation that Rolldown cannot interpret due to the position of the comment.
+      [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m node_modules/@vueuse/core/dist/index.js:3362:1 [38;5;246m][0m
+      [38;5;246m│[0m
+ [38;5;246m3362 │[0m /* #__PURE__ */
+ [38;5;240m     │[0m ───────┬───────  
+ [38;5;240m     │[0m        ╰───────── comment ignored due to position
+ [38;5;240m     │[0m 
+ [38;5;240m     │[0m [38;5;115mHelp[0m: For more information on how to use pure annotations correctly, check the documentation: https://rolldown.rs/in-depth/dead-code-elimination#pure
+[38;5;246m──────╯[0m
+
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+[31m[INVALID_ANNOTATION] [0mA comment "/* #__PURE__ */" in "node_modules/@vueuse/core/dist/index.js" contains an annotation that Rolldown cannot interpret due to the position of the comment.
+      [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m node_modules/@vueuse/core/dist/index.js:5780:23 [38;5;246m][0m
+      [38;5;246m│[0m
+ [38;5;246m5780 │[0m [38;5;249mc[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249ms[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249md[0m[38;5;249me[0m[38;5;249mf[0m[38;5;249ma[0m[38;5;249mu[0m[38;5;249ml[0m[38;5;249mt[0m[38;5;249mS[0m[38;5;249mt[0m[38;5;249ma[0m[38;5;249mt[0m[38;5;249me[0m[38;5;249m [0m[38;5;249m=[0m[38;5;249m [0m[38;5;249m([0m/* #__PURE__ */[38;5;249m [0m[38;5;249m{[0m
+ [38;5;240m     │[0m                       ───────┬───────  
+ [38;5;240m     │[0m                              ╰───────── comment ignored due to position
+ [38;5;240m     │[0m 
+ [38;5;240m     │[0m [38;5;115mHelp[0m: For more information on how to use pure annotations correctly, check the documentation: https://rolldown.rs/in-depth/dead-code-elimination#pure
+[38;5;246m──────╯[0m
+
+[33m[INEFFECTIVE_DYNAMIC_IMPORT] [0msrc/stores/ask.ts is dynamically imported by src/stores/runtime.ts but also statically imported by src/components/ask/AskUserToolCallCard.vue?vue&type=script&setup=true&lang.ts, src/components/chat/WorkspaceComposer.vue?vue&type=script&setup=true&lang.ts, dynamic import will not move module into another chunk.
+
+[33m[PLUGIN_TIMINGS] [0mYour build spent significant time in plugins. Here is a breakdown:
+  - vite:vue (80%)
+  - @tailwindcss/vite:generate:build (9%)
+  - vite:css (9%)
+See https://rolldown.rs/reference/InputOptions.checks#plugintimings for more details.
+
+✓ built in 4.91s

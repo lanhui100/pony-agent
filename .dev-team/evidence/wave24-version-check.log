@@ -1,0 +1,11 @@
+(node:3592283) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+> pony-agent@0.1.149 version:check
+> node scripts/check-version-sync.mjs
+
+(node:3592315) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[check-version-sync] Core version ok: 0.1.123
+[check-version-sync] Tauri version ok (4 places in sync): 0.1.149
+[check-version-sync] PASSED: All version files are synchronized.

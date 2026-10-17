@@ -1,5 +1,5 @@
 {
-  "wave": 18,
+  "wave": 24,
   "status": "all_waves_completed",
   "task_classification": "C",
   "reason": "硬编码 PonySentry 凭证清理（3 处泄漏面）+ 密钥扫描门禁补盲（裸 64-hex 失明）+ 前端默认零 egress 契约 + PA-110 看板治理失真修正",
@@ -594,31 +594,113 @@
     "23": {
       "status": "completed",
       "desc": "统一 PlanStore 单例绑定消除脑裂"
+    },
+    "24": {
+      "status": "completed",
+      "desc": "历史会话加载时 Agent 正文排在思考/工具之前 —— 展示层规范化排序修复（Reasoning < Tools < 正文）",
+      "task_classification": "B",
+      "classification_basis": "跨 3 文件（1 src + 2 tests）但 src 净变更 < 50 行、无 IO/并发/网络面，机械触发规则均未命中；因涉及用户可见展示契约与既有验收用例冲突，升为 B 级并启用独立 Test Agent 分离与红绿双相门禁",
+      "write_scopes": {
+        "task-5/src": [
+          "src/components/HomeWorkspace.vue"
+        ],
+        "task-6/tests": [
+          "tests/acceptance/",
+          "tests/HomeWorkspace.spec.ts"
+        ],
+        "task-7/tests-e2e": [
+          "tests/e2e/wave24-history-order-gate.spec.ts"
+        ],
+        "lead": [
+          ".dev-team/"
+        ]
+      },
+      "contract_ledger": [
+        "展示顺序不变量：同一回合内 Reasoning < Tools < Agent 正文（无条件成立，不依赖 reasoning 面板是否渲染）",
+        "store.messages 数组顺序契约不变：['user','assistant','tool',...]（与实时装配一致；不因展示需要而污染）",
+        "trace 链接工具（call_tool 条目匹配）保持 traceSequence 交错顺序不变（多 hop 语义）"
+      ],
+      "circuit_breaker": {
+        "wave": 24,
+        "branch": "history-message-order",
+        "counter_type": "L2-T",
+        "attempts": 2,
+        "notes": [
+          "attempt 1：执行者仅跑定向子集即申报全绿，被 Lead 全量门禁拦下（tests/runtime-store.spec.ts 2 处失败）——流程缺陷（假放行），已纠正为「全量套件为唯一放行门禁」",
+          "attempt 2：规格未覆盖「无 reasoning 面板」场景，实施者主动报备契约冲突（诚实上报），Lead 裁定二后重锚（F5 + HomeWorkspace:3138 修订）"
+        ]
+      },
+      "contract_evolution": [
+        "tests/acceptance/stage-history-message-order.spec.ts: F1 数组契约锁（tool 前置 → assistant 前置）、新增 F2/F3/F4/F5",
+        "tests/HomeWorkspace.spec.ts:3138: 「正文在工具之上」→「工具在正文之上」（Lead 裁定二 §6）"
+      ],
+      "pool_degradation": {
+        "reason": "wave-24 期间常驻 teammate 的续跑/新建多次即时失败（test-agent、executor-agent、test-agent-24、executor-agent-24、test-agent-26 的运行均在无 closing message 情况下失败）",
+        "fallback": "改用无状态 Subagent 池执行测试修订与业务实现（test 修订与 src 实现由两个互不相同的独立 Subagent 分别承担，独立性成立）",
+        "evidence": ".dev-team/wave24-pool-degradation.md"
+      },
+      "gates": {
+        "acceptance_F1_F5": {
+          "cmd": "npx vitest run tests/acceptance/stage-history-message-order.spec.ts",
+          "result": "5 passed",
+          "exit": 0
+        },
+        "full_unit_suite": {
+          "cmd": "npx vitest run",
+          "result": "90 files; 965 passed | 10 skipped; 0 failed",
+          "exit": 0,
+          "evidence": ".dev-team/evidence/wave24-final-full-suite.log.gz"
+        },
+        "build_typecheck": {
+          "cmd": "npm run build (vue-tsc --noEmit && vite build)",
+          "result": "built ok",
+          "exit": 0,
+          "evidence": ".dev-team/evidence/wave24-build.log"
+        },
+        "version_sync": {
+          "cmd": "npm run version:check",
+          "result": "PASSED all version files synchronized",
+          "exit": 0,
+          "evidence": ".dev-team/evidence/wave24-version-check.log"
+        },
+        "rust_check": {
+          "cmd": "cargo check --manifest-path src-tauri/Cargo.toml",
+          "cmd_note": "npm run cargo:check:shared 在 Linux 无 powershell，降级为原生等价命令",
+          "result": "Finished dev profile",
+          "exit": 0,
+          "evidence": ".dev-team/evidence/wave24-cargo-check.log"
+        },
+        "browser_gate_green": {
+          "cmd": "npx playwright test tests/e2e/wave24-history-order-gate.spec.ts",
+          "result": "2 passed",
+          "exit": 0,
+          "evidence": ".dev-team/evidence/wave24-browser-gate.log"
+        },
+        "browser_gate_discriminating_red": {
+          "cmd": "同上（回退 src + 重建 dist 的基线态）",
+          "result": "2 failed",
+          "exit": 1,
+          "evidence": ".dev-team/evidence/wave24-browser-gate-baseline-red.log",
+          "purpose": "判别力证明，防假绿门禁"
+        },
+        "screenshots": [
+          ".dev-team/evidence/wave24/w24-e2e-tools-above-content.png",
+          ".dev-team/evidence/wave24/w24-e2e-reasoning-tools-content.png"
+        ]
+      },
+      "blast_radius": {
+        "changed_files": 3,
+        "src_changed_files": 1,
+        "src_net_lines": 15,
+        "keyword_blacklist_hits": "无（仅中文注释内含 'io' 字符的假阳性，无 IO/并发/网络面）",
+        "verdict": "机械触发规则均未命中（diff <100 行、无关键字面），无需 L3 双路靶向审查；由全量套件 + 判别力证明 + 真实浏览器门禁兜底"
+      },
+      "meta_retrospective": ".dev-team/meta-retrospective-wave24.md"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
   "previous_wave": {
-    "wave": 7,
-    "status": "completed",
-    "task_classification": "B",
-    "baseline_commit": "76ef6d4",
-    "final_commit": "HEAD",
-    "checkpoints": {
-      "red_anchor": "2b1ee73",
-      "green": "HEAD"
-    },
-    "ci": {
-      "result": "green",
-      "ts_event_bus": "3 passed",
-      "rust_event_bus": "2 passed",
-      "review": "PASS"
-    },
-    "nfr_compliance": {
-      "external_call_timeout_ms": 3000,
-      "max_queue_capacity": 1024,
-      "sanitization_zero_trust": true,
-      "status": "verified"
-    },
-    "meta_retrospective": ".dev-team/meta-retrospective-wave7-eventbus.md"
+    "wave": 23,
+    "desc": "统一 PlanStore 单例绑定消除脑裂"
   }
 }

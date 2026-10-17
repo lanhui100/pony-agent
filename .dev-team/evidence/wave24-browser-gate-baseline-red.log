@@ -1,0 +1,171 @@
+(node:4172733) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4172747) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4172747) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[2m[WebServer] [22m(node:4172791) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+[2m[WebServer] [22m(node:4172791) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+[2m[WebServer] [22m(node:4172810) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+[2m[WebServer] [22m(node:4172810) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+[2m[WebServer] [22m(node:4172810) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+[2m[WebServer] [22m(node:4172810) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+
+Running 2 tests using 1 worker
+
+(node:4172859) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4172859) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:4172859) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4172859) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  ✘  1 [chromium] › tests/e2e/wave24-history-order-gate.spec.ts:209:3 › Wave-24 历史会话展示时序（真实浏览器） › W24-E2E-1：无推理内容的历史回合必须渲染为 Tools -> Content，且 Console Error = 0 (4.5s)
+(node:4173261) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4173261) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:4173261) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4173261) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  ✘  2 [chromium] › tests/e2e/wave24-history-order-gate.spec.ts:209:3 › Wave-24 历史会话展示时序（真实浏览器） › W24-E2E-1：无推理内容的历史回合必须渲染为 Tools -> Content，且 Console Error = 0 (retry #1) (4.8s)
+(node:4175008) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4175008) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:4175008) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4175008) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  ✘  3 [chromium] › tests/e2e/wave24-history-order-gate.spec.ts:249:3 › Wave-24 历史会话展示时序（真实浏览器） › W24-E2E-2：含推理内容的历史回合必须渲染为 Reasoning -> Tools -> Content，且 Console Error = 0 (4.6s)
+(node:4177349) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4177349) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:4177349) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:4177349) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  ✘  4 [chromium] › tests/e2e/wave24-history-order-gate.spec.ts:249:3 › Wave-24 历史会话展示时序（真实浏览器） › W24-E2E-2：含推理内容的历史回合必须渲染为 Reasoning -> Tools -> Content，且 Console Error = 0 (retry #1) (4.7s)
+
+
+  1) [chromium] › tests/e2e/wave24-history-order-gate.spec.ts:209:3 › Wave-24 历史会话展示时序（真实浏览器） › W24-E2E-1：无推理内容的历史回合必须渲染为 Tools -> Content，且 Console Error = 0 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeLessThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: < [32m0[39m
+    Received:   [31m1[39m
+
+      238 |     expect(order!.content).toBeGreaterThanOrEqual(0);
+      239 |     // 合同不变量：工具调用必须排在 Agent 正文之上
+    > 240 |     expect(order!.tools).toBeLessThan(order!.content);
+          |                          ^
+      241 |
+      242 |     await page.locator(".conversation-agent-shell").first().screenshot({
+      243 |       path: path.join(EVIDENCE_DIR, "w24-e2e-tools-above-content.png")
+        at /home/dm/pony-agent/tests/e2e/wave24-history-order-gate.spec.ts:240:26
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--4cfd2---Content，且-Console-Error-0-chromium/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--4cfd2---Content，且-Console-Error-0-chromium/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/wave24-history-order-gate--4cfd2---Content，且-Console-Error-0-chromium/error-context.md
+
+    Retry #1 ───────────────────────────────────────────────────────────────────────────────────────
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeLessThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: < [32m0[39m
+    Received:   [31m1[39m
+
+      238 |     expect(order!.content).toBeGreaterThanOrEqual(0);
+      239 |     // 合同不变量：工具调用必须排在 Agent 正文之上
+    > 240 |     expect(order!.tools).toBeLessThan(order!.content);
+          |                          ^
+      241 |
+      242 |     await page.locator(".conversation-agent-shell").first().screenshot({
+      243 |       path: path.join(EVIDENCE_DIR, "w24-e2e-tools-above-content.png")
+        at /home/dm/pony-agent/tests/e2e/wave24-history-order-gate.spec.ts:240:26
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--4cfd2---Content，且-Console-Error-0-chromium-retry1/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--4cfd2---Content，且-Console-Error-0-chromium-retry1/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/wave24-history-order-gate--4cfd2---Content，且-Console-Error-0-chromium-retry1/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--4cfd2---Content，且-Console-Error-0-chromium-retry1/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results/playwright/wave24-history-order-gate--4cfd2---Content，且-Console-Error-0-chromium-retry1/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [chromium] › tests/e2e/wave24-history-order-gate.spec.ts:249:3 › Wave-24 历史会话展示时序（真实浏览器） › W24-E2E-2：含推理内容的历史回合必须渲染为 Reasoning -> Tools -> Content，且 Console Error = 0 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeLessThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: < [32m1[39m
+    Received:   [31m2[39m
+
+      279 |     // 合同不变量：思考过程 < 工具调用 < Agent 正文（严格递增）
+      280 |     expect(order!.reasoning).toBeLessThan(order!.tools);
+    > 281 |     expect(order!.tools).toBeLessThan(order!.content);
+          |                          ^
+      282 |     await expect(page.locator(".conversation-reasoning-panel").first()).toContainText(REASONING_TEXT);
+      283 |
+      284 |     await page.locator(".conversation-agent-shell").first().screenshot({
+        at /home/dm/pony-agent/tests/e2e/wave24-history-order-gate.spec.ts:281:26
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--73a23---Content，且-Console-Error-0-chromium/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--73a23---Content，且-Console-Error-0-chromium/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/wave24-history-order-gate--73a23---Content，且-Console-Error-0-chromium/error-context.md
+
+    Retry #1 ───────────────────────────────────────────────────────────────────────────────────────
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeLessThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: < [32m1[39m
+    Received:   [31m2[39m
+
+      279 |     // 合同不变量：思考过程 < 工具调用 < Agent 正文（严格递增）
+      280 |     expect(order!.reasoning).toBeLessThan(order!.tools);
+    > 281 |     expect(order!.tools).toBeLessThan(order!.content);
+          |                          ^
+      282 |     await expect(page.locator(".conversation-reasoning-panel").first()).toContainText(REASONING_TEXT);
+      283 |
+      284 |     await page.locator(".conversation-agent-shell").first().screenshot({
+        at /home/dm/pony-agent/tests/e2e/wave24-history-order-gate.spec.ts:281:26
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--73a23---Content，且-Console-Error-0-chromium-retry1/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: video (video/webm) ──────────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--73a23---Content，且-Console-Error-0-chromium-retry1/video.webm
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/playwright/wave24-history-order-gate--73a23---Content，且-Console-Error-0-chromium-retry1/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/playwright/wave24-history-order-gate--73a23---Content，且-Console-Error-0-chromium-retry1/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results/playwright/wave24-history-order-gate--73a23---Content，且-Console-Error-0-chromium-retry1/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2 failed
+    [chromium] › tests/e2e/wave24-history-order-gate.spec.ts:209:3 › Wave-24 历史会话展示时序（真实浏览器） › W24-E2E-1：无推理内容的历史回合必须渲染为 Tools -> Content，且 Console Error = 0 
+    [chromium] › tests/e2e/wave24-history-order-gate.spec.ts:249:3 › Wave-24 历史会话展示时序（真实浏览器） › W24-E2E-2：含推理内容的历史回合必须渲染为 Reasoning -> Tools -> Content，且 Console Error = 0 

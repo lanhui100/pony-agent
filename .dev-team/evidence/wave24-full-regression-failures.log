@@ -1,0 +1,426 @@
+(node:2663424) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2663442) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2663442) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ RUN  v4.1.9 /home/dm/pony-agent
+
+(node:2663490) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | tests/runtime-store.spec.ts > runtime session resilience > shows the target session placeholder and surfaces an error when switching fails without cached state
+[pony-agent][perf] host-read-error {
+  label: 'load_session_runtime_view',
+  elapsedMs: 0.9512899999999718,
+  error: 'Error: snapshot exploded',
+  sessionId: 'session-next',
+  nodeId: null
+}
+
+····stderr | tests/runtime-store.spec.ts > runtime session resilience > rolls back initializeSessions when loading the latest session fails
+[pony-agent][perf] host-read-error {
+  label: 'load_session_runtime_view',
+  elapsedMs: 0.10183400000005349,
+  error: 'Error: load latest failed',
+  sessionId: 'session-latest',
+  nodeId: null
+}
+
+···········xx·························stderr | tests/runtime-store.spec.ts > runtime session resilience > forwards image attachments to start_graph_run_stream and records an image summary
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.10001000000011118,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'image-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > forwards workspace mode to start_graph_run_stream input payload
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.10119299999996656,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'workspace-mode-session',
+  nodeId: null,
+  runId: null
+}
+
+·········stderr | tests/runtime-store.spec.ts > runtime session resilience > marks the turn as failed when start_graph_run_stream throws immediately
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.09811700000000201,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'tauri-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > applies started, delta and completed stream events to the active turn
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.10179399999969974,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: null
+}
+
+········stderr | tests/runtime-store.spec.ts > runtime session resilience > shows finalized output before terminal trace work completes
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.16614600000048085,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: 'run-stream'
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > unlocks the UI synchronously on completed while terminal trace projection is deferred
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1951919999992242,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-output-end',
+  nodeId: null,
+  runId: 'run-output-end'
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > does not overwrite a newly started turn's global state with a stale terminal projection
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.11812499999996362,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-unlock-first',
+  nodeId: null,
+  runId: null
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > keeps terminal assistant payload stable when output_end and completed carry the same content
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.09896800000024086,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-stale-guard',
+  nodeId: null,
+  runId: null
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > defers persistence for delta stream updates instead of flushing every chunk immediately
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.08771699999942939,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-deferred-persist',
+  nodeId: null,
+  runId: null
+}
+
+··stderr | tests/runtime-store.spec.ts > runtime session resilience > prefers canonical event metadata over legacy phase guessing while streaming
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1914550000001327,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'canonical-phase-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > ignores duplicate or older-sequence stream events once a newer canonical event was accepted
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.08956100000068545,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-dedup-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > records model and tool hops in timeline order without merging
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.07894000000123924,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: null
+}
+
+······stderr | tests/runtime-store.spec.ts > runtime session resilience > records model and tool hops in timeline order without merging
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.14874299999974028,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-stable-terminal',
+  nodeId: null,
+  runId: 'run-stable-terminal'
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > prefers backend-provided trace timeline over local timeline assembly
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.08857800000077987,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > prefers backend-provided trace timeline over local timeline assembly
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.14602800000102434,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'terminal-seq-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > prefers backend-provided trace timeline over local timeline assembly
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.17367000000012922,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: 'run-stream-hops'
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > keeps tool result text out of conversation-bound call_model entries on multi-hop completion
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.09735599999839906,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-multihop',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > keeps tool result text out of conversation-bound call_model entries on multi-hop completion
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.24711999999999534,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session',
+  nodeId: null,
+  runId: 'run-stream-backend-timeline'
+}
+
+··stderr | tests/runtime-store.spec.ts > runtime session resilience > ignores non-provider cache-hit candidates on completion
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.06418200000007346,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-accumulated-cache',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > ignores non-provider cache-hit candidates on completion
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.15526599999975588,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-multihop',
+  nodeId: null,
+  runId: 'run-stream-multihop-tool-result-leak'
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > stores call-level model hops with request kinds from host payload
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.12982699999884062,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-provider-calls',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > stores call-level model hops with request kinds from host payload
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.10718400000041584,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-accumulated-cache',
+  nodeId: null,
+  runId: 'run-stream-accumulated-cache'
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > strips the leading thinking prefix from streamed reasoning content
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.06197799999972631,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'reasoning-prefix-session',
+  nodeId: null,
+  runId: null
+}
+
+····stderr | tests/runtime-store.spec.ts > runtime session resilience > processes streamed turn events after submitting from a historical root checkout
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.1836490000005142,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-provider-calls',
+  nodeId: null,
+  runId: 'run-stream-provider-calls'
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > does not fail the turn when stream start response omits run id but streamed completion still arrives
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.09360800000104064,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'reasoning-prefix-session',
+  nodeId: null,
+  runId: 'run-reasoning'
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > does not fail the turn when stream start response omits run id but streamed completion still arrives
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.08480099999906088,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-missing-run-id',
+  nodeId: null,
+  runId: null
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > does not fail the turn when stream start response omits run id but streamed completion still arrives
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.19810700000016368,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'session-root-restart',
+  nodeId: 'node-root',
+  runId: 'run-root-restart'
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > persists runtime-produced hook trace records across streamed event hydration
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.06691700000010314,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'hook-stream-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > persists runtime-produced hook trace records across streamed event hydration
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.10103300000082527,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stream-session-missing-run-id',
+  nodeId: null,
+  runId: null
+}
+
+·stderr | tests/runtime-store.spec.ts > runtime session resilience > applies failed stream events to the active turn
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.05869100000018079,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'failed-stream-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > stops the active turn and handles cancelled stream events
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.05520600000090781,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'cancelled-stream-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > ignores stale failed and cancelled terminal events after a newer turn is active
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.07515299999977287,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'stale-terminal-session',
+  nodeId: null,
+  runId: null
+}
+
+stderr | tests/runtime-store.spec.ts > runtime session resilience > seeds a timeout retrying assistant message when submitting after timeout failure
+[pony-agent][perf] host-read-error {
+  label: 'load_retrieved_context',
+  elapsedMs: 0.06606599999940954,
+  error: 'Error: unexpected command: load_retrieved_context',
+  sessionId: 'timeout-retry-session',
+  nodeId: null,
+  runId: null
+}
+
+········stderr | tests/runtime-store.spec.ts > runtime session resilience > surfaces error when host read fails for uncached session switch
+[pony-agent][perf] host-read-error {
+  label: 'load_session_runtime_view',
+  elapsedMs: 0.32272399999965273,
+  error: 'Error: host read failed',
+  sessionId: 'session-error',
+  nodeId: null
+}
+
+··························
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/runtime-store.spec.ts > runtime session resilience > hydrates assistant history from snapshot content instead of stale persisted markdown text
+AssertionError: expected [ 'user:请整理 markdown', …(2) ] to deeply equal [ 'user:请整理 markdown', …(2) ]
+
+- Expected
++ Received
+
+  [
+    "user:请整理 markdown",
++   "tool:{\"ok\":true}",
+    "assistant:# 新标题
+  > 新引用
+  **已修复**",
+-   "tool:{\"ok\":true}",
+  ]
+
+ ❯ tests/runtime-store.spec.ts:1662:83
+    1660|     );
+    1661|
+    1662|     expect(store.messages.map((message) => `${message.role}:${message.…
+       |                                                                                   ^
+    1663|       "user:请整理 markdown",
+    1664|       "assistant:# 新标题\n> 新引用\n**已修复**",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  tests/runtime-store.spec.ts > runtime session resilience > hydrates reasoning, model label, and tool history from trace when persisted cache is unavailable
+AssertionError: expected [ 'user:请检查入口文件', …(2) ] to deeply equal [ 'user:请检查入口文件', …(2) ]
+
+- Expected
++ Received
+
+  [
+    "user:请检查入口文件",
+-   "assistant:我已经检查了入口文件，并整理了结果。",
+    "tool:import { createApp } from 'vue';",
++   "assistant:我已经检查了入口文件，并整理了结果。",
+  ]
+
+ ❯ tests/runtime-store.spec.ts:1749:83
+    1747|     );
+    1748|
+    1749|     expect(store.messages.map((message) => `${message.role}:${message.…
+       |                                                                                   ^
+    1750|       "user:请检查入口文件",
+    1751|       "assistant:我已经检查了入口文件，并整理了结果。",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 117 passed (119)
+   Start at  11:32:45
+   Duration  16.14s (transform 1.17s, setup 0ms, import 1.37s, tests 14.05s, environment 514ms)
+
