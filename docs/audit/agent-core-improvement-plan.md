@@ -4,6 +4,14 @@
 > 目标：把 4 项 P0 能力断层与 8 项 P1 落后项按"先止损、再补芯、后扩展"的顺序分批补齐，每波独立可验收、可回滚。
 > 台账：沿用本项目 `.dev-team/state.json` 的 wave 约定（当前 wave 24 已收口）。
 
+## 进度（滚动更新）
+
+| 波次 | 状态 | 提交 | 门禁凭证 |
+|---|---|---|---|
+| W25 假能力收口 | ✅ 完成 | `0d162da` 红相 / `3dab551` 实现 / `27255fd` 台账 | check Exit 0；wave25 4/4；orchestration 4/4；provider 52/52；contract_view 12/12；dispatcher 27/27；src-tauri Exit 0 |
+| W26 大输出 spill | ✅ 完成 | `93aa1f9` 红相 / `543d531` 实现+台账 | check Exit 0；wave26 8/8；spill 单测 10/10；wave25 4/4；provider 52/52；contract_view 12/12（primitive 37/surface 21）；src-tauri Exit 0；L3 审查 3 major 已修 |
+| W27 MCP 客户端 | ⏳ 下一波 | — | — |
+
 ## 一、总原则（不可协商）
 
 1. **先停止说谎，再补齐能力**：假接线（桩工具对模型谎报成功、空壳 `/cost`、fail-closed 的资源工具）优先级高于新功能。
