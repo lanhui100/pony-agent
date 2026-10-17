@@ -1564,7 +1564,9 @@ impl ToolRouter {
                             "result": {
                                 "ref_id": args.ref_id,
                                 "offset": offset,
-                                "limit": limit,
+                                // 回显实际生效的上限（spill 模块已 clamp 到 MAX_READ_LIMIT），
+                                // 避免模型按未 clamp 的入参翻页而静默跳字节。
+                                "limit": slice.limit,
                                 "start_offset": slice.start,
                                 "end_offset": slice.end,
                                 "total_bytes": slice.total_bytes,
@@ -6223,6 +6225,8 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_PLAN_CONTROL => "Plan",
         TOOL_VIEW_IMAGE => "ViewImage",
         TOOL_WORKSPACE_READ_DOCUMENT => "ReadDocument",
+        // W26：spill 回读工具的产品名（Deferred，经 tool_search 提升后出现）。
+        TOOL_SPILL_READ => "SpillRead",
         TOOL_TODO_WRITE => "TodoWrite",
         TOOL_TODO_LIST => "TodoList",
         TOOL_SPILL_READ => "SpillRead",
@@ -6338,6 +6342,7 @@ pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
         "Plan" => Some("计划".to_string()),
         "ViewImage" => Some("看图".to_string()),
         "ReadDocument" => Some("读文档".to_string()),
+        "SpillRead" => Some("回读溢出".to_string()),
         _ => None,
     };
     ToolDisplayMetadata { display_name_zh }
@@ -10858,7 +10863,8 @@ mod tests {
     }
 
     #[test]
-    fn read_file_rejects_file_too_large() {
+    fn read_file_spills_oversized_file_instead_of_failing() {
+        // W26：超过整文件内联上限（120_000 bytes）不再硬失败，而是落盘溢出并返回 content_ref。
         let workspace = temp_workspace();
         let large = vec![b'X'; 120_001];
         fs::write(workspace.join("large.bin"), &large).expect("write large file");
@@ -10868,6 +10874,41 @@ mod tests {
             call_id: None,
             name: TOOL_WORKSPACE_READ_FILE.to_string(),
             arguments: json!({ "path": "large.bin" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok", "超限文件应落盘溢出而非失败：{result:?}");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("spilled output should be json");
+        assert_eq!(payload.get("spilled").and_then(Value::as_bool), Some(true));
+        assert_eq!(payload.get("bytes").and_then(Value::as_u64), Some(120_001));
+        let content_ref = payload
+            .get("content_ref")
+            .and_then(Value::as_str)
+            .expect("content_ref required");
+        assert!(
+            crate::agent::spill::is_valid_ref_id(content_ref),
+            "content_ref 必须是 64 位十六进制：{content_ref}"
+        );
+        let preview = payload.get("preview").and_then(Value::as_str).unwrap_or("");
+        assert!(!preview.is_empty(), "spilled 结果必须带非空 preview");
+    }
+
+    #[test]
+    fn read_file_rejects_file_beyond_spill_cap() {
+        // 超过 MAX_SPILL_BYTES 仍必须失败（避免无界磁盘占用）；用稀疏文件快速构造。
+        let workspace = temp_workspace();
+        let path = workspace.join("huge.bin");
+        let file = fs::File::create(&path).expect("create sparse file");
+        file.set_len(crate::agent::spill::MAX_SPILL_BYTES + 1)
+            .expect("extend sparse file");
+        drop(file);
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_READ_FILE.to_string(),
+            arguments: json!({ "path": "huge.bin" }),
             plan: None,
         });
 
@@ -10882,7 +10923,6 @@ mod tests {
             Some("file_too_large")
         );
     }
-
     #[test]
     fn read_file_rejects_non_utf8_content() {
         let workspace = temp_workspace();

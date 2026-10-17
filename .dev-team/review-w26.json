@@ -2,92 +2,44 @@
   "verdict": "FAIL",
   "findings": [
     {
-      "file": "crates/pony-agent-core/src/agent/spill.rs",
-      "line": 171,
-      "severity": "major",
-      "rule": "limit/MAX_READ_LIMIT 上限必须生效，不得无界回灌上下文",
-      "counterexample": "`if end <= start && start < bytes.len() { end = bytes.len(); }`：当 limit==0，或 limit 小于 start 处字符宽度导致边界回退到 start 时，直接改成读到文件尾。实测（真实 ToolRouter 回放，200,002 bytes 中文文件）：spill_read(ref, offset=0, limit=1) 返回 content=200,002 bytes，result.limit 仍回显 1，truncated=false；limit=0 同样返回全文。若落盘文件达 MAX_SPILL_BYTES=64MiB，一次调用可把 64MiB 塞进上下文，MAX_READ_LIMIT=200_000 形同虚设。",
-      "suggestion": "end <= start 时返回空串（或最多推进到下一个字符边界），绝不改成 bytes.len()；limit==0 直接返回空并提示；同时把 start 回退后的实际区间上限再 clamp 到 limit 以内（例如 end = start + limit 后单独给多字节尾部留 1 个字符，而不是整篇）。"
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 10874,
+      "severity": "blocker",
+      "rule": "契约变更必须同步存量单测：cargo test -p pony-agent-core --lib 门禁必须全绿",
+      "counterexample": "`read_file_rejects_file_too_large`（tools.rs:10861）写入 120_001 bytes 后断言 `status == \"error\"` 且 error.code == \"file_too_large\"；但新分支（tools.rs:2804 `if metadata.len() > MAX_FULL_READ_BYTES` → tools.rs:2836 `spill_bytes`）对 120_001 字节文件返回 `status=\"ok\"` 的 spilled JSON。实测在已提交 HEAD（543d531/2380199）上 `cargo test -p pony-agent-core --lib read_file_rejects_file_too_large` FAILED：panicked at tools.rs:10874，left: \"ok\"，right: \"error\"，整包 lib 门禁红。同波已改 `tools.len()==37` 计数断言，却漏改这条。",
+      "suggestion": "把该单测改成 W26 契约（status=ok + JSON spilled=true + content_ref 64hex），另加一例 >MAX_SPILL_BYTES(>64MiB) 才断言 file_too_large；然后跑全量 `cargo test -p pony-agent-core --lib` 取 Exit 0 收据。"
     },
     {
       "file": "crates/pony-agent-core/src/agent/tools.rs",
-      "line": 1570,
-      "severity": "major",
-      "rule": "truncated 必须反映真实是否到文件尾，否则模型静默丢内容",
-      "counterexample": "`consumed = offset + content.len()` 在 start 被回退到字符边界（start < offset）时高估。实测：200,000 bytes 文件内容 = \"X\" + \"😀\" + \"a\"*199993 + \"é\"，spill_read(ref, offset=4, limit=199_997) 实际只读到字节 199,998，content=199,997 bytes，未读尾部 \"é\"（字节 199,998..200,000），但 consumed=4+199,997=200,001 >= total 使 truncated=false，模型据此判定已读全文。",
-      "suggestion": "让 read_spill/read_spill_from 返回真实结束偏移（或 truncated 布尔）而不是 (String,u64)；至少把 start 一并返回，令 truncated = start + content.len() < total_bytes。"
-    },
-    {
-      "file": "crates/pony-agent-core/src/agent/tools.rs",
-      "line": 6330,
-      "severity": "major",
-      "rule": "spilled 回执的 note 必须指向模型当下可调用的路径",
-      "counterexample": "spill_read 注册为 ToolExposure::Deferred（tools.rs:6330），默认回合视图只授权 ModelVisible 描述符（tool_runtime.rs:169-175）；模型源自调用未提升的 Deferred 描述符会被 dispatcher 以 origin_not_authorized 拒绝（dispatcher.rs:824-853）。而 spill 回执的 note 直接写「请用 spill_read(ref_id, offset, limit) 按需回读全文」（tools.rs:2864），模型按提示直接调用即失败。实测 registry：direct_allows_spill_read=false，search(\"spill\") 才得到 builtin:spill_read，elevate 后工具面从 21 变 22（新增 SpillRead）。即 tool_search 提升链本身正常，但 note 未提示需先提升。",
-      "suggestion": "note 改为「先调用 tool_search 检索 spill/SpillRead 提升本回合工具，再按 content_ref 回读」；或基于它只读且本地、无副作用，直接给 ModelVisible（若坚持 Deferred，则必须改提示文案）。"
+      "line": 6341,
+      "severity": "minor",
+      "rule": "D：新增 primitive 的 display 映射需齐全",
+      "counterexample": "`tool_display_metadata_for_name` 的 match（tools.rs:6324-6342）没有 \"SpillRead\" 分支，落到 `_ => None`；而 `model_visible_tool_name(spill_read) == \"SpillRead\"`（tools.rs:6225）。spill_read 经 tool_search 提升进回合工具面后，其 tool card 的 `display_name_zh` 为 None（ToolSearch/Read 等均有中文名），UI 只能退化显示原始名。",
+      "suggestion": "补 `\"SpillRead\" => Some(\"回读\".to_string())`，并在 contract_view_tests 增加一条 display 断言。"
     },
     {
       "file": "crates/pony-agent-core/src/agent/spill.rs",
-      "line": 26,
+      "line": 286,
       "severity": "minor",
-      "rule": "preview 长度契约单位不一致（字符 vs 字节），T1 的 <4000 bytes 条款对多字节内容不成立",
-      "counterexample": "PREVIEW_CHARS=2000 按 chars 截断（spill.rs:69-78/113），中文文件每字符 3 字节。实测 200,002 bytes 中文文件：preview_chars=2000、preview_bytes=5500，超过 T1 文档与断言使用的 <4_000 bytes 阈值。冻结测试夹具为纯 ASCII，故漏网。",
-      "suggestion": "preview 按字节上限截断（例如 4_000 bytes 且回退到字符边界），或把契约统一为字符并同步测试文案；两者必须一致。"
-    },
-    {
-      "file": "crates/pony-agent-core/src/agent/tools.rs",
-      "line": 6140,
-      "severity": "minor",
-      "rule": "新增 primitive 遗漏 execution_policy 映射表",
-      "counterexample": "execution_policy_for_primitive 未列 TOOL_SPILL_READ，落到 ToolExecutionPolicy::default()：concurrent_safe=false（其余全部读工具均为 true，W28 并发分区会把纯 IO 回读串行化）、result_budget_bytes=120_000。实测 default_permission_facts_for_name(\"spill_read\").permission_scope=None。",
-      "suggestion": "把 TOOL_SPILL_READ 加入 concurrent_safe 的只读分支，并按需给 result_budget_bytes（≤MAX_READ_LIMIT）。"
-    },
-    {
-      "file": "crates/pony-agent-core/src/agent/tools.rs",
-      "line": 6358,
-      "severity": "minor",
-      "rule": "新增 primitive 遗漏 permission facts / display metadata 映射",
-      "counterexample": "default_permission_facts_for_name(\"spill_read\") 走 `_ => None`，permission_scope=None（workspace_read_file 等同族工具均为 Some(\"workspace.read\")）；tool_display_metadata_for_name(\"SpillRead\") 返回 display_name_zh=None（前端目录展示会退化为原始名）。实测打印：permission_scope=None，display_zh=ToolDisplayMetadata { display_name_zh: None }。",
-      "suggestion": "补 permission_scope=workspace.read 与中文显示名；若有意留空需注释说明。"
+      "rule": "落盘溢出必须有生命周期与权限收敛：不能无界增长、不能对同机其他用户可读",
+      "counterexample": "`gc_spill_root`（spill.rs:286）全仓只有定义与单测调用点（spill.rs:483/493），生产路径无任何调用者；spill.rs:283-285 注释也承认「本波不自动触发」。落盘根仍是共享 `<temp>/pony-agent-spill`（spill.rs:97-101），写文件走 `fs::write`（spill.rs:164）无权限收敛（全文件无 OpenOptions/set_permissions）。物理凭证：本机 `stat -c '%a' /tmp/pony-agent-spill` → 目录 775、`*.spill` → 664，跑完验收测试后残留 712K 且跨 18:59/19:11 两次运行未回收——任意 >120KB 工作区文件（可能含 .env/密钥）在可预测的共享临时目录里对其他本机用户可读且长期驻留。",
+      "suggestion": "在会话启动/收尾调度 `gc_spill_root`（例如 24h + 512MiB 上限）；Unix 下目录 0700、文件 0600（OpenOptions + PermissionsExt），并按 UID 隔离根目录。"
     },
     {
       "file": "crates/pony-agent-core/src/agent/spill.rs",
-      "line": 44,
+      "line": 200,
       "severity": "minor",
-      "rule": "落盘生命周期缺失，偏离 W26 方案（会话私有目录 + ref 生命周期）",
-      "counterexample": "实现使用全局 <temp>/pony-agent-spill（spill.rs:44-49），无 TTL/GC/配额；模块内不存在任何清理函数，但错误文案声称「可能已过期或被清理」（spill.rs:151）。W26 方案写入范围含 session/store.rs（ref 生命周期）与 dispatcher.rs（预算超限分支），本次 diff 均未触碰（dispatcher.rs:1099/1434 仍硬失败，虽有 governed_executor.rs:184 unbounded 掩盖）。",
-      "suggestion": "至少补一个按 mtime/总量清理的 GC 入口，或把根目录按会话隔离；并在交付说明中显式标注未覆盖的 W26 范围，避免方案与实现漂移。"
-    },
-    {
-      "file": "crates/pony-agent-core/src/agent/spill.rs",
-      "line": 99,
-      "severity": "minor",
-      "rule": "临时文件命名/竞态与残留",
-      "counterexample": "tmp 名固定为 <ref>.spill.tmp 且先 `if !path.exists()` 再写：同内容并发写共用同一 tmp；进程在 write 与 rename 间崩溃会永久残留 .tmp（无清理）；Windows 上后到的 rename 因目标已存在而失败，被当作整体失败返回（spill.rs:102-105）。",
-      "suggestion": "tmp 名加入 pid+随机后缀，rename 失败时先检查目标是否已存在并视为成功；启动/GC 时清理陈旧 .tmp。"
+      "rule": "A：路径校验不得是恒真式；内容寻址必须能验证读取内容与 ref_id 一致",
+      "counterexample": "`if path.parent() != Some(root.as_path())`（spill.rs:200）对 `root.join(format!(\"{ref_id}.spill\"))` 恒为 false（ref_id 已被 is_valid_ref_id 限定为纯 hex，join 只追加一个组件），这段「越界防线」永不触发，给出虚假的安全感；真正可被绕过的是文件替换：spill.rs:157 `if !path.exists()` 信任任意已存在的 `<sha>.spill`，spill.rs:230 `path.is_file()` 与 spill.rs:236 `fs::read` 跟随 symlink，且读回后从不校验 sha256(内容)==ref_id。反例：把 `/tmp/pony-agent-spill/<ref>.spill` 替换为指向其他可读文件的 symlink 后 `spill_read(ref)`，返回的是目标文件内容（total_bytes 也变成目标大小），内容寻址的完整性承诺被破坏。",
+      "suggestion": "Unix 下用 O_NOFOLLOW 打开，读回后校验 sha256 与 ref_id 一致（不一致报 ref_corrupted）；删除恒真的 parent 检查，或改为 canonicalize + starts_with(root) 并在注释里说明 ref_id 白名单才是主防线。"
     },
     {
       "file": "crates/pony-agent-core/src/agent/tools.rs",
-      "line": 2861,
+      "line": 1567,
       "severity": "minor",
-      "rule": "同一波两个成功回执的 JSON 形状不一致",
-      "counterexample": "workspace_read_file 的 spilled 回执把 spilled/content_ref/bytes/preview 放在顶层（tools.rs:2858-2865），spill_read 把同族字段放在 result 下（tools.rs:1575-1584）；T1 允许两种，但同波两个工具两套裁剪会让调用方/前端解析歧义。",
-      "suggestion": "统一为 {ok, tool, result:{...}} 形状（T1 已允许 result 容器）。"
-    },
-    {
-      "file": "crates/pony-agent-core/src/agent/tools.rs",
-      "line": 1592,
-      "severity": "minor",
-      "rule": "错误码靠中文子串匹配，脆弱",
-      "counterexample": "`if err.contains(\"不存在\") { ref_not_found } else if err.contains(\"非法\") { invalid_ref }`：任何文案调整（或文件名里恰好含「非法」的 IO 错误）都会静默改分类；且 is_valid_ref_id 已在 tool 层前置校验，invalid_ref 分支实际不可达。",
-      "suggestion": "让 spill 模块返回带类型的错误枚举（NotFound/InvalidRef/Io），由调用方 match。"
-    },
-    {
-      "file": "crates/pony-agent-core/tests/wave26_spill_test.rs",
-      "line": 705,
-      "severity": "minor",
-      "rule": "冻结测试存在覆盖逃逸：安全前置重复、UTF-8/limit 边界全未覆盖",
-      "counterexample": "T6（688-736）只命中 execute_spill_read 的 is_valid_ref_id 前置（tools.rs:1553），因此把模块层 resolve_ref_path_in 的校验与 parent() 判定整体删除，T6 仍然全绿；夹具纯 ASCII 且只测 limit=8000/200000，故上面第 1/2/4 三条真实缺陷（limit=0/1 全文回灌、truncated 误判、preview 5500 bytes）都不会让冻结测试失败。",
-      "suggestion": "补：offset/limit 边界（0、1、>EOF）、多字节起止、truncated 与真实尾部断言、以及绕过 tool 层直接打 resolve_ref_path_in 的负例；夹具至少一份 CJK。"
+      "rule": "回执字段必须反映实际生效参数，否则客户端分页会静默跳字节",
+      "counterexample": "`\"limit\": limit`（tools.rs:1567）回显的是未 clamp 的入参（tools.rs:1554-1556 取值），而 `read_spill` 内部把 limit clamp 到 MAX_READ_LIMIT=200_000（spill.rs:240）。反例：`spill_read(ref, offset=0, limit=1_000_000)` 返回 200_000 bytes 的 content，但 result.limit=1000000；模型按 `offset += result.limit` 翻页会静默跳过 800_000 bytes（truncated 虽为 true，但下一次读取的起点错了）。",
+      "suggestion": "回显实际生效的 `limit = min(requested, MAX_READ_LIMIT)`（必要时另加 requested_limit 字段），并在 note/文档里统一用 `end_offset` 作为下一页起点。"
     }
   ]
 }

@@ -775,7 +775,10 @@
         "cargo test --lib provider::tests": "52 passed",
         "cargo test --lib contract_view_tests": "12 passed（primitive 37 / surface 21）",
         "cargo test --lib spill::": "10 passed",
-        "cargo check --manifest-path src-tauri/Cargo.toml": "Exit 0"
+        "cargo check --manifest-path src-tauri/Cargo.toml": "Exit 0",
+        "cargo test --lib agent::spill": "11 passed（含 symlink 拒绝 / limit 硬上限 / truncated / gc）",
+        "cargo test --lib read_file_": "10 passed",
+        "full lib suite（串行基线对照）": "基线 1022 passed/12 failed → 本波后 1025 passed/11 failed，失败集仅减少存量陈旧用例，无新增失败（并行跑会互相干扰，须 --test-threads=1）"
       },
       "blast_radius": "3 文件（1 新增 ~470 行 + 2 修改）；文件系统写入限定在 temp/PONY_AGENT_SPILL_DIR 内的内容寻址文件，ref_id 强校验防穿越",
       "review": {
@@ -796,7 +799,22 @@
         "residual": [
           "dispatcher.rs:1099/1434 的 output_budget_exceeded 分支未接 spill（生产 build_governed_executor 为 unbounded 模式，当前不可达）；留待 W28 工具装配重写统一处理",
           "spill 根目录为全局 temp（未按会话隔离），GC 入口已提供但未调度；会话级生命周期留待 W32（会话/快照层）",
-          "workspace_read_file 顶层 JSON 与 spill_read 的 result 容器两套形状（冻结测试兼容两种，属有意保留待 W28 统一）"
+          "workspace_read_file 顶层 JSON 与 spill_read 的 result 容器两套形状（冻结测试兼容两种，属有意保留待 W28 统一）",
+          "全量 lib 套件存在 11 个与本波无关的存量失败（Windows 路径/卷边界、symlink canary、sandbox fail-closed、governed-legacy 对齐、edit_file fs_not_observed），属基线技术债，需单独立项"
+        ],
+        "rounds": [
+          {
+            "reviewer": "d5ad4bcd",
+            "verdict": "FAIL",
+            "findings": "3 major + 8 minor",
+            "outcome": "全部处置（见 .dev-team/review-w26-remediation.md）"
+          },
+          {
+            "reviewer": "897c35db",
+            "verdict": "FAIL",
+            "findings": "1 blocker + 4 minor",
+            "outcome": "blocker=存量陈旧单测未随契约迁移，已迁移+补齐 cap 用例；4 minor 全部处置"
+          }
         ]
       },
       "meta_retrospective": "独立 L3 审查真实拦截了 3 个 major（含限流击穿与 truncated 误报），证明「机器门禁全绿 ≠ 正确」；代价是审查 subagent 稳定性不足需精简提示重试"

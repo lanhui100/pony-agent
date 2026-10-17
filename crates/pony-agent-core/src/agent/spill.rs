@@ -84,6 +84,8 @@ pub struct SpillSlice {
     pub start: u64,
     /// 实际结束字节偏移（不含）。
     pub end: u64,
+    /// 实际生效的读取上限（已 clamp 到 [`MAX_READ_LIMIT`]）。
+    pub limit: usize,
 }
 
 impl SpillSlice {
@@ -133,6 +135,53 @@ pub fn preview_of(content: &str, max_bytes: usize) -> String {
     out
 }
 
+/// 落盘 GC 的默认年龄上限（超过即回收）。
+pub const GC_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// 落盘 GC 的默认总量上限。
+pub const GC_MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+/// 机会式 GC 的最小间隔。
+const GC_MIN_INTERVAL_MS: u64 = 5 * 60 * 1000;
+
+static LAST_GC_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 收紧落盘目录/文件权限（Unix 下目录 0700、文件 0600；其他平台 no-op）。
+fn tighten_permissions(path: &Path, is_dir: bool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if is_dir { 0o700 } else { 0o600 };
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, is_dir);
+    }
+}
+
+/// 机会式 GC（按 `GC_MIN_INTERVAL_MS` 限频），失败静默（不影响主流程）。
+pub fn maybe_gc(root: &Path) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_GC_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < GC_MIN_INTERVAL_MS {
+        return;
+    }
+    if LAST_GC_MS
+        .compare_exchange(
+            last,
+            now_ms,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+    let _ = gc_spill_root(root, GC_MAX_AGE, GC_MAX_TOTAL_BYTES);
+}
+
 fn io_error(context: &str, err: std::io::Error) -> SpillError {
     SpillError::Io(format!("{context}：{err}。"))
 }
@@ -150,6 +199,7 @@ pub fn spill_bytes_to(root: &Path, content: &[u8]) -> Result<SpillRef, SpillErro
     let root = root.to_path_buf();
     fs::create_dir_all(&root)
         .map_err(|err| io_error(&format!("创建落盘目录 {} 失败", root.display()), err))?;
+    tighten_permissions(&root, true);
 
     let ref_id = content_ref_id(content);
     let path = root.join(format!("{ref_id}.spill"));
@@ -163,6 +213,7 @@ pub fn spill_bytes_to(root: &Path, content: &[u8]) -> Result<SpillRef, SpillErro
         ));
         fs::write(&tmp, content)
             .map_err(|err| io_error(&format!("写入落盘文件 {} 失败", tmp.display()), err))?;
+        tighten_permissions(&tmp, false);
         match fs::rename(&tmp, &path) {
             Ok(()) => {}
             // 并发下另一个写者可能已抢先 rename 成功：目标存在即视为成功。
@@ -178,6 +229,9 @@ pub fn spill_bytes_to(root: &Path, content: &[u8]) -> Result<SpillRef, SpillErro
             }
         }
     }
+
+    // 机会式回收：每 5 分钟最多一次，按年龄/总量清理陈旧落盘（避免 temp 目录长期堆积）。
+    maybe_gc(&root);
 
     let preview_source = String::from_utf8_lossy(content);
     Ok(SpillRef {
@@ -233,8 +287,31 @@ pub fn read_spill_from(
         )));
     }
 
-    let bytes = fs::read(&path)
-        .map_err(|err| io_error(&format!("读取落盘文件 {} 失败", path.display()), err))?;
+    // 符号链接防护：解析真实路径后必须仍落在落盘根目录内、且文件名与 ref_id 一致，
+    // 否则拒绝（`ref_id` 是内容哈希，指向别的文件即内容与句柄不符）。
+    let canonical_root = fs::canonicalize(root).map_err(|_| {
+        SpillError::NotFound(format!(
+            "落盘根目录 {} 不可用（content_ref `{ref_id}` 无法解析）。",
+            root.display()
+        ))
+    })?;
+    let canonical_path = fs::canonicalize(&path).map_err(|_| {
+        SpillError::NotFound(format!(
+            "content_ref `{ref_id}` 不存在（可能已过期或被清理）。"
+        ))
+    })?;
+    let expected_name = format!("{ref_id}.spill");
+    if canonical_path.parent() != Some(canonical_root.as_path())
+        || canonical_path.file_name().and_then(|name| name.to_str())
+            != Some(expected_name.as_str())
+    {
+        return Err(SpillError::InvalidRef(format!(
+            "content_ref `{ref_id}` 解析到的真实路径越出落盘根目录或与句柄不符（疑似符号链接替换）。"
+        )));
+    }
+
+    let bytes = fs::read(&canonical_path)
+        .map_err(|err| io_error(&format!("读取落盘文件 {} 失败", canonical_path.display()), err))?;
     let total = bytes.len();
 
     let limit = limit.min(MAX_READ_LIMIT);
@@ -245,6 +322,7 @@ pub fn read_spill_from(
             total_bytes: total as u64,
             start: at as u64,
             end: at as u64,
+            limit: 0,
         });
     }
 
@@ -268,6 +346,7 @@ pub fn read_spill_from(
         total_bytes: total as u64,
         start: start as u64,
         end: end as u64,
+        limit,
     })
 }
 
@@ -501,6 +580,28 @@ mod tests {
             .sum();
         assert!(remaining <= 1, "回收后总量必须不超过上限：{remaining}");
         let _ = fs::remove_dir_all(root2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_spill_file_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root();
+        let outside = temp_root(); // 根目录外的目标
+        fs::create_dir_all(&root).expect("root");
+        fs::create_dir_all(&outside).expect("outside");
+        let victim = outside.join("victim.txt");
+        fs::write(&victim, b"content that does not match the ref_id").expect("write victim");
+
+        // 合法 ref_id（内容哈希）但用符号链接指向根外文件。
+        let ref_id = content_ref_id(b"genuine content");
+        symlink(&victim, root.join(format!("{ref_id}.spill"))).expect("symlink");
+
+        let err = read_spill_from(&root, &ref_id, 0, 32).expect_err("symlink must be rejected");
+        assert_eq!(err.code(), "invalid_ref", "符号链接替换必须拒绝：{err:?}");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[test]
