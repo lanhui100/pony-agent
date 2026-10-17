@@ -1,10 +1,10 @@
 {
-  "wave": 25,
+  "wave": 26,
   "status": "all_waves_completed",
   "task_classification": "B",
-  "reason": "Agent 核心能力审计（22 轴三方对比）后首个完善波次 W25：子代理/团队桩工具假报成功收口为 capability_unavailable，并修正基线即失败的陈旧工具面断言",
-  "baseline_commit": "0d162da",
-  "symptom": "10 个未接线工具（subagent/workflow/spawn_teammate/list_agents/send_message/interrupt_agent/drain_inbox/team_task_*) 经 ToolRouter 返回 status=ok 假回执；provider/mod.rs 与 tools.rs 内联工具面断言仍写死 28 项（含 10 个假工具）故基线 FAILED",
+  "reason": "W26 大输出落盘溢出（spill）：超限读取不再丢弃/硬失败，改为内容寻址落盘 + content_ref 按需回读，并新增 spill_read 工具",
+  "baseline_commit": "93aa1f9",
+  "symptom": "workspace_read_file 对 >120000 bytes 文件直接返回 file_too_large，模型只能分段重读或反复重跑命令；命令输出环形缓冲截断即永久丢失（审计 P0-4 / A09）",
   "waves": {
     "9": {
       "branches": {
@@ -736,12 +736,76 @@
       },
       "blast_radius": "3 文件 / 净增约 120 行；无网络、无并发、无持久化格式变更；工具面契约与错误码契约变更已在 contract_ledger 声明",
       "meta_retrospective": "见 docs/audit/agent-core-improvement-plan.md：本波验证了「先止损」排序（假能力优先于补芯）与红相冻结的有效性；同时暴露 teammate 轮次稳定性问题，后续波次改为 Lead 兜底 + 独立核验 subagent"
+    },
+    "26": {
+      "status": "completed",
+      "desc": "W26 大输出 spill：内容寻址落盘（sha256）+ 超限读取返回 content_ref/preview + spill_read(offset/limit) 回读 + GC 入口",
+      "task_classification": "B",
+      "classification_basis": "新增跨模块能力（新模块 + 新 primitive + 读取语义变更），涉及文件系统写入与安全边界；未命中网络/并发黑名单，但属用户可见契约变更，按 B 级走独立 Test Agent 红相 + 独立 L3 审查",
+      "write_scopes": {
+        "test-agent/frozen-red": [
+          "crates/pony-agent-core/tests/wave26_spill_test.rs"
+        ],
+        "impl": [
+          "crates/pony-agent-core/src/agent/spill.rs",
+          "crates/pony-agent-core/src/agent/tools.rs",
+          "crates/pony-agent-core/src/agent/mod.rs"
+        ]
+      },
+      "contract_ledger": [
+        "超过 MAX_FULL_READ_BYTES(120000) 且 ≤ MAX_SPILL_BYTES(64MiB) 的文件读取：返回 status=ok + JSON{spilled:true, content_ref, bytes, preview, note}，不再返回 file_too_large",
+        "content_ref = sha256 小写十六进制 64 位（内容寻址，天然去重）；任何非 64hex 输入 → error.code=invalid_ref；格式合法但缺失 → ref_not_found",
+        "spill_read(offset, limit=8000, MAX_READ_LIMIT=200000)：limit 为硬上限，limit=0 返回空切片；truncated 由真实 end<total 判定（tail 字符边界回退不会高估）",
+        "preview 按字节截断（PREVIEW_BYTES=3000）且不切断多字节字符",
+        "spill_read 以 Deferred 注册，模型需先 tool_search 提升（提升链实测 21→22）；文件读取回执 note 已写明该前置步骤"
+      ],
+      "circuit_breaker": {
+        "attempts": 0,
+        "note": "无熔断触发"
+      },
+      "contract_evolution": "W26 期间新增 spill_read 使内部 primitive 计数 36→37、模型可见面保持 21；未改 exposure 语义",
+      "pool_degradation": "独立 L3 审查 subagent 首轮两次无产出（第 1 个静默超时），第 3 次（精简提示）成功给出 FAIL+3 major；Lead 按 findings 修复后复跑全门禁，审查报告留档 .dev-team/review-w26.json",
+      "gates": {
+        "cargo check -p pony-agent-core --all-targets": "Exit 0",
+        "cargo test --test wave26_spill_test": "8 passed（红相转绿，红相证据：首次 5 failed / 3 passed）",
+        "cargo test --test wave25_capability_honesty_test": "4 passed",
+        "cargo test --test orchestration_acceptance_test": "4 passed",
+        "cargo test --test dispatcher_matrix": "27 passed",
+        "cargo test --test tool_surface_wave20_contract": "2 passed",
+        "cargo test --lib provider::tests": "52 passed",
+        "cargo test --lib contract_view_tests": "12 passed（primitive 37 / surface 21）",
+        "cargo test --lib spill::": "10 passed",
+        "cargo check --manifest-path src-tauri/Cargo.toml": "Exit 0"
+      },
+      "blast_radius": "3 文件（1 新增 ~470 行 + 2 修改）；文件系统写入限定在 temp/PONY_AGENT_SPILL_DIR 内的内容寻址文件，ref_id 强校验防穿越",
+      "review": {
+        "report": ".dev-team/review-w26.json",
+        "verdict_before_fix": "FAIL（3 major + 8 minor）",
+        "fixed_major": [
+          "limit 击穿：删除 end<=start → bytes.len() 退化分支；limit=0 返回空、limit 为硬上限（单测覆盖 limit=0/1/超大）",
+          "truncated 高估：read_spill 改为返回 SpillSlice{start,end,total}，truncated 由 end<total 真实判定（单测含 CJK 尾部回退）",
+          "Deferred 提示语：读取回执 note 改为先 tool_search 提升 SpillRead 再回读"
+        ],
+        "fixed_minor": [
+          "preview 改按字节截断（PREVIEW_BYTES=3000，不切断多字节字符）",
+          "补 execution_policy（concurrent_safe + result_budget=MAX_READ_LIMIT）与 permission facts（workspace.read）",
+          "tmp 文件名加 pid+uuid 防竞态；rename 冲突且目标存在视为成功",
+          "错误码结构化（SpillError::code），不再靠中文子串匹配",
+          "新增 gc_spill_root（按 mtime/总量回收）+ 单测"
+        ],
+        "residual": [
+          "dispatcher.rs:1099/1434 的 output_budget_exceeded 分支未接 spill（生产 build_governed_executor 为 unbounded 模式，当前不可达）；留待 W28 工具装配重写统一处理",
+          "spill 根目录为全局 temp（未按会话隔离），GC 入口已提供但未调度；会话级生命周期留待 W32（会话/快照层）",
+          "workspace_read_file 顶层 JSON 与 spill_read 的 result 容器两套形状（冻结测试兼容两种，属有意保留待 W28 统一）"
+        ]
+      },
+      "meta_retrospective": "独立 L3 审查真实拦截了 3 个 major（含限流击穿与 truncated 误报），证明「机器门禁全绿 ≠ 正确」；代价是审查 subagent 稳定性不足需精简提示重试"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
   "previous_wave": {
-    "wave": 24,
+    "wave": 25,
     "status": "all_waves_completed",
-    "reason": "硬编码 PonySentry 凭证清理（3 处泄漏面）+ 密钥扫描门禁补盲（裸 64-hex 失明）+ 前端默认零 egress 契约 + PA-110 看板治理失真修正"
+    "reason": "Agent 核心能力审计（22 轴三方对比）后首个完善波次 W25：子代理/团队桩工具假报成功收口为 capability_unavailable，并修正基线即失败的陈旧工具面断言"
   }
 }

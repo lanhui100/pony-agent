@@ -163,6 +163,8 @@ pub(crate) const TOOL_TEAM_TASK_UPDATE: &str = "team_task_update";
 pub(crate) const TOOL_TEAM_TASK_LIST: &str = "team_task_list";
 pub(crate) const TOOL_TODO_WRITE: &str = "todo_write";
 pub(crate) const TOOL_TODO_LIST: &str = "todo_list";
+/// W26：大输出落盘溢出（spill）的按引用回读工具（Deferred，经 tool_search 曝光）。
+pub(crate) const TOOL_SPILL_READ: &str = "spill_read";
 pub(crate) const TOOL_CREATE_GOAL: &str = "create_goal";
 pub(crate) const TOOL_GET_GOAL: &str = "get_goal";
 pub(crate) const TOOL_UPDATE_GOAL: &str = "update_goal";
@@ -1209,6 +1211,7 @@ impl ToolRouter {
             Some(TOOL_TEAM_TASK_LIST) => self.execute_team_task_list(call),
             Some(TOOL_TODO_WRITE) => self.execute_todo_write(call),
             Some(TOOL_TODO_LIST) => self.execute_todo_list(call),
+            Some(TOOL_SPILL_READ) => self.execute_spill_read(call),
             Some(TOOL_CREATE_GOAL) => self.execute_create_goal(call),
             Some(TOOL_GET_GOAL) => self.execute_get_goal(call),
             Some(TOOL_UPDATE_GOAL) => self.execute_update_goal(call),
@@ -1538,6 +1541,55 @@ impl ToolRouter {
                 TOOL_TODO_LIST,
                 "invalid_arguments",
                 format!("Failed to parse todo_list arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_spill_read(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<SpillReadArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => {
+                let offset = args.offset.unwrap_or(0);
+                let limit = args
+                    .limit
+                    .unwrap_or(crate::agent::spill::DEFAULT_READ_LIMIT);
+                match crate::agent::spill::read_spill(&args.ref_id, offset, limit) {
+                    Ok(slice) => ToolResult {
+                        tool_name: TOOL_SPILL_READ.to_string(),
+                        status: "ok".to_string(),
+                        output: json_string(json!({
+                            "ok": true,
+                            "tool": TOOL_SPILL_READ,
+                            "result": {
+                                "ref_id": args.ref_id,
+                                "offset": offset,
+                                "limit": limit,
+                                "start_offset": slice.start,
+                                "end_offset": slice.end,
+                                "total_bytes": slice.total_bytes,
+                                "content": slice.content,
+                                // 真实尾部判定（由 spill 模块给出，避免调用方重算偏移高估）
+                                "truncated": slice.truncated(),
+                            }
+                        })),
+                        duration_ms: 0,
+                    },
+                    Err(err) => error_result(
+                        TOOL_SPILL_READ,
+                        err.code(),
+                        err.message().to_string(),
+                        Some(
+                            "content_ref 来自大输出工具的 spilled 结果；若已被清理请重新执行产生该输出的工具。"
+                                .to_string(),
+                        ),
+                    ),
+                }
+            }
+            Err(err) => error_result(
+                TOOL_SPILL_READ,
+                "invalid_arguments",
+                format!("Failed to parse spill_read arguments: {}", err),
                 None,
             ),
         }
@@ -2750,20 +2802,59 @@ impl ToolRouter {
         };
 
         if metadata.len() > MAX_FULL_READ_BYTES {
-            return error_result(
-                TOOL_WORKSPACE_READ_FILE,
-                "file_too_large",
-                format!(
-                    "文件 {} 大小为 {} bytes，超过整文件读取上限 {} bytes。",
-                    self.display_resolved_workspace_relative(&resolved, context, ws_id),
-                    metadata.len(),
-                    MAX_FULL_READ_BYTES
+            // W26：超过整文件内联上限时不再直接失败，而是落盘溢出并返回 content_ref，
+            // 由 `spill_read` 按需回读（对比基线：claude-code toolResultStorage / DSH spill）。
+            if metadata.len() > crate::agent::spill::MAX_SPILL_BYTES {
+                return error_result(
+                    TOOL_WORKSPACE_READ_FILE,
+                    "file_too_large",
+                    format!(
+                        "文件 {} 大小为 {} bytes，超过落盘溢出上限 {} bytes。",
+                        self.display_resolved_workspace_relative(&resolved, context, ws_id),
+                        metadata.len(),
+                        crate::agent::spill::MAX_SPILL_BYTES
+                    ),
+                    Some(
+                        "请改用 workspace_read_file_segment 分段读取，或用 workspace_gather_context 获取概览。"
+                            .to_string(),
+                    ),
+                );
+            }
+
+            let bytes = match fs::read(&resolved) {
+                Ok(value) => value,
+                Err(error) => {
+                    return error_result(
+                        TOOL_WORKSPACE_READ_FILE,
+                        "read_failed",
+                        format!("读取文件失败：{}。", error),
+                        Some("请确认目标文件存在，且当前进程有读取权限。".to_string()),
+                    )
+                }
+            };
+
+            return match crate::agent::spill::spill_bytes(&bytes) {
+                Ok(spilled) => ToolResult {
+                    tool_name: TOOL_WORKSPACE_READ_FILE.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_WORKSPACE_READ_FILE,
+                        "spilled": true,
+                        "content_ref": spilled.ref_id,
+                        "bytes": spilled.bytes,
+                        "preview": spilled.preview,
+                        "note": "文件超过整文件内联上限，已落盘溢出。回读方式：先调用 tool_search（关键词 spill/SpillRead）把 `SpillRead` 提升到本回合工具面，再用 spill_read(ref_id, offset, limit) 按需读取全文。"
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(
+                    TOOL_WORKSPACE_READ_FILE,
+                    err.code(),
+                    err.message().to_string(),
+                    Some("请改用 workspace_read_file_segment 分段读取。".to_string()),
                 ),
-                Some(
-                    "请改用 workspace_read_file_segment，或用 workspace_gather_context 获取概览。"
-                        .to_string(),
-                ),
-            );
+            };
         }
 
         match fs::read_to_string(&resolved) {
@@ -5353,6 +5444,29 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
             })),
         },
         ToolDefinition {
+            name: TOOL_SPILL_READ,
+            description: "按 content_ref 回读大输出落盘溢出（spill）的内容，支持 offset/limit 分段读取。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "ref_id": {
+                        "type": "string",
+                        "description": "spilled 结果里返回的 content_ref（64 位十六进制内容哈希）"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "起始字节偏移，默认 0"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "本次读取的最大字节数，默认 8000，上限 200000"
+                    }
+                },
+                "required": ["ref_id"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
             name: TOOL_CREATE_GOAL,
             description: "创建会话目标，使 Agent 在同会话内支持跨多轮自动续行追求持久目标。",
             input_schema: with_description(json!({
@@ -5558,7 +5672,7 @@ mod contract_view_tests {
             .map(|view| view.name.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(tools.len(), 36, "baseline internal primitive count");
+        assert_eq!(tools.len(), 37, "W26 新增 spill_read（Deferred）后内部 primitive 数");
         assert_eq!(names.len(), 21, "W25 模型可见工具面 21 项（10 个假能力工具已摘除）");
         assert_eq!(
             names,
@@ -5891,6 +6005,7 @@ pub fn canonical_tool_name(name: &str) -> Option<&'static str> {
         "Run" => Some(TOOL_WORKSPACE_RUN_COMMAND),
         "TodoWrite" => Some(TOOL_TODO_WRITE),
         "TodoList" => Some(TOOL_TODO_LIST),
+        "SpillRead" => Some(TOOL_SPILL_READ),
         // PA-114: the product name `Ask` is now owned by the first-class `ask_user` primitive.
         // `echo_input` keeps resolving to itself below (legacy compat, B2-1).
         "Ask" => Some(TOOL_ASK_USER),
@@ -5946,6 +6061,7 @@ pub fn canonical_tool_name(name: &str) -> Option<&'static str> {
         TOOL_TEAM_TASK_LIST => Some(TOOL_TEAM_TASK_LIST),
         TOOL_TODO_WRITE => Some(TOOL_TODO_WRITE),
         TOOL_TODO_LIST => Some(TOOL_TODO_LIST),
+        TOOL_SPILL_READ => Some(TOOL_SPILL_READ),
         TOOL_CREATE_GOAL | "create.goal" => Some(TOOL_CREATE_GOAL),
         TOOL_GET_GOAL | "get.goal" => Some(TOOL_GET_GOAL),
         TOOL_UPDATE_GOAL | "update.goal" => Some(TOOL_UPDATE_GOAL),
@@ -5999,6 +6115,7 @@ fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str> {
         TOOL_TEAM_TASK_LIST => vec![TOOL_TEAM_TASK_LIST],
         TOOL_TODO_WRITE => vec![TOOL_TODO_WRITE],
         TOOL_TODO_LIST => vec![TOOL_TODO_LIST],
+        TOOL_SPILL_READ => vec![TOOL_SPILL_READ],
         _ => Vec::new(),
     }
 }
@@ -6017,6 +6134,11 @@ fn execution_policy_for_primitive(primitive: &str) -> ToolExecutionPolicy {
         | TOOL_MCP_RESOURCE_READ
         | TOOL_TOOL_SEARCH
         | TOOL_WORKSPACE_GATHER_CONTEXT => policy.concurrent_safe = true,
+        TOOL_SPILL_READ => {
+            policy.concurrent_safe = true;
+            // 单次回读上限与 spill::MAX_READ_LIMIT 对齐，避免结果预算把切片二次截断。
+            policy.result_budget_bytes = crate::agent::spill::MAX_READ_LIMIT;
+        }
         TOOL_VIEW_IMAGE => {
             policy.concurrent_safe = true;
             // Image artifact with include_bytes=true can be up to the default 2 MiB byte cap, so
@@ -6103,6 +6225,7 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_WORKSPACE_READ_DOCUMENT => "ReadDocument",
         TOOL_TODO_WRITE => "TodoWrite",
         TOOL_TODO_LIST => "TodoList",
+        TOOL_SPILL_READ => "SpillRead",
         _ => return None,
     };
     Some(mapped)
@@ -6158,6 +6281,7 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         TOOL_TEAM_TASK_LIST => ToolKind::Read,
         TOOL_TODO_WRITE => ToolKind::Write,
         TOOL_TODO_LIST => ToolKind::Read,
+        TOOL_SPILL_READ => ToolKind::Read,
         _ => ToolKind::External,
     }
 }
@@ -6190,6 +6314,8 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         | TOOL_CREATE_GOAL
         | TOOL_GET_GOAL
         | TOOL_UPDATE_GOAL => ToolExposure::ModelVisible,
+        // W26：spill 回读工具按需曝光（tool_search 提升），不进常驻工具面。
+        TOOL_SPILL_READ => ToolExposure::Deferred,
         _ => ToolExposure::Internal,
     }
 }
@@ -6235,6 +6361,8 @@ pub fn default_permission_facts_for_name(name: &str) -> ToolPermissionFacts {
         TOOL_WORKSPACE_RUN_COMMAND => Some("workspace.execute".to_string()),
         TOOL_TIME_NOW | TOOL_ECHO_INPUT | TOOL_PLAN_CONTROL | TOOL_ASK_USER => None,
         TOOL_VIEW_IMAGE => Some("workspace.read".to_string()),
+        // W26：spill 回读只读本地落盘内容，权限面等同 workspace.read。
+        TOOL_SPILL_READ => Some("workspace.read".to_string()),
         TOOL_WORKSPACE_READ_DOCUMENT => Some("workspace.read".to_string()),
         _ => None,
     };
@@ -7348,6 +7476,16 @@ fn windows_shell_path(path: &str) -> String {
         return rest.to_string();
     }
     path.to_string()
+}
+
+/// W26：`spill_read` 参数。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct SpillReadArgs {
+    ref_id: String,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// W25：未接线的子代理/团队能力的统一拒绝结果。
