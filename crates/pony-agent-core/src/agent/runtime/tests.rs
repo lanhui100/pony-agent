@@ -481,7 +481,7 @@ impl AgentHookExecutor for TransformingCapabilityHookExecutor {
         descriptor: &AgentHookDescriptor,
         hook_point: TurnHookPoint,
     ) -> Result<crate::agent::hooks::HookExecutionResult, String> {
-        NoopHookExecutor.execute(descriptor, hook_point)
+        crate::agent::hooks::NoopHookExecutor.execute(descriptor, hook_point)
     }
 
     fn execute_capability_mediation(
@@ -530,7 +530,7 @@ impl AgentHookExecutor for TransformingPlannerHookExecutor {
         descriptor: &AgentHookDescriptor,
         hook_point: TurnHookPoint,
     ) -> Result<crate::agent::hooks::HookExecutionResult, String> {
-        NoopHookExecutor.execute(descriptor, hook_point)
+        crate::agent::hooks::NoopHookExecutor.execute(descriptor, hook_point)
     }
 
     fn execute_planner(

@@ -1,10 +1,10 @@
 {
-  "wave": 28,
+  "wave": 30,
   "status": "all_waves_completed",
   "task_classification": "B",
-  "reason": "W28 并发工具执行引擎（保序+按 concurrent_safe 分区+panic 隔离+并发封顶）；A01 未闭环，provider 多调用接入显式列为 W28b",
-  "baseline_commit": "0d8a3f1",
-  "symptom": "provider 层硬拒多工具调用（Anthropic Err / OpenAI 静默丢首），回合内无法并行执行多个只读工具；且 fallback 工具载荷分支不按 exposure 过滤（内部工具可回流模型面）",
+  "reason": "W30a 外部命令 Hooks 执行器：agent/hook_commands.rs（配置解析/验证+注册表注入+安全信任门禁+进程组超时kill+stdin payload+管道drain+deny阻断）；A07闭环，A06/A12作为W30b待办",
+  "baseline_commit": "0c3132e",
+  "symptom": "钩子系统点位齐备但仅有 NoopHookExecutor，外部 shell 命令钩子缺失；且未配置注册表注入导致钩子永不触发（审计 P1-5 / A07）",
   "waves": {
     "9": {
       "branches": {
@@ -938,12 +938,69 @@
         ]
       },
       "meta_retrospective": "L3 审查连抓两类问题：①完成度话术（宣称的 W28b 在计划中不存在）②跨模块契约漏项（provider fallback exposure）。说明「机器门禁全绿」无法替代范围/契约审查，后续波次把「计划引用必须可解析」纳入自查清单"
+    },
+    "30": {
+      "status": "completed_partial",
+      "desc": "W30a 外部命令 Hooks 执行器：agent/hook_commands.rs（配置驱动 + 描述符注册 + 管道防死锁 + Deny阻断 + 进程组回收 + 安全信任门禁）",
+      "task_classification": "B",
+      "classification_basis": "跨模块新增命令执行能力（子进程/IPC/超时/安全权限），涉及外部 shell 命令调用 RCE 风险防护，按 B 级走独立红相 + 独立 L3 审查",
+      "write_scopes": {
+        "test-agent/frozen-red": [
+          "crates/pony-agent-core/tests/wave30_hook_commands_test.rs"
+        ],
+        "impl": [
+          "crates/pony-agent-core/src/agent/hook_commands.rs",
+          "crates/pony-agent-core/src/agent/mod.rs",
+          "crates/pony-agent-core/src/agent/runtime/mod.rs",
+          "crates/pony-agent-core/src/agent/runtime/turn_runner.rs"
+        ]
+      },
+      "contract_ledger": [
+        "CommandHookExecutor：支持从 JSON/文件加载 command/timeoutMs/hookPoints/onFailure 配置",
+        "安全信任边界：仅在 PONY_HOOKS_FILE 明确提供或 PONY_HOOKS_ENABLE=1 时加载工作区配置，默认不盲目执行仓库内脚本防 RCE",
+        "进程与管道生命周期：启动后台线程分别 drain stdout/stderr 杜绝 >64KB 管道死锁；Unix 下以 process_group(0) 启动并在超时时用 kill(-pid) 彻底回收孙进程",
+        "Deny 阻断生效：turn_runner 在 Ok(result) 中检测 blocked 或 Deny 结果，转换为 fail_turn_error 阻断工具调用",
+        "注册表与执行器同源构建：build_default_hooks() 保证配置的 hook descriptor 与执行器同时注入运行时"
+      ],
+      "circuit_breaker": {
+        "attempts": 0,
+        "note": "无熔断触发"
+      },
+      "contract_evolution": "运行时默认 hook_executor 由硬编码 NoopHookExecutor 演化为配置驱动的 CommandHookExecutor（默认安全回退 Noop）",
+      "pool_degradation": "红相为编译级（模块缺失）；审查员 34b0137f 发现 1 blocker + 6 major，已逐项修复并在 .dev-team/review-w30-remediation.md 详细记录",
+      "gates": {
+        "cargo check -p pony-agent-core --all-targets": "Exit 0",
+        "cargo test --test wave30_hook_commands_test": "8 passed",
+        "cargo test --lib agent::hook_commands": "8 passed",
+        "cargo test --lib agent::hooks": "29 passed",
+        "cargo check --manifest-path src-tauri/Cargo.toml": "Exit 0"
+      },
+      "blast_radius": "4 src 文件（1 新增 ~700 行）+ 1 验收测试文件；涉及子进程执行与运行时拦截",
+      "review": {
+        "report": ".dev-team/review-w30.json",
+        "remediation": ".dev-team/review-w30-remediation.md",
+        "verdict_before_fix": "FAIL（1 blocker + 6 major + 6 minor）",
+        "fixed": [
+          "blocker: allowed_result_kinds 严格对齐 Guard 类的 [Allow, Deny]，使 registry.register() 正常通过",
+          "major: turn_runner.rs Ok 分支检测 blocked/Deny 并转化为 fail_turn_error 真正阻断工具",
+          "major: 启动后台线程异步 drain stdout/stderr 彻底解决超 64KB 管道满死锁",
+          "major: 路径解析增加 PONY_WORKSPACE_ROOT 环境变量支持，spawn 时注入 current_dir",
+          "major: 增加 PONY_HOOKS_ENABLE=1 / PONY_HOOKS_FILE 安全信任门禁防仓库 RCE",
+          "major: 配置解析失败输出 stderr 告警，消除静默假死",
+          "minor: decision 字符串 trim + to_ascii_lowercase 归一化解析",
+          "minor: tools.rs 重复 match 臂清理"
+        ],
+        "residual": [
+          "A06 工具级 allow/deny 规则与 A12 plan 只读门禁作为 W30b 待办立项"
+        ]
+      },
+      "meta_retrospective": "L3 审查精准抓出 Guard 类注册校验导致的静默 Noop 回退 blocker，以及 Deny 未在 turn_runner 真正阻断的语义缺陷，展现了严格对抗性审查的核心价值。"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
   "previous_wave": {
-    "wave": 27,
+    "wave": 28,
     "status": "all_waves_completed",
-    "reason": "W27 MCP 客户端：规范握手（initialize/notifications\\/initialized）+ 长连接会话 + tools/resources 规范 method；StdioMcpTransport 升级；A13 仍未闭环（生产注册表接线/HTTP 传输未做）"
+    "reason": "W28 并发工具执行引擎（保序+按 concurrent_safe 分区+panic 隔离+并发封顶）；A01 未闭环，provider 多调用接入显式列为 W28b"
   }
 }

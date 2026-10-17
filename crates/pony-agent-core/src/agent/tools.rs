@@ -6229,7 +6229,6 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_SPILL_READ => "SpillRead",
         TOOL_TODO_WRITE => "TodoWrite",
         TOOL_TODO_LIST => "TodoList",
-        TOOL_SPILL_READ => "SpillRead",
         _ => return None,
     };
     Some(mapped)

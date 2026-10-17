@@ -1,0 +1,113 @@
+{
+  "verdict": "FAIL",
+  "snapshot": {
+    "hook_commands_sha256": "64d3f23aaef58e65de0237581c8db22bdac077a830ca4fdec5f328d4b64b0dd9",
+    "note": "reviewed uncommitted working tree; hook_commands.rs was modified during review, findings pinned to this hash"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 481,
+      "severity": "blocker",
+      "rule": "D 接线真实性（注册表注册）",
+      "counterexample": "配置任意一条 hook（{\"hooks\":{\"g\":{\"command\":\"true\"}}}）时：descriptor 固定 class=HookClass::Guard（453）且 allowed_result_kinds=[Allow,Deny,Observe]（457-461），registry.register 调用 validate_descriptor；hooks.rs:1129 规定 Guard 只允许 [Allow,Deny]，因此必然返回 Err('declares result kinds incompatible with hook class Guard')，481-483 用 map_err 上抛 → build_default_hooks 的 Err(_) 分支（513-516）静默返回空注册表+Noop。结论：任何 hooks.json 都不可能注册成功，钩子永不触发；本文件自身的单测 default_hooks_build_registers_descriptors_and_executor（592）里的 expect(\"build hooks\") 必然 panic，说明 lib 测试从未跑过（集成测试 t1-t8 全绿是因为只直连执行器、不碰注册表）。",
+      "suggestion": "按 decision 语义拆分 class/result kinds：config descriptor 只声明 Allow/Deny（Guard），或为 observe 决策单独注册 Observe 类 descriptor；修完必须让 592 号 lib 单测与集成测试一起作为门禁。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_runner.rs",
+      "line": 47,
+      "severity": "major",
+      "rule": "C 协议语义 / F A07 可阻断闭环",
+      "counterexample": "hooks.json 在 tool_call_start 配 deny：dispatch_hook_trace_records 的 Ok 分支只做 hook_order 赋值和 records.push(47-49)，HookDispatchOutcome 根本没有 blocked 字段；turn_sync.rs:44-47 与 turn_stream.rs:112-120 只消费 fail_turn_error。于是 deny 仅落一条 blocked=true 的 trace，工具照常执行。计划验收（docs/audit/agent-core-improvement-plan.md:86）明确要求 'hook 阻断写工具 → 工具未执行且返回 blocked'，当前无法满足；对照 capability mediation 分支（turn_runner.rs:115-123）已把 Deny 转 blocked_error。",
+      "suggestion": "在 Ok 分支对 result.blocked/Deny 设置 blocked_error（并让 turn_sync/turn_stream 在工具执行前短路返回），或在计划里显式把阻断语义改挂到 W30b 并修正模块文档。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 187,
+      "severity": "major",
+      "rule": "B 进程生命周期（管道死锁）",
+      "counterexample": "stdout/stderr 都设为 Piped，但 187-204 的 loop 只 try_wait、从不读管道，直到 207 才 wait_with_output。hook 输出超过管道缓冲（Linux 64KiB，例如 command 为 `cat 大文件`、`cargo clippy` 的 stderr）时子进程阻塞在 write，try_wait 永远 None → 到 deadline 被 kill → 正常 hook 被误判 '执行超时'，默认 FailTurn 直接终止回合。t5 的 `exec sleep` 不产生输出，所以测试掩盖了该缺陷。",
+      "suggestion": "spawn 后立刻起读线程分别 drain stdout/stderr（或改用 wait_timeout 库），退出后 join 取输出；补一条大输出（>128KiB）用例。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 356,
+      "severity": "major",
+      "rule": "D 路径解析 / GUI 宿主可靠性",
+      "counterexample": "default_hooks_config_path 默认返回相对路径 `.pony/hooks.json`（353-357），相对进程 cwd 解析；而 AgentRuntime 明明有 workspace_root（runtime/mod.rs:134、builder.rs:64-69），hook 却在 with_dependencies（runtime/mod.rs:170）里、workspace_root 赋值之前用 cwd 构建。Tauri/GUI 宿主 cwd 通常是启动目录，用户在会话工作区放的 .pony/hooks.json 永不加载；且 spawn 未设 current_dir（170-174），即使加载成功，hook 命令也不以工作区为 cwd。",
+      "suggestion": "由 AgentRuntimeBuilder 把 workspace_root 传入 build_default_hooks，配置路径、PONY_HOOKS_FILE 相对路径与 Command::current_dir 统一按该根解析；GUI/CLI 行为一致化。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 503,
+      "severity": "major",
+      "rule": "A 安全（信任边界）",
+      "counterexample": "CLI/TUI 在仓库目录启动（cli.rs:392、tui.rs:893 构建 runtime），build_default_hooks 会读取 cwd 下 .pony/hooks.json 并原样 `sh -c` 执行（170-174），没有任何信任确认、来源校验或文件权限检查；恶意仓库内置该文件即可在用户打开仓库时执行任意命令，绕过 A06 的工具审批体系。PONY_HOOKS_FILE 同样是无校验的环境变量入口。",
+      "suggestion": "项目级 hooks 需显式 opt-in（复用 path_authorization/审批或 settings 白名单），或只信任用户级配置；对配置文件做属主/权限校验并在加载时打印来源路径。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 513,
+      "severity": "major",
+      "rule": "D 降级路径可观测性 / E 可用性",
+      "counterexample": "配置文件 parse 失败、注册失败（当前必然发生）、hook 名非法时，509-517 全部静默回落 Noop，无 eprintln/runtime_log，也不改变任何用户可见状态；用户配了钩子却毫无提示地空转。仓库已有 runtime_log（turn_flow.rs:1444）与 eprintln 约定未使用，导致上面 blocker 至今未被发现。",
+      "suggestion": "在 Err(e)/空配置分支打印一次带路径与原因的 warn（或写入宿主日志/诊断接口），并让 hook 加载状态可被 UI/自查读取。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave30_hook_commands_test.rs",
+      "line": 632,
+      "severity": "major",
+      "rule": "G 测试充分性（冻结契约）",
+      "counterexample": "t1-t8 只直连 CommandHookExecutor/from_file；t8 只用未配置的 hook 名探测 build_default_hook_executor（632-700），没有任何用例断言 '配置中的 hook 被注册进 registry 并在 ToolCallStart 被 dispatch 执行'。因此 blocker #1（任何配置都注册失败）在冻结测试全绿的情况下漏网，A07 的接线真实性未被覆盖。",
+      "suggestion": "由测试负责人追加一条验收：写 hooks.json → build_default_hooks → registry.list_for_hook_point 非空且该描述符经 runtime dispatch 实际执行；实现者不得改冻结测试。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 180,
+      "severity": "minor",
+      "rule": "B 错误路径生命周期",
+      "counterexample": "hook 脚本不读 stdin（如 command=\"echo '{\\\"decision\\\":\\\"allow\\\"}'\"）且先于父进程写入退出时，write_all 返回 EPIPE → 180-182 直接 return Err，既把合法 hook 变成随机失败，又没有 kill/wait 子进程（std 不在 Drop 里回收）；其余成功/超时/非零退出路径都有回收。",
+      "suggestion": "把 ErrorKind::BrokenPipe 视为正常（继续等待输出），其它写错误先 kill_process_tree 再返回；或用线程写 stdin。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 319,
+      "severity": "minor",
+      "rule": "C 与 Noop 校验一致性",
+      "counterexample": "descriptor.allowed_hook_points 不含当前 hook_point 时，配置分支直接 run_command 并返回 Ok；未配置分支（322 → hooks.rs:1007-1011）返回 Err。同一 trait 上两条路径语义不一致（运行时因 list_for_hook_point 预过滤暂不暴露，t6 只覆盖了未配置分支）。",
+      "suggestion": "在 run_command 之前复用 Noop 的 hook_point/result-kind 前置校验，保证两条路径同构。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 235,
+      "severity": "minor",
+      "rule": "C 协议解析鲁棒性",
+      "counterexample": "decision 解析是精确匹配：{\"decision\":\"Allow\"} 或 {\"decision\":\" allow \"} 落到 other 分支返回 Err（282-287），默认 FailTurn 直接终止回合；stdout 只要多一行日志/ANSI 就整段 JSON 解析失败（221-228）。",
+      "suggestion": "decision 做 trim + to_ascii_lowercase，并文档化 stdout 必须是单行 JSON（或取最后一行 JSON 对象）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "line": 443,
+      "severity": "minor",
+      "rule": "E 失败策略默认值",
+      "counterexample": "配置不带 onFailure 时 default_failure_policy=FailTurn（443-448），配在 ToolCallStart 时任何一次 hook 失败（含上面的超时/EPIPE）都会让 turn_sync.rs:47 / turn_stream.rs:154 终止整个回合（所有工具调用都不再执行）；而模块头文档（8-16）只写了 command/timeoutMs，未告知 hookPoints/onFailure 的存在与默认 fail-closed 语义。",
+      "suggestion": "文档补齐 hookPoints/onFailure/默认策略；考虑命令 hooks 默认 Degrade 或 Ignore，避免一条坏 hook 废掉整回合。"
+    },
+    {
+      "file": "docs/audit/agent-core-improvement-plan.md",
+      "line": 35,
+      "severity": "minor",
+      "rule": "F 分波与台账标注",
+      "counterexample": "W30 行（35）与 §W30（81-86）把 A07/A06/A12 绑成单波，验收含 'hook 阻断写工具'；仓库 grep W30 仅命中该文档，management/task-system/ 下没有任何 W30a/W30b 记录，A06（工具级 allow/deny）与 A12（plan 门禁）既未交付也未显式标为 W30b，所谓 W30a 只存在于实施提示词里。",
+      "suggestion": "在计划与任务板登记 W30a（仅命令 hooks，范围/验收）与 W30b（A06/A12），并拆分 W30 验收条目，避免用 W30a 的绿测冒充整波闭环。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6229,
+      "severity": "minor",
+      "rule": "G 夹带无关改动",
+      "counterexample": "diff 删除重复 match 臂 TOOL_SPILL_READ => \"SpillRead\" 与 W30a 无因果关系：该重复臂由 49f489a（wave-26 修复）引入，仓库未配置 deny(warnings)，删除并非本波编译必需（仅是 unreachable_patterns 警告的顺手清理）。",
+      "suggestion": "拆成独立 hygiene 提交或至少在提交说明里标注该夹带原因，保持波次变更闭包干净。"
+    }
+  ]
+}

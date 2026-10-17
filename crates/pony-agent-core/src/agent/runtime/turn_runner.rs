@@ -46,7 +46,22 @@ pub fn dispatch_hook_trace_records(
         match hook_executor.execute(descriptor, hook_point.clone()) {
             Ok(mut result) => {
                 result.hook_order = (index + 1) as u32;
+                let blocked = result.blocked
+                    || matches!(
+                        result.structured_result,
+                        crate::agent::hooks::HookStructuredResult::Deny(_)
+                    );
+                let summary = result.trace_summary.clone();
                 records.push(result.to_trace_record());
+                if blocked {
+                    // W30a：Deny 必须真正阻断——此前只记 trace，工具照常执行，
+                    // 等于钩子形同虚设。这里升级为 turn 级阻断，保证「工具未执行」。
+                    fail_turn_error = Some(format!(
+                        "hook `{}` blocked `{:?}`: {summary}",
+                        descriptor.name, hook_point
+                    ));
+                    break;
+                }
             }
             Err(error) => {
                 let (result_kind, structured_result) =

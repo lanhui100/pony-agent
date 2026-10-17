@@ -21,7 +21,7 @@ use crate::agent::hooks::{
     turn_hook_point_for_planner_hook_point, AgentHookDescriptor, AgentHookExecutor,
     AgentHookRegistry, CapabilityMediationEnvelope, CapabilityMediationHookPoint,
     HookFailurePolicy, HookPatchConflictPolicy, HookPatchOperation, HookPatchOperationKind,
-    HookStructuredResult, HookTraceRecord, NoopHookExecutor, PlannerFactsEnvelope,
+    HookStructuredResult, HookTraceRecord, PlannerFactsEnvelope,
     PlannerHookPoint, TurnHookPoint,
 };
 use crate::agent::input::TurnInputImage;
@@ -166,6 +166,9 @@ impl AgentRuntime {
         for snapshot in persisted_skill_snapshots {
             let _ = capability_registry.replace_skill_source_snapshot(snapshot);
         }
+        // W30a：钩子注册表与执行器必须同时构建——只给执行器不给描述符会导致钩子点永远不触发。
+        let (hook_registry, hook_executor) =
+            crate::agent::hook_commands::build_default_hooks();
         let sessions_arc = Arc::new(RwLock::new(sessions));
         let trace_persistence = Some(spawn_trace_persistence_worker(Arc::clone(&sessions_arc)));
         Self {
@@ -173,8 +176,8 @@ impl AgentRuntime {
             sessions: sessions_arc,
             provider_resolver,
             capability_registry,
-            hook_registry: AgentHookRegistry::new(),
-            hook_executor: Box::new(NoopHookExecutor),
+            hook_registry,
+            hook_executor,
             tool_executor,
             planner,
             context_builder,
