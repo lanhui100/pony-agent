@@ -223,6 +223,98 @@ impl Drop for ConcurrencyGuard {
     }
 }
 
+/// 模型定价矩阵（每百万 Token 的 USD 价格）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelPricing {
+    pub input_per_million_usd: f64,
+    pub output_per_million_usd: f64,
+    pub cached_input_per_million_usd: f64,
+}
+
+impl Default for ModelPricing {
+    fn default() -> Self {
+        Self {
+            input_per_million_usd: 3.0,
+            output_per_million_usd: 15.0,
+            cached_input_per_million_usd: 0.75,
+        }
+    }
+}
+
+/// 会话成本与用量摘要。
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct CostSummary {
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub currency: &'static str,
+}
+
+/// 生产级成本追踪与硬预算熔断器（A16 闭环）。
+#[derive(Debug, Clone)]
+pub struct CostTracker {
+    pub max_budget_usd: Option<f64>,
+    pub summary: CostSummary,
+    budget_exceeded: bool,
+}
+
+impl CostTracker {
+    pub fn new(max_budget_usd: Option<f64>) -> Self {
+        Self {
+            max_budget_usd,
+            summary: CostSummary {
+                currency: "USD",
+                ..Default::default()
+            },
+            budget_exceeded: false,
+        }
+    }
+
+    /// 记录单次回合的 Token 用量，更新累计金额并在超限时触发熔断
+    pub fn record_usage(
+        &mut self,
+        _model: &str,
+        pricing: &ModelPricing,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+    ) -> Result<f64, String> {
+        let uncached_input = input_tokens.saturating_sub(cached_tokens);
+        let input_cost = (uncached_input as f64 * pricing.input_per_million_usd) / 1_000_000.0;
+        let cached_cost = (cached_tokens as f64 * pricing.cached_input_per_million_usd) / 1_000_000.0;
+        let output_cost = (output_tokens as f64 * pricing.output_per_million_usd) / 1_000_000.0;
+        let call_cost = input_cost + cached_cost + output_cost;
+
+        self.summary.total_input_tokens += uncached_input;
+        self.summary.total_cached_tokens += cached_tokens;
+        self.summary.total_output_tokens += output_tokens;
+        self.summary.total_tokens += input_tokens + output_tokens;
+        self.summary.total_cost_usd += call_cost;
+
+        if let Some(limit) = self.max_budget_usd {
+            if self.summary.total_cost_usd > limit {
+                self.budget_exceeded = true;
+                return Err(format!(
+                    "budget_exceeded: session cost ${:.4} exceeds budget limit ${:.4}",
+                    self.summary.total_cost_usd, limit
+                ));
+            }
+        }
+
+        Ok(call_cost)
+    }
+
+    pub fn is_budget_exceeded(&self) -> bool {
+        self.budget_exceeded
+    }
+
+    pub fn summary(&self) -> CostSummary {
+        self.summary.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

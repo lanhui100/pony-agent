@@ -17,7 +17,8 @@
 | W30a 外部命令 Hooks | ✅ 完成 | `0c3132e` 红相 / `a3f1829` 提交 | wave30 8/8；hook_commands 单测 8/8；hooks 29/29；check Exit 0；src-tauri Exit 0 |
 | W30b 权限规则与 Plan 门禁 | ✅ 完成（A06/A12 闭环） | `e931f7d` 红相 / `ff76305` + `e5734ae` 提交 | wave30b 3/3；pa112 2/2；ask_* 9/9；check Exit 0；src-tauri Exit 0；L3 审查 PASS |
 | W31 真实 LSP 客户端 | ✅ 完成（A19 闭环） | `7632a99` 红相 / `e932a81` 提交 | wave31 1/1；pa107 4/4；check Exit 0；src-tauri Exit 0；L3 审查 PASS |
-| W32 文件级快照与回滚 | ✅ 完成（A11 闭环） | `b8f46ff` 红相 / 本轮实现 | wave32 1/1；check Exit 0；src-tauri Exit 0；L3 审查 PASS |
+| W32 文件级快照与回滚 | ✅ 完成（A11 闭环） | `b8f46ff` 红相 / `dcfebb7` 提交 | wave32 1/1；check Exit 0；src-tauri Exit 0；L3 审查 PASS |
+| W33 平台化收尾（成本熔断） | ✅ 完成（A16 闭环） | `da38a2f` 红相 / 本轮实现 | wave33 1/1；budget 19/19；check Exit 0；src-tauri Exit 0；L3 审查 PASS |
 
 ## 一、总原则（不可协商）
 

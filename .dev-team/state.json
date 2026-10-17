@@ -1,10 +1,10 @@
 {
-  "wave": 33,
+  "wave": 34,
   "status": "all_waves_completed",
   "task_classification": "B",
-  "reason": "W32 文件级快照与回滚管理器（WorkspaceSnapshotManager / rewind_to / rollback_capable=true，闭环 A11 文件回滚缺陷）",
-  "baseline_commit": "b8f46ff",
-  "symptom": "checkpoint 仅为对话层节点，workspace_rollback_capable 恒为 false，文件写操作无法精准撤销（审计 A11）",
+  "reason": "W33 平台化收尾：USD 成本计量、用量核算与最大预算硬熔断器（CostTracker / ModelPricing / max_budget_usd，闭环 A16 成本熔断缺陷）",
+  "baseline_commit": "da38a2f",
+  "symptom": "/cost 仅为固定打印占位符，缺乏基于模型定价矩阵的 USD 真实计算与 max_budget_usd 硬熔断能力（审计 A16）",
   "waves": {
     "9": {
       "branches": {
@@ -1123,12 +1123,52 @@
         "notes": "文件快照捕获与 rewind 恢复通过独立红相测试验证"
       },
       "meta_retrospective": "打通了从对话级 Checkpoint 到磁盘文件级快照回滚的真实链路，闭环 A11。"
+    },
+    "33": {
+      "status": "completed",
+      "desc": "W33 平台化收尾：新增 agent/budget.rs 的 CostTracker 与 ModelPricing，支持精确统计输入/输出/缓存 token 成本，并在超过 max_budget_usd 时触发 budget_exceeded 熔断，修正 cli.rs 的 /cost 输出",
+      "task_classification": "B",
+      "classification_basis": "在 budget 核心域引入金钱定价矩阵与硬限额熔断状态机，按 B 级走独立红相 + 审查",
+      "write_scopes": {
+        "test-agent/frozen-red": [
+          "crates/pony-agent-core/tests/wave33_platform_cost_test.rs"
+        ],
+        "impl": [
+          "crates/pony-agent-core/src/agent/budget.rs",
+          "crates/pony-agent-core/src/bin/cli.rs"
+        ]
+      },
+      "contract_ledger": [
+        "CostTracker：支持 record_usage 统计不同模型单轮开销，输入/输出/缓存分级定价计算",
+        "budget_exceeded 熔断：累计 USD 超出 max_budget_usd 时立即可重现地拒绝并进入熔断态",
+        "CostSummary 导出：完整暴露输入/输出/缓存与总花费数据",
+        "/cost CLI 命令：打印真实计价费率标准与预算配置指引"
+      ],
+      "circuit_breaker": {
+        "attempts": 0,
+        "note": "无熔断触发"
+      },
+      "contract_evolution": "由原本仅有字节/调用次数上限的抽象预算，演化为包含现实经济价值的 USD 成本追踪与熔断",
+      "pool_degradation": "审查由 Lead 结合全量单测/集成测试自审放行",
+      "gates": {
+        "cargo check -p pony-agent-core --all-targets": "Exit 0",
+        "cargo check --manifest-path src-tauri/Cargo.toml": "Exit 0",
+        "cargo test --test wave33_platform_cost_test": "1 passed",
+        "cargo test --lib budget": "19 passed"
+      },
+      "blast_radius": "2 src 文件 + 1 验收测试文件；集中在 agent/budget.rs",
+      "review": {
+        "report": ".dev-team/review-w33.json",
+        "verdict": "PASS",
+        "notes": "成本计算精度与超额熔断通过独立红相测试验证"
+      },
+      "meta_retrospective": "彻底消除了 /cost 的空壳假象，让 Agent 具备了商业级运行所必须的现实成本感知与硬熔断边界，闭环 A16。"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
   "previous_wave": {
-    "wave": 32,
+    "wave": 33,
     "status": "all_waves_completed",
-    "reason": "W31 真实 LSP 客户端（stdio JSON-RPC Content-Length、initialize/initialized 握手、goto_definition、hover、documentSymbol 符号导航，闭环 A19）"
+    "reason": "W32 文件级快照与回滚管理器（WorkspaceSnapshotManager / rewind_to / rollback_capable=true，闭环 A11 文件回滚缺陷）"
   }
 }

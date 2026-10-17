@@ -515,9 +515,10 @@ fn main() {
                 }
                 SlashCommand::Cost => {
                     println!("\x1b[36m📊 Session Cost & Usage:\x1b[0m");
-                    println!("  Session ID:  {}", session_id);
-                    println!("  Model:       {}", args.model);
-                    println!("  Rate:        Standard polyllm metered tariff");
+                    println!("  Session ID:   {}", session_id);
+                    println!("  Model:        {}", args.model);
+                    println!("  Tariff:       PolyLLM Standard ($3.00/1M in, $15.00/1M out, $0.75/1M cache)");
+                    println!("  Budget Limit: Configured via PONY_MAX_BUDGET_USD / CostTracker");
                     continue;
                 }
                 SlashCommand::Unknown(u) => {
