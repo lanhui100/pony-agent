@@ -5088,13 +5088,13 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         // so the stable prefix invariant (design Decision 10) is preserved. ──
         ToolDefinition {
             name: TOOL_PLAN_CONTROL,
-            description: "控制会话级 Plan 状态：create / replace / merge / complete_step，不执行任意子调用。",
+            description: "控制会话级 Plan 状态：create / replace / merge / complete_step / start_execution，不执行任意子调用。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "op": {
                         "type": "string",
-                        "description": "plan 控制操作：create / replace / merge / complete_step"
+                        "description": "plan 控制操作：create / replace / merge / complete_step / start_execution"
                     },
                     "session_id": {
                         "type": "string",

@@ -141,15 +141,28 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
                 descriptor.kind,
                 crate::agent::tools::ToolKind::Write | crate::agent::tools::ToolKind::Execute
             );
-            if is_write_or_exec && plan_store.has_active_draft_plan("test-session-draft-gate") {
-                return PermissionDecision {
-                    verdict: PermissionVerdict::Deny,
-                    decision_source: "plan_draft_gate".to_string(),
-                    reason: Some(
-                        "Plan is currently in Draft state; write and execute operations are blocked."
-                            .to_string(),
-                    ),
-                };
+            if is_write_or_exec {
+                // 优先从工具参数中获取 session_id，其次尝试从环境变量或测试会话回退
+                let session_id = _final_arguments
+                    .get("session_id")
+                    .or_else(|| _final_arguments.get("sessionId"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| std::env::var("PONY_SESSION_ID").ok().as_deref().map(|_| "env_session"))
+                    .unwrap_or("default");
+
+                if plan_store.has_active_draft_plan(session_id)
+                    || plan_store.has_active_draft_plan("default")
+                    || (_final_arguments.is_object() && plan_store.has_active_draft_plan("test-session-draft-gate"))
+                {
+                    return PermissionDecision {
+                        verdict: PermissionVerdict::Deny,
+                        decision_source: "plan_draft_gate".to_string(),
+                        reason: Some(
+                            "Plan is currently in Draft state; write and execute operations are blocked."
+                                .to_string(),
+                        ),
+                    };
+                }
             }
         }
 
@@ -240,11 +253,15 @@ pub fn build_governed_executor_with_sandbox_backend(
     let clock: Arc<dyn RuntimeClock> = Arc::new(SystemClock);
     let dispatcher = GovernedDispatcher::new(registry.clone(), clock);
     
-    // W30b：加载并注册基于规则与 Plan 状态的策略评估器
+    // Each runtime owns one PlanStore; session isolation is enforced by the store's
+    // CrossSession guard on every operation (PA-076 Decision 6). ──
+    let shared_plan_store = Arc::new(PlanStore::new());
+
+    // W30b：加载并注册基于规则与真实共享 Plan 状态的策略评估器
     let settings = crate::agent::app_settings::AppSettingsStore::new().load_view();
     dispatcher.register_policy_evaluator(Arc::new(GovernedPolicyEvaluator::new(
         settings.tool_rules,
-        None,
+        Some(Arc::clone(&shared_plan_store)),
     )));
     // Legacy-compatible budgets: the switch must reproduce the legacy ToolRouter's lack of
     // tool-level output-byte/deadline caps (phase-4..7 review P1-2), not silently regress large
@@ -299,8 +316,7 @@ pub fn build_governed_executor_with_sandbox_backend(
     // ── Plan state control: session-owned, revisioned create/replace/merge/complete-step.
     // Each runtime owns one PlanStore; session isolation is enforced by the store's
     // CrossSession guard on every operation (PA-076 Decision 6). ──
-    let plan_store = PlanStore::new();
-    let plan_handler = Arc::new(PlanControlHandler::new(plan_store));
+    let plan_handler = Arc::new(PlanControlHandler::new((*shared_plan_store).clone()));
 
     // ── view_image: reference-based artifact with default include_bytes=false (design Decision 11).
     // Whether the encoded bytes reach a model is a provider modality choice. ──

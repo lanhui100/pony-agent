@@ -35,9 +35,12 @@ pub enum ToolRuleMatcher {
 impl ToolRuleMatcher {
     pub fn matches(&self, tool_name: &str) -> bool {
         match self {
-            Self::Exact(target) => tool_name == target,
-            Self::Prefix(prefix) => tool_name.starts_with(prefix),
+            Self::Exact(target) => !target.trim().is_empty() && tool_name == target,
+            Self::Prefix(prefix) => !prefix.trim().is_empty() && tool_name.starts_with(prefix),
             Self::Regex(pattern) => {
+                if pattern.trim().is_empty() || pattern.len() > 256 {
+                    return false;
+                }
                 regex::Regex::new(pattern).map(|r| r.is_match(tool_name)).unwrap_or(false)
             }
         }

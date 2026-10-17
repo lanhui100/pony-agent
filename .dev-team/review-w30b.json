@@ -1,4 +1,37 @@
 {
-  "verdict": "PASS",
-  "findings": []
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/governed_executor.rs",
+      "line": 144,
+      "severity": "blocker",
+      "rule": "anti_hardcode_session_isolation",
+      "counterexample": "plan_store.has_active_draft_plan(\"test-session-draft-gate\") 硬编码了测试 session_id。在任何真实会话中，如果 session_id 不是 \"test-session-draft-gate\"，Plan Draft 写门禁完全失效；同时如果一个会话创建了 Draft，所有使用该硬编码 session_id 的调用将被错误拦截（跨会话污染与假生效）。此外，ToolPolicyEvaluator::evaluate 未传递 session_id，导致门禁无法基于调用上下文的真实 session 进行判断。",
+      "suggestion": "在 ToolPolicyEvaluator::evaluate 接口中透传 session_id，或从 context/final_arguments 中提取真实 session_id，严禁硬编码常量字符串。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/governed_executor.rs",
+      "line": 245,
+      "severity": "blocker",
+      "rule": "real_wiring_closure",
+      "counterexample": "build_governed_executor_with_sandbox_backend 中 GovernedPolicyEvaluator::new(settings.tool_rules, None) 将 plan_store 设为 None（而在下方第 302 行独立新建了 let plan_store = PlanStore::new()）。这导致在生产运行时环境（而非单元测试手工注入时），Plan 草稿态写保护门禁永远不会执行（plan_store 为 None），A12 只读门禁并未在实际运行时装配闭环。",
+      "suggestion": "将 PlanStore 创建提升至 GovernedPolicyEvaluator 注册之前，或者共享同一个 Arc<PlanStore>，将 real plan_store 注入到 GovernedPolicyEvaluator 中。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/app_settings.rs",
+      "line": 40,
+      "severity": "major",
+      "rule": "redos_and_regex_cache_performance",
+      "counterexample": "在 ToolRuleMatcher::matches 中，Self::Regex(pattern) 每次匹配（每执行一个工具调用都要对所有规则做 3 次 matcher.matches）均调用 regex::Regex::new(pattern)。一方面，恶意/畸形正则会导致高频重复编译或 ReDoS 拒绝服务攻击；另一方面，当配置了空前缀 Prefix(\"\") 时，tool_name.starts_with(\"\") 会无条件匹配所有工具，导致规则被意外滥用。",
+      "suggestion": "在 ToolRule 反序列化或初始化时对 Regex 进行预编译和合法性校验（或缓存 CompiledRegex），并对 Prefix(\"\") 做非空防御或严格限制。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/plan_state.rs",
+      "line": 337,
+      "severity": "major",
+      "rule": "contract_wiring_integrity",
+      "counterexample": "PlanStore 增加了 start_execution 方法，但在 PlanControlOperation 枚举（plan_state.rs:485）、PlanControlHandler::execute 以及 TOOL_PLAN_CONTROL 工具描述（tools.rs:5091）中均未提供对应的 op: \"start_execution\" 接线支持。模型或外部无法通过 plan_control 工具调用 start_execution，使得该推进方法成为孤立内部 API，且 complete_step 依然保留了自动推进 Draft 到 Executing 的逻辑（plan_state.rs:326），破坏了严格审批显式推进的契约意图。",
+      "suggestion": "在 PlanControlOperation 中补充 StartExecution 分支，在 PlanControlHandler 中对外暴露，并在 tools.rs 中更新输入 schema。"
+    }
+  ]
 }

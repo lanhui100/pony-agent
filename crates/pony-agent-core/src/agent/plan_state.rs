@@ -478,7 +478,7 @@ impl PlanStore {
     }
 }
 
-/// One Plan-tool operation. The schema is exactly `{ create | replace | merge | complete_step }`
+/// One Plan-tool operation. The schema is exactly `{ create | replace | merge | complete_step | start_execution }`
 /// — there is deliberately no generic `calls` array and no child execution.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -501,6 +501,11 @@ pub enum PlanControlOperation {
         plan_id: String,
         revision: u64,
         step_id: String,
+    },
+    StartExecution {
+        session_id: String,
+        plan_id: String,
+        revision: u64,
     },
 }
 
@@ -556,6 +561,11 @@ impl PlanControlHandler {
                 revision,
                 step_id,
             } => self.store.complete_step(&session_id, &plan_id, revision, &step_id),
+            PlanControlOperation::StartExecution {
+                session_id,
+                plan_id,
+                revision,
+            } => self.store.start_execution(&session_id, &plan_id, revision),
         }
     }
 
@@ -574,6 +584,18 @@ impl PlanControlHandler {
                 Ok(PlanControlOperation::Create {
                     session_id: authoritative.to_string(),
                     payload,
+                })
+            }
+            PlanControlOperation::StartExecution {
+                session_id,
+                plan_id,
+                revision,
+            } => {
+                self.require_claimed_session(authoritative, &session_id)?;
+                Ok(PlanControlOperation::StartExecution {
+                    session_id: authoritative.to_string(),
+                    plan_id,
+                    revision,
                 })
             }
             PlanControlOperation::Replace {
