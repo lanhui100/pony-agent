@@ -755,6 +755,9 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   } else if (turn.assistant && shouldShowReasoningBlock(turn.assistant)) {
     const fallbackReasoning = cleanHopText(assistantDisplayedReasoning(turn.assistant));
     if (fallbackReasoning.trim()) {
+      // 无 model trace 时展示权重以 assistant 数组下标为锚点：
+      // 工具无条件锚定在 assistantOrder - 0.1（见下方 toolOrder 回退分支），
+      // 故 reasoning 取 assistantOrder - 0.2，保证 Reasoning < Tools < 正文。
       events.push({
         kind: "reasoning",
         key: `reasoning-${turn.assistant.id}`,
@@ -772,16 +775,17 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     let toolOrder: number;
 
     if (traceSequence != null) {
+      // 有 call_tool trace 链接：保持多 hop 交错顺序（不变量：Reasoning < Tools < 正文）。
       toolOrder = traceSequence + toolIdx * 0.001;
     } else if (modelEntries.length > 0) {
-      if (toolIdx < modelEntries.length) {
-        toolOrder = modelEntries[toolIdx]!.sequence + 0.1 + toolIdx * 0.001;
-      } else {
-        toolOrder = (modelEntry?.sequence ?? assistantOrder) + 0.1 + toolIdx * 0.001;
-      }
+      // 无 trace 链接但存在 model hop：锚定到最后一个 model 条目的正文之前，
+      // 使工具不依赖数组下标即可稳定落在正文之上。
+      const lastModelSequence = modelEntries[modelEntries.length - 1]!.sequence;
+      toolOrder = lastModelSequence - 0.1 + toolIdx * 0.001;
     } else {
-      const fallbackOrder = messageIndexInTurn(tool);
-      toolOrder = Number.isFinite(fallbackOrder) ? fallbackOrder : assistantOrder + 0.1 + toolIdx * 0.001;
+      // 无 trace 链接且无 model hop：无条件锚定到正文之前，
+      // 规范化顺序 Reasoning < Tools < 正文 不依赖 reasoning 面板是否渲染。
+      toolOrder = assistantOrder - 0.1 + toolIdx * 0.001;
     }
 
     events.push({
