@@ -1,10 +1,10 @@
 {
-  "wave": 26,
+  "wave": 27,
   "status": "all_waves_completed",
   "task_classification": "B",
-  "reason": "W26 大输出落盘溢出（spill）：超限读取不再丢弃/硬失败，改为内容寻址落盘 + content_ref 按需回读，并新增 spill_read 工具",
-  "baseline_commit": "93aa1f9",
-  "symptom": "workspace_read_file 对 >120000 bytes 文件直接返回 file_too_large，模型只能分段重读或反复重跑命令；命令输出环形缓冲截断即永久丢失（审计 P0-4 / A09）",
+  "reason": "W27 MCP 客户端：规范握手（initialize/notifications\\/initialized）+ 长连接会话 + tools/resources 规范 method；StdioMcpTransport 升级；A13 仍未闭环（生产注册表接线/HTTP 传输未做）",
+  "baseline_commit": "709e2dd",
+  "symptom": "旧 stdio 传输每次请求 spawn 一个进程、method 名为自造 list_resources/read_resource、无 initialize 握手；资源面在生产路径 fail-closed（SourceUnavailable）",
   "waves": {
     "9": {
       "branches": {
@@ -818,12 +818,74 @@
         ]
       },
       "meta_retrospective": "独立 L3 审查真实拦截了 3 个 major（含限流击穿与 truncated 误报），证明「机器门禁全绿 ≠ 正确」；代价是审查 subagent 稳定性不足需精简提示重试"
+    },
+    "27": {
+      "status": "completed_partial",
+      "desc": "W27 MCP 客户端握手与会话：新增 agent/mcp_client.rs（initialize 协商+版本校验+请求 id 关联+迟到响应缓冲+超时/进程组回收），StdioMcpTransport 改为复用长连接并按规范 method 名执行",
+      "task_classification": "B",
+      "classification_basis": "新增跨模块能力（新模块 ~800 行 + 传输层语义变更 + 子进程生命周期/并发/超时），命中并发与进程管理黑名单，按 B 级走独立红相 + 独立 L3 审查",
+      "write_scopes": {
+        "test-agent/frozen-red": [
+          "crates/pony-agent-core/tests/wave27_mcp_client_test.rs",
+          "crates/pony-agent-core/tests/hotloader_and_mcp_contract.rs"
+        ],
+        "impl": [
+          "crates/pony-agent-core/src/agent/mcp_client.rs",
+          "crates/pony-agent-core/src/agent/tool_runtime.rs",
+          "crates/pony-agent-core/src/agent/mod.rs"
+        ]
+      },
+      "contract_ledger": [
+        "McpClient：connect(spec, request_timeout) / connect_with_timeouts(spec, connect_timeout, request_timeout)；握手必须发送 initialize(protocolVersion=2024-11-05, capabilities, clientInfo) 后发 notifications/initialized（无 id）",
+        "协议版本不兼容（协商值 != 2024-11-05）必须 fail-closed 为 initialize_failed",
+        "请求 id 自增；响应按 id 关联，接受数字或数字字符串 id；id 不匹配的响应进入 pending 缓冲（不丢弃，绝不重放 stdout）；无 id 的 error 响应必须上抛为 server_error；服务端通知（含 method）跳过",
+        "超时语义：Timeout 不代表会话失效，不杀进程、不重放请求（资源读取幂等，由调用方决定是否重试）；仅 NotConnected 触发驱逐并重连一次",
+        "超时可配置：PONY_MCP_CONNECT_TIMEOUT_MS（默认 20000）与 PONY_MCP_REQUEST_TIMEOUT_MS（默认 5000），最小 1ms",
+        "进程回收：Unix 以 process_group(0) 启动，Drop 先关 stdin（EOF）、宽限 200ms、再对进程组 SIGKILL（覆盖 npx/uvx 孙进程）；shutdown_stdio_mcp_clients() 可显式清空缓存",
+        "传输层 method 名：resources/list、resources/templates/list、resources/read；旧 operation_key 更名 legacy_fake_transport_key 且仅用于 FakeMcpTransport 内存键"
+      ],
+      "circuit_breaker": {
+        "attempts": 0,
+        "note": "无熔断触发"
+      },
+      "contract_evolution": "旧一次性 stdio 传输语义（每次 spawn + 自造 method 名）被替代；FakeMcpTransport 语义不变",
+      "pool_degradation": "W27 红相为编译级（模块缺失）：实现与测试并发落地导致断言级红相缺失，已用 git stash 复现 compile-red 快照留档；审查由独立 L3 subagent 执行",
+      "gates": {
+        "cargo check -p pony-agent-core --all-targets": "Exit 0",
+        "cargo test --test wave27_mcp_client_test": "7 passed",
+        "cargo test --test hotloader_and_mcp_contract": "1 passed（已迁移到规范握手）",
+        "cargo test --test wave26_spill_test / wave25 / orchestration / dispatcher_matrix / tool_surface": "8 / 4 / 4 / 27 / 2 passed",
+        "cargo test --lib agent::mcp_client": "7 passed（含字符串 id、无 id 错误上抛、版本不兼容 fail-closed）",
+        "cargo test --lib agent::spill / provider::tests / contract_view_tests": "11 / 52 / 12 passed",
+        "cargo check --manifest-path src-tauri/Cargo.toml": "Exit 0"
+      },
+      "blast_radius": "3 src 文件（1 新增 ~800 行）+ 2 测试文件；引入子进程组管理与会话缓存",
+      "review": {
+        "report": ".dev-team/review-w27.json",
+        "verdict_before_fix": "FAIL（8 major + 5 minor）",
+        "fixed": [
+          "并发丢响应：请求串行锁 + 迟到响应 pending 缓冲（不再丢弃 id 不匹配响应）",
+          "id 假定：接受数字/数字字符串；无 id 的 error 上抛 server_error；无法归属报文报 protocol_error",
+          "超时策略：取消「超时即杀进程+重放」，改为一律返回 Timeout 且保留会话；仅 NotConnected 驱逐重连",
+          "握手超时：新增 connect_with_timeouts，默认 20s，可用环境变量覆盖",
+          "进程回收：process_group(0) + 进程组 SIGKILL + 先关 stdin EOF + 宽限 200ms；新增 shutdown_stdio_mcp_clients()",
+          "协议版本：协商值必须为 2024-11-05，否则 initialize_failed（单测覆盖）",
+          "测试分权：hotloader 迁移独立提交 55ec3f2（先测试后实现）",
+          "协议边界单测：字符串 id / 无 id 错误 / 版本不兼容（3 个新单测）"
+        ],
+        "residual": [
+          "A13 未闭环（显式标注）：McpResourceSurface 生产路径仍 fail-closed（runtime/tool_exec.rs:333），McpClient/StdioMcpTransport 无生产构造点，provider 未做 mcp__<server>__<tool> 动态注入，HttpMcpTransport/SSE 传输未实现",
+          "会话缓存为进程级 static（无 TTL/上限/空闲回收），仅提供 shutdown_stdio_mcp_clients() 显式清理；待 W33 平台化统一",
+          "待办 W27b：MCP server 配置解析（mcpServers）+ 启动时注册表注入 + 动态工具面 + HTTP/SSE 传输"
+        ]
+      },
+      "meta_retrospective": "本轮暴露「实现先于红相落地」的时序风险：并发开发时红相可能失去断言级证据，必须用 git stash 反向复现；另 L3 审查对并发/协议/超时三个视角均给出真实反例，说明机器门禁无法替代设计审查"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
   "previous_wave": {
-    "wave": 25,
+    "wave": 26,
     "status": "all_waves_completed",
-    "reason": "Agent 核心能力审计（22 轴三方对比）后首个完善波次 W25：子代理/团队桩工具假报成功收口为 capability_unavailable，并修正基线即失败的陈旧工具面断言"
+    "reason": "W26 大输出落盘溢出（spill）：超限读取不再丢弃/硬失败，改为内容寻址落盘 + content_ref 按需回读，并新增 spill_read 工具"
   }
 }

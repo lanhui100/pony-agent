@@ -371,7 +371,7 @@ impl FakeMcpTransport {
             .lock()
             .expect("fake MCP transport mutex poisoned")
             .insert(
-                (source_id.into(), operation_key(&operation).to_string()),
+                (source_id.into(), legacy_fake_transport_key(&operation).to_string()),
                 response,
             );
     }
@@ -384,7 +384,7 @@ impl McpTransport for FakeMcpTransport {
             .expect("fake MCP transport mutex poisoned")
             .get(&(
                 request.source_id.clone(),
-                operation_key(&request.operation).to_string(),
+                legacy_fake_transport_key(&request.operation).to_string(),
             ))
             .cloned()
             .unwrap_or_else(|| Err(format!("no fake MCP response for `{}`", request.source_id)))
@@ -410,57 +410,153 @@ impl StdioMcpTransport {
 
 impl McpTransport for StdioMcpTransport {
     fn execute(&self, request: &McpTransportRequest) -> Result<McpTransportResponse, String> {
-        use std::process::{Command, Stdio};
-        use std::io::{BufRead, BufReader, Write};
-
-        let mut child = Command::new(&self.command)
-            .args(&self.args)
-            .envs(&self.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn MCP process `{}`: {e}", self.command))?;
-
-        let mut stdin = child.stdin.take().ok_or("Failed to open child stdin")?;
-        let stdout = child.stdout.take().ok_or("Failed to open child stdout")?;
-
-        let rpc_req = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": operation_key(&request.operation),
-            "params": {
-                "source_id": request.source_id,
-                "arguments": request.arguments
+        // W27：走规范 MCP 会话（handshake + 规范 method 名 + 长连接），失败时对
+        // 「连接已断开 / 超时」做一次驱逐重连，其余错误直接上抛。
+        // 只有「会话已断开」才重建连接并重试一次（资源读取是幂等只读操作）。
+        // 超时**不**重放：会话可能仍健康，重放会重复执行且误杀会话。
+        match self.execute_with_client(request) {
+            Err(crate::agent::mcp_client::McpClientError::NotConnected) => {
+                evict_stdio_client(self, &request.source_id);
+                self.execute_with_client(request)
+                    .map_err(|retry_err| retry_err.message().to_string())
             }
-        });
-
-        let mut payload = serde_json::to_string(&rpc_req).map_err(|e| e.to_string())?;
-        payload.push('\n');
-
-        stdin.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
-        drop(stdin);
-
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| e.to_string())?;
-
-        let rpc_res: Value = serde_json::from_str(&line)
-            .map_err(|e| format!("Invalid JSON-RPC response `{line}`: {e}"))?;
-
-        if let Some(err) = rpc_res.get("error") {
-            return Err(format!("MCP error: {err}"));
+            other => other.map_err(|err| err.message().to_string()),
         }
+    }
+}
 
-        let result = rpc_res.get("result").cloned().unwrap_or(Value::Null);
+impl StdioMcpTransport {
+    fn execute_with_client(
+        &self,
+        request: &McpTransportRequest,
+    ) -> Result<McpTransportResponse, crate::agent::mcp_client::McpClientError> {
+        use crate::agent::mcp_client::McpClientError;
+
+        let client = stdio_client(self, &request.source_id)?;
+        let content = match request.operation {
+            McpResourceOperation::ListResources => {
+                let resources = client.list_resources()?;
+                serde_json::json!({ "resources": resources })
+            }
+            McpResourceOperation::ListResourceTemplates => {
+                let templates = client.list_resource_templates()?;
+                serde_json::json!({ "resourceTemplates": templates })
+            }
+            McpResourceOperation::ReadResource => {
+                let uri = request
+                    .arguments
+                    .get("uri")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|uri| !uri.trim().is_empty())
+                    .ok_or_else(|| {
+                        McpClientError::Protocol(
+                            "MCP resources/read 缺少非空 uri 参数。".to_string(),
+                        )
+                    })?;
+                client.read_resource(uri)?
+            }
+        };
+
         Ok(McpTransportResponse {
-            content: result,
+            content,
             truncated: false,
         })
     }
 }
 
-fn operation_key(operation: &McpResourceOperation) -> &'static str {
+fn stdio_client_key(transport: &StdioMcpTransport, source_id: &str) -> String {
+    let mut env = transport.env.clone();
+    let mut env_pairs: Vec<(String, String)> = env.drain().collect();
+    env_pairs.sort();
+    format!(
+        "{}|{:?}|{:?}|{}",
+        transport.command, transport.args, env_pairs, source_id
+    )
+}
+
+fn stdio_client_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<crate::agent::mcp_client::McpClient>>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<crate::agent::mcp_client::McpClient>>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn stdio_client(
+    transport: &StdioMcpTransport,
+    source_id: &str,
+) -> Result<std::sync::Arc<crate::agent::mcp_client::McpClient>, crate::agent::mcp_client::McpClientError>
+{
+    use crate::agent::mcp_client::{McpClient, McpServerSpec};
+
+    let key = stdio_client_key(transport, source_id);
+    if let Ok(cache) = stdio_client_cache().lock() {
+        if let Some(client) = cache.get(&key) {
+            return Ok(std::sync::Arc::clone(client));
+        }
+    }
+
+    let mut env_pairs: Vec<(String, String)> = transport.env.clone().into_iter().collect();
+    env_pairs.sort();
+    let spec = McpServerSpec {
+        id: source_id.to_string(),
+        command: transport.command.clone(),
+        args: transport.args.clone(),
+        env: env_pairs,
+    };
+    let client = McpClient::connect_with_timeouts(
+        &spec,
+        mcp_connect_timeout(),
+        mcp_request_timeout(),
+    )?;
+    let client = std::sync::Arc::new(client);
+    if let Ok(mut cache) = stdio_client_cache().lock() {
+        cache.insert(key, std::sync::Arc::clone(&client));
+    }
+    Ok(client)
+}
+
+fn env_timeout_ms(key: &str, default_ms: u64) -> std::time::Duration {
+    let parsed = std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(default_ms);
+    std::time::Duration::from_millis(parsed)
+}
+
+/// MCP 握手超时（可用 `PONY_MCP_CONNECT_TIMEOUT_MS` 覆盖，默认 20s：npx/uvx 冷启动较慢）。
+fn mcp_connect_timeout() -> std::time::Duration {
+    env_timeout_ms("PONY_MCP_CONNECT_TIMEOUT_MS", 20_000)
+}
+
+/// MCP 单请求超时（可用 `PONY_MCP_REQUEST_TIMEOUT_MS` 覆盖，默认 5s）。
+fn mcp_request_timeout() -> std::time::Duration {
+    env_timeout_ms("PONY_MCP_REQUEST_TIMEOUT_MS", 5_000)
+}
+
+/// 关闭并清空全部 stdio MCP 会话缓存（会话收尾/测试清理用）。
+pub fn shutdown_stdio_mcp_clients() {
+    if let Ok(mut cache) = stdio_client_cache().lock() {
+        cache.clear();
+    }
+}
+
+fn evict_stdio_client(transport: &StdioMcpTransport, source_id: &str) {
+    let key = stdio_client_key(transport, source_id);
+    if let Ok(mut cache) = stdio_client_cache().lock() {
+        cache.remove(&key);
+    }
+}
+
+/// **仅用于 `FakeMcpTransport` 的内存键**（不是 MCP 线上 method 名）。
+///
+/// 规范 method 名见 `crate::agent::mcp_client`（`resources/list`、`resources/read`、
+/// `resources/templates/list`）。此函数已改名以免被误当作协议 method 使用。
+fn legacy_fake_transport_key(operation: &McpResourceOperation) -> &'static str {
     match operation {
         McpResourceOperation::ListResources => "list_resources",
         McpResourceOperation::ListResourceTemplates => "list_resource_templates",

@@ -1,0 +1,109 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_client.rs",
+      "line": 414,
+      "severity": "major",
+      "rule": "A 并发：共享长连接必须按 id 路由响应；持锁阻塞收包时禁止丢弃「非本次请求」的行，否则他人响应被永久吞掉",
+      "counterexample": "request() 在 mcp_client.rs:388-392 先锁 responses 再 recv_timeout；414-417 对 id != 本次 id 的行一律 continue 丢弃（注释称「单线程请求模型下不应出现」）。但 write_line（376）不加任何请求串行化，两个线程可同时把请求写进同一根 stdin：T1 发 id=1（服务端慢），T2 发 id=2（快），服务端先回 id=2；T1 先拿到 responses 锁，把 id=2 当乱序丢弃；T2 随后只能等到 5s Timeout。stdout 侧已被消费的行不可重放，T2 的响应永久丢失；且 T2 的 deadline 在 378 于取锁前算好，等锁期间已流逝，超时判定还会更早触发。",
+      "suggestion": "读线程按 id 投递：Mutex<HashMap<u64, SyncSender<Value>>> + 一个不持锁的 recv_timeout；未知 id 记 stderr_tail 后丢弃并计数。或者在缓存层把「整个 request+recv」串行化并把 414-417 的静默丢弃改成带原报文的 Protocol 错误。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tool_runtime.rs",
+      "line": 501,
+      "severity": "major",
+      "rule": "A 并发：跨调用共享 Arc<McpClient> 的前提是客户端本身可并发复用；引入共享即引入真实风险面，不能靠「当前还没接线」兜底",
+      "counterexample": "stdio_client（493-525）在 501-504 命中进程级 static 缓存（485-490）后直接返回 Arc::clone，因此同一 (command, args, env, source_id) 的任意两次工具调用、任意两个会话/子代理共享同一个 McpClient。McpClient 对外全部是 &self 方法（request 368、notify 348），而实现是单通道、无 pending 表、id 不匹配即丢（414-417），不具备共享语义。反例即上一条的 T1/T2 交错；该共享是这次改动新引入的（旧实现每次 spawn 独立进程），不是既有风险。",
+      "suggestion": "两种收口任选其一：①缓存层给每个 client 配一把请求锁（Mutex 包住整个 request 周期）；②完成按 id 路由后再允许共享。并在 wave27 冻结测试外补一个「两线程并发 execute 同一 source，各拿各的结果」的用例。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_client.rs",
+      "line": 411,
+      "severity": "major",
+      "rule": "D 协议：响应归属判定不得假定 id 必为 u64；无 id 的 error 响应不得当通知吞掉",
+      "counterexample": "411 `value.get(\"id\").and_then(Value::as_u64)`：①服务端回 {\"id\":\"1\"}（JSON-RPC 允许字符串 id，部分 SDK 会把数字 id 序列化成字符串）→ as_u64 为 None → 412-413 continue；②服务端解析失败或无法关联请求时回 {\"id\":null,\"error\":{\"code\":-32700,...}} → 同样 continue；③服务端回 JSON-RPC batch 数组（MCP 2024-11-05 允许批量）→ get(\"id\") 为 None → 整批丢弃。三种情形都会在 5s 后由 394-399 报 Timeout，真实错误被永久吞掉；随后 tool_runtime.rs:424 还会把「超时」当连接故障驱逐重连，排障方向被带偏并多起一个子进程。",
+      "suggestion": "id 比较保留原类型（number/string 归一化后比较）；error 已存在但 id 缺失/不匹配时返回 Server/Protocol 并带原始报文；batch 数组逐个拆包路由；对「跳过」的行累加计数，超时错误里附上被跳过的行数与最后一行预览。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tool_runtime.rs",
+      "line": 415,
+      "severity": "major",
+      "rule": "C 超时：超时≠会话失效；不得以「杀进程 + 整请求重放」作为超时兜底（重复执行 + 误杀健康会话）",
+      "counterexample": "415-426 把 Timeout 与 NotConnected 同等对待：evict（424）后把同一个请求原样重放一次。慢服务端（例如 resources/read 读远端大文件 >5s）场景：第一次 5s 超时 → kill 健康会话 → 重连（重新 spawn + initialize）→ 第二次仍超时，总耗时 ~10s+，且每次读都重启一次 server；对非幂等操作就是重复执行——当前 transport 只暴露 resources/* 读操作，但 McpClient::call_tool（mcp_client.rs:316）已公开，一旦按计划接线，超时重放会重复调用工具。此外被杀会话的迟到响应仍写回旧管道，成为新会话/旧会话的「乱序行」被 414-417 丢弃。",
+      "suggestion": "只有 NotConnected/管道断开才驱逐重连；Timeout 直接上抛（或仅对显式标注幂等的资源读操作做一次重试），重连加退避与上限，并把「超时前已投递的请求 id」记入日志避免重复执行。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tool_runtime.rs",
+      "line": 515,
+      "severity": "major",
+      "rule": "C 超时：握手预算不得硬编码为 5s；connect 与 request 需要可配置、可区分的超时",
+      "counterexample": "stdio_client 固定以 DEFAULT_TIMEOUT=5s（mcp_client.rs:27）调用 connect（515-519），而 StdioMcpTransport 只有 command/args/env 三个字段（395-408），没有任何超时入口。模块文档（mcp_client.rs:34）明确把 npx 列为典型启动命令：`npx -y @modelcontextprotocol/server-*` 首次运行要下载/安装依赖，必然 >5s，initialize 直接 Timeout；叠加 415-426 的重试，会在 ~10s 内起两个 npx 再全部杀掉，用户侧永久起不来，且错误信息只有 timeout。",
+      "suggestion": "给 StdioMcpTransport 增加 connect_timeout（默认 30s）与 request_timeout（默认 10s）字段并从配置读取；connect 阶段的超时错误用 Initialize 而非 Timeout，避免被当成连接失效反复重启。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_client.rs",
+      "line": 443,
+      "severity": "major",
+      "rule": "B 生命周期：子进程终止必须覆盖进程组；npx 这类 wrapper 的真实 server 是孙进程",
+      "counterexample": "Drop（437-445）先 flush（注释说「关闭 stdin 让 server 自行退出」，但从未 drop/close stdin），随后 child.kill()+wait() 只作用于直接子进程。以 npx 启动时，真实 server 是 npx 派生的 node 孙进程：SIGKILL 掉 npx 后 node 继续运行并继承 stdout 管道，成为常驻孤儿。冻结测试 t7（wave27_mcp_client_test.rs:749-786）用 `MCP_FAKE_PID` 记录的 python pid 断言，而 `/usr/bin/env python3` 是 exec（pid 不变），所以该用例结构上无法发现孙进程残留，其「不残留」结论不覆盖 npx 场景。",
+      "suggestion": "Unix 下用 CommandExt::process_group(0) 起新进程组、Drop 时 killpg(SIGTERM→SIGKILL)；先显式 drop(stdin) 走优雅退出，超时再 kill；Windows 用 Job Object。t7 增加一个「wrapper 派生孙进程」的用例，断言整组消失。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/tool_exec.rs",
+      "line": 333,
+      "severity": "major",
+      "rule": "E 接线完整性：W27 方案第④条「把 McpResourceSurface 接进正常路径、去掉 fail-closed」必须闭环；未闭环须在台账显式标注，不得默认放行",
+      "counterexample": "tool_exec.rs:333-335 对 CapabilityBridgeAction::Resource 仍直接返回 CapabilityFailureKind::SourceUnavailable（注释 327-331 自认「not yet wired」）。全仓 grep：StdioMcpTransport 与 McpClient 的生产构造点为 0（仅 tests/ 使用），list_tools 只被 wave27 测试调用（无 provider 侧 mcp__<server>__<tool> 动态注册，namespaced_tools 无调用者），计划第③条 HttpMcpTransport/SSE 在本 diff 中完全缺席，docs/audit/agent-core-improvement-plan.md:13 也仍写「⏳ 下一波」。结论：握手与长连接仅单测可用，模型面 MCP 工具/资源仍是零可见、资源读仍 fail-closed，W27 验收项「tools/list 得到的工具可被调用；资源读取返回内容」在生产路径不成立。",
+      "suggestion": "本波结论必须在台账显式写「A13 未闭环：仅握手客户端落地，tool_exec/McpResourceSurface 接线、provider 动态注入、HttpMcpTransport 未交付」，verdict 不得记为完成；后续波次补齐接线并补「无 server 时降级不可用但不崩」的验收。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/hotloader_and_mcp_contract.rs",
+      "line": 1,
+      "severity": "major",
+      "rule": "F 测试分权：验收测试一经冻结只读不可改；改测试必须独立提交并由测试方裁决，不能与实现混在同一未提交 diff",
+      "counterexample": "`git status --porcelain` 显示 `M crates/pony-agent-core/tests/hotloader_and_mcp_contract.rs`（该文件冻结于 309c254），工作区未提交改动 -39/+214：删除旧 `test_stdio_mcp_transport_roundtrip_with_echo_sh`，改为依赖 python3 的握手版用例。`git show --stat 709e2dd` 只冻结了 wave27_mcp_client_test.rs，未包含本文件的重写授权；因此审查无法区分「协议变更逼着改测试」与「测试迁就实现」，冻结门禁失去独立性。",
+      "suggestion": "把该测试迁移拆成独立的 test(wave-27) 提交、由 Test Agent/Lead 复核后先行落地（并在 review 记录中写明授权），实现提交只保留 src/ 三处改动；日后冻结测试的迁移一律先于实现提交。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tool_runtime.rs",
+      "line": 527,
+      "severity": "minor",
+      "rule": "B 生命周期：驱逐必须保证进程被回收；static 缓存需要退出/空闲回收路径",
+      "counterexample": "evict_stdio_client（527-532）只做 cache.remove，若另一线程已 clone 到该 Arc（501-504 命中后返回），kill 不会发生，旧进程与旧会话继续存活到最后一个 Arc 释放（期间的迟到响应还会被丢弃）；缓存本身是 OnceLock static（485-490），进程退出时没有 Drop，也没有空闲 TTL/容量上限，配置里每出现一个新的 (command,args,env,source_id) 组合就多一个常驻 server 直到应用退出。",
+      "suggestion": "缓存改由运行时对象持有并在 Drop 时清空；或在 evict 时若强引用计数 >1 则登记待关闭、由下一次 lookup 回收；加 idle TTL 与容量上限。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_client.rs",
+      "line": 378,
+      "severity": "minor",
+      "rule": "C 超时：deadline 计算需防溢出；零时长的请求不得先发出再立刻报超时",
+      "counterexample": "378 `Instant::now() + self.timeout` 对极大 Duration 会 panic/回绕（caller 可控，DEFAULT_TIMEOUT 之外的公开 API）；timeout=0 时 381 立即返回 Timeout，但请求已在 376 写出，服务端仍会执行并回包，这行响应成为下一个请求的「乱序行」被 414-417 丢弃（若同一 client 未被驱逐）。",
+      "suggestion": "用 checked_add 并在失败时返回 Protocol/Timeout 错误；timeout 为 0 时在写入前直接拒绝（或按最小 1ms 处理）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_client.rs",
+      "line": 234,
+      "severity": "minor",
+      "rule": "D 协议：initialize 的 protocolVersion 协商结果必须校验，不兼容应 fail-closed",
+      "counterexample": "握手后只取 serverInfo.name/version 与 capabilities（234-245），从不比对 init.protocolVersion：服务端回 \"2025-06-18\" 或干脆缺失，客户端仍按 2024-11-05 语义继续发 resources/templates/list 等，不兼容会推迟成难以定位的 Timeout。",
+      "suggestion": "校验 protocolVersion 在支持列表内，不匹配返回 Initialize 错误（含服务端声明值）；把协商结果暴露到 server_capabilities 旁的字段供诊断。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave27_mcp_client_test.rs",
+      "line": 688,
+      "severity": "minor",
+      "rule": "F 测试有效性：冻结用例应覆盖协议边界（id 类型、错误吞没、stderr 阻塞、并发、慢启动），不能只跑 happy path",
+      "counterexample": "t1-t7（688/749 等）只覆盖数字 id、单线程、小 stderr、正常握手：没有「字符串 id」「id:null 的 error 响应」「batch 数组」「服务端狂写 stderr 灌满管道」「两线程并发请求」「initialize 超时/慢启动（npx）」用例。于是 mcp_client.rs:411-413 的丢响应、443 的孙进程残留、515 的 5s 握手预算都没有红相护栏（stderr 排空线程虽存在，但无「不排空即阻塞」的反向断言）。",
+      "suggestion": "下一波补：字符串 id 与 id:null error、stderr 灌 1MB 后仍能正常收响应、双线程并发各取结果、npx 冷启动超时、wrapper 派生孙进程的 Drop 用例。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tool_runtime.rs",
+      "line": 534,
+      "severity": "minor",
+      "rule": "E 接线完整性：自造 method 名不得回流到传输层；遗留符号应改名以防误用",
+      "counterexample": "已核对：StdioMcpTransport 不再使用 operation_key（412-431 走 McpClient 的规范 method 名），该函数现在只作为 FakeMcpTransport 的内存 key 使用（374、387）。功能上无回归，但名字仍叫 operation_key，后续很容易被当成线上 method 名再次引用，重演 A13 的「自造 method」问题。",
+      "suggestion": "重命名为 fake_response_key（并在注释标注「仅测试替身使用，禁止用于线上 JSON-RPC」），或把 FakeMcpTransport 的 key 收敛到其自身实现里。"
+    }
+  ]
+}

@@ -10,7 +10,8 @@
 |---|---|---|---|
 | W25 假能力收口 | ✅ 完成 | `0d162da` 红相 / `3dab551` 实现 / `27255fd` 台账 | check Exit 0；wave25 4/4；orchestration 4/4；provider 52/52；contract_view 12/12；dispatcher 27/27；src-tauri Exit 0 |
 | W26 大输出 spill | ✅ 完成 | `93aa1f9` 红相 / `543d531` 实现+台账 | check Exit 0；wave26 8/8；spill 单测 10/10；wave25 4/4；provider 52/52；contract_view 12/12（primitive 37/surface 21）；src-tauri Exit 0；L3 审查 3 major 已修 |
-| W27 MCP 客户端 | ⏳ 下一波 | — | — |
+| W27 MCP 客户端 | 🟡 部分完成（A13 未闭环） | `709e2dd` 红相 / `55ec3f2` 测试迁移 / 本轮实现 | wave27 7/7；hotloader 1/1；mcp_client 单测 7/7；check Exit 0；src-tauri Exit 0；L3 审查 8 major 已修 |
+| W27b MCP 生产接线 | ⏳ 待办（配置解析 + 注册表注入 + 动态工具面 + HTTP/SSE） | — | — |
 
 ## 一、总原则（不可协商）
 
