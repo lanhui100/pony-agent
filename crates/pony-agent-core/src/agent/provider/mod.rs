@@ -4642,21 +4642,14 @@ mod tests {
                 "BatchExecute".to_string(),
                 "Plan".to_string(),
                 "ViewImage".to_string(),
-                // PA-110/PA-109 team & orchestration 工具追加（2ce5d1c wire subagent and
-                // agent team tools）：product tool surface 现止于 team 工具，不再止于 ViewImage。
-                "subagent".to_string(),
-                "workflow".to_string(),
-                "spawn_teammate".to_string(),
-                "list_agents".to_string(),
-                "send_message".to_string(),
-                "interrupt_agent".to_string(),
-                "drain_inbox".to_string(),
-                "team_task_create".to_string(),
-                "team_task_update".to_string(),
-                "team_task_list".to_string(),
-                // PA-112 todo 工具（ToolExposure::ModelVisible，wave-13 对齐实测表面）。
+                // W25：子代理/团队工具（subagent/workflow/team_task_*）未接线，已从模型
+                // 可见工具面摘除（handler 返回 capability_unavailable）。此处对齐实测面。
                 "TodoWrite".to_string(),
-                "TodoList".to_string()
+                "TodoList".to_string(),
+                // W20 goal 工具为模型可见面成员（实测 surface 尾部）。
+                "create_goal".to_string(),
+                "get_goal".to_string(),
+                "update_goal".to_string()
             ]
         );
     }
@@ -4693,21 +4686,14 @@ mod tests {
                 "BatchExecute".to_string(),
                 "Plan".to_string(),
                 "ViewImage".to_string(),
-                // PA-110/PA-109 team & orchestration 工具追加（2ce5d1c wire subagent and
-                // agent team tools）：product tool surface 现止于 team 工具，不再止于 ViewImage。
-                "subagent".to_string(),
-                "workflow".to_string(),
-                "spawn_teammate".to_string(),
-                "list_agents".to_string(),
-                "send_message".to_string(),
-                "interrupt_agent".to_string(),
-                "drain_inbox".to_string(),
-                "team_task_create".to_string(),
-                "team_task_update".to_string(),
-                "team_task_list".to_string(),
-                // PA-112 todo 工具（ToolExposure::ModelVisible，wave-13 对齐实测表面）。
+                // W25：子代理/团队工具（subagent/workflow/team_task_*）未接线，已从模型
+                // 可见工具面摘除（handler 返回 capability_unavailable）。此处对齐实测面。
                 "TodoWrite".to_string(),
-                "TodoList".to_string()
+                "TodoList".to_string(),
+                // W20 goal 工具为模型可见面成员（实测 surface 尾部）。
+                "create_goal".to_string(),
+                "get_goal".to_string(),
+                "update_goal".to_string()
             ]
         );
         assert!(payload.iter().all(|tool| {
@@ -4715,13 +4701,13 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|description| !description.trim().is_empty())
         }));
-        // PA-076 P2-6: Plan and ViewImage 在既有 13-tool 前缀后追加；PA-110 起 team 工具
-        // 再追加于 ViewImage 之后（cache-friendly stable prefix invariant from design
-        // Decision 10 仍保持：前缀顺序不变，仅尾部增长）。
+        // PA-076 P2-6: Plan and ViewImage 在既有 13-tool 前缀后追加；W25 起 team 工具已被
+        // 摘除（未接线），W20 goal 工具成为当前尾部（cache-friendly stable prefix invariant
+        // from design Decision 10 仍保持：前缀顺序不变，仅尾部变化）。
         let last_two = &names[names.len() - 2..];
         assert_eq!(
             last_two,
-            &["TodoWrite".to_string(), "TodoList".to_string()]
+            &["get_goal".to_string(), "update_goal".to_string()]
         );
     }
 

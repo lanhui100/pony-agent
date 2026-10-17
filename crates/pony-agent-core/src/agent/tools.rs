@@ -139,6 +139,18 @@ pub(crate) const TOOL_VIEW_IMAGE: &str = "view_image";
 /// Excel/ODF/RTF/EPUB/CSV/PDF to GitHub-Flavored Markdown, local and offline. The handler
 /// lives in [`crate::agent::document_conversion::ReadDocumentHandler`].
 pub(crate) const TOOL_WORKSPACE_READ_DOCUMENT: &str = "workspace_read_document";
+
+/// W25 单一能力开关：子代理/团队运行时是否已真实接线。
+///
+/// 当前为 `false`：`subagent`/`workflow`/`spawn_teammate`/`list_agents`/`send_message`/
+/// `interrupt_agent`/`drain_inbox`/`team_task_*` 这 10 个工具的实现仍是合成字符串与进程内
+/// 静态表（见 [`crate::agent::orchestration`]），对模型谎报 `status:"ok"` 会让模型误信
+/// 「已派生子代理并收到完成回执」。因此在真实实现（计划 W29）落地前，这些 handler 一律
+/// 返回结构化 `capability_unavailable` 错误，而不是假成功。
+///
+/// W29 落地真实子代理与 workflow 引擎后，将此开关置为 `true` 即可恢复这些实现路径。
+pub const SUBAGENT_RUNTIME_WIRED: bool = false;
+
 pub(crate) const TOOL_SUBAGENT: &str = "subagent";
 pub(crate) const TOOL_WORKFLOW: &str = "workflow";
 pub(crate) const TOOL_SPAWN_TEAMMATE: &str = "spawn_teammate";
@@ -1210,6 +1222,10 @@ impl ToolRouter {
     }
 
     fn execute_subagent(&self, call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_SUBAGENT);
+        }
+
         let args: Result<SubagentArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             Ok(args) => match subagent(args) {
@@ -1235,6 +1251,10 @@ impl ToolRouter {
     }
 
     fn execute_workflow(&self, call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_WORKFLOW);
+        }
+
         let args: Result<WorkflowArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             Ok(args) => match workflow(args) {
@@ -1260,6 +1280,10 @@ impl ToolRouter {
     }
 
     fn execute_spawn_teammate(&self, call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_SPAWN_TEAMMATE);
+        }
+
         let args: Result<SpawnTeammateArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             Ok(args) => match spawn_teammate(args) {
@@ -1285,6 +1309,10 @@ impl ToolRouter {
     }
 
     fn execute_list_agents(&self, _call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_LIST_AGENTS);
+        }
+
         match list_agents() {
             Ok(res) => ToolResult {
                 tool_name: TOOL_LIST_AGENTS.to_string(),
@@ -1301,6 +1329,10 @@ impl ToolRouter {
     }
 
     fn execute_send_message(&self, call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_SEND_MESSAGE);
+        }
+
         let args: Result<SendMessageArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             Ok(args) => match send_message(args) {
@@ -1326,6 +1358,10 @@ impl ToolRouter {
     }
 
     fn execute_interrupt_agent(&self, call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_INTERRUPT_AGENT);
+        }
+
         let args: Result<InterruptAgentArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             Ok(args) => match interrupt_agent(args) {
@@ -1351,6 +1387,10 @@ impl ToolRouter {
     }
 
     fn execute_drain_inbox(&self, call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_DRAIN_INBOX);
+        }
+
         let args: Result<ReadInboxArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             Ok(args) => match drain_inbox(args) {
@@ -1376,6 +1416,10 @@ impl ToolRouter {
     }
 
     fn execute_team_task_create(&self, call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_TEAM_TASK_CREATE);
+        }
+
         let args: Result<TeamTaskCreateArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             Ok(args) => match team_task_create(args) {
@@ -1401,6 +1445,10 @@ impl ToolRouter {
     }
 
     fn execute_team_task_update(&self, call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_TEAM_TASK_UPDATE);
+        }
+
         let args: Result<TeamTaskUpdateArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             Ok(args) => match team_task_update(args) {
@@ -1426,6 +1474,10 @@ impl ToolRouter {
     }
 
     fn execute_team_task_list(&self, _call: &ToolCall) -> ToolResult {
+        if !SUBAGENT_RUNTIME_WIRED {
+            return capability_unavailable_result(TOOL_TEAM_TASK_LIST);
+        }
+
         match team_task_list() {
             Ok(res) => ToolResult {
                 tool_name: TOOL_TEAM_TASK_LIST.to_string(),
@@ -5450,18 +5502,12 @@ mod contract_view_tests {
                 "BatchExecute",
                 "Plan",
                 "ViewImage",
-                "subagent",
-                "workflow",
-                "spawn_teammate",
-                "list_agents",
-                "send_message",
-                "interrupt_agent",
-                "drain_inbox",
-                "team_task_create",
-                "team_task_update",
-                "team_task_list",
+                // W25：subagent/workflow/team_task_* 未接线，已从模型可见面摘除。
                 "TodoWrite",
-                "TodoList"
+                "TodoList",
+                "create_goal",
+                "get_goal",
+                "update_goal"
             ]
         );
         assert_eq!(
@@ -5483,18 +5529,12 @@ mod contract_view_tests {
                 "workspace_batch",
                 "plan_control",
                 "view_image",
-                "subagent",
-                "workflow",
-                "spawn_teammate",
-                "list_agents",
-                "send_message",
-                "interrupt_agent",
-                "drain_inbox",
-                "team_task_create",
-                "team_task_update",
-                "team_task_list",
+                // W25：未接线的子代理/团队工具已从模型可见面摘除。
                 "todo_write",
-                "todo_list"
+                "todo_list",
+                "create_goal",
+                "get_goal",
+                "update_goal"
             ]
         );
     }
@@ -5519,7 +5559,7 @@ mod contract_view_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(tools.len(), 36, "baseline internal primitive count");
-        assert_eq!(names.len(), 28, "baseline product tool count");
+        assert_eq!(names.len(), 21, "W25 模型可见工具面 21 项（10 个假能力工具已摘除）");
         assert_eq!(
             names,
             vec![
@@ -5539,18 +5579,12 @@ mod contract_view_tests {
                 "BatchExecute",
                 "Plan",
                 "ViewImage",
-                "subagent",
-                "workflow",
-                "spawn_teammate",
-                "list_agents",
-                "send_message",
-                "interrupt_agent",
-                "drain_inbox",
-                "team_task_create",
-                "team_task_update",
-                "team_task_list",
+                // W25：subagent/workflow/team_task_* 未接线，已从模型可见面摘除。
                 "TodoWrite",
-                "TodoList"
+                "TodoList",
+                "create_goal",
+                "get_goal",
+                "update_goal"
             ]
         );
         for view in views {
@@ -5698,7 +5732,7 @@ mod contract_view_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
-        assert_eq!(names.len(), 28);
+        assert_eq!(names.len(), 21);
         assert!(registry.resolve("Run").is_some());
         assert!(registry.resolve("workspace.run_command").is_some());
         assert!(registry.resolve("workspace_path_info").is_some());
@@ -7314,6 +7348,26 @@ fn windows_shell_path(path: &str) -> String {
         return rest.to_string();
     }
     path.to_string()
+}
+
+/// W25：未接线的子代理/团队能力的统一拒绝结果。
+///
+/// 这 10 个工具当前只有桩实现（合成字符串 + 进程内静态表），若按「成功」回执返回，模型会
+/// 误信能力已执行。这里统一返回结构化 `capability_unavailable`，并给出可行动指引。
+fn capability_unavailable_result(tool_name: &str) -> ToolResult {
+    error_result(
+        tool_name,
+        "capability_unavailable",
+        format!(
+            "工具 `{}` 所属的子代理/团队运行时尚未接线，该能力当前不可用；请勿据此假设已派生子代理或已产生子任务。",
+            tool_name
+        ),
+        Some(
+            "见 docs/audit/agent-core-improvement-plan.md（计划 W29 落地真实子代理与 workflow 引擎）；\
+             在此之前请改用现有真实工具（Read/Search/Run/BatchExecute 等）。"
+                .to_string(),
+        ),
+    )
 }
 
 fn error_result(tool_name: &str, code: &str, message: String, hint: Option<String>) -> ToolResult {
