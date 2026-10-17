@@ -2582,7 +2582,11 @@ fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
     let contract_views = if is_builtin_tool_definition_set(tools) {
         builtin_provider_contract_views()
     } else {
-        tools.iter().map(|tool| tool.contract_view()).collect()
+        tools
+            .iter()
+            .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
+            .map(|tool| tool.contract_view())
+            .collect()
     };
 
     contract_views
@@ -2604,7 +2608,11 @@ fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
     let contract_views = if is_builtin_tool_definition_set(tools) {
         builtin_provider_contract_views()
     } else {
-        tools.iter().map(|tool| tool.contract_view()).collect()
+        tools
+            .iter()
+            .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
+            .map(|tool| tool.contract_view())
+            .collect()
     };
 
     contract_views
@@ -2625,7 +2633,11 @@ fn provider_tool_contract_views(
     if is_builtin_tool_definition_set(tools) {
         builtin_provider_contract_views()
     } else {
-        tools.iter().map(|tool| tool.contract_view()).collect()
+        tools
+            .iter()
+            .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
+            .map(|tool| tool.contract_view())
+            .collect()
     }
 }
 
@@ -2633,6 +2645,15 @@ fn builtin_provider_contract_views() -> Vec<crate::agent::tools::ToolDefinitionC
     builtin_tool_surface()
         .provider_contract_views()
         .expect("default turn tool view must match its registry snapshot")
+}
+
+/// W28 附带必修：非 builtin 工具集走 fallback 分支时，仍必须挡住「已知 builtin 但
+/// `exposure=Internal`」的名字——否则内部工具（如 `subagent` 桩）可经动态工具通道回流到
+/// 模型可见面，绕过 exposure 策略。未知/动态工具（`mcp__<server>__<tool>` 等）原样透传。
+pub(crate) fn is_internal_builtin_tool_name(name: &str) -> bool {
+    use crate::agent::tools::{canonical_tool_name, tool_exposure_for_name, ToolExposure};
+    canonical_tool_name(name).is_some()
+        && matches!(tool_exposure_for_name(name), ToolExposure::Internal)
 }
 
 fn is_builtin_tool_definition_set(tools: &[ToolDefinition]) -> bool {
@@ -4185,7 +4206,11 @@ fn render_tool_definitions(tools: &[ToolDefinition]) -> String {
     let contract_views = if is_builtin_tool_definition_set(tools) {
         builtin_provider_contract_views()
     } else {
-        tools.iter().map(|tool| tool.contract_view()).collect()
+        tools
+            .iter()
+            .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
+            .map(|tool| tool.contract_view())
+            .collect()
     };
 
     contract_views
@@ -4652,6 +4677,30 @@ mod tests {
                 "update_goal".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn fallback_tool_payload_filters_internal_builtin_but_keeps_dynamic_tools() {
+        // W28 附带必修：非 builtin 集合不得把 Internal 的 builtin 工具透传回模型面，
+        // 同时必须保留未知的动态工具（mcp__server__tool）。
+        let tools = vec![
+            ToolDefinition {
+                name: "subagent",
+                description: "internal stub",
+                input_schema: json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "mcp__demo__echo",
+                description: "dynamic tool",
+                input_schema: json!({"type": "object"}),
+            },
+        ];
+        let payload = anthropic_tools_payload(&tools);
+        let names: Vec<&str> = payload
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names, vec!["mcp__demo__echo"]);
     }
 
     #[test]

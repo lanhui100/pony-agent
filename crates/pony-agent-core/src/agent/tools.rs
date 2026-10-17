@@ -6290,6 +6290,29 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
     }
 }
 
+/// 工具是否「并发安全」（只读/无共享副作用），供并发执行引擎分区。
+///
+/// 语义由 descriptor 的执行策略 `concurrent_safe` 决定（与派发层同一真源），
+/// 因此新增工具只需在 `execution_policy_for_primitive` 声明即可自动生效。
+pub fn tool_is_concurrent_safe(name: &str) -> bool {
+    // 与派发层同源：优先用 builtin registry 的 descriptor.execution_policy（覆盖全部模型名/别名，
+    // 例如 `ReadDocument` 这类未进 canonical 表的模型可见名），未知工具回退到策略函数的默认值
+    // （默认 `concurrent_safe=false`，宁可串行不可并发误判）。
+    if let Some(descriptor) = builtin_registry_cached().resolve(name) {
+        return descriptor.execution_policy.concurrent_safe;
+    }
+    let primitive = canonical_tool_name(name).unwrap_or(name);
+    execution_policy_for_primitive(primitive).concurrent_safe
+}
+
+/// 进程内缓存的 builtin registry 快照（避免每次并发判定重建整张表）。
+fn builtin_registry_cached() -> &'static ToolRegistrySnapshot {
+    static CACHE: std::sync::OnceLock<ToolRegistrySnapshot> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        ToolRegistrySnapshot::builtin().expect("static builtin registry must build")
+    })
+}
+
 pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
     match canonical_tool_name(name).unwrap_or(name) {
         TOOL_WORKSPACE_BATCH

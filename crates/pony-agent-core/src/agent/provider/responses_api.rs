@@ -676,7 +676,11 @@ fn responses_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
     let contract_views = if is_builtin_tool_definition_set(tools) {
         builtin_provider_contract_views()
     } else {
-        tools.iter().map(|tool| tool.contract_view()).collect()
+        tools
+            .iter()
+            .filter(|tool| !super::is_internal_builtin_tool_name(&tool.name))
+            .map(|tool| tool.contract_view())
+            .collect()
     };
 
     contract_views

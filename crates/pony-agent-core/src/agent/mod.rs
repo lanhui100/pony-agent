@@ -24,6 +24,7 @@ pub mod image_artifact;
 pub mod input;
 pub mod jobs;
 pub mod lsp;
+pub mod parallel_tools;
 pub mod patch;
 pub mod pipeline;
 pub mod mcp_client;

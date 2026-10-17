@@ -1,10 +1,10 @@
 {
-  "wave": 27,
+  "wave": 28,
   "status": "all_waves_completed",
   "task_classification": "B",
-  "reason": "W27 MCP 客户端：规范握手（initialize/notifications\\/initialized）+ 长连接会话 + tools/resources 规范 method；StdioMcpTransport 升级；A13 仍未闭环（生产注册表接线/HTTP 传输未做）",
-  "baseline_commit": "709e2dd",
-  "symptom": "旧 stdio 传输每次请求 spawn 一个进程、method 名为自造 list_resources/read_resource、无 initialize 握手；资源面在生产路径 fail-closed（SourceUnavailable）",
+  "reason": "W28 并发工具执行引擎（保序+按 concurrent_safe 分区+panic 隔离+并发封顶）；A01 未闭环，provider 多调用接入显式列为 W28b",
+  "baseline_commit": "0d8a3f1",
+  "symptom": "provider 层硬拒多工具调用（Anthropic Err / OpenAI 静默丢首），回合内无法并行执行多个只读工具；且 fallback 工具载荷分支不按 exposure 过滤（内部工具可回流模型面）",
   "waves": {
     "9": {
       "branches": {
@@ -880,12 +880,70 @@
         ]
       },
       "meta_retrospective": "本轮暴露「实现先于红相落地」的时序风险：并发开发时红相可能失去断言级证据，必须用 git stash 反向复现；另 L3 审查对并发/协议/超时三个视角均给出真实反例，说明机器门禁无法替代设计审查"
+    },
+    "28": {
+      "status": "completed_partial",
+      "desc": "W28 并发工具执行引擎：agent/parallel_tools.rs（工作池、保序聚合、按 concurrent_safe 分区、panic 隔离、并发硬上限 32、毒锁恢复）+ tool_is_concurrent_safe（与 descriptor 策略同源）+ provider fallback 载荷按 exposure 过滤",
+      "task_classification": "B",
+      "classification_basis": "新增并发执行模块（多线程/panic 隔离/共享状态），命中并发黑名单；provider 载荷过滤属跨模块契约修正，按 B 级走独立红相 + 独立 L3 审查",
+      "write_scopes": {
+        "test-agent/frozen-red": [
+          "crates/pony-agent-core/tests/wave28_parallel_tools_test.rs"
+        ],
+        "impl": [
+          "crates/pony-agent-core/src/agent/parallel_tools.rs",
+          "crates/pony-agent-core/src/agent/tools.rs",
+          "crates/pony-agent-core/src/agent/mod.rs",
+          "crates/pony-agent-core/src/agent/provider/mod.rs",
+          "crates/pony-agent-core/src/agent/provider/responses_api.rs"
+        ]
+      },
+      "contract_ledger": [
+        "execute_calls(calls, concurrent_safe, policy, executor)：results 与 calls 一一对应且保序；concurrent_safe=true 并发（上限 policy.effective_concurrency()，clamp 1..=32），false 串行且不与任何其它调用重叠",
+        "executor panic 被隔离为该调用 status=error + error.code=tool_panicked，其余调用不受影响；锁中毒必须恢复（不得静默丢已完成结果）",
+        "空输入 → 空结果 + max_observed_concurrency=0；concurrent_safe 与 calls 长度不一致 → Err",
+        "tool_is_concurrent_safe(name)：与 descriptor.execution_policy 同源（覆盖 ReadDocument 等未进 canonical 表的模型名），未知/动态工具默认串行",
+        "provider fallback 工具载荷（anthropic/openai/responses/render）必须过滤「已知 builtin 且 exposure=Internal」的名字，动态工具（mcp__*）原样透传"
+      ],
+      "circuit_breaker": {
+        "attempts": 0,
+        "note": "无熔断触发"
+      },
+      "contract_evolution": "工具并发属性成为派发与并发引擎的共享真源（descriptor.execution_policy）；未改变既有单调用执行路径",
+      "pool_degradation": "红相为编译级（模块缺失）；实现与测试并发落地，已用 git stash 复现 compile-red（unresolved import ×2）留档",
+      "gates": {
+        "cargo check -p pony-agent-core --all-targets": "Exit 0",
+        "cargo test --test wave28_parallel_tools_test": "8 passed",
+        "cargo test --lib agent::parallel_tools": "6 passed（含别名并发属性、panic 隔离、空输入、长度不匹配）",
+        "cargo test --lib provider::tests": "53 passed（含 fallback exposure 过滤新用例）",
+        "cargo test --test wave27/wave26/wave25/orchestration/dispatcher_matrix/tool_surface/hotloader": "7/8/4/4/27/2/1 passed",
+        "cargo check --manifest-path src-tauri/Cargo.toml": "Exit 0"
+      },
+      "blast_radius": "5 src 文件（1 新增 ~380 行）+ 1 测试文件；引入多线程执行与进程级并发上限",
+      "review": {
+        "report": ".dev-team/review-w28.json",
+        "verdict_before_fix": "FAIL（3 major + 4 minor）",
+        "fixed": [
+          "F 完成度：计划与台账显式记录 W28 部分完成 / W28b 待办（A01 未闭环），引用可解析",
+          "E 语义一致：tool_is_concurrent_safe 改为查 builtin registry descriptor.execution_policy（同源，覆盖 ReadDocument 等别名），新增别名单测",
+          "F 范围完整性：provider fallback（anthropic/openai/responses/render_view）按 exposure 过滤 internal builtin，保留动态工具；新增单测",
+          "C 锁中毒：改为 poison 恢复 + into_inner，不再丢结果",
+          "B panic 契约：文档说明 AssertUnwindSafe 边界与 panic hook 噪音",
+          "D 队头阻塞：chunk 窗口改固定工作池 + 并发硬上限 32",
+          "A 峰值统计：仅覆盖 executor 执行期（fetch_add/fetch_sub 包裹 catch_unwind）"
+        ],
+        "residual": [
+          "A01 未闭环（显式）：provider 仍单工具（ProviderDecision.tool_call: Option），turn_sync/turn_stream 仍单 hop；多调用接入 = W28b",
+          "引擎当前无生产调用者（仅测试接入）；W28b 接入后由回合循环调用 execute_calls_with_router"
+        ]
+      },
+      "meta_retrospective": "L3 审查连抓两类问题：①完成度话术（宣称的 W28b 在计划中不存在）②跨模块契约漏项（provider fallback exposure）。说明「机器门禁全绿」无法替代范围/契约审查，后续波次把「计划引用必须可解析」纳入自查清单"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
   "previous_wave": {
-    "wave": 26,
+    "wave": 27,
     "status": "all_waves_completed",
-    "reason": "W26 大输出落盘溢出（spill）：超限读取不再丢弃/硬失败，改为内容寻址落盘 + content_ref 按需回读，并新增 spill_read 工具"
+    "reason": "W27 MCP 客户端：规范握手（initialize/notifications\\/initialized）+ 长连接会话 + tools/resources 规范 method；StdioMcpTransport 升级；A13 仍未闭环（生产注册表接线/HTTP 传输未做）"
   }
 }

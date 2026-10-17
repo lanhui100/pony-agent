@@ -1,0 +1,61 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/parallel_tools.rs",
+      "line": 12,
+      "severity": "major",
+      "rule": "F 完成度：未接入回合引擎的波次必须在计划/台账显式标注，且计划引用必须可解析，不得让「W28b 待办」只存在于悬空注释",
+      "counterexample": "parallel_tools.rs:12-14 称「已单列为计划 W28b，见 docs/audit/agent-core-improvement-plan.md」，但该文件 9-14 行的进度表只有 W25/W26/W27/W27b，没有 W28/W28b；64-70 行 W28 仍写完整范围（provider 决策改 Vec、turn_stream 边流边跑、附带必修）。全仓 grep `parallel_tools|execute_calls_with_router` 除模块自身与测试外 0 命中；provider/mod.rs:225 仍是 `tool_call: Option<ToolCall>`，:2249/:2938 仍对多个 tool_use 直接 Err；runtime/tool_exec.rs:20-40 仍是单调用解析；turn_stream.rs:1956 仍 resolve 单个调用；.dev-team/state.json:2 顶层仍是 wave 27，无 W28 节点。结论：A01 未闭环且未在台账/计划显式标注，模块注释指向的 W28b 条目不存在。",
+      "suggestion": "二选一：①本波补 provider 决策 Vec + turn_runner/turn_stream 接线并补「同一轮多只读工具并行、含写工具分区、中断保留已完成结果」的冻结验收；②在 plan 进度表加 `W28 引擎部分完成（A01 未闭环）` 与 `W28b：provider 多调用/流式派发/中断保留`，并在 state.json 记录后再删除悬空引用。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6298,
+      "severity": "major",
+      "rule": "E 语义一致：并发安全判定必须覆盖全部模型可见别名，且与 descriptor 的 execution_policy 同源",
+      "counterexample": "模型可见名 `ReadDocument`（tools.rs:6227 映射，且 5608/5685 的模型面清单含它）不在 canonical_tool_name 的 match（6005-6073）中，因此 tool_is_concurrent_safe(\"ReadDocument\") 走 `unwrap_or(name)` → execution_policy_for_primitive(\"ReadDocument\") → `_ => {}` 默认 concurrent_safe=false；而同一 primitive 的 descriptor 在 6151-6157 明确置 true。生产调用方传的是 provider 的模型名，W28b 接线后文档读取会被错误串行化。冻结 t7（wave28_parallel_tools_test.rs:537-538）只测 Read/workspace_read_file/Search，结构上发现不了该缺口。",
+      "suggestion": "在 canonical_tool_name 补 `\"ReadDocument\" => Some(TOOL_WORKSPACE_READ_DOCUMENT)`；更彻底的是让 helper 直接查 registry snapshot 的 descriptor.execution_policy（单一真源），并对 21 个模型可见名做参数化断言，防止下一个新别名再漏。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 2584,
+      "severity": "major",
+      "rule": "F 范围完整性：计划显式指派给 W28 的「附带必修」（fallback 分支按 ToolExposure 过滤 + 单测）不得静默漏做",
+      "counterexample": "docs/audit/agent-core-improvement-plan.md:70 明确要求 W28 把 anthropic_tools_payload / openai_tools_payload / render_tool_definitions 的 fallback 分支改为按 exposure 过滤并补单测；当前 provider/mod.rs:2584-2585、2606-2607、4187-4188 仍是 `tools.iter().map(|tool| tool.contract_view())` 全量透传，本波 diff 完全未触碰 provider/mod.rs。内部/延迟工具仍可经该分支回流模型面，且无覆盖测试。",
+      "suggestion": "在本波或显式拆出的 W28b 中给 fallback 分支加 exposure 过滤（或在 ToolDefinition 层携带 exposure/改为接收 registry 视图），并补 crate 内单测；若决定不做，必须在计划中显式撤销该附带必修并说明原因。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/parallel_tools.rs",
+      "line": 107,
+      "severity": "minor",
+      "rule": "C 结果完整性：锁中毒路径不得静默丢结果，也不得因锁中毒丢弃整批已完成结果",
+      "counterexample": "107-109 对 PoisonError 静默跳过 `slot[index] = Some(result)`；随后 133-135 `results.into_inner().map_err(|_| \"并发执行结果锁被污染。\")?` 又整批返回 Err。当前关键区只有一次不会 panic 的 move 赋值，故该路径实际不可达；但两处策略自相矛盾：一旦未来在锁内加日志或有 Drop 触发 panic，单次 panic 会按 107 行静默吞掉该调用结果，再按 133 行丢掉整批已成功结果，直接违反「panic 隔离、结果完整」契约。",
+      "suggestion": "统一用 `results.lock().unwrap_or_else(PoisonError::into_inner)` 并在中毒时记告警，仍返回已收集结果；或把「锁中毒=整批 Err」写成显式契约并删除 107 行的静默分支，避免两套语义。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/parallel_tools.rs",
+      "line": 92,
+      "severity": "minor",
+      "rule": "B panic 隔离：AssertUnwindSafe 掩盖的外部可变状态必须在 API 契约中说明；panic hook 噪音需知晓",
+      "counterexample": "92-94 对任意 F 套 AssertUnwindSafe（Rust 层面不会产生 UB，但抹掉了编译器的 unwind-safe 约束）：若调用方闭包捕获 &Mutex<T>/&RefCell 类外部状态并在持锁时 panic，同批其余调用会在已中毒/半更新的状态上继续执行；execute_calls_with_router 传入的 ToolRouter 内含 ProcessManager 的内部 Mutex（process.rs:318/350），虽然只读 safe 工具不碰它、run_command 在 unsafe 阶段串行，但接口未声明「executor 捕获状态必须自洽」。另 t4（wave28_parallel_tools_test.rs:350-356）真实触发默认 panic hook，会向 stderr 打印 `thread '<unnamed>' panicked`，污染测试/运行日志（不导致失败）。",
+      "suggestion": "在模块文档/函数文档写明「引擎只保证 panic 不传播，不保证调用方捕获状态的一致性；需要恢复语义请自行隔离」；若要在测试中消除噪音，可在测试二进制内临时替换 hook（注意全局 hook 的跨线程影响），生产侧保留 error 结果中的 panic 上下文即可。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/parallel_tools.rs",
+      "line": 117,
+      "severity": "minor",
+      "rule": "D 死锁/饥饿：按窗口 chunk 会造成队头阻塞；并发上限未做进程级封顶",
+      "counterexample": "117-124 每个 chunk 必须全部 join 才进入下一个 chunk：calls=[10s,1ms,1ms,1ms,1ms]、limit=4 时，第 5 个调用要等 10s 的 index0 结束才启动，尽管此时已有 3 个空闲额度；500 个 safe 调用会累计 spawn 500 个线程（不耗尽句柄，但纯 spawn 开销与头部阻塞叠加）。38-40 只做 `max(1)` 无上限：调用方传 max_concurrency=100000 且有 10 万个 safe 调用时，单个 window 会一次 spawn 10 万线程；std::thread::scope 的 spawn 失败会 panic 出 scope，绕过 catch_unwind 带崩整批。",
+      "suggestion": "改为固定 worker 池（min(limit, 32) 个线程 + mpsc 队列）或「完成即补充」的信号量调度，避免窗口队头阻塞；对 effective_concurrency 设硬上限并在文档标注线程成本，使 W29 多子代理复用时不会打爆进程。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/parallel_tools.rs",
+      "line": 90,
+      "severity": "minor",
+      "rule": "A 并发正确性：max_observed_concurrency 声称是实测峰值，计数窗口应只覆盖 executor 执行期",
+      "counterexample": "90-94 在进入 catch_unwind 之前就 fetch_add，并在 executor 返回后才 fetch_sub，因此计数包含线程启动到进入 executor 前的空窗：4 个瞬时返回的 safe 调用即使在 executor 里的真实重叠为 0（或 1），仍可报 max_observed_concurrency=4。fetch_max 本身不会低估（每次到达 N 的线程都会写 N，且不存在回写更小值），但「实测峰值并发」的语义被高估，用于遥测/断言会失真。",
+      "suggestion": "把 active 的加减移进 catch_unwind 内包裹 executor 调用的最小临界区（或单独在 closure 内计数），并保留 peak 的 fetch_max；测试 t1 依赖 executor 内 sleep，现有断言不受影响。"
+    }
+  ]
+}
