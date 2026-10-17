@@ -3135,7 +3135,7 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(responsePanel.classes()).not.toEqual(expect.arrayContaining(["my-0.5"]));
   });
 
-  it("orders assistant content and tool calls by their turn timeline instead of pinning tools above content", async () => {
+  it("orders tool calls above assistant content by the canonical turn order", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
@@ -3179,9 +3179,13 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
 
     const agentShell = wrapper.get(".conversation-agent-shell");
     const contentIndex = Array.from(agentShell.element.children).indexOf(contentPanel.element);
+    // Lead 裁定二（.dev-team/wave24-adjudication.md §6）：turn 内工具调用时序落盘即丢失
+    //（docs/decisions/0008-event-sourcing-evolution.md:18），重载会话无权威时序来源，
+    // 必须使用规范化顺序「思考过程 -> 工具调用 -> 正文」；store.messages 的数组下标
+    // 不是时间线（实时装配同样是 assistant 先入队、tool 后追加）。
     const toolIndex = Array.from(agentShell.element.children).indexOf(toolPanel.element);
     expect(contentIndex).toBeGreaterThanOrEqual(0);
-    expect(toolIndex).toBeGreaterThan(contentIndex);
+    expect(toolIndex).toBeLessThan(contentIndex);
   });
 
   it("uses trace timeline sequence when it is available for agent event ordering", async () => {
