@@ -78,7 +78,7 @@ C3 首版实现用 `str::rfind(...).map(|index| index + 1)` 的**字节**索引�
 | F-4 | 全量并行下残留 flake：`lifecycle_boundary_checkpoint_…` 失败约 1/13 次全量跑（合并 Lead 与 Test Agent 样本；Wilson 上界 ≈26%）。形态为**首个请求 1ms connect refused**。单跑 20/20 绿、模块批 10/10 绿 | `receipts/wave35/full_lib_run_freeze2.log`、`FINAL_acceptance_report_freeze2.md` | 预存，**被本波解除遮蔽**（见下） |
 | F-5 | 码表仍是子串匹配：`elapsed=40832ms` 可命中 `"408"`；`provider/mod.rs:5991` 把它当契约 | provider/mod.rs:5991 | 残留，须单独立项 |
 | F-6 | `recovery.rs:160-167` 另有一套裸 `contains` 判据，无生产调用者（潜在漂移） | recovery.rs:160-167 | 潜在 |
-| F-7 | **安全姿态变化**：豁免 `plan_control` 后，模型可在 Draft 态自行 `start_execution` 解锁写（`plan_state.rs:337` 无宿主审批） | governed_executor.rs:147 | 本轮决策，L3 要求留档 |
+| F-7 | **安全姿态变化**：豁免 `plan_control` 后，模型可在 Draft 态自行 `start_execution` 解锁写（`plan_state.rs:337` 无宿主审批） | governed_executor.rs:147 | **已裁决：方案 (b) 宿主审批**（wave-36，契约 C-141-*）——`DispatchContext.plan_execution_approval` 宿主注入、绑定 session+plan、TTL、一次性效果；无/不匹配/过期审批的 `start_execution` 与 Draft 态迁移型 `complete_step` ⇒ Deny `plan_execution_approval_required`（语义详见 `docs/architecture/plan-execution-approval.md`） |
 | F-8 | 同族残留（P3）：**无 `://` 的 scheme-less** `endpoint=127.0.0.1:42953/v1` 仍命中限流/服务端码表 → 仍可被误判为可重试；可达路径为「响应正文: {上游体}」（provider/mod.rs:1802，config 的 `base_url` 不校验 scheme）。C3 只剥离 `scheme://…` | L3-B 增量复审收据 | 残留，建议下一波按「按结构字段分类而非整段子串」立项 |
 
 ### F-4 的机制说明（重要：不是本轮引入，而是本轮**解除遮蔽**）
