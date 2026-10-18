@@ -71,6 +71,8 @@ pub struct ChatMessage {
 
 pub enum UiEvent {
     InputKey(crossterm::event::KeyEvent),
+    /// 终端尺寸变化（SSH 初次上报晚到 / 用户拉伸窗口）：必须立即整屏重绘，否则保留旧尺寸画面。
+    Resized,
     ScrollWheel(bool), // true = ScrollUp, false = ScrollDown
     StreamDelta(String),
     StreamToolCall(String),
@@ -1381,8 +1383,12 @@ fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
             let after: String = chars[*s + rel..*e].iter().collect();
             if state.input_buffer.is_empty() {
                 spans.push(Span::styled(CARET, Style::default().fg(theme::ACCENT)));
-                spans.push(Span::styled(
+                let placeholder = truncate_width(
                     " 输入任务，或输入 / 查看命令",
+                    text_width.saturating_sub(1),
+                );
+                spans.push(Span::styled(
+                    placeholder,
                     Style::default().fg(theme::FAINT),
                 ));
             } else {
@@ -1735,8 +1741,10 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let menu_open = !state.matching_commands().is_empty()
         && state.mode == InteractionMode::Normal
         && !state.is_streaming;
-    // 三键位固定（回车 / alt+回车 / 命令），只让 esc 的动词随上下文变化，避免肌肉记忆漂移。
-    let hints = if state.is_streaming {
+
+    // 底栏提示：按键位固定（回车 / alt+回车 / 命令），只让 esc 的动词随上下文变化；
+    // 宽度不足时按候选集逐级降级，绝不出现被截断的半截「·」。
+    let hints_full = if state.is_streaming {
         "esc 中断"
     } else if menu_open {
         "↑↓ 选择   ·   tab 补全   ·   esc 关闭"
@@ -1747,15 +1755,20 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     } else {
         "回车 发送   ·   esc 清空   ·   / 命令"
     };
+    let candidates: [&str; 3] = [hints_full, "回车 发送   ·   / 命令", "回车 发送"];
+    let space = content.width as usize;
+    let hints = candidates
+        .iter()
+        .copied()
+        .find(|h| str_width(h) <= space.saturating_sub(2))
+        .unwrap_or(candidates[2]);
+
     let footer_y = input_rect.y + input_h;
     let footer_rect = Rect { y: footer_y, height: 1, ..content };
     let hints_w = str_width(hints);
     let phrase_w = str_width(&phrase);
-    let space = content.width as usize;
-    // 空间不足时只保留 hints（右对齐状态词整体让位），绝不做无间隔拼接。
-    let footer_line = if phrase.is_empty() {
-        Line::from(Span::styled(hints, faint()))
-    } else if space > hints_w + phrase_w + 2 {
+    // 状态词只有在「不与提示粘连」时才右对齐显示。
+    let footer_line = if !phrase.is_empty() && space > hints_w + phrase_w + 2 {
         Line::from(vec![
             Span::styled(hints, faint()),
             Span::raw(" ".repeat(space - hints_w - phrase_w)),
@@ -2085,6 +2098,9 @@ fn tui_event_loop(
                             let _ = tx_events.send(UiEvent::InputKey(key));
                         }
                     }
+                    Ok(Event::Resize(_, _)) => {
+                        let _ = tx_events.send(UiEvent::Resized);
+                    }
                     Ok(Event::Mouse(mouse)) => {
                         use crossterm::event::MouseEventKind;
                         match mouse.kind {
@@ -2130,6 +2146,11 @@ fn tui_event_loop(
             Ok(event) => {
                 dirty = true;
                 match event {
+                UiEvent::Resized => {
+                    // 尺寸变化后先清空物理终端，避免旧尺寸余晖与新画面叠加成「乱排」。
+                    let _ = terminal.clear();
+                    dirty = true;
+                }
                 UiEvent::ScrollWheel(is_up) => {
                     if is_up {
                         state.scroll_up(3);
