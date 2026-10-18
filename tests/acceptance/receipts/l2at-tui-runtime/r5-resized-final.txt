@@ -1,7 +1,7 @@
-  pony  ·  pony-agent          gemini-3.8-flash  ·  649264
+  pony  ·  pony-agent
   ────────────────────────────────────────────────────────
 
-                                 /home/dm/pony-agent
+     ▀▀
 
   终端里的自主智能体。
 

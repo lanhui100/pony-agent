@@ -1,13 +1,16 @@
-  pony  ·  pony-agent                                                  gemini-3.8-flash  ·  a7ef8f
+  pony  ·  pony-agent                              antigravity/claude-opus-4-6-thinking  ·  11ddee
   ────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 
-
-
-        ▀▀▀             pony v0.1.125
-    ▀▀ ▀▀ ▀▀ ▀▀ ▀▀ ▀▀     gemini-3.8-flash (ponyllm)
-                                 /home/dm/pony-agent
+     ▄▄▄▄▄▄▄▄▄▄
+     ▀▀▀▀▀▀▀▀▀▀
+     ▀▀      ▀▀    pony v0.1.125
+     ▀▀▄▄▄▄▄▄▀▀    antigravity/claude-opus-4-6-thinking (ponyllm)
+     ▀▀▀▀▀▀▀▀▀▀    /home/dm/pony-agent
+     ▀▀
+     ▀▀
+     ▀▀
 
   终端里的自主智能体。
 
@@ -17,9 +20,6 @@
   /provider  管理与切换模型提供商
   /models    切换当前活跃模型
   /clear     清空当前消息上下文
-
-
-
 
 
 

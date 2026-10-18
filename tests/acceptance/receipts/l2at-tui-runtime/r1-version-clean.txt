@@ -1,5 +1,5 @@
-Script started on 2026-10-18 18:44:02+08:00 [COMMAND="/home/dm/pony-agent/target/debug/pony --version" <not executed on terminal>]
+Script started on 2026-10-18 23:45:41+08:00 [COMMAND="/home/dm/pony-agent/target/debug/pony --version" <not executed on terminal>]
 pony 0.1.125 · linux-x86_64
 binary: /home/dm/pony-agent/target/debug/pony
 
-Script done on 2026-10-18 18:44:02+08:00 [COMMAND_EXIT_CODE="0"]
+Script done on 2026-10-18 23:45:41+08:00 [COMMAND_EXIT_CODE="0"]

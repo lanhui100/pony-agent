@@ -1,4 +1,4 @@
-Script started on 2026-10-18 18:44:02+08:00 [COMMAND="stty rows 30 cols 100; /home/dm/pony-agent/target/debug/pony --doctor" <not executed on terminal>]
+Script started on 2026-10-18 23:45:41+08:00 [COMMAND="stty rows 30 cols 100; /home/dm/pony-agent/target/debug/pony --doctor" <not executed on terminal>]
 [ok] stdio: stdin=TTY stdout=TTY · 交互终端就绪
 [ok] TERM: dumb
 [warn] COLORTERM: <unset> · 未启用 truecolor
@@ -8,4 +8,4 @@ Script started on 2026-10-18 18:44:02+08:00 [COMMAND="stty rows 30 cols 100; /ho
 [ok] tui-logs: /home/dm/.pony-agent/tui-logs · 可写
 [warn] PATH: /home/dm/.local/bin/pony · PATH 冲突：SSH 下可能调到其它 pony 二进制
 
-Script done on 2026-10-18 18:44:02+08:00 [COMMAND_EXIT_CODE="0"]
+Script done on 2026-10-18 23:45:41+08:00 [COMMAND_EXIT_CODE="0"]

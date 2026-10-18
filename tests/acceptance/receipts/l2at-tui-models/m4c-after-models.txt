@@ -1,7 +1,7 @@
-  pony  ·  pony-agent                                               fakep-model-default  ·  7c72b4
+  pony  ·  pony-agent                                               fakep-model-default  ·  8ef69d
   ────────────────────────────────────────────────────────────────────────────────────────────────
 
-  ✕ 模型列表拉取失败（fakep）: 获取模型列表失败：状态码 500 Internal Server Error；耗时=4ms；响应
+  ✕ 模型列表拉取失败（fakep）: 获取模型列表失败：状态码 500 Internal Server Error；耗时=1ms；响应
   正文：{"error":"internal boom"}
 
 
@@ -27,4 +27,4 @@
   › ▏ 输入任务，或输入 / 查看命令
 
 
-  模型列表拉取失败: 获取模型列表失败：状态码 500 Internal Server Error；耗时=4ms；响应正文：{"err
+  模型列表拉取失败: 获取模型列表失败：状态码 500 Internal Server Error；耗时=1ms；响应正文：{"err

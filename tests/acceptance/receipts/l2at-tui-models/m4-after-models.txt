@@ -1,8 +1,8 @@
-  pony  ·  pony-agent                                               fakep-model-default  ·  b507f0
+  pony  ·  pony-agent                                               fakep-model-default  ·  1531df
   ────────────────────────────────────────────────────────────────────────────────────────────────
 
-  ✕ 模型列表拉取失败（fakep）: 获取模型列表失败：error sending request for url (http://127.0.0.1:3
-  6843/v1/models)；type=connect+request；elapsed=1ms；url=http://127.0.0.1:36843/v1/models；source
+  ✕ 模型列表拉取失败（fakep）: 获取模型列表失败：error sending request for url (http://127.0.0.1:4
+  1729/v1/models)；type=connect+request；elapsed=0ms；url=http://127.0.0.1:41729/v1/models；source
   =client error (Connect)
 
 
@@ -27,4 +27,4 @@
   › ▏ 输入任务，或输入 / 查看命令
 
 
-  模型列表拉取失败: 获取模型列表失败：error sending request for url (http://127.0.0.1:36843/v1/mo
+  模型列表拉取失败: 获取模型列表失败：error sending request for url (http://127.0.0.1:41729/v1/mo

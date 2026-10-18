@@ -13,6 +13,7 @@ pony 0.1.125 — 交互式 TUI Agent
   /               命令前缀（/help /clear /quit /exit 等）
   Esc             清空输入 / 中断弹窗
   Ctrl-C          退出 TUI
+  F2              切换鼠标捕获（默认开；关闭后可用鼠标选择文本）
   ↑ / ↓           历史翻页
   PageUp/PageDown 消息滚动
 

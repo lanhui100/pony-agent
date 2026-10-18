@@ -4,7 +4,7 @@
       "id": "fakep",
       "name": "FakeProvider",
       "protocol": "openai-completions",
-      "base_url": "http://127.0.0.1:45555/v1",
+      "base_url": "http://127.0.0.1:34615/v1",
       "auth_type": "bearer",
       "api_key_env_var": "FAKE_API_KEY",
       "secret_ref": "",
