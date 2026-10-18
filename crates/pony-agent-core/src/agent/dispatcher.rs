@@ -65,6 +65,20 @@ pub struct DispatchContext {
     /// `interaction_unavailable` instead of persisting a pending request.
     #[serde(default = "default_host_control_available")]
     pub host_control_available: bool,
+    /// W36 / PA-141（方案 b）：宿主注入的 Draft→Executing 审批证据。仅由宿主经
+    /// `DispatchContext`（或 `TurnInput` 透传）携带；模型工具参数**不是**审批来源（C-141-3）。
+    /// 绑定 `(session_id, plan_id)` 并带 TTL（`now_ms < expires_at_ms` 才有效，C-141-4/5）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_execution_approval: Option<PlanExecutionApproval>,
+}
+
+/// 宿主审批证据（PA-141，C-141-1 serde 形状冻结：camelCase）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanExecutionApproval {
+    pub session_id: String,
+    pub plan_id: String,
+    pub expires_at_ms: u64,
 }
 
 fn default_host_control_available() -> bool {
@@ -79,6 +93,7 @@ impl Default for DispatchContext {
             turn_id: None,
             workspace_root: None,
             host_control_available: true,
+            plan_execution_approval: None,
         }
     }
 }
@@ -117,6 +132,20 @@ pub trait ToolPolicyEvaluator: Send + Sync {
         origin: &InvocationOrigin,
         final_arguments: &Value,
     ) -> PermissionDecision;
+
+    /// Context-aware evaluation (W36 / PA-138 public seam): the dispatcher calls this entry so a
+    /// policy can key decisions on runtime-injected facts (`DispatchContext::session_id` and
+    /// friends) instead of model-controlled tool arguments. The default delegates to the
+    /// context-free [`Self::evaluate`], keeping every existing evaluator backward compatible.
+    fn evaluate_with_context(
+        &self,
+        descriptor: &ToolDescriptor,
+        origin: &InvocationOrigin,
+        final_arguments: &Value,
+        _context: &DispatchContext,
+    ) -> PermissionDecision {
+        self.evaluate(descriptor, origin, final_arguments)
+    }
 }
 
 /// Default policy evaluator: `host_mediated` -> `waiting_host`, else `requires_approval` ->
@@ -932,7 +961,8 @@ impl Inner {
             .read()
             .expect("dispatcher policy evaluator poisoned")
             .clone();
-        let decision = evaluator.evaluate(descriptor, origin, &final_arguments);
+        let decision =
+            evaluator.evaluate_with_context(descriptor, origin, &final_arguments, context);
 
         // The sandbox gate applies only to executions the policy allows, so a denied or
         // approval-required invocation surfaces its real verdict instead of being masked by
@@ -1543,8 +1573,15 @@ pub(crate) fn deny_outcome(tool_name: &str, ready: &PreflightedChild) -> ToolOut
         .reason
         .as_deref()
         .unwrap_or("declared policy forbids this invocation");
+    // W36 / PA-141（C-141-6）：宿主审批闸门的 Deny 单独路由为
+    // `plan_execution_approval_required`，不改变既有 `permission_denied` 语义。
+    let code = if ready.decision.decision_source == "plan_execution_approval_gate" {
+        "plan_execution_approval_required"
+    } else {
+        "permission_denied"
+    };
     DispatchError::new(
-        "permission_denied",
+        code,
         format!(
             "permission denied for `{}`: {reason} (decision source: {})",
             ready.descriptor.identity.descriptor_id, ready.decision.decision_source

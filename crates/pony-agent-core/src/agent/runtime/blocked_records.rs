@@ -197,6 +197,7 @@ pub(super) fn build_skill_tool_result(
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             },
         );
 
@@ -338,6 +339,7 @@ pub(super) fn build_skill_tool_result(
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                plan_execution_approval: None,
                 workspace_id: None,
             },
         );

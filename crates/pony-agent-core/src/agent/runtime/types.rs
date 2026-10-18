@@ -90,6 +90,10 @@ pub struct TurnInput {
     /// Workspace 归属（PA-079）：携带时在会话首次持久化时盖章。
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// W36 / PA-141（方案 b）：宿主注入的 Draft→Executing 审批证据，透传至
+    /// `DispatchContext.plan_execution_approval`（camelCase `planExecutionApproval`）。
+    #[serde(default)]
+    pub plan_execution_approval: Option<crate::agent::dispatcher::PlanExecutionApproval>,
 }
 
 

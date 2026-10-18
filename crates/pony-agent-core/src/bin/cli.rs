@@ -362,6 +362,7 @@ fn run_turn_interactive(
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+        plan_execution_approval: None,
         },
     };
 

@@ -79,3 +79,8 @@ jobs:
           RUSTFLAGS: -D warnings
         shell: pwsh
         run: ./scripts/invoke-rust-target.ps1 check check --package=pony-agent-core
+      - name: Core 非 Windows lib 单元测试（Linux-only）
+        if: runner.os == 'Linux'
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test --package=pony-agent-core --lib

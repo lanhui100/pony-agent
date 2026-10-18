@@ -203,6 +203,7 @@ fn stream_turn(
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+        plan_execution_approval: None,
         },
     );
 

@@ -23,14 +23,15 @@
 
 use crate::agent::budget::DispatchBudgetConfig;
 use crate::agent::dispatcher::{
-    GovernedDispatcher, PermissionDecision, PermissionVerdict, ToolPolicyEvaluator,
+    DispatchContext, GovernedDispatcher, PermissionDecision, PermissionVerdict,
+    ToolPolicyEvaluator,
 };
 use crate::agent::dispatcher_composites::{
     register_governed_composites, GovernedToolExecutor,
 };
 use crate::agent::document_conversion::ReadDocumentHandler;
 use crate::agent::image_artifact::ViewImageHandler;
-use crate::agent::plan_state::{PlanControlHandler, PlanStore};
+use crate::agent::plan_state::{PlanLifecycleState, PlanControlHandler, PlanStore};
 use crate::agent::sandbox::{HostApprovedUnsandboxedBackend, NativeSandboxBackend};
 use crate::agent::tool_runtime::{
     InvocationOrigin, PrimitiveToolHandler, PrimitiveToolHandlerRequest, RuntimeClock,
@@ -87,14 +88,18 @@ impl GovernedPolicyEvaluator {
     ) -> Self {
         Self { rules, plan_store }
     }
-}
 
-impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
-    fn evaluate(
+    /// PA-141（方案 b）扩展裁定核心：在 `session_id` 之外额外接收宿主注入的
+    /// `plan_execution_approval`（仅来自 `DispatchContext`，模型工具参数不是审批来源）。
+    /// `session_id` 是**运行时注入**的权威会话（`DispatchContext.session_id`）：工具参数
+    /// 不是会话键（生产 schema 不允许，且可被模型控制）；`None` 表示本次 dispatch 未绑定
+    /// 会话上下文（按 C-138-4 fail-closed 语义处理）。
+    fn decide_with_context(
         &self,
         descriptor: &crate::agent::tools::ToolDescriptor,
-        _origin: &InvocationOrigin,
-        _final_arguments: &Value,
+        session_id: Option<&str>,
+        plan_execution_approval: Option<&crate::agent::dispatcher::PlanExecutionApproval>,
+        json_arguments: &Value,
     ) -> PermissionDecision {
         let is_ask = descriptor.identity.model_name == "Ask"
             || descriptor.identity.primitive_name == "echo_input"
@@ -144,20 +149,65 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
             let is_write_or_exec = matches!(
                 descriptor.kind,
                 crate::agent::tools::ToolKind::Write | crate::agent::tools::ToolKind::Execute
-            ) && descriptor.identity.primitive_name != TOOL_PLAN_CONTROL;
-            if is_write_or_exec {
-                // 优先从工具参数中获取 session_id，其次尝试从环境变量或测试会话回退
-                let session_id = _final_arguments
-                    .get("session_id")
-                    .or_else(|| _final_arguments.get("sessionId"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| std::env::var("PONY_SESSION_ID").ok().as_deref().map(|_| "env_session"))
-                    .unwrap_or("default");
-
-                if plan_store.has_active_draft_plan(session_id)
-                    || plan_store.has_active_draft_plan("default")
-                    || (_final_arguments.is_object() && plan_store.has_active_draft_plan("test-session-draft-gate"))
-                {
+            );
+            if is_write_or_exec && descriptor.identity.primitive_name == TOOL_PLAN_CONTROL {
+                // ── W36 / PA-141（方案 b，C-141-2..8）：宿主审批闸门 ─────────────────────
+                // 触发面：`start_execution`，或目标 plan 仍处 Draft 的 `complete_step`
+                //（complete_step 是第二条 Draft→Executing 迁移路径）。仅该迁移面需要审批；
+                // 其余 plan_control op（create/merge/replace/abort…）与 Executing 态的
+                // complete_step 不受影响（C-141-8）。审批证据只来自宿主注入的
+                // DispatchContext，模型工具参数不是来源（C-141-3）。
+                let requires_execution_approval = || -> Option<bool> {
+                    let op = json_arguments
+                        .get("op")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let session =
+                        json_arguments.get("session_id").and_then(Value::as_str)?;
+                    let plan_id = json_arguments.get("plan_id").and_then(Value::as_str)?;
+                    match op {
+                        "start_execution" => Some(true),
+                        "complete_step" => {
+                            let plan = plan_store.plan(session, plan_id).ok()?;
+                            Some(plan.lifecycle == PlanLifecycleState::Draft)
+                        }
+                        _ => Some(false),
+                    }
+                }();
+                if requires_execution_approval == Some(true) {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(u64::MAX);
+                    let valid = plan_execution_approval
+                        .map(|approval| {
+                            approval.session_id == session_id.unwrap_or_default()
+                                && json_arguments.get("plan_id").and_then(Value::as_str)
+                                    == Some(approval.plan_id.as_str())
+                                && now_ms < approval.expires_at_ms
+                        })
+                        .unwrap_or(false);
+                    if !valid {
+                        return PermissionDecision {
+                            verdict: PermissionVerdict::Deny,
+                            decision_source: "plan_execution_approval_gate".to_string(),
+                            reason: Some(
+                                "host plan execution approval is required to transition a Draft plan to Executing (missing, mismatched, or expired)."
+                                    .to_string(),
+                            ),
+                        };
+                    }
+                }
+                // 其余 plan_control op 豁免草稿写门禁（既有 PA-138 语义不变）。
+            } else if is_write_or_exec {
+                // PA-138：唯一会话判据 = 运行期注入的 `DispatchContext.session_id`。
+                // 未绑定会话上下文（None）时**不得**回退到默认/环境/测试会话名，而是走
+                // fail-closed 判定：PlanStore 存在任一 Draft ⇒ 拒绝（C-138-4）。
+                let draft_gate_tripped = match session_id {
+                    Some(session_id) => plan_store.has_active_draft_plan(session_id),
+                    None => plan_store.has_any_draft_plan(),
+                };
+                if draft_gate_tripped {
                     return PermissionDecision {
                         verdict: PermissionVerdict::Deny,
                         decision_source: "plan_draft_gate".to_string(),
@@ -176,6 +226,36 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
             decision_source: "governed_default".to_string(),
             reason: None,
         }
+    }
+}
+
+impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
+    fn evaluate(
+        &self,
+        descriptor: &crate::agent::tools::ToolDescriptor,
+        _origin: &InvocationOrigin,
+        final_arguments: &Value,
+    ) -> PermissionDecision {
+        // 上下文无关的旧 seam（既有单元/集成测试直接调用）：无注入会话事实，
+        // 草稿门禁按 fail-closed 规则处理（C-138-4）。旧 seam 无宿主审批（None）。
+        self.decide_with_context(descriptor, None, None, final_arguments)
+    }
+
+    fn evaluate_with_context(
+        &self,
+        descriptor: &crate::agent::tools::ToolDescriptor,
+        _origin: &InvocationOrigin,
+        final_arguments: &Value,
+        context: &DispatchContext,
+    ) -> PermissionDecision {
+        // PA-141：审批证据**仅**来自宿主注入的 `DispatchContext`；
+        // `final_arguments`（模型可控）不参与审批判定（C-141-3）。
+        self.decide_with_context(
+            descriptor,
+            context.session_id.as_deref(),
+            context.plan_execution_approval.as_ref(),
+            final_arguments,
+        )
     }
 }
 

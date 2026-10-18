@@ -364,6 +364,20 @@ impl PlanStore {
         }
     }
 
+    /// Check whether **any** session currently owns a plan in `Draft` state (W36 / C-138-4).
+    ///
+    /// Read-only and independent of [`Self::has_active_draft_plan`] (whose per-session semantics
+    /// are unchanged): it answers the fail-closed question "does a draft-state write protection
+    /// exist that an unbound (session-less) dispatch context cannot be proven innocent of?".
+    pub fn has_any_draft_plan(&self) -> bool {
+        let inner = self.inner.lock().expect("plan store poisoned");
+        inner.plans.values().any(|session_plans| {
+            session_plans
+                .values()
+                .any(|p| p.lifecycle == PlanLifecycleState::Draft)
+        })
+    }
+
     /// Abort a `Draft` or `Executing` plan. Aborting an already-`Completed`/`Aborted` plan is an
     /// [`PlanError::IllegalTransition`].
     pub fn abort(

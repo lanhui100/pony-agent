@@ -156,16 +156,11 @@ impl ExecutionRecoveryPolicy {
             };
         }
 
-        // 5. 判断错误瞬态性
-        let is_transient = err_lower.contains("timeout")
-            || err_lower.contains("connection")
-            || err_lower.contains("429")
-            || err_lower.contains("rate limit")
-            || err_lower.contains("500")
-            || err_lower.contains("502")
-            || err_lower.contains("503")
-            || err_lower.contains("504")
-            || err_lower.contains("529");
+        // 5. 判断错误瞬态性 —— PA-145:收敛到 retry.rs 单一分类出口
+        // （ProviderRetryPolicy::classify / upstream_code_for_hints），
+        // 消除与 retry 侧的平行 contains 判据（含 endpoint/端口数字剥离，C-145-1..4）。
+        let classifier = crate::agent::retry::ProviderRetryPolicy::new(crate::agent::retry::BackoffConfig::default());
+        let is_transient = classifier.classify(&ctx.raw_error).is_retryable();
 
         if is_transient {
             let delay = crate::agent::retry::compute_delay(ctx.current_attempt + 1, &self.config.backoff, 0.5);

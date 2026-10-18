@@ -314,7 +314,8 @@ pub(crate) const UPSTREAM_TIMEOUT_HINTS: &[&str] = &[
     "timed out",
     "deadline has elapsed",
 ];
-pub(crate) const UPSTREAM_RATE_LIMITED_HINTS: &[&str] = &["429", "rate limit", "rate_limit"];
+pub(crate) const UPSTREAM_RATE_LIMITED_HINTS: &[&str] =
+    &["429", "rate limit", "rate_limit", "too many requests", "tpm"];
 pub(crate) const UPSTREAM_SERVER_ERROR_HINTS: &[&str] = &["502", "503", "504", "408"];
 pub(crate) const UPSTREAM_NETWORK_HINTS: &[&str] =
     &["connection reset", "connection refused", "dns"];
@@ -357,13 +358,26 @@ pub(crate) const RATE_LIMIT_LONG_BACKOFF_HINTS: &[&str] = &[
 ///
 /// 已知取舍:`:` 不可作为 URL 终点(端口本身即 `host:port`),因此紧贴 URL、不带
 /// 空白/分隔符的尾部原因码会被一并剥离;生产错误文本一律以 `; ` / 空白分隔。
+///
+/// PA-144:除带 scheme 的 `scheme://host:port/path` 外,还要剥离 **scheme-less**
+/// `host:port[/path]`(如 `endpoint=127.0.0.1:42953/v1`、`endpoint=localhost:50208`)——
+/// 生产可达路径是 provider 把 endpoint 拼进错误正文,而 `config.rs` 的 base_url 解析
+/// 不校验 scheme,于是端口数字(乃至恰为码值的 `:429`/`:502`)会污染分类。
 fn strip_endpoint_fragments(lower: &str) -> String {
     let mut out = String::with_capacity(lower.len());
     let mut rest = lower;
     while let Some(scheme_sep) = rest.find("://") {
-        // URL 之前的文本整体保留(含 scheme 名与紧贴的数字,如 `HTTP 502https://…` 的 502;
+        // URL 之前的文本整体保留(含紧贴的数字,如 `HTTP 502https://…` 的 502;
         // 波次 G F2:旧实现在此回退吞掉 scheme 名 ⇒ URL 前紧贴的数字一并丢失)。
-        out.push_str(&rest[..scheme_sep]);
+        // PA-143:紧贴 `://` 的 **scheme 名字母串**(`https` 等)剥掉 —— 数字与字母粘连时
+        // 词边界判据会把 `429https`/`502https` 当成一个 token 拒绝,而 `429abc` 这类
+        // 非 scheme 粘连仍保持不命中;只剥 ASCII 字母,数字原样保留参与分类。
+        let prefix = &rest[..scheme_sep];
+        let mut prefix_end = prefix.len();
+        while prefix_end > 0 && prefix.as_bytes()[prefix_end - 1].is_ascii_alphabetic() {
+            prefix_end -= 1;
+        }
+        out.push_str(&prefix[..prefix_end]);
         // URL 终点:空白或常见分隔符(引号/分号/逗号/括号)。
         let tail = &rest[scheme_sep..];
         let url_end = tail
@@ -375,11 +389,160 @@ fn strip_endpoint_fragments(lower: &str) -> String {
         rest = &tail[url_end..];
     }
     out.push_str(rest);
+    // PA-144:再剥离 scheme-less 的 host:port[/path]。
+    strip_schemeless_host_port(&out)
+}
+
+/// PA-144:剥离没有 scheme 的 `host:port[/path]` 片段,避免端口数字参与码表判定。
+///
+/// 只剥离**可确认是网络端点**的命中,避免吞掉正文语义(C-144「不得过度剥离」):
+/// - host 必须形如域名/IP(`localhost`、含 `.` 的主机名)或**紧跟 `=`**(`endpoint=`/
+///   `host=` 等标签)⇒ `status:502`、时间 `12:30`、端口范围 `8000:8010` 不被剥离,
+///   `status:502` 这类真实原因码仍参与分类;
+/// - 端口必须是 ASCII 数字,且其后只能是串尾/分隔符/`/`(路径);`40832ms` 这类
+///   数字后接字母的命中不剥离;
+/// - 路径从 `/` 剥到空白或 shell/JSON 分隔符为止。
+///
+/// 字节安全:**所有**切片边界只落在 ASCII `:`、ASCII 数字/路径字符、ASCII 分隔符或
+/// 串尾上,天然是 char 边界;反向扫描遇多字节字符(首字节非 ASCII)即停止,不会切进
+/// 多字节字符内部。
+fn strip_schemeless_host_port(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b':' {
+            i += 1;
+            continue;
+        }
+        // 端口:ASCII 数字串(至少一位)。
+        let mut port_end = i + 1;
+        while port_end < bytes.len() && bytes[port_end].is_ascii_digit() {
+            port_end += 1;
+        }
+        if port_end == i + 1 {
+            i += 1;
+            continue;
+        }
+        // host:反向吃 `[a-z0-9.-]`,遇非 ASCII(多字节字符首字节)或其它符号即停。
+        // `]` 与 `[` 参与 IPv6 literal 形态的回扫(如 `[::1]:port`),`=` 参与
+        // `endpoint=` 标签形态;其余非 ASCII 字节即停,不切进多字节字符。
+        let mut host_start = i;
+        while host_start > 0 {
+            let b = bytes[host_start - 1];
+            if b.is_ascii_alphanumeric()
+                || b == b'.'
+                || b == b'-'
+                || b == b':'
+                || b == b'['
+                || b == b']'
+            {
+                host_start -= 1;
+            } else {
+                break;
+            }
+        }
+        // IPv6 literal:回扫吃到 `[` 且段内含 `:`(压缩 `::` 与完整形式都由 `:` 覆盖)
+        // ⇒ 按 IPv6 端点处理;`[]` 内段不得为空且不得以 `:` 结尾误吞(如 `[::1]`)。
+        let mut ipv6_literal = false;
+        if host_start > 0 && bytes[host_start - 1] == b'[' {
+            let inner = &text[host_start..i];
+            // 期望形如 `...]:port` —— 回扫从 port 前的 `:` 起,段首应是 `]` 之后的空段,
+            // 实际 inner 已包含 `]` 前的地址部分;此时检查 inner 是否含 `]` 与 `:`。
+            if let Some(bracket_end) = inner.rfind(']') {
+                // literal 形态:回扫段以 `]` 结尾(addr = `[...`),且地址非空含 `:`。
+                if bracket_end + 1 == inner.len() {
+                    let addr = &inner[..bracket_end];
+                    if !addr.is_empty() && addr.starts_with('[') && addr.contains(':') {
+                        host_start -= 1;
+                        ipv6_literal = true;
+                    }
+                }
+            }
+        }
+        let host = &text[host_start..i];
+        // IPv6 literal 形态要求 host 段形如 `xxx]`(地址已在回扫中含 `[`..`]`),
+        // 即回扫停在 `:`(端口分隔符)时上一字符应为 `]`;否则是 `[:` 这类
+        // literal 内部的伪冒号,不得按端点剥离(C-144:不得过度剥离/误剥)。
+        let preceded_by_equals = !ipv6_literal
+            && host_start > 0
+            && bytes[host_start - 1] == b'='
+            && !host.contains('[')
+            && !host.contains(']');
+        let host_looks_like_endpoint = !host.is_empty()
+            && !host.starts_with('.')
+            && !host.ends_with('.')
+            && !host.ends_with('-')
+            && (ipv6_literal
+                || host.ends_with(']')
+                || host.contains('.')
+                || host == "localhost"
+                || preceded_by_equals);
+        if !host_looks_like_endpoint {
+            i += 1;
+            continue;
+        }
+        // 路径:紧邻的 `/...` 一并剥离(端口与路径都不参与分类)。
+        let mut span_end = port_end;
+        if span_end < bytes.len() && bytes[span_end] == b'/' {
+            span_end += 1;
+            while span_end < bytes.len() {
+                let b = bytes[span_end];
+                if b.is_ascii_whitespace()
+                    || matches!(
+                        b,
+                        b'"' | b'\'' | b';' | b',' | b')' | b']' | b'}' | b'<' | b'>' | b'`'
+                    )
+                {
+                    break;
+                }
+                span_end += 1;
+            }
+        }
+        out.push_str(&text[copied..host_start]);
+        copied = span_end;
+        i = span_end;
+    }
+    out.push_str(&text[copied..]);
     out
 }
 
+/// 码表命中判定：**不得**是整段文本上的裸子串（PA-143）。
+///
+/// 缺陷：`elapsed=40832ms` 内含 `408`、JSON 错误码 `"429001"` 内含 `429`、
+/// `"1502"` 内含 `502`，裸 `contains` 会把这些与原因无关的数字片段当成上游码 ⇒
+/// 重试结论取决于报文里恰好出现了哪些数字。
+///
+/// 判据（词边界/结构化）：
+/// - 数字码（如 `429`/`502`/`408`）：命中位置前后**不得紧邻 ASCII 数字**；
+/// - 措辞（如 `timed out`/`connection reset`/`rate limit`）：命中串首尾为字母数字时，
+///   不得与相邻字母数字粘连；
+/// - 真实原因码 `HTTP 429/502/503/504/408`、`status:502`、`operation timed out`、
+///   `connection reset` 仍命中（C-143-4 护栏）。
 fn hints_match(lower: &str, hints: &[&str]) -> bool {
-    hints.iter().any(|hint| lower.contains(hint))
+    hints.iter().any(|hint| hint_matches(lower, hint))
+}
+
+fn hint_matches(lower: &str, hint: &str) -> bool {
+    for (start, matched) in lower.match_indices(hint) {
+        // 数字码:前后不得紧邻字母数字(挡住 `1502` 里的 `502`、`429001` 里的 `429`、
+        // `429abc`/`abc429`/`error_429x` 等污染片段;独立 `429` 仍命中,PA-143)。
+        // 按字符判定(char 边界安全),多字节字母数字同样粘住。
+        if lower[..start].chars().next_back().is_some_and(is_word_char) {
+            continue;
+        }
+        let end = start + matched.len();
+        if lower[end..].chars().next().is_some_and(is_word_char) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric()
 }
 
 /// 码表分组 → 注册表码（R1 映射的唯一出口；classify 经此归一后再定 FailureKind）。

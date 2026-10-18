@@ -691,6 +691,9 @@ struct MockHttpServer {
     expected: usize,
     /// wave-13：持有串行闸门（drop 时释放），消除并行负载导致的「超时→重试→队列失配」。
     _gate: MockServerGate,
+    /// PA-139：shutdown 标志——finish() 置位后 accept 轮询在 1ms 粒度内退出，
+    /// mock 线程可立即 join（非阻塞 accept 轮询使标志位即终止信号，无需显式关监听）。
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockHttpServer {
@@ -701,23 +704,71 @@ impl MockHttpServer {
         let address = listener.local_addr().expect("mock server addr");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let requests_for_thread = Arc::clone(&requests);
+        // PA-139：`Arc<TcpListener>` + shutdown 标志——队列耗尽后 mock 线程**不再退出**，
+        // listener 保持打开直到 `finish()` 置位 shutdown。旧实现「队列耗尽→线程退出→
+        // listener 关闭」在 finish() 前留下一个 connect refused 窗口：并行负载下用例自身
+        // 请求若晚于队列被异常消费到达，1-2ms 内即 `client error (Connect)` 假失败。
+        // shutdown 前到达的多余连接返回确定性 503 且**不消费队列**（归属校验：非用例
+        // 预期序列的连接无权取走响应）。
+        let listener = std::sync::Arc::new(listener);
+        let listener_for_thread = std::sync::Arc::clone(&listener);
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_for_thread = std::sync::Arc::clone(&shutdown);
 
         let handle = thread::spawn(move || {
-            'responses: for response in responses {
-                // 只把**完整成功读取**的连接计入请求并消费一条响应；中途断开/accept 失败
-                // 一律忽略并继续等待，保证重试仍能拿到队列里的正确响应（避免队列失配）。
-                loop {
-                    let Ok((mut stream, _)) = listener.accept() else {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                        continue;
-                    };
-                    let Some(body) = read_http_request_body(&mut stream) else {
-                        continue;
-                    };
-                    requests_for_thread.lock().unwrap().push(body);
-                    write_http_response(&mut stream, response);
-                    continue 'responses;
+            // PA-139：accept 循环持续到 shutdown；队列耗尽仅停止**发响应**，不关监听。
+            let listener = listener_for_thread;
+            loop {
+                let stream = {
+                    // 非阻塞轮询 accept：shutdown 置位后循环可在 1ms 粒度内退出
+                    // （阻塞式 accept 无法被 shutdown 打断）。
+                    listener.set_nonblocking(true).expect("set_nonblocking mock");
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            listener
+                                .set_nonblocking(false)
+                                .expect("unset_nonblocking mock");
+                            stream
+                        }
+                        Err(ref error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock =>
+                        {
+                            if shutdown_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(_) => {
+                            if shutdown_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            continue;
+                        }
+                    }
+                };
+                if shutdown_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
                 }
+                let mut stream = stream;
+                let Some(body) = read_http_request_body(&mut stream) else {
+                    // 中途断开/半请求：忽略，不消费队列（wave-13 语义保留）。
+                    continue;
+                };
+                let consumed = requests_for_thread.lock().unwrap().len();
+                if consumed >= responses.len() {
+                    // PA-139 归属校验：队列已耗尽（或已被本用例外的连接消费）——
+                    // 该连接不是用例预期的 provider 请求，确定性 503、不消费队列。
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+                let response = responses[consumed].clone();
+                requests_for_thread.lock().unwrap().push(body);
+                write_http_response(&mut stream, response);
             }
         });
 
@@ -727,12 +778,16 @@ impl MockHttpServer {
             handle: Some(handle),
             expected,
             _gate: gate,
+            shutdown,
         }
     }
 
-    // wave-35/C2
+    // wave-35/C2；PA-139：finish 显式 shutdown——置位标志，accept 轮询在 1ms 粒度
+    // 内退出；随后有界 join（预算不变 5000ms）。
     fn finish(mut self) -> Vec<String> {
         if let Some(handle) = self.handle.take() {
+            self.shutdown
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             if !wait_for_mock_thread(&handle, MOCK_SERVER_FINISH_TIMEOUT) {
                 let actual = self.requests.lock().map(|r| r.len()).unwrap_or_default();
                 panic!(
@@ -1206,6 +1261,7 @@ fn run_turn_records_planner_trace_records_in_terminal_trace() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     let _ = server.finish();
@@ -1262,6 +1318,7 @@ fn run_turn_records_capability_mediation_trace_for_forced_tool_planner() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert!(result
@@ -1328,6 +1385,7 @@ fn capability_mediation_hooks_can_rewrite_arguments_before_tool_execution() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert!(result
@@ -1391,6 +1449,7 @@ fn planner_preflight_hooks_can_rewrite_tool_call_before_execution() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert!(result
@@ -1456,6 +1515,7 @@ fn planner_tool_selection_hooks_can_rewrite_selected_tool_before_execution() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert!(result
@@ -1554,6 +1614,7 @@ fn skill_mediation_hooks_can_rewrite_arguments_before_skill_execution() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert!(result
@@ -1652,6 +1713,7 @@ fn start_turn_stream_does_not_dispatch_unstable_prepare_or_context_hooks() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -1738,6 +1800,7 @@ fn start_turn_stream_fail_turn_policy_emits_failed_terminal_with_hook_evidence()
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -1848,6 +1911,7 @@ fn start_turn_stream_fail_turn_policy_on_tool_call_start_stops_before_tool_execu
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -1942,6 +2006,7 @@ fn start_turn_stream_fail_turn_policy_on_tool_call_end_stops_before_followup_mod
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -2043,6 +2108,7 @@ fn start_turn_stream_fail_turn_policy_on_checkpoint_boundary_emits_failed_instea
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -2154,6 +2220,7 @@ fn start_turn_stream_fail_turn_policy_on_finalize_boundary_emits_failed_with_ter
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -2228,6 +2295,7 @@ fn run_turn_fail_turn_policy_on_model_call_start_returns_failed_result_with_hook
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     let request_bodies = server.finish();
@@ -2278,6 +2346,7 @@ fn run_turn_fail_turn_policy_on_tool_call_start_returns_failed_before_tool_execu
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     let request_bodies = server.finish();
@@ -2331,6 +2400,7 @@ fn run_turn_fail_turn_policy_on_tool_call_end_returns_failed_before_followup_mod
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     let request_bodies = server.finish();
@@ -2391,6 +2461,7 @@ fn run_turn_persists_terminal_hook_traces_on_completed_sync_turn() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     let request_bodies = server.finish();
@@ -2482,6 +2553,7 @@ fn run_turn_fail_turn_policy_on_checkpoint_boundary_persists_failed_sync_trace()
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     let request_bodies = server.finish();
@@ -2576,6 +2648,7 @@ fn run_turn_fail_turn_policy_on_finalize_boundary_persists_terminal_sync_hook_ev
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     let request_bodies = server.finish();
@@ -2687,6 +2760,7 @@ fn start_turn_stream_persists_terminal_hook_traces_on_stable_boundaries() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -3521,6 +3595,7 @@ fn start_turn_stream_uses_sink_for_empty_input_failure() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -3616,6 +3691,7 @@ fn start_turn_stream_can_emit_cancelled_when_stop_requested_before_plan() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -3693,6 +3769,7 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
     // 同步入口成功终态的 TurnResult.phase 惯例为 "ready"（事件流终态仍为
     // turn/end completed——两者语义层不同）。
@@ -3725,6 +3802,7 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
     let _ = stream_server.finish();
@@ -3744,6 +3822,7 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
     assert_eq!(failed_sync_result.phase, "failed", "sync turn must fail");
 
@@ -3765,6 +3844,7 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -3909,6 +3989,7 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
     server.finish();
@@ -4024,6 +4105,7 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
     assert_eq!(sync_result.phase, "ready");
     sync_server.finish();
@@ -4239,6 +4321,7 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: Some(registered.id.clone()),
+        plan_execution_approval: None,
     });
 
     let snapshot = runtime.load_session_snapshot(Some("ws-session"));
@@ -4267,6 +4350,7 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: Some("ws-proj-2".to_string()),
+        plan_execution_approval: None,
     });
     let snapshot2 = runtime.load_session_snapshot(Some("ws-session"));
     assert_eq!(
@@ -4315,6 +4399,7 @@ fn run_turn_fails_when_attachment_persistence_fails() {
             name: Some("diagram.png".to_string()),
         }],
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert_eq!(result.phase, "failed");
@@ -4481,6 +4566,7 @@ fn run_turn_records_first_token_latency_for_reasoning_decision() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert_eq!(result.phase, "ready");
@@ -4535,6 +4621,7 @@ fn run_turn_measures_first_token_latency_from_turn_start_across_tool_hops() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert_eq!(result.assistant_message, final_text);
@@ -4585,6 +4672,7 @@ fn run_turn_completes_multi_hop_tool_followups_in_single_turn() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
     let request_bodies = server.finish();
 
@@ -4715,6 +4803,7 @@ fn run_turn_accumulates_token_usage_across_tool_followups() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert_eq!(result.phase, "ready");
@@ -4783,6 +4872,7 @@ fn run_turn_repairs_blank_tool_name_before_execution() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert_eq!(result.phase, "ready");
@@ -5087,6 +5177,7 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     assert_eq!(result.phase, "ready");
@@ -5144,6 +5235,7 @@ fn run_turn_resets_consecutive_failure_counter_on_success() {
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
 
     // 失败-成功-失败-失败：没有连续 3 次同信号失败，turn 正常完成。
@@ -5332,6 +5424,7 @@ fn start_turn_stream_completes_after_multi_hop_followup_stream() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
     let request_bodies = server.finish();
@@ -5556,6 +5649,7 @@ fn start_turn_stream_fails_with_canonical_finalize_boundary_when_tool_hop_limit_
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -5650,6 +5744,7 @@ fn start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_reque
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -5736,6 +5831,7 @@ fn start_turn_stream_preserves_tool_error_activity_when_tool_execution_errors() 
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -5845,6 +5941,7 @@ fn start_turn_stream_emits_first_token_latency_on_reasoning_delta() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -5991,6 +6088,7 @@ fn start_turn_stream_sync_fallback_for_initial_decision_does_not_emit_fake_ttft(
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -6093,6 +6191,7 @@ fn start_turn_stream_measures_first_token_latency_from_turn_start_across_tool_ho
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -6216,6 +6315,7 @@ fn start_turn_stream_uses_live_stream_for_deepseek_tool_followup() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -6369,6 +6469,7 @@ fn start_turn_stream_streams_duplicate_tool_recovery_answer() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -6548,6 +6649,7 @@ fn start_turn_stream_accumulates_token_usage_across_tool_followups() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -6679,6 +6781,7 @@ fn start_turn_stream_repairs_blank_tool_name_in_followup_stream() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -6724,6 +6827,7 @@ fn runtime_can_rebuild_session_snapshot_and_retrieved_context_from_history_node(
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
     let second = runtime.run_turn(TurnInput {
         message: "第二问".to_string(),
@@ -6737,6 +6841,7 @@ fn runtime_can_rebuild_session_snapshot_and_retrieved_context_from_history_node(
         history: Vec::new(),
         images: Vec::new(),
         workspace_id: None,
+        plan_execution_approval: None,
     });
     assert_eq!(first.assistant_message, "第一答");
     assert_eq!(second.assistant_message, "第二答");
@@ -7417,6 +7522,7 @@ fn deepseek_tool_followup_uses_live_stream() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -7553,6 +7659,7 @@ fn deepseek_followup_replays_full_reasoning_from_fragmented_sse() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -7704,6 +7811,7 @@ fn deepseek_multi_hop_followup_preserves_structured_reasoning_content() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 
@@ -8294,6 +8402,7 @@ fn governed_ask_suspends_turn_and_binds_waiting_user_without_provider_followup()
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
         RunTurnFacts {
             run_id: Some("run-ask-loop".to_string()),
@@ -8386,6 +8495,7 @@ fn governed_ask_host_answer_resumes_injects_unique_terminal_result_with_original
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
         RunTurnFacts {
             run_id: Some("run-ask-resume".to_string()),
@@ -8502,6 +8612,7 @@ fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context()
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
         RunTurnFacts {
             run_id: Some("run-ask-inject".to_string()),
@@ -8569,6 +8680,7 @@ fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context()
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
         RunTurnFacts {
             run_id: Some("run-ask-inject".to_string()),
@@ -8761,6 +8873,7 @@ fn governed_ask_stream_suspends_turn_and_binds_waiting_user_without_provider_fol
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
         RunTurnFacts {
             run_id: Some("run-ask-stream".to_string()),
@@ -8877,6 +8990,7 @@ fn governed_stream_normal_glob_tool_turn_completes() {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
         RunTurnFacts {
             run_id: Some("run-repro-glob".to_string()),
@@ -8955,6 +9069,7 @@ fn governed_ask_stream_host_answer_resumes_injects_unique_terminal_result_with_o
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
         RunTurnFacts {
             run_id: Some("run-ask-stream-resume".to_string()),
@@ -9264,6 +9379,7 @@ mod parity {
                         history: Vec::new(),
                         images: Vec::new(),
                         workspace_id: None,
+                        plan_execution_approval: None,
                     },
                 });
             },
@@ -9350,6 +9466,7 @@ mod parity {
                             history: Vec::new(),
                             images: Vec::new(),
                             workspace_id: None,
+                            plan_execution_approval: None,
                         },
                     },
                 );
@@ -9432,6 +9549,7 @@ mod parity {
                         history: Vec::new(),
                         images: Vec::new(),
                         workspace_id: None,
+                        plan_execution_approval: None,
                     },
                 });
             },
@@ -9514,6 +9632,7 @@ mod parity {
                         history: Vec::new(),
                         images: Vec::new(),
                         workspace_id: None,
+                        plan_execution_approval: None,
                     },
                 });
             }
@@ -9607,6 +9726,7 @@ mod parity {
                             history: Vec::new(),
                             images: Vec::new(),
                             workspace_id: None,
+                            plan_execution_approval: None,
                         },
                     },
                 );
@@ -9698,6 +9818,7 @@ mod parity {
                         history: Vec::new(),
                         images: Vec::new(),
                         workspace_id: None,
+                        plan_execution_approval: None,
                     },
                 },
             );
@@ -9814,6 +9935,7 @@ mod parity {
                         history: Vec::new(),
                         images: Vec::new(),
                         workspace_id: None,
+                        plan_execution_approval: None,
                     },
                 },
             );
@@ -9942,6 +10064,7 @@ mod parity {
                             history: Vec::new(),
                             images: Vec::new(),
                             workspace_id: None,
+                            plan_execution_approval: None,
                         },
                     })
                     .phase
@@ -10376,6 +10499,7 @@ fn wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_t
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
+            plan_execution_approval: None,
         },
     );
 

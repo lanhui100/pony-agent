@@ -3683,6 +3683,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
                 "retrieval summary fallback".to_string(),
             )
@@ -3724,6 +3725,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -3805,6 +3807,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -4190,6 +4193,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -4251,6 +4255,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -4292,6 +4297,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph run should start");
@@ -4331,6 +4337,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             },
         );
@@ -4543,6 +4550,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph run should start");
@@ -4611,6 +4619,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph run should start");
@@ -4662,6 +4671,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph run should start");
@@ -4680,6 +4690,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph run should continue");
@@ -4715,6 +4726,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph run should start");
@@ -4819,6 +4831,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph run should resume");
@@ -4910,6 +4923,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph stream run should prepare");
@@ -4960,6 +4974,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph stream run should continue");
@@ -4996,6 +5011,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph stream run should resume");
@@ -5073,6 +5089,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph stream boundary run should prepare");
@@ -5129,6 +5146,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("ordinary graph stream should prepare");
@@ -5566,6 +5584,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -5620,6 +5639,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -5696,6 +5716,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "继续检查 control_plane 的恢复判定。".to_string(),
@@ -5709,6 +5730,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -6159,6 +6181,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             },
         });
 
@@ -6207,6 +6230,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             },
         });
 
@@ -6260,6 +6284,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "第二问".to_string(),
@@ -6273,6 +6298,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -6390,6 +6416,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -6501,6 +6528,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "第二问".to_string(),
@@ -6514,6 +6542,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -6658,6 +6687,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "第二问".to_string(),
@@ -6671,6 +6701,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -6830,6 +6861,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "第二问".to_string(),
@@ -6843,6 +6875,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -6917,6 +6950,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "再继续第二轮".to_string(),
@@ -6930,6 +6964,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -7185,6 +7220,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             });
             assert_eq!(result.phase, "ready", "sync turn must complete");
@@ -7887,6 +7923,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
             assert_eq!(result.phase, "ready");
             assert_eq!(result.tool_activities.len(), 1);
@@ -8123,6 +8160,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             },
         });
         assert!(result
@@ -8188,6 +8226,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             },
         });
         assert!(result
@@ -8320,6 +8359,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             },
         });
         assert!(result
@@ -8964,6 +9004,7 @@ mod tests {
                 history: Vec::new(),
                 images: Vec::new(),
                 workspace_id: None,
+                plan_execution_approval: None,
             });
         }
 
@@ -9457,6 +9498,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("graph stream run should prepare");
@@ -9606,6 +9648,7 @@ mod tests {
                     history: Vec::new(),
                     images: Vec::new(),
                     workspace_id: None,
+                    plan_execution_approval: None,
                 },
             })
             .expect("repro graph stream should prepare");

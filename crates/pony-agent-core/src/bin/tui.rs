@@ -1043,8 +1043,6 @@ mod theme {
     pub const INK_SOFT: Color = Color::Rgb(203, 200, 195);
     pub const MUTED: Color = Color::Rgb(154, 157, 163);
     pub const FAINT: Color = Color::Rgb(112, 116, 124);
-    /// 底栏快捷键专用：比 FAINT 更弱一档，只有凑近才读的「小字」。
-    pub const HINT: Color = Color::Rgb(84, 88, 96);
     pub const HAIRLINE: Color = Color::Rgb(48, 51, 58);
     pub const ACCENT: Color = Color::Rgb(198, 167, 126);
     pub const SUCCESS: Color = Color::Rgb(140, 172, 137);
@@ -1525,8 +1523,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     // ── 底部区块尺寸（输入区高随内容自适应，1~6 行）───────────────────────
     let text_width = content.width.saturating_sub(2).max(1) as usize;
     let visual_lines = layout_input(&state.input_buffer, text_width).len() as u16;
-    let input_h = visual_lines.clamp(1, 6);
-    let bottom_h = 1 + input_h + 1; // 发丝线 + 输入 + 状态行
+    // 输入区至少 3 行高：既是视觉「舞台」，也为多行输入预留空间
+    let input_h = visual_lines.clamp(3, 6);
+    let bottom_h = input_h + 1; // 输入行 + 状态行
 
     let chat_top = content.y + 3;
     let chat_h = area
@@ -1745,7 +1744,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         chat_rect,
     );
 
-    // ── Composer：整宽表面色带（含发丝线上边缘），输入与快捷键都坐在带上 ────
+    // ── Composer：整宽表面色带，靠色块本身与正文分区（不用发丝线）──────────
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
     let band = Rect {
         x: area.x,
@@ -1754,61 +1753,34 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         height: bottom_h,
     };
     fill(f, band, theme::SURFACE);
-    let band_rule = Rect { y: bottom_top, height: 1, ..band };
-    f.render_widget(
-        Paragraph::new(hairline(area.width as usize)),
-        band_rule,
-    );
 
     let input_rect = Rect {
-        y: bottom_top + 1,
+        y: bottom_top,
         height: input_h,
         ..content
     };
     render_input(f, input_rect, state);
 
-    let menu_open = !state.matching_commands().is_empty()
-        && state.mode == InteractionMode::Normal
-        && !state.is_streaming;
-
+    // 状态行：色带最底行只放右侧状态词（快捷键提示已移除，键位靠 --help 与空态引导）
     let (phrase, phrase_style) = status_word(state);
-    // 底栏提示：按键位固定（回车 / alt+回车 / 命令），只让 esc 的动词随上下文变化；
-    // 宽度不足时按候选集逐级降级，绝不出现被截断的半截「·」。
-    let hints_full = if state.is_streaming {
-        "esc 中断"
-    } else if menu_open {
-        "↑↓ 选择   ·   tab 补全   ·   esc 关闭"
-    } else if !state.auto_scroll {
-        "↓ end 回到最新   ·   esc 清空"
-    } else if state.input_buffer.is_empty() {
-        "回车 发送   ·   alt+回车 换行   ·   / 命令"
-    } else {
-        "回车 发送   ·   esc 清空   ·   / 命令"
-    };
-    let candidates: [&str; 3] = [hints_full, "回车 发送   ·   / 命令", "回车 发送"];
-    let space = content.width as usize;
-    let hints = candidates
-        .iter()
-        .copied()
-        .find(|h| str_width(h) <= space.saturating_sub(2))
-        .unwrap_or(candidates[2]);
-
     let footer_y = input_rect.y + input_h;
     let footer_rect = Rect { y: footer_y, height: 1, ..content };
-    let hints_w = str_width(hints);
-    let phrase_w = str_width(&phrase);
-    let hint_style = Style::default().fg(theme::HINT);
-    // 状态词只有在「不与提示粘连」时才右对齐显示。
-    let footer_line = if !phrase.is_empty() && space > hints_w + phrase_w + 2 {
-        Line::from(vec![
-            Span::styled(hints, hint_style),
-            Span::raw(" ".repeat(space - hints_w - phrase_w)),
-            Span::styled(phrase, phrase_style),
-        ])
-    } else {
-        Line::from(Span::styled(hints, hint_style))
-    };
-    f.render_widget(Paragraph::new(footer_line), footer_rect);
+    if !phrase.is_empty() {
+        let phrase_w = str_width(&phrase);
+        let space = content.width as usize;
+        let footer_line = if space > phrase_w + 2 {
+            Line::from(vec![
+                Span::raw(" ".repeat(space - phrase_w)),
+                Span::styled(phrase, phrase_style),
+            ])
+        } else {
+            Line::from(Span::styled(
+                truncate_width(&phrase, space.saturating_sub(1)),
+                phrase_style,
+            ))
+        };
+        f.render_widget(Paragraph::new(footer_line), footer_rect);
+    }
 
     // ── 斜杠命令面板：浮于输入区之上，两条发丝线夹一段浅表面 ──────────────
     let match_cmds = state.matching_commands();
@@ -2655,6 +2627,7 @@ fn tui_event_loop(
                                             history: Vec::new(),
                                             images: Vec::new(),
                                             workspace_id: None,
+        plan_execution_approval: None,
                                         },
                                     };
                                     cp.start_turn_stream(&sink, cmd);

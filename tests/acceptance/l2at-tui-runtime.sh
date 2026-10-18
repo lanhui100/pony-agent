@@ -121,72 +121,192 @@ if [ "$rc" -eq 2 ]; then ok "R4a --bogus exit 2"; else bad "R4a --bogus exit $rc
 if grep -qi "usage\|用法" "$r4_out"; then ok "R4b usage hint on stderr"; else bad "R4b no usage on stderr (see $r4_out)"; fi
 
 # ---------------------------------------------------------------
-# R5: resize repaint (tmux)
+# R5: resize repaint (tmux) — composer band contract (v3, lead-adjudicated):
+#   composer is a full-width SURFACE #181a1f band with NO top hairline;
+#   band top row (h - input_h - 1) and bottom row (last row) must both carry
+#   SURFACE bg; no long '─' line inside the band; band height >= 4 at 80x24
+#   (min 3 input lines + 1 status row); status word on last row right side;
+#   shortcut hints ("回车 发送" / "alt+回车") removed at every size.
+# Detection: tmux capture does not report bg on space-only cells, so we record
+# the raw pty stream via pipe-pane and replay it with a minimal VT state machine.
 # ---------------------------------------------------------------
-tmux_cleanup
-tmux new-session -d -s r5 -x 80 -y 24 2>"$RECEIPTS/r5-tmux-err.log"
+analyze_band() { # $1 = raw pty log, $2 = rows, $3 = cols ; emits JSON verdict
+python3 - "$1" "$2" "$3" <<'EOF'
+import sys, re, json
+raw = open(sys.argv[1], 'rb').read().decode('utf-8', 'replace')
+rows, cols = int(sys.argv[2]), int(sys.argv[3])
+# grid: bg per cell ('S' = SURFACE 24;26;31, '.' = other/none)
+grid = [['.' for _ in range(cols)] for _ in range(rows)]
+r = c = 0
+SURF = '48;2;24;26;31'
+def apply_sgr(params):
+    global bg
+    joined = ';'.join(params)
+    if re.search(r'(^|;)48;2;24;26;31(;|$)', joined): bg = 'S'
+    elif any(p in ('0', '49') for p in params) and not re.search(r'48;2;24;26;31', joined): bg = '.'  # 39=fg reset only; 49/0 reset bg
+i = 0; bg = '.'
+sgr_re = re.compile(r'\x1b\[([0-9;]*)m')
+while i < len(raw):
+    ch = raw[i]
+    if ch == '\x1b':
+        m = sgr_re.match(raw, i)
+        if m:
+            params = [p for p in m.group(1).split(';') if p]
+            apply_sgr(params)
+            i = m.end(); continue
+        m = re.match(r'\x1b\[(\d+);?(\d*)H', raw[i:])
+        if m:
+            r = max(0, int(m.group(1)) - 1); c = max(0, int(m.group(2) or 1) - 1)
+            i += m.end(); continue
+        m = re.match(r'\x1b\[[0-9;]*[A-Za-z]', raw[i:])
+        if m: i += m.end(); continue
+        i += 1; continue
+    if ch == '\r': c = 0; i += 1; continue
+    if ch == '\n': r = min(r + 1, rows - 1); i += 1; continue
+    if 0 <= r < rows and 0 <= c < cols:
+        grid[r][c] = bg
+    c += 1
+    if c >= cols: c = 0; r = min(r + 1, rows - 1)
+    i += 1
+# band detection: rows dominated by SURFACE bg (>=80% cells; per-span SGR resets
+# punch isolated '.' holes, so use ratio not strict all)
+def row_surf(r_idx, thresh=0.8):
+    row = grid[r_idx]
+    return row and sum(1 for x in row if x == 'S') / len(row) >= thresh
+bottom = rows - 1
+band_top = bottom
+if row_surf(bottom):
+    while band_top - 1 >= 0 and row_surf(band_top - 1):
+        band_top -= 1
+band_h = bottom - band_top + 1 if row_surf(bottom) else 0
+plain = ''.join(''.join(row) for row in grid)
+print(json.dumps({
+    'band_top_1based': band_top + 1,
+    'bottom_surf': row_surf(bottom),
+    'top_surf': row_surf(band_top) if band_h else False,
+    'band_h': band_h,
+}))
+EOF
+}
+run_tui_raw() { # $1 session, $2 x, $3 y, $4 outfile
+  tmux_cleanup
+  tmux new-session -d -s "$1" -x "$2" -y "$3" 2>/dev/null
+  tmux pipe-pane -t "$1" "cat > '$4'"
+  sleep 1
+  tmux send-keys -t "$1" "$PONY" Enter
+  wait_main "$1" "$2"
+}
+wait_main() { # $1 session, $2 cols — poll until main TUI (status word) appears, then settle
+  for _ in $(seq 1 20); do
+    sleep 0.5
+    if tmux capture-pane -t "$1" -p 2>/dev/null | grep -q "就绪"; then break; fi
+  done
+  sleep 1
+  # splash gate: one harmless Space + Backspace ensures we are past the welcome screen
+  if ! tmux capture-pane -t "$1" -p 2>/dev/null | grep -q "就绪"; then
+    tmux send-keys -t "$1" Space
+    sleep 1
+    tmux send-keys -t "$1" BSpace
+    for _ in $(seq 1 20); do
+      sleep 0.5
+      if tmux capture-pane -t "$1" -p 2>/dev/null | grep -q "就绪"; then break; fi
+    done
+  fi
+  sleep 1
+}
+pipe_restart() { # $1 session, $2 outfile — stop old pipe, start fresh
+  tmux pipe-pane -t "$1" "" 2>/dev/null
+  tmux pipe-pane -t "$1" "cat > '$2'"
+}
+pipe_stop() { tmux pipe-pane -t "$1" "" 2>/dev/null; }
+
+# R5 main: fresh TUI session per size for band analysis (80x24, 120x40, 60x18),
+# plus one live resize-continuity session (80 -> 120 -> 60) asserting repaint.
+run_tui_raw r5a 80 24 "$RECEIPTS/r5-raw-80x24.bin"
 sleep 1
-tmux send-keys -t r5 "$PONY" Enter
-sleep 3
-tmux capture-pane -t r5 -p > "$RECEIPTS/r5-80x24.txt" 2>/dev/null
-tmux resize-window -t r5 -x 120 -y 40 2>>"$RECEIPTS/r5-tmux-err.log"
-sleep 3
-tmux capture-pane -t r5 -p > "$RECEIPTS/r5-120x40.txt" 2>/dev/null
-tmux resize-window -t r5 -x 60 -y 18 2>>"$RECEIPTS/r5-tmux-err.log"
-sleep 3
-tmux capture-pane -t r5 -p > "$RECEIPTS/r5-60x18.txt" 2>/dev/null
+pipe_stop r5a
+tmux capture-pane -t r5a -p > "$RECEIPTS/r5-80x24.txt" 2>/dev/null
+run_tui_raw r5b 120 40 "$RECEIPTS/r5-raw-120x40.bin"
+sleep 1
+pipe_stop r5b
+tmux capture-pane -t r5b -p -e > "$RECEIPTS/r5-120x40.txt" 2>/dev/null
+run_tui_raw r5c 60 18 "$RECEIPTS/r5-raw-60x18.bin"
+sleep 1
+pipe_stop r5c
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  tmux capture-pane -t r5c -p > "$RECEIPTS/r5-60x18.txt" 2>/dev/null
+  [ -s "$RECEIPTS/r5-60x18.txt" ] && break
+  sleep 1
+done
+
+# resize continuity: 80 -> 120 -> 60 in one live session; status word must reappear at each size
+tmux_cleanup
+tmux new-session -d -s r5r -x 80 -y 24 2>/dev/null
+sleep 1
+tmux send-keys -t r5r "$PONY" Enter
+wait_main r5r 80
+for SZ in "120 40" "60 18"; do
+  set -- $SZ
+  tmux resize-window -t r5r -x "$1" -y "$2" 2>>"$RECEIPTS/r5-tmux-err.log"
+  wait_main r5r "$1"
+done
+tmux capture-pane -t r5r -p > "$RECEIPTS/r5-resized-final.txt" 2>/dev/null
 tmux kill-server >/dev/null 2>&1
 
-if grep -q "pony  ·" "$RECEIPTS/r5-120x40.txt" && grep -q "回车 发送" "$RECEIPTS/r5-120x40.txt"; then
-  ok "R5a header + bottom bar present at 120x40"
+# R5a: header present at 120x40 and no shortcut hints anywhere (hints removed)
+clean_ansi "$RECEIPTS/r5-120x40.txt" > "$RECEIPTS/r5-120x40-clean.txt"
+if grep -q "pony  ·" "$RECEIPTS/r5-120x40-clean.txt"; then
+  ok "R5a header present at 120x40"
 else
-  bad "R5a header/bottom bar missing at 120x40"
+  bad "R5a header missing at 120x40"
 fi
-hair120=$(python3 - "$RECEIPTS/r5-120x40.txt" <<'EOF'
-import sys
-mx=0
-for l in open(sys.argv[1],encoding='utf-8',errors='replace'):
-    mx=max(mx,l.rstrip('\n').count('─'))
-print(mx)
-EOF
-)
-# Design contract (lead-adjudicated): composer is a full-width surface band; its
-# top hairline spans the FULL terminal width (120/60). Old 116/56 content-width
-# assertions are obsolete.
-if [ "$hair120" -eq 120 ]; then ok "R5b hairline length 120 (full terminal width) at 120x40 (got $hair120)"; else bad "R5b hairline at 120x40 is $hair120 (expected 120)"; fi
-if grep -q "────────────\|────────────" "$RECEIPTS/r5-120x40.txt"; then :; fi
-stale76=$(python3 - "$RECEIPTS/r5-120x40.txt" <<'EOF'
-import sys
-n=0
-for l in open(sys.argv[1],encoding='utf-8',errors='replace'):
-    if l.rstrip('\n').count('─')==76: n+=1
-print(n)
-EOF
-)
-if [ "$stale76" -eq 0 ]; then ok "R5c no stale 80-col hairline (len 76) residue"; else bad "R5c stale 76-char hairline residue found ($stale76 lines)"; fi
-hair60=$(python3 - "$RECEIPTS/r5-60x18.txt" <<'EOF'
-import sys
-mx=0
-for l in open(sys.argv[1],encoding='utf-8',errors='replace'):
-    mx=max(mx,l.rstrip('\n').count('─'))
-print(mx)
-EOF
-)
-if [ "$hair60" -eq 60 ]; then ok "R5d hairline length 60 (full terminal width) at 60x18 (got $hair60)"; else bad "R5d hairline at 60x18 is $hair60 (expected 60)"; fi
-
-# R5e: composer band — input row background must be SURFACE #181a1f (truecolor bg 48;2;24;26;31)
-tmux_cleanup
-tmux new-session -d -s r5e -x 120 -y 40 2>/dev/null
-sleep 1
-tmux send-keys -t r5e "$PONY" Enter
-sleep 3
-tmux capture-pane -t r5e -p -e > "$RECEIPTS/r5e-120x40-esc.txt" 2>/dev/null
-tmux kill-server >/dev/null 2>&1
-surface_lines=$(grep -c "48;2;24;26;31" "$RECEIPTS/r5e-120x40-esc.txt" 2>/dev/null || true)
-if [ "$surface_lines" -ge 1 ]; then
-  ok "R5e composer band SURFACE bg #181a1f (48;2;24;26;31) present ($surface_lines lines)"
+hints=$(grep -l "回车 发送\|alt+回车" "$RECEIPTS/r5-80x24.txt" "$RECEIPTS/r5-120x40-clean.txt" "$RECEIPTS/r5-60x18.txt" 2>/dev/null | wc -l)
+if [ "$hints" -eq 0 ]; then
+  ok "R5h no shortcut hints (回车 发送 / alt+回车) at any size"
 else
-  bad "R5e no SURFACE #181a1f background found in composer area"
+  bad "R5h shortcut hints still present in $hints capture(s)"
+fi
+
+# R5b: band top and bottom rows both SURFACE at 120x40, no long hairline inside band
+v120=$(analyze_band "$RECEIPTS/r5-raw-120x40.bin" 40 120)
+echo "R5 120x40: $v120" | tee "$RECEIPTS/r5-120x40-band.json"
+if echo "$v120" | grep -q '"top_surf": true' && echo "$v120" | grep -q '"bottom_surf": true'; then
+  ok "R5b band top+bottom rows SURFACE #181a1f at 120x40"
+else
+  bad "R5b band top/bottom SURFACE missing at 120x40 ($v120)"
+fi
+# R5c: no '─' long line INSIDE the composer band rows (band_top..last row);
+# the header hairline above the band is part of the chat area and allowed.
+band_top_120=$(echo "$v120" | python3 -c "import sys,json;print(json.load(sys.stdin)['band_top_1based'])")
+hair120=$(python3 -c "
+import re
+plain=re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]','',open('$RECEIPTS/r5-120x40.txt',encoding='utf-8',errors='replace').read())
+lines=plain.splitlines()
+band_top=$band_top_120
+print(max((l.count('─') for l in lines[band_top-1:40]), default=0))
+")
+if [ "$hair120" -eq 0 ]; then ok "R5c no hairline (─) inside composer band at 120x40"; else bad "R5c hairline found inside composer band at 120x40 (len $hair120)"; fi
+
+# R5d: band surface + status word at 60x18 after resize
+v60=$(analyze_band "$RECEIPTS/r5-raw-60x18.bin" 18 60)
+echo "R5 60x18: $v60" | tee "$RECEIPTS/r5-60x18-band.json"
+if echo "$v60" | grep -q '"top_surf": true' && echo "$v60" | grep -q '"bottom_surf": true'; then
+  ok "R5d band top+bottom rows SURFACE at 60x18 after resize"
+else
+  bad "R5d band SURFACE missing at 60x18 ($v60)"
+fi
+if grep -q "就绪" "$RECEIPTS/r5-60x18.txt"; then ok "R5f status word present at 60x18"; else bad "R5f status word missing at 60x18"; fi
+if grep -q "就绪" "$RECEIPTS/r5-resized-final.txt"; then ok "R5j live-resize continuity: status word reappears at final 60x18"; else bad "R5j live-resize continuity broken (no status word at final size)"; fi
+
+# R5g: band height >= 4 at 80x24 (3 input min + 1 status row)
+v80=$(analyze_band "$RECEIPTS/r5-raw-80x24.bin" 24 80)
+echo "R5 80x24: $v80" | tee "$RECEIPTS/r5-80x24-band.json"
+band_h=$(echo "$v80" | python3 -c "import sys,json;print(json.load(sys.stdin)['band_h'])")
+if [ "$band_h" -ge 4 ]; then ok "R5g band height $band_h >= 4 at 80x24"; else bad "R5g band height $band_h < 4 at 80x24"; fi
+if grep -q "就绪" "$RECEIPTS/r5-80x24.txt" && tail -1 "$RECEIPTS/r5-80x24.txt" | grep -q "就绪"; then
+  ok "R5i status word on last row right side at 80x24"
+else
+  bad "R5i status word not on last row at 80x24"
 fi
 
 # ---------------------------------------------------------------
@@ -202,12 +322,14 @@ for T in vt100 xterm screen linux xterm-256color; do
   tmux kill-server >/dev/null 2>&1
   hdr=$(grep -c "pony  ·" "$RECEIPTS/r6-term-$T.txt" || true)
   inp=$(grep -c "› ▏" "$RECEIPTS/r6-term-$T.txt" || true)
-  bot=$(grep -c "回车 发送" "$RECEIPTS/r6-term-$T.txt" || true)
+  # composer band: status word on last row replaces old bottom-bar hint check
+  bot=$(grep -c "就绪" "$RECEIPTS/r6-term-$T.txt" || true)
+  hint=$(grep -c "回车 发送\|alt+回车" "$RECEIPTS/r6-term-$T.txt" || true)
   small=$(grep -c "终端窗口过小" "$RECEIPTS/r6-term-$T.txt" || true)
-  if [ "$hdr" -ge 1 ] && [ "$inp" -ge 1 ] && [ "$bot" -ge 1 ] && [ "$small" -eq 0 ]; then
-    ok "R6 TERM=$T: header+prompt+bottom present, no too-small notice"
+  if [ "$hdr" -ge 1 ] && [ "$inp" -ge 1 ] && [ "$bot" -ge 1 ] && [ "$small" -eq 0 ] && [ "$hint" -eq 0 ]; then
+    ok "R6 TERM=$T: header+prompt+band-status present, no too-small notice, no hints"
   else
-    bad "R6 TERM=$T: hdr=$hdr inp=$inp bot=$bot too_small=$small"
+    bad "R6 TERM=$T: hdr=$hdr inp=$inp status=$bot too_small=$small hints=$hint"
   fi
 done
 
@@ -258,10 +380,10 @@ if echo "$dead_status" | grep -q "^1 101"; then
 else
   ok "R8a no panic at 26x9 (pane status: ${dead_status:-alive})"
 fi
-if grep -q "回车 发送" "$RECEIPTS/r8-26x9.txt" && ! grep -q "alt+回车" "$RECEIPTS/r8-26x9.txt"; then
-  ok "R8b bottom bar degraded (present without alt+回车)"
+if grep -q "就绪" "$RECEIPTS/r8-26x9.txt" && ! grep -q "alt+回车" "$RECEIPTS/r8-26x9.txt" && ! grep -q "回车 发送" "$RECEIPTS/r8-26x9.txt"; then
+  ok "R8b status word present, shortcut hints fully removed (incl. alt+回车)"
 else
-  bad "R8b bottom bar not properly degraded (alt+回车 present or bar missing)"
+  bad "R8b status word missing or shortcut hints still present at 26x9"
 fi
 tmux_cleanup
 
