@@ -795,18 +795,23 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
 }
 
 /// 彩色像素 pony 头部（参考 Antigravity CLI init banner）：
-/// 左侧用半块字符拼一匹 13×4 像素的彩虹渐变小马，右侧是版本/模型/工作区信息列；
-/// 整块作为会话流的第一条消息，随对话向上滚动。
+/// 左侧用半块字符拼一枚 14×10 像素的彩虹马蹄铁（马蹄铁即 pony 的徽记），
+/// 右侧是版本 / 模型(提供商) / 工作区信息列；整块随会话向上滚动。
 fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
-    const W: usize = 13;
-    // 4 行像素掩码：马头与鬃毛（row0-1）、躯干（row2）、四腿（row3）。
-    const MASK: [[bool; W]; 4] = [
-        [false, false, false, true, true, true, false, false, false, false, false, false, false],
-        [false, true, true, true, true, true, true, true, true, true, false, false, false],
-        [true, true, true, true, true, true, true, true, true, true, true, true, false],
-        [true, false, true, false, true, false, true, false, true, false, true, true, false],
+    // 14 列 × 10 像素行；两行像素合成一条终端行（▀ / ▄），即 14 字符 × 5 文本行。
+    const ART: [&str; 10] = [
+        "..##########..",
+        ".############.",
+        "##############",
+        "#####....#####",
+        "####......####",
+        "####......####",
+        "####......####",
+        "#####....#####",
+        ".#####..#####.",
+        "..####..####..",
     ];
-    // 渐变停靠点（暖 → 冷）。
+    // 彩虹渐变色标（暖 → 冷）。
     const STOPS: [(f32, u8, u8, u8); 7] = [
         (0.00, 252, 208, 96),
         (0.17, 248, 152, 72),
@@ -816,10 +821,11 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
         (0.83, 104, 122, 240),
         (1.00, 84, 176, 250),
     ];
-    let gradient = |col: usize| -> (u8, u8, u8) {
+    const W: usize = 14;
+
+    let gradient = |col: usize| -> ratatui::style::Color {
         let t = col as f32 / (W - 1) as f32;
-        let mut lo = STOPS[0];
-        let mut hi = STOPS[STOPS.len() - 1];
+        let (mut lo, mut hi) = (STOPS[0], STOPS[STOPS.len() - 1]);
         for pair in STOPS.windows(2) {
             if t >= pair[0].0 && t <= pair[1].0 {
                 lo = pair[0];
@@ -829,64 +835,64 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
         }
         let span = (hi.0 - lo.0).max(1e-6);
         let k = ((t - lo.0) / span).clamp(0.0, 1.0);
-        let mix = |a: u8, b: u8| -> u8 { (a as f32 + (b as f32 - a as f32) * k).round() as u8 };
-        (mix(lo.1, hi.1), mix(lo.2, hi.2), mix(lo.3, hi.3))
+        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * k).round() as u8;
+        ratatui::style::Color::Rgb(mix(lo.1, hi.1), mix(lo.2, hi.2), mix(lo.3, hi.3))
     };
 
-    // 半块坐标：row 0..2 → 上半块带；row 2..4 → 下半块带。
-    let half = |rows: [usize; 2]| -> Line<'static> {
+    let filled = |row: usize, col: usize| -> bool {
+        ART[row].as_bytes().get(col).map(|b| *b == b'#').unwrap_or(false)
+    };
+
+    let mut logo_rows: Vec<Line<'static>> = Vec::new();
+    for pair in 0..5 {
+        let (top, bottom) = (pair * 2, pair * 2 + 1);
         let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
-        for (col, &below_mask) in MASK[rows[1]].iter().enumerate() {
-            let above = MASK[rows[0]][col];
-            let below = below_mask;
+        for col in 0..W {
             let c = gradient(col);
-            let fg = ratatui::style::Color::Rgb(c.0, c.1, c.2);
-            match (above, below) {
-                (true, true) => spans.push(Span::styled("▀", Style::default().fg(fg).bg(fg))),
-                (true, false) => {
-                    spans.push(Span::styled("▀", Style::default().fg(fg)));
-                    spans.push(Span::raw(" "));
-                }
-                (false, true) => spans.push(Span::styled(" ", Style::default().bg(fg))),
-                (false, false) => spans.push(Span::raw("  ")),
+            match (filled(top, col), filled(bottom, col)) {
+                (true, true) => spans.push(Span::styled("▀", Style::default().fg(c).bg(c))),
+                (true, false) => spans.push(Span::styled("▀", Style::default().fg(c))),
+                (false, true) => spans.push(Span::styled("▄", Style::default().fg(c))),
+                (false, false) => spans.push(Span::raw(" ")),
             }
         }
-        // 固定输出全部 13 列（含无背景占位），保证上下两条带严格等宽对齐
-        Line::from(spans)
-    };
+        logo_rows.push(Line::from(spans));
+    }
 
-    let top_band = half([0, 1]);
-    let bottom_band = half([2, 3]);
-    let gap = Span::raw("   ");
+    let info = [
+        Line::from(vec![
+            Span::styled(
+                "pony",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme::INK),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("{} ({})", state.model, state.current_provider_id),
+            Style::default().fg(theme::MUTED),
+        )),
+        Line::from(Span::styled(
+            state.workspace.display().to_string(),
+            Style::default().fg(theme::MUTED),
+        )),
+    ];
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut top_row = top_band.spans;
-    top_row.push(gap.clone());
-    top_row.push(Span::styled(
-        "pony",
-        Style::default()
-            .fg(theme::ACCENT)
-            .add_modifier(Modifier::BOLD),
-    ));
-    top_row.push(Span::styled(
-        format!(" v{}", env!("CARGO_PKG_VERSION")),
-        Style::default().fg(theme::INK),
-    ));
-    lines.push(Line::from(top_row));
-
-    let mut mid_row = bottom_band.spans;
-    mid_row.push(gap);
-    mid_row.push(Span::styled(
-        format!("{} ({})", state.model, state.current_provider_id),
-        Style::default().fg(theme::MUTED),
-    ));
-    lines.push(Line::from(mid_row));
-    // 第 3 行：工作区，与信息列左对齐（马身 2 前导 + 13 列 ×2 = 28，加 3 空格间隙）
-    lines.push(Line::from(vec![
-        Span::raw(" ".repeat(31)),
-        Span::styled(state.workspace.display().to_string(), Style::default().fg(theme::MUTED)),
-    ]));
-    lines
+    // 信息列垂直居中于 5 行标志（占第 2~4 行）。
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for (idx, logo) in logo_rows.into_iter().enumerate() {
+        let mut spans = logo.spans;
+        if let Some(info_line) = idx.checked_sub(1).and_then(|i| info.get(i)) {
+            spans.push(Span::raw("   "));
+            spans.extend(info_line.spans.clone());
+        }
+        out.push(Line::from(spans));
+    }
+    out
 }
 
 pub fn ascii_logo() -> Vec<Line<'static>> {
