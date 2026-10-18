@@ -5988,8 +5988,14 @@ mod tests {
 
     #[test]
     fn is_rate_limit_error_matches_provider_wording() {
+        // PA-143：命中必须来自**措辞**（tpm），而不是 JSON 错误码里的数字子串。
         assert!(is_rate_limit_error(
-            "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"429001\"}}"
+            "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"1001\"}}"
+        ));
+        // PA-143：`"code":"429001"` 只是更长数字串内的 `429` 片段，不构成限流契约
+        // （旧断言把该子串命中当契约，正是缺陷所在）。
+        assert!(!is_rate_limit_error(
+            "{\"error\":{\"message\":\"invalid request\",\"code\":\"429001\"}}"
         ));
         assert!(is_rate_limit_error("HTTP 429 Too Many Requests"));
         assert!(is_rate_limit_error("rate limit exceeded for org"));

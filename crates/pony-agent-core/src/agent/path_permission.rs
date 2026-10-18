@@ -753,6 +753,8 @@ mod tests {
         assert!(permission.canonical.starts_with(&root), "{:?}", permission.canonical);
     }
 
+    /// PA-142：两个平台分支都必须有真实断言。`cfg!` 是编译期常量——旧写法在 POSIX 上只执行
+    /// `.expect(..)` 后便零断言报 ok（等价于被忽略的用例却伪装成通过）。
     #[test]
     fn win_prefix_normalization_strips_verbatim() {
         let root = PathBuf::from(r"C:\WS");
@@ -764,6 +766,18 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(permission.canonical, PathBuf::from(r"C:\WS\file"));
             assert_eq!(permission.zone, PermissionZone::WorkspaceRoot);
+        } else {
+            // POSIX：`\\?\C:\WS\file` 不是 Windows verbatim 绝对路径，只是普通相对文件名
+            // （反斜杠不是分隔符）⇒ 必须以 root 为基座解析、不得被归一化成 `C:\WS\file`，
+            // 更不得逃逸 root。
+            assert_eq!(permission.zone, PermissionZone::WorkspaceRoot);
+            assert_eq!(permission.canonical, root.join(r"\\?\C:\WS\file"));
+            assert_ne!(permission.canonical, PathBuf::from(r"C:\WS\file"));
+            assert!(
+                permission.canonical.starts_with(&root),
+                "POSIX verbatim literal must stay inside root: {:?}",
+                permission.canonical
+            );
         }
     }
 

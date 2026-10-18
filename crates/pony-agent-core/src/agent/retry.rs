@@ -1333,4 +1333,69 @@ mod tests {
             .classify("主站失败 http://a.internal:50208/v1 备用 connection refused")
             .is_retryable());
     }
+
+    /// PA-143：码表是裸 `contains` 时，**更长数字串内的片段**会伪造命中
+    /// （`elapsed=40832ms` → `408`、`"code":"429001"` → `429`），使重试结论取决于
+    /// 与原因无关的数字。判据必须按结构化字段/词边界判定，而不是整段文本子串。
+    #[test]
+    fn stage2_classify_does_not_match_digits_inside_longer_numbers() {
+        let policy = ProviderRetryPolicy::new(BackoffConfig::default());
+        for probe in [
+            "provider stream aborted; elapsed=40832ms",
+            "{\"error\":{\"message\":\"invalid request\",\"code\":\"429001\"}}",
+            "{\"error\":{\"message\":\"invalid request\",\"code\":\"1502\"}}",
+            "{\"error\":{\"message\":\"invalid request\",\"code\":\"1503\"}}",
+            "{\"error\":{\"message\":\"invalid request\",\"code\":\"1504\"}}",
+        ] {
+            let kind = policy.classify(probe);
+            assert!(
+                !kind.is_retryable(),
+                "更长数字串内的片段不得伪造可重试分类: {probe} -> {kind:?}"
+            );
+            assert!(
+                !is_rate_limit_error(probe),
+                "更长数字串内的片段不得伪造限流判定: {probe}"
+            );
+        }
+        // 判据未被削弱：既有合法命中必须保留。
+        for probe in [
+            "HTTP 429 Too Many Requests",
+            "status:502",
+            "operation timed out",
+        ] {
+            assert!(
+                policy.classify(probe).is_retryable(),
+                "既有合法命中不得丢失: {probe}"
+            );
+        }
+    }
+
+    /// PA-144：无 scheme 的 `host:port` 仍把端口数字暴露给码表
+    /// （`endpoint=127.0.0.1:42953/v1` → `429`、`endpoint=localhost:50208` → `502`），
+    /// 生产可达路径是 provider 把 endpoint 拼进错误正文且 base_url 不校验 scheme。
+    /// 端口数字不得改变分类；端口**恰为码值**（`:429` / `:502`）时纯词边界判定仍会漏，
+    /// 因此必须按 host:port 结构剥离。
+    #[test]
+    fn stage2_classify_ignores_schemeless_host_port_digits() {
+        let policy = ProviderRetryPolicy::new(BackoffConfig::default());
+        for probe in [
+            "解析 provider SSE 流失败: 未找到 SSE data 事件; endpoint=127.0.0.1:42953/v1",
+            "解析 provider SSE 流失败: 未找到 SSE data 事件; endpoint=localhost:50208",
+            "解析 provider SSE 流失败: 未找到 SSE data 事件; endpoint=127.0.0.1:429/v1",
+            "解析 provider SSE 流失败: 未找到 SSE data 事件; endpoint=localhost:502",
+        ] {
+            let kind = policy.classify(probe);
+            assert!(
+                !kind.is_retryable(),
+                "scheme-less host:port 的端口不得污染分类: {probe} -> {kind:?}"
+            );
+            assert!(
+                !is_rate_limit_error(probe),
+                "scheme-less host:port 的端口不得触发限流判定: {probe}"
+            );
+        }
+        // 判据未被削弱：真正的原因文本码仍必须命中。
+        assert!(policy.classify("HTTP 502 Bad Gateway").is_retryable());
+        assert!(policy.classify("HTTP 429 Too Many Requests").is_retryable());
+    }
 }
