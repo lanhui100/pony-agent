@@ -13,6 +13,38 @@
 
 ## Backlog
 
+- `PA-138` Plan 草稿态写保护在真实会话下 fail-open(门禁 session 解析不看注入会话)(P1,Complexity B)
+  说明:来自 wave-35 L3 审查视角 A 与 Test Agent 的独立核验。`crates/pony-agent-core/src/agent/governed_executor.rs:150-159` 的草稿门禁把 session 解析为「工具参数 `session_id` → 环境变量 → 常量 `"default"`」,并额外把 `"test-session-draft-gate"`(测试会话名)硬编码进生产判定;而真实会话 id 由 `crates/pony-agent-core/src/agent/runtime/mod.rs:299-300` `governed.set_context(DispatchContext { session_id: input.session_id.clone(), … })` **在上下文里注入**,`workspace_write_file` 的 schema 不接受 `session_id`(additionalProperties:false)⇒ 生产调用永远落到 `"default"`/`"test-session-draft-gate"` 之外的解析结果,门禁**匹配不到当前会话的 Draft Plan** = 写保护形同虚设。另:环境变量回退 `.map(|_| "env_session")` 忽略变量取值、用常量参与匹配,同样无法闭合。该形状由 ff76305(wave-30b)引入,**早于** wave-35;wave-35 对 `plan_control` 的豁免(见 PA-141 与 ADR 0038 F-7)**未削弱任何原本生效的保护**(原本就不生效,由 L3-A 逐行证明)。来源:wave-35 L3-A 收据 `.dev-team/review-wave35-a.json`、Test Agent `receipts/wave35/evidence_round3_prefreeze2.md`。
+  **验收条款**:草稿门禁必须以**运行时注入的会话 id**为唯一判据(或把 `session_id` 纳入工具 schema 并强制由宿主填充),删除 `"test-session-draft-gate"` 生产硬编码与 `"default"` 兜底;补 2 条 Rust 真断言:(a) 非 `default` 会话在 Draft 态调用写工具被 `plan_draft_gate` 拒绝,(b) `plan_control` 仍豁免且 `start_execution` 可达;重跑 `cargo test -p pony-agent-core --test wave30b_policy_rules_and_plan_gate_test` 保持 3 passed。
+
+- `PA-139` 全量并行残留 flake:`control_plane` 用例约 1/13 次失败(首个请求 1ms connect refused)(P1,Complexity B)
+  说明:wave-35 收口期实测。失败用例 `agent::control_plane::tests::lifecycle_boundary_checkpoint_does_not_override_default_submission_plan`,形态为**首个 provider 请求 1ms 内 `client error (Connect)`**,随后回合失败、生命周期断言红。收据:`tests/acceptance/receipts/wave35/full_lib_run_freeze2.log`(`EXIT=101`,`1061 passed; 1 failed`)。分布:单跑 20/20 绿、`control_plane::tests::` 模块批 10/10 绿、全量 Lead 5/5 绿 + Test Agent 5/5 绿 ⇒ 合并样本 **1/13 ≈ 7.7%/次全量**(Wilson 上界 ≈26%)。**关键事实:该 flake 长期被掩盖**——失败日志原文显示修复前端口 `42967` 的 `429` 命中限流码表 ⇒ 该 connect 错误被判 `TransientRetryable` ⇒ 退避重试恰好成功 ⇒ 测试通过;wave-35 修正判据(剥离 URL 片段)后被正确判为永久错误 ⇒ 立即 Abort ⇒ **掩膜消失、真实缺陷暴露**。已排除与 wave-35 的 5s 有界 join 相关(失败发生在首个请求,join 在收尾;日志中 join 超时诊断 0 次;端口每用例独立;provider 解析无进程级缓存)。唯一已定位的进程级耦合候选为预存的 `crates/pony-agent-core/src/agent/runtime_helper.rs` 的 `OnceLock<Runtime> + enter()`(共享运行时的 endpoint 归属),**确切机制未定位**。
+  **验收条款**:优先做 mock 就绪的**确定性握手**(禁止固定 sleep);若无法定位机制,则允许 ≤2 次受控重试并登记告警。验收命令:`for i in $(seq 50); do RUSTFLAGS="-D warnings" cargo test -p pony-agent-core --lib; done` ⇒ 50/50 `0 failed`,并留逐轮 log。**禁止**用「放宽 classify」或「调大 `MOCK_SERVER_FINISH_TIMEOUT`」来掩盖。
+
+- `PA-140` CI 平台覆盖缺口:ubuntu/macos 从不执行 core 测试(平台相关用例长期腐烂)(P1,Complexity A)
+  说明:`.github/workflows/ci.yml:14/61` 的唯一 core 测试 job 是 `windows-latest`(`npm run cargo:test:shared -- --package=pony-agent-core`);`:63-81` 的 `core-platform-check` 在 ubuntu/macos 上**只跑 `cargo check`**(非 Windows cfg 编译检查),不跑测试。后果:wave-35 B 组 4 个平台相关用例(`document_conversion` 的 `..\` 字面量、`path_permission` 的盘符卷边界/大小写折叠、符号链接 canary 缺夹具)**在 Linux CI 从未被执行**,自 PA-080(2db0b0e)/ fcecbd0 落地起一路腐烂,直到 wave-35 本地跑全量才暴露。来源:wave-35 只读归因 + ADR 0038 F-3。
+  **验收条款**:在 `core-platform-check` 增补 ubuntu-latest 的 `cargo test -p pony-agent-core --lib`(可与现有 `cargo check` 同 job,注意 e2e 依赖);提交后给出该 job 绿灯的 CI run id/URL。该门禁落地后,PA-142 及后续平台用例才有防腐能力。
+
+- `PA-141` Plan 草稿态「模型可自解锁」的安全姿态需产品裁决(P1,Complexity B)
+  说明:wave-35 为消除 **自锁死** 必须让 `plan_control` 豁免草稿态写门禁(`crates/pony-agent-core/src/agent/governed_executor.rs:147`)。根因:`plan_control` 是 `ToolKind::Write`(`tools.rs:6274`),被 wave-30b 门禁 Deny ⇒ `merge`/`complete_step`/`replace`/`start_execution` 全不可达,而 `plan_state.rs:336` 明确记载 `start_execution` 是「unlock write operations」的机制 ⇒ **门禁锁死了自己的解锁器**,plan 永远无法离开 Draft 且该会话所有写入被永久 Deny(用户实测表现为草稿计划无法推进)。豁免后语义变为「模型可在 Draft 态自行 `start_execution` 解锁写」,而 `plan_state.rs:337` 的 `start_execution` **不要求宿主审批**。L3 审查视角 A/B 均要求把该**安全姿态变化**留档(ADR 0038 F-7),本轮按「最小闭包 + 先解除自锁死」处置,未加审批闸门。
+  **验收条款**:产品侧明确二选一——(a) 接受模型自解锁(则把该语义写入 `docs/architecture/` 契约并补反例说明),或 (b) 引入宿主审批(则 `start_execution` 需宿主决议证据),并补 Rust 真断言证明「无宿主审批时模型不能越过草稿态写保护」;同步更新 ADR 0038 F-7 状态。
+
+- `PA-142` `path_permission.rs:764` 测试在 Linux 上零断言执行却报 ok(违反「严禁无断言测试」停止线)(P2,Complexity A)
+  说明:`crates/pony-agent-core/src/agent/path_permission.rs:756-768` 的 `win_prefix_normalization_strips_verbatim` 用 `if cfg!(windows) { assert_eq!(...); assert_eq!(...); }` 且**无 else 分支**:`cfg!` 是编译期常量 ⇒ Linux 上测试体只执行 `classify(...).expect(...)`,其后**零断言**,却以 `test ... ok` 上报(等价 `#[ignore]` 但报 ok)。该形状**先于 wave-35 存在**(wave-35 未触碰该行,仅同文件另两处用例按裁决补了 POSIX 等价断言);来源:wave-35 Lead 扫描 + Test Agent `receipts/wave35/evidence_round2.md` 登记。同类形状在 4 个改动文件内另有 12 处 `if cfg!(windows)`,其中多数是合法的命令/字符串选择,需逐处判定后只修「包裹断言且无 else」者。
+  **验收条款**:该用例二选一处理——补 else 分支的**真实 POSIX 断言**(证明 `\?\C:\WS\file` 在 POSIX 下只是普通相对名、不得逃逸 root),或整测 `#[cfg(windows)]`(并说明覆盖代价)。另建议把「测试函数体内零断言却报 ok」做成机械判据(扩展 `tests/acceptance/remediation/wave35_gate.sh` 的 census),使其不可回退。
+
+- `PA-143` 上游码表仍为裸子串匹配:更长数字串内的片段可命中(`elapsed=40832ms` → `408`)(P2,Complexity B)
+  说明:`crates/pony-agent-core/src/agent/retry.rs` 的 `UPSTREAM_TIMEOUT_HINTS`/`UPSTREAM_RATE_LIMITED_HINTS`/`UPSTREAM_SERVER_ERROR_HINTS` 用 `contains` 匹配,wave-35 只消除了「URL/端口数字污染」这一子类(剥离 `scheme://…`);`elapsed=40832ms`、`"code":"429001"` 这类**更长数字串内的片段**仍会命中,使重试结论取决于无关数字。`crates/pony-agent-core/src/agent/provider/mod.rs:5991` 现有测试把该行为当契约(全绿),故 wave-35 未动以守最小闭包。来源:executor-c 上报 + L3-B 增量复审的残留项。
+  **验收条款**:改为结构化/词边界判定(或按错误码字段而非整段文本分类),**同步修订** `provider/mod.rs:5991` 的契约测试;新增变异敏感断言证明 `elapsed=40832ms`、`"code":"429001"` 不再改变分类;重跑 `cargo test -p pony-agent-core --lib -- agent::retry` 与 `-- agent::provider` 全绿。
+
+- `PA-144` scheme-less `host:port` 仍可污染分类(`endpoint=127.0.0.1:42953/v1` → 误判可重试)(P3,Complexity A)
+  说明:wave-35 的 `strip_endpoint_fragments` 只剥离带 `scheme://` 的片段;不含 scheme 的 `host:port` 形态(如 `endpoint=127.0.0.1:42953/v1`、`endpoint=localhost:50208`)仍把端口数字暴露给码表 ⇒ 仍可被误判为 `TransientRetryable`/限流。可达路径:「响应正文: {上游体}」拼接(`provider/mod.rs:1802`),且配置里的 `base_url` 不校验 scheme(`config.rs:426`)。属 C3 未覆盖类(P3,非 wave-35 引入)。来源:L3-B 增量复审收据 `.dev-team/review-wave35-b2.json`。
+  **验收条款**:按结构字段分类(优先)或把 `host:port` 形态一并剥离;补判据测试覆盖 `endpoint=127.0.0.1:42953/v1` 与 `endpoint=localhost:50208`(须不因端口数字改变分类),并验证变异敏感性(退回现实现则测试变红)。
+
+- `PA-145` `recovery.rs` 保留第二套裸 `contains` 瞬态判据(潜在判据漂移)(P3,Complexity A)
+  说明:`crates/pony-agent-core/src/agent/recovery.rs:160-167` 另有一套瞬态错误码表(`429`/`502`/`timeout` 等)且**不做 URL 剥离**,与 `retry.rs` 的判据构成平行实现。当前全仓排查**无生产调用者**(仅 `tests/recovery_acceptance.rs` 构造 `RecoveryContext`),故不可达、无实际漂移;wave-35 修订使 retry 侧保留文本增多,两者判据差集单调减小,未新增漂移。来源:L3-B 增量复审。
+  **验收条款**:二选一——删除该平行判据并收敛到 `retry.rs` 单一出口(**删除前必须先搜消费者**,沿用仓库停止线第 3 条),或补注释与契约测试锁定其可调用前提;若未来接线到生产路径,必须同时接入 URL 剥离,否则重开本卡。
+
 - `PA-119` pony-agent-core 结构化日志迁移（P2，Complexity C）
   说明：`crates/pony-agent-core` 目前无 tracing/log 依赖，诊断输出统一为裸 `eprintln!`（`history_commands.rs` 实测 12 处），不满足 `.dev-team/nfr-baseline.json` 的 `logging{format:json,trace_id_required}`。本次 PA-118 死锁修复按「最小闭包」原则**未**引入日志框架，改以显式豁免落盘（`logging_legacy_eprintln_exempt=true` + `logging_debt_ref="PA-119"`，见 `.dev-team/contract-matrix-deadlock.md` §3.1）。**到期条款：PA-119 完成时必须重跑 PA-118 波次的 L3-P 五问并关闭该豁免**（将 `logging_legacy_eprintln_exempt` 置 false 并重过 `nfr-lint.py --self-test`）。
 - `PA-115` 启动期 host-read 缺有界超时（P2，Complexity A）
