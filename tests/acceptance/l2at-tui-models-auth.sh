@@ -362,40 +362,47 @@ sleep 1
 tmux pipe-pane -t mouse "" 2>/dev/null
 tmux capture-pane -t mouse -p > "$RECEIPTS/b-default-screen.txt" 2>/dev/null
 
-# B1: raw startup stream must NOT contain mouse-enable sequences
-# (strip the initial shell echo: only inspect bytes emitted after the TUI's
-#  alternate-screen enter; simpler: check the whole file — the interactive shell
-#  does not emit mouse sequences anyway)
+# B1 (revised per lead): default startup raw stream MUST contain a mouse-enable
+# sequence (mouse capture on by default)
 if LC_ALL=C grep -aq $'\x1b\[?1000h' "$RECEIPTS/b-raw-full.bin" 2>/dev/null \
    || LC_ALL=C grep -aq $'\x1b\[?1002h' "$RECEIPTS/b-raw-full.bin" 2>/dev/null \
    || LC_ALL=C grep -aq $'\x1b\[?1003h' "$RECEIPTS/b-raw-full.bin" 2>/dev/null; then
-  bad "B1 mouse-enable sequence (?1000h/?1002h/?1003h) present at default startup"
+  ok "B1 mouse-enable sequence present at default startup (capture on by default)"
 else
-  ok "B1 no mouse-enable sequences at default startup"
+  bad "B1 no mouse-enable sequence at default startup (see $RECEIPTS/b-raw-full.bin)"
 fi
 
-# B2: F2 enables mouse capture; F2 again disables
+# B2 (revised): first F2 -> disable sequence; second F2 -> enable sequence
 tmux pipe-pane -t mouse "cat > '$RECEIPTS/b-raw-after-f2on.bin'"
 tmux send-keys -t mouse F2
 sleep 1.5
 tmux pipe-pane -t mouse "" 2>/dev/null
-if LC_ALL=C grep -aq $'\x1b\[?1000h' "$RECEIPTS/b-raw-after-f2on.bin" 2>/dev/null \
-   || LC_ALL=C grep -aq $'\x1b\[?1002h' "$RECEIPTS/b-raw-after-f2on.bin" 2>/dev/null; then
-  ok "B2a F2 emits mouse-enable sequence"
+if LC_ALL=C grep -aq $'\x1b\[?1000l' "$RECEIPTS/b-raw-after-f2on.bin" 2>/dev/null \
+   || LC_ALL=C grep -aq $'\x1b\[?1002l' "$RECEIPTS/b-raw-after-f2on.bin" 2>/dev/null \
+   || LC_ALL=C grep -aq $'\x1b\[?1003l' "$RECEIPTS/b-raw-after-f2on.bin" 2>/dev/null; then
+  ok "B2a first F2 emits mouse-disable sequence"
 else
-  bad "B2a F2 did not emit mouse-enable sequence (see $RECEIPTS/b-raw-after-f2on.bin)"
+  bad "B2a first F2 did not emit mouse-disable sequence (see $RECEIPTS/b-raw-after-f2on.bin)"
 fi
 
 tmux pipe-pane -t mouse "cat > '$RECEIPTS/b-raw-after-f2off.bin'"
 tmux send-keys -t mouse F2
 sleep 1.5
 tmux pipe-pane -t mouse "" 2>/dev/null
-if LC_ALL=C grep -aq $'\x1b\[?1000l' "$RECEIPTS/b-raw-after-f2off.bin" 2>/dev/null \
-   || LC_ALL=C grep -aq $'\x1b\[?1002l' "$RECEIPTS/b-raw-after-f2off.bin" 2>/dev/null \
-   || LC_ALL=C grep -aq $'\x1b\[?1003l' "$RECEIPTS/b-raw-after-f2off.bin" 2>/dev/null; then
-  ok "B2b second F2 emits mouse-disable sequence"
+if LC_ALL=C grep -aq $'\x1b\[?1000h' "$RECEIPTS/b-raw-after-f2off.bin" 2>/dev/null \
+   || LC_ALL=C grep -aq $'\x1b\[?1002h' "$RECEIPTS/b-raw-after-f2off.bin" 2>/dev/null \
+   || LC_ALL=C grep -aq $'\x1b\[?1003h' "$RECEIPTS/b-raw-after-f2off.bin" 2>/dev/null; then
+  ok "B2b second F2 emits mouse-enable sequence"
 else
-  bad "B2b second F2 did not emit mouse-disable sequence (see $RECEIPTS/b-raw-after-f2off.bin)"
+  bad "B2b second F2 did not emit mouse-enable sequence (see $RECEIPTS/b-raw-after-f2off.bin)"
+fi
+
+# B3: F2 toggles silently — no "鼠标捕获" text anywhere on screen
+tmux capture-pane -t mouse -p > "$RECEIPTS/b3-screen-after-f2.txt" 2>/dev/null
+if grep -q "鼠标捕获" "$RECEIPTS/b3-screen-after-f2.txt"; then
+  bad "B3 status bar shows 鼠标捕获 hint (must be silent)"
+else
+  ok "B3 F2 toggle is silent (no 鼠标捕获 text on screen)"
 fi
 tmux send-keys -t mouse Escape
 sleep 0.5

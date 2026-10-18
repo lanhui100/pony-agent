@@ -24,7 +24,7 @@ TUI 的 `/models` 之前只读 `providers.json` 里已配置的 `models` 数组�
 - 面板内 `r`/`R`：对当前 provider 无条件重拉；Normal 模式 `Ctrl+R` 打开面板并刷新（**不占用裸 `r`**，避免吞掉以 r 开头的输入）。
 - provider 解析统一走 `resolve_active_provider_id`（注册表 `selected_provider_id` → 首个 provider → 状态值命中校验），启动时把 `current_provider_id`/`model` 与注册表同步。
 - **解析顺序改为注册表优先**：`provider_id` 命中注册表即用 `registry.resolve_selection`（含 id 为 `ponyllm` 的情形，取注册表里的 base_url 与 `api_key_value`）；仅当注册表完全没有该 provider 时才回落到「gateway_url + 环境变量 key」兜底——修复「选完模型发消息 401 unauthorized」。
-- 鼠标：默认不捕获鼠标（终端原生拖选/复制可用），`F2` 切换捕获以启用滚轮；切换结果写入 `status_text`，`--help` 同步键位说明。
+- 鼠标：**默认捕获**（滚轮可用）；`F2` 静默切换释放捕获，以便用终端原生拖选/复制文本（不写状态栏、不推消息），`--help` 保留键位说明。
 
 ### 方案 C（采纳，伴随）：回环地址强制直连
 

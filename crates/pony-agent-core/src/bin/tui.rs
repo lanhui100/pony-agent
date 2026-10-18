@@ -231,7 +231,7 @@ pub struct TuiState {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub status_text: String,
-    /// wave-36b：鼠标捕获开关（默认关，F2 切换）。
+    /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
     pub scroll_offset: u16,
     pub auto_scroll: bool,
@@ -270,7 +270,7 @@ impl Default for TuiState {
             total_input_tokens: 0,
             total_output_tokens: 0,
             status_text: "Ready".to_string(),
-            mouse_capture: false,
+            mouse_capture: true,
             scroll_offset: 0,
             auto_scroll: true,
             mode: InteractionMode::Normal,
@@ -2205,8 +2205,8 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // wave-36b：默认不捕获鼠标——让终端原生拖选/复制可用；F2 可切换开启（滚轮用）。
-    execute!(stdout, EnterAlternateScreen)?;
+    // wave-36b：默认开启鼠标捕获（滚轮可用）；F2 可切换关闭（终端原生拖选/复制）。
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2361,11 +2361,6 @@ fn tui_event_loop(
                         } else {
                             let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
                         }
-                        state.status_text = if state.mouse_capture {
-                            "鼠标捕获：开（滚轮可用）".to_string()
-                        } else {
-                            "鼠标捕获：关（可用鼠标选择文本）".to_string()
-                        };
                         dirty = true;
                         continue;
                     }
@@ -3085,7 +3080,7 @@ fn cli_help_string() -> String {
         "pony {} — 交互式 TUI Agent\n\n\
 用法: pony [选项]\n\n\
 选项:\n  --version, -V   显示版本与二进制路径后退出\n  --help, -h      显示本帮助后退出\n  --doctor        终端环境自检（TTY/颜色/尺寸/locale/日志目录/PATH 冲突）\n\n\
-交互键位:\n  Enter           发送输入\n  Alt+Enter       输入内换行\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  F2              切换鼠标捕获（默认关，可用鼠标选择文本）\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
+交互键位:\n  Enter           发送输入\n  Alt+Enter       输入内换行\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  F2              切换鼠标捕获（默认开；关闭后可用鼠标选择文本）\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
         env!("CARGO_PKG_VERSION")
     )
 }

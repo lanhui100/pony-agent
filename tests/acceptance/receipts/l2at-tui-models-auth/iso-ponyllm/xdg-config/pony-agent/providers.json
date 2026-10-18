@@ -4,7 +4,7 @@
       "id": "ponyllm",
       "name": "PonyLlm Registry",
       "protocol": "openai-completions",
-      "base_url": "http://127.0.0.1:47807/v1",
+      "base_url": "http://127.0.0.1:44739/v1",
       "auth_type": "bearer",
       "api_key_env_var": "PONYLLM_REGISTRY_API_KEY",
       "secret_ref": "provider/ponyllm/api-key",
@@ -16,7 +16,7 @@
         {
           "protocol": "openai-completions",
           "enabled": true,
-          "baseUrl": "http://127.0.0.1:47807/v1",
+          "baseUrl": "http://127.0.0.1:44739/v1",
           "authType": "bearer"
         },
         {

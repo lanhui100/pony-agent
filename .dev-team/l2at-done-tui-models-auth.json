@@ -2,33 +2,32 @@
   "ticket": "l2at-tui-models-auth",
   "agent": "test-agent",
   "date": "2026-10-18",
-  "status": "red-phase (B2 red: F2 nested inside CONTROL-modifier branch — bare F2 unreachable)",
+  "status": "green",
   "level": "L2-T (strict auth/model passthrough + mouse capture toggle)",
   "test_file": "tests/acceptance/l2at-tui-models-auth.sh",
   "frozen": true,
   "verify_only": true,
   "binary_under_test": "target/debug/pony",
-  "suite_exit_code": 1,
+  "suite_exit_code": 0,
   "summary": {
-    "pass": 6,
-    "fail": 2
+    "pass": 9,
+    "fail": 0
   },
   "cases": {
-    "A0_strict_fake_server": "PASS (401 unless Bearer test-dummy-key + model=alpha-1)",
+    "A0_strict_fake_server": "PASS",
     "A1_no_unauthorized_on_screen": "PASS",
-    "A2_server_receipt_model_and_auth": "PASS (chat body model=alpha-1, Authorization: Bearer test-dummy-key)",
-    "B1_no_mouse_enable_at_startup": "PASS (fixed by executor)",
-    "B2a_F2_enables_mouse": "FAIL (red: F2 handler at tui.rs:2673 nested inside the CONTROL-modifier edit-keys branch; bare F2 never reaches it — manual repro: only cursor blink in raw stream)",
-    "B2b_F2_disables_mouse": "FAIL (red: same root cause)",
+    "A2_server_receipt_model_and_auth": "PASS",
     "A3a_ponyllm_registry_first_no_unauthorized": "PASS",
-    "A3b_ponyllm_server_receipt": "PASS (model=alpha-1 + Bearer test-dummy-key; no PONYLLM_API_KEY env)"
+    "A3b_ponyllm_server_receipt": "PASS",
+    "B1_mouse_on_at_startup": "PASS (revised: capture on by default)",
+    "B2a_first_F2_disables": "PASS (revised)",
+    "B2b_second_F2_enables": "PASS (revised)",
+    "B3_F2_silent_no_status_text": "PASS"
   },
-  "green_conditions": [
-    "B2: move F(2) handling out of the CONTROL branch so bare F2 toggles EnableMouseCapture/DisableMouseCapture"
-  ],
+  "green_conditions": [],
   "method": "real PTY via tmux + pipe-pane raw stream analysis; strict-mode local server logging headers/body per request",
   "receipts_dir": "tests/acceptance/receipts/l2at-tui-models-auth/",
   "notes": [
-    "A3 added per lead: ponyllm registry-first verified (PONYLLM_API_KEY unset, chat reaches local strict server with alpha-1 + test-dummy-key)."
+    "B contract revised per lead: capture on by default, F2 silent toggle (off then on), no 鼠标捕获 status text. 2 consecutive green runs 9/9."
   ]
 }

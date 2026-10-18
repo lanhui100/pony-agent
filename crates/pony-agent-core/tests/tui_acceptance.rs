@@ -915,9 +915,9 @@ fn test_resolver_registry_first_for_ponyllm() {
 #[test]
 fn test_mouse_capture_default_off_and_toggle() {
     let mut state = tui::TuiState::default();
-    assert!(!state.mouse_capture, "默认不捕获鼠标");
+    assert!(state.mouse_capture, "默认开启鼠标捕获");
     state.mouse_capture = !state.mouse_capture;
-    assert!(state.mouse_capture);
+    assert!(!state.mouse_capture, "F2 切换后关闭");
     state.mouse_capture = !state.mouse_capture;
-    assert!(!state.mouse_capture);
+    assert!(state.mouse_capture, "再切回开启");
 }
