@@ -1,7 +1,7 @@
-  pony  ·  pony-agent          gemini-3.8-flash  ·  cc8faa
+  pony  ·  pony-agent          gemini-3.8-flash  ·  f801ff
   ────────────────────────────────────────────────────────
 
-  pony  ·  v0.1.125
+                                 /home/dm/pony-agent
 
   终端里的自主智能体。
 

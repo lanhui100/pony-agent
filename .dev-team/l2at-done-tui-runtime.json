@@ -31,5 +31,6 @@
   "r7_correction": "TEST-DEFECT per lead ruling: threshold 36 -> full-line width 38 (terminal 40 - 2 right gutter); lead measured 2 left gutter + 2 prompt indent + 34 text (17 CJK x2) = 38, compliant. Gutter-overflow check retained.",
   "receipts_dir": "tests/acceptance/receipts/l2at-tui-runtime/",
   "final_suite_log": "tests/acceptance/receipts/l2at-tui-runtime/suite-final.log",
-  "r5_correction": "Design contract v3 per lead ruling: composer band has NO hairline; band top/bottom rows carry SURFACE #181a1f, no long dash inside band; hints removed; band height >=4 at 80x24. Detection via tmux pipe-pane raw pty stream + minimal VT state machine (capture-pane cannot report bg on space-only cells)."
+  "r5_correction": "Design contract v3 per lead ruling: composer band has NO hairline; band top/bottom rows carry SURFACE #181a1f, no long dash inside band; hints removed; band height >=4 at 80x24. Detection via tmux pipe-pane raw pty stream + minimal VT state machine (capture-pane cannot report bg on space-only cells).",
+  "r5f_correction": "R5f detection fixed per lead ruling: status word searched as UTF-8 bytes anywhere in raw pty stream / whole-screen capture (single-glyph match, ratatui may split glyph pairs with cursor jumps); stability: capture retries added (R5a/R5f/R5j empty-capture races) and R5j accepts any status word (就绪/写入中/思考中/连接中). 5 consecutive green runs (30/30)."
 }

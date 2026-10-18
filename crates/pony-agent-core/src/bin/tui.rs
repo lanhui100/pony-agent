@@ -794,26 +794,105 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
+/// 彩色像素 pony 头部（参考 Antigravity CLI init banner）：
+/// 左侧用半块字符拼一匹 13×4 像素的彩虹渐变小马，右侧是版本/模型/工作区信息列；
+/// 整块作为会话流的第一条消息，随对话向上滚动。
+fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
+    const W: usize = 13;
+    // 4 行像素掩码：马头与鬃毛（row0-1）、躯干（row2）、四腿（row3）。
+    const MASK: [[bool; W]; 4] = [
+        [false, false, false, true, true, true, false, false, false, false, false, false, false],
+        [false, true, true, true, true, true, true, true, true, true, false, false, false],
+        [true, true, true, true, true, true, true, true, true, true, true, true, false],
+        [true, false, true, false, true, false, true, false, true, false, true, true, false],
+    ];
+    // 渐变停靠点（暖 → 冷）。
+    const STOPS: [(f32, u8, u8, u8); 7] = [
+        (0.00, 252, 208, 96),
+        (0.17, 248, 152, 72),
+        (0.33, 238, 112, 92),
+        (0.50, 196, 96, 148),
+        (0.67, 150, 100, 216),
+        (0.83, 104, 122, 240),
+        (1.00, 84, 176, 250),
+    ];
+    let gradient = |col: usize| -> (u8, u8, u8) {
+        let t = col as f32 / (W - 1) as f32;
+        let mut lo = STOPS[0];
+        let mut hi = STOPS[STOPS.len() - 1];
+        for pair in STOPS.windows(2) {
+            if t >= pair[0].0 && t <= pair[1].0 {
+                lo = pair[0];
+                hi = pair[1];
+                break;
+            }
+        }
+        let span = (hi.0 - lo.0).max(1e-6);
+        let k = ((t - lo.0) / span).clamp(0.0, 1.0);
+        let mix = |a: u8, b: u8| -> u8 { (a as f32 + (b as f32 - a as f32) * k).round() as u8 };
+        (mix(lo.1, hi.1), mix(lo.2, hi.2), mix(lo.3, hi.3))
+    };
+
+    // 半块坐标：row 0..2 → 上半块带；row 2..4 → 下半块带。
+    let half = |rows: [usize; 2]| -> Line<'static> {
+        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+        for (col, &below_mask) in MASK[rows[1]].iter().enumerate() {
+            let above = MASK[rows[0]][col];
+            let below = below_mask;
+            let c = gradient(col);
+            let fg = ratatui::style::Color::Rgb(c.0, c.1, c.2);
+            match (above, below) {
+                (true, true) => spans.push(Span::styled("▀", Style::default().fg(fg).bg(fg))),
+                (true, false) => {
+                    spans.push(Span::styled("▀", Style::default().fg(fg)));
+                    spans.push(Span::raw(" "));
+                }
+                (false, true) => spans.push(Span::styled(" ", Style::default().bg(fg))),
+                (false, false) => spans.push(Span::raw("  ")),
+            }
+        }
+        // 固定输出全部 13 列（含无背景占位），保证上下两条带严格等宽对齐
+        Line::from(spans)
+    };
+
+    let top_band = half([0, 1]);
+    let bottom_band = half([2, 3]);
+    let gap = Span::raw("   ");
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut top_row = top_band.spans;
+    top_row.push(gap.clone());
+    top_row.push(Span::styled(
+        "pony",
+        Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
+    ));
+    top_row.push(Span::styled(
+        format!(" v{}", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(theme::INK),
+    ));
+    lines.push(Line::from(top_row));
+
+    let mut mid_row = bottom_band.spans;
+    mid_row.push(gap);
+    mid_row.push(Span::styled(
+        format!("{} ({})", state.model, state.current_provider_id),
+        Style::default().fg(theme::MUTED),
+    ));
+    lines.push(Line::from(mid_row));
+    // 第 3 行：工作区，与信息列左对齐（马身 2 前导 + 13 列 ×2 = 28，加 3 空格间隙）
+    lines.push(Line::from(vec![
+        Span::raw(" ".repeat(31)),
+        Span::styled(state.workspace.display().to_string(), Style::default().fg(theme::MUTED)),
+    ]));
+    lines
+}
+
 pub fn ascii_logo() -> Vec<Line<'static>> {
+    // 空态由 ui() 组合：pony_banner_lines(state) + 引导块；
+    // 此函数保留独立可测的引导块。
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "pony",
-                Style::default()
-                    .fg(theme::INK)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  ·  v{}", env!("CARGO_PKG_VERSION")),
-                faint(),
-            ),
-        ]),
-        blank(),
-        Line::from(Span::styled(
-            "终端里的自主智能体。",
-            Style::default().fg(theme::MUTED),
-        )),
-        blank(),
         Line::from(Span::styled("描述一个任务开始，或输入命令：", ink_soft())),
         blank(),
     ];
@@ -1546,8 +1625,14 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     if state.messages.is_empty() {
-        let splash = ascii_logo();
-        // 空态不是「没内容」，而是留白构图：按正文区 1/3 高度锚定，避免顶部挤、底部空。
+        let mut splash: Vec<Line<'static>> = Vec::new();
+        splash.push(blank());
+        splash.extend(pony_banner_lines(state));
+        splash.push(blank());
+        splash.push(Line::from(Span::styled("终端里的自主智能体。", Style::default().fg(theme::MUTED))));
+        splash.push(blank());
+        splash.extend(ascii_logo());
+        // 空态留白构图：按正文区 1/3 高度锚定，避免顶部挤、底部空。
         let top_pad = (chat_h as usize).saturating_sub(splash.len()) / 3;
         for _ in 0..top_pad {
             lines.push(blank());

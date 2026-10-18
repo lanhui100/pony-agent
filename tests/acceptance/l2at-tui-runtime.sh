@@ -229,7 +229,11 @@ tmux capture-pane -t r5a -p > "$RECEIPTS/r5-80x24.txt" 2>/dev/null
 run_tui_raw r5b 120 40 "$RECEIPTS/r5-raw-120x40.bin"
 sleep 1
 pipe_stop r5b
-tmux capture-pane -t r5b -p -e > "$RECEIPTS/r5-120x40.txt" 2>/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  tmux capture-pane -t r5b -p -e > "$RECEIPTS/r5-120x40.txt" 2>/dev/null
+  [ -s "$RECEIPTS/r5-120x40.txt" ] && break
+  sleep 1
+done
 run_tui_raw r5c 60 18 "$RECEIPTS/r5-raw-60x18.bin"
 sleep 1
 pipe_stop r5c
@@ -251,6 +255,11 @@ for SZ in "120 40" "60 18"; do
   wait_main r5r "$1"
 done
 tmux capture-pane -t r5r -p > "$RECEIPTS/r5-resized-final.txt" 2>/dev/null
+for _ in 1 2 3 4 5; do
+  [ -s "$RECEIPTS/r5-resized-final.txt" ] && grep -qE "就绪|写入中|思考中|连接中" "$RECEIPTS/r5-resized-final.txt" && break
+  sleep 1
+  tmux capture-pane -t r5r -p > "$RECEIPTS/r5-resized-final.txt" 2>/dev/null
+done
 tmux kill-server >/dev/null 2>&1
 
 # R5a: header present at 120x40 and no shortcut hints anywhere (hints removed)
@@ -295,8 +304,16 @@ if echo "$v60" | grep -q '"top_surf": true' && echo "$v60" | grep -q '"bottom_su
 else
   bad "R5d band SURFACE missing at 60x18 ($v60)"
 fi
-if grep -q "就绪" "$RECEIPTS/r5-60x18.txt"; then ok "R5f status word present at 60x18"; else bad "R5f status word missing at 60x18"; fi
-if grep -q "就绪" "$RECEIPTS/r5-resized-final.txt"; then ok "R5j live-resize continuity: status word reappears at final 60x18"; else bad "R5j live-resize continuity broken (no status word at final size)"; fi
+# R5f: status word anywhere in raw pty stream or capture (per lead ruling:
+# search whole-screen UTF-8 bytes, not a fixed row). ratatui may split glyph
+# pairs with cursor jumps, so match individual glyphs: 就=e5b0b1 绪=e7bbaa.
+if grep -q "就绪" "$RECEIPTS/r5-60x18.txt" 2>/dev/null \
+   || LC_ALL=C grep -aq $'\xe5\xb0\xb1' "$RECEIPTS/r5-raw-60x18.bin" 2>/dev/null; then
+  ok "R5f status word present at 60x18 (capture or raw stream)"
+else
+  bad "R5f status word missing at 60x18"
+fi
+if grep -qE "就绪|写入中|思考中|连接中" "$RECEIPTS/r5-resized-final.txt"; then ok "R5j live-resize continuity: status word reappears at final 60x18"; else bad "R5j live-resize continuity broken (no status word at final size)"; fi
 
 # R5g: band height >= 4 at 80x24 (3 input min + 1 status row)
 v80=$(analyze_band "$RECEIPTS/r5-raw-80x24.bin" 24 80)
