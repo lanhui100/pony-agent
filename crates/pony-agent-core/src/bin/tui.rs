@@ -231,6 +231,8 @@ pub struct TuiState {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub status_text: String,
+    /// wave-36b：鼠标捕获开关（默认关，F2 切换）。
+    pub mouse_capture: bool,
     pub scroll_offset: u16,
     pub auto_scroll: bool,
     pub mode: InteractionMode,
@@ -268,6 +270,7 @@ impl Default for TuiState {
             total_input_tokens: 0,
             total_output_tokens: 0,
             status_text: "Ready".to_string(),
+            mouse_capture: false,
             scroll_offset: 0,
             auto_scroll: true,
             mode: InteractionMode::Normal,
@@ -926,11 +929,11 @@ pub fn ascii_logo() -> Vec<Line<'static>> {
     lines
 }
 
-struct DynamicProviderResolver {
-    gateway_url: String,
-    api_key: Option<String>,
-    model: String,
-    registry: ProviderRegistryStore,
+pub struct DynamicProviderResolver {
+    pub gateway_url: String,
+    pub api_key: Option<String>,
+    pub model: String,
+    pub registry: ProviderRegistryStore,
 }
 
 impl ProviderSelectionResolver for DynamicProviderResolver {
@@ -939,10 +942,17 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
         provider_id: Option<&str>,
         model_id: Option<&str>,
     ) -> ResolvedProviderSelection {
+        // wave-36b（修订）：注册表优先——只要 provider_id 能在注册表命中（含 "ponyllm"），
+        // 一律走 registry.resolve_selection（base_url/api_key_value 全部来自注册表配置）；
+        // 仅当注册表无该 provider 时才回落 gateway_url + 环境变量 key 的兜底分支。
+        // 旧实现 pid=="ponyllm" 时强制硬编码分支，忽略注册表 key/base_url → 必然 401。
         if let Some(pid) = provider_id {
-            if pid != "ponyllm" {
+            let view = self.registry.load_view();
+            if view.providers.iter().any(|p| p.id == pid) {
                 return self.registry.resolve_selection(Some(pid), model_id);
             }
+        } else if self.registry.load_view().selected_provider_id.is_some() {
+            return self.registry.resolve_selection(None, model_id);
         }
 
         let mut base = self.gateway_url.trim_end_matches('/').to_string();
@@ -2195,7 +2205,8 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // wave-36b：默认不捕获鼠标——让终端原生拖选/复制可用；F2 可切换开启（滚轮用）。
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2341,6 +2352,24 @@ fn tui_event_loop(
                     }
                 }
                 UiEvent::InputKey(key) => {
+                    // wave-36b：F2 顶层处理（任意模式可用）：裸键切换鼠标捕获，
+                    // 默认关（终端原生拖选/复制可用）；与退出恢复路径统一 DisableMouseCapture 不冲突。
+                    if key.code == KeyCode::F(2) {
+                        state.mouse_capture = !state.mouse_capture;
+                        if state.mouse_capture {
+                            let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
+                        } else {
+                            let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+                        }
+                        state.status_text = if state.mouse_capture {
+                            "鼠标捕获：开（滚轮可用）".to_string()
+                        } else {
+                            "鼠标捕获：关（可用鼠标选择文本）".to_string()
+                        };
+                        dirty = true;
+                        continue;
+                    }
+
                     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                         // 有草稿时先清空，避免一次误触丢掉整段输入；空输入才真正退出。
                         if !state.input_buffer.is_empty() && !state.is_streaming {
@@ -2815,7 +2844,10 @@ fn tui_event_loop(
 
                                 let cp = control_plane.clone();
                                 let sess_id = state.session_id.clone();
-                                let prov_id = state.current_provider_id.clone();
+                                // wave-36b：发送口径与 /models 面板来源一致（resolve_active_provider_id），
+                                // 避免 state.current_provider_id 漂移导致 base_url/key 错配 401。
+                                let prov_id = resolve_active_provider_id(&state)
+                                    .unwrap_or_else(|| state.current_provider_id.clone());
                                 let mdl_id = state.model.clone();
                                 let tx_stream = tx.clone();
 
@@ -3053,7 +3085,7 @@ fn cli_help_string() -> String {
         "pony {} — 交互式 TUI Agent\n\n\
 用法: pony [选项]\n\n\
 选项:\n  --version, -V   显示版本与二进制路径后退出\n  --help, -h      显示本帮助后退出\n  --doctor        终端环境自检（TTY/颜色/尺寸/locale/日志目录/PATH 冲突）\n\n\
-交互键位:\n  Enter           发送输入\n  Alt+Enter       输入内换行\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
+交互键位:\n  Enter           发送输入\n  Alt+Enter       输入内换行\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  F2              切换鼠标捕获（默认关，可用鼠标选择文本）\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
         env!("CARGO_PKG_VERSION")
     )
 }

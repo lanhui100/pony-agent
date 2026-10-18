@@ -842,3 +842,82 @@ fn test_resolve_active_provider_three_branches() {
     assert!(result.is_some(), "缺失注册表回落首个注入 provider: {result:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// wave-36b：注册表优先解析——ponyllm 也可来自注册表（base_url/api_key_value），
+// 兜底分支仅在注册表缺失该 provider 时使用。
+#[test]
+fn test_resolver_registry_first_for_ponyllm() {
+    use pony_agent_core::agent::config::ProviderSelectionResolver;
+    use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
+    use tui::DynamicProviderResolver;
+
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("tui-resolver-{}", pid));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _g = REGISTRY_ENV_LOCK.lock().unwrap();
+    let saved = std::env::var("XDG_CONFIG_HOME").ok();
+    std::env::set_var("XDG_CONFIG_HOME", dir.join("xdg-config"));
+    std::fs::create_dir_all(dir.join("xdg-config/pony-agent")).unwrap();
+
+    let store = pony_agent_core::agent::config::ProviderRegistryStore::with_path(dir.join("xdg-config/pony-agent/providers.json"));
+    let mut view = store.load_view();
+    view.providers = vec![pony_agent_core::agent::config::ProviderConfigView {
+        id: "ponyllm".to_string(),
+        name: "ponyllm-custom".to_string(),
+        protocol: ProviderProtocol::OpenAiCompletions,
+        base_url: "http://127.0.0.1:47777/v1".to_string(),
+        auth_type: ProviderAuthType::Bearer,
+        api_key_env_var: "PONYLLM_API_KEY".to_string(),
+        api_key_value: "registry-secret".to_string(),
+        api_key_present: true,
+        supported_protocols: vec![],
+        endpoints: vec![],
+        models: vec![pony_agent_core::agent::config::ProviderModelConfig {
+            id: "custom-model".to_string(),
+            name: "custom-model".to_string(),
+            model: "custom-model".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 8192,
+            capability_preset: pony_agent_core::agent::config::ProviderCapabilityPreset::Auto,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            protocol: Some(ProviderProtocol::OpenAiCompletions),
+            base_url: None,
+            capabilities: Default::default(),
+        }],
+        selected_model_id: Some("custom-model".to_string()),
+    }];
+    view.selected_provider_id = Some("ponyllm".to_string());
+    store.save_view(view).unwrap();
+
+    let resolver = DynamicProviderResolver {
+        gateway_url: "http://gateway.example:9999".to_string(),
+        api_key: None, // 环境变量未设
+        model: "fallback-model".to_string(),
+        registry: pony_agent_core::agent::config::ProviderRegistryStore::new(),
+    };
+    let sel = resolver.resolve_provider_selection(Some("ponyllm"), Some("custom-model"));
+
+    assert_eq!(sel.base_url, "http://127.0.0.1:47777/v1", "base_url 必须来自注册表而非 gateway");
+    // env var 名由 save_view 按 provider.name 归一化派生（derive_env_var_name），属产品语义
+    assert!(sel.api_key_env_var.starts_with("PONYLLM"));
+    assert_eq!(sel.api_key.as_deref(), Some("registry-secret"), "api_key 必须来自注册表 api_key_value");
+    assert_eq!(sel.model, "custom-model");
+
+    match saved {
+        Some(p) => std::env::set_var("XDG_CONFIG_HOME", p),
+        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// wave-36b：mouse_capture 默认关 + 切换取反（纯状态层）。
+#[test]
+fn test_mouse_capture_default_off_and_toggle() {
+    let mut state = tui::TuiState::default();
+    assert!(!state.mouse_capture, "默认不捕获鼠标");
+    state.mouse_capture = !state.mouse_capture;
+    assert!(state.mouse_capture);
+    state.mouse_capture = !state.mouse_capture;
+    assert!(!state.mouse_capture);
+}
