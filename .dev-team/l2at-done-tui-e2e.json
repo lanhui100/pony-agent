@@ -1,0 +1,32 @@
+{
+  "ticket": "l2at-tui-e2e",
+  "agent": "test-agent",
+  "date": "2026-10-18",
+  "status": "green",
+  "level": "L2 (functional contract L2-T + adversarial L2-AT)",
+  "test_file": "tests/acceptance/l2at-tui-e2e.sh",
+  "frozen": true,
+  "verify_only": true,
+  "binary_under_test": "target/debug/pony",
+  "suite_exit_code": 0,
+  "summary": { "pass": 11, "fail": 0 },
+  "cases": {
+    "T1a_non_tty_no_panic": "PASS",
+    "T1b_non_tty_diagnostic": "PASS",
+    "T1c_no_terminal_pollution": "PASS",
+    "T2a_pty_enter_alt_screen": "PASS",
+    "T2b_pty_no_panic_exit": "PASS [DEGRADED-ENV: pty master destroyed externally, only exit asserted]",
+    "T2c_hup_to_pony_restore_terminal": "PASS (?1049l emitted on graceful teardown)",
+    "T2c_at_no_panic_on_hup": "PASS",
+    "T2c_at_stty_sane_recoverable": "PASS",
+    "AT1a_adversarial_env_no_panic": "PASS",
+    "AT1b_stty_sane_recoverable": "PASS",
+    "AT2_readonly_tui_logs_no_crash": "PASS"
+  },
+  "notes": [
+    "TEST-DEFECT fixed (lead-adjudicated): binary resolution now prefers fresh target/debug|release/pony over stale artifacts and installed binary.",
+    "T2 degraded case: kill -INT to script pty master is external pty destruction — only process exit asserted; primary teardown asserted via T2c (kill -HUP pony pid, script alive).",
+    "executor diagnostic logging to tui-logs retained per lead ruling (file-only, no screen pollution)."
+  ],
+  "receipts_dir": "tests/acceptance/receipts/l2at-tui-e2e/"
+}

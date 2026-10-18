@@ -1,0 +1,15 @@
+{
+  "sessions": {},
+  "attachmentAssets": {},
+  "sessionAttachmentIndex": {},
+  "mcpSourceSnapshots": {},
+  "skillSourceSnapshots": {},
+  "workspaces": [
+    {
+      "id": "default",
+      "name": "默认工作区",
+      "rootPath": "/home/dm/pony-agent/tests/acceptance/receipts/l2at-tui-e2e/at2-home/pony_agent"
+    }
+  ],
+  "pathAuthorizations": []
+}

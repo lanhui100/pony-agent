@@ -25,10 +25,32 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
     Frame, Terminal,
 };
+use std::io::IsTerminal;
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+// T2c：SIGINT/SIGTERM 信号到达时不直接杀死进程，而是置位该标志；
+// 主循环每个 tick（≤16ms）检测后正常 break，走统一的终端恢复保证器。
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_shutdown_signal(sig: libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    eprintln!("[pony-tui] shutdown signal {} received", sig);
+}
+
+fn install_shutdown_signal_handlers() {
+    unsafe {
+        libc::signal(libc::SIGINT, handle_shutdown_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handle_shutdown_signal as libc::sighandler_t);
+        // pty 会话被关闭（如 `script` 收到 SIGINT 后退出）时，TUI 进程会收到 SIGHUP；
+        // 同样走优雅退出路径以执行终端恢复，而不是默认终止并留下 alternate screen。
+        libc::signal(libc::SIGHUP, handle_shutdown_signal as libc::sighandler_t);
+    }
+}
+
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1391,6 +1413,16 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
             std::env::set_var("COLORTERM", "truecolor");
         }
     }
+    // wave-14：非 TTY 环境（stdin 已关闭 / tmux 非交互管道）下 enable_raw_mode 会报
+    // "No such device or address (os error 6)" 且诊断信息会被后续 dup2 吞进日志文件，用户侧零输出。
+    // 必须在 dup2 重定向之前提前优雅退出并直接向真实 stderr 打印诊断信息。
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        eprintln!(
+            "pony TUI: stdin/stdout 不是交互式终端，TUI 无法启动。\n请在真实终端中运行 `pony`，或使用 `ponycli`（非交互 CLI 入口）。"
+        );
+        std::process::exit(1);
+    }
+
     // 将底层 Rust 内核对 stderr/stdout 的日志直接重定向到文件或忽略，
     // 避免 [pony-runtime]、[pony-provider] 等原生 println/eprintln 打印污染 crossterm 屏幕，
     // 防止全屏 TUI 界面被破坏退化为终端滚屏输出。
@@ -1419,10 +1451,35 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = TuiState::default();
+    let state = TuiState::default();
     let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
 
     let (tx, rx): (Sender<UiEvent>, Receiver<UiEvent>) = channel();
+
+    // T2c：无论主循环以何种方式退出（Ctrl-C、/quit、错误 `?` 传播、panic），
+    // 都必须恢复终端（disable raw mode + LeaveAlternateScreen + DisableMouseCapture + 光标可见）。
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui_event_loop(&mut terminal, state, control_plane, rx, tx)
+    }));
+
+    eprintln!("[pony-tui] running terminal restore (T2c)");
+    let _ = disable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = terminal.show_cursor();
+
+    match result {
+        Ok(inner) => inner,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn tui_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    mut state: TuiState,
+    control_plane: Arc<pony_agent_core::agent::control_plane::HostControlPlane>,
+    rx: Receiver<UiEvent>,
+    tx: Sender<UiEvent>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let current_turn_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
 
     // 键盘与鼠标事件轮询线程
@@ -1459,8 +1516,13 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut last_tick_instant = std::time::Instant::now();
+    install_shutdown_signal_handlers();
 
     loop {
+        // T2c：SIGINT/SIGTERM 置位后优雅退出主循环，走统一的终端恢复路径。
+        if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            break;
+        }
         // 当处于流式思考状态时，按 80ms 节奏驱动 ASCII Spinner 动态旋转
         if state.is_streaming && last_tick_instant.elapsed() >= Duration::from_millis(80) {
             state.spinner_tick = state.spinner_tick.wrapping_add(1);
@@ -1973,10 +2035,7 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-    terminal.show_cursor()?;
-
+    // 终端恢复已统一由 run_tui 的 T2c 保证器执行（catch_unwind 外层）。
     Ok(())
 }
 
