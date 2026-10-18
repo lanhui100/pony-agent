@@ -1,0 +1,80 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "lock_acquisition_timeout_ms": 2000,
+  "deadlock_watchdog_timeout_ms": 5000,
+  "lock_forbidden_calls": [
+    "resolve_graph_run_for_retrieval",
+    "load_graph_run",
+    "load_execution_checkpoint",
+    "load_active_graph_run_for_session"
+  ],
+  "logging": {
+    "format": "json",
+    "trace_id_required": true,
+    "trace_id": true
+  },
+  "logging_scope": "new_structured_logging_surface_only",
+  "logging_legacy_eprintln_exempt": true,
+  "logging_debt_ref": "PA-119",
+  "logging_eprintln_exempt_scope": "existing_style_non_json_lock_poison_recovery_diagnostics",
+  "logging_eprintln_exempt_covers_new_lines": 1,
+  "logging_compliance_claimed": false,
+  "resource_release": [
+    "bounded_queue",
+    "max_queue_capacity_1024",
+    "fire_and_forget",
+    "worker_thread_shutdown",
+    "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
+    "wave9_job_handle_close_on_terminate_success",
+    "wave9_suspended_process_resume_fail_closed_cleanup"
+  ],
+  "wave36_plan_execution_approval": {
+    "host_injected_only": true,
+    "injection_surface": [
+      "DispatchContext.plan_execution_approval",
+      "TurnInput.plan_execution_approval"
+    ],
+    "model_arguments_are_not_evidence": true,
+    "binding": [
+      "session_id",
+      "plan_id"
+    ],
+    "ttl_required": true,
+    "approval_ttl_max_ms": 300000,
+    "ttl_comparison": "now_ms < expires_at_ms (half-open)",
+    "one_shot": true,
+    "no_session_wide_grant": true,
+    "clock": "RuntimeClock (injectable; SystemClock in production)",
+    "deny_code_on_missing_or_mismatched_or_expired": "plan_execution_approval_required",
+    "unlocks": [
+      "draft_to_executing_transition_start_execution"
+    ],
+    "does_not_unlock": [
+      "ordinary_write_tools",
+      "execute_tools",
+      "plan_content_mutations"
+    ],
+    "draft_write_gate_still_denies": true,
+    "completing_step_transition_gated": "contract C-141-8 (pending Lead adjudication)",
+    "added_network_or_lock_waits": 0,
+    "nfr_note": "审批校验为纯内存判定，不新增外部调用/锁等待；TTL 最大 300000ms 仅约束宿主签发证据，不构成阻塞等待"
+  },
+  "wave36_flake_determinism": {
+    "mock_server_finish_timeout_ms": 5000,
+    "mock_server_finish_timeout_must_stay_leq_deadlock_watchdog": true,
+    "forbidden_masking": [
+      "relax classify hint tables",
+      "increase MOCK_SERVER_FINISH_TIMEOUT"
+    ],
+    "full_lib_rounds_required": 50,
+    "fixed_sleep_for_mock_readiness_forbidden": true,
+    "controlled_retry_max": 2
+  }
+}
