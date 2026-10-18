@@ -1,0 +1,14 @@
+PA-140 CI run receipt (wave-36, branch wave36/pa138-145)
+run_id=39132384596
+url=https://github.com/lanhui100/pony-agent/actions/runs/39132384596
+head_sha=aa8e3e57565757f0ae05358ede6327ee50584942
+core-platform-check (ubuntu-latest): success — step "Core 非 Windows lib 单元测试（Linux-only）" executed
+  test result: ok. 1064 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.17s
+core-platform-check (macos-latest): success
+verify (windows-latest): fail — PRE-EXISTING on main (run 39103198486 @1262d22 also failed at same step,
+  "Core 单元与集成测试（含 Windows Job 生命周期）"; base failures include agent::hook_commands::tests::*,
+  agent::mcp_client::tests::* (windows-only spawn paths). Windows-only wave-36 delta is 0 (all changes
+  platform-neutral or Linux-verified); Windows failures are tracked as pre-existing platform debt, not
+  wave-36 regressions. Verification: failures list diff vs main run shows wave-36 adds 0 new Windows
+  failures in classifier/policy paths (retry/provider classifier tests that were red on main now pass).
+PR: https://github.com/lanhui100/pony-agent/pull/2 (draft, CI gate verification only)

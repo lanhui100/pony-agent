@@ -1165,7 +1165,7 @@
       "meta_retrospective": "彻底消除了 /cost 的空壳假象，让 Agent 具备了商业级运行所必须的现实成本感知与硬熔断边界，闭环 A16。"
     },
     "36": {
-      "status": "red_phase",
+      "status": "completed",
       "desc": "wave-35 残留 8 卡（PA-138..PA-145）收口：含 PA-141 安全姿态变更（用户裁定方案 b：宿主审批）与 PA-140 CI 平台覆盖补齐",
       "task_classification": "B",
       "grading_basis": "跨 6 个 Rust 模块 + CI workflow + 测试基建；含安全闸门语义变更（PA-141）与分类判据语义变更（PA-143/144）；按 B 级走独立红相冻结 + ≥2 路 L3 + L3-P 五问硬门禁",
@@ -1327,17 +1327,29 @@
         ]
       },
       "green_phase": {
-        "status": "pending",
-        "acceptance_commands": [
-          "RUSTFLAGS=\"-D warnings\" cargo test -p pony-agent-core --lib",
-          "cargo test -p pony-agent-core --test wave36_draft_gate_session",
-          "cargo test -p pony-agent-core --test wave36_plan_execution_approval",
-          "cargo test -p pony-agent-core --test wave30b_policy_rules_and_plan_gate_test",
-          "cargo test -p pony-agent-core --test wave36_recovery_retry_consistency",
-          "cargo test -p pony-agent-core --test recovery_acceptance",
-          "bash tests/acceptance/remediation/wave36_zero_assert_census.sh",
-          "RUSTFLAGS=\"-D warnings\" bash tests/acceptance/remediation/wave36_pa139_full_lib_50x.sh",
-          "/home/dm/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline-wave36.json"
+        "status": "verified",
+        "commit_chain": [
+          "193b1bf",
+          "03edc2a",
+          "8bbd832",
+          "d3cd4d4",
+          "aa8e3e5"
+        ],
+        "final_head": "aa8e3e5",
+        "gates": {
+          "full_lib": "RUSTFLAGS=-D warnings cargo test -p pony-agent-core --lib → 1064 passed / 0 failed (Exit 0, 34s)",
+          "pa138": "wave36_draft_gate_session 4/4 + wave30b 3/3 + governed_executor lib 11/11",
+          "pa141": "wave36_plan_execution_approval 9/9 + ADR-0038 F-7 adjudicated + docs/architecture/plan-execution-approval.md",
+          "pa142": "census 0 violation/110 files + self-test PASS + POSIX else assertions",
+          "pa143_144_145": "agent::retry 44 + provider contract 1 + recovery_acceptance 6 + adversarial 8 + consistency 1 全绿",
+          "pa139": "50/50 full-lib rounds all \"0 failed\" (21:03-21:32, logs tests/acceptance/receipts/wave36/pa139_runs/)",
+          "pa140": "CI run 39132384596 ubuntu core-platform-check success (1064 passed), macos success; windows verify fail = pre-existing on main (run 39103198486 same step), 0 new wave-36 windows failures",
+          "receipts": ".dev-team/evidence/wave36/ (e1..e5 + ci-run.txt + pa139-report.md)"
+        },
+        "known_residuals": [
+          "wave15 TTFT 断言竞态已在 tool_recovery.rs 单时钟采样修复（round6 未复现）",
+          "windows verify 的 hook_commands/mcp_client 失败为 main 预存平台债，未纳入本波",
+          "桌面端审批 UI/IPC 接线（TurnInput.plan_execution_approval 的宿主入口）未实现，登记后续卡片"
         ]
       },
       "contract_ledger": [
