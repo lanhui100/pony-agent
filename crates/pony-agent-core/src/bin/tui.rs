@@ -795,62 +795,59 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
 }
 
 /// 彩色 init 头部（参考 Antigravity CLI banner）：
-/// 左侧是品牌渐变色的几何「P」标识 —— 16×20 像素网格，用「▀」半块字符逐格上/下双色渲染
-/// （实心块、无点阵断裂），右侧是版本 / 模型(提供商) / 工作区信息列，垂直居中。
-/// 整块是会话流的第一条内容，随对话向上滚动。
+/// 左侧是品牌渐变色的几何「P」标识 —— 12×16 像素网格，用「▀」半块字符逐格上/下双色渲染
+/// （实心块、无点阵断裂）；渐变在运行时按对角位置在 4 个品牌色标间插值，过渡跨度大。
+/// 右侧是版本 / 模型(提供商) / 工作区信息列，垂直居中；整块随会话向上滚动。
 fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
-    // 「P」字形像素表：每行 22 格，'.' 为空，其余为调色板索引（0-9a）。
-    const P_ROWS: [&str; 20] = [
-        "................",
-        ".0001122345567..",
-        ".00012233456788.",
-        ".00112234566789.",
-        ".01122....67889.",
-        ".0122......8899.",
-        ".112........999.",
-        ".122........99a.",
-        ".1233......99aa.",
-        ".22345....899aa.",
-        ".23445678899aaa.",
-        ".33456778999aaa.",
-        ".3455678899aaa..",
-        ".445............",
-        ".456............",
-        ".556............",
-        ".567............",
-        ".667............",
-        ".678............",
-        "................",
+    // 「P」字形掩码（12×16）：'#' 为实心像素，手工对齐保证边缘整齐、无孤立凸点。
+    const SHAPE: [&str; 16] = [
+        "............",
+        ".##########.",
+        ".##########.",
+        ".##......##.",
+        ".##......##.",
+        ".##......##.",
+        ".##......##.",
+        ".##########.",
+        ".##########.",
+        ".##.........",
+        ".##.........",
+        ".##.........",
+        ".##.........",
+        ".##.........",
+        ".##.........",
+        "............",
     ];
-    const P_PALETTE: [(u8, u8, u8); 12] = [
-        (240, 111, 62),
-        (237, 96, 63),
-        (234, 83, 64),
-        (228, 72, 69),
-        (221, 69, 77),
-        (213, 66, 87),
-        (205, 62, 98),
-        (200, 60, 105),
-        (191, 56, 116),
-        (178, 51, 130),
-        (157, 49, 137),
-        (0, 0, 0),
+    // 品牌渐变色标：亮橙 → 正红 → 洋红 → 深紫（跨度大，过渡明显）。
+    const STOPS: [(f32, u8, u8, u8); 4] = [
+        (0.00, 255, 146, 56),
+        (0.32, 244, 62, 52),
+        (0.64, 196, 30, 124),
+        (1.00, 96, 40, 158),
     ];
-    const COLS: usize = 16;
-    const ROWS: usize = 20;
+    const COLS: usize = 12;
+    const ROWS: usize = 16;
 
-    let color_of = |ch: u8| -> Option<ratatui::style::Color> {
-        if ch == b'.' {
-            return None;
+    let pixel_color = |x: usize, y: usize| -> ratatui::style::Color {
+        let t = (x as f32 / (COLS - 1).max(1) as f32) * 0.6
+            + (y as f32 / (ROWS - 1).max(1) as f32) * 0.4;
+        let mut lo = STOPS[0];
+        let mut hi = STOPS[STOPS.len() - 1];
+        for pair in STOPS.windows(2) {
+            if t >= pair[0].0 && t <= pair[1].0 {
+                lo = pair[0];
+                hi = pair[1];
+                break;
+            }
         }
-        let idx = match ch {
-            b'0'..=b'9' => (ch - b'0') as usize,
-            b'a' => 10,
-            b'b' => 11,
-            _ => return None,
-        };
-        let (r, g, b) = P_PALETTE[idx.min(P_PALETTE.len() - 1)];
-        Some(ratatui::style::Color::Rgb(r, g, b))
+        let span = (hi.0 - lo.0).max(1e-6);
+        let k = ((t - lo.0) / span).clamp(0.0, 1.0);
+        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * k).round() as u8;
+        ratatui::style::Color::Rgb(mix(lo.1, hi.1), mix(lo.2, hi.2), mix(lo.3, hi.3))
+    };
+
+    let filled = |row: usize, col: usize| -> bool {
+        SHAPE[row].as_bytes().get(col).map(|c| *c == b'#').unwrap_or(false)
     };
 
     let info = [
@@ -878,22 +875,28 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
 
     let mut out: Vec<Line<'static>> = Vec::new();
     for line in 0..(ROWS / 2) {
-        let top = P_ROWS[line * 2].as_bytes();
-        let bottom = P_ROWS[line * 2 + 1].as_bytes();
+        let (top, bottom) = (line * 2, line * 2 + 1);
         let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
         for x in 0..COLS {
-            let up = top.get(x).and_then(|c| color_of(*c));
-            let dn = bottom.get(x).and_then(|c| color_of(*c));
-            let span = match (up, dn) {
-                (Some(u), Some(d)) => Span::styled("▀", Style::default().fg(u).bg(d)),
-                (Some(u), None) => Span::styled("▀", Style::default().fg(u)),
-                (None, Some(d)) => Span::styled("▄", Style::default().fg(d)),
-                (None, None) => Span::raw(" "),
-            };
-            spans.push(span);
+            match (filled(top, x), filled(bottom, x)) {
+                (true, true) => {
+                    let up = pixel_color(x, top);
+                    let down = pixel_color(x, bottom);
+                    spans.push(Span::styled("▀", Style::default().fg(up).bg(down)));
+                }
+                (true, false) => spans.push(Span::styled(
+                    "▀",
+                    Style::default().fg(pixel_color(x, top)),
+                )),
+                (false, true) => spans.push(Span::styled(
+                    "▄",
+                    Style::default().fg(pixel_color(x, bottom)),
+                )),
+                (false, false) => spans.push(Span::raw(" ")),
+            }
         }
-        // 信息列垂直居中于 10 行标识（占第 4~6 行）。
-        if let Some(info_line) = line.checked_sub(3).and_then(|i| info.get(i)) {
+        // 信息列垂直居中于 8 行标识（占第 3~5 行）。
+        if let Some(info_line) = line.checked_sub(2).and_then(|i| info.get(i)) {
             spans.push(Span::raw("   "));
             spans.extend(info_line.spans.clone());
         }
