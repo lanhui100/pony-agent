@@ -1,0 +1,52 @@
+{
+  "wave": 35,
+  "baseline_commit": "f70b1f3",
+  "frozen_revision": "b7139b0",
+  "register_purpose": "显式登记本波引入/保留的 test-only 与冻结 NFR 基准的偏差（L3-P review-wave35-p.json 要求留痕，不改源码）",
+  "nfr_baseline_ref": ".dev-team/nfr-baseline.json",
+  "exemptions": [
+    {
+      "id": "wave35-T1",
+      "item": "mock server 线程在有界 join 超时后 detach 存活，且 MockServerGate 在 unwind 时提前释放",
+      "evidence": "crates/pony-agent-core/src/agent/runtime/tests.rs:736-745（panic 分支）；crates/pony-agent-core/src/agent/control_plane/mod.rs:3226-3240；gate Drop: crates/pony-agent-core/src/agent/runtime/tests.rs:636-645",
+      "baseline_field": "resource_release",
+      "deviation": "resource_release 清单未覆盖 test-infra 场景（无 test-only 豁免条目）",
+      "scope": "TEST_ONLY",
+      "compiles_out_in_prod": true,
+      "prod_impact": "none（owner 均在 #[cfg(test)] 编译面：runtime/mod.rs:425-426、control_plane/mod.rs:3069-3070）",
+      "rationale": "该路径只在「队列失配」这一异常态触发，触发即 panic 暴露缺陷；detach 的线程属测试进程内的孤儿 mock，优先保证 gate 一定释放（避免整库挂死）",
+      "accepted_by": "lead",
+      "reviewed_by": "l3-p",
+      "expiry": "next-wave"
+    },
+    {
+      "id": "wave35-T2",
+      "item": "新增测试 wait_for_mock_thread_reports_timeout_within_budget spawn 一个 30s sleeper 且从不 join",
+      "evidence": "crates/pony-agent-core/src/agent/runtime/tests.rs:670-681",
+      "baseline_field": "resource_release",
+      "deviation": "游离线程不 join",
+      "scope": "TEST_ONLY",
+      "compiles_out_in_prod": true,
+      "prod_impact": "none",
+      "rationale": "该 sleeper 的存在本身就是被测对象（验证有界等待会返回 false）；它是测试进程内一次性线程，进程结束即回收",
+      "accepted_by": "lead",
+      "reviewed_by": "l3-p",
+      "expiry": "next-wave"
+    },
+    {
+      "id": "wave35-T3",
+      "item": "进程级测试闸门 MOCK_SERVER_GATE 为可重入且无获取超时（wave-13 既有，本波未改）",
+      "evidence": "crates/pony-agent-core/src/agent/runtime/tests.rs:609（static Mutex）、:620-630（thread_local depth 显式可重入）、:623-625（.lock() 无超时）、:636-645（RAII 释放）",
+      "baseline_field": "lock_reentrancy_forbidden / lock_acquisition_timeout_ms(2000) / lock_scope_bounded",
+      "deviation": "可重入与 lock_reentrancy_forbidden 冲突；获取无 2000ms 上限；作用域按代码块有界但按时间无界",
+      "scope": "TEST_ONLY",
+      "compiles_out_in_prod": true,
+      "prod_impact": "none",
+      "rationale": "本波未改动该闸门语义（本波 hunk 仅 :647+:690+:699+:728+:733+:736+）。该闸门用于串行化 mock HTTP 用例以消除 CI 负载下的「超时→重试→队列失配」。本波已移除其唯一已知的永久占用路径（全局 hop-limit override 竞态），并把无界 join 改为有界 join，使任何未来失配在 5s 内以诊断性 panic 暴露而非挂死；进一步改造（去全局化/按测试隔离 mock）属独立工程，爆炸半径与 flakiness 风险均大，登记为下一波议题",
+      "follow_up": "dev-backlog: 评估用 per-test 隔离替代进程级 mock 闸门（去全局锁）",
+      "accepted_by": "lead",
+      "reviewed_by": "l3-p",
+      "expiry": "next-wave"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/retry.rs",
+      "line": 363,
+      "rule": "panic_utf8_char_boundary",
+      "counterexample": "本波新增的 strip_endpoint_fragments 在 retry.rs:363 `out.push_str(&rest[..scheme_start])` 做原始字节切片,scheme_start = head.rfind(非 scheme 字符).map(|i| i + 1):当 `://` 的 scheme 名紧贴一个多字节字符(无 ASCII 分隔符)时,`i + 1` 落在该字符内部 → 非 char 边界 → panic。实证(真实编译产物,非手抄逻辑):`cargo build -p pony-agent-core --lib` 后 `rustc --edition 2021 probe.rs -L dependency=target/debug/deps --extern pony_agent_core=target/debug/libpony_agent_core.rlib -o probe && ./probe`,其中 probe.rs 调用 `is_rate_limit_error(\"访问https://x/v1\")` 与 `ProviderRetryPolicy::new(BackoffConfig::default()).classify(\"访问https://x/v1\")` → 两者均 panic:`thread panicked at crates/pony-agent-core/src/agent/retry.rs:363:27: byte index 4 is not a char boundary; it is inside '问' (bytes 3..6) of \\`访问https://x/v1\\``;全角句号同样触发:`is_rate_limit_error(\"失败。https://x/v1\")` → `byte index 7 is not a char boundary; it is inside '。' (bytes 6..9)`;对照 `\"访问 https://x/v1\"`(ASCII 空格)不 panic。触发面:classify / is_rate_limit_error 的入参含上游可控文本(provider/mod.rs:1417 `provider 返回错误状态:{};耗时={}ms;响应正文:{}`、openai_sse.rs:100 `响应预览: {}`),只要上游错误正文里出现「CJK 字符或全角标点紧贴 URL」即可命中(如中文错误文案 `详情见https://…/docs`);调用点在 provider 重试循环内(provider/mod.rs:3523/3526),panic 会把整次 turn 打掉(profile 为 unwind,未设 panic=abort)。推断:仓库内既有消息模板在 URL 前后均有 ASCII 分隔符,故未见由模板直接构成的触发串,但插值内容(响应正文/内层错误)不受本仓控制 —— 属新引入的错误路径崩溃,非既有缺陷。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/retry.rs",
+      "line": 360,
+      "rule": "endpoint_strip_overreach",
+      "counterexample": "剥离范围大于 retry.rs:351-352 注释声明的取舍(注释只声明「紧贴 URL、不带空白/分隔符的尾部原因码会被一并剥离」),实为前后两个方向都会吃掉非 URL 文本:①紧贴 URL **之前**的原因码被并入 scheme 名(方案名字符集含数字 `[a-z0-9+.-]`,故 `502https` 被整体视为方案名)——`classify(\"HTTP 502https://gw/v1\")` → `NonRetryable`,而改前(基线裸 contains)为 `TransientRetryable`;②紧贴 URL **之后**且无 ASCII 终结符(终结符仅空白与 `\"' ;,)]}< >` + 反引号,中文不属于终结符)时被吞到串尾——`classify(\"gateway error http://gw.internal/v1:502\")` → `NonRetryable`,同一串插入空格 `\"gateway error http://gw.internal/v1: 502\"` → `TransientRetryable`,即「是否重试」取决于一个空格。实证:同一 probe(见上条复现命令)输出 I/J/K 三行分别为 `NonRetryable` / `TransientRetryable` / `NonRetryable`;对照证据:真实模板串仍正确 —— `classify(\"provider 返回错误状态:502;耗时=12ms;响应正文:{…}\")` → `TransientRetryable`(probe G)、`classify(\"调用 provider 失败:operation timed out;type=timeout;elapsed=45000ms\")` → `TransientRetryable`(probe H)、`响应预览: http://127.0.0.1:42953/v1` → `NonRetryable` + `is_rate_limit_error=false`(probe E/F,即本波目标修复生效)。结论:本仓现有 5 处 URL 拼接点(provider/mod.rs:1417/2322/2334/2352/4370、openai_sse.rs:100/201/219)在 URL 前后均为 `; `/空白,故**未发现生产触发串**,本条按潜在过度剥离风险登记(推断项),非已实证的生产回归。"
+    }
+  ]
+}
