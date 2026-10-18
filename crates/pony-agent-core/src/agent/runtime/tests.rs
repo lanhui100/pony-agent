@@ -698,6 +698,16 @@ struct MockHttpServer {
 
 impl MockHttpServer {
     fn start(responses: Vec<MockHttpResponse>) -> Self {
+        // wave-36 PA-139：默认无归属校验（恒 true），保持既有调用方语义不变。
+        Self::start_with_predicate(responses, Arc::new(|_: &str| true))
+    }
+
+    /// wave-36 PA-139 归属校验：predicate 收到完整请求体时返回该请求是否属于本用例；
+    /// 不匹配的请求（如其它用例迟到重试/杂散探测命中本端口）返回确定性 503 且**不消费队列**。
+    fn start_with_predicate(
+        responses: Vec<MockHttpResponse>,
+        predicate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    ) -> Self {
         let gate = MockServerGate::acquire();
         let expected = responses.len();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
@@ -757,6 +767,15 @@ impl MockHttpServer {
                     continue;
                 };
                 let consumed = requests_for_thread.lock().unwrap().len();
+                // wave-36 PA-139：归属校验——先判断请求是否属于本用例，不属于则确定性
+                // 503、不消费队列（与队列耗尽路径同款）。predicate 拿到完整请求体。
+                if !predicate(&body) {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                    continue;
+                }
                 if consumed >= responses.len() {
                     // PA-139 归属校验：队列已耗尽（或已被本用例外的连接消费）——
                     // 该连接不是用例预期的 provider 请求，确定性 503、不消费队列。
@@ -2164,25 +2183,32 @@ fn start_turn_stream_fail_turn_policy_on_checkpoint_boundary_emits_failed_instea
 #[test]
 fn start_turn_stream_fail_turn_policy_on_finalize_boundary_emits_failed_with_terminal_hook_evidence(
 ) {
-    let server = MockHttpServer::start(vec![sse_response(&[
-        json!({
-            "choices": [
-                {
-                    "delta": {
-                        "content": "finalize failturn answer"
+    // wave-36 PA-139：归属校验——本用例独有的用户消息（provider 请求 volatile 输入必含），
+    // 杂散连接（其它用例迟到重试命中本端口）被 503 拒绝而不消费队列。
+    let server = MockHttpServer::start_with_predicate(
+        vec![sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "finalize failturn answer"
+                        }
                     }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 4,
+                    "total_tokens": 16
                 }
-            ]
+            }),
+        ])],
+        std::sync::Arc::new(|body: &str| {
+            body.contains("会在 finalize boundary failturn 的问题")
         }),
-        json!({
-            "choices": [],
-            "usage": {
-                "prompt_tokens": 12,
-                "completion_tokens": 4,
-                "total_tokens": 16
-            }
-        }),
-    ])]);
+    );
     let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
     runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
     runtime
@@ -4074,7 +4100,11 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
     );
 
     // ---- sync 变体：无 step≥1 的 StepStart，usage 兜底创建 call_model ----
-    let sync_server = MockHttpServer::start(vec![
+    // wave-36 PA-139：归属校验——`同步多跳问题` 是本用例独有的用户消息（首个 decision
+    // 请求的 volatile 输入、followup 的 history 均携带；其它用例不会出现该文案），杂散
+    // 连接（其它用例迟到重试命中本端口）会被 503 拒绝而不消费队列。
+    let sync_server = MockHttpServer::start_with_predicate(
+        vec![
         json_response(json!({
             "choices": [{
                 "message": {
@@ -4090,7 +4120,9 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
             }]
         })),
         json_completion("同步多跳完成。"),
-    ]);
+    ],
+        std::sync::Arc::new(|body: &str| body.contains("同步多跳问题")),
+    );
     let sync_runtime =
         build_runtime_for_test(test_provider_selection(sync_server.base_url.clone()));
     let sync_result = sync_runtime.run_turn(TurnInput {
@@ -8580,7 +8612,16 @@ fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context()
     );
     let store_arc = Arc::new(Mutex::new(store));
     // The resumed turn reaches the provider exactly once and receives a text completion.
-    let server = MockHttpServer::start(vec![json_completion("好的，我已经看到你的回答，继续。")]);
+    // wave-36 PA-139：本端口在 turn 1（ask 挂起，不发 provider 请求）与 resume 之间存在
+    // 时间窗，并行负载下其它用例的杂散连接可能提前消费队列里唯一的响应，导致 resume 的
+    // 真实请求只能拿到 503×5。归属校验：实测线缆体只含 provider-native transcript 回放
+    // （注入的 assistant tool-call + tool result 对，不含 system/session 元数据），故以
+    // 本用例特有的注入 call id `forced-ask-call` 作为判据——杂散连接（如空白 {}、其它
+    // 用例形态）不匹配即 503 且不消费队列。
+    let server = MockHttpServer::start_with_predicate(
+        vec![json_completion("好的，我已经看到你的回答，继续。")],
+        std::sync::Arc::new(|body: &str| body.contains("forced-ask-call")),
+    );
     let mut runtime = AgentRuntime::with_dependencies(
         SessionStore::memory_only(),
         Box::new(StaticResolver {

@@ -3171,6 +3171,18 @@ mod tests {
 
     impl MockHttpServer {
         fn start(responses: Vec<MockHttpResponse>) -> Self {
+            // wave-36 PA-139 对称加固：默认归属校验恒 true，既有调用方语义不变。
+            Self::start_with_predicate(responses, Arc::new(|_: &str| true))
+        }
+
+        /// wave-36 PA-139 对称加固：归属校验——predicate 收到完整请求体时判定该请求
+        /// 是否属于本用例；不匹配的连接（其它用例的杂散请求/探测命中本端口）返回
+        /// 确定性 503 且**不消费队列**（与 runtime/tests.rs MockHttpServer 同路径），
+        /// 修复「任何连接读到完整请求体即可取走队列响应」的无归属缺陷。
+        fn start_with_predicate(
+            responses: Vec<MockHttpResponse>,
+            predicate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+        ) -> Self {
             let gate = crate::agent::runtime::tests::MockServerGate::acquire();
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
             let address = listener.local_addr().expect("mock server addr");
@@ -3191,6 +3203,14 @@ mod tests {
                 let Some(_body) = read_http_request_body(&mut stream) else {
                     continue;
                 };
+                // wave-36 PA-139 归属校验：不属于本用例的请求 503、不消费队列。
+                if !predicate(&_body) {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                    continue;
+                }
                 let response = {
                     let mut responses = pending_for_thread.lock().expect("mock response lock");
                     if responses.is_empty() {

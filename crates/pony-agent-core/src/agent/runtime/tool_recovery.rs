@@ -129,14 +129,25 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
         blocked_tool_call,
         &synthetic_tool_result,
         move |delta| {
-            if call_first_token_latency_for_emit.get().is_none() {
-                let value = started_at_for_emit.elapsed().as_millis() as u64;
-                call_first_token_latency_for_emit.set(Some(value));
-            }
-            let latency = if first_token_latency_for_emit.get().is_none() {
-                let value = turn_started_at_for_latency.elapsed().as_millis() as u64;
-                first_token_latency_for_emit.set(Some(value));
-                Some(value)
+            // 单次时钟采样：保证 call TTFT ≤ turn TTFT 的数学不变式，
+            // 避免两次独立 elapsed() 采样点漂移导致的时序反转 flake。
+            let latency = if call_first_token_latency_for_emit.get().is_none()
+                || first_token_latency_for_emit.get().is_none()
+            {
+                let now = Instant::now();
+                let mut latency: Option<u64> = None;
+                if call_first_token_latency_for_emit.get().is_none() {
+                    let value = now.duration_since(started_at_for_emit).as_millis() as u64;
+                    call_first_token_latency_for_emit.set(Some(value));
+                }
+                if first_token_latency_for_emit.get().is_none() {
+                    let value = now
+                        .duration_since(turn_started_at_for_latency)
+                        .as_millis() as u64;
+                    first_token_latency_for_emit.set(Some(value));
+                    latency = Some(value);
+                }
+                latency
             } else {
                 None
             };
