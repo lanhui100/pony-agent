@@ -1,6 +1,6 @@
 {
-  "wave": 36,
-  "status": "in_progress",
+  "wave": 37,
+  "status": "red_phase",
   "task_classification": "B",
   "reason": "W36 PA-138..145 收口：草稿门禁 fail-open（注入会话为唯一判据）、PA-141 宿主审批闸门（方案 b）、全量 flake 确定性化、ubuntu CI core 测试门禁、PA-142 零断言假绿、PA-143/144 码表边界、PA-145 recovery 单一出口",
   "baseline_commit": "ddbc2fdaaf45447d36310603b57d1984191e1dfd",
@@ -1372,6 +1372,70 @@
         "nfr_baseline": ".dev-team/nfr-baseline-wave36.json",
         "state_node": ".dev-team/state.json#waves.36"
       }
+    },
+    "37": {
+      "status": "red_phase",
+      "desc": "W37 工具面扩展+观察门+子代理引擎",
+      "task_classification": "B",
+      "classification_basis": "tools.rs(12.5k行)+orchestration.rs+新文件，跨3模块含并发与外部调用；命中 blast-keywords(thread/Mutex)；B 级双 L3+L3-P",
+      "baseline_commit": "0bdb882",
+      "contract_matrix": ".dev-team/contracts/wave-37-tool-surface-subagent.md",
+      "nfr_baseline": ".dev-team/nfr-baseline-wave37.json",
+      "members": {
+        "task-1": {
+          "role": "protocol-agent",
+          "subject": "契约矩阵/NFR/空桩冻结",
+          "write_scopes": [
+            ".dev-team",
+            "crates/pony-agent-core/src/agent/subagent_runtime.rs"
+          ],
+          "status": "in_progress"
+        },
+        "task-2": {
+          "role": "test-agent",
+          "subject": "红相验收测试冻结",
+          "write_scopes": [
+            "crates/pony-agent-core/tests",
+            "tools.rs/provider 测试区"
+          ],
+          "status": "in_progress"
+        },
+        "task-3": {
+          "role": "executor-a",
+          "subject": "C1 工具面扩展 + C2 write_file 观察门",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/tools.rs"
+          ],
+          "status": "pending",
+          "blocked_by": [
+            "task-1"
+          ]
+        },
+        "task-4": {
+          "role": "executor-b",
+          "subject": "C3 子代理真实执行引擎",
+          "write_scopes": [
+            "subagent_runtime.rs",
+            "orchestration.rs",
+            "lib.rs"
+          ],
+          "status": "pending",
+          "blocked_by": [
+            "task-1"
+          ]
+        },
+        "task-5": {
+          "role": "lead",
+          "subject": "Join Barrier + L3/L3-P + 收口",
+          "write_scopes": [
+            ".dev-team",
+            "docs",
+            "management"
+          ],
+          "status": "pending"
+        }
+      },
+      "carve_out": "wave-36 在飞未提交变更（governed_executor/retry/plan_state/dispatcher）属 W36 范围，W37 严禁触碰；收口提交时 hunk 定向隔离"
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
@@ -1379,5 +1443,7 @@
     "wave": 35,
     "status": "all_waves_completed",
     "reason": "wave-35 测试套件修复（ADR 0038）：全量死锁解除、flake masking、retry 判据；PA-138..145 残留转入 wave-36"
-  }
+  },
+  "desc": "W37 工具面扩展(21→28)+write_file观察门+子代理真实引擎：修复三方审计 P0（伪实现委派/基准漂移红门禁/写观察缺口）",
+  "classification_basis": "tools.rs(12.5k行)+orchestration.rs+新文件，跨3模块含并发与外部调用；命中 blast-keywords(thread/Mutex)；B 级双 L3+L3-P"
 }

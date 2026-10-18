@@ -4674,7 +4674,15 @@ mod tests {
                 // W20 goal 工具为模型可见面成员（实测 surface 尾部）。
                 "create_goal".to_string(),
                 "get_goal".to_string(),
-                "update_goal".to_string()
+                "update_goal".to_string(),
+                // W37-C1：七件新模型可见工具（present/fuzzy_file_search/git_diff_remote/job_*）。
+                "Present".to_string(),
+                "Find".to_string(),
+                "GitDiff".to_string(),
+                "JobStart".to_string(),
+                "JobOutput".to_string(),
+                "JobKill".to_string(),
+                "JobList".to_string()
             ]
         );
     }
@@ -4742,7 +4750,15 @@ mod tests {
                 // W20 goal 工具为模型可见面成员（实测 surface 尾部）。
                 "create_goal".to_string(),
                 "get_goal".to_string(),
-                "update_goal".to_string()
+                "update_goal".to_string(),
+                // W37-C1：七件新模型可见工具。
+                "Present".to_string(),
+                "Find".to_string(),
+                "GitDiff".to_string(),
+                "JobStart".to_string(),
+                "JobOutput".to_string(),
+                "JobKill".to_string(),
+                "JobList".to_string()
             ]
         );
         assert!(payload.iter().all(|tool| {
@@ -4751,12 +4767,12 @@ mod tests {
                 .is_some_and(|description| !description.trim().is_empty())
         }));
         // PA-076 P2-6: Plan and ViewImage 在既有 13-tool 前缀后追加；W25 起 team 工具已被
-        // 摘除（未接线），W20 goal 工具成为当前尾部（cache-friendly stable prefix invariant
-        // from design Decision 10 仍保持：前缀顺序不变，仅尾部变化）。
+        // 摘除（未接线），W37-C1 job_* 七件成为当前尾部（cache-friendly stable prefix
+        // invariant from design Decision 10 仍保持：前缀顺序不变，仅尾部变化）。
         let last_two = &names[names.len() - 2..];
         assert_eq!(
             last_two,
-            &["get_goal".to_string(), "update_goal".to_string()]
+            &["JobKill".to_string(), "JobList".to_string()]
         );
     }
 

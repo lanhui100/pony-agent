@@ -142,14 +142,15 @@ pub(crate) const TOOL_WORKSPACE_READ_DOCUMENT: &str = "workspace_read_document";
 
 /// W25 单一能力开关：子代理/团队运行时是否已真实接线。
 ///
-/// 当前为 `false`：`subagent`/`workflow`/`spawn_teammate`/`list_agents`/`send_message`/
-/// `interrupt_agent`/`drain_inbox`/`team_task_*` 这 10 个工具的实现仍是合成字符串与进程内
-/// 静态表（见 [`crate::agent::orchestration`]），对模型谎报 `status:"ok"` 会让模型误信
-/// 「已派生子代理并收到完成回执」。因此在真实实现（计划 W29）落地前，这些 handler 一律
-/// 返回结构化 `capability_unavailable` 错误，而不是假成功。
-///
-/// W29 落地真实子代理与 workflow 引擎后，将此开关置为 `true` 即可恢复这些实现路径。
-pub const SUBAGENT_RUNTIME_WIRED: bool = false;
+/// wave-37 C3 落地后改为运行时判定：wired 语义 = 全局引擎槽非空（见
+/// [`crate::agent::subagent_runtime::subagent_engine`]）。保留同名 `pub const`
+/// 值 `true` 供外部二进制兼容引用；运行时判定请使用 [`subagent_runtime_wired`]。
+pub const SUBAGENT_RUNTIME_WIRED: bool = true;
+
+/// 运行时判定：子代理引擎槽是否已接线（引擎非空即 wired）。
+pub fn subagent_runtime_wired() -> bool {
+    crate::agent::subagent_runtime::subagent_engine().is_some()
+}
 
 pub(crate) const TOOL_SUBAGENT: &str = "subagent";
 pub(crate) const TOOL_WORKFLOW: &str = "workflow";
@@ -168,6 +169,15 @@ pub(crate) const TOOL_SPILL_READ: &str = "spill_read";
 pub(crate) const TOOL_CREATE_GOAL: &str = "create_goal";
 pub(crate) const TOOL_GET_GOAL: &str = "get_goal";
 pub(crate) const TOOL_UPDATE_GOAL: &str = "update_goal";
+
+// W37-C1：工具面扩展 21 → 28，七项新 primitive（lib 函数已在顶部 pub use re-export 区引入）。
+pub(crate) const TOOL_PRESENT: &str = "present";
+pub(crate) const TOOL_FUZZY_FILE_SEARCH: &str = "fuzzy_file_search";
+pub(crate) const TOOL_GIT_DIFF_REMOTE: &str = "git_diff_remote";
+pub(crate) const TOOL_JOB_START: &str = "job_start";
+pub(crate) const TOOL_JOB_OUTPUT: &str = "job_output";
+pub(crate) const TOOL_JOB_KILL: &str = "job_kill";
+pub(crate) const TOOL_JOB_LIST: &str = "job_list";
 
 const MAX_FULL_READ_BYTES: u64 = 120_000;
 const MAX_PATH_REPAIR_SEARCH_FILES: usize = 2_000;
@@ -1215,6 +1225,14 @@ impl ToolRouter {
             Some(TOOL_CREATE_GOAL) => self.execute_create_goal(call),
             Some(TOOL_GET_GOAL) => self.execute_get_goal(call),
             Some(TOOL_UPDATE_GOAL) => self.execute_update_goal(call),
+            // W37-C1：七项新工具派发臂（直连 lib 函数）。
+            Some(TOOL_PRESENT) => self.execute_present(call, context),
+            Some(TOOL_FUZZY_FILE_SEARCH) => self.execute_find(call, context),
+            Some(TOOL_GIT_DIFF_REMOTE) => self.execute_git_diff(call, context),
+            Some(TOOL_JOB_START) => self.execute_job_start(call, context),
+            Some(TOOL_JOB_OUTPUT) => self.execute_job_output(call),
+            Some(TOOL_JOB_KILL) => self.execute_job_kill(call),
+            Some(TOOL_JOB_LIST) => self.execute_job_list(),
             _ => error_result(
                 &call.name,
                 "unsupported_tool",
@@ -1225,7 +1243,7 @@ impl ToolRouter {
     }
 
     fn execute_subagent(&self, call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_SUBAGENT);
         }
 
@@ -1254,7 +1272,7 @@ impl ToolRouter {
     }
 
     fn execute_workflow(&self, call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_WORKFLOW);
         }
 
@@ -1283,7 +1301,7 @@ impl ToolRouter {
     }
 
     fn execute_spawn_teammate(&self, call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_SPAWN_TEAMMATE);
         }
 
@@ -1312,7 +1330,7 @@ impl ToolRouter {
     }
 
     fn execute_list_agents(&self, _call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_LIST_AGENTS);
         }
 
@@ -1332,7 +1350,7 @@ impl ToolRouter {
     }
 
     fn execute_send_message(&self, call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_SEND_MESSAGE);
         }
 
@@ -1361,7 +1379,7 @@ impl ToolRouter {
     }
 
     fn execute_interrupt_agent(&self, call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_INTERRUPT_AGENT);
         }
 
@@ -1390,7 +1408,7 @@ impl ToolRouter {
     }
 
     fn execute_drain_inbox(&self, call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_DRAIN_INBOX);
         }
 
@@ -1419,7 +1437,7 @@ impl ToolRouter {
     }
 
     fn execute_team_task_create(&self, call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_TEAM_TASK_CREATE);
         }
 
@@ -1448,7 +1466,7 @@ impl ToolRouter {
     }
 
     fn execute_team_task_update(&self, call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_TEAM_TASK_UPDATE);
         }
 
@@ -1477,7 +1495,7 @@ impl ToolRouter {
     }
 
     fn execute_team_task_list(&self, _call: &ToolCall) -> ToolResult {
-        if !SUBAGENT_RUNTIME_WIRED {
+        if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_TEAM_TASK_LIST);
         }
 
@@ -1672,6 +1690,209 @@ impl ToolRouter {
         }
     }
 
+    // ===================== W37-C1：七项新工具执行方法 =====================
+
+    fn execute_present(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
+        let mut args: PresentArgs = match serde_json::from_value(call.arguments.clone()) {
+            Ok(args) => args,
+            Err(err) => {
+                return error_result(
+                    TOOL_PRESENT,
+                    "invalid_arguments",
+                    format!("Failed to parse present arguments: {}", err),
+                    None,
+                )
+            }
+        };
+        // 未显式提供 cwd 时，用会话 workspace root，避免回退到进程 cwd。
+        if args.cwd.is_none() {
+            if let Ok(root) = self.resolved_workspace_root(context, ws_id) {
+                args.cwd = Some(root.display().to_string());
+            }
+        }
+        match present(args) {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_PRESENT.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_PRESENT,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_PRESENT, "present_failed", err, None),
+        }
+    }
+
+    fn execute_find(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
+        let mut args: FuzzyFileSearchArgs = match serde_json::from_value(call.arguments.clone()) {
+            Ok(args) => args,
+            Err(err) => {
+                return error_result(
+                    TOOL_FUZZY_FILE_SEARCH,
+                    "invalid_arguments",
+                    format!("Failed to parse find arguments: {}", err),
+                    None,
+                )
+            }
+        };
+        if args.cwd.is_none() {
+            if let Ok(root) = self.resolved_workspace_root(context, ws_id) {
+                args.cwd = Some(root.display().to_string());
+            }
+        }
+        match fuzzy_file_search(args) {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_FUZZY_FILE_SEARCH.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_FUZZY_FILE_SEARCH,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_FUZZY_FILE_SEARCH, "find_failed", err, None),
+        }
+    }
+
+    fn execute_git_diff(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
+        let mut args: GitDiffRemoteArgs = match serde_json::from_value(call.arguments.clone()) {
+            Ok(args) => args,
+            Err(err) => {
+                return error_result(
+                    TOOL_GIT_DIFF_REMOTE,
+                    "invalid_arguments",
+                    format!("Failed to parse git_diff arguments: {}", err),
+                    None,
+                )
+            }
+        };
+        if args.cwd.is_none() {
+            if let Ok(root) = self.resolved_workspace_root(context, ws_id) {
+                args.cwd = Some(root.display().to_string());
+            }
+        }
+        match git_diff_remote(args) {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_GIT_DIFF_REMOTE.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_GIT_DIFF_REMOTE,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_GIT_DIFF_REMOTE, "git_diff_failed", err, None),
+        }
+    }
+
+    fn execute_job_start(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let args: JobStartArgs = match serde_json::from_value(call.arguments.clone()) {
+            Ok(args) => args,
+            Err(err) => {
+                return error_result(
+                    TOOL_JOB_START,
+                    "invalid_arguments",
+                    format!("Failed to parse job_start arguments: {}", err),
+                    None,
+                )
+            }
+        };
+        // 必须把会话 workspace root 传给 lib 层做 cwd 解析与 fail-closed 校验。
+        let root = self
+            .resolved_workspace_root(context, self.extract_call_workspace_id(call, context))
+            .ok();
+        match job_start_with_workspace_root(args, root.as_deref()) {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_JOB_START.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_JOB_START,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_JOB_START, "job_start_failed", err, None),
+        }
+    }
+
+    fn execute_job_output(&self, call: &ToolCall) -> ToolResult {
+        let args: JobOutputArgs = match serde_json::from_value(call.arguments.clone()) {
+            Ok(args) => args,
+            Err(err) => {
+                return error_result(
+                    TOOL_JOB_OUTPUT,
+                    "invalid_arguments",
+                    format!("Failed to parse job_output arguments: {}", err),
+                    None,
+                )
+            }
+        };
+        match job_output(args) {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_JOB_OUTPUT.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_JOB_OUTPUT,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_JOB_OUTPUT, "job_output_failed", err, None),
+        }
+    }
+
+    fn execute_job_kill(&self, call: &ToolCall) -> ToolResult {
+        let args: JobKillArgs = match serde_json::from_value(call.arguments.clone()) {
+            Ok(args) => args,
+            Err(err) => {
+                return error_result(
+                    TOOL_JOB_KILL,
+                    "invalid_arguments",
+                    format!("Failed to parse job_kill arguments: {}", err),
+                    None,
+                )
+            }
+        };
+        match job_kill(args) {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_JOB_KILL.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_JOB_KILL,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_JOB_KILL, "job_kill_failed", err, None),
+        }
+    }
+
+    fn execute_job_list(&self) -> ToolResult {
+        match job_list(JobListArgs {}) {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_JOB_LIST.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_JOB_LIST,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_JOB_LIST, "job_list_failed", err, None),
+        }
+    }
+
     fn time_now(&self) -> ToolResult {
         let unix_seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1800,6 +2021,48 @@ impl ToolRouter {
         let expected_hash = call.arguments.get("expectedHash").or_else(|| call.arguments.get("expected_hash")).and_then(Value::as_str);
 
         if existed_before {
+            // W37 barrier 修补（Lead）：`overwrite=false` 是调用方显式拒绝覆盖，
+            // 必须先于观察门判定——否则该语义路径被 fs_not_observed 吞掉，
+            // 既有契约 `file_exists` 错误码不可达（wave-37 lib 回归暴露）。
+            if expected_hash.is_none() && !overwrite {
+                return error_result(
+                    TOOL_WORKSPACE_WRITE_FILE,
+                    "file_exists",
+                    format!(
+                        "目标文件已存在：{}。",
+                        self.display_resolved_workspace_relative(&target, context, ws_id)
+                    ),
+                    Some("如需覆盖，请显式传入 {\"overwrite\": true}；覆盖写入需先 Read 获取 expectedHash。".to_string()),
+                );
+            }
+            // W37-C2 读前写观察门（与 edit_file wave-22 同语义）：对已存在文件的覆盖写入，
+            // 在未携带 expectedHash 且环境未显式豁免（PONY_ALLOW_UNOBSERVED_EDIT）时 fail-closed，
+            // 杜绝"未观察旧版本就静默覆盖"的丢写风险。新文件路径不设门。
+            if expected_hash.is_none()
+                && std::env::var("PONY_ALLOW_UNOBSERVED_EDIT")
+                    .map(|v| v != "1" && v != "true")
+                    .unwrap_or(true)
+            {
+                let display_path =
+                    self.display_resolved_workspace_relative(&target, context, ws_id);
+                return ToolResult {
+                    tool_name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+                    status: "error".to_string(),
+                    output: json_string(json!({
+                        "ok": false,
+                        "code": "fs_not_observed",
+                        "message": format!("文件 {} 已存在但未传入 expectedHash，禁止未观察覆盖写入。", display_path),
+                        "details": {
+                            "path": display_path,
+                            "recoveryHint": {
+                                "action": "read_then_write",
+                                "instruction": "请先调用 workspace_read_file 读取当前文件内容并取其 contentHash，随后携带该 expectedHash 重试写入；或显式设置环境变量 PONY_ALLOW_UNOBSERVED_EDIT=1 豁免本门。"
+                            }
+                        }
+                    })),
+                    duration_ms: 0,
+                };
+            }
             if let Some(expected) = expected_hash {
                 let current_content = match fs::read_to_string(&target) {
                     Ok(c) => c,
@@ -5545,6 +5808,156 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             })),
         },
+        // W37-C1：Present —— 按引用向用户呈报文件卡片（最多 4 个）。
+        ToolDefinition {
+            name: TOOL_PRESENT,
+            description: "向用户呈报工作区内的文件（最多 4 个，按引用展示卡片，含大小与类型）；适合交付成果、展示截图或文档时使用，不会把文件内容读进上下文。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "工作区内的相对文件路径"
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "该文件的一句话说明（可选）"
+                                }
+                            },
+                            "required": ["path"],
+                            "additionalProperties": false
+                        },
+                        "description": "要呈报的文件列表（1–4 项）"
+                    }
+                },
+                "required": ["files"],
+                "additionalProperties": false
+            })),
+        },
+        // W37-C1：Find —— 模糊文件名检索。
+        ToolDefinition {
+            name: TOOL_FUZZY_FILE_SEARCH,
+            description: "在工作区内按模糊关键词检索文件路径（大小写不敏感的包含匹配并打分），适合只记得文件名片段时定位文件。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "文件名模糊查询关键词"
+                    },
+                    "maxResults": {
+                        "type": "integer",
+                        "description": "返回匹配数量上限（可选，默认 20）"
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            })),
+        },
+        // W37-C1：GitDiff —— 本地与远端分支的差异。
+        ToolDefinition {
+            name: TOOL_GIT_DIFF_REMOTE,
+            description: "查看当前工作区 git 仓库与远端 upstream 分支的差异（未设置 targetRef 时默认与 @{upstream} 比较），返回 diff 文本与变更文件清单。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "targetRef": {
+                        "type": "string",
+                        "description": "可选的目标分支或引用（默认远端 upstream）"
+                    }
+                },
+                "additionalProperties": false
+            })),
+        },
+        // W37-C1：JobStart —— 后台长任务启动。
+        ToolDefinition {
+            name: TOOL_JOB_START,
+            description: "在当前工作区后台启动一个长任务进程（如 dev server、watch 构建），立即返回 jobId，可用 JobOutput 轮询输出、JobKill 终止。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "要执行的可执行命令"
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "命令参数列表（可选）"
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "工作目录（可选，默认当前工作区 root）"
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "description": "超时上限毫秒数（可选）"
+                    }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            })),
+        },
+        // W37-C1：JobOutput —— 读取后台任务输出。
+        ToolDefinition {
+            name: TOOL_JOB_OUTPUT,
+            description: "按 jobId 读取后台任务的累计输出与状态，可选择性等待任务结束（wait+timeoutMs）或从指定 offset 增量读取。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "jobId": {
+                        "type": "string",
+                        "description": "JobStart 返回的任务 ID"
+                    },
+                    "wait": {
+                        "type": "boolean",
+                        "description": "是否阻塞等待任务结束（可选，默认 false）"
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "description": "等待超时毫秒数（可选）"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "起始读取游标 offset（可选，默认 0）"
+                    }
+                },
+                "required": ["jobId"],
+                "additionalProperties": false
+            })),
+        },
+        // W37-C1：JobKill —— 终止后台任务。
+        ToolDefinition {
+            name: TOOL_JOB_KILL,
+            description: "按 jobId 终止一个仍在运行的后台任务进程。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "jobId": {
+                        "type": "string",
+                        "description": "JobStart 返回的任务 ID"
+                    }
+                },
+                "required": ["jobId"],
+                "additionalProperties": false
+            })),
+        },
+        // W37-C1：JobList —— 列出后台任务。
+        ToolDefinition {
+            name: TOOL_JOB_LIST,
+            description: "列出当前会话全部后台任务（含运行中与历史保留项）及其状态。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })),
+        },
     ]
 }
 
@@ -5573,6 +5986,14 @@ fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
         TOOL_WORKSPACE_PATH_INFO => 20,
         TOOL_PLAN_CONTROL => 50,
         TOOL_VIEW_IMAGE => 50,
+        // W37-C1：七项新 primitive 与内置工具同级。
+        TOOL_PRESENT => 100,
+        TOOL_FUZZY_FILE_SEARCH => 100,
+        TOOL_GIT_DIFF_REMOTE => 100,
+        TOOL_JOB_START => 100,
+        TOOL_JOB_OUTPUT => 100,
+        TOOL_JOB_KILL => 100,
+        TOOL_JOB_LIST => 100,
         _ => 50,
     }
 }
@@ -5623,7 +6044,15 @@ mod contract_view_tests {
                 "TodoList",
                 "create_goal",
                 "get_goal",
-                "update_goal"
+                "update_goal",
+                // W37-C1：七件新模型可见工具（present/fuzzy_file_search/git_diff_remote/job_*）。
+                "Present",
+                "Find",
+                "GitDiff",
+                "JobStart",
+                "JobOutput",
+                "JobKill",
+                "JobList"
             ]
         );
         assert_eq!(
@@ -5650,7 +6079,15 @@ mod contract_view_tests {
                 "todo_list",
                 "create_goal",
                 "get_goal",
-                "update_goal"
+                "update_goal",
+                // W37-C1：七件新 primitive。
+                "present",
+                "fuzzy_file_search",
+                "git_diff_remote",
+                "job_start",
+                "job_output",
+                "job_kill",
+                "job_list"
             ]
         );
     }
@@ -5674,8 +6111,8 @@ mod contract_view_tests {
             .map(|view| view.name.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(tools.len(), 37, "W26 新增 spill_read（Deferred）后内部 primitive 数");
-        assert_eq!(names.len(), 21, "W25 模型可见工具面 21 项（10 个假能力工具已摘除）");
+        assert_eq!(tools.len(), 44, "W37-C1 新增 7 件 primitive 后内部注册数（37+7）");
+        assert_eq!(names.len(), 28, "W37-C1 模型可见工具面 28 项（+7 新工具，10 个假能力工具保持摘除）");
         assert_eq!(
             names,
             vec![
@@ -5700,7 +6137,15 @@ mod contract_view_tests {
                 "TodoList",
                 "create_goal",
                 "get_goal",
-                "update_goal"
+                "update_goal",
+                // W37-C1：七件新模型可见工具。
+                "Present",
+                "Find",
+                "GitDiff",
+                "JobStart",
+                "JobOutput",
+                "JobKill",
+                "JobList"
             ]
         );
         for view in views {
@@ -5848,10 +6293,12 @@ mod contract_view_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 28, "W37-C1 模型可见面 28 项");
         assert!(registry.resolve("Run").is_some());
         assert!(registry.resolve("workspace.run_command").is_some());
         assert!(registry.resolve("workspace_path_info").is_some());
+        assert!(registry.resolve("Present").is_some());
+        assert!(registry.resolve("JobList").is_some());
         assert_eq!(
             registry
                 .resolve("ToolSearch")
@@ -6067,6 +6514,21 @@ pub fn canonical_tool_name(name: &str) -> Option<&'static str> {
         TOOL_CREATE_GOAL | "create.goal" => Some(TOOL_CREATE_GOAL),
         TOOL_GET_GOAL | "get.goal" => Some(TOOL_GET_GOAL),
         TOOL_UPDATE_GOAL | "update.goal" => Some(TOOL_UPDATE_GOAL),
+        // W37-C1：产品名 → primitive 名映射（七项新工具，产品名即工具名）。
+        "Present" => Some(TOOL_PRESENT),
+        "Find" => Some(TOOL_FUZZY_FILE_SEARCH),
+        "GitDiff" => Some(TOOL_GIT_DIFF_REMOTE),
+        "JobStart" => Some(TOOL_JOB_START),
+        "JobOutput" => Some(TOOL_JOB_OUTPUT),
+        "JobKill" => Some(TOOL_JOB_KILL),
+        "JobList" => Some(TOOL_JOB_LIST),
+        TOOL_PRESENT | "present.tool" => Some(TOOL_PRESENT),
+        TOOL_FUZZY_FILE_SEARCH | "fuzzy.file_search" => Some(TOOL_FUZZY_FILE_SEARCH),
+        TOOL_GIT_DIFF_REMOTE | "git.diff_remote" => Some(TOOL_GIT_DIFF_REMOTE),
+        TOOL_JOB_START | "job.start" => Some(TOOL_JOB_START),
+        TOOL_JOB_OUTPUT | "job.output" => Some(TOOL_JOB_OUTPUT),
+        TOOL_JOB_KILL | "job.kill" => Some(TOOL_JOB_KILL),
+        TOOL_JOB_LIST | "job.list" => Some(TOOL_JOB_LIST),
         _ => None,
     }
 }
@@ -6118,6 +6580,13 @@ fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str> {
         TOOL_TODO_WRITE => vec![TOOL_TODO_WRITE],
         TOOL_TODO_LIST => vec![TOOL_TODO_LIST],
         TOOL_SPILL_READ => vec![TOOL_SPILL_READ],
+        TOOL_PRESENT => vec![TOOL_PRESENT, "present.tool"],
+        TOOL_FUZZY_FILE_SEARCH => vec![TOOL_FUZZY_FILE_SEARCH, "fuzzy.file_search"],
+        TOOL_GIT_DIFF_REMOTE => vec![TOOL_GIT_DIFF_REMOTE, "git.diff_remote"],
+        TOOL_JOB_START => vec![TOOL_JOB_START, "job.start"],
+        TOOL_JOB_OUTPUT => vec![TOOL_JOB_OUTPUT, "job.output"],
+        TOOL_JOB_KILL => vec![TOOL_JOB_KILL, "job.kill"],
+        TOOL_JOB_LIST => vec![TOOL_JOB_LIST, "job.list"],
         _ => Vec::new(),
     }
 }
@@ -6229,6 +6698,14 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_SPILL_READ => "SpillRead",
         TOOL_TODO_WRITE => "TodoWrite",
         TOOL_TODO_LIST => "TodoList",
+        // W37-C1：七项新工具的产品名（与 builtin_tools 注册的模型可见面一一对应）。
+        TOOL_PRESENT => "Present",
+        TOOL_FUZZY_FILE_SEARCH => "Find",
+        TOOL_GIT_DIFF_REMOTE => "GitDiff",
+        TOOL_JOB_START => "JobStart",
+        TOOL_JOB_OUTPUT => "JobOutput",
+        TOOL_JOB_KILL => "JobKill",
+        TOOL_JOB_LIST => "JobList",
         _ => return None,
     };
     Some(mapped)
@@ -6285,6 +6762,10 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         TOOL_TODO_WRITE => ToolKind::Write,
         TOOL_TODO_LIST => ToolKind::Read,
         TOOL_SPILL_READ => ToolKind::Read,
+        // W37-C1：Present/Find/GitDiff 只读或检索；Job* 属 Execute（side-effecting）。
+        TOOL_PRESENT | TOOL_GIT_DIFF_REMOTE => ToolKind::Read,
+        TOOL_FUZZY_FILE_SEARCH => ToolKind::Search,
+        TOOL_JOB_START | TOOL_JOB_OUTPUT | TOOL_JOB_KILL | TOOL_JOB_LIST => ToolKind::Execute,
         _ => ToolKind::External,
     }
 }
@@ -6342,6 +6823,14 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         | TOOL_UPDATE_GOAL => ToolExposure::ModelVisible,
         // W26：spill 回读工具按需曝光（tool_search 提升），不进常驻工具面。
         TOOL_SPILL_READ => ToolExposure::Deferred,
+        // W37-C1：七项新工具全部常驻模型可见面。
+        TOOL_PRESENT
+        | TOOL_FUZZY_FILE_SEARCH
+        | TOOL_GIT_DIFF_REMOTE
+        | TOOL_JOB_START
+        | TOOL_JOB_OUTPUT
+        | TOOL_JOB_KILL
+        | TOOL_JOB_LIST => ToolExposure::ModelVisible,
         _ => ToolExposure::Internal,
     }
 }
@@ -6365,6 +6854,14 @@ pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
         "ViewImage" => Some("看图".to_string()),
         "ReadDocument" => Some("读文档".to_string()),
         "SpillRead" => Some("回读溢出".to_string()),
+        // W37-C1：七项新工具的中文展示名。
+        "Present" => Some("呈报".to_string()),
+        "Find" => Some("找文件".to_string()),
+        "GitDiff" => Some("看差异".to_string()),
+        "JobStart" => Some("后台任务".to_string()),
+        "JobOutput" => Some("任务输出".to_string()),
+        "JobKill" => Some("终止任务".to_string()),
+        "JobList" => Some("任务列表".to_string()),
         _ => None,
     };
     ToolDisplayMetadata { display_name_zh }
@@ -6391,6 +6888,13 @@ pub fn default_permission_facts_for_name(name: &str) -> ToolPermissionFacts {
         // W26：spill 回读只读本地落盘内容，权限面等同 workspace.read。
         TOOL_SPILL_READ => Some("workspace.read".to_string()),
         TOOL_WORKSPACE_READ_DOCUMENT => Some("workspace.read".to_string()),
+        // W37-C1：Present/Find/GitDiff 只读工作区；Job* 是进程级副作用，归 workspace.execute。
+        TOOL_PRESENT | TOOL_FUZZY_FILE_SEARCH | TOOL_GIT_DIFF_REMOTE => {
+            Some("workspace.read".to_string())
+        }
+        TOOL_JOB_START | TOOL_JOB_OUTPUT | TOOL_JOB_KILL | TOOL_JOB_LIST => {
+            Some("workspace.execute".to_string())
+        }
         _ => None,
     };
     // PA-114: `ask_user` is host-mediated (WaitingHost) by declaration; every other builtin keeps

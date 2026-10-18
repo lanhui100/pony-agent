@@ -193,31 +193,55 @@ pub struct TeamTaskListResult {
 // ==========================================
 
 static TEAM_TASKS: Mutex<Option<HashMap<String, TeamTaskItem>>> = Mutex::new(None);
+
+/// 子代理 turn 超时（NFR 基线：subagent_turn_timeout_ms=120000）。
+const SUBAGENT_TURN_TIMEOUT_MS: u64 = 120_000;
 static TEAMMATES: Mutex<Option<HashMap<String, TeammateMember>>> = Mutex::new(None);
 /// 每个 Teammate 对应的优先级双端信箱 (双端队列支持普通排队 push_back 与插队 push_front)
 static TEAMMATE_INBOXES: Mutex<Option<HashMap<String, VecDeque<QueuedMessage>>>> = Mutex::new(None);
 
+/// wave-37 C3：真实子代理执行入口。
+///
+/// - 引擎槽为空 → 结构化错误（含 `capability_unavailable`），不再返回伪字符串；
+/// - 引擎在位 → 错误（busy/oversize/timeout/引擎失败）原样透传；
+/// - 同步调用：成功填 `status:"completed"` + `output:Some(final_text)`；
+/// - `run_in_background=true`：spawn 线程执行并立即返回 `status:"running"` +
+///   `output:None`，后台结果仅记录日志后丢弃。
+/// `workflow()` 保持 wave-38 范围现状，勿动。
 pub fn subagent(args: SubagentArgs) -> Result<SubagentResult, String> {
+    let engine = crate::agent::subagent_runtime::subagent_engine().ok_or_else(|| {
+        "capability_unavailable: subagent engine not wired (HostTurnEngine missing)".to_string()
+    })?;
+    // 入口统一门：oversize/busy 在 orchestration 层先于引擎调用判定
+    //（契约 C3.2 测试 J/K 以 Stub 引擎注入验证，门必须位于入口）。
+    let _gate = crate::agent::subagent_runtime::subagent_gate_enter(&args.prompt)?;
     let subagent_id = format!("subagent-{}", Uuid::new_v4());
     let is_bg = args.run_in_background.unwrap_or(false);
-    
-    let status = if is_bg {
-        "running".to_string()
-    } else {
-        "completed".to_string()
-    };
-    
-    let output = if is_bg {
-        None
-    } else {
-        Some(format!("Subagent completed execution for prompt: {}", args.prompt))
-    };
 
-    Ok(SubagentResult {
-        subagent_id,
-        status,
-        output,
-    })
+    if is_bg {
+        let bg_id = subagent_id.clone();
+        let gate = _gate;
+        std::thread::spawn(move || {
+            let _gate = gate; // 后台 turn 全程占许可
+            if let Err(err) = engine.run_turn(&args.prompt, SUBAGENT_TURN_TIMEOUT_MS) {
+                eprintln!("[subagent] background turn failed ({}): {}", bg_id, err);
+            }
+        });
+        return Ok(SubagentResult {
+            subagent_id,
+            status: "running".to_string(),
+            output: None,
+        });
+    }
+
+    match engine.run_turn(&args.prompt, SUBAGENT_TURN_TIMEOUT_MS) {
+        Ok(outcome) => Ok(SubagentResult {
+            subagent_id,
+            status: "completed".to_string(),
+            output: Some(outcome.final_text),
+        }),
+        Err(err) => Err(err),
+    }
 }
 
 pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {

@@ -1,0 +1,22 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "backoff_cap_ms": 3000,
+    "max_attempts": 3
+  },
+  "concurrency_lock": {
+    "subagent_max_concurrent": 2
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true
+  },
+  "resource_release": {
+    "on_error": true,
+    "on_timeout": true,
+    "on_turn_end": true
+  },
+  "subagent_turn_timeout_ms": 120000,
+  "subagent_max_prompt_bytes": 200000
+}

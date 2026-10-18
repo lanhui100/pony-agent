@@ -49,6 +49,7 @@ pub mod secret_store;
 pub mod session;
 pub mod sqlite_session;
 pub mod spill;
+pub mod subagent_runtime;
 pub mod sse_adapter;
 pub mod telemetry;
 pub mod terminal;
