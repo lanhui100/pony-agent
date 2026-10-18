@@ -346,21 +346,24 @@ pub(crate) const RATE_LIMIT_LONG_BACKOFF_HINTS: &[&str] = &[
 /// 回合相位错误(`control_plane` 相位断言 flake,p≈2.8%);endpoint 里的措辞
 /// (如 `timeout-gw.internal`)同样会污染分组。
 ///
-/// 修法:匹配前剥离 `scheme://...` 片段(连同 scheme 名一起丢掉,保留其前的
-/// `endpoint=` 等标签)。诊断展示不受影响 —— `FailureKind` 的 `details` 仍是原始 message。
+/// 修法:匹配前只从 `://` 分隔符剥到 URL 终点,其前文本**整体保留**(`endpoint=` 标签、
+/// scheme 名、紧贴 URL 的数字与多字节字符都留下)。诊断展示不受影响 —— `FailureKind`
+/// 的 `details` 仍是原始 message。
+///
+/// 切片安全(波次 G F1):所有切片边界只来自 `str::find`,天然是 char 边界;
+/// **禁止**对 `find`/`rfind` 返回的字节索引做 `+1`/`-1` 偏移(会把边界切进多字节字符内部,
+/// 如 `访问https://x/v1` 里 `问` 的 `index+1` ⇒ `byte index 4 is not a char boundary` panic,
+/// 且入参含上游可控文本)。
+///
 /// 已知取舍:`:` 不可作为 URL 终点(端口本身即 `host:port`),因此紧贴 URL、不带
 /// 空白/分隔符的尾部原因码会被一并剥离;生产错误文本一律以 `; ` / 空白分隔。
 fn strip_endpoint_fragments(lower: &str) -> String {
     let mut out = String::with_capacity(lower.len());
     let mut rest = lower;
     while let Some(scheme_sep) = rest.find("://") {
-        // scheme 起点:向前回退到非 scheme 字符([a-z0-9+.-])。
-        let head = &rest[..scheme_sep];
-        let scheme_start = head
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        out.push_str(&rest[..scheme_start]);
+        // URL 之前的文本整体保留(含 scheme 名与紧贴的数字,如 `HTTP 502https://…` 的 502;
+        // 波次 G F2:旧实现在此回退吞掉 scheme 名 ⇒ URL 前紧贴的数字一并丢失)。
+        out.push_str(&rest[..scheme_sep]);
         // URL 终点:空白或常见分隔符(引号/分号/逗号/括号)。
         let tail = &rest[scheme_sep..];
         let url_end = tail
@@ -1286,5 +1289,48 @@ mod tests {
         // 判据未被削弱:原因文本里的网络措辞仍必须命中。
         assert!(policy.classify("connection refused; endpoint=http://a.b:8123/v1").is_retryable());
         assert!(policy.classify("dns failure").is_retryable());
+    }
+
+    /// wave-35/G 回归(F1+F2):剥离必须 (a) 对**多字节字符紧贴 URL** 安全(不得出现
+    /// `byte index N is not a char boundary` panic —— 入参含上游可控文本),(b) 范围最小:
+    /// URL 之前紧贴的数字不得被当作 scheme 名吞掉,(c) URL 后无空白直达串尾时其前文本仍参与分类。
+    #[test]
+    fn stage2_strip_endpoint_fragments_is_byte_safe_and_minimal() {
+        let policy = ProviderRetryPolicy::new(BackoffConfig::default());
+        // (a) 多字节字符**紧贴** `://`(无 ASCII 分隔符):不 panic,端口不得决定分类。
+        // 输入的字符宽度覆盖 CJK(3B)/全角冒号(3B)/emoji(4B);均用转义码点写死,
+        // 避免「只有带空格的输入」导致回归时(index+1 复活)测试仍恒绿。
+        for probe in [
+            "访问https://x/v1",
+            "访问https://127.0.0.1:42953/v1",
+            "错误\u{ff1a}https://x/v1",
+            "错误\u{ff1a}https://127.0.0.1:50208/v1",
+            "\u{1f512}https://x/v1",
+            "\u{1f512}https://127.0.0.1:40891/v1",
+            "错误:https://127.0.0.1:42953/v1",
+            "请求失败(网络层):https://gw.internal:50208/v1/chat/completions",
+        ] {
+            let kind = policy.classify(probe);
+            assert!(
+                !kind.is_retryable(),
+                "多字节紧贴 URL 不得 panic 或按端口误判: {probe} -> {kind:?}"
+            );
+            assert!(!is_rate_limit_error(probe), "{probe}");
+        }
+        // (b) URL 前紧贴的数字必须保留(基线 TransientRetryable),不得被当 scheme 名吞掉。
+        assert!(policy.classify("HTTP 502https://gw/v1").is_retryable());
+        assert!(policy.classify("HTTP 503https://gw/v1").is_retryable());
+        assert!(policy.classify("429https://gw/v1").is_retryable());
+        // (c) URL 后无空白直达串尾:其前原因文本仍参与分类。
+        assert!(policy
+            .classify("connection reset by peer http://127.0.0.1:50208/v1")
+            .is_retryable());
+        assert!(!policy
+            .classify("响应预览无 SSE data 事件 http://127.0.0.1:50208/v1")
+            .is_retryable());
+        // (d) 多个 URL 逐个剥离,后续原因文本保留。
+        assert!(policy
+            .classify("主站失败 http://a.internal:50208/v1 备用 connection refused")
+            .is_retryable());
     }
 }
