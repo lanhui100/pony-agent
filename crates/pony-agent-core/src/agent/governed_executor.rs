@@ -728,6 +728,15 @@ mod tests {
             session_id: Some("session-1".to_string()),
             run_id: Some("run-1".to_string()),
             turn_id: Some("turn-1".to_string()),
+            // W36 / PA-141：Draft→Executing 迁移（complete_step 首步）需要宿主审批证据。
+            plan_execution_approval: Some(crate::agent::dispatcher::PlanExecutionApproval {
+                session_id: "session-1".to_string(),
+                plan_id: "plan-1".to_string(),
+                expires_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64 + 3_600_000)
+                    .unwrap_or(u64::MAX),
+            }),
             ..Default::default()
         });
 
