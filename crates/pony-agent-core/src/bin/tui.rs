@@ -794,71 +794,138 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
-/// 彩色像素 pony 头部（参考 Antigravity CLI init banner）：
-/// 左侧用半块字符拼一枚 14×10 像素的彩虹马蹄铁（马蹄铁即 pony 的徽记），
-/// 右侧是版本 / 模型(提供商) / 工作区信息列；整块随会话向上滚动。
+/// 彩色 init 头部（参考 Antigravity CLI banner）：
+/// 左侧用 Braille 点阵（每格 2×4 点）渲染真实品牌标 —— 24 格 × 10 行 = 48×40 点，
+/// 颜色取每格点均值量化后的调色板色，保持橙→绯→紫渐变；右侧是版本/模型/工作区信息列。
+/// 整块是会话流的第一条内容，随对话向上滚动。
 fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
-    // 14 列 × 10 像素行；两行像素合成一条终端行（▀ / ▄），即 14 字符 × 5 文本行。
-    const ART: [&str; 10] = [
-        "..##########..",
-        ".############.",
-        "##############",
-        "#####....#####",
-        "####......####",
-        "####......####",
-        "####......####",
-        "#####....#####",
-        ".#####..#####.",
-        "..####..####..",
+    // 品牌标（双三角 P）48×40 点阵：每行 48 bit，用 12 位十六进制串存储。
+    const DOT_ROWS: [&str; 40] = [
+    "0007c0000000",
+    "000fe0000000",
+    "001ff0000000",
+    "003ff8000000",
+    "003ffc000000",
+    "007efc000000",
+    "00fc7e000000",
+    "00f83f000000",
+    "01f89f800000",
+    "03f1df800000",
+    "03e1efc00000",
+    "07e3e7e00000",
+    "0fc7ffe00000",
+    "1f87fff00000",
+    "1f0ffff80000",
+    "3f1ffffc0000",
+    "7e0000000000",
+    "7c0000000000",
+    "fffffffffff8",
+    "7ffffffffffe",
+    "7fffffffffff",
+    "3fffffffffff",
+    "00000000003f",
+    "00000000003e",
+    "00001ffff87e",
+    "00001ffff87c",
+    "00000ffff0f8",
+    "000007ffe1f8",
+    "000003e3e3f0",
+    "000003f3c3e0",
+    "000001f987c0",
+    "000000fd8fc0",
+    "0000007c1f80",
+    "0000003e1f00",
+    "0000003f3f00",
+    "0000001ffe00",
+    "0000000ffc00",
+    "00000007f800",
+    "00000007f800",
+    "00000003e000",
     ];
-    // 彩虹渐变色标（暖 → 冷）。
-    const STOPS: [(f32, u8, u8, u8); 7] = [
-        (0.00, 252, 208, 96),
-        (0.17, 248, 152, 72),
-        (0.33, 238, 112, 92),
-        (0.50, 196, 96, 148),
-        (0.67, 150, 100, 216),
-        (0.83, 104, 122, 240),
-        (1.00, 84, 176, 250),
+    // 每格颜色（24×10），base36 索引到 PALETTE；'.' 表示该格无点。
+    const CELL_ROWS: [&str; 10] = [
+    ".....033341.............",
+    "....04302662............",
+    "..236302417d85..........",
+    ".26621477ccfff5.........",
+    "2dd7777ccegggggiiikkkoo9",
+    "13ddcceefppppiillllooqqn",
+    ".........5ghiikklj9anqn9",
+    "...........gll9jj9annb..",
+    "............jjoa9anb9...",
+    "..............abbb9.....",
     ];
-    const W: usize = 14;
+    const PALETTE: [(u8, u8, u8); 28] = [
+    (240, 164, 111),
+    (227, 137, 109),
+    (223, 128, 78),
+    (233, 120, 71),
+    (232, 105, 65),
+    (181, 113, 141),
+    (226, 88, 58),
+    (221, 72, 70),
+    (205, 77, 102),
+    (122, 92, 153),
+    (103, 77, 148),
+    (85, 71, 149),
+    (212, 61, 76),
+    (218, 59, 48),
+    (202, 49, 82),
+    (197, 36, 84),
+    (176, 48, 114),
+    (174, 34, 102),
+    (152, 43, 114),
+    (127, 53, 126),
+    (131, 47, 118),
+    (129, 37, 112),
+    (97, 53, 124),
+    (69, 49, 128),
+    (90, 37, 111),
+    (171, 28, 96),
+    (84, 26, 105),
+    (0, 0, 0),
+    ];
+    const COLS: usize = 24;
+    const ROWS: usize = 10;
+    const DOT_W: usize = 48;
 
-    let gradient = |col: usize| -> ratatui::style::Color {
-        let t = col as f32 / (W - 1) as f32;
-        let (mut lo, mut hi) = (STOPS[0], STOPS[STOPS.len() - 1]);
-        for pair in STOPS.windows(2) {
-            if t >= pair[0].0 && t <= pair[1].0 {
-                lo = pair[0];
-                hi = pair[1];
-                break;
-            }
+    const BASE36: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    // Braille 点序：左列 1/2/3/7，右列 4/5/6/8（按 (dx, dy) 对应点号）。
+    const DOT_MAP: [(usize, usize, u8); 8] = [
+        (0, 0, 1),
+        (0, 1, 2),
+        (0, 2, 4),
+        (1, 0, 8),
+        (1, 1, 16),
+        (1, 2, 32),
+        (0, 3, 64),
+        (1, 3, 128),
+    ];
+
+    // 解析十六进制位图（48 bit/行）。
+    let mut dot_bits: Vec<u64> = Vec::with_capacity(DOT_ROWS.len());
+    for row in DOT_ROWS.iter() {
+        let mut v: u64 = 0;
+        for ch in row.bytes() {
+            let nibble = match ch {
+                b'0'..=b'9' => ch - b'0',
+                b'a'..=b'f' => ch - b'a' + 10,
+                _ => 0,
+            };
+            v = (v << 4) | nibble as u64;
         }
-        let span = (hi.0 - lo.0).max(1e-6);
-        let k = ((t - lo.0) / span).clamp(0.0, 1.0);
-        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * k).round() as u8;
-        ratatui::style::Color::Rgb(mix(lo.1, hi.1), mix(lo.2, hi.2), mix(lo.3, hi.3))
-    };
-
-    let filled = |row: usize, col: usize| -> bool {
-        ART[row].as_bytes().get(col).map(|b| *b == b'#').unwrap_or(false)
-    };
-
-    let mut logo_rows: Vec<Line<'static>> = Vec::new();
-    for pair in 0..5 {
-        let (top, bottom) = (pair * 2, pair * 2 + 1);
-        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
-        for col in 0..W {
-            let c = gradient(col);
-            match (filled(top, col), filled(bottom, col)) {
-                (true, true) => spans.push(Span::styled("▀", Style::default().fg(c).bg(c))),
-                (true, false) => spans.push(Span::styled("▀", Style::default().fg(c))),
-                (false, true) => spans.push(Span::styled("▄", Style::default().fg(c))),
-                (false, false) => spans.push(Span::raw(" ")),
-            }
-        }
-        logo_rows.push(Line::from(spans));
+        dot_bits.push(v);
     }
+    let dot_on = |cell_x: usize, cell_y: usize, dx: usize, dy: usize| -> bool {
+        let x = cell_x * 2 + dx;
+        let y = cell_y * 4 + dy;
+        if x >= DOT_W || y >= dot_bits.len() {
+            return false;
+        }
+        (dot_bits[y] >> (DOT_W - 1 - x)) & 1 == 1
+    };
 
+    let mut out: Vec<Line<'static>> = Vec::new();
     let info = [
         Line::from(vec![
             Span::styled(
@@ -882,11 +949,34 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
         )),
     ];
 
-    // 信息列垂直居中于 5 行标志（占第 2~4 行）。
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for (idx, logo) in logo_rows.into_iter().enumerate() {
-        let mut spans = logo.spans;
-        if let Some(info_line) = idx.checked_sub(1).and_then(|i| info.get(i)) {
+    for (cy, cell_row) in CELL_ROWS.iter().enumerate().take(ROWS) {
+        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+        let colors = cell_row.as_bytes();
+        for cx in 0..COLS {
+            let mut code: u32 = 0;
+            for (dx, dy, bit) in DOT_MAP {
+                if dot_on(cx, cy, dx, dy) {
+                    code |= bit as u32;
+                }
+            }
+            if code == 0 {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+            let pal_idx = colors
+                .get(cx)
+                .and_then(|c| BASE36.iter().position(|b| b == c))
+                .unwrap_or(0)
+                .min(PALETTE.len() - 1);
+            let (r, g, b) = PALETTE[pal_idx];
+            let glyph = char::from_u32(0x2800 + code).unwrap_or(' ');
+            spans.push(Span::styled(
+                glyph.to_string(),
+                Style::default().fg(ratatui::style::Color::Rgb(r, g, b)),
+            ));
+        }
+        // 信息列垂直居中于 10 行标志（占第 4~6 行）。
+        if let Some(info_line) = cy.checked_sub(3).and_then(|i| info.get(i)) {
             spans.push(Span::raw("   "));
             spans.extend(info_line.spans.clone());
         }
