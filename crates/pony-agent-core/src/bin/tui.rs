@@ -795,137 +795,72 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
 }
 
 /// 彩色 init 头部（参考 Antigravity CLI banner）：
-/// 左侧用 Braille 点阵（每格 2×4 点）渲染真实品牌标 —— 24 格 × 10 行 = 48×40 点，
-/// 颜色取每格点均值量化后的调色板色，保持橙→绯→紫渐变；右侧是版本/模型/工作区信息列。
+/// 左侧是品牌渐变色的几何「P」标识 —— 22×28 像素网格，用「▀」半块字符逐格上/下双色渲染
+/// （实心块、无点阵断裂），右侧是版本 / 模型(提供商) / 工作区信息列，垂直居中。
 /// 整块是会话流的第一条内容，随对话向上滚动。
 fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
-    // 品牌标（双三角 P）48×40 点阵：每行 48 bit，用 12 位十六进制串存储。
-    const DOT_ROWS: [&str; 40] = [
-    "0007c0000000",
-    "000fe0000000",
-    "001ff0000000",
-    "003ff8000000",
-    "003ffc000000",
-    "007efc000000",
-    "00fc7e000000",
-    "00f83f000000",
-    "01f89f800000",
-    "03f1df800000",
-    "03e1efc00000",
-    "07e3e7e00000",
-    "0fc7ffe00000",
-    "1f87fff00000",
-    "1f0ffff80000",
-    "3f1ffffc0000",
-    "7e0000000000",
-    "7c0000000000",
-    "fffffffffff8",
-    "7ffffffffffe",
-    "7fffffffffff",
-    "3fffffffffff",
-    "00000000003f",
-    "00000000003e",
-    "00001ffff87e",
-    "00001ffff87c",
-    "00000ffff0f8",
-    "000007ffe1f8",
-    "000003e3e3f0",
-    "000003f3c3e0",
-    "000001f987c0",
-    "000000fd8fc0",
-    "0000007c1f80",
-    "0000003e1f00",
-    "0000003f3f00",
-    "0000001ffe00",
-    "0000000ffc00",
-    "00000007f800",
-    "00000007f800",
-    "00000003e000",
+    // 「P」字形像素表：每行 22 格，'.' 为空，其余为调色板索引（0-9a）。
+    const P_ROWS: [&str; 28] = [
+        "......................",
+        "...000112234456677....",
+        ".0000112234455667788..",
+        ".0000112334556677888..",
+        ".00011223445667778899.",
+        ".00112233455667788899.",
+        ".0011233......7888999.",
+        ".01122..........88999.",
+        ".11123..........8999a.",
+        ".11223..........9999a.",
+        ".12234..........999aa.",
+        ".12334..........99aaa.",
+        ".223445........999aaa.",
+        ".2344556677888999aaaa.",
+        ".334556677888999aaaaa.",
+        ".344566777889999aaaaa.",
+        ".34556677888999aaaaa..",
+        ".4556677888999aaaaa...",
+        ".45667................",
+        ".55667................",
+        ".56677................",
+        ".56677................",
+        ".66778................",
+        ".67778................",
+        ".67788................",
+        ".77888................",
+        "...8..................",
+        "......................",
     ];
-    // 每格颜色（24×10），base36 索引到 PALETTE；'.' 表示该格无点。
-    const CELL_ROWS: [&str; 10] = [
-    ".....033341.............",
-    "....04302662............",
-    "..236302417d85..........",
-    ".26621477ccfff5.........",
-    "2dd7777ccegggggiiikkkoo9",
-    "13ddcceefppppiillllooqqn",
-    ".........5ghiikklj9anqn9",
-    "...........gll9jj9annb..",
-    "............jjoa9anb9...",
-    "..............abbb9.....",
+    const P_PALETTE: [(u8, u8, u8); 12] = [
+        (240, 112, 62),
+        (237, 97, 63),
+        (235, 88, 63),
+        (233, 80, 64),
+        (230, 73, 67),
+        (223, 70, 76),
+        (215, 66, 86),
+        (205, 62, 97),
+        (194, 57, 112),
+        (181, 52, 128),
+        (160, 49, 136),
+        (0, 0, 0),
     ];
-    const PALETTE: [(u8, u8, u8); 28] = [
-    (240, 164, 111),
-    (227, 137, 109),
-    (223, 128, 78),
-    (233, 120, 71),
-    (232, 105, 65),
-    (181, 113, 141),
-    (226, 88, 58),
-    (221, 72, 70),
-    (205, 77, 102),
-    (122, 92, 153),
-    (103, 77, 148),
-    (85, 71, 149),
-    (212, 61, 76),
-    (218, 59, 48),
-    (202, 49, 82),
-    (197, 36, 84),
-    (176, 48, 114),
-    (174, 34, 102),
-    (152, 43, 114),
-    (127, 53, 126),
-    (131, 47, 118),
-    (129, 37, 112),
-    (97, 53, 124),
-    (69, 49, 128),
-    (90, 37, 111),
-    (171, 28, 96),
-    (84, 26, 105),
-    (0, 0, 0),
-    ];
-    const COLS: usize = 24;
-    const ROWS: usize = 10;
-    const DOT_W: usize = 48;
+    const COLS: usize = 22;
+    const ROWS: usize = 28;
 
-    const BASE36: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    // Braille 点序：左列 1/2/3/7，右列 4/5/6/8（按 (dx, dy) 对应点号）。
-    const DOT_MAP: [(usize, usize, u8); 8] = [
-        (0, 0, 1),
-        (0, 1, 2),
-        (0, 2, 4),
-        (1, 0, 8),
-        (1, 1, 16),
-        (1, 2, 32),
-        (0, 3, 64),
-        (1, 3, 128),
-    ];
-
-    // 解析十六进制位图（48 bit/行）。
-    let mut dot_bits: Vec<u64> = Vec::with_capacity(DOT_ROWS.len());
-    for row in DOT_ROWS.iter() {
-        let mut v: u64 = 0;
-        for ch in row.bytes() {
-            let nibble = match ch {
-                b'0'..=b'9' => ch - b'0',
-                b'a'..=b'f' => ch - b'a' + 10,
-                _ => 0,
-            };
-            v = (v << 4) | nibble as u64;
+    let color_of = |ch: u8| -> Option<ratatui::style::Color> {
+        if ch == b'.' {
+            return None;
         }
-        dot_bits.push(v);
-    }
-    let dot_on = |cell_x: usize, cell_y: usize, dx: usize, dy: usize| -> bool {
-        let x = cell_x * 2 + dx;
-        let y = cell_y * 4 + dy;
-        if x >= DOT_W || y >= dot_bits.len() {
-            return false;
-        }
-        (dot_bits[y] >> (DOT_W - 1 - x)) & 1 == 1
+        let idx = match ch {
+            b'0'..=b'9' => (ch - b'0') as usize,
+            b'a' => 10,
+            b'b' => 11,
+            _ => return None,
+        };
+        let (r, g, b) = P_PALETTE[idx.min(P_PALETTE.len() - 1)];
+        Some(ratatui::style::Color::Rgb(r, g, b))
     };
 
-    let mut out: Vec<Line<'static>> = Vec::new();
     let info = [
         Line::from(vec![
             Span::styled(
@@ -949,34 +884,24 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
         )),
     ];
 
-    for (cy, cell_row) in CELL_ROWS.iter().enumerate().take(ROWS) {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for line in 0..(ROWS / 2) {
+        let top = P_ROWS[line * 2].as_bytes();
+        let bottom = P_ROWS[line * 2 + 1].as_bytes();
         let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
-        let colors = cell_row.as_bytes();
-        for cx in 0..COLS {
-            let mut code: u32 = 0;
-            for (dx, dy, bit) in DOT_MAP {
-                if dot_on(cx, cy, dx, dy) {
-                    code |= bit as u32;
-                }
-            }
-            if code == 0 {
-                spans.push(Span::raw(" "));
-                continue;
-            }
-            let pal_idx = colors
-                .get(cx)
-                .and_then(|c| BASE36.iter().position(|b| b == c))
-                .unwrap_or(0)
-                .min(PALETTE.len() - 1);
-            let (r, g, b) = PALETTE[pal_idx];
-            let glyph = char::from_u32(0x2800 + code).unwrap_or(' ');
-            spans.push(Span::styled(
-                glyph.to_string(),
-                Style::default().fg(ratatui::style::Color::Rgb(r, g, b)),
-            ));
+        for x in 0..COLS {
+            let up = top.get(x).and_then(|c| color_of(*c));
+            let dn = bottom.get(x).and_then(|c| color_of(*c));
+            let span = match (up, dn) {
+                (Some(u), Some(d)) => Span::styled("▀", Style::default().fg(u).bg(d)),
+                (Some(u), None) => Span::styled("▀", Style::default().fg(u)),
+                (None, Some(d)) => Span::styled("▄", Style::default().fg(d)),
+                (None, None) => Span::raw(" "),
+            };
+            spans.push(span);
         }
-        // 信息列垂直居中于 10 行标志（占第 4~6 行）。
-        if let Some(info_line) = cy.checked_sub(3).and_then(|i| info.get(i)) {
+        // 信息列垂直居中于 14 行标识（占第 6~8 行）。
+        if let Some(info_line) = line.checked_sub(5).and_then(|i| info.get(i)) {
             spans.push(Span::raw("   "));
             spans.extend(info_line.spans.clone());
         }
