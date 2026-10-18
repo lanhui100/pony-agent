@@ -497,6 +497,8 @@ fn c141_8_complete_step_migration_requires_approval_only_in_draft() {
     assert_eq!(executing["lifecycle"], "executing");
 
     // Executing 状态的 complete_step 不再需要审批（仅迁移受影响）。
+    // 注：两步 plan 完成第二步 ⇒ 既有 PlanStore 语义「全部 step 完成 ⇒ lifecycle=Completed」
+    // （plan_state.rs:330，被 plan_state 冻结单测锁定）；本断言即锁定该终态。
     let next = executor.execute(&call(
         "plan_control",
         complete_step_args(SESSION_A, &executing, 1),
@@ -506,7 +508,7 @@ fn c141_8_complete_step_migration_requires_approval_only_in_draft() {
         "complete_step on Executing must not require approval: {}",
         next.output
     );
-    assert_eq!(parse_output(&next.output)["lifecycle"], "executing");
+    assert_eq!(parse_output(&next.output)["lifecycle"], "completed");
 
     let _ = fs::remove_dir_all(workspace);
 }
