@@ -14,7 +14,7 @@ pub fn fetch_model_ids(
     api_key: &str,
 ) -> Result<Vec<String>, String> {
     let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
-    let client = build_http_client(Duration::from_secs(15))?;
+    let client = build_http_client(Duration::from_secs(15), &endpoint)?;
     let started_at = Instant::now();
 
     let mut request = client.get(&endpoint);

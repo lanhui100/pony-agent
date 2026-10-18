@@ -90,6 +90,10 @@ pub enum UiEvent {
     StreamToolResult(String),
     StreamCompleted,
     StreamFailed(String),
+    /// /models 触发的远程模型目录拉取成功：ids 已由后台线程取得，由主循环持久化并打开面板。
+    ModelsDiscovered { provider_id: String, ids: Vec<String> },
+    /// /models 远程拉取失败：仅上报错误，由主循环以 System 消息呈现，不 panic、不退出。
+    ModelsDiscoverFailed { provider_id: String, error: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1079,6 +1083,39 @@ impl TurnEventSink for TuiTurnSink {
     }
 }
 
+/// wave-35c：解析当前活跃 provider id。
+/// 顺序：注册表 selected_provider_id → 首个 provider → state.current_provider_id
+///（仅当它确实命中注册表才有效——默认硬编码值 "ponyllm" 可能并不存在）。
+pub fn resolve_active_provider_id(_state: &TuiState) -> Option<String> {
+    let view = ProviderRegistryStore::new().load_view();
+    if view.providers.is_empty() {
+        return None;
+    }
+    if let Some(sel) = view.selected_provider_id.as_ref() {
+        if view.providers.iter().any(|p| &p.id == sel) {
+            return Some(sel.clone());
+        }
+    }
+    Some(view.providers[0].id.clone())
+}
+
+/// wave-35c：启动同步——把 TuiState 的 current_provider_id / model 对齐注册表
+/// 选中项与 selected_model_id，使 header/状态一致，并保证后续 discovery 能命中。
+fn sync_state_with_registry(state: &mut TuiState) {
+    if let Some(id) = resolve_active_provider_id(state) {
+        state.current_provider_id = id;
+    }
+    let registry = ProviderRegistryStore::new();
+    let view = registry.load_view();
+    if let Some(p) = view.providers.iter().find(|p| p.id == state.current_provider_id) {
+        if let Some(sel) = p.selected_model_id.as_ref() {
+            if p.models.iter().any(|m| &m.id == sel) {
+                state.model = sel.clone();
+            }
+        }
+    }
+}
+
 fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &str) -> HostControlPlane {
     // 彻底复用桌面端体系：直接使用与桌面端相同的生产环境默认 SessionStore（默认加载与写入 ~/.pony-agent/sessions.sqlite 或 sessions.json）
     // 使得 TUI 创建和更新的会话在桌面端无缝可见与互通。
@@ -1532,6 +1569,12 @@ fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
 
 /// 底部状态词：克制到只有一个词（耗时与动画只在正文活动行出现一次）。
 fn status_word(state: &TuiState) -> (String, Style) {
+    // wave-35b：status_text（/models 拉取进度、Turn completed 等）非空且非 Ready 时
+    // 优先呈现，否则回落 runtime 状态词。
+    let st = state.status_text.trim();
+    if !st.is_empty() && st != "Ready" {
+        return (st.to_string(), muted());
+    }
     match &state.runtime_mode {
         RuntimeMode::Ready => ("就绪".to_string(), faint()),
         RuntimeMode::Connecting => ("连接中".to_string(), muted()),
@@ -2041,7 +2084,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     if state.mode == InteractionMode::SelectingModel {
         let rows = state.model_list.len().max(1) as u16;
         let rect = panel_rect(58, rows + 4);
-        let body = draw_panel(f, rect, "模型", "↑↓ 选择 · 回车 确认 · esc 取消");
+        let body = draw_panel(f, rect, "模型", "↑↓ 选择 · 回车 确认 · r 刷新 · esc 取消");
         let inner_w = body.width as usize;
         let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.model_list.is_empty() {
@@ -2156,7 +2199,9 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let state = TuiState::default();
+    let mut state = TuiState::default();
+    // wave-35c：启动同步 current_provider_id / model 与注册表一致（build_control_plane 之前）。
+    sync_state_with_registry(&mut state);
     let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
 
     let (tx, rx): (Sender<UiEvent>, Receiver<UiEvent>) = channel();
@@ -2176,6 +2221,39 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
         Ok(inner) => inner,
         Err(payload) => std::panic::resume_unwind(payload),
     }
+}
+
+/// wave-35：后台线程远程拉取 provider 模型目录（15s 超时、自带错误语义）。
+/// 复用 fetch_model_ids；成功/失败均经 UiEvent 回主循环，UI 线程不阻塞。
+fn spawn_model_discovery(_state: &TuiState, tx: &Sender<UiEvent>, provider_id: &str) {
+    let registry = ProviderRegistryStore::new();
+    let (protocol, base_url, auth_type) = {
+        let view = registry.load_view();
+        match view.providers.iter().find(|p| p.id == provider_id) {
+            Some(p) => (p.protocol.clone(), p.base_url.clone(), p.auth_type.clone()),
+            None => {
+                let _ = tx.send(UiEvent::ModelsDiscoverFailed {
+                    provider_id: provider_id.to_string(),
+                    error: "provider 不在注册表中".to_string(),
+                });
+                return;
+            }
+        }
+    };
+    let api_key = registry.provider_api_key(Some(provider_id)).unwrap_or_default();
+    let provider_id = provider_id.to_string();
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+        match pony_agent_core::agent::provider::fetch_model_ids(&protocol, &base_url, &auth_type, &api_key) {
+            Ok(ids) => {
+                let _ = tx.send(UiEvent::ModelsDiscovered { provider_id, ids });
+            }
+            Err(error) => {
+                let _ = tx.send(UiEvent::ModelsDiscoverFailed { provider_id, error });
+            }
+        }
+    });
 }
 
 fn tui_event_loop(
@@ -2442,6 +2520,15 @@ fn tui_event_loop(
                                     timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                                 });
                             }
+                            // wave-35b：面板内 `r`/`R` 对当前 provider 无条件重新远程拉取
+                            //（线程化，面板保持；不受 is_streaming 影响——分支先于流式守卫）。
+                            // 完成后由 ModelsDiscovered 处理器刷新 model_list 与选中项。
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                let prov_id = resolve_active_provider_id(&state)
+                                    .unwrap_or_else(|| state.current_provider_id.clone());
+                                state.status_text = "正在拉取模型列表…".to_string();
+                                spawn_model_discovery(&state, &tx, &prov_id);
+                            }
                             _ => {}
                         }
                         continue;
@@ -2570,6 +2657,27 @@ fn tui_event_loop(
                                 state.cursor_line_end();
                                 continue;
                             }
+                            // wave-35b：Ctrl+R 打开模型面板并远程刷新（与 /models 同路径）。
+                            // 不占用裸 `r`，避免无法输入以 r 开头的消息。
+                            KeyCode::Char('r') => {
+                                let registry = ProviderRegistryStore::new();
+                                let view = registry.load_view();
+                                let active_id = resolve_active_provider_id(&state);
+                                let prov = active_id
+                                    .as_ref()
+                                    .and_then(|id| view.providers.iter().find(|p| &p.id == id));
+                                if let Some(p) = prov {
+                                    let items: Vec<ModelItem> = p
+                                        .models
+                                        .iter()
+                                        .map(|m| ModelItem { id: m.id.clone(), name: m.name.clone() })
+                                        .collect();
+                                    state.open_model_selector(items);
+                                    state.status_text = "正在拉取模型列表…".to_string();
+                                    spawn_model_discovery(&state, &tx, &p.id);
+                                }
+                                continue;
+                            }
                             _ => {}
                         }
                     }
@@ -2643,30 +2751,30 @@ fn tui_event_loop(
                                 }
 
                                 if input == "/models" {
+                                    // wave-35b：cache-first + 始终后台刷新。
+                                    // load_view 对空 models 会注入 default（config.rs:873-889），
+                                    // 因此不能以「本地非空」判定免拉取：先开缓存面板，再无条件远程刷新。
+                                    // wave-35c：统一用 resolve_active_provider_id 取 provider。
                                     let registry = ProviderRegistryStore::new();
                                     let view = registry.load_view();
-                                    let current_prov = view
-                                        .providers
-                                        .into_iter()
-                                        .find(|p| p.id == state.current_provider_id)
-                                        .or_else(|| {
-                                            view.selected_provider_id
-                                                .as_ref()
-                                                .and_then(|id| registry.load_view().providers.into_iter().find(|p| &p.id == id))
-                                        });
+                                    let current_prov = resolve_active_provider_id(&state)
+                                        .and_then(|id| view.providers.iter().find(|p| p.id == id).cloned());
 
-                                    let items: Vec<ModelItem> = if let Some(p) = current_prov {
-                                        p.models
-                                            .into_iter()
-                                            .map(|m| ModelItem {
-                                                id: m.id,
-                                                name: m.name,
-                                            })
-                                            .collect()
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    state.open_model_selector(items);
+                                    match current_prov {
+                                        Some(p) => {
+                                            let items: Vec<ModelItem> = p
+                                                .models
+                                                .iter()
+                                                .map(|m| ModelItem { id: m.id.clone(), name: m.name.clone() })
+                                                .collect();
+                                            state.open_model_selector(items);
+                                            state.status_text = "正在拉取模型列表…".to_string();
+                                            spawn_model_discovery(&state, &tx, &p.id);
+                                        }
+                                        None => {
+                                            state.open_model_selector(Vec::new());
+                                        }
+                                    }
                                     continue;
                                 }
 
@@ -2816,6 +2924,81 @@ fn tui_event_loop(
                     state.messages.push(ChatMessage {
                         role: MessageRole::System,
                         content: format!("Error: {}", err),
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                }
+                UiEvent::ModelsDiscovered { provider_id, ids } => {
+                    // 把远程目录写入该 provider 的 models 并持久化，然后打开选择面板。
+                    let registry = ProviderRegistryStore::new();
+                    let mut view = registry.load_view();
+                    if let Some(p) = view.providers.iter_mut().find(|p| p.id == provider_id) {
+                        // 以既有第一个模型条目为模板克隆（保留该 provider 的协议/能力配置语义），
+                        // 无模板时按 OpenAiCompletions 兜底构造合法条目。
+                        let template = p.models.first().cloned();
+                        p.models = ids.iter().map(|id| match &template {
+                            Some(t) => {
+                                let mut m = t.clone();
+                                m.id = id.clone();
+                                m.name = id.clone();
+                                m.model = id.clone();
+                                m
+                            }
+                            None => pony_agent_core::agent::config::ProviderModelConfig {
+                                id: id.clone(),
+                                name: id.clone(),
+                                model: id.clone(),
+                                temperature: 0.2,
+                                max_output_tokens: 8192,
+                                capability_preset: pony_agent_core::agent::config::ProviderCapabilityPreset::Auto,
+                                reasoning_effort: None,
+                                reasoning_budget_tokens: None,
+                                protocol: Some(p.protocol.clone()),
+                                base_url: None,
+                                capabilities: Default::default(),
+                            },
+                        }).collect();
+                    }
+                    match registry.save_view(view) {
+                        Ok(saved) => {
+                            let items: Vec<ModelItem> = saved
+                                .providers
+                                .iter()
+                                .find(|p| p.id == provider_id)
+                                .map(|p| p.models.iter().map(|m| ModelItem { id: m.id.clone(), name: m.name.clone() }).collect())
+                                .unwrap_or_default();
+                            let n = items.len();
+                            if state.mode == InteractionMode::SelectingModel {
+                                // 面板已开：刷新列表，保留当前命中项选择，否则回到 0。
+                                let prev = state.model_list.get(state.selected_model_index).map(|m| m.id.clone())
+                                    .or_else(|| Some(state.model.clone()));
+                                state.model_list = items;
+                                state.selected_model_index = state
+                                    .model_list
+                                    .iter()
+                                    .position(|m| Some(&m.id) == prev.as_ref())
+                                    .unwrap_or(0);
+                            }
+                            // 面板未打开：仅刷新注册表与状态，不强行弹面板。
+                            state.status_text = format!("已加载 {n} 个模型");
+                        }
+                        Err(e) => {
+                            state.status_text = format!("模型目录保存失败: {e}");
+                            state.messages.push(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("模型目录保存失败（{provider_id}）: {e}"),
+                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                            });
+                        }
+                    }
+                }
+                UiEvent::ModelsDiscoverFailed { provider_id, error } => {
+                    // 拉取失败：System 消息呈现摘要，不 panic、不退出；
+                    // 面板已开则保留缓存列表（cache-first 语义），仅更新状态。
+                    let summary: String = error.chars().take(200).collect();
+                    state.status_text = format!("模型列表拉取失败: {summary}");
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: format!("模型列表拉取失败（{provider_id}）: {summary}"),
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
                 }

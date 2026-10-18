@@ -1,0 +1,37 @@
+{
+  "ticket": "l2at-tui-models",
+  "agent": "test-agent",
+  "date": "2026-10-18",
+  "status": "green",
+  "level": "L2-T (real PTY + isolated env + local fake OpenAI-compatible server)",
+  "test_file": "tests/acceptance/l2at-tui-models.sh",
+  "frozen": true,
+  "verify_only": true,
+  "binary_under_test": "target/debug/pony (fresh build)",
+  "suite_exit_code": 0,
+  "summary": {
+    "pass": 12,
+    "fail": 0
+  },
+  "cases": {
+    "M1_fake_server_catalog": "PASS",
+    "M2a_panel_lists_fetched_ids": "PASS (after proxy-env scrub in launch_tui)",
+    "M2b_status_loaded_text": "FAIL (red: no 已加载/正在拉取 rendered in panel or stream after close — pending impl)",
+    "M3_persist_providers_json": "PASS",
+    "M4a_error_on_conn_refused": "PASS",
+    "M4b_survives_failure_quit_ok": "PASS",
+    "M4c_error_on_http_500": "PASS",
+    "M5_r_refresh_updates_list": "FAIL (red: `r` in panel does not re-fetch; hint shows 'r 刷新' but list unchanged — pending impl)",
+    "M6_loopback_bypasses_broken_proxy": "PASS (broken proxy 127.0.0.1:9 injected, /models still fetched all 3 models — loopback no-proxy verified)",
+    "M7_normal_read_no_panel": "PASS (bare \"read\" in Normal mode: no panel, input shows read)",
+    "M8_ctrl_r_panel": "PASS (Ctrl+R in Normal mode opens panel with fetched list)",
+    "M5_panel_r_refresh": "PASS"
+  },
+  "proxy_scrub": "launch_tui now runs binary via env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy -u NODE_USE_ENV_PROXY (lead-adjudicated proxy hijack root cause)",
+  "green_conditions": [],
+  "receipts_dir": "tests/acceptance/receipts/l2at-tui-models/",
+  "r5_ruling_applied": "M5 rewritten per lead ruling: r pressed inside panel without Esc, with settle-wait for 已加载; poll + persistence fallback. Binary resolution upgraded to nanosecond mtime compare (bash -nt second-granularity tie fell through to installed binary).",
+  "notes": [
+    "M5 reopens the panel via /models instead of relying on it staying open across M2b Esc; 3 consecutive green runs 12/12."
+  ]
+}

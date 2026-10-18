@@ -636,3 +636,209 @@ fn test_doctor_exit_zero_in_normal_env() {
     // parse 层仅断言 --doctor 被识别为 Doctor；exit code 由实测收据覆盖。
     assert!(matches!(parse_cli_action(&args(&["--doctor"])), CliAction::Doctor));
 }
+
+// wave-35：/models 远程拉取 — UiEvent 变体存在性/构造 + models 持久化映射（with_path 模拟）。
+#[test]
+fn test_ui_event_models_discovered_variant_constructible() {
+    let ev = tui::UiEvent::ModelsDiscovered {
+        provider_id: "ponyllm".to_string(),
+        ids: vec!["m-a".to_string(), "m-b".to_string()],
+    };
+    match ev {
+        tui::UiEvent::ModelsDiscovered { provider_id, ids } => {
+            assert_eq!(provider_id, "ponyllm");
+            assert_eq!(ids, vec!["m-a".to_string(), "m-b".to_string()]);
+        }
+        _ => panic!("variant mismatch"),
+    }
+}
+
+#[test]
+fn test_ui_event_models_discover_failed_variant_constructible() {
+    let ev = tui::UiEvent::ModelsDiscoverFailed {
+        provider_id: "p1".to_string(),
+        error: "状态码 401".to_string(),
+    };
+    match ev {
+        tui::UiEvent::ModelsDiscoverFailed { provider_id, error } => {
+            assert_eq!(provider_id, "p1");
+            assert!(error.contains("401"));
+        }
+        _ => panic!("variant mismatch"),
+    }
+}
+
+#[test]
+fn test_models_discovery_persists_ids_to_provider() {
+    // 用 with_path + 临时目录模拟「远程拉取结果写入 provider.models 并 save_view 持久化」的
+    // 主循环逻辑（与 tui.rs ModelsDiscovered 分支同一数据路径）。
+    let temp_dir = std::env::temp_dir().join(format!("tui-models-discover-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let providers_file = temp_dir.join("providers.json");
+    let store = pony_agent_core::agent::config::ProviderRegistryStore::with_path(&providers_file);
+
+    let mut view = store.load_view();
+    view.providers.push(pony_agent_core::agent::config::ProviderConfigView {
+        id: "disc-provider".to_string(),
+        name: "Disc".to_string(),
+        protocol: pony_agent_core::agent::provider::ProviderProtocol::OpenAiCompletions,
+        base_url: "http://localhost:8000/v1".to_string(),
+        auth_type: pony_agent_core::agent::provider::ProviderAuthType::Auto,
+        api_key_env_var: "DISC_KEY".to_string(),
+        api_key_value: "sk-test".to_string(),
+        api_key_present: true,
+        supported_protocols: vec![],
+        endpoints: vec![],
+        models: vec![],
+        selected_model_id: None,
+    });
+    store.save_view(view).unwrap();
+
+    // 模拟 ModelsDiscovered 分支：写 ids → save_view → 回读。
+    let ids = vec!["model-x".to_string(), "model-y".to_string()];
+    let registry = pony_agent_core::agent::config::ProviderRegistryStore::with_path(&providers_file);
+    let mut view = registry.load_view();
+    let template = view
+        .providers
+        .iter()
+        .find(|p| p.id == "disc-provider")
+        .and_then(|p| p.models.first().cloned());
+    if let Some(p) = view.providers.iter_mut().find(|p| p.id == "disc-provider") {
+        p.models = ids.iter().map(|id| match &template {
+            Some(t) => {
+                let mut m = t.clone();
+                m.id = id.clone();
+                m.name = id.clone();
+                m.model = id.clone();
+                m
+            }
+            None => pony_agent_core::agent::config::ProviderModelConfig {
+                id: id.clone(),
+                name: id.clone(),
+                model: id.clone(),
+                temperature: 0.2,
+                max_output_tokens: 8192,
+                capability_preset: pony_agent_core::agent::config::ProviderCapabilityPreset::Auto,
+                reasoning_effort: None,
+                reasoning_budget_tokens: None,
+                protocol: Some(p.protocol.clone()),
+                base_url: None,
+                capabilities: Default::default(),
+            },
+        }).collect();
+    }
+    registry.save_view(view).unwrap();
+
+    let reloaded = pony_agent_core::agent::config::ProviderRegistryStore::with_path(&providers_file).load_view();
+    let p = reloaded.providers.iter().find(|p| p.id == "disc-provider").expect("provider persisted");
+    assert_eq!(p.models.len(), 2);
+    assert_eq!(p.models[0].id, "model-x");
+    assert_eq!(p.models[0].name, "model-x");
+    assert_eq!(p.models[1].id, "model-y");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+// wave-36：回环地址旁路代理 — 纯函数断言，不真实出网。
+#[test]
+fn test_should_bypass_proxy_loopback_direct() {
+    use pony_agent_core::agent::provider::should_bypass_proxy;
+    assert!(should_bypass_proxy("http://127.0.0.1:8080/v1"));
+    assert!(should_bypass_proxy("http://localhost:11434"));
+    assert!(should_bypass_proxy("http://[::1]:9000"));
+    assert!(should_bypass_proxy("http://[::1]:9000".replace("[::1]", "[::1]").as_str()));
+    // 大小写不敏感
+    assert!(should_bypass_proxy("http://LOCALHOST:1234"));
+}
+
+#[test]
+fn test_should_bypass_proxy_external_uses_env_proxy() {
+    use pony_agent_core::agent::provider::should_bypass_proxy;
+    // 外部域名不旁路 → 保持环境代理行为
+    assert!(!should_bypass_proxy("https://example.com/v1"));
+    assert!(!should_bypass_proxy("https://api.ponyjob.top/v1/models"));
+    // 非回环的 IP 也不旁路
+    assert!(!should_bypass_proxy("http://10.0.0.5:8080"));
+    // 非法 URL 不旁路
+    assert!(!should_bypass_proxy("not a url"));
+}
+
+// wave-35c：resolve_active_provider_id 三分支解析（with_path 临时注册表隔离）。
+// helper 内部用 ProviderRegistryStore::new()（dirs::config_dir → XDG_CONFIG_HOME），
+// 故用互斥锁串行化对进程级环境变量的切换，避免与并行测试互踩。
+static REGISTRY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn run_in_isolated_registry(dir: &std::path::Path, selected: Option<&str>, ids: &[&str]) -> Option<String> {
+    let _g = REGISTRY_ENV_LOCK.lock().unwrap();
+    let saved = std::env::var("XDG_CONFIG_HOME").ok();
+    std::env::set_var("XDG_CONFIG_HOME", dir.join("xdg-config"));
+    std::fs::create_dir_all(dir.join("xdg-config/pony-agent")).unwrap();
+
+    use pony_agent_core::agent::config::{ProviderConfigView, ProviderRegistryStore};
+    let store = ProviderRegistryStore::with_path(dir.join("xdg-config/pony-agent/providers.json"));
+    let mut view = store.load_view();
+    view.providers = ids.iter().map(|id| ProviderConfigView {
+        id: id.to_string(),
+        name: id.to_string(),
+        protocol: pony_agent_core::agent::provider::ProviderProtocol::OpenAiCompletions,
+        base_url: "http://127.0.0.1:1/v1".to_string(),
+        auth_type: pony_agent_core::agent::provider::ProviderAuthType::Auto,
+        api_key_env_var: format!("{id}_KEY"),
+        api_key_value: "k".to_string(),
+        api_key_present: true,
+        supported_protocols: vec![],
+        endpoints: vec![],
+        models: vec![],
+        selected_model_id: None,
+    }).collect();
+    view.selected_provider_id = selected.map(|s| s.to_string());
+    store.save_view(view).unwrap();
+
+    let result = tui::resolve_active_provider_id(&tui::TuiState::default());
+
+    match saved {
+        Some(p) => std::env::set_var("XDG_CONFIG_HOME", p),
+        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+    result
+}
+
+#[test]
+fn test_resolve_active_provider_three_branches() {
+    let pid = std::process::id();
+    let mk = |tag: &str| std::env::temp_dir().join(format!("tui-resolve-{tag}-{pid}"));
+
+    let dir = mk("a"); let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(run_in_isolated_registry(&dir, Some("beta"), &["alpha", "beta"]).as_deref(), Some("beta"));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir = mk("b"); let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(run_in_isolated_registry(&dir, Some("ghost"), &["alpha", "beta"]).as_deref(), Some("alpha"));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // 分支3：无 providers.json → None（helper 的防御分支）。
+    // 产品语义说明：ProviderRegistryStore::load_storage 对缺失/空注册表会注入出厂默认
+    // provider（config.rs normalize_storage:829-832），故 None 在生产路径上不可达；
+    // 此处通过绕开 load_view 归一化的最小 JSON（空 providers + 非法 key 不行——normalize
+    // 同样兜底）仍不可构造。改测「缺失文件 → 回落首个出厂默认 provider」的可观测行为，
+    // 并保持 helper 的 None 防御分支由代码评审覆盖。
+    let dir = mk("c"); let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join("xdg-config/pony-agent")).unwrap();
+    std::fs::write(
+        dir.join("xdg-config/pony-agent/providers.json"),
+        String::from(r#"{"providers":[],"selectedProviderId":null}"#),
+    )
+    .unwrap();
+    let _g = REGISTRY_ENV_LOCK.lock().unwrap();
+    let saved = std::env::var("XDG_CONFIG_HOME").ok();
+    std::env::set_var("XDG_CONFIG_HOME", dir.join("xdg-config"));
+    let result = tui::resolve_active_provider_id(&tui::TuiState::default());
+    match saved {
+        Some(p) => std::env::set_var("XDG_CONFIG_HOME", p),
+        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+    drop(_g);
+    // 可观测行为：normalize_storage 注入出厂默认 → 返回 Some(首个默认 id)。
+    assert!(result.is_some(), "缺失注册表回落首个注入 provider: {result:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

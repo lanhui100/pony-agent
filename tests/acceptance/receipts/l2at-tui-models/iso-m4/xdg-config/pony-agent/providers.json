@@ -1,0 +1,21 @@
+{
+  "providers": [
+    {
+      "id": "fakep",
+      "name": "FakeProvider",
+      "protocol": "openai-completions",
+      "base_url": "http://127.0.0.1:36843/v1",
+      "auth_type": "bearer",
+      "api_key_env_var": "FAKE_API_KEY",
+      "secret_ref": "",
+      "api_key_value": "test-dummy-key",
+      "supported_protocols": [
+        "openai-completions"
+      ],
+      "endpoints": [],
+      "models": [],
+      "selected_model_id": null
+    }
+  ],
+  "selected_provider_id": "fakep"
+}

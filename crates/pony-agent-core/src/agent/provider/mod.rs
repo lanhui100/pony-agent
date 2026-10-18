@@ -1388,6 +1388,7 @@ impl ProviderManager {
             Duration::from_secs(15),
             Duration::from_secs(180),
             Duration::from_secs(180),
+            endpoint,
         )?;
         let started_at = Instant::now();
 
@@ -1433,6 +1434,7 @@ impl ProviderManager {
             Duration::from_secs(15),
             Duration::from_secs(180),
             Duration::from_secs(180),
+            endpoint,
         )?;
         let started_at = Instant::now();
 
@@ -1773,7 +1775,7 @@ impl ProviderManager {
     }
 
     fn post_openai_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
-        let client = build_http_client(Duration::from_secs(45))?;
+        let client = build_http_client(Duration::from_secs(45), endpoint)?;
         let started_at = Instant::now();
 
         let response = block_on(
@@ -1817,7 +1819,7 @@ impl ProviderManager {
     }
 
     fn post_anthropic_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
-        let client = build_http_client(Duration::from_secs(45))?;
+        let client = build_http_client(Duration::from_secs(45), endpoint)?;
         let started_at = Instant::now();
 
         let api_key = self
@@ -2055,32 +2057,60 @@ impl ProviderClient for ProviderManager {
     // */
 }
 
-fn build_http_client(timeout: Duration) -> Result<Client, String> {
-    Client::builder()
+/// wave-36：回环地址旁路代理。环境代理（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）会把
+/// 对 127.0.0.1/::1/localhost 的请求劫持到代理网关，本地 provider（假服务、Ollama 等）
+/// 全部被打穿。判定为纯函数以便单测：不走网络、只看 URL host。
+pub fn should_bypass_proxy(base_url: &str) -> bool {
+    match url::Url::parse(base_url) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(host) => {
+                let lower = host.to_ascii_lowercase();
+                let host = lower.trim_start_matches('[').trim_end_matches(']');
+                matches!(host, "127.0.0.1" | "::1" | "localhost" | "::ffff:127.0.0.1")
+            }
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+fn build_http_client(timeout: Duration, endpoint: &str) -> Result<Client, String> {
+    let builder = Client::builder()
         .timeout(timeout)
         .http1_only()
-        .pool_max_idle_per_host(0)
-        .build()
-        .map_err(|error| format!("创建 HTTP client 失败：{}", error))
+        .pool_max_idle_per_host(0);
+    client_for_endpoint(builder, endpoint)
+}
+
+/// wave-36：按 endpoint host 决定是否禁用代理（回环直连）。
+/// reqwest 默认继承环境代理；对回环地址调用 no_proxy() 强制直连，
+/// 外部域名不调用 → 代理行为保持不变。
+fn client_for_endpoint(builder: reqwest::ClientBuilder, endpoint: &str) -> Result<Client, String> {
+    let builder = if should_bypass_proxy(endpoint) {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    builder.build().map_err(|error| format!("创建 HTTP client 失败：{}", error))
 }
 
 fn build_streaming_http_client(
     connect_timeout: Duration,
     read_timeout: Duration,
     timeout: Duration,
+    endpoint: &str,
 ) -> Result<Client, String> {
     let effective_timeout = if read_timeout > timeout {
         read_timeout
     } else {
         timeout
     };
-    Client::builder()
+    let builder = Client::builder()
         .connect_timeout(connect_timeout)
         .timeout(effective_timeout)
         .http1_only()
-        .pool_max_idle_per_host(0)
-        .build()
-        .map_err(|error| format!("创建流式 HTTP client 失败: {}", error))
+        .pool_max_idle_per_host(0);
+    client_for_endpoint(builder, endpoint)
 }
 
 fn format_request_error(prefix: &str, error: &reqwest::Error, elapsed: Duration) -> String {
