@@ -638,9 +638,21 @@ mod tests {
         }
     }
 
-    fn write_script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, body).expect("write script");
+    fn write_hook_script(dir: &Path, name: &str, unix_body: &str, win_body: &str) -> std::path::PathBuf {
+        #[cfg(windows)]
+        let (script_name, script_body) = {
+            let cmd_name = format!("{}.cmd", name);
+            let cmd_body = format!("@echo off\r\nchcp 65001 >nul 2>&1\r\n{}", win_body);
+            (cmd_name, cmd_body)
+        };
+        #[cfg(not(windows))]
+        let (script_name, script_body) = {
+            let _ = win_body;
+            (format!("{}.sh", name), unix_body.to_string())
+        };
+
+        let path = dir.join(script_name);
+        std::fs::write(&path, script_body).expect("write script");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -701,10 +713,11 @@ mod tests {
     #[test]
     fn allow_decision_is_returned() {
         let dir = temp_dir("allow");
-        let script = write_script(
+        let script = write_hook_script(
             &dir,
-            "allow.sh",
+            "allow",
             "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"allow\",\"summary\":\"ok\"}'\n",
+            "echo {\"decision\":\"allow\",\"summary\":\"ok\"}\r\n",
         );
         let mut specs = BTreeMap::new();
         specs.insert(
@@ -723,10 +736,11 @@ mod tests {
     #[test]
     fn deny_decision_blocks() {
         let dir = temp_dir("deny");
-        let script = write_script(
+        let script = write_hook_script(
             &dir,
-            "deny.sh",
+            "deny",
             "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"deny\",\"reason\":\"blocked by policy\"}'\n",
+            "echo {\"decision\":\"deny\",\"reason\":\"blocked by policy\"}\r\n",
         );
         let mut specs = BTreeMap::new();
         specs.insert("guard".to_string(), CommandHookSpec::new(script.to_string_lossy().to_string()));
@@ -743,7 +757,12 @@ mod tests {
     #[test]
     fn timeout_kills_child_and_errors() {
         let dir = temp_dir("timeout");
-        let script = write_script(&dir, "slow.sh", "#!/bin/sh\nsleep 5\n");
+        let script = write_hook_script(
+            &dir,
+            "slow",
+            "#!/bin/sh\nsleep 5\n",
+            "ping 127.0.0.1 -n 6 >nul\r\n",
+        );
         let mut specs = BTreeMap::new();
         specs.insert(
             "guard".to_string(),
@@ -762,7 +781,12 @@ mod tests {
     #[test]
     fn invalid_output_errors() {
         let dir = temp_dir("invalid");
-        let script = write_script(&dir, "bad.sh", "#!/bin/sh\ncat >/dev/null\necho 'not json'\n");
+        let script = write_hook_script(
+            &dir,
+            "bad",
+            "#!/bin/sh\ncat >/dev/null\necho 'not json'\n",
+            "echo not json\r\n",
+        );
         let mut specs = BTreeMap::new();
         specs.insert("guard".to_string(), CommandHookSpec::new(script.to_string_lossy().to_string()));
         let executor = CommandHookExecutor::new(specs);
@@ -789,10 +813,11 @@ mod tests {
     fn payload_carries_hook_name_and_point() {
         let dir = temp_dir("payload");
         let capture = dir.join("payload.json");
-        let script = write_script(
+        let script = write_hook_script(
             &dir,
-            "capture.sh",
+            "capture",
             &format!("#!/bin/sh\ncat > '{}'\necho '{{\"decision\":\"allow\"}}'\n", capture.display()),
+            &format!("more > \"{}\"\r\necho {{\"decision\":\"allow\"}}\r\n", capture.display()),
         );
         let mut specs = BTreeMap::new();
         specs.insert("guard".to_string(), CommandHookSpec::new(script.to_string_lossy().to_string()));

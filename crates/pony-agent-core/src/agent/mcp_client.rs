@@ -657,7 +657,11 @@ mod tests {
     }
 
     fn spec_for(script: &std::path::Path, extra: &[&str], id: &str) -> McpServerSpec {
+        #[cfg(windows)]
+        let mut spec = McpServerSpec::new(id, "python");
+        #[cfg(not(windows))]
         let mut spec = McpServerSpec::new(id, "/usr/bin/env").with_arg("python3");
+
         spec = spec.with_arg(script.to_string_lossy().to_string());
         for arg in extra {
             spec = spec.with_arg(*arg);

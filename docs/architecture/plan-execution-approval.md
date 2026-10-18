@@ -83,6 +83,7 @@ decision_source 单独路由：该决策产出
 | TurnInput 透传 | `crates/pony-agent-core/src/agent/runtime/types.rs`；`runtime/mod.rs` 的 `set_context(...)` |
 | 判定核心（触发面 / 绑定 / TTL） | `crates/pony-agent-core/src/agent/governed_executor.rs`（`GovernedPolicyEvaluator::decide_with_context`，`plan_execution_approval_gate`） |
 | 错误码路由 | `crates/pony-agent-core/src/agent/dispatcher.rs`（`deny_outcome`：`plan_execution_approval_required`） |
+| 宿主执行审批命令与 UI | `crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs`（`plan_execution_approve`）、`src-tauri/src/lib.rs`（Tauri command `plan_execution_approve`）、`src/stores/plan.ts`（`approveExecution`）、`src/components/PlanPanel.vue`（「批准执行」按钮） |
 
 ## 4. 验收
 

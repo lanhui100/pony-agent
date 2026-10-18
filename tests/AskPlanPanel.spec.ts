@@ -274,4 +274,54 @@ describe("PlanPanel", () => {
 
     wrapper.unmount();
   });
+
+  it("approves execution of a draft plan when clicking approve execution button", async () => {
+    const draftPlan = createPlan({
+      planId: "plan-draft-1",
+      revision: 1,
+      lifecycle: "draft",
+      summary: "草稿计划",
+      steps: [{ stepId: "step-1", name: "步骤 1", summary: "首步", status: "pending" }]
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "plan_list") {
+        return Promise.resolve([draftPlan]);
+      }
+      if (command === "plan_execution_approve") {
+        return Promise.resolve(
+          createPlan({
+            planId: "plan-draft-1",
+            revision: 2,
+            lifecycle: "executing",
+            summary: "草稿计划",
+            steps: [{ stepId: "step-1", name: "步骤 1", summary: "首步", status: "pending" }]
+          })
+        );
+      }
+      return Promise.resolve(null);
+    });
+
+    const wrapper = mount(PlanPanel, { props: { sessionId: "session-1", open: true } });
+    await flushAsync();
+    const store = usePlanStore();
+    await vi.waitFor(() => {
+      expect(store.selectedPlan?.lifecycle).toBe("draft");
+    });
+
+    const approveBtn = wrapper.find('[data-testid="plan-approve-execution"]');
+    expect(approveBtn.exists()).toBe(true);
+    expect(approveBtn.text()).toContain("批准执行");
+
+    await approveBtn.trigger("click");
+    await flushAsync();
+
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_execution_approve", {
+      sessionId: "session-1",
+      planId: "plan-draft-1",
+      revision: 1
+    });
+    expect(store.selectedPlan?.lifecycle).toBe("executing");
+    expect(store.selectedPlan?.revision).toBe(2);
+    wrapper.unmount();
+  });
 });

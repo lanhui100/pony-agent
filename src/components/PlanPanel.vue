@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
   AlertTriangle,
@@ -8,7 +8,8 @@ import {
   ChevronRight,
   Circle,
   ListChecks,
-  LoaderCircle
+  LoaderCircle,
+  Play
 } from "lucide-vue-next";
 import { usePlanStore } from "@/stores/plan";
 import { useGoalStore } from "@/stores/goal";
@@ -120,6 +121,18 @@ async function completeStep(plan: Plan, step: PlanStep) {
   await planStore.completeStep(props.sessionId, plan.planId, plan.revision, step.stepId);
 }
 
+const approvingPlanId = ref<string | null>(null);
+
+async function approveExecution(plan: Plan) {
+  if (approvingPlanId.value) return;
+  approvingPlanId.value = plan.planId;
+  try {
+    await planStore.approveExecution(props.sessionId, plan.planId, plan.revision);
+  } finally {
+    approvingPlanId.value = null;
+  }
+}
+
 onMounted(() => {
   void refreshPlans();
 });
@@ -214,9 +227,24 @@ const todoSummary = computed(() => {
             >
               {{ plan.summary || plan.kind || plan.planId }}
             </button>
-            <Badge :variant="lifecycleVariant(plan.lifecycle)">
-              {{ lifecycleLabel(plan.lifecycle) }}
-            </Badge>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <Button
+                v-if="plan.lifecycle === 'draft'"
+                size="sm"
+                variant="outline"
+                class="h-5 px-1.5 text-[10px] text-emerald-700 border-emerald-300 hover:bg-emerald-50"
+                :disabled="approvingPlanId === plan.planId"
+                data-testid="plan-approve-execution"
+                @click="approveExecution(plan)"
+              >
+                <LoaderCircle v-if="approvingPlanId === plan.planId" class="mr-1 h-2.5 w-2.5 animate-spin" />
+                <Play v-else class="mr-1 h-2.5 w-2.5 fill-current" />
+                批准执行
+              </Button>
+              <Badge :variant="lifecycleVariant(plan.lifecycle)">
+                {{ lifecycleLabel(plan.lifecycle) }}
+              </Badge>
+            </div>
           </div>
 
           <div v-if="plan === selectedPlan" class="mt-2 space-y-1" data-testid="plan-steps">

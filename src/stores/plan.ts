@@ -221,6 +221,36 @@ export const usePlanStore = defineStore("plan", {
       }
     },
 
+    /**
+     * Approve execution of a Draft plan from host (PA-141).
+     * Transitions lifecycle from `draft` to `executing`.
+     */
+    async approveExecution(
+      sessionId: string,
+      planId: string,
+      revision: number
+    ): Promise<Plan | null> {
+      if (!isTauriAvailable() || !sessionId.trim() || !planId.trim()) {
+        return null;
+      }
+
+      this.error = null;
+      try {
+        const plan = await safeInvoke<Plan | null>("plan_execution_approve", {
+          sessionId,
+          planId,
+          revision
+        });
+        if (plan) {
+          this.upsertPlan(plan);
+        }
+        return plan;
+      } catch (error) {
+        this.error = `批准执行失败：${String(error)}`;
+        return null;
+      }
+    },
+
     upsertPlan(plan: Plan): void {
       const index = this.plans.findIndex((item) => item.planId === plan.planId);
       if (index >= 0) {

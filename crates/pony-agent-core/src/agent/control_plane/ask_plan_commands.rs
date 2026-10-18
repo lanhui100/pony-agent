@@ -158,6 +158,20 @@ impl HostControlPlane {
         plan_value(&plan)
     }
 
+    /// Explicitly approve execution of a Draft plan from host, transitioning it to `Executing`.
+    pub fn plan_execution_approve(
+        &self,
+        session_id: &str,
+        plan_id: &str,
+        revision: u64,
+    ) -> Result<Value, String> {
+        let plan = self
+            .plan_store
+            .start_execution(session_id, plan_id, revision)
+            .map_err(|error| error.to_message())?;
+        plan_value(&plan)
+    }
+
     /// Every plan owned by `session_id`, in creation order.
     pub fn plan_list(&self, session_id: &str) -> Value {
         let plans = self.plan_store.plans_for_session(session_id);

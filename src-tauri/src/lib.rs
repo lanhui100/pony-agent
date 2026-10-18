@@ -306,6 +306,17 @@ fn plan_complete_step(
     control_plane.plan_complete_step(&session_id, &plan_id, revision, &step_id)
 }
 
+/// Host approval: explicitly transition a Draft plan to Executing (PA-141).
+#[tauri::command]
+fn plan_execution_approve(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+    plan_id: String,
+    revision: u64,
+) -> Result<Value, String> {
+    control_plane.plan_execution_approve(&session_id, &plan_id, revision)
+}
+
 /// Every plan owned by a session, in creation order.
 #[tauri::command]
 fn plan_list(
@@ -1228,6 +1239,7 @@ pub fn run() {
             plan_replace,
             plan_merge,
             plan_complete_step,
+            plan_execution_approve,
             plan_list,
             plan_get,
             todo_list,
