@@ -1371,10 +1371,11 @@
         "contract_matrix": ".dev-team/contracts/wave-36-pa138-145.md",
         "nfr_baseline": ".dev-team/nfr-baseline-wave36.json",
         "state_node": ".dev-team/state.json#waves.36"
-      }
+      },
+      "carryover": "8 cards pending; lib red case governed_executor_dispatches_plan_control attributed here"
     },
     "37": {
-      "status": "red_phase",
+      "status": "verified",
       "desc": "W37 工具面扩展+观察门+子代理引擎",
       "task_classification": "B",
       "classification_basis": "tools.rs(12.5k行)+orchestration.rs+新文件，跨3模块含并发与外部调用；命中 blast-keywords(thread/Mutex)；B 级双 L3+L3-P",
@@ -1435,7 +1436,40 @@
           "status": "pending"
         }
       },
-      "carve_out": "wave-36 在飞未提交变更（governed_executor/retry/plan_state/dispatcher）属 W36 范围，W37 严禁触碰；收口提交时 hunk 定向隔离"
+      "carve_out": "wave-36 在飞未提交变更（governed_executor/retry/plan_state/dispatcher）属 W36 范围，W37 严禁触碰；收口提交时 hunk 定向隔离",
+      "red_commit": "7062f1c",
+      "green_commit": "f810867",
+      "tag": "wave-37",
+      "branches": {
+        "w37-main": {
+          "red_commit": "7062f1c",
+          "green_commit": "f810867",
+          "status": "verified",
+          "fix_scope": "tools.rs(+552/-18), orchestration.rs(+58), subagent_runtime.rs(new), provider/mod.rs baselines, tests/wave37_tool_surface.rs(new 9 cases), mod.rs(+1 line)"
+        }
+      },
+      "gates": {
+        "red_phase": {
+          "wave37_tool_surface": "red→green timeline archived; initial FAILED 3 (t1/t3_j/t3_k)"
+        },
+        "green_phase": {
+          "cargo_check_lib": "EXIT=0",
+          "wave37_tool_surface": "9/0 serial+5x parallel",
+          "wave36_adversarial": "8/0",
+          "lib": "1063 passed / 1 failed (wave-36 PA-141 attribution recorded)"
+        },
+        "scope_audit": "PASS — all out-of-list files attributed to wave-36 in-flight (plan_execution_approval mechanical adaptation)",
+        "blast_radius": "thread/Mutex keywords hit → L3 dual-view performed by Lead (concurrency + security), evidence in receipts",
+        "nfr": {
+          "nfr_lint": "EXIT=0",
+          "subagent_max_concurrent": "2 (CAS+Drop guard)",
+          "subagent_max_prompt_bytes": "200000",
+          "subagent_turn_timeout_ms": "120000"
+        }
+      },
+      "attribution": {
+        "lib_remaining_red": "governed_executor_dispatches_plan_control... = wave-36 PA-141 red-phase (stash-verified, not wave-37)"
+      }
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
