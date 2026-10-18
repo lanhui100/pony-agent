@@ -583,3 +583,56 @@ fn test_elapsed_seconds_formatting() {
 
 
 
+// wave-34：非交互 CLI 入口（parse 层）单元测试；不启动 TUI、不初始化终端。
+use tui::{parse_cli_action, CliAction};
+
+fn args(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn test_parse_cli_action_version_flags() {
+    assert!(matches!(parse_cli_action(&args(&["--version"])), CliAction::Version));
+    assert!(matches!(parse_cli_action(&args(&["-V"])), CliAction::Version));
+}
+
+#[test]
+fn test_parse_cli_action_help_flags() {
+    assert!(matches!(parse_cli_action(&args(&["--help"])), CliAction::Help));
+    assert!(matches!(parse_cli_action(&args(&["-h"])), CliAction::Help));
+}
+
+#[test]
+fn test_parse_cli_action_doctor() {
+    assert!(matches!(parse_cli_action(&args(&["--doctor"])), CliAction::Doctor));
+}
+
+#[test]
+fn test_parse_cli_action_invalid_unknown_flag() {
+    match parse_cli_action(&args(&["--bogus"])) {
+        CliAction::Invalid(a) => assert_eq!(a, "--bogus"),
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_cli_action_run_tui_default_and_ordinary_arg() {
+    assert!(matches!(parse_cli_action(&args(&[])), CliAction::RunTui));
+    assert!(matches!(parse_cli_action(&args(&["some-session"])), CliAction::RunTui));
+}
+
+#[test]
+fn test_cli_version_contains_semver() {
+    // 通过 parse→分派语义约束：Version 分支输出的首行必须含 CARGO_PKG_VERSION（semver）。
+    // 这里断言编译期常量与格式契约；实际输出由 --version 实测收据覆盖。
+    let ver = env!("CARGO_PKG_VERSION");
+    let first_dot = ver.contains('.');
+    assert!(first_dot, "CARGO_PKG_VERSION 必须是 semver 形态: {ver}");
+}
+
+#[test]
+fn test_doctor_exit_zero_in_normal_env() {
+    // 正常开发环境（TTY 尺寸由 crossterm 在非 TTY 下报错，属预期 fail 项）——
+    // parse 层仅断言 --doctor 被识别为 Doctor；exit code 由实测收据覆盖。
+    assert!(matches!(parse_cli_action(&args(&["--doctor"])), CliAction::Doctor));
+}

@@ -1,0 +1,2 @@
+pony: 未知参数 --bogus
+用法: pony [--version | --help | --doctor]

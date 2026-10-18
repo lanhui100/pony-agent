@@ -2736,10 +2736,197 @@ fn tui_event_loop(
     Ok(())
 }
 
+// wave-34：非交互 CLI 入口。`pony --version / --help / --doctor` 在不初始化终端
+//（不 enable_raw_mode、不进出备屏）的前提下输出信息后退出，消除 SSH/脚本排障盲点。
+#[derive(Debug)]
+pub enum CliAction {
+    RunTui,
+    Version,
+    Help,
+    Doctor,
+    Invalid(String),
+}
+
+pub fn parse_cli_action(args: &[String]) -> CliAction {
+    match args.iter().next() {
+        None => CliAction::RunTui,
+        Some(a) if a == "--version" || a == "-V" => CliAction::Version,
+        Some(a) if a == "--help" || a == "-h" => CliAction::Help,
+        Some(a) if a == "--doctor" => CliAction::Doctor,
+        Some(a) if a.starts_with('-') => CliAction::Invalid(a.clone()),
+        Some(_) => CliAction::RunTui,
+    }
+}
+
+fn cli_version_string() -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    format!(
+        "pony {} · {}-{}\nbinary: {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        exe
+    )
+}
+
+fn cli_help_string() -> String {
+    format!(
+        "pony {} — 交互式 TUI Agent\n\n\
+用法: pony [选项]\n\n\
+选项:\n  --version, -V   显示版本与二进制路径后退出\n  --help, -h      显示本帮助后退出\n  --doctor        终端环境自检（TTY/颜色/尺寸/locale/日志目录/PATH 冲突）\n\n\
+交互键位:\n  Enter           发送输入\n  Alt+Enter       输入内换行\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn run_doctor() -> i32 {
+    let mut fail = 0usize;
+
+    // a) TTY：stdin 必须是 TTY（TUI 读取键盘）；stdout 允许被重定向（便于把报告存档/管道断言）。
+    let in_tty = std::io::stdin().is_terminal();
+    let out_tty = std::io::stdout().is_terminal();
+    match (in_tty, out_tty) {
+        (true, true) => println!("[ok] stdio: stdin=TTY stdout=TTY · 交互终端就绪"),
+        (true, false) => println!("[warn] stdio: stdout 已重定向 · 报告可正常输出，TUI 内仍使用真实终端"),
+        (false, _) => {
+            fail += 1;
+            println!("[fail] stdio: stdin 非交互终端（TUI 需要 TTY；CLI 场景可用 ponycli）");
+        }
+    }
+
+    // b) 颜色环境
+    let term = std::env::var("TERM").unwrap_or_default();
+    let colorterm = std::env::var("COLORTERM").unwrap_or_default();
+    let nocolor = std::env::var("NO_COLOR").unwrap_or_default();
+    if term.is_empty() {
+        println!("[warn] TERM: <unset> · 真彩色可能降级");
+    } else {
+        println!("[ok] TERM: {term}");
+    }
+    if colorterm.contains("truecolor") || colorterm.contains("24bit") {
+        println!("[ok] COLORTERM: {colorterm} · 真彩色可用");
+    } else {
+        let shown = if colorterm.is_empty() { "<unset>" } else { &colorterm };
+        println!("[warn] COLORTERM: {shown} · 未启用 truecolor");
+    }
+    if nocolor.is_empty() {
+        println!("[ok] NO_COLOR: <unset> · 颜色输出未被禁用");
+    } else {
+        println!("[warn] NO_COLOR: {nocolor} · 颜色输出被禁用");
+    }
+
+    // c) 终端尺寸
+    match crossterm::terminal::size() {
+        Ok((w, h)) if w >= 8 && h >= 24 => println!("[ok] size: {w}x{h} · ≥24 行 × 8 列"),
+        Ok((w, h)) => {
+            fail += 1;
+            println!("[fail] size: {w}x{h} · 低于最低要求 24 行 × 8 列，界面将错乱");
+        }
+        Err(e) => {
+            fail += 1;
+            println!("[fail] size: <n/a> · 无法读取终端尺寸: {e}");
+        }
+    }
+
+    // d) locale UTF-8
+    let mut utf8_ok = false;
+    let mut seen = String::new();
+    for v in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(val) = std::env::var(v) {
+            if !val.is_empty() {
+                seen.push_str(&format!("{v}={val} "));
+                let lower = val.to_lowercase();
+                if lower.contains("utf-8") || lower.contains("utf8") {
+                    utf8_ok = true;
+                }
+            }
+        }
+    }
+    let seen = seen.trim().to_string();
+    if utf8_ok {
+        println!("[ok] locale: {seen} · UTF-8 就绪");
+    } else if seen.is_empty() {
+        println!("[warn] locale: <unset> · LC_ALL/LC_CTYPE/LANG 未设置，中文/CJK 可能错位");
+    } else {
+        println!("[warn] locale: {seen} · 非 UTF-8 locale，中文/CJK 可能错位");
+    }
+
+    // e) tui-logs 可写
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".pony-agent")
+        .join("tui-logs");
+    if std::fs::create_dir_all(&log_dir).is_ok() {
+        let probe = log_dir.join(".doctor-probe");
+        match std::fs::write(&probe, b"ok") {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                println!("[ok] tui-logs: {} · 可写", log_dir.display());
+            }
+            Err(e) => {
+                fail += 1;
+                println!("[fail] tui-logs: {} · 不可写: {e}", log_dir.display());
+            }
+        }
+    } else {
+        fail += 1;
+        println!("[fail] tui-logs: {} · 无法创建目录", log_dir.display());
+    }
+
+    // f) PATH 冲突：按 canonicalize 去重（同一 realpath 只列一条），且仅列「与当前 exe 不同」者。
+    let exe_self = std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok());
+    let mut conflicts: Vec<PathBuf> = Vec::new();
+    let mut seen_canon: Vec<PathBuf> = Vec::new();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let cand = dir.join("pony");
+            if !cand.is_file() {
+                continue;
+            }
+            let canon = std::fs::canonicalize(&cand).unwrap_or_else(|_| cand.clone());
+            if Some(&canon) == exe_self.as_ref() || seen_canon.contains(&canon) {
+                continue;
+            }
+            seen_canon.push(canon);
+            conflicts.push(cand);
+        }
+    }
+    if conflicts.is_empty() {
+        println!("[ok] PATH: 无 pony 冲突");
+    } else {
+        let list = conflicts.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" ");
+        println!("[warn] PATH: {list} · PATH 冲突：SSH 下可能调到其它 pony 二进制");
+    }
+
+    if fail == 0 { 0 } else { 1 }
+}
+
 fn main() {
-    let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
-    if let Err(e) = run_tui() {
-        eprintln!("TUI Error: {e}");
-        std::process::exit(1);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match parse_cli_action(&args) {
+        CliAction::Version => {
+            println!("{}", cli_version_string());
+            std::process::exit(0);
+        }
+        CliAction::Help => {
+            println!("{}", cli_help_string());
+            std::process::exit(0);
+        }
+        CliAction::Doctor => {
+            std::process::exit(run_doctor());
+        }
+        CliAction::Invalid(arg) => {
+            eprintln!("pony: 未知参数 {arg}\n用法: pony [--version | --help | --doctor]");
+            std::process::exit(2);
+        }
+        CliAction::RunTui => {
+            let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+            if let Err(e) = run_tui() {
+                eprintln!("TUI Error: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }

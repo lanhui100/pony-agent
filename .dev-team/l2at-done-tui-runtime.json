@@ -1,0 +1,27 @@
+{
+  "ticket": "l2at-tui-runtime",
+  "agent": "test-agent",
+  "date": "2026-10-18",
+  "status": "green",
+  "level": "L2-AT (runtime robustness & adversarial)",
+  "test_file": "tests/acceptance/l2at-tui-runtime.sh",
+  "frozen": true,
+  "verify_only": true,
+  "binary_under_test": "target/debug/pony",
+  "suite_exit_code": 0,
+  "summary": { "pass": 25, "fail": 0 },
+  "cases": {
+    "R1_version_semver_binary_path_no_altscreen": "PASS (4 asserts)",
+    "R2_help_version_doctor_keybindings": "PASS (3 asserts)",
+    "R3_doctor_ok_warn_markers": "PASS",
+    "R3c_doctor_c_locale_utf8_warn": "PASS",
+    "R4_bogus_exit2_usage": "PASS (2 asserts)",
+    "R5_resize_repaint_116_no_stale76_60x18_56": "PASS (4 asserts)",
+    "R6_term_matrix_vt100_xterm_screen_linux_xterm256": "PASS (5 asserts)",
+    "R7_cjk_softwrap_40x14": "PASS (>=2 lines, full-line width<=38, no gutter overflow)",
+    "R8_tiny_26x9_no_panic_degraded_bar": "PASS (2 asserts)"
+  },
+  "r7_correction": "TEST-DEFECT per lead ruling: threshold 36 -> full-line width 38 (terminal 40 - 2 right gutter); lead measured 2 left gutter + 2 prompt indent + 34 text (17 CJK x2) = 38, compliant. Gutter-overflow check retained.",
+  "receipts_dir": "tests/acceptance/receipts/l2at-tui-runtime/",
+  "final_suite_log": "tests/acceptance/receipts/l2at-tui-runtime/suite-final.log"
+}
