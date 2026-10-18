@@ -10,7 +10,7 @@
   "binary_under_test": "target/debug/pony",
   "suite_exit_code": 0,
   "summary": {
-    "pass": 26,
+    "pass": 30,
     "fail": 0
   },
   "cases": {
@@ -23,10 +23,13 @@
     "R6_term_matrix_vt100_xterm_screen_linux_xterm256": "PASS (5 asserts)",
     "R7_cjk_softwrap_40x14": "PASS (>=2 lines, full-line width<=38, no gutter overflow)",
     "R8_tiny_26x9_no_panic_degraded_bar": "PASS (2 asserts)",
-    "R5_resize_repaint_fullwidth_surface": "PASS (5 asserts: header+bottom, hairline==120 full-width, no stale 76 residue, hairline==60 at 60x18, SURFACE #181a1f bg on composer band)"
+    "R5_resize_repaint_fullwidth_surface": "PASS (5 asserts: header+bottom, hairline==120 full-width, no stale 76 residue, hairline==60 at 60x18, SURFACE #181a1f bg on composer band)",
+    "R5_composer_band_v3": "PASS (10 asserts: header@120, no hints any size, band top+bottom SURFACE@120/60/18, no hairline inside band, band_h>=4@80x24, status word last-row@80/60, live-resize continuity)",
+    "R6_term_matrix": "PASS (5 asserts, status word + no hints)",
+    "R8_tiny_26x9": "PASS (no panic; status word present, hints fully removed)"
   },
   "r7_correction": "TEST-DEFECT per lead ruling: threshold 36 -> full-line width 38 (terminal 40 - 2 right gutter); lead measured 2 left gutter + 2 prompt indent + 34 text (17 CJK x2) = 38, compliant. Gutter-overflow check retained.",
   "receipts_dir": "tests/acceptance/receipts/l2at-tui-runtime/",
   "final_suite_log": "tests/acceptance/receipts/l2at-tui-runtime/suite-final.log",
-  "r5_correction": "Design contract change per lead ruling: composer is full-width surface band, hairline spans full terminal width (120/60); old 116/56 assertions obsolete. Added R5e asserting SURFACE #181a1f (48;2;24;26;31) background on composer band."
+  "r5_correction": "Design contract v3 per lead ruling: composer band has NO hairline; band top/bottom rows carry SURFACE #181a1f, no long dash inside band; hints removed; band height >=4 at 80x24. Detection via tmux pipe-pane raw pty stream + minimal VT state machine (capture-pane cannot report bg on space-only cells)."
 }
