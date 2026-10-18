@@ -37,6 +37,10 @@ wave-18 将 PonySentry 改为 fail-closed（默认零 egress）：`PonySentryCon
 - `release.yml`：新增 `PONYSENTRY_BUILD_CLIENT_TOKEN: ${{ secrets.PONYSENTRY_CLIENT_TOKEN }}`，
   并在 Verify secrets 步骤将其缺失列为 hard fail。
 - `.env.example`：移除 `PONYSENTRY_ENABLED` 条目。
+- `tests/env-example.spec.ts`（契约迁移）：C6-2 变量清单由 `PONYSENTRY_ENABLED` 改为
+  `PONYSENTRY_BUILD_CLIENT_TOKEN`；C6-5 由「必须写明 `PONYSENTRY_ENABLED=true`」改为
+  「模板**不得**出现任何 `PONYSENTRY_ENABLED=` 赋值 + fail-closed 原则声明 + 最小配置仅需
+  token + 构建期烧录通道存在」。红相基线（wave-18b）随之失效并由本文件记录的契约取代。
 - 测试：credential_gate / telemetry / manual_upload / adversarial 及 acceptance 镜像同步迁移为
   wave-18c 契约（开关恒开、变量取值不影响行为、无 token 时零 egress 的出口探针断言保留）。
 
