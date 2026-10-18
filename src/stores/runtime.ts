@@ -594,7 +594,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       }
 
       if (this.streamBufferText) {
+        if (assistantMessage.content === TIMEOUT_RETRY_PENDING_MESSAGE) {
+          assistantMessage.content = "";
+        }
         assistantMessage.content += this.streamBufferText;
+        assistantMessage.errorDetail = null;
       }
 
       if (flushedTextChars > 0 || flushedReasoningChars > 0) {
@@ -2920,7 +2924,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       if (finalText && payload.text !== assistantMessage.content) {
         assistantMessage.content = payload.text ?? assistantMessage.content;
         this.messageRevision = null;
+      } else if (assistantMessage.content === TIMEOUT_RETRY_PENDING_MESSAGE) {
+        assistantMessage.content = payload.text ?? "";
+        this.messageRevision = null;
       }
+      assistantMessage.errorDetail = null;
       const nextReasoningContent = normalizeReasoningContent(
         payload.reasoningContent ?? assistantMessage.reasoningContent ?? null
       );
@@ -3411,6 +3419,14 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           buildAssistantModelLabel(payload.providerName, payload.providerModel)
         );
         this.phase = resolveRuntimePhaseFromEvent(payload, "calling_model");
+        const assistantMessage = this.ensureAssistantMessage(
+          payload.turnId,
+          buildAssistantModelLabel(payload.providerName, payload.providerModel)
+        );
+        if (assistantMessage.content === TIMEOUT_RETRY_PENDING_MESSAGE) {
+          assistantMessage.content = "";
+        }
+        assistantMessage.errorDetail = null;
         debugLog("event:started", {
           turnId: payload.turnId
         });
@@ -3474,13 +3490,19 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.commitTurnEventCursor(payload);
         this.rearmSubmissionWatchdog(payload.turnId);
 
-        this.ensureAssistantMessage(
+        const deltaText = payload.text ?? "";
+        const deltaReasoning = payload.reasoningContent ?? "";
+
+        const assistantMessage = this.ensureAssistantMessage(
           payload.turnId,
           buildAssistantModelLabel(this.providerName, this.providerModel)
         );
-
-        const deltaText = payload.text ?? "";
-        const deltaReasoning = payload.reasoningContent ?? "";
+        if (deltaText && assistantMessage.content === TIMEOUT_RETRY_PENDING_MESSAGE) {
+          assistantMessage.content = "";
+        }
+        if (deltaText || deltaReasoning) {
+          assistantMessage.errorDetail = null;
+        }
 
         if (deltaText || deltaReasoning) {
           this.streamDebugDeltaCount += 1;
@@ -3812,7 +3834,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         const finalText = payload.text?.trim();
         if (finalText && payload.text !== assistantMessage.content) {
           assistantMessage.content = payload.text ?? assistantMessage.content;
+        } else if (assistantMessage.content === TIMEOUT_RETRY_PENDING_MESSAGE) {
+          assistantMessage.content = payload.text ?? "";
         }
+        assistantMessage.errorDetail = null;
         const nextReasoningContent = normalizeReasoningContent(
           payload.reasoningContent ?? assistantMessage.reasoningContent ?? null
         );

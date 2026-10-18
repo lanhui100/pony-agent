@@ -7321,8 +7321,13 @@ describe("runtime session resilience", () => {
   it("seeds a timeout retrying assistant message when submitting after timeout failure", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(9191);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
 
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
       if (command === "inspect_host") {
         return { runs: [] };
@@ -7362,6 +7367,44 @@ describe("runtime session resilience", () => {
     expect(assistantMessage?.status).toBe("pending");
     expect(assistantMessage?.content).toBe("超时后错误重连中...");
     expect(assistantMessage?.errorDetail).toBe("timeout: previous call timed out");
+
+    // 模拟重试成功：收到 turn:delta 事件并 flush 流式文本
+    eventHandlers.get("turn:delta")?.({
+      payload: {
+        turnId: "9191",
+        eventId: "event-turn-delta-9191-1",
+        eventType: "turn.first_token",
+        eventVersion: "1.0",
+        sequence: 1,
+        emittedAtMs: 2000,
+        text: "这是重试后的新回答",
+        reasoningContent: null
+      }
+    });
+
+    store.flushBufferedStreamText("9191");
+    expect(assistantMessage?.content).toBe("这是重试后的新回答");
+    expect(assistantMessage?.errorDetail).toBeNull();
+
+    // 收到 turn:completed 事件
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "9191",
+        eventId: "event-turn-completed-9191",
+        eventType: "turn.completed",
+        eventVersion: "1.0",
+        sequence: 2,
+        emittedAtMs: 2100,
+        text: "这是重试后的新回答",
+        providerName: "OpenAI",
+        providerModel: "gpt-5"
+      }
+    });
+
+    expect(assistantMessage?.status).toBe("done");
+    expect(assistantMessage?.content).toBe("这是重试后的新回答");
+    expect(assistantMessage?.errorDetail).toBeNull();
+
     nowSpy.mockRestore();
   });
 
