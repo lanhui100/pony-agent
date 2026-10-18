@@ -65,6 +65,7 @@
 - [0035 Token 指标口径：输入上下文取单次调用、生成速度按调用级即时产出](0035-token-metrics-per-call-semantics.md)
 - [0036 IME 组合态回车守卫与动态数字位宽稳定](0036-ime-composition-enter-guard-and-numeric-width-stability.md)
 - [0037 废除 PONYSENTRY_ENABLED：开关恒开，门禁由凭证承担](0037-remove-ponysentry-enabled-switch.md)
+- [0038 TUI 设计系统：单色为骨、单一骨色强调、发丝线与 2 列沟槽](0038-tui-design-system-monochrome-restraint.md)
 
 ### 已接替
 

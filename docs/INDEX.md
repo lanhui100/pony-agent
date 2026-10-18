@@ -61,6 +61,7 @@
 - [0028 将 Sentry 问题收集下沉至 Harness 宿主层与 Agent Trace 解耦](decisions/0028-decouple-sentry-issues-to-harness.md)
 - [0032 graph_runs 非重入锁作用域纪律与桌面端会话页卡死修复](decisions/0032-graph-runs-lock-scope-discipline.md)
 - [0036 IME 组合态回车守卫与动态数字位宽稳定](decisions/0036-ime-composition-enter-guard-and-numeric-width-stability.md)
+- [0038 TUI 设计系统：单色为骨、单一骨色强调、发丝线与 2 列沟槽](decisions/0038-tui-design-system-monochrome-restraint.md)
 
 ## 3.1 交付证据归档
 

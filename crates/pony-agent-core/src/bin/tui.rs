@@ -19,10 +19,10 @@ use pony_agent_core::agent::session::SessionStore;
 use pony_agent_core::agent::turn_flow::TurnEventSink;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    layout::Rect,
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph},
     Frame, Terminal,
 };
 use std::io::IsTerminal;
@@ -202,6 +202,8 @@ impl AddProviderPayload {
 pub struct TuiState {
     pub messages: Vec<ChatMessage>,
     pub input_buffer: String,
+    /// 输入光标（按 char 计数的插入点），与 input_buffer 严格同步。
+    pub input_cursor: usize,
     pub is_streaming: bool,
     pub spinner_tick: usize,
     pub session_id: String,
@@ -238,6 +240,7 @@ impl Default for TuiState {
         Self {
             messages: Vec::new(),
             input_buffer: String::new(),
+            input_cursor: 0,
             is_streaming: false,
             spinner_tick: 0,
             session_id: format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]),
@@ -502,13 +505,112 @@ pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u16
     }
 }
 
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// 两帧低频呼吸点：任何终端字体都有这两个字形，且不抢正文注意力。
+const SPINNER_FRAMES: &[&str] = &["·", "•"];
 
 pub fn spinner_frame(tick: usize) -> &'static str {
     SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
 }
 
 impl TuiState {
+    // ── 输入编辑（光标感知，按 char 索引，保证 CJK 安全）──────────────────
+    pub fn input_char_len(&self) -> usize {
+        self.input_buffer.chars().count()
+    }
+
+    fn input_byte_index(&self, char_idx: usize) -> usize {
+        self.input_buffer
+            .char_indices()
+            .nth(char_idx)
+            .map(|(byte, _)| byte)
+            .unwrap_or(self.input_buffer.len())
+    }
+
+    /// 整体替换输入内容，并把光标移到末尾（命令补全/回填专用）。
+    pub fn set_input(&mut self, text: &str) {
+        self.input_buffer = text.to_string();
+        self.input_cursor = self.input_buffer.chars().count();
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        let cursor = self.input_cursor.min(self.input_char_len());
+        let byte = self.input_byte_index(cursor);
+        self.input_buffer.insert(byte, c);
+        self.input_cursor = cursor + 1;
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    pub fn backspace(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let cursor = self.input_cursor.min(self.input_char_len());
+        let byte = self.input_byte_index(cursor - 1);
+        self.input_buffer.remove(byte);
+        self.input_cursor = cursor - 1;
+    }
+
+    pub fn delete_forward(&mut self) {
+        let cursor = self.input_cursor.min(self.input_char_len());
+        if cursor >= self.input_char_len() {
+            return;
+        }
+        let byte = self.input_byte_index(cursor);
+        self.input_buffer.remove(byte);
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        if self.input_cursor > 0 {
+            self.input_cursor -= 1;
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        if self.input_cursor < self.input_char_len() {
+            self.input_cursor += 1;
+        }
+    }
+
+    pub fn cursor_line_home(&mut self) {
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut idx = self.input_cursor.min(chars.len());
+        while idx > 0 && chars[idx - 1] != '\n' {
+            idx -= 1;
+        }
+        self.input_cursor = idx;
+    }
+
+    pub fn cursor_line_end(&mut self) {
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut idx = self.input_cursor.min(chars.len());
+        while idx < chars.len() && chars[idx] != '\n' {
+            idx += 1;
+        }
+        self.input_cursor = idx;
+    }
+
+    /// Ctrl+W：向左删除一个词。
+    pub fn delete_word_backward(&mut self) {
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut idx = self.input_cursor.min(chars.len());
+        while idx > 0 && chars[idx - 1].is_whitespace() {
+            self.backspace();
+            idx -= 1;
+        }
+        while idx > 0 && !chars[idx - 1].is_whitespace() {
+            self.backspace();
+            idx -= 1;
+        }
+    }
+
+    pub fn clear_input(&mut self) {
+        self.input_buffer.clear();
+        self.input_cursor = 0;
+    }
+
     pub fn add_user_message(&mut self, text: &str) {
         self.messages.push(ChatMessage {
             role: MessageRole::User,
@@ -589,29 +691,20 @@ pub fn render_markdown_line(line: &str) -> Vec<Span<'static>> {
     let trimmed = line.trim_start();
     let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
     if hash_count > 0 && trimmed[hash_count..].starts_with(' ') {
+        // 标题不用符号噪音，只用字重与微小的色阶差异表达层级。
         let clean_text = trimmed[hash_count..].trim_start();
-        let (marker_symbol, marker_color, text_color) = match hash_count {
-            1 => ("■ ", Color::Rgb(140, 195, 255), Color::Rgb(220, 235, 255)),
-            2 => ("◆ ", Color::Rgb(120, 180, 255), Color::Rgb(200, 225, 255)),
-            3 => ("▲ ", Color::Rgb(100, 160, 240), Color::Rgb(180, 215, 255)),
-            _ => ("● ", Color::Rgb(90, 145, 225), Color::Rgb(165, 205, 245)),
+        let style = match hash_count {
+            1 => Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+            2 => Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+            3 => Style::default().fg(theme::INK_SOFT).add_modifier(Modifier::BOLD),
+            _ => Style::default().fg(theme::INK_SOFT),
         };
-        let mut spans = vec![
-            Span::styled(marker_symbol, Style::default().fg(marker_color).add_modifier(Modifier::BOLD)),
-        ];
-        let mut content_spans = parse_inline_formatting(clean_text);
-        for s in &mut content_spans {
-            s.style = s.style.fg(text_color).add_modifier(Modifier::BOLD);
-        }
-        spans.extend(content_spans);
-        return spans;
+        return vec![Span::styled(clean_text.to_string(), style)];
     }
 
-    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-        let mut spans = vec![
-            Span::styled("  • ", Style::default().fg(Color::Rgb(100, 200, 240))),
-        ];
-        spans.extend(parse_inline_formatting(&trimmed[2..]));
+    if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+        let mut spans = vec![Span::styled("  · ", faint())];
+        spans.extend(parse_inline_formatting(rest));
         return spans;
     }
 
@@ -619,34 +712,27 @@ pub fn render_markdown_line(line: &str) -> Vec<Span<'static>> {
     if let Some(dot_idx) = trimmed.find(". ") {
         let num_part = &trimmed[..dot_idx];
         if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
-            let mut spans = vec![
-                Span::styled(format!("  {}. ", num_part), Style::default().fg(Color::Rgb(130, 190, 250))),
-            ];
+            let mut spans = vec![Span::styled(format!("  {}. ", num_part), faint())];
             spans.extend(parse_inline_formatting(&trimmed[dot_idx + 2..]));
             return spans;
         }
     }
 
-    // 分割线 --- 或 ***
+    // 分割线 --- 或 ***：一条安静的发丝线
     if trimmed == "---" || trimmed == "***" || trimmed == "___" {
         return vec![Span::styled(
-            "────────────────────────────────────────────────────────",
-            Style::default().fg(Color::Rgb(60, 65, 80)),
+            "─".repeat(48),
+            Style::default().fg(theme::HAIRLINE),
         )];
     }
 
-    // 代码块围栏 ``` 或 ```lang
+    // 代码块围栏 ```lang 只显示语言标签；裸围栏保持安静（不占视觉噪音）
     if trimmed.starts_with("```") {
         let lang = trimmed.trim_start_matches('`').trim();
-        let label = if lang.is_empty() {
-            "代码块 ──".to_string()
-        } else {
-            format!("[{}] ──", lang)
-        };
-        return vec![
-            Span::styled("  ── ", Style::default().fg(Color::Rgb(70, 80, 100))),
-            Span::styled(label, Style::default().fg(Color::Rgb(140, 160, 195))),
-        ];
+        if lang.is_empty() {
+            return vec![Span::raw("")];
+        }
+        return vec![Span::styled(lang.to_string(), faint())];
     }
 
     parse_inline_formatting(line)
@@ -661,16 +747,11 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
             if let Some(bold_end) = rest[bold_start + 2..].find("**") {
                 let actual_end = bold_start + 2 + bold_end;
                 if bold_start > 0 {
-                    spans.push(Span::styled(
-                        rest[..bold_start].to_string(),
-                        Style::default().fg(Color::Rgb(230, 235, 245)),
-                    ));
+                    spans.push(Span::styled(rest[..bold_start].to_string(), ink_soft()));
                 }
                 spans.push(Span::styled(
                     rest[bold_start + 2..actual_end].to_string(),
-                    Style::default()
-                        .fg(Color::Rgb(255, 255, 255))
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
                 ));
                 rest = &rest[actual_end + 2..];
                 continue;
@@ -681,46 +762,43 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
             if let Some(code_end) = rest[code_start + 1..].find('`') {
                 let actual_end = code_start + 1 + code_end;
                 if code_start > 0 {
-                    spans.push(Span::styled(
-                        rest[..code_start].to_string(),
-                        Style::default().fg(Color::Rgb(225, 230, 240)),
-                    ));
+                    spans.push(Span::styled(rest[..code_start].to_string(), ink_soft()));
                 }
                 spans.push(Span::styled(
-                    format!(" {} ", &rest[code_start + 1..actual_end]),
+                    rest[code_start + 1..actual_end].to_string(),
                     Style::default()
-                        .fg(Color::Rgb(255, 220, 130))
-                        .bg(Color::Rgb(45, 50, 68))
-                        .add_modifier(Modifier::BOLD),
+                        .fg(theme::INK)
+                        .bg(theme::SURFACE),
                 ));
                 rest = &rest[actual_end + 1..];
                 continue;
             }
         }
 
-        spans.push(Span::styled(
-            rest.to_string(),
-            Style::default().fg(Color::Rgb(230, 235, 245)),
-        ));
+        spans.push(Span::styled(rest.to_string(), ink_soft()));
         break;
     }
     spans
 }
 
 pub fn ascii_logo() -> Vec<Line<'static>> {
-    vec![
-        Line::from(vec![Span::styled(r#"   ____  ____  _   ____  __"#, Style::default().fg(Color::Rgb(140, 180, 255)).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled(r#"  / __ \/ __ \/ | / /\ \/ /"#, Style::default().fg(Color::Rgb(140, 195, 255)).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled(r#" / /_/ / / / /  |/ /  \  / "#, Style::default().fg(Color::Rgb(120, 215, 245)).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled(r#"/ ____/ /_/ / /|  /   / /  "#, Style::default().fg(Color::Rgb(100, 230, 230)).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled(r#"/_/    \____/_/ |_/   /_/   "#, Style::default().fg(Color::Rgb(110, 240, 200)).add_modifier(Modifier::BOLD))]),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("● Autonomous Agent Runtime ", Style::default().fg(Color::Rgb(200, 210, 230))),
-            Span::styled("· Type your prompt to start", Style::default().fg(Color::Rgb(120, 130, 150))),
-        ]),
-        Line::raw(""),
-    ]
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "终端里的自主智能体。",
+            Style::default().fg(theme::MUTED),
+        )),
+        blank(),
+        Line::from(Span::styled("描述一个任务开始，或输入命令：", ink_soft())),
+        blank(),
+    ];
+    // 直接复用命令表，保证空态提示与斜杠菜单永不漂移。
+    for (cmd, desc) in AVAILABLE_COMMANDS.iter().take(4) {
+        lines.push(Line::from(vec![
+            Span::styled(pad_display(cmd, 11), ink_soft()),
+            Span::styled(desc.to_string(), muted()),
+        ]));
+    }
+    lines
 }
 
 struct DynamicProviderResolver {
@@ -922,486 +1000,996 @@ fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &s
         .build()
 }
 
-fn ui(f: &mut Frame, state: &mut TuiState) {
-    // 背景 100% 铺满终端：直接使用 f.area() 进行垂直切分，色块贴满屏幕边缘，无黑边
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),      // 顶栏 Header
-            Constraint::Min(6),         // 聊天视窗
-            Constraint::Length(4),      // 输入容器：3行输入文本区域 + 1行底栏状态
-        ])
-        .split(f.area());
+// ─────────────────────────────────────────────────────────────────────────────
+// Design tokens —— 极简克制的高级感：
+//   · 单色为骨：一块近乎无色的暖黑画布 + 暖白文字，拒绝高饱和撞色；
+//   · 单一强调色（骨色/bone）只用于「光标、选中、进行中」三处语义；
+//   · 层级靠留白与字重，而非描边、胶囊、色块；
+//   · 分隔只用 1px 发丝线（hairline），永不画整块边框卡片。
+// ─────────────────────────────────────────────────────────────────────────────
+mod theme {
+    use ratatui::style::Color;
 
-    // 1. Header: 铺满终端，暗调微蓝底色，标签式徽标
-    let header_bg = Color::Rgb(28, 32, 42);
-    let ws_name = state.workspace.file_name().and_then(|n| n.to_str()).unwrap_or(".");
-    let total_header_w = chunks[0].width as usize;
-    let right_meta = format!("session: {}  ", state.session_id);
-    let left_meta_len = 2 + 8 + 2 + ws_name.len() + 4;
-    let header_pad = if total_header_w > left_meta_len + right_meta.len() {
-        total_header_w - left_meta_len - right_meta.len()
+    pub const CANVAS: Color = Color::Rgb(13, 14, 17);
+    pub const SURFACE: Color = Color::Rgb(24, 26, 31);
+    pub const SURFACE_SEL: Color = Color::Rgb(38, 41, 48);
+    pub const INK: Color = Color::Rgb(232, 229, 224);
+    pub const INK_SOFT: Color = Color::Rgb(203, 200, 195);
+    pub const MUTED: Color = Color::Rgb(154, 157, 163);
+    pub const FAINT: Color = Color::Rgb(112, 116, 124);
+    pub const HAIRLINE: Color = Color::Rgb(48, 51, 58);
+    pub const ACCENT: Color = Color::Rgb(198, 167, 126);
+    pub const SUCCESS: Color = Color::Rgb(140, 172, 137);
+    pub const DANGER: Color = Color::Rgb(199, 130, 125);
+    pub const WARN: Color = Color::Rgb(199, 176, 126);
+}
+
+/// 左右统一沟槽宽度（视觉留白，禁止内容贴边）。
+const GUTTER: u16 = 2;
+
+/// 极简字形集：只用三种标记，避免图标噪音。
+const GLYPH_RUNNING: &str = "◦";
+const GLYPH_DONE: &str = "✓";
+const GLYPH_FAIL: &str = "✕";
+const CARET: &str = "▏";
+
+fn ink() -> Style {
+    Style::default().fg(theme::INK)
+}
+
+fn ink_soft() -> Style {
+    Style::default().fg(theme::INK_SOFT)
+}
+
+fn muted() -> Style {
+    Style::default().fg(theme::MUTED)
+}
+
+fn faint() -> Style {
+    Style::default().fg(theme::FAINT)
+}
+
+/// 东亚宽字符按 2 列计宽，保证中文/emoji 折行与滚动偏移精确。
+fn char_width(c: char) -> usize {
+    let cp = c as u32;
+    let wide = matches!(cp,
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F64F
+            | 0x1F900..=0x1F9FF
+            | 0x20000..=0x3FFFD);
+    if wide {
+        2
     } else {
         1
+    }
+}
+
+fn str_width(text: &str) -> usize {
+    text.chars().map(char_width).sum()
+}
+
+/// 行首禁则：这些标点不允许出现在行首（悬挂到上一行末尾）。
+fn is_no_line_start(c: char) -> bool {
+    matches!(
+        c,
+        '，' | '。'
+            | '、'
+            | '；'
+            | '：'
+            | '？'
+            | '！'
+            | '）'
+            | '】'
+            | '》'
+            | '」'
+            | '』'
+            | '…'
+            | ','
+            | '.'
+            | ';'
+            | ':'
+            | '?'
+            | '!'
+            | ')'
+            | ']'
+            | '%'
+    )
+}
+
+/// 1px 发丝分隔线（不是边框，只是一条极淡的横线）。
+fn hairline(width: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        "─".repeat(width.max(1)),
+        Style::default().fg(theme::HAIRLINE),
+    ))
+}
+
+fn blank() -> Line<'static> {
+    Line::raw("")
+}
+
+/// 按显示宽度折行，保留 span 样式；用于所有正文（CJK 不会错位）。
+fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    if line.spans.is_empty() {
+        return vec![blank()];
+    }
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+    for span in &line.spans {
+        if span.content.is_empty() {
+            continue;
+        }
+        let style = span.style;
+        let mut buf = String::new();
+        for ch in span.content.chars() {
+            let w = char_width(ch);
+            if col + w > width && col > 0 && !is_no_line_start(ch) {
+                if !buf.is_empty() {
+                    current.push(Span::styled(std::mem::take(&mut buf), style));
+                }
+                out.push(Line::from(std::mem::take(&mut current)));
+                col = 0;
+            }
+            buf.push(ch);
+            col += w;
+        }
+        if !buf.is_empty() {
+            current.push(Span::styled(buf, style));
+        }
+    }
+    if !current.is_empty() || out.is_empty() {
+        out.push(Line::from(current));
+    }
+    out
+}
+
+/// 保证末尾恰好有 n 个空行（用于区分「段间距 1 行」与「轮间距 2 行」的节拍）。
+fn push_gap(lines: &mut Vec<Line<'static>>, n: usize) {
+    if lines.is_empty() {
+        return;
+    }
+    let mut blanks = 0usize;
+    for line in lines.iter().rev() {
+        if line.spans.iter().all(|s| s.content.trim().is_empty()) {
+            blanks += 1;
+        } else {
+            break;
+        }
+    }
+    for _ in blanks..n {
+        lines.push(blank());
+    }
+}
+
+fn push_wrapped(lines: &mut Vec<Line<'static>>, line: Line<'static>, width: usize) {
+    let mut wrapped = wrap_line(&line, width);
+    // 行首禁则（跨行）：模型自带换行后若行首是标点，悬挂回上一行行尾。
+    if !lines.is_empty() {
+        let mut pulled: Option<(char, Style)> = None;
+        if let Some(first) = wrapped.first_mut() {
+            if let Some(span) = first.spans.first_mut() {
+                if let Some(ch) = span.content.chars().next() {
+                    if is_no_line_start(ch) {
+                        span.content = span.content.chars().skip(1).collect();
+                        let style = span.style;
+                        pulled = Some((ch, style));
+                    }
+                }
+            }
+        }
+        if let Some((ch, style)) = pulled {
+            if let Some(prev) = lines.last_mut() {
+                if let Some(last) = prev.spans.last_mut() {
+                    let merged = format!("{}{}", last.content, ch);
+                    last.content = merged.into();
+                } else {
+                    prev.spans.push(Span::styled(ch.to_string(), style));
+                }
+            }
+        }
+    }
+    lines.extend(wrapped);
+}
+
+/// 只在不重复的前提下插入空行，保持「行间距呼吸」而不产生连续空行噪音。
+fn push_blank(lines: &mut Vec<Line<'static>>) {
+    if let Some(last) = lines.last() {
+        let is_blank = last.spans.iter().all(|s| s.content.trim().is_empty());
+        if !is_blank {
+            lines.push(blank());
+        }
+    }
+}
+
+/// 输入框视觉折行：按显示宽度硬折行 + 尊重显式换行符，返回字符区间。
+fn layout_input(text: &str, width: usize) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let width = width.max(1);
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    let mut col = 0usize;
+    for (i, ch) in chars.iter().enumerate() {
+        if *ch == '\n' {
+            ranges.push((start, i));
+            start = i + 1;
+            col = 0;
+            continue;
+        }
+        let w = char_width(*ch);
+        if col + w > width && col > 0 {
+            ranges.push((start, i));
+            start = i;
+            col = 0;
+        }
+        col += w;
+    }
+    ranges.push((start, chars.len()));
+    ranges
+}
+
+/// 浮动面板：发丝描边 + 表面底色 + 标题行（hint 右对齐），返回标题下方的内容区。
+fn draw_panel(f: &mut Frame, area: Rect, title: &str, hint: &str) -> Rect {
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(theme::HAIRLINE))
+        .style(Style::default().bg(theme::SURFACE));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let title_w = str_width(title) + 1;
+    let hint_w = str_width(hint);
+    let gap = (inner.width as usize)
+        .saturating_sub(title_w + hint_w + 2)
+        .max(1);
+    let head = Line::from(vec![
+        Span::styled(
+            format!(" {}", title),
+            Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(hint.to_string(), faint()),
+        Span::raw(" "),
+    ]);
+    let head_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.min(2),
+    };
+    f.render_widget(
+        Paragraph::new(vec![head, blank()]).style(Style::default().bg(theme::SURFACE)),
+        head_area,
+    );
+
+    Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(2),
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    }
+}
+
+fn truncate_width(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = char_width(ch);
+        if used + w > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
+}
+
+fn pad_display(text: &str, width: usize) -> String {
+    let used = str_width(text);
+    if used >= width {
+        text.to_string()
+    } else {
+        format!("{}{}", text, " ".repeat(width - used))
+    }
+}
+
+/// 列表行：左侧 emphasis 竖条 + 主文本 + 右侧次要信息；选中行用极淡底色铺满整行。
+fn list_row(selected: bool, left: &str, right: &str, width: usize) -> Line<'static> {
+    let bg = if selected {
+        theme::SURFACE_SEL
+    } else {
+        theme::SURFACE
+    };
+    let bar = if selected { "▏" } else { " " };
+    let left_style = if selected {
+        Style::default()
+            .fg(theme::INK)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::INK_SOFT).bg(bg)
+    };
+    // 右侧状态/次要信息保持可读（FAINT 只留给纯装饰性 chrome）
+    let right_style = Style::default().fg(theme::MUTED).bg(bg);
+
+    let right_w = str_width(right);
+    let left_w = width.saturating_sub(3 + right_w);
+    let left_txt = pad_display(&truncate_width(left, left_w), left_w);
+    let used = 2 + left_w + right_w;
+    Line::from(vec![
+        Span::styled(
+            bar,
+            if selected {
+                Style::default().fg(theme::ACCENT).bg(bg)
+            } else {
+                Style::default().bg(bg)
+            },
+        ),
+        Span::styled(format!(" {}", left_txt), left_style),
+        Span::styled(right.to_string(), right_style),
+        Span::styled(" ".repeat(width.saturating_sub(used)), Style::default().bg(bg)),
+    ])
+}
+
+fn fill(f: &mut Frame, area: Rect, color: ratatui::style::Color) {
+    f.render_widget(Block::default().style(Style::default().bg(color)), area);
+}
+
+/// 渲染带光标的多行输入区（⌘ 提示符 + 软折行 + 细竖线光标）。
+fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
+    let chars: Vec<char> = state.input_buffer.chars().collect();
+    let cursor = state.input_cursor.min(chars.len());
+    let text_width = area.width.saturating_sub(2).max(1) as usize;
+    let ranges = layout_input(&state.input_buffer, text_width);
+    let active_line = ranges
+        .iter()
+        .position(|(s, e)| cursor >= *s && cursor < *e)
+        .unwrap_or(ranges.len().saturating_sub(1));
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (idx, (s, e)) in ranges.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = vec![if idx == 0 {
+            Span::styled(
+                "› ",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("  ")
+        }];
+
+        let text: String = chars[*s..*e].iter().collect();
+        if idx == active_line {
+            let rel = cursor.saturating_sub(*s).min(*e - *s);
+            let before: String = chars[*s..*s + rel].iter().collect();
+            let after: String = chars[*s + rel..*e].iter().collect();
+            if state.input_buffer.is_empty() {
+                spans.push(Span::styled(CARET, Style::default().fg(theme::ACCENT)));
+                spans.push(Span::styled(
+                    " 输入任务，或输入 / 查看命令",
+                    Style::default().fg(theme::FAINT),
+                ));
+            } else {
+                if !before.is_empty() {
+                    spans.push(Span::styled(before, ink()));
+                }
+                spans.push(Span::styled(CARET, Style::default().fg(theme::ACCENT)));
+                if !after.is_empty() {
+                    spans.push(Span::styled(after, ink()));
+                }
+            }
+        } else if !text.is_empty() {
+            spans.push(Span::styled(text, ink()));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    let widget = Paragraph::new(lines).style(Style::default().bg(theme::CANVAS));
+    f.render_widget(widget, area);
+}
+
+/// 底部状态词：克制到只有一个词（耗时与动画只在正文活动行出现一次）。
+fn status_word(state: &TuiState) -> (String, Style) {
+    match &state.runtime_mode {
+        RuntimeMode::Ready => ("就绪".to_string(), faint()),
+        RuntimeMode::Connecting => ("连接中".to_string(), muted()),
+        RuntimeMode::Thinking => ("思考中".to_string(), muted()),
+        RuntimeMode::Responding => ("写入中".to_string(), muted()),
+        RuntimeMode::ExecutingTool(name) => {
+            let short: String = name.chars().take(28).collect();
+            (short, muted())
+        }
+        RuntimeMode::WaitingApproval => ("待确认".to_string(), Style::default().fg(theme::WARN)),
+        RuntimeMode::Completed => ("完成".to_string(), Style::default().fg(theme::SUCCESS)),
+        RuntimeMode::Failed(_) => ("失败".to_string(), Style::default().fg(theme::DANGER)),
+    }
+}
+
+fn elapsed_label(state: &TuiState) -> String {
+    state
+        .turn_started_at
+        .map(|t| format_elapsed_seconds(t.elapsed().as_millis() as u64))
+        .unwrap_or_default()
+}
+
+pub fn ui(f: &mut Frame, state: &mut TuiState) {
+    let area = f.area();
+    fill(f, area, theme::CANVAS);
+
+    // 极小终端降级：不 panic，只给一行提示。
+    if area.width < 24 || area.height < 8 {
+        let msg = Line::from(Span::styled("终端窗口过小", muted()));
+        f.render_widget(
+            Paragraph::new(msg).style(Style::default().bg(theme::CANVAS)),
+            area,
+        );
+        return;
+    }
+
+    let content = Rect {
+        x: area.x + GUTTER,
+        y: area.y,
+        width: area.width.saturating_sub(GUTTER * 2),
+        height: area.height,
     };
 
-    let header_text = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(" PONY ", Style::default().fg(Color::Rgb(15, 20, 30)).bg(Color::Rgb(120, 185, 255)).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(format!("project: {} ", ws_name), Style::default().fg(Color::Rgb(210, 220, 235)).add_modifier(Modifier::BOLD)),
-        Span::raw(" ".repeat(header_pad)),
-        Span::styled(right_meta, Style::default().fg(Color::Rgb(130, 140, 160))),
-    ]);
-    let header = Paragraph::new(vec![header_text]).style(Style::default().bg(header_bg));
-    f.render_widget(header, chunks[0]);
+    // ── Header：一行、无底色带、无徽章 ─────────────────────────────────────
+    let ws_name = state
+        .workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("~");
+    let session_short: String = state
+        .session_id
+        .rsplit('-')
+        .next()
+        .unwrap_or(&state.session_id)
+        .chars()
+        .take(6)
+        .collect();
+    let right_meta = format!("{}  ·  {}", state.model, session_short);
+    let left_w = 4 + 5 + str_width(ws_name);
+    let right_w = str_width(&right_meta);
+    let pad = content.width as usize;
+    let header_line = if pad > left_w + right_w {
+        Line::from(vec![
+            Span::styled("pony", Style::default().fg(theme::INK).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  ", faint()),
+            Span::styled(ws_name.to_string(), muted()),
+            Span::raw(" ".repeat(pad - left_w - right_w)),
+            Span::styled(right_meta, faint()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("pony", Style::default().fg(theme::INK).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  ", faint()),
+            Span::styled(ws_name.to_string(), muted()),
+        ])
+    };
+    let header_rect = Rect { height: 1, ..content };
+    f.render_widget(Paragraph::new(header_line), header_rect);
 
-    // 2. Chat history or Initial Logo: 背景使用深灰青黑底色
-    let chat_bg = Color::Rgb(18, 20, 26);
-    let mut message_lines: Vec<Line> = Vec::new();
+    // ── 发丝线 + 呼吸留白 ─────────────────────────────────────────────────
+    let rule_rect = Rect { y: content.y + 1, height: 1, ..content };
+    f.render_widget(Paragraph::new(hairline(content.width as usize)), rule_rect);
+
+    // ── 底部区块尺寸（输入区高随内容自适应，1~6 行）───────────────────────
+    let text_width = content.width.saturating_sub(2).max(1) as usize;
+    let visual_lines = layout_input(&state.input_buffer, text_width).len() as u16;
+    let input_h = visual_lines.clamp(1, 6);
+    let bottom_h = 1 + input_h + 1; // 发丝线 + 输入 + 状态行
+
+    let chat_top = content.y + 3;
+    let chat_h = area
+        .y
+        .saturating_add(area.height)
+        .saturating_sub(bottom_h)
+        .saturating_sub(chat_top)
+        .saturating_sub(1); // 输入区上方留白
+    let chat_rect = Rect {
+        x: content.x,
+        y: chat_top,
+        width: content.width,
+        height: chat_h.max(1),
+    };
+
+    // ── 会话正文：角色标签 + 单色正文 + 极简工具行 ───────────────────────
+    let width = chat_rect.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     if state.messages.is_empty() {
-        for l in ascii_logo() {
-            let mut padded = vec![Span::raw("  ")];
-            padded.extend(l.spans);
-            message_lines.push(Line::from(padded));
+        let splash = ascii_logo();
+        // 空态不是「没内容」，而是留白构图：按正文区 1/3 高度锚定，避免顶部挤、底部空。
+        let top_pad = (chat_h as usize).saturating_sub(splash.len()) / 3;
+        for _ in 0..top_pad {
+            lines.push(blank());
+        }
+        for line in splash {
+            push_wrapped(&mut lines, line, width);
         }
     } else {
-        let mut prev_is_tool = false;
-        for msg in &state.messages {
+        let mut prev_role: Option<MessageRole> = None;
+        let last_index = state.messages.len().saturating_sub(1);
+        for (idx, msg) in state.messages.iter().enumerate() {
+            let prev_is_tool = matches!(
+                prev_role,
+                Some(MessageRole::ToolCall) | Some(MessageRole::ToolResult)
+            );
             match msg.role {
                 MessageRole::User => {
-                    message_lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(" USER ", Style::default().fg(Color::Rgb(20, 15, 28)).bg(Color::Rgb(205, 160, 255)).add_modifier(Modifier::BOLD)),
-                        Span::raw(" "),
-                        Span::styled(&msg.content, Style::default().fg(Color::Rgb(250, 250, 255)).add_modifier(Modifier::BOLD)),
-                    ]));
-                    message_lines.push(Line::raw(""));
-                    prev_is_tool = false;
+                    // 轮间距 2 行：长会话里一眼能扫到「新一轮提问」的节拍
+                    push_gap(&mut lines, 2);
+                    lines.push(Line::from(Span::styled("你", muted())));
+                    for raw in msg.content.lines() {
+                        push_wrapped(
+                            &mut lines,
+                            Line::from(Span::styled(raw.to_string(), ink())),
+                            width,
+                        );
+                    }
+                    prev_role = Some(MessageRole::User);
                 }
                 MessageRole::Assistant => {
-                    if prev_is_tool {
-                        message_lines.push(Line::raw(""));
+                    // 一个 assistant turn 只在「首次出现」时打一次标签，工具行与正文共享同一 turn。
+                    if !prev_is_tool {
+                        push_gap(&mut lines, 1);
+                        lines.push(Line::from(Span::styled(
+                            "pony",
+                            Style::default().fg(theme::ACCENT),
+                        )));
+                    } else {
+                        // 工具行结束后回到正文：留一行呼吸，避免正文贴着工具行
+                        push_blank(&mut lines);
                     }
-                    for line in msg.content.lines() {
-                        let mut rendered_spans = vec![Span::raw("  ")];
-                        rendered_spans.extend(render_markdown_line(line));
-                        message_lines.push(Line::from(rendered_spans));
+                    let mut in_code = false;
+                    for raw in msg.content.lines() {
+                        let trimmed = raw.trim_start();
+                        if trimmed.starts_with("```") {
+                            in_code = !in_code;
+                            if in_code {
+                                let lang = trimmed.trim_start_matches('`').trim();
+                                if !lang.is_empty() {
+                                    lines.push(Line::from(vec![
+                                        Span::styled("  ▏ ", Style::default().fg(theme::HAIRLINE)),
+                                        Span::styled(lang.to_string(), faint()),
+                                    ]));
+                                }
+                            }
+                            continue;
+                        }
+                        if in_code {
+                            push_wrapped(
+                                &mut lines,
+                                Line::from(vec![
+                                    Span::styled("  ▏ ", Style::default().fg(theme::HAIRLINE)),
+                                    Span::styled(
+                                        raw.to_string(),
+                                        Style::default().fg(theme::INK_SOFT),
+                                    ),
+                                ]),
+                                width,
+                            );
+                            continue;
+                        }
+                        if trimmed.is_empty() {
+                            push_blank(&mut lines);
+                            continue;
+                        }
+                        push_wrapped(&mut lines, Line::from(render_markdown_line(raw)), width);
                     }
-                    message_lines.push(Line::raw(""));
-                    prev_is_tool = false;
+                    prev_role = Some(MessageRole::Assistant);
                 }
-                MessageRole::ToolCall => {
-                    message_lines.push(Line::from(vec![
-                        Span::raw("    "),
-                        Span::styled("● ", Style::default().fg(Color::Rgb(120, 190, 240))),
-                        Span::styled(&msg.content, Style::default().fg(Color::Rgb(165, 175, 195))),
-                    ]));
-                    prev_is_tool = true;
-                }
-                MessageRole::ToolResult => {
-                    message_lines.push(Line::from(vec![
-                        Span::raw("    "),
-                        Span::styled("✔ ", Style::default().fg(Color::Rgb(80, 210, 130))),
-                        Span::styled(&msg.content, Style::default().fg(Color::Rgb(150, 165, 180))),
-                    ]));
-                    prev_is_tool = true;
+                MessageRole::ToolCall | MessageRole::ToolResult => {
+                    // 工具行本身属于 assistant turn：若无正文先行，则此处开启 turn 并打标签。
+                    if !prev_is_tool && !matches!(prev_role, Some(MessageRole::Assistant)) {
+                        push_gap(&mut lines, 2);
+                        lines.push(Line::from(Span::styled(
+                            "pony",
+                            Style::default().fg(theme::ACCENT),
+                        )));
+                    }
+                    let running = msg.role == MessageRole::ToolCall && idx == last_index;
+                    let (glyph, glyph_style) = if msg.role == MessageRole::ToolCall {
+                        if running {
+                            (
+                                spinner_frame(state.spinner_tick).to_string(),
+                                Style::default().fg(theme::ACCENT),
+                            )
+                        } else {
+                            (GLYPH_RUNNING.to_string(), faint())
+                        }
+                    } else if idx == last_index {
+                        (GLYPH_DONE.to_string(), Style::default().fg(theme::SUCCESS))
+                    } else {
+                        (GLYPH_DONE.to_string(), faint())
+                    };
+                    // 工具行内部也分层：动作名提亮，参数/结果压暗。
+                    let (head, detail) = match msg.content.split_once("  ") {
+                        Some((h, d)) => (h.to_string(), d.to_string()),
+                        None => (msg.content.clone(), String::new()),
+                    };
+                    let head_style = if msg.role == MessageRole::ToolCall {
+                        ink_soft()
+                    } else {
+                        Style::default().fg(theme::MUTED)
+                    };
+                    let mut spans = vec![
+                        Span::styled(format!("  {} ", glyph), glyph_style),
+                        Span::styled(head, head_style),
+                    ];
+                    if !detail.is_empty() {
+                        spans.push(Span::styled(format!("  {}", detail), muted()));
+                    }
+                    push_wrapped(&mut lines, Line::from(spans), width);
+                    prev_role = Some(msg.role.clone());
                 }
                 MessageRole::System => {
-                    message_lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("ℹ ", Style::default().fg(Color::Rgb(120, 185, 255))),
-                        Span::styled(&msg.content, Style::default().fg(Color::Rgb(170, 180, 200))),
-                    ]));
-                    message_lines.push(Line::raw(""));
-                    prev_is_tool = false;
+                    let is_error = msg.content.contains("Error")
+                        || msg.content.contains("fail")
+                        || msg.content.contains("失败");
+                    let (glyph, glyph_style) = if is_error {
+                        (GLYPH_FAIL, Style::default().fg(theme::DANGER))
+                    } else {
+                        ("·", faint())
+                    };
+                    let text_style = if is_error {
+                        Style::default().fg(theme::DANGER)
+                    } else {
+                        muted()
+                    };
+                    if !lines.is_empty() && !prev_is_tool {
+                        push_blank(&mut lines);
+                    }
+                    push_wrapped(
+                        &mut lines,
+                        Line::from(vec![
+                            Span::styled(format!("{} ", glyph), glyph_style),
+                            Span::styled(msg.content.clone(), text_style),
+                        ]),
+                        width,
+                    );
+                    prev_role = Some(MessageRole::System);
                 }
             }
         }
 
-        // 动态状态占位（在对话历史底部，替换原“正在思考”占位，伴随整数秒耗时）：
-        if state.is_streaming {
-            let has_elapsed = state.turn_started_at.is_some();
-            let elapsed_str = if let Some(started) = state.turn_started_at {
-                format!("，用时 {} ···", format_elapsed_seconds(started.elapsed().as_millis() as u64))
+        // 进行中的一行极简状态（不打断阅读节奏，只占一行）
+        if state.is_streaming && !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
+            push_blank(&mut lines);
+            let (word, style) = status_word(state);
+            let elapsed = elapsed_label(state);
+            let text = if elapsed.is_empty() {
+                format!("{} {}", spinner_frame(state.spinner_tick), word)
             } else {
-                String::new()
+                format!("{} {}  {}", spinner_frame(state.spinner_tick), word, elapsed)
             };
-            let spinner = spinner_frame(state.spinner_tick);
-            let (status_text, status_color) = match &state.runtime_mode {
-                RuntimeMode::Ready => ("就绪".to_string(), Color::Rgb(140, 210, 160)),
-                RuntimeMode::Connecting => {
-                    let base = if has_elapsed { "准备就绪中" } else { "准备就绪中..." };
-                    (format!("{base}{elapsed_str}"), Color::Rgb(120, 185, 255))
-                }
-                RuntimeMode::Thinking => {
-                    let base = if has_elapsed { "正在思考" } else { "正在思考..." };
-                    (format!("{base}{elapsed_str}"), Color::Rgb(170, 150, 240))
-                }
-                RuntimeMode::Responding => {
-                    let base = if has_elapsed { "正在回复" } else { "正在回复..." };
-                    (format!("{base}{elapsed_str}"), Color::Rgb(120, 205, 240))
-                }
-                RuntimeMode::ExecutingTool(name) => {
-                    let base = if has_elapsed { format!("执行工具: {name}") } else { format!("执行工具: {name}...") };
-                    (format!("{base}{elapsed_str}"), Color::Rgb(240, 180, 80))
-                }
-                RuntimeMode::WaitingApproval => {
-                    let base = if has_elapsed { "等待确认中" } else { "等待确认中..." };
-                    (format!("{base}{elapsed_str}"), Color::Rgb(240, 180, 80))
-                }
-                RuntimeMode::Completed => ("完成".to_string(), Color::Rgb(120, 210, 140)),
-                RuntimeMode::Failed(reason) => (format!("失败: {reason}"), Color::Rgb(240, 100, 100)),
-            };
-
-            message_lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(format!("{} {}", spinner, status_text), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-            ]));
-            message_lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(text, style)));
+            lines.push(blank());
         }
     }
 
-    // 估算多行折行后的实际行高（左右内边距分别预留 4 字符缓冲）
-    let chat_width = chunks[1].width.saturating_sub(6).max(20) as usize;
-    let mut total_wrapped_lines = 0usize;
-    for line in &message_lines {
-        let line_len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        let rows = if line_len == 0 {
-            1
-        } else {
-            (line_len + chat_width - 1) / chat_width
-        };
-        total_wrapped_lines += rows.max(1);
-    }
-
-    let visible_history_height = chunks[1].height as usize;
-    let max_scroll_offset = if total_wrapped_lines > visible_history_height {
-        (total_wrapped_lines - visible_history_height) as u16
-    } else {
-        0
-    };
-
-    let effective_scroll_offset = if state.auto_scroll {
-        state.scroll_offset = max_scroll_offset;
-        max_scroll_offset
-    } else {
-        state.scroll_offset = state.scroll_offset.min(max_scroll_offset);
-        state.scroll_offset
-    };
-
-    let chat_widget = Paragraph::new(message_lines)
-        .style(Style::default().bg(chat_bg))
-        .wrap(Wrap { trim: false })
-        .scroll((effective_scroll_offset, 0));
-    f.render_widget(chat_widget, chunks[1]);
-
-    // 3. Input Box: 带有输入框边框与底栏状态
-    let input_container_bg = Color::Rgb(24, 27, 36);
-
-    let total_width = chunks[2].width as usize;
-    let model_tag = format!("  {}  ", state.model);
-
-    let (status_text_disp, status_bg, status_fg) = match &state.runtime_mode {
-        RuntimeMode::Ready => (" ● 就绪 ", Color::Rgb(45, 95, 60), Color::Rgb(190, 240, 205)),
-        RuntimeMode::Connecting | RuntimeMode::Thinking | RuntimeMode::Responding | RuntimeMode::ExecutingTool(_) => {
-            (" ⠋ 执行中 ", Color::Rgb(60, 110, 190), Color::Rgb(255, 255, 255))
-        }
-        RuntimeMode::WaitingApproval => (" ⏸ 待确认 ", Color::Rgb(180, 110, 30), Color::Rgb(255, 245, 200)),
-        RuntimeMode::Completed => (" ✔ 完成 ", Color::Rgb(40, 160, 90), Color::Rgb(255, 255, 255)),
-        RuntimeMode::Failed(_) => (" ✕ 失败 ", Color::Rgb(200, 60, 60), Color::Rgb(255, 255, 255)),
-    };
-
-    let left_info_len = status_text_disp.chars().count() + 4;
-    let right_info_len = model_tag.chars().count() + 4;
-    let pad_spaces = if total_width > left_info_len + right_info_len {
-        total_width - left_info_len - right_info_len
-    } else {
-        1
-    };
-
-    let cursor_span = if !state.is_streaming {
-        Span::styled("█", Style::default().fg(Color::Rgb(100, 210, 240)))
-    } else {
-        Span::raw("")
-    };
-
-    // 支持3行高度输入展示，单行/多行自然排版
-    let mut input_content_lines: Vec<Line> = Vec::new();
-    let raw_input_lines: Vec<&str> = state.input_buffer.split('\n').collect();
-    if raw_input_lines.is_empty() || (raw_input_lines.len() == 1 && raw_input_lines[0].is_empty()) {
-        input_content_lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("> ", Style::default().fg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD)),
-            cursor_span,
-        ]));
-        input_content_lines.push(Line::raw(""));
-        input_content_lines.push(Line::raw(""));
-    } else {
-        for (i, line) in raw_input_lines.iter().take(3).enumerate() {
-            let prefix = if i == 0 {
-                Span::styled("> ", Style::default().fg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD))
-            } else {
-                Span::styled("  ", Style::default().fg(Color::Rgb(100, 210, 240)))
-            };
-            let is_last_displayed = i == raw_input_lines.len().min(3) - 1;
-            input_content_lines.push(Line::from(vec![
-                Span::raw("  "),
-                prefix,
-                Span::styled(*line, Style::default().fg(Color::Rgb(245, 248, 255)).add_modifier(Modifier::BOLD)),
-                if is_last_displayed { cursor_span.clone() } else { Span::raw("") },
-            ]));
-        }
-        while input_content_lines.len() < 3 {
-            input_content_lines.push(Line::raw(""));
+    // 模态时压暗背板正文，让浮层成为唯一焦点
+    if state.mode != InteractionMode::Normal {
+        for line in &mut lines {
+            for span in &mut line.spans {
+                span.style = span.style.fg(theme::FAINT);
+            }
         }
     }
 
-    let mut input_lines = input_content_lines;
-    input_lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(status_text_disp, Style::default().fg(status_fg).bg(status_bg).add_modifier(Modifier::BOLD)),
-        Span::raw(" ".repeat(pad_spaces)),
-        Span::styled(model_tag, Style::default().fg(Color::Rgb(170, 195, 230)).bg(Color::Rgb(38, 44, 58))),
-        Span::raw("  "),
-    ]));
+    // 精确滚动：行数即渲染行数（折行已按显示宽度预先完成）
+    let visible = chat_rect.height as usize;
+    let total = lines.len();
+    let max_offset = total.saturating_sub(visible);
+    let offset = if state.auto_scroll {
+        state.scroll_offset = max_offset as u16;
+        max_offset
+    } else {
+        let clamped = (state.scroll_offset as usize).min(max_offset);
+        state.scroll_offset = clamped as u16;
+        clamped
+    };
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme::CANVAS))
+            .scroll((offset as u16, 0)),
+        chat_rect,
+    );
 
-    let input_widget = Paragraph::new(input_lines).style(Style::default().bg(input_container_bg));
-    f.render_widget(input_widget, chunks[2]);
+    // ── 输入区：一条发丝线 + 提示符输入 + 状态行 ──────────────────────────
+    let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
+    let input_rule = Rect { y: bottom_top, height: 1, ..content };
+    f.render_widget(Paragraph::new(hairline(content.width as usize)), input_rule);
 
-    // 斜杠命令自动弹出菜单（当用户输入以 / 开头时实时浮动在输入框上方）
+    let input_rect = Rect {
+        y: bottom_top + 1,
+        height: input_h,
+        ..content
+    };
+    render_input(f, input_rect, state);
+
+    // 状态行：左侧提示随上下文变化，右侧一个状态词（流式时由正文活动行承载，不再重复）
+    let (phrase, phrase_style) = status_word(state);
+    let phrase = if state.is_streaming {
+        String::new()
+    } else {
+        phrase
+    };
+    let menu_open = !state.matching_commands().is_empty()
+        && state.mode == InteractionMode::Normal
+        && !state.is_streaming;
+    // 三键位固定（回车 / alt+回车 / 命令），只让 esc 的动词随上下文变化，避免肌肉记忆漂移。
+    let hints = if state.is_streaming {
+        "esc 中断"
+    } else if menu_open {
+        "↑↓ 选择   ·   tab 补全   ·   esc 关闭"
+    } else if !state.auto_scroll {
+        "↓ end 回到最新   ·   esc 清空"
+    } else if state.input_buffer.is_empty() {
+        "回车 发送   ·   alt+回车 换行   ·   / 命令"
+    } else {
+        "回车 发送   ·   esc 清空   ·   / 命令"
+    };
+    let footer_y = input_rect.y + input_h;
+    let footer_rect = Rect { y: footer_y, height: 1, ..content };
+    let hints_w = str_width(hints);
+    let phrase_w = str_width(&phrase);
+    let space = content.width as usize;
+    // 空间不足时只保留 hints（右对齐状态词整体让位），绝不做无间隔拼接。
+    let footer_line = if phrase.is_empty() {
+        Line::from(Span::styled(hints, faint()))
+    } else if space > hints_w + phrase_w + 2 {
+        Line::from(vec![
+            Span::styled(hints, faint()),
+            Span::raw(" ".repeat(space - hints_w - phrase_w)),
+            Span::styled(phrase, phrase_style),
+        ])
+    } else {
+        Line::from(Span::styled(hints, faint()))
+    };
+    f.render_widget(Paragraph::new(footer_line), footer_rect);
+
+    // ── 斜杠命令面板：浮于输入区之上，两条发丝线夹一段浅表面 ──────────────
     let match_cmds = state.matching_commands();
     if !match_cmds.is_empty() && state.mode == InteractionMode::Normal {
-        let menu_height = (match_cmds.len() as u16 + 2).min(8);
-        let menu_width = 46u16;
-        let menu_x = 4u16;
-        let menu_y = chunks[2].y.saturating_sub(menu_height);
-        let menu_rect = ratatui::layout::Rect::new(menu_x, menu_y, menu_width, menu_height);
+        let rows = match_cmds.len().min(7) as u16;
+        let menu_h = rows + 2;
+        let desc_w = match_cmds
+            .iter()
+            .take(rows as usize)
+            .map(|(_, d)| str_width(d))
+            .max()
+            .unwrap_or(0);
+        // 几何：竖条 1 + 空格 1 + 命令列 12 + 描述 + 右侧留白 2
+        let need_w = (16 + desc_w + 2) as u16;
+        let menu_w = need_w.clamp(28, content.width.min(64));
+        let menu_y = input_rule.y.saturating_sub(menu_h + 1); // 与输入区留一行呼吸
+        let menu_rect = Rect {
+            x: content.x,
+            y: menu_y,
+            width: menu_w,
+            height: menu_h,
+        };
+        if menu_rect.y > chat_rect.y {
+            f.render_widget(ratatui::widgets::Clear, menu_rect);
+            let block = Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(theme::HAIRLINE))
+                .style(Style::default().bg(theme::SURFACE));
+            let inner = block.inner(menu_rect);
+            f.render_widget(block, menu_rect);
 
-        let mut menu_lines = Vec::new();
-        menu_lines.push(Line::from(vec![
-            Span::styled(" 命令提示 ", Style::default().fg(Color::Rgb(15, 20, 30)).bg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-            Span::styled("↑↓选择 · Tab/Enter补全", Style::default().fg(Color::Rgb(130, 140, 165))),
-        ]));
-
-        for (idx, (cmd, desc)) in match_cmds.iter().enumerate() {
-            let is_sel = idx == state.selected_command_index;
-            let (prefix, style, desc_style) = if is_sel {
-                (" ❯ ", Style::default().fg(Color::Rgb(255, 255, 255)).bg(Color::Rgb(45, 75, 130)).add_modifier(Modifier::BOLD), Style::default().fg(Color::Rgb(180, 215, 255)).bg(Color::Rgb(45, 75, 130)))
-            } else {
-                ("   ", Style::default().fg(Color::Rgb(120, 200, 240)), Style::default().fg(Color::Rgb(150, 160, 180)))
-            };
-
-            menu_lines.push(Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(format!("{:<10}", cmd), style),
-                Span::styled(format!(" {}", desc), desc_style),
-            ]));
+            let selected = state
+                .selected_command_index
+                .min(match_cmds.len().saturating_sub(1));
+            let inner_w = inner.width as usize;
+            let mut menu_lines: Vec<Line<'static>> = Vec::new();
+            for (idx, (cmd, desc)) in match_cmds.iter().enumerate().take(rows as usize) {
+                let is_sel = idx == selected;
+                let bg = if is_sel { theme::SURFACE_SEL } else { theme::SURFACE };
+                let cmd_col = pad_display(cmd, 12);
+                let used = 2 + str_width(&cmd_col) + str_width(desc);
+                let mut spans = vec![
+                    Span::styled(
+                        if is_sel { "▏" } else { " " },
+                        if is_sel {
+                            Style::default().fg(theme::ACCENT).bg(bg)
+                        } else {
+                            Style::default().bg(bg)
+                        },
+                    ),
+                    Span::styled(
+                        format!(" {}", cmd_col),
+                        if is_sel {
+                            Style::default()
+                                .fg(theme::INK)
+                                .bg(bg)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme::INK_SOFT).bg(bg)
+                        },
+                    ),
+                    Span::styled(
+                        desc.to_string(),
+                        if is_sel {
+                            Style::default().fg(theme::INK_SOFT).bg(bg)
+                        } else {
+                            Style::default().fg(theme::MUTED).bg(bg)
+                        },
+                    ),
+                    Span::styled(
+                        " ".repeat(inner_w.saturating_sub(used)),
+                        Style::default().bg(bg),
+                    ),
+                ];
+                spans.retain(|s| !s.content.is_empty());
+                menu_lines.push(Line::from(spans));
+            }
+            f.render_widget(
+                Paragraph::new(menu_lines).style(Style::default().bg(theme::SURFACE)),
+                inner,
+            );
         }
-
-        let menu_popup = Paragraph::new(menu_lines).style(Style::default().bg(Color::Rgb(28, 32, 44)));
-        f.render_widget(menu_popup, menu_rect);
     }
 
-    // 如果处于 SelectingSession 弹窗模式，在中央渲染一个无边界柔和浮动选择面板
+    // ── 模态面板（会话 / 提供商 / 模型 / 新增提供商）──────────────────────
+    let panel_rect = |w: u16, h: u16| -> Rect {
+        let pw = w.min(area.width.saturating_sub(4)).max(20);
+        let ph = h.min(area.height.saturating_sub(2)).max(6);
+        Rect {
+            x: area.x + (area.width.saturating_sub(pw)) / 2,
+            y: area.y + (area.height.saturating_sub(ph)) / 2,
+            width: pw,
+            height: ph,
+        }
+    };
+
     if state.mode == InteractionMode::SelectingSession {
-        let area = f.area();
-        let popup_width = area.width.min(64).max(40);
-        let popup_height = area.height.min(18).max(10);
-        let popup_x = (area.width.saturating_sub(popup_width)) / 2;
-        let popup_y = (area.height.saturating_sub(popup_height)) / 2;
-        let popup_rect = ratatui::layout::Rect::new(popup_x, popup_y, popup_width, popup_height);
-
-        let mut lines = Vec::new();
-        f.render_widget(ratatui::widgets::Clear, popup_rect);
-        lines.push(Line::from(vec![
-            Span::styled(" RESUME SESSION ", Style::default().fg(Color::Rgb(15, 17, 23)).bg(Color::Rgb(140, 180, 255)).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-            Span::styled("Select a session to continue (Esc to cancel)", Style::default().fg(Color::Rgb(150, 160, 180))),
-        ]));
-        lines.push(Line::raw(""));
-
+        let rows = state.session_list.len().max(1) as u16;
+        let rect = panel_rect(58, rows + 4);
+        let body = draw_panel(f, rect, "会话", "↑↓ 选择 · 回车 确认 · esc 取消");
+        let inner_w = body.width as usize;
+        let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.session_list.is_empty() {
-            lines.push(Line::from(vec![Span::styled("  No previous sessions found.", Style::default().fg(Color::Rgb(140, 145, 160)))]));
+            lines_out.push(Line::from(Span::styled("  暂无历史会话", faint())));
         } else {
             for (idx, item) in state.session_list.iter().enumerate() {
-                let is_selected = idx == state.selected_session_index;
-                let (prefix, row_style) = if is_selected {
-                    (" ❯ ", Style::default().fg(Color::Rgb(15, 20, 25)).bg(Color::Rgb(130, 220, 240)).add_modifier(Modifier::BOLD))
-                } else {
-                    ("   ", Style::default().fg(Color::Rgb(220, 225, 240)))
-                };
-
-                let mut title_disp = item.title.clone();
-                if title_disp.len() > 30 {
-                    title_disp = format!("{}...", &title_disp[..27]);
-                }
-
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, row_style),
-                    Span::styled(format!("{:<30}", title_disp), row_style),
-                    Span::raw("  "),
-                    Span::styled(format!("[{}]", item.id), Style::default().fg(if is_selected { Color::Rgb(40, 50, 70) } else { Color::Rgb(120, 130, 150) })),
-                ]));
+                let selected = idx == state.selected_session_index;
+                let id_short: String = item
+                    .id
+                    .rsplit('-')
+                    .next()
+                    .unwrap_or(&item.id)
+                    .chars()
+                    .take(8)
+                    .collect();
+                let title = truncate_width(&item.title, inner_w.saturating_sub(14));
+                lines_out.push(list_row(selected, &title, &id_short, inner_w));
             }
         }
-
-        let popup_bg = Color::Rgb(32, 36, 48);
-        let popup = Paragraph::new(lines).style(Style::default().bg(popup_bg));
-        f.render_widget(popup, popup_rect);
+        f.render_widget(
+            Paragraph::new(lines_out).style(Style::default().bg(theme::SURFACE)),
+            body,
+        );
     }
 
-    // Provider 选择弹窗
     if state.mode == InteractionMode::SelectingProvider {
-        let area = f.area();
-        let popup_width = area.width.min(68).max(40);
-        let popup_height = area.height.min(18).max(10);
-        let popup_x = (area.width.saturating_sub(popup_width)) / 2;
-        let popup_y = (area.height.saturating_sub(popup_height)) / 2;
-        let popup_rect = ratatui::layout::Rect::new(popup_x, popup_y, popup_width, popup_height);
-
-        let mut lines = Vec::new();
-        f.render_widget(ratatui::widgets::Clear, popup_rect);
-        lines.push(Line::from(vec![
-            Span::styled(" SELECT PROVIDER ", Style::default().fg(Color::Rgb(15, 17, 23)).bg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-            Span::styled("↑↓ 切换 · Enter 确认 · 'a' 添加新Provider · Esc 取消", Style::default().fg(Color::Rgb(150, 160, 180))),
-        ]));
-        lines.push(Line::raw(""));
-
+        let rows = state.provider_list.len().max(1) as u16;
+        let rect = panel_rect(60, rows + 4);
+        let body = draw_panel(f, rect, "提供商", "↑↓ 选择 · 回车 确认 · a 新增 · esc 取消");
+        let inner_w = body.width as usize;
+        let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.provider_list.is_empty() {
-            lines.push(Line::from(vec![Span::styled("  暂无可用的 Provider 配置。", Style::default().fg(Color::Rgb(140, 145, 160)))]));
+            lines_out.push(Line::from(Span::styled(
+                "  尚未配置，按 a 新增",
+                faint(),
+            )));
         } else {
             for (idx, item) in state.provider_list.iter().enumerate() {
-                let is_selected = idx == state.selected_provider_index;
-                let is_active = item.id == state.current_provider_id;
-                let (prefix, row_style) = if is_selected {
-                    (" ❯ ", Style::default().fg(Color::Rgb(15, 20, 25)).bg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD))
+                let selected = idx == state.selected_provider_index;
+                let active = item.id == state.current_provider_id;
+                let right = if active {
+                    format!("{}  当前", item.protocol)
                 } else {
-                    ("   ", Style::default().fg(Color::Rgb(220, 225, 240)))
+                    item.protocol.clone()
                 };
-
-                let active_badge = if is_active {
-                    Span::styled(" (当前)", Style::default().fg(if is_selected { Color::Rgb(20, 40, 60) } else { Color::Rgb(80, 200, 120) }).add_modifier(Modifier::BOLD))
-                } else {
-                    Span::raw("")
-                };
-
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, row_style),
-                    Span::styled(format!("{:<20}", item.name), row_style),
-                    active_badge,
-                    Span::raw(" "),
-                    Span::styled(format!("[{}]", item.protocol), Style::default().fg(if is_selected { Color::Rgb(40, 50, 70) } else { Color::Rgb(130, 140, 160) })),
-                    Span::raw("  "),
-                    Span::styled(format!("{}", item.base_url), Style::default().fg(if is_selected { Color::Rgb(40, 50, 70) } else { Color::Rgb(100, 110, 130) })),
-                ]));
+                let name = truncate_width(&item.name, inner_w.saturating_sub(24));
+                lines_out.push(list_row(selected, &name, &right, inner_w));
             }
         }
-
-        let popup_bg = Color::Rgb(32, 36, 48);
-        let popup = Paragraph::new(lines).style(Style::default().bg(popup_bg));
-        f.render_widget(popup, popup_rect);
+        f.render_widget(
+            Paragraph::new(lines_out).style(Style::default().bg(theme::SURFACE)),
+            body,
+        );
     }
 
-    // Model 选择弹窗
     if state.mode == InteractionMode::SelectingModel {
-        let area = f.area();
-        let popup_width = area.width.min(64).max(40);
-        let popup_height = area.height.min(18).max(10);
-        let popup_x = (area.width.saturating_sub(popup_width)) / 2;
-        let popup_y = (area.height.saturating_sub(popup_height)) / 2;
-        let popup_rect = ratatui::layout::Rect::new(popup_x, popup_y, popup_width, popup_height);
-
-        let mut lines = Vec::new();
-        f.render_widget(ratatui::widgets::Clear, popup_rect);
-        lines.push(Line::from(vec![
-            Span::styled(" SELECT MODEL ", Style::default().fg(Color::Rgb(15, 17, 23)).bg(Color::Rgb(140, 220, 140)).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-            Span::styled("↑↓ 切换 · Enter 确认 · Esc 取消", Style::default().fg(Color::Rgb(150, 160, 180))),
-        ]));
-        lines.push(Line::raw(""));
-
+        let rows = state.model_list.len().max(1) as u16;
+        let rect = panel_rect(58, rows + 4);
+        let body = draw_panel(f, rect, "模型", "↑↓ 选择 · 回车 确认 · esc 取消");
+        let inner_w = body.width as usize;
+        let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.model_list.is_empty() {
-            lines.push(Line::from(vec![Span::styled("  当前 Provider 无可选模型。", Style::default().fg(Color::Rgb(140, 145, 160)))]));
+            lines_out.push(Line::from(Span::styled(
+                "  当前提供商没有可用模型",
+                faint(),
+            )));
         } else {
             for (idx, item) in state.model_list.iter().enumerate() {
-                let is_selected = idx == state.selected_model_index;
-                let is_active = item.id == state.model;
-                let (prefix, row_style) = if is_selected {
-                    (" ❯ ", Style::default().fg(Color::Rgb(15, 20, 25)).bg(Color::Rgb(140, 220, 140)).add_modifier(Modifier::BOLD))
+                let selected = idx == state.selected_model_index;
+                let active = item.id == state.model;
+                let name = truncate_width(&item.name, inner_w.saturating_sub(20));
+                let right = if active {
+                    format!("{}  当前", item.id)
                 } else {
-                    ("   ", Style::default().fg(Color::Rgb(220, 225, 240)))
+                    item.id.clone()
                 };
-
-                let active_badge = if is_active {
-                    Span::styled(" (当前)", Style::default().fg(if is_selected { Color::Rgb(20, 40, 60) } else { Color::Rgb(80, 200, 120) }).add_modifier(Modifier::BOLD))
-                } else {
-                    Span::raw("")
-                };
-
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, row_style),
-                    Span::styled(format!("{:<26}", item.name), row_style),
-                    active_badge,
-                    Span::raw(" "),
-                    Span::styled(format!("[{}]", item.id), Style::default().fg(if is_selected { Color::Rgb(40, 50, 70) } else { Color::Rgb(120, 130, 150) })),
-                ]));
+                lines_out.push(list_row(selected, &name, &right, inner_w));
             }
         }
-
-        let popup_bg = Color::Rgb(32, 36, 48);
-        let popup = Paragraph::new(lines).style(Style::default().bg(popup_bg));
-        f.render_widget(popup, popup_rect);
+        f.render_widget(
+            Paragraph::new(lines_out).style(Style::default().bg(theme::SURFACE)),
+            body,
+        );
     }
 
-    // AddingProvider 模式分步弹窗渲染
     if state.mode == InteractionMode::AddingProvider {
-        let area = f.area();
-        let popup_width = area.width.min(68).max(40);
-        let popup_height = 11u16;
-        let popup_x = (area.width.saturating_sub(popup_width)) / 2;
-        let popup_y = (area.height.saturating_sub(popup_height)) / 2;
-        let popup_rect = ratatui::layout::Rect::new(popup_x, popup_y, popup_width, popup_height);
-
-        f.render_widget(ratatui::widgets::Clear, popup_rect);
-
-        let (step_title, prompt_text) = match state.add_provider_step {
-            AddingProviderStep::Name => ("1/3: 名称", "请输入 Provider 名称 (如 Ollama, OpenRouter):"),
-            AddingProviderStep::BaseUrl => ("2/3: 服务地址", "请输入 Base URL (如 http://127.0.0.1:11434/v1):"),
-            AddingProviderStep::ApiKey => ("3/3: 凭据密钥", "请输入 API Key (本地服务可留空直接回车):"),
-            AddingProviderStep::Commit => ("提交确认", "正在保存 Provider 配置..."),
+        let rect = panel_rect(60, 11);
+        let body = draw_panel(f, rect, "新增提供商", "回车 下一步 · esc 取消");
+        let (step, prompt) = match state.add_provider_step {
+            AddingProviderStep::Name => ("1 / 3  name", "Provider 名称"),
+            AddingProviderStep::BaseUrl => ("2 / 3  base url", "Base URL（http:// 或 https://）"),
+            AddingProviderStep::ApiKey => ("3 / 3  api key", "API Key（本地服务可留空）"),
+            AddingProviderStep::Commit => ("saving", "正在保存…"),
         };
-
-        let mut lines = Vec::new();
-        lines.push(Line::from(vec![
-            Span::styled(" ADD PROVIDER ", Style::default().fg(Color::Rgb(15, 17, 23)).bg(Color::Rgb(240, 180, 100)).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-            Span::styled(format!("步骤 {} · Enter 下一步 · Esc 取消", step_title), Style::default().fg(Color::Rgb(150, 160, 180))),
+        let mut rows: Vec<Line<'static>> = Vec::new();
+        rows.push(Line::from(vec![
+            Span::styled(format!("  {:<18}", step), faint()),
+            Span::styled(prompt.to_string(), muted()),
         ]));
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {}", prompt_text), Style::default().fg(Color::Rgb(200, 210, 230))),
+        rows.push(blank());
+        let value = if state.add_provider_step == AddingProviderStep::ApiKey && !state.input_buffer.is_empty()
+        {
+            "•".repeat(state.input_buffer.chars().count())
+        } else {
+            state.input_buffer.clone()
+        };
+        rows.push(Line::from(vec![
+            Span::styled("  › ", Style::default().fg(theme::ACCENT)),
+            Span::styled(value, ink()),
+            Span::styled(CARET, Style::default().fg(theme::ACCENT)),
         ]));
-        lines.push(Line::raw(""));
-
-        let input_disp = format!("  ❯ {}█", state.input_buffer);
-        lines.push(Line::from(vec![
-            Span::styled(input_disp, Style::default().fg(Color::Rgb(100, 210, 240)).add_modifier(Modifier::BOLD)),
-        ]));
-
-        if !state.status_text.is_empty() && (state.status_text.contains("错误") || state.status_text.contains("不能")) {
-            lines.push(Line::raw(""));
-            lines.push(Line::from(vec![
-                Span::styled(format!("  [!] {}", state.status_text), Style::default().fg(Color::Rgb(240, 100, 100))),
-            ]));
+        if !state.status_text.is_empty()
+            && (state.status_text.contains("错误") || state.status_text.contains("不能"))
+        {
+            rows.push(blank());
+            rows.push(Line::from(Span::styled(
+                format!("  {}", state.status_text),
+                Style::default().fg(theme::DANGER),
+            )));
         }
-
-        let popup_bg = Color::Rgb(32, 36, 48);
-        let popup = Paragraph::new(lines).style(Style::default().bg(popup_bg));
-        f.render_widget(popup, popup_rect);
+        f.render_widget(
+            Paragraph::new(rows).style(Style::default().bg(theme::SURFACE)),
+            body,
+        );
     }
 }
 
@@ -1518,22 +2106,30 @@ fn tui_event_loop(
     let mut last_tick_instant = std::time::Instant::now();
     install_shutdown_signal_handlers();
 
+    // 事件驱动重绘：无输入、无流式时不做无意义的 60fps 全屏重绘（省 CPU / 省电）。
+    let mut dirty = true;
     loop {
         // T2c：SIGINT/SIGTERM 置位后优雅退出主循环，走统一的终端恢复路径。
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
-        // 当处于流式思考状态时，按 80ms 节奏驱动 ASCII Spinner 动态旋转
-        if state.is_streaming && last_tick_instant.elapsed() >= Duration::from_millis(80) {
+        // 当处于流式思考状态时，按 400ms 节奏驱动呼吸点与耗时刷新（安静、不抢注意力）
+        if state.is_streaming && last_tick_instant.elapsed() >= Duration::from_millis(400) {
             state.spinner_tick = state.spinner_tick.wrapping_add(1);
             last_tick_instant = std::time::Instant::now();
+            dirty = true;
         }
 
-        terminal.draw(|f| ui(f, &mut state))?;
+        if dirty {
+            terminal.draw(|f| ui(f, &mut state))?;
+            dirty = false;
+        }
 
-        // 提高事件响应频率（16ms 约 60fps），确保模型 Token 一旦到达能瞬间呈现打字机 Stream 视觉效果
-        if let Ok(event) = rx.recv_timeout(Duration::from_millis(16)) {
-            match event {
+        let poll_ms = if state.is_streaming { 16 } else { 120 };
+        match rx.recv_timeout(Duration::from_millis(poll_ms)) {
+            Ok(event) => {
+                dirty = true;
+                match event {
                 UiEvent::ScrollWheel(is_up) => {
                     if is_up {
                         state.scroll_up(3);
@@ -1543,6 +2139,11 @@ fn tui_event_loop(
                 }
                 UiEvent::InputKey(key) => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                        // 有草稿时先清空，避免一次误触丢掉整段输入；空输入才真正退出。
+                        if !state.input_buffer.is_empty() && !state.is_streaming {
+                            state.clear_input();
+                            continue;
+                        }
                         break;
                     }
 
@@ -1728,15 +2329,15 @@ fn tui_event_loop(
                                 state.cancel_add_provider();
                             }
                             KeyCode::Backspace => {
-                                state.input_buffer.pop();
+                                state.backspace();
                             }
                             KeyCode::Char(c) => {
-                                state.input_buffer.push(c);
+                                state.insert_char(c);
                             }
                             KeyCode::Enter => {
                                 let input_val = state.input_buffer.trim().to_string();
                                 state.add_provider_input(&input_val);
-                                state.input_buffer.clear();
+                                state.clear_input();
 
                                 match state.advance_add_provider_step() {
                                     Ok(_) => {
@@ -1812,7 +2413,7 @@ fn tui_event_loop(
                             });
                         } else {
                             // 静态时不退出，只清空输入框
-                            state.input_buffer.clear();
+                            state.clear_input();
                         }
                         continue;
                     }
@@ -1821,24 +2422,68 @@ fn tui_event_loop(
                         continue;
                     }
 
+                    // 编辑快捷键（优先于字符插入，避免 Ctrl 组合键被当作普通字符）
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        match key.code {
+                            KeyCode::Char('j') => {
+                                state.insert_newline();
+                                continue;
+                            }
+                            KeyCode::Char('u') => {
+                                state.clear_input();
+                                continue;
+                            }
+                            KeyCode::Char('w') => {
+                                state.delete_word_backward();
+                                continue;
+                            }
+                            KeyCode::Char('a') => {
+                                state.cursor_line_home();
+                                continue;
+                            }
+                            KeyCode::Char('e') => {
+                                state.cursor_line_end();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Shift+Enter / Alt+Enter：换行而不发送
+                    if key.code == KeyCode::Enter
+                        && (key.modifiers.contains(KeyModifiers::SHIFT)
+                            || key.modifiers.contains(KeyModifiers::ALT))
+                    {
+                        state.insert_newline();
+                        continue;
+                    }
+
                     match key.code {
                         KeyCode::Tab => {
                             let match_cmds = state.matching_commands();
                             if !match_cmds.is_empty() {
                                 let idx = state.selected_command_index.min(match_cmds.len() - 1);
-                                state.input_buffer = match_cmds[idx].0.to_string();
+                                let completed = match_cmds[idx].0.to_string();
+                                state.set_input(&completed);
                             }
                         }
                         KeyCode::Enter => {
+                            // 行尾反斜杠 + Enter：换行（不给网关发送半句话）
+                            if state.input_buffer.ends_with('\\') {
+                                state.backspace();
+                                state.insert_newline();
+                                continue;
+                            }
                             let match_cmds = state.matching_commands();
                             if !match_cmds.is_empty() && state.input_buffer.starts_with('/') && !state.input_buffer.ends_with(' ') && state.input_buffer != match_cmds[state.selected_command_index.min(match_cmds.len() - 1)].0 {
                                 let idx = state.selected_command_index.min(match_cmds.len() - 1);
-                                state.input_buffer = match_cmds[idx].0.to_string();
+                                let completed = match_cmds[idx].0.to_string();
+                                state.set_input(&completed);
                                 continue;
                             }
                             let input = state.input_buffer.trim().to_string();
                             if !input.is_empty() {
-                                state.input_buffer.clear();
+                                state.clear_input();
                                 state.selected_command_index = 0;
 
                                 if input == "/resume" {
@@ -1965,12 +2610,29 @@ fn tui_event_loop(
                             }
                         }
                         KeyCode::Char(c) => {
-                            if c != '\r' && c != '\n' {
-                                state.input_buffer.push(c);
+                            if c == '\n' {
+                                state.insert_newline();
+                            } else if c != '\r' {
+                                state.insert_char(c);
                             }
                         }
                         KeyCode::Backspace => {
-                            state.input_buffer.pop();
+                            state.backspace();
+                        }
+                        KeyCode::Delete => {
+                            state.delete_forward();
+                        }
+                        KeyCode::Left => {
+                            state.move_cursor_left();
+                        }
+                        KeyCode::Right => {
+                            state.move_cursor_right();
+                        }
+                        KeyCode::Home => {
+                            state.cursor_line_home();
+                        }
+                        KeyCode::End => {
+                            state.cursor_line_end();
                         }
                         KeyCode::Up => {
                             let match_cmds = state.matching_commands();
@@ -2031,7 +2693,10 @@ fn tui_event_loop(
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
                 }
+                }
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
