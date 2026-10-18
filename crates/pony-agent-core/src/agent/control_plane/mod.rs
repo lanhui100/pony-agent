@@ -3162,6 +3162,8 @@ mod tests {
         base_url: String,
         address: String,
         handle: Option<thread::JoinHandle<()>>,
+        /// wave-35/C2: initial queue length; finish() reports expected/actual on timeout.
+        expected: usize,
         /// wave-13：与 runtime mock 用例共享同一串行闸门，消除并行负载导致的
         /// 「provider 请求超时 → 客户端重试 → mock 队列失配 → 回合失败」抖动。
         _gate: crate::agent::runtime::tests::MockServerGate,
@@ -3173,6 +3175,7 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
             let address = listener.local_addr().expect("mock server addr");
             let pending = Arc::new(Mutex::new(responses));
+            let expected = pending.lock().expect("mock response lock").len();
             let pending_for_thread = Arc::clone(&pending);
             let handle = thread::spawn(move || loop {
                 // 队列为空 → 退出（与旧语义一致）。
@@ -3203,6 +3206,7 @@ mod tests {
                 base_url: format!("http://{}/v1", address),
                 address: address.to_string(),
                 handle: Some(handle),
+                expected,
                 _gate: gate,
             }
         }
@@ -3217,6 +3221,21 @@ mod tests {
                 }
             }
             if let Some(handle) = self.handle.take() {
+                // wave-35/C2: bounded join -- a queue mismatch must fail this single test
+                // with diagnostics, never hang the shared process-wide mock gate.
+                if !crate::agent::runtime::tests::wait_for_mock_thread(
+                    &handle,
+                    crate::agent::runtime::tests::MOCK_SERVER_FINISH_TIMEOUT,
+                ) {
+                    panic!(
+                        "mock server thread still running after {:?}: expected={} responses, \
+                         actual(unconsumed)={} -- mock queue not drained; bounded join keeps \
+                         this a single-test failure instead of hanging the suite.",
+                        crate::agent::runtime::tests::MOCK_SERVER_FINISH_TIMEOUT,
+                        self.expected,
+                        remaining
+                    );
+                }
                 handle.join().expect("join mock server");
             }
             assert_eq!(

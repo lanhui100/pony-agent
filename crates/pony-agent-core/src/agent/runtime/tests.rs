@@ -644,10 +644,51 @@ impl Drop for MockServerGate {
     }
 }
 
+/// wave-35/C2: mock server thread wait budget. A queue mismatch must fail the single test
+/// (with expected/actual diagnostics) instead of hanging the process-wide gate forever.
+/// 依据:对齐已冻结的 NFR 基准 `deadlock_watchdog_timeout_ms = 5000`(`.dev-team/nfr-baseline.json`);
+/// 合法用例下末条响应被消费后 mock 线程立即退出,等待在毫秒级返回,缩短预算只压缩"队列失配"的
+/// 暴露时间,不改变判定语义。
+pub(crate) const MOCK_SERVER_FINISH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(5000);
+
+/// wave-35/C2: bounded wait for a background thread to exit; returns `false` on timeout
+/// (never silently swallows it -- caller panics with diagnostics so the gate is released).
+pub(crate) fn wait_for_mock_thread(
+    handle: &thread::JoinHandle<()>,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
+}
+
+/// wave-35/C2: bounded-wait primitive -- a stuck mock thread must be reported as
+/// "not finished" within the budget instead of blocking the caller (and the process-wide gate).
+#[test]
+fn wait_for_mock_thread_reports_timeout_within_budget() {
+    let stuck = thread::spawn(|| thread::sleep(std::time::Duration::from_secs(30)));
+    let started = std::time::Instant::now();
+    let finished = wait_for_mock_thread(&stuck, std::time::Duration::from_millis(50));
+    assert!(!finished, "stuck thread must be reported as not finished");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "bounded wait must return without blocking: {:?}",
+        started.elapsed()
+    );
+}
+
 struct MockHttpServer {
     base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
     handle: Option<thread::JoinHandle<()>>,
+    /// wave-35/C2: mock queue length; finish() reports expected/actual on timeout.
+    expected: usize,
     /// wave-13：持有串行闸门（drop 时释放），消除并行负载导致的「超时→重试→队列失配」。
     _gate: MockServerGate,
 }
@@ -655,6 +696,7 @@ struct MockHttpServer {
 impl MockHttpServer {
     fn start(responses: Vec<MockHttpResponse>) -> Self {
         let gate = MockServerGate::acquire();
+        let expected = responses.len();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let address = listener.local_addr().expect("mock server addr");
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -683,12 +725,24 @@ impl MockHttpServer {
             base_url: format!("http://{}/v1", address),
             requests,
             handle: Some(handle),
+            expected,
             _gate: gate,
         }
     }
 
+    // wave-35/C2
     fn finish(mut self) -> Vec<String> {
         if let Some(handle) = self.handle.take() {
+            if !wait_for_mock_thread(&handle, MOCK_SERVER_FINISH_TIMEOUT) {
+                let actual = self.requests.lock().map(|r| r.len()).unwrap_or_default();
+                panic!(
+                    "mock server thread still running after {MOCK_SERVER_FINISH_TIMEOUT:?}: \
+                     expected={} requests, actual={} -- mock queue not drained \
+                     (provider aborted early / retries exhausted the queue). \
+                     Bounded join keeps this a single-test failure instead of hanging the suite.",
+                    self.expected, actual
+                );
+            }
             handle.join().expect("join mock server");
         }
         self.requests.lock().unwrap().clone()
@@ -5444,7 +5498,11 @@ fn start_turn_stream_completes_after_multi_hop_followup_stream() {
 
 #[test]
 fn start_turn_stream_fails_with_canonical_finalize_boundary_when_tool_hop_limit_is_hit() {
-    let _limit_guard = ToolHopLimitOverrideGuard::set(1);
+    // wave-35/C1:`ToolHopLimitOverrideGuard` 写的是**进程级** registry(limits.rs),
+    // 必须在持有 `MOCK_SERVER_GATE` 期间才生效:旧代码在 `MockHttpServer::start`(抢 gate)
+    // **之前** `set(1)`,于是正在持 gate 跑 turn 的并发 gated 用例读到 hop=1 → turn 提前
+    // 中止 → 其请求数 < mock 队列 → mock 线程永不等齐 → `finish()` 无限 join → gate 永不
+    // 释放 → 整批 mock 用例 futex 等待(整库挂死)。
     let server = MockHttpServer::start(vec![
         sse_decision_tool_call("workspace_list_files", json!({"path": ".", "limit": 40})),
         sse_response(&[
@@ -5478,6 +5536,8 @@ fn start_turn_stream_fails_with_canonical_finalize_boundary_when_tool_hop_limit_
             }),
         ]),
     ]);
+    // 此处已持有 gate(start 内部 acquire);override 只在此区间内可被观测。
+    let _limit_guard = ToolHopLimitOverrideGuard::set(1);
     let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
     let sink = RecordingTurnEventSink::new();
 
@@ -5499,6 +5559,9 @@ fn start_turn_stream_fails_with_canonical_finalize_boundary_when_tool_hop_limit_
         },
     );
 
+    // `finish()` 按值消费 server ⇒ 返回时 gate 已释放。必须先显式撤销进程级 override,
+    // 否则「gate 已放出、override 仍在」的窗口里,下一个 gated 用例会读到 hop=1 并死锁。
+    drop(_limit_guard);
     let request_bodies = server.finish();
     let events = sink.events.borrow();
     let failed = events

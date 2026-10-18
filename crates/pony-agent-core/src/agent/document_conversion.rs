@@ -362,8 +362,10 @@ mod tests {
         let outside = root.parent().expect("temp root has a parent").join("stray.txt");
         fs::write(&outside, "secret").expect("write outside file");
 
+        // 平台无关的真上跳:`..` + 宿主机路径分隔符(POSIX `../stray.txt` / Windows `..\stray.txt`)。
+        let escape = std::path::PathBuf::from("..").join(outside.file_name().expect("outside file has a name"));
         let error = read_workspace_document(
-            &format!("..\\{}", outside.file_name().unwrap().to_string_lossy()),
+            &escape.to_string_lossy(),
             &root,
             &DocumentReadOptions::default(),
             &AuthorizeStore::new(),

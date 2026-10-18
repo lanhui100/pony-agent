@@ -1,6 +1,4 @@
-use pony_agent_core::agent::tools::{
-    builtin_turn_tool_contract_views, canonical_tool_name, ToolRegistrySnapshot,
-};
+use pony_agent_core::agent::tools::{builtin_turn_tool_contract_views, canonical_tool_name};
 
 #[test]
 fn test_stub_tools_are_no_longer_model_visible() {

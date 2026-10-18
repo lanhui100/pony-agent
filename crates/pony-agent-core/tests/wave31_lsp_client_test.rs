@@ -10,9 +10,8 @@
 //! 7. 优雅降级与错误处理：当进程退出或超时后，返回结构化错误而不是死锁或 panic。
 
 use pony_agent_core::agent::lsp::{
-    LspClient, LspPosition, LspRange, LspServerSpec,
+    LspClient, LspPosition, LspServerSpec,
 };
-use serde_json::json;
 use std::fs;
 use std::io::Write;
 use std::time::Duration;

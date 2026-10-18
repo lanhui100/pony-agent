@@ -337,6 +337,44 @@ pub(crate) const RATE_LIMIT_LONG_BACKOFF_HINTS: &[&str] = &[
     "quota",
 ];
 
+/// wave-35/C3(生产判据修复):分类只允许看**原因文本**,不得看 URL/endpoint 片段。
+///
+/// 缺陷:provider 把 `响应预览: {endpoint}`(`provider/openai_sse.rs`,错误文本里带
+/// `http://127.0.0.1:<随机端口>/v1`)与 `endpoint={url}` 拼进 message,而码表用裸
+/// `contains` 在整段 message 上匹配 ⇒ 端口含 429/502/503/504/408 时(如 `:42953`)
+/// 把「永久性协议错误」误判为 `TransientRetryable` ⇒ 5 次重试耗尽 mock 队列 ⇒
+/// 回合相位错误(`control_plane` 相位断言 flake,p≈2.8%);endpoint 里的措辞
+/// (如 `timeout-gw.internal`)同样会污染分组。
+///
+/// 修法:匹配前剥离 `scheme://...` 片段(连同 scheme 名一起丢掉,保留其前的
+/// `endpoint=` 等标签)。诊断展示不受影响 —— `FailureKind` 的 `details` 仍是原始 message。
+/// 已知取舍:`:` 不可作为 URL 终点(端口本身即 `host:port`),因此紧贴 URL、不带
+/// 空白/分隔符的尾部原因码会被一并剥离;生产错误文本一律以 `; ` / 空白分隔。
+fn strip_endpoint_fragments(lower: &str) -> String {
+    let mut out = String::with_capacity(lower.len());
+    let mut rest = lower;
+    while let Some(scheme_sep) = rest.find("://") {
+        // scheme 起点:向前回退到非 scheme 字符([a-z0-9+.-])。
+        let head = &rest[..scheme_sep];
+        let scheme_start = head
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        out.push_str(&rest[..scheme_start]);
+        // URL 终点:空白或常见分隔符(引号/分号/逗号/括号)。
+        let tail = &rest[scheme_sep..];
+        let url_end = tail
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(c, '"' | '\'' | ';' | ',' | ')' | ']' | '}' | '<' | '>' | '`')
+            })
+            .unwrap_or(tail.len());
+        rest = &tail[url_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn hints_match(lower: &str, hints: &[&str]) -> bool {
     hints.iter().any(|hint| lower.contains(hint))
 }
@@ -344,6 +382,9 @@ fn hints_match(lower: &str, hints: &[&str]) -> bool {
 /// 码表分组 → 注册表码（R1 映射的唯一出口；classify 经此归一后再定 FailureKind）。
 /// 返回 `None` = ⑦其余默认（NonRetryable Abort）。
 pub(crate) fn upstream_code_for_hints(lower: &str) -> Option<ErrorCode> {
+    // wave-35/C3: 先剥离 endpoint/URL 片段,再走码表(端口数字不得决定分组)。
+    let stripped = strip_endpoint_fragments(lower);
+    let lower = stripped.as_str();
     if hints_match(lower, UPSTREAM_TIMEOUT_HINTS) {
         return Some(ErrorCode::UpstreamTimeout);
     }
@@ -517,7 +558,9 @@ impl FailureKind {
 pub fn is_rate_limit_error(err: &str) -> bool {
     // R2.4 七词冻结：唯一来源 RATE_LIMIT_LONG_BACKOFF_HINTS。
     let lower = err.to_ascii_lowercase();
-    hints_match(&lower, RATE_LIMIT_LONG_BACKOFF_HINTS)
+    // wave-35/C3: same as classify -- endpoint/URL fragments (ports can contain 429)
+    // must not drive the decision. R2.4 wording table itself is unchanged.
+    hints_match(&strip_endpoint_fragments(&lower), RATE_LIMIT_LONG_BACKOFF_HINTS)
 }
 
 /// Convenience function: run a full retry loop with the given policy.
@@ -1192,5 +1235,56 @@ mod tests {
         assert!(is_rate_limit_error("HTTP 429 quota exceeded"));
         assert!(is_rate_limit_error("monthly quota exhausted"));
         assert!(!is_rate_limit_error("operation timed out"));
+    }
+
+    /// wave-35/C3:SSE 错误文本把 `响应预览/endpoint`(含**随机端口**)拼进 message
+    /// (`provider/openai_sse.rs` 的 `响应预览: {endpoint}`);端口形如 `:42953`/`:50208`
+    /// 会命中裸 `contains` 码表,把永久性协议错误误判为 `TransientRetryable` →
+    /// 5 次重试耗尽 mock 队列 → 回合相位错误(control_plane 相位断言 flake,p≈2.8%)。
+    /// 判定必须只看原因文本,不受 URL/端口数字影响。
+    #[test]
+    fn stage2_classify_ignores_endpoint_port_digits() {
+        let policy = ProviderRetryPolicy::new(BackoffConfig::default());
+        for port in ["42953", "50208", "40891", "50417", "15029"] {
+            let err = format!(
+                "解析 provider SSE 流失败: provider 流式返回中未找到 SSE data 事件;响应预览: \
+                 http://127.0.0.1:{port}/v1; elapsed=3ms; endpoint=http://127.0.0.1:{port}/v1/chat/completions"
+            );
+            let kind = policy.classify(&err);
+            assert!(
+                !kind.is_retryable(),
+                "endpoint 端口数字不得影响分类: {err} -> {kind:?}"
+            );
+            assert!(
+                !is_rate_limit_error(&err),
+                "端口中含 429 不得触发限流长退避: {err}"
+            );
+        }
+        // 判据未被削弱:原因文本里的真实码仍必须命中。
+        for probe in [
+            "HTTP 502 Bad Gateway",
+            "HTTP 503 Service Unavailable",
+            "HTTP 504 Gateway Timeout",
+            "HTTP 408 Request Timeout",
+            "HTTP 429 Too Many Requests",
+        ] {
+            assert!(policy.classify(probe).is_retryable(), "{probe}");
+        }
+    }
+
+    /// wave-35/C3(同源):endpoint 里的主机名/路径措辞也不得参与分类
+    /// (否则 `http://timeout-gw.internal:8123/v1/timeout` 会把永久协议错误判成超时可重试)。
+    #[test]
+    fn stage2_classify_ignores_endpoint_url_wording() {
+        let policy = ProviderRetryPolicy::new(BackoffConfig::default());
+        let err = "解析 provider SSE 流失败: provider 流式返回中未找到 SSE data 事件; \
+                   endpoint=http://timeout-gw.internal:8123/v1/timeout";
+        assert!(
+            !policy.classify(err).is_retryable(),
+            "endpoint 措辞不得影响分类: {err}"
+        );
+        // 判据未被削弱:原因文本里的网络措辞仍必须命中。
+        assert!(policy.classify("connection refused; endpoint=http://a.b:8123/v1").is_retryable());
+        assert!(policy.classify("dns failure").is_retryable());
     }
 }

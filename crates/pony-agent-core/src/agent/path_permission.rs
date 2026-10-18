@@ -704,6 +704,7 @@ mod tests {
         assert_eq!(permission.zone, PermissionZone::WorkspaceRoot);
     }
 
+    #[cfg(windows)]
     #[test]
     fn win_case_variant_match_and_prefix_confusion() {
         let root = PathBuf::from(r"C:\WS");
@@ -713,12 +714,7 @@ mod tests {
         let permission = checker
             .classify(r"c:\ws\file", &root, &PathBuf::from(r"C:\WS\.tmp"), &no_auth(), PathPurpose::Read)
             .expect("case variant must be allowed on windows");
-        // 非 Windows 平台：`c:\ws\file` 与 `C:\WS` 组件比较不折叠 → 预期拒绝。
-        if cfg!(windows) {
-            assert_eq!(permission.zone, PermissionZone::WorkspaceRoot);
-        } else {
-            assert_eq!(permission.zone, PermissionZone::AuthorizedExternal);
-        }
+        assert_eq!(permission.zone, PermissionZone::WorkspaceRoot);
 
         // `c:\ws-10\file` ⊄ `C:\WS` → 拒绝（双断言第二半）。
         let resolver = FakeResolver::new().with(r"c:\ws-10\file", r"C:\WS-10\file");
@@ -731,6 +727,30 @@ mod tests {
             PathPurpose::Read,
         );
         assert!(result.is_err(), "ws-10 must never match ws root");
+    }
+
+    /// POSIX 等价断言:组件比较不折叠 ASCII 大小写(`/WS` ⊄ `/ws`),且反斜杠只是普通
+    /// 文件名字符、不得被当作路径分隔符而逃逸 root。
+    #[cfg(unix)]
+    #[test]
+    fn posix_case_variant_and_backslash_do_not_escape_root() {
+        let root = PathBuf::from("/ws");
+        let tmp = PathBuf::from("/ws/.tmp");
+        let resolver = FakeResolver::new().with("/WS/file", "/WS/file");
+        let checker = make_checker(resolver);
+        let err = checker
+            .classify("/WS/file", &root, &tmp, &no_auth(), PathPurpose::Read)
+            .expect_err("case variant must not fold into root");
+        assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
+
+        // `c:\ws\file` 在 POSIX 是单个普通组件(相对路径)→ 按 root 基座解析,仍在 root 内,
+        // 绝不因反斜杠被解读为 Windows 绝对路径而逃逸。
+        let checker = make_checker(FakeResolver::new());
+        let permission = checker
+            .classify(r"c:\ws\file", &root, &tmp, &no_auth(), PathPurpose::Read)
+            .expect("backslash literal stays a relative in-workspace name");
+        assert_eq!(permission.zone, PermissionZone::WorkspaceRoot);
+        assert!(permission.canonical.starts_with(&root), "{:?}", permission.canonical);
     }
 
     #[test]
@@ -747,6 +767,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn volume_boundary_c_vs_d_is_rejected() {
         let root = PathBuf::from(r"C:\WS");
@@ -756,6 +777,28 @@ mod tests {
             .classify(r"D:\other\file", &root, &PathBuf::from(r"C:\WS\.tmp"), &no_auth(), PathPurpose::Read)
             .expect_err("different volume must be rejected");
         assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
+    }
+
+    /// POSIX 等价断言:卷边界在 POSIX 上表现为"跨根绝对路径"(独立于 root 的另一个根目录)。
+    /// 不存在盘符折叠 ⇒ 必须 Err(RequiresAuthorization),且同 root 内的绝对路径仍放行(负向对照)。
+    #[cfg(unix)]
+    #[test]
+    fn posix_cross_root_absolute_path_is_rejected() {
+        let root = PathBuf::from("/ws");
+        let resolver = FakeResolver::new().with("/other/file", "/other/file");
+        let checker = make_checker(resolver);
+        let err = checker
+            .classify("/other/file", &root, &PathBuf::from("/ws/.tmp"), &no_auth(), PathPurpose::Read)
+            .expect_err("cross-root absolute path must be rejected");
+        assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
+
+        // 负向对照:同 root 内的绝对路径必须放行,避免"一律拒绝"式假绿。
+        let checker = make_checker(FakeResolver::new());
+        let permission = checker
+            .classify("/ws/file", &root, &PathBuf::from("/ws/.tmp"), &no_auth(), PathPurpose::Read)
+            .expect("in-root absolute path must be allowed");
+        assert_eq!(permission.zone, PermissionZone::WorkspaceRoot);
+        assert_eq!(permission.canonical, PathBuf::from("/ws/file"));
     }
 
     // ── 符号链接逃逸（hermetic fake resolver 双路径）──────────────────────
@@ -1063,6 +1106,9 @@ mod tests {
         prepare_root(&root);
         let outside = test_root("realoutside");
         prepare_root(&outside);
+        // 夹具:被符号链接指向的外部目标文件必须真实存在,否则 canonicalize 得到
+        // NotFound ⇒ PermissionDenied,而本用例断言的是 RequiresAuthorization。
+        std::fs::write(outside.join("f.txt"), "secret").expect("write outside fixture");
         let link = root.join("escape");
         if symlink(&outside, &link).is_err() {
             // 无创建符号链接特权 → 跳过。

@@ -9408,7 +9408,9 @@ mod tests {
             arguments: json!({
                 "path": "demo.txt",
                 "oldText": "foo",
-                "newText": "bar"
+                "newText": "bar",
+                // wave-22 冻结的读前写不变量:未传 expectedHash ⇒ fs_not_observed。
+                "expectedHash": compute_content_sha256("foo\nfoo\n")
             }),
             plan: None,
         });
@@ -9437,7 +9439,9 @@ mod tests {
                 "path": "demo.txt",
                 "oldText": "foo",
                 "newText": "bar",
-                "replaceAll": true
+                "replaceAll": true,
+                // wave-22 冻结的读前写不变量:未传 expectedHash ⇒ fs_not_observed。
+                "expectedHash": compute_content_sha256("foo\nfoo\n")
             }),
             plan: None,
         });
@@ -9461,7 +9465,9 @@ mod tests {
             arguments: json!({
                 "path": "demo.txt",
                 "oldText": "missing",
-                "newText": "gamma"
+                "newText": "gamma",
+                // wave-22 冻结的读前写不变量:未传 expectedHash ⇒ fs_not_observed。
+                "expectedHash": compute_content_sha256("alpha\nbeta\n")
             }),
             plan: None,
         });
@@ -9508,7 +9514,9 @@ mod tests {
             arguments: json!({
                 "path": external_file.display().to_string(),
                 "oldText": "mode = \"old\"",
-                "newText": "mode = \"new\""
+                "newText": "mode = \"new\"",
+                // wave-22 冻结的读前写不变量:未传 expectedHash ⇒ fs_not_observed。
+                "expectedHash": compute_content_sha256("mode = \"old\"\n")
             }),
             plan: None,
         });

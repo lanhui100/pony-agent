@@ -136,11 +136,15 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
         }
 
         // 2. Plan 相位门禁：如果存在 Draft 态 Plan，则写类/执行类工具被拒绝
+        // 例外:`plan_control` 自身豁免本门禁——它是解除草稿态写保护的唯一机制
+        // (`plan_state.rs` 中 `start_execution` = "unlock write operations")。否则
+        // merge / complete_step / replace / start_execution 全被 Deny,plan 永远无法
+        // 离开 Draft(自锁死)。豁免按 canonical primitive 名判定,不影响其它写类描述符。
         if let Some(plan_store) = &self.plan_store {
             let is_write_or_exec = matches!(
                 descriptor.kind,
                 crate::agent::tools::ToolKind::Write | crate::agent::tools::ToolKind::Execute
-            );
+            ) && descriptor.identity.primitive_name != TOOL_PLAN_CONTROL;
             if is_write_or_exec {
                 // 优先从工具参数中获取 session_id，其次尝试从环境变量或测试会话回退
                 let session_id = _final_arguments
@@ -528,6 +532,8 @@ mod tests {
                 "oldText": "hello",
                 "newText": "world",
                 "description": "test",
+                // wave-22 冻结的读前写不变量:未传 expectedHash ⇒ fs_not_observed。
+                "expectedHash": crate::agent::tools::compute_content_sha256("hello\n"),
             }),
         );
         // Re-create the fixture before each edit run (edit requires the target to exist).
