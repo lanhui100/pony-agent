@@ -36,20 +36,31 @@ use std::sync::Arc;
 // 主循环每个 tick（≤16ms）检测后正常 break，走统一的终端恢复保证器。
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn handle_shutdown_signal(sig: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     eprintln!("[pony-tui] shutdown signal {} received", sig);
 }
 
+/// `libc` 是 `[target.'cfg(unix)'.dependencies]` 依赖，Windows 目标不存在该 crate，
+/// 因此整套信号接管必须 cfg(unix) 门控（否则 Windows 编译报 E0433）。
+#[cfg(unix)]
 fn install_shutdown_signal_handlers() {
     unsafe {
-        libc::signal(libc::SIGINT, handle_shutdown_signal as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_shutdown_signal as libc::sighandler_t);
+        // Rust 禁止把函数项直接 cast 成整数（"direct cast of function item into an integer"），
+        // 必须先经 `*const ()` 中转再转成 sighandler_t。
+        let handler = handle_shutdown_signal as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
         // pty 会话被关闭（如 `script` 收到 SIGINT 后退出）时，TUI 进程会收到 SIGHUP；
         // 同样走优雅退出路径以执行终端恢复，而不是默认终止并留下 alternate screen。
-        libc::signal(libc::SIGHUP, handle_shutdown_signal as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, handler);
     }
 }
+
+/// 非 unix（Windows）无 POSIX 信号语义：不接管信号，保持控制台默认行为。
+#[cfg(not(unix))]
+fn install_shutdown_signal_handlers() {}
 
 use std::time::Duration;
 
