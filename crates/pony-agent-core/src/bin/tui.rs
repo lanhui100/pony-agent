@@ -796,6 +796,19 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
 
 pub fn ascii_logo() -> Vec<Line<'static>> {
     let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "pony",
+                Style::default()
+                    .fg(theme::INK)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ·  v{}", env!("CARGO_PKG_VERSION")),
+                faint(),
+            ),
+        ]),
+        blank(),
         Line::from(Span::styled(
             "终端里的自主智能体。",
             Style::default().fg(theme::MUTED),
@@ -1030,6 +1043,8 @@ mod theme {
     pub const INK_SOFT: Color = Color::Rgb(203, 200, 195);
     pub const MUTED: Color = Color::Rgb(154, 157, 163);
     pub const FAINT: Color = Color::Rgb(112, 116, 124);
+    /// 底栏快捷键专用：比 FAINT 更弱一档，只有凑近才读的「小字」。
+    pub const HINT: Color = Color::Rgb(84, 88, 96);
     pub const HAIRLINE: Color = Color::Rgb(48, 51, 58);
     pub const ACCENT: Color = Color::Rgb(198, 167, 126);
     pub const SUCCESS: Color = Color::Rgb(140, 172, 137);
@@ -1418,7 +1433,7 @@ fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
         lines.push(Line::from(spans));
     }
 
-    let widget = Paragraph::new(lines).style(Style::default().bg(theme::CANVAS));
+    let widget = Paragraph::new(lines).style(Style::default().bg(theme::SURFACE));
     f.render_widget(widget, area);
 }
 
@@ -1730,10 +1745,20 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         chat_rect,
     );
 
-    // ── 输入区：一条发丝线 + 提示符输入 + 状态行 ──────────────────────────
+    // ── Composer：整宽表面色带（含发丝线上边缘），输入与快捷键都坐在带上 ────
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
-    let input_rule = Rect { y: bottom_top, height: 1, ..content };
-    f.render_widget(Paragraph::new(hairline(content.width as usize)), input_rule);
+    let band = Rect {
+        x: area.x,
+        y: bottom_top,
+        width: area.width,
+        height: bottom_h,
+    };
+    fill(f, band, theme::SURFACE);
+    let band_rule = Rect { y: bottom_top, height: 1, ..band };
+    f.render_widget(
+        Paragraph::new(hairline(area.width as usize)),
+        band_rule,
+    );
 
     let input_rect = Rect {
         y: bottom_top + 1,
@@ -1742,17 +1767,11 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     };
     render_input(f, input_rect, state);
 
-    // 状态行：左侧提示随上下文变化，右侧一个状态词（流式时由正文活动行承载，不再重复）
-    let (phrase, phrase_style) = status_word(state);
-    let phrase = if state.is_streaming {
-        String::new()
-    } else {
-        phrase
-    };
     let menu_open = !state.matching_commands().is_empty()
         && state.mode == InteractionMode::Normal
         && !state.is_streaming;
 
+    let (phrase, phrase_style) = status_word(state);
     // 底栏提示：按键位固定（回车 / alt+回车 / 命令），只让 esc 的动词随上下文变化；
     // 宽度不足时按候选集逐级降级，绝不出现被截断的半截「·」。
     let hints_full = if state.is_streaming {
@@ -1778,15 +1797,16 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let footer_rect = Rect { y: footer_y, height: 1, ..content };
     let hints_w = str_width(hints);
     let phrase_w = str_width(&phrase);
+    let hint_style = Style::default().fg(theme::HINT);
     // 状态词只有在「不与提示粘连」时才右对齐显示。
     let footer_line = if !phrase.is_empty() && space > hints_w + phrase_w + 2 {
         Line::from(vec![
-            Span::styled(hints, faint()),
+            Span::styled(hints, hint_style),
             Span::raw(" ".repeat(space - hints_w - phrase_w)),
             Span::styled(phrase, phrase_style),
         ])
     } else {
-        Line::from(Span::styled(hints, faint()))
+        Line::from(Span::styled(hints, hint_style))
     };
     f.render_widget(Paragraph::new(footer_line), footer_rect);
 
@@ -1804,7 +1824,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         // 几何：竖条 1 + 空格 1 + 命令列 12 + 描述 + 右侧留白 2
         let need_w = (16 + desc_w + 2) as u16;
         let menu_w = need_w.clamp(28, content.width.min(64));
-        let menu_y = input_rule.y.saturating_sub(menu_h + 1); // 与输入区留一行呼吸
+        let menu_y = band.y.saturating_sub(menu_h + 1); // 与输入区留一行呼吸
         let menu_rect = Rect {
             x: content.x,
             y: menu_y,

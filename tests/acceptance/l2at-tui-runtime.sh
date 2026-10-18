@@ -150,7 +150,10 @@ for l in open(sys.argv[1],encoding='utf-8',errors='replace'):
 print(mx)
 EOF
 )
-if [ "$hair120" -eq 116 ]; then ok "R5b hairline length 116 at 120x40 (got $hair120)"; else bad "R5b hairline at 120x40 is $hair120 (expected 116)"; fi
+# Design contract (lead-adjudicated): composer is a full-width surface band; its
+# top hairline spans the FULL terminal width (120/60). Old 116/56 content-width
+# assertions are obsolete.
+if [ "$hair120" -eq 120 ]; then ok "R5b hairline length 120 (full terminal width) at 120x40 (got $hair120)"; else bad "R5b hairline at 120x40 is $hair120 (expected 120)"; fi
 if grep -q "────────────\|────────────" "$RECEIPTS/r5-120x40.txt"; then :; fi
 stale76=$(python3 - "$RECEIPTS/r5-120x40.txt" <<'EOF'
 import sys
@@ -169,7 +172,22 @@ for l in open(sys.argv[1],encoding='utf-8',errors='replace'):
 print(mx)
 EOF
 )
-if [ "$hair60" -eq 56 ]; then ok "R5d hairline length 56 at 60x18 (got $hair60)"; else bad "R5d hairline at 60x18 is $hair60 (expected 56)"; fi
+if [ "$hair60" -eq 60 ]; then ok "R5d hairline length 60 (full terminal width) at 60x18 (got $hair60)"; else bad "R5d hairline at 60x18 is $hair60 (expected 60)"; fi
+
+# R5e: composer band — input row background must be SURFACE #181a1f (truecolor bg 48;2;24;26;31)
+tmux_cleanup
+tmux new-session -d -s r5e -x 120 -y 40 2>/dev/null
+sleep 1
+tmux send-keys -t r5e "$PONY" Enter
+sleep 3
+tmux capture-pane -t r5e -p -e > "$RECEIPTS/r5e-120x40-esc.txt" 2>/dev/null
+tmux kill-server >/dev/null 2>&1
+surface_lines=$(grep -c "48;2;24;26;31" "$RECEIPTS/r5e-120x40-esc.txt" 2>/dev/null || true)
+if [ "$surface_lines" -ge 1 ]; then
+  ok "R5e composer band SURFACE bg #181a1f (48;2;24;26;31) present ($surface_lines lines)"
+else
+  bad "R5e no SURFACE #181a1f background found in composer area"
+fi
 
 # ---------------------------------------------------------------
 # R6: TERM matrix at 100x30
