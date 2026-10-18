@@ -23,6 +23,8 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       PONYSENTRY_CLIENT_TOKEN: ${{ secrets.PONYSENTRY_CLIENT_TOKEN }}
+      # wave-18c：构建期烧录 token 到桌面二进制（option_env!），用户机器零环境变量依赖
+      PONYSENTRY_BUILD_CLIENT_TOKEN: ${{ secrets.PONYSENTRY_CLIENT_TOKEN }}
       VITE_PONYSENTRY_CLIENT_TOKEN: ${{ secrets.PONYSENTRY_CLIENT_TOKEN }}
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-D warnings"
@@ -51,6 +53,8 @@ jobs:
         run: |
           if ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" -eq "") { throw "TAURI_SIGNING_PRIVATE_KEY is required" }
           if ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" -eq "") { throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required" }
+          # wave-18c：PonySentry token 必须存在，经 PONYSENTRY_BUILD_CLIENT_TOKEN 烧录进桌面产物
+          if ("${{ secrets.PONYSENTRY_CLIENT_TOKEN }}" -eq "") { throw "PONYSENTRY_CLIENT_TOKEN is required (burned into desktop build)" }
 
       - name: Tag/version consistency
         shell: pwsh

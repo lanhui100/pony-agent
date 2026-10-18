@@ -227,8 +227,9 @@ fn test_auto_report_removed_from_emit_event() {
 /// 1. 控制面入口形状契约（`src-tauri/src/lib.rs` 的 `#[tauri::command] upload_session_trace`
 ///    => `Result<usize, String>` 且委派给 `control_plane.upload_session_trace`）；
 /// 2. 控制面实现把直发错误经 `?` 向上传播（fail-closed 不得吞错）；
-/// 3. 行为契约：**set-but-empty `PONYSENTRY_ENABLED` 必须视为未启用**（C2-r3 fail-closed），
-///    无凭证时 `send_agent_trace_direct` 必须返回 `Err` 且**零网络出口**。
+/// 3. 行为契约（wave-18c 修订）：**无凭证（client_token 未配置）时
+///    `send_agent_trace_direct` 必须返回 `Err` 且零网络出口**（fail-closed 由 token 承担，
+///    `PONYSENTRY_ENABLED` 开关变量已废除）。
 #[test]
 fn test_upload_session_trace_contract_shape() {
     let _guard = lock_env();
@@ -261,18 +262,17 @@ fn test_upload_session_trace_contract_shape() {
         "控制面实现必须用 `?` 传播直发错误（fail-closed 不得静默吞错）"
     );
 
-    // ---- 3) 行为契约：set-but-empty enabled ⇒ 未启用 ⇒ 无凭证时 Err + 零 egress ----
+    // ---- 3) 行为契约（wave-18c）：无 token ⇒ Err + 零 egress（enabled 恒 true） ----
     let (port, probe) = spawn_egress_probe(Duration::from_secs(3));
     std::env::set_var("PONYSENTRY_INGEST_URL", format!("http://127.0.0.1:{port}"));
-    // set-but-empty：C2-r3 冻结为“与 unset 同义 ⇒ false”
-    std::env::set_var("PONYSENTRY_ENABLED", "");
     std::env::remove_var("PONYSENTRY_CLIENT_TOKEN");
+    // wave-18c：开关变量已废除 —— 任意取值都不得关闭 fail-closed 的 token 门禁
+    std::env::set_var("PONYSENTRY_ENABLED", "");
 
     let config = PonySentryConfig::from_env();
     assert!(
-        !config.enabled,
-        "C2-r3：set-but-empty PONYSENTRY_ENABLED 必须解析为 false（fail-closed），\
-         否则控制面直发路径会在无凭证时仍尝试上报"
+        config.enabled,
+        "wave-18c：enabled 恒为 true（PONYSENTRY_ENABLED 已废除）"
     );
     assert!(
         config.client_token.is_none(),
@@ -293,8 +293,8 @@ fn test_upload_session_trace_contract_shape() {
 
     assert!(
         result.is_err(),
-        "未配置凭证（且 set-but-empty enabled 必须视为未启用）时，`send_agent_trace_direct` 必须 \
-         fail-closed 返回 Err，实际返回：{result:?}"
+        "未配置凭证时 `send_agent_trace_direct` 必须 fail-closed 返回 Err（wave-18c：门禁由 token 承担），\
+         实际返回：{result:?}"
     );
     assert!(
         !egress_observed,
@@ -308,10 +308,10 @@ fn test_upload_session_trace_contract_shape() {
 /// **无 env 依赖、恒跑**的真断言 —— 未配置 `PONYSENTRY_CLIENT_TOKEN` 时
 /// `send_agent_trace_direct` 必须返回 `Err` 且不得发起任何网络请求。
 ///
-/// 覆盖两种「未启用」输入：
-/// 1. 显式 `PONYSENTRY_ENABLED=false`；
-/// 2. **set-but-empty `PONYSENTRY_ENABLED=""`**（C2-r3 fail-closed 边界 —— 当前实现
-///    落进 `map` 闭包 ⇒ true，故本用例在当前代码上真实失败）。
+/// wave-18c 修订：`PONYSENTRY_ENABLED` 开关变量已废除（enabled 恒 true），
+/// fail-closed 门禁完全由 `PONYSENTRY_CLIENT_TOKEN` 是否配置承担。本用例覆盖：
+/// 1. 显式 `PONYSENTRY_ENABLED=false`（遗留值，不得再产生任何开关效果）；
+/// 2. set-but-empty `PONYSENTRY_ENABLED=""`（同上，仅断言行为不变）。
 ///
 /// 与 M12 的区别：本用例只聚焦“零网络出口 + Err”这一物理事实（本地回环出口探针），
 /// 不依赖任何控制面源码形状断言。
@@ -322,7 +322,7 @@ fn test_upload_trace_direct_sender_is_fail_closed_without_credentials() {
 
     let rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
 
-    // ---- 场景 1：显式 PONYSENTRY_ENABLED=false ----
+    // ---- 场景 1：遗留值 PONYSENTRY_ENABLED=false（不得再产生开关效果） ----
     let (port, probe) = spawn_egress_probe(Duration::from_secs(2));
     std::env::set_var("PONYSENTRY_INGEST_URL", format!("http://127.0.0.1:{port}"));
     std::env::set_var("PONYSENTRY_ENABLED", "false");
@@ -344,7 +344,7 @@ fn test_upload_trace_direct_sender_is_fail_closed_without_credentials() {
         "未配置凭证时不得发起网络请求，但本地回环探针在 127.0.0.1:{port} 观测到了 TCP 连接"
     );
 
-    // ---- 场景 2：set-but-empty PONYSENTRY_ENABLED（C2-r3 冻结断言 7） ----
+    // ---- 场景 2：set-but-empty PONYSENTRY_ENABLED（遗留值，行为不变） ----
     let (port2, probe2) = spawn_egress_probe(Duration::from_secs(2));
     std::env::set_var("PONYSENTRY_INGEST_URL", format!("http://127.0.0.1:{port2}"));
     std::env::set_var("PONYSENTRY_ENABLED", "");
@@ -359,11 +359,11 @@ fn test_upload_trace_direct_sender_is_fail_closed_without_credentials() {
 
     assert!(
         result2.is_err(),
-        "set-but-empty PONYSENTRY_ENABLED 必须与 unset 同义（未启用）⇒ 无凭证时返回 Err，实际返回：{result2:?}"
+        "无凭证时必须 fail-closed 返回 Err（wave-18c：门禁由 token 承担），实际返回：{result2:?}"
     );
     assert!(
         !egress_observed2,
-        "set-but-empty PONYSENTRY_ENABLED 必须 fail-closed 零 egress，但本地回环探针在 127.0.0.1:{port2} 观测到了 TCP 连接"
+        "无凭证时必须零 egress，但本地回环探针在 127.0.0.1:{port2} 观测到了 TCP 连接"
     );
 
     clear_managed_env();
@@ -392,28 +392,26 @@ fn test_upload_trace_to_live_sentry_contract() {
     // ---- M13 恒跑真断言：skip 分支不得零断言通过 ----
     // 跳过只能是「未显式 opt-in」的结果；若已显式 PONYSENTRY_TEST_LIVE=1 却因
     // 无凭证/未启用而无法验证，属测试配置错误，必须失败而非静默报 ok（R6）。
-    if !config.enabled || config.client_token.is_none() {
+    if config.client_token.is_none() {
         assert_ne!(
             live_opt_in.as_deref(),
             Some("1"),
-            "已显式 PONYSENTRY_TEST_LIVE=1，但 PONYSENTRY_CLIENT_TOKEN 未配置或 enabled=false：\
+            "已显式 PONYSENTRY_TEST_LIVE=1，但 PONYSENTRY_CLIENT_TOKEN 未配置：\
              live 契约无法验证，属测试配置错误，不得以静默 skip 冒充 ok（R6/M13）"
         );
         eprintln!(
-            "[skip] test_upload_trace_to_live_sentry_contract: fail-closed 默认态\
-             （enabled={}, token_configured={}）且未显式 PONYSENTRY_TEST_LIVE=1，\
-             为避免真实流量打到端点，跳过 live 契约验证。",
-            config.enabled,
+            "[skip] test_upload_trace_to_live_sentry_contract: 无凭证（token_configured={}）\
+             且未显式 PONYSENTRY_TEST_LIVE=1，为避免真实流量打到端点，跳过 live 契约验证。",
             config.client_token.is_some()
         );
         return;
     }
 
-    // 已具备凭证与启用态 ⇒ 必须显式 opt-in（禁止默认把真实流量打到端点）
+    // 已具备凭证 ⇒ 必须显式 opt-in（禁止默认把真实流量打到端点）
     assert_eq!(
         live_opt_in.as_deref(),
         Some("1"),
-        "已配置凭证且 enabled=true 时必须显式 PONYSENTRY_TEST_LIVE=1 才允许 live 契约验证"
+        "已配置凭证时必须显式 PONYSENTRY_TEST_LIVE=1 才允许 live 契约验证"
     );
 
     let token = config

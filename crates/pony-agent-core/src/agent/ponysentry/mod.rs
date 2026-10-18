@@ -55,19 +55,16 @@ pub fn capture_agent_trace(trace: AgentTracePayload) {
 
 /// 直接异步上报单个 AgentTracePayload 并等待结果（手动上传用）
 pub async fn send_agent_trace_direct(trace: AgentTracePayload) -> Result<(), String> {
-    let (endpoint, client_token, enabled) = {
+    let (endpoint, client_token) = {
         let client = get_global()
             .read()
             .map_err(|e| format!("client lock poisoned: {e}"))?;
-        (
-            client.config.endpoint.clone(),
-            client.config.client_token.clone(),
-            client.config.enabled,
-        )
+        (client.config.endpoint.clone(), client.config.client_token.clone())
     };
 
-    if !enabled {
-        return Err("PonySentry is disabled".to_string());
+    // 门禁：未配置 client_token 即 fail-closed 零 egress（enabled 恒开，无独立开关）。
+    if client_token.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        return Err("PonySentry client token is not configured".to_string());
     }
 
     client::send_trace_direct_http(&endpoint, client_token.as_deref(), trace).await

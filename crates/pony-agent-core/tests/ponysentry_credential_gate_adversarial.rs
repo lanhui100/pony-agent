@@ -134,17 +134,22 @@ fn malformed_env_values_never_resurrect_credential() {
 }
 
 #[test]
-fn malformed_enabled_values_never_enable_by_accident() {
+fn malformed_enabled_values_never_disable_or_flip_behavior() {
     let _guard = lock_env();
     clear_managed_env();
 
-    // 显式关闭族（大小写 + 首尾空白）必须稳定解析为 false
-    for raw in ["false", "FALSE", "False", " false ", "\tfalse\t", "0", " 0 "] {
+    // wave-18c：PONYSENTRY_ENABLED 变量已废除 —— 任何畸形取值都不得改变行为，
+    // enabled 恒 true；零 egress 由 client_token 缺失承担（此处断言 token 仍为 None）。
+    for raw in ["false", "FALSE", "False", " false ", "\tfalse\t", "0", " 0 ", ""] {
         std::env::set_var("PONYSENTRY_ENABLED", raw);
         let config = PonySentryConfig::from_env();
         assert!(
-            !config.enabled,
-            "PONYSENTRY_ENABLED={raw:?} 必须解析为 false（显式关闭族）"
+            config.enabled,
+            "PONYSENTRY_ENABLED={raw:?} 不得影响行为（变量已废除，enabled 恒 true）"
+        );
+        assert!(
+            config.client_token.is_none(),
+            "PONYSENTRY_ENABLED={raw:?} 不得复活任何凭证回落（零 egress 由 token 承担）"
         );
     }
 
@@ -219,7 +224,7 @@ fn concurrent_env_churn_never_panics_and_stays_fail_closed() {
         settled.client_token.as_ref().map(|token| token.len())
     );
     assert!(
-        !settled.enabled,
-        "竞态收尾后 enabled 必须为 false（fail-closed）"
+        settled.enabled,
+        "竞态收尾后 enabled 恒为 true（wave-18c：开关变量已废除，fail-closed 由 token 承担）"
     );
 }

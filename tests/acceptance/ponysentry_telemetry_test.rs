@@ -201,7 +201,7 @@ fn test_sanitizer_json_recursive_redaction() {
 
 /// wave-18 C1/C2 契约迁移（与主文件 `crates/pony-agent-core/tests/ponysentry_telemetry_test.rs`
 /// 的 `test_config_contract` 保持**同步**，消除 F3 双副本漂移）：
-/// - 默认配置不提供凭证、默认禁用；
+/// - 默认配置不提供凭证、开关恒开（wave-18c：fail-closed 由 token 缺失承担）；
 /// - `from_env()` token 仅来自 env，未设/空白即 `None`（禁止硬编码回落）；
 /// - 补“未设 env”的反向断言与 `enabled` 真值表。
 #[test]
@@ -220,8 +220,8 @@ fn test_config_contract() {
         default_cfg.client_token.as_ref().map(|token| token.len())
     );
     assert!(
-        !default_cfg.enabled,
-        "C1：default().enabled 必须为 false（fail-closed 默认零 egress）"
+        default_cfg.enabled,
+        "C1（wave-18c 修订）：default().enabled 恒为 true（开关恒开）"
     );
 
     // --- C2-1/C2-3：未设 env 的反向断言（不得回落硬编码） ---
@@ -232,8 +232,8 @@ fn test_config_contract() {
         unset_cfg.client_token.as_ref().map(|token| token.len())
     );
     assert!(
-        !unset_cfg.enabled,
-        "C2-3：PONYSENTRY_ENABLED 未设时必须为 false"
+        unset_cfg.enabled,
+        "C2-3（wave-18c 修订）：enabled 恒为 true（开关变量已废除）"
     );
 
     // --- C2-2：纯空白 token 等价于未设 ---
@@ -245,34 +245,25 @@ fn test_config_contract() {
     );
     std::env::remove_var("PONYSENTRY_CLIENT_TOKEN");
 
-    // --- C2-4/C2-5：enabled 真值表 ---
-    let enabled_cases: [(&str, bool); 6] = [
-        ("false", false),
-        ("FALSE", false),
-        (" false ", false),
-        ("0", false),
-        ("true", true),
-        ("1", true),
-    ];
-    for (raw, expected) in enabled_cases {
+    // --- C2-4/C2-5（wave-18c 修订）：PONYSENTRY_ENABLED 已废除，任何取值不影响 enabled ---
+    for raw in ["false", "FALSE", " false ", "0", "true", "1", ""] {
         std::env::set_var("PONYSENTRY_ENABLED", raw);
-        assert_eq!(
+        assert!(
             PonySentryConfig::from_env().enabled,
-            expected,
-            "C2-4/5：PONYSENTRY_ENABLED={raw:?} 真值解析不符合冻结契约"
+            "C2-4/5（wave-18c）：PONYSENTRY_ENABLED={raw:?} 不得关闭上报（enabled 恒 true）"
         );
     }
+    std::env::remove_var("PONYSENTRY_ENABLED");
 
     // --- 显式 env 取值链路保持不变（既有断言保留） ---
     std::env::set_var("PONYSENTRY_INGEST_URL", "http://10.43.94.160:3000");
     std::env::set_var("PONYSENTRY_CLIENT_TOKEN", "test-token-123");
-    std::env::set_var("PONYSENTRY_ENABLED", "false");
     std::env::set_var("APP_ENV", "staging");
 
     let env_cfg = PonySentryConfig::from_env();
     assert_eq!(env_cfg.endpoint, "http://10.43.94.160:3000");
     assert_eq!(env_cfg.client_token.as_deref(), Some("test-token-123"));
-    assert!(!env_cfg.enabled);
+    assert!(env_cfg.enabled);
     assert_eq!(env_cfg.environment, "staging");
 
     // Clean up

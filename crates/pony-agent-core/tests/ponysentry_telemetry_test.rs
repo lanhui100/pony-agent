@@ -219,8 +219,8 @@ fn test_config_contract() {
         default_cfg.client_token.as_ref().map(|token| token.len())
     );
     assert!(
-        !default_cfg.enabled,
-        "C1：default().enabled 必须为 false（fail-closed 默认零 egress）"
+        default_cfg.enabled,
+        "C1（wave-18c 修订）：default().enabled 恒为 true（开关恒开）"
     );
 
     // --- C2-1/C2-3：未设 env 的反向断言（不得回落硬编码） ---
@@ -231,8 +231,8 @@ fn test_config_contract() {
         unset_cfg.client_token.as_ref().map(|token| token.len())
     );
     assert!(
-        !unset_cfg.enabled,
-        "C2-3：PONYSENTRY_ENABLED 未设时必须为 false"
+        unset_cfg.enabled,
+        "C2-3（wave-18c 修订）：enabled 恒为 true（开关变量已废除）"
     );
 
     // --- C2-2：纯空白 token 等价于未设 ---
@@ -244,34 +244,25 @@ fn test_config_contract() {
     );
     std::env::remove_var("PONYSENTRY_CLIENT_TOKEN");
 
-    // --- C2-4/C2-5：enabled 真值表 ---
-    let enabled_cases: [(&str, bool); 6] = [
-        ("false", false),
-        ("FALSE", false),
-        (" false ", false),
-        ("0", false),
-        ("true", true),
-        ("1", true),
-    ];
-    for (raw, expected) in enabled_cases {
+    // --- C2-4/C2-5（wave-18c 修订）：PONYSENTRY_ENABLED 已废除，任何取值不影响 enabled ---
+    for raw in ["false", "FALSE", " false ", "0", "true", "1", ""] {
         std::env::set_var("PONYSENTRY_ENABLED", raw);
-        assert_eq!(
+        assert!(
             PonySentryConfig::from_env().enabled,
-            expected,
-            "C2-4/5：PONYSENTRY_ENABLED={raw:?} 真值解析不符合冻结契约"
+            "C2-4/5（wave-18c）：PONYSENTRY_ENABLED={raw:?} 不得关闭上报（enabled 恒 true）"
         );
     }
+    std::env::remove_var("PONYSENTRY_ENABLED");
 
     // --- 显式 env 取值链路保持不变（既有断言保留） ---
     std::env::set_var("PONYSENTRY_INGEST_URL", "http://10.43.94.160:3000");
     std::env::set_var("PONYSENTRY_CLIENT_TOKEN", "test-token-123");
-    std::env::set_var("PONYSENTRY_ENABLED", "false");
     std::env::set_var("APP_ENV", "staging");
 
     let env_cfg = PonySentryConfig::from_env();
     assert_eq!(env_cfg.endpoint, "http://10.43.94.160:3000");
     assert_eq!(env_cfg.client_token.as_deref(), Some("test-token-123"));
-    assert!(!env_cfg.enabled);
+    assert!(env_cfg.enabled);
     assert_eq!(env_cfg.environment, "staging");
 
     // Clean up
@@ -331,13 +322,13 @@ fn test_breadcrumb_ring_buffer_limit() {
     // Module-level functions should also be operable
     init(PonySentryConfig::default());
 
-    // wave-18 F4 强化（contract-matrix-wave18.md §5 F4 / §7 M8）：
-    // 默认 `enabled=false` 后 `init(default())` 必须是“禁用态 init”。此处补**真断言**，
-    // 否则该用例会退化为“只验证不 panic”的恒真空断言；同时确保禁用态下模块级
-    // capture_* 不会向生产端点产生真实 egress（断言前置，避免红相打生产）。
+    // wave-18c 修订：default() 的 token 为 None ⇒ capture_payload 早退零 egress，
+    // 行为上仍等价“禁用态”（零 egress 由 token 缺失承担，开关恒开）。
     assert!(
-        !pony_agent_core::agent::ponysentry::is_enabled(),
-        "F4：PonySentryConfig::default() 必须为 disabled（fail-closed 默认零 egress）"
+        pony_agent_core::agent::ponysentry::PonySentryConfig::default()
+            .client_token
+            .is_none(),
+        "wave-18c：default() 必须无 token（零 egress 由 token 缺失承担）"
     );
 
     add_breadcrumb("ui", "User clicked submit", None);

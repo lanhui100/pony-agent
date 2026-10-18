@@ -29,7 +29,15 @@ impl PonySentryClient {
     pub fn new(config: PonySentryConfig) -> Self {
         let breadcrumbs = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_BREADCRUMBS)));
 
-        let sender = if config.enabled {
+        // fail-closed 门禁：仅当 client_token 已配置时才 spawn worker（无 token 即零 egress）。
+        let sender = if config.enabled
+            && config
+                .client_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some()
+        {
             let (tx, rx) = mpsc::sync_channel::<SentryEvent>(QUEUE_CAPACITY);
             let worker_cfg = config.clone();
             let _handle: Option<JoinHandle<()>> = thread::Builder::new()
@@ -88,7 +96,8 @@ impl PonySentryClient {
     }
 
     pub fn capture_error(&self, error_type: &str, message: &str, extra: Option<serde_json::Value>) {
-        if !self.config.enabled {
+        // fail-closed：无 token 即零 egress（enabled 恒开，门禁由 token 承担）
+        if !self.config.enabled || self.config.client_token.is_none() {
             return;
         }
 
@@ -122,7 +131,8 @@ impl PonySentryClient {
     }
 
     pub fn capture_panic(&self, info: &PanicHookInfo) {
-        if !self.config.enabled {
+        // fail-closed：无 token 即零 egress（enabled 恒开，门禁由 token 承担）
+        if !self.config.enabled || self.config.client_token.is_none() {
             return;
         }
 
@@ -172,7 +182,8 @@ impl PonySentryClient {
     }
 
     pub fn capture_payload(&self, payload: IngestPayload) {
-        if !self.config.enabled {
+        // fail-closed：无 token 即零 egress（enabled 恒开，门禁由 token 承担）
+        if !self.config.enabled || self.config.client_token.is_none() {
             return;
         }
 
@@ -190,7 +201,8 @@ impl PonySentryClient {
     }
 
     pub fn capture_agent_trace(&self, mut trace: AgentTracePayload) {
-        if !self.config.enabled {
+        // fail-closed：无 token 即零 egress（enabled 恒开，门禁由 token 承担）
+        if !self.config.enabled || self.config.client_token.is_none() {
             return;
         }
 

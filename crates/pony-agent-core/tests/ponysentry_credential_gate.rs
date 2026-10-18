@@ -1,7 +1,8 @@
 //! wave-18 L2-T 契约测试：PonySentry 凭证门禁 fail-closed 默认态
 //!
 //! 契约基线：`.dev-team/contract-matrix-wave18.md`
-//!   - §1 C1：`PonySentryConfig::default()` ⇒ `client_token == None`、`enabled == false`；
+//!   - §1 C1（wave-18c 修订）：`PonySentryConfig::default()` ⇒ `client_token == None`、
+//!     `enabled == true`（开关恒开，零 egress 由 token 缺失承担）；
 //!     `endpoint` / `environment` / `release` 取值与回落链不变。
 //!   - §2 C2：`from_env()` 的 token **仅**来自 `PONYSENTRY_CLIENT_TOKEN`
 //!     （未设 / 纯空白 ⇒ `None`，禁止任何硬编码回落）；
@@ -118,8 +119,8 @@ fn default_config_is_fail_closed() {
         config.client_token.as_ref().map(|token| token.len())
     );
     assert!(
-        !config.enabled,
-        "C1：default().enabled 必须为 false（默认零 egress / fail-closed）"
+        config.enabled,
+        "C1（wave-18c 修订）：default().enabled 恒为 true（开关恒开）"
     );
     assert_eq!(config.endpoint, "https://sentry.ponyjob.top");
     assert_eq!(config.environment, "dev");
@@ -138,15 +139,15 @@ fn from_env_without_credentials_is_fail_closed() {
     // Act
     let config = PonySentryConfig::from_env();
 
-    // Assert：未设 env ⇒ 既无 token 也不启用，绝不回落到硬编码凭证
+    // Assert：未设 env ⇒ 无 token（零 egress 由 token 缺失承担），绝不回落硬编码凭证
     assert!(
         config.client_token.is_none(),
         "C2-1：PONYSENTRY_CLIENT_TOKEN 未设时 client_token 必须为 None（禁止回落），实测 len={:?}",
         config.client_token.as_ref().map(|token| token.len())
     );
     assert!(
-        !config.enabled,
-        "C2-3：PONYSENTRY_ENABLED 未设时 enabled 必须为 false"
+        config.enabled,
+        "C2-3（wave-18c 修订）：enabled 恒为 true，无独立开关变量"
     );
     assert_eq!(config.endpoint, "https://sentry.ponyjob.top");
     assert_eq!(config.environment, "dev");
@@ -189,83 +190,25 @@ fn from_env_explicit_token_is_honored_verbatim() {
 }
 
 #[test]
-fn from_env_enabled_resolution_matrix() {
+fn from_env_enabled_is_always_on_without_switch_variable() {
     let _guard = lock_env();
     clear_managed_env();
 
-    // 未设 ⇒ false（fail-closed）
-    let unset = PonySentryConfig::from_env();
-    assert!(
-        !unset.enabled,
-        "C2-3：PONYSENTRY_ENABLED 未设时必须解析为 false"
-    );
-
-    // 显式真值表（保留 config.rs 既有解析表达式语义）
-    let cases: [(&str, bool); 8] = [
-        ("false", false),
-        ("FALSE", false),
-        (" false ", false),
-        ("0", false),
-        ("  0  ", false),
-        ("true", true),
-        ("TRUE", true),
-        (" true ", true),
-    ];
-    for (raw, expected) in cases {
-        std::env::set_var("PONYSENTRY_ENABLED", raw);
-        let config = PonySentryConfig::from_env();
-        assert_eq!(
-            config.enabled, expected,
-            "C2-4/5：PONYSENTRY_ENABLED={raw:?} 的真值解析不符合冻结契约"
-        );
-    }
-
-    clear_managed_env();
-}
-
-/// wave18-r3 §2 冻结断言 7/8/9（C2 fail-closed 边界，`review-l3-contract` finding#4）。
-///
-/// `PONYSENTRY_ENABLED` **set-but-empty / 纯空白**必须与 unset 同义 ⇒ `false`。
-/// 红相基线：`config.rs` 的
-/// `.map(|s| s.trim().to_lowercase() != "false" && s.trim() != "0").unwrap_or(false)`
-/// 使 `Some("")` / `Some("   ")` / `Some("\t")` 落进 `map` 闭包 ⇒ **true**（fail-open 缺口）。
-#[test]
-fn from_env_enabled_set_but_empty_is_fail_closed() {
-    let _guard = lock_env();
-    clear_managed_env();
-
-    // §2 断言 7：set-but-empty / 纯空白 ⇒ false（与 unset 同义）
-    let blank_cases: [(&str, &str); 4] = [
-        ("空串", ""),
-        ("空格串", "   "),
-        ("制表符", "\t"),
-        ("换行符", "\n"),
-    ];
-    for (label, raw) in blank_cases {
+    // wave-18c：PONYSENTRY_ENABLED 变量已废除 —— 任何取值都不得影响 enabled，
+    // 开关恒开；零 egress 完全由 client_token 是否配置决定。
+    for raw in ["true", "false", "0", "1", "", "   ", "garbage"] {
         std::env::set_var("PONYSENTRY_ENABLED", raw);
         let config = PonySentryConfig::from_env();
         assert!(
-            !config.enabled,
-            "C2-r3 断言 7（fail-closed）：PONYSENTRY_ENABLED 为{label}（set-but-empty）时必须为 false，\
-             不得因落进 map 闭包而 fail-open 为 true"
+            config.enabled,
+            "wave-18c：PONYSENTRY_ENABLED={raw:?} 不得关闭上报（变量已废除，enabled 恒 true）"
         );
     }
 
-    // §2 断言 8：trim 先行 —— 空白包裹不得改变显式值语义
-    let padded_cases: [(&str, &str, bool); 4] = [
-        ("空白包裹 0", "  0  ", false),
-        ("空白包裹 false", " false ", false),
-        ("空白包裹 true", " true ", true),
-        ("制表符包裹 1", "\t1\t", true),
-    ];
-    for (label, raw, expected) in padded_cases {
-        std::env::set_var("PONYSENTRY_ENABLED", raw);
-        let config = PonySentryConfig::from_env();
-        assert_eq!(
-            config.enabled, expected,
-            "C2-r3 断言 8：PONYSENTRY_ENABLED 为{label}（{raw:?}）时必须解析为 {expected}（先 trim 再判）"
-        );
-    }
+    // 且 token 缺失 ⇒ 零 egress 仍然成立（fail-closed 由 token 承担）
+    std::env::set_var("PONYSENTRY_ENABLED", "true");
+    let config = PonySentryConfig::from_env();
+    assert!(config.enabled && config.client_token.is_none());
 
     clear_managed_env();
 }
