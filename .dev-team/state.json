@@ -1,6 +1,6 @@
 {
  "wave": 39,
- "status": "in_progress",
+ "status": "green_verified",
  "task_classification": "B",
  "reason": "wave-39: TUI Composer 收边（去顶部细线/收内边距/去底部快捷键与右下角状态）+ 对话框下方弱化指标行（cwd / token in-out / 缓存命中 / 上下文百分比）",
  "baseline_commit": "566e465",
@@ -1544,17 +1544,22 @@
     "composer-metrics": {
      "base": "566e465",
      "protocol": "ba530bd",
-     "red_commit": null,
+     "red_commit": "316245b",
      "green_commit": null,
-     "status": "protocol_frozen",
-     "fix_scope": "crates/pony-agent-core/src/bin/tui.rs + tests/tui_dialog_wave39.rs + tools/tui-audit/checks.py"
+     "status": "verified",
+     "fix_scope": "crates/pony-agent-core/src/bin/tui.rs + tests/tui_dialog_wave39.rs + tests/tui_usage_wave39_delta.rs + tools/tui-audit/{checks.py,run_audit.sh} + docs/decisions/0042",
+     "protocol_delta": "f9f400b",
+     "red_delta_commit": "cf4129e"
     }
    },
    "tasks": {
     "task-1": "protocol: StreamUsage/指标字段/方法签名空桩 + NFR 基线 — completed",
     "task-2": "test: A1-A10 红相冻结 + checks.py 适配 — in_progress",
     "task-3": "executor: R4-R8 实施 — pending",
-    "task-4": "verifier: 测试全绿 + 真实 TUI E2E 截图 + 回归基线 — pending"
+    "task-4": "verifier: 测试全绿 + 真实 TUI E2E 截图 + 回归基线 — pending",
+    "task-5": "protocol-delta: stream_usage_event 空桩 — completed",
+    "task-6": "test-delta: A11 红相 + run_audit wait 信号校正 — completed",
+    "task-7": "executor-delta: R8' usage 单源 — completed"
    },
    "baseline_tests": {
     "tui_render_layout": "3 passed / 5 failed (pre-existing stale assertions: row1 '─', 就绪 footer, 用户轮标签, caret, 手写中文)",
@@ -1564,12 +1569,41 @@
    "gates": {
     "protocol": {
      "cargo_check_warnings": "EXIT=0",
-     "nfr_lint": "EXIT=0",
-     "stub_lint_excerpt": "EXIT=0"
+     "nfr_lint": "EXIT=0"
+    },
+    "red_phase": {
+     "tui_dialog_wave39": "EXIT=101 (0/10 failed: 9 assertions + 1 unimplemented panic)",
+     "tui_usage_wave39_delta": "EXIT=101 (0/4, all unimplemented panic)"
+    },
+    "green_phase": {
+     "cargo_check_warnings": "EXIT=0",
+     "tui_dialog_wave39": "EXIT=0 (10 passed)",
+     "tui_usage_wave39_delta": "EXIT=0 (4 passed)",
+     "tui_acceptance": "34 passed / 1 failed (= baseline test_matching_commands_filter)",
+     "wave38_workspace": "15 passed / 0 failed",
+     "tui_render_layout": "3 passed / 5 failed (= baseline same 5 stale)"
+    },
+    "e2e": {
+     "phase": "after (final binary sha256 f1114e10…)",
+     "run_audit": "EXIT=1: 365/369 pass, 4 fail = [empty.command_desc_column, slash-menu.all_commands_listed/each_command_once/command_desc_column]",
+     "attribution": "pre-wave-39 binary reproduces same 4 → pre-existing /thinking 8-command drift (6429be7), not a wave-39 regression",
+     "wave39_checks": "58/58 PASS (single hairline rule, metrics footer, no hint/status, zero panic)"
     }
    },
-   "reviews": {},
-   "adjudications": {}
+   "reviews": {
+    "L3-A": "PASS findings=0 (review-wave39-a.json; delta_recheck double_count_closed=true)",
+    "L3-B": "PASS findings=0 (review-wave39-b.json)",
+    "L3-P": "PASS findings=0, five questions all PASS (review-wave39-p.json)"
+   },
+   "adjudications": {
+    "A1": "E2E 4 failures = pre-existing baseline drift, proven by pre-wave-39 binary 1:1 replication; new ticket recommended",
+    "A2": "fmt_token_count 999_95x→1M accepted (avoids 1000k; A7 numeric contract unaffected)",
+    "A3": "char_width emoji range gap = pre-existing (HEAD identical), out of scope",
+    "A4": "residual Esc race: stop between last cancel-check and output_end can still land old usage in new slot (window=persist ms; baseline worse) — accepted residual, non-regression",
+    "A5": "resolve_context_window_tokens sync load_view on UI thread (0.165ms measured, same as existing send path) — accepted"
+   },
+   "nfr_baseline": ".dev-team/nfr-baseline-wave39.json (dev-nfr-lint EXIT=0)",
+   "evidence": ".dev-team/evidence/tui-polish/after (18 scenarios/369 checks) + wave39-e2e-evidence.md + wave39-{protocol,red-green,delta}-receipts"
   }
  },
  "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
