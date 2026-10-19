@@ -1255,6 +1255,14 @@ impl TurnEventSink for TuiTurnSink {
     }
 }
 
+/// wave-39 R8'（契约 v2）：仅 `turn:output_end` 是 usage 权威事件；
+/// 返回 `Some(UiEvent::StreamUsage{..})` 当且仅当事件名匹配且任一 token 字段为 Some。
+/// 函数体由 Executor 实现。
+#[allow(dead_code, unused_variables)]
+pub fn stream_usage_event(event_name: &str, payload: &TurnStreamEvent) -> Option<UiEvent> {
+    unimplemented!()
+}
+
 /// wave-35c：解析当前活跃 provider id。
 /// 顺序：注册表 selected_provider_id → 首个 provider → state.current_provider_id
 ///（仅当它确实命中注册表才有效——默认硬编码值 "ponyllm" 可能并不存在）。

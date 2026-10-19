@@ -71,3 +71,28 @@ StreamUsage { input_tokens: u64, output_tokens: u64, cache_hit_input_tokens: u64
 - 不改前端 Vue / 桌面端。
 - 不修 `tests/tui_render_layout.rs` 既有 5 个陈旧失败（基线已记录：3 passed / 5 failed，与本波次无关）。
 - 不新增第三方依赖。
+
+## 5. 契约变更 v2（wave-39-delta，Lead 裁决 2026-10-19）
+
+触发：L3-A 审查非机器观察（PASS 未入 findings，Lead 双人复核后判定为真实可达缺陷）：
+`turn:output_end` 与 `turn:completed` 均携带同一 `persisted` token 值，主循环对两者各 apply 一次；
+当用户在旧轮 output_end 后、旧轮 completed 之前提交新轮，且新轮失败/取消（无 usage 回执）时，
+旧轮 usage 会以「本轮回执」身份被二次计入累计 → 指标永久多算。
+
+### R8'（替代 R8 中 usage 发射口径）
+- `StreamUsage` **仅**由 `"turn:output_end"` 发射；`"turn:completed"` 只发 `StreamCompleted`，不再重复发 usage。
+- 抽取纯函数（可测）：
+  `pub fn stream_usage_event(event_name: &str, payload: &TurnStreamEvent) -> Option<UiEvent>`
+  规则：`event_name == "turn:output_end"` 且任一 token 字段为 Some → `Some(StreamUsage{..})`（缺省 0）；否则 `None`。
+- `TuiTurnSink::emit` 在 `"turn:completed" | "turn:output_end"` 分支先 `if let Some(ev) = stream_usage_event(name, &payload) { send(ev) }`，再发 `StreamCompleted`。
+
+### 验收 A11（Test Agent 新增独立文件，不改 A1-A10 冻结文件）
+- `stream_usage_event("turn:output_end", 全量 payload)` → Some，四个数值一致。
+- `stream_usage_event("turn:completed", 同载荷)` → None（双发去重根因）。
+- `stream_usage_event("turn:delta"/"turn:failed", payload)` → None。
+- 缺失字段（仅 output_tokens=Some(5)）→ Some，其余为 0。
+
+### R7 注释级裁决（不改实现）
+- `fmt_token_count` 在 999_950..=999_999 输出 `1M`（而非字面 `1000k`）：Lead 裁决**接受**，避免破格写法；A7 不受影响。
+- `char_width` 缺 emoji 区（0x1F680–0x1F6FF 等）属既有宽度表局限（HEAD 同样存在），本波次不修，记录为已知限制。
+- E2E 4 条失败（empty.command_desc_column、slash.all_commands_listed/each_command_once/command_desc_column）经 pre-wave-39 二进制 1:1 复现，判为既有基线漂移（`/thinking` 后 8 命令 vs 冻结 7 命令期望），非本波次回归，另开工单。
