@@ -167,6 +167,9 @@ pub struct TeamTaskItem {
     pub revision: u64,
     pub write_scopes: Vec<String>,
     pub blocked_by: Vec<String>,
+    /// 创建时刻（Unix 毫秒）。任务板以它为「生成次序」的稳定排序键；
+    /// 同一毫秒内创建的多个任务以 task_id 作为次级键保证确定性。
+    pub created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +222,14 @@ pub struct TeamTaskListResult {
 // ==========================================
 // 全局状态管理与双向信道
 // ==========================================
+
+/// 当前 Unix 毫秒时间戳（系统时钟早于 UNIX_EPOCH 时退化为 0，不 panic）。
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 static TEAM_TASKS: Mutex<Option<HashMap<String, TeamTaskItem>>> = Mutex::new(None);
 
@@ -457,6 +468,7 @@ pub fn team_task_create(args: TeamTaskCreateArgs) -> Result<TeamTaskItem, String
         revision: 1,
         write_scopes: args.write_scopes.unwrap_or_default(),
         blocked_by: args.blocked_by.unwrap_or_default(),
+        created_at_ms: now_unix_ms(),
     };
     map.insert(task_id, task.clone());
 
@@ -611,10 +623,16 @@ pub fn drive_teammate_turn(target: &str) -> Result<Option<String>, String> {
 
 pub fn team_task_list() -> Result<TeamTaskListResult, String> {
     let lock = TEAM_TASKS.lock().unwrap();
-    let tasks = if let Some(ref map) = *lock {
+    let mut tasks: Vec<TeamTaskItem> = if let Some(ref map) = *lock {
         map.values().cloned().collect()
     } else {
         Vec::new()
     };
+    // 生成次序：created_at_ms 升序，同毫秒以 task_id 作次级键，保证确定性。
+    tasks.sort_by(|a, b| {
+        a.created_at_ms
+            .cmp(&b.created_at_ms)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
     Ok(TeamTaskListResult { tasks })
 }

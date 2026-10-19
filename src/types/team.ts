@@ -15,6 +15,7 @@ export interface TeamTaskItem {
   status: "pending" | "in_progress" | "completed" | "deleted";
   owner?: string | null;
   revision: number;
+  created_at_ms: number;
   write_scopes: string[];
   blocked_by: string[];
 }

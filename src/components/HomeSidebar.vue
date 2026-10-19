@@ -6,6 +6,8 @@ import { usePlanStore } from "@/stores/plan";
 import { useGoalStore } from "@/stores/goal";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
+import TeamRosterPanel from "@/components/team/TeamRosterPanel.vue";
+import TeamTaskBoardPanel from "@/components/team/TeamTaskBoardPanel.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import { clearTraceProjectionMemo } from "@/lib/runtime/trace-projection";
 import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProjection";
@@ -28,7 +30,7 @@ const {
   sessionId
 } = storeToRefs(runtimeStore);
 
-const activePanel = ref<"plan" | "">("");
+const activePanel = ref<"plan" | "roster" | "tasks" | "">("");
 const { copiedKey, copyText, resetCopy, dispose } = useCopyFeedback();
 
 // 状态面板消费活跃调用指标（liveTurnEnabled: true），每次模型调用产生时即刻更新
@@ -47,6 +49,14 @@ const {
 
 function togglePlan() {
   activePanel.value = activePanel.value === "plan" ? "" : "plan";
+}
+
+function toggleRoster() {
+  activePanel.value = activePanel.value === "roster" ? "" : "roster";
+}
+
+function toggleTasks() {
+  activePanel.value = activePanel.value === "tasks" ? "" : "tasks";
 }
 
 watch(
@@ -92,6 +102,9 @@ onBeforeUnmount(() => {
           :open="activePanel === 'plan'"
           @toggle="togglePlan()"
         />
+
+        <TeamRosterPanel :open="activePanel === 'roster'" @toggle="toggleRoster()" />
+        <TeamTaskBoardPanel :open="activePanel === 'tasks'" @toggle="toggleTasks()" />
       </div>
     </ScrollArea>
   </aside>

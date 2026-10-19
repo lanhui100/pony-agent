@@ -20,7 +20,6 @@ import WorkspaceTurnItem, {
 import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
 import QueuedMessagesBubble from "@/components/chat/QueuedMessagesBubble.vue";
 import AgentRuntimeStatusBar from "@/components/chat/AgentRuntimeStatusBar.vue";
-import AgentTeamPanel from "@/components/chat/AgentTeamPanel.vue";
 import TurnDial from "@/components/chat/TurnDial.vue";
 import GoalBar from "@/components/GoalBar.vue";
 
@@ -1662,7 +1661,6 @@ watch(
 <template>
   <section class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-t-[0.6rem]">
     <GoalBar :session-id="sessionId" />
-    <AgentTeamPanel />
     <Teleport to="body">
       <div
         v-if="rollbackInFlight"
