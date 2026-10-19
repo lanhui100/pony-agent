@@ -1546,7 +1546,7 @@
      "protocol": "ba530bd",
      "red_commit": "316245b",
      "green_commit": null,
-     "status": "verified",
+     "status": "verified_v3",
      "fix_scope": "crates/pony-agent-core/src/bin/tui.rs + tests/tui_dialog_wave39.rs + tests/tui_usage_wave39_delta.rs + tools/tui-audit/{checks.py,run_audit.sh} + docs/decisions/0042",
      "protocol_delta": "f9f400b",
      "red_delta_commit": "cf4129e"
@@ -1559,7 +1559,9 @@
     "task-4": "verifier: 测试全绿 + 真实 TUI E2E 截图 + 回归基线 — pending",
     "task-5": "protocol-delta: stream_usage_event 空桩 — completed",
     "task-6": "test-delta: A11 红相 + run_audit wait 信号校正 — completed",
-    "task-7": "executor-delta: R8' usage 单源 — completed"
+    "task-7": "executor-delta: R8' usage 单源 — completed",
+    "task-8": "test v3: A5/A6/A8 迁移 + A12/A13 新增 + checks.py v3 适配 — completed",
+    "task-9": "executor v3: R9 几何/R10 GHOST/R11 无值隐藏 + no-op 清理 — completed"
    },
    "baseline_tests": {
     "tui_render_layout": "3 passed / 5 failed (pre-existing stale assertions: row1 '─', 就绪 footer, 用户轮标签, caret, 手写中文)",
@@ -1588,19 +1590,32 @@
      "run_audit": "EXIT=1: 365/369 pass, 4 fail = [empty.command_desc_column, slash-menu.all_commands_listed/each_command_once/command_desc_column]",
      "attribution": "pre-wave-39 binary reproduces same 4 → pre-existing /thinking 8-command drift (6429be7), not a wave-39 regression",
      "wave39_checks": "58/58 PASS (single hairline rule, metrics footer, no hint/status, zero panic)"
+    },
+    "red_phase_v3": "tui_dialog_wave39 EXIT=101 (7 passed / 5 failed: A5/A6/A8/A12/A13), commit c233c34",
+    "green_phase_v3": {
+     "tui_dialog_wave39": "EXIT=0 (12 passed, incl. A12/A13 after test-defect fix)",
+     "tui_usage_wave39_delta": "EXIT=0 (4 passed)",
+     "cargo_check_warnings": "EXIT=0",
+     "regression": "tui_acceptance 34/1, wave38 15/0, tui_render_layout 3/5 = baseline",
+     "e2e": "final binary sha256 78bd05bf…; 365/369 pass; 4 fail = pre-existing /thinking command drift (PA-146); v3 checks empty.footer_workspace_only / conversation.footer_metrics / error.footer_metrics / scrolled.metrics_footer_* all PASS"
     }
    },
    "reviews": {
     "L3-A": "PASS findings=0 (review-wave39-a.json; delta_recheck double_count_closed=true)",
     "L3-B": "PASS findings=0 (review-wave39-b.json)",
-    "L3-P": "PASS findings=0, five questions all PASS (review-wave39-p.json)"
+    "L3-P": "PASS findings=0, five questions all PASS (review-wave39-p.json)",
+    "L3-B-v3": "PASS findings=0 (review-wave39-v3b.json; A12 continuation-skip correct, no-op set_style removed)"
    },
    "adjudications": {
     "A1": "E2E 4 failures = pre-existing baseline drift, proven by pre-wave-39 binary 1:1 replication; new ticket recommended",
     "A2": "fmt_token_count 999_95x→1M accepted (avoids 1000k; A7 numeric contract unaffected)",
     "A3": "char_width emoji range gap = pre-existing (HEAD identical), out of scope",
     "A4": "residual Esc race: stop between last cancel-check and output_end can still land old usage in new slot (window=persist ms; baseline worse) — accepted residual, non-regression",
-    "A5": "resolve_context_window_tokens sync load_view on UI thread (0.165ms measured, same as existing send path) — accepted"
+    "A5": "resolve_context_window_tokens sync load_view on UI thread (0.165ms measured, same as existing send path) — accepted",
+    "A6": "极小窗 h<=12 + 多行输入时 chat_h 饱和 0，会话行被色带首行覆盖（无越界/无 panic）；v2 同类退化，非 R9 硬数字违例，记录不修",
+    "A7": "窄宽（content 24）截断可能停在 ' ·'，属 R11 允许的截断路径，仅观感",
+    "A8": "测试缺陷两处（A12 宽字符续格、A13 孤立分隔符判定）由 Test Agent 修正，属用例自身缺陷重写豁免；实现未为测试让步",
+    "A9": "后置 buffer_mut().set_style 为 no-op（L3-B 实测 frame diff=0）且注释因果错误，已由 Executor 删除（tui.rs 现无 buffer_mut）"
    },
    "nfr_baseline": ".dev-team/nfr-baseline-wave39.json (dev-nfr-lint EXIT=0)",
    "evidence": ".dev-team/evidence/tui-polish/after (18 scenarios/369 checks) + wave39-e2e-evidence.md + wave39-{protocol,red-green,delta}-receipts"
