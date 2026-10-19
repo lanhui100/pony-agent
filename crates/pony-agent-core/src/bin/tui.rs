@@ -19,7 +19,7 @@ use pony_agent_core::agent::session::SessionStore;
 use pony_agent_core::agent::turn_flow::TurnEventSink;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -234,6 +234,9 @@ pub struct TuiState {
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
     pub scroll_offset: u16,
+    /// 最近一次渲染可滚动到的最大偏移；事件循环据此判断「是否已回到底部」，
+    /// 避免滚轮/方向键下翻时永远无法恢复自动贴底。
+    pub max_scroll_offset: u16,
     pub auto_scroll: bool,
     pub mode: InteractionMode,
     pub session_list: Vec<SessionItem>,
@@ -272,6 +275,7 @@ impl Default for TuiState {
             status_text: "Ready".to_string(),
             mouse_capture: true,
             scroll_offset: 0,
+            max_scroll_offset: 0,
             auto_scroll: true,
             mode: InteractionMode::Normal,
             session_list: Vec::new(),
@@ -515,6 +519,12 @@ impl TuiState {
             self.scroll_offset = next;
         }
     }
+
+    /// End：直接回到最新消息并恢复自动贴底。
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = self.max_scroll_offset;
+        self.auto_scroll = true;
+    }
 }
 
 pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u16 {
@@ -682,6 +692,15 @@ impl TuiState {
     }
 }
 
+/// 协议枚举的展示名：不把 Rust Debug 名直接暴露给用户。
+fn protocol_label(protocol: &ProviderProtocol) -> &'static str {
+    match protocol {
+        ProviderProtocol::OpenAiCompletions => "openai",
+        ProviderProtocol::OpenAiResponses => "openai-responses",
+        ProviderProtocol::AnthropicMessages => "anthropic",
+    }
+}
+
 pub fn format_tool_display(
     name: &str,
     display_zh: Option<&str>,
@@ -761,41 +780,47 @@ pub fn render_markdown_line(line: &str) -> Vec<Span<'static>> {
 fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = text;
+    let plain = |s: &str| Span::styled(s.to_string(), ink_soft());
 
     while !rest.is_empty() {
-        if let Some(bold_start) = rest.find("**") {
-            if let Some(bold_end) = rest[bold_start + 2..].find("**") {
-                let actual_end = bold_start + 2 + bold_end;
-                if bold_start > 0 {
-                    spans.push(Span::styled(rest[..bold_start].to_string(), ink_soft()));
+        let bold = rest.find("**");
+        let code = rest.find('`');
+        // 按「先出现的标记」处理，避免先遇到加粗就把前面的行内代码整段吞成纯文本。
+        let use_bold = match (bold, code) {
+            (Some(b), Some(c)) => b <= c,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if use_bold {
+            let b = bold.unwrap();
+            if let Some(off) = rest[b + 2..].find("**") {
+                if b > 0 {
+                    spans.push(plain(&rest[..b]));
                 }
                 spans.push(Span::styled(
-                    rest[bold_start + 2..actual_end].to_string(),
-                    Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
-                ));
-                rest = &rest[actual_end + 2..];
-                continue;
-            }
-        }
-
-        if let Some(code_start) = rest.find('`') {
-            if let Some(code_end) = rest[code_start + 1..].find('`') {
-                let actual_end = code_start + 1 + code_end;
-                if code_start > 0 {
-                    spans.push(Span::styled(rest[..code_start].to_string(), ink_soft()));
-                }
-                spans.push(Span::styled(
-                    rest[code_start + 1..actual_end].to_string(),
+                    rest[b + 2..b + 2 + off].to_string(),
                     Style::default()
                         .fg(theme::INK)
-                        .bg(theme::SURFACE),
+                        .add_modifier(Modifier::BOLD),
                 ));
-                rest = &rest[actual_end + 1..];
+                rest = &rest[b + 2 + off + 2..];
                 continue;
             }
         }
-
-        spans.push(Span::styled(rest.to_string(), ink_soft()));
+        if let Some(c) = code {
+            if let Some(off) = rest[c + 1..].find('`') {
+                if c > 0 {
+                    spans.push(plain(&rest[..c]));
+                }
+                spans.push(Span::styled(
+                    rest[c + 1..c + 1 + off].to_string(),
+                    Style::default().fg(theme::INK).bg(theme::CODE_FILL),
+                ));
+                rest = &rest[c + 1 + off + 1..];
+                continue;
+            }
+        }
+        spans.push(plain(rest));
         break;
     }
     spans
@@ -883,7 +908,7 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for line in 0..(ROWS / 2) {
         let (top, bottom) = (line * 2, line * 2 + 1);
-        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
         for x in 0..COLS {
             match (filled(top, x), filled(bottom, x)) {
                 (true, true) => {
@@ -914,18 +939,21 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
 
 pub fn ascii_logo() -> Vec<Line<'static>> {
     // 空态由 ui() 组合：pony_banner_lines(state) + 引导块；
-    // 此函数保留独立可测的引导块。
+    // 此函数保留独立可测的引导块。所有文案缩进 2 列，与消息正文共享文本列。
     let mut lines = vec![
-        Line::from(Span::styled("描述一个任务开始，或输入命令：", ink_soft())),
+        Line::from(Span::styled("  描述一个任务开始，或输入命令：", ink_soft())),
         blank(),
     ];
     // 直接复用命令表，保证空态提示与斜杠菜单永不漂移。
     for (cmd, desc) in AVAILABLE_COMMANDS.iter().take(4) {
         lines.push(Line::from(vec![
+            Span::raw("  "),
             Span::styled(pad_display(cmd, 11), ink_soft()),
             Span::styled(desc.to_string(), muted()),
         ]));
     }
+    lines.push(blank());
+    lines.push(Line::from(Span::styled("  键入 / 查看全部命令", faint())));
     lines
 }
 
@@ -1011,10 +1039,8 @@ impl TurnEventSink for TuiTurnSink {
                             let t = d.trim();
                             if t.is_empty() {
                                 None
-                            } else if t.len() > 60 {
-                                Some(format!("{}...", &t[..60]))
                             } else {
-                                Some(t.to_string())
+                                Some(truncate_chars(t, 60))
                             }
                         });
                         let formatted = format_tool_display(
@@ -1073,11 +1099,7 @@ impl TurnEventSink for TuiTurnSink {
                         )
                     })
                     .unwrap_or_else(|| ("Tool".to_string(), None, "ok".to_string(), String::new()));
-                let short_detail = if detail.len() > 60 {
-                    format!("{}...", &detail[..60])
-                } else {
-                    detail
-                };
+                let short_detail = truncate_chars(&detail, 60);
                 let formatted = format_tool_display(&name, display_zh.as_deref(), Some(&short_detail), Some(&status));
                 let _ = self.tx.send(UiEvent::StreamToolResult(formatted));
             }
@@ -1178,28 +1200,37 @@ fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &s
 mod theme {
     use ratatui::style::Color;
 
-    pub const CANVAS: Color = Color::Rgb(13, 14, 17);
-    pub const SURFACE: Color = Color::Rgb(24, 26, 31);
-    pub const SURFACE_SEL: Color = Color::Rgb(38, 41, 48);
+    pub const CANVAS: Color = Color::Rgb(18, 16, 14);
+    pub const SURFACE: Color = Color::Rgb(27, 25, 22);
+    pub const SURFACE_SEL: Color = Color::Rgb(40, 37, 32);
+    /// 行内代码专用，必须比 SURFACE 更贴近画布，避免与用户消息块抢材质语义。
+    pub const CODE_FILL: Color = Color::Rgb(23, 22, 20);
     pub const INK: Color = Color::Rgb(232, 229, 224);
     pub const INK_SOFT: Color = Color::Rgb(203, 200, 195);
-    pub const MUTED: Color = Color::Rgb(154, 157, 163);
-    pub const FAINT: Color = Color::Rgb(112, 116, 124);
-    pub const HAIRLINE: Color = Color::Rgb(48, 51, 58);
+    pub const MUTED: Color = Color::Rgb(162, 155, 146);
+    pub const FAINT: Color = Color::Rgb(124, 118, 110);
+    pub const HAIRLINE: Color = Color::Rgb(52, 47, 41);
     pub const ACCENT: Color = Color::Rgb(198, 167, 126);
+    /// 角色竖条等「结构性强调」用低一档的骨色，避免高饱和抢正文。
+    pub const ACCENT_DIM: Color = Color::Rgb(166, 144, 110);
     pub const SUCCESS: Color = Color::Rgb(140, 172, 137);
     pub const DANGER: Color = Color::Rgb(199, 130, 125);
     pub const WARN: Color = Color::Rgb(199, 176, 126);
 }
 
 /// 左右统一沟槽宽度（视觉留白，禁止内容贴边）。
-const GUTTER: u16 = 2;
+const GUTTER: u16 = 3;
+
+/// 消息轨道：左侧 2 列承载角色/工具字形，所有正文从轨道之后起排。
+/// 这样用户正文、助手正文、工具文本共享同一条文本基线。
+const RAIL: usize = 2;
 
 /// 极简字形集：只用三种标记，避免图标噪音。
 const GLYPH_RUNNING: &str = "◦";
 const GLYPH_DONE: &str = "✓";
 const GLYPH_FAIL: &str = "✕";
 const CARET: &str = "▏";
+const USER_BAR: &str = "▌";
 
 fn ink() -> Style {
     Style::default().fg(theme::INK)
@@ -1279,7 +1310,7 @@ fn is_no_line_start(c: char) -> bool {
 /// 1px 发丝分隔线（不是边框，只是一条极淡的横线）。
 fn hairline(width: usize) -> Line<'static> {
     Line::from(Span::styled(
-        "─".repeat(width.max(1)),
+        "▁".repeat(width.max(1)),
         Style::default().fg(theme::HAIRLINE),
     ))
 }
@@ -1383,6 +1414,114 @@ fn push_blank(lines: &mut Vec<Line<'static>>) {
     }
 }
 
+fn line_display_width(line: &Line<'static>) -> usize {
+    line.spans.iter().map(|s| str_width(&s.content)).sum()
+}
+
+fn pad_line_with_bg(mut line: Line<'static>, width: usize, bg: ratatui::style::Color) -> Line<'static> {
+    let used = line_display_width(&line);
+    if used < width {
+        line.spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(bg),
+        ));
+    }
+    line
+}
+
+/// 轨道缩进折行：首行用 first 前缀、续行用 cont 前缀，正文宽度统一。
+fn push_prefixed(
+    lines: &mut Vec<Line<'static>>,
+    first: Vec<Span<'static>>,
+    cont: Vec<Span<'static>>,
+    body: Line<'static>,
+    body_width: usize,
+) {
+    for (i, line) in wrap_line(&body, body_width.max(1)).into_iter().enumerate() {
+        let mut spans = if i == 0 { first.clone() } else { cont.clone() };
+        spans.extend(line.spans);
+        lines.push(Line::from(spans));
+    }
+}
+
+fn blank_rail(style: Style) -> Vec<Span<'static>> {
+    vec![Span::styled(" ".repeat(RAIL), style)]
+}
+
+/// 用户消息：低对比表面块 + 左侧骨色竖条。用「材质」而不是文字标签区分角色。
+/// 块内含 1 行上/下呼吸留白，正文回到与助手/工具相同的文本列。
+fn push_user_block(lines: &mut Vec<Line<'static>>, content: &str, width: usize) {
+    let bg = theme::SURFACE;
+    let bar_style = Style::default().fg(theme::ACCENT_DIM).bg(bg);
+    let fill_style = Style::default().bg(bg);
+    let body_w = width.saturating_sub(RAIL + 1).max(1);
+
+    let block_pad = |lines: &mut Vec<Line<'static>>| {
+        lines.push(pad_line_with_bg(
+            Line::from(vec![
+                Span::styled(USER_BAR, bar_style),
+                Span::styled(" ", fill_style),
+            ]),
+            width,
+            bg,
+        ));
+    };
+
+    block_pad(lines);
+    let mut wrote_body = false;
+    for raw in content.lines() {
+        let body = Line::from(Span::styled(
+            raw.to_string(),
+            Style::default().fg(theme::INK_SOFT).bg(bg),
+        ));
+        for wrapped in wrap_line(&body, body_w) {
+            let mut spans = vec![
+                Span::styled(USER_BAR, bar_style),
+                Span::styled(" ", fill_style),
+            ];
+            spans.extend(
+                wrapped
+                    .spans
+                    .into_iter()
+                    .map(|s| Span::styled(s.content, s.style.bg(bg))),
+            );
+            lines.push(pad_line_with_bg(Line::from(spans), width, bg));
+            wrote_body = true;
+        }
+    }
+    if !wrote_body {
+        let mut spans = vec![
+            Span::styled(USER_BAR, bar_style),
+            Span::styled(" ", fill_style),
+        ];
+        spans.push(Span::styled(String::new(), Style::default().bg(bg)));
+        lines.push(pad_line_with_bg(Line::from(spans), width, bg));
+    }
+    block_pad(lines);
+}
+
+/// 工具行分层：动作名保留可读性，参数/结果退到次级墨色。
+fn tool_line_spans(
+    glyph: &str,
+    glyph_style: Style,
+    head_style: Style,
+    content: &str,
+) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    // 工具描述常带行内 markdown 记号；工具行不是富文本，直接去掉反引号/加粗星号。
+    let cleaned = content.replace('`', "").replace("**", "");
+    let (head, detail) = cleaned
+        .split_once(" · ")
+        .or_else(|| content.split_once("  "))
+        .map(|(h, d)| (h.to_string(), d.to_string()))
+        .unwrap_or_else(|| (content.to_string(), String::new()));
+    let prefix = vec![Span::styled(format!("{} ", glyph), glyph_style)];
+    let mut body = vec![Span::styled(head, head_style)];
+    if !detail.is_empty() {
+        body.push(Span::styled(format!(" · {}", detail), muted()));
+    }
+    (prefix, body)
+}
+
 /// 输入框视觉折行：按显示宽度硬折行 + 尊重显式换行符，返回字符区间。
 fn layout_input(text: &str, width: usize) -> Vec<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
@@ -1411,7 +1550,29 @@ fn layout_input(text: &str, width: usize) -> Vec<(usize, usize)> {
 
 /// 浮动面板：发丝描边 + 表面底色 + 标题行（hint 右对齐），返回标题下方的内容区。
 fn draw_panel(f: &mut Frame, area: Rect, title: &str, hint: &str) -> Rect {
-    f.render_widget(ratatui::widgets::Clear, area);
+    // 底图可能含有跨越面板边界的 CJK 宽字符：只用 Clear(area) 时，
+    // 被覆盖的「半个宽字符」会在下次重绘时反覆盖边框。向外扩 1 格清底，
+    // 让边界两侧都回到干净画布，再绘制面板。
+    let screen = f.area();
+    // 只在水平方向外扩：宽字符只会跨列，不会跨行；纵向外扩会误清 header 发丝线/输入区上沿。
+    let left = area.x.saturating_sub(1).max(screen.x);
+    let right = area
+        .x
+        .saturating_add(area.width)
+        .saturating_add(1)
+        .min(screen.x.saturating_add(screen.width));
+    let clear_area = Rect {
+        x: left,
+        y: area.y,
+        width: right.saturating_sub(left),
+        height: area.height,
+    };
+    // 注意：仅用带背景色的 Block 只会改 style、不清 symbol，必须先 Clear 再铺画布色。
+    f.render_widget(ratatui::widgets::Clear, clear_area);
+    f.render_widget(
+        Block::default().style(Style::default().bg(theme::CANVAS)),
+        clear_area,
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -1420,19 +1581,19 @@ fn draw_panel(f: &mut Frame, area: Rect, title: &str, hint: &str) -> Rect {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let title_w = str_width(title) + 1;
+    let title_w = str_width(title) + 2;
     let hint_w = str_width(hint);
     let gap = (inner.width as usize)
-        .saturating_sub(title_w + hint_w + 2)
+        .saturating_sub(title_w + hint_w + 3)
         .max(1);
     let head = Line::from(vec![
         Span::styled(
-            format!(" {}", title),
+            format!("  {}", title),
             Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(gap)),
         Span::styled(hint.to_string(), faint()),
-        Span::raw(" "),
+        Span::raw("  "),
     ]);
     let head_area = Rect {
         x: inner.x,
@@ -1467,6 +1628,28 @@ fn truncate_width(text: &str, width: usize) -> String {
     out
 }
 
+/// 按显示宽度截断，并以省略号收尾（头部元信息/面板右列专用）。
+fn ellipsize_width(text: &str, width: usize) -> String {
+    if str_width(text) <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = truncate_width(text, width.saturating_sub(1));
+    out.push('…');
+    out
+}
+
+/// 按「字符」截断（绝不按字节切分，避免 CJK 边界 panic），超长时补省略号。
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut out: String = text.chars().take(max_chars).collect();
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
 fn pad_display(text: &str, width: usize) -> String {
     let used = str_width(text);
     if used >= width {
@@ -1495,7 +1678,9 @@ fn list_row(selected: bool, left: &str, right: &str, width: usize) -> Line<'stat
     // 右侧状态/次要信息保持可读（FAINT 只留给纯装饰性 chrome）
     let right_style = Style::default().fg(theme::MUTED).bg(bg);
 
-    let right_w = str_width(right);
+    // 右侧次要信息也必须截断，否则长 model id 会把左列挤压到不可读。
+    let right_txt = ellipsize_width(right, width.saturating_sub(8));
+    let right_w = str_width(&right_txt);
     let left_w = width.saturating_sub(3 + right_w);
     let left_txt = pad_display(&truncate_width(left, left_w), left_w);
     let used = 2 + left_w + right_w;
@@ -1509,9 +1694,20 @@ fn list_row(selected: bool, left: &str, right: &str, width: usize) -> Line<'stat
             },
         ),
         Span::styled(format!(" {}", left_txt), left_style),
-        Span::styled(right.to_string(), right_style),
+        Span::styled(right_txt, right_style),
         Span::styled(" ".repeat(width.saturating_sub(used)), Style::default().bg(bg)),
     ])
+}
+
+/// 面板滚动窗口：保证选中项始终可见，并尽量让选中项居中。
+fn panel_window(total: usize, selected: usize, visible: usize) -> (usize, usize) {
+    if total <= visible {
+        return (0, total);
+    }
+    let start = selected
+        .saturating_sub(visible / 2)
+        .min(total.saturating_sub(visible));
+    (start, start + visible)
 }
 
 fn fill(f: &mut Frame, area: Rect, color: ratatui::style::Color) {
@@ -1522,46 +1718,81 @@ fn fill(f: &mut Frame, area: Rect, color: ratatui::style::Color) {
 fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
     let chars: Vec<char> = state.input_buffer.chars().collect();
     let cursor = state.input_cursor.min(chars.len());
-    let text_width = area.width.saturating_sub(2).max(1) as usize;
+    // 提示符 2 列 + 右侧 1 列呼吸留白：正文永不贴边。
+    let text_width = area.width.saturating_sub(3).max(1) as usize;
     let ranges = layout_input(&state.input_buffer, text_width);
     let active_line = ranges
         .iter()
-        .position(|(s, e)| cursor >= *s && cursor < *e)
+        .position(|(s, e)| cursor >= *s && cursor <= *e)
         .unwrap_or(ranges.len().saturating_sub(1));
 
+    // 输入超过可视高度时，窗口跟随光标，保证正在编辑的行始终可见。
+    let visible = area.height as usize;
+    let start_line = if ranges.len() > visible {
+        active_line
+            .saturating_sub(visible.saturating_sub(1))
+            .min(ranges.len() - visible)
+    } else {
+        0
+    };
+    let end_line = (start_line + visible).min(ranges.len());
+
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for (idx, (s, e)) in ranges.iter().enumerate() {
-        let mut spans: Vec<Span<'static>> = vec![if idx == 0 {
+    for (idx, (s, e)) in ranges
+        .iter()
+        .enumerate()
+        .take(end_line)
+        .skip(start_line)
+    {
+        let prompt = if idx == 0 {
             Span::styled(
                 "› ",
                 Style::default()
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
             )
+        } else if idx == start_line && start_line > 0 {
+            Span::styled("↑ ", faint())
+        } else if idx + 1 == end_line && end_line < ranges.len() {
+            Span::styled("↓ ", faint())
         } else {
             Span::raw("  ")
-        }];
+        };
+        let mut spans: Vec<Span<'static>> = vec![prompt];
 
         let text: String = chars[*s..*e].iter().collect();
         if idx == active_line {
-            let rel = cursor.saturating_sub(*s).min(*e - *s);
-            let before: String = chars[*s..*s + rel].iter().collect();
-            let after: String = chars[*s + rel..*e].iter().collect();
             if state.input_buffer.is_empty() {
-                spans.push(Span::styled(CARET, Style::default().fg(theme::ACCENT)));
-                let placeholder = truncate_width(
-                    " 输入任务，或输入 / 查看命令",
-                    text_width.saturating_sub(1),
-                );
-                spans.push(Span::styled(
-                    placeholder,
-                    Style::default().fg(theme::FAINT),
-                ));
+                // 块光标压在占位符首字上：光标与正文同列，一敲键不左跳。
+                let placeholder = truncate_width("写下任务，或输入 / 查看命令", text_width);
+                let mut ph = placeholder.chars();
+                if let Some(first) = ph.next() {
+                    spans.push(Span::styled(
+                        first.to_string(),
+                        Style::default().fg(theme::CANVAS).bg(theme::ACCENT),
+                    ));
+                    let rest: String = ph.collect();
+                    if !rest.is_empty() {
+                        spans.push(Span::styled(rest, Style::default().fg(theme::MUTED)));
+                    }
+                }
             } else {
+                let before: String = chars[*s..cursor.min(*e)].iter().collect();
                 if !before.is_empty() {
                     spans.push(Span::styled(before, ink()));
                 }
-                spans.push(Span::styled(CARET, Style::default().fg(theme::ACCENT)));
+                let on_char = cursor < *e;
+                let cursor_text = if on_char {
+                    chars[cursor].to_string()
+                } else {
+                    " ".to_string()
+                };
+                spans.push(Span::styled(
+                    cursor_text,
+                    Style::default().fg(theme::CANVAS).bg(theme::ACCENT),
+                ));
+                let after_start = if on_char { cursor + 1 } else { cursor };
+                let after: String = chars[after_start.min(*e)..*e].iter().collect();
                 if !after.is_empty() {
                     spans.push(Span::styled(after, ink()));
                 }
@@ -1577,22 +1808,59 @@ fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
     f.render_widget(widget, area);
 }
 
-/// 底部状态词：克制到只有一个词（耗时与动画只在正文活动行出现一次）。
-fn status_word(state: &TuiState) -> (String, Style) {
-    // wave-35b：status_text（/models 拉取进度、Turn completed 等）非空且非 Ready 时
-    // 优先呈现，否则回落 runtime 状态词。
-    let st = state.status_text.trim();
-    if !st.is_empty() && st != "Ready" {
-        return (st.to_string(), muted());
+/// 把内部状态文案收敛为「一个短语」：底栏只放节奏信息，错误细节交给正文。
+fn compact_status(st: &str) -> String {
+    let st = st.trim();
+    if st.is_empty() || st == "Ready" || st == "Turn completed" {
+        return String::new();
     }
+    if st == "Context cleared" {
+        return "上下文已清空".to_string();
+    }
+    if st == "Interrupted" {
+        return "已中断".to_string();
+    }
+    if st.starts_with("Thinking") {
+        return "思考中".to_string();
+    }
+    if let Some(rest) = st.strip_prefix("Resumed ") {
+        return format!("已恢复 {}", truncate_chars(rest, 18));
+    }
+    if let Some(rest) = st.strip_prefix("Added provider ") {
+        return format!("已添加 {}", truncate_chars(rest, 18));
+    }
+    if let Some(rest) = st.strip_prefix("Switched model to ") {
+        return format!("模型 · {}", truncate_chars(rest, 22));
+    }
+    if let Some(rest) = st.strip_prefix("Switched provider to ") {
+        return format!("提供商 · {}", truncate_chars(rest, 20));
+    }
+    if st.starts_with("Turn failed") {
+        return "失败".to_string();
+    }
+    if st.starts_with("模型列表拉取失败") {
+        return "模型拉取失败".to_string();
+    }
+    truncate_width(st, 34)
+}
+
+/// 底部状态词：克制到只有一个短语（耗时与动画只在正文活动行出现一次）。
+fn status_word(state: &TuiState) -> (String, Style) {
+    let transient = compact_status(&state.status_text);
     match &state.runtime_mode {
-        RuntimeMode::Ready => ("就绪".to_string(), faint()),
+        RuntimeMode::Ready => {
+            if transient.is_empty() {
+                ("就绪".to_string(), faint())
+            } else {
+                let danger = transient.contains("失败") || transient.contains("错误");
+                (transient, if danger { Style::default().fg(theme::DANGER) } else { muted() })
+            }
+        }
         RuntimeMode::Connecting => ("连接中".to_string(), muted()),
         RuntimeMode::Thinking => ("思考中".to_string(), muted()),
         RuntimeMode::Responding => ("写入中".to_string(), muted()),
         RuntimeMode::ExecutingTool(name) => {
-            let short: String = name.chars().take(28).collect();
-            (short, muted())
+            (format!("工具 · {}", truncate_chars(&clean_tool_name_display(name), 20)), muted())
         }
         RuntimeMode::WaitingApproval => ("待确认".to_string(), Style::default().fg(theme::WARN)),
         RuntimeMode::Completed => ("完成".to_string(), Style::default().fg(theme::SUCCESS)),
@@ -1611,20 +1879,33 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let area = f.area();
     fill(f, area, theme::CANVAS);
 
-    // 极小终端降级：不 panic，只给一行提示。
-    if area.width < 24 || area.height < 8 {
-        let msg = Line::from(Span::styled("终端窗口过小", muted()));
+    // 极小终端降级：不 panic，也不输出半截布局，只给一句可读提示。
+    if area.width < 24 || area.height < 10 {
+        let lines = vec![
+            Line::from(Span::styled("终端窗口过小", muted())),
+            blank(),
+            Line::from(Span::styled("请调整到至少 24 × 10", faint())),
+        ];
         f.render_widget(
-            Paragraph::new(msg).style(Style::default().bg(theme::CANVAS)),
+            Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme::CANVAS)),
             area,
         );
         return;
     }
 
+    // 超宽终端下限制正文行宽（约 120 列），并把内容列居中：
+    // 终端再宽，阅读行宽也不失控；左右留白由两侧均分。
+    const MAX_CONTENT_WIDTH: u16 = 120;
+    let content_w = area
+        .width
+        .saturating_sub(GUTTER * 2)
+        .min(MAX_CONTENT_WIDTH);
     let content = Rect {
-        x: area.x + GUTTER,
+        x: area.x + area.width.saturating_sub(content_w) / 2,
         y: area.y,
-        width: area.width.saturating_sub(GUTTER * 2),
+        width: content_w,
         height: area.height,
     };
 
@@ -1634,29 +1915,33 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("~");
-    let session_short: String = state
-        .session_id
-        .rsplit('-')
-        .next()
-        .unwrap_or(&state.session_id)
-        .chars()
-        .take(6)
-        .collect();
-    let right_meta = format!("{}  ·  {}", state.model, session_short);
+    // header 只保留「模型」这一条有决策价值的信息；session hash 属于 /resume 的上下文。
+    let right_meta = state.model.clone();
     let left_w = 4 + 5 + str_width(ws_name);
     let right_w = str_width(&right_meta);
     let pad = content.width as usize;
     let header_line = if pad > left_w + right_w {
         Line::from(vec![
-            Span::styled("pony", Style::default().fg(theme::INK).add_modifier(Modifier::BOLD)),
+            Span::styled("pony", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
             Span::styled("  ·  ", faint()),
             Span::styled(ws_name.to_string(), muted()),
             Span::raw(" ".repeat(pad - left_w - right_w)),
             Span::styled(right_meta, faint()),
         ])
+    } else if pad > left_w + 12 {
+        // 中等宽度：保留右侧模型/会话，截断而不是整块丢弃。
+        let meta = ellipsize_width(&right_meta, pad - left_w - 1);
+        let gap = pad.saturating_sub(left_w + str_width(&meta));
+        Line::from(vec![
+            Span::styled("pony", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  ", faint()),
+            Span::styled(ws_name.to_string(), muted()),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(meta, faint()),
+        ])
     } else {
         Line::from(vec![
-            Span::styled("pony", Style::default().fg(theme::INK).add_modifier(Modifier::BOLD)),
+            Span::styled("pony", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
             Span::styled("  ·  ", faint()),
             Span::styled(ws_name.to_string(), muted()),
         ])
@@ -1668,20 +1953,16 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let rule_rect = Rect { y: content.y + 1, height: 1, ..content };
     f.render_widget(Paragraph::new(hairline(content.width as usize)), rule_rect);
 
-    // ── 底部区块尺寸（输入区高随内容自适应，1~6 行）───────────────────────
-    let text_width = content.width.saturating_sub(2).max(1) as usize;
-    let visual_lines = layout_input(&state.input_buffer, text_width).len() as u16;
-    // 输入区至少 3 行高：既是视觉「舞台」，也为多行输入预留空间
-    let input_h = visual_lines.clamp(3, 6);
-    let bottom_h = input_h + 1; // 输入行 + 状态行
+    // ── 底部区块尺寸：输入区 2~5 行 + 发丝线 / 上呼吸 / 状态行 ─────────────
+    let composer_text_width = content.width.saturating_sub(3).max(1) as usize;
+    let visual_lines = layout_input(&state.input_buffer, composer_text_width).len() as u16;
+    // 文本行 + 1 行底部呼吸，最多 5 行文本（6 行输入区）。
+    let input_h = (visual_lines + 1).clamp(2, 6);
+    let bottom_h = input_h + 3;
+    let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
 
-    let chat_top = content.y + 3;
-    let chat_h = area
-        .y
-        .saturating_add(area.height)
-        .saturating_sub(bottom_h)
-        .saturating_sub(chat_top)
-        .saturating_sub(1); // 输入区上方留白
+    let chat_top = content.y + 3; // header + rule + 1 行呼吸
+    let chat_h = bottom_top.saturating_sub(chat_top).saturating_sub(1);
     let chat_rect = Rect {
         x: content.x,
         y: chat_top,
@@ -1689,18 +1970,35 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         height: chat_h.max(1),
     };
 
-    // ── 会话正文：角色标签 + 单色正文 + 极简工具行 ───────────────────────
+    // ── 会话正文：轨道标记 + 单色正文 + 分层工具行 ─────────────────────────
     let width = chat_rect.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let kicker = || {
+        Line::from(Span::styled(
+            "pony",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let rail_blank = || blank_rail(Style::default());
 
     if state.messages.is_empty() {
         let mut splash: Vec<Line<'static>> = Vec::new();
-        splash.push(blank());
-        splash.extend(pony_banner_lines(state));
-        splash.push(blank());
-        splash.push(Line::from(Span::styled("终端里的自主智能体。", Style::default().fg(theme::MUTED))));
-        splash.push(blank());
-        splash.extend(ascii_logo());
+        // 短终端不硬塞品牌画：优先保证「一句话 + 命令入口」完整可见。
+        if chat_h as usize >= 20 {
+            splash.push(blank());
+            splash.extend(pony_banner_lines(state));
+            splash.push(blank());
+        }
+        splash.push(Line::from(Span::styled(
+            "  终端里的自主智能体。",
+            Style::default().fg(theme::MUTED),
+        )));
+        if state.matching_commands().is_empty() {
+            splash.push(blank());
+            splash.extend(ascii_logo());
+        }
         // 空态留白构图：按正文区 1/3 高度锚定，避免顶部挤、底部空。
         let top_pad = (chat_h as usize).saturating_sub(splash.len()) / 3;
         for _ in 0..top_pad {
@@ -1721,28 +2019,21 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 MessageRole::User => {
                     // 轮间距 2 行：长会话里一眼能扫到「新一轮提问」的节拍
                     push_gap(&mut lines, 2);
-                    lines.push(Line::from(Span::styled("你", muted())));
-                    for raw in msg.content.lines() {
-                        push_wrapped(
-                            &mut lines,
-                            Line::from(Span::styled(raw.to_string(), ink())),
-                            width,
-                        );
-                    }
+                    push_user_block(&mut lines, &msg.content, width);
                     prev_role = Some(MessageRole::User);
                 }
                 MessageRole::Assistant => {
-                    // 一个 assistant turn 只在「首次出现」时打一次标签，工具行与正文共享同一 turn。
-                    if !prev_is_tool {
-                        push_gap(&mut lines, 1);
-                        lines.push(Line::from(Span::styled(
-                            "pony",
-                            Style::default().fg(theme::ACCENT),
-                        )));
-                    } else {
-                        // 工具行结束后回到正文：留一行呼吸，避免正文贴着工具行
+                    // 一个 assistant turn 只在「首次出现」时打一次字标，工具行与正文共享同一 turn；
+                    // 工具执行后恢复正文不再重复 wordmark，只用一行留白表示节奏。
+                    if prev_is_tool {
                         push_blank(&mut lines);
+                    } else {
+                        if prev_role.is_some() {
+                            push_gap(&mut lines, 1);
+                        }
+                        lines.push(kicker());
                     }
+                    let body_w = width.saturating_sub(RAIL);
                     let mut in_code = false;
                     for raw in msg.content.lines() {
                         let trimmed = raw.trim_start();
@@ -1751,25 +2042,32 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                             if in_code {
                                 let lang = trimmed.trim_start_matches('`').trim();
                                 if !lang.is_empty() {
-                                    lines.push(Line::from(vec![
-                                        Span::styled("  ▏ ", Style::default().fg(theme::HAIRLINE)),
-                                        Span::styled(lang.to_string(), faint()),
-                                    ]));
+                                    let mut pref = rail_blank();
+                                    pref.push(Span::styled(
+                                        "  ▏ ",
+                                        Style::default().fg(theme::HAIRLINE),
+                                    ));
+                                    pref.push(Span::styled(lang.to_string(), faint()));
+                                    lines.push(Line::from(pref));
                                 }
                             }
                             continue;
                         }
                         if in_code {
-                            push_wrapped(
+                            let mut pref = rail_blank();
+                            pref.push(Span::styled(
+                                "  ▏ ",
+                                Style::default().fg(theme::HAIRLINE),
+                            ));
+                            push_prefixed(
                                 &mut lines,
-                                Line::from(vec![
-                                    Span::styled("  ▏ ", Style::default().fg(theme::HAIRLINE)),
-                                    Span::styled(
-                                        raw.to_string(),
-                                        Style::default().fg(theme::INK_SOFT),
-                                    ),
-                                ]),
-                                width,
+                                pref.clone(),
+                                pref,
+                                Line::from(Span::styled(
+                                    raw.to_string(),
+                                    Style::default().fg(theme::INK_SOFT),
+                                )),
+                                width.saturating_sub(RAIL + 4),
                             );
                             continue;
                         }
@@ -1777,21 +2075,23 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                             push_blank(&mut lines);
                             continue;
                         }
-                        push_wrapped(&mut lines, Line::from(render_markdown_line(raw)), width);
+                        let body = Line::from(render_markdown_line(raw));
+                        push_prefixed(&mut lines, rail_blank(), rail_blank(), body, body_w);
                     }
                     prev_role = Some(MessageRole::Assistant);
                 }
                 MessageRole::ToolCall | MessageRole::ToolResult => {
-                    // 工具行本身属于 assistant turn：若无正文先行，则此处开启 turn 并打标签。
+                    // 工具行本身属于 assistant turn：若无正文先行，则此处开启 turn 并打标。
                     if !prev_is_tool && !matches!(prev_role, Some(MessageRole::Assistant)) {
                         push_gap(&mut lines, 2);
-                        lines.push(Line::from(Span::styled(
-                            "pony",
-                            Style::default().fg(theme::ACCENT),
-                        )));
+                        lines.push(kicker());
                     }
-                    let running = msg.role == MessageRole::ToolCall && idx == last_index;
-                    let (glyph, glyph_style) = if msg.role == MessageRole::ToolCall {
+                    let is_call = msg.role == MessageRole::ToolCall;
+                    let running = is_call && idx == last_index;
+                    let is_error = msg.content.contains("失败")
+                        || msg.content.contains("Error")
+                        || msg.content.contains("error");
+                    let (glyph, glyph_style) = if is_call {
                         if running {
                             (
                                 spinner_frame(state.spinner_tick).to_string(),
@@ -1800,29 +2100,26 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                         } else {
                             (GLYPH_RUNNING.to_string(), faint())
                         }
-                    } else if idx == last_index {
-                        (GLYPH_DONE.to_string(), Style::default().fg(theme::SUCCESS))
+                    } else if is_error {
+                        (GLYPH_FAIL.to_string(), Style::default().fg(theme::DANGER))
                     } else {
-                        (GLYPH_DONE.to_string(), faint())
+                        (GLYPH_DONE.to_string(), Style::default().fg(theme::SUCCESS))
                     };
                     // 工具行内部也分层：动作名提亮，参数/结果压暗。
-                    let (head, detail) = match msg.content.split_once("  ") {
-                        Some((h, d)) => (h.to_string(), d.to_string()),
-                        None => (msg.content.clone(), String::new()),
-                    };
-                    let head_style = if msg.role == MessageRole::ToolCall {
+                    let head_style = if is_call {
                         ink_soft()
                     } else {
                         Style::default().fg(theme::MUTED)
                     };
-                    let mut spans = vec![
-                        Span::styled(format!("  {} ", glyph), glyph_style),
-                        Span::styled(head, head_style),
-                    ];
-                    if !detail.is_empty() {
-                        spans.push(Span::styled(format!("  {}", detail), muted()));
-                    }
-                    push_wrapped(&mut lines, Line::from(spans), width);
+                    let (prefix, body) =
+                        tool_line_spans(&glyph, glyph_style, head_style, &msg.content);
+                    push_prefixed(
+                        &mut lines,
+                        prefix,
+                        rail_blank(),
+                        Line::from(body),
+                        width.saturating_sub(RAIL),
+                    );
                     prev_role = Some(msg.role.clone());
                 }
                 MessageRole::System => {
@@ -1842,14 +2139,30 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                     if !lines.is_empty() && !prev_is_tool {
                         push_blank(&mut lines);
                     }
-                    push_wrapped(
-                        &mut lines,
-                        Line::from(vec![
-                            Span::styled(format!("{} ", glyph), glyph_style),
-                            Span::styled(msg.content.clone(), text_style),
-                        ]),
-                        width,
-                    );
+                    let prefix = vec![Span::styled(format!("{} ", glyph), glyph_style)];
+                    for (i, raw) in msg.content.lines().enumerate() {
+                        let (first, cont) = if i == 0 {
+                            (prefix.clone(), rail_blank())
+                        } else {
+                            (rail_blank(), rail_blank())
+                        };
+                        push_prefixed(
+                            &mut lines,
+                            first,
+                            cont,
+                            Line::from(Span::styled(raw.to_string(), text_style)),
+                            width.saturating_sub(RAIL),
+                        );
+                    }
+                    if msg.content.is_empty() {
+                        push_prefixed(
+                            &mut lines,
+                            prefix,
+                            rail_blank(),
+                            Line::from(""),
+                            width.saturating_sub(RAIL),
+                        );
+                    }
                     prev_role = Some(MessageRole::System);
                 }
             }
@@ -1861,21 +2174,22 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             let (word, style) = status_word(state);
             let elapsed = elapsed_label(state);
             let text = if elapsed.is_empty() {
-                format!("{} {}", spinner_frame(state.spinner_tick), word)
+                word
             } else {
-                format!("{} {}  {}", spinner_frame(state.spinner_tick), word, elapsed)
+                format!("{}  {}", word, elapsed)
             };
-            lines.push(Line::from(Span::styled(text, style)));
+            let prefix = vec![Span::styled(
+                format!("{} ", spinner_frame(state.spinner_tick)),
+                Style::default().fg(theme::ACCENT),
+            )];
+            push_prefixed(
+                &mut lines,
+                prefix,
+                rail_blank(),
+                Line::from(Span::styled(text, style)),
+                width.saturating_sub(RAIL),
+            );
             lines.push(blank());
-        }
-    }
-
-    // 模态时压暗背板正文，让浮层成为唯一焦点
-    if state.mode != InteractionMode::Normal {
-        for line in &mut lines {
-            for span in &mut line.spans {
-                span.style = span.style.fg(theme::FAINT);
-            }
         }
     }
 
@@ -1883,6 +2197,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let visible = chat_rect.height as usize;
     let total = lines.len();
     let max_offset = total.saturating_sub(visible);
+    state.max_scroll_offset = max_offset as u16;
     let offset = if state.auto_scroll {
         state.scroll_offset = max_offset as u16;
         max_offset
@@ -1898,34 +2213,93 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         chat_rect,
     );
 
-    // ── Composer：整宽表面色带，靠色块本身与正文分区（不用发丝线）──────────
-    let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
+    // 浮层态先清场：不让边框从底层字形中间切过去，也不留下压暗后的花屏徽标。
+    if state.mode != InteractionMode::Normal {
+        f.render_widget(ratatui::widgets::Clear, chat_rect);
+        f.render_widget(
+            Block::default().style(Style::default().bg(theme::CANVAS)),
+            chat_rect,
+        );
+    }
+
+    // ── Composer：整宽表面色带，顶部 1px 发丝线 + 上呼吸 + 内边距 ───────────
+    // 色带与内容列严格同宽：与 header 发丝线共用同一条左右基准。
+    let band_x = content.x;
+    let band_w = content.width;
     let band = Rect {
-        x: area.x,
+        x: band_x,
         y: bottom_top,
-        width: area.width,
+        width: band_w,
         height: bottom_h,
     };
-    fill(f, band, theme::SURFACE);
+    // 浮层态连 composer 一起收起：画面只留 header + 浮层，键位提示由浮层自己承担。
+    if state.mode == InteractionMode::Normal {
+        fill(f, band, theme::SURFACE);
+        // 分隔线贴住色带上沿（画在上一行底部），避免与色带边界叠加成「双线」。
+        if bottom_top > area.y {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "▁".repeat(band_w as usize),
+                    Style::default().fg(theme::HAIRLINE),
+                )))
+                .style(Style::default().bg(theme::CANVAS)),
+                Rect {
+                    x: band_x,
+                    y: bottom_top - 1,
+                    width: band_w,
+                    height: 1,
+                },
+            );
+        }
 
-    let input_rect = Rect {
-        y: bottom_top,
-        height: input_h,
-        ..content
-    };
-    render_input(f, input_rect, state);
+        let input_rect = Rect {
+            x: content.x,
+            y: bottom_top.saturating_add(2),
+            width: content.width,
+            height: input_h,
+        };
+        render_input(f, input_rect, state);
 
-    // 状态行：色带最底行只放右侧状态词（快捷键提示已移除，键位靠 --help 与空态引导）
-    let (phrase, phrase_style) = status_word(state);
-    let footer_y = input_rect.y + input_h;
-    let footer_rect = Rect { y: footer_y, height: 1, ..content };
-    if !phrase.is_empty() {
-        let phrase_w = str_width(&phrase);
+        // 状态行：左侧情境提示，右侧一个状态短语；两者之间留出弹性空白。
+        let (phrase, phrase_style) = status_word(state);
+        let menu_open = !state.matching_commands().is_empty();
+        let hint = if menu_open {
+            "↑↓ 选择 · Tab 补全".to_string()
+        } else if state.is_streaming {
+            "Esc 中断".to_string()
+        } else if !state.auto_scroll {
+            "↑ 已上翻 · End 回到底部".to_string()
+        } else if state.input_buffer.trim().is_empty() {
+            "Enter 发送 · / 查看命令".to_string()
+        } else {
+            "Enter 发送 · Shift+Enter 换行".to_string()
+        };
+        let footer_rect = Rect {
+            x: content.x,
+            y: input_rect.y.saturating_add(input_h),
+            width: content.width,
+            height: 1,
+        };
         let space = content.width as usize;
-        let footer_line = if space > phrase_w + 2 {
+        let hint_w = str_width(&hint);
+        let status_w = str_width(&phrase);
+        let left_inset = RAIL;
+        let right_inset = 0usize;
+        let footer_line = if space >= left_inset + hint_w + 2 + status_w + right_inset {
+            let gap = space - left_inset - hint_w - status_w - right_inset;
             Line::from(vec![
-                Span::raw(" ".repeat(space - phrase_w)),
+                Span::raw(" ".repeat(left_inset)),
+                Span::styled(hint, faint()),
+                Span::raw(" ".repeat(gap)),
                 Span::styled(phrase, phrase_style),
+                Span::raw(" ".repeat(right_inset)),
+            ])
+        } else if space >= left_inset + status_w + right_inset {
+            let gap = space - left_inset - status_w - right_inset;
+            Line::from(vec![
+                Span::raw(" ".repeat(left_inset + gap)),
+                Span::styled(phrase, phrase_style),
+                Span::raw(" ".repeat(right_inset)),
             ])
         } else {
             Line::from(Span::styled(
@@ -1933,7 +2307,10 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 phrase_style,
             ))
         };
-        f.render_widget(Paragraph::new(footer_line), footer_rect);
+        f.render_widget(
+            Paragraph::new(footer_line).style(Style::default().bg(theme::SURFACE)),
+            footer_rect,
+        );
     }
 
     // ── 斜杠命令面板：浮于输入区之上，两条发丝线夹一段浅表面 ──────────────
@@ -1975,7 +2352,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             for (idx, (cmd, desc)) in match_cmds.iter().enumerate().take(rows as usize) {
                 let is_sel = idx == selected;
                 let bg = if is_sel { theme::SURFACE_SEL } else { theme::SURFACE };
-                let cmd_col = pad_display(cmd, 12);
+                let cmd_col = pad_display(cmd, 11);
                 let used = 2 + str_width(&cmd_col) + str_width(desc);
                 let mut spans = vec![
                     Span::styled(
@@ -2021,6 +2398,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 
     // ── 模态面板（会话 / 提供商 / 模型 / 新增提供商）──────────────────────
+    let max_rows = (area.height.saturating_sub(8)).max(3) as usize;
     let panel_rect = |w: u16, h: u16| -> Rect {
         let pw = w.min(area.width.saturating_sub(4)).max(20);
         let ph = h.min(area.height.saturating_sub(2)).max(6);
@@ -2033,16 +2411,26 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     };
 
     if state.mode == InteractionMode::SelectingSession {
-        let rows = state.session_list.len().max(1) as u16;
-        let rect = panel_rect(58, rows + 4);
-        let body = draw_panel(f, rect, "会话", "↑↓ 选择 · 回车 确认 · esc 取消");
+        let total = state.session_list.len();
+        let shown = total.min(10.min(max_rows)).max(1);
+        let selected = state
+            .selected_session_index
+            .min(total.saturating_sub(1));
+        let (start, end) = panel_window(total, selected, shown);
+        let title = if total > shown {
+            format!("会话 · {}/{}", selected + 1, total)
+        } else {
+            "会话".to_string()
+        };
+        let rect = panel_rect(84, shown as u16 + 4);
+        let body = draw_panel(f, rect, &title, "↑↓ 选择 · ↵ 确认 · esc 取消");
         let inner_w = body.width as usize;
         let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.session_list.is_empty() {
             lines_out.push(Line::from(Span::styled("  暂无历史会话", faint())));
         } else {
-            for (idx, item) in state.session_list.iter().enumerate() {
-                let selected = idx == state.selected_session_index;
+            for (idx, item) in state.session_list.iter().enumerate().take(end).skip(start) {
+                let selected_row = idx == selected;
                 let id_short: String = item
                     .id
                     .rsplit('-')
@@ -2051,8 +2439,14 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                     .chars()
                     .take(8)
                     .collect();
-                let title = truncate_width(&item.title, inner_w.saturating_sub(14));
-                lines_out.push(list_row(selected, &title, &id_short, inner_w));
+                let active = item.id == state.session_id;
+                let right = if active {
+                    format!("{} · 当前", id_short)
+                } else {
+                    id_short
+                };
+                let title = truncate_width(&item.title, inner_w.saturating_sub(18));
+                lines_out.push(list_row(selected_row, &title, &right, inner_w));
             }
         }
         f.render_widget(
@@ -2062,9 +2456,19 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 
     if state.mode == InteractionMode::SelectingProvider {
-        let rows = state.provider_list.len().max(1) as u16;
-        let rect = panel_rect(60, rows + 4);
-        let body = draw_panel(f, rect, "提供商", "↑↓ 选择 · 回车 确认 · a 新增 · esc 取消");
+        let total = state.provider_list.len();
+        let shown = total.min(10.min(max_rows)).max(1);
+        let selected = state
+            .selected_provider_index
+            .min(total.saturating_sub(1));
+        let (start, end) = panel_window(total, selected, shown);
+        let title = if total > shown {
+            format!("提供商 · {}/{}", selected + 1, total)
+        } else {
+            "提供商".to_string()
+        };
+        let rect = panel_rect(84, shown as u16 + 4);
+        let body = draw_panel(f, rect, &title, "↑↓ 选择 · ↵ 确认 · a 新增 · esc 取消");
         let inner_w = body.width as usize;
         let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.provider_list.is_empty() {
@@ -2073,16 +2477,15 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 faint(),
             )));
         } else {
-            for (idx, item) in state.provider_list.iter().enumerate() {
-                let selected = idx == state.selected_provider_index;
+            for (idx, item) in state.provider_list.iter().enumerate().take(end).skip(start) {
+                let selected_row = idx == selected;
                 let active = item.id == state.current_provider_id;
                 let right = if active {
-                    format!("{}  当前", item.protocol)
+                    format!("{} · 当前", item.protocol)
                 } else {
                     item.protocol.clone()
                 };
-                let name = truncate_width(&item.name, inner_w.saturating_sub(24));
-                lines_out.push(list_row(selected, &name, &right, inner_w));
+                lines_out.push(list_row(selected_row, &item.name, &right, inner_w));
             }
         }
         f.render_widget(
@@ -2092,9 +2495,19 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 
     if state.mode == InteractionMode::SelectingModel {
-        let rows = state.model_list.len().max(1) as u16;
-        let rect = panel_rect(58, rows + 4);
-        let body = draw_panel(f, rect, "模型", "↑↓ 选择 · 回车 确认 · r 刷新 · esc 取消");
+        let total = state.model_list.len();
+        let shown = total.min(12.min(max_rows)).max(1);
+        let selected = state
+            .selected_model_index
+            .min(total.saturating_sub(1));
+        let (start, end) = panel_window(total, selected, shown);
+        let title = if total > shown {
+            format!("模型 · {}/{}", selected + 1, total)
+        } else {
+            "模型".to_string()
+        };
+        let rect = panel_rect(84, shown as u16 + 4);
+        let body = draw_panel(f, rect, &title, "↑↓ 选择 · ↵ 确认 · r 刷新 · esc 取消");
         let inner_w = body.width as usize;
         let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.model_list.is_empty() {
@@ -2103,16 +2516,16 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 faint(),
             )));
         } else {
-            for (idx, item) in state.model_list.iter().enumerate() {
-                let selected = idx == state.selected_model_index;
+            for (idx, item) in state.model_list.iter().enumerate().take(end).skip(start) {
+                let selected_row = idx == selected;
                 let active = item.id == state.model;
-                let name = truncate_width(&item.name, inner_w.saturating_sub(20));
-                let right = if active {
-                    format!("{}  当前", item.id)
-                } else {
+                let display = if item.name.trim().is_empty() || item.name == item.id {
                     item.id.clone()
+                } else {
+                    item.name.clone()
                 };
-                lines_out.push(list_row(selected, &name, &right, inner_w));
+                let right = if active { "当前".to_string() } else { String::new() };
+                lines_out.push(list_row(selected_row, &display, &right, inner_w));
             }
         }
         f.render_widget(
@@ -2122,8 +2535,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 
     if state.mode == InteractionMode::AddingProvider {
-        let rect = panel_rect(60, 11);
+        let rect = panel_rect(64, 9);
         let body = draw_panel(f, rect, "新增提供商", "回车 下一步 · esc 取消");
+        let inner_w = body.width as usize;
         let (step, prompt) = match state.add_provider_step {
             AddingProviderStep::Name => ("1 / 3  name", "Provider 名称"),
             AddingProviderStep::BaseUrl => ("2 / 3  base url", "Base URL（http:// 或 https://）"),
@@ -2135,7 +2549,26 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             Span::styled(format!("  {:<18}", step), faint()),
             Span::styled(prompt.to_string(), muted()),
         ]));
-        rows.push(blank());
+        // 已填字段作为上下文回显：分步表单不要求用户记住上一步输入。
+        match state.add_provider_step {
+            AddingProviderStep::Name => {}
+            AddingProviderStep::BaseUrl => {
+                rows.push(Line::from(Span::styled(
+                    truncate_width(&format!("  {}", state.add_provider_form.name), inner_w),
+                    faint(),
+                )));
+            }
+            AddingProviderStep::ApiKey | AddingProviderStep::Commit => {
+                let ctx = format!(
+                    "  {}  ·  {}",
+                    state.add_provider_form.name, state.add_provider_form.base_url
+                );
+                rows.push(Line::from(Span::styled(
+                    truncate_width(&ctx, inner_w),
+                    faint(),
+                )));
+            }
+        }
         let value = if state.add_provider_step == AddingProviderStep::ApiKey && !state.input_buffer.is_empty()
         {
             "•".repeat(state.input_buffer.chars().count())
@@ -2150,9 +2583,8 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         if !state.status_text.is_empty()
             && (state.status_text.contains("错误") || state.status_text.contains("不能"))
         {
-            rows.push(blank());
             rows.push(Line::from(Span::styled(
-                format!("  {}", state.status_text),
+                truncate_width(&format!("  {}", state.status_text), inner_w),
                 Style::default().fg(theme::DANGER),
             )));
         }
@@ -2348,7 +2780,7 @@ fn tui_event_loop(
                     if is_up {
                         state.scroll_up(3);
                     } else {
-                        state.scroll_down(3, u16::MAX);
+                        state.scroll_down(3, state.max_scroll_offset);
                     }
                 }
                 UiEvent::InputKey(key) => {
@@ -2358,8 +2790,10 @@ fn tui_event_loop(
                         state.mouse_capture = !state.mouse_capture;
                         if state.mouse_capture {
                             let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
+                            state.status_text = "鼠标捕获已开启".to_string();
                         } else {
                             let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+                            state.status_text = "鼠标捕获已关闭 · 可选择文本".to_string();
                         }
                         dirty = true;
                         continue;
@@ -2644,7 +3078,7 @@ fn tui_event_loop(
                             state.status_text = "Interrupted".to_string();
                             state.messages.push(ChatMessage {
                                 role: MessageRole::System,
-                                content: "Turn was interrupted.".to_string(),
+                                content: "已中断本轮生成。".to_string(),
                                 timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                             });
                         } else {
@@ -2766,7 +3200,7 @@ fn tui_event_loop(
                                         .map(|p| ProviderItem {
                                             id: p.id,
                                             name: p.name,
-                                            protocol: format!("{:?}", p.protocol).to_lowercase(),
+                                            protocol: protocol_label(&p.protocol).to_string(),
                                             base_url: p.base_url,
                                         })
                                         .collect();
@@ -2811,9 +3245,13 @@ fn tui_event_loop(
                                     continue;
                                 }
                                 if input == "/help" {
+                                    let mut help = String::from("命令列表");
+                                    for (cmd, desc) in AVAILABLE_COMMANDS.iter() {
+                                        help.push_str(&format!("\n{:<11}{}", cmd, desc));
+                                    }
                                     state.messages.push(ChatMessage {
                                         role: MessageRole::System,
-                                        content: "Commands: /resume (select session), /provider, /models, /clear, /cost, /quit".to_string(),
+                                        content: help,
                                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                                     });
                                     continue;
@@ -2821,7 +3259,7 @@ fn tui_event_loop(
                                 if input == "/cost" {
                                     state.messages.push(ChatMessage {
                                         role: MessageRole::System,
-                                        content: format!("Model: {} | Gateway: {}", state.model, state.gateway_url),
+                                        content: format!("模型  {}\n网关  {}", state.model, state.gateway_url),
                                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                                     });
                                     continue;
@@ -2893,7 +3331,12 @@ fn tui_event_loop(
                             state.cursor_line_home();
                         }
                         KeyCode::End => {
-                            state.cursor_line_end();
+                            if state.auto_scroll {
+                                state.cursor_line_end();
+                            } else {
+                                // 手动上翻时 End 回到最新消息；输入编辑仍可用 Ctrl+E。
+                                state.scroll_to_bottom();
+                            }
                         }
                         KeyCode::Up => {
                             let match_cmds = state.matching_commands();
@@ -2912,14 +3355,14 @@ fn tui_event_loop(
                                     state.selected_command_index += 1;
                                 }
                             } else {
-                                state.scroll_down(2, u16::MAX);
+                                state.scroll_down(2, state.max_scroll_offset);
                             }
                         }
                         KeyCode::PageUp => {
                             state.scroll_up(10);
                         }
                         KeyCode::PageDown => {
-                            state.scroll_down(10, u16::MAX);
+                            state.scroll_down(10, state.max_scroll_offset);
                         }
                         _ => {}
                     }

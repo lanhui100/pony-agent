@@ -1,0 +1,151 @@
+{
+  "scenario": "wide",
+  "pass": 24,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "empty.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "empty.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "empty.within_terminal_width",
+      "desc": "every captured row display width <= 160 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=140 cols=160 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "empty.capture_rows",
+      "desc": "capture has exactly pane height rows (40)",
+      "ok": true,
+      "evidence": "rows=40 pane_rows=40"
+    },
+    {
+      "id": "empty.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.ansi size=4674"
+    },
+    {
+      "id": "empty.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.png size=150624"
+    },
+    {
+      "id": "empty.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 37 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "empty.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 37 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "conversation.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "conversation.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "conversation.within_terminal_width",
+      "desc": "every captured row display width <= 160 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=140 cols=160 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "conversation.capture_rows",
+      "desc": "capture has exactly pane height rows (40)",
+      "ok": true,
+      "evidence": "rows=40 pane_rows=40"
+    },
+    {
+      "id": "conversation.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=4007"
+    },
+    {
+      "id": "conversation.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=154742"
+    },
+    {
+      "id": "conversation.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 37 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "conversation.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 37 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "empty.header",
+      "desc": "header shows brand + workspace",
+      "ok": true,
+      "evidence": "row 0 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "empty.separator_two_rules",
+      "desc": "header rule and composer top rule are both present",
+      "ok": true,
+      "evidence": "rule_rows=[1, 34]"
+    },
+    {
+      "id": "empty.separator_same_glyph",
+      "desc": "header and composer rules use the same glyph",
+      "ok": true,
+      "evidence": "header='▁' composer='▁'"
+    },
+    {
+      "id": "empty.separator_same_width",
+      "desc": "header and composer rules have the same display width",
+      "ok": true,
+      "evidence": "header_width=120 composer_width=120"
+    },
+    {
+      "id": "empty.separator_aligned",
+      "desc": "both rules start at content column 20 and span 120 cols",
+      "ok": true,
+      "evidence": "starts=[20, 20] width=120 expected_width=120"
+    },
+    {
+      "id": "wide.header_full_metadata",
+      "desc": "wide header keeps workspace and model metadata on one line",
+      "ok": true,
+      "evidence": "row 0 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "wide.conversation_visible",
+      "desc": "wide conversation shows the final answer",
+      "ok": true,
+      "evidence": "结论"
+    },
+    {
+      "id": "wide.text_columns_aligned",
+      "desc": "at 160x40 the three text streams still share one column",
+      "ok": true,
+      "evidence": "user_col=22 assistant_col=22 tool_col=22"
+    }
+  ]
+}

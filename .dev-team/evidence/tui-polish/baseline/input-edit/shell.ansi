@@ -1,0 +1,34 @@
+bash-5.2$ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy -u NODE_USE_ENV_PROXY
+-u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.9w7sM0/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.9w7sM0/iso-inpu
+t-edit/xdg-data XDG_CACHE_HOME=/tmp/tui-audit.9w7sM0/iso-input-edit/xdg-cache HOME=/tmp/tui-audit.9w7sM0/iso-input-edit/
+home LANG=en_US.UTF-8 /home/dm/pony-agent/tools/tui-audit/bin/pony-baseline; echo AUDIT_EXIT=$?
+AUDIT_EXIT=0
+bash-5.2$ echo AUDIT_SHELL_ALIVE=ok
+AUDIT_SHELL_ALIVE=ok
+bash-5.2$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

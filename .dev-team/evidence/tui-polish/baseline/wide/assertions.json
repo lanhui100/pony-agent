@@ -1,0 +1,133 @@
+{
+  "scenario": "wide",
+  "pass": 18,
+  "fail": 3,
+  "checks": [
+    {
+      "id": "empty.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "empty.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "empty.within_terminal_width",
+      "desc": "every captured row display width <= 160 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=158 cols=160 :: pony · pony-agent mock-alpha · 461faa"
+    },
+    {
+      "id": "empty.capture_rows",
+      "desc": "capture has exactly pane height rows (40)",
+      "ok": true,
+      "evidence": "rows=40 pane_rows=40"
+    },
+    {
+      "id": "empty.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/wide/empty.ansi size=3355"
+    },
+    {
+      "id": "empty.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/wide/empty.png size=132685"
+    },
+    {
+      "id": "empty.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 36 prompt_col=2 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "empty.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 36 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "conversation.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "conversation.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": false,
+      "evidence": "row 3 = ' 你'"
+    },
+    {
+      "id": "conversation.within_terminal_width",
+      "desc": "every captured row display width <= 160 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=158 cols=160 :: pony · pony-agent mock-alpha · 461faa"
+    },
+    {
+      "id": "conversation.capture_rows",
+      "desc": "capture has exactly pane height rows (40)",
+      "ok": true,
+      "evidence": "rows=40 pane_rows=40"
+    },
+    {
+      "id": "conversation.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/wide/conversation.ansi size=2176"
+    },
+    {
+      "id": "conversation.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/wide/conversation.png size=149340"
+    },
+    {
+      "id": "conversation.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 36 prompt_col=2 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "conversation.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 36 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "empty.header",
+      "desc": "header shows brand + workspace",
+      "ok": true,
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · 461faa"
+    },
+    {
+      "id": "empty.separator_two_rules",
+      "desc": "header rule and composer top rule are both present",
+      "ok": false,
+      "evidence": "rule_rows=[]"
+    },
+    {
+      "id": "wide.header_full_metadata",
+      "desc": "wide header keeps workspace and model metadata on one line",
+      "ok": true,
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · 461faa"
+    },
+    {
+      "id": "wide.conversation_visible",
+      "desc": "wide conversation shows the final answer",
+      "ok": true,
+      "evidence": "结论"
+    },
+    {
+      "id": "wide.text_columns_aligned",
+      "desc": "at 160x40 the three text streams still share one column",
+      "ok": false,
+      "evidence": "user_col=2 assistant_col=2 tool_col=6"
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "scenario": "scrolled",
+  "pass": 19,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "before.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "before.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "before.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "before.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "before.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7314"
+    },
+    {
+      "id": "before.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=497761"
+    },
+    {
+      "id": "after.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "after.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "after.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "after.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "after.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=9281"
+    },
+    {
+      "id": "after.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=662305"
+    },
+    {
+      "id": "after.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "after.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "scrolled.bottom_before",
+      "desc": "before scrolling the transcript is pinned to the newest line",
+      "ok": true,
+      "evidence": "这是最后一行，滚动到底部时应完整可见。"
+    },
+    {
+      "id": "scrolled.hint_absent_before",
+      "desc": "scroll-up hint is absent while pinned to bottom",
+      "ok": true,
+      "evidence": "footer :: Enter 发送 · / 查看命令 完成"
+    },
+    {
+      "id": "scrolled.after_shows_earlier_rows",
+      "desc": "PageUp reveals earlier lines and hides the newest ones",
+      "ok": true,
+      "evidence": "· 第 14 行：这是一段用于验证滚动与折行的中文正文，包含 inline code 与 加粗 片段。"
+    },
+    {
+      "id": "scrolled.hint_present_after",
+      "desc": "footer advertises the scrolled-up state",
+      "ok": true,
+      "evidence": "footer :: ↑ 已上翻 · End 回到底部 完成"
+    },
+    {
+      "id": "scrolled.offset_moved_up",
+      "desc": "first visible content row moved up by at least 8 terminal rows",
+      "ok": true,
+      "evidence": "first_visible_before=第24行 first_visible_after=第14行"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "cmd_runs": [
+    {
+      "name": "version",
+      "exit_code": 0,
+      "output_file": "version.out"
+    },
+    {
+      "name": "help",
+      "exit_code": 0,
+      "output_file": "help.out"
+    },
+    {
+      "name": "doctor",
+      "exit_code": 1,
+      "output_file": "doctor.out"
+    }
+  ]
+}

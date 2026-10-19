@@ -1,0 +1,2 @@
+pony TUI: stdin/stdout 不是交互式终端，TUI 无法启动。
+请在真实终端中运行 `pony`，或使用 `ponycli`（非交互 CLI 入口）。

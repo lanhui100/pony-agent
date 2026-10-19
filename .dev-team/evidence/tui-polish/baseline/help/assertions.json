@@ -1,0 +1,79 @@
+{
+  "scenario": "help",
+  "pass": 9,
+  "fail": 3,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 277d25"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/help/main.ansi size=1070"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/help/main.png size=48338"
+    },
+    {
+      "id": "main.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 30 prompt_col=2 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "main.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 30 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "help.commands_listed",
+      "desc": "/help renders the command reference in the transcript",
+      "ok": false,
+      "evidence": "row 3 :: · Commands: /resume (select session), /provider, /models, /clear, /cost, /quit missing=['/help']"
+    },
+    {
+      "id": "main.separator_two_rules",
+      "desc": "header rule and composer top rule are both present",
+      "ok": false,
+      "evidence": "rule_rows=[]"
+    },
+    {
+      "id": "help.command_desc_column",
+      "desc": "command descriptions start at column 16 (same table geometry everywhere)",
+      "ok": false,
+      "evidence": "cols={'/resume': None, '/provider': None, '/models': None, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/resume', '/provider', '/models', '/clear', '/cost', '/help', '/quit']"
+    },
+    {
+      "id": "help.system_message_glyph",
+      "desc": "help output is a system row (bullet glyph), not a user message",
+      "ok": true,
+      "evidence": "row 3 :: · Commands: /resume (select session), /provider, /models, /clear, /cost, /quit"
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "scenario": "add-provider",
+  "pass": 13,
+  "fail": 5,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · a0fad6"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/add-provider/main.ansi size=4236"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/add-provider/main.png size=137982"
+    },
+    {
+      "id": "add_provider.title",
+      "desc": "add-provider modal title is visible",
+      "ok": true,
+      "evidence": "▀▀ │ 新增提供商 回车 下一步 · esc 取消 │"
+    },
+    {
+      "id": "add_provider.step_indicator",
+      "desc": "3-step wizard shows the name step",
+      "ok": true,
+      "evidence": "│ 1 / 3 name Provider 名称 │"
+    },
+    {
+      "id": "add_provider.input_focused",
+      "desc": "modal input row renders the caret prompt",
+      "ok": true,
+      "evidence": "row 30 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "add_provider.border_box",
+      "desc": "exactly one top and one bottom panel border, top above bottom",
+      "ok": true,
+      "evidence": "top_rows=[11] bottom_rows=[21]"
+    },
+    {
+      "id": "add_provider.panel_height_fits_screen",
+      "desc": "panel top/bottom borders are both on screen and the panel height fits",
+      "ok": true,
+      "evidence": "top=11 bottom=21 height=11 pane_rows=34"
+    },
+    {
+      "id": "add_provider.panel_above_composer",
+      "desc": "panel bottom border sits above the composer prompt",
+      "ok": true,
+      "evidence": "bottom=21 composer_top_row=30"
+    },
+    {
+      "id": "add_provider.panel_vertical_borders_aligned",
+      "desc": "every panel interior row shares the same left/right border column",
+      "ok": false,
+      "evidence": "left_cols=[30, 89] right_cols=[89] rows=9"
+    },
+    {
+      "id": "add_provider.no_double_border_overlap",
+      "desc": "no row paints more than one panel's worth of vertical borders",
+      "ok": true,
+      "evidence": "max '│' per row=2"
+    },
+    {
+      "id": "add_provider.focus_composer_hidden",
+      "desc": "focus mode hides the global composer (prompt may only live inside the modal)",
+      "ok": false,
+      "evidence": "prompt_rows_outside_panel=[30]"
+    },
+    {
+      "id": "add_provider.focus_chat_hidden",
+      "desc": "focus mode hides chat and splash (no transcript/logo residue)",
+      "ok": false,
+      "evidence": "guidance=True logo_tag=True block_glyphs=True"
+    },
+    {
+      "id": "add_provider.focus_background_clean",
+      "desc": "rows outside header + panel are completely blank (no half-cell residue)",
+      "ok": false,
+      "evidence": "dirty_rows=[(6, '▄▄▄▄▄▄▄▄▄▄'), (7, '▀▀▀▀▀▀▀▀▀▀'), (8, '▀▀ ▀▀ pony v0.1.125'), (9, '▀▀▄▄▄▄▄▄▀▀ mock-alpha (fakep)')]"
+    },
+    {
+      "id": "add_provider.border_rows_complete",
+      "desc": "every panel row carries both border columns at the same display columns",
+      "ok": false,
+      "evidence": "left=30 right=89 broken_rows=[(19, ' ', '│'), (20, ' ', '│')]"
+    }
+  ]
+}

@@ -1,0 +1,127 @@
+{
+  "scenario": "narrow",
+  "pass": 19,
+  "fail": 1,
+  "checks": [
+    {
+      "id": "empty.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "empty.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "empty.within_terminal_width",
+      "desc": "every captured row display width <= 60 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=58 cols=60 :: pony · pony-agent mock-alpha · db05d2"
+    },
+    {
+      "id": "empty.capture_rows",
+      "desc": "capture has exactly pane height rows (20)",
+      "ok": true,
+      "evidence": "rows=20 pane_rows=20"
+    },
+    {
+      "id": "empty.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/narrow/empty.ansi size=1341"
+    },
+    {
+      "id": "empty.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/narrow/empty.png size=96820"
+    },
+    {
+      "id": "empty.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 16 prompt_col=2 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "empty.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 16 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "conversation.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "conversation.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "conversation.within_terminal_width",
+      "desc": "every captured row display width <= 60 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=58 cols=60 :: pony · pony-agent mock-alpha · db05d2"
+    },
+    {
+      "id": "conversation.capture_rows",
+      "desc": "capture has exactly pane height rows (20)",
+      "ok": true,
+      "evidence": "rows=20 pane_rows=20"
+    },
+    {
+      "id": "conversation.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/narrow/conversation.ansi size=1380"
+    },
+    {
+      "id": "conversation.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/narrow/conversation.png size=92432"
+    },
+    {
+      "id": "conversation.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 16 prompt_col=2 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "conversation.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 16 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "empty.header",
+      "desc": "header shows brand + workspace",
+      "ok": true,
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · db05d2"
+    },
+    {
+      "id": "empty.separator_two_rules",
+      "desc": "header rule and composer top rule are both present",
+      "ok": false,
+      "evidence": "rule_rows=[]"
+    },
+    {
+      "id": "narrow.empty_guidance",
+      "desc": "narrow empty state keeps onboarding guidance on screen",
+      "ok": true,
+      "evidence": "描述一个任务开始，或输入命令："
+    },
+    {
+      "id": "narrow.conversation_visible",
+      "desc": "narrow conversation still shows the tail of the final answer",
+      "ok": true,
+      "evidence": "`package.json` 显示这是 pony-agent，版本 0.1.125。"
+    }
+  ]
+}

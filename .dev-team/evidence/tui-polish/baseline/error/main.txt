@@ -1,0 +1,34 @@
+  pony  ·  pony-agent                                                                            mock-alpha  ·  70aec9
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  你
+  401 认证测试
+
+  ✕ Error: {"error": {"message": "mock 401 unauthorized: invalid api key (audit scenario)", "type": "invalid_request_e
+  rror", "code": "invalid_api_key"}}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  › ▏ 输入任务，或输入 / 查看命令
+
+
+  Turn failed: {"error": {"message": "mock 401 unauthorized: invalid api key (audit scenario)", "type": "invalid_requ

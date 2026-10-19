@@ -62,6 +62,10 @@ fn test_ac03_team_tasks_lifecycle_and_cas() {
         expected_revision: task.revision,
         action: TeamTaskAction::Claim,
         owner: Some("executor-1".to_string()),
+        subject: None,
+        description: None,
+        write_scopes: None,
+        blocked_by: None,
     };
     let claimed = team_task_update(claim_args).expect("claim should succeed");
     assert_eq!(claimed.status, "in_progress");
@@ -73,6 +77,10 @@ fn test_ac03_team_tasks_lifecycle_and_cas() {
         expected_revision: 1,
         action: TeamTaskAction::Complete,
         owner: None,
+        subject: None,
+        description: None,
+        write_scopes: None,
+        blocked_by: None,
     };
     assert!(team_task_update(stale_args).is_err(), "Stale update must fail");
 
@@ -82,6 +90,10 @@ fn test_ac03_team_tasks_lifecycle_and_cas() {
         expected_revision: 2,
         action: TeamTaskAction::Complete,
         owner: None,
+        subject: None,
+        description: None,
+        write_scopes: None,
+        blocked_by: None,
     };
     let completed = team_task_update(comp_args).expect("complete should succeed");
     assert_eq!(completed.status, "completed");

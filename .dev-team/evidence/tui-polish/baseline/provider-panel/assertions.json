@@ -1,0 +1,97 @@
+{
+  "scenario": "provider-panel",
+  "pass": 10,
+  "fail": 5,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 268cca"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/provider-panel/main.ansi size=3607"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/provider-panel/main.png size=143320"
+    },
+    {
+      "id": "provider.title",
+      "desc": "provider panel title is visible",
+      "ok": true,
+      "evidence": "终端里的自主智能体。 │ 提供商 ↑↓ 选择 · 回车 确认 · a 新增 · esc 取消 │"
+    },
+    {
+      "id": "provider.fixture_listed",
+      "desc": "fixture provider is listed",
+      "ok": true,
+      "evidence": "描述一个任务开始，或输入命令│▏ FakeProvider openaicompletions 当前 │"
+    },
+    {
+      "id": "provider.add_hint",
+      "desc": "panel advertises the 'a 新增' shortcut",
+      "ok": true,
+      "evidence": "终端里的自主智能体。 │ 提供商 ↑↓ 选择 · 回车 确认 · a 新增 · esc 取消 │"
+    },
+    {
+      "id": "provider.border_box",
+      "desc": "exactly one top and one bottom panel border, top above bottom",
+      "ok": false,
+      "evidence": "top_rows=[14] bottom_rows=[]"
+    },
+    {
+      "id": "provider.focus_composer_hidden",
+      "desc": "focus mode hides the global composer (prompt may only live inside the modal)",
+      "ok": false,
+      "evidence": "prompt_rows_outside_panel=[30]"
+    },
+    {
+      "id": "provider.focus_chat_hidden",
+      "desc": "focus mode hides chat and splash (no transcript/logo residue)",
+      "ok": false,
+      "evidence": "guidance=True logo_tag=True block_glyphs=True"
+    },
+    {
+      "id": "provider.focus_background_clean",
+      "desc": "rows outside the panel are blank",
+      "ok": false,
+      "evidence": "panel bounds missing"
+    },
+    {
+      "id": "provider.border_rows_complete",
+      "desc": "every panel row carries both border columns",
+      "ok": false,
+      "evidence": "missing top/bottom border"
+    },
+    {
+      "id": "provider.current_marker",
+      "desc": "active provider row is marked as current",
+      "ok": true,
+      "evidence": "描述一个任务开始，或输入命令│▏ FakeProvider openaicompletions 当前 │"
+    }
+  ]
+}

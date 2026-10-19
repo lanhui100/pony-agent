@@ -1,0 +1,97 @@
+{
+  "scenario": "empty",
+  "pass": 11,
+  "fail": 4,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 80e9c1"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/empty/main.ansi size=3149"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/empty/main.png size=125642"
+    },
+    {
+      "id": "main.header",
+      "desc": "header shows brand + workspace",
+      "ok": true,
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · 80e9c1"
+    },
+    {
+      "id": "main.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 30 prompt_col=2 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "main.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 30 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "empty.guidance",
+      "desc": "empty state shows onboarding guidance",
+      "ok": true,
+      "evidence": "描述一个任务开始，或输入命令："
+    },
+    {
+      "id": "empty.no_error_status",
+      "desc": "empty state has no error status word",
+      "ok": true,
+      "evidence": "footer :: 就绪"
+    },
+    {
+      "id": "main.separator_two_rules",
+      "desc": "header rule and composer top rule are both present",
+      "ok": false,
+      "evidence": "rule_rows=[]"
+    },
+    {
+      "id": "main.composer_cursor_block",
+      "desc": "placeholder cursor cell found",
+      "ok": false,
+      "evidence": "placeholder not found"
+    },
+    {
+      "id": "empty.placeholder_column",
+      "desc": "placeholder starts at the shared text column 5",
+      "ok": false,
+      "evidence": "placeholder_col=None"
+    },
+    {
+      "id": "empty.command_desc_column",
+      "desc": "command descriptions start at column 16 (same table geometry everywhere)",
+      "ok": false,
+      "evidence": "cols={'/resume': 13, '/provider': 13, '/models': 13, '/clear': 13, '/cost': None, '/help': None, '/quit': None} expected=16 missing=[]"
+    }
+  ]
+}

@@ -1,0 +1,145 @@
+{
+  "scenario": "sessions-panel",
+  "pass": 18,
+  "fail": 5,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": false,
+      "evidence": "row 3 = ' 你'"
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 952e16"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/sessions-panel/main.ansi size=3077"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/sessions-panel/main.png size=159880"
+    },
+    {
+      "id": "sessions.title",
+      "desc": "session panel title is visible",
+      "ok": true,
+      "evidence": "▏ { │ 会话 ↑↓ 选择 · 回车 确认 · esc 取消 │"
+    },
+    {
+      "id": "sessions.prior_conversation_listed",
+      "desc": "the conversation just completed is offered for resume",
+      "ok": true,
+      "evidence": "读取 package.json 并总结"
+    },
+    {
+      "id": "sessions.session_id_visible",
+      "desc": "session row carries a short session id",
+      "ok": true,
+      "evidence": "▏ \"version\": \"0.1.125\" │▏ 读取 package.json 并总结 952e16ca │"
+    },
+    {
+      "id": "sessions.not_empty",
+      "desc": "panel does not show the empty-sessions placeholder",
+      "ok": true,
+      "evidence": "no '暂无历史会话' placeholder"
+    },
+    {
+      "id": "sessions.border_box",
+      "desc": "exactly one top and one bottom panel border, top above bottom",
+      "ok": true,
+      "evidence": "top_rows=[14] bottom_rows=[19]"
+    },
+    {
+      "id": "sessions.panel_height_fits_screen",
+      "desc": "panel top/bottom borders are both on screen and the panel height fits",
+      "ok": true,
+      "evidence": "top=14 bottom=19 height=6 pane_rows=34"
+    },
+    {
+      "id": "sessions.panel_above_composer",
+      "desc": "panel bottom border sits above the composer prompt",
+      "ok": true,
+      "evidence": "bottom=19 composer_top_row=30"
+    },
+    {
+      "id": "sessions.panel_vertical_borders_aligned",
+      "desc": "every panel interior row shares the same left/right border column",
+      "ok": true,
+      "evidence": "left_cols=[31] right_cols=[88] rows=4"
+    },
+    {
+      "id": "sessions.panel_width_fits",
+      "desc": "panel width fits inside the terminal",
+      "ok": true,
+      "evidence": "panel_cols=31..88 width=58 terminal_cols=120"
+    },
+    {
+      "id": "sessions.panel_width_expected",
+      "desc": "panel width matches the design token (84) and is centered",
+      "ok": false,
+      "evidence": "width=58 expected=84 left=31 right_margin=31"
+    },
+    {
+      "id": "sessions.panel_rows_not_overlapping",
+      "desc": "panel rows are consecutive (no overlapping/duplicated rows)",
+      "ok": true,
+      "evidence": "interior_rows=[15, 16, 17, 18]"
+    },
+    {
+      "id": "sessions.no_double_border_overlap",
+      "desc": "no row paints more than one panel's worth of vertical borders",
+      "ok": true,
+      "evidence": "max '│' per row=2"
+    },
+    {
+      "id": "sessions.focus_composer_hidden",
+      "desc": "focus mode hides the global composer (prompt may only live inside the modal)",
+      "ok": false,
+      "evidence": "prompt_rows_outside_panel=[30]"
+    },
+    {
+      "id": "sessions.focus_chat_hidden",
+      "desc": "focus mode hides chat and splash (no transcript/logo residue)",
+      "ok": true,
+      "evidence": "guidance=False logo_tag=False block_glyphs=False"
+    },
+    {
+      "id": "sessions.focus_background_clean",
+      "desc": "rows outside header + panel are completely blank (no half-cell residue)",
+      "ok": false,
+      "evidence": "dirty_rows=[(3, '你'), (4, '读取 package.json 并总结'), (7, 'pony'), (8, '✓ 读取 (Read) · 收集路径 `package.json` 的上下文。')]"
+    },
+    {
+      "id": "sessions.border_rows_complete",
+      "desc": "every panel row carries both border columns at the same display columns",
+      "ok": true,
+      "evidence": "left=31 right=88 broken_rows=[]"
+    },
+    {
+      "id": "sessions.current_marker",
+      "desc": "sessions panel marks the active session",
+      "ok": false,
+      "evidence": "no 当前 marker"
+    }
+  ]
+}

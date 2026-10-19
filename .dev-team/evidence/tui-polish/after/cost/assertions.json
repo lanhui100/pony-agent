@@ -1,0 +1,91 @@
+{
+  "scenario": "cost",
+  "pass": 14,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=2054"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=59479"
+    },
+    {
+      "id": "main.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "main.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "cost.model_line",
+      "desc": "/cost shows the active model",
+      "ok": true,
+      "evidence": "row :: · 模型 mock-alpha"
+    },
+    {
+      "id": "main.separator_two_rules",
+      "desc": "header rule and composer top rule are both present",
+      "ok": true,
+      "evidence": "rule_rows=[1, 28]"
+    },
+    {
+      "id": "main.separator_same_glyph",
+      "desc": "header and composer rules use the same glyph",
+      "ok": true,
+      "evidence": "header='▁' composer='▁'"
+    },
+    {
+      "id": "main.separator_same_width",
+      "desc": "header and composer rules have the same display width",
+      "ok": true,
+      "evidence": "header_width=114 composer_width=114"
+    },
+    {
+      "id": "main.separator_aligned",
+      "desc": "both rules start at content column 3 and span 114 cols",
+      "ok": true,
+      "evidence": "starts=[3, 3] width=114 expected_width=114"
+    },
+    {
+      "id": "cost.gateway_line",
+      "desc": "/cost shows the gateway endpoint",
+      "ok": true,
+      "evidence": "row :: 网关 http://10.42.0.67:8080"
+    }
+  ]
+}

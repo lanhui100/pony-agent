@@ -1,0 +1,139 @@
+{
+  "scenario": "models-panel",
+  "pass": 22,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/models-panel/main.ansi size=4273"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/models-panel/main.png size=87513"
+    },
+    {
+      "id": "models.title_counter",
+      "desc": "model panel title carries the '模型 · 1/N' position counter",
+      "ok": true,
+      "evidence": "title_row :: │ 模型 · 1/20 ↑↓ 选择 · ↵ 确认 · r 刷新 · esc 取消 │"
+    },
+    {
+      "id": "models.border_box",
+      "desc": "exactly one top and one bottom panel border, top above bottom",
+      "ok": true,
+      "evidence": "top_rows=[9] bottom_rows=[24]"
+    },
+    {
+      "id": "models.panel_height_fits_screen",
+      "desc": "panel top/bottom borders are both on screen and the panel height fits",
+      "ok": true,
+      "evidence": "top=9 bottom=24 height=16 pane_rows=34"
+    },
+    {
+      "id": "models.panel_vertical_borders_aligned",
+      "desc": "every panel interior row shares the same left/right border column",
+      "ok": true,
+      "evidence": "left_cols=[18] right_cols=[101] rows=14"
+    },
+    {
+      "id": "models.panel_width_fits",
+      "desc": "panel width fits inside the terminal",
+      "ok": true,
+      "evidence": "panel_cols=18..101 width=84 terminal_cols=120"
+    },
+    {
+      "id": "models.panel_width_expected",
+      "desc": "panel width matches the design token (84) and is centered",
+      "ok": true,
+      "evidence": "width=84 expected=84 left=18 right_margin=18"
+    },
+    {
+      "id": "models.panel_rows_not_overlapping",
+      "desc": "panel rows are consecutive (no overlapping/duplicated rows)",
+      "ok": true,
+      "evidence": "interior_rows=[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]"
+    },
+    {
+      "id": "models.no_double_border_overlap",
+      "desc": "no row paints more than one panel's worth of vertical borders",
+      "ok": true,
+      "evidence": "max '│' per row=2"
+    },
+    {
+      "id": "models.focus_composer_hidden",
+      "desc": "focus mode hides the global composer (prompt may only live inside the modal)",
+      "ok": true,
+      "evidence": "prompt_rows_outside_panel=[]"
+    },
+    {
+      "id": "models.focus_chat_hidden",
+      "desc": "focus mode hides chat and splash (no transcript/logo residue)",
+      "ok": true,
+      "evidence": "guidance=False logo_tag=False block_glyphs=False"
+    },
+    {
+      "id": "models.focus_background_clean",
+      "desc": "rows outside header + panel are completely blank (no half-cell residue)",
+      "ok": true,
+      "evidence": "dirty_rows=[]"
+    },
+    {
+      "id": "models.border_rows_complete",
+      "desc": "every panel row carries both border columns at the same display columns",
+      "ok": true,
+      "evidence": "left=18 right=101 broken_rows=[]"
+    },
+    {
+      "id": "models.rows_rendered",
+      "desc": "panel renders at least the capped 12 model rows",
+      "ok": true,
+      "evidence": "model_rows=12 first=['mock-alpha', 'mock-beta'] last=['mock-model-12']"
+    },
+    {
+      "id": "models.rows_unique_and_consecutive",
+      "desc": "model rows are unique and occupy consecutive screen rows",
+      "ok": true,
+      "evidence": "ids=12 unique=12 rows=[12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]"
+    },
+    {
+      "id": "models.no_fetch_failure",
+      "desc": "remote /models fetch succeeded (no failure row)",
+      "ok": true,
+      "evidence": "no fetch failure row"
+    },
+    {
+      "id": "models.selected_marker",
+      "desc": "selected model row carries the selection marker",
+      "ok": true,
+      "evidence": "selection marker '▏' present"
+    }
+  ]
+}

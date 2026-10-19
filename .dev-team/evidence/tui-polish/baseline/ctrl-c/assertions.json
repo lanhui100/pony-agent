@@ -1,0 +1,97 @@
+{
+  "scenario": "ctrl-c",
+  "pass": 15,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "exit.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "exit.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.9w7sM0/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.9w7sM0/iso-ctrl-c/x"
+    },
+    {
+      "id": "exit.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "exit.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/ctrl-c/exit.ansi size=493"
+    },
+    {
+      "id": "exit.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/ctrl-c/exit.png size=77687"
+    },
+    {
+      "id": "shell.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "shell.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.9w7sM0/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.9w7sM0/iso-ctrl-c/x"
+    },
+    {
+      "id": "shell.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "shell.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/ctrl-c/shell.ansi size=548"
+    },
+    {
+      "id": "shell.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/ctrl-c/shell.png size=89087"
+    },
+    {
+      "id": "ctrl_c.process_exited",
+      "desc": "Ctrl-C terminates the TUI process with a normal exit status",
+      "ok": true,
+      "evidence": "row :: UTF-8 /home/dm/pony-agent/tools/tui-audit/bin/pony-baseline; echo AUDIT_EXIT=$? code=0"
+    },
+    {
+      "id": "ctrl_c.terminal_restored",
+      "desc": "alternate screen is left and the pane stops painting the TUI",
+      "ok": true,
+      "evidence": "tui_band_present=False placeholder_present=False"
+    },
+    {
+      "id": "ctrl_c.shell_alive",
+      "desc": "the same tmux pane still runs commands after exit",
+      "ok": true,
+      "evidence": "bash-5.2$ echo AUDIT_SHELL_ALIVE=ok"
+    },
+    {
+      "id": "ctrl_c.pane_command_is_shell",
+      "desc": "pane foreground command is a shell again, not pony",
+      "ok": true,
+      "evidence": "pane_current_command='bash'"
+    },
+    {
+      "id": "ctrl_c.no_panic",
+      "desc": "shutdown path prints no panic",
+      "ok": true,
+      "evidence": "no panic tokens in shutdown captures"
+    }
+  ]
+}

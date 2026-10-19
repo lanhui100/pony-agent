@@ -1,0 +1,10 @@
+{
+  "phase": "after",
+  "scenario": "cost",
+  "index": 14,
+  "cols": 120,
+  "rows": 34,
+  "bin": "/home/dm/pony-agent/target/release/pony",
+  "started_at": "2026-10-19T04:10:36+08:00",
+  "duration_ms": 2000
+}

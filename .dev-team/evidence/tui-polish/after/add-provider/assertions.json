@@ -1,0 +1,127 @@
+{
+  "scenario": "add-provider",
+  "pass": 20,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/add-provider/main.ansi size=2518"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/add-provider/main.png size=43590"
+    },
+    {
+      "id": "add_provider.title",
+      "desc": "add-provider modal title is visible",
+      "ok": true,
+      "evidence": "│ 新增提供商 回车 下一步 · esc 取消 │"
+    },
+    {
+      "id": "add_provider.step_indicator",
+      "desc": "3-step wizard shows the name step",
+      "ok": true,
+      "evidence": "│ 1 / 3 name Provider 名称 │"
+    },
+    {
+      "id": "add_provider.input_focused",
+      "desc": "modal input row renders the caret prompt",
+      "ok": true,
+      "evidence": "row 16 :: │ › ▏ │"
+    },
+    {
+      "id": "add_provider.border_box",
+      "desc": "exactly one top and one bottom panel border, top above bottom",
+      "ok": true,
+      "evidence": "top_rows=[12] bottom_rows=[20]"
+    },
+    {
+      "id": "add_provider.panel_height_fits_screen",
+      "desc": "panel top/bottom borders are both on screen and the panel height fits",
+      "ok": true,
+      "evidence": "top=12 bottom=20 height=9 pane_rows=34"
+    },
+    {
+      "id": "add_provider.panel_vertical_borders_aligned",
+      "desc": "every panel interior row shares the same left/right border column",
+      "ok": true,
+      "evidence": "left_cols=[28] right_cols=[91] rows=7"
+    },
+    {
+      "id": "add_provider.panel_width_fits",
+      "desc": "panel width fits inside the terminal",
+      "ok": true,
+      "evidence": "panel_cols=28..91 width=64 terminal_cols=120"
+    },
+    {
+      "id": "add_provider.panel_width_expected",
+      "desc": "panel width matches the design token (64) and is centered",
+      "ok": true,
+      "evidence": "width=64 expected=64 left=28 right_margin=28"
+    },
+    {
+      "id": "add_provider.panel_rows_not_overlapping",
+      "desc": "panel rows are consecutive (no overlapping/duplicated rows)",
+      "ok": true,
+      "evidence": "interior_rows=[13, 14, 15, 16, 17, 18, 19]"
+    },
+    {
+      "id": "add_provider.no_double_border_overlap",
+      "desc": "no row paints more than one panel's worth of vertical borders",
+      "ok": true,
+      "evidence": "max '│' per row=2"
+    },
+    {
+      "id": "add_provider.focus_composer_hidden",
+      "desc": "focus mode hides the global composer (prompt may only live inside the modal)",
+      "ok": true,
+      "evidence": "prompt_rows_outside_panel=[]"
+    },
+    {
+      "id": "add_provider.focus_chat_hidden",
+      "desc": "focus mode hides chat and splash (no transcript/logo residue)",
+      "ok": true,
+      "evidence": "guidance=False logo_tag=False block_glyphs=False"
+    },
+    {
+      "id": "add_provider.focus_background_clean",
+      "desc": "rows outside header + panel are completely blank (no half-cell residue)",
+      "ok": true,
+      "evidence": "dirty_rows=[]"
+    },
+    {
+      "id": "add_provider.border_rows_complete",
+      "desc": "every panel row carries both border columns at the same display columns",
+      "ok": true,
+      "evidence": "left=28 right=91 broken_rows=[]"
+    }
+  ]
+}

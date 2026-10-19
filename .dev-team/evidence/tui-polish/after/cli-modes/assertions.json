@@ -1,0 +1,61 @@
+{
+  "scenario": "cli-modes",
+  "pass": 9,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "cli.version_exit_status",
+      "desc": "--version exits with a documented status (0)",
+      "ok": true,
+      "evidence": "exit_code=0 allowed=(0,)"
+    },
+    {
+      "id": "cli.version_output",
+      "desc": "--version prints its documented payload",
+      "ok": true,
+      "evidence": "pony 0.1.125 · linux-x86_64 missing=[]"
+    },
+    {
+      "id": "cli.version_no_panic",
+      "desc": "--version does not panic",
+      "ok": true,
+      "evidence": "no panic tokens in output"
+    },
+    {
+      "id": "cli.help_exit_status",
+      "desc": "--help exits with a documented status (0)",
+      "ok": true,
+      "evidence": "exit_code=0 allowed=(0,)"
+    },
+    {
+      "id": "cli.help_output",
+      "desc": "--help prints its documented payload",
+      "ok": true,
+      "evidence": "pony 0.1.125 — 交互式 TUI Agent missing=[]"
+    },
+    {
+      "id": "cli.help_no_panic",
+      "desc": "--help does not panic",
+      "ok": true,
+      "evidence": "no panic tokens in output"
+    },
+    {
+      "id": "cli.doctor_exit_status",
+      "desc": "--doctor exits with a documented status (0, or 1 when the non-TTY self-check reports a hard failure)",
+      "ok": true,
+      "evidence": "exit_code=1 allowed=(0, 1)"
+    },
+    {
+      "id": "cli.doctor_output",
+      "desc": "--doctor prints its documented payload",
+      "ok": true,
+      "evidence": "[ok] TERM: dumb missing=[]"
+    },
+    {
+      "id": "cli.doctor_no_panic",
+      "desc": "--doctor does not panic",
+      "ok": true,
+      "evidence": "no panic tokens in output"
+    }
+  ]
+}

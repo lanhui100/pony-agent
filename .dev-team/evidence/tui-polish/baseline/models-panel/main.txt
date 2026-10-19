@@ -1,0 +1,34 @@
+  pony  ·  pony-agent                                                                            mock-alpha  ·  3397cc
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+                               ┌────────────────────────────────────────────────────────┐
+     ▄▄▄▄▄▄▄▄▄▄                │ 模型          ↑↓ 选择 · 回车 确认 · r 刷新 · esc 取消  │
+     ▀▀▀▀▀▀▀▀▀▀                │                                                        │
+     ▀▀      ▀▀    pony v0.1.12│▏ mock-alpha                           mock-alpha  当前 │
+     ▀▀▄▄▄▄▄▄▀▀    mock-alpha (│  mock-beta                                   mock-beta │
+     ▀▀▀▀▀▀▀▀▀▀    /home/dm/pon│  mock-gamma                                 mock-gamma │
+     ▀▀                        │  mock-model-04                           mock-model-04 │
+     ▀▀                        │  mock-model-05                           mock-model-05 │
+     ▀▀                        │  mock-model-06                           mock-model-06 │
+                               │  mock-model-07                           mock-model-07 │
+  终端里的自主智能体。         │  mock-model-08                           mock-model-08 │
+                               │  mock-model-09                           mock-model-09 │
+  描述一个任务开始，或输入命令：  mock-model-10                           mock-model-10 │
+                               │  mock-model-11                           mock-model-11 │
+  /resume    选择并恢复历史会话│  mock-model-12                           mock-model-12 │
+  /provider  管理与切换模型提供│  mock-model-13                           mock-model-13 │
+  /models    切换当前活跃模型  │  mock-model-14                           mock-model-14 │
+  /clear     清空当前消息上下文│  mock-model-15                           mock-model-15 │
+                               │  mock-model-16                           mock-model-16 │
+                               │  mock-model-17                           mock-model-17 │
+                               │  mock-model-18                           mock-model-18 │
+                               │  mock-model-19                           mock-model-19 │
+                               │  mock-model-20                           mock-model-20 │
+                               └────────────────────────────────────────────────────────┘
+
+  › ▏ 输入任务，或输入 / 查看命令
+
+
+                                                                                                      已加载 20 个模型

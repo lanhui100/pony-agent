@@ -1,0 +1,10 @@
+{
+  "phase": "baseline",
+  "bin": "/home/dm/pony-agent/tools/tui-audit/bin/pony-baseline",
+  "sha256": "53ede00e3b1cdb93f2316ff85eef6828105d8d0c445be6ffb1c34d688792cfc3",
+  "mtime": "2026-10-19T00:03:57+08:00",
+  "size": 23720440,
+  "version": "pony 0.1.125 · linux-x86_64",
+  "generated_at": "2026-10-19T03:45:10+08:00",
+  "repo": "/home/dm/pony-agent"
+}

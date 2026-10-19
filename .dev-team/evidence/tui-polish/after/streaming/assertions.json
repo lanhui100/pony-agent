@@ -1,0 +1,115 @@
+{
+  "scenario": "streaming",
+  "pass": 18,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "mid.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "mid.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "mid.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "mid.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "mid.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2802"
+    },
+    {
+      "id": "mid.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=79709"
+    },
+    {
+      "id": "final.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "final.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "final.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "final.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "final.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=3249"
+    },
+    {
+      "id": "final.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=144252"
+    },
+    {
+      "id": "streaming.mid_status_writing",
+      "desc": "footer shows the writing state while the stream is still arriving",
+      "ok": true,
+      "evidence": "footer :: Esc 中断 写入中"
+    },
+    {
+      "id": "streaming.mid_active_elapsed",
+      "desc": "active line shows elapsed time next to the writing state",
+      "ok": true,
+      "evidence": "active_row :: • 写入中 0秒"
+    },
+    {
+      "id": "streaming.mid_partial_body",
+      "desc": "partial streamed markdown body is already rendered",
+      "ok": true,
+      "evidence": "正在分析"
+    },
+    {
+      "id": "streaming.mid_not_finished",
+      "desc": "mid-stream capture is not the completed answer yet",
+      "ok": true,
+      "evidence": "footer :: Esc 中断 写入中"
+    },
+    {
+      "id": "streaming.final_complete",
+      "desc": "final capture contains the terminal answer and ready footer",
+      "ok": true,
+      "evidence": "footer :: Enter 发送 · / 查看命令 完成"
+    },
+    {
+      "id": "streaming.final_not_writing",
+      "desc": "writing status disappeared once the stream finished",
+      "ok": true,
+      "evidence": "footer :: Enter 发送 · / 查看命令 完成"
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+{
+  "scenario": "error",
+  "pass": 14,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.ansi size=2689"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.png size=70616"
+    },
+    {
+      "id": "main.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "main.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "error.message_visible",
+      "desc": "provider 401 is surfaced as a visible error message",
+      "ok": true,
+      "evidence": "row 7 :: ✕ Error: {\"error\": {\"message\": \"mock 401 unauthorized: invalid api key (audit scenario)\", \"type\": \"invalid_request"
+    },
+    {
+      "id": "error.error_glyph",
+      "desc": "error row carries the failure glyph",
+      "ok": true,
+      "evidence": "row 7 :: ✕ Error: {\"error\": {\"message\": \"mock 401 unauthorized: invalid api key (audit scenario)\", \"type\": \"invalid_request"
+    },
+    {
+      "id": "error.reason_included",
+      "desc": "error text names the 401/unauthorized cause",
+      "ok": true,
+      "evidence": "▌ 401 认证测试"
+    },
+    {
+      "id": "error.footer_failed",
+      "desc": "footer reports the failed turn",
+      "ok": true,
+      "evidence": "footer :: Enter 发送 · / 查看命令 失败"
+    },
+    {
+      "id": "error.no_fake_answer",
+      "desc": "no assistant answer is fabricated for the failed turn",
+      "ok": true,
+      "evidence": "no 结论 row in failed capture"
+    },
+    {
+      "id": "error.mock_401_receipt",
+      "desc": "mock receipt proves the 401 scenario was requested",
+      "ok": true,
+      "evidence": "scenarios=['401', '401']"
+    }
+  ]
+}

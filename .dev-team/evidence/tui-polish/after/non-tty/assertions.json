@@ -1,0 +1,31 @@
+{
+  "scenario": "non-tty",
+  "pass": 4,
+  "fail": 0,
+  "checks": [
+    {
+      "id": "non_tty.diagnostic",
+      "desc": "non-TTY stdin prints an explicit interactive-terminal diagnostic",
+      "ok": true,
+      "evidence": "pony TUI: stdin/stdout 不是交互式终端，TUI 无法启动。"
+    },
+    {
+      "id": "non_tty.no_panic",
+      "desc": "non-TTY launch does not panic",
+      "ok": true,
+      "evidence": "no panic tokens in stdout/stderr"
+    },
+    {
+      "id": "non_tty.exit_code_recorded",
+      "desc": "exit code is a real process status (not a timeout)",
+      "ok": true,
+      "evidence": "exit_code=1"
+    },
+    {
+      "id": "non_tty.tty_hint",
+      "desc": "diagnostic points the user at a real terminal / ponycli",
+      "ok": true,
+      "evidence": "请在真实终端中运行 `pony`，或使用 `ponycli`（非交互 CLI 入口）。"
+    }
+  ]
+}

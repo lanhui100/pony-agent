@@ -1,0 +1,20 @@
+  pony  ·  pony-agent                mock-alpha  ·  db05d2
+  ────────────────────────────────────────────────────────
+
+  `package.json` 显示这是 pony-agent，版本 0.1.125。
+
+    ▏ json
+    ▏ {
+    ▏   "name": "pony-agent",
+    ▏   "version": "0.1.125"
+    ▏ }
+
+    · 包管理器：npm
+    · 关键信息：私有项目、使用 Vite 构建
+
+  如果需要，我可以继续列出依赖清单。
+
+  › ▏ 输入任务，或输入 / 查看命令
+
+
+                                            Turn completed

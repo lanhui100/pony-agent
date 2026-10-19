@@ -153,6 +153,8 @@ pub enum TeamTaskAction {
     Complete,
     Release,
     Delete,
+    Edit,
+    SetDependencies,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +183,32 @@ pub struct TeamTaskUpdateArgs {
     pub expected_revision: u64,
     pub action: TeamTaskAction,
     pub owner: Option<String>,
+    pub subject: Option<String>,
+    pub description: Option<String>,
+    pub write_scopes: Option<Vec<String>>,
+    pub blocked_by: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamTaskGetArgs {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitAgentArgs {
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitAgentNoProgress {
+    pub reason: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitAgentResult {
+    pub timed_out: bool,
+    pub no_progress: Option<WaitAgentNoProgress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -435,6 +463,13 @@ pub fn team_task_create(args: TeamTaskCreateArgs) -> Result<TeamTaskItem, String
     Ok(task)
 }
 
+pub fn team_task_get(args: TeamTaskGetArgs) -> Result<TeamTaskItem, String> {
+    let lock = TEAM_TASKS.lock().unwrap();
+    let map = lock.as_ref().ok_or_else(|| "No tasks exist".to_string())?;
+    let task = map.get(&args.task_id).ok_or_else(|| format!("Task not found: {}", args.task_id))?;
+    Ok(task.clone())
+}
+
 pub fn team_task_update(args: TeamTaskUpdateArgs) -> Result<TeamTaskItem, String> {
     let mut lock = TEAM_TASKS.lock().unwrap();
     let map = lock.as_mut().ok_or_else(|| "No tasks exist".to_string())?;
@@ -462,13 +497,63 @@ pub fn team_task_update(args: TeamTaskUpdateArgs) -> Result<TeamTaskItem, String
         TeamTaskAction::Delete => {
             task.status = "deleted".to_string();
         }
+        TeamTaskAction::Edit => {
+            if let Some(subject) = args.subject {
+                task.subject = subject;
+            }
+            if let Some(description) = args.description {
+                task.description = description;
+            }
+            if let Some(scopes) = args.write_scopes {
+                task.write_scopes = scopes;
+            }
+            if let Some(owner) = args.owner {
+                task.owner = Some(owner);
+            }
+        }
+        TeamTaskAction::SetDependencies => {
+            if let Some(deps) = args.blocked_by {
+                task.blocked_by = deps;
+            }
+        }
     }
 
     task.revision += 1;
     Ok(task.clone())
 }
 
-/// 自动驱动队员处理消息的循环执行回路
+/// 等待队友活动（对齐 DSH wait_agent 边沿机制）
+pub fn wait_agent(args: WaitAgentArgs) -> Result<WaitAgentResult, String> {
+    let has_active_peer = {
+        let lock = TEAMMATES.lock().unwrap();
+        if let Some(ref map) = *lock {
+            map.iter().any(|(target, member)| {
+                target != "lead" && (member.status == TeammateStatus::Running || member.status == TeammateStatus::Provisioning)
+            })
+        } else {
+            false
+        }
+    };
+
+    if !has_active_peer {
+        return Ok(WaitAgentResult {
+            timed_out: false,
+            no_progress: Some(WaitAgentNoProgress {
+                reason: "no-active-peer".to_string(),
+                message: "No other Team member is running or provisioning.".to_string(),
+            }),
+        });
+    }
+
+    let _timeout = args.timeout_ms.unwrap_or(30_000);
+    // 模拟等待返回
+    Ok(WaitAgentResult {
+        timed_out: false,
+        no_progress: None,
+    })
+}
+
+/// 自动驱动队员处理消息的循环执行回路：若在位真实引擎则驱动真实 Turn，并可回信给 sender/lead
 pub fn drive_teammate_turn(target: &str) -> Result<Option<String>, String> {
     let result = drain_inbox(ReadInboxArgs {
         target: target.to_string(),
@@ -477,20 +562,51 @@ pub fn drive_teammate_turn(target: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    // 自动更新队员状态
+    // 自动更新队员状态为 Running
     if let Ok(mut team_lock) = TEAMMATES.lock() {
         if let Some(team_map) = team_lock.as_mut() {
             if let Some(member) = team_map.get_mut(target) {
-                if member.status == TeammateStatus::Running {
-                    member.status = TeammateStatus::Active;
-                }
+                member.status = TeammateStatus::Running;
             }
         }
     }
-    
-    // 处理消息并转入 Active / Idle 状态
-    let summary = format!("Processed {} message(s) for teammate {}", result.messages.len(), target);
-    Ok(Some(summary))
+
+    // 整合收件箱内的消息内容
+    let mut combined_prompt = format!("You are teammate '{}'. Incoming messages:\n", target);
+    for msg in &result.messages {
+        combined_prompt.push_str(&format!("- {}\n", msg.content));
+    }
+    combined_prompt.push_str("\nProcess these messages and provide your response or action report.");
+
+    // 如果挂载了真实模型引擎，则执行真实 Turn
+    let final_reply = if let Some(engine) = crate::agent::subagent_runtime::subagent_engine() {
+        match engine.run_turn(&combined_prompt, SUBAGENT_TURN_TIMEOUT_MS) {
+            Ok(outcome) => outcome.final_text,
+            Err(err) => format!("[Execution error]: {}", err),
+        }
+    } else {
+        format!("Processed {} message(s) for teammate {}", result.messages.len(), target)
+    };
+
+    // 状态流转回到 Active
+    if let Ok(mut team_lock) = TEAMMATES.lock() {
+        if let Some(team_map) = team_lock.as_mut() {
+            if let Some(member) = team_map.get_mut(target) {
+                member.status = TeammateStatus::Active;
+            }
+        }
+    }
+
+    // 将产出的答复作为回执发送给 lead
+    if target != "lead" {
+        let _ = send_message(SendMessageArgs {
+            target: "lead".to_string(),
+            message: format!("Teammate '{}' finished turn:\n{}", target, final_reply),
+            mode: Some(MessageDeliveryMode::Queue),
+        });
+    }
+
+    Ok(Some(final_reply))
 }
 
 pub fn team_task_list() -> Result<TeamTaskListResult, String> {

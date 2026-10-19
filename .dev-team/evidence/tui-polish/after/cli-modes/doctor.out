@@ -1,0 +1,8 @@
+[fail] stdio: stdin 非交互终端（TUI 需要 TTY；CLI 场景可用 ponycli）
+[ok] TERM: dumb
+[warn] COLORTERM: <unset> · 未启用 truecolor
+[ok] NO_COLOR: <unset> · 颜色输出未被禁用
+[ok] size: 80x24 · ≥24 行 × 8 列
+[ok] locale: LANG=en_US.UTF-8 · UTF-8 就绪
+[ok] tui-logs: /tmp/tui-audit.5n13xn/iso-cli-modes/home/.pony-agent/tui-logs · 可写
+[warn] PATH: /home/dm/.local/bin/pony · PATH 冲突：SSH 下可能调到其它 pony 二进制

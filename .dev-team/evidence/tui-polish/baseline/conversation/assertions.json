@@ -1,0 +1,121 @@
+{
+  "scenario": "conversation",
+  "pass": 14,
+  "fail": 5,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": false,
+      "evidence": "row 3 = ' 你'"
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · c087e3"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/conversation/main.ansi size=1970"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/conversation/main.png size=142036"
+    },
+    {
+      "id": "main.header",
+      "desc": "header shows brand + workspace",
+      "ok": true,
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · c087e3"
+    },
+    {
+      "id": "main.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 30 prompt_col=2 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "main.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 30 :: › ▏ 输入任务，或输入 / 查看命令"
+    },
+    {
+      "id": "conversation.user_message_visible",
+      "desc": "user prompt is rendered in the transcript",
+      "ok": true,
+      "evidence": "row 4 :: 读取 package.json 并总结"
+    },
+    {
+      "id": "conversation.user_role_rail",
+      "desc": "user message is distinguished by a rail/block, not a text label",
+      "ok": false,
+      "evidence": "no '▌' rail found"
+    },
+    {
+      "id": "conversation.tool_line_visible",
+      "desc": "tool activity line (Read) is visible with a status glyph",
+      "ok": true,
+      "evidence": "row 8 :: ✓ 读取 (Read) · 收集路径 `package.json` 的上下文。"
+    },
+    {
+      "id": "conversation.final_answer_visible",
+      "desc": "final assistant answer (mock round 2) is visible",
+      "ok": true,
+      "evidence": "row 10 :: 结论"
+    },
+    {
+      "id": "conversation.text_columns_aligned",
+      "desc": "user body / assistant body / tool text start on the same column",
+      "ok": false,
+      "evidence": "user_col=2 assistant_col=2 tool_col=6"
+    },
+    {
+      "id": "conversation.aligned_columns_padded",
+      "desc": "shared text column is inset from the terminal edge",
+      "ok": false,
+      "evidence": "shared_col=2"
+    },
+    {
+      "id": "conversation.no_error_rendered",
+      "desc": "successful turn shows no error message",
+      "ok": true,
+      "evidence": "no Error:/失败 rows in transcript"
+    },
+    {
+      "id": "conversation.mock_followup_has_tool_round",
+      "desc": "mock receipt proves the final model round carried a tool result",
+      "ok": true,
+      "evidence": "chat_requests=1 tool_round_requests=1 roles=[['system', 'system', 'system', 'system', 'user', 'assistant', 'tool']] scenarios=['final']"
+    },
+    {
+      "id": "main.separator_two_rules",
+      "desc": "header rule and composer top rule are both present",
+      "ok": false,
+      "evidence": "rule_rows=[]"
+    },
+    {
+      "id": "conversation.footer_ready",
+      "desc": "footer returns to a ready state after the turn",
+      "ok": true,
+      "evidence": "footer :: Turn completed"
+    }
+  ]
+}
