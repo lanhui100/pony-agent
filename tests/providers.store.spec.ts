@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import type { ProviderRegistry } from "@/types/provider";
 import {
   buildProviderModelConfig,
   createDefaultCapabilities,
@@ -429,4 +430,117 @@ function seedSingleProvider(store: ReturnType<typeof useProviderStore>, baseUrl:
       ] as never,
     },
   });
+}
+
+describe("provider selection persistence", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    // 合并落盘用 setTimeout 调度，这里锁定时间轴，避免用例之间互相干扰。
+    vi.useFakeTimers();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(
+      async (_command: string, args?: Record<string, unknown>) =>
+        args?.registry as ProviderRegistry,
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("writes reasoning effort back into the current model user policy", async () => {
+    const store = useProviderStore();
+    seedSingleProvider(store, "https://example.invalid/v1");
+    store.addModel("provider-x");
+
+    const modelId = store.currentModel?.id;
+    expect(modelId).toBeTruthy();
+
+    store.setCurrentReasoningEffort("high");
+    expect(store.currentReasoningEffort).toBe("high");
+
+    await store.flushRegistryPersist();
+
+    const saved = readSavedRegistry();
+    const savedModel = saved?.providers[0]?.models.find((model) => model.id === modelId);
+    expect(savedModel?.reasoningEffort).toBe("high");
+    // 落盘回写不得把用户刚选的强度覆盖成模型默认值。
+    expect(store.currentReasoningEffort).toBe("high");
+  });
+
+  it("keeps the user effort after an explicit saveRegistry", async () => {
+    const store = useProviderStore();
+    seedSingleProvider(store, "https://example.invalid/v1");
+    store.addModel("provider-x");
+
+    const defaultEffort = store.currentModel?.reasoningEffort ?? null;
+    const target = defaultEffort === "max" ? "low" : "max";
+
+    store.setCurrentReasoningEffort(target);
+    await store.saveRegistry();
+
+    expect(store.currentReasoningEffort).toBe(target);
+    expect(store.currentModel?.reasoningEffort).toBe(target);
+  });
+
+  it("persists provider and model selection from selectModel", async () => {
+    const store = useProviderStore();
+    seedSingleProvider(store, "https://example.invalid/v1");
+
+    const buildModel = (id: string, name: string) =>
+      buildProviderModelConfig(
+        { id, name, model: name, protocol: "openai-completions" },
+        {
+          capabilityPreset: "custom",
+          capabilities: createDefaultCapabilities(),
+        },
+        createDefaultModelUserPolicy(),
+      );
+
+    const first = buildModel("model-a", "model-a");
+    const second = buildModel("model-b", "model-b");
+
+    store.$patch({
+      registry: {
+        selectedProviderId: "provider-x",
+        providers: [
+          {
+            ...store.providers[0]!,
+            models: [first, second],
+            selectedModelId: first.id,
+          },
+        ],
+      },
+    });
+
+    store.selectModel("provider-x", "model-b");
+    await store.flushRegistryPersist();
+
+    const saved = readSavedRegistry();
+    expect(saved?.selectedProviderId).toBe("provider-x");
+    expect(saved?.providers[0]?.selectedModelId).toBe("model-b");
+    expect(store.currentModel?.id).toBe("model-b");
+  });
+
+  it("never touches disk in browser preview mode", async () => {
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+
+    const store = useProviderStore();
+    seedSingleProvider(store, "https://example.invalid/v1");
+    store.addModel("provider-x");
+
+    store.setCurrentReasoningEffort("low");
+    await store.flushRegistryPersist();
+
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalled();
+    expect(store.currentReasoningEffort).toBe("low");
+  });
+});
+
+function readSavedRegistry(): ProviderRegistry | undefined {
+  const call = tauriMocks.mockSafeInvoke.mock.calls.find(
+    ([command]) => command === "save_provider_registry",
+  );
+  return call?.[1]?.registry as ProviderRegistry | undefined;
 }

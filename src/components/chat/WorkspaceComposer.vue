@@ -511,11 +511,12 @@ function onReasoningFocus(event: FocusEvent) {
   adjustReasoningSubmenuPosition(event.currentTarget as HTMLElement);
 }
 
-async function selectModel(providerId: string, modelId: string) {
+function selectModel(providerId: string, modelId: string) {
+  // 落盘交给 store 的合并调度（selectModel 内部已 scheduleRegistryPersist），
+  // 此处不再重复保存，避免每次点击都同步写盘。
   providerStore.selectModel(providerId, modelId);
   menuOpen.value = false;
   modelMenuOpen.value = false;
-  await providerStore.saveRegistry();
 }
 
 function selectReasoningEffort(value: ProviderReasoningEffort | null) {

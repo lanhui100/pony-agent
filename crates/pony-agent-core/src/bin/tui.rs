@@ -737,11 +737,26 @@ pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u16
     }
 }
 
-// 两帧低频呼吸点：任何终端字体都有这两个字形，且不抢正文注意力。
-const SPINNER_FRAMES: &[&str] = &["·", "•"];
+// 状态感知动效字形集：
+// 1. 思考中 (Thinking): 脉冲/呼吸波纹 (· ✢ ✦ ✢)
+// 2. 生成中 (Responding): 动态光标/扫描方块 (▖ ▘ ▝ ▗)
+// 3. 执行中 (ExecutingTool): 旋转齿轮/旋涡 (◐ ◓ ◑ ◒)
+const THINKING_FRAMES: &[&str] = &["·", "✢", "✦", "✢"];
+const RESPONDING_FRAMES: &[&str] = &["▖", "▘", "▝", "▗"];
+const EXECUTING_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
+const DEFAULT_SPINNER_FRAMES: &[&str] = &["·", "•", "●", "•"];
 
 pub fn spinner_frame(tick: usize) -> &'static str {
-    SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
+    DEFAULT_SPINNER_FRAMES[tick % DEFAULT_SPINNER_FRAMES.len()]
+}
+
+pub fn mode_status_icon(mode: &RuntimeMode, tick: usize) -> &'static str {
+    match mode {
+        RuntimeMode::Thinking => THINKING_FRAMES[tick % THINKING_FRAMES.len()],
+        RuntimeMode::Responding => RESPONDING_FRAMES[tick % RESPONDING_FRAMES.len()],
+        RuntimeMode::ExecutingTool(_) => EXECUTING_FRAMES[tick % EXECUTING_FRAMES.len()],
+        _ => spinner_frame(tick),
+    }
 }
 
 impl TuiState {
@@ -2549,7 +2564,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                     let (glyph, glyph_style) = if is_call {
                         if running {
                             (
-                                spinner_frame(state.spinner_tick).to_string(),
+                                mode_status_icon(&RuntimeMode::ExecutingTool(msg.content.clone()), state.spinner_tick).to_string(),
                                 Style::default().fg(theme::ACCENT_DIM),
                             )
                         } else {
@@ -2642,7 +2657,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 format!("{}  {}", word, elapsed)
             };
             let prefix = vec![Span::styled(
-                format!("{} ", spinner_frame(state.spinner_tick)),
+                format!("{} ", mode_status_icon(&state.runtime_mode, state.spinner_tick)),
                 Style::default().fg(theme::ACCENT_DIM),
             )];
             push_prefixed(

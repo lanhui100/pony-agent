@@ -3,10 +3,10 @@
 | field | value |
 | --- | --- |
 | binary | `/home/dm/pony-agent/target/debug/pony` |
-| sha256 | `63e48f5d6aa0aebf3ce6d4d2991b162a3e7a1681f9752a1108173c489aa43c73` |
-| mtime | `2026-10-20T00:23:39+08:00` |
+| sha256 | `a9c9c180119e200a6ca5ba12b66a7687179c408470e2e6ae45880c38de69d3eb` |
+| mtime | `2026-10-20T07:40:06+08:00` |
 | version | `pony 0.1.127 · linux-x86_64` |
-| generated_at | `2026-10-19T16:29:46.034066+00:00` |
+| generated_at | `2026-10-19T23:40:59.868748+00:00` |
 | result | **369 pass / 0 fail** across 18 scenarios |
 
 ## baseline → after 差异摘要
@@ -219,10 +219,10 @@
 | PASS | `main.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `main.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
 | PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.ansi size=2211 |
-| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=50711 |
+| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=50818 |
 | PASS | `sessions.title` — session panel title is visible | │ 会话 ↑↓ 选择 · ↵ 确认 · esc 取消 │ |
-| PASS | `sessions.prior_conversation_listed` — the conversation just completed is offered for resume | │▏ 读取 package.json 并总结 9b6f5494 · 当前 │ |
-| PASS | `sessions.session_id_visible` — session row carries a short session id | │▏ 读取 package.json 并总结 9b6f5494 · 当前 │ |
+| PASS | `sessions.prior_conversation_listed` — the conversation just completed is offered for resume | │▏ 读取 package.json 并总结 2072f9ee · 当前 │ |
+| PASS | `sessions.session_id_visible` — session row carries a short session id | │▏ 读取 package.json 并总结 2072f9ee · 当前 │ |
 | PASS | `sessions.not_empty` — panel does not show the empty-sessions placeholder | no '暂无历史会话' placeholder |
 | PASS | `sessions.border_box` — exactly one top and one bottom panel border, top above bottom | top_rows=[14] bottom_rows=[19] |
 | PASS | `sessions.panel_height_fits_screen` — panel top/bottom borders are both on screen and the panel height fits | top=14 bottom=19 height=6 pane_rows=34 |
@@ -235,7 +235,7 @@
 | PASS | `sessions.focus_chat_hidden` — focus mode hides chat and splash (no transcript/logo residue) | guidance=False logo_tag=False block_glyphs=False |
 | PASS | `sessions.focus_background_clean` — rows outside header + panel are completely blank (no half-cell residue) | dirty_rows=[] |
 | PASS | `sessions.border_rows_complete` — every panel row carries both border columns at the same display columns | left=18 right=101 broken_rows=[] |
-| PASS | `sessions.current_marker` — sessions panel marks the active session | │▏ 读取 package.json 并总结 9b6f5494 · 当前 │ |
+| PASS | `sessions.current_marker` — sessions panel marks the active session | │▏ 读取 package.json 并总结 2072f9ee · 当前 │ |
 
 ### add-provider (120x34)
 
@@ -279,15 +279,15 @@
 | PASS | `mid.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `mid.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
 | PASS | `mid.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2177 |
-| PASS | `mid.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=81243 |
+| PASS | `mid.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=81038 |
 | PASS | `final.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `final.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `final.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `final.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
 | PASS | `final.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2609 |
 | PASS | `final.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=144979 |
-| PASS | `streaming.mid_status_generating` — streaming active line shows the generating state while the footer is the metrics row | active_row :: • 生成中 0秒 \| footer :: /home/dm/pony-agent 上下文 0% |
-| PASS | `streaming.mid_active_elapsed` — active line shows elapsed time next to the generating state | active_row :: • 生成中 0秒 |
+| PASS | `streaming.mid_status_generating` — streaming active line shows the generating state while the footer is the metrics row | active_row :: ▗ 生成中 0秒 \| footer :: /home/dm/pony-agent 上下文 0% |
+| PASS | `streaming.mid_active_elapsed` — active line shows elapsed time next to the generating state | active_row :: ▗ 生成中 0秒 |
 | PASS | `streaming.mid_partial_body` — partial streamed markdown body is already rendered | 正在分析 |
 | PASS | `streaming.mid_not_finished` — mid-stream capture is not the completed answer yet (footer is the metrics row) | footer :: /home/dm/pony-agent 上下文 0% |
 | PASS | `streaming.final_complete` — final capture contains the terminal answer and the metrics footer | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
@@ -457,15 +457,15 @@
 | result | check | evidence |
 | --- | --- | --- |
 | PASS | `exit.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `exit.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-ctrl-c/x |
+| PASS | `exit.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.YQXXal/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.YQXXal/iso-ctrl-c/x |
 | PASS | `exit.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
 | PASS | `exit.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.ansi size=477 |
-| PASS | `exit.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.png size=76079 |
+| PASS | `exit.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.png size=74298 |
 | PASS | `shell.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `shell.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-ctrl-c/x |
+| PASS | `shell.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.YQXXal/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.YQXXal/iso-ctrl-c/x |
 | PASS | `shell.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
 | PASS | `shell.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.ansi size=532 |
-| PASS | `shell.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.png size=87710 |
+| PASS | `shell.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.png size=86166 |
 | PASS | `ctrl_c.process_exited` — Ctrl-C terminates the TUI process with a normal exit status | row :: UTF-8 /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$? code=0 |
 | PASS | `ctrl_c.terminal_restored` — alternate screen is left and the pane stops painting the TUI | tui_band_present=False placeholder_present=False |
 | PASS | `ctrl_c.shell_alive` — the same tmux pane still runs commands after exit | bash-5.2$ echo AUDIT_SHELL_ALIVE=ok |
@@ -554,15 +554,15 @@
 | PASS | `input_edit.ctrl_c_with_draft_clears_only` — Ctrl-C with a draft clears the composer instead of quitting | buffer='' exit_marker=False |
 | PASS | `input_edit.ctrl_c_draft_still_running` — TUI is still painting its composer after the first Ctrl-C | › 写下任务，或输入 / 查看命令 |
 | PASS | `exit.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `exit.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-inpu |
+| PASS | `exit.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.YQXXal/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.YQXXal/iso-inpu |
 | PASS | `exit.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
 | PASS | `exit.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.ansi size=493 |
-| PASS | `exit.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=77085 |
+| PASS | `exit.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=74931 |
 | PASS | `shell.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `shell.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-inpu |
+| PASS | `shell.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.YQXXal/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.YQXXal/iso-inpu |
 | PASS | `shell.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
 | PASS | `shell.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.ansi size=548 |
-| PASS | `shell.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=88582 |
+| PASS | `shell.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=86715 |
 | PASS | `input_edit.ctrl_c_empty_exits` — a second Ctrl-C on the empty composer exits the process normally | exit_code=0 row :: home LANG=en_US.UTF-8 /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$? |
 | PASS | `input_edit.terminal_restored` — alternate screen is left after exit | tui_band=False |
 | PASS | `input_edit.shell_alive` — the pane still runs commands after exit | bash-5.2$ echo AUDIT_SHELL_ALIVE=ok |

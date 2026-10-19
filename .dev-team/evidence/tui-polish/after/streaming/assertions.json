@@ -37,7 +37,7 @@
       "id": "mid.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=81243"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=81038"
     },
     {
       "id": "final.no_panic",
@@ -79,13 +79,13 @@
       "id": "streaming.mid_status_generating",
       "desc": "streaming active line shows the generating state while the footer is the metrics row",
       "ok": true,
-      "evidence": "active_row :: • 生成中 0秒 | footer :: /home/dm/pony-agent 上下文 0%"
+      "evidence": "active_row :: ▗ 生成中 0秒 | footer :: /home/dm/pony-agent 上下文 0%"
     },
     {
       "id": "streaming.mid_active_elapsed",
       "desc": "active line shows elapsed time next to the generating state",
       "ok": true,
-      "evidence": "active_row :: • 生成中 0秒"
+      "evidence": "active_row :: ▗ 生成中 0秒"
     },
     {
       "id": "streaming.mid_partial_body",

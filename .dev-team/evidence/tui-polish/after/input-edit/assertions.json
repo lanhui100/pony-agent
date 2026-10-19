@@ -451,7 +451,7 @@
       "id": "exit.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-inpu"
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.YQXXal/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.YQXXal/iso-inpu"
     },
     {
       "id": "exit.capture_rows",
@@ -469,7 +469,7 @@
       "id": "exit.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=77085"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=74931"
     },
     {
       "id": "shell.no_panic",
@@ -481,7 +481,7 @@
       "id": "shell.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-inpu"
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.YQXXal/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.YQXXal/iso-inpu"
     },
     {
       "id": "shell.capture_rows",
@@ -499,7 +499,7 @@
       "id": "shell.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=88582"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=86715"
     },
     {
       "id": "input_edit.ctrl_c_empty_exits",

@@ -18,6 +18,12 @@ import type {
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 1000000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 64000;
 
+// 选择态（当前提供商/模型/思考强度）都是用户级偏好：落盘前在同一个时间窗口内合并，
+// 连续点击只写一次 providers.json；需要立即收尾时调用 flushRegistryPersist。
+const REGISTRY_PERSIST_DEBOUNCE_MS = 200;
+let registryPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let registryPersistChain: Promise<void> = Promise.resolve();
+
 // 协议家族（能力目录匹配用）：openai 族 = completions + responses 两值。
 type ProviderProtocolFamily = "openai" | "anthropic";
 
@@ -853,21 +859,33 @@ export const useProviderStore = defineStore("providers", {
         this.loading = false;
       }
     },
-    async saveRegistry() {
+    async saveRegistry(options: { silent?: boolean } = {}) {
+      // 立即写盘：先取消窗口内待合并的调度，避免随后再写一次相同内容。
+      if (registryPersistTimer !== null) {
+        clearTimeout(registryPersistTimer);
+        registryPersistTimer = null;
+      }
+
       if (!this.registry) {
         return;
       }
 
+      const silent = options.silent === true;
+
       this.registry.providers = this.registry.providers.map(normalizeProvider);
 
-      this.saving = true;
-      this.error = null;
-      this.notice = null;
+      if (!silent) {
+        this.saving = true;
+        this.error = null;
+        this.notice = null;
+      }
 
       try {
         if (!isTauriAvailable()) {
-          this.notice =
-            "当前是浏览器预览模式，保存结果只保留在当前页面会话中。";
+          if (!silent) {
+            this.notice =
+              "当前是浏览器预览模式，保存结果只保留在当前页面会话中。";
+          }
           return;
         }
 
@@ -881,13 +899,58 @@ export const useProviderStore = defineStore("providers", {
           ...registry,
           providers: registry.providers.map(normalizeProvider),
         };
-        this.syncReasoningEffortFromCurrentModel();
-        this.notice = "提供商配置已保存；敏感密钥已写入应用密钥存储。";
+        // 回写后的模型用户策略就是本次落盘的真相源：这里只兜底“当前模型不支持思考”，
+        // 不能用模型默认值无条件覆盖用户刚选的强度，否则选择永远回落到默认。
+        if (!this.currentModel?.capabilities?.supportsReasoning) {
+          this.selectedReasoningEffort = null;
+        }
+        if (!silent) {
+          this.notice = "提供商配置已保存；敏感密钥已写入应用密钥存储。";
+        }
       } catch (error) {
         this.error = `保存模型配置失败：${String(error)}`;
       } finally {
-        this.saving = false;
+        if (!silent) {
+          this.saving = false;
+        }
       }
+    },
+    /** 选择态变更后的合并落盘：同一窗口内多次变更只写一次 providers.json。 */
+    scheduleRegistryPersist() {
+      if (!this.registry || !isTauriAvailable()) {
+        return;
+      }
+
+      if (registryPersistTimer !== null) {
+        clearTimeout(registryPersistTimer);
+      }
+
+      registryPersistTimer = setTimeout(() => {
+        registryPersistTimer = null;
+        registryPersistChain = registryPersistChain
+          .catch(() => undefined)
+          .then(() => this.saveRegistry({ silent: true }))
+          .then(
+            () => undefined,
+            () => undefined,
+          );
+      }, REGISTRY_PERSIST_DEBOUNCE_MS);
+    },
+    /** 立即收尾待合并的写盘（测试与退出前使用）。 */
+    async flushRegistryPersist() {
+      if (registryPersistTimer !== null) {
+        clearTimeout(registryPersistTimer);
+        registryPersistTimer = null;
+        registryPersistChain = registryPersistChain
+          .catch(() => undefined)
+          .then(() => this.saveRegistry({ silent: true }))
+          .then(
+            () => undefined,
+            () => undefined,
+          );
+      }
+
+      await registryPersistChain.catch(() => undefined);
     },
     selectProvider(providerId: string) {
       if (!this.registry) {
@@ -896,6 +959,8 @@ export const useProviderStore = defineStore("providers", {
 
       this.registry.selectedProviderId = providerId;
       this.syncReasoningEffortFromCurrentModel();
+      // 选择即偏好：调用方无需记得保存，窗口内合并写盘。
+      this.scheduleRegistryPersist();
     },
     selectModel(providerId: string, modelId: string) {
       if (!this.registry) {
@@ -912,9 +977,23 @@ export const useProviderStore = defineStore("providers", {
       provider.selectedModelId = modelId;
       this.registry.selectedProviderId = providerId;
       this.syncReasoningEffortFromCurrentModel();
+      // 选择即偏好：调用方无需记得保存，窗口内合并写盘。
+      this.scheduleRegistryPersist();
     },
     setCurrentReasoningEffort(value: ProviderReasoningEffort | null) {
-      this.selectedReasoningEffort = value;
+      const currentModel = this.currentModel;
+      const nextValue = currentModel?.capabilities?.supportsReasoning
+        ? normalizeReasoningEffort(value)
+        : null;
+
+      this.selectedReasoningEffort = nextValue;
+
+      // 方案A：强度写回当前模型的用户策略（providers.json 是单点真相源），
+      // 桌面端与 TUI 下次启动读到同一份选择，而不是只活在内存里。
+      if (currentModel && currentModel.reasoningEffort !== nextValue) {
+        currentModel.reasoningEffort = nextValue;
+        this.scheduleRegistryPersist();
+      }
     },
     addProvider() {
       if (!this.registry) {
