@@ -740,10 +740,10 @@ pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u16
 // 状态感知动效字形集：
 // 1. 思考中 (Thinking): 脉冲/呼吸波纹 (· ✢ ✦ ✢)
 // 2. 生成中 (Responding): 动态光标/扫描方块 (▖ ▘ ▝ ▗)
-// 3. 执行中 (ExecutingTool): 旋转齿轮/旋涡 (◐ ◓ ◑ ◒)
+// 3. 执行中 (ExecutingTool): 机械轨道瞄准锁点 / 准星光标循迹 (⌜ ⌝ ⌟ ⌞)
 const THINKING_FRAMES: &[&str] = &["·", "✢", "✦", "✢"];
 const RESPONDING_FRAMES: &[&str] = &["▖", "▘", "▝", "▗"];
-const EXECUTING_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
+const EXECUTING_FRAMES: &[&str] = &["⌜", "⌝", "⌟", "⌞"];
 const DEFAULT_SPINNER_FRAMES: &[&str] = &["·", "•", "●", "•"];
 
 pub fn spinner_frame(tick: usize) -> &'static str {

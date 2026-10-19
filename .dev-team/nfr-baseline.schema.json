@@ -11,7 +11,12 @@
       "type": "object",
       "properties": {
         "max_attempts": { "type": "integer" },
-        "backoff_cap_ms": { "type": "integer" }
+        "backoff_cap_ms": { "type": "integer" },
+        "backoff_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "wave-1 新增（additive-only）：基础退避（指数退避起点，毫秒）；与既有 backoff_cap_ms（退避上限）配对，二者必须同时声明。"
+        }
       },
       "required": ["max_attempts", "backoff_cap_ms"],
       "additionalProperties": false
@@ -56,7 +61,12 @@
       "description": "适用范围收窄为 logging_scope 声明的「新增结构化日志面」；既有风格（非 JSON）的锁中毒恢复诊断输出按 logging_legacy_eprintln_exempt + logging_eprintln_exempt_scope 豁免（含本波新增 1 处）。注意：当前全仓库无结构化日志面，本字段无代码级检查点，属 PA-119 债务（见 logging_compliance_claimed）。",
       "properties": {
         "format": { "type": "string", "enum": ["json"] },
-        "trace_id_required": { "type": "boolean" }
+        "trace_id_required": { "type": "boolean" },
+        "trace_id_field": {
+          "type": "string",
+          "minLength": 1,
+          "description": "wave-1 新增（additive-only）：承载 trace id 的 JSON 字段名（当前全仓库无结构化日志面，仍属 PA-119 债务，不主张已满足）。"
+        }
       },
       "required": ["format", "trace_id_required"],
       "additionalProperties": false
@@ -94,6 +104,16 @@
     "resource_release": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "auto_continue_max": {
+      "type": "integer",
+      "const": 8,
+      "description": "wave-1 新增（additive-only）：同一用户消息系列内连续自动续行硬上限，对应 MAX_CONSECUTIVE_AUTO_CONTINUES（契约 C1/C3）。"
+    },
+    "goal_store_atomic_write": {
+      "type": "boolean",
+      "const": true,
+      "description": "wave-1 新增（additive-only）：goal JSON sidecar 必须原子写（*.tmp + rename），禁止原地覆写（契约 C2）。"
     },
     "wave18_secret_scan_gate": {
       "type": "object",

@@ -2,7 +2,8 @@
   "external_call_timeout_ms": 3000,
   "retry": {
     "max_attempts": 1,
-    "backoff_cap_ms": 1000
+    "backoff_cap_ms": 1000,
+    "backoff_ms": 500
   },
   "concurrency_lock": "mutex",
   "lock_scope_bounded": true,
@@ -17,7 +18,8 @@
   ],
   "logging": {
     "format": "json",
-    "trace_id_required": true
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
   },
   "logging_scope": "new_structured_logging_surface_only",
   "logging_legacy_eprintln_exempt": true,
@@ -33,5 +35,7 @@
     "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
     "wave9_job_handle_close_on_terminate_success",
     "wave9_suspended_process_resume_fail_closed_cleanup"
-  ]
+  ],
+  "auto_continue_max": 8,
+  "goal_store_atomic_write": true
 }

@@ -287,3 +287,26 @@ mod tests {
         assert_eq!(complete_res.goal.activation, GoalActivation::Disarmed);
     }
 }
+
+// ===========================================================================
+// Wave-1 冻结契约空桩（protocol-agent 签署；实现方见
+// docs/architecture/plan-goal-contract.md，签名与语义在该文档冻结，不得就地改名）
+// 本区域只允许「签名 + unimplemented!("wave-1")」，任何业务逻辑由 wave-1 executor
+// 在 green 阶段替换；禁止改动本文件既有函数体。
+// ===========================================================================
+
+/// C2：goal JSON sidecar 的落盘路径（env `PONY_AGENT_GOAL_STORE_PATH` 优先）。
+pub fn goal_store_path() -> std::path::PathBuf { unimplemented!("wave-1") }
+
+/// C1：按 session 精确命中 armed 的 active 目标（唯一目标真值源）。
+pub fn active_goal_for_session(session_id: &str) -> Option<GoalData> { unimplemented!("wave-1") }
+
+/// C3：goal-round 用户消息的唯一文案实现（宿主与 TUI 共用）。
+pub fn build_goal_round_message(objective: &str, round: u32, max_rounds: u32) -> String { unimplemented!("wave-1") }
+
+/// C2：测试接缝——清空进程内缓存并从 `goal_store_path()` 重新懒加载。
+pub fn reset_goal_store_for_test() { unimplemented!("wave-1") }
+
+/// C3：`rounds_started += 1` 并原子持久化，返回更新后的目标快照。
+pub fn advance_goal_round(goal_id: &str) -> Result<GoalData, String> { unimplemented!("wave-1") }
+
