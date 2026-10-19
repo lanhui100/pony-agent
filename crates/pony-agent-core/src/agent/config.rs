@@ -17,7 +17,7 @@ struct CapabilityCatalogEntry {
     preset: ProviderCapabilityPreset,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderReasoningEffort {
     Low,

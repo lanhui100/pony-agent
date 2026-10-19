@@ -7,7 +7,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use pony_agent_core::agent::config::{
-    ProviderModelCapabilities, ProviderRegistryStore, ProviderSelectionResolver,
+    ProviderModelCapabilities, ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
     ResolvedProviderSelection, ThinkingParamPattern,
 };
 use pony_agent_core::agent::control_plane::{
@@ -138,6 +138,7 @@ pub enum InteractionMode {
     SelectingSession,
     SelectingProvider,
     SelectingModel,
+    SelectingReasoningEffort,
     AddingProvider,
 }
 
@@ -145,10 +146,19 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "选择并恢复历史会话"),
     ("/provider", "管理与切换模型提供商"),
     ("/models", "切换当前活跃模型"),
+    ("/thinking", "设置思考强度 (Reasoning Effort)"),
     ("/clear", "清空当前消息上下文"),
     ("/cost", "查看当前模型与网关配额信息"),
     ("/help", "查看所有支持的快捷指令"),
     ("/quit", "安全退出 TUI 界面"),
+];
+
+pub const REASONING_EFFORT_OPTIONS: &[(Option<ProviderReasoningEffort>, &str, &str)] = &[
+    (None, "默认 (Default)", "遵循模型默认"),
+    (Some(ProviderReasoningEffort::Low), "低 · low", "轻量思考，快速响应"),
+    (Some(ProviderReasoningEffort::Medium), "中 · medium", "平衡思考深度与耗时"),
+    (Some(ProviderReasoningEffort::High), "高 · high", "深度思考，适合复杂逻辑"),
+    (Some(ProviderReasoningEffort::Max), "极高 · max", "最大推理深度"),
 ];
 
 #[derive(Debug, Clone)]
@@ -245,6 +255,8 @@ pub struct TuiState {
     pub selected_provider_index: usize,
     pub model_list: Vec<ModelItem>,
     pub selected_model_index: usize,
+    pub reasoning_effort: Option<ProviderReasoningEffort>,
+    pub selected_reasoning_effort_index: usize,
     pub selected_command_index: usize,
     pub add_provider_step: AddingProviderStep,
     pub add_provider_form: AddProviderForm,
@@ -284,6 +296,8 @@ impl Default for TuiState {
             selected_provider_index: 0,
             model_list: Vec::new(),
             selected_model_index: 0,
+            reasoning_effort: None,
+            selected_reasoning_effort_index: 0,
             selected_command_index: 0,
             add_provider_step: AddingProviderStep::Name,
             add_provider_form: AddProviderForm::default(),
@@ -463,6 +477,73 @@ impl TuiState {
             let m = &self.model_list[self.selected_model_index];
             self.model = m.id.clone();
             self.status_text = format!("Switched model to {}", m.name);
+        }
+        self.mode = InteractionMode::Normal;
+    }
+
+    pub fn reasoning_effort_label(&self) -> &'static str {
+        match self.reasoning_effort {
+            None => "默认",
+            Some(ProviderReasoningEffort::Low) => "低",
+            Some(ProviderReasoningEffort::Medium) => "中",
+            Some(ProviderReasoningEffort::High) => "高",
+            Some(ProviderReasoningEffort::Max) => "极高",
+        }
+    }
+
+    pub fn reasoning_effort_display(&self) -> String {
+        match self.reasoning_effort {
+            None => "默认 (Default)".to_string(),
+            Some(ProviderReasoningEffort::Low) => "低 · low".to_string(),
+            Some(ProviderReasoningEffort::Medium) => "中 · medium".to_string(),
+            Some(ProviderReasoningEffort::High) => "高 · high".to_string(),
+            Some(ProviderReasoningEffort::Max) => "极高 · max".to_string(),
+        }
+    }
+
+    pub fn cycle_reasoning_effort(&mut self) -> Option<ProviderReasoningEffort> {
+        let current_pos = REASONING_EFFORT_OPTIONS
+            .iter()
+            .position(|(eff, _, _)| *eff == self.reasoning_effort)
+            .unwrap_or(0);
+        let next_pos = (current_pos + 1) % REASONING_EFFORT_OPTIONS.len();
+        let (next_effort, name, _) = &REASONING_EFFORT_OPTIONS[next_pos];
+        self.reasoning_effort = next_effort.clone();
+        self.selected_reasoning_effort_index = next_pos;
+        self.status_text = format!("已切换思考强度: {}", name);
+        self.reasoning_effort.clone()
+    }
+
+    pub fn open_reasoning_effort_selector(&mut self) {
+        let pos = REASONING_EFFORT_OPTIONS
+            .iter()
+            .position(|(eff, _, _)| *eff == self.reasoning_effort)
+            .unwrap_or(0);
+        self.selected_reasoning_effort_index = pos;
+        self.mode = InteractionMode::SelectingReasoningEffort;
+    }
+
+    pub fn cancel_reasoning_effort_selector(&mut self) {
+        self.mode = InteractionMode::Normal;
+    }
+
+    pub fn next_reasoning_effort(&mut self) {
+        if self.selected_reasoning_effort_index + 1 < REASONING_EFFORT_OPTIONS.len() {
+            self.selected_reasoning_effort_index += 1;
+        }
+    }
+
+    pub fn prev_reasoning_effort(&mut self) {
+        if self.selected_reasoning_effort_index > 0 {
+            self.selected_reasoning_effort_index -= 1;
+        }
+    }
+
+    pub fn select_current_reasoning_effort(&mut self) {
+        if self.selected_reasoning_effort_index < REASONING_EFFORT_OPTIONS.len() {
+            let (eff, name, _) = &REASONING_EFFORT_OPTIONS[self.selected_reasoning_effort_index];
+            self.reasoning_effort = eff.clone();
+            self.status_text = format!("已切换思考强度: {}", name);
         }
         self.mode = InteractionMode::Normal;
     }
@@ -1915,8 +1996,11 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("~");
-    // header 只保留「模型」这一条有决策价值的信息；session hash 属于 /resume 的上下文。
-    let right_meta = state.model.clone();
+    // header 保留「模型」与当前非默认思考强度信息；session hash 属于 /resume 的上下文。
+    let right_meta = match state.reasoning_effort {
+        Some(_) => format!("{} · 思考:{}", state.model, state.reasoning_effort_label()),
+        None => state.model.clone(),
+    };
     let left_w = 4 + 5 + str_width(ws_name);
     let right_w = str_width(&right_meta);
     let pad = content.width as usize;
@@ -2270,7 +2354,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         } else if !state.auto_scroll {
             "↑ 已上翻 · End 回到底部".to_string()
         } else if state.input_buffer.trim().is_empty() {
-            "Enter 发送 · / 查看命令".to_string()
+            "Enter 发送 · F3/Ctrl+T 思考强度 · / 查看命令".to_string()
         } else {
             "Enter 发送 · Shift+Enter 换行".to_string()
         };
@@ -2527,6 +2611,34 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 let right = if active { "当前".to_string() } else { String::new() };
                 lines_out.push(list_row(selected_row, &display, &right, inner_w));
             }
+        }
+        f.render_widget(
+            Paragraph::new(lines_out).style(Style::default().bg(theme::SURFACE)),
+            body,
+        );
+    }
+
+    if state.mode == InteractionMode::SelectingReasoningEffort {
+        let total = REASONING_EFFORT_OPTIONS.len();
+        let shown = total.min(10.min(max_rows)).max(1);
+        let selected = state
+            .selected_reasoning_effort_index
+            .min(total.saturating_sub(1));
+        let (start, end) = panel_window(total, selected, shown);
+        let title = "思考强度 (Reasoning Effort)".to_string();
+        let rect = panel_rect(76, shown as u16 + 4);
+        let body = draw_panel(f, rect, &title, "↑↓ 选择 · ↵ 确认 · esc 取消");
+        let inner_w = body.width as usize;
+        let mut lines_out: Vec<Line<'static>> = Vec::new();
+        for (idx, (opt_eff, name, desc)) in REASONING_EFFORT_OPTIONS.iter().enumerate().take(end).skip(start) {
+            let selected_row = idx == selected;
+            let active = opt_eff == &state.reasoning_effort;
+            let right = if active {
+                format!("{} · 当前", desc)
+            } else {
+                desc.to_string()
+            };
+            lines_out.push(list_row(selected_row, name, &right, inner_w));
         }
         f.render_widget(
             Paragraph::new(lines_out).style(Style::default().bg(theme::SURFACE)),
@@ -2799,6 +2911,18 @@ fn tui_event_loop(
                         continue;
                     }
 
+                    // F3 快捷键：顶层免冲突快速切换思考强度档位
+                    if key.code == KeyCode::F(3) {
+                        state.cycle_reasoning_effort();
+                        state.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: format!("已设置思考强度为: {}", state.reasoning_effort_display()),
+                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                        });
+                        dirty = true;
+                        continue;
+                    }
+
                     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                         // 有草稿时先清空，避免一次误触丢掉整段输入；空输入才真正退出。
                         if !state.input_buffer.is_empty() && !state.is_streaming {
@@ -2986,6 +3110,31 @@ fn tui_event_loop(
                                     .unwrap_or_else(|| state.current_provider_id.clone());
                                 state.status_text = "正在拉取模型列表…".to_string();
                                 spawn_model_discovery(&state, &tx, &prov_id);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+// 1c2. ReasoningEffort 选择弹窗模式下的按键处理
+                    if state.mode == InteractionMode::SelectingReasoningEffort {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.cancel_reasoning_effort_selector();
+                            }
+                            KeyCode::Up => {
+                                state.prev_reasoning_effort();
+                            }
+                            KeyCode::Down => {
+                                state.next_reasoning_effort();
+                            }
+                            KeyCode::Enter => {
+                                state.select_current_reasoning_effort();
+                                state.messages.push(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: format!("已设置思考强度为: {}", state.reasoning_effort_display()),
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                });
                             }
                             _ => {}
                         }
@@ -3240,6 +3389,10 @@ fn tui_event_loop(
                                 if input == "/exit" || input == "/quit" {
                                     break;
                                 }
+                                if input == "/thinking" || input == "/effort" {
+                                    state.open_reasoning_effort_selector();
+                                    continue;
+                                }
                                 if input == "/clear" {
                                     state.clear_messages();
                                     continue;
@@ -3294,7 +3447,7 @@ fn tui_event_loop(
                                             display_message: None,
                                             provider_id: Some(prov_id),
                                             model_id: Some(mdl_id),
-                                            reasoning_effort: None,
+                                            reasoning_effort: state.reasoning_effort.clone(),
                                             workspace_mode: None,
                                             session_id: Some(sess_id),
                                             node_id: None,
