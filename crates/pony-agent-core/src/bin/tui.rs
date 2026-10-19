@@ -90,6 +90,14 @@ pub enum UiEvent {
     StreamToolResult(String),
     StreamCompleted,
     StreamFailed(String),
+    /// wave-39 R1（契约冻结空桩）：本轮 token 用量回执，源自 `turn:output_end` /
+    /// `turn:completed` 载荷。变体与穷尽匹配已冻结；发送侧（R8）由 Executor 接线。
+    StreamUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_hit_input_tokens: u64,
+        total_tokens: u64,
+    },
     /// /models 触发的远程模型目录拉取成功：ids 已由后台线程取得，由主循环持久化并打开面板。
     ModelsDiscovered { provider_id: String, ids: Vec<String> },
     /// /models 远程拉取失败：仅上报错误，由主循环以 System 消息呈现，不 panic、不退出。
@@ -247,8 +255,19 @@ pub struct TuiState {
     /// `startup_workspace_id` 由 `main` 在 `ensure_workspace_for_root` 成功后写入。
     pub startup_workspace_path: PathBuf,
     pub startup_workspace_id: Option<String>,
+    /// wave-39 R2：累计已提交轮次的输入 token（语义在 wave-39 明确为「轮次累加」）。
     pub total_input_tokens: u64,
+    /// wave-39 R2：累计已提交轮次的输出 token。
     pub total_output_tokens: u64,
+    /// wave-39 R2（契约冻结）：累计缓存命中输入 token。
+    pub total_cache_hit_tokens: u64,
+    /// wave-39 R2：最近一轮 `total_tokens`，用于上下文占用率。
+    pub last_context_tokens: u64,
+    /// wave-39 R2：当前模型上下文窗口；`0` = 未知（指标行渲染 `—`）。
+    pub context_window_tokens: u32,
+    /// wave-39 R2：本轮去重回执 `(input, output, cache_hit, total)`；`None` = 本轮尚无回执。
+    #[allow(dead_code)]
+    turn_usage: Option<(u64, u64, u64, u64)>,
     pub status_text: String,
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
@@ -296,6 +315,11 @@ impl Default for TuiState {
             startup_workspace_id: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            // wave-39 R2：指标字段默认归零 / 未知。
+            total_cache_hit_tokens: 0,
+            last_context_tokens: 0,
+            context_window_tokens: 0,
+            turn_usage: None,
             status_text: "Ready".to_string(),
             mouse_capture: true,
             scroll_offset: 0,
@@ -335,6 +359,21 @@ impl TuiState {
             RuntimeMode::Completed => "完成".to_string(),
             RuntimeMode::Failed(reason) => format!("失败: {}", reason),
         }
+    }
+
+    /// wave-39 R3（契约冻结空桩）：发送新消息前清空本轮 usage 回执。
+    /// 仅冻结签名与语义，函数体保持 `unimplemented!()`，由 Executor 在 R8 接线时实现。
+    #[allow(dead_code)]
+    pub fn begin_turn_usage(&mut self) {
+        unimplemented!()
+    }
+
+    /// wave-39 R3（契约冻结空桩）：**幂等覆盖**本轮增量 —— 若已有本轮回执则先扣除旧值
+    /// 再加入新值，`last_context_tokens = total`；跨轮为累加。
+    /// 仅冻结签名与语义，函数体保持 `unimplemented!()`，由 Executor 在 R8 接线时实现。
+    #[allow(dead_code, unused_variables)]
+    pub fn apply_turn_usage(&mut self, input: u64, output: u64, cache_hit: u64, total: u64) {
+        unimplemented!()
     }
     pub fn start_add_provider(&mut self) {
         self.mode = InteractionMode::AddingProvider;
@@ -618,6 +657,14 @@ impl TuiState {
         self.scroll_offset = self.max_scroll_offset;
         self.auto_scroll = true;
     }
+}
+
+/// wave-39 R3（契约冻结空桩）：解析当前 provider/model 的上下文窗口 token 数。
+/// 命中注册表则取 `capabilities.context_window_tokens`，否则回退 `1_000_000`；
+/// 函数体保持 `unimplemented!()`，由 Executor 在 R8 接线时实现。
+#[allow(dead_code, unused_variables)]
+pub fn resolve_context_window_tokens(state: &TuiState) -> u32 {
+    unimplemented!()
 }
 
 pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u16 {
@@ -3640,6 +3687,9 @@ fn tui_event_loop(
                     state.transition_runtime_mode(RuntimeMode::Completed);
                     state.status_text = "Turn completed".to_string();
                 }
+                // wave-39 R1/R3（契约冻结）：穷尽匹配占位，保证新增变体可编译；
+                // 实际接线（apply_turn_usage）由 Executor 在 R8 实现。
+                UiEvent::StreamUsage { .. } => unimplemented!(),
                 UiEvent::StreamFailed(err) => {
                     state.is_streaming = false;
                     state.transition_runtime_mode(RuntimeMode::Failed(err.clone()));

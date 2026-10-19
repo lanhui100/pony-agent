@@ -1,0 +1,21 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "sessions_rwlock_write_with_poison_recovery",
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true
+  },
+  "resource_release": [
+    "sessions_rwlock_write_guard_released_on_method_return",
+    "no_background_threads_or_handles_introduced_by_ensure_workspace_for_root",
+    "no_file_handles_held_beyond_single_registry_write",
+    "tui_startup_ensure_failure_degrades_to_none_without_panic_or_exit",
+    "no_new_threads_or_handles_introduced_by_composer_metrics_line",
+    "tui_usage_state_updates_bound_to_main_event_loop"
+  ]
+}
