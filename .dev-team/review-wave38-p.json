@@ -1,0 +1,23 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 1951,
+      "rule": "Q3 / 契约 §2 AT1：只读 HOME 下新增 workspace 落盘失败必须返回 Err 或幂等成功；ensure_workspace_for_root 新增记录后调用 save_to_backend()（返回 ()，无 Result 通道），FileSessionBackend::save_store 对 fs::write 失败执行 `let _ =`（file_backend.rs:45），SQLite 后端同样只 eprintln 不把错误返回调用方，因此 ensure 仍返回 Ok(record)；TUI tui.rs:2799-2804 据此把未持久化 id 写入 active_workspace_id，map_err 的 eprintln 永不触发，失败未回退 None",
+      "counterexample": "复核：git show 7456d1c:crates/pony-agent-core/src/agent/session/store.rs | sed -n '1948,1953p' => `if self.workspaces.len() > before { self.save_to_backend(); } Ok(record)`；git show 7456d1c:crates/pony-agent-core/src/agent/session/file_backend.rs | sed -n '33,45p' => create_dir_all/serde 失败直接 `return`，`let _ = fs::write(...)`。场景：隔离 HOME chmod 555 后在全新目录启动 TUI，ensure 走新增记录分支，fs::write EACCES 被吞，函数返回 Ok 而非 Err；既非 Err 也非既有记录幂等命中，AT1 语义不成立"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave38-tui-workspace-contract.rs",
+      "line": 351,
+      "rule": "防止假绿 / 契约 §2 AT1：该冻结用例只调用纯内存 workspace::ensure_workspace_for_root（:352）、build_turn_input（:361）与 TuiState::default()，从不构造 SessionStore/HostControlPlane，也不执行 tui.rs:2799 的 TUI 启动登记路径；AT1 的『落盘失败』分支零覆盖——store.rs:1951 的 save_to_backend 分支即使 panic 或返回 Err，本用例仍保持绿色",
+      "counterexample": "grep -nE 'SessionStore|HostControlPlane|save_to_backend|run_tui' crates/pony-agent-core/tests/wave38-tui-workspace-contract.rs => 0 命中；sed -n '351,425p' 只有 ensure(纯函数)/build_turn_input 断言。clean rebuild 实跑 `cargo test -p pony-agent-core --test wave38-tui-workspace-contract` = 10 passed，但 AT1 声称的持久化路径未被任何断言触达"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2993,
+      "rule": "契约 R1.5（7456d1c 冻结版）：恢复旧会话后再发送会按 TUI cwd 盖章；实际 /resume 只更新 state.session_id（:2993），active_workspace_id 仍是启动 cwd；store.rs:2044-2063 的 only-once 语义对已注册且不同的 owner 不覆盖，resolve_session_workspace_root（runtime/mod.rs:309、turn_stream.rs:186）仍按旧 owner 解析；header（tui.rs:989）显示 cwd，工具根却是旧 workspace",
+      "counterexample": "场景：桌面端在 ~/pony_agent 以 workspace_id=default 盖章的会话 → 在 /tmp/proj 启动 TUI → /resume 选中该会话（tui.rs:2993）→ 发送 turn 时 build_turn_input（tui.rs:1263）传 cwd 的 ws-*；stamp_workspace_id（store.rs:2059）判定 current=default 已注册且 != normalized => should_write=false；resolve_session_workspace_root 返回 ~/pony_agent；屏幕 header 仍显示 /tmp/proj。R1.5 的『按 TUI cwd 盖章』不成立（Lead 已在 §5.D1 追加修正，但 7456d1c 未实现）"
+    }
+  ]
+}

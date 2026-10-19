@@ -63,7 +63,7 @@ pub fn ensure_workspace_for_root(&self, root: &str) -> Result<WorkspaceRecord, S
 ### R1.5 语义边界（非目标 Non-Goals）
 - **不改** `bootstrap_default_workspace` / `compute_default_workspace_root` / `get_workspace_root` 的语义与默认登记（桌面端默认工作区仍是 `~/pony_agent`，既有 default 永不迁移）。
 - **不改** 前端、`ponycli`（`src/bin/cli.rs`）、Tauri 适配层。
-- **不改** 会话 stamping/normalize 的既有核心语义（TUI 通过 `workspace_id` 走既有盖章链；恢复旧会话后再发送会按 TUI cwd 盖章，属显式语义，文档记录）。
+- **不改** 会话 stamping/normalize 的既有核心语义（TUI 通过 `workspace_id` 走既有盖章链）。*（原文「恢复旧会话后再发送会按 TUI cwd 盖章」已被 §5.D1 取代：恢复已有注册归属的会话保持原归属，仅 None/空/死 id 才回退启动目录绑定。）*
 - 不新增第三方依赖；不重构无关代码。
 
 ## 2. 验收契约（红相先行，Test Agent 编写，Executor 只读）
@@ -78,7 +78,7 @@ pub fn ensure_workspace_for_root(&self, root: &str) -> Result<WorkspaceRecord, S
 - **E7** 回归：`TuiState::default().workspace` == `canonicalize(current_dir)`。
 
 ### L2-AT 对抗（同脚本第二段 / 独立用例）
-- **AT1** 只读 HOME（`HOME` 目录 chmod 只读或指向不可写）：`ensure_workspace_for_root` 落盘失败必须返回 `Err` 或幂等成功，**不得 panic**；TUI 启动仍进入 alt screen 且不崩溃（无 101）。
+- **AT1** 只读 HOME（`HOME` 目录 chmod 只读或指向不可写）：TUI 启动不 panic、可正常进入并退出（无 101）。*（口径已由 §5.D2/D4 修订：不要求 `ensure` 返回 Err——持久化为既有 best-effort 契约。）*
 - **AT2** 同名目录对抗：两个不同 root 同名（`a/proj`、`b/proj`）并发/连续 ensure → 名称去重确定性（顺序执行两次），无重复 id、无重复名。
 - **AT3** 超长/含怪异字符目录名（≥100 char）：登记后名称 ≤64 char 且 root 正确。
 
@@ -128,7 +128,7 @@ pub fn resolve_resumed_workspace_binding(
   - E12 空字符串 id → (startup id, startup path)。
 
 ### D3（对应 finding 3，契约声明，无代码）：workspace 登记增长语义
-- **显式设计**：TUI 启动目录会作为 workspace 记录**持久化到共享注册表**（桌面端同样可见），不做 TTL/上限/自动清理；清理口径 = 用户在桌面/TUI 侧显式删除（`delete_workspace`，default 保留字不可删）。这属 R1 的预期副作用，不作为缺陷修复。
+- **显式设计**：TUI 启动目录会作为 workspace 记录**持久化到共享注册表**（桌面端同样可见），不做 TTL/上限/自动清理；清理口径 = 用户经宿主 API（桌面端工作区菜单 / `delete_workspace` 命令，default 保留字不可删）显式删除；TUI 本身不提供删除命令。这属 R1 的预期副作用，不作为缺陷修复。
 
 ### 门禁
 - D1/D2 测试先红后绿；`cargo test --test wave38-tui-workspace-contract` 与 `bash tests/acceptance/l2at-tui-workspace.sh` EXIT=0；`RUSTFLAGS="-D warnings" cargo check --lib --bins` EXIT=0；复跑 L3-B 靶向审查 PASS。

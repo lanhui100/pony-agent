@@ -1,10 +1,10 @@
 {
-  "wave": 37,
-  "status": "red_phase",
+  "wave": 38,
+  "status": "green_verified",
   "task_classification": "B",
-  "reason": "W36 PA-138..145 收口：草稿门禁 fail-open（注入会话为唯一判据）、PA-141 宿主审批闸门（方案 b）、全量 flake 确定性化、ubuntu CI core 测试门禁、PA-142 零断言假绿、PA-143/144 码表边界、PA-145 recovery 单一出口",
-  "baseline_commit": "ddbc2fdaaf45447d36310603b57d1984191e1dfd",
-  "symptom": "/cost 仅为固定打印占位符，缺乏基于模型定价矩阵的 USD 真实计算与 max_budget_usd 硬熔断能力（审计 A16）",
+  "reason": "wave-38: TUI 启动目录即默认 workspace（cwd→workspace 绑定；工具/env note/会话归属一致；桌面端默认工作区语义不变）",
+  "baseline_commit": "7145631ca12eea0bf84c7c441887a72866bd5372",
+  "symptom": "在任意目录运行 pony TUI 时，header 显示启动目录，但工具执行/env note 走注册表默认工作区 ~/pony_agent（红相 E2E 铁证：屏幕出现 DEFAULT_WS_MARKER、无 TUI_WORKSPACE_MARKER）",
   "waves": {
     "9": {
       "branches": {
@@ -1482,6 +1482,62 @@
       "attribution": {
         "lib_remaining_red": "governed_executor_dispatches_plan_control... = wave-36 PA-141 red-phase (stash-verified, not wave-37)"
       }
+    },
+    "38": {
+      "branches": {
+        "tui-workspace-cwd": {
+          "base": "7145631",
+          "wip_snapshot": "6429be7 (pre-existing /thinking changes, not wave38)",
+          "protocol": "2b99f7a",
+          "red_commit": "cc98128",
+          "green_commit": "b473a3f",
+          "delta_green_commit": "cd6412e",
+          "status": "verified",
+          "fix_scope": "workspace.rs / session/store.rs / control_plane/workspace_commands.rs / bin/tui.rs + tests + acceptance script",
+          "final_commit": "cd6412e",
+          "final_commit_note": "closure commit adds ledger/reviews/meta-retrospective only"
+        }
+      },
+      "tasks": {
+        "task-1": "protocol: stubs + NFR wave38 incremental — completed",
+        "task-2": "test: red-phase E1-E7/AT1-AT3 + real TUI E2E — completed",
+        "task-3": "executor: cwd→workspace binding — completed",
+        "task-4": "protocol-delta: resume binding stub — completed",
+        "task-5": "test-delta: E8-E12 + AT1-RO — completed",
+        "task-6": "executor-delta: resume binding + wiring — completed"
+      },
+      "gates": {
+        "red_phase": {
+          "cargo_test_wave38": "EXIT=101 (9/10 failed by unimplemented!)",
+          "e2e": "EXIT=1 (A1/A2/A4 fail: tools read ~/pony_agent marker)",
+          "red_purity": "EXIT=0 PURE_RED"
+        },
+        "green_phase": {
+          "cargo_check_warnings": "EXIT=0",
+          "cargo_test_wave38": "EXIT=0 (15 passed)",
+          "lib_workspace_regression": "EXIT=0 (24 passed)",
+          "e2e": "EXIT=0 GREEN 10/10 (incl. AT1-RO chmod 500 HOME)",
+          "intermediate_commit_builds": "WIP/red/stub commits cargo check EXIT=0 (isolated worktrees)"
+        }
+      },
+      "reviews": {
+        "L3-A": "PASS (review-wave38-a.json)",
+        "L3-B": "FAIL 3 findings → delta D1/D2/D3 → PASS (review-wave38-b2.json)",
+        "L3-P": "FAIL Q3 → D4 adjudication → PASS (review-wave38-p2.json)",
+        "L3-A2": "did not land within budget (subagent timeout); initial L3-A PASS + L3-B2 PASS cover correctness"
+      },
+      "adjudications": {
+        "D3": "workspace registry growth without TTL = explicit design, not defect",
+        "D4": "SessionBackend::save_store returns () (pre-existing); wave38 = in-process + best-effort persistence, fail-safe normalize to default on next launch"
+      },
+      "evidence": [
+        ".dev-team/evidence/wave38/red-rust.log",
+        ".dev-team/evidence/wave38/red-e2e.log",
+        ".dev-team/evidence/wave38/delta-red-rust.log",
+        ".dev-team/evidence/wave38/delta-red-e2e.log",
+        "tests/acceptance/receipts/l2at-tui-workspace/",
+        "tests/acceptance/receipts/l2at-tui-workspace/at1-ro/"
+      ]
     }
   },
   "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
