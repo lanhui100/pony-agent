@@ -1,0 +1,54 @@
+{
+  "scenario": "shift-enter",
+  "wave": 40,
+  "bin": "/home/dm/pony-agent/target/debug/pony",
+  "bin_sha256": "6f805145a9925f4b358f85d6f9028322d9f62bbcc7bea0bf4bed9e2dcdf811d5",
+  "pty": {
+    "cols": 120,
+    "rows": 34,
+    "term": "xterm-256color",
+    "isolated_home": true
+  },
+  "generated_at": "2026-10-19T21:52:24+0800",
+  "exit_code": 1,
+  "pass": 3,
+  "fail": 1,
+  "assertions": [
+    {
+      "id": "a2.1_probe_answered_and_flags_pushed",
+      "ok": false,
+      "detail": "probe_seen=False push_seen=False push_flags=None raw_push= expected_push_flags_bit=DISAMBIGUATE(1) [contract literal '>2u' == REPORT_EVENT_TYPES bit; crossterm writes '>1u' for R2 flags]"
+    },
+    {
+      "id": "a2.2_shift_enter_inserts_newline_without_submit",
+      "ok": true,
+      "detail": "composer_row='   › abc' submit_markers=[] prompt_row_before=31 prompt_row_after=30 composer_grew(second visual line)=True"
+    },
+    {
+      "id": "a2.3_plain_enter_submits_and_clears_composer",
+      "ok": true,
+      "detail": "submitted=True composer_row='   › 写下任务，或输入 / 查看命令'"
+    },
+    {
+      "id": "a2.4_ctrl_c_exits_without_panic_and_restores_terminal",
+      "ok": true,
+      "detail": "exited=True child_exit=0 panic=False leave_alt_screen=True pop_seen=False pop_required=False"
+    }
+  ],
+  "sequences": {
+    "probe": "",
+    "shift_enter": "1b5b31333b3275",
+    "plain_enter": "0d",
+    "ctrl_c": "03"
+  },
+  "screens": {
+    "before": "screen-before.txt",
+    "after_shift_enter": "screen-after-shift-enter.txt",
+    "after_enter": "screen-after-enter.txt"
+  },
+  "notes": [
+    "no CSI ? u probe observed within 8s: the binary does not call supports_keyboard_enhancement() (R3 not wired)",
+    "assertion 1 failed before the app can receive Shift+Enter (expected red phase)",
+    "pop flags not required in this run: no push was observed (red phase / unsupported terminal path)"
+  ]
+}

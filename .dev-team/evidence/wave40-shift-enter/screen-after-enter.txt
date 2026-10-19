@@ -1,0 +1,34 @@
+   pony  ·  pony-agent                                                                              model-ppx-default
+   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+
+   ▌
+   ▌ abc
+   ▌
+
+   ✕ Error: provider ppx missing API key; please save a key in the model config page (field: PPX_API_KEY).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   › 写下任务，或输入 / 查看命令
+
+     /home/dm/pony-agent                                                                                    上下文 0%
