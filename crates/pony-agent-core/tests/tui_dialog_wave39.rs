@@ -611,16 +611,16 @@ fn a9_apply_turn_usage_is_idempotent_per_turn_and_accumulates_across_turns() {
     // Arrange
     let mut state = tui::TuiState::default();
 
-    // Act 1：本轮首次回执
+    // Act 1：本轮首次回执 (input=1, output=1, cache=0, total=2)
     state.apply_turn_usage(1, 1, 0, 2);
 
-    // Assert 1：首轮回执直接计入
+    // Assert 1：首轮回执直接计入，last_context_tokens 遵循 S1 单次上下文输入
     assert_eq!(state.total_input_tokens, 1, "首轮回执 input 必须计入");
     assert_eq!(state.total_output_tokens, 1, "首轮回执 output 必须计入");
     assert_eq!(state.total_cache_hit_tokens, 0, "首轮回执 cache 必须计入");
     assert_eq!(
-        state.last_context_tokens, 2,
-        "last_context_tokens 必须跟随最近一轮 total"
+        state.last_context_tokens, 1,
+        "last_context_tokens 遵循 S1 必须记录当前上下文输入"
     );
 
     // Act 2：同一轮重复回执（幂等覆盖，不是累加）
@@ -640,18 +640,18 @@ fn a9_apply_turn_usage_is_idempotent_per_turn_and_accumulates_across_turns() {
         "同一轮二次回执必须幂等覆盖 cache"
     );
     assert_eq!(
-        state.last_context_tokens, 5,
-        "同一轮二次回执后 last_context_tokens 必须为最新 total"
+        state.last_context_tokens, 3,
+        "同一轮二次回执后 last_context_tokens 必须为最新上下文输入 3"
     );
 
     // Act 3：新一轮（begin 清空本轮回执）后再次回执
     state.begin_turn_usage();
     state.apply_turn_usage(10, 4, 2, 14);
 
-    // Assert 3：跨轮累加 = 3+10 / 2+4 / 1+2，last_context 跟随最新一轮
+    // Assert 3：wave-41 对齐 ADR 0035 S1 规范：当前输入为单次上下文输入 10（非跨轮累加 13）；输出与缓存保持跨轮累加
     assert_eq!(
-        state.total_input_tokens, 13,
-        "跨轮 input 必须累加（3 + 10）"
+        state.total_input_tokens, 10,
+        "wave-41：输入 token 对齐 ADR 0035 S1 当前单次上下文输入（10，非 3+10）"
     );
     assert_eq!(
         state.total_output_tokens, 6,
@@ -662,8 +662,8 @@ fn a9_apply_turn_usage_is_idempotent_per_turn_and_accumulates_across_turns() {
         "跨轮 cache 必须累加（1 + 2）"
     );
     assert_eq!(
-        state.last_context_tokens, 14,
-        "last_context_tokens 必须跟随最新一轮 total（14）"
+        state.last_context_tokens, 10,
+        "last_context_tokens 必须跟随最新一轮上下文输入（10）"
     );
 }
 

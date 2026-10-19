@@ -289,13 +289,13 @@ pub struct TuiState {
     /// `startup_workspace_id` 由 `main` 在 `ensure_workspace_for_root` 成功后写入。
     pub startup_workspace_path: PathBuf,
     pub startup_workspace_id: Option<String>,
-    /// wave-39 R2：累计已提交轮次的输入 token（语义在 wave-39 明确为「轮次累加」）。
+    /// wave-39 R2 / wave-41 S1：当前上下文输入 token（最近一次模型调用的 input_tokens，禁止跨调用累加，对齐 ADR 0035 S1）。
     pub total_input_tokens: u64,
     /// wave-39 R2：累计已提交轮次的输出 token。
     pub total_output_tokens: u64,
     /// wave-39 R2（契约冻结）：累计缓存命中输入 token。
     pub total_cache_hit_tokens: u64,
-    /// wave-39 R2：最近一轮 `total_tokens`，用于上下文占用率。
+    /// wave-39 R2 / wave-41 S1：最近一次调用的上下文占用 token，用于上下文百分比分子（对齐 ADR 0035 S1）。
     pub last_context_tokens: u64,
     /// wave-39 R2：当前模型上下文窗口；`0` = 未知（指标行渲染 `—`）。
     pub context_window_tokens: u32,
@@ -323,6 +323,8 @@ pub struct TuiState {
     pub add_provider_form: AddProviderForm,
     pub runtime_mode: RuntimeMode,
     pub turn_started_at: Option<std::time::Instant>,
+    /// Composer 高度平滑收拢过渡（每帧衰减 1 行直至 target_input_h）
+    pub anim_composer_h: Option<u16>,
 }
 
 impl Default for TuiState {
@@ -372,11 +374,18 @@ impl Default for TuiState {
             add_provider_form: AddProviderForm::default(),
             runtime_mode: RuntimeMode::Ready,
             turn_started_at: None,
+            anim_composer_h: None,
         }
     }
 }
 
 impl TuiState {
+    /// 是否存在未完成的 UI 动画（输入框收拢过渡，或平滑滚动追赶）
+    pub fn has_pending_animation(&self) -> bool {
+        self.anim_composer_h.is_some()
+            || (self.auto_scroll && self.scroll_offset < self.max_scroll_offset)
+    }
+
     pub fn transition_runtime_mode(&mut self, next: RuntimeMode) {
         self.runtime_mode = next;
     }
@@ -399,18 +408,18 @@ impl TuiState {
         self.turn_usage = None;
     }
 
-    /// wave-39 R3：**幂等覆盖**本轮增量 —— 若已有本轮回执则先扣除旧值再加入新值，
-    /// `last_context_tokens = total`；跨轮为累加。
+    /// wave-39 R3 / wave-41 S1：输入 token 与上下文按单次调用口径（ADR 0035 S1），
+    /// `total_input_tokens` 表达当前上下文占用（不跨轮跨跳累加）；
+    /// 输出 token 与缓存命中维持跨轮会话累计（幂等覆盖本轮增量）。
     pub fn apply_turn_usage(&mut self, input: u64, output: u64, cache_hit: u64, total: u64) {
-        if let Some((prev_input, prev_output, prev_cache, _prev_total)) = self.turn_usage {
-            self.total_input_tokens = self.total_input_tokens.saturating_sub(prev_input);
+        if let Some((_prev_input, prev_output, prev_cache, _prev_total)) = self.turn_usage {
             self.total_output_tokens = self.total_output_tokens.saturating_sub(prev_output);
             self.total_cache_hit_tokens = self.total_cache_hit_tokens.saturating_sub(prev_cache);
         }
-        self.total_input_tokens = self.total_input_tokens.saturating_add(input);
+        self.total_input_tokens = input;
         self.total_output_tokens = self.total_output_tokens.saturating_add(output);
         self.total_cache_hit_tokens = self.total_cache_hit_tokens.saturating_add(cache_hit);
-        self.last_context_tokens = total;
+        self.last_context_tokens = input;
         self.turn_usage = Some((input, output, cache_hit, total));
     }
     pub fn start_add_provider(&mut self) {
@@ -830,6 +839,10 @@ impl TuiState {
     }
 
     pub fn clear_input(&mut self) {
+        let lines_count = (self.input_buffer.lines().count() + 1).clamp(2, 6) as u16;
+        if lines_count > 2 {
+            self.anim_composer_h = Some(lines_count);
+        }
         self.input_buffer.clear();
         self.input_cursor = 0;
     }
@@ -1313,8 +1326,9 @@ impl TurnEventSink for TuiTurnSink {
     }
 }
 
-/// wave-39 R8'（契约 v2）：仅 `turn:output_end` 是 usage 权威事件；
-/// 返回 `Some(UiEvent::StreamUsage{..})` 当且仅当事件名匹配且任一 token 字段为 Some。
+/// wave-39 R8' / wave-41 S1：仅 `turn:output_end` 是 usage 权威事件；
+/// 输入 token 遵循 ADR 0035 S1 规范：多跳时从 provider_call_records 末条提取单次上下文输入，
+/// 严禁跨跳跨轮求和；无 records 时回退 payload.input_tokens。
 pub fn stream_usage_event(event_name: &str, payload: &TurnStreamEvent) -> Option<UiEvent> {
     if event_name != "turn:output_end" {
         return None;
@@ -1323,11 +1337,22 @@ pub fn stream_usage_event(event_name: &str, payload: &TurnStreamEvent) -> Option
         && payload.output_tokens.is_none()
         && payload.cache_hit_input_tokens.is_none()
         && payload.total_tokens.is_none()
+        && payload.provider_call_records.is_none()
     {
         return None;
     }
+
+    // ADR 0035 S1：优先从末次 provider call record 提取真实单次上下文输入
+    let context_input = payload
+        .provider_call_records
+        .as_ref()
+        .and_then(|records| records.last())
+        .and_then(|rec| rec.input_tokens)
+        .or(payload.input_tokens)
+        .unwrap_or(0);
+
     Some(UiEvent::StreamUsage {
-        input_tokens: payload.input_tokens.unwrap_or(0),
+        input_tokens: context_input,
         output_tokens: payload.output_tokens.unwrap_or(0),
         cache_hit_input_tokens: payload.cache_hit_input_tokens.unwrap_or(0),
         total_tokens: payload.total_tokens.unwrap_or(0),
@@ -1980,8 +2005,9 @@ fn workspace_label(workspace: &std::path::Path) -> String {
     full
 }
 
-/// wave-39 v3 §6 R7/R10/R11：色带下方指标行 —— 左侧 workspace 路径（整行 GHOST），
+/// wave-39 v3 §6 R7/R10/R11 / wave-41 S1：色带下方指标行 —— 左侧 workspace 路径（整行 GHOST），
 /// 右侧按「有值才显示」拼装 `↑in ↓out · 缓存 x% · 上下文 y%`；全无值时右簇为空。
+/// 输入 token (↑) 与上下文百分比分子对齐 ADR 0035 S1：使用当前上下文输入 token（非会话累计）。
 fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
     let ghost = || Style::default().fg(theme::GHOST);
     let mut segments: Vec<String> = Vec::new();
@@ -1999,7 +2025,13 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
         segments.push(format!("缓存 {pct:.0}%"));
     }
     if state.context_window_tokens > 0 {
-        let pct = (state.last_context_tokens as f64 / state.context_window_tokens as f64 * 100.0)
+        // ADR 0035 S1：若显式设置了 last_context_tokens（或单次调用的输入 token），以此为分子计算上下文占用
+        let context_tokens = if state.last_context_tokens > 0 {
+            state.last_context_tokens
+        } else {
+            state.total_input_tokens
+        };
+        let pct = (context_tokens as f64 / state.context_window_tokens as f64 * 100.0)
             .round()
             .clamp(0.0, 100.0);
         segments.push(format!("上下文 {pct:.0}%"));
@@ -2353,7 +2385,20 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let visual_lines = layout_input(&state.input_buffer, composer_text_width).len() as u16;
     // wave-39 v3 R9：正文 + 1 行呼吸（单行输入 = 2 行），最多 6 行；色带 = input_h + 顶部内边距。
     // wave-39 v4 R13：删除独立 CANVAS 间距行，input_h 末行即色带内呼吸行 → 间距视觉 2 行收为 1 行。
-    let input_h = (visual_lines + 1).clamp(2, 6);
+    // wave-41：发送时 Composer 高度平滑衰减收拢，正文平滑展开，底部平稳下移。
+    let target_input_h = (visual_lines + 1).clamp(2, 6);
+    let input_h = if let Some(anim_h) = state.anim_composer_h {
+        if anim_h > target_input_h {
+            let next_h = anim_h.saturating_sub(1);
+            state.anim_composer_h = if next_h > target_input_h { Some(next_h) } else { None };
+            anim_h
+        } else {
+            state.anim_composer_h = None;
+            target_input_h
+        }
+    } else {
+        target_input_h
+    };
     let band_h = input_h + 1;
     let bottom_h = input_h + 2;
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
@@ -2565,9 +2610,15 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             }
         }
 
-        // 进行中的一行极简状态（不打断阅读节奏，只占一行）
+        // 进行中的一行极简状态（不打断阅读节奏，紧凑规整，不晃动）
         if state.is_streaming && !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
-            push_blank(&mut lines);
+            let need_blank = lines
+                .last()
+                .map(|l| !l.spans.is_empty() && !l.spans.iter().all(|s| s.content.trim().is_empty()))
+                .unwrap_or(false);
+            if need_blank {
+                push_blank(&mut lines);
+            }
             let (word, style) = status_word(state);
             let elapsed = elapsed_label(state);
             let text = if elapsed.is_empty() {
@@ -2586,7 +2637,6 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 Line::from(Span::styled(text, style)),
                 width.saturating_sub(RAIL),
             );
-            lines.push(blank());
         }
     }
 
@@ -2596,8 +2646,25 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let max_offset = total.saturating_sub(visible);
     state.max_scroll_offset = max_offset as u16;
     let offset = if state.auto_scroll {
-        state.scroll_offset = max_offset as u16;
-        max_offset
+        let current = state.scroll_offset as usize;
+        if current < max_offset {
+            let diff = max_offset - current;
+            // 阻尼平滑跟随：新消息涌入或状态下移时，以阻尼步长平滑推进行，消除画面撕裂
+            let step = if diff > 6 {
+                3
+            } else if diff > 2 {
+                2
+            } else {
+                1
+            };
+            let next = (current + step).min(max_offset);
+            state.scroll_offset = next as u16;
+            next
+        } else {
+            let clamped = current.min(max_offset);
+            state.scroll_offset = clamped as u16;
+            clamped
+        }
     } else {
         let clamped = (state.scroll_offset as usize).min(max_offset);
         state.scroll_offset = clamped as u16;
@@ -3173,12 +3240,17 @@ fn tui_event_loop(
             dirty = true;
         }
 
+        // 存在平滑阻尼过渡（Composer 柔和收拢或平滑滚动追赶）时持续刷新下一帧
+        if state.has_pending_animation() {
+            dirty = true;
+        }
+
         if dirty {
             terminal.draw(|f| ui(f, &mut state))?;
             dirty = false;
         }
 
-        let poll_ms = if state.is_streaming { 16 } else { 120 };
+        let poll_ms = if state.is_streaming || state.has_pending_animation() { 16 } else { 120 };
         match rx.recv_timeout(Duration::from_millis(poll_ms)) {
             Ok(event) => {
                 dirty = true;
