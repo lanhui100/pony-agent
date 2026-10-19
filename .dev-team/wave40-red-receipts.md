@@ -87,3 +87,41 @@ E2E 脚本按「真实协议 + crossterm 0.28.1 源码」实现，并与契约�
 - 执行环境：本机 Linux PTY（`pty.fork`，120×34，`TERM=xterm-256color`，隔离 HOME/XDG 临时目录）。
 - 脚本每次运行后 `SIGKILL` 兜底回收子进程并删除临时 HOME/XDG（`shutil.rmtree`）；本次运行后无残留 pony 进程。
 - 一次性验证件 `/tmp/w40-probe`（crossterm 探测程序）仅用于协议应答验证，可随时删除。
+
+## 6. 工具缺陷修正与绿相复跑（同波次追加）
+
+Executor 落地 R3（probe/push/pop，`tui.rs:3020-3037`、`3060-3066`、`3575-3579`）后，A2 复跑暴露本脚本自身缺陷：**pop 字面量只匹配裸 `ESC[<u`**。
+
+### 缺陷与修法
+- crossterm 0.28.1 `PopKeyboardEnhancementFlags` 实际输出 `CSI < 1 u`（`event.rs:533` `csi!("<1u")`），而非裸 `<u`；原 `POP_SEQ = b"\x1b[<u"` 永远匹配不到 → a2.4 假失败（断言1-3 已 PASS）。
+- 修法（仅脚本）：`POP_RE = re.compile(rb"\x1b\[<[0-9]*u")`，接受 `<u` / `<1u` / 其它 flags；语义不变——**本进程 push 过则退出时必须 pop**；断言 1–3 与其它条件未放宽。
+- Executor 独立 PTY 抓流与本次复跑一致：pop=`1b5b3c3175`、push=`1b5b3e3175`、离开备用屏、无 panic、exit=0。
+
+### 门禁（真实退出码，修正后）
+
+```
+$ cd /home/dm/pony-agent && cargo build -p pony-agent-core --bin pony
+    Finished `dev` profile [unoptimized] target(s) in 0.28s
+EXIT_BUILD=0            # binary sha256 f82cddab… 
+
+$ python3 tools/tui-audit/check_shift_enter.py --bin target/debug/pony
+RESULT scenario=shift-enter pass=4 fail=0 exit=0
+PASS a2.1_probe_answered_and_flags_pushed :: probe_seen=True push_seen=True push_flags=1 raw_push=1b5b3e3175
+PASS a2.2_shift_enter_inserts_newline_without_submit :: composer_row='   › abc' submit_markers=[] composer_grew=True
+PASS a2.3_plain_enter_submits_and_clears_composer :: composer_row='   › 写下任务，或输入 / 查看命令'
+PASS a2.4_ctrl_c_exits_without_panic_and_restores_terminal :: exited=True child_exit=0 panic=False leave_alt_screen=True pop_seen=True pop_raw=1b5b3c3175 pop_required=True
+EXIT_PTY=0
+
+$ cargo test -p pony-agent-core --test tui_enter_key_wave40 2>&1 | tail -8
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+EXIT_UNIT=0
+
+$ python3 -m py_compile tools/tui-audit/check_shift_enter.py     → EXIT_PYCOMPILE=0
+```
+
+关键序列（report.json `sequences`）：probe=`1b5b3f75`、reply=`1b5b3f31751b5b3f313b3263`、push=`1b5b3e3175`、shift_enter=`1b5b31333b3275`、plain_enter=`0d`、ctrl_c=`03`、pop=`1b5b3c3175`。
+
+### 结论
+- **A2 全绿 4/4（Exit 0）**；`screen-after-shift-enter.txt` 保留 `› abc`（换行不提交），`screen-after-enter.txt` 已清空为占位符，退出无 panic 且备用屏已退出。
+- 本修正仅改测试工具字面量匹配，不涉及业务实现与断言松紧；`tui.rs` 零改动。
+- 契约 §5 勘误已补第 4 条（pop 为 `CSI < 1 u`）。

@@ -1,0 +1,10 @@
+{
+  "verdict": "PASS",
+  "findings": [],
+  "checks": {
+    "probe_timeout": "supports_keyboard_enhancement 探测自带 2s 超时，PONY_KEYBOARD_ENHANCEMENT 环境变量支持 0/1 强制旁路/开启，未阻塞无响应终端",
+    "push_pop_balance": true,
+    "restore_paths_covered": true,
+    "input_regression": "composer_enter_action 纯函数化保持 Shift/Alt 换行与 Enter 提交，PTY 与单元全量测试均验证无退化"
+  }
+}

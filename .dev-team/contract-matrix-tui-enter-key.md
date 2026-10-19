@@ -59,3 +59,10 @@ pub fn keyboard_enhancement_flags(supported: bool) -> Option<crossterm::event::K
 - 不改桌面端（Tauri/Vue）键盘处理；不改 IME 组合态逻辑。
 - 不改其它键位（Ctrl+J、Esc、Tab）。
 - 不支持「终端完全不支持键盘增强协议」时识别 Shift+Enter（硬件/协议限制，无法区分）；该情形保留 Alt+Enter 换行与 `PONY_KEYBOARD_ENHANCEMENT=1` 兜底。
+
+## 5. 契约勘误（Test Agent 物理验证，2026-10-19）
+
+1. **push 序列为 `ESC[>1u`**，不是 §3 写的 `>2u`：`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` bits=1（crossterm-0.28.1 `event.rs:293,494-496`）；`>2u` 是 `REPORT_EVENT_TYPES`。A2 断言改为「push 存在且 disambiguate 位为 1」并记录实际 flags/hex。
+2. **PTY 对 `ESC[?u` 的应答必须为 `ESC[?1u` + 主设备属性** `ESC[?1;2c`；裸 `ESC[c` 只是查询，回写会让 crossterm 探测等待 8s 超时。一次性 crossterm 探针已实证：回写 `ESC[?1u`+`ESC[?1;2c` 后 `supports_keyboard_enhancement()==true`。
+3. 红相期间断言 2–4（换行/提交/退出）原本已通过：crossterm 对 `CSI 13;2u` 的解析不依赖 push，且既有 Shift/Alt 内联分支本就可达；本波次真正缺失的是 R3 的「探测 + push + 退出 pop」。故 A2 的判别性断言是 #1（probe/push），其余用于防回归。
+4. **pop 序列为 `ESC[<1u`**（crossterm-0.28.1 `event.rs:533 csi!("<1u")`）；A2 断言 4 的「push 过必须 pop」应以 `re: \x1b\[<[0-9]*u` 匹配，不得只认裸 `<u`。

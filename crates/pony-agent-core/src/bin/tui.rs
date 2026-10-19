@@ -2,9 +2,15 @@
 //! 基于 ratatui + crossterm 构建，支持对话历史、流式输出、工具状态与多行输入。
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags, KeyCode,
+        KeyModifiers, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use pony_agent_core::agent::config::{
     ProviderModelCapabilities, ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
@@ -111,15 +117,25 @@ pub enum ComposerEnterAction {
     Newline,
 }
 
-#[allow(dead_code, unused_variables)]
 pub fn composer_enter_action(key: &crossterm::event::KeyEvent) -> ComposerEnterAction {
-    unimplemented!()
+    // Shift+Enter / Alt+Enter 是「换行」的显式语义；其余键（含裸 Enter）落到 Enter 分支的提交语义。
+    if key.code == KeyCode::Enter
+        && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT))
+    {
+        ComposerEnterAction::Newline
+    } else {
+        ComposerEnterAction::Submit
+    }
 }
 
 /// wave-40 R2（契约冻结空桩）：终端支持键盘增强时返回要 push 的标志。
-#[allow(dead_code, unused_variables)]
-pub fn keyboard_enhancement_flags(supported: bool) -> Option<crossterm::event::KeyboardEnhancementFlags> {
-    unimplemented!()
+pub fn keyboard_enhancement_flags(supported: bool) -> Option<KeyboardEnhancementFlags> {
+    // kitty 协议的 DISAMBIGUATE_ESCAPE_CODES：把 Shift+Enter 与裸 Enter 区分开。
+    if supported {
+        Some(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3009,6 +3025,21 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // wave-40 R3：启用终端键盘增强协议（crossterm 的 kitty 探测内部自带 2s 超时，失败不 panic）。
+    // 必须在 raw mode + 备用屏之后探测：crossterm 需要 /dev/tty 可用。
+    // PONY_KEYBOARD_ENHANCEMENT：0 = 强制关闭（不探测不 push）；1 = 强制开启（不探测直接 push）；
+    // 其他/未设置 = 真实探测终端能力。
+    let enhancement_override = std::env::var("PONY_KEYBOARD_ENHANCEMENT").ok();
+    let keyboard_enhancement_supported = match enhancement_override.as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => supports_keyboard_enhancement().unwrap_or(false),
+    };
+    let keyboard_enhancement_pushed = match keyboard_enhancement_flags(keyboard_enhancement_supported) {
+        Some(flags) => execute!(terminal.backend_mut(), PushKeyboardEnhancementFlags(flags)).is_ok(),
+        None => false,
+    };
+
     let mut state = TuiState::default();
     // wave-35c：启动同步 current_provider_id / model 与注册表一致（build_control_plane 之前）。
     sync_state_with_registry(&mut state);
@@ -3032,6 +3063,11 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     eprintln!("[pony-tui] running terminal restore (T2c)");
+    // wave-40 R3：先撤销键盘增强协议（若已 push），与既有的 raw mode / 备用屏恢复同批次，
+    // panic catch 路径也会经过这里。
+    if keyboard_enhancement_pushed {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
     let _ = terminal.show_cursor();
@@ -3573,11 +3609,8 @@ fn tui_event_loop(
                         }
                     }
 
-                    // Shift+Enter / Alt+Enter：换行而不发送
-                    if key.code == KeyCode::Enter
-                        && (key.modifiers.contains(KeyModifiers::SHIFT)
-                            || key.modifiers.contains(KeyModifiers::ALT))
-                    {
+                    // wave-40 R4：Enter 语义统一由 composer_enter_action 裁定（Shift/Alt → 换行）。
+                    if composer_enter_action(&key) == ComposerEnterAction::Newline {
                         state.insert_newline();
                         continue;
                     }

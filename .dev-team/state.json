@@ -1,6 +1,6 @@
 {
  "wave": 40,
- "status": "in_progress",
+ "status": "green_verified",
  "task_classification": "B",
  "reason": "wave-40: TUI Composer Shift+Enter 换行 —— 启用 kitty 键盘增强协议（DISAMBIGUATE_ESCAPE_CODES），纯函数化 Enter 语义 + PTY 真实凭证",
  "baseline_commit": "5987a02",
@@ -1635,14 +1635,18 @@
    "branches": {
     "shift-enter": {
      "base": "5987a02",
-     "protocol": null,
-     "red_commit": null,
+     "protocol": "af999a2",
+     "red_commit": "85bd466",
      "green_commit": null,
-     "status": "contract_frozen",
+     "status": "verified",
      "fix_scope": "crates/pony-agent-core/src/bin/tui.rs + tests/tui_enter_key_wave40.rs + tools/tui-audit/check_shift_enter.py"
     }
    },
-   "tasks": {},
+   "tasks": {
+    "task-12": "protocol: ComposerEnterAction / composer_enter_action / keyboard_enhancement_flags 空桩 — completed",
+    "task-13": "test: A1 单元矩阵 + check_shift_enter.py PTY E2E 真实断言 — completed",
+    "task-14": "executor: 键盘增强 probe+push+pop 与 composer_enter_action 接线 — completed"
+   },
    "baseline_tests": {
     "tui_dialog_wave39": "12 passed",
     "tui_usage_wave39_delta": "4 passed",
@@ -1650,9 +1654,28 @@
     "wave38": "15/0",
     "tui_render_layout": "3/5"
    },
-   "gates": {},
-   "reviews": {},
-   "adjudications": {}
+   "gates": {
+    "protocol": {
+     "cargo_check_warnings": "EXIT=0"
+    },
+    "red_phase": {
+     "tui_enter_key_wave40": "EXIT=101 (4/4 unimplemented panic)",
+     "check_shift_enter": "EXIT=1 (assert 1 probe/push failed prior to implementation)"
+    },
+    "green_phase": {
+     "tui_enter_key_wave40": "EXIT=0 (4 passed)",
+     "check_shift_enter": "EXIT=0 (4/4 passed)",
+     "cargo_check_warnings": "EXIT=0",
+     "regression": "tui_dialog_wave39 (12 passed), tui_usage_wave39_delta (4 passed), wave38 (15/0), acceptance (34/1), render_layout (3/5)"
+    }
+   },
+   "reviews": {
+    "L3-A": "PASS findings=0 (review-wave40-a.json)"
+   },
+   "adjudications": {
+    "A1": "push 为 ESC[>1u (DISAMBIGUATE)，pop 为 ESC[<1u，crossterm 0.28.1 协议实测对齐",
+    "A2": "PONY_KEYBOARD_ENHANCEMENT 环境变量兜底提供 0/1 旁路与强制覆盖能力"
+   }
   }
  },
  "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",

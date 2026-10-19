@@ -57,7 +57,9 @@ PROBE = b"\x1b[?u"
 # (bare `ESC [ c` is the DA1 query, not a response; crossterm expects `CSI ? ... c`)
 PROBE_REPLY = b"\x1b[?1u\x1b[?1;2c"
 PUSH_RE = re.compile(rb"\x1b\[>([0-9]+)u")
-POP_SEQ = b"\x1b[<u"
+# crossterm 0.28.1 serializes PopKeyboardEnhancementFlags as `CSI < 1 u`
+# (event.rs:533 `csi!("<1u")`), not a bare `CSI < u`; accept any flag value.
+POP_RE = re.compile(rb"\x1b\[<[0-9]*u")
 SHIFT_ENTER = b"\x1b[13;2u"  # kitty CSI u: codepoint 13 (Enter), modifier 2 (Shift)
 PLAIN_ENTER = b"\r"
 CTRL_C = b"\x03"
@@ -515,16 +517,18 @@ def run(bin_path: str, evidence_dir: str) -> int:
         panic = "panicked at" in text or "RUST_BACKTRACE" in text
         restored = LEAVE_ALT_SCREEN in raw
         pop_ok = True
+        pop_match = POP_RE.search(raw)
         if push_ok and push_flags is not None:
-            pop_ok = POP_SEQ in raw
-            if POP_SEQ in raw:
-                sequences["pop"] = hexs(POP_SEQ)
+            pop_ok = pop_match is not None
+            if pop_match:
+                sequences["pop"] = hexs(pop_match.group(0))
         report.add(
             "a2.4_ctrl_c_exits_without_panic_and_restores_terminal",
             exited and not panic and restored and pop_ok,
             (
                 f"exited={exited} child_exit={session.returncode} panic={panic} "
-                f"leave_alt_screen={restored} pop_seen={POP_SEQ in raw} pop_required={push_ok}"
+                f"leave_alt_screen={restored} pop_seen={pop_match is not None} "
+                f"pop_raw={pop_match.group(0).hex() if pop_match else ''} pop_required={push_ok}"
             ),
         )
         if not push_ok:

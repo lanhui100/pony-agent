@@ -2,22 +2,22 @@
   "scenario": "shift-enter",
   "wave": 40,
   "bin": "/home/dm/pony-agent/target/debug/pony",
-  "bin_sha256": "6f805145a9925f4b358f85d6f9028322d9f62bbcc7bea0bf4bed9e2dcdf811d5",
+  "bin_sha256": "05a830560ac2106da2664e9d5bdeb56d005ebab254ef32d29946efada0901e09",
   "pty": {
     "cols": 120,
     "rows": 34,
     "term": "xterm-256color",
     "isolated_home": true
   },
-  "generated_at": "2026-10-19T21:52:24+0800",
-  "exit_code": 1,
-  "pass": 3,
-  "fail": 1,
+  "generated_at": "2026-10-19T22:03:55+0800",
+  "exit_code": 0,
+  "pass": 4,
+  "fail": 0,
   "assertions": [
     {
       "id": "a2.1_probe_answered_and_flags_pushed",
-      "ok": false,
-      "detail": "probe_seen=False push_seen=False push_flags=None raw_push= expected_push_flags_bit=DISAMBIGUATE(1) [contract literal '>2u' == REPORT_EVENT_TYPES bit; crossterm writes '>1u' for R2 flags]"
+      "ok": true,
+      "detail": "probe_seen=True push_seen=True push_flags=1 raw_push=1b5b3e3175 expected_push_flags_bit=DISAMBIGUATE(1) [contract literal '>2u' == REPORT_EVENT_TYPES bit; crossterm writes '>1u' for R2 flags]"
     },
     {
       "id": "a2.2_shift_enter_inserts_newline_without_submit",
@@ -32,23 +32,22 @@
     {
       "id": "a2.4_ctrl_c_exits_without_panic_and_restores_terminal",
       "ok": true,
-      "detail": "exited=True child_exit=0 panic=False leave_alt_screen=True pop_seen=False pop_required=False"
+      "detail": "exited=True child_exit=0 panic=False leave_alt_screen=True pop_seen=True pop_raw=1b5b3c3175 pop_required=True"
     }
   ],
   "sequences": {
-    "probe": "",
+    "probe": "1b5b3f75",
+    "reply": "1b5b3f31751b5b3f313b3263",
+    "push": "1b5b3e3175",
     "shift_enter": "1b5b31333b3275",
     "plain_enter": "0d",
-    "ctrl_c": "03"
+    "ctrl_c": "03",
+    "pop": "1b5b3c3175"
   },
   "screens": {
     "before": "screen-before.txt",
     "after_shift_enter": "screen-after-shift-enter.txt",
     "after_enter": "screen-after-enter.txt"
   },
-  "notes": [
-    "no CSI ? u probe observed within 8s: the binary does not call supports_keyboard_enhancement() (R3 not wired)",
-    "assertion 1 failed before the app can receive Shift+Enter (expected red phase)",
-    "pop flags not required in this run: no push was observed (red phase / unsupported terminal path)"
-  ]
+  "notes": []
 }

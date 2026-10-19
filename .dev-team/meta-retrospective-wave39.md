@@ -48,3 +48,20 @@
 - **审查发现 no-op 也被清理**：L3-B 用 frame-buffer diff=0 证明后置 `buffer_mut().set_style` 无效且注释因果错误 → Executor 删除，避免误导后人。审查价值不止于拦截错误，也在于消除「看似修复」的死代码。
 - **门禁教训**：对比基线时 E2E 报出 2 项 `PASS→FAIL`（slash.all_commands_listed/each_command_once），实为基线二进制命令表 7 条、当前 8 条的「归因漂移」；该类「相对基线回归」必须与「相对波次起点回归」区分，否则会误判。
 - **残留**：极小窗（h≤12 + 多行输入）chat 被色带覆盖（v2 同类，无越界）；窄宽截断可停在 `" ·"`；两者均已登记 adjudications，不构成本波次回归。
+
+# Wave-40 元复盘增量（TUI Shift+Enter 换行与键盘增强协议）
+
+## 1. 通信拓扑与信噪比
+- **精准闭环**：用户反馈 TUI 中 Shift+Enter 依然发送而非换行。经 Lead 事实查证发现分支代码存在，但终端因未协商 Kitty Keyboard Enhancement 协议导致修饰键信息在 TTY 丢失。
+- 派生 Protocol 空桩、Test 单元矩阵与 PTY 交互断言脚本、Executor 落地接入，各司其职，无信噪比发散。
+
+## 2. 门禁穿透与误杀率
+- **高拟真真实 PTY E2E**：`tools/tui-audit/check_shift_enter.py` 通过虚拟 PTY 发送真实 ANSI 转义字符序列并拦截应用对 Terminal 的探测与协商信号（`CSI ? u` 对应 `CSI ? 1 u` 与 Primary DA），成功在非交互环境下完成真实的软硬件级键盘增强协议断言。
+- 单元矩阵覆盖 Shift+Enter / Alt+Enter / Control+Shift+Enter 及普通字符，无假测试。
+
+## 3. 分工契约与隔离有效性
+- 契约 matrix 明确定义了 `composer_enter_action` 纯函数抽象与 `keyboard_enhancement_flags` 协商决议。
+- 异常退出时完整还原 `PopKeyboardEnhancementFlags`，保证终端不被污染。
+
+## 4. 元协议迭代建议
+- 终端协议相关的功能应常态化配备专用 PTY 驱动脚本，以杜绝因测试 mock 导致的“代码写了但终端收不到”的黑盒盲区。
