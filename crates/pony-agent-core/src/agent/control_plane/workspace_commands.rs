@@ -27,6 +27,19 @@ impl HostControlPlane {
             .create_workspace(name, root_path)
     }
 
+    /// 确保 root 已成 workspace 记录（wave-38 契约 R1.3 宿主入口）。
+    /// 语义 = 幂等登记（见 `agent::workspace::ensure_workspace_for_root`）；
+    /// 锁纪律与 `create_workspace` 一致：`sessions_rwlock.write()` + poison 恢复。
+    ///
+    /// wave-38 空桩：函数体仅 `unimplemented!`，实现由 Executor 填充。
+    #[allow(dead_code, unused_variables)] // wave38 空桩期（未接线），Executor 接线后移除
+    pub fn ensure_workspace_for_root(
+        &self,
+        root: &str,
+    ) -> Result<crate::agent::workspace::WorkspaceRecord, String> {
+        unimplemented!("wave38 R1.3 HostControlPlane::ensure_workspace_for_root: 待 Executor 实现")
+    }
+
     pub fn rename_workspace(
         &self,
         workspace_id: &str,

@@ -238,6 +238,11 @@ pub struct TuiState {
     pub current_provider_id: String,
     pub gateway_url: String,
     pub workspace: PathBuf,
+    /// wave-38 R1.4：启动目录登记后的活跃 workspace id；`None` = 沿用注册表默认工作区。
+    /// Executor 接线时由 `control_plane.ensure_workspace_for_root(...)` 填充，并作为
+    /// `TurnInput.workspace_id` 的唯一来源。
+    #[allow(dead_code)] // wave38 空桩期（未接线），Executor 接线后移除
+    pub active_workspace_id: Option<String>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub status_text: String,
@@ -282,6 +287,7 @@ impl Default for TuiState {
             current_provider_id: "ponyllm".to_string(),
             gateway_url: env_gateway,
             workspace: canonical_workspace,
+            active_workspace_id: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             status_text: "Ready".to_string(),
@@ -1227,6 +1233,27 @@ fn sync_state_with_registry(state: &mut TuiState) {
             }
         }
     }
+}
+
+/// wave-38 R1.4 可测接缝（空桩）：由 `TuiState` 组装发送给 `start_turn_stream` 的唯一 `TurnInput`。
+///
+/// 契约口径（Executor 实现时逐字对齐现发送点，勿增删字段语义）：
+/// - `workspace_id` 取 `state.active_workspace_id.clone()`（本期修复的唯一目的字段）；
+/// - 其余字段与现发送点一致：`message` 透传、`display_message: None`、
+///   `provider_id: Some(provider_id)`、`model_id: Some(model_id)`、
+///   `reasoning_effort: state.reasoning_effort.clone()`、`workspace_mode: None`、
+///   `session_id: Some(state.session_id.clone())`、`node_id: None`、
+///   `history`/`images` 为空 Vec、`plan_execution_approval: None`。
+///
+/// wave-38 空桩：函数体仅 `unimplemented!`；发送点接线属 Executor 职责，本期不接线。
+#[allow(dead_code, unused_variables)] // wave38 空桩期（未接线），Executor 接线后移除
+pub fn build_turn_input(
+    state: &TuiState,
+    message: String,
+    provider_id: String,
+    model_id: String,
+) -> TurnInput {
+    unimplemented!("wave38 R1.4 build_turn_input: 待 Executor 实现")
 }
 
 fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &str) -> HostControlPlane {

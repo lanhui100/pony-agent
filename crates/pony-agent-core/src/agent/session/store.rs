@@ -1937,6 +1937,19 @@ impl SessionStore {
         Ok(record)
     }
 
+    /// 确保 root 已成 workspace 记录（wave-38 契约 R1.2，供 TUI 把启动目录登记为工作区）：
+    /// 语义 = 调 `agent::workspace::ensure_workspace_for_root`（幂等）；**仅当新增记录时**
+    /// `save_to_backend()` 落盘，命中既有记录 → 零写盘。
+    ///
+    /// wave-38 空桩：函数体仅 `unimplemented!`，实现由 Executor 填充。
+    #[allow(dead_code, unused_variables)] // wave38 空桩期（未接线），Executor 接线后移除
+    pub fn ensure_workspace_for_root(
+        &mut self,
+        root: &str,
+    ) -> Result<crate::agent::workspace::WorkspaceRecord, String> {
+        unimplemented!("wave38 R1.2 SessionStore::ensure_workspace_for_root: 待 Executor 实现")
+    }
+
     /// 重命名工作区（侧边栏三级树）：校验与 id/root 不变性由 workspace 域负责，
     /// 成功即全量落盘。未知 id 返回错误。
     pub fn rename_workspace(

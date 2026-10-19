@@ -257,6 +257,25 @@ pub fn create_workspace_entry(
     Ok(record)
 }
 
+/// 确保 root 已在 workspace 注册表中（wave-38 契约 R1.1）：
+/// - **幂等**：已存在同 root 记录（`roots_match`）→ 原样返回该既有记录，`records` 不变、
+///   不产生任何写盘（持久化由调用方负责）；
+/// - **新登记**：复用 `create_workspace_entry`（id 规则 `ws-<slug>-<ts>` 与名称校验单源），
+///   root 规范化复用 `normalize_workspace_root`（canonicalize + 必须为目录 + Windows 去 `\\?\` 前缀）；
+/// - **显示名规则**：取 canonical root 的 `file_name`；空/非 UTF-8/根路径（如 `/`）→ `"workspace"`；
+///   按 char 截断到 ≤64 字符；与既有记录重名（不同 root）→ 依次追加 `" (2)"`…`" (99)"`；
+///   全部占用则 `Err`；
+/// - 不改动既有 default 记录、不做任何迁移（R1.5 语义边界）。
+///
+/// wave-38 空桩：函数体仅 `unimplemented!`，实现由 Executor 填充。
+#[allow(dead_code, unused_variables)] // wave38 空桩期（未接线），Executor 接线后移除
+pub fn ensure_workspace_for_root(
+    records: &mut Vec<WorkspaceRecord>,
+    root_path: &str,
+) -> Result<WorkspaceRecord, String> {
+    unimplemented!("wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现")
+}
+
 /// 重命名工作区：仅改显示名；id 与 root 不变。校验规则与 create 一致，
 /// 重名判定排除自身（改名回当前名为 no-op 成功）。未知 id 报错。
 pub fn rename_workspace_entry(
