@@ -104,6 +104,24 @@ pub enum UiEvent {
     ModelsDiscoverFailed { provider_id: String, error: String },
 }
 
+/// wave-40 R1（契约冻结空桩）：Composer 中 Enter 键语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerEnterAction {
+    Submit,
+    Newline,
+}
+
+#[allow(dead_code, unused_variables)]
+pub fn composer_enter_action(key: &crossterm::event::KeyEvent) -> ComposerEnterAction {
+    unimplemented!()
+}
+
+/// wave-40 R2（契约冻结空桩）：终端支持键盘增强时返回要 push 的标志。
+#[allow(dead_code, unused_variables)]
+pub fn keyboard_enhancement_flags(supported: bool) -> Option<crossterm::event::KeyboardEnhancementFlags> {
+    unimplemented!()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeMode {
     Ready,

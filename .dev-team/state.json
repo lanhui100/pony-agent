@@ -1,10 +1,10 @@
 {
- "wave": 39,
- "status": "green_verified",
+ "wave": 40,
+ "status": "in_progress",
  "task_classification": "B",
- "reason": "wave-39: TUI Composer 收边（去顶部细线/收内边距/去底部快捷键与右下角状态）+ 对话框下方弱化指标行（cwd / token in-out / 缓存命中 / 上下文百分比）",
- "baseline_commit": "566e465",
- "symptom": "TUI 输入对话框内边距过大、底部快捷键提示与右下角状态冗余、顶部多一条细线；且缺少 token 用量/缓存/上下文占用指标",
+ "reason": "wave-40: TUI Composer Shift+Enter 换行 —— 启用 kitty 键盘增强协议（DISAMBIGUATE_ESCAPE_CODES），纯函数化 Enter 语义 + PTY 真实凭证",
+ "baseline_commit": "5987a02",
+ "symptom": "TUI 输入框中 Shift+Enter 被当作 Enter 发送；根因是终端未启用 kitty keyboard enhancement，终端把 Shift+Enter 编码为裸 CR（tui.rs:3559 分支已存在但不可达）",
  "waves": {
   "9": {
    "branches": {
@@ -1630,14 +1630,37 @@
    },
    "nfr_baseline": ".dev-team/nfr-baseline-wave39.json (dev-nfr-lint EXIT=0)",
    "evidence": ".dev-team/evidence/tui-polish/after (18 scenarios/369 checks) + wave39-e2e-evidence.md + wave39-{protocol,red-green,delta}-receipts"
+  },
+  "40": {
+   "branches": {
+    "shift-enter": {
+     "base": "5987a02",
+     "protocol": null,
+     "red_commit": null,
+     "green_commit": null,
+     "status": "contract_frozen",
+     "fix_scope": "crates/pony-agent-core/src/bin/tui.rs + tests/tui_enter_key_wave40.rs + tools/tui-audit/check_shift_enter.py"
+    }
+   },
+   "tasks": {},
+   "baseline_tests": {
+    "tui_dialog_wave39": "12 passed",
+    "tui_usage_wave39_delta": "4 passed",
+    "tui_acceptance": "34/1",
+    "wave38": "15/0",
+    "tui_render_layout": "3/5"
+   },
+   "gates": {},
+   "reviews": {},
+   "adjudications": {}
   }
  },
  "meta_retrospective": ".dev-team/meta-retrospective-wave15.md",
  "previous_wave": {
-  "wave": 38,
+  "wave": 39,
   "status": "green_verified",
-  "reason": "wave-38: TUI 启动目录即默认 workspace（cwd→workspace 绑定；工具/env note/会话归属一致；桌面端默认工作区语义不变）"
+  "reason": "wave-39: TUI Composer 收边（去顶部细线/收内边距/去底部快捷键与右下角状态）+ 对话框下方弱化指标行（cwd / token in-out / 缓存命中 / 上下文百分比）"
  },
- "desc": "Composer 几何重排 + usage 事件接线 + 指标行渲染（单文件 tui.rs 渲染/事件/状态三层）",
- "classification_basis": "tui.rs 3932 行单文件但跨渲染层(ui/2400+)、事件层(TuiTurnSink/主循环)、状态层(TuiState)；需新增 usage 契约面并适配 2 个测试文件 + 1 个 E2E 审计脚本；无外部网络/线程新增，故 B 级而非 C"
+ "desc": "单文件 tui.rs：终端能力探测 + push/pop 增强标志 + composer_enter_action 纯函数化 + PTY E2E",
+ "classification_basis": "单文件但跨终端初始化/恢复/事件循环三层，新增纯函数契约与 PTY 测试工具；无外部网络，B 级"
 }
