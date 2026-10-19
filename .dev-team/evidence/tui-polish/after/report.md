@@ -2,65 +2,81 @@
 
 | field | value |
 | --- | --- |
-| binary | `/home/dm/pony-agent/target/release/pony` |
-| sha256 | `047df14b63ac21db88bf4f9c1e1f862912f641a713b72fad6e25fb235fa5f868` |
-| mtime | `2026-10-19T03:59:28+08:00` |
-| version | `pony 0.1.125 · linux-x86_64` |
-| generated_at | `2026-10-18T20:10:56.424548+00:00` |
-| result | **381 pass / 0 fail** across 18 scenarios |
+| binary | `/home/dm/pony-agent/target/debug/pony` |
+| sha256 | `f1114e108466e609d6276dc998cc6b622d7391f44fec45ec1df5be55a5c6ebee` |
+| mtime | `2026-10-19T20:16:53+08:00` |
+| version | `pony 0.1.127 · linux-x86_64` |
+| generated_at | `2026-10-19T12:17:57.312049+00:00` |
+| result | **365 pass / 4 fail** across 18 scenarios |
+
+## Failed checks
+
+| scenario | check | evidence |
+| --- | --- | --- |
+| empty | `empty.command_desc_column` | cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/clear'] |
+| slash-menu | `slash.all_commands_listed` | menu_commands=['/resume', '/provider', '/models', '/clear', '/cost', '/help', '/quit'] missing=['/quit'] |
+| slash-menu | `slash.each_command_once` | duplicate/missing commands=['/quit'] menu_rows=7 |
+| slash-menu | `slash.command_desc_column` | cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': None} expected=16 missing=['/quit'] |
 
 ## baseline → after 差异摘要
 
-- 断言：baseline 354 / after 381；失败 48 → 0；场景失败 15 → 0。
-- FAIL→PASS（已消除）：48 项。
-  - empty：`main.separator_two_rules`, `main.composer_cursor_block`, `empty.placeholder_column`, `empty.command_desc_column`
-  - conversation：`main.no_standalone_role_label`, `conversation.user_role_rail`, `conversation.text_columns_aligned`, `conversation.aligned_columns_padded`, `main.separator_two_rules`
-  - slash-menu：`slash.command_desc_column`, `slash.resume_once_whole_screen`
+- 断言：baseline 354 / after 369；失败 48 → 4；场景失败 15 → 2。
+- FAIL→PASS（已消除）：39 项。
+  - empty：`main.composer_cursor_block`, `empty.placeholder_column`
+  - conversation：`main.no_standalone_role_label`, `conversation.user_role_rail`, `conversation.text_columns_aligned`, `conversation.aligned_columns_padded`
+  - slash-menu：`slash.resume_once_whole_screen`
   - models-panel：`models.title_counter`, `models.panel_vertical_borders_aligned`, `models.focus_composer_hidden`, `models.focus_chat_hidden`, `models.focus_background_clean`, `models.border_rows_complete`, `models.rows_unique_and_consecutive`
   - provider-panel：`provider.border_box`, `provider.focus_composer_hidden`, `provider.focus_chat_hidden`, `provider.focus_background_clean`, `provider.border_rows_complete`
   - sessions-panel：`main.no_standalone_role_label`, `sessions.panel_width_expected`, `sessions.focus_composer_hidden`, `sessions.focus_background_clean`, `sessions.current_marker`
   - add-provider：`add_provider.panel_vertical_borders_aligned`, `add_provider.focus_composer_hidden`, `add_provider.focus_chat_hidden`, `add_provider.focus_background_clean`, `add_provider.border_rows_complete`
   - streaming：`mid.no_standalone_role_label`, `final.no_standalone_role_label`, `streaming.mid_status_writing`, `streaming.mid_active_elapsed`
   - error：`main.no_standalone_role_label`
-  - narrow：`empty.separator_two_rules`
-  - wide：`conversation.no_standalone_role_label`, `empty.separator_two_rules`, `wide.text_columns_aligned`
-  - scrolled：`scrolled.hint_present_after`
-  - help：`help.commands_listed`, `main.separator_two_rules`, `help.command_desc_column`
-  - cost：`main.separator_two_rules`
+  - wide：`conversation.no_standalone_role_label`, `wide.text_columns_aligned`
+  - help：`help.commands_listed`, `help.command_desc_column`
   - input-edit：`input_edit.typed_text_column`
-- PASS→FAIL（回归）：0 项。
-  - 无
-- 仅 after 求值的断言（baseline 因边框/证据缺失提前返回，或本相位新增）：30 项。
-  - empty：`main.separator_same_glyph`, `main.separator_same_width`, `main.separator_aligned`
-  - conversation：`main.separator_same_glyph`, `main.separator_same_width`, `main.separator_aligned`
+- PASS→FAIL（回归）：2 项。
+  - slash-menu：`slash.all_commands_listed`, `slash.each_command_once`
+- 仅 after 求值的断言（baseline 因边框/证据缺失提前返回，或本相位新增）：29 项。
+  - empty：`empty.footer_metrics`, `main.separator_single_header_rule`, `main.separator_header_rule_geometry`
+  - conversation：`main.separator_single_header_rule`, `main.separator_header_rule_geometry`, `conversation.footer_metrics`
   - models-panel：`models.panel_width_fits`, `models.panel_width_expected`, `models.panel_rows_not_overlapping`
   - provider-panel：`provider.panel_height_fits_screen`, `provider.panel_vertical_borders_aligned`, `provider.panel_width_fits`, `provider.panel_width_expected`, `provider.panel_rows_not_overlapping`, `provider.no_double_border_overlap`
   - add-provider：`add_provider.panel_width_fits`, `add_provider.panel_width_expected`, `add_provider.panel_rows_not_overlapping`
-  - narrow：`empty.separator_same_glyph`, `empty.separator_same_width`, `empty.separator_aligned`
-  - wide：`empty.separator_same_glyph`, `empty.separator_same_width`, `empty.separator_aligned`
-  - help：`main.separator_same_glyph`, `main.separator_same_width`, `main.separator_aligned`
-  - cost：`main.separator_same_glyph`, `main.separator_same_width`, `main.separator_aligned`
-- 仅 baseline 求值的断言：3 项。
+  - error：`error.footer_metrics`
+  - narrow：`empty.separator_single_header_rule`, `empty.separator_header_rule_geometry`
+  - wide：`empty.separator_single_header_rule`, `empty.separator_header_rule_geometry`
+  - scrolled：`scrolled.metrics_footer_before`, `scrolled.metrics_footer_after`
+  - help：`main.separator_single_header_rule`, `main.separator_header_rule_geometry`
+  - cost：`main.separator_single_header_rule`, `main.separator_header_rule_geometry`
+- 仅 baseline 求值的断言：14 项。
+  - empty：`empty.no_error_status`, `main.separator_two_rules`
+  - conversation：`main.separator_two_rules`, `conversation.footer_ready`
   - models-panel：`models.panel_above_composer`
   - sessions-panel：`sessions.panel_above_composer`
   - add-provider：`add_provider.panel_above_composer`
+  - error：`error.footer_failed`
+  - narrow：`empty.separator_two_rules`
+  - wide：`empty.separator_two_rules`
+  - scrolled：`scrolled.hint_absent_before`, `scrolled.hint_present_after`
+  - help：`main.separator_two_rules`
+  - cost：`main.separator_two_rules`
 
 | scenario | baseline pass/total | after pass/total | fixed | regressed |
 | --- | --- | --- | --- | --- |
-| empty | 11/15 | 18/18 | 4 | 0 |
-| conversation | 14/19 | 22/22 | 5 | 0 |
-| slash-menu | 12/14 | 14/14 | 2 | 0 |
+| empty | 11/15 | 15/16 | 2 | 0 |
+| conversation | 14/19 | 20/20 | 4 | 0 |
+| slash-menu | 12/14 | 11/14 | 1 | 2 |
 | models-panel | 13/20 | 22/22 | 7 | 0 |
 | provider-panel | 10/15 | 21/21 | 5 | 0 |
 | sessions-panel | 18/23 | 22/22 | 5 | 0 |
 | add-provider | 13/18 | 20/20 | 5 | 0 |
 | streaming | 14/18 | 18/18 | 4 | 0 |
 | error | 13/14 | 14/14 | 1 | 0 |
-| narrow | 19/20 | 23/23 | 1 | 0 |
-| wide | 18/21 | 24/24 | 3 | 0 |
-| scrolled | 18/19 | 19/19 | 1 | 0 |
-| help | 9/12 | 15/15 | 3 | 0 |
-| cost | 10/11 | 14/14 | 1 | 0 |
+| narrow | 19/20 | 21/21 | 0 | 0 |
+| wide | 18/21 | 22/22 | 2 | 0 |
+| scrolled | 18/19 | 19/19 | 0 | 0 |
+| help | 9/12 | 13/13 | 2 | 0 |
+| cost | 10/11 | 12/12 | 0 | 0 |
 | ctrl-c | 15/15 | 15/15 | 0 | 0 |
 | input-edit | 86/87 | 87/87 | 1 | 0 |
 | non-tty | 4/4 | 4/4 | 0 | 0 |
@@ -72,7 +88,7 @@
 
 - evidence: `empty/`
 - screenshots: [main.png](empty/main.png)
-- checks: 18 pass / 0 fail
+- checks: 15 pass / 1 fail
 
 | result | check | evidence |
 | --- | --- | --- |
@@ -80,26 +96,24 @@
 | PASS | `main.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `main.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `main.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.ansi size=4205 |
-| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.png size=140916 |
+| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.ansi size=3557 |
+| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.png size=144125 |
 | PASS | `main.header` — header shows brand + workspace | row 0 :: pony · pony-agent mock-alpha |
-| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 31 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 32 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `empty.guidance` — empty state shows onboarding guidance | 描述一个任务开始，或输入命令： |
-| PASS | `empty.no_error_status` — empty state has no error status word | footer :: Enter 发送 · / 查看命令 就绪 |
-| PASS | `main.separator_two_rules` — header rule and composer top rule are both present | rule_rows=[1, 28] |
-| PASS | `main.separator_same_glyph` — header and composer rules use the same glyph | header='▁' composer='▁' |
-| PASS | `main.separator_same_width` — header and composer rules have the same display width | header_width=114 composer_width=114 |
-| PASS | `main.separator_aligned` — both rules start at content column 3 and span 114 cols | starts=[3, 3] width=114 expected_width=114 |
-| PASS | `main.composer_cursor_block` — first placeholder glyph is a reverse-video block (accent bg / canvas-colored glyph) | row=31 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224) |
+| PASS | `empty.footer_metrics` — footer is the composer metrics line (↑ ↓ 缓存 上下文), with no error/status phrase | footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 — |
+| PASS | `main.separator_single_header_rule` — exactly one full ▁ rule remains: the header hairline (composer top rule removed) | rule_rows=[1] |
+| PASS | `main.separator_header_rule_geometry` — header rule lives on row 1, starts at content column 3 and spans 114 cols | row=1 start=3 expected_start=3 width=114 expected_width=114 |
+| PASS | `main.composer_cursor_block` — first placeholder glyph is a reverse-video block (accent bg / canvas-colored glyph) | row=32 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224) |
 | PASS | `empty.placeholder_column` — placeholder starts at the shared text column 5 | placeholder_col=5 |
-| PASS | `empty.command_desc_column` — command descriptions start at column 16 (same table geometry everywhere) | cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': None, '/help': None, '/quit': None} expected=16 missing=[] |
+| FAIL | `empty.command_desc_column` — command descriptions start at column 16 (same table geometry everywhere) | cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/clear'] |
 
 ### conversation (120x34)
 
 - evidence: `conversation/`
 - screenshots: [main.png](conversation/main.png)
-- checks: 22 pass / 0 fail
+- checks: 20 pass / 0 fail
 
 | result | check | evidence |
 | --- | --- | --- |
@@ -107,11 +121,11 @@
 | PASS | `main.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `main.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `main.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=3520 |
-| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=145267 |
+| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=2858 |
+| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=147627 |
 | PASS | `main.header` — header shows brand + workspace | row 0 :: pony · pony-agent mock-alpha |
-| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 31 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 32 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `conversation.user_message_visible` — user prompt is rendered in the transcript | row 4 :: ▌ 读取 package.json 并总结 |
 | PASS | `conversation.user_role_rail` — user message is distinguished by a rail/block, not a text label | row 3 :: ▌ |
 | PASS | `conversation.tool_line_visible` — tool activity line (Read) is visible with a status glyph | row 9 :: ✓ 读取 (Read) · 收集路径 package.json 的上下文。 |
@@ -120,17 +134,15 @@
 | PASS | `conversation.aligned_columns_padded` — shared text column is inset from the terminal edge | shared_col=5 |
 | PASS | `conversation.no_error_rendered` — successful turn shows no error message | no Error:/失败 rows in transcript |
 | PASS | `conversation.mock_followup_has_tool_round` — mock receipt proves the final model round carried a tool result | chat_requests=1 tool_round_requests=1 roles=[['system', 'system', 'system', 'system', 'user', 'assistant', 'tool']] scenarios=['final'] |
-| PASS | `main.separator_two_rules` — header rule and composer top rule are both present | rule_rows=[1, 28] |
-| PASS | `main.separator_same_glyph` — header and composer rules use the same glyph | header='▁' composer='▁' |
-| PASS | `main.separator_same_width` — header and composer rules have the same display width | header_width=114 composer_width=114 |
-| PASS | `main.separator_aligned` — both rules start at content column 3 and span 114 cols | starts=[3, 3] width=114 expected_width=114 |
-| PASS | `conversation.footer_ready` — footer returns to a ready state after the turn | footer :: Enter 发送 · / 查看命令 完成 |
+| PASS | `main.separator_single_header_rule` — exactly one full ▁ rule remains: the header hairline (composer top rule removed) | rule_rows=[1] |
+| PASS | `main.separator_header_rule_geometry` — header rule lives on row 1, starts at content column 3 and spans 114 cols | row=1 start=3 expected_start=3 width=114 expected_width=114 |
+| PASS | `conversation.footer_metrics` — footer is the composer metrics line after the turn (status phrase removed by wave-39) | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
 
 ### slash-menu (120x34)
 
 - evidence: `slash-menu/`
 - screenshots: [main.png](slash-menu/main.png)
-- checks: 14 pass / 0 fail
+- checks: 11 pass / 3 fail
 
 | result | check | evidence |
 | --- | --- | --- |
@@ -138,16 +150,16 @@
 | PASS | `main.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `main.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `main.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=5078 |
-| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=137809 |
-| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 31 prompt_col=3 :: › / |
-| PASS | `slash.all_commands_listed` — slash menu lists the full command table | menu_commands=['/resume', '/provider', '/models', '/clear', '/cost', '/help', '/quit'] missing=[] |
-| PASS | `slash.menu_has_top_and_bottom_rules` — menu is framed by two hairline rules | rule_rows=[19, 27] |
-| PASS | `slash.menu_above_composer` — menu rows sit above the composer input row | menu_rows=[20, 21]..26 bottom_rule=27 input_row=31 |
-| PASS | `slash.each_command_once` — each command appears exactly once inside the menu region | duplicate/missing commands=[] menu_rows=7 |
-| PASS | `slash.command_desc_column` — command descriptions start at column 16 (same table geometry everywhere) | cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[] |
+| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4483 |
+| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=145476 |
+| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 32 prompt_col=3 :: › / |
+| FAIL | `slash.all_commands_listed` — slash menu lists the full command table | menu_commands=['/resume', '/provider', '/models', '/clear', '/cost', '/help', '/quit'] missing=['/quit'] |
+| PASS | `slash.menu_has_top_and_bottom_rules` — menu is framed by two hairline rules | rule_rows=[21, 29] |
+| PASS | `slash.menu_above_composer` — menu rows sit above the composer input row | menu_rows=[22, 23]..28 bottom_rule=29 input_row=32 |
+| FAIL | `slash.each_command_once` — each command appears exactly once inside the menu region | duplicate/missing commands=['/quit'] menu_rows=7 |
+| FAIL | `slash.command_desc_column` — command descriptions start at column 16 (same table geometry everywhere) | cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': None} expected=16 missing=['/quit'] |
 | PASS | `slash.resume_once_whole_screen` — '/resume' appears exactly once on the whole screen while the menu is open | /resume occurrences=1 |
-| PASS | `slash.selected_row_marker` — selected command row carries the selection marker | row 20 :: ▏ /resume 选择并恢复历史会话 |
+| PASS | `slash.selected_row_marker` — selected command row carries the selection marker | row 22 :: ▏ /resume 选择并恢复历史会话 |
 
 ### models-panel (120x34)
 
@@ -223,10 +235,10 @@
 | PASS | `main.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `main.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
 | PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.ansi size=2211 |
-| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=50822 |
+| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=52000 |
 | PASS | `sessions.title` — session panel title is visible | │ 会话 ↑↓ 选择 · ↵ 确认 · esc 取消 │ |
-| PASS | `sessions.prior_conversation_listed` — the conversation just completed is offered for resume | │▏ 读取 package.json 并总结 f9f2c50c · 当前 │ |
-| PASS | `sessions.session_id_visible` — session row carries a short session id | │▏ 读取 package.json 并总结 f9f2c50c · 当前 │ |
+| PASS | `sessions.prior_conversation_listed` — the conversation just completed is offered for resume | │▏ 读取 package.json 并总结 de7c3296 · 当前 │ |
+| PASS | `sessions.session_id_visible` — session row carries a short session id | │▏ 读取 package.json 并总结 de7c3296 · 当前 │ |
 | PASS | `sessions.not_empty` — panel does not show the empty-sessions placeholder | no '暂无历史会话' placeholder |
 | PASS | `sessions.border_box` — exactly one top and one bottom panel border, top above bottom | top_rows=[14] bottom_rows=[19] |
 | PASS | `sessions.panel_height_fits_screen` — panel top/bottom borders are both on screen and the panel height fits | top=14 bottom=19 height=6 pane_rows=34 |
@@ -239,7 +251,7 @@
 | PASS | `sessions.focus_chat_hidden` — focus mode hides chat and splash (no transcript/logo residue) | guidance=False logo_tag=False block_glyphs=False |
 | PASS | `sessions.focus_background_clean` — rows outside header + panel are completely blank (no half-cell residue) | dirty_rows=[] |
 | PASS | `sessions.border_rows_complete` — every panel row carries both border columns at the same display columns | left=18 right=101 broken_rows=[] |
-| PASS | `sessions.current_marker` — sessions panel marks the active session | │▏ 读取 package.json 并总结 f9f2c50c · 当前 │ |
+| PASS | `sessions.current_marker` — sessions panel marks the active session | │▏ 读取 package.json 并总结 de7c3296 · 当前 │ |
 
 ### add-provider (120x34)
 
@@ -282,20 +294,20 @@
 | PASS | `mid.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `mid.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `mid.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `mid.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2802 |
-| PASS | `mid.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=79709 |
+| PASS | `mid.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2146 |
+| PASS | `mid.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=86270 |
 | PASS | `final.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `final.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `final.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `final.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `final.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=3249 |
-| PASS | `final.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=144252 |
-| PASS | `streaming.mid_status_writing` — footer shows the writing state while the stream is still arriving | footer :: Esc 中断 写入中 |
+| PASS | `final.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2587 |
+| PASS | `final.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=146594 |
+| PASS | `streaming.mid_status_writing` — streaming active line shows the writing state while the footer is the metrics line | active_row :: • 写入中 0秒 \| footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0% |
 | PASS | `streaming.mid_active_elapsed` — active line shows elapsed time next to the writing state | active_row :: • 写入中 0秒 |
 | PASS | `streaming.mid_partial_body` — partial streamed markdown body is already rendered | 正在分析 |
-| PASS | `streaming.mid_not_finished` — mid-stream capture is not the completed answer yet | footer :: Esc 中断 写入中 |
-| PASS | `streaming.final_complete` — final capture contains the terminal answer and ready footer | footer :: Enter 发送 · / 查看命令 完成 |
-| PASS | `streaming.final_not_writing` — writing status disappeared once the stream finished | footer :: Enter 发送 · / 查看命令 完成 |
+| PASS | `streaming.mid_not_finished` — mid-stream capture is not the completed answer yet (footer is the metrics line) | footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0% |
+| PASS | `streaming.final_complete` — final capture contains the terminal answer and the metrics footer | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
+| PASS | `streaming.final_not_writing` — writing status disappeared once the stream finished | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
 
 ### error (120x34)
 
@@ -309,14 +321,14 @@
 | PASS | `main.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `main.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `main.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.ansi size=2689 |
-| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.png size=70616 |
-| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 31 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.ansi size=2029 |
+| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.png size=70756 |
+| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 32 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `error.message_visible` — provider 401 is surfaced as a visible error message | row 7 :: ✕ Error: {"error": {"message": "mock 401 unauthorized: invalid api key (audit scenario)", "type": "invalid_request |
 | PASS | `error.error_glyph` — error row carries the failure glyph | row 7 :: ✕ Error: {"error": {"message": "mock 401 unauthorized: invalid api key (audit scenario)", "type": "invalid_request |
 | PASS | `error.reason_included` — error text names the 401/unauthorized cause | ▌ 401 认证测试 |
-| PASS | `error.footer_failed` — footer reports the failed turn | footer :: Enter 发送 · / 查看命令 失败 |
+| PASS | `error.footer_metrics` — footer stays the metrics line during a failed turn (the failure lives in the transcript) | footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0% |
 | PASS | `error.no_fake_answer` — no assistant answer is fabricated for the failed turn | no 结论 row in failed capture |
 | PASS | `error.mock_401_receipt` — mock receipt proves the 401 scenario was requested | scenarios=['401', '401'] |
 
@@ -324,7 +336,7 @@
 
 - evidence: `narrow/`
 - screenshots: [conversation.png](narrow/conversation.png), [empty.png](narrow/empty.png)
-- checks: 23 pass / 0 fail
+- checks: 21 pass / 0 fail
 
 | result | check | evidence |
 | --- | --- | --- |
@@ -332,31 +344,29 @@
 | PASS | `empty.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `empty.within_terminal_width` — every captured row display width <= 60 cols | widest row 0 width=57 cols=60 :: pony · pony-agent mock-alpha |
 | PASS | `empty.capture_rows` — capture has exactly pane height rows (20) | rows=20 pane_rows=20 |
-| PASS | `empty.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.ansi size=1727 |
-| PASS | `empty.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.png size=111279 |
-| PASS | `empty.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 17 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `empty.input_placeholder` — composer shows placeholder guidance when empty | row 17 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `empty.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.ansi size=1379 |
+| PASS | `empty.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.png size=114304 |
+| PASS | `empty.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 18 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `empty.input_placeholder` — composer shows placeholder guidance when empty | row 18 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `conversation.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `conversation.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `conversation.within_terminal_width` — every captured row display width <= 60 cols | widest row 0 width=57 cols=60 :: pony · pony-agent mock-alpha |
 | PASS | `conversation.capture_rows` — capture has exactly pane height rows (20) | rows=20 pane_rows=20 |
-| PASS | `conversation.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1752 |
-| PASS | `conversation.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=82230 |
-| PASS | `conversation.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 17 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `conversation.input_placeholder` — composer shows placeholder guidance when empty | row 17 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `conversation.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1712 |
+| PASS | `conversation.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=102599 |
+| PASS | `conversation.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 18 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `conversation.input_placeholder` — composer shows placeholder guidance when empty | row 18 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `empty.header` — header shows brand + workspace | row 0 :: pony · pony-agent mock-alpha |
-| PASS | `empty.separator_two_rules` — header rule and composer top rule are both present | rule_rows=[1, 14] |
-| PASS | `empty.separator_same_glyph` — header and composer rules use the same glyph | header='▁' composer='▁' |
-| PASS | `empty.separator_same_width` — header and composer rules have the same display width | header_width=54 composer_width=54 |
-| PASS | `empty.separator_aligned` — both rules start at content column 3 and span 54 cols | starts=[3, 3] width=54 expected_width=54 |
+| PASS | `empty.separator_single_header_rule` — exactly one full ▁ rule remains: the header hairline (composer top rule removed) | rule_rows=[1] |
+| PASS | `empty.separator_header_rule_geometry` — header rule lives on row 1, starts at content column 3 and spans 54 cols | row=1 start=3 expected_start=3 width=54 expected_width=54 |
 | PASS | `narrow.empty_guidance` — narrow empty state keeps onboarding guidance on screen | 描述一个任务开始，或输入命令： |
-| PASS | `narrow.conversation_visible` — narrow conversation still shows the tail of the final answer | ▏ "version": "0.1.125" |
+| PASS | `narrow.conversation_visible` — narrow conversation still shows the tail of the final answer | package.json 显示这是 pony-agent，版本 0.1.125。 |
 
 ### wide (160x40)
 
 - evidence: `wide/`
 - screenshots: [conversation.png](wide/conversation.png), [empty.png](wide/empty.png)
-- checks: 24 pass / 0 fail
+- checks: 22 pass / 0 fail
 
 | result | check | evidence |
 | --- | --- | --- |
@@ -364,23 +374,21 @@
 | PASS | `empty.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `empty.within_terminal_width` — every captured row display width <= 160 cols | widest row 0 width=140 cols=160 :: pony · pony-agent mock-alpha |
 | PASS | `empty.capture_rows` — capture has exactly pane height rows (40) | rows=40 pane_rows=40 |
-| PASS | `empty.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.ansi size=4674 |
-| PASS | `empty.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.png size=150624 |
-| PASS | `empty.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 37 prompt_col=20 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `empty.input_placeholder` — composer shows placeholder guidance when empty | row 37 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `empty.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.ansi size=3945 |
+| PASS | `empty.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.png size=153784 |
+| PASS | `empty.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 38 prompt_col=20 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `empty.input_placeholder` — composer shows placeholder guidance when empty | row 38 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `conversation.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `conversation.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `conversation.within_terminal_width` — every captured row display width <= 160 cols | widest row 0 width=140 cols=160 :: pony · pony-agent mock-alpha |
 | PASS | `conversation.capture_rows` — capture has exactly pane height rows (40) | rows=40 pane_rows=40 |
-| PASS | `conversation.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=4007 |
-| PASS | `conversation.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=154742 |
-| PASS | `conversation.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 37 prompt_col=20 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `conversation.input_placeholder` — composer shows placeholder guidance when empty | row 37 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `conversation.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3264 |
+| PASS | `conversation.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=157565 |
+| PASS | `conversation.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 38 prompt_col=20 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `conversation.input_placeholder` — composer shows placeholder guidance when empty | row 38 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `empty.header` — header shows brand + workspace | row 0 :: pony · pony-agent mock-alpha |
-| PASS | `empty.separator_two_rules` — header rule and composer top rule are both present | rule_rows=[1, 34] |
-| PASS | `empty.separator_same_glyph` — header and composer rules use the same glyph | header='▁' composer='▁' |
-| PASS | `empty.separator_same_width` — header and composer rules have the same display width | header_width=120 composer_width=120 |
-| PASS | `empty.separator_aligned` — both rules start at content column 20 and span 120 cols | starts=[20, 20] width=120 expected_width=120 |
+| PASS | `empty.separator_single_header_rule` — exactly one full ▁ rule remains: the header hairline (composer top rule removed) | rule_rows=[1] |
+| PASS | `empty.separator_header_rule_geometry` — header rule lives on row 1, starts at content column 20 and spans 120 cols | row=1 start=20 expected_start=20 width=120 expected_width=120 |
 | PASS | `wide.header_full_metadata` — wide header keeps workspace and model metadata on one line | row 0 :: pony · pony-agent mock-alpha |
 | PASS | `wide.conversation_visible` — wide conversation shows the final answer | 结论 |
 | PASS | `wide.text_columns_aligned` — at 160x40 the three text streams still share one column | user_col=22 assistant_col=22 tool_col=22 |
@@ -397,27 +405,27 @@
 | PASS | `before.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `before.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `before.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `before.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7314 |
-| PASS | `before.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=497761 |
+| PASS | `before.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7534 |
+| PASS | `before.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=573144 |
 | PASS | `after.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `after.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `after.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `after.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `after.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=9281 |
-| PASS | `after.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=662305 |
-| PASS | `after.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `after.input_placeholder` — composer shows placeholder guidance when empty | row 31 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `after.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=9498 |
+| PASS | `after.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=738020 |
+| PASS | `after.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `after.input_placeholder` — composer shows placeholder guidance when empty | row 32 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `scrolled.bottom_before` — before scrolling the transcript is pinned to the newest line | 这是最后一行，滚动到底部时应完整可见。 |
-| PASS | `scrolled.hint_absent_before` — scroll-up hint is absent while pinned to bottom | footer :: Enter 发送 · / 查看命令 完成 |
+| PASS | `scrolled.metrics_footer_before` — footer is the metrics line while pinned to bottom (scroll-up hint removed by wave-39) | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
 | PASS | `scrolled.after_shows_earlier_rows` — PageUp reveals earlier lines and hides the newest ones | · 第 14 行：这是一段用于验证滚动与折行的中文正文，包含 inline code 与 加粗 片段。 |
-| PASS | `scrolled.hint_present_after` — footer advertises the scrolled-up state | footer :: ↑ 已上翻 · End 回到底部 完成 |
-| PASS | `scrolled.offset_moved_up` — first visible content row moved up by at least 8 terminal rows | first_visible_before=第24行 first_visible_after=第14行 |
+| PASS | `scrolled.metrics_footer_after` — footer stays the metrics line after scrolling up (the old '已上翻' hint row is gone) | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
+| PASS | `scrolled.offset_moved_up` — first visible content row moved up by at least 8 terminal rows | first_visible_before=第21行 first_visible_after=第11行 |
 
 ### help (120x34)
 
 - evidence: `help/`
 - screenshots: [main.png](help/main.png)
-- checks: 15 pass / 0 fail
+- checks: 13 pass / 0 fail
 
 | result | check | evidence |
 | --- | --- | --- |
@@ -425,15 +433,13 @@
 | PASS | `main.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `main.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `main.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/help/main.ansi size=2472 |
-| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/help/main.png size=131664 |
-| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 31 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/help/main.ansi size=1891 |
+| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/help/main.png size=141693 |
+| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 32 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `help.commands_listed` — /help renders the command reference in the transcript | row 3 :: · 命令列表 missing=[] |
-| PASS | `main.separator_two_rules` — header rule and composer top rule are both present | rule_rows=[1, 28] |
-| PASS | `main.separator_same_glyph` — header and composer rules use the same glyph | header='▁' composer='▁' |
-| PASS | `main.separator_same_width` — header and composer rules have the same display width | header_width=114 composer_width=114 |
-| PASS | `main.separator_aligned` — both rules start at content column 3 and span 114 cols | starts=[3, 3] width=114 expected_width=114 |
+| PASS | `main.separator_single_header_rule` — exactly one full ▁ rule remains: the header hairline (composer top rule removed) | rule_rows=[1] |
+| PASS | `main.separator_header_rule_geometry` — header rule lives on row 1, starts at content column 3 and spans 114 cols | row=1 start=3 expected_start=3 width=114 expected_width=114 |
 | PASS | `help.command_desc_column` — command descriptions start at column 16 (same table geometry everywhere) | cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[] |
 | PASS | `help.system_message_glyph` — help output is a system row (bullet glyph), not a user message | row 3 :: · 命令列表 |
 
@@ -441,7 +447,7 @@
 
 - evidence: `cost/`
 - screenshots: [main.png](cost/main.png)
-- checks: 14 pass / 0 fail
+- checks: 12 pass / 0 fail
 
 | result | check | evidence |
 | --- | --- | --- |
@@ -449,15 +455,13 @@
 | PASS | `main.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `main.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `main.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=2054 |
-| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=59479 |
-| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
-| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 31 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=1396 |
+| PASS | `main.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=59164 |
+| PASS | `main.input_padded_from_left_edge` — input prompt has left padding (>0 cols from terminal edge) | row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令 |
+| PASS | `main.input_placeholder` — composer shows placeholder guidance when empty | row 32 :: › 写下任务，或输入 / 查看命令 |
 | PASS | `cost.model_line` — /cost shows the active model | row :: · 模型 mock-alpha |
-| PASS | `main.separator_two_rules` — header rule and composer top rule are both present | rule_rows=[1, 28] |
-| PASS | `main.separator_same_glyph` — header and composer rules use the same glyph | header='▁' composer='▁' |
-| PASS | `main.separator_same_width` — header and composer rules have the same display width | header_width=114 composer_width=114 |
-| PASS | `main.separator_aligned` — both rules start at content column 3 and span 114 cols | starts=[3, 3] width=114 expected_width=114 |
+| PASS | `main.separator_single_header_rule` — exactly one full ▁ rule remains: the header hairline (composer top rule removed) | rule_rows=[1] |
+| PASS | `main.separator_header_rule_geometry` — header rule lives on row 1, starts at content column 3 and spans 114 cols | row=1 start=3 expected_start=3 width=114 expected_width=114 |
 | PASS | `cost.gateway_line` — /cost shows the gateway endpoint | row :: 网关 http://10.42.0.67:8080 |
 
 ### ctrl-c (120x34)
@@ -469,16 +473,16 @@
 | result | check | evidence |
 | --- | --- | --- |
 | PASS | `exit.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `exit.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.5n13xn/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.5n13xn/iso-ctrl-c/x |
+| PASS | `exit.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-ctrl-c/x |
 | PASS | `exit.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `exit.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.ansi size=479 |
-| PASS | `exit.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.png size=74374 |
+| PASS | `exit.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.ansi size=477 |
+| PASS | `exit.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.png size=74973 |
 | PASS | `shell.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `shell.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.5n13xn/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.5n13xn/iso-ctrl-c/x |
+| PASS | `shell.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-ctrl-c/x |
 | PASS | `shell.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `shell.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.ansi size=534 |
-| PASS | `shell.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.png size=86214 |
-| PASS | `ctrl_c.process_exited` — Ctrl-C terminates the TUI process with a normal exit status | row :: UTF-8 /home/dm/pony-agent/target/release/pony; echo AUDIT_EXIT=$? code=0 |
+| PASS | `shell.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.ansi size=532 |
+| PASS | `shell.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.png size=86752 |
+| PASS | `ctrl_c.process_exited` — Ctrl-C terminates the TUI process with a normal exit status | row :: UTF-8 /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$? code=0 |
 | PASS | `ctrl_c.terminal_restored` — alternate screen is left and the pane stops painting the TUI | tui_band_present=False placeholder_present=False |
 | PASS | `ctrl_c.shell_alive` — the same tmux pane still runs commands after exit | bash-5.2$ echo AUDIT_SHELL_ALIVE=ok |
 | PASS | `ctrl_c.pane_command_is_shell` — pane foreground command is a shell again, not pony | pane_current_command='bash' |
@@ -496,64 +500,64 @@
 | PASS | `abc.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `abc.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `abc.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `abc.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.ansi size=4207 |
-| PASS | `abc.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.png size=129705 |
+| PASS | `abc.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.ansi size=3561 |
+| PASS | `abc.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.png size=134471 |
 | PASS | `input_edit.abc` — typed text lands in the composer | buffer='abc' expected='abc' |
 | PASS | `inserted.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `inserted.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `inserted.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `inserted.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `inserted.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.ansi size=4207 |
-| PASS | `inserted.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.png size=130519 |
+| PASS | `inserted.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.ansi size=3561 |
+| PASS | `inserted.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.png size=135225 |
 | PASS | `input_edit.inserted` — Left + X inserts in the middle without losing the tail | buffer='abXc' expected='abXc' |
 | PASS | `backspace.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `backspace.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `backspace.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `backspace.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `backspace.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.ansi size=4207 |
-| PASS | `backspace.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.png size=130067 |
+| PASS | `backspace.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.ansi size=3561 |
+| PASS | `backspace.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.png size=134801 |
 | PASS | `input_edit.backspace` — Right + Backspace deletes the character at the end | buffer='abX' expected='abX' |
 | PASS | `word_cleared.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `word_cleared.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `word_cleared.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `word_cleared.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `word_cleared.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.ansi size=4205 |
-| PASS | `word_cleared.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.png size=140916 |
+| PASS | `word_cleared.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.ansi size=3557 |
+| PASS | `word_cleared.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.png size=144125 |
 | PASS | `input_edit.word_cleared` — Ctrl+W deletes the whole word | buffer='' expected='' |
 | PASS | `tab_complete.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `tab_complete.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `tab_complete.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `tab_complete.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `tab_complete.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.ansi size=4218 |
-| PASS | `tab_complete.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.png size=71920 |
+| PASS | `tab_complete.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.ansi size=3558 |
+| PASS | `tab_complete.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.png size=73747 |
 | PASS | `input_edit.tab_complete` — Tab completes '/mo' to '/models' | buffer='/models' expected='/models' |
 | PASS | `ctrl_u_cleared.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `ctrl_u_cleared.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `ctrl_u_cleared.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `ctrl_u_cleared.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `ctrl_u_cleared.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.ansi size=4205 |
-| PASS | `ctrl_u_cleared.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.png size=140916 |
+| PASS | `ctrl_u_cleared.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.ansi size=3557 |
+| PASS | `ctrl_u_cleared.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.png size=144125 |
 | PASS | `input_edit.ctrl_u_cleared` — Ctrl+U clears the composer | buffer='' expected='' |
 | PASS | `multiline.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `multiline.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `multiline.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `multiline.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `multiline.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.ansi size=4380 |
-| PASS | `multiline.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.png size=131025 |
+| PASS | `multiline.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.ansi size=3734 |
+| PASS | `multiline.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.png size=135687 |
 | PASS | `input_edit.multiline` — Ctrl+J inserts a newline (two visual rows) | buffer='line1\nline2' expected='line1\nline2' |
 | PASS | `esc_cleared.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `esc_cleared.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `esc_cleared.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `esc_cleared.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `esc_cleared.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=4205 |
-| PASS | `esc_cleared.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.png size=140916 |
+| PASS | `esc_cleared.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=3557 |
+| PASS | `esc_cleared.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.png size=144125 |
 | PASS | `input_edit.esc_cleared` — Esc clears the composer | buffer='' expected='' |
 | PASS | `draft.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
 | PASS | `draft.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `draft.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `draft.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `draft.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.ansi size=4207 |
-| PASS | `draft.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.png size=129735 |
+| PASS | `draft.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.ansi size=3561 |
+| PASS | `draft.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.png size=134496 |
 | PASS | `input_edit.draft` — draft text is present before Ctrl-C | buffer='draft' expected='draft' |
 | PASS | `input_edit.typed_text_column` — typed text starts at the same column as the empty-state placeholder (5) | typed_col=5 |
 | PASS | `input_edit.multiline_visual_rows` — multi-line draft occupies two distinct composer rows | composer_rows=2 buffer='line1\nline2' |
@@ -561,21 +565,21 @@
 | PASS | `draft_cleared.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
 | PASS | `draft_cleared.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
 | PASS | `draft_cleared.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `draft_cleared.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.ansi size=4205 |
-| PASS | `draft_cleared.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.png size=140916 |
+| PASS | `draft_cleared.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.ansi size=3557 |
+| PASS | `draft_cleared.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.png size=144125 |
 | PASS | `input_edit.ctrl_c_with_draft_clears_only` — Ctrl-C with a draft clears the composer instead of quitting | buffer='' exit_marker=False |
 | PASS | `input_edit.ctrl_c_draft_still_running` — TUI is still painting its composer after the first Ctrl-C | › 写下任务，或输入 / 查看命令 |
 | PASS | `exit.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `exit.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.5n13xn/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.5n13xn/iso-inpu |
+| PASS | `exit.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-inpu |
 | PASS | `exit.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `exit.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.ansi size=495 |
-| PASS | `exit.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=75010 |
+| PASS | `exit.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.ansi size=493 |
+| PASS | `exit.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=75425 |
 | PASS | `shell.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `shell.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.5n13xn/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.5n13xn/iso-inpu |
+| PASS | `shell.within_terminal_width` — every captured row display width <= 120 cols | widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-inpu |
 | PASS | `shell.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `shell.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.ansi size=550 |
-| PASS | `shell.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=86732 |
-| PASS | `input_edit.ctrl_c_empty_exits` — a second Ctrl-C on the empty composer exits the process normally | exit_code=0 row :: home LANG=en_US.UTF-8 /home/dm/pony-agent/target/release/pony; echo AUDIT_EXIT=$? |
+| PASS | `shell.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.ansi size=548 |
+| PASS | `shell.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=87100 |
+| PASS | `input_edit.ctrl_c_empty_exits` — a second Ctrl-C on the empty composer exits the process normally | exit_code=0 row :: home LANG=en_US.UTF-8 /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$? |
 | PASS | `input_edit.terminal_restored` — alternate screen is left after exit | tui_band=False |
 | PASS | `input_edit.shell_alive` — the pane still runs commands after exit | bash-5.2$ echo AUDIT_SHELL_ALIVE=ok |
 | PASS | `input_edit.pane_command_is_shell` — pane foreground command is a shell again | pane_current_command='bash' |
@@ -600,10 +604,10 @@
 | result | check | evidence |
 | --- | --- | --- |
 | PASS | `cli.version_exit_status` — --version exits with a documented status (0) | exit_code=0 allowed=(0,) |
-| PASS | `cli.version_output` — --version prints its documented payload | pony 0.1.125 · linux-x86_64 missing=[] |
+| PASS | `cli.version_output` — --version prints its documented payload | pony 0.1.127 · linux-x86_64 missing=[] |
 | PASS | `cli.version_no_panic` — --version does not panic | no panic tokens in output |
 | PASS | `cli.help_exit_status` — --help exits with a documented status (0) | exit_code=0 allowed=(0,) |
-| PASS | `cli.help_output` — --help prints its documented payload | pony 0.1.125 — 交互式 TUI Agent missing=[] |
+| PASS | `cli.help_output` — --help prints its documented payload | pony 0.1.127 — 交互式 TUI Agent missing=[] |
 | PASS | `cli.help_no_panic` — --help does not panic | no panic tokens in output |
 | PASS | `cli.doctor_exit_status` — --doctor exits with a documented status (0, or 1 when the non-TTY self-check reports a hard failure) | exit_code=1 allowed=(0, 1) |
 | PASS | `cli.doctor_output` — --doctor prints its documented payload | [ok] TERM: dumb missing=[] |

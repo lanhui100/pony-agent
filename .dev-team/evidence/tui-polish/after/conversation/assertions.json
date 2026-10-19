@@ -1,6 +1,6 @@
 {
   "scenario": "conversation",
-  "pass": 22,
+  "pass": 20,
   "fail": 0,
   "checks": [
     {
@@ -31,13 +31,13 @@
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=3520"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=2858"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=145267"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=147627"
     },
     {
       "id": "main.header",
@@ -49,13 +49,13 @@
       "id": "main.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "main.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.user_message_visible",
@@ -106,34 +106,22 @@
       "evidence": "chat_requests=1 tool_round_requests=1 roles=[['system', 'system', 'system', 'system', 'user', 'assistant', 'tool']] scenarios=['final']"
     },
     {
-      "id": "main.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "main.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": true,
-      "evidence": "rule_rows=[1, 28]"
+      "evidence": "rule_rows=[1]"
     },
     {
-      "id": "main.separator_same_glyph",
-      "desc": "header and composer rules use the same glyph",
+      "id": "main.separator_header_rule_geometry",
+      "desc": "header rule lives on row 1, starts at content column 3 and spans 114 cols",
       "ok": true,
-      "evidence": "header='▁' composer='▁'"
+      "evidence": "row=1 start=3 expected_start=3 width=114 expected_width=114"
     },
     {
-      "id": "main.separator_same_width",
-      "desc": "header and composer rules have the same display width",
+      "id": "conversation.footer_metrics",
+      "desc": "footer is the composer metrics line after the turn (status phrase removed by wave-39)",
       "ok": true,
-      "evidence": "header_width=114 composer_width=114"
-    },
-    {
-      "id": "main.separator_aligned",
-      "desc": "both rules start at content column 3 and span 114 cols",
-      "ok": true,
-      "evidence": "starts=[3, 3] width=114 expected_width=114"
-    },
-    {
-      "id": "conversation.footer_ready",
-      "desc": "footer returns to a ready state after the turn",
-      "ok": true,
-      "evidence": "footer :: Enter 发送 · / 查看命令 完成"
+      "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
     }
   ]
 }

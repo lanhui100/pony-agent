@@ -31,13 +31,13 @@
       "id": "before.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7314"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7534"
     },
     {
       "id": "before.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=497761"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=573144"
     },
     {
       "id": "after.no_panic",
@@ -67,25 +67,25 @@
       "id": "after.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=9281"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=9498"
     },
     {
       "id": "after.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=662305"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=738020"
     },
     {
       "id": "after.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "after.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "scrolled.bottom_before",
@@ -94,10 +94,10 @@
       "evidence": "这是最后一行，滚动到底部时应完整可见。"
     },
     {
-      "id": "scrolled.hint_absent_before",
-      "desc": "scroll-up hint is absent while pinned to bottom",
+      "id": "scrolled.metrics_footer_before",
+      "desc": "footer is the metrics line while pinned to bottom (scroll-up hint removed by wave-39)",
       "ok": true,
-      "evidence": "footer :: Enter 发送 · / 查看命令 完成"
+      "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
     },
     {
       "id": "scrolled.after_shows_earlier_rows",
@@ -106,16 +106,16 @@
       "evidence": "· 第 14 行：这是一段用于验证滚动与折行的中文正文，包含 inline code 与 加粗 片段。"
     },
     {
-      "id": "scrolled.hint_present_after",
-      "desc": "footer advertises the scrolled-up state",
+      "id": "scrolled.metrics_footer_after",
+      "desc": "footer stays the metrics line after scrolling up (the old '已上翻' hint row is gone)",
       "ok": true,
-      "evidence": "footer :: ↑ 已上翻 · End 回到底部 完成"
+      "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
     },
     {
       "id": "scrolled.offset_moved_up",
       "desc": "first visible content row moved up by at least 8 terminal rows",
       "ok": true,
-      "evidence": "first_visible_before=第24行 first_visible_after=第14行"
+      "evidence": "first_visible_before=第21行 first_visible_after=第11行"
     }
   ]
 }

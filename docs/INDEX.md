@@ -63,6 +63,7 @@
 - [0036 IME 组合态回车守卫与动态数字位宽稳定](decisions/0036-ime-composition-enter-guard-and-numeric-width-stability.md)
 - [0038 TUI 设计系统：单色为骨、单一骨色强调、发丝线与 2 列沟槽](decisions/0038-tui-design-system-monochrome-restraint.md)
 - [0040 TUI /models 远程模型发现与回环地址代理旁路](decisions/0040-tui-model-discovery-and-loopback-proxy-bypass.md)
+- [0042 TUI Composer 收边与底部指标行（弱化 cwd / token / 缓存 / 上下文）](decisions/0042-tui-composer-metrics-line.md)
 
 ## 3.1 交付证据归档
 

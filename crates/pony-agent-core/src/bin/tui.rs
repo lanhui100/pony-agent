@@ -266,7 +266,6 @@ pub struct TuiState {
     /// wave-39 R2：当前模型上下文窗口；`0` = 未知（指标行渲染 `—`）。
     pub context_window_tokens: u32,
     /// wave-39 R2：本轮去重回执 `(input, output, cache_hit, total)`；`None` = 本轮尚无回执。
-    #[allow(dead_code)]
     turn_usage: Option<(u64, u64, u64, u64)>,
     pub status_text: String,
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
@@ -361,19 +360,24 @@ impl TuiState {
         }
     }
 
-    /// wave-39 R3（契约冻结空桩）：发送新消息前清空本轮 usage 回执。
-    /// 仅冻结签名与语义，函数体保持 `unimplemented!()`，由 Executor 在 R8 接线时实现。
-    #[allow(dead_code)]
+    /// wave-39 R3：发送新消息前清空本轮 usage 回执（跨轮由累计字段承载）。
     pub fn begin_turn_usage(&mut self) {
-        unimplemented!()
+        self.turn_usage = None;
     }
 
-    /// wave-39 R3（契约冻结空桩）：**幂等覆盖**本轮增量 —— 若已有本轮回执则先扣除旧值
-    /// 再加入新值，`last_context_tokens = total`；跨轮为累加。
-    /// 仅冻结签名与语义，函数体保持 `unimplemented!()`，由 Executor 在 R8 接线时实现。
-    #[allow(dead_code, unused_variables)]
+    /// wave-39 R3：**幂等覆盖**本轮增量 —— 若已有本轮回执则先扣除旧值再加入新值，
+    /// `last_context_tokens = total`；跨轮为累加。
     pub fn apply_turn_usage(&mut self, input: u64, output: u64, cache_hit: u64, total: u64) {
-        unimplemented!()
+        if let Some((prev_input, prev_output, prev_cache, _prev_total)) = self.turn_usage {
+            self.total_input_tokens = self.total_input_tokens.saturating_sub(prev_input);
+            self.total_output_tokens = self.total_output_tokens.saturating_sub(prev_output);
+            self.total_cache_hit_tokens = self.total_cache_hit_tokens.saturating_sub(prev_cache);
+        }
+        self.total_input_tokens = self.total_input_tokens.saturating_add(input);
+        self.total_output_tokens = self.total_output_tokens.saturating_add(output);
+        self.total_cache_hit_tokens = self.total_cache_hit_tokens.saturating_add(cache_hit);
+        self.last_context_tokens = total;
+        self.turn_usage = Some((input, output, cache_hit, total));
     }
     pub fn start_add_provider(&mut self) {
         self.mode = InteractionMode::AddingProvider;
@@ -659,12 +663,27 @@ impl TuiState {
     }
 }
 
-/// wave-39 R3（契约冻结空桩）：解析当前 provider/model 的上下文窗口 token 数。
-/// 命中注册表则取 `capabilities.context_window_tokens`，否则回退 `1_000_000`；
-/// 函数体保持 `unimplemented!()`，由 Executor 在 R8 接线时实现。
-#[allow(dead_code, unused_variables)]
+/// wave-39 R3：解析当前 provider/model 的上下文窗口 token 数。
+/// 命中注册表则取 `capabilities.context_window_tokens`，否则回退 `1_000_000`。
 pub fn resolve_context_window_tokens(state: &TuiState) -> u32 {
-    unimplemented!()
+    /// 与 `config::DEFAULT_CONTEXT_WINDOW_TOKENS` 同值；TUI 侧不引入额外依赖。
+    const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
+
+    let view = ProviderRegistryStore::new().load_view();
+    let provider = resolve_active_provider_id(state)
+        .and_then(|id| view.providers.iter().find(|p| p.id == id));
+    if let Some(provider) = provider {
+        if let Some(model) = provider
+            .models
+            .iter()
+            .find(|m| m.id == state.model || m.model == state.model)
+        {
+            if let Some(window) = model.capabilities.context_window_tokens {
+                return window;
+            }
+        }
+    }
+    DEFAULT_CONTEXT_WINDOW_TOKENS
 }
 
 pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u16 {
@@ -1244,6 +1263,11 @@ impl TurnEventSink for TuiTurnSink {
                 let _ = self.tx.send(UiEvent::StreamToolResult(formatted));
             }
             "turn:completed" | "turn:output_end" => {
+                // wave-39 R8'（契约 v2）：usage 只由 turn:output_end 发射；turn:completed
+                // 仅收尾，避免同一 persisted token 值在新旧轮交叠时被二次 apply 而永久多算。
+                if let Some(event) = stream_usage_event(name, &payload) {
+                    let _ = self.tx.send(event);
+                }
                 let _ = self.tx.send(UiEvent::StreamCompleted);
             }
             "turn:failed" => {
@@ -1257,10 +1281,23 @@ impl TurnEventSink for TuiTurnSink {
 
 /// wave-39 R8'（契约 v2）：仅 `turn:output_end` 是 usage 权威事件；
 /// 返回 `Some(UiEvent::StreamUsage{..})` 当且仅当事件名匹配且任一 token 字段为 Some。
-/// 函数体由 Executor 实现。
-#[allow(dead_code, unused_variables)]
 pub fn stream_usage_event(event_name: &str, payload: &TurnStreamEvent) -> Option<UiEvent> {
-    unimplemented!()
+    if event_name != "turn:output_end" {
+        return None;
+    }
+    if payload.input_tokens.is_none()
+        && payload.output_tokens.is_none()
+        && payload.cache_hit_input_tokens.is_none()
+        && payload.total_tokens.is_none()
+    {
+        return None;
+    }
+    Some(UiEvent::StreamUsage {
+        input_tokens: payload.input_tokens.unwrap_or(0),
+        output_tokens: payload.output_tokens.unwrap_or(0),
+        cache_hit_input_tokens: payload.cache_hit_input_tokens.unwrap_or(0),
+        total_tokens: payload.total_tokens.unwrap_or(0),
+    })
 }
 
 /// wave-35c：解析当前活跃 provider id。
@@ -1858,6 +1895,100 @@ fn ellipsize_width(text: &str, width: usize) -> String {
     out
 }
 
+/// wave-39 R7：token 数字缩写 —— `<1000` 原样；`<1e6` 一位小数 `k`（`.0` 省略）；
+/// 否则一位小数 `M`（`.0` 省略）。
+fn fmt_token_count(n: u64) -> String {
+    fn one_decimal(value: f64) -> String {
+        let rounded = (value * 10.0).round() / 10.0;
+        let text = format!("{:.1}", rounded);
+        text.strip_suffix(".0").unwrap_or(&text).to_string()
+    }
+    if n < 1_000 {
+        return n.to_string();
+    }
+    if n < 1_000_000 {
+        let k = n as f64 / 1_000.0;
+        // 999_999 四舍五入后会变成 1000k：改以 M 表达，避免「1000k」这种破格写法。
+        if (k * 10.0).round() >= 10_000.0 {
+            return format!("{}M", one_decimal(k / 1_000.0));
+        }
+        return format!("{}k", one_decimal(k));
+    }
+    format!("{}M", one_decimal(n as f64 / 1_000_000.0))
+}
+
+/// wave-39 R7：workspace 路径标签 —— `display()` 全路径，`$HOME` 前缀折叠为 `~`。
+fn workspace_label(workspace: &std::path::Path) -> String {
+    let full = workspace.display().to_string();
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .filter(|h| !h.trim().is_empty())
+        });
+    if let Some(home) = home {
+        let home = home.trim_end_matches(['/', '\\']);
+        if !home.is_empty() {
+            if full == home {
+                return "~".to_string();
+            }
+            if let Some(rest) = full.strip_prefix(home) {
+                if rest.starts_with('/') || rest.starts_with('\\') {
+                    return format!("~{}", rest);
+                }
+            }
+        }
+    }
+    full
+}
+
+/// wave-39 R7：色带最后一行的指标行 —— 左侧 workspace 路径（弱化），右侧
+/// `↑in ↓out · 缓存 x% · 上下文 y%`。空间不足时优先完整保留右簇。
+fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
+    let cache_ratio = if state.total_input_tokens == 0 {
+        "—".to_string()
+    } else {
+        let pct = (state.total_cache_hit_tokens as f64 / state.total_input_tokens as f64 * 100.0)
+            .round();
+        format!("{pct:.0}%")
+    };
+    let context_ratio = if state.context_window_tokens == 0 {
+        "—".to_string()
+    } else {
+        let pct = (state.last_context_tokens as f64 / state.context_window_tokens as f64 * 100.0)
+            .round()
+            .clamp(0.0, 100.0);
+        format!("{pct:.0}%")
+    };
+    let right = format!(
+        "↑{} ↓{} · 缓存 {} · 上下文 {}",
+        fmt_token_count(state.total_input_tokens),
+        fmt_token_count(state.total_output_tokens),
+        cache_ratio,
+        context_ratio
+    );
+    let right_w = str_width(&right);
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if width > RAIL + 1 + right_w {
+        let label = ellipsize_width(&workspace_label(&state.workspace), width - RAIL - 1 - right_w);
+        let used = RAIL + str_width(&label);
+        spans.push(Span::raw(" ".repeat(RAIL)));
+        spans.push(Span::styled(label, faint()));
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + right_w))));
+        spans.push(Span::styled(right, faint()));
+    } else if right_w <= width {
+        // 左路径放不下：只渲染右簇，仍然严格右对齐到内容列最后一列。
+        spans.push(Span::raw(" ".repeat(width - right_w)));
+        spans.push(Span::styled(right, faint()));
+    } else {
+        spans.push(Span::styled(truncate_width(&right, width), faint()));
+    }
+    Line::from(spans)
+}
+
 /// 按「字符」截断（绝不按字节切分，避免 CJK 边界 panic），超长时补省略号。
 fn truncate_chars(text: &str, max_chars: usize) -> String {
     let mut out: String = text.chars().take(max_chars).collect();
@@ -2173,16 +2304,16 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let rule_rect = Rect { y: content.y + 1, height: 1, ..content };
     f.render_widget(Paragraph::new(hairline(content.width as usize)), rule_rect);
 
-    // ── 底部区块尺寸：输入区 2~5 行 + 发丝线 / 上呼吸 / 状态行 ─────────────
+    // ── 底部区块尺寸：1 行顶部内边距 + 输入区 1~5 行 + 1 行指标行 ───────────
     let composer_text_width = content.width.saturating_sub(3).max(1) as usize;
     let visual_lines = layout_input(&state.input_buffer, composer_text_width).len() as u16;
-    // 文本行 + 1 行底部呼吸，最多 5 行文本（6 行输入区）。
-    let input_h = (visual_lines + 1).clamp(2, 6);
-    let bottom_h = input_h + 3;
+    // wave-39 R5：单行输入只占 1 行；最多 5 行文本，不再保留底部呼吸行。
+    let input_h = visual_lines.clamp(1, 5);
+    let bottom_h = input_h + 2;
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
 
     let chat_top = content.y + 3; // header + rule + 1 行呼吸
-    let chat_h = bottom_top.saturating_sub(chat_top).saturating_sub(1);
+    let chat_h = bottom_top.saturating_sub(chat_top);
     let chat_rect = Rect {
         x: content.x,
         y: chat_top,
@@ -2442,7 +2573,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         );
     }
 
-    // ── Composer：整宽表面色带，顶部 1px 发丝线 + 上呼吸 + 内边距 ───────────
+    // ── Composer：整宽表面色带 = 1 行顶部内边距 + 输入行 + 指标行 ───────────
     // 色带与内容列严格同宽：与 header 发丝线共用同一条左右基准。
     let band_x = content.x;
     let band_w = content.width;
@@ -2455,81 +2586,27 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     // 浮层态连 composer 一起收起：画面只留 header + 浮层，键位提示由浮层自己承担。
     if state.mode == InteractionMode::Normal {
         fill(f, band, theme::SURFACE);
-        // 分隔线贴住色带上沿（画在上一行底部），避免与色带边界叠加成「双线」。
-        if bottom_top > area.y {
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "▁".repeat(band_w as usize),
-                    Style::default().fg(theme::HAIRLINE),
-                )))
-                .style(Style::default().bg(theme::CANVAS)),
-                Rect {
-                    x: band_x,
-                    y: bottom_top - 1,
-                    width: band_w,
-                    height: 1,
-                },
-            );
-        }
 
         let input_rect = Rect {
             x: content.x,
-            y: bottom_top.saturating_add(2),
+            y: bottom_top.saturating_add(1),
             width: content.width,
             height: input_h,
         };
         render_input(f, input_rect, state);
 
-        // 状态行：左侧情境提示，右侧一个状态短语；两者之间留出弹性空白。
-        let (phrase, phrase_style) = status_word(state);
-        let menu_open = !state.matching_commands().is_empty();
-        let hint = if menu_open {
-            "↑↓ 选择 · Tab 补全".to_string()
-        } else if state.is_streaming {
-            "Esc 中断".to_string()
-        } else if !state.auto_scroll {
-            "↑ 已上翻 · End 回到底部".to_string()
-        } else if state.input_buffer.trim().is_empty() {
-            "Enter 发送 · F3/Ctrl+T 思考强度 · / 查看命令".to_string()
-        } else {
-            "Enter 发送 · Shift+Enter 换行".to_string()
-        };
-        let footer_rect = Rect {
+        // wave-39 R7：色带最后一行是指标行（整宽 SURFACE，全部 faint）。
+        // 左 = workspace 路径标签，右 = token/缓存/上下文簇；绝不写出内容列。
+        let metrics_rect = Rect {
             x: content.x,
             y: input_rect.y.saturating_add(input_h),
             width: content.width,
             height: 1,
         };
-        let space = content.width as usize;
-        let hint_w = str_width(&hint);
-        let status_w = str_width(&phrase);
-        let left_inset = RAIL;
-        let right_inset = 0usize;
-        let footer_line = if space >= left_inset + hint_w + 2 + status_w + right_inset {
-            let gap = space - left_inset - hint_w - status_w - right_inset;
-            Line::from(vec![
-                Span::raw(" ".repeat(left_inset)),
-                Span::styled(hint, faint()),
-                Span::raw(" ".repeat(gap)),
-                Span::styled(phrase, phrase_style),
-                Span::raw(" ".repeat(right_inset)),
-            ])
-        } else if space >= left_inset + status_w + right_inset {
-            let gap = space - left_inset - status_w - right_inset;
-            Line::from(vec![
-                Span::raw(" ".repeat(left_inset + gap)),
-                Span::styled(phrase, phrase_style),
-                Span::raw(" ".repeat(right_inset)),
-            ])
-        } else {
-            Line::from(Span::styled(
-                truncate_width(&phrase, space.saturating_sub(1)),
-                phrase_style,
-            ))
-        };
         f.render_widget(
-            Paragraph::new(footer_line).style(Style::default().bg(theme::SURFACE)),
-            footer_rect,
+            Paragraph::new(metrics_line(state, content.width as usize))
+                .style(Style::default().bg(theme::SURFACE)),
+            metrics_rect,
         );
     }
 
@@ -3583,6 +3660,10 @@ fn tui_event_loop(
                                     continue;
                                 }
 
+                                // wave-39 R8：新一轮开始前清空本轮回执，并按当前
+                                // provider/model 解析上下文窗口（解析不到则回退默认值）。
+                                state.begin_turn_usage();
+                                state.context_window_tokens = resolve_context_window_tokens(&state);
                                 state.add_user_message(&input);
                                 state.is_streaming = true;
                                 state.auto_scroll = true; // 发送新消息时立即恢复自动贴底滚动
@@ -3695,9 +3776,20 @@ fn tui_event_loop(
                     state.transition_runtime_mode(RuntimeMode::Completed);
                     state.status_text = "Turn completed".to_string();
                 }
-                // wave-39 R1/R3（契约冻结）：穷尽匹配占位，保证新增变体可编译；
-                // 实际接线（apply_turn_usage）由 Executor 在 R8 实现。
-                UiEvent::StreamUsage { .. } => unimplemented!(),
+                // wave-39 R8：本轮 token 回执 → 幂等覆盖计入累计指标。
+                UiEvent::StreamUsage {
+                    input_tokens,
+                    output_tokens,
+                    cache_hit_input_tokens,
+                    total_tokens,
+                } => {
+                    state.apply_turn_usage(
+                        input_tokens,
+                        output_tokens,
+                        cache_hit_input_tokens,
+                        total_tokens,
+                    );
+                }
                 UiEvent::StreamFailed(err) => {
                     state.is_streaming = false;
                     state.transition_runtime_mode(RuntimeMode::Failed(err.clone()));

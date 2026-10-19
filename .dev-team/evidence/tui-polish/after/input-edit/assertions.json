@@ -31,13 +31,13 @@
       "id": "abc.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.ansi size=4207"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.ansi size=3561"
     },
     {
       "id": "abc.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.png size=129705"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.png size=134471"
     },
     {
       "id": "input_edit.abc",
@@ -73,13 +73,13 @@
       "id": "inserted.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.ansi size=4207"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.ansi size=3561"
     },
     {
       "id": "inserted.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.png size=130519"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.png size=135225"
     },
     {
       "id": "input_edit.inserted",
@@ -115,13 +115,13 @@
       "id": "backspace.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.ansi size=4207"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.ansi size=3561"
     },
     {
       "id": "backspace.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.png size=130067"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.png size=134801"
     },
     {
       "id": "input_edit.backspace",
@@ -157,13 +157,13 @@
       "id": "word_cleared.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.ansi size=4205"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.ansi size=3557"
     },
     {
       "id": "word_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.png size=140916"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.png size=144125"
     },
     {
       "id": "input_edit.word_cleared",
@@ -199,13 +199,13 @@
       "id": "tab_complete.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.ansi size=4218"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.ansi size=3558"
     },
     {
       "id": "tab_complete.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.png size=71920"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.png size=73747"
     },
     {
       "id": "input_edit.tab_complete",
@@ -241,13 +241,13 @@
       "id": "ctrl_u_cleared.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.ansi size=4205"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.ansi size=3557"
     },
     {
       "id": "ctrl_u_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.png size=140916"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.png size=144125"
     },
     {
       "id": "input_edit.ctrl_u_cleared",
@@ -283,13 +283,13 @@
       "id": "multiline.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.ansi size=4380"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.ansi size=3734"
     },
     {
       "id": "multiline.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.png size=131025"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.png size=135687"
     },
     {
       "id": "input_edit.multiline",
@@ -325,13 +325,13 @@
       "id": "esc_cleared.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=4205"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=3557"
     },
     {
       "id": "esc_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.png size=140916"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.png size=144125"
     },
     {
       "id": "input_edit.esc_cleared",
@@ -367,13 +367,13 @@
       "id": "draft.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.ansi size=4207"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.ansi size=3561"
     },
     {
       "id": "draft.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.png size=129735"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.png size=134496"
     },
     {
       "id": "input_edit.draft",
@@ -421,13 +421,13 @@
       "id": "draft_cleared.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.ansi size=4205"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.ansi size=3557"
     },
     {
       "id": "draft_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.png size=140916"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.png size=144125"
     },
     {
       "id": "input_edit.ctrl_c_with_draft_clears_only",
@@ -451,7 +451,7 @@
       "id": "exit.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.5n13xn/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.5n13xn/iso-inpu"
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-inpu"
     },
     {
       "id": "exit.capture_rows",
@@ -463,13 +463,13 @@
       "id": "exit.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.ansi size=495"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.ansi size=493"
     },
     {
       "id": "exit.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=75010"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=75425"
     },
     {
       "id": "shell.no_panic",
@@ -481,7 +481,7 @@
       "id": "shell.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.5n13xn/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.5n13xn/iso-inpu"
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-inpu"
     },
     {
       "id": "shell.capture_rows",
@@ -493,19 +493,19 @@
       "id": "shell.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.ansi size=550"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.ansi size=548"
     },
     {
       "id": "shell.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=86732"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=87100"
     },
     {
       "id": "input_edit.ctrl_c_empty_exits",
       "desc": "a second Ctrl-C on the empty composer exits the process normally",
       "ok": true,
-      "evidence": "exit_code=0 row :: home LANG=en_US.UTF-8 /home/dm/pony-agent/target/release/pony; echo AUDIT_EXIT=$?"
+      "evidence": "exit_code=0 row :: home LANG=en_US.UTF-8 /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$?"
     },
     {
       "id": "input_edit.terminal_restored",

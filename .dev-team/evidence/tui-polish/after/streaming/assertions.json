@@ -31,13 +31,13 @@
       "id": "mid.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2802"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2146"
     },
     {
       "id": "mid.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=79709"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=86270"
     },
     {
       "id": "final.no_panic",
@@ -67,19 +67,19 @@
       "id": "final.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=3249"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2587"
     },
     {
       "id": "final.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=144252"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=146594"
     },
     {
       "id": "streaming.mid_status_writing",
-      "desc": "footer shows the writing state while the stream is still arriving",
+      "desc": "streaming active line shows the writing state while the footer is the metrics line",
       "ok": true,
-      "evidence": "footer :: Esc 中断 写入中"
+      "evidence": "active_row :: • 写入中 0秒 | footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0%"
     },
     {
       "id": "streaming.mid_active_elapsed",
@@ -95,21 +95,21 @@
     },
     {
       "id": "streaming.mid_not_finished",
-      "desc": "mid-stream capture is not the completed answer yet",
+      "desc": "mid-stream capture is not the completed answer yet (footer is the metrics line)",
       "ok": true,
-      "evidence": "footer :: Esc 中断 写入中"
+      "evidence": "footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0%"
     },
     {
       "id": "streaming.final_complete",
-      "desc": "final capture contains the terminal answer and ready footer",
+      "desc": "final capture contains the terminal answer and the metrics footer",
       "ok": true,
-      "evidence": "footer :: Enter 发送 · / 查看命令 完成"
+      "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
     },
     {
       "id": "streaming.final_not_writing",
       "desc": "writing status disappeared once the stream finished",
       "ok": true,
-      "evidence": "footer :: Enter 发送 · / 查看命令 完成"
+      "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
     }
   ]
 }

@@ -37,7 +37,7 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=50822"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=52000"
     },
     {
       "id": "sessions.title",
@@ -49,13 +49,13 @@
       "id": "sessions.prior_conversation_listed",
       "desc": "the conversation just completed is offered for resume",
       "ok": true,
-      "evidence": "│▏ 读取 package.json 并总结 f9f2c50c · 当前 │"
+      "evidence": "│▏ 读取 package.json 并总结 de7c3296 · 当前 │"
     },
     {
       "id": "sessions.session_id_visible",
       "desc": "session row carries a short session id",
       "ok": true,
-      "evidence": "│▏ 读取 package.json 并总结 f9f2c50c · 当前 │"
+      "evidence": "│▏ 读取 package.json 并总结 de7c3296 · 当前 │"
     },
     {
       "id": "sessions.not_empty",
@@ -133,7 +133,7 @@
       "id": "sessions.current_marker",
       "desc": "sessions panel marks the active session",
       "ok": true,
-      "evidence": "│▏ 读取 package.json 并总结 f9f2c50c · 当前 │"
+      "evidence": "│▏ 读取 package.json 并总结 de7c3296 · 当前 │"
     }
   ]
 }

@@ -1,7 +1,7 @@
 {
   "scenario": "empty",
-  "pass": 18,
-  "fail": 0,
+  "pass": 15,
+  "fail": 1,
   "checks": [
     {
       "id": "main.no_panic",
@@ -31,13 +31,13 @@
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.ansi size=4205"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.ansi size=3557"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.png size=140916"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.png size=144125"
     },
     {
       "id": "main.header",
@@ -49,13 +49,13 @@
       "id": "main.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "main.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.guidance",
@@ -64,40 +64,28 @@
       "evidence": "描述一个任务开始，或输入命令："
     },
     {
-      "id": "empty.no_error_status",
-      "desc": "empty state has no error status word",
+      "id": "empty.footer_metrics",
+      "desc": "footer is the composer metrics line (↑ ↓ 缓存 上下文), with no error/status phrase",
       "ok": true,
-      "evidence": "footer :: Enter 发送 · / 查看命令 就绪"
+      "evidence": "footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 —"
     },
     {
-      "id": "main.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "main.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": true,
-      "evidence": "rule_rows=[1, 28]"
+      "evidence": "rule_rows=[1]"
     },
     {
-      "id": "main.separator_same_glyph",
-      "desc": "header and composer rules use the same glyph",
+      "id": "main.separator_header_rule_geometry",
+      "desc": "header rule lives on row 1, starts at content column 3 and spans 114 cols",
       "ok": true,
-      "evidence": "header='▁' composer='▁'"
-    },
-    {
-      "id": "main.separator_same_width",
-      "desc": "header and composer rules have the same display width",
-      "ok": true,
-      "evidence": "header_width=114 composer_width=114"
-    },
-    {
-      "id": "main.separator_aligned",
-      "desc": "both rules start at content column 3 and span 114 cols",
-      "ok": true,
-      "evidence": "starts=[3, 3] width=114 expected_width=114"
+      "evidence": "row=1 start=3 expected_start=3 width=114 expected_width=114"
     },
     {
       "id": "main.composer_cursor_block",
       "desc": "first placeholder glyph is a reverse-video block (accent bg / canvas-colored glyph)",
       "ok": true,
-      "evidence": "row=31 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224)"
+      "evidence": "row=32 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224)"
     },
     {
       "id": "empty.placeholder_column",
@@ -108,8 +96,8 @@
     {
       "id": "empty.command_desc_column",
       "desc": "command descriptions start at column 16 (same table geometry everywhere)",
-      "ok": true,
-      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': None, '/help': None, '/quit': None} expected=16 missing=[]"
+      "ok": false,
+      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/clear']"
     }
   ]
 }

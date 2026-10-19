@@ -1,6 +1,6 @@
 {
   "scenario": "cost",
-  "pass": 14,
+  "pass": 12,
   "fail": 0,
   "checks": [
     {
@@ -31,25 +31,25 @@
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=2054"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=1396"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=59479"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=59164"
     },
     {
       "id": "main.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "main.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "cost.model_line",
@@ -58,28 +58,16 @@
       "evidence": "row :: · 模型 mock-alpha"
     },
     {
-      "id": "main.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "main.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": true,
-      "evidence": "rule_rows=[1, 28]"
+      "evidence": "rule_rows=[1]"
     },
     {
-      "id": "main.separator_same_glyph",
-      "desc": "header and composer rules use the same glyph",
+      "id": "main.separator_header_rule_geometry",
+      "desc": "header rule lives on row 1, starts at content column 3 and spans 114 cols",
       "ok": true,
-      "evidence": "header='▁' composer='▁'"
-    },
-    {
-      "id": "main.separator_same_width",
-      "desc": "header and composer rules have the same display width",
-      "ok": true,
-      "evidence": "header_width=114 composer_width=114"
-    },
-    {
-      "id": "main.separator_aligned",
-      "desc": "both rules start at content column 3 and span 114 cols",
-      "ok": true,
-      "evidence": "starts=[3, 3] width=114 expected_width=114"
+      "evidence": "row=1 start=3 expected_start=3 width=114 expected_width=114"
     },
     {
       "id": "cost.gateway_line",

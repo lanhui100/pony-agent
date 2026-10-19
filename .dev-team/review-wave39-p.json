@@ -1,0 +1,41 @@
+{
+  "verdict": "PASS",
+  "findings": [],
+  "five_questions": [
+    {
+      "q": "Q1",
+      "baseline": "external_call_timeout_ms <= 3000；本波次不得新增无超时的外部调用",
+      "evidence": "git diff -- crates/pony-agent-core/src/bin/tui.rs（1 file, 173 insertions, 85 deletions）中无 HTTP/网络客户端、socket、timeout API、无新增依赖；唯一新增 IO 为 tui.rs:672 ProviderRegistryStore::new().load_view() → config.rs:337-339 → config.rs:480-489 fs::read_to_string(单个 ~/.config/pony-agent/providers.json, 实测 31,971 B) → config.rs:589-619 build_view_from_storage。判定：本地注册表读取 = 本地文件系统读，无远程端点、无网络栈，不属于 external_call_timeout_ms 所约束的外部调用（该字段口径为网络/远程调用）；实测本地 read+parse 0.165 ms/次（200 次均值，本机同文件）。透明披露：load_view 经 config.rs:621-638 secret_store.get 触达 OS keyring（Cargo.toml:50 linux-native-sync-persistent → keyring 3.6.3 keyutils_persistent，冷缓存回落 secret-service，本地 IPC 且无应用层超时），但该链为既有模式（HEAD tui.rs:3591 发送路径已调用 resolve_active_provider_id → load_view），波次仅新增 2 次/发送（672 + resolve_active_provider_id@1295），未引入新调用类别。",
+      "verdict": "PASS",
+      "kind": "machine"
+    },
+    {
+      "q": "Q2",
+      "baseline": "logging.format=json + trace_id；禁止裸 print / 吞异常",
+      "evidence": "diff 扫描 println!/print!/eprintln!/dbg!/tracing::/log:: = 0 行（grep 无命中）；tui.rs 内 tracing/log 计数 = 0，该 bin 无 JSON 日志面，故 logging 基准不适用于本文件且本波次未新增日志/打印。新增 let _ 仅 tui.rs:1273 `let _ = self.tx.send(UiEvent::StreamUsage{..})`，与紧邻既有 tui.rs:1263、1280 同一惯用法；std mpsc SendError 唯一成因是接收端（UI 主循环）已退出，不存在被隐藏的真实错误（无降级/无数据通路）。新增代码无 unwrap()/expect()/panic!()（grep 仅命中被删除的空桩 unimplemented!() 行，diff 内已消除）。",
+      "verdict": "PASS",
+      "kind": "machine"
+    },
+    {
+      "q": "Q3",
+      "baseline": "resource_release：无新增线程/文件句柄/跨 await 锁；UI 主线程调用时延可接受",
+      "evidence": "diff grep thread::spawn|spawn(|.lock(|Mutex|RwLock|.await|File::|OpenOptions = NONE；唯一 thread::spawn（tui.rs:3683 发送 turn）在 diff 中为上下文非新增。load_view 以 fs::read_to_string 单文件读完即返回、句柄随之释放（config.rs:480-489），全路径同步无 await、无锁。UI 主线程：tui.rs:3654 位于 tui_event_loop（tui.rs:3024）单线程循环；TuiState 无 Arc<Mutex>/RwLock（grep=0）；每次发送 2 次注册表读（672 与 1295），实测 31,971 B read+parse 0.165 ms。non-machine：UI 主线程可接受性中 keyring 每 provider 查询时延未做 Rust 实链测量 → Lead 需双人复核。",
+      "verdict": "PASS",
+      "kind": "non-machine"
+    },
+    {
+      "q": "Q4",
+      "baseline": "concurrency_lock：usage 状态仅在主事件循环单线程更新；sat 运算不得掩盖并发/逻辑问题",
+      "evidence": "apply_turn_usage 定义 tui.rs:370-381，src 内唯一调用点 tui.rs:3774（tui_event_loop 内）；begin_turn_usage 唯一调用点 tui.rs:3653；tui.rs 内 start_turn_stream 唯一调用点 3684，无旁路轮次起点。status_text 写入 3658/3765/3784 与 usage 更新同处 tui_event_loop（3024）单线程；TuiState 未跨线程共享（无 Arc<Mutex<TuiState>>）。saturating_sub/add（372-378）在单写者且「本轮 prev 先加后减」前提下恒不触发饱和，属防御式写法而非掩盖并发；幂等覆盖+跨轮累加由冻结测试 A9（tests/tui_dialog_wave39.rs:501-560，12 条断言）实证。",
+      "verdict": "PASS",
+      "kind": "machine"
+    },
+    {
+      "q": "Q5",
+      "baseline": "NFR resource_release 两新增条目履诺 + 可机器复核自检（测试 10/10、-D warnings Exit 0、E2E）",
+      "evidence": "自跑凭证：cargo test -p pony-agent-core --test tui_dialog_wave39 → 'test result: ok. 10 passed; 0 failed'，PIPE_EXIT=0；RUSTFLAGS=\"-D warnings\" cargo check -p pony-agent-core --bin pony → Exit 0；dev-nfr-lint .dev-team/nfr-baseline-wave39.json → [PASS] Exit 0。基准履诺：no_new_threads_or_handles_introduced_by_composer_metrics_line（metrics_line tui.rs:1937 为纯渲染函数，diff 无线程/句柄）；tui_usage_state_updates_bound_to_main_event_loop（apply_turn_usage 调用点唯一 tui.rs:3774，位于 3024 循环内）。E2E 缺口如实记录：四份凭证 grep 'e2e' 0 命中，wave39-green-receipts.md §2 仅含 test/check/回归三类命令，无 E2E 命令与产物；E2E 产物生成超出本人唯一可写文件约束（不得产出捕获件），故 E2E 归 non-machine → Lead 需双人复核（审查期间 .dev-team/evidence/tui-polish/after 正被并行门禁写入，非本凭证范围）。",
+      "verdict": "PASS",
+      "kind": "non-machine"
+    }
+  ]
+}

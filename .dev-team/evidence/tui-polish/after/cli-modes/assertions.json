@@ -13,7 +13,7 @@
       "id": "cli.version_output",
       "desc": "--version prints its documented payload",
       "ok": true,
-      "evidence": "pony 0.1.125 · linux-x86_64 missing=[]"
+      "evidence": "pony 0.1.127 · linux-x86_64 missing=[]"
     },
     {
       "id": "cli.version_no_panic",
@@ -31,7 +31,7 @@
       "id": "cli.help_output",
       "desc": "--help prints its documented payload",
       "ok": true,
-      "evidence": "pony 0.1.125 — 交互式 TUI Agent missing=[]"
+      "evidence": "pony 0.1.127 — 交互式 TUI Agent missing=[]"
     },
     {
       "id": "cli.help_no_panic",

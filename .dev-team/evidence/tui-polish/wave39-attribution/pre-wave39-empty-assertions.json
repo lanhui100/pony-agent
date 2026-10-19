@@ -1,0 +1,97 @@
+{
+  "scenario": "empty",
+  "pass": 11,
+  "fail": 4,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture contains no Rust panic/backtrace",
+      "ok": true,
+      "evidence": "no panic tokens in capture"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "evidence": "widest row 0 width=117 cols=120 :: pony · w39-head mock-alpha"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/tmp/w39-head/.dev-team/evidence/tui-polish/after/empty/main.ansi size=4214"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "evidence": "/tmp/w39-head/.dev-team/evidence/tui-polish/after/empty/main.png size=148717"
+    },
+    {
+      "id": "main.header",
+      "desc": "header shows brand + workspace",
+      "ok": false,
+      "evidence": "row 0 :: pony · w39-head mock-alpha"
+    },
+    {
+      "id": "main.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "main.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "empty.guidance",
+      "desc": "empty state shows onboarding guidance",
+      "ok": true,
+      "evidence": "描述一个任务开始，或输入命令："
+    },
+    {
+      "id": "empty.footer_metrics",
+      "desc": "footer is the composer metrics line (↑ ↓ 缓存 上下文), with no error/status phrase",
+      "ok": false,
+      "evidence": "footer :: Enter 发送 · F3/Ctrl+T 思考强度 · / 查看命令 就绪"
+    },
+    {
+      "id": "main.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
+      "ok": false,
+      "evidence": "rule_rows=[1, 28]"
+    },
+    {
+      "id": "main.composer_cursor_block",
+      "desc": "first placeholder glyph is a reverse-video block (accent bg / canvas-colored glyph)",
+      "ok": true,
+      "evidence": "row=31 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224)"
+    },
+    {
+      "id": "empty.placeholder_column",
+      "desc": "placeholder starts at the shared text column 5",
+      "ok": true,
+      "evidence": "placeholder_col=5"
+    },
+    {
+      "id": "empty.command_desc_column",
+      "desc": "command descriptions start at column 16 (same table geometry everywhere)",
+      "ok": false,
+      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/clear']"
+    }
+  ]
+}

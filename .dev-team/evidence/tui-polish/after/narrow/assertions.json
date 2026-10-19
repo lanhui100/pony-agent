@@ -1,6 +1,6 @@
 {
   "scenario": "narrow",
-  "pass": 23,
+  "pass": 21,
   "fail": 0,
   "checks": [
     {
@@ -31,25 +31,25 @@
       "id": "empty.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.ansi size=1727"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.ansi size=1379"
     },
     {
       "id": "empty.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.png size=111279"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.png size=114304"
     },
     {
       "id": "empty.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 17 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 18 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 17 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 18 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.no_panic",
@@ -79,25 +79,25 @@
       "id": "conversation.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1752"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1712"
     },
     {
       "id": "conversation.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=82230"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=102599"
     },
     {
       "id": "conversation.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 17 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 18 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 17 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 18 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.header",
@@ -106,28 +106,16 @@
       "evidence": "row 0 :: pony · pony-agent mock-alpha"
     },
     {
-      "id": "empty.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "empty.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": true,
-      "evidence": "rule_rows=[1, 14]"
+      "evidence": "rule_rows=[1]"
     },
     {
-      "id": "empty.separator_same_glyph",
-      "desc": "header and composer rules use the same glyph",
+      "id": "empty.separator_header_rule_geometry",
+      "desc": "header rule lives on row 1, starts at content column 3 and spans 54 cols",
       "ok": true,
-      "evidence": "header='▁' composer='▁'"
-    },
-    {
-      "id": "empty.separator_same_width",
-      "desc": "header and composer rules have the same display width",
-      "ok": true,
-      "evidence": "header_width=54 composer_width=54"
-    },
-    {
-      "id": "empty.separator_aligned",
-      "desc": "both rules start at content column 3 and span 54 cols",
-      "ok": true,
-      "evidence": "starts=[3, 3] width=54 expected_width=54"
+      "evidence": "row=1 start=3 expected_start=3 width=54 expected_width=54"
     },
     {
       "id": "narrow.empty_guidance",
@@ -139,7 +127,7 @@
       "id": "narrow.conversation_visible",
       "desc": "narrow conversation still shows the tail of the final answer",
       "ok": true,
-      "evidence": "▏ \"version\": \"0.1.125\""
+      "evidence": "package.json 显示这是 pony-agent，版本 0.1.125。"
     }
   ]
 }

@@ -1,2 +1,2 @@
-pony 0.1.125 · linux-x86_64
-binary: /home/dm/pony-agent/target/release/pony
+pony 0.1.127 · linux-x86_64
+binary: /home/dm/pony-agent/target/debug/pony
