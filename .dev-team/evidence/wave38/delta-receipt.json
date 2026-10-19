@@ -1,0 +1,93 @@
+{
+  "wave": "wave-38",
+  "task": "task-5 / §5.D2 delta 验收（E8–E12 + AT1-RO 真实只读 HOME）",
+  "owner": "test-agent",
+  "status": "RED",
+  "verdict": "RED",
+  "generated_at": "2026-10-19T19:26:09",
+  "l2t_delta": {
+    "command": "cargo test -p pony-agent-core --test wave38-tui-workspace-contract",
+    "exit_code": 101,
+    "total": 15,
+    "passed": 10,
+    "failed": 5,
+    "green_tests": [
+      "at3_overlong_directory_name_is_truncated_but_root_is_exact",
+      "e6_build_turn_input_propagates_active_workspace_id",
+      "e7_default_tui_state_workspace_is_canonical_cwd",
+      "e1_ensure_new_root_registers_normalized_record",
+      "e2_ensure_is_idempotent_for_same_root",
+      "at2_same_basename_dedup_is_order_deterministic",
+      "at1_readonly_home_never_panics",
+      "e4_duplicate_basename_gets_deterministic_suffix",
+      "e3_ensure_returns_existing_record_untouched",
+      "e5_invalid_root_returns_err_without_mutating_records"
+    ],
+    "failure_root_cause": "unimplemented!: tui.rs:1296 resolve_resumed_workspace_binding（wave38 D1 空桩，待 Executor 实现）",
+    "evidence": ".dev-team/evidence/wave38/delta-red-rust.log"
+  },
+  "l2at": {
+    "command": "bash tests/acceptance/l2at-tui-workspace.sh",
+    "exit_code": 0,
+    "verdict": "GREEN",
+    "pass": 10,
+    "fail": 0,
+    "total": 10,
+    "at1_ro": {
+      "chmod_mode": "500",
+      "home_writable_after_chmod": 0,
+      "ran_as_uid": 1000,
+      "composer_rendered": true,
+      "no_panic": true,
+      "exit_code": "0",
+      "readonly_home_blocked_log_dir": true,
+      "evidence_dir": "tests/acceptance/receipts/l2at-tui-workspace/at1-ro/"
+    },
+    "evidence": ".dev-team/evidence/wave38/delta-red-e2e.log",
+    "receipts_dir": "tests/acceptance/receipts/l2at-tui-workspace/"
+  },
+  "failures": [
+    {
+      "test": "e10_resumed_binding_none_id_falls_back_to_startup_binding",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/tests/../src/bin/tui.rs:1296:5",
+      "exception": "not implemented: wave38 D1 resolve_resumed_workspace_binding: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/delta-red-rust.log"
+    },
+    {
+      "test": "e12_resumed_binding_blank_id_falls_back_to_startup_binding",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/tests/../src/bin/tui.rs:1296:5",
+      "exception": "not implemented: wave38 D1 resolve_resumed_workspace_binding: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/delta-red-rust.log"
+    },
+    {
+      "test": "e11_resumed_binding_dead_id_falls_back_to_startup_binding",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/tests/../src/bin/tui.rs:1296:5",
+      "exception": "not implemented: wave38 D1 resolve_resumed_workspace_binding: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/delta-red-rust.log"
+    },
+    {
+      "test": "e9_resumed_binding_registered_id_without_env_cwd_falls_back_to_startup_path",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/tests/../src/bin/tui.rs:1296:5",
+      "exception": "not implemented: wave38 D1 resolve_resumed_workspace_binding: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/delta-red-rust.log"
+    },
+    {
+      "test": "e8_resumed_binding_registered_id_with_env_cwd_keeps_owner",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/tests/../src/bin/tui.rs:1296:5",
+      "exception": "not implemented: wave38 D1 resolve_resumed_workspace_binding: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/delta-red-rust.log"
+    }
+  ],
+  "artifacts": {
+    "rust_test_file": "crates/pony-agent-core/tests/wave38-tui-workspace-contract.rs",
+    "e2e_script": "tests/acceptance/l2at-tui-workspace.sh",
+    "delta_rust_log": ".dev-team/evidence/wave38/delta-red-rust.log",
+    "delta_e2e_log": ".dev-team/evidence/wave38/delta-red-e2e.log",
+    "at1_ro_receipts": "tests/acceptance/receipts/l2at-tui-workspace/at1-ro/"
+  }
+}

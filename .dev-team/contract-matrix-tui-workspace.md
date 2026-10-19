@@ -97,3 +97,44 @@ pub fn ensure_workspace_for_root(&self, root: &str) -> Result<WorkspaceRecord, S
 ## 4. NFR 基准（wave-38 增量，不覆盖冻结基线）
 - 既有 `.dev-team/nfr-baseline.json`（PA-118 16 键冻结基准 + schema）**不修改**；实跑 `dev-nfr-lint.py` 取 EXIT 0。
 - 本期增量 `.dev-team/nfr-baseline-wave38.json`（5 必填：`external_call_timeout_ms`≤3000 / `retry` / `concurrency_lock` / `logging`(json+trace_id) / `resource_release`），实跑 `dev-nfr-lint.py` EXIT 0。
+
+## 5. 审查 delta（wave-38 追加冻结，L3-B 3 项 findings 处置）
+
+### D1（对应 finding 1，代码修复）：恢复旧会话的 workspace 绑定不得与 header 撒谎
+- **语义裁定（Lead）**：TUI 终止「恢复已有归属会话时静默改写其 workspace」的假设。恢复会话时：
+  - 会话已有**已注册** workspace 归属 → 保持该归属；`active_workspace_id` = 会话归属 id；`state.workspace`（header 展示）切换为该会话解析出的 workspace root（`session.env_info.cwd`，缺失则回退启动目录）；
+  - 会话无归属 / 空 id / 死 id（未注册）→ 回退启动目录绑定（`startup_workspace_id` + `startup_workspace_path`）。
+  - 不新增任何强制改写既有 owner 的写入路径（跨表面静默迁移仍被禁止）。
+- 新增纯函数（`src/bin/tui.rs`）：
+```rust
+pub fn resolve_resumed_workspace_binding(
+    session_workspace_id: Option<&str>,
+    session_env_cwd: Option<&str>,
+    registered_workspace_ids: &[String],
+    startup_workspace_id: Option<&str>,
+    startup_workspace_path: &std::path::Path,
+) -> (Option<String>, PathBuf);
+```
+- `TuiState` 新增 `pub startup_workspace_path: PathBuf`（Default = canonical cwd，与 `workspace` 一致）与 `pub startup_workspace_id: Option<String>`（Default None，`main` 登记成功后写入）。
+- `/resume` 选中会话后（`load_session_runtime_view` 返回后）按上述纯函数设置 `active_workspace_id` / `workspace`。
+
+### D2（对应 finding 2，测试补齐）：AT1 假绿修补
+- 在 `tests/acceptance/l2at-tui-workspace.sh` 增加 `AT1-RO` 场景：隔离 HOME 目录 `chmod 500` 后以相同方式启动 TUI（tmux），断言：无 panic 痕迹、进程可正常退出（EXIT=0/非 101）、收据落盘；若平台无法 chmod（root 等）→ 输出 `[RED DEGRADED: CHMOD-UNAVAILABLE]` 并 exit 3。
+- Rust 侧新增 E8–E12（D1 纯函数矩阵）：
+  - E8 已注册 id + env cwd → 返回 (id, env cwd)；
+  - E9 已注册 id + env cwd 缺失 → (id, startup path)；
+  - E10 None id → (startup id, startup path)；
+  - E11 死 id（未注册）→ (startup id, startup path)；
+  - E12 空字符串 id → (startup id, startup path)。
+
+### D3（对应 finding 3，契约声明，无代码）：workspace 登记增长语义
+- **显式设计**：TUI 启动目录会作为 workspace 记录**持久化到共享注册表**（桌面端同样可见），不做 TTL/上限/自动清理；清理口径 = 用户在桌面/TUI 侧显式删除（`delete_workspace`，default 保留字不可删）。这属 R1 的预期副作用，不作为缺陷修复。
+
+### 门禁
+- D1/D2 测试先红后绿；`cargo test --test wave38-tui-workspace-contract` 与 `bash tests/acceptance/l2at-tui-workspace.sh` EXIT=0；`RUSTFLAGS="-D warnings" cargo check --lib --bins` EXIT=0；复跑 L3-B 靶向审查 PASS。
+
+### D4（L3-P Q3 裁定：持久化 best-effort，非本波缺陷）
+- 事实：`SessionBackend::save_store(&PersistedStore)` 返回 `()`（`agent/session/backend.rs:216`），File/SQLite 后端内部吞掉写盘错误——这是**本波之前既有契约**，`save_to_backend()` 一直 best-effort。
+- 裁定：wave-38 **不改造后端错误传播**（属跨模块重构，违背最小闭包）；`HostControlPlane::ensure_workspace_for_root` 的成功语义 = **本进程内注册成功 + best-effort 持久化**。持久化失败时：本次运行工具根正确（内存注册），下次启动未知 workspace id 由 `normalize_session_workspace_id` 归一为 default（fail-safe，不崩溃、不越权）。
+- 契约同步：§2 AT1 的"Err 或幂等成功"口径修正为"不 panic + TUI 正常退出"；只读 HOME 场景由 AT1-RO 真实覆盖（`tests/acceptance/receipts/l2at-tui-workspace/at1-ro/`）。
+- L3-P 复核口径：Q3 以"既有后端 API 限制 + 已声明 best-effort/fail-safe"为准，不再要求本波新增错误传播。

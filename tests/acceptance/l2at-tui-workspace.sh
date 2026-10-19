@@ -73,6 +73,10 @@ cleanup() {
   if [ "$TMUX_STARTED" -eq 1 ]; then
     tmux -L "$SOCK" kill-server >/dev/null 2>&1 || true
   fi
+  if [ -n "${RO_SOCK:-}" ]; then
+    tmux -L "$RO_SOCK" kill-server >/dev/null 2>&1 || true
+  fi
+  chmod -R u+w "$WORK" 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
@@ -460,7 +464,8 @@ cp "$ISO/project/package.json" "$RECEIPTS/project-package.json"
 cp "$ISO/home/pony_agent/package.json" "$RECEIPTS/default-ws-package.json"
 
 # provider 注册表（fakep → 本脚本 mock；参考 tools/tui-audit/run_audit.sh 的 fakep 形态，但自包含）
-python3 - "$ISO/xdg-config/pony-agent/providers.json" "$MOCK_PORT" <<'PY'
+write_provider_registry() { # $1 = ISO 根（需已存在 xdg-config/pony-agent）
+python3 - "$1/xdg-config/pony-agent/providers.json" "$MOCK_PORT" <<'PY'
 import json, sys
 path, port = sys.argv[1], int(sys.argv[2])
 model = {
@@ -503,6 +508,8 @@ provider = {
 with open(path, "w", encoding="utf-8") as fh:
     json.dump({"providers": [provider], "selected_provider_id": "fakep"}, fh, ensure_ascii=False, indent=2)
 PY
+}
+write_provider_registry "$ISO"
 log "== marker(project)=$MARKER"
 log "== marker(default)=$DEFAULT_MARKER"
 
@@ -689,6 +696,136 @@ else
     ok "A4b 最后一次 tool 请求的工具结果不含 $DEFAULT_MARKER"
   fi
 fi
+
+# ---------------------------------------------------------------------------
+# 6. AT1-RO（§5.D2 delta）：真实只读 HOME（chmod 500）下启动 TUI
+#    目的：修补 L3-B 指出的「AT1 假绿」——此前只测纯函数，从未真实让 HOME 不可写。
+#    断言：composer 正常渲染（TUI 进入主循环）、无 panic 痕迹、退出码非 101（正常 0）。
+#    若无法让 HOME 真正不可写（root / 特权容器）→ [RED DEGRADED: CHMOD-UNAVAILABLE] exit 3。
+# ---------------------------------------------------------------------------
+RO_RECEIPTS="$RECEIPTS/at1-ro"
+mkdir -p "$RO_RECEIPTS"
+ISO_RO="$WORK/iso-ro"
+RO_SOCK="tui-ws-ro-$$"
+RO_SESS="wave38-ro"
+mkdir -p "$ISO_RO/home/pony_agent" "$ISO_RO/project" "$ISO_RO/xdg-config/pony-agent" "$ISO_RO/xdg-data" "$ISO_RO/xdg-cache"
+python3 - "$ISO_RO/project/package.json" "$MARKER" <<'PY'
+import json, sys
+json.dump({"name": "wave38-project-ro", "version": "0.0.1", "private": True, "marker": sys.argv[2]},
+          open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+write_provider_registry "$ISO_RO"
+
+chmod 500 "$ISO_RO/home" 2>/dev/null || true
+CHMOD_MODE="$(stat -c %a "$ISO_RO/home" 2>/dev/null || echo unknown)"
+PROBE="$ISO_RO/home/.write-probe"
+if ( : > "$PROBE" ) 2>/dev/null; then
+  RO_WRITABLE=1
+  rm -f "$PROBE" 2>/dev/null || true
+else
+  RO_WRITABLE=0
+fi
+{
+  echo "iso_ro=$ISO_RO"
+  echo "home=$ISO_RO/home"
+  echo "chmod_mode=$CHMOD_MODE"
+  echo "home_writable_after_chmod=$RO_WRITABLE"
+  echo "ran_as_uid=$(id -u 2>/dev/null || echo unknown)"
+} > "$RO_RECEIPTS/fixture.txt"
+cat "$RO_RECEIPTS/fixture.txt" | tee -a "$LOG"
+
+if [ "$CHMOD_MODE" != "500" ] || [ "$RO_WRITABLE" -ne 0 ]; then
+  echo "[RED DEGRADED: CHMOD-UNAVAILABLE] 无法把隔离 HOME 置为真正只读（mode=$CHMOD_MODE writable=$RO_WRITABLE uid=$(id -u 2>/dev/null || echo unknown)）" \
+    | tee "$RO_RECEIPTS/degraded.log" | tee -a "$LOG"
+  chmod 700 "$ISO_RO/home" 2>/dev/null || true
+  exit 3
+fi
+
+cat > "$WORK/run_tui_ro.sh" <<RUNNER
+#!/usr/bin/env bash
+cd "$ISO_RO/project" || exit 90
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \\
+  -u NODE_USE_ENV_PROXY -u NO_COLOR \\
+  HOME="$ISO_RO/home" \\
+  XDG_CONFIG_HOME="$ISO_RO/xdg-config" \\
+  XDG_DATA_HOME="$ISO_RO/xdg-data" \\
+  XDG_CACHE_HOME="$ISO_RO/xdg-cache" \\
+  PONYLLM_GATEWAY_URL="http://127.0.0.1:$MOCK_PORT" \\
+  PONYLLM_API_KEY="mock-key" \\
+  LANG="\${LANG:-C.UTF-8}" TERM=screen-256color \\
+  "$BIN"
+rc=\$?
+echo "\$rc" > "$RO_RECEIPTS/exit-code.txt"
+exit \$rc
+RUNNER
+chmod +x "$WORK/run_tui_ro.sh"
+
+tmux -L "$RO_SOCK" -f /dev/null start-server >/dev/null 2>&1 || true
+tmux -L "$RO_SOCK" set-option -g status off >/dev/null 2>&1 || true
+tmux -L "$RO_SOCK" set-option -g remain-on-exit on >/dev/null 2>&1 || true
+tmux -L "$RO_SOCK" set-option -g history-limit 20000 >/dev/null 2>&1 || true
+tmux -L "$RO_SOCK" set-option -g default-terminal "screen-256color" >/dev/null 2>&1 || true
+tmux -L "$RO_SOCK" new-session -d -s "$RO_SESS" -x 120 -y 36 -c "$ISO_RO/project" "$WORK/run_tui_ro.sh" >/dev/null 2>&1
+RO_NEW_EXIT=$?
+if [ "$RO_NEW_EXIT" -ne 0 ]; then
+  log "FATAL: AT1-RO tmux new-session failed (exit $RO_NEW_EXIT)"
+  exit 2
+fi
+
+ro_capture() { tmux -L "$RO_SOCK" capture-pane -t "$RO_SESS" -p 2>/dev/null || true; }
+RO_READY=0
+for _ in $(seq 1 150); do
+  if ro_capture | grep -q '›'; then RO_READY=1; break; fi
+  sleep 0.2
+done
+ro_capture > "$RO_RECEIPTS/screen-ready.txt"
+tmux -L "$RO_SOCK" send-keys -t "$RO_SESS" -l "/quit"
+tmux -L "$RO_SOCK" send-keys -t "$RO_SESS" Enter
+RO_EXITED=0
+for _ in $(seq 1 100); do
+  if [ -s "$RO_RECEIPTS/exit-code.txt" ]; then RO_EXITED=1; break; fi
+  sleep 0.2
+done
+if [ "$RO_EXITED" -ne 1 ]; then
+  log "WARN: AT1-RO TUI did not exit via /quit within 20s; killing session"
+  tmux -L "$RO_SOCK" kill-session -t "$RO_SESS" >/dev/null 2>&1 || true
+  echo "killed" > "$RO_RECEIPTS/exit-code.txt"
+fi
+sleep 0.3
+ro_capture > "$RO_RECEIPTS/screen-exit.txt"
+tmux -L "$RO_SOCK" kill-server >/dev/null 2>&1 || true
+if [ -f "$ISO_RO/home/.pony-agent/tui-logs/tui-runtime.log" ]; then
+  cp "$ISO_RO/home/.pony-agent/tui-logs/tui-runtime.log" "$RO_RECEIPTS/tui-runtime.log"
+else
+  echo "(no tui-runtime.log: 只读 HOME 阻止创建 \$HOME/.pony-agent/tui-logs —— 符合预期)" > "$RO_RECEIPTS/tui-runtime.log"
+fi
+chmod 700 "$ISO_RO/home" 2>/dev/null || true
+
+RO_SCREEN_ALL="$(cat "$RO_RECEIPTS/screen-ready.txt" "$RO_RECEIPTS/screen-exit.txt" 2>/dev/null)"
+RO_EXIT_CODE="$(cat "$RO_RECEIPTS/exit-code.txt" 2>/dev/null || echo missing)"
+
+if [ "$RO_READY" -eq 1 ]; then
+  ok "A5 AT1-RO 只读 HOME（mode=$CHMOD_MODE）下 TUI composer 正常渲染（进入主循环，未在启动期崩溃）"
+else
+  bad "A5 AT1-RO 只读 HOME 下 TUI 未在 30s 内渲染 composer（启动期疑似失败，见 at1-ro/screen-ready.txt）"
+fi
+if grep -qE "panicked at|thread 'main' panicked|RUST_BACKTRACE" <<<"$RO_SCREEN_ALL"; then
+  bad "A5b AT1-RO 屏幕出现 panic 痕迹（见 at1-ro/screen-ready.txt / screen-exit.txt）"
+else
+  ok "A5b AT1-RO 屏幕无 panic 痕迹"
+fi
+case "$RO_EXIT_CODE" in
+  101|missing|killed)
+    bad "A5c AT1-RO 退出码异常：$RO_EXIT_CODE（101=panic / missing=未取得 / killed=未响应 /quit）"
+    ;;
+  *)
+    if [ "$RO_EXIT_CODE" = "0" ]; then
+      ok "A5c AT1-RO 正常退出（exit code 0）"
+    else
+      ok "A5c AT1-RO 非 panic 退出（exit code $RO_EXIT_CODE，契约允许非 101）"
+    fi
+    ;;
+esac
 
 TOTAL=$((PASS + FAIL))
 VERDICT="GREEN"

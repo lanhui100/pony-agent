@@ -500,3 +500,173 @@ fn at3_overlong_directory_name_is_truncated_but_root_is_exact() {
     assert!(validate_workspace_id(&record.id).is_ok(), "AT3：id 必须合法");
     assert_eq!(records.len(), 1, "AT3：登记后应只有一条记录");
 }
+
+// ===========================================================================
+// wave-38 §5.D2 delta（task-5）：恢复历史会话的 workspace 绑定纯函数矩阵 E8–E12。
+// 契约 §5.D1：已注册归属 → 保持该归属（header 用 env cwd，缺失回退启动目录）；
+// None / 空串 / 死 id → 回退启动目录绑定（startup id + startup path）。
+// 本组用例当前必须因 `tui::resolve_resumed_workspace_binding` 的 `unimplemented!` 而红。
+// ===========================================================================
+
+fn registered_ids() -> Vec<String> {
+    vec!["default".to_string(), "ws-reg-1".to_string()]
+}
+
+/// E8：已注册 id + env cwd 存在 → (Some(id), env cwd PathBuf)。
+#[test]
+fn e8_resumed_binding_registered_id_with_env_cwd_keeps_owner() {
+    let tmp = TempRoot::new("e8");
+    // 夹具用 canonical 路径，避免「原样透传」与「实现再 canonicalize」两种口径分歧。
+    let env_cwd = std::fs::canonicalize(tmp.dir("env-cwd")).expect("E8：夹具 env cwd 必须可 canonicalize");
+    let startup = tmp.dir("startup");
+    let registered = registered_ids();
+
+    let (id, path) = tui::resolve_resumed_workspace_binding(
+        Some("ws-reg-1"),
+        Some(&pstr(&env_cwd)),
+        &registered,
+        Some("ws-startup-1"),
+        &startup,
+    );
+
+    assert_eq!(
+        id.as_deref(),
+        Some("ws-reg-1"),
+        "E8：已注册会话归属必须保持原 id（不得回退启动目录绑定）"
+    );
+    assert_eq!(
+        path, env_cwd,
+        "E8：header 展示 root 必须取会话 env cwd，而非启动目录"
+    );
+    assert_ne!(
+        path, startup,
+        "E8：已注册归属 + env cwd 存在时不得回退启动目录"
+    );
+}
+
+/// E9：已注册 id 但 env cwd 缺失 → (Some(id), startup path)。
+#[test]
+fn e9_resumed_binding_registered_id_without_env_cwd_falls_back_to_startup_path() {
+    let tmp = TempRoot::new("e9");
+    let startup = tmp.dir("startup");
+    let registered = registered_ids();
+
+    let (id, path) = tui::resolve_resumed_workspace_binding(
+        Some("ws-reg-1"),
+        None,
+        &registered,
+        Some("ws-startup-1"),
+        &startup,
+    );
+
+    assert_eq!(
+        id.as_deref(),
+        Some("ws-reg-1"),
+        "E9：env cwd 缺失时归属 id 仍必须保持会话归属"
+    );
+    assert_eq!(
+        path,
+        PathBuf::from(&startup),
+        "E9：env cwd 缺失时 header root 必须回退 startup path，实际 = {path:?}"
+    );
+}
+
+/// E10：None id → 回退启动目录绑定；并覆盖 startup id 为 None 的情形。
+#[test]
+fn e10_resumed_binding_none_id_falls_back_to_startup_binding() {
+    let tmp = TempRoot::new("e10");
+    let startup = tmp.dir("startup");
+    let registered = registered_ids();
+
+    let (id, path) = tui::resolve_resumed_workspace_binding(
+        None,
+        Some("/should/be/ignored"),
+        &registered,
+        Some("ws-startup-1"),
+        &startup,
+    );
+    assert_eq!(
+        id.as_deref(),
+        Some("ws-startup-1"),
+        "E10：无归属会话必须回退启动目录绑定 id"
+    );
+    assert_eq!(
+        path,
+        PathBuf::from(&startup),
+        "E10：无归属会话必须回退 startup path，实际 = {path:?}"
+    );
+
+    let (id_none, path_none) = tui::resolve_resumed_workspace_binding(
+        None,
+        None,
+        &registered,
+        None,
+        &startup,
+    );
+    assert!(
+        id_none.is_none(),
+        "E10：startup id 为 None 时返回值必须为 None，实际 = {id_none:?}"
+    );
+    assert_eq!(
+        path_none,
+        PathBuf::from(&startup),
+        "E10：startup id 为 None 时 header root 仍必须是 startup path"
+    );
+}
+
+/// E11：死 id（未注册）→ 回退启动目录绑定（不得保留死 id）。
+#[test]
+fn e11_resumed_binding_dead_id_falls_back_to_startup_binding() {
+    let tmp = TempRoot::new("e11");
+    let startup = tmp.dir("startup");
+    let env_cwd = std::fs::canonicalize(tmp.dir("stale-env-cwd")).expect("E11：夹具路径必须可 canonicalize");
+    let registered = registered_ids();
+
+    let (id, path) = tui::resolve_resumed_workspace_binding(
+        Some("ws-dead-not-registered"),
+        Some(&pstr(&env_cwd)),
+        &registered,
+        Some("ws-startup-1"),
+        &startup,
+    );
+
+    assert_eq!(
+        id.as_deref(),
+        Some("ws-startup-1"),
+        "E11：未注册（死 id）归属必须回退启动目录绑定 id"
+    );
+    assert_eq!(
+        path,
+        PathBuf::from(&startup),
+        "E11：死 id 不得使用会话残留 env cwd，必须回退 startup path，实际 = {path:?}"
+    );
+}
+
+/// E12：空串 / 纯空白 id → 回退启动目录绑定。
+#[test]
+fn e12_resumed_binding_blank_id_falls_back_to_startup_binding() {
+    let tmp = TempRoot::new("e12");
+    let startup = tmp.dir("startup");
+    let env_cwd = std::fs::canonicalize(tmp.dir("blank-env-cwd")).expect("E12：夹具路径必须可 canonicalize");
+    let registered = registered_ids();
+
+    for blank in ["", "   ", "\t"] {
+        let (id, path) = tui::resolve_resumed_workspace_binding(
+            Some(blank),
+            Some(&pstr(&env_cwd)),
+            &registered,
+            Some("ws-startup-1"),
+            &startup,
+        );
+        assert_eq!(
+            id.as_deref(),
+            Some("ws-startup-1"),
+            "E12：空/空白 id {blank:?} 必须回退启动目录绑定 id"
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(&startup),
+            "E12：空/空白 id {blank:?} 必须回退 startup path，实际 = {path:?}"
+        );
+    }
+}

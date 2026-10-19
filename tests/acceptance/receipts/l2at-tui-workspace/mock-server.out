@@ -1,3 +1,3 @@
-{"event": "listening", "port": 51731}
+{"event": "listening", "port": 43561}
 {"served": "chat_completions", "roles": ["system", "system", "system", "system", "user"], "tool_messages": 0}
 {"served": "chat_completions", "roles": ["system", "system", "system", "system", "user", "assistant", "tool"], "tool_messages": 1}

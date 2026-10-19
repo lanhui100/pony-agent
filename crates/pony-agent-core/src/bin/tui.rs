@@ -242,6 +242,11 @@ pub struct TuiState {
     /// `main` 在 `control_plane` 构造后用 `ensure_workspace_for_root` 填充，并作为
     /// `TurnInput.workspace_id` 的唯一来源。
     pub active_workspace_id: Option<String>,
+    /// wave-38 D1：启动目录对应的 workspace 绑定（`/resume` 回退基准）。
+    /// `startup_workspace_path` 与 `workspace` 同源（canonical cwd）；
+    /// `startup_workspace_id` 由 `main` 在 `ensure_workspace_for_root` 成功后写入。
+    pub startup_workspace_path: PathBuf,
+    pub startup_workspace_id: Option<String>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub status_text: String,
@@ -285,8 +290,10 @@ impl Default for TuiState {
             model: "gemini-3.8-flash".to_string(),
             current_provider_id: "ponyllm".to_string(),
             gateway_url: env_gateway,
-            workspace: canonical_workspace,
+            workspace: canonical_workspace.clone(),
             active_workspace_id: None,
+            startup_workspace_path: canonical_workspace,
+            startup_workspace_id: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             status_text: "Ready".to_string(),
@@ -1262,6 +1269,44 @@ pub fn build_turn_input(
         images: Vec::new(),
         workspace_id: state.active_workspace_id.clone(),
         plan_execution_approval: None,
+    }
+}
+
+/// wave-38 D1 纯函数：恢复历史会话时的 workspace 绑定解析。
+///
+/// 契约口径（§5.D1，逐条对齐 E8–E12）：
+/// - `session_workspace_id` 为 **已注册** id（命中 `registered_workspace_ids`）→
+///   返回 `(Some(id), env cwd 对应的 PathBuf)`；`session_env_cwd` 缺失/空白 → PathBuf 回退
+///   `startup_workspace_path`；
+/// - `session_workspace_id` 为 `None` / 空串 / 死 id（未注册）→ 回退启动目录绑定
+///   `(startup_workspace_id.map(str::to_string), startup_workspace_path.to_path_buf())`；
+/// - 不产生任何写入/迁移：会话已有归属原样保留（跨表面静默迁移仍被禁止）。
+pub fn resolve_resumed_workspace_binding(
+    session_workspace_id: Option<&str>,
+    session_env_cwd: Option<&str>,
+    registered_workspace_ids: &[String],
+    startup_workspace_id: Option<&str>,
+    startup_workspace_path: &std::path::Path,
+) -> (Option<String>, PathBuf) {
+    let registered_id = session_workspace_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .filter(|id| registered_workspace_ids.iter().any(|registered| registered == id));
+    match registered_id {
+        Some(id) => {
+            // 已注册归属：header root 取会话 env cwd；缺失/空白才回退启动目录。
+            let path = session_env_cwd
+                .map(str::trim)
+                .filter(|cwd| !cwd.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| startup_workspace_path.to_path_buf());
+            (Some(id.to_string()), path)
+        }
+        // 无归属 / 空 id / 死 id：复用启动目录绑定（死 id 不得沿用会话残留 env cwd）。
+        None => (
+            startup_workspace_id.map(str::to_string),
+            startup_workspace_path.to_path_buf(),
+        ),
     }
 }
 
@@ -2801,6 +2846,8 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
         .map(|record| record.id)
         .map_err(|error| eprintln!("[pony-tui] 启动目录登记为 workspace 失败：{error}"))
         .ok();
+    // wave-38 D1：记住启动目录绑定，作为恢复「无归属/死归属」会话时的回退基准。
+    state.startup_workspace_id = state.active_workspace_id.clone();
 
     let (tx, rx): (Sender<UiEvent>, Receiver<UiEvent>) = channel();
 
@@ -3001,6 +3048,26 @@ fn tui_event_loop(
                                         run_id: None,
                                     });
                                     let session_snapshot = runtime_view.session;
+                                    // wave-38 D1：恢复会话的 workspace 绑定——
+                                    // 已注册归属保持该归属（header = 会话 env cwd），否则回退启动目录绑定。
+                                    // 只读决议，不触发任何 owner 改写/静默迁移。
+                                    let registered_ids = control_plane
+                                        .list_workspaces()
+                                        .iter()
+                                        .map(|workspace| workspace.id.clone())
+                                        .collect::<Vec<_>>();
+                                    let (resumed_id, resumed_path) = resolve_resumed_workspace_binding(
+                                        session_snapshot.workspace_id.as_deref(),
+                                        session_snapshot
+                                            .env_info
+                                            .as_ref()
+                                            .map(|env| env.cwd.as_str()),
+                                        &registered_ids,
+                                        state.startup_workspace_id.as_deref(),
+                                        &state.startup_workspace_path,
+                                    );
+                                    state.active_workspace_id = resumed_id;
+                                    state.workspace = resumed_path;
                                     let mut trace_map: std::collections::HashMap<String, &pony_agent_core::agent::session::TurnTraceRecord> = std::collections::HashMap::new();
                                     for trace in &session_snapshot.turn_trace_history {
                                         trace_map.insert(trace.turn_id.clone(), trace);

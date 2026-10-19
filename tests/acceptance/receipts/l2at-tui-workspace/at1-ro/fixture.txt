@@ -1,0 +1,5 @@
+iso_ro=/tmp/wave38-tui-ws.vHcp0p/iso-ro
+home=/tmp/wave38-tui-ws.vHcp0p/iso-ro/home
+chmod_mode=500
+home_writable_after_chmod=0
+ran_as_uid=1000

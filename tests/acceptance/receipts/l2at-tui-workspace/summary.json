@@ -2,10 +2,10 @@
   "wave": "wave-38",
   "suite": "l2at-tui-workspace",
   "verdict": "GREEN",
-  "pass": 7,
+  "pass": 10,
   "fail": 0,
-  "total": 7,
+  "total": 10,
   "failed_assertions": [],
-  "generated_at": "2026-10-19T18:20:08",
+  "generated_at": "2026-10-19T19:28:52",
   "receipts": "/home/dm/pony-agent/tests/acceptance/receipts/l2at-tui-workspace"
 }
