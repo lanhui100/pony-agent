@@ -296,17 +296,22 @@ mod tests {
 // ===========================================================================
 
 /// C2：goal JSON sidecar 的落盘路径（env `PONY_AGENT_GOAL_STORE_PATH` 优先）。
+#[allow(dead_code, unused_variables)] // wave-1 空桩期（未接线），green 阶段随实现移除
 pub fn goal_store_path() -> std::path::PathBuf { unimplemented!("wave-1") }
 
 /// C1：按 session 精确命中 armed 的 active 目标（唯一目标真值源）。
+#[allow(dead_code, unused_variables)] // wave-1 空桩期（未接线），green 阶段随实现移除
 pub fn active_goal_for_session(session_id: &str) -> Option<GoalData> { unimplemented!("wave-1") }
 
 /// C3：goal-round 用户消息的唯一文案实现（宿主与 TUI 共用）。
+#[allow(dead_code, unused_variables)] // wave-1 空桩期（未接线），green 阶段随实现移除
 pub fn build_goal_round_message(objective: &str, round: u32, max_rounds: u32) -> String { unimplemented!("wave-1") }
 
 /// C2：测试接缝——清空进程内缓存并从 `goal_store_path()` 重新懒加载。
+#[allow(dead_code, unused_variables)] // wave-1 空桩期（未接线），green 阶段随实现移除
 pub fn reset_goal_store_for_test() { unimplemented!("wave-1") }
 
 /// C3：`rounds_started += 1` 并原子持久化，返回更新后的目标快照。
+#[allow(dead_code, unused_variables)] // wave-1 空桩期（未接线），green 阶段随实现移除
 pub fn advance_goal_round(goal_id: &str) -> Result<GoalData, String> { unimplemented!("wave-1") }
 
