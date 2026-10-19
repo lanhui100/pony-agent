@@ -237,7 +237,7 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     // ADR 0013 迭代：已在提供商上下文内，不重复"所属提供商"；参数以 K/M 单位呈现
     expect(detail.text()).not.toContain("所属提供商");
     expect(detail.text()).not.toContain("tokens");
-    expect(detail.text()).toContain("256K");
+    expect(detail.text()).toContain("1M");
     expect(detail.text()).toContain("64K");
     // 能力 chip 仅图标，名称经 tooltip（stub 的 data-text）呈现
     const chipTexts = detail.findAll(".tooltip-stub").map((tip) => tip.attributes("data-text"));

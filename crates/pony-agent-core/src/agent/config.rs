@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
-const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 256000;
+const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 const DEFAULT_MODERN_MAX_OUTPUT_TOKENS: u32 = 64000;
 
 struct CapabilityCatalogEntry {
@@ -99,11 +99,11 @@ pub struct ProviderModelCapabilities {
 impl Default for ProviderModelCapabilities {
     fn default() -> Self {
         Self {
-            context_window_tokens: None,
+            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             supports_tools: true,
             supports_streaming: true,
-            supports_image_input: false,
-            supports_reasoning: false,
+            supports_image_input: true,
+            supports_reasoning: true,
             supports_video_input: false,
             supports_audio_input: false,
             supports_image_output: false,
@@ -1296,11 +1296,10 @@ fn resolve_thinking_param_pattern(
 fn preset_model_capabilities(
     preset: &ProviderCapabilityPreset,
     protocol: &ProviderProtocol,
-    model_name: &str,
+    _model_name: &str,
 ) -> ProviderModelCapabilities {
-    let lower = model_name.to_ascii_lowercase();
     let inferred_preset = if matches!(preset, ProviderCapabilityPreset::Auto) {
-        infer_capability_preset(protocol, model_name)
+        infer_capability_preset(protocol, _model_name)
     } else {
         preset.clone()
     };
@@ -1370,17 +1369,8 @@ fn preset_model_capabilities(
             context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             supports_tools: true,
             supports_streaming: true,
-            supports_image_input: lower.contains("gpt-4.1")
-                || lower.contains("claude")
-                || lower.contains("vision"),
-            supports_reasoning: lower.contains("gpt-5")
-                || lower.contains("o1")
-                || lower.contains("o3")
-                || lower.contains("reason")
-                || lower.contains("claude-3-7")
-                || lower.contains("deepseek-r1")
-                || lower.contains("deepseek-reasoner")
-                || lower.contains("deepseek-v4-pro"),
+            supports_image_input: true,
+            supports_reasoning: true,
             supports_video_input: false,
             supports_audio_input: false,
             supports_image_output: false,
@@ -1675,7 +1665,7 @@ mod tests {
             model.capability_preset,
             ProviderCapabilityPreset::Auto
         ));
-        assert_eq!(model.capabilities.context_window_tokens, Some(256_000));
+        assert_eq!(model.capabilities.context_window_tokens, Some(1_000_000));
         assert!(model.capabilities.supports_reasoning);
     }
 
@@ -2383,5 +2373,22 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn default_added_model_capabilities_have_reasoning_images_1m_context_64k_output() {
+        let default_caps = default_model_capabilities(&ProviderProtocol::OpenAiCompletions, "custom-model");
+        assert_eq!(default_caps.context_window_tokens, Some(1_000_000));
+        assert!(default_caps.supports_reasoning);
+        assert!(default_caps.supports_image_input);
+
+        let custom_caps = preset_model_capabilities(
+            &ProviderCapabilityPreset::Custom,
+            &ProviderProtocol::OpenAiCompletions,
+            "custom-model",
+        );
+        assert_eq!(custom_caps.context_window_tokens, Some(1_000_000));
+        assert!(custom_caps.supports_reasoning);
+        assert!(custom_caps.supports_image_input);
     }
 }

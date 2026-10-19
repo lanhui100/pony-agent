@@ -39,7 +39,7 @@ describe("provider capability layering", () => {
 
     expect(declaration.capabilityPreset).toBe("auto");
     expect(declaration.capabilities.supportsReasoning).toBe(true);
-    expect(declaration.capabilities.contextWindowTokens).toBe(256000);
+    expect(declaration.capabilities.contextWindowTokens).toBe(1000000);
   });
 
   it("normalizes user policy separately from capabilities", () => {
@@ -388,6 +388,20 @@ describe("provider protocol tri-value layer (D1/D3/D6)", () => {
 
     // 不复用 upsertModel 的 error 通道。
     expect(store.error).toBeNull();
+  });
+
+  it("ensures newly added and default models have reasoning, image input, 1m context window, and 64k max output", () => {
+    const store = useProviderStore();
+    seedSingleProvider(store, "https://example.invalid/v1");
+
+    store.addModel("provider-x");
+    const provider = store.registry?.providers.find((item) => item.id === "provider-x")!;
+    const model = provider.models[0];
+
+    expect(model.capabilities.supportsReasoning).toBe(true);
+    expect(model.capabilities.supportsImageInput).toBe(true);
+    expect(model.capabilities.contextWindowTokens).toBe(1000000);
+    expect(model.maxOutputTokens).toBe(64000);
   });
 });
 

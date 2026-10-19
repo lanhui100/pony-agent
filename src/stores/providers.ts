@@ -15,7 +15,7 @@ import type {
   ProviderRegistry,
 } from "@/types/provider";
 
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 1000000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 64000;
 
 // 协议家族（能力目录匹配用）：openai 族 = completions + responses 两值。
@@ -124,8 +124,8 @@ export function createDefaultCapabilities(): ProviderModelCapabilities {
     contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
     supportsTools: true,
     supportsStreaming: true,
-    supportsReasoning: false,
-    supportsImageInput: false,
+    supportsReasoning: true,
+    supportsImageInput: true,
     supportsVideoInput: false,
     supportsAudioInput: false,
     supportsTextOutput: true,
@@ -216,7 +216,6 @@ function capabilitiesForPreset(
 ): ProviderModelCapabilities {
   const inferredPreset =
     preset === "auto" ? inferCapabilityPreset(protocol, modelIdValue) : preset;
-  const lower = modelIdValue.toLowerCase();
 
   switch (inferredPreset) {
     case "open-ai-chat":
@@ -248,19 +247,8 @@ function capabilitiesForPreset(
       });
     case "auto":
       return createCapabilities({
-        supportsReasoning:
-          lower.includes("gpt-5") ||
-          lower.includes("o1") ||
-          lower.includes("o3") ||
-          lower.includes("reason") ||
-          lower.includes("claude-3-7") ||
-          lower.includes("deepseek-r1") ||
-          lower.includes("deepseek-reasoner") ||
-          lower.includes("deepseek-v4-pro"),
-        supportsImageInput:
-          lower.includes("gpt-4.1") ||
-          lower.includes("claude") ||
-          lower.includes("vision"),
+        supportsReasoning: true,
+        supportsImageInput: true,
       });
     default:
       return capabilitiesForPreset("auto", protocol, modelIdValue);

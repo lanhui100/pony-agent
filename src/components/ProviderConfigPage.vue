@@ -163,10 +163,10 @@ const modelForm = reactive<ModelFormState>({
   id: null,
   name: "",
   model: "",
-  contextWindowTokens: "256000",
+  contextWindowTokens: "1000000",
   maxOutputTokens: "64000",
-  supportsReasoning: false,
-  supportsImageInput: false,
+  supportsReasoning: true,
+  supportsImageInput: true,
   supportsVideoInput: false,
   supportsAudioInput: false,
   supportsTextOutput: true,
@@ -518,10 +518,10 @@ function resetModelForm() {
   modelForm.id = null;
   modelForm.name = "";
   modelForm.model = "";
-  modelForm.contextWindowTokens = "256000";
+  modelForm.contextWindowTokens = "1000000";
   modelForm.maxOutputTokens = "64000";
-  modelForm.supportsReasoning = false;
-  modelForm.supportsImageInput = false;
+  modelForm.supportsReasoning = true;
+  modelForm.supportsImageInput = true;
   modelForm.supportsVideoInput = false;
   modelForm.supportsAudioInput = false;
   modelForm.supportsTextOutput = true;
@@ -553,7 +553,7 @@ function parseOptionalPositiveInteger(value: string) {
 function getModelCapabilitiesFromForm(): ProviderModelCapabilities {
   return {
     ...createDefaultCapabilities(),
-    contextWindowTokens: parseOptionalPositiveInteger(modelForm.contextWindowTokens) ?? 256000,
+    contextWindowTokens: parseOptionalPositiveInteger(modelForm.contextWindowTokens) ?? 1000000,
     supportsReasoning: modelForm.supportsReasoning,
     supportsImageInput: modelForm.supportsImageInput,
     supportsVideoInput: modelForm.supportsVideoInput,
@@ -2234,7 +2234,7 @@ defineExpose({
                     <div>
                       <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">上下文长度</div>
                       <div class="mt-1 rounded-[0.45rem] bg-stone-100/75 px-3 py-2.5 text-[13px] text-stone-900">
-                        {{ formatTokenUnit(detailModel.capabilities.contextWindowTokens, "256K") }}
+                        {{ formatTokenUnit(detailModel.capabilities.contextWindowTokens, "1M") }}
                       </div>
                     </div>
                     <div>
