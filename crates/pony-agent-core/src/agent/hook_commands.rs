@@ -641,6 +641,7 @@ mod tests {
     fn write_hook_script(dir: &Path, name: &str, unix_body: &str, win_body: &str) -> std::path::PathBuf {
         #[cfg(windows)]
         let (script_name, script_body) = {
+            let _ = unix_body;
             let cmd_name = format!("{}.cmd", name);
             let cmd_body = format!("@echo off\r\nchcp 65001 >nul 2>&1\r\n{}", win_body);
             (cmd_name, cmd_body)
