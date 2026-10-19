@@ -96,3 +96,37 @@ StreamUsage { input_tokens: u64, output_tokens: u64, cache_hit_input_tokens: u64
 - `fmt_token_count` 在 999_950..=999_999 输出 `1M`（而非字面 `1000k`）：Lead 裁决**接受**，避免破格写法；A7 不受影响。
 - `char_width` 缺 emoji 区（0x1F680–0x1F6FF 等）属既有宽度表局限（HEAD 同样存在），本波次不修，记录为已知限制。
 - E2E 4 条失败（empty.command_desc_column、slash.all_commands_listed/each_command_once/command_desc_column）经 pre-wave-39 二进制 1:1 复现，判为既有基线漂移（`/thinking` 后 8 命令 vs 冻结 7 命令期望），非本波次回归，另开工单。
+
+## 6. 契约变更 v3（wave-39-delta2，用户实测反馈）
+
+用户反馈：① 对话框再高一些；② 底部 workspace/metrics 行需与对话框留出间距，且更小更弱；③ metrics 无值时不显示。
+
+### R9 几何 v3（替代 R5 的数值）
+- `input_h = (visual_lines + 1).clamp(2, 6)`（单行输入 = 2 行：正文 + 1 行呼吸 → 对话框更高）
+- 色带（SURFACE）= 1 行顶部内边距 + input_h；`band_h = input_h + 1`
+- 色带下方：1 行 **间距行**（CANVAS，不画任何字符）+ 1 行 **指标行**（CANVAS 背景，非色带内）
+- `bottom_h = input_h + 3`；`bottom_top = height - bottom_h`
+- 110×30 单行输入基准：`bottom_top=25`；色带 `25..=27`（25 空 / 26-27 输入）；间距行 `28`；指标行 `29`
+- `chat_h = bottom_top - chat_top`（不变）
+
+### R10 强度层级（替代 R7 的 faint）
+- 新增主题色 `theme::GHOST = Rgb(104,98,90)`（比 `FAINT` Rgb(124,118,110) 更暗一档；终端无法改字号，以更低对比度实现「更小更弱」）
+- 指标行整行使用 `GHOST`；不加 `Modifier::DIM`（终端兼容性差）
+- 间距行保持 CANVAS 空白
+
+### R11 metrics 无值不显示（替代 R7 固定文案）
+右簇按「有值才显示」拼装，段间 `" · "` 连接：
+- `↑in ↓out`：仅当 `in>0 || out>0`；
+- `缓存 {pct}%`：仅当 `in>0`（此时缓存比可算，0% 也是值）；
+- `上下文 {pct}%`：仅当 `context_window_tokens>0`；
+- 三段全无值 → 右簇为空（只显示左侧 workspace）；段间不得出现孤立分隔符。
+- 左簇 workspace 始终显示（起点 `content.x + RAIL`），右簇终点 `content.x + content.width`；空间不足仍优先保留右簇。
+
+### R12 验收迁移与新增（Test Agent 负责，允许改动 A5/A6/A8）
+- A5：注入非零值后断言 `↑/↓/缓存/上下文` 全在；默认全零状态断言右簇为空（不出现 `↑`/`缓存`/`上下文`）。
+- A6：几何改为 110×30 单行输入：`bottom_top=25`、提示符行 `26..27`、间距行 `28` 空白、指标行 `29`；沟槽列空白。
+- A8：改为「无值不显示」：in=0/window=0 → 不出现 `缓存`/`上下文`/`—`；仅 workspace 可见。
+- A12（新）：指标行 fg 必须是 `theme::GHOST`（Rgb(104,98,90)），且间距行 28 全空白；指标行背景必须是 CANVAS（非 SURFACE）。
+- A13（新）：分段隐藏组合：仅 in>0 → 有 ↑/↓/缓存、无上下文；仅 window>0 且 in=0 → 仅上下文；in=0 且 out>0 → 有 ↑/↓、无缓存。
+- A7 数值断言保留（1200/345/600/50k/200k → 1.2k、345、缓存 50%、上下文 25%）。
+- A9/A10/A11 不变。

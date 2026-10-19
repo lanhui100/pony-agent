@@ -16,12 +16,19 @@ mod tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::style::Color;
 use ratatui::Terminal;
 
 // 与 tui.rs 保持一致的布局常量（只在断言里复算几何，不参与实现）。
 const GUTTER: u16 = 3;
 const RAIL: usize = 2;
 const MAX_CONTENT_WIDTH: u16 = 120;
+
+// 契约 v3 §6 R9/R10 主题字面值（`tui::theme` 为私有模块，无法从测试引用；按现实现值冻结）。
+// CANVAS = 正文/指标行背景；SURFACE = 色带背景；GHOST = 指标行前景（比 FAINT 更暗一档）。
+const CANVAS: Color = Color::Rgb(18, 16, 14);
+const SURFACE: Color = Color::Rgb(27, 25, 22);
+const GHOST: Color = Color::Rgb(104, 98, 90);
 
 // ---------------------------------------------------------------------------
 // 渲染与取值工具
@@ -321,7 +328,7 @@ fn a4_metrics_row_left_shows_workspace_label() {
 }
 
 // ---------------------------------------------------------------------------
-// A5：指标行右簇 = ↑in ↓out · 缓存 x% · 上下文 y%，以数字/百分号收尾
+// A5：有值时右簇 = ↑in ↓out · 缓存 x% · 上下文 y%；无值时右簇为空（v3 §6 R11）
 // ---------------------------------------------------------------------------
 #[test]
 fn a5_metrics_row_carries_up_down_cache_and_context() {
@@ -337,12 +344,12 @@ fn a5_metrics_row_carries_up_down_cache_and_context() {
     let buf = screen(&mut state, 110, 30);
     let last = row_text(&buf, 29);
 
-    // Assert：四个契约 token 全部在最后一行
+    // Assert 1：四个契约 token 全部在最后一行
     for needle in ["↑", "↓", "缓存", "上下文"] {
         assert!(last.contains(needle), "指标行缺少 {needle:?}: {last:?}");
     }
 
-    // Assert：右簇顶到内容列最后一列，且以数字/百分号结尾
+    // Assert 2：右簇顶到内容列最后一列，且以数字/百分号结尾
     let (cx, cw) = content_geometry(110);
     let tail = buf[(cx + cw - 1, 29)].symbol();
     let tail_ch = tail.chars().next().unwrap_or(' ');
@@ -357,59 +364,119 @@ fn a5_metrics_row_carries_up_down_cache_and_context() {
         end_ch.is_ascii_digit() || end_ch == '%',
         "指标行去尾空白后必须以数字/百分号结尾，实际 {end_ch:?}；行文本 {last:?}"
     );
+
+    // Assert 3（v3 R11）：默认全零状态 → 右簇整段为空，只剩左侧 workspace 标签
+    let mut zero = tui::TuiState::default();
+    let buf = screen(&mut zero, 110, 30);
+    let row = row_text(&buf, 29);
+    for needle in ["↑", "↓", "缓存", "上下文", "—"] {
+        assert!(
+            !row.contains(needle),
+            "无值状态不得渲染指标段 {needle:?}（v3 R11：无值不显示）: {row:?}"
+        );
+    }
+    let ws = zero
+        .workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        row.contains(&ws),
+        "无值状态仍必须显示左侧 workspace 标签 {ws:?}: {row:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// A6：110×30 空输入几何 —— 提示符 y=28 / 指标行 y=29 / 顶部内边距 y=27 空白
+// A6：110×30 单行输入几何 v3 —— bottom_top=25 / 提示符 26..27 / 间距行 28 空白 / 指标行 29
 // ---------------------------------------------------------------------------
 #[test]
-fn a6_composer_geometry_is_input_row_plus_metrics_row() {
+fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
     // Arrange
     let mut state = tui::TuiState::default();
     let (cx, cw) = content_geometry(110);
+    let ws = state
+        .workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
 
     // Act
     let buf = screen(&mut state, 110, 30);
 
-    // Assert：提示符行唯一且位于 y=28
+    // Assert 1（R9：bottom_top=25）：y=24 是正文画布，y=25 是色带顶部内边距（SURFACE 空白）
+    assert!(
+        row_text(&buf, 24).trim().is_empty(),
+        "y=24 应为正文区空白，实际 {:?}",
+        row_text(&buf, 24)
+    );
+    assert_eq!(
+        buf[(cx, 24)].bg, CANVAS,
+        "y=24 必须仍是正文画布 CANVAS（色带不得从 24 行开始）"
+    );
+    assert!(
+        row_text(&buf, 25).trim().is_empty(),
+        "y=25 色带顶部内边距必须整行空白，实际 {:?}",
+        row_text(&buf, 25)
+    );
+    assert_eq!(
+        buf[(cx, 25)].bg, SURFACE,
+        "y=25 必须是色带顶部内边距（SURFACE）—— 即 bottom_top=25"
+    );
+
+    // Assert 2（R9：input_h=2）：提示符行唯一，位于输入区 26..=27
     let prompt_rows: Vec<u16> = (0..buf.area.height)
         .filter(|y| row_text(&buf, *y).contains('›'))
         .collect();
     assert_eq!(
-        prompt_rows,
-        vec![28u16],
-        "110×30 空输入的提示符行必须唯一且位于 y=28（input_h=1, bottom_h=3），实际 {prompt_rows:?}"
+        prompt_rows.len(),
+        1,
+        "单行输入必须恰好一个提示符行，实际 {prompt_rows:?}"
+    );
+    let prompt_y = prompt_rows[0];
+    assert!(
+        (26..=27).contains(&prompt_y),
+        "v3 几何下提示符必须位于 26..=27（input_h=2），实际 y={prompt_y}"
     );
     assert_eq!(
-        buf[(cx, 28)].symbol(),
+        buf[(cx, prompt_y)].symbol(),
         "›",
-        "提示符必须落在输入区内容列起点 x={cx}"
+        "提示符必须落在输入区内容列起点 x={cx}（y={prompt_y}）"
     );
 
-    // Assert：y=29 是指标行（非空白，含指标簇）
+    // Assert 3（R9：间距行 28）：整行空白且为 CANVAS（与色带分离）
+    let gap = row_text(&buf, 28);
+    assert!(
+        gap.trim().is_empty(),
+        "y=28 间距行必须整行空白，实际 {gap:?}"
+    );
+    assert_eq!(
+        buf[(cx, 28)].bg, CANVAS,
+        "y=28 间距行必须是 CANVAS 背景（不属于色带）"
+    );
+
+    // Assert 4（R9：指标行 29）：最后一行、CANVAS 背景、左簇 workspace 仍在
     let metrics = row_text(&buf, 29);
     assert!(
         !metrics.trim().is_empty(),
-        "110×30 的 y=29 必须是指标行，不允许整行空白"
+        "y=29 必须是指标行（至少 workspace 标签），不允许整行空白"
     );
     assert!(
-        metrics.contains("缓存") && metrics.contains("上下文"),
-        "y=29 必须是指标行（含 缓存/上下文），实际 {metrics:?}"
+        metrics.contains(&ws),
+        "y=29 指标行必须显示 workspace basename {ws:?}，实际 {metrics:?}"
+    );
+    assert_eq!(
+        buf[(cx, 29)].bg, CANVAS,
+        "y=29 指标行必须是 CANVAS 背景（非色带 SURFACE）"
     );
 
-    // Assert：y=27 是色带顶部内边距，必须整行空白（bottom_h=3 的直接证据）
-    let pad = row_text(&buf, 27);
-    assert!(
-        pad.trim().is_empty(),
-        "y=27 必须是色带顶部空白内边距（bottom_top=27），实际 {pad:?}"
-    );
-
-    // Assert：三条主体沟槽列无内容
+    // Assert 5：三条主体沟槽列无内容
     assert_gutters_blank(&buf, 110);
 
-    // Assert：输入行右侧（指标行之外）不得贴到内容列最后一列
-    let input_row = row_text(&buf, 28);
-    let input_cells = row_cells(&buf, 28);
+    // Assert 6：输入行右侧（指标行之外）不得贴到内容列最后一列
+    let input_row = row_text(&buf, prompt_y);
+    let input_cells = row_cells(&buf, prompt_y);
     assert!(
         input_cells[cx as usize + cw as usize - 1].trim().is_empty(),
         "输入行最后一列 x={} 必须留白，实际 {:?}；行文本 {input_row:?}",
@@ -455,43 +522,74 @@ fn a7_metrics_row_formats_compact_numbers_and_ratios() {
 }
 
 // ---------------------------------------------------------------------------
-// A8：未知态占位符 —— in=0 → 缓存 —；window=0 → 上下文 —
+// A8：无值不显示（v3 §6 R11）—— in=0 / window=0 时不出现对应段，也不出现占位符 "—"
 // ---------------------------------------------------------------------------
 #[test]
-fn a8_metrics_row_renders_unknown_placeholders() {
-    // 用例 1：输入未知（in=0）→ 缓存占用率未知
+fn a8_metrics_row_hides_segments_without_values() {
+    let ws = tui::TuiState::default()
+        .workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    // 用例 1：全零（in=0 / out=0 / window=0）→ 右簇整段为空，只剩 workspace
+    let mut state = tui::TuiState::default();
+    let buf = screen(&mut state, 110, 30);
+    let last = row_text(&buf, 29);
+    for needle in ["↑", "↓", "缓存", "上下文", "—"] {
+        assert!(
+            !last.contains(needle),
+            "全零状态不得出现指标段/占位符 {needle:?}（v3 R11）：{last:?}"
+        );
+    }
+    assert!(
+        last.contains(&ws),
+        "全零状态仍必须显示 workspace {ws:?}: {last:?}"
+    );
+
+    // 用例 2：in=0 但 window>0 → 只有「上下文」段；缓存比不可算，不得出现 缓存/↑/↓
     let mut state = tui::TuiState::default();
     state.total_input_tokens = 0;
+    state.total_output_tokens = 0;
     state.total_cache_hit_tokens = 0;
-    state.last_context_tokens = 10_000;
+    state.last_context_tokens = 50_000;
     state.context_window_tokens = 200_000;
     let buf = screen(&mut state, 110, 30);
     let last = row_text(&buf, 29);
     assert!(
-        last.contains("缓存 —"),
-        "in=0 时缓存占用率必须显示占位符 \"缓存 —\"，实际 {last:?}"
+        last.contains("上下文 25%"),
+        "window>0 时上下文段必须显示（50000/200000=25%）：{last:?}"
     );
-    assert!(
-        last.contains("上下文 5%"),
-        "10000/200000 上下文仍有值时必须显示 \"上下文 5%\"，实际 {last:?}"
-    );
+    for needle in ["缓存", "↑", "↓", "—"] {
+        assert!(
+            !last.contains(needle),
+            "in=0 时不得显示 {needle:?}（缓存比不可算，也不再用占位符）：{last:?}"
+        );
+    }
 
-    // 用例 2：上下文窗口未知（window=0）→ 上下文占用率未知
+    // 用例 3：window=0 且 last_ctx>0 → 上下文段不得显示；in>0 时 ↑/↓/缓存 正常
     let mut state = tui::TuiState::default();
     state.total_input_tokens = 500;
+    state.total_output_tokens = 0;
     state.total_cache_hit_tokens = 0;
-    state.last_context_tokens = 0;
+    state.last_context_tokens = 12_345;
     state.context_window_tokens = 0;
     let buf = screen(&mut state, 110, 30);
     let last = row_text(&buf, 29);
     assert!(
-        last.contains("上下文 —"),
-        "window=0 时上下文占用率必须显示占位符 \"上下文 —\"，实际 {last:?}"
+        !last.contains("上下文"),
+        "window=0 时上下文段不得显示：{last:?}"
+    );
+    assert!(
+        last.contains("↑500") && last.contains("↓0"),
+        "in>0 时 ↑/↓ 段必须显示：{last:?}"
     );
     assert!(
         last.contains("缓存 0%"),
-        "0/500 缓存命中必须显示 \"缓存 0%\"，实际 {last:?}"
+        "in>0 时缓存段必须显示（0/500=0%）：{last:?}"
     );
+    assert!(!last.contains('—'), "v3 起不再使用占位符 —：{last:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -564,8 +662,14 @@ fn a9_apply_turn_usage_is_idempotent_per_turn_and_accumulates_across_turns() {
 #[test]
 fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
     // 用例 1/2：窄终端仍渲染指标行且不越沟槽
+    // （v3 R11：无值不显示，故注入有值状态，右簇才有 ↑/↓ 段可断言）
     for (w, h) in [(60u16, 20u16), (80u16, 24u16)] {
         let mut state = tui::TuiState::default();
+        state.total_input_tokens = 12;
+        state.total_output_tokens = 3;
+        state.total_cache_hit_tokens = 6;
+        state.last_context_tokens = 50_000;
+        state.context_window_tokens = 200_000;
         let buf = screen(&mut state, w, h);
 
         assert_eq!(buf.area.width, w, "{w}×{h} 渲染宽度不符");
@@ -617,4 +721,157 @@ fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
         "浮层态不得渲染色带输入提示符，实际屏幕: {text:?}"
     );
     assert_gutters_blank(&buf, 110);
+}
+
+// ---------------------------------------------------------------------------
+// A12（v3 §6 R9/R10）：指标行 = GHOST 前景 + CANVAS 背景；间距行 28 全空白 + CANVAS
+// ---------------------------------------------------------------------------
+
+/// v3 R11：段间不得出现孤立分隔符（"· ·" / 行尾 "·" / 首个段前 "·"）。
+fn assert_no_orphan_separator(row: &str, label: &str) {
+    assert!(
+        !row.contains("· ·") && !row.contains("·  ·"),
+        "[{label}] 指标段之间不得出现孤立分隔符: {row:?}"
+    );
+    assert!(
+        !row.trim_end().ends_with('·'),
+        "[{label}] 指标行不得以分隔符结尾: {row:?}"
+    );
+    for segment in ["↑", "缓存", "上下文"] {
+        if let Some(idx) = row.find(segment) {
+            assert!(
+                !row[..idx].trim_end().ends_with('·'),
+                "[{label}] 首个指标段 {segment:?} 之前不得有孤立分隔符: {row:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a12_metrics_row_is_ghost_on_canvas_and_spacing_row_is_blank_canvas() {
+    // Arrange：注入非零值，保证指标行右簇有字形（左簇 workspace 始终有字形）
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 1200;
+    state.total_output_tokens = 345;
+    state.total_cache_hit_tokens = 600;
+    state.last_context_tokens = 50_000;
+    state.context_window_tokens = 200_000;
+
+    // Act
+    let buf = screen(&mut state, 110, 30);
+
+    // Assert 1（R10）：指标行整行 GHOST 前景（字形格）+ CANVAS 背景（全部格）
+    let mut glyph_cells = 0usize;
+    for x in 0..buf.area.width {
+        let cell = &buf[(x, 29)];
+        assert_eq!(
+            cell.bg, CANVAS,
+            "指标行第 {x} 列背景必须是 CANVAS（非色带 SURFACE），实际 {:?}",
+            cell.bg
+        );
+        if !cell.symbol().trim().is_empty() {
+            glyph_cells += 1;
+            assert_eq!(
+                cell.fg,
+                GHOST,
+                "指标行第 {x} 列字形前景必须是 GHOST Rgb(104,98,90)，实际 {:?}（symbol={:?}）",
+                cell.fg,
+                cell.symbol()
+            );
+        }
+    }
+    assert!(
+        glyph_cells > 0,
+        "指标行必须至少渲染一个字形（workspace 标签 / 指标段）"
+    );
+
+    // Assert 2（R9/R10）：间距行 28 全空白且 CANVAS 背景
+    for x in 0..buf.area.width {
+        let cell = &buf[(x, 28)];
+        assert!(
+            cell.symbol().trim().is_empty(),
+            "间距行第 {x} 列不得有字符，实际 {:?}",
+            cell.symbol()
+        );
+        assert_eq!(
+            cell.bg, CANVAS,
+            "间距行第 {x} 列背景必须是 CANVAS，实际 {:?}",
+            cell.bg
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A13（v3 §6 R11）：分段隐藏组合 —— 有值才显示对应段，且不得出现孤立分隔符
+// ---------------------------------------------------------------------------
+#[test]
+fn a13_metrics_segments_hide_independently() {
+    // 用例 1：仅 in>0（out=0 / window=0）→ ↑/↓/缓存 有，上下文 无
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 500;
+    state.total_output_tokens = 0;
+    state.total_cache_hit_tokens = 100;
+    state.last_context_tokens = 0;
+    state.context_window_tokens = 0;
+    let buf = screen(&mut state, 110, 30);
+    let last = row_text(&buf, 29);
+    assert!(
+        last.contains("↑500") && last.contains("↓0"),
+        "in>0 时 ↑/↓ 段必须显示：{last:?}"
+    );
+    assert!(
+        last.contains("缓存 20%"),
+        "in>0 时缓存段必须显示（100/500=20%）：{last:?}"
+    );
+    assert!(
+        !last.contains("上下文"),
+        "window=0 时上下文段必须隐藏：{last:?}"
+    );
+    assert!(!last.contains('—'), "v3 起不再使用占位符：{last:?}");
+    assert_no_orphan_separator(&last, "A13-1 in>0");
+
+    // 用例 2：仅 window>0（in=0 / out=0）→ 仅「上下文」一段
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 0;
+    state.total_output_tokens = 0;
+    state.total_cache_hit_tokens = 0;
+    state.last_context_tokens = 50_000;
+    state.context_window_tokens = 200_000;
+    let buf = screen(&mut state, 110, 30);
+    let last = row_text(&buf, 29);
+    assert!(
+        last.contains("上下文 25%"),
+        "window>0 时上下文段必须显示（50000/200000=25%）：{last:?}"
+    );
+    for needle in ["↑", "↓", "缓存", "—"] {
+        assert!(
+            !last.contains(needle),
+            "in=0/out=0 时不得出现 {needle:?}：{last:?}"
+        );
+    }
+    assert_no_orphan_separator(&last, "A13-2 window>0");
+
+    // 用例 3：in=0 且 out>0（window=0）→ ↑/↓ 有，缓存/上下文本无
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 0;
+    state.total_output_tokens = 250;
+    state.total_cache_hit_tokens = 0;
+    state.last_context_tokens = 0;
+    state.context_window_tokens = 0;
+    let buf = screen(&mut state, 110, 30);
+    let last = row_text(&buf, 29);
+    assert!(
+        last.contains("↑0") && last.contains("↓250"),
+        "out>0 时 ↑/↓ 段必须显示：{last:?}"
+    );
+    assert!(
+        !last.contains("缓存"),
+        "in=0 时缓存段必须隐藏（缓存比不可算）：{last:?}"
+    );
+    assert!(
+        !last.contains("上下文"),
+        "window=0 时上下文段必须隐藏：{last:?}"
+    );
+    assert!(!last.contains('—'), "v3 起不再使用占位符：{last:?}");
+    assert_no_orphan_separator(&last, "A13-3 out>0");
 }
