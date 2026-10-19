@@ -19,7 +19,7 @@
       "id": "empty.within_terminal_width",
       "desc": "every captured row display width <= 60 cols",
       "ok": true,
-      "evidence": "widest row 0 width=58 cols=60 :: pony · pony-agent mock-alpha · db05d2"
+      "evidence": "widest row 0 width=58 cols=60 :: pony · pony-agent mock-alpha · f55f16"
     },
     {
       "id": "empty.capture_rows",
@@ -37,7 +37,7 @@
       "id": "empty.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/narrow/empty.png size=96820"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/narrow/empty.png size=95823"
     },
     {
       "id": "empty.input_padded_from_left_edge",
@@ -67,7 +67,7 @@
       "id": "conversation.within_terminal_width",
       "desc": "every captured row display width <= 60 cols",
       "ok": true,
-      "evidence": "widest row 0 width=58 cols=60 :: pony · pony-agent mock-alpha · db05d2"
+      "evidence": "widest row 0 width=58 cols=60 :: pony · pony-agent mock-alpha · f55f16"
     },
     {
       "id": "conversation.capture_rows",
@@ -85,7 +85,7 @@
       "id": "conversation.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/narrow/conversation.png size=92432"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/narrow/conversation.png size=91481"
     },
     {
       "id": "conversation.input_padded_from_left_edge",
@@ -103,11 +103,11 @@
       "id": "empty.header",
       "desc": "header shows brand + workspace",
       "ok": true,
-      "evidence": "row 0 :: pony · pony-agent mock-alpha · db05d2"
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · f55f16"
     },
     {
-      "id": "empty.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "empty.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": false,
       "evidence": "rule_rows=[]"
     },

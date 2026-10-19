@@ -21,10 +21,10 @@
        · 第 39 行：这是一段用于验证滚动与折行的中文正文，包含 inline code 与 加粗 片段。
        · 第 40 行：这是一段用于验证滚动与折行的中文正文，包含 inline code 与 加粗 片段。
 
-       ▏ rust
-       ▏ fn main() {
-       ▏     println!("scroll test");
-       ▏ }
+       rust
+       fn main() {
+           println!("scroll test");
+       }
 
      结束
      这是最后一行，滚动到底部时应完整可见。

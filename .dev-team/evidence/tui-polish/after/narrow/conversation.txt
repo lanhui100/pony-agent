@@ -4,11 +4,11 @@
 
      package.json 显示这是 pony-agent，版本 0.1.125。
 
-       ▏ json
-       ▏ {
-       ▏   "name": "pony-agent",
-       ▏   "version": "0.1.125"
-       ▏ }
+       json
+       {
+         "name": "pony-agent",
+         "version": "0.1.125"
+       }
 
        · 包管理器：npm
        · 关键信息：私有项目、使用 Vite 构建

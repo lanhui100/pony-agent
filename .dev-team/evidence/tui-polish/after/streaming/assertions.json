@@ -31,13 +31,13 @@
       "id": "mid.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2227"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2177"
     },
     {
       "id": "mid.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=82926"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=81243"
     },
     {
       "id": "final.no_panic",
@@ -67,25 +67,25 @@
       "id": "final.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2678"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2609"
     },
     {
       "id": "final.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=146346"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=144979"
     },
     {
-      "id": "streaming.mid_status_writing",
-      "desc": "streaming active line shows the writing state while the footer is the metrics row",
+      "id": "streaming.mid_status_generating",
+      "desc": "streaming active line shows the generating state while the footer is the metrics row",
       "ok": true,
-      "evidence": "active_row :: • 写入中 0秒 | footer :: /home/dm/pony-agent 上下文 0%"
+      "evidence": "active_row :: • 生成中 0秒 | footer :: /home/dm/pony-agent 上下文 0%"
     },
     {
       "id": "streaming.mid_active_elapsed",
-      "desc": "active line shows elapsed time next to the writing state",
+      "desc": "active line shows elapsed time next to the generating state",
       "ok": true,
-      "evidence": "active_row :: • 写入中 0秒"
+      "evidence": "active_row :: • 生成中 0秒"
     },
     {
       "id": "streaming.mid_partial_body",
@@ -106,8 +106,8 @@
       "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
     },
     {
-      "id": "streaming.final_not_writing",
-      "desc": "writing status disappeared once the stream finished",
+      "id": "streaming.final_not_generating",
+      "desc": "transient generating status disappeared once the stream finished",
       "ok": true,
       "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
     }

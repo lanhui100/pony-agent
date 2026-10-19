@@ -1,4 +1,4 @@
-  pony  ·  pony-agent                mock-alpha  ·  db05d2
+  pony  ·  pony-agent                mock-alpha  ·  f55f16
   ────────────────────────────────────────────────────────
 
   `package.json` 显示这是 pony-agent，版本 0.1.125。

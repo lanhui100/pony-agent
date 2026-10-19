@@ -394,9 +394,9 @@ impl TuiState {
         match &self.runtime_mode {
             RuntimeMode::Ready => "Ready".to_string(),
             RuntimeMode::Connecting => "准备就绪中...".to_string(),
-            RuntimeMode::Thinking => "正在思考...".to_string(),
-            RuntimeMode::Responding => "正在回复...".to_string(),
-            RuntimeMode::ExecutingTool(name) => format!("执行工具: {}...", name),
+            RuntimeMode::Thinking => "思考中...".to_string(),
+            RuntimeMode::Responding => "生成中...".to_string(),
+            RuntimeMode::ExecutingTool(name) => format!("执行: {}...", name),
             RuntimeMode::WaitingApproval => "等待确认中...".to_string(),
             RuntimeMode::Completed => "完成".to_string(),
             RuntimeMode::Failed(reason) => format!("失败: {}", reason),
@@ -1020,7 +1020,7 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
                 }
                 spans.push(Span::styled(
                     rest[c + 1..c + 1 + off].to_string(),
-                    Style::default().fg(theme::INK).bg(theme::CODE_FILL),
+                    Style::default().fg(theme::INK_SOFT).bg(theme::CODE_FILL),
                 ));
                 rest = &rest[c + 1 + off + 1..];
                 continue;
@@ -1763,6 +1763,37 @@ fn blank_rail(style: Style) -> Vec<Span<'static>> {
     vec![Span::styled(" ".repeat(RAIL), style)]
 }
 
+/// 代码块色带的右端内缩量：色块不贴内容列右缘，留出呼吸。
+const CODE_BAND_INSET: usize = 2;
+/// 色带内部左内边距：代码文字与色块左缘之间留 2 列。
+const CODE_BAND_PAD: usize = 2;
+
+/// 代码块材质：语言标签行与代码行共用同一条 `CODE_FILL` 色带，无竖线、无边框。
+/// 色带从轨道后起排，右端内缩 `CODE_BAND_INSET` 列；超出宽度的代码按显示宽度折行，
+/// 每个折行仍继承整块底色，保证视觉上是一整块而非逐行悬空高亮。
+fn push_code_band_line(lines: &mut Vec<Line<'static>>, body: Line<'static>, width: usize) {
+    let band_w = width
+        .saturating_sub(RAIL + CODE_BAND_INSET)
+        .max(CODE_BAND_PAD + 1);
+    let body_w = band_w.saturating_sub(CODE_BAND_PAD).max(1);
+    let bg = Style::default().bg(theme::CODE_FILL);
+    for wrapped in wrap_line(&body, body_w) {
+        let mut spans = blank_rail(Style::default());
+        spans.push(Span::styled(" ".repeat(CODE_BAND_PAD), bg));
+        spans.extend(
+            wrapped
+                .spans
+                .into_iter()
+                .map(|span| Span::styled(span.content, span.style.bg(theme::CODE_FILL))),
+        );
+        lines.push(pad_line_with_bg(
+            Line::from(spans),
+            RAIL + band_w,
+            theme::CODE_FILL,
+        ));
+    }
+}
+
 /// 用户消息：低对比表面块 + 左侧骨色竖条。用「材质」而不是文字标签区分角色。
 /// 块内含 1 行上/下呼吸留白，正文回到与助手/工具相同的文本列。
 fn push_user_block(lines: &mut Vec<Line<'static>>, content: &str, width: usize) {
@@ -1832,7 +1863,8 @@ fn tool_line_spans(
     let prefix = vec![Span::styled(format!("{} ", glyph), glyph_style)];
     let mut body = vec![Span::styled(head, head_style)];
     if !detail.is_empty() {
-        body.push(Span::styled(format!(" · {}", detail), muted()));
+        // 参数/结果属于中间过程，压到最暗一档。
+        body.push(Span::styled(format!(" · {}", detail), faint()));
     }
     (prefix, body)
 }
@@ -2281,10 +2313,10 @@ fn status_word(state: &TuiState) -> (String, Style) {
             }
         }
         RuntimeMode::Connecting => ("连接中".to_string(), muted()),
-        RuntimeMode::Thinking => ("思考中".to_string(), muted()),
-        RuntimeMode::Responding => ("写入中".to_string(), muted()),
+        RuntimeMode::Thinking => ("思考中".to_string(), faint()),
+        RuntimeMode::Responding => ("生成中".to_string(), muted()),
         RuntimeMode::ExecutingTool(name) => {
-            (format!("工具 · {}", truncate_chars(&clean_tool_name_display(name), 20)), muted())
+            (format!("执行 · {}", truncate_chars(&clean_tool_name_display(name), 20)), faint())
         }
         RuntimeMode::WaitingApproval => ("待确认".to_string(), Style::default().fg(theme::WARN)),
         RuntimeMode::Completed => ("完成".to_string(), Style::default().fg(theme::SUCCESS)),
@@ -2415,14 +2447,6 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     // ── 会话正文：轨道标记 + 单色正文 + 分层工具行 ─────────────────────────
     let width = chat_rect.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let kicker = || {
-        Line::from(Span::styled(
-            "pony",
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ))
-    };
     let rail_blank = || blank_rail(Style::default());
 
     if state.messages.is_empty() {
@@ -2465,15 +2489,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                     prev_role = Some(MessageRole::User);
                 }
                 MessageRole::Assistant => {
-                    // 一个 assistant turn 只在「首次出现」时打一次字标，工具行与正文共享同一 turn；
-                    // 工具执行后恢复正文不再重复 wordmark，只用一行留白表示节奏。
+                    // 助手正文不再打 "pony" 字标：角色由轨道与留白承担，避免每轮都有一段品牌噪音。
+                    // 工具执行后恢复正文只用一行留白表示节奏。
                     if prev_is_tool {
                         push_blank(&mut lines);
-                    } else {
-                        if prev_role.is_some() {
-                            push_gap(&mut lines, 1);
-                        }
-                        lines.push(kicker());
+                    } else if prev_role.is_some() {
+                        push_gap(&mut lines, 2);
                     }
                     let body_w = width.saturating_sub(RAIL);
                     let mut in_code = false;
@@ -2484,32 +2505,25 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                             if in_code {
                                 let lang = trimmed.trim_start_matches('`').trim();
                                 if !lang.is_empty() {
-                                    let mut pref = rail_blank();
-                                    pref.push(Span::styled(
-                                        "  ▏ ",
-                                        Style::default().fg(theme::HAIRLINE),
-                                    ));
-                                    pref.push(Span::styled(lang.to_string(), faint()));
-                                    lines.push(Line::from(pref));
+                                    push_code_band_line(
+                                        &mut lines,
+                                        Line::from(Span::styled(lang.to_string(), faint())),
+                                        width,
+                                    );
                                 }
                             }
                             continue;
                         }
                         if in_code {
-                            let mut pref = rail_blank();
-                            pref.push(Span::styled(
-                                "  ▏ ",
-                                Style::default().fg(theme::HAIRLINE),
-                            ));
-                            push_prefixed(
+                            // 代码块材质：整块由 push_code_band_line 统一铺底（含语言标签行），
+                            // 无发丝竖线；正文降一档对比度并加 DIM 表达次级信息层级。
+                            push_code_band_line(
                                 &mut lines,
-                                pref.clone(),
-                                pref,
                                 Line::from(Span::styled(
                                     raw.to_string(),
-                                    Style::default().fg(theme::INK_SOFT),
+                                    Style::default().fg(theme::MUTED).add_modifier(Modifier::DIM),
                                 )),
-                                width.saturating_sub(RAIL + 4),
+                                width,
                             );
                             continue;
                         }
@@ -2523,10 +2537,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                     prev_role = Some(MessageRole::Assistant);
                 }
                 MessageRole::ToolCall | MessageRole::ToolResult => {
-                    // 工具行本身属于 assistant turn：若无正文先行，则此处开启 turn 并打标。
+                    // 工具行本身属于 assistant turn：若无正文先行，此处只留间距、不打字标。
                     if !prev_is_tool && !matches!(prev_role, Some(MessageRole::Assistant)) {
                         push_gap(&mut lines, 2);
-                        lines.push(kicker());
                     }
                     let is_call = msg.role == MessageRole::ToolCall;
                     let running = is_call && idx == last_index;
@@ -2537,7 +2550,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                         if running {
                             (
                                 spinner_frame(state.spinner_tick).to_string(),
-                                Style::default().fg(theme::ACCENT),
+                                Style::default().fg(theme::ACCENT_DIM),
                             )
                         } else {
                             (GLYPH_RUNNING.to_string(), faint())
@@ -2545,13 +2558,15 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                     } else if is_error {
                         (GLYPH_FAIL.to_string(), Style::default().fg(theme::DANGER))
                     } else {
-                        (GLYPH_DONE.to_string(), Style::default().fg(theme::SUCCESS))
+                        (GLYPH_DONE.to_string(), faint())
                     };
-                    // 工具行内部也分层：动作名提亮，参数/结果压暗。
-                    let head_style = if is_call {
-                        ink_soft()
+                    // 工具行是中间过程而非重点：动作名压到 MUTED/FAINT，只有失败回到 DANGER。
+                    let head_style = if is_error {
+                        Style::default().fg(theme::DANGER)
+                    } else if is_call {
+                        muted()
                     } else {
-                        Style::default().fg(theme::MUTED)
+                        faint()
                     };
                     let (prefix, body) =
                         tool_line_spans(&glyph, glyph_style, head_style, &msg.content);
@@ -2628,7 +2643,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             };
             let prefix = vec![Span::styled(
                 format!("{} ", spinner_frame(state.spinner_tick)),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::ACCENT_DIM),
             )];
             push_prefixed(
                 &mut lines,
@@ -2738,7 +2753,8 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     // ── 斜杠命令面板：浮于输入区之上，两条发丝线夹一段浅表面 ──────────────
     let match_cmds = state.matching_commands();
     if !match_cmds.is_empty() && state.mode == InteractionMode::Normal {
-        let rows = match_cmds.len().min(7) as u16;
+        // 菜单行数上限 8：命令表当前正好 8 条（含 /thinking），不能再把末尾 /quit 截掉。
+        let rows = match_cmds.len().min(8) as u16;
         let menu_h = rows + 2;
         let desc_w = match_cmds
             .iter()

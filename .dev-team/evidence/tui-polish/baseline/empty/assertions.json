@@ -1,7 +1,7 @@
 {
   "scenario": "empty",
-  "pass": 11,
-  "fail": 4,
+  "pass": 10,
+  "fail": 5,
   "checks": [
     {
       "id": "main.no_panic",
@@ -19,7 +19,7 @@
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 80e9c1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 366b4c"
     },
     {
       "id": "main.capture_rows",
@@ -37,13 +37,13 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/empty/main.png size=125642"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/empty/main.png size=124960"
     },
     {
       "id": "main.header",
       "desc": "header shows brand + workspace",
       "ok": true,
-      "evidence": "row 0 :: pony · pony-agent mock-alpha · 80e9c1"
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · 366b4c"
     },
     {
       "id": "main.input_padded_from_left_edge",
@@ -64,14 +64,14 @@
       "evidence": "描述一个任务开始，或输入命令："
     },
     {
-      "id": "empty.no_error_status",
-      "desc": "empty state has no error status word",
-      "ok": true,
+      "id": "empty.footer_workspace_only",
+      "desc": "empty footer shows the workspace only: no metrics segments before the first turn (v3 R11: no value -> no segment, and no '—' placeholder)",
+      "ok": false,
       "evidence": "footer :: 就绪"
     },
     {
-      "id": "main.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "main.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": false,
       "evidence": "rule_rows=[]"
     },
@@ -91,7 +91,7 @@
       "id": "empty.command_desc_column",
       "desc": "command descriptions start at column 16 (same table geometry everywhere)",
       "ok": false,
-      "evidence": "cols={'/resume': 13, '/provider': 13, '/models': 13, '/clear': 13, '/cost': None, '/help': None, '/quit': None} expected=16 missing=[]"
+      "evidence": "cols={'/resume': 13, '/provider': 13, '/models': 13, '/thinking': None, '/clear': 13, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/thinking']"
     }
   ]
 }

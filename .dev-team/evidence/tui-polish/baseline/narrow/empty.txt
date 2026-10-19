@@ -1,4 +1,4 @@
-  pony  ·  pony-agent                mock-alpha  ·  db05d2
+  pony  ·  pony-agent                mock-alpha  ·  f55f16
   ────────────────────────────────────────────────────────
 
      ▀▀

@@ -105,7 +105,7 @@ fn test_matching_commands_filter() {
 
     state.input_buffer = "/".to_string();
     let all = state.matching_commands();
-    assert_eq!(all.len(), 7);
+    assert_eq!(all.len(), 8, "命令表含 /thinking 在内共 8 条");
 
     state.input_buffer = "/re".to_string();
     let re = state.matching_commands();
@@ -524,12 +524,12 @@ fn test_tui_runtime_mode_state_transitions() {
     assert_eq!(state.runtime_mode, tui::RuntimeMode::Connecting);
     assert!(state.runtime_status_display().contains("准备就绪中"));
 
-    // 3. 流式输出 delta -> Responding ("正在回复...")
+    // 3. 流式输出 delta -> Responding ("生成中...")
     state.transition_runtime_mode(tui::RuntimeMode::Responding);
     assert_eq!(state.runtime_mode, tui::RuntimeMode::Responding);
-    assert!(state.runtime_status_display().contains("正在回复"));
+    assert!(state.runtime_status_display().contains("生成中"));
 
-    // 4. 工具启动 -> ExecutingTool ("执行工具: 读取文件 (Read)...")
+    // 4. 工具启动 -> ExecutingTool ("执行: 读取文件 (Read)...")
     state.transition_runtime_mode(tui::RuntimeMode::ExecutingTool("读取文件 (Read)".to_string()));
     match &state.runtime_mode {
         tui::RuntimeMode::ExecutingTool(tool_name) => {
@@ -539,10 +539,10 @@ fn test_tui_runtime_mode_state_transitions() {
     }
     assert!(state.runtime_status_display().contains("读取文件 (Read)"));
 
-    // 5. 工具执行结束 -> 回切为 Responding ("正在回复...")
+    // 5. 工具执行结束 -> 回切为 Responding ("生成中...")
     state.transition_runtime_mode(tui::RuntimeMode::Responding);
     assert_eq!(state.runtime_mode, tui::RuntimeMode::Responding);
-    assert!(state.runtime_status_display().contains("正在回复"));
+    assert!(state.runtime_status_display().contains("生成中"));
 
     // 6. Turn completed -> Completed ("完成")
     state.transition_runtime_mode(tui::RuntimeMode::Completed);

@@ -255,7 +255,7 @@ fn a3_metrics_row_never_renders_status_words() {
     ));
 
     const FORBIDDEN: [&str; 7] = [
-        "就绪", "完成", "失败", "待确认", "写入中", "思考中", "工具 ·",
+        "就绪", "完成", "失败", "待确认", "生成中", "思考中", "执行 ·",
     ];
 
     for (label, state) in states.iter_mut() {

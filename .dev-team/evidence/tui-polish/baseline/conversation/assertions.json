@@ -1,7 +1,7 @@
 {
   "scenario": "conversation",
-  "pass": 14,
-  "fail": 5,
+  "pass": 13,
+  "fail": 6,
   "checks": [
     {
       "id": "main.no_panic",
@@ -19,7 +19,7 @@
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · c087e3"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 081f66"
     },
     {
       "id": "main.capture_rows",
@@ -37,13 +37,13 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/conversation/main.png size=142036"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/conversation/main.png size=141639"
     },
     {
       "id": "main.header",
       "desc": "header shows brand + workspace",
       "ok": true,
-      "evidence": "row 0 :: pony · pony-agent mock-alpha · c087e3"
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · 081f66"
     },
     {
       "id": "main.input_padded_from_left_edge",
@@ -106,15 +106,15 @@
       "evidence": "chat_requests=1 tool_round_requests=1 roles=[['system', 'system', 'system', 'system', 'user', 'assistant', 'tool']] scenarios=['final']"
     },
     {
-      "id": "main.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "main.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": false,
       "evidence": "rule_rows=[]"
     },
     {
-      "id": "conversation.footer_ready",
-      "desc": "footer returns to a ready state after the turn",
-      "ok": true,
+      "id": "conversation.footer_metrics",
+      "desc": "footer is the composer metrics line after the turn (status phrase removed by wave-39)",
+      "ok": false,
       "evidence": "footer :: Turn completed"
     }
   ]

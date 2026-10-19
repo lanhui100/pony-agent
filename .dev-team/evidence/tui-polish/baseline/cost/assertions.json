@@ -19,7 +19,7 @@
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d42b81"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 029662"
     },
     {
       "id": "main.capture_rows",
@@ -37,7 +37,7 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/cost/main.png size=50365"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/cost/main.png size=50335"
     },
     {
       "id": "main.input_padded_from_left_edge",
@@ -58,8 +58,8 @@
       "evidence": "row :: · Model: mock-alpha | Gateway: http://10.42.0.67:8080"
     },
     {
-      "id": "main.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "main.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": false,
       "evidence": "rule_rows=[]"
     },

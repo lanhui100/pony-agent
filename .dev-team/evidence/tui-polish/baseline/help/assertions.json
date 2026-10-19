@@ -19,7 +19,7 @@
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 277d25"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · ec6c95"
     },
     {
       "id": "main.capture_rows",
@@ -37,7 +37,7 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/help/main.png size=48338"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/help/main.png size=48786"
     },
     {
       "id": "main.input_padded_from_left_edge",
@@ -55,11 +55,11 @@
       "id": "help.commands_listed",
       "desc": "/help renders the command reference in the transcript",
       "ok": false,
-      "evidence": "row 3 :: · Commands: /resume (select session), /provider, /models, /clear, /cost, /quit missing=['/help']"
+      "evidence": "row 3 :: · Commands: /resume (select session), /provider, /models, /clear, /cost, /quit missing=['/thinking', '/help']"
     },
     {
-      "id": "main.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "main.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": false,
       "evidence": "rule_rows=[]"
     },
@@ -67,7 +67,7 @@
       "id": "help.command_desc_column",
       "desc": "command descriptions start at column 16 (same table geometry everywhere)",
       "ok": false,
-      "evidence": "cols={'/resume': None, '/provider': None, '/models': None, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/resume', '/provider', '/models', '/clear', '/cost', '/help', '/quit']"
+      "evidence": "cols={'/resume': None, '/provider': None, '/models': None, '/thinking': None, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/resume', '/provider', '/models', '/thinking', '/clear', '/cost', '/help', '/q…"
     },
     {
       "id": "help.system_message_glyph",

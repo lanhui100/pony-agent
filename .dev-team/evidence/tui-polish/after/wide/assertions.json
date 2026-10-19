@@ -79,13 +79,13 @@
       "id": "conversation.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3378"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3890"
     },
     {
       "id": "conversation.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=157369"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=153564"
     },
     {
       "id": "conversation.input_padded_from_left_edge",

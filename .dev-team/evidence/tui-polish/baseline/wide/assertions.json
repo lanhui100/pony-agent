@@ -19,7 +19,7 @@
       "id": "empty.within_terminal_width",
       "desc": "every captured row display width <= 160 cols",
       "ok": true,
-      "evidence": "widest row 0 width=158 cols=160 :: pony · pony-agent mock-alpha · 461faa"
+      "evidence": "widest row 0 width=158 cols=160 :: pony · pony-agent mock-alpha · 66f640"
     },
     {
       "id": "empty.capture_rows",
@@ -37,7 +37,7 @@
       "id": "empty.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/wide/empty.png size=132685"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/wide/empty.png size=133188"
     },
     {
       "id": "empty.input_padded_from_left_edge",
@@ -67,7 +67,7 @@
       "id": "conversation.within_terminal_width",
       "desc": "every captured row display width <= 160 cols",
       "ok": true,
-      "evidence": "widest row 0 width=158 cols=160 :: pony · pony-agent mock-alpha · 461faa"
+      "evidence": "widest row 0 width=158 cols=160 :: pony · pony-agent mock-alpha · 66f640"
     },
     {
       "id": "conversation.capture_rows",
@@ -85,7 +85,7 @@
       "id": "conversation.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/wide/conversation.png size=149340"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/wide/conversation.png size=149789"
     },
     {
       "id": "conversation.input_padded_from_left_edge",
@@ -103,11 +103,11 @@
       "id": "empty.header",
       "desc": "header shows brand + workspace",
       "ok": true,
-      "evidence": "row 0 :: pony · pony-agent mock-alpha · 461faa"
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · 66f640"
     },
     {
-      "id": "empty.separator_two_rules",
-      "desc": "header rule and composer top rule are both present",
+      "id": "empty.separator_single_header_rule",
+      "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": false,
       "evidence": "rule_rows=[]"
     },
@@ -115,7 +115,7 @@
       "id": "wide.header_full_metadata",
       "desc": "wide header keeps workspace and model metadata on one line",
       "ok": true,
-      "evidence": "row 0 :: pony · pony-agent mock-alpha · 461faa"
+      "evidence": "row 0 :: pony · pony-agent mock-alpha · 66f640"
     },
     {
       "id": "wide.conversation_visible",

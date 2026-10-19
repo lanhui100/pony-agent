@@ -73,7 +73,7 @@
       "id": "help.command_desc_column",
       "desc": "command descriptions start at column 16 (same table geometry everywhere)",
       "ok": true,
-      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[]"
+      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/thinking': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[]"
     },
     {
       "id": "help.system_message_glyph",

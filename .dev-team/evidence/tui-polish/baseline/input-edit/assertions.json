@@ -19,7 +19,7 @@
       "id": "abc.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "abc.capture_rows",
@@ -37,7 +37,7 @@
       "id": "abc.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/abc.png size=115706"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/abc.png size=115470"
     },
     {
       "id": "input_edit.abc",
@@ -61,7 +61,7 @@
       "id": "inserted.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "inserted.capture_rows",
@@ -79,7 +79,7 @@
       "id": "inserted.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/inserted.png size=116546"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/inserted.png size=116310"
     },
     {
       "id": "input_edit.inserted",
@@ -103,7 +103,7 @@
       "id": "backspace.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "backspace.capture_rows",
@@ -121,7 +121,7 @@
       "id": "backspace.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/backspace.png size=116088"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/backspace.png size=115845"
     },
     {
       "id": "input_edit.backspace",
@@ -145,7 +145,7 @@
       "id": "word_cleared.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "word_cleared.capture_rows",
@@ -163,7 +163,7 @@
       "id": "word_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/word_cleared.png size=124696"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/word_cleared.png size=124449"
     },
     {
       "id": "input_edit.word_cleared",
@@ -187,7 +187,7 @@
       "id": "tab_complete.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "tab_complete.capture_rows",
@@ -205,7 +205,7 @@
       "id": "tab_complete.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/tab_complete.png size=129437"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/tab_complete.png size=129197"
     },
     {
       "id": "input_edit.tab_complete",
@@ -229,7 +229,7 @@
       "id": "ctrl_u_cleared.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "ctrl_u_cleared.capture_rows",
@@ -247,7 +247,7 @@
       "id": "ctrl_u_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/ctrl_u_cleared.png size=124696"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/ctrl_u_cleared.png size=124449"
     },
     {
       "id": "input_edit.ctrl_u_cleared",
@@ -271,7 +271,7 @@
       "id": "multiline.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "multiline.capture_rows",
@@ -289,7 +289,7 @@
       "id": "multiline.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/multiline.png size=117020"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/multiline.png size=116783"
     },
     {
       "id": "input_edit.multiline",
@@ -313,7 +313,7 @@
       "id": "esc_cleared.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "esc_cleared.capture_rows",
@@ -331,7 +331,7 @@
       "id": "esc_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/esc_cleared.png size=124696"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/esc_cleared.png size=124449"
     },
     {
       "id": "input_edit.esc_cleared",
@@ -355,7 +355,7 @@
       "id": "draft.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "draft.capture_rows",
@@ -373,7 +373,7 @@
       "id": "draft.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/draft.png size=115774"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/draft.png size=115535"
     },
     {
       "id": "input_edit.draft",
@@ -409,7 +409,7 @@
       "id": "draft_cleared.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 2550f1"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · d797d7"
     },
     {
       "id": "draft_cleared.capture_rows",
@@ -427,7 +427,7 @@
       "id": "draft_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/draft_cleared.png size=124696"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/draft_cleared.png size=124449"
     },
     {
       "id": "input_edit.ctrl_c_with_draft_clears_only",
@@ -451,7 +451,7 @@
       "id": "exit.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.9w7sM0/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.9w7sM0/iso-inpu"
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0dHg4z/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0dHg4z/iso-inpu"
     },
     {
       "id": "exit.capture_rows",
@@ -469,7 +469,7 @@
       "id": "exit.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/exit.png size=78141"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/exit.png size=76562"
     },
     {
       "id": "shell.no_panic",
@@ -481,7 +481,7 @@
       "id": "shell.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.9w7sM0/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.9w7sM0/iso-inpu"
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0dHg4z/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0dHg4z/iso-inpu"
     },
     {
       "id": "shell.capture_rows",
@@ -499,7 +499,7 @@
       "id": "shell.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/shell.png size=89497"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/input-edit/shell.png size=88113"
     },
     {
       "id": "input_edit.ctrl_c_empty_exits",

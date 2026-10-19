@@ -229,7 +229,7 @@ fn conversation_hierarchy_and_streaming_render() {
     let buf = screen(&mut state, 110, 26);
     dump_if_requested("06-streaming", &buf);
     let squeezed_text = squeezed(&buf);
-    assert!(squeezed_text.contains("写入中"), "流式活动行缺失");
+    assert!(squeezed_text.contains("生成中"), "流式活动行缺失");
     assert!(squeezed_text.contains("秒"), "流式活动行缺少耗时");
 }
 

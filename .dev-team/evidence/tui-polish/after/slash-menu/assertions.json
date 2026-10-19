@@ -1,7 +1,7 @@
 {
   "scenario": "slash-menu",
-  "pass": 11,
-  "fail": 3,
+  "pass": 14,
+  "fail": 0,
   "checks": [
     {
       "id": "main.no_panic",
@@ -31,13 +31,13 @@
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4559"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4692"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=140108"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=146463"
     },
     {
       "id": "main.input_padded_from_left_edge",
@@ -48,32 +48,32 @@
     {
       "id": "slash.all_commands_listed",
       "desc": "slash menu lists the full command table",
-      "ok": false,
-      "evidence": "menu_commands=['/resume', '/provider', '/models', '/clear', '/cost', '/help', '/quit'] missing=['/quit']"
+      "ok": true,
+      "evidence": "menu_commands=['/resume', '/provider', '/models', '/thinking', '/clear', '/cost', '/help', '/quit'] missing=[]"
     },
     {
       "id": "slash.menu_has_top_and_bottom_rules",
       "desc": "menu is framed by two hairline rules",
       "ok": true,
-      "evidence": "rule_rows=[20, 28]"
+      "evidence": "rule_rows=[19, 28]"
     },
     {
       "id": "slash.menu_above_composer",
       "desc": "menu rows sit above the composer input row",
       "ok": true,
-      "evidence": "menu_rows=[21, 22]..27 bottom_rule=28 input_row=31"
+      "evidence": "menu_rows=[20, 21]..27 bottom_rule=28 input_row=31"
     },
     {
       "id": "slash.each_command_once",
       "desc": "each command appears exactly once inside the menu region",
-      "ok": false,
-      "evidence": "duplicate/missing commands=['/quit'] menu_rows=7"
+      "ok": true,
+      "evidence": "duplicate/missing commands=[] menu_rows=8"
     },
     {
       "id": "slash.command_desc_column",
       "desc": "command descriptions start at column 16 (same table geometry everywhere)",
-      "ok": false,
-      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': None} expected=16 missing=['/quit']"
+      "ok": true,
+      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/thinking': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[]"
     },
     {
       "id": "slash.resume_once_whole_screen",
@@ -85,7 +85,7 @@
       "id": "slash.selected_row_marker",
       "desc": "selected command row carries the selection marker",
       "ok": true,
-      "evidence": "row 21 :: ▏ /resume 选择并恢复历史会话"
+      "evidence": "row 20 :: ▏ /resume 选择并恢复历史会话"
     }
   ]
 }

@@ -1,7 +1,7 @@
 {
   "scenario": "empty",
-  "pass": 15,
-  "fail": 1,
+  "pass": 16,
+  "fail": 0,
   "checks": [
     {
       "id": "main.no_panic",
@@ -96,8 +96,8 @@
     {
       "id": "empty.command_desc_column",
       "desc": "command descriptions start at column 16 (same table geometry everywhere)",
-      "ok": false,
-      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/clear']"
+      "ok": true,
+      "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/thinking': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=[]"
     }
   ]
 }

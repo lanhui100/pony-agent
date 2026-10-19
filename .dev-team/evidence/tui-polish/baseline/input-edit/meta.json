@@ -5,6 +5,6 @@
   "cols": 120,
   "rows": 34,
   "bin": "/home/dm/pony-agent/tools/tui-audit/bin/pony-baseline",
-  "started_at": "2026-10-19T03:46:25+08:00",
-  "duration_ms": 12000
+  "started_at": "2026-10-19T23:31:31+08:00",
+  "duration_ms": 11000
 }

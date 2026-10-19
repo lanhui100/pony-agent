@@ -1,7 +1,7 @@
 {
   "scenario": "scrolled",
-  "pass": 18,
-  "fail": 1,
+  "pass": 17,
+  "fail": 2,
   "checks": [
     {
       "id": "before.no_panic",
@@ -19,7 +19,7 @@
       "id": "before.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 46e13f"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 740646"
     },
     {
       "id": "before.capture_rows",
@@ -37,7 +37,7 @@
       "id": "before.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/scrolled/before.png size=518562"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/scrolled/before.png size=518510"
     },
     {
       "id": "after.no_panic",
@@ -55,7 +55,7 @@
       "id": "after.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 46e13f"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 740646"
     },
     {
       "id": "after.capture_rows",
@@ -73,7 +73,7 @@
       "id": "after.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/scrolled/after.png size=684667"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/scrolled/after.png size=684617"
     },
     {
       "id": "after.input_padded_from_left_edge",
@@ -94,9 +94,9 @@
       "evidence": "这是最后一行，滚动到底部时应完整可见。"
     },
     {
-      "id": "scrolled.hint_absent_before",
-      "desc": "scroll-up hint is absent while pinned to bottom",
-      "ok": true,
+      "id": "scrolled.metrics_footer_before",
+      "desc": "footer is the metrics line while pinned to bottom (scroll-up hint removed by wave-39)",
+      "ok": false,
       "evidence": "footer :: Turn completed"
     },
     {
@@ -106,8 +106,8 @@
       "evidence": "· 第 14 行：这是一段用于验证滚动与折行的中文正文，包含 `inline code` 与 加粗 片段。"
     },
     {
-      "id": "scrolled.hint_present_after",
-      "desc": "footer advertises the scrolled-up state",
+      "id": "scrolled.metrics_footer_after",
+      "desc": "footer stays the metrics line after scrolling up (the old '已上翻' hint row is gone)",
       "ok": false,
       "evidence": "footer :: Turn completed"
     },

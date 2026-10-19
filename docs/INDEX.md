@@ -64,6 +64,8 @@
 - [0038 TUI 设计系统：单色为骨、单一骨色强调、发丝线与 2 列沟槽](decisions/0038-tui-design-system-monochrome-restraint.md)
 - [0040 TUI /models 远程模型发现与回环地址代理旁路](decisions/0040-tui-model-discovery-and-loopback-proxy-bypass.md)
 - [0042 TUI Composer 收边与底部指标行（弱化 cwd / token / 缓存 / 上下文）](decisions/0042-tui-composer-metrics-line.md)
+- [0043 TUI 消息区层级弱化、代码块材质与三态状态词](decisions/0043-tui-message-hierarchy-and-tri-state-status.md)
+- [0044 系统提示词 v2（收据化、注入防线、阈值收敛与层序守卫）](decisions/0044-system-prompt-v2-receipts-injection-and-layer-order.md)
 
 ## 3.1 交付证据归档
 

@@ -1,7 +1,7 @@
 {
   "scenario": "slash-menu",
-  "pass": 12,
-  "fail": 2,
+  "pass": 10,
+  "fail": 4,
   "checks": [
     {
       "id": "main.no_panic",
@@ -19,7 +19,7 @@
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · dd7af6"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 0aeb2a"
     },
     {
       "id": "main.capture_rows",
@@ -37,7 +37,7 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/slash-menu/main.png size=160566"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/slash-menu/main.png size=161039"
     },
     {
       "id": "main.input_padded_from_left_edge",
@@ -48,8 +48,8 @@
     {
       "id": "slash.all_commands_listed",
       "desc": "slash menu lists the full command table",
-      "ok": true,
-      "evidence": "menu_commands=['/resume', '/provider', '/models', '/clear', '/cost', '/help', '/quit'] missing=[]"
+      "ok": false,
+      "evidence": "menu_commands=['/resume', '/provider', '/models', '/thinking', '/clear', '/cost', '/help', '/quit'] missing=['/thinking']"
     },
     {
       "id": "slash.menu_has_top_and_bottom_rules",
@@ -66,14 +66,14 @@
     {
       "id": "slash.each_command_once",
       "desc": "each command appears exactly once inside the menu region",
-      "ok": true,
-      "evidence": "duplicate/missing commands=[] menu_rows=7"
+      "ok": false,
+      "evidence": "duplicate/missing commands=['/thinking'] menu_rows=7"
     },
     {
       "id": "slash.command_desc_column",
       "desc": "command descriptions start at column 16 (same table geometry everywhere)",
       "ok": false,
-      "evidence": "cols={'/resume': 13, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[]"
+      "evidence": "cols={'/resume': 13, '/provider': 16, '/models': 16, '/thinking': None, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=['/thinking']"
     },
     {
       "id": "slash.resume_once_whole_screen",

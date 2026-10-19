@@ -1,4 +1,4 @@
-  pony  ·  pony-agent                                                                            mock-alpha  ·  277d25
+  pony  ·  pony-agent                                                                            mock-alpha  ·  ec6c95
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
   · Commands: /resume (select session), /provider, /models, /clear, /cost, /quit

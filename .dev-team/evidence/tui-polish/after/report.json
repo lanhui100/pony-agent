@@ -3,23 +3,20 @@
   "binary": {
     "phase": "after",
     "bin": "/home/dm/pony-agent/target/debug/pony",
-    "sha256": "ebff0b36991bbf313b4c4737ac140e581d4d2de62cfa7bdd2b6786c22710e5fa",
-    "mtime": "2026-10-19T21:25:02+08:00",
-    "size": 56692928,
+    "sha256": "63e48f5d6aa0aebf3ce6d4d2991b162a3e7a1681f9752a1108173c489aa43c73",
+    "mtime": "2026-10-20T00:23:39+08:00",
+    "size": 59408952,
     "version": "pony 0.1.127 · linux-x86_64",
-    "generated_at": "2026-10-19T21:25:02+08:00",
+    "generated_at": "2026-10-20T00:28:55+08:00",
     "repo": "/home/dm/pony-agent"
   },
-  "generated_at": "2026-10-19T13:26:05.057808+00:00",
+  "generated_at": "2026-10-19T16:29:46.034066+00:00",
   "summary": {
     "scenarios": 18,
     "checks": 369,
-    "pass": 365,
-    "fail": 4,
-    "failed_scenarios": [
-      "empty",
-      "slash-menu"
-    ]
+    "pass": 369,
+    "fail": 0,
+    "failed_scenarios": []
   },
   "scenarios": [
     {
@@ -28,13 +25,13 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T21:25:02+08:00",
+      "started_at": "2026-10-20T00:28:55+08:00",
       "evidence_dir": "empty",
       "captures": [
         "main"
       ],
-      "pass": 15,
-      "fail": 1,
+      "pass": 16,
+      "fail": 0,
       "checks": [
         {
           "id": "main.no_panic",
@@ -129,8 +126,8 @@
         {
           "id": "empty.command_desc_column",
           "desc": "command descriptions start at column 16 (same table geometry everywhere)",
-          "ok": false,
-          "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=['/clear']"
+          "ok": true,
+          "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/thinking': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=[]"
         }
       ]
     },
@@ -139,8 +136,8 @@
       "index": 2,
       "cols": 120,
       "rows": 34,
-      "duration_ms": 3000,
-      "started_at": "2026-10-19T21:25:04+08:00",
+      "duration_ms": 2000,
+      "started_at": "2026-10-20T00:28:57+08:00",
       "evidence_dir": "conversation",
       "captures": [
         "main"
@@ -176,13 +173,13 @@
           "id": "main.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=2949"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=3448"
         },
         {
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=147380"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=144164"
         },
         {
           "id": "main.header",
@@ -218,13 +215,13 @@
           "id": "conversation.tool_line_visible",
           "desc": "tool activity line (Read) is visible with a status glyph",
           "ok": true,
-          "evidence": "row 9 :: ✓ 读取 (Read) · 收集路径 package.json 的上下文。"
+          "evidence": "row 8 :: ✓ 读取 (Read) · 收集路径 package.json 的上下文。"
         },
         {
           "id": "conversation.final_answer_visible",
           "desc": "final assistant answer (mock round 2) is visible",
           "ok": true,
-          "evidence": "row 11 :: 结论"
+          "evidence": "row 10 :: 结论"
         },
         {
           "id": "conversation.text_columns_aligned",
@@ -275,14 +272,14 @@
       "index": 3,
       "cols": 120,
       "rows": 34,
-      "duration_ms": 9000,
-      "started_at": "2026-10-19T21:25:07+08:00",
+      "duration_ms": 1000,
+      "started_at": "2026-10-20T00:29:00+08:00",
       "evidence_dir": "slash-menu",
       "captures": [
         "main"
       ],
-      "pass": 11,
-      "fail": 3,
+      "pass": 14,
+      "fail": 0,
       "checks": [
         {
           "id": "main.no_panic",
@@ -312,13 +309,13 @@
           "id": "main.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4559"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4692"
         },
         {
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=140108"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=146463"
         },
         {
           "id": "main.input_padded_from_left_edge",
@@ -329,32 +326,32 @@
         {
           "id": "slash.all_commands_listed",
           "desc": "slash menu lists the full command table",
-          "ok": false,
-          "evidence": "menu_commands=['/resume', '/provider', '/models', '/clear', '/cost', '/help', '/quit'] missing=['/quit']"
+          "ok": true,
+          "evidence": "menu_commands=['/resume', '/provider', '/models', '/thinking', '/clear', '/cost', '/help', '/quit'] missing=[]"
         },
         {
           "id": "slash.menu_has_top_and_bottom_rules",
           "desc": "menu is framed by two hairline rules",
           "ok": true,
-          "evidence": "rule_rows=[20, 28]"
+          "evidence": "rule_rows=[19, 28]"
         },
         {
           "id": "slash.menu_above_composer",
           "desc": "menu rows sit above the composer input row",
           "ok": true,
-          "evidence": "menu_rows=[21, 22]..27 bottom_rule=28 input_row=31"
+          "evidence": "menu_rows=[20, 21]..27 bottom_rule=28 input_row=31"
         },
         {
           "id": "slash.each_command_once",
           "desc": "each command appears exactly once inside the menu region",
-          "ok": false,
-          "evidence": "duplicate/missing commands=['/quit'] menu_rows=7"
+          "ok": true,
+          "evidence": "duplicate/missing commands=[] menu_rows=8"
         },
         {
           "id": "slash.command_desc_column",
           "desc": "command descriptions start at column 16 (same table geometry everywhere)",
-          "ok": false,
-          "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': None} expected=16 missing=['/quit']"
+          "ok": true,
+          "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/thinking': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[]"
         },
         {
           "id": "slash.resume_once_whole_screen",
@@ -366,7 +363,7 @@
           "id": "slash.selected_row_marker",
           "desc": "selected command row carries the selection marker",
           "ok": true,
-          "evidence": "row 21 :: ▏ /resume 选择并恢复历史会话"
+          "evidence": "row 20 :: ▏ /resume 选择并恢复历史会话"
         }
       ]
     },
@@ -375,8 +372,8 @@
       "index": 4,
       "cols": 120,
       "rows": 34,
-      "duration_ms": 2000,
-      "started_at": "2026-10-19T21:25:17+08:00",
+      "duration_ms": 1000,
+      "started_at": "2026-10-20T00:29:02+08:00",
       "evidence_dir": "models-panel",
       "captures": [
         "main"
@@ -524,7 +521,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T21:25:19+08:00",
+      "started_at": "2026-10-20T00:29:04+08:00",
       "evidence_dir": "provider-panel",
       "captures": [
         "main"
@@ -666,7 +663,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T21:25:21+08:00",
+      "started_at": "2026-10-20T00:29:06+08:00",
       "evidence_dir": "sessions-panel",
       "captures": [
         "main"
@@ -708,7 +705,7 @@
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=50414"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=50711"
         },
         {
           "id": "sessions.title",
@@ -720,13 +717,13 @@
           "id": "sessions.prior_conversation_listed",
           "desc": "the conversation just completed is offered for resume",
           "ok": true,
-          "evidence": "│▏ 读取 package.json 并总结 f94f73c3 · 当前 │"
+          "evidence": "│▏ 读取 package.json 并总结 9b6f5494 · 当前 │"
         },
         {
           "id": "sessions.session_id_visible",
           "desc": "session row carries a short session id",
           "ok": true,
-          "evidence": "│▏ 读取 package.json 并总结 f94f73c3 · 当前 │"
+          "evidence": "│▏ 读取 package.json 并总结 9b6f5494 · 当前 │"
         },
         {
           "id": "sessions.not_empty",
@@ -804,7 +801,7 @@
           "id": "sessions.current_marker",
           "desc": "sessions panel marks the active session",
           "ok": true,
-          "evidence": "│▏ 读取 package.json 并总结 f94f73c3 · 当前 │"
+          "evidence": "│▏ 读取 package.json 并总结 9b6f5494 · 当前 │"
         }
       ]
     },
@@ -814,7 +811,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T21:25:24+08:00",
+      "started_at": "2026-10-20T00:29:08+08:00",
       "evidence_dir": "add-provider",
       "captures": [
         "main"
@@ -950,7 +947,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 4000,
-      "started_at": "2026-10-19T21:25:26+08:00",
+      "started_at": "2026-10-20T00:29:10+08:00",
       "evidence_dir": "streaming",
       "captures": [
         "final",
@@ -987,13 +984,13 @@
           "id": "mid.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2227"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2177"
         },
         {
           "id": "mid.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=82926"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=81243"
         },
         {
           "id": "final.no_panic",
@@ -1023,25 +1020,25 @@
           "id": "final.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2678"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2609"
         },
         {
           "id": "final.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=146346"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=144979"
         },
         {
-          "id": "streaming.mid_status_writing",
-          "desc": "streaming active line shows the writing state while the footer is the metrics row",
+          "id": "streaming.mid_status_generating",
+          "desc": "streaming active line shows the generating state while the footer is the metrics row",
           "ok": true,
-          "evidence": "active_row :: • 写入中 0秒 | footer :: /home/dm/pony-agent 上下文 0%"
+          "evidence": "active_row :: • 生成中 0秒 | footer :: /home/dm/pony-agent 上下文 0%"
         },
         {
           "id": "streaming.mid_active_elapsed",
-          "desc": "active line shows elapsed time next to the writing state",
+          "desc": "active line shows elapsed time next to the generating state",
           "ok": true,
-          "evidence": "active_row :: • 写入中 0秒"
+          "evidence": "active_row :: • 生成中 0秒"
         },
         {
           "id": "streaming.mid_partial_body",
@@ -1062,8 +1059,8 @@
           "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
         },
         {
-          "id": "streaming.final_not_writing",
-          "desc": "writing status disappeared once the stream finished",
+          "id": "streaming.final_not_generating",
+          "desc": "transient generating status disappeared once the stream finished",
           "ok": true,
           "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
         }
@@ -1075,7 +1072,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T21:25:30+08:00",
+      "started_at": "2026-10-20T00:29:14+08:00",
       "evidence_dir": "error",
       "captures": [
         "main"
@@ -1175,7 +1172,7 @@
       "cols": 60,
       "rows": 20,
       "duration_ms": 3000,
-      "started_at": "2026-10-19T21:25:32+08:00",
+      "started_at": "2026-10-20T00:29:16+08:00",
       "evidence_dir": "narrow",
       "captures": [
         "conversation",
@@ -1260,13 +1257,13 @@
           "id": "conversation.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1689"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1957"
         },
         {
           "id": "conversation.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=99698"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=98637"
         },
         {
           "id": "conversation.input_padded_from_left_edge",
@@ -1317,8 +1314,8 @@
       "index": 11,
       "cols": 160,
       "rows": 40,
-      "duration_ms": 4000,
-      "started_at": "2026-10-19T21:25:35+08:00",
+      "duration_ms": 3000,
+      "started_at": "2026-10-20T00:29:19+08:00",
       "evidence_dir": "wide",
       "captures": [
         "conversation",
@@ -1403,13 +1400,13 @@
           "id": "conversation.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3378"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3890"
         },
         {
           "id": "conversation.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=157369"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=153564"
         },
         {
           "id": "conversation.input_padded_from_left_edge",
@@ -1467,7 +1464,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 5000,
-      "started_at": "2026-10-19T21:25:39+08:00",
+      "started_at": "2026-10-20T00:29:22+08:00",
       "evidence_dir": "scrolled",
       "captures": [
         "after",
@@ -1504,13 +1501,13 @@
           "id": "before.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7331"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7102"
         },
         {
           "id": "before.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=548901"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=548398"
         },
         {
           "id": "after.no_panic",
@@ -1540,13 +1537,13 @@
           "id": "after.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=9295"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=8269"
         },
         {
           "id": "after.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=714097"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=714222"
         },
         {
           "id": "after.input_padded_from_left_edge",
@@ -1598,7 +1595,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T21:25:44+08:00",
+      "started_at": "2026-10-20T00:29:27+08:00",
       "evidence_dir": "help",
       "captures": [
         "main"
@@ -1676,7 +1673,7 @@
           "id": "help.command_desc_column",
           "desc": "command descriptions start at column 16 (same table geometry everywhere)",
           "ok": true,
-          "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[]"
+          "evidence": "cols={'/resume': 16, '/provider': 16, '/models': 16, '/thinking': 16, '/clear': 16, '/cost': 16, '/help': 16, '/quit': 16} expected=16 missing=[]"
         },
         {
           "id": "help.system_message_glyph",
@@ -1692,7 +1689,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T21:25:46+08:00",
+      "started_at": "2026-10-20T00:29:29+08:00",
       "evidence_dir": "cost",
       "captures": [
         "main"
@@ -1779,8 +1776,8 @@
       "index": 15,
       "cols": 120,
       "rows": 34,
-      "duration_ms": 4000,
-      "started_at": "2026-10-19T21:25:48+08:00",
+      "duration_ms": 3000,
+      "started_at": "2026-10-20T00:29:31+08:00",
       "evidence_dir": "ctrl-c",
       "captures": [
         "exit",
@@ -1799,7 +1796,7 @@
           "id": "exit.within_terminal_width",
           "desc": "every captured row display width <= 120 cols",
           "ok": true,
-          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.HaJAV8/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.HaJAV8/iso-ctrl-c/x"
+          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-ctrl-c/x"
         },
         {
           "id": "exit.capture_rows",
@@ -1817,7 +1814,7 @@
           "id": "exit.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.png size=75244"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.png size=76079"
         },
         {
           "id": "shell.no_panic",
@@ -1829,7 +1826,7 @@
           "id": "shell.within_terminal_width",
           "desc": "every captured row display width <= 120 cols",
           "ok": true,
-          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.HaJAV8/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.HaJAV8/iso-ctrl-c/x"
+          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-ctrl-c/x"
         },
         {
           "id": "shell.capture_rows",
@@ -1847,7 +1844,7 @@
           "id": "shell.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.png size=86977"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.png size=87710"
         },
         {
           "id": "ctrl_c.process_exited",
@@ -1886,8 +1883,8 @@
       "index": 16,
       "cols": 120,
       "rows": 34,
-      "duration_ms": 12000,
-      "started_at": "2026-10-19T21:25:52+08:00",
+      "duration_ms": 11000,
+      "started_at": "2026-10-20T00:29:34+08:00",
       "evidence_dir": "input-edit",
       "captures": [
         "abc",
@@ -2228,7 +2225,7 @@
           "id": "esc_cleared.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=3633"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=3782"
         },
         {
           "id": "esc_cleared.artifact_png",
@@ -2354,7 +2351,7 @@
           "id": "exit.within_terminal_width",
           "desc": "every captured row display width <= 120 cols",
           "ok": true,
-          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.HaJAV8/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.HaJAV8/iso-inpu"
+          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-inpu"
         },
         {
           "id": "exit.capture_rows",
@@ -2372,7 +2369,7 @@
           "id": "exit.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=75857"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=77085"
         },
         {
           "id": "shell.no_panic",
@@ -2384,7 +2381,7 @@
           "id": "shell.within_terminal_width",
           "desc": "every captured row display width <= 120 cols",
           "ok": true,
-          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.HaJAV8/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.HaJAV8/iso-inpu"
+          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.0gL2SQ/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.0gL2SQ/iso-inpu"
         },
         {
           "id": "shell.capture_rows",
@@ -2402,7 +2399,7 @@
           "id": "shell.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=87470"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=88582"
         },
         {
           "id": "input_edit.ctrl_c_empty_exits",
@@ -2436,7 +2433,7 @@
       "cols": 80,
       "rows": 24,
       "duration_ms": 0,
-      "started_at": "2026-10-19T21:26:04+08:00",
+      "started_at": "2026-10-20T00:29:45+08:00",
       "evidence_dir": "non-tty",
       "captures": [],
       "pass": 4,
@@ -2474,7 +2471,7 @@
       "cols": 80,
       "rows": 24,
       "duration_ms": 0,
-      "started_at": "2026-10-19T21:26:04+08:00",
+      "started_at": "2026-10-20T00:29:45+08:00",
       "evidence_dir": "cli-modes",
       "captures": [],
       "pass": 9,
@@ -2541,8 +2538,8 @@
     "baseline": {
       "scenarios": 18,
       "checks": 354,
-      "pass": 306,
-      "fail": 48,
+      "pass": 298,
+      "fail": 56,
       "failed_scenarios": [
         "empty",
         "conversation",
@@ -2564,25 +2561,30 @@
     "after": {
       "scenarios": 18,
       "checks": 369,
-      "pass": 365,
-      "fail": 4,
-      "failed_scenarios": [
-        "empty",
-        "slash-menu"
-      ]
+      "pass": 369,
+      "fail": 0,
+      "failed_scenarios": []
     },
     "fixed": {
       "empty": [
+        "empty.footer_workspace_only",
+        "main.separator_single_header_rule",
         "main.composer_cursor_block",
-        "empty.placeholder_column"
+        "empty.placeholder_column",
+        "empty.command_desc_column"
       ],
       "conversation": [
         "main.no_standalone_role_label",
         "conversation.user_role_rail",
         "conversation.text_columns_aligned",
-        "conversation.aligned_columns_padded"
+        "conversation.aligned_columns_padded",
+        "main.separator_single_header_rule",
+        "conversation.footer_metrics"
       ],
       "slash-menu": [
+        "slash.all_commands_listed",
+        "slash.each_command_once",
+        "slash.command_desc_column",
         "slash.resume_once_whole_screen"
       ],
       "models-panel": [
@@ -2618,40 +2620,46 @@
       "streaming": [
         "mid.no_standalone_role_label",
         "final.no_standalone_role_label",
-        "streaming.mid_status_writing",
-        "streaming.mid_active_elapsed"
+        "streaming.mid_status_generating",
+        "streaming.mid_active_elapsed",
+        "streaming.mid_not_finished",
+        "streaming.final_complete"
       ],
       "error": [
-        "main.no_standalone_role_label"
+        "main.no_standalone_role_label",
+        "error.footer_metrics"
+      ],
+      "narrow": [
+        "empty.separator_single_header_rule"
       ],
       "wide": [
         "conversation.no_standalone_role_label",
+        "empty.separator_single_header_rule",
         "wide.text_columns_aligned"
+      ],
+      "scrolled": [
+        "scrolled.metrics_footer_before",
+        "scrolled.metrics_footer_after"
       ],
       "help": [
         "help.commands_listed",
+        "main.separator_single_header_rule",
         "help.command_desc_column"
+      ],
+      "cost": [
+        "main.separator_single_header_rule"
       ],
       "input-edit": [
         "input_edit.typed_text_column"
       ]
     },
-    "regressed": {
-      "slash-menu": [
-        "slash.all_commands_listed",
-        "slash.each_command_once"
-      ]
-    },
+    "regressed": {},
     "only_after": {
       "empty": [
-        "empty.footer_workspace_only",
-        "main.separator_single_header_rule",
         "main.separator_header_rule_geometry"
       ],
       "conversation": [
-        "main.separator_single_header_rule",
-        "main.separator_header_rule_geometry",
-        "conversation.footer_metrics"
+        "main.separator_header_rule_geometry"
       ],
       "models-panel": [
         "models.panel_width_fits",
@@ -2671,39 +2679,20 @@
         "add_provider.panel_width_expected",
         "add_provider.panel_rows_not_overlapping"
       ],
-      "error": [
-        "error.footer_metrics"
-      ],
       "narrow": [
-        "empty.separator_single_header_rule",
         "empty.separator_header_rule_geometry"
       ],
       "wide": [
-        "empty.separator_single_header_rule",
         "empty.separator_header_rule_geometry"
       ],
-      "scrolled": [
-        "scrolled.metrics_footer_before",
-        "scrolled.metrics_footer_after"
-      ],
       "help": [
-        "main.separator_single_header_rule",
         "main.separator_header_rule_geometry"
       ],
       "cost": [
-        "main.separator_single_header_rule",
         "main.separator_header_rule_geometry"
       ]
     },
     "only_before": {
-      "empty": [
-        "empty.no_error_status",
-        "main.separator_two_rules"
-      ],
-      "conversation": [
-        "main.separator_two_rules",
-        "conversation.footer_ready"
-      ],
       "models-panel": [
         "models.panel_above_composer"
       ],
@@ -2712,48 +2701,29 @@
       ],
       "add-provider": [
         "add_provider.panel_above_composer"
-      ],
-      "error": [
-        "error.footer_failed"
-      ],
-      "narrow": [
-        "empty.separator_two_rules"
-      ],
-      "wide": [
-        "empty.separator_two_rules"
-      ],
-      "scrolled": [
-        "scrolled.hint_absent_before",
-        "scrolled.hint_present_after"
-      ],
-      "help": [
-        "main.separator_two_rules"
-      ],
-      "cost": [
-        "main.separator_two_rules"
       ]
     },
     "scenarios": [
       {
         "scenario": "empty",
-        "baseline": "11/15",
-        "after": "15/16",
-        "fixed": 2,
+        "baseline": "10/15",
+        "after": "16/16",
+        "fixed": 5,
         "regressed": 0
       },
       {
         "scenario": "conversation",
-        "baseline": "14/19",
+        "baseline": "13/19",
         "after": "20/20",
-        "fixed": 4,
+        "fixed": 6,
         "regressed": 0
       },
       {
         "scenario": "slash-menu",
-        "baseline": "12/14",
-        "after": "11/14",
-        "fixed": 1,
-        "regressed": 2
+        "baseline": "10/14",
+        "after": "14/14",
+        "fixed": 4,
+        "regressed": 0
       },
       {
         "scenario": "models-panel",
@@ -2785,51 +2755,51 @@
       },
       {
         "scenario": "streaming",
-        "baseline": "14/18",
+        "baseline": "12/18",
         "after": "18/18",
-        "fixed": 4,
+        "fixed": 6,
         "regressed": 0
       },
       {
         "scenario": "error",
-        "baseline": "13/14",
+        "baseline": "12/14",
         "after": "14/14",
-        "fixed": 1,
+        "fixed": 2,
         "regressed": 0
       },
       {
         "scenario": "narrow",
         "baseline": "19/20",
         "after": "21/21",
-        "fixed": 0,
+        "fixed": 1,
         "regressed": 0
       },
       {
         "scenario": "wide",
         "baseline": "18/21",
         "after": "22/22",
-        "fixed": 2,
+        "fixed": 3,
         "regressed": 0
       },
       {
         "scenario": "scrolled",
-        "baseline": "18/19",
+        "baseline": "17/19",
         "after": "19/19",
-        "fixed": 0,
+        "fixed": 2,
         "regressed": 0
       },
       {
         "scenario": "help",
         "baseline": "9/12",
         "after": "13/13",
-        "fixed": 2,
+        "fixed": 3,
         "regressed": 0
       },
       {
         "scenario": "cost",
         "baseline": "10/11",
         "after": "12/12",
-        "fixed": 0,
+        "fixed": 1,
         "regressed": 0
       },
       {

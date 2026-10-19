@@ -19,7 +19,7 @@
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 952e16"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 957c1f"
     },
     {
       "id": "main.capture_rows",
@@ -37,7 +37,7 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/sessions-panel/main.png size=159880"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/sessions-panel/main.png size=158873"
     },
     {
       "id": "sessions.title",
@@ -55,7 +55,7 @@
       "id": "sessions.session_id_visible",
       "desc": "session row carries a short session id",
       "ok": true,
-      "evidence": "▏ \"version\": \"0.1.125\" │▏ 读取 package.json 并总结 952e16ca │"
+      "evidence": "▏ \"version\": \"0.1.125\" │▏ 读取 package.json 并总结 957c1fe6 │"
     },
     {
       "id": "sessions.not_empty",

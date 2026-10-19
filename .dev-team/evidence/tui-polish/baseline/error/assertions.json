@@ -1,7 +1,7 @@
 {
   "scenario": "error",
-  "pass": 13,
-  "fail": 1,
+  "pass": 12,
+  "fail": 2,
   "checks": [
     {
       "id": "main.no_panic",
@@ -19,7 +19,7 @@
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 70aec9"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · e571c3"
     },
     {
       "id": "main.capture_rows",
@@ -37,7 +37,7 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/error/main.png size=74218"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/error/main.png size=73884"
     },
     {
       "id": "main.input_padded_from_left_edge",
@@ -70,9 +70,9 @@
       "evidence": "401 认证测试"
     },
     {
-      "id": "error.footer_failed",
-      "desc": "footer reports the failed turn",
-      "ok": true,
+      "id": "error.footer_metrics",
+      "desc": "footer stays the metrics row during a failed turn (no usage -> 上下文 only; failure in transcript)",
+      "ok": false,
       "evidence": "footer :: Turn failed: {\"error\": {\"message\": \"mock 401 unauthorized: invalid api key (audit scenario)\", \"type\": \"invalid_requ"
     },
     {

@@ -19,7 +19,7 @@
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · a0fad6"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 0bc26b"
     },
     {
       "id": "main.capture_rows",
@@ -37,7 +37,7 @@
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/add-provider/main.png size=137982"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/add-provider/main.png size=138314"
     },
     {
       "id": "add_provider.title",

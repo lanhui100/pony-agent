@@ -1,7 +1,7 @@
 {
   "scenario": "streaming",
-  "pass": 14,
-  "fail": 4,
+  "pass": 12,
+  "fail": 6,
   "checks": [
     {
       "id": "mid.no_panic",
@@ -19,7 +19,7 @@
       "id": "mid.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 61e1b0"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · c23d00"
     },
     {
       "id": "mid.capture_rows",
@@ -37,7 +37,7 @@
       "id": "mid.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/streaming/mid.png size=77907"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/streaming/mid.png size=77850"
     },
     {
       "id": "final.no_panic",
@@ -55,7 +55,7 @@
       "id": "final.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · 61e1b0"
+      "evidence": "widest row 0 width=118 cols=120 :: pony · pony-agent mock-alpha · c23d00"
     },
     {
       "id": "final.capture_rows",
@@ -73,17 +73,17 @@
       "id": "final.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/streaming/final.png size=140257"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/baseline/streaming/final.png size=140199"
     },
     {
-      "id": "streaming.mid_status_writing",
-      "desc": "footer shows the writing state while the stream is still arriving",
+      "id": "streaming.mid_status_generating",
+      "desc": "streaming active line shows the generating state while the footer is the metrics row",
       "ok": false,
-      "evidence": "footer :: Thinking..."
+      "evidence": "active_row :: | footer :: Thinking..."
     },
     {
       "id": "streaming.mid_active_elapsed",
-      "desc": "active line shows elapsed time next to the writing state",
+      "desc": "active line shows elapsed time next to the generating state",
       "ok": false,
       "evidence": "no elapsed line"
     },
@@ -95,19 +95,19 @@
     },
     {
       "id": "streaming.mid_not_finished",
-      "desc": "mid-stream capture is not the completed answer yet",
-      "ok": true,
+      "desc": "mid-stream capture is not the completed answer yet (footer is the metrics row)",
+      "ok": false,
       "evidence": "footer :: Thinking..."
     },
     {
       "id": "streaming.final_complete",
-      "desc": "final capture contains the terminal answer and ready footer",
-      "ok": true,
+      "desc": "final capture contains the terminal answer and the metrics footer",
+      "ok": false,
       "evidence": "footer :: Turn completed"
     },
     {
-      "id": "streaming.final_not_writing",
-      "desc": "writing status disappeared once the stream finished",
+      "id": "streaming.final_not_generating",
+      "desc": "transient generating status disappeared once the stream finished",
       "ok": true,
       "evidence": "footer :: Turn completed"
     }

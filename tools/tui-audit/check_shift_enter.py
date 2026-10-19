@@ -65,7 +65,7 @@ PLAIN_ENTER = b"\r"
 CTRL_C = b"\x03"
 LEAVE_ALT_SCREEN = b"\x1b[?1049l"
 CSI_RE = re.compile(r"\x1b\[([0-9;:?<>!=]*)([ -/]*)([@-~])")
-SUBMIT_MARKERS = ("思考中", "写入中", "Thinking", "Responding", "准备就绪中")
+SUBMIT_MARKERS = ("思考中", "生成中", "Thinking", "Responding", "准备就绪中")
 
 
 # ---------------------------------------------------------------------------
