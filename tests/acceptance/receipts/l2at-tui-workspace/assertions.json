@@ -1,0 +1,29 @@
+{
+  "chat_completions_requests": 2,
+  "tool_bearing_requests": 1,
+  "request_roles": [
+    [
+      "system",
+      "system",
+      "system",
+      "system",
+      "user"
+    ],
+    [
+      "system",
+      "system",
+      "system",
+      "system",
+      "user",
+      "assistant",
+      "tool"
+    ]
+  ],
+  "tool_message_counts": [
+    0,
+    1
+  ],
+  "last_tool_request_contains_project_marker": false,
+  "last_tool_request_contains_default_marker": true,
+  "last_tool_request_tool_preview": "{\n  \"abortedCount\": 0,\n  \"completedCount\": 2,\n  \"errorCount\": 0,\n  \"meta\": {\n    \"mode\": \"file\",\n    \"path\": \"package.json\",\n    \"query\": null\n  },\n  \"ok\": true,\n  \"partialCount\": 0,\n  \"permissionSummary\": {\n    \"childDecisions\": [\n      {\n        \"decisionSource\": \"child_execution_observed\",\n        \"verdict\": \"allow\"\n      },\n      {\n        \"decisionSource\": \"child_execution_observed\",\n        \"verdict\": \"allow\"\n      }\n    ],\n    \"hostMediated\": false,\n    \"requiresApproval\": false,\n    \"scopes\": [\n      \"workspace_read\"\n    ]\n  },\n  \"plan\": {\n    \"continueOnError\": true,\n    \"kind\": \"workspace_gather_context\",\n    \"parallel\": true,\n    \"steps\": [\n      {\n        \"arguments\": {\n          \"description\": \"gather 内部子调用\",\n          \"path\": \"package.json\"\n        },\n        \"name\": \"workspa"
+}

@@ -1,0 +1,2 @@
+no server running on /tmp/tmux-1000/tui-ws-2444036
+no server running on /tmp/tmux-1000/tui-ws-2444036

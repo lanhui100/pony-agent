@@ -1,0 +1,42 @@
+{
+  "suite": "l2at-tui-workspace",
+  "wave": "wave-38",
+  "status": "RED",
+  "verdict": "RED",
+  "command": "bash tests/acceptance/l2at-tui-workspace.sh",
+  "exit_code": 1,
+  "pass": 3,
+  "fail": 4,
+  "total": 7,
+  "failure_kind": "AssertionError (SUT 行为错误：工具执行根 = 注册表默认工作区 ~/pony_agent)",
+  "failures": [
+    {
+      "assertion": "A1",
+      "detail": "A1 屏幕未出现 TUI_WORKSPACE_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具未读取启动目录的 package.json）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt"
+    },
+    {
+      "assertion": "A2",
+      "detail": "A2 屏幕出现 DEFAULT_WS_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具落到了注册表默认工作区 ~/pony_agent）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt"
+    },
+    {
+      "assertion": "A4",
+      "detail": "A4 最后一次 tool 请求的工具结果不含 TUI_WORKSPACE_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具执行根不是启动目录，见 assertions.json）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt"
+    },
+    {
+      "assertion": "A4b",
+      "detail": "A4b 最后一次 tool 请求的工具结果含 DEFAULT_WS_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（落到默认工作区 ~/pony_agent）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt"
+    }
+  ],
+  "observations": {
+    "chat_completions_requests": 2,
+    "tool_bearing_requests": 1,
+    "last_tool_request_contains_project_marker": false,
+    "last_tool_request_contains_default_marker": true,
+    "tui_exit_code": "0"
+  },
+  "generated_at": "2026-10-19T18:15:23"
+}

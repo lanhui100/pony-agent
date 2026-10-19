@@ -1,0 +1,157 @@
+{
+  "wave": "wave-38",
+  "task": "task-2 / L2-T + L2-AT 冻结验收测试（红相）",
+  "owner": "test-agent",
+  "status": "RED",
+  "verdict": "RED",
+  "generated_at": "2026-10-19T18:15:16",
+  "contract": ".dev-team/contract-matrix-tui-workspace.md §2（E1–E7 / AT1–AT3 / 真实 TUI E2E）",
+  "l2t": {
+    "command": "cargo test -p pony-agent-core --test wave38-tui-workspace-contract",
+    "exit_code": 101,
+    "total": 10,
+    "passed": 1,
+    "failed": 9,
+    "passing_tests": [
+      "e7_default_tui_state_workspace_is_canonical_cwd"
+    ],
+    "failure_root_cause": "unimplemented!: wave38 R1.1 ensure_workspace_for_root / R1.4 build_turn_input 空桩",
+    "evidence": ".dev-team/evidence/wave38/red-rust.log"
+  },
+  "l2at": {
+    "command": "bash tests/acceptance/l2at-tui-workspace.sh",
+    "exit_code": 1,
+    "verdict": "RED",
+    "pass": 3,
+    "fail": 4,
+    "total": 7,
+    "chat_completions_requests": 2,
+    "tool_bearing_requests": 1,
+    "last_tool_request_contains_project_marker": false,
+    "last_tool_request_contains_default_marker": true,
+    "evidence": ".dev-team/evidence/wave38/red-e2e.log",
+    "receipts_dir": "tests/acceptance/receipts/l2at-tui-workspace"
+  },
+  "failures": [
+    {
+      "test": "e6_build_turn_input_propagates_active_workspace_id",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/tests/../src/bin/tui.rs:1256:5",
+      "exception": "not implemented: wave38 R1.4 build_turn_input: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "e3_ensure_returns_existing_record_untouched",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/src/agent/workspace.rs:276:5",
+      "exception": "not implemented: wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "at1_readonly_home_never_panics",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/src/agent/workspace.rs:276:5",
+      "exception": "not implemented: wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "e1_ensure_new_root_registers_normalized_record",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/src/agent/workspace.rs:276:5",
+      "exception": "not implemented: wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "e4_duplicate_basename_gets_deterministic_suffix",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/src/agent/workspace.rs:276:5",
+      "exception": "not implemented: wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "at2_same_basename_dedup_is_order_deterministic",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/src/agent/workspace.rs:276:5",
+      "exception": "not implemented: wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "e2_ensure_is_idempotent_for_same_root",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/src/agent/workspace.rs:276:5",
+      "exception": "not implemented: wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "at3_overlong_directory_name_is_truncated_but_root_is_exact",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/src/agent/workspace.rs:276:5",
+      "exception": "not implemented: wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "e5_invalid_root_returns_err_without_mutating_records",
+      "kind": "panic",
+      "location": "crates/pony-agent-core/src/agent/workspace.rs:276:5",
+      "exception": "not implemented: wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现",
+      "evidence": ".dev-team/evidence/wave38/red-rust.log"
+    },
+    {
+      "test": "A1",
+      "kind": "AssertionError",
+      "exception": "A1 屏幕未出现 TUI_WORKSPACE_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具未读取启动目录的 package.json）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt + mock-requests.jsonl + assertions.json"
+    },
+    {
+      "test": "A2",
+      "kind": "AssertionError",
+      "exception": "A2 屏幕出现 DEFAULT_WS_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具落到了注册表默认工作区 ~/pony_agent）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt + mock-requests.jsonl + assertions.json"
+    },
+    {
+      "test": "A4",
+      "kind": "AssertionError",
+      "exception": "A4 最后一次 tool 请求的工具结果不含 TUI_WORKSPACE_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具执行根不是启动目录，见 assertions.json）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt + mock-requests.jsonl + assertions.json"
+    },
+    {
+      "test": "A4b",
+      "kind": "AssertionError",
+      "exception": "A4b 最后一次 tool 请求的工具结果含 DEFAULT_WS_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（落到默认工作区 ~/pony_agent）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt + mock-requests.jsonl + assertions.json"
+    }
+  ],
+  "artifacts": {
+    "rust_test_file": "crates/pony-agent-core/tests/wave38-tui-workspace-contract.rs",
+    "e2e_script": "tests/acceptance/l2at-tui-workspace.sh",
+    "red_rust_log": ".dev-team/evidence/wave38/red-rust.log",
+    "red_e2e_log": ".dev-team/evidence/wave38/red-e2e.log",
+    "e2e_receipts": "tests/acceptance/receipts/l2at-tui-workspace/",
+    "e2e_screen": "tests/acceptance/receipts/l2at-tui-workspace/screen-final.txt",
+    "e2e_mock_requests": "tests/acceptance/receipts/l2at-tui-workspace/mock-requests.jsonl",
+    "e2e_exit_code": "tests/acceptance/receipts/l2at-tui-workspace/tui-exit-code.txt"
+  },
+  "red_purity": {
+    "tool": "/home/dm/.agents/skills/dev-team/scripts/dev-red-purity.py",
+    "runs": [
+      {
+        "input": ".dev-team/evidence/wave38/l2at-red-result.json",
+        "command": "python3 /home/dm/.agents/skills/dev-team/scripts/dev-red-purity.py .dev-team/evidence/wave38/l2at-red-result.json --json-out .dev-team/evidence/wave38/red-purity-l2at.json",
+        "exit_code": 0,
+        "verdict": "PURE_RED (valid)",
+        "report": ".dev-team/evidence/wave38/red-purity-l2at.json",
+        "log": ".dev-team/evidence/wave38/red-purity-l2at.log"
+      },
+      {
+        "input": ".dev-team/red-receipt.json",
+        "command": "python3 /home/dm/.agents/skills/dev-team/scripts/dev-red-purity.py .dev-team/red-receipt.json --json-out .dev-team/evidence/wave38/red-purity-receipt.json",
+        "exit_code": 0,
+        "verdict": "PURE_RED (valid)",
+        "report": ".dev-team/evidence/wave38/red-purity-receipt.json",
+        "log": ".dev-team/evidence/wave38/red-purity-receipt.log"
+      }
+    ],
+    "note": "两次判定均为 EXIT 0（有效纯净红相：失败原因来自 SUT 空桩 panic 与 SUT 行为断言，非 harness 超时/语法错误）。"
+  },
+  "updated_at": "2026-10-19T18:15:29"
+}
