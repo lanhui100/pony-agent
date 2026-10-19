@@ -1524,7 +1524,7 @@
         "L3-A": "PASS (review-wave38-a.json)",
         "L3-B": "FAIL 3 findings → delta D1/D2/D3 → PASS (review-wave38-b2.json)",
         "L3-P": "FAIL Q3 → D4 adjudication → PASS (review-wave38-p2.json)",
-        "L3-A2": "did not land within budget (subagent timeout); initial L3-A PASS + L3-B2 PASS cover correctness"
+        "L3-A2": "PASS (review-wave38-a2.json, landed after closure commit)"
       },
       "adjudications": {
         "D3": "workspace registry growth without TTL = explicit design, not defect",
