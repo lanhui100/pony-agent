@@ -31,7 +31,7 @@
       "id": "mid.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2249"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2227"
     },
     {
       "id": "mid.artifact_png",
@@ -67,7 +67,7 @@
       "id": "final.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2700"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2678"
     },
     {
       "id": "final.artifact_png",

@@ -31,7 +31,7 @@
       "id": "empty.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.ansi size=3945"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.ansi size=4044"
     },
     {
       "id": "empty.artifact_png",
@@ -43,13 +43,13 @@
       "id": "empty.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 36 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 37 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 36 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 37 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.no_panic",
@@ -79,7 +79,7 @@
       "id": "conversation.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3400"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3378"
     },
     {
       "id": "conversation.artifact_png",
@@ -91,13 +91,13 @@
       "id": "conversation.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 36 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 37 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 36 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 37 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.header",

@@ -2314,13 +2314,14 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let rule_rect = Rect { y: content.y + 1, height: 1, ..content };
     f.render_widget(Paragraph::new(hairline(content.width as usize)), rule_rect);
 
-    // ── 底部区块尺寸：色带（1 行顶部内边距 + 输入区）+ 间距行 + 指标行 ──────
+    // ── 底部区块尺寸：色带（1 行顶部内边距 + 输入区）+ 紧贴的指标行 ──────────
     let composer_text_width = content.width.saturating_sub(3).max(1) as usize;
     let visual_lines = layout_input(&state.input_buffer, composer_text_width).len() as u16;
     // wave-39 v3 R9：正文 + 1 行呼吸（单行输入 = 2 行），最多 6 行；色带 = input_h + 顶部内边距。
+    // wave-39 v4 R13：删除独立 CANVAS 间距行，input_h 末行即色带内呼吸行 → 间距视觉 2 行收为 1 行。
     let input_h = (visual_lines + 1).clamp(2, 6);
     let band_h = input_h + 1;
-    let bottom_h = input_h + 3;
+    let bottom_h = input_h + 2;
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
 
     let chat_top = content.y + 3; // header + rule + 1 行呼吸
@@ -2584,7 +2585,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         );
     }
 
-    // ── Composer：整宽表面色带 = 1 行顶部内边距 + 输入区；下方间距行 + 指标行 ──
+    // ── Composer：整宽表面色带 = 1 行顶部内边距 + 输入区；指标行紧贴其下 ──────
     // 色带与内容列严格同宽：与 header 发丝线共用同一条左右基准。
     let band_x = content.x;
     let band_w = content.width;
@@ -2597,6 +2598,18 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     // 浮层态连 composer 一起收起：画面只留 header + 浮层，键位提示由浮层自己承担。
     if state.mode == InteractionMode::Normal {
         fill(f, band, theme::SURFACE);
+        // wave-39 v4 R13：色带末行是呼吸行（整行空白）。v4 起它同时是「输入正文 → 指标行」之间
+        // 唯一的 1 行视觉间距；底色按色带 content 宽铺设，左右沟槽列保持 CANVAS。
+        let breathing_rect = Rect {
+            x: content.x,
+            y: bottom_top.saturating_add(band_h).saturating_sub(1),
+            width: content.width,
+            height: 1,
+        };
+        f.render_widget(
+            Block::default().style(Style::default().bg(theme::SURFACE)),
+            breathing_rect,
+        );
 
         let input_rect = Rect {
             x: content.x,
@@ -2606,17 +2619,17 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         };
         render_input(f, input_rect, state);
 
-        // wave-39 v3 R9/R10：色带下方隔 1 行间距（CANVAS 空白），再画指标行；
+        // wave-39 v4 R13：指标行紧贴色带下方（删除 v3 独立 CANVAS 间距行）；
         // 指标行不在色带内：整行 GHOST 前景 + CANVAS 背景，绝不写出内容列。
         let metrics_rect = Rect {
             x: content.x,
-            y: bottom_top.saturating_add(band_h).saturating_add(1),
+            y: bottom_top.saturating_add(band_h),
             width: content.width,
             height: 1,
         };
         f.render_widget(
             Paragraph::new(metrics_line(state, content.width as usize))
-                .style(Style::default().bg(theme::CANVAS)),
+                .style(Style::default().bg(theme::CANVAS).fg(theme::GHOST)),
             metrics_rect,
         );
     }

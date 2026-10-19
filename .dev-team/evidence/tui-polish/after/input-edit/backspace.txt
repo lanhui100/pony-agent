@@ -28,7 +28,7 @@
 
 
 
-   › abX
 
+   › abX
 
      /home/dm/pony-agent

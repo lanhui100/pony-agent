@@ -1,6 +1,6 @@
 bash-5.2$ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy -u NODE_USE_ENV_PROXY
--u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.t5Z5Yt/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.t5Z5Yt/iso-ctrl-c/x
-dg-data XDG_CACHE_HOME=/tmp/tui-audit.t5Z5Yt/iso-ctrl-c/xdg-cache HOME=/tmp/tui-audit.t5Z5Yt/iso-ctrl-c/home LANG=en_US.
+-u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.HaJAV8/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.HaJAV8/iso-ctrl-c/x
+dg-data XDG_CACHE_HOME=/tmp/tui-audit.HaJAV8/iso-ctrl-c/xdg-cache HOME=/tmp/tui-audit.HaJAV8/iso-ctrl-c/home LANG=en_US.
 UTF-8 /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$?
 AUDIT_EXIT=0
 bash-5.2$

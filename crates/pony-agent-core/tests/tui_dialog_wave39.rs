@@ -789,20 +789,21 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
     state.total_cache_hit_tokens = 600;
     state.last_context_tokens = 50_000;
     state.context_window_tokens = 200_000;
+    let (cx, cw) = content_geometry(110);
 
     // Act
     let buf = screen(&mut state, 110, 30);
 
-    // Assert 1（R10）：指标行整行 GHOST 前景（字形格）+ CANVAS 背景（宽字符续格除外）
+    // Assert 1（R10）：指标行**仅在内容列内**断言 —— 非续格 bg=CANVAS、字形 fg=GHOST。
     //
-    // 用例缺陷修正（v3 履约插桩发现）：ratatui 0.29 `Buffer::diff` 会把宽字符右侧续格标记
-    // 为 to_skip，TestBackend 在首帧不会为它写入样式，该格仍是 `Cell::default`（fg/bg=Reset）；
-    // 而 `ui()` 本身已把整行 bg 填为 CANVAS、整行字形 fg 设为 GHOST。续格由宽字符渲染器
-    // 覆盖，不承载独立的 fg/bg 契约，因此在遍历时按「前一格 symbol 显示宽度 == 2」跳过续格；
-    // GHOST/CANVAS 语义与逐格严格度不变（非续格仍然逐格断言）。
+    // 用例缺陷修正（v4b）：原实现遍历终端整行，迫使实现把呼吸行 SURFACE 铺满整行，
+    // 会在对话框底部形成比对话框更宽的横条，破坏 ADR 0038 的沟槽纪律。指标行/呼吸行
+    // 始终与内容列同宽，故只断言 `content.x..content.x+content.width`。
+    // （v3 test-fix 的宽字符续格跳过逻辑保留：ratatui 0.29 `Buffer::diff` 对续格置 to_skip，
+    // TestBackend 首帧该格为 `Cell::default`，不承载独立 fg/bg 契约。）
     let mut glyph_cells = 0usize;
     let mut skip_continuation = false;
-    for x in 0..buf.area.width {
+    for x in cx..cx + cw {
         if skip_continuation {
             skip_continuation = false;
             continue;
@@ -810,7 +811,7 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
         let cell = &buf[(x, 29)];
         assert_eq!(
             cell.bg, CANVAS,
-            "指标行第 {x} 列背景必须是 CANVAS（非色带 SURFACE），实际 {:?}",
+            "指标行内容列第 {x} 列背景必须是 CANVAS（非色带 SURFACE），实际 {:?}",
             cell.bg
         );
         let symbol = cell.symbol();
@@ -819,7 +820,7 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
             assert_eq!(
                 cell.fg,
                 GHOST,
-                "指标行第 {x} 列字形前景必须是 GHOST Rgb(104,98,90)，实际 {:?}（symbol={:?}）",
+                "指标行内容列第 {x} 列字形前景必须是 GHOST Rgb(104,98,90)，实际 {:?}（symbol={:?}）",
                 cell.fg,
                 symbol
             );
@@ -836,20 +837,39 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
         "指标行必须至少渲染一个字形（workspace 标签 / 指标段）"
     );
 
-    // Assert 2（R13/R14）：y=28 是**色带内**呼吸行 —— 逐格空白且 bg=SURFACE。
-    // v4 已删除独立 CANVAS 间距行（宽字符无涉，本行逐格严格断言）。
-    for x in 0..buf.area.width {
+    // Assert 2（R13/R14）：y=28 是**色带内**呼吸行 —— **内容列**逐格空白且 bg=SURFACE。
+    // v4 已删除独立 CANVAS 间距行；但色带与内容列同宽，不得因呼吸行把 SURFACE 抹到沟槽。
+    for x in cx..cx + cw {
         let cell = &buf[(x, 28)];
         assert!(
             cell.symbol().trim().is_empty(),
-            "色带呼吸行第 {x} 列不得有字符，实际 {:?}",
+            "色带呼吸行内容列第 {x} 列不得有字符，实际 {:?}",
             cell.symbol()
         );
         assert_eq!(
             cell.bg, SURFACE,
-            "色带呼吸行第 {x} 列背景必须是 SURFACE（v4：间距行已删除，呼吸行属于色带），实际 {:?}",
+            "色带呼吸行内容列第 {x} 列背景必须是 SURFACE（v4：呼吸行属于色带），实际 {:?}",
             cell.bg
         );
+    }
+
+    // Assert 3（ADR 0038 沟槽纪律）：沟槽列（0/1/W-2/W-1）在呼吸行（28）与指标行（29）
+    // 必须保持 CANVAS 背景且无字形 —— 色带/指标不得越出内容列。
+    assert_eq!(cx, 3, "110×30 的内容列起点应为 3（GUTTER=3）");
+    for x in [0u16, 1, buf.area.width - 2, buf.area.width - 1] {
+        for y in [28u16, 29u16] {
+            let cell = &buf[(x, y)];
+            assert!(
+                cell.symbol().trim().is_empty(),
+                "沟槽列 x={x}（y={y}）不得有字形，实际 {:?}",
+                cell.symbol()
+            );
+            assert_eq!(
+                cell.bg, CANVAS,
+                "沟槽列 x={x}（y={y}）背景必须是 CANVAS（呼吸行/指标行不得铺满整行），实际 {:?}",
+                cell.bg
+            );
+        }
     }
 }
 
