@@ -1,16 +1,11 @@
 {
   "wave": "wave-38",
   "suite": "l2at-tui-workspace",
-  "verdict": "RED",
-  "pass": 3,
-  "fail": 4,
+  "verdict": "GREEN",
+  "pass": 7,
+  "fail": 0,
   "total": 7,
-  "failed_assertions": [
-    "A1 屏幕未出现 TUI_WORKSPACE_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具未读取启动目录的 package.json）",
-    "A2 屏幕出现 DEFAULT_WS_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具落到了注册表默认工作区 ~/pony_agent）",
-    "A4 最后一次 tool 请求的工具结果不含 TUI_WORKSPACE_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（工具执行根不是启动目录，见 assertions.json）",
-    "A4b 最后一次 tool 请求的工具结果含 DEFAULT_WS_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590（落到默认工作区 ~/pony_agent）"
-  ],
-  "generated_at": "2026-10-19T18:14:12",
+  "failed_assertions": [],
+  "generated_at": "2026-10-19T18:20:08",
   "receipts": "/home/dm/pony-agent/tests/acceptance/receipts/l2at-tui-workspace"
 }

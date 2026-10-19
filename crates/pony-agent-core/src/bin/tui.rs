@@ -239,9 +239,8 @@ pub struct TuiState {
     pub gateway_url: String,
     pub workspace: PathBuf,
     /// wave-38 R1.4：启动目录登记后的活跃 workspace id；`None` = 沿用注册表默认工作区。
-    /// Executor 接线时由 `control_plane.ensure_workspace_for_root(...)` 填充，并作为
+    /// `main` 在 `control_plane` 构造后用 `ensure_workspace_for_root` 填充，并作为
     /// `TurnInput.workspace_id` 的唯一来源。
-    #[allow(dead_code)] // wave38 空桩期（未接线），Executor 接线后移除
     pub active_workspace_id: Option<String>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
@@ -1235,25 +1234,35 @@ fn sync_state_with_registry(state: &mut TuiState) {
     }
 }
 
-/// wave-38 R1.4 可测接缝（空桩）：由 `TuiState` 组装发送给 `start_turn_stream` 的唯一 `TurnInput`。
+/// wave-38 R1.4 可测接缝：由 `TuiState` 组装发送给 `start_turn_stream` 的唯一 `TurnInput`。
 ///
-/// 契约口径（Executor 实现时逐字对齐现发送点，勿增删字段语义）：
+/// 契约口径（逐字对齐现发送点，勿增删字段语义）：
 /// - `workspace_id` 取 `state.active_workspace_id.clone()`（本期修复的唯一目的字段）；
 /// - 其余字段与现发送点一致：`message` 透传、`display_message: None`、
 ///   `provider_id: Some(provider_id)`、`model_id: Some(model_id)`、
 ///   `reasoning_effort: state.reasoning_effort.clone()`、`workspace_mode: None`、
 ///   `session_id: Some(state.session_id.clone())`、`node_id: None`、
 ///   `history`/`images` 为空 Vec、`plan_execution_approval: None`。
-///
-/// wave-38 空桩：函数体仅 `unimplemented!`；发送点接线属 Executor 职责，本期不接线。
-#[allow(dead_code, unused_variables)] // wave38 空桩期（未接线），Executor 接线后移除
 pub fn build_turn_input(
     state: &TuiState,
     message: String,
     provider_id: String,
     model_id: String,
 ) -> TurnInput {
-    unimplemented!("wave38 R1.4 build_turn_input: 待 Executor 实现")
+    TurnInput {
+        message,
+        display_message: None,
+        provider_id: Some(provider_id),
+        model_id: Some(model_id),
+        reasoning_effort: state.reasoning_effort.clone(),
+        workspace_mode: None,
+        session_id: Some(state.session_id.clone()),
+        node_id: None,
+        history: Vec::new(),
+        images: Vec::new(),
+        workspace_id: state.active_workspace_id.clone(),
+        plan_execution_approval: None,
+    }
 }
 
 fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &str) -> HostControlPlane {
@@ -2785,6 +2794,13 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     // wave-35c：启动同步 current_provider_id / model 与注册表一致（build_control_plane 之前）。
     sync_state_with_registry(&mut state);
     let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
+    // wave-38 R1.4：把启动目录登记为 workspace，并作为本会话后续 turn 的 workspace 归属。
+    // 失败不 panic、不退出：仅告警并回退 None（保持既有默认工作区行为）。
+    state.active_workspace_id = control_plane
+        .ensure_workspace_for_root(&state.workspace.display().to_string())
+        .map(|record| record.id)
+        .map_err(|error| eprintln!("[pony-tui] 启动目录登记为 workspace 失败：{error}"))
+        .ok();
 
     let (tx, rx): (Sender<UiEvent>, Receiver<UiEvent>) = channel();
 
@@ -3456,33 +3472,23 @@ fn tui_event_loop(
                                 *current_turn_id.lock().unwrap() = Some(turn_id_str.clone());
 
                                 let cp = control_plane.clone();
-                                let sess_id = state.session_id.clone();
                                 // wave-36b：发送口径与 /models 面板来源一致（resolve_active_provider_id），
                                 // 避免 state.current_provider_id 漂移导致 base_url/key 错配 401。
                                 let prov_id = resolve_active_provider_id(&state)
                                     .unwrap_or_else(|| state.current_provider_id.clone());
                                 let mdl_id = state.model.clone();
                                 let tx_stream = tx.clone();
+                                // wave-38 R1.4：唯一发送点改用 build_turn_input（携带
+                                // workspace_id / reasoning_effort / session_id）。
+                                // 在 spawn 前组装，避免把整个 TuiState move 进线程。
+                                let turn_input = build_turn_input(&state, input, prov_id, mdl_id);
 
                                 std::thread::spawn(move || {
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                                     let sink = TuiTurnSink { tx: tx_stream };
                                     let cmd = StartTurnStreamCommand {
                                         turn_id: turn_id_str,
-                                        input: TurnInput {
-                                            message: input,
-                                            display_message: None,
-                                            provider_id: Some(prov_id),
-                                            model_id: Some(mdl_id),
-                                            reasoning_effort: state.reasoning_effort.clone(),
-                                            workspace_mode: None,
-                                            session_id: Some(sess_id),
-                                            node_id: None,
-                                            history: Vec::new(),
-                                            images: Vec::new(),
-                                            workspace_id: None,
-        plan_execution_approval: None,
-                                        },
+                                        input: turn_input,
                                     };
                                     cp.start_turn_stream(&sink, cmd);
                                 });

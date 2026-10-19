@@ -9,7 +9,7 @@
      我先读取 package.json 确认启动目录。
    ✓ 读取 (Read) · 读取 package.json 确认工作区
 
-     已读取工作区文件，文件中的标记是：DEFAULT_WS_MARKER_42ccafc4-2623-440b-b9ff-fedf7e3da590 。任务完成。
+     已读取工作区文件，文件中的标记是：TUI_WORKSPACE_MARKER_13c553d1-8bc9-4558-a4a4-b2a49cff650d 。任务完成。
 
 
 

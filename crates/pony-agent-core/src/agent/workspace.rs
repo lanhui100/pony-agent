@@ -266,14 +266,64 @@ pub fn create_workspace_entry(
 ///   按 char 截断到 ≤64 字符；与既有记录重名（不同 root）→ 依次追加 `" (2)"`…`" (99)"`；
 ///   全部占用则 `Err`；
 /// - 不改动既有 default 记录、不做任何迁移（R1.5 语义边界）。
-///
-/// wave-38 空桩：函数体仅 `unimplemented!`，实现由 Executor 填充。
-#[allow(dead_code, unused_variables)] // wave38 空桩期（未接线），Executor 接线后移除
 pub fn ensure_workspace_for_root(
     records: &mut Vec<WorkspaceRecord>,
     root_path: &str,
 ) -> Result<WorkspaceRecord, String> {
-    unimplemented!("wave38 R1.1 ensure_workspace_for_root: 待 Executor 实现")
+    let canonical = normalize_workspace_root(root_path)?;
+    // 幂等优先：同 root 命中既有记录 → 原样返回（不新增、不改名、不迁移）。
+    if let Some(existing) = find_workspace_by_root(records, &canonical) {
+        return Ok(existing);
+    }
+    let base = display_name_from_root(&canonical);
+    let name = unique_display_name(records, &base)?;
+    // 名称/root → id 的生成与校验单源复用 create_workspace_entry（入参 root 已是 canonical）。
+    create_workspace_entry(records, &name, &canonical)
+}
+
+/// 由 canonical root 派生显示名：`file_name`；空/非 UTF-8/根路径（如 `/`）→ `"workspace"`；
+/// 按 char 截断到 `MAX_DISPLAY_NAME_CHARS`。纯函数（无 IO），供 ensure 复用。
+fn display_name_from_root(canonical_root: &str) -> String {
+    let candidate = Path::new(canonical_root)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("workspace");
+    let truncated: String = candidate.chars().take(MAX_DISPLAY_NAME_CHARS).collect();
+    if truncated.trim().is_empty() {
+        "workspace".to_string()
+    } else {
+        truncated
+    }
+}
+
+/// 为 `base` 分配注册表内唯一的显示名：原名可用则原名；与既有记录重名（不同 root）→
+/// 依次追加 `" (2)"`…`" (99)"`（追加后仍需 ≤64 char，必要时先截断 base）；全部占用 → `Err`。
+fn unique_display_name(records: &[WorkspaceRecord], base: &str) -> Result<String, String> {
+    let trimmed = base.trim();
+    let base: String = if trimmed.is_empty() {
+        "workspace".to_string()
+    } else {
+        trimmed.chars().take(MAX_DISPLAY_NAME_CHARS).collect()
+    };
+    if !records.iter().any(|record| record.name == base) {
+        return Ok(base);
+    }
+    for ordinal in 2..=99usize {
+        let suffix = format!(" ({ordinal})");
+        let keep = MAX_DISPLAY_NAME_CHARS
+            .saturating_sub(suffix.chars().count())
+            .max(1);
+        let truncated: String = base.chars().take(keep).collect();
+        let candidate = format!("{truncated}{suffix}");
+        if !records.iter().any(|record| record.name == candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "无法为 workspace 分配唯一显示名：{base:?} 的 (2)-(99) 去重后缀均已被占用"
+    ))
 }
 
 /// 重命名工作区：仅改显示名；id 与 root 不变。校验规则与 create 一致，
