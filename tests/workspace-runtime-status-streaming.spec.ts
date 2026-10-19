@@ -48,10 +48,10 @@ describe("Workspace Runtime Status Streaming Behavior", () => {
       }
     );
 
-    // Wave-14 契约（§8 C14-1）：状态条在运行期间始终可见（含流式阶段），data-visible="true"
+    // 优化3：agent 消息正文 streaming 时，底部状态条应平滑隐藏 (data-visible="false")
     const statusSlot = wrapper.find('[data-testid="workspace-runtime-status-slot"]');
     expect(statusSlot.exists()).toBe(true);
-    expect(statusSlot.attributes("data-visible")).toBe("true");
+    expect(statusSlot.attributes("data-visible")).toBe("false");
 
     wrapper.unmount();
   }, 15000);

@@ -999,21 +999,49 @@ const shouldShowAgentRuntimeStatus = computed(() => {
 });
 
 /**
- * Wave-11 契约 §2.3/§2.4 + wave-11.2 F1（mode-aware）+ wave-11.4 F7（回归修复）：
- * 槽位常驻不卸载，仅以 data-visible 切换可见性。
- * 仅 `responding` 与 `thinking` 两种 mode 具备隐藏资格：
- *  - 推理模型场景下 `reasoningContent` 常驻 → status.ts 优先返回 `thinking`，
- *    若只放行 `responding`，整个正文流式期间槽位会恒可见（R3/M2 失效）→ 故一并放行 `thinking`；
- *  - 其余 mode（connecting/error/waiting_approval/retrying/tool_drafting/executing_tool）
- *    一律 data-visible="true" —— 例如 sessionOperation="initializing" 且 messages 里残留
- *    pending assistant + 内容时，必须仍显示「正在加载最近对话…」。
- * 放行后仍需同时满足：无 running/planned 工具活动 且 最后一个可见 turn 的 assistant 为
- * pending 且已有可见流式内容（无正文的 `thinking` = 「思考中」保持可见）。
+ * 需求3优化：agent消息stream时，底部的状态消息无需显示。
+ * 当有活跃工具执行/等待审批/会话操作/错误态时，保持可见；
+ * 当处于纯回复/思考流式输出正文时，平滑隐藏底部状态条，避免与正在流式的内容视觉竞争和抖动。
  */
 const isRuntimeStatusVisible = computed(() => {
-  // wave-14（用户裁定 A）：只要存在运行态/会话操作状态就始终可见（含最终回答 streaming）。
-  // 防跳动不再依赖隐藏，而由「消息流最下方、随消息流滚动」的落位 + 相对稳定断言保证。
-  return Boolean(agentRuntimeStatus.value);
+  if (!agentRuntimeStatus.value) {
+    return false;
+  }
+
+  // 会话全局操作（如切换中、初始化中）或错误态，必须显示
+  if (sessionOperation.value || agentRuntimeStatus.value.mode === "error") {
+    return true;
+  }
+
+  // 工具执行或等待授权等高优先级交互模式，必须显示
+  if (
+    agentRuntimeStatus.value.mode === "executing_tool" ||
+    agentRuntimeStatus.value.mode === "tool_drafting" ||
+    agentRuntimeStatus.value.mode === "waiting_approval" ||
+    agentRuntimeStatus.value.mode === "retrying"
+  ) {
+    return true;
+  }
+
+  const hasActiveToolActivity = runtimeStore.toolActivities.some(
+    (activity) => activity.status === "running" || activity.status === "planned"
+  );
+  if (hasActiveToolActivity) {
+    return true;
+  }
+
+  // 检查最后一个可见轮次的 assistant 消息：如果正在 stream 且已有内容展示，则隐藏状态条
+  const latestTurn = visibleTurns.value[visibleTurns.value.length - 1] ?? null;
+  const assistant = latestTurn?.assistant ?? null;
+  if (assistant && assistant.status === "pending") {
+    const hasStreamingVisibleContent =
+      assistantHasVisibleContent(assistant) || Boolean(assistant.content?.trim());
+    if (hasStreamingVisibleContent) {
+      return false;
+    }
+  }
+
+  return true;
 });
 
 function hasPendingAssistantPresentationWork() {
@@ -1895,11 +1923,15 @@ watch(
   }
 }
 
-/* Wave-11 §2.3/§2.6：槽位常驻不卸载，仅以 opacity + translateY(≤4px) 200ms ease-out 过渡显隐；
-   translateY 施加在内层，保证槽位自身视口 Y 恒定（M1/M4 极差 ≤ 1px）。 */
+/* Wave-11 §2.3/§2.6 + 优化1：底部状态行下移采用硬件加速的平滑过渡，并在出现时平滑淡入 */
+.runtime-status-row {
+  transition: transform 240ms cubic-bezier(0.23, 1, 0.32, 1);
+  will-change: transform;
+}
+
 .runtime-status-slot {
   transition:
-    opacity 200ms ease-out,
+    opacity 200ms cubic-bezier(0.23, 1, 0.32, 1),
     visibility 0s linear 200ms;
 }
 
@@ -1907,7 +1939,7 @@ watch(
   opacity: 1;
   visibility: visible;
   transition:
-    opacity 200ms ease-out,
+    opacity 200ms cubic-bezier(0.23, 1, 0.32, 1),
     visibility 0s linear 0s;
 }
 
@@ -1918,7 +1950,7 @@ watch(
 
 .runtime-status-slot-inner {
   transform: translateY(0);
-  transition: transform 200ms ease-out;
+  transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .runtime-status-slot-inner-hidden {

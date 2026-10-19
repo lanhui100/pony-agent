@@ -360,10 +360,10 @@ const toolIconByCanonicalName: Record<string, any> = {
           v-if="event.kind === 'reasoning'"
           :open="shouldOpenReasoningBlock(event.assistant)"
           v-motion
-          :initial="{ opacity: 0, y: 6 }"
+          :initial="{ opacity: 0, y: 4 }"
           :animate="{ opacity: 1, y: 0 }"
-          :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
-          class="conversation-disclosure conversation-reasoning-panel group p-0"
+          :transition="{ duration: 0.16, ease: 'easeOut' }"
+          class="conversation-disclosure conversation-reasoning-panel group p-0 transition-item-enter"
           style="contain: layout;"
         >
           <summary class="conversation-disclosure-summary">
@@ -409,10 +409,10 @@ const toolIconByCanonicalName: Record<string, any> = {
         <div
           v-else-if="event.kind === 'tools'"
           v-motion
-          :initial="{ opacity: 0, y: 6 }"
+          :initial="{ opacity: 0, y: 4 }"
           :animate="{ opacity: 1, y: 0 }"
-          :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
-          class="conversation-tool-panel space-y-0.5"
+          :transition="{ duration: 0.16, ease: 'easeOut' }"
+          class="conversation-tool-panel space-y-0.5 transition-item-enter"
         >
           <template v-for="tool in event.tools" :key="tool.id">
             <!-- PA-114: Ask 工具行渲染专属交互卡片，其余行保持通用渲染（F1-4）。 -->
@@ -775,12 +775,27 @@ const toolIconByCanonicalName: Record<string, any> = {
   justify-content: flex-end;
 }
 
-/* v-motion 面板：预声明 transform 层以减少首次动画跳变 */
+/* 面板入场与过渡：硬件加速的平滑淡入微动效 */
 .conversation-tool-row,
 .conversation-tool-panel,
 .conversation-reasoning-panel,
 .assistant-response-panel {
   will-change: opacity, transform;
+}
+
+.transition-item-enter {
+  animation: item-smooth-appear 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@keyframes item-smooth-appear {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* 非流式 content 入场使用极简动画，避免 `animation-fill-mode: both` 在流式→完成过渡时
@@ -806,11 +821,13 @@ const toolIconByCanonicalName: Record<string, any> = {
   overflow-wrap: anywhere;
   line-height: 1.7;
   transition: color 140ms ease;
+  contain: layout style;
 }
 
 .assistant-streaming-markdown {
   display: block;
   white-space: normal;
+  contain: layout style;
 }
 
 .assistant-streaming-content .assistant-streaming-markdown:empty {
@@ -820,25 +837,25 @@ const toolIconByCanonicalName: Record<string, any> = {
 .assistant-streaming-fade {
   display: inline;
   white-space: pre-wrap;
+  will-change: opacity;
 }
 
 .assistant-streaming-char {
   display: inline;
   white-space: pre-wrap;
   animation-name: assistant-stream-char-fade-in;
-  animation-duration: 180ms;
-  animation-timing-function: ease-out;
+  animation-duration: 160ms;
+  animation-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
   animation-fill-mode: both;
+  will-change: opacity;
 }
 
 @keyframes assistant-stream-char-fade-in {
   from {
     opacity: 0;
-    transform: translateY(-0.04em);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 

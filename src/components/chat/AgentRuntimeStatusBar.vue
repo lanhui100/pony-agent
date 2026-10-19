@@ -131,15 +131,21 @@ const displayLabel = computed(() => {
           data-testid="agent-runtime-status-orbit-dot"
         />
       </span>
-      <span
+      <div
         :class="displayedStatus.mode === 'error' ? 'text-rose-600 dark:text-rose-400 not-italic' : 'runtime-status-shimmer text-stone-500 dark:text-stone-300 italic'"
-        class="min-w-0 truncate font-normal"
-        data-testid="agent-runtime-status-label"
-      >{{ displayLabel }}</span><span
-        v-if="elapsedText && displayedStatus.mode !== 'error'"
-        class="runtime-status-shimmer shrink-0 text-[12px] text-stone-500 dark:text-stone-300 italic font-normal tabular-nums"
-        data-testid="agent-runtime-status-elapsed"
-      >{{ elapsedText }}</span>
+        class="inline-flex min-w-0 max-w-full items-center font-normal"
+      >
+        <span
+          :class="displayedStatus.mode === 'error' ? 'text-rose-600 dark:text-rose-400 not-italic' : 'runtime-status-shimmer text-stone-500 dark:text-stone-300 italic'"
+          class="min-w-0 truncate font-normal"
+          data-testid="agent-runtime-status-label"
+        >{{ displayLabel }}</span>
+        <span
+          v-if="elapsedText && displayedStatus.mode !== 'error'"
+          class="shrink-0 text-[12px] italic font-normal tabular-nums"
+          data-testid="agent-runtime-status-elapsed"
+        >{{ elapsedText }}</span>
+      </div>
     </div>
   </div>
 </template>
@@ -282,16 +288,16 @@ const displayLabel = computed(() => {
   background: linear-gradient(
     90deg,
     rgba(120, 113, 108, 0.45) 0%,
-    rgba(120, 113, 108, 0.45) 35%,
+    rgba(120, 113, 108, 0.45) 30%,
     rgba(28, 25, 23, 1) 50%,
-    rgba(120, 113, 108, 0.45) 65%,
+    rgba(120, 113, 108, 0.45) 70%,
     rgba(120, 113, 108, 0.45) 100%
   );
-  background-size: 250% 100%;
+  background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: shimmer-sweep 2.2s ease-in-out infinite;
+  animation: shimmer-sweep 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 @keyframes shimmer-sweep {
@@ -300,7 +306,7 @@ const displayLabel = computed(() => {
   }
 
   100% {
-    background-position: -150% 0;
+    background-position: -100% 0;
   }
 }
 
@@ -308,12 +314,12 @@ const displayLabel = computed(() => {
   background: linear-gradient(
     90deg,
     rgba(168, 162, 158, 0.45) 0%,
-    rgba(168, 162, 158, 0.45) 35%,
+    rgba(168, 162, 158, 0.45) 30%,
     rgba(255, 255, 255, 1) 50%,
-    rgba(168, 162, 158, 0.45) 65%,
+    rgba(168, 162, 158, 0.45) 70%,
     rgba(168, 162, 158, 0.45) 100%
   );
-  background-size: 250% 100%;
+  background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
