@@ -28,7 +28,7 @@
 
 
 
-
-
    › 写下任务，或输入 / 查看命令
-     /home/dm/pony-agent                                                                   ↑0 ↓0 · 缓存 — · 上下文 0%
+
+
+     /home/dm/pony-agent                                                                                    上下文 0%

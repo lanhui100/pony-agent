@@ -3,7 +3,6 @@
 
 
 
-
      ▄▄▄▄▄▄▄▄▄▄
      ▀▀▀▀▀▀▀▀▀▀
      ▀▀      ▀▀    pony v0.1.127
@@ -28,7 +27,8 @@
 
 
 
-
    › line1
      line2
-     /home/dm/pony-agent                                                                    ↑0 ↓0 · 缓存 — · 上下文 —
+
+
+     /home/dm/pony-agent

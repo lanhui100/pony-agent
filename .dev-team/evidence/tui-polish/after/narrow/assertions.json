@@ -31,25 +31,25 @@
       "id": "empty.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.ansi size=1379"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.ansi size=1362"
     },
     {
       "id": "empty.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.png size=114304"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.png size=109072"
     },
     {
       "id": "empty.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 18 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 16 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 18 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 16 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.no_panic",
@@ -79,25 +79,25 @@
       "id": "conversation.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1712"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1711"
     },
     {
       "id": "conversation.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=102599"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=99729"
     },
     {
       "id": "conversation.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 18 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 16 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 18 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 16 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.header",

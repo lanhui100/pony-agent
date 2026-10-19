@@ -31,13 +31,13 @@
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.ansi size=3557"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.ansi size=3540"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.png size=144125"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.png size=138735"
     },
     {
       "id": "main.header",
@@ -49,13 +49,13 @@
       "id": "main.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "main.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.guidance",
@@ -64,10 +64,10 @@
       "evidence": "描述一个任务开始，或输入命令："
     },
     {
-      "id": "empty.footer_metrics",
-      "desc": "footer is the composer metrics line (↑ ↓ 缓存 上下文), with no error/status phrase",
+      "id": "empty.footer_workspace_only",
+      "desc": "empty footer shows the workspace only: no metrics segments before the first turn (v3 R11: no value -> no segment, and no '—' placeholder)",
       "ok": true,
-      "evidence": "footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 —"
+      "evidence": "footer :: /home/dm/pony-agent"
     },
     {
       "id": "main.separator_single_header_rule",
@@ -85,7 +85,7 @@
       "id": "main.composer_cursor_block",
       "desc": "first placeholder glyph is a reverse-video block (accent bg / canvas-colored glyph)",
       "ok": true,
-      "evidence": "row=32 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224)"
+      "evidence": "row=30 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224)"
     },
     {
       "id": "empty.placeholder_column",

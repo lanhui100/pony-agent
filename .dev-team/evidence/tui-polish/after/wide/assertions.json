@@ -37,19 +37,19 @@
       "id": "empty.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.png size=153784"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.png size=147780"
     },
     {
       "id": "empty.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 38 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 36 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 38 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 36 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.no_panic",
@@ -79,25 +79,25 @@
       "id": "conversation.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3264"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3400"
     },
     {
       "id": "conversation.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=157565"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=157369"
     },
     {
       "id": "conversation.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 38 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 36 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 38 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 36 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "empty.header",

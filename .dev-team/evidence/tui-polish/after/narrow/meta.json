@@ -5,6 +5,6 @@
   "cols": 60,
   "rows": 20,
   "bin": "/home/dm/pony-agent/target/debug/pony",
-  "started_at": "2026-10-19T20:17:26+08:00",
-  "duration_ms": 3000
+  "started_at": "2026-10-19T20:52:06+08:00",
+  "duration_ms": 2000
 }

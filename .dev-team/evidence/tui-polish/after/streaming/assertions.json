@@ -31,13 +31,13 @@
       "id": "mid.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2146"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2249"
     },
     {
       "id": "mid.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=86270"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=82926"
     },
     {
       "id": "final.no_panic",
@@ -67,19 +67,19 @@
       "id": "final.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2587"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2700"
     },
     {
       "id": "final.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=146594"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=146346"
     },
     {
       "id": "streaming.mid_status_writing",
-      "desc": "streaming active line shows the writing state while the footer is the metrics line",
+      "desc": "streaming active line shows the writing state while the footer is the metrics row",
       "ok": true,
-      "evidence": "active_row :: • 写入中 0秒 | footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0%"
+      "evidence": "active_row :: • 写入中 0秒 | footer :: /home/dm/pony-agent 上下文 0%"
     },
     {
       "id": "streaming.mid_active_elapsed",
@@ -95,9 +95,9 @@
     },
     {
       "id": "streaming.mid_not_finished",
-      "desc": "mid-stream capture is not the completed answer yet (footer is the metrics line)",
+      "desc": "mid-stream capture is not the completed answer yet (footer is the metrics row)",
       "ok": true,
-      "evidence": "footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0%"
+      "evidence": "footer :: /home/dm/pony-agent 上下文 0%"
     },
     {
       "id": "streaming.final_complete",

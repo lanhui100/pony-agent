@@ -727,23 +727,45 @@ fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
 // A12（v3 §6 R9/R10）：指标行 = GHOST 前景 + CANVAS 背景；间距行 28 全空白 + CANVAS
 // ---------------------------------------------------------------------------
 
-/// v3 R11：段间不得出现孤立分隔符（"· ·" / 行尾 "·" / 首个段前 "·"）。
+/// v3 R11：段间分隔符必须恰好是 `" · "`；只检测**真正的孤立分隔符**。
+///
+/// 仅检查：行首/簇首 `·`、簇尾 `·`、连续分隔符（`"· ·"` / `"·  ·"`）。合法的段间
+/// `" · "` 前缀会自然以 `·` 结尾，不能据此判为孤立（原实现误杀 `"↑500 ↓0 · 缓存 20%"`）。
 fn assert_no_orphan_separator(row: &str, label: &str) {
+    // 右簇 = 行内第一个指标段到行尾（workspace 路径不可能含 ↑/缓存/上下文）。
+    let cluster_start = ["↑", "缓存", "上下文"]
+        .iter()
+        .filter_map(|token| row.find(token))
+        .min()
+        .unwrap_or(row.len());
+    let cluster = row[cluster_start..].trim();
+    if cluster.is_empty() {
+        // 无值不显示：右簇为空时由各用例的存在性断言负责，这里无结构可查。
+        return;
+    }
     assert!(
-        !row.contains("· ·") && !row.contains("·  ·"),
-        "[{label}] 指标段之间不得出现孤立分隔符: {row:?}"
+        !cluster.starts_with('·'),
+        "[{label}] 指标右簇不得以孤立分隔符开头: {cluster:?}"
     );
     assert!(
-        !row.trim_end().ends_with('·'),
-        "[{label}] 指标行不得以分隔符结尾: {row:?}"
+        !cluster.ends_with('·'),
+        "[{label}] 指标右簇不得以孤立分隔符结尾: {cluster:?}"
     );
-    for segment in ["↑", "缓存", "上下文"] {
-        if let Some(idx) = row.find(segment) {
-            assert!(
-                !row[..idx].trim_end().ends_with('·'),
-                "[{label}] 首个指标段 {segment:?} 之前不得有孤立分隔符: {row:?}"
-            );
-        }
+    assert!(
+        !cluster.contains("· ·") && !cluster.contains("·  ·"),
+        "[{label}] 指标段之间不得出现连续孤立分隔符: {cluster:?}"
+    );
+    // 结构断言：段间恰好一个 " · "，各段非空且不含首尾空格（空段会同时暴露为 "· ·"）。
+    for part in cluster.split(" · ") {
+        assert!(
+            !part.is_empty(),
+            "[{label}] 分隔符之间存在空段: {cluster:?}"
+        );
+        assert_eq!(
+            part,
+            part.trim(),
+            "[{label}] 指标段不得含首尾空格: {part:?}（簇 {cluster:?}）"
+        );
     }
 }
 
@@ -760,24 +782,42 @@ fn a12_metrics_row_is_ghost_on_canvas_and_spacing_row_is_blank_canvas() {
     // Act
     let buf = screen(&mut state, 110, 30);
 
-    // Assert 1（R10）：指标行整行 GHOST 前景（字形格）+ CANVAS 背景（全部格）
+    // Assert 1（R10）：指标行整行 GHOST 前景（字形格）+ CANVAS 背景（宽字符续格除外）
+    //
+    // 用例缺陷修正（v3 履约插桩发现）：ratatui 0.29 `Buffer::diff` 会把宽字符右侧续格标记
+    // 为 to_skip，TestBackend 在首帧不会为它写入样式，该格仍是 `Cell::default`（fg/bg=Reset）；
+    // 而 `ui()` 本身已把整行 bg 填为 CANVAS、整行字形 fg 设为 GHOST。续格由宽字符渲染器
+    // 覆盖，不承载独立的 fg/bg 契约，因此在遍历时按「前一格 symbol 显示宽度 == 2」跳过续格；
+    // GHOST/CANVAS 语义与逐格严格度不变（非续格仍然逐格断言）。
     let mut glyph_cells = 0usize;
+    let mut skip_continuation = false;
     for x in 0..buf.area.width {
+        if skip_continuation {
+            skip_continuation = false;
+            continue;
+        }
         let cell = &buf[(x, 29)];
         assert_eq!(
             cell.bg, CANVAS,
             "指标行第 {x} 列背景必须是 CANVAS（非色带 SURFACE），实际 {:?}",
             cell.bg
         );
-        if !cell.symbol().trim().is_empty() {
+        let symbol = cell.symbol();
+        if !symbol.trim().is_empty() {
             glyph_cells += 1;
             assert_eq!(
                 cell.fg,
                 GHOST,
                 "指标行第 {x} 列字形前景必须是 GHOST Rgb(104,98,90)，实际 {:?}（symbol={:?}）",
                 cell.fg,
-                cell.symbol()
+                symbol
             );
+        }
+        let mut chars = symbol.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            if disp_width(ch) == 2 {
+                skip_continuation = true;
+            }
         }
     }
     assert!(

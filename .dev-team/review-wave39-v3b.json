@@ -1,0 +1,9 @@
+{
+  "verdict": "PASS",
+  "findings": [],
+  "checks": {
+    "wide_char_rows": "frame buffer: continuation cells after CJK glyphs already carry bg=CANVAS (Paragraph 0.29 applies its area style, paragraph.rs:426); only the flushed TestBackend copy shows Reset because Buffer::diff to_skip skips cells under a multi-width symbol (ratatui buffer.rs:493-505). Post-render f.buffer_mut().set_style(metrics_rect, bg CANVAS) at tui.rs:2622-2625 is a no-op (frame-buffer diff = 0 cells for zero/vals states at 24/30/110 cols), so A12's continuation skip (tests/tui_dialog_wave39.rs:793-807) masks no non-continuation cell: every other row-29 cell was verified bg=CANVAS and every glyph cell fg=GHOST(104,98,90). No real background bug behind it.",
+    "gap_row_blank": true,
+    "no_value_hidden": true
+  }
+}

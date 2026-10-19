@@ -46,3 +46,13 @@ Status: implemented
 - 承接 ADR 0038（TUI 设计系统：发丝线与弱化层级），本 ADR 将其「上下双发丝线」收敛为 header 单线。
 - 与 ADR 0035（桌面端 token 指标口径）为不同显示面，口径显式分离。
 - 契约与证据：`.dev-team/contract-matrix-tui-dialog-wave39.md`、`.dev-team/evidence/tui-polish/after/`。
+
+## v3 调整（用户实测反馈，同 ADR 内修订）
+
+用户对 v1 效果提出三点：对话框仍偏矮、底部指标行与对话框贴得太近且存在感偏强、无用量时显示 `↑0 ↓0 · 缓存 — · 上下文 —` 属噪声。
+
+1. **对话框增高**：`input_h = (visual_lines + 1).clamp(2, 6)`；单行输入占 2 行（正文 + 1 行呼吸），色带 = 1 行顶部内边距 + input_h。
+2. **指标行脱离色带**：色带下方先 1 行 CANVAS 间距行（不画字符），再 1 行 CANVAS 背景的指标行；`bottom_h = input_h + 3`。
+3. **更弱的层级**：新增 `theme::GHOST = Rgb(104,98,90)`（介于 `HAIRLINE` 与 `FAINT` 之间），指标行整行使用。终端无法改变字号，「更小更弱」以更低对比度实现；不使用 `Modifier::DIM`（终端兼容性差，且项目既有 0 使用）。
+4. **无值不显示**：右侧指标改为分段拼装，`↑in ↓out` 仅当有非零用量、`缓存 x%` 仅当输入 token>0、`上下文 y%` 仅当窗口已知；全无值时右簇为空，只保留左侧 workspace。彻底消除 `—` 占位符与 `↑0 ↓0`。
+5. 测试相应迁移：A5/A6/A8 重写，新增 A12（GHOST + CANVAS + 间距行逐格）与 A13（分段隐藏组合、无孤立分隔符）；E2E `checks.py` 空态改为 workspace-only，落定场景仍要求四段完整。

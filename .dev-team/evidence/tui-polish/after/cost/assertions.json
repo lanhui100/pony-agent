@@ -31,25 +31,25 @@
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=1396"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=1379"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=59164"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=53751"
     },
     {
       "id": "main.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "main.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "cost.model_line",

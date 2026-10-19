@@ -3,14 +3,14 @@
   "binary": {
     "phase": "after",
     "bin": "/home/dm/pony-agent/target/debug/pony",
-    "sha256": "f1114e108466e609d6276dc998cc6b622d7391f44fec45ec1df5be55a5c6ebee",
-    "mtime": "2026-10-19T20:16:53+08:00",
-    "size": 56688736,
+    "sha256": "78bd05bfb9f5655b823e1fce7fc27f8075270d04e00ef043b35315393c694adf",
+    "mtime": "2026-10-19T20:51:36+08:00",
+    "size": 56692928,
     "version": "pony 0.1.127 · linux-x86_64",
-    "generated_at": "2026-10-19T20:16:56+08:00",
+    "generated_at": "2026-10-19T20:51:36+08:00",
     "repo": "/home/dm/pony-agent"
   },
-  "generated_at": "2026-10-19T12:17:57.312049+00:00",
+  "generated_at": "2026-10-19T12:52:36.248058+00:00",
   "summary": {
     "scenarios": 18,
     "checks": 369,
@@ -28,7 +28,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 1000,
-      "started_at": "2026-10-19T20:16:57+08:00",
+      "started_at": "2026-10-19T20:51:37+08:00",
       "evidence_dir": "empty",
       "captures": [
         "main"
@@ -64,13 +64,13 @@
           "id": "main.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.ansi size=3557"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.ansi size=3540"
         },
         {
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.png size=144125"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/empty/main.png size=138735"
         },
         {
           "id": "main.header",
@@ -82,13 +82,13 @@
           "id": "main.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "main.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "empty.guidance",
@@ -97,10 +97,10 @@
           "evidence": "描述一个任务开始，或输入命令："
         },
         {
-          "id": "empty.footer_metrics",
-          "desc": "footer is the composer metrics line (↑ ↓ 缓存 上下文), with no error/status phrase",
+          "id": "empty.footer_workspace_only",
+          "desc": "empty footer shows the workspace only: no metrics segments before the first turn (v3 R11: no value -> no segment, and no '—' placeholder)",
           "ok": true,
-          "evidence": "footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 —"
+          "evidence": "footer :: /home/dm/pony-agent"
         },
         {
           "id": "main.separator_single_header_rule",
@@ -118,7 +118,7 @@
           "id": "main.composer_cursor_block",
           "desc": "first placeholder glyph is a reverse-video block (accent bg / canvas-colored glyph)",
           "ok": true,
-          "evidence": "row=32 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224)"
+          "evidence": "row=30 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224)"
         },
         {
           "id": "empty.placeholder_column",
@@ -140,7 +140,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 3000,
-      "started_at": "2026-10-19T20:16:58+08:00",
+      "started_at": "2026-10-19T20:51:38+08:00",
       "evidence_dir": "conversation",
       "captures": [
         "main"
@@ -176,13 +176,13 @@
           "id": "main.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=2858"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=2971"
         },
         {
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=147627"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=147380"
         },
         {
           "id": "main.header",
@@ -194,13 +194,13 @@
           "id": "main.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "main.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "conversation.user_message_visible",
@@ -276,7 +276,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 9000,
-      "started_at": "2026-10-19T20:17:01+08:00",
+      "started_at": "2026-10-19T20:51:41+08:00",
       "evidence_dir": "slash-menu",
       "captures": [
         "main"
@@ -312,19 +312,19 @@
           "id": "main.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4483"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4466"
         },
         {
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=145476"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=140116"
         },
         {
           "id": "main.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 32 prompt_col=3 :: › /"
+          "evidence": "row 30 prompt_col=3 :: › /"
         },
         {
           "id": "slash.all_commands_listed",
@@ -336,13 +336,13 @@
           "id": "slash.menu_has_top_and_bottom_rules",
           "desc": "menu is framed by two hairline rules",
           "ok": true,
-          "evidence": "rule_rows=[21, 29]"
+          "evidence": "rule_rows=[19, 27]"
         },
         {
           "id": "slash.menu_above_composer",
           "desc": "menu rows sit above the composer input row",
           "ok": true,
-          "evidence": "menu_rows=[22, 23]..28 bottom_rule=29 input_row=32"
+          "evidence": "menu_rows=[20, 21]..26 bottom_rule=27 input_row=30"
         },
         {
           "id": "slash.each_command_once",
@@ -366,7 +366,7 @@
           "id": "slash.selected_row_marker",
           "desc": "selected command row carries the selection marker",
           "ok": true,
-          "evidence": "row 22 :: ▏ /resume 选择并恢复历史会话"
+          "evidence": "row 20 :: ▏ /resume 选择并恢复历史会话"
         }
       ]
     },
@@ -376,7 +376,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T20:17:11+08:00",
+      "started_at": "2026-10-19T20:51:51+08:00",
       "evidence_dir": "models-panel",
       "captures": [
         "main"
@@ -524,7 +524,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T20:17:13+08:00",
+      "started_at": "2026-10-19T20:51:53+08:00",
       "evidence_dir": "provider-panel",
       "captures": [
         "main"
@@ -666,7 +666,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T20:17:15+08:00",
+      "started_at": "2026-10-19T20:51:55+08:00",
       "evidence_dir": "sessions-panel",
       "captures": [
         "main"
@@ -708,7 +708,7 @@
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=52000"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/sessions-panel/main.png size=51216"
         },
         {
           "id": "sessions.title",
@@ -720,13 +720,13 @@
           "id": "sessions.prior_conversation_listed",
           "desc": "the conversation just completed is offered for resume",
           "ok": true,
-          "evidence": "│▏ 读取 package.json 并总结 de7c3296 · 当前 │"
+          "evidence": "│▏ 读取 package.json 并总结 9632973b · 当前 │"
         },
         {
           "id": "sessions.session_id_visible",
           "desc": "session row carries a short session id",
           "ok": true,
-          "evidence": "│▏ 读取 package.json 并总结 de7c3296 · 当前 │"
+          "evidence": "│▏ 读取 package.json 并总结 9632973b · 当前 │"
         },
         {
           "id": "sessions.not_empty",
@@ -804,7 +804,7 @@
           "id": "sessions.current_marker",
           "desc": "sessions panel marks the active session",
           "ok": true,
-          "evidence": "│▏ 读取 package.json 并总结 de7c3296 · 当前 │"
+          "evidence": "│▏ 读取 package.json 并总结 9632973b · 当前 │"
         }
       ]
     },
@@ -813,8 +813,8 @@
       "index": 7,
       "cols": 120,
       "rows": 34,
-      "duration_ms": 2000,
-      "started_at": "2026-10-19T20:17:17+08:00",
+      "duration_ms": 3000,
+      "started_at": "2026-10-19T20:51:57+08:00",
       "evidence_dir": "add-provider",
       "captures": [
         "main"
@@ -949,8 +949,8 @@
       "index": 8,
       "cols": 120,
       "rows": 34,
-      "duration_ms": 4000,
-      "started_at": "2026-10-19T20:17:19+08:00",
+      "duration_ms": 3000,
+      "started_at": "2026-10-19T20:52:00+08:00",
       "evidence_dir": "streaming",
       "captures": [
         "final",
@@ -987,13 +987,13 @@
           "id": "mid.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2146"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2249"
         },
         {
           "id": "mid.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=86270"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=82926"
         },
         {
           "id": "final.no_panic",
@@ -1023,19 +1023,19 @@
           "id": "final.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2587"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2700"
         },
         {
           "id": "final.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=146594"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=146346"
         },
         {
           "id": "streaming.mid_status_writing",
-          "desc": "streaming active line shows the writing state while the footer is the metrics line",
+          "desc": "streaming active line shows the writing state while the footer is the metrics row",
           "ok": true,
-          "evidence": "active_row :: • 写入中 0秒 | footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0%"
+          "evidence": "active_row :: • 写入中 0秒 | footer :: /home/dm/pony-agent 上下文 0%"
         },
         {
           "id": "streaming.mid_active_elapsed",
@@ -1051,9 +1051,9 @@
         },
         {
           "id": "streaming.mid_not_finished",
-          "desc": "mid-stream capture is not the completed answer yet (footer is the metrics line)",
+          "desc": "mid-stream capture is not the completed answer yet (footer is the metrics row)",
           "ok": true,
-          "evidence": "footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0%"
+          "evidence": "footer :: /home/dm/pony-agent 上下文 0%"
         },
         {
           "id": "streaming.final_complete",
@@ -1075,7 +1075,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T20:17:24+08:00",
+      "started_at": "2026-10-19T20:52:04+08:00",
       "evidence_dir": "error",
       "captures": [
         "main"
@@ -1111,25 +1111,25 @@
           "id": "main.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.ansi size=2029"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.ansi size=2132"
         },
         {
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.png size=70756"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.png size=68175"
         },
         {
           "id": "main.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "main.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "error.message_visible",
@@ -1151,9 +1151,9 @@
         },
         {
           "id": "error.footer_metrics",
-          "desc": "footer stays the metrics line during a failed turn (the failure lives in the transcript)",
+          "desc": "footer stays the metrics row during a failed turn (no usage -> 上下文 only; failure in transcript)",
           "ok": true,
-          "evidence": "footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0%"
+          "evidence": "footer :: /home/dm/pony-agent 上下文 0%"
         },
         {
           "id": "error.no_fake_answer",
@@ -1174,8 +1174,8 @@
       "index": 10,
       "cols": 60,
       "rows": 20,
-      "duration_ms": 3000,
-      "started_at": "2026-10-19T20:17:26+08:00",
+      "duration_ms": 2000,
+      "started_at": "2026-10-19T20:52:06+08:00",
       "evidence_dir": "narrow",
       "captures": [
         "conversation",
@@ -1212,25 +1212,25 @@
           "id": "empty.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.ansi size=1379"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.ansi size=1362"
         },
         {
           "id": "empty.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.png size=114304"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/empty.png size=109072"
         },
         {
           "id": "empty.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 18 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 16 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "empty.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 18 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 16 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "conversation.no_panic",
@@ -1260,25 +1260,25 @@
           "id": "conversation.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1712"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.ansi size=1711"
         },
         {
           "id": "conversation.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=102599"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/narrow/conversation.png size=99729"
         },
         {
           "id": "conversation.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 18 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 16 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "conversation.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 18 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 16 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "empty.header",
@@ -1318,7 +1318,7 @@
       "cols": 160,
       "rows": 40,
       "duration_ms": 3000,
-      "started_at": "2026-10-19T20:17:29+08:00",
+      "started_at": "2026-10-19T20:52:09+08:00",
       "evidence_dir": "wide",
       "captures": [
         "conversation",
@@ -1361,19 +1361,19 @@
           "id": "empty.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.png size=153784"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/empty.png size=147780"
         },
         {
           "id": "empty.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 38 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 36 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "empty.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 38 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 36 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "conversation.no_panic",
@@ -1403,25 +1403,25 @@
           "id": "conversation.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3264"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.ansi size=3400"
         },
         {
           "id": "conversation.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=157565"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/wide/conversation.png size=157369"
         },
         {
           "id": "conversation.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 38 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 36 prompt_col=20 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "conversation.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 38 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 36 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "empty.header",
@@ -1467,7 +1467,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 5000,
-      "started_at": "2026-10-19T20:17:32+08:00",
+      "started_at": "2026-10-19T20:52:12+08:00",
       "evidence_dir": "scrolled",
       "captures": [
         "after",
@@ -1504,13 +1504,13 @@
           "id": "before.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7534"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.ansi size=7059"
         },
         {
           "id": "before.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=573144"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/before.png size=524608"
         },
         {
           "id": "after.no_panic",
@@ -1540,25 +1540,25 @@
           "id": "after.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=9498"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.ansi size=9023"
         },
         {
           "id": "after.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=738020"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/after.png size=689745"
         },
         {
           "id": "after.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "after.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "scrolled.bottom_before",
@@ -1588,7 +1588,7 @@
           "id": "scrolled.offset_moved_up",
           "desc": "first visible content row moved up by at least 8 terminal rows",
           "ok": true,
-          "evidence": "first_visible_before=第21行 first_visible_after=第11行"
+          "evidence": "first_visible_before=第23行 first_visible_after=第13行"
         }
       ]
     },
@@ -1598,7 +1598,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T20:17:37+08:00",
+      "started_at": "2026-10-19T20:52:17+08:00",
       "evidence_dir": "help",
       "captures": [
         "main"
@@ -1634,25 +1634,25 @@
           "id": "main.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/help/main.ansi size=1891"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/help/main.ansi size=1874"
         },
         {
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/help/main.png size=141693"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/help/main.png size=136280"
         },
         {
           "id": "main.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "main.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "help.commands_listed",
@@ -1692,7 +1692,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 2000,
-      "started_at": "2026-10-19T20:17:39+08:00",
+      "started_at": "2026-10-19T20:52:19+08:00",
       "evidence_dir": "cost",
       "captures": [
         "main"
@@ -1728,25 +1728,25 @@
           "id": "main.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=1396"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.ansi size=1379"
         },
         {
           "id": "main.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=59164"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/cost/main.png size=53751"
         },
         {
           "id": "main.input_padded_from_left_edge",
           "desc": "input prompt has left padding (>0 cols from terminal edge)",
           "ok": true,
-          "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "main.input_placeholder",
           "desc": "composer shows placeholder guidance when empty",
           "ok": true,
-          "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+          "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
         },
         {
           "id": "cost.model_line",
@@ -1779,8 +1779,8 @@
       "index": 15,
       "cols": 120,
       "rows": 34,
-      "duration_ms": 4000,
-      "started_at": "2026-10-19T20:17:41+08:00",
+      "duration_ms": 3000,
+      "started_at": "2026-10-19T20:52:21+08:00",
       "evidence_dir": "ctrl-c",
       "captures": [
         "exit",
@@ -1799,7 +1799,7 @@
           "id": "exit.within_terminal_width",
           "desc": "every captured row display width <= 120 cols",
           "ok": true,
-          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-ctrl-c/x"
+          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.t5Z5Yt/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.t5Z5Yt/iso-ctrl-c/x"
         },
         {
           "id": "exit.capture_rows",
@@ -1817,7 +1817,7 @@
           "id": "exit.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.png size=74973"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/exit.png size=74478"
         },
         {
           "id": "shell.no_panic",
@@ -1829,7 +1829,7 @@
           "id": "shell.within_terminal_width",
           "desc": "every captured row display width <= 120 cols",
           "ok": true,
-          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-ctrl-c/x"
+          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.t5Z5Yt/iso-ctrl-c/xdg-config XDG_DATA_HOME=/tmp/tui-audit.t5Z5Yt/iso-ctrl-c/x"
         },
         {
           "id": "shell.capture_rows",
@@ -1847,7 +1847,7 @@
           "id": "shell.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.png size=86752"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ctrl-c/shell.png size=86306"
         },
         {
           "id": "ctrl_c.process_exited",
@@ -1887,7 +1887,7 @@
       "cols": 120,
       "rows": 34,
       "duration_ms": 11000,
-      "started_at": "2026-10-19T20:17:45+08:00",
+      "started_at": "2026-10-19T20:52:24+08:00",
       "evidence_dir": "input-edit",
       "captures": [
         "abc",
@@ -1934,13 +1934,13 @@
           "id": "abc.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.ansi size=3561"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.ansi size=3544"
         },
         {
           "id": "abc.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.png size=134471"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.png size=128630"
         },
         {
           "id": "input_edit.abc",
@@ -1976,13 +1976,13 @@
           "id": "inserted.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.ansi size=3561"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.ansi size=3544"
         },
         {
           "id": "inserted.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.png size=135225"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.png size=129431"
         },
         {
           "id": "input_edit.inserted",
@@ -2018,13 +2018,13 @@
           "id": "backspace.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.ansi size=3561"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.ansi size=3544"
         },
         {
           "id": "backspace.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.png size=134801"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.png size=128980"
         },
         {
           "id": "input_edit.backspace",
@@ -2060,13 +2060,13 @@
           "id": "word_cleared.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.ansi size=3557"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.ansi size=3540"
         },
         {
           "id": "word_cleared.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.png size=144125"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.png size=138735"
         },
         {
           "id": "input_edit.word_cleared",
@@ -2102,13 +2102,13 @@
           "id": "tab_complete.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.ansi size=3558"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.ansi size=3541"
         },
         {
           "id": "tab_complete.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.png size=73747"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.png size=68073"
         },
         {
           "id": "input_edit.tab_complete",
@@ -2144,13 +2144,13 @@
           "id": "ctrl_u_cleared.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.ansi size=3557"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.ansi size=3540"
         },
         {
           "id": "ctrl_u_cleared.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.png size=144125"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.png size=138735"
         },
         {
           "id": "input_edit.ctrl_u_cleared",
@@ -2186,13 +2186,13 @@
           "id": "multiline.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.ansi size=3734"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.ansi size=3717"
         },
         {
           "id": "multiline.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.png size=135687"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.png size=129637"
         },
         {
           "id": "input_edit.multiline",
@@ -2228,13 +2228,13 @@
           "id": "esc_cleared.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=3557"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=3540"
         },
         {
           "id": "esc_cleared.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.png size=144125"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.png size=138735"
         },
         {
           "id": "input_edit.esc_cleared",
@@ -2270,13 +2270,13 @@
           "id": "draft.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.ansi size=3561"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.ansi size=3544"
         },
         {
           "id": "draft.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.png size=134496"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.png size=128666"
         },
         {
           "id": "input_edit.draft",
@@ -2324,13 +2324,13 @@
           "id": "draft_cleared.artifact_ansi",
           "desc": "ansi artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.ansi size=3557"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.ansi size=3540"
         },
         {
           "id": "draft_cleared.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.png size=144125"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.png size=138735"
         },
         {
           "id": "input_edit.ctrl_c_with_draft_clears_only",
@@ -2354,7 +2354,7 @@
           "id": "exit.within_terminal_width",
           "desc": "every captured row display width <= 120 cols",
           "ok": true,
-          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-inpu"
+          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.t5Z5Yt/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.t5Z5Yt/iso-inpu"
         },
         {
           "id": "exit.capture_rows",
@@ -2372,7 +2372,7 @@
           "id": "exit.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=75425"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=75120"
         },
         {
           "id": "shell.no_panic",
@@ -2384,7 +2384,7 @@
           "id": "shell.within_terminal_width",
           "desc": "every captured row display width <= 120 cols",
           "ok": true,
-          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.RjKBXL/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.RjKBXL/iso-inpu"
+          "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.t5Z5Yt/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.t5Z5Yt/iso-inpu"
         },
         {
           "id": "shell.capture_rows",
@@ -2402,7 +2402,7 @@
           "id": "shell.artifact_png",
           "desc": "png artifact exists for screenshot review",
           "ok": true,
-          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=87100"
+          "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=86822"
         },
         {
           "id": "input_edit.ctrl_c_empty_exits",
@@ -2436,7 +2436,7 @@
       "cols": 80,
       "rows": 24,
       "duration_ms": 0,
-      "started_at": "2026-10-19T20:17:56+08:00",
+      "started_at": "2026-10-19T20:52:35+08:00",
       "evidence_dir": "non-tty",
       "captures": [],
       "pass": 4,
@@ -2473,8 +2473,8 @@
       "index": 18,
       "cols": 80,
       "rows": 24,
-      "duration_ms": 1000,
-      "started_at": "2026-10-19T20:17:56+08:00",
+      "duration_ms": 0,
+      "started_at": "2026-10-19T20:52:35+08:00",
       "evidence_dir": "cli-modes",
       "captures": [],
       "pass": 9,
@@ -2644,7 +2644,7 @@
     },
     "only_after": {
       "empty": [
-        "empty.footer_metrics",
+        "empty.footer_workspace_only",
         "main.separator_single_header_rule",
         "main.separator_header_rule_geometry"
       ],

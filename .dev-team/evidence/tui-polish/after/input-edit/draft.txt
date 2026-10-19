@@ -28,7 +28,7 @@
 
 
 
-
-
    › draft
-     /home/dm/pony-agent                                                                    ↑0 ↓0 · 缓存 — · 上下文 —
+
+
+     /home/dm/pony-agent

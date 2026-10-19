@@ -1,10 +1,10 @@
 {
   "phase": "after",
   "bin": "/home/dm/pony-agent/target/debug/pony",
-  "sha256": "f1114e108466e609d6276dc998cc6b622d7391f44fec45ec1df5be55a5c6ebee",
-  "mtime": "2026-10-19T20:16:53+08:00",
-  "size": 56688736,
+  "sha256": "78bd05bfb9f5655b823e1fce7fc27f8075270d04e00ef043b35315393c694adf",
+  "mtime": "2026-10-19T20:51:36+08:00",
+  "size": 56692928,
   "version": "pony 0.1.127 · linux-x86_64",
-  "generated_at": "2026-10-19T20:16:56+08:00",
+  "generated_at": "2026-10-19T20:51:36+08:00",
   "repo": "/home/dm/pony-agent"
 }

@@ -31,19 +31,19 @@
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4483"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.ansi size=4466"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=145476"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/slash-menu/main.png size=140116"
     },
     {
       "id": "main.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 32 prompt_col=3 :: › /"
+      "evidence": "row 30 prompt_col=3 :: › /"
     },
     {
       "id": "slash.all_commands_listed",
@@ -55,13 +55,13 @@
       "id": "slash.menu_has_top_and_bottom_rules",
       "desc": "menu is framed by two hairline rules",
       "ok": true,
-      "evidence": "rule_rows=[21, 29]"
+      "evidence": "rule_rows=[19, 27]"
     },
     {
       "id": "slash.menu_above_composer",
       "desc": "menu rows sit above the composer input row",
       "ok": true,
-      "evidence": "menu_rows=[22, 23]..28 bottom_rule=29 input_row=32"
+      "evidence": "menu_rows=[20, 21]..26 bottom_rule=27 input_row=30"
     },
     {
       "id": "slash.each_command_once",
@@ -85,7 +85,7 @@
       "id": "slash.selected_row_marker",
       "desc": "selected command row carries the selection marker",
       "ok": true,
-      "evidence": "row 22 :: ▏ /resume 选择并恢复历史会话"
+      "evidence": "row 20 :: ▏ /resume 选择并恢复历史会话"
     }
   ]
 }

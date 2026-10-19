@@ -31,25 +31,25 @@
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.ansi size=2029"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.ansi size=2132"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.png size=70756"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.png size=68175"
     },
     {
       "id": "main.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
-      "evidence": "row 32 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 30 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "main.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
-      "evidence": "row 32 :: › 写下任务，或输入 / 查看命令"
+      "evidence": "row 30 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "error.message_visible",
@@ -71,9 +71,9 @@
     },
     {
       "id": "error.footer_metrics",
-      "desc": "footer stays the metrics line during a failed turn (the failure lives in the transcript)",
+      "desc": "footer stays the metrics row during a failed turn (no usage -> 上下文 only; failure in transcript)",
       "ok": true,
-      "evidence": "footer :: /home/dm/pony-agent ↑0 ↓0 · 缓存 — · 上下文 0%"
+      "evidence": "footer :: /home/dm/pony-agent 上下文 0%"
     },
     {
       "id": "error.no_fake_answer",

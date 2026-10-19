@@ -1463,6 +1463,8 @@ mod theme {
     pub const INK_SOFT: Color = Color::Rgb(203, 200, 195);
     pub const MUTED: Color = Color::Rgb(162, 155, 146);
     pub const FAINT: Color = Color::Rgb(124, 118, 110);
+    /// wave-39 v3 R10：指标行专用，比 FAINT 再暗一档（终端无法改字号，以低对比度表达「更小更弱」）。
+    pub const GHOST: Color = Color::Rgb(104, 98, 90);
     pub const HAIRLINE: Color = Color::Rgb(52, 47, 41);
     pub const ACCENT: Color = Color::Rgb(198, 167, 126);
     /// 角色竖条等「结构性强调」用低一档的骨色，避免高饱和抢正文。
@@ -1944,47 +1946,55 @@ fn workspace_label(workspace: &std::path::Path) -> String {
     full
 }
 
-/// wave-39 R7：色带最后一行的指标行 —— 左侧 workspace 路径（弱化），右侧
-/// `↑in ↓out · 缓存 x% · 上下文 y%`。空间不足时优先完整保留右簇。
+/// wave-39 v3 §6 R7/R10/R11：色带下方指标行 —— 左侧 workspace 路径（整行 GHOST），
+/// 右侧按「有值才显示」拼装 `↑in ↓out · 缓存 x% · 上下文 y%`；全无值时右簇为空。
 fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
-    let cache_ratio = if state.total_input_tokens == 0 {
-        "—".to_string()
-    } else {
+    let ghost = || Style::default().fg(theme::GHOST);
+    let mut segments: Vec<String> = Vec::new();
+    if state.total_input_tokens > 0 || state.total_output_tokens > 0 {
+        segments.push(format!(
+            "↑{} ↓{}",
+            fmt_token_count(state.total_input_tokens),
+            fmt_token_count(state.total_output_tokens)
+        ));
+    }
+    // 缓存比只在输入已知时可算（0% 也是有效值，故键控于 in>0 而非 cache>0）。
+    if state.total_input_tokens > 0 {
         let pct = (state.total_cache_hit_tokens as f64 / state.total_input_tokens as f64 * 100.0)
             .round();
-        format!("{pct:.0}%")
-    };
-    let context_ratio = if state.context_window_tokens == 0 {
-        "—".to_string()
-    } else {
+        segments.push(format!("缓存 {pct:.0}%"));
+    }
+    if state.context_window_tokens > 0 {
         let pct = (state.last_context_tokens as f64 / state.context_window_tokens as f64 * 100.0)
             .round()
             .clamp(0.0, 100.0);
-        format!("{pct:.0}%")
-    };
-    let right = format!(
-        "↑{} ↓{} · 缓存 {} · 上下文 {}",
-        fmt_token_count(state.total_input_tokens),
-        fmt_token_count(state.total_output_tokens),
-        cache_ratio,
-        context_ratio
-    );
+        segments.push(format!("上下文 {pct:.0}%"));
+    }
+    let right = segments.join(" · ");
     let right_w = str_width(&right);
+    let label = workspace_label(&state.workspace);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    if width > RAIL + 1 + right_w {
-        let label = ellipsize_width(&workspace_label(&state.workspace), width - RAIL - 1 - right_w);
+    if right_w == 0 {
+        // v3 R11：全无值 → 只显示左侧 workspace，不产生孤立分隔符。
+        spans.push(Span::raw(" ".repeat(RAIL)));
+        spans.push(Span::styled(
+            ellipsize_width(&label, width.saturating_sub(RAIL)),
+            ghost(),
+        ));
+    } else if width > RAIL + 1 + right_w {
+        let label = ellipsize_width(&label, width - RAIL - 1 - right_w);
         let used = RAIL + str_width(&label);
         spans.push(Span::raw(" ".repeat(RAIL)));
-        spans.push(Span::styled(label, faint()));
+        spans.push(Span::styled(label, ghost()));
         spans.push(Span::raw(" ".repeat(width.saturating_sub(used + right_w))));
-        spans.push(Span::styled(right, faint()));
+        spans.push(Span::styled(right, ghost()));
     } else if right_w <= width {
         // 左路径放不下：只渲染右簇，仍然严格右对齐到内容列最后一列。
         spans.push(Span::raw(" ".repeat(width - right_w)));
-        spans.push(Span::styled(right, faint()));
+        spans.push(Span::styled(right, ghost()));
     } else {
-        spans.push(Span::styled(truncate_width(&right, width), faint()));
+        spans.push(Span::styled(truncate_width(&right, width), ghost()));
     }
     Line::from(spans)
 }
@@ -2304,12 +2314,13 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let rule_rect = Rect { y: content.y + 1, height: 1, ..content };
     f.render_widget(Paragraph::new(hairline(content.width as usize)), rule_rect);
 
-    // ── 底部区块尺寸：1 行顶部内边距 + 输入区 1~5 行 + 1 行指标行 ───────────
+    // ── 底部区块尺寸：色带（1 行顶部内边距 + 输入区）+ 间距行 + 指标行 ──────
     let composer_text_width = content.width.saturating_sub(3).max(1) as usize;
     let visual_lines = layout_input(&state.input_buffer, composer_text_width).len() as u16;
-    // wave-39 R5：单行输入只占 1 行；最多 5 行文本，不再保留底部呼吸行。
-    let input_h = visual_lines.clamp(1, 5);
-    let bottom_h = input_h + 2;
+    // wave-39 v3 R9：正文 + 1 行呼吸（单行输入 = 2 行），最多 6 行；色带 = input_h + 顶部内边距。
+    let input_h = (visual_lines + 1).clamp(2, 6);
+    let band_h = input_h + 1;
+    let bottom_h = input_h + 3;
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
 
     let chat_top = content.y + 3; // header + rule + 1 行呼吸
@@ -2573,7 +2584,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         );
     }
 
-    // ── Composer：整宽表面色带 = 1 行顶部内边距 + 输入行 + 指标行 ───────────
+    // ── Composer：整宽表面色带 = 1 行顶部内边距 + 输入区；下方间距行 + 指标行 ──
     // 色带与内容列严格同宽：与 header 发丝线共用同一条左右基准。
     let band_x = content.x;
     let band_w = content.width;
@@ -2581,7 +2592,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         x: band_x,
         y: bottom_top,
         width: band_w,
-        height: bottom_h,
+        height: band_h,
     };
     // 浮层态连 composer 一起收起：画面只留 header + 浮层，键位提示由浮层自己承担。
     if state.mode == InteractionMode::Normal {
@@ -2595,17 +2606,17 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         };
         render_input(f, input_rect, state);
 
-        // wave-39 R7：色带最后一行是指标行（整宽 SURFACE，全部 faint）。
-        // 左 = workspace 路径标签，右 = token/缓存/上下文簇；绝不写出内容列。
+        // wave-39 v3 R9/R10：色带下方隔 1 行间距（CANVAS 空白），再画指标行；
+        // 指标行不在色带内：整行 GHOST 前景 + CANVAS 背景，绝不写出内容列。
         let metrics_rect = Rect {
             x: content.x,
-            y: input_rect.y.saturating_add(input_h),
+            y: bottom_top.saturating_add(band_h).saturating_add(1),
             width: content.width,
             height: 1,
         };
         f.render_widget(
             Paragraph::new(metrics_line(state, content.width as usize))
-                .style(Style::default().bg(theme::SURFACE)),
+                .style(Style::default().bg(theme::CANVAS)),
             metrics_rect,
         );
     }
