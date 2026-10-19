@@ -130,3 +130,19 @@ StreamUsage { input_tokens: u64, output_tokens: u64, cache_hit_input_tokens: u64
 - A13（新）：分段隐藏组合：仅 in>0 → 有 ↑/↓/缓存、无上下文；仅 window>0 且 in=0 → 仅上下文；in=0 且 out>0 → 有 ↑/↓、无缓存。
 - A7 数值断言保留（1200/345/600/50k/200k → 1.2k、345、缓存 50%、上下文 25%）。
 - A9/A10/A11 不变。
+
+## 7. 契约变更 v4（wave-39-delta3，用户实测反馈）
+
+用户反馈：指标行与对话框之间的间距过大，减少一半。现状视觉间距 = 色带内底部呼吸行（SURFACE）+ 独立间距行（CANVAS）= 2 行空白；「减少一半」= 收敛为 1 行空白（终端无法画半行）。
+
+### R13 几何 v4（替代 R9 的间距部分）
+- 删除独立间距行；`bottom_h = input_h + 2`；`band_h = input_h + 1`（顶部内边距 + input_h，含 input_h 内最后 1 行呼吸）
+- 指标行紧贴色带下方：`metrics_y = bottom_top + band_h`（= 终端最后一行，CANVAS 背景 + GHOST 前景）
+- `input_h = (visual_lines + 1).clamp(2, 6)` 不变；`chat_h = bottom_top - chat_top` 不变
+- 110×30 单行输入：`bottom_top=26`；色带 `26..=28`（26 顶部内边距 / 27 输入正文 / 28 呼吸空白 SURFACE）；指标行 `29`
+- 间距语义：输入正文行 → 指标行之间只隔 1 行空白（v3 为 2 行）
+
+### R14 验收迁移（Test Agent，允许改 A6/A12）
+- A6：110×30 单行 → `bottom_top=26`、提示符行 26..27、`y=28` 为色带内呼吸行（空白、bg=SURFACE）、`y=29` 指标行（bg=CANVAS、fg=GHOST）；沟槽列空白；不再存在 CANVAS 间距行。
+- A12：`y=28` 断言逐格空白且 bg=SURFACE（宽字符无涉），`y=29` 非续格 fg=GHOST/bg=CANVAS。
+- 其余 A1-A5/A7-A11/A13 语义不变（A13 只依赖指标行内容）。

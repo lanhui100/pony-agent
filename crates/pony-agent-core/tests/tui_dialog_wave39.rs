@@ -388,7 +388,7 @@ fn a5_metrics_row_carries_up_down_cache_and_context() {
 }
 
 // ---------------------------------------------------------------------------
-// A6：110×30 单行输入几何 v3 —— bottom_top=25 / 提示符 26..27 / 间距行 28 空白 / 指标行 29
+// A6：110×30 单行输入几何 v4 —— bottom_top=26 / 提示符 26..27 / 色带呼吸行 28 SURFACE / 指标行 29
 // ---------------------------------------------------------------------------
 #[test]
 fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
@@ -405,27 +405,27 @@ fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
     // Act
     let buf = screen(&mut state, 110, 30);
 
-    // Assert 1（R9：bottom_top=25）：y=24 是正文画布，y=25 是色带顶部内边距（SURFACE 空白）
-    assert!(
-        row_text(&buf, 24).trim().is_empty(),
-        "y=24 应为正文区空白，实际 {:?}",
-        row_text(&buf, 24)
-    );
-    assert_eq!(
-        buf[(cx, 24)].bg, CANVAS,
-        "y=24 必须仍是正文画布 CANVAS（色带不得从 24 行开始）"
-    );
+    // Assert 1（R13：bottom_top=26）：y=25 是正文画布，y=26 是色带顶部内边距（SURFACE 空白）
     assert!(
         row_text(&buf, 25).trim().is_empty(),
-        "y=25 色带顶部内边距必须整行空白，实际 {:?}",
+        "y=25 应为正文区空白，实际 {:?}",
         row_text(&buf, 25)
     );
     assert_eq!(
-        buf[(cx, 25)].bg, SURFACE,
-        "y=25 必须是色带顶部内边距（SURFACE）—— 即 bottom_top=25"
+        buf[(cx, 25)].bg, CANVAS,
+        "y=25 必须仍是正文画布 CANVAS（v4 色带不得从 25 行开始）"
+    );
+    assert!(
+        row_text(&buf, 26).trim().is_empty(),
+        "y=26 色带顶部内边距必须整行空白，实际 {:?}",
+        row_text(&buf, 26)
+    );
+    assert_eq!(
+        buf[(cx, 26)].bg, SURFACE,
+        "y=26 必须是色带顶部内边距（SURFACE）—— 即 bottom_top=26"
     );
 
-    // Assert 2（R9：input_h=2）：提示符行唯一，位于输入区 26..=27
+    // Assert 2（R13：input_h=2）：提示符行唯一，位于输入区 26..=27
     let prompt_rows: Vec<u16> = (0..buf.area.height)
         .filter(|y| row_text(&buf, *y).contains('›'))
         .collect();
@@ -437,7 +437,7 @@ fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
     let prompt_y = prompt_rows[0];
     assert!(
         (26..=27).contains(&prompt_y),
-        "v3 几何下提示符必须位于 26..=27（input_h=2），实际 y={prompt_y}"
+        "v4 几何下提示符必须位于 26..=27（input_h=2），实际 y={prompt_y}"
     );
     assert_eq!(
         buf[(cx, prompt_y)].symbol(),
@@ -445,18 +445,25 @@ fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
         "提示符必须落在输入区内容列起点 x={cx}（y={prompt_y}）"
     );
 
-    // Assert 3（R9：间距行 28）：整行空白且为 CANVAS（与色带分离）
-    let gap = row_text(&buf, 28);
+    // Assert 3（R13：间距减半 —— 独立 CANVAS 间距行已删除）：
+    // y=28 是**色带内**呼吸行：整行空白且 bg=SURFACE（不再是 CANVAS 间距行）。
+    let breathing = row_text(&buf, 28);
     assert!(
-        gap.trim().is_empty(),
-        "y=28 间距行必须整行空白，实际 {gap:?}"
+        breathing.trim().is_empty(),
+        "y=28 色带呼吸行必须整行空白，实际 {breathing:?}"
     );
     assert_eq!(
-        buf[(cx, 28)].bg, CANVAS,
-        "y=28 间距行必须是 CANVAS 背景（不属于色带）"
+        buf[(cx, 28)].bg, SURFACE,
+        "y=28 必须是色带内呼吸行（SURFACE）；v4 已删除独立 CANVAS 间距行"
+    );
+    // 输入正文行（27）→ 指标行（29）之间只隔 1 行空白（v3 为 2 行）。
+    assert_eq!(
+        prompt_y + 2,
+        29,
+        "输入正文行与指标行之间必须只隔 1 行（呼吸行 28），实际 prompt_y={prompt_y}"
     );
 
-    // Assert 4（R9：指标行 29）：最后一行、CANVAS 背景、左簇 workspace 仍在
+    // Assert 4（R13：指标行 29，紧贴色带）：CANVAS 背景 + GHOST 前景 + workspace 仍在
     let metrics = row_text(&buf, 29);
     assert!(
         !metrics.trim().is_empty(),
@@ -469,6 +476,10 @@ fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
     assert_eq!(
         buf[(cx, 29)].bg, CANVAS,
         "y=29 指标行必须是 CANVAS 背景（非色带 SURFACE）"
+    );
+    assert_eq!(
+        buf[(cx, 29)].fg, GHOST,
+        "y=29 指标行字形前景必须是 GHOST Rgb(104,98,90)"
     );
 
     // Assert 5：三条主体沟槽列无内容
@@ -770,7 +781,7 @@ fn assert_no_orphan_separator(row: &str, label: &str) {
 }
 
 #[test]
-fn a12_metrics_row_is_ghost_on_canvas_and_spacing_row_is_blank_canvas() {
+fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
     // Arrange：注入非零值，保证指标行右簇有字形（左簇 workspace 始终有字形）
     let mut state = tui::TuiState::default();
     state.total_input_tokens = 1200;
@@ -825,17 +836,18 @@ fn a12_metrics_row_is_ghost_on_canvas_and_spacing_row_is_blank_canvas() {
         "指标行必须至少渲染一个字形（workspace 标签 / 指标段）"
     );
 
-    // Assert 2（R9/R10）：间距行 28 全空白且 CANVAS 背景
+    // Assert 2（R13/R14）：y=28 是**色带内**呼吸行 —— 逐格空白且 bg=SURFACE。
+    // v4 已删除独立 CANVAS 间距行（宽字符无涉，本行逐格严格断言）。
     for x in 0..buf.area.width {
         let cell = &buf[(x, 28)];
         assert!(
             cell.symbol().trim().is_empty(),
-            "间距行第 {x} 列不得有字符，实际 {:?}",
+            "色带呼吸行第 {x} 列不得有字符，实际 {:?}",
             cell.symbol()
         );
         assert_eq!(
-            cell.bg, CANVAS,
-            "间距行第 {x} 列背景必须是 CANVAS，实际 {:?}",
+            cell.bg, SURFACE,
+            "色带呼吸行第 {x} 列背景必须是 SURFACE（v4：间距行已删除，呼吸行属于色带），实际 {:?}",
             cell.bg
         );
     }
