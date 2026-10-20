@@ -84,3 +84,25 @@
 ## 3. 分工契约与隔离有效性
 - 契约 matrix 规范了 `stream_usage_event` 从 `provider_call_records` 提取 S1 口径单次调用的规则；
 - 输出 token 与缓存命中继续保持累计与幂等覆盖。
+
+---
+
+# Wave-43 追加复盘（真实运行时接线 + tmux 真机验证）
+
+## 1. 本轮暴露的协作事实
+
+- **并行会话写域冲突**：Lead 的未提交改动曾被另一会话的 `feat(agent): optimize context building` 提交覆盖（tui.rs 回到旧版，默认演示计划丢失）。教训与 `dev-team` 写域公理一致：跨 shell 共享工作区时，**改动必须在同一轮内提交**，否则被他人 commit/reset 静默吞掉。
+- **teammate 空转**：executor 二次认领 task-5 后长时间无产出，最终一轮才落地实现；期间 Lead 必须用 `git status` 与 `cargo check` 作为进度信号，而不是相信回报。
+
+## 2. 验证方法论升级（可复用）
+
+- 真实模型网关存在 followup 400 缺陷时，**用本地 stub 网关 + 隔离 HOME**替换 LLM，仅替换 token 生成，保留真实 runtime/控制面/存储/渲染 —— 得到的是真机链路凭证，而非「测试构造」。
+- `tmux capture-pane -e` + 自写 ANSI→PNG 渲染（CJK 宽字符按 East-Asian Width 双格、逐字定位）比截图工具更可复现，且能进版本库。
+- 「面板无数据整屏空白」属于假象型缺陷：本轮统一改为显式空状态，避免用户误判进程死亡。
+
+## 3. 遗留（下一轮前置）
+
+1. provider/transcript 回放 400（`messages.1.content.0.tool_use.id`）——阻塞一切工具 followup，需单独立项。
+2. `tui_render_layout` 6 例在 HEAD 即为红（非本轮引入），需定点修复。
+3. 权限审批面板缺少可触发的 approval-required 内置工具；TUI 侧管线已就绪。
+4. TUI 走轻量 turn 流（`bound_run=None`），如需真图续行需切到 graph-run stream 路径。
