@@ -544,6 +544,120 @@ impl AddProviderPayload {
     }
 }
 
+// ── 鼠标选择与复制契约模型 ───────────────────────────────────────────────────
+
+/// 文本字符坐标（行、字符索引）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextCoord {
+    pub line: usize,
+    pub col: usize,
+}
+
+/// 鼠标拖拽选择状态机
+#[derive(Debug, Clone, Default)]
+pub struct MouseSelectionState {
+    pub active: bool,
+    pub anchor: Option<TextCoord>,
+    pub head: Option<TextCoord>,
+    pub debounce_until: Option<std::time::Instant>,
+    pub copied_range: Option<(TextCoord, TextCoord)>,
+}
+
+impl MouseSelectionState {
+    pub fn clear(&mut self) {
+        self.active = false;
+        self.anchor = None;
+        self.head = None;
+        self.debounce_until = None;
+        self.copied_range = None;
+    }
+
+    pub fn normalized_range(&self) -> Option<(TextCoord, TextCoord)> {
+        match (self.anchor, self.head) {
+            (Some(a), Some(h)) => {
+                if a <= h {
+                    Some((a, h))
+                } else {
+                    Some((h, a))
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// 将文本编码为 OSC 52 终端剪贴板序列
+pub fn encode_osc52_copy(text: &str) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\x1b]52;c;{}\x07", b64)
+}
+
+/// 判断给定坐标是否落在由 anchor 和 head 围成的选区内
+pub fn is_coord_selected(coord: TextCoord, anchor: TextCoord, head: TextCoord) -> bool {
+    let (start, end) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    if coord.line < start.line || coord.line > end.line {
+        return false;
+    }
+    if start.line == end.line {
+        coord.col >= start.col && coord.col <= end.col
+    } else if coord.line == start.line {
+        coord.col >= start.col
+    } else if coord.line == end.line {
+        coord.col <= end.col
+    } else {
+        true
+    }
+}
+
+/// 从多行纯文本切片中截取选区内的文本内容
+pub fn extract_selected_text(lines: &[String], anchor: TextCoord, head: TextCoord) -> String {
+    let (start, end) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    if lines.is_empty() || start.line >= lines.len() {
+        return String::new();
+    }
+    let end_line = end.line.min(lines.len() - 1);
+    if start.line == end_line {
+        let line = &lines[start.line];
+        let chars: Vec<char> = line.chars().collect();
+        if start.col >= chars.len() {
+            return String::new();
+        }
+        let end_col = end.col.min(chars.len().saturating_sub(1));
+        if start.col > end_col {
+            return String::new();
+        }
+        chars[start.col..=end_col].iter().collect()
+    } else {
+        let mut result = Vec::new();
+        for line_idx in start.line..=end_line {
+            let line = &lines[line_idx];
+            let chars: Vec<char> = line.chars().collect();
+            if line_idx == start.line {
+                if start.col < chars.len() {
+                    result.push(chars[start.col..].iter().collect::<String>());
+                } else {
+                    result.push(String::new());
+                }
+            } else if line_idx == end_line {
+                let end_col = end.col.min(chars.len().saturating_sub(1));
+                result.push(chars[..=end_col].iter().collect::<String>());
+            } else {
+                result.push(line.clone());
+            }
+        }
+        result.join("\n")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiState {
     pub messages: Vec<ChatMessage>,
@@ -583,6 +697,7 @@ pub struct TuiState {
     pub status_text: String,
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
+    pub mouse_selection: MouseSelectionState,
     pub scroll_offset: u16,
     /// 最近一次渲染可滚动到的最大偏移；事件循环据此判断「是否已回到底部」，
     /// 避免滚轮/方向键下翻时永远无法恢复自动贴底。
@@ -648,6 +763,7 @@ impl Default for TuiState {
             turn_usage: None,
             status_text: "Ready".to_string(),
             mouse_capture: true,
+            mouse_selection: MouseSelectionState::default(),
             scroll_offset: 0,
             max_scroll_offset: 0,
             auto_scroll: true,

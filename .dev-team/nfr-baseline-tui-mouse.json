@@ -1,0 +1,18 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 0
+  },
+  "debounce_delay_ms": 200,
+  "debounce_delay_ms_range": [150, 250],
+  "max_selection_chars": 1000000,
+  "clipboard_protocol": "OSC52",
+  "concurrency_lock": "debounce_instant_tracker",
+  "logging": {
+    "format": "json"
+  },
+  "resource_release": [
+    "selection_clear"
+  ]
+}
