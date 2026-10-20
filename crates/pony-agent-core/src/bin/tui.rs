@@ -1049,6 +1049,7 @@ impl TuiState {
                 .iter()
                 .copied()
                 .filter(|(cmd, _)| cmd.to_lowercase().starts_with(&filter))
+                .take(8)
                 .collect()
         } else {
             Vec::new()
@@ -1394,7 +1395,7 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
                 spans.push(Span::styled(
                     rest[b + 2..b + 2 + off].to_string(),
                     Style::default()
-                        .fg(theme::INK)
+                        .fg(theme::EMPHASIS)
                         .add_modifier(Modifier::BOLD),
                 ));
                 rest = &rest[b + 2 + off + 2..];
@@ -1408,7 +1409,7 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
                 }
                 spans.push(Span::styled(
                     rest[c + 1..c + 1 + off].to_string(),
-                    Style::default().fg(theme::INK_SOFT).bg(theme::CODE_FILL),
+                    Style::default().fg(theme::VSCODE_STRING).bg(theme::CODE_FILL),
                 ));
                 rest = &rest[c + 1 + off + 1..];
                 continue;
@@ -1909,8 +1910,8 @@ mod theme {
     pub const CANVAS: Color = Color::Rgb(18, 16, 14);
     pub const SURFACE: Color = Color::Rgb(27, 25, 22);
     pub const SURFACE_SEL: Color = Color::Rgb(40, 37, 32);
-    /// 行内代码专用，必须比 SURFACE 更贴近画布，避免与用户消息块抢材质语义。
-    pub const CODE_FILL: Color = Color::Rgb(23, 22, 20);
+    /// 代码块材质底色：加强深沉温暖的陶土黑底，对比鲜明同时与整套陶土暖黑画布自然呼应。
+    pub const CODE_FILL: Color = Color::Rgb(36, 25, 22);
     pub const INK: Color = Color::Rgb(232, 229, 224);
     pub const INK_SOFT: Color = Color::Rgb(203, 200, 195);
     pub const MUTED: Color = Color::Rgb(162, 155, 146);
@@ -1918,12 +1919,25 @@ mod theme {
     /// wave-39 v3 R10：指标行专用，比 FAINT 再暗一档（终端无法改字号，以低对比度表达「更小更弱」）。
     pub const GHOST: Color = Color::Rgb(104, 98, 90);
     pub const HAIRLINE: Color = Color::Rgb(52, 47, 41);
-    pub const ACCENT: Color = Color::Rgb(198, 167, 126);
-    /// 角色竖条等「结构性强调」用低一档的骨色，避免高饱和抢正文。
-    pub const ACCENT_DIM: Color = Color::Rgb(166, 144, 110);
+    /// 强调色：更深沉醒目的陶土色（深赤陶色 Terracotta，温暖有质感）。
+    pub const ACCENT: Color = Color::Rgb(214, 114, 80);
+    /// 角色竖条等「结构性强调」用次级陶土色。
+    pub const ACCENT_DIM: Color = Color::Rgb(180, 92, 62);
+    /// 强化强调色：行内 **强调** 专用，明艳饱满的陶土砖红色，凸显视觉重点。
+    pub const EMPHASIS: Color = Color::Rgb(232, 128, 92);
     pub const SUCCESS: Color = Color::Rgb(140, 172, 137);
     pub const DANGER: Color = Color::Rgb(199, 130, 125);
     pub const WARN: Color = Color::Rgb(199, 176, 126);
+
+    // ── VS Code Dark+ / Modern 经典语法配色 ──
+    pub const VSCODE_KEYWORD: Color = Color::Rgb(197, 134, 192);   // 紫色 (fn, let, pub, return, if, match)
+    pub const VSCODE_CONTROL: Color = Color::Rgb(224, 108, 117);   // 控流深粉
+    pub const VSCODE_STRING: Color = Color::Rgb(206, 145, 120);    // 橙粉色 "string"
+    pub const VSCODE_COMMENT: Color = Color::Rgb(106, 153, 85);    // 橄榄绿 // comment
+    pub const VSCODE_TYPE: Color = Color::Rgb(78, 201, 176);       // 青碧色 Option, Result, Vec, String
+    pub const VSCODE_NUMBER: Color = Color::Rgb(181, 206, 168);    // 淡青绿 123, 0.42
+    pub const VSCODE_VARIABLE: Color = Color::Rgb(156, 220, 254);  // 天蓝色 self, args, variables
+    pub const VSCODE_ATTR: Color = Color::Rgb(86, 156, 214);       // 鲜亮蓝 #[], @decorator
 }
 
 /// 左右统一沟槽宽度（视觉留白，禁止内容贴边）。
@@ -2158,17 +2172,156 @@ fn blank_rail(style: Style) -> Vec<Span<'static>> {
 
 /// 代码块色带的右端内缩量：色块不贴内容列右缘，留出呼吸。
 const CODE_BAND_INSET: usize = 2;
-/// 色带内部左内边距：代码文字与色块左缘之间留 2 列。
-const CODE_BAND_PAD: usize = 2;
+/// 色带内部左右内边距：代码文字与色块边缘之间留 3 列内边距，提升视觉质感。
+const CODE_BAND_PAD: usize = 3;
 
-/// 代码块材质：语言标签行与代码行共用同一条 `CODE_FILL` 色带，无竖线、无边框。
+/// VS Code 风格的高亮代码行着色器（无重依赖的极速词法识别）
+pub fn highlight_code_line(raw: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let trimmed = raw.trim_start();
+    let leading_spaces = raw.len() - trimmed.len();
+    if leading_spaces > 0 {
+        spans.push(Span::raw(" ".repeat(leading_spaces)));
+    }
+
+    // 单行注释
+    if trimmed.starts_with("//") || trimmed.starts_with('#') {
+        spans.push(Span::styled(
+            trimmed.to_string(),
+            Style::default().fg(theme::VSCODE_COMMENT).add_modifier(Modifier::ITALIC),
+        ));
+        return spans;
+    }
+
+    // 属性宏例如 #[derive(...)]
+    if trimmed.starts_with("#[") || trimmed.starts_with('@') {
+        spans.push(Span::styled(
+            trimmed.to_string(),
+            Style::default().fg(theme::VSCODE_ATTR),
+        ));
+        return spans;
+    }
+
+    let mut rest = trimmed;
+    while !rest.is_empty() {
+        // 查找字符串 "..." 或 '...'
+        if let Some(quote_idx) = rest.find('"') {
+            if let Some(next_quote) = rest[quote_idx + 1..].find('"') {
+                let before = &rest[..quote_idx];
+                if !before.is_empty() {
+                    spans.extend(tokenize_code_segment(before));
+                }
+                let str_content = &rest[quote_idx..=quote_idx + 1 + next_quote];
+                spans.push(Span::styled(
+                    str_content.to_string(),
+                    Style::default().fg(theme::VSCODE_STRING),
+                ));
+                rest = &rest[quote_idx + 2 + next_quote..];
+                continue;
+            }
+        }
+        spans.extend(tokenize_code_segment(rest));
+        break;
+    }
+    spans
+}
+
+fn tokenize_code_segment(segment: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut word = String::new();
+
+    let flush_word = |spans: &mut Vec<Span<'static>>, w: &mut String| {
+        if w.is_empty() {
+            return;
+        }
+        let token = w.clone();
+        w.clear();
+
+        // 关键字
+        let is_keyword = matches!(
+            token.as_str(),
+            "fn" | "let" | "mut" | "pub" | "struct" | "enum" | "impl" | "use" | "mod"
+                | "const" | "static" | "type" | "trait" | "async" | "await" | "return"
+                | "if" | "else" | "match" | "for" | "in" | "while" | "loop" | "break"
+                | "continue" | "def" | "class" | "import" | "from" | "as" | "function"
+                | "var" | "val" | "export" | "default"
+        );
+        if is_keyword {
+            spans.push(Span::styled(
+                token,
+                Style::default().fg(theme::VSCODE_KEYWORD).add_modifier(Modifier::BOLD),
+            ));
+            return;
+        }
+
+        // 控流特殊词
+        if matches!(token.as_str(), "mut" | "ref") {
+            spans.push(Span::styled(
+                token,
+                Style::default().fg(theme::VSCODE_CONTROL),
+            ));
+            return;
+        }
+
+        // 布尔与空值
+        if matches!(token.as_str(), "true" | "false" | "None" | "Some" | "Ok" | "Err" | "null" | "nil" | "self" | "Self") {
+            spans.push(Span::styled(
+                token,
+                Style::default().fg(theme::VSCODE_VARIABLE).add_modifier(Modifier::ITALIC),
+            ));
+            return;
+        }
+
+        // 类型 (首字母大写)
+        if token.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            spans.push(Span::styled(
+                token,
+                Style::default().fg(theme::VSCODE_TYPE),
+            ));
+            return;
+        }
+
+        // 数字
+        if token.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '_') {
+            spans.push(Span::styled(
+                token,
+                Style::default().fg(theme::VSCODE_NUMBER),
+            ));
+            return;
+        }
+
+        // 常规函数名 / 标识符：如果后面紧跟着括号，或者作为常用命名
+        spans.push(Span::styled(token, Style::default().fg(theme::VSCODE_VARIABLE)));
+    };
+
+    for c in segment.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush_word(&mut spans, &mut word);
+            let symbol_style = match c {
+                '(' | ')' | '{' | '}' | '[' | ']' => Style::default().fg(theme::VSCODE_ATTR),
+                ':' | ';' | ',' | '.' => Style::default().fg(theme::FAINT),
+                '=' | '+' | '-' | '*' | '/' | '%' | '&' | '|' | '!' | '<' | '>' | '^' => {
+                    Style::default().fg(theme::VSCODE_CONTROL)
+                }
+                _ => Style::default().fg(theme::INK_SOFT),
+            };
+            spans.push(Span::styled(c.to_string(), symbol_style));
+        }
+    }
+    flush_word(&mut spans, &mut word);
+    spans
+}
+
+/// 代码块材质：语言标签行与代码行共用同一条 `CODE_FILL` 陶土暗底色带，无竖线、无边框。
 /// 色带从轨道后起排，右端内缩 `CODE_BAND_INSET` 列；超出宽度的代码按显示宽度折行，
-/// 每个折行仍继承整块底色，保证视觉上是一整块而非逐行悬空高亮。
+/// 内部增加 CODE_BAND_PAD 列内边距，提升呼吸感与专业代码编辑器质感。
 fn push_code_band_line(lines: &mut Vec<Line<'static>>, body: Line<'static>, width: usize) {
     let band_w = width
         .saturating_sub(RAIL + CODE_BAND_INSET)
-        .max(CODE_BAND_PAD + 1);
-    let body_w = band_w.saturating_sub(CODE_BAND_PAD).max(1);
+        .max(CODE_BAND_PAD * 2 + 1);
+    let body_w = band_w.saturating_sub(CODE_BAND_PAD * 2).max(1);
     let bg = Style::default().bg(theme::CODE_FILL);
     for wrapped in wrap_line(&body, body_w) {
         let mut spans = blank_rail(Style::default());
@@ -2980,26 +3133,31 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                         if trimmed.starts_with("```") {
                             in_code = !in_code;
                             if in_code {
+                                // 代码块开始：增加与上方正文文字的 1 行呼吸留白间距
+                                push_blank(&mut lines);
+
                                 let lang = trimmed.trim_start_matches('`').trim();
                                 if !lang.is_empty() {
                                     push_code_band_line(
                                         &mut lines,
-                                        Line::from(Span::styled(lang.to_string(), faint())),
+                                        Line::from(Span::styled(
+                                            format!("// {}", lang),
+                                            Style::default().fg(theme::VSCODE_COMMENT).add_modifier(Modifier::ITALIC),
+                                        )),
                                         width,
                                     );
                                 }
+                            } else {
+                                // 代码块结束：增加与下方后续文字的 1 行呼吸留白间距
+                                push_blank(&mut lines);
                             }
                             continue;
                         }
                         if in_code {
-                            // 代码块材质：整块由 push_code_band_line 统一铺底（含语言标签行），
-                            // 无发丝竖线；正文降一档对比度并加 DIM 表达次级信息层级。
+                            // 代码块材质：使用 VS Code 经典暗色配色高亮与增强陶土色底衬
                             push_code_band_line(
                                 &mut lines,
-                                Line::from(Span::styled(
-                                    raw.to_string(),
-                                    Style::default().fg(theme::MUTED).add_modifier(Modifier::DIM),
-                                )),
+                                Line::from(highlight_code_line(raw)),
                                 width,
                             );
                             continue;

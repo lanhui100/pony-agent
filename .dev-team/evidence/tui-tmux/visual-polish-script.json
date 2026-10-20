@@ -1,0 +1,15 @@
+{
+  "steps": [
+    {
+      "tool": "TodoWrite",
+      "args": {
+        "todos": [
+          {"content": "打磨视觉色彩与代码块样式", "status": "completed"},
+          {"content": "验证 VS Code 代码语法着色方案", "status": "in_progress"},
+          {"content": "捕获真实终端截图并复核", "status": "pending"}
+        ],
+        "description": "更新任务看板为本次视觉打磨任务"
+      }
+    }
+  ]
+}
