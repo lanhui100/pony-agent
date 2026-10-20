@@ -16,18 +16,53 @@ fn screen(state: &mut TuiState, width: u16, height: u16) -> Buffer {
     terminal.backend().buffer().clone()
 }
 
-fn buffer_to_string(buf: &Buffer) -> String {
-    let mut text = String::new();
-    for y in 0..buf.area.height {
-        let mut line = String::new();
-        for x in 0..buf.area.width {
-            let cell = &buf[(x, y)];
-            line.push_str(cell.symbol());
+fn disp_width(ch: char) -> usize {
+    let cp = ch as u32;
+    let wide = matches!(cp,
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F64F
+            | 0x1F900..=0x1F9FF
+            | 0x20000..=0x3FFFD);
+    if wide { 2 } else { 1 }
+}
+
+fn row_text(buf: &Buffer, y: u16) -> String {
+    let mut out = String::new();
+    let mut skip_placeholder = false;
+    for x in 0..buf.area.width {
+        if skip_placeholder {
+            skip_placeholder = false;
+            continue;
         }
-        text.push_str(line.trim_end());
-        text.push('\n');
+        let sym = buf[(x, y)].symbol();
+        out.push_str(sym);
+        let mut chars = sym.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            if disp_width(ch) == 2 {
+                skip_placeholder = true;
+            }
+        }
     }
-    text
+    out
+}
+
+fn buffer_to_string(buf: &Buffer) -> String {
+    (0..buf.area.height)
+        .map(|y| row_text(buf, y))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // -----------------------------------------------------------------------------

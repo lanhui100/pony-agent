@@ -2191,6 +2191,20 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             .clamp(0.0, 100.0);
         segments.push(format!("上下文 {pct:.0}%"));
     }
+    // 渲染活跃 Goal 指标
+    if let Some(ref goal) = state.goal_state {
+        let rounds_str = match goal.max_rounds {
+            Some(max) => format!("{}/{}", goal.round_count, max),
+            None => format!("{}", goal.round_count),
+        };
+        let phase_str = match goal.phase {
+            GoalPhase::Active => "进行中",
+            GoalPhase::Completed => "已完成",
+            GoalPhase::Blocked => "已阻塞",
+            GoalPhase::Paused => "已暂停",
+        };
+        segments.push(format!("Goal: {} [{}] ({})", truncate_chars(&goal.objective, 16), rounds_str, phase_str));
+    }
     let right = segments.join(" · ");
     let right_w = str_width(&right);
     let label = workspace_label(&state.workspace);
@@ -3198,33 +3212,86 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 }
 
-pub fn render_permission_dialog_stub(f: &mut Frame, _state: &TuiState) {
+pub fn render_permission_dialog_stub(f: &mut Frame, state: &TuiState) {
+    let perm = match &state.permission_state {
+        Some(p) => p,
+        None => return,
+    };
     let area = f.area();
-    let pw = 70u16.min(area.width.saturating_sub(4)).max(20);
-    let ph = 10u16.min(area.height.saturating_sub(2)).max(6);
+    let pw = 76u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = 14u16.min(area.height.saturating_sub(2)).max(6);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(pw)) / 2,
         y: area.y + (area.height.saturating_sub(ph)) / 2,
         width: pw,
         height: ph,
     };
-    let _ = draw_panel(f, rect, "权限审批请求 (Permission Request)", "Enter 确认 · Tab 切换 · Esc 拒绝");
+    let body = draw_panel(
+        f,
+        rect,
+        "权限审批请求 (Permission Request)",
+        "Enter 确认 · Tab 切换 · Esc 拒绝",
+    );
+    let inner_w = body.width as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // 1. 工具与描述
+    let tool_line = Line::from(vec![
+        Span::styled("  工具: ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            truncate_chars(&perm.request.tool_name, inner_w.saturating_sub(10)),
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    lines.push(tool_line);
+
+    let desc_line = Line::from(vec![
+        Span::styled("  说明: ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            truncate_chars(&perm.request.description, inner_w.saturating_sub(10)),
+            Style::default().fg(theme::INK),
+        ),
+    ]);
+    lines.push(desc_line);
+
+    // 2. 命令或路径
+    if let Some(ref cmd) = perm.request.command_or_path {
+        let cmd_line = Line::from(vec![
+            Span::styled("  目标: ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                truncate_chars(cmd, inner_w.saturating_sub(10)),
+                Style::default().fg(theme::INK_SOFT),
+            ),
+        ]);
+        lines.push(cmd_line);
+    }
+    lines.push(blank());
+
+    // 3. 审批选项列表
+    let choices = &perm.choices;
+    for (idx, choice) in choices.iter().enumerate() {
+        let selected = idx == perm.selected_choice_index;
+        let (label, desc) = match choice {
+            PermissionChoice::AllowOnce => ("AllowOnce (允许一次)", "仅允许当前单次工具执行"),
+            PermissionChoice::AllowSession => ("AllowSession (永久允许)", "在此会话中永久放行该工具"),
+            PermissionChoice::Deny => ("Deny (拒绝执行)", "拦截并取消本次工具调用"),
+        };
+        let row = list_row(selected, label, desc, inner_w);
+        lines.push(row);
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        body,
+    );
 }
 
-pub fn render_ask_user_dialog_stub(f: &mut Frame, _state: &TuiState) {
-    let area = f.area();
-    let pw = 70u16.min(area.width.saturating_sub(4)).max(20);
-    let ph = 12u16.min(area.height.saturating_sub(2)).max(6);
-    let rect = Rect {
-        x: area.x + (area.width.saturating_sub(pw)) / 2,
-        y: area.y + (area.height.saturating_sub(ph)) / 2,
-        width: pw,
-        height: ph,
+pub fn render_ask_user_dialog_stub(f: &mut Frame, state: &TuiState) {
+    let ask = match &state.ask_user_state {
+        Some(a) => a,
+        None => return,
     };
-    let _ = draw_panel(f, rect, "用户输入确认 (Ask User)", "Space 勾选 · Enter 提交 · Esc 取消");
-}
-
-pub fn render_plan_panel_stub(f: &mut Frame, _state: &TuiState) {
     let area = f.area();
     let pw = 76u16.min(area.width.saturating_sub(4)).max(20);
     let ph = 16u16.min(area.height.saturating_sub(2)).max(6);
@@ -3234,10 +3301,80 @@ pub fn render_plan_panel_stub(f: &mut Frame, _state: &TuiState) {
         width: pw,
         height: ph,
     };
-    let _ = draw_panel(f, rect, "Plan 计划模式与步骤展示", "/plan 或 Esc 退出计划模式");
+    let body = draw_panel(
+        f,
+        rect,
+        "用户输入确认 (Ask User)",
+        "Space 勾选 · Enter 提交 · Esc 取消",
+    );
+    let inner_w = body.width as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(q) = ask.current_question() {
+        if let Some(ref header) = q.header {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  [{}]", truncate_chars(header, inner_w.saturating_sub(8))),
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {}", q.question),
+                Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(blank());
+
+        // 渲染候选项
+        for (idx, opt) in q.options.iter().enumerate() {
+            let is_focused = idx == ask.selected_option_index;
+            let check_mark = if q.multi_select {
+                if ask.multi_selected_indices.contains(&idx) {
+                    "[x] "
+                } else {
+                    "[ ] "
+                }
+            } else {
+                if is_focused { "(●) " } else { "(○) " }
+            };
+
+            let left = format!("  {}{}", check_mark, opt.label);
+            let right = opt.description.as_deref().unwrap_or("");
+            lines.push(list_row(is_focused, &left, right, inner_w));
+        }
+
+        // 自定义输入项
+        let custom_idx = q.options.len();
+        let is_custom_focused = ask.selected_option_index == custom_idx;
+        let custom_label = if ask.custom_input.is_empty() {
+            "  ✎ 自定义输入...".to_string()
+        } else {
+            format!("  ✎ {}", ask.custom_input)
+        };
+        lines.push(list_row(
+            is_custom_focused,
+            &custom_label,
+            if is_custom_focused { "直接键入文本" } else { "" },
+            inner_w,
+        ));
+    } else {
+        lines.push(Line::from(Span::styled("  无等待确认的问题", faint())));
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        body,
+    );
 }
 
-pub fn render_task_board_stub(f: &mut Frame, _state: &TuiState) {
+pub fn render_plan_panel_stub(f: &mut Frame, state: &TuiState) {
+    let plan = match &state.plan_state {
+        Some(p) => p,
+        None => return,
+    };
     let area = f.area();
     let pw = 80u16.min(area.width.saturating_sub(4)).max(20);
     let ph = 18u16.min(area.height.saturating_sub(2)).max(6);
@@ -3247,7 +3384,129 @@ pub fn render_task_board_stub(f: &mut Frame, _state: &TuiState) {
         width: pw,
         height: ph,
     };
-    let _ = draw_panel(f, rect, "Team 共享任务看板", "Tab 折叠/展开 · ↑↓ 浏览 · Esc 退出");
+    let body = draw_panel(
+        f,
+        rect,
+        "Plan 计划模式与步骤展示",
+        "/plan 或 Esc 退出计划模式",
+    );
+    let inner_w = body.width as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // 计划概要/总纲
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  实施计划: {}", plan.summary),
+            Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(blank());
+
+    // 渲染各步骤
+    if plan.steps.is_empty() {
+        lines.push(Line::from(Span::styled("  尚无正在执行的步骤", faint())));
+    } else {
+        for (idx, step) in plan.steps.iter().enumerate() {
+            let is_focused = idx == plan.selected_step_index;
+            let (icon, _icon_style) = match step.status {
+                PlanStepStatus::Completed => ("✔", Style::default().fg(theme::ACCENT)),
+                PlanStepStatus::InProgress => ("●", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+                PlanStepStatus::Pending => ("○", Style::default().fg(theme::MUTED)),
+                PlanStepStatus::Failed => ("✘", Style::default().fg(theme::MUTED)),
+            };
+
+            let left = format!("  {} {}. {}", icon, idx + 1, step.name);
+            let right = step.summary.as_str();
+            lines.push(list_row(is_focused, &left, right, inner_w));
+        }
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        body,
+    );
+}
+
+pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
+    let board = match &state.task_board_state {
+        Some(b) => b,
+        None => return,
+    };
+    let area = f.area();
+    let pw = 84u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = 20u16.min(area.height.saturating_sub(2)).max(6);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(pw)) / 2,
+        y: area.y + (area.height.saturating_sub(ph)) / 2,
+        width: pw,
+        height: ph,
+    };
+    let body = draw_panel(
+        f,
+        rect,
+        "Team 共享任务看板",
+        "Tab 折叠/展开 · ↑↓ 浏览 · Esc 退出",
+    );
+    let inner_w = body.width as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // 统计各状态数量
+    let total = board.tasks.len();
+    let completed_count = board.tasks.iter().filter(|t| t.status == TuiTaskStatus::Completed).count();
+    let in_progress_count = board.tasks.iter().filter(|t| t.status == TuiTaskStatus::InProgress).count();
+    let pending_count = board.tasks.iter().filter(|t| t.status == TuiTaskStatus::Pending).count();
+    let _blocked_count = board.tasks.iter().filter(|t| t.status == TuiTaskStatus::Blocked).count();
+
+    // 汇总状态头
+    let summary_text = format!(
+        "  任务进度: {}/{} · 已完成: {} · 进行中: {} · 待办: {}",
+        completed_count, total, completed_count, in_progress_count, pending_count
+    );
+    lines.push(Line::from(vec![
+        Span::styled(
+            summary_text,
+            Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(blank());
+
+    if board.tasks.is_empty() {
+        lines.push(Line::from(Span::styled("  暂无共享任务", faint())));
+    } else {
+        // 渲染任务条目
+        let max_visible_items = ph.saturating_sub(6) as usize;
+        let selected = board.selected_index.min(total.saturating_sub(1));
+        let (start, end) = panel_window(total, selected, max_visible_items.max(1));
+
+        for (idx, task) in board.tasks.iter().enumerate().take(end).skip(start) {
+            let is_focused = idx == selected;
+            let status_mark = match task.status {
+                TuiTaskStatus::Completed => "[✔]",
+                TuiTaskStatus::InProgress => "[●]",
+                TuiTaskStatus::Pending => "[○]",
+                TuiTaskStatus::Blocked => "[✕]",
+            };
+
+            let owner_str = task.owner.as_deref().unwrap_or("unassigned");
+            let left = format!("  {} {} · {}", status_mark, task.id, task.subject);
+            let right = format!("@{}", owner_str);
+            lines.push(list_row(is_focused, &left, &right, inner_w));
+        }
+
+        if total > end {
+            lines.push(Line::from(Span::styled(
+                format!("  ... 另有 {} 个任务项未展开", total - end),
+                faint(),
+            )));
+        }
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        body,
+    );
 }
 
 fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
@@ -3814,6 +4073,182 @@ fn tui_event_loop(
                         continue;
                     }
 
+                    // 1e. PermissionApproval 权限审批弹窗按键处理
+                    if state.mode == InteractionMode::PermissionApproval {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                if let Some(ref perm) = state.permission_state {
+                                    let req_id = perm.request.request_id.clone();
+                                    let _ = tx.send(UiEvent::PermissionDecided {
+                                        request_id: req_id,
+                                        choice: PermissionChoice::Deny,
+                                    });
+                                }
+                                state.cancel_permission_approval();
+                            }
+                            KeyCode::Tab | KeyCode::Down => {
+                                if let Some(ref mut perm) = state.permission_state {
+                                    perm.next_choice();
+                                }
+                            }
+                            KeyCode::BackTab | KeyCode::Up => {
+                                if let Some(ref mut perm) = state.permission_state {
+                                    perm.prev_choice();
+                                }
+                            }
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                if let Some(ref perm) = state.permission_state {
+                                    let req_id = perm.request.request_id.clone();
+                                    let _ = tx.send(UiEvent::PermissionDecided {
+                                        request_id: req_id,
+                                        choice: PermissionChoice::AllowOnce,
+                                    });
+                                }
+                                state.cancel_permission_approval();
+                            }
+                            KeyCode::Enter => {
+                                if let Some(ref perm) = state.permission_state {
+                                    let req_id = perm.request.request_id.clone();
+                                    let choice = perm.selected_choice();
+                                    let _ = tx.send(UiEvent::PermissionDecided {
+                                        request_id: req_id,
+                                        choice,
+                                    });
+                                }
+                                state.cancel_permission_approval();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // 1f. AskUserQuestion 问答弹窗按键处理
+                    if state.mode == InteractionMode::AskUserQuestion {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.cancel_ask_user();
+                            }
+                            KeyCode::Down => {
+                                if let Some(ref mut ask) = state.ask_user_state {
+                                    ask.next_option();
+                                }
+                            }
+                            KeyCode::Up => {
+                                if let Some(ref mut ask) = state.ask_user_state {
+                                    ask.prev_option();
+                                }
+                            }
+                            KeyCode::Char(' ') => {
+                                if let Some(ref mut ask) = state.ask_user_state {
+                                    if !ask.is_custom_input_active {
+                                        ask.toggle_current_option();
+                                    } else {
+                                        ask.custom_input.push(' ');
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                if let Some(ref mut ask) = state.ask_user_state {
+                                    if ask.is_custom_input_active {
+                                        ask.custom_input.pop();
+                                    }
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                if let Some(ref mut ask) = state.ask_user_state {
+                                    if ask.is_custom_input_active {
+                                        ask.custom_input.push(c);
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(ref ask) = state.ask_user_state {
+                                    let req_id = ask.request_id.clone();
+                                    let (q_id, answers_list) = if ask.is_custom_input_active {
+                                        let qid = ask.current_question().map(|q| q.id.clone()).unwrap_or_default();
+                                        (qid, vec![ask.custom_input.clone()])
+                                    } else if let Some(q) = ask.current_question() {
+                                        let selected_labels = if q.multi_select {
+                                            ask.multi_selected_indices
+                                                .iter()
+                                                .filter_map(|&idx| q.options.get(idx).map(|o| o.label.clone()))
+                                                .collect::<Vec<_>>()
+                                        } else {
+                                            q.options.get(ask.selected_option_index)
+                                                .map(|o| vec![o.label.clone()])
+                                                .unwrap_or_default()
+                                        };
+                                        (q.id.clone(), selected_labels)
+                                    } else {
+                                        (String::new(), Vec::new())
+                                    };
+                                    let _ = tx.send(UiEvent::AskUserAnswered {
+                                        request_id: req_id,
+                                        answers: vec![(q_id, answers_list)],
+                                    });
+                                }
+                                state.cancel_ask_user();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // 1g. PlanMode 计划模式按键处理
+                    if state.mode == InteractionMode::PlanMode {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.toggle_plan_mode();
+                            }
+                            KeyCode::Down => {
+                                if let Some(ref mut plan) = state.plan_state {
+                                    if !plan.steps.is_empty() {
+                                        plan.selected_step_index = (plan.selected_step_index + 1) % plan.steps.len();
+                                    }
+                                }
+                            }
+                            KeyCode::Up => {
+                                if let Some(ref mut plan) = state.plan_state {
+                                    if !plan.steps.is_empty() {
+                                        if plan.selected_step_index == 0 {
+                                            plan.selected_step_index = plan.steps.len() - 1;
+                                        } else {
+                                            plan.selected_step_index -= 1;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // 1h. TaskBoard 任务看板按键处理
+                    if state.mode == InteractionMode::TaskBoard {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.toggle_task_board();
+                            }
+                            KeyCode::Tab => {
+                                if let Some(ref mut board) = state.task_board_state {
+                                    board.toggle_collapse();
+                                }
+                            }
+                            KeyCode::Down => {
+                                if let Some(ref mut board) = state.task_board_state {
+                                    board.next_task();
+                                }
+                            }
+                            KeyCode::Up => {
+                                if let Some(ref mut board) = state.task_board_state {
+                                    board.prev_task();
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // 2. 仅在正在运行（Streaming）态下 Esc 触发 Interrupt；静态下 Esc 仅用于清空输入缓冲区，不退出程序
                     if key.code == KeyCode::Esc {
                         if state.is_streaming {
@@ -3985,6 +4420,14 @@ fn tui_event_loop(
                                 }
                                 if input == "/thinking" || input == "/effort" {
                                     state.open_reasoning_effort_selector();
+                                    continue;
+                                }
+                                if input == "/plan" {
+                                    state.toggle_plan_mode();
+                                    continue;
+                                }
+                                if input == "/tasks" {
+                                    state.toggle_task_board();
                                     continue;
                                 }
                                 if input == "/clear" {
@@ -4273,7 +4716,7 @@ fn tui_event_loop(
                 UiEvent::PlanUpdated(plan) => {
                     state.update_plan(plan);
                 }
-                UiEvent::TasksUpdated(tasks) => {
+                UiEvent::TaskBoardUpdated(tasks) => {
                     state.update_task_board(tasks);
                 }
                 UiEvent::GoalUpdated(goal) => {
