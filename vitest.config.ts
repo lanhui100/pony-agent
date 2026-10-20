@@ -17,7 +17,11 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    include: ["tests/**/*.spec.ts", "tests/**/*.test.ts"],
+    include: [
+      "tests/**/*.spec.ts",
+      "tests/**/*.test.ts",
+      "src/**/__tests__/**/*.spec.ts"
+    ],
     exclude: ["tests/e2e/**"],
     outputFile: {
       json: "test-results/vitest/results.json"
