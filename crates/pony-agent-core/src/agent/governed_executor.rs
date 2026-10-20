@@ -79,6 +79,7 @@ impl ToolPolicyEvaluator for LegacyCompatiblePolicyEvaluator {
 pub struct GovernedPolicyEvaluator {
     pub rules: Vec<crate::agent::app_settings::ToolRule>,
     pub plan_store: Option<Arc<crate::agent::plan_state::PlanStore>>,
+    pub authorize_store: Option<Arc<crate::agent::path_permission::AuthorizeStore>>,
 }
 
 impl GovernedPolicyEvaluator {
@@ -86,7 +87,12 @@ impl GovernedPolicyEvaluator {
         rules: Vec<crate::agent::app_settings::ToolRule>,
         plan_store: Option<Arc<crate::agent::plan_state::PlanStore>>,
     ) -> Self {
-        Self { rules, plan_store }
+        Self { rules, plan_store, authorize_store: None }
+    }
+
+    pub fn with_authorize_store(mut self, authorize_store: Arc<crate::agent::path_permission::AuthorizeStore>) -> Self {
+        self.authorize_store = Some(authorize_store);
+        self
     }
 
     /// PA-141（方案 b）扩展裁定核心：在 `session_id` 之外额外接收宿主注入的
@@ -99,6 +105,7 @@ impl GovernedPolicyEvaluator {
         descriptor: &crate::agent::tools::ToolDescriptor,
         session_id: Option<&str>,
         plan_execution_approval: Option<&crate::agent::dispatcher::PlanExecutionApproval>,
+        workspace_root: Option<&str>,
         json_arguments: &Value,
     ) -> PermissionDecision {
         let is_ask = descriptor.identity.model_name == "Ask"
@@ -220,7 +227,52 @@ impl GovernedPolicyEvaluator {
             }
         }
 
-        // 3. 默认放行
+        // 3. 路径安全门禁（PA-080 / 审批联动）：
+        // 若工具需要读取外部文件（如 Read / ReadDocument / ViewImage），检查路径是否位于工作区之外且未获得授权。
+        // 未获得授权时返回 ApprovalRequired，触发宿主审批流（对话框），而不是直接报错。
+        if let Some(auth_store) = &self.authorize_store {
+            let prim = descriptor.identity.primitive_name.as_str();
+            let model = descriptor.identity.model_name.as_str();
+            let is_file_read_tool = prim == "workspace_read_file"
+                || prim == "workspace_read_file_segment"
+                || prim == "workspace_read_document"
+                || prim == "view_image"
+                || prim == "workspace_gather_context"
+                || model == "Read"
+                || model == "ReadDocument"
+                || model == "ViewImage";
+            if is_file_read_tool {
+                let target_path = json_arguments.get("path")
+                    .or_else(|| json_arguments.get("filePath"))
+                    .or_else(|| json_arguments.get("file_path"))
+                    .and_then(Value::as_str);
+                if let Some(raw_path) = target_path {
+                    let ws_root = workspace_root
+                        .map(PathBuf::from)
+                        .or_else(|| crate::agent::workspace::compute_default_workspace_root())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let tmp = ws_root.join(".tmp");
+                    let checker = crate::agent::path_permission::PathPermissionChecker::with_default();
+                    if let Err(err) = checker.classify(
+                        raw_path,
+                        &ws_root,
+                        &tmp,
+                        auth_store,
+                        crate::agent::path_permission::PathPurpose::Read,
+                    ) {
+                        if err.code == crate::agent::path_permission::PermissionErrorCode::RequiresAuthorization {
+                            return PermissionDecision {
+                                verdict: PermissionVerdict::ApprovalRequired,
+                                decision_source: "path_permission_requires_authorization".to_string(),
+                                reason: Some(err.message),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. 默认放行
         PermissionDecision {
             verdict: PermissionVerdict::Allow,
             decision_source: "governed_default".to_string(),
@@ -238,7 +290,7 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
     ) -> PermissionDecision {
         // 上下文无关的旧 seam（既有单元/集成测试直接调用）：无注入会话事实，
         // 草稿门禁按 fail-closed 规则处理（C-138-4）。旧 seam 无宿主审批（None）。
-        self.decide_with_context(descriptor, None, None, final_arguments)
+        self.decide_with_context(descriptor, None, None, None, final_arguments)
     }
 
     fn evaluate_with_context(
@@ -254,6 +306,7 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
             descriptor,
             context.session_id.as_deref(),
             context.plan_execution_approval.as_ref(),
+            context.workspace_root.as_deref(),
             final_arguments,
         )
     }
@@ -362,24 +415,26 @@ pub fn build_governed_executor_full(
     // CrossSession guard on every operation (PA-076 Decision 6). ──
     let shared_plan_store = Arc::new(plan_store.unwrap_or_else(PlanStore::new));
 
-    // W30b：加载并注册基于规则与真实共享 Plan 状态的策略评估器
-    let settings = crate::agent::app_settings::AppSettingsStore::new().load_view();
-    dispatcher.register_policy_evaluator(Arc::new(GovernedPolicyEvaluator::new(
-        settings.tool_rules,
-        Some(Arc::clone(&shared_plan_store)),
-    )));
-    // Legacy-compatible budgets: the switch must reproduce the legacy ToolRouter's lack of
-    // tool-level output-byte/deadline caps (phase-4..7 review P1-2), not silently regress large
-    // reads/batches. The governed path still enforces cancellation + child-call budgets.
-    dispatcher.set_budget_config(DispatchBudgetConfig {
-        unbounded_output_and_deadline: true,
-        ..Default::default()
+    // 默认工作区分叉收敛：None 兜底取 compute_default_workspace_root()
+    //（Windows Documents/pony_agent，Unix ~/pony_agent），dirs 解析失败才回退 cwd。
+    let workspace = workspace_root.unwrap_or_else(|| {
+        crate::agent::workspace::compute_default_workspace_root()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     });
-    // 生产链路沙箱装配（design Decision 7 / DSH danger-full-access 信任透传语义）：
-    // Execute-scope（workspace_run_command）有 dispatcher 预检 + legacy handler 两层门禁，
-    // 两层必须装配同一决策的后端，否则 dispatcher 放行后 handler 仍 fail-closed。
-    // 优先级：显式 override > Native 可用 > HostApproved。
-    // override（测试注入）只替换 dispatcher 预检层；handler 层沿用生产默认，保证 Run 可执行。
+    // PA-080：授权清单（如有）与 host control plane 共享同一 `Arc`；
+    // 缺省（测试/legacy 构造）时工具判定使用空授权清单（workspace 外读一律 requires_authorization）。
+    let shared_authorizations = authorize_store
+        .unwrap_or_else(|| Arc::new(crate::agent::path_permission::AuthorizeStore::new()));
+
+    // W30b：加载并注册基于规则与真实共享 Plan 状态以及路径授权状态的策略评估器
+    let settings = crate::agent::app_settings::AppSettingsStore::new().load_view();
+    dispatcher.register_policy_evaluator(Arc::new(
+        GovernedPolicyEvaluator::new(
+            settings.tool_rules,
+            Some(Arc::clone(&shared_plan_store)),
+        )
+        .with_authorize_store(Arc::clone(&shared_authorizations)),
+    ));
     let native_probe = NativeSandboxBackend::detect();
     let native_available = native_probe.availability() == SandboxAvailability::Available;
     match &sandbox_override {
@@ -394,18 +449,10 @@ pub fn build_governed_executor_full(
             }
         }
     }
-
-    // 默认工作区分叉收敛：None 兜底取 compute_default_workspace_root()
-    //（Windows Documents/pony_agent，Unix ~/pony_agent），dirs 解析失败才回退 cwd。
-    let workspace = workspace_root.unwrap_or_else(|| {
-        crate::agent::workspace::compute_default_workspace_root()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    dispatcher.set_budget_config(DispatchBudgetConfig {
+        unbounded_output_and_deadline: true,
+        ..Default::default()
     });
-    // PA-080：授权清单（如有）与 host control plane 共享同一 `Arc`；
-    // 缺省（测试/legacy 构造）时工具判定使用空授权清单（workspace 外读一律 requires_authorization）。
-    let shared_authorizations = authorize_store
-        .unwrap_or_else(|| Arc::new(crate::agent::path_permission::AuthorizeStore::new()));
-    // handler 层（legacy ToolRouter.Run）与 dispatcher 预检层装配同一决策的后端：
     // 否则预检放行后 handler 仍以 NoSandboxBackend 报 sandbox_denied。
     let router = if native_available {
         ToolRouter::with_workspace_root(workspace.clone())
@@ -588,6 +635,41 @@ mod tests {
         assert_eq!(pending[0].session_id.as_deref(), Some("session-ask"));
         assert_eq!(pending[0].turn_id, "turn-1");
         assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
+    }
+
+    #[test]
+    fn governed_executor_read_outside_workspace_requires_approval_and_persists_request() {
+        let workspace = temp_workspace();
+        let governed = build_governed_executor(Some(workspace.clone()), None);
+        governed.set_context(crate::agent::dispatcher::DispatchContext {
+            session_id: Some("session-approval".to_string()),
+            run_id: Some("run-appr".to_string()),
+            turn_id: Some("turn-appr".to_string()),
+            workspace_root: Some(workspace.display().to_string()),
+            ..Default::default()
+        });
+
+        // 创建一个真实存在的外部临时文件
+        let ext_dir = temp_workspace();
+        let ext_file = ext_dir.join("external_test_file.txt");
+        std::fs::write(&ext_file, "external content").expect("write external");
+
+        let read_call = same_call(
+            "Read",
+            json!({ "path": ext_file.display().to_string(), "description": "test" }),
+        );
+        let result = governed.execute(&read_call);
+        assert_eq!(result.status, "error");
+        assert!(
+            result.output.contains("control_outcome_pending"),
+            "expected control_outcome_pending for unauthorized external read, got: {}",
+            result.output
+        );
+
+        let pending = governed.dispatcher().pending_requests();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request_kind, PendingControlRequestKind::Approval);
+        assert_eq!(pending[0].session_id.as_deref(), Some("session-approval"));
     }
 
     /// Parse a tool output and drop the non-deterministic `durationMs` field for fidelity

@@ -346,6 +346,7 @@ pub fn pending_ui_request_from_value(value: &serde_json::Value) -> Option<Pendin
         .get("requestKind")
         .and_then(|kind| kind.as_str())
         .unwrap_or("interaction");
+    let is_approval = kind == "approval" || kind == "approval_required";
     Some(PendingUiRequest {
         request_id,
         version,
@@ -353,7 +354,7 @@ pub fn pending_ui_request_from_value(value: &serde_json::Value) -> Option<Pendin
             .get("runId")
             .and_then(|run_id| run_id.as_str())
             .map(str::to_string),
-        is_approval: kind == "approval_required",
+        is_approval,
     })
 }
 
@@ -414,6 +415,17 @@ pub fn permission_request_from_pending(
     value: &serde_json::Value,
     session_id: &str,
 ) -> PermissionRequest {
+    let target_path = value
+        .get("options")
+        .and_then(|opts| opts.get("path").or_else(|| opts.get("file_path")))
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("callId")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        });
     PermissionRequest {
         request_id: value
             .get("requestId")
@@ -435,10 +447,7 @@ pub fn permission_request_from_pending(
             .and_then(|prompt| prompt.as_str())
             .unwrap_or("（宿主请求缺少说明）")
             .to_string(),
-        command_or_path: value
-            .get("callId")
-            .and_then(|id| id.as_str())
-            .map(str::to_string),
+        command_or_path: target_path,
         timestamp_ms: value
             .get("expiresAtMs")
             .and_then(|ms| ms.as_u64())
@@ -5465,6 +5474,13 @@ fn tui_event_loop(
                                     if handle.is_approval {
                                         match choice {
                                             PermissionChoice::AllowOnce | PermissionChoice::AllowSession => {
+                                                if choice == PermissionChoice::AllowSession {
+                                                    if let Some(ref perm) = state.permission_state {
+                                                        if let Some(ref target) = perm.request.command_or_path {
+                                                            let _ = control_plane.authorize_path(target, "read");
+                                                        }
+                                                    }
+                                                }
                                                 if let Err(e) = control_plane.approve_control_request(&handle.request_id, handle.version) {
                                                     state.status_text = format!("审批执行失败: {e}");
                                                     state.messages.push(ChatMessage {
@@ -6427,11 +6443,19 @@ mod wave43_unit_tests {
         let val_appr = json!({
             "requestId": "appr-202",
             "version": 1,
-            "requestKind": "approval_required"
+            "requestKind": "approval"
         });
         let handle_appr = pending_ui_request_from_value(&val_appr).expect("must parse handle");
         assert_eq!(handle_appr.request_id, "appr-202");
         assert!(handle_appr.is_approval);
+
+        let val_appr_req = json!({
+            "requestId": "appr-203",
+            "version": 1,
+            "requestKind": "approval_required"
+        });
+        let handle_appr_req = pending_ui_request_from_value(&val_appr_req).expect("must parse handle");
+        assert!(handle_appr_req.is_approval);
     }
 
     #[test]
