@@ -249,6 +249,38 @@ fn test_ask_user_dialog_rendering_contract() {
     );
 }
 
+#[test]
+fn test_ask_user_resume_version_resolution_logic() {
+    // 模拟控制面 graph_list_ask_waits 返回的值，验证 expectedVersion 获取逻辑
+    let waits_json = serde_json::json!([
+        {
+            "requestId": "ask-req-1",
+            "expectedVersion": 2,
+            "runId": "run-101"
+        },
+        {
+            "requestId": "ask-req-2",
+            "expectedVersion": 5,
+            "runId": "run-101"
+        }
+    ]);
+
+    let handle_req_id = "ask-req-1";
+    let fallback_version = 1u64;
+
+    let resume_version = waits_json
+        .as_array()
+        .and_then(|waits| {
+            waits.iter().find(|w| {
+                w.get("requestId").and_then(|r| r.as_str()) == Some(handle_req_id)
+            })
+        })
+        .and_then(|w| w.get("expectedVersion").and_then(|v| v.as_u64()))
+        .unwrap_or(fallback_version);
+
+    assert_eq!(resume_version, 2, "必须成功从 ask_waits 匹配得到 expectedVersion");
+}
+
 // -----------------------------------------------------------------------------
 // 3. Plan 交互与展示测试 (Plan Steps & /plan Mode)
 // -----------------------------------------------------------------------------

@@ -3712,10 +3712,11 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         } else {
             state.input_buffer.clone()
         };
+        let caret = if state.spinner_tick % 2 == 0 { CARET } else { "" };
         rows.push(Line::from(vec![
             Span::styled("  › ", Style::default().fg(theme::ACCENT)),
             Span::styled(value, ink()),
-            Span::styled(CARET, Style::default().fg(theme::ACCENT)),
+            Span::styled(caret, Style::default().fg(theme::ACCENT)),
         ]));
         if !state.status_text.is_empty()
             && (state.status_text.contains("错误") || state.status_text.contains("不能"))
@@ -4043,15 +4044,20 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
 
         if lines.len() + 1 < area.height as usize {
             custom_focused = ask.selected_option_index == q.options.len();
-            // 聚焦时把光标块画在文本尾部，明确「这里可以直接打字」。
+            // 聚焦时在文本尾部显示闪烁的半角细竖线光标（▏），半角且呼吸闪烁。
+            let caret = if custom_focused && state.spinner_tick % 2 == 0 {
+                CARET
+            } else {
+                ""
+            };
             let label = if ask.custom_input.is_empty() {
                 if custom_focused {
-                    "自定义输入 ▌".to_string()
+                    format!("自定义输入{caret}")
                 } else {
                     "自定义输入…".to_string()
                 }
             } else if custom_focused {
-                format!("{}▌", ask.custom_input)
+                format!("{}{caret}", ask.custom_input)
             } else {
                 ask.custom_input.clone()
             };
@@ -4183,8 +4189,19 @@ pub fn render_ask_user_dialog_stub(f: &mut Frame, state: &TuiState) {
         // 自定义输入项
         let custom_idx = q.options.len();
         let is_custom_focused = ask.selected_option_index == custom_idx;
+        let caret = if is_custom_focused && state.spinner_tick % 2 == 0 {
+            CARET
+        } else {
+            ""
+        };
         let custom_label = if ask.custom_input.is_empty() {
-            "  ✎ 自定义输入...".to_string()
+            if is_custom_focused {
+                format!("  ✎ 自定义输入{caret}")
+            } else {
+                "  ✎ 自定义输入...".to_string()
+            }
+        } else if is_custom_focused {
+            format!("  ✎ {}{caret}", ask.custom_input)
         } else {
             format!("  ✎ {}", ask.custom_input)
         };
@@ -4675,7 +4692,7 @@ fn tui_event_loop(
         // 流式态 160ms 驱动动效；问答等待期用 450ms 的低频呼吸提醒（不闪、不抢注意力）。
         let awaiting_answer = matches!(
             state.mode,
-            InteractionMode::AskUserQuestion
+            InteractionMode::AskUserQuestion | InteractionMode::AddingProvider
         );
         let tick_ms = if state.is_streaming { 160 } else { 450 };
         if (state.is_streaming || awaiting_answer)

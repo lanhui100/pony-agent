@@ -75,3 +75,7 @@ tsconfig.tsbuildinfo
 
 # DSH Windows 沙箱 ACL 修复的备份与回滚脚本（本地环境产物，不含项目内容）
 .acl-recovery/
+
+# tools/tui-audit 本地基线可执行文件及临时二进制产物
+tools/tui-audit/bin/
+
