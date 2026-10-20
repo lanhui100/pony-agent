@@ -89,6 +89,13 @@ pub struct WorkspaceHotloader {
     session_baselines: RwLock<HashMap<String, SessionBaselineSnapshot>>,
 }
 
+static GLOBAL_HOTLOADER: std::sync::OnceLock<WorkspaceHotloader> = std::sync::OnceLock::new();
+
+/// 获取进程级全局持久化热加载管理器，确保跨轮次持有基线
+pub fn get_global_workspace_hotloader() -> &'static WorkspaceHotloader {
+    GLOBAL_HOTLOADER.get_or_init(WorkspaceHotloader::new)
+}
+
 impl WorkspaceHotloader {
     pub fn new() -> Self {
         Self::default()

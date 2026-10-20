@@ -2872,6 +2872,49 @@ fn anthropic_system_text(input: &[ProviderMessage]) -> String {
         .join("\n\n")
 }
 
+pub fn anthropic_system_payload(input: &[ProviderMessage]) -> Value {
+    let text = anthropic_system_text(input);
+    if text.trim().is_empty() {
+        Value::String(String::new())
+    } else {
+        // 声明 cache_control 断点，触发 Anthropic Prompt Caching
+        json!([
+            {
+                "type": "text",
+                "text": text,
+                "cache_control": {
+                    "type": "ephemeral"
+                }
+            }
+        ])
+    }
+}
+
+pub fn build_anthropic_test_request_payload(system: &str, user_text: &str) -> Value {
+    json!({
+        "system": anthropic_system_payload(&[ProviderMessage::system(system)]),
+        "messages": [
+            {
+                "role": "user",
+                "content": user_text
+            }
+        ]
+    })
+}
+
+pub fn extract_anthropic_usage_from_sse_payload(payload_str: &str) -> TokenUsage {
+    for line in payload_str.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if let Ok(v) = serde_json::from_str::<Value>(data) {
+                if let Some(usage) = extract_anthropic_usage(&v) {
+                    return usage;
+                }
+            }
+        }
+    }
+    TokenUsage::default()
+}
+
 /// 构建 Anthropic API 的 messages 数组，按原始顺序包含：
 /// - user 消息（含图片处理）
 /// - "Previous assistant reply" 作为 assistant 角色消息
@@ -4078,10 +4121,15 @@ fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
         })
         .or_else(|| payload.get("delta").and_then(|delta| delta.get("usage")))?;
 
+    let cache_hit = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .map(|v| (v, "usage.cache_read_input_tokens"));
+
     Some(normalize_token_usage(TokenUsage {
         input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
-        cache_hit_input_tokens: None,
-        cache_hit_source: None,
+        cache_hit_input_tokens: cache_hit.map(|(v, _)| v),
+        cache_hit_source: cache_hit.map(|(_, s)| s.to_string()),
         reasoning_tokens: None,
         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),

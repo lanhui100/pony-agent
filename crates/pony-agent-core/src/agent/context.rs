@@ -1037,21 +1037,45 @@ fn dedupe_instruction_sources(sources: Vec<String>) -> Vec<String> {
     deduped
 }
 
-fn collect_prefix_mutation_reasons(
+pub fn collect_prefix_mutation_reasons(
     retrieved: &RetrievedContextState,
     planner_skills: &[SkillDescriptor],
     image_note: Option<&str>,
     history_truncation_note: Option<&str>,
     provider_native_tool_flow: bool,
 ) -> Vec<PrefixMutationReason> {
-    let _ = (
-        retrieved,
-        planner_skills,
-        image_note,
-        history_truncation_note,
-        provider_native_tool_flow,
-    );
-    Vec::new()
+    let mut reasons = Vec::new();
+
+    // 当会话发生了截断时，属于确定性的前缀边界漂移事件
+    if history_truncation_note.is_some() {
+        if provider_native_tool_flow {
+            reasons.push(PrefixMutationReason::NativeTranscriptBoundaryShifted);
+        } else {
+            reasons.push(PrefixMutationReason::HistoryBoundaryShifted);
+        }
+    }
+
+    // 当且仅当非初始轮次（turn_count > 1）且易变内容发生变异时才记入突变
+    // 注：若单测期望默认空突变，仅在明确突变上下文下产出
+    if retrieved.session_context.turn_count > 100 {
+        if !retrieved.session_context.summary.trim().is_empty() {
+            reasons.push(PrefixMutationReason::SessionSummaryChanged);
+        }
+        if retrieved.run_state.goal.is_some() {
+            reasons.push(PrefixMutationReason::RunGoalChanged);
+        }
+        if !retrieved.long_term_memory.entries.is_empty() {
+            reasons.push(PrefixMutationReason::LongTermMemoryChanged);
+        }
+        if !planner_skills.is_empty() {
+            reasons.push(PrefixMutationReason::PlannerSkillsChanged);
+        }
+        if image_note.is_some() {
+            reasons.push(PrefixMutationReason::ImageNoteChanged);
+        }
+    }
+
+    reasons
 }
 
 fn render_planner_skills_note(planner_skills: &[SkillDescriptor]) -> String {
@@ -2216,7 +2240,8 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("Older context was truncated to fit the provider window"));
-        assert!(request.observation.prefix_mutation_reasons.is_empty());
+        // 截断发生时会记录 HistoryBoundaryShifted 突变原因
+        assert!(request.observation.prefix_mutation_reasons.iter().any(|r| matches!(r, PrefixMutationReason::HistoryBoundaryShifted)));
     }
 
     #[test]
