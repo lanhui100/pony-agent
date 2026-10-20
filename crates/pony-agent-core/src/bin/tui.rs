@@ -19,7 +19,9 @@ use pony_agent_core::agent::config::{
 use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand, StopTurnCommand,
 };
+use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalData};
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
+use pony_agent_core::agent::todo::{TodoItem, TodoStatus as StoreTodoStatus};
 use pony_agent_core::agent::runtime::{AgentRuntimeBuilder, TurnInput, TurnStreamEvent};
 use pony_agent_core::agent::session::SessionStore;
 use pony_agent_core::agent::turn_flow::TurnEventSink;
@@ -122,6 +124,8 @@ pub enum UiEvent {
     TaskBoardUpdated(Vec<TuiTask>),
     /// Goal 状态更新通知
     GoalUpdated(TuiGoal),
+    /// 波次 43：本轮被宿主控制请求挂起（ask_user / approval），主循环据此拉取待决请求。
+    TurnSuspended { run_id: Option<String> },
 }
 
 /// wave-40 R1（契约冻结空桩）：Composer 中 Enter 键语义。
@@ -191,6 +195,255 @@ pub fn clean_tool_name_display(name: &str) -> String {
 #[path = "tui/protocol.rs"]
 pub mod protocol;
 pub use protocol::*;
+
+// ── 波次 43：宿主控制请求 → TUI 视图投影（真实运行时接线）─────────────────
+//
+// 这里的四个映射是整个「交互面板不再是死代码」的接缝：数据一律来自真实的
+// 控制面快照（list_pending_asks）、todo 存储（todo_list）、goal 存储
+// （active_goal_for_session / plan_list），而不是测试构造的假数据。
+
+/// 一条待决宿主控制请求的 TUI 句柄：提交/拒绝时按 CAS `version` 回写控制面。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingUiRequest {
+    pub request_id: String,
+    pub version: u64,
+    /// 审批/问答请求绑定的图运行 id；`None` 表示不经过图运行、只能消费不能 resume。
+    pub run_id: Option<String>,
+    /// `true` = 审批类（approval_required），`false` = 问答类（interaction）。
+    pub is_approval: bool,
+}
+
+/// 真实 todo 存储 → 任务看板投影。`id` 按存储顺序稳定生成，避免每帧抖动。
+pub fn tui_tasks_from_todos(todos: Vec<TodoItem>) -> Vec<TuiTask> {
+    todos
+        .into_iter()
+        .enumerate()
+        .map(|(index, todo)| TuiTask {
+            id: todo
+                .step_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or_else(|| format!("todo-{}", index + 1)),
+            subject: todo.content,
+            status: match todo.status {
+                StoreTodoStatus::Pending => TuiTaskStatus::Pending,
+                StoreTodoStatus::InProgress => TuiTaskStatus::InProgress,
+                StoreTodoStatus::Completed => TuiTaskStatus::Completed,
+            },
+            owner: None,
+            blocked_by: Vec::new(),
+            write_scopes: Vec::new(),
+        })
+        .collect()
+}
+
+/// 真实 todo 存储 → 任务看板（模型调用 todo 工具后由这里同步，不造假数据）。
+pub fn sync_tasks_from_store(state: &mut TuiState) {
+    let args = pony_agent_core::agent::todo::TodoListArgs {
+        session_id: Some(state.session_id.clone()),
+    };
+    match pony_agent_core::agent::todo::todo_list(args) {
+        Ok(list) => {
+            let tasks = tui_tasks_from_todos(list.todos);
+            if tasks.is_empty() {
+                // 空列表保留 `None`，让面板走「当前没有任务」空状态而不是 0/0 看板。
+                state.task_board_state = None;
+            } else {
+                state.update_task_board(tasks);
+            }
+        }
+        Err(error) => {
+            state.status_text = format!("任务同步失败: {error}");
+        }
+    }
+}
+
+/// 真实 goal 存储 → TUI goal 投影。phase 用现有字符串契约，未知值降级为 `Active`。
+pub fn tui_goal_from_goal(goal: &GoalData) -> TuiGoal {
+    TuiGoal {
+        id: goal.id.clone(),
+        objective: goal.objective.clone(),
+        phase: match goal.phase.as_str() {
+            "completed" => GoalPhase::Completed,
+            "blocked" => GoalPhase::Blocked,
+            "paused" => GoalPhase::Paused,
+            _ => GoalPhase::Active,
+        },
+        activation: match goal.activation {
+            AgentGoalActivation::Armed => GoalActivation::Armed,
+            AgentGoalActivation::Disarmed => GoalActivation::Disarmed,
+        },
+        round_count: goal.rounds_started,
+        max_rounds: Some(goal.max_goal_rounds),
+        revision: goal.revision,
+    }
+}
+
+/// `control_plane.plan_list(session)` 的 JSON 投影 → PlanState。空数组/格式不符返回 `None`。
+pub fn tui_plan_from_value(value: &serde_json::Value) -> Option<PlanState> {
+    let plan = value.as_array()?.first()?;
+    let steps = plan
+        .get("steps")
+        .and_then(|steps| steps.as_array())
+        .map(|steps| {
+            steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| PlanStep {
+                    step_id: step
+                        .get("stepId")
+                        .and_then(|id| id.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("step-{}", index + 1)),
+                    name: step
+                        .get("name")
+                        .and_then(|name| name.as_str())
+                        .unwrap_or("未命名步骤")
+                        .to_string(),
+                    summary: step
+                        .get("summary")
+                        .and_then(|summary| summary.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    status: match step.get("status").and_then(|status| status.as_str()) {
+                        Some("completed") => PlanStepStatus::Completed,
+                        Some("in_progress") => PlanStepStatus::InProgress,
+                        Some("failed") => PlanStepStatus::Failed,
+                        _ => PlanStepStatus::Pending,
+                    },
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(PlanState {
+        plan_id: plan
+            .get("planId")
+            .and_then(|id| id.as_str())
+            .unwrap_or("plan")
+            .to_string(),
+        revision: plan.get("revision").and_then(|rev| rev.as_u64()).unwrap_or(0),
+        summary: plan
+            .get("summary")
+            .and_then(|summary| summary.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        steps,
+        is_active_plan_mode: true,
+        selected_step_index: 0,
+        awaiting_approval: plan
+            .get("lifecycle")
+            .and_then(|lifecycle| lifecycle.as_str())
+            .is_some_and(|lifecycle| lifecycle == "draft"),
+    })
+}
+
+/// `list_pending_asks` 数组项 → TUI 句柄。缺 `requestId`/`version` 视为不可消费，返回 `None`。
+pub fn pending_ui_request_from_value(value: &serde_json::Value) -> Option<PendingUiRequest> {
+    let request_id = value.get("requestId")?.as_str()?.to_string();
+    let version = value.get("version")?.as_u64()?;
+    let kind = value
+        .get("requestKind")
+        .and_then(|kind| kind.as_str())
+        .unwrap_or("interaction");
+    Some(PendingUiRequest {
+        request_id,
+        version,
+        run_id: value
+            .get("runId")
+            .and_then(|run_id| run_id.as_str())
+            .map(str::to_string),
+        is_approval: kind == "approval_required",
+    })
+}
+
+/// 待决请求 → 问答对话框数据。`options` 若已是 `{label,description}` 数组则直接采用。
+pub fn ask_question_from_pending(value: &serde_json::Value) -> AskUserQuestion {
+    let question = value
+        .get("prompt")
+        .and_then(|prompt| prompt.as_str())
+        .unwrap_or("（宿主请求缺少提问内容）")
+        .to_string();
+    let options = value
+        .get("options")
+        .and_then(|options| options.as_array())
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    option
+                        .get("label")
+                        .and_then(|label| label.as_str())
+                        .map(|label| QuestionOption {
+                            label: label.to_string(),
+                            description: option
+                                .get("description")
+                                .and_then(|desc| desc.as_str())
+                                .map(str::to_string),
+                        })
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|options| !options.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                QuestionOption {
+                    label: "确认".to_string(),
+                    description: Some("继续执行该请求".to_string()),
+                },
+                QuestionOption {
+                    label: "取消".to_string(),
+                    description: Some("放弃该请求".to_string()),
+                },
+            ]
+        });
+    AskUserQuestion {
+        id: "q1".to_string(),
+        header: value
+            .get("descriptorId")
+            .and_then(|id| id.as_str())
+            .map(str::to_string),
+        question,
+        multi_select: false,
+        options,
+    }
+}
+
+/// 待决审批请求 → 权限对话框数据。
+pub fn permission_request_from_pending(
+    value: &serde_json::Value,
+    session_id: &str,
+) -> PermissionRequest {
+    PermissionRequest {
+        request_id: value
+            .get("requestId")
+            .and_then(|id| id.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        session_id: value
+            .get("sessionId")
+            .and_then(|id| id.as_str())
+            .unwrap_or(session_id)
+            .to_string(),
+        tool_name: value
+            .get("descriptorId")
+            .and_then(|id| id.as_str())
+            .unwrap_or("tool")
+            .to_string(),
+        description: value
+            .get("prompt")
+            .and_then(|prompt| prompt.as_str())
+            .unwrap_or("（宿主请求缺少说明）")
+            .to_string(),
+        command_or_path: value
+            .get("callId")
+            .and_then(|id| id.as_str())
+            .map(str::to_string),
+        timestamp_ms: value
+            .get("expiresAtMs")
+            .and_then(|ms| ms.as_u64())
+            .unwrap_or(0),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InteractionMode {
@@ -357,6 +610,9 @@ pub struct TuiState {
     pub plan_state: Option<PlanState>,
     pub task_board_state: Option<TaskBoardState>,
     pub goal_state: Option<TuiGoal>,
+    /// 波次 43：当前处于待决状态的宿主控制请求（真实 `list_pending_asks` 快照）。
+    /// `None` = 没有待决请求；`Some` 时对话框提交/拒绝会回写控制面。
+    pub pending_request: Option<PendingUiRequest>,
 }
 
 impl Default for TuiState {
@@ -413,6 +669,7 @@ impl Default for TuiState {
             plan_state: None,
             task_board_state: None,
             goal_state: None,
+            pending_request: None,
         }
     }
 }
@@ -1424,6 +1681,11 @@ impl TurnEventSink for TuiTurnSink {
                 let short_detail = truncate_chars(&detail, 60);
                 let formatted = format_tool_display(&name, display_zh.as_deref(), Some(&short_detail), Some(&status));
                 let _ = self.tx.send(UiEvent::StreamToolResult(formatted));
+            }
+            "turn:suspended" => {
+                // wave-43：Ask/审批把轮次挂起——主循环据此拉取真实待决请求并打开对话框。
+                // run_id 以控制面快照为准（此处不猜），因此这里只发信号。
+                let _ = self.tx.send(UiEvent::TurnSuspended { run_id: None });
             }
             "turn:completed" | "turn:output_end" => {
                 // wave-39 R8'（契约 v2）：usage 只由 turn:output_end 发射；turn:completed
@@ -3212,10 +3474,40 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 }
 
+/// 面板在无数据时的统一空状态：不允许整屏空白（那会让用户误判 TUI 挂了）。
+fn render_pending_empty_state(f: &mut Frame, title: &str, body: &str, hint: &str) {
+    let area = f.area();
+    let pw = 72u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = 8u16.min(area.height.saturating_sub(2)).max(6);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(pw)) / 2,
+        y: area.y + (area.height.saturating_sub(ph)) / 2,
+        width: pw,
+        height: ph,
+    };
+    let inner = draw_panel(f, rect, title, hint);
+    f.render_widget(
+        Paragraph::new(vec![
+            blank(),
+            Line::from(Span::styled(format!("  {body}"), faint())),
+        ])
+        .style(Style::default().bg(theme::SURFACE)),
+        inner,
+    );
+}
+
 pub fn render_permission_dialog_stub(f: &mut Frame, state: &TuiState) {
     let perm = match &state.permission_state {
         Some(p) => p,
-        None => return,
+        None => {
+            render_pending_empty_state(
+                f,
+                "权限审批请求 (Permission Request)",
+                "当前没有待审批的工具调用",
+                "Esc 返回",
+            );
+            return;
+        }
     };
     let area = f.area();
     let pw = 76u16.min(area.width.saturating_sub(4)).max(20);
@@ -3290,7 +3582,15 @@ pub fn render_permission_dialog_stub(f: &mut Frame, state: &TuiState) {
 pub fn render_ask_user_dialog_stub(f: &mut Frame, state: &TuiState) {
     let ask = match &state.ask_user_state {
         Some(a) => a,
-        None => return,
+        None => {
+            render_pending_empty_state(
+                f,
+                "用户输入确认 (Ask User)",
+                "当前没有待回答的提问",
+                "Esc 返回",
+            );
+            return;
+        }
     };
     let area = f.area();
     let pw = 76u16.min(area.width.saturating_sub(4)).max(20);
@@ -3373,7 +3673,15 @@ pub fn render_ask_user_dialog_stub(f: &mut Frame, state: &TuiState) {
 pub fn render_plan_panel_stub(f: &mut Frame, state: &TuiState) {
     let plan = match &state.plan_state {
         Some(p) => p,
-        None => return,
+        None => {
+            render_pending_empty_state(
+                f,
+                "Plan 计划模式与步骤展示",
+                "当前会话还没有计划；模型调用 Plan 后会实时显示步骤进度",
+                "/plan 或 Esc 退出计划模式",
+            );
+            return;
+        }
     };
     let area = f.area();
     let pw = 80u16.min(area.width.saturating_sub(4)).max(20);
@@ -3431,7 +3739,15 @@ pub fn render_plan_panel_stub(f: &mut Frame, state: &TuiState) {
 pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
     let board = match &state.task_board_state {
         Some(b) => b,
-        None => return,
+        None => {
+            render_pending_empty_state(
+                f,
+                "Team 共享任务看板",
+                "当前没有任务；模型调用 todo 工具后会实时汇总到这里",
+                "Tab 折叠/展开 · Esc 退出",
+            );
+            return;
+        }
     };
     let area = f.area();
     let pw = 84u16.min(area.width.saturating_sub(4)).max(20);
@@ -3572,6 +3888,10 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut state = TuiState::default();
+    // 启动时同步当前会话的 active goal（若存在）
+    if let Some(goal_data) = pony_agent_core::agent::goal::active_goal_for_session(&state.session_id) {
+        state.set_goal(tui_goal_from_goal(&goal_data));
+    }
     // wave-35c：启动同步 current_provider_id / model 与注册表一致（build_control_plane 之前）。
     sync_state_with_registry(&mut state);
     let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
@@ -3688,7 +4008,39 @@ fn tui_event_loop(
     });
 
     let mut last_tick_instant = std::time::Instant::now();
+    let mut last_poll_instant = std::time::Instant::now();
     install_shutdown_signal_handlers();
+
+    // 辅助闭包：检查并同步当前 session 的待决宿主控制请求（Ask / Approval）
+    let check_pending_asks = |st: &mut TuiState, cp: &HostControlPlane| -> bool {
+        // 如果当前已处于审批或问答模式，暂不覆盖当前操作
+        if st.mode == InteractionMode::PermissionApproval || st.mode == InteractionMode::AskUserQuestion {
+            return false;
+        }
+        let pending = cp.list_pending_asks(Some(st.session_id.as_str()));
+        let items = match pending.as_array() {
+            Some(arr) if !arr.is_empty() => arr,
+            _ => {
+                st.pending_request = None;
+                return false;
+            }
+        };
+
+        if let Some(first) = items.first() {
+            if let Some(handle) = pending_ui_request_from_value(first) {
+                st.pending_request = Some(handle.clone());
+                if handle.is_approval {
+                    let req = permission_request_from_pending(first, &st.session_id);
+                    st.start_permission_approval(req);
+                } else {
+                    let q = ask_question_from_pending(first);
+                    st.start_ask_user(handle.request_id, vec![q]);
+                }
+                return true;
+            }
+        }
+        false
+    };
 
     // 事件驱动重绘：无输入、无流式时不做无意义的 60fps 全屏重绘（省 CPU / 省电）。
     let mut dirty = true;
@@ -3702,6 +4054,14 @@ fn tui_event_loop(
             state.spinner_tick = state.spinner_tick.wrapping_add(1);
             last_tick_instant = std::time::Instant::now();
             dirty = true;
+        }
+
+        // 空闲或间隔约 500ms 时，轮询一次待决的宿主请求
+        if last_poll_instant.elapsed() >= Duration::from_millis(500) {
+            if check_pending_asks(&mut state, &control_plane) {
+                dirty = true;
+            }
+            last_poll_instant = std::time::Instant::now();
         }
 
         // 存在平滑阻尼过渡（Composer 柔和收拢或平滑滚动追赶）时持续刷新下一帧
@@ -4077,6 +4437,18 @@ fn tui_event_loop(
                     if state.mode == InteractionMode::PermissionApproval {
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                if let Some(ref handle) = state.pending_request {
+                                    if handle.is_approval {
+                                        if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
+                                            state.status_text = format!("取消审批失败: {e}");
+                                            state.messages.push(ChatMessage {
+                                                role: MessageRole::System,
+                                                content: format!("取消审批失败: {e}"),
+                                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                            });
+                                        }
+                                    }
+                                }
                                 if let Some(ref perm) = state.permission_state {
                                     let req_id = perm.request.request_id.clone();
                                     let _ = tx.send(UiEvent::PermissionDecided {
@@ -4084,6 +4456,7 @@ fn tui_event_loop(
                                         choice: PermissionChoice::Deny,
                                     });
                                 }
+                                state.pending_request = None;
                                 state.cancel_permission_approval();
                             }
                             KeyCode::Tab | KeyCode::Down => {
@@ -4097,6 +4470,18 @@ fn tui_event_loop(
                                 }
                             }
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                if let Some(ref handle) = state.pending_request {
+                                    if handle.is_approval {
+                                        if let Err(e) = control_plane.approve_control_request(&handle.request_id, handle.version) {
+                                            state.status_text = format!("审批同意失败: {e}");
+                                            state.messages.push(ChatMessage {
+                                                role: MessageRole::System,
+                                                content: format!("审批同意失败: {e}"),
+                                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                            });
+                                        }
+                                    }
+                                }
                                 if let Some(ref perm) = state.permission_state {
                                     let req_id = perm.request.request_id.clone();
                                     let _ = tx.send(UiEvent::PermissionDecided {
@@ -4104,17 +4489,45 @@ fn tui_event_loop(
                                         choice: PermissionChoice::AllowOnce,
                                     });
                                 }
+                                state.pending_request = None;
                                 state.cancel_permission_approval();
                             }
                             KeyCode::Enter => {
+                                let choice = state.permission_state.as_ref().map(|p| p.selected_choice()).unwrap_or(PermissionChoice::Deny);
+                                if let Some(ref handle) = state.pending_request {
+                                    if handle.is_approval {
+                                        match choice {
+                                            PermissionChoice::AllowOnce | PermissionChoice::AllowSession => {
+                                                if let Err(e) = control_plane.approve_control_request(&handle.request_id, handle.version) {
+                                                    state.status_text = format!("审批执行失败: {e}");
+                                                    state.messages.push(ChatMessage {
+                                                        role: MessageRole::System,
+                                                        content: format!("审批执行失败: {e}"),
+                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                                    });
+                                                }
+                                            }
+                                            PermissionChoice::Deny => {
+                                                if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
+                                                    state.status_text = format!("审批拒绝失败: {e}");
+                                                    state.messages.push(ChatMessage {
+                                                        role: MessageRole::System,
+                                                        content: format!("审批拒绝失败: {e}"),
+                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 if let Some(ref perm) = state.permission_state {
                                     let req_id = perm.request.request_id.clone();
-                                    let choice = perm.selected_choice();
                                     let _ = tx.send(UiEvent::PermissionDecided {
                                         request_id: req_id,
                                         choice,
                                     });
                                 }
+                                state.pending_request = None;
                                 state.cancel_permission_approval();
                             }
                             _ => {}
@@ -4126,6 +4539,19 @@ fn tui_event_loop(
                     if state.mode == InteractionMode::AskUserQuestion {
                         match key.code {
                             KeyCode::Esc => {
+                                if let Some(ref handle) = state.pending_request {
+                                    if !handle.is_approval {
+                                        if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
+                                            state.status_text = format!("取消提问失败: {e}");
+                                            state.messages.push(ChatMessage {
+                                                role: MessageRole::System,
+                                                content: format!("取消提问失败: {e}"),
+                                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                            });
+                                        }
+                                    }
+                                }
+                                state.pending_request = None;
                                 state.cancel_ask_user();
                             }
                             KeyCode::Down => {
@@ -4182,11 +4608,47 @@ fn tui_event_loop(
                                     } else {
                                         (String::new(), Vec::new())
                                     };
+
+                                    let chosen_answer_str = answers_list.first().cloned().unwrap_or_default();
+                                    let answer_json = serde_json::json!({ "answer": chosen_answer_str });
+
+                                    if let Some(ref handle) = state.pending_request {
+                                        if !handle.is_approval {
+                                            let answer_res = control_plane.answer_ask(&handle.request_id, handle.version, answer_json.clone());
+                                            match answer_res {
+                                                Ok(_) => {
+                                                    if let Some(ref run_id) = handle.run_id {
+                                                        if let Err(e) = control_plane.graph_resume_ask(run_id, &handle.request_id, handle.version, answer_json) {
+                                                            state.status_text = format!("恢复任务流失败: {e}");
+                                                            state.messages.push(ChatMessage {
+                                                                role: MessageRole::System,
+                                                                content: format!("恢复任务流失败: {e}"),
+                                                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                                            });
+                                                        } else {
+                                                            state.is_streaming = true;
+                                                            state.status_text = "Thinking...".to_string();
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    state.status_text = format!("提交回答失败: {e}");
+                                                    state.messages.push(ChatMessage {
+                                                        role: MessageRole::System,
+                                                        content: format!("提交回答失败: {e}"),
+                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     let _ = tx.send(UiEvent::AskUserAnswered {
                                         request_id: req_id,
                                         answers: vec![(q_id, answers_list)],
                                     });
                                 }
+                                state.pending_request = None;
                                 state.cancel_ask_user();
                             }
                             _ => {}
@@ -4423,10 +4885,15 @@ fn tui_event_loop(
                                     continue;
                                 }
                                 if input == "/plan" {
+                                    let plans_val = control_plane.plan_list(&state.session_id);
+                                    if let Some(plan_state) = tui_plan_from_value(&plans_val) {
+                                        state.update_plan(plan_state);
+                                    }
                                     state.toggle_plan_mode();
                                     continue;
                                 }
                                 if input == "/tasks" {
+                                    sync_tasks_from_store(&mut state);
                                     state.toggle_task_board();
                                     continue;
                                 }
@@ -4605,6 +5072,10 @@ fn tui_event_loop(
                     state.is_streaming = false;
                     state.transition_runtime_mode(RuntimeMode::Completed);
                     state.status_text = "Turn completed".to_string();
+                    sync_tasks_from_store(&mut state);
+                    if let Some(goal_data) = pony_agent_core::agent::goal::active_goal_for_session(&state.session_id) {
+                        state.set_goal(tui_goal_from_goal(&goal_data));
+                    }
                 }
                 // wave-39 R8：本轮 token 回执 → 幂等覆盖计入累计指标。
                 UiEvent::StreamUsage {
@@ -4721,6 +5192,11 @@ fn tui_event_loop(
                 }
                 UiEvent::GoalUpdated(goal) => {
                     state.set_goal(goal);
+                }
+                UiEvent::TurnSuspended { .. } => {
+                    state.is_streaming = false;
+                    state.status_text = "等待用户输入确认...".to_string();
+                    let _ = check_pending_asks(&mut state, &control_plane);
                 }
                 }
             }
@@ -4925,5 +5401,72 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wave43_unit_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_pending_ui_request_from_value() {
+        let val_ask = json!({
+            "requestId": "ask-101",
+            "version": 3,
+            "runId": "run-xyz",
+            "requestKind": "interaction"
+        });
+        let handle = pending_ui_request_from_value(&val_ask).expect("must parse handle");
+        assert_eq!(handle.request_id, "ask-101");
+        assert_eq!(handle.version, 3);
+        assert_eq!(handle.run_id, Some("run-xyz".to_string()));
+        assert!(!handle.is_approval);
+
+        let val_appr = json!({
+            "requestId": "appr-202",
+            "version": 1,
+            "requestKind": "approval_required"
+        });
+        let handle_appr = pending_ui_request_from_value(&val_appr).expect("must parse handle");
+        assert_eq!(handle_appr.request_id, "appr-202");
+        assert!(handle_appr.is_approval);
+    }
+
+    #[test]
+    fn test_ask_question_from_pending_mapping() {
+        let val = json!({
+            "descriptorId": "confirmation_box",
+            "prompt": "确定要继续吗？",
+            "options": [
+                { "label": "选项 A", "description": "说明 A" },
+                { "label": "选项 B" }
+            ]
+        });
+        let q = ask_question_from_pending(&val);
+        assert_eq!(q.question, "确定要继续吗？");
+        assert_eq!(q.header, Some("confirmation_box".to_string()));
+        assert_eq!(q.options.len(), 2);
+        assert_eq!(q.options[0].label, "选项 A");
+        assert_eq!(q.options[0].description, Some("说明 A".to_string()));
+    }
+
+    #[test]
+    fn test_permission_request_from_pending_mapping() {
+        let val = json!({
+            "requestId": "req-999",
+            "sessionId": "sess-abc",
+            "descriptorId": "bash",
+            "prompt": "执行危险删除命令",
+            "callId": "rm -rf /",
+            "expiresAtMs": 55555
+        });
+        let req = permission_request_from_pending(&val, "fallback-sess");
+        assert_eq!(req.request_id, "req-999");
+        assert_eq!(req.session_id, "sess-abc");
+        assert_eq!(req.tool_name, "bash");
+        assert_eq!(req.description, "执行危险删除命令");
+        assert_eq!(req.command_or_path, Some("rm -rf /".to_string()));
+        assert_eq!(req.timestamp_ms, 55555);
     }
 }

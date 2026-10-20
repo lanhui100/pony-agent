@@ -1,0 +1,32 @@
+{
+  "steps": [
+    {
+      "tool": "TodoWrite",
+      "args": {
+        "todos": [
+          {
+            "content": "打通控制面待决请求 → TUI 对话框",
+            "status": "completed"
+          },
+          {
+            "content": "tmux 真实会话验证 Ask 交互",
+            "status": "in_progress"
+          },
+          {
+            "content": "截图归档并复核门禁",
+            "status": "pending"
+          }
+        ],
+        "description": "写入本次验证的任务清单"
+      }
+    },
+    {
+      "tool": "create_goal",
+      "args": {
+        "objective": "在真实终端里验证 TUI 交互面板可用",
+        "max_goal_rounds": 6,
+        "description": "锚定本次验证的会话目标"
+      }
+    }
+  ]
+}
