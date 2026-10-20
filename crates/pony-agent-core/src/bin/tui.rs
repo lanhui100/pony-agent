@@ -2455,7 +2455,8 @@ pub fn goal_banner_phase(state: &TuiState) -> Option<(bool, u64)> {
     }
 }
 
-fn goal_banner_text(goal: &TuiGoal) -> String {
+/// Goal 横幅拆成「加重的 Goal 标签」+「正文」两段，避免整行同一灰度。
+fn goal_banner_parts(goal: &TuiGoal) -> (String, String) {
     let rounds = match goal.max_rounds {
         Some(max) => format!("{}/{}", goal.round_count, max),
         None => format!("{}", goal.round_count),
@@ -2466,9 +2467,12 @@ fn goal_banner_text(goal: &TuiGoal) -> String {
         GoalPhase::Blocked => "已阻塞",
         GoalPhase::Paused => "已暂停",
     };
-    format!(
-        "Goal · {} [{rounds}] ({phase})",
-        goal.objective.trim().replace('\n', " ")
+    (
+        "Goal".to_string(),
+        format!(
+            " · {} [{rounds}] ({phase})",
+            goal.objective.trim().replace('\n', " ")
+        ),
     )
 }
 
@@ -2512,18 +2516,28 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
     let label_text = workspace_label(&state.workspace);
     if matches!(goal_banner_phase(state), Some((true, _))) {
         if let Some(goal) = state.goal_state.as_ref() {
-            let text = goal_banner_text(goal);
+            let (tag, body) = goal_banner_parts(goal);
             let left_budget = (width.saturating_sub(RAIL + 2)) / 3;
             let label = ellipsize_width(&label_text, left_budget.max(8));
             let used = RAIL + str_width(&label) + 2;
             let budget = width.saturating_sub(used).max(12);
-            let banner = ellipsize_width(&text, budget);
-            let pad = width.saturating_sub(used + str_width(&banner));
+            // 标签固定完整显示（最多 4 列），正文按剩余宽度省略。
+            let body_budget = budget.saturating_sub(str_width(&tag)).max(6);
+            let body = ellipsize_width(&body, body_budget);
+            let pad = width
+                .saturating_sub(used + str_width(&tag) + str_width(&body));
             return Line::from(vec![
                 Span::raw(" ".repeat(RAIL)),
                 Span::styled(label, ghost()),
                 Span::raw("  "),
-                Span::styled(banner, ghost()),
+                // 「Goal」标记加重：BOLD + 比正文亮一档，作为横幅唯一的强调点。
+                Span::styled(
+                    tag,
+                    Style::default()
+                        .fg(theme::MUTED)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(body, ghost()),
                 Span::raw(" ".repeat(pad)),
             ]);
         }

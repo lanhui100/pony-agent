@@ -53,6 +53,7 @@ def char_width(ch: str) -> int:
 
 def parse_runs(line: str):
     fg, bg = DEFAULT_FG, DEFAULT_BG
+    bold = False
     runs = []
     for idx, part in enumerate(SGR.split(line)):
         if idx % 2 == 1:
@@ -61,7 +62,11 @@ def parse_runs(line: str):
             while i < len(codes):
                 code = codes[i]
                 if code == "0":
-                    fg, bg = DEFAULT_FG, DEFAULT_BG
+                    fg, bg, bold = DEFAULT_FG, DEFAULT_BG, False
+                elif code == "1":
+                    bold = True
+                elif code == "22":
+                    bold = False
                 elif code in ("38", "48") and i + 4 < len(codes) and codes[i + 1] == "2":
                     color = tuple(int(codes[i + k]) for k in (2, 3, 4))
                     if code == "38":
@@ -75,7 +80,7 @@ def parse_runs(line: str):
                     bg = DEFAULT_BG
                 i += 1
         elif part:
-            runs.append((part, fg, bg))
+            runs.append((part, fg, bg, bold))
     return runs
 
 
@@ -92,7 +97,7 @@ def render(src: str, dst: str, cols: int = 120, rows: int = 36) -> None:
     for row, line in enumerate(lines):
         y = PAD + row * CELL_H
         col = 0
-        for text, fg, bg in parse_runs(line):
+        for text, fg, bg, bold in parse_runs(line):
             for ch in text:
                 cells = char_width(ch)
                 x = PAD + col * CELL_W
@@ -101,7 +106,12 @@ def render(src: str, dst: str, cols: int = 120, rows: int = 36) -> None:
                         [x, y, x + cells * CELL_W - 1, y + CELL_H - 1], fill=bg
                     )
                 if not ch.isspace():
-                    draw.text((x, y - 1), ch, font=glyph_font(ch), fill=fg)
+                    font_for_ch = glyph_font(ch)
+                    draw.text((x, y - 1), ch, font=font_for_ch, fill=fg)
+                    if bold:
+                        # SGR 1：用亚像素描边模拟粗体，保证证据图能体现强调层级。
+                        for dx, dy in ((0.6, 0), (0, 0.4), (0.6, 0.4)):
+                            draw.text((x + dx, y - 1 + dy), ch, font=font_for_ch, fill=fg)
                 col += cells
     image.save(dst)
     print(f"saved {dst} ({width}x{height})")

@@ -75,7 +75,8 @@ HOME=/tmp/pony-mock-home4 XDG_CONFIG_HOME=/tmp/pony-mock-home/.config target/deb
 Goal 原先被拼在指标行右侧，长目标会把 token/缓存/上下文挤掉。现在改为**时间片轮播**：
 
 - `GOAL_BANNER_HOLD_MS = 6000`、`METRICS_HOLD_MS = 8000`（`goal_banner_phase()` 单点定义）；
-- Goal 相位整行**左对齐**成横幅（`Goal · <目标> [轮次/上限] (阶段)`），指标相位保持右对齐数值；
+- Goal 相位整行**左对齐**成横幅（`Goal · <目标> [轮次/上限] (阶段)`），其中 `Goal` 标签
+  单独加重（`BOLD` + 比正文亮一档的 `MUTED`），作为横幅唯一强调点；指标相位保持右对齐数值；
 - 相位边界由主循环精确重绘（`cap_poll_ms` 对齐到下次切换），空闲时不空转。
 
 实测采样（1s 粒度）：
