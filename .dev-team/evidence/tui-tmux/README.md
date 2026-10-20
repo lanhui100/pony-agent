@@ -39,6 +39,7 @@ python3 .dev-team/evidence/tui-tmux/ansi2png.py <file>.ansi <file>.png
 | `19-ask-inline-answered.png` | 提交后回到普通输入态，工具行转 `✓` | 真实 tmux |
 | `21-code-block-polished.png` | **深赤陶强调色 + VS Code 语法着色陶土代码块**（上下呼吸留白 + 3列内边距） | 真实 tmux |
 | `22-code-block-padding.png` | **代码块内部上下陶土暗底内边距**（`push_code_band_padding` 顶部+底部各 1 行） | 真实 tmux |
+| `23-code-block-external-spacing.png` | **代码块外部下方空行修复**（修复后代码块下方拥有清晰的 1 行外呼吸留白） | 真实 tmux |
 
 ## 3. Ask 挂起链路的机器凭证
 
@@ -116,7 +117,7 @@ Goal 原先被拼在指标行右侧，长目标会把 token/缓存/上下文挤�
    - 行内 `**强调文字**` 与标题重点使用明艳饱满的深赤陶色（`#E8805C` / `theme::EMPHASIS`），打破灰度单调并凸显层级；
    - 角色标识与结构色同步选用暖赤陶色（`theme::ACCENT` / `#D67250`）。
 2. **代码块呼吸留白与增强陶土暗底**：
-   - 代码块与上部（及下部）正文段落之间各加入 1 行外呼吸留白（`push_blank`），彻底告别上下挤压感；
+   - 代码块与上部、下部正文段落之间各保证独立的 1 行外呼吸留白（`push_blank` / `lines.push(blank())`），修复了此前因去重逻辑导致代码块下方外部空行丢失的问题；
    - 代码块内部增加**顶部与底部各 1 行带有陶土暗底色的内边距**（`push_code_band_padding`），文字不再紧贴代码容器上下边缘；
    - 代码块背景采用深沉温暖的深陶土暗黑底（`#241916` / `theme::CODE_FILL`），质感高级内敛；
    - 内部左右内边距扩充至 **3 列**（`CODE_BAND_PAD = 3`），形成如同原生编辑器的舒适包裹感。

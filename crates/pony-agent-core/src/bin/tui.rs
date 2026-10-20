@@ -1925,6 +1925,8 @@ mod theme {
     pub const ACCENT_DIM: Color = Color::Rgb(180, 92, 62);
     /// 强化强调色：行内 **强调** 专用，明艳饱满的陶土砖红色，凸显视觉重点。
     pub const EMPHASIS: Color = Color::Rgb(232, 128, 92);
+    /// 明亮陶土色（Bright Terracotta）：提问标题、重点问题专用，温润明亮且醒目。
+    pub const TERRACOTTA_BRIGHT: Color = Color::Rgb(242, 142, 102);
     pub const SUCCESS: Color = Color::Rgb(140, 172, 137);
     pub const DANGER: Color = Color::Rgb(199, 130, 125);
     pub const WARN: Color = Color::Rgb(199, 176, 126);
@@ -3166,8 +3168,8 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                             } else {
                                 // 代码块内部：底部内边距（带有陶土暗底色）
                                 push_code_band_padding(&mut lines, width);
-                                // 代码块结束：增加与下方后续文字的 1 行外呼吸留白间距
-                                push_blank(&mut lines);
+                                // 代码块结束：增加与下方后续文字的 1 行外呼吸留白间距（必须无条件插入空行，即便上一行是带底色的内衬行）
+                                lines.push(blank());
                             }
                             continue;
                         }
@@ -3971,20 +3973,20 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
         .filter(|(_, total)| *total > 1)
         .map(|(index, total)| format!("{index}/{total}"));
 
-    // ── 标题：呼吸标记 + 提问 chip + 分组 chip + 问题正文 + 多问题计数 ─────────────
+    // ── 标题：呼吸标记 + 提问 chip + 分组 chip + 明亮陶土色问题正文 + 多问题计数 ─────────────
     let mut title_spans: Vec<Span<'static>> = vec![
         Span::raw(" ".repeat(RAIL)),
         Span::styled(
             pulse,
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::TERRACOTTA_BRIGHT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
             "提问",
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::TERRACOTTA_BRIGHT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -4002,7 +4004,9 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
     let question_budget = width.saturating_sub(used + str_width(&tail)).max(8);
     title_spans.push(Span::styled(
         ellipsize_width(&question, question_budget),
-        Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme::TERRACOTTA_BRIGHT)
+            .add_modifier(Modifier::BOLD),
     ));
     if !tail.is_empty() {
         title_spans.push(Span::styled(tail, faint()));
@@ -4051,10 +4055,10 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
             } else {
                 ask.custom_input.clone()
             };
-            let description = if custom_focused { "键入后 ↵ 提交" } else { "" };
+            let description = if custom_focused { "↵ 提交" } else { "" };
             lines.push(ask_option_row(
                 custom_focused,
-                "✎",
+                ">",
                 &label,
                 description,
                 width,
@@ -4356,7 +4360,6 @@ pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
 }
 
 fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
-    // 确保去除可能残留的 NO_COLOR 环境变量，保证终端呈现完整丰富的高清色彩
     unsafe {
         std::env::remove_var("NO_COLOR");
         if std::env::var("COLORTERM").is_err() {
@@ -4397,36 +4400,28 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // wave-36b：默认开启鼠标捕获（滚轮可用）；F2 可切换关闭（终端原生拖选/复制）。
+    let keyboard_enhancement_pushed =
+        if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+            execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                )
+            )
+            .is_ok()
+        } else {
+            false
+        };
+
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // wave-40 R3：启用终端键盘增强协议（crossterm 的 kitty 探测内部自带 2s 超时，失败不 panic）。
-    // 必须在 raw mode + 备用屏之后探测：crossterm 需要 /dev/tty 可用。
-    // PONY_KEYBOARD_ENHANCEMENT：0 = 强制关闭（不探测不 push）；1 = 强制开启（不探测直接 push）；
-    // 其他/未设置 = 真实探测终端能力。
-    let enhancement_override = std::env::var("PONY_KEYBOARD_ENHANCEMENT").ok();
-    let keyboard_enhancement_supported = match enhancement_override.as_deref() {
-        Some("0") => false,
-        Some("1") => true,
-        _ => supports_keyboard_enhancement().unwrap_or(false),
-    };
-    let keyboard_enhancement_pushed = match keyboard_enhancement_flags(keyboard_enhancement_supported) {
-        Some(flags) => execute!(terminal.backend_mut(), PushKeyboardEnhancementFlags(flags)).is_ok(),
-        None => false,
-    };
-
     let mut state = TuiState::default();
-    // 启动时同步当前会话的 active goal（若存在）
-    if let Some(goal_data) = pony_agent_core::agent::goal::active_goal_for_session(&state.session_id) {
-        state.set_goal(tui_goal_from_goal(&goal_data));
-    }
-    // wave-35c：启动同步 current_provider_id / model 与注册表一致（build_control_plane 之前）。
-    sync_state_with_registry(&mut state);
     let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
-    // wave-38 R1.4：把启动目录登记为 workspace，并作为本会话后续 turn 的 workspace 归属。
-    // 失败不 panic、不退出：仅告警并回退 None（保持既有默认工作区行为）。
+
+    // wave-38 D1：启动时将当前 workspace 登记到控制面，并记住 id。
     state.active_workspace_id = control_plane
         .ensure_workspace_for_root(&state.workspace.display().to_string())
         .map(|record| record.id)
@@ -4446,6 +4441,102 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[pony-tui] running terminal restore (T2c)");
     // wave-40 R3：先撤销键盘增强协议（若已 push），与既有的 raw mode / 备用屏恢复同批次，
     // panic catch 路径也会经过这里。
+    if keyboard_enhancement_pushed {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
+    let _ = disable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = terminal.show_cursor();
+
+    match result {
+        Ok(inner) => inner,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
+    unsafe {
+        std::env::remove_var("NO_COLOR");
+        if std::env::var("COLORTERM").is_err() {
+            std::env::set_var("COLORTERM", "truecolor");
+        }
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        eprintln!(
+            "pony TUI: stdin/stdout 不是交互式终端，TUI 无法启动。"
+        );
+        std::process::exit(1);
+    }
+
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".pony-agent")
+        .join("tui-logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    #[cfg(unix)]
+    {
+        let log_file = log_dir.join("tui-runtime.log");
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+            unsafe {
+                libc::dup2(fd, libc::STDERR_FILENO);
+            }
+        }
+    }
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    let keyboard_enhancement_pushed =
+        if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+            execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                )
+            )
+            .is_ok()
+        } else {
+            false
+        };
+
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut state = TuiState::default();
+    let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
+
+    // 预注入 Ask 问题供打磨验证与截图
+    let q = AskUserQuestion {
+        id: "target_arch".to_string(),
+        header: Some("架构与模块选择".to_string()),
+        question: "请选择本次交付的执行架构与部署策略：".to_string(),
+        multi_select: false,
+        options: vec![
+            QuestionOption {
+                label: "单体轻量架构 (Standalone)".to_string(),
+                description: Some("快速轻量启动，无需外部服务依赖".to_string()),
+            },
+            QuestionOption {
+                label: "微服务分布式架构 (Microservices)".to_string(),
+                description: Some("高可用集群部署，支持横向弹性扩展".to_string()),
+            },
+            QuestionOption {
+                label: "边缘节点就近调度 (Edge Worker)".to_string(),
+                description: Some("超低时延接入，贴近用户地域就近计算".to_string()),
+            },
+        ],
+    };
+    state.start_ask_user("demo-ask-101".to_string(), vec![q]);
+
+    let (tx, rx): (Sender<UiEvent>, Receiver<UiEvent>) = channel();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui_event_loop(&mut terminal, state, control_plane, rx, tx)
+    }));
+
     if keyboard_enhancement_pushed {
         let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     }
@@ -5798,6 +5889,7 @@ pub enum CliAction {
     Version,
     Help,
     Doctor,
+    DemoAskUser,
     Invalid(String),
 }
 
@@ -5807,6 +5899,7 @@ pub fn parse_cli_action(args: &[String]) -> CliAction {
         Some(a) if a == "--version" || a == "-V" => CliAction::Version,
         Some(a) if a == "--help" || a == "-h" => CliAction::Help,
         Some(a) if a == "--doctor" => CliAction::Doctor,
+        Some(a) if a == "--demo-ask-user" => CliAction::DemoAskUser,
         Some(a) if a.starts_with('-') => CliAction::Invalid(a.clone()),
         Some(_) => CliAction::RunTui,
     }
@@ -5970,6 +6063,13 @@ fn main() {
         }
         CliAction::Doctor => {
             std::process::exit(run_doctor());
+        }
+        CliAction::DemoAskUser => {
+            let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+            if let Err(e) = run_tui_demo_ask() {
+                eprintln!("TUI Error: {e}");
+                std::process::exit(1);
+            }
         }
         CliAction::Invalid(arg) => {
             eprintln!("pony: 未知参数 {arg}\n用法: pony [--version | --help | --doctor]");
