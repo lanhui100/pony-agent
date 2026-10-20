@@ -87,6 +87,10 @@ pub struct UpdateGoalResult {
 /// 内存中的 map 是权威读面，写入成功后立即落盘（原子替换）。损坏/不可读的 sidecar 降级为空，
 /// 绝不 panic。
 static SESSION_GOALS: Mutex<Option<HashMap<String, GoalData>>> = Mutex::new(None);
+static GOAL_STORE_DEGRADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+static TEST_DEFAULT_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// 契约 C2 / §8：sidecar 路径真值。env `PONY_AGENT_GOAL_STORE_PATH` 非空即整体覆盖；
 /// 默认落在 `default_sqlite_path().parent()/goal_store.json`（与既有会话库同目录）。
@@ -98,6 +102,20 @@ pub fn goal_store_path() -> PathBuf {
         }
     }
 
+    #[cfg(test)]
+    {
+        return TEST_DEFAULT_PATH
+            .get_or_init(|| {
+                std::env::temp_dir().join(format!(
+                    "pony-goal-test-{}-{}.json",
+                    std::process::id(),
+                    Uuid::new_v4()
+                ))
+            })
+            .clone();
+    }
+
+    #[cfg(not(test))]
     crate::agent::sqlite_session::default_sqlite_path()
         .parent()
         .map(|dir| dir.join("goal_store.json"))
@@ -117,29 +135,77 @@ fn ensure_goal_store_loaded(guard: &mut Option<HashMap<String, GoalData>>) {
     }
 }
 
-/// 契约 C2：读取 sidecar。文件缺失、不可读、JSON 损坏一律降级为空 map（不 panic、不返回 Err）。
+/// 契约 C2：读取 sidecar。文件缺失返回空 map；不可读或 JSON 损坏置 degraded 标记。
 fn load_goal_store() -> HashMap<String, GoalData> {
     let path = goal_store_path();
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(_) => return HashMap::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            GOAL_STORE_DEGRADED.store(false, std::sync::atomic::Ordering::SeqCst);
+            return HashMap::new();
+        }
+        Err(err) => {
+            eprintln!(
+                "[pony-agent] goal store `{}` failed to read ({err}); degraded to readonly",
+                path.display()
+            );
+            GOAL_STORE_DEGRADED.store(true, std::sync::atomic::Ordering::SeqCst);
+            return HashMap::new();
+        }
     };
 
     match serde_json::from_str::<HashMap<String, GoalData>>(&raw) {
-        Ok(goals) => goals,
+        Ok(goals) => {
+            GOAL_STORE_DEGRADED.store(false, std::sync::atomic::Ordering::SeqCst);
+            goals
+        }
         Err(error) => {
             eprintln!(
                 "[pony-agent] goal store `{}` is unreadable ({error}); degraded to empty",
                 path.display()
             );
+            GOAL_STORE_DEGRADED.store(true, std::sync::atomic::Ordering::SeqCst);
             HashMap::new()
         }
     }
 }
 
+#[cfg(unix)]
+fn lock_file(file: &fs::File) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+    let res = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if res != 0 {
+        return Err(format!("flock failed: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn lock_file(_file: &fs::File) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlock_file(file: &fs::File) {
+    use std::os::unix::io::AsRawFd;
+    unsafe {
+        libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+    }
+}
+
+#[cfg(not(unix))]
+fn unlock_file(_file: &fs::File) {}
+
 /// 契约 C2 / NFR `goal_store_atomic_write`：`*.tmp` + rename 原子替换，父目录按需创建。
 fn persist_goal_store(goals: &HashMap<String, GoalData>) -> Result<(), String> {
     let path = goal_store_path();
+    if GOAL_STORE_DEGRADED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(format!(
+            "goal store at `{}` is degraded due to read/parse error; refusing to overwrite",
+            path.display()
+        ));
+    }
+
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -151,32 +217,78 @@ fn persist_goal_store(goals: &HashMap<String, GoalData>) -> Result<(), String> {
         }
     }
 
-    let payload = serde_json::to_string_pretty(goals)
-        .map_err(|error| format!("failed to serialize goal store: {error}"))?;
+    let lock_path = path.with_extension("lock");
+    let lock_handle = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| format!("failed to open lock file `{}`: {error}", lock_path.display()))?;
+
+    lock_file(&lock_handle)?;
+
+    // 跨进程写时合并：若磁盘已有更新且合法，保留其他 session
+    let to_write = if path.exists() {
+        if let Ok(raw) = fs::read_to_string(&path) {
+            if let Ok(disk_goals) = serde_json::from_str::<HashMap<String, GoalData>>(&raw) {
+                let mut merged = disk_goals;
+                for (k, v) in goals {
+                    merged.insert(k.clone(), v.clone());
+                }
+                merged
+            } else {
+                goals.clone()
+            }
+        } else {
+            goals.clone()
+        }
+    } else {
+        goals.clone()
+    };
+
+    let payload = match serde_json::to_string_pretty(&to_write) {
+        Ok(p) => p,
+        Err(error) => {
+            unlock_file(&lock_handle);
+            return Err(format!("failed to serialize goal store: {error}"));
+        }
+    };
+
     let tmp_path = goal_store_tmp_path(&path);
-    fs::write(&tmp_path, payload.as_bytes()).map_err(|error| {
-        format!(
+    if let Err(error) = fs::write(&tmp_path, payload.as_bytes()) {
+        unlock_file(&lock_handle);
+        return Err(format!(
             "failed to write goal store tmp `{}`: {error}",
             tmp_path.display()
-        )
-    })?;
+        ));
+    }
 
     if let Err(error) = fs::rename(&tmp_path, &path) {
         let _ = fs::remove_file(&tmp_path);
+        unlock_file(&lock_handle);
         return Err(format!(
             "failed to atomically replace goal store `{}`: {error}",
             path.display()
         ));
     }
+
+    unlock_file(&lock_handle);
     Ok(())
 }
 
 fn goal_store_tmp_path(path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let ext = format!("{pid}.{nanos}.tmp");
     let mut name = path
         .file_name()
         .map(|name| name.to_os_string())
         .unwrap_or_else(|| std::ffi::OsString::from("goal_store.json"));
-    name.push(".tmp");
+    name.push(".");
+    name.push(ext);
     path.with_file_name(name)
 }
 
@@ -277,10 +389,18 @@ pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
     let mut guard = goal_store_guard();
     ensure_goal_store_loaded(&mut guard);
     let goals = guard.as_mut().expect("goal store must be loaded");
+    let previous = goals.get(&session).cloned();
     goals.insert(session.clone(), goal.clone());
 
     if let Err(error) = persist_goal_store(goals) {
-        goals.remove(&session);
+        match previous {
+            Some(prev) => {
+                goals.insert(session, prev);
+            }
+            None => {
+                goals.remove(&session);
+            }
+        }
         return Err(error);
     }
 
@@ -653,6 +773,41 @@ mod wave1_tests {
         assert_eq!(reloaded.rounds_started, 2);
 
         assert!(advance_goal_round("goal-does-not-exist").is_err());
+    }
+
+    #[test]
+    fn wave1_corrupt_file_prevents_overwrite_and_rollback_restores_previous() {
+        let _guard = test_support::lock();
+        let (_env, store_path) = install_temp_store("rollback-degrade");
+        let session = "wave1-unit-degrade";
+
+        let _created = create_goal(CreateGoalArgs {
+            session_id: Some(session.to_string()),
+            objective: "初始目标".to_string(),
+            max_goal_rounds: Some(5),
+        })
+        .expect("initial create_goal")
+        .goal;
+
+        // 模拟损坏文件
+        let corrupt_bytes = b"corrupted-not-json-content";
+        fs::write(&store_path, corrupt_bytes).expect("write corrupt bytes");
+
+        // 损坏后 reset，store 应当判定为 degraded
+        reset_goal_store_for_test();
+        assert!(GOAL_STORE_DEGRADED.load(std::sync::atomic::Ordering::SeqCst));
+
+        // 尝试新建目标，必须拒绝覆写磁盘损坏数据
+        let res = create_goal(CreateGoalArgs {
+            session_id: Some(session.to_string()),
+            objective: "尝试覆写目标".to_string(),
+            max_goal_rounds: Some(10),
+        });
+        assert!(res.is_err(), "create_goal 必须拒绝覆写已降级的磁盘");
+
+        // 磁盘内容应完全保留损坏现场，未被覆写
+        let disk_content = fs::read(&store_path).expect("read store_path");
+        assert_eq!(disk_content, corrupt_bytes, "磁盘内容不得被静默冲掉");
     }
 }
 
