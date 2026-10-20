@@ -8,6 +8,7 @@ pub struct AgentRuntimeBuilder {
     planner: Option<Box<dyn TurnPlanner>>,
     context_builder: Option<Box<dyn TurnContextBuilder>>,
     telemetry_builder: Option<Box<dyn TurnTelemetryBuilder>>,
+    plan_store: Option<crate::agent::plan_state::PlanStore>,
 }
 
 
@@ -21,6 +22,7 @@ impl AgentRuntimeBuilder {
             planner: None,
             context_builder: None,
             telemetry_builder: None,
+            plan_store: None,
         }
     }
 
@@ -69,17 +71,24 @@ impl AgentRuntimeBuilder {
         self
     }
 
+    pub fn plan_store(mut self, plan_store: crate::agent::plan_state::PlanStore) -> Self {
+        self.plan_store = Some(plan_store);
+        self
+    }
+
     pub fn build(self) -> AgentRuntime {
         let sessions = self.sessions.unwrap_or_else(SessionStore::new);
         let shared_authorizations = sessions.path_authorizations();
+        let plan_store = self.plan_store;
         let mut runtime = AgentRuntime::with_dependencies(
             sessions,
             self.provider_resolver
                 .unwrap_or_else(|| Box::new(ProviderRegistryStore::new())),
             self.tool_executor.unwrap_or_else(|| {
-                Box::new(build_governed_executor(
+                Box::new(crate::agent::governed_executor::build_governed_executor_with_plan_store(
                     self.workspace_root.clone(),
                     Some(shared_authorizations),
+                    plan_store,
                 ))
             }),
             self.planner.unwrap_or_else(|| Box::new(LocalTurnPlanner)),

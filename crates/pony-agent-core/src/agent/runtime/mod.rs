@@ -11,7 +11,8 @@ use crate::agent::dispatcher::{DispatchContext, GovernedDispatcher};
 use crate::agent::dispatcher_composites::GovernedToolExecutor;
 use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::execution_control::ExecutionControlRegistry;
-use crate::agent::governed_executor::build_governed_executor;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(super) use crate::agent::governed_executor::build_governed_executor;
 use crate::agent::graph::{
     GraphAskResumeInjection, GraphAskWaitBinding, GraphDecision, GraphDecisionKind, GraphEngine,
     GraphRun, GraphRunStore, GraphRunner, GraphTurnHandoff,

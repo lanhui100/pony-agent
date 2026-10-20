@@ -3867,11 +3867,46 @@ fn tui_event_loop(
                                 std::thread::spawn(move || {
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                                     let sink = TuiTurnSink { tx: tx_stream };
+                                    let session_id = turn_input
+                                        .session_id
+                                        .clone()
+                                        .unwrap_or_else(|| "default".to_string());
                                     let cmd = StartTurnStreamCommand {
                                         turn_id: turn_id_str,
-                                        input: turn_input,
+                                        input: turn_input.clone(),
                                     };
                                     cp.start_turn_stream(&sink, cmd);
+
+                                    let mut consecutive = 0;
+                                    while consecutive < pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES {
+                                        let active_goal = match pony_agent_core::agent::goal::active_goal_for_session(&session_id) {
+                                            Some(g) => g,
+                                            None => break,
+                                        };
+                                        if active_goal.rounds_started >= active_goal.max_goal_rounds {
+                                            break;
+                                        }
+                                        let updated_goal = match pony_agent_core::agent::goal::advance_goal_round(&active_goal.id) {
+                                            Ok(g) => g,
+                                            Err(_) => break,
+                                        };
+                                        consecutive += 1;
+                                        let round = updated_goal.rounds_started;
+                                        let msg = pony_agent_core::agent::goal::build_goal_round_message(
+                                            &updated_goal.objective,
+                                            round,
+                                            updated_goal.max_goal_rounds,
+                                        );
+                                        let next_turn_id = format!("turn-goal-{round}-{}", uuid::Uuid::new_v4());
+                                        let mut next_input = turn_input.clone();
+                                        next_input.message = msg;
+                                        next_input.display_message = Some(format!("[goal round {round}] 推进目标：{}", updated_goal.objective));
+                                        let next_cmd = StartTurnStreamCommand {
+                                            turn_id: next_turn_id,
+                                            input: next_input,
+                                        };
+                                        cp.start_turn_stream(&sink, next_cmd);
+                                    }
                                 });
                             }
                         }

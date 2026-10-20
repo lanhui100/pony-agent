@@ -971,7 +971,11 @@ impl HostControlPlaneBuilder {
     }
 
     pub fn build(self) -> HostControlPlane {
-        let mut runtime = self.runtime.unwrap_or_else(AgentRuntime::new);
+        let plan_store = self.plan_store.unwrap_or_else(PlanStore::new);
+        let mut runtime = match self.runtime {
+            Some(rt) => rt,
+            None => AgentRuntimeBuilder::new().plan_store(plan_store.clone()).build(),
+        };
         let capability_registry = runtime.capability_registry_snapshot();
         let sessions_rwlock = runtime.sessions_handle();
         // PA-091：注册事件持久化通道（缓冲 + turn 终态 flush）。
@@ -1136,7 +1140,7 @@ impl HostControlPlaneBuilder {
                 default_frontend_diagnostics_sqlite_path(),
             ),
             ask_dispatcher,
-            plan_store: self.plan_store.unwrap_or_else(PlanStore::new),
+            plan_store,
             // PA-095 #3：块内必然赋值（通道注册无条件执行）。
             event_persist_channel,
             event_flush_channel,
@@ -1623,6 +1627,76 @@ impl HostControlPlane {
     }
 
     pub fn execute_graph_run_stream<S: TurnEventSink>(
+        &self,
+        sink: &S,
+        mut prepared: PreparedGraphRunStream,
+    ) -> Result<GraphRunTurnResponse, String> {
+        let mut consecutive_continues = 0;
+        loop {
+            let response = self.execute_graph_run_stream_step(sink, prepared)?;
+            if response.decision.kind != GraphDecisionKind::Continue {
+                return Ok(response);
+            }
+
+            let session_id = response.run.session_id.as_deref().unwrap_or("default");
+            let active_goal = match crate::agent::goal::active_goal_for_session(session_id) {
+                Some(goal) => goal,
+                None => return Ok(response),
+            };
+
+            if consecutive_continues >= crate::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES {
+                return Ok(response);
+            }
+
+            if active_goal.rounds_started >= active_goal.max_goal_rounds {
+                return Ok(response);
+            }
+
+            let updated_goal = match crate::agent::goal::advance_goal_round(&active_goal.id) {
+                Ok(goal) => goal,
+                Err(_) => return Ok(response),
+            };
+
+            consecutive_continues += 1;
+            let round_num = updated_goal.rounds_started;
+            let goal_msg = crate::agent::goal::build_goal_round_message(
+                &updated_goal.objective,
+                round_num,
+                updated_goal.max_goal_rounds,
+            );
+
+            let next_turn_id = format!("{}-turn-{}", response.run.id, response.run.steps.len() + 1);
+            let next_input = TurnInput {
+                message: goal_msg,
+                session_id: Some(session_id.to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+                display_message: Some(format!("[goal round {round_num}] 推进目标：{}", updated_goal.objective)),
+                workspace_mode: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                workspace_id: None,
+                plan_execution_approval: None,
+            };
+
+            let next_cmd = ContinueGraphRunStreamCommand {
+                run_id: response.run.id.clone(),
+                turn_id: next_turn_id,
+                input: next_input,
+            };
+
+            let (_, next_prepared) = match self.prepare_continue_graph_run_stream(next_cmd) {
+                Ok(prep) => prep,
+                Err(_) => return Ok(response),
+            };
+
+            prepared = next_prepared;
+        }
+    }
+
+    fn execute_graph_run_stream_step<S: TurnEventSink>(
         &self,
         sink: &S,
         prepared: PreparedGraphRunStream,
@@ -2189,6 +2263,62 @@ impl HostControlPlane {
     }
 
     fn advance_graph_run(
+        &self,
+        run_id: String,
+        mut input: TurnInput,
+    ) -> Result<GraphRunTurnResponse, String> {
+        let mut consecutive_continues = 0;
+        loop {
+            let response = self.advance_graph_run_step(run_id.clone(), input)?;
+            if response.decision.kind != GraphDecisionKind::Continue {
+                return Ok(response);
+            }
+
+            let session_id = response.run.session_id.as_deref().unwrap_or("default");
+            let active_goal = match crate::agent::goal::active_goal_for_session(session_id) {
+                Some(goal) => goal,
+                None => return Ok(response),
+            };
+
+            if consecutive_continues >= crate::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES {
+                return Ok(response);
+            }
+
+            if active_goal.rounds_started >= active_goal.max_goal_rounds {
+                return Ok(response);
+            }
+
+            let updated_goal = match crate::agent::goal::advance_goal_round(&active_goal.id) {
+                Ok(goal) => goal,
+                Err(_) => return Ok(response),
+            };
+
+            consecutive_continues += 1;
+            let round_num = updated_goal.rounds_started;
+            let goal_msg = crate::agent::goal::build_goal_round_message(
+                &updated_goal.objective,
+                round_num,
+                updated_goal.max_goal_rounds,
+            );
+
+            input = TurnInput {
+                message: goal_msg,
+                session_id: Some(session_id.to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+                display_message: Some(format!("[goal round {round_num}] 推进目标：{}", updated_goal.objective)),
+                workspace_mode: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                workspace_id: None,
+                plan_execution_approval: None,
+            };
+        }
+    }
+
+    fn advance_graph_run_step(
         &self,
         run_id: String,
         input: TurnInput,
@@ -9683,6 +9813,38 @@ mod tests {
             "normal glob tool turn must not suspend"
         );
         server.finish();
+        drop(rt_guard);
+    }
+
+    #[test]
+    fn test_wave1_auto_continue_bounded_by_goal_and_limit() {
+        let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let session_id = "test-session-auto-continue";
+
+        // Create armed goal with max 3 rounds
+        let created = crate::agent::goal::create_goal(crate::agent::goal::CreateGoalArgs {
+            session_id: Some(session_id.to_string()),
+            objective: "自动续行测试目标".to_string(),
+            max_goal_rounds: Some(3),
+        })
+        .expect("create_goal")
+        .goal;
+        assert_eq!(created.rounds_started, 0);
+
+        let active = crate::agent::goal::active_goal_for_session(session_id);
+        assert!(active.is_some());
+
+        // Verify advance_goal_round increments rounds_started up to max_goal_rounds
+        let r1 = crate::agent::goal::advance_goal_round(&created.id).expect("round 1");
+        assert_eq!(r1.rounds_started, 1);
+        let r2 = crate::agent::goal::advance_goal_round(&created.id).expect("round 2");
+        assert_eq!(r2.rounds_started, 2);
+        let r3 = crate::agent::goal::advance_goal_round(&created.id).expect("round 3");
+        assert_eq!(r3.rounds_started, 3);
+
+        let active_at_limit = crate::agent::goal::active_goal_for_session(session_id).unwrap();
+        assert!(active_at_limit.rounds_started >= active_at_limit.max_goal_rounds);
+
         drop(rt_guard);
     }
 }

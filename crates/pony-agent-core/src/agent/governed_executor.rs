@@ -325,7 +325,15 @@ pub fn build_governed_executor(
     workspace_root: Option<PathBuf>,
     authorize_store: Option<Arc<crate::agent::path_permission::AuthorizeStore>>,
 ) -> GovernedToolExecutor {
-    build_governed_executor_with_sandbox_backend(workspace_root, authorize_store, None)
+    build_governed_executor_full(workspace_root, authorize_store, None, None)
+}
+
+pub fn build_governed_executor_with_plan_store(
+    workspace_root: Option<PathBuf>,
+    authorize_store: Option<Arc<crate::agent::path_permission::AuthorizeStore>>,
+    plan_store: Option<PlanStore>,
+) -> GovernedToolExecutor {
+    build_governed_executor_full(workspace_root, authorize_store, None, plan_store)
 }
 
 /// 生产沙箱装配的显式 override 入口（测试注入用）：`Some(backend)` 时直接注册该后端；
@@ -335,6 +343,15 @@ pub fn build_governed_executor_with_sandbox_backend(
     authorize_store: Option<Arc<crate::agent::path_permission::AuthorizeStore>>,
     sandbox_override: Option<Arc<dyn SandboxBackend>>,
 ) -> GovernedToolExecutor {
+    build_governed_executor_full(workspace_root, authorize_store, sandbox_override, None)
+}
+
+pub fn build_governed_executor_full(
+    workspace_root: Option<PathBuf>,
+    authorize_store: Option<Arc<crate::agent::path_permission::AuthorizeStore>>,
+    sandbox_override: Option<Arc<dyn SandboxBackend>>,
+    plan_store: Option<PlanStore>,
+) -> GovernedToolExecutor {
     let registry = Arc::new(
         ToolRegistrySnapshot::builtin().expect("builtin registry must validate"),
     );
@@ -343,7 +360,7 @@ pub fn build_governed_executor_with_sandbox_backend(
     
     // Each runtime owns one PlanStore; session isolation is enforced by the store's
     // CrossSession guard on every operation (PA-076 Decision 6). ──
-    let shared_plan_store = Arc::new(PlanStore::new());
+    let shared_plan_store = Arc::new(plan_store.unwrap_or_else(PlanStore::new));
 
     // W30b：加载并注册基于规则与真实共享 Plan 状态的策略评估器
     let settings = crate::agent::app_settings::AppSettingsStore::new().load_view();
