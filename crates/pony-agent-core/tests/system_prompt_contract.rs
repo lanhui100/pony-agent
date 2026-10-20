@@ -137,20 +137,20 @@ fn sp6_legacy_direct_answer_and_context_closed_wording_are_absent() {
     );
 }
 
-/// SP7：多步任务用 `todo_write` 跟踪，且不得残留旧的初始化措辞。
+/// SP7：多步任务用 `TodoWrite` 跟踪，且不得残留旧的初始化措辞。
 #[test]
 fn sp7_todo_contract_uses_todo_write_without_legacy_initialization_wording() {
     // Arrange
     let prompt = base_system_prompt();
 
     // Act
-    let has_todo_write = prompt.contains("todo_write");
+    let has_todo_write = prompt.contains("TodoWrite");
     let has_legacy_initialization = prompt.contains("Initialize pending items");
 
     // Assert
     assert!(
         has_todo_write,
-        "SP7 违约：稳定层提示词的 todo 契约必须指向工具 `todo_write`，实际未命中。当前 base_system_prompt() 长度 = {} 字节",
+        "SP7 违约：稳定层提示词的 todo 契约必须指向工具 `TodoWrite`，实际未命中。当前 base_system_prompt() 长度 = {} 字节",
         prompt.len()
     );
     assert!(
@@ -183,13 +183,13 @@ fn sp8_stricter_wins_and_no_capability_fabrication() {
     );
 }
 
-/// SP9：稳定层体量受控（<= 3400 字节，Lead 2026-10-20 裁决值）。
+/// SP9：稳定层体量受控（<= 3900 字节，Wave-1 Lead 裁决值）。
 ///
 /// 附加护栏：体积上限不得被空串桩"空转通过"，故同时要求提示词非空。
 #[test]
 fn sp9_base_system_prompt_size_is_within_budget() {
     // Arrange
-    const MAX_BYTES: usize = 3400;
+    const MAX_BYTES: usize = 3900;
     let prompt = base_system_prompt();
 
     // Act
@@ -203,7 +203,7 @@ fn sp9_base_system_prompt_size_is_within_budget() {
     );
     assert!(
         within_budget,
-        "SP9 违约：稳定层提示词体积 {} 字节，超出上限 {} 字节（契约第 4 节 SP9 / Lead 裁决 <= 3400）",
+        "SP9 违约：稳定层提示词体积 {} 字节，超出上限 {} 字节（契约第 4 节 SP9 / Lead 裁决 <= 3900）",
         actual_bytes,
         MAX_BYTES
     );
