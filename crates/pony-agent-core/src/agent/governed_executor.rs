@@ -38,8 +38,8 @@ use crate::agent::tool_runtime::{
     SandboxAvailability, SandboxBackend, SystemClock,
 };
 use crate::agent::tools::{
-    ToolCall, ToolRegistrySnapshot, ToolRouter, TOOL_ASK_USER, TOOL_PLAN_CONTROL,
-    TOOL_WORKSPACE_READ_DOCUMENT, TOOL_VIEW_IMAGE,
+    ToolCall, ToolExecutionContext, ToolRegistrySnapshot, ToolRouter, TOOL_ASK_USER,
+    TOOL_PLAN_CONTROL, TOOL_WORKSPACE_READ_DOCUMENT, TOOL_VIEW_IMAGE,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -270,21 +270,25 @@ struct RouterPrimitiveHandler {
 impl PrimitiveToolHandler for RouterPrimitiveHandler {
     fn execute(&self, request: &PrimitiveToolHandlerRequest) -> Result<Value, String> {
         // PA-080 P1-2：会话级 workspace root 透传给 ToolRouter 的权限判定。
-        let workspace_root = request
-            .workspace_root
-            .as_deref()
-            .map(std::path::Path::new);
-        let result = self
-            .router
-            .execute_with_workspace_root(
-                &ToolCall {
-                    call_id: None,
-                    name: self.primitive.clone(),
-                    arguments: request.arguments.clone(),
-                    plan: None,
-                },
-                workspace_root,
-            );
+        // wave-1 C5：会话 id 同样由 dispatch context 注入——TodoWrite/TodoList/create_goal/
+        // get_goal/update_goal 在模型未显式给 session 参数时回退到当前会话。
+        let execution_context = ToolExecutionContext {
+            workspace_root: request
+                .workspace_root
+                .as_deref()
+                .map(std::path::PathBuf::from),
+            session_id: request.session_id.clone(),
+            ..Default::default()
+        };
+        let result = self.router.execute_with_context(
+            &ToolCall {
+                call_id: None,
+                name: self.primitive.clone(),
+                arguments: request.arguments.clone(),
+                plan: None,
+            },
+            &execution_context,
+        );
         if result.status == "ok" {
             Ok(Value::String(result.output))
         } else {

@@ -1,4 +1,5 @@
 use crate::agent::capability_bridge::SkillDescriptor;
+use crate::agent::goal::{active_goal_for_session, GoalData};
 use crate::agent::graph::{
     GraphDecision, GraphDecisionKind, GraphDecisionReason, GraphRun, GraphRunPhase,
     GraphTurnHandoff,
@@ -9,7 +10,17 @@ use crate::agent::tools::{builtin_tool_surface, ToolCall, ToolPlan, ToolPlanStep
 use serde_json::json;
 
 const MAX_LOCAL_BATCH_PATHS: usize = 6;
-const MAX_GRAPH_AUTO_CONTINUE_STEPS: usize = 8;
+
+/// 契约 C1 / NFR `auto_continue_max`：同一用户消息系列内允许的**连续**自动续行上限。
+///
+/// 计数由宿主续行循环（`HostControlPlane::advance_graph_run` / TUI 循环）持有：每成功发起一轮
+/// goal-round 递增；用户手动轮次将其归零且不消耗额度。planner 只给出判定与目标级预算
+/// （`rounds_started < max_goal_rounds`），不自行累计系列计数，避免与循环形成 8×8 复合预算。
+pub const MAX_CONSECUTIVE_AUTO_CONTINUES: usize = 8;
+
+/// 兼容读面：与 [`MAX_CONSECUTIVE_AUTO_CONTINUES`] 描述**同一预算**（不得相乘）。
+/// 旧语义（run 级 step 计数）仅保留在无 armed 目标的 `run.goal` 关键词回退路径上。
+pub const MAX_GRAPH_AUTO_CONTINUE_STEPS: usize = MAX_CONSECUTIVE_AUTO_CONTINUES;
 
 pub trait TurnPlanner: Send + Sync {
     fn preflight_decision(
@@ -31,6 +42,8 @@ pub trait TurnPlanner: Send + Sync {
 pub struct GraphPlanningContext<'a> {
     pub run: GraphPlanningRunView<'a>,
     pub handoff: &'a GraphTurnHandoff,
+    /// 契约 C1：目标真值源的 session 键（`GraphRun.session_id`）；`None` 时不查 goal store。
+    pub session_id: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -47,6 +60,7 @@ impl<'a> GraphPlanningContext<'a> {
                 step_count: run.steps.len(),
             },
             handoff,
+            session_id: run.session_id.as_deref(),
         }
     }
 }
@@ -69,34 +83,59 @@ fn model_tool_name(primitive_name: &str) -> String {
 impl GraphPlanner for DefaultGraphPlanner {
     fn decide_after_turn(&self, context: GraphPlanningContext<'_>) -> GraphDecision {
         let assistant_message = context.handoff.assistant_message.trim();
-        let goal = context.run.goal.trim();
 
+        // 明确向用户提问 = 收口信号：即使存在 armed 目标也必须交还人类。
         if assistant_requests_user_input(assistant_message) {
-            return GraphDecision {
-                kind: GraphDecisionKind::WaitUser,
-                reason: GraphDecisionReason::TurnCompletedAwaitingUser,
-                summary: String::new(),
-                target_phase: GraphRunPhase::WaitingUser,
-            };
+            return wait_for_user_decision();
         }
 
+        // 契约 C1 优先级 1：active + Armed 的会话目标（唯一真值源），与 run.goal / 关键词无关。
+        let armed_goal = context
+            .session_id
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+            .and_then(active_goal_for_session);
+        if let Some(goal) = armed_goal {
+            return decide_for_armed_goal(&goal, context.handoff);
+        }
+
+        // 契约 C1 优先级 2：回退 run.goal + 关键词启发（保留既有 run 级续行行为）。
+        let goal = context.run.goal.trim();
         if goal_supports_auto_continue(goal)
             && context.run.step_count < MAX_GRAPH_AUTO_CONTINUE_STEPS
         {
-            return GraphDecision {
-                kind: GraphDecisionKind::Continue,
-                reason: GraphDecisionReason::PlannerRequestedContinue,
-                summary: build_next_action_summary(goal, context.handoff),
-                target_phase: GraphRunPhase::Ready,
-            };
+            return continue_decision(goal, context.handoff);
         }
 
-        GraphDecision {
-            kind: GraphDecisionKind::WaitUser,
-            reason: GraphDecisionReason::TurnCompletedAwaitingUser,
-            summary: String::new(),
-            target_phase: GraphRunPhase::WaitingUser,
-        }
+        wait_for_user_decision()
+    }
+}
+
+/// armed 目标驱动的续行判定：仅受目标级预算约束（`rounds_started < max_goal_rounds`）。
+/// 系列内的连续续行次数由宿主循环用 [`MAX_CONSECUTIVE_AUTO_CONTINUES`] 持有并判定。
+fn decide_for_armed_goal(goal: &GoalData, handoff: &GraphTurnHandoff) -> GraphDecision {
+    if goal.rounds_started < goal.max_goal_rounds {
+        return continue_decision(&goal.objective, handoff);
+    }
+
+    wait_for_user_decision()
+}
+
+fn continue_decision(goal: &str, handoff: &GraphTurnHandoff) -> GraphDecision {
+    GraphDecision {
+        kind: GraphDecisionKind::Continue,
+        reason: GraphDecisionReason::PlannerRequestedContinue,
+        summary: build_next_action_summary(goal, handoff),
+        target_phase: GraphRunPhase::Ready,
+    }
+}
+
+fn wait_for_user_decision() -> GraphDecision {
+    GraphDecision {
+        kind: GraphDecisionKind::WaitUser,
+        reason: GraphDecisionReason::TurnCompletedAwaitingUser,
+        summary: String::new(),
+        target_phase: GraphRunPhase::WaitingUser,
     }
 }
 
@@ -627,13 +666,15 @@ fn skill_tool_plan(skill: &SkillDescriptor) -> ToolPlan {
     }
 }
 
+/// 契约 C1：问号启发式收紧——仅当 trim 后**最后一个字符**为 `?`/`？`（明确提问）或命中既有显式
+/// 短语表时判定为向用户提问；正文中间的问号（代码示例、参数名等）不再拦截续行。
 fn assistant_requests_user_input(message: &str) -> bool {
     let normalized = message.trim().to_lowercase();
     if normalized.is_empty() {
         return false;
     }
 
-    if normalized.contains('?') || normalized.contains('？') {
+    if normalized.ends_with('?') || normalized.ends_with('？') {
         return true;
     }
 
@@ -787,7 +828,47 @@ fn contains_any(text: &str, keywords: &[&str]) -> bool {
 mod tests {
     use super::*;
     use crate::agent::capability_bridge::{CapabilityKind, SkillDescriptor, SkillSourceKind};
+    use crate::agent::goal::test_support;
+    use crate::agent::goal::{
+        create_goal, update_goal, CreateGoalArgs, GoalData, UpdateGoalAction, UpdateGoalArgs,
+    };
     use crate::agent::graph::{GraphRun, GraphRunPhase};
+
+    fn run_for_session(goal: &str, session: &str) -> GraphRun {
+        let mut run = sample_run(goal);
+        run.session_id = Some(session.to_string());
+        run
+    }
+
+    fn handoff_for_session(assistant_message: &str, session: &str) -> GraphTurnHandoff {
+        let mut handoff = sample_handoff(assistant_message);
+        handoff.session_id = Some(session.to_string());
+        handoff.conversation_id = session.to_string();
+        handoff
+    }
+
+    fn create_test_goal(session: &str, objective: &str, max_rounds: u32) -> GoalData {
+        create_goal(CreateGoalArgs {
+            session_id: Some(session.to_string()),
+            objective: objective.to_string(),
+            max_goal_rounds: Some(max_rounds),
+        })
+        .expect("create_goal must succeed")
+        .goal
+    }
+
+    fn disarm(goal: &GoalData) {
+        update_goal(UpdateGoalArgs {
+            session_id: Some(goal.session_id.clone()),
+            goal_id: goal.id.clone(),
+            revision: goal.revision,
+            action: UpdateGoalAction::Complete,
+            objective: None,
+            blocked_reason: None,
+            max_goal_rounds: None,
+        })
+        .expect("complete goal");
+    }
 
     fn history(role: &str, content: &str) -> TurnHistoryMessage {
         TurnHistoryMessage {
@@ -1272,5 +1353,127 @@ mod tests {
 
         assert_eq!(decision.kind, GraphDecisionKind::WaitUser);
         assert_eq!(decision.target_phase, GraphRunPhase::WaitingUser);
+    }
+
+    // ── Wave-1 C1：armed 目标为真值源（与 run.goal / 关键词无关） ──
+
+    #[test]
+    fn graph_planner_uses_armed_goal_regardless_of_run_goal_keywords() {
+        let _lock = test_support::lock();
+        let session = "wave1-planner-armed-goal";
+        let goal = create_test_goal(session, "把报告写完", 10);
+
+        let run = run_for_session("无关文本", session);
+        let handoff = handoff_for_session("报告第三章已完成，接下来推进第四章。", session);
+        let decision =
+            DefaultGraphPlanner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
+
+        assert_eq!(
+            decision.kind,
+            GraphDecisionKind::Continue,
+            "armed 目标必须驱动 Continue（objective/run.goal 不含关键词）"
+        );
+        assert_eq!(decision.target_phase, GraphRunPhase::Ready);
+        assert!(decision.summary.contains("把报告写完"));
+
+        disarm(&goal);
+    }
+
+    #[test]
+    fn graph_planner_paused_goal_does_not_drive_continue() {
+        let _lock = test_support::lock();
+        let session = "wave1-planner-paused-goal";
+        let goal = create_test_goal(session, "把报告写完", 10);
+        disarm(&goal);
+
+        let run = run_for_session("无关文本", session);
+        let handoff = handoff_for_session("报告第三章已完成，接下来推进第四章。", session);
+        let decision =
+            DefaultGraphPlanner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
+
+        assert_eq!(decision.kind, GraphDecisionKind::WaitUser);
+    }
+
+    #[test]
+    fn graph_planner_armed_goal_respects_max_goal_rounds_budget() {
+        let _lock = test_support::lock();
+        let session = "wave1-planner-goal-budget";
+        let goal = create_test_goal(session, "把报告写完", 1);
+        crate::agent::goal::advance_goal_round(&goal.id).expect("advance round");
+
+        let run = run_for_session("无关文本", session);
+        let handoff = handoff_for_session("报告第三章已完成，接下来推进第四章。", session);
+        let decision =
+            DefaultGraphPlanner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
+
+        assert_eq!(
+            decision.kind,
+            GraphDecisionKind::WaitUser,
+            "rounds_started >= max_goal_rounds 时不得再发起 goal-round"
+        );
+
+        disarm(&goal);
+    }
+
+    #[test]
+    fn graph_planner_ignores_mid_sentence_question_mark_for_armed_goal() {
+        let _lock = test_support::lock();
+        let session = "wave1-planner-mid-question";
+        let goal = create_test_goal(session, "把报告写完", 10);
+
+        let run = run_for_session("无关文本", session);
+        let handoff = handoff_for_session("参数 query? 已修复，结果如下。", session);
+        let decision =
+            DefaultGraphPlanner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
+
+        assert_eq!(
+            decision.kind,
+            GraphDecisionKind::Continue,
+            "正文中间的 ? 不得拦截 armed 目标续行"
+        );
+
+        disarm(&goal);
+    }
+
+    #[test]
+    fn graph_planner_trailing_question_mark_still_waits_user() {
+        let _lock = test_support::lock();
+        let session = "wave1-planner-trailing-question";
+        let goal = create_test_goal(session, "把报告写完", 10);
+
+        let run = run_for_session("无关文本", session);
+        for assistant_message in ["还需要我继续吗？", "May I proceed?"] {
+            let handoff = handoff_for_session(assistant_message, session);
+            let decision = DefaultGraphPlanner
+                .decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
+            assert_eq!(
+                decision.kind,
+                GraphDecisionKind::WaitUser,
+                "末尾问号必须 WaitUser（即使存在 armed 目标）：{assistant_message}"
+            );
+        }
+
+        disarm(&goal);
+    }
+
+    #[test]
+    fn graph_planner_without_goal_and_keywords_waits_user() {
+        let _lock = test_support::lock();
+        let session = "wave1-planner-no-goal";
+        assert!(
+            crate::agent::goal::active_goal_for_session(session).is_none(),
+            "前置条件：该 session 不应存在目标"
+        );
+
+        let run = run_for_session("把报告写完", session);
+        let handoff = handoff_for_session("报告第三章已完成，接下来推进第四章。", session);
+        let decision =
+            DefaultGraphPlanner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
+
+        assert_eq!(
+            decision.kind,
+            GraphDecisionKind::WaitUser,
+            "无目标且 run.goal 无续行关键词时必须 WaitUser"
+        );
     }
 }

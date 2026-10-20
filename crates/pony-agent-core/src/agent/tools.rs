@@ -1036,6 +1036,28 @@ pub struct ToolExecutionContext {
     pub workspace_root: Option<PathBuf>,
     /// 会话级 workspace id（显式透传或由 call.arguments["workspaceId"] 提供）。
     pub workspace_id: Option<String>,
+    /// 当前会话 id（wave-1 C5）：`TodoWrite` / `TodoList` / goal 工具参数缺省 session 时回退用它。
+    /// 由 runtime / governed dispatch 注入；模型显式给出的 session 参数优先，不被覆盖。
+    pub session_id: Option<String>,
+}
+
+/// wave-1 C5：工具参数未显式给 session 时回退到执行上下文注入的会话 id。
+fn fill_session_from_context(
+    session_id: &mut Option<String>,
+    context: &ToolExecutionContext,
+) {
+    let explicit = session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    if !explicit {
+        if let Some(context_session) = context.session_id.as_deref().map(str::trim) {
+            if !context_session.is_empty() {
+                *session_id = Some(context_session.to_string());
+            }
+        }
+    }
 }
 
 pub struct ToolRouter {
@@ -1220,12 +1242,12 @@ impl ToolRouter {
             Some(TOOL_TEAM_TASK_CREATE) => self.execute_team_task_create(call),
             Some(TOOL_TEAM_TASK_UPDATE) => self.execute_team_task_update(call),
             Some(TOOL_TEAM_TASK_LIST) => self.execute_team_task_list(call),
-            Some(TOOL_TODO_WRITE) => self.execute_todo_write(call),
-            Some(TOOL_TODO_LIST) => self.execute_todo_list(call),
+            Some(TOOL_TODO_WRITE) => self.execute_todo_write(call, context),
+            Some(TOOL_TODO_LIST) => self.execute_todo_list(call, context),
             Some(TOOL_SPILL_READ) => self.execute_spill_read(call),
-            Some(TOOL_CREATE_GOAL) => self.execute_create_goal(call),
-            Some(TOOL_GET_GOAL) => self.execute_get_goal(call),
-            Some(TOOL_UPDATE_GOAL) => self.execute_update_goal(call),
+            Some(TOOL_CREATE_GOAL) => self.execute_create_goal(call, context),
+            Some(TOOL_GET_GOAL) => self.execute_get_goal(call, context),
+            Some(TOOL_UPDATE_GOAL) => self.execute_update_goal(call, context),
             // W37-C1：七项新工具派发臂（直连 lib 函数）。
             Some(TOOL_PRESENT) => self.execute_present(call, context),
             Some(TOOL_FUZZY_FILE_SEARCH) => self.execute_find(call, context),
@@ -1515,8 +1537,11 @@ impl ToolRouter {
         }
     }
 
-    fn execute_todo_write(&self, call: &ToolCall) -> ToolResult {
-        let args: Result<TodoWriteArgs, _> = serde_json::from_value(call.arguments.clone());
+    fn execute_todo_write(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let mut args: Result<TodoWriteArgs, _> = serde_json::from_value(call.arguments.clone());
+        if let Ok(parsed) = args.as_mut() {
+            fill_session_from_context(&mut parsed.session_id, context);
+        }
         match args {
             Ok(args) => match todo_write(args) {
                 Ok(res) => ToolResult {
@@ -1540,8 +1565,11 @@ impl ToolRouter {
         }
     }
 
-    fn execute_todo_list(&self, call: &ToolCall) -> ToolResult {
-        let args: Result<TodoListArgs, _> = serde_json::from_value(call.arguments.clone());
+    fn execute_todo_list(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let mut args: Result<TodoListArgs, _> = serde_json::from_value(call.arguments.clone());
+        if let Ok(parsed) = args.as_mut() {
+            fill_session_from_context(&mut parsed.session_id, context);
+        }
         match args {
             Ok(args) => match todo_list(args) {
                 Ok(res) => ToolResult {
@@ -1616,8 +1644,11 @@ impl ToolRouter {
         }
     }
 
-    fn execute_create_goal(&self, call: &ToolCall) -> ToolResult {
-        let args: Result<CreateGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+    fn execute_create_goal(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let mut args: Result<CreateGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+        if let Ok(parsed) = args.as_mut() {
+            fill_session_from_context(&mut parsed.session_id, context);
+        }
         match args {
             Ok(args) => match create_goal(args) {
                 Ok(res) => ToolResult {
@@ -1641,8 +1672,11 @@ impl ToolRouter {
         }
     }
 
-    fn execute_get_goal(&self, call: &ToolCall) -> ToolResult {
-        let args: Result<GetGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+    fn execute_get_goal(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let mut args: Result<GetGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+        if let Ok(parsed) = args.as_mut() {
+            fill_session_from_context(&mut parsed.session_id, context);
+        }
         match args {
             Ok(args) => match get_goal(args) {
                 Ok(res) => ToolResult {
@@ -1666,8 +1700,11 @@ impl ToolRouter {
         }
     }
 
-    fn execute_update_goal(&self, call: &ToolCall) -> ToolResult {
-        let args: Result<UpdateGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+    fn execute_update_goal(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let mut args: Result<UpdateGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+        if let Ok(parsed) = args.as_mut() {
+            fill_session_from_context(&mut parsed.session_id, context);
+        }
         match args {
             Ok(args) => match update_goal(args) {
                 Ok(res) => ToolResult {

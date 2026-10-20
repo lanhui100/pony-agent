@@ -231,6 +231,8 @@ import {
   createCapabilitySources,
   defaultAvailableTools
 } from "@/lib/runtime/browser-preview";
+import { refreshForTurn as refreshPlanForTurn } from "@/stores/plan";
+import { refreshForTurn as refreshGoalForTurn } from "@/stores/goal";
 // 运行态看门狗：isSubmitting 置位后若在超时窗口内未收到任何终态事件
 // （completed/failed/cancelled），强制解锁，杜绝"终态事件被丢弃 → 永久卡死"。
 // 阈值 240s > 后端 provider 阻塞读超时 180s + 连接 15s 余量（契约冻结值）；
@@ -248,6 +250,48 @@ function resolveInitialActiveWorkspaceId(): string {
     return stored && stored.trim() !== "" ? stored : DEFAULT_WORKSPACE_ID;
   } catch {
     return DEFAULT_WORKSPACE_ID;
+  }
+}
+
+// Wave-1 C6：turn 结束（turn:completed / graph 流结束）后刷新计划与目标面板。
+// - 同一 turnId 只刷新一次（事件去重/重放时避免重复拉取）；
+// - 失败只记诊断（console.warn），绝不影响 turn 主流程；
+// - 空 sessionId 由各 refreshForTurn 内部直接返回（不发起 IPC）。
+const PLAN_GOAL_REFRESHED_TURNS_LIMIT = 64;
+const planGoalRefreshedTurnIds = new Set<string>();
+
+function refreshPlanGoalAfterTurn(
+  turnId: string | null | undefined,
+  sessionId: string | null | undefined
+): void {
+  const normalizedSessionId = sessionId?.trim() ?? "";
+  if (!normalizedSessionId) {
+    return;
+  }
+
+  const normalizedTurnId = turnId?.trim() ?? "";
+  if (normalizedTurnId) {
+    if (planGoalRefreshedTurnIds.has(normalizedTurnId)) {
+      return;
+    }
+    planGoalRefreshedTurnIds.add(normalizedTurnId);
+    if (planGoalRefreshedTurnIds.size > PLAN_GOAL_REFRESHED_TURNS_LIMIT) {
+      const oldestTurnId = planGoalRefreshedTurnIds.values().next().value;
+      if (oldestTurnId) {
+        planGoalRefreshedTurnIds.delete(oldestTurnId);
+      }
+    }
+  }
+
+  try {
+    void Promise.allSettled([
+      refreshPlanForTurn(normalizedSessionId),
+      refreshGoalForTurn(normalizedSessionId)
+    ]).catch((error) => {
+      console.warn("[wave-1] plan/goal refresh after turn failed:", error);
+    });
+  } catch (error) {
+    console.warn("[wave-1] plan/goal refresh after turn failed:", error);
   }
 }
 
@@ -3769,6 +3813,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
+        // Wave-1 C6：turn 结束（含后台会话 turn）即刷新计划/目标面板；
+        // 同一 turnId 只刷新一次，失败不影响主流程。
+        refreshPlanGoalAfterTurn(payload.turnId, payload.sessionId ?? this.sessionId);
         // Detect terminal event for a background session's turn
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];

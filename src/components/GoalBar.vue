@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
   Target,
@@ -9,7 +9,8 @@ import {
   AlertCircle,
   LoaderCircle,
 } from "lucide-vue-next";
-import { useGoalStore } from "@/stores/goal";
+import { safeListen } from "@/lib/tauri";
+import { refreshForTurn, useGoalStore } from "@/stores/goal";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 
@@ -25,6 +26,62 @@ const props = withDefaults(
 const goalStore = useGoalStore();
 const { currentGoal, updating, isBlocked, isActive, isPaused, isCompleted } =
   storeToRefs(goalStore);
+
+// Wave-1 C6：GoalBar 在 sessionId 变化、turn 结束（runtime 侧统一刷新）、
+// `goal://changed` / `goal://round` 事件后以真实 sessionId 刷新。
+type GoalChangedEventPayload = { sessionId?: string };
+type GoalRoundEventPayload = { round?: number; status?: string };
+
+const GOAL_CHANGED_EVENT = "goal://changed";
+const GOAL_ROUND_EVENT = "goal://round";
+
+function refreshGoal(): void {
+  void refreshForTurn(props.sessionId);
+}
+
+let unlistenHandlers: Array<() => void> = [];
+
+onMounted(() => {
+  refreshGoal();
+  void (async () => {
+    try {
+      unlistenHandlers.push(
+        await safeListen<GoalChangedEventPayload>(GOAL_CHANGED_EVENT, ({ payload }) => {
+          const eventSessionId = payload?.sessionId?.trim();
+          if (eventSessionId && eventSessionId !== props.sessionId) {
+            return;
+          }
+          refreshGoal();
+        })
+      );
+      unlistenHandlers.push(
+        await safeListen<GoalRoundEventPayload>(GOAL_ROUND_EVENT, () => {
+          refreshGoal();
+        })
+      );
+    } catch (error) {
+      console.warn("[wave-1] goal event subscription failed:", error);
+    }
+  })();
+});
+
+onBeforeUnmount(() => {
+  for (const unlisten of unlistenHandlers) {
+    try {
+      unlisten();
+    } catch {
+      // 卸载阶段忽略 unlisten 失败（不阻塞组件销毁）。
+    }
+  }
+  unlistenHandlers = [];
+});
+
+watch(
+  () => props.sessionId,
+  () => {
+    refreshGoal();
+  }
+);
 
 const phaseVariant = computed(() => {
   switch (currentGoal.value?.phase) {

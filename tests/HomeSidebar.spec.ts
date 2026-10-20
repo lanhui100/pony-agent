@@ -335,14 +335,17 @@ describe("HomeSidebar", () => {
     vi.restoreAllMocks();
   });
 
-  it("右侧栏只保留状态、计划段，计划仅在非0时出现，不再渲染 Tools、Trace 与 Debug（PA-096）", async () => {
-    // 初始 plans 为 0，不显示计划
+  it("右侧栏只保留状态、计划段，计划面板常驻且空计划显示空态，不再渲染 Tools、Trace 与 Debug（PA-096/C6）", async () => {
+    // Wave-1 C6：PlanPanel 常驻渲染（不以「已有数据」为渲染前提），空计划时显示「暂无计划」空态
     let wrapper = await mountSidebar();
     await flushAll();
 
     expect(wrapper.text()).toContain("状态");
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
-    expect(wrapper.text()).not.toContain("计划");
+    const planPanelToggle = wrapper.find('[data-testid="plan-panel-toggle"]');
+    expect(planPanelToggle.exists()).toBe(true);
+    expect(planPanelToggle.element.closest("section")).not.toBeNull();
+    expect(wrapper.text()).toContain("暂无计划");
     expect(wrapper.text()).not.toContain("Tools");
     expect(wrapper.text()).not.toContain("DEBUG");
     expect(wrapper.find('[data-testid="tools-panel-toggle"]').exists()).toBe(false);

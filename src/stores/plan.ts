@@ -291,15 +291,32 @@ export const usePlanStore = defineStore("plan", {
 });
 
 // ===========================================================================
-// Wave-1 冻结契约空桩（protocol-agent 签署；实现方见
-// docs/architecture/plan-goal-contract.md C6）。仅签名 + throw，禁止在空桩内写实现。
+// Wave-1 C6：turn 结束后的计划面板刷新（docs/architecture/plan-goal-contract.md §6）
 // ===========================================================================
 
 /**
  * C6：turn 结束（`turn:completed` / graph 流结束）后，以真实 sessionId 刷新计划面板数据
  * （`list(sessionId)` + `listTodos(sessionId)`）。
+ *
+ * 契约约束：
+ * - 以真实 sessionId 为键，禁止 `"default"` 兜底；
+ * - 空 sessionId 直接返回，不发起任何 IPC；
+ * - IPC 异常必须吞掉（store action 内已降级为空），不得冒泡到 turn 结束路径。
  */
 export async function refreshForTurn(sessionId: string): Promise<void> {
-  void sessionId; // 空桩期参数保留签名但未读取（noUnusedParameters）；实现时删除本行。
-  throw new Error("NotImplemented: wave-1");
+  const normalizedSessionId = sessionId?.trim() ?? "";
+  if (!normalizedSessionId) {
+    return;
+  }
+
+  const planStore = usePlanStore();
+  try {
+    await Promise.all([
+      planStore.list(normalizedSessionId),
+      planStore.listTodos(normalizedSessionId)
+    ]);
+  } catch (error) {
+    // turn 结束路径禁止因面板刷新失败而中断主流程。
+    console.warn("[wave-1] plan refreshForTurn failed:", error);
+  }
 }

@@ -96,8 +96,8 @@ onBeforeUnmount(() => {
           @copy-session-id="copyText('session-id', sessionId)"
         />
 
+        <!-- Wave-1 C6：计划面板常驻（不再以「已有数据」为渲染前提），空态由 PlanPanel 内部展示。 -->
         <PlanPanel
-          v-if="hasPlanOrTasks"
           :session-id="sessionId"
           :open="activePanel === 'plan'"
           @toggle="togglePlan()"

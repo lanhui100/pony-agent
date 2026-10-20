@@ -127,15 +127,24 @@ export const useGoalStore = defineStore("goal", {
 });
 
 // ===========================================================================
-// Wave-1 冻结契约空桩（protocol-agent 签署；实现方见
-// docs/architecture/plan-goal-contract.md C6）。仅签名 + throw，禁止在空桩内写实现。
+// Wave-1 C6：turn 结束 / goal 事件后的目标条刷新（docs/architecture/plan-goal-contract.md §6）
 // ===========================================================================
 
 /**
  * C6：turn 结束（`turn:completed` / graph 流结束）或 `goal://changed` / `goal://round`
  * 事件到达后，以真实 sessionId 刷新目标条（`fetchGoal(sessionId)`）。
+ *
+ * 契约约束：空 sessionId 直接返回（不发起 IPC）；IPC 异常必须吞掉，不得冒泡到事件路径。
  */
 export async function refreshForTurn(sessionId: string): Promise<void> {
-  void sessionId; // 空桩期参数保留签名但未读取（noUnusedParameters）；实现时删除本行。
-  throw new Error("NotImplemented: wave-1");
+  const normalizedSessionId = sessionId?.trim() ?? "";
+  if (!normalizedSessionId) {
+    return;
+  }
+
+  try {
+    await useGoalStore().fetchGoal(normalizedSessionId);
+  } catch (error) {
+    console.warn("[wave-1] goal refreshForTurn failed:", error);
+  }
 }
