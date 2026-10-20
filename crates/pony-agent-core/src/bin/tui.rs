@@ -2314,6 +2314,20 @@ fn tokenize_code_segment(segment: &str) -> Vec<Span<'static>> {
     spans
 }
 
+/// 向代码块色带追加一行整行背景留白，形成顶部或底部的代码块内边距（内边距仍带有 CODE_FILL 底色）。
+fn push_code_band_padding(lines: &mut Vec<Line<'static>>, width: usize) {
+    let band_w = width
+        .saturating_sub(RAIL + CODE_BAND_INSET)
+        .max(CODE_BAND_PAD * 2 + 1);
+    let mut spans = blank_rail(Style::default());
+    spans.push(Span::styled(" ", Style::default().bg(theme::CODE_FILL)));
+    lines.push(pad_line_with_bg(
+        Line::from(spans),
+        RAIL + band_w,
+        theme::CODE_FILL,
+    ));
+}
+
 /// 代码块材质：语言标签行与代码行共用同一条 `CODE_FILL` 陶土暗底色带，无竖线、无边框。
 /// 色带从轨道后起排，右端内缩 `CODE_BAND_INSET` 列；超出宽度的代码按显示宽度折行，
 /// 内部增加 CODE_BAND_PAD 列内边距，提升呼吸感与专业代码编辑器质感。
@@ -3133,8 +3147,10 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                         if trimmed.starts_with("```") {
                             in_code = !in_code;
                             if in_code {
-                                // 代码块开始：增加与上方正文文字的 1 行呼吸留白间距
+                                // 代码块开始：增加与上方正文文字的 1 行外呼吸留白间距
                                 push_blank(&mut lines);
+                                // 代码块内部：顶部内边距（带有陶土暗底色）
+                                push_code_band_padding(&mut lines, width);
 
                                 let lang = trimmed.trim_start_matches('`').trim();
                                 if !lang.is_empty() {
@@ -3148,7 +3164,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                                     );
                                 }
                             } else {
-                                // 代码块结束：增加与下方后续文字的 1 行呼吸留白间距
+                                // 代码块内部：底部内边距（带有陶土暗底色）
+                                push_code_band_padding(&mut lines, width);
+                                // 代码块结束：增加与下方后续文字的 1 行外呼吸留白间距
                                 push_blank(&mut lines);
                             }
                             continue;
@@ -3901,7 +3919,7 @@ fn ask_option_row(
 
     let mut spans = vec![
         Span::raw(" "),
-        Span::styled(if focused { "▏" } else { " " }, bar_style),
+        Span::styled(if focused { "▌" } else { " " }, bar_style),
         Span::raw(" "),
         Span::styled(format!("{marker} "), marker_style),
         Span::styled(label, label_style),
@@ -3953,10 +3971,9 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
         .filter(|(_, total)| *total > 1)
         .map(|(index, total)| format!("{index}/{total}"));
 
-    // ── 标题：呼吸标记 + 提问 + 分组 chip + 问题正文 + 多问题计数 ─────────────
+    // ── 标题：呼吸标记 + 提问 chip + 分组 chip + 问题正文 + 多问题计数 ─────────────
     let mut title_spans: Vec<Span<'static>> = vec![
-        Span::styled(" ▌", Style::default().fg(theme::ACCENT)),
-        Span::raw(" "),
+        Span::raw(" ".repeat(RAIL)),
         Span::styled(
             pulse,
             Style::default()
@@ -3970,9 +3987,9 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
+        Span::raw(" "),
     ];
-    let mut used = RAIL + 2 + 2 + 3;
+    let mut used = RAIL + 2 + 1 + 4 + 1;
     if let Some(header) = header {
         let chip = format!("{header} ");
         used += str_width(&chip);
@@ -4054,14 +4071,14 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
             .map(|q| q.multi_select)
             .unwrap_or(false);
         let hint = if custom_focused {
-            "键入文本 · ↵ 提交 · esc 取消"
+            "输入自定义回答 · ↵ 提交 · esc 取消"
         } else if multi {
             "↑↓ 移动 · space 勾选 · ↵ 提交 · esc 取消"
         } else {
             "↑↓ 移动 · ↵ 确认 · esc 取消"
         };
         lines.push(Line::from(vec![
-            Span::raw(" ".repeat(1 + RAIL + 2)),
+            Span::raw(" ".repeat(RAIL + 1)),
             Span::styled(hint, faint()),
         ]));
     }
@@ -5157,7 +5174,19 @@ fn tui_event_loop(
                                             match answer_res {
                                                 Ok(_) => {
                                                     if let Some(ref run_id) = handle.run_id {
-                                                        if let Err(e) = control_plane.graph_resume_ask(run_id, &handle.request_id, handle.version, answer_json) {
+                                                        // 查找对应 graph_run 当前绑定的 ask wait 期望版本
+                                                        let waits_val = control_plane.graph_list_ask_waits(run_id);
+                                                        let resume_version = waits_val
+                                                            .as_array()
+                                                            .and_then(|waits| {
+                                                                waits.iter().find(|w| {
+                                                                    w.get("requestId").and_then(|r| r.as_str()) == Some(&handle.request_id)
+                                                                })
+                                                            })
+                                                            .and_then(|w| w.get("expectedVersion").and_then(|v| v.as_u64()))
+                                                            .unwrap_or(handle.version);
+
+                                                        if let Err(e) = control_plane.graph_resume_ask(run_id, &handle.request_id, resume_version, answer_json) {
                                                             state.status_text = format!("恢复任务流失败: {e}");
                                                             state.messages.push(ChatMessage {
                                                                 role: MessageRole::System,
