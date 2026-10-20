@@ -31,6 +31,9 @@ python3 .dev-team/evidence/tui-tmux/ansi2png.py <file>.ansi <file>.png
 | `08-tasks-real.png` | 任务看板显示 `TodoWrite` **真实落库**的 3 条任务与 1/3 汇总 | 真实 tmux + 真实 todo 存储 |
 | `09-goal-metrics.png` | 指标行显示 `create_goal` **真实落库**的 Goal 与 `[0/6]` 轮次 | 真实 tmux + 真实 goal 存储 |
 | `10-plan-real.png` | 无计划时会话内 `/plan` 的空状态（不再整屏空白） | 真实 tmux |
+| `11-goal-phase.png` | Goal 相位：`Goal · <目标> [0/6] (进行中)` 左对齐横幅 | 真实 tmux + 真实 goal 存储 |
+| `12-metrics-phase.png` | 指标相位：`↑1.7k ↓4 · 缓存 0% · 上下文 0%` 右对齐数值 | 真实 tmux |
+| `13-ctrl-t-board.png` | **`Ctrl+T` 直接呼出**任务看板（与 `/tasks` 同路径） | 真实 tmux |
 
 ## 3. Ask 挂起链路的机器凭证
 
@@ -66,6 +69,22 @@ HOME=/tmp/pony-mock-home4 XDG_CONFIG_HOME=/tmp/pony-mock-home/.config target/deb
 
 即：**工具执行、挂起、待决请求、CAS 消费、todo/goal 落库、面板渲染全部是真实代码
 路径**，只有 LLM 的 token 生成被 stub 替代。
+
+## 4.1 Goal 与指标行的交替轮播（波次 44）
+
+Goal 原先被拼在指标行右侧，长目标会把 token/缓存/上下文挤掉。现在改为**时间片轮播**：
+
+- `GOAL_BANNER_HOLD_MS = 6000`、`METRICS_HOLD_MS = 8000`（`goal_banner_phase()` 单点定义）；
+- Goal 相位整行**左对齐**成横幅（`Goal · <目标> [轮次/上限] (阶段)`），指标相位保持右对齐数值；
+- 相位边界由主循环精确重绘（`cap_poll_ms` 对齐到下次切换），空闲时不空转。
+
+实测采样（1s 粒度）：
+
+```
+1..5  GOAL     6..13 METRICS     14..18 GOAL   ...
+```
+
+快捷键：`Ctrl+T` 呼出/收起任务看板（面板内再按一次也关闭）。
 
 ## 5. 已知限制（如实记录）
 

@@ -465,7 +465,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/models", "切换当前活跃模型"),
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
     ("/plan", "切换/查看 Plan 计划模式"),
-    ("/tasks", "切换/查看 Team 任务看板"),
+    ("/tasks", "切换/查看 Team 任务看板（Ctrl+T）"),
     ("/clear", "清空当前消息上下文"),
     ("/cost", "查看当前模型与网关配额信息"),
     ("/help", "查看所有支持的快捷指令"),
@@ -613,6 +613,8 @@ pub struct TuiState {
     /// 波次 43：当前处于待决状态的宿主控制请求（真实 `list_pending_asks` 快照）。
     /// `None` = 没有待决请求；`Some` 时对话框提交/拒绝会回写控制面。
     pub pending_request: Option<PendingUiRequest>,
+    /// 波次 44：Goal 横幅首次出现的时间点，用于与指标行做时间片交替（不挤在同一行右侧）。
+    pub goal_banner_since: Option<std::time::Instant>,
 }
 
 impl Default for TuiState {
@@ -670,6 +672,7 @@ impl Default for TuiState {
             task_board_state: None,
             goal_state: None,
             pending_request: None,
+            goal_banner_since: None,
         }
     }
 }
@@ -1012,6 +1015,18 @@ impl TuiState {
     }
 
     pub fn set_goal(&mut self, goal: TuiGoal) {
+        // 新目标（或阶段/轮次变化）重置横幅时间片，保证一次切换从 Goal 相位开始。
+        let restarted = match &self.goal_state {
+            Some(previous) => {
+                previous.id != goal.id
+                    || previous.round_count != goal.round_count
+                    || previous.phase != goal.phase
+            }
+            None => true,
+        };
+        if restarted || self.goal_banner_since.is_none() {
+            self.goal_banner_since = Some(std::time::Instant::now());
+        }
         self.goal_state = Some(goal);
     }
 
@@ -2418,6 +2433,45 @@ fn workspace_label(workspace: &std::path::Path) -> String {
 /// wave-39 v3 §6 R7/R10/R11 / wave-41 S1：色带下方指标行 —— 左侧 workspace 路径（整行 GHOST），
 /// 右侧按「有值才显示」拼装 `↑in ↓out · 缓存 x% · 上下文 y%`；全无值时右簇为空。
 /// 输入 token (↑) 与上下文百分比分子对齐 ADR 0035 S1：使用当前上下文输入 token（非会话累计）。
+/// 波次 44：Goal 横幅与指标行的**时间片交替**参数。
+///
+/// 占用同一行会让右侧指标被 Goal 挤掉（真实目标动辄一整句），因此改为轮播：
+/// 前 6 秒展示 Goal，随后 8 秒让位给 token / 缓存 / 上下文指标，循环往复。
+pub const GOAL_BANNER_HOLD_MS: u64 = 6_000;
+pub const METRICS_HOLD_MS: u64 = 8_000;
+
+/// 当前 Goal 轮播相位（`None` = 没有活跃 Goal，整行永远是指标）。
+/// 返回 `(是否显示 Goal, 距离下次切换的毫秒数)`，供主循环安排精确重绘。
+pub fn goal_banner_phase(state: &TuiState) -> Option<(bool, u64)> {
+    let goal = state.goal_state.as_ref()?;
+    let _ = goal;
+    let since = state.goal_banner_since?;
+    let period = GOAL_BANNER_HOLD_MS + METRICS_HOLD_MS;
+    let elapsed = since.elapsed().as_millis() as u64 % period;
+    if elapsed < GOAL_BANNER_HOLD_MS {
+        Some((true, GOAL_BANNER_HOLD_MS - elapsed))
+    } else {
+        Some((false, period - elapsed))
+    }
+}
+
+fn goal_banner_text(goal: &TuiGoal) -> String {
+    let rounds = match goal.max_rounds {
+        Some(max) => format!("{}/{}", goal.round_count, max),
+        None => format!("{}", goal.round_count),
+    };
+    let phase = match goal.phase {
+        GoalPhase::Active => "进行中",
+        GoalPhase::Completed => "已完成",
+        GoalPhase::Blocked => "已阻塞",
+        GoalPhase::Paused => "已暂停",
+    };
+    format!(
+        "Goal · {} [{rounds}] ({phase})",
+        goal.objective.trim().replace('\n', " ")
+    )
+}
+
 fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
     let ghost = || Style::default().fg(theme::GHOST);
     let mut segments: Vec<String> = Vec::new();
@@ -2453,19 +2507,26 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             .clamp(0.0, 100.0);
         segments.push(format!("上下文 {pct:.0}%"));
     }
-    // 渲染活跃 Goal 指标
-    if let Some(ref goal) = state.goal_state {
-        let rounds_str = match goal.max_rounds {
-            Some(max) => format!("{}/{}", goal.round_count, max),
-            None => format!("{}", goal.round_count),
-        };
-        let phase_str = match goal.phase {
-            GoalPhase::Active => "进行中",
-            GoalPhase::Completed => "已完成",
-            GoalPhase::Blocked => "已阻塞",
-            GoalPhase::Paused => "已暂停",
-        };
-        segments.push(format!("Goal: {} [{}] ({})", truncate_chars(&goal.objective, 16), rounds_str, phase_str));
+    // 波次 44：Goal 与指标行按时间片交替（见 goal_banner_phase），
+    // 且 Goal 相位**左对齐**成横幅，不与右对齐的数值指标混在同一排版里。
+    let label_text = workspace_label(&state.workspace);
+    if matches!(goal_banner_phase(state), Some((true, _))) {
+        if let Some(goal) = state.goal_state.as_ref() {
+            let text = goal_banner_text(goal);
+            let left_budget = (width.saturating_sub(RAIL + 2)) / 3;
+            let label = ellipsize_width(&label_text, left_budget.max(8));
+            let used = RAIL + str_width(&label) + 2;
+            let budget = width.saturating_sub(used).max(12);
+            let banner = ellipsize_width(&text, budget);
+            let pad = width.saturating_sub(used + str_width(&banner));
+            return Line::from(vec![
+                Span::raw(" ".repeat(RAIL)),
+                Span::styled(label, ghost()),
+                Span::raw("  "),
+                Span::styled(banner, ghost()),
+                Span::raw(" ".repeat(pad)),
+            ]);
+        }
     }
     let right = segments.join(" · ");
     let right_w = str_width(&right);
@@ -4009,6 +4070,8 @@ fn tui_event_loop(
 
     let mut last_tick_instant = std::time::Instant::now();
     let mut last_poll_instant = std::time::Instant::now();
+    let mut last_goal_phase: Option<bool> = None;
+    let mut cap_poll_ms: Option<u64> = None;
     install_shutdown_signal_handlers();
 
     // 辅助闭包：检查并同步当前 session 的待决宿主控制请求（Ask / Approval）
@@ -4074,7 +4137,24 @@ fn tui_event_loop(
             dirty = false;
         }
 
-        let poll_ms = if state.is_streaming || state.has_pending_animation() { 16 } else { 120 };
+        // 波次 44：Goal/指标轮播到切换点时立即重绘，并且把等待时长压到不超过剩余相位，
+        // 既不靠 16fps 空转，也不会让横幅在相位边界上“卡住不动”。
+        if let Some((visible, remaining)) = goal_banner_phase(&state) {
+            if last_goal_phase != Some(visible) {
+                last_goal_phase = Some(visible);
+                dirty = true;
+            }
+            // 留 1ms 余量，避免取整后再次落在同一相位。
+            cap_poll_ms = Some(remaining.saturating_add(1));
+        } else {
+            last_goal_phase = None;
+        }
+
+        let mut poll_ms = if state.is_streaming || state.has_pending_animation() { 16 } else { 120 };
+        if let Some(cap) = cap_poll_ms {
+            poll_ms = poll_ms.min(cap.max(30));
+            cap_poll_ms = None;
+        }
         match rx.recv_timeout(Duration::from_millis(poll_ms)) {
             Ok(event) => {
                 dirty = true;
@@ -4691,6 +4771,12 @@ fn tui_event_loop(
                             KeyCode::Esc => {
                                 state.toggle_task_board();
                             }
+                            // 面板内再按 Ctrl+T 直接收起（与命令式 toggle 语义一致）。
+                            KeyCode::Char('t')
+                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                state.toggle_task_board();
+                            }
                             KeyCode::Tab => {
                                 if let Some(ref mut board) = state.task_board_state {
                                     board.toggle_collapse();
@@ -4756,6 +4842,13 @@ fn tui_event_loop(
                             }
                             KeyCode::Char('e') => {
                                 state.cursor_line_end();
+                                continue;
+                            }
+                            // 波次 44：Ctrl+T 呼出任务看板（与 /tasks 同路径：先同步真实 todo 存储）。
+                            // 不占用裸 `t`，避免无法输入以 t 开头的消息。
+                            KeyCode::Char('t') => {
+                                sync_tasks_from_store(&mut state);
+                                state.toggle_task_board();
                                 continue;
                             }
                             // wave-35b：Ctrl+R 打开模型面板并远程刷新（与 /models 同路径）。
