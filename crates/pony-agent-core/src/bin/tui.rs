@@ -737,13 +737,13 @@ pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u16
     }
 }
 
-// 状态感知动效字形集：
-// 1. 思考中 (Thinking): 脉冲/呼吸波纹 (· ✢ ✦ ✢)
-// 2. 生成中 (Responding): 动态光标/扫描方块 (▖ ▘ ▝ ▗)
-// 3. 执行中 (ExecutingTool): 机械轨道瞄准锁点 / 准星光标循迹 (⌜ ⌝ ⌟ ⌞)
+// 状态感知动效字形集（精细化点阵与轨道流）：
+// 1. 思考中 (Thinking): 脉冲呼吸星芒 (· ✢ ✦ ✢)
+// 2. 生成中 (Responding): 盲文水滴波动 / 动态字符流 (⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+// 3. 执行中 (ExecutingTool): 精致平滑弧光流 (◜ ◠ ◝ ◞ ◡ ◟)
 const THINKING_FRAMES: &[&str] = &["·", "✢", "✦", "✢"];
-const RESPONDING_FRAMES: &[&str] = &["▖", "▘", "▝", "▗"];
-const EXECUTING_FRAMES: &[&str] = &["⌜", "⌝", "⌟", "⌞"];
+const RESPONDING_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const EXECUTING_FRAMES: &[&str] = &["◜", "◠", "◝", "◞", "◡", "◟"];
 const DEFAULT_SPINNER_FRAMES: &[&str] = &["·", "•", "●", "•"];
 
 pub fn spinner_frame(tick: usize) -> &'static str {
@@ -3264,8 +3264,8 @@ fn tui_event_loop(
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
-        // 当处于流式思考状态时，按 400ms 节奏驱动呼吸点与耗时刷新（安静、不抢注意力）
-        if state.is_streaming && last_tick_instant.elapsed() >= Duration::from_millis(400) {
+        // 当处于流式或执行状态时，按 160ms 节奏驱动平滑动效与耗时刷新
+        if state.is_streaming && last_tick_instant.elapsed() >= Duration::from_millis(160) {
             state.spinner_tick = state.spinner_tick.wrapping_add(1);
             last_tick_instant = std::time::Instant::now();
             dirty = true;

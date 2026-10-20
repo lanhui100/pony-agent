@@ -3,10 +3,10 @@
 | field | value |
 | --- | --- |
 | binary | `/home/dm/pony-agent/target/debug/pony` |
-| sha256 | `a9c9c180119e200a6ca5ba12b66a7687179c408470e2e6ae45880c38de69d3eb` |
-| mtime | `2026-10-20T07:40:06+08:00` |
+| sha256 | `6fa2b962dd6c5db2fda8a72e35f940765b7343595a7ab36f4f26a17431d3cd55` |
+| mtime | `2026-10-20T09:44:30+08:00` |
 | version | `pony 0.1.127 · linux-x86_64` |
-| generated_at | `2026-10-19T23:40:59.868748+00:00` |
+| generated_at | `2026-10-20T01:44:34.770953+00:00` |
 | result | **369 pass / 0 fail** across 18 scenarios |
 
 ## baseline → after 差异摘要
@@ -14,13 +14,13 @@
 - 断言：baseline 354 / after 369；失败 56 → 0；场景失败 15 → 0。
 - FAIL→PASS（已消除）：56 项。
   - empty：`empty.footer_workspace_only`, `main.separator_single_header_rule`, `main.composer_cursor_block`, `empty.placeholder_column`, `empty.command_desc_column`
+  - streaming：`mid.no_standalone_role_label`, `final.no_standalone_role_label`, `streaming.mid_status_generating`, `streaming.mid_active_elapsed`, `streaming.mid_not_finished`, `streaming.final_complete`
   - conversation：`main.no_standalone_role_label`, `conversation.user_role_rail`, `conversation.text_columns_aligned`, `conversation.aligned_columns_padded`, `main.separator_single_header_rule`, `conversation.footer_metrics`
   - slash-menu：`slash.all_commands_listed`, `slash.each_command_once`, `slash.command_desc_column`, `slash.resume_once_whole_screen`
   - models-panel：`models.title_counter`, `models.panel_vertical_borders_aligned`, `models.focus_composer_hidden`, `models.focus_chat_hidden`, `models.focus_background_clean`, `models.border_rows_complete`, `models.rows_unique_and_consecutive`
   - provider-panel：`provider.border_box`, `provider.focus_composer_hidden`, `provider.focus_chat_hidden`, `provider.focus_background_clean`, `provider.border_rows_complete`
   - sessions-panel：`main.no_standalone_role_label`, `sessions.panel_width_expected`, `sessions.focus_composer_hidden`, `sessions.focus_background_clean`, `sessions.current_marker`
   - add-provider：`add_provider.panel_vertical_borders_aligned`, `add_provider.focus_composer_hidden`, `add_provider.focus_chat_hidden`, `add_provider.focus_background_clean`, `add_provider.border_rows_complete`
-  - streaming：`mid.no_standalone_role_label`, `final.no_standalone_role_label`, `streaming.mid_status_generating`, `streaming.mid_active_elapsed`, `streaming.mid_not_finished`, `streaming.final_complete`
   - error：`main.no_standalone_role_label`, `error.footer_metrics`
   - narrow：`empty.separator_single_header_rule`
   - wide：`conversation.no_standalone_role_label`, `empty.separator_single_header_rule`, `wide.text_columns_aligned`
@@ -48,13 +48,13 @@
 | scenario | baseline pass/total | after pass/total | fixed | regressed |
 | --- | --- | --- | --- | --- |
 | empty | 10/15 | 16/16 | 5 | 0 |
+| streaming | 12/18 | 18/18 | 6 | 0 |
 | conversation | 13/19 | 20/20 | 6 | 0 |
 | slash-menu | 10/14 | 14/14 | 4 | 0 |
 | models-panel | 13/20 | 22/22 | 7 | 0 |
 | provider-panel | 10/15 | 21/21 | 5 | 0 |
 | sessions-panel | 18/23 | 22/22 | 5 | 0 |
 | add-provider | 13/18 | 20/20 | 5 | 0 |
-| streaming | 12/18 | 18/18 | 6 | 0 |
 | error | 12/14 | 14/14 | 2 | 0 |
 | narrow | 19/20 | 21/21 | 1 | 0 |
 | wide | 18/21 | 22/22 | 3 | 0 |
@@ -92,6 +92,33 @@
 | PASS | `main.composer_cursor_block` — first placeholder glyph is a reverse-video block (accent bg / canvas-colored glyph) | row=31 col=5 fg=(18, 16, 14) bg=(198, 167, 126) canvas=(18, 16, 14) ink=(232, 229, 224) |
 | PASS | `empty.placeholder_column` — placeholder starts at the shared text column 5 | placeholder_col=5 |
 | PASS | `empty.command_desc_column` — command descriptions start at column 16 (same table geometry everywhere) | cols={'/resume': 16, '/provider': 16, '/models': 16, '/thinking': 16, '/clear': None, '/cost': None, '/help': None, '/quit': None} expected=16 missing=[] |
+
+### streaming (120x34)
+
+- evidence: `streaming/`
+- screenshots: [final.png](streaming/final.png), [mid.png](streaming/mid.png)
+- checks: 18 pass / 0 fail
+
+| result | check | evidence |
+| --- | --- | --- |
+| PASS | `mid.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
+| PASS | `mid.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
+| PASS | `mid.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
+| PASS | `mid.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
+| PASS | `mid.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2177 |
+| PASS | `mid.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=81085 |
+| PASS | `final.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
+| PASS | `final.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
+| PASS | `final.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
+| PASS | `final.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
+| PASS | `final.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2609 |
+| PASS | `final.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=144979 |
+| PASS | `streaming.mid_status_generating` — streaming active line shows the generating state while the footer is the metrics row | active_row :: ⠴ 生成中 0秒 \| footer :: /home/dm/pony-agent 上下文 0% |
+| PASS | `streaming.mid_active_elapsed` — active line shows elapsed time next to the generating state | active_row :: ⠴ 生成中 0秒 |
+| PASS | `streaming.mid_partial_body` — partial streamed markdown body is already rendered | 正在分析 |
+| PASS | `streaming.mid_not_finished` — mid-stream capture is not the completed answer yet (footer is the metrics row) | footer :: /home/dm/pony-agent 上下文 0% |
+| PASS | `streaming.final_complete` — final capture contains the terminal answer and the metrics footer | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
+| PASS | `streaming.final_not_generating` — transient generating status disappeared once the stream finished | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
 
 ### conversation (120x34)
 
@@ -265,33 +292,6 @@
 | PASS | `add_provider.focus_chat_hidden` — focus mode hides chat and splash (no transcript/logo residue) | guidance=False logo_tag=False block_glyphs=False |
 | PASS | `add_provider.focus_background_clean` — rows outside header + panel are completely blank (no half-cell residue) | dirty_rows=[] |
 | PASS | `add_provider.border_rows_complete` — every panel row carries both border columns at the same display columns | left=28 right=91 broken_rows=[] |
-
-### streaming (120x34)
-
-- evidence: `streaming/`
-- screenshots: [final.png](streaming/final.png), [mid.png](streaming/mid.png)
-- checks: 18 pass / 0 fail
-
-| result | check | evidence |
-| --- | --- | --- |
-| PASS | `mid.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `mid.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
-| PASS | `mid.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
-| PASS | `mid.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `mid.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.ansi size=2177 |
-| PASS | `mid.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mid.png size=81038 |
-| PASS | `final.no_panic` — capture contains no Rust panic/backtrace | no panic tokens in capture |
-| PASS | `final.no_standalone_role_label` — no standalone role label line "你" (role shown by material, not label) | no line equals "你" |
-| PASS | `final.within_terminal_width` — every captured row display width <= 120 cols | widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha |
-| PASS | `final.capture_rows` — capture has exactly pane height rows (34) | rows=34 pane_rows=34 |
-| PASS | `final.artifact_ansi` — ansi artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.ansi size=2609 |
-| PASS | `final.artifact_png` — png artifact exists for screenshot review | /home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/final.png size=144979 |
-| PASS | `streaming.mid_status_generating` — streaming active line shows the generating state while the footer is the metrics row | active_row :: ▗ 生成中 0秒 \| footer :: /home/dm/pony-agent 上下文 0% |
-| PASS | `streaming.mid_active_elapsed` — active line shows elapsed time next to the generating state | active_row :: ▗ 生成中 0秒 |
-| PASS | `streaming.mid_partial_body` — partial streamed markdown body is already rendered | 正在分析 |
-| PASS | `streaming.mid_not_finished` — mid-stream capture is not the completed answer yet (footer is the metrics row) | footer :: /home/dm/pony-agent 上下文 0% |
-| PASS | `streaming.final_complete` — final capture contains the terminal answer and the metrics footer | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
-| PASS | `streaming.final_not_generating` — transient generating status disappeared once the stream finished | footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0% |
 
 ### error (120x34)
 
