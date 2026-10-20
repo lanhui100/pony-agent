@@ -1,0 +1,29 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/goal.rs",
+      "line": 283,
+      "rule": "原子写失败回滚必须恢复先前值：create_goal 覆盖已有 session 目标后落盘失败，回滚不是恢复旧值而是 remove 整个 session",
+      "counterexample": "非 root Unix：PONY_AGENT_GOAL_STORE_PATH=/tmp/g/goal_store.json（/tmp/g 可写）→ create_goal(S,'A') 成功（内存/磁盘均为 {S:A}）→ chmod 0500 /tmp/g → create_goal(S,'B') 在 persist_goal_store 的 fs::write 处失败并返回 Err → 此时 goals.remove(&session) 把旧目标 A 一并从内存删除：get_goal(S) 返回 None，而 sidecar 仍是 {S:A}（内存/磁盘发散）；chmod 0755 后 reset_goal_store_for_test()+get_goal(S) 又返回 A。对照 update_goal（:366）与 advance_goal_round（:246）均用 previous 快照恢复，create_goal 是唯一 remove 型回滚。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/goal.rs",
+      "line": 125,
+      "rule": "读取失败降级为空后不得以空基线全量覆写既有 sidecar（静默数据丢失）",
+      "counterexample": "非 root Unix：先 create_goal(S1)、create_goal(S2)（sidecar 含两目标）→ chmod 000 sidecar（read_to_string 返回 EACCES，但父目录可写）→ reset_goal_store_for_test() 懒加载降级为空 map → create_goal(S3) 成功并 persist_goal_store 全量写 {S3}（tmp+rename 覆盖成功）→ chmod 0644 后 reset_goal_store_for_test()+get_goal(S1)/get_goal(S2) 均为 None：S1/S2 被静默删除。任何瞬时读失败（Windows 杀软占用/EMFILE）都会把整库替换为当前单条目标。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/goal.rs",
+      "line": 174,
+      "rule": "跨进程共享 sidecar 必须序列化：固定 *.tmp 名 + 全量覆写 + 无 OS 文件锁，而桌面端与 TUI 共用同一默认路径",
+      "counterexample": "P1/P2 为两个进程（桌面 + TUI，均取 default_sqlite_path().parent()/goal_store.json，各自只有进程内 Mutex）：P1 create_goal(S,'A') 写完 goal_store.json.tmp 尚未 rename；P2 create_goal(T,'B') 用同一临时文件名 fs::write 截断覆写后 rename → store={T:B}；P1 再 rename → store={S:A}，T 的目标静默丢失且两次调用都返回 Ok。若 P1 恰在 P2 fs::write 中途 rename，sidecar 得到被截断的 JSON，下次 load_goal_store 解析失败 → 全库降级为空。此外 ensure_goal_store_loaded 只在首次访问加载（:114-118），进程启动后永不重读，桌面端与 TUI 会长期看不到对方 create_goal/update_goal 的结果（目标真值源跨进程陈旧）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/goal.rs",
+      "line": 101,
+      "rule": "测试隔离：cfg(test) 下 sidecar 默认路径不得退化到共享 temp_dir（覆盖 default_sqlite_path 已内建的 pid+nanos 唯一化）",
+      "counterexample": "cfg(test) 时 default_sqlite_path() 返回 temp_dir/pony-agent-test-<pid>-<nanos>.db，但 goal_store_path() 只取 .parent()，于是全部 lib 单测共用 /tmp/goal_store.json。预置 printf '{\"session-1\":{\"id\":\"g1\",\"session_id\":\"session-1\",\"objective\":\"x\",\"phase\":\"active\",\"activation\":\"armed\",\"revision\":1,\"roundsStarted\":0,\"maxGoalRounds\":10,\"blocked_reason\":null}}' > \"${TMPDIR:-/tmp}/goal_store.json\" 后运行 cargo test -p pony-agent-core --lib agent::planner::tests::graph_planner_defaults_to_wait_user_without_iterative_goal_signal：该用例 run.session_id=session-1 命中 armed 目标 → 判定 Continue，断言 WaitUser 失败（残留文件/上次 panic 未 disarm 均可触发）。同时两个并发的 cargo test 进程共用同一 path 与同一 tmp 名，互相覆写并可能把共享文件写坏。"
+    }
+  ]
+}
