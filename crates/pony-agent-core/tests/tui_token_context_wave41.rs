@@ -188,3 +188,45 @@ fn a4_context_percentage_is_based_on_current_context_input() {
         "输入指标必须显示当前上下文占用 25k，实际：{last}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A5: 跨轮对话中缓存命中率必须按单轮次计算，绝不能超过 100%（针对累计缓存命中除以单轮输入造成的计算错误）
+// ---------------------------------------------------------------------------
+#[test]
+fn a5_cache_hit_percentage_is_calculated_per_turn_and_clamped() {
+    let mut state = tui::TuiState::default();
+
+    // 第 1 轮：输入 1000，输出 100，缓存命中 800 (80%)
+    state.apply_turn_usage(1000, 100, 800, 1100);
+    assert_eq!(state.turn_cache_hit_tokens, 800, "第 1 轮单轮缓存命中为 800");
+
+    let buf1 = screen(&mut state, 110, 30);
+    let last1 = row_text(&buf1, 29);
+    assert!(
+        last1.contains("缓存 80%"),
+        "第 1 轮缓存命中率必须是 800/1000 = 80%，实际：{last1}"
+    );
+
+    // 第 2 轮：新一轮开始清空本轮 usage
+    state.begin_turn_usage();
+    // 第 2 轮：单次输入 1000，输出 200，本轮缓存命中 600 (60%)
+    // 若错误地累加缓存 (800 + 600 = 1400)，且分母是本轮单次输入 1000，则 1400/1000 会达到 140%！
+    state.apply_turn_usage(1000, 200, 600, 1200);
+
+    // 跨轮累计缓存命中为 800 + 600 = 1400
+    assert_eq!(state.total_cache_hit_tokens, 1400, "跨轮累计缓存命中保持累加为 1400");
+    // 本轮单轮缓存命中为 600
+    assert_eq!(state.turn_cache_hit_tokens, 600, "第 2 轮单轮缓存命中必须为 600");
+
+    let buf2 = screen(&mut state, 110, 30);
+    let last2 = row_text(&buf2, 29);
+    assert!(
+        last2.contains("缓存 60%"),
+        "第 2 轮缓存命中率必须是单轮次计算 600/1000 = 60%，绝不能是 1400/1000 = 140%！实际：{last2}"
+    );
+    assert!(
+        !last2.contains("140%"),
+        "缓存命中率绝不得超过 100%，实际：{last2}"
+    );
+}
+
