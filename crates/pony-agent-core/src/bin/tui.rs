@@ -108,6 +108,20 @@ pub enum UiEvent {
     ModelsDiscovered { provider_id: String, ids: Vec<String> },
     /// /models 远程拉取失败：仅上报错误，由主循环以 System 消息呈现，不 panic、不退出。
     ModelsDiscoverFailed { provider_id: String, error: String },
+    /// 触发权限请求审批对话框
+    RequestPermission(PermissionRequest),
+    /// 权限审批完成并回传用户决议
+    PermissionDecided { request_id: String, choice: PermissionChoice },
+    /// 触发 AskUser 提问交互
+    AskUserPrompt { request_id: String, questions: Vec<AskUserQuestion> },
+    /// 用户提交 AskUser 回答
+    AskUserAnswered { request_id: String, answers: Vec<(String, Vec<String>)> },
+    /// Plan 计划更新通知
+    PlanUpdated(PlanState),
+    /// 任务看板更新通知
+    TaskBoardUpdated(Vec<TuiTask>),
+    /// Goal 状态更新通知
+    GoalUpdated(TuiGoal),
 }
 
 /// wave-40 R1（契约冻结空桩）：Composer 中 Enter 键语义。
@@ -174,6 +188,10 @@ pub fn clean_tool_name_display(name: &str) -> String {
     cleaned.to_string()
 }
 
+#[path = "tui/protocol.rs"]
+pub mod protocol;
+pub use protocol::*;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InteractionMode {
     Normal,
@@ -182,6 +200,10 @@ pub enum InteractionMode {
     SelectingModel,
     SelectingReasoningEffort,
     AddingProvider,
+    PermissionApproval,
+    AskUserQuestion,
+    PlanMode,
+    TaskBoard,
 }
 
 pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
@@ -189,6 +211,8 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/provider", "管理与切换模型提供商"),
     ("/models", "切换当前活跃模型"),
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
+    ("/plan", "切换/查看 Plan 计划模式"),
+    ("/tasks", "切换/查看 Team 任务看板"),
     ("/clear", "清空当前消息上下文"),
     ("/cost", "查看当前模型与网关配额信息"),
     ("/help", "查看所有支持的快捷指令"),
@@ -295,6 +319,8 @@ pub struct TuiState {
     pub total_output_tokens: u64,
     /// wave-39 R2（契约冻结）：累计缓存命中输入 token。
     pub total_cache_hit_tokens: u64,
+    /// 单轮缓存命中输入 token（仅对应当前轮单次调用，用于单轮缓存命中率计算，避免跨轮累计除以单轮输入导致>100%）。
+    pub turn_cache_hit_tokens: u64,
     /// wave-39 R2 / wave-41 S1：最近一次调用的上下文占用 token，用于上下文百分比分子（对齐 ADR 0035 S1）。
     pub last_context_tokens: u64,
     /// wave-39 R2：当前模型上下文窗口；`0` = 未知（指标行渲染 `—`）。
@@ -325,6 +351,12 @@ pub struct TuiState {
     pub turn_started_at: Option<std::time::Instant>,
     /// Composer 高度平滑收拢过渡（每帧衰减 1 行直至 target_input_h）
     pub anim_composer_h: Option<u16>,
+    // 进阶交互状态
+    pub permission_state: Option<PermissionState>,
+    pub ask_user_state: Option<AskUserState>,
+    pub plan_state: Option<PlanState>,
+    pub task_board_state: Option<TaskBoardState>,
+    pub goal_state: Option<TuiGoal>,
 }
 
 impl Default for TuiState {
@@ -352,6 +384,7 @@ impl Default for TuiState {
             total_output_tokens: 0,
             // wave-39 R2：指标字段默认归零 / 未知。
             total_cache_hit_tokens: 0,
+            turn_cache_hit_tokens: 0,
             last_context_tokens: 0,
             context_window_tokens: 0,
             turn_usage: None,
@@ -375,6 +408,11 @@ impl Default for TuiState {
             runtime_mode: RuntimeMode::Ready,
             turn_started_at: None,
             anim_composer_h: None,
+            permission_state: None,
+            ask_user_state: None,
+            plan_state: None,
+            task_board_state: None,
+            goal_state: None,
         }
     }
 }
@@ -406,11 +444,13 @@ impl TuiState {
     /// wave-39 R3：发送新消息前清空本轮 usage 回执（跨轮由累计字段承载）。
     pub fn begin_turn_usage(&mut self) {
         self.turn_usage = None;
+        self.turn_cache_hit_tokens = 0;
     }
 
     /// wave-39 R3 / wave-41 S1：输入 token 与上下文按单次调用口径（ADR 0035 S1），
     /// `total_input_tokens` 表达当前上下文占用（不跨轮跨跳累加）；
-    /// 输出 token 与缓存命中维持跨轮会话累计（幂等覆盖本轮增量）。
+    /// 输出 token 与累计缓存命中维持跨轮会话累计（幂等覆盖本轮增量）；
+    /// `turn_cache_hit_tokens` 记录单轮缓存命中，用于单轮缓存率。
     pub fn apply_turn_usage(&mut self, input: u64, output: u64, cache_hit: u64, total: u64) {
         if let Some((_prev_input, prev_output, prev_cache, _prev_total)) = self.turn_usage {
             self.total_output_tokens = self.total_output_tokens.saturating_sub(prev_output);
@@ -419,6 +459,7 @@ impl TuiState {
         self.total_input_tokens = input;
         self.total_output_tokens = self.total_output_tokens.saturating_add(output);
         self.total_cache_hit_tokens = self.total_cache_hit_tokens.saturating_add(cache_hit);
+        self.turn_cache_hit_tokens = cache_hit;
         self.last_context_tokens = input;
         self.turn_usage = Some((input, output, cache_hit, total));
     }
@@ -655,6 +696,66 @@ impl TuiState {
     pub fn cancel_session_selector(&mut self) {
         self.mode = InteractionMode::Normal;
         self.session_list.clear();
+    }
+
+    // ── 进阶交互模式切换与状态桩函数 ──
+
+    pub fn start_permission_approval(&mut self, request: PermissionRequest) {
+        self.permission_state = Some(PermissionState::new(request));
+        self.mode = InteractionMode::PermissionApproval;
+    }
+
+    pub fn cancel_permission_approval(&mut self) {
+        self.permission_state = None;
+        self.mode = InteractionMode::Normal;
+    }
+
+    pub fn start_ask_user(&mut self, request_id: String, questions: Vec<AskUserQuestion>) {
+        self.ask_user_state = Some(AskUserState::new(request_id, questions));
+        self.mode = InteractionMode::AskUserQuestion;
+    }
+
+    pub fn cancel_ask_user(&mut self) {
+        self.ask_user_state = None;
+        self.mode = InteractionMode::Normal;
+    }
+
+    pub fn toggle_plan_mode(&mut self) {
+        if self.mode == InteractionMode::PlanMode {
+            self.mode = InteractionMode::Normal;
+            if let Some(ref mut plan) = self.plan_state {
+                plan.is_active_plan_mode = false;
+            }
+        } else {
+            self.mode = InteractionMode::PlanMode;
+            if let Some(ref mut plan) = self.plan_state {
+                plan.is_active_plan_mode = true;
+            }
+        }
+    }
+
+    pub fn toggle_task_board(&mut self) {
+        if self.mode == InteractionMode::TaskBoard {
+            self.mode = InteractionMode::Normal;
+        } else {
+            self.mode = InteractionMode::TaskBoard;
+        }
+    }
+
+    pub fn update_plan(&mut self, plan: PlanState) {
+        self.plan_state = Some(plan);
+    }
+
+    pub fn update_task_board(&mut self, tasks: Vec<TuiTask>) {
+        if let Some(ref mut board) = self.task_board_state {
+            board.tasks = tasks;
+        } else {
+            self.task_board_state = Some(TaskBoardState::new(tasks));
+        }
+    }
+
+    pub fn set_goal(&mut self, goal: TuiGoal) {
+        self.goal_state = Some(goal);
     }
 
     pub fn next_session(&mut self) {
@@ -2066,9 +2167,16 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
         ));
     }
     // 缓存比只在输入已知时可算（0% 也是有效值，故键控于 in>0 而非 cache>0）。
+    // 单轮次计算缓存命中率：turn_cache_hit_tokens / total_input_tokens，并限制在 0.0..=100.0% 避免跨轮或数据异常导致越界。
     if state.total_input_tokens > 0 {
-        let pct = (state.total_cache_hit_tokens as f64 / state.total_input_tokens as f64 * 100.0)
-            .round();
+        let cache_hits = if state.turn_cache_hit_tokens > 0 {
+            state.turn_cache_hit_tokens
+        } else {
+            state.total_cache_hit_tokens
+        };
+        let pct = (cache_hits as f64 / state.total_input_tokens as f64 * 100.0)
+            .round()
+            .clamp(0.0, 100.0);
         segments.push(format!("缓存 {pct:.0}%"));
     }
     if state.context_window_tokens > 0 {
@@ -3074,6 +3182,72 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             body,
         );
     }
+
+    // ── 进阶交互组件渲染空桩（由 Executor 在阶段 3 完善实际 UI） ──
+    if state.mode == InteractionMode::PermissionApproval {
+        render_permission_dialog_stub(f, state);
+    }
+    if state.mode == InteractionMode::AskUserQuestion {
+        render_ask_user_dialog_stub(f, state);
+    }
+    if state.mode == InteractionMode::PlanMode {
+        render_plan_panel_stub(f, state);
+    }
+    if state.mode == InteractionMode::TaskBoard {
+        render_task_board_stub(f, state);
+    }
+}
+
+pub fn render_permission_dialog_stub(f: &mut Frame, _state: &TuiState) {
+    let area = f.area();
+    let pw = 70u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = 10u16.min(area.height.saturating_sub(2)).max(6);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(pw)) / 2,
+        y: area.y + (area.height.saturating_sub(ph)) / 2,
+        width: pw,
+        height: ph,
+    };
+    let _ = draw_panel(f, rect, "权限审批请求 (Permission Request)", "Enter 确认 · Tab 切换 · Esc 拒绝");
+}
+
+pub fn render_ask_user_dialog_stub(f: &mut Frame, _state: &TuiState) {
+    let area = f.area();
+    let pw = 70u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = 12u16.min(area.height.saturating_sub(2)).max(6);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(pw)) / 2,
+        y: area.y + (area.height.saturating_sub(ph)) / 2,
+        width: pw,
+        height: ph,
+    };
+    let _ = draw_panel(f, rect, "用户输入确认 (Ask User)", "Space 勾选 · Enter 提交 · Esc 取消");
+}
+
+pub fn render_plan_panel_stub(f: &mut Frame, _state: &TuiState) {
+    let area = f.area();
+    let pw = 76u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = 16u16.min(area.height.saturating_sub(2)).max(6);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(pw)) / 2,
+        y: area.y + (area.height.saturating_sub(ph)) / 2,
+        width: pw,
+        height: ph,
+    };
+    let _ = draw_panel(f, rect, "Plan 计划模式与步骤展示", "/plan 或 Esc 退出计划模式");
+}
+
+pub fn render_task_board_stub(f: &mut Frame, _state: &TuiState) {
+    let area = f.area();
+    let pw = 80u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = 18u16.min(area.height.saturating_sub(2)).max(6);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(pw)) / 2,
+        y: area.y + (area.height.saturating_sub(ph)) / 2,
+        width: pw,
+        height: ph,
+    };
+    let _ = draw_panel(f, rect, "Team 共享任务看板", "Tab 折叠/展开 · ↑↓ 浏览 · Esc 退出");
 }
 
 fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
@@ -4087,6 +4261,23 @@ fn tui_event_loop(
                         content: format!("模型列表拉取失败（{provider_id}）: {summary}"),
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
+                }
+                UiEvent::RequestPermission(request) => {
+                    state.start_permission_approval(request);
+                }
+                UiEvent::PermissionDecided { .. } => {}
+                UiEvent::AskUserPrompt { request_id, questions } => {
+                    state.start_ask_user(request_id, questions);
+                }
+                UiEvent::AskUserAnswered { .. } => {}
+                UiEvent::PlanUpdated(plan) => {
+                    state.update_plan(plan);
+                }
+                UiEvent::TasksUpdated(tasks) => {
+                    state.update_task_board(tasks);
+                }
+                UiEvent::GoalUpdated(goal) => {
+                    state.set_goal(goal);
                 }
                 }
             }
