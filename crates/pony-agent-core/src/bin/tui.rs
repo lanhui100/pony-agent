@@ -3679,7 +3679,7 @@ fn ask_pulse_glyph(tick: usize) -> &'static str {
     }
 }
 
-/// 内联 Ask 面板高度：1 行标题 + 选项(含自定义输入) + 1 行键位提示；无问答时为 0。
+/// 内联 Ask 面板高度：分隔线 + 标题 + 选项(含自定义输入) + 键位提示；无问答时为 0。
 pub fn inline_ask_height(state: &TuiState, width: usize) -> u16 {
     if state.mode != InteractionMode::AskUserQuestion {
         return 0;
@@ -3691,9 +3691,77 @@ pub fn inline_ask_height(state: &TuiState, width: usize) -> u16 {
         .current_question()
         .map(|q| q.options.len() + 1) // +1 自定义输入项
         .unwrap_or(0);
-    // 宽终端给足 12 行，窄终端至少保证标题 + 一屏选项 + 提示。
     let cap = if width >= 60 { 12 } else { 8 };
-    (1 + option_rows as u16 + 1).min(cap).max(3)
+    (2 + option_rows as u16 + 1).min(cap).max(4)
+}
+
+/// 单行选项：`▏ ● 标签   说明`。焦点行整行 SURFACE_SEL + INK BOLD，
+/// 说明文字跟在标签后（不再右对齐拉满一行），窄终端自然省略。
+fn ask_option_row(
+    focused: bool,
+    marker: &str,
+    label: &str,
+    description: &str,
+    width: usize,
+) -> Line<'static> {
+    let bg = if focused {
+        theme::SURFACE_SEL
+    } else {
+        theme::CANVAS
+    };
+    let bar_style = if focused {
+        Style::default().fg(theme::ACCENT).bg(bg)
+    } else {
+        Style::default().bg(bg)
+    };
+    let label_style = if focused {
+        Style::default()
+            .fg(theme::INK)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::INK_SOFT).bg(bg)
+    };
+    let marker_style = if focused {
+        Style::default().fg(theme::ACCENT).bg(bg)
+    } else {
+        Style::default().fg(theme::MUTED).bg(bg)
+    };
+
+    // 列预算：rail(2) + marker(2) + 间隔(1) + 说明前的 2 空格。
+    let fixed = 1 + RAIL + 1;
+    let desc_budget = width.saturating_sub(fixed + str_width(label) + 3);
+    let desc = if description.trim().is_empty() {
+        String::new()
+    } else {
+        ellipsize_width(description.trim(), desc_budget.max(6))
+    };
+    let desc_w = if desc.is_empty() { 0 } else { str_width(&desc) + 2 };
+    let label_budget = width.saturating_sub(fixed + desc_w).max(6);
+    let label = ellipsize_width(label, label_budget);
+    let used = fixed + str_width(&label) + desc_w;
+
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(if focused { "▏" } else { " " }, bar_style),
+        Span::raw(" "),
+        Span::styled(format!("{marker} "), marker_style),
+        Span::styled(label, label_style),
+    ];
+    if !desc.is_empty() {
+        spans.push(Span::styled("  ", Style::default().bg(bg)));
+        let desc_style = if focused {
+            Style::default().fg(theme::INK_SOFT).bg(bg)
+        } else {
+            Style::default().fg(theme::MUTED).bg(bg)
+        };
+        spans.push(Span::styled(desc, desc_style));
+    }
+    spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used)),
+        Style::default().bg(bg),
+    ));
+    Line::from(spans)
 }
 
 /// 信息流底部的内联问答面板（无边框、无遮罩，与正文同一 CANVAS 底色）。
@@ -3705,7 +3773,11 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
     let width = area.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // ── 标题：呼吸标记 + 「提问」标签 + （可选）分组 chip + 问题正文 ─────────
+    // ── 顶部发丝线：把问答面板钉在信息流底部，而不是浮在半空 ─────────────────
+    if area.height >= 2 {
+        lines.push(hairline(width));
+    }
+
     let pulse = ask_pulse_glyph(state.spinner_tick);
     let question = ask
         .current_question()
@@ -3717,9 +3789,16 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
         .and_then(|q| q.header.clone())
         .filter(|header| !header.trim().is_empty())
         .filter(|header| !header.contains(':') && !header.starts_with("builtin"));
+    let counter = ask
+        .current_question()
+        .map(|_| (ask.current_question_index + 1, ask.questions.len()))
+        .filter(|(_, total)| *total > 1)
+        .map(|(index, total)| format!("{index}/{total}"));
 
+    // ── 标题：呼吸标记 + 提问 + 分组 chip + 问题正文 + 多问题计数 ─────────────
     let mut title_spans: Vec<Span<'static>> = vec![
         Span::styled(" ▌", Style::default().fg(theme::ACCENT)),
+        Span::raw(" "),
         Span::styled(
             pulse,
             Style::default()
@@ -3733,30 +3812,30 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::raw("  "),
     ];
-    title_spans.push(Span::raw(" "));
     let mut used = RAIL + 2 + 2 + 3;
     if let Some(header) = header {
         let chip = format!("{header} ");
         used += str_width(&chip);
         title_spans.push(Span::styled(chip, muted()));
     }
-    let question_budget = width.saturating_sub(used).max(8);
+    let tail = counter
+        .as_ref()
+        .map(|counter| format!("  {counter}"))
+        .unwrap_or_default();
+    let question_budget = width.saturating_sub(used + str_width(&tail)).max(8);
     title_spans.push(Span::styled(
         ellipsize_width(&question, question_budget),
         Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
     ));
-    if let Some((index, total)) = ask
-        .current_question()
-        .map(|_| (ask.current_question_index + 1, ask.questions.len()))
-        .filter(|(_, total)| *total > 1)
-    {
-        let counter = format!("  {index}/{total}");
-        title_spans.push(Span::styled(counter, faint()));
+    if !tail.is_empty() {
+        title_spans.push(Span::styled(tail, faint()));
     }
     lines.push(Line::from(title_spans));
 
-    // ── 选项：焦点行沿用 list_row 的「▏+整行 SURFACE」表达 ───────────────────
+    // ── 选项 + 自定义输入 ───────────────────────────────────────────────────
+    let mut custom_focused = false;
     if let Some(q) = ask.current_question() {
         for (idx, option) in q.options.iter().enumerate() {
             if lines.len() + 1 >= area.height as usize {
@@ -3765,49 +3844,67 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
             let focused = idx == ask.selected_option_index;
             let marker = if q.multi_select {
                 if ask.multi_selected_indices.contains(&idx) {
-                    "[x] "
+                    "▣"
                 } else {
-                    "[ ] "
+                    "▢"
                 }
             } else if focused {
-                "(●) "
+                "●"
             } else {
-                "(○) "
+                "○"
             };
-            let left = format!("{marker}{}", option.label);
-            lines.push(list_row(
+            lines.push(ask_option_row(
                 focused,
-                &left,
+                marker,
+                &option.label,
                 option.description.as_deref().unwrap_or(""),
                 width,
             ));
         }
 
-        // 自定义输入项
         if lines.len() + 1 < area.height as usize {
-            let custom_focused = ask.selected_option_index == q.options.len();
-            let custom = if ask.custom_input.is_empty() {
-                "✎ 自定义输入…".to_string()
+            custom_focused = ask.selected_option_index == q.options.len();
+            // 聚焦时把光标块画在文本尾部，明确「这里可以直接打字」。
+            let label = if ask.custom_input.is_empty() {
+                if custom_focused {
+                    "自定义输入 ▌".to_string()
+                } else {
+                    "自定义输入…".to_string()
+                }
+            } else if custom_focused {
+                format!("{}▌", ask.custom_input)
             } else {
-                format!("✎ {}", ask.custom_input)
+                ask.custom_input.clone()
             };
-            lines.push(list_row(
+            let description = if custom_focused { "键入后 ↵ 提交" } else { "" };
+            lines.push(ask_option_row(
                 custom_focused,
-                &custom,
-                if custom_focused { "直接键入文本" } else { "" },
+                "✎",
+                &label,
+                description,
                 width,
             ));
         }
+    } else {
+        lines.push(Line::from(Span::styled("  无等待确认的问题", faint())));
     }
 
-    // ── 键位提示（最后一行）─────────────────────────────────────────────────
+    // ── 键位提示：按当前状态给最短的一组 ─────────────────────────────────────
     if lines.len() < area.height as usize {
+        let multi = ask
+            .current_question()
+            .map(|q| q.multi_select)
+            .unwrap_or(false);
+        let hint = if custom_focused {
+            "键入文本 · ↵ 提交 · esc 取消"
+        } else if multi {
+            "↑↓ 移动 · space 勾选 · ↵ 提交 · esc 取消"
+        } else {
+            "↑↓ 移动 · ↵ 确认 · esc 取消"
+        };
         lines.push(Line::from(vec![
-            Span::raw(" ".repeat(RAIL + 3)),
-            Span::styled(
-                "↑↓ 选择 · Space 勾选 · ↵ 提交 · esc 取消",
-                faint(),
-            ),
+            Span::raw(" ".repeat(1 + RAIL + 2)),
+            Span::styled(hint, faint()),
         ]));
     }
 
@@ -3817,7 +3914,7 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
     );
 }
 
-/// Ask 态下色带输入区的替身：一行「等待选择」提示，保持底部呼吸感但不接受字符。
+/// Ask 态下色带输入区的替身：一行「等待选择」，不重复面板里的键位提示。
 fn render_ask_band_hint(f: &mut Frame, area: Rect, state: &TuiState) {
     let pulse = ask_pulse_glyph(state.spinner_tick);
     let line = Line::from(vec![
@@ -3829,10 +3926,7 @@ fn render_ask_band_hint(f: &mut Frame, area: Rect, state: &TuiState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            "等待你在上方问答中选择（输入区此刻不接受文本）",
-            Style::default().fg(theme::MUTED),
-        ),
+        Span::styled("等待你的选择…", Style::default().fg(theme::MUTED)),
     ]);
     f.render_widget(
         Paragraph::new(vec![blank(), line]).style(Style::default().bg(theme::SURFACE)),
