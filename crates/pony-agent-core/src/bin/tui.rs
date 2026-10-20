@@ -2906,11 +2906,14 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         target_input_h
     };
     let band_h = input_h + 1;
+    // 底部固定基座 = 色带 + 指标行；内联 Ask 面板插在基座之上（信息流底部）。
     let bottom_h = input_h + 2;
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
+    let ask_inline_h = inline_ask_height(state, content.width as usize);
+    let ask_top = bottom_top.saturating_sub(ask_inline_h);
 
     let chat_top = content.y + 3; // header + rule + 1 行呼吸
-    let chat_h = bottom_top.saturating_sub(chat_top);
+    let chat_h = ask_top.saturating_sub(chat_top);
     let chat_rect = Rect {
         x: content.x,
         y: chat_top,
@@ -3175,6 +3178,17 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         );
     }
 
+    // ── 内联 Ask：贴在信息流底部（色带之上），不遮挡正文、不抢整屏 ──────────
+    if ask_inline_h > 0 {
+        let ask_rect = Rect {
+            x: content.x,
+            y: ask_top,
+            width: content.width,
+            height: ask_inline_h,
+        };
+        render_ask_inline(f, ask_rect, state);
+    }
+
     // ── Composer：整宽表面色带 = 1 行顶部内边距 + 输入区；指标行紧贴其下 ──────
     // 色带与内容列严格同宽：与 header 发丝线共用同一条左右基准。
     let band_x = content.x;
@@ -3185,8 +3199,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         width: band_w,
         height: band_h,
     };
-    // 浮层态连 composer 一起收起：画面只留 header + 浮层，键位提示由浮层自己承担。
-    if state.mode == InteractionMode::Normal {
+    // 普通态渲染输入区；Ask 态保留色带与指标行，只把输入区换成「等待选择」提示，
+    // 让问答面板成为信息流底部的一段，而不是遮罩式弹窗。
+    if state.mode == InteractionMode::Normal || state.mode == InteractionMode::AskUserQuestion {
         fill(f, band, theme::SURFACE);
         // wave-39 v4 R13：色带末行是呼吸行（整行空白）。v4 起它同时是「输入正文 → 指标行」之间
         // 唯一的 1 行视觉间距；底色按色带 content 宽铺设，左右沟槽列保持 CANVAS。
@@ -3207,7 +3222,11 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             width: content.width,
             height: input_h,
         };
-        render_input(f, input_rect, state);
+        if state.mode == InteractionMode::AskUserQuestion {
+            render_ask_band_hint(f, input_rect, state);
+        } else {
+            render_input(f, input_rect, state);
+        }
 
         // wave-39 v4 R13：指标行紧贴色带下方（删除 v3 独立 CANVAS 间距行）；
         // 指标行不在色带内：整行 GHOST 前景 + CANVAS 背景，绝不写出内容列。
@@ -3538,9 +3557,6 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     if state.mode == InteractionMode::PermissionApproval {
         render_permission_dialog_stub(f, state);
     }
-    if state.mode == InteractionMode::AskUserQuestion {
-        render_ask_user_dialog_stub(f, state);
-    }
     if state.mode == InteractionMode::PlanMode {
         render_plan_panel_stub(f, state);
     }
@@ -3651,6 +3667,176 @@ pub fn render_permission_dialog_stub(f: &mut Frame, state: &TuiState) {
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
         body,
+    );
+}
+
+/// Ask 面板的呼吸节奏：2 帧交替（每帧约 450ms），只在问答等待期生效。
+fn ask_pulse_glyph(tick: usize) -> &'static str {
+    if tick % 2 == 0 {
+        "◆"
+    } else {
+        "◇"
+    }
+}
+
+/// 内联 Ask 面板高度：1 行标题 + 选项(含自定义输入) + 1 行键位提示；无问答时为 0。
+pub fn inline_ask_height(state: &TuiState, width: usize) -> u16 {
+    if state.mode != InteractionMode::AskUserQuestion {
+        return 0;
+    }
+    let Some(ask) = &state.ask_user_state else {
+        return 0;
+    };
+    let option_rows = ask
+        .current_question()
+        .map(|q| q.options.len() + 1) // +1 自定义输入项
+        .unwrap_or(0);
+    // 宽终端给足 12 行，窄终端至少保证标题 + 一屏选项 + 提示。
+    let cap = if width >= 60 { 12 } else { 8 };
+    (1 + option_rows as u16 + 1).min(cap).max(3)
+}
+
+/// 信息流底部的内联问答面板（无边框、无遮罩，与正文同一 CANVAS 底色）。
+pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
+    let Some(ask) = &state.ask_user_state else {
+        return;
+    };
+    fill(f, area, theme::CANVAS);
+    let width = area.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── 标题：呼吸标记 + 「提问」标签 + （可选）分组 chip + 问题正文 ─────────
+    let pulse = ask_pulse_glyph(state.spinner_tick);
+    let question = ask
+        .current_question()
+        .map(|q| q.question.trim().replace('\n', " "))
+        .unwrap_or_default();
+    // 分组标签只展示真正面向用户的短词；运行时内部 id（`builtin:ask_user`）不暴露到界面。
+    let header = ask
+        .current_question()
+        .and_then(|q| q.header.clone())
+        .filter(|header| !header.trim().is_empty())
+        .filter(|header| !header.contains(':') && !header.starts_with("builtin"));
+
+    let mut title_spans: Vec<Span<'static>> = vec![
+        Span::styled(" ▌", Style::default().fg(theme::ACCENT)),
+        Span::styled(
+            pulse,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "提问",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    title_spans.push(Span::raw(" "));
+    let mut used = RAIL + 2 + 2 + 3;
+    if let Some(header) = header {
+        let chip = format!("{header} ");
+        used += str_width(&chip);
+        title_spans.push(Span::styled(chip, muted()));
+    }
+    let question_budget = width.saturating_sub(used).max(8);
+    title_spans.push(Span::styled(
+        ellipsize_width(&question, question_budget),
+        Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+    ));
+    if let Some((index, total)) = ask
+        .current_question()
+        .map(|_| (ask.current_question_index + 1, ask.questions.len()))
+        .filter(|(_, total)| *total > 1)
+    {
+        let counter = format!("  {index}/{total}");
+        title_spans.push(Span::styled(counter, faint()));
+    }
+    lines.push(Line::from(title_spans));
+
+    // ── 选项：焦点行沿用 list_row 的「▏+整行 SURFACE」表达 ───────────────────
+    if let Some(q) = ask.current_question() {
+        for (idx, option) in q.options.iter().enumerate() {
+            if lines.len() + 1 >= area.height as usize {
+                break;
+            }
+            let focused = idx == ask.selected_option_index;
+            let marker = if q.multi_select {
+                if ask.multi_selected_indices.contains(&idx) {
+                    "[x] "
+                } else {
+                    "[ ] "
+                }
+            } else if focused {
+                "(●) "
+            } else {
+                "(○) "
+            };
+            let left = format!("{marker}{}", option.label);
+            lines.push(list_row(
+                focused,
+                &left,
+                option.description.as_deref().unwrap_or(""),
+                width,
+            ));
+        }
+
+        // 自定义输入项
+        if lines.len() + 1 < area.height as usize {
+            let custom_focused = ask.selected_option_index == q.options.len();
+            let custom = if ask.custom_input.is_empty() {
+                "✎ 自定义输入…".to_string()
+            } else {
+                format!("✎ {}", ask.custom_input)
+            };
+            lines.push(list_row(
+                custom_focused,
+                &custom,
+                if custom_focused { "直接键入文本" } else { "" },
+                width,
+            ));
+        }
+    }
+
+    // ── 键位提示（最后一行）─────────────────────────────────────────────────
+    if lines.len() < area.height as usize {
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(RAIL + 3)),
+            Span::styled(
+                "↑↓ 选择 · Space 勾选 · ↵ 提交 · esc 取消",
+                faint(),
+            ),
+        ]));
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::CANVAS)),
+        area,
+    );
+}
+
+/// Ask 态下色带输入区的替身：一行「等待选择」提示，保持底部呼吸感但不接受字符。
+fn render_ask_band_hint(f: &mut Frame, area: Rect, state: &TuiState) {
+    let pulse = ask_pulse_glyph(state.spinner_tick);
+    let line = Line::from(vec![
+        Span::raw(" ".repeat(RAIL)),
+        Span::styled(
+            pulse,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "等待你在上方问答中选择（输入区此刻不接受文本）",
+            Style::default().fg(theme::MUTED),
+        ),
+    ]);
+    f.render_widget(
+        Paragraph::new(vec![blank(), line]).style(Style::default().bg(theme::SURFACE)),
+        area,
     );
 }
 
@@ -4126,8 +4312,15 @@ fn tui_event_loop(
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
-        // 当处于流式或执行状态时，按 160ms 节奏驱动平滑动效与耗时刷新
-        if state.is_streaming && last_tick_instant.elapsed() >= Duration::from_millis(160) {
+        // 流式态 160ms 驱动动效；问答等待期用 450ms 的低频呼吸提醒（不闪、不抢注意力）。
+        let awaiting_answer = matches!(
+            state.mode,
+            InteractionMode::AskUserQuestion
+        );
+        let tick_ms = if state.is_streaming { 160 } else { 450 };
+        if (state.is_streaming || awaiting_answer)
+            && last_tick_instant.elapsed() >= Duration::from_millis(tick_ms)
+        {
             state.spinner_tick = state.spinner_tick.wrapping_add(1);
             last_tick_instant = std::time::Instant::now();
             dirty = true;

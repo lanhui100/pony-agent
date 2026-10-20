@@ -34,6 +34,9 @@ python3 .dev-team/evidence/tui-tmux/ansi2png.py <file>.ansi <file>.png
 | `11-goal-phase.png` | Goal 相位：`Goal · <目标> [0/6] (进行中)` 左对齐横幅 | 真实 tmux + 真实 goal 存储 |
 | `12-metrics-phase.png` | 指标相位：`↑1.7k ↓4 · 缓存 0% · 上下文 0%` 右对齐数值 | 真实 tmux |
 | `13-ctrl-t-board.png` | **`Ctrl+T` 直接呼出**任务看板（与 `/tasks` 同路径） | 真实 tmux |
+| `14-ask-inline.png` | Ask **内联**面板（信息流底部，◆ 呼吸帧） | 真实 tmux + 真实挂起 |
+| `15-ask-inline-pulse.png` | 同一面板的 ◇ 帧，证明提醒动效在跑 | 真实 tmux |
+| `16-ask-inline-answered.png` | 提交后回到普通输入态，工具行转 `✓` | 真实 tmux |
 
 ## 3. Ask 挂起链路的机器凭证
 
@@ -86,6 +89,19 @@ Goal 原先被拼在指标行右侧，长目标会把 token/缓存/上下文挤�
 ```
 
 快捷键：`Ctrl+T` 呼出/收起任务看板（面板内再按一次也关闭）。
+
+## 4.2 Ask 改为信息流内联（不弹窗）+ 呼吸提醒
+
+弹窗会遮挡正文、打断阅读。现在 Ask 面板贴在**正文底部、色带之上**：
+
+- 无边框、无遮罩，与正文同一 `CANVAS` 底色；焦点行沿用列表的 `▏ + SURFACE` 表达；
+- 标题 `▌<脉冲> 提问 <问题>`，脉冲 `◆/◇` 每 450ms 交替（`ask_pulse_glyph` + 主循环 tick），
+  仅在问答等待期生效，进入流式后回到 160ms 动效节奏；
+- 问答期间色带输入区改为「等待你在上方问答中选择」提示，避免误以为可继续输入；
+- 高度 `inline_ask_height()` 自适应（宽终端 ≤12 行、窄终端 ≤8 行），不会把正文挤成 0 行；
+- 运行时内部 id（`builtin:ask_user`）不再作为分组标签展示（表现层过滤，映射契约不变）。
+
+权限审批（Permission Request）仍是弹窗，本轮未改动。
 
 ## 5. 已知限制（如实记录）
 
