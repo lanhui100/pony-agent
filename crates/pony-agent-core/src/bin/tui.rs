@@ -726,6 +726,10 @@ pub struct TuiState {
     pub anim_composer_h: Option<u16>,
     /// 最近一次计算的正文渲染区域 chat_rect
     pub last_chat_rect: Option<Rect>,
+    /// 最近一次实际生效的滚动 offset（用于鼠标点击映射）
+    pub effective_scroll_offset: u16,
+    /// 最近一次实际渲染的纯文本行列表（与渲染视觉行严格 1:1 对齐）
+    pub rendered_lines_text: Vec<String>,
     // 进阶交互状态
     pub permission_state: Option<PermissionState>,
     pub ask_user_state: Option<AskUserState>,
@@ -790,6 +794,8 @@ impl Default for TuiState {
             turn_started_at: None,
             anim_composer_h: None,
             last_chat_rect: None,
+            effective_scroll_offset: 0,
+            rendered_lines_text: Vec::new(),
             permission_state: None,
             ask_user_state: None,
             plan_state: None,
@@ -3493,7 +3499,19 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let total = lines.len();
     let max_offset = total.saturating_sub(visible);
     state.max_scroll_offset = max_offset as u16;
-    let offset = if state.auto_scroll {
+
+    // 保存实际渲染的纯文本行（严格 1:1 对齐视觉行），供精准鼠标框选提取
+    state.rendered_lines_text = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>()
+                .concat()
+        })
+        .collect();
+    let effective_offset = if state.auto_scroll {
         let current = state.scroll_offset as usize;
         if current < max_offset {
             let diff = max_offset - current;
@@ -3518,10 +3536,11 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         state.scroll_offset = clamped as u16;
         clamped
     };
+    state.effective_scroll_offset = effective_offset as u16;
     f.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(theme::CANVAS))
-            .scroll((offset as u16, 0)),
+            .scroll((effective_offset as u16, 0)),
         chat_rect,
     );
 
@@ -4918,7 +4937,11 @@ fn tui_event_loop(
                 state.mouse_selection.debounce_until = None;
                 if let Some(normalized) = state.mouse_selection.normalized_range() {
                     if state.mouse_selection.copied_range != Some(normalized) {
-                        let lines = extract_current_rendered_lines(&state);
+                        let lines = if !state.rendered_lines_text.is_empty() {
+                            state.rendered_lines_text.clone()
+                        } else {
+                            extract_current_rendered_lines(&state)
+                        };
                         let selected_text = extract_selected_text(&lines, normalized.0, normalized.1);
                         if !selected_text.is_empty() && selected_text.len() <= 1_000_000 {
                             let osc_seq = encode_osc52_copy(&selected_text);
@@ -4983,7 +5006,7 @@ fn tui_event_loop(
                             MouseEventKind::Down(MouseButton::Left) => {
                                 if in_chat {
                                     let rel_line = (y.saturating_sub(chat_rect.y)) as usize
-                                        + state.scroll_offset as usize;
+                                        + state.effective_scroll_offset as usize;
                                     let rel_col = (x.saturating_sub(chat_rect.x)) as usize;
                                     let coord = TextCoord {
                                         line: rel_line,
@@ -5005,7 +5028,7 @@ fn tui_event_loop(
                             MouseEventKind::Drag(MouseButton::Left) => {
                                 if state.mouse_selection.active {
                                     let rel_line = (y.saturating_sub(chat_rect.y)) as usize
-                                        + state.scroll_offset as usize;
+                                        + state.effective_scroll_offset as usize;
                                     let rel_col = (x.saturating_sub(chat_rect.x)) as usize;
                                     let coord = TextCoord {
                                         line: rel_line,
