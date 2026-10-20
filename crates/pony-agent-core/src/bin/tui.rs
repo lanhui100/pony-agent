@@ -90,6 +90,7 @@ pub struct ChatMessage {
 
 pub enum UiEvent {
     InputKey(crossterm::event::KeyEvent),
+    InputMouse(crossterm::event::MouseEvent),
     /// 终端尺寸变化（SSH 初次上报晚到 / 用户拉伸窗口）：必须立即整屏重绘，否则保留旧尺寸画面。
     Resized,
     ScrollWheel(bool), // true = ScrollUp, false = ScrollDown
@@ -628,7 +629,7 @@ pub fn extract_selected_text(lines: &[String], anchor: TextCoord, head: TextCoor
     if start.line == end_line {
         let line = &lines[start.line];
         let chars: Vec<char> = line.chars().collect();
-        if start.col >= chars.len() {
+        if chars.is_empty() || start.col >= chars.len() {
             return String::new();
         }
         let end_col = end.col.min(chars.len().saturating_sub(1));
@@ -642,14 +643,18 @@ pub fn extract_selected_text(lines: &[String], anchor: TextCoord, head: TextCoor
             let line = &lines[line_idx];
             let chars: Vec<char> = line.chars().collect();
             if line_idx == start.line {
-                if start.col < chars.len() {
+                if !chars.is_empty() && start.col < chars.len() {
                     result.push(chars[start.col..].iter().collect::<String>());
                 } else {
                     result.push(String::new());
                 }
             } else if line_idx == end_line {
-                let end_col = end.col.min(chars.len().saturating_sub(1));
-                result.push(chars[..=end_col].iter().collect::<String>());
+                if !chars.is_empty() {
+                    let end_col = end.col.min(chars.len().saturating_sub(1));
+                    result.push(chars[..=end_col].iter().collect::<String>());
+                } else {
+                    result.push(String::new());
+                }
             } else {
                 result.push(line.clone());
             }
@@ -719,6 +724,8 @@ pub struct TuiState {
     pub turn_started_at: Option<std::time::Instant>,
     /// Composer 高度平滑收拢过渡（每帧衰减 1 行直至 target_input_h）
     pub anim_composer_h: Option<u16>,
+    /// 最近一次计算的正文渲染区域 chat_rect
+    pub last_chat_rect: Option<Rect>,
     // 进阶交互状态
     pub permission_state: Option<PermissionState>,
     pub ask_user_state: Option<AskUserState>,
@@ -782,6 +789,7 @@ impl Default for TuiState {
             runtime_mode: RuntimeMode::Ready,
             turn_started_at: None,
             anim_composer_h: None,
+            last_chat_rect: None,
             permission_state: None,
             ask_user_state: None,
             plan_state: None,
@@ -3205,6 +3213,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         width: content.width,
         height: chat_h.max(1),
     };
+    state.last_chat_rect = Some(chat_rect);
 
     // ── 会话正文：轨道标记 + 单色正文 + 分层工具行 ─────────────────────────
     let width = chat_rect.width as usize;
@@ -3423,6 +3432,59 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 Line::from(Span::styled(text, style)),
                 width.saturating_sub(RAIL),
             );
+        }
+    }
+
+    // 高亮鼠标选区
+    if let Some((start, end)) = state.mouse_selection.normalized_range() {
+        let highlight_style = Style::default().add_modifier(Modifier::REVERSED);
+        for line_idx in start.line..=end.line.min(lines.len().saturating_sub(1)) {
+            let old_line = &lines[line_idx];
+            let mut new_spans: Vec<Span<'static>> = Vec::new();
+            let mut current_col = 0usize;
+
+            for span in &old_line.spans {
+                let content_str = span.content.as_ref();
+                let base_style = span.style;
+                let mut segment = String::new();
+                let mut in_sel = false;
+
+                for ch in content_str.chars() {
+                    let ch_col = current_col;
+                    let is_sel = is_coord_selected(
+                        TextCoord { line: line_idx, col: ch_col },
+                        start,
+                        end,
+                    );
+                    if segment.is_empty() {
+                        in_sel = is_sel;
+                        segment.push(ch);
+                    } else if in_sel == is_sel {
+                        segment.push(ch);
+                    } else {
+                        let style = if in_sel {
+                            base_style.patch(highlight_style)
+                        } else {
+                            base_style
+                        };
+                        new_spans.push(Span::styled(std::mem::take(&mut segment), style));
+                        in_sel = is_sel;
+                        segment.push(ch);
+                    }
+                    current_col += 1;
+                }
+
+                if !segment.is_empty() {
+                    let style = if in_sel {
+                        base_style.patch(highlight_style)
+                    } else {
+                        base_style
+                    };
+                    new_spans.push(Span::styled(segment, style));
+                }
+            }
+
+            lines[line_idx] = Line::from(new_spans);
         }
     }
 
@@ -4752,7 +4814,9 @@ fn tui_event_loop(
                             MouseEventKind::ScrollDown => {
                                 let _ = tx_events.send(UiEvent::ScrollWheel(false));
                             }
-                            _ => {}
+                            _ => {
+                                let _ = tx_events.send(UiEvent::InputMouse(mouse));
+                            }
                         }
                     }
                     _ => {}
@@ -4760,6 +4824,17 @@ fn tui_event_loop(
             }
         }
     });
+
+    // 辅助函数：根据当前会话消息正文提取行纯文本切片
+    let extract_current_rendered_lines = |st: &TuiState| -> Vec<String> {
+        let mut lines = Vec::new();
+        for msg in &st.messages {
+            for line in msg.content.lines() {
+                lines.push(line.to_string());
+            }
+        }
+        lines
+    };
 
     let mut last_tick_instant = std::time::Instant::now();
     let mut last_poll_instant = std::time::Instant::now();
@@ -4837,6 +4912,29 @@ fn tui_event_loop(
             dirty = false;
         }
 
+        // 检查鼠标选区防抖与复制
+        if let Some(until) = state.mouse_selection.debounce_until {
+            if std::time::Instant::now() >= until {
+                state.mouse_selection.debounce_until = None;
+                if let Some(normalized) = state.mouse_selection.normalized_range() {
+                    if state.mouse_selection.copied_range != Some(normalized) {
+                        let lines = extract_current_rendered_lines(&state);
+                        let selected_text = extract_selected_text(&lines, normalized.0, normalized.1);
+                        if !selected_text.is_empty() && selected_text.len() <= 1_000_000 {
+                            let osc_seq = encode_osc52_copy(&selected_text);
+                            let mut stdout = std::io::stdout();
+                            let _ = std::io::Write::write_all(&mut stdout, osc_seq.as_bytes());
+                            let _ = std::io::Write::flush(&mut stdout);
+                            let _ = terminal.backend_mut();
+                            state.mouse_selection.copied_range = Some(normalized);
+                            state.status_text = "已复制到剪贴板".to_string();
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+        }
+
         // 波次 44：Goal/指标轮播到切换点时立即重绘，并且把等待时长压到不超过剩余相位，
         // 既不靠 16fps 空转，也不会让横幅在相位边界上“卡住不动”。
         if let Some((visible, remaining)) = goal_banner_phase(&state) {
@@ -4869,6 +4967,72 @@ fn tui_event_loop(
                         state.scroll_up(3);
                     } else {
                         state.scroll_down(3, state.max_scroll_offset);
+                    }
+                }
+                UiEvent::InputMouse(mouse) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    if let Some(chat_rect) = state.last_chat_rect {
+                        let x = mouse.column;
+                        let y = mouse.row;
+                        let in_chat = x >= chat_rect.x
+                            && x < chat_rect.x + chat_rect.width
+                            && y >= chat_rect.y
+                            && y < chat_rect.y + chat_rect.height;
+
+                        match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if in_chat {
+                                    let rel_line = (y.saturating_sub(chat_rect.y)) as usize
+                                        + state.scroll_offset as usize;
+                                    let rel_col = (x.saturating_sub(chat_rect.x)) as usize;
+                                    let coord = TextCoord {
+                                        line: rel_line,
+                                        col: rel_col,
+                                    };
+                                    state.mouse_selection.active = true;
+                                    state.mouse_selection.anchor = Some(coord);
+                                    state.mouse_selection.head = Some(coord);
+                                    state.mouse_selection.copied_range = None;
+                                    state.mouse_selection.debounce_until = None;
+                                    dirty = true;
+                                } else {
+                                    if state.mouse_selection.active || state.mouse_selection.anchor.is_some() {
+                                        state.mouse_selection.clear();
+                                        dirty = true;
+                                    }
+                                }
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                if state.mouse_selection.active {
+                                    let rel_line = (y.saturating_sub(chat_rect.y)) as usize
+                                        + state.scroll_offset as usize;
+                                    let rel_col = (x.saturating_sub(chat_rect.x)) as usize;
+                                    let coord = TextCoord {
+                                        line: rel_line,
+                                        col: rel_col,
+                                    };
+                                    state.mouse_selection.head = Some(coord);
+                                    if state.mouse_selection.anchor != state.mouse_selection.head {
+                                        state.mouse_selection.debounce_until =
+                                            Some(std::time::Instant::now() + Duration::from_millis(200));
+                                    }
+                                    dirty = true;
+                                }
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                if state.mouse_selection.active {
+                                    state.mouse_selection.active = false;
+                                    if state.mouse_selection.anchor == state.mouse_selection.head {
+                                        state.mouse_selection.clear();
+                                    } else {
+                                        state.mouse_selection.debounce_until =
+                                            Some(std::time::Instant::now() + Duration::from_millis(200));
+                                    }
+                                    dirty = true;
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 UiEvent::InputKey(key) => {
