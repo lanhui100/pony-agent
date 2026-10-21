@@ -1,0 +1,47 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 50,
+      "rule": "C4-1 越界不注入（F1 同族未覆盖）：宪法/local overlay 读取无 canonical 包含与普通文件校验，符号链接可把宿主任意文件注入系统提示词",
+      "counterexample": "workspace=/tmp/ws，`mkdir -p /tmp/out && echo SUPER-SECRET-OUTSIDE-CONTENT > /tmp/out/secret.txt && ln -s /tmp/out/secret.txt /tmp/ws/AGENTS.md`（仓库可直接分发 symlink；`AGENTS.local.md` 同理，读取点 workspace_hotloader.rs:628），调用 `WorkspaceHotloader::resolve_constitution_with_budget(/tmp/ws, &[], InstructionBudget::default())` → 实测 `LEAK=true RENDERED=\"SUPER-SECRET-OUTSIDE-CONTENT\\n\"`；`AGENTS.local.md` 同样 `LEAK=true`。生产装配 context.rs:830 用 current_dir 作为 root、context.rs:832-840 把该文本拼进 `=== Workspace & User Instructions (AGENTS.md / CLAUDE.md) ===`，故在恶意仓库 cwd 启动/打开即把宿主文件内容随提示词发往模型服务商。F1 的 canonical+is_file 校验只加在 instruction_touch.rs，未覆盖同一候选文件族的宪法读取。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/instruction_touch.rs",
+      "line": 74,
+      "rule": "C4-4 单步字节预算只截断输出、不约束读取：先 `fs::read_to_string` 全量读入内存再截到 16KiB（无界内存/IO）",
+      "counterexample": "`mkdir -p /tmp/ws/a && echo x > /tmp/ws/a/x.rs && truncate -s 1610612736 /tmp/ws/a/AGENTS.md`（1.5GiB，稀疏即可），`workspace_read_file {\"path\":\"a/x.rs\"}` → 实测 2561ms、maxRSS 1,578,368KiB，最终 entries[0].content.len()=16384。恶意仓库提交 500MB 非稀疏 AGENTS.md 同样在每次触达时全量读入；应先 `metadata` 判 `MAX_TOUCH_STEP_BYTES`（或 `take(max+1)` 读）再截断。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 50,
+      "rule": "C1-3 上限声明失效：scan_skills 阶段对每个 SKILL.md 全量 read_to_string 算 hash，MAX_SKILL_BODY_BYTES(262144) 只在读完后才判",
+      "counterexample": "`mkdir -p /tmp/ws/.agents/skills/big && truncate -s 805306368 /tmp/ws/.agents/skills/big/SKILL.md`（768MiB），`skill_load {\"name\":\"does-not-exist\"}` 也会经 skill_body.rs:173 resolve_skill_by_name→scan_skills 全量读盘 → 实测 SCAN_MS=5755、maxRSS 792,448KiB；`skill_load {\"name\":\"big\"}` 再全量读一次（6040ms）后才返回 TooLarge{size:805306368,limit:262144}。上限对内存/IO 无任何保护，且任何 workspace 或全局技能文件都能触发（每次 skill_load 都新建 hotloader，缓存必然冷）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/path_permission.rs",
+      "line": 641,
+      "rule": "F4 受信根可被 workspace 内符号链接重定向：`.agents/skills -> <workspace 外目录>` 会把 workspace 外目录提升为受信根，突破“workspace 内技能”包含边界",
+      "counterexample": "`mkdir -p /tmp/outside/x && echo OUTSIDE-SKILL-BODY > /tmp/outside/x/SKILL.md && ln -s /tmp/outside /tmp/ws/.agents/skills`；`skill_load {\"name\":\"x\"}` → 实测 `LOADED_OUTSIDE=true PATH=\"/tmp/ws/.agents/skills/x/SKILL.md\"`（canonical 目标 /tmp/outside/x/SKILL.md，trusted root canonical 为 /tmp/outside）。仓库自带该 symlink 或模型用 Run/`ln -s` 自建均可；包含判定必须在 canonical root 已落入 canonical(workspace) 之后才成立。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/path_permission.rs",
+      "line": 702,
+      "rule": "F3 fail-closed 被 load_skill_body 的“无根结构判定”分支绕过：任意 `*/.agents/skills/*/SKILL.md` 均被接受（无 workspace 包含关系）",
+      "counterexample": "构造 `HotloadedSkill { path: \"/tmp/w42probe-noneslayout-<pid>/.agents/skills/x/SKILL.md\" }`（目录不在任何 workspace 内，文件真实存在），`load_skill_body(&skill, MAX_SKILL_BODY_BYTES)` → 实测 `ACCEPTED_ARBITRARY_LAYOUT=true`。工具面 execute_skill_load 传 Some(real root) 不受影响，但公开 `load_skill_body` 与红线 2（全局正文必须经受信根）语义不一致，调用方漏传 root 即 fail-open；且它使 F3“canonicalize 失败才拒绝”的收紧在 API 层失效。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/instruction_touch.rs",
+      "line": 99,
+      "rule": "non-machine:F1/F2 残留 TOCTOU：canonical 校验通过后仍用路径重新 open/read（instruction_touch.rs:74 / skill_body.rs:123），无 O_NOFOLLOW/openat2，FIFO 未加 O_NONBLOCK；静态场景已堵死，窗口未消除",
+      "counterexample": "后台 `while :; do ln -sf /tmp/out/SKILL.md /tmp/ws/.agents/skills/x/SKILL.md; printf local > /tmp/ws/.agents/skills/x/SKILL.md; done` 与循环 `skill_load {\"name\":\"x\"}` 并发：若替换落在 canonicalize 与 `File::open` 之间，open 会跟随新链接（/tmp/out/SKILL.md 文件名仍合法、fstat 仍为普通文件）读出 workspace 外内容；同一窗口换成 `mkfifo` 则 File::open 无 O_NONBLOCK 永久阻塞（execute_skill_load 无超时）。本次未稳定复现该竞态，按窗口分析记录；风险等级 Low（需受信目录写权限 + 微秒级竞态，且同用户本可读目标文件），建议 O_NOFOLLOW + fstat(dev,ino) 与 canonical 元数据比对。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1187,
+      "rule": "non-machine:F6/F8 LRU 只在新指令注入时刷新 last_used，活跃但无新层级指令的桶仍会被淘汰，导致 seen/预算状态丢失并重复注入",
+      "counterexample": "会话 A 读 a/x.rs 注入 16KiB 后不再出现新指令层（entries 为空直接 return，:1177-1179，不更新 last_used）；随后 64 个不同 session（子代理各带独立 session id）各建桶并刷新，A 成为 min last_used 被 :1118 淘汰；A 再读 a/x.rs 时 already_injected 为空，同一 AGENTS.md 再次注入（≤64KiB），C4-2“同路径二次触达不重复注入”被破坏。模型不能自造 session id，故不可被模型直接放大，记录为低危；建议 entries 为空时也 touch last_used。"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 261,
+      "rule": "constitution-dedupe-cache-stale: 缓存命中只校验 kept 层，被去重丢弃的来源永不重校验",
+      "counterexample": "两轮调用构造：第1轮 $PONY_AGENT_HOME/AGENTS.md 与项目 AGENTS.md 经 normalize 后同文（如 cp 模板），dedupe_constitution_layers 丢弃 global 层，缓存写入 {layers:[project], sources:[global,project]}（291-294）。第2轮只编辑 global 文件（追加一行），resolve_constitution_with_budget 在 261-265 判定 same_sources==true，且 metadata 只对所有 cached.layers 即 [project] 逐个 stat（未变）→ 命中旧缓存并返回 hit=true，global 新内容在本进程生命周期内永不进入提示词，直到项目层文件也被改动或来源清单长度变化。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1095,
+      "rule": "non-machine:touch-memory-session-leak: sessions 桶无回收，仅按单会话 256 条淘汰",
+      "counterexample": "长期 GUI 进程：每个 subagent 调用生成独立 session_id=subagent-<uuid>（subagent_runtime.rs:113），其 read_file 触达含 AGENTS.md 的目录即在 TouchedInstructionMemory.sessions 建桶；1124-1134 只淘汰单会话内的最旧路径，sessions 表全文件无 remove → 1000 次子代理调用留下 1000 个常驻桶（每桶最多 256 个绝对路径字符串），随运行时长单调增长。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3250,
+      "rule": "non-machine:touch-dedup-shared-no-session-bucket: 无会话上下文时全部落到 \"-\" 桶，跨会话互相抑制",
+      "counterexample": "宿主在 runtime 里覆写 tool_executor（builder.tool_executor(Box::new(ToolRouter::...))）或调用 execute_with_workspace_root/execute() 时 context.session_id=None（turn_sync.rs:58、turn_stream.rs:185 构造的 context 只填 workspace_root）→ 所有会话共用 \"-\" 桶：会话 A 先读 ws/a/b/x.rs 登记 root/AGENTS.md 与 a/AGENTS.md，会话 B 首轮读同一路径时 already_injected 命中，返回空串，B 永久漏注入（C4-2 会话级隔离在该路径上失效）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1100,
+      "rule": "non-machine:touch-dedup-check-then-act-race: 两次加锁之间做 IO/计算，并发同会话可重复注入",
+      "counterexample": "同一 ToolRouter 被两线程并发使用（先例：workspace.rs 的 16 线程用例共享 Arc<ToolRouter>，context.session_id 均为 None 即同一桶）：T1 触达 a/x、T2 触达 a/y，二者在 1100-1108 都读到空 snapshot，再各自在 1111-1116 计算 entries → root/AGENTS.md 与 a/AGENTS.md 各被注入两份（最坏 2×16KB，违反 C4-2）；read_file 在 6869 被标 concurrent_safe，一旦并行引擎（parallel_tools::execute_calls）接线到回合循环即稳定触发。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 676,
+      "rule": "non-machine:global-skill-rank-env-non-hermetic: rank 由进程环境反推，显式注入 global_homes 亦非纯函数",
+      "counterexample": "scan_skills_with_globals(ws, &[X]) 每次 scan 都在 676-702 读 $PONY_AGENT_HOME 与 dirs::home_dir() 判身份：同一 (ws, homes, budget) 输入在 env 变化前后给 X 得到 rank 400 或 450+index，max_bytes 紧张时 scan_skills_with_budget 的丢弃顺序与最终字节随之改变（deps 层面同输入不同输出）；测试侧 ENV_LOCK 只对取锁用例生效，wave42_global_config.rs:523 持锁改 env 时，同二进制内未取锁却注入 home==env 值的扫描用例可读到 400 而非 450。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave42_global_config.rs",
+      "line": 153,
+      "rule": "non-machine:c2-1-parity-is-tautological: 零漂移断言与被测实现同源，红线4无守卫",
+      "counterexample": "resolve_constitution_with_globals 现已直接委托 resolve_constitution_with_budget(default)（workspace_hotloader.rs:237-242），故 C2-1 的 legacy_text 与 budget_text 是同一函数两次调用：即使默认预算路径新增标题/空行/omitted 行，该断言仍恒过；只有下方「单项目层返回原始字节」那条是真实锚点，多层级默认渲染无 c1bd454 字节基线。"
+    }
+  ]
+}

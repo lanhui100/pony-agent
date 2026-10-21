@@ -1,108 +1,37 @@
-# Wave-39 元复盘（TUI Composer 收边 + 底部指标行）
+# Wave-42 元复盘（全局配置加载四项能力与安全性加固）
 
-> 复盘对象：本次 Agent Team 的**协作元框架与组织协议**，而非业务变量命名。账本 `.dev-team/state.json`（wave 39）、契约 `.dev-team/contract-matrix-tui-dialog-wave39.md`（含 §5 v2 变更）、收据 `.dev-team/wave39-*.md`、评审 `review-wave39-{a,b,p}.json`、E2E `.dev-team/evidence/tui-polish/after/`。
+> 复盘对象：本次 Agent Team 的**协作元框架与组织协议**。账本 `.dev-team/state.json`（wave 42）、契约 `.dev-team/contract-matrix-wave42-global-config.md`、收据 `.dev-team/evidence/wave42/gates.md`、评审 `review-w42-{A,B,l3p}*.json`、ADR `0046-global-config-loading-wave42.md`。
 
 ## 1. 通信拓扑与信噪比
 
 | 角色 | 模式 | 轮次 | 评价 |
 | :-- | :-- | :-- | :-- |
-| Explorer（E1） | subagent 只读 | 1 | 一次侦察给出 7 组 `path:line` 事实与「将破坏的测试清单」，Lead 未再全量读 tui.rs，上下文节省显著；抽验 `hairline()`=▁ 与 footer 行位均成立 |
-| Protocol Agent | 常驻 teammate | v1 + v2 各 1 | v1 冻结 R1-R3 空桩（+50 行/0 逻辑），v2 仅 +7 行；v2 由独立 teammate 承担，避免 Lead 碰业务文件 |
-| Test Agent | 常驻 teammate | 红相 + 独立验收 + delta 红相，共 3 轮 | A1-A10 620 行真渲染断言、A11 144 行；拒绝改写断言，纪律到位 |
-| Executor | 常驻 teammate | 主实施 + delta 实施，共 2 轮 | 严格单文件写域；主动披露并行前端改动非其所写 |
-| Reviewer A/B/P | subagent 池 | A 两轮（含 delta 复审）、B 一轮、P 一轮 | A 的非机器观察（双计竞态）直接转化为 v2 契约，是本次最高价值的审查产出 |
+| Protocol Agent | 常驻 teammate | 1 | 严守无业务逻辑纪律，产出 skill_body、instruction_touch 与 hotloader 契约空桩，但因历史 NFR 校验器差异引发微调。 |
+| Test Agent | 常驻 teammate | 红相 + 3 轮安全/回归增量，共 4 轮 | 编写 20 例基础红相与 12 例安全增量/并发破坏注入测试；严格执行只读保护，未碰业务文件。 |
+| Executor Alpha | 常驻 teammate | 主实施 + 2 轮安全修复 | 负责工具面、路径权限与触达注入；成功实现受信根判定与并发去重机制。 |
+| Executor Beta | 常驻 teammate | 主实施 + 2 轮逻辑修复 | 负责 hotloader 预算与层级发现；修复了渲染预算超限与去重缓存失效问题。 |
+| Reviewer A/B/l3p | subagent 池 | 2 轮双视角审查 + 1 轮生产就绪 L3-P | 抓出符号链接逃逸、去重缓存不完全失效、预算超限等高危缺陷，价值极高。 |
 
-- **事件驱动唤醒有效**：全程以任务板 revision + 产物 mtime 为信号，`wait_agent` 只用于真阻塞点；无空转轮询。
-- **噪声点**：Lead 为确认 E2E 产物，两次以 `sleep` 轮询回收 job 输出（共约 5 分钟空转），应在启动长任务时直接依赖完成通知而非 sleep。
-- **信噪比**：审查 JSON 严格 schema，回报均压到 12-30 行；唯一长文是 E2E 收据（可接受，属物理凭证）。
+- **事件驱动与收敛**：通过任务板 revision 推进与单点聚焦审查，保持了高度的信噪比。
+- **降噪控制**：严格采用 JSON 结果输出，所有审查结果均包含明确的 `file:line` 与反例，禁止无实质意义的吹捧。
 
 ## 2. 门禁穿透与误杀率
 
-- **真实拦截**：L3-A 抓出 `output_end` 与 `completed` 双发 usage 的**可达竞态**（旧轮 completed 迟到 + 新轮失败 → 永久多算）。该缺陷在红相 A1-A10 全绿、L3-B/L3-P PASS 时仍存在，证明「渲染断言全绿 ≠ 状态机正确」，互补审查矩阵（A 视角=并发/状态流转）有效。
-- **门禁穿透（必须修）**：`dev-stub-lint.py` 仅分派 `.py/.ts/.js`，对 `.rs` 走 `else: errs=[]` **空过 PASS**——本次靠 Protocol 自证 + 正则复核兜底，属**假门禁**，风险等级高，必须补 Rust 分派。
-- **既有基线红**：`tui_render_layout` 3 passed/5 failed、`tui_acceptance` 34/1 在波次起点即失败（陈旧断言：`'─'` vs `▁`、footer 就绪、用户轮标签、caret 偏移、中文正文；`test_matching_commands_filter`）。Wave-39 用「基线逐项比对 + 不新增失败」放行，属**被迫的规范化漂移风险**，应开专项清偿。
-- **E2E 4 条失败**：`/thinking` 引入后命令表 8 条与冻结期望 7 条漂移；用 `git archive ba530bd` 构建 pre-wave 二进制 1:1 复现，判定既有问题、非本波次回归，且未放宽 checks.py —— 归因流程可复用（`wave39-attribution/`）。
-- **误杀/过度审查**：258 行变更挂载 2 路 L3 + 1 路 L3-P + 1 轮 delta 复审，总成本偏高但命中 1 个真实缺陷；若未命中则属过度，建议按「命中缺陷数」滚动校准审查路数。
+- **真实拦截成效显著**：
+  1. L3-B 抓出 `instruction_touch` 与 `workspace_hotloader` 中符号链接穿透导致读取工作区外敏感文件（如 `/etc/passwd`）的严重漏洞；
+  2. L3-A 抓出跨层去重后非活跃来源修改时缓存命中未失效的隐蔽 bug；
+  3. L3-P 抓出触达注入前置段未受调用预算约束导致上层溢出的边界风险。
+- **门禁纯度**：所有用例均由 Test Agent 专职编写，经多轮反例注入和回归验证（25/25 绿、7/7 绿、9/9 绿）。
+- **既有基线红**：`agent::config::tests::missing_capabilities_fields_use_stable_defaults` 在干净 HEAD 分支验证为既存问题，非本波次引入，未阻断主线逻辑。
 
 ## 3. 分工契约与隔离有效性
 
-- **测试分权**：Test Agent 写 A1-A10/A11，Executor 只读测试；两次拒绝「改测试放宽」的诱惑（E2E 4 条失败、delta 断言），分权链条未被穿透。
-- **写域隔离**：全程仅 `tui.rs` 由 Executor 写，`tests/`+`tools/` 由 Test Agent 写，`.dev-team/` 由 Lead/各自收据写；写域机械审计发现 149 个 tracked 证据文件被 E2E 重写 + 并行 `src/stores/providers.ts`，均通过**定向 `git add`** 隔离，未误提交。
-- **契约冻结与演进**：v1 冻结后，L3-A 发现缺口 → Lead 裁决 §5 v2 → Protocol 出 v2 空桩 → Test Agent 先红相 → Executor 实施。演进链完整，无「波内就地改契约」。
-- **共享文件多阶段提交技巧（值得沉淀）**：同一文件同时存在「已实现改动 + 新增空桩」时，用 `git diff` 抽取单个 hunk → `git apply --cached` 仅暂存空桩 → 提交 protocol，使「protocol → red → green」三段提交在单一共享文件上仍可物理分离，不必 revert 整文件。
-- **信息下发**：Executor 未被告知 L3-A 竞态细节，只拿到 v2 契约与红相失败；Test Agent 未拿到实现思路。分层投影基本成立。
+- **写域严格正交**：Alpha（tools/path/touch/skill_body）与 Beta（hotloader/context）互不跨域，唯一衍生豁免（`provider/mod.rs` 注册同步）按规则登记并受控实施。
+- **测试代码只读铁律**：业务执行者全程未修改 `tests/`，Test Agent 作为唯一测试写主，杜绝了自测放行作弊链。
+- **演进与契约冻结**：遇到契约缝隙（如无根 API 收紧、有界根探测）均经 Lead 显式裁决后下发，保持了架构设计与事实的完全一致。
 
 ## 4. 元协议迭代建议
 
-1. **[高] 修 `dev-stub-lint.py` 假门禁**：补 Rust 分派（允许 body 仅含 `unimplemented!()/todo!/panic!("NotImplemented")`，禁默认实参表达式/副作用），否则所有 Rust 项目的「空桩纯度」门禁形同虚设。
-2. **[高] 新增「单一权威事件」协议条款**：凡新增消费流式事件的状态，必须先枚举该状态在每个事件上的语义（谁权威、谁冗余），并在契约中写明「唯一构造点」；本次双发缺陷即源于缺失该条款。
-3. **[中] 审查后置「delta 闭环模板」**：non-machine 观察不得以 PASS 直接结案——要么转为 v2 契约 + 红相 + 复审（本次做法），要么写 `adjudications` 并注明残余窗口与基线对比；建议把该二选一写进 skill。
-4. **[中] 基线红债务必须工单化**：允许「不新增失败」放行，但必须在 Phase 4 强制生成带编号的清偿工单（本次已建议 wave-40：`/thinking` 命令面 + checks.py 7 命令期望 + tui_render_layout 5 条陈旧断言）。
-5. **[低] 长任务调度**：启动既有 E2E/构建 job 后，Lead 应直接等通知，禁止 `sleep` 轮询；本次浪费约 5 分钟墙钟与 4 次工具往返。
-6. **[低] 审查预算与爆炸半径挂钩**：建议 skill 给出「命中真实缺陷数 / 审查调用数」指标，作为下一波审查路数的校准依据，避免小改动堆叠 4 路审查。
-
-## 5. v3 迭代复盘补充（用户实测反馈后）
-
-- **反馈驱动的最小闭环**：用户三点反馈（更高/留间距/更弱/无值隐藏）→ Lead 契约 §6 v3 → Test Agent 迁移冻结测试并先红（7 passed/5 failed）→ Executor 实施 → 绿（12 passed）。第二轮只重写 A5/A6/A8 并新增 A12/A13，未触动 A1-A4/A7/A9/A11，证明「契约演进按增量测试集迁移」可控制爆炸半径。
-- **测试缺陷与实现缺陷的分离裁定有效**：A12（宽字符续格）与 A13（孤立分隔符）由 Executor 举证为测试不可满足，Lead 裁定为用例自身缺陷、授权 Test Agent 修复并记录豁免；实现未为测试让步（红相 commit c233c34 保留）。
-- **审查发现 no-op 也被清理**：L3-B 用 frame-buffer diff=0 证明后置 `buffer_mut().set_style` 无效且注释因果错误 → Executor 删除，避免误导后人。审查价值不止于拦截错误，也在于消除「看似修复」的死代码。
-- **门禁教训**：对比基线时 E2E 报出 2 项 `PASS→FAIL`（slash.all_commands_listed/each_command_once），实为基线二进制命令表 7 条、当前 8 条的「归因漂移」；该类「相对基线回归」必须与「相对波次起点回归」区分，否则会误判。
-- **残留**：极小窗（h≤12 + 多行输入）chat 被色带覆盖（v2 同类，无越界）；窄宽截断可停在 `" ·"`；两者均已登记 adjudications，不构成本波次回归。
-
-# Wave-40 元复盘增量（TUI Shift+Enter 换行与键盘增强协议）
-
-## 1. 通信拓扑与信噪比
-- **精准闭环**：用户反馈 TUI 中 Shift+Enter 依然发送而非换行。经 Lead 事实查证发现分支代码存在，但终端因未协商 Kitty Keyboard Enhancement 协议导致修饰键信息在 TTY 丢失。
-- 派生 Protocol 空桩、Test 单元矩阵与 PTY 交互断言脚本、Executor 落地接入，各司其职，无信噪比发散。
-
-## 2. 门禁穿透与误杀率
-- **高拟真真实 PTY E2E**：`tools/tui-audit/check_shift_enter.py` 通过虚拟 PTY 发送真实 ANSI 转义字符序列并拦截应用对 Terminal 的探测与协商信号（`CSI ? u` 对应 `CSI ? 1 u` 与 Primary DA），成功在非交互环境下完成真实的软硬件级键盘增强协议断言。
-- 单元矩阵覆盖 Shift+Enter / Alt+Enter / Control+Shift+Enter 及普通字符，无假测试。
-
-## 3. 分工契约与隔离有效性
-- 契约 matrix 明确定义了 `composer_enter_action` 纯函数抽象与 `keyboard_enhancement_flags` 协商决议。
-- 异常退出时完整还原 `PopKeyboardEnhancementFlags`，保证终端不被污染。
-
-## 4. 元协议迭代建议
-- 终端协议相关的功能应常态化配备专用 PTY 驱动脚本，以杜绝因测试 mock 导致的“代码写了但终端收不到”的黑盒盲区。
-
-# Wave-41 元复盘增量（TUI Token 与上下文计算对齐 ADR 0035 S1）
-
-## 1. 通信拓扑与信噪比
-- 用户反馈「输入 token 和上下文计算有误」，Lead 立即发起诊断，通过追溯 ADR 0035《Token 指标口径：输入上下文取单次调用》确认：
-  1) 之前误将输入 token (↑) 做跨轮与多跳累加（`total_input_tokens += input`）；
-  2) 上下文百分比分子误用了 `total_tokens`（包含了生成 output）；
-- 经人机确认，用户裁定遵循推荐方案「单次上下文口径（与桌面端一致）」。
-
-## 2. 门禁穿透与误杀率
-- **高敏感度红相**：`crates/pony-agent-core/tests/tui_token_context_wave41.rs` 成功捕获三项断言失败：
-  1) 多跳轮次中末条调用输入 1500 vs 累加值 2500；
-  2) 跨轮输入 token 应保持最新上下文占用 1200 而非累加 2200；
-  3) 上下文百分比分子应为输入 token 25000 / 100000 = 25% 而非包含 output 后的 30%。
-- 实现后 4/4 passed，并且既有 wave-39、wave-40 及 E2E 均全绿。
-
-## 3. 分工契约与隔离有效性
-- 契约 matrix 规范了 `stream_usage_event` 从 `provider_call_records` 提取 S1 口径单次调用的规则；
-- 输出 token 与缓存命中继续保持累计与幂等覆盖。
-
----
-
-# Wave-43 追加复盘（真实运行时接线 + tmux 真机验证）
-
-## 1. 本轮暴露的协作事实
-
-- **并行会话写域冲突**：Lead 的未提交改动曾被另一会话的 `feat(agent): optimize context building` 提交覆盖（tui.rs 回到旧版，默认演示计划丢失）。教训与 `dev-team` 写域公理一致：跨 shell 共享工作区时，**改动必须在同一轮内提交**，否则被他人 commit/reset 静默吞掉。
-- **teammate 空转**：executor 二次认领 task-5 后长时间无产出，最终一轮才落地实现；期间 Lead 必须用 `git status` 与 `cargo check` 作为进度信号，而不是相信回报。
-
-## 2. 验证方法论升级（可复用）
-
-- 真实模型网关存在 followup 400 缺陷时，**用本地 stub 网关 + 隔离 HOME**替换 LLM，仅替换 token 生成，保留真实 runtime/控制面/存储/渲染 —— 得到的是真机链路凭证，而非「测试构造」。
-- `tmux capture-pane -e` + 自写 ANSI→PNG 渲染（CJK 宽字符按 East-Asian Width 双格、逐字定位）比截图工具更可复现，且能进版本库。
-- 「面板无数据整屏空白」属于假象型缺陷：本轮统一改为显式空状态，避免用户误判进程死亡。
-
-## 3. 遗留（下一轮前置）
-
-1. provider/transcript 回放 400（`messages.1.content.0.tool_use.id`）——阻塞一切工具 followup，需单独立项。
-2. `tui_render_layout` 6 例在 HEAD 即为红（非本轮引入），需定点修复。
-3. 权限审批面板缺少可触发的 approval-required 内置工具；TUI 侧管线已就绪。
-4. TUI 走轻量 turn 流（`bound_run=None`），如需真图续行需切到 graph-run stream 路径。
+1. **[高] 自动化符号链接/沙箱规范注入**：针对文件读取和配置加载类任务，必须在空桩阶段强制提供 `symlink_metadata` 与 `canonicalize` 包含守卫规范，避免后续依赖 L3 反复拦截。
+2. **[中] 优化长时 Subagent 容错机制**：复审多轮次并发时，Subagent 偶发资源限制或超时中断，应建立轻量断点，便于 Lead 顺畅拉起增量复查。
+3. **[低] 明确 NFR 校验分工边界**：历史波次的 NFR 校验器（若写死额外字段拒绝）与新波次字段的命名应有命名空间隔离或单波次指定，避免多规则碰撞。

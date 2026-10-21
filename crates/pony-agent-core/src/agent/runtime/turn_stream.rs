@@ -184,6 +184,8 @@ impl AgentRuntime {
 
             let execution_context = ToolExecutionContext {
                 workspace_root: self.resolve_session_workspace_root(input.session_id.as_deref()),
+                // L3 r2 A1：透传真实会话 id，触达注入按会话分桶（否则跨会话互相抑制）。
+                session_id: input.session_id.clone(),
                 ..Default::default()
             };
             let (tool_result, invocation_record, capability_hook_trace_records) =

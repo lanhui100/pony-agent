@@ -4760,7 +4760,9 @@ mod tests {
                 "JobStart".to_string(),
                 "JobOutput".to_string(),
                 "JobKill".to_string(),
-                "JobList".to_string()
+                "JobList".to_string(),
+                // W42/PA-149：技能正文按需加载（builtin_tools 追加序末位）。
+                "skill_load".to_string()
             ]
         );
     }
@@ -4836,7 +4838,9 @@ mod tests {
                 "JobStart".to_string(),
                 "JobOutput".to_string(),
                 "JobKill".to_string(),
-                "JobList".to_string()
+                "JobList".to_string(),
+                // W42/PA-149：技能正文按需加载（builtin_tools 追加序末位）。
+                "skill_load".to_string()
             ]
         );
         assert!(payload.iter().all(|tool| {
@@ -4845,13 +4849,11 @@ mod tests {
                 .is_some_and(|description| !description.trim().is_empty())
         }));
         // PA-076 P2-6: Plan and ViewImage 在既有 13-tool 前缀后追加；W25 起 team 工具已被
-        // 摘除（未接线），W37-C1 job_* 七件成为当前尾部（cache-friendly stable prefix
-        // invariant from design Decision 10 仍保持：前缀顺序不变，仅尾部变化）。
+        // 摘除（未接线），W37-C1 job_* 七件成为尾部，W42 追加 skill_load 成为当前尾项
+        //（cache-friendly stable prefix invariant from design Decision 10 仍保持：
+        // 前缀顺序不变，仅尾部变化）。
         let last_two = &names[names.len() - 2..];
-        assert_eq!(
-            last_two,
-            &["JobKill".to_string(), "JobList".to_string()]
-        );
+        assert_eq!(last_two, &["JobList".to_string(), "skill_load".to_string()]);
     }
 
     #[test]

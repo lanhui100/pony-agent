@@ -68,6 +68,7 @@
 - [0040 TUI /models 远程模型发现与回环地址代理旁路](0040-tui-model-discovery-and-loopback-proxy-bypass.md)
 - [0038 TUI 设计系统：单色为骨、单一骨色强调、发丝线与 2 列沟槽](0038-tui-design-system-monochrome-restraint.md)
 - [0045 用户级（全局）指令与 Skills 分层加载](0045-global-instructions-and-skills-layering.md)
+- [0046 全局配置加载四项能力：技能正文按需加载 / 指令预算 / 层级发现 / 触达即载](0046-global-config-loading-wave42.md)
 
 ### 已接替
 

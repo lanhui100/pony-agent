@@ -3,11 +3,73 @@
   "waves": [
     {
       "wave": 1,
-      "tasks": ["task-1", "task-2", "task-3", "task-4"]
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4"
+      ]
     },
     {
       "wave": 2,
-      "tasks": ["task-5", "task-6", "task-7"]
+      "tasks": [
+        "task-5",
+        "task-6",
+        "task-7"
+      ]
+    },
+    {
+      "wave": 42,
+      "theme": "DSH-inspired global config loading (PA-149..152)",
+      "baseline_commit": "c1bd454",
+      "protocol_commit": "7d90340",
+      "red_commit": "6e1bf18",
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4"
+      ],
+      "branches": {
+        "task-1": {
+          "owner": "executor-alpha",
+          "status": "in_progress",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/skill_body.rs",
+            "crates/pony-agent-core/src/agent/path_permission.rs",
+            "crates/pony-agent-core/src/agent/tools.rs",
+            "crates/pony-agent-core/src/agent/mod.rs"
+          ]
+        },
+        "task-2": {
+          "owner": "executor-beta",
+          "status": "in_progress",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+            "crates/pony-agent-core/src/agent/context.rs"
+          ]
+        },
+        "task-3": {
+          "owner": "executor-beta",
+          "status": "blocked_by:task-2",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/workspace_hotloader.rs"
+          ]
+        },
+        "task-4": {
+          "owner": "executor-alpha",
+          "status": "blocked_by:task-1,task-3",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/instruction_touch.rs",
+            "crates/pony-agent-core/src/agent/tools.rs",
+            "crates/pony-agent-core/src/agent/mod.rs"
+          ]
+        }
+      },
+      "gates": {
+        "red_phase": "20 failed / 0 passed (all SUT-stub or unmet assertions)",
+        "nfr_schema": "dev-nfr-lint.py EXIT 0 on nfr-baseline-wave42.json"
+      }
     }
   ],
   "counters": {}

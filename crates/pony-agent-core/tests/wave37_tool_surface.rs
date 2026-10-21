@@ -7,6 +7,11 @@
 //!
 //! 红相要求：T3/T4 实现落地前，下列测试必须全部失败。
 //! 分级判定：L3（并发原语 + 协议契约 + 跨模块集成）。
+//!
+//! Wave-42 迁移（Test Agent 按 Lead 裁决执行）：PA-149 新增模型可见工具 `skill_load`
+//! （ADR 0045 派生的全局/项目配置分层契约），模型可见工具面由 28 项演进为 29 项，故 C1
+//! 精确清单同步追加 `skill_load`，用例更名为 `t1_model_visible_surface_is_exact_29_tool_list`；
+//! 其余 8 个用例保持原样，未放宽任何断言。
 
 use pony_agent_core::agent::orchestration::{subagent, SubagentArgs, SubagentResult};
 use pony_agent_core::agent::subagent_runtime::{
@@ -69,15 +74,19 @@ fn parse_code(result: &pony_agent_core::agent::tools::ToolResult) -> String {
 }
 
 // ============================================================
-// C1 工具面：模型可见面 28 项精确清单（红：现 21）
+// C1 工具面：模型可见面 29 项精确清单（Wave-42 迁移：28 + skill_load）
 // ============================================================
 
 #[test]
-fn t1_model_visible_surface_is_exact_28_tool_list() {
+fn t1_model_visible_surface_is_exact_29_tool_list() {
     let views = pony_agent_core::agent::tools::builtin_turn_tool_contract_views();
     let names: Vec<&str> = views.iter().map(|v| v.name.as_str()).collect();
 
-    assert_eq!(names.len(), 28, "W37-C1 模型可见工具面必须为 28 项（现网 21）");
+    assert_eq!(
+        names.len(),
+        29,
+        "W37-C1 × W42/PA-149 模型可见工具面必须为 29 项（28 + skill_load）"
+    );
 
     let expected = vec![
         "Run",
@@ -109,8 +118,11 @@ fn t1_model_visible_surface_is_exact_28_tool_list() {
         "JobOutput",
         "JobKill",
         "JobList",
+        // W42/PA-149：技能正文按需加载，由 builtin_tools 默认追加序排在 JobList 之后
+        //（与 `builtin_turn_tool_contract_views()` 实测输出一致，非猜测位置）。
+        "skill_load",
     ];
-    assert_eq!(names, expected, "W37-C1 28 项精确清单（含顺序）");
+    assert_eq!(names, expected, "W37-C1 × W42 29 项精确清单（含顺序）");
 
     // C1.1 表：kind / exposure / priority / permission facts
     // （ToolKind::as_str 为 snake_case：read/search/execute）

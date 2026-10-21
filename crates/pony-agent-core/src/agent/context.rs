@@ -827,7 +827,13 @@ fn provider_semistable_context_note(
     // （AGENTS.md / CLAUDE.md，全局层在前、项目层在后）
     let hotloader = crate::agent::workspace_hotloader::WorkspaceHotloader::new();
     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    if let Some((constitution, _)) = hotloader.resolve_constitution(&current_dir) {
+    // PA-150：静态前缀装配受默认注入预算约束（超预算层被省略并留 `omitted` 标记）。
+    let global_homes = crate::agent::workspace_hotloader::resolve_global_agent_homes();
+    if let Some((constitution, _)) = hotloader.resolve_constitution_with_budget(
+        &current_dir,
+        &global_homes,
+        crate::agent::workspace_hotloader::InstructionBudget::default(),
+    ) {
         if !constitution.trim().is_empty() {
             note.push_str("\n\n=== Workspace & User Instructions (AGENTS.md / CLAUDE.md) ===\n");
             note.push_str(&constitution);

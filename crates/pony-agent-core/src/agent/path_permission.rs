@@ -606,6 +606,87 @@ impl PathPermissionChecker {
     }
 }
 
+/// 技能正文文件名（白名单只放行技能正文本身）。
+const SKILL_BODY_FILE_NAME: &str = "SKILL.md";
+
+/// workspace 内允许按需读取技能正文的目录（相对 workspace root）。
+///
+/// L3-B F4：项目层技能会出现在提示词的 `[project]` 清单里，必须同样可读，
+/// 否则「列表有、加载 404」。
+const WORKSPACE_SKILL_DIRS: [&str; 3] = [".agents/skills", ".claude/skills", ".dsh/skills"];
+
+/// 受信只读根（PA-149）：用户级全局根下**实际存在**的 `skills` 目录（已 canonical 化）。
+pub fn trusted_readonly_roots() -> Vec<PathBuf> {
+    trusted_skill_roots(None)
+}
+
+/// 受信技能只读根全集：全局 `<home>/skills` + 可选 workspace 内三处技能目录。
+///
+/// L3 r3 A6：根自身也必须做 canonical **包含**校验 —— `<ws>/.agents/skills` 若是指向
+/// workspace 外的符号链接，canonical 后不在 canonical(workspace)/canonical(home) 内，
+/// 该根整根不采纳（否则 symlink 重定向会让 workspace 外目录变成受信根）。
+pub fn trusted_skill_roots(workspace_root: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for home in crate::agent::workspace_hotloader::resolve_global_agent_homes() {
+        push_contained_canonical_root(&mut roots, &home.join("skills"), &home);
+    }
+    if let Some(root) = workspace_root {
+        for dir in WORKSPACE_SKILL_DIRS {
+            push_contained_canonical_root(&mut roots, &root.join(dir), root);
+        }
+    }
+    roots
+}
+
+/// 收录「canonical 后仍在 `base` 内」的技能根；符号链接重定向 / 不存在 / 不可解析一律不采纳。
+fn push_contained_canonical_root(roots: &mut Vec<PathBuf>, candidate: &Path, base: &Path) {
+    if !candidate.is_dir() {
+        return;
+    }
+    let (Ok(canonical_base), Ok(canonical_candidate)) = (base.canonicalize(), candidate.canonicalize())
+    else {
+        return;
+    };
+    if !canonical_candidate.starts_with(&canonical_base) {
+        return;
+    }
+    if !roots.iter().any(|existing| existing == &canonical_candidate) {
+        roots.push(canonical_candidate);
+    }
+}
+
+/// 路径是否落在受信只读根内（PA-149，fail-closed；全局根版本）。
+pub fn is_within_trusted_readonly_roots(path: &Path) -> bool {
+    is_within_trusted_skill_roots(path, None)
+}
+
+/// 路径是否是受信技能根内的技能正文（PA-149 / L3-B F3+F4 / L3 r3 A6+A7，fail-closed）。
+///
+/// - `..` 组件一律拒绝（不做词法放行）；
+/// - **先 canonicalize 再比**：失败即不受信（悬空符号链接/不存在路径不得因字面前缀放行）；
+/// - 目标（canonical 后）必须是 `SKILL.md`，且逐组件落在某个 canonical 受信根内；
+/// - 无显式 workspace root 时只有全局根受信（项目层必须显式传入 root，杜绝
+///   `*/.agents/skills/*/SKILL.md` 任意路径被接受的 fail-open）。
+pub fn is_within_trusted_skill_roots(path: &Path, workspace_root: Option<&Path>) -> bool {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
+    // fail-closed（L3-B F3）：canonicalize 失败意味着路径不可解析（悬空符号链接等），
+    // 任何字面前缀放行都会让逃逸链接被误判为受信根内，故直接判否。
+    let Ok(canonical_path) = path.canonicalize() else {
+        return false;
+    };
+    if canonical_path.file_name().and_then(|name| name.to_str()) != Some(SKILL_BODY_FILE_NAME) {
+        return false;
+    }
+    trusted_skill_roots(workspace_root)
+        .iter()
+        .any(|root| canonical_path.starts_with(root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,41 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 149,
+      "rule": "constitution-cache-hit-only-stat: 命中校验只看 mtime+size，首次读取失败的来源永不复读",
+      "counterexample": "C3-7 场景本体已修（cargo test --test wave42_global_config c3_deduped_global_source_change_invalidates_cache → 1 passed；删除来源也确实失效：删全局后 hit2=false）。但 :306 注释声称『文件恢复可读时必须能触发缓存失效』不成立：探针（rustc 直连 libpony_agent_core rlib）构造 全局+项目 两层，首次 resolve 前对全局 AGENTS.md chmod 000 → capture 记录 mtime/size（stat 成功）、read_to_string 失败、层被跳过、缓存仍写入该来源；chmod 644 恢复（mtime/size 不变）后第二次 resolve 输出 hit2=true 且 t2_has_global=false（readback_ok=true），即该层在进程生命周期内永久不可见。Windows 共享冲突/瞬时 EACCES 同样落入此窗口。另：FileFingerprint 已算 content_hash，但新快照只存 mtime+size，同尺寸改写且 mtime 被保留时返回旧内容（探针：write 后用 File::set_times 回填原 mtime → hit2=true、old_present=true、new_present=false）；20ms sleep 仅在 ns 粒度 FS（本机 ext4，stat 显示 .931566227）足够，FAT/exFAT/部分网络挂载的 1–2s 粒度下两次写可同 mtime。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 972,
+      "rule": "instruction-budget-excludes-render-overhead: 只对 layer.content.len() 记账，标题/空行/omitted 行不计入，渲染结果可超 max_bytes",
+      "counterexample": "预算循环（:967-1000）与截断分支（:979-992）都只累计正文；render_constitution（:821-843）额外写入 `## Global user-level instructions (<path>)`、`## Project instructions (<path>)`、层间 `\\n\\n`，末尾再追加每层一行 `omitted <path>`（:1007-1012）。实测（探针）：①3 层全『放得下』（全局90B+全局90B+项目90B，max_bytes=300）→ rendered=467B，超预算 167B，且超过 C2-5 自身容差 max_bytes+128=428 达 39B（tests/wave42_global_config.rs:871 的 +128 是测试为 marker 自留的留白，代码无此保证）；②max_bytes=100 + 2 全局 + 5KB 项目层 → rendered=199B（项目层确已截断保留，未丢，但总长翻倍）；③max_bytes=10、单项目层5KB → rendered=43B，因为 marker `truncated <path>` 本身已大于预算（available=0 仍写入 `\\n`+marker）。多全局根越多/路径越长，超支线性增长；context.rs:838 还会在外部再拼一段标题。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 979,
+      "rule": "top-priority-layer-dropped-for-global-or-oversize-project: 文档『最高优先级层永不整层丢弃』与实现不一致",
+      "counterexample": "截断分支额外要求 layer.scope == Project，而 :926 文档写的是『最高优先级层永不整层丢弃』（无 scope 限定）。①workspace 无 AGENTS.md、唯一全局层 70KB（<max_source_bytes 1MiB）→ 最高优先级层即该全局层，走 omitted 分支整层丢弃，渲染仅 41B 的 `omitted /tmp/.../AGENTS.md`，零指令注入；②项目层 2MB（> max_source_bytes 默认 1MiB）在 :946-949 先被 eligible 过滤 → 同样只余 42B `omitted <path>`，与 C2-5『项目层禁止被整层丢弃』相冲突（C2-3 只测了全局超限文件，未覆盖项目层超 max_source_bytes）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 720,
+      "rule": "global-skill-rank-still-env-non-hermetic: 同一 (workspace,homes,budget) 在 env 变化后 rank 与丢弃顺序改变",
+      "counterexample": "snapshot() 每次调用都读 PONY_AGENT_HOME/home_dir/config_dir（:720-729），rank() 只对这份快照纯函数，因此跨调用不纯。探针实测：homes=[A,B]（两者都不是已知根）、budget=260、每技能 cost≈170：env 未设 → 保留 alpha(rank 450)，丢弃 beta；PONY_AGENT_HOME=B → 保留 beta(rank 400)，丢弃 alpha；同一输入不同输出。建议先裁决：C3-6（tests/wave42_global_config.rs:546/584）冻结了『$PONY_AGENT_HOME/skills rank=400』，与『rank 不依赖 env』互斥，属契约冲突而非单纯代码回归；若保留现契约，应在文档中承认 rank 的隐式输入 env，并删掉『纯函数』表述。未识别根 450+index 在 index≥50 时会越过 500（~/.dsh）与 520（~/.claude），使注入根反而压过系统全局根。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1140,
+      "rule": "non-machine:touch-dedupe-same-workspace-sessions-still-share-bucket",
+      "counterexample": "F7 只把无会话桶从 \"-\" 改为 `ws:<root>`；同一 workspace 内多个会话（或两次无上下文调用）仍互相抑制：探针（同一 ToolRouter::with_workspace_root，连续两次 workspace_read_file a/b/x.rs，均无 session 上下文）→ first_has_prelude=true、second_same_ws_has_prelude=false，仅换 workspace 才隔离（other_ws=true）。根因是调用方没传会话：runtime/turn_sync.rs:58-61 与 runtime/turn_stream.rs:185-188 构造 ToolExecutionContext 只填 workspace_root，session_id 就在同函数作用域内（resolve_session_workspace_root(session_id)）却未透传；governed_executor.rs:328-334 走 dispatch 时才补齐 session_id。上一轮 5 条中的 F6（tools.rs:1074/1113 64 桶 LRU）与 F8（tools.rs:1182-1211 锁内重判+记账）已确认修复；C4-7 并发用例通过。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/config.rs",
+      "line": 1616,
+      "rule": "gate-receipt:lib-red-not-attributable-but-not-green（HEAD 既有红相）",
+      "counterexample": "证据 .dev-team/evidence/wave42/gates.md 的 --lib 段记录 FAILED（1084 passed / 1 failed）；单独复跑 `cargo test -p pony-agent-core --lib agent::config::tests::missing_capabilities_fields_use_stable_defaults` 复现：期望 Some(256000)，实际 Some(1000000)（DEFAULT_CONTEXT_WINDOW_TOKENS=1_000_000）。config.rs 与本仓库 HEAD 无 diff，故这是 bb1d208 引入的既有失败，不是本轮引入；但物理门禁并非 Exit 0，收口前需基线裁决或书面豁免，否则『全绿』证据不成立。"
+    }
+  ]
+}

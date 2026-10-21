@@ -1,0 +1,85 @@
+{
+  "verdict": "FAIL",
+  "questions": [
+    {
+      "id": 1,
+      "baseline": "external_call_timeout_ms=3000（有外部调用才需硬超时）；文件 IO 有界：skill_body.read_limit_bytes=262144、touch_injection.step_limit_bytes=16384（会话聚合 65536）、instruction_budget.max_source_bytes=1048576",
+      "evidence": "本波新增行无网络/外部 IO（也无任何新增超时面）：`grep -E '^\\+.*(reqwest|http|Command::new|timeout)' /tmp/w42.diff` → EXIT=1，0 命中。数值侧全部命中：skill_body.rs:55=262_144、134-141 句柄 fstat 超限拒绝；instruction_touch.rs:16=16_384、108-120 UTF-8 边界截断；tools.rs:1071=65_536、1202 累计预算判定；workspace_hotloader.rs:100=1_048_576、946-953 metadata 预筛。**但读操作本身无界**：instruction_touch.rs:74 `fs::read_to_string` 对 workspace 可控指令文件无 metadata 预检、无 `.take(limit)`，整文件读入后 79 行才截断（还多一次 content.to_string() 拷贝）；skill_body.rs:144 也是先 `read_to_string` 再 146 行事后判超限（声明为 read_limit，实际是 read-then-check）。",
+      "verdict": "FAIL"
+    },
+    {
+      "id": 2,
+      "baseline": "logging{format:json,trace_id_required:true}；既有 eprintln 债务 PA-119 豁免（logging_scope=new_structured_logging_surface_only）",
+      "evidence": "**未新增日志面，豁免成立于既有 eprintln 债务（PA-119）——属实**。① 新增行零日志语句：`grep -E '^\\+.*(eprintln!|println!|tracing::|log::(info|warn|error|debug))' /tmp/w42.diff` → 0 命中；② 既有 eprintln 仅 path_permission.rs:256,275 与 context.rs:720，均在 diff hunk（606/827）之外，本波未新增；③ 吞异常逐条为跳过式 fail-closed 且有据：instruction_touch.rs:74/91/99（越界/FIFO/读失败 → 不注入）、workspace_hotloader.rs:136-137（stat 快照 .ok()）、309-311（读失败跳过该层）、952（`Err(_) => {}` 跳过不可 stat 来源）；skill_body.rs 全部错误经 code() 结构化上抛，无 `let _ =`；④ PA-119 为真实工单（management/task-system/01_TASK_BOARD.md:16-17），豁免条款见 .dev-team/contract-matrix-deadlock.md §3.1。注意：wave42 基准未登记 logging_legacy_eprintln_exempt/logging_debt_ref，故该豁免在“基准文件”层面未落盘（见 Q5 findings）。",
+      "verdict": "PASS"
+    },
+    {
+      "id": 3,
+      "baseline": "resource_release: wave42_skill_body_single_read_fd_closed_on_return / wave42_instruction_touch_read_only_no_handle_retained",
+      "evidence": "无句柄逃逸：skill_body.rs:123 File::open 为局部变量，126 fstat、144 read_to_string，所有返回路径（111/116/130/137/148/154）均在函数作用域内 drop；instruction_touch.rs:74 用 read_to_string（内部 open/close），只返回 String，不保留 fd；workspace_hotloader.rs:50 同为 fs::read_to_string。会话表确为有界且与声称一致：tools.rs:1068 每桶 256 路径、1071 每会话 64KiB 聚合、1074 64 桶、1113-1125 min(last_used) LRU 淘汰、1213-1217 桶内淘汰最旧，全部在锁内完成。",
+      "verdict": "PASS"
+    },
+    {
+      "id": 4,
+      "baseline": "concurrency_lock=hotloader_rwlock_write_with_poison_recovery；触达去重不得 check-then-act；同一 session 重复注入幂等",
+      "evidence": "**锁中毒恢复缺失**：workspace_hotloader.rs:325 `*self.constitution.write().unwrap()`（新函数 load_constitution_layers 内），287/384/388/447 亦为 `.unwrap()`；全仓仅 tools.rs:1164/1184 对 Mutex 做 `unwrap_or_else(|poison| poison.into_inner())`，hotloader 的 RwLock 无任何恢复路径，与基准字段名直接冲突。**锁内 IO**：289-295 `cached.matches()` 在 read guard 内对每个来源做 fs::metadata（293）。去重竞态已收口：1161-1170 只取快照，文件读取在锁外，1182-1210 同一临界区重判 seen/记账/渲染，`c4_concurrent_touch_does_not_duplicate_injection`（8 线程 Barrier）实测通过；同 session 重复注入幂等 ✓。**分桶范围漂移**：1140-1145 在 session_id 为空时退化为 `ws:<root>`，而默认 runtime 恒不填 session_id（runtime/turn_sync.rs:58-61、runtime/turn_stream.rs:185-188 均 `..Default::default()`）→ 同 workspace 内会话 B 对会话 A 已注入的路径永久漏注入。",
+      "verdict": "FAIL"
+    },
+    {
+      "id": 5,
+      "baseline": "skill_body.read_limit_bytes=262144 / touch_injection.step_limit_bytes=16384 / instruction_budget{max_bytes:65536,max_source_bytes:1048576}；须有机械自检（单测断言这些数值）",
+      "evidence": "四项数值与基准完全一致：skill_body.rs:55=262_144、instruction_touch.rs:16=16_384、workspace_hotloader.rs:99=65_536、:100=1_048_576。**但无机械自检**：`grep -rn '262_144|16_384|65_536|1_048_576' crates/pony-agent-core/tests/wave42_*.rs` 仅命中测试自建 budget（wave42_global_config.rs:205、250），无一条断言实现常量/默认预算等于基准值；wave42_global_config.rs:761 用符号 MAX_TOUCH_STEP_BYTES 自比，常量若漂移到 65536 测试仍绿；全仓也无任何测试/脚本把 nfr-baseline-wave42.json 与代码常量对照。**gates.md 的 lint 收据不可复现**：`python3 .dev-team/nfr-lint.py --instance .dev-team/nfr-baseline-wave42.json` → EXIT=1（28 errors：11 个 required 键缺失 + 未知键 skill_body/touch_injection/instruction_budget），且仓库内不存在 gates.md:28 所称的 `dev-nfr-lint` 脚本（`find . -name '*nfr*'` 仅 nfr-lint.py / validate-nfr-baseline.mjs，后者为标准 5 键形状，同样不接受本文件）。**lib 门禁本身非绿**：gates.md:4-5 记录 `agent::config::tests::missing_capabilities_fields_use_stable_defaults` FAILED，实测复现 config.rs:1616 期望 Some(256000) 而 config.rs:11 DEFAULT_CONTEXT_WINDOW_TOKENS=1_000_000 给出 Some(1000000)。",
+      "verdict": "FAIL"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3340,
+      "rule": "触达注入前置追加未计入下游 result budget（默认 governed runtime 下合法读取被打成错误）",
+      "counterexample": "workspace 内 sub/AGENTS.md 写满 16 KiB，sub/big.txt 为 110_000 字节（read_file 内联阈值 MAX_FULL_READ_BYTES=120_000，允许整文件返回）。workspace_read_file {path:sub/big.txt} → with_touched_instructions 在 3340 前置约 16.4 KiB prelude，输出约 126 KiB；governed 默认引擎（runtime/builder.rs:88）经 RouterPrimitiveHandler→dispatcher.rs:1463 `ledger.reserve_bytes(output.len())`，max=read_file 的 result_budget_bytes=120_000（tools.rs:417）→ reserve_bytes 返回 Err（budget.rs:161），整个调用变为 status=error code=output_budget_exceeded，文件正文全部丢失（注入前该读取为成功）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 325,
+      "rule": "concurrency_lock=hotloader_rwlock_write_with_poison_recovery 未实现（写锁 .unwrap()，中毒即 panic）",
+      "counterexample": "任意在临界区内发生的 panic 都会毒化 constitution: RwLock（例如 288-298 命中分支的 `cached.layers.clone()` 分配失败，或 325 赋值时的分配 panic）。此后每次提示词装配进入 287 `self.constitution.read().unwrap()` 直接 panic，而非按基准名承诺的 poison recovery 继续服务——同一进程内所有后续回合稳定 panic。对照：同一 diff 触达表的 Mutex 在 tools.rs:1164/1184 使用 `unwrap_or_else(|poison| poison.into_inner())`，证明恢复模式在本仓库存在但未用于基准指定的 hotloader RwLock。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 293,
+      "rule": "锁内做文件 IO（read guard 持有期间逐来源 fs::metadata）",
+      "counterexample": "缓存命中校验 `cached.sources.iter().zip(...).all(|...| cached.matches())` 在 287 取得的 read guard 内为每个来源执行 fs::metadata（ConstitutionSourceFingerprint::matches, 145-152）。挂 3 个全局 home（$PONY_AGENT_HOME、~/.dsh、~/.agents）到缓慢/挂起网络盘时，每次 resolve_constitution_with_budget 在锁内阻塞 3 次 stat；并发的 325 写锁与其他读者（含 tools 侧技能扫描无关调用）被串行阻塞，而该路径无任何超时/有界等待。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/instruction_touch.rs",
+      "line": 74,
+      "rule": "文件 IO 无界：先整文件读入再截断（touch_injection 步长/会话预算只约束输出，不约束读）",
+      "counterexample": "恶意/巨型仓库在 sub/AGENTS.md 放置 512 MiB 文本（git clone 即可分发），再 workspace_read_file {path:sub/main.rs}：74 行 fs::read_to_string 一次性读入约 512 MiB（+79 行 truncate_to_step_budget 的 content.to_string() 再拷贝整串）后才由 108-120 截到 16_384 字节；单次触达峰值内存约 1 GiB，且 canonicalize/metadata 预检只判 is_file 与路径，不判长度。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1140,
+      "rule": "触达去重分桶范围与契约 C4-2「会话级」不符：session_id 缺失时退化为 workspace 桶，跨会话互相抑制",
+      "counterexample": "默认 runtime 构造 ToolExecutionContext 时不填 session_id（runtime/turn_sync.rs:58-61、runtime/turn_stream.rs:185-188 均为 `workspace_root: ..., ..Default::default()`），故 take_touched_instruction_prelude 的 bucket_key 恒为 `ws:<root>`。会话 A 首轮读 src/x.rs 后 root/AGENTS.md 与 src/AGENTS.md 记入该桶；会话 B（同 workspace、新会话）首轮读同一路径时 already_injected 命中，prelude 为空串 → B 全程拿不到子目录指令，且 64 KiB 会话预算被 A 消耗。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave42_global_config.rs",
+      "line": 761,
+      "rule": "基准业务键缺少机械自检：无单测断言 262144/16384/65536/1048576 与实现常量一致（自比式断言，常量漂移仍绿）",
+      "counterexample": "`assert!(content.len() <= MAX_TOUCH_STEP_BYTES, ...)` 用被测常量自身作期望值；把 instruction_touch.rs:16 改成 65536、skill_body.rs:55 改成 1_048_576、workspace_hotloader.rs:99 改成 131_072，wave42_global_config（20 passed）与 wave42_skill_body（6 passed）仍全绿——`.dev-team/nfr-baseline-wave42.json` 的四个数值与代码之间没有任何可失败断言。"
+    },
+    {
+      "file": ".dev-team/evidence/wave42/gates.md",
+      "line": 28,
+      "rule": "nfr lint 收据不可复现（仓库内无 dev-nfr-lint 脚本；自带 nfr-lint.py 对该文件 EXIT=1）",
+      "counterexample": "`python3 .dev-team/nfr-lint.py --instance .dev-team/nfr-baseline-wave42.json` → 28 errors / EXIT=1：schema 要求 lock_scope_bounded、logging_legacy_eprintln_exempt、logging_debt_ref 等 11 个键，且拒绝未知键 skill_body/touch_injection/instruction_budget。仓库内不存在名为 dev-nfr-lint 的脚本（`.dev-team/tools/validate-nfr-baseline.mjs` 走 5 键形状，同样拒绝本文件），故 gates.md:28 的 `[PASS] dev-nfr-lint 校验通过` 无对应可执行物与输出。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/config.rs",
+      "line": 1616,
+      "rule": "本波 gates.md 自报 lib 非全绿（配置默认值自检红），与「生产就绪」门禁冲突",
+      "counterexample": "`cargo test -p pony-agent-core --lib agent::config::tests::missing_capabilities_fields_use_stable_defaults -- --exact` → FAILED：config.rs:1616 断言 context_window_tokens==Some(256_000)，而 config.rs:11 DEFAULT_CONTEXT_WINDOW_TOKENS=1_000_000，实测 left=Some(1000000) right=Some(256000)。gates.md:4-5 已记录 `test result: FAILED. 1084 passed; 1 failed`；该断言位于未修改的 config.rs（HEAD 内容），非本 diff 引入，但本波最终收据仍以「lib 非全绿」状态交付。"
+    }
+  ]
+}

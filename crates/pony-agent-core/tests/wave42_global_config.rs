@@ -32,8 +32,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -827,5 +827,543 @@ fn c4_workspace_read_file_prepends_additional_instructions() {
     assert!(
         section_at < content_at,
         "C4-5：附加指令必须是**前置**追加（不得改变既有结果文本顺序之外的关键字段）"
+    );
+}
+
+// ============================================================
+// Wave-42 追加红相（L3 双审查 FAIL 后追加；不修改上方已冻结的 20 条断言）
+// ============================================================
+// 追加契约点：
+// - C2-5：项目层是最高优先级 —— 单层超 max_bytes 必须**截断**而非整层丢弃；
+// - C3-7：跨层去重不得污染来源缓存 —— 被去重掉的全局层变更必须触发缓存失效；
+// - C2-6：默认预算黄金字节（单一项目层原始字节语义）逐字节锁定；
+// - C4-6：符号链接逃逸（workspace 内指令文件指向 workspace 外真实文件）不得注入。
+
+// ============================================================
+// C2-5 超大项目层：截断而非丢弃（禁止 omitted 掉最高优先级项目层）
+// ============================================================
+
+#[test]
+fn c2_huge_project_layer_is_truncated_not_dropped() {
+    // Arrange：单一项目 AGENTS.md ≈ 70KB，无全局层，默认预算 64KiB
+    let workspace = TempDir::new("huge-project");
+    let content = format!("# HUGE-PROJECT-RULE\n{}\n", "p".repeat(70_000));
+    workspace.write("AGENTS.md", &content);
+    let budget = InstructionBudget::default();
+
+    // Act
+    let rendered = budgeted_constitution(&WorkspaceHotloader::new(), workspace.path(), &[], budget);
+
+    // Assert：项目层必须"截断保留"而不是"整层丢弃"
+    assert!(
+        rendered.contains("# HUGE-PROJECT-RULE"),
+        "C2-5：项目层是最高优先级，超预算时必须截断保留首部，实际渲染 {} 字节：{:?}",
+        rendered.len(),
+        rendered.chars().take(200).collect::<String>()
+    );
+    assert!(
+        rendered.to_lowercase().contains("truncated"),
+        "C2-5：截断必须带 `truncated` 标记，实际渲染 {} 字节：{:?}",
+        rendered.len(),
+        rendered.chars().take(200).collect::<String>()
+    );
+    assert!(
+        rendered.as_bytes().len() <= budget.max_bytes + 128,
+        "C2-5：截断结果必须落在 max_bytes(65536)+128 标记留白内，实际 {} 字节",
+        rendered.as_bytes().len()
+    );
+    assert!(
+        !rendered.contains("omitted"),
+        "C2-5：项目层禁止被整层丢弃（不得出现 `omitted`），实际渲染 {} 字节：{:?}",
+        rendered.len(),
+        rendered.chars().take(200).collect::<String>()
+    );
+}
+
+// ============================================================
+// C3-7 去重不得吞掉全局层变更：全局来源变更必须使缓存失效
+// ============================================================
+
+#[test]
+fn c3_deduped_global_source_change_invalidates_cache() {
+    // Arrange：全局 home 与 workspace 写**完全相同**内容的 AGENTS.md
+    let workspace = TempDir::new("dedupe-cache-ws");
+    let global = TempDir::new("dedupe-cache-global");
+    let shared = "# SHARED-DEDUPE-RULE\nidentical copy\n";
+    workspace.write("AGENTS.md", shared);
+    let global_path = global.write("AGENTS.md", shared);
+    let homes = vec![global.path().to_path_buf()];
+    let hotloader = WorkspaceHotloader::new();
+    let budget = InstructionBudget::default();
+
+    // Act 1：首次解析
+    let (first_text, first_hit) = hotloader
+        .resolve_constitution_with_budget(workspace.path(), &homes, budget)
+        .expect("C3-7：前置条件：首次解析必须返回内容");
+    assert!(
+        !first_hit,
+        "C3-7：首次解析不得命中缓存（否则后续失效断言无意义）"
+    );
+    assert_eq!(
+        count_occurrences(&first_text, "# SHARED-DEDUPE-RULE"),
+        1,
+        "C3-7：前置条件：trim 相同内容只保留一份，实际：{first_text:?}"
+    );
+
+    // Act 2：20ms 后改写被去重掉的全局层
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(&global_path, "# GLOBAL-UPDATED\nonly in global layer\n")
+        .expect("改写全局 AGENTS.md 失败");
+
+    // Assert：缓存必须失效，且新内容真正进入渲染结果
+    let (second_text, second_hit) = hotloader
+        .resolve_constitution_with_budget(workspace.path(), &homes, budget)
+        .expect("C3-7：第二次解析必须返回内容");
+    assert!(
+        !second_hit,
+        "C3-7：被去重的全局层内容变更必须使缓存失效（禁止被去重缓存吞掉），实际 hit=true"
+    );
+    assert!(
+        second_text.contains("# GLOBAL-UPDATED"),
+        "C3-7：变更后的全局层内容必须出现在渲染结果里，实际：{second_text:?}"
+    );
+}
+
+// ============================================================
+// C2-6 默认预算黄金字节：单一项目层必须逐字节等于原始文件内容
+// ============================================================
+
+#[test]
+fn c2_default_budget_golden_bytes() {
+    // Arrange：固定 fixture
+    let workspace = TempDir::new("golden-ws");
+    workspace.write("AGENTS.md", "# GOLDEN-PROJECT\nrules\n");
+
+    // Act
+    let (rendered, _hit) = WorkspaceHotloader::new()
+        .resolve_constitution_with_budget(workspace.path(), &[], InstructionBudget::default())
+        .expect("C2-6：前置条件：单一项目层必须返回内容");
+
+    // Assert：黄金字节（禁止同函数自比，禁止只做包含断言）
+    let expected = "# GOLDEN-PROJECT\nrules\n";
+    assert_eq!(
+        rendered.as_bytes(),
+        expected.as_bytes(),
+        "C2-6：默认预算下单一项目层必须逐字节等于原始 AGENTS.md 内容，实际：{rendered:?}"
+    );
+}
+
+// ============================================================
+// C4-6 符号链接逃逸：workspace 内指令文件指向 workspace 外文件不得注入
+// ============================================================
+
+#[test]
+fn c4_symlinked_instruction_outside_workspace_is_not_injected() {
+    let workspace = TempDir::new("symlink-ws");
+    let outside = TempDir::new("symlink-outside");
+    let secret = "# SECRET-OUTSIDE-CONTENT\nhost secrets\n";
+    let outside_file = outside.write("AGENTS.md", secret);
+    workspace.mkdir("sub");
+    workspace.write("sub/main.rs", "fn main() {}\n");
+    let touched = workspace.path().join("sub/main.rs");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside_file, workspace.path().join("sub/AGENTS.md"))
+            .expect("C4-6：创建符号链接失败");
+
+        // 断言 1：纯函数层不注入 workspace 外内容
+        let entries =
+            instructions_for_touched_path(workspace.path(), &touched, &BTreeSet::new());
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !entry.content.contains("SECRET-OUTSIDE-CONTENT")),
+            "C4-6：符号链接指向 workspace 外时不得注入其内容，实际 {:?}",
+            entries
+                .iter()
+                .map(|entry| entry.display_path.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // 断言 2：工具结果文本同样不得泄漏
+        let router = ToolRouter::with_workspace_root(workspace.path().to_path_buf());
+        let call = ToolCall {
+            call_id: None,
+            name: "workspace_read_file".to_string(),
+            arguments: json!({ "path": "sub/main.rs" }),
+            plan: None,
+        };
+        let result = router.execute_with_workspace_root(&call, Some(workspace.path()));
+        assert_eq!(
+            result.status, "ok",
+            "C4-6：前置条件：workspace_read_file 必须成功，实际 status={} output={}",
+            result.status, result.output
+        );
+        assert!(
+            !result.output.contains("SECRET-OUTSIDE-CONTENT"),
+            "C4-6：工具结果不得前置注入符号链接逃逸后的 workspace 外内容，实际：{}",
+            result.output
+        );
+    }
+
+    #[cfg(not(unix))]
+    {
+        // 非 unix 平台无法构造稳定符号链接逃逸：显式跳过（不计红相失败）。
+        let _ = (&outside_file, &touched);
+    }
+}
+
+// ============================================================
+// Wave-42 L2-AT 对抗/并发破坏注入（末条追加；不修改上方任何既有断言）
+// ============================================================
+// 契约点 C4-7：共享同一 `Arc<ToolRouter>` 的 8 个并发 `workspace_read_file` 触碰同一深层文件时，
+// 触达注入必须**每份结果最多一次**（并发下不得重复注入），且不得因互斥/竞态而全部丢失。
+// 同步原语：`Barrier(8)` 让 8 线程同一时刻起跑（确定性，禁止 sleep 竞态）。
+
+#[test]
+fn c4_concurrent_touch_does_not_duplicate_injection() {
+    const THREADS: usize = 8;
+
+    // Arrange：root 与 mid 两层指令，触碰 a/b/main.rs
+    let workspace = TempDir::new("race-touch");
+    workspace.write("AGENTS.md", "# ROOT-RACE-MARKER\nroot rules\n");
+    workspace.write("a/AGENTS.md", "# A-RACE-MARKER\na rules\n");
+    workspace.write("a/b/main.rs", "fn main() {}\n");
+    let root_agents = workspace.path().join("AGENTS.md");
+    let a_agents = workspace.path().join("a/AGENTS.md");
+
+    let router = Arc::new(ToolRouter::with_workspace_root(
+        workspace.path().to_path_buf(),
+    ));
+    let root_path = workspace.path().to_path_buf();
+    let barrier = Barrier::new(THREADS);
+
+    // Act：8 线程同一 Barrier 起跑，各自独立构造同一调用并执行
+    let results: Vec<(String, String)> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            let router = Arc::clone(&router);
+            let root_path = root_path.clone();
+            let barrier = &barrier;
+            handles.push(scope.spawn(move || {
+                let call = ToolCall {
+                    call_id: None,
+                    name: "workspace_read_file".to_string(),
+                    arguments: json!({ "path": "a/b/main.rs" }),
+                    plan: None,
+                };
+                barrier.wait();
+                let result = router.execute_with_workspace_root(&call, Some(root_path.as_path()));
+                (result.status, result.output)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("C4-7：并发线程发生 panic"))
+            .collect()
+    });
+
+    // Assert：① 全部成功；② 每层指令/每层段落标题在单份结果内至多一次；③ 至少一份携带附加段落。
+    //
+    // 注意（对 Lead 原始措辞的契约级修正，见汇报）：C4-1 冻结语义是"**每个**来源目录各一段"，
+    // 本 fixture 有 root 与 a 两级指令，因此单份结果的段落标题基线是 **2**（不是 1）。
+    // 真正要守的不变量是"并发不得让**同一层**重复注入"，故按层分别计数：
+    // 根层段落标题 ≤1、mid 层段落标题 ≤1、总标题数 ≤ 层数(2)，两级标记各 ≤1。
+    let root_header = format!(
+        "=== Additional instructions ({})",
+        root_agents.display()
+    );
+    let a_header = format!("=== Additional instructions ({})", a_agents.display());
+    let instruction_layers = 2usize;
+    let mut with_section = 0usize;
+    for (index, (status, output)) in results.iter().enumerate() {
+        assert_eq!(
+            status, "ok",
+            "C4-7：第 {index} 个并发结果必须成功，实际 output={output}"
+        );
+        assert!(
+            count_occurrences(output, &root_header) <= 1,
+            "C4-7：第 {index} 个结果里根层指令段落最多出现 1 次（并发不得重复注入），实际：{output}"
+        );
+        assert!(
+            count_occurrences(output, &a_header) <= 1,
+            "C4-7：第 {index} 个结果里 mid 层指令段落最多出现 1 次（并发不得重复注入），实际：{output}"
+        );
+        assert!(
+            count_occurrences(output, "=== Additional instructions") <= instruction_layers,
+            "C4-7：第 {index} 个结果的附加段落标题数不得超过指令层数({instruction_layers})，实际：{output}"
+        );
+        assert!(
+            count_occurrences(output, "# ROOT-RACE-MARKER") <= 1,
+            "C4-7：第 {index} 个结果里根层指令最多出现 1 次，实际：{output}"
+        );
+        assert!(
+            count_occurrences(output, "# A-RACE-MARKER") <= 1,
+            "C4-7：第 {index} 个结果里 mid 层指令最多出现 1 次，实际：{output}"
+        );
+        if output.contains("=== Additional instructions") {
+            with_section += 1;
+        }
+    }
+    assert!(
+        with_section >= 1,
+        "C4-7：并发下必须至少有一份结果携带附加指令段落（不得因互斥/竞态全部丢失），实际 0/{THREADS}"
+    );
+    eprintln!(
+        "C4-7 并发触达收据：threads={THREADS} ok={} with_section={with_section}",
+        results.iter().filter(|(status, _)| status == "ok").count()
+    );
+}
+
+// ============================================================
+// Wave-42 L3-r2 复审反例追加（只加用例；上方 21 条既有断言一字未改）
+// ============================================================
+// 契约点：
+// - C2-7：渲染结果字节数必须严格受 `max_bytes` 约束（标题/分隔/标记不得白送预算）；
+// - C2-8：最高优先级层即便位于全局带，也必须"截断保留"而不是"整层省略"；
+// - C2-9：来源文件不可读后恢复可读，必须重试读取（缓存不得把临时读失败永久固化）；
+// - C4-8：触达 prelude 不得把成功读取顶成 `output_budget_exceeded`。
+
+// ============================================================
+// C2-7 渲染字节严格不超预算
+// ============================================================
+
+#[test]
+fn c2_rendered_bytes_never_exceed_budget() {
+    // 子例 A：3 个全局层各 ~78B，max_bytes=300
+    let workspace = TempDir::new("render-budget-ws");
+    let global_one = TempDir::new("render-budget-g1");
+    let global_two = TempDir::new("render-budget-g2");
+    let global_three = TempDir::new("render-budget-g3");
+    let layer = |tag: char| format!("# LAYER-{tag}-MARKER\n{}\n", tag.to_string().repeat(60));
+    global_one.write("AGENTS.md", &layer('a'));
+    global_two.write("AGENTS.md", &layer('b'));
+    global_three.write("AGENTS.md", &layer('c'));
+    let homes = vec![
+        global_one.path().to_path_buf(),
+        global_two.path().to_path_buf(),
+        global_three.path().to_path_buf(),
+    ];
+    let budget = InstructionBudget {
+        max_bytes: 300,
+        max_source_bytes: 1_048_576,
+    };
+    let rendered = budgeted_constitution(
+        &WorkspaceHotloader::new(),
+        workspace.path(),
+        &homes,
+        budget,
+    );
+    assert!(
+        rendered.as_bytes().len() <= budget.max_bytes,
+        "C2-7：渲染字节 {} 超过 max_bytes({})（标题/分隔/标记不得占用额外预算），实际：{rendered:?}",
+        rendered.as_bytes().len(),
+        budget.max_bytes
+    );
+
+    // 子例 B：max_bytes=10 的极紧预算仍须严格不超且非空
+    let single = TempDir::new("render-budget-tiny");
+    single.write("AGENTS.md", "# SMALL-PROJECT\nrules\n");
+    let tiny_budget = InstructionBudget {
+        max_bytes: 10,
+        max_source_bytes: 1_048_576,
+    };
+    let tiny = budgeted_constitution(
+        &WorkspaceHotloader::new(),
+        single.path(),
+        &[],
+        tiny_budget,
+    );
+    assert!(
+        !tiny.is_empty(),
+        "C2-7：极紧预算下结果不得为空（必须保留可判读的截断信号）"
+    );
+    assert!(
+        tiny.as_bytes().len() <= tiny_budget.max_bytes,
+        "C2-7：极紧预算下渲染字节 {} 超过 max_bytes({})，实际：{tiny:?}",
+        tiny.as_bytes().len(),
+        tiny_budget.max_bytes
+    );
+}
+
+// ============================================================
+// C2-8 全局带最高优先级层：截断保留，不得整层省略
+// ============================================================
+
+#[test]
+fn c2_oversize_global_top_layer_is_truncated_not_omitted() {
+    let workspace = TempDir::new("huge-global-ws"); // 无 AGENTS.md
+    let home = TempDir::new("huge-global-home");
+    home.write(
+        "AGENTS.md",
+        &format!("# HUGE-GLOBAL-TOP\n{}\n", "h".repeat(70_000)),
+    );
+    let homes = vec![home.path().to_path_buf()];
+    let budget = InstructionBudget::default();
+
+    let rendered = budgeted_constitution(
+        &WorkspaceHotloader::new(),
+        workspace.path(),
+        &homes,
+        budget,
+    );
+
+    assert!(
+        rendered.contains("# HUGE-GLOBAL-TOP"),
+        "C2-8：全局带唯一/最高优先级层超预算时必须截断保留首部，实际渲染 {} 字节：{:?}",
+        rendered.as_bytes().len(),
+        rendered.chars().take(200).collect::<String>()
+    );
+    assert!(
+        rendered.to_lowercase().contains("truncated"),
+        "C2-8：截断必须带 `truncated` 标记，实际：{:?}",
+        rendered.chars().take(200).collect::<String>()
+    );
+    assert!(
+        !rendered.contains("omitted"),
+        "C2-8：最高优先级层不得被整层省略（不得出现 `omitted`），实际：{:?}",
+        rendered.chars().take(200).collect::<String>()
+    );
+    assert!(
+        rendered.as_bytes().len() <= budget.max_bytes,
+        "C2-8：截断结果必须落在 max_bytes({}) 内，实际 {} 字节",
+        budget.max_bytes,
+        rendered.as_bytes().len()
+    );
+}
+
+// ============================================================
+// C2-9 不可读来源在权限恢复后必须重试读取
+// ============================================================
+
+#[cfg(unix)]
+#[test]
+fn c2_unreadable_source_is_retried_after_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// 权限守卫：Drop（含 panic）时恢复可读，避免污染后续用例。
+    struct PermGuard {
+        path: PathBuf,
+    }
+
+    impl Drop for PermGuard {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o644));
+        }
+    }
+
+    let workspace = TempDir::new("recovery-ws");
+    let home = TempDir::new("recovery-home");
+    let global_path = home.write("AGENTS.md", "# RECOVERY-LAYER-MARKER\nrecovered rules\n");
+    let homes = vec![home.path().to_path_buf()];
+    let hotloader = WorkspaceHotloader::new();
+    let budget = InstructionBudget::default();
+
+    let _guard = PermGuard {
+        path: global_path.clone(),
+    };
+    fs::set_permissions(&global_path, fs::Permissions::from_mode(0o000))
+        .expect("C2-9：设置 0o000 失败");
+
+    // 第 1 次解析：层不可读 → 不得凭空注入
+    let first_text = hotloader
+        .resolve_constitution_with_budget(workspace.path(), &homes, budget)
+        .map(|(text, _)| text)
+        .unwrap_or_default();
+    assert!(
+        !first_text.contains("# RECOVERY-LAYER-MARKER"),
+        "C2-9：不可读的来源不得被注入，实际：{first_text:?}"
+    );
+
+    // 恢复可读后第 2 次解析：必须重新读到该层
+    fs::set_permissions(&global_path, fs::Permissions::from_mode(0o644))
+        .expect("C2-9：恢复 0o644 失败");
+    let (second_text, _hit) = hotloader
+        .resolve_constitution_with_budget(workspace.path(), &homes, budget)
+        .expect("C2-9：权限恢复后必须重新解析出内容（禁止返回 None）");
+    assert!(
+        second_text.contains("# RECOVERY-LAYER-MARKER"),
+        "C2-9：来源恢复可读后必须重试读取（禁止把临时读失败固化进缓存），实际：{second_text:?}"
+    );
+}
+
+// ============================================================
+// C4-8 触达 prelude 不得破坏大文件读取的成功语义
+// ============================================================
+//
+// [RED DEGRADED: PUBLIC-SEAM-ONLY] `GovernedToolExecutor` 仅有 `new`/`dispatcher`/`context`
+// 公开方法，`DispatchBudgetConfig.max_result_bytes` 没有对外 execute 注入缝，集成测试无法
+// 构造 governed 预算路径；故此处仅经 `ToolRouter` 公开入口断言
+// 「16KiB 触达 prelude 不破坏 110KB 读取的 status=ok 语义」（legacy 路径无 tool 级字节上限）。
+// 待公开 governed 执行缝落地后，应改为真实 governed 路径复测。
+
+#[test]
+fn c4_governed_read_stays_ok_with_touch_prelude() {
+    let workspace = TempDir::new("governed-touch");
+    workspace.write(
+        "AGENTS.md",
+        &format!("# BIG-TOUCH-RULE\n{}\n", "t".repeat(16 * 1024)),
+    );
+    workspace.write("a/big.txt", &"x".repeat(110 * 1024));
+
+    let router = ToolRouter::with_workspace_root(workspace.path().to_path_buf());
+    let call = ToolCall {
+        call_id: None,
+        name: "workspace_read_file".to_string(),
+        arguments: json!({ "path": "a/big.txt" }),
+        plan: None,
+    };
+    let result = router.execute_with_workspace_root(&call, Some(workspace.path()));
+
+    assert_eq!(
+        result.status, "ok",
+        "C4-8：触达 prelude 后大文件读取必须仍然成功，实际 status={} output={}",
+        result.status, result.output
+    );
+    assert!(
+        !result.output.contains("output_budget_exceeded"),
+        "C4-8：触达 prelude 不得把成功读取顶成输出预算超限，实际：{}",
+        result.output.chars().take(300).collect::<String>()
+    );
+}
+
+// ============================================================
+// Wave-42 L3-r3 安全回归追加（只加用例；上方 24 条既有断言一字未改）
+// ============================================================
+// 契约点 C3-8：符号链接不得把 workspace 外文件伪装成宪法层注入；
+// 同时正向钉子：真实普通文件必须仍被加载（防"一刀切收紧"导致功能回退）。
+
+#[cfg(unix)]
+#[test]
+fn c3_symlinked_constitution_outside_workspace_is_not_injected() {
+    let workspace = TempDir::new("symlink-constitution-ws");
+    let outside = TempDir::new("symlink-constitution-outside");
+    let outside_file = outside.write("secret.md", "# SECRET-CONSTITUTION\nhost secrets\n");
+    let link = workspace.path().join("AGENTS.md");
+    std::os::unix::fs::symlink(&outside_file, &link).expect("C3-8：创建宪法符号链接失败");
+
+    // Act：无全局层，workspace 的 AGENTS.md 是指向 workspace 外的符号链接
+    let rendered = WorkspaceHotloader::new()
+        .resolve_constitution_with_budget(workspace.path(), &[], InstructionBudget::default())
+        .map(|(text, _)| text)
+        .unwrap_or_default();
+
+    // Assert 1：符号链接逃逸的层必须被跳过（不得注入 workspace 外内容）
+    assert!(
+        !rendered.contains("SECRET-CONSTITUTION"),
+        "C3-8：符号链接指向 workspace 外时不得注入其内容，实际渲染 {} 字节：{:?}",
+        rendered.as_bytes().len(),
+        rendered.chars().take(200).collect::<String>()
+    );
+
+    // Assert 2（正向钉子）：真实普通文件仍必须被加载
+    let normal = TempDir::new("symlink-constitution-normal");
+    normal.write("AGENTS.md", "# NORMAL-CONSTITUTION-MARKER\nteam rules\n");
+    let normal_text =
+        budgeted_constitution(&WorkspaceHotloader::new(), normal.path(), &[], InstructionBudget::default());
+    assert!(
+        normal_text.contains("# NORMAL-CONSTITUTION-MARKER"),
+        "C3-8：真实普通文件 AGENTS.md 必须仍被加载（防过度收紧），实际：{normal_text:?}"
     );
 }

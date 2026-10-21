@@ -21,7 +21,7 @@ use pony_agent_core::agent::skill_body::{
 };
 use pony_agent_core::agent::tools::{builtin_tools, builtin_turn_tool_contract_views};
 use pony_agent_core::agent::workspace_hotloader::{
-    AgentScope, FileFingerprint, HotloadedSkill, PONY_AGENT_HOME_ENV,
+    AgentScope, FileFingerprint, HotloadedSkill, WorkspaceHotloader, PONY_AGENT_HOME_ENV,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -350,4 +350,169 @@ fn c1_skill_load_is_registered_on_the_model_visible_surface() {
         internal.iter().any(|tool| tool.name == "skill_load"),
         "C1-5：内部注册表缺少 `skill_load`（只改投影不改注册是假注册）"
     );
+}
+
+// ============================================================
+// Wave-42 追加红相（L3 双审查 FAIL 后追加；不修改上方已冻结的 5 条断言）
+// ============================================================
+// 追加契约点 C1-6：项目级技能（workspace 内 `.agents/skills`）正文必须可加载 ——
+// 「项目层永远最高优先级」不变量要求项目技能正文与全局技能正文同等可用；
+// 同时既有「workspace 外非白名单路径 → OutOfAllowedRoot」断言（`c1_rejects_paths_outside_trusted_readonly_roots`）
+// 保持原样不动，用于守 fail-closed 边界不被放宽。
+// wave-42 r3：A7 收紧无根入口（fail-closed），项目层正文经带根入口加载
+
+#[test]
+fn c1_project_skill_body_is_loadable() {
+    let _lock = env_lock();
+    let home = TempDir::new("home-project-skill");
+    home.mkdir("skills");
+    let workspace = TempDir::new("ws-project-skill");
+    let skill_file = workspace.write(
+        ".agents/skills/p-local/SKILL.md",
+        "---\nname: p-local\ndescription: project local skill\n---\n\n# PROJECT-SKILL-BODY\nlocal steps\n",
+    );
+    let _env = EnvGuard::set(PONY_AGENT_HOME_ENV, home.path());
+
+    // Act：项目层技能解析 + 正文加载
+    let skill = resolve_skill_by_name(workspace.path(), "p-local")
+        .expect("C1-6：项目 `.agents/skills` 下的技能必须可被解析");
+    assert_eq!(skill.path, skill_file, "C1-6：解析路径必须是项目 SKILL.md");
+    assert_eq!(
+        skill.scope,
+        AgentScope::Project,
+        "C1-6：项目技能作用域必须是 Project"
+    );
+
+    // 迁移（Lead 裁决 ②）：项目层正文经**带根入口**加载（显式 API 分层，非放宽断言）。
+    let body = match pony_agent_core::agent::skill_body::load_skill_body_for_workspace(
+        &skill,
+        MAX_SKILL_BODY_BYTES,
+        Some(workspace.path()),
+    ) {
+        Ok(body) => body,
+        Err(error) => panic!(
+            "C1-6：workspace 内的项目技能正文必须可经带根入口加载（项目层永远最高优先级），实际 {error:?}"
+        ),
+    };
+
+    // Assert
+    assert!(
+        body.content.contains("# PROJECT-SKILL-BODY"),
+        "C1-6：正文必须包含项目 SKILL.md 真实内容，实际：{:?}",
+        body.content
+    );
+    assert_eq!(body.name, "p-local", "C1-6：正文记录名必须与请求一致");
+    assert_eq!(
+        body.scope,
+        AgentScope::Project,
+        "C1-6：正文作用域必须与扫描结果一致"
+    );
+    assert!(
+        !body.truncated,
+        "C1-6：未超上限的项目技能正文不得被标记截断"
+    );
+
+    // 负例强化（fail-closed 钉子）：同一技能走**无根**入口必须被拒绝，
+    // 防止后续把无根入口改回 fail-open（例如误加"任意 SKILL.md 皆可读"的宽松判定）。
+    match load_skill_body(&skill, MAX_SKILL_BODY_BYTES) {
+        Ok(_) => panic!(
+            "C1-6：无根入口 `load_skill_body` 不得读到 workspace 内项目技能正文（必须 OutOfAllowedRoot）"
+        ),
+        Err(SkillBodyError::OutOfAllowedRoot(reported)) => {
+            assert!(
+                reported == skill_file || reported.ends_with("SKILL.md"),
+                "C1-6：无根入口拒绝时必须携带被拒绝的项目技能路径，实际 {reported:?}"
+            );
+        }
+        Err(other) => panic!(
+            "C1-6：无根入口对项目层技能必须返回 OutOfAllowedRoot（A7 fail-closed），实际 {other:?}"
+        ),
+    }
+}
+
+// ============================================================
+// Wave-42 L3-r3 安全回归追加（只加用例；上方 6 条既有断言一字未改）
+// ============================================================
+// 契约点 C1-7：超过 MAX_SKILL_BODY_BYTES 的技能不得进入扫描结果（不整文件读入），
+// 且对该覆盖范围的直接加载必须返回结构化 `TooLarge{size,limit}`（禁止截断返回成功）。
+// 说明：不做任何耗时/时间断言（避免 flaky），只断言结果语义。
+
+#[test]
+fn c1_oversize_skill_is_skipped_without_full_read() {
+    let _lock = env_lock();
+    let home = TempDir::new("home-oversize-skill");
+    home.mkdir("skills");
+    let workspace = TempDir::new("ws-oversize-skill");
+    let payload = "Z".repeat(300 * 1024);
+    let skill_file = workspace.write(
+        ".agents/skills/huge/SKILL.md",
+        &format!("---\nname: huge-skill\ndescription: oversize skill\n---\n\n{payload}\n"),
+    );
+    let _env = EnvGuard::set(PONY_AGENT_HOME_ENV, home.path());
+    assert!(
+        fs::metadata(&skill_file)
+            .expect("C1-7：前置条件：技能文件必须存在")
+            .len()
+            > MAX_SKILL_BODY_BYTES as u64,
+        "C1-7：前置条件：fixture 必须超过 MAX_SKILL_BODY_BYTES({MAX_SKILL_BODY_BYTES})"
+    );
+
+    // Assert 1：扫描结果不得包含超限技能
+    let hotloader = WorkspaceHotloader::new();
+    let (skills, _hit) = hotloader.scan_skills(workspace.path());
+    assert!(
+        skills.iter().all(|skill| skill.name != "huge-skill"),
+        "C1-7：超过 MAX_SKILL_BODY_BYTES 的技能不得进入扫描结果，实际可见技能：{:?}",
+        skills
+            .iter()
+            .map(|skill| (skill.name.clone(), skill.fingerprint.file_size))
+            .collect::<Vec<_>>()
+    );
+
+    // Assert 2：直接加载同一路径必须返回结构化 TooLarge{size,limit}
+    let (fingerprint, _content) =
+        FileFingerprint::compute(&skill_file).expect("C1-7：前置条件：计算指纹失败");
+    let descriptor = HotloadedSkill {
+        name: "huge-skill".to_string(),
+        description: "oversize skill".to_string(),
+        user_invocable: true,
+        allowed_tools: Vec::new(),
+        path: skill_file.clone(),
+        fingerprint,
+        scope: AgentScope::Project,
+        rank: 200,
+    };
+    // 说明（L3 r3 设计演进）：执行器在 r3 收敛为「无显式 workspace root 时只放行全局根」，
+    // 项目层技能正文必须经 `load_skill_body_for_workspace(.., Some(root))` 加载。
+    // 因此这里按演进后的公开缝断言**尺寸语义**（TooLarge），并额外钉住非 root 入口的 fail-closed。
+    match pony_agent_core::agent::skill_body::load_skill_body_for_workspace(
+        &descriptor,
+        MAX_SKILL_BODY_BYTES,
+        Some(workspace.path()),
+    ) {
+        Ok(body) => panic!(
+            "C1-7：超限技能必须拒绝而非截断返回成功，实际 truncated={} 正文 {} 字节",
+            body.truncated,
+            body.content.len()
+        ),
+        Err(SkillBodyError::TooLarge { size, limit }) => {
+            assert_eq!(limit, MAX_SKILL_BODY_BYTES, "C1-7：limit 必须是 MAX_SKILL_BODY_BYTES");
+            assert!(
+                size > limit,
+                "C1-7：size({size}) 必须大于 limit({limit})"
+            );
+        }
+        Err(other) => panic!("C1-7：超限技能必须返回 TooLarge，实际 {other:?}"),
+    }
+
+    // 非 root 入口（全局根策略）必须 fail-closed，不得静默读到超限正文
+    match load_skill_body(&descriptor, MAX_SKILL_BODY_BYTES) {
+        Ok(_) => panic!("C1-7：非 root 入口不得读到 workspace 内项目技能正文（应 fail-closed）"),
+        Err(SkillBodyError::OutOfAllowedRoot(_))
+        | Err(SkillBodyError::TooLarge { .. })
+        | Err(SkillBodyError::Unreadable(_)) => {}
+        Err(SkillBodyError::UnknownSkill(name)) => {
+            panic!("C1-7：非 root 入口返回 UnknownSkill({name})，不是 fail-closed 根策略语义")
+        }
+    }
 }

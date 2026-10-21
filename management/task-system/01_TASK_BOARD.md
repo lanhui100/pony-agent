@@ -83,6 +83,10 @@
 
 ## Review
 
+- `PA-149 ~ PA-152` wave-42 全局配置加载四项能力（P1，Complexity B/C）
+  状态：Review（实现 + 双 L3 复审 + L3-P 五问完成，待收口提交）。
+  说明：① `skill_load` 技能正文按需加载（模型面 28→29，受信只读根 canonical+普通文件+256KiB 上限，`skills.read` 仅只读）；② `InstructionBudget{65536,1048576}`：最高优先级层截断（`truncated`）、低优先级层省略（`omitted`），默认预算逐字节兼容；③ 层级发现有界原语（`.git` 根/祖先链/`*.local.md`/跨层去重）+ 技能 rank 显式化（项目恒优先）；④ read/write/edit 触达即载子目录指令（符号链接逃逸门禁 + 会话 64KiB 聚合预算 + 并发幂等）。门禁：`wave42_global_config` 20/20、`wave42_skill_body` 6/6、`wave37_tool_surface` 9/9（T1 迁移至 29）、全量 `--lib` 1084 passed/1 failed（既有 config 基线，干净 worktree 复现）、`pony --version` EXIT 0、NFR lint EXIT 0。任务卡：`03_TASKS/PA-149-global-config-loading-wave42.md`；ADR：`docs/decisions/0046-global-config-loading-wave42.md`；契约：`.dev-team/contract-matrix-wave42-global-config.md`。
+
 - `PA-148` 用户级（全局）指令与 Skills 分层加载（P1，Complexity B）
   状态：Review（实现与门禁完成，待 closeout 复核）。
   说明：`WorkspaceHotloader` 现按 `~/.agents` < `~/.claude` < `config_dir()/pony-agent` < `$PONY_AGENT_HOME` （全局层，低→高）+ 工作区（项目层，最高）合并指令与技能；同名技能项目级覆盖全局级，提示词行标注 `[global]`/`[project]`；`ConstitutionCache` 改分层结构，仅单一项目层时保持原始字节。门禁：`cargo test -p pony-agent-core --lib agent::workspace_hotloader` 10 passed / 0 failed；`--test context_cache_red_contract` 4 passed / 0 failed；全量 `--lib` 1084 passed / 1 failed（`agent::config::tests::missing_capabilities_fields_use_stable_defaults` 在 clean HEAD worktree 复现，属基线既有红相，与本卡无因果）。任务卡：`03_TASKS/PA-148-global-instructions-and-skills.md`；ADR：`docs/decisions/0045-global-instructions-and-skills-layering.md`。
