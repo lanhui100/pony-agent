@@ -1,0 +1,34 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_cap_ms": 1000,
+    "backoff_ms": 500
+  },
+  "concurrency_lock": "hotloader_rwlock_write_with_poison_recovery",
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "resource_release": [
+    "wave42_skill_body_single_read_fd_closed_on_return",
+    "wave42_instruction_touch_read_only_no_handle_retained"
+  ],
+  "skill_body": {
+    "read_limit_bytes": 262144,
+    "fail_closed": true,
+    "read_only": true,
+    "allowed_root_whitelist": true
+  },
+  "touch_injection": {
+    "step_limit_bytes": 16384,
+    "order": "shallow_to_deep",
+    "skip_already_injected": true
+  },
+  "instruction_budget": {
+    "max_bytes": 65536,
+    "max_source_bytes": 1048576
+  }
+}

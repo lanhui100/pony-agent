@@ -78,6 +78,24 @@ pub struct HotloadedSkill {
     pub fingerprint: FileFingerprint,
     /// 该 Skill 来自用户级全局根目录还是当前工作区。
     pub scope: AgentScope,
+    /// 注入排序权重（wave-42 契约字段，数值越小越先注入）。
+    pub rank: u16,
+}
+
+/// 指令注入预算上限（wave-42 契约桩）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstructionBudget {
+    pub max_bytes: usize,
+    pub max_source_bytes: usize,
+}
+
+impl Default for InstructionBudget {
+    fn default() -> Self {
+        Self {
+            max_bytes: 65_536,
+            max_source_bytes: 1_048_576,
+        }
+    }
 }
 
 /// 单层指令文档（用户级或项目级宪法文件）
@@ -102,6 +120,8 @@ pub struct SessionBaselineSnapshot {
     pub constitution_content: String,
     pub skills_hash: u64,
     pub skills: Vec<HotloadedSkill>,
+    /// 固化基线时使用的注入预算（wave-42 契约字段）。
+    pub budget: InstructionBudget,
 }
 
 /// 针对会话的增量规则变更记录（DSH 风格的 Append-Only 变动事件）
@@ -330,6 +350,7 @@ impl WorkspaceHotloader {
                                         path: skill_file,
                                         fingerprint,
                                         scope,
+                                        rank: 0,
                                     }
                                 }
                                 None => continue,
@@ -407,6 +428,7 @@ impl WorkspaceHotloader {
                 constitution_content: current_constitution.clone(),
                 skills_hash,
                 skills: current_skills.clone(),
+                budget: InstructionBudget::default(),
             };
             let static_prefix =
                 self.build_cached_prompt_prefix(Some(&current_constitution), &current_skills);
@@ -659,6 +681,42 @@ fn extract_fallback_description(content: &str) -> String {
         return trimmed.chars().take(200).collect();
     }
     "No description provided.".to_string()
+}
+
+impl WorkspaceHotloader {
+    /// 带预算的宪法解析：超出预算时按 `max_source_bytes` 截断并标记（wave-42 契约桩）。
+    #[allow(unused_variables)]
+    pub fn resolve_constitution_with_budget<P: AsRef<Path>>(
+        &self,
+        workspace_root: P,
+        global_homes: &[PathBuf],
+        budget: InstructionBudget,
+    ) -> Option<(String, bool)> {
+        unimplemented!("wave42 stub: resolve_constitution_with_budget")
+    }
+
+    /// 带预算的 Skills 扫描：总注入字节受 `max_bytes` 约束（wave-42 契约桩）。
+    #[allow(unused_variables)]
+    pub fn scan_skills_with_budget<P: AsRef<Path>>(
+        &self,
+        workspace_root: P,
+        global_homes: &[PathBuf],
+        budget: InstructionBudget,
+    ) -> (Vec<HotloadedSkill>, bool) {
+        unimplemented!("wave42 stub: scan_skills_with_budget")
+    }
+}
+
+/// 由 cwd 向上探测 `marker` 定位项目根，`bound` 为不可越过的上界（wave-42 契约桩）。
+#[allow(unused_variables)]
+pub fn find_project_root(cwd: &Path, marker: &str, bound: &Path) -> PathBuf {
+    unimplemented!("wave42 stub: find_project_root")
+}
+
+/// 生成 root→cwd 的祖先目录链（含两端，浅→深）（wave-42 契约桩）。
+#[allow(unused_variables)]
+pub fn ancestor_chain(root: &Path, cwd: &Path) -> Vec<PathBuf> {
+    unimplemented!("wave42 stub: ancestor_chain")
 }
 
 #[cfg(test)]
@@ -915,6 +973,7 @@ mod tests {
                     content_hash: 7,
                 },
                 scope: AgentScope::Global,
+                rank: 0,
             }],
         );
         assert!(prefix.contains("- `audit` [global]: audit things"));
