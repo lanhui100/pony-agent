@@ -83,6 +83,10 @@
 
 ## Review
 
+- `PA-148` 用户级（全局）指令与 Skills 分层加载（P1，Complexity B）
+  状态：Review（实现与门禁完成，待 closeout 复核）。
+  说明：`WorkspaceHotloader` 现按 `~/.agents` < `~/.claude` < `config_dir()/pony-agent` < `$PONY_AGENT_HOME` （全局层，低→高）+ 工作区（项目层，最高）合并指令与技能；同名技能项目级覆盖全局级，提示词行标注 `[global]`/`[project]`；`ConstitutionCache` 改分层结构，仅单一项目层时保持原始字节。门禁：`cargo test -p pony-agent-core --lib agent::workspace_hotloader` 10 passed / 0 failed；`--test context_cache_red_contract` 4 passed / 0 failed；全量 `--lib` 1084 passed / 1 failed（`agent::config::tests::missing_capabilities_fields_use_stable_defaults` 在 clean HEAD worktree 复现，属基线既有红相，与本卡无因果）。任务卡：`03_TASKS/PA-148-global-instructions-and-skills.md`；ADR：`docs/decisions/0045-global-instructions-and-skills-layering.md`。
+
 - `PA-104 ~ PA-111` 核心工具拓展包全套能力（PA-104持久终端PTY、PA-105后台作业、PA-106原子补丁、PA-107语言服务器LSP、PA-108模糊检索与Git差异、PA-109长程自驱目标、PA-110智能体协作编排、PA-111成果物声明）
   状态：Review（实现与全量回归验证全部完成，元复盘已落盘 `02_REVIEWS/2026-10-04-pa104-pa111-meta-audit.md`）。
   说明：已全量通过 8 个 acceptance test suites (30/30 tests passed)、`cargo check --workspace` 及前端 614/614 测试全绿。

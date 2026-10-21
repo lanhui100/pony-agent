@@ -823,12 +823,13 @@ fn provider_semistable_context_note(
         graph_name, retrieved.session_context.conversation_id
     );
 
-    // PA wave-21: 激活 WorkspaceHotloader，动态注入项目宪法规则 (AGENTS.md / CLAUDE.md)
+    // PA-148: 激活 WorkspaceHotloader，动态注入用户级（全局）+ 项目级指令规则
+    // （AGENTS.md / CLAUDE.md，全局层在前、项目层在后）
     let hotloader = crate::agent::workspace_hotloader::WorkspaceHotloader::new();
     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     if let Some((constitution, _)) = hotloader.resolve_constitution(&current_dir) {
         if !constitution.trim().is_empty() {
-            note.push_str("\n\n=== Project Instructions (AGENTS.md) ===\n");
+            note.push_str("\n\n=== Workspace & User Instructions (AGENTS.md / CLAUDE.md) ===\n");
             note.push_str(&constitution);
         }
     }

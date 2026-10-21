@@ -67,6 +67,7 @@
 - [0037 废除 PONYSENTRY_ENABLED：开关恒开，门禁由凭证承担](0037-remove-ponysentry-enabled-switch.md)
 - [0040 TUI /models 远程模型发现与回环地址代理旁路](0040-tui-model-discovery-and-loopback-proxy-bypass.md)
 - [0038 TUI 设计系统：单色为骨、单一骨色强调、发丝线与 2 列沟槽](0038-tui-design-system-monochrome-restraint.md)
+- [0045 用户级（全局）指令与 Skills 分层加载](0045-global-instructions-and-skills-layering.md)
 
 ### 已接替
 
