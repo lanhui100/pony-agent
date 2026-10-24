@@ -192,9 +192,34 @@ impl AgentRuntime {
                 self.execute_registered_tool_call_with_context(&current_tool_call, &execution_context);
             hook_trace_records.extend(capability_hook_trace_records);
             all_tools_ok &= tool_result.status == "ok";
+            // Wave43 task-8 挂载切片：实时路径「工具执行结束 → 产生 TurnToolActivity」单点。
+            // 一层工具执行 = 一个 tool.call span：只对顶层活动（parent_activity_id 为 None）记录，
+            // 子调用活动从属顶层活动，避免 span 基数爆炸。
+            let otel_activity_batch = self
+                .telemetry_builder
+                .tool_activities_after_result(&current_tool_call, &tool_result);
+            if let Some(otel_top_activity) = otel_activity_batch
+                .iter()
+                .find(|activity| activity.parent_activity_id.is_none())
+            {
+                crate::agent::otel::record_tool_call_span(&crate::agent::otel::ToolSpanInput {
+                    tool_name: otel_top_activity
+                        .canonical_tool_name
+                        .clone()
+                        .unwrap_or_else(|| otel_top_activity.name.clone()),
+                    status: if otel_top_activity.status == "done" {
+                        "success".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
+                    duration_ms: otel_top_activity
+                        .duration_seconds
+                        .map(|seconds| (seconds * 1000.0).round() as u64),
+                    error: turn_tool_activity_error_text(otel_top_activity),
+                });
+            }
             tool_activities.extend(annotate_capability_tool_activities(
-                self.telemetry_builder
-                    .tool_activities_after_result(&current_tool_call, &tool_result),
+                otel_activity_batch,
                 invocation_record,
             ));
             let return_trace_steps = self.telemetry_builder.trace_return_active(all_tools_ok);
@@ -1261,6 +1286,14 @@ impl AgentRuntime {
         input: TurnInput,
         facts: RunTurnFacts,
     ) {
+        // Wave43 task-8 挂载切片：turn root span（agent.turn）在流式轮唯一顶层入口创建，
+        // 函数返回时 Drop 自动结束 span，覆盖整轮生命周期（含同步执行的工具子轮）。
+        // TurnInput 无 turn 序号，按契约回退 sequence = 0。
+        let mut otel_turn_scope = crate::agent::otel::begin_turn_trace(
+            input.session_id.as_deref().unwrap_or(""),
+            &turn_id,
+            0,
+        );
         // Bind the streamed turn's session/run/turn to the governed executor so an Ask control
         // request persists against the real invocation (design.md Decision 5, P1-1 wiring).
         self.apply_governed_turn_context(&input, &facts);
@@ -1282,6 +1315,7 @@ impl AgentRuntime {
                     error,
                     input.session_id.clone(),
                 );
+                otel_turn_scope.set_phase("failed");
                 return;
             }
         };
@@ -1359,6 +1393,7 @@ impl AgentRuntime {
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(prepared.build_context_observation.clone()),
             );
+            otel_turn_scope.set_phase("cancelled");
             return;
         }
 
@@ -1433,6 +1468,7 @@ impl AgentRuntime {
                 error,
                 input.session_id.clone(),
             );
+            otel_turn_scope.set_phase("failed");
             return;
         }
         if let Some(error) = preflight_dispatch.blocked_error.take() {
@@ -1490,6 +1526,7 @@ impl AgentRuntime {
                 error,
                 input.session_id.clone(),
             );
+            otel_turn_scope.set_phase("failed");
             return;
         }
         let preflight_decision = preflight_dispatch.decision;
@@ -1826,6 +1863,7 @@ impl AgentRuntime {
                             hook_error,
                         );
                     }
+                    otel_turn_scope.set_phase("failed");
                     return;
                 }
                 let trace_steps = self.telemetry_builder.failed_trace_before_tool();
@@ -1879,6 +1917,7 @@ impl AgentRuntime {
                     error,
                     input.session_id.clone(),
                 );
+                otel_turn_scope.set_phase("failed");
                 return;
             }
         };
@@ -1943,6 +1982,7 @@ impl AgentRuntime {
                         error,
                         input.session_id.clone(),
                     );
+                    otel_turn_scope.set_phase("failed");
                     return;
                 }
             };
@@ -2033,6 +2073,7 @@ impl AgentRuntime {
                 error,
                 input.session_id.clone(),
             );
+            otel_turn_scope.set_phase("failed");
             return;
         }
         if let Some(error) = tool_selection_dispatch.blocked_error.take() {
@@ -2094,6 +2135,7 @@ impl AgentRuntime {
                 error,
                 input.session_id.clone(),
             );
+            otel_turn_scope.set_phase("failed");
             return;
         }
         let resolved_tool_call = tool_selection_dispatch.selected_tool_call;
@@ -2188,6 +2230,7 @@ impl AgentRuntime {
                 error,
                 input.session_id.clone(),
             );
+            otel_turn_scope.set_phase("failed");
             return;
         }
 
@@ -2206,6 +2249,7 @@ impl AgentRuntime {
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
             );
+            otel_turn_scope.set_phase("cancelled");
             return;
         }
 
@@ -2228,6 +2272,18 @@ impl AgentRuntime {
                 &turn_started_at,
                 &mut provider_call_records,
             );
+            // 工具子轮的成功/失败/取消都在 handle_stream_tool_turn 内部发射终态，外层拿不到
+            // 返回值；这里按终态 checkpoint.status 回读相位（不改 helper 签名）。
+            let otel_delegated_status = control
+                .load_checkpoint(Some(turn_id.as_str()), input.session_id.as_deref())
+                .map(|checkpoint| checkpoint.status)
+                .unwrap_or_default();
+            otel_turn_scope.set_phase(match otel_delegated_status.as_str() {
+                "completed" => "completed",
+                "cancelled" | "aborted" => "cancelled",
+                "failed" | "error" => "failed",
+                _ => "",
+            });
             return;
         }
 
@@ -2289,6 +2345,7 @@ impl AgentRuntime {
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
             );
+            otel_turn_scope.set_phase("cancelled");
             return;
         }
 
@@ -2381,6 +2438,7 @@ impl AgentRuntime {
                     error,
                     input.session_id.clone(),
                 );
+                otel_turn_scope.set_phase("failed");
                 return;
             }
         };
@@ -2524,6 +2582,7 @@ impl AgentRuntime {
                 0,
                 error,
             );
+            otel_turn_scope.set_phase("failed");
             return;
         }
         let finalize_hook_outcome =
@@ -2550,6 +2609,7 @@ impl AgentRuntime {
                 0,
                 error,
             );
+            otel_turn_scope.set_phase("failed");
             return;
         }
         self.update_execution_checkpoint(
@@ -2646,5 +2706,6 @@ impl AgentRuntime {
             Some(persisted.session_summary),
             input.session_id.clone(),
         );
+        otel_turn_scope.set_phase("completed");
     }
 }

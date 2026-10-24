@@ -974,6 +974,8 @@ pub fn emit_event(
     ) {
         clear_turn_event_sequence(&terminal_turn_id);
     }
+    // D6 迁移：PonySentry 自动 trace 上报已下线；agent trace 由 OTel span 承担
+    // （门禁关闭时零 span 分配、零 egress，见 `agent::otel`）。
     // PA-095：返回本次发射的信封（调用方可复用为 TurnResult 终态信封，
     // 避免二次分配序列号造成事件流与结果信封错位）。
     TurnEventEnvelope {
@@ -2253,7 +2255,19 @@ pub fn provider_decision<P: ProviderClient>(
     request: &ProviderRequest,
     tools: &[ToolDefinition],
 ) -> Result<ProviderDecision, String> {
-    provider.decide_with_tools(request, tools)
+    // Wave43：llm.chat 子 span（父 = 当前活动 turn）；token 用量取响应侧。
+    let mut llm_span = crate::agent::otel::start_llm_span(
+        provider.name(),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let result = provider.decide_with_tools(request, tools);
+    if let Ok(decision) = result.as_ref() {
+        if let Some(usage) = decision.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+        }
+    }
+    result
 }
 
 pub fn provider_decision_stream<P, F>(
@@ -2266,7 +2280,19 @@ where
     P: ProviderClient,
     F: FnMut(ProviderStreamChunk),
 {
-    provider.decide_with_tools_stream(request, tools, on_delta)
+    // Wave43：llm.chat 子 span（流式决策）。
+    let mut llm_span = crate::agent::otel::start_llm_span(
+        provider.name(),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let result = provider.decide_with_tools_stream(request, tools, on_delta);
+    if let Ok(decision) = result.as_ref() {
+        if let Some(usage) = decision.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+        }
+    }
+    result
 }
 
 pub fn provider_followup<P: ProviderClient>(
@@ -2278,14 +2304,26 @@ pub fn provider_followup<P: ProviderClient>(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Result<crate::agent::provider::ProviderResponse, String> {
-    provider.continue_with_tool_result(
+    // Wave43：llm.chat 子 span（工具结果后续轮）。
+    let mut llm_span = crate::agent::otel::start_llm_span(
+        provider.name(),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let result = provider.continue_with_tool_result(
         request,
         tools,
         accumulated_messages,
         assistant_message,
         tool_call,
         tool_result,
-    )
+    );
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+        }
+    }
+    result
 }
 
 pub fn provider_followup_stream<P, F>(
@@ -2302,7 +2340,13 @@ where
     P: ProviderClient,
     F: FnMut(ProviderStreamChunk),
 {
-    provider.continue_with_tool_result_stream(
+    // Wave43：llm.chat 子 span（流式工具结果后续轮）。
+    let mut llm_span = crate::agent::otel::start_llm_span(
+        provider.name(),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let result = provider.continue_with_tool_result_stream(
         request,
         tools,
         accumulated_messages,
@@ -2310,5 +2354,11 @@ where
         tool_call,
         tool_result,
         on_delta,
-    )
+    );
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+        }
+    }
+    result
 }

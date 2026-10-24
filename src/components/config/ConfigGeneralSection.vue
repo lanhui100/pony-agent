@@ -131,6 +131,23 @@ function openExa() {
   // PA-101 F1：统一走 openExternalUrl（含 catch 语义；白名单拒绝禁回退仅告警）。
   void openExternalUrl("https://exa.ai/");
 }
+
+// ── Wave43 D7：诊断与遥测（全局 Agent Trace 上报开关） ────────────────
+// 持久化复用既有 save_app_settings 通道（不新增 Tauri 命令）；core 侧 gate 由 Rust 落地。
+const traceReportingError = ref<string | null>(null);
+
+async function toggleAgentTraceReporting(enabled: boolean) {
+  if (settings.value.agentTraceReporting === enabled) return;
+
+  traceReportingError.value = null;
+  await settingsStore.setAgentTraceReporting(enabled);
+
+  // store 在落盘失败时已回滚末态，这里补一条就近的可读反馈。
+  if (settingsStore.error) {
+    traceReportingError.value = "开关保存失败，已恢复原状态，请重试。";
+  }
+}
+// ────────────────────────────────────────────────────────────────────
 </script>
 
 <template>
@@ -355,6 +372,50 @@ function openExa() {
             >
               上次检查：{{ lastCheckedLabel }}
             </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Wave43 D7：诊断与遥测卡片（全局 Agent Trace 上报 + 隐私告示，默认关闭）。 -->
+      <div class="space-y-2" data-testid="config-diagnostics-section">
+        <div class="text-[12px] font-medium text-stone-500">诊断与遥测</div>
+        <div class="max-w-[680px] space-y-2.5 rounded-[0.5rem] border border-stone-200 bg-white px-3 py-3">
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-stone-900">
+              全局 Agent Trace 上报
+              <Shield class="h-3.5 w-3.5 shrink-0 text-stone-500" />
+            </div>
+            <Switch
+              :model-value="settings.agentTraceReporting"
+              :disabled="saving"
+              aria-label="全局 Agent Trace 上报"
+              data-testid="config-agent-trace-reporting-switch"
+              @update:model-value="toggleAgentTraceReporting($event)"
+            />
+          </div>
+
+          <div
+            class="space-y-1 text-[12px] leading-5 text-stone-500"
+            data-testid="config-agent-trace-privacy-notice"
+          >
+            <p>
+              默认关闭。开启后，本机每个 Agent 回合的运行链路会被收集并上传至
+              <span class="font-medium text-stone-700"> Langfuse </span>
+              诊断平台，内容包括模型调用与工具调用的名称、耗时与 token 用量；
+              密钥、鉴权头等敏感字段在本地脱敏后再上报，不会以明文离开本机。
+            </p>
+            <p>
+              仅用于定位模型/工具链路问题。可随时关闭，关闭后不再产生任何上报。
+            </p>
+          </div>
+
+          <div
+            v-if="traceReportingError"
+            class="flex items-center gap-1.5 text-[12px] text-rose-600"
+            data-testid="config-agent-trace-save-error"
+          >
+            <TriangleAlert class="h-3.5 w-3.5 shrink-0" />
+            {{ traceReportingError }}
           </div>
         </div>
       </div>

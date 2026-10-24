@@ -1,0 +1,90 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel",
+    "crates/pony-agent-core/src/agent/ponysentry",
+    "crates/pony-agent-core/src/agent/runtime",
+    "src-tauri/src",
+    "src",
+    ".env.example",
+    "docs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/control_plane",
+    "crates/pony-agent-core/tests",
+    "tests",
+    ".dev-team/evidence/wave43",
+    ".dev-team/evidence/wave15/wire-red.json"
+  ],
+  "findings": [
+    {
+      "file": "src-tauri/src/lib.rs",
+      "line": 1239,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "git diff -U0 src-tauri/src/lib.rs | grep -n '^+.*eprintln'  # 新增纯文本 eprintln 绕过 log_json JSON 面，扩大 pa119 豁免面",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 909,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "grep -n 'static ACTIVE_TURNS' -A3 crates/pony-agent-core/src/agent/otel/mod.rs; grep -n 'fn active_turn_context' -A7 crates/pony-agent-core/src/agent/otel/mod.rs; grep -n 'spawn_turn_stream' src-tauri/src/lib.rs  # 全局可变栈取栈顶做父 span ⇒ 并发 turn 交叉挂错 trace",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1104,
+      "rule": "LEAK",
+      "counterexample_cmd": "sed -n '1099,1121p' crates/pony-agent-core/src/agent/otel/mod.rs  # 每次 force_flush 新建线程且从不 join，超时后线程持 Arc<OtelState> 存活",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 282,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '281,298p;843,845p' crates/pony-agent-core/src/agent/otel/mod.rs  # take_state 只在取 state 时持锁，shutdown 主体在锁外 ⇒ init 可在关闭窗口内建第二个 provider",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1118,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'log_json(' -A5 crates/pony-agent-core/src/agent/otel/mod.rs  # 三个调用点（289/364/1118）trace_id 实参全为 None ⇒ 每行日志 trace_id 恒为 null，与 ADR 0047 §10 承诺的 trace_id 关联不符",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 256,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -rnE \"BatchConfig|with_batch_config|max_queue_size\" crates/pony-agent-core/src/agent/otel/ | wc -l  # 0 命中：batch_queue_bounded / scheduled_delay=5000 全靠 SDK 默认值，无显式配置也无断言",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/log.rs",
+      "line": 30,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'stdout' crates/pony-agent-core/src/agent/otel/log.rs; grep -n 'stderr 不可捕获' crates/pony-agent-core/tests/otel_trace_adversarial.rs  # 输出流由 stderr 静默改 stdout，测试注释与契约证据仍写 stderr",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/evidence/wave15/wire-red.json",
+      "line": 1,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "git diff .dev-team/evidence/wave15/wire-red.json | grep -c '^[-+].*emittedAtMs'  # wave15 收据被本波未提交 diff 重写（仅时间戳），与 wave43 无因果关系",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/decisions/0024-ponysentry-agent-trace-ingest.md",
+      "line": 1,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n '1,3p' docs/decisions/0024-ponysentry-agent-trace-ingest.md; grep -n '0024' docs/decisions/README.md  # 主体已被 D6 整体删除，仍标 Status: implemented 且未路由到「已接替」",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/evidence/wave43/deleted-tests-coverage-map.md",
+      "line": 27,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n '27p' .dev-team/evidence/wave43/deleted-tests-coverage-map.md; grep -n 'begin_turn_trace' crates/pony-agent-core/src/agent/runtime/turn_sync.rs crates/pony-agent-core/src/agent/runtime/turn_stream.rs  # 收据称 TurnScope 未落地，实际已落地（460/1292）",
+      "severity": "ADVISORY"
+    }
+  ]
+}

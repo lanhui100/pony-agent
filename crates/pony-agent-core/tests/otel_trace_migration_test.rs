@@ -14,7 +14,8 @@
 //! 5. OT-6 手动导出旁路（A4）：签名冻结、`Ok(2)` 数量契约、**不改变 gate 末态**、
 //!    真实落到本地 sink 的 `POST /v1/traces` + wire 级 body 断言。
 //! 6. OT-7 退役守卫：13 个待退役符号 0 命中 + 8 个保留面符号仍存在（双向，防过度删除）。
-//! 7. OT-8 设置持久化：缺省 false / camelCase 键往返 / legacy 无键容错（本地临时文件）。
+//! 7. OT-8 设置持久化：缺省 false / camelCase 键往返 / legacy 无键容错（本地临时文件），
+//!    以及 Tauri 宿主桥接的 P4 静态断言（8d 设置读写双路径同步 core 门禁、8e 退出路径释放 provider）。
 //!
 //! 断言纪律：属性键一律用**字面量**断言（避免「常量被改后自指自证」），另设一条常量字面量冻结
 //! 测试；禁止 `#[ignore]`、禁止无断言、禁止 `unwrap()` 吞错。
@@ -694,14 +695,16 @@ fn ot7_retired_ponysentry_trace_symbols_have_zero_hits() {
     let source = crate_source("src/agent/ponysentry/mod.rs");
 
     // 防假绿：证据源必须是真实、非空且含保留面锚点的文件（否则 0 命中毫无意义）。
+    // D6 退役后本文件从 ~18KB 合法收缩到 ~2.2KB（13 个符号整段删除），原 4096 字节阈值
+    // 已与新契约矛盾；改为「体积下限 + 两个保留面锚点」双证据，仍能击穿空文件/错路径。
     assert!(
-        source.len() > 4_096,
+        source.len() > 1_000,
         "证据源疑似空文件或路径失效（len={}），OT-7 的 0 命中断言不可信",
         source.len()
     );
     assert!(
-        source.contains("pub fn capture_error"),
-        "证据源缺少保留面锚点 `pub fn capture_error`，OT-7 的 0 命中断言不可信"
+        source.contains("pub fn capture_error") && source.contains("pub fn capture_panic"),
+        "证据源缺少保留面锚点（capture_error / capture_panic），OT-7 的 0 命中断言不可信"
     );
 
     let mut hits: Vec<String> = Vec::new();
@@ -740,6 +743,172 @@ fn ot7_issue_reporting_keep_surface_still_exists() {
     assert!(
         missing_call_sites.is_empty(),
         "D6/A7 宿主 issue 上报调用点被过度删除：{missing_call_sites:#?}"
+    );
+}
+
+// ---------------------------------------- OT-7 扩扫：全仓机械守卫（Lead 裁决 2026-10-24）
+//
+// 为什么需要扩扫：残留引用会以编译错误暴露，但字符串/注释/文档级残留不会——只能机械扫描。
+// 扫描面：`crates/**`、`src-tauri/src/**`、`src/**`、`tests/**`（仅 .rs/.ts/.tsx/.js/.vue）。
+// 排除：`docs/`、`.dev-team/`、`openspec/changes/archive/`（历史归档不追改）、`target*`、
+//       `node_modules`、`.git`、`dist`，以及**本守卫文件自身**（符号清单以字面量存放于此，属自指）。
+//
+// [task-4 DONE 2026-10-24] §5 清单中的 3 个存量测试已按契约处置（删除 2 个 + 重写 1 个），
+// 因此本守卫已是**全仓 0 命中强断言**，不再有「已知待清理」豁免表：任何残留一律判失败。
+
+const RETIRED_SCAN_ROOTS: [&str; 4] = ["crates", "src-tauri/src", "src", "tests"];
+const RETIRED_SCAN_EXTENSIONS: [&str; 5] = ["rs", "ts", "tsx", "js", "vue"];
+
+/// 目录名命中即整棵跳过（`target*` 前缀另行判断，覆盖 `target-test-exact-a` 等隔离构建目录）。
+const RETIRED_SCAN_SKIP_DIRS: [&str; 7] = [
+    "node_modules",
+    ".git",
+    "dist",
+    "docs",
+    ".dev-team",
+    "archive",
+    "openspec",
+];
+
+/// 自指处理：本文件以字面量保存 `RETIRED_TRACE_SYMBOLS`，故**只掩码该常量的定义块**，
+/// 文件其余部分照常扫描——禁止整文件排除，否则会漏掉守卫自身其他位置的残留。
+const GUARD_FILE_RELATIVE_PATH: &str = "crates/pony-agent-core/tests/otel_trace_migration_test.rs";
+
+/// 符号清单常量定义块的起始标记；改名即触发守卫完整性失败，避免掩码静默失效。
+const RETIRED_SYMBOL_LIST_MARKER: &str = "const RETIRED_TRACE_SYMBOLS";
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+}
+
+fn collect_scannable_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("OT-7 扩扫目录必须可读（{}）：{err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("OT-7 扩扫目录项必须可读：{err}"));
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if name.starts_with("target") || RETIRED_SCAN_SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            collect_scannable_files(&path, files);
+            continue;
+        }
+        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        if RETIRED_SCAN_EXTENSIONS.contains(&extension) {
+            files.push(path);
+        }
+    }
+}
+
+fn repo_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// 把 `source[start..end]` 挖成空格（逐字节等长，保留换行 ⇒ 行号不漂移）。
+fn mask_span(source: &str, start: usize, end: usize) -> String {
+    let mut masked = String::with_capacity(source.len());
+    masked.push_str(&source[..start]);
+    for character in source[start..end].chars() {
+        if character == '\n' {
+            masked.push('\n');
+        } else {
+            for _ in 0..character.len_utf8() {
+                masked.push(' ');
+            }
+        }
+    }
+    masked.push_str(&source[end..]);
+    masked
+}
+
+/// 只掩码 `RETIRED_TRACE_SYMBOLS` 常量定义块，返回（掩码后源码，被掩码块本身）。
+fn mask_retired_symbol_list(source: &str) -> (String, String) {
+    let marker = source.find(RETIRED_SYMBOL_LIST_MARKER).unwrap_or_else(|| {
+        panic!("守卫完整性：未找到 `{RETIRED_SYMBOL_LIST_MARKER}` 定义块，自指掩码会失效")
+    });
+    let start = source[..marker]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let end = source[marker..]
+        .find("];")
+        .map(|index| marker + index + 2)
+        .unwrap_or_else(|| panic!("守卫完整性：`RETIRED_TRACE_SYMBOLS` 定义块未闭合（缺 `];`）"));
+    (mask_span(source, start, end), source[start..end].to_string())
+}
+
+#[test]
+fn ot7_retired_symbols_have_zero_hits_repo_wide() {
+    let root = repo_root();
+
+    // 防假绿：四个扫描根必须真实存在，且扫描面不能塌缩。
+    for scan_root in RETIRED_SCAN_ROOTS {
+        assert!(
+            root.join(scan_root).exists(),
+            "OT-7 扩扫根不存在：`{scan_root}`（全仓守卫不可信）"
+        );
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for scan_root in RETIRED_SCAN_ROOTS {
+        collect_scannable_files(&root.join(scan_root), &mut files);
+    }
+    assert!(
+        files.len() > 150,
+        "OT-7 扩扫面过小（{} 个源文件），全仓守卫不可信",
+        files.len()
+    );
+
+    let mut violations: Vec<String> = Vec::new();
+    let mut guard_file_scanned = false;
+
+    for file in &files {
+        let relative = repo_relative(&root, file);
+        let mut source = std::fs::read_to_string(file)
+            .unwrap_or_else(|err| panic!("OT-7 扩扫面文件必须可读（{relative}）：{err}"));
+
+        if relative == GUARD_FILE_RELATIVE_PATH {
+            // 自指掩码只覆盖符号清单定义块；文件其余内容仍在扫描面内。
+            let (masked, block) = mask_retired_symbol_list(&source);
+            for symbol in RETIRED_TRACE_SYMBOLS {
+                assert!(
+                    block.contains(symbol),
+                    "守卫完整性：符号 `{symbol}` 不在 RETIRED_TRACE_SYMBOLS 定义块内，掩码会漏扫"
+                );
+            }
+            assert_eq!(
+                masked.len(),
+                source.len(),
+                "自指掩码必须逐字节等长（行号与证据不可漂移）"
+            );
+            source = masked;
+            guard_file_scanned = true;
+        }
+
+        for symbol in RETIRED_TRACE_SYMBOLS {
+            if let Some(index) = source.find(symbol) {
+                let line = source[..index].matches('\n').count() + 1;
+                violations.push(format!("{symbol} @ {relative}:{line}"));
+            }
+        }
+    }
+
+    assert!(
+        guard_file_scanned,
+        "守卫文件必须处于扫描面内（只掩码符号清单常量块，禁止整文件排除）"
+    );
+
+    assert!(
+        violations.is_empty(),
+        "OT-7 全仓守卫：D6 退役符号必须 0 命中，实际残留 {} 条：{violations:#?}",
+        violations.len()
     );
 }
 
@@ -835,4 +1004,174 @@ fn ot8_legacy_settings_without_trace_flag_reads_false() {
         "OT-8c：legacy settings.json 无该键时必须回落 false（serde default 容错）"
     );
     cleanup_dir(&dir);
+}
+
+// ------------------------------------------- OT-8d/8e 宿主桥接（P4 静态断言）
+
+const TAURI_SRC_RELATIVE: &str = "src-tauri/src";
+const CORE_AGENT_SRC_RELATIVE: &str = "crates/pony-agent-core/src/agent";
+
+fn read_repo_source(relative: &str) -> String {
+    let path = repo_root().join(relative);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("OT-8 静态断言目标源码必须可读（{relative}）：{err}"))
+}
+
+fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("OT-8 静态断言目录必须可读（{}）：{err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("OT-8 静态断言目录项必须可读：{err}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_files(&path, files);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+}
+
+/// 从函数签名处按花括号配对截取函数体（含签名）。花括号不闭合直接失败，禁止静默截断。
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("OT-8 静态断言：未找到 `{signature}`"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("OT-8 静态断言：`{signature}` 缺少函数体左花括号"));
+    let mut depth = 0usize;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return &source[open..open + offset + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("OT-8 静态断言：`{signature}` 的花括号未闭合，断言不可信");
+}
+
+/// 在 `crates/pony-agent-core/src/agent/**` 内定位 core 公共 API 定义（模块位置不冻结）。
+fn find_core_gate_api() -> (String, String) {
+    let root = repo_root();
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_rust_files(&root.join(CORE_AGENT_SRC_RELATIVE), &mut files);
+    assert!(
+        files.len() > 20,
+        "OT-8d 核心源码扫描面过小（{} 个 .rs），静态断言不可信",
+        files.len()
+    );
+
+    let signature = "pub fn set_agent_trace_reporting(";
+    for file in files {
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|err| panic!("OT-8d 扫描面文件必须可读（{}）：{err}", file.display()));
+        if source.contains(signature) {
+            return (repo_relative(&root, &file), source);
+        }
+    }
+    panic!("OT-8d：core 公共 API `set_agent_trace_reporting(bool)` 未定义（D7 契约缺失）")
+}
+
+#[test]
+fn ot8_settings_bridge_syncs_core_gate_on_load_and_save() {
+    // 1) core 公共 API 存在，且真正桥接到 OTel 门禁（不是空实现）。
+    let (api_file, api_source) = find_core_gate_api();
+    let api_body = function_body(&api_source, "pub fn set_agent_trace_reporting(");
+    assert!(
+        api_body.contains("set_reporting_enabled("),
+        "OT-8d：`{api_file}` 的 set_agent_trace_reporting 必须桥接到 otel 门禁，实际函数体：{api_body}"
+    );
+
+    // 2) 启动加载路径必须把持久化值同步给 core 门禁。
+    let lib = read_repo_source("src-tauri/src/lib.rs");
+    let load_body = function_body(&lib, "fn load_app_settings");
+    assert!(
+        load_body.contains("set_agent_trace_reporting("),
+        "OT-8d：load_app_settings 必须调用 set_agent_trace_reporting（启动即按持久化值生效），实际函数体：{load_body}"
+    );
+    assert!(
+        load_body.contains("agent_trace_reporting"),
+        "OT-8d：load_app_settings 必须传入读回的持久化字段，不得硬编码常量，实际函数体：{load_body}"
+    );
+
+    // 3) 保存路径同样必须同步（否则开关开启后需重启才生效）。
+    let save_body = function_body(&lib, "fn save_app_settings");
+    assert!(
+        save_body.contains("set_agent_trace_reporting("),
+        "OT-8d：save_app_settings 必须调用 set_agent_trace_reporting（保存即生效），实际函数体：{save_body}"
+    );
+    assert!(
+        save_body.contains("agent_trace_reporting"),
+        "OT-8d：save_app_settings 必须传入落盘后的持久化字段，不得硬编码常量，实际函数体：{save_body}"
+    );
+}
+
+#[test]
+fn ot8_exit_path_releases_otel_provider() {
+    let root = repo_root();
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_rust_files(&root.join(TAURI_SRC_RELATIVE), &mut files);
+    assert!(
+        files.len() >= 5,
+        "OT-8e 宿主源码扫描面过小（{} 个 .rs），静态断言不可信",
+        files.len()
+    );
+    for anchor in ["lib.rs", "main.rs"] {
+        assert!(
+            files.iter().any(|file| file.file_name().and_then(|name| name.to_str()) == Some(anchor)),
+            "OT-8e 扫描面必须包含宿主锚点文件 `{anchor}`（否则退出路径断言不可信）"
+        );
+    }
+
+    let mut init_sites: Vec<String> = Vec::new();
+    let mut shutdown_sites: Vec<String> = Vec::new();
+
+    for file in files {
+        let relative = repo_relative(&root, &file);
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|err| panic!("OT-8e 扫描面文件必须可读（{relative}）：{err}"));
+
+        if source.contains("otel::init(") {
+            init_sites.push(relative.clone());
+        }
+
+        // 退出路径：`RunEvent::Exit` 或 `RunEvent::ExitRequested` 分支内必须出现 shutdown。
+        let exit_at = source
+            .find("RunEvent::Exit")
+            .map(|index| (index, "RunEvent::Exit"));
+        let Some((exit_index, exit_marker)) = exit_at else {
+            continue;
+        };
+        let search_from = exit_index + exit_marker.len();
+        let shutdown_at = source[search_from..]
+            .find("otel::shutdown()")
+            .map(|offset| search_from + offset);
+        let Some(shutdown_index) = shutdown_at else {
+            continue;
+        };
+
+        let between = &source[search_from..shutdown_index];
+        assert!(
+            !between.contains("RunEvent::") && !between.contains("ExitRequested =>"),
+            "OT-8e：`{relative}` 的 otel::shutdown() 必须落在同一个 Exit 分支内，不得跨分支放置"
+        );
+        shutdown_sites.push(relative);
+    }
+
+    assert!(
+        !init_sites.is_empty(),
+        "OT-8e：src-tauri/src 必须存在 otel::init( 启动装配点（provider 生命周期起点）"
+    );
+    assert!(
+        !shutdown_sites.is_empty(),
+        "OT-8e：src-tauri/src 必须在 RunEvent::Exit / ExitRequested 分支内调用 otel::shutdown()（NFR resource_release）"
+    );
 }

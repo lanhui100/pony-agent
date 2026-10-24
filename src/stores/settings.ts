@@ -2,8 +2,13 @@ import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 import type { AppSettings, WorkspaceMode } from "@/types/settings";
 
+/**
+ * Wave43 D7：`agentTraceReporting` 缺省 `false`——诊断上报默认关闭（隐私 fail-closed），
+ * 必须由用户在配置页显式开启后才产生任何 span 出口。
+ */
 const DEFAULT_SETTINGS: AppSettings = {
   workspaceMode: "coding",
+  agentTraceReporting: false,
 };
 
 type SettingsState = {
@@ -76,12 +81,33 @@ export const useSettingsStore = defineStore("settings", {
       this.settings.workspaceMode = mode;
       await this.saveSettings();
     },
+    async setAgentTraceReporting(enabled: boolean) {
+      if (this.settings.agentTraceReporting === enabled) {
+        return;
+      }
+
+      const previous = this.settings.agentTraceReporting;
+      this.settings.agentTraceReporting = enabled;
+      await this.saveSettings();
+
+      if (this.error) {
+        // 落盘失败即回滚：避免开关显示「已开启」而实际未持久化（隐私 fail-closed）。
+        this.settings.agentTraceReporting = previous;
+      }
+    },
   },
 });
 
 function normalizeAppSettings(settings?: Partial<AppSettings> | null): AppSettings {
+  // wave43-B7：透传未知字段以防设置回写丢字段。`load_app_settings` 返回的 Rust
+  // `AppSettings` 含前端未建模的键（如 `toolRules`）；若只重建已知字段，
+  // 任何一次 `save_app_settings` 都会把它们覆盖成缺省值（静默数据丢失）。
+  // 故以原始对象为基线，仅覆盖需要规范化的已知字段。
   return {
+    ...(settings ?? {}),
     workspaceMode:
       settings?.workspaceMode === "work" ? "work" : "coding",
-  };
+    // 老 settings.json 无该键（legacy）时回落 false；仅显式 true 才开启上报。
+    agentTraceReporting: settings?.agentTraceReporting === true,
+  } as AppSettings;
 }

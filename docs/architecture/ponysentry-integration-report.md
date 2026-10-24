@@ -1,8 +1,12 @@
 # PonySentry 错误采集与全链路遥测接入架构报告
 
 > 制定者: Protocol Agent (L2-P)  
-> 状态: 契约已冻结 (Phase 1 交付物)  
-> 对应任务: dev-team task-1
+> 状态: **部分被取代（2026-10-24）** —— 本文的 **Trace 上报** 部分（`AgentTracePayload` /
+> `POST /api/v1/traces` / `maybe_report_turn_trace` / 观测页手动上传至 PonySentry）已随服务端 Trace
+> 能力下线而废止，改走 OpenTelemetry → Langfuse 语义轨，见
+> [ADR 0047](../decisions/0047-agent-trace-otel-langfuse-migration.md)。本文的 **issue / 错误与 panic 采集**
+> 部分仍然有效（`POST /api/v1/ingest` 契约、零信任脱敏管道、容量 1024 有界队列均未变）。
+> 对应任务: dev-team task-1（原）｜wave-43（Trace 迁移）
 
 ---
 

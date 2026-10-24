@@ -69,8 +69,11 @@
 - [0038 TUI 设计系统：单色为骨、单一骨色强调、发丝线与 2 列沟槽](0038-tui-design-system-monochrome-restraint.md)
 - [0045 用户级（全局）指令与 Skills 分层加载](0045-global-instructions-and-skills-layering.md)
 - [0046 全局配置加载四项能力：技能正文按需加载 / 指令预算 / 层级发现 / 触达即载](0046-global-config-loading-wave42.md)
+- [0047 Agent Trace 迁移至 OpenTelemetry → Langfuse（PonySentry Trace 下线 + 全局上报开关）](0047-agent-trace-otel-langfuse-migration.md)
 
 ### 已接替
+
+- [0024 PonySentry Agent Trace 上报契约与生命周期状态机](0024-ponysentry-agent-trace-ingest.md) —— 被 [0047](0047-agent-trace-otel-langfuse-migration.md) 接替（服务端 Trace 能力下线，改走 OTel → Langfuse）
 
 - [0004 前端工作台先采用原生 TypeScript + Vite 壳层](superseded/0004-frontend-shell-workbench-direction.md) —— 被 [0003](0003-frontend-stack-vue-pinia-no-router.md) 接替
 - [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](superseded/0009-workbench-ia-telemetry-page-and-config-tabs.md) —— 被 [0013](0013-workbench-nav-observation-entry-and-provider-hierarchy.md) 部分接替（入口决定修订，其余承接重述）

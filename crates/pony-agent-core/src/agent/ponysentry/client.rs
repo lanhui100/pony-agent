@@ -1,5 +1,5 @@
 use super::config::PonySentryConfig;
-use super::models::{AgentTracePayload, Breadcrumb, Exception, Frame, IngestPayload};
+use super::models::{Breadcrumb, Exception, Frame, IngestPayload};
 use super::sanitizer::{sanitize, sanitize_json};
 use std::collections::{HashMap, VecDeque};
 use std::panic::PanicHookInfo;
@@ -15,7 +15,6 @@ const REQUEST_TIMEOUT_SECS: u64 = 3;
 #[derive(Debug)]
 enum SentryEvent {
     Ingest(IngestPayload),
-    Trace(AgentTracePayload),
 }
 
 #[derive(Clone)]
@@ -200,131 +199,9 @@ impl PonySentryClient {
         }
     }
 
-    pub fn capture_agent_trace(&self, mut trace: AgentTracePayload) {
-        // fail-closed：无 token 即零 egress（enabled 恒开，门禁由 token 承担）
-        if !self.config.enabled || self.config.client_token.is_none() {
-            return;
-        }
-
-        // 零信任脱敏管道处理
-        trace.session_id = sanitize(&trace.session_id);
-        trace.run_id = trace.run_id.take().map(|r| sanitize(&r));
-        trace.turn_id = trace.turn_id.take().map(|t| sanitize(&t));
-
-        if let Some(tags) = trace.tags.take() {
-            trace.tags = Some(
-                tags.into_iter()
-                    .map(|(k, v)| (sanitize(&k), sanitize(&v)))
-                    .collect(),
-            );
-        }
-
-        if let Some(extra) = trace.extra.take() {
-            trace.extra = Some(sanitize_json(&extra));
-        }
-
-        for turn in &mut trace.turns {
-            turn.turn_id = sanitize(&turn.turn_id);
-            turn.phase = turn.phase.take().map(|p| sanitize(&p));
-            turn.provider = turn.provider.take().map(|p| sanitize(&p));
-            turn.model = turn.model.take().map(|m| sanitize(&m));
-            turn.error = turn.error.take().map(|e| sanitize(&e));
-            for tool_call in &mut turn.tool_calls {
-                tool_call.call_id = tool_call.call_id.take().map(|c| sanitize(&c));
-                tool_call.tool_name = sanitize(&tool_call.tool_name);
-                tool_call.arguments_summary =
-                    tool_call.arguments_summary.take().map(|a| sanitize(&a));
-                tool_call.status = sanitize(&tool_call.status);
-                tool_call.error = tool_call.error.take().map(|e| sanitize(&e));
-            }
-        }
-
-        if let Some(ref tx) = self.sender {
-            match tx.try_send(SentryEvent::Trace(trace)) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    eprintln!("[ponysentry] queue full (1024), dropping trace to protect runtime");
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    eprintln!("[ponysentry] worker disconnected");
-                }
-            }
-        }
-    }
-
     pub fn flush(&self) {
         // Queue is continuously processed by the worker thread
     }
-}
-
-/// 独立的直接发送函数，不持有任何非 Send guard，支持跨 await 边界
-pub async fn send_trace_direct_http(
-    endpoint: &str,
-    client_token: Option<&str>,
-    mut trace: AgentTracePayload,
-) -> Result<(), String> {
-    // 零信任脱敏管道处理
-    trace.session_id = sanitize(&trace.session_id);
-    trace.run_id = trace.run_id.take().map(|r| sanitize(&r));
-    trace.turn_id = trace.turn_id.take().map(|t| sanitize(&t));
-
-    if let Some(tags) = trace.tags.take() {
-        trace.tags = Some(
-            tags.into_iter()
-                .map(|(k, v)| (sanitize(&k), sanitize(&v)))
-                .collect(),
-        );
-    }
-
-    if let Some(extra) = trace.extra.take() {
-        trace.extra = Some(sanitize_json(&extra));
-    }
-
-    for turn in &mut trace.turns {
-        turn.turn_id = sanitize(&turn.turn_id);
-        turn.phase = turn.phase.take().map(|p| sanitize(&p));
-        turn.provider = turn.provider.take().map(|p| sanitize(&p));
-        turn.model = turn.model.take().map(|m| sanitize(&m));
-        turn.error = turn.error.take().map(|e| sanitize(&e));
-        for tool_call in &mut turn.tool_calls {
-            tool_call.call_id = tool_call.call_id.take().map(|c| sanitize(&c));
-            tool_call.tool_name = sanitize(&tool_call.tool_name);
-            tool_call.arguments_summary =
-                tool_call.arguments_summary.take().map(|a| sanitize(&a));
-            tool_call.status = sanitize(&tool_call.status);
-            tool_call.error = tool_call.error.take().map(|e| sanitize(&e));
-        }
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-
-    let base_url = endpoint.trim_end_matches('/');
-    let trace_url = format!("{base_url}/api/v1/traces");
-
-    let mut req = client
-        .post(&trace_url)
-        .header("Content-Type", "application/json");
-
-    if let Some(token) = client_token {
-        req = req.header("X-Client-Token", token);
-    }
-
-    let resp = req
-        .json(&trace)
-        .send()
-        .await
-        .map_err(|e| format!("网络请求失败: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(format!("服务端响应异常 ({status}): {body_text}"));
-    }
-
-    Ok(())
 }
 
 fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<SentryEvent>) {
@@ -353,12 +230,10 @@ fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<SentryEvent>) 
 
     let base_url = config.endpoint.trim_end_matches('/');
     let ingest_url = format!("{base_url}/api/v1/ingest");
-    let trace_url = format!("{base_url}/api/v1/traces");
 
     while let Ok(event) = receiver.recv() {
         let (url, body_json) = match event {
             SentryEvent::Ingest(payload) => (ingest_url.clone(), serde_json::to_value(&payload)),
-            SentryEvent::Trace(trace) => (trace_url.clone(), serde_json::to_value(&trace)),
         };
 
         let body = match body_json {

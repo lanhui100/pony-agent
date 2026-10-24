@@ -173,7 +173,11 @@ describe("TelemetryPage", () => {
     });
     await Promise.resolve();
     expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("已成功上传该会话 Trace（共 3 轮对话）");
-    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("已成功上传会话 Trace（包含 3 轮对话链路）至 PonySentry");
+    // Wave43 D5/UI-2：上传目标由 PonySentry 迁移到 Langfuse，全页不得残留旧品牌。
+    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("已成功上传会话 Trace（包含 3 轮对话链路）至 Langfuse");
+    expect(wrapper.html()).not.toContain("PonySentry");
+    // Wave43 U3/A5：单会话上传为逐次授权动作，需常驻「与全局开关互不影响」的独立说明。
+    expect(wrapper.find('[data-testid="telemetry-upload-independent-note"]').exists()).toBe(true);
 
     // 2. 0 条数据友好提示
     tauriMocks.mockSafeInvoke.mockResolvedValueOnce(0);

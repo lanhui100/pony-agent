@@ -1,0 +1,53 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/control_plane/query_commands.rs",
+    "src-tauri/src/main.rs",
+    "src-tauri/src/lib.rs",
+    "crates/pony-agent-core/src/agent/otel",
+    "crates/pony-agent-core/src/agent/runtime",
+    "crates/pony-agent-core/src/agent/control_plane"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 904,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /tmp/w43a-repro && CARGO_TARGET_DIR=/tmp/w43a-target cargo build -q && /tmp/w43a-target/debug/w43a-repro bypass  # 门禁 CLOSED 下上传 200 条记录；复现结果：requests=1 agent.turn=1000 llm.chat=27，即 gate 关闭期间另一线程的 27 个 llm.chat 被采样并出网（预期 llm.chat=0，脚本以 FAIL/exit 1 收尾）；机制：static BYPASS_COUNT(874) + spans_allowed()(905) 为进程级，force_export_session_trace 的 `let _bypass = BypassGuard::new()`(510) 覆盖整个重放+flush 窗口，使任意并发 turn 的 start_llm_span/record_tool_call_span 同时被放行（D2/D3/RuntimeExporter::export 门禁只判全局 spans_allowed，无法区分旁路 span 与其它 turn 的 span）。同一宿主有 TurnTaskRegistry::with_max_concurrent(3)，3 路并发 turn 常态存在。",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1211,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'forceflush_timeout' ~/.cargo/registry/src/*/opentelemetry_sdk-0.30.0/src/trace/span_processor.rs  # 597: forceflush_timeout = Duration::from_secs(5)（SDK 硬编码，不可配）；配合 mod.rs:1211 flush_state()：`state.provider.force_flush()` 为同步阻塞调用，timeout_ms 只在返回后用于判定（elapsed > timeout_ms 才改判 Err），不在等待路径上，故 force_flush(3000) 实测可阻塞 ~3000-5000ms；调用方 src-tauri/src/lib.rs:651 `#[tauri::command] async fn upload_session_trace` → control_plane/query_commands.rs:56 `pub async fn upload_session_trace` 在 tokio worker 线程上同步阻塞，超过 nfr external_call_timeout_ms=3000。复现锚点：cargo test -p pony-agent-core --test otel_trace_adversarial at1_blackhole_endpoint_swallows_export_failure_within_bounded_time 已把该路径实测耗时钉在 [2000,3250]ms，即该参数并不能提前中断等待。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 335,
+      "rule": "LEAK",
+      "counterexample_cmd": "sed -n '320,341p' crates/pony-agent-core/src/agent/otel/mod.rs  # shutdown(): `let provider = state.provider.clone(); provider.shutdown_with_timeout(3000)?; drop(state);` —— 该 clone 是最后一个强引用，实际在函数返回（drop(state) 之后）才销毁 provider/BatchSpanProcessor；若 shutdown_with_timeout 在黑洞端点上超时返回 Err，BSP 线程仍在 span_processor.rs:452-494 export_batch_sync 的 `futures_executor::block_on(export)` 里 poll RuntimeExporter，而此刻 `_runtime` 已随 drop(state) 释放，导出 future 的 reactor/定时器消失 ⇒ 该线程永久阻塞（连同 reqwest Client 泄漏），注释「provider 先关闭、runtime 后释放」与实际 drop 顺序不符。手工复现：以 EXPORT_TIMEOUT_MS=3000 的不可应答端点（accept 后不回包）调用 init → 建 span → shutdown()，观察进程内残留线程。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 537,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/w43a-repro && CARGO_TARGET_DIR=/tmp/w43a-target cargo build -q && W43A_N=600 /tmp/w43a-target/debug/w43a-repro bypass; python3 /tmp/w43a-parse.py '/tmp/w43a-out/bypass-*.bin' | grep 'spans='  # 复现结果：force_export_session_trace => Ok(600)，但第一个请求只有 spans=512（第二个请求 spans=97 由 5s 定时器补发）。机制：SDK 的 ForceFlush 只从队列取 max_export_batch_size(=BATCH_MAX_EXPORT_BATCH_SIZE 512) 条后 break（span_processor.rs:452-469），所以一次 flush 最多交付 512 条 span，而本函数无条件 Ok(traces.len())，把「已入队」当「已交付」返回给前端提示。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1007,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /tmp/w43a-repro && CARGO_TARGET_DIR=/tmp/w43a-target cargo build -q && /tmp/w43a-target/debug/w43a-repro single_thread  # 在非 tokio 任务线程（TUI/CLI run_sync_turn、src-tauri/src/bin/direct_turn_probe.rs、宿主单测的 std::thread 入口）上执行：register_active_turn(1007) 因 tokio::task::try_id() 返回 None 而不登记，active_turn_context(1032) 同样返回 None ⇒ spans_per_trace={turn T:1, 另一 trace:1}，llm.chat 断链为独立 root（parent=None），与 begin_turn_trace 文档「之后 start_llm_span/record_tool_call_span 会自动挂到该 turn 之下」不符；对照：同一脚本 single/parenting 场景（spawn_blocking，即 tauri 真实路径）PASS。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

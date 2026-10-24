@@ -583,12 +583,18 @@ fn fetch_provider_models(
 
 #[tauri::command]
 fn load_app_settings() -> AppSettings {
-    AppSettingsStore::new().load_view()
+    let settings = AppSettingsStore::new().load_view();
+    // D7：启动即按持久化值生效（默认 false ⇒ 零 span 分配、零 egress）。
+    pony_agent_core::agent::otel::set_agent_trace_reporting(settings.agent_trace_reporting);
+    settings
 }
 
 #[tauri::command]
 fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
-    AppSettingsStore::new().save_view(settings)
+    let saved = AppSettingsStore::new().save_view(settings)?;
+    // D7：保存即生效，无需重启；以落盘后的回显值为准（避免保存失败后门禁被误翻）。
+    pony_agent_core::agent::otel::set_agent_trace_reporting(saved.agent_trace_reporting);
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -1224,6 +1230,20 @@ pub fn run() {
                 eprintln!("[tray-warning] failed to setup tray icon: {e}");
             }
 
+            // Wave43 D2/D3：provider 进程启动时装配一次（开关只翻转 flag，不重建 provider）。
+            // 装配失败必须降级为日志：trace 不可用绝不阻塞主业务启动。
+            let _ = load_app_settings();
+            if let Err(err) = pony_agent_core::agent::otel::init(
+                pony_agent_core::agent::otel::from_env(),
+            ) {
+                // F4：走统一 JSON 日志面（stdout 单行 JSON），不得新增明文 eprintln 边界。
+                pony_agent_core::agent::otel::log::log_json(
+                    "warn",
+                    &format!("otel 装配失败，trace 上报已禁用：{err}"),
+                    None,
+                );
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1326,6 +1346,12 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("failed to run Pony Agent");
+        .build(tauri::generate_context!())
+        .expect("failed to build Pony Agent")
+        .run(|_app_handle, event| {
+            // NFR resource_release：退出时 flush 并释放 OTel provider 及其导出 runtime。
+            if let tauri::RunEvent::Exit = event {
+                pony_agent_core::agent::otel::shutdown();
+            }
+        });
 }
