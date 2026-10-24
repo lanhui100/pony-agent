@@ -427,12 +427,29 @@ pub fn from_env() -> OtelConfig {
         }
     }
     if let Some(token) = env_non_empty(ENV_PONY_OTEL_TOKEN) {
-        config
-            .headers
-            .push((AUTH_HEADER_NAME.to_string(), token));
+        config.headers.push((
+            AUTH_HEADER_NAME.to_string(),
+            authorization_header_value(&token),
+        ));
     }
 
     config
+}
+
+/// 把 `PONY_OTEL_TOKEN` 组装成 `Authorization` 头的值。
+///
+/// 契约：集群公网入口的 collector 用 `bearertokenauth`（`scheme: Bearer`），只认
+/// `Authorization: Bearer <token>`；裸 token 会被直接 401（2026-10-24 实测）。因此缺省补
+/// `Bearer ` 前缀。若调用方已在 token 里自带 scheme（`bearer x` / `basic x`，大小写不敏感），
+/// 原样透传，避免出现 `Bearer Bearer x`。除鉴权 scheme 外不解释 token 内容。
+fn authorization_header_value(token: &str) -> String {
+    let trimmed = token.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("bearer ") || lower.starts_with("basic ") {
+        trimmed.to_string()
+    } else {
+        format!("Bearer {trimmed}")
+    }
 }
 
 /// turn 级 span 守卫。
@@ -1223,6 +1240,15 @@ impl SpanExporter for RuntimeExporter {
         })
     }
 
+    /// **必须转发**：`SpanExporter::set_resource` 缺省是空实现，而 OTLP exporter 正是用它
+    /// 得知道「这批 span 的 Resource」，再用它分组（`group_spans_by_resource_and_scope`）。
+    /// 曾经的 bug：包装器没转发 ⇒ 导出的 ResourceSpans 没有 resource ⇒ Tempo 里没有
+    /// `service.name`（公网 edge 侧只能靠它自己改写成 `desktop-client` 才「看起来正常」），
+    /// Langfuse 侧也丢了 service 归因。2026-10-24 由公网端到端探针实测发现。
+    fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
+        self.inner.set_resource(resource);
+    }
+
     fn shutdown_with_timeout(&mut self, timeout: Duration) -> OTelSdkResult {
         self.inner.shutdown_with_timeout(timeout)
     }
@@ -1447,6 +1473,19 @@ mod tests {
         );
     }
 
+    /// 公网入口回归：`PONY_OTEL_TOKEN` 必须组装成 `Authorization: Bearer <token>`。
+    ///
+    /// 背景：集群公网 edge collector 用 `bearertokenauth`（`scheme: Bearer`），
+    /// 裸 token 实测 401；本用例钉死「补 scheme」与「已带 scheme 不重复」两种形态。
+    #[test]
+    fn authorization_header_adds_bearer_scheme_once() {
+        assert_eq!(authorization_header_value("raw-token-123"), "Bearer raw-token-123");
+        assert_eq!(authorization_header_value("  raw-token-123  "), "Bearer raw-token-123");
+        assert_eq!(authorization_header_value("Bearer already"), "Bearer already");
+        assert_eq!(authorization_header_value("bearer lower"), "bearer lower");
+        assert_eq!(authorization_header_value("Basic dXNlcjpwYXNz"), "Basic dXNlcjpwYXNz");
+    }
+
     /// F1 回归：`Debug` 与敏感 header 判定不得泄漏凭据；明文外网判定覆盖回环豁免。
     #[test]
     fn config_debug_redacts_headers_and_detects_sensitive_names() {
@@ -1581,6 +1620,17 @@ mod tests {
         assert!(
             !wire.contains("sess-foreign-turn"),
             "F6：关闭态手动上传**不得**带出同期其它 turn 的 span"
+        );
+        // 回归（2026-10-24 公网 E2E 发现）：包装导出器若忘记转发 `set_resource`，
+        // 导出的 ResourceSpans 会没有任何 resource —— Tempo 里没有 `service.name`，
+        // 公网 edge 只能把它改写成 `desktop-client`，`client.service.name` 也随之丢失。
+        assert!(
+            wire.contains("service.name"),
+            "导出体必须携带 Resource 的 `service.name`（RuntimeExporter 必须转发 set_resource）"
+        );
+        assert!(
+            wire.contains("pony-agent-otel-unit"),
+            "导出体的 `service.name` 必须等于配置值"
         );
     }
 
