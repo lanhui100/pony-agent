@@ -773,6 +773,9 @@ impl Drop for TurnTraceGuard {
     fn drop(&mut self) {
         if let Some(phase) = self.phase.take() {
             if let Some(span) = self.span.as_mut() {
+                if phase == "failed" {
+                    span.set_status(opentelemetry::trace::Status::error(phase.clone()));
+                }
                 span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_PHASE, phase));
             }
         }
@@ -858,6 +861,10 @@ pub fn record_tool_call_span(input: &ToolSpanInput) {
     }
     let attributes = to_key_values(tool_span_attributes(input));
     if let Some(mut span) = start_child_span(SPAN_TOOL_CALL, attributes) {
+        if input.status == "failed" || input.status == "error" || input.error.is_some() {
+            let err_desc = input.error.as_deref().unwrap_or("tool call failed");
+            span.set_status(opentelemetry::trace::Status::error(err_desc.to_string()));
+        }
         span.end();
     }
 }
