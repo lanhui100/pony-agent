@@ -329,7 +329,13 @@ pub fn shutdown() {
             // 正常路径（A7）：先显式释放 provider（导出线程 / reqwest Client），
             // 再释放含 runtime 的全局态 —— runtime 必须活到所有导出 future 结束之后。
             drop(provider);
-            drop(state);
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // 若处于异步 runtime 线程中直接 drop Runtime 会因阻塞等待 worker panic；
+                // 移交独立 std 线程安全释放。
+                std::thread::spawn(move || drop(state));
+            } else {
+                drop(state);
+            }
         }
         Err(err) => {
             // 超时/失败路径（task-10）：**有意不释放** runtime。
