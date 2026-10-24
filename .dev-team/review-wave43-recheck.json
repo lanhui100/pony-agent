@@ -1,0 +1,31 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel",
+    "src-tauri/src",
+    "crates/pony-agent-core/src/agent/runtime"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 967,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && D=target-test-exact-a/debug/deps && rustc --edition 2021 -O -L dependency=$D --extern pony_agent_core=$D/libpony_agent_core-40b22060ed7258e9.rlib -o /tmp/w43recheck/probe /tmp/w43recheck/probe.rs && /tmp/w43recheck/probe f2  # 实测线上 agent.tool.error 原样带出 api_key 明文: curl -H 'authorization: Bearer [REDACTED_SECRET]' api_key=sk-live-RRRRRRRRRRRR [USER_HOME]/.aws/credentials; Bearer 与家目录已脱敏, 但 api_key=<明文> 未脱敏; /tmp/w43recheck/san 实测仅 JSON 形式 \"api_key\": \"...\" 被 RE_KEY_VALUE_SECRET 覆盖, 'api_key=...' 与 'X-Api-Key: ...' 直通. F2 接线本身成立(全部字符串属性含 set_phase 均过 sanitize), 此为正则覆盖缺口, 与退役 ponysentry client.rs 同源, 非本波引入",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 538,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && D=target-test-exact-a/debug/deps && rustc --edition 2021 -O -L dependency=$D --extern pony_agent_core=$D/libpony_agent_core-40b22060ed7258e9.rlib -o /tmp/w43recheck/probe /tmp/w43recheck/probe.rs && /tmp/w43recheck/probe a6 && /tmp/w43recheck/probe a6b 8000 600  # 实测: force_flush(3000)=Err elapsed 3000ms (单次硬截止成立); force_flush(8000)=Err('在 5000ms 内未完成') elapsed 5000ms (实际上限=max(MAX_FLUSH_WAIT_MS)=5000 而非 3000); 600 条手动脉路在黑洞端点 elapsed 6035ms (2 块 x 3000ms 导出超时串行); 调用方 upload_session_trace 是 async tauri command (src-tauri/src/lib.rs:651 -> control_plane/query_commands.rs:56) 在 tokio worker 上同步阻塞该时长, 超 nfr external_call_timeout_ms=3000",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 336,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && D=target-test-exact-a/debug/deps && rustc --edition 2021 -O -L dependency=$D --extern pony_agent_core=$D/libpony_agent_core-40b22060ed7258e9.rlib -o /tmp/w43recheck/a7c /tmp/w43recheck/a7c.rs && /tmp/w43recheck/a7c  # 实测: shutdown_ms=3000 (黑洞端点导致 provider shutdown 超时) 后 stderr: thread 'OpenTelemetry.Traces.BatchProcessor' panicked at tokio-1.52.3/src/runtime/time/entry.rs:602: 'A Tokio 1.x context was found, but it is being shutdown.'; /proc/self/task 3 -> 2 (该线程 <=1s 自退, 无永久泄漏). 代码顺序 336 drop(provider) -> 337 drop(state) 本身成立, 但超时路径下 drop(state) 关闭 runtime 时 BSP 导出 future 仍在 poll (A7 想消除的时序窗口仍可观测, 现表现为后台 panic 而非永久阻塞)",
+      "severity": "ADVISORY"
+    }
+  ]
+}

@@ -324,17 +324,27 @@ pub fn shutdown() {
     };
 
     let provider = state.provider.clone();
-    if let Err(err) = provider.shutdown_with_timeout(Duration::from_millis(SHUTDOWN_TIMEOUT_MS)) {
-        degraded_warn(
-            &format!("otel::shutdown：provider 关闭期间导出未完全成功：{err}"),
-            None,
-        );
+    match provider.shutdown_with_timeout(Duration::from_millis(SHUTDOWN_TIMEOUT_MS)) {
+        Ok(()) => {
+            // 正常路径（A7）：先显式释放 provider（导出线程 / reqwest Client），
+            // 再释放含 runtime 的全局态 —— runtime 必须活到所有导出 future 结束之后。
+            drop(provider);
+            drop(state);
+        }
+        Err(err) => {
+            // 超时/失败路径（task-10）：**有意不释放** runtime。
+            // 关闭中的 runtime 会与仍在退出中的后台导出线程竞争，触发
+            // `Tokio ... being shutdown` panic；这里改为保留 runtime 至进程终止，仅记 warn。
+            degraded_warn(
+                &format!(
+                    "otel::shutdown：provider 关闭超时或失败，导出 runtime 保留至进程终止：{err}"
+                ),
+                None,
+            );
+            std::mem::forget(state);
+            drop(provider);
+        }
     }
-
-    // A7：显式先释放 provider（及其导出线程/reqwest Client），再释放含 runtime 的全局态；
-    // 否则超时场景下 provider 的导出线程会与 Client 一起被拖到最后才析构（等效泄漏）。
-    drop(provider);
-    drop(state);
 }
 
 /// 把当前已入队 span 强制导出，等待至多 `timeout_ms` 毫秒。
@@ -858,8 +868,8 @@ const RUNTIME_THREAD_NAME: &str = "pony-otel-export";
 /// 单次 OTLP/HTTP 导出的网络超时：与 NFR 冻结的 `external_call_timeout_ms = 3000` 对齐。
 /// 导出层自身必须有界（而不是靠调用方干等），黑洞端点下 `force_flush` 才会在 ~3s 内返回 Err。
 const EXPORT_TIMEOUT_MS: u64 = 3_000;
-/// 手动导出后的 flush 等待上限。
-const FORCE_EXPORT_FLUSH_TIMEOUT_MS: u64 = 8_000;
+/// 手动导出的单块 flush 等待上限（每块 ≤3000ms；总耗时随块数线性增长，属用户显式动作）。
+const FORCE_EXPORT_FLUSH_TIMEOUT_MS: u64 = 3_000;
 /// 关闭 provider 时的导出等待上限。
 const SHUTDOWN_TIMEOUT_MS: u64 = 3_000;
 /// 降级日志单条最大字符数（超出截断，避免把超长响应体写进日志面）。
@@ -870,8 +880,9 @@ const BATCH_MAX_QUEUE_SIZE: usize = 2_048;
 const BATCH_MAX_EXPORT_BATCH_SIZE: usize = 512;
 /// 批量调度延迟。
 const BATCH_SCHEDULED_DELAY_MS: u64 = 5_000;
-/// `force_flush` 的等待上限夹值（A6：保证调用方阻塞有界，最多 5s）。
-const MAX_FLUSH_WAIT_MS: u64 = 5_000;
+/// `force_flush` 的等待上限夹值：与 `EXPORT_TIMEOUT_MS` / NFR `external_call_timeout_ms`
+/// 对齐为 **3000ms**（task-10：单次 flush 预算不得超基准）。
+const MAX_FLUSH_WAIT_MS: u64 = 3_000;
 /// 手动上传的分块大小 = 单批导出上限（A8：避免「入队成功但被队列丢弃」被当成已交付）。
 const FORCE_EXPORT_CHUNK_TURNS: usize = BATCH_MAX_EXPORT_BATCH_SIZE;
 
@@ -1638,6 +1649,78 @@ mod tests {
                 }
             }
             bodies
+        });
+
+        (port, handle)
+    }
+
+    /// task-10 探针：黑洞端点下 600 轮上传 —— 单次 flush 必须 ≤3000ms（+容差），
+    /// 且 `shutdown()` 的超时/失败分支不得 panic（runtime 有意保留至进程终止）。
+    #[test]
+    fn blackhole_600_turn_upload_stays_within_flush_budget() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+
+        let (port, blackhole) = spawn_blackhole_sink(Duration::from_millis(12_000));
+        init(OtelConfig {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            service_name: "pony-agent-otel-probe".to_string(),
+            sampling_ratio: 1.0,
+            headers: Vec::new(),
+        })
+        .expect("回环端点必须可装配");
+
+        let traces: Vec<crate::agent::session::TurnTraceRecord> = (0..600)
+            .map(|index| crate::agent::session::TurnTraceRecord {
+                turn_id: format!("turn-probe-{index}"),
+                session_id: Some("sess-probe-600".to_string()),
+                title: "probe".to_string(),
+                phase: "completed".to_string(),
+                ..Default::default()
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        let result = force_export_session_trace("sess-probe-600", &traces);
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "黑洞端点下单块导出必须返回 Err（不得 panic）：{result:?}"
+        );
+        assert!(
+            elapsed <= Duration::from_millis(3_250),
+            "task-10：单次 flush 必须 ≤3000ms(+容差)，实测 {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(2_000),
+            "task-10：必须真的发出去了，否则探针无效（实测 {elapsed:?}）"
+        );
+
+        // 超时/失败分支：只记 warn，不 drop runtime ⇒ 不得 panic。
+        shutdown();
+        assert!(!is_reporting_enabled(), "shutdown 不得改写上报门禁");
+        drop(blackhole);
+    }
+
+    /// 黑洞 OTLP 端点：只 accept、不回包（导出必然超时），held 到预算耗尽。
+    fn spawn_blackhole_sink(budget: Duration) -> (u16, std::thread::JoinHandle<usize>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("黑屏端点必须能绑定回环端口");
+        listener.set_nonblocking(true).expect("黑屏端点必须非阻塞");
+        let port = listener.local_addr().expect("blackhole local_addr").port();
+
+        let handle = std::thread::spawn(move || {
+            let mut held: Vec<std::net::TcpStream> = Vec::new();
+            let deadline = std::time::Instant::now() + budget;
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _peer)) => held.push(stream),
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            held.len()
         });
 
         (port, handle)

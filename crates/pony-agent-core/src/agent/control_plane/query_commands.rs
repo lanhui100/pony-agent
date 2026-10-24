@@ -58,7 +58,19 @@ impl HostControlPlane {
         if traces.is_empty() {
             return Ok(0);
         }
-        crate::agent::otel::force_export_session_trace(session_id, &traces)
+        // task-10：导出是**阻塞**调用（每块最长 3000ms），必须移出 async worker，
+        // 否则一次手动上传会把 tokio worker 占住数秒。非 async 上下文（std 单测/CLI）
+        // 没有 spawn_blocking 可用，则就地执行（语义等价）。
+        let session_id = session_id.to_string();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle
+                .spawn_blocking(move || {
+                    crate::agent::otel::force_export_session_trace(&session_id, &traces)
+                })
+                .await
+                .map_err(|err| format!("trace 上传任务执行失败：{err}"))?,
+            Err(_) => crate::agent::otel::force_export_session_trace(&session_id, &traces),
+        }
     }
 
     /// PA-094：按引用加载 build_context_observation 全量 payload（大字段外置）。
