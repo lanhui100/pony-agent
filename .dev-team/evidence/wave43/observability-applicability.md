@@ -41,25 +41,37 @@ $ ls deploy/ k8s/ manifests/
 **已在 skill 侧修复**：`scripts/audit-project.sh` 的 T3 正则追加 `start_with_context|build_with_context`；
 `scripts/selftest.sh` 仍 Exit 0（三档 fixture 判定未被污染），`scripts/check-drift.sh` 仍 Exit 0（契约未变）。
 
-## 3. 当前真实判定
+## 3. 公网入口上线后的复测（2026-10-24 晚）
+
+infra 侧已完成 `https://otel.ponyjob.top/v1/traces`（Traefik Exact + TLS + ratelimit/buffering）
+→ `otel-collector-edge`（bearertokenauth 多 token）→ 内部 collector → Tempo + Langfuse。
+本仓用真实公网路径验证（探针经 `agent/otel` 发 `agent.turn` + `llm.chat` + `tool.call`）：
+
+- 无令牌 401 / 裸令牌 401 / `Bearer <token>` 200 —— 由此发现并修复本仓鉴权 scheme 缺陷；
+- Tempo 侧同一条 trace 的 resource：`{service.name=desktop-client, client.service.name=pony-agent, ingest.source=public}`；
+- Langfuse 侧：`agent.turn`=SPAN(root)、`llm.chat`=**GENERATION**(model `gpt-4o-mini`, usage 123/45)、`tool.call`=**TOOL**(`read_file`)，父子关系正确。
+- 由此发现并修复更严重的 **Resource 丢失**：包装导出器未转发 `SpanExporter::set_resource`，
+  导致导出的 `ResourceSpans` 完全没有 resource（Tempo 无 `service.name`）。
+
+复测后巡检：**tracing 5/5 PASS**（T4 由真实 trace 支撑，公网 edge 项目按 `client.service.name` 回退命中）。
+
+## 4. 当前真实判定
 
 | 维度 | 静态（写没写） | 动态（数据到没到） | 本次结论 |
 | :--- | :--- | :--- | :--- |
-| tracing | **T1/T2/T3/T5 全 PASS**（SDK + OTLP 端点 + 显式 span + `gen_ai.system`/`langfuse.*` 属性） | T4 需 Tempo 侧有真实 trace，**依赖公网入口上线**（桌面端无法直连 ClusterIP collector） | **静态达标，动态待上线** |
+| tracing | **T1/T2/T3/T5 全 PASS** | **T4 PASS**（公网路径实测 trace 已进 Tempo；按 `client.service.name` 归因） | **PASS 5/5** |
 | issues | **I1~I4 全 PASS** | **I5 PASS**（PonySentry 有 `project=pony-agent` 的 issue 记录） | **PASS** |
 | metrics | M1/M2 为文档误命中（真实：无端点） | M3 无抓取 | **结构不适用** |
 | logs | **L1/L2 PASS**（单行 JSON + `trace_id`，新增日志面 `otel/log.rs::log_json`） | L3/L4 无集群采集面 | **静态达标，动态结构不适用** |
 
-## 4. 上线后如何补齐（与公网入口同批）
+## 5. 剩余结构不适用项
 
 见 `.dev-team/handoff-otel-public-ingress.md`。补充两条：
 
-1. **T4**：公网入口打通后，桌面端开启开关跑一轮，`service.name=pony-agent` 的 trace 才进 Tempo；
-   届时 T4 自然 PASS（无需改代码）。
-2. **metrics/logs**：若未来新增集群内常驻形态，再按 `contract.json` 的 `scrape_job_required_fields`
+1. **metrics/logs**：若未来新增集群内常驻形态，再按 `contract.json` 的 `scrape_job_required_fields`
    与 log-collector `<source>/<filter>` 接入，属独立立项，不在本波。
 
-## 5. 命令收据
+## 6. 命令收据
 
 ```console
 $ bash scripts/selftest.sh            # skill 自检

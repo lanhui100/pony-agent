@@ -30,10 +30,12 @@
 | `npx vue-tsc --noEmit` | 0 | 无 diagnostics |
 | `npx vitest run tests/env-example.spec.ts` | 0 | 6 passed |
 | `node scripts/check-secrets.mjs --all` | 0 | 0 leaks |
+| `cargo test -p pony-agent-core --lib agent::otel` | 0 | 7 passed（含 Bearer scheme 与 wire 级 `service.name` 回归） |
+| 公网 E2E（真实 `https://otel.ponyjob.top`） | 200 | Tempo 有 trace（`client.service.name=pony-agent`）；Langfuse 有 SPAN/GENERATION/TOOL 三观察 |
 
 ## 遗留与后续
 
-1. **公网 OTLP 入口未实施**（用户裁决：新会话处理），交接单 `.dev-team/handoff-otel-public-ingress.md`。
+1. **公网 OTLP 入口已上线并端到端验证**（2026-10-24）：`https://otel.ponyjob.top/v1/traces`；拓扑与运维见 [agent-trace-pipeline.md](../../../docs/architecture/agent-trace-pipeline.md)（原交接单已删除，其内容已并入该文档与 ADR 0047）。实测发现并修复两个本仓缺陷：鉴权缺 `Bearer` scheme、包装导出器未转发 `set_resource` 导致 Resource 丢失。
 2. **基线红测**：`missing_capabilities_fields_use_stable_defaults` 为 HEAD 既有缺陷（常量 `1_000_000` vs 断言 `256_000`），建议单列 backlog 裁决产品语义。
 3. **脱敏正则缺口（另立 backlog）**：`sanitize` 对 `api_key=sk-live-…` / `X-Api-Key:` 这类**非 JSON 引号键值**形式不覆盖（与已退役的 ponysentry 上报路径同源，非本波引入）。trace 属性已全部过该漏斗，缺口在漏斗本身。
 4. **可观测性巡检**：`tracing` 由 0/5 升至 4/5；`T3` 为巡检器启发式未识别 `Tracer::build_with_context` 的假阴性；`M3`/`L3`/`L4` 属 infra 侧（scrape job、log-collector 白名单），随公网入口同批处理。
