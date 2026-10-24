@@ -1110,9 +1110,10 @@ function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, _conte
     return false;
   }
 
-  // 缓存锁定路径，防止内容渐进增长导致 isSimpleTextContent 翻转 → DOM 重建闪烁
-  if (streamingRenderPathLock.has(message.id)) {
-    return streamingRenderPathLock.get(message.id)!;
+  // 缓存锁定路径：如果已经升级为 Markdown 渲染，则锁定为 true 防止退回闪烁；
+  // 但若此前为纯文本路径，当后续内容检测到 Markdown 语法时，允许平滑升级为 Markdown 渲染。
+  if (streamingRenderPathLock.get(message.id) === true) {
+    return true;
   }
 
   const useMarkdown = !isSimpleTextContent(message.content);

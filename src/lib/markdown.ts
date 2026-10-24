@@ -271,6 +271,24 @@ function unwrapInlineMarkdownFences(content: string) {
   );
 }
 
+function normalizeBoldOutsideCodespans(text: string): string {
+  // 针对 CommonMark 中文及全角标点旁 delimiter run 判定失效的问题做规范化规整：
+  // 在代码跨度之外，将成对包裹的 **...** 转换为 <strong>...</strong>，
+  // 确保标点（如中文双引号“”、书名号《》、破折号等）不会破坏 left-flanking/right-flanking 判定。
+  return text.replace(
+    /(^|[^\\])(`+)([\s\S]*?[^\\])?\2|(?<!\*)\*\*([^\s*](?:[\s\S]*?[^\s*])?)\*\*(?!\*)/g,
+    (match, _prefix, backticks, _codeContent, boldContent) => {
+      if (backticks !== undefined) {
+        return match;
+      }
+      if (boldContent !== undefined) {
+        return `<strong>${boldContent}</strong>`;
+      }
+      return match;
+    }
+  );
+}
+
 export function normalizeMarkdownSource(content: string) {
   const unwrappedContent = unwrapInlineMarkdownFences(
     unwrapOuterMarkdownFence(maybeDecodeEscapedMarkdown(maybeParseSerializedMarkdown(content)))
@@ -289,7 +307,8 @@ export function normalizeMarkdownSource(content: string) {
         return line;
       }
 
-      return normalizeMarkdownLine(line);
+      const normalizedLine = normalizeMarkdownLine(line);
+      return normalizeBoldOutsideCodespans(normalizedLine);
     })
     .join("\n");
 }
