@@ -1,0 +1,13 @@
+AgentTracePayload                             22
+TurnTraceItem                                 7
+ToolCallTraceItem                             7
+EvalStatus                                    7
+capture_agent_trace                           4
+send_agent_trace_direct                       2
+maybe_report_turn_trace                       2
+build_agent_trace_from_event                  2
+build_session_aggregated_trace_payload        3
+build_agent_trace_payloads_from_turns         1
+build_session_trace_payloads_sharded          2
+send_trace_direct_http                        2
+/api/v1/traces                                2

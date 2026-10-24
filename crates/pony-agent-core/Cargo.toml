@@ -34,6 +34,13 @@ regex = "1"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
+# Wave43：Agent Trace 上报（OTLP/HTTP protobuf）。三件套版本必须锁步一致，
+# 版本依据 .dev-team/wave43-dep-probe.md（隔离 crate 实编译 Exit 0）。
+# 注：http-proto 会经 opentelemetry-proto/gen-tonic-messages 连带引入 tonic（仅 codegen，
+# 无 gRPC 传输层），属已知可接受代价。
+opentelemetry = { version = "=0.30.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.30.0", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "=0.30.0", default-features = false, features = ["http-proto", "reqwest-client", "trace"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

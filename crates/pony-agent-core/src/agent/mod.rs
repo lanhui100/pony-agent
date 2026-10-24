@@ -32,6 +32,7 @@ pub mod pipeline;
 pub mod mcp_client;
 pub mod mcp_resources;
 pub mod orchestration;
+pub mod otel;
 pub mod planner;
 pub mod plan_state;
 pub mod ponysentry;

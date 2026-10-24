@@ -63,6 +63,10 @@ pub struct AppSettings {
     pub workspace_mode: WorkspaceMode,
     #[serde(default)]
     pub tool_rules: Vec<ToolRule>,
+    /// 全局 Agent Trace 上报开关（落盘键 `agentTraceReporting`，缺省 `false`）。
+    /// 契约：由设置页读写；`false` 时 core 必须零 span 分配、零网络出口。
+    #[serde(default)]
+    pub agent_trace_reporting: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,6 +76,8 @@ struct AppSettingsStorage {
     workspace_mode: WorkspaceMode,
     #[serde(default)]
     tool_rules: Vec<ToolRule>,
+    #[serde(default)]
+    agent_trace_reporting: bool,
 }
 
 impl From<AppSettingsStorage> for AppSettings {
@@ -79,6 +85,7 @@ impl From<AppSettingsStorage> for AppSettings {
         Self {
             workspace_mode: value.workspace_mode,
             tool_rules: value.tool_rules,
+            agent_trace_reporting: value.agent_trace_reporting,
         }
     }
 }
@@ -88,6 +95,7 @@ impl From<AppSettings> for AppSettingsStorage {
         Self {
             workspace_mode: value.workspace_mode,
             tool_rules: value.tool_rules,
+            agent_trace_reporting: value.agent_trace_reporting,
         }
     }
 }
@@ -128,6 +136,7 @@ impl AppSettingsStore {
         AppSettingsStorage {
             workspace_mode: WorkspaceMode::default(),
             tool_rules: Vec::new(),
+            agent_trace_reporting: false,
         }
     }
 

@@ -1,0 +1,57 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 0,
+    "backoff_cap_ms": 0,
+    "jitter": false,
+    "note": "OTLP 导出失败不重试（AT-2 断言总连接数 <= 2）；失败只降级为 warn JSON 日志，绝不阻断 turn 主链路"
+  },
+  "concurrency_lock": {
+    "reporting_gate": "atomic_bool_acquire_release_no_mutex",
+    "provider_lifecycle": "init_shutdown_serialized_single_assembly_point",
+    "turn_scope": "per_turn_closure_no_shared_mutable_state",
+    "note": "开关翻转与 span 构造/结束并发下不得 panic、不得死锁、不得概率等待（AT-3 Barrier 同步）"
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id",
+    "surface": "crates/pony-agent-core/src/agent/otel/log.rs::log_json",
+    "levels": [
+      "debug",
+      "info",
+      "warn",
+      "error"
+    ],
+    "legacy_eprintln_exempt": "pa119_debt_not_expanded"
+  },
+  "resource_release": [
+    "otel_provider_shutdown",
+    "batch_queue_bounded",
+    "worker_thread_shutdown",
+    "turn_scope_ended_explicitly",
+    "settings_file_no_handle_retained"
+  ],
+  "otel_export": {
+    "protocol": "http/protobuf",
+    "endpoint_default": "http://otel-collector.observability.svc.cluster.local:4318",
+    "path": "/v1/traces",
+    "timeout_source": "external_call_timeout_ms",
+    "batch_scheduled_delay_ms": 5000,
+    "batch_queue_bounded": true,
+    "compression": "none"
+  },
+  "sampling": {
+    "default_ratio": 1.0,
+    "env_override": "OTEL_TRACES_SAMPLER_ARG",
+    "probability_assertion_forbidden": true
+  },
+  "privacy_gate": {
+    "default_enabled": false,
+    "closed_state": "zero_span_allocation_zero_egress",
+    "manual_upload_bypass": true,
+    "manual_upload_must_restore_gate": true
+  }
+}
