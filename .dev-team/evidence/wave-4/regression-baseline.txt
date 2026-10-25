@@ -1,0 +1,10 @@
+
+ Test Files  95 passed (95)
+      Tests  1009 passed | 10 skipped (1019)
+   Start at  11:18:53
+   Duration  39.71s (transform 59.08s, setup 0ms, import 196.97s, tests 128.27s, environment 152.66s)
+
+=== rust otel ===
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.07s
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.23s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
