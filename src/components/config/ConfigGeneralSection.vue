@@ -190,22 +190,22 @@ function handleCostBudgetChange(value: string) {
   }, 500);
 }
 
-function handleUsagePolicyChange(key: "window" | "hard_limit_usd" | "soft_ratio" | "enforcement", val: any) {
-  if (!settings.value.usagePolicy) {
-    settings.value.usagePolicy = {
+function handleUsagePolicyChange(key: "window" | "hardLimitUsd" | "softRatio" | "enforcement", val: any) {
+  if (!settings.value.usageGovernancePolicy) {
+    settings.value.usageGovernancePolicy = {
       window: "session",
-      soft_ratio: 0.8,
-      hard_limit_usd: null,
+      softRatio: 0.8,
+      hardLimitUsd: null,
       enforcement: false,
     };
   }
   if (key === "enforcement") {
-    settings.value.usagePolicy.enforcement = Boolean(val);
+    settings.value.usageGovernancePolicy.enforcement = Boolean(val);
   } else if (key === "window") {
-    settings.value.usagePolicy.window = val;
+    settings.value.usageGovernancePolicy.window = val;
   } else {
     const num = parseFloat(val);
-    settings.value.usagePolicy[key] = !isNaN(num) ? num : null;
+    settings.value.usageGovernancePolicy[key] = !isNaN(num) ? num : null;
   }
   if (otelDebounceTimer) {
     clearTimeout(otelDebounceTimer);
@@ -553,7 +553,7 @@ function flushOtelSettings() {
               <div class="space-y-1">
                 <label class="block text-[11px] text-stone-500">统计窗口</label>
                 <select
-                  :value="settings.usagePolicy?.window || 'session'"
+                  :value="settings.usageGovernancePolicy?.window || 'session'"
                   :disabled="saving"
                   class="w-full rounded-md border border-stone-200 bg-stone-50 px-2 py-1 text-[11px] text-stone-700 focus:outline-none"
                   data-testid="config-usage-policy-window"
@@ -566,31 +566,31 @@ function flushOtelSettings() {
               <div class="space-y-1">
                 <label class="block text-[11px] text-stone-500">硬限额 (USD)</label>
                 <Input
-                  :model-value="settings.usagePolicy?.hard_limit_usd !== undefined && settings.usagePolicy?.hard_limit_usd !== null ? String(settings.usagePolicy.hard_limit_usd) : ''"
+                  :model-value="settings.usageGovernancePolicy?.hardLimitUsd !== undefined && settings.usageGovernancePolicy?.hardLimitUsd !== null ? String(settings.usageGovernancePolicy.hardLimitUsd) : ''"
                   :disabled="saving"
                   placeholder="例如 1.00"
                   class="bg-stone-50 text-[11px]"
                   data-testid="config-usage-policy-hard-limit"
-                  @update:model-value="handleUsagePolicyChange('hard_limit_usd', $event)"
+                  @update:model-value="handleUsagePolicyChange('hardLimitUsd', $event)"
                   @blur="flushOtelSettings"
                 />
               </div>
               <div class="space-y-1">
                 <label class="block text-[11px] text-stone-500">软告警比例 (0.0 ~ 1.0)</label>
                 <Input
-                  :model-value="settings.usagePolicy?.soft_ratio !== undefined && settings.usagePolicy?.soft_ratio !== null ? String(settings.usagePolicy.soft_ratio) : '0.8'"
+                  :model-value="settings.usageGovernancePolicy?.softRatio !== undefined && settings.usageGovernancePolicy?.softRatio !== null ? String(settings.usageGovernancePolicy.softRatio) : '0.8'"
                   :disabled="saving"
                   placeholder="0.8"
                   class="bg-stone-50 text-[11px]"
                   data-testid="config-usage-policy-soft-ratio"
-                  @update:model-value="handleUsagePolicyChange('soft_ratio', $event)"
+                  @update:model-value="handleUsagePolicyChange('softRatio', $event)"
                   @blur="flushOtelSettings"
                 />
               </div>
               <div class="flex items-center justify-between pt-4">
                 <label class="flex cursor-pointer items-center gap-2 text-[11px] text-stone-600">
                   <Switch
-                    :model-value="settings.usagePolicy?.enforcement ?? false"
+                    :model-value="settings.usageGovernancePolicy?.enforcement ?? false"
                     :disabled="saving"
                     data-testid="config-usage-policy-enforcement"
                     @update:model-value="handleUsagePolicyChange('enforcement', $event)"

@@ -371,9 +371,31 @@ pub fn round_usd6(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
 }
 
-/// UTC 天桶键 `YYYY-MM-DD`。
+/// 天桶键 `YYYY-MM-DD`：**本地日历日**（架构蓝图 §3.2；L3 裁决按蓝图改）。
+///
+/// 语义：按宿主本地时区切日 —— 例如 UTC+8 用户的日窗在**本地 00:00** 复位
+/// （UTC `2026-10-24T16:30Z` ⇒ 本地 `2026-10-25 00:30` ⇒ `day_key = "2026-10-25"`）。
+///
+/// 历史兼容：`day_key` 属**首写冻结**列（G1.2），已入账行**不重算**——即升级前后
+/// 可能存在少量按 UTC 切日的历史桶，属既定取舍（不得 UPDATE 改写历史）。
 pub fn day_key_for_epoch_ms(epoch_ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(epoch_ms)
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(epoch_ms)
+        .single()
+        .map(|instant| instant.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string())
+}
+
+/// 按指定固定偏移切日（测试/非本地时区场景用；语义与 [`day_key_for_epoch_ms`] 一致）。
+pub fn day_key_for_epoch_ms_with_offset(
+    epoch_ms: i64,
+    offset: chrono::FixedOffset,
+) -> String {
+    use chrono::TimeZone;
+    offset
+        .timestamp_millis_opt(epoch_ms)
+        .single()
         .map(|instant| instant.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "1970-01-01".to_string())
 }
@@ -436,7 +458,11 @@ mod tests {
             )
             .expect("select");
         assert_eq!(recorded_at_ms, 1_700_000_000_000, "recorded_at_ms 必须首写冻结");
-        assert_eq!(day_key, "2023-11-14", "day_key 必须首写冻结");
+        assert_eq!(
+            day_key,
+            day_key_for_epoch_ms(1_700_000_000_000),
+            "day_key 必须首写冻结（本地日历日）"
+        );
         assert_eq!(cost, 0.03, "可变列必须被最后一次写入更新");
         assert_eq!(model, "gpt-4o-mini", "可变列必须被最后一次写入更新");
     }
@@ -518,8 +544,8 @@ mod tests {
 
         let days = day_summaries(&conn, Some("sess-1")).expect("days");
         assert_eq!(days.len(), 2, "必须按天分成两个桶");
-        assert_eq!(days[0].day_key, "2023-11-14");
-        assert_eq!(days[1].day_key, "2023-11-15");
+        assert_eq!(days[0].day_key, day_key_for_epoch_ms(day1));
+        assert_eq!(days[1].day_key, day_key_for_epoch_ms(day2));
         assert_eq!(round_usd6(days.iter().map(|day| day.cost_usd).sum()), 3.0);
     }
 
@@ -560,6 +586,31 @@ mod tests {
         assert!(result.is_err(), "写失败必须返回 Err 供调用方忽略（绝不 panic）");
         assert_eq!(spool_len(), 1, "最终失败必须进入 spool 待重试");
         let _ = drain_spool();
+    }
+
+    /// L3 ADVISORY 3：天桶按**本地日历日**切分（蓝图 §3.2）。
+    #[test]
+    fn day_key_uses_local_calendar_day() {
+        use chrono::{FixedOffset, TimeZone};
+        // UTC 2026-10-24T16:30:00Z ⇒ UTC+8 本地 2026-10-25 00:30（跨日）。
+        let epoch_ms = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 24, 16, 30, 0)
+            .single()
+            .expect("valid timestamp")
+            .timestamp_millis();
+        let utc8 = FixedOffset::east_opt(8 * 3600).expect("valid offset");
+        assert_eq!(
+            day_key_for_epoch_ms_with_offset(epoch_ms, utc8),
+            "2026-10-25",
+            "本地 00:30 必须落入次日桶"
+        );
+        // UTC 视角同刻仍是 10-24 —— 证明实现确实按本地时区而非 UTC 切日。
+        let utc = FixedOffset::east_opt(0).expect("valid offset");
+        assert_eq!(day_key_for_epoch_ms_with_offset(epoch_ms, utc), "2026-10-24");
+        // 生产入口使用本地时区：仅在宿主时区为 UTC+8 时断言具体值（避免 CI 时区差异）。
+        if chrono::Local::now().offset().local_minus_utc() == 8 * 3600 {
+            assert_eq!(day_key_for_epoch_ms(epoch_ms), "2026-10-25");
+        }
     }
 
     /// 空库查询返回零值结构体（G4.2：禁止返回错误）。

@@ -2594,9 +2594,7 @@ fn corrupt_file_backend_falls_back_to_default_workspace() {
     let storage_path = dir.join("store.json");
     std::fs::write(&storage_path, "{bad json").unwrap();
 
-    let backend = FileSessionBackend {
-        storage_path: storage_path.clone(),
-    };
+    let backend = FileSessionBackend::new(storage_path.clone());
     let store = SessionStore::with_backend(Box::new(backend));
     let workspaces = store.list_workspaces();
     assert_eq!(workspaces.len(), 1, "损坏回退后应只剩默认 workspace");

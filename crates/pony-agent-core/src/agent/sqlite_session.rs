@@ -3007,7 +3007,6 @@ impl SessionBackend for SqliteSessionBackend {
         }
     }
 
-    /// PA-093：读取会话事件流 `(seq, branch_id, event)`（seq 升序，可截断）。
     /// Wave-7 B001：账本写入（幂等 UPSERT + 重试 1 次 + spool；失败只返回 Err 由调用方忽略）。
     fn append_usage_ledger_entry(
         &self,
@@ -3047,6 +3046,7 @@ impl SessionBackend for SqliteSessionBackend {
             .map_err(|error| error.to_string())
     }
 
+    /// PA-093：读取会话事件流 `(seq, branch_id, event)`（seq 升序，可截断）。
     fn load_turn_events(
         &self,
         session_id: &str,

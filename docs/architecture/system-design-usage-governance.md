@@ -77,13 +77,13 @@ turn 启动（turn_stream::prepare_turn 之前）
 **幂等**：`INSERT ... ON CONFLICT(session_id,turn_id) DO UPDATE`；窗口累计是 `SELECT SUM` 而非计数器 ⇒ 重启不丢、重放不重。
 
 ### 3.2 口径规则（冲突时以此为准）
-1. 跨天：按每轮结束时刻归入本地日历日，不整体归起始日。
+1. 跨天：按每轮结束时刻归入本地日历日（`day_key` 使用本地日历日，UTC+8 用户日窗在本地 00:00 复位；历史行首写冻结，不重算），不整体归起始日。
 2. 未计价：`SUM(COALESCE(cost_usd,0))` 只是"已知成本下限"；UI 必须并列 `unpriced_turns` 并加 `≥` 前缀，全未计价显示 `—`。
 3. 阈值：`usage >= threshold` 即触及（与 `cost::is_budget_exceeded` 统一）；`None`/`<=0` 视为未设置。
 4. 协议感知：账本只认 `estimate_cost_with_protocol`；`turn_persist.rs` 的 OpenAI 口径为已知缺陷（单开工单，账本不复用）。
 
 ### 3.3 决策状态机
-`Allow --usage↑--> Warn --usage↑--> Block`（单调，不可逆）；`enforcement=false` 时 `Warn/Block` 一律降为 `Allow`（但保留 `would_block` 诊断字段供 UI 提示）。
+`Allow --usage↑--> Warn --usage↑--> Block`（单调，不可逆）；`enforcement=false` ⇒ **永不 Block**（根据阈值情况降级为 `Allow` 或 `Warn`），并**保留 `would_block` 诊断位**供 UI 提示；`Block` 仅在 `enforcement=true` 且 `usage >= hard_limit` 时产生。
 
 ---
 

@@ -1319,6 +1319,8 @@ impl AgentRuntime {
                 reason, current, limit, ..
             } = &governance.decision
             {
+                // L3 B3：阻断属**预期内用户状态**，标记后跳过 issue 上报（仍会发 turn:failed 事件）。
+                crate::agent::ponysentry::mark_turn_failure_expected(&turn_id);
                 let error = format!(
                     "用量治理已阻断本轮：当前已用 ${current:.6}，上限 ${limit:.6}（触发 {reason}）。\
                      如需继续，请提高上限或关闭「强制拦截」——设置 → 用量治理 → 关闭 enforcement（一键出口）。"

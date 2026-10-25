@@ -597,6 +597,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     },
     /** Wave-7 G4：用量治理汇总（纯前端聚合或来自后端 summary） */
     usageGovernanceSummary: (state): any => {
+      // 优先消费后端 summary（若存在）
+      if ((state as any).backendGovernanceSummary) {
+        return (state as any).backendGovernanceSummary;
+      }
       let costSum = 0;
       let unpricedCount = 0;
       for (const turn of state.turnTraceHistory ?? []) {
@@ -654,8 +658,28 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     }
   },
   actions: {
-    overrideGovernanceBlock() {
+    async overrideGovernanceBlock() {
       (this as any).governanceDecision = null;
+      try {
+        const settingsStore = useSettingsStore();
+        if (settingsStore.settings.usageGovernancePolicy?.enforcement) {
+          settingsStore.settings.usageGovernancePolicy.enforcement = false;
+          await settingsStore.saveSettings();
+        }
+      } catch {
+        // ignore
+      }
+    },
+    async fetchUsageGovernanceSummary() {
+      if (!isTauriAvailable()) return;
+      try {
+        const res = await safeInvoke<any>("usage_governance_summary", { sessionId: this.sessionId });
+        if (res) {
+          (this as any).backendGovernanceSummary = res;
+        }
+      } catch {
+        // 优雅降级，未接线时不报错
+      }
     },
     resetSessionRuntimeState() {
       this.cancelDeferredPersist();
@@ -4541,27 +4565,38 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           });
 
           // 宿主层/Harness 捕获 Agent 失败事件上报 PonySentry (ADR 0028)
-          void reportError({
-            errorType: "TurnExecutionFailed",
-            message: payload.error || this.error || DEFAULT_FAILED_TURN_ERROR,
-            trace_id: failedTurnTraceId || undefined,
-            tags: {
-              source: "turn_failed_event",
-              session_id: failedSessionId || "unknown",
-              turn_id: payload.turnId,
-              provider: payload.providerName || this.providerName || "unknown",
-              model: payload.providerModel || this.providerModel || "unknown"
-            },
-            extra: {
-              turnId: payload.turnId,
-              sessionId: failedSessionId,
-              providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-              providerName: payload.providerName ?? this.providerName,
-              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-              providerModel: payload.providerModel ?? this.providerModel,
-              errorDetail: payload.error ?? this.error
-            }
-          });
+          // Wave-7 B3：用量治理阻断属于正常预期的用户状态，禁止将含有金额的 error 上报到 Sentry
+          const errDetail = payload.error || this.error || "";
+          const isGovernanceBlocked =
+            errDetail.includes("用量治理拦截") ||
+            errDetail.includes("硬限额") ||
+            errDetail.includes("limit exceeded") ||
+            errDetail.includes("Usage limit") ||
+            (payload as any).failureKind === "governance_block";
+
+          if (!isGovernanceBlocked) {
+            void reportError({
+              errorType: "TurnExecutionFailed",
+              message: payload.error || this.error || DEFAULT_FAILED_TURN_ERROR,
+              trace_id: failedTurnTraceId || undefined,
+              tags: {
+                source: "turn_failed_event",
+                session_id: failedSessionId || "unknown",
+                turn_id: payload.turnId,
+                provider: payload.providerName || this.providerName || "unknown",
+                model: payload.providerModel || this.providerModel || "unknown"
+              },
+              extra: {
+                turnId: payload.turnId,
+                sessionId: failedSessionId,
+                providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+                providerName: payload.providerName ?? this.providerName,
+                providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+                providerModel: payload.providerModel ?? this.providerModel,
+                errorDetail: payload.error ?? this.error
+              }
+            });
+          }
         }, 0);
       });
 

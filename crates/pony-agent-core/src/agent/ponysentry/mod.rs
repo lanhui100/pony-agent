@@ -87,6 +87,36 @@ pub fn is_turn_failure_capture_enabled() -> bool {
     TURN_FAILURE_CAPTURE.load(Ordering::SeqCst)
 }
 
+/// 「预期内失败」的 turn 集合（如用量治理阻断）：这类失败**不上报 issue**。
+///
+/// 依据 L3 B3 裁决：治理阻断是**用户可见的预期状态**（策略触发），不是系统故障；
+/// 上报会污染 issue 流并造成噪音（且 Block 文案含金额，属敏感/动态数字）。
+static EXPECTED_FAILURE_TURNS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// 标记某个 turn 的失败为**预期内**（不产生 issue）。调用方：治理 Block 分支。
+pub fn mark_turn_failure_expected(turn_id: &str) {
+    let turn_id = turn_id.trim();
+    if turn_id.is_empty() {
+        return;
+    }
+    let mut guard = EXPECTED_FAILURE_TURNS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.len() > 256 {
+        guard.clear();
+    }
+    guard.insert(turn_id.to_string());
+}
+
+/// 取走「预期内失败」标记（一次性；未标记 ⇒ false）。
+fn take_turn_failure_expected(turn_id: &str) -> bool {
+    let mut guard = EXPECTED_FAILURE_TURNS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.remove(turn_id)
+}
+
 /// 上报一次 turn 失败（旁路：任何异常都不影响轮次返回）。
 ///
 /// 调用方：`turn_flow::emit_stream_failed`（failed 终态唯一装配点）。
@@ -102,6 +132,10 @@ pub fn capture_turn_failure(turn_id: &str, error: &str, model: Option<&str>) {
     }
     let turn_id = turn_id.trim();
     if turn_id.is_empty() {
+        return;
+    }
+    // L3 B3：治理阻断等**预期内失败**跳过上报（保留日志，不产生 issue）。
+    if take_turn_failure_expected(turn_id) {
         return;
     }
     if !claim_turn_failure_report(turn_id) {
@@ -142,7 +176,6 @@ fn claim_turn_failure_report(turn_id: &str) -> bool {
     guard.insert(turn_id.to_string())
 }
 
-/// 排空上报队列（有界，最多 1500ms）：供 CLI/TUI 退出前调用，避免「报错即退出」丢 issue。
 // ------------------------------------- 治理子系统故障上报（Wave-7 G5.3）
 
 /// 已上报的治理故障 `(kind, policy_version)` 组合（去重：同一故障只产生一个 issue）。
@@ -209,6 +242,7 @@ pub fn testing_last_enqueued_payload() -> Option<crate::agent::ponysentry::model
     client::last_enqueued_payload()
 }
 
+/// 排空上报队列（有界，最多 1500ms）：供 CLI/TUI 退出前调用，避免「报错即退出」丢 issue。
 pub fn flush() {
     if let Ok(client) = get_global().read() {
         client.flush();
@@ -260,6 +294,50 @@ mod turn_failure_capture_tests {
         // 不同 turn 互不影响。
         let other = format!("turn-dedupe-{}", uuid::Uuid::new_v4());
         assert!(claim_turn_failure_report(&other));
+    }
+
+    /// L3 B3：治理阻断等**预期内失败**不得产生 issue（但普通失败仍照常上报）。
+    #[test]
+    fn governance_block_failure_is_not_reported() {
+        init(PonySentryConfig {
+            client_token: Some("dummy-token".to_string()),
+            enabled: true,
+            endpoint: "http://127.0.0.1:9".to_string(),
+            environment: "test".to_string(),
+            release: "test".to_string(),
+        });
+        enable_turn_failure_capture(true);
+
+        // 哨兵：先入队一条可识别的普通错误。
+        let sentinel = format!("sentinel-marker-{}", uuid::Uuid::new_v4());
+        capture_error("Sentinel", &sentinel, None);
+        let baseline = testing_last_enqueued_payload().expect("sentinel 必须入队");
+        assert!(baseline.message.as_deref().unwrap_or("").contains(&sentinel));
+
+        // 预期内失败（治理阻断）：标记后不得产生新 payload。
+        let blocked_turn = format!("turn-blocked-{}", uuid::Uuid::new_v4());
+        mark_turn_failure_expected(&blocked_turn);
+        capture_turn_failure(&blocked_turn, "用量治理已阻断本轮", Some("gpt-4o"));
+        let after_block = testing_last_enqueued_payload().expect("payload 仍在");
+        assert_eq!(
+            after_block.event_id, baseline.event_id,
+            "预期内失败必须**跳过**上报（payload 不得被覆盖）"
+        );
+
+        // 对照：未标记的普通失败照常上报。
+        let failed_turn = format!("turn-normal-{}", uuid::Uuid::new_v4());
+        capture_turn_failure(&failed_turn, "provider unreachable", Some("gpt-4o"));
+        let after_normal = testing_last_enqueued_payload().expect("普通失败必须入队");
+        assert_ne!(
+            after_normal.event_id, baseline.event_id,
+            "普通 turn 失败必须照常产生 issue"
+        );
+        assert_eq!(
+            after_normal.trace_id, None,
+            "无活跃 turn 上下文时不得凭空生成 trace_id"
+        );
+
+        enable_turn_failure_capture(false);
     }
 
     /// 空 turn_id 不占用上报权（畸形输入不污染去重表）。

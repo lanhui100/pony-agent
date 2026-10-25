@@ -479,6 +479,8 @@ impl AgentRuntime {
                 reason, current, limit, ..
             } = &governance.decision
             {
+                // L3 B3：同步入口同样把治理阻断标记为「预期内失败」（不产生 issue）。
+                crate::agent::ponysentry::mark_turn_failure_expected(&sync_turn_id);
                 let error = format!(
                     "用量治理已阻断本轮：当前已用 ${current:.6}，上限 ${limit:.6}（触发 {reason}）。\
                      如需继续，请提高上限或关闭「强制拦截」——设置 → 用量治理 → 关闭 enforcement（一键出口）。"

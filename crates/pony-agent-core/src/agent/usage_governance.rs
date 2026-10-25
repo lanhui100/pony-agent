@@ -308,6 +308,7 @@ pub fn window_label(policy: &UsagePolicy) -> &'static str {
 pub fn snapshot_for_store(
     store: &crate::agent::session::SessionStore,
     session_id: Option<&str>,
+    window: PolicyWindow,
 ) -> Result<UsageSnapshot, String> {
     use crate::agent::usage_ledger::{day_key_for_epoch_ms, now_epoch_ms, LedgerScope};
     let day_key = day_key_for_epoch_ms(now_epoch_ms());
@@ -318,10 +319,16 @@ pub fn snapshot_for_store(
         None => crate::agent::usage_ledger::WindowSummary::zero(),
     };
     let day_summary = store.usage_ledger_window_summary(&LedgerScope::Day(day_key))?;
+    // L3 ADVISORY 修复：`session` 行天然包含在 `day` 行内，二者相加会重复计数；
+    // 改为**按所判窗口取对应值**（Session ⇒ 会话历史；Day ⇒ 当天桶）。
+    let unpriced_turns = match window {
+        PolicyWindow::Session => session_summary.unpriced_turns,
+        PolicyWindow::Day => day_summary.unpriced_turns,
+    };
     Ok(UsageSnapshot {
         session_cost_usd: session_summary.cost_usd,
         day_cost_usd: day_summary.cost_usd,
-        unpriced_turns: session_summary.unpriced_turns + day_summary.unpriced_turns,
+        unpriced_turns,
     })
 }
 
@@ -336,8 +343,13 @@ pub fn evaluate_with_store(
     session_id: Option<&str>,
 ) -> GovernanceOutcome {
     let policy = policy();
-    let snapshot = snapshot_for_store(store, session_id);
-    let outcome = evaluate(snapshot.map(|snapshot| snapshot), &policy);
+    let snapshot = snapshot_for_store(store, session_id, policy.window);
+    // L3 ADVISORY 修复：span 必须写**真实**未计价 turn 数（此前恒 0 属 telemetry 说谎）。
+    let unpriced_turns = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.unpriced_turns)
+        .unwrap_or(0);
+    let outcome = evaluate(snapshot, &policy);
 
     // G5.1：宏观决策 span（白名单属性）。
     let mut span = crate::agent::otel::start_governance_decide_span();
@@ -350,7 +362,7 @@ pub fn evaluate_with_store(
         outcome.decision.label(),
         reason,
         &outcome.policy_version,
-        0,
+        unpriced_turns,
     );
     drop(span);
 
@@ -426,7 +438,7 @@ pub fn summary_for_store(
     store: &crate::agent::session::SessionStore,
     session_id: Option<&str>,
 ) -> UsageGovernanceSummaryView {
-    use crate::agent::usage_ledger::{day_key_for_epoch_ms, now_epoch_ms, LedgerScope, WindowSummary};
+    use crate::agent::usage_ledger::LedgerScope;
     let mut degraded = false;
     let session = match session_id.filter(|value| !value.trim().is_empty()) {
         Some(session_id) => match store
@@ -460,9 +472,6 @@ pub fn summary_for_store(
             Vec::new()
         }
     };
-    // 今日窗口的“未计价”也并入会话计数之外的单查询：保持契约形状即可（不额外暴露字段）。
-    let _ = (day_key_for_epoch_ms(now_epoch_ms()), WindowSummary::zero());
-
     UsageGovernanceSummaryView {
         session,
         days,
@@ -815,6 +824,50 @@ mod tests {
         assert_eq!(summary.days[0].unpriced_turns, 1);
         assert!(!summary.governance_degraded);
         assert_eq!(summary.policy_version.len(), 12);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L3 ADVISORY 2：`unpriced_turns` 必须按**所判窗口**取值，不得 session+day 重复计数。
+    #[test]
+    fn snapshot_unpriced_turns_follows_window_without_double_counting() {
+        use crate::agent::session::{SeparateTraceTableMode, SessionStore};
+        use crate::agent::usage_ledger::LedgerEntry;
+
+        let _guard = governance_test_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "pony-gov-window-{}-{}",
+            std::process::id(),
+            crate::agent::usage_ledger::now_epoch_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                dir.join("window.db"),
+                SeparateTraceTableMode::WriteSeparate,
+            ),
+        ));
+
+        let now = crate::agent::usage_ledger::now_epoch_ms();
+        let yesterday = now - 86_400_000;
+        // 今天 1 条未计价 + 昨天 1 条未计价（同一会话）。
+        for (turn, at) in [("turn-today", now), ("turn-yesterday", yesterday)] {
+            let mut entry = LedgerEntry::unpriced(
+                "sess-win", turn, at, "openai", "unknown-model", "openai-completions", 10, 5, 0,
+            );
+            entry.day_key = crate::agent::usage_ledger::day_key_for_epoch_ms(at);
+            store.append_usage_ledger_entry(&entry).expect("append");
+        }
+
+        let session_scoped = snapshot_for_store(&store, Some("sess-win"), PolicyWindow::Session)
+            .expect("session snapshot");
+        assert_eq!(session_scoped.unpriced_turns, 2, "Session 窗口应统计全部历史未计价 turn");
+        let day_scoped = snapshot_for_store(&store, Some("sess-win"), PolicyWindow::Day)
+            .expect("day snapshot");
+        assert_eq!(
+            day_scoped.unpriced_turns, 1,
+            "Day 窗口只统计当天；若实现相加会得到 3（重复计数）"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

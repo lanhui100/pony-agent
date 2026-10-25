@@ -1,0 +1,109 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contracts/wave-7-usage-governance.md",
+    "docs/architecture/system-design-usage-governance.md",
+    "docs/decisions/0048-usage-governance-enforcement.md",
+    "crates/pony-agent-core/src/agent/usage_ledger.rs",
+    "crates/pony-agent-core/src/agent/usage_governance.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/agent/session/backend.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/session/file_backend.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
+    "crates/pony-agent-core/src/agent/app_settings.rs",
+    "crates/pony-agent-core/src/agent/control_plane/query_commands.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src-tauri/src/lib.rs",
+    "src/stores/runtime.ts",
+    "src/stores/settings.ts",
+    "src/types/settings.ts",
+    "src/components/HomeStatusPanel.vue",
+    "src/components/config/ConfigGeneralSection.vue",
+    "tests/wave-7-usage-governance.spec.ts"
+  ],
+  "findings": [
+    {
+      "file": "src/types/settings.ts",
+      "line": 18,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "python3 - <<'PY'\nimport pathlib\nfe = pathlib.Path('src/types/settings.ts').read_text()\nbe = pathlib.Path('crates/pony-agent-core/src/agent/app_settings.rs').read_text()\nassert 'usagePolicy?: {' in fe and 'hard_limit_usd' in fe and 'usageGovernancePolicy' not in fe\nassert 'pub usage_governance_policy' in be and '#[serde(rename_all = \"camelCase\")]' in be\nprint('MISMATCH: FE writes key usagePolicy / fields hard_limit_usd+soft_ratio, BE serde only reads usageGovernancePolicy / hardLimitUsd+softRatio')\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+      "line": 282,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "python3 - <<'PY'\nimport pathlib\ns = pathlib.Path('crates/pony-agent-core/src/agent/runtime/turn_persist.rs').read_text()\ni = s.index('fn append_usage_ledger')\nblk = s[i:i+1800]\nassert 'input_tokens.unwrap_or(0)' in blk and 'output_tokens.unwrap_or(0)' in blk\nassert 'LedgerEntry::priced' in blk\nt = pathlib.Path('crates/pony-agent-core/src/agent/turn_flow.rs').read_text()\nj = t.index('fn turn_event_cost_usd')\nassert 'input_tokens?' in t[j:j+700]\nprint('K2 口径: usage 缺失 => cost 缺席; 账本口径: usage 缺失 => priced=1 / cost_usd=0.0（伪造零成本）')\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 1322,
+      "rule": "LEAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "python3 - <<'PY'\nimport pathlib\ns = pathlib.Path('crates/pony-agent-core/src/agent/runtime/turn_stream.rs').read_text()\ni = s.index('用量治理已阻断本轮')\nseg = s[i:i+400]\nassert '${current:.6}' in seg and '${limit:.6}' in seg\nf = pathlib.Path('crates/pony-agent-core/src/agent/turn_flow.rs').read_text()\nk = f.index('pub fn emit_stream_failed')\nassert 'capture_turn_failure(' in f[k:k+1400]\nv = pathlib.Path('crates/pony-agent-core/src/agent/runtime/turn_sync.rs').read_text()\nassert '${current:.6}' in v\nprint('含 USD 金额的阻断文案经 emit_turn_failed -> ponysentry::capture_turn_failure（CLI/TUI 引导无条件 enable=true）/ 前端 reportError(message=payload.error) 进入 issue payload')\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/usage_governance.rs",
+      "line": 353,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 - <<'PY'\nimport pathlib, re\ns = pathlib.Path('crates/pony-agent-core/src/agent/usage_governance.rs').read_text()\ni = s.index('let mut span = crate::agent::otel::start_governance_decide_span()')\nassert re.search(r'&outcome\\.policy_version,\\s*\\n\\s*0,\\s*\\n', s[i:i+400])\nprint('白名单属性 governance.unpriced_turns 恒写 0（真实值在 snapshot 中 discarded），telemetry 事实错误')\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/usage_governance.rs",
+      "line": 324,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 - <<'PY'\nimport pathlib\ns = pathlib.Path('crates/pony-agent-core/src/agent/usage_governance.rs').read_text()\nassert 'unpriced_turns: session_summary.unpriced_turns + day_summary.unpriced_turns' in s\nprint('session 范围已含当天轮次，再叠加 day 范围 => 同一未计价轮被重复计数')\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/usage_ledger.rs",
+      "line": 374,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'chrono::Utc' crates/pony-agent-core/src/agent/usage_ledger.rs; grep -n '本地日历日' docs/architecture/system-design-usage-governance.md"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 615,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'policy_version: \"v1\"\\|governance_degraded: false\\|days: \\[\\]' src/stores/runtime.ts; grep -rn 'usage_governance_summary' src/ src-tauri/src/lib.rs | grep -v '^src-tauri' || echo 'backend IPC usage_governance_summary 零前端消费者（死命令）'"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 637,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -rn 'governanceDecision' src/ | grep -v 'runtime.ts'; echo '^ 无任何生产写入点（仅测试手动赋值）——拦截横幅永不可达'; grep -n 'overrideGovernanceBlock' -A 3 src/stores/runtime.ts; ls -l .dev-team/evidence/wave-7/ui-block.png"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/file_backend.rs",
+      "line": 99,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'PRAGMA busy_timeout\\|PRAGMA journal_mode' crates/pony-agent-core/src/agent/session/file_backend.rs || echo 'CLI 侧车账本连接未设 busy_timeout/WAL，且每次读写新建连接并重跑 DDL（SQLITE_BUSY => 静默 fail-open 放行）'"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
+      "line": 145,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '143,152p' crates/pony-agent-core/src/agent/ponysentry/mod.rs; sed -n '3008,3014p' crates/pony-agent-core/src/agent/sqlite_session.rs"
+    },
+    {
+      "file": "docs/architecture/system-design-usage-governance.md",
+      "line": 86,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n '一律降为' docs/architecture/system-design-usage-governance.md; grep -n 'Warn { ratio: 1.0' .dev-team/contracts/wave-7-usage-governance.md"
+    }
+  ]
+}

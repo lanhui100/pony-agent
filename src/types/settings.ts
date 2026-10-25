@@ -14,11 +14,11 @@ export type AppSettings = {
   otelSamplingRatio?: number;
   /** Wave-5 K3：会话成本预算上限 (USD)。<= 0 或未设置时视为无预算限制。 */
   costBudgetUsd?: number | null;
-  /** Wave-7 G2：用量治理策略配置 */
-  usagePolicy?: {
+  /** Wave-7 G2：用量治理策略配置（与 Rust serde camelCase 严格一致） */
+  usageGovernancePolicy?: {
     window?: "session" | "day";
-    soft_ratio?: number | null;
-    hard_limit_usd?: number | null;
+    softRatio?: number | null;
+    hardLimitUsd?: number | null;
     enforcement?: boolean;
   };
 };

@@ -129,6 +129,8 @@
 8. **脏数据/非法策略 (NaN/负值)**：`limit = NaN` → `Allow { would_block: false }`（degraded）。
 9. **单调性穷举验证**：测试从 0.0 逐步递增 cost 至 20.0，决策状态机单调推进。
 
+*脚注：`Warn { would_block: true }` 出现在 `enforcement = false` 且 `usage >= hard_limit` 时（如上述用例 #5 与 #6），语义属于向前端透出的“预告拦截”，**绝不阻断**当前与后续 turn 的执行。*
+
 ---
 
 ## G3 Fail-Open 韧性契约
