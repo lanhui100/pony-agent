@@ -10395,12 +10395,7 @@ const WAVE15_AGGREGATE_INPUT: u64 = 1_080_000;
 const WAVE15_AGGREGATE_OUTPUT: u64 = 210;
 
 fn wave15_evidence_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join(".dev-team")
-        .join("evidence")
-        .join("wave15")
+    std::env::temp_dir().join("pony-wave15-evidence")
 }
 
 fn wave15_write_evidence(file_name: &str, document: &serde_json::Value) {
