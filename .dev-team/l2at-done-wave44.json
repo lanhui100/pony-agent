@@ -1,0 +1,100 @@
+{
+  "wave": "wave-44",
+  "status": "done",
+  "role": "test-agent",
+  "baseline_commit": "ab54b06",
+  "contract_source": ".dev-team/contract-matrix-wave44.md",
+  "contract_status": "FROZEN (protocol-agent 已产出，红相以契约为唯一口径)",
+  "red_command": "npx vitest run tests/acceptance/wave44 --reporter=verbose",
+  "red_exit_code": 1,
+  "red_result": "Test Files 3 failed (3) | Tests 8 failed (8) | 0 pre-passing",
+  "red_receipts": {
+    "log": ".dev-team/wave44-red-receipts.log",
+    "structured_receipt": ".dev-team/wave44-red-receipt.json",
+    "vitest_json": ".dev-team/wave44-red-vitest.json",
+    "purity_report": ".dev-team/wave44-red-purity.json",
+    "purity_exit_code": 0,
+    "purity_verdict": "pure_red=true"
+  },
+  "regression_check": {
+    "command": "npx vitest run",
+    "exit_code": 1,
+    "note": "3 failed = 本波 3 个新 spec；1026 passed / 10 skipped 与 regression-baseline-wave44.json 完全一致（存量零回归）"
+  },
+  "files": [
+    "tests/acceptance/wave44/pa115-host-read-timeout.spec.ts",
+    "tests/acceptance/wave44/pa135-composition-undo.spec.ts",
+    "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts"
+  ],
+  "tests": [
+    {
+      "id": "PA115-T1",
+      "file": "tests/acceptance/wave44/pa115-host-read-timeout.spec.ts",
+      "kind": "L2-T",
+      "assertion": "host 读永不 settle ⇒ initializeSessions 在 HYDRATION_TIMEOUT_MS+1000ms 内 resolve（非 pending）且 sessionError 以「初始化对话失败：」开头并含「超时」、agentRuntimeStatus={mode:error,label=sessionError.trim()}≠「正在加载最近对话…」、sessionOperation=null、phase 回到快照；随后正常 mock 复跑可恢复（sessionId/messages/sessionError=null），正常路径 host 读恰好 1 次"
+    },
+    {
+      "id": "PA115-T2",
+      "file": "tests/acceptance/wave44/pa115-host-read-timeout.spec.ts",
+      "kind": "L2-AT",
+      "assertion": "对抗：host 读在 baseline+5000ms 才 resolve ⇒ 初始化仍在截止期内有界 resolve + 可见失败；迟到 resolve 不得改写 sessionId/phase/messages（迟到历史文本不得被回填），且 load_session_runtime_view 仅调用 1 次（无重试风暴）"
+    },
+    {
+      "id": "PA135-T1",
+      "file": "tests/acceptance/wave44/pa135-composition-undo.spec.ts",
+      "kind": "L2-T",
+      "assertion": "组合态(isComposing=true) Ctrl+Z ⇒ runtimeStore.checkoutHistoryNode 1 次（arg0=node-root）、event.defaultPrevented=true、submitTurn 0 次；同用例内正控：非组合态 Ctrl+Z 仍撤销 1 次、非组合态 Enter 仍 submitTurn 1 次"
+    },
+    {
+      "id": "PA135-T2",
+      "file": "tests/acceptance/wave44/pa135-composition-undo.spec.ts",
+      "kind": "L2-AT",
+      "assertion": "对抗：keyCode=229 组合态 Ctrl+Z ⇒ 撤销 1 次且 defaultPrevented；组合态 Ctrl+Shift+Z ⇒ 撤销 0 次（!shiftKey 约束保持）；组合态 Enter 与 Shift+Enter ⇒ submitTurn 0 次且撤销调用数不增"
+    },
+    {
+      "id": "PA135-T3",
+      "file": "tests/acceptance/wave44/pa135-composition-undo.spec.ts",
+      "kind": "L2-AT",
+      "assertion": "对抗：textarea 处于 document.activeElement（真实焦点）时组合态 Cmd+Z(metaKey) ⇒ checkoutHistoryNode 恰好 1 次（不得经 window handleWindowKeydown 双触发）、defaultPrevented=true、submitTurn 0 次"
+    },
+    {
+      "id": "PA117-T1",
+      "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
+      "kind": "L2-T",
+      "assertion": "默认关闭（vi.stubEnv DEV=false + 无开关）触发 wheel debug 事件序列 ⇒ [workspace-scroll] console.info 0 次、__ponyScrollDebugBuffer 长度 0 且 __ponyScrollDebugLatest undefined、该序列 getBoundingClientRect 次数严格小于启用态（差≥1）；启用态为有效参照（logs>0 且 rect>0）"
+    },
+    {
+      "id": "PA117-T2",
+      "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
+      "kind": "L2-AT",
+      "assertion": "开关矩阵：localStorage pony-agent.debug.workspace-scroll=\"true\"(DEV=false) ⇒ 输出恢复且 payload 含 distanceToBottom/viewportResolved/composerTop；=\"false\"(DEV=true) ⇒ kill switch 生效 0 输出 0 缓冲；URL ?debug=1 与 ?debug=scroll(DEV=false) ⇒ 开启"
+    },
+    {
+      "id": "PA117-T3",
+      "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
+      "kind": "L2-AT",
+      "assertion": "对抗：同一已挂载实例内 关→开→关 即时生效（开关不得缓存）——关闭态 0 输出，置 \"true\" 后输出>0（不重挂载），置 \"false\" 后输出 0 且 getBoundingClientRect 0 次"
+    }
+  ],
+  "adversarial_coverage": {
+    "L2-AT": [
+      "PA115-T2",
+      "PA135-T2",
+      "PA135-T3",
+      "PA117-T2",
+      "PA117-T3"
+    ],
+    "L2-T": [
+      "PA115-T1",
+      "PA135-T1",
+      "PA117-T1"
+    ],
+    "notes": "每个 spec 至少 1 条 L2-AT 对抗/边界用例；无 skip/todo/吞异常；无 sleep 式等待（fake timers / 同步派发）。"
+  },
+  "contract_ambiguities": [
+    "PA-115：契约把 PA115-T1 定义为正常路径回归（修复前天然绿），与 Lead「8/8 全红、0 预通过」硬门禁冲突；本文件将正常路径断言并入 PA115-T1 的恢复阶段（hang → 超时失败 → 换正常 mock 复跑），既覆盖契约 T1 语义又保持红相。",
+    "PA-117：契约 §2.3 冻结的专用开关 key/URL 参数（pony-agent.debug.workspace-scroll、?debug=1|scroll）与既有 isDebugLoggingEnabled 并存；测试只使用契约口径，并在 afterEach 复位 URL/localStorage/DEV，避免污染其它用例。",
+    "PA-117：契约 T1 要求缓冲「不增长」（未强制数组不存在），故只断言 length=0 与 latest===undefined，未锁死 __ponyScrollDebugBuffer 是否被创建。",
+    "PA-135：契约要求断言 preventDefault；jsdom 中 event.defaultPrevented 可稳定观测（已在正控实测 true），未额外断言 preventDefault 调用次数。"
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "wave": "wave-44",
+  "phase": "red",
+  "head": "ab54b06",
+  "command": "npx vitest run tests/acceptance/wave44 --reporter=json",
+  "status": "FAIL",
+  "exit_code": 1,
+  "num_total": 8,
+  "num_failed": 8,
+  "num_passed": 0,
+  "contract_source": ".dev-team/contract-matrix-wave44.md",
+  "failures": [
+    {
+      "file": "pa115-host-read-timeout.spec.ts",
+      "title": "PA115-T1: 宿主读永不 settle → 有界 resolve + 可见失败 + 状态复位，随后正常宿主读可恢复",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected false to be true // Object.is equality",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa115-host-read-timeout.spec.ts:247:35"
+    },
+    {
+      "file": "pa115-host-read-timeout.spec.ts",
+      "title": "PA115-T2 (L2-AT 对抗): 宿主读在 baseline 超时 + 5s 后才 resolve → 仍须有界收敛，且迟到结果不得改写状态",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected false to be true // Object.is equality",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa115-host-read-timeout.spec.ts:297:35"
+    },
+    {
+      "file": "pa117-scroll-debug-log.spec.ts",
+      "title": "PA117-T1: 默认关闭（DEV=false + 无开关）时零日志、零缓冲写入，且布局读数严格少于启用态",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected 2 to be +0 // Object.is equality",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:335:27"
+    },
+    {
+      "file": "pa117-scroll-debug-log.spec.ts",
+      "title": "PA117-T2 (L2-AT 开关矩阵): localStorage true/false 与 URL ?debug=1|scroll 必须按契约优先级生效",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected 2 to be +0 // Object.is equality",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:365:29"
+    },
+    {
+      "file": "pa117-scroll-debug-log.spec.ts",
+      "title": "PA117-T3 (L2-AT 对抗): 同一已挂载实例内 关→开→关 必须即时生效（开关不得被缓存）",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected [ { …(25) }, { …(26) } ] to have a length of +0 but got 2",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:397:35"
+    },
+    {
+      "file": "pa135-composition-undo.spec.ts",
+      "title": "PA135-T1: 组合态 Ctrl+Z 必须撤销（1 次）且阻止默认；非组合态撤销/发送正控保持",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected \"wrappedAction\" to be called 1 times, but got 0 times",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa135-composition-undo.spec.ts:320:25"
+    },
+    {
+      "file": "pa135-composition-undo.spec.ts",
+      "title": "PA135-T2 (L2-AT 对抗): keyCode=229 组合态 Ctrl+Z 同样撤销；修饰键约束与组合态 Enter 不发送保持",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected \"wrappedAction\" to be called 1 times, but got 0 times",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa135-composition-undo.spec.ts:367:25"
+    },
+    {
+      "file": "pa135-composition-undo.spec.ts",
+      "title": "PA135-T3 (L2-AT 对抗): 输入框持焦时组合态 Cmd+Z 撤销恰好 1 次（不得经 window 监听双触发）",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected \"wrappedAction\" to be called 1 times, but got 0 times",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa135-composition-undo.spec.ts:400:25"
+    }
+  ]
+}
