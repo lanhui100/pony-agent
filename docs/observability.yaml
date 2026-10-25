@@ -1,0 +1,56 @@
+# pony-agent 的可观测性适用性声明
+# 形状：~/.agents/skills/observability-onboarding/references/declaration.schema.json
+# 判定：声明说「该不该有」，巡检说「实际有没有」，两者交叉才是结论（规则家：declaration-rubric.md）。
+# 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
+service: pony-agent
+kind: desktop
+reviewed_at: "2026-10-25"
+
+dimensions:
+  tracing:
+    applicable: true
+    # OTel 初始化/导出/资源属性的唯一落点（span 与 resource 构造、配置解析、traceparent 注入器都在这个模块）
+    anchor: crates/pony-agent-core/src/agent/otel/mod.rs
+  issues:
+    applicable: true
+    # PonySentry ingest 客户端（事件上报/幂等键 event_id/trace_id 回填/重试都在这里）
+    anchor: crates/pony-agent-core/src/agent/ponysentry/client.rs
+  metrics:
+    applicable: false
+    reason: >-
+      桌面端（Tauri）+ CLI/TUI + headless harness 交付形态：进程随用户窗口启停，无常驻监听地址、
+      无 Service、不进集群，Prometheus pull 模型的前提（稳定可达的 /metrics）结构上不成立。
+      这不是「还没接」，而是这套接法不适用于该交付形态；为让巡检变绿而伪造 /metrics 已被明确拒绝。
+  logs:
+    applicable: false
+    reason: >-
+      日志采集是节点侧 fluentd 按容器日志路径白名单（/var/log/containers/*.log）tail；
+      桌面端进程不在容器里、不产生该路径，节点侧采集结构上不适用。Wave-4 起桌面端日志已落
+      `<app_data_dir>/logs/pony-agent.log`（单行 JSON + trace_id + 512KiB 轮转），但那是用户数据面
+      的本地取证面；不上送 Loki 仍是结构性选择而非缺口。
+
+# enforcement_points 刻意留空：本仓当前没有满足「唯一合法实现路径」的横切点，详见 note。
+# schema 规定：只声明真实存在且确实是唯一路径的点；没有就不要编（编出来的收口点会让门禁一落地就红）。
+note: >-
+  【收口点待建｜建议进 OBS-GOV backlog】
+  (0) Wave-4 已收敛但**未达 enforcement_point 标准**（故暂不声明）：
+      traceparent 注入收敛为单一 helper `otel::with_current_traceparent` /
+      `traceparent_header_map`（provider ×4、model_catalog、tools ×2、PonySentry worker 共 8 点
+      全部经它注入，insert 语义防重复）；OTel 配置解析收敛为 `otel::resolve_config`
+      （settings > env > default，缺省公网端点 https://otel.ponyjob.top）；
+      trace_id 语义已分离：`exported_trace_id()` 供 issue/会话 DTO，`current_trace_id()` 供日志/traceparent。
+      不写 enforcement_point 的理由：reqwest 客户端本身仍是 4 处直连，helper 只能约束「调用者主动调它」，
+      无法用 forbidden 正则可靠拦截「新增客户端却不调 helper」，写了会造成假绿。
+  (1) http_client：无统一网络出口 —— Rust 侧 4 处直接 reqwest::Client
+      （agent/otel/mod.rs、agent/tools.rs、agent/provider/mod.rs、agent/ponysentry/client.rs），
+      前端另有直接 fetch（src/lib/telemetry.ts、src/lib/update-check.ts）。
+  (2) error_boundary：无唯一边界 —— 前端 src/main.ts 有全局 errorHandler/unhandledrejection，
+      Rust 侧多处 catch_unwind 与各自上报路径尚未收敛到一个 re-export 边界。
+  (3) error_classifier：crates/pony-agent-core/src/agent/error_code.rs 提供 ErrorCode/ErrorCategory，
+      但 retry.rs 的 classify 与各 provider 仍各自分类（该模块头注释亦写明「只新增不改旧分支」），
+      故它不是唯一分类器。
+  (4) issue 上报存在两条实现：前端 src/lib/telemetry.ts 直接 fetch ingest，Rust 走
+      agent/ponysentry/client.rs。
+  (5) 无 journey.yaml（anchor_events 机制未启用）。
+  收口点建好之后再按 schema 补 enforcement_points（path + guarantees + forbidden_in_other_files），
+  且顺序是先确认「当前无违规」再写 forbidden，避免门禁一落地就红。
