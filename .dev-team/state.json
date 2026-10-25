@@ -82,7 +82,7 @@
           "write_scopes": [
             "src/stores/runtime.ts"
           ],
-          "status": "in_progress"
+          "status": "completed"
         },
         "task-4": {
           "owner": "executor-beta",
@@ -91,7 +91,7 @@
             "src/lib/useTimelineAutoScroll.ts",
             "src/lib/runtime/utils.ts"
           ],
-          "status": "in_progress"
+          "status": "completed"
         }
       },
       "gates": {
@@ -100,7 +100,16 @@
         "gate1_review": "plan-A PASS(6 adv), plan-B FAIL(1 BLOCKING: draft rollback) -> adopted; re-review-B FAIL(1 BLOCKING: call-site timeout unpinned) -> adopted (mutant killed)",
         "red_phase": "8/8 red, dev-red-purity PASS (pure_red=true)",
         "machine_write_scope": "git diff 4 src files == write_scopes; blast keywords 0; union diff 54 lines",
-        "observability": "check-declaration EXIT 0; audit-diff EXIT 1 (WARN zero enforcement points, accepted)"
+        "observability": "check-declaration EXIT 0; audit-diff EXIT 1 (WARN zero enforcement points, accepted)",
+        "l3_reviews": "A PASS(3 adv); B FAIL(1 BLOCKING streamDebugState) -> fixed -> recheck PASS(2 adv); L3-P PASS(0 blocking/3 adv)",
+        "final": {
+          "vitest": "8/8 passed",
+          "full_suite": "102 files/1034 passed/10 skipped",
+          "build": "EXIT 0",
+          "typecheck": "EXIT 0",
+          "check_declaration": "EXIT 0",
+          "audit_diff": "EXIT 1 (WARN zero enforcement points, accepted)"
+        }
       },
       "observability": {
         "applicable": true,
@@ -115,6 +124,13 @@
         "full_suite": "102 files/1034 passed/10 skipped EXIT 0",
         "build": "EXIT 0",
         "typecheck": "EXIT 0"
+      },
+      "green_commit": "367f7c8",
+      "tag": "wave-44",
+      "closeout": {
+        "dev_server": "vite 127.0.0.1:4176 HTTP 200 (kept running per user request)",
+        "preview": "killed",
+        "worktree": "clean"
       }
     }
   ],
