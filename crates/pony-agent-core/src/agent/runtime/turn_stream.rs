@@ -1301,6 +1301,44 @@ impl AgentRuntime {
         // seeded into this turn's provider context.
         let ask_injection = self.take_pending_ask_injection(facts.run_id.as_deref());
         let turn_started_at = Instant::now();
+
+        // Wave-7 B003：**turn 启动前**的用量治理判定（一次性；只在入口，绝不中断进行中的 turn）。
+        // fail-open：账本不可读/策略非法 ⇒ Allow + governance_degraded（G3），不会进这里的分支。
+        {
+            let governance = {
+                let store = self.sessions.read().unwrap_or_else(|error| {
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+                    error.into_inner()
+                });
+                crate::agent::usage_governance::evaluate_with_store(
+                    &store,
+                    input.session_id.as_deref(),
+                )
+            };
+            if let crate::agent::usage_governance::Decision::Block {
+                reason, current, limit, ..
+            } = &governance.decision
+            {
+                let error = format!(
+                    "用量治理已阻断本轮：当前已用 ${current:.6}，上限 ${limit:.6}（触发 {reason}）。\
+                     如需继续，请提高上限或关闭「强制拦截」——设置 → 用量治理 → 关闭 enforcement（一键出口）。"
+                );
+                emit_turn_failed(
+                    sink,
+                    turn_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    self.telemetry_builder.failed_trace_empty_input(),
+                    error,
+                    input.session_id.clone(),
+                );
+                otel_turn_scope.set_phase("failed");
+                return;
+            }
+        }
+
         let prepared = match self.prepare_turn(&input, true, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {

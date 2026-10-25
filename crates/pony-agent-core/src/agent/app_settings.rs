@@ -85,6 +85,11 @@ pub struct AppSettings {
     /// `None` / `null` / `<= 0.0` 一律视为未设置预算；任何情况下不得拦截用户请求。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_budget_usd: Option<f64>,
+    /// 用量治理策略（Wave-7，落盘键 `usageGovernancePolicy`；`None` ⇒ 默认策略 = 不启用拦截）。
+    ///
+    /// 契约 G2：`enforcement` 默认 `false`（纯软告警）；只有用户显式 opt-in 才阻断**新** turn。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_governance_policy: Option<crate::agent::usage_governance::UsagePolicy>,
 }
 
 impl std::fmt::Debug for AppSettings {
@@ -104,6 +109,7 @@ impl std::fmt::Debug for AppSettings {
             .field("otel_service_name", &self.otel_service_name)
             .field("otel_sampling_ratio", &self.otel_sampling_ratio)
             .field("cost_budget_usd", &self.cost_budget_usd)
+            .field("usage_governance_policy", &self.usage_governance_policy)
             .finish()
     }
 }
@@ -142,6 +148,8 @@ struct AppSettingsStorage {
     otel_sampling_ratio: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cost_budget_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage_governance_policy: Option<crate::agent::usage_governance::UsagePolicy>,
 }
 
 impl From<AppSettingsStorage> for AppSettings {
@@ -155,6 +163,7 @@ impl From<AppSettingsStorage> for AppSettings {
             otel_service_name: value.otel_service_name,
             otel_sampling_ratio: value.otel_sampling_ratio,
             cost_budget_usd: value.cost_budget_usd,
+            usage_governance_policy: value.usage_governance_policy,
         }
     }
 }
@@ -170,6 +179,7 @@ impl From<AppSettings> for AppSettingsStorage {
             otel_service_name: value.otel_service_name,
             otel_sampling_ratio: value.otel_sampling_ratio,
             cost_budget_usd: value.cost_budget_usd,
+            usage_governance_policy: value.usage_governance_policy,
         }
     }
 }

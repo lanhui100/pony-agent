@@ -58,6 +58,16 @@ pub const ATTR_AGENT_TURN_SPEED_TOKENS_PER_SECOND: &str = "agent.turn.speed.toke
 /// 单次 LLM 调用成本（USD，f64）。Wave-5 K4：未知模型/门禁关闭时**不输出该键**。
 pub const ATTR_GEN_AI_COST_USD: &str = "gen_ai.cost.usd";
 
+/// Wave-7 G5：治理决策 span 名（宏观调度入口，唯一允许的治理 span）。
+pub const SPAN_GOVERNANCE_DECIDE: &str = "governance.decide";
+
+/// 治理 span 属性白名单（G5.1；**严禁**扩展为金额/阈值等动态数字）。
+pub const ATTR_GOVERNANCE_WINDOW: &str = "governance.window";
+pub const ATTR_GOVERNANCE_DECISION: &str = "governance.decision";
+pub const ATTR_GOVERNANCE_REASON: &str = "governance.reason";
+pub const ATTR_GOVERNANCE_POLICY_VERSION: &str = "governance.policy_version";
+pub const ATTR_GOVERNANCE_UNPRICED_TURNS: &str = "governance.unpriced_turns";
+
 /// 整轮 turn 聚合成本（USD，f64）。Wave-5 K4：无有效计价时**不输出该键**（严禁写 0.0）。
 pub const ATTR_AGENT_TURN_COST_USD: &str = "agent.turn.cost.usd";
 
@@ -1373,6 +1383,77 @@ impl Drop for LlmSpanGuard {
             if let Some(cost) = self.cost_usd {
                 span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
             }
+            span.end();
+        }
+    }
+}
+
+/// 打开治理决策 span（`governance.decide`），返回守卫（Drop 即结束）。
+///
+/// 契约 G5.1：**只**在宏观决策调度入口使用；纯函数内部严禁加 span。
+/// 门禁关闭/无 provider 时返回空操作守卫（零分配零导出）。
+pub fn start_governance_decide_span() -> GovernanceDecideGuard {
+    if !spans_allowed() {
+        return GovernanceDecideGuard { span: None };
+    }
+    let span = start_child_span(
+        SPAN_GOVERNANCE_DECIDE,
+        vec![KeyValue::new(
+            ATTR_GEN_AI_OPERATION_NAME,
+            "governance.decide",
+        )],
+    );
+    GovernanceDecideGuard { span }
+}
+
+/// 治理决策 span 守卫；只允许写入 G5 白名单属性。
+pub struct GovernanceDecideGuard {
+    span: Option<opentelemetry_sdk::trace::Span>,
+}
+
+impl GovernanceDecideGuard {
+    /// 记录决策判定结果（白名单属性；缺失值不输出键）。
+    ///
+    /// 参数：窗口标签、决策标签、原因标签、策略版本、未计价 turn 数。
+    pub fn record_verdict(
+        &mut self,
+        window: &str,
+        decision: &str,
+        reason: Option<&str>,
+        policy_version: &str,
+        unpriced_turns: u64,
+    ) {
+        let Some(span) = self.span.as_mut() else {
+            return;
+        };
+        if !window.trim().is_empty() {
+            span.set_attribute(KeyValue::new(ATTR_GOVERNANCE_WINDOW, window.to_string()));
+        }
+        if !decision.trim().is_empty() {
+            span.set_attribute(KeyValue::new(ATTR_GOVERNANCE_DECISION, decision.to_string()));
+        }
+        if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
+            span.set_attribute(KeyValue::new(ATTR_GOVERNANCE_REASON, reason.to_string()));
+        }
+        if !policy_version.trim().is_empty() {
+            span.set_attribute(KeyValue::new(
+                ATTR_GOVERNANCE_POLICY_VERSION,
+                policy_version.to_string(),
+            ));
+        }
+        span.set_attribute(KeyValue::new(
+            ATTR_GOVERNANCE_UNPRICED_TURNS,
+            unpriced_turns as i64,
+        ));
+        if decision == "block" {
+            span.set_status(opentelemetry::trace::Status::error("quota_blocked".to_string()));
+        }
+    }
+}
+
+impl Drop for GovernanceDecideGuard {
+    fn drop(&mut self) {
+        if let Some(mut span) = self.span.take() {
             span.end();
         }
     }
@@ -2704,6 +2785,63 @@ mod tests {
         drop(scope);
         shutdown();
         REPORTING_ENABLED.store(false, Ordering::SeqCst);
+    }
+
+    /// Wave-7 G5 判据 1：`governance.decide` span 的 **5 项白名单属性真实上 wire**，
+    /// 且非白名单属性（如金额/阈值）不得出现。
+    #[test]
+    fn g5_governance_decide_span_exports_whitelisted_attributes_to_wire() {
+        let _guard = test_lock();
+        shutdown();
+        let (port, sink) = spawn_local_otlp_sink(Duration::from_millis(1_500));
+        init(OtelConfig {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            service_name: "unit-governance".to_string(),
+            sampling_ratio: 1.0,
+            headers: Vec::new(),
+        })
+        .expect("回环端点必须可装配");
+        REPORTING_ENABLED.store(true, Ordering::SeqCst);
+
+        {
+            let _turn = begin_turn_trace("sess-gov-wire", "turn-gov-wire", 0);
+            let mut span = start_governance_decide_span();
+            span.record_verdict(
+                "session",
+                "block",
+                Some("hard_limit_reached"),
+                "abc123def456",
+                3,
+            );
+        }
+
+        let flushed = force_flush(3_000);
+        assert!(flushed.is_ok(), "flush 必须成功：{flushed:?}");
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+
+        let wire = sink.join().expect("sink 线程不得 panic");
+        let text = String::from_utf8_lossy(&wire).to_string();
+        for attribute in [
+            ATTR_GOVERNANCE_WINDOW,
+            ATTR_GOVERNANCE_DECISION,
+            ATTR_GOVERNANCE_REASON,
+            ATTR_GOVERNANCE_POLICY_VERSION,
+            ATTR_GOVERNANCE_UNPRICED_TURNS,
+        ] {
+            assert!(
+                text.contains(attribute),
+                "G5：wire payload 缺少白名单属性 `{attribute}`"
+            );
+        }
+        assert!(text.contains("hard_limit_reached"), "reason 取值必须上 wire");
+        assert!(text.contains("abc123def456"), "policy_version 取值必须上 wire");
+        for forbidden in ["governance.limit_usd", "governance.current_usd", "governance.cost_usd"] {
+            assert!(
+                !text.contains(forbidden),
+                "G5：非白名单属性 `{forbidden}` 不得出现在 wire payload"
+            );
+        }
     }
 
     /// A8：`traceparent` 注入必须是「替换」语义，重复注入不得产生两个同名头。

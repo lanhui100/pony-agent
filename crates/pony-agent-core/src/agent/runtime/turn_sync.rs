@@ -462,6 +462,38 @@ impl AgentRuntime {
             &sync_turn_id,
             0,
         );
+        // Wave-7 B003（同步入口同构）：**turn 启动前**的用量治理判定（一次性、fail-open）。
+        // 与流式入口同一策略与同一决策入口，避免「只挡流式 ⇒ 可绕过」。
+        {
+            let governance = {
+                let store = self.sessions.read().unwrap_or_else(|error| {
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+                    error.into_inner()
+                });
+                crate::agent::usage_governance::evaluate_with_store(
+                    &store,
+                    input.session_id.as_deref(),
+                )
+            };
+            if let crate::agent::usage_governance::Decision::Block {
+                reason, current, limit, ..
+            } = &governance.decision
+            {
+                let error = format!(
+                    "用量治理已阻断本轮：当前已用 ${current:.6}，上限 ${limit:.6}（触发 {reason}）。\
+                     如需继续，请提高上限或关闭「强制拦截」——设置 → 用量治理 → 关闭 enforcement（一键出口）。"
+                );
+                otel_turn_scope.set_phase("failed");
+                return build_failed_turn_result(
+                    None,
+                    String::new(),
+                    error,
+                    self.telemetry_builder.failed_trace_empty_input(),
+                    Vec::new(),
+                );
+            }
+        }
+
         let prepared = match self.prepare_turn(&input, false, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {

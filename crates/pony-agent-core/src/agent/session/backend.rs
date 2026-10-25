@@ -251,6 +251,32 @@ pub trait SessionBackend: Send + Sync {
     fn load_session_traces(&self, _session_id: &str) -> SessionBackendTraceLoadResult {
         SessionBackendTraceLoadResult::Unsupported
     }
+
+    /// Wave-7 B001：写入一条用量账本记录（幂等 UPSERT）。
+    ///
+    /// 默认实现：非 SQLite 后端无独立账本表 ⇒ 静默成功（fail-open，不阻断 turn）。
+    fn append_usage_ledger_entry(
+        &self,
+        _entry: &crate::agent::usage_ledger::LedgerEntry,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Wave-7 B001：账本窗口聚合（默认零值，非 SQLite 后端无账本）。
+    fn usage_ledger_window_summary(
+        &self,
+        _scope: &crate::agent::usage_ledger::LedgerScope,
+    ) -> Result<crate::agent::usage_ledger::WindowSummary, String> {
+        Ok(crate::agent::usage_ledger::WindowSummary::zero())
+    }
+
+    /// Wave-7 B001：账本天桶聚合（默认空）。
+    fn usage_ledger_day_summaries(
+        &self,
+        _session_id: Option<&str>,
+    ) -> Result<Vec<crate::agent::usage_ledger::DaySummary>, String> {
+        Ok(Vec::new())
+    }
     /// PA-093：读取会话事件流 `(seq, branch_id, event)`（seq 升序，可截断）。
     /// 默认返回空（File/Memory backend 不支持——引用化节点在非 SQLite 后端下
     /// checkout 退化为空视图并告警；生产路径恒为 SqliteSessionBackend）。

@@ -497,6 +497,24 @@ impl SqliteSessionBackend {
              );",
         )
         .map_err(|e| format!("normalized schema: {e}"))?;
+        // Wave-7 B001：用量账本纯增量迁移（仅 CREATE ... IF NOT EXISTS；**不 bump** EVENT_SCHEMA_VERSION，
+        // 也不触碰任何既有表）。迁移失败只降级告警 + 去重 issue，绝不阻断会话库使用（G1.4/G3）。
+        if let Err(error) = crate::agent::usage_ledger::ensure_ledger_schema(conn) {
+            crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "usage ledger schema migration failed",
+                None,
+                &[
+                    ("kind", serde_json::json!("ledger_migration")),
+                    ("error", serde_json::json!(error.to_string())),
+                ],
+            );
+            crate::agent::ponysentry::capture_governance_fault(
+                "ledger_migration",
+                "schema",
+                &error.to_string(),
+            );
+        }
         // PA-093：旧库迁移——CREATE TABLE IF NOT EXISTS 不补列，显式 ALTER
         // （列已存在时忽略错误，幂等）。
         let _ = conn.execute(
@@ -2990,6 +3008,45 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     /// PA-093：读取会话事件流 `(seq, branch_id, event)`（seq 升序，可截断）。
+    /// Wave-7 B001：账本写入（幂等 UPSERT + 重试 1 次 + spool；失败只返回 Err 由调用方忽略）。
+    fn append_usage_ledger_entry(
+        &self,
+        entry: &crate::agent::usage_ledger::LedgerEntry,
+    ) -> Result<(), String> {
+        let slot = self
+            .connection()
+            .map_err(|error| format!("sqlite open error: {error}"))?;
+        let conn = slot.as_ref().expect("connection initialized");
+        crate::agent::usage_ledger::append_entry_resilient(conn, entry)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Wave-7 B001：账本窗口聚合（只读）。
+    fn usage_ledger_window_summary(
+        &self,
+        scope: &crate::agent::usage_ledger::LedgerScope,
+    ) -> Result<crate::agent::usage_ledger::WindowSummary, String> {
+        let slot = self
+            .connection()
+            .map_err(|error| format!("sqlite open error: {error}"))?;
+        let conn = slot.as_ref().expect("connection initialized");
+        crate::agent::usage_ledger::window_summary(conn, scope)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Wave-7 B001：账本天桶聚合（只读）。
+    fn usage_ledger_day_summaries(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<crate::agent::usage_ledger::DaySummary>, String> {
+        let slot = self
+            .connection()
+            .map_err(|error| format!("sqlite open error: {error}"))?;
+        let conn = slot.as_ref().expect("connection initialized");
+        crate::agent::usage_ledger::day_summaries(conn, session_id)
+            .map_err(|error| error.to_string())
+    }
+
     fn load_turn_events(
         &self,
         session_id: &str,

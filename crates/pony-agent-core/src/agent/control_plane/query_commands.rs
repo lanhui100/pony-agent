@@ -89,6 +89,22 @@ impl HostControlPlane {
             .load_build_context_observation(session_id, observation_ref)
     }
 
+    /// Wave-7 G4：用量治理汇总（只读账本聚合；空库返回零值结构，绝不报错）。
+    pub fn usage_governance_summary(
+        &self,
+        session_id: Option<String>,
+    ) -> crate::agent::usage_governance::UsageGovernanceSummaryView {
+        let target = session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let store = self.sessions_rwlock.read().unwrap_or_else(|error| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+            error.into_inner()
+        });
+        crate::agent::usage_governance::summary_for_store(&store, target)
+    }
+
     pub fn load_model_monitor_summary(
         &self,
         query: ModelMonitorSummaryQuery,

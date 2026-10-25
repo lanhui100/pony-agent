@@ -248,6 +248,82 @@ impl AgentRuntime {
                 },
             );
         self.enqueue_trace_persistence(session_key, mutation);
+
+        // Wave-7 B001/B003：本轮用量写入 `usage_ledger`（幂等 UPSERT；协议感知计价）。
+        // 失败只 warn + spool（append_entry_resilient 内部处理），**绝不阻塞 turn 返回**。
+        self.append_usage_ledger(
+            session_id,
+            turn_id,
+            provider_meta,
+            input_tokens,
+            output_tokens,
+            cache_hit_input_tokens,
+        );
+    }
+
+    /// Wave-7 B003：把本轮用量写入账本（未知模型 ⇒ `cost_usd = NULL` / `priced = 0`）。
+    ///
+    /// 计价口径与 K2/K4 完全同源：`cost::estimate_cost_with_protocol`（协议语义归一）。
+    fn append_usage_ledger(
+        &self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        cache_hit_input_tokens: Option<u64>,
+    ) {
+        let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) else {
+            return; // 无会话归属 ⇒ 不入账（避免污染统计）
+        };
+        let Some(meta) = provider_meta else {
+            return; // 无 provider 元数据（未走到模型调用）⇒ 不入账
+        };
+        let input = input_tokens.unwrap_or(0);
+        let output = output_tokens.unwrap_or(0);
+        let cache_read = cache_hit_input_tokens.unwrap_or(0);
+        let protocol = crate::agent::cost::ProviderCostProtocol::from_label(&meta.protocol);
+        let cost = crate::agent::cost::estimate_cost_with_protocol(
+            &meta.model,
+            input,
+            output,
+            cache_hit_input_tokens,
+            protocol,
+        )
+        .map(|estimate| estimate.total_cost_usd);
+        let recorded_at_ms = crate::agent::usage_ledger::now_epoch_ms();
+        let entry = match cost {
+            Some(cost) => crate::agent::usage_ledger::LedgerEntry::priced(
+                session_id,
+                turn_id,
+                recorded_at_ms,
+                &meta.provider_name,
+                &meta.model,
+                &meta.protocol,
+                input,
+                output,
+                cache_read,
+                cost,
+            ),
+            // 未知模型：**严禁**写成 0 成本（G1.3）。
+            None => crate::agent::usage_ledger::LedgerEntry::unpriced(
+                session_id,
+                turn_id,
+                recorded_at_ms,
+                &meta.provider_name,
+                &meta.model,
+                &meta.protocol,
+                input,
+                output,
+                cache_read,
+            ),
+        };
+        let store = self.sessions.read().unwrap_or_else(|error| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+            error.into_inner()
+        });
+        // 失败已在 append_entry_resilient 内降级（warn + spool），这里只吞掉结果。
+        let _ = store.append_usage_ledger_entry(&entry);
     }
 
     #[allow(clippy::too_many_arguments)]

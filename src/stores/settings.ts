@@ -18,6 +18,7 @@ type SettingsState = {
   error: string | null;
   notice: string | null;
   costBudgetUsd?: number | null;
+  usagePolicy?: AppSettings["usagePolicy"];
 };
 
 export const useSettingsStore = defineStore("settings", {
@@ -28,6 +29,7 @@ export const useSettingsStore = defineStore("settings", {
     error: null,
     notice: null,
     costBudgetUsd: null,
+    usagePolicy: undefined,
   }),
   getters: {
     workspaceMode: (state) => state.settings.workspaceMode,
@@ -36,6 +38,7 @@ export const useSettingsStore = defineStore("settings", {
       if (typeof state.settings.costBudgetUsd === "number") return state.settings.costBudgetUsd;
       return null;
     },
+    effectiveUsagePolicy: (state) => state.usagePolicy ?? state.settings.usagePolicy,
   },
   actions: {
     async loadSettings() {
@@ -121,5 +124,6 @@ function normalizeAppSettings(settings?: Partial<AppSettings> | null): AppSettin
     otelServiceName: settings?.otelServiceName ?? undefined,
     otelSamplingRatio: typeof settings?.otelSamplingRatio === "number" ? settings.otelSamplingRatio : undefined,
     costBudgetUsd: typeof settings?.costBudgetUsd === "number" ? settings.costBudgetUsd : undefined,
+    usagePolicy: settings?.usagePolicy ? { ...settings.usagePolicy } : undefined,
   } as AppSettings;
 }

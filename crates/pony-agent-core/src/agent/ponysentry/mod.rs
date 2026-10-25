@@ -143,6 +143,67 @@ fn claim_turn_failure_report(turn_id: &str) -> bool {
 }
 
 /// 排空上报队列（有界，最多 1500ms）：供 CLI/TUI 退出前调用，避免「报错即退出」丢 issue。
+// ------------------------------------- 治理子系统故障上报（Wave-7 G5.3）
+
+/// 已上报的治理故障 `(kind, policy_version)` 组合（去重：同一故障只产生一个 issue）。
+static REPORTED_GOVERNANCE_FAULTS: LazyLock<Mutex<HashSet<(String, String)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// 上报治理子系统自身故障（DB 损坏 / 迁移失败 / 账本不可读等）。
+///
+/// 契约 G5.3：
+/// - `fingerprint` 按 `(kind, policy_version)` **严格收敛**，同一组合只上报一次；
+/// - payload **绝不**包含金额、阈值、token 数等动态数字（`detail` 只放稳定错误种类）。
+pub fn capture_governance_fault(kind: &str, policy_version: &str, detail: &str) {
+    let kind = kind.trim();
+    let policy_version = policy_version.trim();
+    if kind.is_empty() {
+        return;
+    }
+    {
+        let mut guard = REPORTED_GOVERNANCE_FAULTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !guard.insert((kind.to_string(), policy_version.to_string())) {
+            return; // 已上报过 ⇒ 去重
+        }
+        if guard.len() > 256 {
+            guard.clear();
+        }
+    }
+    let payload = IngestPayload {
+        platform: "rust".to_string(),
+        release: env!("CARGO_PKG_VERSION").to_string(),
+        environment: "core".to_string(),
+        message: Some(format!("usage governance fault: {kind}")),
+        exception: Some(models::Exception {
+            error_type: format!("UsageGovernanceFault.{kind}"),
+            value: Some(detail.chars().take(200).collect::<String>()),
+            stacktrace: None,
+        }),
+        tags: Some(HashMap::from([
+            ("project".to_string(), "pony-agent".to_string()),
+            ("component".to_string(), "usage_governance".to_string()),
+            ("policy_version".to_string(), policy_version.to_string()),
+        ])),
+        extra: None,
+        breadcrumbs: None,
+        event_id: None,
+        trace_id: crate::agent::otel::exported_trace_id(),
+        fingerprint: Some(vec![kind.to_string(), policy_version.to_string()]),
+        culprit: None,
+    };
+    capture_payload(payload);
+}
+
+/// 测试钩子：治理故障上报去重表的当前条目数。
+pub fn governance_fault_fingerprint_count() -> usize {
+    REPORTED_GOVERNANCE_FAULTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .len()
+}
+
 /// 读取最近一次入队的上报 payload（测试钩子，Wave-6 验收用例使用）。
 pub fn testing_last_enqueued_payload() -> Option<crate::agent::ponysentry::models::IngestPayload> {
     client::last_enqueued_payload()

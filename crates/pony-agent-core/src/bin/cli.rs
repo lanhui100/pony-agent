@@ -451,6 +451,10 @@ impl ObservabilityBootstrap {
         let settings = pony_agent_core::agent::app_settings::AppSettingsStore::new().load_view();
         pony_agent_core::agent::otel::set_agent_trace_reporting(settings.agent_trace_reporting);
         pony_agent_core::agent::cost::set_budget_usd(settings.cost_budget_usd);
+        // Wave-7：用量治理策略（None ⇒ 默认：enforcement=false，软告警不阻断）。
+        pony_agent_core::agent::usage_governance::set_policy(
+            settings.usage_governance_policy.clone(),
+        );
 
         let snapshot = settings.otel_settings_snapshot();
         if let Err(err) = pony_agent_core::agent::otel::init(

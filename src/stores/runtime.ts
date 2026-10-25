@@ -595,6 +595,56 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       const budget = (settingsStore as any).effectiveCostBudgetUsd ?? (settingsStore as any).costBudgetUsd;
       return `已超出成本预算限额 (当前超预算: $${Number(budget).toFixed(2)})`;
     },
+    /** Wave-7 G4：用量治理汇总（纯前端聚合或来自后端 summary） */
+    usageGovernanceSummary: (state): any => {
+      let costSum = 0;
+      let unpricedCount = 0;
+      for (const turn of state.turnTraceHistory ?? []) {
+        if (typeof turn.costUsd === "number" && Number.isFinite(turn.costUsd) && turn.costUsd >= 0) {
+          costSum += turn.costUsd;
+        } else {
+          unpricedCount++;
+        }
+      }
+      return {
+        session: {
+          cost_usd: Number(costSum.toFixed(6)),
+          unpriced_turns: unpricedCount,
+        },
+        days: [],
+        policy_version: "v1",
+        governance_degraded: false,
+      };
+    },
+    /** Wave-7 G4：格式化展示用量治理成本（并列展示未计价轮数与 ≥ 语义，全未计价显示 "—"） */
+    formattedGovernanceCost(): string {
+      const summary = this.usageGovernanceSummary;
+      const history = this.turnTraceHistory ?? [];
+      const validTurns = history.filter(
+        (t) => typeof t.costUsd === "number" && Number.isFinite(t.costUsd) && t.costUsd >= 0
+      );
+      if (validTurns.length === 0) {
+        return "—";
+      }
+      const costStr = `$${summary.session.cost_usd.toFixed(6)}`;
+      if (summary.session.unpriced_turns > 0) {
+        return `≥ ${costStr} · ${summary.session.unpriced_turns} 轮未计价`;
+      }
+      return costStr;
+    },
+    /** Wave-7 G2/G3：拦截态详情 UI 信息 */
+    governanceBlockDetail(state): any {
+      const decision = (state as any).governanceDecision;
+      if (!decision || decision.kind !== "Block") {
+        return null;
+      }
+      return {
+        currentText: `$${Number(decision.current).toFixed(3)}`,
+        limitText: `$${Number(decision.limit).toFixed(2)}`,
+        reason: decision.reason,
+        overrideActionAvailable: true,
+      };
+    },
     /** 软告警不阻断原则：始终允许发送与输入 */
     canSubmitPrompt: (state): boolean => {
       return !state.isSubmitting;
@@ -604,6 +654,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     }
   },
   actions: {
+    overrideGovernanceBlock() {
+      (this as any).governanceDecision = null;
+    },
     resetSessionRuntimeState() {
       this.cancelDeferredPersist();
       this.clearSubmissionWatchdog();

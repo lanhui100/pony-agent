@@ -592,6 +592,8 @@ fn load_app_settings() -> AppSettings {
     pony_agent_core::agent::otel::set_agent_trace_reporting(settings.agent_trace_reporting);
     // Wave-5 K3：成本预算只做软告警（None/<=0 视为未设置），绝不参与任何拦截。
     pony_agent_core::agent::cost::set_budget_usd(settings.cost_budget_usd);
+    // Wave-7：用量治理策略同步（None ⇒ 默认策略：enforcement=false，纯软告警）。
+    pony_agent_core::agent::usage_governance::set_policy(settings.usage_governance_policy.clone());
     settings
 }
 
@@ -602,6 +604,8 @@ fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
     pony_agent_core::agent::otel::set_agent_trace_reporting(saved.agent_trace_reporting);
     // Wave-5 K3：预算保存即生效（软告警门槛，不阻断请求）。
     pony_agent_core::agent::cost::set_budget_usd(saved.cost_budget_usd);
+    // Wave-7：治理策略保存即生效（enforcement 仍需用户显式开启）。
+    pony_agent_core::agent::usage_governance::set_policy(saved.usage_governance_policy.clone());
     Ok(saved)
 }
 
@@ -646,6 +650,15 @@ fn ponysentry_capture(mut payload: serde_json::Value) -> Result<(), String> {
         agent::ponysentry::capture_error(err_type, msg, extra);
     }
     Ok(())
+}
+
+/// Wave-7 G4：用量治理汇总（会话维度 + 天桶；空库返回零值结构）。
+#[tauri::command]
+fn usage_governance_summary(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+) -> agent::usage_governance::UsageGovernanceSummaryView {
+    control_plane.usage_governance_summary(session_id)
 }
 
 #[tauri::command]
@@ -1297,6 +1310,7 @@ pub fn run() {
             list_sessions,
             upload_session_trace,
             get_workspace_root,
+            usage_governance_summary,
             import_attachment,
             workspace_list,
             workspace_create,

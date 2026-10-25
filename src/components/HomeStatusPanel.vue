@@ -56,14 +56,18 @@ function resolveRuntimeStoreSafe() {
   }
 }
 
-const formattedCost = computed(() => resolveRuntimeStoreSafe()?.formattedSessionCost ?? "—");
+const formattedCost = computed(() => resolveRuntimeStoreSafe()?.formattedGovernanceCost ?? resolveRuntimeStoreSafe()?.formattedSessionCost ?? "—");
 const isOverBudget = computed(() => resolveRuntimeStoreSafe()?.isCostBudgetExceeded ?? false);
+const blockDetail = computed(() => resolveRuntimeStoreSafe()?.governanceBlockDetail ?? null);
 const costTooltipText = computed(() => {
   const store = resolveRuntimeStoreSafe();
+  if (blockDetail.value) {
+    return `用量治理拦截: 当前 ${blockDetail.value.currentText} / 硬上限 ${blockDetail.value.limitText}`;
+  }
   if (isOverBudget.value) {
     return store?.costBudgetWarningMessage || "已超出成本预算限额";
   }
-  return `会话累计成本: ${formattedCost.value}`;
+  return `会话治理成本: ${formattedCost.value}`;
 });
 
 const debugAttrsEnabled = computed(() => isDebugLoggingEnabled());
@@ -181,20 +185,45 @@ function formatTokenSpeed(value?: number | null) {
           </Tooltip>
         </div>
 
-        <!-- Wave-5 K2/K3：会话成本展示位与预算超限软告警（在 token 行下方紧凑行展示） -->
+        <!-- Wave-5 K2/K3 & Wave-7 G4：会话成本展示位与预算超限软告警（在 token 行下方紧凑行展示） -->
         <div class="flex items-center justify-between border-t border-stone-200/50 mt-1.5 pt-1.5 px-1 text-[11px] leading-5 text-stone-600">
           <span class="text-stone-400">会话成本</span>
           <Tooltip :text="costTooltipText">
             <div
               class="inline-flex items-center gap-1 tabular-nums transition-colors"
-              :class="isOverBudget ? 'text-amber-600 font-medium' : 'text-stone-600'"
+              :class="blockDetail ? 'text-rose-600 font-medium' : isOverBudget ? 'text-amber-600 font-medium' : 'text-stone-600'"
               data-testid="status-metric-session-cost"
             >
-              <AlertTriangle v-if="isOverBudget" class="h-3 w-3 text-amber-500 animate-pulse" />
+              <AlertTriangle v-if="blockDetail || isOverBudget" class="h-3 w-3 text-amber-500 animate-pulse" />
               <Coins v-else class="h-3 w-3 text-stone-400" />
               <span class="inline-block min-w-[2.5rem] text-right">{{ formattedCost }}</span>
             </div>
           </Tooltip>
+        </div>
+
+        <!-- Wave-7 G2：拦截态横幅 UI（触及硬限额 opt-in 拦截） -->
+        <div
+          v-if="blockDetail"
+          class="mt-2 rounded-[0.4rem] border border-rose-200 bg-rose-50/80 p-2 text-[11px] text-rose-800 space-y-1"
+          data-testid="governance-block-banner"
+        >
+          <div class="flex items-center gap-1.5 font-medium text-rose-900">
+            <AlertTriangle class="h-3.5 w-3.5 text-rose-600 shrink-0" />
+            <span>已触发用量治理拦截</span>
+          </div>
+          <div class="leading-relaxed">
+            当前消耗 {{ blockDetail.currentText }} / 硬限额 {{ blockDetail.limitText }}
+          </div>
+          <div class="flex items-center gap-2 pt-0.5">
+            <button
+              type="button"
+              class="text-rose-700 underline hover:text-rose-900"
+              data-testid="governance-override-btn"
+              @click="(resolveRuntimeStoreSafe() as any)?.overrideGovernanceBlock?.()"
+            >
+              本次解除拦截
+            </button>
+          </div>
         </div>
       </div>
     </section>
