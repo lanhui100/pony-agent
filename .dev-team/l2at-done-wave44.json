@@ -5,7 +5,7 @@
   "baseline_commit": "ab54b06",
   "contract_source": ".dev-team/contract-matrix-wave44.md",
   "contract_status": "FROZEN (protocol-agent 已产出，红相以契约为唯一口径)",
-  "red_command": "npx vitest run tests/acceptance/wave44 --reporter=verbose",
+  "red_command": "npx vitest run tests/acceptance/wave44 --reporter=dot",
   "red_exit_code": 1,
   "red_result": "Test Files 3 failed (3) | Tests 8 failed (8) | 0 pre-passing",
   "red_receipts": {
@@ -19,7 +19,8 @@
   "regression_check": {
     "command": "npx vitest run",
     "exit_code": 1,
-    "note": "3 failed = 本波 3 个新 spec；1026 passed / 10 skipped 与 regression-baseline-wave44.json 完全一致（存量零回归）"
+    "result": "Test Files 3 failed | 99 passed (102); Tests 8 failed | 1026 passed | 10 skipped (1044)",
+    "note": "3 failed == 本波 3 个新 spec；1026 passed / 10 skipped 与 regression-baseline-wave44.json 逐项一致"
   },
   "files": [
     "tests/acceptance/wave44/pa115-host-read-timeout.spec.ts",
@@ -31,13 +32,13 @@
       "id": "PA115-T1",
       "file": "tests/acceptance/wave44/pa115-host-read-timeout.spec.ts",
       "kind": "L2-T",
-      "assertion": "host 读永不 settle ⇒ initializeSessions 在 HYDRATION_TIMEOUT_MS+1000ms 内 resolve（非 pending）且 sessionError 以「初始化对话失败：」开头并含「超时」、agentRuntimeStatus={mode:error,label=sessionError.trim()}≠「正在加载最近对话…」、sessionOperation=null、phase 回到快照；随后正常 mock 复跑可恢复（sessionId/messages/sessionError=null），正常路径 host 读恰好 1 次"
+      "assertion": "host 读永不 settle ⇒ initializeSessions 在 HYDRATION_TIMEOUT_MS+1000ms 内 resolve（非 pending）且 sessionError 以「初始化对话失败：」开头并含「超时」、agentRuntimeStatus={mode:error,label=sessionError.trim()}≠「正在加载最近对话…」、sessionOperation=null、phase 回到快照；随后正常 mock 复跑可恢复（sessionId/messages/sessionError=null），正常路径 host 读恰好 1 次；并含常量漂移锁 expect(HYDRATION_TIMEOUT_MS).toBe(15000)"
     },
     {
       "id": "PA115-T2",
       "file": "tests/acceptance/wave44/pa115-host-read-timeout.spec.ts",
       "kind": "L2-AT",
-      "assertion": "对抗：host 读在 baseline+5000ms 才 resolve ⇒ 初始化仍在截止期内有界 resolve + 可见失败；迟到 resolve 不得改写 sessionId/phase/messages（迟到历史文本不得被回填），且 load_session_runtime_view 仅调用 1 次（无重试风暴）"
+      "assertion": "对抗：host 读在 baseline+5000ms 才 resolve ⇒ 初始化仍在截止期内有界 resolve + 可见失败；草稿保留：3500ms watchdog 解锁输入后写入的 draftMessage 在 15000ms 超时降级后必须保留（不得被整包快照回滚吞掉）且 sessionError 非空；迟到 resolve 不得改写 sessionId/phase/messages，load_session_runtime_view 仅 1 次；并含常量漂移锁"
     },
     {
       "id": "PA135-T1",
@@ -49,7 +50,7 @@
       "id": "PA135-T2",
       "file": "tests/acceptance/wave44/pa135-composition-undo.spec.ts",
       "kind": "L2-AT",
-      "assertion": "对抗：keyCode=229 组合态 Ctrl+Z ⇒ 撤销 1 次且 defaultPrevented；组合态 Ctrl+Shift+Z ⇒ 撤销 0 次（!shiftKey 约束保持）；组合态 Enter 与 Shift+Enter ⇒ submitTurn 0 次且撤销调用数不增"
+      "assertion": "对抗：keyCode=229 组合态 Ctrl+Z ⇒ 撤销 1 次且 defaultPrevented；组合态 Ctrl+Shift+Z ⇒ 撤销 0 次（!shiftKey 约束保持）；组合态 Enter / Shift+Enter / keyCode=229 Enter / keyCode=229 Shift+Enter ⇒ submitTurn 0 次且撤销调用数不增（防 isComposing-only mutant）"
     },
     {
       "id": "PA135-T3",
@@ -61,13 +62,13 @@
       "id": "PA117-T1",
       "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
       "kind": "L2-T",
-      "assertion": "默认关闭（vi.stubEnv DEV=false + 无开关）触发 wheel debug 事件序列 ⇒ [workspace-scroll] console.info 0 次、__ponyScrollDebugBuffer 长度 0 且 __ponyScrollDebugLatest undefined、该序列 getBoundingClientRect 次数严格小于启用态（差≥1）；启用态为有效参照（logs>0 且 rect>0）"
+      "assertion": "默认关闭（vi.stubEnv DEV=false + 无开关）触发 wheel debug 事件序列 ⇒ [workspace-scroll] console.info 0 次、__ponyScrollDebugBuffer 长度 0 且 __ponyScrollDebugLatest undefined、该序列 getBoundingClientRect 恰好 0 次；启用态为有效参照：logs>0、rectTotal>0、payload.viewportResolved===true 且 composerTop/distanceToBottom 为数值型（防空 ref 假红）"
     },
     {
       "id": "PA117-T2",
       "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
       "kind": "L2-AT",
-      "assertion": "开关矩阵：localStorage pony-agent.debug.workspace-scroll=\"true\"(DEV=false) ⇒ 输出恢复且 payload 含 distanceToBottom/viewportResolved/composerTop；=\"false\"(DEV=true) ⇒ kill switch 生效 0 输出 0 缓冲；URL ?debug=1 与 ?debug=scroll(DEV=false) ⇒ 开启"
+      "assertion": "开关矩阵：localStorage pony-agent.debug.workspace-scroll=\"true\"(DEV=false) ⇒ 输出恢复且 payload 含 distanceToBottom/viewportResolved/composerTop 且三者类型/取值有效；=\"false\"(DEV=true) ⇒ kill switch 生效 0 输出 0 缓冲；URL ?debug=1 与 ?debug=scroll(DEV=false) ⇒ 开启；每次测量独立挂载且只精确还原本用例 spy（不 restoreAllMocks，保证同 bridge 态差分）"
     },
     {
       "id": "PA117-T3",
@@ -92,9 +93,21 @@
     "notes": "每个 spec 至少 1 条 L2-AT 对抗/边界用例；无 skip/todo/吞异常；无 sleep 式等待（fake timers / 同步派发）。"
   },
   "contract_ambiguities": [
-    "PA-115：契约把 PA115-T1 定义为正常路径回归（修复前天然绿），与 Lead「8/8 全红、0 预通过」硬门禁冲突；本文件将正常路径断言并入 PA115-T1 的恢复阶段（hang → 超时失败 → 换正常 mock 复跑），既覆盖契约 T1 语义又保持红相。",
-    "PA-117：契约 §2.3 冻结的专用开关 key/URL 参数（pony-agent.debug.workspace-scroll、?debug=1|scroll）与既有 isDebugLoggingEnabled 并存；测试只使用契约口径，并在 afterEach 复位 URL/localStorage/DEV，避免污染其它用例。",
-    "PA-117：契约 T1 要求缓冲「不增长」（未强制数组不存在），故只断言 length=0 与 latest===undefined，未锁死 __ponyScrollDebugBuffer 是否被创建。",
-    "PA-135：契约要求断言 preventDefault；jsdom 中 event.defaultPrevented 可稳定观测（已在正控实测 true），未额外断言 preventDefault 调用次数。"
+    "PA-115：契约 PA115-T1 为正常路径回归（修复前天然绿），与「8/8 全红、0 预通过」门禁冲突 → 正常路径断言并入 PA115-T1 恢复阶段（hang → 超时失败 → 换正常 mock 复跑）。",
+    "PA-115：Gate-1 审查 B-2 追加「草稿保留」——契约 §2.1 的「phase 回滚到快照」与「草稿不得被回滚吞掉」需实现方在 restoreSessionRuntimeSnapshot 后回填 draftMessage（快照含 draftMessage，见 sessions.ts:109/170）。请契约同步该口径。",
+    "PA117：契约 §2.3 冻结专用开关 key/URL（pony-agent.debug.workspace-scroll、?debug=1|scroll），与既有 isDebugLoggingEnabled 并存；测试只用契约口径并在每例复位。",
+    "PA117：契约 T1 措辞「缓冲不增长」，故断言 length=0 与 latest===undefined，不锁死数组对象是否创建；window.__ponyScrollDebugBuffer/__ponyScrollDebugLatest 作为允许探针保留。",
+    "PA-135：契约要求断言 preventDefault；jsdom 中 event.defaultPrevented 可稳定观测（正控实测 true），未断言 preventDefault 调用次数。"
+  ],
+  "revision": 2,
+  "red_command_json": "npx vitest run tests/acceptance/wave44 --reporter=json --outputFile=.dev-team/wave44-red-vitest.json",
+  "delta_vs_revision1": [
+    "[B-1] PA115: 新增常量漂移锁 expect(HYDRATION_TIMEOUT_MS).toBe(15000)（T1/T2 各一处）",
+    "[B-2] PA115-T2: 新增草稿保留断言——advanceTimersByTimeAsync(4000)（watchdog 3500ms 已解锁输入）后写入 draftMessage=\"等待期间输入\"，推进至 16000ms 超时收敛后断言 draftMessage 保留且 sessionError 非空",
+    "[A-1] PA117: measureSequence 去掉 vi.restoreAllMocks()（会连带还原 hoisted tauri mock，造成第 2+ 次测量 bridge 态不同的差分污染），改为布局探针 spy.mockRestore() 精确还原",
+    "[A-2] PA135-T2: 新增 keyCode:229 的 Enter 与 keyCode:229 Shift+Enter 不得提交（防把守卫改回 isComposing-only 的 mutant）",
+    "[A-3] PA117: 启用态参照有效性断言（viewportResolved=true、composerTop/distanceToBottom 为数值型、rectTotal>0），防空 ref 退化假红；实测 logs=2 / rect=12",
+    "[A-4] PA117: 关闭态口径收紧为 console=0、rectTotal=0、latest===undefined、buffer 未增长",
+    "[A-4b] PA117 探针 window.__ponyScrollDebugBuffer/__ponyScrollDebugLatest 保留（契约将显式列为允许探针）"
   ]
 }

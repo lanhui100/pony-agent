@@ -341,9 +341,10 @@ describe("PA-117 · [workspace-scroll] 调试输出开关门控", () => {
 
     // Assert 2：关闭态不得写 debug 缓冲（`__ponyScrollDebugLatest` 未定义 + 缓冲未增长）。
     // 契约措辞为「不增长」，故断言长度与 latest，不锁死数组对象是否被创建。
+    // 注意（TEST-DEFECT 修正）：必须读**关闭态采集时的快照** offState.buffer——
+    // 此时 onState 已按契约写入 `__ponyScrollDebugLatest`，读活窗口 window.* 必然非 undefined。
     expect(offState.buffer.length).toBe(0);
     expect(offState.buffer.latest).toBeUndefined();
-    expect(readScrollDebugBuffer().latest).toBeUndefined();
 
     // Assert 3：关闭态该序列的布局读数必须为 0（契约 §3.5 性能底线），启用态必须 >0。
     expect(offState.rectTotal).toBe(0);
@@ -353,6 +354,9 @@ describe("PA-117 · [workspace-scroll] 调试输出开关门控", () => {
     // Assert 4：启用态参照必须真实有效（防"空 ref 退化成假红"）——
     // viewport 已解析为真实元素、composer/anchor 度量已产出，而不是全 null 的空壳 payload。
     expect(onState.logs).toBeGreaterThan(0);
+    // 启用态只断言其**自身快照**：确有缓冲写入（latest 非空），不读活窗口。
+    expect(onState.buffer.latest).not.toBeUndefined();
+    expect(onState.buffer.latest).not.toBeNull();
     const onPayload = onState.payloads[0]!;
     expect(onPayload.viewportResolved).toBe(true);
     expect(typeof onPayload.composerTop).toBe("number");
