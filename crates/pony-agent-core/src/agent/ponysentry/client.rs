@@ -111,6 +111,21 @@ impl PonySentryClient {
     }
 
     pub fn capture_error(&self, error_type: &str, message: &str, extra: Option<serde_json::Value>) {
+        self.capture_error_with_trace_hint(error_type, message, extra, None);
+    }
+
+    /// 与 [`Self::capture_error`] 相同，但允许调用方显式提供 **trace_id 提示**。
+    ///
+    /// 语义：hint 必须是合法 32 位小写十六进制，否则忽略并回落到 `exported_trace_id()`。
+    /// 用途（Wave-6 BLOCKING）：`capture_turn_failure` 可能在与 turn 登记不同的任务/线程
+    /// 上下文执行，此时按 turn_id 精确回查的导出态 id 通过本参数传入，避免 issue 丢 trace_id。
+    pub fn capture_error_with_trace_hint(
+        &self,
+        error_type: &str,
+        message: &str,
+        extra: Option<serde_json::Value>,
+        trace_id_hint: Option<String>,
+    ) {
         // fail-closed：无 token 即零 egress（enabled 恒开，门禁由 token 承担）
         if !self.config.enabled || self.config.client_token.is_none() {
             return;
@@ -145,7 +160,10 @@ impl PonySentryClient {
             event_id: Some(new_event_id()),
             // B1：issue 的 trace_id **只**接受导出态 id（门禁关闭/未 init/未采样 ⇒ None），
             // 绝不回落到本地相关性 id（那会让 issue 带一个「查不到链路」的假关联）。
-            trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-6：跨上下文场景由 hint 提供（仍必须是导出态 id，非法 hint 被忽略）。
+            trace_id: trace_id_hint
+                .filter(|value| is_lower_hex_32(value))
+                .or_else(crate::agent::otel::exported_trace_id),
             fingerprint: Some(fingerprint_for(error_type)),
             culprit: None,
         };
@@ -244,6 +262,8 @@ impl PonySentryClient {
             return;
         }
         let traceparent = crate::agent::otel::current_traceparent();
+        // Wave-6：记录最终 payload（已 normalize/脱敏），供验收用例断言 trace_id 等字段。
+        remember_enqueued_payload(&payload);
 
         if let Some(ref tx) = self.sender {
             match tx.try_send(SentryEvent::Ingest {
@@ -276,6 +296,27 @@ impl PonySentryClient {
         }
         let _ = ack_rx.recv_timeout(Duration::from_millis(FLUSH_TIMEOUT_MS));
     }
+}
+
+/// 最近一次**入队**的 payload（测试钩子，Wave-6 BLOCKING 用例需要检查最终 payload）。
+///
+/// 生产路径只写不读，成本为一次 clone + Mutex 写入；仅在入队成功后记录（已过 normalize/脱敏）。
+static LAST_ENQUEUED_PAYLOAD: Mutex<Option<IngestPayload>> = Mutex::new(None);
+
+/// 记录最近入队 payload（供测试断言 trace_id 等最终字段）。
+fn remember_enqueued_payload(payload: &IngestPayload) {
+    let mut guard = LAST_ENQUEUED_PAYLOAD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(payload.clone());
+}
+
+/// 读取最近一次入队的 payload（仅测试/诊断用）。
+pub fn last_enqueued_payload() -> Option<IngestPayload> {
+    let guard = LAST_ENQUEUED_PAYLOAD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.clone()
 }
 
 /// 生成事件 id：32 位小写十六进制（无连字符，符合 C2 的 `^[0-9a-f]{32}$` 契约）。

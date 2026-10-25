@@ -117,7 +117,18 @@ pub fn capture_turn_failure(turn_id: &str, error: &str, model: Option<&str>) {
         "model": model,
         "source": "core_turn_failure",
     });
-    capture_error("TurnExecutionFailed", &message, Some(extra));
+    // Wave-6 BLOCKING 修复：优先按 turn_id 精确回查该 turn 的**导出态** trace_id（跨任务/线程
+    // 也能拿到真实 id），取不到再回落当前上下文的导出态 id（绝不使用本地相关性 id）。
+    let trace_id_hint = crate::agent::otel::exported_trace_id_for_turn(turn_id)
+        .or_else(crate::agent::otel::exported_trace_id);
+    if let Ok(client) = get_global().read() {
+        client.capture_error_with_trace_hint(
+            "TurnExecutionFailed",
+            &message,
+            Some(extra),
+            trace_id_hint,
+        );
+    }
 }
 
 /// 抢占「该 turn 的上报权」：返回 `true` 表示本次由我上报。
@@ -132,6 +143,11 @@ fn claim_turn_failure_report(turn_id: &str) -> bool {
 }
 
 /// 排空上报队列（有界，最多 1500ms）：供 CLI/TUI 退出前调用，避免「报错即退出」丢 issue。
+/// 读取最近一次入队的上报 payload（测试钩子，Wave-6 验收用例使用）。
+pub fn testing_last_enqueued_payload() -> Option<crate::agent::ponysentry::models::IngestPayload> {
+    client::last_enqueued_payload()
+}
+
 pub fn flush() {
     if let Ok(client) = get_global().read() {
         client.flush();

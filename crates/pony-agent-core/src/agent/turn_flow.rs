@@ -713,13 +713,16 @@ pub fn emit_stream_event_with_step(
         if let Some(cost) = cost_usd {
             let budget = crate::agent::cost::budget_usd();
             if crate::agent::cost::is_budget_exceeded(cost, budget) {
-                crate::agent::otel::log::log_json(
+                // Wave-6 K6：数值走**结构化字段**（number 类型），message 保持干净常量描述。
+                crate::agent::otel::log::log_json_with_fields(
                     "warn",
-                    &format!(
-                        "turn 成本超出预算：turn_id={turn_id} cost_usd={cost:.6} budget_usd={:.6}",
-                        budget.unwrap_or(0.0)
-                    ),
+                    "turn cost reached or exceeded budget threshold",
                     None,
+                    &[
+                        ("turn_id", serde_json::json!(turn_id)),
+                        ("turn_cost_usd", serde_json::json!(cost)),
+                        ("budget_usd", serde_json::json!(budget.unwrap_or(0.0))),
+                    ],
                 );
             }
         }
@@ -2336,16 +2339,20 @@ fn calculate_call_generation_speed(
 fn record_llm_span_cost(
     llm_span: &mut crate::agent::otel::LlmSpanGuard,
     model: &str,
+    protocol_label: &str,
     usage: &TokenUsage,
 ) {
     if !crate::agent::otel::is_span_capture_enabled() {
         return;
     }
-    let cost = crate::agent::cost::estimate_cost(
+    // Wave-6 K1.1：按**协议语义**归一未缓存输入（Anthropic 的 input 不含 cache，不能相减）。
+    let protocol = crate::agent::cost::ProviderCostProtocol::from_label(protocol_label);
+    let cost = crate::agent::cost::estimate_cost_with_protocol(
         model,
         usage.input_tokens.unwrap_or(0),
         usage.output_tokens.unwrap_or(0),
         usage.cache_hit_input_tokens,
+        protocol,
     )
     .map(|estimate| estimate.total_cost_usd);
     llm_span.record_cost(cost);
@@ -2358,11 +2365,20 @@ fn turn_event_cost_usd(
     output_tokens: Option<u64>,
     cache_hit_input_tokens: Option<u64>,
 ) -> Option<f64> {
-    let model = provider_meta.map(|meta| meta.model.as_str())?;
+    let meta = provider_meta?;
+    let model = meta.model.as_str();
     let input = input_tokens?;
     let output = output_tokens?;
-    crate::agent::cost::estimate_cost(model, input, output, cache_hit_input_tokens)
-        .map(|estimate| estimate.total_cost_usd)
+    // Wave-6 K1.1：协议语义归一（Anthropic input 不含 cache；未知协议保守按 OpenAI）。
+    let protocol = crate::agent::cost::ProviderCostProtocol::from_label(meta.protocol.as_str());
+    crate::agent::cost::estimate_cost_with_protocol(
+        model,
+        input,
+        output,
+        cache_hit_input_tokens,
+        protocol,
+    )
+    .map(|estimate| estimate.total_cost_usd)
 }
 
 pub fn provider_decision<P: ProviderClient>(
@@ -2384,7 +2400,12 @@ pub fn provider_decision<P: ProviderClient>(
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
             llm_span.record_speed_and_context(speed, None);
-            record_llm_span_cost(&mut llm_span, request.model.as_str(), usage);
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
         }
     }
     result
@@ -2421,7 +2442,12 @@ where
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
             llm_span.record_speed_and_context(speed, None);
-            record_llm_span_cost(&mut llm_span, request.model.as_str(), usage);
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
         }
     }
     result
@@ -2457,7 +2483,12 @@ pub fn provider_followup<P: ProviderClient>(
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
             llm_span.record_speed_and_context(speed, None);
-            record_llm_span_cost(&mut llm_span, request.model.as_str(), usage);
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
         }
     }
     result
@@ -2506,7 +2537,12 @@ where
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
             llm_span.record_speed_and_context(speed, None);
-            record_llm_span_cost(&mut llm_span, request.model.as_str(), usage);
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
         }
     }
     result

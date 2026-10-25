@@ -62,6 +62,42 @@ pub fn log_file_path() -> Option<PathBuf> {
 /// 仍取不到才输出 JSON `null`，不得省略键。
 /// 失败语义：本函数不返回错误、不 panic；写 stdout/文件失败时静默丢弃。
 pub fn log_json(level: &str, message: &str, trace_id: Option<&str>) {
+    write_json_line(level, message, trace_id, &[]);
+}
+
+/// 核心字段名集合：extras 不得覆盖这些键（保持日志协议稳定）。
+const RESERVED_LOG_KEYS: [&str; 4] = ["level", "message", "ts", "trace_id"];
+
+/// 携带**结构化字段（extras）**的 JSON 日志（Wave-6 K6）。
+///
+/// 语义：
+/// - 与 [`log_json`] 完全同一格式，仅把 `extras` **平铺**到同一行 JSON 的**根级**；
+/// - extras 中的键若与核心键（`level`/`message`/`ts`/`trace_id`）冲突则**忽略**（不覆盖）；
+/// - 数值型 extra 保持 JSON number（严禁序列化成字符串）——供日志收集器直接做指标化；
+/// - `sink` 为可注入输出（测试/自定义采集用）：写入单行 JSON（含换行）；
+///   生产调用点应使用 [`write_json_line`] 或本函数配合 `&mut Vec<u8>` 之外的缺省 sink。
+///
+/// 向后兼容：未提供 extras 时输出与 [`log_json`] 100% 一致（同一实现路径）。
+pub fn log_json_with_extras(
+    level: &str,
+    message: &str,
+    trace_id: Option<&str>,
+    extras: &[(&str, serde_json::Value)],
+    sink: &mut Vec<u8>,
+) {
+    let line = build_json_line(level, message, trace_id, extras);
+    sink.extend_from_slice(line.as_bytes());
+    sink.push(b'\n');
+    emit_stdout_and_file(&line);
+}
+
+/// 构造单行 JSON（不写出）：供 [`log_json`] / [`log_json_with_extras`] 共用，保证格式同源。
+fn build_json_line(
+    level: &str,
+    message: &str,
+    trace_id: Option<&str>,
+    extras: &[(&str, serde_json::Value)],
+) -> String {
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     // C4.3：落盘与输出前统一脱敏（调用方可能传入未经清洗的外部内容）。
     let sanitized = crate::agent::ponysentry::sanitize(message);
@@ -69,24 +105,51 @@ pub fn log_json(level: &str, message: &str, trace_id: Option<&str>) {
     let resolved_trace_id = trace_id
         .map(str::to_string)
         .or_else(crate::agent::otel::current_trace_id);
-    let record = serde_json::json!({
-        "level": level,
-        "message": sanitized,
-        "ts": timestamp,
-        // Option 序列化为 null 时键仍然存在（契约：不得省略 trace_id 键）。
-        "trace_id": resolved_trace_id,
-    });
+    let mut record = serde_json::Map::new();
+    record.insert("level".to_string(), serde_json::json!(level));
+    record.insert("message".to_string(), serde_json::json!(sanitized));
+    record.insert("ts".to_string(), serde_json::json!(timestamp));
+    // Option 序列化为 null 时键仍然存在（契约：不得省略 trace_id 键）。
+    record.insert("trace_id".to_string(), serde_json::json!(resolved_trace_id));
+    for (key, value) in extras {
+        if RESERVED_LOG_KEYS.contains(key) {
+            continue; // 核心键不可被 extras 覆盖
+        }
+        record.insert((*key).to_string(), value.clone());
+    }
+    serde_json::Value::Object(record).to_string()
+}
 
-    let Ok(line) = serde_json::to_string(&record) else {
-        return;
-    };
+/// 缺省写出路径（stdout + 可选文件 sink）；失败静默降级。
+fn emit_stdout_and_file(line: &str) {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let _ = writeln!(handle, "{line}");
     let _ = handle.flush();
     drop(handle);
+    append_to_file(line);
+}
 
-    append_to_file(&line);
+/// 携带结构化字段但不注入自定义 sink 的便捷入口（生产调用点用；等价于 `log_json_with_extras`
+/// 加缺省 stdout/文件输出）。
+pub fn log_json_with_fields(
+    level: &str,
+    message: &str,
+    trace_id: Option<&str>,
+    extras: &[(&str, serde_json::Value)],
+) {
+    write_json_line(level, message, trace_id, extras);
+}
+
+/// 写出单行 JSON（无 extras 的兼容入口，内部实现与 [`log_json`] 同源）。
+fn write_json_line(
+    level: &str,
+    message: &str,
+    trace_id: Option<&str>,
+    extras: &[(&str, serde_json::Value)],
+) {
+    let line = build_json_line(level, message, trace_id, extras);
+    emit_stdout_and_file(&line);
 }
 
 /// 追加一行到注入的日志文件；全程持锁，超限先轮转。任何异常都静默降级。

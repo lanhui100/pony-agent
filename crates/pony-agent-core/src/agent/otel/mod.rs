@@ -1107,7 +1107,11 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
             let trace_id = sampled_trace_id(&mut span);
             // 只有真实建立且被采样的 root span 才算「导出态」（B1/B1b）。
             let exported = trace_id.is_some();
-            let slot = register_active_turn(turn_id, span_context, exported);
+            if let Some(trace_id) = trace_id.as_deref() {
+                // Wave-6：登记 turn 级导出态 trace_id，供跨上下文失败上报精确回查。
+                register_turn_exported_trace_id(turn_id, trace_id);
+            }
+            let slot = register_active_turn(turn_id, session_id, span_context, exported);
 
             return TurnTraceGuard {
                 span: Some(span),
@@ -1125,7 +1129,7 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
     // 契约：`exported = false` ⇒ 永不作子 span 的 parent、永不作 issue/前端跳转的 trace_id。
     let span_context = local_span_context();
     let trace_id = span_context.trace_id().to_string();
-    let slot = register_active_turn(turn_id, span_context, false);
+    let slot = register_active_turn(turn_id, session_id, span_context, false);
     TurnTraceGuard {
         span: None,
         slot,
@@ -1259,13 +1263,15 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
     if !spans_allowed() {
         return empty;
     }
-    let attributes = to_key_values(llm_span_attributes(&LlmSpanInput {
+    let mut attributes = to_key_values(llm_span_attributes(&LlmSpanInput {
         provider_kind: provider_kind.to_string(),
         model: model.map(|value| value.to_string()),
         input_tokens: None,
         output_tokens: None,
         operation: operation.to_string(),
     }));
+    // Wave-6 K4.1：子 span 下沉会话归属（无活跃 turn / session 为空 ⇒ 不输出该键）。
+    push_active_session_attribute(&mut attributes);
     let Some(span) = start_child_span(SPAN_LLM_CHAT, attributes) else {
         return empty;
     };
@@ -1379,7 +1385,9 @@ pub fn record_tool_call_span(input: &ToolSpanInput) {
     if !spans_allowed() {
         return;
     }
-    let attributes = to_key_values(tool_span_attributes(input));
+    let mut attributes = to_key_values(tool_span_attributes(input));
+    // Wave-6 K4.1：tool.call 同样携带会话归属。
+    push_active_session_attribute(&mut attributes);
     if let Some(mut span) = start_child_span(SPAN_TOOL_CALL, attributes) {
         if input.status == "failed" || input.status == "error" || input.error.is_some() {
             let err_desc = input.error.as_deref().unwrap_or("tool call failed");
@@ -1567,6 +1575,8 @@ fn sampled_trace_id(span: &mut opentelemetry_sdk::trace::Span) -> Option<String>
 #[derive(Clone)]
 struct ActiveTurn {
     turn_id: String,
+    /// Wave-6 K4.1：所属会话 id（子 span 下沉 `langfuse.session.id` 时读取；空串即不输出）。
+    session_id: String,
     span_context: opentelemetry::trace::SpanContext,
     exported: bool,
     /// Wave-5 K4：本轮内各 `llm.chat` 已记录成本之和（USD；Turn span Drop 时回填属性）。
@@ -1611,12 +1621,14 @@ struct ActiveTurnSlot {
 /// 嵌套语义（L3-A#2）：同一 task/线程内再次登记会**保存前值**，Drop 时恢复而非丢弃。
 fn register_active_turn(
     turn_id: &str,
+    session_id: &str,
     span_context: opentelemetry::trace::SpanContext,
     exported: bool,
 ) -> Option<ActiveTurnSlot> {
     let trace_id = span_context.trace_id().to_string();
     let entry = ActiveTurn {
         turn_id: turn_id.to_string(),
+        session_id: session_id.to_string(),
         span_context,
         exported,
         accumulated_cost_usd: 0.0,
@@ -1745,6 +1757,54 @@ fn take_active_turn_cost() -> f64 {
             .unwrap_or(0.0)
     })
 }
+
+/// 把当前活跃 turn 的会话 id 作为 `langfuse.session.id` 属性压入子 span 属性表。
+///
+/// 语义（K4.1）：无活跃 turn / session_id 为空或纯空白 ⇒ **不输出该键**（禁止空串/伪造值）。
+fn push_active_session_attribute(attributes: &mut Vec<KeyValue>) {
+    let Some(session_id) = current_active_turn()
+        .map(|entry| entry.session_id)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return;
+    };
+    attributes.push(KeyValue::new(
+        ATTR_LANGFUSE_SESSION_ID,
+        crate::agent::ponysentry::sanitize(&session_id),
+    ));
+}
+
+/// turn_id → 该 turn 的**导出态** trace_id（Wave-6 K6/ Issue 互跳修复）。
+///
+/// 为什么需要：`capture_turn_failure` 可能在与 `begin_turn_trace` **不同的任务/线程上下文**
+/// 中执行（或守卫已 Drop），此时 `exported_trace_id()` 取不到 ⇒ issue 丢 trace_id。
+/// 登记在 turn 建立真实 root span 时写入，按 turn 精确回查（不是伪造：就是该 turn 的真实 id）。
+static TURN_EXPORTED_TRACE_IDS: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 登记 turn 的导出态 trace_id（有界：超过 [`TURN_TRACE_ID_CAPACITY`] 清空重来）。
+fn register_turn_exported_trace_id(turn_id: &str, trace_id: &str) {
+    let mut guard = TURN_EXPORTED_TRACE_IDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.len() >= TURN_TRACE_ID_CAPACITY {
+        guard.clear();
+    }
+    guard.insert(turn_id.to_string(), trace_id.to_string());
+}
+
+/// 按 turn_id 回查其**导出态** trace_id；未登记 / 已淘汰 ⇒ `None`。
+///
+/// 调用方：`ponysentry::capture_turn_failure`（跨上下文补偿，绝不返回本地相关性 id）。
+pub fn exported_trace_id_for_turn(turn_id: &str) -> Option<String> {
+    let guard = TURN_EXPORTED_TRACE_IDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.get(turn_id).cloned()
+}
+
+/// turn → trace_id 登记表的容量上限（进程内最多保留最近这么多轮）。
+const TURN_TRACE_ID_CAPACITY: usize = 512;
 
 /// 子 span 的父上下文：**只**接受真实导出态 root span 的上下文（B1b：杜绝孤儿 trace）。
 ///
@@ -2053,7 +2113,12 @@ mod tests {
             handles.push(runtime.spawn(async move {
                 let expected = span_context(0x1000 + index);
                 // exported = true：本用例模拟真实 root span 登记（父子链语义）。
-                let slot = register_active_turn(&format!("turn-{index}"), expected.clone(), true);
+                let slot = register_active_turn(
+                    &format!("turn-{index}"),
+                    &format!("sess-{index}"),
+                    expected.clone(),
+                    true,
+                );
                 assert!(slot.is_some(), "活动 turn 必须登记成功");
                 assert!(
                     slot.as_ref().and_then(|slot| slot.task_id).is_some(),
@@ -2534,6 +2599,111 @@ mod tests {
         );
         drop(outer);
         assert_eq!(current_trace_id(), None, "A2：全部结束后不得残留登记");
+    }
+
+    /// K4.1 反向：无活跃 turn（或 session 为空）时**不得**输出 `langfuse.session.id`。
+    #[test]
+    fn k41_child_spans_omit_session_id_without_active_turn() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+
+        // 1) 无活跃 turn ⇒ 不压入该键。
+        let mut attributes: Vec<KeyValue> = Vec::new();
+        push_active_session_attribute(&mut attributes);
+        assert!(
+            attributes
+                .iter()
+                .all(|pair| pair.key.as_str() != ATTR_LANGFUSE_SESSION_ID),
+            "无活跃 turn 时不得输出 langfuse.session.id"
+        );
+
+        // 2) 活跃 turn 但 session 为空白 ⇒ 同样不输出。
+        let scope = begin_turn_trace("   ", "turn-k41-blank", 0);
+        let mut attributes: Vec<KeyValue> = Vec::new();
+        push_active_session_attribute(&mut attributes);
+        assert!(
+            attributes
+                .iter()
+                .all(|pair| pair.key.as_str() != ATTR_LANGFUSE_SESSION_ID),
+            "session_id 为空白时不得输出 langfuse.session.id"
+        );
+        drop(scope);
+
+        // 3) 正常 session ⇒ 输出且值一致。
+        let scope = begin_turn_trace("sess-k41-ok", "turn-k41-ok", 0);
+        let mut attributes: Vec<KeyValue> = Vec::new();
+        push_active_session_attribute(&mut attributes);
+        let session_attr = attributes
+            .iter()
+            .find(|pair| pair.key.as_str() == ATTR_LANGFUSE_SESSION_ID)
+            .expect("活跃 turn 必须输出 langfuse.session.id");
+        assert_eq!(
+            session_attr.value,
+            opentelemetry::Value::String("sess-k41-ok".into())
+        );
+        drop(scope);
+
+        // 4) turn 级导出态 trace_id 可按 turn 回查（跨上下文补偿的基础）。
+        assert_eq!(exported_trace_id_for_turn("no-such-turn"), None);
+    }
+
+    /// Wave-6 BLOCKING：`capture_turn_failure` 在**跨线程/无活跃 turn 上下文**时
+    /// 仍必须上报该 turn 的导出态 trace_id（按 turn_id 精确回查，绝不用本地 id / 绝不丢）。
+    #[test]
+    fn wave6_capture_turn_failure_uses_turn_scoped_trace_id_across_threads() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(true, Ordering::SeqCst);
+        init(OtelConfig {
+            endpoint: "http://127.0.0.1:9".to_string(),
+            service_name: "unit-wave6".to_string(),
+            sampling_ratio: 1.0,
+            headers: Vec::new(),
+        })
+        .expect("回环端点必须可装配");
+        // PonySentry：dummy token 让上报路径不被 fail-closed 短路（不产生真实外网流量）。
+        crate::agent::ponysentry::init(crate::agent::ponysentry::PonySentryConfig {
+            client_token: Some("dummy-token".to_string()),
+            enabled: true,
+            endpoint: "http://127.0.0.1:9".to_string(),
+            environment: "test".to_string(),
+            release: "test".to_string(),
+        });
+        crate::agent::ponysentry::enable_turn_failure_capture(true);
+
+        let scope = begin_turn_trace("sess-wave6-x", "turn-wave6-x", 0);
+        let expected = exported_trace_id().expect("活跃 turn 必须有导出态 trace_id");
+        assert_eq!(exported_trace_id_for_turn("turn-wave6-x"), Some(expected.clone()));
+
+        // 在**另一个线程**（无活跃 turn 登记）触发失败上报。
+        let handle = std::thread::spawn(|| {
+            assert!(
+                exported_trace_id().is_none(),
+                "该线程不应有活跃 turn 上下文（模拟真实跨任务场景）"
+            );
+            crate::agent::ponysentry::capture_turn_failure("turn-wave6-x", "boom", Some("gpt-4o"));
+            crate::agent::ponysentry::testing_last_enqueued_payload()
+        });
+        let payload = handle.join().expect("上报线程不得 panic").expect("必须入队 payload");
+        assert_eq!(
+            payload.trace_id,
+            Some(expected),
+            "跨线程上报必须回查到该 turn 的导出态 trace_id"
+        );
+
+        // 反向：未知 turn 不得凭空产生 trace_id（禁止伪造）。
+        let handle = std::thread::spawn(|| {
+            crate::agent::ponysentry::capture_turn_failure("turn-not-registered", "boom", None);
+            crate::agent::ponysentry::testing_last_enqueued_payload()
+        });
+        let payload = handle.join().expect("上报线程不得 panic").expect("必须入队 payload");
+        assert_eq!(payload.trace_id, None, "未登记的 turn 不得输出 trace_id");
+
+        crate::agent::ponysentry::enable_turn_failure_capture(false);
+        drop(scope);
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
     }
 
     /// A8：`traceparent` 注入必须是「替换」语义，重复注入不得产生两个同名头。

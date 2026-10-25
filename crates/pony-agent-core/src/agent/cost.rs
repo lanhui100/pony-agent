@@ -46,6 +46,44 @@ pub struct CostEstimate {
     pub total_cost_usd: f64,
 }
 
+/// 计价口径所需的「协议语义类别」（Wave-6 K1.1）。
+///
+/// 只描述**语义差异**，不依赖 provider 模块类型（保持 `cost` 为纯函数模块）：
+/// - [`ProviderCostProtocol::OpenAi`]：`prompt_tokens` **已包含**缓存命中 token
+///   ⇒ `uncached = max(input − cache_read, 0)`；
+/// - [`ProviderCostProtocol::Anthropic`]：`input_tokens` **不含**缓存读取 token
+///   ⇒ `uncached = input`（缓存部分独立按 `cache_read_per_mtok` 计费）；
+/// - [`ProviderCostProtocol::Unknown`]：保守**按 OpenAI 语义**处理。
+///
+/// ⚠️ 风险周知（契约 K1.1.3）：若把 Anthropic 兼容上游误标为 Unknown/OpenAI，
+/// 缓存场景下会**轻微少计**输入成本（不会多收）；因此所有接入点必须显式传入准确协议。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCostProtocol {
+    OpenAi,
+    Anthropic,
+    Unknown,
+}
+
+impl ProviderCostProtocol {
+    /// 由 provider 协议标签映射（`"anthropic-messages"` / `"openai-completions"` / …）。
+    ///
+    /// 语义：大小写不敏感；无法识别 ⇒ [`ProviderCostProtocol::Unknown`]（保守按 OpenAI 口径）。
+    pub fn from_label(label: &str) -> Self {
+        let normalized = label.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "" => Self::Unknown,
+            // Anthropic 原生协议族（含 Bedrock Claude / 各类 anthropic 兼容标签）。
+            "anthropic" | "anthropic-messages" | "anthropic_messages" | "bedrock"
+            | "bedrock-anthropic" | "claude" => Self::Anthropic,
+            // OpenAI 协议族（含 DeepSeek / Azure / Ollama / 各类 openai 兼容标签）。
+            "openai" | "openai-completions" | "openai_completions" | "openai-responses"
+            | "openai_responses" | "openai-chat" | "chat-completions" | "deepseek" | "azure"
+            | "ollama" => Self::OpenAi,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 // ------------------------------------------------------------------ 价格表（公开定价）
 //
 // 价格快照日期：2026-10-25；单位 USD / 1M tokens；变更需同步 docs 并在 PR 描述附来源链接。
@@ -285,11 +323,41 @@ pub fn calculate_cost_with_pricing(
     output_tokens: u64,
     cache_read_tokens: Option<u64>,
 ) -> Option<CostEstimate> {
+    // 兼容入口：历史语义即 OpenAI 口径（input 含 cache）。
+    calculate_cost_with_protocol(
+        pricing,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        ProviderCostProtocol::OpenAi,
+    )
+}
+
+/// 按**协议语义**归一未缓存输入后计价（Wave-6 K1.1 唯一公式实现）。
+///
+/// 语义：
+/// - `Anthropic` ⇒ `uncached = input_tokens`（input 不含 cache，缓存部分另按缓存单价计）；
+/// - `OpenAi` / `Unknown` ⇒ `uncached = max(input_tokens − cache_read_tokens, 0)`；
+/// - 其余校验（单价非法 / 非有限结果 ⇒ `None`）与 [`calculate_cost_with_pricing`] 完全一致。
+pub fn calculate_cost_with_protocol(
+    pricing: &ModelPricing,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: Option<u64>,
+    protocol: ProviderCostProtocol,
+) -> Option<CostEstimate> {
     if !is_valid_pricing(pricing) {
         return None;
     }
     let cache_read = cache_read_tokens.unwrap_or(0);
-    let uncached_input = input_tokens.saturating_sub(cache_read);
+    let uncached_input = match protocol {
+        // Anthropic：input 不含 cache_read，严禁相减（否则 input<cache 时输入费被清零）。
+        ProviderCostProtocol::Anthropic => input_tokens,
+        // OpenAI / Unknown：prompt_tokens 已含 cached，需剔除（未知协议保守按 OpenAI）。
+        ProviderCostProtocol::OpenAi | ProviderCostProtocol::Unknown => {
+            input_tokens.saturating_sub(cache_read)
+        }
+    };
 
     let input_cost_raw = (uncached_input as f64 * pricing.input_per_mtok
         + cache_read as f64 * pricing.cache_read_per_mtok)
@@ -328,8 +396,29 @@ pub fn estimate_cost(
     output_tokens: u64,
     cache_read_tokens: Option<u64>,
 ) -> Option<CostEstimate> {
+    // 兼容入口：历史语义即 OpenAI 口径。
+    estimate_cost_with_protocol(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        ProviderCostProtocol::OpenAi,
+    )
+}
+
+/// 按模型 + **协议语义**计价（Wave-6 K1.1 接入点唯一入口）。
+///
+/// 调用方：`turn_flow` 的事件成本（K2）与 `llm.chat` span 成本属性（K4），
+/// 必须传 `provider_meta.protocol` 映射出的协议类别，禁止再用无差别减法。
+pub fn estimate_cost_with_protocol(
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: Option<u64>,
+    protocol: ProviderCostProtocol,
+) -> Option<CostEstimate> {
     let pricing = pricing_for(model)?;
-    calculate_cost_with_pricing(&pricing, input_tokens, output_tokens, cache_read_tokens)
+    calculate_cost_with_protocol(&pricing, input_tokens, output_tokens, cache_read_tokens, protocol)
 }
 
 /// 预算超限判定（K3 软告警语义，纯函数，不阻断任何请求）。
@@ -444,6 +533,60 @@ mod tests {
         assert!(!is_budget_exceeded(0.50, Some(0.0)), "0 视为未设置");
         assert!(!is_budget_exceeded(0.50, Some(-1.0)), "负数视为未设置");
         assert!(!is_budget_exceeded(f64::NAN, Some(0.5)), "非有限成本不判定超限");
+    }
+
+    /// K1.1：协议标签映射（Anthropic 族 / OpenAI 族 / 未知保守回退）。
+    #[test]
+    fn protocol_label_mapping_is_explicit_and_conservative() {
+        for label in ["anthropic", "anthropic-messages", "bedrock", "Claude"] {
+            assert_eq!(
+                ProviderCostProtocol::from_label(label),
+                ProviderCostProtocol::Anthropic,
+                "{label} 必须归为 Anthropic 族"
+            );
+        }
+        for label in ["openai", "openai-completions", "openai-responses", "deepseek", "azure", "ollama"] {
+            assert_eq!(
+                ProviderCostProtocol::from_label(label),
+                ProviderCostProtocol::OpenAi,
+                "{label} 必须归为 OpenAI 族"
+            );
+        }
+        for label in ["", "   ", "mystery-protocol"] {
+            assert_eq!(
+                ProviderCostProtocol::from_label(label),
+                ProviderCostProtocol::Unknown,
+                "未知标签必须保守归为 Unknown（按 OpenAI 语义计）"
+            );
+        }
+    }
+
+    /// K1.1：Anthropic 语义下 input<cache 时不得把基础输入费清零（历史缺陷）。
+    #[test]
+    fn anthropic_semantics_does_not_zero_uncached_input() {
+        let pricing = ModelPricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cache_read_per_mtok: 0.3,
+        };
+        let anthropic = calculate_cost_with_protocol(
+            &pricing,
+            100,
+            0,
+            Some(5000),
+            ProviderCostProtocol::Anthropic,
+        )
+        .expect("Anthropic 计价成功");
+        assert_eq!(anthropic.input_cost_usd, 0.0018);
+        let openai = calculate_cost_with_protocol(
+            &pricing,
+            100,
+            0,
+            Some(5000),
+            ProviderCostProtocol::OpenAi,
+        )
+        .expect("OpenAI 计价成功");
+        assert_eq!(openai.input_cost_usd, 0.0015);
     }
 
     /// 预算桥接：非正/非有限值一律视为未设置；设置后可读回。
