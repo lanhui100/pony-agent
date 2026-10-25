@@ -161,7 +161,15 @@
         "green": "Rust integration 7/7; lib otel 25/25; TS 2/2; full vitest 1036; build 0",
         "full_rust": "1154 passed/2 failed (1 known baseline + 1 pre-existing ponysentry flake 2/20 module-level); single-thread 1155/1 known",
         "l3": "A PASS(4 adv); B PASS(4 adv); L3-P PASS(2 adv)",
-        "observability": "check-declaration EXIT 0; audit-diff EXIT 1 (WARN zero enforcement points)"
+        "observability": "check-declaration EXIT 0; audit-diff EXIT 1 (WARN zero enforcement points, accepted)"
+      },
+      "green_commit": "b3e1af6",
+      "tag": "wave-45",
+      "closeout": {
+        "worktree": "clean",
+        "dev_server": "kept (vite :4176)",
+        "nfr_degraded": "0",
+        "meta_lint": "PASS"
       }
     }
   ],
