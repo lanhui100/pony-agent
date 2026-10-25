@@ -1,30 +1,31 @@
 # 元框架复盘报告（Meta-Retrospective）
 
-> 本轮对象：Wave-4（可观测性四维断链修复）。复盘重心为**协作元框架与组织协议本身**，非业务代码细节。
+> 本轮对象：Wave-5（会话成本估算 + 预算软告警 + CLI/TUI 可观测性引导）。复盘重心为**协作元框架与组织协议本身**。
 
 ## 一、 通信拓扑与信噪比 (Topology & Noise)
-- **拓扑**：Lead + Protocol(1) + Test(1) + Executor-Rust(1) + Executor-Frontend(1)，共 5 名（≤8）。审查全部走 Subagent：L3-A/L3-B 两视角互补，共 4 轮（A×2、B×4）。
-- **并行收益真实**：Rust 侧与前端/CI 侧写域正交（crates+src-tauri vs src+.github），两 Executor 全程并行，无一次越界踩踏；关键跨侧契约（settings 字段名 `otelEndpoint/otelToken/otelServiceName/otelSamplingRatio`）靠**契约文件先行冻结**对齐，未出现字段漂移。
-- **信噪比问题（需改进）**：同一 BLOCKING 被我连续回派 3 次（F1 跨轮误归因），根因不是执行者能力，而是**我的回派描述不够可判定**——前两次只说"去掉 `|| this.activeTraceId`"，执行者改了最终表达式却保留了 `?? this.activeTraceId` 兜底。第 3 次改为贴「:4351 改后应为哪三行原文」后一次通过。**教训：回派缺陷必须给"改后应长什么样"，不能只给"别写什么"。**
+- **拓扑**：Lead + Protocol + Test + Executor-Rust + Executor-Frontend（5 名，≤8）。审查走 Subagent（Wave-5 单轮合并双视角）。
+- **并行有效性**：Rust 与前端写域正交，两 Executor 全程并行无冲突；跨侧契约（`costUsd` / `costBudgetUsd`）由契约先冻结。
+- **本轮信噪比最好的实践**：Executor-Rust 在遇到「冻结测试自身缺陷」时**不擅自改测试、而是给出根因+两态探针+最小补丁建议**，Lead 一次裁决即通过（k4 sink 不回包问题）。这比"先改了再说"省掉至少两轮返工。
+- **仍需改进**：Lead 回派缺陷时仍出现过一次"只描述现象、没给目标态"，本轮已改为"必须贴改后应长的代码片段"（Wave-4 教训复用后生效）。
 
 ## 二、 门禁穿透与误杀率 (Gate Penetration / False Negatives & Positives)
-**有效穿透（本轮价值最高的部分）**：
-1. L3-A 捕获 **BLOCKING：门禁关闭时本地上下文伪造 trace_id 写入 Issue**（比 null 更误导，指向 Tempo 中不存在的 trace）。修法引入 `exported_trace_id()` 与 `current_trace_id()` 语义分离。
-2. L3-B 捕获 **BLOCKING：前端 trace_id 接线空转**（写入点读 `payload.traceId`，但 wire 无该字段）。该缺陷**全部门禁全绿**——这正是"绿而不真"的典型；连续 3 轮才彻底闭环（started → failed → 跨轮误归因）。
-3. Lead 二次捕获 **假绿测试**：Test Agent 的用例 #6 通过，但陷阱未布好（`activeTraceId` 实际 undefined），删除兜底逻辑仍绿。改为「先断言陷阱已生效（`toBe(X)`），再断言不误归因」并做变异验证后，才具备证伪力。
-4. Lead 捕获 **环境级假绿**：Executor 用共享 `target/` 在 `/tmp/pony-head` 复现基线红，导致主工作树后续编译复用陈旧 unit 指纹（`cargo test` 编译失败但报错指向 `/tmp`）。已 `git worktree prune` + `cargo clean -p` 修复。
-- **误杀率**：0 起 NFR-DEGRADED；两轮共 21 条 ADVISORY，其中 4 条被我判定需收口（脱敏漏面、计量白名单放行 `access_tokens`、跨轮误归因、终态覆盖 traceId），其余进 backlog。
-- **既有红隔离**：2 条既有红（`config.rs:1616` 断言 256_000 vs 常量 1_000_000；`pa110 test_ac01_subagent_dispatch`）由执行者用 pristine HEAD worktree 证明与本轮无关，我另行核对 HEAD 源码确认属实。
+**本轮抓到的真问题（全部有机器证据）**：
+1. **冻结测试自身缺陷（生产性拦截）**：`wave5_cost_test` 的 mock OTLP sink 只读不回包 ⇒ 导出层必然 3000ms 超时 ⇒ `force_flush()` 恒 Err ⇒ K4 wire 断言**无论实现对错都红**。Executor 用「复刻该 sink → flush=Err」vs「回 200 → flush=Ok 且两个 cost 属性都在 wire」两态探针证明是测试缺陷，Lead 裁决派 Test 修 helper（断言零改动）。这是"红相不可信"的典型，值得沉淀为门禁自检项。
+2. **零假测试（前端同义反复）**：L3 指出「软告警不阻断」用例断言的 `canSubmitPrompt` 是**无消费者的 shim** ⇒ 恒真。改为挂载真实 `HomeStatusPanel` 断言告警样式 + 草稿保留 + 提交链路未被阻断，并做变异证伪。
+3. **第二份价格真源**：`budget.rs` 残留 `ModelPricing` + 编造的 `$3/$15/$0.75` Default，与「`cost.rs` 唯一真源 / 宁缺勿错」冲突。处置：删 Default、结构改为引用 + 计价委托唯一公式（既有 frozen `wave33` 用例保持绿）。
+4. **真实运行暴露的 P0 断链**：`ponycli`/`pony` 对 `otel`、`ponysentry` **零命中** —— 只有跑真实轮次才看得出来（静态巡检会把 T1/T2/T3 判 PASS，因为依赖与打点在 core 里）。
+- **误判/超纲**：0 起 NFR-DEGRADED。Wave-5 L3 共 13 条 ADVISORY，我判定 6 条收口（`>=` 阈值语义、来源 URL、唯一真源、假测试、K4 负向用例、来源链接），其余（结构化 warn 字段、Anthropic cache 语义、子 span session 下沉等）转 backlog 并写明风险。
+- **既有红复核**：`config.rs:1616`（断言 256_000 vs 常量 1_000_000）经 HEAD 源码核实为既有红，本轮未顺手修（避免夹带）。
 
 ## 三、 分工契约与隔离有效性 (Contract Isolation)
-- **有效**：Protocol 只写 `.dev-team/`；Test 只写 `tests/` 与 `crates/*/tests/`（仅有 2 行 `..Default::default()` 机械适配 + 1 处 `sk-` 形状假 token 被我改为 `sk-test-dummy` 以过 secrets 门禁）；两 Executor 写域互斥。
-- **写域扩展的裁决成本**：共 5 次扩权（app_settings.rs、authored runtime/+projection.rs、control_plane/sqlite_session、sse_adapter、turn_flow），每次都由执行者**主动上报缺口 + 给选项**，未发生私自越界。这一协作模式有效，建议固化为协议：**越界前先问，附最小补丁预览**。
-- **契约演进**：v1（C1~C5）→ v2（R1~R5，含"仅导出态 trace_id""secret 子串脱敏""header insert 语义""退出预算三段≤3000ms"）单文件增量保留历史，未删 v1。
+- **测试分权有效**：本轮 Test Agent 唯一越界是"改 helper 修断言外的死锁"，我明确背书并要求 diff 仅限 helper 区域；断言逻辑零改动。
+- **写域扩展 0 次**：本轮通过"事先在任务描述里列全写域"避免了 Wave-4 的频繁扩权。Executor 仍做到"越界前先问"。
+- **契约演进**：`wave-5-cost.md` v1.0 → v1.1（K3.1 告警落点分工、K5.1 价格表生命周期/宁缺勿错），原文保留。
 
 ## 四、 元协议迭代建议 (Self-Evolving Protocol)
-1. **P0 修缺陷回派必须给"目标态原文"**：本轮 F1 三轮返工的直接教训。建议 dev-team skill 增加一条：回派 BLOCKING 时，必须贴出「期望的代码/配置片段」，仅描述"删除某段"不算合格回派。
-2. **P0 禁止跨工作树共享 `target/`**：`CARGO_TARGET_DIR` 必须独立。已由执行者确认并内化；建议写入 skill 的「共享工具链互斥清单」。
-3. **P1 新增"陷阱先布"测试范式**：凡断言"不应该发生"的用例（不误归因/不回落/不带占位值），必须先有一条断言证明**陷阱已生效**（否则恒真）。本轮用例 #6 即范本。
-4. **P1 门禁必须能证明"错误实现会红"**：本轮 3 次假绿（两次 E2E 弱断言、一次 store 用例）都靠人工变异对照发现。建议把「关键契约用例需附变异对照收据」写入验收模板。
-5. **P2 声明文件与门禁的实际效用**：`audit-diff.sh` 对本仓当前输出 `WARN 规则集为空（门禁空转）`——因为 `docs/observability.yaml` 刻意不声明 `enforcement_points`（reqwest 仍 4 处直连，无法用正则可靠拦截）。这是**诚实的空转**，但需在 OBS-GOV backlog 里建 http_client 收口点，否则该门禁长期无判定力。
-6. **P2 证据文件自污染**：`cargo test --test '*'` 会重写 `.dev-team/evidence/wave15/wire-red.json`（工具清单快照）。本轮 3 次手工 `git show HEAD:` 复原。建议该用例改为写入临时目录或 `#[ignore]`，避免每次全量测试污染工作树。
+1. **P0 冻结测试也要接受"可执行性审计"**：本轮 k4 的 sink 不回包导致"红相不可信"。建议在红相锚定后加一步机器自检：**对每条 wire 级用例，确认 mock sink 会回包**（否则用例恒红，会把实现者逼去吞错）。可固化为 `dev-team` 的 Join Barrier 前置项。
+2. **P0 交付验证必须跑"真实形态"**：CLI/TUI 三处断链（引导/日志/issue）静态巡检全 PASS，只有真跑一次轮次才暴露。建议把「交付形态矩阵」（desktop / cli / tui / headless）列入可观测性接入的必测项。
+3. **P1 shim 禁令**：凡为让测试通过而新增的 `canSubmitPrompt` 类"未被任何 UI 消费"的 getter，一律视为假测试温床。建议在验收模板里加一条：**测试断言的消费点必须是生产代码路径**（可在 PR 描述里给出 `grep` 证据）。
+4. **P1 mock sink 契约**：所有 OTLP sink 类测试 helper 收敛到一处共用实现（当前 `otel_trace_migration_test` 会回包、`wave5_cost_test` 曾不回包 ⇒ 不一致即事故源）。建议抽到 `tests/support/otlp_sink.rs`。
+5. **P2 证据文件自污染治理**：`cargo test --test '*'` 仍会重写 `.dev-team/evidence/wave15/wire-red.json`（本轮又手工复原 3 次）。建议该用例写入临时目录或标 `#[ignore]`，否则每次全量测试都污染工作树、干扰提交门禁。
+6. **P2 enforcement_points 空转**：`audit-diff.sh` 对本站输出「规则集为空」WARN。属诚实空转（reqwest 仍 4 处直连，正则无法可靠拦截），需进 OBS-GOV backlog 建 `http_client` 收口点，否则该门禁长期无判定力。
