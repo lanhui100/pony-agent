@@ -39,7 +39,9 @@ import { mount } from "@vue/test-utils";
 import { TooltipProvider } from "reka-ui";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import { useProviderStore } from "@/stores/providers";
+import { useRuntimeStore } from "@/stores/runtime";
 import type { ProviderRegistry } from "@/types/provider";
+import type { ChatMessage } from "@/types/runtime";
 
 const tauriMocks = vi.hoisted(() => ({
   mockSafeInvoke: vi.fn(),
@@ -56,6 +58,8 @@ vi.mock("@/lib/tauri", () => ({
 /** 契约 §2.3 ②：本波新增的专用调试开关（workspace-scroll 通道）。 */
 const WORKSPACE_SCROLL_DEBUG_KEY = "pony-agent.debug.workspace-scroll";
 const WORKSPACE_SCROLL_TAG = "[workspace-scroll]";
+/** 源码实际口径：`HomeWorkspace.vue:1648` 的 stream 指标落盘 key（非配置项）。 */
+const STREAM_METRICS_STORAGE_KEY = "pony-agent.metrics.stream-sessions";
 
 // ── 挂载壳（与 tests/HomeWorkspace.spec.ts 同构的最小 stub 集）────────────
 
@@ -257,6 +261,92 @@ function triggerScrollDebugSequence(times = 1): void {
   }
 }
 
+function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id: partial.id ?? "msg-1",
+    turnId: partial.turnId ?? "turn-1",
+    role: partial.role ?? "user",
+    content: partial.content ?? "hello",
+    status: partial.status ?? "done",
+    tokenCount: null,
+    reasoningContent: null,
+    modelName: null,
+    toolName: null,
+    detail: null,
+    durationSeconds: null,
+    errorDetail: null
+  };
+}
+
+/** 冲刷 setTimeout(0) 级别的延迟任务（落盘是 `setTimeout(...,0)` 排队，属显式条件等待而非 sleep）。 */
+async function flushDeferredTimers(times = 2): Promise<void> {
+  for (let index = 0; index < times; index += 1) {
+    await new Promise<void>((resolve) => window.setTimeout(() => resolve(), 0));
+  }
+}
+
+/** 读取 `pony-agent.metrics.stream-sessions` 最后一条记录的 `streamDebugState`（无记录返回 null）。 */
+function readLastStoredStreamDebugState(): Record<string, unknown> | null {
+  const raw = window.localStorage.getItem(STREAM_METRICS_STORAGE_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const sessions = JSON.parse(raw) as Array<Record<string, unknown>>;
+    const last = sessions[sessions.length - 1] ?? null;
+    const state = (last?.streamDebugState ?? null) as Record<string, unknown> | null;
+    return state ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 关闭态下跑一遍「完成态 assistant 消息 → MarkdownRenderer render-complete →
+ * updateStreamDebugReveal → stream 指标落盘」的真实链路，返回落盘的 streamDebugState。
+ *
+ * 落盘时机（源码实际）：`watch(isSubmitting)` 的 true→false 时刻以 `setTimeout(...,0)` 排队调用
+ * `flushStreamMetricsToStorage()`；故必须显式驱动一次 isSubmitting 的 true→false。
+ */
+async function measureMarkdownDebugReveal(): Promise<Record<string, unknown> | null> {
+  vi.stubEnv("DEV", false);
+  window.localStorage.removeItem(WORKSPACE_SCROLL_DEBUG_KEY);
+  window.localStorage.removeItem(STREAM_METRICS_STORAGE_KEY);
+  window.history.replaceState({}, "", "/");
+
+  const runtimeStore = useRuntimeStore();
+  runtimeStore.$patch({
+    sessionOperation: null,
+    phase: "ready",
+    isSubmitting: false,
+    messages: [
+      createMessage({ id: "user-md", turnId: "turn-md", role: "user", content: "问题" }),
+      createMessage({
+        id: "assistant-md",
+        turnId: "turn-md",
+        role: "assistant",
+        content: "**完成态回答**：用于触发 MarkdownRenderer render-complete。",
+        status: "done"
+      })
+    ]
+  });
+
+  const wrapper = mountWorkspace();
+  await nextTick();
+  await flushDeferredTimers(2);
+
+  // 落盘唯一触发点：isSubmitting true → false（HomeWorkspace.vue:1679-1686）。
+  runtimeStore.$patch({ isSubmitting: true });
+  await nextTick();
+  runtimeStore.$patch({ isSubmitting: false });
+  await nextTick();
+  await flushDeferredTimers(3);
+
+  const state = readLastStoredStreamDebugState();
+  wrapper.unmount();
+  return state;
+}
+
 type SwitchOptions = {
   dev: boolean;
   storage: "true" | "false" | null;
@@ -361,6 +451,18 @@ describe("PA-117 · [workspace-scroll] 调试输出开关门控", () => {
     expect(onPayload.viewportResolved).toBe(true);
     expect(typeof onPayload.composerTop).toBe("number");
     expect(typeof onPayload.distanceToBottom).toBe("number");
+
+    // Assert 5（L3-B 补充 · 关闭态 streamDebugState 落盘）：markdown 路径
+    // HomeWorkspace.vue:1525 `updateStreamDebugReveal({ markdownRender* })` 也必须受同一开关门控。
+    // 关闭态下走完「完成态 assistant 消息 → render-complete → isSubmitting true→false 落盘」真实链路后，
+    // `pony-agent.metrics.stream-sessions` 末条 streamDebugState 不得含任何 `markdownRender*` 键。
+    const markdownDebugState = await measureMarkdownDebugReveal();
+    // 先证明落盘链路确实被驱动（否则"无键"会是空断言的假绿）。
+    expect(markdownDebugState).not.toBeNull();
+    const markdownRenderKeys = Object.keys(markdownDebugState ?? {}).filter((key) =>
+      key.startsWith("markdownRender")
+    );
+    expect(markdownRenderKeys).toEqual([]);
   });
 
   it("PA117-T2 (L2-AT 开关矩阵): localStorage true/false 与 URL ?debug=1|scroll 必须按契约优先级生效", async () => {
