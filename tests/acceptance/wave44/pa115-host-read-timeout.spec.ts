@@ -306,10 +306,13 @@ describe("PA-115 · initializeSessions host-read 有界超时", () => {
     await flushMicrotasks();
     expect(store.sessionOperation).toBeNull();
     store.draftMessage = DRAFT_TYPED_WHILE_WAITING;
-    const settledWithinDeadline = await advanceTo(
-      settlement,
-      SETTLE_DEADLINE_MS - 4_000
-    );
+    // Assert 1a（调用点超时钉死）：推进到 14000ms 时**必须仍未收敛**——
+    // 把调用点 `withTimeout(hostRead, <值>, ...)` 的 <值> 机械夹逼在 (14000, 16000) 区间，
+    // 防止仅钉住常量层（HYDRATION_TIMEOUT_MS）而调用点被改成 1000 等更小值时测试仍绿。
+    const settledBy14s = await advanceTo(settlement, 14_000 - 4_000);
+    expect(settledBy14s).toBe(false);
+    // Assert 1b：推进到 16000ms 结算截止期必须已收敛。
+    const settledWithinDeadline = await advanceTo(settlement, SETTLE_DEADLINE_MS - 14_000);
 
     // Assert 1：必须在迟到结果到达之前收敛（截止期严格早于迟到时刻）。
     expect(SETTLE_DEADLINE_MS).toBeLessThan(LATE_RESOLVE_AT_MS);
