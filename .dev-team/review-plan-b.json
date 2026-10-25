@@ -1,0 +1,49 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave44.md",
+    ".dev-team/nfr-baseline-wave44.json",
+    "src/stores/runtime.ts",
+    "src/components/HomeWorkspace.vue",
+    "src/lib/useTimelineAutoScroll.ts",
+    "src/lib/runtime/utils.ts",
+    "tests/acceptance/wave44/"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2694,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "rm -rf /tmp/w44f2 && mkdir -p /tmp/w44f2 && cp -r /home/dm/pony-agent/src /home/dm/pony-agent/tests /home/dm/pony-agent/vite.config.ts /home/dm/pony-agent/vitest.config.ts /home/dm/pony-agent/tsconfig.json /home/dm/pony-agent/package.json /tmp/w44f2/ && ln -s /home/dm/pony-agent/node_modules /tmp/w44f2/node_modules && python3 -c \"import pathlib;p=pathlib.Path('/tmp/w44f2/src/stores/runtime.ts');s=p.read_text();o='const runtimeView = await this.loadSessionRuntimeViewState(preferredSessionId);';n='const runtimeView = await withTimeout(this.loadSessionRuntimeViewState(preferredSessionId), 1000, \\\"加载对话\\\");';assert o in s;p.write_text(s.replace(o,n))\" && cd /tmp/w44f2 && npx vitest run tests/acceptance/wave44/pa115-host-read-timeout.spec.ts --reporter=dot",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2728,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "rm -rf /tmp/w44f1 && mkdir -p /tmp/w44f1 && cd /home/dm/pony-agent && cp -r src tests vite.config.ts vitest.config.ts tsconfig.json package.json /tmp/w44f1/ && ln -s /home/dm/pony-agent/node_modules /tmp/w44f1/node_modules && python3 -c \"\nimport pathlib\np=pathlib.Path('/tmp/w44f1/src/stores/runtime.ts'); s=p.read_text()\no='const runtimeView = await this.loadSessionRuntimeViewState(preferredSessionId);'\nn='const runtimeView = await withTimeout(this.loadSessionRuntimeViewState(preferredSessionId), HYDRATION_TIMEOUT_MS, \\\"加载对话\\\");'\nassert o in s\np.write_text(s.replace(o,n))\n\" && cat > /tmp/w44f1/tests/acceptance/wave44/probe.spec.ts <<'EOF'\nimport { createPinia, setActivePinia } from \"pinia\";\nimport { afterEach, beforeEach, expect, it, vi } from \"vitest\";\nimport { HYDRATION_TIMEOUT_MS } from \"@/lib/runtime/constants\";\nimport { useRuntimeStore } from \"@/stores/runtime\";\nconst m = vi.hoisted(() => ({ inv: vi.fn(), lis: vi.fn(), tauri: vi.fn() }));\nvi.mock(\"@/lib/tauri\", () => ({ safeInvoke: m.inv, safeListen: m.lis, isTauriAvailable: m.tauri }));\nbeforeEach(() => {\n  vi.useFakeTimers(); window.localStorage.clear(); setActivePinia(createPinia());\n  m.lis.mockResolvedValue(() => {}); m.tauri.mockReturnValue(true);\n  m.inv.mockImplementation((c: string) => c === \"list_sessions\"\n    ? Promise.resolve([{ conversationId: \"s1\", title: \"t\", summary: \"s\", turnCount: 1, lastReferencedFile: null, updatedAtMs: 1, workspaceId: null }])\n    : new Promise<never>(() => {}));\n});\nafterEach(() => { vi.useRealTimers(); });\nit(\"stale timeout rollback wipes state written after the 3500ms watchdog and clears a foreign lock\", async () => {\n  const store = useRuntimeStore();\n  void store.initializeSessions();\n  await vi.advanceTimersByTimeAsync(4000);\n  expect(store.sessionOperation).toBeNull();\n  store.sessionId = \"user-created-session\"; store.phase = \"ready\";\n  store.messages = [{ id: \"m1\", turnId: \"t1\", role: \"user\", content: \"窗口内输入\" }] as never;\n  store.sessionOperation = \"deleting\";\n  await vi.advanceTimersByTimeAsync(HYDRATION_TIMEOUT_MS + 1000);\n  expect(store.sessionId).toBe(\"local-dev-session\");\n  expect(store.messages).toHaveLength(0);\n  expect(store.sessionOperation).toBeNull();\n});\nEOF\ncd /tmp/w44f1 && npx vitest run tests/acceptance/wave44/probe.spec.ts --reporter=dot 2>&1 | tail -5",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/lib/runtime/utils.ts",
+      "line": 5,
+      "rule": "LEAK",
+      "counterexample_cmd": "rm -rf /tmp/w44f3 && mkdir -p /tmp/w44f3 && cp -r /home/dm/pony-agent/src /home/dm/pony-agent/tests /home/dm/pony-agent/vite.config.ts /home/dm/pony-agent/vitest.config.ts /home/dm/pony-agent/tsconfig.json /home/dm/pony-agent/package.json /tmp/w44f3/ && ln -s /home/dm/pony-agent/node_modules /tmp/w44f3/node_modules && python3 -c \"\nimport pathlib\np=pathlib.Path('/tmp/w44f3/src/stores/runtime.ts');s=p.read_text()\no='const runtimeView = await this.loadSessionRuntimeViewState(preferredSessionId);'\nn='''const runtimeView = await Promise.race([\n              this.loadSessionRuntimeViewState(preferredSessionId),\n              new Promise((_, reject) => setTimeout(() => reject(new Error(\\`加载对话 超时 (\\${HYDRATION_TIMEOUT_MS}ms)\\`)), HYDRATION_TIMEOUT_MS))\n            ]);'''\nassert o in s\np.write_text(s.replace(o,n))\n\" && cd /tmp/w44f3 && npx vitest run tests/acceptance/wave44/pa115-host-read-timeout.spec.ts --reporter=dot",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
+      "line": 230,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'defined' tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts && sed -n '73p' .dev-team/contract-matrix-wave44.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-wave44.md",
+      "line": 61,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'emitTimelineScrollDebug' src/components/HomeWorkspace.vue",
+      "severity": "ADVISORY"
+    }
+  ]
+}

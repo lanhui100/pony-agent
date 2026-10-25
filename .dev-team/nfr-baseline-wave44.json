@@ -23,6 +23,7 @@
     "pa_115_hydration": {
       "branch": "src/stores/runtime.ts:2693 host-read",
       "hydration_read_timeout_ms": 15000,
+      "hydration_read_timeout_ms_pinned": 15000,
       "timeout_source": "src/lib/runtime/constants.ts:15 HYDRATION_TIMEOUT_MS（与 src/stores/runtime.ts:2141 会话切换分支同语义）",
       "settle_deadline_ms": 16000,
       "settle_must_be_fulfilled_not_rejected": true,
@@ -34,6 +35,7 @@
       "stuck_loading_label_forbidden": "正在加载最近对话…",
       "silent_empty_degrade_forbidden": true,
       "late_resolution_must_not_mutate_state": true,
+      "draft_preserved_after_timeout": true,
       "retry_on_timeout": 0,
       "external_call_timeout_ms_applicable": false,
       "external_call_timeout_ms_na_reason": "本地 Tauri IPC 水合（非外部网络出口），3000ms 外部调用上限结构性不适用；沿用切换分支 15000ms 保证一致性"
@@ -60,7 +62,10 @@
       "console_info_calls_when_disabled": 0,
       "debug_buffer_written_when_disabled": false,
       "layout_reads_when_disabled": 0,
-      "layout_read_assertion": "同触发序列内 Element.prototype.getBoundingClientRect 调用数：关闭态 < 启用态（差 >= 1）",
+      "layout_read_assertion": "同 fixture 同触发序列内 Element.prototype.getBoundingClientRect 调用数：关闭态 = 0；启用态 > 0",
+      "stream_reveal_writes_when_disabled": 0,
+      "stream_debug_state_new_keys_when_disabled": 0,
+      "declared_behavior_change": "关闭态 updateStreamDebugReveal 不再被调用、streamDebugState 不新增键、不分配 debug buffer（属期望行为，非回归）",
       "payload_shape_unchanged_when_enabled": true,
       "logging_format_json_applicable": false,
       "logging_format_json_na_reason": "console.info 为开发者诊断输出，非结构化日志出口；内核结构化日志面本波零变更"

@@ -1,0 +1,66 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave44.md",
+    ".dev-team/nfr-baseline-wave44.json",
+    "src/stores/runtime.ts",
+    "src/lib/runtime/utils.ts",
+    "src/lib/runtime/constants.ts",
+    "src/lib/runtime/sessions.ts",
+    "src/components/HomeWorkspace.vue",
+    "src/lib/useTimelineAutoScroll.ts",
+    "tests/acceptance/wave44/",
+    "tests/HomeWorkspace.spec.ts"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-wave44.md",
+      "line": 47,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "反例实现（预算被压到 1s 仍全绿）：case \"host-read\": const runtimeView = await withTimeout(this.loadSessionRuntimeViewState(preferredSessionId), 1_000, \"加载对话\"); → npx vitest run tests/acceptance/wave44/pa115-host-read-timeout.spec.ts 仍 2/2 通过（1s < 16000 截止期；T1/T2 只验证上界），但 NFR hydration_read_timeout_ms=15000 与「沿用切换分支 15000ms 语义」完全未被锁定；真机 15s 慢水合会被误判失败并清空会话。建议补一条：host 读在 HYDRATION_TIMEOUT_MS-1000 返回时必须 resolve、messages 含宿主历史、sessionError===null。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
+      "line": 329,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "反例实现（无 DEV 兜底）：const on = () => localStorage.getItem('pony-agent.debug.workspace-scroll')==='true' || ['1','scroll'].includes(new URLSearchParams(location.search).get('debug') ?? '');（storage==='false' 先返回 false）→ npx vitest run tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts 3/3 全绿，因为 T1/T2/T3 全部 vi.stubEnv('DEV', false)，没有一条 dev:true+无开关⇒期望开 的用例；但 npx vitest run tests/HomeWorkspace.spec.ts -t \"does not start a terminal smooth follow when assistant streaming completes\" 立刻破（__ponyScrollDebugBuffer 为空 / latestScrollDebugEvent undefined）。NFR dev_default_enabled=true 在验收 spec 内零覆盖，只靠回归文件兜底。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
+      "line": 363,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "反例实现（URL 覆盖 kill switch）：开关谓词先判 ?debug=1|scroll 再判 storage==='false' → npx vitest run tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts -t PA117-T2 仍绿；契约 §2.3 优先级 ①storage_false > ③URL（contract-matrix-wave44.md:61）只用 {dev:true,storage:'false'} 验证了 ①>④，从未出现 storage:'false' + url:'/?debug=1' 组合。建议补 measureSequence({dev:false,storage:'false',url:'/?debug=1'}) 断言 logs===0 且 buffer.length===0。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
+      "line": 377,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "PA117-T3 不是冻结断言 id：契约 §1 冻结表只登记 PA117-T1/T2（contract-matrix-wave44.md:35-36），文件却在头部把它写成「契约断言 id 对照」。npx vitest run tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts -t \"PA117-T3\" 可独立执行，但红相/绿相收据无法与契约 id 对齐。要么回写契约冻结表，要么并入 T2。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave44/pa135-composition-undo.spec.ts",
+      "line": 383,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "PA135-T3 同样不是冻结 id：契约 §1 只有 PA135-T1/T2（contract-matrix-wave44.md:33-34）。其断言的「不得经 handleWindowKeydown 双触发」对应 NFR double_fire_forbidden（nfr-baseline-wave44.json:47）且未登记 id；而 src/components/HomeWorkspace.vue:1444 的 `isUndoShortcut && !isEditableTarget` 使该场景在现有架构下恒不双触发 ⇒ T3 的双触发断言不可证伪，实际只覆盖「组合态撤销恰好 1 次」。npx vitest run tests/acceptance/wave44/pa135-composition-undo.spec.ts -t \"PA135-T3\"。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts",
+      "line": 298,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "measureSequence 末尾的 vi.restoreAllMocks() 会连带 reset beforeEach 里 vi.hoisted 模块 mock 的实现（@vitest/spy dist/index.js:158-161：mockRestore = mockReset + restore），于是同一用例第 2..n 次测量的 mount 中 safeInvoke/safeListen/isTauriAvailable 已无 implementation（返回 undefined），第 1 次却有 mockResolvedValue(null)/mockResolvedValue(()=>{})/mockReturnValue(false)；T2 一轮 4 次测量=4 套不同夹具，与 :263 注释「同 fixture、同序列两态差分」不符。当前挂载期不触达 IPC 故无害，一旦挂载链新增 safeListen 调用即变 flaky 假绿。建议只单独 mockRestore getBoundingClientRect 探针。复现：npx vitest run tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts -t PA117-T2。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2639,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "反例序列（无 generation token 的 stale 快照回滚）：vi.useFakeTimers(); const p1 = store.initializeSessions(); await vi.advanceTimersByTimeAsync(3500); // watchdog 已把 sessionOperation 置 null（runtime.ts:2639-2643）⇒ 重入守卫失效；const p2 = store.initializeSessions(); // 第二次 init 正常完成并写入 sessionId/messages；await vi.advanceTimersByTimeAsync(11500); // 第一个 init 的 host 读在 15000 超时 → catch 执行 restoreSessionRuntimeSnapshot(this, previousSnapshot)（:2720-2722），把第二次 init 写入的 sessionId/messages/phase 覆盖成 stale 快照。PA115 方案未加 sessionSwitchToken 式代际校验，验收用例也没有「未 settle 前重入」覆盖（PA115-T1 Act2 是 settle 之后再调）。当前唯一调用点 src/App.vue:163，属潜在风险；修复把窗口从「永不结算」变成「15s 可重入且会被回滚」，建议 catch 内比对 init 代际再回滚。",
+      "severity": "ADVISORY"
+    }
+  ]
+}
