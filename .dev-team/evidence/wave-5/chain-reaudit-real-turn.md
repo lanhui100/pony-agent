@@ -58,11 +58,13 @@ tcount 'client.service.name="pony-agent"' = 1         ← 原服务名保留（�
 
 ## 3. 仍存缺口与优化建议（按优先级）
 
-### P1-1 Tempo 跨 2 小时数据不可查（infra，需核实）
-- 现象：本轮 03:00Z 由合成探针写入的 trace（当时 `tcount=1`）在 04:57Z 查询时 `service.name` 标签值集合为**空**；Tempo Pod 期间重启过。
-- 配置现状：S3(MinIO) 后端 + `block_retention: 168h` + `flush_all_on_shutdown: true` + `terminationGracePeriodSeconds`（注释称 90）。
-- 影响：短时重启窗口内**已接收但未封块的 trace 可能丢失**，表现为「链路偶尔查不到」。属 infra 侧问题，非客户端缺陷。
-- 建议：核实 Pod `terminationGracePeriodSeconds` 实际值与 ingester flush 日志；必要时提高至 120s 并在重启前排空。
+### ~~P1-1 Tempo 跨 2 小时数据不可查~~ → **已撤回：不是数据丢失，是查询工具的窗口缺陷（已修）**
+- 原判断（错误）：03:00Z 写入的探针 trace 在 04:57Z 查不到，疑似重启丢数据。
+- 复核（正确）：用**显式时间窗**查询同一 window（`start/end` 覆盖 02:40–03:20Z）→ **trace 仍在**
+  （`traceID=5b8efff798038103d269b633813fc60c`）。Tempo Pod 实测 `restarts=0`、`terminationGracePeriodSeconds=90`、S3 后端 + 168h 保留 ⇒ **无数据丢失**。
+- 根因：`observability-onboarding/scripts/lib.sh::tcount()` 的 tag 搜索**不带 `start/end`**，Tempo 对 tag 搜索使用很窄的默认窗口（≈15min）⇒ 一小时前的 trace 被判成不存在。
+- 已修（skill 侧，见 `.dev-team/evidence/wave-6/skill-lib.sh.patch`）：`tcount()` 与 `tcount_q()` 对齐，缺省回看 24h。
+- 连带修复（skill 侧，`skill-audit-project.sh.patch`）：`g()/gh()` 未排除文档/治理树与 `target*` 构建产物、且 `/metrics` 用裸正则命中 `metrics-diagnostics` 模块名 ⇒ M1/M2 假 PASS。修后 `M1=MISSING / M2=PARTIAL`，与 `docs/observability.yaml` 的 N/A 声明一致。
 
 ### P1-2 `llm.chat` 子 span 缺 `langfuse.session.id`（客户端，低成本）
 - 现状：`langfuse.session.id` 只在 `agent.turn` root 上；Langfuse 会话归集靠 trace 级字段，因此**当前不影响检索**，但子 observation 单独导出/聚合时会丢会话。
