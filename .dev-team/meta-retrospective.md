@@ -55,3 +55,10 @@
 1. **P0 多宿主一致性必须显式列为本项目的一等检查项**：本次"CLI 可绕过"与 Wave-4 的"CLI/TUI 零引导"是同一根因（桌面优先实现）。建议在 dev-team 的 L3 检查清单里固化一条：**凡 core 能力，必须列出三宿主接入点并逐一验证**。
 2. **P1 配置字段的跨语言命名要有机械校验**：本轮两次踩坑都源于 Rust serde camelCase ↔ 手写 JSON 键名不一致。建议在验收里加一条：settings 结构体字段名与 `src/types/settings.ts` 由脚本比对（现有 `check-declaration.sh` 类似思路）。
 3. **P2 复审脚本应内置到仓库**：本轮复审命令（隔离 HOME + token 注入 + Tempo 回查）是手工拼的。建议落成 `scripts/observability/chain-probe.sh`，把"正常轮 / 阻断轮 / trace 回查"三件事一键跑通，避免每轮重写并重复踩坑。
+
+
+### Wave-7 补记：L3 判 FAIL 是本轮最有价值的一次门禁
+- **3 个 BLOCKING 全部是"功能对错"而非"链路通断"**：设置键名 camelCase 断裂（UI 配置永不生效）、未计价被伪造成 0 成本（账本第二套语义）、金额进 issue payload（财务数据泄漏）。而端到端链路本身是**全通**的（trace/日志/span 都对）。
+- **教训（P0）**：`可观测性链路通 ≠ 功能正确`。任何"链路验证"的结论都必须显式声明其覆盖面仅限数据通路，不得外推为功能验收。
+- **教训（P1）**：跨语言配置契约（Rust serde camelCase ↔ 手写 TS/JSON 键）缺机械校验，导致 UI 配置整条路径不可达而所有测试仍绿——本轮由 L3 的 `counterexample_cmd` 断言文件内容才发现。建议把「配置键名一致性」做成脚本门禁（比对 `app_settings.rs` 字段与 `src/types/settings.ts`）。
+- **教训（P2）**：`ui-block.png` 初次提交的是启动 splash 而非拦截 UI —— **截图凭证必须可自证内容**（本轮由 L3 指出后重截）。凡以截图作凭证，须同时给出"该图为何证明目标行为"的一句话说明。
