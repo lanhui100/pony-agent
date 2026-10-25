@@ -107,3 +107,40 @@ curl -sS -u "$PK:$SK" "http://127.0.0.1:13000/api/public/traces?limit=3"
 bash ~/.agents/skills/observability-onboarding/scripts/check-declaration.sh .
 bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --repo .
 ```
+
+---
+
+## 5. Wave-6 优化后复审（追加）
+
+### 5.1 已闭环
+| 项 | 修复 | 证据 |
+| :--- | :--- | :--- |
+| P1-2 子 span 缺会话属性 | `ActiveTurn.session_id` → `llm.chat` / `tool.call` 均带 `langfuse.session.id`（无活跃 turn 不输出） | `wave6_observability_polish_test` wire 级断言 + 4 情形反向单测 |
+| P2 计价协议语义 | 新增 `ProviderCostProtocol`：Anthropic（input 不含 cache）⇒ `uncached = input`；OpenAI ⇒ `max(input−cache,0)`；未知保守走 OpenAI | 单测：100/5000 ⇒ Anthropic 0.0018 vs OpenAI 0.0015 |
+| K6 结构化日志 | `log_json_with_extras`；成本告警改为数值字段 `turn_cost_usd` / `budget_usd` | 实测 JSON 行为 number |
+| 测试证据自污染 | `wave15_evidence_dir()` 改写临时目录 ⇒ 全量测试后 `.dev-team/evidence/wave15/` **零改动** | `git status` 空 |
+| 巡检脚本误判（skill 侧） | `tcount()` 补时间窗；`g()/gh()` 排除文档/治理树与 `target*`；`/metrics` 改正字面量 | `M1=MISSING/M2=PARTIAL`（此前假 PASS）；`T4=PASS`（此前假 MISSING） |
+
+### 5.2 **新发现（服务端缺口，非客户端缺陷）：PonySentry ingest 丢弃 `trace_id`**
+隔离实验（不经 pony-agent，直接打公网 ingest）：
+```bash
+curl -X POST https://sentry.ponyjob.top/api/v1/ingest \
+  -H "X-Client-Token: <client>" -d '{"platform":"rust",...,"event_id":"aaaa...0001",
+     "trace_id":"2a5fd54e11965d25c59f16155fee7e3c","tags":{"project":"pony-agent"},...}'
+# → 201 {"result":"created","event_id":"aaaa...0001","warnings":["missing_culprit..."]}
+```
+回读该事件 payload 的 keys：`['breadcrumbs','environment','event_id','exception','extra','level','message','platform','release','tags']`
+—— **`event_id` 保留、`trace_id` 被服务端丢弃**。
+
+结论：
+- 客户端侧（`event_id` / `trace_id` / `tags.project` / `extra.turn_id`）**已完整发送**，本地 sink 逐字节可见；
+- `Issue ↔ Tempo` 互跳的最后一环卡在 **PonySentry ingest schema**：需要服务端接收并持久化 `trace_id`，并在 issue/event 详情里暴露（用于跳 Tempo）。
+- 建议（infra PR）：ingest 白名单增加 `trace_id`（32hex 校验）→ 入库 → API 返回；客户端无需再改。
+
+### 5.3 客户端侧已完成的互跳前置
+`pony-agent` 现在能保证：每个来自 core 的 issue 都带 `event_id`、`tags.project=pony-agent`、`extra.turn_id`，并**在能取到导出态 id 时**带 `trace_id`（turn 级登记表 + 跨上下文 hint）。服务端放开该字段后即可全链互跳。
+
+### 5.4 仍存（不阻断）
+- `M3` Prometheus job 前缀近似匹配仍会产生 PARTIAL 噪声（桌面端 metrics 本就 N/A，声明已覆盖）；
+- `audit-diff` 仍输出「规则集为空」WARN（无 `enforcement_points`，属诚实空转）；
+- `langfuse.session.id` 未写入 `agent.turn` 之外的日志面（日志已有 trace_id，够用）。
