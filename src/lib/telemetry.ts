@@ -47,12 +47,94 @@ export interface IngestPayload {
   platform: string;
   release: string;
   environment: string;
+  event_id?: string;
+  trace_id?: string;
   message?: string;
   exception?: Exception;
   tags?: Record<string, string>;
   extra?: Record<string, unknown>;
   breadcrumbs?: Breadcrumb[];
 }
+
+export type BeforeSendCallback = (
+  payload: IngestPayload
+) => IngestPayload | null | Promise<IngestPayload | null>;
+
+let globalBeforeSend: BeforeSendCallback | null = null;
+
+export function setBeforeSend(callback: BeforeSendCallback | null): void {
+  globalBeforeSend = callback;
+}
+
+export function getBeforeSend(): BeforeSendCallback | null {
+  return globalBeforeSend;
+}
+
+/**
+ * 全局未捕获异常网络噪音清洗规则接口
+ */
+export interface NetworkNoiseRule {
+  name: string;
+  test: (message: string, url?: string) => boolean;
+}
+
+export const DEFAULT_NETWORK_NOISE_RULES: NetworkNoiseRule[] = [
+  {
+    name: "network_failed_fetch",
+    test: (msg) => /Failed to fetch|NetworkError|Load failed|net::ERR_/i.test(msg),
+  },
+  {
+    name: "cors_error",
+    test: (msg) => /Cross-Origin Request Blocked|CORS request did not succeed/i.test(msg),
+  },
+  {
+    name: "script_load_error",
+    test: (msg) => /Loading chunk [\w-]+ failed|ChunkLoadError/i.test(msg),
+  },
+];
+
+export function isNetworkNoise(message?: string, url?: string): boolean {
+  if (!message) return false;
+  return DEFAULT_NETWORK_NOISE_RULES.some((rule) => rule.test(message, url));
+}
+
+/**
+ * W3C traceparent 获取与注入辅助契约
+ */
+export interface TraceParentContext {
+  version: string;
+  traceId: string;
+  parentId: string;
+  traceFlags: string;
+}
+
+export function parseTraceParent(header?: string | null): TraceParentContext | null {
+  if (!header) return null;
+  const match = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(header.trim());
+  if (!match) return null;
+  return {
+    version: match[1],
+    traceId: match[2],
+    parentId: match[3],
+    traceFlags: match[4],
+  };
+}
+
+export function formatTraceParent(ctx: TraceParentContext): string {
+  return `${ctx.version}-${ctx.traceId}-${ctx.parentId}-${ctx.traceFlags}`;
+}
+
+export function generateEventId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID().replace(/-/g, "");
+  }
+  return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 
 // ---- 零信任脱敏规则 (客户端脱敏双保险) ----
 const SENSITIVE_KEYS =
@@ -221,6 +303,7 @@ export function buildIngestPayload(options: ReportErrorOptions): IngestPayload {
     platform: options.platform || (isTauriAvailable() ? "tauri" : "vue"),
     release: APP_RELEASE,
     environment: APP_ENV,
+    event_id: generateEventId(),
     message: sanitizedMsg,
     exception: {
       error_type: sanitizeString(errorType),

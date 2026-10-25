@@ -18,6 +18,7 @@
   ],
   "logging": {
     "format": "json",
+    "trace_id": true,
     "trace_id_required": true,
     "trace_id_field": "trace_id"
   },

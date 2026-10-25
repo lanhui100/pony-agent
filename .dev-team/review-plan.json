@@ -1,0 +1,9 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".dev-team/nfr-baseline.json",
+    "src/lib/telemetry.ts",
+    "crates/pony-agent-core/src/agent/otel/mod.rs"
+  ],
+  "findings": []
+}

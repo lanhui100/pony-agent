@@ -680,6 +680,40 @@ pub fn tool_span_attributes(input: &ToolSpanInput) -> Vec<(String, AttrValue)> {
     attributes
 }
 
+// ---------------------------------------------------------------- W3C Trace Context 契约辅助与空桩
+
+/// W3C traceparent 上下文结构
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct W3cTraceContext {
+    pub version: String,
+    pub trace_id: String,
+    pub parent_id: String,
+    pub trace_flags: String,
+}
+
+impl W3cTraceContext {
+    /// 格式化为标准 W3C traceparent 头部字符串 (例如 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01)
+    pub fn to_header_value(&self) -> String {
+        format!("{}-{}-{}-{}", self.version, self.trace_id, self.parent_id, self.trace_flags)
+    }
+}
+
+/// 将 traceparent 注入到 HTTP 请求头集合中（空桩与契约接口签名）。
+///
+/// 契约约定：
+/// - 若当前上下文存在有效 trace_id 与 span_id，则格式化并设置 `traceparent` 请求头。
+/// - 若不存在或上报门禁关闭，保持空桩或透传既有 headers。
+pub fn inject_traceparent_header<H>(headers: &mut H, _context: Option<&W3cTraceContext>)
+where
+    H: AsMut<reqwest::header::HeaderMap>,
+{
+    if let Some(ctx) = _context {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(&ctx.to_header_value()) {
+            headers.as_mut().insert("traceparent", val);
+        }
+    }
+}
+
 // ------------------------------------------------- turn / LLM / 工具 span 装配面（挂载切片）
 //
 // 运行时装配点（runtime/turn_*.rs、turn_flow.rs 的 provider 调用缝、工具活动记录点）
