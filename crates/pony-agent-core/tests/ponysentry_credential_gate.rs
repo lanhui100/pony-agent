@@ -100,6 +100,7 @@ fn minimal_ingest_payload() -> IngestPayload {
         tags: None,
         extra: None,
         breadcrumbs: None,
+        ..Default::default()
     }
 }
 

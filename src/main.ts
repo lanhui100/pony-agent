@@ -4,6 +4,7 @@ import { MotionPlugin } from "motion-v";
 import App from "./App.vue";
 import "./styles.css";
 import { reportError, addBreadcrumb, isNetworkNoise } from "./lib/telemetry";
+import { useRuntimeStore } from "@/stores/runtime";
 
 const mountCount = Number(window.sessionStorage.getItem("pony-agent.mount-count") || "0") + 1;
 window.sessionStorage.setItem("pony-agent.mount-count", String(mountCount));
@@ -20,6 +21,18 @@ addBreadcrumb("app", "App boot start", {
 
 const app = createApp(App);
 
+const pinia = createPinia();
+app.use(pinia);
+app.use(MotionPlugin);
+
+function getActiveTraceId(): string | undefined {
+  try {
+    return useRuntimeStore().activeTraceId;
+  } catch {
+    return undefined;
+  }
+}
+
 // 全局 Vue 组件渲染及生命周期错误捕获 (PonySentry A1)
 app.config.errorHandler = (err: unknown, instance, info: string) => {
   console.error("[pony-agent][vue-error]", err, info);
@@ -30,6 +43,7 @@ app.config.errorHandler = (err: unknown, instance, info: string) => {
     errorType: errorObj.name || "VueComponentError",
     message,
     stack: errorObj.stack,
+    trace_id: getActiveTraceId(),
     extra: {
       lifecycleHook: info,
       componentTag: instance?.$options?.name || "AnonymousComponent",
@@ -52,6 +66,7 @@ if (typeof window !== "undefined") {
       errorType: errorObj.name || "UnhandledRejection",
       message,
       stack: errorObj.stack,
+      trace_id: getActiveTraceId(),
       extra: {
         reasonString: String(reason),
       },
@@ -74,6 +89,7 @@ if (typeof window !== "undefined") {
       errorType: errorObj.name || "WindowRuntimeError",
       message,
       stack: errorObj.stack,
+      trace_id: getActiveTraceId(),
       extra: {
         filename: event.filename,
         lineno: event.lineno,
@@ -86,9 +102,6 @@ if (typeof window !== "undefined") {
   });
 }
 
-const pinia = createPinia();
-app.use(pinia);
-app.use(MotionPlugin);
 app.mount("#app");
 
 // 优雅淡出 index.html 预加载启动屏（保留 3s 品牌展示，结束后立即解绑事件拦截防遮挡）

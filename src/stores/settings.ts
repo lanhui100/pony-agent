@@ -109,5 +109,9 @@ function normalizeAppSettings(settings?: Partial<AppSettings> | null): AppSettin
       settings?.workspaceMode === "work" ? "work" : "coding",
     // 老 settings.json 无该键（legacy）时回落 false；仅显式 true 才开启上报。
     agentTraceReporting: settings?.agentTraceReporting === true,
+    otelEndpoint: settings?.otelEndpoint ?? undefined,
+    otelToken: settings?.otelToken ?? undefined,
+    otelServiceName: settings?.otelServiceName ?? undefined,
+    otelSamplingRatio: typeof settings?.otelSamplingRatio === "number" ? settings.otelSamplingRatio : undefined,
   } as AppSettings;
 }

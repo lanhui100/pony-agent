@@ -106,8 +106,17 @@ pub const OBSERVATION_TYPE_TOOL: &str = "tool";
 
 // ------------------------------------------------------------- 缺省值与环境变量（D3）
 
-/// OTLP/HTTP 端点缺省值（集群内 collector，4318 端口）。
+/// 集群内 collector 的 OTLP/HTTP 端点常量（4318 端口）。
+///
+/// Wave-4 C1.4：桌面端**内置缺省**端点已改为公网 [`DEFAULT_PUBLIC_ENDPOINT`]；本常量保留为
+/// 「集群内直连」的显式取值（供测试/运维按需经 env 覆盖），**不再**是 [`OtelConfig::default`]
+/// 的取值。历史冻结断言（`otel_trace_migration_test.rs` D3 缺省值扫描）逐字锁定本常量，故不改值。
 pub const DEFAULT_ENDPOINT: &str = "http://otel-collector.observability.svc.cluster.local:4318";
+
+/// 桌面端内置缺省 OTLP/HTTP 端点（公网 edge，Wave-4 C1.4）。
+///
+/// 语义：`settings` 与 `env` 均未提供端点时的最终回落值；端点补齐 `/v1/traces` 由导出层负责。
+pub const DEFAULT_PUBLIC_ENDPOINT: &str = "https://otel.ponyjob.top";
 
 /// `service.name` 资源属性缺省值。
 pub const DEFAULT_SERVICE_NAME: &str = "pony-agent";
@@ -194,7 +203,10 @@ pub struct ToolSpanInput {
 /// 见 [`OtelConfig::from_env`]。
 #[derive(Clone, PartialEq)]
 pub struct OtelConfig {
-    /// OTLP/HTTP 端点；缺省 [`DEFAULT_ENDPOINT`]。
+    /// OTLP/HTTP 端点；缺省 [`DEFAULT_PUBLIC_ENDPOINT`]（桌面端公网出口 `https://otel.ponyjob.top`）。
+    ///
+    /// 说明：集群内 collector（[`DEFAULT_ENDPOINT`]）**只是**一个常量取值，需经
+    /// [`ENV_OTLP_ENDPOINT`] 或 settings 显式指定才会生效，不再是内置缺省。
     pub endpoint: String,
     /// `service.name`；缺省 [`DEFAULT_SERVICE_NAME`]。
     pub service_name: String,
@@ -223,17 +235,179 @@ impl fmt::Debug for OtelConfig {
 }
 
 impl Default for OtelConfig {
-    /// 契约（缺省语义）：`endpoint` = [`DEFAULT_ENDPOINT`]、`service_name` =
-    /// [`DEFAULT_SERVICE_NAME`]、`sampling_ratio` = [`DEFAULT_SAMPLING_RATIO`]、
+    /// 契约（缺省语义）：`endpoint` = [`DEFAULT_PUBLIC_ENDPOINT`]（桌面端公网出口）、
+    /// `service_name` = [`DEFAULT_SERVICE_NAME`]、`sampling_ratio` = [`DEFAULT_SAMPLING_RATIO`]、
     /// `headers` 为空。
     fn default() -> Self {
         Self {
-            endpoint: DEFAULT_ENDPOINT.to_string(),
+            endpoint: DEFAULT_PUBLIC_ENDPOINT.to_string(),
             service_name: DEFAULT_SERVICE_NAME.to_string(),
             sampling_ratio: DEFAULT_SAMPLING_RATIO,
             headers: Vec::new(),
         }
     }
+}
+
+/// settings 持久化来源的中性快照（Wave-4 C1：`settings > env > 内置默认`）。
+///
+/// 契约：由宿主（Tauri `load_app_settings` 路径）从 `AppSettings` 构造；
+/// 字段为 `None` 表示「该项未配置」——必须继续向下一来源回落，**不得**用空串占位。
+/// 凭据（[`OtelSettingsSnapshot::token`]）只允许流入导出 header，绝不进入日志/回显
+/// （因此本类型**手写 Debug**，token 一律 `[REDACTED]`）。
+#[derive(Clone, Default, PartialEq)]
+pub struct OtelSettingsSnapshot {
+    /// 用户配置的 OTLP 端点；`None`/空串 ⇒ 回落 env ⇒ 内置公网缺省。
+    pub endpoint: Option<String>,
+    /// 用户配置的鉴权 token；`None`/空串 ⇒ 回落 env ⇒ 不注入（零 egress 凭证态）。
+    pub token: Option<String>,
+    /// 用户配置的 `service.name`；`None`/空串 ⇒ 回落 env ⇒ [`DEFAULT_SERVICE_NAME`]。
+    pub service_name: Option<String>,
+    /// 用户配置的采样率；`None` 或越界 ⇒ 回落 env ⇒ [`DEFAULT_SAMPLING_RATIO`]。
+    pub sampling_ratio: Option<f64>,
+}
+
+impl fmt::Debug for OtelSettingsSnapshot {
+    /// F1/C1.5：**绝不**打印 token 明文（与 [`OtelConfig`] 手写 Debug 同一约束）。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OtelSettingsSnapshot")
+            .field("endpoint", &self.endpoint)
+            .field(
+                "token",
+                &self.token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("service_name", &self.service_name)
+            .field("sampling_ratio", &self.sampling_ratio)
+            .finish()
+    }
+}
+
+/// 按「settings > env > 内置默认」解析最终生效配置（纯函数，无全局态、无网络 IO）。
+///
+/// 调用方：宿主启动装配点（`otel::init` 之前）与单测；`env` 参数显式传入，
+/// **不读进程环境**（进程环境只在 [`from_env`] 里采集），保证可测性与可重放性。
+/// 语义：
+/// - `settings` 的每个非空字段优先于 `env` 同名项；
+/// - `env` 覆盖内置缺省（[`ENV_OTLP_ENDPOINT`] / [`ENV_SERVICE_NAME`] / [`ENV_SAMPLER_ARG`] /
+///   [`ENV_PONY_OTEL_TOKEN`]）；
+/// - token 统一组装为 [`AUTH_HEADER_NAME`] header（值见 [`authorization_header_value`]），
+///   settings 与 env 互斥生效，绝不重复叠加；
+/// - 采样率越界（非有限值或不在 0.0~1.0）时该来源**拒绝采纳**并降级到下一来源，不 panic。
+pub fn resolve_config(
+    settings: Option<&OtelSettingsSnapshot>,
+    env: Option<&[(&str, &str)]>,
+) -> OtelConfig {
+    let mut config = OtelConfig::default();
+    let lookup = |name: &str| -> Option<String> {
+        env.and_then(|pairs| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+    };
+
+    // ---- 第二优先级：进程 env ----
+    if let Some(endpoint) = lookup(ENV_OTLP_ENDPOINT) {
+        config.endpoint = endpoint;
+    }
+    if let Some(service_name) = lookup(ENV_SERVICE_NAME) {
+        config.service_name = service_name;
+    }
+    if let Some(raw_ratio) = lookup(ENV_SAMPLER_ARG) {
+        match parse_sampling_ratio(&raw_ratio) {
+            Some(ratio) => config.sampling_ratio = ratio,
+            None => log::log_json(
+                "warn",
+                &format!(
+                    "otel::resolve_config：{ENV_SAMPLER_ARG} 取值非法，已回落缺省采样率 {DEFAULT_SAMPLING_RATIO}：{raw_ratio}"
+                ),
+                None,
+            ),
+        }
+    }
+    if let Some(token) = lookup(ENV_PONY_OTEL_TOKEN) {
+        set_authorization_header(&mut config.headers, &token);
+    }
+
+    // ---- 第一优先级：settings 持久化 ----
+    if let Some(settings) = settings {
+        if let Some(endpoint) = non_empty_setting(settings.endpoint.as_deref()) {
+            config.endpoint = endpoint;
+        }
+        if let Some(service_name) = non_empty_setting(settings.service_name.as_deref()) {
+            config.service_name = service_name;
+        }
+        if let Some(ratio) = settings.sampling_ratio {
+            match parse_sampling_ratio(&ratio.to_string()) {
+                Some(ratio) => config.sampling_ratio = ratio,
+                None => log::log_json(
+                    "warn",
+                    &format!(
+                        "otel::resolve_config：settings 采样率越界（须 0.0~1.0），已忽略并沿用上一来源：{ratio}"
+                    ),
+                    None,
+                ),
+            }
+        }
+        // C1.5：settings token 为空串 ⇒ 等同未配置（继续沿用 env 结果 / 零凭证）。
+        if let Some(token) = non_empty_setting(settings.token.as_deref()) {
+            set_authorization_header(&mut config.headers, &token);
+        }
+    }
+
+    config
+}
+
+impl OtelConfig {
+    /// 由 settings 持久化快照 + 进程环境变量解析生效配置（宿主启动装配点）。
+    ///
+    /// 语义：等价于 `resolve_config(settings, Some(进程 env 白名单))`；先按 env 组装，
+    /// 再用 settings 覆盖。失败语义：不返回错误（越界/非法项降级为 warn 日志）。
+    pub fn from_settings(settings: Option<&OtelSettingsSnapshot>) -> OtelConfig {
+        let pairs = process_env_pairs();
+        let borrowed: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        resolve_config(settings, Some(borrowed.as_slice()))
+    }
+}
+
+/// settings 字符串项清洗：`None`/纯空白 ⇒ `None`（回落下一来源）。
+fn non_empty_setting(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// 采样率解析：仅接受有限且落在 0.0~1.0 的值，其余返回 `None`（拒绝采纳）。
+fn parse_sampling_ratio(raw: &str) -> Option<f64> {
+    match raw.trim().parse::<f64>() {
+        Ok(ratio) if ratio.is_finite() && (0.0..=1.0).contains(&ratio) => Some(ratio),
+        _ => None,
+    }
+}
+
+/// 设置鉴权 header：先摘除同名的既有项（settings 覆盖 env，绝不叠加）。
+fn set_authorization_header(headers: &mut Vec<(String, String)>, token: &str) {
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case(AUTH_HEADER_NAME));
+    headers.push((
+        AUTH_HEADER_NAME.to_string(),
+        authorization_header_value(token),
+    ));
+}
+
+/// 采集进程环境变量白名单（仅 OTel 相关四项）；未设置/空白项不出现在结果里。
+fn process_env_pairs() -> Vec<(String, String)> {
+    [ENV_OTLP_ENDPOINT, ENV_SERVICE_NAME, ENV_SAMPLER_ARG, ENV_PONY_OTEL_TOKEN]
+        .iter()
+        .filter_map(|name| {
+            env_non_empty(name).map(|value| ((*name).to_string(), value))
+        })
+        .collect()
 }
 
 /// 装配入口：安装全局 trace provider。
@@ -330,13 +504,23 @@ pub fn init(config: OtelConfig) -> Result<(), String> {
 /// 语义：幂等，可重复调用；返回后允许再次 [`init`]。
 /// 失败语义：不返回错误——任何内部异常都必须在内部吞掉并降级为日志，绝不 panic。
 pub fn shutdown() {
+    shutdown_bounded(SHUTDOWN_TIMEOUT_MS);
+}
+
+/// 带预算的 [`shutdown`]：provider 关闭等待上限由调用方给定（毫秒）。
+///
+/// 调用方：进程退出路径（Wave-4.1 A5：退出总预算 ≤3000ms 时传入 1000ms 档位）。
+/// 语义：与 [`shutdown`] 完全一致（幂等、不 panic、失败只降级 warn），仅把内部
+/// `shutdown_with_timeout` 的等待上限替换为 `timeout_ms`（内部仍按 `MAX_FLUSH_WAIT_MS` 夹值）。
+pub fn shutdown_bounded(timeout_ms: u64) {
     let state = take_state();
     let Some(state) = state else {
         return;
     };
+    let wait_ms = timeout_ms.min(MAX_FLUSH_WAIT_MS);
 
     let provider = state.provider.clone();
-    match provider.shutdown_with_timeout(Duration::from_millis(SHUTDOWN_TIMEOUT_MS)) {
+    match provider.shutdown_with_timeout(Duration::from_millis(wait_ms)) {
         Ok(()) => {
             // 正常路径（A7）：先显式释放 provider（导出线程 / reqwest Client），
             // 再释放含 runtime 的全局态 —— runtime 必须活到所有导出 future 结束之后。
@@ -415,43 +599,15 @@ pub fn config() -> Option<OtelConfig> {
     })
 }
 
-/// 按环境变量组装配置。
+/// 按环境变量组装配置（无 settings 来源的兼容入口）。
 ///
-/// 调用方：[`init`] 的宿主侧调用点。优先级：环境变量 > 编译期缺省值
-/// （[`ENV_OTLP_ENDPOINT`] / [`ENV_SERVICE_NAME`] / [`ENV_SAMPLER_ARG`]）；
-/// [`ENV_PONY_OTEL_TOKEN`] 存在时以 [`AUTH_HEADER_NAME`] header 注入 headers。
-/// 语义：不读写全局状态、不发起网络 IO，可被单测直接调用。
+/// 调用方：[`init`] 的宿主侧调用点（无持久化 settings 时，如 TUI/CLI 进程）。
+/// 语义：等价于 [`OtelConfig::from_settings`]`(None)` ⇒ 优先级 `env > 内置默认`
+/// （[`ENV_OTLP_ENDPOINT`] / [`ENV_SERVICE_NAME`] / [`ENV_SAMPLER_ARG`]，缺省端点为
+/// [`DEFAULT_PUBLIC_ENDPOINT`]）；[`ENV_PONY_OTEL_TOKEN`] 存在时以 [`AUTH_HEADER_NAME`]
+/// header 注入 headers。不读写全局状态、不发起网络 IO，可被单测直接调用。
 pub fn from_env() -> OtelConfig {
-    let mut config = OtelConfig::default();
-
-    if let Some(endpoint) = env_non_empty(ENV_OTLP_ENDPOINT) {
-        config.endpoint = endpoint;
-    }
-    if let Some(service_name) = env_non_empty(ENV_SERVICE_NAME) {
-        config.service_name = service_name;
-    }
-    if let Some(raw_ratio) = env_non_empty(ENV_SAMPLER_ARG) {
-        match raw_ratio.trim().parse::<f64>() {
-            Ok(ratio) if ratio.is_finite() && (0.0..=1.0).contains(&ratio) => {
-                config.sampling_ratio = ratio;
-            }
-            _ => log::log_json(
-                "warn",
-                &format!(
-                    "otel::from_env：{ENV_SAMPLER_ARG} 取值非法，已回落缺省采样率 {DEFAULT_SAMPLING_RATIO}：{raw_ratio}"
-                ),
-                None,
-            ),
-        }
-    }
-    if let Some(token) = env_non_empty(ENV_PONY_OTEL_TOKEN) {
-        config.headers.push((
-            AUTH_HEADER_NAME.to_string(),
-            authorization_header_value(&token),
-        ));
-    }
-
-    config
+    OtelConfig::from_settings(None)
 }
 
 /// 把 `PONY_OTEL_TOKEN` 组装成 `Authorization` 头的值。
@@ -726,6 +882,163 @@ where
     }
 }
 
+// ------------------------------------------- 当前活跃 turn 上下文查询（Wave-4 C3/C4 契约）
+//
+// 两套 id 语义**必须**严格区分（Wave-4.1 L3-A B1 修复）：
+// - [`current_trace_id`] / [`current_span_id`] / [`current_traceparent`]：**本地相关性** id。
+//   门禁关闭或 provider 未装配时由轮内本地上下文提供，只用于日志关联与出网 traceparent；
+//   这类 id **不保证**可在 Tempo/Langfuse 检索到。
+// - [`exported_trace_id`]：**导出态** id。仅当本轮存在真实 SDK root span 且已采样时返回；
+//   凡是会让用户/第三方「按 id 去查链路」的下游（PonySentry issue、会话 trace DTO）
+//   必须只使用它 —— 否则会出现「有 id 但查不到」的误导。
+
+/// 读取当前活跃 turn 的 trace_id（32 位小写十六进制，**本地相关性**语义）。
+///
+/// 调用方：结构化日志（C4）与出网 traceparent 组装。
+/// 语义：无活跃 turn（或上下文非法）时返回 `None`——**绝不**返回全 0 / dummy 占位值。
+/// 注意：本 id 可能是门禁关闭时的轮内本地 id，**不得**用于「按 id 检索上游链路」的场景，
+/// 那类场景请用 [`exported_trace_id`]。
+pub fn current_trace_id() -> Option<String> {
+    let span_context = active_turn_span_context()?;
+    if !span_context.is_valid() {
+        return None;
+    }
+    let hex = span_context.trace_id().to_string();
+    if is_lower_hex(&hex, 32) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
+/// 读取当前 turn 的**导出态** trace_id；不满足导出条件时一律 `None`。
+///
+/// 调用方：PonySentry issue 的 `trace_id` 回填（C2）、会话 trace DTO（前端按 id 跳转 Tempo）。
+/// 语义（三条同时满足才返回）：
+/// 1. 存在**真实 SDK root span** 建立的登记（本地降级上下文不算）；
+/// 2. `span_context.is_valid()`；
+/// 3. `span_context.is_sampled()`（未被采样 ⇒ 上游无此 trace，返回 id 只会误导）。
+/// 门禁关闭 / 未 init / 未采样 ⇒ `None`，**严禁**回落到 [`current_trace_id`]。
+pub fn exported_trace_id() -> Option<String> {
+    let entry = current_active_turn()?;
+    if !entry.exported || !entry.span_context.is_valid() || !entry.span_context.is_sampled() {
+        return None;
+    }
+    let hex = entry.span_context.trace_id().to_string();
+    if is_lower_hex(&hex, 32) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
+/// 读取当前活跃 turn 的 span_id（16 位小写十六进制）。
+///
+/// 调用方：出网 `traceparent` 组装与诊断透出。语义同 [`current_trace_id`]（无活跃 turn ⇒ `None`）。
+pub fn current_span_id() -> Option<String> {
+    let span_context = active_turn_span_context()?;
+    if !span_context.is_valid() {
+        return None;
+    }
+    let hex = span_context.span_id().to_string();
+    if is_lower_hex(&hex, 16) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
+/// 组装当前活跃 turn 的 W3C `traceparent` 头值：`00-<trace_id>-<span_id>-<flags>`。
+///
+/// 调用方：出网注入（[`with_current_traceparent`]）与诊断断言。
+/// 语义：无活跃 turn / 任一 id 非法 / 未采样 ⇒ `None`（fail-closed：宁可不注入脏头）。
+/// 采样位固定取 `01`：只有可用的（已采样或本轮本地登记的）上下文才会被注入。
+pub fn current_traceparent() -> Option<String> {
+    let span_context = active_turn_span_context()?;
+    if !span_context.is_valid() || !span_context.is_sampled() {
+        return None;
+    }
+    let trace_id = span_context.trace_id().to_string();
+    let span_id = span_context.span_id().to_string();
+    if !is_lower_hex(&trace_id, 32) || !is_lower_hex(&span_id, 16) {
+        return None;
+    }
+    Some(format!("00-{trace_id}-{span_id}-01"))
+}
+
+/// 给 outbound 请求注入 `traceparent`（C3 单点注入入口）。
+///
+/// 调用方：**所有** outbound `reqwest` 出网点（provider 模型调用、PonySentry ingest、
+/// 模型目录查询、Exa 搜索、web_fetch）。语义：无活跃 span 时**原样返回**请求
+/// （零分配、不写头）；有活跃 span 时写入 `traceparent` 头；id 非法时 fail-closed（不注入）。
+/// 任何情况下不 panic。
+///
+/// 防重复（Wave-4.1 L3-A #8）：`RequestBuilder::headers(HeaderMap)` 走 reqwest 内部的
+/// `replace_headers`（`Entry::insert` 语义），因此**同名学生头会被替换而非追加** ——
+/// 调用方自带或重复调用都不会产生两个 `traceparent`（W3C 要求每请求至多一个）。
+pub fn with_current_traceparent(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    let Some(headers) = traceparent_header_map() else {
+        return request;
+    };
+    request.headers(headers)
+}
+
+/// 组装只含单个 `traceparent` 的 header map；无活跃 span / 非法值 ⇒ `None`。
+///
+/// 调用方：[`with_current_traceparent`] 与 PonySentry worker（已持有 traceparent 字符串时）。
+pub fn traceparent_header_map() -> Option<reqwest::header::HeaderMap> {
+    let traceparent = current_traceparent()?;
+    traceparent_header_map_from(&traceparent)
+}
+
+/// 由既有 traceparent 字符串组装单头 map（供跨线程传递 traceparent 的调用点复用）。
+pub fn traceparent_header_map_from(traceparent: &str) -> Option<reqwest::header::HeaderMap> {
+    let value = reqwest::header::HeaderValue::from_str(traceparent).ok()?;
+    let mut headers = reqwest::header::HeaderMap::with_capacity(1);
+    headers.insert(reqwest::header::HeaderName::from_static("traceparent"), value);
+    Some(headers)
+}
+
+/// 是否为指定长度的「小写十六进制」串（W3C trace-id / span-id 形态校验）。
+fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// 读取当前活跃 turn 的 span 上下文；无活跃 turn 时 `None`。
+fn active_turn_span_context() -> Option<opentelemetry::trace::SpanContext> {
+    current_active_turn().map(|entry| entry.span_context)
+}
+
+/// 为「不导出但仍需关联」的 turn 生成本地 W3C 上下文（随机、合法、已采样）。
+///
+/// 语义：门禁关闭或 provider 未装配时，turn 仍需要一个稳定的关联标识，供日志
+/// `trace_id`（C4）与出网 `traceparent`（C3）使用；该上下文**只存在于进程内**，
+/// 不产生任何 span 分配与网络出口（导出链路仍由门禁严格关闭）。
+fn local_span_context() -> opentelemetry::trace::SpanContext {
+    let trace_bytes = uuid::Uuid::new_v4().into_bytes();
+    let span_bytes = uuid::Uuid::new_v4().into_bytes();
+    let mut span_id_bytes = [0u8; 8];
+    span_id_bytes.copy_from_slice(&span_bytes[..8]);
+    // W3C 要求 id 非全 0；极低概率命中时按位或 1 兜底（保持随机性，避免出现无效上下文）。
+    let mut trace_id_bytes = trace_bytes;
+    if trace_id_bytes.iter().all(|byte| *byte == 0) {
+        trace_id_bytes[15] = 1;
+    }
+    if span_id_bytes.iter().all(|byte| *byte == 0) {
+        span_id_bytes[7] = 1;
+    }
+    opentelemetry::trace::SpanContext::new(
+        opentelemetry::trace::TraceId::from_bytes(trace_id_bytes),
+        opentelemetry::trace::SpanId::from_bytes(span_id_bytes),
+        opentelemetry::trace::TraceFlags::SAMPLED,
+        false,
+        opentelemetry::trace::TraceState::default(),
+    )
+}
+
 // ------------------------------------------------- turn / LLM / 工具 span 装配面（挂载切片）
 //
 // 运行时装配点（runtime/turn_*.rs、turn_flow.rs 的 provider 调用缝、工具活动记录点）
@@ -738,6 +1051,10 @@ where
 /// 守卫 **Drop 即结束 span**（turn 有多个出口，避免漏 `end`）。
 /// 失败语义：未 [`init`]、门禁关闭、或 `session_id`/`turn_id` 缺失（空串）时返回空操作守卫
 /// （缺失即跳过，**禁止**用占位值伪造 session）；任何情况下不 panic。
+///
+/// Wave-4 C3/C4：门禁关闭或 provider 未装配时，本函数仍为该 turn 登记一个**进程内本地**
+/// W3C 上下文（随机 trace_id/span_id、已采样、零导出零网络），使 [`current_trace_id`] /
+/// [`current_traceparent`] 在活跃 turn 内可用（日志 trace_id 绑定与出网级联不因「不导出」失效）。
 pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnTraceGuard {
     let empty = TurnTraceGuard {
         span: None,
@@ -751,37 +1068,50 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
     if session_id.trim().is_empty() || turn_id.trim().is_empty() {
         return empty;
     }
-    if !spans_allowed() {
-        return empty;
+    if spans_allowed() {
+        if let Some(state) = current_state() {
+            let attributes = to_key_values(turn_span_attributes(&TurnSpanInput {
+                session_id: session_id.to_string(),
+                user_id: None,
+                turn_id: turn_id.to_string(),
+                sequence,
+                phase: String::new(),
+            }));
+            let mut span = state.tracer.build_with_context(
+                opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
+                    .with_kind(opentelemetry::trace::SpanKind::Internal)
+                    .with_attributes(attributes),
+                &opentelemetry::Context::new(),
+            );
+            let span_context = span.span_context().clone();
+            let trace_id = sampled_trace_id(&mut span);
+            // 只有真实建立且被采样的 root span 才算「导出态」（B1/B1b）。
+            let exported = trace_id.is_some();
+            let slot = register_active_turn(turn_id, span_context, exported);
+
+            return TurnTraceGuard {
+                span: Some(span),
+                slot,
+                phase: None,
+                trace_id: None,
+                turn_speed: None,
+            }
+            .with_trace_id(trace_id);
+        }
     }
-    let Some(state) = current_state() else {
-        return empty;
-    };
 
-    let attributes = to_key_values(turn_span_attributes(&TurnSpanInput {
-        session_id: session_id.to_string(),
-        user_id: None,
-        turn_id: turn_id.to_string(),
-        sequence,
-        phase: String::new(),
-    }));
-    let mut span = state.tracer.build_with_context(
-        opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
-            .with_kind(opentelemetry::trace::SpanKind::Internal)
-            .with_attributes(attributes),
-        &opentelemetry::Context::new(),
-    );
-    let slot = register_active_turn(turn_id, span.span_context().clone());
-    let trace_id = sampled_trace_id(&mut span);
-
+    // 降级通路：本地关联上下文（不导出、不联网），仅承担本轮内的 trace 关联标识。
+    // 契约：`exported = false` ⇒ 永不作子 span 的 parent、永不作 issue/前端跳转的 trace_id。
+    let span_context = local_span_context();
+    let trace_id = span_context.trace_id().to_string();
+    let slot = register_active_turn(turn_id, span_context, false);
     TurnTraceGuard {
-        span: Some(span),
+        span: None,
         slot,
         phase: None,
-        trace_id: None,
+        trace_id: Some(trace_id),
         turn_speed: None,
     }
-    .with_trace_id(trace_id)
 }
 
 /// turn trace 守卫（`Drop` 时补 phase 属性并结束 span）。
@@ -818,8 +1148,23 @@ impl TurnTraceGuard {
     }
 
     /// 读取该 turn 的 trace_id（十六进制字符串）；未采样/门禁关闭/未 init 时 `None`。
+    ///
+    /// 注意：门禁关闭时这里返回的是**本地相关性** id（日志/traceparent 用），
+    /// 若下游要「按 id 去上游检索链路」，必须改用 [`TurnTraceGuard::exported_trace_id`]。
     pub fn trace_id(&self) -> Option<String> {
         self.trace_id.clone()
+    }
+
+    /// 读取该 turn 的**导出态** trace_id：仅真实 SDK span 且已采样时返回。
+    ///
+    /// 调用方：会话 trace DTO（前端跳转 Tempo/Langfuse）与任何「可检索」语义的下游。
+    /// 语义：本地降级上下文（`span == None`）或未采样（`trace_id == None`）一律 `None`。
+    pub fn exported_trace_id(&self) -> Option<String> {
+        if self.span.is_some() {
+            self.trace_id.clone()
+        } else {
+            None
+        }
     }
 }
 
@@ -1004,8 +1349,12 @@ const RUNTIME_THREAD_NAME: &str = "pony-otel-export";
 const EXPORT_TIMEOUT_MS: u64 = 3_000;
 /// 手动导出的单块 flush 等待上限（每块 ≤3000ms；总耗时随块数线性增长，属用户显式动作）。
 const FORCE_EXPORT_FLUSH_TIMEOUT_MS: u64 = 3_000;
-/// 关闭 provider 时的导出等待上限。
-const SHUTDOWN_TIMEOUT_MS: u64 = 3_000;
+/// 关闭 provider 时的导出等待上限（Wave-4.1 A5：作为退出总预算 3000ms 的 1000ms 档位）。
+///
+/// 背景：进程退出路径最多经历「ExitRequested flush 1000ms + Exit flush 1000ms（幂等短路后
+/// 通常为 0）+ shutdown 1000ms」，三段合计硬上限 ≤3000ms，满足 NFR
+/// `observability.exporter_flush_timeout_ms` 与契约 C5 验收判据#1（3000ms 内优雅退出）。
+const SHUTDOWN_TIMEOUT_MS: u64 = 1_000;
 /// 降级日志单条最大字符数（超出截断，避免把超长响应体写进日志面）。
 const WARN_MESSAGE_MAX_CHARS: usize = 512;
 /// BatchSpanProcessor 队列上限（显式有界：队列满即丢，绝不无界堆积）。
@@ -1137,15 +1486,28 @@ fn sampled_trace_id(span: &mut opentelemetry_sdk::trace::Span) -> Option<String>
     }
 }
 
-/// 活动 turn 索引：`tokio::task::Id` → `(turn_id, 该 turn root span 的 SpanContext)`。
+/// 一次活动 turn 的登记项。
+///
+/// `exported` 是两条通路的**语义分水岭**（Wave-4.1 L3-A B1/B1b）：
+/// - `true`：由**真实 SDK root span** 建立（可导出、可在 Tempo/Langfuse 检索）；
+/// - `false`：门禁关闭 / provider 未装配时的**本地相关性**上下文（只服务日志与出网
+///   traceparent 的轮内关联，永不导出）。
+/// 只有 `exported == true` 的登记才允许作为子 span 的 parent —— 否则会造出无 root 的孤儿 trace。
+#[derive(Clone)]
+struct ActiveTurn {
+    turn_id: String,
+    span_context: opentelemetry::trace::SpanContext,
+    exported: bool,
+}
+
+/// 活动 turn 索引：`tokio::task::Id` → 该任务当前 turn 的登记项。
 ///
 /// F5（跨 turn 污染）：宿主按 turn 并发 spawn，若用「栈顶」选父 span，两个 turn 同时
 /// 在跑时 A 的 llm/tool span 会被挂到 B 的 trace 上。改为**按当前 tokio 任务 id 索引**：
 /// 守卫登记自己的 task id，Drop 时只摘除自己那条；无 task id（非 tokio 任务上下文）
-/// 时不加 parent —— 宁可让子 span 自成 root，也绝不猜父 span。
-static ACTIVE_TURNS: std::sync::LazyLock<
-    Mutex<HashMap<tokio::task::Id, (String, opentelemetry::trace::SpanContext)>>,
-> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// 时退回线程本地栈；两者都取不到时**不加 parent** —— 宁可让子 span 自成 root，也绝不猜父 span。
+static ACTIVE_TURNS: std::sync::LazyLock<Mutex<HashMap<tokio::task::Id, ActiveTurn>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 取当前 tokio 任务 id；不在任务上下文时 `None`。
 fn current_task_id() -> Option<tokio::task::Id> {
@@ -1155,46 +1517,64 @@ fn current_task_id() -> Option<tokio::task::Id> {
 thread_local! {
     /// A9：无 tokio 任务上下文（TUI/CLI `run_sync_turn`、`direct_turn_probe`、std 单测）时的
     /// 活动 turn 兜底栈 —— 否则这些路径的子 span 会断链成独立 root。
-    static THREAD_TURNS: RefCell<Vec<(String, opentelemetry::trace::SpanContext)>> =
-        const { RefCell::new(Vec::new()) };
+    static THREAD_TURNS: RefCell<Vec<ActiveTurn>> = const { RefCell::new(Vec::new()) };
 }
 
 /// 一次 turn 登记的归属信息（task 表或线程本地栈，二者择一）。
 struct ActiveTurnSlot {
     task_id: Option<tokio::task::Id>,
+    /// 本登记的 turn_id 与 trace_id：Drop 时用于**精确**判定「当前登记是否仍属于自己」。
+    turn_id: String,
+    trace_id: String,
+    /// 嵌套 turn 场景：本登记覆盖掉的前一条登记，Drop 时恢复。
+    previous: Option<ActiveTurn>,
     thread_local: bool,
 }
 
-/// 登记活动 turn，返回归属的 task id（守卫 Drop 时用它精确摘除）。
+/// 登记活动 turn，返回归属信息（守卫 Drop 时用它精确摘除/回滚）。
+///
+/// 语义：门禁判定由调用方（[`begin_turn_trace`]）负责；本函数只做登记，
+/// 同时支持「真实 span 上下文」（`exported = true`）与「本地降级上下文」（`exported = false`）。
+/// 嵌套语义（L3-A#2）：同一 task/线程内再次登记会**保存前值**，Drop 时恢复而非丢弃。
 fn register_active_turn(
     turn_id: &str,
     span_context: opentelemetry::trace::SpanContext,
+    exported: bool,
 ) -> Option<ActiveTurnSlot> {
-    if !spans_allowed() {
-        return None;
-    }
+    let trace_id = span_context.trace_id().to_string();
+    let entry = ActiveTurn {
+        turn_id: turn_id.to_string(),
+        span_context,
+        exported,
+    };
+
     // A9：优先按 tokio 任务 id 索引；无任务上下文时退回线程本地栈（不丢父 span）。
     if let Some(task_id) = current_task_id() {
         let mut guard = ACTIVE_TURNS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.insert(task_id, (turn_id.to_string(), span_context));
+        let previous = guard.insert(task_id, entry);
         return Some(ActiveTurnSlot {
             task_id: Some(task_id),
+            turn_id: turn_id.to_string(),
+            trace_id,
+            previous,
             thread_local: false,
         });
     }
     THREAD_TURNS.with(|stack| {
-        stack
-            .borrow_mut()
-            .push((turn_id.to_string(), span_context));
+        stack.borrow_mut().push(entry);
     });
     Some(ActiveTurnSlot {
         task_id: None,
+        turn_id: turn_id.to_string(),
+        trace_id,
+        previous: None,
         thread_local: true,
     })
 }
 
+/// 摘除登记：只有「当前登记仍属于自己」时才动，并恢复嵌套时被覆盖的前值。
 fn unregister_active_turn(slot: Option<ActiveTurnSlot>) {
     let Some(slot) = slot else {
         return;
@@ -1203,31 +1583,62 @@ fn unregister_active_turn(slot: Option<ActiveTurnSlot>) {
         let mut guard = ACTIVE_TURNS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.remove(&task_id);
+        let owns = guard
+            .get(&task_id)
+            .map(|current| {
+                current.turn_id == slot.turn_id
+                    && current.span_context.trace_id().to_string() == slot.trace_id
+            })
+            .unwrap_or(false);
+        if !owns {
+            // 登记已被同 task 的后续 turn 覆盖：只放弃自己的归属，绝不动别人的登记。
+            return;
+        }
+        match slot.previous {
+            Some(previous) => {
+                guard.insert(task_id, previous);
+            }
+            None => {
+                guard.remove(&task_id);
+            }
+        }
         return;
     }
     if slot.thread_local {
         THREAD_TURNS.with(|stack| {
-            stack.borrow_mut().pop();
+            let mut stack = stack.borrow_mut();
+            // 逆序找到属于自己的那条（支持乱序 Drop），只摘除它自己。
+            if let Some(index) = stack.iter().rposition(|entry| {
+                entry.turn_id == slot.turn_id
+                    && entry.span_context.trace_id().to_string() == slot.trace_id
+            }) {
+                stack.remove(index);
+            }
         });
     }
 }
 
-fn active_turn_context() -> Option<Context> {
+/// 读取当前活动的 turn 登记项（真实或本地，未按导出态过滤）。
+fn current_active_turn() -> Option<ActiveTurn> {
     if let Some(task_id) = current_task_id() {
         let guard = ACTIVE_TURNS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        return guard
-            .get(&task_id)
-            .map(|(_, span_context)| Context::new().with_remote_span_context(span_context.clone()));
+        return guard.get(&task_id).cloned();
     }
-    THREAD_TURNS.with(|stack| {
-        stack
-            .borrow()
-            .last()
-            .map(|(_, span_context)| Context::new().with_remote_span_context(span_context.clone()))
-    })
+    THREAD_TURNS.with(|stack| stack.borrow().last().cloned())
+}
+
+/// 子 span 的父上下文：**只**接受真实导出态 root span 的上下文（B1b：杜绝孤儿 trace）。
+///
+/// 本地相关性上下文（`exported = false`）永不作父 —— 否则 turn 中途打开开关时，
+/// 后续子 span 会以一条从无 root 的 trace_id 真实出网。
+fn active_exported_turn_context() -> Option<Context> {
+    let entry = current_active_turn()?;
+    if !entry.exported || !entry.span_context.is_valid() || !entry.span_context.is_sampled() {
+        return None;
+    }
+    Some(Context::new().with_remote_span_context(entry.span_context))
 }
 
 /// 在「当前活动 turn」之下开一个子 span；门禁关闭时返回 `None`（零分配）。
@@ -1239,7 +1650,7 @@ fn start_child_span(
         return None;
     }
     let state = current_state()?;
-    let parent = active_turn_context().unwrap_or_else(Context::new);
+    let parent = active_exported_turn_context().unwrap_or_else(Context::new);
     Some(state.tracer.build_with_context(
         opentelemetry::trace::SpanBuilder::from_name(name.to_string())
             .with_kind(SpanKind::Internal)
@@ -1524,7 +1935,8 @@ mod tests {
             let mismatches = mismatches.clone();
             handles.push(runtime.spawn(async move {
                 let expected = span_context(0x1000 + index);
-                let slot = register_active_turn(&format!("turn-{index}"), expected.clone());
+                // exported = true：本用例模拟真实 root span 登记（父子链语义）。
+                let slot = register_active_turn(&format!("turn-{index}"), expected.clone(), true);
                 assert!(slot.is_some(), "活动 turn 必须登记成功");
                 assert!(
                     slot.as_ref().and_then(|slot| slot.task_id).is_some(),
@@ -1532,13 +1944,13 @@ mod tests {
                 );
                 // 两个 turn 同时处于活动状态，模拟宿主按 turn 并发 spawn。
                 barrier.wait().await;
-                let observed = active_turn_context().expect("任务内必须有活动 turn");
+                let observed = active_exported_turn_context().expect("任务内必须有活动 turn");
                 if observed.span().span_context().trace_id() != expected.trace_id() {
                     mismatches.fetch_add(1, Ordering::SeqCst);
                 }
                 unregister_active_turn(slot);
                 assert!(
-                    active_turn_context().is_none(),
+                    current_active_turn().is_none(),
                     "摘除后该任务不得再有活动 turn"
                 );
             }));
@@ -1869,6 +2281,191 @@ mod tests {
         shutdown();
         assert!(!is_reporting_enabled(), "shutdown 不得改写上报门禁");
         drop(blackhole);
+    }
+
+    // ------------------------------- Wave-4.1 L3-A B1 / B1b / A2 实现级行为断言
+    //
+    // 说明：这是实现级回归（非验收门禁），与 tests/ 下的冻结验收用例互不替代。
+
+    /// B1：门禁关闭（且未 init）时只有「本地相关性」id，导出态 id 必须为 `None`。
+    #[test]
+    fn b1_local_context_exposes_current_ids_but_no_exported_trace_id() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+
+        let scope = begin_turn_trace("sess-b1", "turn-b1", 0);
+        assert!(
+            current_trace_id().is_some(),
+            "B1：本地相关性 trace_id 必须存在（日志/traceparent 依赖它）"
+        );
+        assert!(
+            current_traceparent().is_some(),
+            "B1：本地上下文仍必须能组装 W3C traceparent"
+        );
+        assert_eq!(
+            exported_trace_id(),
+            None,
+            "B1：门禁关闭时导出态 trace_id 必须为 None（否则 issue 会带不可检索的假关联）"
+        );
+        assert_eq!(
+            scope.trace_id().is_some(),
+            true,
+            "本地守卫的 trace_id() 仍应可读（日志用）"
+        );
+        assert_eq!(
+            scope.exported_trace_id(),
+            None,
+            "B1b：本地守卫的导出态 id 必须为 None"
+        );
+        drop(scope);
+        assert_eq!(current_trace_id(), None, "守卫 Drop 后不得残留活动 turn");
+    }
+
+    /// B1 反向：门禁开启 + provider 已装配时，导出态 id 与守卫/本地读取一致。
+    #[test]
+    fn b1_exported_trace_id_matches_real_span_when_gate_open() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(true, Ordering::SeqCst);
+        init(OtelConfig {
+            endpoint: "http://127.0.0.1:9".to_string(),
+            service_name: "unit-b1".to_string(),
+            sampling_ratio: 1.0,
+            headers: Vec::new(),
+        })
+        .expect("回环端点必须可装配");
+
+        let scope = begin_turn_trace("sess-b1-on", "turn-b1-on", 0);
+        let exported = scope.exported_trace_id();
+        assert!(
+            exported.as_deref().map(|id| id.len()) == Some(32),
+            "B1：门禁开启时必须产出 32 位导出态 trace_id，实际 {exported:?}"
+        );
+        assert_eq!(exported_trace_id(), exported, "全局读取必须等于守卫的导出态 id");
+        assert_eq!(current_trace_id(), exported, "导出态与本地读取在此场景应同源");
+        drop(scope);
+
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+    }
+
+    /// B1b：本地上下文**绝不**作为子 span 的 parent（否则会造出无 root 的孤儿 trace）。
+    #[test]
+    fn b1b_local_context_never_parents_child_spans() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+
+        // 1) 门禁关闭时开启 turn ⇒ 本地上下文。
+        let scope = begin_turn_trace("sess-b1b", "turn-b1b", 0);
+        let local_trace = current_trace_id().expect("本地上下文必须存在");
+        assert!(
+            active_exported_turn_context().is_none(),
+            "B1b：本地上下文不得成为子 span 的父上下文"
+        );
+
+        // 2) turn 中途打开开关并装配 provider（模拟用户运行中开启上报）。
+        REPORTING_ENABLED.store(true, Ordering::SeqCst);
+        init(OtelConfig {
+            endpoint: "http://127.0.0.1:9".to_string(),
+            service_name: "unit-b1b".to_string(),
+            sampling_ratio: 1.0,
+            headers: Vec::new(),
+        })
+        .expect("回环端点必须可装配");
+        assert!(
+            active_exported_turn_context().is_none(),
+            "B1b：门禁翻转后本地登记仍不得充作父上下文"
+        );
+
+        // 3) 子 span 必须自成 root（trace_id 与本地伪造 id 不同）。
+        let mut child =
+            start_child_span("llm.chat", Vec::new()).expect("门禁开启时应能开子 span");
+        let child_trace = opentelemetry::trace::Span::span_context(&child)
+            .trace_id()
+            .to_string();
+        assert_ne!(
+            child_trace, local_trace,
+            "B1b：子 span 不得落在本地上下文这条「无 root」trace 上"
+        );
+        child.end();
+
+        drop(scope);
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+    }
+
+    /// A2：嵌套 turn 必须「保存前值 + 精确摘除」，内层结束后恢复外层的上下文。
+    #[test]
+    fn a2_nested_turns_restore_previous_context() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+
+        let outer = begin_turn_trace("sess-a2", "turn-outer", 0);
+        let outer_trace = current_trace_id().expect("外层 turn 必须有上下文");
+        let inner = begin_turn_trace("sess-a2", "turn-inner", 1);
+        let inner_trace = current_trace_id().expect("内层 turn 必须有上下文");
+        assert_ne!(outer_trace, inner_trace, "内外层必须是不同的 trace");
+
+        drop(inner);
+        assert_eq!(
+            current_trace_id(),
+            Some(outer_trace),
+            "A2：内层结束后必须恢复外层上下文（而不是留下空洞）"
+        );
+        drop(outer);
+        assert_eq!(current_trace_id(), None, "A2：全部结束后不得残留登记");
+    }
+
+    /// A8：`traceparent` 注入必须是「替换」语义，重复注入不得产生两个同名头。
+    #[test]
+    fn a8_traceparent_injection_replaces_instead_of_appending() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+
+        let scope = begin_turn_trace("sess-a8", "turn-a8", 0);
+        let expected = current_traceparent().expect("本地上下文应可组装 traceparent");
+
+        let request = reqwest::Client::new()
+            .get("http://127.0.0.1:9/probe")
+            .header("traceparent", "00-00000000000000000000000000000000-0000000000000000-00");
+        let request = with_current_traceparent(with_current_traceparent(request));
+        let built = request.build().expect("请求必须可构建");
+        let values: Vec<&reqwest::header::HeaderValue> =
+            built.headers().get_all("traceparent").iter().collect();
+        assert_eq!(
+            values.len(),
+            1,
+            "A8：traceparent 必须至多一个（预防重复头），实际 {}",
+            values.len()
+        );
+        assert_eq!(
+            values[0].to_str().expect("ASCII header"),
+            expected,
+            "A8：注入值必须覆盖既有头"
+        );
+
+        drop(scope);
+    }
+
+    /// A6-adjacent：settings 快照的 Debug 必须打码 token（L3-A #6）。
+    #[test]
+    fn otel_settings_snapshot_debug_redacts_token() {
+        let snapshot = OtelSettingsSnapshot {
+            endpoint: Some("https://otel.example".to_string()),
+            token: Some("SUPER_SECRET_OTEL_TOKEN_123".to_string()),
+            service_name: Some("svc".to_string()),
+            sampling_ratio: Some(0.5),
+        };
+        let shown = format!("{snapshot:?}");
+        assert!(
+            !shown.contains("SUPER_SECRET_OTEL_TOKEN_123"),
+            "L3-A#6：Debug 不得泄漏 token：{shown}"
+        );
+        assert!(shown.contains("[REDACTED]"), "必须显式标出脱敏位：{shown}");
     }
 
     /// 黑洞 OTLP 端点：只 accept、不回包（导出必然超时），held 到预算耗尽。

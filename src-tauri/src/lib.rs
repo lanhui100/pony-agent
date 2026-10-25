@@ -38,8 +38,12 @@ use agent::session::SessionOverview;
 use agent::session::TurnTraceRecord;
 use agent::tools::{builtin_turn_tool_contract_views, ToolDefinitionContractView};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
+
+/// 退出 flush 的幂等短路位（C5.3）：`ExitRequested` 与 `Exit` 共享，避免预算叠加。
+static EXIT_FLUSH_DONE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 struct StreamDebugMetricsState {
@@ -1193,6 +1197,33 @@ async fn export_frontend_trace_chrome_trace(
     .await?
 }
 
+/// 退出路径的统一 OTel flush 出口（Wave-4 C5 / Wave-4.1 A5）。
+///
+/// 契约：
+/// - 有界：单次 flush 预算 [`EXIT_FLUSH_BUDGET_MS`]（1000ms）；与 `otel::shutdown()`
+///   （内部 1000ms 等待档位）合计硬上限 ≤3000ms，满足 NFR
+///   `observability.exporter_flush_timeout_ms` 与 C5 验收判据#1；
+/// - 幂等：`ExitRequested` 与 `Exit` 共享 [`EXIT_FLUSH_DONE`] 短路，重复事件不再叠加预算；
+/// - 未装配（otel 装配失败/非桌面启动路径）时静默跳过；未完成只降级 warn JSON 日志；绝不 panic。
+fn flush_otel_on_exit(stage: &str) {
+    if pony_agent_core::agent::otel::config().is_none() {
+        return;
+    }
+    if EXIT_FLUSH_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Err(message) = pony_agent_core::agent::otel::force_flush(EXIT_FLUSH_BUDGET_MS) {
+        pony_agent_core::agent::otel::log::log_json(
+            "warn",
+            &format!("退出 flush（{stage}）未在预算内完成：{message}"),
+            None,
+        );
+    }
+}
+
+/// 退出 flush 的单次预算（毫秒）：与 `otel::shutdown()` 的 1000ms 档位合计 ≤3000ms。
+const EXIT_FLUSH_BUDGET_MS: u64 = 1_000;
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -1232,9 +1263,20 @@ pub fn run() {
 
             // Wave43 D2/D3：provider 进程启动时装配一次（开关只翻转 flag，不重建 provider）。
             // 装配失败必须降级为日志：trace 不可用绝不阻塞主业务启动。
-            let _ = load_app_settings();
+            //
+            // Wave-4 C4.2：桌面端结构化日志落盘（追加 + 512KiB 轮转），路径由 app_data_dir 解析；
+            // 解析/创建失败只影响落盘，不影响 stdout 与主链路。
+            if let Ok(app_data_dir) = app.path().app_data_dir() {
+                pony_agent_core::agent::otel::log::set_log_file_path(
+                    app_data_dir.join("logs").join("pony-agent.log"),
+                );
+            }
+
+            // Wave-4 C1：配置来源优先级 settings > env > 内置默认（公网端点 https://otel.ponyjob.top）。
+            let app_settings = load_app_settings();
+            let otel_settings = app_settings.otel_settings_snapshot();
             if let Err(err) = pony_agent_core::agent::otel::init(
-                pony_agent_core::agent::otel::from_env(),
+                pony_agent_core::agent::otel::OtelConfig::from_settings(Some(&otel_settings)),
             ) {
                 // F4：走统一 JSON 日志面（stdout 单行 JSON），不得新增明文 eprintln 边界。
                 pony_agent_core::agent::otel::log::log_json(
@@ -1349,9 +1391,19 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build Pony Agent")
         .run(|_app_handle, event| {
-            // NFR resource_release：退出时 flush 并释放 OTel provider 及其导出 runtime。
-            if let tauri::RunEvent::Exit = event {
-                pony_agent_core::agent::otel::shutdown();
+            // Wave-4 C5：退出拦截——`ExitRequested` 与 `Exit` 两个分支都必须触发
+            // **有界** force_flush（硬上限 3000ms，对齐 NFR
+            // `observability.exporter_flush_timeout_ms`），保证缓冲区中尚未发出的 span
+            // 在进程退出前完成投递；两条路径幂等，重复触发不得 panic / 死锁。
+            match event {
+                tauri::RunEvent::Exit => {
+                    flush_otel_on_exit("exit");
+                    // NFR resource_release：flush 后释放 OTel provider 及其导出 runtime（幂等）。
+                    pony_agent_core::agent::otel::shutdown();
+                }
+                // 退出请求（进程可能继续运行，如托盘常驻）同样有界 flush，但不释放 provider。
+                tauri::RunEvent::ExitRequested { .. } => flush_otel_on_exit("exit_requested"),
+                _ => {}
             }
         });
 }

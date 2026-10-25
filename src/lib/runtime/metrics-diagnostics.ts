@@ -63,7 +63,8 @@ export function recordMetricsSnapshot(snapshot: MetricsSnapshot): void {
 
 export function reportMetricsAnomaly(
   code: "invalid_duration" | "negative_speed" | "context_overflow",
-  detail: Record<string, unknown>
+  detail: Record<string, unknown>,
+  traceId?: string | null
 ): void {
   const now = Date.now();
   const lastEmitted = anomalyThrottleMap.get(code);
@@ -76,6 +77,7 @@ export function reportMetricsAnomaly(
     reportError({
       errorType: "TelemetryMetricsAnomaly",
       message: `[metrics-anomaly] ${code}`,
+      trace_id: traceId || undefined,
       extra: detail,
       tags: {
         category: "metrics_governance",

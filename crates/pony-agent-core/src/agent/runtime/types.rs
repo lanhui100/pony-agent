@@ -138,6 +138,13 @@ pub struct TurnStreamEvent {
     pub event_id: Option<String>,
     pub session_id: Option<String>,
     pub turn_id: String,
+    /// Wave-4.1 B1 闭环：本事件的 **导出态** OTel trace_id（camelCase 下发 `traceId`）。
+    ///
+    /// 语义：仅当该 turn 真实创建并被采样了 root span 时才有值（`otel::exported_trace_id()`）；
+    /// 门禁关闭 / 未 init / 未采样 ⇒ `None`（R1：绝不回落到本地相关性 id）。
+    /// 前端 `runtime` store 用它回填 `activeTraceId`，使 live turn 期间的错误上报也带真实 trace_id。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
     pub kind: String,
     pub event_type: Option<String>,
     pub event_version: Option<String>,

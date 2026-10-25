@@ -526,6 +526,27 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         streamingReasoning: isStreamingReasoning,
         hasStreamingContent
       });
+    },
+    /**
+     * Wave-4 C2：读取当前活跃 turn 的 OTel trace_id（若无则返回 undefined）。
+     * 语义：
+     * 1. 仅当存在 activeTurnId 时，从 turnTraceHistory 中查找该活跃 turn 的 traceId 并返回；
+     *    若该活跃 turn 尚未记录 traceId 则严格返回 undefined，杜绝将上一轮的 traceId 误归因给本轮。
+     * 2. 无 activeTurnId（空闲态或终态后）时，回落到最近一个已完成 turn 的 traceId 供上下文调试。
+     */
+    activeTraceId: (state): string | undefined => {
+      const activeId = state.activeTurnId;
+      if (activeId) {
+        const activeTurn = state.turnTraceHistory?.find((t) => t.turnId === activeId);
+        return activeTurn?.traceId || undefined;
+      }
+      for (let i = (state.turnTraceHistory?.length ?? 0) - 1; i >= 0; i--) {
+        const turn = state.turnTraceHistory[i];
+        if (turn?.phase === "completed" && turn.traceId) {
+          return turn.traceId;
+        }
+      }
+      return undefined;
     }
   },
   actions: {
@@ -2625,6 +2646,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         phase: patch.phase ?? this.phase,
         traceSteps: patch.traceSteps ?? [],
         traceTimeline: patchTimeline ?? [],
+        traceId: patch.traceId ?? null,
         toolActivities: patch.toolActivities ?? [],
         providerCallRecords: patch.providerCallRecords ?? [],
         hookTraceRecords: patch.hookTraceRecords ?? [],
@@ -3507,6 +3529,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities, false);
         this.updateActiveTraceTimeline(this.traceTimeline, true);
+
+        // Wave-4 C2：新轮开始时立即落盘 traceId 到 turnTraceHistory，保证 live turn 期可读
+        if (payload.traceId) {
+          this.upsertTurnTrace(payload.turnId, { traceId: payload.traceId });
+        }
       });
 
       const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
@@ -4009,6 +4036,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             emittedAtMs: payload.emittedAtMs ?? null,
             phase: "completed",
             traceSteps: nextTraceSteps,
+            ...(payload.traceId ? { traceId: payload.traceId } : {}),
             toolActivities: terminalToolActivities,
             providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
             providerRequestedName: nextProviderRequestedName,
@@ -4320,6 +4348,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         this.clearSubmissionWatchdog();
         this.isSubmitting = false;
+        const failedTurnTraceId = payload.traceId
+          ?? (this.activeTurnId ? this.turnTraceHistory?.find((t) => t.turnId === this.activeTurnId)?.traceId ?? null : null);
         this.activeTurnId = null;
         this.activeRunId = null;
         const failedTraceTimeline = resolveEventTraceTimeline(payload, () =>
@@ -4358,6 +4388,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           emittedAtMs: payload.emittedAtMs ?? null,
           phase: "failed",
           traceSteps: payload.traceSteps ?? this.traceSteps,
+          ...(payload.traceId ? { traceId: payload.traceId } : {}),
           toolActivities: terminalToolActivities,
           providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
           providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
@@ -4404,6 +4435,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           void reportError({
             errorType: "TurnExecutionFailed",
             message: payload.error || this.error || DEFAULT_FAILED_TURN_ERROR,
+            trace_id: failedTurnTraceId || undefined,
             tags: {
               source: "turn_failed_event",
               session_id: failedSessionId || "unknown",
@@ -4549,6 +4581,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           emittedAtMs: payload.emittedAtMs ?? null,
           phase: "cancelled",
           traceSteps: cancelledTraceSteps,
+          ...(payload.traceId ? { traceId: payload.traceId } : {}),
           toolActivities: terminalToolActivities,
           providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
           providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,

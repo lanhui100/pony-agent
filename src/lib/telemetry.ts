@@ -60,7 +60,74 @@ export type BeforeSendCallback = (
   payload: IngestPayload
 ) => IngestPayload | null | Promise<IngestPayload | null>;
 
-let globalBeforeSend: BeforeSendCallback | null = null;
+export const MAX_PAYLOAD_STRING_LENGTH = 2048;
+
+export function truncateString(value: string, maxLength = MAX_PAYLOAD_STRING_LENGTH): string {
+  if (typeof value !== "string") return value;
+  if (value.length <= maxLength) return value;
+  const suffix = "...[truncated]";
+  const truncateAt = Math.max(0, maxLength - suffix.length);
+  return value.slice(0, truncateAt) + suffix;
+}
+
+export function deepTruncate(obj: unknown, depth = 0): unknown {
+  if (depth > 32) return "[MAX_DEPTH_EXCEEDED]";
+  if (obj === null || obj === undefined) return obj;
+
+  if (typeof obj === "string") {
+    return truncateString(obj);
+  }
+
+  if (typeof obj === "number" || typeof obj === "boolean") {
+    return obj;
+  }
+
+  if (Array.isArray(obj)) {
+    return obj.map((item) => deepTruncate(item, depth + 1));
+  }
+
+  if (typeof obj === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      out[k] = deepTruncate(v, depth + 1);
+    }
+    return out;
+  }
+
+  return obj;
+}
+
+/**
+ * 默认 beforeSend 治理管道：
+ * - 结合 isNetworkNoise 过滤网络连接中断、CORS、资源加载等噪音错误（返回 null 取消上报）；
+ * - 对 extra / tags / breadcrumbs 做深度脱敏；
+ * - 对长字符串字段进行截断（最大 2048 字符，加 ...[truncated] 后缀）。
+ */
+export const defaultBeforeSend: BeforeSendCallback = (payload: IngestPayload): IngestPayload | null => {
+  if (payload.message && isNetworkNoise(payload.message)) {
+    return null;
+  }
+
+  const sanitizedExtra = payload.extra ? (deepTruncate(deepSanitize(payload.extra)) as Record<string, unknown>) : undefined;
+  const sanitizedTags = payload.tags ? (deepTruncate(deepSanitize(payload.tags)) as Record<string, string>) : undefined;
+  const sanitizedBreadcrumbs = payload.breadcrumbs
+    ? payload.breadcrumbs.map((b) => ({
+        ...b,
+        message: truncateString(sanitizeString(b.message)),
+        data: b.data ? (deepTruncate(deepSanitize(b.data)) as Record<string, unknown>) : undefined,
+      }))
+    : undefined;
+
+  return {
+    ...payload,
+    message: payload.message ? truncateString(sanitizeString(payload.message)) : payload.message,
+    extra: sanitizedExtra,
+    tags: sanitizedTags,
+    breadcrumbs: sanitizedBreadcrumbs,
+  };
+};
+
+let globalBeforeSend: BeforeSendCallback | null = defaultBeforeSend;
 
 export function setBeforeSend(callback: BeforeSendCallback | null): void {
   globalBeforeSend = callback;
@@ -138,7 +205,7 @@ export function generateEventId(): string {
 
 // ---- 零信任脱敏规则 (客户端脱敏双保险) ----
 const SENSITIVE_KEYS =
-  /^(token|password|passwd|secret|api_key|apikey|access_token|refresh_token|authorization|cookie|private_key|credential)/i;
+  /(token|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|private[_-]?key|credential)/i;
 
 export function sanitizeString(value: string): string {
   if (typeof value !== "string") return String(value);

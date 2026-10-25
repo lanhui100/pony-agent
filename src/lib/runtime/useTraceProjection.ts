@@ -383,21 +383,21 @@ export function useTraceProjection(options: {
           turnId: latest.turnId,
           durationMs: latest.turnDurationMs,
           outputTokens: latest.outputTokens,
-        });
+        }, latest?.traceId);
       }
       if (speedState.speed != null && speedState.speed < 0) {
         reportMetricsAnomaly("negative_speed", {
           turnId: latest?.turnId,
           speed: speedState.speed,
           mode: speedState.mode,
-        });
+        }, latest?.traceId);
       }
       if (windowTokens > 0 && inputTokens != null && inputTokens > windowTokens) {
         reportMetricsAnomaly("context_overflow", {
           turnId: latest?.turnId,
           inputTokens,
           contextWindow: windowTokens,
-        });
+        }, latest?.traceId);
       }
     },
     { immediate: true, flush: "post" }

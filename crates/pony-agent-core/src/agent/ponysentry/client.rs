@@ -1,6 +1,7 @@
 use super::config::PonySentryConfig;
 use super::models::{Breadcrumb, Exception, Frame, IngestPayload};
 use super::sanitizer::{sanitize, sanitize_json};
+use std::backtrace::Backtrace;
 use std::collections::{HashMap, VecDeque};
 use std::panic::PanicHookInfo;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -11,10 +12,20 @@ use std::time::Duration;
 const MAX_BREADCRUMBS: usize = 64;
 const QUEUE_CAPACITY: usize = 1024;
 const REQUEST_TIMEOUT_SECS: u64 = 3;
+/// 栈帧采集上限（超出截断，避免把超深调用栈写穿 ingest 载荷）。
+const MAX_STACK_FRAMES: usize = 32;
 
 #[derive(Debug)]
 enum SentryEvent {
-    Ingest(IngestPayload),
+    /// 一次上报：payload + 入队时（调用方上下文）已解析好的 traceparent + 待惰性符号化的原始栈。
+    ///
+    /// `traceparent` 必须在**入队线程**解析：活跃 turn 位于调用方上下文，worker 线程看不到。
+    /// `backtrace` 保留原始帧指针，符号化（昂贵）推迟到 worker，保证入队路径非阻塞。
+    Ingest {
+        payload: IngestPayload,
+        traceparent: Option<String>,
+        backtrace: Option<Backtrace>,
+    },
 }
 
 #[derive(Clone)]
@@ -115,6 +126,8 @@ impl PonySentryClient {
             exception: Some(Exception {
                 error_type: error_type.to_string(),
                 value: Some(sanitized_msg),
+                // 栈帧由 worker 侧从原始 backtrace 惰性符号化后回填（C2 要求填充 stacktrace，
+                // 但符号化昂贵，不得阻塞上报入队路径）。
                 stacktrace: None,
             }),
             tags: Some(tags),
@@ -124,9 +137,19 @@ impl PonySentryClient {
             } else {
                 Some(breadcrumbs)
             },
+            event_id: Some(new_event_id()),
+            // B1：issue 的 trace_id **只**接受导出态 id（门禁关闭/未 init/未采样 ⇒ None），
+            // 绝不回落到本地相关性 id（那会让 issue 带一个「查不到链路」的假关联）。
+            trace_id: crate::agent::otel::exported_trace_id(),
+            fingerprint: Some(fingerprint_for(error_type)),
+            culprit: None,
         };
 
-        self.capture_payload(payload);
+        // H1：本路径同样走统一清洗（culprit/stacktrace/tags 等全字段），不留脱敏旁路。
+        let mut payload = payload;
+        normalize_payload(&mut payload);
+        // 原始帧指针采集很便宜（不符号化），符号化推迟到 worker 线程。
+        self.enqueue(payload, Some(Backtrace::force_capture()));
     }
 
     pub fn capture_panic(&self, info: &PanicHookInfo) {
@@ -161,8 +184,9 @@ impl PonySentryClient {
             exception: Some(Exception {
                 error_type: "Panic".to_string(),
                 value: Some(sanitized_msg),
+                // panic 现场至少保留一条定位帧；真实调用栈由 worker 侧追加在前。
                 stacktrace: Some(vec![Frame {
-                    filename: location,
+                    filename: location.clone(),
                     function: Some("panic_hook".to_string()),
                     lineno: None,
                     in_app: Some(true),
@@ -175,9 +199,17 @@ impl PonySentryClient {
             } else {
                 Some(breadcrumbs)
             },
+            event_id: Some(new_event_id()),
+            // B1：导出态 id only（见 capture_error 同条注释）。
+            trace_id: crate::agent::otel::exported_trace_id(),
+            fingerprint: Some(fingerprint_for("Panic")),
+            culprit: location.clone(),
         };
 
-        self.capture_payload(payload);
+        // H1：panic 现场的 culprit（含文件路径）与栈帧同样必须脱敏。
+        let mut payload = payload;
+        normalize_payload(&mut payload);
+        self.enqueue(payload, Some(Backtrace::force_capture()));
     }
 
     pub fn capture_payload(&self, payload: IngestPayload) {
@@ -185,9 +217,35 @@ impl PonySentryClient {
         if !self.config.enabled || self.config.client_token.is_none() {
             return;
         }
+        let mut payload = payload;
+        // C2：IPC 路径（前端已带 event_id/trace_id）不得被丢弃；缺失项在 Rust 侧补齐。
+        normalize_payload(&mut payload);
+        // 前端自带 stacktrace 时不重复采集调用栈（避免无谓开销）。
+        let needs_stack = payload
+            .exception
+            .as_ref()
+            .map(|exception| exception.stacktrace.is_none())
+            .unwrap_or(false);
+        self.enqueue(
+            payload,
+            needs_stack.then(Backtrace::force_capture),
+        );
+    }
+
+    /// 统一入队：在**调用方线程**解析 traceparent（活跃 turn 只在该上下文可见），
+    /// 再投递到有界队列（满即丢弃，绝不阻塞）。
+    fn enqueue(&self, payload: IngestPayload, backtrace: Option<Backtrace>) {
+        if !self.config.enabled || self.config.client_token.is_none() {
+            return;
+        }
+        let traceparent = crate::agent::otel::current_traceparent();
 
         if let Some(ref tx) = self.sender {
-            match tx.try_send(SentryEvent::Ingest(payload)) {
+            match tx.try_send(SentryEvent::Ingest {
+                payload,
+                traceparent,
+                backtrace,
+            }) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     eprintln!("[ponysentry] queue full (1024), dropping event to protect runtime");
@@ -201,6 +259,226 @@ impl PonySentryClient {
 
     pub fn flush(&self) {
         // Queue is continuously processed by the worker thread
+    }
+}
+
+/// 生成事件 id：32 位小写十六进制（无连字符，符合 C2 的 `^[0-9a-f]{32}$` 契约）。
+fn new_event_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// 32 位小写十六进制校验（event_id / trace_id 共用形态契约）。
+fn is_lower_hex_32(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// 分组指纹：缺省按异常类型聚合（同类型错误在服务端归并为同一 issue）。
+fn fingerprint_for(error_type: &str) -> Vec<String> {
+    vec![error_type.trim().to_string()]
+}
+
+/// 补齐 / 校正 C2 互跳字段：非法 event_id 一律替换为新生成的合法 id，
+/// trace_id 仅接受合法 32 位小写十六进制；否则回落**导出态** id（仍取不到则 `None`，
+/// 绝不写占位值、也绝不回落本地相关性 id）。
+/// 同时把 IPC 载荷统一过一遍脱敏（extra 走 `sanitize_json`，文本字段走 `sanitize`）。
+fn normalize_payload(payload: &mut IngestPayload) {
+    if !payload
+        .event_id
+        .as_deref()
+        .map(is_lower_hex_32)
+        .unwrap_or(false)
+    {
+        payload.event_id = Some(new_event_id());
+    }
+    let trace_is_valid = payload
+        .trace_id
+        .as_deref()
+        .map(is_lower_hex_32)
+        .unwrap_or(false);
+    if !trace_is_valid {
+        payload.trace_id = crate::agent::otel::exported_trace_id();
+    }
+    if payload.fingerprint.is_none() {
+        if let Some(exception) = payload.exception.as_ref() {
+            payload.fingerprint = Some(fingerprint_for(&exception.error_type));
+        }
+    }
+    // 零信任：前端传入的载荷同样必须脱敏（此前只有 add_breadcrumb/capture_error 走了清洗）。
+    // H1：**所有**文本承载字段（extra / message / tags / exception / stacktrace / breadcrumbs /
+    // culprit / fingerprint）统一过清洗，杜绝任何未脱敏字符串进入 payload 的路径。
+    if let Some(extra) = payload.extra.as_ref() {
+        payload.extra = Some(sanitize_json(extra));
+    }
+    if let Some(message) = payload.message.as_ref() {
+        payload.message = Some(sanitize(message));
+    }
+    if let Some(tags) = payload.tags.as_mut() {
+        for value in tags.values_mut() {
+            *value = sanitize(value);
+        }
+    }
+    if let Some(exception) = payload.exception.as_mut() {
+        exception.error_type = sanitize(&exception.error_type);
+        if let Some(value) = exception.value.as_ref() {
+            exception.value = Some(sanitize(value));
+        }
+        if let Some(frames) = exception.stacktrace.as_mut() {
+            for frame in frames.iter_mut() {
+                if let Some(filename) = frame.filename.as_ref() {
+                    frame.filename = Some(sanitize(filename));
+                }
+                if let Some(function) = frame.function.as_ref() {
+                    frame.function = Some(sanitize(function));
+                }
+            }
+        }
+    }
+    if let Some(breadcrumbs) = payload.breadcrumbs.as_mut() {
+        for breadcrumb in breadcrumbs.iter_mut() {
+            breadcrumb.category = sanitize(&breadcrumb.category);
+            breadcrumb.message = sanitize(&breadcrumb.message);
+            if let Some(data) = breadcrumb.data.as_mut() {
+                for value in data.values_mut() {
+                    *value = sanitize(value);
+                }
+            }
+        }
+    }
+    if let Some(culprit) = payload.culprit.as_ref() {
+        payload.culprit = Some(sanitize(culprit));
+    }
+    if let Some(fingerprint) = payload.fingerprint.as_mut() {
+        for part in fingerprint.iter_mut() {
+            *part = sanitize(part);
+        }
+    }
+}
+
+/// 把原始调用栈符号化为 PonySentry `Frame` 列表（worker 侧调用，失败返回空）。
+///
+/// 解析 `std::backtrace` 的文本形态：`N: <function>` 后跟可选的 `at <file>:<line>:<col>`。
+/// 语义：最多保留 [`MAX_STACK_FRAMES`] 帧；标准库/依赖帧标记 `in_app=false`；
+/// 函数名与文件名同样过 [`sanitize`]（栈里可能含家目录/令牌）。
+fn symbolize_backtrace(backtrace: &Backtrace) -> Vec<Frame> {
+    let text = backtrace.to_string();
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut current: Option<Frame> = None;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if let Some(function) = strip_frame_index(line) {
+            if let Some(frame) = current.take() {
+                frames.push(frame);
+            }
+            current = Some(Frame {
+                filename: None,
+                function: Some(sanitize(function)),
+                lineno: None,
+                in_app: None,
+            });
+        } else if let Some(location) = line.strip_prefix("at ") {
+            let (filename, lineno) = split_location(location);
+            let in_app = filename
+                .as_deref()
+                .map(|path| is_app_path(path))
+                .unwrap_or(false);
+            let sanitized_filename = filename.map(|path| sanitize(&path));
+            match current.as_mut() {
+                Some(frame) => {
+                    frame.filename = sanitized_filename;
+                    frame.lineno = lineno;
+                    frame.in_app = Some(in_app);
+                }
+                None => {
+                    current = Some(Frame {
+                        filename: sanitized_filename,
+                        function: None,
+                        lineno,
+                        in_app: Some(in_app),
+                    })
+                }
+            }
+        }
+        if frames.len() >= MAX_STACK_FRAMES {
+            break;
+        }
+    }
+    if let Some(frame) = current.take() {
+        frames.push(frame);
+    }
+    frames.truncate(MAX_STACK_FRAMES);
+    frames
+}
+
+/// 识别 `N: function` 形态的帧头，返回函数名部分（非帧头返回 `None`）。
+fn strip_frame_index(line: &str) -> Option<&str> {
+    let (index, rest) = line.split_once(':')?;
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// 拆分 `file:line:col`：返回（文件名，行号）；列号丢弃，无法解析的部分置 `None`。
+fn split_location(location: &str) -> (Option<String>, Option<u32>) {
+    let trimmed = location.trim();
+    let mut parts = trimmed.rsplitn(3, ':');
+    let third = parts.next();
+    let second = parts.next();
+    match (third, second) {
+        (Some(_column), Some(line)) => match line.trim().parse::<u32>() {
+            Ok(lineno) => {
+                // 第三个片段是列号；文件名 = 去掉最后两段后的前缀（用 rsplitn 再取一次）。
+                let filename = trimmed
+                    .rsplitn(3, ':')
+                    .nth(2)
+                    .map(|prefix| prefix.to_string())
+                    .filter(|prefix| !prefix.is_empty());
+                (filename, Some(lineno))
+            }
+            Err(_) => (Some(trimmed.to_string()), None),
+        },
+        _ => (Some(trimmed.to_string()), None),
+    }
+}
+
+/// 是否属于本项目代码（非 registry 依赖 / 非标准库路径）。
+fn is_app_path(path: &str) -> bool {
+    !path.contains("/registry/") && !path.contains("library/std") && !path.contains("rustc/")
+}
+
+/// worker 侧回填：把符号化后的栈与 culprit 写入载荷（已有栈则追加在后，保留定位帧）。
+fn apply_stacktrace(payload: &mut IngestPayload, backtrace: Option<Backtrace>) {
+    let Some(backtrace) = backtrace else {
+        return;
+    };
+    let captured = symbolize_backtrace(&backtrace);
+    if captured.is_empty() {
+        return;
+    }
+    if payload.culprit.is_none() {
+        payload.culprit = captured
+            .iter()
+            .find(|frame| frame.in_app == Some(true))
+            .or_else(|| captured.first())
+            .and_then(|frame| frame.function.clone().or_else(|| frame.filename.clone()));
+    }
+    if let Some(exception) = payload.exception.as_mut() {
+        match exception.stacktrace.as_mut() {
+            Some(existing) if !existing.is_empty() => {
+                existing.extend(captured);
+                existing.truncate(MAX_STACK_FRAMES);
+            }
+            _ => exception.stacktrace = Some(captured),
+        }
     }
 }
 
@@ -232,9 +510,16 @@ fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<SentryEvent>) 
     let ingest_url = format!("{base_url}/api/v1/ingest");
 
     while let Ok(event) = receiver.recv() {
-        let (url, body_json) = match event {
-            SentryEvent::Ingest(payload) => (ingest_url.clone(), serde_json::to_value(&payload)),
-        };
+        let SentryEvent::Ingest {
+            mut payload,
+            traceparent,
+            backtrace,
+        } = event;
+        // 符号化（昂贵）落在 worker 线程，绝不占用上报入队路径。
+        apply_stacktrace(&mut payload, backtrace);
+
+        let url = ingest_url.clone();
+        let body_json = serde_json::to_value(&payload);
 
         let body = match body_json {
             Ok(b) => b,
@@ -252,6 +537,14 @@ fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<SentryEvent>) 
             req = req.header("X-Client-Token", token);
         }
 
+        // Wave-4 C3：入队时（活跃 turn 上下文）解析好的 traceparent 在这里落到出网请求头。
+        // 用 `headers()`（内部 `Entry::insert` 语义）而非 `header()`（append），避免重复头。
+        if let Some(traceparent) = traceparent.as_deref() {
+            if let Some(headers) = crate::agent::otel::traceparent_header_map_from(traceparent) {
+                req = req.headers(headers);
+            }
+        }
+
         let send_fut = req.json(&body).send();
 
         rt.block_on(async {
@@ -266,5 +559,113 @@ fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<SentryEvent>) 
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    /// H1：IPC 载荷的**所有**文本承载字段（culprit / stacktrace.filename /
+    /// breadcrumbs / extra / message / tags）都必须脱敏，不存在旁路。
+    #[test]
+    fn h1_ipc_payload_fields_are_all_sanitized() {
+        let mut breadcrumb_data = HashMap::new();
+        breadcrumb_data.insert("path".to_string(), "/home/alice/secret.rs".to_string());
+        breadcrumb_data.insert(
+            "header".to_string(),
+            "Bearer abcdefghij".to_string(),
+        );
+
+        let mut payload = IngestPayload {
+            platform: "tauri".to_string(),
+            release: "0.1.155".to_string(),
+            environment: "production".to_string(),
+            message: Some("boom Bearer abcdefghij".to_string()),
+            exception: Some(Exception {
+                error_type: "TypeError".to_string(),
+                value: Some("failed at /home/alice/secret.rs".to_string()),
+                stacktrace: Some(vec![Frame {
+                    filename: Some("/home/alice/secret.rs".to_string()),
+                    function: Some("do_thing Bearer abcdefghij".to_string()),
+                    lineno: Some(12),
+                    in_app: Some(true),
+                }]),
+            }),
+            tags: Some(HashMap::from([(
+                "path".to_string(),
+                "/home/alice/secret.rs".to_string(),
+            )])),
+            extra: Some(json!({
+                "access_tokens": "secret123",
+                "input_tokens": 42,
+                "trace": "Bearer abcdefghij"
+            })),
+            breadcrumbs: Some(vec![Breadcrumb {
+                category: "ui Bearer abcdefghij".to_string(),
+                message: "clicked /home/alice/secret.rs".to_string(),
+                data: Some(breadcrumb_data),
+            }]),
+            event_id: None,
+            trace_id: None,
+            fingerprint: None,
+            culprit: Some("/home/alice/secret.rs @ Bearer abcdefghij".to_string()),
+        };
+
+        normalize_payload(&mut payload);
+
+        let rendered = serde_json::to_string(&payload).expect("载荷必须可序列化");
+        for leaked in ["abcdefghij", "/home/alice", "secret123"] {
+            assert!(
+                !rendered.contains(leaked),
+                "H1：脱敏旁路，payload 中仍出现 `{leaked}`：{rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("[REDACTED_SECRET]"),
+            "必须出现凭据脱敏标记：{rendered}"
+        );
+        assert!(
+            rendered.contains("[USER_HOME]"),
+            "必须出现家目录脱敏标记：{rendered}"
+        );
+        // 计量键仍保持数字原值（H2 精确白名单）。
+        assert_eq!(payload.extra.as_ref().expect("extra")["input_tokens"], 42);
+        // 互跳字段仍被补齐。
+        assert_eq!(payload.event_id.as_deref().map(str::len), Some(32));
+    }
+
+    /// H1 反向：`capture_panic` 的 culprit（panic 文件路径）同样被清洗。
+    #[test]
+    fn h1_panic_culprit_shape_is_sanitized_by_normalize() {
+        let mut payload = IngestPayload {
+            platform: "rust".to_string(),
+            release: "0.1.155".to_string(),
+            environment: "dev".to_string(),
+            message: Some("panic: boom".to_string()),
+            exception: Some(Exception {
+                error_type: "Panic".to_string(),
+                value: Some("boom".to_string()),
+                stacktrace: Some(vec![Frame {
+                    filename: Some("/home/alice/secret.rs:1:1".to_string()),
+                    function: Some("panic_hook".to_string()),
+                    lineno: None,
+                    in_app: Some(true),
+                }]),
+            }),
+            tags: None,
+            extra: None,
+            breadcrumbs: None,
+            event_id: None,
+            trace_id: None,
+            fingerprint: None,
+            culprit: Some("/home/alice/secret.rs:1:1".to_string()),
+        };
+        normalize_payload(&mut payload);
+        let rendered = serde_json::to_string(&payload).expect("serialize");
+        assert!(!rendered.contains("/home/alice"), "culprit 未脱敏：{rendered}");
+        assert!(rendered.contains("[USER_HOME]"), "缺少家目录脱敏位：{rendered}");
     }
 }

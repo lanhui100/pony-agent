@@ -187,6 +187,9 @@ impl AgentRuntime {
                     turn_id: turn_id.to_string(),
                     session_id: session_id.map(str::to_string),
                     event_id: None,
+                    // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
+                    // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
+                    trace_id: crate::agent::otel::exported_trace_id(),
                     event_type: None,
                     event_version: None,
                     sequence: None,
@@ -495,6 +498,9 @@ impl AgentRuntime {
                     turn_id: turn_id.to_string(),
                     session_id: session_id.map(str::to_string),
                     event_id: None,
+                    // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
+                    // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
+                    trace_id: crate::agent::otel::exported_trace_id(),
                     event_type: None,
                     event_version: None,
                     sequence: None,
@@ -593,6 +599,9 @@ impl AgentRuntime {
                     turn_id: turn_id.to_string(),
                     session_id: session_id.map(str::to_string),
                     event_id: None,
+                    // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
+                    // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
+                    trace_id: crate::agent::otel::exported_trace_id(),
                     event_type: None,
                     event_version: None,
                     sequence: None,

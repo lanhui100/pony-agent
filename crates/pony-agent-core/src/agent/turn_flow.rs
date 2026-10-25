@@ -500,6 +500,8 @@ pub fn emit_stream_failed(
             event_id: None,
             session_id,
             turn_id,
+            // Wave-4.1 B1：导出态 trace_id（门禁关闭/未采样 ⇒ None，绝不回落本地 id）。
+            trace_id: crate::agent::otel::exported_trace_id(),
             kind: "failed".to_string(),
             event_type: None,
             event_version: None,
@@ -557,6 +559,8 @@ pub fn emit_stream_cancelled(
             event_id: None,
             session_id,
             turn_id,
+            // Wave-4.1 B1：导出态 trace_id（门禁关闭/未采样 ⇒ None，绝不回落本地 id）。
+            trace_id: crate::agent::otel::exported_trace_id(),
             kind: "cancelled".to_string(),
             event_type: None,
             event_version: None,
@@ -692,6 +696,8 @@ pub fn emit_stream_event_with_step(
             event_id: None,
             session_id,
             turn_id,
+            // Wave-4.1 B1：所有活链路事件都携带导出态 trace_id（门禁关闭 ⇒ None）。
+            trace_id: crate::agent::otel::exported_trace_id(),
             kind: kind.to_string(),
             event_type: None,
             event_version: None,
@@ -1475,6 +1481,7 @@ mod tests {
             event_id: None,
             session_id: Some("s1".to_string()),
             turn_id: turn_id.to_string(),
+            trace_id: None,
             kind: kind.to_string(),
             event_type: None,
             event_version: None,

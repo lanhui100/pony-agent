@@ -132,7 +132,7 @@ function openExa() {
   void openExternalUrl("https://exa.ai/");
 }
 
-// ── Wave43 D7：诊断与遥测（全局 Agent Trace 上报开关） ────────────────
+// ── Wave43 D7 & Wave-4 C1：诊断与遥测（全局 Agent Trace 上报与 OTel 配置） ──
 // 持久化复用既有 save_app_settings 通道（不新增 Tauri 命令）；core 侧 gate 由 Rust 落地。
 const traceReportingError = ref<string | null>(null);
 
@@ -146,6 +146,41 @@ async function toggleAgentTraceReporting(enabled: boolean) {
   if (settingsStore.error) {
     traceReportingError.value = "开关保存失败，已恢复原状态，请重试。";
   }
+}
+
+let otelDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+function handleOtelInputChange(key: "otelEndpoint" | "otelServiceName" | "otelToken", value: string) {
+  settings.value[key] = value.trim() || undefined;
+  if (otelDebounceTimer) {
+    clearTimeout(otelDebounceTimer);
+  }
+  otelDebounceTimer = setTimeout(() => {
+    void settingsStore.saveSettings();
+  }, 500);
+}
+
+function handleOtelSamplingRatioChange(value: string) {
+  const num = parseFloat(value);
+  if (!isNaN(num) && num >= 0.0 && num <= 1.0) {
+    settings.value.otelSamplingRatio = num;
+  } else if (!value.trim()) {
+    settings.value.otelSamplingRatio = undefined;
+  }
+  if (otelDebounceTimer) {
+    clearTimeout(otelDebounceTimer);
+  }
+  otelDebounceTimer = setTimeout(() => {
+    void settingsStore.saveSettings();
+  }, 500);
+}
+
+function flushOtelSettings() {
+  if (otelDebounceTimer) {
+    clearTimeout(otelDebounceTimer);
+    otelDebounceTimer = undefined;
+  }
+  void settingsStore.saveSettings();
 }
 // ────────────────────────────────────────────────────────────────────
 </script>
@@ -407,6 +442,65 @@ async function toggleAgentTraceReporting(enabled: boolean) {
             <p>
               仅用于定位模型/工具链路问题。可随时关闭，关闭后不再产生任何上报。
             </p>
+          </div>
+
+          <!-- Wave-4 C1：OTel 端点与鉴权自定义配置 -->
+          <div class="mt-3 border-t border-stone-100 pt-3 space-y-2.5">
+            <div class="flex items-center justify-between">
+              <span class="text-[12px] font-medium text-stone-700">OTel 导出网络与认证</span>
+              <span class="text-[11px] text-amber-600">修改后需重启应用生效</span>
+            </div>
+            <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              <div class="space-y-1">
+                <label class="block text-[11px] text-stone-500">OTLP 端点 URL</label>
+                <Input
+                  :model-value="settings.otelEndpoint || ''"
+                  :disabled="saving"
+                  placeholder="https://otel.ponyjob.top"
+                  class="bg-stone-50 text-[11px]"
+                  data-testid="config-otel-endpoint-input"
+                  @update:model-value="handleOtelInputChange('otelEndpoint', $event)"
+                  @blur="flushOtelSettings"
+                />
+              </div>
+              <div class="space-y-1">
+                <label class="block text-[11px] text-stone-500">服务名称</label>
+                <Input
+                  :model-value="settings.otelServiceName || ''"
+                  :disabled="saving"
+                  placeholder="pony-agent"
+                  class="bg-stone-50 text-[11px]"
+                  data-testid="config-otel-service-name-input"
+                  @update:model-value="handleOtelInputChange('otelServiceName', $event)"
+                  @blur="flushOtelSettings"
+                />
+              </div>
+              <div class="space-y-1">
+                <label class="block text-[11px] text-stone-500">采样率 (0.0 ~ 1.0)</label>
+                <Input
+                  :model-value="settings.otelSamplingRatio !== undefined ? String(settings.otelSamplingRatio) : '1.0'"
+                  :disabled="saving"
+                  placeholder="1.0"
+                  class="bg-stone-50 text-[11px]"
+                  data-testid="config-otel-sampling-ratio-input"
+                  @update:model-value="handleOtelSamplingRatioChange($event)"
+                  @blur="flushOtelSettings"
+                />
+              </div>
+              <div class="space-y-1">
+                <label class="block text-[11px] text-stone-500">Token 鉴权凭证</label>
+                <Input
+                  :model-value="settings.otelToken || ''"
+                  type="password"
+                  :disabled="saving"
+                  placeholder="输入 Bearer Token (不回显)"
+                  class="bg-stone-50 text-[11px]"
+                  data-testid="config-otel-token-input"
+                  @update:model-value="handleOtelInputChange('otelToken', $event)"
+                  @blur="flushOtelSettings"
+                />
+              </div>
+            </div>
           </div>
 
           <div

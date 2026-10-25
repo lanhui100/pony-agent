@@ -684,6 +684,11 @@ pub struct TurnTraceRecord {
     pub session_id: Option<String>,
     #[serde(default)]
     pub event_id: Option<String>,
+    /// Wave-4.1 A6：本 turn 的**导出态** OTel trace_id（32 位小写十六进制，camelCase 下发
+    /// `traceId`）。语义：仅当本轮真实创建并被采样了 root span 时为 `Some`；
+    /// 门禁关闭/未采样/本地降级上下文一律 `None`（前端据此决定是否展示「跳转链路」入口）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
     #[serde(default)]
     pub event_type: Option<String>,
     #[serde(default)]

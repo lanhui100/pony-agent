@@ -4186,6 +4186,7 @@ fn turn_stream_event_step_serde_roundtrip() {
         event_id: None,
         session_id: None,
         turn_id: "turn-new".to_string(),
+        trace_id: None,
         kind: "delta".to_string(),
         event_type: None,
         event_version: None,

@@ -3231,14 +3231,13 @@ impl ToolRouter {
             TOOL_WEB_SEARCH_QUERY,
             timeout_ms.max(WEB_FETCH_TOTAL_DEADLINE_MS),
             |_deadline| {
-                block_on(
-                    client
-                        .post("https://api.exa.ai/search")
-                        .header("x-api-key", &api_key)
-                        .header("Content-Type", "application/json")
-                        .body(body.to_string())
-                        .send(),
-                )
+                let request = client
+                    .post("https://api.exa.ai/search")
+                    .header("x-api-key", &api_key)
+                    .header("Content-Type", "application/json");
+                // Wave-4 C3：工具出网在活跃 turn 内级联 traceparent（无活跃 turn 时零改动）。
+                let request = crate::agent::otel::with_current_traceparent(request);
+                block_on(request.body(body.to_string()).send())
                 .map_err(|error| {
                     if is_reqwest_timeout_error(&error) {
                         format!("timeout: Exa 搜索请求超时：{}。", error)
@@ -7883,7 +7882,9 @@ impl PinnedSender for ReqwestPinnedSender {
         let hostname = parsed.host_str().unwrap_or("").to_string();
         let client = build_pinned_web_client(decision, &hostname, timeout_ms)
             .map_err(WebFetchTransportError::ClientBuild)?;
-        let response = block_on(client.get(parsed).send()).map_err(|error| {
+        // Wave-4 C3：工具出网在活跃 turn 内级联 traceparent（无活跃 turn 时零改动）。
+        let request = crate::agent::otel::with_current_traceparent(client.get(parsed));
+        let response = block_on(request.send()).map_err(|error| {
             if is_reqwest_timeout_error(&error) {
                 WebFetchTransportError::Request(format!("timeout: 抓取 URL 超时：{}。", error))
             } else {
