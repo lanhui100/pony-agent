@@ -1,0 +1,17 @@
+{
+  "wave": 46,
+  "status": "red_phase_verified",
+  "receipts": {
+    "frontend": {
+      "suite": "tests/acceptance/wave46/pa161-pa162-ui-resilience.spec.ts",
+      "result": "RED",
+      "reason": "ErrorBoundary.vue 尚未实现 (PA-162)"
+    },
+    "rust_core": {
+      "suite": "crates/pony-agent-core/tests/otel_user_id_acceptance_test.rs",
+      "result": "RED",
+      "reason": "wire 缺少 langfuse.user.id (PA-163)"
+    }
+  },
+  "verified_at": "2026-10-25T21:32:00Z"
+}

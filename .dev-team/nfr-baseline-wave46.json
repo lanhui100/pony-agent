@@ -1,0 +1,48 @@
+{
+  "wave": 46,
+  "baseline_ref": ".dev-team/nfr-baseline-wave45.json",
+  "delta_scope": "additive-only: wave46 前端交互轨迹增强、局部错误边界组件与 Langfuse user_id 规范归因",
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 500,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "resource_release": [
+    "error_boundary_cleanup_on_unmount",
+    "otel_provider_flush_and_shutdown_on_exit"
+  ],
+  "wave46_ui_resilience": {
+    "pa_161_breadcrumbs": {
+      "navigation_category": "navigation",
+      "max_breadcrumbs": 30,
+      "sanitize_enabled": true,
+      "truncate_enabled": true
+    },
+    "pa_162_error_boundary": {
+      "component_name": "ErrorBoundary",
+      "uses_on_error_captured": true,
+      "stops_propagation": true,
+      "triggers_report_error": true,
+      "fallback_test_id": "error-boundary-fallback",
+      "retry_button_test_id": "error-boundary-retry"
+    }
+  },
+  "wave46_observability_semantics": {
+    "pa_163_langfuse_user_id": {
+      "attr_key": "langfuse.user.id",
+      "env_var": "PONY_OTEL_USER_ID",
+      "trim_non_empty_required": true,
+      "blank_treated_as_unset": true,
+      "absent_when_unset": true,
+      "zero_empty_string_placeholder": true
+    }
+  }
+}
