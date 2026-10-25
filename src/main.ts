@@ -3,7 +3,7 @@ import { createApp } from "vue";
 import { MotionPlugin } from "motion-v";
 import App from "./App.vue";
 import "./styles.css";
-import { reportError, addBreadcrumb } from "./lib/telemetry";
+import { reportError, addBreadcrumb, isNetworkNoise } from "./lib/telemetry";
 
 const mountCount = Number(window.sessionStorage.getItem("pony-agent.mount-count") || "0") + 1;
 window.sessionStorage.setItem("pony-agent.mount-count", String(mountCount));
@@ -24,9 +24,11 @@ const app = createApp(App);
 app.config.errorHandler = (err: unknown, instance, info: string) => {
   console.error("[pony-agent][vue-error]", err, info);
   const errorObj = err instanceof Error ? err : new Error(String(err));
+  const message = errorObj.message || String(err);
+  if (isNetworkNoise(message)) return;
   reportError({
     errorType: errorObj.name || "VueComponentError",
-    message: errorObj.message || String(err),
+    message,
     stack: errorObj.stack,
     extra: {
       lifecycleHook: info,
@@ -44,9 +46,11 @@ if (typeof window !== "undefined") {
     console.error("[pony-agent][unhandled-rejection]", event.reason);
     const reason = event.reason;
     const errorObj = reason instanceof Error ? reason : new Error(String(reason));
+    const message = errorObj.message || String(reason);
+    if (isNetworkNoise(message)) return;
     reportError({
       errorType: errorObj.name || "UnhandledRejection",
-      message: errorObj.message || String(reason),
+      message,
       stack: errorObj.stack,
       extra: {
         reasonString: String(reason),
@@ -61,12 +65,14 @@ if (typeof window !== "undefined") {
   window.addEventListener("error", (event) => {
     // 忽略加载资源失败引发的无 error 对象的事件
     if (!event.error && !event.message) return;
-    console.error("[pony-agent][window-error]", event.error || event.message);
     const errorObj =
       event.error instanceof Error ? event.error : new Error(String(event.message));
+    const message = errorObj.message || event.message || "Unknown window error";
+    if (isNetworkNoise(message, event.filename)) return;
+    console.error("[pony-agent][window-error]", event.error || event.message);
     reportError({
       errorType: errorObj.name || "WindowRuntimeError",
-      message: errorObj.message || event.message || "Unknown window error",
+      message,
       stack: errorObj.stack,
       extra: {
         filename: event.filename,

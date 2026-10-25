@@ -283,6 +283,7 @@ export interface ReportErrorOptions {
   tags?: Record<string, string>;
   extra?: Record<string, unknown>;
   platform?: string;
+  trace_id?: string;
 }
 
 export function buildIngestPayload(options: ReportErrorOptions): IngestPayload {
@@ -304,6 +305,7 @@ export function buildIngestPayload(options: ReportErrorOptions): IngestPayload {
     release: APP_RELEASE,
     environment: APP_ENV,
     event_id: generateEventId(),
+    trace_id: options.trace_id,
     message: sanitizedMsg,
     exception: {
       error_type: sanitizeString(errorType),
@@ -345,17 +347,36 @@ export async function reportError(options: ReportErrorOptions): Promise<void> {
     return;
   }
 
+  // 结合 isNetworkNoise 过滤网络连接中断、CORS、资源加载等噪音错误
+  if (isNetworkNoise(options.message)) {
+    return;
+  }
+
   // 自动化测试环境严格静音，防止测试模拟异常污染生产/预发 Sentry 监控 (ADR 0028)
   if (
-    import.meta.env?.MODE === "test" ||
-    Boolean(import.meta.env?.TEST) ||
     Boolean((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.VITEST)
   ) {
     return;
   }
 
   try {
-    const payload = buildIngestPayload(options);
+    let payload: IngestPayload | null = buildIngestPayload(options);
+
+    // beforeSend 管道装配：支持异步或同步 beforeSend。
+    // 若返回 null，立即取消上报；若抛出异常，捕获并降级打印警告，保留原 payload 继续上报。
+    if (globalBeforeSend) {
+      try {
+        const result = await globalBeforeSend(payload);
+        if (result === null) {
+          return;
+        }
+        if (result) {
+          payload = result;
+        }
+      } catch (hookErr) {
+        console.warn("[ponysentry] beforeSend hook execution error:", hookErr);
+      }
+    }
 
     // 1. 若处于桌面端环境，优先通过 Tauri IPC 委托给 core 客户端上报
     if (isTauriAvailable()) {
