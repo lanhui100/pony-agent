@@ -1,6 +1,19 @@
 # 元框架复盘报告（Meta-Retrospective）
 
-> 本轮对象：Wave-5（会话成本估算 + 预算软告警 + CLI/TUI 可观测性引导）。复盘重心为**协作元框架与组织协议本身**。
+> 本轮对象：Wave-5 + Wave-6（成本估算 / 预算软告警 / CLI,TUI 可观测性引导 / 计价协议语义 / 子 span 会话 / 结构化日志 / 巡检脚本修正）。复盘重心为**协作元框架与组织协议本身**。
+
+## 补充：Wave-6 增补复盘
+
+### 门禁穿透（本轮最有价值的三次）
+1. **自证实验隔离了责任边界**：Wave-5 收尾时公网 issue 的 `trace_id` 为空，执行者倾向「客户端没发」，我改用**不经本仓库**的 curl 直打 ingest，回读事件 payload 发现 `event_id` 保留而 `trace_id` 被服务端丢弃 ⇒ 一次实验把"客户端缺陷"改判为"服务端 schema 缺口"，避免了继续在客户端加无效修补。**结论：跨组件断言必须做"绕过本组件"的隔离实验。**
+2. **证据不可信导致假红**：`wave5_cost_test` 的 mock OTLP sink 不回包 ⇒ `force_flush` 恒 Err ⇒ 用例恒红；执行者用双探针（复刻 sink vs 回 200 sink）证明是测试缺陷而非实现缺陷。**教训：红相也要验证"红得对"**。
+3. **巡检脚本自身误判**：`tcount` 缺时间窗把 1h 前的 trace 判成不存在（假 MISSING），`g/gh` 未排除文档与 `target*` 把「trace/metrics 二级化」散文判成 `/#metrics` 实现（假 PASS）。修完 `M1 MISSING / T4 PASS` 才与事实一致。**教训：审计工具的输出也是"证据"，必须能被交叉验证（本次用显式时间窗复核推翻了此前的"数据丢失"结论）。**
+
+### 元协议增补
+1. **P0 撤回错误结论要留痕**：我把"Tempo 丢数据"写进报告后经复核推翻，已在同一文件保留「原判断（错误）→ 复核（正确）→ 根因」三段，而不是偷偷改写。审计报告必须可追溯订正。
+2. **P1 服务端契约缺口需独立工单**：客户端已把 `trace_id` 送到 ingest，服务端 schema 不接 ⇒ 这类跨仓缺口应在 `OBS-GOV` backlog 建「PonySentry ingest 增加 trace_id」条目，并在客户端契约里标注「依赖服务端支持才可互跳」。
+3. **P1 mock 工具收敛**：两处 OTLP sink（`otel_trace_migration_test` 会回包、`wave5_cost_test` 曾不回包）导致一次假红。建议抽 `tests/support/otlp_sink.rs` 单一实现，红相前先自检 sink 行为。
+4. **P2 巡检脚本应有自检用例**：`selftest.sh` 覆盖了 declare/audit-diff，但 `audit-project.sh` 的判据（M1/M2/T4）没有"假文档目录"回归夹具。建议加 fixture：一个只含散文的假项目必须判 MISSING。
 
 ## 一、 通信拓扑与信噪比 (Topology & Noise)
 - **拓扑**：Lead + Protocol + Test + Executor-Rust + Executor-Frontend（5 名，≤8）。审查走 Subagent（Wave-5 单轮合并双视角）。
