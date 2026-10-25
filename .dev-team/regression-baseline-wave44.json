@@ -1,0 +1,12 @@
+{
+  "wave": 44,
+  "baseline_commit": "ab54b06",
+  "captured_at": "2026-10-25T17:18:00+08:00",
+  "command": "npm run test:unit -- --reporter=dot",
+  "exit_code": 0,
+  "test_files": { "total": 99, "passed": 99, "failed": 0 },
+  "tests": { "total": 1036, "passed": 1026, "skipped": 10, "failed": 0 },
+  "duration_seconds": 40.04,
+  "raw_log": "/tmp/wave44-baseline-vitest.log",
+  "notes": "存量测试基线全绿；10 skipped 为既有（非本波引入）。红相锚定前/后均与此基线逐项对照。"
+}
