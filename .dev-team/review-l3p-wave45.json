@@ -1,0 +1,24 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "src/stores/runtime.ts",
+    "docs/observability.yaml"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1289,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '1167p;1289p' crates/pony-agent-core/src/agent/otel/mod.rs && sed -n '1988,2002p' crates/pony-agent-core/src/agent/otel/mod.rs && grep -n 'input.session_id.as_deref().unwrap_or(\"\")' crates/pony-agent-core/src/agent/runtime/turn_sync.rs crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 57,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'PONY_OTEL_SERVICE_VERSION\\|PONY_OTEL_ENVIRONMENT' .env.example docs/observability.yaml || echo 'MISSING: 0 命中（新 env 与 resource 归因未登记）'",
+      "severity": "ADVISORY"
+    }
+  ]
+}

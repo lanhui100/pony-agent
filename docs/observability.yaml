@@ -58,3 +58,9 @@ note: >-
   （`pony-agent.debug.workspace-scroll` / `?debug=1|scroll` / DEV，默认生产关闭），属开发者诊断输出，
   非结构化日志出口：四维归属不变（logs 仍为结构性 N-A），不新增 metrics/tracing/issues 面。
   审计事实与优化点见 `docs/audit/observability-audit-2026-10-25.md`。
+  【wave-45 归属登记】tracing 维度新增 resource 归因属性：`service.version`（默认 core crate 版本，
+  可由 `PONY_OTEL_SERVICE_VERSION` 覆盖）与 `deployment.environment`（默认 debug=`development` /
+  release=`production`，可由 `PONY_OTEL_ENVIRONMENT` 覆盖）。维度归属不变（仍为 tracing，唯一落点仍是
+  `crates/pony-agent-core/src/agent/otel/mod.rs`），不新增出口/端点/标签维度；`agent.turn` 根 span
+  新增 `agent.turn.outcome=error` + `turn_error:` 状态承接子 span 失败。见
+  `docs/audit/observability-audit-2026-10-25.md` 与 `.dev-team/contract-matrix-wave45.md`。

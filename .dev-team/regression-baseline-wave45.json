@@ -1,0 +1,21 @@
+{
+  "wave": 45,
+  "baseline_commit": "f233a96",
+  "captured_at": "2026-10-25T18:14:00+08:00",
+  "rust": {
+    "command": "cargo test -p pony-agent-core --lib --target-dir target-test",
+    "exit_code": 101,
+    "passed": 1149,
+    "failed": 1,
+    "known_failure": "agent::config::tests::missing_capabilities_fields_use_stable_defaults",
+    "note": "既有基线缺陷（wave-43 已记录，本波零改动该模块）；判定口径=不新增失败"
+  },
+  "frontend": {
+    "command": "npm run test:unit",
+    "exit_code": 0,
+    "test_files": 102,
+    "passed": 1034,
+    "skipped": 10,
+    "note": "wave-44 收口基线，本波前未变动前端业务代码"
+  }
+}

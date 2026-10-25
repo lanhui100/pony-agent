@@ -1,0 +1,37 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "src/stores/runtime.ts"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2681,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "node -e 'const w=(p,ms)=>new Promise((res,rej)=>{const t=setTimeout(()=>rej(new Error(\"timeout\")),ms);p.then(v=>{clearTimeout(t);res(v)},e=>{clearTimeout(t);rej(e)})});w(Promise.reject(new Error(\"host IPC permission denied\")),15000).catch(e=>console.log(\"merged_as_null:\",e.message))'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2680,
+      "rule": "LEAK",
+      "counterexample_cmd": "node -e 'let late;const p=new Promise(r=>{late=r});const w=(x,ms)=>new Promise((res,rej)=>{const t=setTimeout(()=>rej(new Error(\"timeout\")),ms);x.then(v=>{clearTimeout(t);res(v)},e=>{clearTimeout(t);rej(e)})});w(p,20).catch(()=>null);setTimeout(()=>{console.log(\"late_resolve_still_retained\");late({session:{history:[\"host\"]}})},300)'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2639,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "grep -n \"const watchdog = setTimeout\" -A6 src/stores/runtime.ts; grep -n \"HYDRATION_TIMEOUT_MS = 15000\" src/lib/runtime/constants.ts; grep -n \"sessionSwitchToken\" src/stores/runtime.ts",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "line": 415,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "for i in $(seq 1 10); do cargo test -q -p pony-agent-core --test otel_resource_turn_status_test --test otel_resource_env_test 2>&1 | grep -E '^test pa154_t2|test result'; done",
+      "severity": "ADVISORY"
+    }
+  ]
+}

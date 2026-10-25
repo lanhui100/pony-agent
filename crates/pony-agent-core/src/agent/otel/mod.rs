@@ -105,6 +105,10 @@ pub const ATTR_AGENT_TURN_SEQUENCE: &str = "agent.turn.sequence";
 /// turn 终态相位（如 `completed` / `failed` / `cancelled`）。
 pub const ATTR_AGENT_TURN_PHASE: &str = "agent.turn.phase";
 
+/// turn 终态错误聚合结论（PA-154）：**仅**本轮聚合到子 span 错误时输出（值固定 `error`）；
+/// 全成功轮次**不输出该键**（保持「有 = 有错」的单义语义，避免污染失败率看板）。
+pub const ATTR_AGENT_TURN_OUTCOME: &str = "agent.turn.outcome";
+
 /// 工具执行状态（如 `success` / `failed`）。
 pub const ATTR_AGENT_TOOL_STATUS: &str = "agent.tool.status";
 
@@ -151,6 +155,28 @@ pub const ENV_SAMPLER_ARG: &str = "OTEL_TRACES_SAMPLER_ARG";
 
 /// 公网 OTLP 端点鉴权 token 的环境变量名；仅作为 header 注入，不落盘、不入库。
 pub const ENV_PONY_OTEL_TOKEN: &str = "PONY_OTEL_TOKEN";
+
+/// `service.version` resource 属性的进程 env 覆盖名（PA-153）；trim 后非空即覆盖默认值。
+pub const ENV_PONY_OTEL_SERVICE_VERSION: &str = "PONY_OTEL_SERVICE_VERSION";
+
+/// `deployment.environment` resource 属性的进程 env 覆盖名（PA-153）；trim 后非空即覆盖默认值。
+pub const ENV_PONY_OTEL_ENVIRONMENT: &str = "PONY_OTEL_ENVIRONMENT";
+
+// ------------------------------------------------------ resource 归因键（PA-153）
+//
+// 归因维度只在 resource 层表达（span 属性不动）；键名取自 OTel resource 语义约定。
+
+/// resource 语义约定键：服务版本（缺省 = 本 crate 的 `CARGO_PKG_VERSION`）。
+pub(crate) const RESOURCE_SERVICE_VERSION: &str = "service.version";
+
+/// resource 语义约定键：部署环境（缺省按构建档位推导，见 [`default_deployment_environment`]）。
+pub(crate) const RESOURCE_DEPLOYMENT_ENVIRONMENT: &str = "deployment.environment";
+
+/// debug 构建的默认部署环境取值。
+pub(crate) const ENVIRONMENT_DEVELOPMENT: &str = "development";
+
+/// release 构建的默认部署环境取值。
+pub(crate) const ENVIRONMENT_PRODUCTION: &str = "production";
 
 /// 鉴权 header 名（token 值由 [`ENV_PONY_OTEL_TOKEN`] 注入）。
 pub const AUTH_HEADER_NAME: &str = "authorization";
@@ -426,6 +452,41 @@ fn process_env_pairs() -> Vec<(String, String)> {
         .collect()
 }
 
+/// 默认部署环境（PA-153）：debug 构建 `development`，release 构建 `production`。
+///
+/// 结构性限制（契约 §4 Non-Goals）：仅能按构建档位推导，staging/preprod 不可区分；
+/// 需要精确环境时由 `PONY_OTEL_ENVIRONMENT` 显式覆盖。
+pub(crate) fn default_deployment_environment(debug_assertions: bool) -> &'static str {
+    if debug_assertions {
+        ENVIRONMENT_DEVELOPMENT
+    } else {
+        ENVIRONMENT_PRODUCTION
+    }
+}
+
+/// 解析 resource 归因属性（PA-153）：`service.version` + `deployment.environment`。
+///
+/// 语义：`env` 取值 **trim 后非空**即覆盖默认；空白串等同未设置（回落默认）；
+/// `service.version` 默认取本 crate 的 `CARGO_PKG_VERSION`。
+/// 纯函数（env 由调用方注入）：实现期单测据此覆盖 release 分支与空白串回退。
+pub(crate) fn resolve_resource_attributes(
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let override_value = |name: &str| {
+        env(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let service_version = override_value(ENV_PONY_OTEL_SERVICE_VERSION)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let environment = override_value(ENV_PONY_OTEL_ENVIRONMENT)
+        .unwrap_or_else(|| default_deployment_environment(cfg!(debug_assertions)).to_string());
+    vec![
+        (RESOURCE_SERVICE_VERSION.to_string(), service_version),
+        (RESOURCE_DEPLOYMENT_ENVIRONMENT.to_string(), environment),
+    ]
+}
+
 /// 装配入口：安装全局 trace provider。
 ///
 /// 调用方：宿主启动路径（Tauri 装配点），进程生命周期内**至多一次**。
@@ -479,6 +540,13 @@ pub fn init(config: OtelConfig) -> Result<(), String> {
 
     let resource = opentelemetry_sdk::Resource::builder()
         .with_service_name(config.service_name.clone())
+        // PA-153：resource 补齐归因维度（service.version / deployment.environment）；
+        // 每份 ResourceSpans 各一次，值来自 env 覆盖或构建档位默认。
+        .with_attributes(
+            resolve_resource_attributes(env_non_empty)
+                .into_iter()
+                .map(|(key, value)| KeyValue::new(key, opentelemetry::Value::String(value.into()))),
+        )
         .build();
     // ADVISORY：批量管道显式有界（队列/批量/并发/超时都钉死，不依赖 SDK 缺省与 env 漂移）。
     let batch_config = opentelemetry_sdk::trace::BatchConfigBuilder::default()
@@ -1217,12 +1285,32 @@ impl TurnTraceGuard {
 
 impl Drop for TurnTraceGuard {
     fn drop(&mut self) {
+        // PA-154：先取走本轮错误聚合（取走即清零 ⇒ 跨 turn 不污染）；无活动 turn 时无副作用。
+        let aggregated_error = take_active_turn_error();
+        let phase_failed = self.phase.as_deref() == Some("failed");
         if let Some(phase) = self.phase.take() {
             if let Some(span) = self.span.as_mut() {
                 if phase == "failed" {
                     span.set_status(opentelemetry::trace::Status::error(phase.clone()));
                 }
                 span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_PHASE, phase));
+            }
+        }
+        // PA-154：phase 语义零变更——phase == "failed" 保持既有 `Status::error(phase)`，
+        // **不写** `turn_error` 文案但仍在根 span 标出终态聚合键；
+        // 其余相位由聚合到的子 span 错误承接 `turn_error: <reason>`。
+        if let Some(span) = self.span.as_mut() {
+            match (phase_failed, aggregated_error) {
+                (true, _) => {
+                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, "error"));
+                }
+                (false, Some(reason)) => {
+                    span.set_status(opentelemetry::trace::Status::error(
+                        turn_error_status_message(&reason),
+                    ));
+                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, "error"));
+                }
+                (false, None) => {}
             }
         }
         if let Some(speed) = self.turn_speed.take() {
@@ -1447,6 +1535,8 @@ impl GovernanceDecideGuard {
         ));
         if decision == "block" {
             span.set_status(opentelemetry::trace::Status::error("quota_blocked".to_string()));
+            // PA-154/F6：治理 block 除子 span 置错外，同时向活动 turn 聚合（根 span 承接）。
+            mark_active_turn_error(TURN_ERROR_PREFIX_QUOTA_BLOCKED);
         }
     }
 }
@@ -1469,8 +1559,14 @@ pub fn record_tool_call_span(input: &ToolSpanInput) {
     let mut attributes = to_key_values(tool_span_attributes(input));
     // Wave-6 K4.1：tool.call 同样携带会话归属。
     push_active_session_attribute(&mut attributes);
+    // F5 失败谓词（`failed` / `error` / 带 error 摘要）：同一判定既写子 span 状态，
+    // 也向活动 turn 聚合（PA-154：根 span 承接失败，否则按根状态告警全漏）。
+    let failed = input.status == "failed" || input.status == "error" || input.error.is_some();
+    if failed {
+        mark_active_turn_error(TURN_ERROR_PREFIX_TOOL_FAILED);
+    }
     if let Some(mut span) = start_child_span(SPAN_TOOL_CALL, attributes) {
-        if input.status == "failed" || input.status == "error" || input.error.is_some() {
+        if failed {
             let err_desc = input.error.as_deref().unwrap_or("tool call failed");
             span.set_status(opentelemetry::trace::Status::error(err_desc.to_string()));
         }
@@ -1662,6 +1758,24 @@ struct ActiveTurn {
     exported: bool,
     /// Wave-5 K4：本轮内各 `llm.chat` 已记录成本之和（USD；Turn span Drop 时回填属性）。
     accumulated_cost_usd: f64,
+    /// PA-154：本轮内子 span 错误聚合（`<prefix>: <detail>`，**先记录者胜**）；
+    /// `None` ⇒ 本轮无错误，根 span 不输出 [`ATTR_AGENT_TURN_OUTCOME`]。
+    accumulated_error: Option<String>,
+}
+
+/// turn 根 span 错误聚合前缀：工具执行失败（PA-154，谓词同 F5）。
+const TURN_ERROR_PREFIX_TOOL_FAILED: &str = "tool_failed";
+
+/// turn 根 span 错误聚合前缀：治理决策 block（PA-154，F6）。
+const TURN_ERROR_PREFIX_QUOTA_BLOCKED: &str = "quota_blocked";
+
+/// 根 span 错误承接的 `status.message` 前缀（PA-154）：与子 span 的原始错误文案区分，
+/// 便于根级告警按 `turn_error` 单口径检索。
+const TURN_ERROR_STATUS_PREFIX: &str = "turn_error";
+
+/// 构造根 span 错误承接文案：`turn_error: <reason>`（reason ∈ `tool_failed` / `quota_blocked`）。
+fn turn_error_status_message(reason: &str) -> String {
+    format!("{TURN_ERROR_STATUS_PREFIX}: {reason}")
 }
 
 /// 活动 turn 索引：`tokio::task::Id` → 该任务当前 turn 的登记项。
@@ -1713,6 +1827,7 @@ fn register_active_turn(
         span_context,
         exported,
         accumulated_cost_usd: 0.0,
+        accumulated_error: None,
     };
 
     // A9：优先按 tokio 任务 id 索引；无任务上下文时退回线程本地栈（不丢父 span）。
@@ -1836,6 +1951,54 @@ fn take_active_turn_cost() -> f64 {
             .last()
             .map(|entry| entry.accumulated_cost_usd)
             .unwrap_or(0.0)
+    })
+}
+
+/// 把一次子 span 错误聚合到**当前活动 turn**（PA-154：根 span 错误承接）。
+///
+/// 语义：与成本聚合同源——按 tokio task id 索引，无任务上下文时退回线程本地栈；
+/// 无活动 turn 时 **no-op**（绝不新建登记）；已有记录时保留**先记录者**（`reason`），
+/// 后续错误不覆盖（双错误并存不拼长文案）。
+fn mark_active_turn_error(reason: &str) {
+    let message = reason.to_string();
+    let record = |entry: &mut ActiveTurn| {
+        if entry.accumulated_error.is_none() {
+            entry.accumulated_error = Some(message);
+        }
+    };
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            record(entry);
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            record(entry);
+        }
+    });
+}
+
+/// 取走并**清空**当前活动 turn 的错误聚合（Turn 守卫 Drop 调用）。
+///
+/// 语义：取走即清零 ⇒ 跨 turn 不污染；无活动 turn / 本轮无错时返回 `None`。
+fn take_active_turn_error() -> Option<String> {
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get_mut(&task_id)
+            .and_then(|entry| entry.accumulated_error.take());
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow_mut()
+            .last_mut()
+            .and_then(|entry| entry.accumulated_error.take())
     })
 }
 
@@ -2913,5 +3076,101 @@ mod tests {
         });
 
         (port, handle)
+    }
+
+    // ------------------------------------------------ PA-153 · resource 归因（实现期单测）
+
+    /// PA-153：默认值 = crate 版本 + debug 构建 `development`（集成测试只覆盖 debug 档）。
+    #[test]
+    fn resource_attributes_default_to_crate_version_and_build_environment() {
+        let attrs = resolve_resource_attributes(|_| None);
+        assert_eq!(attrs.len(), 2, "resource 归因必须恰好两键：{attrs:?}");
+        assert_eq!(attrs[0].0, "service.version");
+        assert_eq!(attrs[0].1, env!("CARGO_PKG_VERSION"));
+        assert_eq!(attrs[1].0, "deployment.environment");
+        assert_eq!(
+            attrs[1].1,
+            default_deployment_environment(cfg!(debug_assertions))
+        );
+    }
+
+    /// PA-153：两个 env（trim 后非空）各自覆盖默认，且互不影响。
+    #[test]
+    fn resource_attributes_env_overrides_are_independent() {
+        let attrs = resolve_resource_attributes(|name| match name {
+            "PONY_OTEL_SERVICE_VERSION" => Some("1.2.3-custom".to_string()),
+            "PONY_OTEL_ENVIRONMENT" => Some("staging".to_string()),
+            _ => None,
+        });
+        assert_eq!(attrs[0].1, "1.2.3-custom");
+        assert_eq!(attrs[1].1, "staging");
+    }
+
+    /// PA-153：空白串（含仅 trim 后为空）等同未设置 ⇒ 回落默认；非空值 trim 后生效。
+    #[test]
+    fn resource_attributes_blank_env_falls_back_to_defaults() {
+        for blank in ["", "   ", "\t\n "] {
+            let attrs = resolve_resource_attributes(|name| match name {
+                "PONY_OTEL_SERVICE_VERSION" | "PONY_OTEL_ENVIRONMENT" => Some(blank.to_string()),
+                _ => None,
+            });
+            assert_eq!(attrs[0].1, env!("CARGO_PKG_VERSION"), "空白串 `{blank:?}` 必须回落默认版本");
+            assert_eq!(
+                attrs[1].1,
+                default_deployment_environment(cfg!(debug_assertions)),
+                "空白串 `{blank:?}` 必须回落默认环境"
+            );
+        }
+        let padded = resolve_resource_attributes(|name| match name {
+            "PONY_OTEL_SERVICE_VERSION" => Some("  9.9.9  ".to_string()),
+            _ => None,
+        });
+        assert_eq!(padded[0].1, "9.9.9", "env 取值必须 trim 后生效");
+    }
+
+    /// PA-153：release 分支（契约 §1 第 3 行仅允许实现期单测覆盖）。
+    #[test]
+    fn default_deployment_environment_switches_on_build_profile() {
+        assert_eq!(default_deployment_environment(true), "development");
+        assert_eq!(default_deployment_environment(false), "production");
+    }
+
+    // -------------------------------------------- PA-154 · turn 错误聚合（实现期单测）
+
+    /// PA-154：聚合先记录者胜、取走即清零；无活动 turn 时 mark 为 no-op。
+    #[test]
+    fn turn_error_aggregation_first_wins_and_take_clears() {
+        let _guard = test_lock();
+        // 无活动 turn：mark / take 都必须是安全 no-op。
+        mark_active_turn_error(TURN_ERROR_PREFIX_TOOL_FAILED);
+        assert_eq!(take_active_turn_error(), None, "无活动 turn 时不得产生聚合");
+
+        let slot = register_active_turn("turn-err", "sess-err", span_context(0x2000), true);
+        mark_active_turn_error(TURN_ERROR_PREFIX_TOOL_FAILED);
+        mark_active_turn_error(TURN_ERROR_PREFIX_QUOTA_BLOCKED);
+        assert_eq!(
+            take_active_turn_error().as_deref(),
+            Some("tool_failed"),
+            "双错误并存时必须保留先记录者"
+        );
+        assert_eq!(take_active_turn_error(), None, "取走后必须清零（跨 turn 不污染）");
+        unregister_active_turn(slot);
+    }
+
+    /// PA-154：根 span 文案必须是 `turn_error: <reason>`（与子 span 原始文案可区分）。
+    #[test]
+    fn turn_error_status_message_uses_turn_error_prefix() {
+        assert_eq!(
+            turn_error_status_message(TURN_ERROR_PREFIX_TOOL_FAILED),
+            "turn_error: tool_failed"
+        );
+        assert_eq!(
+            turn_error_status_message(TURN_ERROR_PREFIX_QUOTA_BLOCKED),
+            "turn_error: quota_blocked"
+        );
+        // 值契约：`agent.turn.outcome` 恒定取值 `error`（键名/值均须与冻结字面量一致）。
+        assert_eq!(ATTR_AGENT_TURN_OUTCOME, "agent.turn.outcome");
+        assert_eq!(TURN_ERROR_PREFIX_TOOL_FAILED, "tool_failed");
+        assert_eq!(TURN_ERROR_PREFIX_QUOTA_BLOCKED, "quota_blocked");
     }
 }

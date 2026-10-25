@@ -132,6 +132,37 @@
         "preview": "killed",
         "worktree": "clean"
       }
+    },
+    {
+      "wave": 45,
+      "theme": "observability semantics convergence (PA-153 resource attribution / PA-154 turn error aggregation / PA-155 local-cache timeout)",
+      "baseline_commit": "f233a96",
+      "red_commit": "59b53f2",
+      "branches": {
+        "task-rust": {
+          "owner": "executor-rust",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/otel/mod.rs"
+          ],
+          "status": "completed"
+        },
+        "task-ts": {
+          "owner": "executor-ts",
+          "write_scopes": [
+            "src/stores/runtime.ts"
+          ],
+          "status": "completed"
+        }
+      },
+      "gates": {
+        "regression_baseline": "rust lib 1149 passed/1 known fail; frontend 1034 passed/10 skipped",
+        "gate1": "plan-A FAIL(1 BLOCKING: zero-discrimination quota_blocked) adopted -> contract evolution turn_error prefix; plan-B PASS; final recheck pending",
+        "red_phase": "Rust 4 failed + 1 env failed (assertion, 0 compile); TS 2 failed; stash-based re-anchor",
+        "green": "Rust integration 7/7; lib otel 25/25; TS 2/2; full vitest 1036; build 0",
+        "full_rust": "1154 passed/2 failed (1 known baseline + 1 pre-existing ponysentry flake 2/20 module-level); single-thread 1155/1 known",
+        "l3": "A PASS(4 adv); B PASS(4 adv); L3-P PASS(2 adv)",
+        "observability": "check-declaration EXIT 0; audit-diff EXIT 1 (WARN zero enforcement points)"
+      }
     }
   ],
   "counters": {}

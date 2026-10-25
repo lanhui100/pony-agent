@@ -29,3 +29,28 @@
 3. **[P1] TEST-DEFECT 豁免通道**：冻结测试被发现自相矛盾时，当前流程要求“改测试 + 重锚 + 重跑”，建议在契约矩阵增加 `test_defect_waiver` 段（含反证命令与 Lead 裁决），减少往返。
 4. **[P1] 观测驱动的 backlog 生成**：本轮审计产出 9 条优化点（root span 错误承接、探针隔离、issue 治理、usage 属性等），建议把“审计报告 → backlog 卡片”作为 wave 收口的固定动作，让观测数据真正进入迭代闭环。
 5. **[P2] 审计工具口径修正回写 skill**：`audit-project.sh` 对 desktop 项目的空 service/project 与 `limit` 当计数的缺陷，应作为 `observability-onboarding` 的 selftest fixture 固化（否则每轮都要人工校正）。
+
+---
+
+# Wave-45 增补复盘（可观测性语义收敛）
+
+## 通信拓扑与信噪比 (Topology & Noise)
+- 拓扑：Lead + Protocol-45 + Test-45 + Executor-Rust + Executor-TS（5/8）；计划审查 2 路、实现审查 L3 A/B + L3-P 共 3 路，全部 Subagent。
+- 有效点：一次把“审计发现 → 契约 → 红相 → 实现 → 证据”跑通；Protocol 主动指出“测试 id 映射缺失”与“`quota_blocked` 已在 HEAD 子 span 写出”的风险，避免了零鉴别力断言。
+- 噪声：Rust 首次冷编译 target-test 约 5 分钟；三个审查子代理并行读取大文件导致等待 10 分钟；建议冻结“审查输入包”（diff + 契约 + 2 个测试文件）而非让审查员自行 grep。
+
+## 门禁穿透与误杀率 (Gate Penetration / False Negatives & Positives)
+- 抓到真问题：① 计划审查 A 判 BLOCKING——`quota_blocked` 子串在 HEAD 已存在，PA154-T2 零鉴别力 → 契约演进为唯一前缀 `turn_error: `；② 全量 lib 出现“新增失败”——经模块级 20 次复跑证明是既有 ponysentry 共享全局队列 flake（2/20），非本波引入，已登记 backlog；③ L3-P 指出 `take_active_turn_error` 缺归属校验（slot=None 时可能清空同 task 另一 turn），登记 advisory。
+- 误杀：0 起 NFR-DEGRADED；两路审查共 13 条 ADVISORY，采纳 3 条（声明登记、env 文档、flake 收据），其余明确登记 Non-Goal。
+- 红相：Rust 4+1 条断言红、0 编译失败；TS 2/2 红；重锚以 `git stash` 实现态复验后提交，红相纪律未被“实现已落地”破坏。
+
+## 分工契约与隔离有效性 (Contract Isolation)
+- 写域：Rust Executor 仅 `otel/mod.rs`（+261），TS Executor 仅 `runtime.ts`（+8），Test Agent 仅 tests，Lead 仅 docs/.dev-team；`git diff --name-only` 与声明完全一致。
+- 契约演进 2 次（turn_error 前缀、outcome 值），均由 Protocol 落盘、Test 迁移、Lead 重锚，未出现实现方改测试。
+- 代价：Rust 集成测试的全局 OTel init 与 sink 预算带来一次不可复现 flake（1 次/9 次），提示“并发测试共享全局态”应默认串行或每测试独立进程。
+
+## 元协议迭代建议 (Self-Evolving Protocol)
+1. **[P0] 冻结测试的 flake 检测入闸**：对涉及全局态（OTel init、sink、LAST_ENQUEUED）的用例，加入“连跑 N 次”稳定性门禁，N=5；不达标不得红相锚定。
+2. **[P0] 既有 flake 必须与本次回归分离**：全量失败清单需与基线逐项对照并附“模块级复现率”，否则会把既有 flake 误判为 IMPL-DEFECT（本轮已按此口径执行）。
+3. **[P1] 断言唯一性优先于语义描述**：涉及父/子 span 同名错误时，契约必须冻结“只可能出现在目标 span”的唯一字面量（本轮 `turn_error: `），否则 contains 断言零鉴别力。
+4. **[P1] 审查输入包标准化**：`[diff, 契约, 测试文件清单, 运行命令]` 一次下发，减少审查员自行探索（本轮 3 路审查共耗时 ~20 分钟）。

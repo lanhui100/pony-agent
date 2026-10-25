@@ -1,0 +1,38 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "src/stores/runtime.ts",
+    "docs/observability.yaml"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1778,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1776,1779p' crates/pony-agent-core/src/agent/otel/mod.rs && grep -n 'root_status_message_template' .dev-team/nfr-baseline-wave45.json",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 481,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'PONY_OTEL_SERVICE_VERSION' src-tauri/ | wc -l && grep -m1 '^version' crates/pony-agent-core/Cargo.toml && python3 -c \"import json;d=json.load(open('.version.json'));print('tauri',d['tauri'],'core',d['core'])\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 477,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '472,490p' crates/pony-agent-core/src/agent/otel/mod.rs && grep -n 'pub fn sanitize' -A 6 crates/pony-agent-core/src/agent/ponysentry/sanitizer.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 12,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -c 'PONY_OTEL_SERVICE_VERSION\\|PONY_OTEL_ENVIRONMENT\\|deployment.environment\\|service.version' docs/observability.yaml",
+      "severity": "ADVISORY"
+    }
+  ]
+}

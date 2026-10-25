@@ -1,0 +1,54 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave45.md",
+    "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+    "tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "src/stores/runtime.ts"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "line": 421,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git show HEAD:crates/pony-agent-core/src/agent/otel/mod.rs | grep -c 'Status::error(\"quota_blocked\"'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "line": 427,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -c '\"error\"' crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "line": 381,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'matches(\"tool_failed\").count()' crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "line": 337,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "grep -c 'tokio' crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "line": 236,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'assert_eq!(\"service.name\", \"service.name\")' crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts",
+      "line": 346,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'expect(store.phase)' tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts",
+      "severity": "ADVISORY"
+    }
+  ]
+}

@@ -2675,7 +2675,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         switch (strategy.kind) {
           case "local-cache": {
             const cachedRuntimeView = buildRuntimeViewFromPersistedState(preferredSessionId, strategy.persistedState);
-            const hostRuntimeView = await this.loadSessionRuntimeViewState(preferredSessionId).catch((error) => {
+            // PA-155：local-cache 的宿主刷新是有界增强项（同 :2696 语义），
+            // 超时/失败一律降级为 null ⇒ mergeRuntimeViews 原样保留缓存视图，不得冒泡成 sessionError。
+            const hostRuntimeView = await withTimeout(
+              this.loadSessionRuntimeViewState(preferredSessionId),
+              HYDRATION_TIMEOUT_MS,
+              "加载对话"
+            ).catch((error) => {
               debugLog("session:init:host:error", { sessionId: preferredSessionId, error: String(error) });
               return null;
             });
