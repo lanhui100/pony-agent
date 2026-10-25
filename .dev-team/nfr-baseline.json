@@ -46,6 +46,8 @@
       "settings",
       "env",
       "default"
-    ]
+    ],
+    "cost_precision_decimals": 6,
+    "cost_budget_semantics": "soft_warn"
   }
 }
