@@ -190,9 +190,14 @@ async function advanceAnimationFrames(count = 3): Promise<void> {
 
 type RectProbe = { total: number };
 
-function installRectProbe(): RectProbe {
+/**
+ * 布局读数探针：只 spy `Element.prototype.getBoundingClientRect`，并返回**精确还原句柄**。
+ * 注意（Gate-1 审查 A-1）：这里绝不能用 `vi.restoreAllMocks()`——它会连带还原 beforeEach 里
+ * hoisted 的 `@/lib/tauri` mock 实现，导致第 2 次测量处于不同 bridge 态，"同 fixture 差分"失效。
+ */
+function installRectProbe(): { probe: RectProbe; restore: () => void } {
   const probe: RectProbe = { total: 0 };
-  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function () {
+  const spy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function () {
     probe.total += 1;
     return {
       top: 0,
@@ -208,7 +213,7 @@ function installRectProbe(): RectProbe {
       }
     } as DOMRect;
   });
-  return probe;
+  return { probe, restore: () => spy.mockRestore() };
 }
 
 function scrollDebugPayloads(): Array<Record<string, unknown>> {
@@ -277,7 +282,8 @@ async function measureSequence(options: SwitchOptions): Promise<{
   clearScrollDebugBuffer();
   resetConsoleInfoCalls();
 
-  const rectProbe = installRectProbe();
+  const rectProbeHandle = installRectProbe();
+  const rectProbe = rectProbeHandle.probe;
   const wrapper = mountWorkspace();
   await nextTick();
   await advanceAnimationFrames(3);
@@ -295,10 +301,9 @@ async function measureSequence(options: SwitchOptions): Promise<{
   };
 
   wrapper.unmount();
-  vi.restoreAllMocks();
-  vi.spyOn(console, "info").mockImplementation(() => {});
-  vi.spyOn(console, "warn").mockImplementation(() => {});
-  vi.spyOn(console, "error").mockImplementation(() => {});
+  // 只还原本函数新增的布局读数 spy；console / tauri mock 保持 beforeEach 的同一实现，
+  // 否则第二次测量会换到不同的 bridge 态（差分污染）。
+  rectProbeHandle.restore();
   return result;
 }
 
@@ -326,7 +331,7 @@ describe("PA-117 · [workspace-scroll] 调试输出开关门控", () => {
     latestViewportEl = null;
   });
 
-  it("PA117-T1: 默认关闭（DEV=false + 无开关）时零日志、零缓冲写入，且布局读数严格少于启用态", async () => {
+  it("PA117-T1: 默认关闭（DEV=false + 无开关）时零日志、零缓冲写入、零布局读数（启用态为有效参照）", async () => {
     // Arrange/Act：同 fixture、同序列，两态各跑一遍。
     const offState = await measureSequence({ dev: false, storage: null });
     const onState = await measureSequence({ dev: false, storage: "true" });
@@ -334,18 +339,24 @@ describe("PA-117 · [workspace-scroll] 调试输出开关门控", () => {
     // Assert 1：关闭态 console.info 必须为 0。
     expect(offState.logs).toBe(0);
 
-    // Assert 2：关闭态不得写 debug 缓冲（`__ponyScrollDebugBuffer` 不增长 / latest 未定义）。
-    // 契约措辞为「不增长」，故只断言长度与 latest，不锁死数组是否被创建。
+    // Assert 2：关闭态不得写 debug 缓冲（`__ponyScrollDebugLatest` 未定义 + 缓冲未增长）。
+    // 契约措辞为「不增长」，故断言长度与 latest，不锁死数组对象是否被创建。
     expect(offState.buffer.length).toBe(0);
     expect(offState.buffer.latest).toBeUndefined();
+    expect(readScrollDebugBuffer().latest).toBeUndefined();
 
-    // Assert 3：关闭态该序列的布局读数必须严格小于启用态（差 ≥1）。
-    expect(offState.rectTotal).toBeLessThan(onState.rectTotal);
+    // Assert 3：关闭态该序列的布局读数必须为 0（契约 §3.5 性能底线），启用态必须 >0。
+    expect(offState.rectTotal).toBe(0);
+    expect(onState.rectTotal).toBeGreaterThan(0);
     expect(onState.rectTotal - offState.rectTotal).toBeGreaterThanOrEqual(1);
 
-    // Assert 4：启用态是有效参照（否则差分无意义）——必须确有输出且确有测量。
+    // Assert 4：启用态参照必须真实有效（防"空 ref 退化成假红"）——
+    // viewport 已解析为真实元素、composer/anchor 度量已产出，而不是全 null 的空壳 payload。
     expect(onState.logs).toBeGreaterThan(0);
-    expect(onState.rectTotal).toBeGreaterThan(0);
+    const onPayload = onState.payloads[0]!;
+    expect(onPayload.viewportResolved).toBe(true);
+    expect(typeof onPayload.composerTop).toBe("number");
+    expect(typeof onPayload.distanceToBottom).toBe("number");
   });
 
   it("PA117-T2 (L2-AT 开关矩阵): localStorage true/false 与 URL ?debug=1|scroll 必须按契约优先级生效", async () => {
@@ -359,6 +370,10 @@ describe("PA-117 · [workspace-scroll] 调试输出开关门控", () => {
     expect(firstPayload).toHaveProperty("distanceToBottom");
     expect(firstPayload).toHaveProperty("viewportResolved");
     expect(firstPayload).toHaveProperty("composerTop");
+    // 参照有效性：viewport 必须解析为真实元素，度量必须是数值而非 null（空 ref 会让断言失真）。
+    expect(firstPayload.viewportResolved).toBe(true);
+    expect(typeof firstPayload.composerTop).toBe("number");
+    expect(typeof firstPayload.distanceToBottom).toBe("number");
 
     // ② localStorage "false"（DEV=true）⇒ kill switch 优先于 DEV 兜底，必须关闭。
     const storageOff = await measureSequence({ dev: true, storage: "false" });
@@ -382,7 +397,7 @@ describe("PA-117 · [workspace-scroll] 调试输出开关门控", () => {
     clearScrollDebugBuffer();
     resetConsoleInfoCalls();
 
-    const rectProbe = installRectProbe();
+    const { probe: rectProbe } = installRectProbe();
     const wrapper = mountWorkspace();
     await nextTick();
     await advanceAnimationFrames(3);
@@ -399,11 +414,13 @@ describe("PA-117 · [workspace-scroll] 调试输出开关门控", () => {
     // Act 2：同一实例内打开开关（localStorage "true"），再次触发。
     window.localStorage.setItem(WORKSPACE_SCROLL_DEBUG_KEY, "true");
     resetConsoleInfoCalls();
+    rectProbe.total = 0;
     triggerScrollDebugSequence();
     await nextTick();
 
-    // Assert 2：必须立即恢复输出（不依赖重新挂载）。
+    // Assert 2：必须立即恢复输出（不依赖重新挂载），且启用态参照真实有效（>0 输出 + >0 测量）。
     expect(scrollDebugPayloads().length).toBeGreaterThan(0);
+    expect(rectProbe.total).toBeGreaterThan(0);
 
     // Act 3：同一实例内关闭（显式 "false"），再次触发。
     window.localStorage.setItem(WORKSPACE_SCROLL_DEBUG_KEY, "false");

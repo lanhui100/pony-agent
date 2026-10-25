@@ -14,7 +14,9 @@
  *     同一用例内追加防假修复正控：非组合态 Ctrl+Z 仍撤销 1 次、非组合态 Enter 仍提交 1 次。
  *   PA135-T2（L2-AT 对抗）：① 组合态 Ctrl+Shift+Z（带 shift 修饰）⇒ 撤销 **0** 次（修饰键约束保持）；
  *     ② 旧式 IME 标记 `keyCode:229` + Ctrl+Z ⇒ 撤销 **1** 次（与 isComposing 等价，修复前必红）；
- *     ③ 组合态 Enter 与 Shift+Enter ⇒ `submitTurn` **0** 次、`checkoutHistoryNode` 不增加。
+ *     ③ 组合态 Enter / Shift+Enter / **`keyCode:229` Enter / `keyCode:229` Shift+Enter**
+ *        ⇒ `submitTurn` **0** 次、`checkoutHistoryNode` 不增加（Gate-1 审查项：
+ *        防止把守卫改回 isComposing-only 的 mutant 全绿——旧式 IME 只给 keyCode=229）。
  *   PA135-T3（L2-AT 对抗）：textarea 处于 `document.activeElement`（真实焦点）时，组合态 Cmd+Z（metaKey）
  *     ⇒ 撤销**恰好 1 次**且 `defaultPrevented === true`（不得经 `handleWindowKeydown` 双触发）。
  *
@@ -367,13 +369,19 @@ describe("PA-135 · 组合态 Ctrl/Cmd+Z 撤销可达性", () => {
     expect(checkoutSpy).toHaveBeenCalledTimes(1);
     expect(legacyImeUndo.defaultPrevented).toBe(true);
 
-    // Act 3 / Assert 3：组合态 Enter 与 Shift+Enter 不得发送。
+    // Act 3 / Assert 3：组合态 Enter / Shift+Enter / keyCode=229 Enter / keyCode=229 Shift+Enter
+    // 均不得发送（`keyCode:229` 覆盖旧式 IME 只给 keyCode 的路径，防 isComposing-only mutant）。
     const checkoutCallsBeforeEnter = checkoutSpy.mock.calls.length;
     submitSpy.mockClear();
     await dispatchComposerKeydown(wrapper, keydownEvent({ key: "Enter", isComposing: true }));
     await dispatchComposerKeydown(
       wrapper,
       keydownEvent({ key: "Enter", shiftKey: true, isComposing: true })
+    );
+    await dispatchComposerKeydown(wrapper, keydownEvent({ key: "Enter", keyCode: 229 }));
+    await dispatchComposerKeydown(
+      wrapper,
+      keydownEvent({ key: "Enter", keyCode: 229, shiftKey: true })
     );
 
     expect(submitSpy).not.toHaveBeenCalled();

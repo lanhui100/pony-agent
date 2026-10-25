@@ -19,10 +19,15 @@
  *     - 恢复：随后把宿主 mock 换成正常返回，再次 `initializeSessions()` ⇒ 正常路径不回归
  *       （sessionId/消息内容/`sessionError===null`/`sessionOperation===null`/status≠error，
  *        且 `load_session_runtime_view` 在恢复调用中恰好 1 次）。
- *   PA115-T2（L2-AT 对抗，契约 PA115-T2 的迟到写分支）
+ *   PA115-T2（L2-AT 对抗，契约 PA115-T2 的迟到写分支 + Gate-1 审查项「草稿保留」）
  *     - 宿主读在 baseline 超时 + 5s 后才 resolve → 初始化仍必须在有界时间内收敛；
+ *     - **草稿保留**：3500ms watchdog 触发（`sessionOperation` 解锁 = 输入区可用）后用户输入的草稿，
+ *       在 15000ms 超时整包快照回滚时**不得被静默吞掉**（快照含 `draftMessage`，
+ *       直接 `restoreSessionRuntimeSnapshot` 会回滚掉它）；
  *     - 迟到 resolve **不得**改写 `sessionId` / `messages` / `phase`（无迟到写）；
  *     - 不得对同一逻辑读做重试风暴（`load_session_runtime_view` 仅 1 次）。
+ *
+ * 另含**常量漂移锁**：`expect(HYDRATION_TIMEOUT_MS).toBe(15000)`——超时基线被改动即红。
  *
  * 确定性：`vi.useFakeTimers()` + `vi.advanceTimersByTimeAsync()`（同 `tests/runtime-store.spec.ts:2316` 惯例），
  * 全程无真实 sleep、无壁钟断言。
@@ -63,6 +68,8 @@ const LATE_RESOLVE_AT_MS = HYDRATION_TIMEOUT_MS + 5_000;
 const HOST_USER_TEXT = "宿主历史：正常加载的问题";
 const HOST_ASSISTANT_TEXT = "宿主历史：正常加载的回答";
 const LATE_USER_TEXT = "迟到历史：不得被回填的问题";
+/** 3500ms watchdog 解锁输入后、15000ms 超时降级前用户输入的草稿（Gate-1 审查项）。 */
+const DRAFT_TYPED_WHILE_WAITING = "等待期间输入";
 
 // ── 夹具（形状对齐 tests/runtime-store.spec.ts 已验证的 host view）─────────
 
@@ -233,6 +240,8 @@ describe("PA-115 · initializeSessions host-read 有界超时", () => {
   });
 
   it("PA115-T1: 宿主读永不 settle → 有界 resolve + 可见失败 + 状态复位，随后正常宿主读可恢复", async () => {
+    // Arrange：超时基线常量漂移锁（契约 A3 / NFR hydration_read_timeout_ms=15000）。
+    expect(HYDRATION_TIMEOUT_MS).toBe(15000);
     // Arrange：宿主 bridge 正常，但 load_session_runtime_view 永久挂起（IPC 静默丢包）。
     const hangCounter = installHostMocks("hang");
     const store = useRuntimeStore();
@@ -281,16 +290,26 @@ describe("PA-115 · initializeSessions host-read 有界超时", () => {
   });
 
   it("PA115-T2 (L2-AT 对抗): 宿主读在 baseline 超时 + 5s 后才 resolve → 仍须有界收敛，且迟到结果不得改写状态", async () => {
+    // Arrange：超时基线常量漂移锁（契约 A3 / NFR hydration_read_timeout_ms=15000）。
+    expect(HYDRATION_TIMEOUT_MS).toBe(15000);
     // Arrange：宿主读永不「及时」返回，只在 baseline 超时之后 +5s 才 resolve。
     const counter = installHostMocks("resolve-late");
     const store = useRuntimeStore();
     const phaseBefore = store.phase;
     const sessionIdBefore = store.sessionId;
 
-    // Act 1：推进到结算截止期（此时迟到结果尚未到达）。
+    // Act 1：先推进到 3500ms watchdog 触发点（`sessionOperation` 被解锁 ⇒ 输入区可用），
+    // 模拟用户在等待期间输入草稿；再推进到结算截止期（此时迟到结果尚未到达）。
     const settlement = trackSettlement(store.initializeSessions());
     await flushMicrotasks();
-    const settledWithinDeadline = await advanceTo(settlement, SETTLE_DEADLINE_MS);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flushMicrotasks();
+    expect(store.sessionOperation).toBeNull();
+    store.draftMessage = DRAFT_TYPED_WHILE_WAITING;
+    const settledWithinDeadline = await advanceTo(
+      settlement,
+      SETTLE_DEADLINE_MS - 4_000
+    );
 
     // Assert 1：必须在迟到结果到达之前收敛（截止期严格早于迟到时刻）。
     expect(SETTLE_DEADLINE_MS).toBeLessThan(LATE_RESOLVE_AT_MS);
@@ -320,7 +339,12 @@ describe("PA-115 · initializeSessions host-read 有界超时", () => {
     expect(store.messages.map((message) => message.content)).toEqual(snapshotBeforeLate.messageContents);
     expect(store.messages.map((message) => message.content)).not.toContain(LATE_USER_TEXT);
 
-    // Assert 4：不得因迟到结果触发重试风暴；初始快照语义保持。
+    // Assert 4：**草稿保留**——超时降级不得用整包快照回滚吞掉用户在等待期间输入的草稿，
+    // 且失败仍必须可见（两者同时成立）。
+    expect(store.draftMessage).toBe(DRAFT_TYPED_WHILE_WAITING);
+    expect(store.sessionError).toBeTruthy();
+
+    // Assert 5：不得因迟到结果触发重试风暴；初始快照语义保持。
     expect(counter.hostReadCalls).toBe(1);
     expect(store.phase).toBe(phaseBefore);
     expect(store.sessionId).toBe(sessionIdBefore);
