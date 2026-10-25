@@ -493,6 +493,13 @@ pub fn emit_stream_failed(
     error: String,
     session_id: Option<String>,
 ) -> TurnEventEnvelope {
+    // Wave-5 P0：CLI/TUI 形态的 turn 失败上报（开关默认关；桌面端由前端 `TurnExecutionFailed`
+    // 上报，故用进程级开关隔离，避免重复）。旁路上报：内部吞错，绝不改变轮次返回。
+    crate::agent::ponysentry::capture_turn_failure(
+        &turn_id,
+        &error,
+        provider_meta.map(|meta| meta.model.as_str()),
+    );
     emit_event(
         sink,
         "turn:failed",
@@ -502,6 +509,8 @@ pub fn emit_stream_failed(
             turn_id,
             // Wave-4.1 B1：导出态 trace_id（门禁关闭/未采样 ⇒ None，绝不回落本地 id）。
             trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+            cost_usd: None,
             kind: "failed".to_string(),
             event_type: None,
             event_version: None,
@@ -561,6 +570,8 @@ pub fn emit_stream_cancelled(
             turn_id,
             // Wave-4.1 B1：导出态 trace_id（门禁关闭/未采样 ⇒ None，绝不回落本地 id）。
             trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+            cost_usd: None,
             kind: "cancelled".to_string(),
             event_type: None,
             event_version: None,
@@ -689,6 +700,30 @@ pub fn emit_stream_event_with_step(
     step: Option<u32>,
 ) -> TurnEventEnvelope {
     let is_delta_event = name == "turn:delta";
+    // Wave-5 K3：单轮成本超预算 ⇒ 一条 warn 日志（软告警，**绝不**阻断请求；
+    // 会话级累计与 UI 告警由前端 store 负责，core 不建第二份会话状态）。
+    // 只在终态事件上判定，避免同一轮多事件重复告警。
+    if name == "turn:completed" {
+        let cost_usd = turn_event_cost_usd(
+            provider_meta,
+            input_tokens,
+            output_tokens,
+            cache_hit_input_tokens,
+        );
+        if let Some(cost) = cost_usd {
+            let budget = crate::agent::cost::budget_usd();
+            if crate::agent::cost::is_budget_exceeded(cost, budget) {
+                crate::agent::otel::log::log_json(
+                    "warn",
+                    &format!(
+                        "turn 成本超出预算：turn_id={turn_id} cost_usd={cost:.6} budget_usd={:.6}",
+                        budget.unwrap_or(0.0)
+                    ),
+                    None,
+                );
+            }
+        }
+    }
     emit_event(
         sink,
         name,
@@ -698,6 +733,13 @@ pub fn emit_stream_event_with_step(
             turn_id,
             // Wave-4.1 B1：所有活链路事件都携带导出态 trace_id（门禁关闭 ⇒ None）。
             trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：本轮成本（未知模型 / 缺 usage ⇒ None，键缺席）。
+            cost_usd: turn_event_cost_usd(
+                provider_meta,
+                input_tokens,
+                output_tokens,
+                cache_hit_input_tokens,
+            ),
             kind: kind.to_string(),
             event_type: None,
             event_version: None,
@@ -1482,6 +1524,7 @@ mod tests {
             session_id: Some("s1".to_string()),
             turn_id: turn_id.to_string(),
             trace_id: None,
+            cost_usd: None,
             kind: kind.to_string(),
             event_type: None,
             event_version: None,
@@ -2286,6 +2329,42 @@ fn calculate_call_generation_speed(
     }
 }
 
+/// Wave-5 K4：把单次调用成本写入 `llm.chat` span。
+///
+/// 门禁关闭（[`crate::agent::otel::is_span_capture_enabled`] = false）时**零计算短路**：
+/// 不查价格表、不做浮点运算、不附加属性（契约 K4 边界）。
+fn record_llm_span_cost(
+    llm_span: &mut crate::agent::otel::LlmSpanGuard,
+    model: &str,
+    usage: &TokenUsage,
+) {
+    if !crate::agent::otel::is_span_capture_enabled() {
+        return;
+    }
+    let cost = crate::agent::cost::estimate_cost(
+        model,
+        usage.input_tokens.unwrap_or(0),
+        usage.output_tokens.unwrap_or(0),
+        usage.cache_hit_input_tokens,
+    )
+    .map(|estimate| estimate.total_cost_usd);
+    llm_span.record_cost(cost);
+}
+
+/// Wave-5 K2：turn 事件成本（未知模型或缺真实 usage ⇒ `None`）。
+fn turn_event_cost_usd(
+    provider_meta: Option<&ProviderEventMeta>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+) -> Option<f64> {
+    let model = provider_meta.map(|meta| meta.model.as_str())?;
+    let input = input_tokens?;
+    let output = output_tokens?;
+    crate::agent::cost::estimate_cost(model, input, output, cache_hit_input_tokens)
+        .map(|estimate| estimate.total_cost_usd)
+}
+
 pub fn provider_decision<P: ProviderClient>(
     provider: &P,
     request: &ProviderRequest,
@@ -2305,6 +2384,7 @@ pub fn provider_decision<P: ProviderClient>(
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
             llm_span.record_speed_and_context(speed, None);
+            record_llm_span_cost(&mut llm_span, request.model.as_str(), usage);
         }
     }
     result
@@ -2341,6 +2421,7 @@ where
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
             llm_span.record_speed_and_context(speed, None);
+            record_llm_span_cost(&mut llm_span, request.model.as_str(), usage);
         }
     }
     result
@@ -2376,6 +2457,7 @@ pub fn provider_followup<P: ProviderClient>(
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
             llm_span.record_speed_and_context(speed, None);
+            record_llm_span_cost(&mut llm_span, request.model.as_str(), usage);
         }
     }
     result
@@ -2424,6 +2506,7 @@ where
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
             llm_span.record_speed_and_context(speed, None);
+            record_llm_span_cost(&mut llm_span, request.model.as_str(), usage);
         }
     }
     result

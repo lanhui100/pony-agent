@@ -17,6 +17,7 @@ type SettingsState = {
   saving: boolean;
   error: string | null;
   notice: string | null;
+  costBudgetUsd?: number | null;
 };
 
 export const useSettingsStore = defineStore("settings", {
@@ -26,9 +27,15 @@ export const useSettingsStore = defineStore("settings", {
     saving: false,
     error: null,
     notice: null,
+    costBudgetUsd: null,
   }),
   getters: {
     workspaceMode: (state) => state.settings.workspaceMode,
+    effectiveCostBudgetUsd: (state): number | null => {
+      if (typeof state.costBudgetUsd === "number") return state.costBudgetUsd;
+      if (typeof state.settings.costBudgetUsd === "number") return state.settings.costBudgetUsd;
+      return null;
+    },
   },
   actions: {
     async loadSettings() {
@@ -113,5 +120,6 @@ function normalizeAppSettings(settings?: Partial<AppSettings> | null): AppSettin
     otelToken: settings?.otelToken ?? undefined,
     otelServiceName: settings?.otelServiceName ?? undefined,
     otelSamplingRatio: typeof settings?.otelSamplingRatio === "number" ? settings.otelSamplingRatio : undefined,
+    costBudgetUsd: typeof settings?.costBudgetUsd === "number" ? settings.costBudgetUsd : undefined,
   } as AppSettings;
 }

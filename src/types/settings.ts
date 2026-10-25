@@ -12,4 +12,6 @@ export type AppSettings = {
   otelToken?: string;
   otelServiceName?: string;
   otelSamplingRatio?: number;
+  /** Wave-5 K3：会话成本预算上限 (USD)。<= 0 或未设置时视为无预算限制。 */
+  costBudgetUsd?: number | null;
 };

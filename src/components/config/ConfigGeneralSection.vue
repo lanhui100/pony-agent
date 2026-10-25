@@ -175,6 +175,21 @@ function handleOtelSamplingRatioChange(value: string) {
   }, 500);
 }
 
+function handleCostBudgetChange(value: string) {
+  const num = parseFloat(value);
+  if (!isNaN(num) && num > 0) {
+    settings.value.costBudgetUsd = num;
+  } else if (!value.trim() || (!isNaN(num) && num <= 0)) {
+    settings.value.costBudgetUsd = null;
+  }
+  if (otelDebounceTimer) {
+    clearTimeout(otelDebounceTimer);
+  }
+  otelDebounceTimer = setTimeout(() => {
+    void settingsStore.saveSettings();
+  }, 500);
+}
+
 function flushOtelSettings() {
   if (otelDebounceTimer) {
     clearTimeout(otelDebounceTimer);
@@ -500,6 +515,25 @@ function flushOtelSettings() {
                   @blur="flushOtelSettings"
                 />
               </div>
+            </div>
+          </div>
+
+          <!-- Wave-5 K3：成本预算配置卡片（软告警不阻断） -->
+          <div class="mt-3 border-t border-stone-100 pt-3 space-y-2.5">
+            <div class="flex items-center justify-between">
+              <span class="text-[12px] font-medium text-stone-700">会话成本预算上限 (USD)</span>
+              <span class="text-[11px] text-stone-400">超额后展示软告警，不阻断提问</span>
+            </div>
+            <div class="max-w-[280px]">
+              <Input
+                :model-value="settings.costBudgetUsd !== undefined && settings.costBudgetUsd !== null ? String(settings.costBudgetUsd) : ''"
+                :disabled="saving"
+                placeholder="例如 0.50 (≤0 为不限制)"
+                class="bg-stone-50 text-[11px]"
+                data-testid="config-cost-budget-input"
+                @update:model-value="handleCostBudgetChange($event)"
+                @blur="flushOtelSettings"
+              />
             </div>
           </div>
 

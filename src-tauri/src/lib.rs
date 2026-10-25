@@ -590,6 +590,8 @@ fn load_app_settings() -> AppSettings {
     let settings = AppSettingsStore::new().load_view();
     // D7：启动即按持久化值生效（默认 false ⇒ 零 span 分配、零 egress）。
     pony_agent_core::agent::otel::set_agent_trace_reporting(settings.agent_trace_reporting);
+    // Wave-5 K3：成本预算只做软告警（None/<=0 视为未设置），绝不参与任何拦截。
+    pony_agent_core::agent::cost::set_budget_usd(settings.cost_budget_usd);
     settings
 }
 
@@ -598,6 +600,8 @@ fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
     let saved = AppSettingsStore::new().save_view(settings)?;
     // D7：保存即生效，无需重启；以落盘后的回显值为准（避免保存失败后门禁被误翻）。
     pony_agent_core::agent::otel::set_agent_trace_reporting(saved.agent_trace_reporting);
+    // Wave-5 K3：预算保存即生效（软告警门槛，不阻断请求）。
+    pony_agent_core::agent::cost::set_budget_usd(saved.cost_budget_usd);
     Ok(saved)
 }
 

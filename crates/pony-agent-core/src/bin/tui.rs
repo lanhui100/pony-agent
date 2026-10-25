@@ -6386,7 +6386,72 @@ fn run_doctor() -> i32 {
     if fail == 0 { 0 } else { 1 }
 }
 
+/// 可观测性引导（Wave-5 P0 修复：CLI/TUI 交付形态此前**完全没有** tracing 与 issue 引导）。
+///
+/// 契约：
+/// - 装配 panic hook（崩溃上报 PonySentry）与 OTel provider（trace 导出）；
+/// - 配置解析与 Tauri 侧**同一套语义**：settings 持久化 > 环境变量 > 内置公网默认端点；
+/// - **上报门禁默认关闭**（`agentTraceReporting` 缺省 `false`），需用户在设置里显式开启
+///   （写入 `~/.config/pony-agent/settings.json`）才会产生 span 与导出；关闭态零 span 零 egress；
+/// - 失败只降级为 `log_json("warn", ...)`：绝不 panic、绝不阻塞启动（trace 不可用不阻断业务）。
+/// CLI/TUI 的运行日志落盘路径（与 Tauri 的 `<app_data_dir>/logs/pony-agent.log` 同口径）。
+///
+/// 取舍：**统一**落到 `logs/pony-agent.log`，不复用 TUI 既有的 `~/.pony-agent/tui-logs/` ——
+/// 后者是会话调试产物（整屏 dump），把结构化 JSON 运行日志混进去会让取证面变脏。
+/// 优先级：`dirs::state_dir()`（Linux = `$XDG_STATE_HOME` 或 `~/.local/state`）
+/// > `$HOME/.local/state`；都不可得时返回 `None`（仅 stdout，不阻塞启动）。
+/// 轮转（512KiB）/ 降级 / 脱敏全部复用 `otel::log` 既有实现。
+fn bin_log_file_path() -> Option<std::path::PathBuf> {
+    let base = dirs::state_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))?;
+    Some(base.join("pony-agent").join("logs").join("pony-agent.log"))
+}
+struct ObservabilityBootstrap;
+
+impl ObservabilityBootstrap {
+    fn install() -> Self {
+        pony_agent_core::agent::ponysentry::install_panic_hook();
+        // Wave-5 P0-A：日志落盘（复用 otel::log 的 512KiB 轮转 / 降级 / 脱敏实现，不另写一套）。
+        if let Some(log_path) = bin_log_file_path() {
+            pony_agent_core::agent::otel::log::set_log_file_path(log_path);
+        }
+        // Wave-5 P0-B：仅 CLI/TUI 打开 core 侧 turn 失败上报（桌面端由前端 `TurnExecutionFailed`
+        // 上报，保持关闭以避免重复 issue）。
+        pony_agent_core::agent::ponysentry::enable_turn_failure_capture(true);
+
+        // settings 优先（与 `src-tauri` 的 `load_app_settings` 等价的双路径同步）。
+        let settings = pony_agent_core::agent::app_settings::AppSettingsStore::new().load_view();
+        pony_agent_core::agent::otel::set_agent_trace_reporting(settings.agent_trace_reporting);
+        pony_agent_core::agent::cost::set_budget_usd(settings.cost_budget_usd);
+
+        let snapshot = settings.otel_settings_snapshot();
+        if let Err(err) = pony_agent_core::agent::otel::init(
+            pony_agent_core::agent::otel::OtelConfig::from_settings(Some(&snapshot)),
+        ) {
+            pony_agent_core::agent::otel::log::log_json(
+                "warn",
+                &format!("otel 装配失败，trace 上报已禁用：{err}"),
+                None,
+            );
+        }
+        Self
+    }
+}
+
+impl Drop for ObservabilityBootstrap {
+    /// 退出清理（正常 return / 主循环结束 / Ctrl-C 交由 TUI 循环返回后）：有界 shutdown，
+    /// 内部会先 drain 批量队列再关 provider（上限 1000ms，幂等，不因网络悬挂卡死退出）。
+    fn drop(&mut self) {
+        // 先排空 issue 上报队列（有界 1500ms，避免 `--prompt` 这类「报错即退出」丢 issue），
+        // 再关闭 OTel provider（有界 1000ms，内部先 drain span 队列）。
+        pony_agent_core::agent::ponysentry::flush();
+        pony_agent_core::agent::otel::shutdown();
+    }
+}
+
 fn main() {
+    // Wave-5 P0：可观测性引导（panic hook + OTel provider；失败只降级 warn，不阻塞启动）。
+    let _observability = ObservabilityBootstrap::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse_cli_action(&args) {
         CliAction::Version => {
@@ -6404,6 +6469,8 @@ fn main() {
             let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
             if let Err(e) = run_tui_demo_ask() {
                 eprintln!("TUI Error: {e}");
+                // `process::exit` 不跑 Drop ⇒ 显式有界 shutdown，保证末批 span 不丢。
+                pony_agent_core::agent::otel::shutdown();
                 std::process::exit(1);
             }
         }
@@ -6415,6 +6482,8 @@ fn main() {
             let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
             if let Err(e) = run_tui() {
                 eprintln!("TUI Error: {e}");
+                // `process::exit` 不跑 Drop ⇒ 显式有界 shutdown，保证末批 span 不丢。
+                pony_agent_core::agent::otel::shutdown();
                 std::process::exit(1);
             }
         }

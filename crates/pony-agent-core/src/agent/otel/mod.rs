@@ -55,6 +55,12 @@ pub const ATTR_GEN_AI_USAGE_CONTEXT_RATIO: &str = "gen_ai.usage.context_ratio";
 /// 整轮综合生成速度（t/s）。
 pub const ATTR_AGENT_TURN_SPEED_TOKENS_PER_SECOND: &str = "agent.turn.speed.tokens_per_second";
 
+/// 单次 LLM 调用成本（USD，f64）。Wave-5 K4：未知模型/门禁关闭时**不输出该键**。
+pub const ATTR_GEN_AI_COST_USD: &str = "gen_ai.cost.usd";
+
+/// 整轮 turn 聚合成本（USD，f64）。Wave-5 K4：无有效计价时**不输出该键**（严禁写 0.0）。
+pub const ATTR_AGENT_TURN_COST_USD: &str = "agent.turn.cost.usd";
+
 /// 工具名（如 `bash`）。
 pub const ATTR_GEN_AI_TOOL_NAME: &str = "gen_ai.tool.name";
 
@@ -577,6 +583,19 @@ pub fn is_reporting_enabled() -> bool {
     REPORTING_ENABLED.load(Ordering::SeqCst)
 }
 
+/// 是否允许采集 span 级属性（Wave-5 K4：成本属性零计算短路判定）。
+///
+/// 调用方：turn/provider 侧「先判门禁、再算价格」的成本接缝。
+/// 语义：`false` ⇒ 调用方**不得**执行价格计算、不得附加任何 span 属性（零分配零计算）。
+pub fn is_span_capture_enabled() -> bool {
+    spans_allowed()
+}
+
+/// 成本值四舍五入到 6 位小数（与 [`crate::agent::cost::COST_PRECISION_DECIMALS`] 对齐）。
+fn round_cost_usd(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
 /// 宿主设置桥接：把持久化的 `AppSettings.agent_trace_reporting` 同步到 OTel 门禁。
 ///
 /// 调用方：Tauri 侧 `load_app_settings` / `save_app_settings`（D7：启动即按持久化值生效，
@@ -1062,6 +1081,7 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
         phase: None,
         trace_id: None,
         turn_speed: None,
+        turn_cost: None,
     };
     // 契约：session_id / turn_id 缺失（空串）⇒ **不创建** turn span。
     // 绝不用占位值伪造会话——那会在 Langfuse 侧造出不存在的 session，污染数据。
@@ -1095,6 +1115,7 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
                 phase: None,
                 trace_id: None,
                 turn_speed: None,
+                turn_cost: None,
             }
             .with_trace_id(trace_id);
         }
@@ -1111,6 +1132,7 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
         phase: None,
         trace_id: Some(trace_id),
         turn_speed: None,
+        turn_cost: None,
     }
 }
 
@@ -1122,6 +1144,8 @@ pub struct TurnTraceGuard {
     phase: Option<String>,
     trace_id: Option<String>,
     turn_speed: Option<f64>,
+    /// Wave-5 K4：整轮聚合成本（USD）；`None` ⇒ 不输出 `agent.turn.cost.usd`。
+    turn_cost: Option<f64>,
 }
 
 impl TurnTraceGuard {
@@ -1145,6 +1169,15 @@ impl TurnTraceGuard {
             // F2：phase 同样过脱敏（防御调用方传入不可信内容）。
             self.phase = Some(crate::agent::ponysentry::sanitize(phase));
         }
+    }
+
+    /// 记录整轮 turn 的聚合成本（USD）。
+    ///
+    /// 调用方：turn 终态路径（Wave-5 K4）。语义：`None` / 非有限 / 负值 ⇒ 视为「无有效计价」，
+    /// **不输出** `agent.turn.cost.usd`；门禁关闭时守卫为空操作（零导出），此处只做赋值。
+    /// 注意：未显式记录时，[`TurnTraceGuard::drop`] 会回落到本轮内各 `llm.chat` span 的累计成本。
+    pub fn record_turn_cost(&mut self, cost: Option<f64>) {
+        self.turn_cost = cost.filter(|value| value.is_finite() && *value >= 0.0);
     }
 
     /// 读取该 turn 的 trace_id（十六进制字符串）；未采样/门禁关闭/未 init 时 `None`。
@@ -1186,6 +1219,21 @@ impl Drop for TurnTraceGuard {
                 ));
             }
         }
+        // Wave-5 K4：整轮聚合成本——显式记录优先，否则回落到本轮 llm.chat 累计值；
+        // 无有效计价时**不输出该键**（严禁写 0.0）。
+        let accumulated_cost = take_active_turn_cost();
+        let turn_cost = self.turn_cost.take().or_else(|| {
+            if accumulated_cost > 0.0 && accumulated_cost.is_finite() {
+                Some(round_cost_usd(accumulated_cost))
+            } else {
+                None
+            }
+        });
+        if let Some(cost) = turn_cost {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_COST_USD, cost));
+            }
+        }
         if let Some(mut span) = self.span.take() {
             span.end();
         }
@@ -1206,6 +1254,7 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
         speed: None,
         context_window: None,
         context_ratio: None,
+        cost_usd: None,
     };
     if !spans_allowed() {
         return empty;
@@ -1227,6 +1276,7 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
         speed: None,
         context_window: None,
         context_ratio: None,
+        cost_usd: None,
     }
 }
 
@@ -1238,6 +1288,8 @@ pub struct LlmSpanGuard {
     speed: Option<f64>,
     context_window: Option<u64>,
     context_ratio: Option<f64>,
+    /// Wave-5 K4：单次调用成本（USD）；`None` ⇒ 不输出 `gen_ai.cost.usd`。
+    cost_usd: Option<f64>,
 }
 
 impl LlmSpanGuard {
@@ -1245,6 +1297,22 @@ impl LlmSpanGuard {
     pub fn record_usage(&mut self, input_tokens: Option<u64>, output_tokens: Option<u64>) {
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
+    }
+
+    /// 记录单次调用成本（USD）。
+    ///
+    /// 调用方：provider 调用返回真实 usage 之后（Wave-5 K4）。
+    /// 语义：`None` / 非有限 / 负值 ⇒ 不输出 `gen_ai.cost.usd`；门禁关闭时守卫为空操作
+    /// （零导出），且调用方应先用 [`is_span_capture_enabled`] 短路掉价格计算。
+    /// 同时把该成本累加到当前 turn，供 `agent.turn.cost.usd` 聚合。
+    pub fn record_cost(&mut self, cost: Option<f64>) {
+        let validated = cost.filter(|value| value.is_finite() && *value >= 0.0);
+        self.cost_usd = validated;
+        if self.span.is_some() {
+            if let Some(cost) = validated {
+                accumulate_active_turn_cost(cost);
+            }
+        }
     }
 
     /// 记录单次调用生成速度与上下文用量诊断属性。
@@ -1295,6 +1363,9 @@ impl Drop for LlmSpanGuard {
                     ATTR_GEN_AI_USAGE_CONTEXT_RATIO,
                     context_ratio,
                 ));
+            }
+            if let Some(cost) = self.cost_usd {
+                span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
             }
             span.end();
         }
@@ -1498,6 +1569,8 @@ struct ActiveTurn {
     turn_id: String,
     span_context: opentelemetry::trace::SpanContext,
     exported: bool,
+    /// Wave-5 K4：本轮内各 `llm.chat` 已记录成本之和（USD；Turn span Drop 时回填属性）。
+    accumulated_cost_usd: f64,
 }
 
 /// 活动 turn 索引：`tokio::task::Id` → 该任务当前 turn 的登记项。
@@ -1546,6 +1619,7 @@ fn register_active_turn(
         turn_id: turn_id.to_string(),
         span_context,
         exported,
+        accumulated_cost_usd: 0.0,
     };
 
     // A9：优先按 tokio 任务 id 索引；无任务上下文时退回线程本地栈（不丢父 span）。
@@ -1627,6 +1701,49 @@ fn current_active_turn() -> Option<ActiveTurn> {
         return guard.get(&task_id).cloned();
     }
     THREAD_TURNS.with(|stack| stack.borrow().last().cloned())
+}
+
+/// 把一次调用的成本累加到**当前活动 turn**（供 `agent.turn.cost.usd` 聚合）。
+///
+/// 语义：只在存在活动 turn 时累加；非有限/负值直接忽略。门禁关闭时调用方不会走到这里。
+fn accumulate_active_turn_cost(cost: f64) {
+    if !cost.is_finite() || cost < 0.0 {
+        return;
+    }
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            entry.accumulated_cost_usd += cost;
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            entry.accumulated_cost_usd += cost;
+        }
+    });
+}
+
+/// 读取当前活动 turn 的累计成本；无活动 turn 时返回 0.0。
+fn take_active_turn_cost() -> f64 {
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(|entry| entry.accumulated_cost_usd)
+            .unwrap_or(0.0);
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(|entry| entry.accumulated_cost_usd)
+            .unwrap_or(0.0)
+    })
 }
 
 /// 子 span 的父上下文：**只**接受真实导出态 root span 的上下文（B1b：杜绝孤儿 trace）。

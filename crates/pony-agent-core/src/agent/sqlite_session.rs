@@ -3416,6 +3416,7 @@ mod tests {
             session_id: Some("s1".to_string()),
             event_id: None,
             trace_id: None,
+            cost_usd: None,
             event_type: Some("turn.completed".to_string()),
             event_version: Some("turn-event-v1".to_string()),
             sequence: Some(1),

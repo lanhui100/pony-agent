@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Check,
+  Coins,
   Copy,
   Gauge,
   MessageSquareMore,
@@ -14,6 +16,7 @@ import {
 } from "lucide-vue-next";
 import Tooltip from "@/components/ui/Tooltip.vue";
 import { isDebugLoggingEnabled } from "@/lib/runtime/utils";
+import { useRuntimeStore } from "@/stores/runtime";
 
 const props = defineProps<{
   sessionId: string;
@@ -44,6 +47,24 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{ copySessionId: [] }>();
+
+function resolveRuntimeStoreSafe() {
+  try {
+    return useRuntimeStore();
+  } catch {
+    return null;
+  }
+}
+
+const formattedCost = computed(() => resolveRuntimeStoreSafe()?.formattedSessionCost ?? "—");
+const isOverBudget = computed(() => resolveRuntimeStoreSafe()?.isCostBudgetExceeded ?? false);
+const costTooltipText = computed(() => {
+  const store = resolveRuntimeStoreSafe();
+  if (isOverBudget.value) {
+    return store?.costBudgetWarningMessage || "已超出成本预算限额";
+  }
+  return `会话累计成本: ${formattedCost.value}`;
+});
 
 const debugAttrsEnabled = computed(() => isDebugLoggingEnabled());
 
@@ -157,6 +178,22 @@ function formatTokenSpeed(value?: number | null) {
               <Gauge class="h-3 w-3 text-stone-400" />
               {{ formatTokenSpeed(tokenGenerationSpeed) }}
             </span>
+          </Tooltip>
+        </div>
+
+        <!-- Wave-5 K2/K3：会话成本展示位与预算超限软告警（在 token 行下方紧凑行展示） -->
+        <div class="flex items-center justify-between border-t border-stone-200/50 mt-1.5 pt-1.5 px-1 text-[11px] leading-5 text-stone-600">
+          <span class="text-stone-400">会话成本</span>
+          <Tooltip :text="costTooltipText">
+            <div
+              class="inline-flex items-center gap-1 tabular-nums transition-colors"
+              :class="isOverBudget ? 'text-amber-600 font-medium' : 'text-stone-600'"
+              data-testid="status-metric-session-cost"
+            >
+              <AlertTriangle v-if="isOverBudget" class="h-3 w-3 text-amber-500 animate-pulse" />
+              <Coins v-else class="h-3 w-3 text-stone-400" />
+              <span class="inline-block min-w-[2.5rem] text-right">{{ formattedCost }}</span>
+            </div>
           </Tooltip>
         </div>
       </div>

@@ -81,6 +81,10 @@ pub struct AppSettings {
     /// 采样率（落盘键 `otelSamplingRatio`，0.0 ~ 1.0）；越界值在解析期拒绝采纳。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otel_sampling_ratio: Option<f64>,
+    /// 会话成本预算（USD，落盘键 `costBudgetUsd`）。Wave-5 K3：仅用于**软告警**，
+    /// `None` / `null` / `<= 0.0` 一律视为未设置预算；任何情况下不得拦截用户请求。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_budget_usd: Option<f64>,
 }
 
 impl std::fmt::Debug for AppSettings {
@@ -99,6 +103,7 @@ impl std::fmt::Debug for AppSettings {
             )
             .field("otel_service_name", &self.otel_service_name)
             .field("otel_sampling_ratio", &self.otel_sampling_ratio)
+            .field("cost_budget_usd", &self.cost_budget_usd)
             .finish()
     }
 }
@@ -135,6 +140,8 @@ struct AppSettingsStorage {
     otel_service_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     otel_sampling_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost_budget_usd: Option<f64>,
 }
 
 impl From<AppSettingsStorage> for AppSettings {
@@ -147,6 +154,7 @@ impl From<AppSettingsStorage> for AppSettings {
             otel_token: value.otel_token,
             otel_service_name: value.otel_service_name,
             otel_sampling_ratio: value.otel_sampling_ratio,
+            cost_budget_usd: value.cost_budget_usd,
         }
     }
 }
@@ -161,6 +169,7 @@ impl From<AppSettings> for AppSettingsStorage {
             otel_token: value.otel_token,
             otel_service_name: value.otel_service_name,
             otel_sampling_ratio: value.otel_sampling_ratio,
+            cost_budget_usd: value.cost_budget_usd,
         }
     }
 }

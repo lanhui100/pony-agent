@@ -547,6 +547,60 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         }
       }
       return undefined;
+    },
+    /** Wave-5 K1/K2：会话累计成本 (USD)，仅累加有效轮次，空值轮跳过 */
+    sessionTotalCostUsd: (state): number => {
+      let sum = 0;
+      for (const turn of state.turnTraceHistory ?? []) {
+        if (typeof turn.costUsd === "number" && Number.isFinite(turn.costUsd) && turn.costUsd >= 0) {
+          sum += turn.costUsd;
+        }
+      }
+      return Number(sum.toFixed(6));
+    },
+    /** 标识会话中是否含有未计价（未知模型）的轮次 */
+    hasUnpricedTurns: (state): boolean => {
+      const history = state.turnTraceHistory ?? [];
+      if (history.length === 0) return false;
+      return history.some((t) => t.costUsd === undefined || t.costUsd === null);
+    },
+    /** 格式化输出会话成本；全部轮次无计价或异常时退化为 "—" */
+    formattedSessionCost(): string {
+      const history = this.turnTraceHistory ?? [];
+      const validCosts = history.filter(
+        (t) => typeof t.costUsd === "number" && Number.isFinite(t.costUsd) && t.costUsd >= 0
+      );
+      if (validCosts.length === 0) {
+        return "—";
+      }
+      const total = this.sessionTotalCostUsd;
+      if (!Number.isFinite(total) || total < 0) {
+        return "—";
+      }
+      return `$${total.toFixed(6)}`;
+    },
+    /** Wave-5 K3：预算超限软告警状态 */
+    isCostBudgetExceeded(): boolean {
+      const settingsStore = useSettingsStore();
+      const budget = (settingsStore as any).effectiveCostBudgetUsd ?? (settingsStore as any).costBudgetUsd;
+      if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
+        return false;
+      }
+      return this.sessionTotalCostUsd > budget;
+    },
+    /** 预算超限提示文案 */
+    costBudgetWarningMessage(): string | null {
+      if (!this.isCostBudgetExceeded) return null;
+      const settingsStore = useSettingsStore();
+      const budget = (settingsStore as any).effectiveCostBudgetUsd ?? (settingsStore as any).costBudgetUsd;
+      return `已超出成本预算限额 (当前超预算: $${Number(budget).toFixed(2)})`;
+    },
+    /** 软告警不阻断原则：始终允许发送与输入 */
+    canSubmitPrompt: (state): boolean => {
+      return !state.isSubmitting;
+    },
+    isInputDisabled: (): boolean => {
+      return false;
     }
   },
   actions: {
@@ -2667,6 +2721,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         totalTokens: patch.totalTokens ?? null,
         firstTokenLatencyMs: patch.firstTokenLatencyMs ?? null,
         turnDurationMs: patch.turnDurationMs ?? null,
+        costUsd: patch.costUsd ?? undefined,
         updatedAt
       }));
       this.turnTraceHistory[this.turnTraceHistory.length - 1]!.title = resolvedTitle;
@@ -4056,6 +4111,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             ...cacheHitInputTokenPatch,
             ...reasoningTokenPatch,
             ...turnDurationPatch,
+            ...(payload.costUsd !== undefined ? { costUsd: payload.costUsd } : {}),
             error: null
           };
 

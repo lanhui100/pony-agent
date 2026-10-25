@@ -14,6 +14,8 @@ const QUEUE_CAPACITY: usize = 1024;
 const REQUEST_TIMEOUT_SECS: u64 = 3;
 /// 栈帧采集上限（超出截断，避免把超深调用栈写穿 ingest 载荷）。
 const MAX_STACK_FRAMES: usize = 32;
+/// 退出前排空上报队列的有界等待上限（Wave-5 P0-B：不因网络悬挂卡住进程退出）。
+const FLUSH_TIMEOUT_MS: u64 = 1_500;
 
 #[derive(Debug)]
 enum SentryEvent {
@@ -26,6 +28,9 @@ enum SentryEvent {
         traceparent: Option<String>,
         backtrace: Option<Backtrace>,
     },
+    /// 排空屏障（Wave-5 P0-B）：worker 收到它即表示**此前所有事件已处理完**，
+    /// 用于进程退出前有界 flush，避免 CLI `--prompt` 这种「报错即退出」形态丢 issue。
+    Flush(mpsc::SyncSender<()>),
 }
 
 #[derive(Clone)]
@@ -257,8 +262,19 @@ impl PonySentryClient {
         }
     }
 
+    /// 排空上报队列（有界等待，最多 1500ms）。
+    ///
+    /// 语义：投递一个 FIFO 屏障，worker 处理到屏障时说明此前事件都已尝试发送；
+    /// 队列已满/worker 已断开时**立即返回**（绝不阻塞调用方，绝不 panic）。
     pub fn flush(&self) {
-        // Queue is continuously processed by the worker thread
+        let Some(tx) = self.sender.as_ref() else {
+            return;
+        };
+        let (ack_tx, ack_rx) = mpsc::sync_channel::<()>(1);
+        if tx.try_send(SentryEvent::Flush(ack_tx)).is_err() {
+            return;
+        }
+        let _ = ack_rx.recv_timeout(Duration::from_millis(FLUSH_TIMEOUT_MS));
     }
 }
 
@@ -465,9 +481,18 @@ fn apply_stacktrace(payload: &mut IngestPayload, backtrace: Option<Backtrace>) {
         return;
     }
     if payload.culprit.is_none() {
+        // 尽力填「肇事点」：优先本仓库中**非**上报模块自身的帧（避免 culprit 永远是 ponysentry），
+        // 其次 in_app 帧，最后退回首个帧。
         payload.culprit = captured
             .iter()
-            .find(|frame| frame.in_app == Some(true))
+            .find(|frame| {
+                frame
+                    .function
+                    .as_deref()
+                    .map(|name| name.contains("pony_agent_core") && !name.contains("ponysentry"))
+                    .unwrap_or(false)
+            })
+            .or_else(|| captured.iter().find(|frame| frame.in_app == Some(true)))
             .or_else(|| captured.first())
             .and_then(|frame| frame.function.clone().or_else(|| frame.filename.clone()));
     }
@@ -510,11 +535,18 @@ fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<SentryEvent>) 
     let ingest_url = format!("{base_url}/api/v1/ingest");
 
     while let Ok(event) = receiver.recv() {
-        let SentryEvent::Ingest {
-            mut payload,
-            traceparent,
-            backtrace,
-        } = event;
+        let (mut payload, traceparent, backtrace) = match event {
+            SentryEvent::Ingest {
+                payload,
+                traceparent,
+                backtrace,
+            } => (payload, traceparent, backtrace),
+            // FIFO 屏障：此前事件都已处理完，回 ack 即可继续处理后续事件。
+            SentryEvent::Flush(ack) => {
+                let _ = ack.try_send(());
+                continue;
+            }
+        };
         // 符号化（昂贵）落在 worker 线程，绝不占用上报入队路径。
         apply_stacktrace(&mut payload, backtrace);
 

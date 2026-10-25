@@ -689,6 +689,9 @@ pub struct TurnTraceRecord {
     /// 门禁关闭/未采样/本地降级上下文一律 `None`（前端据此决定是否展示「跳转链路」入口）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Wave-5 K2：本轮成本（USD，camelCase 下发 `costUsd`）；未知模型/缺 usage ⇒ 键缺席。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
     #[serde(default)]
     pub event_type: Option<String>,
     #[serde(default)]

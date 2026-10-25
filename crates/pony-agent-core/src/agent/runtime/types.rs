@@ -145,6 +145,12 @@ pub struct TurnStreamEvent {
     /// 前端 `runtime` store 用它回填 `activeTraceId`，使 live turn 期间的错误上报也带真实 trace_id。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Wave-5 K2：本轮成本（USD，camelCase 下发 `costUsd`）。
+    ///
+    /// 语义：仅当本轮拿到真实 usage 且模型命中内置价格表时有值；
+    /// 未知模型/缺 usage ⇒ `None`，键缺席（前端显示「—」，严禁用 0.0 伪造）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
     pub kind: String,
     pub event_type: Option<String>,
     pub event_version: Option<String>,

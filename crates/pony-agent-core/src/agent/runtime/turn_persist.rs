@@ -2,6 +2,22 @@
 // 由 runtime/mod.rs 的 AgentRuntime 巨型 impl 拆分而来，行为与结构保持一致。
 use super::*;
 
+/// Wave-5 K2：持久化 trace 的成本（未知模型 / 缺真实 usage ⇒ `None`）。
+///
+/// 只基于 provider 真实返回的 usage 计算，禁止本地 token 猜测（契约 K1.3）。
+fn estimate_trace_cost(
+    provider_meta: Option<&ProviderEventMeta>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+) -> Option<f64> {
+    let model = provider_meta.map(|meta| meta.model.as_str())?;
+    let input = input_tokens?;
+    let output = output_tokens?;
+    crate::agent::cost::estimate_cost(model, input, output, cache_hit_input_tokens)
+        .map(|estimate| estimate.total_cost_usd)
+}
+
 impl AgentRuntime {
     pub(crate) fn persist_turn_outcome(
         &self,
@@ -190,6 +206,13 @@ impl AgentRuntime {
                     // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
                     // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
                     trace_id: crate::agent::otel::exported_trace_id(),
+                    // Wave-5 K2：会话 trace 成本（未知模型 / 缺 usage ⇒ None，键缺席）。
+                    cost_usd: estimate_trace_cost(
+                        provider_meta,
+                        input_tokens,
+                        output_tokens,
+                        cache_hit_input_tokens,
+                    ),
                     event_type: None,
                     event_version: None,
                     sequence: None,
@@ -501,6 +524,8 @@ impl AgentRuntime {
                     // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
                     // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
                     trace_id: crate::agent::otel::exported_trace_id(),
+                    // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+                    cost_usd: None,
                     event_type: None,
                     event_version: None,
                     sequence: None,
@@ -602,6 +627,8 @@ impl AgentRuntime {
                     // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
                     // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
                     trace_id: crate::agent::otel::exported_trace_id(),
+                    // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+                    cost_usd: None,
                     event_type: None,
                     event_version: None,
                     sequence: None,

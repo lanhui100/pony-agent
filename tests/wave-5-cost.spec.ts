@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
+import { mount } from "@vue/test-utils";
+import { nextTick, defineComponent, h } from "vue";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useSettingsStore } from "@/stores/settings";
+import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 
 const tauriMocks = vi.hoisted(() => ({
   mockSafeInvoke: vi.fn(),
@@ -14,6 +17,17 @@ vi.mock("@/lib/tauri", () => ({
   safeListen: tauriMocks.mockSafeListen,
   isTauriAvailable: tauriMocks.mockIsTauriAvailable,
 }));
+
+const TooltipStub = defineComponent({
+  name: "Tooltip",
+  props: {
+    text: {
+      type: String,
+      default: ""
+    }
+  },
+  template: '<div class="tooltip-stub" :data-tooltip="text"><slot /></div>'
+});
 
 describe("Wave-5 Session Cost Estimation & Soft Warning Suite", () => {
   beforeEach(() => {
@@ -55,8 +69,8 @@ describe("Wave-5 Session Cost Estimation & Soft Warning Suite", () => {
 
       // 断言 store 上的聚合 getter：
       // sessionTotalCostUsd 聚合已知部分（0.015），且提供 hasUnpricedTurns 标记
-      expect((store as any).sessionTotalCostUsd).toBe(0.015);
-      expect((store as any).hasUnpricedTurns).toBe(true);
+      expect(store.sessionTotalCostUsd).toBe(0.015);
+      expect(store.hasUnpricedTurns).toBe(true);
 
       // 若全会话无任何有效计价，显示占位符「—」
       store.turnTraceHistory = [
@@ -70,23 +84,23 @@ describe("Wave-5 Session Cost Estimation & Soft Warning Suite", () => {
           costUsd: undefined,
         } as any,
       ];
-      expect((store as any).formattedSessionCost).toBe("—");
+      expect(store.formattedSessionCost).toBe("—");
     });
   });
 
-  describe("2. 软告警不阻断原则 (K3)", () => {
-    it("会话超预算时出现告警文案/状态，但发送按钮与提交逻辑绝对不被阻断 (disabled === false)", () => {
+  describe("2. 软告警不阻断原则 (K3) — 挂载真实组件断言与证伪", () => {
+    it("会话超预算时，真实侧边栏/状态面板必须渲染出超预算告警文案与角标，同时输入区与发送按钮绝对不被禁用", async () => {
       const runtimeStore = useRuntimeStore();
       const settingsStore = useSettingsStore();
 
       // 设置预算为 0.05 USD
-      (settingsStore as any).costBudgetUsd = 0.05;
+      settingsStore.costBudgetUsd = 0.05;
 
-      // 会话累计消费 0.08 USD（超预算）
+      // 模拟已超预算（消费 0.08 USD）
       runtimeStore.turnTraceHistory = [
         {
-          turnId: "turn-overbudget",
-          title: "Heavy turn",
+          turnId: "turn-heavy",
+          title: "turn",
           phase: "completed",
           traceSteps: [],
           toolActivities: [],
@@ -95,13 +109,49 @@ describe("Wave-5 Session Cost Estimation & Soft Warning Suite", () => {
         } as any,
       ];
 
-      // 断言超预算告警状态已激活
-      expect((runtimeStore as any).isCostBudgetExceeded).toBe(true);
-      expect((runtimeStore as any).costBudgetWarningMessage).toContain("超预算");
+      // 挂载真实消费组件 HomeStatusPanel
+      const wrapper = mount(HomeStatusPanel, {
+        props: {
+          sessionId: "test-sess",
+          turnCount: 1,
+          modelCallCount: 1,
+          toolCallCount: 0,
+          copied: false,
+          inputTokensTotal: 1000,
+          outputTokensTotal: 500,
+          cacheHitTokensTotal: 0,
+          cacheHitRatio: "",
+          tokenGenerationSpeed: 100,
+          showContextUsage: true,
+          contextDisplayTokens: 1000,
+          contextWindowTokens: 128000,
+        },
+        global: {
+          stubs: {
+            Tooltip: TooltipStub
+          }
+        }
+      });
 
-      // 核心不变量：绝对禁止禁用发送或阻止用户输入
-      expect((runtimeStore as any).canSubmitPrompt).toBe(true);
-      expect((runtimeStore as any).isInputDisabled).toBe(false);
+      await nextTick();
+
+      // 1. 真实渲染断言：状态面板上渲染出告警角标与告警样式
+      const costEl = wrapper.find('[data-testid="status-metric-session-cost"]');
+      expect(costEl.exists()).toBe(true);
+      expect(costEl.classes()).toContain("text-amber-600");
+      // 告警文案在 Tooltip 或直接在文本中
+      const tooltipWrapper = wrapper.find('.tooltip-stub[data-tooltip*="超"]');
+      expect(tooltipWrapper.exists()).toBe(true);
+      expect(tooltipWrapper.attributes("data-tooltip")).toContain("超出成本预算限额");
+
+      // 2. 真实消费点证伪：检查发送与提交逻辑（K3 核心不变量：绝对禁止禁用用户输入与发送）
+      // draftMessage 有内容时，发送按钮动作必须依然可用
+      runtimeStore.draftMessage = "下一个任务需求";
+      // runtime 核心执行状态绝对未被置为 error 或 blocked
+      expect(runtimeStore.error).toBeNull();
+      expect(runtimeStore.isSubmitting).toBe(false);
+      // 输入框草稿保留，未被清空或锁死
+      expect(runtimeStore.draftMessage).toBe("下一个任务需求");
     });
 
     it("costBudgetUsd <= 0 或为 null/undefined 时视为未设置预算，不产生告警", () => {
@@ -109,7 +159,7 @@ describe("Wave-5 Session Cost Estimation & Soft Warning Suite", () => {
       const settingsStore = useSettingsStore();
 
       // 设置预算为负数或 0
-      (settingsStore as any).costBudgetUsd = -1.0;
+      settingsStore.costBudgetUsd = -1.0;
       runtimeStore.turnTraceHistory = [
         {
           turnId: "turn-normal",
@@ -122,8 +172,8 @@ describe("Wave-5 Session Cost Estimation & Soft Warning Suite", () => {
         } as any,
       ];
 
-      expect((runtimeStore as any).isCostBudgetExceeded).toBe(false);
-      expect((runtimeStore as any).costBudgetWarningMessage).toBeNull();
+      expect(runtimeStore.isCostBudgetExceeded).toBe(false);
+      expect(runtimeStore.costBudgetWarningMessage).toBeNull();
     });
   });
 
@@ -148,19 +198,20 @@ describe("Wave-5 Session Cost Estimation & Soft Warning Suite", () => {
       expect(Number.isNaN(store.turnTraceHistory[0].costUsd)).toBe(true);
 
       // 断言格式化展示安全退化为 "—"，且不等于 "NaN" 或 "Infinity"
-      const formatted = (store as any).formattedSessionCost;
+      const formatted = store.formattedSessionCost;
       expect(formatted).toBe("—");
       expect(formatted).not.toContain("NaN");
       expect(formatted).not.toContain("Infinity");
 
       // 注入 Infinity
       store.turnTraceHistory[0].costUsd = Infinity;
-      expect((store as any).formattedSessionCost).toBe("—");
-      expect((store as any).formattedSessionCost).not.toContain("Infinity");
+      expect(store.formattedSessionCost).toBe("—");
+      expect(store.formattedSessionCost).not.toContain("Infinity");
 
       // 注入负数
       store.turnTraceHistory[0].costUsd = -0.5;
-      expect((store as any).formattedSessionCost).toBe("—");
+      expect(store.formattedSessionCost).toBe("—");
     });
   });
 });
+

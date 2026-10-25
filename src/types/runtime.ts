@@ -804,6 +804,7 @@ export type TurnTraceRecord = {
   totalTokens?: number | null;
   firstTokenLatencyMs?: number | null;
   turnDurationMs?: number | null;
+  costUsd?: number | null;
   updatedAt: number;
 };
 
@@ -1118,6 +1119,7 @@ export type TurnStreamEvent = {
   hookTraceRecords?: HookTraceRecord[] | null;
   sessionSummary?: string | null;
   traceId?: string | null;
+  costUsd?: number | null;
 };
 
 export type ExecutionCheckpoint = {

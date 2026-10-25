@@ -239,6 +239,71 @@ fn k4_otel_spans_export_cost_attributes_to_wire() {
 }
 
 // ---------------------------------------------------------------------------
+// 7b. K4 OTel 属性负向断言：未知模型不写 cost 属性，门禁关闭时不导出
+// ---------------------------------------------------------------------------
+#[test]
+fn k4_otel_spans_do_not_export_cost_when_unknown_model_or_gate_closed() {
+    let _g = LOCK.lock().unwrap();
+
+    // 负向 1：OTel 门禁关闭时，即使记录了 cost 也绝不产生任何 wire 导出请求
+    otel::shutdown();
+    let (port1, sink1) = test_helpers::spawn_otlp_sink(Duration::from_millis(1000));
+    otel::init(test_helpers::local_config(port1)).expect("本地端点装配必须成功");
+    otel::set_reporting_enabled(false); // 门禁关闭
+
+    {
+        let mut turn = otel::begin_turn_trace("sess-closed", "turn-closed", 1);
+        turn.record_turn_cost(Some(0.05));
+        let mut span = otel::start_llm_span("openai", Some("gpt-4o"), "chat");
+        span.record_cost(Some(0.02));
+    }
+
+    let _ = otel::force_flush(1000);
+    otel::shutdown();
+    let captured1 = sink1.join().expect("sink 线程不得 panic");
+    assert!(
+        captured1.is_empty(),
+        "K4 负向断言：OTel 门禁关闭时不得输出任何 wire 请求"
+    );
+
+    // 负向 2：门禁开启，但模型未知且 cost 为 None 时，wire payload 绝对不得包含 gen_ai.cost.usd
+    let (port2, sink2) = test_helpers::spawn_otlp_sink(Duration::from_millis(1500));
+    otel::init(test_helpers::local_config(port2)).expect("本地端点装配必须成功");
+    otel::set_reporting_enabled(true); // 门禁开启
+
+    {
+        let mut turn = otel::begin_turn_trace("sess-unknown", "turn-unknown", 1);
+        turn.record_turn_cost(None); // 未知模型无成本
+
+        let mut span = otel::start_llm_span("unknown-prov", Some("unknown-model-xyz"), "chat");
+        span.record_cost(None); // 未知模型无成本
+    }
+
+    let flushed = otel::force_flush(3000);
+    assert!(flushed.is_ok());
+    otel::shutdown();
+    otel::set_reporting_enabled(false);
+
+    let captured2 = sink2.join().expect("sink 线程不得 panic");
+    assert!(!captured2.is_empty(), "必须收到正常 trace 导出请求");
+
+    let wire_text2 = captured2
+        .iter()
+        .map(|r| String::from_utf8_lossy(&r.body).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !wire_text2.contains("gen_ai.cost.usd"),
+        "K4 负向断言：未知模型（cost 为 None）时 wire payload 绝对不得包含 gen_ai.cost.usd"
+    );
+    assert!(
+        !wire_text2.contains("agent.turn.cost.usd"),
+        "K4 负向断言：未知模型（cost 为 None）时 wire payload 绝对不得包含 agent.turn.cost.usd"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 8. K3 Settings 预算语义
 // ---------------------------------------------------------------------------
 #[test]
@@ -258,7 +323,7 @@ fn k3_negative_or_zero_budget_is_treated_as_unset() {
 mod test_helpers {
     use super::*;
     use pony_agent_core::agent::otel::OtelConfig;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
@@ -289,8 +354,13 @@ mod test_helpers {
             while start.elapsed() < timeout {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        let mut chunk = [0u8; 65536];
                         let mut buf = Vec::new();
-                        let _ = stream.read_to_end(&mut buf);
+                        if let Ok(read) = stream.read(&mut chunk) {
+                            buf.extend_from_slice(&chunk[..read]);
+                        }
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/x-protobuf\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+                        let _ = stream.flush();
                         captured.push(CapturedRequest { body: buf });
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {

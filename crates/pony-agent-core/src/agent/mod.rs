@@ -8,6 +8,7 @@ pub mod compression;
 pub mod config;
 pub mod context;
 pub mod control_plane;
+pub mod cost;
 pub mod dispatcher;
 pub mod dispatcher_composites;
 pub mod document_conversion;
