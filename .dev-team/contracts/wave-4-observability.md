@@ -123,3 +123,127 @@ P1
 ### 验收判据
 1. 模拟网络黑洞或慢速端点时，触发退出事件并在 3000ms 容差范围内完成进程优雅退出。
 2. 正常退出时，缓冲区中尚未发出的 spans 能够在退出前成功投递到 OTLP 收集器。
+
+---
+
+# Wave-4.1 v2 契约修订（回应 L3-A / L3-B 审查裁决）
+
+> 本节为 Wave-4.1 v2 增补与裁决修订段，保留前文 v1 原文作为历史基线。凡本节与 v1 存在差异之处，一律以本节 v2 裁决为准。
+
+## R1 [C2 修订] 仅允许「导出态」trace_id 绑定 Issue（对应 L3-A BLOCKING）
+
+### 契约条款与概念裁决
+1. **概念正交定义**：
+   - `exported_trace_id()`：仅在当前存在真实 SDK root span，且状态满足 `is_valid() && is_sampled()` 时返回 32 位十六进制字符串；未配置导出、门禁关闭、未采样或非真实导出 span 时恒为 `None`。
+   - `current_trace_id()`：当前 turn 的相关性 ID（Correlation ID，十六进制 32 位）。用于本地日志串联与跨服务 `traceparent` 上下文传播，**不保证已向 Tempo 导出**。
+2. **Issue 绑定约束**：
+   - `IngestPayload.trace_id` **只能**取 `exported_trace_id()`；取不到时必须显式为 `None`（前端传递 null / undefined，Rust 反序列化为 `None`）。
+   - **绝对禁止**使用本地相关性 ID 填充 `issue.trace_id`，以杜绝 Issue 指向 Tempo 中根本不存在的虚假 trace 导致排障断链。
+
+### 优先级
+P0
+
+### 拒绝条件
+1. 在 OTel 门禁关闭、非导出态或未采样时，向 PonySentry Issue 注入任何非 None 的 `trace_id`。
+2. 使用 `current_trace_id()` 或伪造占位串填充 `IngestPayload.trace_id`。
+
+### 验收判据
+1. 产生包含 `trace_id` 的 Issue 时，该 ID 在 Tempo 中**100% 具备可检索的真实链路**。
+2. 当 OTel 上报门禁关闭或无真实导出时，PonySentry 产生的 Issue 详情中 `trace_id` 必定为 null/None。
+
+---
+
+## R2 [C2 前端修订] 前端上报数据源归一（对应 L3-B BLOCKING-1）
+
+### 契约条款
+1. **下发与消费契约**：
+   - 前端**唯一且法定**的活跃 trace 来源为 Rust 下发的 `TurnTraceRecord.traceId`（DTO 属性命名为 camelCase `traceId`）。
+   - 前端所有 6 处 `reportError` 错误上报入口（以及 beforeSend 拦截管线）仅能读取当前活跃 turn 的 `TurnTraceRecord.traceId`。
+   - 若 `TurnTraceRecord.traceId` 为空或当前无活跃 turn，前端上报时不得传递 `trace_id` 字段（保持 undefined / 序列化时省略或 null）。
+
+### 优先级
+P0
+
+### 拒绝条件
+1. 前端自行生成随机 UUID 或通过其他前端本地变量填充 `reportError` 的 `trace_id`。
+2. 在 `TurnTraceRecord.traceId` 存在的情况下，前端 `reportError` 丢失该关联。
+
+### 验收判据
+1. 单元测试覆盖：终态 turn 携带有效 `traceId` 时，触发 `reportError` 生成的 payload 中 `trace_id` 严格等于该值。
+2. 单元测试覆盖：无活跃 turn 或 `traceId` 未下发时，`reportError` payload 中无 `trace_id`。
+
+---
+
+## R3 [新增 C6] Secret 全生命周期防护与脱敏契约（对应 L3-B BLOCKING-2）
+
+### 契约条款
+1. **Secret 绝缘面**：
+   - `otelToken`（以及所有类凭据敏感信息）绝对禁止出现在：标准/文件日志、面包屑（Breadcrumbs）、IPC 错误上报的 `extra`/`tags`、Rust 类型 `Debug`/`Display` 输出、遥测公开 payload 中。
+2. **前后端统一脱敏正则**：
+   - 脱敏匹配规则从原有「严格前缀/完全匹配」全面升级为**键名子串不区分大小写匹配**：
+     ```regex
+     (?i)(token|secret|password|credential|authorization|api_key|apikey)
+     ```
+   - 前端（TypeScript）与 Rust 核心层必须使用语义完全等价的子串脱敏正则。凡键名命中该正则的字段，其值在序列化/落盘/上报前一律替换为 `"[REDACTED]"`（或既有 `"[REDACTED_SECRET]"`）。
+3. **配置文件权限与平台兼容**：
+   - `settings.json` 在包含 `otelToken`（或其它凭据）落盘时，POSIX 系统下文件权限必须强制设置为 `0o600`（仅所有者读写）。
+   - Windows 平台说明：Windows 下降级为依赖用户个人 AppData 目录的默认 ACL 隔离，捕获权限错误并保证平稳写入，禁止因文件权限不支持而 panic。
+
+### 优先级
+P0
+
+### 拒绝条件
+1. 任何形式的日志、面包屑或 Issue extra 中出现未掩码的 `otelToken` 原文。
+2. POSIX 环境下写入含有 token 的 `settings.json` 时权限为 `0o644` 或更宽。
+
+### 验收判据
+1. 输入包含 `{ otelToken: "dummy-live-secret-value-12345" }` 的对象经过上报与日志链路后，输出必为 `[REDACTED]` 或 `[REDACTED_SECRET]`。
+2. Rust 侧 `AppSettings` 及 `OtelSettingsSnapshot` 的 `Debug` 格式化输出中，token 字段均显示为 `"[REDACTED]"`。
+
+---
+
+## R4 [C3 / C5 收紧] Header 注入幂等与退出预算配额（对应 L3-A ADVISORY）
+
+### 契约条款
+1. **C3 注入语义与重复防范**：
+   - 请求头注入必须采用 **`HeaderMap::insert` 语义**（覆盖式写入），严禁使用 `append` 导致请求中产生多条重复的 `traceparent` 头。
+2. **C3 第三方 URL（WebFetch）注入裁决**：
+   - **裁决结论**：保持对所有出网请求（含 WebFetch）注入 `traceparent`。
+   - **架构取舍理由**：遵循 W3C TraceContext 规范，透传 traceparent 属于分布式追踪的标准最小信息披露，便于在跨系统协作及出网网关（如反向代理/代理集群）日志中联合检索定位；`traceparent` 仅含十六进制 ID 与采样位，绝不携带任何业务载荷或凭证，安全风险可控。
+3. **C5 退出超时预算细化（三段合计 ≤ 3000ms）**：
+   - 进程退出硬预算上限为 3000ms，按以下建议配额分配三阶段：
+     - ① `RunEvent::ExitRequested`: 有界超时 ≤ 1000ms；
+     - ② `RunEvent::Exit` flush: 有界超时 ≤ 1000ms；
+     - ③ `shutdown()` 清理释放: 有界超时 ≤ 1000ms。
+   - 三段操作必须各自及全局保持**绝对幂等**，重入调用直接短路返回，不得发生阻塞累加或死锁。
+
+### 优先级
+P1
+
+### 拒绝条件
+1. Outbound 请求头中出现两条或以上的 `traceparent`。
+2. 退出总耗时超过 3000ms 导致进程无法正常终止。
+
+### 验收判据
+1. 网络抓包验证发往外部的 HTTP 请求中仅存在单条合法的 `traceparent`。
+2. 进程退出路径在网络不可达时的单测实测总耗时 ≤ 3000ms。
+
+---
+
+## R5 [C4 语义澄清] 结构化日志 trace_id 契约定位
+
+### 契约条款
+1. **语义定位**：
+   - 日志中的 `trace_id` 严格定义为「**本地执行相关性 ID**（Correlation ID）」，其生命周期绑定当前 turn。
+   - **明确澄清**：结构化日志中的 `trace_id` 仅保证「同一 turn 内部所有日志事件的关联一致性」，**不承诺**该 trace_id 一定能在 Tempo/Langfuse 检索到（例如采样未命中、上报门禁关闭或纯离线模式运行时）。
+2. **与 Issue trace_id 的边界隔离**：
+   - Issue 的 `trace_id`：代表**导出态 trace**，必须在 Tempo 可查（见 R1）。
+   - Log 的 `trace_id`：代表**本地逻辑流关联**，服务于本地控制台排查与 `pony-agent.log` 日志归集。
+
+### 优先级
+P1
+
+### 验收判据
+1. 在无外部导出（门禁关闭）状态下，turn 周期内的 `log_json` 依然正常输出统一的 32 位十六进制 `trace_id`。
+2. 文档与代码注释中均已消除「日志 trace_id 必定可在远端 APM 检索」的误导性表述。
+

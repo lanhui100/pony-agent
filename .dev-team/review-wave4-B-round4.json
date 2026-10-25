@@ -1,0 +1,62 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/stores/runtime.ts",
+    "src/types/runtime.ts",
+    "src/lib/telemetry.ts",
+    "src/main.ts",
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "tests/wave-4-trace-id-live.spec.ts"
+  ],
+  "round3_closure": {
+    "blocking_recheck": "CLOSED — 上一轮唯一 BLOCKING（turn:started/delta/failed/cancelled 不消费 payload.traceId ⇒ live turn 期 activeTraceId 恒 undefined、6 处 reportError 空转）已真实闭环：runtime.ts:3533-3537 在 turn:started 内 `const traceId = payload.traceId ?? null; if (traceId) this.upsertTurnTrace(payload.turnId, { traceId })`（写入发生在 3531 updateActiveTraceTimeline 之后、handler 唯一出口前）；getter runtime.ts:537-550 改为「activeTurnId 命中即只取该轮 traceId，未命中严格 undefined；仅无 active 时回落到最近 phase==='completed' 的 turn」。6 个 reportError 调用点全部接上 trace_id：main.ts:46/69/92（getActiveTraceId→store.activeTraceId）、tauri.ts:109（动态 import store）、metrics-diagnostics.ts:80（调用方传入 traceId）、runtime.ts:4438（failedTurnTraceId）。",
+    "checklist": {
+      "1_started_write": "PASS — runtime.ts:3533-3537 upsertTurnTrace(payload.turnId, { traceId }) 等价写入，且带 `if (traceId)` 守卫（门禁关闭不造空记录）。",
+      "2_terminal_patch_order": "PASS（顺序） — turn:failed: const failedTurnTraceId 于 4352 捕获（此刻 activeTurnId 仍为 payload.turnId）→ 4383 commitTurnTraceTimeline(...,{traceId: payload.traceId ?? null}) 同步落库 → 4413 window.setTimeout(0) → 4435 reportError。终态 patch 严格早于 reportError。turn:cancelled: 4576 commitTurnTraceTimeline 携带 traceId（4584），该分支无 reportError（无顺序义务）。",
+      "3_type_and_cast": "PARTIAL — types/runtime.ts:1120 TurnStreamEvent 已新增 `traceId?: string | null`（Rust types.rs:128 rename_all camelCase + 147 字段，wire 名 traceId 对齐）；但 runtime.ts:3534 仍保留 `(payload as any).trace_id` 回落、2649 保留 `(patch as any).trace_id`（见 ADVISORY #3，属类型逃逸/死回落，不影响闭环）。",
+      "4_getter_semantics": "PASS — runtime.ts:537-550：activeId 存在时只查该 turn 记录（未记录 ⇒ undefined），无 active 时才逆序找 phase==='completed' 的 traceId；tests #3（wave-4-trace-id-live.spec.ts:104-132）可证伪跨轮误归因。残余：failed 上报在 activeTurnId 置空后二次读 getter（ADVISORY #2）。",
+      "5_tests_falsifiable": "PASS（抽查 #1/#3） — #1（:32-53）断言 started 后 getter 立即等于该 traceId：若 started 不写则返回 undefined，故可证伪；#3（:104-132）第二轮不带 traceId 断言 undefined：若 getter 回落上一轮则返回 1111...，故可证伪。#2 断言 reportError 实参 trace_id/errorType（可证伪），但不钉「终态 patch 先于上报」顺序；#4/#5 覆盖不足见 ADVISORY #4。",
+      "6_naming": "PASS — Rust `trace_id`（types.rs:147，serde camelCase ⇒ `traceId`，skip_serializing_if none 表示缺省而非 null）↔ TS `traceId`（types/runtime.ts:1120；store 3534/4352/4391/4584）↔ reportError `trace_id`（telemetry.ts:51/353 → buildIngestPayload 375 原样出网）。三处各就各位。"
+    }
+  },
+  "gates": {
+    "targeted_vitest": "EXIT 0 — `npx vitest run tests/wave-4-trace-id-live.spec.ts tests/wave-4-observability.spec.ts` → Test Files 2 passed, Tests 9 passed, Duration 1.50s",
+    "full_vitest": "EXIT 1 — `npx vitest run` → Test Files 97 passed, Tests 1018 passed | 10 skipped, Errors 1 error（Uncaught ReferenceError: window is not defined @ src/stores/runtime.ts:773 scheduleDeferredPersist ← tests/runtime-store.spec.ts 的 jsdom teardown 后 800ms 定时器回调）。分类：PRE_EXISTING_BASELINE_DEFECT——触发路径（runtime.ts STAGE 3 `runLowPriorityTurnWork(()=>this.scheduleDeferredPersist())`、src/lib/runtime/utils.ts、tests/runtime-store.spec.ts）在本轮 diff 中零改动（runtime.ts 本轮 hunks 仅 +529/+2649/+3532/+4040/+4352/+4391/+4438/+4584），且 .dev-team/regression-baseline-wave43.json 已登记同一 `npx vitest run` exit_code=1（runtime-store.spec.ts teardown 报错）为基线缺陷；0 failed，非本波回归。",
+    "vue_tsc": "EXIT 0 — `npx vue-tsc --noEmit` 无输出、无 error。"
+  },
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4391,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '2620,2633p;4038,4041p;4389,4392p;4582,4585p' src/stores/runtime.ts  # 终态 patch 一律 `traceId: payload.traceId ?? null`，而 upsertTurnTrace 的 existing 分支是 Object.assign(existing, patch)（2621）。Rust types.rs:147 带 #[serde(skip_serializing_if = \"Option::is_none\")]：未采样/门禁关闭时 wire 上**没有** traceId 字段 ⇒ payload.traceId === undefined ⇒ patch.traceId=null ⇒ 把 turn:started 已写入该轮记录的 traceId 覆盖成 null（completed 4040 / failed 4391 / cancelled 4584 三处同型）。复现路径：started 带 traceId 后同一 turn 的终态事件缺该字段（如 turn_sync.rs:419 的 emit_stream_failed 在 460 begin_turn_trace 之前发出 ⇒ exported_trace_id()=None）。影响：turnTraceHistory/持久化丢失已获得的 traceId，completed 轮的 activeTraceId 回落随之为 undefined；不影响 4438 已提前捕获的 failed 上报。建议：patch 只在 `payload.traceId != null` 时携带 traceId（或 `traceId: payload.traceId ?? existing?.traceId`）。",
+      "detail": "既有测试 #2/#5 不覆盖「started 有值、终态缺值」的覆盖写场景。"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4438,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '4350,4356p;4413,4416p;4435,4440p;537,550p' src/stores/runtime.ts  # 4352 已在 activeTurnId 存活时算出 failedTurnTraceId，4353 立即 activeTurnId=null；但 setTimeout(0) 内 4438 又写 `failedTurnTraceId || this.activeTraceId` —— 此刻 getter 走 543-548 的「无 active ⇒ 最近 phase==='completed' 的 traceId」，于是「本轮失败且本轮无 traceId」时会把**上一轮已完成**的 trace_id 贴到本轮 TurnExecutionFailed 上报上，正是 getter 注释 534 行声称杜绝的跨轮误归因。反例状态：turn-1 completed 且 traceId=1111...，turn-2 的 started/failed 均不带 traceId（Rust 侧未采样，字段被 skip_serializing_if 省略）→ reportError payload.trace_id === '1111...' 而非 undefined。tests #5（:153-186）因 turnTraceHistory 为空而测不出。建议：4438 直接用 `failedTurnTraceId`（该值在 4352 已含 active 期 getter 结果），删除 `|| this.activeTraceId`。",
+      "detail": "触发条件需「前轮已采样完成 + 本轮未采样/门禁关闭切换」，故非阻断；但属于可观测性归属正确性缺陷。"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 3534,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n '(payload as any).trace_id\\|(patch as any).trace_id' src/stores/runtime.ts  # 2 命中（3534、2649）。TurnStreamEvent 已于 types/runtime.ts:1120 声明 traceId，snake_case 回落是死代码（Rust 仅 camelCase 下发，且 None 时字段直接缺席），强转只降低类型约束。建议：删除 `?? (payload as any).trace_id`（2649 同理），仅保留 payload.traceId。",
+      "detail": "本轮核验清单第 3 条的字面要求（不再出现强转取 traceId）未完全满足，但功能面已对齐，故 ADVISORY。"
+    },
+    {
+      "file": "tests/wave-4-trace-id-live.spec.ts",
+      "line": 134,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '134,151p;153,186p' tests/wave-4-trace-id-live.spec.ts  # #4 直接给 turnTraceHistory 注入一条 completed 记录后断言 getter，属正例复读：把 getter 的 `turn?.phase === \"completed\"` 条件删掉该用例仍绿（无法证伪「只回落 completed」）；应在该记录之上再放一条 phase='failed' 且 traceId 更近的记录，断言仍返回 completed 那条。#5 用 `traceId: null` 模拟关闭态，但 Rust types.rs:147 skip_serializing_if 使真实 wire 是**字段缺席**（undefined）；且 store 历史为空，无法捕获 findings[1] 的跨轮回落（补一条前置 completed 记录后断言 trace_id undefined 即可证伪）。",
+      "detail": "用例 1/2/3 具备真实证伪力（已抽查），仅 4/5 断言面偏弱，判 ADVISORY 不阻断。"
+    }
+  ]
+}
