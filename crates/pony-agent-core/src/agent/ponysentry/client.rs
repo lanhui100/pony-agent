@@ -40,6 +40,23 @@ pub struct PonySentryClient {
     breadcrumbs: Arc<Mutex<VecDeque<Breadcrumb>>>,
 }
 
+/// 过滤用于离线自测、E2E 诊断以及探针预埋的诊断桩错误，避免污染生产监控。
+/// 与前端 `shouldIgnoreTelemetryError` 语义严格保持对齐。
+pub fn should_ignore_telemetry_error(message: &str) -> bool {
+    let msg = message.trim();
+    if msg.contains("DIAG_STUB") || msg.contains("DIAG:") {
+        return true;
+    }
+    if msg.contains("cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch")
+        || msg.contains("stale mutation rejected")
+        || msg.contains("unknown control request")
+        || (msg.contains("control request") && msg.contains("kind mismatch"))
+    {
+        return true;
+    }
+    false
+}
+
 impl PonySentryClient {
     pub fn new(config: PonySentryConfig) -> Self {
         let breadcrumbs = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_BREADCRUMBS)));
@@ -128,6 +145,11 @@ impl PonySentryClient {
     ) {
         // fail-closed：无 token 即零 egress（enabled 恒开，门禁由 token 承担）
         if !self.config.enabled || self.config.client_token.is_none() {
+            return;
+        }
+
+        // 过滤诊断桩/测试预埋错误，避免污染生产监控（与前端 shouldIgnoreTelemetryError 保持一致）
+        if should_ignore_telemetry_error(message) {
             return;
         }
 
@@ -240,6 +262,21 @@ impl PonySentryClient {
         if !self.config.enabled || self.config.client_token.is_none() {
             return;
         }
+
+        // 诊断桩噪音硬过滤：message 或 exception.value 命中 DIAG_STUB 等模式则静默忽略
+        if let Some(ref msg) = payload.message {
+            if should_ignore_telemetry_error(msg) {
+                return;
+            }
+        }
+        if let Some(ref exc) = payload.exception {
+            if let Some(ref val) = exc.value {
+                if should_ignore_telemetry_error(val) {
+                    return;
+                }
+            }
+        }
+
         let mut payload = payload;
         // C2：IPC 路径（前端已带 event_id/trace_id）不得被丢弃；缺失项在 Rust 侧补齐。
         normalize_payload(&mut payload);
@@ -708,6 +745,16 @@ mod tests {
         assert_eq!(payload.extra.as_ref().expect("extra")["input_tokens"], 42);
         // 互跳字段仍被补齐。
         assert_eq!(payload.event_id.as_deref().map(str::len), Some(32));
+    }
+
+    #[test]
+    fn test_should_ignore_diag_stubs_and_control_noise() {
+        assert!(should_ignore_telemetry_error("IPC command \"ask_list_pending\" failed: DIAG_STUB_UNIMPLEMENTED"));
+        assert!(should_ignore_telemetry_error("load_session_runtime_view failed: DIAG: sessions.db read failed"));
+        assert!(should_ignore_telemetry_error("cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch"));
+        assert!(should_ignore_telemetry_error("stale mutation rejected"));
+        assert!(!should_ignore_telemetry_error("Network timeout connecting to LLM provider"));
+        assert!(!should_ignore_telemetry_error("Panic occurred in worker thread"));
     }
 
     /// H1 反向：`capture_panic` 的 culprit（panic 文件路径）同样被清洗。

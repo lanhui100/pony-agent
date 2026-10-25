@@ -259,8 +259,8 @@ export function deepSanitize(obj: unknown, depth = 0): unknown {
   return String(obj);
 }
 
-// ---- 面包屑队列 (上限 64 条环形缓冲) ----
-const MAX_BREADCRUMBS = 64;
+// ---- 面包屑队列 (上限 30 条环形缓冲，对齐 NFR PA-161 规范) ----
+const MAX_BREADCRUMBS = 30;
 const breadcrumbsQueue: Breadcrumb[] = [];
 
 export function addBreadcrumb(
@@ -269,13 +269,13 @@ export function addBreadcrumb(
   data?: Record<string, unknown>
 ): void {
   const item: Breadcrumb = {
-    category: sanitizeString(category),
-    message: sanitizeString(message),
+    category: truncateString(sanitizeString(category)),
+    message: truncateString(sanitizeString(message)),
     timestamp: Date.now(),
   };
 
   if (data) {
-    item.data = deepSanitize(data) as Record<string, unknown>;
+    item.data = deepTruncate(deepSanitize(data)) as Record<string, unknown>;
   }
 
   breadcrumbsQueue.push(item);

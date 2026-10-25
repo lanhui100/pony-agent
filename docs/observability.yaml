@@ -64,3 +64,11 @@ note: >-
   `crates/pony-agent-core/src/agent/otel/mod.rs`），不新增出口/端点/标签维度；`agent.turn` 根 span
   新增 `agent.turn.outcome=error` + `turn_error:` 状态承接子 span 失败。见
   `docs/audit/observability-audit-2026-10-25.md` 与 `.dev-team/contract-matrix-wave45.md`。
+  【wave-46 归属登记】前端与语义轨交互增强：
+  (1) 前端交互轨迹：全局面包屑强化为有界环形缓冲（30 条），自动捕获页面导航（`navigate_page`）
+      并在推入时做深度截断与凭据清洗，丰富排障上下文；
+  (2) 局部错误边界：新增 `ErrorBoundary.vue` 组件，使用 Vue 3 `onErrorCaptured` 拦截并阻止
+      子组件异常冒泡整屏，触发 `reportError` 并在局部渲染具备重试恢复机制的优雅降级卡片；
+  (3) Langfuse 用户归因：`crates/pony-agent-core/src/agent/otel/mod.rs` 支持环境变量
+      `PONY_OTEL_USER_ID`，在 `begin_turn_trace` 根 span 中规范映射 `langfuse.user.id`。
+  四维归属保持不变，唯一落点仍为既有 anchor。

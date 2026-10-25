@@ -45,6 +45,8 @@ pub fn capture_payload(payload: IngestPayload) {
     }
 }
 
+pub use client::should_ignore_telemetry_error;
+
 pub fn capture_panic(info: &PanicHookInfo) {
     if let Ok(client) = get_global().read() {
         client.capture_panic(info);

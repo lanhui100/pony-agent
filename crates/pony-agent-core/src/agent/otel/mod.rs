@@ -162,7 +162,13 @@ pub const ENV_PONY_OTEL_SERVICE_VERSION: &str = "PONY_OTEL_SERVICE_VERSION";
 /// `deployment.environment` resource 属性的进程 env 覆盖名（PA-153）；trim 后非空即覆盖默认值。
 pub const ENV_PONY_OTEL_ENVIRONMENT: &str = "PONY_OTEL_ENVIRONMENT";
 
-// ------------------------------------------------------ resource 归因键（PA-153）
+/// 探针自报标记环境变量名（O4 探针隔离）；取值为 `1` / `true` / `probe` 时 resource 自动声明 `pony.probe=true`。
+pub const ENV_PONY_OTEL_PROBE: &str = "PONY_OTEL_PROBE";
+
+/// Langfuse `langfuse.user.id` 属性覆盖环境变量名（PA-163）；trim 后非空即注入 root span。
+pub const ENV_PONY_OTEL_USER_ID: &str = "PONY_OTEL_USER_ID";
+
+// ------------------------------------------------------ resource 归因键（PA-153 / O4）
 //
 // 归因维度只在 resource 层表达（span 属性不动）；键名取自 OTel resource 语义约定。
 
@@ -171,6 +177,9 @@ pub(crate) const RESOURCE_SERVICE_VERSION: &str = "service.version";
 
 /// resource 语义约定键：部署环境（缺省按构建档位推导，见 [`default_deployment_environment`]）。
 pub(crate) const RESOURCE_DEPLOYMENT_ENVIRONMENT: &str = "deployment.environment";
+
+/// resource 语义约定键：探针隔离标记（集群边缘 edge 探针隔离契约源侧自报）。
+pub(crate) const RESOURCE_PONY_PROBE: &str = "pony.probe";
 
 /// debug 构建的默认部署环境取值。
 pub(crate) const ENVIRONMENT_DEVELOPMENT: &str = "development";
@@ -481,10 +490,16 @@ pub(crate) fn resolve_resource_attributes(
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     let environment = override_value(ENV_PONY_OTEL_ENVIRONMENT)
         .unwrap_or_else(|| default_deployment_environment(cfg!(debug_assertions)).to_string());
-    vec![
+    let mut attrs = vec![
         (RESOURCE_SERVICE_VERSION.to_string(), service_version),
         (RESOURCE_DEPLOYMENT_ENVIRONMENT.to_string(), environment),
-    ]
+    ];
+    if let Some(probe) = override_value(ENV_PONY_OTEL_PROBE) {
+        if probe.eq_ignore_ascii_case("true") || probe == "1" || probe.eq_ignore_ascii_case("probe") {
+            attrs.push((RESOURCE_PONY_PROBE.to_string(), "true".to_string()));
+        }
+    }
+    attrs
 }
 
 /// 装配入口：安装全局 trace provider。
@@ -1168,9 +1183,10 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
     }
     if spans_allowed() {
         if let Some(state) = current_state() {
+            let user_id = env_non_empty(ENV_PONY_OTEL_USER_ID);
             let attributes = to_key_values(turn_span_attributes(&TurnSpanInput {
                 session_id: session_id.to_string(),
-                user_id: None,
+                user_id,
                 turn_id: turn_id.to_string(),
                 sequence,
                 phase: String::new(),
@@ -3054,6 +3070,21 @@ mod tests {
             "L3-A#6：Debug 不得泄漏 token：{shown}"
         );
         assert!(shown.contains("[REDACTED]"), "必须显式标出脱敏位：{shown}");
+    }
+
+    #[test]
+    fn test_resolve_resource_attributes_probe_marking() {
+        let attrs = resolve_resource_attributes(|k| match k {
+            ENV_PONY_OTEL_PROBE => Some("true".to_string()),
+            _ => None,
+        });
+        assert!(attrs.iter().any(|(k, v)| k == RESOURCE_PONY_PROBE && v == "true"));
+
+        let attrs_off = resolve_resource_attributes(|k| match k {
+            ENV_PONY_OTEL_PROBE => Some("false".to_string()),
+            _ => None,
+        });
+        assert!(!attrs_off.iter().any(|(k, _)| k == RESOURCE_PONY_PROBE));
     }
 
     /// 黑洞 OTLP 端点：只 accept、不回包（导出必然超时），held 到预算耗尽。
