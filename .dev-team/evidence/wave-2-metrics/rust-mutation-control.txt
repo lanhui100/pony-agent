@@ -1,0 +1,7 @@
+test wave2_llm_span_exports_speed_attribute_to_wire ... ok
+test wave2_turn_flow_calculates_and_records_speed ... FAILED
+failures:
+thread 'wave2_turn_flow_calculates_and_records_speed' (3539386) panicked at crates/pony-agent-core/tests/otel_trace_migration_test.rs:1323:5:
+Wire payload 
+failures:
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 21 filtered out; finished in 3.51s

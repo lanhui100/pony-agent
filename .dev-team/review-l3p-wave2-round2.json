@@ -1,0 +1,14 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "src/lib/runtime/token-metrics.ts",
+    "src/lib/runtime/useTraceProjection.ts",
+    "src/lib/runtime/metrics-diagnostics.ts",
+    "src/components/HomeStatusPanel.vue",
+    "src/components/HomeSidebar.vue",
+    "src/components/chat/WorkspaceComposer.vue",
+    ".dev-team/contracts/wave-2-metrics.md"
+  ],
+  "findings": []
+}

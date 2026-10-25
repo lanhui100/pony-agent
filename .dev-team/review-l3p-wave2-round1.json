@@ -1,0 +1,63 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "src/lib/runtime/token-metrics.ts",
+    "src/lib/runtime/useTraceProjection.ts",
+    "src/lib/runtime/metrics-diagnostics.ts",
+    "src/components/HomeStatusPanel.vue",
+    "src/components/HomeSidebar.vue",
+    "src/components/chat/WorkspaceComposer.vue"
+  ],
+  "findings": [
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 141,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'data-speed-debug' src/components/HomeStatusPanel.vue && grep -c 'isDebugLoggingEnabled' src/components/HomeStatusPanel.vue",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "src/components/chat/WorkspaceComposer.vue",
+      "line": 1128,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'data-context-debug' src/components/chat/WorkspaceComposer.vue",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/lib/runtime/metrics-diagnostics.ts",
+      "line": 32,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -c 'trace_id' src/lib/runtime/metrics-diagnostics.ts",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/lib/runtime/metrics-diagnostics.ts",
+      "line": 25,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'const signature' src/lib/runtime/metrics-diagnostics.ts",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 906,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -rn 'record_speed_and_context\\|record_turn_speed' crates --include=*.rs | grep -v 'otel/mod.rs' | wc -l",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/lib/runtime/token-metrics.ts",
+      "line": 189,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '30p' .dev-team/contracts/wave-15-token-metrics.md; ls .dev-team/contracts | grep -c 'wave-2'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/components/chat/WorkspaceComposer.vue",
+      "line": 1121,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'delay-duration' src/components/chat/WorkspaceComposer.vue",
+      "severity": "ADVISORY"
+    }
+  ]
+}
