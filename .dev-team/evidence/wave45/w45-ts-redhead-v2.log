@@ -1,0 +1,54 @@
+
+ RUN  v4.1.9 /tmp/w45-red-head
+
+ ❯ tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts (2 tests | 2 failed) 39ms
+     × PA155-T1: 缓存可用但宿主刷新永不 settle → 有界 settle、缓存消息仍可见、无硬失败 31ms
+     × PA155-T2 (L2-AT 对抗): 宿主读在 baseline 超时 + 5s 后才 resolve → 仍须有界收敛，且迟到结果不得改写状态 7ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts > PA-155 · local-cache 初始化策略的宿主刷新有界性 > PA155-T1: 缓存可用但宿主刷新永不 settle → 有界 settle、缓存消息仍可见、无硬失败
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts:336:35
+    334|
+    335|     // Assert 1（红相主断言）：必须有界收敛，且为 resolve（启动流程不得向调用方抛）。
+    336|     expect(settledWithinDeadline).toBe(true);
+       |                                   ^
+    337|     expect(settlement.outcome).toBe("resolved");
+    338|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts > PA-155 · local-cache 初始化策略的宿主刷新有界性 > PA155-T2 (L2-AT 对抗): 宿主读在 baseline 超时 + 5s 后才 resolve → 仍须有界收敛，且迟到结果不得改写状态
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts:376:35
+    374|     // Assert 1：必须在迟到结果到达之前收敛（截止期严格早于迟到时刻）。
+    375|     expect(SETTLE_DEADLINE_MS).toBeLessThan(LATE_RESOLVE_AT_MS);
+    376|     expect(settledWithinDeadline).toBe(true);
+       |                                   ^
+    377|     expect(settlement.outcome).toBe("resolved");
+    378|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  18:25:58
+   Duration  2.01s (transform 966ms, setup 0ms, import 1.18s, tests 39ms, environment 591ms)
+
+EXIT=1
