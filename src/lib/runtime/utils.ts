@@ -33,6 +33,33 @@ export function isDebugLoggingEnabled() {
   return window.localStorage.getItem(DEBUG_RUNTIME_LOGS_KEY) === "true";
 }
 
+const WORKSPACE_SCROLL_DEBUG_KEY = "pony-agent.debug.workspace-scroll";
+
+/**
+ * [workspace-scroll] 调试通道开关（PA-117）。优先级（运行时求值、不缓存）：
+ * ① localStorage `"false"` → 关（kill switch，优先于 DEV 兜底）
+ * ② localStorage `"true"` → 开
+ * ③ URL `?debug=1` / `?debug=scroll` → 开
+ * ④ 否则 DEV 真值 → 开，否则关（测试/开发态默认可用）
+ */
+export function isWorkspaceScrollDebugEnabled(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const stored = window.localStorage.getItem(WORKSPACE_SCROLL_DEBUG_KEY);
+  if (stored === "false") {
+    return false;
+  }
+  if (stored === "true") {
+    return true;
+  }
+  const urlDebug = new URLSearchParams(window.location.search).get("debug");
+  if (urlDebug === "1" || urlDebug === "scroll") {
+    return true;
+  }
+  return import.meta.env.DEV === true;
+}
+
 export function debugLog(event: string, payload?: Record<string, unknown>) {
   if (!isDebugLoggingEnabled()) {
     return;

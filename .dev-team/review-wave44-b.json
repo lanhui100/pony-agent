@@ -1,0 +1,26 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/stores/runtime.ts",
+    "src/components/HomeWorkspace.vue",
+    "src/lib/useTimelineAutoScroll.ts",
+    "src/lib/runtime/utils.ts",
+    "docs/observability.yaml"
+  ],
+  "findings": [
+    {
+      "file": "docs/observability.yaml",
+      "line": 57,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base HEAD; echo EXIT=$? # 实跑 EXIT=2：[FAIL][D1] 声明在本次变更中被修改，需显式批准（--decl-approved 或 commit message 含 [decl-change-approved]）；加 --decl-approved 后 EXIT=1（仅存量『零收口点』WARN，属声明 note 已接受的空转风险，非本波遗漏）。登记内容与代码逐项一致（pony-agent.debug.workspace-scroll / ?debug=1|scroll / DEV 兜底），故仅需提交时补批准标记。"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 60,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git status --porcelain docs/audit/observability-audit-2026-10-25.md # 输出 '?? docs/audit/observability-audit-2026-10-25.md'：yaml:60 引用的审计文件当前未被跟踪，若本波提交不含该文件则引用悬空（docs/AGENTS.md「同提交原子性」）。"
+    }
+  ]
+}

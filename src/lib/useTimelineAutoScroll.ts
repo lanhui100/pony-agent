@@ -22,6 +22,7 @@ type UseTimelineAutoScrollOptions = {
   getLatestUserMessageElement: () => HTMLElement | null;
   getLatestAgentMessageElement: () => HTMLElement | null;
   showDebug: (event: string, patch?: Record<string, unknown>) => void;
+  isDebugEnabled?: () => boolean;
   updateFloatingUiPositions: () => void;
 };
 
@@ -55,6 +56,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     getLatestUserMessageElement,
     getLatestAgentMessageElement,
     showDebug,
+    isDebugEnabled,
     updateFloatingUiPositions
   } = options;
 
@@ -182,6 +184,10 @@ let lastLayoutCompensationAtMs = 0;
   }
 
   function emit(event: string, patch: Record<string, unknown> = {}) {
+    // PA-117：关闭态必须在 collectMetrics() 之前短路，否则布局读数仍会发生。
+    if (isDebugEnabled && !isDebugEnabled()) {
+      return;
+    }
     showDebug(event, {
       ...collectMetrics(),
       ...patch

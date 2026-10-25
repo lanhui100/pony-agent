@@ -2691,7 +2691,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             break;
           }
           case "host-read": {
-            const runtimeView = await this.loadSessionRuntimeViewState(preferredSessionId);
+            // PA-115：宿主读必须有界（同 :2141 语义），避免 IPC 挂起导致 initializeSessions 永不 settle。
+            const hostRead = this.loadSessionRuntimeViewState(preferredSessionId);
+            const runtimeView = await withTimeout(hostRead, HYDRATION_TIMEOUT_MS, "加载对话");
             if (!runtimeView?.checkpoint && runtimeView?.session.history.length === 0) {
               this.resetSessionRuntimeState();
               this.sessionId = preferredSessionId;
@@ -2718,7 +2720,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           }
         }
       } catch (error) {
+        // PA-115 Gate-1 BLOCKING：草稿是用户输入而非可回滚状态，快照回滚不得覆盖它。
+        const draftBeforeRestore = this.draftMessage;
         restoreSessionRuntimeSnapshot(this, previousSnapshot);
+        if (draftBeforeRestore !== previousSnapshot.draftMessage) {
+          this.draftMessage = draftBeforeRestore;
+        }
         this.sessionError = `初始化对话失败：${String(error)}`;
         debugLog("session:init:error", {
           error: String(error)

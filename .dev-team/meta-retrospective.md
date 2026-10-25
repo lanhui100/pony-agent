@@ -1,64 +1,31 @@
-# 元框架复盘报告（Meta-Retrospective）
+# 元框架复盘（Wave-44：前端健壮性收敛 + 可观测性审计）
 
-> 本轮对象：Wave-5 + Wave-6（成本估算 / 预算软告警 / CLI,TUI 可观测性引导 / 计价协议语义 / 子 span 会话 / 结构化日志 / 巡检脚本修正）。复盘重心为**协作元框架与组织协议本身**。
-
-## 补充：Wave-6 增补复盘
-
-### 门禁穿透（本轮最有价值的三次）
-1. **自证实验隔离了责任边界**：Wave-5 收尾时公网 issue 的 `trace_id` 为空，执行者倾向「客户端没发」，我改用**不经本仓库**的 curl 直打 ingest，回读事件 payload 发现 `event_id` 保留而 `trace_id` 被服务端丢弃 ⇒ 一次实验把"客户端缺陷"改判为"服务端 schema 缺口"，避免了继续在客户端加无效修补。**结论：跨组件断言必须做"绕过本组件"的隔离实验。**
-2. **证据不可信导致假红**：`wave5_cost_test` 的 mock OTLP sink 不回包 ⇒ `force_flush` 恒 Err ⇒ 用例恒红；执行者用双探针（复刻 sink vs 回 200 sink）证明是测试缺陷而非实现缺陷。**教训：红相也要验证"红得对"**。
-3. **巡检脚本自身误判**：`tcount` 缺时间窗把 1h 前的 trace 判成不存在（假 MISSING），`g/gh` 未排除文档与 `target*` 把「trace/metrics 二级化」散文判成 `/#metrics` 实现（假 PASS）。修完 `M1 MISSING / T4 PASS` 才与事实一致。**教训：审计工具的输出也是"证据"，必须能被交叉验证（本次用显式时间窗复核推翻了此前的"数据丢失"结论）。**
-
-### 元协议增补
-1. **P0 撤回错误结论要留痕**：我把"Tempo 丢数据"写进报告后经复核推翻，已在同一文件保留「原判断（错误）→ 复核（正确）→ 根因」三段，而不是偷偷改写。审计报告必须可追溯订正。
-2. **P1 服务端契约缺口需独立工单**：客户端已把 `trace_id` 送到 ingest，服务端 schema 不接 ⇒ 这类跨仓缺口应在 `OBS-GOV` backlog 建「PonySentry ingest 增加 trace_id」条目，并在客户端契约里标注「依赖服务端支持才可互跳」。
-3. **P1 mock 工具收敛**：两处 OTLP sink（`otel_trace_migration_test` 会回包、`wave5_cost_test` 曾不回包）导致一次假红。建议抽 `tests/support/otlp_sink.rs` 单一实现，红相前先自检 sink 行为。
-4. **P2 巡检脚本应有自检用例**：`selftest.sh` 覆盖了 declare/audit-diff，但 `audit-project.sh` 的判据（M1/M2/T4）没有"假文档目录"回归夹具。建议加 fixture：一个只含散文的假项目必须判 MISSING。
+> 本轮对象：Wave-44（PA-115 启动期 host-read 有界超时 / PA-135 组合态撤销 / PA-117 调试输出门控）+ 基于 Tempo/Loki/Prometheus/PonySentry/Langfuse 真实数据的项目审计。
+> 历史复盘保留于 `meta-retrospective-wave6.md`；本文只记本轮。
 
 ## 一、 通信拓扑与信噪比 (Topology & Noise)
-- **拓扑**：Lead + Protocol + Test + Executor-Rust + Executor-Frontend（5 名，≤8）。审查走 Subagent（Wave-5 单轮合并双视角）。
-- **并行有效性**：Rust 与前端写域正交，两 Executor 全程并行无冲突；跨侧契约（`costUsd` / `costBudgetUsd`）由契约先冻结。
-- **本轮信噪比最好的实践**：Executor-Rust 在遇到「冻结测试自身缺陷」时**不擅自改测试、而是给出根因+两态探针+最小补丁建议**，Lead 一次裁决即通过（k4 sink 不回包问题）。这比"先改了再说"省掉至少两轮返工。
-- **仍需改进**：Lead 回派缺陷时仍出现过一次"只描述现象、没给目标态"，本轮已改为"必须贴改后应长的代码片段"（Wave-4 教训复用后生效）。
+- **拓扑**：Lead + Protocol Agent + Test Agent + Executor-A + Executor-B（5/8 槽位）；方案审查 A/B、L3 A/B、L3-P 共 5 次 Subagent 挂载；观测事实采集用 1 个只读 Explorer Subagent。
+- **有效实践**：Explorer 一次交付 25 条带 command/exit_code 的观测事实（77 trace / 11 issue / 47 Langfuse trace），Lead 只做抽验（复跑 `count(up)`、TraceQL 计数、ClickHouse count），把「数据采集」与「裁决」解耦，显著降低 Lead 上下文占用。
+- **噪声与浪费**：第一批方案审查子代理 2 个中有 1 个长时间无产物（疑似上下文耗尽），导致 Gate-1 重复派发一轮；Test Agent 在 `tests/acceptance/wave44/` 留下临时 `_probe117c.spec.ts`，由 Lead 清理。**结论：子代理必须有“产物路径 + 时限 + 失败信号”三件套，临时文件必须写在 /tmp 或带下划线且被 exclude。**
 
 ## 二、 门禁穿透与误杀率 (Gate Penetration / False Negatives & Positives)
-**本轮抓到的真问题（全部有机器证据）**：
-1. **冻结测试自身缺陷（生产性拦截）**：`wave5_cost_test` 的 mock OTLP sink 只读不回包 ⇒ 导出层必然 3000ms 超时 ⇒ `force_flush()` 恒 Err ⇒ K4 wire 断言**无论实现对错都红**。Executor 用「复刻该 sink → flush=Err」vs「回 200 → flush=Ok 且两个 cost 属性都在 wire」两态探针证明是测试缺陷，Lead 裁决派 Test 修 helper（断言零改动）。这是"红相不可信"的典型，值得沉淀为门禁自检项。
-2. **零假测试（前端同义反复）**：L3 指出「软告警不阻断」用例断言的 `canSubmitPrompt` 是**无消费者的 shim** ⇒ 恒真。改为挂载真实 `HomeStatusPanel` 断言告警样式 + 草稿保留 + 提交链路未被阻断，并做变异证伪。
-3. **第二份价格真源**：`budget.rs` 残留 `ModelPricing` + 编造的 `$3/$15/$0.75` Default，与「`cost.rs` 唯一真源 / 宁缺勿错」冲突。处置：删 Default、结构改为引用 + 计价委托唯一公式（既有 frozen `wave33` 用例保持绿）。
-4. **真实运行暴露的 P0 断链**：`ponycli`/`pony` 对 `otel`、`ponysentry` **零命中** —— 只有跑真实轮次才看得出来（静态巡检会把 T1/T2/T3 判 PASS，因为依赖与打点在 core 里）。
-- **误判/超纲**：0 起 NFR-DEGRADED。Wave-5 L3 共 13 条 ADVISORY，我判定 6 条收口（`>=` 阈值语义、来源 URL、唯一真源、假测试、K4 负向用例、来源链接），其余（结构化 warn 字段、Anthropic cache 语义、子 span session 下沉等）转 backlog 并写明风险。
-- **既有红复核**：`config.rs:1616`（断言 256_000 vs 常量 1_000_000）经 HEAD 源码核实为既有红，本轮未顺手修（避免夹带）。
+本轮门禁抓到 5 个真问题，全部有机器证据：
+1. **Gate-1 BLOCKING（真缺陷，非误杀）**：3500ms watchdog 解锁输入后，15000ms 超时若整包快照回滚会静默吞掉用户草稿。审查 B 用 fake-timer 反例证明；契约新增 `PA115-T2a` 草稿保全条款，实现以“回滚前保存/回滚后恢复 draft”最小闭包修复。
+2. **测试自身缺陷（TEST-DEFECT）**：`PA117-T1` 在开启态测量后读活窗口缓冲，忠实实现必红。Test Agent 改为读关闭态快照并重新锚定红相；实现未迁就错误断言——这是测试分权制生效的关键证据。
+3. **NFR 机械性缺口（BLOCKING 号）**：超时值只在常量层钉住、调用点未钉，`1000ms` mutant 可存活。补“14000ms 未收敛 / 16000ms 收敛”后 mutant 被击杀（Test Agent 实测）。
+4. **L3-B BLOCKING（实现级，交付前拦截）**：关闭态 markdown `render-complete` 仍写 `streamDebugState` 5 个键并落盘，违反契约 §2.3。修复为 `updateStreamDebugReveal` 入口 no-op 门控（+4 行）；Test Agent 补“落盘无 markdownRender* 键”断言；L3-B 复核探针由 5 键降为 0 键，改判 PASS。
+5. **写域机械审计 0 越界**：`git diff --name-only` 与 4 个 write_scopes 完全一致；blast-keywords 0 命中；union diff 58 行 <100。
+- **误杀/降级**：0 起 NFR-DEGRADED；审查 A 6 条、B 9 条 ADVISORY 中，采纳 5 条（契约探针口径、legacy IME Enter、restoreAllMocks 污染、NFR 0 口径、调用点钉住），其余登记 Non-Goal 或 backlog。
+- **红相纯度**：`dev-red-purity.py` PASS（pure_red=true），8 条均落点 SUT 栈。
 
 ## 三、 分工契约与隔离有效性 (Contract Isolation)
-- **测试分权有效**：本轮 Test Agent 唯一越界是"改 helper 修断言外的死锁"，我明确背书并要求 diff 仅限 helper 区域；断言逻辑零改动。
-- **写域扩展 0 次**：本轮通过"事先在任务描述里列全写域"避免了 Wave-4 的频繁扩权。Executor 仍做到"越界前先问"。
-- **契约演进**：`wave-5-cost.md` v1.0 → v1.1（K3.1 告警落点分工、K5.1 价格表生命周期/宁缺勿错），原文保留。
+- **写域隔离**：Executor-A 仅 `src/stores/runtime.ts`（+9 行）；Executor-B 仅 3 个前端文件（+54 行）；Test Agent 仅 `tests/acceptance/wave44/**`；Lead 仅 `.dev-team/**` 与 `docs/**`。零交叉污染。
+- **契约演进**：Gate-1 后 `contract-matrix-wave44.md` +26/−12、NFR +7；Test Agent 同步迁移断言；Lead 以 `git stash push -- src/` 在“实现已落地”状态下重锚红相（8/8 红），随后 pop 恢复实现——证明契约演进不破坏红相纪律。
+- **分权制的代价与收益**：Test Agent 不能修实现、Executor 不能动测试，导致“测试缺陷”需 Lead 裁决 + 两轮往返；但正是这条约束让 `1` 类假绿（开启态读活窗口）没有变成“改实现迁就测试”的隐性缺陷。
 
 ## 四、 元协议迭代建议 (Self-Evolving Protocol)
-1. **P0 冻结测试也要接受"可执行性审计"**：本轮 k4 的 sink 不回包导致"红相不可信"。建议在红相锚定后加一步机器自检：**对每条 wire 级用例，确认 mock sink 会回包**（否则用例恒红，会把实现者逼去吞错）。可固化为 `dev-team` 的 Join Barrier 前置项。
-2. **P0 交付验证必须跑"真实形态"**：CLI/TUI 三处断链（引导/日志/issue）静态巡检全 PASS，只有真跑一次轮次才暴露。建议把「交付形态矩阵」（desktop / cli / tui / headless）列入可观测性接入的必测项。
-3. **P1 shim 禁令**：凡为让测试通过而新增的 `canSubmitPrompt` 类"未被任何 UI 消费"的 getter，一律视为假测试温床。建议在验收模板里加一条：**测试断言的消费点必须是生产代码路径**（可在 PR 描述里给出 `grep` 证据）。
-4. **P1 mock sink 契约**：所有 OTLP sink 类测试 helper 收敛到一处共用实现（当前 `otel_trace_migration_test` 会回包、`wave5_cost_test` 曾不回包 ⇒ 不一致即事故源）。建议抽到 `tests/support/otlp_sink.rs`。
-5. **P2 证据文件自污染治理**：`cargo test --test '*'` 仍会重写 `.dev-team/evidence/wave15/wire-red.json`（本轮又手工复原 3 次）。建议该用例写入临时目录或标 `#[ignore]`，否则每次全量测试都污染工作树、干扰提交门禁。
-6. **P2 enforcement_points 空转**：`audit-diff.sh` 对本站输出「规则集为空」WARN。属诚实空转（reqwest 仍 4 处直连，正则无法可靠拦截），需进 OBS-GOV backlog 建 `http_client` 收口点，否则该门禁长期无判定力。
-
-
-## 补充二：Wave-7（中等规模新项目 Usage Governance v1）
-
-### 门禁穿透
-- **执行者主动发现"可绕过面"**：CLI 用 `FileSessionBackend` 而账本走 trait 默认实现（恒零）⇒ enforcement 在 CLI 永不触发。执行者在收口阶段自查发现并修（同 schema SQLite 侧车），比 L3 审查更早。**这说明"实现者自证"在多宿主场景下仍有价值——前提是自证给出物理收据（预置 $1 账本仍不拦）而非口头断言。**
-- **Lead 侧踩坑两次（自造噪声）**：复审计时把 settings 治理字段写成 snake_case（`hardLimitUsd` 实为 camelCase），serde `Option` 静默忽略 ⇒ 误判"enforcement 不生效"；另把"日志文件懒创建"误判为"日志链断"。两条都已写入复审报告的踩坑记录。**教训：验证失败时先怀疑验证方法，再怀疑实现。**
-- **L3 审查未在时限内产出**：Wave-7 的 L3 subagent 超时未落盘 JSON，Lead 改为对三处最高风险（NULL≠0、第二份计价公式、span 白名单）做定点自查并以 Tempo 实据佐证。**这属于对"审查预算超水位自动降级为纯机器核验"的一次真实应用，需在下一轮把"L3 超时"显式记入熔断计数。**
-
-### 元协议增补
-1. **P0 多宿主一致性必须显式列为本项目的一等检查项**：本次"CLI 可绕过"与 Wave-4 的"CLI/TUI 零引导"是同一根因（桌面优先实现）。建议在 dev-team 的 L3 检查清单里固化一条：**凡 core 能力，必须列出三宿主接入点并逐一验证**。
-2. **P1 配置字段的跨语言命名要有机械校验**：本轮两次踩坑都源于 Rust serde camelCase ↔ 手写 JSON 键名不一致。建议在验收里加一条：settings 结构体字段名与 `src/types/settings.ts` 由脚本比对（现有 `check-declaration.sh` 类似思路）。
-3. **P2 复审脚本应内置到仓库**：本轮复审命令（隔离 HOME + token 注入 + Tempo 回查）是手工拼的。建议落成 `scripts/observability/chain-probe.sh`，把"正常轮 / 阻断轮 / trace 回查"三件事一键跑通，避免每轮重写并重复踩坑。
-
-
-### Wave-7 补记：L3 判 FAIL 是本轮最有价值的一次门禁
-- **3 个 BLOCKING 全部是"功能对错"而非"链路通断"**：设置键名 camelCase 断裂（UI 配置永不生效）、未计价被伪造成 0 成本（账本第二套语义）、金额进 issue payload（财务数据泄漏）。而端到端链路本身是**全通**的（trace/日志/span 都对）。
-- **教训（P0）**：`可观测性链路通 ≠ 功能正确`。任何"链路验证"的结论都必须显式声明其覆盖面仅限数据通路，不得外推为功能验收。
-- **教训（P1）**：跨语言配置契约（Rust serde camelCase ↔ 手写 TS/JSON 键）缺机械校验，导致 UI 配置整条路径不可达而所有测试仍绿——本轮由 L3 的 `counterexample_cmd` 断言文件内容才发现。建议把「配置键名一致性」做成脚本门禁（比对 `app_settings.rs` 字段与 `src/types/settings.ts`）。
-- **教训（P2）**：`ui-block.png` 初次提交的是启动 splash 而非拦截 UI —— **截图凭证必须可自证内容**（本轮由 L3 指出后重截）。凡以截图作凭证，须同时给出"该图为何证明目标行为"的一句话说明。
+1. **[P0] 子代理交付契约前置**：Subagent 任务模板必须含 `output_path`、`deadline`、`on_failure` 三字段；Lead 以文件 mtime 作为唤醒信号，超过时限未见产物直接重派（本轮 Gate-1 因此损失约 10 分钟）。
+2. **[P0] 契约演进后的红相重锚应脚本化**：`stash src → 跑验收 → commit tests → stash pop → 跑验收` 是通用动作，建议固化为 `dev-red-reanchor.sh`，避免手工顺序错误。
+3. **[P1] TEST-DEFECT 豁免通道**：冻结测试被发现自相矛盾时，当前流程要求“改测试 + 重锚 + 重跑”，建议在契约矩阵增加 `test_defect_waiver` 段（含反证命令与 Lead 裁决），减少往返。
+4. **[P1] 观测驱动的 backlog 生成**：本轮审计产出 9 条优化点（root span 错误承接、探针隔离、issue 治理、usage 属性等），建议把“审计报告 → backlog 卡片”作为 wave 收口的固定动作，让观测数据真正进入迭代闭环。
+5. **[P2] 审计工具口径修正回写 skill**：`audit-project.sh` 对 desktop 项目的空 service/project 与 `limit` 当计数的缺陷，应作为 `observability-onboarding` 的 selftest fixture 固化（否则每轮都要人工校正）。

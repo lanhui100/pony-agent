@@ -82,23 +82,39 @@
           "write_scopes": [
             "src/stores/runtime.ts"
           ],
-          "status": "pending"
+          "status": "in_progress"
         },
         "task-4": {
           "owner": "executor-beta",
           "write_scopes": [
-            "src/components/HomeWorkspace.vue"
+            "src/components/HomeWorkspace.vue",
+            "src/lib/useTimelineAutoScroll.ts",
+            "src/lib/runtime/utils.ts"
           ],
-          "status": "pending"
+          "status": "in_progress"
         }
       },
       "gates": {
         "regression_baseline": "99 files / 1026 passed / 10 skipped / EXIT 0",
-        "classification": "B (multi-file business flow, UI interaction, I/O timeout) -> B-level mandatory team"
+        "classification": "B (multi-file business flow, UI interaction, I/O timeout) -> B-level mandatory team",
+        "gate1_review": "plan-A PASS(6 adv), plan-B FAIL(1 BLOCKING: draft rollback) -> adopted; re-review-B FAIL(1 BLOCKING: call-site timeout unpinned) -> adopted (mutant killed)",
+        "red_phase": "8/8 red, dev-red-purity PASS (pure_red=true)",
+        "machine_write_scope": "git diff 4 src files == write_scopes; blast keywords 0; union diff 54 lines",
+        "observability": "check-declaration EXIT 0; audit-diff EXIT 1 (WARN zero enforcement points, accepted)"
       },
       "observability": {
         "applicable": true,
         "reason": "UI interaction + host IPC read (network/IPC IO) + LLM project; requires audit-diff + check-declaration"
+      },
+      "protocol_commit": "3c6736d",
+      "contract_amend_commit": "143b1ea",
+      "red_commit": "9b70bde",
+      "red_tag": "wave-44-red",
+      "green_state": {
+        "vitest_acceptance": "8/8 passed",
+        "full_suite": "102 files/1034 passed/10 skipped EXIT 0",
+        "build": "EXIT 0",
+        "typecheck": "EXIT 0"
       }
     }
   ],

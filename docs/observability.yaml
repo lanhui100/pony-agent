@@ -54,3 +54,7 @@ note: >-
   (5) 无 journey.yaml（anchor_events 机制未启用）。
   收口点建好之后再按 schema 补 enforcement_points（path + guarantees + forbidden_in_other_files），
   且顺序是先确认「当前无违规」再写 forbidden，避免门禁一落地就红。
+  【wave-44 归属登记】前端 `[workspace-scroll]` 调试通道新增显式开关
+  （`pony-agent.debug.workspace-scroll` / `?debug=1|scroll` / DEV，默认生产关闭），属开发者诊断输出，
+  非结构化日志出口：四维归属不变（logs 仍为结构性 N-A），不新增 metrics/tracing/issues 面。
+  审计事实与优化点见 `docs/audit/observability-audit-2026-10-25.md`。
