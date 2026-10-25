@@ -42,3 +42,16 @@
 4. **P1 mock sink 契约**：所有 OTLP sink 类测试 helper 收敛到一处共用实现（当前 `otel_trace_migration_test` 会回包、`wave5_cost_test` 曾不回包 ⇒ 不一致即事故源）。建议抽到 `tests/support/otlp_sink.rs`。
 5. **P2 证据文件自污染治理**：`cargo test --test '*'` 仍会重写 `.dev-team/evidence/wave15/wire-red.json`（本轮又手工复原 3 次）。建议该用例写入临时目录或标 `#[ignore]`，否则每次全量测试都污染工作树、干扰提交门禁。
 6. **P2 enforcement_points 空转**：`audit-diff.sh` 对本站输出「规则集为空」WARN。属诚实空转（reqwest 仍 4 处直连，正则无法可靠拦截），需进 OBS-GOV backlog 建 `http_client` 收口点，否则该门禁长期无判定力。
+
+
+## 补充二：Wave-7（中等规模新项目 Usage Governance v1）
+
+### 门禁穿透
+- **执行者主动发现"可绕过面"**：CLI 用 `FileSessionBackend` 而账本走 trait 默认实现（恒零）⇒ enforcement 在 CLI 永不触发。执行者在收口阶段自查发现并修（同 schema SQLite 侧车），比 L3 审查更早。**这说明"实现者自证"在多宿主场景下仍有价值——前提是自证给出物理收据（预置 $1 账本仍不拦）而非口头断言。**
+- **Lead 侧踩坑两次（自造噪声）**：复审计时把 settings 治理字段写成 snake_case（`hardLimitUsd` 实为 camelCase），serde `Option` 静默忽略 ⇒ 误判"enforcement 不生效"；另把"日志文件懒创建"误判为"日志链断"。两条都已写入复审报告的踩坑记录。**教训：验证失败时先怀疑验证方法，再怀疑实现。**
+- **L3 审查未在时限内产出**：Wave-7 的 L3 subagent 超时未落盘 JSON，Lead 改为对三处最高风险（NULL≠0、第二份计价公式、span 白名单）做定点自查并以 Tempo 实据佐证。**这属于对"审查预算超水位自动降级为纯机器核验"的一次真实应用，需在下一轮把"L3 超时"显式记入熔断计数。**
+
+### 元协议增补
+1. **P0 多宿主一致性必须显式列为本项目的一等检查项**：本次"CLI 可绕过"与 Wave-4 的"CLI/TUI 零引导"是同一根因（桌面优先实现）。建议在 dev-team 的 L3 检查清单里固化一条：**凡 core 能力，必须列出三宿主接入点并逐一验证**。
+2. **P1 配置字段的跨语言命名要有机械校验**：本轮两次踩坑都源于 Rust serde camelCase ↔ 手写 JSON 键名不一致。建议在验收里加一条：settings 结构体字段名与 `src/types/settings.ts` 由脚本比对（现有 `check-declaration.sh` 类似思路）。
+3. **P2 复审脚本应内置到仓库**：本轮复审命令（隔离 HOME + token 注入 + Tempo 回查）是手工拼的。建议落成 `scripts/observability/chain-probe.sh`，把"正常轮 / 阻断轮 / trace 回查"三件事一键跑通，避免每轮重写并重复踩坑。
