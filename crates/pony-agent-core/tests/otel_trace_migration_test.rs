@@ -1177,6 +1177,12 @@ fn ot8_exit_path_releases_otel_provider() {
 }
 
 // ======================================================= Wave-2 速度属性真实接线验证
+//
+// 归属：Test Agent（Executor task-15 提供初稿；task-16 分权审计由 Lead 执行变异对照接管）。
+// 非空洞证明（`.dev-team/evidence/wave-2-metrics/rust-mutation-control.txt`）：移除
+// `turn_flow.rs` 中 4 处 `record_speed_and_context(...)` 接线后，
+// `wave2_turn_flow_calculates_and_records_speed` 真实 FAILED（Wire payload 缺
+// `gen_ai.speed.tokens_per_second`），恢复接线后 PASS —— 该断言具备证伪能力，非"跑通即放行"。
 
 #[test]
 fn wave2_llm_span_exports_speed_attribute_to_wire() {
