@@ -43,6 +43,8 @@ const {
   sessionOutputTokensTotal,
   sessionToolCallCount,
   sessionTokenGenerationSpeed,
+  tokenSpeedCalculationMode,
+  tokenSpeedDebugInfo,
   sessionTurnCount,
   showContextUsage
 } = useTraceProjection({ liveTurnEnabled: ref(true) });
@@ -89,6 +91,8 @@ onBeforeUnmount(() => {
           :cache-hit-tokens-total="sessionCacheHitTokensTotal"
           :cache-hit-ratio="sessionCacheHitRatio"
           :token-generation-speed="sessionTokenGenerationSpeed"
+          :token-speed-calculation-mode="tokenSpeedCalculationMode"
+          :speed-debug-info="tokenSpeedDebugInfo"
           :show-context-usage="showContextUsage"
           :context-display-tokens="contextDisplayTokens"
           :context-window-tokens="currentContextWindowTokens"

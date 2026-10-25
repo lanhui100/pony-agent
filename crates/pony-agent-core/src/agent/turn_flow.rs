@@ -2250,6 +2250,35 @@ pub fn preview_text(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn calculate_call_generation_speed(
+    output_tokens: Option<u64>,
+    elapsed_ms: u64,
+    ttft_ms: Option<u64>,
+) -> Option<f64> {
+    let output = output_tokens?;
+    if output == 0 || elapsed_ms == 0 {
+        return None;
+    }
+
+    let mut generation_ms = elapsed_ms;
+    if let Some(ttft) = ttft_ms {
+        if elapsed_ms > ttft {
+            generation_ms = elapsed_ms - ttft;
+        }
+    }
+
+    if generation_ms == 0 {
+        return None;
+    }
+
+    let speed = (output as f64) / ((generation_ms as f64) / 1000.0);
+    if speed.is_finite() && speed > 0.0 {
+        Some(speed)
+    } else {
+        None
+    }
+}
+
 pub fn provider_decision<P: ProviderClient>(
     provider: &P,
     request: &ProviderRequest,
@@ -2261,10 +2290,14 @@ pub fn provider_decision<P: ProviderClient>(
         Some(request.model.as_str()),
         "chat",
     );
+    let start = std::time::Instant::now();
     let result = provider.decide_with_tools(request, tools);
+    let elapsed_ms = start.elapsed().as_millis() as u64;
     if let Ok(decision) = result.as_ref() {
         if let Some(usage) = decision.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            llm_span.record_speed_and_context(speed, None);
         }
     }
     result
@@ -2274,7 +2307,7 @@ pub fn provider_decision_stream<P, F>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
-    on_delta: F,
+    mut on_delta: F,
 ) -> Result<ProviderDecision, String>
 where
     P: ProviderClient,
@@ -2286,10 +2319,21 @@ where
         Some(request.model.as_str()),
         "chat",
     );
-    let result = provider.decide_with_tools_stream(request, tools, on_delta);
+    let start = std::time::Instant::now();
+    let mut first_token_time: Option<std::time::Instant> = None;
+    let result = provider.decide_with_tools_stream(request, tools, |chunk| {
+        if first_token_time.is_none() {
+            first_token_time = Some(std::time::Instant::now());
+        }
+        on_delta(chunk);
+    });
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let ttft_ms = first_token_time.map(|t| t.duration_since(start).as_millis() as u64);
     if let Ok(decision) = result.as_ref() {
         if let Some(usage) = decision.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
+            llm_span.record_speed_and_context(speed, None);
         }
     }
     result
@@ -2310,6 +2354,7 @@ pub fn provider_followup<P: ProviderClient>(
         Some(request.model.as_str()),
         "chat",
     );
+    let start = std::time::Instant::now();
     let result = provider.continue_with_tool_result(
         request,
         tools,
@@ -2318,9 +2363,12 @@ pub fn provider_followup<P: ProviderClient>(
         tool_call,
         tool_result,
     );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
     if let Ok(response) = result.as_ref() {
         if let Some(usage) = response.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            llm_span.record_speed_and_context(speed, None);
         }
     }
     result
@@ -2334,7 +2382,7 @@ pub fn provider_followup_stream<P, F>(
     assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
-    on_delta: F,
+    mut on_delta: F,
 ) -> Result<crate::agent::provider::ProviderResponse, String>
 where
     P: ProviderClient,
@@ -2346,6 +2394,8 @@ where
         Some(request.model.as_str()),
         "chat",
     );
+    let start = std::time::Instant::now();
+    let mut first_token_time: Option<std::time::Instant> = None;
     let result = provider.continue_with_tool_result_stream(
         request,
         tools,
@@ -2353,11 +2403,20 @@ where
         assistant_message,
         tool_call,
         tool_result,
-        on_delta,
+        |chunk| {
+            if first_token_time.is_none() {
+                first_token_time = Some(std::time::Instant::now());
+            }
+            on_delta(chunk);
+        },
     );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let ttft_ms = first_token_time.map(|t| t.duration_since(start).as_millis() as u64);
     if let Ok(response) = result.as_ref() {
         if let Some(usage) = response.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
+            llm_span.record_speed_and_context(speed, None);
         }
     }
     result

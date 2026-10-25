@@ -43,6 +43,18 @@ pub const ATTR_GEN_AI_USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 /// 输出 token 数。
 pub const ATTR_GEN_AI_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
 
+/// 模型生成速度（t/s）。
+pub const ATTR_GEN_AI_SPEED_TOKENS_PER_SECOND: &str = "gen_ai.speed.tokens_per_second";
+
+/// 上下文窗口总大小（tokens）。
+pub const ATTR_GEN_AI_USAGE_CONTEXT_WINDOW: &str = "gen_ai.usage.context_window";
+
+/// 上下文使用比例（0.0 ~ 1.0）。
+pub const ATTR_GEN_AI_USAGE_CONTEXT_RATIO: &str = "gen_ai.usage.context_ratio";
+
+/// 整轮综合生成速度（t/s）。
+pub const ATTR_AGENT_TURN_SPEED_TOKENS_PER_SECOND: &str = "agent.turn.speed.tokens_per_second";
+
 /// 工具名（如 `bash`）。
 pub const ATTR_GEN_AI_TOOL_NAME: &str = "gen_ai.tool.name";
 
@@ -732,6 +744,7 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
         slot: None,
         phase: None,
         trace_id: None,
+        turn_speed: None,
     };
     // 契约：session_id / turn_id 缺失（空串）⇒ **不创建** turn span。
     // 绝不用占位值伪造会话——那会在 Langfuse 侧造出不存在的 session，污染数据。
@@ -766,6 +779,7 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
         slot,
         phase: None,
         trace_id: None,
+        turn_speed: None,
     }
     .with_trace_id(trace_id)
 }
@@ -777,12 +791,18 @@ pub struct TurnTraceGuard {
     slot: Option<ActiveTurnSlot>,
     phase: Option<String>,
     trace_id: Option<String>,
+    turn_speed: Option<f64>,
 }
 
 impl TurnTraceGuard {
     fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
         self.trace_id = trace_id;
         self
+    }
+
+    /// 记录 turn 综合生成速度（token/s）。
+    pub fn record_turn_speed(&mut self, speed: Option<f64>) {
+        self.turn_speed = speed.filter(|s| s.is_finite() && *s > 0.0);
     }
 
     /// 记录 turn 终态相位（`completed` / `failed` / `cancelled` …）。
@@ -813,6 +833,14 @@ impl Drop for TurnTraceGuard {
                 span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_PHASE, phase));
             }
         }
+        if let Some(speed) = self.turn_speed.take() {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_AGENT_TURN_SPEED_TOKENS_PER_SECOND,
+                    speed,
+                ));
+            }
+        }
         if let Some(mut span) = self.span.take() {
             span.end();
         }
@@ -830,6 +858,9 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
         span: None,
         input_tokens: None,
         output_tokens: None,
+        speed: None,
+        context_window: None,
+        context_ratio: None,
     };
     if !spans_allowed() {
         return empty;
@@ -848,6 +879,9 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
         span: Some(span),
         input_tokens: None,
         output_tokens: None,
+        speed: None,
+        context_window: None,
+        context_ratio: None,
     }
 }
 
@@ -856,6 +890,9 @@ pub struct LlmSpanGuard {
     span: Option<opentelemetry_sdk::trace::Span>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    speed: Option<f64>,
+    context_window: Option<u64>,
+    context_ratio: Option<f64>,
 }
 
 impl LlmSpanGuard {
@@ -863,6 +900,21 @@ impl LlmSpanGuard {
     pub fn record_usage(&mut self, input_tokens: Option<u64>, output_tokens: Option<u64>) {
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
+    }
+
+    /// 记录单次调用生成速度与上下文用量诊断属性。
+    pub fn record_speed_and_context(
+        &mut self,
+        speed: Option<f64>,
+        context_window: Option<u64>,
+    ) {
+        self.speed = speed.filter(|s| s.is_finite() && *s > 0.0);
+        self.context_window = context_window.filter(|w| *w > 0);
+        if let (Some(input), Some(window)) = (self.input_tokens, self.context_window) {
+            if window > 0 {
+                self.context_ratio = Some((input as f64) / (window as f64));
+            }
+        }
     }
 }
 
@@ -879,6 +931,24 @@ impl Drop for LlmSpanGuard {
                 span.set_attribute(KeyValue::new(
                     ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
                     output_tokens as i64,
+                ));
+            }
+            if let Some(speed) = self.speed {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_SPEED_TOKENS_PER_SECOND,
+                    speed,
+                ));
+            }
+            if let Some(context_window) = self.context_window {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_CONTEXT_WINDOW,
+                    context_window as i64,
+                ));
+            }
+            if let Some(context_ratio) = self.context_ratio {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_CONTEXT_RATIO,
+                    context_ratio,
                 ));
             }
             span.end();

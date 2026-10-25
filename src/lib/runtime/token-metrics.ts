@@ -97,5 +97,240 @@ export function resolveCallGenerationSpeed(
   }
 
   const speed = outputTokens / (generationMs / 1000);
-  return Number.isFinite(speed) ? speed : null;
+  if (!Number.isFinite(speed) || speed < 0) {
+    return null;
+  }
+  return speed;
+}
+
+export type TokenSpeedCalculationMode =
+  | "turn_completed_aggregate"
+  | "call_active_stream"
+  | "call_fallback"
+  | "none";
+
+export interface TokenSpeedOptions {
+  isActiveTurn?: boolean;
+  isSubmitting?: boolean;
+}
+
+/**
+ * 速度双模计算：
+ * - 活跃调用中（isActiveTurn / isSubmitting 为 true）：优先计算最近活跃调用速度 (call_active_stream)。
+ * - 终态（isSubmitting === false 或 turn.status === "completed"）：若包含整轮 outputTokens 与 durationMs，
+ *   计算整轮综合速度 (turn_completed_aggregate)。无整轮数据时回退单次调用速度 (call_fallback)。
+ */
+export function resolveTurnGenerationSpeed(
+  turn: TurnTraceRecord | null | undefined,
+  options?: TokenSpeedOptions
+): number | null {
+  const result = resolveDualModeTokenSpeedDetail(turn, options);
+  return result.speed;
+}
+
+export const resolveDualModeTokenSpeed = resolveTurnGenerationSpeed;
+
+export interface TokenSpeedDetail {
+  speed: number | null;
+  mode: TokenSpeedCalculationMode;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  durationMs?: number | null;
+  ttftMs?: number | null;
+}
+
+export function resolveDualModeTokenSpeedDetail(
+  turn: TurnTraceRecord | null | undefined,
+  options?: TokenSpeedOptions
+): TokenSpeedDetail {
+  if (!turn) {
+    return { speed: null, mode: "none" };
+  }
+
+  const turnStatus = (turn as { status?: string }).status;
+  const isActive =
+    options?.isActiveTurn ??
+    options?.isSubmitting ??
+    (turnStatus === "running" || turn.phase === "calling_model" || turn.phase === "calling_tool");
+
+  // 1. 活跃调用生成中：优先取最近一次 ProviderCall 的生成速度
+  if (isActive) {
+    const records = turn.providerCallRecords ?? [];
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i];
+      const callSpeed = resolveCallGenerationSpeed(record);
+      if (callSpeed != null) {
+        return {
+          speed: callSpeed,
+          mode: "call_active_stream",
+          inputTokens: record?.inputTokens,
+          outputTokens: record?.outputTokens,
+          durationMs: record?.turnDurationMs,
+          ttftMs: record?.firstTokenLatencyMs,
+        };
+      }
+    }
+  }
+
+  // 2. 终态轮次（已完成或非活跃）：
+  // 根据 Lead 裁决（records 判别 + timeline 次级判别）：
+  // - records.length > 1: 多调用单轮终态回退末条有效 record 速度（TTFT 抵扣），mode = "call_fallback"（满足 S3 不得用整轮累加）
+  // - records.length === 1: 真实单调用终态，若 turn 级 outputTokens 与 turnDurationMs 有效，取整轮综合速度 outputTokens/(turnDurationMs/1000)，mode = "turn_completed_aggregate"；否则该 record 速度，mode = "call_fallback"
+  // - records.length === 0:
+  //   - 若 traceTimeline 有 canonical call_model 条目且 (firstTokenLatencyMs != null || outputTokens != null):
+  //     取该条目单次速度（TTFT 抵扣），mode = "call_fallback"（保住已冻结的 S3 契约 tests/context-display-tokens.spec.ts）
+  //   - 否则若 turn 级数据有效: 取整轮综合速度，mode = "turn_completed_aggregate"
+  //   - 否则: null, mode = "none"
+  const records = turn.providerCallRecords ?? [];
+  const turnDurationMs = turn.turnDurationMs;
+  const outputTokens = turn.outputTokens;
+  const inputTokens = turn.inputTokens;
+
+  if (records.length > 1) {
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i];
+      const callSpeed = resolveCallGenerationSpeed(record);
+      if (callSpeed != null) {
+        return {
+          speed: callSpeed,
+          mode: "call_fallback",
+          inputTokens: record?.inputTokens,
+          outputTokens: record?.outputTokens,
+          durationMs: record?.turnDurationMs,
+          ttftMs: record?.firstTokenLatencyMs,
+        };
+      }
+    }
+  } else if (records.length === 1) {
+    if (turnDurationMs != null && turnDurationMs > 0 && outputTokens != null) {
+      const aggregateSpeed = outputTokens / (turnDurationMs / 1000);
+      if (Number.isFinite(aggregateSpeed) && aggregateSpeed > 0) {
+        return {
+          speed: aggregateSpeed,
+          mode: "turn_completed_aggregate",
+          inputTokens: inputTokens ?? records[0]?.inputTokens,
+          outputTokens,
+          durationMs: turnDurationMs,
+          ttftMs: undefined,
+        };
+      }
+    }
+    const callSpeed = resolveCallGenerationSpeed(records[0]);
+    if (callSpeed != null) {
+      return {
+        speed: callSpeed,
+        mode: "call_fallback",
+        inputTokens: records[0]?.inputTokens,
+        outputTokens: records[0]?.outputTokens,
+        durationMs: records[0]?.turnDurationMs,
+        ttftMs: records[0]?.firstTokenLatencyMs,
+      };
+    }
+  } else {
+    // records.length === 0
+    const entries = turn.traceTimeline ?? [];
+    const hasTimelineCallModel = entries.some(
+      (e) => canonicalTraceTimelineKind(e.kind) === "call_model" && (e.firstTokenLatencyMs != null || e.outputTokens != null)
+    );
+
+    if (hasTimelineCallModel) {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i]!;
+        if (canonicalTraceTimelineKind(entry.kind) === "call_model") {
+          const callSpeed = resolveCallGenerationSpeed({
+            requestKind: "initial_request",
+            latencyKind: "provider_stream",
+            inputTokens: entry.inputTokens ?? undefined,
+            outputTokens: entry.outputTokens ?? undefined,
+            turnDurationMs: entry.turnDurationMs ?? undefined,
+            firstTokenLatencyMs: entry.firstTokenLatencyMs ?? undefined,
+          });
+          if (callSpeed != null) {
+            return {
+              speed: callSpeed,
+              mode: "call_fallback",
+              inputTokens: entry.inputTokens,
+              outputTokens: entry.outputTokens,
+              durationMs: entry.turnDurationMs,
+              ttftMs: entry.firstTokenLatencyMs,
+            };
+          }
+        }
+      }
+    } else if (turnDurationMs != null && turnDurationMs > 0 && outputTokens != null) {
+      const aggregateSpeed = outputTokens / (turnDurationMs / 1000);
+      if (Number.isFinite(aggregateSpeed) && aggregateSpeed > 0) {
+        return {
+          speed: aggregateSpeed,
+          mode: "turn_completed_aggregate",
+          inputTokens,
+          outputTokens,
+          durationMs: turnDurationMs,
+          ttftMs: undefined,
+        };
+      }
+    }
+  }
+
+  return { speed: null, mode: "none" };
+}
+
+export interface ContextUsageDebugInfo {
+  inputTokens: number | null;
+  contextWindow: number;
+  calculationMode: TokenSpeedCalculationMode;
+  generationSpeed: number | null;
+}
+
+export interface ContextUsageMetrics {
+  contextUsagePercentage: number;
+  contextUsageDebugInfo: ContextUsageDebugInfo;
+}
+
+export function resolveContextUsageMetrics(
+  turn: TurnTraceRecord | null | undefined,
+  contextWindow: number,
+  options?: TokenSpeedOptions
+): ContextUsageMetrics {
+  const inputTokens = resolveCurrentContextInputTokens(turn);
+  const safeWindow = Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : 0;
+  let percentage = 0;
+
+  if (safeWindow > 0 && inputTokens != null && inputTokens > 0) {
+    const ratio = (inputTokens / safeWindow) * 100;
+    percentage = Math.min(100, Math.max(0, ratio < 1 && ratio > 0 ? 1 : Math.round(ratio)));
+  }
+
+  const { speed, mode } = resolveDualModeTokenSpeedDetail(turn, options);
+
+  const debugInfo: ContextUsageDebugInfo = {
+    inputTokens: inputTokens ?? (turn?.inputTokens ?? null),
+    contextWindow: safeWindow,
+    calculationMode: mode,
+    generationSpeed: speed,
+  };
+
+  return {
+    contextUsagePercentage: percentage,
+    contextUsageDebugInfo: debugInfo,
+  };
+}
+
+export function resolveContextUsageDiagnostics(
+  debugInfo: ContextUsageDebugInfo
+): string {
+  const parts = [
+    `模式: ${debugInfo.calculationMode}`,
+    `窗口: ${debugInfo.contextWindow}`,
+    `输入: ${debugInfo.inputTokens ?? 0}`,
+    `速度: ${formatTokenSpeed(debugInfo.generationSpeed)}`,
+  ];
+  return parts.join(" · ");
+}
+
+export function formatTokenSpeed(value?: number | null): string {
+  if (value == null || !Number.isFinite(value)) {
+    return "—";
+  }
+  return `${Math.round(value)} t/s`;
 }

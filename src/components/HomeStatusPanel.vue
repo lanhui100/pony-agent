@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import {
   ArrowDown,
   ArrowUp,
@@ -12,8 +13,9 @@ import {
   Zap
 } from "lucide-vue-next";
 import Tooltip from "@/components/ui/Tooltip.vue";
+import { isDebugLoggingEnabled } from "@/lib/runtime/utils";
 
-defineProps<{
+const props = defineProps<{
   sessionId: string;
   turnCount: number;
   modelCallCount: number;
@@ -25,12 +27,39 @@ defineProps<{
   cacheHitTokensTotal: number;
   cacheHitRatio: string;
   tokenGenerationSpeed: number | null;
+  tokenSpeedCalculationMode?: string;
+  speedDebugInfo?: {
+    mode?: string;
+    speed?: number | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    durationMs?: number | null;
+    ttftMs?: number | null;
+    contextWindow?: number | null;
+    ratio?: string | null;
+  };
   showContextUsage: boolean;
   contextDisplayTokens: number | null;
   contextWindowTokens: number | null;
 }>();
 
 const emit = defineEmits<{ copySessionId: [] }>();
+
+const debugAttrsEnabled = computed(() => isDebugLoggingEnabled());
+
+const speedDebugString = computed(() => {
+  const info = props.speedDebugInfo;
+  const inVal = info?.inputTokens ?? props.inputTokensTotal ?? "-";
+  const outVal = info?.outputTokens ?? props.outputTokensTotal ?? "-";
+  const durVal = info?.durationMs ?? "-";
+  const ttftVal = info?.ttftMs ?? "-";
+  const winVal = info?.contextWindow ?? props.contextWindowTokens ?? "-";
+  let ratioVal = info?.ratio ?? "-";
+  if (ratioVal === "-" && props.contextWindowTokens && props.contextWindowTokens > 0 && inVal !== "-") {
+    ratioVal = (Number(inVal) / props.contextWindowTokens).toFixed(3);
+  }
+  return `in=${inVal};out=${outVal};dur=${durVal};ttft=${ttftVal};win=${winVal};ratio=${ratioVal}`;
+});
 
 function formatCompactInteger(value?: number | null) {
   if (value == null || !Number.isFinite(value)) { return ""; }
@@ -119,7 +148,12 @@ function formatTokenSpeed(value?: number | null) {
           <!-- 速度位在无数据时渲染 "—"（无数字文本节点），故预留宽度落在承载 span 自身，
                使其在 9 / 12 / 1234 三档（含注入探针）下宽度恒定。 -->
           <Tooltip text="生成速度">
-            <span class="inline-flex min-w-[4rem] items-center gap-1 tabular-nums" data-testid="status-metric-token-speed">
+            <span
+              class="inline-flex min-w-[4rem] items-center gap-1 tabular-nums"
+              data-testid="status-metric-token-speed"
+              :data-speed-mode="tokenSpeedCalculationMode || 'none'"
+              :data-speed-debug="debugAttrsEnabled ? speedDebugString : undefined"
+            >
               <Gauge class="h-3 w-3 text-stone-400" />
               {{ formatTokenSpeed(tokenGenerationSpeed) }}
             </span>

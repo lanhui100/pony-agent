@@ -1175,3 +1175,153 @@ fn ot8_exit_path_releases_otel_provider() {
         "OT-8e：src-tauri/src 必须在 RunEvent::Exit / ExitRequested 分支内调用 otel::shutdown()（NFR resource_release）"
     );
 }
+
+// ======================================================= Wave-2 速度属性真实接线验证
+
+#[test]
+fn wave2_llm_span_exports_speed_attribute_to_wire() {
+    let _guard = gate_lock();
+    otel::shutdown();
+
+    let (port, sink) = spawn_otlp_sink(Duration::from_millis(1_500));
+    otel::init(local_config(port)).expect("本地回环端点必须可装配");
+    otel::set_reporting_enabled(true);
+
+    {
+        let _turn = otel::begin_turn_trace("sess-speed-wire", "turn-speed-wire", 1);
+        let mut span = otel::start_llm_span("mock-provider", Some("gpt-4o"), "chat");
+        span.record_usage(Some(100), Some(50));
+        span.record_speed_and_context(Some(25.0), None);
+    }
+
+    let flushed = otel::force_flush(3_000);
+    assert!(flushed.is_ok(), "flush 必须成功: {:?}", flushed);
+
+    otel::shutdown();
+    otel::set_reporting_enabled(false);
+
+    let captured = sink.join().expect("sink 线程不得 panic");
+    assert!(!captured.is_empty(), "必须有导出请求");
+
+    let wire_text = captured
+        .iter()
+        .map(|r| String::from_utf8_lossy(&r.body).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        wire_text.contains("gen_ai.speed.tokens_per_second"),
+        "Wire payload 必须包含 gen_ai.speed.tokens_per_second 属性"
+    );
+}
+
+#[test]
+fn wave2_turn_flow_calculates_and_records_speed() {
+    use pony_agent_core::agent::provider::{ProviderClient, ProviderDecision, ProviderProtocol, ProviderRequest, ProviderResponse, ProviderStreamChunk, TokenUsage};
+    use pony_agent_core::agent::tools::{ToolCall, ToolDefinition, ToolResult};
+
+    struct MockSleepProvider;
+    impl ProviderClient for MockSleepProvider {
+        fn requested_name(&self) -> &str { "mock-sleep" }
+        fn name(&self) -> &str { "mock-sleep" }
+        fn model(&self) -> &str { "mock-model" }
+        fn protocol_label(&self) -> &'static str { "openai" }
+        fn protocol(&self) -> &ProviderProtocol { &ProviderProtocol::OpenAiCompletions }
+        fn temperature(&self) -> f32 { 0.0 }
+        fn max_output_tokens(&self) -> u32 { 100 }
+        fn decide_with_tools(&self, _req: &ProviderRequest, _tools: &[ToolDefinition]) -> Result<ProviderDecision, String> {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(ProviderDecision {
+                output_text: "hi".to_string(),
+                tool_call: None,
+                reasoning_content: None,
+                reasoning_content_value: None,
+                assistant_message: Some(serde_json::json!({"role": "assistant", "content": "hi"})),
+                provider_source: "mock".to_string(),
+                provider_mode: "mock".to_string(),
+                fallback_reason: None,
+                token_usage: Some(TokenUsage {
+                    input_tokens: Some(100),
+                    output_tokens: Some(50),
+                    total_tokens: Some(150),
+                    cache_hit_input_tokens: None,
+                    cache_hit_source: None,
+                    reasoning_tokens: None,
+                }),
+            })
+        }
+        fn decide_with_tools_stream<F>(&self, _req: &ProviderRequest, _tools: &[ToolDefinition], mut on_delta: F) -> Result<ProviderDecision, String>
+        where F: FnMut(ProviderStreamChunk) {
+            std::thread::sleep(Duration::from_millis(15));
+            on_delta(ProviderStreamChunk::Text("hi".to_string()));
+            std::thread::sleep(Duration::from_millis(35));
+            Ok(ProviderDecision {
+                output_text: "hi".to_string(),
+                tool_call: None,
+                reasoning_content: None,
+                reasoning_content_value: None,
+                assistant_message: Some(serde_json::json!({"role": "assistant", "content": "hi"})),
+                provider_source: "mock".to_string(),
+                provider_mode: "mock".to_string(),
+                fallback_reason: None,
+                token_usage: Some(TokenUsage {
+                    input_tokens: Some(100),
+                    output_tokens: Some(50),
+                    total_tokens: Some(150),
+                    cache_hit_input_tokens: None,
+                    cache_hit_source: None,
+                    reasoning_tokens: None,
+                }),
+            })
+        }
+        fn continue_with_tool_result(&self, _req: &ProviderRequest, _tools: &[ToolDefinition], _acc: &mut Vec<serde_json::Value>, _asst: Option<&serde_json::Value>, _tc: &ToolCall, _tr: &ToolResult) -> Result<ProviderResponse, String> {
+            unimplemented!()
+        }
+        fn continue_with_tool_result_stream<F>(&self, _req: &ProviderRequest, _tools: &[ToolDefinition], _acc: &mut Vec<serde_json::Value>, _asst: Option<&serde_json::Value>, _tc: &ToolCall, _tr: &ToolResult, _on_delta: F) -> Result<ProviderResponse, String>
+        where F: FnMut(ProviderStreamChunk) {
+            unimplemented!()
+        }
+    }
+
+    let _guard = gate_lock();
+    otel::shutdown();
+
+    let (port, sink) = spawn_otlp_sink(Duration::from_millis(2_000));
+    otel::init(local_config(port)).expect("本地回环端点必须可装配");
+    otel::set_reporting_enabled(true);
+
+    {
+        let _turn = otel::begin_turn_trace("sess-flow-test", "turn-flow-test", 1);
+        let req = ProviderRequest {
+            model: "mock-model".to_string(),
+            input: vec![],
+            images: vec![],
+            native_messages: vec![],
+            temperature: 0.0,
+            max_output_tokens: 100,
+            observation: Default::default(),
+        };
+        let _ = pony_agent_core::agent::turn_flow::provider_decision(&MockSleepProvider, &req, &[]);
+        let _ = pony_agent_core::agent::turn_flow::provider_decision_stream(&MockSleepProvider, &req, &[], |_| {});
+    }
+
+    let flushed = otel::force_flush(3_000);
+    assert!(flushed.is_ok(), "flush 必须成功: {:?}", flushed);
+
+    otel::shutdown();
+    otel::set_reporting_enabled(false);
+
+    let captured = sink.join().expect("sink 线程不得 panic");
+    assert!(!captured.is_empty(), "必须收到 OTLP 请求");
+    let wire_text = captured
+        .iter()
+        .map(|r| String::from_utf8_lossy(&r.body).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!("DEBUG captured wire_text: {}", wire_text);
+
+    assert!(
+        wire_text.contains("gen_ai.speed.tokens_per_second"),
+        "Wire payload 必须包含 gen_ai.speed.tokens_per_second 属性"
+    );
+}

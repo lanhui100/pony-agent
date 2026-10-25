@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from "vue";
+import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 import { storeToRefs } from "pinia";
 import type { TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
@@ -11,8 +11,12 @@ import { cloneProviderCallRecords, resolveProviderReturnedCacheHitInputTokens } 
 import {
   countTurnProviderCalls,
   resolveCallGenerationSpeed,
-  resolveCurrentContextInputTokens
+  resolveCurrentContextInputTokens,
+  resolveDualModeTokenSpeedDetail,
+  type TokenSpeedCalculationMode,
+  type TokenSpeedDetail,
 } from "@/lib/runtime/token-metrics";
+import { recordMetricsSnapshot, reportMetricsAnomaly } from "@/lib/runtime/metrics-diagnostics";
 
 export { canonicalTraceTimelineKind, projectedTurnTimeline };
 
@@ -305,19 +309,99 @@ export function useTraceProjection(options: {
     return null;
   }
 
-  // 当前模型生成速度（token/s）：最近一次已完成模型调用的 per-call 生成速度。
-  // 活跃轮只要收到该次调用的 per-call 记录即可产出，不等 turn:completed。
-  const sessionTokenGenerationSpeed = computed<number | null>(() => {
+  // 当前模型生成速度与计算模式
+  const sessionTokenSpeedState = computed<TokenSpeedDetail>(() => {
     const turns = orderedTurnTraces.value;
     for (let t = turns.length - 1; t >= 0; t--) {
-      const speed = resolveTurnCallGenerationSpeed(turns[t]!);
-      if (speed != null) {
-        return speed;
+      const turn = turns[t]!;
+      // 检查最新轮是否为活跃提交状态
+      const isActive = isSubmitting.value && t === turns.length - 1;
+      const detail = resolveDualModeTokenSpeedDetail(turn, { isSubmitting: isActive, isActiveTurn: isActive });
+      if (detail.speed != null) {
+        return detail;
+      }
+      // 回退旧的 timeline per-call 解析
+      const legacySpeed = resolveTurnCallGenerationSpeed(turn);
+      if (legacySpeed != null) {
+        return { speed: legacySpeed, mode: "call_fallback" };
       }
     }
-
-    return null;
+    return { speed: null, mode: "none" };
   });
+
+  const sessionTokenGenerationSpeed = computed<number | null>(() => sessionTokenSpeedState.value.speed);
+  const tokenSpeedCalculationMode = computed<TokenSpeedCalculationMode>(() => sessionTokenSpeedState.value.mode);
+
+  const tokenSpeedDebugInfo = computed(() => {
+    const state = sessionTokenSpeedState.value;
+    const windowTokens = currentContextWindowTokens.value ?? null;
+    const inTokens = state.inputTokens ?? contextDisplayTokens.value ?? null;
+    let ratio: string | null = null;
+    if (windowTokens && windowTokens > 0 && inTokens != null) {
+      ratio = (inTokens / windowTokens).toFixed(3);
+    }
+    return {
+      mode: state.mode,
+      speed: state.speed,
+      inputTokens: inTokens,
+      outputTokens: state.outputTokens ?? null,
+      durationMs: state.durationMs ?? null,
+      ttftMs: state.ttftMs ?? null,
+      contextWindow: windowTokens,
+      ratio,
+    };
+  });
+
+  // 状态变化时触发调试埋点与异常检测 (task-11)
+  watch(
+    [sessionTokenSpeedState, contextDisplayTokens, currentContextWindowTokens],
+    ([speedState, inputTokens, contextWindow]) => {
+      const turns = orderedTurnTraces.value;
+      const latest = turns.length > 0 ? turns[turns.length - 1] : null;
+      const windowTokens = contextWindow ?? 0;
+      const inTokens = speedState.inputTokens ?? inputTokens;
+      const ratio = windowTokens > 0 && inTokens != null ? Number((inTokens / windowTokens).toFixed(4)) : null;
+
+      // 1. 结构化快照记录
+      if (speedState.mode !== "none" || inTokens != null) {
+        recordMetricsSnapshot({
+          turnId: latest?.turnId,
+          mode: speedState.mode,
+          speed: speedState.speed,
+          inputTokens: inTokens,
+          contextWindow: windowTokens,
+          contextRatio: ratio,
+          outputTokens: speedState.outputTokens ?? latest?.outputTokens,
+          durationMs: speedState.durationMs ?? latest?.turnDurationMs,
+          ttftMs: speedState.ttftMs ?? latest?.firstTokenLatencyMs,
+        });
+      }
+
+      // 2. 异常值节流上报
+      if (latest?.turnDurationMs != null && latest.turnDurationMs <= 0) {
+        reportMetricsAnomaly("invalid_duration", {
+          turnId: latest.turnId,
+          durationMs: latest.turnDurationMs,
+          outputTokens: latest.outputTokens,
+        });
+      }
+      if (speedState.speed != null && speedState.speed < 0) {
+        reportMetricsAnomaly("negative_speed", {
+          turnId: latest?.turnId,
+          speed: speedState.speed,
+          mode: speedState.mode,
+        });
+      }
+      if (windowTokens > 0 && inputTokens != null && inputTokens > windowTokens) {
+        reportMetricsAnomaly("context_overflow", {
+          turnId: latest?.turnId,
+          inputTokens,
+          contextWindow: windowTokens,
+        });
+      }
+    },
+    { immediate: true, flush: "post" }
+  );
 
   return {
     orderedTurnTraces,
@@ -329,6 +413,8 @@ export function useTraceProjection(options: {
     sessionOutputTokensTotal,
     sessionCacheHitRatio,
     sessionTokenGenerationSpeed,
+    tokenSpeedCalculationMode,
+    tokenSpeedDebugInfo,
     contextDisplayTokens,
     currentContextWindowTokens,
     showContextUsage
