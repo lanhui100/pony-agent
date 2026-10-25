@@ -92,3 +92,21 @@ in_probe "wget -qO- 'http://tempo.observability.svc.cluster.local:3200/api/trace
 ```
 
 > ⚠️ 踩坑记录：settings 里治理字段是 **camelCase 嵌套**（`hardLimitUsd` / `softRatio`），写成 snake_case 不会报错但会被 serde 忽略（`Option` 缺省）⇒ 表现为「enforcement 开了却没拦」。本轮首测即因此误判两次，已记入本报告避免重复。
+
+---
+
+## 6. 附：L3 审查判 FAIL 后的整改（诚实记录）
+
+Wave-7 首次 L3 审查 **FAIL（3 BLOCKING / 8 ADVISORY）**，说明"链路通"不等于"功能对"。三项 BLOCKING 与处置：
+
+| # | 缺陷 | 后果 | 处置 |
+| :--- | :--- | :--- | :--- |
+| B1 | **设置契约断裂**：前端写 `usagePolicy` + snake_case（`hard_limit_usd`），Rust serde 只认 `usageGovernancePolicy` + `hardLimitUsd` | 配置页改了不落盘、`enforcement` **无法经 UI 开启** ⇒ ADR-0048 的 opt-in 硬限流整条路径不可达 | TS 改 camelCase 并对齐 Rust 键名；补 camelCase 往返测试 |
+| B2 | **未计价被伪造成 0 成本**：`input_tokens.unwrap_or(0)` ⇒ 失败/取消轮写成 `priced=1, cost_usd=0.0` | 违反 G1.3；账本成为第二套语义（事件口径是"缺席"） | 抽 `build_usage_ledger_entry`：usage 任一缺失 ⇒ `unpriced`（NULL + priced=0） |
+| B3 | **金额进 issue payload**：Block 文案含 `$current/$limit`，经 `emit_turn_failed → capture_turn_failure` 上报 | 用户财务数据泄漏到 PonySentry，违反 G5.3 | core 加 `mark_turn_failure_expected`，治理阻断**跳过** issue；前端 `reportError` 同步跳过 |
+
+关键 ADVISORY 也一并修：`governance.unpriced_turns` 恒写 0（telemetry 说谎）→ 传真实值；`unpriced_turns` session+day 重复计数 → 按窗口取值；`day_key` 为 UTC 桶 → 改本地日历日（历史行冻结不重算）；CLI 侧车账本无 WAL/busy_timeout → 单连接 + WAL + 5000ms；`overrideGovernanceBlock` 空逃生舱 → 真实持久化关闭 enforcement；`ui-block.png` 原为启动 splash（非凭证）→ 重截真实拦截横幅。
+
+**结论更新**：整改后 `cargo test --lib` 1149 passed / 1 既有红、vitest 1026 passed、三靶全绿；拦截横幅真实渲染（当前 $0.065 / 硬限额 $0.05 / 本次解除拦截），Console Error 0。
+
+**复审教训**：可观测性链路的"通"与功能的"对"必须分开验收——本轮链路端到端全通（trace/日志/span 都对），但业务契约仍有 3 处开裂。
