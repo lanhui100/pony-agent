@@ -1,0 +1,42 @@
+{
+  "wave": 47,
+  "stage": "Stage-1 Protocol",
+  "baseline_ref": ".dev-team/nfr-baseline-wave46.json",
+  "delta_scope": "enforcement_points baseline and protocol freeze for docs/observability.yaml",
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 500,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "resource_release": [
+    "error_boundary_cleanup_on_unmount",
+    "otel_provider_flush_and_shutdown_on_exit"
+  ],
+  "enforcement_points": {
+    "error_boundary": {
+      "path": "src/components/common/ErrorBoundary.vue",
+      "guarantees": ["breadcrumbs", "trace_id"],
+      "forbidden_patterns": ["\\bonErrorCaptured\\s*\\("],
+      "anti_bypass_rule": "除 ErrorBoundary.vue 之外禁止在任意文件调用 Vue 3 onErrorCaptured 钩子"
+    },
+    "http_client": {
+      "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "guarantees": ["traceparent", "timeout"],
+      "forbidden_patterns": ["\\bheader\\s*\\(\\s*[\"']traceparent[\"']"],
+      "anti_bypass_rule": "所有网络请求必须经由 with_current_traceparent / traceparent_header_map_from 统一注入 traceparent"
+    }
+  },
+  "verification": {
+    "schema": "~/.agents/skills/observability-onboarding/references/declaration.schema.json",
+    "check_declaration": "bash ~/.agents/skills/observability-onboarding/scripts/check-declaration.sh /home/dm/pony-agent",
+    "audit_diff": "bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --decl-approved"
+  }
+}
