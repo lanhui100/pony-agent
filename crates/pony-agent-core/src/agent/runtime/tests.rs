@@ -683,8 +683,19 @@ fn wait_for_mock_thread_reports_timeout_within_budget() {
     );
 }
 
+/// 归属令牌发号器：进程内单调递增，保证同一测试进程里任意两个 mock server 的令牌不同。
+static MOCK_SERVER_OWNER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 生成一个新的 mock server 归属令牌（进程内唯一）。
+fn next_mock_owner_token() -> String {
+    let seq = MOCK_SERVER_OWNER_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("own{}-{seq}", std::process::id())
+}
+
 struct MockHttpServer {
     base_url: String,
+    /// 本 server 的归属令牌（同时出现在 `base_url` 的路径段里）。
+    owner_token: String,
     requests: Arc<Mutex<Vec<String>>>,
     handle: Option<thread::JoinHandle<()>>,
     /// wave-35/C2: mock queue length; finish() reports expected/actual on timeout.
@@ -698,18 +709,29 @@ struct MockHttpServer {
 
 impl MockHttpServer {
     fn start(responses: Vec<MockHttpResponse>) -> Self {
-        // wave-36 PA-139：默认无归属校验（恒 true），保持既有调用方语义不变。
+        // wave-36 PA-139：默认谓词恒 true（不做**业务**层面的请求内容筛选）；
+        // 但「归属」不再依赖谓词——见 start_with_predicate 里的 owner token 路径校验：
+        // 非本用例的迟到/杂散连接一律 503 且不消费队列。
         Self::start_with_predicate(responses, Arc::new(|_: &str| true))
     }
 
     /// wave-36 PA-139 归属校验：predicate 收到完整请求体时返回该请求是否属于本用例；
     /// 不匹配的请求（如其它用例迟到重试/杂散探测命中本端口）返回确定性 503 且**不消费队列**。
+    ///
+    /// wave-47（PA-139 遗留 flake）：谓词只解决「内容可判定」的归属；默认谓词恒 true，
+    /// 因此**结构层面**的归属必须另有依据，否则迟到连接会合法吃掉一个响应槽位。做法：
+    /// 每个 server 生成进程内唯一的 owner token 并放进自己的 `base_url` 路径段
+    /// （`http://host/v1/<token>`），provider 拼接出的请求行必然带它；任何不属于本用例的
+    /// 连接（上一个用例 finish() 后仍在退避重试的请求、端口被内核复用后打进来的迟到请求）
+    /// 带的都是**它自己的旧 token**，请求行匹配不上 → 确定性 503 且不消费队列。
     fn start_with_predicate(
         responses: Vec<MockHttpResponse>,
         predicate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     ) -> Self {
         let gate = MockServerGate::acquire();
         let expected = responses.len();
+        let owner_token = next_mock_owner_token();
+        let owner_token_for_thread = owner_token.clone();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let address = listener.local_addr().expect("mock server addr");
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -775,10 +797,27 @@ impl MockHttpServer {
                     continue;
                 }
                 let mut stream = stream;
-                let Some(body) = read_http_request_body(&mut stream) else {
+                let Some(request) = read_http_request_body(&mut stream) else {
                     // 中途断开/半请求：忽略，不消费队列（wave-13 语义保留）。
                     continue;
                 };
+                // wave-47 归属校验（优先级 0）：请求行必须带本 server 的 owner token，
+                // 否则视为「其它用例的迟到/杂散连接」——确定性 503 且**绝不消费队列**。
+                // 这一步把 PA-139 依赖「谓词 + 端口不复用」的赌运气式归属，换成 URL 里
+                // 可验证的显式归属：即便内核把本 server 的端口复用给了迟到重试，旧连接的
+                // 请求行带的是旧 token，不会命中。
+                if !request.request_line.contains(&owner_token_for_thread) {
+                    eprintln!(
+                        "[pony-agent][mock] 拒绝非本用例请求（归属令牌不匹配，不消费响应队列）: {}",
+                        request.request_line
+                    );
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+                let body = request.body;
                 let consumed = requests_for_thread.lock().unwrap().len();
                 // wave-36 PA-139：归属校验——先判断请求是否属于本用例，不属于则确定性
                 // 503、不消费队列（与队列耗尽路径同款）。predicate 拿到完整请求体。
@@ -805,7 +844,11 @@ impl MockHttpServer {
         });
 
         Self {
-            base_url: format!("http://{}/v1", address),
+            // wave-47：owner token 作为路径段注入——provider 一律按
+            // `format!("{}/chat/completions", base_url.trim_end_matches('/'))` 拼接，
+            // 故此段必定出现在请求行里，供 mock 做归属校验。
+            base_url: format!("http://{}/v1/{}", address, owner_token),
+            owner_token,
             requests,
             handle: Some(handle),
             expected,
@@ -836,9 +879,106 @@ impl MockHttpServer {
     }
 }
 
+/// 裸 HTTP 请求（不经 provider），供归属校验回归用例精确构造「本用例请求 / 外来迟到请求」。
+fn send_raw_http_request(host: &str, port: u16, path: &str, body: &str) -> String {
+    let mut stream = TcpStream::connect((host, port)).expect("connect mock server");
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .expect("write raw mock request");
+    stream.flush().expect("flush raw mock request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read raw mock response");
+    response
+}
+
+/// wave-47 回归（PA-139 遗留 flake）：**非本用例的迟到/杂散请求绝不允许吃掉响应队列**。
+///
+/// 复刻真实失败形态：上一个用例 `finish()` 之后其 provider 仍在退避重试（0/500/1000/2000ms），
+/// 端口被内核复用给下一个用例的 mock → 迟到请求命中新 server。修复前默认谓词恒 true，
+/// 迟到请求会**合法消费一个响应槽位**，导致本用例自身请求落入「队列已耗尽」503 分支，
+/// 整轮失败（本机实测 ~17% 整库 flake，两次红均为此形态：
+/// `decision_stream:attempt=1..5/5 failed class=TransientRetryable … 503 Service Unavailable`）。
+///
+/// 本用例把该竞争**确定性**复现：先发一个「旧 token」的迟到请求，断言它被 503 且不消费队列；
+/// 再发本用例自身请求，断言它仍拿到队列里的那条响应。旧实现下第一次断言即红。
+#[test]
+fn mock_server_rejects_foreign_request_without_consuming_queue() {
+    let server = MockHttpServer::start(vec![json_completion("owned-response")]);
+    let url = url::Url::parse(&server.base_url).expect("parse mock base_url");
+    let host = url.host_str().expect("mock host").to_string();
+    let port = url.port().expect("mock port");
+    // 归属令牌必须真的落在 base_url 路径段里——这是 provider 请求行携带令牌的前提。
+    assert!(
+        server
+            .base_url
+            .ends_with(&format!("/{}", server.owner_token)),
+        "owner token 必须注入 base_url 路径段，实际 base_url={}",
+        server.base_url
+    );
+    let own_path = format!("/v1/{}/chat/completions", server.owner_token);
+
+    // 1) 外来迟到请求：带的是**别的** server 的令牌（这里显式构造一个不同令牌）。
+    let foreign = send_raw_http_request(
+        &host,
+        port,
+        "/v1/own-other-test-999/chat/completions",
+        "{\"marker\":\"foreign\"}",
+    );
+    assert!(
+        foreign.starts_with("HTTP/1.1 503"),
+        "外来请求必须被归属校验拒绝为 503，实际响应：{foreign}"
+    );
+    let consumed_by_foreign = server.requests.lock().unwrap().clone();
+    assert!(
+        consumed_by_foreign.is_empty(),
+        "外来请求绝不允许消费响应队列，实际已消费：{consumed_by_foreign:?}"
+    );
+
+    // 2) 本用例自身请求：请求行带本 server 令牌 → 正常拿到队列里的响应。
+    let owned = send_raw_http_request(&host, port, &own_path, "{\"marker\":\"owned\"}");
+    assert!(
+        owned.starts_with("HTTP/1.1 200"),
+        "本用例请求必须正常服务，实际响应：{owned}"
+    );
+    assert!(
+        owned.contains("owned-response"),
+        "本用例请求必须拿到队列里的那条响应，实际响应：{owned}"
+    );
+
+    let expected = server.expected;
+    let recorded = server.finish();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "队列必须恰好被本用例自身请求消费一次，实际记录 {recorded:?}"
+    );
+    assert!(
+        recorded[0].contains("owned") && !recorded[0].contains("foreign"),
+        "记录的请求体必须是本用例自身请求（外来请求不得入队），实际记录 {recorded:?}"
+    );
+    assert_eq!(expected, 1);
+}
+
+/// wave-47：mock 收到的一次请求。
+///
+/// - `request_line`：请求行（`POST /v1/<owner-token>/chat/completions HTTP/1.1`），
+///   用于**归属令牌**校验（PA-139 遗留 flake：迟到/杂散连接吃掉响应队列）。
+/// - `body`：既有语义不变——只含 `Content-Length` 切片，谓词与用例断言完全不受影响。
+struct MockHttpRequest {
+    request_line: String,
+    body: String,
+}
+
 /// wave-13：读请求改为**优雅失败**（`None`）。CI 负载下客户端可能提前断开/重复建连，
 /// 旧实现 `read(...).expect(...)` 会 panic 打死 mock 线程 → 后续重试连接被拒 → 用例假失败。
-fn read_http_request_body(stream: &mut TcpStream) -> Option<String> {
+fn read_http_request_body(stream: &mut TcpStream) -> Option<MockHttpRequest> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 4096];
     let mut header_end = None;
@@ -868,7 +1008,12 @@ fn read_http_request_body(stream: &mut TcpStream) -> Option<String> {
     }
 
     let end = header_end?;
-    Some(String::from_utf8_lossy(&buffer[end..end + content_length]).to_string())
+    let head = String::from_utf8_lossy(&buffer[..end]);
+    let request_line = head.lines().next().unwrap_or("").trim().to_string();
+    Some(MockHttpRequest {
+        request_line,
+        body: String::from_utf8_lossy(&buffer[end..end + content_length]).to_string(),
+    })
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {

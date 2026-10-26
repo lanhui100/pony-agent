@@ -335,10 +335,27 @@ impl PonySentryClient {
     }
 }
 
+// 进程内测试串行锁：供需要重置全局 PonySentryClient 或执行 ponysentry 有状态测试时使用。
+#[cfg(test)]
+static TEST_SINK_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub fn test_sink_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_SINK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 最近一次**入队**的 payload（测试钩子，Wave-6 BLOCKING 用例需要检查最终 payload）。
 ///
 /// 生产路径只写不读，成本为一次 clone + Mutex 写入；仅在入队成功后记录（已过 normalize/脱敏）。
 static LAST_ENQUEUED_PAYLOAD: Mutex<Option<IngestPayload>> = Mutex::new(None);
+
+/// 有界环形缓冲容量（供测试按谓词检索，消除多测试并发写入导致的单槽覆盖 flake）。
+const RECENT_ENQUEUED_PAYLOADS_CAPACITY: usize = 64;
+
+static RECENT_ENQUEUED_PAYLOADS: Mutex<std::collections::VecDeque<IngestPayload>> =
+    Mutex::new(std::collections::VecDeque::new());
 
 /// 记录最近入队 payload（供测试断言 trace_id 等最终字段）。
 fn remember_enqueued_payload(payload: &IngestPayload) {
@@ -346,6 +363,14 @@ fn remember_enqueued_payload(payload: &IngestPayload) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = Some(payload.clone());
+
+    let mut queue = RECENT_ENQUEUED_PAYLOADS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if queue.len() >= RECENT_ENQUEUED_PAYLOADS_CAPACITY {
+        queue.pop_front();
+    }
+    queue.push_back(payload.clone());
 }
 
 /// 读取最近一次入队的 payload（仅测试/诊断用）。
@@ -354,6 +379,16 @@ pub fn last_enqueued_payload() -> Option<IngestPayload> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.clone()
+}
+
+/// 从最近入队的 payload 队列中按谓词反向检索（从新到旧找）。
+pub fn find_enqueued_payload(
+    predicate: impl Fn(&IngestPayload) -> bool,
+) -> Option<IngestPayload> {
+    let queue = RECENT_ENQUEUED_PAYLOADS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    queue.iter().rev().find(|p| predicate(p)).cloned()
 }
 
 /// 生成事件 id：32 位小写十六进制（无连字符，符合 C2 的 `^[0-9a-f]{32}$` 契约）。

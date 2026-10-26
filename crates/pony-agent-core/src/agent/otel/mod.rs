@@ -822,8 +822,31 @@ pub fn force_export_session_trace(
 
     // A8：按批量管道上限分块重放，**每块 flush 成功后才计入已交付**；
     // 返回值是「实际完成 flush 的 turn 数」，不是入队条数。
+    //
+    // 总预算约束（Bounded Total Flush Budget）：
+    // 整个会话导出的总 flush 预算严格钉死为 FORCE_EXPORT_FLUSH_TIMEOUT_MS（3000ms），
+    // 跨 chunk 共享倒计时。进入每个 chunk 时若总预算已耗尽则立即返回 Err；
+    // 每块传递的等待时间为剩余预算（remaining_ms），从结构上杜绝 N 个 chunk 各自等待
+    // 3000ms 导致的 N×3000ms（如 2 块 6s）超时膨胀。
+    let total_deadline = std::time::Instant::now()
+        + Duration::from_millis(FORCE_EXPORT_FLUSH_TIMEOUT_MS);
     let mut delivered: usize = 0;
-    for chunk in traces.chunks(FORCE_EXPORT_CHUNK_TURNS) {
+    let chunks: Vec<&[crate::agent::session::TurnTraceRecord]> =
+        traces.chunks(FORCE_EXPORT_CHUNK_TURNS).collect();
+    let total_chunks = chunks.len();
+
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        let remaining = total_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            let skipped = total_chunks - chunk_idx;
+            return Err(format!(
+                "otel::force_export_session_trace：整体导出预算已耗尽（{FORCE_EXPORT_FLUSH_TIMEOUT_MS}ms），剩余 {skipped} 个 chunk 未发送"
+            ));
+        }
+        let chunk_timeout_ms = (remaining.as_millis() as u64)
+            .min(FORCE_EXPORT_FLUSH_TIMEOUT_MS)
+            .max(1);
+
         for (offset, record) in chunk.iter().enumerate() {
             let record_session = record
                 .session_id
@@ -848,7 +871,7 @@ pub fn force_export_session_trace(
             );
             span.end();
         }
-        flush_state(&state, FORCE_EXPORT_FLUSH_TIMEOUT_MS)
+        flush_state(&state, chunk_timeout_ms)
             .map_err(|message| format!("otel::force_export_session_trace：{message}"))?;
         delivered += chunk.len();
     }
@@ -2725,6 +2748,54 @@ mod tests {
         drop(blackhole);
     }
 
+    /// 回归断言：多 chunk（4 个 chunk = 2048 条 trace）在黑洞端点下的总耗时
+    /// 仍被总预算严格限制在 ≤3250ms，彻底杜绝 N×3000ms 放大。
+    #[test]
+    fn multi_chunk_blackhole_upload_stays_within_total_flush_budget() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(false, Ordering::SeqCst);
+
+        let (port, blackhole) = spawn_blackhole_sink(Duration::from_millis(15_000));
+        init(OtelConfig {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            service_name: "unit-multi-chunk-probe".to_string(),
+            sampling_ratio: 1.0,
+            headers: Vec::new(),
+        })
+        .expect("回环端点必须可装配");
+
+        let traces: Vec<crate::agent::session::TurnTraceRecord> = (0..2048)
+            .map(|index| crate::agent::session::TurnTraceRecord {
+                turn_id: format!("turn-probe-4chunk-{index}"),
+                session_id: Some("sess-probe-4chunk".to_string()),
+                title: "probe".to_string(),
+                phase: "completed".to_string(),
+                ..Default::default()
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        let result = force_export_session_trace("sess-probe-4chunk", &traces);
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "黑洞端点下多块导出必须返回 Err：{result:?}"
+        );
+        assert!(
+            elapsed <= Duration::from_millis(3_250),
+            "多 chunk 导出总耗时必须 ≤3000ms(+容差)，实测 {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(2_000),
+            "总预算倒计时必须切实执行，实测 {elapsed:?}"
+        );
+
+        shutdown();
+        drop(blackhole);
+    }
+
     // ------------------------------- Wave-4.1 L3-A B1 / B1b / A2 实现级行为断言
     //
     // 说明：这是实现级回归（非验收门禁），与 tests/ 下的冻结验收用例互不替代。
@@ -2913,6 +2984,7 @@ mod tests {
     #[test]
     fn wave6_capture_turn_failure_uses_turn_scoped_trace_id_across_threads() {
         let _guard = test_lock();
+        let _sentry_guard = crate::agent::ponysentry::test_sink_lock();
         shutdown();
         REPORTING_ENABLED.store(true, Ordering::SeqCst);
         init(OtelConfig {
@@ -2961,6 +3033,7 @@ mod tests {
         assert_eq!(payload.trace_id, None, "未登记的 turn 不得输出 trace_id");
 
         crate::agent::ponysentry::enable_turn_failure_capture(false);
+        crate::agent::ponysentry::init(crate::agent::ponysentry::PonySentryConfig::default());
         drop(scope);
         shutdown();
         REPORTING_ENABLED.store(false, Ordering::SeqCst);
