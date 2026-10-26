@@ -1,6 +1,10 @@
 //! pony-tui: Claude Code 风格的终端全屏 Agent 交互界面
 //! 基于 ratatui + crossterm 构建，支持对话历史、流式输出、工具状态与多行输入。
 
+// 作为测试目标编译时 main() 不会被执行，运行期才用到的项会被判定为 dead_code；
+// 仅在 test cfg 下放行，生产构建仍严格保持 -D warnings（不掩盖真实死代码）。
+#![cfg_attr(test, allow(dead_code))]
+
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags, KeyCode,
