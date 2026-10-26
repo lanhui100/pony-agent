@@ -46,8 +46,6 @@ jobs:
       # 收口契约的可执行门禁已独立为 .github/workflows/observability-gate.yml
       # （只依赖 git + node，秒级独立红绿；不再挂在 verify 的长时间构建后面）。
       - name: 安装依赖
-
-      - name: 安装依赖
         run: npm ci
 
       - name: 类型检查
