@@ -7,10 +7,7 @@ use crossterm::{
         KeyModifiers, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
-        LeaveAlternateScreen,
-    },
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use pony_agent_core::agent::config::{
     ProviderModelCapabilities, ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
@@ -1910,6 +1907,10 @@ pub fn resolve_active_provider_id(_state: &TuiState) -> Option<String> {
 
 /// wave-35c：启动同步——把 TuiState 的 current_provider_id / model 对齐注册表
 /// 选中项与 selected_model_id，使 header/状态一致，并保证后续 discovery 能命中。
+// 注意：当前无调用点。保留是为了不丢失「启动时把 current_provider_id / model
+// 对齐注册表选中项」的设计意图（wave-35c）；是否接入启动链路属行为变更，需另开工单裁决，
+// 故这里只屏蔽告警，不删除、也不擅自接线。
+#[allow(dead_code)]
 fn sync_state_with_registry(state: &mut TuiState) {
     if let Some(id) = resolve_active_provider_id(state) {
         state.current_provider_id = id;
