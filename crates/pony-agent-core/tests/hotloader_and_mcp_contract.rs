@@ -146,9 +146,47 @@ fn unique_source_id() -> String {
     format!("test-src-{}-{nanos}", std::process::id())
 }
 
+/// 解析跨平台 Python 解释器命令与基础参数。
+///
+/// 为什么 Windows 不能用 `/usr/bin/env`：Windows 没有 Unix 虚拟路径 `/usr/bin/env`，
+/// 直接调用会触发 os error 3（系统找不到指定路径）。
+/// Windows 下按序探测：python --version → python3 --version → py -3 --version，
+/// 规避 Microsoft Store 的 python 别名存根；
+/// Unix 下保持既有 `/usr/bin/env python3`。
+fn resolve_python_command() -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        let candidates: &[(&str, &[&str])] = &[
+            ("python", &[]),
+            ("python3", &[]),
+            ("py", &["-3"]),
+        ];
+        for &(program, extra_args) in candidates {
+            if let Ok(output) = std::process::Command::new(program)
+                .args(extra_args)
+                .arg("--version")
+                .output()
+            {
+                if output.status.success() {
+                    return (
+                        program,
+                        extra_args.iter().map(|s| (*s).to_string()).collect(),
+                    );
+                }
+            }
+        }
+        panic!("CI 环境缺少可用 python 解释器（已尝试 python, python3, py -3），MCP stdio 契约测试无法运行");
+    }
+
+    #[cfg(not(windows))]
+    {
+        ("/usr/bin/env", vec!["python3".to_string()])
+    }
+}
+
 #[test]
 fn test_stdio_mcp_transport_roundtrip_with_mcp_handshake() {
-    // Arrange：Python3 假 server（/usr/bin/env python3 <script>，无需 shebang/可执行位）
+    // Arrange：Python3 假 server（跨平台解释器命令 + <script>，无需 shebang/可执行位）
     let workspace = TempDir::new("mcp-stdio-contract");
     let script = workspace.write("fake_res_server.py", FAKE_RES_SERVER_PY);
     let script_arg = script
@@ -156,10 +194,9 @@ fn test_stdio_mcp_transport_roundtrip_with_mcp_handshake() {
         .expect("临时脚本路径必须是合法 UTF-8")
         .to_string();
 
-    let transport = StdioMcpTransport::new(
-        "/usr/bin/env",
-        vec!["python3".to_string(), script_arg],
-    );
+    let (cmd, mut args) = resolve_python_command();
+    args.push(script_arg);
+    let transport = StdioMcpTransport::new(cmd, args);
     let request = McpTransportRequest {
         source_id: unique_source_id(),
         source_revision: "1".to_string(),
