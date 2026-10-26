@@ -10873,15 +10873,59 @@ fn wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_t
             record_ttft > 0,
             "hop {index} 的 per-call firstTokenLatencyMs 必须为有效正值"
         );
-        // per-call TTFT 不可能大于该 hop 事件携带的轮级 TTFT（后者从整轮起点计）。
+        // per-call TTFT 与「轮级 TTFT」的可比性边界（wave-15 偶发红的根因）：
+        // 轮级 TTFT（`payload.firstTokenLatencyMs`）是**整轮单次采样**——「turn 起点 → 本回合
+        // 第一个 delta」（`turn_stream.rs` 里 `first_token_latency` 跨 hop 只写一次）；而本
+        // hop 的 `last()` 是**第 k+1 次调用**（§7.10 I2），它的 per-call TTFT 是「第 k+1 次
+        // 调用起点 → 该次调用第一个 delta」。两者是**不同区间**，因此「轮级 ≥ per-call」
+        // 不是不变量：并行负载下后者完全可能更慢（实测红：
+        // `hop 0 的 per-call TTFT (80ms) 不得大于轮级 TTFT (71ms)`，复现率 1/15）。
+        // 注意：即便是 records[0]（第 0 次调用）与轮级 TTFT 也只是**两次独立采样**
+        // （起点不同、读取时刻相差若干指令），跨调度抢占后仍无逻辑保证 → 一律不做跨区间比较。
+        // 改为断言两条同区间、逻辑恒真的不变量（鉴别力更强，且不依赖负载）：
+        // (a) 轮级 TTFT 必须存在且为正（「TTFT 可信门控」真正要保护的东西）；
+        // (b) 任一条 per-call TTFT ≤ 该条自身的 turnDurationMs（同一起点、后者到调用结束）；
+        //     若有人把 per-call TTFT 改成从 turn 起点或整轮聚合值回填，这条必然红。
+        // 另加 records[0] 的流式门控断言，避免「首条记录悄悄退化为 buffered（无 TTFT）」。
         let turn_level_ttft = payload
             .get("firstTokenLatencyMs")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                panic!("hop {index} 的 turn:hop_complete 必须携带可用的轮级 firstTokenLatencyMs")
+            });
         assert!(
-            record_ttft <= turn_level_ttft,
-            "hop {index} 的 per-call TTFT ({record_ttft}ms) 不得大于轮级 TTFT ({turn_level_ttft}ms)"
+            turn_level_ttft > 0,
+            "hop {index} 的轮级 TTFT 必须为有效正值（TTFT 可信门控 §7.2）"
         );
+        assert_eq!(
+            records[0].get("latencyKind"),
+            Some(&serde_json::to_value(ProviderLatencyKind::ProviderStream).unwrap()),
+            "hop {index} 的 records[0]（第 0 次调用）latencyKind 必须为 provider_stream"
+        );
+        assert!(
+            records[0]
+                .get("firstTokenLatencyMs")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|value| value > 0),
+            "hop {index} 的 records[0]（第 0 次调用）必须携带正值 per-call firstTokenLatencyMs"
+        );
+        for (record_index, record) in records.iter().enumerate() {
+            let (Some(ttft), Some(duration)) = (
+                record
+                    .get("firstTokenLatencyMs")
+                    .and_then(serde_json::Value::as_u64),
+                record
+                    .get("turnDurationMs")
+                    .and_then(serde_json::Value::as_u64),
+            ) else {
+                continue;
+            };
+            assert!(
+                ttft <= duration,
+                "hop {index} 的 records[{record_index}] per-call TTFT ({ttft}ms) 不得大于该次调用\
+                 总耗时 ({duration}ms)——同一起点，TTFT 必须落在调用区间内"
+            );
+        }
         assert_eq!(
             last.get("latencyKind"),
             Some(&serde_json::to_value(ProviderLatencyKind::ProviderStream).unwrap()),
