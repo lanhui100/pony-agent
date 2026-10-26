@@ -33,12 +33,13 @@ use pony_agent_core::agent::telemetry::DefaultTurnTelemetryBuilder;
 use pony_agent_core::agent::tools::{
     job_kill, job_output, job_start, job_start_with_workspace_root, terminal_close, terminal_open,
     terminal_open_with_workspace_root, terminal_read, terminal_send, JobKillArgs, JobOutputArgs,
-    JobStartArgs, TerminalCloseArgs, TerminalOpenArgs, TerminalReadArgs, TerminalSendArgs,
-    ToolCall, ToolExecutor, ToolRouter,
+    JobOutputResult, JobStartArgs, TerminalCloseArgs, TerminalOpenArgs, TerminalReadArgs,
+    TerminalSendArgs, ToolCall, ToolExecutor, ToolRouter,
 };
 use pony_agent_core::agent::workspace::compute_default_workspace_root;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 fn unique_tag(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
@@ -138,6 +139,35 @@ fn assert_output_contains_path_for_platform(output: &str, expected: &str, messag
         norm_output.contains(&norm_expected),
         "{message}\noutput={output}\nexpected={expected}"
     );
+}
+
+/// 有界轮询取回 job 输出，直到非空或预算耗尽（返回最后一次结果）。
+///
+/// **原断言错在哪**：`job_output(wait=true)` 只等待**进程退出**（`jobs.rs::job_output` 的
+/// `session.update_status()` 在 `try_wait` 报退出的那一轮就把状态置为 exited），而
+/// stdout/stderr 是由 `job_start*` 起的独立 drain 线程异步写进 RingBuffer 的
+/// （`jobs.rs` 的 `job-stdout-drain`/`job-stderr-drain`）。进程退出瞬间 drain 线程可能还没把
+/// 最后一批字节搬进缓冲区，于是这一次读取拿到空字符串。原用例把这一次读取当作"最终输出"
+/// 直接做路径相等比较 → 偶发假红（本地 20 连跑 8 次失败，actual="" ，见 task-10 诊断）。
+///
+/// **新断言为什么仍能抓住回归**：路径相等判定原封不动；空输出**不**视为通过——只在预算内
+/// 轮询到非空再比较，预算耗尽仍为空则照旧让用例失败。若"cwd 缺省锚定会话 workspace"回归成
+/// 锚 current_dir，读到的是非空的 current_dir 路径，断言立即失败，鉴别力不降。
+fn job_output_until_nonempty(job_id: &str, budget: Duration) -> JobOutputResult {
+    let deadline = Instant::now() + budget;
+    loop {
+        let out = job_output(JobOutputArgs {
+            job_id: job_id.to_string(),
+            wait: Some(true),
+            timeout_ms: Some(8_000),
+            offset: Some(0),
+        })
+        .expect("job_output should succeed");
+        if !out.output.trim().is_empty() || Instant::now() >= deadline {
+            return out;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Windows 形态转换逻辑的 Linux 可测镜像（复现 CI 实际值，见 ci_final.log）：
@@ -304,13 +334,8 @@ fn red_job_cwd_none_must_default_to_session_workspace_root() {
         Some(ws.as_path()),
     )
     .expect("job_start_with_workspace_root should succeed");
-    let out = job_output(JobOutputArgs {
-        job_id: started.job_id.clone(),
-        wait: Some(true),
-        timeout_ms: Some(8_000),
-        offset: Some(0),
-    })
-    .expect("job_output should succeed");
+    // 有界轮询：drain 线程异步落缓冲，进程刚退出时首读可能为空（原断言假红根因）。
+    let out = job_output_until_nonempty(&started.job_id, Duration::from_secs(5));
     let _ = job_kill(JobKillArgs {
         job_id: started.job_id,
         reason: Some("cleanup".to_string()),
@@ -466,13 +491,8 @@ fn patch4_job_some_ws_none_cwd_must_default_to_ws() {
         Some(ws.as_path()),
     )
     .expect("job_start_with_workspace_root should succeed");
-    let out = job_output(JobOutputArgs {
-        job_id: started.job_id.clone(),
-        wait: Some(true),
-        timeout_ms: Some(8_000),
-        offset: Some(0),
-    })
-    .expect("job_output should succeed");
+    // 有界轮询：drain 线程异步落缓冲，进程刚退出时首读可能为空（原断言假红根因）。
+    let out = job_output_until_nonempty(&started.job_id, Duration::from_secs(5));
     let _ = job_kill(JobKillArgs {
         job_id: started.job_id,
         reason: Some("cleanup".to_string()),

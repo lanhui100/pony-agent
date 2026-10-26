@@ -8,11 +8,17 @@
 //! from a bare `ToolRouter` to this executor without changing its own surface.
 //!
 //! Migration notes (deliberate, documented):
-//! - A `LegacyCompatiblePolicyEvaluator` reproduces the legacy runtime's direct-execution
-//!   behavior (every builtin allowed; the legacy `ToolRouter` applied its own tool-level risk
-//!   checks). The dispatcher's conservative default is intentionally overridden here so the switch
-//!   does not change today's tool-visible behavior. Real approval semantics land with the
-//!   permission-contract work (phase 4 / task 3.6 closeout).
+//! - The dispatcher's conservative default (`DescriptorPolicyEvaluator`, which lifts any
+//!   write/execute-scope builtin to `ApprovalRequired`) is intentionally overridden here: this
+//!   seam registers a `GovernedPolicyEvaluator` built from the user's persisted tool rules
+//!   (`AppSettingsStore::tool_rules`, wave-30b). Its fallback for an unmatched tool is `Allow`
+//!   (`decision_source = "governed_default"`), i.e. model-origin writes/executes run without
+//!   approval by default, reproducing the legacy `ToolRouter`'s direct-execution behavior.
+//!   Real approval is therefore delegated to: (a) explicit `Ask`/`Deny` tool rules,
+//!   (b) the Plan-draft write gate (`plan_draft_gate`), and (c) path authorization
+//!   (`path_permission_requires_authorization` -> `ApprovalRequired`), plus the host-mediated
+//!   `Ask` control path. Restoring a global fail-closed write/execute default would be a
+//!   product/security-posture change, not a documentation change.
 //! - Execute-scope tools (`workspace_run_command`) run behind the production sandbox
 //!   assembly below: `NativeSandboxBackend` when available, else
 //!   `HostApprovedUnsandboxedBackend` (DSH danger-full-access trust passthrough).
