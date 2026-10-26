@@ -114,31 +114,41 @@ fn last_row_left(buf: &Buffer) -> String {
     cells[cx as usize + RAIL..].concat().trim_end().to_string()
 }
 
-/// Windows 绝对路径形态（盘符 `X:\`/`X:/` 或 UNC `\\server\share`）。
+/// 路径形态（**显式参数**，与宿主平台无关）。
 ///
-/// 单独实现而非直接 `Path::is_absolute()`：在 Linux 上编译时反斜杠不是分隔符，
-/// 无法直接验证 Windows 形态；此纯函数让 Windows 语义能在 Linux 上被镜像测试
-/// （与 `default_workspace_red_phase.rs::normalize_path_forms` 同一手法）。
-fn is_windows_absolute_path(token: &str) -> bool {
-    let bytes = token.as_bytes();
-    let drive_absolute = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/');
-    drive_absolute || (token.starts_with("\\\\") && token.len() > 2)
+/// 为什么不能用宿主 `Path::is_absolute()` 做跨平台镜像：它按**编译目标**的规则判定——
+/// Windows 宿主上 `/home/u/x` 不是绝对路径（无盘符），Linux 宿主上 `C:\x` 也不是绝对路径。
+/// 于是「在 Linux 上镜像验证 Windows 形态」会变成「用 Linux 规则验证 Windows 数据」，
+/// 反之亦然（本用例上一版就是这么红的：Windows 宿主跑 unix 正例时判假）。
+/// 所以判定必须是**纯字符串规则 + 显式形态参数**，两种形态都与宿主无关。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathForms {
+    Unix,
+    Windows,
 }
 
-/// 判据核心（带平台参数，便于在 Linux 上镜像验证 Windows 形态）。
-fn is_folded_or_absolute_path_with(text: &str, windows_forms: bool) -> bool {
+/// 按**指定形态**判定绝对路径（纯字符串，不看宿主）。
+/// - Unix：以 `/` 开头；
+/// - Windows：盘符绝对（`X:` + `\` 或 `/`）、UNC（`\\server\share`）、
+///   verbatim（`\\?\C:\x`，同样以 `\\` 起，故与 UNC 同支覆盖）。
+fn is_absolute_path_in(token: &str, forms: PathForms) -> bool {
+    match forms {
+        PathForms::Unix => token.starts_with('/'),
+        PathForms::Windows => {
+            let bytes = token.as_bytes();
+            let drive_absolute = bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/');
+            drive_absolute || (token.starts_with("\\\\") && token.len() > 2)
+        }
+    }
+}
+
+/// 判据核心（显式形态参数）：折叠形态（`~` / `~\…`）或该形态下的绝对路径。
+fn is_folded_or_absolute_path_with(text: &str, forms: PathForms) -> bool {
     let token = text.trim_start().split_whitespace().next().unwrap_or("");
-    if token.starts_with('~') {
-        return true;
-    }
-    if windows_forms {
-        is_windows_absolute_path(token)
-    } else {
-        std::path::Path::new(token).is_absolute()
-    }
+    token.starts_with('~') || is_absolute_path_in(token, forms)
 }
 
 /// workspace 标签是否「折叠形态」（`~` / `~\…`）或「绝对路径」。
@@ -148,8 +158,18 @@ fn is_folded_or_absolute_path_with(text: &str, windows_forms: bool) -> bool {
 /// 于是 Windows CI 恒假红。平台无关判据：折叠形态仍以 `~` 起；其余交给平台各自的
 /// 绝对路径判定（Unix `/x`、Windows `C:\x`）。鉴别力不降：空串、纯数字、
 /// 相对形态（`pony-agent`）仍判假。
+/// 运行时包装：**只有这里**按平台选形态；判定函数本身完全不看宿主。
 fn is_folded_or_absolute_path(text: &str) -> bool {
-    is_folded_or_absolute_path_with(text, cfg!(windows))
+    is_folded_or_absolute_path_with(text, host_path_forms())
+}
+
+/// 宿主的路径形态（编译目标决定，仅在运行时选择用哪套字符串规则）。
+fn host_path_forms() -> PathForms {
+    if cfg!(windows) {
+        PathForms::Windows
+    } else {
+        PathForms::Unix
+    }
 }
 
 /// 三条主体沟槽列（左 0/1，右 W-2/W-1）在任何一行都不得出现内容。
@@ -417,37 +437,58 @@ fn a4_metrics_row_left_shows_workspace_label() {
 }
 
 // ---------------------------------------------------------------------------
-// A4-mirror：Windows 路径形态可测镜像 —— 证明平台无关判据在 Windows 形态下成立
-// （Linux 上直接跑 cfg(windows) 分支是不可能的，故用参数化纯函数复现 CI 实测值）。
+// A4-mirror：两种路径形态的判据镜像 —— **本用例在 Linux 与 Windows 上都跑同一张表**。
+//
+// 上一版红在这个位置：`is_folded_or_absolute_path_with(_, windows_forms=false)` 内部用的是
+// **宿主**的 `Path::is_absolute()`，于是在 Windows 宿主上跑「unix 正例 `/home/u/...`」必然判假。
+// 现在判定是纯字符串规则 + 显式形态参数（`PathForms::Unix/Windows`），与宿主无关，
+// 因此正例/反例在两种宿主上的期望完全相同，不需要按平台改期望。
 // ---------------------------------------------------------------------------
 #[test]
-fn a4_windows_path_shapes_are_testable_on_linux() {
-    // CI windows-latest 上实际渲染的标签（修复前 `starts_with('/')` 判假 → 假红）。
-    assert!(is_folded_or_absolute_path_with(
+fn a4_path_form_rules_are_host_independent() {
+    // (1) Windows 形态：CI windows-latest 上实际渲染的标签（修复前 `starts_with('/')` 判假 → 假红）。
+    for label in [
         r"C:\Users\RUNNER~1\AppData\Local\Temp\wave39-ws-alpha",
-        true
-    ));
-    // 正斜杠盘符形态（Git-Bash / MSYS 路径也常见）。
-    assert!(is_folded_or_absolute_path_with("C:/Users/runner/AppData/Local/Temp/ws", true));
-    // UNC 形态。
-    assert!(is_folded_or_absolute_path_with(r"\\server\share\proj", true));
-    // 折叠形态（Windows 反斜杠 / Unix 正斜杠）两平台都应判真。
-    assert!(is_folded_or_absolute_path_with(r"~\pony-agent", true));
-    assert!(is_folded_or_absolute_path_with("~/pony-agent", true));
-    assert!(is_folded_or_absolute_path_with("~/pony-agent", false));
-    // 带右侧指标簇的整行（token 化后只取首个路径片段）。
-    assert!(is_folded_or_absolute_path_with(r"C:\ws-alpha  ↑12 ↓3", true));
-    assert!(is_folded_or_absolute_path_with("/home/u/pony-agent  ↑12 ↓3", false));
+        "C:/Users/runner/AppData/Local/Temp/ws",      // 正斜杠盘符形态
+        r"\\server\share\proj",                      // UNC
+        r"\\?\C:\x",                                 // verbatim（同样以 \\ 起）
+        r"~\pony-agent",                                // 折叠形态
+        r"C:\ws-alpha  ↑12 ↓3",                          // 带右侧指标簇的整行
+        "C:\\x",
+    ] {
+        assert!(
+            is_folded_or_absolute_path_with(label, PathForms::Windows),
+            "Windows 形态下应判真：{label:?}"
+        );
+    }
+    for label in ["pony-agent", "", "   ", r"C:foo\bar", "tmp/wave39", r"\only-root"] {
+        assert!(
+            !is_folded_or_absolute_path_with(label, PathForms::Windows),
+            "Windows 形态下应判假：{label:?}"
+        );
+    }
 
-    // 反例：这些必须判假，否则判据退化为恒真。
-    assert!(!is_folded_or_absolute_path_with("pony-agent", true));
-    assert!(!is_folded_or_absolute_path_with("pony-agent", false));
-    assert!(!is_folded_or_absolute_path_with("", true));
-    assert!(!is_folded_or_absolute_path_with("   ", false));
-    // 盘符相对路径（`C:foo`）在 Windows 上不是绝对路径，必须判假。
-    assert!(!is_folded_or_absolute_path_with(r"C:foo\bar", true));
-    // Unix 相对路径在 Unix 判据下必须判假。
-    assert!(!is_folded_or_absolute_path_with("tmp/wave39", false));
+    // (2) Unix 形态：`/a` 与 `~/a` 判真；Windows 盘符形态在 Unix 下判假（形态不通用，这正是显式参数的意义）。
+    for label in ["/a", "/home/u/pony-agent  ↑12 ↓3", "~/pony-agent"] {
+        assert!(
+            is_folded_or_absolute_path_with(label, PathForms::Unix),
+            "Unix 形态下应判真：{label:?}"
+        );
+    }
+    for label in ["pony-agent", "", "tmp/a", r"C:\x", r"\\server\share"] {
+        assert!(
+            !is_folded_or_absolute_path_with(label, PathForms::Unix),
+            "Unix 形态下应判假：{label:?}"
+        );
+    }
+
+    // (3) 交叉一致性：`~` 折叠形态与宿主无关（两套规则都认）。
+    for forms in [PathForms::Unix, PathForms::Windows] {
+        assert!(is_folded_or_absolute_path_with("~/a", forms));
+        assert!(is_folded_or_absolute_path_with(r"~\a", forms));
+        // 单个 `~` 是"折叠后的 HOME 本身"（产品 workspace_label 在 workspace == home 时返回 "~"）。
+        assert!(is_folded_or_absolute_path_with("~", forms));
+    }
 }
 
 // ---------------------------------------------------------------------------
