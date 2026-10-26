@@ -120,11 +120,57 @@ traceparent: 00-6eb3ce536b0f481bada70e7b6d04d804-fe0cf6d9b8d541bb-01
 | ADR 0048 | 首五行无 `Status:`（写成 `**状态**: accepted`） | 改为 `Status: implemented`（正文为既成事实叙述，属已采纳落地） | 同上 |
 | `tui.rs` | 两处告警被 `-D warnings` 升级为错误 | ① 删除未使用 import（调用点均用全限定路径）；② `sync_state_with_registry` 加 `#[allow(dead_code)]` + 说明注释 | `RUSTFLAGS=-D warnings cargo check`（core 与 workspace）均 exit 0 |
 
+**顺带清偿的另外三处**（修前一轮 CI 才暴露出来的既有红项，均非本轮引入）：
+
+| 项 | 原状 | 处置 |
+|---|---|---|
+| `config.rs:1616` | 断言 `Some(256_000)`，但 `bb1d208` 已把 `DEFAULT_CONTEXT_WINDOW_TOKENS` 调为 `1_000_000`，同文件另三处断言都已同步，仅此一处漏改 | 对齐为 `Some(1_000_000)` |
+| `wave5_cost_test.rs` | 未使用的 `CostEstimate` 导入 + 从未被断言使用的 `pricing` 构造（`-D warnings` 下编译失败） | 分别删除 |
+| `src/bin/tui.rs` | 作为**测试目标**编译时 `main()` 不执行，约 50 项运行期符号被判 `dead_code` 并升级为错误 | 仅加 `#![cfg_attr(test, allow(dead_code))]`（生产构建仍严格 `-D warnings`） |
+
 > `sync_state_with_registry` 的处理说明：该函数是 wave-35c 的「启动同步」设计意图，
 > 但当前**没有任何调用点**——即「启动时把 current_provider_id / model 对齐注册表」这件事
 > 实际没有发生。是否接回启动链路属于**行为变更**，本轮只屏蔽告警不擅自接线，建议单开工单裁决。
 
-## 复跑方式## 复跑方式
+## 仍红的部分（截止本轮结束）
+
+`CI / verify (windows-latest)` 最后一个步骤「Core 单元与集成测试」仍有 **14 个既有失败**：
+
+- 13 × `agent::runtime::tests`（`parity_*`、`start_turn_stream_*` 等）
+- 1 × `agent::hook_commands::tests::timeout_kills_child_and_errors`（超时敏感）
+
+证据：`test result: FAILED. 1151 passed; 14 failed`。
+
+**与本轮无关**：wave-47 自身改动范围（`89a8ef0..HEAD`，27 文件）不含 `agent/runtime/**` 与
+`hook_commands.rs`；这些失败来自此前 59 个未推送提交所带的 Windows 行为差异，需另开工单定位
+（属于「本地从未在 Windows 上跑过全量 lib 测试」这一历史缺口）。
+
+`core-platform-check (ubuntu/macos)` 与 `enforcement` 本轮均已 **pass**。
+
+另有一处已知 flake（`agent::ponysentry::turn_failure_capture_tests::governance_block_failure_is_not_reported`）：
+共享全局 sink（`LAST_ENQUEUED_PAYLOAD` 单槽）被并行测试互相覆盖所致，隔离跑 0/8 失败、
+全量跑偶发失败（wave-45 复盘已登记）。建议后续改为 thread-local sink 或引入 `serial_test`。
+
+## 复跑方式## 仍红的部分（截止本轮结束）
+
+`CI / verify (windows-latest)` 最后一个步骤「Core 单元与集成测试」仍有 **14 个既有失败**：
+
+- 13 × `agent::runtime::tests`（`parity_*`、`start_turn_stream_*` 等）
+- 1 × `agent::hook_commands::tests::timeout_kills_child_and_errors`（超时敏感）
+
+证据：`test result: FAILED. 1151 passed; 14 failed`。
+
+**与本轮无关**：wave-47 自身改动范围（`89a8ef0..HEAD`，27 文件）不含 `agent/runtime/**` 与
+`hook_commands.rs`；这些失败来自此前 59 个未推送提交所带的 Windows 行为差异，需另开工单定位
+（属于「本地从未在 Windows 上跑过全量 lib 测试」这一历史缺口）。
+
+`core-platform-check (ubuntu/macos)` 与 `enforcement` 本轮均已 **pass**。
+
+另有一处已知 flake（`agent::ponysentry::turn_failure_capture_tests::governance_block_failure_is_not_reported`）：
+共享全局 sink（`LAST_ENQUEUED_PAYLOAD` 单槽）被并行测试互相覆盖所致，隔离跑 0/8 失败、
+全量跑偶发失败（wave-45 复盘已登记）。建议后续改为 thread-local sink 或引入 `serial_test`。
+
+## 复跑方式
 
 ```bash
 bash tests/acceptance/receipts/wave47/verify-l0.sh          # L0
