@@ -1,0 +1,61 @@
+name: Observability Gate
+
+# 为什么单独一个 workflow：
+#   1. 变更门禁只需要 git + node，秒级出结果；挂在 verify（windows，含完整 Rust 构建）里
+#      会让「契约是否被绕过」的反馈被长时间构建淹没，且任何无关步骤变红都会掩盖它。
+#   2. 它是 ob2 收口契约的**执行者**——必须独立可见、独立红绿。
+# 规则来源：docs/observability.yaml 的 enforcement_points（脚本内不硬编码任何语言关键字）。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  enforcement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 可观测性收口与变更门禁
+        run: |
+          set -euo pipefail
+
+          BASE="HEAD~1"
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            if git rev-parse --verify --quiet "origin/${GITHUB_BASE_REF}" >/dev/null; then
+              BASE="origin/${GITHUB_BASE_REF}"
+            fi
+          fi
+          echo "base=${BASE}"
+
+          # 声明变更的批准口令由提交信息承载，判定对象是「产出当前声明内容的那个提交」
+          # ＝区间内最后一次动过声明的提交（与 scripts/observability/gate.mjs 同口径）：
+          #   · 逐提交全查会在引入约定前的历史改动上一次性全红，门禁随后被无视；
+          #   · 只要「任一提交带口令」则可搭便车绕过（实测可绕）。
+          FLAG=""
+          if git diff --name-only "${BASE}...HEAD" 2>/dev/null | grep -qx 'docs/observability.yaml'; then
+            LATEST=$(git log "${BASE}..HEAD" -1 --pretty=%H -- docs/observability.yaml)
+            if git log -1 --pretty=%B "$LATEST" | grep -q '\[decl-change-approved\]'; then
+              FLAG="--decl-approved"
+            fi
+            echo "declaration changed in ${LATEST:-working-tree}; flag=${FLAG:-none}"
+          fi
+
+          # 本机/自带 skill 的 runner 用权威器；GitHub 托管 runner 没有 skill，
+          # 走仓库内等价引擎（判定口径由 tests/acceptance/wave47/gate-conformance.spec.ts 守护）。
+          SKILL="$HOME/.agents/skills/observability-onboarding/scripts/audit-diff.sh"
+          if [ -f "$SKILL" ]; then
+            bash "$SKILL" $FLAG
+          else
+            node scripts/observability/gate.mjs
+          fi

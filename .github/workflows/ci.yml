@@ -43,6 +43,8 @@ jobs:
       - name: 敏感信息与脱敏扫描（全库纳管文件）
         run: node scripts/check-secrets.mjs --all
 
+      # 收口契约的可执行门禁已独立为 .github/workflows/observability-gate.yml
+      # （只依赖 git + node，秒级独立红绿；不再挂在 verify 的长时间构建后面）。
       - name: 安装依赖
         run: npm ci
 

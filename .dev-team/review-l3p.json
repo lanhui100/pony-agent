@@ -1,0 +1,9 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "docs/observability.yaml",
+    ".github/workflows/ci.yml",
+    "tests/acceptance/wave47-ob2-enforcement.spec.ts"
+  ],
+  "findings": []
+}
