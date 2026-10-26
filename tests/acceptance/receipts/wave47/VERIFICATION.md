@@ -11,7 +11,8 @@
 | **L0** | 门禁拦截力（真实工作树） | 在真实仓里写入违背收口点的代码 → 跑 `audit-diff.sh` | **两条规则均拦截（exit 2）**，清理后放行（exit 0） | `l0_gate_probe.txt` |
 | **L2** | `http_client` 的 `traceparent` 保证 | 裸 `TcpListener` 捕获 reqwest 实际写出的 HTTP/1.1 原始字节 | **线上真实出现 `traceparent: 00-<32hex>-<16hex>-01`**；无活跃 turn 时不注入 | `l2_wire_traceparent.txt` |
 | **L3** | `error_boundary` 真实渲染链路 | 真实 Vue 运行时 + 真实 HTTP 服务端；默认静音 vs 主动开闸两态对比 | **默认零出网；开闸后真实出网，breadcrumbs/trace_id/归因三件保证齐全** | `l3_realpath.txt` |
-| **回归** | 全量前端套件 | `npx vitest run` | **106 文件 / 1048 用例通过**，exit 0 | `full-vitest-suite.txt` |
+| **L1** | CI 是否真的执行门禁 | 推分支 + PR，看 Actions 实跑 | **Observability Gate `success`**，日志有 `base=origin/main` 与扫描行；且**一次真实拦截**证明非橡皮章 | `l1_ci_gate.txt` |
+| **回归** | 全量前端套件 | `npx vitest run` | **107 文件 / 1055 用例通过**，exit 0 | `full-vitest-suite.txt` |
 
 ## L0 · 门禁拦截力（真实工作树）
 
@@ -80,6 +81,41 @@ traceparent: 00-6eb3ce536b0f481bada70e7b6d04d804-fe0cf6d9b8d541bb-01
 
 > 修正：本报告早前版本曾判定「真实出网在 vitest 里结构性不可观测」，那是**错的**——
 > 既有 `enableBrowserEgressPath()` 已提供单点开闸模式，本轮直接复用即可。
+
+## L1 · CI 真的会跑门禁（本轮新增）
+
+### 为什么原来那条 CI 步骤是坏的
+
+1. `verify` job 是 `windows-latest`，默认 shell 是 **pwsh**，原步骤写的 `if [ -f ... ]` 会直接语法失败；
+2. 即使 shell 对了，GitHub 托管 runner **没有** `~/.agents/skills/observability-onboarding/`，
+   原步骤会**静默空转**——门禁「装了但什么都没拦」，是最糟的假绿。
+
+### 处置
+
+- 拆出独立 workflow `.github/workflows/observability-gate.yml`（只依赖 git + node，秒级独立红绿）；
+- runner 无 skill → 走仓库内引擎 `scripts/observability/gate.mjs`；本机有 skill → 仍用权威器；
+- 两个引擎的判定口径由 `gate-conformance.spec.ts`（4 条）与 D1 语义回归（3 条）锁死。
+
+### 物理收据
+
+| 运行 | 结论 | 含义 |
+|---|---|---|
+| [40253502463](https://github.com/lanhui100/pony-agent/actions/runs/40253502463) | **failure（exit 2）** | 首次上线即**真实拦截**：`[D1] docs/observability.yaml 在本次变更中被修改，但其提交信息缺少 [decl-change-approved]` —— 证明门禁不是橡皮章 |
+| [40253725543](https://github.com/lanhui100/pony-agent/actions/runs/40253725543) | **success** | 日志：`base=origin/main` / `[OK] 可观测性变更门禁通过：2 个收口点，扫描 229 个变更文件` —— 证明**真的执行了**且解析到正确 base |
+
+### D1 批准语义（本轮踩了两次坑才收敛）
+
+- 逐提交全查 → 引入口令约定前的历史改动会一次性全红，门禁随即被无视；
+- 任一提交带口令 → 实测可搭便车：先批准一次，再追加未批准改动即可绕过；
+- 最终口径：**区间内最后一次动过声明的提交**必须带 `[decl-change-approved]`。两端都堵住，
+  并由 D1-a/b/c 三条回归用例锁定。
+
+## 仍未绿的部分（与本轮改动无关，需另开工单）
+
+`CI` 主 workflow 仍红，三处均为**既有问题**，本轮未夹带修改：
+
+1. `verify-decisions.ps1`：`0024-ponysentry-agent-trace-ingest.md` 状态为 `superseded` 但仍在主目录（应移入 `superseded/`）；`0048-usage-governance-enforcement.md` 缺 `Status` 行。
+2. `core-platform-check`（ubuntu/macos）：`crates/pony-agent-core/src/bin/tui.rs` 两处既有告警被 `-D warnings` 升级为错误（第 11 行未使用 import、第 1913 行未使用函数）。
 
 ## 复跑方式
 
