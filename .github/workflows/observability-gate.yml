@@ -1,0 +1,43 @@
+name: Observability Gate
+
+# 为什么单独一个 workflow：
+#   1. 变更门禁只需要 git + node，秒级出结果；挂在 verify（windows，含完整 Rust 构建）里
+#      会让「契约是否被绕过」的反馈被长时间构建淹没，且任何无关步骤变红都会掩盖它。
+#   2. 它是 ob2 收口契约的**执行者**——必须独立可见、独立红绿。
+# 规则来源：docs/observability.yaml 的 enforcement_points（脚本内不硬编码任何语言关键字）。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  enforcement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 可观测性收口与变更门禁
+        run: |
+          set -euo pipefail
+          # 声明变更的批准口令由提交信息承载；本机有权威器时优先用它，CI 用仓库内等价引擎。
+          FLAG=""
+          if git log -1 --pretty=%B | grep -q '\[decl-change-approved\]'; then
+            FLAG="--decl-approved"
+          fi
+          echo "base=${GITHUB_BASE_REF:-HEAD~1} flag=${FLAG:-none}"
+          SKILL="$HOME/.agents/skills/observability-onboarding/scripts/audit-diff.sh"
+          if [ -f "$SKILL" ]; then
+            bash "$SKILL" $FLAG
+          else
+            node scripts/observability/gate.mjs
+          fi

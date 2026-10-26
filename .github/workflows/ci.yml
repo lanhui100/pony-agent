@@ -43,26 +43,9 @@ jobs:
       - name: 敏感信息与脱敏扫描（全库纳管文件）
         run: node scripts/check-secrets.mjs --all
 
-      # 收口契约来源：docs/observability.yaml 的 enforcement_points（规则不在代码里硬编码）。
-      # runner 上没有本机 skill，故走仓库内等价引擎 scripts/observability/gate.mjs；
-      # 本机有 skill 时优先用权威器 audit-diff.sh（判定口径由 tests/acceptance/wave47 的一致性用例守护）。
-      # 注意：verify job 是 windows-latest，默认 shell 是 pwsh，这里必须显式 shell: bash。
-      - name: 可观测性收口与变更门禁（audit-diff）
-        shell: bash
-        run: |
-          set -euo pipefail
-          SKILL="$HOME/.agents/skills/observability-onboarding/scripts/audit-diff.sh"
-          # 声明变更的批准口令统一由提交信息承载（`[decl-change-approved]`），
-          # 两个引擎（权威器 / 仓库内引擎）共用同一判据，避免口径分叉。
-          FLAG=""
-          if git log -1 --pretty=%B | grep -q '\[decl-change-approved\]'; then
-            FLAG="--decl-approved"
-          fi
-          if [ -f "$SKILL" ]; then
-            bash "$SKILL" $FLAG
-          else
-            node scripts/observability/gate.mjs
-          fi
+      # 收口契约的可执行门禁已独立为 .github/workflows/observability-gate.yml
+      # （只依赖 git + node，秒级独立红绿；不再挂在 verify 的长时间构建后面）。
+      - name: 安装依赖
 
       - name: 安装依赖
         run: npm ci
