@@ -3297,6 +3297,8 @@ mod tests {
         /// wave-13：与 runtime mock 用例共享同一串行闸门，消除并行负载导致的
         /// 「provider 请求超时 → 客户端重试 → mock 队列失配 → 回合失败」抖动。
         _gate: crate::agent::runtime::tests::MockServerGate,
+        /// 控制面全局状态串行锁：保证 mock server 生命周期内同时持有 control plane 锁。
+        _cp_lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl MockHttpServer {
@@ -3313,6 +3315,7 @@ mod tests {
             responses: Vec<MockHttpResponse>,
             predicate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
         ) -> Self {
+            let cp_lock = control_plane_test_lock();
             let gate = crate::agent::runtime::tests::MockServerGate::acquire();
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
             let address = listener.local_addr().expect("mock server addr");
@@ -3358,6 +3361,7 @@ mod tests {
                 handle: Some(handle),
                 expected,
                 _gate: gate,
+                _cp_lock: cp_lock,
             }
         }
 
@@ -3672,6 +3676,19 @@ mod tests {
             },
             thinking_param_pattern: ThinkingParamPattern::EffortStandard,
         }
+    }
+
+    /// 控制面测试串行锁：
+    /// `HostControlPlane::build` 会全局注册 `register_event_persist` 和 `register_event_flush`，
+    /// 且依赖共享的单例状态（如全局事件通道、静态注册表）。
+    /// 为杜绝全局通道被并行覆盖导致的事件漏写、会话上下文错位或跨用例竞争，
+    /// 凡是启动真实 turn/stream 或依赖控制面状态落盘的用例统一通过此锁串行化。
+    static TEST_CONTROL_PLANE_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn control_plane_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_CONTROL_PLANE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn build_test_control_plane(
@@ -4869,9 +4886,12 @@ mod tests {
             json_completion("first response"),
             json_completion("second response"),
         ]);
+        let run_id = format!("run-pause-{}", uuid::Uuid::new_v4());
+        let session_id = format!("graph-pause-{}", uuid::Uuid::new_v4());
+
         let _ = control_plane
             .start_graph_run(StartGraphRunCommand {
-                run_id: Some("run-pause".to_string()),
+                run_id: Some(run_id.clone()),
                 goal: "pause then resume".to_string(),
                 input: TurnInput {
                     message: "execute the first turn".to_string(),
@@ -4880,7 +4900,7 @@ mod tests {
                     model_id: None,
                     reasoning_effort: None,
                     workspace_mode: None,
-                    session_id: Some("graph-pause".to_string()),
+                    session_id: Some(session_id.clone()),
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
@@ -4892,7 +4912,7 @@ mod tests {
 
         let stopped = control_plane
             .stop_graph_run(StopGraphRunCommand {
-                run_id: "run-pause".to_string(),
+                run_id: run_id.clone(),
             })
             .expect("graph run should stop");
         assert_eq!(stopped.run.phase, GraphRunPhase::Paused);
@@ -4927,7 +4947,7 @@ mod tests {
 
         let checkpoint = control_plane
             .load_graph_run_checkpoint(GraphRunCheckpointQuery {
-                run_id: Some("run-pause".to_string()),
+                run_id: Some(run_id.clone()),
             })
             .expect("checkpoint should exist");
         assert_eq!(checkpoint.phase, GraphRunPhase::Paused);
@@ -4940,7 +4960,7 @@ mod tests {
         let recovery_checkpoint = control_plane
             .load_execution_checkpoint(ExecutionCheckpointQuery {
                 turn_id: None,
-                session_id: Some("graph-pause".to_string()),
+                session_id: Some(session_id.clone()),
             })
             .expect("recovery checkpoint should be projected");
         assert_eq!(recovery_checkpoint.checkpoint_kind, "recovery");
@@ -4951,12 +4971,12 @@ mod tests {
         assert_eq!(recovery_checkpoint.phase, "paused");
         assert_eq!(
             recovery_checkpoint.session_id.as_deref(),
-            Some("graph-pause")
+            Some(session_id.as_str())
         );
         let paused_runtime_view =
             control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-                session_id: Some("graph-pause".to_string()),
-                run_id: Some("run-pause".to_string()),
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
                 ..SessionRuntimeViewQuery::default()
             });
         assert_eq!(
@@ -4977,7 +4997,7 @@ mod tests {
 
         let resumed = control_plane
             .resume_graph_run(ResumeGraphRunCommand {
-                run_id: "run-pause".to_string(),
+                run_id: run_id.clone(),
                 input: TurnInput {
                     message: "continue with the second turn".to_string(),
                     display_message: None,
@@ -5004,8 +5024,8 @@ mod tests {
         );
         let resumed_runtime_view =
             control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-                session_id: Some("graph-pause".to_string()),
-                run_id: Some("run-pause".to_string()),
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
                 ..SessionRuntimeViewQuery::default()
             });
         assert_eq!(

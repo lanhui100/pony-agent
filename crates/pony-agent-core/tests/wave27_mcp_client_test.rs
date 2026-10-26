@@ -376,9 +376,136 @@ fn pid_alive(pid: u32) -> Option<bool> {
     Some(status.success())
 }
 
-#[cfg(not(unix))]
+// ── Windows：OpenProcess + GetExitCodeProcess ────────────────────────────────
+//
+// Win32 判定依据（数值取自 Win32 SDK；`windows-sys` 的 `Win32::Foundation` 亦有同名常量，
+// 这里显式定义是为了让纯判定函数 `decide_windows_pid_alive` 在**非 Windows 平台**也能编译，
+// 从而可以在 Linux 上镜像测试这些分支）：
+const WIN_ERROR_ACCESS_DENIED: u32 = 5;
+const WIN_ERROR_INVALID_PARAMETER: u32 = 87;
+/// `STILL_ACTIVE`：`GetExitCodeProcess` 用它表示"进程尚未退出"。
+const WIN_STILL_ACTIVE: u32 = 259;
+
+/// Windows 存活判定核心（纯函数，平台无关可镜像测试）。
+///
+/// 语义：
+/// - `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)` 拿句柄失败时看 `GetLastError()`：
+///   - `ERROR_INVALID_PARAMETER(87)`：该 pid 没有对应进程对象 → **已不存在** → `Some(false)`；
+///   - `ERROR_ACCESS_DENIED(5)`：进程对象存在但当前身份无权查询（系统进程/其它用户会话）→
+///     按**存活**处理 `Some(true)`（保守方向：把"无权看"误判成"已死"会让 t7 的等待提前通过，
+///     那才是把断言变空转）；
+///   - 其它错误 → `None`（无法确定性判定，调用方按"未知"处理，不猜）。
+/// - 拿到句柄后 `GetExitCodeProcess`：退出码 `STILL_ACTIVE(259)` ⇒ 仍在运行 `Some(true)`；
+///   其它退出码 ⇒ 已退出 `Some(false)`；调用失败 ⇒ `None`。
+///
+/// 已知局限：
+/// 1. 真实退出码恰好为 259 的进程与"仍在运行"在 Win32 层无法区分（本用例的 python 假 server
+///    不会以 259 退出，故不受影响）；
+/// 2. pid 复用：判定与使用之间 pid 可能被系统回收再分配。本用例只在 ≤1s 窗口内观察自己刚
+///    启动的子进程，风险可忽略；且 `Some(false)` 仅在句柄/退出码明确指向"已退出"时返回。
+fn decide_windows_pid_alive(
+    open_handle: bool,
+    last_error: u32,
+    exit_code: Option<u32>,
+) -> Option<bool> {
+    if !open_handle {
+        return match last_error {
+            WIN_ERROR_INVALID_PARAMETER => Some(false),
+            WIN_ERROR_ACCESS_DENIED => Some(true),
+            _ => None,
+        };
+    }
+    match exit_code {
+        Some(WIN_STILL_ACTIVE) => Some(true),
+        Some(_) => Some(false),
+        None => None,
+    }
+}
+
+/// Windows 存活判定（FFI 薄层；判定逻辑见 [`decide_windows_pid_alive`]）。
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> Option<bool> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // safety: 只做查询权（PROCESS_QUERY_LIMITED_INFORMATION），不继承句柄；失败路径不持有句柄。
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        let last_error = unsafe { GetLastError() };
+        return decide_windows_pid_alive(false, last_error, None);
+    }
+    let mut exit_code: u32 = 0;
+    let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    // safety: 句柄由 OpenProcess 返回且未移交，须由本函数关闭（返回值无需处理）。
+    let _ = unsafe { CloseHandle(handle) };
+    let exit_code = if queried != 0 { Some(exit_code) } else { None };
+    decide_windows_pid_alive(true, 0, exit_code)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn pid_alive(_pid: u32) -> Option<bool> {
     None
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t0：pid 探测自身的可信度（平台无关可测部分）
+// ─────────────────────────────────────────────────────────────────────────────
+/// Linux 上无法执行 Win32 API，故用「纯判定函数镜像 + 真实回收探针」两路证明：
+/// 1) Windows 四个分支的判定表逐条锁定；
+/// 2) 三平台都跑一遍「已回收子进程的 pid → Some(false)」的真实探针
+///    （Linux 走 /proc 分支；Windows 走 OpenProcess→ERROR_INVALID_PARAMETER(87) 分支），
+///    证明「pid 不存在 ⇒ Some(false)」不是纸面结论。
+#[test]
+fn t0_pid_alive_decision_and_reaped_child_probe() {
+    // (1) Windows 判定表（镜像）
+    assert_eq!(
+        decide_windows_pid_alive(false, WIN_ERROR_INVALID_PARAMETER, None),
+        Some(false),
+        "OpenProcess 报 ERROR_INVALID_PARAMETER(87) ⇒ 该 pid 无进程对象 ⇒ 已终止"
+    );
+    assert_eq!(
+        decide_windows_pid_alive(false, WIN_ERROR_ACCESS_DENIED, None),
+        Some(true),
+        "ERROR_ACCESS_DENIED(5) ⇒ 进程存在但无权查询 ⇒ 按存活处理（保守方向）"
+    );
+    assert_eq!(
+        decide_windows_pid_alive(false, 6, None),
+        None,
+        "其它 OpenProcess 错误 ⇒ 无法确定性判定 ⇒ None（不猜）"
+    );
+    assert_eq!(
+        decide_windows_pid_alive(true, 0, Some(WIN_STILL_ACTIVE)),
+        Some(true),
+        "GetExitCodeProcess 返回 STILL_ACTIVE(259) ⇒ 仍在运行"
+    );
+    assert_eq!(
+        decide_windows_pid_alive(true, 0, Some(0)),
+        Some(false),
+        "退出码 0 ⇒ 已终止"
+    );
+    assert_eq!(
+        decide_windows_pid_alive(true, 0, None),
+        None,
+        "GetExitCodeProcess 失败 ⇒ None"
+    );
+
+    // (2) 真实探针：spawn 一个立即退出的子进程（本测试二进制自身，`--list` 只列举并退出），
+    //     wait() 回收后探测其 pid，必须得到明确 Some(false)——不是 None。
+    let mut child = process::Command::new(std::env::current_exe().expect("current_exe"))
+        .arg("--list")
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::null())
+        .spawn()
+        .expect("spawn reaped-child probe");
+    let pid = child.id();
+    child.wait().expect("wait reaped-child probe");
+    assert_eq!(
+        pid_alive(pid),
+        Some(false),
+        "已 wait 回收的 pid 必须判定为「已终止」(Some(false))，不得是 None 或 Some(true)"
+    );
 }
 
 /// 从 pid 文件读出子进程 pid（轮询等待假 server 启动落盘）。
