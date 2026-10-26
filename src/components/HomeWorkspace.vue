@@ -7,6 +7,7 @@ import type { ChatMessage, ConversationCheckpointEntry, HistoryNode, TraceTimeli
 import { useRuntimeStore } from "@/stores/runtime";
 import { extractErrorMessage } from "@/lib/error-utils";
 import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
+import { isWorkspaceScrollDebugEnabled } from "@/lib/runtime/utils";
 import { useStreamingPresentationState } from "@/lib/useStreamingPresentationState";
 import { isSimpleTextContent } from "@/lib/markdown";
 
@@ -188,10 +189,19 @@ function getLatestAgentMessageElement() {
 }
 
 function updateStreamDebugReveal(patch: Record<string, unknown>) {
+  // PA-117：关闭态不得写入 streamDebugState（markdown render-complete 路径也经此函数）
+  if (!isWorkspaceScrollDebugEnabled()) {
+    return;
+  }
   Object.assign(streamDebugState, patch);
 }
 
 function emitTimelineScrollDebug(event: string, patch: Record<string, unknown> = {}) {
+  // PA-117：关闭态下 console / 诊断缓冲 / streamDebugState 该通道全部停用，
+  // 且不得为构造 payload 触发布局读数（collectMetrics 会读 rect）。
+  if (!isWorkspaceScrollDebugEnabled()) {
+    return;
+  }
   const payload = {
     event,
     at: Date.now(),
@@ -1398,23 +1408,24 @@ async function handleUndoLastTurn() {
 }
 
 function handleComposerKeydown(event: KeyboardEvent) {
-  // IME 组合中（中文候选确认等）不触发快捷键与提交，避免误发送
-  if (event.isComposing || event.keyCode === 229) {
-    return;
-  }
-
   const isUndoShortcut =
     event.key.toLowerCase() === "z" &&
     (event.ctrlKey || event.metaKey) &&
     !event.shiftKey &&
     !event.altKey;
   if (isUndoShortcut) {
+    // PA-135：撤销快捷键不受 IME 组合态影响（组合态守卫只服务 Enter 提交）
     event.preventDefault();
     handleUndoLastTurn();
     return;
   }
 
   if (event.key === "Enter" && !event.shiftKey) {
+    // IME 组合中（中文候选确认等）不提交，避免误发送；
+    // 旧式 IME 只给 keyCode=229，与 isComposing 同权拦截。
+    if (event.isComposing || event.keyCode === 229) {
+      return;
+    }
     event.preventDefault();
     if (!isSubmitting.value) {
       timelineAutoScroll.setAutoFollowEnabled();
@@ -1494,6 +1505,7 @@ const timelineAutoScroll = useTimelineAutoScroll({
   getLatestUserMessageElement,
   getLatestAgentMessageElement,
   showDebug: emitTimelineScrollDebug,
+  isDebugEnabled: isWorkspaceScrollDebugEnabled,
   updateFloatingUiPositions
 });
 

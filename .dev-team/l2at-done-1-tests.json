@@ -1,0 +1,26 @@
+{
+  "phase": "wave-1-l2at-red-phase",
+  "task_id": "task-3",
+  "status": "RED_PHASE_VERIFIED",
+  "tests": {
+    "frontend": {
+      "path": "tests/telemetry-governance.spec.ts",
+      "total": 14,
+      "passed": 11,
+      "failed": 3,
+      "expected_red_reasons": [
+        "preserves trace_id in payload when provided in options or context: buildIngestPayload does not yet forward trace_id",
+        "allows beforeSend to mutate or enrich the payload before dispatch: reportError does not yet invoke beforeSend callback",
+        "adversarial injection: beforeSend throwing an exception does NOT crash or break reportError dispatch: beforeSend not yet wired in reportError"
+      ]
+    },
+    "rust_core": {
+      "path": "crates/pony-agent-core/tests/otel_traceparent_test.rs",
+      "total": 3,
+      "passed": 3,
+      "failed": 0,
+      "exit_code": 0
+    }
+  },
+  "timestamp": "2026-10-25T08:52:30+08:00"
+}

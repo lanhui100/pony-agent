@@ -1,0 +1,296 @@
+###############################################################
+# wave-44 L2-AT 红相回执（RED PHASE · Gate-1 复审后修订版 v2）
+# repo: /home/dm/pony-agent   HEAD: 4869e2a   branch: main
+# date: 2026-10-25T17:35:17+08:00
+# 契约源: .dev-team/contract-matrix-wave44.md（协议特派员冻结，Red 后只读）
+# command: npx vitest run tests/acceptance/wave44 --reporter=dot
+# 期望：失败（exit != 0）。8/8 全红，0 条预通过。
+# v2 修订（Lead Gate-1 + 审查 A 共 6 项）：
+#   [B-1] PA115 增常量漂移锁 expect(HYDRATION_TIMEOUT_MS).toBe(15000)
+#   [B-2] PA115-T2 增草稿保留：watchdog(3500ms) 解锁后写入草稿，超时收敛后草稿不得被快照回滚吞掉
+#   [A-1] PA117 measureSequence 去掉 restoreAllMocks()，改为精确 mockRestore() 布局探针（消除 bridge 态差分污染）
+#   [A-2] PA135-T2 增 keyCode:229 的 Enter / Shift+Enter 不得提交（防 isComposing-only mutant）
+#   [A-3] PA117-T1/T2/T3 增启用态参照有效性断言（viewportResolved=true、composerTop/distanceToBottom 为数值、rect>0）
+#   [A-4] PA117 关闭态口径收紧：console=0、rect=0、latest===undefined、buffer 未增长
+#   [无变更] PA117/PA135 断言仅涉及 window.__ponyScrollDebugBuffer/__ponyScrollDebugLatest 探针（契约已显式允许）
+###############################################################
+
+
+ RUN  v4.1.9 /home/dm/pony-agent
+
+xxxxxxxx
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/acceptance/wave44/pa115-host-read-timeout.spec.ts > PA-115 · initializeSessions host-read 有界超时 > PA115-T1: 宿主读永不 settle → 有界 resolve + 可见失败 + 状态复位，随后正常宿主读可恢复
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/acceptance/wave44/pa115-host-read-timeout.spec.ts:256:35
+    254|
+    255|     // Assert 1（红相主断言）：必须有界收敛，且是 resolve（外层 catch 已吸收）而非 reject。
+    256|     expect(settledWithinDeadline).toBe(true);
+       |                                   ^
+    257|     expect(settlement.outcome).toBe("resolved");
+    258|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/8]⎯
+
+ FAIL  tests/acceptance/wave44/pa115-host-read-timeout.spec.ts > PA-115 · initializeSessions host-read 有界超时 > PA115-T2 (L2-AT 对抗): 宿主读在 baseline 超时 + 5s 后才 resolve → 仍须有界收敛，且迟到结果不得改写状态
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/acceptance/wave44/pa115-host-read-timeout.spec.ts:316:35
+    314|     // Assert 1：必须在迟到结果到达之前收敛（截止期严格早于迟到时刻）。
+    315|     expect(SETTLE_DEADLINE_MS).toBeLessThan(LATE_RESOLVE_AT_MS);
+    316|     expect(settledWithinDeadline).toBe(true);
+       |                                   ^
+    317|     expect(settlement.outcome).toBe("resolved");
+    318|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/8]⎯
+
+ FAIL  tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts > PA-117 · [workspace-scroll] 调试输出开关门控 > PA117-T1: 默认关闭（DEV=false + 无开关）时零日志、零缓冲写入、零布局读数（启用态为有效参照）
+AssertionError: expected 2 to be +0 // Object.is equality
+
+- Expected
++ Received
+
+- 0
++ 2
+
+ ❯ tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:340:27
+    338|
+    339|     // Assert 1：关闭态 console.info 必须为 0。
+    340|     expect(offState.logs).toBe(0);
+       |                           ^
+    341|
+    342|     // Assert 2：关闭态不得写 debug 缓冲（`__ponyScrollDebugLatest` 未定义 + 缓冲未增长）。
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/8]⎯
+
+ FAIL  tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts > PA-117 · [workspace-scroll] 调试输出开关门控 > PA117-T2 (L2-AT 开关矩阵): localStorage true/false 与 URL ?debug=1|scroll 必须按契约优先级生效
+AssertionError: expected 2 to be +0 // Object.is equality
+
+- Expected
++ Received
+
+- 0
++ 2
+
+ ❯ tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:380:29
+    378|     // ② localStorage "false"（DEV=true）⇒ kill switch 优先于 DEV 兜底，必须关闭。
+    379|     const storageOff = await measureSequence({ dev: true, storage: "fa…
+    380|     expect(storageOff.logs).toBe(0);
+       |                             ^
+    381|     expect(storageOff.buffer.length).toBe(0);
+    382|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/8]⎯
+
+ FAIL  tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts > PA-117 · [workspace-scroll] 调试输出开关门控 > PA117-T3 (L2-AT 对抗): 同一已挂载实例内 关→开→关 必须即时生效（开关不得被缓存）
+AssertionError: expected [ { …(25) }, { …(26) } ] to have a length of +0 but got 2
+
+- Expected
++ Received
+
+- 0
++ 2
+
+ ❯ tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:412:35
+    410|
+    411|     // Assert 1：关闭态必须静默。
+    412|     expect(scrollDebugPayloads()).toHaveLength(0);
+       |                                   ^
+    413|
+    414|     // Act 2：同一实例内打开开关（localStorage "true"），再次触发。
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/8]⎯
+
+ FAIL  tests/acceptance/wave44/pa135-composition-undo.spec.ts > PA-135 · 组合态 Ctrl/Cmd+Z 撤销可达性 > PA135-T1: 组合态 Ctrl+Z 必须撤销（1 次）且阻止默认；非组合态撤销/发送正控保持
+AssertionError: expected "wrappedAction" to be called 1 times, but got 0 times
+ ❯ tests/acceptance/wave44/pa135-composition-undo.spec.ts:322:25
+    320|
+    321|     // Assert 1：组合态不得吞掉撤销快捷键。
+    322|     expect(checkoutSpy).toHaveBeenCalledTimes(1);
+       |                         ^
+    323|     expect(checkoutSpy.mock.calls[0]?.[0]).toBe("node-root");
+    324|     expect(composingEvent.defaultPrevented).toBe(true);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/8]⎯
+
+ FAIL  tests/acceptance/wave44/pa135-composition-undo.spec.ts > PA-135 · 组合态 Ctrl/Cmd+Z 撤销可达性 > PA135-T2 (L2-AT 对抗): keyCode=229 组合态 Ctrl+Z 同样撤销；修饰键约束与组合态 Enter 不发送保持
+AssertionError: expected "wrappedAction" to be called 1 times, but got 0 times
+ ❯ tests/acceptance/wave44/pa135-composition-undo.spec.ts:369:25
+    367|
+    368|     // Assert 2：keyCode=229 必须与 isComposing 等价（修复前必红）。
+    369|     expect(checkoutSpy).toHaveBeenCalledTimes(1);
+       |                         ^
+    370|     expect(legacyImeUndo.defaultPrevented).toBe(true);
+    371|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/8]⎯
+
+ FAIL  tests/acceptance/wave44/pa135-composition-undo.spec.ts > PA-135 · 组合态 Ctrl/Cmd+Z 撤销可达性 > PA135-T3 (L2-AT 对抗): 输入框持焦时组合态 Cmd+Z 撤销恰好 1 次（不得经 window 监听双触发）
+AssertionError: expected "wrappedAction" to be called 1 times, but got 0 times
+ ❯ tests/acceptance/wave44/pa135-composition-undo.spec.ts:408:25
+    406|
+    407|     // Assert：恰好 1 次撤销（双触发会是 2 次），且阻止默认、不发送。
+    408|     expect(checkoutSpy).toHaveBeenCalledTimes(1);
+       |                         ^
+    409|     expect(cmdUndoEvent.defaultPrevented).toBe(true);
+    410|     expect(submitSpy).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/8]⎯
+
+
+ Test Files  3 failed (3)
+      Tests  8 failed (8)
+   Start at  17:35:19
+   Duration  5.81s (transform 5.63s, setup 0ms, import 9.34s, tests 1.34s, environment 2.88s)
+
+
+###############################################################
+# EXIT_CODE=1
+# RESULT: Test Files 3 failed (3) | Tests 8 failed (8) | 0 pre-passing
+###############################################################
+
+###############################################################
+# 逐条失败摘要（v2 · 8/8 全红，0 条预通过）
+###############################################################
+# [PA-115] pa115-host-read-timeout.spec.ts
+#  PA115-T1  FAIL @ spec:256  AssertionError: expected false to be true
+#            → 16000ms（HYDRATION_TIMEOUT_MS+1000）截止期内 settlement.settled=false：
+#              runtime.ts:2694 host-read 裸 await 无界，initializeSessions 永不 settle。
+#              （同用例已先完成常量漂移锁 expect(HYDRATION_TIMEOUT_MS).toBe(15000) 通过）
+#  PA115-T2  FAIL @ spec:316  AssertionError: expected false to be true
+#            → 4000ms（watchdog 3500ms 解锁输入）后写入草稿，再推进到截止期仍未收敛。
+#              修订后该用例在下游追加两项 Gate-1 断言（修复前不可达，修复后必须同时成立）：
+#              (a) store.draftMessage === "等待期间输入"（超时不得整包快照回滚吞草稿）
+#              (b) store.sessionError 非空（失败可见与草稿保留并存）
+#
+# [PA-135] pa135-composition-undo.spec.ts
+#  PA135-T1  FAIL @ spec:322  checkoutHistoryNode 调用 0 次（期望 1）
+#  PA135-T2  FAIL @ spec:369  同上（keyCode=229 撤销 0 次）；
+#            下游新增 keyCode=229 Enter / keyCode=229 Shift+Enter 不得提交（防 isComposing-only mutant）
+#  PA135-T3  FAIL @ spec:408  同上（持焦 + 组合态 Cmd+Z 撤销 0 次）
+#
+# [PA-117] pa117-scroll-debug-log.spec.ts
+#  PA117-T1  FAIL @ spec:340  expected 2 to be +0
+#            → 关闭态（DEV=false + 无开关）仍输出 2 条 [workspace-scroll]；
+#              实测同序列 关闭态 logs=2 / rect=12 / buffer=8 与启用态完全相同 ⇒ 无门控。
+#  PA117-T2  FAIL @ spec:380  同上（DEV=true + localStorage "false" kill switch 不生效）
+#  PA117-T3  FAIL @ spec:412  关闭相位即输出 2 条（开关未生效，且未缓存语义无从谈起）
+#
+###############################################################
+# v2 修订 delta（相对 v1 回执）
+###############################################################
+#  1) [B-1] PA115 增常量漂移锁：expect(HYDRATION_TIMEOUT_MS).toBe(15000)（T1/T2 各一处）
+#  2) [B-2] PA115-T2 增草稿保留：advanceTimersByTimeAsync(4000) → draftMessage="等待期间输入"
+#           → 推进至超时收敛 → 断言 draft 保留 + sessionError 非空
+#  3) [A-1] PA117 measureSequence 去除 vi.restoreAllMocks()，改为布局探针精确 mockRestore()，
+#           避免连带还原 hoisted tauri mock 造成「第 2+ 次测量 bridge 态不同」的差分污染
+#  4) [A-2] PA135-T2 增 keyCode:229 的 Enter / Shift+Enter 不得提交
+#  5) [A-3] PA117 启用态参照有效性：viewportResolved=true、composerTop/distanceToBottom 为数值、
+#           rectTotal>0（实测启用态 logs=2 / rect=12 / composerTop=number / distanceToBottom=number）
+#  6) [A-4] PA117 关闭态口径收紧：console=0、rectTotal=0、latest===undefined、buffer 未增长
+#  7) [无变更] window.__ponyScrollDebugBuffer / __ponyScrollDebugLatest 探针保留（契约将显式允许）
+#
+###############################################################
+# 红相纯度机械判定（dev-red-purity.py · v2）
+###############################################################
+# 输入：.dev-team/wave44-red-receipt.json（status=FAIL / 8 failures / 无 [HARNESS-TIMEOUT]）
+# 结果：PASS  pure_red=true  errors=[]   PURITY_EXIT=0
+# 人工分类（脚本不判 raise 点归属）：8 条均为**行为断言红**（AssertionError 落点在 spec expect 行），
+# 非 SUT 抛异常型；每条与 SUT 位点一一对应，无测试自身语法/夹具错误：
+#   PA115 → src/stores/runtime.ts:2694；PA135 → src/components/HomeWorkspace.vue:1402；
+#   PA117 → src/components/HomeWorkspace.vue:211
+#
+###############################################################
+# 回归对照（新增测试无附带损伤）
+###############################################################
+# command: npx vitest run     →  EXIT_CODE=1
+# Test Files  3 failed | 99 passed (102)
+# Tests       8 failed | 1026 passed | 10 skipped (1044)
+# 3 个 failed 文件 == 本波 3 个新 spec；1026 passed / 10 skipped 与
+# .dev-team/regression-baseline-wave44.json 基线逐项一致（存量零回归）。
+###############################################################
+
+###############################################################
+# TEST-DEFECT 修正（Lead 裁决）· 测试有效性证据
+###############################################################
+# 缺陷（测试侧，非实现侧）：pa117-scroll-debug-log.spec.ts PA117-T1 的 Assert 2 末尾读
+#   `readScrollDebugBuffer().latest`（**活窗口** window.__ponyScrollDebugLatest），
+#   而该断言执行时 onState（启用态）已按契约写入 latest ⇒ 忠实实现也必红（test defect）。
+# 修正（仅测试文件）：
+#   - 删除活窗口读取 expect(readScrollDebugBuffer().latest).toBeUndefined();
+#   - 改为读关闭态采集快照：expect(offState.buffer.latest).toBeUndefined()（与 offState.buffer.length 同源）
+#   - 启用态补自身快照断言：expect(onState.buffer.latest).not.toBeUndefined() / not.toBeNull()
+# 修正后对「当前实现（含 wave-44 修复）」执行：
+#   command: npx vitest run tests/acceptance/wave44 --reporter=dot
+#   EXIT_CODE=0   Test Files 3 passed (3)   Tests 8 passed (8)
+# 结论：8/8 绿证明测试非永红且实现满足冻结契约；红相重锚（stash 实现后应 8/8 红）由 Lead 执行。
+###############################################################
+
+###############################################################
+# 调用点超时夹具（Lead 复审 B · BLOCKING）· 变异体击杀证据
+###############################################################
+# 缺口：src/stores/runtime.ts:2696 的 withTimeout 超时值此前只被常量层锁住
+#       （PA115-T1/T2 的 expect(HYDRATION_TIMEOUT_MS).toBe(15000)），
+#       调用点写成 withTimeout(hostRead, 1000, ...) 时 2/2 仍绿（未钉调用点）。
+# 修正（仅 tests/acceptance/wave44/pa115-host-read-timeout.spec.ts，+3 行，T2 内）：
+#   - 推进到 14000ms：expect(settledBy14s).toBe(false)   ← 尚未收敛（夹逼下界）
+#   - 推进到 16000ms：expect(settledWithinDeadline).toBe(true) ← 已收敛（夹逼上界）
+#   ⇒ 调用点超时被机械夹逼在 (14000, 16000] 区间。
+# 变异体击杀实测（调用点改 1000ms）：
+#   path: tests/acceptance/wave44/_mutant_pa115.spec.ts（临时探针，已删除）
+#   result: FAIL — AssertionError: expected true to be false @ expect(settledBy14s).toBe(false)
+#   ⇒ 1000ms mutant 被杀死，夹具有效。
+# 当前实现（含 wave-44 修复）复跑：
+#   command: npx vitest run tests/acceptance/wave44
+#   EXIT_CODE=0   Test Files 3 passed (3)   Tests 8 passed (8)
+###############################################################
+
+###############################################################
+# L3-B 补充：关闭态 streamDebugState 落盘断言（markdownRender* 键）
+###############################################################
+# 缺口：关闭态下 HomeWorkspace.vue:1525 `updateStreamDebugReveal({ markdownRender* ... })`
+#       （markdown render-complete 路径）曾不受门控，向 streamDebugState 写入 4 个 markdownRender* 键，
+#       并随 localStorage `pony-agent.metrics.stream-sessions` 落盘。此前的 PA117-T1 只覆盖
+#       console / __ponyScrollDebug* / rect，未覆盖该落盘通道。
+# 新增断言（仅 tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts，PA117-T1 内）：
+#   L459 const markdownDebugState = await measureMarkdownDebugReveal();   // 关闭态真实链路
+#   L461 expect(markdownDebugState).not.toBeNull();                        // 先证明落盘被驱动（防空断言假绿）
+#   L462-464 const markdownRenderKeys = Object.keys(...).filter(k => k.startsWith("markdownRender"))
+#   L465 expect(markdownRenderKeys).toEqual([]);                           // 关闭态不得含任何 markdownRender* 键
+#
+# 落盘链路与源码实际口径（与 Lead 描述一致的核对结果）：
+#   · 存储键：`pony-agent.metrics.stream-sessions`（HomeWorkspace.vue:1648 STREAM_METRICS_STORAGE_KEY）
+#   · 记录形状：数组，元素 { flushedAt, streamAutoFollowEnabled, viewport*, streamDebugState, streamingRenderOptimized }
+#   · 落盘时机：`watch(isSubmitting)` 的 true→false 时以 window.setTimeout(...,0) 排队
+#     → flushStreamMetricsToStorage()（:1679-1687）；故测试必须显式驱动一次 isSubmitting true→false
+#     并冲刷 setTimeout(0)（flushDeferredTimers，显式条件等待，非任意 sleep）。
+#   · markdown 触发：完成态 assistant 消息（非流式）走 MarkdownRenderer（WorkspaceTurnItem.vue:459-472），
+#     stub 的 render-complete → handleMarkdownRenderComplete → updateStreamDebugReveal。
+#
+# 变异体击杀实测（gate no-op ≡ 未修复实现）：
+#   · 手法：临时 probe 将 isWorkspaceScrollDebugEnabled 恒置 true（等价 updateStreamDebugReveal 无门控）
+#   · 结果：落盘 streamDebugState 键为 [..., markdownRenderCompletedAt, markdownRenderContentLength,
+#           markdownRenderStreaming, markdownRenderDistanceToBottom, streamingRenderOptimized, ...]
+#           ⇒ markdownRenderKeys 非空 ⇒ L465 断言必红。probe 已删除。
+#   · 当前实现（executor-beta 已在 updateStreamDebugReveal 加门控）：
+#     command: npx vitest run tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts
+#     EXIT_CODE=0   Test Files 1 passed (1)   Tests 3 passed (3)
+# 说明：Lead 消息中「当前未修复实现」在本次执行时已由 executor-beta 修复落地（utils.ts:45
+#       isWorkspaceScrollDebugEnabled + HomeWorkspace.vue:191-196 门控），故以 mutant 探针提供红相证据。
+###############################################################

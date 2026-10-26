@@ -1,0 +1,122 @@
+{
+  "wave": 45,
+  "baseline_ref": ".dev-team/nfr-baseline.json",
+  "delta_scope": "additive-only: wave45_observability_semantics（PA-153 OTel resource 归因 / PA-154 agent.turn 根 span 错误承接 / PA-155 local-cache 有界水合超时）；继承字段值未收紧，仅新增字段",
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 500,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "resource_release": [
+    "withTimeout_timer_cleared_on_settle",
+    "initialize_sessions_watchdog_cleared_in_finally",
+    "otel_provider_flush_and_shutdown_on_exit_unchanged"
+  ],
+  "wave45_observability_semantics": {
+    "pa_153_resource_attribution": {
+      "resource_attributes_required": [
+        "service.name",
+        "service.version",
+        "deployment.environment"
+      ],
+      "resource_attributes_each_emitted_once": true,
+      "service_version_default_source": "env!(\"CARGO_PKG_VERSION\")",
+      "service_version_default_observed": "0.1.128",
+      "service_version_env_override": "PONY_OTEL_SERVICE_VERSION",
+      "deployment_environment_env_override": "PONY_OTEL_ENVIRONMENT",
+      "deployment_environment_default_mapping": {
+        "debug_assertions_true": "development",
+        "debug_assertions_false": "production"
+      },
+      "blank_env_treated_as_unset": true,
+      "env_value_trimmed": true,
+      "otel_config_public_struct_unchanged": true,
+      "otel_config_construction_sites_unchanged": 7,
+      "pure_function_seam": "模块内纯函数（入参：版本 env 值、环境 env 值、debug 布尔）→ init 内使用；不做全局态读写",
+      "wire_ascii_substrings": [
+        "service.version",
+        "deployment.environment",
+        "development"
+      ],
+      "no_new_network_io": true,
+      "no_new_stub": true,
+      "release_environment_covered_by": "实现期 in-crate 纯函数单测（is_debug=false ⇒ production），冻结集成测试不覆盖 release 构建",
+      "version_alignment_risk": "core crate 0.1.128 与发布版本 tauri 0.1.155 不同轨；发布对齐只能经 PONY_OTEL_SERVICE_VERSION 覆盖（宿主未设置），列 follow-up"
+    },
+    "pa_154_turn_error_aggregation": {
+      "attr_key": "agent.turn.outcome",
+      "attr_key_const": "ATTR_AGENT_TURN_OUTCOME",
+      "attr_value_on_error": "error",
+      "attr_absent_on_all_success": true,
+      "root_status_error_on_tool_failure": true,
+      "phase_attr_semantics_unchanged": true,
+      "phase_failed_message_behavior_preserved_when_no_child_error": true,
+      "cost_attr_semantics_unchanged": true,
+      "tool_failure_predicate": "status in {failed,error} 或 error.is_some()（与 tool.call 子 span 判定同源）",
+      "governance_block_predicate": "decision == \"block\"（与 governance.decide 子 span 判定同源）",
+      "aggregation_scope": "活动 turn 登记（tokio task_id 表 / 线程本地栈，与 accumulated_cost_usd 同源查找）",
+      "no_active_turn_is_noop": true,
+      "reset_on_guard_drop": true,
+      "cross_turn_pollution_forbidden": true,
+      "span_error_proxy": "status.message ASCII 前缀（不做 protobuf 结构解析）",
+      "wire_ascii_substrings": [
+        "agent.turn.outcome",
+        "turn_error: ",
+        "tool_failed",
+        "quota_blocked"
+      ],
+      "new_network_io": false,
+      "new_stub": false,
+      "new_background_task": false,
+      "combination_precedence": "双错误并存取先记录者（本波不冻结组合前缀）",
+      "error_attribution_independent_of_phase": true,
+      "root_error_message_prefix": "turn_error: ",
+      "root_status_message_template": "turn_error: <tool_failed|quota_blocked>[: <detail>]",
+      "root_error_prefix_unique_to_root_span": true,
+      "child_span_message_must_not_contain_prefix": true,
+      "outcome_value_on_error": "error",
+      "phase_failed_precedence": "phase==\"failed\" ⇒ status.message=\"failed\"（不写 turn_error），仍输出 outcome=\"error\""
+    },
+    "pa_155_local_cache_timeout": {
+      "branch": "src/stores/runtime.ts:2676 case local-cache",
+      "defect_anchor": "src/stores/runtime.ts:2678 宿主读裸 await（对照 host-read 分支 :2695-2696 已 withTimeout）",
+      "hydration_timeout_ms": 15000,
+      "hydration_timeout_ms_pinned": 15000,
+      "timeout_label": "加载对话",
+      "timeout_source": "src/lib/runtime/constants.ts:15 HYDRATION_TIMEOUT_MS（与 :2141 会话切换分支同语义）",
+      "settle_deadline_ms": 16000,
+      "settle_must_be_fulfilled_not_rejected": true,
+      "timeout_must_be_caught_not_escalated": true,
+      "cached_runtime_view_preserved": true,
+      "cache_merge_semantic": "mergeRuntimeViews(cached, null) === cached（src/lib/runtime/sessions.ts:610-616）",
+      "session_entered_after_timeout": true,
+      "session_error_on_timeout": null,
+      "visible_failure_required": false,
+      "visible_failure_na_reason": "本地缓存可用即正常进入会话，属预期降级而非失败；错误上抛会丢缓存并让会话不可进",
+      "session_operation_null_after_settle": true,
+      "host_read_invocations": 1,
+      "retry_on_timeout": 0,
+      "late_resolution_must_not_mutate_state": true,
+      "late_resolution_is_discarded": true,
+      "watchdog_timeout_ms_unchanged": 3500,
+      "host_read_branch_unchanged": true,
+      "external_call_timeout_ms_applicable": false,
+      "external_call_timeout_ms_na_reason": "本地 Tauri IPC 水合（非外部网络出口），3000ms 外部调用上限结构性不适用；沿用 15000ms 水合基线",
+      "no_new_stub": true,
+      "phase_after_settle_forbidden_values": [
+        "error",
+        "failed",
+        "cancelled"
+      ],
+      "phase_after_settle_assertion": "phase 不得为 error/failed/cancelled（而非仅 ≠idle）"
+    }
+  }
+}

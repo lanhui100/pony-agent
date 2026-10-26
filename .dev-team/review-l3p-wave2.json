@@ -1,0 +1,73 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "src/components/HomeSidebar.vue",
+    "src/components/HomeStatusPanel.vue",
+    "src/components/chat/WorkspaceComposer.vue",
+    "src/lib/runtime/token-metrics.ts",
+    "src/lib/runtime/useTraceProjection.ts",
+    "src/lib/runtime/metrics-diagnostics.ts",
+    "tests/e2e/metrics-live-verification.spec.ts",
+    ".dev-team/contracts/wave-2-metrics.md",
+    ".dev-team/evidence/wave-2-metrics/console-metrics.log"
+  ],
+  "findings": [
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 52,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '52,57p' src/components/HomeStatusPanel.vue; sed -n '19p' .dev-team/evidence/wave-2-metrics/console-metrics.log",
+      "severity": "ADVISORY",
+      "note": "dur/ttft 硬编码伪造常量已消除（值来自 props.speedDebugInfo，与速度同源）；但 `?? \"-\"` 缺席哨兵仍在，turn_completed_aggregate 必然打印 ttft=-（证据日志第 19 行），无法区分「该模式本无 TTFT」与「数据缺失」。建议改为显式 n/a 标记。"
+    },
+    {
+      "file": "src/lib/runtime/useTraceProjection.ts",
+      "line": 324,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '319,327p' src/lib/runtime/useTraceProjection.ts",
+      "severity": "ADVISORY",
+      "note": "legacy 回退分支仅返回 {speed, mode}，丢弃同源 in/out/dur/ttft；一旦该分支命中，DOM 调试串会以 out=-;dur=-;ttft=- 伴随一个非空速度，同源性在该边界不成立。"
+    },
+    {
+      "file": "src/lib/runtime/token-metrics.ts",
+      "line": 307,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '305,309p' src/lib/runtime/token-metrics.ts; grep -rn 'resolveContextUsageMetrics' src --include=*.ts | grep -v 'token-metrics.ts' | wc -l",
+      "severity": "ADVISORY",
+      "note": "debugInfo.inputTokens 在 S1 解析为 null 时回退 turn.inputTokens（多调用聚合值），与 wave-15 §S1/S4「严禁放行聚合值」冲突；该导出仅被单测引用（生产 0 调用），故为潜伏风险而非线上缺陷。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 906,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -rn 'record_speed_and_context\\|record_turn_speed' crates --include=*.rs | grep -v 'otel/mod.rs' | wc -l",
+      "severity": "ADVISORY",
+      "note": "上一轮 ADVISORY 未闭环：新增 record_speed_and_context(:906) 与 record_turn_speed(:804) 仍无任何调用点（外部调用数 = 0），四个 gen_ai.speed/context 属性永不导出；wave-2-metrics.md:15/54 宣称「可在 Tempo/Langfuse 检索」不成立。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 48,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n '不缓存' -A1 src/lib/runtime/utils.ts; sed -n '48p' src/components/HomeStatusPanel.vue; sed -n '127p' src/components/chat/WorkspaceComposer.vue",
+      "severity": "ADVISORY",
+      "note": "debugAttrsEnabled = computed(() => isDebugLoggingEnabled()) 无响应式依赖，首次求值后永久缓存；运行时写 localStorage 不会显形（需刷新），与 utils.ts:28「不缓存…立即生效」的既定语义冲突。URL ?debug=1 场景不受影响。"
+    },
+    {
+      "file": "src/components/chat/WorkspaceComposer.vue",
+      "line": 1160,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "git diff -U0 src/components/chat/WorkspaceComposer.vue | grep -n 'cursor-help\\|role=\"tooltip\"'",
+      "severity": "ADVISORY",
+      "note": "夹带非因果变更：cursor-help 由内层 div 迁至外层 span(:1127) + TooltipContent 冗余 role=\"tooltip\"(:1160，Radix 默认已注入)，与本轮「门控 + delay-duration 还原」无因果关系且未在契约登记。"
+    },
+    {
+      "file": "tests/e2e/metrics-live-verification.spec.ts",
+      "line": 331,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n '331,343p' tests/e2e/metrics-live-verification.spec.ts",
+      "severity": "ADVISORY",
+      "note": "物理凭证强度：console-metrics.log 中 Mode-1 的 data-speed-mode 与两处 Speed Text 为静态模板字面量（非测量值，虽其同值已在 :284/:313 断言）；且指标经 pinia.$patch 注入而非真实 runtime 事件，端到端「生产路径」未物理贯通。门控行为亦无冻结套件级回归（三份冻结 spec 均未断言 data-*-debug）。"
+    }
+  ]
+}

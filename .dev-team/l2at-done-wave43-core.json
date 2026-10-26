@@ -1,0 +1,134 @@
+{
+  "wave": "wave43",
+  "task": "L2-AT 对抗破坏测试（Red Team / L2-AT）",
+  "author_role": "L2-AT adversarial test author",
+  "write_scope": {
+    "new_files": [
+      "crates/pony-agent-core/tests/otel_trace_adversarial.rs",
+      ".dev-team/l2at-done-wave43-core.json"
+    ],
+    "modified_existing_files": [],
+    "note": "未修改 crates/pony-agent-core/src/**、任何既有 tests/** 文件或 Cargo.toml"
+  },
+  "file": "crates/pony-agent-core/tests/otel_trace_adversarial.rs",
+  "path_decision": {
+    "requested": "crates/pony-agent-core/tests/adversarial/otel_trace_adversarial.rs",
+    "actual": "crates/pony-agent-core/tests/otel_trace_adversarial.rs",
+    "reason": "cargo 自动发现只认 tests/*.rs；tests/adversarial/*.rs 必须新增 [[test]] 段才能成为 test target，而那条改动属修改既有 Cargo.toml（越界），故采用任务书给定的 fallback 路径。"
+  },
+  "cases": [
+    {
+      "id": "AT-1a",
+      "name": "at1_blackhole_endpoint_swallows_export_failure_within_bounded_time",
+      "break": "在 127.0.0.1 起只 accept、永不响应的 TCP 黑洞作 OtelConfig.endpoint，开启门禁后跑一个 TurnScope 生命周期并 force_flush(6000)。",
+      "asserts": [
+        "TurnScope::new/trace_id/end 不 panic（catch_unwind 包裹，panic 即失败）",
+        "force_flush 不 panic，且耗时落在 [2000ms, 3250ms]：下界防「根本没发」，上界防「导出层没配超时 / 超时口径≠nfr 3000」",
+        "导出失败只以非空 Err 降级（黑洞下返回 Ok(()) 判伪绿）",
+        "失败不污染门禁末态（is_reporting_enabled 仍为 true）",
+        "黑洞端点至少收到 1 条连接（证明导出真的发出去）",
+        "连接总数 <= 2（nfr retry.max_attempts=1，防重试风暴）"
+      ]
+    },
+    {
+      "id": "AT-1b",
+      "name": "at1_export_failure_has_warn_json_degradation_callsite",
+      "break": "静态扫描 src/agent/otel/**（整目录，不假定失败处理落在哪个文件）。",
+      "asserts": [
+        "证据源含锚点 `pub fn log_json` 与 `pub fn force_flush`（防扫空文件假绿）",
+        "存在 >=1 个 `log_json(\"warn\", ...)` 调用点（剥空白后匹配，容忍跨行书写）",
+        "warn 级别不得经常量/引用间接传入（D8 要求字面量，否则扫描断言失效）"
+      ]
+    },
+    {
+      "id": "AT-2a",
+      "name": "at2_oversized_payload_stays_bounded_and_does_not_panic",
+      "break": "TurnSpanInput 的 session_id/user_id/turn_id/phase 各 64KB（4 字段同时拉满 = 本 seam 的属性维度上限）+ sequence=u64::MAX。",
+      "asserts": [
+        "turn_span_attributes 不 panic（catch_unwind）",
+        "属性条数 <= 冻结键数 7（输入规模不得污染键集）",
+        "输出仍是合法键值对：键非空、可打印 ASCII、属冻结键集白名单、无重复、值无空串占位",
+        "不 OOM 的可确定代理：输出字节 <= 输入字节×4 + 1KiB（平方级复制立即越界）",
+        "64KB session_id 长度与内容逐字节原样保留（不截断/不改写）",
+        "sequence 键存在且为 I64（u64::MAX 不得丢键）",
+        "同输入两次映射结果完全相等（无隐式状态/无规模爬升）"
+      ]
+    },
+    {
+      "id": "AT-2b",
+      "name": "at2_empty_session_and_user_values_omit_keys",
+      "break": "session_id=\"\"、user_id=Some(\"\")（空值伪装成「有值」）。",
+      "asserts": [
+        "不 panic",
+        "langfuse.session.id 与 langfuse.user.id 均不输出（A2 缺失值不输出）",
+        "全集无空串占位属性（空 turn_id/phase 若写成 \"\" 同样红）",
+        "反向防过度删除：agent.turn.id / gen_ai.operation.name / agent.turn.sequence 仍在位"
+      ]
+    },
+    {
+      "id": "AT-2c",
+      "name": "at2_injection_shaped_strings_are_verbatim_not_promoted_to_keys",
+      "break": "注入形状 payload：引号 + 换行 + 花括号 JSON 片段 + NUL + tab + 中文（伪造 log 行/伪造 JSON 字段）。",
+      "asserts": [
+        "不 panic",
+        "所有键必须落在冻结键集白名单内（用户可控值绝不能被提升为属性键 = 键注入）",
+        "session_id / user_id / turn_id 逐字节原样保留，长度与输入一致（不转义、不二次编码、不截断）"
+      ]
+    },
+    {
+      "id": "AT-3",
+      "name": "at3_gate_flip_storm_no_panic_no_deadlock",
+      "break": "std::sync::Barrier::new(3) 同步起跑 3 线程 × 200 次 set_reporting_enabled 翻转（方向由 (线程号+步号)%2 决定，无随机），另 1 线程持续 is_reporting_enabled()。",
+      "asserts": [
+        "整体 5s 硬截止：recv_timeout 超时即判死锁并失败",
+        "翻转线程/读线程均无 panic（join 错误带出 panic payload 原文）",
+        "读线程已完成至少一次真实读取（握手构造事实，非调度概率；全程无 sleep 概率等待）",
+        "翻转次数为确定值 3×200=600",
+        "所有写者退出后显式置 true/false，末态读回必须等于最后一次写入（最终态可确定设置）"
+      ]
+    }
+  ],
+  "red_command": "cargo test -p pony-agent-core --test otel_trace_adversarial --target-dir target-test-exact-b",
+  "red_exit_code": 101,
+  "red_output_tail": [
+    "running 6 tests",
+    "test at2_injection_shaped_strings_are_verbatim_not_promoted_to_keys ... ok",
+    "test at2_empty_session_and_user_values_omit_keys ... ok",
+    "test at2_oversized_payload_stays_bounded_and_does_not_panic ... ok",
+    "test at1_export_failure_has_warn_json_degradation_callsite ... ok",
+    "test at1_blackhole_endpoint_swallows_export_failure_within_bounded_time ... FAILED",
+    "test at3_gate_flip_storm_no_panic_no_deadlock ... ok",
+    "AT-1 上界失败：force_flush 耗时 5.000321944s（> 3250ms）——nfr 冻结 external_call_timeout_ms=3000；落点若≈6000ms（本用例窗口）说明导出层没配自身超时、只有调用方在干等，落点若为其它值说明导出层超时口径≠3000ms（防「没配超时 / 超时口径漂移」）",
+    "test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.05s",
+    "error: test failed, to rerun pass `-p pony-agent-core --test otel_trace_adversarial`"
+  ],
+  "stub_phase_receipt": {
+    "captured_when": "2026-10-24T17:00 左右（src/agent/otel/mod.rs 仍为 15681B 全 unimplemented 空桩）",
+    "command": "cargo test -p pony-agent-core --test otel_trace_adversarial --target-dir target",
+    "exit_code": 101,
+    "result": "6 failed; 0 passed; 0 ignored（6 条全部因 `not implemented: Wave43 空桩：...` 红，属预期红相）",
+    "note": "该次运行用的是预热 target 目录；随后 Executor 于 17:05~17:10 落地 src/agent/otel/mod.rs（849 行）并修复 lib 编译错误，故 target-test-exact-b 的正式回执改为对已实现代码的红相（1 红 5 绿）。"
+  },
+  "open_defect_found_by_at1": {
+    "severity": "P1（NFR 违背，非测试缺陷）",
+    "evidence": "crates/pony-agent-core/src/agent/otel/mod.rs:618 `const EXPORT_TIMEOUT_MS: u64 = 5_000;`，:842 `.with_timeout(Duration::from_millis(EXPORT_TIMEOUT_MS))`",
+    "violation": "nfr-baseline-wave43.json 冻结 external_call_timeout_ms=3000；实测黑洞端点下导出层自身超时落在 5.000s（>3250ms 上界）",
+    "impact": "单次 OTLP 导出最多阻塞 5s（force_flush 窗口 6s 时由导出层超时收尾）；若调用方给更大窗口，退出/手动上传路径可被拖到 5s，违背 3s 外部调用基线",
+    "expected_fix": "EXPORT_TIMEOUT_MS 对齐 3000（或直接从 nfr 常量派生），改后 AT-1a 应转绿"
+  },
+  "blind_spots": [
+    "真实内存峰值/RSS 未测：AT-2 的「不 OOM」以「输出字节 ≤ 输入×4 + 键集/条数有界 + 不 panic」作可确定代理，无堆计量（未装计数 allocator，避免与并行用例互相污染）。",
+    "u64::MAX → AttrValue::I64 的具体映射（截断 vs 饱和）未在 A2 冻结，故只断言「键存在且类型为 I64」，不锁具体数值。",
+    "warn 降级只做源码静态扫描：进程内 stderr 不可捕获，无法证明运行时真的执行到该调用点；也未断言日志行内 trace_id 字段的真实取值。",
+    "AT-1 的连接数上限 2 只覆盖 force_flush + shutdown 两段；batch_scheduled_delay_ms=5000 的后台定时批量导出的重试行为在测试窗口外，未覆盖。",
+    "AT-3 只证明「无 panic / 5s 内完成 / 末态可确定」，不证明线性一致性（读写交错的具体值序列），也未对 nfr 的 `atomic_bool_acquire_release_no_mutex` 做内部结构断言（只断言外部可观察行为）。",
+    "采样率概率上报按 A8 明确不做断言；wire 级 /v1/traces body 断言归 L2-T，本文件不重复。",
+    "AT-1 的时间带依赖 CI 机器调度：下界 2000ms 与上界 3250ms 之间留 1250ms 余量；若 CI 极端负载导致 force_flush 自身开销 >250ms 会有抖动风险，但当前实测 5.000s/3.0s 落点远离边界。"
+  ],
+  "discipline": {
+    "ignore_attributes": 0,
+    "tests_without_assertions": 0,
+    "sleep_based_probabilistic_waits_in_at3": 0,
+    "hard_deadlines": ["AT-3 整体 5s", "AT-1 导出耗时上界 3250ms", "AT-1 黑洞保持 8s 安全网", "AT-3 握手各 2s"]
+  }
+}

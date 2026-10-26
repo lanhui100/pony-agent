@@ -1,0 +1,90 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/client.rs",
+    "crates/pony-agent-core/src/agent/app_settings.rs",
+    "crates/pony-agent-core/src/agent/runtime/",
+    "crates/pony-agent-core/src/agent/session/types.rs",
+    "src-tauri/src/lib.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/sanitizer.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/models.rs",
+    "crates/pony-agent-core/src/agent/tools.rs"
+  ],
+  "round1_closure": {
+    "blocking_recheck": "CLOSED — 上一轮唯一 BLOCKING（门禁关闭时本地上下文污染 issue.trace_id）已真实闭环：otel/mod.rs:922-933 新增 exported_trace_id()（exported && is_valid() && is_sampled() 三重判定）；ponysentry/client.rs:143（capture_error）/201（capture_panic）/296（normalize_payload）三处**只**取导出态且无 current_trace_id() 回落（grep 全仓 current_trace_id 仅剩 log.rs:71 日志面一处消费）。实体证据：cargo test --lib agent::otel::tests::b1_local_context_exposes_current_ids_but_no_exported_trace_id → ok（本地 id=Some 且 exported_trace_id=None）；b1b_local_context_never_parents_child_spans → ok。",
+    "advisory_recheck": {
+      "A2_nested_turn": "CLOSED — ActiveTurn{turn_id,span_context,exported} 三元（mod.rs:1497-1501）；register 保存前值（1556 `guard.insert` 返回 previous）、unregister 以 turn_id+trace_id 双校验后精确摘除/回填（1586-1604）；start_child_span 父上下文只认 exported（1636-1642、1653）。残余：乱序 Drop 的幽灵回填见 findings[5]。",
+      "A3_log_sink": "CLOSED — 路径/判长/轮转/写整行共用同一把进程级 Mutex（log.rs:25-32、96-120），行尾并入同一次 write_all（102-104、117）。",
+      "A4_rotate": "CLOSED — log.rs:131-134 只做 rename，失败返回 false 由 107-110 放弃本轮落盘；全文再无 truncate 兜底（grep truncate 仅剩注释与断言）。实体证据：agent::otel::log::tests::rotation_failure_keeps_existing_log_intact → ok。",
+      "A5_exit_budget": "CLOSED — EXIT_FLUSH_BUDGET_MS=1000（lib.rs:1225）+ EXIT_FLUSH_DONE 幂等短路（lib.rs:46/1212，config()==None 时先返回不置位）+ shutdown→shutdown_bounded(SHUTDOWN_TIMEOUT_MS=1000)（mod.rs:506-520），三段合计硬上限 2000ms ≤ 3000ms。残余：flush 线程未 join 见 findings[0]。",
+      "A8_traceparent": "CLOSED — 注入改走 `request.headers(HeaderMap)`（mod.rs:979-984、traceparent_header_map_from 995-1000），reqwest 侧为 replace_headers/insert 语义；client.rs:503-507 同款。实体证据：agent::otel::tests::a8_traceparent_injection_replaces_instead_of_appending → ok（预置伪头 + 连续两次注入后 get_all 长度=1）。",
+      "A6_secret": "CLOSED — OtelSettingsSnapshot 手写 Debug 打码（mod.rs:269-283）、AppSettings 手写 Debug 打码（app_settings.rs:86-104）；SENSITIVE_KEY_PATTERN 去锚定为子串匹配（sanitizer.rs:22-27）；capture_payload→normalize_payload 对 extra 走 sanitize_json（client.rs:304-306）；settings.json 含 token 时 best-effort 0600（app_settings.rs:220-228、235-248）。实体证据：app_settings_debug_redacts_otel_token / otel_settings_snapshot_debug_redacts_token / settings_file_with_token_is_owner_only → ok。残余见 findings[2][3][6]。",
+      "A2_state_bounds": "CLOSED（有界）— LOG_FILE 只存路径、不缓存长度（每行 metadata 重算，无状态堆积）；ACTIVE_TURNS 键为 task::Id 且守卫 Drop 即摘除；EXIT_FLUSH_DONE 单原子位。exported_trace_id()/current_active_turn() 均 clone 后立即释放锁（1622-1630），不持锁跨长耗时；ACTIVE_TURNS 与 LOG_FILE 之间无反向加锁路径（无锁序反转）。残余泄漏见 findings[5]。"
+    }
+  },
+  "gates": {
+    "cargo_test_wave4_six_suites": "exit 0 —— otel_trace_adversarial 6 passed / otel_trace_migration_test 23 passed / otel_traceparent_test 3 passed / ponysentry_credential_gate 7 passed / ponysentry_telemetry_test 7 passed / wave4_observability_chain_test 6 passed（合计 52 passed, 0 failed）",
+    "cargo_check_lib": "exit 0 —— Finished `dev` profile in 35.84s（无 error/warning）",
+    "supplementary": "cargo test -p pony-agent-core --lib agent::otel:: → 16 passed；cargo test -p pony-agent-core --lib agent::app_settings → 3 passed"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1864,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '1836,1872p' crates/pony-agent-core/src/agent/otel/mod.rs  # flush_state 每次调用都 spawn 具名线程 pony-otel-flush（1848-1853），但 1864-1867 的超时分支 `Err(err) => Err(...)` **不 join**：worker 被 detach，仍持有 provider 的 Arc（SdkTracerProvider + 导出 runtime 句柄），直到导出层自身超时（EXPORT_TIMEOUT_MS=3000）才自行退出。注释 1839 自称『因此**不再起辅助线程**（辅助线程在超时后无人 join，属泄漏）』与实现直接矛盾 —— 描述的是未落地的方案。复现：对黑洞端点连打 3 次 force_flush(500)（cargo test -p pony-agent-core --lib agent::otel::tests::blackhole_600_turn_upload_stays_within_flush_budget 的 blackhole 场景）→ 进程内同时存在 3 个 pony-otel-flush 线程（`ls /proc/<pid>/task | wc -l` 递增），每个在 3s 后才消失。退出路径本轮已加 EXIT_FLUSH_DONE 短路（lib.rs:1212），故不再按退出事件叠加；但 upload/manual 旁路反复超时仍会按次起线程。建议：超时分支改为『直接调用 + 计时』（按注释所述）或对 worker 做 join 兜底并在超时后复用单例线程。",
+      "detail": "上一轮 #5 括号内提到的『不 join 已 spawn 线程』只解决了叠加部分，线程 detach 本体仍存；自终止故不构成无界增长。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/log.rs",
+      "line": 97,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '96,125p' crates/pony-agent-core/src/agent/otel/log.rs  # append_to_file 在**持有进程级 LOG_FILE Mutex 的整个作用域内**做 fs::metadata（107→123-125，每写一行一次 syscall）+ fs::rename（轮转）+ OpenOptions::open + write_all + flush；锁不区分『取路径』与『落盘 I/O』。慢盘/网络盘（NFS/SMB）或 fsync 悬挂时，所有调用 log_json 的线程（provider 错误路径、pony-otel-flush、ponysentry worker、tauri IPC）会按序阻塞在 97 行的 lock() 上，与 C4.2『文件写入异常时降级为仅控制台/忽略，**禁止阻塞**』的边界要求存在张力。测量示例：把日志目录放到 fuse/nfs 挂载点后并发 8 线程 log_json（同 log.rs:168 用例形态），单行延迟由 ~40µs 放大到 OS 写超时量级，且所有线程串行。建议：Mutex 只保护『路径 + 轮转决策』，写入用 try_lock + 独立单写线程/channel，或给 97 行加 try_lock 降级（拿不到锁直接丢弃落盘，stdout 已输出）。",
+      "detail": "串行化本身是上一轮 A3 的正确修复方向；残余风险是把阻塞 I/O 放进临界区。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ponysentry/sanitizer.rs",
+      "line": 38,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '33,44p;78,90p' crates/pony-agent-core/src/agent/ponysentry/sanitizer.rs  # is_metric_or_token_count_key 的白名单过于宽松：`lower.ends_with(\"tokens\")` / `contains(\"token_count\")` 在 SENSITIVE_KEY_PATTERN 之前短路直通（82-84 先于 85 判定）。于是键 `access_tokens` / `refresh_tokens` / `id_tokens` 等**真实凭据键**（复数形态）虽然命中 22-27 的 token 子串规则，却被白名单放行、原样上报。最小验证（无需改码，用同一正则与同一判定顺序即可复现语义）：python3 -c \"import re;p=re.compile(r'(?i)(token|secret|password|passwd|credential|api_?key|apikey|authorization|cookie|private_?key)');k='access_tokens';print(bool(p.search(k)), k.endswith('tokens'))\" → `True True`（正则要求脱敏 vs 白名单要求直通，白名单生效）。建议：白名单只直通**数值型计量键**（input_tokens/output_tokens/total_tokens/token_count/context_window），对以 `tokens` 结尾但以 access/refresh/id/secret 开头的键强制脱敏。",
+      "detail": "otelToken（单数）不受影响，仍被正确打码；风险仅限复数凭据键，故定级 ADVISORY。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ponysentry/client.rs",
+      "line": 203,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '185,204p;298,320p' crates/pony-agent-core/src/agent/ponysentry/client.rs  # 脱敏覆盖不完整：capture_panic 的 culprit 直接取 `location.clone()`（203）、stacktrace[0].filename 同样取 location（186-187），均**未过 sanitize**（而同函数 message/exception.value 在 170/183 已过），panic 定位路径可能是 /home/<user>/.cargo/registry/... 或含凭据的 URL；normalize_payload（281-320）只清洗 extra/message/tags/exception.value，**未覆盖** breadcrumbs[].message/data/category、exception.stacktrace[].filename/function、culprit、fingerprint —— 而 303 行注释自称『零信任：前端传入的载荷同样必须脱敏』。复现（静态可判）：ponysentry_capture IPC 传入 {\"breadcrumbs\":[{\"message\":\"GET https://api.x/?token=abc123def456\"}],\"exception\":{\"error_type\":\"E\",\"value\":\"ok\",\"stacktrace\":[{\"filename\":\"/home/alice/app.js\"}]}} → 出网 body 中 breadcrumb message 与 filename 原样保留（token 与家目录均未脱敏）。建议：normalize_payload 内对 breadcrumbs 逐条 sanitize、对 stacktrace 帧 filename/function 与 culprit 过 sanitize。",
+      "detail": "本轮要求的『capture_payload 过 sanitize_json』已满足（extra 已覆盖，client.rs:304-306），此处为同路径的剩余字段缺口。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 956,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '951,992p' crates/pony-agent-core/src/agent/otel/mod.rs; sed -n '7880,7890p' crates/pony-agent-core/src/agent/tools.rs  # 本轮把『可检索』语义收敛到 issue/DTO（exported_trace_id），但**出网 traceparent 仍取本地相关性上下文**：current_traceparent() 只校验 valid && sampled（958），而本地降级上下文被构造成 SAMPLED（1020-1039），因此默认配置（agentTraceReporting=false，门禁关闭、零导出）下每条 provider 请求、PonySentry ingest（client.rs:235/505）、以及 WebFetch 的**任意第三方 URL**（tools.rs:7886）都会带上一个永远不会被导出的 trace id。复现：cargo test -p pony-agent-core --lib agent::otel::tests::b1_local_context_exposes_current_ids_but_no_exported_trace_id -- --nocapture → 断言 current_traceparent().is_some() 在 exported_trace_id()==None 时仍成立（即：发出 traceparent 而 Tempo/Langfuse 永远查不到该 trace）。与 C3.2『所有出网注入』条款一致，但与 C2『可检索』精神及最小披露原则存在张力（第三方站点可据此跨请求关联本机 turn）。建议：二选一并写入契约/ADR —— ①第三方（非契约内）出网点改用 traceparent_header_map 的 exported 变体，或 ②在 C3 明示『本地相关性 id 亦可出网，仅用于 ingress 关联』。",
+      "detail": "与上一轮 #7（WebFetch 向任意第三方注入）同源；本轮只消除了『子 span 挂到幽灵 trace』这一更严重形态（active_exported_turn_context 只认 exported）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1597,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '1578,1618p' crates/pony-agent-core/src/agent/otel/mod.rs  # 嵌套登记的恢复只对 LIFO 正确：乱序 Drop（先在作用域内显式 drop(outer)，再 drop(inner)）时，inner 的 owns 校验通过（1586-1592）→ 走 1597-1599 把 slot.previous=Some(outer) 原样**回填**，但 outer 的 root span 早已 end()，于是 ACTIVE_TURNS 里留下一条『已结束 turn』的幽灵登记：此后同 task 内 exported_trace_id()（922-933）会返回这个已完成 turn 的 trace_id，且该 map 条目在该 task 生命周期内不再被摘除（无 TTL/无存活校验），按 task 数无界累积。复现（当前不可达，需先有嵌套 turn 入口）：等价序列 outer=begin_turn_trace(\"s\",\"A\",0); inner=begin_turn_trace(\"s\",\"B\",1); drop(outer); drop(inner); → current_trace_id() 仍为 Some(A 的 trace)（应为 None），即 1622-1630 读到幽灵登记。今日两个 turn 入口（turn_stream.rs、turn_sync.rs）均为顶层，故不可达；建议：回填前校验 previous 是否仍归属存活 span（例如登记项加 `ended: AtomicBool` 或在 TurnTraceGuard Drop 前置位），或在 Drop 时只要 previous 不可用就 remove。",
+      "detail": "上一轮要求『保存前值 + 双校验精确摘除/恢复』已实现（1556/1586-1604），此处仅指出『回填死值』这一剩余边界。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/app_settings.rs",
+      "line": 121,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '121,138p;211,231p' crates/pony-agent-core/src/agent/app_settings.rs  # ①落盘结构 AppSettingsStorage 仍 `#[derive(Debug)]` 且含 otel_token 明文（121/133），是 AppSettings 之后唯一未打码的凭据载体，任何 `{storage:?}` / unwrap_err / expect 打印即泄漏（今日 grep 未见调用点，属潜伏）；②0600 是 best-effort 但顺序为 `fs::write`（214，创建文件按 umask，典型 0644）**之后**才 set_permissions(0600)（227/239），存在『写入完成 → chmod 生效』之间的可读窗口，且 fs::write 为 truncate 非原子写（并发保存/中途崩溃会截断配置）。复现：umask 022 下调用 save_view（含 otelToken）→ 在 214 与 227 之间用另一进程 `cat ~/.config/pony-agent/settings.json` 可读到明文 token（`strace -f -e trace=openat,fchmod,chmod` 可见顺序 write→chmod）。建议：先用 OpenOptions::new().mode(0o600).create(true).truncate(true) 建文件再写（tmp+rename 更佳），并给 AppSettingsStorage 手写打码 Debug。",
+      "detail": "本轮要求的『Debug 打码 + best-effort 0600』在 AppSettings/OtelSettingsSnapshot 上已达标（测试通过），此处为同一凭据的剩余静默面。"
+    }
+  ]
+}

@@ -780,6 +780,7 @@ export type TurnTraceRecord = {
   phase: RuntimePhase;
   traceSteps: TraceStep[];
   traceTimeline?: TraceTimelineEntry[];
+  traceId?: string | null;
   toolActivities: ToolActivity[];
   providerCallRecords?: ProviderCallCacheRecord[];
   hookTraceRecords?: HookTraceRecord[];
@@ -803,6 +804,7 @@ export type TurnTraceRecord = {
   totalTokens?: number | null;
   firstTokenLatencyMs?: number | null;
   turnDurationMs?: number | null;
+  costUsd?: number | null;
   updatedAt: number;
 };
 
@@ -1116,6 +1118,8 @@ export type TurnStreamEvent = {
   providerCallRecords?: ProviderCallCacheRecord[] | null;
   hookTraceRecords?: HookTraceRecord[] | null;
   sessionSummary?: string | null;
+  traceId?: string | null;
+  costUsd?: number | null;
 };
 
 export type ExecutionCheckpoint = {

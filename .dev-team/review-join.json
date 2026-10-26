@@ -1,0 +1,9 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/lib/telemetry.ts",
+    "src/main.ts",
+    "crates/pony-agent-core/src/agent/otel/mod.rs"
+  ],
+  "findings": []
+}

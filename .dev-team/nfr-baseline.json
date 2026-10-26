@@ -18,6 +18,7 @@
   ],
   "logging": {
     "format": "json",
+    "trace_id": true,
     "trace_id_required": true,
     "trace_id_field": "trace_id"
   },
@@ -37,5 +38,16 @@
     "wave9_suspended_process_resume_fail_closed_cleanup"
   ],
   "auto_continue_max": 8,
-  "goal_store_atomic_write": true
+  "goal_store_atomic_write": true,
+  "observability": {
+    "exporter_flush_timeout_ms": 3000,
+    "log_file_max_bytes": 524288,
+    "setting_precedence": [
+      "settings",
+      "env",
+      "default"
+    ],
+    "cost_precision_decimals": 6,
+    "cost_budget_semantics": "soft_warn"
+  }
 }

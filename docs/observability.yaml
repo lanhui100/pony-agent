@@ -1,0 +1,94 @@
+# pony-agent 的可观测性适用性声明
+# 形状：~/.agents/skills/observability-onboarding/references/declaration.schema.json
+# 判定：声明说「该不该有」，巡检说「实际有没有」，两者交叉才是结论（规则家：declaration-rubric.md）。
+# 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
+service: pony-agent
+kind: desktop
+reviewed_at: "2026-10-26"
+
+dimensions:
+  tracing:
+    applicable: true
+    # OTel 初始化/导出/资源属性的唯一落点（span 与 resource 构造、配置解析、traceparent 注入器都在这个模块）
+    anchor: crates/pony-agent-core/src/agent/otel/mod.rs
+  issues:
+    applicable: true
+    # PonySentry ingest 客户端（事件上报/幂等键 event_id/trace_id 回填/重试都在这里）
+    anchor: crates/pony-agent-core/src/agent/ponysentry/client.rs
+  metrics:
+    applicable: false
+    reason: >-
+      桌面端（Tauri）+ CLI/TUI + headless harness 交付形态：进程随用户窗口启停，无常驻监听地址、
+      无 Service、不进集群，Prometheus pull 模型的前提（稳定可达的 /metrics）结构上不成立。
+      这不是「还没接」，而是这套接法不适用于该交付形态；为让巡检变绿而伪造 /metrics 已被明确拒绝。
+  logs:
+    applicable: false
+    reason: >-
+      日志采集是节点侧 fluentd 按容器日志路径白名单（/var/log/containers/*.log）tail；
+      桌面端进程不在容器里、不产生该路径，节点侧采集结构上不适用。Wave-4 起桌面端日志已落
+      `<app_data_dir>/logs/pony-agent.log`（单行 JSON + trace_id + 512KiB 轮转），但那是用户数据面
+      的本地取证面；不上送 Loki 仍是结构性选择而非缺口。
+
+enforcement_points:
+  error_boundary:
+    path: src/components/common/ErrorBoundary.vue
+    guarantees:
+      - breadcrumbs
+      - trace_id
+    forbidden_in_other_files:
+      - pattern: "\\bonErrorCaptured\\s*\\("
+        hint: 前端组件级异常捕获必须统一使用 ErrorBoundary.vue 统一收口与上报，禁止在别处私自声明 onErrorCaptured
+
+  http_client:
+    path: crates/pony-agent-core/src/agent/otel/mod.rs
+    guarantees:
+      - traceparent
+      - timeout
+    forbidden_in_other_files:
+      - pattern: "\\bheader\\s*\\(\\s*[\"']traceparent[\"']"
+        hint: 出网 HTTP 请求必须通过 otel::with_current_traceparent / traceparent_header_map_from 统一注入 traceparent，禁止手写硬编码请求头
+
+note: >-
+  【收口点落地说明（Stage-1 Protocol）】
+  (1) error_boundary: 收敛至 src/components/common/ErrorBoundary.vue，提供 Vue 3 onErrorCaptured 拦截、优雅降级及上报。
+  (2) http_client: 收敛至 crates/pony-agent-core/src/agent/otel/mod.rs，提供统一 with_current_traceparent 注入防重复与超时保证。
+  【历史 backlog 留存】
+  (0) Wave-4 已收敛但**未达 enforcement_point 标准**（故暂不声明）：
+      traceparent 注入收敛为单一 helper `otel::with_current_traceparent` /
+      `traceparent_header_map`（provider ×4、model_catalog、tools ×2、PonySentry worker 共 8 点
+      全部经它注入，insert 语义防重复）；OTel 配置解析收敛为 `otel::resolve_config`
+      （settings > env > default，缺省公网端点 https://otel.ponyjob.top）；
+      trace_id 语义已分离：`exported_trace_id()` 供 issue/会话 DTO，`current_trace_id()` 供日志/traceparent。
+      不写 enforcement_point 的理由：reqwest 客户端本身仍是 4 处直连，helper 只能约束「调用者主动调它」，
+      无法用 forbidden 正则可靠拦截「新增客户端却不调 helper」，写了会造成假绿。
+  (1) http_client：无统一网络出口 —— Rust 侧 4 处直接 reqwest::Client
+      （agent/otel/mod.rs、agent/tools.rs、agent/provider/mod.rs、agent/ponysentry/client.rs），
+      前端另有直接 fetch（src/lib/telemetry.ts、src/lib/update-check.ts）。
+  (2) error_boundary：无唯一边界 —— 前端 src/main.ts 有全局 errorHandler/unhandledrejection，
+      Rust 侧多处 catch_unwind 与各自上报路径尚未收敛到一个 re-export 边界。
+  (3) error_classifier：crates/pony-agent-core/src/agent/error_code.rs 提供 ErrorCode/ErrorCategory，
+      但 retry.rs 的 classify 与各 provider 仍各自分类（该模块头注释亦写明「只新增不改旧分支」），
+      故它不是唯一分类器。
+  (4) issue 上报存在两条实现：前端 src/lib/telemetry.ts 直接 fetch ingest，Rust 走
+      agent/ponysentry/client.rs。
+  (5) 无 journey.yaml（anchor_events 机制未启用）。
+  收口点建好之后再按 schema 补 enforcement_points（path + guarantees + forbidden_in_other_files），
+  且顺序是先确认「当前无违规」再写 forbidden，避免门禁一落地就红。
+  【wave-44 归属登记】前端 `[workspace-scroll]` 调试通道新增显式开关
+  （`pony-agent.debug.workspace-scroll` / `?debug=1|scroll` / DEV，默认生产关闭），属开发者诊断输出，
+  非结构化日志出口：四维归属不变（logs 仍为结构性 N-A），不新增 metrics/tracing/issues 面。
+  审计事实与优化点见 `docs/audit/observability-audit-2026-10-25.md`。
+  【wave-45 归属登记】tracing 维度新增 resource 归因属性：`service.version`（默认 core crate 版本，
+  可由 `PONY_OTEL_SERVICE_VERSION` 覆盖）与 `deployment.environment`（默认 debug=`development` /
+  release=`production`，可由 `PONY_OTEL_ENVIRONMENT` 覆盖）。维度归属不变（仍为 tracing，唯一落点仍是
+  `crates/pony-agent-core/src/agent/otel/mod.rs`），不新增出口/端点/标签维度；`agent.turn` 根 span
+  新增 `agent.turn.outcome=error` + `turn_error:` 状态承接子 span 失败。见
+  `docs/audit/observability-audit-2026-10-25.md` 与 `.dev-team/contract-matrix-wave45.md`。
+  【wave-46 归属登记】前端与语义轨交互增强：
+  (1) 前端交互轨迹：全局面包屑强化为有界环形缓冲（30 条），自动捕获页面导航（`navigate_page`）
+      并在推入时做深度截断与凭据清洗，丰富排障上下文；
+  (2) 局部错误边界：新增 `ErrorBoundary.vue` 组件，使用 Vue 3 `onErrorCaptured` 拦截并阻止
+      子组件异常冒泡整屏，触发 `reportError` 并在局部渲染具备重试恢复机制的优雅降级卡片；
+  (3) Langfuse 用户归因：`crates/pony-agent-core/src/agent/otel/mod.rs` 支持环境变量
+      `PONY_OTEL_USER_ID`，在 `begin_turn_trace` 根 span 中规范映射 `langfuse.user.id`。
+  四维归属保持不变，唯一落点仍为既有 anchor。

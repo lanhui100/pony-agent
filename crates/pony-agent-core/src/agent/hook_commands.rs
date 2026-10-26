@@ -34,6 +34,13 @@ use crate::agent::hooks::{HookDenyDecision, HookExecutionResult, HookResultKind,
 /// 默认命令钩子超时（毫秒）。
 pub const DEFAULT_HOOK_TIMEOUT_MS: u64 = 5_000;
 
+/// kill 之后等待 drain 读线程收尾的**总**预算上限（超时路径专用）。
+///
+/// 取值须显著小于 `timeout_kills_child_and_errors` 的时间断言（2s），也要覆盖
+/// "进程已死、管道即将 EOF" 的正常情况（毫秒级）。注意 stdout/stderr 两条流共用同一截止
+/// 时间，因此总增量不超过本预算（而非每流各算一次）。
+const KILLED_READER_DRAIN_BUDGET: Duration = Duration::from_secs(1);
+
 /// 单个命令钩子的配置。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandHookSpec {
@@ -200,9 +207,12 @@ impl CommandHookExecutor {
                 Ok(None) => {
                     if Instant::now() >= deadline {
                         kill_process_tree(&mut child, child_pid);
-                        // kill 之后管道关闭，读线程会自然结束；仍取回已读内容用于诊断。
-                        let _ = stdout_reader.join();
-                        let _ = stderr_reader.join();
+                        // 有界等待：Unix 上进程组已被 SIGKILL、管道立即 EOF；Windows 上孙进程
+                        // 可能仍持有管道写端，此时宁可放弃诊断输出也要守住超时上限。
+                        // 两条流共用一个截止时间，保证总增量不超过 KILLED_READER_DRAIN_BUDGET。
+                        let drain_deadline = Instant::now() + KILLED_READER_DRAIN_BUDGET;
+                        let _ = join_reader_until(stdout_reader, drain_deadline);
+                        let _ = join_reader_until(stderr_reader, drain_deadline);
                         return Err(format!(
                             "hook `{}` 执行超时（{timeout:?}），已终止子进程（含子进程组）。",
                             descriptor.name
@@ -212,8 +222,10 @@ impl CommandHookExecutor {
                 }
                 Err(err) => {
                     kill_process_tree(&mut child, child_pid);
-                    let _ = stdout_reader.join();
-                    let _ = stderr_reader.join();
+                    // 同上：等待失败路径同样不得被残留管道阻塞（共享同一份预算）。
+                    let drain_deadline = Instant::now() + KILLED_READER_DRAIN_BUDGET;
+                    let _ = join_reader_until(stdout_reader, drain_deadline);
+                    let _ = join_reader_until(stderr_reader, drain_deadline);
                     return Err(format!("hook `{}` 等待子进程失败：{err}", descriptor.name));
                 }
             }
@@ -359,7 +371,40 @@ fn read_all(pipe: Option<impl std::io::Read>) -> Vec<u8> {
     buffer
 }
 
+/// 有界等待一个 drain 读线程结束（到 `deadline` 仍未结束就放弃取回内容，返回 `None`）。
+///
+/// 为什么必须有界：超时路径 kill 之后**不能**假设管道立刻 EOF。Windows 上
+/// [`kill_process_tree`] 只能杀掉直接子进程（`cmd /C <command>`）；若该命令又派生了孙进程
+/// （如测试脚本里的 `ping.exe`），孙进程继承了同一组 stdout/stderr 管道写端并继续持有，
+/// 父进程已死后管道仍不 EOF，`read_all` 的 `join()` 会一直阻塞到孙进程自然退出（约 5s），
+/// 把 200ms 的 hook 超时拖成"假超时"，直接违反超时上限语义。
+/// 这里按 `runtime/tests.rs::wait_for_mock_thread` 的写法用 `JoinHandle::is_finished()`
+/// 轮询实现有界等待。
+///
+/// 语义变化：超时/等待失败路径的 stdout/stderr 降级为 **best-effort**（仅可能用于诊断，
+/// 不参与任何判定，也不会因取不到而改变返回的错误）。正常退出路径不走本函数——那时子进程
+/// 已退出、管道已 EOF，直接 `join()` 不会阻塞，保持原样以便完整取回输出。
+///
+/// 已知遗留（本轮不修）：Windows 上孙进程（如残留的 `ping.exe`）可能继续运行至自然结束。
+/// 彻底回收需要 Job Object，而 `agent/process/windows_job.rs` 的可见性收紧为 `pub(super)`，
+/// 提升可见性属于契约变更，不在本轮范围内。
+fn join_reader_until(
+    handle: std::thread::JoinHandle<Vec<u8>>,
+    deadline: Instant,
+) -> Option<Vec<u8>> {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    handle.join().ok()
+}
+
 /// 终止 hook 子进程树：Unix 对进程组发 SIGKILL（覆盖 shell 派生的孙进程），其它平台 kill 子进程。
+///
+/// 已知遗留：Windows 分支只杀直接子进程，孙进程可能残留并继续持有 stdout/stderr 管道写端
+/// （见 [`join_reader_until`]：超时路径因此使用有界等待，不被残留管道阻塞）。
 fn kill_process_tree(child: &mut std::process::Child, pid: u32) {
     #[cfg(unix)]
     {

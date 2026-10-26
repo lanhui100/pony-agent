@@ -526,9 +526,161 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         streamingReasoning: isStreamingReasoning,
         hasStreamingContent
       });
+    },
+    /**
+     * Wave-4 C2：读取当前活跃 turn 的 OTel trace_id（若无则返回 undefined）。
+     * 语义：
+     * 1. 仅当存在 activeTurnId 时，从 turnTraceHistory 中查找该活跃 turn 的 traceId 并返回；
+     *    若该活跃 turn 尚未记录 traceId 则严格返回 undefined，杜绝将上一轮的 traceId 误归因给本轮。
+     * 2. 无 activeTurnId（空闲态或终态后）时，回落到最近一个已完成 turn 的 traceId 供上下文调试。
+     */
+    activeTraceId: (state): string | undefined => {
+      const activeId = state.activeTurnId;
+      if (activeId) {
+        const activeTurn = state.turnTraceHistory?.find((t) => t.turnId === activeId);
+        return activeTurn?.traceId || undefined;
+      }
+      for (let i = (state.turnTraceHistory?.length ?? 0) - 1; i >= 0; i--) {
+        const turn = state.turnTraceHistory[i];
+        if (turn?.phase === "completed" && turn.traceId) {
+          return turn.traceId;
+        }
+      }
+      return undefined;
+    },
+    /** Wave-5 K1/K2：会话累计成本 (USD)，仅累加有效轮次，空值轮跳过 */
+    sessionTotalCostUsd: (state): number => {
+      let sum = 0;
+      for (const turn of state.turnTraceHistory ?? []) {
+        if (typeof turn.costUsd === "number" && Number.isFinite(turn.costUsd) && turn.costUsd >= 0) {
+          sum += turn.costUsd;
+        }
+      }
+      return Number(sum.toFixed(6));
+    },
+    /** 标识会话中是否含有未计价（未知模型）的轮次 */
+    hasUnpricedTurns: (state): boolean => {
+      const history = state.turnTraceHistory ?? [];
+      if (history.length === 0) return false;
+      return history.some((t) => t.costUsd === undefined || t.costUsd === null);
+    },
+    /** 格式化输出会话成本；全部轮次无计价或异常时退化为 "—" */
+    formattedSessionCost(): string {
+      const history = this.turnTraceHistory ?? [];
+      const validCosts = history.filter(
+        (t) => typeof t.costUsd === "number" && Number.isFinite(t.costUsd) && t.costUsd >= 0
+      );
+      if (validCosts.length === 0) {
+        return "—";
+      }
+      const total = this.sessionTotalCostUsd;
+      if (!Number.isFinite(total) || total < 0) {
+        return "—";
+      }
+      return `$${total.toFixed(6)}`;
+    },
+    /** Wave-5 K3：预算超限软告警状态 */
+    isCostBudgetExceeded(): boolean {
+      const settingsStore = useSettingsStore();
+      const budget = (settingsStore as any).effectiveCostBudgetUsd ?? (settingsStore as any).costBudgetUsd;
+      if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
+        return false;
+      }
+      return this.sessionTotalCostUsd > budget;
+    },
+    /** 预算超限提示文案 */
+    costBudgetWarningMessage(): string | null {
+      if (!this.isCostBudgetExceeded) return null;
+      const settingsStore = useSettingsStore();
+      const budget = (settingsStore as any).effectiveCostBudgetUsd ?? (settingsStore as any).costBudgetUsd;
+      return `已超出成本预算限额 (当前超预算: $${Number(budget).toFixed(2)})`;
+    },
+    /** Wave-7 G4：用量治理汇总（纯前端聚合或来自后端 summary） */
+    usageGovernanceSummary: (state): any => {
+      // 优先消费后端 summary（若存在）
+      if ((state as any).backendGovernanceSummary) {
+        return (state as any).backendGovernanceSummary;
+      }
+      let costSum = 0;
+      let unpricedCount = 0;
+      for (const turn of state.turnTraceHistory ?? []) {
+        if (typeof turn.costUsd === "number" && Number.isFinite(turn.costUsd) && turn.costUsd >= 0) {
+          costSum += turn.costUsd;
+        } else {
+          unpricedCount++;
+        }
+      }
+      return {
+        session: {
+          cost_usd: Number(costSum.toFixed(6)),
+          unpriced_turns: unpricedCount,
+        },
+        days: [],
+        policy_version: "v1",
+        governance_degraded: false,
+      };
+    },
+    /** Wave-7 G4：格式化展示用量治理成本（并列展示未计价轮数与 ≥ 语义，全未计价显示 "—"） */
+    formattedGovernanceCost(): string {
+      const summary = this.usageGovernanceSummary;
+      const history = this.turnTraceHistory ?? [];
+      const validTurns = history.filter(
+        (t) => typeof t.costUsd === "number" && Number.isFinite(t.costUsd) && t.costUsd >= 0
+      );
+      if (validTurns.length === 0) {
+        return "—";
+      }
+      const costStr = `$${summary.session.cost_usd.toFixed(6)}`;
+      if (summary.session.unpriced_turns > 0) {
+        return `≥ ${costStr} · ${summary.session.unpriced_turns} 轮未计价`;
+      }
+      return costStr;
+    },
+    /** Wave-7 G2/G3：拦截态详情 UI 信息 */
+    governanceBlockDetail(state): any {
+      const decision = (state as any).governanceDecision;
+      if (!decision || decision.kind !== "Block") {
+        return null;
+      }
+      return {
+        currentText: `$${Number(decision.current).toFixed(3)}`,
+        limitText: `$${Number(decision.limit).toFixed(2)}`,
+        reason: decision.reason,
+        overrideActionAvailable: true,
+      };
+    },
+    /** 软告警不阻断原则：始终允许发送与输入 */
+    canSubmitPrompt: (state): boolean => {
+      return !state.isSubmitting;
+    },
+    isInputDisabled: (): boolean => {
+      return false;
     }
   },
   actions: {
+    async overrideGovernanceBlock() {
+      (this as any).governanceDecision = null;
+      try {
+        const settingsStore = useSettingsStore();
+        if (settingsStore.settings.usageGovernancePolicy?.enforcement) {
+          settingsStore.settings.usageGovernancePolicy.enforcement = false;
+          await settingsStore.saveSettings();
+        }
+      } catch {
+        // ignore
+      }
+    },
+    async fetchUsageGovernanceSummary() {
+      if (!isTauriAvailable()) return;
+      try {
+        const res = await safeInvoke<any>("usage_governance_summary", { sessionId: this.sessionId });
+        if (res) {
+          (this as any).backendGovernanceSummary = res;
+        }
+      } catch {
+        // 优雅降级，未接线时不报错
+      }
+    },
     resetSessionRuntimeState() {
       this.cancelDeferredPersist();
       this.clearSubmissionWatchdog();
@@ -2523,7 +2675,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         switch (strategy.kind) {
           case "local-cache": {
             const cachedRuntimeView = buildRuntimeViewFromPersistedState(preferredSessionId, strategy.persistedState);
-            const hostRuntimeView = await this.loadSessionRuntimeViewState(preferredSessionId).catch((error) => {
+            // PA-155：local-cache 的宿主刷新是有界增强项（同 :2696 语义），
+            // 超时/失败一律降级为 null ⇒ mergeRuntimeViews 原样保留缓存视图，不得冒泡成 sessionError。
+            const hostRuntimeView = await withTimeout(
+              this.loadSessionRuntimeViewState(preferredSessionId),
+              HYDRATION_TIMEOUT_MS,
+              "加载对话"
+            ).catch((error) => {
               debugLog("session:init:host:error", { sessionId: preferredSessionId, error: String(error) });
               return null;
             });
@@ -2539,7 +2697,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             break;
           }
           case "host-read": {
-            const runtimeView = await this.loadSessionRuntimeViewState(preferredSessionId);
+            // PA-115：宿主读必须有界（同 :2141 语义），避免 IPC 挂起导致 initializeSessions 永不 settle。
+            const hostRead = this.loadSessionRuntimeViewState(preferredSessionId);
+            const runtimeView = await withTimeout(hostRead, HYDRATION_TIMEOUT_MS, "加载对话");
             if (!runtimeView?.checkpoint && runtimeView?.session.history.length === 0) {
               this.resetSessionRuntimeState();
               this.sessionId = preferredSessionId;
@@ -2566,7 +2726,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           }
         }
       } catch (error) {
+        // PA-115 Gate-1 BLOCKING：草稿是用户输入而非可回滚状态，快照回滚不得覆盖它。
+        const draftBeforeRestore = this.draftMessage;
         restoreSessionRuntimeSnapshot(this, previousSnapshot);
+        if (draftBeforeRestore !== previousSnapshot.draftMessage) {
+          this.draftMessage = draftBeforeRestore;
+        }
         this.sessionError = `初始化对话失败：${String(error)}`;
         debugLog("session:init:error", {
           error: String(error)
@@ -2625,6 +2790,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         phase: patch.phase ?? this.phase,
         traceSteps: patch.traceSteps ?? [],
         traceTimeline: patchTimeline ?? [],
+        traceId: patch.traceId ?? null,
         toolActivities: patch.toolActivities ?? [],
         providerCallRecords: patch.providerCallRecords ?? [],
         hookTraceRecords: patch.hookTraceRecords ?? [],
@@ -2645,6 +2811,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         totalTokens: patch.totalTokens ?? null,
         firstTokenLatencyMs: patch.firstTokenLatencyMs ?? null,
         turnDurationMs: patch.turnDurationMs ?? null,
+        costUsd: patch.costUsd ?? undefined,
         updatedAt
       }));
       this.turnTraceHistory[this.turnTraceHistory.length - 1]!.title = resolvedTitle;
@@ -3507,6 +3674,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities, false);
         this.updateActiveTraceTimeline(this.traceTimeline, true);
+
+        // Wave-4 C2：新轮开始时立即落盘 traceId 到 turnTraceHistory，保证 live turn 期可读
+        if (payload.traceId) {
+          this.upsertTurnTrace(payload.turnId, { traceId: payload.traceId });
+        }
       });
 
       const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
@@ -4009,6 +4181,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             emittedAtMs: payload.emittedAtMs ?? null,
             phase: "completed",
             traceSteps: nextTraceSteps,
+            ...(payload.traceId ? { traceId: payload.traceId } : {}),
             toolActivities: terminalToolActivities,
             providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
             providerRequestedName: nextProviderRequestedName,
@@ -4028,6 +4201,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             ...cacheHitInputTokenPatch,
             ...reasoningTokenPatch,
             ...turnDurationPatch,
+            ...(payload.costUsd !== undefined ? { costUsd: payload.costUsd } : {}),
             error: null
           };
 
@@ -4320,6 +4494,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         this.clearSubmissionWatchdog();
         this.isSubmitting = false;
+        const failedTurnTraceId = payload.traceId
+          ?? (this.activeTurnId ? this.turnTraceHistory?.find((t) => t.turnId === this.activeTurnId)?.traceId ?? null : null);
         this.activeTurnId = null;
         this.activeRunId = null;
         const failedTraceTimeline = resolveEventTraceTimeline(payload, () =>
@@ -4358,6 +4534,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           emittedAtMs: payload.emittedAtMs ?? null,
           phase: "failed",
           traceSteps: payload.traceSteps ?? this.traceSteps,
+          ...(payload.traceId ? { traceId: payload.traceId } : {}),
           toolActivities: terminalToolActivities,
           providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
           providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
@@ -4401,26 +4578,38 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           });
 
           // 宿主层/Harness 捕获 Agent 失败事件上报 PonySentry (ADR 0028)
-          void reportError({
-            errorType: "TurnExecutionFailed",
-            message: payload.error || this.error || DEFAULT_FAILED_TURN_ERROR,
-            tags: {
-              source: "turn_failed_event",
-              session_id: failedSessionId || "unknown",
-              turn_id: payload.turnId,
-              provider: payload.providerName || this.providerName || "unknown",
-              model: payload.providerModel || this.providerModel || "unknown"
-            },
-            extra: {
-              turnId: payload.turnId,
-              sessionId: failedSessionId,
-              providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-              providerName: payload.providerName ?? this.providerName,
-              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-              providerModel: payload.providerModel ?? this.providerModel,
-              errorDetail: payload.error ?? this.error
-            }
-          });
+          // Wave-7 B3：用量治理阻断属于正常预期的用户状态，禁止将含有金额的 error 上报到 Sentry
+          const errDetail = payload.error || this.error || "";
+          const isGovernanceBlocked =
+            errDetail.includes("用量治理拦截") ||
+            errDetail.includes("硬限额") ||
+            errDetail.includes("limit exceeded") ||
+            errDetail.includes("Usage limit") ||
+            (payload as any).failureKind === "governance_block";
+
+          if (!isGovernanceBlocked) {
+            void reportError({
+              errorType: "TurnExecutionFailed",
+              message: payload.error || this.error || DEFAULT_FAILED_TURN_ERROR,
+              trace_id: failedTurnTraceId || undefined,
+              tags: {
+                source: "turn_failed_event",
+                session_id: failedSessionId || "unknown",
+                turn_id: payload.turnId,
+                provider: payload.providerName || this.providerName || "unknown",
+                model: payload.providerModel || this.providerModel || "unknown"
+              },
+              extra: {
+                turnId: payload.turnId,
+                sessionId: failedSessionId,
+                providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+                providerName: payload.providerName ?? this.providerName,
+                providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+                providerModel: payload.providerModel ?? this.providerModel,
+                errorDetail: payload.error ?? this.error
+              }
+            });
+          }
         }, 0);
       });
 
@@ -4549,6 +4738,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           emittedAtMs: payload.emittedAtMs ?? null,
           phase: "cancelled",
           traceSteps: cancelledTraceSteps,
+          ...(payload.traceId ? { traceId: payload.traceId } : {}),
           toolActivities: terminalToolActivities,
           providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
           providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,

@@ -70,6 +70,107 @@
         "red_phase": "20 failed / 0 passed (all SUT-stub or unmet assertions)",
         "nfr_schema": "dev-nfr-lint.py EXIT 0 on nfr-baseline-wave42.json"
       }
+    },
+    {
+      "wave": 44,
+      "theme": "frontend robustness convergence (PA-115/PA-135/PA-117)",
+      "baseline_commit": "ab54b06",
+      "regression_baseline": ".dev-team/regression-baseline-wave44.json",
+      "branches": {
+        "task-3": {
+          "owner": "executor-alpha",
+          "write_scopes": [
+            "src/stores/runtime.ts"
+          ],
+          "status": "completed"
+        },
+        "task-4": {
+          "owner": "executor-beta",
+          "write_scopes": [
+            "src/components/HomeWorkspace.vue",
+            "src/lib/useTimelineAutoScroll.ts",
+            "src/lib/runtime/utils.ts"
+          ],
+          "status": "completed"
+        }
+      },
+      "gates": {
+        "regression_baseline": "99 files / 1026 passed / 10 skipped / EXIT 0",
+        "classification": "B (multi-file business flow, UI interaction, I/O timeout) -> B-level mandatory team",
+        "gate1_review": "plan-A PASS(6 adv), plan-B FAIL(1 BLOCKING: draft rollback) -> adopted; re-review-B FAIL(1 BLOCKING: call-site timeout unpinned) -> adopted (mutant killed)",
+        "red_phase": "8/8 red, dev-red-purity PASS (pure_red=true)",
+        "machine_write_scope": "git diff 4 src files == write_scopes; blast keywords 0; union diff 54 lines",
+        "observability": "check-declaration EXIT 0; audit-diff EXIT 1 (WARN zero enforcement points, accepted)",
+        "l3_reviews": "A PASS(3 adv); B FAIL(1 BLOCKING streamDebugState) -> fixed -> recheck PASS(2 adv); L3-P PASS(0 blocking/3 adv)",
+        "final": {
+          "vitest": "8/8 passed",
+          "full_suite": "102 files/1034 passed/10 skipped",
+          "build": "EXIT 0",
+          "typecheck": "EXIT 0",
+          "check_declaration": "EXIT 0",
+          "audit_diff": "EXIT 1 (WARN zero enforcement points, accepted)"
+        }
+      },
+      "observability": {
+        "applicable": true,
+        "reason": "UI interaction + host IPC read (network/IPC IO) + LLM project; requires audit-diff + check-declaration"
+      },
+      "protocol_commit": "3c6736d",
+      "contract_amend_commit": "143b1ea",
+      "red_commit": "9b70bde",
+      "red_tag": "wave-44-red",
+      "green_state": {
+        "vitest_acceptance": "8/8 passed",
+        "full_suite": "102 files/1034 passed/10 skipped EXIT 0",
+        "build": "EXIT 0",
+        "typecheck": "EXIT 0"
+      },
+      "green_commit": "367f7c8",
+      "tag": "wave-44",
+      "closeout": {
+        "dev_server": "vite 127.0.0.1:4176 HTTP 200 (kept running per user request)",
+        "preview": "killed",
+        "worktree": "clean"
+      }
+    },
+    {
+      "wave": 45,
+      "theme": "observability semantics convergence (PA-153 resource attribution / PA-154 turn error aggregation / PA-155 local-cache timeout)",
+      "baseline_commit": "f233a96",
+      "red_commit": "59b53f2",
+      "branches": {
+        "task-rust": {
+          "owner": "executor-rust",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/otel/mod.rs"
+          ],
+          "status": "completed"
+        },
+        "task-ts": {
+          "owner": "executor-ts",
+          "write_scopes": [
+            "src/stores/runtime.ts"
+          ],
+          "status": "completed"
+        }
+      },
+      "gates": {
+        "regression_baseline": "rust lib 1149 passed/1 known fail; frontend 1034 passed/10 skipped",
+        "gate1": "plan-A FAIL(1 BLOCKING: zero-discrimination quota_blocked) adopted -> contract evolution turn_error prefix; plan-B PASS; final recheck pending",
+        "red_phase": "Rust 4 failed + 1 env failed (assertion, 0 compile); TS 2 failed; stash-based re-anchor",
+        "green": "Rust integration 7/7; lib otel 25/25; TS 2/2; full vitest 1036; build 0",
+        "full_rust": "1154 passed/2 failed (1 known baseline + 1 pre-existing ponysentry flake 2/20 module-level); single-thread 1155/1 known",
+        "l3": "A PASS(4 adv); B PASS(4 adv); L3-P PASS(2 adv)",
+        "observability": "check-declaration EXIT 0; audit-diff EXIT 1 (WARN zero enforcement points, accepted)"
+      },
+      "green_commit": "b3e1af6",
+      "tag": "wave-45",
+      "closeout": {
+        "worktree": "clean",
+        "dev_server": "kept (vite :4176)",
+        "nfr_degraded": "0",
+        "meta_lint": "PASS"
+      }
     }
   ],
   "counters": {}

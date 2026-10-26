@@ -1,0 +1,15 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave45.md",
+    "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+    "crates/pony-agent-core/src/agent/otel/mod.rs"
+  ],
+  "findings": [],
+  "evidence": {
+    "1_contract": "§5 NFR 行 :79 明文冻结 root_error_message_prefix=\"turn_error: \"（后接 tool_failed|quota_blocked）、outcome_value_on_error=\"error\"（成功不输出该键）、phase=failed 优先（message=failed 且不写 turn_error）；§2 :46-:50 给出对应 T1/T2/T3 冻结断言与优先级条款；§6 :89 要求唯一性 + 键值=error 断言。三项均明确。",
+    "2_tests": "otel_resource_turn_status_test.rs:394 断言 `turn_error: tool_failed`、:447 断言 `turn_error: quota_blocked`；:403-408 与 :455-460 断言 `turn_error:` 计数==1；:234-254 assert_turn_outcome_value_is_error 断言键计数==1 且键后 16 字节窗口值=error（并禁 success）；PA154-T3 :495-516 断言全成功时 agent.turn.outcome / turn_error / tool_failed / quota_blocked 四者均不出现，且 :483-492 正向锚 agent.turn+agent.turn.phase+completed。",
+    "3_impl": "turn_error 前缀唯一构造点 otel/mod.rs:1777-1779 turn_error_status_message，唯一调用点 :1309（TurnTraceGuard::drop 内 self.span 即根 span）。子 span 文案仍为原始 err_desc（:1569-1571）与 \"quota_blocked\"（:1539），均不含前缀；全仓 grep `\"turn_error` 非测试命中仅 :1774 常量一处（:3165/:3169 为 in-crate 单测字面量）。",
+    "4_tests_run": "cargo test -q -p pony-agent-core --test otel_resource_turn_status_test --test otel_resource_env_test --target-dir target-test => 1 passed + 6 passed, 0 failed, EXIT_CODE=0"
+  }
+}

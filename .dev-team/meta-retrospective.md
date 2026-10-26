@@ -1,62 +1,56 @@
-# Wave-42 元复盘（全局配置加载四项能力与安全性加固）
+# 元框架复盘（Wave-44：前端健壮性收敛 + 可观测性审计）
 
-> 复盘对象：本次 Agent Team 的**协作元框架与组织协议**。账本 `.dev-team/state.json`（wave 42）、契约 `.dev-team/contract-matrix-wave42-global-config.md`、收据 `.dev-team/evidence/wave42/gates.md`、评审 `review-w42-{A,B,l3p}*.json`、ADR `0046-global-config-loading-wave42.md`。
+> 本轮对象：Wave-44（PA-115 启动期 host-read 有界超时 / PA-135 组合态撤销 / PA-117 调试输出门控）+ 基于 Tempo/Loki/Prometheus/PonySentry/Langfuse 真实数据的项目审计。
+> 历史复盘保留于 `meta-retrospective-wave6.md`；本文只记本轮。
 
-## 1. 通信拓扑与信噪比
+## 一、 通信拓扑与信噪比 (Topology & Noise)
+- **拓扑**：Lead + Protocol Agent + Test Agent + Executor-A + Executor-B（5/8 槽位）；方案审查 A/B、L3 A/B、L3-P 共 5 次 Subagent 挂载；观测事实采集用 1 个只读 Explorer Subagent。
+- **有效实践**：Explorer 一次交付 25 条带 command/exit_code 的观测事实（77 trace / 11 issue / 47 Langfuse trace），Lead 只做抽验（复跑 `count(up)`、TraceQL 计数、ClickHouse count），把「数据采集」与「裁决」解耦，显著降低 Lead 上下文占用。
+- **噪声与浪费**：第一批方案审查子代理 2 个中有 1 个长时间无产物（疑似上下文耗尽），导致 Gate-1 重复派发一轮；Test Agent 在 `tests/acceptance/wave44/` 留下临时 `_probe117c.spec.ts`，由 Lead 清理。**结论：子代理必须有“产物路径 + 时限 + 失败信号”三件套，临时文件必须写在 /tmp 或带下划线且被 exclude。**
 
-| 角色 | 模式 | 轮次 | 评价 |
-| :-- | :-- | :-- | :-- |
-| Protocol Agent | 常驻 teammate | 1 | 严守无业务逻辑纪律，产出 skill_body、instruction_touch 与 hotloader 契约空桩，但因历史 NFR 校验器差异引发微调。 |
-| Test Agent | 常驻 teammate | 红相 + 3 轮安全/回归增量，共 4 轮 | 编写 20 例基础红相与 12 例安全增量/并发破坏注入测试；严格执行只读保护，未碰业务文件。 |
-| Executor Alpha | 常驻 teammate | 主实施 + 2 轮安全修复 | 负责工具面、路径权限与触达注入；成功实现受信根判定与并发去重机制。 |
-| Executor Beta | 常驻 teammate | 主实施 + 2 轮逻辑修复 | 负责 hotloader 预算与层级发现；修复了渲染预算超限与去重缓存失效问题。 |
-| Reviewer A/B/l3p | subagent 池 | 2 轮双视角审查 + 1 轮生产就绪 L3-P | 抓出符号链接逃逸、去重缓存不完全失效、预算超限等高危缺陷，价值极高。 |
+## 二、 门禁穿透与误杀率 (Gate Penetration / False Negatives & Positives)
+本轮门禁抓到 5 个真问题，全部有机器证据：
+1. **Gate-1 BLOCKING（真缺陷，非误杀）**：3500ms watchdog 解锁输入后，15000ms 超时若整包快照回滚会静默吞掉用户草稿。审查 B 用 fake-timer 反例证明；契约新增 `PA115-T2a` 草稿保全条款，实现以“回滚前保存/回滚后恢复 draft”最小闭包修复。
+2. **测试自身缺陷（TEST-DEFECT）**：`PA117-T1` 在开启态测量后读活窗口缓冲，忠实实现必红。Test Agent 改为读关闭态快照并重新锚定红相；实现未迁就错误断言——这是测试分权制生效的关键证据。
+3. **NFR 机械性缺口（BLOCKING 号）**：超时值只在常量层钉住、调用点未钉，`1000ms` mutant 可存活。补“14000ms 未收敛 / 16000ms 收敛”后 mutant 被击杀（Test Agent 实测）。
+4. **L3-B BLOCKING（实现级，交付前拦截）**：关闭态 markdown `render-complete` 仍写 `streamDebugState` 5 个键并落盘，违反契约 §2.3。修复为 `updateStreamDebugReveal` 入口 no-op 门控（+4 行）；Test Agent 补“落盘无 markdownRender* 键”断言；L3-B 复核探针由 5 键降为 0 键，改判 PASS。
+5. **写域机械审计 0 越界**：`git diff --name-only` 与 4 个 write_scopes 完全一致；blast-keywords 0 命中；union diff 58 行 <100。
+- **误杀/降级**：0 起 NFR-DEGRADED；审查 A 6 条、B 9 条 ADVISORY 中，采纳 5 条（契约探针口径、legacy IME Enter、restoreAllMocks 污染、NFR 0 口径、调用点钉住），其余登记 Non-Goal 或 backlog。
+- **红相纯度**：`dev-red-purity.py` PASS（pure_red=true），8 条均落点 SUT 栈。
 
-- **事件驱动与收敛**：通过任务板 revision 推进与单点聚焦审查，保持了高度的信噪比。
-- **降噪控制**：严格采用 JSON 结果输出，所有审查结果均包含明确的 `file:line` 与反例，禁止无实质意义的吹捧。
+## 三、 分工契约与隔离有效性 (Contract Isolation)
+- **写域隔离**：Executor-A 仅 `src/stores/runtime.ts`（+9 行）；Executor-B 仅 3 个前端文件（+54 行）；Test Agent 仅 `tests/acceptance/wave44/**`；Lead 仅 `.dev-team/**` 与 `docs/**`。零交叉污染。
+- **契约演进**：Gate-1 后 `contract-matrix-wave44.md` +26/−12、NFR +7；Test Agent 同步迁移断言；Lead 以 `git stash push -- src/` 在“实现已落地”状态下重锚红相（8/8 红），随后 pop 恢复实现——证明契约演进不破坏红相纪律。
+- **分权制的代价与收益**：Test Agent 不能修实现、Executor 不能动测试，导致“测试缺陷”需 Lead 裁决 + 两轮往返；但正是这条约束让 `1` 类假绿（开启态读活窗口）没有变成“改实现迁就测试”的隐性缺陷。
 
-## 2. 门禁穿透与误杀率
-
-- **真实拦截成效显著**：
-  1. L3-B 抓出 `instruction_touch` 与 `workspace_hotloader` 中符号链接穿透导致读取工作区外敏感文件（如 `/etc/passwd`）的严重漏洞；
-  2. L3-A 抓出跨层去重后非活跃来源修改时缓存命中未失效的隐蔽 bug；
-  3. L3-P 抓出触达注入前置段未受调用预算约束导致上层溢出的边界风险。
-- **门禁纯度**：所有用例均由 Test Agent 专职编写，经多轮反例注入和回归验证（25/25 绿、7/7 绿、9/9 绿）。
-- **既有基线红**：`agent::config::tests::missing_capabilities_fields_use_stable_defaults` 在干净 HEAD 分支验证为既存问题，非本波次引入，未阻断主线逻辑。
-
-## 3. 分工契约与隔离有效性
-
-- **写域严格正交**：Alpha（tools/path/touch/skill_body）与 Beta（hotloader/context）互不跨域，唯一衍生豁免（`provider/mod.rs` 注册同步）按规则登记并受控实施。
-- **测试代码只读铁律**：业务执行者全程未修改 `tests/`，Test Agent 作为唯一测试写主，杜绝了自测放行作弊链。
-- **演进与契约冻结**：遇到契约缝隙（如无根 API 收紧、有界根探测）均经 Lead 显式裁决后下发，保持了架构设计与事实的完全一致。
-
-## 4. 元协议迭代建议
-
-1. **[高] 自动化符号链接/沙箱规范注入**：针对文件读取和配置加载类任务，必须在空桩阶段强制提供 `symlink_metadata` 与 `canonicalize` 包含守卫规范，避免后续依赖 L3 反复拦截。
-2. **[中] 优化长时 Subagent 容错机制**：复审多轮次并发时，Subagent 偶发资源限制或超时中断，应建立轻量断点，便于 Lead 顺畅拉起增量复查。
-3. **[低] 明确 NFR 校验分工边界**：历史波次的 NFR 校验器（若写死额外字段拒绝）与新波次字段的命名应有命名空间隔离或单波次指定，避免多规则碰撞。
+## 四、 元协议迭代建议 (Self-Evolving Protocol)
+1. **[P0] 子代理交付契约前置**：Subagent 任务模板必须含 `output_path`、`deadline`、`on_failure` 三字段；Lead 以文件 mtime 作为唤醒信号，超过时限未见产物直接重派（本轮 Gate-1 因此损失约 10 分钟）。
+2. **[P0] 契约演进后的红相重锚应脚本化**：`stash src → 跑验收 → commit tests → stash pop → 跑验收` 是通用动作，建议固化为 `dev-red-reanchor.sh`，避免手工顺序错误。
+3. **[P1] TEST-DEFECT 豁免通道**：冻结测试被发现自相矛盾时，当前流程要求“改测试 + 重锚 + 重跑”，建议在契约矩阵增加 `test_defect_waiver` 段（含反证命令与 Lead 裁决），减少往返。
+4. **[P1] 观测驱动的 backlog 生成**：本轮审计产出 9 条优化点（root span 错误承接、探针隔离、issue 治理、usage 属性等），建议把“审计报告 → backlog 卡片”作为 wave 收口的固定动作，让观测数据真正进入迭代闭环。
+5. **[P2] 审计工具口径修正回写 skill**：`audit-project.sh` 对 desktop 项目的空 service/project 与 `limit` 当计数的缺陷，应作为 `observability-onboarding` 的 selftest fixture 固化（否则每轮都要人工校正）。
 
 ---
 
-# Wave-43 元复盘（Markdown 中文标点加粗与流式平滑渲染状态机治理）
+# Wave-45 增补复盘（可观测性语义收敛）
 
-> 复盘对象：本次 Agent Team 的**协作元框架与组织协议**。针对桌面端 Markdown 中 `**` 中文引号包裹 raw 泄露及流式形态割裂/抖动治理。
+## 通信拓扑与信噪比 (Topology & Noise)
+- 拓扑：Lead + Protocol-45 + Test-45 + Executor-Rust + Executor-TS（5/8）；计划审查 2 路、实现审查 L3 A/B + L3-P 共 3 路，全部 Subagent。
+- 有效点：一次把“审计发现 → 契约 → 红相 → 实现 → 证据”跑通；Protocol 主动指出“测试 id 映射缺失”与“`quota_blocked` 已在 HEAD 子 span 写出”的风险，避免了零鉴别力断言。
+- 噪声：Rust 首次冷编译 target-test 约 5 分钟；三个审查子代理并行读取大文件导致等待 10 分钟；建议冻结“审查输入包”（diff + 契约 + 2 个测试文件）而非让审查员自行 grep。
 
-## 1. 通信拓扑与信噪比
-- **拓扑结构**：Lead 定位根因并下发验收契约 -> Test Agent 依规编写三类双模态红相测试（精准 3/6 失败断言）-> Executor 在正交写域实施最小闭包修复 -> 6/6 全绿 + 全量 981 个单测零回归收口。
-- **信噪比表现**：严格以客观测试 Exit Code 与断言证据驱动，杜绝主观臆测。
+## 门禁穿透与误杀率 (Gate Penetration / False Negatives & Positives)
+- 抓到真问题：① 计划审查 A 判 BLOCKING——`quota_blocked` 子串在 HEAD 已存在，PA154-T2 零鉴别力 → 契约演进为唯一前缀 `turn_error: `；② 全量 lib 出现“新增失败”——经模块级 20 次复跑证明是既有 ponysentry 共享全局队列 flake（2/20），非本波引入，已登记 backlog；③ L3-P 指出 `take_active_turn_error` 缺归属校验（slot=None 时可能清空同 task 另一 turn），登记 advisory。
+- 误杀：0 起 NFR-DEGRADED；两路审查共 13 条 ADVISORY，采纳 3 条（声明登记、env 文档、flake 收据），其余明确登记 Non-Goal。
+- 红相：Rust 4+1 条断言红、0 编译失败；TS 2/2 红；重锚以 `git stash` 实现态复验后提交，红相纪律未被“实现已落地”破坏。
 
-## 2. 门禁穿透与误杀率
-- **真实拦截成效**：
-  1. 准确捕获 CommonMark 在汉字与全角双引号/标点邻接时 delimiter run 判定失效导致的加粗未渲染与 raw 裸露；
-  2. 准确捕获流式首包纯文本时 `streamingRenderPathLock` 将通道永久锁死为 false 的单向死锁缺陷；
-  3. 拦截了流式增量推进中 Markdown 抖动与 raw 泄露。
-- **零误杀**：92 个测试文件全部通过，原生类型和测试双通过。
+## 分工契约与隔离有效性 (Contract Isolation)
+- 写域：Rust Executor 仅 `otel/mod.rs`（+261），TS Executor 仅 `runtime.ts`（+8），Test Agent 仅 tests，Lead 仅 docs/.dev-team；`git diff --name-only` 与声明完全一致。
+- 契约演进 2 次（turn_error 前缀、outcome 值），均由 Protocol 落盘、Test 迁移、Lead 重锚，未出现实现方改测试。
+- 代价：Rust 集成测试的全局 OTel init 与 sink 预算带来一次不可复现 flake（1 次/9 次），提示“并发测试共享全局态”应默认串行或每测试独立进程。
 
-## 3. 分工契约与隔离有效性
-- **测试独立分权**：Test Agent 作为唯一测试编写方，Executor 仅负责业务修复且对测试用例只读，严格阻断“自编自测自证”链条。
-- **最小闭包与正交写域**：修改严格限制在 `src/lib/markdown.ts` 和 `src/components/HomeWorkspace.vue`，无附带重构。
-
-## 4. 元协议迭代建议
-- **流式渲染通道判定应采用单调升级模型**：在 Agent 桌面交互端，流式渲染状态机的路径锁定应具备“单向单调升格（Monotonic Upgrade）”机制，防止被初始片段误判锁死。
-
+## 元协议迭代建议 (Self-Evolving Protocol)
+1. **[P0] 冻结测试的 flake 检测入闸**：对涉及全局态（OTel init、sink、LAST_ENQUEUED）的用例，加入“连跑 N 次”稳定性门禁，N=5；不达标不得红相锚定。
+2. **[P0] 既有 flake 必须与本次回归分离**：全量失败清单需与基线逐项对照并附“模块级复现率”，否则会把既有 flake 误判为 IMPL-DEFECT（本轮已按此口径执行）。
+3. **[P1] 断言唯一性优先于语义描述**：涉及父/子 span 同名错误时，契约必须冻结“只可能出现在目标 span”的唯一字面量（本轮 `turn_error: `），否则 contains 断言零鉴别力。
+4. **[P1] 审查输入包标准化**：`[diff, 契约, 测试文件清单, 运行命令]` 一次下发，减少审查员自行探索（本轮 3 路审查共耗时 ~20 分钟）。

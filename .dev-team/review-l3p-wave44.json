@@ -1,0 +1,33 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/stores/runtime.ts",
+    "src/components/HomeWorkspace.vue",
+    "src/lib/useTimelineAutoScroll.ts",
+    "src/lib/runtime/utils.ts",
+    "docs/observability.yaml"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2678,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vitest run --config /tmp/w44repro/vitest.config.ts pa115-local-cache-residual  # 实测 FAIL：localStorage 种入 cachedState ⇒ deriveInitStrategy=local-cache；mockSafeInvoke('load_session_runtime_view') 永不 resolve；推进 HYDRATION_TIMEOUT_MS+1000 后 state.settled 仍为 false（expect(state.settled).toBe(true) → false）⇒ local-cache 分支的宿主读仍是无界裸 await，initializeSessions 可永不 settle、app-startup-screen 常驻（initializeSessions 内 loadSessionCatalog 同样无界）。PA-115 只覆盖 host-read 分支，契约 §2.1 Non-Goals 明示排除其余启动 IPC，故记 ADVISORY，建议立 backlog 走契约演进。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2725,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vitest run --config /tmp/w44repro/vitest.config.ts pa115-concurrent-switch  # 实测 FAIL：host-read 挂起 → t=4s watchdog(:2641) 已清 sessionOperation → switchSession('wave44-session-switched') 在窗口内成功 → 推进至 t=16s，:2725 以 t=0 的 previousSnapshot 整包 restore，store.sessionId 实测回退为 'local-dev-session'（Expected \"wave44-session-switched\" / Received \"local-dev-session\"）；:2734 finally 无属主校验地 sessionOperation=null。:2724-2728 仅保全 draftMessage 文本，窗口内其它用户动作（会话切换、已提交 turn 的 messages/isSubmitting/activeTurnId）仍被整体回滚。根因是 3500ms watchdog（契约 Non-Goal，不改其职责）与 15000ms 超时并存的窗口，生产入口单一（App.vue:163）且有启动遮罩，故记 ADVISORY。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/components/HomeWorkspace.vue",
+      "line": 1524,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && cat > /tmp/w44repro/pa117-markdown-residual.spec.ts <<'EOF'\nimport { mount } from '@vue/test-utils';\nimport HomeWorkspace from '@/components/HomeWorkspace.vue';\n// vi.stubEnv('DEV', false)；mount 后包裹 Element.prototype.getBoundingClientRect 计数；\n// 触发 markdown render-complete（streaming:true）→ expect(count).toBe(0)\nEOF\n# 预期 FAIL：handleMarkdownRenderComplete 先执行 :1524 collectTimelineScrollMetrics()（6+ 次 getBoundingClientRect），\n# 之后才进入受 isWorkspaceScrollDebugEnabled() 门控的 updateStreamDebugReveal(:1525)：关闭态 rect 计数 > 0。\n# NFR 字段 layout_reads_when_disabled=0 的断言口径被限定在『同 fixture 同 debug 触发序列内』（矩阵盲区 B-117-1 已登记），\n# 故不构成当前门禁失败；但 markdown 路径的布局读数在关闭态未真正归零，记 ADVISORY。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

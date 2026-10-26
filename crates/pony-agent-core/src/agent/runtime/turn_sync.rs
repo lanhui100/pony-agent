@@ -72,9 +72,34 @@ impl AgentRuntime {
                 preview_text(&tool_result.output, 160)
             ));
             all_tools_ok &= tool_result.status == "ok";
+            // Wave43 task-8 挂载切片：实时路径「工具执行结束 → 产生 TurnToolActivity」单点。
+            // 一层工具执行 = 一个 tool.call span：只对顶层活动（parent_activity_id 为 None）记录，
+            // 子调用活动从属顶层活动，避免 span 基数爆炸。
+            let otel_activity_batch = self
+                .telemetry_builder
+                .tool_activities_after_result(&current_tool_call, &tool_result);
+            if let Some(otel_top_activity) = otel_activity_batch
+                .iter()
+                .find(|activity| activity.parent_activity_id.is_none())
+            {
+                crate::agent::otel::record_tool_call_span(&crate::agent::otel::ToolSpanInput {
+                    tool_name: otel_top_activity
+                        .canonical_tool_name
+                        .clone()
+                        .unwrap_or_else(|| otel_top_activity.name.clone()),
+                    status: if otel_top_activity.status == "done" {
+                        "success".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
+                    duration_ms: otel_top_activity
+                        .duration_seconds
+                        .map(|seconds| (seconds * 1000.0).round() as u64),
+                    error: turn_tool_activity_error_text(otel_top_activity),
+                });
+            }
             tool_activities.extend(annotate_capability_tool_activities(
-                self.telemetry_builder
-                    .tool_activities_after_result(&current_tool_call, &tool_result),
+                otel_activity_batch,
                 invocation_record,
             ));
             hop_records.push(ToolTurnHopRecord {
@@ -364,7 +389,7 @@ impl AgentRuntime {
         static SYNC_TURN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         format!(
             "sync:{}:{}{:04x}",
-            input.session_id.as_deref().unwrap_or("local-dev-session"),
+            input.session_id.as_deref().unwrap_or(""),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos())
@@ -430,9 +455,51 @@ impl AgentRuntime {
         // PA-095：同步入口事件 turn_id 一次性计算——started/failed/completed 全路径
         // 复用同一 id，保证"每个 turn:started 必有配对 turn:end"的配对不变式。
         let sync_turn_id = Self::sync_turn_event_id(&input);
+        // Wave43 task-8 挂载切片：turn root span（agent.turn）在入口创建，函数返回时 Drop
+        // 自动结束 span，覆盖同步轮全部终态出口。TurnInput 无 turn 序号，按契约回退 sequence = 0。
+        let mut otel_turn_scope = crate::agent::otel::begin_turn_trace(
+            input.session_id.as_deref().unwrap_or(""),
+            &sync_turn_id,
+            0,
+        );
+        // Wave-7 B003（同步入口同构）：**turn 启动前**的用量治理判定（一次性、fail-open）。
+        // 与流式入口同一策略与同一决策入口，避免「只挡流式 ⇒ 可绕过」。
+        {
+            let governance = {
+                let store = self.sessions.read().unwrap_or_else(|error| {
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+                    error.into_inner()
+                });
+                crate::agent::usage_governance::evaluate_with_store(
+                    &store,
+                    input.session_id.as_deref(),
+                )
+            };
+            if let crate::agent::usage_governance::Decision::Block {
+                reason, current, limit, ..
+            } = &governance.decision
+            {
+                // L3 B3：同步入口同样把治理阻断标记为「预期内失败」（不产生 issue）。
+                crate::agent::ponysentry::mark_turn_failure_expected(&sync_turn_id);
+                let error = format!(
+                    "用量治理已阻断本轮：当前已用 ${current:.6}，上限 ${limit:.6}（触发 {reason}）。\
+                     如需继续，请提高上限或关闭「强制拦截」——设置 → 用量治理 → 关闭 enforcement（一键出口）。"
+                );
+                otel_turn_scope.set_phase("failed");
+                return build_failed_turn_result(
+                    None,
+                    String::new(),
+                    error,
+                    self.telemetry_builder.failed_trace_empty_input(),
+                    Vec::new(),
+                );
+            }
+        }
+
         let prepared = match self.prepare_turn(&input, false, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
+                otel_turn_scope.set_phase("failed");
                 return build_failed_turn_result(
                     None,
                     String::new(),
@@ -510,6 +577,7 @@ impl AgentRuntime {
                 error,
             );
             self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            otel_turn_scope.set_phase("failed");
             return result;
         }
 
@@ -535,6 +603,7 @@ impl AgentRuntime {
                     error,
                 );
                 self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+                otel_turn_scope.set_phase("failed");
                 return result;
             }
         };
@@ -590,6 +659,7 @@ impl AgentRuntime {
                 error,
             );
             self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            otel_turn_scope.set_phase("failed");
             return result;
         }
         let mut planning_hook_trace_records = initial_model_hook_trace_records.clone();
@@ -653,6 +723,12 @@ impl AgentRuntime {
                         failed_result.session_summary.clone(),
                     );
                     self.apply_terminal_envelope_to_turn_result(&mut failed_result, &envelope);
+                    // Ask 等暂停态不是终态：相位留空（不输出该键），恢复后由其自身出口定相位。
+                    if failed_result.phase == SUSPENDED_TURN_PHASE {
+                        otel_turn_scope.set_phase("");
+                    } else {
+                        otel_turn_scope.set_phase("failed");
+                    }
                     return failed_result;
                 }
             }
@@ -724,6 +800,7 @@ impl AgentRuntime {
                     hook_trace_records,
                 );
                 self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+                otel_turn_scope.set_phase("failed");
                 return result;
             }
         };
@@ -786,6 +863,7 @@ impl AgentRuntime {
                 error,
             );
             self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            otel_turn_scope.set_phase("failed");
             return result;
         }
         let finalize_hook_outcome =
@@ -835,6 +913,7 @@ impl AgentRuntime {
                 error,
             );
             self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            otel_turn_scope.set_phase("failed");
             return result;
         }
         // PA-095：trace turn_id 与事件 turn_id 同源（sync_turn_id），保证事件流
@@ -963,6 +1042,7 @@ impl AgentRuntime {
             session_summary: persisted.session_summary,
         };
         self.apply_terminal_envelope_to_turn_result(&mut result, &terminal_envelope);
+        otel_turn_scope.set_phase("completed");
         result
     }
 

@@ -3231,14 +3231,13 @@ impl ToolRouter {
             TOOL_WEB_SEARCH_QUERY,
             timeout_ms.max(WEB_FETCH_TOTAL_DEADLINE_MS),
             |_deadline| {
-                block_on(
-                    client
-                        .post("https://api.exa.ai/search")
-                        .header("x-api-key", &api_key)
-                        .header("Content-Type", "application/json")
-                        .body(body.to_string())
-                        .send(),
-                )
+                let request = client
+                    .post("https://api.exa.ai/search")
+                    .header("x-api-key", &api_key)
+                    .header("Content-Type", "application/json");
+                // Wave-4 C3：工具出网在活跃 turn 内级联 traceparent（无活跃 turn 时零改动）。
+                let request = crate::agent::otel::with_current_traceparent(request);
+                block_on(request.body(body.to_string()).send())
                 .map_err(|error| {
                     if is_reqwest_timeout_error(&error) {
                         format!("timeout: Exa 搜索请求超时：{}。", error)
@@ -3366,12 +3365,28 @@ impl ToolRouter {
             return result;
         };
         let ws_id = self.extract_call_workspace_id(call, context);
-        let Ok(workspace_root) = self.resolved_workspace_root(context, ws_id) else {
+        let Ok(raw_root) = self.resolved_workspace_root(context, ws_id) else {
             return result;
         };
-        let Ok(touched_path) = self.resolve_workspace_path(raw_path, context, ws_id) else {
+        let Ok(raw_touched) = self.resolve_workspace_path(raw_path, context, ws_id) else {
             return result;
         };
+        // 两侧统一到「canonical + 无 verbatim 前缀」形态，再交给 `instructions_for_touched_path`
+        // 的组件级前缀闸门（`instruction_touch.rs`：`lexical_touched.starts_with(lexical_root)`）。
+        //
+        // 不归一会在 Windows 上造成两层错配（缺一层都不够）：
+        //   1) 前缀：`resolved_workspace_root` 来自会话注册（`workspace::normalize_workspace_root`
+        //      已 canonicalize 并**剥掉** `\\?\`，plain 形态），而 `resolve_workspace_path` 返回
+        //      `canonicalize()` 的**原始**结果（verbatim `\\?\C:\...`）——`Prefix(VerbatimDisk)`
+        //      与 `Prefix(Disk)` 不是同一组件；
+        //   2) 短名：Windows 的 `%TEMP%` 常是 8.3 短名（`C:\Users\RUNNER~1\...`），
+        //      `canonicalize()` 会展开成长名（`C:\Users\runneradmin\...`），root 不 canonicalize
+        //      就仍不等。
+        // 故 root 先 canonicalize（解析短名/符号链接），再统一剥前缀；两侧都过同一归一函数。
+        // Linux 上：root 通常已是 canonical（幂等），且无 `\\?\` 前缀 ⇒ 归一恒等，行为零变化。
+        let canonical_root = raw_root.canonicalize().unwrap_or(raw_root);
+        let workspace_root = normalize_if_verbatim(&canonical_root);
+        let touched_path = normalize_if_verbatim(&raw_touched);
         // L3-B F7：无会话时由分桶函数按 workspace root 分桶（空串 = 无 session 上下文）。
         let session_id = context.session_id.as_deref().map(str::trim).unwrap_or("");
         let prelude = take_touched_instruction_prelude(&workspace_root, &touched_path, session_id);
@@ -5032,7 +5047,14 @@ impl ToolRouter {
             }
         };
 
-        if !is_within_root(&root, &canonical) {
+        // 同一 Windows 前缀问题（安全面，但与既有意图一致）：`root` 来自
+        // `canonical_resolved_root`（已归一为 plain），而 `canonical` 是 `canonicalize()` 的原始
+        // 输出（Windows 带 `\\?\`）。不归一的话工作区内路径会被误判为越界，白白落到下面的
+        // 授权分支（`classify_workspace_path` 内部会再归一，所以历史上"看起来还能放行"，
+        // 但语义上不该走到这里）。两侧统一形态后再判定；Linux 无前缀 ⇒ 恒等。
+        let root_for_within = normalize_if_verbatim(&root);
+        let canonical_for_within = normalize_if_verbatim(&canonical);
+        if !is_within_root(&root_for_within, &canonical_for_within) {
             // PA-080：workspace 外读 → 授权清单命中放行（classify_path(Read) 判定），
             // 未命中返回 `requires_authorization` 结构化错误。
             let display = canonical.display().to_string();
@@ -5047,7 +5069,14 @@ impl ToolRouter {
                 });
         }
 
-        Ok(canonical)
+        // **返回形态必须与改动前一致（plain 归一形态）**：改动前这类"工作区内路径"走的是上方
+        // `classify_workspace_path` 分支，返回的是 `permission.canonical`（已归一为 plain）。
+        // 若这里直接返回 `canonicalize()` 的原始 verbatim 形态，下游的相对化
+        // （`display_resolved_workspace_relative` 的 `path.strip_prefix(plain_root)`）会失配，
+        // 退化成绝对路径、再经 `replace('\\', "/")` 变成 `//?/C:/...` —— Windows 上
+        // `search_text` 的路径契约（workspace 相对）就是这样被打破的。
+        // 结论：**边界判定用归一形态（保留 Windows 修复），返回值用归一形态（保持对外语义）**。
+        Ok(normalize_if_verbatim(&canonical))
     }
 
     fn canonical_resolved_root(
@@ -5082,6 +5111,11 @@ impl ToolRouter {
         let root = self
             .canonical_resolved_root(context, ws_id)
             .unwrap_or_else(|_| self.canonical_workspace_root());
+        // 兜底：调用方若传入 verbatim 形态（Windows `\\\\?\\C:\\...`），先归一为 plain 再相对化，
+        // 否则 `strip_prefix(plain_root)` 必然失配 → 输出绝对路径且前缀被转成 `//?/` 的怪形态。
+        // Linux 无前缀 ⇒ 归一返回入参的 owned 副本（形态不变），行为零变化。
+        let normalized_path = normalize_if_verbatim(path);
+        let path = normalized_path.as_path();
         path.strip_prefix(&root)
             .ok()
             .map(|value| {
@@ -7353,6 +7387,33 @@ fn is_within_root(root: &Path, path: &Path) -> bool {
     path.starts_with(root)
 }
 
+/// 把「Windows verbatim 前缀形态」的路径归一为 plain 形态；**无前缀时原样返回（恒等）**。
+///
+/// 为什么要收口成一个函数：`Path::starts_with` 是**逐组件**比较，
+/// Windows 上 `\\?\C:\a` 的首组件是 `Prefix(VerbatimDisk("C"))`，而 `C:\a` 是
+/// `Prefix(Disk("C"))` —— 两者不相等，于是「canonicalize 出来的 verbatim 路径」与
+/// 「会话里已归一（`workspace::normalize_workspace_root` 剥掉 `\\?\`）的 plain root」做
+/// 前缀判定会**恒为假**。触达指令注入（`with_touched_instructions`）正是栽在这里：
+/// 整段附加指令在 Windows 上静默消失且无任何报错。
+///
+/// 归一实现复用已存在的 [`crate::agent::path_permission::normalize_canonical`]（同一套
+/// `\\?\` / `\\?\UNC\` 剥离规则），不新增第二套规则。这里只加了一个**前缀守卫**：
+/// 仅当路径字节以 `\\?\` 起时才调用归一（生产侧两个调用点传入的都是绝对路径：Linux 绝对
+/// 路径必以 `/` 起，永不命中），其余情况直接返回 `PathBuf`。
+/// 这样：
+/// 1. Linux/macOS 上绝对路径必以 `/` 起，**永远不会**命中该前缀分支 ⇒ 恒等 ⇒ 行为零变化；
+/// 2. 避免对非 UTF-8 路径走 `display()` 造成有损转换（`normalize_canonical` 内部用
+///    `display().to_string()`，只在 Windows verbatim 场景才需要）；
+/// 3. 判定只看字节前缀、**不调宿主 `Path::is_absolute()`**，因此 Windows 规则可以在 Linux 上
+///    被镜像单测（与 `tui_dialog_wave39.rs` 的 `PathForms` 同一教训：宿主相关的判据没法跨平台验证）。
+fn normalize_if_verbatim(path: &Path) -> PathBuf {
+    if path.as_os_str().as_encoded_bytes().starts_with(b"\\\\?\\") {
+        crate::agent::path_permission::normalize_canonical(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// 词法逃逸判定（Windows B 类修复）：canonicalize 失败时（如相对路径 `..` 越过卷根或
 /// 逃逸目标不存在），Windows 上无法像 Linux 那样解析出 canonical 再做 `is_within_root`，
 /// 导致逃逸判定分支不可达、误落 `invalid_path`。这里在 IO 失败分支用词法折叠兜底：
@@ -7883,7 +7944,9 @@ impl PinnedSender for ReqwestPinnedSender {
         let hostname = parsed.host_str().unwrap_or("").to_string();
         let client = build_pinned_web_client(decision, &hostname, timeout_ms)
             .map_err(WebFetchTransportError::ClientBuild)?;
-        let response = block_on(client.get(parsed).send()).map_err(|error| {
+        // Wave-4 C3：工具出网在活跃 turn 内级联 traceparent（无活跃 turn 时零改动）。
+        let request = crate::agent::otel::with_current_traceparent(client.get(parsed));
+        let response = block_on(request.send()).map_err(|error| {
             if is_reqwest_timeout_error(&error) {
                 WebFetchTransportError::Request(format!("timeout: 抓取 URL 超时：{}。", error))
             } else {
@@ -13480,5 +13543,47 @@ mod tests {
         assert_eq!(update_payload["result"]["in_progress_count"], 1);
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// Windows verbatim 前缀归一：**纯字符串逻辑**，因此可在 Linux 上镜像验证；
+    /// 同时锁定「无前缀 ⇒ 恒等（Linux 行为零变化）」。
+    #[test]
+    fn normalize_if_verbatim_is_identity_without_ws_prefix_and_strips_it_with() {
+        // 1) 无前缀：恒等（Linux/macOS 上 canonicalize 永不产生 verbatim 前缀 ⇒ 零变化）。
+        for plain in ["/tmp/a/b", "/Users/x/AGENTS.md", "C:\\Users\\x\\AGENTS.md"] {
+            let path = Path::new(plain);
+            assert_eq!(
+                normalize_if_verbatim(path),
+                path.to_path_buf(),
+                "无 `\\\\?\\` 前缀的路径必须原样返回（不得走 display() 归一）: {plain}"
+            );
+        }
+        // 2) 归一判定只按字节前缀（不调宿主 is_absolute）：`\\?\\` 起即按 verbatim 处理。
+        //    生产侧两处调用点传入的都是绝对路径（root / canonicalize 结果），Linux 绝对路径必以
+        //    `/` 起，故该分支在 Linux 上不可达 ⇒ 行为零变化。
+        assert_eq!(
+            normalize_if_verbatim(Path::new("\\\\?\\odd-name")),
+            PathBuf::from("odd-name")
+        );
+        // 3) Windows verbatim 形态（纯字符串可判定，故 Linux 上也能断言）：
+        assert_eq!(
+            normalize_if_verbatim(Path::new("\\\\?\\C:\\ws\\AGENTS.md")),
+            PathBuf::from("C:\\ws\\AGENTS.md"),
+            "`\\\\?\\C:\\...` 必须剥成 `C:\\...`（否则 Prefix(VerbatimDisk) ≠ Prefix(Disk)）"
+        );
+        assert_eq!(
+            normalize_if_verbatim(Path::new("\\\\?\\UNC\\server\\share\\x")),
+            PathBuf::from("\\\\server\\share\\x"),
+            "`\\\\?\\UNC\\...` 必须剥成 `\\\\server\\share\\...`"
+        );
+        // 4) 契约级检查（纯字符串可判定）：归一后的形态必须与 plain root **字面同形**，
+        //    Windows 上 `Path::strip_prefix(plain_root)` 才能成功 → 搜索结果才会是
+        //    `src/lib.rs` 这类 workspace 相对路径，而不是 `//?/C:/...` 绝对怪形态。
+        let plain_root = r"C:\ws";
+        let normalized = normalize_if_verbatim(Path::new(r"\\?\C:\ws\src\lib.rs"));
+        assert!(
+            normalized.to_string_lossy().starts_with(plain_root),
+            "归一结果必须与 plain root 字面同形（否则 Windows 上 strip_prefix 失配）: {normalized:?}"
+        );
     }
 }

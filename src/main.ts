@@ -3,7 +3,8 @@ import { createApp } from "vue";
 import { MotionPlugin } from "motion-v";
 import App from "./App.vue";
 import "./styles.css";
-import { reportError, addBreadcrumb } from "./lib/telemetry";
+import { reportError, addBreadcrumb, isNetworkNoise } from "./lib/telemetry";
+import { useRuntimeStore } from "@/stores/runtime";
 
 const mountCount = Number(window.sessionStorage.getItem("pony-agent.mount-count") || "0") + 1;
 window.sessionStorage.setItem("pony-agent.mount-count", String(mountCount));
@@ -20,14 +21,29 @@ addBreadcrumb("app", "App boot start", {
 
 const app = createApp(App);
 
+const pinia = createPinia();
+app.use(pinia);
+app.use(MotionPlugin);
+
+function getActiveTraceId(): string | undefined {
+  try {
+    return useRuntimeStore().activeTraceId;
+  } catch {
+    return undefined;
+  }
+}
+
 // 全局 Vue 组件渲染及生命周期错误捕获 (PonySentry A1)
 app.config.errorHandler = (err: unknown, instance, info: string) => {
   console.error("[pony-agent][vue-error]", err, info);
   const errorObj = err instanceof Error ? err : new Error(String(err));
+  const message = errorObj.message || String(err);
+  if (isNetworkNoise(message)) return;
   reportError({
     errorType: errorObj.name || "VueComponentError",
-    message: errorObj.message || String(err),
+    message,
     stack: errorObj.stack,
+    trace_id: getActiveTraceId(),
     extra: {
       lifecycleHook: info,
       componentTag: instance?.$options?.name || "AnonymousComponent",
@@ -44,10 +60,13 @@ if (typeof window !== "undefined") {
     console.error("[pony-agent][unhandled-rejection]", event.reason);
     const reason = event.reason;
     const errorObj = reason instanceof Error ? reason : new Error(String(reason));
+    const message = errorObj.message || String(reason);
+    if (isNetworkNoise(message)) return;
     reportError({
       errorType: errorObj.name || "UnhandledRejection",
-      message: errorObj.message || String(reason),
+      message,
       stack: errorObj.stack,
+      trace_id: getActiveTraceId(),
       extra: {
         reasonString: String(reason),
       },
@@ -61,13 +80,16 @@ if (typeof window !== "undefined") {
   window.addEventListener("error", (event) => {
     // 忽略加载资源失败引发的无 error 对象的事件
     if (!event.error && !event.message) return;
-    console.error("[pony-agent][window-error]", event.error || event.message);
     const errorObj =
       event.error instanceof Error ? event.error : new Error(String(event.message));
+    const message = errorObj.message || event.message || "Unknown window error";
+    if (isNetworkNoise(message, event.filename)) return;
+    console.error("[pony-agent][window-error]", event.error || event.message);
     reportError({
       errorType: errorObj.name || "WindowRuntimeError",
-      message: errorObj.message || event.message || "Unknown window error",
+      message,
       stack: errorObj.stack,
+      trace_id: getActiveTraceId(),
       extra: {
         filename: event.filename,
         lineno: event.lineno,
@@ -80,9 +102,6 @@ if (typeof window !== "undefined") {
   });
 }
 
-const pinia = createPinia();
-app.use(pinia);
-app.use(MotionPlugin);
 app.mount("#app");
 
 // 优雅淡出 index.html 预加载启动屏（保留 3s 品牌展示，结束后立即解绑事件拦截防遮挡）

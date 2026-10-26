@@ -493,6 +493,13 @@ pub fn emit_stream_failed(
     error: String,
     session_id: Option<String>,
 ) -> TurnEventEnvelope {
+    // Wave-5 P0：CLI/TUI 形态的 turn 失败上报（开关默认关；桌面端由前端 `TurnExecutionFailed`
+    // 上报，故用进程级开关隔离，避免重复）。旁路上报：内部吞错，绝不改变轮次返回。
+    crate::agent::ponysentry::capture_turn_failure(
+        &turn_id,
+        &error,
+        provider_meta.map(|meta| meta.model.as_str()),
+    );
     emit_event(
         sink,
         "turn:failed",
@@ -500,6 +507,10 @@ pub fn emit_stream_failed(
             event_id: None,
             session_id,
             turn_id,
+            // Wave-4.1 B1：导出态 trace_id（门禁关闭/未采样 ⇒ None，绝不回落本地 id）。
+            trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+            cost_usd: None,
             kind: "failed".to_string(),
             event_type: None,
             event_version: None,
@@ -557,6 +568,10 @@ pub fn emit_stream_cancelled(
             event_id: None,
             session_id,
             turn_id,
+            // Wave-4.1 B1：导出态 trace_id（门禁关闭/未采样 ⇒ None，绝不回落本地 id）。
+            trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+            cost_usd: None,
             kind: "cancelled".to_string(),
             event_type: None,
             event_version: None,
@@ -685,6 +700,33 @@ pub fn emit_stream_event_with_step(
     step: Option<u32>,
 ) -> TurnEventEnvelope {
     let is_delta_event = name == "turn:delta";
+    // Wave-5 K3：单轮成本超预算 ⇒ 一条 warn 日志（软告警，**绝不**阻断请求；
+    // 会话级累计与 UI 告警由前端 store 负责，core 不建第二份会话状态）。
+    // 只在终态事件上判定，避免同一轮多事件重复告警。
+    if name == "turn:completed" {
+        let cost_usd = turn_event_cost_usd(
+            provider_meta,
+            input_tokens,
+            output_tokens,
+            cache_hit_input_tokens,
+        );
+        if let Some(cost) = cost_usd {
+            let budget = crate::agent::cost::budget_usd();
+            if crate::agent::cost::is_budget_exceeded(cost, budget) {
+                // Wave-6 K6：数值走**结构化字段**（number 类型），message 保持干净常量描述。
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "turn cost reached or exceeded budget threshold",
+                    None,
+                    &[
+                        ("turn_id", serde_json::json!(turn_id)),
+                        ("turn_cost_usd", serde_json::json!(cost)),
+                        ("budget_usd", serde_json::json!(budget.unwrap_or(0.0))),
+                    ],
+                );
+            }
+        }
+    }
     emit_event(
         sink,
         name,
@@ -692,6 +734,15 @@ pub fn emit_stream_event_with_step(
             event_id: None,
             session_id,
             turn_id,
+            // Wave-4.1 B1：所有活链路事件都携带导出态 trace_id（门禁关闭 ⇒ None）。
+            trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：本轮成本（未知模型 / 缺 usage ⇒ None，键缺席）。
+            cost_usd: turn_event_cost_usd(
+                provider_meta,
+                input_tokens,
+                output_tokens,
+                cache_hit_input_tokens,
+            ),
             kind: kind.to_string(),
             event_type: None,
             event_version: None,
@@ -974,6 +1025,8 @@ pub fn emit_event(
     ) {
         clear_turn_event_sequence(&terminal_turn_id);
     }
+    // D6 迁移：PonySentry 自动 trace 上报已下线；agent trace 由 OTel span 承担
+    // （门禁关闭时零 span 分配、零 egress，见 `agent::otel`）。
     // PA-095：返回本次发射的信封（调用方可复用为 TurnResult 终态信封，
     // 避免二次分配序列号造成事件流与结果信封错位）。
     TurnEventEnvelope {
@@ -1473,6 +1526,8 @@ mod tests {
             event_id: None,
             session_id: Some("s1".to_string()),
             turn_id: turn_id.to_string(),
+            trace_id: None,
+            cost_usd: None,
             kind: kind.to_string(),
             event_type: None,
             event_version: None,
@@ -2248,25 +2303,154 @@ pub fn preview_text(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn calculate_call_generation_speed(
+    output_tokens: Option<u64>,
+    elapsed_ms: u64,
+    ttft_ms: Option<u64>,
+) -> Option<f64> {
+    let output = output_tokens?;
+    if output == 0 || elapsed_ms == 0 {
+        return None;
+    }
+
+    let mut generation_ms = elapsed_ms;
+    if let Some(ttft) = ttft_ms {
+        if elapsed_ms > ttft {
+            generation_ms = elapsed_ms - ttft;
+        }
+    }
+
+    if generation_ms == 0 {
+        return None;
+    }
+
+    let speed = (output as f64) / ((generation_ms as f64) / 1000.0);
+    if speed.is_finite() && speed > 0.0 {
+        Some(speed)
+    } else {
+        None
+    }
+}
+
+/// Wave-5 K4：把单次调用成本写入 `llm.chat` span。
+///
+/// 门禁关闭（[`crate::agent::otel::is_span_capture_enabled`] = false）时**零计算短路**：
+/// 不查价格表、不做浮点运算、不附加属性（契约 K4 边界）。
+fn record_llm_span_cost(
+    llm_span: &mut crate::agent::otel::LlmSpanGuard,
+    model: &str,
+    protocol_label: &str,
+    usage: &TokenUsage,
+) {
+    if !crate::agent::otel::is_span_capture_enabled() {
+        return;
+    }
+    // Wave-6 K1.1：按**协议语义**归一未缓存输入（Anthropic 的 input 不含 cache，不能相减）。
+    let protocol = crate::agent::cost::ProviderCostProtocol::from_label(protocol_label);
+    let cost = crate::agent::cost::estimate_cost_with_protocol(
+        model,
+        usage.input_tokens.unwrap_or(0),
+        usage.output_tokens.unwrap_or(0),
+        usage.cache_hit_input_tokens,
+        protocol,
+    )
+    .map(|estimate| estimate.total_cost_usd);
+    llm_span.record_cost(cost);
+}
+
+/// Wave-5 K2：turn 事件成本（未知模型或缺真实 usage ⇒ `None`）。
+fn turn_event_cost_usd(
+    provider_meta: Option<&ProviderEventMeta>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+) -> Option<f64> {
+    let meta = provider_meta?;
+    let model = meta.model.as_str();
+    let input = input_tokens?;
+    let output = output_tokens?;
+    // Wave-6 K1.1：协议语义归一（Anthropic input 不含 cache；未知协议保守按 OpenAI）。
+    let protocol = crate::agent::cost::ProviderCostProtocol::from_label(meta.protocol.as_str());
+    crate::agent::cost::estimate_cost_with_protocol(
+        model,
+        input,
+        output,
+        cache_hit_input_tokens,
+        protocol,
+    )
+    .map(|estimate| estimate.total_cost_usd)
+}
+
 pub fn provider_decision<P: ProviderClient>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
 ) -> Result<ProviderDecision, String> {
-    provider.decide_with_tools(request, tools)
+    // Wave43：llm.chat 子 span（父 = 当前活动 turn）；token 用量取响应侧。
+    let mut llm_span = crate::agent::otel::start_llm_span(
+        provider.name(),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let start = std::time::Instant::now();
+    let result = provider.decide_with_tools(request, tools);
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if let Ok(decision) = result.as_ref() {
+        if let Some(usage) = decision.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            llm_span.record_speed_and_context(speed, None);
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
 }
 
 pub fn provider_decision_stream<P, F>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
-    on_delta: F,
+    mut on_delta: F,
 ) -> Result<ProviderDecision, String>
 where
     P: ProviderClient,
     F: FnMut(ProviderStreamChunk),
 {
-    provider.decide_with_tools_stream(request, tools, on_delta)
+    // Wave43：llm.chat 子 span（流式决策）。
+    let mut llm_span = crate::agent::otel::start_llm_span(
+        provider.name(),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let start = std::time::Instant::now();
+    let mut first_token_time: Option<std::time::Instant> = None;
+    let result = provider.decide_with_tools_stream(request, tools, |chunk| {
+        if first_token_time.is_none() {
+            first_token_time = Some(std::time::Instant::now());
+        }
+        on_delta(chunk);
+    });
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let ttft_ms = first_token_time.map(|t| t.duration_since(start).as_millis() as u64);
+    if let Ok(decision) = result.as_ref() {
+        if let Some(usage) = decision.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
+            llm_span.record_speed_and_context(speed, None);
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
 }
 
 pub fn provider_followup<P: ProviderClient>(
@@ -2278,14 +2462,36 @@ pub fn provider_followup<P: ProviderClient>(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Result<crate::agent::provider::ProviderResponse, String> {
-    provider.continue_with_tool_result(
+    // Wave43：llm.chat 子 span（工具结果后续轮）。
+    let mut llm_span = crate::agent::otel::start_llm_span(
+        provider.name(),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let start = std::time::Instant::now();
+    let result = provider.continue_with_tool_result(
         request,
         tools,
         accumulated_messages,
         assistant_message,
         tool_call,
         tool_result,
-    )
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            llm_span.record_speed_and_context(speed, None);
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
 }
 
 pub fn provider_followup_stream<P, F>(
@@ -2296,19 +2502,48 @@ pub fn provider_followup_stream<P, F>(
     assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
-    on_delta: F,
+    mut on_delta: F,
 ) -> Result<crate::agent::provider::ProviderResponse, String>
 where
     P: ProviderClient,
     F: FnMut(ProviderStreamChunk),
 {
-    provider.continue_with_tool_result_stream(
+    // Wave43：llm.chat 子 span（流式工具结果后续轮）。
+    let mut llm_span = crate::agent::otel::start_llm_span(
+        provider.name(),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let start = std::time::Instant::now();
+    let mut first_token_time: Option<std::time::Instant> = None;
+    let result = provider.continue_with_tool_result_stream(
         request,
         tools,
         accumulated_messages,
         assistant_message,
         tool_call,
         tool_result,
-        on_delta,
-    )
+        |chunk| {
+            if first_token_time.is_none() {
+                first_token_time = Some(std::time::Instant::now());
+            }
+            on_delta(chunk);
+        },
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let ttft_ms = first_token_time.map(|t| t.duration_since(start).as_millis() as u64);
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
+            llm_span.record_speed_and_context(speed, None);
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
 }

@@ -42,3 +42,5 @@
 - **版本同步校验**：`npm run version:check`
 - **前端测试**：`npm test`
 - **Rust 编译检查**：`npm run cargo:check:shared`
+- **可观测性归属先决**：新增/修改对外接口、网络 IO、后台任务、LLM 调用或 UI 交互前，先更新 `docs/observability.yaml` 的四维归属（适用 / N-A + 结构性理由）与收口点；验收跑
+  `~/.agents/skills/observability-onboarding/scripts/audit-diff.sh` 与 `check-declaration.sh`（判定口径见该 skill 的 `references/declaration-rubric.md`）。N-A 必须写结构性理由，不得为让门禁变绿而伪造 `/metrics` 或改 `applicable`。

@@ -1,0 +1,41 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "src/stores/runtime.ts",
+    "src/lib/telemetry.ts",
+    "src/main.ts",
+    "src/types/runtime.ts"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4025,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "awk 'NR>=3458 && NR<=4600 && /traceId|trace_id/' src/stores/runtime.ts   # 仅 4025(turn:completed 写) 与 4421(trace_id: this.activeTraceId 读)；turn:started(3458)/turn:delta(3525)/turn:trace(3594)/turn:tool(3714)/turn:failed(4226)/turn:cancelled(4442) 均未写 payload.traceId",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "src/types/runtime.ts",
+      "line": 1086,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n 1086,1120p src/types/runtime.ts | grep -c 'traceId'   # 输出 0：TS TurnStreamEvent 无 traceId 字段，Rust camelCase 契约在类型层无约束（故 4025 只能用 (payload as any).traceId 强转）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 540,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'latestTurn?.traceId' src/stores/runtime.ts   # activeTraceId 在 activeTurnId 无记录时回落上一条已 completed 轮次的 traceId → 新轮 live 期错误可能被归到上一轮 trace（跨轮误归因）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/wave-4-observability.spec.ts",
+      "line": 29,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'activeTraceId\\|turn:started\\|turn:failed' tests/wave-4-observability.spec.ts   # Exit 1：前端门禁仅断言 buildIngestPayload 契约，无一条 live 链路(store 写→activeTraceId 读→reportError)端到端断言，故 B1 未闭环时门禁仍全绿",
+      "severity": "ADVISORY"
+    }
+  ]
+}

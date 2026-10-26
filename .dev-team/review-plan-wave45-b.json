@@ -1,0 +1,76 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave45.md",
+    ".dev-team/nfr-baseline-wave45.json",
+    "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+    "tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "src/stores/runtime.ts"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1222,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cargo test -p pony-agent-core pa154_combo_phase_failed -- # 新增用例：set_phase(\"failed\") + record_tool_call_span(status=\"failed\") 后断言根 status.message 以 \"failed\" 开头 ⇒ 若聚合在 phase 块之后写则被降级为 \"tool_failed\"，既有按 failed 文案告警的规则静默失联（契约 §2 只冻结了「无子错」与「双错取先记录者」，未定义 phase=failed+子错的组合前缀）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2639,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "npx vitest run tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts -t 'PA155-T1' # 在 T1 的 3_600ms 处插入 expect(store.sessionOperation).toBe('initializing') ⇒ 实际为 null：watchdog(3500) 已释放 init 锁而 withTimeout 仍在 15000 内等待，重入 initializeSessions() 会二次进宿主读（hostReadCalls=2），先发起的 init 在 15s 时把缓存态写回用户已切走的会话",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts",
+      "line": 352,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "git stash push -- src/stores/runtime.ts && npx vitest run tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts -t 'PA155-T1' # Assert 5（sessionOperation===null）在修复前也成立（watchdog 3500ms 置 null），属恒真锚，无法证明「不永久 pending」；唯一有效锚是 Assert 1 的 settled/resolved，故该断言不得作为红相证据",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "line": 315,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "PONY_OTEL_SERVICE_VERSION=9.9.9 cargo test -p pony-agent-core --test otel_resource_turn_status_test pa153_t1_resource_carries_name_version_and_environment # 环境里存在该 env 时 Assert 3 必红（wire 含 9.9.9 不含 CARGO_PKG_VERSION）；文件头宣称「确定性」但未 scrub PONY_OTEL_SERVICE_VERSION / PONY_OTEL_ENVIRONMENT，与 T2 的进程隔离策略不一致",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-wave45.md",
+      "line": 88,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'PA153-T2' crates/pony-agent-core/tests/otel_resource_turn_status_test.rs # 冻结文件把 T2 迁到 tests/otel_resource_env_test.rs 并注明「Lead 裁决」，但矩阵 §6 仍只列单一冻结文件、§6 覆盖差异仍称缺 governance block（实际 PA154-T2 已落）；断言注册表与被审制品不一致，后续改动 env 测试不再受冻结清单约束",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 420,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n '仅 OTel 相关四项' -A 4 crates/pony-agent-core/src/agent/otel/mod.rs # 新增 PONY_OTEL_SERVICE_VERSION / PONY_OTEL_ENVIRONMENT 两个读取点后「env 白名单仅四项」不变量与 docs/observability.yaml:39-40『配置解析收敛为 otel::resolve_config（settings>env>default）』同时失真；空白串必须复用 env_non_empty 才能满足 NFR blank_env_treated_as_unset，矩阵 §1 未点名该复用",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1684,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test otel_resource_turn_status_test pa154 -- --test-threads=1 # 冻结用例的 begin/record 全在同一测试线程，无法区分「聚合挂在 ActiveTurn」与「聚合落在新 thread_local」：后者在 record 与 Drop 跨 worker 线程时既漏归因又把残留串到同线程的下一个 turn；缺两个负向用例——跨线程 record、以及 A(tool_failed)→Drop→B(全成功) 的连续两 turn 污染检查",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2680,
+      "rule": "LEAK",
+      "counterexample_cmd": "grep -n 'measureHostRead' -A 12 src/stores/runtime.ts # withTimeout 超时后底层 safeInvoke promise 与 withTimeout 的两个 .then 闭包在 IPC 永不返回时永久驻留（每次 init 一份，无 abort 通道）；NFR resource_release 只覆盖『timer 结算即清』，未覆盖被弃 promise 的闭包驻留",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2688,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "npx vitest run tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts # 把 seedLocalCache 的 phase 改为 'calling_tool' 并断言 phase!=='calling_tool' ⇒ 会红：host=null 时缓存检查点经 loadSessionState:1434 applyExecutionCheckpoint 落成「幻影运行中」，无宿主真相可纠正且取消按钮指向不存在的 turn；T1 只断言 phase!=='idle'，掩盖了过期 phase 的降级规则缺失",
+      "severity": "ADVISORY"
+    }
+  ]
+}

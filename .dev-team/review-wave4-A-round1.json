@@ -1,0 +1,70 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    "crates/pony-agent-core/src/agent/app_settings.rs",
+    "src-tauri/src/lib.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/model_catalog.rs",
+    "crates/pony-agent-core/src/agent/tools.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1028,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "./target/debug/deps/wave4_observability_chain_test-cdd829dce1427ac1 c3_current_traceparent_contract_active_and_idle --nocapture  # 实测 exit=0（test result: ok）。该二进制从未调用 set_reporting_enabled(true)（grep -c 结果 0），即门禁 CLOSED 且该 turn 零 span 分配（begin_turn_trace 在 998 判定 spans_allowed()=false，直接落到 1028 降级通路 local_span_context()），但测试仍断言 current_traceparent() 为 Some(\"00-<32hex>-<16hex>-01\")；同条件 c4_log_json_trace_id_bound_to_active_turn 断言 current_trace_id() 为 Some。复现 C2 违约链：同一随机 trace_id 经 ponysentry/client.rs:141/198（capture_error/capture_panic）与 291（normalize_payload 回填）写入 issue.trace_id，而门禁关闭 = 零导出（mod.rs:1311 spans_allowed → GatedSampler::Drop），因此 Tempo/Langfuse 永远查不到该 trace。冻结契约 .dev-team/contracts/wave-4-observability.md C2 拒绝条件#2「在无活跃 trace 上下文时人为注入非 null 的假 trace_id」与 C2 验收判据#2「依据该 trace_id 可在 Tempo/Langfuse 检索到同 ID 的完整链路 span」被直接击中：默认配置（settings.agentTraceReporting 缺省 false，app_settings.rs:66-69）下**每一条** issue 都带一个不可检索的 trace_id，比改前的 null 更误导（前端会把 null 当「无链路」，非 null 则当成可跳转）。附带副作用：降级上下文用 Context::new().with_remote_span_context()（mod.rs:1476）把**本地**上下文标成 remote 且 SAMPLED，GatedSampler::should_sample 的 ParentBased 分支（mod.rs:1534-1542）无条件放大采样 —— turn 起始门禁关闭、turn 中途用户打开上报开关（save_app_settings 即时生效）时，后续 llm.chat/tool.call 子 span 会以这个从无 root 的伪造 trace_id 真实出网，在 Langfuse 侧生成孤儿 trace。需二选一：把降级上下文改为仅在「issue/trace 将被导出」时登记（门禁关闭返回 None，日志 trace_id 写 null），或修订 C2/C3 契约 + 补 ADR 承认「进程内本地 trace_id」并同步修正 C2 验收判据。",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1434,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '1399,1470p' crates/pony-agent-core/src/agent/otel/mod.rs  # ACTIVE_TURNS 是 HashMap<task::Id,(turn_id,SpanContext)> 的**单槽**登记：1434 `guard.insert(task_id, ...)` 直接覆盖同 task 的既有登记且不保存前值；1459 `guard.remove(&task_id)` **完全不校验 map 里存的 turn_id 是否属于自己**（存了 turn_id 却从不比较）。最小反例（同一 tokio task 内嵌套两个 turn，即两个守卫生命周期重叠）：#[tokio::test] async fn nested(){ let outer=otel::begin_turn_trace(\"s\",\"outer\",0); let before=otel::current_traceparent(); { let _inner=otel::begin_turn_trace(\"s\",\"inner\",0); } assert_eq!(otel::current_traceparent(), before); } —— 断言失败：inner 的 Drop 把整个键摘掉，outer 剩余生命周期内 current_trace_id()/current_traceparent() 静默变 None（日志 trace_id 回退 null、出网 traceparent 消失），而 outer 自己的 Drop 再摘一次是 no-op。本次改动的实质风险是把该缺陷从「仅门禁开启」扩大到**默认路径**（门禁关闭时每 turn 都登记降级上下文），且降级上下文与真实 span 上下文共用同一存储（无独立的降级槽）。当前调用图两个入口（turn_stream.rs:1292、turn_sync.rs:460）都是顶层入口，故今日不可达，但任何未来的嵌套 turn（工具内联子轮/join! 并行 turn）会立刻造成串号。建议：登记时保存前值、Drop 时按 turn_id 校验后回填，或改为 task_id → Vec<(turn_id,ctx)> 栈。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/log.rs",
+      "line": 101,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '88,106p' crates/pony-agent-core/src/agent/otel/log.rs  # append_to_file 全程无锁（LOG_FILE_PATH 的 Mutex 在 73-83 的 log_file_path() 里就释放了），且每条记录拆成**两次** syscall：101 `write_all(line)` + 102 `write_all(b\"\\n\")`。两端并发（provider 错误路径线程、pony-otel-flush 线程、ponysentry worker、tauri IPC 线程都会调 log_json）时，换行 syscall 会插到另一条记录之后再落盘：文件里出现 `{...}{...}\\n\\n`，按行采集的 JSON 解析器拿到的整行是非法 JSON ⇒ 两条记录同时丢失（stdout 侧因为 writeln! 一次写+进程级锁反而是安全的，只有文件 sink 有此缺陷）。验证：两线程各写 5 万行后 `python3 -c \"import json,sys;[json.loads(l) for l in open(p)]\"` 可稳定复现异常行。同文件 90-96（current_len+rotate）也是无锁 check-then-act：两线程同时判定超限时，后者的 rename 会把前者刚生成的小体积新文件覆盖成 .1（旧备份丢失），或触发 116-124 的 truncate 兜底。建议：把「取路径+改长度+轮转+写整行」一起纳入同一把 Mutex（或单写线程 channel），并把行尾并入同一次 write。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/log.rs",
+      "line": 122,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '116,125p' crates/pony-agent-core/src/agent/otel/log.rs  # rotate(): `if rename(path,&backup).is_ok() { return; }` 之后紧接 `OpenOptions::new().write(true).truncate(true).open(path)` —— rename **失败**时兜底动作是「清空当前日志文件」，而不是「放弃落盘」。可复现丢日志两条路径：① Linux `mkdir <log>.log.1 && touch <log>.log.1/x`（newpath 为非空目录时 rename 返回 EISDIR/ENOTEMPTY）→ 512KiB 既有日志被 truncate 归零；② Windows（桌面主目标）目标文件正被并发写线程持有句柄且未带 FILE_SHARE_DELETE 时 rename 抛共享冲突 → 同样走 truncate。契约 C4.2 只要求「文件写入异常时降级为仅控制台/忽略，禁止阻塞或 panic」，truncate 兜底把「写不进去」升级成了「销毁已有日志」，与 C4「轮转且文件读写正常」的验收判据相反。建议：rename 失败时直接 return（丢本轮落盘），绝不 truncate；或先写 `<name>.tmp` 再 rename。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src-tauri/src/lib.rs",
+      "line": 1389,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "sed -n '1383,1399p' src-tauri/src/lib.rs; sed -n '486,527p' crates/pony-agent-core/src/agent/otel/mod.rs  # 退出路径在**事件循环线程**上串行叠加三段 3s 预算：ExitRequested → flush_otel_on_exit(\"exit_requested\")（EXIT_FLUSH_TIMEOUT_MS=3000，lib.rs:1215）→ Exit → flush_otel_on_exit(\"exit\")（再 3000）→ otel::shutdown() → provider.shutdown_with_timeout(SHUTDOWN_TIMEOUT_MS=3000，mod.rs:493)。Tauri v2 在无人 prevent_exit 时 ExitRequested 之后必然再发 Exit，故黑洞/慢速端点下最坏阻塞 ≈9s（契约 C5 验收判据#1 要求「3000ms 容差范围内完成进程优雅退出」）。单次 flush 的 3000ms 上界已有实测锚点：cargo test -p pony-agent-core --test otel_trace_adversarial at1_blackhole_endpoint_swallows_export_failure_within_bounded_time 把单次黑洞 flush 钉在 2000~3250ms（.dev-team/review-wave43-a.json 同条记录）。另：flush_state（mod.rs:1697-1709）超时分支不 join 已 spawn 的 pony-otel-flush 线程，重复退出事件会让该线程与 3s 阻塞按次叠加。建议：ExitRequested 与 Exit 共享一个 AtomicBool「已 flush」短路（幂等要求本来就是 C5.3），或把 flush+shutdown 移到独立线程并 join 单次总预算 3000ms；shutdown 在 flush 成功后可跳过再 flush。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 253,
+      "rule": "SECURITY",
+      "counterexample_cmd": "sed -n '250,262p' crates/pony-agent-core/src/agent/otel/mod.rs  # `#[derive(Clone, Debug, Default, PartialEq)] pub struct OtelSettingsSnapshot { ... pub token: Option<String> }` —— 明文 token 随 derive(Debug) 直接可打印，绕过了同文件为 OtelConfig 手写的脱敏 Debug（mod.rs:213-230：header 值一律 \"[REDACTED]\"）这一既有约定；契约 C1.5「严禁落盘到任何日志、面包屑或调试回显」与 app_settings.rs:74-76 的自述契约同被违反。当前 grep 未发现 `{:?}` 调用点（潜伏），但同类扩展 app_settings.rs:59 保留了 Debug 且新增 otel_token 字段，任何 `tracing::debug!(\"{:?}\", settings)`/`expect(\"{settings:?}\")`/panic 消息（`unwrap_err()` 的 Debug 打印）都会一次性泄露 token，而 sanitize()（ponysentry/sanitizer.rs:31）只匹配 `Bearer xxx`/JSON `\"token\":\"...\"` 形态，裸 token 不会被清洗。建议：删掉 OtelSettingsSnapshot 的 Debug 派生或手写 Debug 输出 token=\"[REDACTED]\"，AppSettings 同理；并补一条「OtelSettingsSnapshot 的 Debug 不含 token」的单测。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 7886,
+      "rule": "SECURITY",
+      "counterexample_cmd": "sed -n '7880,7890p' crates/pony-agent-core/src/agent/tools.rs  # WebFetch 的 ReqwestPinnedSender::send 对**用户任意指定 URL** 注入 traceparent，而该 trace_id 在整个 turn 内稳定（mod.rs:1028 本地上下文或 1013 真实 span 上下文均 turn 级不变）⇒ 任意第三方站点/攻击者控制的抓取目标都能拿到一个跨请求可关联的稳定标识，并把 pony-agent 的 trace 关联关系外泄；工具侧 api.exa.ai（tools.rs:3239）/模型目录（model_catalog.rs:26）/provider base_url 属契约内的出网点，但 WebFetch 是「任意第三方」边界，与 AGENTS.md 的外部安全边界（严格白名单）精神不一致。契约 C3.2 写的是「**所有** outbound reqwest 请求」，故这是契约与最小披露原则的冲突，非硬违约：建议在契约里显式豁免/限定第三方抓取（或加 host allowlist），并在文档中记录该隐私取舍。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 921,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '916,924p' crates/pony-agent-core/src/agent/otel/mod.rs; grep -n 'headers_mut().append' ~/.cargo/registry/src/*/reqwest-0.12.28/src/async_impl/request.rs  # 注入用的是 `request.header(\"traceparent\", value)`，而 reqwest RequestBuilder::header → header_sensitive 内部是 `req.headers_mut().append(key, value)`（实测本仓库锁 reqwest 0.12.28，见 Cargo.lock:3394；append 在 async_impl/request.rs:228）。因此若调用方自带 traceparent 或对同一 builder 调本函数两次，会发出**重复的 traceparent 头**（W3C trace-context 要求每请求至多一个，接收端应视为非法）——与契约 C3 拒绝条件#2「格式不合规的 traceparent 头部被发送出网」相冲，也违背函数自述的 fail-closed。今日 4 处调用点（provider/mod.rs:1402/1455/1786/1838、model_catalog.rs:26、tools.rs:3239/7886）都不自带该头，故仅潜伏。建议：先 `headers_mut().remove(\"traceparent\")` 再 insert，或改用默认的 set 语义（HeaderMap::insert）而非 append。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

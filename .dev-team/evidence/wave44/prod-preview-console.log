@@ -1,0 +1,6 @@
+[info] [pony-agent][app] beforeunload {href: "http://127.0.0.1:4177/", ts: "2026-10-25T09:46:12.465Z", messages: 0, traces: 0, phase: "idle"}
+[info] [pony-agent][app] pagehide {href: "http://127.0.0.1:4177/", ts: "2026-10-25T09:46:12.477Z", messages: 0, traces: 0, phase: "idle"}
+[info] [pony-agent][app] visibility:hidden {href: "http://127.0.0.1:4177/", ts: "2026-10-25T09:46:12.477Z", messages: 0, traces: 0, phase: "idle"}
+[info] [pony-agent][boot] mount app {mountCount: 2, href: "http://127.0.0.1:4177/", ts: "2026-10-25T09:46:12.553Z"}
+[info] [pony-agent][app] mounted {href: "http://127.0.0.1:4177/", ts: "2026-10-25T09:46:12.821Z", messages: 0, traces: 0, phase: "idle"}
+[warning] [pony-agent][perf] long-task {name: "self", duration: 326, startTime: 76.90000009536743, page: "home", sessionId: "local-dev-session", ...}

@@ -224,6 +224,14 @@ impl Drop for ConcurrencyGuard {
 }
 
 /// 模型定价矩阵（每百万 Token 的 USD 价格）。
+///
+/// **唯一真源说明（Wave-5 FIX-3）**：单价与计价公式的真源在
+/// [`crate::agent::cost`]（`cost::ModelPricing` / `cost::calculate_cost_with_pricing`）。
+/// 本结构保留**仅为兼容既有预算 DTO 的字段命名**（`*_per_million_usd`），
+/// 通过 [`From`] 转换后委托 `cost` 计算 —— 不再是第二份价格真源。
+///
+/// 同时**已删除**原先编造的 `Default` 实现（`$3 / $15 / $0.75`）：未知单价必须显式给出，
+/// 禁止任何「兜底价」默认值（与契约 K1「未知模型 ⇒ None、宁缺勿错」一致）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPricing {
     pub input_per_million_usd: f64,
@@ -231,12 +239,13 @@ pub struct ModelPricing {
     pub cached_input_per_million_usd: f64,
 }
 
-impl Default for ModelPricing {
-    fn default() -> Self {
+impl From<&ModelPricing> for crate::agent::cost::ModelPricing {
+    /// 适配到 `cost` 的唯一真源结构（字段命名不同，语义一一对应）。
+    fn from(value: &ModelPricing) -> Self {
         Self {
-            input_per_million_usd: 3.0,
-            output_per_million_usd: 15.0,
-            cached_input_per_million_usd: 0.75,
+            input_per_mtok: value.input_per_million_usd,
+            output_per_mtok: value.output_per_million_usd,
+            cache_read_per_mtok: value.cached_input_per_million_usd,
         }
     }
 }
@@ -282,10 +291,15 @@ impl CostTracker {
         cached_tokens: u64,
     ) -> Result<f64, String> {
         let uncached_input = input_tokens.saturating_sub(cached_tokens);
-        let input_cost = (uncached_input as f64 * pricing.input_per_million_usd) / 1_000_000.0;
-        let cached_cost = (cached_tokens as f64 * pricing.cached_input_per_million_usd) / 1_000_000.0;
-        let output_cost = (output_tokens as f64 * pricing.output_per_million_usd) / 1_000_000.0;
-        let call_cost = input_cost + cached_cost + output_cost;
+        // FIX-3：计价委托 `cost` 唯一真源（含 6 位小数取整与非法值 None 语义），此处不再二次实现公式。
+        let estimate = crate::agent::cost::calculate_cost_with_pricing(
+            &crate::agent::cost::ModelPricing::from(pricing),
+            input_tokens,
+            output_tokens,
+            Some(cached_tokens),
+        )
+        .ok_or_else(|| "invalid_pricing: 单价矩阵非法（NaN/Inf/负值），拒绝计入成本".to_string())?;
+        let call_cost = estimate.total_cost_usd;
 
         self.summary.total_input_tokens += uncached_input;
         self.summary.total_cached_tokens += cached_tokens;

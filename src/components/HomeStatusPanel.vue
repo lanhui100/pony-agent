@@ -1,8 +1,11 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Check,
+  Coins,
   Copy,
   Gauge,
   MessageSquareMore,
@@ -12,8 +15,10 @@ import {
   Zap
 } from "lucide-vue-next";
 import Tooltip from "@/components/ui/Tooltip.vue";
+import { isDebugLoggingEnabled } from "@/lib/runtime/utils";
+import { useRuntimeStore } from "@/stores/runtime";
 
-defineProps<{
+const props = defineProps<{
   sessionId: string;
   turnCount: number;
   modelCallCount: number;
@@ -25,12 +30,61 @@ defineProps<{
   cacheHitTokensTotal: number;
   cacheHitRatio: string;
   tokenGenerationSpeed: number | null;
+  tokenSpeedCalculationMode?: string;
+  speedDebugInfo?: {
+    mode?: string;
+    speed?: number | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    durationMs?: number | null;
+    ttftMs?: number | null;
+    contextWindow?: number | null;
+    ratio?: string | null;
+  };
   showContextUsage: boolean;
   contextDisplayTokens: number | null;
   contextWindowTokens: number | null;
 }>();
 
 const emit = defineEmits<{ copySessionId: [] }>();
+
+function resolveRuntimeStoreSafe() {
+  try {
+    return useRuntimeStore();
+  } catch {
+    return null;
+  }
+}
+
+const formattedCost = computed(() => resolveRuntimeStoreSafe()?.formattedGovernanceCost ?? resolveRuntimeStoreSafe()?.formattedSessionCost ?? "—");
+const isOverBudget = computed(() => resolveRuntimeStoreSafe()?.isCostBudgetExceeded ?? false);
+const blockDetail = computed(() => resolveRuntimeStoreSafe()?.governanceBlockDetail ?? null);
+const costTooltipText = computed(() => {
+  const store = resolveRuntimeStoreSafe();
+  if (blockDetail.value) {
+    return `用量治理拦截: 当前 ${blockDetail.value.currentText} / 硬上限 ${blockDetail.value.limitText}`;
+  }
+  if (isOverBudget.value) {
+    return store?.costBudgetWarningMessage || "已超出成本预算限额";
+  }
+  return `会话治理成本: ${formattedCost.value}`;
+});
+
+const debugAttrsEnabled = computed(() => isDebugLoggingEnabled());
+
+const speedDebugString = computed(() => {
+  const info = props.speedDebugInfo;
+  const inVal = info?.inputTokens ?? props.inputTokensTotal ?? "-";
+  const outVal = info?.outputTokens ?? props.outputTokensTotal ?? "-";
+  const durVal = info?.durationMs ?? "-";
+  const ttftVal = info?.ttftMs ?? "-";
+  const winVal = info?.contextWindow ?? props.contextWindowTokens ?? "-";
+  let ratioVal = info?.ratio ?? "-";
+  if (ratioVal === "-" && props.contextWindowTokens && props.contextWindowTokens > 0 && inVal !== "-") {
+    ratioVal = (Number(inVal) / props.contextWindowTokens).toFixed(3);
+  }
+  return `in=${inVal};out=${outVal};dur=${durVal};ttft=${ttftVal};win=${winVal};ratio=${ratioVal}`;
+});
 
 function formatCompactInteger(value?: number | null) {
   if (value == null || !Number.isFinite(value)) { return ""; }
@@ -119,11 +173,57 @@ function formatTokenSpeed(value?: number | null) {
           <!-- 速度位在无数据时渲染 "—"（无数字文本节点），故预留宽度落在承载 span 自身，
                使其在 9 / 12 / 1234 三档（含注入探针）下宽度恒定。 -->
           <Tooltip text="生成速度">
-            <span class="inline-flex min-w-[4rem] items-center gap-1 tabular-nums" data-testid="status-metric-token-speed">
+            <span
+              class="inline-flex min-w-[4rem] items-center gap-1 tabular-nums"
+              data-testid="status-metric-token-speed"
+              :data-speed-mode="tokenSpeedCalculationMode || 'none'"
+              :data-speed-debug="debugAttrsEnabled ? speedDebugString : undefined"
+            >
               <Gauge class="h-3 w-3 text-stone-400" />
               {{ formatTokenSpeed(tokenGenerationSpeed) }}
             </span>
           </Tooltip>
+        </div>
+
+        <!-- Wave-5 K2/K3 & Wave-7 G4：会话成本展示位与预算超限软告警（在 token 行下方紧凑行展示） -->
+        <div class="flex items-center justify-between border-t border-stone-200/50 mt-1.5 pt-1.5 px-1 text-[11px] leading-5 text-stone-600">
+          <span class="text-stone-400">会话成本</span>
+          <Tooltip :text="costTooltipText">
+            <div
+              class="inline-flex items-center gap-1 tabular-nums transition-colors"
+              :class="blockDetail ? 'text-rose-600 font-medium' : isOverBudget ? 'text-amber-600 font-medium' : 'text-stone-600'"
+              data-testid="status-metric-session-cost"
+            >
+              <AlertTriangle v-if="blockDetail || isOverBudget" class="h-3 w-3 text-amber-500 animate-pulse" />
+              <Coins v-else class="h-3 w-3 text-stone-400" />
+              <span class="inline-block min-w-[2.5rem] text-right">{{ formattedCost }}</span>
+            </div>
+          </Tooltip>
+        </div>
+
+        <!-- Wave-7 G2：拦截态横幅 UI（触及硬限额 opt-in 拦截） -->
+        <div
+          v-if="blockDetail"
+          class="mt-2 rounded-[0.4rem] border border-rose-200 bg-rose-50/80 p-2 text-[11px] text-rose-800 space-y-1"
+          data-testid="governance-block-banner"
+        >
+          <div class="flex items-center gap-1.5 font-medium text-rose-900">
+            <AlertTriangle class="h-3.5 w-3.5 text-rose-600 shrink-0" />
+            <span>已触发用量治理拦截</span>
+          </div>
+          <div class="leading-relaxed">
+            当前消耗 {{ blockDetail.currentText }} / 硬限额 {{ blockDetail.limitText }}
+          </div>
+          <div class="flex items-center gap-2 pt-0.5">
+            <button
+              type="button"
+              class="text-rose-700 underline hover:text-rose-900"
+              data-testid="governance-override-btn"
+              @click="(resolveRuntimeStoreSafe() as any)?.overrideGovernanceBlock?.()"
+            >
+              本次解除拦截
+            </button>
+          </div>
         </div>
       </div>
     </section>

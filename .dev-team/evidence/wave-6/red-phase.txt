@@ -1,0 +1,39 @@
+=== Wave-6 Observability Polish & BLOCKING Failure Red-Phase Evidence ===
+Generated At: 2026-10-25T15:20:00+08:00
+Test Agent: test-agent
+Contract Ref: .dev-team/contracts/wave-6-observability-polish.md (K1.1 / K4.1 / K6 / CLI Issue↔Trace 断裂)
+
+--------------------------------------------------------------------------------
+1. Rust Core Red-Phase Receipt
+Command: cargo test -p pony-agent-core --test wave6_observability_polish_test
+Exit Code: 101 (Compile-time & Contract Red-Phase Failure)
+Summary: 6 compilation & contract errors in crates/pony-agent-core/tests/wave6_observability_polish_test.rs
+
+Failures Breakdown:
+1) K1.1 计价归一缺失 (Anthropic vs OpenAI 语义)：
+   error[E0432]: unresolved import `pony_agent_core::agent::cost::ProviderCostProtocol`
+   error[E0425]: cannot find function `calculate_cost_with_protocol` in module `cost`
+   原因：既有计价函数未区分协议族（无 ProviderCostProtocol 枚举，无 calculate_cost_with_protocol）。现状在 (input=100, cache_read=5000, output=0) 时将 Anthropic 基础输入误减为 0。
+
+2) K4.1 子 Span 会话属性下沉缺失：
+   用例 `k4_1_child_spans_contain_session_id_on_wire` 验证 llm.chat 与 tool.call 的 wire body 必须包含 langfuse.session.id 属性。现状未带该属性。
+
+3) K6 结构化日志数值字段缺失：
+   error[E0425]: cannot find function `log_json_with_extras` in module `log`
+   原因：otel::log 尚未提供支持结构化数值 extras 字段扩展的 API，且成本 warn 日志未作为根级数值输出。
+
+4) 真实运行暴露的 BLOCKING 缺陷（CLI/TUI 路径 Issue↔Trace 关联断裂）：
+   error[E0425]: cannot find function `testing_last_enqueued_payload` in module `ponysentry`
+   原因：真实活跃 turn 下 capture_turn_failure 在 CLI 路径上因任务/线程上下文脱节，导致上报 payload 的 trace_id 为 None，需测试桩与上下文穿透修复。
+
+--------------------------------------------------------------------------------
+2. C 修复验收证据（测试自污染消除）：
+- 变更位置：`crates/pony-agent-core/src/agent/runtime/tests.rs:10397`
+- 修复方法：`wave15_evidence_dir()` 从硬编码 `.dev-team/evidence/wave15` 改为写入 `std::env::temp_dir().join("pony-wave15-evidence")`。
+- 验收命令：`cargo test -p pony-agent-core --lib wave15 && git status --porcelain .dev-team/evidence/wave15/`
+- 验收结果：测试通过（1 passed in 0.28s），`git status --porcelain .dev-team/evidence/wave15/` 输出为空（无任何时间戳 churn 或自污染）。
+
+--------------------------------------------------------------------------------
+3. Vitest 基线状态：
+- 命令：`npx vitest run`
+- 状态：98 passed (1023 passed | 10 skipped | 0 failed)

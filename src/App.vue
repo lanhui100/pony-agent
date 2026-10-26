@@ -10,6 +10,8 @@ import TelemetryPage from "@/components/telemetry/TelemetryPage.vue";
 import ConfigPage from "@/components/config/ConfigPage.vue";
 import AppStartupScreen from "@/components/AppStartupScreen.vue";
 import Tooltip from "@/components/ui/Tooltip.vue";
+import ErrorBoundary from "@/components/common/ErrorBoundary.vue";
+import { addBreadcrumb } from "@/lib/telemetry";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useSettingsStore } from "@/stores/settings";
@@ -22,6 +24,13 @@ const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "pony-agent.ui.right-sidebar-open";
 const AUTO_CLOSE_RIGHT_SIDEBAR_WIDTH = 1000;
 const AUTO_COLLAPSE_LEFT_SIDEBAR_WIDTH = 820;
 const currentPage = ref<AppPage>("home");
+
+watch(currentPage, (newPage, oldPage) => {
+  addBreadcrumb("navigation", "navigate_page", {
+    from: oldPage,
+    to: newPage,
+  });
+});
 const isInitializing = ref(true);
 const startupStageText = ref("正在加载工作区与模型引擎...");
 // PA-096：配置页 tab 为会话内受控状态。两个一级键（模型配置/设置）本身是
@@ -212,78 +221,80 @@ watch(rightSidebarPreferredOpen, (value) => {
         <HomeSessionSidebar :current-page="sessionSidebarActivePage" :force-collapsed="forceCollapseLeftSidebar" @navigate="handleSessionNavigate" />
 
         <section class="flex flex-col min-h-0 min-w-0 flex-1">
-          <Transition
-            mode="out-in"
-            enter-active-class="transition-all duration-300 ease-out"
-            enter-from-class="translate-y-2 opacity-0"
-            enter-to-class="translate-y-0 opacity-100"
-            leave-active-class="transition-all duration-200 ease-in"
-            leave-from-class="translate-y-0 opacity-100"
-            leave-to-class="-translate-y-1 opacity-0"
-          >
-            <div
-              v-if="currentPage === 'home'"
-              key="page-home"
-              :class="rightSidebarOpen ? 'gap-4' : 'gap-0'"
-              class="relative flex min-h-0 min-w-0 flex-1 flex-col transition-[gap] duration-300 ease-out lg:flex-row"
-              data-testid="home-layout-shell"
+          <ErrorBoundary component-tag="AppMainSection" class="h-full flex-1 min-h-0 min-w-0">
+            <Transition
+              mode="out-in"
+              enter-active-class="transition-all duration-300 ease-out"
+              enter-from-class="translate-y-2 opacity-0"
+              enter-to-class="translate-y-0 opacity-100"
+              leave-active-class="transition-all duration-200 ease-in"
+              leave-from-class="translate-y-0 opacity-100"
+              leave-to-class="-translate-y-1 opacity-0"
             >
-              <div class="flex flex-col min-h-0 min-w-0 flex-1">
-                <HomeWorkspace :right-sidebar-open="rightSidebarOpen" class="min-h-0 flex-1" />
-              </div>
               <div
-                :class="
-                  rightSidebarOpen
-                    ? 'max-h-[70rem] opacity-100 translate-x-0 lg:w-[20rem] lg:max-h-none xl:w-[21rem]'
-                    : 'pointer-events-none max-h-0 opacity-0 translate-x-6 lg:w-0 lg:max-h-none'
-                "
-                class="min-h-0 min-w-0 shrink-0 overflow-hidden transition-[width,max-height,opacity,transform] duration-300 ease-out"
-                :data-open="rightSidebarOpen ? 'true' : 'false'"
-                data-testid="home-right-sidebar-shell"
+                v-if="currentPage === 'home'"
+                key="page-home"
+                :class="rightSidebarOpen ? 'gap-4' : 'gap-0'"
+                class="relative flex min-h-0 min-w-0 flex-1 flex-col transition-[gap] duration-300 ease-out lg:flex-row"
+                data-testid="home-layout-shell"
               >
-                <div class="h-full min-h-0 min-w-0 lg:w-[20rem] xl:w-[21rem]">
-                  <HomeSidebar />
+                <div class="flex flex-col min-h-0 min-w-0 flex-1">
+                  <HomeWorkspace :right-sidebar-open="rightSidebarOpen" class="min-h-0 flex-1" />
                 </div>
-              </div>
-              <!-- ADR 0013：观测入口——右栏右上角折叠按钮左侧的纯图标浮动按钮。
-                   tooltip"观测"；<1000px 右栏强制关闭时折叠按钮消失，观测按钮
-                   落位 right-3 保持任何窗口宽度可达（吸收 0009 曾否决右栏入口
-                   的窄窗口零入口问题）。 -->
-              <Tooltip text="观测" side="bottom">
-                <button
-                  type="button"
-                  class="absolute top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
-                  :class="forceCloseRightSidebar ? 'right-3' : 'right-11'"
-                  aria-label="观测"
-                  data-testid="workspace-observation-toggle"
-                  @click="currentPage = 'telemetry'"
-                >
-                  <Activity class="h-3 w-3" />
-                </button>
-              </Tooltip>
-              <button
-                  v-if="!forceCloseRightSidebar"
-                  type="button"
-                  class="absolute right-3 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"
-                  :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
-                  :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+                <div
+                  :class="
+                    rightSidebarOpen
+                      ? 'max-h-[70rem] opacity-100 translate-x-0 lg:w-[20rem] lg:max-h-none xl:w-[21rem]'
+                      : 'pointer-events-none max-h-0 opacity-0 translate-x-6 lg:w-0 lg:max-h-none'
+                  "
+                  class="min-h-0 min-w-0 shrink-0 overflow-hidden transition-[width,max-height,opacity,transform] duration-300 ease-out"
                   :data-open="rightSidebarOpen ? 'true' : 'false'"
-                  data-testid="workspace-right-sidebar-toggle"
-                  @click="rightSidebarPreferredOpen = !rightSidebarPreferredOpen"
+                  data-testid="home-right-sidebar-shell"
                 >
-                <ChevronRight v-if="rightSidebarOpen" class="h-4 w-4" />
-                <ChevronLeft v-else class="h-4 w-4" />
-              </button>
-            </div>
+                  <div class="h-full min-h-0 min-w-0 lg:w-[20rem] xl:w-[21rem]">
+                    <HomeSidebar />
+                  </div>
+                </div>
+                <!-- ADR 0013：观测入口——右栏右上角折叠按钮左侧的纯图标浮动按钮。
+                     tooltip"观测"；<1000px 右栏强制关闭时折叠按钮消失，观测按钮
+                     落位 right-3 保持任何窗口宽度可达（吸收 0009 曾否决右栏入口
+                     的窄窗口零入口问题）。 -->
+                <Tooltip text="观测" side="bottom">
+                  <button
+                    type="button"
+                    class="absolute top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                    :class="forceCloseRightSidebar ? 'right-3' : 'right-11'"
+                    aria-label="观测"
+                    data-testid="workspace-observation-toggle"
+                    @click="currentPage = 'telemetry'"
+                  >
+                    <Activity class="h-3 w-3" />
+                  </button>
+                </Tooltip>
+                <button
+                    v-if="!forceCloseRightSidebar"
+                    type="button"
+                    class="absolute right-3 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"
+                    :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+                    :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+                    :data-open="rightSidebarOpen ? 'true' : 'false'"
+                    data-testid="workspace-right-sidebar-toggle"
+                    @click="rightSidebarPreferredOpen = !rightSidebarPreferredOpen"
+                  >
+                  <ChevronRight v-if="rightSidebarOpen" class="h-4 w-4" />
+                  <ChevronLeft v-else class="h-4 w-4" />
+                </button>
+              </div>
 
-            <ConfigPage
-              v-else-if="currentPage === 'config'"
-              key="page-config"
-              v-model:tab="configTab"
-              class="h-full"
-            />
-            <TelemetryPage v-else key="page-telemetry" class="h-full" @navigate="handleSessionNavigate" />
-          </Transition>
+              <ConfigPage
+                v-else-if="currentPage === 'config'"
+                key="page-config"
+                v-model:tab="configTab"
+                class="h-full"
+              />
+              <TelemetryPage v-else key="page-telemetry" class="h-full" @navigate="handleSessionNavigate" />
+            </Transition>
+          </ErrorBoundary>
         </section>
       </section>
 

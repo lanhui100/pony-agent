@@ -1392,19 +1392,15 @@ impl ProviderManager {
         )?;
         let started_at = Instant::now();
 
-        let response = block_on(
-            client
-                .post(endpoint)
-                .bearer_auth(
-                    self.config
-                        .api_key
-                        .as_deref()
-                        .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-                )
-                .json(body)
-                .send(),
-        )
-        .map_err(|error| {
+        let request = client.post(endpoint).bearer_auth(
+            self.config
+                .api_key
+                .as_deref()
+                .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+        );
+        // Wave-4 C3：outbound 级联注入 traceparent（无活跃 turn 时原样透传，零改动）。
+        let request = crate::agent::otel::with_current_traceparent(request);
+        let response = block_on(request.json(body).send()).map_err(|error| {
             format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
         })?;
 
@@ -1455,6 +1451,8 @@ impl ProviderManager {
                     .header("anthropic-version", "2023-06-01");
             }
         }
+        // Wave-4 C3：outbound 级联注入 traceparent。
+        let request = crate::agent::otel::with_current_traceparent(request);
         let response = block_on(request.json(body).send()).map_err(|error| {
             format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
         })?;
@@ -1778,18 +1776,15 @@ impl ProviderManager {
         let client = build_http_client(Duration::from_secs(45), endpoint)?;
         let started_at = Instant::now();
 
-        let response = block_on(
-            client
-                .post(endpoint)
-                .bearer_auth(
-                    self.config
-                        .api_key
-                        .as_deref()
-                        .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-                )
-                .json(body)
-                .send(),
-        )
+        let request = client.post(endpoint).bearer_auth(
+            self.config
+                .api_key
+                .as_deref()
+                .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+        );
+        // Wave-4 C3：outbound 级联注入 traceparent（无活跃 turn 时原样透传，零改动）。
+        let request = crate::agent::otel::with_current_traceparent(request);
+        let response = block_on(request.json(body).send())
         .map_err(|error| {
             format_request_error("调用 provider 失败", &error, started_at.elapsed())
         })?;
@@ -1839,6 +1834,8 @@ impl ProviderManager {
                     .header("anthropic-version", "2023-06-01");
             }
         }
+        // Wave-4 C3：outbound 级联注入 traceparent。
+        let request = crate::agent::otel::with_current_traceparent(request);
         let response = block_on(request.json(body).send()).map_err(|error| {
             format_request_error("调用 provider 失败", &error, started_at.elapsed())
         })?;

@@ -1,0 +1,63 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel",
+    "crates/pony-agent-core/src/agent/ponysentry",
+    "crates/pony-agent-core/src/agent/app_settings.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/control_plane/query_commands.rs",
+    "src-tauri/src",
+    "src"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 376,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && printf 'fn main(){std::env::set_var(\"PONY_OTEL_TOKEN\",\"SUPER_SECRET_TOKEN_123\");println!(\"{:?}\",pony_agent_core::agent::otel::from_env());}\\n' > /tmp/p.rs && RLIB=$(ls target-test-exact-a/debug/deps/libpony_agent_core-*.rlib | head -1) && rustc --edition 2021 -L dependency=$(dirname \"$RLIB\") --extern pony_agent_core=\"$RLIB\" -o /tmp/p /tmp/p.rs && /tmp/p   # 实测 stdout: headers: [(\"authorization\", \"SUPER_SECRET_TOKEN_123\")]",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 773,
+      "rule": "LEAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -c sanitize crates/pony-agent-core/src/agent/otel/mod.rs crates/pony-agent-core/src/agent/otel/log.rs && grep -rn 'sanitize(' crates/pony-agent-core/src --include=*.rs | grep -v ponysentry | wc -l && git show HEAD:crates/pony-agent-core/src/agent/ponysentry/client.rs | grep -n 'tool_call.error = tool_call.error.take().map(|e| sanitize(&e));'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1041,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1040,1056p' crates/pony-agent-core/src/agent/otel/mod.rs | grep -c spans_allowed   # 0 命中：导出层无 gate；同一 harness 实测（/tmp/otelproof/gate.rs）gate_off_now=true inflight_exported_after_off=true",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1118,
+      "rule": "LEAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1100,1120p' crates/pony-agent-core/src/agent/otel/mod.rs | grep -n 'log_json(\"warn\", message' && grep -n 'Response: {:?}' ~/.cargo/registry/src/*/opentelemetry-otlp-0.30.0/src/exporter/http/trace.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 350,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -c https crates/pony-agent-core/src/agent/otel/mod.rs   # 0：endpoint 无 scheme 校验，http:// + PONY_OTEL_TOKEN 即明文鉴权头出网；DEFAULT_ENDPOINT 亦为 http://",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 323,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && printf 'fn main(){pony_agent_core::agent::otel::shutdown();pony_agent_core::agent::otel::set_reporting_enabled(true);println!(\"uninit_is_reporting_enabled={}\",pony_agent_core::agent::otel::is_reporting_enabled());}\\n' > /tmp/q.rs && RLIB=$(ls target-test-exact-a/debug/deps/libpony_agent_core-*.rlib | head -1) && rustc --edition 2021 -L dependency=$(dirname \"$RLIB\") --extern pony_agent_core=\"$RLIB\" -o /tmp/q /tmp/q.rs && /tmp/q   # 未 init 却输出 true，与「未 init 时返回 false」契约相反",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/components/config/ConfigGeneralSection.vue",
+      "line": 405,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -c sanitize crates/pony-agent-core/src/agent/otel/mod.rs crates/pony-agent-core/src/agent/otel/log.rs   # 0 ⇒ 用户告知里的「密钥、鉴权头等敏感字段在本地脱敏后再上报」与实现不符",
+      "severity": "ADVISORY"
+    }
+  ]
+}

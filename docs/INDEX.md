@@ -52,9 +52,10 @@
 
 ## 3. 决策记录
 
+- [Agent Trace 全链路（客户端 → 公网 OTLP → Tempo/Langfuse）](architecture/agent-trace-pipeline.md)
 - [决策记录索引](decisions/README.md)
 - [0008 会话数据架构向事件溯源演进（分阶段落地）](decisions/0008-event-sourcing-evolution.md)
-- [0024 PonySentry Agent Trace 上报契约与生命周期状态机](decisions/0024-ponysentry-agent-trace-ingest.md)
+- [0024 PonySentry Agent Trace 上报契约与生命周期状态机](decisions/superseded/0024-ponysentry-agent-trace-ingest.md)
 - [0025 基于 Conventional Commits 的发布说明生成器](decisions/0025-release-notes-from-conventional-commits.md)
 - [0026 基础工具体系加固（CAS 乐观并发写守卫与富语义错误自愈协议）](decisions/0026-tool-cas-and-recovery-hint.md)
 - [0027 端到端全链路 EventBus 架构设计](decisions/0027-end-to-end-event-bus-architecture.md)
@@ -66,6 +67,7 @@
 - [0042 TUI Composer 收边与底部指标行（弱化 cwd / token / 缓存 / 上下文）](decisions/0042-tui-composer-metrics-line.md)
 - [0043 TUI 消息区层级弱化、代码块材质与三态状态词](decisions/0043-tui-message-hierarchy-and-tri-state-status.md)
 - [0044 系统提示词 v2（收据化、注入防线、阈值收敛与层序守卫）](decisions/0044-system-prompt-v2-receipts-injection-and-layer-order.md)
+- [0047 Agent Trace 迁移至 OpenTelemetry → Langfuse（PonySentry Trace 下线 + 全局上报开关）](decisions/0047-agent-trace-otel-langfuse-migration.md)
 
 ## 3.1 交付证据归档
 

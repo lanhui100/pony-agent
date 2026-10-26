@@ -1,0 +1,60 @@
+--- /tmp/audit-project.sh.bak	2026-10-25 15:13:37.809131129 +0800
++++ scripts/audit-project.sh	2026-10-25 15:20:20.552902988 +0800
+@@ -50,12 +50,12 @@
+ # ── 自动探测项目身份（只读 grep）
+ # 依赖/产物目录必须排除：否则 site-packages 里的 opentelemetry 会让「本项目没接 OTel」被判成已接入
+ # （实证：job_copilot 的 api_v2/.venv 里 redis/azure/langsmith 都带 otel）。
+-EXCL_DIRS=(node_modules target .git dist build .next vendor __pycache__ site-packages .venv venv
++EXCL_DIRS=(node_modules 'target*' .git dist build .next vendor __pycache__ site-packages .venv venv
+            .tox .nox .pnpm .yarn .cargo dist-packages __pypackages__ .direnv .mypy_cache
+            .pytest_cache .ruff_cache coverage .turbo .svelte-kit out obj htmlcov .idea .vscode
+            .tmp-uv-cache .cache tmp logs playwright-report test-results evidence)
+ EXCL_ARGS=(); for _d in "${EXCL_DIRS[@]}"; do EXCL_ARGS+=("--exclude-dir=$_d"); done
+-not_vendor() { grep -vE '/(site-packages|dist-packages|\.venv|venv|\.tox|\.nox|node_modules|target|__pypackages__|\.cargo|vendor|\.mypy_cache|\.pytest_cache|\.ruff_cache|coverage|htmlcov|evidence)/'; }
++not_vendor() { grep -vE '/(site-packages|dist-packages|\.venv|venv|\.tox|\.nox|node_modules|target[^/]*|__pypackages__|\.cargo|vendor|\.mypy_cache|\.pytest_cache|\.ruff_cache|coverage|htmlcov|evidence)/'; }
+ 
+ MAN_INC=(--include='requirements*.txt' --include='pyproject.toml' --include='Pipfile' --include='poetry.lock'
+          --include='uv.lock' --include='Cargo.toml' --include='Cargo.lock' --include='package.json'
+@@ -64,15 +64,20 @@
+          --include='*.rs' --include='*.go' --include='*.java' --include='*.kt' --include='*.rb'
+          --include='*.toml' --include='*.yaml' --include='*.yml' --include='*.tf' --include='*.env*')
+ SRC_EXCL_PATH='/(frontend-dist|docs|backlog|openspec|node_modules|evidence|tests?/fixtures?)/'
++# 散文/治理树：这些文件里出现 "/metrics" 只是文字描述，不是实现。
++DOC_EXCL_PATH='(/(frontend-dist|docs|backlog|openspec|management|\.dev-team|node_modules|evidence|tests?/fixtures?)/|\.md$)'
+ 
+ # 依赖清单（判断「有没有引入 SDK」的唯一可信来源；文档里提到 opentelemetry 不算）
+ gman()  { grep -rIl "${EXCL_ARGS[@]}" "${MAN_INC[@]}" -E "$1" "$PROJ" 2>/dev/null | not_vendor | head -n "${2:-3}" 2>/dev/null; }
+ # 源码（判断「有没有实际打点/配置」；排除 docs/backlog/产物）
+-gsrc()  { grep -rIl "${EXCL_ARGS[@]}" "${SRC_INC[@]}" -E "$1" "$PROJ" 2>/dev/null | not_vendor | grep -vE "$SRC_EXCL_PATH" | head -n "${2:-3}" 2>/dev/null; }
++gsrc()  { grep -rIl "${EXCL_ARGS[@]}" "${SRC_INC[@]}" -E "$1" "$PROJ" 2>/dev/null | not_vendor | grep -vE "$DOC_EXCL_PATH" | head -n "${2:-3}" 2>/dev/null; }
+ gsrch() { grep -rIh "${EXCL_ARGS[@]}" "${SRC_INC[@]}" -E "$1" "$PROJ" 2>/dev/null | grep -vE "$SRC_EXCL_PATH" | head -n "${2:-5}" 2>/dev/null; }
+ # 全文件（不限类型，用于配置类探测）
+-g()     { grep -rIl "${EXCL_ARGS[@]}" -E "$1" "$PROJ" 2>/dev/null | not_vendor | head -n "${2:-3}" 2>/dev/null; }
+-gh()    { grep -rIh "${EXCL_ARGS[@]}" -E "$1" "$PROJ" 2>/dev/null | head -n "${2:-3}" 2>/dev/null; }
++# ⚠ 必须排除文档/任务树：否则 M1/M2 这类「有没有 /metrics」的判定会被
++# `management/task-system/01_TASK_BOARD.md` 里 "trace/metrics 二级化" 这种**散文**误命中，
++# 得到假 PASS（实测：pony-agent 的 M1/M2 曾被任务看板文本点亮）。
++g()     { grep -rIl "${EXCL_ARGS[@]}" -E "$1" "$PROJ" 2>/dev/null | not_vendor | grep -vE "$DOC_EXCL_PATH" | head -n "${2:-3}" 2>/dev/null; }
++gh()    { grep -rIh "${EXCL_ARGS[@]}" -E "$1" "$PROJ" 2>/dev/null | grep -vE "$DOC_EXCL_PATH" | head -n "${2:-3}" 2>/dev/null; }
+ # 只在清单类文件（k8s yaml/helm 模板）里搜，用于推断 namespace 等部署事实
+ ghm()   { grep -rIh --include='*.yaml' --include='*.yml' --include='*.tpl' --include='*.jsonnet' \
+             "${EXCL_ARGS[@]}" -E "$1" "$PROJ" 2>/dev/null | head -n "${2:-40}" 2>/dev/null; }
+@@ -88,13 +93,16 @@
+ info "AI 形态=$AI_TIER（Langfuse 适用性：$(case "$AI_TIER" in agent) echo 必需;; llm) echo 建议;; *) echo 不适用;; esac)）  依据：$AI_BASIS"
+ 
+ # ═══════════════ METRICS ═══════════════
+-if [[ -n "$(g 'prometheus_client|prom-client|/metrics|metrics_endpoint|axum_prometheus|actix_web_prom|opentelemetry_prometheus|micrometer' 1)" ]]; then
++# `/metrics` 必须是**路由字面量**：裸 `/metrics` 会命中 `@/lib/runtime/metrics-diagnostics` 这类模块名，
++# 造成假 PASS（实测 pony-agent 的 M1 曾被 import 路径点亮）。
++if [[ -n "$(g 'prometheus_client|prom-client|["'\'']/metrics["'\'']|metrics_endpoint|axum_prometheus|actix_web_prom|opentelemetry_prometheus|micrometer' 1)" ]]; then
+   emit metrics M1 PASS "代码暴露 /metrics（静态命中）" ""
+ else
+   emit metrics M1 MISSING "未发现 /metrics 暴露点（无 prometheus 客户端/指标路由）" "接入 prometheus 客户端并暴露 /metrics（或 OTel 的 prometheus exporter）"
+ fi
+ 
+-if [[ -n "$(gh 'name:\s*metrics|metricsPort|/metrics' 5)" ]]; then
++# 这里判的是「清单里有没有给 metrics 端口命名」，裸 `/metrics` 会把代码/散文误算成清单声明。
++if [[ -n "$(gh 'name:\s*["'\'']?metrics["'\'']?\s*$|metricsPort|metrics-port|containerPort:\s*[0-9]+\s*#\s*metrics' 5)" ]]; then
+   emit metrics M2 PASS "k8s 清单/配置声明了 metrics 端口或路径" ""
+ else
+   emit metrics M2 PARTIAL "清单未显式声明 metrics 端口（抓取可走容器端口，但不利于发现）" "在 Service/Deployment 里给 metrics 端口命名（如 name: metrics）"

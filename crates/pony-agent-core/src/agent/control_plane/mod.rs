@@ -3297,6 +3297,8 @@ mod tests {
         /// wave-13：与 runtime mock 用例共享同一串行闸门，消除并行负载导致的
         /// 「provider 请求超时 → 客户端重试 → mock 队列失配 → 回合失败」抖动。
         _gate: crate::agent::runtime::tests::MockServerGate,
+        /// 控制面全局状态串行锁：保证 mock server 生命周期内同时持有 control plane 锁。
+        _cp_lock: ControlPlaneTestLock,
     }
 
     impl MockHttpServer {
@@ -3313,6 +3315,7 @@ mod tests {
             responses: Vec<MockHttpResponse>,
             predicate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
         ) -> Self {
+            let cp_lock = control_plane_test_lock();
             let gate = crate::agent::runtime::tests::MockServerGate::acquire();
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
             let address = listener.local_addr().expect("mock server addr");
@@ -3358,6 +3361,7 @@ mod tests {
                 handle: Some(handle),
                 expected,
                 _gate: gate,
+                _cp_lock: cp_lock,
             }
         }
 
@@ -3674,6 +3678,48 @@ mod tests {
         }
     }
 
+    static CONTROL_PLANE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    thread_local! {
+        static CONTROL_PLANE_LOCK_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static CONTROL_PLANE_LOCK_GUARD: std::cell::RefCell<Option<std::sync::MutexGuard<'static, ()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(crate) struct ControlPlaneTestLock;
+
+    impl ControlPlaneTestLock {
+        pub(crate) fn acquire() -> Self {
+            CONTROL_PLANE_LOCK_DEPTH.with(|depth| {
+                if depth.get() == 0 {
+                    let guard = CONTROL_PLANE_LOCK
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    CONTROL_PLANE_LOCK_GUARD.with(|slot| *slot.borrow_mut() = Some(guard));
+                }
+                depth.set(depth.get() + 1);
+            });
+            Self
+        }
+    }
+
+    impl Drop for ControlPlaneTestLock {
+        fn drop(&mut self) {
+            CONTROL_PLANE_LOCK_DEPTH.with(|depth| {
+                depth.set(depth.get().saturating_sub(1));
+                if depth.get() == 0 {
+                    CONTROL_PLANE_LOCK_GUARD.with(|slot| {
+                        *slot.borrow_mut() = None;
+                    });
+                }
+            });
+        }
+    }
+
+    pub(crate) fn control_plane_test_lock() -> ControlPlaneTestLock {
+        ControlPlaneTestLock::acquire()
+    }
+
     fn build_test_control_plane(
         responses: Vec<MockHttpResponse>,
     ) -> (
@@ -3713,6 +3759,7 @@ mod tests {
     #[test]
     fn import_attachment_resolves_workspace_via_registry() {
         // PA-078×PA-079：workspace_id 经注册表解析目标 root；未注册 id → 明确错误。
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::with_runtime(AgentRuntime::new());
 
         // 未注册 workspace → 明确错误
@@ -3785,6 +3832,8 @@ mod tests {
                 event_id: Some("turn-fallback:1".to_string()),
                 session_id: Some("session-fallback".to_string()),
                 turn_id: "turn-fallback".to_string(),
+                trace_id: None,
+                cost_usd: None,
                 kind: "completed".to_string(),
                 event_type: Some("turn.completed".to_string()),
                 event_version: Some("turn-event-v1".to_string()),
@@ -3918,6 +3967,7 @@ mod tests {
 
     #[test]
     fn session_snapshot_queries_flow_through_control_plane() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
 
         let snapshot = control_plane.load_session_snapshot(SessionSnapshotQuery {
@@ -3939,6 +3989,7 @@ mod tests {
     fn session_runtime_view_queries_flow_through_control_plane() {
         let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("runtime-view")]);
+        let session_id = format!("session-runtime-view-{}", uuid::Uuid::new_v4());
 
         {
             let runtime = control_plane
@@ -3952,7 +4003,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 workspace_mode: None,
-                session_id: Some("session-runtime-view".to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
@@ -3962,14 +4013,14 @@ mod tests {
         }
 
         let view = control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-            session_id: Some("session-runtime-view".to_string()),
+            session_id: Some(session_id.clone()),
             ..SessionRuntimeViewQuery::default()
         });
 
-        assert_eq!(view.session.conversation_id, "session-runtime-view");
+        assert_eq!(view.session.conversation_id, session_id);
         assert_eq!(
             view.retrieved.session_context.conversation_id,
-            "session-runtime-view"
+            session_id
         );
         let checkpoint = view
             .checkpoint
@@ -3986,6 +4037,7 @@ mod tests {
 
     #[test]
     fn session_runtime_view_reads_runtime_generated_hook_traces_and_metrics() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
         {
             let mut runtime = control_plane
@@ -3998,6 +4050,8 @@ mod tests {
                     turn_id: "turn-hook-view".to_string(),
                     session_id: Some("session-hook-view".to_string()),
                     event_id: Some("turn-hook-view:1".to_string()),
+                    trace_id: None,
+                    cost_usd: None,
                     event_type: Some("turn.completed".to_string()),
                     event_version: Some("turn-event-v1".to_string()),
                     sequence: Some(1),
@@ -4077,6 +4131,7 @@ mod tests {
 
     #[test]
     fn model_monitor_session_drilldown_preserves_failed_and_cancelled_terminal_evidence() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
         {
             let mut runtime = control_plane
@@ -4089,6 +4144,8 @@ mod tests {
                     turn_id: "turn-failed-evidence".to_string(),
                     session_id: Some("session-terminal-evidence".to_string()),
                     event_id: Some("turn-failed-evidence:4".to_string()),
+                    trace_id: None,
+                    cost_usd: None,
                     event_type: Some("turn.failed".to_string()),
                     event_version: Some("turn-event-v1".to_string()),
                     sequence: Some(4),
@@ -4184,6 +4241,8 @@ mod tests {
                     turn_id: "turn-cancelled-evidence".to_string(),
                     session_id: Some("session-terminal-evidence".to_string()),
                     event_id: Some("turn-cancelled-evidence:5".to_string()),
+                    trace_id: None,
+                    cost_usd: None,
                     event_type: Some("turn.cancelled".to_string()),
                     event_version: Some("turn-event-v1".to_string()),
                     sequence: Some(5),
@@ -4468,6 +4527,7 @@ mod tests {
 
     #[test]
     fn stop_turn_and_checkpoint_queries_share_same_registry_surface() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
         let sink = NoopSink;
 
@@ -4860,9 +4920,12 @@ mod tests {
             json_completion("first response"),
             json_completion("second response"),
         ]);
+        let run_id = format!("run-pause-{}", uuid::Uuid::new_v4());
+        let session_id = format!("graph-pause-{}", uuid::Uuid::new_v4());
+
         let _ = control_plane
             .start_graph_run(StartGraphRunCommand {
-                run_id: Some("run-pause".to_string()),
+                run_id: Some(run_id.clone()),
                 goal: "pause then resume".to_string(),
                 input: TurnInput {
                     message: "execute the first turn".to_string(),
@@ -4871,7 +4934,7 @@ mod tests {
                     model_id: None,
                     reasoning_effort: None,
                     workspace_mode: None,
-                    session_id: Some("graph-pause".to_string()),
+                    session_id: Some(session_id.clone()),
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
@@ -4883,7 +4946,7 @@ mod tests {
 
         let stopped = control_plane
             .stop_graph_run(StopGraphRunCommand {
-                run_id: "run-pause".to_string(),
+                run_id: run_id.clone(),
             })
             .expect("graph run should stop");
         assert_eq!(stopped.run.phase, GraphRunPhase::Paused);
@@ -4918,7 +4981,7 @@ mod tests {
 
         let checkpoint = control_plane
             .load_graph_run_checkpoint(GraphRunCheckpointQuery {
-                run_id: Some("run-pause".to_string()),
+                run_id: Some(run_id.clone()),
             })
             .expect("checkpoint should exist");
         assert_eq!(checkpoint.phase, GraphRunPhase::Paused);
@@ -4931,7 +4994,7 @@ mod tests {
         let recovery_checkpoint = control_plane
             .load_execution_checkpoint(ExecutionCheckpointQuery {
                 turn_id: None,
-                session_id: Some("graph-pause".to_string()),
+                session_id: Some(session_id.clone()),
             })
             .expect("recovery checkpoint should be projected");
         assert_eq!(recovery_checkpoint.checkpoint_kind, "recovery");
@@ -4942,12 +5005,12 @@ mod tests {
         assert_eq!(recovery_checkpoint.phase, "paused");
         assert_eq!(
             recovery_checkpoint.session_id.as_deref(),
-            Some("graph-pause")
+            Some(session_id.as_str())
         );
         let paused_runtime_view =
             control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-                session_id: Some("graph-pause".to_string()),
-                run_id: Some("run-pause".to_string()),
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
                 ..SessionRuntimeViewQuery::default()
             });
         assert_eq!(
@@ -4968,7 +5031,7 @@ mod tests {
 
         let resumed = control_plane
             .resume_graph_run(ResumeGraphRunCommand {
-                run_id: "run-pause".to_string(),
+                run_id: run_id.clone(),
                 input: TurnInput {
                     message: "continue with the second turn".to_string(),
                     display_message: None,
@@ -4995,8 +5058,8 @@ mod tests {
         );
         let resumed_runtime_view =
             control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-                session_id: Some("graph-pause".to_string()),
-                run_id: Some("run-pause".to_string()),
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
                 ..SessionRuntimeViewQuery::default()
             });
         assert_eq!(
@@ -5612,6 +5675,7 @@ mod tests {
 
     #[test]
     fn submission_plan_starts_fresh_run_when_recovery_contract_requires_replay() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
         control_plane.execution_control.register_turn(
             "turn-replay-plan",
@@ -5975,6 +6039,7 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::with_runtime(runtime);
 
         let checkpoint = control_plane
@@ -6027,6 +6092,7 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::with_runtime(runtime);
 
         control_plane
@@ -6116,6 +6182,7 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
+        let _cp_lock = control_plane_test_lock();
         let reloaded_control_plane = HostControlPlane::with_runtime(reloaded_runtime);
 
         let reloaded_source = reloaded_control_plane
@@ -7306,6 +7373,9 @@ mod tests {
     /// 已知问题，登记于 PA-095 任务卡），重试重建以在调度噪声下保持确定性。
     #[test]
     fn graph_sync_run_turn_persists_event_stream_end_to_end() {
+        // 全局 event persist/flush 单槽 + MockServerGate 的获取顺序必须全文件一致：
+        // 先 cp 锁再起 mock server。否则与本文件其它用例形成 ABBA 死锁。
+        let _cp_lock = control_plane_test_lock();
         // provider HTTP 调用需要 tokio runtime 上下文（与 build_test_control_plane 一致）。
         let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let stamp = SystemTime::now()
@@ -7408,6 +7478,8 @@ mod tests {
     /// plane 构建抢占（结构性已知问题），重试重建保证确定性。
     #[test]
     fn append_turn_materializes_history_from_events_over_caller_text() {
+        // 同 graph_sync_run_turn...：先 cp 锁再起 mock server，保持获取顺序一致。
+        let _cp_lock = control_plane_test_lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
@@ -7731,6 +7803,7 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::with_runtime(runtime);
 
         let summary = control_plane.load_model_monitor_summary(ModelMonitorSummaryQuery {
@@ -7867,6 +7940,7 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::with_runtime(runtime);
 
         let summary = control_plane.load_model_monitor_summary(ModelMonitorSummaryQuery {
@@ -7995,6 +8069,7 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::with_runtime(runtime);
 
         let summary = control_plane.load_model_monitor_summary(ModelMonitorSummaryQuery::default());
@@ -8055,6 +8130,7 @@ mod tests {
             })),
             json_completion("文件已列出。"),
         ]);
+        let session_id = format!("monitor-runtime-capability-{}", uuid::Uuid::new_v4());
 
         {
             let runtime = control_plane
@@ -8068,7 +8144,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 workspace_mode: None,
-                session_id: Some("monitor-runtime-capability".to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
@@ -8091,7 +8167,7 @@ mod tests {
             );
             assert_eq!(invocation.failure_kind, None);
 
-            let snapshot = runtime.load_session_snapshot(Some("monitor-runtime-capability"));
+            let snapshot = runtime.load_session_snapshot(Some(&session_id));
             let trace = snapshot
                 .turn_trace_history
                 .last()
@@ -8107,7 +8183,7 @@ mod tests {
         }
 
         let summary = control_plane.load_model_monitor_summary(ModelMonitorSummaryQuery {
-            session_id: Some("monitor-runtime-capability".to_string()),
+            session_id: Some(session_id),
         });
         assert!(summary
             .capability_sources
@@ -8165,6 +8241,7 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::with_runtime(runtime);
 
         control_plane
@@ -8296,6 +8373,7 @@ mod tests {
             })),
             json_completion("文件已列出。"),
         ]);
+        let session_id = format!("monitor-capability-hook-{}", uuid::Uuid::new_v4());
 
         let result = control_plane.run_turn(RunTurnCommand {
             input: TurnInput {
@@ -8305,7 +8383,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 workspace_mode: None,
-                session_id: Some("monitor-capability-hook".to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
@@ -8319,7 +8397,7 @@ mod tests {
             .any(|record| record.hook_name == "capability.resolve.observe"));
 
         let runtime_view = control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-            session_id: Some("monitor-capability-hook".to_string()),
+            session_id: Some(session_id.clone()),
             ..SessionRuntimeViewQuery::default()
         });
         let trace = runtime_view
@@ -8334,7 +8412,7 @@ mod tests {
 
         let drilldown =
             control_plane.load_model_monitor_session_drilldown(ModelMonitorSessionDrilldownQuery {
-                session_id: "monitor-capability-hook".to_string(),
+                session_id: session_id.clone(),
             });
         assert!(drilldown.metrics.hook_call_count >= 1);
         assert!(drilldown
@@ -8348,7 +8426,7 @@ mod tests {
             .any(|record| record.hook_name == "capability.resolve.observe"));
 
         let summary = control_plane.load_model_monitor_summary(ModelMonitorSummaryQuery {
-            session_id: Some("monitor-capability-hook".to_string()),
+            session_id: Some(session_id),
         });
         assert!(summary
             .hooks
@@ -8362,6 +8440,7 @@ mod tests {
     fn monitor_and_drilldown_read_runtime_generated_planner_hook_evidence() {
         let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("目录已分析。")]);
+        let session_id = format!("monitor-planner-hook-{}", uuid::Uuid::new_v4());
 
         let result = control_plane.run_turn(RunTurnCommand {
             input: TurnInput {
@@ -8371,7 +8450,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 workspace_mode: None,
-                session_id: Some("monitor-planner-hook".to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
@@ -8389,7 +8468,7 @@ mod tests {
             .any(|record| record.hook_name == "planner.tool_selection.observe"));
 
         let runtime_view = control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-            session_id: Some("monitor-planner-hook".to_string()),
+            session_id: Some(session_id.clone()),
             ..SessionRuntimeViewQuery::default()
         });
         let trace = runtime_view
@@ -8408,7 +8487,7 @@ mod tests {
 
         let drilldown =
             control_plane.load_model_monitor_session_drilldown(ModelMonitorSessionDrilldownQuery {
-                session_id: "monitor-planner-hook".to_string(),
+                session_id: session_id,
             });
         assert!(drilldown.metrics.hook_call_count >= 2);
         let drilldown_trace = drilldown
@@ -8459,6 +8538,7 @@ mod tests {
             })),
             json_completion("skill 已执行。"),
         ]);
+        let session_id = format!("monitor-skill-hook-{}", uuid::Uuid::new_v4());
         control_plane
             .apply_skill_source_snapshot(ApplySkillSourceSnapshotCommand {
                 snapshot: crate::agent::capability_bridge::SkillSourceSnapshot {
@@ -8504,7 +8584,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 workspace_mode: None,
-                session_id: Some("monitor-skill-hook".to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
@@ -8518,7 +8598,7 @@ mod tests {
             .any(|record| record.hook_name == "skill.tool_actions.observe"));
 
         let runtime_view = control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-            session_id: Some("monitor-skill-hook".to_string()),
+            session_id: Some(session_id.clone()),
             ..SessionRuntimeViewQuery::default()
         });
         let trace = runtime_view
@@ -8533,7 +8613,7 @@ mod tests {
 
         let drilldown =
             control_plane.load_model_monitor_session_drilldown(ModelMonitorSessionDrilldownQuery {
-                session_id: "monitor-skill-hook".to_string(),
+                session_id: session_id,
             });
         assert!(drilldown.metrics.hook_call_count >= 1);
         assert!(drilldown
@@ -8551,6 +8631,7 @@ mod tests {
 
     #[test]
     fn list_capabilities_exposes_builtin_tools_through_unified_registry() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
 
         let sources = control_plane.list_capability_sources();
@@ -8570,6 +8651,7 @@ mod tests {
 
     #[test]
     fn apply_mcp_source_snapshot_updates_read_plane_and_runtime_registry() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
 
         let snapshot = crate::agent::capability_bridge::McpSourceSnapshot {
@@ -8659,6 +8741,7 @@ mod tests {
 
     #[test]
     fn apply_mcp_source_snapshot_replaces_stale_capabilities_for_same_source() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
 
         let old_snapshot = crate::agent::capability_bridge::McpSourceSnapshot {
@@ -8783,6 +8866,7 @@ mod tests {
 
     #[test]
     fn apply_mcp_source_snapshot_keeps_unreachable_source_visible_without_capabilities() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
 
         control_plane
@@ -8828,6 +8912,7 @@ mod tests {
 
     #[test]
     fn apply_skill_source_snapshot_updates_read_plane_and_runtime_registry() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
 
         control_plane
@@ -8952,6 +9037,7 @@ mod tests {
 
     #[test]
     fn skill_source_ingress_hooks_can_block_snapshot_apply_without_persisting_source() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
         {
             let mut runtime = control_plane
@@ -8997,6 +9083,7 @@ mod tests {
 
     #[test]
     fn apply_skill_source_snapshot_replaces_stale_skills_for_same_source() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
 
         control_plane
@@ -9116,6 +9203,7 @@ mod tests {
 
     #[test]
     fn inspect_capability_returns_normalized_builtin_capability_view() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
 
         let capability = control_plane
@@ -9136,6 +9224,7 @@ mod tests {
     fn load_model_monitor_session_drilldown_returns_metrics_and_runtime_view() {
         let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("下钻摘要")]);
+        let session_id = format!("monitor-drilldown-{}", uuid::Uuid::new_v4());
 
         {
             let runtime = control_plane
@@ -9149,7 +9238,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 workspace_mode: None,
-                session_id: Some("monitor-drilldown".to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
@@ -9160,15 +9249,15 @@ mod tests {
 
         let drilldown =
             control_plane.load_model_monitor_session_drilldown(ModelMonitorSessionDrilldownQuery {
-                session_id: "monitor-drilldown".to_string(),
+                session_id: session_id.clone(),
             });
 
-        assert_eq!(drilldown.session_id, "monitor-drilldown");
-        assert_eq!(drilldown.metrics.session_id, "monitor-drilldown");
+        assert_eq!(drilldown.session_id, session_id);
+        assert_eq!(drilldown.metrics.session_id, session_id);
         assert_eq!(drilldown.metrics.request_count, 1);
         assert_eq!(
             drilldown.runtime_view.session.conversation_id,
-            "monitor-drilldown"
+            session_id
         );
         assert_eq!(drilldown.runtime_view.session.turn_trace_history.len(), 1);
         server.finish();
@@ -9275,6 +9364,7 @@ mod tests {
             registry,
             Arc::new(FakeClock::new(1_000)),
         ));
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlaneBuilder::new()
             .ask_dispatcher(Arc::clone(&dispatcher))
             .build();
@@ -9358,6 +9448,7 @@ mod tests {
 
     #[test]
     fn plan_control_plane_surface_creates_reads_mutates_and_lists() {
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlaneBuilder::new().build();
 
         let created = control_plane
@@ -9448,6 +9539,7 @@ mod tests {
                 Some("session-1"),
             ),
         );
+        let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlaneBuilder::new()
             .ask_dispatcher(Arc::clone(&dispatcher))
             .graph_run_store(graph_store)
@@ -9602,6 +9694,8 @@ mod tests {
 
     #[test]
     fn graph_run_stream_ask_suspends_returns_waiting_user_and_resumes_unique_terminal() {
+        // 锁获取顺序必须与全文件一致：先 cp 锁再起 mock server（否则 ABBA 死锁）。
+        let _cp_lock = control_plane_test_lock();
         // PA-076 P1-1: the frontend's main path is the graph-run stream. A real streamed turn
         // must persist the Ask pending request against run/turn facts, `execute_graph_run_stream`
         // must return a `WaitingUser` suspension (provider never called again), and the host
@@ -9740,6 +9834,8 @@ mod tests {
 
     #[test]
     fn graph_run_stream_normal_tool_turn_completes() {
+        // 锁获取顺序必须与全文件一致：先 cp 锁再起 mock server（否则 ABBA 死锁）。
+        let _cp_lock = control_plane_test_lock();
         // Regression: the app.s exact entry (prepare_start_graph_run_stream →
         // execute_graph_run_stream) with a real workspace tool + followup must complete, not hang.
         let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();

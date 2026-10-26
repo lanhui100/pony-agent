@@ -1,0 +1,227 @@
+[
+  {
+    "id": "audit-auto",
+    "dimension": "metrics",
+    "command": "bash /home/dm/.agents/skills/observability-onboarding/scripts/audit-project.sh /home/dm/pony-agent --json > /tmp/obs-audit-project.json 2>/tmp/obs-audit-project.err; echo EXIT=$?",
+    "exit_code": 2,
+    "raw_summary": "EXIT=2; summary={metrics:PARTIAL, tracing:PASS, logs:PARTIAL, issues:PARTIAL}; 自动探测 namespace='' service='' pony_sentry_project=''（三项皆空）; I5 detail='PonySentry 查询成功但该 project 无 issue'（查询值为空字符串）; T4 detail='Tempo 近 24h 有 service.name= 的 trace（10 条命中）'（service.name 为空）",
+    "finding": "自动探测失败：docs/observability.yaml 只写 service: pony-agent + kind: desktop，没有 k8s namespace/Service，脚本据此探测出空串，导致 T4/I5 两条动态证据都是在空 service.name / 空 project 上做出的（T4 的『10 条命中』= limit=10 上限，不是真实条数）。不显式传 --service/--project 时该 JSON 的 tracing/issues 结论不可用。",
+    "confidence": "high"
+  },
+  {
+    "id": "audit-explicit",
+    "dimension": "metrics",
+    "command": "bash /home/dm/.agents/skills/observability-onboarding/scripts/audit-project.sh /home/dm/pony-agent --service desktop-client --project pony-agent --since 24h --json > /tmp/obs-audit-project-svc.json; echo EXIT=$?",
+    "exit_code": 2,
+    "raw_summary": "EXIT=2; summary={metrics:PARTIAL, tracing:PASS, logs:PARTIAL, issues:PASS}; static_missing=[M1]; dynamic_missing=[M3,L3]; M3='Prometheus 抓不到该项目（无 up{job=...}，也无 component/service_name series）'; L3='Loki 查不到 namespace= 的日志'; I5='PonySentry 有 project=pony-agent 的 issue 记录'; T5='AI Agent 项目已设 genai/langfuse 属性'",
+    "finding": "口径正确后的矩阵：metrics=PARTIAL(M1/M3 缺)、tracing=PASS、logs=PARTIAL(L3/L4 缺)、issues=PASS。脚本自身不读 docs/observability.yaml 的 applicable:false，所以 metrics/logs 的『缺』需人工按声明判为结构性 N-A。",
+    "confidence": "high"
+  },
+  {
+    "id": "prom-up-all",
+    "dimension": "metrics",
+    "command": "curl -s -G http://127.0.0.1:19090/api/v1/query --data-urlencode 'query=up'  # 19090 = kubectl port-forward svc/job-copilot-prometheus 19090:9090，同等 kubectl -n monitor exec <prom-pod> -- wget -qO- 'http://job-copilot-prometheus.monitor.svc.cluster.local:9090/api/v1/query?query=up'",
+    "exit_code": 0,
+    "raw_summary": "count(up)=48, sum(up==0)=0, sum(up)=47；逐 target 表中唯一 0 值：up{job='api-v2-dev-host',instance='100.95.193.103:9091',namespace='dev',service_name='job-copilot-api-v2-dev-host'}=0",
+    "finding": "Prometheus 现有 48 个抓取目标，47 up / 1 疑似 down：api-v2-dev-host(100.95.193.103:9091) 的 up=0 且 scrape_samples_scraped==0（空抓取）。注意 sum(up==0) 返回 0 与逐条 up==0 返回 1 不一致——聚合口径在这个 job 上不可靠，巡检应以逐 target 为准。与 pony-agent 无关，但属真实基础设施缺陷。",
+    "confidence": "high"
+  },
+  {
+    "id": "prom-no-project-job",
+    "dimension": "metrics",
+    "command": "curl -s -G http://127.0.0.1:19090/api/v1/query --data-urlencode 'query=up{job=~\".*(desktop|pony-agent|ponyagent).*\"}'",
+    "exit_code": 0,
+    "raw_summary": "n=0；另 count by(job)({__name__=~'scrape_samples_scraped', job=~'.*(desktop|pony-agent).*'}) = 0；label service_name/values 全量 25 个值（api-v2、pony-sentry、langfuse-web、otel-collector-edge…）不含 desktop-client / pony-agent",
+    "finding": "事实：Prometheus 里不存在 desktop-client 或 pony-agent 的任何抓取 job / series。与 docs/observability.yaml 声明（metrics applicable:false，桌面端无稳定可达 /metrics）结构性一致，属 N-A 而非『漏接』。",
+    "confidence": "high"
+  },
+  {
+    "id": "prom-top10",
+    "dimension": "metrics",
+    "command": "curl -s -G http://127.0.0.1:19090/api/v1/query --data-urlencode 'query=topk(10,sum by(job)(scrape_samples_scraped))'",
+    "exit_code": 0,
+    "raw_summary": "kubelet 98947, cadvisor 20217, node-exporter 8693, kube-state-metrics 8571, loki 3454, coredns 1282, prometheus 1178, api-v2 545, alertmanager 533, blackbox-http 132；TSDB numSeries=132438, numLabelPairs=7769",
+    "finding": "指标量集中在 KSM/kubelet/cadvisor（合计约 13.6 万样本/轮），业务侧只有 api-v2(545) 与 pony-sentry(23)。桌面端项目在这套 pull 模型里没有任何立足点，佐证 metrics N-A 判定。",
+    "confidence": "high"
+  },
+  {
+    "id": "prom-otelcol-absent",
+    "dimension": "metrics",
+    "command": "curl -s -G http://127.0.0.1:19090/api/v1/query --data-urlencode 'query=count({__name__=~\"otelcol_.*\"})'",
+    "exit_code": 0,
+    "raw_summary": "result=[] （ABSENT）；service_name 标签里 otel-collector-edge 只出现在 kube-state-metrics 的 1 条 series",
+    "finding": "OTel Collector 自身没暴露/没被抓取内部 telemetry（otelcol_receiver_accepted_spans 等全缺）。后果：trace 管道吞吐与丢弃在 Prometheus 侧完全不可观测，桌面端 trace 量无法做任何告警，只能查 Tempo。",
+    "confidence": "high"
+  },
+  {
+    "id": "tempo-dc-volume",
+    "dimension": "tracing",
+    "command": "curl -s -G http://127.0.0.1:13200/api/search --data-urlencode 'q={ resource.service.name = \"desktop-client\" }' --data-urlencode start=$((NOW-604800)) --data-urlencode end=$NOW --data-urlencode limit=1000",
+    "exit_code": 0,
+    "raw_summary": "7d traces=77；24h traces=77（两窗口相等，即全部落在最近 24h）；root span 分布：acc.size.probe 27 / acc.public.probe 24 / agent.turn 18 / public-otel-smoke-span 8；按小时（CST）：10-24 17h=14, 19h=12, 22h=17, 23h=12, 10-25 00h=3, 07h=11, 11h=1, 13h=1, 15h=2, 16h=4",
+    "finding": "Tempo 有真实数据：近 7 天 service.name=desktop-client 共 77 条 trace，且全部集中在最近 24h。77 条中真正来自产品运行时的只有 18 条 agent.turn（23%），其余 59 条（77%）是验收/烟测探针（acc.size.probe、acc.public.probe、public-otel-smoke-span）。",
+    "confidence": "high"
+  },
+  {
+    "id": "tempo-identity-rewrite",
+    "dimension": "tracing",
+    "command": "curl -s http://127.0.0.1:13200/api/traces/4de1a7c76c2211de2e87711caa54158e",
+    "exit_code": 0,
+    "raw_summary": "每一批 resource attributes：service.name='desktop-client', client.service.name='pony-agent', deployment.environment='production', telemetry.sdk.language='rust'；span 集合：agent.turn(root) → llm.chat ×6 / tool.call ×8",
+    "finding": "公网入口改写事实被物理验证：service.name 被统一改成 desktop-client，原始服务名在 client.service.name=pony-agent；environment=production、SDK=rust。凡按 service.name 过滤的看板都会把该项目归到 desktop-client 名下。",
+    "confidence": "high"
+  },
+  {
+    "id": "tempo-error",
+    "dimension": "tracing",
+    "command": "curl -s -G http://127.0.0.1:13200/api/search --data-urlencode 'q={ status = error }' ... / '{ resource.service.name = \"desktop-client\" && status = error }' ...（7d, limit=1000）",
+    "exit_code": 0,
+    "raw_summary": "7d：{status=error}=16（rootServiceName: desktop-client 9 / api-v2 7）；{resource.service.name='desktop-client' && status=error}=9；9 条全为 root=agent.turn，durationMs=31636, 6383, 284, 249, 234, 234, 197, 162, 1；traceID 样本=4de1a7c76c2211de2e87711caa54158e（31.6s）、acfb983f6ecef85c50ba442a82b87c3c（6.4s）",
+    "finding": "桌面端 7d 有 9 条含错误 span 的 trace（占 18 条 agent.turn 的一半）。状态消息可读：'child_not_allowed: descriptor builtin:workspace_gather_context is not an allowed child of builtin:workspace_batch'、'handler_error: invalid_path: 无法解析路径 PROJECT.md：No such file or directory (os error 2)'、'non_zero_exit: 命令执行完成，但退出码为 127'、'control_outcome_pending: 工具调用尚处于控制请求状态…'。",
+    "confidence": "high"
+  },
+  {
+    "id": "tempo-root-status-unset",
+    "dimension": "tracing",
+    "command": "python3 解析 /api/traces/4de1a7c7… 的 spans[].status（同一 trace 的 status 字段原文）",
+    "exit_code": 0,
+    "raw_summary": "agent.turn(parentSpanId='' 即 root) status={}；llm.chat status={} ×6；tool.call 3 条 status={'code':'STATUS_CODE_ERROR','message':'child_not_allowed: …' / 'handler_error: invalid_path: …' / 'non_zero_exit: …'}，其余 tool.call status={}",
+    "finding": "根 span 不带 error 状态：错误只落在 tool.call 子 span 上，root(agent.turn) 的 status 恒为 unset。所以任何『按 root span status 判失败』的告警/看板都会漏掉这 9 条错误 trace，只能靠 TraceQL {status=error} 全 span 扫描。",
+    "confidence": "high"
+  },
+  {
+    "id": "tempo-client-service-cardinality",
+    "dimension": "tracing",
+    "command": "curl -s -G http://127.0.0.1:13200/api/v2/search/tag/resource.client.service.name/values --data-urlencode 'q=' --data-urlencode start=$((NOW-604800)) --data-urlencode end=$NOW",
+    "exit_code": 0,
+    "raw_summary": "7d 共 36 个不同值：desktop-acc-probe-<hash> ×27、macbook-air-<hash> ×7、size-probe、pony-agent、pony-agent-chain-audit；逐 trace 归类（77 条全扫）= acc.size.probe→size-probe 27、acc.public.probe→desktop-acc-probe-* 24、public-otel-smoke-span→macbook-air-* 8、agent.turn→pony-agent 16 + pony-agent-chain-audit 1 + 无标识 1",
+    "finding": "client.service.name 维度被验收探针污染：36 个值里 33 个是一次性设备/探针 ID（desktop-acc-probe-*、macbook-air-*、size-probe），真实生产标识只有 pony-agent（16 条）。这是可预见的基数膨胀源，按设备/探针 ID 建维度会炸；另注意 /api/v2/search/tag/client.service.name/values 直接 500（必须用 resource.client.service.name 这个 scoped 名）。",
+    "confidence": "high"
+  },
+  {
+    "id": "tempo-genai-route",
+    "dimension": "langfuse",
+    "command": "curl -s -G http://127.0.0.1:13200/api/search --data-urlencode 'q={ span.pony.trace.route = \"genai\" }'（7d）；另 { resource.service.name='desktop-client' && span.pony.trace.route='genai' }；{ resource.pony.trace.route = 'genai' }",
+    "exit_code": 0,
+    "raw_summary": "span.pony.trace.route=genai → 48 条（root: agent.turn 19, acc.public.probe 13, llm.generation 8, public-otel-smoke-span 3, llm.generate 2, acc.size.probe 1）；限定 desktop-client → 35 条；resource.pony.trace.route=genai → 0 条",
+    "finding": "收集器分流标记确实打上了：pony.trace.route 是 span 级属性（resource 级为 0，别按 resource 查）。7d 有 48 条 genai 语义轨 trace，其中 35 条属 desktop-client。",
+    "confidence": "high"
+  },
+  {
+    "id": "collector-genai-pipeline",
+    "dimension": "langfuse",
+    "command": "kubectl -n observability logs deploy/otel-collector --tail=200 | grep -i genai; echo EXIT=$?",
+    "exit_code": 0,
+    "raw_summary": "2 行命中：{'msg':'Using percentage memory limiter','name':'memory_limiter','pipeline':'traces/genai','total_memory_mib':512,…} 与 {'msg':'Memory limiter configured','pipeline':'traces/genai','limit_mib':409,…}；启动日志含 extension 'basicauth/langfuse' 已 started、otlp http 4318 / grpc 4317 已起；tail 800 行内 grep error|failed|refused = 0 行",
+    "finding": "traces/genai 管道在跑且 basicauth/langfuse 扩展已加载，采集器侧 18h 内无导出错误。分流链路工作正常的日志侧证据。",
+    "confidence": "high"
+  },
+  {
+    "id": "langfuse-clickhouse",
+    "dimension": "langfuse",
+    "command": "kubectl -n observability exec clickhouse-0 -- clickhouse-client -q \"select count(), groupUniqArray(project_id), min(timestamp), max(timestamp) from default.traces where timestamp > now()-interval 7 day\"; 及 observations 按 type/model 聚合",
+    "exit_code": 0,
+    "raw_summary": "traces 7d=47，project_id=['pony-agents']，timestamp 范围 2026-10-24 11:11:36.802 ~ 2026-10-25 08:44:06.025（CH 时区 UTC，= CST 16:44，距采样时刻约 35 分钟）；observations 7d：SPAN 19 / GENERATION 52 / TOOL 29（共 100）；模型分布 sense/deepseek-v4-flash 20, gemini-3.8-flash 12, workbuddy/deepseek-v4.1-flash 7, gpt-4o-mini 5, gpt-4o 4, probe-model 2, antigravity/gemini-3.8-flash 1",
+    "finding": "Langfuse 语义轨是活的：ClickHouse 内近 7 天 47 条 trace / 100 条 observation（含 19 个 agent.turn SPAN、52 个 GENERATION、29 个 TOOL），模型与 token 维度可查，最新一条与 Tempo 最新 genai trace（CST 16:44）同分钟，未见入库滞后。项目归属 project_id='pony-agents'（注意与 PonySentry 的 'pony-agent' 不是同一字符串）。",
+    "confidence": "high"
+  },
+  {
+    "id": "langfuse-worker-queue-errors",
+    "dimension": "langfuse",
+    "command": "kubectl -n observability logs deploy/langfuse-worker --tail=300 2>&1 | grep -iE 'otel|otlp|error|ingest' | tail -15",
+    "exit_code": 0,
+    "raw_summary": "近 300 行内反复出现（约每 30s 一次）：'Queue job data-retention-queue errored: Error: Socket timeout. Expecting data, but didn't receive any in 30000ms.'；未见 otlp ingest 相关报错",
+    "finding": "langfuse-worker 的 data-retention-queue 长期 Socket timeout 刷错（每 30s），但 otlp 入库路径无报错、ClickHouse 数据连续，故判定为保留策略队列的既存噪声而非语义轨断流。影响面（是否导致旧数据不清理）未验证 → 该子问题 UNKNOWN。",
+    "confidence": "medium"
+  },
+  {
+    "id": "loki-labels",
+    "dimension": "logs",
+    "command": "curl -s http://127.0.0.1:13100/loki/api/v1/label/namespace/values; 同 /label/service_name/values、/label/app/values、/label/job/values",
+    "exit_code": 0,
+    "raw_summary": "namespace=['dev','kube-system','preprod','production']（7d 聚合查询另见 cert-manager/monitor）；service_name=['api-v2','kube-dns','postgresql','redis']；app=['api-v2','coredns','postgres','redis']；job=['kubernetes']；样例 series={job:kubernetes,level:INFO,namespace:production,service_name:postgresql,target_type:dependency,app:postgres,component:postgresql,env:production}",
+    "finding": "Loki 的命名空间/服务维度完全由集群内容器日志构成：没有 pony-agent/desktop-client 相关 namespace（桌面端不进集群，无 namespace 可言）。契约标签集（env/job/namespace/service_name/target_type + level/app/component）在样例 stream 上齐备。",
+    "confidence": "high"
+  },
+  {
+    "id": "loki-zero-volume",
+    "dimension": "logs",
+    "command": "curl -s -G http://127.0.0.1:13100/loki/api/v1/query --data-urlencode 'query=sum(count_over_time({namespace=~\".+\"} |= \"desktop-client\" [7d]))'（同 'pony-agent'；对照 sum(count_over_time({service_name=~\".+\"}[7d]))）",
+    "exit_code": 0,
+    "raw_summary": "|= 'desktop-client' → 0；|= 'pony-agent' → 0；对照总量 7d=448453 行（dev 98323, kube-system 170098, monitor 3022, preprod 173404, production 3468, cert-manager 136）",
+    "finding": "近 7 天 Loki 中 desktop-client / pony-agent 日志量为 0（对照总量 44.8 万行，检索链路本身有效）。这是结构性为 0 而非采集故障：采集口径是节点侧 /var/log/containers/*.log 白名单，桌面端进程不在容器内。",
+    "confidence": "high"
+  },
+  {
+    "id": "logs-structural-reason",
+    "dimension": "logs",
+    "command": "kubectl -n monitor get cm job-copilot-log-collector-config -o yaml | grep -E 'path|tag|namespace|service_name'",
+    "exit_code": 0,
+    "raw_summary": "配置全部为容器日志路径白名单：/var/log/containers/job-copilot-api-v2-*_{preprod,production}_api-v2-*.log、/var/log/job-copilot-dev/api-v2-dev.log、job-copilot-log-collector-*_monitor_*、job-copilot-frontend-*、job-copilot-postgres-* 等；每条附 tag kubernetes.<x> 与显式 namespace/service_name",
+    "finding": "结构性原因落地可查：采集器只 tail 容器日志路径并显式打 namespace/service_name，桌面端（Tauri/CLI）不在这些路径产生日志，接入必须先在 infra 侧加 source/filter —— 因此 logs 维度对交付形态是 N-A，且给出可执行的接入前提。",
+    "confidence": "high"
+  },
+  {
+    "id": "sentry-projects",
+    "dimension": "issues",
+    "command": "curl -s -H \"Authorization: Bearer $ADMIN_TOKEN\" http://127.0.0.1:3000/api/v1/projects   # $ADMIN_TOKEN 取自 /proc/$(pgrep -f pony-sentry-server)/environ，仅存 shell 变量，未打印未落盘",
+    "exit_code": 0,
+    "raw_summary": "HTTP=200，body=[\"campus_collector\",\"job_copilot\",\"pony-agent\",\"ponyllm\"]；token_len=64 且仅存于变量（输出中已脱敏）",
+    "finding": "PonySentry 侧确有 pony-agent 项目（4 个项目之一），project 名与 pony-agent 的 tags.project 完全一致，排除了『project 名不匹配』这一假设。",
+    "confidence": "high"
+  },
+  {
+    "id": "sentry-issues-pony-agent",
+    "dimension": "issues",
+    "command": "curl -s -H \"Authorization: Bearer $ADMIN_TOKEN\" 'http://127.0.0.1:3000/api/v1/issues?project=pony-agent&limit=100'",
+    "exit_code": 0,
+    "raw_summary": "HTTP=200，total=11；by status: unresolved 2 / resolved 2 / ignored 7；level 全为 error；environment 全为 dev；platform rust 4 / tauri 7；sum(count)=185。最近 10 条（last_seen_at 降序，count|status|title|culprit）：1) 2026-10-25T08:43:03Z cnt=3 unresolved 'TurnExecutionFailed: [model=gemini-3.8-flash] 调用 provider 失败：error sending request for url (http://127.0.0.1:1/v1/chat/completions)' culprit=pony_agent_core::agent::ponysentry::client::PonySentryClient::capture_error；2) 2026-10-25T07:28:28Z cnt=1 unresolved 'Wave6Probe: trace-id-probe' culprit=None；3) 2026-10-18T06:36:04Z cnt=1 resolved 'TurnExecutionFailed: All candidate upstream providers exhausted for model workbuddy/deepseek-v4.1-flash'；4) 2026-10-14T05:43:31Z cnt=46 ignored 'IpcCommandError: IPC command \"ask_list_pending\" failed: DIAG_STUB_UNIMPLEMENTED' culprit=tauri_safe_invoke in ask_list_pending；5) cnt=24 ignored health_check；6) cnt=24 ignored load_provider_registry；7) cnt=36 ignored workspace_list；8) cnt=24 ignored list_available_tools；9) cnt=24 ignored load_app_settings；10) cnt=1 ignored 'load_session_runtime_view failed: DIAG: sessions.db read failed'",
+    "finding": "issues 维度有真实数据：11 条 issue、累计 185 次事件、全部 error 级。真正需要看的只有 2 条 unresolved（一条 provider 连接失败 3 次、一条探针）；大头是 7 条已 ignored 的 Tauri DIAG_STUB_UNIMPLEMENTED（合计 178 次，占 96%），说明历史上 IPC stub 噪声刷屏后被静音——现状是『噪声被忽略』而非『无错误』。注意 /api/v1/issues 不带 project 时默认只回 50 条（pony-agent 只露 2 条），必须显式传 project。",
+    "confidence": "high"
+  },
+  {
+    "id": "sentry-events-7d",
+    "dimension": "issues",
+    "command": "逐 issue：curl -s -H \"Authorization: Bearer $ADMIN_TOKEN\" 'http://127.0.0.1:3000/api/v1/issues/<id>/events?limit=500'，按 created_at >= 2026-10-18T17:2x 过滤",
+    "exit_code": 0,
+    "raw_summary": "7d 事件：11e8ab79 3 条（last 2026-10-25T08:43:03Z）+ e5a24eed 1 条（last 2026-10-25T07:28:28Z）= 4 条；其余 9 条 issue 最近事件均在 2026-10-14 及以前。分页实测：同一 issue 传 limit=5 / 200 / 500 均只返回 20 行（HTTP 200）",
+    "finding": "近 7 天 pony-agent 只有 4 次 issue 上报（2 个 issue），量级很小。事件路由 /api/v1/issues/:id/events 的 limit 参数无效（恒 20 行硬上限），所以单 issue 事件数超过 20 时无法用该端点精确统计 → 该子口径 UNKNOWN；本报告 7d 数不受影响（两条 issue 的事件数 3 和 1 均 < 20），185 的累计值取自 issue.count。",
+    "confidence": "high"
+  },
+  {
+    "id": "sentry-route-probe",
+    "dimension": "issues",
+    "command": "for P in /api/v1/events?project=pony-agent /api/v1/stats /api/v1/projects/pony-agent/stats /api/v1/stats?project=pony-agent /healthz /api/v1/traces?project=pony-agent; do curl -s -o /dev/null -w '%{http_code}' ...; done",
+    "exit_code": 0,
+    "raw_summary": "/api/v1/events → 404；/api/v1/stats → 404；/api/v1/projects/pony-agent/stats → 404；/api/v1/stats?project=pony-agent → 404；/healthz → 200 {'db':'up','status':'ok'}；/api/v1/traces?project=pony-agent → 410 {'error':'trace_ingest_disabled','message':'tracing moved to tempo+langfuse'}",
+    "finding": "PonySentry 没有 /api/v1/events 与 /api/v1/stats 聚合接口（404），事件量只能走 issues/:id/events 或 /metrics；/api/v1/traces 返回 410 trace_ingest_disabled，明确『trace 已迁至 tempo+langfuse』，与 tracing 走 Tempo 的事实闭环。",
+    "confidence": "high"
+  },
+  {
+    "id": "sentry-metrics-scraped",
+    "dimension": "issues",
+    "command": "curl -s http://127.0.0.1:3000/metrics | grep pony_sentry_events_total; 以及 Prometheus: query=pony_sentry_events_total / up{job='pony-sentry'} / scrape_samples_scraped{job='pony-sentry'}",
+    "exit_code": 0,
+    "raw_summary": "host /metrics：pony_sentry_events_total 1255，pony_sentry_issues_total{status='unresolved',environment='dev'} 2；Prometheus：pony_sentry_events_total{job='pony-sentry',component='pony-sentry',env='production',instance='pony-sentry.pony-sentry.svc.cluster.local:3000'}=1255；up=1；scrape_samples_scraped=23",
+    "finding": "issue 上报链路的服务端可观测性健全：pony-sentry 自身 /metrics 被抓（up=1, 23 样本），事件总数 1255 与 host 直查一致。反差点是——项目自己的指标完全没有，只有承载它的服务端有指标。",
+    "confidence": "high"
+  },
+  {
+    "id": "unknown-metrics-na-vs-gap",
+    "dimension": "metrics",
+    "command": "（无动态证据可得）桌面端进程不在集群，无法从 Prometheus/Tempo 侧取得其进程级资源指标",
+    "exit_code": null,
+    "raw_summary": "无命令产出；本项为无法取得动态证据的说明",
+    "finding": "UNKNOWN：桌面端 CPU/内存/token 成本等进程级指标既不在 Prometheus，也无 pushgateway/remote-write 落点（contract: web_enable_remote_write_receiver=false）。是否应该用 OTel metrics + otlphttp 推到 collector（需 infra 侧开 metrics pipeline，contract 目前只有 traces 两条 pipeline）——无法从现有事实判定，需 infra 决策。",
+    "confidence": "UNKNOWN"
+  },
+  {
+    "id": "unknown-langfuse-user-session",
+    "dimension": "langfuse",
+    "command": "kubectl exec clickhouse-0 -- clickhouse-client -q \"select count() from default.traces where user_id is not null and timestamp > now()-interval 7 day\"（未执行成功/未采集）",
+    "exit_code": null,
+    "raw_summary": "未采集：本轮只验证了 trace/observation 数量与模型维度，未查 user_id / session_id 覆盖率",
+    "finding": "UNKNOWN：Langfuse 侧 user/session 维度（多轮会话、用户成本归因）是否可用未验证，需补一条 ClickHouse 查询。",
+    "confidence": "UNKNOWN"
+  }
+]

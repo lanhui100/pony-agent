@@ -1,6 +1,10 @@
 # 0024 PonySentry Agent Trace 上报契约与生命周期状态机
 
-Status: implemented
+Status: superseded by 0047（2026-10-24，由 [0047](0047-agent-trace-otel-langfuse-migration.md) 接替）
+
+> 本决策所定义的 `AgentTracePayload` 契约、`/api/v1/traces` 上报通道与 `EvalStatus` 状态机已随
+> PonySentry 服务端 Trace 能力下线而废止，Agent 运行链路改走 OpenTelemetry → Langfuse 语义轨。
+> 保留本文仅作历史追溯；其中「本地 `TurnTraceRecord` 持久化」部分仍有效（该结构未变）。
 
 ## 背景
 

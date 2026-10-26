@@ -76,6 +76,7 @@ fn test_ingest_payload_serialization_contract() {
                 map
             }),
         }]),
+        ..Default::default()
     };
 
     let serialized = serde_json::to_string(&payload).expect("Serialization must succeed");

@@ -2,6 +2,81 @@
 // 由 runtime/mod.rs 的 AgentRuntime 巨型 impl 拆分而来，行为与结构保持一致。
 use super::*;
 
+/// Wave-7 B001/B003：构造一条账本记录（纯函数，可单测）。
+///
+/// 语义（契约 G1.3 + L3 B2 修复）：
+/// - **usage 缺失**（`input_tokens` 或 `output_tokens` 为 `None`，如失败/取消/部分 provider 不回报）
+///   ⇒ `LedgerEntry::unpriced`（`cost_usd = NULL` / `priced = 0`），**绝不用 0 冒充已知成本**；
+/// - 模型未命中价格表 ⇒ 同样 `unpriced`；
+/// - 只有「真实 usage + 命中价格表」才写 `priced = 1`。
+pub(crate) fn build_usage_ledger_entry(
+    session_id: &str,
+    turn_id: &str,
+    meta: &ProviderEventMeta,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    recorded_at_ms: i64,
+) -> crate::agent::usage_ledger::LedgerEntry {
+    let protocol = crate::agent::cost::ProviderCostProtocol::from_label(&meta.protocol);
+    // usage 必须是**真实上报**的：任一 token 字段缺失即视为未计价（不猜、不补 0）。
+    let cost = match (input_tokens, output_tokens) {
+        (Some(input), Some(output)) => crate::agent::cost::estimate_cost_with_protocol(
+            &meta.model,
+            input,
+            output,
+            cache_hit_input_tokens,
+            protocol,
+        )
+        .map(|estimate| estimate.total_cost_usd),
+        _ => None,
+    };
+    let input = input_tokens.unwrap_or(0);
+    let output = output_tokens.unwrap_or(0);
+    let cache_read = cache_hit_input_tokens.unwrap_or(0);
+    match cost {
+        Some(cost) => crate::agent::usage_ledger::LedgerEntry::priced(
+            session_id,
+            turn_id,
+            recorded_at_ms,
+            &meta.provider_name,
+            &meta.model,
+            &meta.protocol,
+            input,
+            output,
+            cache_read,
+            cost,
+        ),
+        None => crate::agent::usage_ledger::LedgerEntry::unpriced(
+            session_id,
+            turn_id,
+            recorded_at_ms,
+            &meta.provider_name,
+            &meta.model,
+            &meta.protocol,
+            input,
+            output,
+            cache_read,
+        ),
+    }
+}
+
+/// Wave-5 K2：持久化 trace 的成本（未知模型 / 缺真实 usage ⇒ `None`）。
+///
+/// 只基于 provider 真实返回的 usage 计算，禁止本地 token 猜测（契约 K1.3）。
+fn estimate_trace_cost(
+    provider_meta: Option<&ProviderEventMeta>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+) -> Option<f64> {
+    let model = provider_meta.map(|meta| meta.model.as_str())?;
+    let input = input_tokens?;
+    let output = output_tokens?;
+    crate::agent::cost::estimate_cost(model, input, output, cache_hit_input_tokens)
+        .map(|estimate| estimate.total_cost_usd)
+}
+
 impl AgentRuntime {
     pub(crate) fn persist_turn_outcome(
         &self,
@@ -187,6 +262,16 @@ impl AgentRuntime {
                     turn_id: turn_id.to_string(),
                     session_id: session_id.map(str::to_string),
                     event_id: None,
+                    // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
+                    // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
+                    trace_id: crate::agent::otel::exported_trace_id(),
+                    // Wave-5 K2：会话 trace 成本（未知模型 / 缺 usage ⇒ None，键缺席）。
+                    cost_usd: estimate_trace_cost(
+                        provider_meta,
+                        input_tokens,
+                        output_tokens,
+                        cache_hit_input_tokens,
+                    ),
                     event_type: None,
                     event_version: None,
                     sequence: None,
@@ -222,6 +307,52 @@ impl AgentRuntime {
                 },
             );
         self.enqueue_trace_persistence(session_key, mutation);
+
+        // Wave-7 B001/B003：本轮用量写入 `usage_ledger`（幂等 UPSERT；协议感知计价）。
+        // 失败只 warn + spool（append_entry_resilient 内部处理），**绝不阻塞 turn 返回**。
+        self.append_usage_ledger(
+            session_id,
+            turn_id,
+            provider_meta,
+            input_tokens,
+            output_tokens,
+            cache_hit_input_tokens,
+        );
+    }
+
+    /// Wave-7 B003：把本轮用量写入账本（未知模型 ⇒ `cost_usd = NULL` / `priced = 0`）。
+    ///
+    /// 计价口径与 K2/K4 完全同源：`cost::estimate_cost_with_protocol`（协议语义归一）。
+    fn append_usage_ledger(
+        &self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        cache_hit_input_tokens: Option<u64>,
+    ) {
+        let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) else {
+            return; // 无会话归属 ⇒ 不入账（避免污染统计）
+        };
+        let Some(meta) = provider_meta else {
+            return; // 无 provider 元数据（未走到模型调用）⇒ 不入账
+        };
+        let entry = build_usage_ledger_entry(
+            session_id,
+            turn_id,
+            meta,
+            input_tokens,
+            output_tokens,
+            cache_hit_input_tokens,
+            crate::agent::usage_ledger::now_epoch_ms(),
+        );
+        let store = self.sessions.read().unwrap_or_else(|error| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+            error.into_inner()
+        });
+        // 失败已在 append_entry_resilient 内降级（warn + spool），这里只吞掉结果。
+        let _ = store.append_usage_ledger_entry(&entry);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -495,6 +626,11 @@ impl AgentRuntime {
                     turn_id: turn_id.to_string(),
                     session_id: session_id.map(str::to_string),
                     event_id: None,
+                    // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
+                    // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
+                    trace_id: crate::agent::otel::exported_trace_id(),
+                    // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+                    cost_usd: None,
                     event_type: None,
                     event_version: None,
                     sequence: None,
@@ -593,6 +729,11 @@ impl AgentRuntime {
                     turn_id: turn_id.to_string(),
                     session_id: session_id.map(str::to_string),
                     event_id: None,
+                    // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
+                    // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
+                    trace_id: crate::agent::otel::exported_trace_id(),
+                    // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+                    cost_usd: None,
                     event_type: None,
                     event_version: None,
                     sequence: None,
@@ -711,5 +852,91 @@ impl AgentRuntime {
                 checkpoint.status = status.to_string();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod usage_ledger_entry_tests {
+    use super::*;
+
+    fn meta() -> ProviderEventMeta {
+        ProviderEventMeta {
+            requested_name: "openai".to_string(),
+            provider_name: "openai".to_string(),
+            protocol: "openai-completions".to_string(),
+            model: "gpt-4o".to_string(),
+        }
+    }
+
+    /// L3 B2：**usage 缺失**的 turn 必须写 `unpriced`（cost=NULL / priced=0），绝不用 0 冒充已知成本。
+    #[test]
+    fn missing_usage_is_recorded_as_unpriced_not_zero_cost() {
+        let entry = build_usage_ledger_entry(
+            "sess-b2",
+            "turn-b2",
+            &meta(),
+            None,
+            None,
+            None,
+            1_700_000_000_000,
+        );
+        assert!(entry.cost_usd.is_none(), "usage 缺失时 cost_usd 必须为 None（SQL NULL）");
+        assert!(!entry.is_priced(), "usage 缺失时 priced 必须为 0");
+        // 半缺失（只有 input）同样不得计价。
+        let half = build_usage_ledger_entry(
+            "sess-b2",
+            "turn-b2-half",
+            &meta(),
+            Some(100),
+            None,
+            None,
+            1_700_000_000_000,
+        );
+        assert!(half.cost_usd.is_none(), "只有一半 usage 时同样不得计价");
+    }
+
+    /// 对照：真实 usage + 已知模型 ⇒ priced，且与 `cost::estimate_cost_with_protocol` 完全同源。
+    #[test]
+    fn real_usage_is_priced_with_protocol_aware_cost() {
+        let entry = build_usage_ledger_entry(
+            "sess-b2",
+            "turn-priced",
+            &meta(),
+            Some(1_000),
+            Some(500),
+            Some(200),
+            1_700_000_000_000,
+        );
+        let expected = crate::agent::cost::estimate_cost_with_protocol(
+            "gpt-4o",
+            1_000,
+            500,
+            Some(200),
+            crate::agent::cost::ProviderCostProtocol::from_label("openai-completions"),
+        )
+        .expect("known model")
+        .total_cost_usd;
+        assert!(entry.is_priced());
+        assert_eq!(entry.cost_usd, Some(expected));
+        assert_eq!(entry.input_tokens, 1_000);
+        assert_eq!(entry.cache_read_tokens, 200);
+    }
+
+    /// 未知模型（真实 usage）⇒ 同样 unpriced（G1.3）。
+    #[test]
+    fn unknown_model_with_usage_is_unpriced() {
+        let mut unknown = meta();
+        unknown.model = "definitely-not-priced-model".to_string();
+        let entry = build_usage_ledger_entry(
+            "sess-b2",
+            "turn-unknown",
+            &unknown,
+            Some(10),
+            Some(5),
+            None,
+            1_700_000_000_000,
+        );
+        assert!(entry.cost_usd.is_none());
+        assert!(!entry.is_priced());
     }
 }

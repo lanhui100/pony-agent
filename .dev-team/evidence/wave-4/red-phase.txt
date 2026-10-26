@@ -1,0 +1,40 @@
+=== Wave-4 Dual-Modal Red-Phase Test Evidence ===
+Generated At: 2026-10-25T11:28:00+08:00
+Test Agent: test-agent
+
+--------------------------------------------------------------------------------
+1. Frontend Red-Phase Receipt
+Command: npx vitest run tests/wave-4-observability.spec.ts
+Exit Code: 1
+Summary: 2 passed | 2 failed (4 total)
+
+Failures:
+- FAIL: C4 契约：默认 beforeSend 注册与凭据清洗截断治理 > 模块初始化时必须默认注册全局 beforeSend 钩子（getBeforeSend 缺省非 null）
+  Reason: AssertionError: expected null not to be null.
+  Analysis: src/lib/telemetry.ts 尚未在模块初始化时挂载并导出默认的 beforeSend 治理回调。
+
+- FAIL: C4 契约：默认 beforeSend 注册与凭据清洗截断治理 > 默认 beforeSend 必须对 extra 中的 Authorization Bearer token 深度脱敏并裁剪超长字段
+  Reason: AssertionError: expected null not to be null.
+  Analysis: 未提供默认 beforeSend 钩子对 extra 中的敏感 token 脱敏以及超长 payload 裁剪。
+
+--------------------------------------------------------------------------------
+2. Rust Core Red-Phase Receipt
+Command: cargo test -p pony-agent-core --test wave4_observability_chain_test
+Exit Code: 101 (Compile-time & Contract Red-Phase Failure)
+Summary: Failed to compile due to missing Wave-4 contract implementations
+
+Failures:
+- C1: unresolved imports OtelSettingsSnapshot, resolve_config:
+  OtelConfig 未实现按 settings > env > 默认端点 (https://otel.ponyjob.top) 的配置优先级解析器与 Settings 契约结构体。
+- C2: no field event_id / trace_id on type IngestPayload:
+  crates/pony-agent-core/src/agent/ponysentry/models.rs 中的 IngestPayload 尚未增加 event_id 与 trace_id 字段定义。
+- C3: unresolved import current_traceparent:
+  otel 模块尚未公开暴露 current_traceparent() 上下文查询契约接口。
+- C4: cannot find function current_trace_id:
+  otel 模块尚未公开活跃 turn 的 trace_id 查询能力，无法在 log_json 中动态注入 trace_id。
+- C5: exit flush contract:
+  src-tauri/src/lib.rs 目前仅处理 RunEvent::Exit，未在 RunEvent::ExitRequested 处理有界 force_flush。
+
+--------------------------------------------------------------------------------
+Conclusion:
+双模态红相已稳固锚定（前端 2 failed，Rust 7 compile errors），无恒真断言，均精准命中 Wave-4 冻结契约断链点。

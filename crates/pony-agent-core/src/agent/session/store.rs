@@ -5478,3 +5478,30 @@ fn load_attachment_image(
         name: attachment.name.clone(),
     })
 }
+
+/// Wave-7 B001/B003：用量账本的会话库门面（SQLite 后端直连，其它后端 fail-open 降级）。
+impl SessionStore {
+    /// 追加一条账本记录（幂等；失败返回 Err 供调用方忽略，绝不阻塞 turn）。
+    pub fn append_usage_ledger_entry(
+        &self,
+        entry: &crate::agent::usage_ledger::LedgerEntry,
+    ) -> Result<(), String> {
+        self.backend.append_usage_ledger_entry(entry)
+    }
+
+    /// 账本窗口聚合（只读）。
+    pub fn usage_ledger_window_summary(
+        &self,
+        scope: &crate::agent::usage_ledger::LedgerScope,
+    ) -> Result<crate::agent::usage_ledger::WindowSummary, String> {
+        self.backend.usage_ledger_window_summary(scope)
+    }
+
+    /// 账本天桶聚合（只读）。
+    pub fn usage_ledger_day_summaries(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<crate::agent::usage_ledger::DaySummary>, String> {
+        self.backend.usage_ledger_day_summaries(session_id)
+    }
+}

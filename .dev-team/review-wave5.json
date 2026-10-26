@@ -1,0 +1,126 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".dev-team/contracts/wave-5-cost.md",
+    ".dev-team/evidence/wave15/wire-red.json",
+    "crates/pony-agent-core/src/agent/cost.rs",
+    "crates/pony-agent-core/src/agent/app_settings.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/mod.rs",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/agent/session/tests.rs",
+    "crates/pony-agent-core/src/agent/session/types.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/agent/sse_adapter.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/tests/wave5_cost_test.rs",
+    "src-tauri/src/lib.rs",
+    "src/components/HomeStatusPanel.vue",
+    "src/components/config/ConfigGeneralSection.vue",
+    "src/stores/runtime.ts",
+    "src/stores/settings.ts",
+    "src/types/runtime.ts",
+    "src/types/settings.ts",
+    "tests/wave-5-cost.spec.ts"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/turn_flow.rs",
+      "line": 716,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '716,724p' crates/pony-agent-core/src/agent/turn_flow.rs && sed -n '64,78p' crates/pony-agent-core/src/agent/otel/log.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/cost.rs",
+      "line": 339,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'is_budget_exceeded(0.5' crates/pony-agent-core/tests/wave5_cost_test.rs || echo 'no equality assertion; K3.1 says 触及或超过 (>=) but impl uses >'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1730,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '1730,1748p' crates/pony-agent-core/src/agent/otel/mod.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/turn_flow.rs",
+      "line": 737,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n '737,743p' crates/pony-agent-core/src/agent/turn_flow.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 4127,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "python3 -c \"print('impl=',(max(200-5000,0)*3.0+5000*0.30)/1e6,'correct=',(200*3.0+5000*0.30)/1e6)\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave5_cost_test.rs",
+      "line": 292,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git diff HEAD -- crates/pony-agent-core/tests/wave5_cost_test.rs | head -40",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/cost.rs",
+      "line": 51,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'https://' crates/pony-agent-core/src/agent/cost.rs || echo 'K5.1 requires public pricing source link'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/budget.rs",
+      "line": 234,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'impl Default for ModelPricing' -A 8 crates/pony-agent-core/src/agent/budget.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 599,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -rn 'isInputDisabled\\|canSubmitPrompt' src --include=*.vue || echo 'no UI consumer: shim getters only satisfy tests/wave-5-cost.spec.ts'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 562,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn 'hasUnpricedTurns' src/components src/views 2>/dev/null || echo 'unpriced-model distinction never rendered (K2 edge)'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/components/config/ConfigGeneralSection.vue",
+      "line": 178,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '178,195p' src/components/config/ConfigGeneralSection.vue",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
+      "line": 81,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "git diff --stat -- crates/pony-agent-core/src/bin/ crates/pony-agent-core/src/agent/ponysentry/mod.rs && sed -n '496,503p' crates/pony-agent-core/src/agent/turn_flow.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/evidence/wave15/wire-red.json",
+      "line": 1,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "git diff --quiet -- .dev-team/evidence/wave15/wire-red.json; echo \"modified_exit=$? (regenerated by agent/runtime/tests.rs:10603 lib-test runs; revert before commit)\"",
+      "severity": "ADVISORY"
+    }
+  ]
+}

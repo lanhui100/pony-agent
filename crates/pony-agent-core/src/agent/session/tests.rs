@@ -2594,9 +2594,7 @@ fn corrupt_file_backend_falls_back_to_default_workspace() {
     let storage_path = dir.join("store.json");
     std::fs::write(&storage_path, "{bad json").unwrap();
 
-    let backend = FileSessionBackend {
-        storage_path: storage_path.clone(),
-    };
+    let backend = FileSessionBackend::new(storage_path.clone());
     let store = SessionStore::with_backend(Box::new(backend));
     let workspaces = store.list_workspaces();
     assert_eq!(workspaces.len(), 1, "损坏回退后应只剩默认 workspace");
@@ -3256,6 +3254,8 @@ fn file_backend_roundtrip_restores_turn_trace_history() {
             turn_id: "turn-1".to_string(),
             session_id: Some("trace-persisted".to_string()),
             event_id: Some("turn-1:4".to_string()),
+            trace_id: None,
+            cost_usd: None,
             event_type: Some("turn.completed".to_string()),
             event_version: Some("turn-event-v1".to_string()),
             sequence: Some(4),
@@ -3464,6 +3464,8 @@ fn file_backend_roundtrip_restores_runtime_generated_multi_boundary_hook_traces(
             turn_id: "turn-multi-hook".to_string(),
             session_id: Some("trace-multi-hook".to_string()),
             event_id: Some("turn-multi-hook:11".to_string()),
+            trace_id: None,
+            cost_usd: None,
             event_type: Some("turn.completed".to_string()),
             event_version: Some("turn-event-v1".to_string()),
             sequence: Some(11),
@@ -3563,6 +3565,8 @@ fn file_backend_roundtrip_restores_terminal_event_annotation_after_trace_update(
             turn_id: "turn-annotated".to_string(),
             session_id: Some("trace-annotated".to_string()),
             event_id: None,
+            trace_id: None,
+            cost_usd: None,
             event_type: None,
             event_version: None,
             sequence: None,
@@ -3703,6 +3707,8 @@ fn append_turn_trace_hook_records_updates_existing_trace_and_roundtrips() {
             turn_id: "turn-append-hook".to_string(),
             session_id: Some("trace-append-hook".to_string()),
             event_id: Some("turn-append-hook:3".to_string()),
+            trace_id: None,
+            cost_usd: None,
             event_type: Some("turn.completed".to_string()),
             event_version: Some("turn-event-v1".to_string()),
             sequence: Some(3),
@@ -3932,6 +3938,8 @@ fn file_backend_roundtrip_restores_checkpoint_persist_evidence() {
             turn_id: "turn-checkpoint-boundary".to_string(),
             session_id: Some("trace-checkpoint-boundary".to_string()),
             event_id: Some("turn-checkpoint-boundary:9".to_string()),
+            trace_id: None,
+            cost_usd: None,
             event_type: Some("turn.completed".to_string()),
             event_version: Some("turn-event-v1".to_string()),
             sequence: Some(9),
@@ -4072,6 +4080,8 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
             turn_id: "turn-failed-terminal".to_string(),
             session_id: Some("trace-failed-terminal".to_string()),
             event_id: Some("turn-failed-terminal:8".to_string()),
+            trace_id: None,
+            cost_usd: None,
             event_type: Some("turn.failed".to_string()),
             event_version: Some("turn-event-v1".to_string()),
             sequence: Some(8),
@@ -4230,6 +4240,8 @@ fn file_backend_roundtrip_persists_failed_turn_into_visible_history() {
             turn_id: "turn-failed-visible-history".to_string(),
             session_id: Some("failed-visible-history".to_string()),
             event_id: None,
+            trace_id: None,
+            cost_usd: None,
             event_type: None,
             event_version: None,
             sequence: None,
@@ -4325,6 +4337,8 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
             turn_id: "turn-cancelled-terminal".to_string(),
             session_id: Some("trace-cancelled-terminal".to_string()),
             event_id: Some("turn-cancelled-terminal:6".to_string()),
+            trace_id: None,
+            cost_usd: None,
             event_type: Some("turn.cancelled".to_string()),
             event_version: Some("turn-event-v1".to_string()),
             sequence: Some(6),

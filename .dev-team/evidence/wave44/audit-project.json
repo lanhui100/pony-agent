@@ -1,0 +1,232 @@
+{
+  "project": "/home/dm/pony-agent",
+  "namespace": "",
+  "service": "",
+  "pony_sentry_project": "",
+  "is_llm": true,
+  "ai_tier": "agent",
+  "ai_basis": "源码含 agent 循环/工具调用：status.ts",
+  "langfuse_applicability": "required",
+  "summary": {
+    "metrics": "PARTIAL",
+    "tracing": "PASS",
+    "logs": "PARTIAL",
+    "issues": "PARTIAL"
+  },
+  "exit_code": 2,
+  "checks": [
+    {
+      "dim": "metrics",
+      "id": "M1",
+      "kind": "static",
+      "status": "MISSING",
+      "detail": "未发现 /metrics 暴露点（无 prometheus 客户端/指标路由）",
+      "fix": "接入 prometheus 客户端并暴露 /metrics（或 OTel 的 prometheus exporter）",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "metrics",
+      "id": "M2",
+      "kind": "static",
+      "status": "PARTIAL",
+      "detail": "清单未显式声明 metrics 端口（抓取可走容器端口，但不利于发现）",
+      "fix": "在 Service/Deployment 里给 metrics 端口命名（如 name: metrics）",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "metrics",
+      "id": "M3",
+      "kind": "dynamic",
+      "status": "PARTIAL",
+      "detail": "没有精确 job= 的抓取，只匹配到前缀相同的近似 job（是另一个抓取目标）",
+      "fix": "确认 job 名是否与 service 一致；不一致就为 <svc> 新增独立 scrape job",
+      "evidence_quality": "deficiency"
+    },
+    {
+      "dim": "metrics",
+      "id": "M4",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "环境维度已切片（来源：Prometheus env 标签）",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "tracing",
+      "id": "T1",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "依赖清单中存在 OTel SDK（/home/dm/pony-agent/crates/pony-agent-core/Cargo.toml）",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "tracing",
+      "id": "T2",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "OTLP 端点已配置（env 或清单）",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "tracing",
+      "id": "T3",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "存在显式 span 打点",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "tracing",
+      "id": "T4",
+      "kind": "dynamic",
+      "status": "PASS",
+      "detail": "Tempo 近 24h 有 service.name= 的 trace（10 条命中）",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "tracing",
+      "id": "T5",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "AI Agent 项目已设 genai/langfuse 属性（语义轨可用）",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "logs",
+      "id": "L1",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "结构化（JSON）日志命中",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "logs",
+      "id": "L2",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "日志含关联键（trace_id/request_id/run_id）",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "logs",
+      "id": "L3",
+      "kind": "dynamic",
+      "status": "MISSING",
+      "detail": "Loki 查不到 namespace= 的日志",
+      "fix": "在 log-collector ConfigMap 增加 <source>/<filter>（infra 侧），标签需含 env/job/namespace/app/service_name/target_type",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "logs",
+      "id": "L4",
+      "kind": "static",
+      "status": "PARTIAL",
+      "detail": "Loki series 缺 service_name 标签，只能按 namespace 检索",
+      "fix": "在 log-collector 的 <filter> 里写 service_name=$.…；契约标签集见 references/audit-rubric.md",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "issues",
+      "id": "I1",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "存在 issue 上报客户端/调用",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "issues",
+      "id": "I2",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "ingest 端点与凭据已参数化（env）",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "issues",
+      "id": "I3",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "已显式设置 project 归属（tags.project）",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "issues",
+      "id": "I4",
+      "kind": "static",
+      "status": "PASS",
+      "detail": "已使用 event_id 幂等键",
+      "fix": "",
+      "evidence_quality": "unknown"
+    },
+    {
+      "dim": "issues",
+      "id": "I5",
+      "kind": "dynamic",
+      "status": "PARTIAL",
+      "detail": "PonySentry 查询成功但该 project 无 issue（可能确实无错误，也可能 project 名不匹配）",
+      "fix": "确认 tags.project 与查询名一致（当前查询值 ）",
+      "evidence_quality": "sparsity"
+    }
+  ],
+  "static_missing": [
+    "M1"
+  ],
+  "dynamic_missing": [
+    "L3"
+  ],
+  "gaps": [
+    {
+      "dim": "metrics",
+      "id": "M1",
+      "status": "MISSING",
+      "detail": "未发现 /metrics 暴露点（无 prometheus 客户端/指标路由）",
+      "fix": "接入 prometheus 客户端并暴露 /metrics（或 OTel 的 prometheus exporter）"
+    },
+    {
+      "dim": "metrics",
+      "id": "M2",
+      "status": "PARTIAL",
+      "detail": "清单未显式声明 metrics 端口（抓取可走容器端口，但不利于发现）",
+      "fix": "在 Service/Deployment 里给 metrics 端口命名（如 name: metrics）"
+    },
+    {
+      "dim": "metrics",
+      "id": "M3",
+      "status": "PARTIAL",
+      "detail": "没有精确 job= 的抓取，只匹配到前缀相同的近似 job（是另一个抓取目标）",
+      "fix": "确认 job 名是否与 service 一致；不一致就为 <svc> 新增独立 scrape job"
+    },
+    {
+      "dim": "logs",
+      "id": "L3",
+      "status": "MISSING",
+      "detail": "Loki 查不到 namespace= 的日志",
+      "fix": "在 log-collector ConfigMap 增加 <source>/<filter>（infra 侧），标签需含 env/job/namespace/app/service_name/target_type"
+    },
+    {
+      "dim": "logs",
+      "id": "L4",
+      "status": "PARTIAL",
+      "detail": "Loki series 缺 service_name 标签，只能按 namespace 检索",
+      "fix": "在 log-collector 的 <filter> 里写 service_name=$.…；契约标签集见 references/audit-rubric.md"
+    },
+    {
+      "dim": "issues",
+      "id": "I5",
+      "status": "PARTIAL",
+      "detail": "PonySentry 查询成功但该 project 无 issue（可能确实无错误，也可能 project 名不匹配）",
+      "fix": "确认 tags.project 与查询名一致（当前查询值 ）"
+    }
+  ],
+  "unknown": []
+}

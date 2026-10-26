@@ -1,0 +1,20 @@
+{
+  "wave": 43,
+  "captured_at": "2026-10-24T16:50+08:00",
+  "note": "pre-change regression baseline. 采集期间 protocol-agent 已落盘惰性空桩（otel/mod.rs 全部 unimplemented!，无调用点），对既有用例行为无影响。",
+  "frontend": {
+    "command": "npx vitest run",
+    "test_files": "92 passed",
+    "tests": "981 passed | 10 skipped",
+    "exit_code": 1,
+    "exit_code_reason": "EnvironmentTeardownError: [vitest-worker]: Closing rpc while \"onUserConsoleLog\" was pending（tests/runtime-store.spec.ts 的 teardown 报错，非用例失败）",
+    "classification": "PRE_EXISTING_BASELINE_DEFECT",
+    "policy": "本次任务不得把该 teardown 错误当作行为回归；同样也不得借修复之名扩大改动面。"
+  },
+  "rust": {
+    "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+    "result": "13 passed; 0 failed; 0 ignored",
+    "exit_code": 0
+  },
+  "policy": "红相锚定前与收口后均与本报基对照：基线绿→现红 = IMPL-DEFECT 打回；基线红→现绿 = 需说明是否被本次修复。"
+}

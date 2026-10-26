@@ -1,0 +1,88 @@
+   Compiling pony-agent-core v0.1.128 (/tmp/w45-red-head/crates/pony-agent-core)
+warning: unused import: `supports_keyboard_enhancement`
+  --> crates/pony-agent-core/src/bin/tui.rs:11:44
+   |
+11 |         disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `sync_state_with_registry` is never used
+    --> crates/pony-agent-core/src/bin/tui.rs:1913:4
+     |
+1913 | fn sync_state_with_registry(state: &mut TuiState) {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pony-agent-core` (bin "pony") generated 2 warnings (run `cargo fix --bin "pony"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 6.02s
+     Running tests/otel_resource_env_test.rs (/tmp/w45-redhead-target/debug/deps/otel_resource_env_test-c221923baba03aa3)
+
+running 1 test
+test pa153_t2_env_overrides_service_version_and_environment ... FAILED
+
+failures:
+
+---- pa153_t2_env_overrides_service_version_and_environment stdout ----
+
+thread 'pa153_t2_env_overrides_service_version_and_environment' (535383) panicked at crates/pony-agent-core/tests/otel_resource_env_test.rs:221:5:
+PA153-T2 前置：resource 必须先有 `service.version` 键（PA153-T1 冻结项），片段：.......2..service.name.". pony-agent-wave45-env-acceptance. ..telemetry.sdk.language....rust.!..telemetry.sdk.version....0.30.0.%..telemetry.sdk.name....opentelemetry.......pony-agent.agent.trace.............~+.c..j..\B."....*.agent.turn0.9<.'h...A{{(h...J/..langfuse.session.id....sess-pa153-t2-overrideJ/..langfuse.trace.name....turn-pa153-t2-overrideJ%..gen_ai.operation.name....agent.turnJ)..agent.turn.id....turn-pa153-t2-overrideJ...agent.turn.sequence....J...agent.turn.phase....completedz.......
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pa153_t2_env_overrides_service_version_and_environment
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+
+error: test failed, to rerun pass `-p pony-agent-core --test otel_resource_env_test`
+     Running tests/otel_resource_turn_status_test.rs (/tmp/w45-redhead-target/debug/deps/otel_resource_turn_status_test-917dc095fe2f5a34)
+
+running 6 tests
+test wave45_existing_span_and_attribute_literals_are_frozen ... ok
+test pa154_t2_governance_block_marks_turn_error ... FAILED
+test pa153_t1_resource_carries_name_version_and_environment ... FAILED
+test pa154_t3_successful_turn_does_not_emit_failure_signals ... ok
+test pa154_adv_failed_phase_without_child_error_keeps_semantics ... FAILED
+test pa154_t1_failed_tool_span_marks_turn_error ... FAILED
+
+failures:
+
+---- pa154_t2_governance_block_marks_turn_error stdout ----
+
+thread 'pa154_t2_governance_block_marks_turn_error' (537052) panicked at crates/pony-agent-core/tests/otel_resource_turn_status_test.rs:448:5:
+F4/F6/PA154-T2：治理 block 必须聚合到根 span 的 status.message=`turn_error: quota_blocked`，body 片段：.......%..telemetry.sdk.name....opentelemetry....service.name....pony-agent-wave45-acceptance. ..telemetry.sdk.language....rust.!..telemetry.sdk.version....0.30.0.......pony-agent.agent.trace..............Hj=.....n5....w"..Jv.._..*.governance.decide0.9.SC....A..C....J,..gen_ai.operation.name....governance.decideJ...governance.window....sessionJ...governance.decision....blockJ)..governance.reason....hard_limit_reachedJ!..governance.policy_version....v1J...governance.unpriced_turns....z...quota_blocked......................Hj=......Jv.._..*.agent.turn0.9..B....A=.C....J&..langfuse.session.id....…(共 794 字符，已截断)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- pa153_t1_resource_carries_name_version_and_environment stdout ----
+
+thread 'pa153_t1_resource_carries_name_version_and_environment' (537049) panicked at crates/pony-agent-core/tests/otel_resource_turn_status_test.rs:313:5:
+F1/PA153-T1：resource 必须携带 `service.version`（当前实现只 with_service_name）。body 片段：.......%..telemetry.sdk.name....opentelemetry....service.name....pony-agent-wave45-acceptance. ..telemetry.sdk.language....rust.!..telemetry.sdk.version....0.30.0.......pony-agent.agent.trace.....\.(a(wov.e.._.`..9...%.]y".@.4.sZ.i*.tool.call0.9..wV...A-.wV...J...gen_ai.tool.name....bashJ#..langfuse.observation.type....toolJ...agent.tool.status....successJ...agent.tool.duration_ms....J&..langfuse.session.id....sess-pa153-t1z............\.(a(wov.e.._.`..@.4.sZ.i*.agent.turn0.9.zvV...At.wV...J&..langfuse.session.id....sess-pa153-t1J&..langfuse.trace.name....turn-pa153-t1J%..gen_ai.operation.name…(共 716 字符，已截断)
+
+---- pa154_adv_failed_phase_without_child_error_keeps_semantics stdout ----
+
+thread 'pa154_adv_failed_phase_without_child_error_keeps_semantics' (537050) panicked at crates/pony-agent-core/tests/otel_resource_turn_status_test.rs:237:5:
+assertion `left == right` failed: PA154[ADV]：`agent.turn.outcome` 必须恰好出现一次（根 span 单值），实际 0 次，body 片段：.......%..telemetry.sdk.name....opentelemetry....service.name....pony-agent-wave45-acceptance. ..telemetry.sdk.language....rust.!..telemetry.sdk.version....0.30.0.......pony-agent.agent.trace..........2..qR.Cj=.....@.-.C..*.agent.turn0.9...E...AK..E...J'..langfuse.session.id....sess-pa154-advJ'..langfuse.trace.name....turn-pa154-advJ%..gen_ai.operation.name....agent.turnJ!..agent.turn.id....turn-pa154-advJ...agent.turn.sequence....J...agent.turn.phase....failedz...failed........
+  left: 0
+ right: 1
+
+---- pa154_t1_failed_tool_span_marks_turn_error stdout ----
+
+thread 'pa154_t1_failed_tool_span_marks_turn_error' (537051) panicked at crates/pony-agent-core/tests/otel_resource_turn_status_test.rs:395:5:
+F4/F5/PA154-T1：子工具失败必须聚合到根 span 的 status.message=`turn_error: tool_failed`，body 片段：.......%..telemetry.sdk.name....opentelemetry....service.name....pony-agent-wave45-acceptance. ..telemetry.sdk.language....rust.!..telemetry.sdk.version....0.30.0.......pony-agent.agent.trace.....w..... .MZ..j0].....>..K."..\...d..*.tool.call0.9.r....A..r....J...gen_ai.tool.name....bashJ#..langfuse.observation.type....toolJ...agent.tool.status....failedJ...agent.tool.duration_ms....J...agent.tool.error....boomJ&..langfuse.session.id....sess-pa154-t1z...boom.............w..... .MZ..j0]...\...d..*.agent.turn0.9..q....A..r....J&..langfuse.session.id....sess-pa154-t1J&..langfuse.trace.name....turn…(共 750 字符，已截断)
+
+
+failures:
+    pa153_t1_resource_carries_name_version_and_environment
+    pa154_adv_failed_phase_without_child_error_keeps_semantics
+    pa154_t1_failed_tool_span_marks_turn_error
+    pa154_t2_governance_block_marks_turn_error
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.02s
+
+error: test failed, to rerun pass `-p pony-agent-core --test otel_resource_turn_status_test`
+error: 2 targets failed:
+    `-p pony-agent-core --test otel_resource_env_test`
+    `-p pony-agent-core --test otel_resource_turn_status_test`
+EXIT=101

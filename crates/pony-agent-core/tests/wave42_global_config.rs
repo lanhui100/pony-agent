@@ -59,6 +59,10 @@ impl TempDir {
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("创建 C2/C3/C4 测试临时目录失败");
+        // 注意：这里**刻意不做 canonicalize**。夹具根保持"与生产 workspace root 相同的形态"——
+        // 生产 root 来自会话注册（`workspace::normalize_workspace_root`：canonicalize 后**剥掉**
+        // Windows `\\?\` 前缀），即普通绝对路径。保持这一形态才能如实暴露产品侧的
+        // "plain root vs verbatim 解析结果"不一致（见 C4-5 用例上方的缺陷说明）。
         Self { root }
     }
 
@@ -188,12 +192,29 @@ fn c2_default_budget_matches_legacy_constitution_bytes() {
 
 #[test]
 fn c2_total_budget_omits_low_priority_global_layers() {
-    // Arrange：项目层 150B、高优先级全局层 150B、低优先级全局层 ~2KB
-    let workspace = TempDir::new("budget-ws");
-    let low = TempDir::new("budget-low");
-    let high = TempDir::new("budget-high");
-    let project_line = format!("# PROJECT-RULES-MARKER\n{}\n", "p".repeat(120));
-    let high_line = format!("# HIGH-GLOBAL-MARKER\n{}\n", "h".repeat(120));
+    // Arrange：项目层 ~58B、高优先级全局层 ~57B、低优先级全局层 ~2KB
+    //
+    // 为什么把两层小内容从 150B 缩到 ~58B（**预算 600 与"保留/省略"期望均未改**）：
+    // 产品预算按**渲染后字节**计，含每层 `## <标题> (<绝对路径>)` 标题行与末尾 `omitted <路径>`
+    // 行（`workspace_hotloader.rs:1254-1259` 明确冻结此口径）。本地实测渲染代价为
+    //   total ≈ 105 + 3*len(根路径) + 项目内容 + 高层内容
+    // Linux 上根≈`/tmp/wave42-c2c4-budget-high-<pid>-<nanos>-<seq>`（≈55）→ total≈570，
+    // 600 预算只剩 **30B** 余量；而 Windows 根含 `\\?\C:\Users\runneradmin\AppData\Local\Temp\`
+    // （≈96）→ total≈681 > 600 ⇒ 连高优先级层都被 omit（CI 原样复现）。
+    // 路径前缀无法缩短（OS 既定），故把**夹具内容**压到与平台无关的量级，恢复原有语义：
+    // 「项目层 + 高优先级全局层都放得下，低优先级 ~2KB 必须被省略」。
+    //
+    // **夹具根长度上限 ≈140 字符**（实测：根 135 绿、167 红）。Windows 实际根 ≈96（余量 ~44）。
+    // 若将来 CI runner 的 TEMP 根异常长而本用例转红：说明该口径下"路径也吃用户预算"已经
+    // 实质影响可用性 —— 那属于**产品预算口径议题**（要把标题行/omitted 行排除出预算），
+    // 不要靠继续缩夹具内容来凑，按议题走。
+    // 目录标签也刻意取短：两条全局层路径 + 项目层路径都会被渲染进预算（标题行 / omitted 行），
+    // 标签每多 1 字符就多消耗 3 字节预算。
+    let workspace = TempDir::new("c2ws");
+    let low = TempDir::new("c2lo");
+    let high = TempDir::new("c2hi");
+    let project_line = format!("# PROJECT-RULES-MARKER\n{}\n", "p".repeat(24));
+    let high_line = format!("# HIGH-GLOBAL-MARKER\n{}\n", "h".repeat(24));
     let low_line = format!("# LOW-GLOBAL-MARKER\n{}\n", "w".repeat(2_000));
     workspace.write("AGENTS.md", &project_line);
     high.write("AGENTS.md", &high_line);
@@ -776,7 +797,19 @@ fn c4_oversize_instruction_is_truncated_with_marker() {
 // ============================================================
 // C4-5 workspace_read_file 前置 `=== Additional instructions` 段落
 // ============================================================
-
+//
+// 【已知产品缺陷（Windows 专属，已经上报 Lead，产品侧未改）】
+// 本用例与 C4-7 在 windows-latest 上会红，原因**不是**并发、也不是预算，而是路径前缀形态不一致：
+//   1) 产品 `resolve_workspace_path`（`tools.rs:4752`）返回的是 `candidate.canonicalize()` 的
+//      **原始**结果——Windows 上带 verbatim 前缀 `\\?\C:\...`；
+//   2) 而 `with_touched_instructions`（`tools.rs:3360-3390`）把**会话 root**（已剥掉 `\\?\`
+//      前缀的普通绝对路径，见 `workspace::normalize_workspace_root`）传给
+//      `instructions_for_touched_path`，后者用 `lexical_touched.starts_with(lexical_root)`
+//      做边界闸门（`instruction_touch.rs:60-62`）——`Prefix(VerbatimDisk)` 与 `Prefix(Disk)`
+//      不是同一组件 ⇒ 直接返回空 ⇒ 触达注入整段为空 ⇒ 段落缺失 / `with_section=0`。
+// 本机（Linux）100% 复现方式：`TMPDIR=<符号链接目录>`，让 canonical 与给定路径不一致，
+// 即可得到与 CI 逐字相同的 "0/8"。修法应落在产品侧（两处统一 `path_permission::normalize_canonical`
+// 或改用 `canonical_resolved_root`），测试侧故意不 canonicalize 夹具根，以免把该缺陷掩盖成绿色。
 #[test]
 fn c4_workspace_read_file_prepends_additional_instructions() {
     let root = TempDir::new("touch-tool");

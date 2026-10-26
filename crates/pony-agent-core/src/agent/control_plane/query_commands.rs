@@ -49,27 +49,28 @@ impl HostControlPlane {
             .load_turn_traces(session_id)
     }
 
-    /// 手动上传指定会话的 trace 至 PonySentry（Trace tab 一键上传）。
-    /// 读取会话全部持久化 turn trace，聚合后按分片序列化上限（1_500_000 bytes）切分为
-    /// 多个 Session 级 Trace 记录并逐个上报；`project` 取 workspace root 的 basename。
-    /// 若无任何 trace 返回 Ok(0)；若有则上报并返回全部 turns 数量（成功数，方便前端提示
-    /// "已上传包含 N 轮对话的 Trace"）。
+    /// 手动上传指定会话的 trace 至 Langfuse（Trace tab 一键上传，D5 迁移）。
+    ///
+    /// 读取会话全部持久化 turn trace，经 OTel 重放为 span 树并强制导出（旁路全局上报开关：
+    /// 用户点击即逐次授权）。返回导出的 turn 数；无 trace 返回 `Ok(0)`。
     pub async fn upload_session_trace(&self, session_id: &str) -> Result<usize, String> {
         let traces = self.load_session_traces(session_id);
-        let project = std::path::Path::new(&self.get_workspace_root())
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-        let payloads = crate::agent::ponysentry::build_session_trace_payloads_sharded(
-            session_id,
-            project.as_deref(),
-            traces,
-            1_500_000,
-        );
-        let total_turns: usize = payloads.iter().map(|payload| payload.turns.len()).sum();
-        for payload in payloads {
-            crate::agent::ponysentry::send_agent_trace_direct(payload).await?;
+        if traces.is_empty() {
+            return Ok(0);
         }
-        Ok(total_turns)
+        // task-10：导出是**阻塞**调用（每块最长 3000ms），必须移出 async worker，
+        // 否则一次手动上传会把 tokio worker 占住数秒。非 async 上下文（std 单测/CLI）
+        // 没有 spawn_blocking 可用，则就地执行（语义等价）。
+        let session_id = session_id.to_string();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle
+                .spawn_blocking(move || {
+                    crate::agent::otel::force_export_session_trace(&session_id, &traces)
+                })
+                .await
+                .map_err(|err| format!("trace 上传任务执行失败：{err}"))?,
+            Err(_) => crate::agent::otel::force_export_session_trace(&session_id, &traces),
+        }
     }
 
     /// PA-094：按引用加载 build_context_observation 全量 payload（大字段外置）。
@@ -86,6 +87,22 @@ impl HostControlPlane {
                 e.into_inner()
             })
             .load_build_context_observation(session_id, observation_ref)
+    }
+
+    /// Wave-7 G4：用量治理汇总（只读账本聚合；空库返回零值结构，绝不报错）。
+    pub fn usage_governance_summary(
+        &self,
+        session_id: Option<String>,
+    ) -> crate::agent::usage_governance::UsageGovernanceSummaryView {
+        let target = session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let store = self.sessions_rwlock.read().unwrap_or_else(|error| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+            error.into_inner()
+        });
+        crate::agent::usage_governance::summary_for_store(&store, target)
     }
 
     pub fn load_model_monitor_summary(

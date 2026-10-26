@@ -1,0 +1,24 @@
+=== Wave-2 Token Speed & Mode Physical Evidence (task-14) ===
+Mode 1 (Default / Production):
+  data-speed-debug: null (Gated / Zero Payload)
+  data-context-debug: null (Gated / Zero Payload)
+  data-speed-mode: call_active_stream (Preserved)
+
+Mode 2 (Debug Enabled / ?debug=1):
+  Scenario A (Active Stream):
+    Speed Text: 267 t/s
+    data-speed-mode: call_active_stream
+    data-speed-debug: in=42000;out=800;dur=4000;ttft=1000;win=200000;ratio=0.210
+    data-context-debug: in=42000;win=200000;pct=21;mode=call_active_stream;speed=267
+    Input Tokens: 42K
+    Context Circle Offset: 37.227872945039046 (expected ≈ 37.23)
+
+  Scenario B (Completed Aggregate):
+    Speed Text: 250 t/s
+    data-speed-mode: turn_completed_aggregate
+    data-speed-debug: in=42000;out=1500;dur=6000;ttft=-;win=200000;ratio=0.210
+    data-context-debug: in=42000;win=200000;pct=21;mode=turn_completed_aggregate;speed=250
+    Discriminant: not 375 t/s (PASS)
+
+=== Console Diagnostics Logs ===
+[no special metrics logs emitted directly to console]

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { TooltipProvider } from "reka-ui";
-import { ArrowLeft, CheckCircle2, LoaderCircle, UploadCloud, XCircle } from "lucide-vue-next";
+import { ArrowLeft, CheckCircle2, LoaderCircle, Shield, UploadCloud, XCircle } from "lucide-vue-next";
 import ModelMonitorPage from "@/components/ModelMonitorPage.vue";
 import TraceInspector from "@/components/TraceInspector.vue";
 import Tooltip from "@/components/ui/Tooltip.vue";
@@ -32,7 +32,7 @@ const { workspaceMode } = storeToRefs(settingsStore);
 
 const isCoding = computed(() => workspaceMode.value === "coding");
 
-// Trace 一键上传至 PonySentry（纯手动触发，上传当前会话全部持久化 trace）
+// Trace 一键上传至 Langfuse（纯手动触发、逐次授权，上传当前会话全部持久化 trace）
 const runtimeStore = useRuntimeStore();
 const uploadState = ref<"idle" | "uploading" | "done" | "error">("idle");
 const uploadFeedback = ref("");
@@ -81,7 +81,7 @@ async function uploadSessionTrace() {
     } else {
       uploadState.value = "done";
       uploadFeedback.value = `已成功上传该会话 Trace（共 ${count} 轮对话）`;
-      showToast(`已成功上传会话 Trace（包含 ${count} 轮对话链路）至 PonySentry`, "success");
+      showToast(`已成功上传会话 Trace（包含 ${count} 轮对话链路）至 Langfuse`, "success");
     }
   } catch (err) {
     uploadState.value = "error";
@@ -224,13 +224,13 @@ onMounted(() => {
         <TooltipProvider :delay-duration="200">
           <Tooltip
             v-if="isCoding && activeTab === 'trace'"
-            :text="uploadState === 'uploading' ? '上传中…' : '上传本会话 Trace 至 PonySentry'"
+            :text="uploadState === 'uploading' ? '上传中…' : '上传本会话 Trace 至 Langfuse'"
             side="bottom"
           >
             <button
               type="button"
               class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-50"
-              aria-label="上传本会话 Trace 至 PonySentry"
+              aria-label="上传本会话 Trace 至 Langfuse"
               data-testid="telemetry-upload-trace"
               :disabled="uploadState === 'uploading'"
               @click="uploadSessionTrace"
@@ -277,6 +277,19 @@ onMounted(() => {
         </button>
       </div>
       </div>
+    </div>
+
+    <!-- Wave43 D7：手动上传为单次显式动作，与配置页全局上报开关解耦（plan U3）。 -->
+    <div
+      v-if="isCoding && activeTab === 'trace'"
+      class="flex shrink-0 items-center gap-1.5 border-b border-stone-200/70 px-4 py-2 text-[11px] leading-5 text-stone-500"
+      data-testid="telemetry-upload-independent-note"
+    >
+      <Shield class="h-3.5 w-3.5 shrink-0 text-stone-400" />
+      <span>
+        此操作与配置页「全局 Agent Trace 上报」开关互不影响：手动上传仅对本次点击生效，
+        全局开关关闭时也可按需上传单次会话。
+      </span>
     </div>
 
     <div class="flex min-h-0 flex-1 flex-col p-3">

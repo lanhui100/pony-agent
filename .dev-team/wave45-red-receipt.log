@@ -1,0 +1,195 @@
+###############################################################
+# wave-45 L2-AT 红相回执（RED PHASE · Gate-1 审查 A 修订版 v2）
+# repo: /home/dm/pony-agent   HEAD: f233a96 (main)   测试基线: f233a96
+# date: 2026-10-25T18:31+08:00 (Asia/Shanghai) · v2 (含 Lead stash 后主工作树红相实跑)
+# 契约源（唯一口径）: .dev-team/contract-matrix-wave45.md（协议特派员冻结）
+# 角色: test-agent-45（独立 Test Agent，只写测试与回执；未改任何 src/**）
+#
+# v2 修订（Lead Gate-1 审查 A，1 条 BLOCKING + 5 条收口）：
+#   [A-BLOCKING#1] PA154-T1 唯一前缀：断言 `turn_error: tool_failed`（不再只断言 `tool_failed`），
+#                  且 `turn_error` 在 body 中恰好 1 次（子 span 现有文案不得含该前缀）
+#   [A-BLOCKING#2] PA154-T2 唯一前缀：断言 `turn_error: quota_blocked`
+#                  （避免与 HEAD 既有 governance 子 span 的裸 `quota_blocked` 混淆）
+#   [A-#3] outcome 值断言：定位 `agent.turn.outcome` 键后取 16 字节窗口，必须含 `error`、不得含 `success`
+#                  （键存在 ≠ 值正确）；T1/T2/ADV 三处生效
+#   [A-#4] PA154-ADV（phase=failed，无 child error）：body 含 `failed`、**不含** `turn_error`（phase 优先）、
+#                  仍含 `agent.turn.outcome`（值 error）；全成功 T3：outcome/tool_failed/quota_blocked/turn_error 皆不出现
+#   [A-#5] 删除自指自证字面量断言（`assert_eq!("x","x")` 恒真、零证伪能力），
+#                  冻结用例收缩为「HEAD 既有常量 vs 字面量」的真实取值断言
+#   [A-#6] PA155 spec phase 收紧：`not.toBe("error"|"failed"|"cancelled")`
+###############################################################
+
+
+===============================================================
+[1A] RED 相（权威 · 契约冻结命令 · 主工作树实跑）
+    Lead 以 `git stash push` 暂存实现（stash@{0} = wave45-impl）后，本 Agent 在
+    /home/dm/pony-agent（HEAD f233a96 源码态）执行契约冻结命令，v2 冻结测试实测为红。
+===============================================================
+
+# command: npx vitest run tests/acceptance/wave45          (cwd: /home/dm/pony-agent)
+# EXIT CODE: 1
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+# 逐条：
+#   PA155-T1 FAILED  pa155-local-cache-timeout.spec.ts:322  expected false to be true
+#   PA155-T2 FAILED  pa155-local-cache-timeout.spec.ts:373  expected false to be true
+
+# command: cargo test -p pony-agent-core --test otel_resource_turn_status_test \
+#            --test otel_resource_env_test --target-dir target-test --no-fail-fast
+#          (cwd: /home/dm/pony-agent)
+# EXIT CODE: 101
+running 1 test
+test pa153_t2_env_overrides_service_version_and_environment ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+running 6 tests
+test wave45_existing_span_and_attribute_literals_are_frozen ... ok
+test pa154_adv_failed_phase_without_child_error_keeps_semantics ... FAILED
+test pa154_t1_failed_tool_span_marks_turn_error ... FAILED
+test pa153_t1_resource_carries_name_version_and_environment ... FAILED
+test pa154_t3_successful_turn_does_not_emit_failure_signals ... ok
+test pa154_t2_governance_block_marks_turn_error ... FAILED
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out
+# 逐条失败摘要（全部为断言失败，零编译失败）：
+#   PA153-T1        : otel_resource_turn_status_test.rs:287  resource 缺 `service.version`
+#   PA153-T2        : otel_resource_env_test.rs:221         resource 缺 `service.version`（env 覆盖前置）
+#   PA154-T1        : otel_resource_turn_status_test.rs:367  缺根 span `turn_error: tool_failed`
+#   PA154-T2        : otel_resource_turn_status_test.rs:428  缺 `agent.turn.outcome`（治理 block 未承接）
+#   PA154-ADV       : otel_resource_turn_status_test.rs:522  缺 `agent.turn.outcome`（phase=failed 无聚合键）
+#   预通过 2 条（设计如此）：既有常量守卫 + T3 纯负向断言（HEAD 天然满足）
+# 原始日志：
+#   .dev-team/evidence/wave45/w45-rust-canonical-red.log
+#   .dev-team/evidence/wave45/w45-ts-canonical-red.log
+
+===============================================================
+[1B] RED 相（可重放替代路径）：干净 HEAD f233a96 git worktree + v2 冻结测试
+    说明：主工作树被 stash 撤销前的红相窗口里，实现已落地，故另在 worktree 复现同一红相；
+    该路径不依赖 Lead 的 stash 状态，可在任意时刻重放（复现后 worktree 已按纪律清理）。
+===============================================================
+
+# --- Rust ---
+# command: cargo test -p pony-agent-core --test otel_resource_turn_status_test \
+#            --test otel_resource_env_test --target-dir /tmp/w45-redhead-target --no-fail-fast
+# cwd: /tmp/w45-red-head
+# 期望：因断言失败变红（无编译失败）
+# EXIT CODE: 101
+running 1 test
+test pa153_t2_env_overrides_service_version_and_environment ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+running 6 tests
+test wave45_existing_span_and_attribute_literals_are_frozen ... ok
+test pa154_t2_governance_block_marks_turn_error ... FAILED
+test pa153_t1_resource_carries_name_version_and_environment ... FAILED
+test pa154_t3_successful_turn_does_not_emit_failure_signals ... ok
+test pa154_adv_failed_phase_without_child_error_keeps_semantics ... FAILED
+test pa154_t1_failed_tool_span_marks_turn_error ... FAILED
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out
+# 逐条失败摘要（均为断言失败，非编译失败）：
+#   PA153-T1 FAILED  : otel_resource_turn_status_test.rs:287  缺 resource `service.version`
+#   PA153-T2 FAILED  : otel_resource_env_test.rs:221         缺 resource `service.version`（env 覆盖前置）
+#   PA154-T1 FAILED  : otel_resource_turn_status_test.rs:367  缺根 span `turn_error: tool_failed`
+#   PA154-T2 FAILED  : otel_resource_turn_status_test.rs:428  缺 `agent.turn.outcome`（治理 block 不承接）
+#   PA154-ADV FAILED : otel_resource_turn_status_test.rs:522  缺 `agent.turn.outcome`（phase=failed 无 outcome）
+#   预通过 2 条（设计如此，非假绿）：
+#     wave45_existing_span_and_attribute_literals_are_frozen（HEAD 既有常量守卫，本应常绿）
+#     pa154_t3_successful_turn_does_not_emit_failure_signals（纯负向断言，HEAD 天然满足）
+
+# --- 前端 ---
+# command: npx vitest run tests/acceptance/wave45
+# cwd: /tmp/w45-red-head
+# 期望：红
+# EXIT CODE: 1
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+# 逐条失败摘要：
+#   PA155-T1 FAILED : pa155-local-cache-timeout.spec.ts:322 AssertionError: expected false to be true
+#                     （local-cache 分支裸 await ⇒ initializeSessions 超出 16000ms 截止仍未 settle）
+#   PA155-T2 FAILED : pa155-local-cache-timeout.spec.ts:373 AssertionError: expected false to be true
+#                     （迟到 resolve 对抗：同样因裸 await 永不收敛）
+#   另：两例均先通过「防假绿守卫」expectLocalCacheStrategy()（deriveInitStrategy(...).kind==="local-cache"），
+#   证明夹具确实命中 local-cache 分支，未静默退化到 host-read。
+
+# 原始日志（全文）：
+#   .dev-team/evidence/wave45/w45-rust-redhead-v2.log
+#   .dev-team/evidence/wave45/w45-ts-redhead-v2.log
+# v1（Gate-1 A 修订前）日志留档：
+#   .dev-team/evidence/wave45/w45-rust-redhead.log / w45-ts-redhead.log
+
+
+===============================================================
+[2] 实现态绿灯快照（2026-10-25T18:25 采集：Executor 实现已落地主工作树时）
+    目的：证明冻结断言「可实现且与契约一致」（红相不是被写死的永假断言）。
+    注：随后 Lead 以 stash 暂存实现做红相复验，故该绿灯态为历史快照，非当前树状态。
+===============================================================
+
+# command: cargo test -p pony-agent-core --test otel_resource_turn_status_test \
+#            --test otel_resource_env_test --target-dir target-test --no-fail-fast
+# cwd: /home/dm/pony-agent
+# EXIT CODE: 0
+running 1 test
+test pa153_t2_env_overrides_service_version_and_environment ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+running 6 tests
+test wave45_existing_span_and_attribute_literals_are_frozen ... ok
+test pa154_adv_failed_phase_without_child_error_keeps_semantics ... ok
+test pa154_t2_governance_block_marks_turn_error ... ok
+test pa153_t1_resource_carries_name_version_and_environment ... ok
+test pa154_t1_failed_tool_span_marks_turn_error ... ok
+test pa154_t3_successful_turn_does_not_emit_failure_signals ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+# command: npx vitest run tests/acceptance/wave45
+# cwd: /home/dm/pony-agent
+# EXIT CODE: 0
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+
+# 回归邻域（既有验收不受影响）：npx vitest run tests/acceptance/wave44
+# EXIT CODE: 0    Test Files 3 passed (3) / Tests 8 passed (8)
+
+
+===============================================================
+[3] 基线核对（Lead 并行执行，本 Agent 只读复核）
+===============================================================
+
+# command: cargo test -p pony-agent-core --lib --target-dir target-test
+# EXIT CODE: 101
+#   1149 passed; 1 failed; 0 ignored
+# 唯一失败项：agent::config::tests::missing_capabilities_fields_use_stable_defaults
+#   panicked at crates/pony-agent-core/src/agent/config.rs:1616
+#   left: Some(1000000) / right: Some(256000)
+# 判定：**非本波引入**。该轮运行期间 `git status` 仅有本 Agent 两个未跟踪测试文件
+#       （src/** 零改动），故属 HEAD f233a96 存量失败，与 wave-45 三张断言无关；
+#       本 Agent 未修改该断言、未做 ignore/skip。
+# 原始日志：.dev-team/evidence/wave45/cargo-lib-baseline.log
+
+
+===============================================================
+[4] 覆盖清单（9 条断言：Rust 7 + 前端 2）
+===============================================================
+
+# Rust · crates/pony-agent-core/tests/otel_resource_turn_status_test.rs（6 条）
+#   PA153-T1  resource 三键（service.name/service.version/deployment.environment）各一次
+#             + service.version == env!("CARGO_PKG_VERSION") + debug ⇒ development
+#   PA154-T1  tool failed + phase=completed ⇒ `turn_error: tool_failed`（恰好 1 次）+ outcome=error
+#   PA154-T2  governance block + phase=completed ⇒ `turn_error: quota_blocked`（恰好 1 次）+ outcome=error
+#   PA154-T3  全成功 ⇒ outcome/tool_failed/quota_blocked/turn_error 皆不出现 + 正锚 agent.turn/.phase/completed
+#   PA154-ADV phase=failed 无 child error ⇒ 含 failed、不含 turn_error、含 outcome=error、不 panic
+#   FREEZE    HEAD 既有 span 名/属性键取值守卫（真实常量断言，非自指自证）
+# Rust · crates/pony-agent-core/tests/otel_resource_env_test.rs（1 条，独立进程隔离）
+#   PA153-T2  PONY_OTEL_SERVICE_VERSION=9.9.9-wave45 / PONY_OTEL_ENVIRONMENT=staging ⇒ wire 出现哨兵值
+#             且不出现默认版本；空白串 "  " ⇒ 回落 CARGO_PKG_VERSION + development
+# 前端 · tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts（2 条）
+#   PA155-T1  缓存命中 local-cache + 宿主读永不 settle ⇒ 16000ms 内 resolve、cached 消息可见、
+#             sessionError 无硬失败、phase ∉ {error,failed,cancelled}、sessionOperation=null、host 读 1 次
+#   PA155-T2  迟到 resolve(15000+5000ms) ⇒ 结算态零改写（sessionId/phase/messages 逐项相等）、
+#             host 文案不出现、host 读仍 1 次（无重试风暴）
+# 纪律：零 skip/todo、零 #[ignore]、零吞异常、零真实 sleep（fake timers / 硬截止 sink）、
+#       每条负向断言均配正向锚，LocalStorage 与进程 env 均在用例内复位（谁修改谁恢复）。
+
+===============================================================
+[5] 环境清理
+===============================================================
+# /tmp/w45-red-head git worktree（红相复现用）与 /tmp/w45-redhead-target 构建目录在留证后移除；
+# 复现命令见 [1]。主工作树未创建任何目标目录以外的残留物。
+# worktree 清理: git worktree remove /tmp/w45-red-head --force && rm -rf /tmp/w45-redhead-target
+###############################################################

@@ -1,0 +1,119 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".github/workflows/release.yml",
+    "crates/pony-agent-core/src/agent/app_settings.rs",
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/client.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/models.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/model_catalog.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/tests/ponysentry_credential_gate.rs",
+    "crates/pony-agent-core/tests/ponysentry_telemetry_test.rs",
+    "crates/pony-agent-core/tests/wave4_observability_chain_test.rs",
+    "crates/pony-agent-core/tests/otel_trace_migration_test.rs",
+    "src-tauri/src/lib.rs",
+    "src/components/config/ConfigGeneralSection.vue",
+    "src/lib/runtime/metrics-diagnostics.ts",
+    "src/lib/runtime/useTraceProjection.ts",
+    "src/lib/runtime/utils.ts",
+    "src/lib/tauri.ts",
+    "src/lib/telemetry.ts",
+    "src/main.ts",
+    "src/stores/runtime.ts",
+    "src/stores/settings.ts",
+    "src/types/runtime.ts",
+    "src/types/settings.ts",
+    "tests/wave-4-observability.spec.ts",
+    "tests/telemetry-governance.spec.ts",
+    ".dev-team/contracts/wave-4-observability.md"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 535,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn \"traceId\" src/ --include=*.ts --include=*.vue | grep -vE \"types/runtime.ts|useTraceProjection|metrics-diagnostics|telemetry.ts\"",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "src/lib/tauri.ts",
+      "line": 78,
+      "rule": "LEAK",
+      "counterexample_cmd": "node -e 'const r=/^(token|password|passwd|secret|api_key|apikey|access_token|refresh_token|authorization|cookie|private_key|credential)/i;console.log(\"otelToken redacted?\",r.test(\"otelToken\"))'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/app_settings.rs",
+      "line": 194,
+      "rule": "SECURITY",
+      "counterexample_cmd": "grep -n \"0o600\\|set_permissions\" crates/pony-agent-core/src/agent/app_settings.rs; stat -c '%a %n' ~/.config/pony-agent/settings.json",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1028,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test wave4_observability_chain_test c3_current_traceparent_contract_active_and_idle -- --nocapture",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 206,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn \"DEFAULT_ENDPOINT\" crates/pony-agent-core/src/",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/lib/runtime/utils.ts",
+      "line": 143,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "git diff -U2 src/lib/runtime/utils.ts | grep -n '^-.*callback();'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src-tauri/src/lib.rs",
+      "line": 1205,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "grep -n 'EXIT_FLUSH_TIMEOUT_MS: u64' src-tauri/src/lib.rs; grep -n 'SHUTDOWN_TIMEOUT_MS: u64' crates/pony-agent-core/src/agent/otel/mod.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/components/config/ConfigGeneralSection.vue",
+      "line": 473,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n '@update:model-value=\"updateOtelSetting' src/components/config/ConfigGeneralSection.vue",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src-tauri/src/lib.rs",
+      "line": 593,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'set_agent_trace_reporting\\|OtelConfig::from_settings' src-tauri/src/lib.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/log.rs",
+      "line": 93,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '88,120p' crates/pony-agent-core/src/agent/otel/log.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/ponysentry_credential_gate.rs",
+      "line": 103,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git diff crates/pony-agent-core/tests/",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".github/workflows/release.yml",
+      "line": 31,
+      "rule": "SECURITY",
+      "counterexample_cmd": "grep -n 'PONY_OTEL_TOKEN' .github/workflows/release.yml",
+      "severity": "ADVISORY"
+    }
+  ]
+}

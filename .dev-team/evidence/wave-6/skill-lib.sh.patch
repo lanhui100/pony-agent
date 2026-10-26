@@ -1,0 +1,20 @@
+--- /tmp/lib.sh.bak	2026-10-25 15:13:37.806131064 +0800
++++ scripts/lib.sh	2026-10-25 15:13:44.856284618 +0800
+@@ -91,9 +91,15 @@
+     | python3 -c 'import sys,json;d=json.load(sys.stdin);print("\n".join(d.get("data") or []))'
+ }
+ 
+-# Tempo 搜索命中数：tcount <tags> → 整数
++# Tempo 搜索命中数：tcount <tags> [lookback_seconds] → 整数
++# 注意：tag 搜索若不给 start/end，Tempo 用**很窄的默认窗口**（实测约 15 分钟），
++# 会把「一小时前刚写入的 trace」判成不存在（实测踩坑：同一 trace 带窗口可查、不带窗口为 0）。
++# 因此这里与 tcount_q 对齐，缺省回看 24h。
+ tcount() {
+-  in_probe "wget -qO- 'http://${TEMPO_SVC}/api/search?limit=10&tags=$(urlenc "$1")'" \
++  local tags="$1" lookback="${2:-86400}" start end
++  end="$(date +%s)"
++  start=$(( end - lookback ))
++  in_probe "wget -qO- 'http://${TEMPO_SVC}/api/search?limit=10&start=${start}&end=${end}&tags=$(urlenc "$tags")'" \
+     | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("traces") or []))'
+ }
+ 

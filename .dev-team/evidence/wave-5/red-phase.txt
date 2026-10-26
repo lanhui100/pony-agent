@@ -1,0 +1,51 @@
+=== Wave-5 Cost Estimation & Soft Warning Red-Phase Evidence ===
+Generated At: 2026-10-25T13:22:00+08:00
+Test Agent: test-agent
+Contract Ref: .dev-team/contracts/wave-5-cost.md (K1~K5)
+
+--------------------------------------------------------------------------------
+1. Frontend Red-Phase Receipt
+Command: npx vitest run tests/wave-5-cost.spec.ts
+Exit Code: 1
+Summary: 0 passed | 4 failed (4 total)
+
+Failures:
+- FAIL: 1. 会话成本聚合与未知模型处理 (K2) > turn 带 costUsd 时计算累计值；某轮缺失（未知模型）显示「—」且不按 0 计入
+  Reason: AssertionError: expected undefined to be 0.015
+  Analysis: runtimeStore 尚未实现 sessionTotalCostUsd / hasUnpricedTurns / formattedSessionCost getter。
+
+- FAIL: 2. 软告警不阻断原则 (K3) > 会话超预算时出现告警文案/状态，但发送按钮与提交逻辑绝对不被阻断 (disabled === false)
+  Reason: AssertionError: expected undefined to be true
+  Analysis: 预算超限判定 isCostBudgetExceeded 及其文案尚未装配到 runtimeStore。
+
+- FAIL: 2. 软告警不阻断原则 (K3) > costBudgetUsd <= 0 或为 null/undefined 时视为未设置预算，不产生告警
+  Reason: AssertionError: expected undefined to be false
+  Analysis: costBudgetUsd 负值或非正数值的退化判定逻辑尚未实现。
+
+- FAIL: 3. 异常边界与对抗防御 (L2-AT) > costUsd 为负 / NaN / Infinity 时安全退化为「—」，严禁向 UI 渲染出 NaN/Infinity 文本
+  Reason: AssertionError: expected undefined to be '—'
+  Analysis: 前端 formattedSessionCost 尚未实现对 NaN / Infinity / 负数异常数值的防御清洗退化。
+
+--------------------------------------------------------------------------------
+2. Rust Core Red-Phase Receipt
+Command: cargo test -p pony-agent-core --test wave5_cost_test
+Exit Code: 101 (Compile-time & Contract Red-Phase Failure)
+Summary: Failed to compile due to missing Wave-5 cost contract implementations
+
+Failures:
+- K1 Pricing Module Missing:
+  error[E0432]: unresolved imports pony_agent_core::agent::cost::{self, CostEstimate, ModelPricing}
+  crates/pony-agent-core/src/agent/ 下尚未创建 cost 模块与计费计算结构。
+- K2 DTO Wire Field Missing:
+  error[E0560]: struct TurnStreamEvent has no field named cost_usd
+  TurnStreamEvent 尚未声明 cost_usd 字段及 camelCase 序列化契约。
+- K4 OTel Span Cost Attributes Missing:
+  error[E0599]: no method named record_turn_cost found for struct TurnTraceGuard
+  error[E0599]: no method named record_cost found for struct LlmSpanGuard
+  OTel 守卫层尚未实现 gen_ai.cost.usd 与 agent.turn.cost.usd 属性写入方法。
+- K3 Budget Threshold Utility Missing:
+  error[E0432]: unresolved import is_budget_exceeded in cost module.
+
+--------------------------------------------------------------------------------
+Conclusion:
+双模态红相已成功锚定，每条测试用例均精准对应 K1~K5 契约条款，且均在当前未实现代码上产生确定性失败。

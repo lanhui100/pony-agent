@@ -1,0 +1,216 @@
+{
+  "wave": "wave-45",
+  "status": "done",
+  "role": "test-agent",
+  "agent": "test-agent-45",
+  "revision": 2,
+  "baseline_commit": "f233a96",
+  "contract_source": ".dev-team/contract-matrix-wave45.md",
+  "contract_status": "FROZEN (协议特派员产出；Gate-1 审查 A 后契约演进为唯一前缀 `turn_error: `，本文件与冻结测试均已同步)",
+  "write_scope_respected": {
+    "modified": [
+      "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "crates/pony-agent-core/tests/otel_resource_env_test.rs",
+      "tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts",
+      ".dev-team/wave45-red-receipt.log",
+      ".dev-team/l2at-done-wave45.json",
+      ".dev-team/evidence/wave45/*"
+    ],
+    "not_modified": [
+      "crates/**/src/**",
+      "src/**",
+      "src-tauri/**",
+      ".dev-team/contract-matrix-wave45.md",
+      "package.json"
+    ]
+  },
+  "red_command_rust": "cargo test -p pony-agent-core --test otel_resource_turn_status_test --test otel_resource_env_test --target-dir target-test --no-fail-fast",
+  "red_command_ts": "npx vitest run tests/acceptance/wave45",
+  "red_receipts": {
+    "log": ".dev-team/wave45-red-receipt.log",
+    "raw_rust_head_worktree": ".dev-team/evidence/wave45/w45-rust-redhead-v2.log",
+    "raw_ts_head_worktree": ".dev-team/evidence/wave45/w45-ts-redhead-v2.log",
+    "raw_rust_v1": ".dev-team/evidence/wave45/w45-rust-redhead.log",
+    "raw_ts_v1": ".dev-team/evidence/wave45/w45-ts-redhead.log",
+    "reproduce": "git worktree add /tmp/w45-red-head f233a96 && cp <两个 Rust 测试>+<wave45 spec> 进去 && 分别执行 red_command_rust（--target-dir /tmp/w45-redhead-target）/ red_command_ts"
+  },
+  "red_phase_head_f233a96": {
+    "why_worktree": "实现已于红相窗口后落地主工作树；为给出不含实现的权威红相证据，在干净 HEAD f233a96 worktree（仅拷入冻结测试）复现",
+    "rust_exit_code": 101,
+    "rust_result": "otel_resource_env_test: 0 passed / 1 failed；otel_resource_turn_status_test: 2 passed / 4 failed（均为断言失败，无编译失败）",
+    "rust_failures": [
+      {
+        "id": "PA153-T1",
+        "line": 287,
+        "reason": "wire 缺 resource `service.version`（HEAD 只 with_service_name）"
+      },
+      {
+        "id": "PA153-T2",
+        "line": 221,
+        "reason": "wire 缺 resource `service.version`（env 覆盖前置不成立）"
+      },
+      {
+        "id": "PA154-T1",
+        "line": 367,
+        "reason": "wire 缺根 span `turn_error: tool_failed`（HEAD 根 status 为空）"
+      },
+      {
+        "id": "PA154-T2",
+        "line": 428,
+        "reason": "wire 缺 `agent.turn.outcome`（治理 block 未承接）"
+      },
+      {
+        "id": "PA154-ADV",
+        "line": 522,
+        "reason": "wire 缺 `agent.turn.outcome`（phase=failed 无根级聚合键）"
+      }
+    ],
+    "rust_prepassing_by_design": [
+      "wave45_existing_span_and_attribute_literals_are_frozen（HEAD 既有常量守卫，应常绿）",
+      "pa154_t3_successful_turn_does_not_emit_failure_signals（纯负向断言，HEAD 天然满足）"
+    ],
+    "ts_exit_code": 1,
+    "ts_result": "Test Files 1 failed (1) / Tests 2 failed (2)",
+    "ts_failures": [
+      {
+        "id": "PA155-T1",
+        "line": 322,
+        "reason": "local-cache 分支裸 await ⇒ initializeSessions 超过 16000ms 截止仍未 settle（expected false to be true）"
+      },
+      {
+        "id": "PA155-T2",
+        "line": 373,
+        "reason": "迟到 resolve 对抗同源：裸 await 永不收敛（expected false to be true）"
+      }
+    ],
+    "ts_fixture_guard": "两例先过 expectLocalCacheStrategy()（deriveInitStrategy(...).kind === \"local-cache\"），确保夹具命中 local-cache 分支而非静默退化 host-read",
+    "role": "可重放替代路径（不依赖 Lead stash 状态；worktree 已清理）"
+  },
+  "implementation_snapshot_green": {
+    "purpose": "非空洞反向证明：冻结断言可实现且与契约一致（红相不是永假断言）",
+    "rust_exit_code": 0,
+    "rust_result": "2 binaries: 1 passed + 6 passed; 0 failed",
+    "ts_exit_code": 0,
+    "ts_result": "Test Files 1 passed (1) / Tests 2 passed (2)",
+    "wave44_neighbourhood": "npx vitest run tests/acceptance/wave44 → exit 0 / 3 files 8 tests passed",
+    "captured_at": "2026-10-25T18:25+08:00（实现落地主树期间的历史快照；随后 Lead stash 做红相复验）"
+  },
+  "baseline_check": {
+    "command": "cargo test -p pony-agent-core --lib --target-dir target-test",
+    "exit_code": 101,
+    "result": "1149 passed; 1 failed; 0 ignored",
+    "failing_test": "agent::config::tests::missing_capabilities_fields_use_stable_defaults",
+    "verdict": "存量失败（HEAD f233a96；该轮运行期间 src/** 零改动），与本波三张断言无关，未做 ignore/skip",
+    "log": ".dev-team/evidence/wave45/cargo-lib-baseline.log"
+  },
+  "files": [
+    "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+    "crates/pony-agent-core/tests/otel_resource_env_test.rs",
+    "tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts"
+  ],
+  "tests": [
+    {
+      "id": "PA153-T1",
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "kind": "L2-T",
+      "assertion": "init(本地回环)+turn+tool span+flush ⇒ 同一 ResourceSpans 同时含 service.name/service.version/deployment.environment 且与 service.name 同基数（各一次）；service.version == env!(CARGO_PKG_VERSION)；debug 构建 deployment.environment == development；非空洞锚：body 含 agent.turn+tool.call+completed"
+    },
+    {
+      "id": "PA153-T2",
+      "file": "crates/pony-agent-core/tests/otel_resource_env_test.rs",
+      "kind": "L2-T",
+      "assertion": "独立进程（一次 init 一个环境态）：PONY_OTEL_SERVICE_VERSION=9.9.9-wave45 + PONY_OTEL_ENVIRONMENT=staging ⇒ wire 出现两哨兵值且不出现默认版本；空白串 \"   \" ⇒ 回落 CARGO_PKG_VERSION 与 development 且不残留哨兵值；env 退出复位"
+    },
+    {
+      "id": "PA154-T1",
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "kind": "L2-AT",
+      "assertion": "tool(gen_ai.tool.name=bash, status=failed, error=boom) + phase=completed ⇒ body 含 `turn_error: tool_failed`；`turn_error` 恰好 1 次（子 span 现有文案不得含该前缀）；agent.turn.outcome 键存在且键后 16 字节窗口值 == error（不得为 success）"
+    },
+    {
+      "id": "PA154-T2",
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "kind": "L2-AT",
+      "assertion": "governance.record_verdict(session, block, hard_limit_reached, v1, 0) + phase=completed ⇒ body 含 `turn_error: quota_blocked`；`turn_error` 恰好 1 次（与 HEAD 既有子 span 裸 quota_blocked 不混淆）；outcome 值 == error"
+    },
+    {
+      "id": "PA154-T3",
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "kind": "L2-T",
+      "assertion": "全成功（两条 tool success、无 block、phase=completed）⇒ agent.turn.outcome / tool_failed / quota_blocked / turn_error 皆不出现；正锚含 agent.turn + agent.turn.phase + completed"
+    },
+    {
+      "id": "PA154-ADV",
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "kind": "L2-AT",
+      "assertion": "对抗：无 child error 且 phase=failed ⇒ body 含 failed（旧语义零变更）、不含 turn_error（phase 优先）、仍含 agent.turn.outcome 且值 == error、不 panic、不得虚构 tool_failed / tool.call / quota_blocked"
+    },
+    {
+      "id": "PA155-T1",
+      "file": "tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts",
+      "kind": "L2-T",
+      "assertion": "种入 local-cache 持久化缓存（cachedStateVersion=2、phase=completed、checkpoint 非空）+ 宿主 load_session_runtime_view 永不 settle ⇒ HYDRATION_TIMEOUT_MS+1000 内 initializeSessions resolve（1s 时未收敛为下界锚）；cached 消息仍可见、sessionId 落到缓存会话、phase ∉ {error,failed,cancelled}、sessionError 无 `初始化对话失败：` 硬失败、sessionOperation=null、host 读 1 次；含常量漂移锁 15000ms 与 expectLocalCacheStrategy 防假绿守卫"
+    },
+    {
+      "id": "PA155-T2",
+      "file": "tests/acceptance/wave45/pa155-local-cache-timeout.spec.ts",
+      "kind": "L2-AT",
+      "assertion": "对抗：宿主读在 15000+5000ms 才 resolve 且返回不同文案 ⇒ 仍在 16000ms 内收敛；迟到 resolve 后 sessionId/phase/messages 逐项与结算态相等、迟到文案不出现、缓存文案仍在、host 读仍 1 次（无重试风暴）"
+    },
+    {
+      "id": "FREEZE-LITERALS",
+      "file": "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+      "kind": "L2-T",
+      "assertion": "HEAD 既有常量取值守卫（SPAN_AGENT_TURN/SPAN_TOOL_CALL/SPAN_GOVERNANCE_DECIDE/ATTR_AGENT_TURN_PHASE/ATTR_AGENT_TOOL_STATUS vs 字面量）；Gate-1 A 后已删除全部自指自证断言（assert_eq!(\"x\",\"x\")），新增键只在 wire 级断言，不引用待新增符号"
+    }
+  ],
+  "gate1_a_revisions": {
+    "blocking_1": "PA154-T1 唯一前缀 `turn_error: tool_failed` + 恰好 1 次",
+    "blocking_2": "PA154-T2 唯一前缀 `turn_error: quota_blocked`",
+    "item_3": "outcome 值断言：键后 16 字节窗口含 error 且不含 success（helper assert_turn_outcome_value_is_error）",
+    "item_4": "PA154-ADV phase=failed ⇒ 含 failed、不含 turn_error、含 outcome=error；PA154-T3 全成功 ⇒ 四者皆不出现",
+    "item_5": "删除自指自证字面量断言，冻结用例收缩为真实常量取值断言",
+    "item_6": "PA155 spec phase 断言收紧为 not.toBe(error|failed|cancelled)"
+  },
+  "adversarial_coverage": {
+    "L2-AT": [
+      "PA154-T1",
+      "PA154-T2",
+      "PA154-ADV",
+      "PA155-T2"
+    ],
+    "L2-T": [
+      "PA153-T1",
+      "PA153-T2",
+      "PA154-T3",
+      "PA155-T1",
+      "FREEZE-LITERALS"
+    ],
+    "notes": "零 skip/todo/ignore、零吞异常、零真实 sleep（fake timers + 硬截止回环 sink）；负向断言均配正向锚；localStorage 与进程 env 用例内复位"
+  },
+  "contract_ambiguities": [
+    "契约 §2 曾以裸 `tool_failed` / `quota_blocked` 作为根 status.message 的可判代理；Gate-1 A 演进为唯一前缀 `turn_error: <reason>` 后，本测试随契约改为前缀断言，并保留「恰好 1 次」以防前缀被同时写进子 span。",
+    "契约 §2 T3 原文只覆盖「全成功」；prompt 另冻结「phase=failed 无 child error 不 panic」。二者拆为 PA154-T3（全成功）与 PA154-ADV（phase=failed 对抗）两条用例，均在冻结清单内、无删减。",
+    "PA153-T2 需进程 env 覆盖，与 PA153-T1（默认版本/development 断言）同进程会互相串味；按 Lead 裁决拆到独立测试二进制 otel_resource_env_test.rs（一个 #[test] 顺序驱动两个环境相位），已在契约 §6 允许的「补测」范围内。",
+    "契约 §6 覆盖差异一项（缺治理 block 与 env 覆盖）已按 Lead 指令补齐为 PA154-T2 与 PA153-T2，无删矩阵要求。",
+    "release 构建的 production 分支按契约由实现期 in-crate 纯函数单测覆盖，冻结集成测试只断 debug 分支（cfg!(debug_assertions) 门控）。"
+  ],
+  "notes": [
+    "红相证据来自干净 HEAD f233a96 worktree（仅拷入冻结测试，未含实现改动）：Rust exit 101 / TS exit 1。",
+    "实现落地后同一批测试在主工作树全绿（Rust 7/7、TS 2/2），证明断言可实现且非永假；红相复验由 Lead 以 stash 方式独立执行。",
+    "cargo lib 基线存在 1 条存量失败（agent::config::tests::missing_capabilities_fields_use_stable_defaults），与本波无关，未掩饰。"
+  ],
+  "red_phase_canonical": {
+    "tree": "/home/dm/pony-agent @ HEAD f233a96 源码态（Lead 以 git stash push 暂存 wave45-impl 后由本 Agent 实跑）",
+    "rust_command": "cargo test -p pony-agent-core --test otel_resource_turn_status_test --test otel_resource_env_test --target-dir target-test --no-fail-fast",
+    "rust_exit_code": 101,
+    "rust_result": "otel_resource_env_test: 0 passed / 1 failed；otel_resource_turn_status_test: 2 passed / 4 failed（均断言失败，零编译失败）",
+    "ts_command": "npx vitest run tests/acceptance/wave45",
+    "ts_exit_code": 1,
+    "ts_result": "Test Files 1 failed (1) / Tests 2 failed (2)",
+    "logs": [
+      ".dev-team/evidence/wave45/w45-rust-canonical-red.log",
+      ".dev-team/evidence/wave45/w45-ts-canonical-red.log"
+    ]
+  }
+}

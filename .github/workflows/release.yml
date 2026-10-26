@@ -26,6 +26,9 @@ jobs:
       # wave-18c：构建期烧录 token 到桌面二进制（option_env!），用户机器零环境变量依赖
       PONYSENTRY_BUILD_CLIENT_TOKEN: ${{ secrets.PONYSENTRY_CLIENT_TOKEN }}
       VITE_PONYSENTRY_CLIENT_TOKEN: ${{ secrets.PONYSENTRY_CLIENT_TOKEN }}
+      VITE_PONYSENTRY_INGEST_URL: ${{ secrets.VITE_PONYSENTRY_INGEST_URL || 'https://ponysentry.ponyjob.top' }}
+      # 运行期 OTel token 由用户在应用内配置或安装包配置 settings.json 注入；
+      # 避免在 CI 全局构建环境变量中扩大 secret 暴露面
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-D warnings"
     steps:
@@ -55,6 +58,7 @@ jobs:
           if ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" -eq "") { throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required" }
           # wave-18c：PonySentry token 必须存在，经 PONYSENTRY_BUILD_CLIENT_TOKEN 烧录进桌面产物
           if ("${{ secrets.PONYSENTRY_CLIENT_TOKEN }}" -eq "") { throw "PONYSENTRY_CLIENT_TOKEN is required (burned into desktop build)" }
+          if ("${{ secrets.VITE_PONYSENTRY_INGEST_URL }}" -eq "") { Write-Warning "VITE_PONYSENTRY_INGEST_URL is not set in secrets, using fallback https://ponysentry.ponyjob.top" }
 
       - name: Tag/version consistency
         shell: pwsh

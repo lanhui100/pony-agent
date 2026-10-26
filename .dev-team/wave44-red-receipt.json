@@ -1,0 +1,80 @@
+{
+  "wave": "wave-44",
+  "phase": "red",
+  "revision": 2,
+  "head": "ab54b06",
+  "command": "npx vitest run tests/acceptance/wave44 --reporter=dot",
+  "json_command": "npx vitest run tests/acceptance/wave44 --reporter=json",
+  "exit_code": 1,
+  "status": "FAIL",
+  "num_total": 8,
+  "num_failed": 8,
+  "num_passed": 0,
+  "contract_source": ".dev-team/contract-matrix-wave44.md",
+  "delta_vs_revision1": [
+    "PA115: 新增常量漂移锁 expect(HYDRATION_TIMEOUT_MS).toBe(15000)（T1/T2 各一处）",
+    "PA115-T2: 新增草稿保留断言（3500ms watchdog 解锁后写 draft，16000ms 超时收敛后 draft 必须保留且 sessionError 非空）",
+    "PA117: measureSequence 以精确 mockRestore() 替换 vi.restoreAllMocks()，消除 tauri bridge 态差分污染",
+    "PA117-T1/T2/T3: layout_reads 口径改为 关闭态=0 / 启用态>0，并补启用态参照有效性断言（viewportResolved=true、composerTop/distanceToBottom 数值型）",
+    "PA117-T1: 关闭态追加 latest===undefined 与 buffer 未增长断言",
+    "PA135-T2: 追加 keyCode:229 的 Enter / Shift+Enter 不得提交（防 isComposing-only mutant）"
+  ],
+  "failures": [
+    {
+      "file": "pa115-host-read-timeout.spec.ts",
+      "title": "PA115-T1: 宿主读永不 settle → 有界 resolve + 可见失败 + 状态复位，随后正常宿主读可恢复",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected false to be true // Object.is equality",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa115-host-read-timeout.spec.ts:256:35"
+    },
+    {
+      "file": "pa115-host-read-timeout.spec.ts",
+      "title": "PA115-T2 (L2-AT 对抗): 宿主读在 baseline 超时 + 5s 后才 resolve → 仍须有界收敛，且迟到结果不得改写状态",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected false to be true // Object.is equality",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa115-host-read-timeout.spec.ts:316:35"
+    },
+    {
+      "file": "pa117-scroll-debug-log.spec.ts",
+      "title": "PA117-T1: 默认关闭（DEV=false + 无开关）时零日志、零缓冲写入、零布局读数（启用态为有效参照）",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected 2 to be +0 // Object.is equality",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:340:27"
+    },
+    {
+      "file": "pa117-scroll-debug-log.spec.ts",
+      "title": "PA117-T2 (L2-AT 开关矩阵): localStorage true/false 与 URL ?debug=1|scroll 必须按契约优先级生效",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected 2 to be +0 // Object.is equality",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:380:29"
+    },
+    {
+      "file": "pa117-scroll-debug-log.spec.ts",
+      "title": "PA117-T3 (L2-AT 对抗): 同一已挂载实例内 关→开→关 必须即时生效（开关不得被缓存）",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected [ { …(25) }, { …(26) } ] to have a length of +0 but got 2",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa117-scroll-debug-log.spec.ts:412:35"
+    },
+    {
+      "file": "pa135-composition-undo.spec.ts",
+      "title": "PA135-T1: 组合态 Ctrl+Z 必须撤销（1 次）且阻止默认；非组合态撤销/发送正控保持",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected \"wrappedAction\" to be called 1 times, but got 0 times",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa135-composition-undo.spec.ts:322:25"
+    },
+    {
+      "file": "pa135-composition-undo.spec.ts",
+      "title": "PA135-T2 (L2-AT 对抗): keyCode=229 组合态 Ctrl+Z 同样撤销；修饰键约束与组合态 Enter 不发送保持",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected \"wrappedAction\" to be called 1 times, but got 0 times",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa135-composition-undo.spec.ts:369:25"
+    },
+    {
+      "file": "pa135-composition-undo.spec.ts",
+      "title": "PA135-T3 (L2-AT 对抗): 输入框持焦时组合态 Cmd+Z 撤销恰好 1 次（不得经 window 监听双触发）",
+      "status": "failed",
+      "assertion_error": "AssertionError: expected \"wrappedAction\" to be called 1 times, but got 0 times",
+      "first_assertion_location": "at /home/dm/pony-agent/tests/acceptance/wave44/pa135-composition-undo.spec.ts:408:25"
+    }
+  ]
+}

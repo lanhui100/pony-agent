@@ -1,0 +1,74 @@
+{
+  "wave": 44,
+  "baseline_ref": ".dev-team/nfr-baseline.json",
+  "delta_scope": "additive-only: wave44_ui_robustness（PA-115 有界水合超时 / PA-135 组合态守卫作用域 / PA-117 调试输出默认关闭）；继承字段值未收紧，仅新增字段",
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 500,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "resource_release": [
+    "withTimeout_timer_cleared_on_settle",
+    "initialize_sessions_watchdog_cleared_in_finally"
+  ],
+  "wave44_ui_robustness": {
+    "pa_115_hydration": {
+      "branch": "src/stores/runtime.ts:2693 host-read",
+      "hydration_read_timeout_ms": 15000,
+      "hydration_read_timeout_ms_pinned": 15000,
+      "timeout_source": "src/lib/runtime/constants.ts:15 HYDRATION_TIMEOUT_MS（与 src/stores/runtime.ts:2141 会话切换分支同语义）",
+      "settle_deadline_ms": 16000,
+      "settle_must_be_fulfilled_not_rejected": true,
+      "visible_failure_required": true,
+      "visible_failure_label_prefix": "初始化对话失败：",
+      "visible_failure_must_contain": ["超时"],
+      "error_mode": "error",
+      "session_operation_null_after_settle": true,
+      "stuck_loading_label_forbidden": "正在加载最近对话…",
+      "silent_empty_degrade_forbidden": true,
+      "late_resolution_must_not_mutate_state": true,
+      "draft_preserved_after_timeout": true,
+      "retry_on_timeout": 0,
+      "external_call_timeout_ms_applicable": false,
+      "external_call_timeout_ms_na_reason": "本地 Tauri IPC 水合（非外部网络出口），3000ms 外部调用上限结构性不适用；沿用切换分支 15000ms 保证一致性"
+    },
+    "pa_135_ime_composition_guard": {
+      "blocked_paths": ["enter_submit"],
+      "unblocked_paths": ["undo_ctrl_z", "undo_cmd_z"],
+      "submit_turns_during_composition": 0,
+      "undo_invocations_during_composition": 1,
+      "modifier_constraint_preserved": "undo 仅 key=z 且 (ctrl|meta) 且 !shift 且 !alt",
+      "double_fire_forbidden": true
+    },
+    "debug_log_default_off": {
+      "channel": "[workspace-scroll]",
+      "source": "src/components/HomeWorkspace.vue:211",
+      "production_default_enabled": false,
+      "dev_default_enabled": true,
+      "kill_switch_storage_key": "pony-agent.debug.workspace-scroll",
+      "storage_values": ["true", "false"],
+      "url_param": "debug",
+      "url_enable_values": ["1", "scroll"],
+      "precedence": ["storage_false", "storage_true", "url_debug", "import_meta_env_dev"],
+      "runtime_reevaluation_no_cache": true,
+      "console_info_calls_when_disabled": 0,
+      "debug_buffer_written_when_disabled": false,
+      "layout_reads_when_disabled": 0,
+      "layout_read_assertion": "同 fixture 同触发序列内 Element.prototype.getBoundingClientRect 调用数：关闭态 = 0；启用态 > 0",
+      "stream_reveal_writes_when_disabled": 0,
+      "stream_debug_state_new_keys_when_disabled": 0,
+      "declared_behavior_change": "关闭态 updateStreamDebugReveal 不再被调用、streamDebugState 不新增键、不分配 debug buffer（属期望行为，非回归）",
+      "payload_shape_unchanged_when_enabled": true,
+      "logging_format_json_applicable": false,
+      "logging_format_json_na_reason": "console.info 为开发者诊断输出，非结构化日志出口；内核结构化日志面本波零变更"
+    }
+  }
+}

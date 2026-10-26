@@ -47,6 +47,8 @@ export interface IngestPayload {
   platform: string;
   release: string;
   environment: string;
+  event_id?: string;
+  trace_id?: string;
   message?: string;
   exception?: Exception;
   tags?: Record<string, string>;
@@ -54,9 +56,156 @@ export interface IngestPayload {
   breadcrumbs?: Breadcrumb[];
 }
 
+export type BeforeSendCallback = (
+  payload: IngestPayload
+) => IngestPayload | null | Promise<IngestPayload | null>;
+
+export const MAX_PAYLOAD_STRING_LENGTH = 2048;
+
+export function truncateString(value: string, maxLength = MAX_PAYLOAD_STRING_LENGTH): string {
+  if (typeof value !== "string") return value;
+  if (value.length <= maxLength) return value;
+  const suffix = "...[truncated]";
+  const truncateAt = Math.max(0, maxLength - suffix.length);
+  return value.slice(0, truncateAt) + suffix;
+}
+
+export function deepTruncate(obj: unknown, depth = 0): unknown {
+  if (depth > 32) return "[MAX_DEPTH_EXCEEDED]";
+  if (obj === null || obj === undefined) return obj;
+
+  if (typeof obj === "string") {
+    return truncateString(obj);
+  }
+
+  if (typeof obj === "number" || typeof obj === "boolean") {
+    return obj;
+  }
+
+  if (Array.isArray(obj)) {
+    return obj.map((item) => deepTruncate(item, depth + 1));
+  }
+
+  if (typeof obj === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      out[k] = deepTruncate(v, depth + 1);
+    }
+    return out;
+  }
+
+  return obj;
+}
+
+/**
+ * 默认 beforeSend 治理管道：
+ * - 结合 isNetworkNoise 过滤网络连接中断、CORS、资源加载等噪音错误（返回 null 取消上报）；
+ * - 对 extra / tags / breadcrumbs 做深度脱敏；
+ * - 对长字符串字段进行截断（最大 2048 字符，加 ...[truncated] 后缀）。
+ */
+export const defaultBeforeSend: BeforeSendCallback = (payload: IngestPayload): IngestPayload | null => {
+  if (payload.message && isNetworkNoise(payload.message)) {
+    return null;
+  }
+
+  const sanitizedExtra = payload.extra ? (deepTruncate(deepSanitize(payload.extra)) as Record<string, unknown>) : undefined;
+  const sanitizedTags = payload.tags ? (deepTruncate(deepSanitize(payload.tags)) as Record<string, string>) : undefined;
+  const sanitizedBreadcrumbs = payload.breadcrumbs
+    ? payload.breadcrumbs.map((b) => ({
+        ...b,
+        message: truncateString(sanitizeString(b.message)),
+        data: b.data ? (deepTruncate(deepSanitize(b.data)) as Record<string, unknown>) : undefined,
+      }))
+    : undefined;
+
+  return {
+    ...payload,
+    message: payload.message ? truncateString(sanitizeString(payload.message)) : payload.message,
+    extra: sanitizedExtra,
+    tags: sanitizedTags,
+    breadcrumbs: sanitizedBreadcrumbs,
+  };
+};
+
+let globalBeforeSend: BeforeSendCallback | null = defaultBeforeSend;
+
+export function setBeforeSend(callback: BeforeSendCallback | null): void {
+  globalBeforeSend = callback;
+}
+
+export function getBeforeSend(): BeforeSendCallback | null {
+  return globalBeforeSend;
+}
+
+/**
+ * 全局未捕获异常网络噪音清洗规则接口
+ */
+export interface NetworkNoiseRule {
+  name: string;
+  test: (message: string, url?: string) => boolean;
+}
+
+export const DEFAULT_NETWORK_NOISE_RULES: NetworkNoiseRule[] = [
+  {
+    name: "network_failed_fetch",
+    test: (msg) => /Failed to fetch|NetworkError|Load failed|net::ERR_/i.test(msg),
+  },
+  {
+    name: "cors_error",
+    test: (msg) => /Cross-Origin Request Blocked|CORS request did not succeed/i.test(msg),
+  },
+  {
+    name: "script_load_error",
+    test: (msg) => /Loading chunk [\w-]+ failed|ChunkLoadError/i.test(msg),
+  },
+];
+
+export function isNetworkNoise(message?: string, url?: string): boolean {
+  if (!message) return false;
+  return DEFAULT_NETWORK_NOISE_RULES.some((rule) => rule.test(message, url));
+}
+
+/**
+ * W3C traceparent 获取与注入辅助契约
+ */
+export interface TraceParentContext {
+  version: string;
+  traceId: string;
+  parentId: string;
+  traceFlags: string;
+}
+
+export function parseTraceParent(header?: string | null): TraceParentContext | null {
+  if (!header) return null;
+  const match = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(header.trim());
+  if (!match) return null;
+  return {
+    version: match[1],
+    traceId: match[2],
+    parentId: match[3],
+    traceFlags: match[4],
+  };
+}
+
+export function formatTraceParent(ctx: TraceParentContext): string {
+  return `${ctx.version}-${ctx.traceId}-${ctx.parentId}-${ctx.traceFlags}`;
+}
+
+export function generateEventId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID().replace(/-/g, "");
+  }
+  return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+
 // ---- 零信任脱敏规则 (客户端脱敏双保险) ----
 const SENSITIVE_KEYS =
-  /^(token|password|passwd|secret|api_key|apikey|access_token|refresh_token|authorization|cookie|private_key|credential)/i;
+  /(token|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|private[_-]?key|credential)/i;
 
 export function sanitizeString(value: string): string {
   if (typeof value !== "string") return String(value);
@@ -110,8 +259,8 @@ export function deepSanitize(obj: unknown, depth = 0): unknown {
   return String(obj);
 }
 
-// ---- 面包屑队列 (上限 64 条环形缓冲) ----
-const MAX_BREADCRUMBS = 64;
+// ---- 面包屑队列 (上限 30 条环形缓冲，对齐 NFR PA-161 规范) ----
+const MAX_BREADCRUMBS = 30;
 const breadcrumbsQueue: Breadcrumb[] = [];
 
 export function addBreadcrumb(
@@ -120,13 +269,13 @@ export function addBreadcrumb(
   data?: Record<string, unknown>
 ): void {
   const item: Breadcrumb = {
-    category: sanitizeString(category),
-    message: sanitizeString(message),
+    category: truncateString(sanitizeString(category)),
+    message: truncateString(sanitizeString(message)),
     timestamp: Date.now(),
   };
 
   if (data) {
-    item.data = deepSanitize(data) as Record<string, unknown>;
+    item.data = deepTruncate(deepSanitize(data)) as Record<string, unknown>;
   }
 
   breadcrumbsQueue.push(item);
@@ -201,6 +350,7 @@ export interface ReportErrorOptions {
   tags?: Record<string, string>;
   extra?: Record<string, unknown>;
   platform?: string;
+  trace_id?: string;
 }
 
 export function buildIngestPayload(options: ReportErrorOptions): IngestPayload {
@@ -221,6 +371,8 @@ export function buildIngestPayload(options: ReportErrorOptions): IngestPayload {
     platform: options.platform || (isTauriAvailable() ? "tauri" : "vue"),
     release: APP_RELEASE,
     environment: APP_ENV,
+    event_id: generateEventId(),
+    trace_id: options.trace_id,
     message: sanitizedMsg,
     exception: {
       error_type: sanitizeString(errorType),
@@ -262,17 +414,36 @@ export async function reportError(options: ReportErrorOptions): Promise<void> {
     return;
   }
 
+  // 结合 isNetworkNoise 过滤网络连接中断、CORS、资源加载等噪音错误
+  if (isNetworkNoise(options.message)) {
+    return;
+  }
+
   // 自动化测试环境严格静音，防止测试模拟异常污染生产/预发 Sentry 监控 (ADR 0028)
   if (
-    import.meta.env?.MODE === "test" ||
-    Boolean(import.meta.env?.TEST) ||
     Boolean((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.VITEST)
   ) {
     return;
   }
 
   try {
-    const payload = buildIngestPayload(options);
+    let payload: IngestPayload | null = buildIngestPayload(options);
+
+    // beforeSend 管道装配：支持异步或同步 beforeSend。
+    // 若返回 null，立即取消上报；若抛出异常，捕获并降级打印警告，保留原 payload 继续上报。
+    if (globalBeforeSend) {
+      try {
+        const result = await globalBeforeSend(payload);
+        if (result === null) {
+          return;
+        }
+        if (result) {
+          payload = result;
+        }
+      } catch (hookErr) {
+        console.warn("[ponysentry] beforeSend hook execution error:", hookErr);
+      }
+    }
 
     // 1. 若处于桌面端环境，优先通过 Tauri IPC 委托给 core 客户端上报
     if (isTauriAvailable()) {
