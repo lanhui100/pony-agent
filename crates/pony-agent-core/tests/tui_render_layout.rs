@@ -72,33 +72,100 @@ fn dump_if_requested(name: &str, buf: &ratatui::buffer::Buffer) {
     let _ = std::fs::write(format!("/tmp/tui-snap/{}.json", name), json);
 }
 
-/// 该平台语义下的绝对路径判定（供 `starts_with_folded_or_absolute_path` 使用）。
+/// 路径形态（**显式参数**，与宿主平台无关）。
 ///
-/// Windows 上 `Path::is_absolute()` 只认「盘符 + 分隔符」或 UNC；这里显式实现，
-/// 使判据在两种平台下语义一致（Windows 语义的镜像测试见
-/// `tui_dialog_wave39.rs::a4_windows_path_shapes_are_testable_on_linux`）。
-fn is_absolute_path_for_platform(token: &str) -> bool {
+/// 为什么不能用宿主 `Path::is_absolute()` 做跨平台判定：它按**编译目标**规则判——
+/// Windows 宿主上 `/home/u/x` 不是绝对路径（无盘符），Linux 宿主上 `C:\x` 也不是。
+/// 因此判定改为纯字符串规则 + 显式形态参数，两种形态都与宿主无关；
+/// **只有运行时包装**按 `cfg!(windows)` 选形态。
+///
+/// 与 `tui_dialog_wave39.rs` 中的同名实现**逐字对齐**（两处各自独立、无共享模块），
+/// 两边都各有一条镜像用例锁同一张真/假表，改动必须同步。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathForms {
+    Unix,
+    Windows,
+}
+
+fn host_path_forms() -> PathForms {
     if cfg!(windows) {
-        let bytes = token.as_bytes();
-        let drive_absolute = bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && (bytes[2] == b'\\' || bytes[2] == b'/');
-        drive_absolute || (token.starts_with("\\\\") && token.len() > 2)
+        PathForms::Windows
     } else {
-        std::path::Path::new(token).is_absolute()
+        PathForms::Unix
     }
 }
 
-/// 指标行/最后一行是否以「折叠 cwd（`~`/`~\…`）」或「绝对路径」起排（平台无关）。
+/// 按**指定形态**判定绝对路径（纯字符串，不看宿主）。
+fn is_absolute_path_in(token: &str, forms: PathForms) -> bool {
+    match forms {
+        PathForms::Unix => token.starts_with('/'),
+        PathForms::Windows => {
+            let bytes = token.as_bytes();
+            let drive_absolute = bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/');
+            // 覆盖 UNC（`\\server\share`）与 verbatim（`\\?\C:\x`）。
+            drive_absolute || (token.starts_with("\\\\") && token.len() > 2)
+        }
+    }
+}
+
+/// 判据核心（显式形态）：折叠 cwd（`~` / `~\…`）或该形态下的绝对路径。
+fn starts_with_folded_or_absolute_path_with(text: &str, forms: PathForms) -> bool {
+    let token = text.trim_start().split_whitespace().next().unwrap_or("");
+    token.starts_with('~') || is_absolute_path_in(token, forms)
+}
+
+/// 指标行/最后一行是否以「折叠 cwd（`~`/`~\…`）」或「绝对路径」起排。
 ///
 /// 原断言写作 `trim_start().starts_with('~') || trim_start().starts_with('/')`，
 /// **只在 Unix 成立**：Windows 绝对路径形如 `C:\Users\...`（盘符 + 反斜杠），
 /// 两个前缀都不命中 → 正向断言在 Windows 恒假红、反向断言在 Windows 恒真（空转）。
-/// 平台无关判据：折叠形态以 `~` 起；其余按平台各自的绝对路径语义判定。
 fn starts_with_folded_or_absolute_path(text: &str) -> bool {
-    let token = text.trim_start().split_whitespace().next().unwrap_or("");
-    token.starts_with('~') || is_absolute_path_for_platform(token)
+    starts_with_folded_or_absolute_path_with(text, host_path_forms())
+}
+
+/// 两种形态判据的镜像用例（Linux 与 Windows 都跑同一张表，期望不随宿主变化）。
+#[test]
+fn path_form_rules_are_host_independent() {
+    for label in [
+        r"C:\x",
+        "C:/x",
+        r"\\server\share\proj",
+        r"\\?\C:\x",
+        r"~\pony-agent",
+        r"C:\ws-alpha  ↑12 ↓3",
+    ] {
+        assert!(
+            starts_with_folded_or_absolute_path_with(label, PathForms::Windows),
+            "Windows 形态应判真：{label:?}"
+        );
+    }
+    for label in ["pony-agent", "", "   ", r"C:foo\bar", "tmp/a", r"\only-root"] {
+        assert!(
+            !starts_with_folded_or_absolute_path_with(label, PathForms::Windows),
+            "Windows 形态应判假：{label:?}"
+        );
+    }
+    for label in ["/a", "/home/u/pony-agent  ↑12 ↓3", "~/pony-agent", "~"] {
+        assert!(
+            starts_with_folded_or_absolute_path_with(label, PathForms::Unix),
+            "Unix 形态应判真：{label:?}"
+        );
+    }
+    for label in ["pony-agent", "", "tmp/a", r"C:\x", r"\\server\share"] {
+        assert!(
+            !starts_with_folded_or_absolute_path_with(label, PathForms::Unix),
+            "Unix 形态应判假：{label:?}"
+        );
+    }
+    // 运行时包装只负责按宿主选形态，不改判据本身。
+    let host = host_path_forms();
+    assert_eq!(
+        starts_with_folded_or_absolute_path("~/x"),
+        starts_with_folded_or_absolute_path_with("~/x", host)
+    );
 }
 
 #[test]
