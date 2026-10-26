@@ -181,6 +181,15 @@ pub(crate) const RESOURCE_DEPLOYMENT_ENVIRONMENT: &str = "deployment.environment
 /// resource 语义约定键：探针隔离标记（集群边缘 edge 探针隔离契约源侧自报）。
 pub(crate) const RESOURCE_PONY_PROBE: &str = "pony.probe";
 
+/// resource 语义约定键：上报客户端归因标记（区分真实设备与边缘探针）。
+pub(crate) const RESOURCE_INGEST_CLIENT_KIND: &str = "ingest.client.kind";
+
+/// 客户端归因标记取值：真实设备客户端。
+pub(crate) const INGEST_CLIENT_KIND_DEVICE: &str = "device";
+
+/// 客户端归因标记取值：边缘探针。
+pub(crate) const INGEST_CLIENT_KIND_PROBE: &str = "probe";
+
 /// debug 构建的默认部署环境取值。
 pub(crate) const ENVIRONMENT_DEVELOPMENT: &str = "development";
 
@@ -494,11 +503,19 @@ pub(crate) fn resolve_resource_attributes(
         (RESOURCE_SERVICE_VERSION.to_string(), service_version),
         (RESOURCE_DEPLOYMENT_ENVIRONMENT.to_string(), environment),
     ];
+    let mut is_probe = false;
     if let Some(probe) = override_value(ENV_PONY_OTEL_PROBE) {
         if probe.eq_ignore_ascii_case("true") || probe == "1" || probe.eq_ignore_ascii_case("probe") {
             attrs.push((RESOURCE_PONY_PROBE.to_string(), "true".to_string()));
+            is_probe = true;
         }
     }
+    let client_kind = if is_probe {
+        INGEST_CLIENT_KIND_PROBE
+    } else {
+        INGEST_CLIENT_KIND_DEVICE
+    };
+    attrs.push((RESOURCE_INGEST_CLIENT_KIND.to_string(), client_kind.to_string()));
     attrs
 }
 
@@ -593,6 +610,24 @@ pub fn init(config: OtelConfig) -> Result<(), String> {
         // 并发 init 竞争：后者整体回滚，不覆盖已生效的全局态。
         return Err("otel::init：并发初始化竞争，已存在生效中的 provider".to_string());
     }
+
+    let auth_configured = state
+        .config
+        .headers
+        .iter()
+        .any(|(name, _)| is_sensitive_header(name));
+    if !auth_configured && is_remote_endpoint(&state.config.endpoint) {
+        log::log_json(
+            "warn",
+            &format!(
+                "otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），\
+                 本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：{}）",
+                state.config.endpoint
+            ),
+            None,
+        );
+    }
+
     *guard = Some(state);
     Ok(())
 }
@@ -696,6 +731,38 @@ fn round_cost_usd(value: f64) -> f64 {
 /// 便于静态断言「设置读写双路径都做了同步」。
 pub fn set_agent_trace_reporting(enabled: bool) {
     set_reporting_enabled(enabled);
+}
+
+/// 导出链路诊断快照：供 Settings 页/诊断入口展示「trace 到底有没有在往外发」。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportDiagnostics {
+    pub endpoint: String,
+    pub auth_configured: bool, // config.headers 中存在鉴权 header（authorization）
+    pub probe: bool,           // 本次是否探针自报（PONY_OTEL_PROBE 生效）
+}
+
+/// 读取当前导出链路诊断快照；未 [`init`] 时返回 `None`。
+///
+/// 状态取自现有全局 state（`lock_state()`）；`auth_configured` 用已有的
+/// `is_sensitive_header` 判定；**绝不返回 token 真实内容**。
+pub fn export_diagnostics() -> Option<ExportDiagnostics> {
+    current_state().map(|state| {
+        let auth_configured = state
+            .config
+            .headers
+            .iter()
+            .any(|(name, _)| is_sensitive_header(name));
+        let probe = env_non_empty(ENV_PONY_OTEL_PROBE).is_some_and(|probe| {
+            probe.eq_ignore_ascii_case("true")
+                || probe == "1"
+                || probe.eq_ignore_ascii_case("probe")
+        });
+        ExportDiagnostics {
+            endpoint: state.config.endpoint.clone(),
+            auth_configured,
+            probe,
+        }
+    })
 }
 
 /// 回显当前生效配置。
@@ -1740,6 +1807,17 @@ fn is_plaintext_remote(endpoint: &str) -> bool {
     if parsed.scheme() != "http" {
         return false;
     }
+    match parsed.host_str() {
+        Some("localhost") | Some("127.0.0.1") | Some("::1") => false,
+        _ => true,
+    }
+}
+
+/// 目标端点是否为远端主机（非本机/回环地址）。用于未配 token 时发起告警。
+fn is_remote_endpoint(endpoint: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(endpoint) else {
+        return true;
+    };
     match parsed.host_str() {
         Some("localhost") | Some("127.0.0.1") | Some("::1") => false,
         _ => true,
@@ -3152,12 +3230,57 @@ mod tests {
             _ => None,
         });
         assert!(attrs.iter().any(|(k, v)| k == RESOURCE_PONY_PROBE && v == "true"));
+        assert!(attrs.iter().any(|(k, v)| k == RESOURCE_INGEST_CLIENT_KIND && v == INGEST_CLIENT_KIND_PROBE));
 
         let attrs_off = resolve_resource_attributes(|k| match k {
             ENV_PONY_OTEL_PROBE => Some("false".to_string()),
             _ => None,
         });
         assert!(!attrs_off.iter().any(|(k, _)| k == RESOURCE_PONY_PROBE));
+        assert!(attrs_off.iter().any(|(k, v)| k == RESOURCE_INGEST_CLIENT_KIND && v == INGEST_CLIENT_KIND_DEVICE));
+    }
+
+    #[test]
+    fn test_export_diagnostics_uninit_returns_none() {
+        let _guard = test_lock();
+        shutdown();
+        assert!(export_diagnostics().is_none());
+    }
+
+    #[test]
+    fn test_export_diagnostics_with_and_without_auth() {
+        let _guard = test_lock();
+        shutdown();
+
+        // 1. 无 auth_token 初始化
+        init(OtelConfig {
+            endpoint: "https://collector.example.com".to_string(),
+            service_name: "test-svc".to_string(),
+            sampling_ratio: 1.0,
+            headers: Vec::new(),
+        })
+        .expect("init without auth should succeed");
+
+        let diag = export_diagnostics().expect("diagnostics should exist after init");
+        assert_eq!(diag.endpoint, "https://collector.example.com");
+        assert!(!diag.auth_configured, "无鉴权头时 auth_configured 必须为 false");
+
+        shutdown();
+
+        // 2. 带 auth_token 初始化
+        init(OtelConfig {
+            endpoint: "https://collector.example.com".to_string(),
+            service_name: "test-svc".to_string(),
+            sampling_ratio: 1.0,
+            headers: vec![("authorization".to_string(), "Bearer secret-123".to_string())],
+        })
+        .expect("init with auth should succeed");
+
+        let diag = export_diagnostics().expect("diagnostics should exist after init");
+        assert_eq!(diag.endpoint, "https://collector.example.com");
+        assert!(diag.auth_configured, "带 authorization 头时 auth_configured 必须为 true");
+
+        shutdown();
     }
 
     /// 黑洞 OTLP 端点：只 accept、不回包（导出必然超时），held 到预算耗尽。
@@ -3184,11 +3307,11 @@ mod tests {
 
     // ------------------------------------------------ PA-153 · resource 归因（实现期单测）
 
-    /// PA-153：默认值 = crate 版本 + debug 构建 `development`（集成测试只覆盖 debug 档）。
+    /// PA-153：默认值 = crate 版本 + debug 构建 `development` + 默认 client.kind=device。
     #[test]
     fn resource_attributes_default_to_crate_version_and_build_environment() {
         let attrs = resolve_resource_attributes(|_| None);
-        assert_eq!(attrs.len(), 2, "resource 归因必须恰好两键：{attrs:?}");
+        assert_eq!(attrs.len(), 3, "resource 归因包含三键：{attrs:?}");
         assert_eq!(attrs[0].0, "service.version");
         assert_eq!(attrs[0].1, env!("CARGO_PKG_VERSION"));
         assert_eq!(attrs[1].0, "deployment.environment");
@@ -3196,6 +3319,8 @@ mod tests {
             attrs[1].1,
             default_deployment_environment(cfg!(debug_assertions))
         );
+        assert_eq!(attrs[2].0, "ingest.client.kind");
+        assert_eq!(attrs[2].1, INGEST_CLIENT_KIND_DEVICE);
     }
 
     /// PA-153：两个 env（trim 后非空）各自覆盖默认，且互不影响。
