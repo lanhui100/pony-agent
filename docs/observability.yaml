@@ -4,7 +4,7 @@
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
 service: pony-agent
 kind: desktop
-reviewed_at: "2026-10-25"
+reviewed_at: "2026-10-26"
 
 dimensions:
   tracing:
@@ -29,10 +29,30 @@ dimensions:
       `<app_data_dir>/logs/pony-agent.log`（单行 JSON + trace_id + 512KiB 轮转），但那是用户数据面
       的本地取证面；不上送 Loki 仍是结构性选择而非缺口。
 
-# enforcement_points 刻意留空：本仓当前没有满足「唯一合法实现路径」的横切点，详见 note。
-# schema 规定：只声明真实存在且确实是唯一路径的点；没有就不要编（编出来的收口点会让门禁一落地就红）。
+enforcement_points:
+  error_boundary:
+    path: src/components/common/ErrorBoundary.vue
+    guarantees:
+      - breadcrumbs
+      - trace_id
+    forbidden_in_other_files:
+      - pattern: "\\bonErrorCaptured\\s*\\("
+        hint: 前端组件级异常捕获必须统一使用 ErrorBoundary.vue 统一收口与上报，禁止在别处私自声明 onErrorCaptured
+
+  http_client:
+    path: crates/pony-agent-core/src/agent/otel/mod.rs
+    guarantees:
+      - traceparent
+      - timeout
+    forbidden_in_other_files:
+      - pattern: "\\bheader\\s*\\(\\s*[\"']traceparent[\"']"
+        hint: 出网 HTTP 请求必须通过 otel::with_current_traceparent / traceparent_header_map_from 统一注入 traceparent，禁止手写硬编码请求头
+
 note: >-
-  【收口点待建｜建议进 OBS-GOV backlog】
+  【收口点落地说明（Stage-1 Protocol）】
+  (1) error_boundary: 收敛至 src/components/common/ErrorBoundary.vue，提供 Vue 3 onErrorCaptured 拦截、优雅降级及上报。
+  (2) http_client: 收敛至 crates/pony-agent-core/src/agent/otel/mod.rs，提供统一 with_current_traceparent 注入防重复与超时保证。
+  【历史 backlog 留存】
   (0) Wave-4 已收敛但**未达 enforcement_point 标准**（故暂不声明）：
       traceparent 注入收敛为单一 helper `otel::with_current_traceparent` /
       `traceparent_header_map`（provider ×4、model_catalog、tools ×2、PonySentry worker 共 8 点
