@@ -3941,6 +3941,7 @@ mod tests {
     fn session_runtime_view_queries_flow_through_control_plane() {
         let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("runtime-view")]);
+        let session_id = format!("session-runtime-view-{}", uuid::Uuid::new_v4());
 
         {
             let runtime = control_plane
@@ -3954,7 +3955,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 workspace_mode: None,
-                session_id: Some("session-runtime-view".to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
@@ -3964,14 +3965,14 @@ mod tests {
         }
 
         let view = control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-            session_id: Some("session-runtime-view".to_string()),
+            session_id: Some(session_id.clone()),
             ..SessionRuntimeViewQuery::default()
         });
 
-        assert_eq!(view.session.conversation_id, "session-runtime-view");
+        assert_eq!(view.session.conversation_id, session_id);
         assert_eq!(
             view.retrieved.session_context.conversation_id,
-            "session-runtime-view"
+            session_id
         );
         let checkpoint = view
             .checkpoint
