@@ -1,0 +1,33 @@
+warning: unused import: `supports_keyboard_enhancement`
+  --> crates/pony-agent-core/src/bin/tui.rs:11:44
+   |
+11 |         disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `sync_state_with_registry` is never used
+    --> crates/pony-agent-core/src/bin/tui.rs:1913:4
+     |
+1913 | fn sync_state_with_registry(state: &mut TuiState) {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pony-agent-core` (bin "pony") generated 2 warnings (run `cargo fix --bin "pony"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.78s
+     Running tests/wave47_ob2_wire_traceparent.rs (target-test/debug/deps/wave47_ob2_wire_traceparent-e9039eefd8709d77)
+
+running 2 tests
+test wave47_l2at_no_traceparent_on_wire_without_active_turn ... ok
+test wave47_l2t_traceparent_reaches_the_wire_inside_active_turn ... [WIRE-RECEIPT] 线上原始请求头：
+GET /v1/probe HTTP/1.1
+traceparent: 00-6eb3ce536b0f481bada70e7b6d04d804-fe0cf6d9b8d541bb-01
+accept: */*
+host: 127.0.0.1:41001
+
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+

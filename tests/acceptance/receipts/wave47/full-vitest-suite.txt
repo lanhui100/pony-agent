@@ -1,0 +1,9 @@
+
+ RUN  v4.1.9 /home/dm/pony-agent
+
+
+ Test Files  106 passed (106)
+      Tests  1048 passed | 12 skipped (1060)
+   Start at  09:01:42
+   Duration  42.33s (transform 59.31s, setup 0ms, import 203.39s, tests 178.29s, environment 166.48s)
+

@@ -53,4 +53,28 @@
 1. **[P0] 冻结测试的 flake 检测入闸**：对涉及全局态（OTel init、sink、LAST_ENQUEUED）的用例，加入“连跑 N 次”稳定性门禁，N=5；不达标不得红相锚定。
 2. **[P0] 既有 flake 必须与本次回归分离**：全量失败清单需与基线逐项对照并附“模块级复现率”，否则会把既有 flake 误判为 IMPL-DEFECT（本轮已按此口径执行）。
 3. **[P1] 断言唯一性优先于语义描述**：涉及父/子 span 同名错误时，契约必须冻结“只可能出现在目标 span”的唯一字面量（本轮 `turn_error: `），否则 contains 断言零鉴别力。
-4. **[P1] 审查输入包标准化**：`[diff, 契约, 测试文件清单, 运行命令]` 一次下发，减少审查员自行探索（本轮 3 路审查共耗时 ~20 分钟）。
+
+---
+
+# Wave-47 增补复盘（可观测性升级至 ob2：收口点与变更门禁落地）
+
+## 一、 通信拓扑与信噪比 (Topology & Noise)
+- **拓扑**：Lead + Protocol-47 + Test-47 + Executor（4/8 槽位）；无状态审查挂载 L3-P（review-l3p.json）。
+- **有效实践**：Protocol Agent 基于既有 Wave-46 ErrorBoundary 与 Wave-4 OTel 机制设计真实存在的收口点，拒绝假收口；Test Agent 独立在 `tests/acceptance/wave47-ob2-enforcement.spec.ts` 编写覆盖 7 项维度的对抗性门禁测试，断言拦截率达 100%。
+- **信噪比控制**：会话严格遵循极简交互规范与 JSON 零废话协议，各代理完成各自 write_scopes 闭包后有序流转。
+
+## 二、 门禁穿透与误杀率 (Gate Penetration / False Negatives & Positives)
+- **拦截能力**：7 项断言覆盖 D1 未批准拦截、Rule A 前端非法 onErrorCaptured、Rule A 后端手写 traceparent 头注入、Rule B 路径清空、非声明越界扫描等。真实 Exit Code 2 拦截率 100%。
+- **门禁打通**：通过将 audit-diff 挂载至 CI（`.github/workflows/ci.yml`），彻底解决 `mount_missing` 缺口，使 `ponygo observe audit --level ob2` 物理 Exit Code 为 0。
+- **误杀率**：0 起误杀，所有规则均由项目实际收敛逻辑映射，无泛化硬编码。
+
+## 三、 分工契约与隔离有效性 (Contract Isolation)
+- **写域隔离**：Protocol Agent 负责声明契约与 NFR 落盘；Test Agent 编写验收测试；Lead 与 Executor 完成收敛；写域完全正交。
+- **真实收口点**：
+  - `error_boundary`: `src/components/common/ErrorBoundary.vue`（guarantees: breadcrumbs, trace_id）
+  - `http_client`: `crates/pony-agent-core/src/agent/otel/mod.rs`（guarantees: traceparent, timeout）
+
+## 四、 元协议迭代建议 (Self-Evolving Protocol)
+1. **[P0] 变更门禁载体自动化探测适配**：在 `ponygo observe audit` 针对各类型项目时，可提供对主流 CI 载体（GitHub Actions / pre-commit / husky）的智能挂载检测或自动初始化提示。
+2. **[P1] 测试套件前置隔离**：在多 Agent 协同执行 vitest 测试时，确保测试文件临时目录使用独立命名空间，避免并发运行互相争用。
+
