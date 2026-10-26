@@ -49,6 +49,39 @@ fn unique_tag(prefix: &str) -> String {
     format!("{prefix}-{}-{nanos}", std::process::id())
 }
 
+// ── 平台 shell 夹具（Windows 兼容）──────────────────────────────────────────
+//
+// 原写法硬编码 `sh`（`sh -c pwd` / `sh -c "exit 0"` / 交互式 `sh`）：Windows 没有 `sh.exe`
+// （Git Bash 的 sh 不在默认 PATH），`job_start*` / `terminal_open*` 会在 spawn 阶段失败。
+// 平台分支：Unix `sh -c <cmd>`，Windows `cmd /C <cmd>`。
+
+/// 平台 shell 程序名。
+fn platform_shell() -> String {
+    if cfg!(windows) {
+        "cmd".to_string()
+    } else {
+        "sh".to_string()
+    }
+}
+
+/// 「执行单条命令」的平台参数：Unix `-c <cmd>`，Windows `/C <cmd>`。
+fn platform_shell_exec(command: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec!["/C".to_string(), command.to_string()]
+    } else {
+        vec!["-c".to_string(), command.to_string()]
+    }
+}
+
+/// 打印当前工作目录的 shell 命令：Unix `pwd`，Windows 内建 `cd`（cmd 的 `cd` 无参即打印 cwd）。
+fn platform_print_cwd() -> &'static str {
+    if cfg!(windows) {
+        "cd"
+    } else {
+        "pwd"
+    }
+}
+
 fn current_dir_canonical() -> PathBuf {
     let cwd = std::env::current_dir().expect("current_dir must be available");
     cwd.canonicalize().unwrap_or(cwd)
@@ -326,8 +359,8 @@ fn red_job_cwd_none_must_default_to_session_workspace_root() {
 
     let started = job_start_with_workspace_root(
         JobStartArgs {
-            command: "sh".to_string(),
-            args: Some(vec!["-c".to_string(), "pwd".to_string()]),
+            command: platform_shell(),
+            args: Some(platform_shell_exec(platform_print_cwd())),
             cwd: None,
             timeout_ms: Some(10_000),
         },
@@ -366,8 +399,8 @@ fn red_job_cwd_outside_session_workspace_must_be_rejected() {
     );
 
     let attempt = job_start(JobStartArgs {
-        command: "sh".to_string(),
-        args: Some(vec!["-c".to_string(), "exit 0".to_string()]),
+        command: platform_shell(),
+        args: Some(platform_shell_exec("exit 0")),
         cwd: Some(outside.display().to_string()),
         timeout_ms: Some(10_000),
     });
@@ -401,7 +434,7 @@ fn red_terminal_cwd_outside_session_workspace_must_be_rejected() {
     );
 
     let attempt = terminal_open(TerminalOpenArgs {
-        command: Some("sh".to_string()),
+        command: Some(platform_shell()),
         args: None,
         cwd: Some(outside.display().to_string()),
         cols: Some(80),
@@ -435,7 +468,7 @@ fn red_terminal_cwd_none_must_default_to_session_workspace_root() {
 
     let opened = terminal_open_with_workspace_root(
         TerminalOpenArgs {
-            command: Some("sh".to_string()),
+            command: Some(platform_shell()),
             args: None,
             cwd: None,
             cols: Some(80),
@@ -447,7 +480,8 @@ fn red_terminal_cwd_none_must_default_to_session_workspace_root() {
     .expect("terminal_open_with_workspace_root should succeed");
     let send_ok = terminal_send(TerminalSendArgs {
         terminal_id: opened.terminal_id.clone(),
-        input: "pwd\n".to_string(),
+        // 原写法 `pwd`：Windows 上 cmd 内建的"打印当前目录"是 `cd`。
+        input: format!("{}\n", platform_print_cwd()),
     });
     assert!(send_ok.is_ok(), "terminal_send should succeed: {send_ok:?}");
     let read = terminal_read(TerminalReadArgs {
@@ -483,8 +517,8 @@ fn patch4_job_some_ws_none_cwd_must_default_to_ws() {
 
     let started = job_start_with_workspace_root(
         JobStartArgs {
-            command: "sh".to_string(),
-            args: Some(vec!["-c".to_string(), "pwd".to_string()]),
+            command: platform_shell(),
+            args: Some(platform_shell_exec(platform_print_cwd())),
             cwd: None,
             timeout_ms: Some(10_000),
         },
@@ -521,8 +555,8 @@ fn patch4_job_some_ws_cross_boundary_cwd_must_be_rejected() {
 
     let attempt = job_start_with_workspace_root(
         JobStartArgs {
-            command: "sh".to_string(),
-            args: Some(vec!["-c".to_string(), "exit 0".to_string()]),
+            command: platform_shell(),
+            args: Some(platform_shell_exec("exit 0")),
             cwd: Some(outside.display().to_string()),
             timeout_ms: Some(10_000),
         },
@@ -553,7 +587,7 @@ fn patch4_terminal_some_ws_none_cwd_must_default_to_ws() {
 
     let opened = terminal_open_with_workspace_root(
         TerminalOpenArgs {
-            command: Some("sh".to_string()),
+            command: Some(platform_shell()),
             args: None,
             cwd: None,
             cols: Some(80),
@@ -565,7 +599,8 @@ fn patch4_terminal_some_ws_none_cwd_must_default_to_ws() {
     .expect("terminal_open_with_workspace_root should succeed");
     let send_ok = terminal_send(TerminalSendArgs {
         terminal_id: opened.terminal_id.clone(),
-        input: "pwd\n".to_string(),
+        // 原写法 `pwd`：Windows 上 cmd 内建的"打印当前目录"是 `cd`。
+        input: format!("{}\n", platform_print_cwd()),
     });
     assert!(send_ok.is_ok(), "terminal_send should succeed: {send_ok:?}");
     let read = terminal_read(TerminalReadArgs {
@@ -601,7 +636,7 @@ fn patch4_terminal_some_ws_cross_boundary_cwd_must_be_rejected() {
 
     let attempt = terminal_open_with_workspace_root(
         TerminalOpenArgs {
-            command: Some("sh".to_string()),
+            command: Some(platform_shell()),
             args: None,
             cwd: Some(outside.display().to_string()),
             cols: Some(80),
@@ -644,8 +679,8 @@ fn patch4_none_branch_must_not_create_default_dir_as_side_effect() {
         return;
     }
     let _ = job_start(JobStartArgs {
-        command: "sh".to_string(),
-        args: Some(vec!["-c".to_string(), "exit 0".to_string()]),
+        command: platform_shell(),
+        args: Some(platform_shell_exec("exit 0")),
         cwd: None,
         timeout_ms: Some(10_000),
     });
