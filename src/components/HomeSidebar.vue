@@ -4,6 +4,7 @@ import { storeToRefs } from "pinia";
 import { useRuntimeStore } from "@/stores/runtime";
 import { usePlanStore } from "@/stores/plan";
 import { useGoalStore } from "@/stores/goal";
+import { useTeamStore } from "@/stores/team";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
 import TeamRosterPanel from "@/components/team/TeamRosterPanel.vue";
@@ -22,8 +23,23 @@ import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProje
 const runtimeStore = useRuntimeStore();
 const planStore = usePlanStore();
 const goalStore = useGoalStore();
+const teamStore = useTeamStore();
+
+// 计划与任务在有值时显示（有 plan、todo 或 goal）
 const hasPlanOrTasks = computed(
   () => planStore.plans.length > 0 || planStore.todos.length > 0 || goalStore.hasGoal
+);
+
+// 团队在有子智能体时才显示（成员数 > 1，或排除 lead 后的子代理数 > 0）
+const hasSubagents = computed(() => {
+  return teamStore.members.some((m) => m.target !== "lead") || teamStore.members.length > 1;
+});
+
+// 任务看板在有任务时显示
+const hasTeamTasks = computed(() => teamStore.tasks.length > 0);
+
+const hasVisiblePanelsBelowStatus = computed(
+  () => hasPlanOrTasks.value || hasSubagents.value || hasTeamTasks.value
 );
 
 const {
@@ -96,19 +112,31 @@ onBeforeUnmount(() => {
           :show-context-usage="showContextUsage"
           :context-display-tokens="contextDisplayTokens"
           :context-window-tokens="currentContextWindowTokens"
-          :class="hasPlanOrTasks ? 'border-b border-stone-200/70 pb-4' : ''"
+          :class="hasVisiblePanelsBelowStatus ? 'border-b border-stone-200/70 pb-4' : ''"
           @copy-session-id="copyText('session-id', sessionId)"
         />
 
-        <!-- Wave-1 C6：计划面板常驻（不再以「已有数据」为渲染前提），空态由 PlanPanel 内部展示。 -->
+        <!-- 计划与任务：在有值时显示 -->
         <PlanPanel
+          v-if="hasPlanOrTasks"
           :session-id="sessionId"
           :open="activePanel === 'plan'"
           @toggle="togglePlan()"
         />
 
-        <TeamRosterPanel :open="activePanel === 'roster'" @toggle="toggleRoster()" />
-        <TeamTaskBoardPanel :open="activePanel === 'tasks'" @toggle="toggleTasks()" />
+        <!-- 团队：改为「团队」，在有子智能体时才显示 -->
+        <TeamRosterPanel
+          v-if="hasSubagents"
+          :open="activePanel === 'roster'"
+          @toggle="toggleRoster()"
+        />
+
+        <!-- 任务看板：在有值时显示 -->
+        <TeamTaskBoardPanel
+          v-if="hasTeamTasks"
+          :open="activePanel === 'tasks'"
+          @toggle="toggleTasks()"
+        />
       </div>
     </ScrollArea>
   </aside>

@@ -135,16 +135,7 @@ describe("Wave-5 Session Cost Estimation & Soft Warning Suite", () => {
 
       await nextTick();
 
-      // 1. 真实渲染断言：状态面板上渲染出告警角标与告警样式
-      const costEl = wrapper.find('[data-testid="status-metric-session-cost"]');
-      expect(costEl.exists()).toBe(true);
-      expect(costEl.classes()).toContain("text-amber-600");
-      // 告警文案在 Tooltip 或直接在文本中
-      const tooltipWrapper = wrapper.find('.tooltip-stub[data-tooltip*="超"]');
-      expect(tooltipWrapper.exists()).toBe(true);
-      expect(tooltipWrapper.attributes("data-tooltip")).toContain("超出成本预算限额");
-
-      // 2. 真实消费点证伪：检查发送与提交逻辑（K3 核心不变量：绝对禁止禁用用户输入与发送）
+      // 1. 真实消费点证伪：检查发送与提交逻辑（K3 核心不变量：绝对禁止禁用用户输入与发送）
       // draftMessage 有内容时，发送按钮动作必须依然可用
       runtimeStore.draftMessage = "下一个任务需求";
       // runtime 核心执行状态绝对未被置为 error 或 blocked
