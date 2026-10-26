@@ -148,55 +148,68 @@ jobs:
           # 与「空 draft」（删 tag 重推会让原 release 退回 draft，同时新 run 又 create 一条空的），
           # 于是取到空的那条 ⇒ 明明产物齐全却报 "got 0"。
           $nsis = "target/release/bundle/nsis"
-          $allReleases = @(gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json)
-          $sameTag = @($allReleases | Where-Object { $_.tag_name -eq $tag })
-          # 优先选「已有 setup.exe 资产」的那条；其次选已发布的；都没有才新建。
-          $picked = $sameTag | Where-Object { @($_.assets | Where-Object { $_.name -like "*-setup.exe" }).Count -ge 1 } | Select-Object -First 1
-          if (-not $picked) { $picked = $sameTag | Where-Object { -not $_.draft } | Select-Object -First 1 }
-          if (-not $picked) { $picked = $sameTag | Select-Object -First 1 }
-          if ($picked) {
-            $relId = $picked.id
-            Write-Host "release $tag already exists (id=$relId, draft=$($picked.draft)); reusing it (idempotent rerun)"
-            if ($sameTag.Count -gt 1) {
-              Write-Host "WARN: found $($sameTag.Count) releases for tag ${tag}; using id=$relId (others: $((($sameTag | Where-Object { $_.id -ne $relId }).id) -join ', '))"
-            }
+
+          # ── 解析/创建目标 release ────────────────────────────────────────────────
+          # 只用 **tag** 作为句柄，全程不需要 release id。原因（三次发版失败换来的教训）：
+          #   1) 草稿 release 是 **untagged** 的（html_url 形如 untagged-…），
+          #      `releases/tags/<tag>` 对草稿必然 404 —— 本文件顶部注释早已写明；
+          #   2) 该列表端点有**最终一致性**：创建后立刻查询可能暂时查不到（v0.1.161 实测），
+          #      所以解析必须带重试，不能"查一次没有就报错"；
+          #   3) 删 tag 重推会让旧 release 退回草稿并可能并存多条同 tag 记录，
+          #      用 id 反而容易取到空的那条。用 tag + "谁的资产最全" 择优最稳。
+          function Resolve-ReleaseByTag {
+            param([string]$Repo, [string]$Tag)
+            $list = @(gh api "repos/$Repo/releases?per_page=100" 2>$null | ConvertFrom-Json)
+            $same = @($list | Where-Object { $_.tag_name -eq $Tag })
+            # 优先「已有 setup.exe 资产」的那条；其次已发布的；再次最新创建的
+            $withAsset = $same | Where-Object { @($_.assets | Where-Object { $_.name -like "*-setup.exe" }).Count -ge 1 } | Select-Object -First 1
+            if ($withAsset) { return $withAsset }
+            $published = $same | Where-Object { -not $_.draft } | Select-Object -First 1
+            if ($published) { return $published }
+            return ($same | Sort-Object created_at -Descending | Select-Object -First 1)
+          }
+
+          $rel = $null
+          for ($attempt = 0; $attempt -lt 10; $attempt++) {
+            $rel = Resolve-ReleaseByTag -Repo $repo -Tag $tag
+            if ($rel) { break }
+            Start-Sleep -Seconds 3
+          }
+          if ($rel) {
+            Write-Host "release $tag already exists (id=$($rel.id), draft=$($rel.draft)); reusing it (idempotent rerun)"
           } else {
-            # 注意：`gh release create` **不支持 --json**（那是 gh release view/list 的能力），
-            # 旧写法会直接报错并被误报成 "failed to create release"（v0.1.159 实测）。
+            # `gh release create` 不支持 --json（那是 view/list 的能力）。
             gh release create "$tag" --draft --title "$tag" --notes-file "target/release/bundle/nsis/release-notes.md"
             if ($LASTEXITCODE -ne 0) { throw "failed to create release $tag (gh exit $LASTEXITCODE)" }
-            # 关键：**draft release 是 untagged 的**（html_url 形如 untagged-…），
-            # 所以 `releases/tags/<tag>` 对刚创建的草稿必然 404（本文件顶部注释早已写明）。
-            # 只能通过 releases **列表**端点按 tag_name 字段反查（取最新一条草稿）。
-            $list = @(gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json)
-            $createdRel = @($list | Where-Object { $_.tag_name -eq $tag -and $_.draft -eq $true }) |
-              Sort-Object created_at -Descending | Select-Object -First 1
-            if (-not $createdRel) { throw "created release $tag but cannot resolve it from releases list (drafts are untagged)" }
-            $relId = $createdRel.id
-            Write-Host "created draft release $tag (id=$relId)"
+            # 草稿是 untagged + 列表最终一致 ⇒ 创建后必须重试等待可见，再取引用。
+            for ($attempt = 0; $attempt -lt 15; $attempt++) {
+              $rel = Resolve-ReleaseByTag -Repo $repo -Tag $tag
+              if ($rel) { break }
+              Start-Sleep -Seconds 3
+            }
+            if (-not $rel) { throw "created draft release $tag but it never appeared in releases list (60s)" }
+            Write-Host "created draft release $tag (id=$($rel.id))"
           }
+
           # Windows desktop assets: NSIS installer + its updater signature
           Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
           Get-ChildItem $nsis -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
 
-          # Compose latest.json from the POST-upload (GitHub-normalized) asset names:
-          # GitHub uploads rename spaces to dots, so the local build name (with space)
-          # would 404 in the updater. Read the draft's real asset list by release id.
-          # Wait up to 45s for assets to become queryable via GitHub Releases API
-          $rel = $null
+          # 上传后资产可见性同样有延迟：按 tag 重新解析，直到看到恰好一个 setup.exe。
           $setup = @()
-          # 轮询解析目标 release —— **不区分 draft/published**。
-          # 历史缺陷：旧实现只按 `.draft == true` 过滤，而串行化前可能已有另一条 run 把 release
-          # 发布掉了 ⇒ 永远找不到 draft ⇒ 上游产物明明齐全却 throw "got 0"（v0.1.157 实测）。
-          for ($retry = 0; $retry -lt 15; $retry++) {
-            $rel = gh api "repos/$repo/releases/$relId" | ConvertFrom-Json
+          for ($retry = 0; $retry -lt 20; $retry++) {
+            $rel = Resolve-ReleaseByTag -Repo $repo -Tag $tag
             $setup = @($rel.assets | Where-Object { $_.name -like "*-setup.exe" })
             if ($setup.Count -ge 1) { break }
             Start-Sleep -Seconds 3
           }
           if ($setup.Count -ne 1) {
             $seen = if ($rel) { (($rel.assets).name -join ", ") } else { "<release not found>" }
-            throw "expected exactly one setup.exe asset in release id=$relId, got $($setup.Count): $seen"
+            # 诊断信息：把列表端点实际返回的 tag 采样打出来，避免下次再靠猜
+            $diag = @(gh api "repos/$repo/releases?per_page=100" 2>$null | ConvertFrom-Json)
+            $sample = (($diag | Select-Object -First 5 | ForEach-Object { "$($_.tag_name)[draft=$($_.draft)]" }) -join ", ")
+            throw ("expected exactly one setup.exe asset for tag ${tag}, got $($setup.Count): $seen" +
+                   " | list_count=$($diag.Count) sample=$sample")
           }
           $asset = $setup[0].name
           $assetUrl = [uri]::EscapeDataString($asset)
