@@ -41,10 +41,15 @@ const FAKE_CAPABILITY_TOOLS: [&str; 10] = [
     "team_task_list",
 ];
 
-/// 生产工具面投影 `builtin_turn_tool_contract_views()` 的 21 个真实工具名
+/// 生产工具面投影 `builtin_turn_tool_contract_views()` 的 29 个真实工具名
 /// （== `builtin_tool_surface().provider_contract_views()` == Anthropic/OpenAI tools payload 数据源）。
-/// 该清单由 Lead 实跑基线确认：10 个假工具已不在可见面，21 个真实工具必须在。
-const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 21] = [
+///
+/// 演进历史：
+/// - W25 基线：21 项（彻底移除了 10 个假能力工具）。
+/// - W37-C1 新增 7 项已真实实现的工具（Present, Find, GitDiff, JobStart, JobOutput, JobKill, JobList）；
+/// - W42/PA-149 新增 1 项真实实现的工具（skill_load 按需加载技能正文）。
+/// 总计 29 项真实生产工具，10 个假能力工具绝不回流。
+const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 29] = [
     "Run",
     "Ask",
     "Read",
@@ -66,6 +71,14 @@ const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 21] = [
     "create_goal",
     "get_goal",
     "update_goal",
+    "Present",
+    "Find",
+    "GitDiff",
+    "JobStart",
+    "JobOutput",
+    "JobKill",
+    "JobList",
+    "skill_load",
 ];
 
 fn make_call(name: &str, arguments: Value) -> ToolCall {
