@@ -7,7 +7,20 @@ import os from "node:os";
 const SCRIPT_PATH = "/home/dm/.agents/skills/observability-onboarding/scripts/audit-diff.sh";
 const REPO_ROOT = path.resolve(__dirname, "../..");
 
-describe("ob2 变更级门禁与横切收口点验收测试 (L2-T & L2-AT)", () => {
+// 本套件直驱本机 skill（audit-diff）与 ponygo，二者都只存在于开发机；
+// CI runner 上没有，硬跑会得到 bash 127 的假红。故整体在缺依赖时跳过——
+// CI 侧的等价覆盖由 gate-conformance.spec.ts（gate.mjs 引擎，含 D1 语义回归）承担。
+const hasSkill = fs.existsSync(SCRIPT_PATH);
+const hasPonygo = (() => {
+  try {
+    execSync("command -v ponygo", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+describe.skipIf(!hasSkill || !hasPonygo)("ob2 变更级门禁与横切收口点验收测试 (L2-T & L2-AT)", () => {
   it("T1-BASELINE: 当前工作区在 --decl-approved 下基线合规退出 0", () => {
     const res = execSync(`bash "${SCRIPT_PATH}" --repo "${REPO_ROOT}" --decl-approved 2>&1`, {
       encoding: "utf-8",

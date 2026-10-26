@@ -1613,7 +1613,7 @@ mod tests {
         let normalized = normalize_storage(storage);
         let model = &normalized.providers[0].models[0];
 
-        assert_eq!(model.capabilities.context_window_tokens, Some(256_000));
+        assert_eq!(model.capabilities.context_window_tokens, Some(1_000_000));
         assert!(model.capabilities.supports_tools);
         assert!(model.capabilities.supports_streaming);
         assert!(model.capabilities.supports_reasoning);
