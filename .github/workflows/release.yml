@@ -32,8 +32,11 @@ jobs:
       # 开发机的会话误标成 production（实测已发生：本机 release 构建的 trace 进了生产维度）。
       # 只有本发布工作流会注入此标记 ⇒ 只有真正发布的产物才判 production。
       PONY_RELEASE_BUILD: "1"
-      # 运行期 OTel token 由用户在应用内配置或安装包配置 settings.json 注入；
-      # 避免在 CI 全局构建环境变量中扩大 secret 暴露面
+      # 构建期烧录 OTel 准入 token：与 PonySentry token 同款取舍（ADR 0037 的构建期分发模式）。
+      # 历史缺口：桌面端此前没有任何 token 分发通道，用户不手填 Settings 就静默 401、trace 全丢
+      # （实测 24h 零 trace，同期探针正常）。烧录后安装包开箱即可上报，用户零配置。
+      # 优先级最低（settings > env > 构建期），运维仍可覆盖。
+      PONY_OTEL_BUILD_TOKEN: ${{ secrets.PONY_OTEL_TOKEN }}
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-D warnings"
     steps:

@@ -84,6 +84,15 @@ note: >-
   `crates/pony-agent-core/src/agent/otel/mod.rs`），不新增出口/端点/标签维度；`agent.turn` 根 span
   新增 `agent.turn.outcome=error` + `turn_error:` 状态承接子 span 失败。见
   `docs/audit/observability-audit-2026-10-25.md` 与 `.dev-team/contract-matrix-wave45.md`。
+  【wave-49 增补｜OTel 准入 token 改构建期烧录（ADR 0049，用户零配置）】
+  根因：桌面端此前**没有任何 OTel token 分发通道**（settings 手填 / env 之外全无），
+  release.yml 只烧录 PonySentry token，仓库也缺 `PONY_OTEL_TOKEN` secret ⇒ 实测 24h 零 trace
+  而同期探针正常。修法：`PONY_OTEL_BUILD_TOKEN` 构建期烧录（release.yml 从 secret 注入），
+  优先级 **settings > env > 构建期 > 缺省**，空白视为未配置（fail-closed）。
+  安全取舍（ADR 0049 显式承认）：token 内嵌安装包可被提取；当前 edge 本就是单 token 模型，
+  按设备吊销不成立，吊销代价 = 重新发版；该 token 只能写、不能读，edge 侧有 120 req/min/IP
+  与 16MiB/请求上限。四维归属不变（仍是 tracing 维度，唯一落点仍为 otel/mod.rs）。
+
   【wave-49 归属登记｜真实链路巡检驱动的四项缺陷修复（均不改四维归属）】
   (1) tracing｜检索键分裂：公网 edge 会把 `service.name` 改写成 `desktop-client`，
       集群内直连则保留 `pony-agent` ⇒ 同一产品两条 ingest 路径产出不同检索键，查询口径分裂

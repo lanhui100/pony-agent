@@ -206,6 +206,21 @@ pub(crate) const ENVIRONMENT_DEVELOPMENT: &str = "development";
 /// release 构建的默认部署环境取值。
 pub(crate) const ENVIRONMENT_PRODUCTION: &str = "production";
 
+/// 构建期烧录的准入 token 的 env 名（`option_env!` 读取，仅 release 工作流注入）。
+///
+/// 为什么需要它：桌面端此前**没有任何 token 分发通道** —— 用户必须在 Settings 里手填
+/// 公网 edge 的 OTel token，没填就静默 401、trace 全丢（实测：24h 零 trace，而同期探针正常）。
+/// 与 PonySentry 的构建期烧录（ADR 0037）同款取舍：安装包内嵌 token，用户零配置。
+/// 优先级最低（settings > env > 构建期），因此用户/运维仍可覆盖或吊销为本地值。
+pub const ENV_PONY_OTEL_BUILD_TOKEN: &str = "PONY_OTEL_BUILD_TOKEN";
+
+/// 构建期烧录值（未注入时为 `None`；本地 `cargo build` 恒为 None）。
+fn build_time_otel_token() -> Option<&'static str> {
+    option_env!("PONY_OTEL_BUILD_TOKEN")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// 鉴权 header 名（token 值由 [`ENV_PONY_OTEL_TOKEN`] 注入）。
 pub const AUTH_HEADER_NAME: &str = "authorization";
 
@@ -367,6 +382,18 @@ pub fn resolve_config(
     settings: Option<&OtelSettingsSnapshot>,
     env: Option<&[(&str, &str)]>,
 ) -> OtelConfig {
+    resolve_config_with_build_token(settings, env, build_time_otel_token())
+}
+
+/// [`resolve_config`] 的可测内核：把「构建期烧录 token」作为参数显式传入。
+///
+/// 拆出来是为了让「最低优先级兜底」可被单测锁定——`option_env!` 在测试构建里恒为 `None`，
+/// 不拆开就无法验证 "settings/env 都没给时用构建期值" 与 "用户显式配置不会被覆盖"。
+pub fn resolve_config_with_build_token(
+    settings: Option<&OtelSettingsSnapshot>,
+    env: Option<&[(&str, &str)]>,
+    build_token: Option<&str>,
+) -> OtelConfig {
     let mut config = OtelConfig::default();
     let lookup = |name: &str| -> Option<String> {
         env.and_then(|pairs| {
@@ -424,6 +451,14 @@ pub fn resolve_config(
         // C1.5：settings token 为空串 ⇒ 等同未配置（继续沿用 env 结果 / 零凭证）。
         if let Some(token) = non_empty_setting(settings.token.as_deref()) {
             set_authorization_header(&mut config.headers, &token);
+        }
+    }
+
+    // 最低优先级兜底：构建期烧录 token（release 产物零配置可用）。
+    // 仅在 settings 与 env 都没给凭证时生效，因此不会覆盖用户显式配置。
+    if config.headers.is_empty() {
+        if let Some(token) = build_token.map(str::trim).filter(|value| !value.is_empty()) {
+            set_authorization_header(&mut config.headers, token);
         }
     }
 
@@ -3618,6 +3653,50 @@ mod tests {
         assert_eq!(ATTR_AGENT_TURN_OUTCOME, "agent.turn.outcome");
         assert_eq!(TURN_ERROR_PREFIX_TOOL_FAILED, "tool_failed");
         assert_eq!(TURN_ERROR_PREFIX_QUOTA_BLOCKED, "quota_blocked");
+    }
+
+    /// wave-49 回归：构建期烧录 token 是**最低优先级**兜底 —— 用户零配置也能上报，
+    /// 但绝不覆盖 settings/env 的显式配置。
+    /// 守护的线上故障：桌面端无 token 分发通道 ⇒ 用户不手填 Settings 就静默 401、trace 全丢。
+    #[test]
+    fn build_time_token_is_lowest_priority_fallback() {
+        // ① settings 与 env 都没给 ⇒ 用构建期值
+        let with_build = resolve_config_with_build_token(None, None, Some("build-token-xyz"));
+        assert_eq!(
+            with_build
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(AUTH_HEADER_NAME))
+                .map(|(_, value)| value.as_str()),
+            Some("Bearer build-token-xyz"),
+            "无 settings/env 时必须回落到构建期 token"
+        );
+
+        // ② env 给了 ⇒ 构建期值不得覆盖
+        let env_pairs = [(ENV_PONY_OTEL_TOKEN, "env-token-abc")];
+        let with_env = resolve_config_with_build_token(None, Some(&env_pairs), Some("build-token-xyz"));
+        assert_eq!(
+            with_env
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(AUTH_HEADER_NAME))
+                .map(|(_, value)| value.as_str()),
+            Some("Bearer env-token-abc"),
+            "env 显式配置必须压过构建期 token"
+        );
+
+        // ③ 构建期值为空/空白 ⇒ 视为未烧录（零凭证，fail-closed）
+        for blank in ["", "   "] {
+            let config = resolve_config_with_build_token(None, None, Some(blank));
+            assert!(
+                config.headers.is_empty(),
+                "空白构建期 token 必须视为未配置（{blank:?}）"
+            );
+        }
+
+        // ④ 完全没有构建期 token（本地 cargo build 的常态）⇒ 仍然零凭证
+        let none = resolve_config_with_build_token(None, None, None);
+        assert!(none.headers.is_empty(), "无构建期 token 时不得凭空产生凭证");
     }
 
     /// T11 回归：工具 span 的时间边界必须覆盖真实执行区间；退化/溢出路径不得 panic。
