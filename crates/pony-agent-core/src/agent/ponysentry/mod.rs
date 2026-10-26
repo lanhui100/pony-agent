@@ -239,9 +239,22 @@ pub fn governance_fault_fingerprint_count() -> usize {
         .len()
 }
 
+/// 测试钩子：供 ponysentry 单元测试同步串行化全局客户端与状态。
+#[cfg(test)]
+pub fn test_sink_lock() -> std::sync::MutexGuard<'static, ()> {
+    client::test_sink_lock()
+}
+
 /// 读取最近一次入队的上报 payload（测试钩子，Wave-6 验收用例使用）。
 pub fn testing_last_enqueued_payload() -> Option<crate::agent::ponysentry::models::IngestPayload> {
     client::last_enqueued_payload()
+}
+
+/// 从最近入队的 payload 队列中按谓词反向检索（测试钩子）。
+pub fn testing_find_enqueued_payload(
+    predicate: impl Fn(&crate::agent::ponysentry::models::IngestPayload) -> bool,
+) -> Option<crate::agent::ponysentry::models::IngestPayload> {
+    client::find_enqueued_payload(predicate)
 }
 
 /// 排空上报队列（有界，最多 1500ms）：供 CLI/TUI 退出前调用，避免「报错即退出」丢 issue。
@@ -276,6 +289,7 @@ mod turn_failure_capture_tests {
     /// 开关默认关闭（桌面端不重复上报）；可显式开关。
     #[test]
     fn turn_failure_capture_switch_defaults_off_and_roundtrips() {
+        let _guard = test_sink_lock();
         enable_turn_failure_capture(false);
         assert!(
             !is_turn_failure_capture_enabled(),
@@ -301,6 +315,7 @@ mod turn_failure_capture_tests {
     /// L3 B3：治理阻断等**预期内失败**不得产生 issue（但普通失败仍照常上报）。
     #[test]
     fn governance_block_failure_is_not_reported() {
+        let _guard = test_sink_lock();
         init(PonySentryConfig {
             client_token: Some("dummy-token".to_string()),
             enabled: true,
@@ -313,23 +328,40 @@ mod turn_failure_capture_tests {
         // 哨兵：先入队一条可识别的普通错误。
         let sentinel = format!("sentinel-marker-{}", uuid::Uuid::new_v4());
         capture_error("Sentinel", &sentinel, None);
-        let baseline = testing_last_enqueued_payload().expect("sentinel 必须入队");
+        let baseline = testing_find_enqueued_payload(|p| {
+            p.message.as_deref().unwrap_or("").contains(&sentinel)
+        })
+        .expect("sentinel 必须入队");
         assert!(baseline.message.as_deref().unwrap_or("").contains(&sentinel));
 
         // 预期内失败（治理阻断）：标记后不得产生新 payload。
         let blocked_turn = format!("turn-blocked-{}", uuid::Uuid::new_v4());
         mark_turn_failure_expected(&blocked_turn);
         capture_turn_failure(&blocked_turn, "用量治理已阻断本轮", Some("gpt-4o"));
-        let after_block = testing_last_enqueued_payload().expect("payload 仍在");
-        assert_eq!(
-            after_block.event_id, baseline.event_id,
-            "预期内失败必须**跳过**上报（payload 不得被覆盖）"
+        let after_block = testing_find_enqueued_payload(|p| {
+            p.extra
+                .as_ref()
+                .and_then(|ex| ex.get("turn_id"))
+                .and_then(|tid| tid.as_str())
+                == Some(&blocked_turn)
+                || p.message.as_deref().unwrap_or("").contains(&blocked_turn)
+        });
+        assert!(
+            after_block.is_none(),
+            "预期内失败必须**跳过**上报（不得在队列中检索到属于 blocked_turn 的 payload）"
         );
 
         // 对照：未标记的普通失败照常上报。
         let failed_turn = format!("turn-normal-{}", uuid::Uuid::new_v4());
         capture_turn_failure(&failed_turn, "provider unreachable", Some("gpt-4o"));
-        let after_normal = testing_last_enqueued_payload().expect("普通失败必须入队");
+        let after_normal = testing_find_enqueued_payload(|p| {
+            p.extra
+                .as_ref()
+                .and_then(|ex| ex.get("turn_id"))
+                .and_then(|tid| tid.as_str())
+                == Some(&failed_turn)
+        })
+        .expect("普通失败必须入队");
         assert_ne!(
             after_normal.event_id, baseline.event_id,
             "普通 turn 失败必须照常产生 issue"
@@ -340,11 +372,13 @@ mod turn_failure_capture_tests {
         );
 
         enable_turn_failure_capture(false);
+        init(PonySentryConfig::default());
     }
 
     /// 空 turn_id 不占用上报权（畸形输入不污染去重表）。
     #[test]
     fn blank_turn_id_is_ignored_by_capture() {
+        let _guard = test_sink_lock();
         enable_turn_failure_capture(true);
         // 无 token 的默认全局客户端也是 fail-closed，这里只验证不 panic、不占表。
         capture_turn_failure("   ", "boom", Some("m"));
