@@ -73,10 +73,17 @@ fn platform_shell_exec(command: &str) -> Vec<String> {
     }
 }
 
-/// 打印当前工作目录的 shell 命令：Unix `pwd`，Windows 内建 `cd`（cmd 的 `cd` 无参即打印 cwd）。
+/// 打印当前工作目录的 shell 命令：Unix `pwd`；Windows `echo %CD%`。
+///
+/// 为什么 Windows 选 `echo %CD%` 而不是裸 `cd`：
+/// - 产品 `terminal_open` / `job_start` 用的都是**管道 stdio**（`terminal.rs:414-416` 的
+///   `Stdio::piped()`，不是 PTY），子进程是非交互模式的 cmd：无提示符、但会先打启动 banner；
+/// - 裸 `cd` 的"无参即打印"是 cmd 的内建行为，输出与命令回显/提示符混在一起时更难界定边界；
+/// - `%CD%` 是 cmd 维护的动态变量（每条命令行重新展开），`echo %CD%` 在 `cmd /C`（job）与
+///   管道 stdin（terminal）两种上下文都只输出一行纯路径 → 同一 helper 两处复用、断言最稳。
 fn platform_print_cwd() -> &'static str {
     if cfg!(windows) {
-        "cd"
+        "echo %CD%"
     } else {
         "pwd"
     }
@@ -136,20 +143,25 @@ fn normalize_path_forms(s: &str, windows_forms: bool) -> String {
 /// Windows 下对**多行输出逐行**归一化（MSYS 根形态只作用于每行行首，terminal
 /// 输出中的 pwd 行可能在多行文本中部），Linux 恒等。
 fn normalize_path_for_compare(raw: &str) -> String {
+    normalize_path_for_compare_with(raw, cfg!(windows))
+}
+
+/// [`normalize_path_for_compare`] 的参数化核心（`windows_forms=true` 时按 Windows 形态归一）。
+///
+/// 参数化的唯一目的是**让 Windows 形态能在 Linux 上镜像测试**（与 `normalize_path_forms`
+/// 同一手法）：normalize 本身仍然只有这一份实现，不另造第二套。
+fn normalize_path_for_compare_with(raw: &str, windows_forms: bool) -> String {
     let trimmed = raw.trim();
     let canonical = canonicalize_lossy(trimmed);
-    #[cfg(windows)]
-    {
-        canonical
-            .lines()
-            .map(|line| normalize_path_forms(line.trim(), true))
-            .collect::<Vec<_>>()
-            .join("\n")
+    if !windows_forms {
+        // 非 Windows：`normalize_path_forms(_, false)` 是恒等变换，直接返回 canonical 结果。
+        return canonical;
     }
-    #[cfg(not(windows))]
-    {
-        normalize_path_forms(&canonical, false)
-    }
+    canonical
+        .lines()
+        .map(|line| normalize_path_forms(line.trim(), true))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 路径断言辅助：双方经 `normalize_path_for_compare` 归一化后比较
@@ -203,6 +215,43 @@ fn job_output_until_nonempty(job_id: &str, budget: Duration) -> JobOutputResult 
     }
 }
 
+/// 有界轮询 terminal 输出，直到（平台归一化后）含期望路径，或预算耗尽；返回最后一次累计输出。
+///
+/// **Windows 坑 1（时序）**：产品终端是**管道 stdio**（非 PTY），`cmd` 启动时会先输出
+/// `Microsoft Windows [Version ...]` 启动 banner（windows-latest 实测如此），命令的输出要晚一步
+/// 才进环形缓冲。原先「send 之后立刻单次 `terminal_read` 就断言」在 Windows 上只拿到 banner，
+/// 输出里根本没有路径 —— 这是本用例 Windows 假红的直接原因（banner 与路径谁先到是竞态）。
+/// 故改为按 50ms 粒度轮询累计输出（`offset=0` 每次取全量），命中即返回，否则超时返回最后一次
+/// 输出（供断言打印全貌）。
+///
+/// **Windows 坑 2（形态）**：期望值来自 `canonicalize()`，Windows 上是 verbatim 前缀
+/// `\\?\C:\...`，而 shell 打印的是 `C:\...`；两侧一律走本文件既有的
+/// [`normalize_path_for_compare`]（剥 `\\?\` + 大小写归一）再比，不另造第二套规范化。
+fn terminal_read_until_contains_path(
+    terminal_id: &str,
+    expected_path: &str,
+    budget: Duration,
+) -> String {
+    let deadline = Instant::now() + budget;
+    let norm_expected = normalize_path_for_compare(expected_path);
+    loop {
+        let read = terminal_read(TerminalReadArgs {
+            terminal_id: terminal_id.to_string(),
+            timeout_ms: Some(500),
+            offset: Some(0),
+        })
+        .expect("terminal_read should succeed");
+        let output = read.output;
+        if normalize_path_for_compare(&output).contains(&norm_expected) {
+            return output;
+        }
+        if Instant::now() >= deadline {
+            return output;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Windows 形态转换逻辑的 Linux 可测镜像（复现 CI 实际值，见 ci_final.log）：
 /// MSYS 根形态与 `\\?\` 扩展形态必须归一为同一字形，避免 windows-latest 形态假红。
 #[test]
@@ -226,6 +275,31 @@ fn normalize_path_forms_windows_shapes_are_testable_on_linux() {
     );
     // Unix 绝对路径不得被 MSYS 分支误转换（第三字符非 '/'）。
     assert_eq!(normalize_path_forms("/home/user/pony", true), "/home/user/pony");
+}
+
+/// CI windows-latest 实据镜像：terminal 输出是「banner 多行 + `C:\...` 纯盘符路径」，
+/// 而期望值来自 `canonicalize()` 的 verbatim 形态 `\\?\C:\...`。
+/// 断言：两侧经同一份 `normalize_path_for_compare_with(_, true)` 后，输出确实「包含」期望路径。
+#[test]
+fn normalize_path_for_compare_handles_banner_plus_verbatim_expected() {
+    let expected = r"\\?\C:\Users\runneradmin\AppData\Local\Temp\red-phase-ws-3152-1792995962970334900";
+    // Windows 上 ConPTY 输出的样子：启动 banner（CRLF）+ 命令打印的裸盘符路径。
+    let output = "Microsoft Windows [Version 10.0.26100.33650]\r\n(c) Microsoft Corporation. All rights reserved.\r\n\r\nC:\\Users\\runneradmin\\AppData\\Local\\Temp\\red-phase-ws-3152-1792995962970334900\r\n";
+
+    let norm_expected = normalize_path_for_compare_with(expected, true);
+    let norm_output = normalize_path_for_compare_with(output, true);
+    assert!(
+        norm_output.contains(&norm_expected),
+        "verbatim 前缀期望值必须与 banner 多行输出中的裸盘符路径归一后命中\nnorm_output={norm_output:?}\nnorm_expected={norm_expected:?}"
+    );
+    // 反例：期望路径不存在时不得命中（防止 contains 退化为恒真）。
+    assert!(
+        !norm_output.contains(&normalize_path_for_compare_with(
+            r"\\?\C:\Users\runneradmin\AppData\Local\Temp\other-ws",
+            true
+        )),
+        "不存在的路径不得命中"
+    );
     // 恒等分支。
     assert_eq!(normalize_path_forms("/tmp/a/b", false), "/tmp/a/b");
 }
@@ -480,24 +554,25 @@ fn red_terminal_cwd_none_must_default_to_session_workspace_root() {
     .expect("terminal_open_with_workspace_root should succeed");
     let send_ok = terminal_send(TerminalSendArgs {
         terminal_id: opened.terminal_id.clone(),
-        // 原写法 `pwd`：Windows 上 cmd 内建的"打印当前目录"是 `cd`。
+        // 原写法 `pwd`：Windows 上打印当前目录用 `echo %CD%`（理由见 platform_print_cwd）。
         input: format!("{}\n", platform_print_cwd()),
     });
     assert!(send_ok.is_ok(), "terminal_send should succeed: {send_ok:?}");
-    let read = terminal_read(TerminalReadArgs {
-        terminal_id: opened.terminal_id.clone(),
-        timeout_ms: Some(5_000),
-        offset: Some(0),
-    })
-    .expect("terminal_read should succeed");
+    // 有界等待（5s 预算）：Windows 上首读只会拿到 shell banner，命令输出要晚一步才进缓冲。
+    let output = terminal_read_until_contains_path(
+        &opened.terminal_id,
+        &ws.display().to_string(),
+        Duration::from_secs(5),
+    );
     let _ = terminal_close(TerminalCloseArgs {
         terminal_id: opened.terminal_id,
         force: Some(true),
     });
     let _ = std::fs::remove_dir_all(&ws);
-    // 归一化包含比较：Windows 下 pwd 为 MSYS 形态（/c/...）、ws 为 \\?\ 形态。
+    // 归一化包含比较（断言未放宽）：Windows 下 shell 打印 `C:\...`、ws 为 `\\?\` verbatim
+    // 形态，两侧都过既有 normalize_path_for_compare 后比较。
     assert_output_contains_path_for_platform(
-        &read.output,
+        &output,
         &ws.display().to_string(),
         "terminal cwd 缺省必须为会话 workspace root",
     );
@@ -599,25 +674,25 @@ fn patch4_terminal_some_ws_none_cwd_must_default_to_ws() {
     .expect("terminal_open_with_workspace_root should succeed");
     let send_ok = terminal_send(TerminalSendArgs {
         terminal_id: opened.terminal_id.clone(),
-        // 原写法 `pwd`：Windows 上 cmd 内建的"打印当前目录"是 `cd`。
+        // 原写法 `pwd`：Windows 上打印当前目录用 `echo %CD%`（理由见 platform_print_cwd）。
         input: format!("{}\n", platform_print_cwd()),
     });
     assert!(send_ok.is_ok(), "terminal_send should succeed: {send_ok:?}");
-    let read = terminal_read(TerminalReadArgs {
-        terminal_id: opened.terminal_id.clone(),
-        timeout_ms: Some(5_000),
-        offset: Some(0),
-    })
-    .expect("terminal_read should succeed");
+    // 有界等待（5s 预算）：Windows 上首读只会拿到 shell banner，命令输出要晚一步才进缓冲。
+    let output = terminal_read_until_contains_path(
+        &opened.terminal_id,
+        &ws.display().to_string(),
+        Duration::from_secs(5),
+    );
     let _ = terminal_close(TerminalCloseArgs {
         terminal_id: opened.terminal_id,
         force: Some(true),
     });
     let _ = std::fs::remove_dir_all(&ws);
-    // 归一化包含比较：Windows 下 pwd 为 MSYS 形态（/c/...）、ws 为 \\?\ 形态；
-    // 实现已生效（terminal 落在会话 ws），仅形态错配，归一后包含命中。
+    // 归一化包含比较（断言未放宽）：Windows 下 shell 打印 `C:\...`、ws 为 `\\?\` verbatim
+    // 形态，两侧都过既有 normalize_path_for_compare 后比较。
     assert_output_contains_path_for_platform(
-        &read.output,
+        &output,
         &ws.display().to_string(),
         "Some(ws)+cwd缺省必须为 ws",
     );
