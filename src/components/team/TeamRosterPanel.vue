@@ -49,7 +49,7 @@ onMounted(() => {
     >
       <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
         <Users class="h-3.5 w-3.5" />
-        <span>队友</span>
+        <span>团队</span>
       </div>
       <div class="flex items-center gap-2">
         <span class="text-[10px] leading-[1.2] text-stone-400">{{ members.length }}</span>
@@ -67,7 +67,7 @@ onMounted(() => {
           class="px-1 text-[10px] leading-5 text-stone-400"
           data-testid="team-roster-empty"
         >
-          暂无队友
+          暂无团队成员
         </div>
 
         <div

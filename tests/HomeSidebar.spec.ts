@@ -335,17 +335,15 @@ describe("HomeSidebar", () => {
     vi.restoreAllMocks();
   });
 
-  it("右侧栏只保留状态、计划段，计划面板常驻且空计划显示空态，不再渲染 Tools、Trace 与 Debug（PA-096/C6）", async () => {
-    // Wave-1 C6：PlanPanel 常驻渲染（不以「已有数据」为渲染前提），空计划时显示「暂无计划」空态
+  it("右侧栏只保留状态、计划段，计划面板有值时显示，不再渲染 Tools、Trace 与 Debug（PA-096/C6）", async () => {
+    // 计划与任务在无值时不渲染（由原来的常驻改为有值才显示）
     let wrapper = await mountSidebar();
     await flushAll();
 
     expect(wrapper.text()).toContain("状态");
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
     const planPanelToggle = wrapper.find('[data-testid="plan-panel-toggle"]');
-    expect(planPanelToggle.exists()).toBe(true);
-    expect(planPanelToggle.element.closest("section")).not.toBeNull();
-    expect(wrapper.text()).toContain("暂无计划");
+    expect(planPanelToggle.exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Tools");
     expect(wrapper.text()).not.toContain("DEBUG");
     expect(wrapper.find('[data-testid="tools-panel-toggle"]').exists()).toBe(false);
@@ -385,6 +383,70 @@ describe("HomeSidebar", () => {
     expect(wrapperWithPlan.text()).toContain("计划");
     wrapperWithPlan.unmount();
   }, 10000);
+
+  it("右侧栏条件渲染：有子智能体时显示团队（队友文案改为团队），有任务时显示任务看板", async () => {
+    let wrapper = await mountSidebar();
+    await flushAll();
+
+    // 默认空状态无子智能体、无任务看板
+    expect(wrapper.find('[data-testid="team-roster-toggle"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="team-task-board-toggle"]').exists()).toBe(false);
+    wrapper.unmount();
+
+    // 注入子智能体与任务数据
+    const teamStore = (await import("@/stores/team")).useTeamStore();
+    teamStore.$patch({
+      members: [
+        {
+          target: "lead",
+          name: "Lead",
+          role: "lead",
+          status: "running",
+          description: "Leader"
+        },
+        {
+          target: "subagent-1",
+          name: "Worker",
+          role: "executor",
+          status: "active",
+          description: "Subagent 1"
+        }
+      ],
+      tasks: [
+        {
+          task_id: "task-1",
+          subject: "Test task",
+          description: "desc",
+          status: "pending",
+          revision: 1,
+          created_at_ms: Date.now(),
+          write_scopes: [],
+          blocked_by: []
+        }
+      ]
+    });
+
+    const wrapperWithTeam = mount(HomeSidebar, {
+      global: {
+        stubs: {
+          ScrollArea: ScrollAreaStub,
+          Tooltip: TooltipStub
+        }
+      }
+    });
+    await flushAll();
+
+    const rosterToggle = wrapperWithTeam.find('[data-testid="team-roster-toggle"]');
+    expect(rosterToggle.exists()).toBe(true);
+    expect(rosterToggle.text()).toContain("团队");
+    expect(rosterToggle.text()).not.toContain("队友");
+
+    const taskBoardToggle = wrapperWithTeam.find('[data-testid="team-task-board-toggle"]');
+    expect(taskBoardToggle.exists()).toBe(true);
+    expect(taskBoardToggle.text()).toContain("任务看板");
+
+    wrapperWithTeam.unmount();
+  });
 
   it("实时聚合：进行中 turn 的模型调用与 token 即时反映在状态面板", async () => {
     const runtimeStore = useRuntimeStore();

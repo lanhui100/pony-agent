@@ -5,7 +5,6 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
-  Coins,
   Copy,
   Gauge,
   MessageSquareMore,
@@ -56,19 +55,7 @@ function resolveRuntimeStoreSafe() {
   }
 }
 
-const formattedCost = computed(() => resolveRuntimeStoreSafe()?.formattedGovernanceCost ?? resolveRuntimeStoreSafe()?.formattedSessionCost ?? "—");
-const isOverBudget = computed(() => resolveRuntimeStoreSafe()?.isCostBudgetExceeded ?? false);
 const blockDetail = computed(() => resolveRuntimeStoreSafe()?.governanceBlockDetail ?? null);
-const costTooltipText = computed(() => {
-  const store = resolveRuntimeStoreSafe();
-  if (blockDetail.value) {
-    return `用量治理拦截: 当前 ${blockDetail.value.currentText} / 硬上限 ${blockDetail.value.limitText}`;
-  }
-  if (isOverBudget.value) {
-    return store?.costBudgetWarningMessage || "已超出成本预算限额";
-  }
-  return `会话治理成本: ${formattedCost.value}`;
-});
 
 const debugAttrsEnabled = computed(() => isDebugLoggingEnabled());
 
@@ -182,22 +169,6 @@ function formatTokenSpeed(value?: number | null) {
               <Gauge class="h-3 w-3 text-stone-400" />
               {{ formatTokenSpeed(tokenGenerationSpeed) }}
             </span>
-          </Tooltip>
-        </div>
-
-        <!-- Wave-5 K2/K3 & Wave-7 G4：会话成本展示位与预算超限软告警（在 token 行下方紧凑行展示） -->
-        <div class="flex items-center justify-between border-t border-stone-200/50 mt-1.5 pt-1.5 px-1 text-[11px] leading-5 text-stone-600">
-          <span class="text-stone-400">会话成本</span>
-          <Tooltip :text="costTooltipText">
-            <div
-              class="inline-flex items-center gap-1 tabular-nums transition-colors"
-              :class="blockDetail ? 'text-rose-600 font-medium' : isOverBudget ? 'text-amber-600 font-medium' : 'text-stone-600'"
-              data-testid="status-metric-session-cost"
-            >
-              <AlertTriangle v-if="blockDetail || isOverBudget" class="h-3 w-3 text-amber-500 animate-pulse" />
-              <Coins v-else class="h-3 w-3 text-stone-400" />
-              <span class="inline-block min-w-[2.5rem] text-right">{{ formattedCost }}</span>
-            </div>
           </Tooltip>
         </div>
 

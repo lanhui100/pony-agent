@@ -95,14 +95,24 @@ for (const b of bumpLog) {
   console.log(`  - ${b.component}: ${b.from} -> ${b.to} (${b.segment})`);
 }
 
+// ADR 0011: 同步 Cargo.lock 中的 workspace 本地成员版本（Node 版替换 PowerShell 版时遗漏了这一步）。
+// 历史教训：曾出现只改 Cargo.toml 而不同步根 Cargo.lock 的提交，导致 --locked 构建失败。
+// `cargo metadata` 只刷新 workspace 本地成员的 lock 条目，不会升级第三方依赖；失败降级为警告不阻塞 bump。
+try {
+  execSync("cargo metadata --format-version 1", { stdio: "ignore", cwd: repoRoot });
+  console.log("[bump-version] Synced Cargo.lock (workspace member versions)");
+} catch (err) {
+  console.warn(`[bump-version] WARN: cargo metadata failed: ${err.message} — Cargo.lock NOT synced.`);
+}
+
 // Check and verify version sync
 execSync("node scripts/check-version-sync.mjs", { stdio: "inherit", cwd: repoRoot });
 
 const tauriVer = getVersionString(state.tauri.major, state.tauri.minor, state.tauri.patch);
 const tagName = `v${tauriVer}`;
 
-// Commit and tag
-execSync("git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json .version.json", { stdio: "inherit", cwd: repoRoot });
+// Commit and tag (ADR 0011: git add 包含 Cargo.lock)
+execSync("git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json .version.json Cargo.lock", { stdio: "inherit", cwd: repoRoot });
 if (bumpTargets.includes("core")) {
   execSync("git add crates/pony-agent-core/Cargo.toml", { stdio: "inherit", cwd: repoRoot });
 }
