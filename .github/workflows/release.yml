@@ -161,9 +161,12 @@ jobs:
               Write-Host "WARN: found $($sameTag.Count) releases for tag ${tag}; using id=$relId (others: $((($sameTag | Where-Object { $_.id -ne $relId }).id) -join ', '))"
             }
           } else {
-            $created = gh release create "$tag" --draft --title "$tag" --notes-file "target/release/bundle/nsis/release-notes.md" --json id 2>$null | ConvertFrom-Json
-            if (-not $created) { throw "failed to create release $tag" }
-            $relId = $created.id
+            # 注意：`gh release create` **不支持 --json**（那是 gh release view/list 的能力），
+            # 旧写法会直接报错并被误报成 "failed to create release"（v0.1.159 实测）。
+            gh release create "$tag" --draft --title "$tag" --notes-file "target/release/bundle/nsis/release-notes.md"
+            if ($LASTEXITCODE -ne 0) { throw "failed to create release $tag (gh exit $LASTEXITCODE)" }
+            $relId = gh api "repos/$repo/releases/tags/$tag" --jq '.id' 2>$null
+            if ($LASTEXITCODE -ne 0 -or -not $relId) { throw "created release $tag but cannot resolve its id" }
             Write-Host "created draft release $tag (id=$relId)"
           }
           # Windows desktop assets: NSIS installer + its updater signature
