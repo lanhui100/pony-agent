@@ -11,7 +11,7 @@
 //! 7. K4 OTel 属性 wire 级断言：gen_ai.cost.usd 与 agent.turn.cost.usd 正确上报，门禁关闭时不出现
 //! 8. K3 Settings 预算语义：cost_budget_usd <= 0 或 None 视为未设置预算
 
-use pony_agent_core::agent::cost::{self, CostEstimate, ModelPricing};
+use pony_agent_core::agent::cost::{self, ModelPricing};
 use pony_agent_core::agent::otel;
 use pony_agent_core::agent::runtime::TurnStreamEvent;
 use std::sync::Mutex;
@@ -92,12 +92,6 @@ fn k1_unknown_model_must_return_none() {
 // ---------------------------------------------------------------------------
 #[test]
 fn k1_invalid_negative_or_nan_returns_none() {
-    let pricing = ModelPricing {
-        input_per_mtok: 2.0,
-        output_per_mtok: 8.0,
-        cache_read_per_mtok: 0.5,
-    };
-
     // 负数单价或非法输入
     let invalid_pricing = ModelPricing {
         input_per_mtok: -2.0,
