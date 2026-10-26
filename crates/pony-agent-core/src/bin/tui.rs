@@ -6443,6 +6443,11 @@ impl ObservabilityBootstrap {
                 None,
             );
         }
+        // PonySentry 凭据分发（settings > env > 构建期 option_env! > 缺省）。
+        // 无 token ⇒ fail-closed 零 egress；token 不进任何日志/Debug。
+        // 历史缺口：CLI/TUI 只有构建期烧录通道，桌面端之外的形态一条 issue 都发不出去。
+        let ponysentry_settings = settings.ponysentry_settings_snapshot();
+        pony_agent_core::agent::ponysentry::init_from_settings(Some(&ponysentry_settings));
         Self
     }
 }

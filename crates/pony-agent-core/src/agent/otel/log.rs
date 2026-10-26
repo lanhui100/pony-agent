@@ -31,18 +31,35 @@ fn log_file_slot() -> MutexGuard<'static, Option<PathBuf>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 注入桌面端日志落盘路径（追加写；父目录不存在则按需创建）。
+/// 注入桌面端日志落盘路径（追加写；父目录不存在则按需创建，启动自检日志）。
 ///
 /// 调用方：Tauri 启动装配点（`app.path().app_data_dir()` 解析后注入
-/// `<app_data_dir>/logs/pony-agent.log`）。
-/// 语义：幂等，重复注入以最后一次为准；创建父目录的失败只降级为「后续落盘静默失败」，
+/// `<app_data_dir>/logs/pony-agent.log`）及 CLI 启动路径。
+/// 语义：幂等，重复注入以最后一次为准；创建父目录失败降级为 stderr 警告并放弃文件写入，
 /// 不返回错误、不 panic（日志不可用绝不阻断主链路）。
 pub fn set_log_file_path(path: impl Into<PathBuf>) {
     let path = path.into();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            eprintln!("[pony-agent] WARN: 无法创建日志父目录 `{}`: {err}", parent.display());
+            return;
+        }
     }
-    *log_file_slot() = Some(path);
+    *log_file_slot() = Some(path.clone());
+
+    // 启动自检：尝试打开/创建日志文件。失败则 warn 到 stderr 并继续。
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => {
+            drop(file);
+        }
+        Err(err) => {
+            eprintln!("[pony-agent] WARN: 日志文件 `{}` 创建/打开自检失败: {err}", path.display());
+        }
+    }
 }
 
 /// 读取当前注入的日志落盘路径（诊断/测试用）。
@@ -179,6 +196,19 @@ fn append_to_file(line: &str) {
     {
         let _ = file.write_all(payload.as_bytes());
         let _ = file.flush();
+    } else {
+        // 若打开失败，尝试再次创建父目录后重试一次
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path.as_path())
+            {
+                let _ = file.write_all(payload.as_bytes());
+                let _ = file.flush();
+            }
+        }
     }
 }
 
@@ -224,6 +254,34 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("pony-otel-log-{tag}-{stamp}.log"))
+    }
+
+    /// P3：父目录不存在时自动创建，并自检创建日志文件。
+    #[test]
+    fn set_log_file_path_creates_missing_parents_and_writes_self_check() {
+        let _guard = lock();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let deeply_nested = std::env::temp_dir()
+            .join(format!("pony-test-parent-dir-{stamp}"))
+            .join("nested-subfolder")
+            .join("pony-agent.log");
+
+        assert!(!deeply_nested.parent().unwrap().exists());
+        set_log_file_path(deeply_nested.clone());
+        assert!(deeply_nested.parent().unwrap().exists(), "父目录必须被自动创建");
+        assert!(deeply_nested.exists(), "日志文件必须存在（自检创建）");
+
+        log_json("info", "log sink ready", None);
+        let content = std::fs::read_to_string(&deeply_nested).expect("log readable");
+        let first_line = content.lines().next().expect("first line exists");
+        let parsed: serde_json::Value = serde_json::from_str(first_line).expect("valid json");
+        assert_eq!(parsed["level"], "info");
+        assert_eq!(parsed["message"], "log sink ready");
+
+        let _ = std::fs::remove_dir_all(deeply_nested.parent().unwrap().parent().unwrap());
     }
 
     /// L3-A #3：多线程并发写日志时，文件里每一行都必须是可解析的完整 JSON（不得交错）。

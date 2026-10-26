@@ -184,6 +184,16 @@ pub(crate) const RESOURCE_PONY_PROBE: &str = "pony.probe";
 /// resource 语义约定键：上报客户端归因标记（区分真实设备与边缘探针）。
 pub(crate) const RESOURCE_INGEST_CLIENT_KIND: &str = "ingest.client.kind";
 
+/// resource 语义约定键：跨路径稳定产品名。
+///
+/// 契约依据：公网 edge 会把 `service.name` 改写为 `desktop-client`（原值放入 `client.service.name`），
+/// 但不会改写带 `pony.` 前缀的语义约定属性（skill 契约 §1.0）。因此 `pony.app.name`
+/// 是两条接入路径（内网直连 collector 与公网 edge）唯一保持一致的跨路径检索键。
+pub(crate) const RESOURCE_PONY_APP_NAME: &str = "pony.app.name";
+
+/// 产品稳定名。
+pub(crate) const PONY_APP_NAME: &str = "pony-agent";
+
 /// 客户端归因标记取值：真实设备客户端。
 pub(crate) const INGEST_CLIENT_KIND_DEVICE: &str = "device";
 
@@ -195,6 +205,21 @@ pub(crate) const ENVIRONMENT_DEVELOPMENT: &str = "development";
 
 /// release 构建的默认部署环境取值。
 pub(crate) const ENVIRONMENT_PRODUCTION: &str = "production";
+
+/// 构建期烧录的准入 token 的 env 名（`option_env!` 读取，仅 release 工作流注入）。
+///
+/// 为什么需要它：桌面端此前**没有任何 token 分发通道** —— 用户必须在 Settings 里手填
+/// 公网 edge 的 OTel token，没填就静默 401、trace 全丢（实测：24h 零 trace，而同期探针正常）。
+/// 与 PonySentry 的构建期烧录（ADR 0037）同款取舍：安装包内嵌 token，用户零配置。
+/// 优先级最低（settings > env > 构建期），因此用户/运维仍可覆盖或吊销为本地值。
+pub const ENV_PONY_OTEL_BUILD_TOKEN: &str = "PONY_OTEL_BUILD_TOKEN";
+
+/// 构建期烧录值（未注入时为 `None`；本地 `cargo build` 恒为 None）。
+fn build_time_otel_token() -> Option<&'static str> {
+    option_env!("PONY_OTEL_BUILD_TOKEN")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
 
 /// 鉴权 header 名（token 值由 [`ENV_PONY_OTEL_TOKEN`] 注入）。
 pub const AUTH_HEADER_NAME: &str = "authorization";
@@ -357,6 +382,18 @@ pub fn resolve_config(
     settings: Option<&OtelSettingsSnapshot>,
     env: Option<&[(&str, &str)]>,
 ) -> OtelConfig {
+    resolve_config_with_build_token(settings, env, build_time_otel_token())
+}
+
+/// [`resolve_config`] 的可测内核：把「构建期烧录 token」作为参数显式传入。
+///
+/// 拆出来是为了让「最低优先级兜底」可被单测锁定——`option_env!` 在测试构建里恒为 `None`，
+/// 不拆开就无法验证 "settings/env 都没给时用构建期值" 与 "用户显式配置不会被覆盖"。
+pub fn resolve_config_with_build_token(
+    settings: Option<&OtelSettingsSnapshot>,
+    env: Option<&[(&str, &str)]>,
+    build_token: Option<&str>,
+) -> OtelConfig {
     let mut config = OtelConfig::default();
     let lookup = |name: &str| -> Option<String> {
         env.and_then(|pairs| {
@@ -417,6 +454,14 @@ pub fn resolve_config(
         }
     }
 
+    // 最低优先级兜底：构建期烧录 token（release 产物零配置可用）。
+    // 仅在 settings 与 env 都没给凭证时生效，因此不会覆盖用户显式配置。
+    if config.headers.is_empty() {
+        if let Some(token) = build_token.map(str::trim).filter(|value| !value.is_empty()) {
+            set_authorization_header(&mut config.headers, token);
+        }
+    }
+
     config
 }
 
@@ -470,16 +515,26 @@ fn process_env_pairs() -> Vec<(String, String)> {
         .collect()
 }
 
-/// 默认部署环境（PA-153）：debug 构建 `development`，release 构建 `production`。
-///
-/// 结构性限制（契约 §4 Non-Goals）：仅能按构建档位推导，staging/preprod 不可区分；
-/// 需要精确环境时由 `PONY_OTEL_ENVIRONMENT` 显式覆盖。
-pub(crate) fn default_deployment_environment(debug_assertions: bool) -> &'static str {
-    if debug_assertions {
-        ENVIRONMENT_DEVELOPMENT
-    } else {
-        ENVIRONMENT_PRODUCTION
+/// 默认部署环境（PA-153 / task-13）：
+/// - 优先级 1（运行时环境）：`PONY_OTEL_ENVIRONMENT`（由 `resolve_resource_attributes` 处理）；
+/// - 优先级 2（构建期发布标记）：若设置了 `PONY_RELEASE_BUILD=1`（release.yml CI 流程注入），则为 `production`；
+/// - 优先级 3（构建档位兜底）：仅当 `PONY_RELEASE_BUILD` 未设时，缺省判定为 `development`（即使 debug_assertions=false
+///   也是本地 release 构建的开发/调试会话，避免误标 production）。
+pub(crate) fn default_deployment_environment_with_release_flag(
+    debug_assertions: bool,
+    release_build: Option<&str>,
+) -> &'static str {
+    if let Some(flag) = release_build {
+        if flag == "1" || flag.eq_ignore_ascii_case("true") {
+            return ENVIRONMENT_PRODUCTION;
+        }
     }
+    let _ = debug_assertions;
+    ENVIRONMENT_DEVELOPMENT
+}
+
+pub(crate) fn default_deployment_environment(debug_assertions: bool) -> &'static str {
+    default_deployment_environment_with_release_flag(debug_assertions, option_env!("PONY_RELEASE_BUILD"))
 }
 
 /// 解析 resource 归因属性（PA-153）：`service.version` + `deployment.environment`。
@@ -502,6 +557,7 @@ pub(crate) fn resolve_resource_attributes(
     let mut attrs = vec![
         (RESOURCE_SERVICE_VERSION.to_string(), service_version),
         (RESOURCE_DEPLOYMENT_ENVIRONMENT.to_string(), environment),
+        (RESOURCE_PONY_APP_NAME.to_string(), PONY_APP_NAME.to_string()),
     ];
     let mut is_probe = false;
     if let Some(probe) = override_value(ENV_PONY_OTEL_PROBE) {
@@ -1437,9 +1493,28 @@ impl Drop for TurnTraceGuard {
                 None
             }
         });
+        // P2：整轮聚合 token 用量（各 llm.chat 子 span 累计值）。
+        let (turn_input_tokens, turn_output_tokens) = take_active_turn_usage();
+        if let Some(input_tokens) = turn_input_tokens {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+                    input_tokens as i64,
+                ));
+            }
+        }
+        if let Some(output_tokens) = turn_output_tokens {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+                    output_tokens as i64,
+                ));
+            }
+        }
         if let Some(cost) = turn_cost {
             if let Some(span) = self.span.as_mut() {
                 span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_COST_USD, cost));
+                span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
             }
         }
         if let Some(mut span) = self.span.take() {
@@ -1507,6 +1582,9 @@ impl LlmSpanGuard {
     pub fn record_usage(&mut self, input_tokens: Option<u64>, output_tokens: Option<u64>) {
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
+        if self.span.is_some() {
+            accumulate_active_turn_usage(input_tokens, output_tokens);
+        }
     }
 
     /// 记录单次调用成本（USD）。
@@ -1671,12 +1749,17 @@ pub fn record_tool_call_span(input: &ToolSpanInput) {
     if failed {
         mark_active_turn_error(TURN_ERROR_PREFIX_TOOL_FAILED);
     }
-    if let Some(mut span) = start_child_span(SPAN_TOOL_CALL, attributes) {
+    // T11：span 必须覆盖**真实执行区间**。此前 `start_child_span` + 立即 `end()` 只覆盖
+    // 登记动作（实测：829ms 的工具被导出成 0.002ms 的 span，瀑布图上工具耗时不可见，
+    // 真值只存在于属性 `agent.tool.duration_ms`）。用 duration 反推起点并 backdate。
+    let (started_at, ended_at) = tool_span_bounds(SystemTime::now(), input.duration_ms);
+    if let Some(mut span) = start_child_span_at(SPAN_TOOL_CALL, attributes, started_at) {
         if failed {
             let err_desc = input.error.as_deref().unwrap_or("tool call failed");
             span.set_status(opentelemetry::trace::Status::error(err_desc.to_string()));
         }
-        span.end();
+        // 失败路径同样 end：`set_status` 之后直接 end，绝不提前 return → span 不泄漏。
+        span.end_with_timestamp(ended_at);
     }
 }
 
@@ -1689,7 +1772,7 @@ use std::fmt;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use opentelemetry::trace::{
     Link, SamplingDecision, SamplingResult, Span, SpanKind, TraceContextExt, TraceId, TraceState,
@@ -1875,6 +1958,10 @@ struct ActiveTurn {
     exported: bool,
     /// Wave-5 K4：本轮内各 `llm.chat` 已记录成本之和（USD；Turn span Drop 时回填属性）。
     accumulated_cost_usd: f64,
+    /// 本轮内各 `llm.chat` 累积的 input tokens。
+    accumulated_input_tokens: u64,
+    /// 本轮内各 `llm.chat` 累积的 output tokens。
+    accumulated_output_tokens: u64,
     /// PA-154：本轮内子 span 错误聚合（`<prefix>: <detail>`，**先记录者胜**）；
     /// `None` ⇒ 本轮无错误，根 span 不输出 [`ATTR_AGENT_TURN_OUTCOME`]。
     accumulated_error: Option<String>,
@@ -1944,6 +2031,8 @@ fn register_active_turn(
         span_context,
         exported,
         accumulated_cost_usd: 0.0,
+        accumulated_input_tokens: 0,
+        accumulated_output_tokens: 0,
         accumulated_error: None,
     };
 
@@ -2049,6 +2138,56 @@ fn accumulate_active_turn_cost(cost: f64) {
             entry.accumulated_cost_usd += cost;
         }
     });
+}
+
+/// 把一次调用的 token 用量累加到当前活动 turn。
+fn accumulate_active_turn_usage(input_tokens: Option<u64>, output_tokens: Option<u64>) {
+    let inp = input_tokens.unwrap_or(0);
+    let out = output_tokens.unwrap_or(0);
+    if inp == 0 && out == 0 {
+        return;
+    }
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            entry.accumulated_input_tokens += inp;
+            entry.accumulated_output_tokens += out;
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            entry.accumulated_input_tokens += inp;
+            entry.accumulated_output_tokens += out;
+        }
+    });
+}
+
+/// 读取当前活动 turn 的累计 token 用量；无活动 turn 或全为 0 时返回 None。
+fn take_active_turn_usage() -> (Option<u64>, Option<u64>) {
+    let get_tokens = |entry: &ActiveTurn| {
+        let inp = (entry.accumulated_input_tokens > 0).then_some(entry.accumulated_input_tokens);
+        let out = (entry.accumulated_output_tokens > 0).then_some(entry.accumulated_output_tokens);
+        (inp, out)
+    };
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(get_tokens)
+            .unwrap_or((None, None));
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(get_tokens)
+            .unwrap_or((None, None))
+    })
 }
 
 /// 读取当前活动 turn 的累计成本；无活动 turn 时返回 0.0。
@@ -2192,6 +2331,53 @@ fn start_child_span(
     Some(state.tracer.build_with_context(
         opentelemetry::trace::SpanBuilder::from_name(name.to_string())
             .with_kind(SpanKind::Internal)
+            .with_attributes(attributes),
+        &parent,
+    ))
+}
+
+/// 回填上限：单次工具调用超过 24h 视为异常数据（时钟跳变 / 脏 duration）。
+///
+/// 为什么需要它：`SystemTime::checked_sub` 的平台语义不一致——Linux 的 `SystemTime` 允许
+/// 负值（i64 秒），`u64::MAX` 毫秒（≈5.8 亿年）依然能"减成功"，会生成一条跨越几亿年的离奇
+/// span；Windows 的 FILETIME 不能早于 1601，则退化为零长。为了让行为**跨平台确定**、且不让
+/// 脏数据污染 trace 时间轴，这里显式设上限：超出即退化为零长 span（原始值仍原样保留在属性
+/// `agent.tool.duration_ms` 里，信息不丢）。
+const TOOL_SPAN_MAX_BACKDATE_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// T11：工具子 span 的时间边界——`end` 取采集时刻，`start = end - duration`。
+///
+/// 抽成纯函数是为了让「span 覆盖真实执行区间」可被**无线程 / 无全局 provider / 无网络**的
+/// 单测锁定：`None`（耗时未知）、超过 [`TOOL_SPAN_MAX_BACKDATE_MS`] 的异常值、以及
+/// `checked_sub` 溢出，一律退化为零长 span —— 绝不 panic、绝不凭空造时长。
+fn tool_span_bounds(now: SystemTime, duration_ms: Option<u64>) -> (SystemTime, SystemTime) {
+    let Some(millis) =
+        duration_ms.filter(|millis| *millis <= TOOL_SPAN_MAX_BACKDATE_MS)
+    else {
+        return (now, now);
+    };
+    match now.checked_sub(Duration::from_millis(millis)) {
+        Some(started_at) => (started_at, now),
+        // 平台最早时刻之前的回填：退化为零长 span（不 panic、不生成越界时间戳）。
+        None => (now, now),
+    }
+}
+
+/// 与 [`start_child_span`] 同构，唯一差别是允许**显式起点**（回填真实执行区间起点）。
+fn start_child_span_at(
+    name: &str,
+    attributes: Vec<KeyValue>,
+    started_at: SystemTime,
+) -> Option<opentelemetry_sdk::trace::Span> {
+    if !spans_allowed() {
+        return None;
+    }
+    let state = current_state()?;
+    let parent = active_exported_turn_context().unwrap_or_else(Context::new);
+    Some(state.tracer.build_with_context(
+        opentelemetry::trace::SpanBuilder::from_name(name.to_string())
+            .with_kind(SpanKind::Internal)
+            .with_start_time(started_at)
             .with_attributes(attributes),
         &parent,
     ))
@@ -3231,6 +3417,7 @@ mod tests {
         });
         assert!(attrs.iter().any(|(k, v)| k == RESOURCE_PONY_PROBE && v == "true"));
         assert!(attrs.iter().any(|(k, v)| k == RESOURCE_INGEST_CLIENT_KIND && v == INGEST_CLIENT_KIND_PROBE));
+        assert!(attrs.iter().any(|(k, v)| k == RESOURCE_PONY_APP_NAME && v == PONY_APP_NAME));
 
         let attrs_off = resolve_resource_attributes(|k| match k {
             ENV_PONY_OTEL_PROBE => Some("false".to_string()),
@@ -3238,6 +3425,66 @@ mod tests {
         });
         assert!(!attrs_off.iter().any(|(k, _)| k == RESOURCE_PONY_PROBE));
         assert!(attrs_off.iter().any(|(k, v)| k == RESOURCE_INGEST_CLIENT_KIND && v == INGEST_CLIENT_KIND_DEVICE));
+        assert!(attrs_off.iter().any(|(k, v)| k == RESOURCE_PONY_APP_NAME && v == PONY_APP_NAME));
+    }
+
+    /// P1 & P2 单测：三种环境来源优先级判定，以及根 span usage/cost 聚合。
+    #[test]
+    fn test_deployment_environment_precedence() {
+        // 1. env 显式覆盖优先
+        let attrs_env = resolve_resource_attributes(|k| match k {
+            ENV_PONY_OTEL_ENVIRONMENT => Some("staging".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            attrs_env.iter().find(|(k, _)| k == RESOURCE_DEPLOYMENT_ENVIRONMENT).map(|(_, v)| v.as_str()),
+            Some("staging")
+        );
+
+        // 2. 无 env 时根据 default_deployment_environment
+        let env_default = default_deployment_environment(false);
+        // 本地开发测试环境无 PONY_RELEASE_BUILD，即使 debug_assertions 为 false 也判 development
+        assert_eq!(env_default, "development");
+    }
+
+    #[test]
+    fn test_turn_root_span_aggregates_usage_and_cost() {
+        let _guard = test_lock();
+        shutdown();
+        REPORTING_ENABLED.store(true, Ordering::SeqCst);
+
+        init(OtelConfig {
+            endpoint: "http://127.0.0.1:9".to_string(),
+            service_name: "test-usage-agg".to_string(),
+            sampling_ratio: 1.0,
+            headers: Vec::new(),
+        })
+        .expect("init");
+
+        // 1. 有 usage 与 cost 场景
+        {
+            let mut turn = begin_turn_trace("sess-usage", "turn-usage-1", 0);
+            {
+                let mut llm1 = start_llm_span("openai", Some("gpt-4o"), "chat");
+                llm1.record_usage(Some(100), Some(25));
+                llm1.record_cost(Some(0.005));
+            }
+            {
+                let mut llm2 = start_llm_span("openai", Some("gpt-4o"), "chat");
+                llm2.record_usage(Some(50), Some(15));
+                llm2.record_cost(Some(0.003));
+            }
+            turn.set_phase("completed");
+            // Drop turn guard 触发聚合回填
+        }
+
+        // 2. 无 usage 与 cost 场景（不输出对应属性键）
+        {
+            let mut turn = begin_turn_trace("sess-usage-none", "turn-usage-none", 0);
+            turn.set_phase("completed");
+        }
+
+        shutdown();
     }
 
     #[test]
@@ -3307,11 +3554,11 @@ mod tests {
 
     // ------------------------------------------------ PA-153 · resource 归因（实现期单测）
 
-    /// PA-153：默认值 = crate 版本 + debug 构建 `development` + 默认 client.kind=device。
+    /// PA-153：默认值 = crate 版本 + debug 构建 `development` + 稳定产品名 + 默认 client.kind=device。
     #[test]
     fn resource_attributes_default_to_crate_version_and_build_environment() {
         let attrs = resolve_resource_attributes(|_| None);
-        assert_eq!(attrs.len(), 3, "resource 归因包含三键：{attrs:?}");
+        assert_eq!(attrs.len(), 4, "resource 归因包含四键：{attrs:?}");
         assert_eq!(attrs[0].0, "service.version");
         assert_eq!(attrs[0].1, env!("CARGO_PKG_VERSION"));
         assert_eq!(attrs[1].0, "deployment.environment");
@@ -3319,8 +3566,10 @@ mod tests {
             attrs[1].1,
             default_deployment_environment(cfg!(debug_assertions))
         );
-        assert_eq!(attrs[2].0, "ingest.client.kind");
-        assert_eq!(attrs[2].1, INGEST_CLIENT_KIND_DEVICE);
+        assert_eq!(attrs[2].0, "pony.app.name");
+        assert_eq!(attrs[2].1, "pony-agent");
+        assert_eq!(attrs[3].0, "ingest.client.kind");
+        assert_eq!(attrs[3].1, INGEST_CLIENT_KIND_DEVICE);
     }
 
     /// PA-153：两个 env（trim 后非空）各自覆盖默认，且互不影响。
@@ -3357,11 +3606,14 @@ mod tests {
         assert_eq!(padded[0].1, "9.9.9", "env 取值必须 trim 后生效");
     }
 
-    /// PA-153：release 分支（契约 §1 第 3 行仅允许实现期单测覆盖）。
+    /// PA-153 / task-13：release 标记判定（PONY_RELEASE_BUILD=1 为 production，否则一律 development）。
     #[test]
     fn default_deployment_environment_switches_on_build_profile() {
-        assert_eq!(default_deployment_environment(true), "development");
-        assert_eq!(default_deployment_environment(false), "production");
+        assert_eq!(default_deployment_environment_with_release_flag(true, None), "development");
+        assert_eq!(default_deployment_environment_with_release_flag(false, None), "development");
+        assert_eq!(default_deployment_environment_with_release_flag(false, Some("1")), "production");
+        assert_eq!(default_deployment_environment_with_release_flag(true, Some("1")), "production");
+        assert_eq!(default_deployment_environment_with_release_flag(false, Some("true")), "production");
     }
 
     // -------------------------------------------- PA-154 · turn 错误聚合（实现期单测）
@@ -3401,5 +3653,93 @@ mod tests {
         assert_eq!(ATTR_AGENT_TURN_OUTCOME, "agent.turn.outcome");
         assert_eq!(TURN_ERROR_PREFIX_TOOL_FAILED, "tool_failed");
         assert_eq!(TURN_ERROR_PREFIX_QUOTA_BLOCKED, "quota_blocked");
+    }
+
+    /// wave-49 回归：构建期烧录 token 是**最低优先级**兜底 —— 用户零配置也能上报，
+    /// 但绝不覆盖 settings/env 的显式配置。
+    /// 守护的线上故障：桌面端无 token 分发通道 ⇒ 用户不手填 Settings 就静默 401、trace 全丢。
+    #[test]
+    fn build_time_token_is_lowest_priority_fallback() {
+        // ① settings 与 env 都没给 ⇒ 用构建期值
+        let with_build = resolve_config_with_build_token(None, None, Some("build-token-xyz"));
+        assert_eq!(
+            with_build
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(AUTH_HEADER_NAME))
+                .map(|(_, value)| value.as_str()),
+            Some("Bearer build-token-xyz"),
+            "无 settings/env 时必须回落到构建期 token"
+        );
+
+        // ② env 给了 ⇒ 构建期值不得覆盖
+        let env_pairs = [(ENV_PONY_OTEL_TOKEN, "env-token-abc")];
+        let with_env = resolve_config_with_build_token(None, Some(&env_pairs), Some("build-token-xyz"));
+        assert_eq!(
+            with_env
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(AUTH_HEADER_NAME))
+                .map(|(_, value)| value.as_str()),
+            Some("Bearer env-token-abc"),
+            "env 显式配置必须压过构建期 token"
+        );
+
+        // ③ 构建期值为空/空白 ⇒ 视为未烧录（零凭证，fail-closed）
+        for blank in ["", "   "] {
+            let config = resolve_config_with_build_token(None, None, Some(blank));
+            assert!(
+                config.headers.is_empty(),
+                "空白构建期 token 必须视为未配置（{blank:?}）"
+            );
+        }
+
+        // ④ 完全没有构建期 token（本地 cargo build 的常态）⇒ 仍然零凭证
+        let none = resolve_config_with_build_token(None, None, None);
+        assert!(none.headers.is_empty(), "无构建期 token 时不得凭空产生凭证");
+    }
+
+    /// T11 回归：工具 span 的时间边界必须覆盖真实执行区间；退化/溢出路径不得 panic。
+    #[test]
+    fn tool_span_bounds_covers_execution_interval() {
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+
+        // 正常路径：end - start 精确等于 duration_ms（这正是 0.002ms → 829ms 的修复点）。
+        let (start, end) = tool_span_bounds(now, Some(829));
+        assert_eq!(end, now, "end 必须是采集时刻");
+        assert_eq!(
+            end.duration_since(start).expect("end 必须晚于 start"),
+            std::time::Duration::from_millis(829),
+            "工具 span 必须覆盖真实执行区间（修复前恒为 0 时长）"
+        );
+
+        // 零耗时：唯一允许的零长 span。
+        let (start, end) = tool_span_bounds(now, Some(0));
+        assert_eq!((start, end), (now, now), "duration=0 必须 start == end");
+
+        // 耗时未知：退化为零长 span（不得凭空造时长、不得 panic）。
+        let (start, end) = tool_span_bounds(now, None);
+        assert_eq!((start, end), (now, now), "duration=None 必须退化为 start == end");
+
+        // 极大值：异常大 duration 必须退化为零长 span（不得 panic）。
+        // 说明：Linux 的 SystemTime 允许负值，`u64::MAX` 毫秒并不会让 checked_sub 失败，
+        // 因此这里额外有跨平台确定的上限（TOOL_SPAN_MAX_BACKDATE_MS = 24h）。
+        let (start, end) = tool_span_bounds(now, Some(u64::MAX));
+        assert_eq!((start, end), (now, now), "超上限必须退化为 start == end");
+        let (start, end) = tool_span_bounds(now, Some(TOOL_SPAN_MAX_BACKDATE_MS + 1));
+        assert_eq!((start, end), (now, now), "刚超上限也必须退化为 start == end");
+        let (start, end) = tool_span_bounds(now, Some(TOOL_SPAN_MAX_BACKDATE_MS));
+        assert_eq!(
+            end.duration_since(start).expect("end 必须晚于 start"),
+            std::time::Duration::from_millis(TOOL_SPAN_MAX_BACKDATE_MS),
+            "上限内的长耗时必须完整保留（不得误伤长任务）"
+        );
+
+        // 秒级量级同样精确（证明不是毫秒量级的巧合）。
+        let (start, end) = tool_span_bounds(now, Some(1_000));
+        assert_eq!(
+            end.duration_since(start).expect("end 必须晚于 start"),
+            std::time::Duration::from_secs(1)
+        );
     }
 }

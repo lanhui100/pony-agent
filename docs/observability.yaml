@@ -84,6 +84,42 @@ note: >-
   `crates/pony-agent-core/src/agent/otel/mod.rs`），不新增出口/端点/标签维度；`agent.turn` 根 span
   新增 `agent.turn.outcome=error` + `turn_error:` 状态承接子 span 失败。见
   `docs/audit/observability-audit-2026-10-25.md` 与 `.dev-team/contract-matrix-wave45.md`。
+  【wave-49 增补｜OTel 准入 token 改构建期烧录（ADR 0049，用户零配置）】
+  根因：桌面端此前**没有任何 OTel token 分发通道**（settings 手填 / env 之外全无），
+  release.yml 只烧录 PonySentry token，仓库也缺 `PONY_OTEL_TOKEN` secret ⇒ 实测 24h 零 trace
+  而同期探针正常。修法：`PONY_OTEL_BUILD_TOKEN` 构建期烧录（release.yml 从 secret 注入），
+  优先级 **settings > env > 构建期 > 缺省**，空白视为未配置（fail-closed）。
+  安全取舍（ADR 0049 显式承认）：token 内嵌安装包可被提取；当前 edge 本就是单 token 模型，
+  按设备吊销不成立，吊销代价 = 重新发版；该 token 只能写、不能读，edge 侧有 120 req/min/IP
+  与 16MiB/请求上限。四维归属不变（仍是 tracing 维度，唯一落点仍为 otel/mod.rs）。
+
+  【wave-49 归属登记｜真实链路巡检驱动的四项缺陷修复（均不改四维归属）】
+  (1) tracing｜检索键分裂：公网 edge 会把 `service.name` 改写成 `desktop-client`，
+      集群内直连则保留 `pony-agent` ⇒ 同一产品两条 ingest 路径产出不同检索键，查询口径分裂
+      （实测：查 `desktop-client` 全空、查 `pony-agent` 才命中）。修法：resource 恒带
+      `pony.app.name=pony-agent`（`pony.*` 前缀语义属性不被 edge 改写），作为跨路径唯一稳定键。
+  (2) tracing｜`deployment.environment` 误标：原先按 `debug_assertions` 推断，而本地
+      `cargo build --release` 同样为 false ⇒ 开发机会话被标成 production（实测已发生）。
+      修法：环境判定改为 `PONY_OTEL_ENVIRONMENT` > 构建期 `PONY_RELEASE_BUILD=1`
+      （仅 release.yml 注入）> `development` 兜底。`PONY_RELEASE_BUILD` 只由发布工作流注入。
+  (3) tracing｜根 span 无用量汇总：token 只在子 span `llm.chat` 上，`agent.turn` 根 span
+      缺 `gen_ai.usage.*` ⇒ 多 hop 会话成本需跨 span 拼装。修法：`ActiveTurn` 累计用量并在
+      `TurnTraceGuard::drop` 回填根 span（缺值不输出键，保持既有"不输出空占位"约定）。
+  (4) tracing｜`tool.call` span 时长恒为 ~0：`record_tool_call_span` 曾是「创建即 end」，
+      span 只覆盖登记动作（实测：834ms 的工具导出成 0.002ms，真值只在属性
+      `agent.tool.duration_ms`）⇒ Tempo 瀑布图工具耗时不可见。修法：按 `duration_ms`
+      反推起点 `with_start_time` + `end_with_timestamp`；加 24h 回填上限（异常大 duration
+      退化为零长 span，跨平台确定；超限原始值仍保留在属性里）。
+  (5) issues｜CLI/TUI/headless 无凭据分发通道：token 只能来自构建期烧录或运行时 env，
+      而桌面端以外没有构建期通道 ⇒ 实测 provider 真实失败后 PonySentry 零事件。
+      修法：`AppSettings` 新增 `ponysentryIngestUrl` / `ponysentryClientToken`（camelCase 落盘、
+      Debug 打码、`settings.json` 0600 收紧），解析优先级 settings > env > 构建期 > 缺省；
+      `bin/cli.rs`、`bin/tui.rs`、`src-tauri/src/lib.rs` 启动时调用 `init_from_settings`。
+      fail-closed 不变：无 token ⇒ 零 egress（不 spawn worker、不发请求）。
+  (6) 巡检工具面补强：`scripts/observability/check-langfuse.sh` 补上「语义轨是否有数据」
+      这一动态判据（原 T5 仅静态检查；本项目 `ai_tier=agent` ⇒ Langfuse 必需）。
+      凭据经 stdin 管道进入探针 shell，不进 argv、不落盘；缺凭据判 UNKNOWN 而非 PASS。
+
   【wave-46 归属登记】前端与语义轨交互增强：
   (1) 前端交互轨迹：全局面包屑强化为有界环形缓冲（30 条），自动捕获页面导航（`navigate_page`）
       并在推入时做深度截断与凭据清洗，丰富排障上下文；
