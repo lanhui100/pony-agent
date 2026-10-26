@@ -16,6 +16,38 @@ use std::fs;
 use std::io::Write;
 use std::time::Duration;
 
+/// 解析跨平台 Python 解释器（命令 + 需要前置的参数）。
+///
+/// 原写法硬编码 `python3`：Windows 上通常只有 `python`（或 `py -3` 启动器），
+/// 且 Microsoft Store 的 `python3` 别名可能是"打开商店"的存根 → spawn/握手会失败。
+/// Windows 按序探测 `python` → `python3` → `py -3`；Unix 保持 `python3`。
+fn resolve_python_command() -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        let candidates: &[(&str, &[&str])] = &[("python", &[]), ("python3", &[]), ("py", &["-3"])];
+        for &(program, extra) in candidates {
+            if let Ok(output) = std::process::Command::new(program)
+                .args(extra)
+                .arg("--version")
+                .output()
+            {
+                if output.status.success() {
+                    return (
+                        program.to_string(),
+                        extra.iter().map(|s| (*s).to_string()).collect(),
+                    );
+                }
+            }
+        }
+        panic!("CI 环境缺少可用 python 解释器（已尝试 python, python3, py -3），W31 LSP 契约测试无法运行");
+    }
+
+    #[cfg(not(windows))]
+    {
+        ("python3".to_string(), Vec::new())
+    }
+}
+
 /// 生成轻量可控的 fake lsp server 脚本（Python），模拟标准 LSP JSON-RPC Content-Length 协议
 fn create_mock_lsp_server(dir: &std::path::Path) -> std::path::PathBuf {
     let script_path = dir.join("mock_lsp_server.py");
@@ -112,10 +144,12 @@ fn test_lsp_client_handshake_and_definition() {
     fs::create_dir_all(&temp).expect("create temp dir");
     let script_path = create_mock_lsp_server(&temp);
 
+    let (python, mut python_args) = resolve_python_command();
+    python_args.push(script_path.to_str().unwrap().to_string());
     let spec = LspServerSpec {
         language_id: "rust".to_string(),
-        command: "python3".to_string(),
-        args: vec![script_path.to_str().unwrap().to_string()],
+        command: python,
+        args: python_args,
         cwd: Some(temp.to_str().unwrap().to_string()),
         env: vec![],
     };

@@ -16,11 +16,36 @@ use pony_agent_core::agent::tools::{
     TerminalSignal, TerminalSignalArgs, TerminalSignalResult,
 };
 
+// ── 平台 shell 夹具（Windows 兼容）──────────────────────────────────────────
+//
+// 原写法硬编码 `sh`：Windows 没有 `sh.exe`（Git Bash 的 sh 不在默认 PATH），
+// `terminal_open` 会在 spawn 阶段失败。产品在 Windows 上的默认 shell 是 `powershell.exe`
+// （`terminal.rs:404` 的 `cfg!(windows)` 分支），故夹具按平台取 shell：
+// Unix `sh`、Windows `cmd`（cmd 内建 echo/exit，交互式也常驻，最贴近原用例语义）。
+
+/// 平台 shell 程序名。
+fn shell_program() -> String {
+    if cfg!(windows) {
+        "cmd".to_string()
+    } else {
+        "sh".to_string()
+    }
+}
+
+/// 「执行单条命令」的平台参数：Unix `-c <cmd>`，Windows `/C <cmd>`。
+fn shell_exec_args(command: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec!["/C".to_string(), command.to_string()]
+    } else {
+        vec!["-c".to_string(), command.to_string()]
+    }
+}
+
 #[test]
 fn test_ac01_terminal_open_spawns_pty_and_returns_uuid_and_pid() {
     let args = TerminalOpenArgs {
-        command: Some("sh".to_string()),
-        args: Some(vec!["-c".to_string(), "echo hello".to_string()]),
+        command: Some(shell_program()),
+        args: Some(shell_exec_args("echo hello")),
         cwd: None,
         cols: Some(80),
         rows: Some(24),
@@ -34,7 +59,7 @@ fn test_ac01_terminal_open_spawns_pty_and_returns_uuid_and_pid() {
 #[test]
 fn test_ac02_terminal_send_and_read_duplex_interaction() {
     let open_args = TerminalOpenArgs {
-        command: Some("sh".to_string()),
+        command: Some(shell_program()),
         args: None,
         cwd: None,
         cols: Some(80),
@@ -68,7 +93,7 @@ fn test_ac02_terminal_send_and_read_duplex_interaction() {
 #[test]
 fn test_ac03_terminal_close_and_signal_reaps_process_tree() {
     let open_args = TerminalOpenArgs {
-        command: Some("sh".to_string()),
+        command: Some(shell_program()),
         args: None,
         cwd: None,
         cols: Some(80),
@@ -95,7 +120,7 @@ fn test_ac03_terminal_close_and_signal_reaps_process_tree() {
 #[test]
 fn test_ac04_path_traversal_fails_closed() {
     let open_args = TerminalOpenArgs {
-        command: Some("sh".to_string()),
+        command: Some(shell_program()),
         args: None,
         cwd: Some("../../etc/unauthorized".to_string()),
         cols: None,
@@ -108,7 +133,7 @@ fn test_ac04_path_traversal_fails_closed() {
     // SEC-01: Absolute path outside workspace must fail closed unconditionally
     let outside_abs = if cfg!(windows) { "C:\\Windows" } else { "/etc" };
     let abs_args = TerminalOpenArgs {
-        command: Some("sh".to_string()),
+        command: Some(shell_program()),
         args: None,
         cwd: Some(outside_abs.to_string()),
         cols: None,
@@ -124,9 +149,11 @@ fn test_leak01_max_active_terminals_and_auto_reap() {
     // Open terminals until capacity or test limit
     let mut opened = Vec::new();
     for _ in 0..MAX_ACTIVE_TERMINALS {
+        // 原写法 `sh -c "sleep 30"`：Windows 无 sleep/sleep.exe。本用例只需要「终端保持存活」，
+        // 交互式 shell 本身就会一直等输入（与 sleep 30 的存活语义一致，且两平台都有）。
         let open_args = TerminalOpenArgs {
-            command: Some("sh".to_string()),
-            args: Some(vec!["-c".to_string(), "sleep 30".to_string()]),
+            command: Some(shell_program()),
+            args: None,
             cwd: None,
             cols: None,
             rows: None,
@@ -145,7 +172,7 @@ fn test_leak01_max_active_terminals_and_auto_reap() {
     // Attempting to open one more beyond MAX_ACTIVE_TERMINALS must fail if we filled it
     if opened.len() == MAX_ACTIVE_TERMINALS {
         let overflow_args = TerminalOpenArgs {
-            command: Some("sh".to_string()),
+            command: Some(shell_program()),
             args: None,
             cwd: None,
             cols: None,
