@@ -72,6 +72,35 @@ fn dump_if_requested(name: &str, buf: &ratatui::buffer::Buffer) {
     let _ = std::fs::write(format!("/tmp/tui-snap/{}.json", name), json);
 }
 
+/// 该平台语义下的绝对路径判定（供 `starts_with_folded_or_absolute_path` 使用）。
+///
+/// Windows 上 `Path::is_absolute()` 只认「盘符 + 分隔符」或 UNC；这里显式实现，
+/// 使判据在两种平台下语义一致（Windows 语义的镜像测试见
+/// `tui_dialog_wave39.rs::a4_windows_path_shapes_are_testable_on_linux`）。
+fn is_absolute_path_for_platform(token: &str) -> bool {
+    if cfg!(windows) {
+        let bytes = token.as_bytes();
+        let drive_absolute = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/');
+        drive_absolute || (token.starts_with("\\\\") && token.len() > 2)
+    } else {
+        std::path::Path::new(token).is_absolute()
+    }
+}
+
+/// 指标行/最后一行是否以「折叠 cwd（`~`/`~\…`）」或「绝对路径」起排（平台无关）。
+///
+/// 原断言写作 `trim_start().starts_with('~') || trim_start().starts_with('/')`，
+/// **只在 Unix 成立**：Windows 绝对路径形如 `C:\Users\...`（盘符 + 反斜杠），
+/// 两个前缀都不命中 → 正向断言在 Windows 恒假红、反向断言在 Windows 恒真（空转）。
+/// 平台无关判据：折叠形态以 `~` 起；其余按平台各自的绝对路径语义判定。
+fn starts_with_folded_or_absolute_path(text: &str) -> bool {
+    let token = text.trim_start().split_whitespace().next().unwrap_or("");
+    token.starts_with('~') || is_absolute_path_for_platform(token)
+}
+
 #[test]
 fn layout_invariants_hold_on_standard_terminal() {
     let mut state = tui::TuiState::default();
@@ -125,9 +154,10 @@ fn layout_invariants_hold_on_standard_terminal() {
         row_text(&buf, prompt_row + 1)
     );
     let metrics_row = row_text(&buf, buf.area.height - 1);
+    // 平台无关判据替代 Unix-only 的 `starts_with('~') || starts_with('/')`（见 helper 注释）。
     assert!(
-        metrics_row.trim_start().starts_with('~') || metrics_row.trim_start().starts_with('/'),
-        "指标行左侧必须是折叠后的 cwd（ADR 0042 R7），实际 {metrics_row:?}"
+        starts_with_folded_or_absolute_path(&metrics_row),
+        "指标行左侧必须是折叠后的 cwd 或绝对路径（ADR 0042 R7），实际 {metrics_row:?}"
     );
     assert!(
         !metrics_row.contains('›'),
@@ -327,9 +357,11 @@ fn panel_renders_inside_screen_and_keeps_footer() {
     );
     assert!(panel_top > 0 && panel_bottom < buf.area.height - 1, "浮层不得贴屏幕上下边缘");
     // 浮层态指标行必须收起：最后一行不得出现折叠 cwd（ADR 0042 R7 的左侧簇）。
+    // 原断言只查 `starts_with('~')`：cwd 不在 HOME 下时（Windows 上永远是 `C:\...`）
+    // 该断言恒真 → 反向断言空转。改用平台无关判据后，绝对路径也会被抓到。
     let modal_last_row = row_text(&buf, buf.area.height - 1);
     assert!(
-        !modal_last_row.trim_start().starts_with('~'),
+        !starts_with_folded_or_absolute_path(&modal_last_row),
         "浮层态必须收起指标行，实际最后一行 {modal_last_row:?}"
     );
 
@@ -344,7 +376,7 @@ fn panel_renders_inside_screen_and_keeps_footer() {
     );
     let restored_last_row = row_text(&buf, buf.area.height - 1);
     assert!(
-        restored_last_row.trim_start().starts_with('~') || restored_last_row.trim_start().starts_with('/'),
+        starts_with_folded_or_absolute_path(&restored_last_row),
         "关闭浮层后指标行必须恢复（ADR 0042 R7），实际 {restored_last_row:?}"
     );
 }

@@ -114,6 +114,44 @@ fn last_row_left(buf: &Buffer) -> String {
     cells[cx as usize + RAIL..].concat().trim_end().to_string()
 }
 
+/// Windows 绝对路径形态（盘符 `X:\`/`X:/` 或 UNC `\\server\share`）。
+///
+/// 单独实现而非直接 `Path::is_absolute()`：在 Linux 上编译时反斜杠不是分隔符，
+/// 无法直接验证 Windows 形态；此纯函数让 Windows 语义能在 Linux 上被镜像测试
+/// （与 `default_workspace_red_phase.rs::normalize_path_forms` 同一手法）。
+fn is_windows_absolute_path(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    let drive_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    drive_absolute || (token.starts_with("\\\\") && token.len() > 2)
+}
+
+/// 判据核心（带平台参数，便于在 Linux 上镜像验证 Windows 形态）。
+fn is_folded_or_absolute_path_with(text: &str, windows_forms: bool) -> bool {
+    let token = text.trim_start().split_whitespace().next().unwrap_or("");
+    if token.starts_with('~') {
+        return true;
+    }
+    if windows_forms {
+        is_windows_absolute_path(token)
+    } else {
+        std::path::Path::new(token).is_absolute()
+    }
+}
+
+/// workspace 标签是否「折叠形态」（`~` / `~\…`）或「绝对路径」。
+///
+/// 原断言写作 `label.starts_with('/') || label.starts_with('~')`，**只在 Unix 成立**：
+/// Windows 绝对路径形如 `C:\Users\...`（盘符 + 反斜杠），既不以 `/` 也不以 `~` 开头，
+/// 于是 Windows CI 恒假红。平台无关判据：折叠形态仍以 `~` 起；其余交给平台各自的
+/// 绝对路径判定（Unix `/x`、Windows `C:\x`）。鉴别力不降：空串、纯数字、
+/// 相对形态（`pony-agent`）仍判假。
+fn is_folded_or_absolute_path(text: &str) -> bool {
+    is_folded_or_absolute_path_with(text, cfg!(windows))
+}
+
 /// 三条主体沟槽列（左 0/1，右 W-2/W-1）在任何一行都不得出现内容。
 fn assert_gutters_blank(buf: &Buffer, width: u16) {
     let cols = [0u16, 1, width - 2, width - 1];
@@ -306,6 +344,46 @@ fn a4_metrics_row_left_shows_workspace_label() {
         );
     }
 
+    // 用例 1（Windows 镜像）：同一「HOME 前缀折叠」契约，分隔符用 MAIN_SEPARATOR。
+    //
+    // 原用例整体 `#[cfg(unix)]`，Windows 上折叠契约毫无覆盖；且原断言把分隔符写死成 `/`，
+    // 在 Windows 上即使跑也只在 Unix 成立（产品折叠输出 `~\pony-agent`）。
+    // 按平台分流但保留同等鉴别力：折叠前缀 + 首格 `~` 与 Unix 版一一对应，只换分隔符。
+    #[cfg(windows)]
+    {
+        // 与产品 `workspace_label` 同序解析 home：HOME 优先，其次 USERPROFILE。
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|h| !h.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USERPROFILE")
+                    .ok()
+                    .filter(|h| !h.trim().is_empty())
+            })
+            .unwrap_or_default();
+        assert!(
+            !home.is_empty(),
+            "Windows 环境必须提供 HOME 或 USERPROFILE 才能验证 ~ 折叠契约"
+        );
+        let mut state = tui::TuiState::default();
+        state.workspace = std::path::PathBuf::from(&home).join("pony-agent");
+
+        let buf = screen(&mut state, 110, 30);
+        let label = last_row_left(&buf);
+        let expected = format!("~{}pony-agent", std::path::MAIN_SEPARATOR);
+        assert!(
+            label.starts_with(&expected),
+            "HOME 下的 workspace 必须折叠为 {expected:?}，实际标签 {label:?}"
+        );
+        let cells = row_cells(&buf, 29);
+        assert_eq!(
+            cells[cx as usize + RAIL],
+            "~",
+            "路径标签必须从 content.x+RAIL({}) 列起排",
+            cx as usize + RAIL
+        );
+    }
+
     // 用例 2：非 HOME 前缀 → 完整 display，basename 必须出现在左侧。
     let mut state = tui::TuiState::default();
     state.workspace = std::env::temp_dir().join("wave39-ws-alpha");
@@ -315,16 +393,61 @@ fn a4_metrics_row_left_shows_workspace_label() {
         label.contains("wave39-ws-alpha"),
         "指标行左侧必须显示 workspace basename，实际标签 {label:?}"
     );
+    // 原断言 `label.starts_with('/') || label.starts_with('~')` 只在 Unix 成立：
+    // Windows 绝对路径是 `C:\Users\...`，两种前缀都不命中 → Windows CI 假红。
     assert!(
-        label.starts_with('/') || label.starts_with('~'),
-        "workspace 标签必须以路径形式起排，实际标签 {label:?}"
+        is_folded_or_absolute_path(&label),
+        "workspace 标签必须以绝对路径或折叠路径起排，实际标签 {label:?}"
     );
     let cells = row_cells(&buf, 29);
     let first = cells[cx as usize + RAIL].as_str();
-    assert!(
-        first == "/" || first == "~",
-        "路径标签首字符必须是路径根（/ 或 ~），实际 {first:?}"
+    // 原断言 `first == "/" || first == "~"` 同属 Unix-only 形态假设（Windows 首字符是盘符）。
+    // 该断言的真实契约是「标签从 content.x+RAIL 列起排」，故与标签首字符对齐比较：
+    // 平台无关，且比"首字符必须是根字符"更贴近起排语义（路径根合法性已由上面判据守住）。
+    let expected_first = label
+        .chars()
+        .next()
+        .map(|c| c.to_string())
+        .unwrap_or_default();
+    assert_eq!(
+        first, expected_first,
+        "路径标签必须从 content.x+RAIL({}) 列起排",
+        cx as usize + RAIL
     );
+}
+
+// ---------------------------------------------------------------------------
+// A4-mirror：Windows 路径形态可测镜像 —— 证明平台无关判据在 Windows 形态下成立
+// （Linux 上直接跑 cfg(windows) 分支是不可能的，故用参数化纯函数复现 CI 实测值）。
+// ---------------------------------------------------------------------------
+#[test]
+fn a4_windows_path_shapes_are_testable_on_linux() {
+    // CI windows-latest 上实际渲染的标签（修复前 `starts_with('/')` 判假 → 假红）。
+    assert!(is_folded_or_absolute_path_with(
+        r"C:\Users\RUNNER~1\AppData\Local\Temp\wave39-ws-alpha",
+        true
+    ));
+    // 正斜杠盘符形态（Git-Bash / MSYS 路径也常见）。
+    assert!(is_folded_or_absolute_path_with("C:/Users/runner/AppData/Local/Temp/ws", true));
+    // UNC 形态。
+    assert!(is_folded_or_absolute_path_with(r"\\server\share\proj", true));
+    // 折叠形态（Windows 反斜杠 / Unix 正斜杠）两平台都应判真。
+    assert!(is_folded_or_absolute_path_with(r"~\pony-agent", true));
+    assert!(is_folded_or_absolute_path_with("~/pony-agent", true));
+    assert!(is_folded_or_absolute_path_with("~/pony-agent", false));
+    // 带右侧指标簇的整行（token 化后只取首个路径片段）。
+    assert!(is_folded_or_absolute_path_with(r"C:\ws-alpha  ↑12 ↓3", true));
+    assert!(is_folded_or_absolute_path_with("/home/u/pony-agent  ↑12 ↓3", false));
+
+    // 反例：这些必须判假，否则判据退化为恒真。
+    assert!(!is_folded_or_absolute_path_with("pony-agent", true));
+    assert!(!is_folded_or_absolute_path_with("pony-agent", false));
+    assert!(!is_folded_or_absolute_path_with("", true));
+    assert!(!is_folded_or_absolute_path_with("   ", false));
+    // 盘符相对路径（`C:foo`）在 Windows 上不是绝对路径，必须判假。
+    assert!(!is_folded_or_absolute_path_with(r"C:foo\bar", true));
+    // Unix 相对路径在 Unix 判据下必须判假。
+    assert!(!is_folded_or_absolute_path_with("tmp/wave39", false));
 }
 
 // ---------------------------------------------------------------------------
