@@ -142,15 +142,30 @@ jobs:
           # NOTE: GitHub keeps draft releases UNTAGGED ("untagged-…" html_url) until they
           # are published, so releases/tags/<tag> 404s on drafts. Resolve drafts by the
           # tag_name FIELD via the releases list endpoint instead.
-          # 幂等：release 可能已由本 tag 的上一条 run 创建并发布（串行化后仍可能重跑/重试）。
-          # 先探测再创建；已存在则直接复用（不 --clobber 标题/说明，避免覆盖已发布内容）。
-          $existing = gh api "repos/$repo/releases/tags/$tag" --jq '.id' 2>$null
-          if ($LASTEXITCODE -ne 0 -or -not $existing) {
-            gh release create "$tag" --draft --title "$tag" --notes-file "target/release/bundle/nsis/release-notes.md"
-          } else {
-            Write-Host "release $tag already exists (id=$existing); reusing it (idempotent rerun)"
-          }
+          # 幂等：release 可能已由本 tag 的上一条 run 创建并发布（rerun/重试/串行排队都会命中）。
+          # 关键：**只解析一次 release id 并全程使用它**。历史缺陷（v0.1.158 实测）——旧实现先在
+          # 列表里 Select-Object -First 1 再取 assets，而同 tag 可能同时存在「有资产的已发布记录」
+          # 与「空 draft」（删 tag 重推会让原 release 退回 draft，同时新 run 又 create 一条空的），
+          # 于是取到空的那条 ⇒ 明明产物齐全却报 "got 0"。
           $nsis = "target/release/bundle/nsis"
+          $allReleases = @(gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json)
+          $sameTag = @($allReleases | Where-Object { $_.tag_name -eq $tag })
+          # 优先选「已有 setup.exe 资产」的那条；其次选已发布的；都没有才新建。
+          $picked = $sameTag | Where-Object { @($_.assets | Where-Object { $_.name -like "*-setup.exe" }).Count -ge 1 } | Select-Object -First 1
+          if (-not $picked) { $picked = $sameTag | Where-Object { -not $_.draft } | Select-Object -First 1 }
+          if (-not $picked) { $picked = $sameTag | Select-Object -First 1 }
+          if ($picked) {
+            $relId = $picked.id
+            Write-Host "release $tag already exists (id=$relId, draft=$($picked.draft)); reusing it (idempotent rerun)"
+            if ($sameTag.Count -gt 1) {
+              Write-Host "WARN: found $($sameTag.Count) releases for tag ${tag}; using id=$relId (others: $((($sameTag | Where-Object { $_.id -ne $relId }).id) -join ', '))"
+            }
+          } else {
+            $created = gh release create "$tag" --draft --title "$tag" --notes-file "target/release/bundle/nsis/release-notes.md" --json id 2>$null | ConvertFrom-Json
+            if (-not $created) { throw "failed to create release $tag" }
+            $relId = $created.id
+            Write-Host "created draft release $tag (id=$relId)"
+          }
           # Windows desktop assets: NSIS installer + its updater signature
           Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
           Get-ChildItem $nsis -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
@@ -164,20 +179,15 @@ jobs:
           # 轮询解析目标 release —— **不区分 draft/published**。
           # 历史缺陷：旧实现只按 `.draft == true` 过滤，而串行化前可能已有另一条 run 把 release
           # 发布掉了 ⇒ 永远找不到 draft ⇒ 上游产物明明齐全却 throw "got 0"（v0.1.157 实测）。
-          $endpoint = "repos/$repo/releases?per_page=100"
           for ($retry = 0; $retry -lt 15; $retry++) {
-            $releases = (gh api $endpoint | ConvertFrom-Json)
-            $target = @($releases | Where-Object { $_.tag_name -eq $tag }) | Select-Object -First 1
-            if ($target) {
-              $rel = gh api "repos/$repo/releases/$($target.id)" | ConvertFrom-Json
-              $setup = @($rel.assets | Where-Object { $_.name -like "*-setup.exe" })
-              if ($setup.Count -ge 1) { break }
-            }
+            $rel = gh api "repos/$repo/releases/$relId" | ConvertFrom-Json
+            $setup = @($rel.assets | Where-Object { $_.name -like "*-setup.exe" })
+            if ($setup.Count -ge 1) { break }
             Start-Sleep -Seconds 3
           }
           if ($setup.Count -ne 1) {
             $seen = if ($rel) { (($rel.assets).name -join ", ") } else { "<release not found>" }
-            throw "expected exactly one setup.exe asset, got $($setup.Count): $seen"
+            throw "expected exactly one setup.exe asset in release id=$relId, got $($setup.Count): $seen"
           }
           $asset = $setup[0].name
           $assetUrl = [uri]::EscapeDataString($asset)
