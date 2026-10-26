@@ -184,11 +184,31 @@ function isExempt(file) {
 // ---------------------------------------------------------------- 规则
 function ruleD1(files) {
   if (!files.includes(DECL_PATH)) return;
-  const message = git(["log", "-1", "--pretty=%B"]).trim();
+
+  // 判定对象＝「产出当前声明内容的那个提交」（区间内**最后一次**动过声明的提交）。
+  //
+  // 为什么不逐提交全查：历史提交里存在批准口令约定之前的老改动，逐查会在引入约定时
+  // 一次性全红，门禁随即被无视。为什么不用 some(任一提交带口令)：实测可绕——
+  // 先提交一个带口令的改动，再追加一个不带口令的改动，就能搭便车通过。
+  // 「最后一次」两头都堵住：任何未批准的追加都会成为最后一次，从而被拦。
+  let latest = null;
+  if (baseRef) {
+    try {
+      latest = git(["log", `${baseRef}..HEAD`, "-1", "--pretty=%H", "--", DECL_PATH]).trim() || null;
+    } catch {
+      latest = null;
+    }
+  }
+
+  const message = latest
+    ? git(["log", "-1", "--pretty=%B", latest])
+    : git(["log", "-1", "--pretty=%B", "HEAD"]); // 声明改动尚未提交时的本地预检兜底
+
   if (!message.includes(APPROVAL_TOKEN)) {
     fail(
       2,
-      `[D1] ${DECL_PATH} 在本次变更中被修改，但 HEAD 提交信息缺少 ${APPROVAL_TOKEN}；声明变更必须显式批准`
+      `[D1] ${DECL_PATH} 在本次变更中被修改${latest ? `（提交 ${latest.slice(0, 7)}）` : ""}，` +
+        `但其提交信息缺少 ${APPROVAL_TOKEN}；声明变更必须显式批准`
     );
   }
 }

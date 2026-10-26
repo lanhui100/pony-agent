@@ -142,3 +142,76 @@ describe.skipIf(!skillAvailable)("wave47 双引擎一致性（gate.mjs vs audit-
     }
   });
 });
+
+/**
+ * D1（声明批准）语义回归：这三条锁死 gate.mjs 的判定口径，
+ * 因为「逐提交全查」与「任一提交带口令」两个极端都出过问题（前者历史全红、后者可绕过）。
+ */
+describe("wave47 D1 声明批准语义（仓库内引擎）", () => {
+  function fixtureWithBase() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wave47-d1-"));
+    execFileSync("git", ["init", "-q", "-b", "main", dir], { stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: dir, stdio: "ignore" });
+    fs.mkdirSync(path.join(dir, "docs"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "docs/observability.yaml"), DECL, "utf-8");
+    fs.writeFileSync(path.join(dir, "src/ep.ts"), "line1\nline2\n", "utf-8");
+    execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["commit", "-qm", "baseline"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["checkout", "-q", "-b", "feat"], { cwd: dir, stdio: "ignore" });
+    return dir;
+  }
+
+  function commitDecl(dir, message) {
+    fs.appendFileSync(path.join(dir, "docs/observability.yaml"), `# ${message}\n`, "utf-8");
+    execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["commit", "-qm", message], { cwd: dir, stdio: "ignore" });
+  }
+
+  function runGate(dir) {
+    try {
+      const stdout = execFileSync("node", [GATE], {
+        cwd: dir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        env: { ...process.env, GATE_REPO: dir, GATE_BASE: "main" }
+      });
+      return { code: 0, out: stdout };
+    } catch (err) {
+      return { code: err.status ?? -1, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+    }
+  }
+
+  it("D1-a: 唯一一次声明改动未批准 → 拦截", () => {
+    const dir = fixtureWithBase();
+    try {
+      commitDecl(dir, "docs: unapproved");
+      expect(runGate(dir).code).toBe(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("D1-b: 早期历史改动未批准、最后一次已批准 → 放行（不因历史全红）", () => {
+    const dir = fixtureWithBase();
+    try {
+      commitDecl(dir, "docs: legacy unapproved");
+      commitDecl(dir, "docs: approved [decl-change-approved]");
+      expect(runGate(dir).code).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("D1-c: 先批准再追加未批准改动 → 拦截（不可搭便车）", () => {
+    const dir = fixtureWithBase();
+    try {
+      commitDecl(dir, "docs: approved [decl-change-approved]");
+      commitDecl(dir, "docs: sneaky unapproved");
+      expect(runGate(dir).code).toBe(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
