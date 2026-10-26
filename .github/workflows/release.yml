@@ -165,8 +165,14 @@ jobs:
             # 旧写法会直接报错并被误报成 "failed to create release"（v0.1.159 实测）。
             gh release create "$tag" --draft --title "$tag" --notes-file "target/release/bundle/nsis/release-notes.md"
             if ($LASTEXITCODE -ne 0) { throw "failed to create release $tag (gh exit $LASTEXITCODE)" }
-            $relId = gh api "repos/$repo/releases/tags/$tag" --jq '.id' 2>$null
-            if ($LASTEXITCODE -ne 0 -or -not $relId) { throw "created release $tag but cannot resolve its id" }
+            # 关键：**draft release 是 untagged 的**（html_url 形如 untagged-…），
+            # 所以 `releases/tags/<tag>` 对刚创建的草稿必然 404（本文件顶部注释早已写明）。
+            # 只能通过 releases **列表**端点按 tag_name 字段反查（取最新一条草稿）。
+            $list = @(gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json)
+            $createdRel = @($list | Where-Object { $_.tag_name -eq $tag -and $_.draft -eq $true }) |
+              Sort-Object created_at -Descending | Select-Object -First 1
+            if (-not $createdRel) { throw "created release $tag but cannot resolve it from releases list (drafts are untagged)" }
+            $relId = $createdRel.id
             Write-Host "created draft release $tag (id=$relId)"
           }
           # Windows desktop assets: NSIS installer + its updater signature
