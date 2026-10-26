@@ -12,7 +12,8 @@
 //! - `impl AgentHookExecutor`：
 //!   1) descriptor.name 无对应 spec → 等价 Noop（`result_kind` 为 Allow/Observe 且 `blocked==false`），
 //!      但 descriptor 不允许该 hook_point 时仍返回 Err；
-//!   2) 有 spec → `sh -c <command>`，stdin 收到
+//!   2) 有 spec → Unix `sh -c <command>` / Windows `cmd /C <command>`（产品双平台，见
+//!      `hook_commands.rs:160-170`），stdin 收到
 //!      `{"hookName":...,"hookPoint":"<snake_case>","descriptorName":...}`，读取 stdout；
 //!   3) `{"decision":"allow"}`→Allow/blocked=false；`{"decision":"deny"}`→Deny/blocked=true 且
 //!      `structured_result` 为 `HookStructuredResult::Deny(_)`；`{"decision":"observe"}`→Observe/false；
@@ -25,16 +26,23 @@
 //! 本文件只引用冻结的公开路径与 `hooks.rs` 既有类型（不新增 descriptor 字段），
 //! 以保证实现落地后立即成为有效断言。
 //!
-//! 时序/稳定性：临时脚本各用例独立落盘到唯一临时目录，Drop 清理；超时用例用
-//! 「每 100ms 追加一行」的心跳脚本，既验证 2s 内返回 Err，也验证子进程确实被 kill
-//! （返回后心跳文件不再增长），避免仅靠返回时延无法区分「kill」与「弃管」。
+//! 时序/稳定性：临时目录仅用于「stdin payload 落盘」「hooks.json 落盘」等真实文件产物，
+//! 每用例唯一目录 + Drop 清理；命令本身不再落脚本文件。
 //!
-//! 契约歧义（已回执）：t5 用「心跳循环 + sleep 0.1」替代契约示例的裸 `sleep 5`，
-//! 以便确定性地断言「进程被 kill」；超时语义（200ms + 2s 内返回）不变。
+//! Windows 兼容（本文件曾在此处失效）：产品是**双平台**的——Windows 走 `cmd /C <command>`，
+//! 其它平台走 `sh -c <command>`。旧实现把 `#!/bin/sh` 脚本的**文件路径**当命令交给
+//! `cmd /C`，Windows 上必然失败（且不能用 `#![cfg(unix)]` 砍覆盖，否则 Windows 零覆盖）。
+//! 现改为「内联命令串 + 平台分支」（见 `decision_command` / `invalid_json_command` /
+//! `nonzero_exit_command` 与 t5/t7 内的分支），**断言一条未改**，只替换「命令怎么构造」。
+//!
+//! t5 超时判定说明：Unix 用 `exec sleep <唯一小数标记>`——`exec` 让 sh 自身被替换为目标进程，
+//! 于是「kill 直接子进程」等价于「kill 该命令」，且唯一小数标记可用 /proc cmdline 确定性地
+//! 判定进程是否已消失（不依赖时间窗猜测）；Windows 用 `ping -n 6 127.0.0.1 >nul` 充当长命令
+//! （对齐 `hook_commands.rs` 单元测试既有写法），超时语义（200ms + 2s 内返回）两平台一致。
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -78,21 +86,6 @@ impl TempDir {
         self.root.join(name)
     }
 
-    /// 写可执行 shell 脚本（executor 以 `sh -c <脚本路径>` 启动，需要可执行位）。
-    fn write_script(&self, name: &str, body: &str) -> PathBuf {
-        let path = self.path(name);
-        fs::write(&path, body).expect("写入 W30 临时脚本失败");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&path)
-                .expect("读取 W30 脚本元信息失败")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&path, permissions).expect("设置 W30 脚本可执行位失败");
-        }
-        path
-    }
 }
 
 impl Drop for TempDir {
@@ -101,10 +94,111 @@ impl Drop for TempDir {
     }
 }
 
-fn script_arg(path: &Path) -> String {
-    path.to_str()
-        .expect("W30 临时脚本路径必须是合法 UTF-8")
-        .to_string()
+/// Unix 分支：`sh -c` 收到命令串原样执行，故用 `cat >/dev/null` 抽干 stdin
+/// （对齐真实 hook「读 payload」的行为；产品对「子进程不读 stdin」已用
+/// `let _ = stdin.write_all(...)` 容错），再用 `printf` 精确输出文本（不追加换行）。
+fn unix_output_command(text: &str) -> String {
+    format!("cat >/dev/null; printf '{text}'")
+}
+
+/// Windows 分支：把文本放进数据文件，用 PowerShell 读回。
+///
+/// **为什么不能 `echo {"decision":"allow"}`**：产品以
+/// `Command::new("cmd").arg("/C").arg(cmd)` 启动（`hook_commands.rs:159-161`），而 Rust std 在
+/// Windows 上构造命令行时会给含空格/制表符的 argv 加外层引号，并且**无条件**把参数内每个 `"`
+/// 转义成 `\"`（`library/std/src/sys/args/windows.rs::append_arg`：`Quote::Auto` 只在含空格时
+/// 加引号，但 `escape` 恒为 `true`）。于是 `echo {"decision":"allow"}` 在 cmd 眼里是
+/// `"echo {\"decision\":\"allow\"}"`，按 cmd `/C` 的「剥首尾引号」规则执行后变成
+/// `echo {\"decision\":\"allow\"}`，echo 把反斜杠原样打印 → stdout 不是合法 JSON。
+/// 结论：**Windows 命令串里不能出现任何 `"`**。故 JSON 一律先落数据文件，再用
+/// `Get-Content -Raw` 读回；路径用 PowerShell 单引号包裹（`%TEMP%` 含空格也不会被拆词）。
+fn windows_file_read_command(file: &str) -> String {
+    powershell_encoded_command(&format!("Get-Content -Raw -LiteralPath '{file}'"))
+}
+
+/// 把 PowerShell 脚本编码成 `-EncodedCommand` 所需的 UTF-16LE base64 命令串。
+///
+/// 为什么不用 `-Command "<script>"`：产品以 `.arg()` 传命令串，Rust std 会把参数内每个 `"` 转义成
+/// `\"`（见上），所以命令串必须完全不含双引号；`-Command` 的无引号形式虽可避开双引号，但仍需过
+/// cmd 一遍（脚本里的 `|` `;` `(` 都得小心），且依赖 powershell.exe「拼接后续 argv」的隐式规则。
+/// `-EncodedCommand` 的载荷只有 `[A-Za-z0-9+/=]`——不含双引号、不含任何 cmd 元字符，
+/// 解析路径最短最确定。脚本内容仍在本文件内可读（t0 会解码回来逐字校验）。
+fn powershell_encoded_command(script: &str) -> String {
+    use base64::Engine as _;
+    let utf16: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    format!("powershell -NoProfile -NonInteractive -EncodedCommand {encoded}")
+}
+
+/// 「输出一段固定文本」的 hook 命令（平台分支；Windows 侧顺带落数据文件）。
+fn output_text_command(dir: &std::path::Path, tag: &str, text: &str) -> String {
+    if cfg!(windows) {
+        let file = dir.join(format!("{tag}.json"));
+        fs::write(&file, text).expect("写入 W30 决策数据文件失败");
+        windows_file_read_command(
+            file.to_str().expect("W30 数据文件路径必须是合法 UTF-8"),
+        )
+    } else {
+        unix_output_command(text)
+    }
+}
+
+/// 输出一条 `{"decision":...}` 决策 JSON 的命令。
+fn decision_command(dir: &std::path::Path, tag: &str, json_literal: &str) -> String {
+    output_text_command(dir, tag, json_literal)
+}
+
+/// 协议违规：输出非法 JSON（两平台都不含 `"`，可直接用 echo）。
+fn invalid_json_command() -> String {
+    if cfg!(windows) {
+        "echo this is not json".to_string()
+    } else {
+        unix_output_command("this is not json")
+    }
+}
+
+/// 协议违规：非零退出码（Unix `exit 3`，Windows `exit /b 3`；两者都不含 `"`）。
+fn nonzero_exit_command_for(windows: bool) -> String {
+    if windows {
+        "exit /b 3".to_string()
+    } else {
+        "cat >/dev/null; exit 3".to_string()
+    }
+}
+
+fn nonzero_exit_command() -> String {
+    nonzero_exit_command_for(cfg!(windows))
+}
+
+/// 超时用例的长命令（Unix `exec sleep <marker>`，Windows `ping ... >nul`；均不含 `"`）。
+fn timeout_command_for(windows: bool, marker: &str) -> String {
+    if windows {
+        "ping -n 6 127.0.0.1 >nul".to_string()
+    } else {
+        format!("exec sleep {marker}")
+    }
+}
+
+/// t7 的「stdin 落盘 + 回决策」命令（`decision_file` 仅在 Windows 分支使用）。
+///
+/// Windows：cmd 无 `cat`，用 PowerShell `[Console]::In.ReadToEnd()` 读完整 stdin；
+/// `Set-Content -Encoding ascii -NoNewline` 以**无 BOM** 的 ASCII 原样落盘
+/// （PS 默认 UTF-16 会带 BOM，污染 JSON 解析）；决策 JSON 同样从数据文件读回。
+/// 整条脚本经 `-EncodedCommand` 编码，命令串只剩 base64 载荷（不含 `"` 与任何 cmd 元字符）。
+fn stdin_capture_command_for(windows: bool, captured: &str, decision_file: &str) -> String {
+    if windows {
+        powershell_encoded_command(&format!(
+            "$i=[Console]::In.ReadToEnd(); Set-Content -LiteralPath '{captured}' -Value $i -Encoding ascii -NoNewline; Get-Content -Raw -LiteralPath '{decision_file}'"
+        ))
+    } else {
+        // Unix 侧不需要数据文件：决策 JSON 直接内联进 printf 的单引号里
+        // （t7 的决策固定为 captured，保留字面量便于阅读）。
+        let decision = r#"{"decision":"allow","summary":"captured"}"#;
+        format!("cat > '{captured}'; printf '{decision}'")
+    }
 }
 
 /// 与 `hooks.rs` 既有测试一致的 descriptor 构造（不新增字段）。
@@ -217,20 +311,132 @@ fn process_with_marker_exists(_marker: &str) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// t0：平台命令文本镜像 + cmd 安全不变量
+//
+// 目的：Linux 上无法执行 cmd/PowerShell，故用参数化构造函数锁定 Windows 分支的**确切文本**，
+// 并把「echo/printf 的实参不含元字符」变成可执行不变量（防后人改 JSON 内容时引入 `>`/`&`/`'`）。
+// cmd /C 实际收到的整串（逐条对应本文件各用例）：
+//   echo {"decision":"allow","summary":"ok"}
+//   echo {"decision":"deny","reason":"forbidden by w30"}
+//   echo this is not json
+//   echo {"summary":"missing decision"}
+//   exit /b 3
+//   ping -n 6 127.0.0.1 >nul
+//   powershell -NoProfile -NonInteractive -Command "[Console]::In.ReadToEnd() | Set-Content -Path 'C:\Temp\stdin.json' -Encoding ascii -NoNewline" & echo {"decision":"allow","summary":"captured"}
+// ─────────────────────────────────────────────────────────────────────────────
+/// 把 `powershell ... -EncodedCommand <b64>` 的载荷解码回脚本文本。
+///
+/// 用途：Linux 上无法执行 cmd/PowerShell，但可以验证「Windows 分支最终会执行的脚本内容」——
+/// base64/UTF-16LE 是**本文件内**可计算的事实，不依赖任何 Windows 行为。
+fn decode_powershell_script(command: &str) -> String {
+    use base64::Engine as _;
+    let encoded = command
+        .rsplit(' ')
+        .next()
+        .expect("W30 断言失败：命令串缺少 -EncodedCommand 载荷");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("W30 断言失败：-EncodedCommand 载荷必须是合法 base64");
+    assert_eq!(bytes.len() % 2, 0, "UTF-16LE 载荷长度必须是偶数");
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+    String::from_utf16(&units).expect("W30 断言失败：脚本必须是合法 UTF-16")
+}
+
+#[test]
+fn t0_platform_command_strings_are_mirrorable_and_cmd_safe() {
+    // (1) Unix 分支（本机实际执行）：命令串原样交给 `sh -c`。
+    let allow = r#"{"decision":"allow","summary":"ok"}"#;
+    assert_eq!(
+        unix_output_command(allow),
+        format!("cat >/dev/null; printf '{allow}'")
+    );
+    assert_eq!(nonzero_exit_command_for(false), "cat >/dev/null; exit 3");
+    assert_eq!(
+        timeout_command_for(false, "5.123456"),
+        "exec sleep 5.123456"
+    );
+    assert!(stdin_capture_command_for(false, "/tmp/stdin.json", "/tmp/decision.json")
+        .starts_with("cat > '/tmp/stdin.json'; printf '"));
+
+    // (2) Windows 分支：命令串可镜像解码（Linux 上无法执行 cmd/PowerShell，故把 -EncodedCommand
+    //     的载荷解码回脚本，逐字校验将要执行的内容）。
+    assert_eq!(
+        decode_powershell_script(&windows_file_read_command(r"C:\Temp\w30-decision.json")),
+        r"Get-Content -Raw -LiteralPath 'C:\Temp\w30-decision.json'",
+        "Windows 决策输出必须在 PowerShell 里按数据文件读回（且路径用单引号避免拆词）"
+    );
+    assert_eq!(
+        decode_powershell_script(&stdin_capture_command_for(
+            true,
+            r"C:\Temp\stdin.json",
+            r"C:\Temp\decision.json"
+        )),
+        r"$i=[Console]::In.ReadToEnd(); Set-Content -LiteralPath 'C:\Temp\stdin.json' -Value $i -Encoding ascii -NoNewline; Get-Content -Raw -LiteralPath 'C:\Temp\decision.json'",
+        "t7 的 Windows 分支：读 stdin → 无 BOM（ascii）落盘 → 从数据文件读回决策"
+    );
+    assert!(windows_file_read_command(r"C:\Temp\x.json")
+        .starts_with("powershell -NoProfile -NonInteractive -EncodedCommand "));
+    assert_eq!(nonzero_exit_command_for(true), "exit /b 3");
+    assert_eq!(
+        timeout_command_for(true, "5.123456"),
+        "ping -n 6 127.0.0.1 >nul",
+        "Windows 超时命令与 marker 无关（marker 只服务 Linux 的 /proc 判定）"
+    );
+
+    // (3) **回归护栏**：Windows 命令串一律不得含双引号。
+    // 原因见 `windows_file_read_command` 注释：产品用 `.arg()` 传命令串，Rust std 会把参数内每个
+    // `"` 转义成 `\"`，而 cmd `/C` 只剥外层引号，反斜杠会留在 echo/stdout 里 → 断言全崩。
+    for command in [
+        windows_file_read_command(r"C:\Temp\colon.json"),
+        nonzero_exit_command_for(true),
+        "echo this is not json".to_string(),
+        timeout_command_for(true, "5.000001"),
+        stdin_capture_command_for(true, r"C:\Temp\a.json", r"C:\Temp\b.json"),
+    ] {
+        assert!(
+            !command.contains('"'),
+            "Windows 命令串不得含双引号：Rust std 会把它转义成反斜杠+引号，cmd 剥壳后反斜杠残留在 stdout。实际命令：{command}"
+        );
+    }
+
+    // (4) Unix `printf '...'` 的实参安全不变量：不得含单引号或换行（否则引号被截断）。
+    for literal in [
+        allow,
+        r#"{"decision":"deny","reason":"forbidden by w30"}"#,
+        r#"{"summary":"missing decision"}"#,
+        r#"{"decision":"allow","summary":"captured"}"#,
+        "this is not json",
+    ] {
+        assert!(
+            !literal
+                .chars()
+                .any(|c| matches!(c, '\'' | '\n' | '\r')),
+            "sh printf 单引号内的字面量 {literal:?} 不得含单引号/换行，否则命令串被截断"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // t1：from_json_str 解析与空 command 拒绝
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn t1_json_config_parses_two_specs_and_rejects_empty_command() {
-    // Arrange：两个 hook 名，各自指向「echo allow」脚本
+    // Arrange：两个 hook 名，各自指向「输出 allow 的内联命令」（两平台同一语义）
     let workspace = TempDir::new("t1-json");
-    let allow_script = script_arg(&workspace.write_script(
-        "allow.sh",
-        "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"allow\",\"summary\":\"ok\"}'\n",
-    ));
+    let allow_command = decision_command(
+        &workspace.root,
+        "t1-allow",
+        r#"{"decision":"allow","summary":"ok"}"#,
+    );
     let config = json!({
         "hooks": {
-            "w30-alpha": { "command": allow_script, "timeoutMs": 2000 },
-            "w30-beta": { "command": allow_script }
+            // 15000ms：Windows 分支要冷启动 PowerShell；该值只作超时预算，不参与断言
+            // （仍显式给出，以覆盖「配置里的 timeoutMs 被解析」这条契约）。
+            "w30-alpha": { "command": allow_command.as_str(), "timeoutMs": 15000 },
+            "w30-beta": { "command": allow_command.as_str() }
         }
     })
     .to_string();
@@ -292,11 +498,12 @@ fn t1_json_config_parses_two_specs_and_rejects_empty_command() {
 fn t2_allow_decision_returns_allow_and_not_blocked() {
     // Arrange
     let workspace = TempDir::new("t2-allow");
-    let script = script_arg(&workspace.write_script(
-        "allow.sh",
-        "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"allow\",\"summary\":\"ok\"}'\n",
-    ));
-    let executor = single_spec("w30-allow", script, 5_000);
+    let command = decision_command(
+        &workspace.root,
+        "t2-allow",
+        r#"{"decision":"allow","summary":"ok"}"#,
+    );
+    let executor = single_spec("w30-allow", command, 5_000);
     let descriptor = guard_descriptor("w30-allow", TurnHookPoint::ToolCallStart);
 
     // Act
@@ -337,11 +544,12 @@ fn t2_allow_decision_returns_allow_and_not_blocked() {
 fn t3_deny_decision_returns_blocked_deny_structured_result() {
     // Arrange
     let workspace = TempDir::new("t3-deny");
-    let script = script_arg(&workspace.write_script(
-        "deny.sh",
-        "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"deny\",\"reason\":\"forbidden by w30\"}'\n",
-    ));
-    let executor = single_spec("w30-deny", script, 5_000);
+    let command = decision_command(
+        &workspace.root,
+        "t3-deny",
+        r#"{"decision":"deny","reason":"forbidden by w30"}"#,
+    );
+    let executor = single_spec("w30-deny", command, 5_000);
     let descriptor = guard_descriptor("w30-deny", TurnHookPoint::ToolCallStart);
 
     // Act
@@ -375,29 +583,18 @@ fn t3_deny_decision_returns_blocked_deny_structured_result() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn t4_invalid_protocol_outputs_return_errors() {
-    // Arrange：三类坏输出
+    // Arrange：三类坏输出（内联命令，两平台同一语义；Windows 侧决策 JSON 落数据文件）
     let workspace = TempDir::new("t4-invalid");
     let cases: Vec<(&str, String)> = vec![
-        (
-            "非法 JSON",
-            script_arg(&workspace.write_script(
-                "bad_json.sh",
-                "#!/bin/sh\ncat >/dev/null\necho 'this is not json'\n",
-            )),
-        ),
-        (
-            "非零退出码",
-            script_arg(&workspace.write_script(
-                "exit_nonzero.sh",
-                "#!/bin/sh\ncat >/dev/null\nexit 3\n",
-            )),
-        ),
+        ("非法 JSON", invalid_json_command()),
+        ("非零退出码", nonzero_exit_command()),
         (
             "缺 decision",
-            script_arg(&workspace.write_script(
-                "no_decision.sh",
-                "#!/bin/sh\ncat >/dev/null\necho '{\"summary\":\"missing decision\"}'\n",
-            )),
+            decision_command(
+                &workspace.root,
+                "t4-no-decision",
+                r#"{"summary":"missing decision"}"#,
+            ),
         ),
     ];
 
@@ -439,15 +636,19 @@ fn t4_invalid_protocol_outputs_return_errors() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn t5_timeout_returns_error_promptly_and_kills_child() {
-    // Arrange：契约示例的 `sleep` 长命令；用 `exec` 让 sh 自身被替换为目标进程，
-    // 于是「kill 直接子进程」等价于「kill 该命令」；sleep 时长带唯一小数标记，
-    // 便于用 /proc cmdline 确定性地判定该进程是否已消失（不依赖时间窗猜测）。
+    // Arrange：长命令（内联，平台分支）。
+    // Unix：`exec sleep <唯一小数标记>` —— `exec` 让 sh 自身被替换为目标进程，于是
+    //   「kill 直接子进程」等价于「kill 该命令」；标记供 /proc cmdline 确定性判定是否已消失。
+    // Windows：`ping -n 6 127.0.0.1 >nul`（约 5s，对齐 `hook_commands.rs` 单元测试的既有写法）。
+    //   注：Windows 上产品只能 kill 直接子进程（cmd），孙进程可能残留，故超时路径依赖产品的
+    //   「有界等待 drain」保证 2s 内返回（`hook_commands.rs::join_reader_until`）。
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or(0);
     let sleep_marker = format!("5.{:06}", nanos % 1_000_000);
-    let executor = single_spec("w30-timeout", format!("exec sleep {sleep_marker}"), 200);
+    let long_command = timeout_command_for(cfg!(windows), &sleep_marker);
+    let executor = single_spec("w30-timeout", long_command, 200);
     let descriptor = guard_descriptor("w30-timeout", TurnHookPoint::ToolCallStart);
 
     // Act
@@ -487,11 +688,12 @@ fn t5_timeout_returns_error_promptly_and_kills_child() {
 fn t6_unknown_hook_name_falls_back_to_noop_semantics() {
     // Arrange：executor 只配置了 "w30-configured"，descriptor 用另一个名字
     let workspace = TempDir::new("t6-noop");
-    let script = script_arg(&workspace.write_script(
-        "allow.sh",
-        "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"allow\",\"summary\":\"ok\"}'\n",
-    ));
-    let executor = single_spec("w30-configured", script, 5_000);
+    let command = decision_command(
+        &workspace.root,
+        "t6-allow",
+        r#"{"decision":"allow","summary":"ok"}"#,
+    );
+    let executor = single_spec("w30-configured", command, 5_000);
     let descriptor = guard_descriptor("w30-unconfigured", TurnHookPoint::ToolCallStart);
 
     // Act 1：未知 hook 名 → Noop 等价
@@ -543,17 +745,25 @@ fn t6_unknown_hook_name_falls_back_to_noop_semantics() {
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn t7_stdin_payload_contains_hook_name_and_snake_case_hook_point() {
-    // Arrange：脚本把 stdin 原样落盘，再回 allow
+    // Arrange：命令把 stdin 原样落盘，再回 allow（内联，平台分支）
     let workspace = TempDir::new("t7-payload");
     let captured = workspace.path("stdin.json");
-    let captured_arg = script_arg(&captured);
-    let script = script_arg(&workspace.write_script(
-        "capture.sh",
-        &format!(
-            "#!/bin/sh\ncat > '{captured_arg}'\necho '{{\"decision\":\"allow\",\"summary\":\"captured\"}}'\n"
-        ),
-    ));
-    let executor = single_spec("w30-payload", script, 5_000);
+    let captured_arg = captured
+        .to_str()
+        .expect("t7 失败：临时产物路径必须是合法 UTF-8")
+        .to_string();
+    let decision_file = workspace.path("decision.json");
+    fs::write(&decision_file, r#"{"decision":"allow","summary":"captured"}"#)
+        .expect("t7 失败：写入决策数据文件失败");
+    let decision_file_arg = decision_file
+        .to_str()
+        .expect("t7 失败：决策数据文件路径必须是合法 UTF-8")
+        .to_string();
+    // 平台分支见 `stdin_capture_command_for` 的注释。
+    let command = stdin_capture_command_for(cfg!(windows), &captured_arg, &decision_file_arg);
+    // 15s 而非 5s：Windows 分支要冷启动 PowerShell（约 0.3~1.5s，CI 负载下更慢），
+    // 该值只是超时预算、不参与任何断言；Unix 分支为毫秒级，收紧/放宽都不改变鉴别力。
+    let executor = single_spec("w30-payload", command, 15_000);
     let descriptor = guard_descriptor("w30-payload", TurnHookPoint::ToolCallStart);
 
     // Act
@@ -630,14 +840,17 @@ fn t7_stdin_payload_contains_hook_name_and_snake_case_hook_point() {
 fn t8_from_file_and_default_executor_wiring() {
     // Arrange：临时 hooks.json（唯一 hook 名，避免与环境里的 .pony/hooks.json 冲突）
     let workspace = TempDir::new("t8-file");
-    let script = script_arg(&workspace.write_script(
-        "allow.sh",
-        "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"allow\",\"summary\":\"ok\"}'\n",
-    ));
+    let command = decision_command(
+        &workspace.root,
+        "t8-allow",
+        r#"{"decision":"allow","summary":"ok"}"#,
+    );
     let config_path = workspace.path("hooks.json");
     fs::write(
         &config_path,
-        json!({ "hooks": { "w30-file": { "command": script, "timeoutMs": 2000 } } }).to_string(),
+        // 15000ms：同上，Windows 侧 PowerShell 冷启动预算。
+        json!({ "hooks": { "w30-file": { "command": command.as_str(), "timeoutMs": 15000 } } })
+            .to_string(),
     )
     .expect("t8 失败：写入临时 hooks.json 失败");
 
