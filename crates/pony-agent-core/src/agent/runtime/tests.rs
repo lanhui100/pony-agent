@@ -738,6 +738,19 @@ impl MockHttpServer {
                             listener
                                 .set_nonblocking(false)
                                 .expect("unset_nonblocking mock");
+                            // **Windows 会继承 non-blocking 标志**：accept() 返回的 socket
+                            // 在 Windows 上沿用 listener 的 non-blocking 状态，而 Linux 上
+                            // accept() 的 fd 恒为阻塞（不继承 O_NONBLOCK）。因此只把
+                            // listener 设回阻塞**不够**，必须显式把 accepted stream 也设回
+                            // 阻塞。否则 Windows 下 `read_http_request_body` 首次 read 立即
+                            // WouldBlock → Err 分支 `return None` → 连接被无响应丢弃
+                            // （Windows 发 RST，Linux 通常仅 FIN）→ 客户端侧
+                            // `client error (SendRequest)` → 流式决策静默 fallback 到同步
+                            // → 同步请求消费掉下一 hop 的 SSE 体 → `expected value at
+                            // line 1 column 1`。这是 windows-latest CI 专属失败的根因。
+                            stream
+                                .set_nonblocking(false)
+                                .expect("set_blocking accepted mock stream");
                             stream
                         }
                         Err(ref error)

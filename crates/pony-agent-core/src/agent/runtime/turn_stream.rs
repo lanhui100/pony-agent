@@ -1852,7 +1852,19 @@ impl AgentRuntime {
                 // 与 plan_turn 一致：native tool flow 下必须由 provider 生成决策，
                 // 保证 follow-up 回传的 assistant 消息带完整 reasoning_content。
                 if supports_true_streaming_decision {
-                    stream_initial_decision().or_else(|_| decide_sync())
+                    stream_initial_decision().or_else(|error| {
+                        // 仅诊断：不改变控制流（失败仍然 fallback 到同步决策），
+                        // 只是不再像过去的 `|_|` 那样把根因吞掉。Windows CI 上真实
+                        // 原因（连接级 `client error (SendRequest)`）曾被完全掩盖，
+                        // 只在下游留下 "expected value at line 1 column 1"。
+                        eprintln!(
+                            "[pony-agent] 流式决策失败，fallback 到同步决策 \
+                             (scope=native_tool_flow): session={} turn={turn_id_for_stream} \
+                             error={error}",
+                            stream_session_id.as_deref().unwrap_or("-"),
+                        );
+                        decide_sync()
+                    })
                 } else {
                     decide_sync()
                 }
@@ -1863,7 +1875,16 @@ impl AgentRuntime {
                     }
                     None => {
                         if supports_true_streaming_decision {
-                            stream_initial_decision().or_else(|_| decide_sync())
+                            stream_initial_decision().or_else(|error| {
+                                // 同 1855 处：仅记录根因，控制流不变（失败即 fallback）。
+                                eprintln!(
+                                    "[pony-agent] 流式决策失败，fallback 到同步决策 \
+                                     (scope=no_preflight_decision): session={} turn={turn_id_for_stream} \
+                                     error={error}",
+                                    stream_session_id.as_deref().unwrap_or("-"),
+                                );
+                                decide_sync()
+                            })
                         } else {
                             decide_sync()
                         }
