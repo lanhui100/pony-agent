@@ -179,7 +179,7 @@ jobs:
             Write-Host "release $tag already exists (id=$($rel.id), draft=$($rel.draft)); reusing it (idempotent rerun)"
           } else {
             # `gh release create` 不支持 --json（那是 view/list 的能力）。
-            gh release create "$tag" --draft --title "$tag" --notes-file "$nsis/release-notes.md"
+            gh release create "$tag" --draft --title "$tag" --notes-file "target/release/bundle/nsis/release-notes.md"
             if ($LASTEXITCODE -ne 0) { throw "failed to create release $tag (gh exit $LASTEXITCODE)" }
             # 草稿是 untagged + 列表最终一致 ⇒ 创建后必须重试等待可见，再取引用。
             for ($attempt = 0; $attempt -lt 15; $attempt++) {
