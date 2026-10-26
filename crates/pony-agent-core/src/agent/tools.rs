@@ -5069,7 +5069,14 @@ impl ToolRouter {
                 });
         }
 
-        Ok(canonical)
+        // **返回形态必须与改动前一致（plain 归一形态）**：改动前这类"工作区内路径"走的是上方
+        // `classify_workspace_path` 分支，返回的是 `permission.canonical`（已归一为 plain）。
+        // 若这里直接返回 `canonicalize()` 的原始 verbatim 形态，下游的相对化
+        // （`display_resolved_workspace_relative` 的 `path.strip_prefix(plain_root)`）会失配，
+        // 退化成绝对路径、再经 `replace('\\', "/")` 变成 `//?/C:/...` —— Windows 上
+        // `search_text` 的路径契约（workspace 相对）就是这样被打破的。
+        // 结论：**边界判定用归一形态（保留 Windows 修复），返回值用归一形态（保持对外语义）**。
+        Ok(normalize_if_verbatim(&canonical))
     }
 
     fn canonical_resolved_root(
@@ -5104,6 +5111,11 @@ impl ToolRouter {
         let root = self
             .canonical_resolved_root(context, ws_id)
             .unwrap_or_else(|_| self.canonical_workspace_root());
+        // 兜底：调用方若传入 verbatim 形态（Windows `\\\\?\\C:\\...`），先归一为 plain 再相对化，
+        // 否则 `strip_prefix(plain_root)` 必然失配 → 输出绝对路径且前缀被转成 `//?/` 的怪形态。
+        // Linux 无前缀 ⇒ 归一返回入参的 owned 副本（形态不变），行为零变化。
+        let normalized_path = normalize_if_verbatim(path);
+        let path = normalized_path.as_path();
         path.strip_prefix(&root)
             .ok()
             .map(|value| {
@@ -13563,6 +13575,15 @@ mod tests {
             normalize_if_verbatim(Path::new("\\\\?\\UNC\\server\\share\\x")),
             PathBuf::from("\\\\server\\share\\x"),
             "`\\\\?\\UNC\\...` 必须剥成 `\\\\server\\share\\...`"
+        );
+        // 4) 契约级检查（纯字符串可判定）：归一后的形态必须与 plain root **字面同形**，
+        //    Windows 上 `Path::strip_prefix(plain_root)` 才能成功 → 搜索结果才会是
+        //    `src/lib.rs` 这类 workspace 相对路径，而不是 `//?/C:/...` 绝对怪形态。
+        let plain_root = r"C:\ws";
+        let normalized = normalize_if_verbatim(Path::new(r"\\?\C:\ws\src\lib.rs"));
+        assert!(
+            normalized.to_string_lossy().starts_with(plain_root),
+            "归一结果必须与 plain root 字面同形（否则 Windows 上 strip_prefix 失配）: {normalized:?}"
         );
     }
 }
