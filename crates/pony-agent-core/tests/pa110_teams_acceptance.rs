@@ -2,14 +2,44 @@
 //!
 //! 契约依据：`management/task-system/03_TASKS/PA-110-agent-teams-and-subagent-tools.md`
 
+use std::sync::Arc;
+use pony_agent_core::agent::subagent_runtime::{
+    set_subagent_engine, subagent_engine, SubagentRunOutcome, SubagentTurnEngine,
+};
 use pony_agent_core::agent::tools::{
     subagent, team_task_create, team_task_list, team_task_update, workflow,
     SubagentArgs, TeamTaskAction, TeamTaskCreateArgs, TeamTaskUpdateArgs,
     WorkflowArgs, WorkflowStep,
 };
 
+/// 测试专用 Stub 引擎：返回确定性的 SubagentRunOutcome，无需真实大模型连接。
+struct AcceptanceStubEngine;
+
+impl SubagentTurnEngine for AcceptanceStubEngine {
+    fn run_turn(&self, _prompt: &str, _timeout_ms: u64) -> Result<SubagentRunOutcome, String> {
+        Ok(SubagentRunOutcome {
+            final_text: "Analysis completed successfully: codebase structure verified.".to_string(),
+            session_id: "stub-ac01-session".to_string(),
+        })
+    }
+}
+
+fn ensure_subagent_engine_installed() {
+    let _ = set_subagent_engine(Arc::new(AcceptanceStubEngine));
+    assert!(
+        subagent_engine().is_some(),
+        "PA-110: subagent 引擎槽注入后必须可读"
+    );
+}
+
 #[test]
 fn test_ac01_subagent_dispatch() {
+    // 说明：subagent() 设计为 fail-closed，未注入 HostTurnEngine 时必然返回 capability_unavailable。
+    // 在真实桌面运行中，HostTurnEngine 负责建栈并连真实 Provider；
+    // 本验收用例验收的是编排层的派发语义（生成 subagent_id、status="completed"、output 正确捕获并回传），
+    // 因此在此注入轻量 Stub 引擎完成端到端派发校验。
+    ensure_subagent_engine_installed();
+
     let args = SubagentArgs {
         prompt: "Analyze rust codebase".to_string(),
         description: "Codebase analysis".to_string(),
