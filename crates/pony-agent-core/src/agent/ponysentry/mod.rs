@@ -4,7 +4,7 @@ pub mod models;
 pub mod sanitizer;
 
 pub use client::PonySentryClient;
-pub use config::PonySentryConfig;
+pub use config::{PonySentryConfig, PonySentrySettingsSnapshot};
 pub use models::{Breadcrumb, Exception, Frame, IngestPayload};
 pub use sanitizer::{sanitize, sanitize_json};
 
@@ -20,6 +20,25 @@ fn get_global() -> &'static RwLock<PonySentryClient> {
         let cfg = PonySentryConfig::from_env();
         RwLock::new(PonySentryClient::new(cfg))
     })
+}
+
+/// 按 settings 通道装配并安装全局客户端：**settings > env > 构建期注入 > 缺省**。
+///
+/// 宿主启动装配点（CLI/TUI 的 `ObservabilityBootstrap::install`、桌面端 `load_app_settings`）
+/// 必须在任何 turn 之前调用一次。语义：
+/// - settings 非空项优先；空白/None ⇒ 完整沿用 `PonySentryConfig::from_env()`（ADR 0037 的
+///   env > `option_env!` 链路不变）；
+/// - 解析后 token 仍为空 ⇒ 客户端 fail-closed：不 spawn worker、零 egress；
+/// - token 全链路不落日志/Debug（`PonySentryConfig` / `PonySentrySettingsSnapshot` 手写 Debug 打码）。
+pub fn init_from_settings(settings: Option<&PonySentrySettingsSnapshot>) {
+    init(PonySentryConfig::from_settings(settings));
+}
+
+/// 纯解析入口（不装全局客户端）：供诊断/自测按同一优先级拿生效配置。
+pub fn resolve_config_from_settings(
+    settings: Option<&PonySentrySettingsSnapshot>,
+) -> PonySentryConfig {
+    PonySentryConfig::from_settings(settings)
 }
 
 pub fn init(config: PonySentryConfig) {

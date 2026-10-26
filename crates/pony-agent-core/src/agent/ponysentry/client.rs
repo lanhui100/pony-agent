@@ -339,6 +339,14 @@ impl PonySentryClient {
 #[cfg(test)]
 static TEST_SINK_LOCK: Mutex<()> = Mutex::new(());
 
+/// 测试钩子：是否已按 fail-closed 规则 spawn 上报 worker（`false` = 零 egress）。
+#[cfg(test)]
+impl PonySentryClient {
+    pub fn has_worker(&self) -> bool {
+        self.sender.is_some()
+    }
+}
+
 #[cfg(test)]
 pub fn test_sink_lock() -> std::sync::MutexGuard<'static, ()> {
     TEST_SINK_LOCK

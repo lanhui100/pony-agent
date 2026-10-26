@@ -594,6 +594,10 @@ fn load_app_settings() -> AppSettings {
     pony_agent_core::agent::cost::set_budget_usd(settings.cost_budget_usd);
     // Wave-7：用量治理策略同步（None ⇒ 默认策略：enforcement=false，纯软告警）。
     pony_agent_core::agent::usage_governance::set_policy(settings.usage_governance_policy.clone());
+    // PonySentry 凭据分发（settings > env > 构建期烧录 > 缺省）：桌面端也可用 settings 覆盖
+    // 构建期烧录的 token；无 token ⇒ fail-closed 零 egress，token 不进日志/Debug。
+    let ponysentry_settings = settings.ponysentry_settings_snapshot();
+    pony_agent_core::agent::ponysentry::init_from_settings(Some(&ponysentry_settings));
     settings
 }
 

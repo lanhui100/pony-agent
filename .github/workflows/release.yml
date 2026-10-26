@@ -27,6 +27,11 @@ jobs:
       PONYSENTRY_BUILD_CLIENT_TOKEN: ${{ secrets.PONYSENTRY_CLIENT_TOKEN }}
       VITE_PONYSENTRY_CLIENT_TOKEN: ${{ secrets.PONYSENTRY_CLIENT_TOKEN }}
       VITE_PONYSENTRY_INGEST_URL: ${{ secrets.VITE_PONYSENTRY_INGEST_URL || 'https://ponysentry.ponyjob.top' }}
+      # 发布态显式标记：`deployment.environment` 不再按 debug_assertions 推断。
+      # 本地 `cargo build --release` 的 debug_assertions 同样是 false，若按编译档位判定会把
+      # 开发机的会话误标成 production（实测已发生：本机 release 构建的 trace 进了生产维度）。
+      # 只有本发布工作流会注入此标记 ⇒ 只有真正发布的产物才判 production。
+      PONY_RELEASE_BUILD: "1"
       # 运行期 OTel token 由用户在应用内配置或安装包配置 settings.json 注入；
       # 避免在 CI 全局构建环境变量中扩大 secret 暴露面
       CARGO_INCREMENTAL: "0"
