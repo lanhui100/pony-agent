@@ -6,8 +6,8 @@
   "revision": "red-phase run #2 + TEST-DEFECT 修复后的绿相收据（test_defect_amendments / green_phase_receipt）",
   "contract": ".dev-team/contract-matrix-wave51.md §1/§2/§3/§7.2（v3 + Lead v4 三处裁决 + 裁决 A）",
   "test_file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
-  "test_file_lines": 1039,
-  "case_count": 11,
+  "test_file_lines": 1448,
+  "case_count": 14,
   "anchored_frozen_test_edit": "crates/pony-agent-core/tests/otel_trace_migration_test.rs:1142（OT-8e 唯一授权单点：otel::init( || otel::init_with_service_version(；其余断言零改动）",
   "command": "cargo test -p pony-agent-core --test observability_reporting_fixes_test",
   "cwd": "/home/dm/pony-agent",
@@ -199,6 +199,68 @@
       "duration_s": 14.06
     },
     "log_section": ".dev-team/red-phase-wave51.log 尾部 [GREEN-REPAIR]",
-    "note": "红相段仍保留在日志上半部（9 failed / 2 passed 的 SUT 未实现证据），两段物理并存，可审计「红→绿」全过程"
+    "note": "红相段仍保留在日志上半部（9 failed / 2 passed 的 SUT 未实现证据），两段物理并存，可审计「红→绿」全过程",
+    "superseded_by": "post_join_amendments（14 例绿相）"
+  },
+  "post_join_amendments": {
+    "discovered_by": "Lead Join-Barrier 复盘 + L3-B 独立复现（BLOCKING）",
+    "stage": "绿相后复盘（补测，非红相段）",
+    "blocking_gap": {
+      "title": "协议门控零行为覆盖（PA51-C3-T6 ②③ 无证伪能力）",
+      "counterexample": "全仓测试零处驱动 `turn_flow::provider_decision`；把 `cache_reportable_input_tokens` 改成恒返回 `None`（门控永久失效）后，本波 11 例仍全绿 ⇒ 门控代码路径零行为覆盖",
+      "why_invisible_before": "既有 C3 用例只直调 `llm_usage_detail_attributes`（纯函数）与 `LlmSpanGuard::record_usage_details`（方法），从不经过 `turn_flow::provider_decision` 里的协议分支",
+      "root_cause": "缺「真实决策路径 + wire 判定」的行为级接入，只测了函数级接缝"
+    },
+    "added_tests": [
+      {
+        "name": "c3_cache_protocol_gating_wire",
+        "kind": "BLOCKING",
+        "line": 1225,
+        "what": "最小 `ProviderClient` mock（MockUsageProvider，line 1060）回放固定 usage（input=100/output=50/reasoning=7/cache_hit=5）；活跃 turn + 回环 sink 下调 `turn_flow::provider_decision` 两次：\n① label=`openai-completions` ⇒ 解码 `llm.chat` span 自身属性：cache_read==5 且 reasoning==7；\n② label=`anthropic-messages`（同一 usage）⇒ cache_read **缺席**，reasoning 仍==7",
+        "falsifiability": "门控恒 `None` ⇒ ① 必红；门控完全放开 ⇒ ② 必红；reasoning 受门控 ⇒ 两例必红",
+        "support_added": "MockUsageProvider(:1060)、mock_provider_request(:1172)、decode_export_after_provider_decision(:1186)；断言均解码到 span 自身属性（复用文件内 protobuf 解码器 + find_span）"
+      },
+      {
+        "name": "c3_root_zero_visible_on_wire",
+        "kind": "ADVISORY",
+        "line": 1275,
+        "what": "活跃 turn 内 `record_usage_details(Some(0), Some(0))` ⇒ 解码子 `llm.chat` 与根 `agent.turn`，两键均存在且值 == 0（T5② 的 wire 侧，补 T6 之前只覆盖「缺失」的空白）",
+        "falsifiability": "若把 0 当缺失丢弃（负向用例已覆盖），聚合会漏键 ⇒ 根断言必红"
+      },
+      {
+        "name": "c1_env_reverse_proof",
+        "kind": "ADVISORY",
+        "line": 1332,
+        "what": "env `PONY_OTEL_SERVICE_VERSION=\"1.2.3\\n\"` ⇒ 解码 resource 层断言 `service.version == \"1.2.3\"` 且无控制字符（v4-V4-1 反证组：env 路径保持 trim-only，不被显式入参的新脏值防御规则拒绝）",
+        "falsifiability": "若把 `normalize_service_version` 的「拒绝控制字符」规则误下推到 env 层，该级判为未设置 ⇒ 回落 CARGO_PKG_VERSION ⇒ 断言必红",
+        "support_added": "decode_resource_attributes(:1366，resource→attributes 解码)、export_captured_with_explicit_version(:1414，返回原始捕获)"
+      }
+    ],
+    "self_caught_test_defect": {
+      "case": "c1_env_reverse_proof（首版）",
+      "symptom": "首跑 13 passed / 1 failed：`!body.contains(\"1.2.3\\n\")` 失败",
+      "root_cause": "**测试缺陷，非 SUT 缺陷**：protobuf wire 中 `\"1.2.3\"` 字符串值之后紧邻的字节是下一个 KeyValue 的字段 tag `0x0a`，`from_utf8_lossy` 后恰好伪装成换行符 ⇒ 文本包含性断言无意义。实现侧 `override_value`（otel/mod.rs:588-592）确实已 trim，env 语义正确",
+      "fix": "改为解码 resource 层属性后做值相等断言（新增 decode_resource_attributes + export_captured_with_explicit_version，未改动任何既有断言）",
+      "note": "同类风险已在本波其他文本包含性断言上排查：`service.version`/`9.9.9`/`7.7.7`/两 usage 键名等均为「值 + tag 字节」组合，tag 0x0a 仅在断言串以换行结尾时才会误命中，其余断言不受影响"
+    },
+    "scope": "仅新增测试函数与 import（`git diff --stat`：405 insertions / 0 deletions，零删改既有断言）；实现侧零接触",
+    "verification": {
+      "compile": {
+        "command": "cargo test -p pony-agent-core --test observability_reporting_fixes_test --no-run",
+        "exit_code": 0
+      },
+      "run": {
+        "command": "timeout 120 cargo test -p pony-agent-core --test observability_reporting_fixes_test -- --test-threads=1",
+        "exit_code": 0,
+        "result": "14 passed; 0 failed; 0 ignored; finished in 20.11s",
+        "raw_log": ".dev-team/red-phase-wave51.log 尾部 [POST-JOIN] 段"
+      },
+      "case_count": {
+        "before": 11,
+        "after": 14,
+        "note": "Lead 预期口径写的是 13 passed；按「1 BLOCKING + 2 ADVISORY = 3 个新函数」实际为 11+3=14 例，以实测 14 为准"
+      },
+      "hang": "无（120s 硬超时内完成 20.11s）"
+    }
   }
 }

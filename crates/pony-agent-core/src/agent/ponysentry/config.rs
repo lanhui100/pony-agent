@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 const RELEASE_MAX_BYTES: usize = 64;
 
 /// 合法化**显式注入**的 `release`（契约 PA51-C1-T4；作用域仅 [`PonySentryConfig::with_release`]）：
-/// ① 拒绝任何 `char::is_control()` 控制字符（先于 trim 判定：`"1.2.3\n"` 不得被 trim 洗白）；
-/// ② trim 后为空 ⇒ 视为未提供；③ trim 后字节长度上限 64。
+/// 判定顺序即实现顺序：① **先**拒绝任何 `char::is_control()` 控制字符（**先于 trim**：
+/// `"1.2.3\n"` 不得被 trim 洗白而放行）；② **再** trim，为空 ⇒ 视为未提供；
+/// ③ trim 后字节长度上限 **64**。
 /// 不合规返回 `None` ⇒ 调用方**保持原值**（绝不写入非法值、绝不 panic）。
 ///
 /// 与 [`PonySentryConfig::from_env`] 的差异：env `APP_RELEASE` 保持「保留原值不 trim」的既有语义
@@ -148,16 +149,17 @@ impl PonySentryConfig {
         }
     }
 
-    /// 覆盖 `release`（wave-51 C1 契约桩）：把安装包版本注入 PonySentry 的 release 标注。
+    /// 覆盖 `release`（wave-51 C1）：把安装包版本注入 PonySentry 的 release 标注。
     ///
     /// 语义：`Some` 且合法 ⇒ 覆盖为 **trim 后的值**；`None` / 纯空白 / 不合规 ⇒ **保持原值**
     /// （不覆盖成空串，也不落非法字符）。
-    /// 合法化规则（与 OTel `service.version` 同一套，契约 PA51-C1-T4）：① 先 trim；
-    /// ② 拒绝任何 `char::is_control()` 控制字符；③ trim 后字节长度上限 **64**；不合规即视为未提供。
+    /// 合法化规则（与 OTel `service.version` 显式入参同一套，契约 PA51-C1-T4，判定顺序即
+    /// [`normalize_release_value`] 的实现顺序）：① **先**拒绝任何 `char::is_control()` 控制字符
+    /// （**先于 trim**，否则 `"1.2.3\n"` 会被 trim 洗白而放行）；② **再** trim 并判空；
+    /// ③ trim 后字节长度上限 **64**；任一条不合规即视为未提供 ⇒ 保持原值。
     /// 与 [`Self::from_env`] 的差异（契约 PA51-C1-T5）：env `APP_RELEASE` 路径**保留原值不 trim**，
     /// 本构造器 trim 后写入 —— 既有 env 语义不改，差异如实登记在契约矩阵。
     /// 纯构造器语义：不读取 env、不产生 IO、不改动其它字段。
-    ///
     pub fn with_release(self, release: Option<&str>) -> Self {
         let Some(release) = release.and_then(normalize_release_value) else {
             return self;

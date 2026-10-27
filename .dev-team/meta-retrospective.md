@@ -104,6 +104,13 @@
 - **测试缺陷穿透（TD-1）**：`l2at_concurrent_init` 的 `Barrier::new(3)` 主线程只 wait 一次，第 2 轮死锁；
   红相期被 `unimplemented!()` panic + `catch_unwind` 提前 return 掩盖，绿相才暴露。按 TEST-DEFECT 由
   Test Agent 最小修复并重跑 11 passed；残留风险（实现回退为 panic 时该例会 hang）已登记。
+- **Join 期真拦截（BLOCKING）**：L3-B 独立复现出「协议门控零行为覆盖」——把 `cache_reportable_input_tokens`
+  改恒 `None` 后 11 例仍全绿（契约 V4-3/T6② 无 wire 判定）。Lead 裁决补测：新增
+  `c3_cache_protocol_gating_wire`（最小 `ProviderClient` mock 实调 `provider_decision`，OpenAI 族 cache=5 /
+  Anthropic 族缺键 / reasoning=7）+ `c3_root_zero_visible_on_wire` + `c1_env_reverse_proof`，
+  最终 **14 passed**。这条证明「Join 双路审查不是形式主义」，也暴露「静态计数型接线断言可被注释满足」。
+- **自查测试缺陷**：`c1_env_reverse_proof` 首版用文本 `contains("1.2.3\\n")`，被 protobuf 字段 tag `0x0a`
+  在 lossy 解码后伪装成换行误导；改为解码 resource 层做值相等断言。教训：**wire 层文本包含断言在字节域不可靠**。
 - **零假测试**：验收测试无 `#[ignore]`、无空断言；wire 断言分两层（键名在 wire、数值在纯函数/解码器）。
 
 ## 三、 分工契约与隔离有效性 (Contract Isolation)

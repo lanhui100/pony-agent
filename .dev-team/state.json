@@ -217,11 +217,17 @@
         "classification": "B (network IO + cross-module + external interface)",
         "gate1": "PASS (review-plan-wave51.json, dev-review-lint EXIT 0; 2 rounds: FAIL->v3->PASS)",
         "observability": "audit-diff + check-declaration required",
-        "green": "acceptance 11 passed EXIT 0; lib 1175 passed EXIT 0; cargo check tauri EXIT 0; version:check EXIT 0",
-        "join_barrier": "PASS (L3-P + L3-B, review-l3p-wave51.json / review-l3b-wave51.json, dev-review-lint EXIT 0; meta-retrospective dev-meta-lint EXIT 0)",
+        "green": "acceptance 14 passed EXIT 0; lib 1175 passed EXIT 0; cargo check tauri EXIT 0; version:check EXIT 0",
+        "join_barrier": "PASS after fix: L3-B BLOCKING (protocol gating zero coverage) resolved by +3 tests; 14 passed EXIT 0; dev-review-lint x2 EXIT 0; dev-meta-lint EXIT 0",
         "write_scope_audit": "0 越界（git diff --name-only 090df55..HEAD 与声明写域一致）",
         "blast_radius": "union diff 2402 行 > 100 ⇒ 双路 L3 审查已挂载",
-        "observability_gate": "audit-diff EXIT 0; check-declaration PASS exit 0"
+        "observability_gate": "audit-diff --base 090df55 --decl-approved EXIT 0 (声明变更显式批准); check-declaration PASS exit 0",
+        "test_amendments": [
+          "TD-1 Barrier deadlock (green phase)",
+          "JOIN-1 protocol gating coverage (join phase, BLOCKING)",
+          "JOIN-2 root zero wire visibility",
+          "JOIN-3 env reverse proof"
+        ]
       },
       "test_defect_amendments": [
         "TD-1 Barrier deadlock (discovered at green phase, fixed by Test Agent, re-run 11 passed)"

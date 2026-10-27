@@ -5,32 +5,85 @@
     "crates/pony-agent-core/src/agent/otel/mod.rs",
     "crates/pony-agent-core/src/agent/turn_flow.rs",
     "crates/pony-agent-core/src/agent/ponysentry/config.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
     "src-tauri/src/lib.rs",
     "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs"
   ],
   "findings": [
     {
-      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
-      "line": 1601,
-      "rule": "CORRECTNESS",
-      "counterexample_cmd": "sed -n '1580,1605p' crates/pony-agent-core/src/agent/otel/mod.rs",
+      "file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+      "line": 1225,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'anthropic\\|protocol_label' crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
       "severity": "ADVISORY",
-      "note": "新增键走 saturating，而既有 input/output 仍 `as i64` 直转；超 i64::MAX 时旧键可能出负值（既有缺陷，非本波引入，登记 follow-up）。"
+      "discovery_severity": "BLOCKING",
+      "note": "发现时（BLOCKING）：协议门控零行为覆盖——把 cache_reportable_input_tokens 改恒 None 后 11 例仍全绿。已由 Lead 裁决补测：新增 c3_cache_protocol_gating_wire（mock ProviderClient 实调 provider_decision，OpenAI 族 cache=5 / Anthropic 族缺席 / reasoning=7），14 passed 收据入 l2at json；反例现会被 ①/② 两个方向击杀。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+      "line": 1275,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test observability_reporting_fixes_test c3_root_zero_visible_on_wire",
+      "severity": "ADVISORY",
+      "discovery_severity": "ADVISORY",
+      "note": "T5② 根 span 对子 span Some(0) 的 wire 可见性缺口：已补 c3_root_zero_visible_on_wire（子与根均断言 0）。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+      "line": 1332,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test observability_reporting_fixes_test c1_env_reverse_proof",
+      "severity": "ADVISORY",
+      "discovery_severity": "ADVISORY",
+      "note": "PA51-C1-T4③ env 反证组缺失：已补 c1_env_reverse_proof（env 含尾随控制字符仍按 trim-only 接受，防 normalize 误下推到 env）。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+      "line": 944,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -c 'record_usage_details(' crates/pony-agent-core/src/agent/turn_flow.rs",
+      "severity": "ADVISORY",
+      "note": "T6 静态计数可被注释满足；已由 c3_cache_protocol_gating_wire 的真实行为断言补位，静态断言保留作快速哨兵（登记为已知弱断言）。"
     },
     {
       "file": "crates/pony-agent-core/src/agent/turn_flow.rs",
-      "line": 2372,
-      "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "grep -n 'cache_reportable_input_tokens\\|ProviderCostProtocol::from_label' crates/pony-agent-core/src/agent/turn_flow.rs",
+      "line": 2371,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'openai-chat\\|deepseek\\|azure' crates/pony-agent-core/src/agent/cost.rs | head",
       "severity": "ADVISORY",
-      "note": "cache 上报白名单 fail-closed 与 `cost::from_label` 对未知协议按 OpenAI 计价的口径分叉；已在契约 L3 与 NFR known_limitations 登记，未来新增协议标签需同步。"
+      "note": "门控裸字符串白名单与 cost 别名族/枚举纪律分叉；fail-closed 只少报不污染，已在契约 L3 与 ADR 已知限制登记。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+      "line": 1021,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "在 init_with_service_version 首行临时插入 panic!(\"x\") 后跑 timeout 60 cargo test -p pony-agent-core --test observability_reporting_fixes_test l2at_concurrent_init -- --test-threads=1",
+      "severity": "ADVISORY",
+      "note": "worker panic 会跳过后续 barrier ⇒ 主线程可能 hang；已登记 ADR 已知限制与 l2at residual_risk_note，建议后续加 watchdog。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ponysentry/config.rs",
+      "line": 155,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n 10,25p crates/pony-agent-core/src/agent/ponysentry/config.rs",
+      "severity": "ADVISORY",
+      "note": "doc 顺序与实现不一致：已由 Executor 纯注释修正（先拒控制字符→trim→≤64），零逻辑改动。"
     }
   ],
   "verified_points": [
-    "Q1 normalize_service_version 先拒控制字符后 trim：\" 1.2.3 \" 通过 / \"1.2.3\\n\" 拒绝；字节上限只影响边界",
-    "Q2 门禁关闭（span=None）时 record_usage_details 不累加，根聚合不被污染",
-    "Q3 TurnTraceGuard::drop 在 unregister 前取聚合（take_* 只读不清零，依赖摘除时机，已满足）",
-    "Q4 setup 仅一次 init_with_service_version；load_app_settings 每次调用替换 PonySentry client（与旧 init_from_settings 等价）；AppHandle 由 Tauri 注入，前端 invoke 无参兼容（Lead 已复核 lib.rs:589-611）",
-    "Q5 cache 白名单 fail-closed 与 cost 未知协议口径分叉已登记"
+    "Q1 版本合法化：先拒控制字符后 trim；env 路径未加严（v4-V4-1）",
+    "Q2 门禁关闭时 record_usage_details 不累加；累加顺序在 guard drop 前",
+    "Q3 根聚合在 unregister 前读取（只读不清零，依赖摘除时机，已满足）",
+    "Q4 setup 单次 init_with_service_version；AppHandle 注入不破前端 invoke；失败路径全局态回滚",
+    "Q5 semconv 键与 Langfuse 减项规则一致；根 SPAN 当前无重复计费（下次真实 trace 复核）"
+  ],
+  "receipts": [
+    "cargo test -p pony-agent-core --test observability_reporting_fixes_test -- --test-threads=1 -> 14 passed / EXIT 0 / 20.10s",
+    "cargo check -p pony-agent-core -> EXIT 0",
+    "cargo test -p pony-agent-core --lib -> 1175 passed / EXIT 0",
+    "cargo check -p pony-agent -> EXIT 0",
+    "npm run version:check -> EXIT 0",
+    "audit-diff.sh --base 090df55 --decl-approved -> EXIT 0",
+    "check-declaration.sh . -> PASS / EXIT 0"
   ]
 }

@@ -1041,3 +1041,408 @@ fn l2at_concurrent_init() {
     let captured = sink.join().expect("sink 线程不得 panic");
     let _ = describe(&captured);
 }
+
+// ================================================== PA51-C3-T6 · 协议门控行为覆盖（后补）
+//
+// 背景（Lead Join-Barrier 复盘 · L3-B 独立复现的 BLOCKING 覆盖缺口）：
+// 本波 11 例从未驱动 `turn_flow::provider_decision`，因此把 `cache_reportable_input_tokens`
+// 改成恒返回 `None`（协议门控永久失效）后仍全绿 —— 门控零行为覆盖。下面用最小
+// `ProviderClient` mock 真实走一遍决策路径，并在 wire 上判定 cache 键的有无。
+// mock 只回放固定 usage，零网络 IO。
+
+use pony_agent_core::agent::provider::{
+    ProviderClient, ProviderDecision, ProviderMessage, ProviderProtocol, ProviderRequest,
+    ProviderResponse, ProviderStreamChunk, TokenUsage,
+};
+use pony_agent_core::agent::tools::{ToolCall, ToolDefinition, ToolResult};
+use pony_agent_core::agent::turn_flow::provider_decision;
+
+struct MockUsageProvider {
+    label: &'static str,
+    protocol: ProviderProtocol,
+    usage: TokenUsage,
+}
+
+impl MockUsageProvider {
+    fn new(label: &'static str, protocol: ProviderProtocol) -> Self {
+        Self {
+            label,
+            protocol,
+            usage: TokenUsage {
+                input_tokens: Some(100),
+                cache_hit_input_tokens: Some(5),
+                cache_hit_source: Some("mock".to_string()),
+                reasoning_tokens: Some(7),
+                output_tokens: Some(50),
+                total_tokens: Some(150),
+            },
+        }
+    }
+}
+
+impl ProviderClient for MockUsageProvider {
+    fn requested_name(&self) -> &str {
+        "mock-gated"
+    }
+
+    fn name(&self) -> &str {
+        "mock-gated"
+    }
+
+    fn model(&self) -> &str {
+        "mock-model-gated"
+    }
+
+    fn protocol_label(&self) -> &'static str {
+        self.label
+    }
+
+    fn protocol(&self) -> &ProviderProtocol {
+        &self.protocol
+    }
+
+    fn temperature(&self) -> f32 {
+        0.0
+    }
+
+    fn max_output_tokens(&self) -> u32 {
+        64
+    }
+
+    fn decide_with_tools(
+        &self,
+        _request: &ProviderRequest,
+        _tools: &[ToolDefinition],
+    ) -> Result<ProviderDecision, String> {
+        Ok(ProviderDecision {
+            output_text: "ok".to_string(),
+            tool_call: None,
+            reasoning_content: None,
+            reasoning_content_value: None,
+            assistant_message: None,
+            provider_source: self.label.to_string(),
+            provider_mode: "mock".to_string(),
+            fallback_reason: None,
+            token_usage: Some(self.usage.clone()),
+        })
+    }
+
+    fn decide_with_tools_stream<F>(
+        &self,
+        _request: &ProviderRequest,
+        _tools: &[ToolDefinition],
+        _on_delta: F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        Err("本用例只驱动非流式 provider_decision，不得走流式路径".to_string())
+    }
+
+    fn continue_with_tool_result(
+        &self,
+        _request: &ProviderRequest,
+        _tools: &[ToolDefinition],
+        _accumulated_messages: &mut Vec<serde_json::Value>,
+        _assistant_message: Option<&serde_json::Value>,
+        _tool_call: &ToolCall,
+        _tool_result: &ToolResult,
+    ) -> Result<ProviderResponse, String> {
+        Err("本用例不驱动工具续跑路径".to_string())
+    }
+
+    fn continue_with_tool_result_stream<F>(
+        &self,
+        _request: &ProviderRequest,
+        _tools: &[ToolDefinition],
+        _accumulated_messages: &mut Vec<serde_json::Value>,
+        _assistant_message: Option<&serde_json::Value>,
+        _tool_call: &ToolCall,
+        _tool_result: &ToolResult,
+        _on_delta: F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        Err("本用例不驱动工具续跑路径".to_string())
+    }
+}
+
+/// 最小 `ProviderRequest`（逐字段填充；`observation` 用 `Default`，避免依赖派生构造器）。
+fn mock_provider_request() -> ProviderRequest {
+    ProviderRequest {
+        model: "mock-model-gated".to_string(),
+        input: vec![ProviderMessage::user("ping")],
+        images: Vec::new(),
+        native_messages: Vec::new(),
+        observation: Default::default(),
+        temperature: 0.0,
+        max_output_tokens: 64,
+    }
+}
+
+/// 在活跃 turn + 回环 sink 下跑一次 `provider_decision`，返回解码后的全部 span。
+/// 调用方必须持 `gate_lock`（全局 provider / 门禁是进程级状态）。
+fn decode_export_after_provider_decision(label: &'static str, protocol: ProviderProtocol) -> Vec<DecodedSpan> {
+    otel::set_reporting_enabled(false);
+    otel::shutdown();
+
+    let (port, sink) = spawn_otlp_sink(Duration::from_millis(1_500));
+    otel::init(local_config(port)).expect("本地回环端点必须可装配");
+    otel::set_reporting_enabled(true);
+
+    let provider = MockUsageProvider::new(label, protocol);
+    let request = mock_provider_request();
+    {
+        let _turn = otel::begin_turn_trace("sess-gate", "turn-gate", 0);
+        let decision = provider_decision(&provider, &request, &[])
+            .expect("mock provider 必须返回 Ok（决策路径不得失败）");
+        assert!(
+            decision.token_usage.is_some(),
+            "PA51-C3-T6：mock 必须回放真实 usage，否则门控断言无意义"
+        );
+    }
+
+    let flushed = otel::force_flush(3_000);
+    assert!(flushed.is_ok(), "PA51-C3-T6：flush 必须成功：{flushed:?}");
+    otel::shutdown();
+    otel::set_reporting_enabled(false);
+
+    let captured = sink.join().expect("sink 线程不得 panic");
+    assert!(
+        !captured.is_empty(),
+        "PA51-C3-T6（{label}）：必须至少导出一次 POST /v1/traces（捕获：{:?}）",
+        describe(&captured)
+    );
+    decoded_spans(&captured)
+}
+
+/// BLOCKING：协议门控的真实行为覆盖（cache 键只对 OpenAI 协议族上报；reasoning 不受门控）。
+///
+/// 证伪能力：把 `cache_reportable_input_tokens` 改成恒 `None` ⇒ ① 的 cache 断言必红；
+/// 改成完全不做门控（恒传 `usage.cache_hit_input_tokens`）⇒ ② 的缺键断言必红。
+#[test]
+fn c3_cache_protocol_gating_wire() {
+    let _guard = gate_lock();
+
+    // ① OpenAI 协议族：cache 命中键必须上 wire，reasoning 同样上报。
+    let spans = decode_export_after_provider_decision(
+        "openai-completions",
+        ProviderProtocol::OpenAiCompletions,
+    );
+    let chat = find_span(&spans, "llm.chat");
+    assert_eq!(
+        span_int_attribute(chat, "gen_ai.usage.input_tokens"),
+        Some(100),
+        "PA51-C3-T6①：`llm.chat` 必须来自既有 record_usage 出口（input=100），否则断言可能命中了别的 span"
+    );
+    assert_eq!(
+        span_int_attribute(chat, KEY_CACHED),
+        Some(5),
+        "PA51-C3-T6①（BLOCKING）：`openai-completions` 协议族必须上报 `{KEY_CACHED}`=5（门控恒 None 时此处必红）"
+    );
+    assert_eq!(
+        span_int_attribute(chat, KEY_REASONING),
+        Some(7),
+        "PA51-C3-T6③：`reasoning_tokens` 不受协议门控，两类协议都必须上报 7"
+    );
+
+    // ② Anthropic Messages：cache 命中键必须被门控掉（Langfuse 会二次减项），reasoning 仍上报。
+    let spans = decode_export_after_provider_decision(
+        "anthropic-messages",
+        ProviderProtocol::AnthropicMessages,
+    );
+    let chat = find_span(&spans, "llm.chat");
+    assert_eq!(
+        span_int_attribute(chat, "gen_ai.usage.input_tokens"),
+        Some(100),
+        "PA51-C3-T6②：`llm.chat` 必须来自既有 record_usage 出口（input=100）"
+    );
+    assert_eq!(
+        span_int_attribute(chat, KEY_CACHED),
+        None,
+        "PA51-C3-T6②（BLOCKING）：`anthropic-messages` 必须门控掉 `{KEY_CACHED}`（F15：input 不含缓存 ⇒ 会让 Langfuse 减成偏小值）"
+    );
+    assert_eq!(
+        span_int_attribute(chat, KEY_REASONING),
+        Some(7),
+        "PA51-C3-T6③：`anthropic-messages` 下 `reasoning_tokens` 仍必须上报 7（门控只作用于 cache 键）"
+    );
+}
+
+/// ADVISORY：T5② 的 wire 侧 —— 子 span 上报 `Some(0)` ⇒ 根 `agent.turn` 必须输出 0（0 ≠ 缺失）。
+#[test]
+fn c3_root_zero_visible_on_wire() {
+    let _guard = gate_lock();
+    otel::set_reporting_enabled(false);
+    otel::shutdown();
+
+    let (port, sink) = spawn_otlp_sink(Duration::from_millis(1_500));
+    otel::init(local_config(port)).expect("本地回环端点必须可装配");
+    otel::set_reporting_enabled(true);
+
+    {
+        let _turn = otel::begin_turn_trace("sess-usage-zero", "turn-usage-zero", 0);
+        let mut span = otel::start_llm_span("mock-provider", Some("gpt-4o"), "chat");
+        span.record_usage(Some(100), Some(50));
+        span.record_usage_details(Some(0), Some(0));
+    }
+
+    let flushed = otel::force_flush(3_000);
+    assert!(flushed.is_ok(), "PA51-C3-T5②：flush 必须成功：{flushed:?}");
+    otel::shutdown();
+    otel::set_reporting_enabled(false);
+
+    let captured = sink.join().expect("sink 线程不得 panic");
+    assert!(
+        !captured.is_empty(),
+        "PA51-C3-T5②：必须至少导出一次 POST /v1/traces（捕获：{:?}）",
+        describe(&captured)
+    );
+    let spans = decoded_spans(&captured);
+
+    let chat = find_span(&spans, "llm.chat");
+    assert_eq!(
+        span_int_attribute(chat, KEY_REASONING),
+        Some(0),
+        "PA51-C3-T5②：子 span 的 `Some(0)` 必须原样上 wire（不得当缺失丢弃）"
+    );
+    assert_eq!(
+        span_int_attribute(chat, KEY_CACHED),
+        Some(0),
+        "PA51-C3-T5②：子 span 的 `Some(0)` 必须原样上 wire（不得当缺失丢弃）"
+    );
+
+    let root = find_span(&spans, "agent.turn");
+    assert_eq!(
+        span_int_attribute(root, KEY_REASONING),
+        Some(0),
+        "PA51-C3-T5②：根 `agent.turn` 聚合值必须输出 0（禁「用缺失代替 0」）"
+    );
+    assert_eq!(
+        span_int_attribute(root, KEY_CACHED),
+        Some(0),
+        "PA51-C3-T5②：根 `agent.turn` 聚合值必须输出 0（禁「用缺失代替 0」）"
+    );
+}
+
+/// ADVISORY：v4-V4-1 反证组 —— env `PONY_OTEL_SERVICE_VERSION` 只做 trim-only，
+/// **不**受显式入参/`with_release` 的新脏值防御规则约束。
+#[test]
+fn c1_env_reverse_proof() {
+    let _guard = gate_lock();
+    // 含尾随换行：trim 后为合法值 "1.2.3"；若把防御规则错误地下推到 env 层，该级会被判为未设置
+    // 而回落到 CARGO_PKG_VERSION ⇒ 本用例必红。
+    let _env = EnvVarGuard::set(ENV_SERVICE_VERSION, "1.2.3\n");
+
+    let captured = export_captured_with_explicit_version(None);
+    let resource = decode_resource_attributes(&captured);
+
+    // 必须在 **resource 层解码后** 断言取值：wire 文本里 `1.2.3` 的紧邻字节是下一个 KeyValue 的
+    // 字段 tag（0x0a），`from_utf8_lossy` 后会伪装成换行符 ⇒ 文本包含性断言会产生假红/假绿。
+    let service_version = match resource.iter().find(|(name, _)| name == "service.version") {
+        Some((_, DecodedValue::Str(text))) => text.clone(),
+        other => panic!(
+            "PA51-C1（env 反证）：resource 层必须输出字符串属性 `service.version`，实际 {other:?}；resource 全集：{:?}",
+            resource.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        ),
+    };
+
+    assert_eq!(
+        service_version, "1.2.3",
+        "PA51-C1（env 反证，v4-V4-1）：env 路径保持 trim-only ⇒ resource `service.version` 必须是 trim 后的 `1.2.3`；若把显式入参的脏值防御规则误下推到 env 层，此处会回落 CARGO_PKG_VERSION"
+    );
+    assert!(
+        !service_version.chars().any(char::is_control),
+        "PA51-C1（env 反证）：env 值 trim 后不得残留控制字符（实际 {:?}）",
+        service_version
+    );
+}
+
+// ------------------------------- resource 层解码 + 可复用「捕获 → 断言」装配（后补辅助）
+
+/// 解码 **resource** 层属性（`service.version` 等归因维度断言用）。
+/// 路径：ExportTraceServiceRequest.resource_spans(1) → ResourceSpans.resource(1) → Resource.attributes(1)。
+fn decode_resource_attributes(captured: &[CapturedRequest]) -> Vec<(String, DecodedValue)> {
+    let mut attributes: Vec<(String, DecodedValue)> = Vec::new();
+    for request in captured {
+        for (number, resource_spans) in parse_fields(&request.body) {
+            let WireValue::Bytes(resource_spans) = resource_spans else {
+                continue;
+            };
+            if number != 1 {
+                continue;
+            }
+            for (number, resource) in parse_fields(&resource_spans) {
+                let WireValue::Bytes(resource) = resource else {
+                    continue;
+                };
+                if number != 1 {
+                    continue;
+                }
+                for (number, entry) in parse_fields(&resource) {
+                    let WireValue::Bytes(entry) = entry else {
+                        continue;
+                    };
+                    if number != 1 {
+                        continue;
+                    }
+                    let mut key = String::new();
+                    let mut value = DecodedValue::Other;
+                    for (number, field) in parse_fields(&entry) {
+                        let WireValue::Bytes(payload) = field else {
+                            continue;
+                        };
+                        match number {
+                            1 => key = String::from_utf8_lossy(&payload).to_string(),
+                            2 => value = decode_any_value(&payload),
+                            _ => {}
+                        }
+                    }
+                    attributes.push((key, value));
+                }
+            }
+        }
+    }
+    attributes
+}
+
+/// `init_with_service_version(explicit)` + 单 turn 导出 → 返回**原始捕获**（供 resource 层解码）。
+///
+/// 与 `export_wire_body_with_explicit_version` 语义一致，只是保留结构化捕获而非拼文本；
+/// 独立成函数以免改动既有默认面文本断言。调用方必须持 `gate_lock`。
+fn export_captured_with_explicit_version(explicit: Option<&str>) -> Vec<CapturedRequest> {
+    otel::shutdown();
+    otel::set_reporting_enabled(false);
+
+    let (port, sink) = spawn_otlp_sink(Duration::from_millis(1_500));
+    let assembled = otel::init_with_service_version(local_config(port), explicit);
+    assert!(
+        assembled.is_ok(),
+        "PA51-C1：本地回环端点必须可装配（装配失败只降级不 panic）：{assembled:?}"
+    );
+    otel::set_reporting_enabled(true);
+
+    {
+        let _turn = otel::begin_turn_trace("sess-ver-wave51", "turn-ver-wave51", 0);
+        let mut span = otel::start_llm_span("mock-provider", Some("gpt-4o"), "chat");
+        span.record_usage(Some(100), Some(50));
+    }
+
+    let flushed = otel::force_flush(3_000);
+    assert!(
+        flushed.is_ok(),
+        "PA51-C1：已装配时 force_flush 必须成功：{flushed:?}"
+    );
+
+    otel::shutdown();
+    otel::set_reporting_enabled(false);
+
+    let captured = sink.join().expect("sink 线程不得 panic");
+    assert!(
+        !captured.is_empty(),
+        "PA51-C1：必须至少导出一次 POST /v1/traces（捕获：{:?}）",
+        describe(&captured)
+    );
+    captured
+}

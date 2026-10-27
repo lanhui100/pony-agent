@@ -120,3 +120,35 @@ test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 EXIT=0
 
 # [GREEN-REPAIR] exit code = 0，11 passed / 0 failed，finished in 14.06s（timeout 120 内完成，无挂死）
+
+
+# ==========================================================================
+# [POST-JOIN] Join-Barrier 复盘补测（L3-B BLOCKING 协议门控覆盖缺口）：11 → 14 例
+# 命令：cargo test -p pony-agent-core --test observability_reporting_fixes_test -- --test-threads=1
+# ==========================================================================
+
+   Compiling pony-agent-core v0.1.135 (/home/dm/pony-agent/crates/pony-agent-core)
+    Finished `test` profile [unoptimized] target(s) in 4.16s
+     Running tests/observability_reporting_fixes_test.rs (target/debug/deps/observability_reporting_fixes_test-34cb66f1094cb758)
+
+running 14 tests
+test c1_blank_version_falls_back_to_env ... ok
+test c1_env_reverse_proof ... ok
+test c1_explicit_version_wins ... ok
+test c1_invalid_version_rejected ... ok
+test c1_ponysentry_with_release ... ok
+test c2_governance_span_carries_session ... ok
+test c2_governance_without_turn_has_no_session ... ok
+test c3_all_none_root_has_no_keys ... ok
+test c3_cache_protocol_gating_wire ... ok
+test c3_root_zero_visible_on_wire ... ok
+test c3_usage_details_values ... ok
+test c3_wire_keys_and_root_aggregation ... ok
+test l2at_concurrent_init ... ok
+test t6_static_wiring ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.11s
+
+EXIT=0
+
+# [POST-JOIN] exit code = 0，14 passed / 0 failed，finished in 20.11s
