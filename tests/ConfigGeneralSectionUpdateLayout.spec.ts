@@ -70,16 +70,16 @@ describe("ConfigGeneralSection 软件自动更新卡片布局契约（Wave-52）
     expect(wrapper.get('[data-testid="config-update-section"]').text()).not.toContain("软件更新");
   });
 
-  // ── C2：开关行最右端 ────────────────────────────────────────────────────
-  it("C2：自动检查行内 Switch 为最右端元素、文案在左", () => {
+  // ── C2：开关在 section 标题行最右端 ─────────────────────────────────────
+  it("C2：section 标题行内 Switch 为最右端元素、标题在左", () => {
     const wrapper = mountSection();
 
-    const row = wrapper.find('[data-testid="config-update-autocheck-row"]');
-    expect(row.exists(), "必须存在契约锚点 config-update-autocheck-row").toBe(true);
+    const row = wrapper.find('[data-testid="config-update-header-row"]');
+    expect(row.exists(), "必须存在契约锚点 config-update-header-row").toBe(true);
     const rowEl = row.element as HTMLElement;
 
     const switchEl = wrapper.get('[data-testid="config-update-autocheck-switch"]').element as HTMLElement;
-    expect(rowEl.contains(switchEl), "Switch 必须在自动检查行内").toBe(true);
+    expect(rowEl.contains(switchEl), "Switch 必须在 section 标题行内").toBe(true);
 
     // 最右端 = 行内不存在任何排在 Switch 之后、且不属于 Switch 自身的元素。
     const trailing = Array.from(rowEl.querySelectorAll("*")).filter(
@@ -90,12 +90,26 @@ describe("ConfigGeneralSection 软件自动更新卡片布局契约（Wave-52）
       "Switch 之后不得再有任何元素（最右端）"
     ).toEqual([]);
 
-    // 文案在 Switch 左侧（DOM 序早于 Switch）。
-    const labelEl = Array.from(rowEl.querySelectorAll("*")).find(
-      (el) => !switchEl.contains(el) && el.children.length === 0 && (el.textContent ?? "").trim() === "自动检查更新"
-    );
-    expect(labelEl, "自动检查行内必须有「自动检查更新」文案").toBeTruthy();
-    expect(precedes(labelEl as Element, switchEl), "文案必须排在 Switch 之前").toBe(true);
+    // 标题文案在 Switch 左侧（DOM 序早于 Switch），且标题元素就是契约锚点。
+    const titleEl = row.get('[data-testid="config-update-section-title"]').element as HTMLElement;
+    expect(precedes(titleEl, switchEl), "标题必须排在 Switch 之前").toBe(true);
+    expect(titleEl.textContent?.trim()).toBe("软件自动更新");
+  });
+
+  // ── C2b：卡片方框内不再有「自动检查更新」行 ──────────────────────────────
+  it("C2b：方框内无「自动检查更新」文案、无自动检查行，section 内 Switch 恰为 1 个", () => {
+    const wrapper = mountSection();
+
+    const section = wrapper.get('[data-testid="config-update-section"]');
+    expect(section.text(), "方框内不得再有「自动检查更新」文案").not.toContain("自动检查更新");
+    expect(
+      wrapper.find('[data-testid="config-update-autocheck-row"]').exists(),
+      "旧的行级锚点 config-update-autocheck-row 必须消失"
+    ).toBe(false);
+    expect(
+      section.findAll('[data-testid="config-update-autocheck-switch"]').length,
+      "section 内 Switch 必须恰为 1 个（标题行那个）"
+    ).toBe(1);
   });
 
   // ── C3：「上次检查」紧随当前版本 ─────────────────────────────────────────
@@ -116,10 +130,10 @@ describe("ConfigGeneralSection 软件自动更新卡片布局契约（Wave-52）
     expect(precedes(chip.element, lastChecked.element), "「上次检查」必须排在版本 chip 之后").toBe(true);
     expect(lastChecked.text()).toContain("上次检查：");
 
-    // 反向断言：不得仍留在自动检查行（旧布局的位置）。
-    const autoRow = wrapper.find('[data-testid="config-update-autocheck-row"]');
-    expect(autoRow.exists()).toBe(true);
-    expect(autoRow.element.contains(lastChecked.element), "「上次检查」不得留在自动检查行").toBe(false);
+    // 反向断言：不得跑到 section 标题行（那里只有标题 + 开关）。
+    const headerRow = wrapper.find('[data-testid="config-update-header-row"]');
+    expect(headerRow.exists()).toBe(true);
+    expect(headerRow.element.contains(lastChecked.element), "「上次检查」不得出现在 section 标题行").toBe(false);
   });
 
   it("C3b：无上次检查时间时不渲染「上次检查」，版本行仍在", () => {

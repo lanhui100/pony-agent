@@ -58,47 +58,64 @@ test("C1：分区标题为「软件自动更新」（真实浏览器文本）", 
   await expect(title).not.toHaveText("软件更新");
 });
 
-test("C2：Switch 是该行最右端元素（物理几何 ≤2px 贴边，文案在左）", async ({ page }) => {
+test("C2：Switch 在 section 标题行最右端（与标题行/方框右边缘 ≤2px 对齐）", async ({ page }) => {
   await seedUpdateCache(page);
   await openUpdateSection(page);
 
-  const row = page.getByTestId("config-update-autocheck-row");
+  const headerRow = page.getByTestId("config-update-header-row");
+  const title = page.getByTestId("config-update-section-title");
   const autoSwitch = page.getByTestId("config-update-autocheck-switch");
-  const label = row.getByText("自动检查更新");
+  const card = page.getByTestId("config-update-section").locator("div.max-w-\\[680px\\]");
 
-  await expect(row).toBeVisible();
+  await expect(headerRow).toBeVisible();
+  await expect(title).toBeVisible();
   await expect(autoSwitch).toBeVisible();
-  await expect(label).toBeVisible();
 
-  const rowBox = await row.boundingBox();
+  const rowBox = await headerRow.boundingBox();
+  const titleBox = await title.boundingBox();
   const switchBox = await autoSwitch.boundingBox();
-  const labelBox = await label.boundingBox();
-  expect(rowBox, "自动检查行必须有盒子模型").not.toBeNull();
+  expect(rowBox, "标题行必须有盒子模型").not.toBeNull();
+  expect(titleBox, "标题必须有盒子模型").not.toBeNull();
   expect(switchBox, "Switch 必须有盒子模型").not.toBeNull();
-  expect(labelBox, "文案必须有盒子模型").not.toBeNull();
 
   const rowRight = rowBox!.x + rowBox!.width;
   const switchRight = switchBox!.x + switchBox!.width;
 
   expect(
     Math.abs(rowRight - switchRight),
-    `Switch 右边缘必须与该行右边缘对齐（≤2px）；行右=${rowRight}，Switch 右=${switchRight}`
+    `Switch 右边缘必须与标题行右边缘对齐（≤2px）；行右=${rowRight}，Switch 右=${switchRight}`
   ).toBeLessThanOrEqual(2);
 
   expect(
     switchBox!.x,
-    `Switch 必须位于文案右侧；文案右=${labelBox!.x + labelBox!.width}，Switch 左=${switchBox!.x}`
-  ).toBeGreaterThanOrEqual(labelBox!.x + labelBox!.width);
+    `Switch 必须位于标题右侧；标题右=${titleBox!.x + titleBox!.width}，Switch 左=${switchBox!.x}`
+  ).toBeGreaterThanOrEqual(titleBox!.x + titleBox!.width);
 
   expect(
-    Math.abs(labelBox!.x - rowBox!.x),
-    `文案必须贴该行左边缘（≤2px）；行左=${rowBox!.x}，文案左=${labelBox!.x}`
+    Math.abs(titleBox!.x - rowBox!.x),
+    `标题必须贴标题行左边缘（≤2px）；行左=${rowBox!.x}，标题左=${titleBox!.x}`
   ).toBeLessThanOrEqual(2);
 
   expect(
-    Math.abs(switchBox!.y + switchBox!.height / 2 - (labelBox!.y + labelBox!.height / 2)),
-    "Switch 与文案必须同行（垂直中心差 ≤2px）"
+    Math.abs(switchBox!.y + switchBox!.height / 2 - (titleBox!.y + titleBox!.height / 2)),
+    "Switch 与标题必须同行（垂直中心差 ≤2px）"
   ).toBeLessThanOrEqual(2);
+
+  const cardBox = await card.boundingBox();
+  expect(cardBox, "方框必须有盒子模型").not.toBeNull();
+  expect(
+    Math.abs(cardBox!.x + cardBox!.width - switchRight),
+    `Switch 右边缘应与方框右边缘对齐（≤2px）；方框右=${cardBox!.x + cardBox!.width}，Switch 右=${switchRight}`
+  ).toBeLessThanOrEqual(2);
+});
+
+test("C2b：方框内不再有「自动检查更新」，section 内 Switch 恰为 1 个", async ({ page }) => {
+  await seedUpdateCache(page);
+  const section = await openUpdateSection(page);
+
+  await expect(section).not.toContainText("自动检查更新");
+  await expect(page.getByTestId("config-update-autocheck-row")).toHaveCount(0);
+  await expect(section.getByTestId("config-update-autocheck-switch")).toHaveCount(1);
 });
 
 test("C3：「上次检查」与当前版本同一行、且位于版本 chip 右侧（≤4px 同排）", async ({ page }) => {
@@ -129,11 +146,11 @@ test("C3：「上次检查」与当前版本同一行、且位于版本 chip 右
     "「上次检查」与版本 chip 必须同行（垂直中心差 ≤4px）"
   ).toBeLessThanOrEqual(4);
 
-  // 行内归属：不得落进自动检查行。
-  const inAutoRow = await page.getByTestId("config-update-autocheck-row").evaluate((rowEl, lastEl) => {
+  // 行内归属：不得落进 section 标题行（那里只有标题 + 开关）。
+  const inHeaderRow = await page.getByTestId("config-update-header-row").evaluate((rowEl, lastEl) => {
     return rowEl.contains(lastEl as Node);
   }, await lastChecked.elementHandle());
-  expect(inAutoRow, "「上次检查」不得仍在自动检查行内").toBe(false);
+  expect(inHeaderRow, "「上次检查」不得出现在 section 标题行").toBe(false);
 });
 
 test("C5：点击 Switch 翻转 aria-checked 并持久化偏好", async ({ page }) => {
@@ -141,6 +158,8 @@ test("C5：点击 Switch 翻转 aria-checked 并持久化偏好", async ({ page 
   await openUpdateSection(page);
 
   const autoSwitch = page.getByTestId("config-update-autocheck-switch");
+  // C5：卡片内已无可视文案，Switch 必须自持可及名「软件自动更新」。
+  await expect(autoSwitch).toHaveAccessibleName("软件自动更新");
   await expect(autoSwitch).toHaveAttribute("aria-checked", "false");
 
   await autoSwitch.click();
