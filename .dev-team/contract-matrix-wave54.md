@@ -133,3 +133,28 @@ export function resolveTurnWeightedSpeedDetail(
 - `call_only`：`calls === 0` 且存在活跃调用的 per-call 值（`speed = out/(dur-ttft|dur)`）。
 - `none`：其余（`speed = null`）。
 - 旧的 `resolveDualModeTokenSpeedDetail` / `resolveTurnGenerationSpeed` 若保留，必须委托本函数，不得再有自己的分支。
+
+### 3.1 编译兼容衍生豁免（Lead 2026-10-27 20:58 追认）
+
+C3/C4 给 `TokenUsage` / `ProviderCallCacheRecord` / `TurnTraceRecord` 增字段后，所有全字段结构体字面量
+必须同步补初始化（Rust 无 FRU 时逐点补行）。以下文件纳入**衍生写域**，变更仅限「字段初始化 / 传参」，
+严禁改逻辑、改断言、改判定：
+
+`crates/pony-agent-core/src/agent/telemetry.rs`、`provider/responses_api.rs`、
+`runtime/tool_recovery.rs`、`runtime/turn_stream.rs`、`runtime/turn_sync.rs`、`runtime/turn_persist.rs`、
+`session/store.rs`、`session/tests.rs`、`turn_event.rs`、`sqlite_session.rs`、`control_plane/mod.rs`、
+`crates/pony-agent-core/tests/otel_trace_migration_test.rs`、
+`crates/pony-agent-core/tests/observability_reporting_fixes_test.rs`。
+
+`crates/pony-agent-core/tests/wave54_metric_truth.rs` **不在**衍生豁免内（冻结只读）。
+
+## 5. 红相期歧义裁决（Lead 2026-10-27 21:10）
+
+1. **`detail.inputTokens` 语义**：恒取**末次已完成调用**的 `contextInputTokens`（C4 口径归一值；
+   缺失时回退该记录的 per-call `inputTokens`），多调用轮不得求和。`cacheInputTokens` 同源取末次调用。
+2. **混合 origin 的 turn 级 `origin`**：任一分量为 `estimated_chars` ⇒ turn 级 `origin="estimated_chars"`
+   （估算不得冒充真值，保守降级）；全部为 `provider` 才输出 `provider`。
+3. **无效窗口的 `genMs`**：只累计有效调用（`dur>0` 且 `out>0`）；`Σgen===0` ⇒ `genMs=null` 且 `speed=null`；
+   `ttft>dur` 按 C2 退化 `gen=dur`（计入 Σgen）。
+4. **`≈` 通道**：由既有 `speedDebugInfo.origin` 子字段驱动（不新增 prop），并同步进 `data-speed-debug`。
+5. **`data-speed-basis`**：作为 C6 实现细节要求落地，但**不纳入**本波冻结断言（避免超契约扩测）。

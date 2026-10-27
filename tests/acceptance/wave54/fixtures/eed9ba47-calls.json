@@ -1,0 +1,222 @@
+[
+ {
+  "call": 1,
+  "durationMs": 4251,
+  "outputTokens": 192,
+  "inputTokens": 7460,
+  "cacheReadTokens": 0,
+  "reasoningTokens": 84,
+  "genMs": 1204,
+  "ttftMs": 3047,
+  "speedAttr": 159.47
+ },
+ {
+  "call": 2,
+  "durationMs": 2636,
+  "outputTokens": 133,
+  "inputTokens": 8125,
+  "cacheReadTokens": 7552,
+  "reasoningTokens": 9,
+  "genMs": 741,
+  "ttftMs": 1895,
+  "speedAttr": 179.49
+ },
+ {
+  "call": 3,
+  "durationMs": 4849,
+  "outputTokens": 255,
+  "inputTokens": 8478,
+  "cacheReadTokens": 8064,
+  "reasoningTokens": 116,
+  "genMs": 1677,
+  "ttftMs": 3172,
+  "speedAttr": 152.06
+ },
+ {
+  "call": 4,
+  "durationMs": 3265,
+  "outputTokens": 230,
+  "inputTokens": 11143,
+  "cacheReadTokens": 8448,
+  "reasoningTokens": 81,
+  "genMs": 1296,
+  "ttftMs": 1969,
+  "speedAttr": 177.47
+ },
+ {
+  "call": 5,
+  "durationMs": 2919,
+  "outputTokens": 100,
+  "inputTokens": 11350,
+  "cacheReadTokens": 11136,
+  "reasoningTokens": 20,
+  "genMs": 527,
+  "ttftMs": 2392,
+  "speedAttr": 189.75
+ },
+ {
+  "call": 6,
+  "durationMs": 3010,
+  "outputTokens": 98,
+  "inputTokens": 11497,
+  "cacheReadTokens": 11264,
+  "reasoningTokens": 30,
+  "genMs": 824,
+  "ttftMs": 2186,
+  "speedAttr": 118.93
+ },
+ {
+  "call": 7,
+  "durationMs": 3690,
+  "outputTokens": 140,
+  "inputTokens": 12112,
+  "cacheReadTokens": 11520,
+  "reasoningTokens": 28,
+  "genMs": 1044,
+  "ttftMs": 2646,
+  "speedAttr": 134.1
+ },
+ {
+  "call": 8,
+  "durationMs": 3754,
+  "outputTokens": 100,
+  "inputTokens": 12417,
+  "cacheReadTokens": 12160,
+  "reasoningTokens": 0,
+  "genMs": 3752,
+  "ttftMs": 2,
+  "speedAttr": 26.65
+ },
+ {
+  "call": 9,
+  "durationMs": 3108,
+  "outputTokens": 87,
+  "inputTokens": 13337,
+  "cacheReadTokens": 12416,
+  "reasoningTokens": 0,
+  "genMs": 3107,
+  "ttftMs": 1,
+  "speedAttr": 28.0
+ },
+ {
+  "call": 10,
+  "durationMs": 9189,
+  "outputTokens": 159,
+  "inputTokens": 16509,
+  "cacheReadTokens": 13312,
+  "reasoningTokens": 79,
+  "genMs": 1205,
+  "ttftMs": 7984,
+  "speedAttr": 131.95
+ },
+ {
+  "call": 11,
+  "durationMs": 3324,
+  "outputTokens": 81,
+  "inputTokens": 16814,
+  "cacheReadTokens": 16640,
+  "reasoningTokens": 0,
+  "genMs": 3324,
+  "ttftMs": 0,
+  "speedAttr": 24.37
+ },
+ {
+  "call": 12,
+  "durationMs": 4182,
+  "outputTokens": 179,
+  "inputTokens": 19648,
+  "cacheReadTokens": 16768,
+  "reasoningTokens": 80,
+  "genMs": 1349,
+  "ttftMs": 2833,
+  "speedAttr": 132.69
+ },
+ {
+  "call": 13,
+  "durationMs": 3737,
+  "outputTokens": 128,
+  "inputTokens": 22195,
+  "cacheReadTokens": 19712,
+  "reasoningTokens": 67,
+  "genMs": 1100,
+  "ttftMs": 2637,
+  "speedAttr": 116.36
+ },
+ {
+  "call": 14,
+  "durationMs": 3676,
+  "outputTokens": 74,
+  "inputTokens": 22770,
+  "cacheReadTokens": 22272,
+  "reasoningTokens": 0,
+  "genMs": 3674,
+  "ttftMs": 2,
+  "speedAttr": 20.14
+ },
+ {
+  "call": 15,
+  "durationMs": 3237,
+  "outputTokens": 158,
+  "inputTokens": 23504,
+  "cacheReadTokens": 22656,
+  "reasoningTokens": 64,
+  "genMs": 1034,
+  "ttftMs": 2203,
+  "speedAttr": 152.8
+ },
+ {
+  "call": 16,
+  "durationMs": 2851,
+  "outputTokens": 77,
+  "inputTokens": 23948,
+  "cacheReadTokens": 23552,
+  "reasoningTokens": 0,
+  "genMs": 2850,
+  "ttftMs": 1,
+  "speedAttr": 27.02
+ },
+ {
+  "call": 17,
+  "durationMs": 7694,
+  "outputTokens": 657,
+  "inputTokens": 26407,
+  "cacheReadTokens": 23936,
+  "reasoningTokens": 555,
+  "genMs": 5037,
+  "ttftMs": 2657,
+  "speedAttr": 130.43
+ },
+ {
+  "call": 18,
+  "durationMs": 4232,
+  "outputTokens": 220,
+  "inputTokens": 28921,
+  "cacheReadTokens": 27008,
+  "reasoningTokens": 125,
+  "genMs": 1525,
+  "ttftMs": 2707,
+  "speedAttr": 144.26
+ },
+ {
+  "call": 19,
+  "durationMs": 3343,
+  "outputTokens": 115,
+  "inputTokens": 30246,
+  "cacheReadTokens": 29056,
+  "reasoningTokens": 18,
+  "genMs": 753,
+  "ttftMs": 2590,
+  "speedAttr": 152.72
+ },
+ {
+  "call": 20,
+  "durationMs": 16207,
+  "outputTokens": 1359,
+  "inputTokens": 31752,
+  "cacheReadTokens": 30336,
+  "reasoningTokens": 719,
+  "genMs": 11556,
+  "ttftMs": 4651,
+  "speedAttr": 117.6
+ }
+]
