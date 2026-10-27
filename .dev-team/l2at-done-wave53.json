@@ -1,0 +1,15 @@
+{
+  "wave": 53,
+  "file": "crates/pony-agent-core/tests/observability_reporting_wave53_test.rs",
+  "cases": [
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6"
+  ],
+  "red_exit_code": 101,
+  "red_summary": "cargo test -p pony-agent-core --test observability_reporting_wave53_test => test result: FAILED. 1 passed; 6 failed; 0 ignored (exit 101)；编译 0 error / 0 warning（红相仅来自 unimplemented!() 与断言不符）。契约形态 = Lead 裁决附加式 API（C3/C6 修订，历史冻结测试零改动）。 T1 t1_cost_components_wire: panic 'not implemented' @ src/agent/otel/mod.rs:1834（record_cost_components 空桩）。 T2 t2_priced_marker_wire: 断言不符 @ test:768 — 有 usage 未计价时 pony.cost.priced 键缺失（期望 false）。 T3 t3_gen_ai_system_enum_convergence: panic 'not implemented' @ src/agent/otel/mod.rs:1132（gen_ai_system_enum 空桩，经 llm_span_attributes_with_provider 触发）。 T4 t4_degraded_semantics_wire: panic 'not implemented' @ src/agent/otel/mod.rs:2012（record_tool_call_span_with_call_id 空桩）。 T5 t5_trace_name_readable: 断言不符 @ test:1036 — langfuse.trace.name 仍回落 turn_id（left=turn-abc-raw-id，right=pony-agent#turn-7）。 T6 t6_tool_call_id: panic 'not implemented' @ src/agent/otel/mod.rs:1264（tool_span_attributes_with_call_id 空桩）。 辅助守卫 t0_attribute_key_literals_frozen 已绿（6 个新常量字面量与契约逐字一致，由 protocol-agent 空桩先落）。",
+  "written_at": "2026-10-27T17:28:17+08:00"
+}
