@@ -158,6 +158,31 @@ describe("ConfigGeneralSection 签名更新 UI（release gate 模拟）", () => 
     expect(wrapper.get('[data-testid="config-update-check-button"]').text()).toContain("检查更新");
   });
 
+  it("C8b：检查中且签名候选已到 —— 主按钮必须是禁用的「检查中…」，不得是灰态「立即升级」", () => {
+    const store = useUpdateStore();
+    store.signedStatus = "available";
+    store.signedCandidate = CANDIDATE;
+    store.status = "checking";
+
+    const wrapper = mountSection();
+    const button = wrapper.get('[data-testid="config-update-check-button"]');
+
+    expect(button.text(), "检查中优先于可安装态，避免出现点不动的灰态「立即升级」").toContain("检查中");
+    expect(button.text()).not.toContain("立即升级");
+    expect(button.attributes("disabled"), "检查中必须禁用").toBeDefined();
+  });
+
+  it("C8c：检查中（无签名候选）主按钮文案为「检查中…」且禁用", () => {
+    const store = useUpdateStore();
+    store.status = "checking";
+
+    const wrapper = mountSection();
+    const button = wrapper.get('[data-testid="config-update-check-button"]');
+
+    expect(button.text()).toContain("检查中");
+    expect(button.attributes("disabled")).toBeDefined();
+  });
+
   it("C8 主按钮模式机：无更新 → 检查更新；检查中 → 检查中…；有签名候选 → 立即升级", async () => {
     const store = useUpdateStore();
 
