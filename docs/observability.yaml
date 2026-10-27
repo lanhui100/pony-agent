@@ -4,7 +4,7 @@
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
 service: pony-agent
 kind: desktop
-reviewed_at: "2026-10-26"
+reviewed_at: "2026-10-27"
 
 dimensions:
   tracing:
@@ -128,3 +128,15 @@ note: >-
   (3) Langfuse 用户归因：`crates/pony-agent-core/src/agent/otel/mod.rs` 支持环境变量
       `PONY_OTEL_USER_ID`，在 `begin_turn_trace` 根 span 中规范映射 `langfuse.user.id`。
   四维归属保持不变，唯一落点仍为既有 anchor。
+
+  【wave-51 归属登记｜真实会话审计驱动的三项值错/缺项修复（ADR 0051）】
+  (1) tracing｜版本归因：resource `service.version` 改为三级优先（宿主注入 app 版本 > env
+      `PONY_OTEL_SERVICE_VERSION` > core crate 版本），PonySentry `release` 同源注入；
+      解决 trace/Langfuse `version` 与 PonySentry `last_release` 指向 core 计数线（0.1.135/0.1.128）
+      而非安装包发布线的问题。维度归属不变（仍 tracing，落点仍 `agent/otel/mod.rs` + 宿主装配点）。
+  (2) tracing｜治理归属：`governance.decide` 补 `langfuse.session.id`（复用既有 helper，无活跃 turn
+      不输出），会话过滤命中 9/9，治理决策进入语义轨。
+  (3) tracing｜用量明细：`llm.chat` 与根 `agent.turn` 新增 `gen_ai.usage.reasoning.output_tokens` /
+      `gen_ai.usage.cache_read.input_tokens`（semconv 标准名；有值才写、0 有效、`u64→i64` 饱和；
+      cache 键仅 OpenAI 协议族上报，Anthropic 语义 fail-closed 且登记为已知限制）。
+  四维归属不变：不新增 metrics/logs/issues 出口，不新增端点/环境变量/依赖；tracing 唯一落点不变。

@@ -139,3 +139,20 @@ bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base orig
 # 本会话 trace（Tempo）
 # { resource.client.service.name = "pony-agent" && span.langfuse.session.id = "pa_01a17b23-1e98-7a53-a2bb-15d116495edb" }
 ```
+
+## 8. 修复闭环收据（wave-51，ADR 0051）
+
+| 编号 | 修复内容 | 落点 | 机器收据 |
+| :--- | :--- | :--- | :--- |
+| P0-1 | 版本单一来源：`init_with_service_version` 三级优先 + 注入合法化；`PonySentryConfig::with_release`；Tauri 注入 `package_info().version` | `otel/mod.rs`、`ponysentry/config.rs`、`src-tauri/src/lib.rs` | `crates/pony-agent-core/tests/observability_reporting_fixes_test.rs` C1 四例（含脏值对抗）PASS；`cargo check -p pony-agent` EXIT 0 |
+| P0-2 | `governance.decide` 补 `langfuse.session.id`（复用 `push_active_session_attribute`） | `otel/mod.rs::start_governance_decide_span` | C2 两例（活跃 turn 带键 / 无 turn 缺键，均解码 span 自身属性）PASS |
+| P0-3 | 思考/缓存 token 出口：semconv 键 `gen_ai.usage.reasoning.output_tokens` / `cache_read.input_tokens`，子 span + 根整轮聚合，`u64→i64` 饱和，cache 仅 OpenAI 协议族 | `otel/mod.rs`、`turn_flow.rs` | C3 五例（值级/缺键/0 值/饱和/根聚合 Σ=10,7）PASS；`--lib` 1175 passed 零新增失败 |
+| — | 测试缺陷 TD-1：`l2at_concurrent_init` Barrier 参与方不匹配死锁（绿相发现，Test Agent 修复） | 冻结测试 `:1019-1024` | 修复后 `11 passed`；修复缘由与红相掩盖原因登记在 `.dev-team/l2at-done-wave51.json` |
+
+**门禁**：`audit-diff.sh --base 090df55` EXIT 0；`check-declaration.sh` PASS exit 0（四维不变）；
+`npm run version:check` EXIT 0；`cargo test --test observability_reporting_fixes_test` 11 passed。
+
+**遗留（不在本波范围）**：P1-4（`gen_ai.system` 显示名）、P1-5（Langfuse 成本恒 0）、P1-6（思考树内容）、
+P2-7~P3-12 仍按 §5 建议表排期；另登记一条测试残留风险：`l2at_concurrent_init` 若实现回退为 panic，
+主线程可能 hang 而非快速失败（根治方案已在 `l2at-done-wave51.json.residual_risk_note`）。
+

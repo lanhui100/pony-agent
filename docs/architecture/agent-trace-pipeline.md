@@ -47,14 +47,16 @@
 | 超时 | 导出 3000ms、`force_flush` ≤3000ms；不重试 | `EXPORT_TIMEOUT_MS` / `MAX_FLUSH_WAIT_MS` |
 | 脱敏 | 所有字符串型 span 属性统一过 `ponysentry::sanitize` | `push_str` / `set_phase` |
 | 明文 HTTP 防线 | 有令牌 + `http://` + 非回环/非集群内主机 ⇒ `init` 直接 Err | `is_plaintext_remote` |
+| 版本归因 | `service.version` 三级优先：**宿主注入**（Tauri `app.package_info().version`）> env `PONY_OTEL_SERVICE_VERSION` > core crate 版本；PonySentry `release` 同源（`with_release`） | `init_with_service_version` / `PonySentryConfig::with_release`（ADR 0051） |
 
 ### 2.1 Span 语义
 
 | Span | 关键属性 | Langfuse 侧呈现 |
 | :--- | :--- | :--- |
-| `agent.turn`（root） | `langfuse.session.id` / `langfuse.trace.name` / `gen_ai.operation.name=agent.turn` / `agent.turn.id|sequence|phase` | SPAN（trace 根） |
-| `llm.chat` | `gen_ai.system` / `gen_ai.request.model` + `langfuse.observation.model.name` / `gen_ai.usage.input_tokens|output_tokens` | **GENERATION**（带 model 与 token 用量） |
+| `agent.turn`（root） | `langfuse.session.id` / `langfuse.trace.name` / `gen_ai.operation.name=agent.turn` / `agent.turn.id|sequence|phase`；整轮聚合 `gen_ai.usage.input_tokens|output_tokens`，以及（wave-51）`gen_ai.usage.reasoning.output_tokens|cache_read.input_tokens`（有值才输出） | SPAN（trace 根） |
+| `llm.chat` | `gen_ai.system` / `gen_ai.request.model` + `langfuse.observation.model.name` / `gen_ai.usage.input_tokens|output_tokens` /（wave-51）`gen_ai.usage.reasoning.output_tokens|cache_read.input_tokens` | **GENERATION**（带 model 与 token 用量；Langfuse 会从 input 减 cache_read、从 output 减 reasoning） |
 | `tool.call` | `gen_ai.tool.name` / `langfuse.observation.type=tool` / `agent.tool.status|duration_ms|error` | **TOOL** |
+| `governance.decide` | `gen_ai.operation.name=governance.decide` / `governance.window|decision|policy_version|unpriced_turns` +（wave-51）`langfuse.session.id` | SPAN（wave-51 起进入语义轨，可按会话过滤） |
 
 父 span 解析：按 `tokio::task::Id` 索引 + `thread_local` 兜底（非 tokio 上下文如 TUI/CLI 同步路径）。
 
