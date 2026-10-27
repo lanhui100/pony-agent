@@ -1,0 +1,16 @@
+{
+  "wave": 51,
+  "theme": "observability P0 fixes: version single-source / governance session attribution / reasoning+cache token reporting",
+  "baseline_commit": "090df55",
+  "captured_at": "2026-10-27T13:26:00+08:00",
+  "commands": [
+    {
+      "cmd": "cargo test -p pony-agent-core --lib",
+      "exit_code": 0,
+      "summary": "1175 passed; 0 failed; 0 ignored; finished in 40.24s",
+      "log": "/tmp/baseline-lib.log"
+    }
+  ],
+  "known_baseline_failures": [],
+  "notes": "红相锚定前基线；绿相必须逐项对照，禁止新增失败。"
+}

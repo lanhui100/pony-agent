@@ -43,6 +43,21 @@ pub const ATTR_GEN_AI_USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 /// 输出 token 数。
 pub const ATTR_GEN_AI_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
 
+/// 思考（推理）token 数（wave-51 C3 契约键；**semconv 标准名**）。
+///
+/// semconv 口径（OTel GenAI registry `gen_ai.usage.reasoning.output_tokens`）：该值 SHOULD 已包含在
+/// [`ATTR_GEN_AI_USAGE_OUTPUT_TOKENS`] 之内（`output_tokens` 含思考 token，禁止二次相加）。
+/// 由 [`llm_usage_detail_attributes`] 在有值时产出；缺失 ⇒ **不得输出该键**。
+pub const ATTR_GEN_AI_USAGE_REASONING_TOKENS: &str = "gen_ai.usage.reasoning.output_tokens";
+
+/// 缓存命中输入 token 数（wave-51 C3 契约键；**semconv 标准名**）。
+///
+/// semconv 口径（OTel GenAI registry `gen_ai.usage.cache_read.input_tokens`）：该值 SHOULD 已包含在
+/// [`ATTR_GEN_AI_USAGE_INPUT_TOKENS`] 之内（`input_tokens` 含缓存命中 token）。
+/// Langfuse ingest 会从 `input_tokens` 减本值、从 `output_tokens` 减思考值以避免重复计费
+/// ⇒ 仅当上游 `input_tokens` **确实包含**缓存命中时才允许上报（协议门控见契约 PA51-C3-T6）。
+pub const ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS: &str = "gen_ai.usage.cache_read.input_tokens";
+
 /// 模型生成速度（t/s）。
 pub const ATTR_GEN_AI_SPEED_TOKENS_PER_SECOND: &str = "gen_ai.speed.tokens_per_second";
 
@@ -575,6 +590,30 @@ pub(crate) fn resolve_resource_attributes(
     attrs
 }
 
+/// 装配入口（wave-51 C1 契约桩）：由调用方显式注入安装包版本后再建立全局 trace provider。
+///
+/// 优先级契约（`service.version` resource 属性，三级，高者优先）：
+/// 1. 显式入参 `service_version`；
+/// 2. 进程 env [`ENV_PONY_OTEL_SERVICE_VERSION`]；
+/// 3. 本 crate 的 `CARGO_PKG_VERSION`（兜底）。
+///
+/// 空白语义：`service_version` 与 env 取值 **trim 后为空**一律视为**未设置**，
+/// 逐级下落到下一来源（与 [`resolve_resource_attributes`] 既有空白回退语义一致）。
+/// 取值合法化（逐级判定，每一级都过同一规则）：① 先 trim；② 拒绝任何 `char::is_control()`
+/// 控制字符（含 `\n` / `\r` / `\t` / NUL）；③ trim 后字节长度上限 **64**；
+/// 任一条不合规 ⇒ 该级视为**未设置**并下落一级（**不得**把非法值写进 resource、不得 panic）。
+/// 关系：[`init`] 等价于本函数传入 `None`；校验/失败/可重入语义与 [`init`] 完全一致，
+/// 二者互斥 —— 同一进程生命周期内至多成功装配一次。
+///
+/// [STUB wave-51] 空桩：仅冻结签名与语义，实现归 Executor。
+pub fn init_with_service_version(
+    config: OtelConfig,
+    service_version: Option<&str>,
+) -> Result<(), String> {
+    let _ = (config, service_version);
+    unimplemented!("wave-51 C1 契约桩：init_with_service_version 待实现")
+}
+
 /// 装配入口：安装全局 trace provider。
 ///
 /// 调用方：宿主启动路径（Tauri 装配点），进程生命周期内**至多一次**。
@@ -1075,6 +1114,23 @@ pub fn llm_span_attributes(input: &LlmSpanInput) -> Vec<(String, AttrValue)> {
     );
 
     attributes
+}
+
+/// 「细分用量」属性映射（纯函数，无网络、无全局态；wave-51 C3 契约桩）。
+///
+/// 调用方：[`LlmSpanGuard::record_usage_details`]（`llm.chat` 子 span）与根 `agent.turn`
+/// 聚合路径**共用同一份**映射 ⇒ 键名/取值/出现条件只在一处定义，禁止两条口径漂移。
+/// 语义：有值才输出（`None` ⇒ 不输出该键）；`Some(0)` 是有效取值、必须输出 0；
+/// 值为 `i64`，`u64 -> i64` **安全饱和**（超出 `i64::MAX` 钳到 `i64::MAX`，禁止 `as` 直转成负数）。
+/// 输出键：[`ATTR_GEN_AI_USAGE_REASONING_TOKENS`]、[`ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS`]。
+///
+/// [STUB wave-51] 空桩：仅冻结签名与语义，实现归 Executor。
+pub fn llm_usage_detail_attributes(
+    reasoning_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+) -> Vec<(String, AttrValue)> {
+    let _ = (reasoning_tokens, cached_input_tokens);
+    unimplemented!("wave-51 C3 契约桩：llm_usage_detail_attributes 待实现")
 }
 
 /// 工具属性映射（纯函数，无网络、无全局态）。
@@ -1585,6 +1641,27 @@ impl LlmSpanGuard {
         if self.span.is_some() {
             accumulate_active_turn_usage(input_tokens, output_tokens);
         }
+    }
+
+    /// 记录思考 token 与缓存命中输入 token（wave-51 C3 契约桩）。
+    ///
+    /// 语义：**有值才写** —— `None` ⇒ **不得输出**对应键
+    /// （[`ATTR_GEN_AI_USAGE_REASONING_TOKENS`] / [`ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS`]）；
+    /// `Some(0)` 是**有效取值**，必须原样输出 0（不得当作缺失丢弃）。
+    /// 类型契约：属性值为 `i64`，`u64 -> i64` 必须**安全饱和**
+    /// （超出 `i64::MAX` 钳到 `i64::MAX`），禁止 `as` 直转产生负数。
+    /// 复用契约：属性映射必须复用纯函数 [`llm_usage_detail_attributes`]（与根 `agent.turn`
+    /// 聚合同一份口径）；调用方负责**协议门控**缓存键（见契约 PA51-C3-T6）。
+    /// 门禁关闭时守卫为空操作（零导出）。
+    ///
+    /// [STUB wave-51] 空桩：仅冻结签名与语义，实现归 Executor。
+    pub fn record_usage_details(
+        &mut self,
+        reasoning_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
+    ) {
+        let _ = (reasoning_tokens, cached_input_tokens);
+        unimplemented!("wave-51 C3 契约桩：LlmSpanGuard::record_usage_details 待实现")
     }
 
     /// 记录单次调用成本（USD）。

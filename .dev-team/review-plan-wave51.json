@@ -1,0 +1,49 @@
+{
+  "verdict": "PASS",
+  "id": "gate1-wave51",
+  "rounds": 2,
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave51.md",
+    ".dev-team/nfr-baseline-wave51.json",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/config.rs",
+    "crates/pony-agent-core/tests/otel_trace_migration_test.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "src-tauri/src/lib.rs"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-wave51.md",
+      "line": 94,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'wire 只断言键名\\|根 agent.turn.*数值' .dev-team/contract-matrix-wave51.md",
+      "severity": "ADVISORY",
+      "resolution": "Lead 裁决：T4/T5 根 span 数值断言授权测试侧自写最小 protobuf varint 解码（不新增依赖、不进 src/）；T3 纯函数值级断言不变。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-wave51.md",
+      "line": 96,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'record_usage_details' crates/pony-agent-core/src/agent/turn_flow.rs",
+      "severity": "ADVISORY",
+      "resolution": "Lead 裁决：T6 以 wire 键存在/缺失 + 4 处调用点静态计数判定；协议门控走 mock provider 端到端可选项，不强制纯函数接缝。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-wave51.md",
+      "line": 60,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '563,569p' crates/pony-agent-core/src/agent/otel/mod.rs",
+      "severity": "ADVISORY",
+      "resolution": "Lead 裁决：env 通道保持既有 trim-only 语义（不新增控制字符/长度过滤）；T4 防御规则只作用于显式入参与 with_release。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 51,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'ATTR_GEN_AI_USAGE_REASONING_TOKENS\\|ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS' crates/pony-agent-core/src/agent/otel/mod.rs",
+      "severity": "ADVISORY",
+      "resolution": "Lead 裁决：常量名保留（内部符号），取值以 semconv 为准并在矩阵 §6 标注；不改名以免扩大 diff。"
+    }
+  ],
+  "non_machine_notes": "第 1 轮 2 路独立审查（契约一致性 / 安全语义）判 FAIL；Protocol v3 收敛 3 条 BLOCKING 后第 2 轮复评 PASS。"
+}

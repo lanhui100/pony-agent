@@ -1,0 +1,177 @@
+{
+  "wave": 51,
+  "baseline_ref": ".dev-team/nfr-baseline-wave46.json",
+  "delta_scope": "additive-only: wave51 版本单一来源（OTel service.version / PonySentry release）、governance.decide 会话归属、思考 token 与缓存命中 token 出口（子 llm.chat span + 根 agent.turn span 聚合，契约 v2/v3）；继承字段取值未收紧，仅新增 wave51 命名空间分节",
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 500,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "resource_release": [
+    "error_boundary_cleanup_on_unmount",
+    "otel_provider_flush_and_shutdown_on_exit"
+  ],
+  "wave51_observability_semantics": {
+    "config_selfcheck": {
+      "otel_config_public_struct_unchanged": true,
+      "otel_config_construction_sites_unchanged": true,
+      "ponysentry_config_public_fields_unchanged": true,
+      "llm_span_input_struct_unchanged": true,
+      "explicit_service_version_param_optional": true,
+      "init_without_version_equivalent_to_init": true,
+      "blank_treated_as_unset": true,
+      "env_value_trimmed": true,
+      "no_new_env_var_introduced": true,
+      "no_new_dependency": true,
+      "no_new_network_io": true
+    },
+    "pa_51_c1_single_version_source": {
+      "resource_attr_key": "service.version",
+      "release_attr_field": "PonySentryConfig.release",
+      "precedence": [
+        "explicit_argument",
+        "env:PONY_OTEL_SERVICE_VERSION",
+        "CARGO_PKG_VERSION"
+      ],
+      "ponysentry_release_precedence": [
+        "explicit_with_release",
+        "env:APP_RELEASE",
+        "CARGO_PKG_VERSION"
+      ],
+      "precedence_chains_kept_separate": true,
+      "blank_treated_as_unset": true,
+      "value_trimmed": true,
+      "injection_validation": {
+        "applies_to": [
+          "explicit_service_version_argument",
+          "ponysentry_with_release"
+        ],
+        "env_override_trim_only": true,
+        "env_extra_filtering_added": false,
+        "trim_first": true,
+        "reject_control_chars": true,
+        "max_len_bytes": 64,
+        "invalid_treated_as_unset": true,
+        "invalid_falls_to_next_level": true,
+        "with_release_invalid_keeps_original": true,
+        "panic_forbidden": true,
+        "assertion_id": "PA51-C1-T4"
+      },
+      "with_release_vs_env_trim": {
+        "with_release_writes_trimmed_value": true,
+        "env_app_release_keeps_raw_value": true,
+        "legacy_env_semantics_unchanged": true,
+        "assertion_id": "PA51-C1-T5"
+      },
+      "core_crate_version_is_last_resort_only": true,
+      "host_wiring_deferred_to_executor": true
+    },
+    "pa_51_c2_governance_session_attribution": {
+      "attr_key": "langfuse.session.id",
+      "span_name": "governance.decide",
+      "session_attr_required_when_active_turn": true,
+      "session_value_must_equal_sibling_spans": true,
+      "absent_when_no_active_session": true,
+      "zero_empty_string_placeholder": true,
+      "session_filter_hit_ratio_target": "9/9"
+    },
+    "pa_51_c3_reasoning_and_cache_tokens": {
+      "attr_keys": [
+        "gen_ai.usage.reasoning.output_tokens",
+        "gen_ai.usage.cache_read.input_tokens"
+      ],
+      "attr_keys_follow_otel_semconv": true,
+      "legacy_key_names_retired": [
+        "gen_ai.usage.reasoning_tokens",
+        "gen_ai.usage.cached_input_tokens"
+      ],
+      "write_semantics": "input_tokens includes cache_read; output_tokens includes reasoning",
+      "attribute_value_type": "i64",
+      "written_only_when_value_present": true,
+      "zero_is_valid_value": true,
+      "u64_to_i64_saturating": true,
+      "saturation_value": 9223372036854775807,
+      "existing_usage_attrs_unchanged": true,
+      "value_assert_seam": "pure fn llm_usage_detail_attributes(reasoning_tokens, cached_input_tokens)",
+      "wire_assert_key_names_only": true,
+      "cache_report_gating": {
+        "report_when_protocol_in": [
+          "openai-completions",
+          "openai-responses"
+        ],
+        "suppress_when_protocol_in": [
+          "anthropic-messages"
+        ],
+        "suppress_when_protocol_unknown": true,
+        "fail_closed": true,
+        "reasoning_not_gated_by_protocol": true,
+        "langfuse_double_subtract_guard": true,
+        "assertion_id": "PA51-C3-T6",
+        "pure_fn_seam_required": false,
+        "judgement_basis": [
+          "wire_key_presence_or_absence",
+          "turn_flow_static_call_site_count_4"
+        ]
+      },
+      "call_sites": {
+        "file": "crates/pony-agent-core/src/agent/turn_flow.rs",
+        "record_usage_expected_count": 4,
+        "record_usage_details_expected_count": 4,
+        "llm_span_input_extension_forbidden": true,
+        "assertion_id": "PA51-C3-T6"
+      },
+      "root_turn_aggregation": {
+        "span_name": "agent.turn",
+        "aggregated_keys": [
+          "gen_ai.usage.reasoning.output_tokens",
+          "gen_ai.usage.cache_read.input_tokens"
+        ],
+        "aggregation_op": "sum_over_child_llm_chat_spans",
+        "keys_judged_independently": true,
+        "emitted_only_if_any_child_value_present": true,
+        "u64_to_i64_saturating": true,
+        "write_site": "TurnTraceGuard::drop set_attribute",
+        "turn_span_attributes_pure_fn_unchanged": true,
+        "frozen_turn_key_set_size": 7,
+        "assertion_id": "PA51-C3-T4",
+        "assert_seam": {
+          "kind": "test_side_minimal_protobuf_varint_decoder",
+          "test_file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+          "test_file_created_by": "test_agent",
+          "no_new_dependency": true,
+          "no_src_test_helper": true
+        }
+      },
+      "root_turn_absence": {
+        "all_children_none_emits_no_key": true,
+        "zero_placeholder_forbidden": true,
+        "some_zero_emits_zero": true,
+        "assertion_id": "PA51-C3-T5"
+      }
+    },
+    "known_limitations": {
+      "anthropic_cache_key_not_reported": {
+        "reason": "anthropic input_tokens excludes cache_read while langfuse always subtracts cache_read from input",
+        "follow_up": "protocol-side input_tokens normalization before enabling"
+      },
+      "cli_tui_version_still_core_crate": {
+        "reason": "only desktop host has installer version source",
+        "follow_up": "declare per-form version semantics in ADR/observability.yaml"
+      },
+      "unknown_protocol_cache_fail_closed": {
+        "reason": "cost side treats unknown as openai, telemetry side must not risk double subtraction"
+      },
+      "env_app_release_not_trimmed": {
+        "reason": "legacy env semantics unchanged by design; difference pinned by PA51-C1-T5"
+      }
+    }
+  }
+}

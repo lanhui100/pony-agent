@@ -171,6 +171,53 @@
         "nfr_degraded": "0",
         "meta_lint": "PASS"
       }
+    },
+    {
+      "wave": 51,
+      "theme": "observability P0 fixes (version single-source / governance session id / reasoning+cache tokens)",
+      "baseline_commit": "090df55",
+      "branches": {
+        "protocol": {
+          "owner": "protocol-agent",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/otel/mod.rs",
+            "crates/pony-agent-core/src/agent/ponysentry/config.rs",
+            ".dev-team/"
+          ],
+          "status": "completed"
+        },
+        "test": {
+          "owner": "test-agent-2",
+          "write_scopes": [
+            "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+            "crates/pony-agent-core/tests/otel_trace_migration_test.rs"
+          ],
+          "status": "in_progress"
+        },
+        "exec": {
+          "owner": "executor-alpha",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/otel/mod.rs",
+            "crates/pony-agent-core/src/agent/turn_flow.rs",
+            "crates/pony-agent-core/src/agent/ponysentry/config.rs",
+            "src-tauri/src/lib.rs"
+          ],
+          "status": "pending"
+        },
+        "docs": {
+          "owner": "lead",
+          "write_scopes": [
+            "docs/"
+          ],
+          "status": "pending"
+        }
+      },
+      "gates": {
+        "regression_baseline": "rust lib 1175 passed / 0 failed (EXIT 0)",
+        "classification": "B (network IO + cross-module + external interface)",
+        "gate1": "PASS (review-plan-wave51.json, dev-review-lint EXIT 0; 2 rounds: FAIL->v3->PASS)",
+        "observability": "audit-diff + check-declaration required"
+      }
     }
   ],
   "counters": {}
