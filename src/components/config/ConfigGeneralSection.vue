@@ -252,7 +252,18 @@ async function toggleAgentTraceReporting(enabled: boolean) {
 
       <!-- PA-099：软件更新卡片（GitHub 发版检测 + 发布页跳转 + 自动检查开关）。 -->
       <div class="space-y-2" data-testid="config-update-section">
-        <div class="text-[12px] font-medium text-stone-500" data-testid="config-update-section-title">软件自动更新</div>
+        <div
+          class="flex w-[680px] max-w-full items-center justify-between gap-2"
+          data-testid="config-update-header-row"
+        >
+          <div class="text-[12px] font-medium text-stone-500" data-testid="config-update-section-title">软件自动更新</div>
+          <Switch
+            aria-label="软件自动更新"
+            :model-value="updateStore.autoCheck"
+            data-testid="config-update-autocheck-switch"
+            @update:model-value="updateStore.setAutoCheck($event)"
+          />
+        </div>
         <div class="max-w-[680px] space-y-2.5 rounded-[0.5rem] border border-stone-200 bg-white px-3 py-3">
           <div class="flex items-center justify-between gap-2" data-testid="config-update-version-row">
             <div class="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-stone-900">
@@ -361,19 +372,6 @@ async function toggleAgentTraceReporting(enabled: boolean) {
           <div v-if="updateStore.signedStatus === 'relaunch-failed'" class="text-[12px] text-rose-600" data-testid="config-update-relaunch-failed">更新已提交，但重启失败，请手动重启应用。</div>
           <div v-if="updateStore.signedStatus === 'error'" class="text-[12px] text-rose-600" data-testid="config-update-signed-error">
             {{ updateStore.signedErrorMessage || "签名更新失败，请稍后重试。" }}
-          </div>
-
-          <div class="flex items-center justify-between gap-2 pt-0.5" data-testid="config-update-autocheck-row">
-            <label
-              class="cursor-pointer text-[11px] text-stone-500"
-              for="config-update-autocheck-toggle"
-            >自动检查更新</label>
-            <Switch
-              id="config-update-autocheck-toggle"
-              :model-value="updateStore.autoCheck"
-              data-testid="config-update-autocheck-switch"
-              @update:model-value="updateStore.setAutoCheck($event)"
-            />
           </div>
         </div>
       </div>

@@ -1,0 +1,17 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/components/config/ConfigGeneralSection.vue",
+    "src/components/ui/Switch.vue",
+    "tests/e2e/wave52-update-card-layout.spec.ts"
+  ],
+  "findings": [
+    {
+      "file": "tests/e2e/wave52-update-card-layout.spec.ts",
+      "line": 68,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && node /tmp/w52-fragility.mjs http://127.0.0.1:4791   # 证伪「方框定位依赖 Tailwind class」：当前 matches=1；仅把标题行的 `w-[680px] max-w-full` 自然收敛为 `max-w-[680px]`（消除 680 魔法数字在 ConfigGeneralSection.vue:256/267/380 的三处重复）后 matches=2，locator.boundingBox() 即抛 strict mode violation ⇒ 冻结 e2e C2 假红。该风险仅为测试耦合（重构级），非当前缺陷：独立实测 26 档视口 360→1920（含容器 678/680/682 边界）Switch 右缘 − 标题行右缘 − 方框右缘差恒为 0.00px（1280：1009/1009/1009；780：763/763/763，容器 675.61px 时两分支等宽；1024：993/993/993），垂直中心差 0.00px、标题左缘差 0.00px，故 `w-[680px] max-w-full` 未引入真实几何风险；产品最小窗宽 780（src-tauri/tauri.conf.json:19）实测容器 675.61px < 680，两条分支在产品内均可达且已实测。已在 .dev-team/wave52-receipts.md §7 登记技术债（建议后续加 data-testid=\"config-update-card\" 并改用它 + 680 收敛为单一 token）。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

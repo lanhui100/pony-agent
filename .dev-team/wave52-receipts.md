@@ -47,3 +47,13 @@
 - 操作闭环：打开首页 → 左栏「设置」→ 滚动到卡片 → 真实点击「检查更新」（真实 api.github.com 响应）→ 真实点击 Switch
 - 断言（agent-browser 快照/属性读取）：标题文本 = `软件自动更新`；`config-update-status` = `当前已是最新版本。`；`config-update-last-checked` = `上次检查：2026年10月27日`；Switch `aria-checked: false → true`（点击可切换）
 - 证据（入仓）：`.dev-team/evidence/wave-52/dev-server-update-section.png`（未检查/已检查态）、`.dev-team/evidence/wave-52/dev-server-update-section-switch-on.png`（Switch 开启态，位于行最右端）
+
+## 7. 契约 v2 修订（用户反馈驱动，2026-10-27 19:2x）
+
+用户反馈：「开关应该是 section『软件自动更新』同行最右端，方框内不应该再有『自动检查更新』」。
+
+- 契约演进：C2 改为「section 标题行最右端」（新增行锚点 `config-update-header-row`）；新增 C2b（方框内不得再有该文案、section 内 Switch 恰为 1 个）；C5 改为 Switch 自持 `aria-label="软件自动更新"`。
+- 红相重锚：commit `f127a33` —— 单元 3 红（C2 缺标题行 / C2b 旧文案仍在 / C3 反向断言），浏览器 4 红（C2 缺锚点、C2b、C3、C5 可及名）。
+- 绿相（v2）：`npm run build` exit 0；`npx vitest run` **108 文件 / 1061 passed / 12 skipped**（+1 用例：C2b）；`npx playwright test tests/e2e/wave52-update-card-layout.spec.ts --retries=0` **6/6 passed**（C1/C2/C2b/C3/C5/C6，Console Error = 0）。
+- Dev 真实环境复验（vite dev 4176，真实 GitHub 检查）：标题行「软件自动更新」+ Switch 最右端、方框内已无「自动检查更新」、`上次检查：2026年10月27日` 紧邻 `v0.1.163`。证据：`.dev-team/evidence/wave-52/dev-server-v2-update-section.png`。
+- 实现偏离（Lead 裁决接受）：标题行用 `w-[680px] max-w-full` 而非字面 `max-w-[680px]`，以免与冻结 e2e 的 `locator("div.max-w-\\[680px\\]")` 在 strict mode 下撞车；容器 ≥680px 时右边缘等价（1280/780 实测差 0px）。**登记技术债**：e2e 以 Tailwind class 定位方框属脆弱写法，后续应为卡片加 `data-testid="config-update-card"` 并改用它。
