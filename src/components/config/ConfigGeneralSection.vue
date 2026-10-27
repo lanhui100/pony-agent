@@ -57,6 +57,29 @@ function installSignedUpdate() {
   void updateStore.installSignedUpdate();
 }
 
+// ── Wave-52 v3：版本行主按钮双模（检查更新 ⇄ 立即升级），不再有独立安装按钮 ──
+/** 主按钮是否处于「安装/升级」模式：安装中或存在可装的签名候选。 */
+const primaryInstallMode = computed(() => signedInstalling.value || signedUpdateAvailable.value);
+/** 主按钮忙碌态（两者共用同一个加载图标）。 */
+const primaryBusy = computed(() => signedInstalling.value || updateChecking.value);
+/** 四态文案优先级：安装中 > 可安装 > 检查中 > 空闲。 */
+const primaryLabel = computed(() => {
+  if (signedInstalling.value) return "正在升级…";
+  if (signedUpdateAvailable.value) return "立即升级";
+  if (updateChecking.value) return "检查中…";
+  return "检查更新";
+});
+const primaryDisabled = computed(() => signedInstalling.value || updateChecking.value);
+
+function onPrimaryAction() {
+  if (primaryDisabled.value) return;
+  if (signedUpdateAvailable.value) {
+    installSignedUpdate();
+    return;
+  }
+  checkForUpdateNow();
+}
+
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   year: "numeric",
   month: "short",
@@ -284,17 +307,18 @@ async function toggleAgentTraceReporting(enabled: boolean) {
               type="button"
               class="inline-flex shrink-0 items-center gap-1 rounded-[0.35rem] px-2 py-1 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
               :class="
-                updateChecking
+                primaryBusy
                   ? 'bg-stone-100 text-stone-400'
                   : 'bg-[#f3c98d] text-stone-900 hover:bg-[#f6dfb8]'
               "
-              :disabled="updateChecking || signedInstalling"
+              :disabled="primaryDisabled"
               data-testid="config-update-check-button"
-              @click="checkForUpdateNow()"
+              @click="onPrimaryAction()"
             >
-              <LoaderCircle v-if="updateChecking" class="h-3 w-3 animate-spin" />
+              <LoaderCircle v-if="primaryBusy" class="h-3 w-3 animate-spin" />
+              <ArrowUpCircle v-else-if="primaryInstallMode" class="h-3 w-3" />
               <RefreshCw v-else class="h-3 w-3" />
-              {{ updateChecking ? "检查中…" : "检查更新" }}
+              {{ primaryLabel }}
             </button>
           </div>
 
@@ -347,21 +371,8 @@ async function toggleAgentTraceReporting(enabled: boolean) {
             </template>
           </div>
 
-          <div class="flex items-center gap-2">
-            <button
-              v-if="signedUpdateAvailable || signedInstalling"
-              type="button"
-              class="inline-flex items-center gap-1 rounded-[0.35rem] bg-[#f3c98d] px-2 py-1 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="signedInstalling"
-              data-testid="config-update-install-button"
-              @click="installSignedUpdate()"
-            >
-              <LoaderCircle v-if="signedInstalling" class="h-3 w-3 animate-spin" />
-              <ArrowUpCircle v-else class="h-3 w-3" />
-              {{ signedInstalling ? "正在升级…" : "立即升级" }}
-            </button>
+          <div v-if="signedInstalling && updateStore.signedProgress !== null" class="flex items-center gap-2">
             <div
-              v-if="signedInstalling && updateStore.signedProgress !== null"
               class="h-1.5 w-28 overflow-hidden rounded-full bg-stone-100"
               data-testid="config-update-progress"
             >

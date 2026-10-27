@@ -57,3 +57,14 @@
 - 绿相（v2）：`npm run build` exit 0；`npx vitest run` **108 文件 / 1061 passed / 12 skipped**（+1 用例：C2b）；`npx playwright test tests/e2e/wave52-update-card-layout.spec.ts --retries=0` **6/6 passed**（C1/C2/C2b/C3/C5/C6，Console Error = 0）。
 - Dev 真实环境复验（vite dev 4176，真实 GitHub 检查）：标题行「软件自动更新」+ Switch 最右端、方框内已无「自动检查更新」、`上次检查：2026年10月27日` 紧邻 `v0.1.163`。证据：`.dev-team/evidence/wave-52/dev-server-v2-update-section.png`。
 - 实现偏离（Lead 裁决接受）：标题行用 `w-[680px] max-w-full` 而非字面 `max-w-[680px]`，以免与冻结 e2e 的 `locator("div.max-w-\\[680px\\]")` 在 strict mode 下撞车；容器 ≥680px 时右边缘等价（1280/780 实测差 0px）。**登记技术债**：e2e 以 Tailwind class 定位方框属脆弱写法，后续应为卡片加 `data-testid="config-update-card"` 并改用它。
+
+## 8. 契约 v3（用户反馈 2026-10-27 20:0x）
+
+用户反馈：「检查更新按钮点击后发现新版本，则转换为『立即升级』按钮，下方的立即升级按钮去除」。
+
+- 契约：C8 主按钮四态机（正在升级…/立即升级/检查中…/检查更新，含图标与点击路由）、C9 删除 `config-update-install-button`（版本行只允许 1 个 button）、C10 进度条保留。
+- 红相重锚：commit `c5a3892` —— `ConfigGeneralSectionSignedUpdate.spec.ts` **5 例红**（安装态主按钮不变形、独立按钮仍在、error 态回退断言失败、C8 模式机失败）。
+- 绿相：`npm run build` exit 0；全量 `npx vitest run` **108 文件 / 1063 passed / 12 skipped**（+2：C8 模式机 + C9）；`npx playwright test tests/e2e/wave52-update-card-layout.spec.ts --retries=0` **7/7 passed**（新增 C9 浏览器用例）。
+- Dev 真实环境复验（vite dev 4176）：卡片显示 `v0.1.164`、`上次检查：2026年10月27日`、主按钮「检查更新」，方框内已无独立安装按钮；DOM 快照确认 section 内仅 1 个 button。证据：`.dev-team/evidence/wave-52/dev-server-v3-update-section.png`。
+- **证据边界（如实声明）**：「立即升级 / 正在升级…」两态的**视觉**只能在真实 Tauri 桌面会话复现（`isSignedUpdaterAvailable()` 依赖 Tauri 运行时；浏览器/dev 永远走 disabled 分支）。该两态由 jsdom 四态机断言 + mock `@/lib/tauri-updater` 覆盖（6 例），不属于浏览器 E2E 覆盖范围。
+- 语义边界（供产品裁决，本次未做）：主按钮变形条件是「**可安装的签名更新**」（`signedStatus==='available'` 且候选非空）。若未来希望「GitHub 有新版但签名候选缺失」时也显示立即升级（回退到发布页跳转），需另立契约。
