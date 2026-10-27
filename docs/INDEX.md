@@ -73,6 +73,7 @@
 - [0050 配置页「全局轨迹上报」选项收敛为单行标签 + 右端开关](decisions/0050-trace-reporting-switch-ui-simplification.md)
 - [0051 可观测性上报三项修正（版本单一来源、治理 span 会话归属、思考/缓存 token 出口）](decisions/0051-observability-version-session-and-thinking-token-fixes.md)
 - [0052 可观测性语义轨补全（成本明细、未计价标记、枚举收敛、降级标记、可读 trace 名、工具调用 id）](decisions/0052-observability-semantic-completeness-fixes.md)
+- [0053 token / 速度口径真值契约（wave-54）](decisions/0053-token-speed-truth-contract.md)
 
 ## 3.1 交付证据归档
 

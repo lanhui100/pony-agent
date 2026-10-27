@@ -1,0 +1,41 @@
+{
+  "wave": 54,
+  "theme": "token / speed truth contract (span attributes + single speed formula + display discipline)",
+  "recorded_at": "2026-10-27T20:25:00+08:00",
+  "baseline_commit": "224f26f",
+  "worktree_dirty_preexisting": [],
+  "note": "wave-52 另一会话在飞：HEAD 在本波开始后前移到 224f26f（其实现提交）。wave-54 提交必须定向 add 自身文件，禁止 git add -A；audit-diff 基线用 224f26f。",
+  "gates": {
+    "vitest": {
+      "command": "npm run test:unit",
+      "exit_code": 1,
+      "test_files": "108 passed (108)",
+      "tests": "1063 passed | 12 skipped (1075)",
+      "known_noise": {
+        "kind": "pre-existing unhandled error (not a failing test)",
+        "error": "ReferenceError: window is not defined @ src/stores/runtime.ts:904 (tests/runtime-store.spec.ts 定时器回调)",
+        "policy": "wave-54 归因只看用例级结果与新增/变更文件相关用例；该 unhandled error 在改动前即存在，不归因本次改动。若绿相后该错误消失，也不作为 wave-54 成果。"
+      }
+    },
+    "cargo_test_lib": {
+      "command": "cargo test -p pony-agent-core --lib --target-dir target-test",
+      "exit_code": 0,
+      "result": "1175 passed; 0 failed; 0 ignored (50.75s)"
+    }
+  },
+  "grading": {
+    "level": "B",
+    "triggers": [
+      "跨 Rust/TS 多模块 + 触及 LLM 调用链与对外语义属性（tracing 契约）",
+      "UI 交互显示契约变更（HomeStatusPanel）"
+    ]
+  },
+  "observability_motion": {
+    "hit": true,
+    "reason": "改的就是 tracing 属性面 + UI 显示",
+    "required_gates": [
+      "audit-diff.sh --base c5a3892",
+      "check-declaration.sh /home/dm/pony-agent"
+    ]
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_cap_ms": 1000,
+    "backoff_ms": 500
+  },
+  "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "lock_acquisition_timeout_ms": 2000,
+  "deadlock_watchdog_timeout_ms": 5000,
+  "lock_forbidden_calls": [
+    "resolve_graph_run_for_retrieval",
+    "load_graph_run",
+    "load_execution_checkpoint",
+    "load_active_graph_run_for_session"
+  ],
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "logging_scope": "new_structured_logging_surface_only",
+  "logging_legacy_eprintln_exempt": true,
+  "logging_debt_ref": "PA-119",
+  "logging_eprintln_exempt_scope": "existing_style_non_json_lock_poison_recovery_diagnostics",
+  "logging_eprintln_exempt_covers_new_lines": 1,
+  "logging_compliance_claimed": false,
+  "resource_release": [
+    "bounded_queue",
+    "max_queue_capacity_1024",
+    "fire_and_forget",
+    "worker_thread_shutdown",
+    "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
+    "wave9_job_handle_close_on_terminate_success",
+    "wave9_suspended_process_resume_fail_closed_cleanup"
+  ],
+  "auto_continue_max": 8,
+  "goal_store_atomic_write": true,
+  "observability": {
+    "exporter_flush_timeout_ms": 3000,
+    "log_file_max_bytes": 524288,
+    "setting_precedence": [
+      "settings",
+      "env",
+      "default"
+    ],
+    "cost_precision_decimals": 6,
+    "cost_budget_semantics": "soft_warn"
+  }
+}

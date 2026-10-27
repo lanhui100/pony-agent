@@ -156,3 +156,17 @@ note: >-
   tracing 唯一落点仍 `crates/pony-agent-core/src/agent/otel/mod.rs`（新增入口均为附加式，旧签名不动）。
   已知待办（不在本维闭环内）：Langfuse trace 级 usage/totalCost 恒空属 infra 侧聚合行为；
   `langfuse.user.id` 仍仅由 env 注入（用户归因需产品决策）。
+
+  【wave-54 归属登记｜token / 速度口径真值（ADR 0053）】
+  (1) tracing｜per-call 真值键：`llm.chat` 增 `llm.call.duration_ms` / `llm.call.ttft_ms`（有值才写）/
+      `llm.call.generation_ms`；根 `agent.turn` 增 `agent.turn.duration_ms` / `agent.turn.ttft_ms` /
+      `agent.turn.calls` / `agent.turn.speed.tokens_per_second` + `agent.turn.speed.basis=turn_weighted`。
+      此前 `record_turn_speed` 为 dead code（全仓 0 调用），速度在 tracing 面无可对账属性；
+      本波把 UI 显示值与其 span 真值收敛为同一公式（Σoutput / Σ(duration−ttft)）。
+  (2) tracing｜用量来源与上下文：新增 `agent.usage.origin`（`provider` | `estimated_chars`），
+      把「provider 上报」与「chars/4 估算」显式分离（此前估算值冒充真值且无标记）；
+      `gen_ai.usage.context_window` / `context_ratio` 改为传真实 `provider.context_window_tokens()`
+      （此前 4 个调用点恒传 `None`，24h 实测 0 条 trace 带该键）。
+  (3) 四维归属不变：不新增 metrics/logs 出口（N-A 结构性理由不变），issues 落点与异常码不变；
+      新增键全部为附加式（旧属性值与既有签名零变更），tracing 唯一落点仍为
+      `crates/pony-agent-core/src/agent/otel/mod.rs`。

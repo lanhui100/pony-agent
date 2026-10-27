@@ -86,6 +86,43 @@ pub const ATTR_GOVERNANCE_UNPRICED_TURNS: &str = "governance.unpriced_turns";
 /// 整轮 turn 聚合成本（USD，f64）。Wave-5 K4：无有效计价时**不输出该键**（严禁写 0.0）。
 pub const ATTR_AGENT_TURN_COST_USD: &str = "agent.turn.cost.usd";
 
+// --------------------- 属性键（wave-54 C1/C2：per-call 真值 + turn 速度唯一口径）
+//
+// 契约来源：`.dev-team/contract-matrix-wave54.md` §1 C1/C2（Lead 冻结，只读）。
+// 命名：`llm.call.*` 属 pony-agent 自有 per-call 维度（OTel GenAI semconv 未定义该组键，
+// 故**不是** semconv 标准键），`agent.usage.*` / `agent.turn.*` 沿用既有自有维度前缀；
+// 与语义轨 `gen_ai.*` 并存（`gen_ai.speed.tokens_per_second` 语义不变）。
+// 通用纪律：键不存在即「未知」，**严禁**写 0/空串占位。
+
+/// 单次 provider 调用耗时（毫秒，I64）；wave-54 C1，与 `ProviderCallCacheRecord.turnDurationMs`
+/// 同窗口；`None` ⇒ 不输出该键。
+pub const ATTR_LLM_CALL_DURATION_MS: &str = "llm.call.duration_ms";
+
+/// 单次 provider 调用首包耗时（毫秒，I64）；wave-54 C1，**仅** `Some` 时输出
+/// （buffered/无首包 ⇒ 键不存在）。
+pub const ATTR_LLM_CALL_TTFT_MS: &str = "llm.call.ttft_ms";
+
+/// 单次 provider 调用生成耗时（毫秒，I64）；wave-54 C1，`= duration - ttft`
+/// （当且仅当 ttft 存在且 `duration > ttft`），否则 `= duration`。
+pub const ATTR_LLM_CALL_GENERATION_MS: &str = "llm.call.generation_ms";
+
+/// usage 来源（字符串，`provider` | `estimated_chars`）；wave-54 C1/C3，
+/// 未记录 usage ⇒ 键不存在（估算值不得冒充真值）。
+pub const ATTR_AGENT_USAGE_ORIGIN: &str = "agent.usage.origin";
+
+/// turn 速度口径标记（字符串）；wave-54 C2，取值 `turn_weighted`。
+pub const ATTR_AGENT_TURN_SPEED_BASIS: &str = "agent.turn.speed.basis";
+
+/// turn 级耗时（毫秒，I64）；wave-54 C2，`None` ⇒ 不输出该键。
+pub const ATTR_AGENT_TURN_DURATION_MS: &str = "agent.turn.duration_ms";
+
+/// turn 级 TTFT（毫秒，I64）；wave-54 C2 语义为「首个带 ttft 的 per-call 值」（不跨 hop 采样），
+/// `None` ⇒ 不输出该键。
+pub const ATTR_AGENT_TURN_TTFT_MS: &str = "agent.turn.ttft_ms";
+
+/// turn 内已完成调用数（I64）；wave-54 C2，`None` ⇒ 不输出该键。
+pub const ATTR_AGENT_TURN_CALLS: &str = "agent.turn.calls";
+
 /// 模型供应商展示名（wave-53 C3，如 `PonyLlm`）：与枚举化的 [`ATTR_GEN_AI_SYSTEM`] 并存。
 pub const ATTR_GEN_AI_PROVIDER_NAME: &str = "gen_ai.provider.name";
 
@@ -1660,6 +1697,18 @@ impl TurnTraceGuard {
             None
         }
     }
+
+    /// 记录 turn 级速度真值（wave-54 C2 契约空桩）：映射 [`ATTR_AGENT_TURN_DURATION_MS`] /
+    /// [`ATTR_AGENT_TURN_TTFT_MS`] / [`ATTR_AGENT_TURN_CALLS`]。
+    /// 当前为契约冻结空桩，实现由 rust-exec 在本波内落地。
+    pub fn record_turn_timing(
+        &mut self,
+        _duration_ms: Option<u64>,
+        _ttft_ms: Option<u64>,
+        _calls: Option<u32>,
+    ) {
+        unimplemented!("wave-54 stub")
+    }
 }
 
 impl Drop for TurnTraceGuard {
@@ -1958,6 +2007,19 @@ impl LlmSpanGuard {
                 self.context_ratio = Some((input as f64) / (window as f64));
             }
         }
+    }
+
+    /// 记录本次调用的耗时与首包（wave-54 C1 契约空桩）：映射 [`ATTR_LLM_CALL_DURATION_MS`] /
+    /// [`ATTR_LLM_CALL_TTFT_MS`] / [`ATTR_LLM_CALL_GENERATION_MS`]。
+    /// 当前为契约冻结空桩，实现由 rust-exec 在本波内落地。
+    pub fn record_call_timing(&mut self, _duration_ms: Option<u64>, _ttft_ms: Option<u64>) {
+        unimplemented!("wave-54 stub")
+    }
+
+    /// 记录 usage 来源（wave-54 C1/C3 契约空桩）：映射 [`ATTR_AGENT_USAGE_ORIGIN`]
+    /// （`provider` | `estimated_chars`）。当前为契约冻结空桩，实现由 rust-exec 在本波内落地。
+    pub fn record_usage_origin(&mut self, _origin: Option<&'static str>) {
+        unimplemented!("wave-54 stub")
     }
 }
 

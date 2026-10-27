@@ -356,6 +356,12 @@ export type ProviderCallCacheRecord = {
   turnDurationMs?: number | null;
   latencyKind?: ProviderLatencyKind | null;
   prefixMutationReasons?: PrefixMutationReason[];
+  /** wave-54 契约 C3（.dev-team/contract-matrix-wave54.md）：usage 来源
+   *  `provider` | `estimated_chars`；缺失表示未知（不得静默当真值）。 */
+  usageOrigin?: string;
+  /** wave-54 契约 C4：上下文占用归一值（anthropic 系 = input + cache_read，
+   *  其余协议 = input）；缺失表示无值，UI 显示 `—`。 */
+  contextInputTokens?: number;
 };
 
 export type BuildContextObservation = {
@@ -805,6 +811,11 @@ export type TurnTraceRecord = {
   firstTokenLatencyMs?: number | null;
   turnDurationMs?: number | null;
   costUsd?: number | null;
+  /** wave-54 契约 C3（.dev-team/contract-matrix-wave54.md）：usage 来源
+   *  `provider` | `estimated_chars`；缺失表示未知（`estimated_chars` 时 UI 需加 `≈`）。 */
+  usageOrigin?: string;
+  /** wave-54 契约 C4：上下文占用归一值（协议归一口径，缺失 ⇒ UI `—`）。 */
+  contextInputTokens?: number;
   updatedAt: number;
 };
 

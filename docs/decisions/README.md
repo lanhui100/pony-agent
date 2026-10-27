@@ -72,6 +72,7 @@
 - [0047 Agent Trace 迁移至 OpenTelemetry → Langfuse（PonySentry Trace 下线 + 全局上报开关）](0047-agent-trace-otel-langfuse-migration.md)
 - [0050 配置页「全局轨迹上报」选项收敛为单行标签 + 右端开关](0050-trace-reporting-switch-ui-simplification.md)
 - [0051 可观测性上报三项修正（版本单一来源、治理 span 会话归属、思考/缓存 token 出口）](0051-observability-version-session-and-thinking-token-fixes.md)
+- [0053 token / 速度口径真值契约（wave-54）](0053-token-speed-truth-contract.md)
 
 ### 已接替
 
