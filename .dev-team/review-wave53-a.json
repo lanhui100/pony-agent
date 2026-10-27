@@ -1,0 +1,16 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 2090,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '2089,2091p;2101,2104p' crates/pony-agent-core/src/agent/otel/mod.rs   # 旧入口在克隆后（2090）才于委托函数内做门禁判定（2102）：门禁关闭（生产默认）时每次工具调用仍克隆 3 个 String + Option<String>。绝对量级可忽略（一次工具调用开销在毫秒以上），但克隆置于门禁前属可避免的多余分配；语义与改动前等价（无行为差异）。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

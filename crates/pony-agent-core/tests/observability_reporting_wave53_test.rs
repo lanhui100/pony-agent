@@ -21,7 +21,10 @@
 //! - **T4** degraded 语义拆键：`completed` + 1 个 failed 工具 ⇒ `agent.turn.degraded=true` +
 //!   `agent.turn.tool_failures=1`；全 success ⇒ 两键均不存在；`phase="error"` + 1 个 failed 工具 ⇒
 //!   有 `tool_failures`、**无** `degraded`（错误语义仍由 outcome/status 表达）。
-//! - **T5** 可读 trace 名：`turn_span_attributes(sequence=7)` ⇒ `langfuse.trace.name == "pony-agent#turn-7"`。
+//! - **T5** 可读 trace 名（**C5 v2**）：`turn_span_attributes` 的 `langfuse.trace.name` =
+//!   `pony-agent#turn-<sequence>`（`turn_id` 空）/ `pony-agent#turn-<sequence>@<turn_id 尾 6 字符>`
+//!   （非空，按字符截尾、不足 6 位取全串）；例：`sequence=7`+`turn-abc-raw-id` ⇒ `pony-agent#turn-7@raw-id`，
+//!   `sequence=0`+`1793090889676` ⇒ `pony-agent#turn-0@889676`。
 //! - **T6** tool call id：`call_id=Some("call_1")` ⇒ `gen_ai.tool.call.id=="call_1"`；`None` ⇒ 键不存在。
 //!
 //! 契约演进（2026-10-27 17:35 Lead 裁决 = 方案 a「附加式 API，历史冻结工件零改动」）：
@@ -1021,10 +1024,16 @@ fn t4_degraded_semantics_wire() {
 
 // ============================================================ T5 · 可读 trace 名
 
-/// T5：`langfuse.trace.name` 必须是 `pony-agent#turn-<sequence>`（十进制、无零填充）；
-/// 同 span 上的 `agent.turn.id` / `agent.turn.sequence` 语义零变更。
+/// T5（契约 **C5 v2** 重锚）：`langfuse.trace.name` 必须是
+/// `pony-agent#turn-<sequence>`（`turn_id` 为空）/ `pony-agent#turn-<sequence>@<turn_id 尾 6 字符>`
+/// （`turn_id` 非空，不足 6 位取全串；按**字符**截尾，禁止 panic；十进制、无零填充、无空白）。
+///
+/// 修订缘由：两个运行时入口（`runtime/turn_sync.rs` / `runtime/turn_stream.rs`）均硬传
+/// `sequence = 0`，纯 `<sequence>` 命名会让所有 turn 同名 ⇒ 必须叠加 turn_id 尾码以可区分。
+/// 同 span 上的 `agent.turn.id` / `agent.turn.sequence` / `langfuse.session.id` 语义零变更。
 #[test]
 fn t5_trace_name_readable() {
+    // ① 基准：sequence=7 + turn_id="turn-abc-raw-id" ⇒ 尾 6 **字符** = "raw-id"。
     let attributes = otel::turn_span_attributes(&TurnSpanInput {
         session_id: "sess-wave53-t5".to_string(),
         user_id: None,
@@ -1035,15 +1044,16 @@ fn t5_trace_name_readable() {
 
     assert_eq!(
         pure_str(&attributes, KEY_TRACE_NAME),
-        Some("pony-agent#turn-7"),
-        "T5（BLOCKING）：`langfuse.trace.name` 必须为 `pony-agent#turn-7`；属性全集：{:?}",
+        Some("pony-agent#turn-7@raw-id"),
+        "T5①（BLOCKING, C5 v2）：`turn_id=turn-abc-raw-id` 的 trace 名必须为 `pony-agent#turn-7@raw-id`\
+         （尾 6 字符 = raw-id）；属性全集：{:?}",
         pure_keys(&attributes)
     );
-    // 负向对照：不得再回落到 turn_id（旧行为会让 Langfuse 列表出现不可读的内部 id）。
+    // 负向对照：不得直接使用 turn_id（旧行为会让 Langfuse 列表出现不可读的内部 id）。
     assert_ne!(
         pure_str(&attributes, KEY_TRACE_NAME),
         Some("turn-abc-raw-id"),
-        "T5：trace 名不得直接使用 turn_id"
+        "T5①：trace 名不得直接等于 turn_id"
     );
     // 既有键语义零变更。
     assert_eq!(
@@ -1062,7 +1072,37 @@ fn t5_trace_name_readable() {
         "T5：`langfuse.session.id` 语义不变"
     );
 
-    // 无零填充：sequence=10 必须写成 `#turn-10`（不是 `#turn-010`）。
+    // ② 同名问题已解：两个 sequence 恒为 0 的 turn（真实运行时形态）必须可区分。
+    let same_seq_a = otel::turn_span_attributes(&TurnSpanInput {
+        session_id: "sess-wave53-t5".to_string(),
+        user_id: None,
+        turn_id: "1793090889676".to_string(),
+        sequence: 0,
+        phase: "completed".to_string(),
+    });
+    assert_eq!(
+        pure_str(&same_seq_a, KEY_TRACE_NAME),
+        Some("pony-agent#turn-0@889676"),
+        "T5②（BLOCKING, C5 v2）：`sequence=0` + `turn_id=1793090889676` 必须为 \
+         `pony-agent#turn-0@889676`（尾 6 字符），证明「所有 turn 同名」已解；属性全集：{:?}",
+        pure_keys(&same_seq_a)
+    );
+    let same_seq_b = otel::turn_span_attributes(&TurnSpanInput {
+        session_id: "sess-wave53-t5".to_string(),
+        user_id: None,
+        turn_id: "1793090889677".to_string(),
+        sequence: 0,
+        phase: "completed".to_string(),
+    });
+    assert_ne!(
+        pure_str(&same_seq_a, KEY_TRACE_NAME),
+        pure_str(&same_seq_b, KEY_TRACE_NAME),
+        "T5②：sequence 同为 0 的两个不同 turn 不得同名（{:?} vs {:?}）",
+        pure_str(&same_seq_a, KEY_TRACE_NAME),
+        pure_str(&same_seq_b, KEY_TRACE_NAME)
+    );
+
+    // ③ 无零填充：sequence=10 必须写成 `#turn-10`（不是 `#turn-010`）。
     let padded = otel::turn_span_attributes(&TurnSpanInput {
         session_id: "sess-wave53-t5".to_string(),
         user_id: None,
@@ -1072,9 +1112,57 @@ fn t5_trace_name_readable() {
     });
     assert_eq!(
         pure_str(&padded, KEY_TRACE_NAME),
-        Some("pony-agent#turn-10"),
-        "T5：序号必须十进制无零填充（`pony-agent#turn-10`），实际 {:?}",
+        Some("pony-agent#turn-10@seq-10"),
+        "T5③：序号必须十进制无零填充（`pony-agent#turn-10@seq-10`），实际 {:?}",
         pure_str(&padded, KEY_TRACE_NAME)
+    );
+
+    // ④ turn_id 为空 ⇒ 纯 `pony-agent#turn-<sequence>`（不带 `@` 后缀）。
+    let empty_turn = otel::turn_span_attributes(&TurnSpanInput {
+        session_id: "sess-wave53-t5".to_string(),
+        user_id: None,
+        turn_id: String::new(),
+        sequence: 3,
+        phase: "completed".to_string(),
+    });
+    assert_eq!(
+        pure_str(&empty_turn, KEY_TRACE_NAME),
+        Some("pony-agent#turn-3"),
+        "T5④（C5 v2）：`turn_id` 为空时必须退化为 `pony-agent#turn-3`（无 `@` 后缀、无空白）；\
+         实际 {:?}",
+        pure_str(&empty_turn, KEY_TRACE_NAME)
+    );
+
+    // ⑤ 尾码不足 6 位 ⇒ 取全串（不得补空格/补零）。
+    let short_turn = otel::turn_span_attributes(&TurnSpanInput {
+        session_id: "sess-wave53-t5".to_string(),
+        user_id: None,
+        turn_id: "abc".to_string(),
+        sequence: 1,
+        phase: "completed".to_string(),
+    });
+    assert_eq!(
+        pure_str(&short_turn, KEY_TRACE_NAME),
+        Some("pony-agent#turn-1@abc"),
+        "T5⑤（C5 v2）：turn_id 不足 6 位时必须取全串（`pony-agent#turn-1@abc`），实际 {:?}",
+        pure_str(&short_turn, KEY_TRACE_NAME)
+    );
+
+    // ⑥ 非 ASCII turn_id 必须按**字符**截尾（按字节切片会在 UTF-8 边界 panic）。
+    //    "turn-会话-阶段测试" 共 12 字符，尾 6 字符 = "话-阶段测试"。
+    let unicode_turn = otel::turn_span_attributes(&TurnSpanInput {
+        session_id: "sess-wave53-t5".to_string(),
+        user_id: None,
+        turn_id: "turn-会话-阶段测试".to_string(),
+        sequence: 2,
+        phase: "completed".to_string(),
+    });
+    assert_eq!(
+        pure_str(&unicode_turn, KEY_TRACE_NAME),
+        Some("pony-agent#turn-2@话-阶段测试"),
+        "T5⑥（C5 v2）：非 ASCII turn_id 必须按字符截尾（不得按字节切片、不得 panic）；\
+         期望 `pony-agent#turn-2@话-阶段测试`，实际 {:?}",
+        pure_str(&unicode_turn, KEY_TRACE_NAME)
     );
 }
 

@@ -52,8 +52,13 @@
   `phase != "completed"`（含 error/aborted）⇒ **不输出** `degraded`（错误语义仍由 outcome/status 表达）。
 - 既有 `phase` / `outcome` / `set_status` 语义**零变更**。
 
-### C5 可读 trace 名
-- `turn_span_attributes` 的 `langfuse.trace.name` = `pony-agent#turn-<sequence>`（十进制，无零填充）。
+### C5 可读 trace 名（**契约修订 v2，2026-10-27 18:05，Lead 裁决**）
+- 修订缘由（L3 审查 + Lead 复核）：两个运行时入口 `runtime/turn_sync.rs:466` 与 `runtime/turn_stream.rs:1298`
+  均硬传 `sequence = 0` ⇒ 纯 `<sequence>` 命名会让**所有 turn 同名**（`pony-agent#turn-0`），
+  可读但不可区分，「按名检索」目标落空。
+- 修订后契约：`langfuse.trace.name` = `pony-agent#turn-<sequence>`（`turn_id` 为空时）
+  / `pony-agent#turn-<sequence>@<turn_id 尾 6 字符>`（`turn_id` 非空时，取尾 6 位，不足 6 位则取全串）；
+  十进制、无零填充、无空白。turn_id 含非 ASCII 时按字符（非字节）截尾，禁止 panic。
 - `langfuse.session.id` / `agent.turn.id` / `agent.turn.sequence` 属性不变。
 
 ### C6 tool call id（同样适用附加式 API 裁决）

@@ -140,3 +140,19 @@ note: >-
       `gen_ai.usage.cache_read.input_tokens`（semconv 标准名；有值才写、0 有效、`u64→i64` 饱和；
       cache 键仅 OpenAI 协议族上报，Anthropic 语义 fail-closed 且登记为已知限制）。
   四维归属不变：不新增 metrics/logs/issues 出口，不新增端点/环境变量/依赖；tracing 唯一落点不变。
+
+  【wave-53 归属登记｜第二轮真实会话审计（会话 pa_01a17c85 / trace eed9ba47）驱动的语义轨补全（ADR 0052）】
+  (1) tracing｜成本口径：`llm.chat` 增 `langfuse.observation.cost_details`（input/output/total 三分量，
+      有价才发）与 `pony.cost.priced`（有 usage 无成本 ⇒ false）：在 Tempo/原始属性面可区分「0 元」与
+      「未计价」，Langfuse 展示面仍为 `costDetails={}` / 0（无价模型需产品侧补价后才有数值）；
+      网关型号缺单价仍无成本数值，属产品侧补价待办（不计入本维缺口）。
+  (2) tracing｜枚举收敛：`gen_ai.system` 改为协议枚举（openai/anthropic/google/generic），
+      展示名（PonyLlm）迁至 `gen_ai.provider.name`；跨宿主同协议取值一致。
+  (3) tracing｜失败语义：新增 `agent.turn.degraded`（completed 且有工具失败）与
+      `agent.turn.tool_failures`；既有 phase/outcome/status 语义零变更（成功率与错误率口径解耦）。
+  (4) tracing｜可读性：`langfuse.trace.name` = `pony-agent#turn-<sequence>`（原为数字 turn id）。
+  (5) tracing｜工具对账：`tool.call` 增 `gen_ai.tool.call.id`（模型侧 call id）。
+  四维归属不变：仍不新增 metrics/logs 出口（N-A 结构性理由不变），issues 落点不变；
+  tracing 唯一落点仍 `crates/pony-agent-core/src/agent/otel/mod.rs`（新增入口均为附加式，旧签名不动）。
+  已知待办（不在本维闭环内）：Langfuse trace 级 usage/totalCost 恒空属 infra 侧聚合行为；
+  `langfuse.user.id` 仍仅由 env 注入（用户归因需产品决策）。

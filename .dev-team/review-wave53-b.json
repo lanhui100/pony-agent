@@ -1,0 +1,54 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "docs/observability.yaml",
+    "docs/audit/observability-audit-2026-10-27b.md",
+    "docs/decisions/0052-observability-semantic-completeness-fixes.md"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "line": 466,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n -A4 'begin_turn_trace(' crates/pony-agent-core/src/agent/runtime/turn_sync.rs crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "docs/audit/observability-audit-2026-10-27b.md",
+      "line": 114,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n -A4 'begin_turn_trace(' crates/pony-agent-core/src/agent/runtime/turn_sync.rs; git status --short crates/pony-agent-core/src/agent/otel/mod.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 146,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'ATTR_PONY_COST_PRICED\\|langfuse\\.observation\\.cost_details' crates/pony-agent-core/src/agent/otel/mod.rs; grep -n 'costDetails' docs/audit/observability-audit-2026-10-27b.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/audit/observability-audit-2026-10-27b.md",
+      "line": 14,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "test -f scripts/check-declaration.sh || echo 'MISSING: repo has no scripts/check-declaration.sh'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/audit/observability-audit-2026-10-27b.md",
+      "line": 15,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "git diff --stat origin/main...HEAD -- docs/observability.yaml | wc -l",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/decisions/0052-observability-semantic-completeness-fixes.md",
+      "line": 65,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git status --short crates/pony-agent-core/src/agent/otel/mod.rs crates/pony-agent-core/src/agent/turn_flow.rs; grep -n -A4 'begin_turn_trace(' crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}

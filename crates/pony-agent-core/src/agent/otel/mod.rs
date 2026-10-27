@@ -865,6 +865,43 @@ fn round_cost_usd(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
 }
 
+/// 构造 [`ATTR_LANGFUSE_TRACE_NAME`]（wave-53 C5 v2，纯函数）。
+///
+/// 语义：`pony-agent#turn-<sequence>`（`turn_id` 为空/全空白）/
+/// `pony-agent#turn-<sequence>@<turn_id 尾 6 字符>`（`turn_id` 非空，不足 6 位取全串）。
+/// 尾码按**字符**（`char`）截尾而非字节切片：`turn_id` 含非 ASCII 时按字节切片会落进
+/// UTF-8 多字节边界直接 panic；十进制、无零填充、无空白。
+fn turn_trace_name(sequence: u64, turn_id: &str) -> String {
+    let trimmed = turn_id.trim();
+    if trimmed.is_empty() {
+        return format!("pony-agent#turn-{sequence}");
+    }
+    let tail: String = {
+        let chars: Vec<char> = trimmed.chars().collect();
+        let start = chars.len().saturating_sub(6);
+        chars[start..].iter().collect()
+    };
+    format!("pony-agent#turn-{sequence}@{tail}")
+}
+
+/// 构造 [`ATTR_LANGFUSE_OBSERVATION_COST_DETAILS`] 的单行 JSON（wave-53 C1）。
+///
+/// 语义：键只允许 `input` / `output` / `total`，各自 `Some` 才出现（`total` 由调用方保证有效）；
+/// 数字保留 6 位小数（`{:.6}`，与 [`round_cost_usd`] 的精度口径一致）。
+/// 为什么手写而不用序列化库：本波硬约束「禁止引入新依赖」，且键集固定、无数值歧义。
+/// 非有限分量一律丢弃（`{:.6}` 渲染 `NaN`/`inf` 会产出非法 JSON）。
+fn cost_details_json(input_cost_usd: Option<f64>, output_cost_usd: Option<f64>, total: f64) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if let Some(value) = input_cost_usd.filter(|value| value.is_finite()) {
+        parts.push(format!("\"input\":{value:.6}"));
+    }
+    if let Some(value) = output_cost_usd.filter(|value| value.is_finite()) {
+        parts.push(format!("\"output\":{value:.6}"));
+    }
+    parts.push(format!("\"total\":{total:.6}"));
+    format!("{{{}}}", parts.join(","))
+}
+
 /// 宿主设置桥接：把持久化的 `AppSettings.agent_trace_reporting` 同步到 OTel 门禁。
 ///
 /// 调用方：Tauri 侧 `load_app_settings` / `save_app_settings`（D7：启动即按持久化值生效，
@@ -1098,13 +1135,13 @@ pub fn turn_span_attributes(input: &TurnSpanInput) -> Vec<(String, AttrValue)> {
     let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(7);
 
     push_str(&mut attributes, ATTR_LANGFUSE_SESSION_ID, &input.session_id);
-    // trace 名取 turn 级展示名：优先 turn_id，回落到 session_id（两者皆空则不输出）。
-    let trace_name = if input.turn_id.is_empty() {
-        input.session_id.as_str()
-    } else {
-        input.turn_id.as_str()
-    };
-    push_str(&mut attributes, ATTR_LANGFUSE_TRACE_NAME, trace_name);
+    // wave-53 C5 v2：trace 名可读且可区分 —— `pony-agent#turn-<sequence>`（turn_id 为空）/
+    // `pony-agent#turn-<sequence>@<turn_id 尾 6 字符>`（turn_id 非空）。
+    // 修订缘由：两个运行时入口（turn_sync / turn_stream）均硬传 `sequence = 0`，纯序号命名会让
+    // 所有 turn 同名；尾码让「按名检索」重新可用。
+    // `langfuse.session.id` / `agent.turn.id` / `agent.turn.sequence` 语义零变更。
+    let trace_name = turn_trace_name(input.sequence, &input.turn_id);
+    push_str(&mut attributes, ATTR_LANGFUSE_TRACE_NAME, &trace_name);
     push_str(
         &mut attributes,
         ATTR_GEN_AI_OPERATION_NAME,
@@ -1123,13 +1160,22 @@ pub fn turn_span_attributes(input: &TurnSpanInput) -> Vec<(String, AttrValue)> {
     attributes
 }
 
-/// 协议标签 → `gen_ai.system` 枚举值（wave-53 C3 契约桩，空桩未实现）。
+/// 协议标签 → `gen_ai.system` 枚举值（wave-53 C3）。
 ///
 /// 冻结契约：`openai*` → `openai`；`anthropic*` → `anthropic`；`gemini*` / `google*` → `google`；
-/// 其余 → `generic`。入参本身也过映射（幂等），未实现的空桩体由实现波次补齐。
-#[allow(unused_variables)] // 空桩阶段参数未被读取；实现落地时随之移除。
+/// 其余 → `generic`。入参本身也过映射（幂等：`"openai"` → `"openai"`），因此调用点二次映射
+/// 不会漂移。大小写不敏感（`PonyLlm` → `generic`）。
 pub fn gen_ai_system_enum(protocol_label: &str) -> &'static str {
-    unimplemented!()
+    let normalized = protocol_label.trim().to_ascii_lowercase();
+    if normalized.starts_with("openai") {
+        "openai"
+    } else if normalized.starts_with("anthropic") {
+        "anthropic"
+    } else if normalized.starts_with("gemini") || normalized.starts_with("google") {
+        "google"
+    } else {
+        "generic"
+    }
 }
 
 /// LLM 属性映射（纯函数，无网络、无全局态）。
@@ -1138,10 +1184,29 @@ pub fn gen_ai_system_enum(protocol_label: &str) -> &'static str {
 /// 语义：恒输出 [`ATTR_GEN_AI_SYSTEM`] 与 [`ATTR_GEN_AI_OPERATION_NAME`]；
 /// `model` 非空时同时输出 [`ATTR_GEN_AI_REQUEST_MODEL`] 与
 /// [`ATTR_LANGFUSE_OBSERVATION_MODEL_NAME`]（同值双写）；token 字段各自非空才输出。
+///
+/// wave-53 C3：`gen_ai.system` 走 [`gen_ai_system_enum`] 枚举映射（协议标签不直接上 wire）；
+/// 本入口无展示名通道 ⇒ **不输出** [`ATTR_GEN_AI_PROVIDER_NAME`]（等价于传 `None` 委托）。
 pub fn llm_span_attributes(input: &LlmSpanInput) -> Vec<(String, AttrValue)> {
-    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(6);
+    llm_span_attributes_with_provider(input, None)
+}
 
-    push_str(&mut attributes, ATTR_GEN_AI_SYSTEM, &input.provider_kind);
+/// 带供应商展示名的 LLM 属性映射（wave-53 C3 附加式 API）。
+///
+/// 冻结契约：`gen_ai.system = gen_ai_system_enum(input.provider_kind)`（入参也过映射，保证幂等）；
+/// `provider_name` 非空 ⇒ 追加 [`ATTR_GEN_AI_PROVIDER_NAME`]（展示名，如 `PonyLlm`）；其余键与
+/// [`llm_span_attributes`] 完全一致。旧函数等价于传 `None` 委托本函数。
+pub fn llm_span_attributes_with_provider(
+    input: &LlmSpanInput,
+    provider_name: Option<&str>,
+) -> Vec<(String, AttrValue)> {
+    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(7);
+
+    push_str(
+        &mut attributes,
+        ATTR_GEN_AI_SYSTEM,
+        gen_ai_system_enum(&input.provider_kind),
+    );
     if let Some(model) = input.model.as_deref() {
         push_str(&mut attributes, ATTR_GEN_AI_REQUEST_MODEL, model);
         push_str(
@@ -1167,21 +1232,12 @@ pub fn llm_span_attributes(input: &LlmSpanInput) -> Vec<(String, AttrValue)> {
         ATTR_GEN_AI_OPERATION_NAME,
         &input.operation,
     );
+    // 展示名通道：空串/全空白等价于缺失（禁止空串占位）。
+    if let Some(provider_name) = provider_name.filter(|name| !name.trim().is_empty()) {
+        push_str(&mut attributes, ATTR_GEN_AI_PROVIDER_NAME, provider_name);
+    }
 
     attributes
-}
-
-/// 带供应商展示名的 LLM 属性映射（wave-53 C3 附加式 API，空桩未实现）。
-///
-/// 冻结契约：`gen_ai.system = gen_ai_system_enum(input.provider_kind)`（入参也过映射，保证幂等）；
-/// `provider_name` 非空 ⇒ 追加 [`ATTR_GEN_AI_PROVIDER_NAME`]（展示名，如 `PonyLlm`）；其余键与
-/// [`llm_span_attributes`] 完全一致。旧函数等价于传 `None` 委托本函数。
-#[allow(unused_variables)] // 空桩阶段展示名未被读取；实现落地时随之移除。
-pub fn llm_span_attributes_with_provider(
-    input: &LlmSpanInput,
-    provider_name: Option<&str>,
-) -> Vec<(String, AttrValue)> {
-    unimplemented!()
 }
 
 /// 「细分用量」属性映射（纯函数，无网络、无全局态；wave-51 C3 契约桩）。
@@ -1252,16 +1308,19 @@ pub fn tool_span_attributes(input: &ToolSpanInput) -> Vec<(String, AttrValue)> {
 }
 
 
-/// 带模型侧 tool call id 的工具属性映射（wave-53 C6 附加式 API，空桩未实现）。
+/// 带模型侧 tool call id 的工具属性映射（wave-53 C6 附加式 API）。
 ///
-/// 冻结契约：`call_id` 非空 ⇒ 追加 [`ATTR_GEN_AI_TOOL_CALL_ID`]；`None` ⇒ **不输出该键**；
-/// 其余键与 [`tool_span_attributes`] 完全一致。旧函数等价于传 `None` 委托本函数。
-#[allow(unused_variables)] // 空桩阶段 call_id 未被读取；实现落地时随之移除。
+/// 冻结契约：`call_id` 非空 ⇒ 追加 [`ATTR_GEN_AI_TOOL_CALL_ID`]；`None`/空串 ⇒ **不输出该键**；
+/// 其余键与 [`tool_span_attributes`] 完全一致。旧函数等价于传 `None`。
 pub fn tool_span_attributes_with_call_id(
     input: &ToolSpanInput,
     call_id: Option<&str>,
 ) -> Vec<(String, AttrValue)> {
-    unimplemented!()
+    let mut attributes = tool_span_attributes(input);
+    if let Some(call_id) = call_id.filter(|value| !value.trim().is_empty()) {
+        push_str(&mut attributes, ATTR_GEN_AI_TOOL_CALL_ID, call_id);
+    }
+    attributes
 }
 
 // ---------------------------------------------------------------- W3C Trace Context 契约辅助与空桩
@@ -1607,6 +1666,9 @@ impl Drop for TurnTraceGuard {
     fn drop(&mut self) {
         // PA-154：先取走本轮错误聚合（取走即清零 ⇒ 跨 turn 不污染）；无活动 turn 时无副作用。
         let aggregated_error = take_active_turn_error();
+        // wave-53 C4：degraded 判定必须在 `self.phase.take()` **之前**快照相位，
+        // 否则「completed + 工具失败」永远判不出来。
+        let phase_snapshot = self.phase.clone();
         let phase_failed = self.phase.as_deref() == Some("failed");
         if let Some(phase) = self.phase.take() {
             if let Some(span) = self.span.as_mut() {
@@ -1675,6 +1737,22 @@ impl Drop for TurnTraceGuard {
                 span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
             }
         }
+        // wave-53 C4：工具失败语义拆键 —— 计数 > 0 才输出 `agent.turn.tool_failures`；
+        // 且**仅**在 `phase == "completed"` 时追加 `agent.turn.degraded=true`（部分失败）；
+        // `phase != "completed"`（error/aborted/…）⇒ 不输出 degraded（错误语义仍由 outcome/status 表达）。
+        let tool_failures = take_active_turn_tool_failures();
+        let degraded = tool_failures > 0 && phase_snapshot.as_deref() == Some("completed");
+        if let Some(span) = self.span.as_mut() {
+            if tool_failures > 0 {
+                span.set_attribute(KeyValue::new(
+                    ATTR_AGENT_TURN_TOOL_FAILURES,
+                    saturating_token_count(tool_failures),
+                ));
+            }
+            if degraded {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_DEGRADED, true));
+            }
+        }
         // wave-51 C3：整轮聚合细分用量（思考 / 缓存命中）——取本轮各 `llm.chat` 的有效值之和，
         // 与子 span 共用 [`llm_usage_detail_attributes`] 同一份映射（键名/饱和/出现条件同源）。
         // 语义：本轮从未上报过某键 ⇒ 该键不输出（禁止 0 占位）；上报过 0 ⇒ 输出 0。
@@ -1699,7 +1777,24 @@ impl Drop for TurnTraceGuard {
 /// 语义：属性按 [`llm_span_attributes`] 生成；token 用量在响应侧拿到后调用
 /// [`LlmSpanGuard::record_usage`] 补写（缺失则不输出该键）。
 /// 失败语义：门禁关闭/未 init 时返回空操作守卫，不 panic。
+///
+/// wave-53 C3：等价于 [`start_llm_span_with_provider`] 传 `provider_name = None`
+/// （无展示名通道 ⇒ 不输出 [`ATTR_GEN_AI_PROVIDER_NAME`]）。
 pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str) -> LlmSpanGuard {
+    start_llm_span_with_provider(provider_kind, None, model, operation)
+}
+
+/// 带供应商展示名的 `llm.chat` 子 span（wave-53 C3 附加式 API）。
+///
+/// 冻结契约：`gen_ai.system = gen_ai_system_enum(system)`（入参也过映射，保证幂等）；
+/// `provider_name` 非空 ⇒ 输出 [`ATTR_GEN_AI_PROVIDER_NAME`]（展示名，如 `PonyLlm`）。
+/// 与 [`start_llm_span`] 的唯一差异是多了展示名通道，其余语义（父 span/门禁/失败语义）一致。
+pub fn start_llm_span_with_provider(
+    system: &str,
+    provider_name: Option<&str>,
+    model: Option<&str>,
+    operation: &str,
+) -> LlmSpanGuard {
     let empty = LlmSpanGuard {
         span: None,
         input_tokens: None,
@@ -1710,17 +1805,23 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
         context_window: None,
         context_ratio: None,
         cost_usd: None,
+        cost_details: None,
+        usage_recorded: false,
+        cost_recorded: false,
     };
     if !spans_allowed() {
         return empty;
     }
-    let mut attributes = to_key_values(llm_span_attributes(&LlmSpanInput {
-        provider_kind: provider_kind.to_string(),
-        model: model.map(|value| value.to_string()),
-        input_tokens: None,
-        output_tokens: None,
-        operation: operation.to_string(),
-    }));
+    let mut attributes = to_key_values(llm_span_attributes_with_provider(
+        &LlmSpanInput {
+            provider_kind: system.to_string(),
+            model: model.map(|value| value.to_string()),
+            input_tokens: None,
+            output_tokens: None,
+            operation: operation.to_string(),
+        },
+        provider_name,
+    ));
     // Wave-6 K4.1：子 span 下沉会话归属（无活跃 turn / session 为空 ⇒ 不输出该键）。
     push_active_session_attribute(&mut attributes);
     let Some(span) = start_child_span(SPAN_LLM_CHAT, attributes) else {
@@ -1736,22 +1837,10 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
         context_window: None,
         context_ratio: None,
         cost_usd: None,
+        cost_details: None,
+        usage_recorded: false,
+        cost_recorded: false,
     }
-}
-
-/// 带供应商展示名的 `llm.chat` 子 span（wave-53 C3 附加式 API，空桩未实现属性逻辑）。
-///
-/// 冻结契约：`gen_ai.system = gen_ai_system_enum(system)`（入参也过映射，保证幂等）；
-/// `provider_name` 非空 ⇒ 输出 [`ATTR_GEN_AI_PROVIDER_NAME`]（展示名，如 `PonyLlm`）。
-/// 与 [`start_llm_span`] 的唯一差异是多了展示名通道，其余语义（父 span/门禁/失败语义）一致。
-#[allow(unused_variables)] // 空桩阶段展示名未被读取；实现落地时随之移除。
-pub fn start_llm_span_with_provider(
-    system: &str,
-    provider_name: Option<&str>,
-    model: Option<&str>,
-    operation: &str,
-) -> LlmSpanGuard {
-    start_llm_span(system, model, operation)
 }
 
 /// `llm.chat` 子 span 守卫（`Drop` 时补 token 用量并结束 span）。
@@ -1768,13 +1857,25 @@ pub struct LlmSpanGuard {
     context_ratio: Option<f64>,
     /// Wave-5 K4：单次调用成本（USD）；`None` ⇒ 不输出 `gen_ai.cost.usd`。
     cost_usd: Option<f64>,
+    /// wave-53 C1：成本三分量 JSON（[`ATTR_LANGFUSE_OBSERVATION_COST_DETAILS`]）；
+    /// `None` ⇒ 不输出该键。
+    cost_details: Option<String>,
+    /// wave-53 C2：是否记录过 usage（input 或 output 至少一个 `Some`）。
+    usage_recorded: bool,
+    /// wave-53 C2：是否记录过有效成本。
+    cost_recorded: bool,
 }
 
 impl LlmSpanGuard {
     /// 记录响应侧 token 用量（`None` 表示缺失 → 不输出该键）。
+    ///
+    /// wave-53 C2：任一分量非 `None` 即视为「记录过 usage」，供 `pony.cost.priced` 三态判定。
     pub fn record_usage(&mut self, input_tokens: Option<u64>, output_tokens: Option<u64>) {
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
+        if input_tokens.is_some() || output_tokens.is_some() {
+            self.usage_recorded = true;
+        }
         if self.span.is_some() {
             accumulate_active_turn_usage(input_tokens, output_tokens);
         }
@@ -1808,9 +1909,13 @@ impl LlmSpanGuard {
     /// 语义：`None` / 非有限 / 负值 ⇒ 不输出 `gen_ai.cost.usd`；门禁关闭时守卫为空操作
     /// （零导出），且调用方应先用 [`is_span_capture_enabled`] 短路掉价格计算。
     /// 同时把该成本累加到当前 turn，供 `agent.turn.cost.usd` 聚合。
+    /// wave-53 C2：有效成本 ⇒ 该调用标记为「已计价」（`pony.cost.priced=true`）。
     pub fn record_cost(&mut self, cost: Option<f64>) {
         let validated = cost.filter(|value| value.is_finite() && *value >= 0.0);
         self.cost_usd = validated;
+        if validated.is_some() {
+            self.cost_recorded = true;
+        }
         if self.span.is_some() {
             if let Some(cost) = validated {
                 accumulate_active_turn_cost(cost);
@@ -1818,20 +1923,26 @@ impl LlmSpanGuard {
         }
     }
 
-    /// 记录单次调用的成本三分量（wave-53 C1 契约桩，空桩未实现）。
+    /// 记录单次调用的成本三分量（wave-53 C1）。
     ///
     /// 冻结契约：仅当 `total_cost_usd` 为 `Some(v)` 且 `v.is_finite() && v >= 0.0` 才输出
     /// [`ATTR_LANGFUSE_OBSERVATION_COST_DETAILS`]（单行 JSON，键 `input`/`output`/`total`，
     /// 各自 `Some` 才出现，数字保留 6 位小数）；并**等价地**计入该 turn 的成本聚合
     /// （与 [`LlmSpanGuard::record_cost`] 同一聚合口径，根 span 不得漏算或重复计）。
-    #[allow(unused_variables)] // 空桩阶段参数未被读取；实现落地时随之移除。
+    /// 既有 [`ATTR_GEN_AI_COST_USD`] 照旧输出（Tempo 面），故此处委托 `record_cost` 一次，
+    /// **只聚合一次**。
     pub fn record_cost_components(
         &mut self,
         input_cost_usd: Option<f64>,
         output_cost_usd: Option<f64>,
         total_cost_usd: Option<f64>,
     ) {
-        unimplemented!()
+        let Some(total) = total_cost_usd.filter(|value| value.is_finite() && *value >= 0.0) else {
+            return;
+        };
+        self.cost_details = Some(cost_details_json(input_cost_usd, output_cost_usd, total));
+        // 单一出口：`gen_ai.cost.usd`（Tempo 面）+ turn 聚合 + `pony.cost.priced` 判定。
+        self.record_cost(Some(total));
     }
 
     /// 记录单次调用生成速度与上下文用量诊断属性。
@@ -1885,6 +1996,25 @@ impl Drop for LlmSpanGuard {
             }
             if let Some(cost) = self.cost_usd {
                 span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
+            }
+            // wave-53 C1：成本三分量（Langfuse 语义轨）——单行 JSON 字符串，仅 total 有效时存在。
+            if let Some(details) = self.cost_details.as_deref() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_LANGFUSE_OBSERVATION_COST_DETAILS,
+                    details.to_string(),
+                ));
+            }
+            // wave-53 C2：未计价显式标记三态——有 usage 无成本 ⇒ false；有成本 ⇒ true；
+            // 两者皆无 ⇒ **不输出**该键（「未知」不等于「未计价」，禁止 false 占位）。
+            let priced = if self.cost_recorded {
+                Some(true)
+            } else if self.usage_recorded {
+                Some(false)
+            } else {
+                None
+            };
+            if let Some(priced) = priced {
+                span.set_attribute(KeyValue::new(ATTR_PONY_COST_PRICED, priced));
             }
             // wave-51 C3：细分用量（思考/缓存命中）——与根 `agent.turn` 聚合同一份映射，
             // `None` 不产出键、`Some(0)` 原样输出 0。
@@ -1975,13 +2105,41 @@ impl Drop for GovernanceDecideGuard {
 /// 记一个 `tool.call` 子 span（一次工具执行 = 一个 span，创建即结束）。
 ///
 /// 调用方：工具活动落库点（`TurnToolActivity` 生成处）。门禁关闭时为空操作。
+/// wave-53 C6：旧入口等价于 [`record_tool_call_span_with_call_id`] 传 `call_id = None`
+/// （不输出 [`ATTR_GEN_AI_TOOL_CALL_ID`]）。
+///
+/// L3-A review-wave53-a（NFR_VIOLATION 修复）：门禁判定**先于** `input.clone()` ——
+/// 门禁关闭（生产默认）时直接返回，零克隆/零分配；语义与被委托函数完全一致。
 pub fn record_tool_call_span(input: &ToolSpanInput) {
     if !spans_allowed() {
         return;
     }
-    let mut attributes = to_key_values(tool_span_attributes(input));
+    record_tool_call_span_with_call_id(input.clone(), None);
+}
+
+/// 带模型侧 tool call id 的工具 span 记录入口（wave-53 C6 附加式 API）。
+///
+/// 冻结契约：属性走 [`tool_span_attributes_with_call_id`]；`call_id` 非空 ⇒ 输出
+/// [`ATTR_GEN_AI_TOOL_CALL_ID`]；失败聚合/backdate/会话归属等语义与 [`record_tool_call_span`]
+/// 完全一致。旧函数等价于传 `None` 委托本函数。
+///
+/// wave-53 C4：`status != "success"` ⇒ 累加当前活动 turn 的工具失败计数（供根 span
+/// `agent.turn.tool_failures` / `agent.turn.degraded`）。既有错误聚合谓词（F5）零变更。
+pub fn record_tool_call_span_with_call_id(input: ToolSpanInput, call_id: Option<String>) {
+    if !spans_allowed() {
+        return;
+    }
+    let mut attributes = to_key_values(tool_span_attributes_with_call_id(
+        &input,
+        call_id.as_deref(),
+    ));
     // Wave-6 K4.1：tool.call 同样携带会话归属。
     push_active_session_attribute(&mut attributes);
+    // wave-53 C4：失败计数（`status != "success"`）——与 F5 错误聚合谓词**解耦**，
+    // F5 语义（`failed` / `error` / 带 error 摘要）零变更。
+    if input.status != "success" {
+        accumulate_active_turn_tool_failure();
+    }
     // F5 失败谓词（`failed` / `error` / 带 error 摘要）：同一判定既写子 span 状态，
     // 也向活动 turn 聚合（PA-154：根 span 承接失败，否则按根状态告警全漏）。
     let failed = input.status == "failed" || input.status == "error" || input.error.is_some();
@@ -2000,16 +2158,6 @@ pub fn record_tool_call_span(input: &ToolSpanInput) {
         // 失败路径同样 end：`set_status` 之后直接 end，绝不提前 return → span 不泄漏。
         span.end_with_timestamp(ended_at);
     }
-}
-
-/// 带模型侧 tool call id 的工具 span 记录入口（wave-53 C6 附加式 API，空桩未实现）。
-///
-/// 冻结契约：属性走 [`tool_span_attributes_with_call_id`]；`call_id` 非空 ⇒ 输出
-/// [`ATTR_GEN_AI_TOOL_CALL_ID`]；失败聚合/backdate/会话归属等语义与 [`record_tool_call_span`]
-/// 完全一致。旧函数等价于传 `None` 委托本函数。
-#[allow(unused_variables)] // 空桩阶段 call_id 未被读取；实现落地时随之移除。
-pub fn record_tool_call_span_with_call_id(input: ToolSpanInput, call_id: Option<String>) {
-    unimplemented!()
 }
 
 // ==================================================================== 私有实现
@@ -2219,6 +2367,9 @@ struct ActiveTurn {
     /// PA-154：本轮内子 span 错误聚合（`<prefix>: <detail>`，**先记录者胜**）；
     /// `None` ⇒ 本轮无错误，根 span 不输出 [`ATTR_AGENT_TURN_OUTCOME`]。
     accumulated_error: Option<String>,
+    /// wave-53 C4：本轮 `status != "success"` 的工具调用次数（根 span Drop 时回填
+    /// [`ATTR_AGENT_TURN_TOOL_FAILURES`]；`0` ⇒ 不输出该键，禁止 0 占位）。
+    tool_failures: u64,
 }
 
 /// turn 根 span 错误聚合前缀：工具执行失败（PA-154，谓词同 F5）。
@@ -2290,6 +2441,7 @@ fn register_active_turn(
         accumulated_reasoning_tokens: None,
         accumulated_cached_input_tokens: None,
         accumulated_error: None,
+        tool_failures: 0,
     };
 
     // A9：优先按 tokio 任务 id 索引；无任务上下文时退回线程本地栈（不丢父 span）。
@@ -2508,6 +2660,50 @@ fn take_active_turn_usage() -> (Option<u64>, Option<u64>) {
             .last()
             .map(get_tokens)
             .unwrap_or((None, None))
+    })
+}
+
+/// 把一次工具失败（`status != "success"`）累加到**当前活动 turn**（wave-53 C4）。
+///
+/// 语义：与成本/错误聚合同源——按 tokio task id 索引，无任务上下文时退回线程本地栈；
+/// 无活动 turn 时 **no-op**（绝不新建登记）；`saturating_add` 防溢出（绝不 wrap/panic）。
+fn accumulate_active_turn_tool_failure() {
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            entry.tool_failures = entry.tool_failures.saturating_add(1);
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            entry.tool_failures = entry.tool_failures.saturating_add(1);
+        }
+    });
+}
+
+/// 读取当前活动 turn 的累计工具失败计数（wave-53 C4）；无活动 turn 时返回 0。
+///
+/// 语义：与 [`take_active_turn_cost`] 同为**读取**（登记项由
+/// [`unregister_active_turn`] 摘除，无需在此清零）；`0` ⇒ 根 span 不输出该键。
+fn take_active_turn_tool_failures() -> u64 {
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(|entry| entry.tool_failures)
+            .unwrap_or(0);
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(|entry| entry.tool_failures)
+            .unwrap_or(0)
     })
 }
 

@@ -42,6 +42,7 @@
 - [Trace 诊断与收口报告 (pa_01a12d88)](analysis/trace-analysis-pa-01a12d88.md)
 - [Trace 诊断与闭环优化收口报告 (a0fa4c67)](analysis/trace-analysis-pa-0af4c67.md)
 - [可观测性四维上报审计（真实会话 pa_01a17b23，2026-10-27）](audit/observability-audit-2026-10-27.md)
+- [可观测性四维上报审计（真实会话 pa_01a17c85，第二轮，2026-10-27）](audit/observability-audit-2026-10-27b.md)
 - [Turn 完成时 UI 冻结：根因诊断与解决路径](analysis/turn-completion-ui-freeze-diagnosis-2026-06-16.md)
 - [Trace Redteam 审计 (2026-06-01)](analysis/trace-redteam-2026-06-01.md)
 - [上下文构建与缓存策略 canonical spec](../openspec/specs/context-assembly-and-cache-strategy/spec.md)
@@ -71,6 +72,7 @@
 - [0047 Agent Trace 迁移至 OpenTelemetry → Langfuse（PonySentry Trace 下线 + 全局上报开关）](decisions/0047-agent-trace-otel-langfuse-migration.md)
 - [0050 配置页「全局轨迹上报」选项收敛为单行标签 + 右端开关](decisions/0050-trace-reporting-switch-ui-simplification.md)
 - [0051 可观测性上报三项修正（版本单一来源、治理 span 会话归属、思考/缓存 token 出口）](decisions/0051-observability-version-session-and-thinking-token-fixes.md)
+- [0052 可观测性语义轨补全（成本明细、未计价标记、枚举收敛、降级标记、可读 trace 名、工具调用 id）](decisions/0052-observability-semantic-completeness-fixes.md)
 
 ## 3.1 交付证据归档
 

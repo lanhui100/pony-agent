@@ -233,6 +233,49 @@
         "TD-1 Barrier deadlock (discovered at green phase, fixed by Test Agent, re-run 11 passed)"
       ],
       "status": "completed"
+    },
+    {
+      "wave": 53,
+      "theme": "observability semantic completeness (ADR 0052)",
+      "baseline_commit": "dd37169",
+      "protocol_commit": "4daa99c",
+      "red_commit": "08ec1b8",
+      "grading": {
+        "level": "B",
+        "triggers": [
+          "cross-file (4 files)",
+          "otel/mod.rs hits blast keywords (net/io)",
+          "touches LLM call chain + external reporting surface"
+        ]
+      },
+      "observability_dynamics": {
+        "touched": true,
+        "gates": [
+          "audit-diff.sh",
+          "check-declaration.sh"
+        ],
+        "reason": "改动即上报面"
+      },
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3"
+      ],
+      "branches": {
+        "task-1": {
+          "owner": "protocol-agent",
+          "status": "completed"
+        },
+        "task-2": {
+          "owner": "test-agent",
+          "status": "completed"
+        },
+        "task-3": {
+          "owner": "executor",
+          "status": "in_progress"
+        }
+      },
+      "regression_baseline": ".dev-team/regression-baseline-wave53.json"
     }
   ],
   "counters": {}

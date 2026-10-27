@@ -2347,15 +2347,23 @@ fn record_llm_span_cost(
     }
     // Wave-6 K1.1：按**协议语义**归一未缓存输入（Anthropic 的 input 不含 cache，不能相减）。
     let protocol = crate::agent::cost::ProviderCostProtocol::from_label(protocol_label);
-    let cost = crate::agent::cost::estimate_cost_with_protocol(
+    // wave-53 C1：一次计价同时给出三分量 ⇒ `llm.chat` 输出 `langfuse.observation.cost_details`
+    // （Langfuse 语义轨），既有 `gen_ai.cost.usd`（Tempo 面）与 turn 成本聚合由同一出口承担。
+    if let Some(estimate) = crate::agent::cost::estimate_cost_with_protocol(
         model,
         usage.input_tokens.unwrap_or(0),
         usage.output_tokens.unwrap_or(0),
         usage.cache_hit_input_tokens,
         protocol,
-    )
-    .map(|estimate| estimate.total_cost_usd);
-    llm_span.record_cost(cost);
+    ) {
+        llm_span.record_cost_components(
+            Some(estimate.input_cost_usd),
+            Some(estimate.output_cost_usd),
+            Some(estimate.total_cost_usd),
+        );
+    } else {
+        llm_span.record_cost(None);
+    }
 }
 
 /// wave-51 C3：缓存命中 token 的**协议门控**（契约 PA51-C3-T6 / 已知限制 L1、L3）。
