@@ -173,8 +173,9 @@ export function runLowPriorityTurnWork(callback: () => void) {
 
   safeSetTimeout(() => {
     const idleWindow = resolveBrowserWindow();
+    // wave55：宏任务到点时若宿主环境（window）已销毁，必须中止而非继续下传 callback，
+    // 否则会向已失效环境发起持久化调度（ReferenceError: window is not defined）。
     if (!idleWindow) {
-      callback();
       return;
     }
 

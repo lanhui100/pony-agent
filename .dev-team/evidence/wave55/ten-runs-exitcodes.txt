@@ -1,0 +1,21 @@
+=== Vitest 10 Consecutive Full Runs (Official Receipt) ===
+Started at: 2026-10-27T22:45:21+08:00
+Commit: 097c843
+
+Run 1/10: exit=0 | duration=41s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 2/10: exit=0 | duration=42s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 3/10: exit=0 | duration=42s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 4/10: exit=0 | duration=41s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 5/10: exit=0 | duration=42s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 6/10: exit=0 | duration=43s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 7/10: exit=0 | duration=42s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 8/10: exit=0 | duration=43s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 9/10: exit=0 | duration=42s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+Run 10/10: exit=0 | duration=45s | Test Files 111 passed (111) | Tests 1089 passed | 12 skipped (1101) | Errors 0 | ReferenceErrors=0
+
+=== Summary ===
+Completed at: 2026-10-27T22:52:24+08:00
+Total Runs: 10
+Total Failed: 0
+All Exit=0: YES
+All Errors=0: YES

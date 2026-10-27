@@ -738,7 +738,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         return;
       }
 
-      window.clearTimeout(this.deferredPersistTimerId);
+      // wave55：环境销毁后裸解引用 window 会抛 ReferenceError，此处只做清理不触达宿主定时器。
+      if (typeof window !== "undefined") {
+        window.clearTimeout(this.deferredPersistTimerId);
+      }
       this.deferredPersistTimerId = null;
     },
     cancelStreamFlush() {
@@ -901,8 +904,15 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     },
     scheduleDeferredPersist(delay = 140) {
       this.cancelDeferredPersist();
+      if (typeof window === "undefined") {
+        this.deferredPersistTimerId = null;
+        return;
+      }
       this.deferredPersistTimerId = window.setTimeout(() => {
         this.deferredPersistTimerId = null;
+        if (typeof window === "undefined") {
+          return;
+        }
         this.persistHistory();
       }, delay);
     },
