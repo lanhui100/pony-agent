@@ -41,3 +41,9 @@
 
 ## 4. 偏差与裁决
 - 视觉像素 diff 不适用 → 已被真实浏览器几何断言替代，裁决与理由见 `.dev-team/wave52-visual-gate-deviation.md`（Lead 一票，偏差仅限本条）。
+
+## 6. Dev Server 人工截图验证（2026-10-27 19:12，真实 vite dev + 真实 GitHub 网络）
+- 服务：`http://127.0.0.1:4176`（既有 vite dev 进程，vite 直接读源码 ⇒ 反映本次改动）
+- 操作闭环：打开首页 → 左栏「设置」→ 滚动到卡片 → 真实点击「检查更新」（真实 api.github.com 响应）→ 真实点击 Switch
+- 断言（agent-browser 快照/属性读取）：标题文本 = `软件自动更新`；`config-update-status` = `当前已是最新版本。`；`config-update-last-checked` = `上次检查：2026年10月27日`；Switch `aria-checked: false → true`（点击可切换）
+- 证据（入仓）：`.dev-team/evidence/wave-52/dev-server-update-section.png`（未检查/已检查态）、`.dev-team/evidence/wave-52/dev-server-update-section-switch-on.png`（Switch 开启态，位于行最右端）
