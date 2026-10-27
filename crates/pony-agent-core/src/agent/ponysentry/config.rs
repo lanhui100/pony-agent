@@ -1,5 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+/// 显式注入 `release` 的合法化上限（契约 PA51-C1-T4）：trim 后字节长度上限 **64**。
+const RELEASE_MAX_BYTES: usize = 64;
+
+/// 合法化**显式注入**的 `release`（契约 PA51-C1-T4；作用域仅 [`PonySentryConfig::with_release`]）：
+/// ① 拒绝任何 `char::is_control()` 控制字符（先于 trim 判定：`"1.2.3\n"` 不得被 trim 洗白）；
+/// ② trim 后为空 ⇒ 视为未提供；③ trim 后字节长度上限 64。
+/// 不合规返回 `None` ⇒ 调用方**保持原值**（绝不写入非法值、绝不 panic）。
+///
+/// 与 [`PonySentryConfig::from_env`] 的差异：env `APP_RELEASE` 保持「保留原值不 trim」的既有语义
+/// （契约 PA51-C1-T5），本规则**不**作用于 env 路径。
+fn normalize_release_value(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > RELEASE_MAX_BYTES {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PonySentryConfig {
     pub endpoint: String,
@@ -137,10 +158,11 @@ impl PonySentryConfig {
     /// 本构造器 trim 后写入 —— 既有 env 语义不改，差异如实登记在契约矩阵。
     /// 纯构造器语义：不读取 env、不产生 IO、不改动其它字段。
     ///
-    /// [STUB wave-51] 空桩：仅冻结签名与语义，实现归 Executor。
     pub fn with_release(self, release: Option<&str>) -> Self {
-        let _ = release;
-        unimplemented!("wave-51 C1 契约桩：PonySentryConfig::with_release 待实现")
+        let Some(release) = release.and_then(normalize_release_value) else {
+            return self;
+        };
+        Self { release, ..self }
     }
 
     /// 由 settings 快照解析生效配置：**settings > env > 构建期注入 > 缺省**。

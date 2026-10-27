@@ -2358,6 +2358,22 @@ fn record_llm_span_cost(
     llm_span.record_cost(cost);
 }
 
+/// wave-51 C3：缓存命中 token 的**协议门控**（契约 PA51-C3-T6 / 已知限制 L1、L3）。
+///
+/// 为什么需要门控：semconv 口径要求 `gen_ai.usage.input_tokens` **已包含**缓存命中，
+/// `gen_ai.usage.cache_read.input_tokens` 只是它的子集读数；Langfuse ingest 会从 input 减
+/// cache_read 以免重复计费。本仓 `AnthropicMessages` 的 `input_tokens` **不含** cache
+/// （见 `cost.rs` 的协议语义注释），若照报会被减成偏小值 ⇒ fail-closed：只对
+/// OpenAI 协议族（`openai-completions` / `openai-responses`）上报，其余（含未知标签）一律
+/// `None`（宁可少报，也不污染 Langfuse 用量口径）。
+/// 注：思考 token 不受门控（两类协议下思考都计入 output）。
+fn cache_reportable_input_tokens(protocol_label: &str, usage: &TokenUsage) -> Option<u64> {
+    match protocol_label {
+        "openai-completions" | "openai-responses" => usage.cache_hit_input_tokens,
+        _ => None,
+    }
+}
+
 /// Wave-5 K2：turn 事件成本（未知模型或缺真实 usage ⇒ `None`）。
 fn turn_event_cost_usd(
     provider_meta: Option<&ProviderEventMeta>,
@@ -2398,6 +2414,11 @@ pub fn provider_decision<P: ProviderClient>(
     if let Ok(decision) = result.as_ref() {
         if let Some(usage) = decision.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            // wave-51 C3：思考/缓存命中细分用量（cache 键经协议门控，见契约 PA51-C3-T6）。
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
             llm_span.record_speed_and_context(speed, None);
             record_llm_span_cost(
@@ -2440,6 +2461,11 @@ where
     if let Ok(decision) = result.as_ref() {
         if let Some(usage) = decision.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            // wave-51 C3：思考/缓存命中细分用量（cache 键经协议门控，见契约 PA51-C3-T6）。
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
             llm_span.record_speed_and_context(speed, None);
             record_llm_span_cost(
@@ -2481,6 +2507,11 @@ pub fn provider_followup<P: ProviderClient>(
     if let Ok(response) = result.as_ref() {
         if let Some(usage) = response.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            // wave-51 C3：思考/缓存命中细分用量（cache 键经协议门控，见契约 PA51-C3-T6）。
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
             llm_span.record_speed_and_context(speed, None);
             record_llm_span_cost(
@@ -2535,6 +2566,11 @@ where
     if let Ok(response) = result.as_ref() {
         if let Some(usage) = response.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            // wave-51 C3：思考/缓存命中细分用量（cache 键经协议门控，见契约 PA51-C3-T6）。
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
             llm_span.record_speed_and_context(speed, None);
             record_llm_span_cost(

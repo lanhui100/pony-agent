@@ -586,7 +586,7 @@ fn fetch_provider_models(
 }
 
 #[tauri::command]
-fn load_app_settings() -> AppSettings {
+fn load_app_settings(app: AppHandle) -> AppSettings {
     let settings = AppSettingsStore::new().load_view();
     // D7：启动即按持久化值生效（默认 false ⇒ 零 span 分配、零 egress）。
     pony_agent_core::agent::otel::set_agent_trace_reporting(settings.agent_trace_reporting);
@@ -597,7 +597,14 @@ fn load_app_settings() -> AppSettings {
     // PonySentry 凭据分发（settings > env > 构建期烧录 > 缺省）：桌面端也可用 settings 覆盖
     // 构建期烧录的 token；无 token ⇒ fail-closed 零 egress，token 不进日志/Debug。
     let ponysentry_settings = settings.ponysentry_settings_snapshot();
-    pony_agent_core::agent::ponysentry::init_from_settings(Some(&ponysentry_settings));
+    // wave-51 C1（审计 §4 P0-1）：PonySentry `release` 与安装包发布线对齐 —— 以宿主
+    // `package_info().version` 显式覆盖 env `APP_RELEASE` / core crate 版本（空白或脏值不覆盖）。
+    let app_version = app.package_info().version.to_string();
+    let ponysentry_config = pony_agent_core::agent::ponysentry::PonySentryConfig::from_settings(
+        Some(&ponysentry_settings),
+    )
+    .with_release(Some(app_version.as_str()));
+    pony_agent_core::agent::ponysentry::init(ponysentry_config);
     settings
 }
 
@@ -1294,10 +1301,14 @@ pub fn run() {
             }
 
             // Wave-4 C1：配置来源优先级 settings > env > 内置默认（公网端点 https://otel.ponyjob.top）。
-            let app_settings = load_app_settings();
+            let app_settings = load_app_settings(app.handle().clone());
             let otel_settings = app_settings.otel_settings_snapshot();
-            if let Err(err) = pony_agent_core::agent::otel::init(
+            // wave-51 C1（审计 §4 P0-1）：resource `service.version` 取安装包版本（单一来源：
+            // 宿主注入 > env `PONY_OTEL_SERVICE_VERSION` > core crate 版本）。
+            let app_version = app.package_info().version.to_string();
+            if let Err(err) = pony_agent_core::agent::otel::init_with_service_version(
                 pony_agent_core::agent::otel::OtelConfig::from_settings(Some(&otel_settings)),
+                Some(app_version.as_str()),
             ) {
                 // F4：走统一 JSON 日志面（stdout 单行 JSON），不得新增明文 eprintln 边界。
                 pony_agent_core::agent::otel::log::log_json(

@@ -192,7 +192,7 @@
             "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
             "crates/pony-agent-core/tests/otel_trace_migration_test.rs"
           ],
-          "status": "in_progress"
+          "status": "completed"
         },
         "exec": {
           "owner": "executor-alpha",
@@ -202,22 +202,27 @@
             "crates/pony-agent-core/src/agent/ponysentry/config.rs",
             "src-tauri/src/lib.rs"
           ],
-          "status": "pending"
+          "status": "completed"
         },
         "docs": {
           "owner": "lead",
           "write_scopes": [
             "docs/"
           ],
-          "status": "pending"
+          "status": "in_progress"
         }
       },
       "gates": {
         "regression_baseline": "rust lib 1175 passed / 0 failed (EXIT 0)",
         "classification": "B (network IO + cross-module + external interface)",
         "gate1": "PASS (review-plan-wave51.json, dev-review-lint EXIT 0; 2 rounds: FAIL->v3->PASS)",
-        "observability": "audit-diff + check-declaration required"
-      }
+        "observability": "audit-diff + check-declaration required",
+        "green": "acceptance 11 passed EXIT 0; lib 1175 passed EXIT 0; cargo check tauri EXIT 0; version:check EXIT 0",
+        "join_barrier": "pending"
+      },
+      "test_defect_amendments": [
+        "TD-1 Barrier deadlock (discovered at green phase, fixed by Test Agent, re-run 11 passed)"
+      ]
     }
   ],
   "counters": {}

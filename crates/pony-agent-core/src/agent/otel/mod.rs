@@ -552,20 +552,47 @@ pub(crate) fn default_deployment_environment(debug_assertions: bool) -> &'static
     default_deployment_environment_with_release_flag(debug_assertions, option_env!("PONY_RELEASE_BUILD"))
 }
 
-/// 解析 resource 归因属性（PA-153）：`service.version` + `deployment.environment`。
+/// 显式注入版本串的合法化上限（契约 PA51-C1-T4）：trim 后字节长度上限 **64**。
+const SERVICE_VERSION_MAX_BYTES: usize = 64;
+
+/// 合法化**显式入参**里的版本串（契约 PA51-C1-T4，作用域仅限显式入参与
+/// [`crate::agent::ponysentry::PonySentryConfig::with_release`]）：
+/// ① 拒绝任何 `char::is_control()` 控制字符（`\n` / `\r` / `\t` / NUL 等，先于 trim 判定，
+///    否则 `"1.2.3\n"` 会被 trim 洗白）；② trim 后为空 ⇒ 未设置；③ trim 后字节长度上限 64。
+/// 不合规一律返回 `None`（= 视为未设置，下落下一级），**绝不**写入非法值、绝不 panic。
 ///
-/// 语义：`env` 取值 **trim 后非空**即覆盖默认；空白串等同未设置（回落默认）；
-/// `service.version` 默认取本 crate 的 `CARGO_PKG_VERSION`。
+/// 注意：env `PONY_OTEL_SERVICE_VERSION` **不**走本规则（v4-V4-1：保持既有 trim-only 语义）。
+fn normalize_service_version(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > SERVICE_VERSION_MAX_BYTES {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// 解析 resource 归因属性（PA-153 + wave-51 C1）：`service.version` + `deployment.environment`。
+///
+/// 语义：`env` 取值 **trim 后非空**即覆盖默认（既有语义不变）；空白串等同未设置（回落默认）。
+/// `service_version`（显式入参，wave-51 C1）取值三级优先：
+/// 1. `service_version` 显式入参（经 [`normalize_service_version`] 合法化，不合规视为未设置）；
+/// 2. env [`ENV_PONY_OTEL_SERVICE_VERSION`]（trim-only，既有语义）；
+/// 3. 本 crate 的 `CARGO_PKG_VERSION`（兜底）。
 /// 纯函数（env 由调用方注入）：实现期单测据此覆盖 release 分支与空白串回退。
 pub(crate) fn resolve_resource_attributes(
     env: impl Fn(&str) -> Option<String>,
+    service_version: Option<&str>,
 ) -> Vec<(String, String)> {
     let override_value = |name: &str| {
         env(name)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     };
-    let service_version = override_value(ENV_PONY_OTEL_SERVICE_VERSION)
+    let service_version = service_version
+        .and_then(normalize_service_version)
+        .or_else(|| override_value(ENV_PONY_OTEL_SERVICE_VERSION))
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     let environment = override_value(ENV_PONY_OTEL_ENVIRONMENT)
         .unwrap_or_else(|| default_deployment_environment(cfg!(debug_assertions)).to_string());
@@ -590,39 +617,26 @@ pub(crate) fn resolve_resource_attributes(
     attrs
 }
 
-/// 装配入口（wave-51 C1 契约桩）：由调用方显式注入安装包版本后再建立全局 trace provider。
+/// 装配入口（wave-51 C1）：由调用方显式注入安装包版本后再安装全局 trace provider。
 ///
+/// 调用方：宿主启动路径（Tauri 装配点）—— 桌面端传 `app.package_info().version`，
+/// 使 resource `service.version` 与安装包发布线对齐（审计 §4 P0-1）。
 /// 优先级契约（`service.version` resource 属性，三级，高者优先）：
-/// 1. 显式入参 `service_version`；
-/// 2. 进程 env [`ENV_PONY_OTEL_SERVICE_VERSION`]；
+/// 1. 显式入参 `service_version`（经 [`normalize_service_version`] 合法化：控制字符/空白/超 64 字节 ⇒ 未设置）；
+/// 2. 进程 env [`ENV_PONY_OTEL_SERVICE_VERSION`]（既有 trim-only 语义，不新增过滤）；
 /// 3. 本 crate 的 `CARGO_PKG_VERSION`（兜底）。
 ///
-/// 空白语义：`service_version` 与 env 取值 **trim 后为空**一律视为**未设置**，
-/// 逐级下落到下一来源（与 [`resolve_resource_attributes`] 既有空白回退语义一致）。
-/// 取值合法化（逐级判定，每一级都过同一规则）：① 先 trim；② 拒绝任何 `char::is_control()`
-/// 控制字符（含 `\n` / `\r` / `\t` / NUL）；③ trim 后字节长度上限 **64**；
-/// 任一条不合规 ⇒ 该级视为**未设置**并下落一级（**不得**把非法值写进 resource、不得 panic）。
 /// 关系：[`init`] 等价于本函数传入 `None`；校验/失败/可重入语义与 [`init`] 完全一致，
 /// 二者互斥 —— 同一进程生命周期内至多成功装配一次。
-///
-/// [STUB wave-51] 空桩：仅冻结签名与语义，实现归 Executor。
+/// 语义：以 `config` 建立导出通路与资源属性；provider 常驻，开关只翻转门禁位
+/// （本函数**不改变**上报开关，缺省仍为 `false`）。
+/// 失败语义：配置非法或端点不可解析时返回 `Err`，调用方记录告警后**继续启动**，
+/// 不得 panic、不得阻断主链路；失败时全局态整体回滚为「未 init」，不留半初始化状态。
+/// 可重入：本函数返回 `Ok` 后，需先 [`shutdown`] 才能再次装配。
 pub fn init_with_service_version(
     config: OtelConfig,
     service_version: Option<&str>,
 ) -> Result<(), String> {
-    let _ = (config, service_version);
-    unimplemented!("wave-51 C1 契约桩：init_with_service_version 待实现")
-}
-
-/// 装配入口：安装全局 trace provider。
-///
-/// 调用方：宿主启动路径（Tauri 装配点），进程生命周期内**至多一次**。
-/// 语义：以 `config` 建立导出通路与资源属性；provider 常驻，开关只翻转门禁位
-/// （[`init`] **不改变**上报开关，缺省仍为 `false`）。
-/// 失败语义：配置非法或端点不可解析时返回 `Err`，调用方记录告警后**继续启动**，
-/// 不得 panic、不得阻断主链路；失败时全局态整体回滚为「未 init」，不留半初始化状态。
-/// 可重入：本函数返回 `Ok` 后，需先 [`shutdown`] 才能再次 [`init`]。
-pub fn init(config: OtelConfig) -> Result<(), String> {
     if config.endpoint.trim().is_empty() {
         return Err("otel::init：OTLP 端点不得为空".to_string());
     }
@@ -668,9 +682,9 @@ pub fn init(config: OtelConfig) -> Result<(), String> {
     let resource = opentelemetry_sdk::Resource::builder()
         .with_service_name(config.service_name.clone())
         // PA-153：resource 补齐归因维度（service.version / deployment.environment）；
-        // 每份 ResourceSpans 各一次，值来自 env 覆盖或构建档位默认。
+        // 每份 ResourceSpans 各一次，值来自显式入参 / env 覆盖 / 构建档位默认（wave-51 C1）。
         .with_attributes(
-            resolve_resource_attributes(env_non_empty)
+            resolve_resource_attributes(env_non_empty, service_version)
                 .into_iter()
                 .map(|(key, value)| KeyValue::new(key, opentelemetry::Value::String(value.into()))),
         )
@@ -725,6 +739,14 @@ pub fn init(config: OtelConfig) -> Result<(), String> {
 
     *guard = Some(state);
     Ok(())
+}
+
+/// 装配入口（既有签名，语义零变更）：等价于 [`init_with_service_version`] 传入 `None` ——
+/// `service.version` 仍按 env [`ENV_PONY_OTEL_SERVICE_VERSION`] > `CARGO_PKG_VERSION` 解析。
+///
+/// 调用方：无安装包版本可注入的装配点（CLI / TUI / 单测）。
+pub fn init(config: OtelConfig) -> Result<(), String> {
+    init_with_service_version(config, None)
 }
 
 /// 装配逆过程：flush 并释放 provider 及其后台资源。
@@ -1124,13 +1146,34 @@ pub fn llm_span_attributes(input: &LlmSpanInput) -> Vec<(String, AttrValue)> {
 /// 值为 `i64`，`u64 -> i64` **安全饱和**（超出 `i64::MAX` 钳到 `i64::MAX`，禁止 `as` 直转成负数）。
 /// 输出键：[`ATTR_GEN_AI_USAGE_REASONING_TOKENS`]、[`ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS`]。
 ///
-/// [STUB wave-51] 空桩：仅冻结签名与语义，实现归 Executor。
+/// 实现（wave-51 C3）：只对有值的键产出条目；`Some(0)` 是有效采集结果（产出 `I64(0)`）；
+/// `u64 -> i64` 走 [`saturating_token_count`]（超出 `i64::MAX` 钳到 `i64::MAX`，绝不出现负值）。
 pub fn llm_usage_detail_attributes(
     reasoning_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
 ) -> Vec<(String, AttrValue)> {
-    let _ = (reasoning_tokens, cached_input_tokens);
-    unimplemented!("wave-51 C3 契约桩：llm_usage_detail_attributes 待实现")
+    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(2);
+    if let Some(reasoning_tokens) = reasoning_tokens {
+        attributes.push((
+            ATTR_GEN_AI_USAGE_REASONING_TOKENS.to_string(),
+            AttrValue::I64(saturating_token_count(reasoning_tokens)),
+        ));
+    }
+    if let Some(cached_input_tokens) = cached_input_tokens {
+        attributes.push((
+            ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS.to_string(),
+            AttrValue::I64(saturating_token_count(cached_input_tokens)),
+        ));
+    }
+    attributes
+}
+
+/// `u64 -> i64` 安全饱和（契约 PA51-C3-T3）：超出 `i64::MAX` 钳到 `i64::MAX`。
+///
+/// 为什么不能用 `as`：`u64 as i64` 对 `u64::MAX` 会产生 **-1**，把用量写成负数会污染
+/// Langfuse 成本/用量聚合与阈值判定。
+fn saturating_token_count(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// 工具属性映射（纯函数，无网络、无全局态）。
@@ -1573,6 +1616,18 @@ impl Drop for TurnTraceGuard {
                 span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
             }
         }
+        // wave-51 C3：整轮聚合细分用量（思考 / 缓存命中）——取本轮各 `llm.chat` 的有效值之和，
+        // 与子 span 共用 [`llm_usage_detail_attributes`] 同一份映射（键名/饱和/出现条件同源）。
+        // 语义：本轮从未上报过某键 ⇒ 该键不输出（禁止 0 占位）；上报过 0 ⇒ 输出 0。
+        let (turn_reasoning_tokens, turn_cached_input_tokens) = take_active_turn_usage_details();
+        if let Some(span) = self.span.as_mut() {
+            for attribute in to_key_values(llm_usage_detail_attributes(
+                turn_reasoning_tokens,
+                turn_cached_input_tokens,
+            )) {
+                span.set_attribute(attribute);
+            }
+        }
         if let Some(mut span) = self.span.take() {
             span.end();
         }
@@ -1590,6 +1645,8 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
         span: None,
         input_tokens: None,
         output_tokens: None,
+        reasoning_tokens: None,
+        cached_input_tokens: None,
         speed: None,
         context_window: None,
         context_ratio: None,
@@ -1614,6 +1671,8 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
         span: Some(span),
         input_tokens: None,
         output_tokens: None,
+        reasoning_tokens: None,
+        cached_input_tokens: None,
         speed: None,
         context_window: None,
         context_ratio: None,
@@ -1626,6 +1685,10 @@ pub struct LlmSpanGuard {
     span: Option<opentelemetry_sdk::trace::Span>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    /// wave-51 C3：思考 token；`None` ⇒ 不输出 [`ATTR_GEN_AI_USAGE_REASONING_TOKENS`]。
+    reasoning_tokens: Option<u64>,
+    /// wave-51 C3：缓存命中输入 token；`None` ⇒ 不输出 [`ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS`]。
+    cached_input_tokens: Option<u64>,
     speed: Option<f64>,
     context_window: Option<u64>,
     context_ratio: Option<f64>,
@@ -1643,7 +1706,7 @@ impl LlmSpanGuard {
         }
     }
 
-    /// 记录思考 token 与缓存命中输入 token（wave-51 C3 契约桩）。
+    /// 记录思考 token 与缓存命中输入 token（wave-51 C3）。
     ///
     /// 语义：**有值才写** —— `None` ⇒ **不得输出**对应键
     /// （[`ATTR_GEN_AI_USAGE_REASONING_TOKENS`] / [`ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS`]）；
@@ -1653,15 +1716,16 @@ impl LlmSpanGuard {
     /// 复用契约：属性映射必须复用纯函数 [`llm_usage_detail_attributes`]（与根 `agent.turn`
     /// 聚合同一份口径）；调用方负责**协议门控**缓存键（见契约 PA51-C3-T6）。
     /// 门禁关闭时守卫为空操作（零导出）。
-    ///
-    /// [STUB wave-51] 空桩：仅冻结签名与语义，实现归 Executor。
     pub fn record_usage_details(
         &mut self,
         reasoning_tokens: Option<u64>,
         cached_input_tokens: Option<u64>,
     ) {
-        let _ = (reasoning_tokens, cached_input_tokens);
-        unimplemented!("wave-51 C3 契约桩：LlmSpanGuard::record_usage_details 待实现")
+        self.reasoning_tokens = reasoning_tokens;
+        self.cached_input_tokens = cached_input_tokens;
+        if self.span.is_some() {
+            accumulate_active_turn_usage_details(reasoning_tokens, cached_input_tokens);
+        }
     }
 
     /// 记录单次调用成本（USD）。
@@ -1732,6 +1796,13 @@ impl Drop for LlmSpanGuard {
             if let Some(cost) = self.cost_usd {
                 span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
             }
+            // wave-51 C3：细分用量（思考/缓存命中）——与根 `agent.turn` 聚合同一份映射，
+            // `None` 不产出键、`Some(0)` 原样输出 0。
+            for attribute in
+                to_key_values(llm_usage_detail_attributes(self.reasoning_tokens, self.cached_input_tokens))
+            {
+                span.set_attribute(attribute);
+            }
             span.end();
         }
     }
@@ -1745,13 +1816,14 @@ pub fn start_governance_decide_span() -> GovernanceDecideGuard {
     if !spans_allowed() {
         return GovernanceDecideGuard { span: None };
     }
-    let span = start_child_span(
-        SPAN_GOVERNANCE_DECIDE,
-        vec![KeyValue::new(
-            ATTR_GEN_AI_OPERATION_NAME,
-            "governance.decide",
-        )],
-    );
+    let mut attributes = vec![KeyValue::new(
+        ATTR_GEN_AI_OPERATION_NAME,
+        "governance.decide",
+    )];
+    // wave-51 C2（审计 §4 P0-2）：治理决策子 span 下沉会话归属，使 Langfuse 会话过滤 9/9 命中。
+    // 无活跃 turn / session 为空 ⇒ 该函数不压入任何键（禁止空串占位）。
+    push_active_session_attribute(&mut attributes);
+    let span = start_child_span(SPAN_GOVERNANCE_DECIDE, attributes);
     GovernanceDecideGuard { span }
 }
 
@@ -2039,6 +2111,11 @@ struct ActiveTurn {
     accumulated_input_tokens: u64,
     /// 本轮内各 `llm.chat` 累积的 output tokens。
     accumulated_output_tokens: u64,
+    /// wave-51 C3：本轮内各 `llm.chat` 上报的思考 token 之和（`None` = 本轮从未上报 ⇒
+    /// 根 span 不输出该键；`Some(0)` 是有效值）。
+    accumulated_reasoning_tokens: Option<u64>,
+    /// wave-51 C3：本轮内各 `llm.chat` 上报的缓存命中输入 token 之和（同上，各自独立判定）。
+    accumulated_cached_input_tokens: Option<u64>,
     /// PA-154：本轮内子 span 错误聚合（`<prefix>: <detail>`，**先记录者胜**）；
     /// `None` ⇒ 本轮无错误，根 span 不输出 [`ATTR_AGENT_TURN_OUTCOME`]。
     accumulated_error: Option<String>,
@@ -2110,6 +2187,8 @@ fn register_active_turn(
         accumulated_cost_usd: 0.0,
         accumulated_input_tokens: 0,
         accumulated_output_tokens: 0,
+        accumulated_reasoning_tokens: None,
+        accumulated_cached_input_tokens: None,
         accumulated_error: None,
     };
 
@@ -2240,6 +2319,71 @@ fn accumulate_active_turn_usage(input_tokens: Option<u64>, output_tokens: Option
             entry.accumulated_output_tokens += out;
         }
     });
+}
+
+/// 把一次调用的细分用量（思考 / 缓存命中）累加到当前活动 turn（wave-51 C3）。
+///
+/// 语义：`None` 表示「本次未采集」⇒ 不累加、也不把该键标成「已上报」；
+/// `Some(0)` 是有效采集结果 ⇒ 置位并累加 0（根 span 必须输出 0，不得当缺失）。
+/// 累加用 `saturating_add`：`u64` 溢出只会饱和到 `u64::MAX`（随后由
+/// [`saturating_token_count`] 饱和到 `i64::MAX`），绝不 wrap 成小值、绝不 panic。
+fn accumulate_active_turn_usage_details(
+    reasoning_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+) {
+    if reasoning_tokens.is_none() && cached_input_tokens.is_none() {
+        return;
+    }
+    fn merge(slot: &mut Option<u64>, value: Option<u64>) {
+        if let Some(value) = value {
+            *slot = Some(slot.unwrap_or(0).saturating_add(value));
+        }
+    }
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            merge(&mut entry.accumulated_reasoning_tokens, reasoning_tokens);
+            merge(&mut entry.accumulated_cached_input_tokens, cached_input_tokens);
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            merge(&mut entry.accumulated_reasoning_tokens, reasoning_tokens);
+            merge(&mut entry.accumulated_cached_input_tokens, cached_input_tokens);
+        }
+    });
+}
+
+/// 读取当前活动 turn 的累计细分用量（思考 / 缓存命中；wave-51 C3）。
+///
+/// 语义：无活动 turn ⇒ `(None, None)`；本轮从未上报过某键 ⇒ 该键为 `None`
+/// （根 span **不得**输出，禁止用 0 伪造「已采集」）；上报过 0 ⇒ 返回 `Some(0)`。
+fn take_active_turn_usage_details() -> (Option<u64>, Option<u64>) {
+    let get_details = |entry: &ActiveTurn| {
+        (
+            entry.accumulated_reasoning_tokens,
+            entry.accumulated_cached_input_tokens,
+        )
+    };
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(get_details)
+            .unwrap_or((None, None));
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(get_details)
+            .unwrap_or((None, None))
+    })
 }
 
 /// 读取当前活动 turn 的累计 token 用量；无活动 turn 或全为 0 时返回 None。
@@ -3488,18 +3632,24 @@ mod tests {
 
     #[test]
     fn test_resolve_resource_attributes_probe_marking() {
-        let attrs = resolve_resource_attributes(|k| match k {
-            ENV_PONY_OTEL_PROBE => Some("true".to_string()),
-            _ => None,
-        });
+        let attrs = resolve_resource_attributes(
+            |k| match k {
+                ENV_PONY_OTEL_PROBE => Some("true".to_string()),
+                _ => None,
+            },
+            None,
+        );
         assert!(attrs.iter().any(|(k, v)| k == RESOURCE_PONY_PROBE && v == "true"));
         assert!(attrs.iter().any(|(k, v)| k == RESOURCE_INGEST_CLIENT_KIND && v == INGEST_CLIENT_KIND_PROBE));
         assert!(attrs.iter().any(|(k, v)| k == RESOURCE_PONY_APP_NAME && v == PONY_APP_NAME));
 
-        let attrs_off = resolve_resource_attributes(|k| match k {
-            ENV_PONY_OTEL_PROBE => Some("false".to_string()),
-            _ => None,
-        });
+        let attrs_off = resolve_resource_attributes(
+            |k| match k {
+                ENV_PONY_OTEL_PROBE => Some("false".to_string()),
+                _ => None,
+            },
+            None,
+        );
         assert!(!attrs_off.iter().any(|(k, _)| k == RESOURCE_PONY_PROBE));
         assert!(attrs_off.iter().any(|(k, v)| k == RESOURCE_INGEST_CLIENT_KIND && v == INGEST_CLIENT_KIND_DEVICE));
         assert!(attrs_off.iter().any(|(k, v)| k == RESOURCE_PONY_APP_NAME && v == PONY_APP_NAME));
@@ -3509,10 +3659,13 @@ mod tests {
     #[test]
     fn test_deployment_environment_precedence() {
         // 1. env 显式覆盖优先
-        let attrs_env = resolve_resource_attributes(|k| match k {
-            ENV_PONY_OTEL_ENVIRONMENT => Some("staging".to_string()),
-            _ => None,
-        });
+        let attrs_env = resolve_resource_attributes(
+            |k| match k {
+                ENV_PONY_OTEL_ENVIRONMENT => Some("staging".to_string()),
+                _ => None,
+            },
+            None,
+        );
         assert_eq!(
             attrs_env.iter().find(|(k, _)| k == RESOURCE_DEPLOYMENT_ENVIRONMENT).map(|(_, v)| v.as_str()),
             Some("staging")
@@ -3634,7 +3787,7 @@ mod tests {
     /// PA-153：默认值 = crate 版本 + debug 构建 `development` + 稳定产品名 + 默认 client.kind=device。
     #[test]
     fn resource_attributes_default_to_crate_version_and_build_environment() {
-        let attrs = resolve_resource_attributes(|_| None);
+        let attrs = resolve_resource_attributes(|_| None, None);
         assert_eq!(attrs.len(), 4, "resource 归因包含四键：{attrs:?}");
         assert_eq!(attrs[0].0, "service.version");
         assert_eq!(attrs[0].1, env!("CARGO_PKG_VERSION"));
@@ -3652,11 +3805,14 @@ mod tests {
     /// PA-153：两个 env（trim 后非空）各自覆盖默认，且互不影响。
     #[test]
     fn resource_attributes_env_overrides_are_independent() {
-        let attrs = resolve_resource_attributes(|name| match name {
-            "PONY_OTEL_SERVICE_VERSION" => Some("1.2.3-custom".to_string()),
-            "PONY_OTEL_ENVIRONMENT" => Some("staging".to_string()),
-            _ => None,
-        });
+        let attrs = resolve_resource_attributes(
+            |name| match name {
+                "PONY_OTEL_SERVICE_VERSION" => Some("1.2.3-custom".to_string()),
+                "PONY_OTEL_ENVIRONMENT" => Some("staging".to_string()),
+                _ => None,
+            },
+            None,
+        );
         assert_eq!(attrs[0].1, "1.2.3-custom");
         assert_eq!(attrs[1].1, "staging");
     }
@@ -3665,10 +3821,13 @@ mod tests {
     #[test]
     fn resource_attributes_blank_env_falls_back_to_defaults() {
         for blank in ["", "   ", "\t\n "] {
-            let attrs = resolve_resource_attributes(|name| match name {
-                "PONY_OTEL_SERVICE_VERSION" | "PONY_OTEL_ENVIRONMENT" => Some(blank.to_string()),
-                _ => None,
-            });
+            let attrs = resolve_resource_attributes(
+                |name| match name {
+                    "PONY_OTEL_SERVICE_VERSION" | "PONY_OTEL_ENVIRONMENT" => Some(blank.to_string()),
+                    _ => None,
+                },
+                None,
+            );
             assert_eq!(attrs[0].1, env!("CARGO_PKG_VERSION"), "空白串 `{blank:?}` 必须回落默认版本");
             assert_eq!(
                 attrs[1].1,
@@ -3676,10 +3835,13 @@ mod tests {
                 "空白串 `{blank:?}` 必须回落默认环境"
             );
         }
-        let padded = resolve_resource_attributes(|name| match name {
-            "PONY_OTEL_SERVICE_VERSION" => Some("  9.9.9  ".to_string()),
-            _ => None,
-        });
+        let padded = resolve_resource_attributes(
+            |name| match name {
+                "PONY_OTEL_SERVICE_VERSION" => Some("  9.9.9  ".to_string()),
+                _ => None,
+            },
+            None,
+        );
         assert_eq!(padded[0].1, "9.9.9", "env 取值必须 trim 后生效");
     }
 
