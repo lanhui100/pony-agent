@@ -1,0 +1,12 @@
+{
+  "wave": 52,
+  "baseline_commit": "e43f8c3",
+  "captured_at": "2026-10-27T16:46:37+08:00",
+  "command": "npx vitest run --reporter=dot",
+  "exit_code": 0,
+  "test_files": 107,
+  "tests_passed": 1056,
+  "tests_skipped": 12,
+  "tests_failed": 0,
+  "note": "存量前端单测全绿基线（A 级任务：改动前必须存在的行为对照组）"
+}
