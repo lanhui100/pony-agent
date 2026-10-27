@@ -1,0 +1,17 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/components/config/ConfigGeneralSection.vue",
+    "src/components/ui/Switch.vue",
+    "tests/visual-baseline/wave-52-config-update-section-before.png"
+  ],
+  "findings": [
+    {
+      "file": "src/components/config/ConfigGeneralSection.vue",
+      "line": 258,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vite build --outDir /tmp/w52-dist --emptyOutDir --logLevel error >/dev/null 2>&1 && node /tmp/w52/repro-narrow.mjs   # 期望复现：viewport 360 → versionRowH=78、lastCheckedLines=3（当前版本逐字换行）；viewport 400 → 39/2 行；viewport 460 与 780 → 24.5/1 行。基线对比（git archive e43f8c3 同一脚本）：360/400/780 恒为 versionRowH=24.5、lastCheckedLines=1。不可达性反证：src-tauri/tauri.conf.json app.windows[0].minWidth=780 ⇒ 产品内卡片宽度 ≥675px，780 下与变更前几何完全一致（row 24.5、last 15、Switch 右缘差 0px），故仅 ADVISORY。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

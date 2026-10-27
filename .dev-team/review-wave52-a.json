@@ -1,0 +1,9 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/components/config/ConfigGeneralSection.vue",
+    "tests/ConfigGeneralSectionUpdateLayout.spec.ts",
+    "tests/e2e/wave52-update-card-layout.spec.ts"
+  ],
+  "findings": []
+}

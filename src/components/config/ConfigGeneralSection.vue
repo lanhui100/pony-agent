@@ -252,15 +252,22 @@ async function toggleAgentTraceReporting(enabled: boolean) {
 
       <!-- PA-099：软件更新卡片（GitHub 发版检测 + 发布页跳转 + 自动检查开关）。 -->
       <div class="space-y-2" data-testid="config-update-section">
-        <div class="text-[12px] font-medium text-stone-500">软件更新</div>
+        <div class="text-[12px] font-medium text-stone-500" data-testid="config-update-section-title">软件自动更新</div>
         <div class="max-w-[680px] space-y-2.5 rounded-[0.5rem] border border-stone-200 bg-white px-3 py-3">
-          <div class="flex items-center justify-between gap-2">
+          <div class="flex items-center justify-between gap-2" data-testid="config-update-version-row">
             <div class="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-stone-900">
               当前版本
               <span
                 class="rounded-[0.3rem] bg-stone-100 px-1.5 py-0.5 text-[11px] font-normal text-stone-600"
                 data-testid="config-update-current-version"
               >v{{ updateStore.currentVersion }}</span>
+              <span
+                v-if="lastCheckedLabel"
+                class="text-[10px] font-normal text-stone-400"
+                data-testid="config-update-last-checked"
+              >
+                上次检查：{{ lastCheckedLabel }}
+              </span>
             </div>
             <button
               type="button"
@@ -356,22 +363,17 @@ async function toggleAgentTraceReporting(enabled: boolean) {
             {{ updateStore.signedErrorMessage || "签名更新失败，请稍后重试。" }}
           </div>
 
-           <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-0.5">
-            <label class="flex cursor-pointer items-center gap-2 text-[11px] text-stone-500">
-              <Switch
-                :model-value="updateStore.autoCheck"
-                data-testid="config-update-autocheck-switch"
-                @update:model-value="updateStore.setAutoCheck($event)"
-              />
-              <span>自动检查更新</span>
-            </label>
-            <span
-              v-if="lastCheckedLabel"
-              class="text-[10px] text-stone-400"
-              data-testid="config-update-last-checked"
-            >
-              上次检查：{{ lastCheckedLabel }}
-            </span>
+          <div class="flex items-center justify-between gap-2 pt-0.5" data-testid="config-update-autocheck-row">
+            <label
+              class="cursor-pointer text-[11px] text-stone-500"
+              for="config-update-autocheck-toggle"
+            >自动检查更新</label>
+            <Switch
+              id="config-update-autocheck-toggle"
+              :model-value="updateStore.autoCheck"
+              data-testid="config-update-autocheck-switch"
+              @update:model-value="updateStore.setAutoCheck($event)"
+            />
           </div>
         </div>
       </div>
