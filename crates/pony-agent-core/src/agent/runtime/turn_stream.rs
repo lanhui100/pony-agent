@@ -202,21 +202,24 @@ impl AgentRuntime {
                 .iter()
                 .find(|activity| activity.parent_activity_id.is_none())
             {
-                crate::agent::otel::record_tool_call_span(&crate::agent::otel::ToolSpanInput {
-                    tool_name: otel_top_activity
-                        .canonical_tool_name
-                        .clone()
-                        .unwrap_or_else(|| otel_top_activity.name.clone()),
-                    status: if otel_top_activity.status == "done" {
-                        "success".to_string()
-                    } else {
-                        "failed".to_string()
+                crate::agent::otel::record_tool_call_span_with_call_id(
+                    crate::agent::otel::ToolSpanInput {
+                        tool_name: otel_top_activity
+                            .canonical_tool_name
+                            .clone()
+                            .unwrap_or_else(|| otel_top_activity.name.clone()),
+                        status: if otel_top_activity.status == "done" {
+                            "success".to_string()
+                        } else {
+                            "failed".to_string()
+                        },
+                        duration_ms: otel_top_activity
+                            .duration_seconds
+                            .map(|seconds| (seconds * 1000.0).round() as u64),
+                        error: turn_tool_activity_error_text(otel_top_activity),
                     },
-                    duration_ms: otel_top_activity
-                        .duration_seconds
-                        .map(|seconds| (seconds * 1000.0).round() as u64),
-                    error: turn_tool_activity_error_text(otel_top_activity),
-                });
+                    current_tool_call.call_id.clone(),
+                );
             }
             tool_activities.extend(annotate_capability_tool_activities(
                 otel_activity_batch,

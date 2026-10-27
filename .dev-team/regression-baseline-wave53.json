@@ -1,0 +1,9 @@
+{
+  "wave": 53,
+  "baseline_commit": "dd37169",
+  "recorded_at": "2026-10-27T17:20:00+08:00",
+  "gate": "cargo test -p pony-agent-core --test observability_reporting_fixes_test",
+  "exit_code": 0,
+  "result": "14 passed; 0 failed; 0 ignored",
+  "note": "wave-51 冻结红相在 wave-53 改动前全绿，作为行为对照组基线；绿相后逐项对照，基线绿→现红即判 IMPL-DEFECT。"
+}

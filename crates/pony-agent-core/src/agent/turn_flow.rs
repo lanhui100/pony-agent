@@ -2403,8 +2403,9 @@ pub fn provider_decision<P: ProviderClient>(
     tools: &[ToolDefinition],
 ) -> Result<ProviderDecision, String> {
     // Wave43：llm.chat 子 span（父 = 当前活动 turn）；token 用量取响应侧。
-    let mut llm_span = crate::agent::otel::start_llm_span(
-        provider.name(),
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
         Some(request.model.as_str()),
         "chat",
     );
@@ -2443,8 +2444,9 @@ where
     F: FnMut(ProviderStreamChunk),
 {
     // Wave43：llm.chat 子 span（流式决策）。
-    let mut llm_span = crate::agent::otel::start_llm_span(
-        provider.name(),
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
         Some(request.model.as_str()),
         "chat",
     );
@@ -2489,8 +2491,9 @@ pub fn provider_followup<P: ProviderClient>(
     tool_result: &ToolResult,
 ) -> Result<crate::agent::provider::ProviderResponse, String> {
     // Wave43：llm.chat 子 span（工具结果后续轮）。
-    let mut llm_span = crate::agent::otel::start_llm_span(
-        provider.name(),
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
         Some(request.model.as_str()),
         "chat",
     );
@@ -2540,8 +2543,9 @@ where
     F: FnMut(ProviderStreamChunk),
 {
     // Wave43：llm.chat 子 span（流式工具结果后续轮）。
-    let mut llm_span = crate::agent::otel::start_llm_span(
-        provider.name(),
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
         Some(request.model.as_str()),
         "chat",
     );

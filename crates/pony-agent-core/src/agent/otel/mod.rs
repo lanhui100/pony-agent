@@ -86,8 +86,14 @@ pub const ATTR_GOVERNANCE_UNPRICED_TURNS: &str = "governance.unpriced_turns";
 /// 整轮 turn 聚合成本（USD，f64）。Wave-5 K4：无有效计价时**不输出该键**（严禁写 0.0）。
 pub const ATTR_AGENT_TURN_COST_USD: &str = "agent.turn.cost.usd";
 
+/// 模型供应商展示名（wave-53 C3，如 `PonyLlm`）：与枚举化的 [`ATTR_GEN_AI_SYSTEM`] 并存。
+pub const ATTR_GEN_AI_PROVIDER_NAME: &str = "gen_ai.provider.name";
+
 /// 工具名（如 `bash`）。
 pub const ATTR_GEN_AI_TOOL_NAME: &str = "gen_ai.tool.name";
+
+/// 模型侧工具调用 id（wave-53 C6）：有值才输出，缺失**不输出该键**。
+pub const ATTR_GEN_AI_TOOL_CALL_ID: &str = "gen_ai.tool.call.id";
 
 /// 操作名；turn root span 上的取值恒为 [`OPERATION_AGENT_TURN`]。
 pub const ATTR_GEN_AI_OPERATION_NAME: &str = "gen_ai.operation.name";
@@ -109,6 +115,10 @@ pub const ATTR_LANGFUSE_OBSERVATION_TYPE: &str = "langfuse.observation.type";
 /// Langfuse observation 模型名：与 [`ATTR_GEN_AI_REQUEST_MODEL`] 同值双写。
 pub const ATTR_LANGFUSE_OBSERVATION_MODEL_NAME: &str = "langfuse.observation.model.name";
 
+/// Langfuse 语义轨成本三分量（wave-53 C1）：值为**单行 JSON 字符串**，
+/// 键只允许 `input` / `output` / `total`（各自有值才出现）；无有效总额时**不输出该键**。
+pub const ATTR_LANGFUSE_OBSERVATION_COST_DETAILS: &str = "langfuse.observation.cost_details";
+
 // ------------------------------------------------------- 属性键（pony-agent 自有维度）
 
 /// turn 标识，用于 Langfuse 侧与本地会话记录的互跳。
@@ -126,6 +136,20 @@ pub const ATTR_AGENT_TURN_OUTCOME: &str = "agent.turn.outcome";
 
 /// 工具执行状态（如 `success` / `failed`）。
 pub const ATTR_AGENT_TOOL_STATUS: &str = "agent.tool.status";
+
+/// 本轮是否存在「已完成但有工具失败」的降级语义（wave-53 C4，Bool）。
+///
+/// 语义：仅当 `phase == "completed"` 且工具失败计数 > 0 时输出 `true`；
+/// 其余相位（error/aborted 等）**不输出**该键（错误语义仍由 outcome/status 表达）。
+pub const ATTR_AGENT_TURN_DEGRADED: &str = "agent.turn.degraded";
+
+/// 本轮工具失败次数（wave-53 C4，I64）；计数为 0 时**不输出该键**。
+pub const ATTR_AGENT_TURN_TOOL_FAILURES: &str = "agent.turn.tool_failures";
+
+/// 「本轮是否已计价」显式标记（wave-53 C2，Bool）。
+///
+/// 语义：记录过成本 ⇒ `true`；只记录 usage 未记成本 ⇒ `false`；两者都没记录 ⇒ 不输出。
+pub const ATTR_PONY_COST_PRICED: &str = "pony.cost.priced";
 
 /// 工具执行耗时（毫秒整数）。
 pub const ATTR_AGENT_TOOL_DURATION_MS: &str = "agent.tool.duration_ms";
@@ -1099,6 +1123,15 @@ pub fn turn_span_attributes(input: &TurnSpanInput) -> Vec<(String, AttrValue)> {
     attributes
 }
 
+/// 协议标签 → `gen_ai.system` 枚举值（wave-53 C3 契约桩，空桩未实现）。
+///
+/// 冻结契约：`openai*` → `openai`；`anthropic*` → `anthropic`；`gemini*` / `google*` → `google`；
+/// 其余 → `generic`。入参本身也过映射（幂等），未实现的空桩体由实现波次补齐。
+#[allow(unused_variables)] // 空桩阶段参数未被读取；实现落地时随之移除。
+pub fn gen_ai_system_enum(protocol_label: &str) -> &'static str {
+    unimplemented!()
+}
+
 /// LLM 属性映射（纯函数，无网络、无全局态）。
 ///
 /// 调用方：LLM 子 span 的属性填充与单测断言。
@@ -1136,6 +1169,19 @@ pub fn llm_span_attributes(input: &LlmSpanInput) -> Vec<(String, AttrValue)> {
     );
 
     attributes
+}
+
+/// 带供应商展示名的 LLM 属性映射（wave-53 C3 附加式 API，空桩未实现）。
+///
+/// 冻结契约：`gen_ai.system = gen_ai_system_enum(input.provider_kind)`（入参也过映射，保证幂等）；
+/// `provider_name` 非空 ⇒ 追加 [`ATTR_GEN_AI_PROVIDER_NAME`]（展示名，如 `PonyLlm`）；其余键与
+/// [`llm_span_attributes`] 完全一致。旧函数等价于传 `None` 委托本函数。
+#[allow(unused_variables)] // 空桩阶段展示名未被读取；实现落地时随之移除。
+pub fn llm_span_attributes_with_provider(
+    input: &LlmSpanInput,
+    provider_name: Option<&str>,
+) -> Vec<(String, AttrValue)> {
+    unimplemented!()
 }
 
 /// 「细分用量」属性映射（纯函数，无网络、无全局态；wave-51 C3 契约桩）。
@@ -1203,6 +1249,19 @@ pub fn tool_span_attributes(input: &ToolSpanInput) -> Vec<(String, AttrValue)> {
     }
 
     attributes
+}
+
+
+/// 带模型侧 tool call id 的工具属性映射（wave-53 C6 附加式 API，空桩未实现）。
+///
+/// 冻结契约：`call_id` 非空 ⇒ 追加 [`ATTR_GEN_AI_TOOL_CALL_ID`]；`None` ⇒ **不输出该键**；
+/// 其余键与 [`tool_span_attributes`] 完全一致。旧函数等价于传 `None` 委托本函数。
+#[allow(unused_variables)] // 空桩阶段 call_id 未被读取；实现落地时随之移除。
+pub fn tool_span_attributes_with_call_id(
+    input: &ToolSpanInput,
+    call_id: Option<&str>,
+) -> Vec<(String, AttrValue)> {
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------- W3C Trace Context 契约辅助与空桩
@@ -1680,6 +1739,21 @@ pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str)
     }
 }
 
+/// 带供应商展示名的 `llm.chat` 子 span（wave-53 C3 附加式 API，空桩未实现属性逻辑）。
+///
+/// 冻结契约：`gen_ai.system = gen_ai_system_enum(system)`（入参也过映射，保证幂等）；
+/// `provider_name` 非空 ⇒ 输出 [`ATTR_GEN_AI_PROVIDER_NAME`]（展示名，如 `PonyLlm`）。
+/// 与 [`start_llm_span`] 的唯一差异是多了展示名通道，其余语义（父 span/门禁/失败语义）一致。
+#[allow(unused_variables)] // 空桩阶段展示名未被读取；实现落地时随之移除。
+pub fn start_llm_span_with_provider(
+    system: &str,
+    provider_name: Option<&str>,
+    model: Option<&str>,
+    operation: &str,
+) -> LlmSpanGuard {
+    start_llm_span(system, model, operation)
+}
+
 /// `llm.chat` 子 span 守卫（`Drop` 时补 token 用量并结束 span）。
 pub struct LlmSpanGuard {
     span: Option<opentelemetry_sdk::trace::Span>,
@@ -1742,6 +1816,22 @@ impl LlmSpanGuard {
                 accumulate_active_turn_cost(cost);
             }
         }
+    }
+
+    /// 记录单次调用的成本三分量（wave-53 C1 契约桩，空桩未实现）。
+    ///
+    /// 冻结契约：仅当 `total_cost_usd` 为 `Some(v)` 且 `v.is_finite() && v >= 0.0` 才输出
+    /// [`ATTR_LANGFUSE_OBSERVATION_COST_DETAILS`]（单行 JSON，键 `input`/`output`/`total`，
+    /// 各自 `Some` 才出现，数字保留 6 位小数）；并**等价地**计入该 turn 的成本聚合
+    /// （与 [`LlmSpanGuard::record_cost`] 同一聚合口径，根 span 不得漏算或重复计）。
+    #[allow(unused_variables)] // 空桩阶段参数未被读取；实现落地时随之移除。
+    pub fn record_cost_components(
+        &mut self,
+        input_cost_usd: Option<f64>,
+        output_cost_usd: Option<f64>,
+        total_cost_usd: Option<f64>,
+    ) {
+        unimplemented!()
     }
 
     /// 记录单次调用生成速度与上下文用量诊断属性。
@@ -1910,6 +2000,16 @@ pub fn record_tool_call_span(input: &ToolSpanInput) {
         // 失败路径同样 end：`set_status` 之后直接 end，绝不提前 return → span 不泄漏。
         span.end_with_timestamp(ended_at);
     }
+}
+
+/// 带模型侧 tool call id 的工具 span 记录入口（wave-53 C6 附加式 API，空桩未实现）。
+///
+/// 冻结契约：属性走 [`tool_span_attributes_with_call_id`]；`call_id` 非空 ⇒ 输出
+/// [`ATTR_GEN_AI_TOOL_CALL_ID`]；失败聚合/backdate/会话归属等语义与 [`record_tool_call_span`]
+/// 完全一致。旧函数等价于传 `None` 委托本函数。
+#[allow(unused_variables)] // 空桩阶段 call_id 未被读取；实现落地时随之移除。
+pub fn record_tool_call_span_with_call_id(input: ToolSpanInput, call_id: Option<String>) {
+    unimplemented!()
 }
 
 // ==================================================================== 私有实现
