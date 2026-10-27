@@ -87,7 +87,9 @@
   Σout/整轮时长 = 4542/98.47 = 46.13 属另一指标，本波**不**作为 turn.speed 输出。
   另：`gen_i = out_i/attrSpeed_i` 由 span 实测反推，容差按毫秒取整。
 
-**L2-AT（对抗）**：A1 `dur<=0` / `ttft>dur` / 全空 usage ⇒ 不得产出 NaN/Inf/负值、不得输出 speed 键；
+**L2-AT（对抗）**：A1 `dur<=0` / 全空 usage ⇒ 不得产出 NaN/Inf/负值且 speed 必须为 `null`；
+`ttft>dur`（Lead 裁决 2026-10-27 20:40）⇒ **按 C2 退化 `gen=dur`**，断言 speed=`out/dur`（有限正值，
+与已冻结的 `tests/unit/token-speed-metrics.spec.ts:101` 一致），**不得**判 null；
 A2 `estimated_chars` 与 provider 混合 ⇒ 加权限仍有限且方向不变；A3 同一事件序列重复 fold 10 次幂等
 （固定序列、无随机、无 sleep）。
 
@@ -100,3 +102,34 @@ A2 `estimated_chars` 与 provider 混合 ⇒ 加权限仍有限且方向不变�
 | rust-exec | `crates/pony-agent-core/src/agent/otel/mod.rs`, `turn_flow.rs`, `projection.rs`, `runtime/stream_support.rs`, `provider/mod.rs`, `session/types.rs` |
 | ui-exec | `src/lib/runtime/token-metrics.ts`, `src/lib/runtime/useTraceProjection.ts`, `src/components/HomeStatusPanel.vue`, `src/components/HomeSidebar.vue` |
 | lead | `.dev-team/contract-matrix-wave54.md`, `docs/observability.yaml`, `docs/decisions/`, `docs/audit/`, `.dev-team/state.json` |
+
+## 4. C2 前端 API 冻结（实施前补充，Lead 2026-10-27 同一波次裁定）
+
+`src/lib/runtime/token-metrics.ts` 必须导出（Named export，位置参数不变，旧导出可保留为薄别名）：
+
+```ts
+export type TokenSpeedCalculationMode = "turn_weighted" | "call_only" | "none";
+
+export interface TurnWeightedSpeedDetail {
+  speed: number | null;
+  mode: TokenSpeedCalculationMode;
+  basis: "turn_weighted" | "call_only" | "none";
+  calls: number;            // 参与计算的已完成调用数
+  outputTokens: number | null;  // Σout
+  genMs: number | null;         // Σgen
+  inputTokens: number | null;   // 末次调用上下文输入（见 C4）
+  cacheInputTokens: number | null;
+  ttftMs: number | null;        // 首次调用 TTFT
+  origin: string | null;        // estimated_chars | provider | null
+}
+
+export function resolveTurnWeightedSpeedDetail(
+  turn: TurnTraceRecord | null | undefined,
+  options?: { isActiveTurn?: boolean }
+): TurnWeightedSpeedDetail;
+```
+
+- `turn_weighted`：`calls >= 1` 且 `genMs > 0 && Σout > 0`。
+- `call_only`：`calls === 0` 且存在活跃调用的 per-call 值（`speed = out/(dur-ttft|dur)`）。
+- `none`：其余（`speed = null`）。
+- 旧的 `resolveDualModeTokenSpeedDetail` / `resolveTurnGenerationSpeed` 若保留，必须委托本函数，不得再有自己的分支。
