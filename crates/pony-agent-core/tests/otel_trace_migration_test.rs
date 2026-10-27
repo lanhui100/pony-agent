@@ -1139,7 +1139,11 @@ fn ot8_exit_path_releases_otel_provider() {
         let source = std::fs::read_to_string(&file)
             .unwrap_or_else(|err| panic!("OT-8e 扫描面文件必须可读（{relative}）：{err}"));
 
-        if source.contains("otel::init(") {
+        // wave-51 C1（契约 PA51-C1，§7.2 Lead 授权 V3-5）：宿主装配入口从 `otel::init(` 迁移到
+        // `otel::init_with_service_version(`（安装包版本注入通道）后，本判定必须同时接受两条入口，
+        // 否则装配点会「找不到」而误红。授权边界：只改本处匹配条件，其余断言（扫描面、
+        // RunEvent::Exit 内 shutdown 分支）一律不动。
+        if source.contains("otel::init(") || source.contains("otel::init_with_service_version(") {
             init_sites.push(relative.clone());
         }
 

@@ -1,0 +1,90 @@
+    Finished `test` profile [unoptimized] target(s) in 0.33s
+     Running tests/observability_reporting_fixes_test.rs (target/debug/deps/observability_reporting_fixes_test-34cb66f1094cb758)
+
+running 11 tests
+test c1_ponysentry_with_release ... FAILED
+test c1_blank_version_falls_back_to_env ... FAILED
+test c1_explicit_version_wins ... FAILED
+test c3_usage_details_values ... FAILED
+test c1_invalid_version_rejected ... FAILED
+test t6_static_wiring ... FAILED
+test c2_governance_span_carries_session ... FAILED
+test c2_governance_without_turn_has_no_session ... ok
+test c3_all_none_root_has_no_keys ... ok
+test l2at_concurrent_init ... FAILED
+test c3_wire_keys_and_root_aggregation ... FAILED
+
+failures:
+
+---- c1_ponysentry_with_release stdout ----
+
+thread 'c1_ponysentry_with_release' (2115540) panicked at crates/pony-agent-core/src/agent/ponysentry/config.rs:143:9:
+not implemented: wave-51 C1 契约桩：PonySentryConfig::with_release 待实现
+
+---- c1_blank_version_falls_back_to_env stdout ----
+
+thread 'c1_blank_version_falls_back_to_env' (2115537) panicked at crates/pony-agent-core/src/agent/otel/mod.rs:614:5:
+not implemented: wave-51 C1 契约桩：init_with_service_version 待实现
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- c1_explicit_version_wins stdout ----
+
+thread 'c1_explicit_version_wins' (2115538) panicked at crates/pony-agent-core/src/agent/otel/mod.rs:614:5:
+not implemented: wave-51 C1 契约桩：init_with_service_version 待实现
+
+---- c3_usage_details_values stdout ----
+
+thread 'c3_usage_details_values' (2115546) panicked at crates/pony-agent-core/src/agent/otel/mod.rs:1133:5:
+not implemented: wave-51 C3 契约桩：llm_usage_detail_attributes 待实现
+
+---- c1_invalid_version_rejected stdout ----
+
+thread 'c1_invalid_version_rejected' (2115539) panicked at crates/pony-agent-core/src/agent/otel/mod.rs:614:5:
+not implemented: wave-51 C1 契约桩：init_with_service_version 待实现
+
+---- t6_static_wiring stdout ----
+
+thread 't6_static_wiring' (2115549) panicked at crates/pony-agent-core/tests/observability_reporting_fixes_test.rs:945:5:
+assertion `left == right` failed: PA51-C3-T6：`turn_flow.rs` 必须恰好 4 处 `record_usage_details(` 接线（不得漏接/多接），实际 0
+  left: 0
+ right: 4
+
+---- c2_governance_span_carries_session stdout ----
+
+thread 'c2_governance_span_carries_session' (2115542) panicked at crates/pony-agent-core/tests/observability_reporting_fixes_test.rs:624:5:
+assertion `left == right` failed: PA51-C2-T1：活跃 turn 内的 `governance.decide` span 必须自带 `langfuse.session.id`，且与同 turn 逐字相同（期望 `sess-gov`）；治理 span 实际属性：[("gen_ai.operation.name", Str("governance.decide")), ("governance.window", Str("session")), ("governance.decision", Str("allow")), ("governance.policy_version", Str("pv-1")), ("governance.unpriced_turns", Int(0))]
+  left: None
+ right: Some("sess-gov")
+
+---- l2at_concurrent_init stdout ----
+
+thread '<unnamed>' (2115811) panicked at crates/pony-agent-core/src/agent/otel/mod.rs:614:5:
+not implemented: wave-51 C1 契约桩：init_with_service_version 待实现
+
+thread '<unnamed>' (2115810) panicked at crates/pony-agent-core/src/agent/otel/mod.rs:614:5:
+not implemented: wave-51 C1 契约桩：init_with_service_version 待实现
+
+thread 'l2at_concurrent_init' (2115548) panicked at crates/pony-agent-core/tests/observability_reporting_fixes_test.rs:1029:5:
+L2-AT：并发 `init_with_service_version` + export 不得 panic（允许 Err），实际：["worker 0 第 0 轮 init/export 发生 panic（并发下只允许返回 Err）", "worker 1 第 0 轮 init/export 发生 panic（并发下只允许返回 Err）"]
+
+---- c3_wire_keys_and_root_aggregation stdout ----
+
+thread 'c3_wire_keys_and_root_aggregation' (2115547) panicked at crates/pony-agent-core/src/agent/otel/mod.rs:1664:9:
+not implemented: wave-51 C3 契约桩：LlmSpanGuard::record_usage_details 待实现
+
+
+failures:
+    c1_blank_version_falls_back_to_env
+    c1_explicit_version_wins
+    c1_invalid_version_rejected
+    c1_ponysentry_with_release
+    c2_governance_span_carries_session
+    c3_usage_details_values
+    c3_wire_keys_and_root_aggregation
+    l2at_concurrent_init
+    t6_static_wiring
+
+test result: FAILED. 2 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.57s
+
+error: test failed, to rerun pass `-p pony-agent-core --test observability_reporting_fixes_test`
+EXIT=101

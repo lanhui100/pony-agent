@@ -1,0 +1,171 @@
+{
+  "schema": "l2at-done/wave-51",
+  "wave": "wave-51",
+  "agent": "test-agent-2 (Test Agent, 独立测试分权)",
+  "kind": "红相验收 + L2-AT 对抗（冻结）",
+  "revision": "red-phase run #2（Lead 裁决 A 强化后终态；run #1 见 enhancement_history）",
+  "contract": ".dev-team/contract-matrix-wave51.md §1/§2/§3/§7.2（v3 + Lead v4 三处裁决 + 裁决 A）",
+  "test_file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+  "test_file_lines": 1039,
+  "case_count": 11,
+  "anchored_frozen_test_edit": "crates/pony-agent-core/tests/otel_trace_migration_test.rs:1142（OT-8e 唯一授权单点：otel::init( || otel::init_with_service_version(；其余断言零改动）",
+  "command": "cargo test -p pony-agent-core --test observability_reporting_fixes_test",
+  "cwd": "/home/dm/pony-agent",
+  "exit_code": 101,
+  "raw_log": ".dev-team/red-phase-wave51.log",
+  "compilation_receipt": {
+    "command": "cargo test -p pony-agent-core --test observability_reporting_fixes_test --no-run",
+    "exit_code": 0,
+    "otel_frozen_test_command": "cargo test -p pony-agent-core --test otel_trace_migration_test --no-run",
+    "otel_frozen_test_exit_code": 0
+  },
+  "summary": {
+    "total": 11,
+    "failed": 9,
+    "passed": 2,
+    "ignored": 0,
+    "passed_negative_face_allowed": 2,
+    "skipped_or_ignored": 0,
+    "external_network": "zero（全部走 127.0.0.1 回环 OTLP sink 或纯函数/文件读）"
+  },
+  "verdict": "红相成立：9/11 失败，失败根因全部在 SUT（4 个 unimplemented! 契约桩 + 1 处 span 缺属性 + 1 处接线缺失 0/4 + 并发 panic 传导）；余 2 例为契约允许的负向面，均内置正向对照，不构成假绿",
+  "failure_attribution_breakdown": {
+    "unimplemented_stub": [
+      "c1_explicit_version_wins (otel/mod.rs:614)",
+      "c1_blank_version_falls_back_to_env (otel/mod.rs:614)",
+      "c1_invalid_version_rejected (otel/mod.rs:614)",
+      "c1_ponysentry_with_release (ponysentry/config.rs:143)",
+      "c3_usage_details_values (otel/mod.rs:1133)",
+      "c3_wire_keys_and_root_aggregation (otel/mod.rs:1664)",
+      "l2at_concurrent_init (otel/mod.rs:614, 经 catch_unwind 转断言)"
+    ],
+    "missing_attribute": [
+      "c2_governance_span_carries_session (otel/mod.rs:1744-1755 未 push langfuse.session.id；断言点 tests:624)"
+    ],
+    "missing_wiring": [
+      "t6_static_wiring (turn_flow.rs record_usage_details 计数 0/4；断言点 tests:935)"
+    ]
+  },
+  "enhancement_history": [
+    {
+      "run": 1,
+      "command": "cargo test -p pony-agent-core --test observability_reporting_fixes_test",
+      "exit_code": 101,
+      "failed": 8,
+      "passed": 3,
+      "finding": "c2_governance_span_carries_session 意外通过（PASSED）—— 整段 body 的 contains(\"langfuse.session.id\") 被同 trace 的 agent.turn span 满足，属不可证伪的假绿；非实现已修"
+    },
+    {
+      "run": 2,
+      "trigger": "Lead 裁决 A：授权改为解码 governance.decide span 自身属性（复用文件内 find_span + 新增 span_str_attribute）",
+      "change_scope": "仅本测试文件 c2_governance_span_carries_session 一个用例 + 1 个 6 行辅助函数；其余用例与冻结 OT 测试零改动",
+      "command": "cargo test -p pony-agent-core --test observability_reporting_fixes_test",
+      "exit_code": 101,
+      "failed": 9,
+      "passed": 2,
+      "result": "该例正确转红：panic 于 tests/observability_reporting_fixes_test.rs:624，left=None / right=Some(\"sess-gov\")，根因 SUT 缺属性"
+    }
+  ],
+  "cases": [
+    {
+      "n": 1,
+      "name": "c1_explicit_version_wins",
+      "pillar": "PA51-C1-T1",
+      "status": "failed",
+      "assertions": "wire body 含 resource 键 service.version 且值 == 9.9.9（显式入参压过 env/CARGO_PKG_VERSION）",
+      "failure_reason": "unimplemented! 桩在任何断言前 panic",
+      "panic_attribution": "SUT: crates/pony-agent-core/src/agent/otel/mod.rs:614 `init_with_service_version` 未实现"
+    },
+    {
+      "n": 2,
+      "name": "c1_blank_version_falls_back_to_env",
+      "pillar": "PA51-C1-T2",
+      "status": "failed",
+      "assertions": "Some(\"   \") + env PONY_OTEL_SERVICE_VERSION=7.7.7 ⇒ body 含 7.7.7 且不含 9.9.9（env 保持 trim-only 语义，无控制字符用例）",
+      "failure_reason": "unimplemented! 桩在任何断言前 panic",
+      "panic_attribution": "SUT: crates/pony-agent-core/src/agent/otel/mod.rs:614 `init_with_service_version` 未实现"
+    },
+    {
+      "n": 3,
+      "name": "c1_invalid_version_rejected",
+      "pillar": "PA51-C1-T4（对抗）",
+      "status": "failed",
+      "assertions": "显式入参 \"1.2.3\\n9.9.9\" 与 65 字节 \"9\"*65 一律视为未设置：wire 不含脏值/截断后的 64 字节值，且回落 CARGO_PKG_VERSION=0.1.135",
+      "failure_reason": "首个脏值（换行注入）即 panic，断言未执行",
+      "panic_attribution": "SUT: crates/pony-agent-core/src/agent/otel/mod.rs:614 `init_with_service_version` 未实现"
+    },
+    {
+      "n": 4,
+      "name": "c1_ponysentry_with_release",
+      "pillar": "PA51-C1-T3/T4/T5",
+      "status": "failed",
+      "assertions": "with_release(Some(\" 9.9.9 \")) ⇒ release==\"9.9.9\" 且其余字段不变；None/纯空白/NUL 控制字符/65 字节 ⇒ 保持原值 CARGO_PKG_VERSION",
+      "failure_reason": "unimplemented! 桩在任何断言前 panic",
+      "panic_attribution": "SUT: crates/pony-agent-core/src/agent/ponysentry/config.rs:143 `PonySentryConfig::with_release` 未实现"
+    },
+    {
+      "n": 5,
+      "name": "c2_governance_span_carries_session",
+      "pillar": "PA51-C2-T1",
+      "status": "failed",
+      "assertions": "活跃 turn 内解码 `governance.decide` span **自身**属性：langfuse.session.id == \"sess-gov\"（Lead 裁决 A 强化后）",
+      "failure_reason": "assertion left==right failed：治理 span 自身属性缺 langfuse.session.id（left=None，right=Some(\"sess-gov\")）；实测属性仅 [gen_ai.operation.name, governance.window, governance.decision, governance.policy_version, governance.unpriced_turns]",
+      "panic_attribution": "断言点 tests/observability_reporting_fixes_test.rs:624；根因 SUT：crates/pony-agent-core/src/agent/otel/mod.rs:1744-1755 `start_governance_decide_span` 未补 push_active_session_attribute（缺属性，非桩 panic）",
+      "strengthening": "强化前为整段 body contains(\"langfuse.session.id\") —— 被同 trace 的 agent.turn span 满足而假绿（PASSED）；强化后逐 span 解码治理 span 自身属性 ⇒ 正确转红"
+    },
+    {
+      "n": 6,
+      "name": "c2_governance_without_turn_has_no_session",
+      "pillar": "PA51-C2-T2",
+      "status": "passed_negative_face_allowed",
+      "assertions": "无活跃 turn ⇒ wire 不含 langfuse.session.id（禁止空串占位）；含 `governance.decide` span 存在性正向对照（防零导出假绿）",
+      "failure_reason": "不适用：契约允许的负向面（无任何 span 写会话键 ⇒ 键天然缺席，不依赖新实现）",
+      "panic_attribution": "N/A（未失败）"
+    },
+    {
+      "n": 7,
+      "name": "c3_usage_details_values",
+      "pillar": "PA51-C3-T1/T2/T3",
+      "status": "failed",
+      "assertions": "(7,5) ⇒ 两键各 I64(7)/I64(5)；混合 ⇒ 只出其一；(None,None) ⇒ 空；Some(0) ⇒ 输出 0；u64::MAX ⇒ 双键饱和 i64::MAX(9223372036854775807)；常量键名字面量冻结",
+      "failure_reason": "unimplemented! 桩在任何断言前 panic",
+      "panic_attribution": "SUT: crates/pony-agent-core/src/agent/otel/mod.rs:1133 `llm_usage_detail_attributes` 未实现"
+    },
+    {
+      "n": 8,
+      "name": "c3_wire_keys_and_root_aggregation",
+      "pillar": "PA51-C3-T4",
+      "status": "failed",
+      "assertions": "两子 llm.chat 各 record_usage_details(7,5)/(3,2) ⇒ 子 span int_value 排序后 [3,7]/[2,5]；根 agent.turn 聚合 int_value Σ=10/Σ=7（测试内最小 protobuf varint 解码器反解）",
+      "failure_reason": "unimplemented! 桩在首个 record_usage_details 调用处 panic",
+      "panic_attribution": "SUT: crates/pony-agent-core/src/agent/otel/mod.rs:1664 `LlmSpanGuard::record_usage_details` 未实现"
+    },
+    {
+      "n": 9,
+      "name": "c3_all_none_root_has_no_keys",
+      "pillar": "PA51-C3-T5",
+      "status": "passed_negative_face_allowed",
+      "assertions": "子 span 不上报细分用量 ⇒ wire 文本与根 agent.turn 解码属性均无两键（禁 0 占位）；正向对照 gen_ai.usage.input_tokens 必须存在（防「零导出」假绿）",
+      "failure_reason": "不适用：契约允许的负向面（实现未写键 ⇒ 键天然缺席）；正向对照已通过，证明导出通路正常",
+      "panic_attribution": "N/A（未失败）"
+    },
+    {
+      "n": 10,
+      "name": "t6_static_wiring",
+      "pillar": "PA51-C3-T6",
+      "status": "failed",
+      "assertions": "turn_flow.rs 中 `record_usage_details(` 计数 == 4；src-tauri/src/lib.rs 含 init_with_service_version( 与 .with_release(",
+      "failure_reason": "assertion left==right failed：实际 0 ≠ 4（4 个调用点尚未接线，第一断言即中止，宿主两条断言未执行）",
+      "panic_attribution": "SUT: crates/pony-agent-core/src/agent/turn_flow.rs 缺 4 处接线（宿主 src-tauri/src/lib.rs 亦待切换入口，接线后须复跑本断言）"
+    },
+    {
+      "n": 11,
+      "name": "l2at_concurrent_init",
+      "pillar": "L2-AT 对抗（并发双初始化 + 多轮 export）",
+      "status": "failed",
+      "assertions": "Barrier 对齐的 2 线程 × 3 轮 shutdown/init/export：允许返回 Err，禁止 panic（catch_unwind 捕获后转断言失败，不吞异常）",
+      "failure_reason": "两 worker 均在 mod.rs:614 panic（stub），被 catch_unwind 捕获并转为失败信息 ⇒ 断言「不得 panic」失败",
+      "panic_attribution": "SUT: crates/pony-agent-core/src/agent/otel/mod.rs:614 `init_with_service_version` 未实现"
+    }
+  ]
+}
