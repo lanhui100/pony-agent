@@ -1,0 +1,36 @@
+{
+  "verdict": "PASS",
+  "id": "l3b-wave51",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/config.rs",
+    "src-tauri/src/lib.rs",
+    "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 1601,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '1580,1605p' crates/pony-agent-core/src/agent/otel/mod.rs",
+      "severity": "ADVISORY",
+      "note": "新增键走 saturating，而既有 input/output 仍 `as i64` 直转；超 i64::MAX 时旧键可能出负值（既有缺陷，非本波引入，登记 follow-up）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/turn_flow.rs",
+      "line": 2372,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'cache_reportable_input_tokens\\|ProviderCostProtocol::from_label' crates/pony-agent-core/src/agent/turn_flow.rs",
+      "severity": "ADVISORY",
+      "note": "cache 上报白名单 fail-closed 与 `cost::from_label` 对未知协议按 OpenAI 计价的口径分叉；已在契约 L3 与 NFR known_limitations 登记，未来新增协议标签需同步。"
+    }
+  ],
+  "verified_points": [
+    "Q1 normalize_service_version 先拒控制字符后 trim：\" 1.2.3 \" 通过 / \"1.2.3\\n\" 拒绝；字节上限只影响边界",
+    "Q2 门禁关闭（span=None）时 record_usage_details 不累加，根聚合不被污染",
+    "Q3 TurnTraceGuard::drop 在 unregister 前取聚合（take_* 只读不清零，依赖摘除时机，已满足）",
+    "Q4 setup 仅一次 init_with_service_version；load_app_settings 每次调用替换 PonySentry client（与旧 init_from_settings 等价）；AppHandle 由 Tauri 注入，前端 invoke 无参兼容（Lead 已复核 lib.rs:589-611）",
+    "Q5 cache 白名单 fail-closed 与 cost 未知协议口径分叉已登记"
+  ]
+}

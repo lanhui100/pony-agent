@@ -78,3 +78,55 @@
 1. **[P0] 变更门禁载体自动化探测适配**：在 `ponygo observe audit` 针对各类型项目时，可提供对主流 CI 载体（GitHub Actions / pre-commit / husky）的智能挂载检测或自动初始化提示。
 2. **[P1] 测试套件前置隔离**：在多 Agent 协同执行 vitest 测试时，确保测试文件临时目录使用独立命名空间，避免并发运行互相争用。
 
+---
+
+# Wave-51 增补复盘（可观测性 P0 三项修复：版本单一来源 / 治理会话归属 / 思考与缓存 token 出口）
+
+## 一、 通信拓扑与信噪比 (Topology & Noise)
+- **拓扑**：Lead + Protocol Agent + Test Agent（两任）+ Executor（常驻峰值 5/8）；Gate-1 两轮（2 路独立）、
+  Join 双路（L3-P + L3-B）全部以 Subagent 挂载；Explorer 1 个只读侦察（E1）。
+- **有效实践**：Protocol 的契约矩阵 v1→v4 把「env 仅 trim-only」「cache 仅 OpenAI 族」「wire 只断键名 +
+  纯函数值级断言」写死，实现/测试/文档三方没有出现口径漂移；Gate-1 第 1 轮拦下 4 个 BLOCKING
+  （semconv 键名错、OT-8e 冻结锚点死锁、C3 无接线条目、NFR 优先级 3 级 vs 4 级），v3 修正后复评 PASS。
+- **噪声与浪费**：① 首任 Test Agent 大量前置阅读后上下文耗尽，0 文件产出，换 test-agent-2（最小读集）
+  后一轮落盘 —— 证明「阅读预算」必须写进 prompt；② 治理 span 断言首版用整段 body `contains`，被同
+  trace 根 span 满足造成假绿，Test Agent 自检后按 Lead 裁决改为解码目标 span 自身属性；
+  ③ Lead 起草 task 卡时未先与 Protocol 对齐「根聚合」范围，导致契约 Non-Goal #4 与任务卡冲突，
+  多花一轮消息往返。
+
+## 二、 门禁穿透与误杀率 (Gate Penetration / False Negatives & Positives)
+- **真拦截**：Gate-1 两路 BLOCKING 全部有 file:line 反例；L3-P 六问 0 BLOCKING（2 ADVISORY：
+  非法版本静默回落无日志、C2 的 9/9 缺真实 trace 收据）；L3-B 复核未发现实现缺陷（见 review-l3b-wave51.json）。
+- **机械门禁**：契约/NFR lint、cargo check（core + tauri）、验收测试 11 例、`--lib` 1175 例（=基线）、
+  version:check、audit-diff、check-declaration 全 Exit 0；union diff 2402 行触发双路 L3 审查。
+- **红相纯度**：9/11 失败（7 个桩 panic + 1 缺属性 + 1 接线缺失），2 例允许负向面均带正向对照；
+  但 `c2_governance_span_carries_session` 首版不可证伪，属于「红相全绿≠断言可证伪」的真实样本。
+- **测试缺陷穿透（TD-1）**：`l2at_concurrent_init` 的 `Barrier::new(3)` 主线程只 wait 一次，第 2 轮死锁；
+  红相期被 `unimplemented!()` panic + `catch_unwind` 提前 return 掩盖，绿相才暴露。按 TEST-DEFECT 由
+  Test Agent 最小修复并重跑 11 passed；残留风险（实现回退为 panic 时该例会 hang）已登记。
+- **零假测试**：验收测试无 `#[ignore]`、无空断言；wire 断言分两层（键名在 wire、数值在纯函数/解码器）。
+
+## 三、 分工契约与隔离有效性 (Contract Isolation)
+- **写域隔离**：Protocol 仅桩/契约/NFR；Test Agent 仅测试文件与 OT-8e 一处授权修订 + 收据；Executor 严格
+  4 个 write_scope（`otel/mod.rs`、`turn_flow.rs`、`ponysentry/config.rs`、`src-tauri/lib.rs`）；Lead 仅
+  文档/裁决/门禁。`git diff --name-only 090df55..HEAD` 与声明写域零越界；git 写操作 Lead 独占（5 次原子提交）。
+- **契约演进**：v1→v2（根聚合纳入）→v3（semconv 键名/OT-8e 授权/优先级拆分/注入防御）→v4（三处澄清）；
+  每版均由 Protocol 落盘、Lead 裁决、Test Agent 迁移断言后才重跑红相。
+- **分权代价**：TD-1 需 Lead 裁决 + Test Agent 修复 + Executor 重跑，往返约 20 分钟；但避免了「实现方
+  以改测试迁就实现」的隐性破坏。
+
+## 四、 元协议迭代建议 (Self-Evolving Protocol)
+1. **[P0] 最小读集强制**：Test/Executor 首条 prompt 必须给「精确文件 + 行范围 + 禁止通读」，大产物要求
+   单次 write；本波首任 Test Agent 的失败就是反例。
+2. **[P0] 红相可证伪性抽检**：冻结前对每条属性归属断言做一次「目标对象缺失时应转红」的变异抽检
+   （本次治理 span 若早做此检查，可省一轮）。
+3. **[P1] 并发用例禁 panic 短路**：L2-AT 并发用例必须让 worker 每轮到场（panic 信息累积到循环外返回），
+   否则死锁被 catch_unwind 掩盖；本次 TD-1 已登记残留风险。
+4. **[P1] 契约-任务卡双签**：Lead 任务卡只引用契约条目号（PA51-Cx-Ty），不重述规则；开波前做一次
+   「任务卡断言集合 ⊆ 契约断言集合」的机械 diff。
+5. **[P1] 生产证据补位**：合成 wire 断言不能替代 Tempo/Langfuse 真实会话收据；建议每次上报类修复后
+   由用户在真实设备跑一跳，并以「会话过滤命中率 / usage 明细」作为收口证据（本次 C2 已列待证据项）。
+6. **[P2] 审查输入包化**：给 Subagent 审查员冻结「diff + 契约 + 关键文件行范围」输入包，避免其自行通读
+   导致超时（本波一个 L3 审查员超时后由精简版接替）。
+
+

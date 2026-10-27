@@ -56,7 +56,9 @@ Status: implemented
   前端 `invoke("load_app_settings")` 无参调用不受影响（Tauri 自动注入）。
 - **已知限制**：① Anthropic 语义下 cache 键不上报（follow-up：需要同时把 cache 计入 input 口径）；
   ② CLI/TUI 仍报 core crate 版本（无安装包版本可注入）；③ 未知协议标签 cache fail-closed；
-  ④ 显式注入与 env 的 trim 差异（env 保留原值）。
+  ④ 显式注入与 env 的 trim 差异（env 保留原值）；⑤ 非法显式版本静默回落、当前无日志收据
+  （L3-P ADVISORY，建议后续补一条 warn）；⑥ 既有 `gen_ai.usage.input_tokens|output_tokens` 聚合
+  仍用 `as i64` 直转，与新增键的饱和口径不一致（既有缺陷，非本波引入）。
 - **测试**：新增冻结验收 `crates/pony-agent-core/tests/observability_reporting_fixes_test.rs`
   （11 例，含 L2-AT 对抗与测试侧最小 protobuf 解码器）；OT-8e 静态扫描授权接受新装配入口一处；
   既有 AT2 7 键冻结集与 wave49 根 usage 断言不被打破。绿相期发现并修复测试缺陷 TD-1

@@ -156,3 +156,8 @@ bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base orig
 P2-7~P3-12 仍按 §5 建议表排期；另登记一条测试残留风险：`l2at_concurrent_init` 若实现回退为 panic，
 主线程可能 hang 而非快速失败（根治方案已在 `l2at-done-wave51.json.residual_risk_note`）。
 
+**待证据项（L3-P ADVISORY）**：C2 的「会话过滤 9/9」当前由合成 trace 的 wire 级断言证明
+（`c2_governance_span_carries_session` 解码 `governance.decide` 自身属性），仓内**尚无**真实
+Tempo/Langfuse 9-span 实测收据；需下一次真实桌面会话（开启上报）复跑 Tempo 会话过滤后补齐。
+
+

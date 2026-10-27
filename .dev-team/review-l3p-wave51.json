@@ -1,0 +1,52 @@
+{
+  "verdict": "PASS",
+  "id": "l3p-wave51",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/config.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "src-tauri/src/lib.rs",
+    "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+    "crates/pony-agent-core/tests/otel_trace_migration_test.rs",
+    "docs/observability.yaml",
+    "docs/architecture/agent-trace-pipeline.md",
+    "docs/audit/observability-audit-2026-10-27.md",
+    ".dev-team/nfr-baseline-wave51.json",
+    ".dev-team/contract-matrix-wave51.md"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 566,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n '565,578p' crates/pony-agent-core/src/agent/otel/mod.rs",
+      "severity": "ADVISORY",
+      "note": "显式注入版本非法（控制字符/超 64B）时静默按未设置回落，分支内无 log_json，桌面端唯一版本来源降级不可观测（登记 follow-up）。"
+    },
+    {
+      "file": "docs/audit/observability-audit-2026-10-27.md",
+      "line": 118,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test observability_reporting_fixes_test c2_governance_span_carries_session",
+      "severity": "ADVISORY",
+      "note": "会话过滤 9/9 仅有合成 trace 的 wire 属性断言，真实 Tempo/Langfuse 9-span 收据需下一真实会话复核（已在审计报告标注待证据项）。"
+    }
+  ],
+  "six_questions": {
+    "timeout": "PASS",
+    "logging": "PASS",
+    "resource_release": "PASS",
+    "concurrency": "PASS",
+    "config_selfcheck": "PASS",
+    "contract_compat": "PASS"
+  },
+  "evidence_refs": [
+    "cargo test -p pony-agent-core --test observability_reporting_fixes_test -> EXIT 0 / 11 passed",
+    "cargo test -p pony-agent-core --lib -> EXIT 0 / 1175 passed",
+    "cargo check -p pony-agent -> EXIT 0",
+    "npm run version:check -> EXIT 0",
+    "audit-diff.sh --base 090df55 -> EXIT 0",
+    "check-declaration.sh . -> PASS exit 0"
+  ]
+}
