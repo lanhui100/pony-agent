@@ -136,6 +136,23 @@ describe("ConfigGeneralSection 软件自动更新卡片布局契约（Wave-52）
     expect(headerRow.element.contains(lastChecked.element), "「上次检查」不得出现在 section 标题行").toBe(false);
   });
 
+  // ── C9：安装入口收敛为版本行主按钮 ──────────────────────────────────────
+  it("C9：方框内不存在独立「立即升级」按钮，版本行只有主按钮 1 个", () => {
+    const wrapper = mountSection();
+
+    expect(
+      wrapper.find('[data-testid="config-update-install-button"]').exists(),
+      "下方独立「立即升级」按钮必须被移除（契约 v3 C9）"
+    ).toBe(false);
+
+    const versionRow = wrapper.get('[data-testid="config-update-version-row"]');
+    const buttons = versionRow.findAll("button");
+    expect(
+      buttons.map((b) => b.attributes("data-testid")),
+      "版本行只允许存在 1 个主操作按钮"
+    ).toEqual(["config-update-check-button"]);
+  });
+
   it("C3b：无上次检查时间时不渲染「上次检查」，版本行仍在", () => {
     const wrapper = mountSection();
 

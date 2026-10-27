@@ -61,7 +61,7 @@ describe("ConfigGeneralSection 签名更新 UI（release gate 模拟）", () => 
     vi.restoreAllMocks();
   });
 
-  it("signed available 时渲染立即升级按钮，点击进入 downloading 并禁用", async () => {
+  it("signed available 时主按钮转为立即升级（下方独立按钮已移除），点击进入 downloading 并禁用", async () => {
     mocks.adapter.downloadAndInstall.mockResolvedValue(undefined);
     mocks.adapter.relaunch.mockResolvedValue(undefined);
     const store = useUpdateStore();
@@ -69,7 +69,13 @@ describe("ConfigGeneralSection 签名更新 UI（release gate 模拟）", () => 
     store.signedCandidate = CANDIDATE;
     const wrapper = mountSection();
 
-    const button = wrapper.get('[data-testid="config-update-install-button"]');
+    // C9：方框内不再有独立的「立即升级」按钮，主按钮就是它。
+    expect(
+      wrapper.find('[data-testid="config-update-install-button"]').exists(),
+      "下方独立安装按钮必须已被移除（契约 v3 C9）"
+    ).toBe(false);
+
+    const button = wrapper.get('[data-testid="config-update-check-button"]');
     expect(button.text()).toContain("立即升级");
     await button.trigger("click");
     await flushPromises();
@@ -93,12 +99,12 @@ describe("ConfigGeneralSection 签名更新 UI（release gate 模拟）", () => 
     store.signedCandidate = CANDIDATE;
     const wrapper = mountSection();
 
-    await wrapper.get('[data-testid="config-update-install-button"]').trigger("click");
+    await wrapper.get('[data-testid="config-update-check-button"]').trigger("click");
     await flushPromises();
 
-    // 下载中：按钮禁用、文案为"正在升级…"、进度条 50%
-    expect(wrapper.get('[data-testid="config-update-install-button"]').attributes("disabled")).toBeDefined();
-    expect(wrapper.get('[data-testid="config-update-install-button"]').text()).toContain("正在升级");
+    // 下载中：同一按钮禁用、文案为"正在升级…"、进度条 50%
+    expect(wrapper.get('[data-testid="config-update-check-button"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="config-update-check-button"]').text()).toContain("正在升级");
     expect(
       wrapper.get('[data-testid="config-update-progress"]').element.firstElementChild?.style.width
     ).toBe("50%");
@@ -108,20 +114,22 @@ describe("ConfigGeneralSection 签名更新 UI（release gate 模拟）", () => 
     expect(wrapper.get('[data-testid="config-update-pending-restart"]').text()).toContain("已提交");
   });
 
-  it("安装失败进入 error 态：按钮消失、显示安全文案且不调用 relaunch", async () => {
+  it("安装失败进入 error 态：主按钮退回检查更新、显示安全文案且不调用 relaunch", async () => {
     mocks.adapter.downloadAndInstall.mockRejectedValue(new Error("https://secret.example/leak"));
     const store = useUpdateStore();
     store.signedStatus = "available";
     store.signedCandidate = CANDIDATE;
     const wrapper = mountSection();
 
-    await wrapper.get('[data-testid="config-update-install-button"]').trigger("click");
+    await wrapper.get('[data-testid="config-update-check-button"]').trigger("click");
     await flushPromises();
 
     expect(mocks.adapter.relaunch).not.toHaveBeenCalled();
     const errorText = wrapper.get('[data-testid="config-update-signed-error"]').text();
     expect(errorText).toContain("签名更新安装失败");
     expect(errorText).not.toContain("secret.example");
+    // error 态不再是安装态 ⇒ 主按钮退回「检查更新」，且无独立安装按钮
+    expect(wrapper.get('[data-testid="config-update-check-button"]').text()).toContain("检查更新");
     expect(wrapper.find('[data-testid="config-update-install-button"]').exists()).toBe(false);
   });
 
@@ -133,13 +141,13 @@ describe("ConfigGeneralSection 签名更新 UI（release gate 模拟）", () => 
     store.signedCandidate = CANDIDATE;
     const wrapper = mountSection();
 
-    await wrapper.get('[data-testid="config-update-install-button"]').trigger("click");
+    await wrapper.get('[data-testid="config-update-check-button"]').trigger("click");
     await flushPromises();
 
     expect(wrapper.get('[data-testid="config-update-relaunch-failed"]').text()).toContain("重启失败");
   });
 
-  it("浏览器/非 Tauri 环境不渲染安装按钮", () => {
+  it("浏览器/非 Tauri 环境主按钮保持检查更新、不渲染安装按钮", () => {
     mocks.tauri.isTauriAvailable.mockReturnValue(false);
     const store = useUpdateStore();
     store.signedStatus = "disabled";
@@ -147,5 +155,21 @@ describe("ConfigGeneralSection 签名更新 UI（release gate 模拟）", () => 
     const wrapper = mountSection();
 
     expect(wrapper.find('[data-testid="config-update-install-button"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="config-update-check-button"]').text()).toContain("检查更新");
+  });
+
+  it("C8 主按钮模式机：无更新 → 检查更新；检查中 → 检查中…；有签名候选 → 立即升级", async () => {
+    const store = useUpdateStore();
+
+    const idle = mountSection();
+    expect(idle.get('[data-testid="config-update-check-button"]').text()).toContain("检查更新");
+    idle.unmount();
+
+    store.signedStatus = "available";
+    store.signedCandidate = CANDIDATE;
+    const installable = mountSection();
+    expect(installable.get('[data-testid="config-update-check-button"]').text()).toContain("立即升级");
+    // 安装态不得再渲染独立安装按钮（C9）
+    expect(installable.find('[data-testid="config-update-install-button"]').exists()).toBe(false);
   });
 });

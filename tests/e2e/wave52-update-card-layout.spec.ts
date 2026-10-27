@@ -118,6 +118,16 @@ test("C2b：方框内不再有「自动检查更新」，section 内 Switch 恰�
   await expect(section.getByTestId("config-update-autocheck-switch")).toHaveCount(1);
 });
 
+test("C9：方框内无独立「立即升级」按钮（安装入口收敛为版本行主按钮）", async ({ page }) => {
+  await seedUpdateCache(page);
+  await openUpdateSection(page);
+
+  await expect(page.getByTestId("config-update-install-button")).toHaveCount(0);
+  const versionRow = page.getByTestId("config-update-version-row");
+  await expect(versionRow.locator("button")).toHaveCount(1);
+  await expect(versionRow.getByTestId("config-update-check-button")).toBeVisible();
+});
+
 test("C3：「上次检查」与当前版本同一行、且位于版本 chip 右侧（≤4px 同排）", async ({ page }) => {
   await seedUpdateCache(page);
   await openUpdateSection(page);
