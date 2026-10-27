@@ -62,11 +62,11 @@ function installSignedUpdate() {
 const primaryInstallMode = computed(() => signedInstalling.value || signedUpdateAvailable.value);
 /** 主按钮忙碌态（两者共用同一个加载图标）。 */
 const primaryBusy = computed(() => signedInstalling.value || updateChecking.value);
-/** 四态文案优先级：安装中 > 可安装 > 检查中 > 空闲。 */
+/** 四态文案优先级：安装中 > 检查中 > 可安装 > 空闲（检查中禁用，文案必须随之，避免灰态「立即升级」）。 */
 const primaryLabel = computed(() => {
   if (signedInstalling.value) return "正在升级…";
-  if (signedUpdateAvailable.value) return "立即升级";
   if (updateChecking.value) return "检查中…";
+  if (signedUpdateAvailable.value) return "立即升级";
   return "检查更新";
 });
 const primaryDisabled = computed(() => signedInstalling.value || updateChecking.value);

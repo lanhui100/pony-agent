@@ -68,3 +68,26 @@
 - Dev 真实环境复验（vite dev 4176）：卡片显示 `v0.1.164`、`上次检查：2026年10月27日`、主按钮「检查更新」，方框内已无独立安装按钮；DOM 快照确认 section 内仅 1 个 button。证据：`.dev-team/evidence/wave-52/dev-server-v3-update-section.png`。
 - **证据边界（如实声明）**：「立即升级 / 正在升级…」两态的**视觉**只能在真实 Tauri 桌面会话复现（`isSignedUpdaterAvailable()` 依赖 Tauri 运行时；浏览器/dev 永远走 disabled 分支）。该两态由 jsdom 四态机断言 + mock `@/lib/tauri-updater` 覆盖（6 例），不属于浏览器 E2E 覆盖范围。
 - 语义边界（供产品裁决，本次未做）：主按钮变形条件是「**可安装的签名更新**」（`signedStatus==='available'` 且候选非空）。若未来希望「GitHub 有新版但签名候选缺失」时也显示立即升级（回退到发布页跳转），需另立契约。
+
+## 9. 契约 v3.1（L3 审查 F1 修复，2026-10-27 20:4x）
+
+L3 审查 v3（`.dev-team/review-wave52-v3.json`，verdict PASS，3 条 ADVISORY）发现唯一实质缺陷 F1：
+`primaryLabel` 旧优先级使 `signedUpdateAvailable && updateChecking` 交叠时显示**灰底「立即升级」+ spinner 且点击无响应**——而这正是用户点「检查更新」后的必经 happy path（本地签名检查 ~100ms 返回、GitHub 检查最长 8s）。
+
+- 契约 v3.1：`primaryLabel` 优先级改为 `正在升级…` > `检查中…` > `立即升级` > `检查更新`（`primaryDisabled`/`primaryBusy`/`onPrimaryAction` 不变）。
+- 红相：commit `ae79def` —— 新增 C8b（交叠态文案必须是禁用「检查中…」）单例红；C8c 补齐 F2 指出的「检查中…」文案断言缺口。
+- 绿相：`npm run build` exit 0；全量 `npx vitest run` **108 文件 / 1065 passed / 12 skipped**；`playwright` **7/7 passed**。
+- 浏览器视觉证据（F3 更正后获取，见下）。
+
+## 10. F3 更正：安装态视觉**可以**在浏览器取证
+
+v3 收据（§8 末）曾称「立即升级 / 正在升级…两态视觉只能在真实 Tauri 会话复现」，L3 审查用证据推翻：只需把 `@/lib/tauri-updater` 用 **vite 模块别名打桩**，即可让浏览器渲染安装态。
+本波已按此方法自证（配置与 stub 均为 `/tmp` 过程产物，收口已删除）：
+
+| 状态 | 证据 |
+| :--- | :--- |
+| 安装态主按钮 =「立即升级」（↑ 图标，版本行右端，下方已无独立按钮） | `.dev-team/evidence/wave-52/states-2-upgrade-available.png` |
+| 安装中 =「正在升级…」（spinner + 禁用）且进度条真实渲染（42%） | `.dev-team/evidence/wave-52/states-3-installing.png` |
+
+- 说明：该证据环境的**签名更新器**被打桩（候选 v9.9.9），状态行文案仍来自真实 GitHub 检查结果，故两者语义不同源；截图仅用于验证按钮四态与布局，不用于验证发版检测逻辑。
+- 结论修正：**仅真实 IPC 链路不可在浏览器复现**；UI 视觉层可取证。

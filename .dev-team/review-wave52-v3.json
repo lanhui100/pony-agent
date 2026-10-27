@@ -1,0 +1,31 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/components/config/ConfigGeneralSection.vue",
+    "src/stores/update.ts",
+    "tests/ConfigGeneralSectionSignedUpdate.spec.ts"
+  ],
+  "findings": [
+    {
+      "file": "src/components/config/ConfigGeneralSection.vue",
+      "line": 68,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/w52-probe && npx vitest run --config /tmp/w52-probe/vitest.config.ts   # 探针 /tmp/w52-probe/overlap.spec.ts：signedUpdateAvailable 与 updateChecking 同时为真时断言 主按钮文案=立即升级 且 disabled=true（exit 0 = 错态复现）；浏览器实证：npx vite --config /tmp/w52-probe/vite.web.config.ts --configLoader native 后 node /tmp/w52-probe/shot.mjs（state=overlap 输出 text=立即升级 disabled=true spinning=1 arrow=0，截屏 /tmp/w52-probe/shot-overlap.png 显示状态行『正在检查更新…』与灰态『立即升级』并存）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/ConfigGeneralSectionSignedUpdate.spec.ts",
+      "line": 161,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -c '检查中' tests/ConfigGeneralSectionSignedUpdate.spec.ts   # 输出 1（仅 it() 标题），无任何断言；C8 的『检查中…』按钮文案在 jsdom 侧无断言（存量 checking 断言只查状态区『正在检查更新』：tests/ConfigGeneralSectionUpdate.spec.ts:179）。浏览器实测 label 确为『检查中…』，故仅为覆盖缺口",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/wave52-receipts.md",
+      "line": 69,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/w52-probe && npx vite --config /tmp/w52-probe/vite.web.config.ts --configLoader native & sleep 6 && node /tmp/w52-probe/shot.mjs   # 真实 Chromium 渲染出四态（检查更新/检查中…/立即升级/正在升级…，installing 带 config-update-progress，CONSOLE_ERRORS []），证明『两态视觉只能真实 Tauri 复现』过强：仅真实 IPC 链路不可浏览器复现，视觉层可经 @/lib/tauri-updater 模块别名打桩后在浏览器取证",
+      "severity": "ADVISORY"
+    }
+  ]
+}
