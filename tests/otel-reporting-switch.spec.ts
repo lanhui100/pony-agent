@@ -8,14 +8,14 @@ import { useSettingsStore } from "@/stores/settings";
 import { useRuntimeStore } from "@/stores/runtime";
 
 /**
- * Wave43 UI-1 / UI-2 验收（红相）：Agent Trace 上报开关 + 观测页文案去 PonySentry 化。
+ * Wave43 UI-1 / UI-2 验收：全局轨迹上报开关 + 观测页文案去 PonySentry 化。
  *
  * 契约来源：
- * - `.dev-team/wave43-adjudication.md` A5（testid 冻结）：
- *   `config-agent-trace-reporting-switch` / `config-agent-trace-privacy-notice` /
- *   `telemetry-upload-independent-note`。
- * - `.dev-team/contract-matrix-wave43.md` UI-1 / UI-2。
- * - plan D7（缺省 `false`、落盘键 `agentTraceReporting`、隐私告示三段语义）；U3（手动上传不受全局开关约束）。
+ * - `.dev-team/wave43-adjudication.md` A5（testid 冻结）：`config-agent-trace-reporting-switch` /
+ *   `telemetry-upload-independent-note`；`config-agent-trace-privacy-notice` 已由 ADR 0050 裁决移除。
+ * - `docs/decisions/0050-trace-reporting-switch-ui-simplification.md`（用户裁决 2026-10-27）：
+ *   选项收敛为单行「全局轨迹上报」+ 右端 switch，去除注释（隐私告示）与子项（OTel/用量治理/成本预算入口）。
+ * - ADR 0047 plan D7（缺省 `false`、落盘键 `agentTraceReporting`）；U3（手动上传不受全局开关约束）。
  *
  * mock 范式沿用 `tests/TelemetryPage.spec.ts` + `tests/ConfigGeneralSectionUpdate.spec.ts`
  * （`vi.hoisted` mock `@/lib/tauri` + `setActivePinia(createPinia())` + data-testid 断言），不自创基础设施。
@@ -78,20 +78,45 @@ describe("Wave43 Agent Trace 上报开关与观测页文案", () => {
 
   // ------------------------------------------------------------------ UI-1
 
-  it("UI-1：开关渲染且默认关闭（aria-checked=false），并存在隐私告示三段语义", () => {
+  it("UI-1：开关渲染且默认关闭（aria-checked=false），仅单行「全局轨迹上报」标签，无注释与子项", () => {
     const wrapper = mount(ConfigGeneralSection);
 
     const toggle = wrapper.get('[data-testid="config-agent-trace-reporting-switch"]');
     expect(toggle.attributes("aria-checked")).toBe("false");
+    expect(toggle.attributes("aria-label")).toBe("全局轨迹上报");
     // store 缺省值同源冻结（D7：DEFAULT_SETTINGS.agentTraceReporting === false）
     expect(settingsField("agentTraceReporting")).toBe(false);
 
-    const notice = wrapper.get('[data-testid="config-agent-trace-privacy-notice"]');
-    const noticeText = notice.text();
-    // D7 三段语义：收集内容 / 不含密钥 / 可随时关闭
-    expect(noticeText).toContain("收集");
-    expect(noticeText).toContain("密钥");
-    expect(noticeText).toContain("关闭");
+    // 用户裁决（2026-10-27）：选项收敛为「全局轨迹上报」+ 右端 switch，旧称「全局 Agent Trace 上报」不再出现
+    const section = wrapper.get('[data-testid="config-diagnostics-section"]');
+    expect(section.text()).toContain("全局轨迹上报");
+    expect(section.text()).not.toContain("Agent Trace");
+
+    // 用户裁决（2026-10-27 二次）：不再有「诊断与遥测」分区标题，行本身无边框、无背景色
+    expect(section.text()).not.toContain("诊断与遥测");
+    const sectionClasses = section.classes();
+    expect(sectionClasses.some((name) => name === "border" || name.startsWith("border-"))).toBe(false);
+    expect(sectionClasses.some((name) => name.startsWith("bg-"))).toBe(false);
+    // 标签与 switch 处于同一 justify-between 行（开关贴最右端）
+    const row = section.get("div.flex");
+    expect(row.classes()).toContain("justify-between");
+
+    // 去除注释与子项：隐私告示、OTel 子配置、用量治理、成本预算入口一律不得残留
+    const removedTestIds = [
+      "config-agent-trace-privacy-notice",
+      "config-otel-endpoint-input",
+      "config-otel-service-name-input",
+      "config-otel-sampling-ratio-input",
+      "config-otel-token-input",
+      "config-usage-policy-window",
+      "config-usage-policy-hard-limit",
+      "config-usage-policy-soft-ratio",
+      "config-usage-policy-enforcement",
+      "config-cost-budget-input",
+    ];
+    for (const testId of removedTestIds) {
+      expect(wrapper.find(`[data-testid="${testId}"]`).exists()).toBe(false);
+    }
   });
 
   it("UI-1：开启开关后调用 save_app_settings 且入参 agentTraceReporting 为 true", async () => {

@@ -132,7 +132,7 @@ function openExa() {
   void openExternalUrl("https://exa.ai/");
 }
 
-// ── Wave43 D7 & Wave-4 C1：诊断与遥测（全局 Agent Trace 上报与 OTel 配置） ──
+// ── Wave43 D7：全局轨迹上报开关（UI 已精简为单行标签 + 右端 Switch，无注释与子项） ──
 // 持久化复用既有 save_app_settings 通道（不新增 Tauri 命令）；core 侧 gate 由 Rust 落地。
 const traceReportingError = ref<string | null>(null);
 
@@ -146,81 +146,6 @@ async function toggleAgentTraceReporting(enabled: boolean) {
   if (settingsStore.error) {
     traceReportingError.value = "开关保存失败，已恢复原状态，请重试。";
   }
-}
-
-let otelDebounceTimer: ReturnType<typeof setTimeout> | undefined;
-
-function handleOtelInputChange(key: "otelEndpoint" | "otelServiceName" | "otelToken", value: string) {
-  settings.value[key] = value.trim() || undefined;
-  if (otelDebounceTimer) {
-    clearTimeout(otelDebounceTimer);
-  }
-  otelDebounceTimer = setTimeout(() => {
-    void settingsStore.saveSettings();
-  }, 500);
-}
-
-function handleOtelSamplingRatioChange(value: string) {
-  const num = parseFloat(value);
-  if (!isNaN(num) && num >= 0.0 && num <= 1.0) {
-    settings.value.otelSamplingRatio = num;
-  } else if (!value.trim()) {
-    settings.value.otelSamplingRatio = undefined;
-  }
-  if (otelDebounceTimer) {
-    clearTimeout(otelDebounceTimer);
-  }
-  otelDebounceTimer = setTimeout(() => {
-    void settingsStore.saveSettings();
-  }, 500);
-}
-
-function handleCostBudgetChange(value: string) {
-  const num = parseFloat(value);
-  if (!isNaN(num) && num > 0) {
-    settings.value.costBudgetUsd = num;
-  } else if (!value.trim() || (!isNaN(num) && num <= 0)) {
-    settings.value.costBudgetUsd = null;
-  }
-  if (otelDebounceTimer) {
-    clearTimeout(otelDebounceTimer);
-  }
-  otelDebounceTimer = setTimeout(() => {
-    void settingsStore.saveSettings();
-  }, 500);
-}
-
-function handleUsagePolicyChange(key: "window" | "hardLimitUsd" | "softRatio" | "enforcement", val: any) {
-  if (!settings.value.usageGovernancePolicy) {
-    settings.value.usageGovernancePolicy = {
-      window: "session",
-      softRatio: 0.8,
-      hardLimitUsd: null,
-      enforcement: false,
-    };
-  }
-  if (key === "enforcement") {
-    settings.value.usageGovernancePolicy.enforcement = Boolean(val);
-  } else if (key === "window") {
-    settings.value.usageGovernancePolicy.window = val;
-  } else {
-    const num = parseFloat(val);
-    settings.value.usageGovernancePolicy[key] = !isNaN(num) ? num : null;
-  }
-  if (otelDebounceTimer) {
-    clearTimeout(otelDebounceTimer);
-  }
-  otelDebounceTimer = setTimeout(() => {
-    void settingsStore.saveSettings();
-  }, 500);
-}
-
-function flushOtelSettings() {
-  if (otelDebounceTimer) {
-    clearTimeout(otelDebounceTimer);
-    otelDebounceTimer = undefined;
-  }
-  void settingsStore.saveSettings();
 }
 // ────────────────────────────────────────────────────────────────────
 </script>
@@ -451,187 +376,29 @@ function flushOtelSettings() {
         </div>
       </div>
 
-      <!-- Wave43 D7：诊断与遥测卡片（全局 Agent Trace 上报 + 隐私告示，默认关闭）。 -->
-      <div class="space-y-2" data-testid="config-diagnostics-section">
-        <div class="text-[12px] font-medium text-stone-500">诊断与遥测</div>
-        <div class="max-w-[680px] space-y-2.5 rounded-[0.5rem] border border-stone-200 bg-white px-3 py-3">
-          <div class="flex items-center justify-between gap-2">
-            <div class="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-stone-900">
-              全局 Agent Trace 上报
-              <Shield class="h-3.5 w-3.5 shrink-0 text-stone-500" />
-            </div>
-            <Switch
-              :model-value="settings.agentTraceReporting"
-              :disabled="saving"
-              aria-label="全局 Agent Trace 上报"
-              data-testid="config-agent-trace-reporting-switch"
-              @update:model-value="toggleAgentTraceReporting($event)"
-            />
-          </div>
+      <!-- Wave43 D7 / ADR 0050：全局轨迹上报——裸字段行（无分区标题、无边框、无背景色），标签 + 最右端 Switch。 -->
+      <div class="max-w-[680px] space-y-2" data-testid="config-diagnostics-section">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-[13px] font-medium text-stone-900">全局轨迹上报</span>
+          <Switch
+            :model-value="settings.agentTraceReporting"
+            :disabled="saving"
+            aria-label="全局轨迹上报"
+            data-testid="config-agent-trace-reporting-switch"
+            @update:model-value="toggleAgentTraceReporting($event)"
+          />
+        </div>
 
-          <div
-            class="space-y-1 text-[12px] leading-5 text-stone-500"
-            data-testid="config-agent-trace-privacy-notice"
-          >
-            <p>
-              默认关闭。开启后，本机每个 Agent 回合的运行链路会被收集并上传至
-              <span class="font-medium text-stone-700"> Langfuse </span>
-              诊断平台，内容包括模型调用与工具调用的名称、耗时与 token 用量；
-              密钥、鉴权头等敏感字段在本地脱敏后再上报，不会以明文离开本机。
-            </p>
-            <p>
-              仅用于定位模型/工具链路问题。可随时关闭，关闭后不再产生任何上报。
-            </p>
-          </div>
-
-          <!-- Wave-4 C1：OTel 端点与鉴权自定义配置 -->
-          <div class="mt-3 border-t border-stone-100 pt-3 space-y-2.5">
-            <div class="flex items-center justify-between">
-              <span class="text-[12px] font-medium text-stone-700">OTel 导出网络与认证</span>
-              <span class="text-[11px] text-amber-600">修改后需重启应用生效</span>
-            </div>
-            <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-              <div class="space-y-1">
-                <label class="block text-[11px] text-stone-500">OTLP 端点 URL</label>
-                <Input
-                  :model-value="settings.otelEndpoint || ''"
-                  :disabled="saving"
-                  placeholder="https://otel.ponyjob.top"
-                  class="bg-stone-50 text-[11px]"
-                  data-testid="config-otel-endpoint-input"
-                  @update:model-value="handleOtelInputChange('otelEndpoint', $event)"
-                  @blur="flushOtelSettings"
-                />
-              </div>
-              <div class="space-y-1">
-                <label class="block text-[11px] text-stone-500">服务名称</label>
-                <Input
-                  :model-value="settings.otelServiceName || ''"
-                  :disabled="saving"
-                  placeholder="pony-agent"
-                  class="bg-stone-50 text-[11px]"
-                  data-testid="config-otel-service-name-input"
-                  @update:model-value="handleOtelInputChange('otelServiceName', $event)"
-                  @blur="flushOtelSettings"
-                />
-              </div>
-              <div class="space-y-1">
-                <label class="block text-[11px] text-stone-500">采样率 (0.0 ~ 1.0)</label>
-                <Input
-                  :model-value="settings.otelSamplingRatio !== undefined ? String(settings.otelSamplingRatio) : '1.0'"
-                  :disabled="saving"
-                  placeholder="1.0"
-                  class="bg-stone-50 text-[11px]"
-                  data-testid="config-otel-sampling-ratio-input"
-                  @update:model-value="handleOtelSamplingRatioChange($event)"
-                  @blur="flushOtelSettings"
-                />
-              </div>
-              <div class="space-y-1">
-                <label class="block text-[11px] text-stone-500">Token 鉴权凭证</label>
-                <Input
-                  :model-value="settings.otelToken || ''"
-                  type="password"
-                  :disabled="saving"
-                  placeholder="输入 Bearer Token (不回显)"
-                  class="bg-stone-50 text-[11px]"
-                  data-testid="config-otel-token-input"
-                  @update:model-value="handleOtelInputChange('otelToken', $event)"
-                  @blur="flushOtelSettings"
-                />
-              </div>
-            </div>
-          </div>
-
-          <!-- Wave-7 G2：用量治理策略配置区块 -->
-          <div class="mt-3 border-t border-stone-100 pt-3 space-y-2.5">
-            <div class="flex items-center justify-between">
-              <span class="text-[12px] font-medium text-stone-700">用量治理策略 (Usage Governance)</span>
-              <span class="text-[11px] text-amber-600">开启物理拦截后触及上限将拒绝新轮次</span>
-            </div>
-            <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-              <div class="space-y-1">
-                <label class="block text-[11px] text-stone-500">统计窗口</label>
-                <select
-                  :value="settings.usageGovernancePolicy?.window || 'session'"
-                  :disabled="saving"
-                  class="w-full rounded-md border border-stone-200 bg-stone-50 px-2 py-1 text-[11px] text-stone-700 focus:outline-none"
-                  data-testid="config-usage-policy-window"
-                  @change="handleUsagePolicyChange('window', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="session">按单会话 (session)</option>
-                  <option value="day">按自然日 (day)</option>
-                </select>
-              </div>
-              <div class="space-y-1">
-                <label class="block text-[11px] text-stone-500">硬限额 (USD)</label>
-                <Input
-                  :model-value="settings.usageGovernancePolicy?.hardLimitUsd !== undefined && settings.usageGovernancePolicy?.hardLimitUsd !== null ? String(settings.usageGovernancePolicy.hardLimitUsd) : ''"
-                  :disabled="saving"
-                  placeholder="例如 1.00"
-                  class="bg-stone-50 text-[11px]"
-                  data-testid="config-usage-policy-hard-limit"
-                  @update:model-value="handleUsagePolicyChange('hardLimitUsd', $event)"
-                  @blur="flushOtelSettings"
-                />
-              </div>
-              <div class="space-y-1">
-                <label class="block text-[11px] text-stone-500">软告警比例 (0.0 ~ 1.0)</label>
-                <Input
-                  :model-value="settings.usageGovernancePolicy?.softRatio !== undefined && settings.usageGovernancePolicy?.softRatio !== null ? String(settings.usageGovernancePolicy.softRatio) : '0.8'"
-                  :disabled="saving"
-                  placeholder="0.8"
-                  class="bg-stone-50 text-[11px]"
-                  data-testid="config-usage-policy-soft-ratio"
-                  @update:model-value="handleUsagePolicyChange('softRatio', $event)"
-                  @blur="flushOtelSettings"
-                />
-              </div>
-              <div class="flex items-center justify-between pt-4">
-                <label class="flex cursor-pointer items-center gap-2 text-[11px] text-stone-600">
-                  <Switch
-                    :model-value="settings.usageGovernancePolicy?.enforcement ?? false"
-                    :disabled="saving"
-                    data-testid="config-usage-policy-enforcement"
-                    @update:model-value="handleUsagePolicyChange('enforcement', $event)"
-                  />
-                  <span>开启物理拦截 (Enforcement)</span>
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <!-- Wave-5 K3：成本预算配置卡片（软告警不阻断） -->
-          <div class="mt-3 border-t border-stone-100 pt-3 space-y-2.5">
-            <div class="flex items-center justify-between">
-              <span class="text-[12px] font-medium text-stone-700">会话成本预算上限 (USD)</span>
-              <span class="text-[11px] text-stone-400">超额后展示软告警，不阻断提问</span>
-            </div>
-            <div class="max-w-[280px]">
-              <Input
-                :model-value="settings.costBudgetUsd !== undefined && settings.costBudgetUsd !== null ? String(settings.costBudgetUsd) : ''"
-                :disabled="saving"
-                placeholder="例如 0.50 (≤0 为不限制)"
-                class="bg-stone-50 text-[11px]"
-                data-testid="config-cost-budget-input"
-                @update:model-value="handleCostBudgetChange($event)"
-                @blur="flushOtelSettings"
-              />
-            </div>
-          </div>
-
-          <div
-            v-if="traceReportingError"
-            class="flex items-center gap-1.5 text-[12px] text-rose-600"
-            data-testid="config-agent-trace-save-error"
-          >
-            <TriangleAlert class="h-3.5 w-3.5 shrink-0" />
-            {{ traceReportingError }}
-          </div>
+        <div
+          v-if="traceReportingError"
+          class="flex items-center gap-1.5 text-[12px] text-rose-600"
+          data-testid="config-agent-trace-save-error"
+        >
+          <TriangleAlert class="h-3.5 w-3.5 shrink-0" />
+          {{ traceReportingError }}
         </div>
       </div>
 
-      <p v-if="settingsStore.notice" class="text-[11px] leading-5 text-stone-400">{{ settingsStore.notice }}</p>
       <p v-if="settingsStore.error" class="text-[11px] leading-5 text-rose-600">{{ settingsStore.error }}</p>
     </div>
   </div>

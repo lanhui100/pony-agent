@@ -26,7 +26,7 @@ Status: implemented
 6. **PonySentry Trace 全量下线**（**破坏性变更**）：删除 `AgentTracePayload` / `TurnTraceItem` / `ToolCallTraceItem` / `EvalStatus`、`capture_agent_trace` / `send_agent_trace_direct` / `maybe_report_turn_trace` / `build_*_trace_payload(s)`、`client::send_trace_direct_http` 与 trace 队列分支；`ponysentry/mod.rs` 由 517 行收敛至 79 行，仅保留 issue/panic 面（`IngestPayload`/`capture_error`/`capture_payload`/`capture_panic`/`add_breadcrumb`/`install_panic_hook`/`is_enabled`）。
    **兼容性证据**：服务端 trace 能力已下线（用户决策 2026-10-24）；`AgentTracePayload` 无第三方消费方（仓库内仅 ponysentry 自身与其测试引用）。
 7. **手动上传迁移**：`HostControlPlane::upload_session_trace` 改为把持久化 `TurnTraceRecord` 重放为 OTel span 树并**强制导出**（`BypassGuard` RAII 旁路，用完即释放，不改变门禁末态），返回 `Result<usize, String>` 契约不变。该动作**不受全局开关约束**——用户点击即逐次授权，与全局开关互不冲突。
-8. **桌面端开关与告知**：`AppSettings` 增 `agent_trace_reporting: bool`（落盘键 `agentTraceReporting`，缺省 `false`；`AppSettings` 与 `AppSettingsStorage` 均已 `rename_all = "camelCase"`）；配置页「通用」新增「诊断与遥测 → 全局 Agent Trace 上报」卡片与隐私说明；`load_app_settings` / `save_app_settings` 之后立刻同步门禁，保存失败回滚 UI 末态（隐私 fail-closed）。
+8. **桌面端开关与告知**：`AppSettings` 增 `agent_trace_reporting: bool`（落盘键 `agentTraceReporting`，缺省 `false`；`AppSettings` 与 `AppSettingsStorage` 均已 `rename_all = "camelCase"`）；配置页「通用」以裸字段行「全局轨迹上报 + 最右端开关」呈现（无分区标题、无边框/背景色、无隐私说明与子项，见 [0050](0050-trace-reporting-switch-ui-simplification.md)）；`load_app_settings` / `save_app_settings` 之后立刻同步门禁，保存失败回滚 UI 末态（隐私 fail-closed）。
 9. **端点与令牌全部外置**：`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_SERVICE_NAME` / `OTEL_TRACES_SAMPLER_ARG` / `PONY_OTEL_TOKEN`（→ `authorization` 头）。集群内缺省 `http://otel-collector.observability.svc.cluster.local:4318`；桌面端公网入口 `otel.ponyjob.top` **待 infra 侧单独实施**，交接单见 `.dev-team/handoff-otel-public-ingress.md`，上线时只需填 endpoint + token，**无需改代码**。
 10. **NFR**：导出超时对齐 `external_call_timeout_ms = 3000`（L2-AT 黑洞用例实测抓住过 5000ms 的初版）；不重试（`max_attempts = 1`）；导出失败吞掉并降级 `log_json("warn", …, trace_id)`；新增日志面为单行 JSON（`level`/`message`/`ts`/`trace_id`），存量 `eprintln!` 按既有豁免不动、不扩大豁免面。
 
@@ -42,7 +42,7 @@ Status: implemented
 ## 后果
 
 - 代码：新增 `agent/otel/{mod,log}.rs`；改 `agent/{mod,app_settings,turn_flow}.rs`、`agent/runtime/{turn_stream,turn_sync}.rs`、`agent/control_plane/query_commands.rs`、`agent/ponysentry/{mod,models,client}.rs`、`src-tauri/src/{main,lib}.rs`、前端 4 文件；`Cargo.toml` +3 依赖（lock 净增 15 包，零版本抖动）。
-- 用户可见：配置页出现「全局 Agent Trace 上报」开关（**默认关闭**）；观测页上传改称 Langfuse 并标注与全局开关互不影响。
+- 用户可见：配置页出现「全局轨迹上报」开关（**默认关闭**，UI 见 [0050](0050-trace-reporting-switch-ui-simplification.md)）；观测页上传改称 Langfuse 并标注与全局开关互不影响。
 - 测试：`crates/pony-agent-core/tests/otel_trace_migration_test.rs`（21 例，含 OT-7 全仓退役符号守卫、OT-8 设置契约与宿主桥接静态断言）、`otel_trace_adversarial.rs`（6 例：黑洞超时区间、超大/畸形 payload、Barrier 门禁翻转风暴）、`ponysentry_issue_resilience_test.rs`（2 例，补回被删测试里的队列抗雪崩覆盖）、前端 `tests/otel-reporting-switch.spec.ts`（4 例）。删除 `ponysentry_trace_test.rs`、`trace_auto_report_test.rs` 及孤儿副本，覆盖对照见 `.dev-team/evidence/wave43/deleted-tests-coverage-map.md`。
 - **明确非目标**：公网 OTLP 入口（`otel.ponyjob.top`，infra 单独会话）；Prometheus `/metrics` 暴露；Loki 日志采集白名单；`EvalStatus` 评估标注工作流的 Langfuse score 映射；同步路径的 turn 级取消出口；graph/control_plane 离线构造路径的 span 埋点。
 - 可观测性巡检收口口径（2026-10-24 用户裁决）：**tracing / issues 过硬件门禁；metrics / logs 对本交付形态（桌面端，无集群部署）结构不适用**，且巡检器 M1/M2 的 PASS 实为文档误命中（源码 0 个 `/metrics`），不作为交付依据。证据见 `.dev-team/evidence/wave43/observability-applicability.md`。同时修复了巡检器 T3 假阴性（正则不认识 `Tracer::build_with_context`），skill 侧 `selftest.sh` 与 `check-drift.sh` 均 Exit 0。

@@ -8,7 +8,7 @@
 
 ```
 ┌────────────────────────────┐
-│ 桌面端 / CLI（用户机器）      │  默认**不上报**：配置页「全局 Agent Trace 上报」开关 false
+│ 桌面端 / CLI（用户机器）      │  默认**不上报**：配置页「全局轨迹上报」开关 false
 │  agent/otel（OTel Rust SDK）│  开启后：OTLP/HTTP-protobuf + Authorization: Bearer <token>
 └──────────────┬─────────────┘
                │ HTTPS  POST https://otel.ponyjob.top/v1/traces   （pathType: Exact）

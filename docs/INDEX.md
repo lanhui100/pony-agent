@@ -68,6 +68,7 @@
 - [0043 TUI 消息区层级弱化、代码块材质与三态状态词](decisions/0043-tui-message-hierarchy-and-tri-state-status.md)
 - [0044 系统提示词 v2（收据化、注入防线、阈值收敛与层序守卫）](decisions/0044-system-prompt-v2-receipts-injection-and-layer-order.md)
 - [0047 Agent Trace 迁移至 OpenTelemetry → Langfuse（PonySentry Trace 下线 + 全局上报开关）](decisions/0047-agent-trace-otel-langfuse-migration.md)
+- [0050 配置页「全局轨迹上报」选项收敛为单行标签 + 右端开关](decisions/0050-trace-reporting-switch-ui-simplification.md)
 
 ## 3.1 交付证据归档
 
