@@ -103,6 +103,8 @@ use blocked_records::*;
 use limits::*;
 pub use limits::{max_tool_followups_per_turn, parse_max_tool_followups_per_turn};
 pub use stream_support::tool_failure_signal;
+/// wave-54 C4：协议归一上下文输入（turn_flow 的 span 装配面共用同一实现）。
+pub(crate) use stream_support::context_input_tokens_for;
 use planner_patches::*;
 use stream_support::*;
 use tool_recovery::*;

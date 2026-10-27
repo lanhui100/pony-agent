@@ -571,12 +571,17 @@ describe("HomeSidebar", () => {
     expect(tooltipTexts).toContain("输出");
     expect(tooltipTexts).toContain("缓存读取");
     expect(tooltipTexts).toContain("生成速度");
-    // Visible panel shows integer compact values (no decimals) and Token text is removed
+    // wave-54 C6（ADR 0053）：紧凑格式 <1e6 取一位小数（8437 ⇒ 8.4K、1366 ⇒ 1.4K），
+    // 不再四舍五入成整数 K；Token 文本仍移除。
     expect(statusPanelText).not.toContain("Token");
-    expect(statusPanelText).toContain("8K");
-    expect(statusPanelText).toContain("1K");
-    expect(statusPanelText).toContain("t/s");
-    expect(statusPanelText).not.toMatch(/\d\.\dK/);
+    expect(statusPanelText).toContain("8.4K");
+    expect(statusPanelText).toContain("1.4K");
+    expect(statusPanelText).toMatch(/\d\.\dK/);
+    // wave-54 C6 / ADR 0053：该夹具无 per-call 分量（无 providerCallRecords、无 turnDurationMs）
+    // ⇒ 速度无值，必须显示 `—`（旧的整轮聚合回退已废除，故不再出现带 t/s 的数字）。
+    const speedCarrier = statusPanel.querySelector<HTMLElement>('[data-testid="status-metric-token-speed"]');
+    expect(speedCarrier).not.toBeNull();
+    expect(speedCarrier?.textContent?.trim()).toBe("—");
     // No "总计" suffix in labels
     expect(statusPanelText).not.toContain("输入总计");
     expect(statusPanelText).not.toContain("缓存读取总计");

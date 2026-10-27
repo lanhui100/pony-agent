@@ -1257,6 +1257,8 @@ fn wave2_turn_flow_calculates_and_records_speed() {
                     cache_hit_input_tokens: None,
                     cache_hit_source: None,
                     reasoning_tokens: None,
+                    cache_creation_input_tokens: None,
+                    origin: None,
                 }),
             })
         }
@@ -1281,6 +1283,8 @@ fn wave2_turn_flow_calculates_and_records_speed() {
                     cache_hit_input_tokens: None,
                     cache_hit_source: None,
                     reasoning_tokens: None,
+                    cache_creation_input_tokens: None,
+                    origin: None,
                 }),
             })
         }

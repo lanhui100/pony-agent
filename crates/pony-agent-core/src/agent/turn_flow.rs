@@ -1157,6 +1157,12 @@ fn build_provider_usage_event(
                         reasoning_tokens: record.reasoning_tokens,
                         output_tokens: record.output_tokens,
                         total_tokens: record.total_tokens,
+                        // wave-54 C3：来源随事件载荷下发（未知 ⇒ None，禁止默认值占位）。
+                        origin: record
+                            .usage_origin
+                            .as_deref()
+                            .and_then(crate::agent::provider::usage_origin_from_label),
+                        cache_creation_input_tokens: None,
                     };
                     TurnEvent::ProviderUsage {
                         turn_id: payload.turn_id.clone(),
@@ -1300,6 +1306,9 @@ fn payload_usage(payload: &TurnStreamEvent) -> Option<crate::agent::provider::To
         reasoning_tokens: payload.reasoning_tokens,
         output_tokens: payload.output_tokens,
         total_tokens: payload.total_tokens,
+        // 回退路径（无 per-call records）无来源信息 ⇒ 未知，不得冒充 provider 真值。
+        origin: None,
+        cache_creation_input_tokens: None,
     })
 }
 
@@ -1902,6 +1911,8 @@ mod tests {
                 turn_duration_ms: Some(500),
                 latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                 prefix_mutation_reasons: Vec::new(),
+                usage_origin: None,
+                context_input_tokens: None,
             },
             crate::agent::telemetry::ProviderCallCacheRecord {
                 request_kind: crate::agent::telemetry::ProviderRequestKind::ToolFollowup,
@@ -1921,6 +1932,8 @@ mod tests {
                     crate::agent::provider::PrefixMutationReason::SessionSummaryChanged,
                     crate::agent::provider::PrefixMutationReason::HistoryBoundaryShifted,
                 ],
+                usage_origin: None,
+                context_input_tokens: None,
             },
         ]);
         let per_call_events = build_provider_usage_event("turn:completed", &payload);
@@ -2332,6 +2345,89 @@ fn calculate_call_generation_speed(
     }
 }
 
+/// wave-54 C2：turn 加权生成速度真值（单一口径，UI 与根 span 共用）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnSpeedTruth {
+    /// `Σout / (Σgen / 1000)`；`Σgen == 0` 或 `Σout == 0` ⇒ `None`（无值，禁止 0 占位）。
+    pub speed: Option<f64>,
+    /// `Σout`（各 per-call `output_tokens` 之和）。
+    pub output_tokens: u64,
+    /// `Σgen`（各 per-call 生成耗时之和，毫秒）。
+    pub generation_ms: u64,
+    /// 首个带 ttft 的 per-call 值（**不**跨 hop 采样，不是 turn elapsed 内首包）。
+    pub ttft_ms: Option<u64>,
+    /// 参与计算的已完成调用数。
+    pub calls: u32,
+}
+
+/// 单次调用生成耗时（C1/C2 同一公式）：
+/// `gen = (ttft 存在且 dur > ttft) ? dur - ttft : dur`（`ttft > dur` 退化，不出负值）。
+pub fn call_generation_ms(duration_ms: Option<u64>, ttft_ms: Option<u64>) -> u64 {
+    let duration = duration_ms.unwrap_or(0);
+    match ttft_ms {
+        Some(ttft) if duration > ttft => duration - ttft,
+        _ => duration,
+    }
+}
+
+/// wave-54 C2：由 per-call 记录求 turn 加权生成速度真值。
+///
+/// 公式：`gen_i = call_generation_ms(dur_i, ttft_i)`；`speed = Σout_i / (Σgen_i / 1000)`，
+/// 仅当 `Σgen_i > 0` 且 `Σout_i > 0`。**不含** TTFT（端到端吞吐是另一指标，本波不输出）。
+pub fn weighted_turn_speed(records: &[ProviderCallCacheRecord]) -> TurnSpeedTruth {
+    let mut output_tokens: u64 = 0;
+    let mut generation_ms: u64 = 0;
+    let mut ttft_ms: Option<u64> = None;
+    let mut calls: u32 = 0;
+    for record in records {
+        // 有效调用判据（与 UI `isCountableCall` 完全一致）：`dur > 0 && out > 0`。
+        // planner-only 伪记录（dur/out 为 None）不计入 Σ、也不计入 calls。
+        let duration = record.turn_duration_ms.unwrap_or(0);
+        let output = record.output_tokens.unwrap_or(0);
+        if duration == 0 || output == 0 {
+            continue;
+        }
+        output_tokens = output_tokens.saturating_add(output);
+        generation_ms = generation_ms
+            .saturating_add(call_generation_ms(Some(duration), record.first_token_latency_ms));
+        calls = calls.saturating_add(1);
+        if ttft_ms.is_none() {
+            ttft_ms = record.first_token_latency_ms;
+        }
+    }
+    let speed = if generation_ms > 0 && output_tokens > 0 {
+        let candidate = (output_tokens as f64) / ((generation_ms as f64) / 1_000.0);
+        if candidate.is_finite() && candidate > 0.0 {
+            Some(candidate)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    TurnSpeedTruth {
+        speed,
+        output_tokens,
+        generation_ms,
+        ttft_ms,
+        calls,
+    }
+}
+
+/// wave-54 C2：把加权速度与 turn 级 timing 落到根 `agent.turn` span。
+///
+/// 生产路径（`runtime/turn_stream.rs` / `runtime/turn_sync.rs` 的终态收尾）唯一出口：
+/// 速度、`basis=turn_weighted`、duration/ttft/calls 必须同源同帧写入，禁止各写各的。
+pub fn record_turn_speed_truth(
+    scope: &mut crate::agent::otel::TurnTraceGuard,
+    records: &[ProviderCallCacheRecord],
+    turn_duration_ms: Option<u64>,
+) {
+    let truth = weighted_turn_speed(records);
+    scope.record_turn_speed(truth.speed);
+    scope.record_turn_timing(turn_duration_ms, truth.ttft_ms, Some(truth.calls));
+}
+
 /// Wave-5 K4：把单次调用成本写入 `llm.chat` span。
 ///
 /// 门禁关闭（[`crate::agent::otel::is_span_capture_enabled`] = false）时**零计算短路**：
@@ -2429,7 +2525,18 @@ pub fn provider_decision<P: ProviderClient>(
                 cache_reportable_input_tokens(provider.protocol_label(), usage),
             );
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
-            llm_span.record_speed_and_context(speed, None);
+            // wave-54 C1：per-call 耗时/首包真值（buffered 无首包 ⇒ 无 ttft 键）。
+            llm_span.record_call_timing(Some(elapsed_ms), None);
+            // wave-54 C3：usage 来源（provider | estimated_chars）。
+            llm_span.record_usage_origin(usage.origin);
+            // wave-54 C4：传真实上下文窗口（无能力 ⇒ None ⇒ 两键不输出）。
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            // wave-54 C4：context_ratio 分子用协议归一输入（anthropic 含 cache_read/creation）。
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
             record_llm_span_cost(
                 &mut llm_span,
                 request.model.as_str(),
@@ -2477,7 +2584,18 @@ where
                 cache_reportable_input_tokens(provider.protocol_label(), usage),
             );
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
-            llm_span.record_speed_and_context(speed, None);
+            // wave-54 C1：`generation = duration - ttft`（ttft 存在且 dur > ttft），否则 = duration。
+            llm_span.record_call_timing(Some(elapsed_ms), ttft_ms);
+            // wave-54 C3：usage 来源（provider | estimated_chars）。
+            llm_span.record_usage_origin(usage.origin);
+            // wave-54 C4：传真实上下文窗口（无能力 ⇒ None ⇒ 两键不输出）。
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            // wave-54 C4：context_ratio 分子用协议归一输入（anthropic 含 cache_read/creation）。
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
             record_llm_span_cost(
                 &mut llm_span,
                 request.model.as_str(),
@@ -2524,7 +2642,18 @@ pub fn provider_followup<P: ProviderClient>(
                 cache_reportable_input_tokens(provider.protocol_label(), usage),
             );
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
-            llm_span.record_speed_and_context(speed, None);
+            // wave-54 C1：per-call 耗时/首包真值（buffered 无首包 ⇒ 无 ttft 键）。
+            llm_span.record_call_timing(Some(elapsed_ms), None);
+            // wave-54 C3：usage 来源（provider | estimated_chars）。
+            llm_span.record_usage_origin(usage.origin);
+            // wave-54 C4：传真实上下文窗口（无能力 ⇒ None ⇒ 两键不输出）。
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            // wave-54 C4：context_ratio 分子用协议归一输入（anthropic 含 cache_read/creation）。
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
             record_llm_span_cost(
                 &mut llm_span,
                 request.model.as_str(),
@@ -2584,7 +2713,18 @@ where
                 cache_reportable_input_tokens(provider.protocol_label(), usage),
             );
             let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
-            llm_span.record_speed_and_context(speed, None);
+            // wave-54 C1：`generation = duration - ttft`（ttft 存在且 dur > ttft），否则 = duration。
+            llm_span.record_call_timing(Some(elapsed_ms), ttft_ms);
+            // wave-54 C3：usage 来源（provider | estimated_chars）。
+            llm_span.record_usage_origin(usage.origin);
+            // wave-54 C4：传真实上下文窗口（无能力 ⇒ None ⇒ 两键不输出）。
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            // wave-54 C4：context_ratio 分子用协议归一输入（anthropic 含 cache_read/creation）。
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
             record_llm_span_cost(
                 &mut llm_span,
                 request.model.as_str(),

@@ -4102,6 +4102,8 @@ mod tests {
                     input_text: None,
                     output_text: None,
                     updated_at: 0,
+                    usage_origin: None,
+                    context_input_tokens: None,
                 },
             );
         }
@@ -4191,6 +4193,8 @@ mod tests {
                         prefix_mutation_reasons: vec![
                             crate::agent::provider::PrefixMutationReason::SessionSummaryChanged,
                         ],
+                        usage_origin: None,
+                        context_input_tokens: None,
                     }],
                     hook_trace_records: vec![crate::agent::hooks::HookTraceRecord {
                         hook_name: "observe.failed-finalize".to_string(),
@@ -4233,6 +4237,8 @@ mod tests {
                     input_text: None,
                     output_text: None,
                     updated_at: 0,
+                    context_input_tokens: None,
+                    usage_origin: None,
                 },
             );
             runtime.record_turn_trace_for_test(
@@ -4287,6 +4293,8 @@ mod tests {
                         prefix_mutation_reasons: vec![
                             crate::agent::provider::PrefixMutationReason::HistoryBoundaryShifted,
                         ],
+                        usage_origin: None,
+                        context_input_tokens: None,
                     }],
                     hook_trace_records: vec![crate::agent::hooks::HookTraceRecord {
                         hook_name: "observe.cancelled-finalize".to_string(),
@@ -4326,6 +4334,8 @@ mod tests {
                     input_text: None,
                     output_text: None,
                     updated_at: 0,
+                    context_input_tokens: None,
+                    usage_origin: None,
                 },
             );
         }
@@ -8011,6 +8021,8 @@ mod tests {
                     turn_duration_ms: Some(800),
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::BufferedResponse,
                     prefix_mutation_reasons: Vec::new(),
+                    usage_origin: None,
+                    context_input_tokens: None,
                 }],
                 ..crate::agent::session::TurnTraceRecord::default()
             },
@@ -8054,6 +8066,8 @@ mod tests {
                     turn_duration_ms: Some(1500),
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                     prefix_mutation_reasons: Vec::new(),
+                    usage_origin: None,
+                    context_input_tokens: None,
                 }],
                 ..crate::agent::session::TurnTraceRecord::default()
             },

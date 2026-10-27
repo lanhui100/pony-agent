@@ -764,6 +764,9 @@ pub(crate) fn extract_responses_usage(payload: &Value) -> Option<TokenUsage> {
             .and_then(Value::as_u64),
         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+        // wave-54 C3：上游 usage 真值。
+        origin: Some(USAGE_ORIGIN_PROVIDER),
+        cache_creation_input_tokens: None,
     }))
 }
 

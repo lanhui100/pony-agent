@@ -233,7 +233,7 @@ test("真实浏览器 E2E 物理验证：调试属性门控与速度双模渲染
   // =============================================================
   // 态 1：生产默认态（无 ?debug=1，localStorage 未置位）
   // 验证门控零载荷：data-speed-debug 与 data-context-debug 均为 null
-  // 但非门控属性 data-speed-mode 仍必须正常渲染
+  // 但非门控属性 data-speed-basis 仍必须正常渲染
   // =============================================================
   await page.goto("/", { waitUntil: "networkidle" });
   await expect(page.getByTestId("workspace-composer-input")).toBeVisible();
@@ -248,7 +248,8 @@ test("真实浏览器 E2E 物理验证：调试属性门控与速度双模渲染
 
   await expect(tokenSpeedElDefault).toBeVisible();
   await expect(tokenSpeedElDefault).toHaveText(/267\s*t\/s/);
-  await expect(tokenSpeedElDefault).toHaveAttribute("data-speed-mode", "call_active_stream");
+  // wave-54 C6（ADR 0053）：速度口径基准位由 data-speed-mode 改为 data-speed-basis（turn_weighted）。
+  await expect(tokenSpeedElDefault).toHaveAttribute("data-speed-basis", "turn_weighted");
 
   // 断言门控关闭时属性为 null
   const defaultSpeedDebug = await tokenSpeedElDefault.getAttribute("data-speed-debug");
@@ -275,19 +276,24 @@ test("真实浏览器 E2E 物理验证：调试属性门控与速度双模渲染
 
   const inputTokensEl = page.getByTestId("status-metric-input-tokens");
   await expect(inputTokensEl).toBeVisible();
-  await expect(inputTokensEl).toHaveText(/42K/);
+  // wave-54 C6：<1e6 取一位小数（42000 ⇒ 42.0K）。
+  await expect(inputTokensEl).toHaveText(/42\.0K/);
 
-  await expect(tokenSpeedEl).toHaveAttribute("data-speed-mode", "call_active_stream");
+  await expect(tokenSpeedEl).toHaveAttribute("data-speed-basis", "turn_weighted");
 
-  // 场景 A 调试属性真值断言
+  // 场景 A 调试属性真值断言（wave-54 C6：10 段 basis;calls;in;out;dur;ttft;gen;win;ratio;origin）
+  // 单次调用 turn 加权：gen = 4000 − 1000 = 3000ms ⇒ 800 / 3.0s ≈ 266.7 ⇒ 267 t/s（与旧口径同值）。
   const activeSpeedDebug = await tokenSpeedEl.getAttribute("data-speed-debug");
-  expect(activeSpeedDebug).toBe("in=42000;out=800;dur=4000;ttft=1000;win=200000;ratio=0.210");
+  expect(activeSpeedDebug).toBe(
+    "basis=turn_weighted;calls=1;in=42000;out=800;dur=4000;ttft=1000;gen=3000;win=200000;ratio=0.210;origin=-"
+  );
 
   const usageCircle = page.getByTestId("workspace-context-usage-circle");
   await expect(usageCircle).toBeVisible();
 
   const activeContextDebug = await usageCircle.getAttribute("data-context-debug");
-  expect(activeContextDebug).toBe("in=42000;win=200000;pct=21;mode=call_active_stream;speed=267");
+  // wave-54 §4：模式域收敛为 turn_weighted | call_only | none。
+  expect(activeContextDebug).toBe("in=42000;win=200000;pct=21;mode=turn_weighted;speed=267");
 
   // 圆形进度条 offset 校验 (21%)
   const secondCircle = usageCircle.locator("circle").nth(1);
@@ -299,26 +305,29 @@ test("真实浏览器 E2E 物理验证：调试属性门控与速度双模渲染
 
   await page.screenshot({ path: path.join(EVIDENCE_DIR, "active-debug.png") });
 
-  // 场景 B：轮次结束（整轮综合速度 —— 判别式强化）
+  // 场景 B：轮次结束（C2 turn 加权口径 —— 判别式强化）
   await injectCompletedTurnStore(page);
 
-  // 1. 速度必须是整轮综合速度 250 t/s
-  await expect(tokenSpeedEl).toHaveText(/250\s*t\/s/);
+  // 1. 速度必须是 turn 加权生成速度：gen = 6000 − 2000 = 4000ms ⇒ 1500 / 4.0s = 375 t/s
+  //    （ADR 0053 已废除「整轮综合速度 1500/6.0 = 250 t/s」）。
+  await expect(tokenSpeedEl).toHaveText(/375\s*t\/s/);
 
-  // 2. data-speed-mode 必须为 turn_completed_aggregate
-  await expect(tokenSpeedEl).toHaveAttribute("data-speed-mode", "turn_completed_aggregate");
+  // 2. data-speed-basis 必须为 turn_weighted（完成轮同样走 Σout/Σgen）
+  await expect(tokenSpeedEl).toHaveAttribute("data-speed-basis", "turn_weighted");
 
-  // 场景 B 调试属性真值断言
+  // 场景 B 调试属性真值断言（10 段）
   const completedSpeedDebug = await tokenSpeedEl.getAttribute("data-speed-debug");
-  expect(completedSpeedDebug).toBe("in=42000;out=1500;dur=6000;ttft=-;win=200000;ratio=0.210");
+  expect(completedSpeedDebug).toBe(
+    "basis=turn_weighted;calls=1;in=42000;out=1500;dur=6000;ttft=2000;gen=4000;win=200000;ratio=0.210;origin=-"
+  );
 
   const completedContextDebug = await usageCircle.getAttribute("data-context-debug");
-  expect(completedContextDebug).toContain("mode=turn_completed_aggregate");
-  expect(completedContextDebug).toContain("speed=250");
+  expect(completedContextDebug).toContain("mode=turn_weighted");
+  expect(completedContextDebug).toContain("speed=375");
 
-  // 3. 判别式防伪断言：绝对不能是误走单次速度的 375 t/s
+  // 3. 判别式防伪断言：绝不能退化为已废除的整轮聚合口径 250 t/s
   const completedSpeedText = (await tokenSpeedEl.textContent()) || "";
-  expect(completedSpeedText).not.toContain("375");
+  expect(completedSpeedText).not.toContain("250");
 
   await page.screenshot({ path: path.join(EVIDENCE_DIR, "completed-debug.png") });
 
@@ -328,23 +337,23 @@ test("真实浏览器 E2E 物理验证：调试属性门控与速度双模渲染
     `Mode 1 (Default / Production):`,
     `  data-speed-debug: ${defaultSpeedDebug ?? "null (Gated / Zero Payload)"}`,
     `  data-context-debug: ${defaultContextDebug ?? "null (Gated / Zero Payload)"}`,
-    `  data-speed-mode: call_active_stream (Preserved)`,
+    `  data-speed-basis: turn_weighted (wave-54 C6)`,
     ``,
     `Mode 2 (Debug Enabled / ?debug=1):`,
     `  Scenario A (Active Stream):`,
     `    Speed Text: 267 t/s`,
-    `    data-speed-mode: call_active_stream`,
+    `    data-speed-basis: turn_weighted`,
     `    data-speed-debug: ${activeSpeedDebug}`,
     `    data-context-debug: ${activeContextDebug}`,
-    `    Input Tokens: 42K`,
+    `    Input Tokens: 42.0K (C6 一位小数)`,
     `    Context Circle Offset: ${strokeDashoffset} (expected ≈ ${expectedOffset.toFixed(2)})`,
     ``,
-    `  Scenario B (Completed Aggregate):`,
-    `    Speed Text: 250 t/s`,
-    `    data-speed-mode: turn_completed_aggregate`,
+    `  Scenario B (Completed / turn_weighted):`,
+    `    Speed Text: 375 t/s`,
+    `    data-speed-basis: turn_weighted`,
     `    data-speed-debug: ${completedSpeedDebug}`,
     `    data-context-debug: ${completedContextDebug}`,
-    `    Discriminant: not 375 t/s (PASS)`,
+    `    Discriminant: not 250 t/s (整轮聚合口径已废除, PASS)`,
     ``,
     `=== Console Diagnostics Logs ===`,
     metricsLogs.length > 0 ? metricsLogs.join("\n") : "[no special metrics logs emitted directly to console]"

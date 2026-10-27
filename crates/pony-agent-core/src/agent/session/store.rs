@@ -600,6 +600,8 @@ impl SessionStore {
                 ..Default::default()
             });
             trace.updated_at = now_timestamp_ms();
+            // wave-54 C3/C4：失败轮同样由 per-call 记录派生 provenance（与 live/fold 同口径）。
+            trace.derive_usage_provenance_from_calls();
             staged_session.turn_trace_history.push(trace);
             if staged_session.history.len() > DEFAULT_HISTORY_LIMIT {
                 let keep_from = staged_session.history.len() - DEFAULT_HISTORY_LIMIT;
@@ -671,6 +673,8 @@ impl SessionStore {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
             trace.updated_at = now_timestamp_ms();
+            // wave-54 C3/C4：轮级 usage 来源/上下文输入口径由 per-call 记录派生。
+            trace.derive_usage_provenance_from_calls();
             // PA-095 #7：live 写入剥离 observation 全量 payload（R4b No duplicate
             // storage）——payload 已由事件 flush 外置到 build_context_observations 表，
             // 引用由 flush 同事务回填到 trace 行；缓存行不再内嵌副本
@@ -3566,6 +3570,8 @@ pub(super) fn fold_session_views(
     for trace in &mut traces {
         if let Some(records) = metrics_state.by_turn_records.get(&trace.turn_id) {
             trace.provider_call_records = records.clone();
+            // wave-54 C3/C4：恢复路径同样从重建记录派生 provenance（与 live 同口径）。
+            trace.derive_usage_provenance_from_calls();
         }
     }
     (history_state.messages(), traces)
@@ -3588,6 +3594,8 @@ fn fold_session_traces_all(
     for trace in &mut traces {
         if let Some(records) = metrics_state.by_turn_records.get(&trace.turn_id) {
             trace.provider_call_records = records.clone();
+            // wave-54 C3/C4：恢复路径同样从重建记录派生 provenance（与 live 同口径）。
+            trace.derive_usage_provenance_from_calls();
         }
     }
     traces

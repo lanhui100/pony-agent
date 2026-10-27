@@ -303,16 +303,105 @@ pub enum ProviderStreamChunk {
     Reasoning(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+/// usage 来源标记：上游 usage 真值（协议解析得到）。
+pub const USAGE_ORIGIN_PROVIDER: &str = "provider";
+/// usage 来源标记：本地字符数估算（**不是**真值，UI 必须以 `≈` 呈现）。
+pub const USAGE_ORIGIN_ESTIMATED_CHARS: &str = "estimated_chars";
+
+/// wave-54 C3：把来源字符串归一为静态标记（未知/自定义值 ⇒ `None`，禁止冒充）。
+pub fn usage_origin_from_label(label: &str) -> Option<&'static str> {
+    match label {
+        USAGE_ORIGIN_PROVIDER => Some(USAGE_ORIGIN_PROVIDER),
+        USAGE_ORIGIN_ESTIMATED_CHARS => Some(USAGE_ORIGIN_ESTIMATED_CHARS),
+        _ => None,
+    }
+}
+
+/// token 用量（响应侧）。
+///
+/// wave-54 C3：`origin` 以 `&'static str` 静态标记承载（`provider` | `estimated_chars`），
+/// 该类型无法由 serde derive 反序列化（`'de` 需为 `'static`），故 `Serialize`/`Deserialize`
+/// 手写：wire 上 `origin` 为字符串，反序列化经 [`usage_origin_from_label`] 归一为静态标记。
+#[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
     pub cache_hit_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_hit_source: Option<String>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    /// wave-54 C4（anthropic 归一）：`cache_creation_input_tokens` **仅**用于
+    /// `context_input_tokens`（anthropic 的 `input` 既不含 cache_read 也不含 cache_creation）。
+    /// 语义边界：**不并入** `cache_hit_input_tokens`，**不**进 `gen_ai.usage.cache_read.*`。
+    pub cache_creation_input_tokens: Option<u64>,
+    /// wave-54 C3：usage 来源。`None` ⇒ 未知/未标注（估算值不得静默冒充真值）。
+    pub origin: Option<&'static str>,
+}
+
+impl serde::Serialize for TokenUsage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        // 字段数与出现条件与既有 wire 形态保持一致（cache_hit_source/origin 缺失即缺键）。
+        let mut state = serializer.serialize_struct("TokenUsage", 9)?;
+        state.serialize_field("inputTokens", &self.input_tokens)?;
+        state.serialize_field("cacheHitInputTokens", &self.cache_hit_input_tokens)?;
+        if self.cache_hit_source.is_some() {
+            state.serialize_field("cacheHitSource", &self.cache_hit_source)?;
+        }
+        state.serialize_field("reasoningTokens", &self.reasoning_tokens)?;
+        state.serialize_field("outputTokens", &self.output_tokens)?;
+        state.serialize_field("totalTokens", &self.total_tokens)?;
+        if self.cache_creation_input_tokens.is_some() {
+            state.serialize_field("cacheCreationInputTokens", &self.cache_creation_input_tokens)?;
+        }
+        if self.origin.is_some() {
+            state.serialize_field("origin", &self.origin)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TokenUsage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct TokenUsageWire {
+            #[serde(default)]
+            input_tokens: Option<u64>,
+            #[serde(default)]
+            cache_hit_input_tokens: Option<u64>,
+            #[serde(default)]
+            cache_hit_source: Option<String>,
+            #[serde(default)]
+            reasoning_tokens: Option<u64>,
+            #[serde(default)]
+            output_tokens: Option<u64>,
+            #[serde(default)]
+            total_tokens: Option<u64>,
+            #[serde(default)]
+            cache_creation_input_tokens: Option<u64>,
+            #[serde(default)]
+            origin: Option<String>,
+        }
+
+        let wire = TokenUsageWire::deserialize(deserializer)?;
+        Ok(TokenUsage {
+            input_tokens: wire.input_tokens,
+            cache_hit_input_tokens: wire.cache_hit_input_tokens,
+            cache_hit_source: wire.cache_hit_source,
+            reasoning_tokens: wire.reasoning_tokens,
+            output_tokens: wire.output_tokens,
+            total_tokens: wire.total_tokens,
+            cache_creation_input_tokens: wire.cache_creation_input_tokens,
+            origin: wire.origin.as_deref().and_then(usage_origin_from_label),
+        })
+    }
 }
 
 #[allow(dead_code)]
@@ -359,6 +448,13 @@ pub trait ProviderClient {
     ) -> Result<ProviderResponse, String>
     where
         F: FnMut(ProviderStreamChunk);
+
+    /// 模型能力里的上下文窗口（tokens）。wave-54 C4：`llm.chat` 据此输出
+    /// `gen_ai.usage.context_window` / `context_ratio`；无窗口能力 ⇒ `None`
+    /// （禁止 0 占位）。默认实现返回 `None`，由具备能力信息的实现覆盖。
+    fn context_window_tokens(&self) -> Option<u32> {
+        None
+    }
 }
 
 pub struct ProviderManager {
@@ -2029,6 +2125,11 @@ impl ProviderClient for ProviderManager {
         )
     }
 
+    /// wave-54 C4：桥梁转发真实能力（`None` ⇒ 上游不输出 context_window/ratio）。
+    fn context_window_tokens(&self) -> Option<u32> {
+        ProviderManager::context_window_tokens(self)
+    }
+
     /*
      */
     #[cfg(any())]
@@ -2309,6 +2410,13 @@ where
                         reasoning_tokens: None,
                         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
                         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+                        // wave-54 C4：anthropic `input` 不含 cache_read / cache_creation，
+                        // 两者仅用于 context_input 归一（不并入 cache_read 上报）。
+                        cache_creation_input_tokens: usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(Value::as_u64),
+                        // wave-54 C3：上游 usage 真值。
+                        origin: Some(USAGE_ORIGIN_PROVIDER),
                     }));
                 }
             }
@@ -4081,6 +4189,9 @@ fn extract_openai_usage(payload: &Value) -> Option<TokenUsage> {
             }),
         output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+        cache_creation_input_tokens: None,
+        // wave-54 C3：上游 usage 真值。
+        origin: Some(USAGE_ORIGIN_PROVIDER),
     }))
 }
 
@@ -4122,6 +4233,11 @@ fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
         .get("cache_read_input_tokens")
         .and_then(Value::as_u64)
         .map(|v| (v, "usage.cache_read_input_tokens"));
+    // wave-54 C4：anthropic 的 `input_tokens` 既不含 cache_read 也不含 cache_creation，
+    // 后者仅参与 context_input 归一（不计入 cache 命中上报）。
+    let cache_creation_input_tokens = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64);
 
     Some(normalize_token_usage(TokenUsage {
         input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
@@ -4130,6 +4246,9 @@ fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
         reasoning_tokens: None,
         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+        cache_creation_input_tokens,
+        // wave-54 C3：上游 usage 真值。
+        origin: Some(USAGE_ORIGIN_PROVIDER),
     }))
 }
 
@@ -4171,6 +4290,9 @@ fn estimate_token_usage(request: &ProviderRequest, output_text: &str) -> TokenUs
         reasoning_tokens: None,
         output_tokens: Some(estimate_tokens_from_chars(output_chars)),
         total_tokens: None,
+        cache_creation_input_tokens: None,
+        // wave-54 C3：估算值必须可辨识（UI 以 `≈` 呈现，不得冒充真值）。
+        origin: Some(USAGE_ORIGIN_ESTIMATED_CHARS),
     })
 }
 
@@ -4232,6 +4354,8 @@ fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
         reasoning_tokens: usage.reasoning_tokens,
         output_tokens: usage.output_tokens,
         total_tokens,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        origin: usage.origin,
     }
 }
 

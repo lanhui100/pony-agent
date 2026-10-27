@@ -733,12 +733,58 @@ pub struct TurnTraceRecord {
     pub total_tokens: Option<u64>,
     pub first_token_latency_ms: Option<u64>,
     pub turn_duration_ms: Option<u64>,
+    /// wave-54 C3：本轮 usage 来源（`provider` | `estimated_chars`）；缺失不输出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_origin: Option<String>,
+    /// wave-54 C4：本轮上下文输入口径（末次调用，协议归一）；缺失不输出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_input_tokens: Option<u64>,
     #[serde(default)]
     pub input_text: Option<String>,
     #[serde(default)]
     pub output_text: Option<String>,
     #[serde(default)]
     pub updated_at: u64,
+}
+
+impl TurnTraceRecord {
+    /// wave-54 C3/C4：由 per-call 记录派生轮级 `usage_origin` / `context_input_tokens`。
+    ///
+    /// 语义（wave-54 §5.2 契约）：
+    /// - `usage_origin`：**任一** per-call 为 `estimated_chars` ⇒ 轮级 `estimated_chars`
+    ///   （只要有一个估算值，整轮数字就必须可辨识）；**全部**为 `provider` ⇒ `provider`；
+    ///   混合了未知（`None`）且无估算值，或全无记录 ⇒ `None`（「未知」保持未知）。
+    /// - `context_input_tokens`：取**末次调用**口径（UI「输入」位同源）。
+    /// - 只填补空缺（`None`），**不覆盖**调用方已显式写入的值；
+    /// - 由 store 的写入/恢复路径统一调用，保证 live 产物与折叠产物同口径。
+    pub fn derive_usage_provenance_from_calls(&mut self) {
+        if self.provider_call_records.is_empty() {
+            return;
+        }
+        if self.usage_origin.is_none() {
+            let any_estimated = self
+                .provider_call_records
+                .iter()
+                .any(|record| record.usage_origin.as_deref() == Some("estimated_chars"));
+            let all_provider = self
+                .provider_call_records
+                .iter()
+                .all(|record| record.usage_origin.as_deref() == Some("provider"));
+            self.usage_origin = if any_estimated {
+                Some("estimated_chars".to_string())
+            } else if all_provider {
+                Some("provider".to_string())
+            } else {
+                None
+            };
+        }
+        if self.context_input_tokens.is_none() {
+            self.context_input_tokens = self
+                .provider_call_records
+                .last()
+                .and_then(|record| record.context_input_tokens);
+        }
+    }
 }
 
 /// 会话与持久化层结构化错误枚举。

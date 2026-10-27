@@ -239,6 +239,8 @@ mod tests {
             reasoning_tokens: Some(10),
             output_tokens: Some(50),
             total_tokens: Some(160),
+            origin: None,
+            cache_creation_input_tokens: None,
         }
     }
 

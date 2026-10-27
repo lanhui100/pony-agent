@@ -115,6 +115,14 @@ pub struct ProviderCallCacheRecord {
     pub total_tokens: Option<u64>,
     pub first_token_latency_ms: Option<u64>,
     pub turn_duration_ms: Option<u64>,
+    /// wave-54 C3：usage 来源（`provider` | `estimated_chars`）。`None` ⇒ 键缺席
+    /// （「未知」不得被渲染/上报成真值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_origin: Option<String>,
+    /// wave-54 C4：上下文输入口径（协议归一）——`anthropic*` ⇒ `input + cache_read`，
+    /// 其余协议 ⇒ `input`（上游已含缓存命中）。`None` ⇒ UI 回退到上下文解析路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_input_tokens: Option<u64>,
     #[serde(default)]
     pub latency_kind: ProviderLatencyKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

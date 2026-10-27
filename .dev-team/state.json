@@ -276,6 +276,74 @@
         }
       },
       "regression_baseline": ".dev-team/regression-baseline-wave53.json"
+    },
+    {
+      "wave": 54,
+      "theme": "token / speed truth contract (span truth attrs + single weighted speed + display discipline)",
+      "baseline_commit": "224f26f",
+      "protocol_commit": "60f4b71",
+      "red_commits": [
+        "38918f9",
+        "1271a64"
+      ],
+      "tasks": [
+        "task-4",
+        "task-5",
+        "task-6",
+        "task-7",
+        "task-8",
+        "task-9"
+      ],
+      "branches": {
+        "rust": {
+          "owner": "rust-origin",
+          "status": "green",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/otel/mod.rs",
+            "crates/pony-agent-core/src/agent/turn_flow.rs",
+            "crates/pony-agent-core/src/agent/projection.rs"
+          ]
+        },
+        "ui": {
+          "owner": "ui-chain",
+          "status": "green",
+          "write_scopes": [
+            "src/lib/runtime/token-metrics.ts",
+            "src/lib/runtime/useTraceProjection.ts",
+            "src/components/HomeStatusPanel.vue"
+          ]
+        },
+        "tests": {
+          "owner": "test-ts",
+          "status": "green",
+          "write_scopes": [
+            "tests/acceptance/wave54/",
+            "crates/pony-agent-core/tests/wave54_metric_truth.rs"
+          ]
+        }
+      },
+      "reviews": {
+        "plan": "FAIL→闭环",
+        "l3a": "FAIL→闭环",
+        "l3b": "FAIL→闭环",
+        "l3p": "pending"
+      },
+      "grading": "B",
+      "blast_radius": {
+        "files": 32,
+        "insertions": 1486,
+        "deletions": 352,
+        "triggered": "yes"
+      },
+      "gates": {
+        "tsc": "0",
+        "vitest": "0 (1084 passed/0 failed)",
+        "cargo_lib": "0 (1175 passed)",
+        "cargo_wave54": "0 (8 passed)",
+        "cargo_check": "0",
+        "observability_audit_diff": "0 (--decl-approved)",
+        "observability_declaration": "PASS/0"
+      }
     }
   ],
   "counters": {}

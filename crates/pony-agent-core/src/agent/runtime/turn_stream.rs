@@ -710,6 +710,8 @@ impl AgentRuntime {
                 ProviderRequestKind::ToolFollowup,
                 Some(response.provider_source.as_str()),
                 Some(response.provider_mode.as_str()),
+                // wave-54 C4：协议归一上下文输入口径（anthropic ⇒ input + cache_read）。
+                Some(provider.protocol_label()),
                 response.token_usage.as_ref(),
                 if provider_call_used_true_stream {
                     provider_call_first_token_latency.get()
@@ -2223,6 +2225,8 @@ impl AgentRuntime {
             ProviderRequestKind::InitialRequest,
             Some(first_decision.provider_source.as_str()),
             Some(first_decision.provider_mode.as_str()),
+            // wave-54 C4：协议归一上下文输入口径（anthropic ⇒ input + cache_read）。
+            Some(provider.protocol_label()),
             first_decision.token_usage.as_ref(),
             if initial_latency_kind == ProviderLatencyKind::ProviderStream {
                 initial_call_first_token_latency_ms
@@ -2408,6 +2412,12 @@ impl AgentRuntime {
                 None,
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
+            );
+            // wave-54 C2：取消轮同样落已发生调用的加权速度真值（records 为空 ⇒ 仅 calls=0）。
+            crate::agent::turn_flow::record_turn_speed_truth(
+                &mut otel_turn_scope,
+                &provider_call_records,
+                Some(turn_started_at.elapsed().as_millis() as u64),
             );
             otel_turn_scope.set_phase("cancelled");
             return;
@@ -2741,6 +2751,12 @@ impl AgentRuntime {
             turn_duration_ms,
             // Wave-15 R2：单调用轮次的 per-call 记录同样按序号写入。
             &provider_call_records,
+        );
+        // wave-54 C2：根 span 速度/耗时真值（生产路径唯一出口，数据源 = 本轮 per-call records）。
+        crate::agent::turn_flow::record_turn_speed_truth(
+            &mut otel_turn_scope,
+            &provider_call_records,
+            turn_duration_ms,
         );
         emit_stream_event(
             sink,

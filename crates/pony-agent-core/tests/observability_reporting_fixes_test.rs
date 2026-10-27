@@ -1075,6 +1075,8 @@ impl MockUsageProvider {
                 reasoning_tokens: Some(7),
                 output_tokens: Some(50),
                 total_tokens: Some(150),
+                origin: None,
+                cache_creation_input_tokens: None,
             },
         }
     }

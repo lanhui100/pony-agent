@@ -221,6 +221,7 @@ pub(super) fn build_provider_call_cache_record(
     request_kind: ProviderRequestKind,
     provider_source: Option<&str>,
     provider_mode: Option<&str>,
+    protocol_label: Option<&str>,
     token_usage: Option<&TokenUsage>,
     first_token_latency_ms: Option<u64>,
     turn_duration_ms: Option<u64>,
@@ -250,10 +251,67 @@ pub(super) fn build_provider_call_cache_record(
         total_tokens,
         first_token_latency_ms,
         turn_duration_ms,
+        // wave-54 C3：usage 来源随记录透传（`None` ⇒ 未知，不得冒充真值）。
+        usage_origin: token_usage.and_then(|usage| usage.origin).map(str::to_string),
+        // wave-54 C4：上下文输入按协议归一（anthropic ⇒ input + cache_read）。
+        context_input_tokens: context_input_tokens_for(protocol_label, token_usage),
         latency_kind,
         prefix_mutation_reasons: build_context_observation
             .map(|observation| observation.prefix_mutation_reasons.clone())
             .unwrap_or_default(),
+    }
+}
+
+/// wave-54 C4：上下文输入口径（协议归一）。
+///
+/// `protocol_label` 以 `anthropic` 开头 ⇒ `input + cache_read`（anthropic 的 `input`
+/// 不含缓存命中）；其余协议 ⇒ `input`（上游已含缓存命中）。缺 input ⇒ `None`
+/// （UI 回退到上下文解析路径，禁止 0 占位）。
+pub(crate) fn context_input_tokens_for(
+    protocol_label: Option<&str>,
+    token_usage: Option<&TokenUsage>,
+) -> Option<u64> {
+    let usage = token_usage?;
+    let input_tokens = usage.input_tokens?;
+    let anthropic = protocol_label
+        .map(|label| label.starts_with("anthropic"))
+        .unwrap_or(false);
+    if anthropic {
+        // anthropic：`input` 既不含 cache_read 也不含 cache_creation ⇒ 三者相加。
+        Some(
+            input_tokens
+                .saturating_add(usage.cache_hit_input_tokens.unwrap_or(0))
+                .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0)),
+        )
+    } else {
+        // 其余协议：`input` 已含缓存命中（semconv 口径）。
+        Some(input_tokens)
+    }
+}
+
+/// wave-54 C3：合并累积 usage 的来源标记——`provider` 真值优先于估算值；
+/// 两者一致则保持，均缺失 ⇒ `None`（未知）。
+pub(super) fn merge_usage_origin(
+    left: Option<&'static str>,
+    right: Option<&'static str>,
+) -> Option<&'static str> {
+    use crate::agent::provider::{USAGE_ORIGIN_ESTIMATED_CHARS, USAGE_ORIGIN_PROVIDER};
+    // wave-54 C3（L3 收口）：与 `TurnTraceRecord::derive_usage_provenance_from_calls`
+    // 及前端同一口径 —— **任一** `estimated_chars` ⇒ 合并结果 `estimated_chars`
+    // （只要掺了估算值，整轮数字就必须可辨识）；全 `provider` ⇒ `provider`；
+    // 其余（含未知 `None`）⇒ `None`，不臆造。
+    let any_estimated = matches!(left, Some(USAGE_ORIGIN_ESTIMATED_CHARS))
+        || matches!(right, Some(USAGE_ORIGIN_ESTIMATED_CHARS));
+    if any_estimated {
+        return Some(USAGE_ORIGIN_ESTIMATED_CHARS);
+    }
+    let all_provider = (left.is_none() || left == Some(USAGE_ORIGIN_PROVIDER))
+        && (right.is_none() || right == Some(USAGE_ORIGIN_PROVIDER))
+        && (left == Some(USAGE_ORIGIN_PROVIDER) || right == Some(USAGE_ORIGIN_PROVIDER));
+    if all_provider {
+        Some(USAGE_ORIGIN_PROVIDER)
+    } else {
+        None
     }
 }
 
@@ -282,6 +340,11 @@ pub(super) fn merge_token_usage(
             reasoning_tokens: add_optional_u64(existing.reasoning_tokens, next.reasoning_tokens),
             output_tokens: add_optional_u64(existing.output_tokens, next.output_tokens),
             total_tokens: add_optional_u64(existing.total_tokens, next.total_tokens),
+            origin: merge_usage_origin(existing.origin, next.origin),
+            cache_creation_input_tokens: add_optional_u64(
+                existing.cache_creation_input_tokens,
+                next.cache_creation_input_tokens,
+            ),
         }),
         (Some(existing), None) => Some(existing),
         (None, Some(next)) => Some(next.clone()),

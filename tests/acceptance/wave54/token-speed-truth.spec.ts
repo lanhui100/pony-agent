@@ -93,7 +93,7 @@ const FIXTURE_TOTALS = {
   inputTokens: 358633,
   cacheReadTokens: 327808,
   reasoningTokens: 2075,
-  /** 契约写作 Σgen=47580ms，fixture 逐条 `durationMs - ttftMs` 求和为 47579ms（1ms 取整差）。 */
+  /** Σgen 以 fixture 逐条 `durationMs - ttftMs` 求和为准：47579ms（容差 ±60 保留）。 */
   genMs: 47579,
   durationMs: 93154,
   firstCallTtftMs: 3047
@@ -235,6 +235,43 @@ describe("wave-54 T4：resolveTurnWeightedSpeedDetail 单口径（Σout / Σgen�
       expect(detail.basis).toBe("none");
       expect(detail.calls).toBe(0);
     }
+  });
+
+  it("T4-4（[BLOCKING 7]）: 无已完成调用但存在活跃调用记录 ⇒ mode/basis=call_only、calls=0、speed=out/(dur−ttft)", () => {
+    // Arrange：§4 `call_only` 分支 = `calls === 0` 且存在「活跃调用」的 per-call 值。
+    // - `providerCallRecords` 为空 ⇒ 无已完成调用（records 是调用完成后的 per-call 真值载体）；
+    // - live timeline 的 call_model 条目携带当前活跃调用（state=running）的 per-call 指标；
+    // - 轮次处于活跃态（isActiveTurn=true）。
+    const activeCallTurn = buildTurn("wave54-t4-call-only", [], {
+      phase: "calling_model",
+      traceTimeline: [
+        {
+          id: "wave54-live-call-1",
+          turnId: "wave54-t4-call-only",
+          sequence: 1,
+          kind: "call_model",
+          label: "CALL MODEL #1",
+          state: "running",
+          inputTokens: 4000,
+          outputTokens: 150,
+          turnDurationMs: 2000,
+          firstTokenLatencyMs: 500
+        }
+      ]
+    });
+
+    // Act
+    const detail = resolveTurnWeightedSpeedDetail(activeCallTurn, { isActiveTurn: true });
+
+    // Assert：gen = 2000 − 500 = 1500ms ⇒ 150 / 1.5s = 100 t/s（该 per-call 值，而非 Σ 加权）
+    expect(detail.speed).not.toBeNull();
+    expect(detail.speed).toBe(100);
+    expect(detail.mode).toBe("call_only");
+    expect(detail.basis).toBe("call_only");
+    expect(detail.calls).toBe(0);
+    expect(detail.outputTokens).toBe(150);
+    expect(detail.genMs).toBe(1500);
+    expect(detail.ttftMs).toBe(500);
   });
 });
 
@@ -453,7 +490,7 @@ describe("wave-54 T6：golden replay eed9ba47（20 次调用）", () => {
     expect(sumCache).toBe(FIXTURE_TOTALS.cacheReadTokens);
   });
 
-  it("T6-1: fixture 自洽 —— 逐条 genMs === durationMs - ttftMs（C2 的 gen_i 定义），且 Σgen≈47580±60", () => {
+  it("T6-1: fixture 自洽 —— 逐条 genMs === durationMs - ttftMs（C2 的 gen_i 定义），且 Σgen=47579（容差 ±60）", () => {
     // Act
     const genDelta = goldenCalls.map((call) => call.durationMs - call.ttftMs - call.genMs);
     const sumGen = goldenCalls.reduce((sum, call) => sum + call.genMs, 0);
@@ -462,11 +499,11 @@ describe("wave-54 T6：golden replay eed9ba47（20 次调用）", () => {
     // Assert
     expect(genDelta).toEqual(goldenCalls.map(() => 0));
     expect(sumGen).toBe(FIXTURE_TOTALS.genMs);
-    expect(Math.abs(sumGen - 47580)).toBeLessThanOrEqual(60);
+    expect(Math.abs(sumGen - 47579)).toBeLessThanOrEqual(60);
     expect(sumReasoning).toBe(FIXTURE_TOTALS.reasoningTokens);
   });
 
-  it("T6-2: 20 次调用 replay ⇒ speed=95.46±1.0、basis=turn_weighted、outputTokens=4542、genMs=47580±60", () => {
+  it("T6-2: 20 次调用 replay ⇒ speed=95.46±1.0、basis=turn_weighted、outputTokens=4542、genMs=47579±60", () => {
     // Arrange
     const turn = buildGoldenTurn("wave54-t6-golden");
 
@@ -483,7 +520,7 @@ describe("wave-54 T6：golden replay eed9ba47（20 次调用）", () => {
     expect(detail.calls).toBe(FIXTURE_TOTALS.calls);
     expect(detail.outputTokens).toBe(FIXTURE_TOTALS.outputTokens);
     expect(detail.genMs).not.toBeNull();
-    expect(Math.abs((detail.genMs as number) - 47580)).toBeLessThanOrEqual(60);
+    expect(Math.abs((detail.genMs as number) - 47579)).toBeLessThanOrEqual(60);
     // §1 C2：turn 级 TTFT = 首个带 ttft 的 per-call 值（不跨 hop 采样）
     expect(detail.ttftMs).toBe(FIXTURE_TOTALS.firstCallTtftMs);
     // 判别：不得退化为端到端吞吐 4542/98.469s ≈ 46.13

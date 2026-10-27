@@ -1575,6 +1575,12 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
         trace_id: None,
         turn_speed: None,
         turn_cost: None,
+        turn_duration_ms: None,
+        turn_ttft_ms: None,
+        turn_calls: None,
+        turn_started_at: None,
+        turn_speed_recorded: false,
+        turn_timing_recorded: false,
     };
     // 契约：session_id / turn_id 缺失（空串）⇒ **不创建** turn span。
     // 绝不用占位值伪造会话——那会在 Langfuse 侧造出不存在的 session，污染数据。
@@ -1614,6 +1620,12 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
                 trace_id: None,
                 turn_speed: None,
                 turn_cost: None,
+                turn_duration_ms: None,
+                turn_ttft_ms: None,
+                turn_calls: None,
+                turn_started_at: Some(std::time::Instant::now()),
+                turn_speed_recorded: false,
+                turn_timing_recorded: false,
             }
             .with_trace_id(trace_id);
         }
@@ -1631,6 +1643,12 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
         trace_id: Some(trace_id),
         turn_speed: None,
         turn_cost: None,
+        turn_duration_ms: None,
+        turn_ttft_ms: None,
+        turn_calls: None,
+        turn_started_at: Some(std::time::Instant::now()),
+        turn_speed_recorded: false,
+        turn_timing_recorded: false,
     }
 }
 
@@ -1644,6 +1662,15 @@ pub struct TurnTraceGuard {
     turn_speed: Option<f64>,
     /// Wave-5 K4：整轮聚合成本（USD）；`None` ⇒ 不输出 `agent.turn.cost.usd`。
     turn_cost: Option<f64>,
+    /// wave-54 C2：turn 级耗时/TTFT/已完成调用数；`None` ⇒ 对应键缺席。
+    turn_duration_ms: Option<u64>,
+    turn_ttft_ms: Option<u64>,
+    turn_calls: Option<u32>,
+    /// wave-54 C2（L3 收口）：turn 计时起点（Drop 时派生 `agent.turn.duration_ms`）。
+    turn_started_at: Option<std::time::Instant>,
+    /// 是否由调用方**显式**记录过速度 / timing（显式优先，不因派生覆盖）。
+    turn_speed_recorded: bool,
+    turn_timing_recorded: bool,
 }
 
 impl TurnTraceGuard {
@@ -1655,6 +1682,9 @@ impl TurnTraceGuard {
     /// 记录 turn 综合生成速度（token/s）。
     pub fn record_turn_speed(&mut self, speed: Option<f64>) {
         self.turn_speed = speed.filter(|s| s.is_finite() && *s > 0.0);
+        // 显式记录即「调用方定义了真值」：即使被过滤成 `None`（0/NaN/Inf），
+        // `Drop` 也不再用派生值顶替（语义：显式无值 = 无值）。
+        self.turn_speed_recorded = true;
     }
 
     /// 记录 turn 终态相位（`completed` / `failed` / `cancelled` …）。
@@ -1698,16 +1728,22 @@ impl TurnTraceGuard {
         }
     }
 
-    /// 记录 turn 级速度真值（wave-54 C2 契约空桩）：映射 [`ATTR_AGENT_TURN_DURATION_MS`] /
+    /// 记录 turn 级速度真值（wave-54 C2 契约）：映射 [`ATTR_AGENT_TURN_DURATION_MS`] /
     /// [`ATTR_AGENT_TURN_TTFT_MS`] / [`ATTR_AGENT_TURN_CALLS`]。
-    /// 当前为契约冻结空桩，实现由 rust-exec 在本波内落地。
+    ///
+    /// 语义（C2）：`duration_ms` = turn 级耗时；`ttft_ms` = **首个带 ttft 的 per-call 值**
+    /// （不是 turn elapsed 内首包，旧 turn 级 TTFT 语义作废）；`calls` = 已完成调用数。
+    /// 每个键 `None` ⇒ 该键缺席（「未知」不得写 0 占位）。只做赋值，落 span 在 `Drop`。
     pub fn record_turn_timing(
         &mut self,
-        _duration_ms: Option<u64>,
-        _ttft_ms: Option<u64>,
-        _calls: Option<u32>,
+        duration_ms: Option<u64>,
+        ttft_ms: Option<u64>,
+        calls: Option<u32>,
     ) {
-        unimplemented!("wave-54 stub")
+        self.turn_duration_ms = duration_ms;
+        self.turn_ttft_ms = ttft_ms;
+        self.turn_calls = calls;
+        self.turn_timing_recorded = true;
     }
 }
 
@@ -1744,12 +1780,60 @@ impl Drop for TurnTraceGuard {
                 (false, None) => {}
             }
         }
+        // wave-54 C2（L3 收口）：未显式记录速度/timing 时，由本轮各 `llm.chat` 在
+        // `record_call_timing` 时累积的真值在此结算 ⇒ 根 span 属性**不随退出点漂移**
+        // （completed / cancelled / failed / 多跳 全部覆盖，无需逐点接线）。
+        // 显式值优先（冻结契约 T2 语义不变）。
+        let (derived_speed, derived_ttft, derived_calls, _derived_generation_ms, derived_call_ms) =
+            read_active_turn_call_truth();
+        if !self.turn_speed_recorded {
+            self.turn_speed = derived_speed;
+        }
+        if !self.turn_timing_recorded && derived_calls > 0 {
+            // Lead 裁决（T7）：`duration_ms = max(墙钟 elapsed_ms, Σ已计入调用的 dur_ms)`。
+            // 生产路径调用串行 ⇒ `elapsed ≥ Σdur`，下限是 no-op（真实会话 = 98469ms）；
+            // 合成/极短轮 `elapsed()` 取整为 0 时由下限兜底，且仍遵守「>0 才落键」。
+            let wall_ms = self
+                .turn_started_at
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            let duration_ms = wall_ms.max(derived_call_ms);
+            if duration_ms > 0 {
+                self.turn_duration_ms = self.turn_duration_ms.or(Some(duration_ms));
+            }
+            self.turn_ttft_ms = self.turn_ttft_ms.or(derived_ttft);
+            self.turn_calls = self
+                .turn_calls
+                .or(Some(u32::try_from(derived_calls).unwrap_or(u32::MAX)));
+        }
         if let Some(speed) = self.turn_speed.take() {
             if let Some(span) = self.span.as_mut() {
                 span.set_attribute(KeyValue::new(
                     ATTR_AGENT_TURN_SPEED_TOKENS_PER_SECOND,
                     speed,
                 ));
+                // wave-54 C2：速度必须自带口径标记（单一口径 `turn_weighted`），
+                // 否则下游无法判断分母是否已扣除 TTFT。
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_SPEED_BASIS, "turn_weighted"));
+            }
+        }
+        // wave-54 C2：turn 级耗时 / 首包 / 已完成调用数——`None` ⇒ 键缺席（禁止 0 占位）。
+        if let Some(duration_ms) = self.turn_duration_ms.take() {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_AGENT_TURN_DURATION_MS,
+                    duration_ms as i64,
+                ));
+            }
+        }
+        if let Some(ttft_ms) = self.turn_ttft_ms.take() {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_TTFT_MS, ttft_ms as i64));
+            }
+        }
+        if let Some(calls) = self.turn_calls.take() {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_CALLS, calls as i64));
             }
         }
         // Wave-5 K4：整轮聚合成本——显式记录优先，否则回落到本轮 llm.chat 累计值；
@@ -1853,6 +1937,10 @@ pub fn start_llm_span_with_provider(
         speed: None,
         context_window: None,
         context_ratio: None,
+        context_normalized_input: None,
+        call_duration_ms: None,
+        call_ttft_ms: None,
+        usage_origin: None,
         cost_usd: None,
         cost_details: None,
         usage_recorded: false,
@@ -1885,6 +1973,10 @@ pub fn start_llm_span_with_provider(
         speed: None,
         context_window: None,
         context_ratio: None,
+        context_normalized_input: None,
+        call_duration_ms: None,
+        call_ttft_ms: None,
+        usage_origin: None,
         cost_usd: None,
         cost_details: None,
         usage_recorded: false,
@@ -1904,6 +1996,16 @@ pub struct LlmSpanGuard {
     speed: Option<f64>,
     context_window: Option<u64>,
     context_ratio: Option<f64>,
+    /// wave-54 C4：协议归一后的上下文输入（anthropic = input + cache_read + cache_creation）；
+    /// 有值时 `gen_ai.usage.context_ratio` 以它作分子，否则回退 `input_tokens`。
+    context_normalized_input: Option<u64>,
+    /// wave-54 C1：本次调用耗时；`None` ⇒ 不输出 [`ATTR_LLM_CALL_DURATION_MS`]。
+    call_duration_ms: Option<u64>,
+    /// wave-54 C1：本次调用首包耗时；`None` ⇒ 不输出 [`ATTR_LLM_CALL_TTFT_MS`]（buffered 无首包）。
+    call_ttft_ms: Option<u64>,
+    /// wave-54 C3：usage 来源（`provider` | `estimated_chars`）；`None` ⇒ 不输出
+    /// [`ATTR_AGENT_USAGE_ORIGIN`]（未知不得冒充真值）。
+    usage_origin: Option<&'static str>,
     /// Wave-5 K4：单次调用成本（USD）；`None` ⇒ 不输出 `gen_ai.cost.usd`。
     cost_usd: Option<f64>,
     /// wave-53 C1：成本三分量 JSON（[`ATTR_LANGFUSE_OBSERVATION_COST_DETAILS`]）；
@@ -2009,17 +2111,37 @@ impl LlmSpanGuard {
         }
     }
 
-    /// 记录本次调用的耗时与首包（wave-54 C1 契约空桩）：映射 [`ATTR_LLM_CALL_DURATION_MS`] /
-    /// [`ATTR_LLM_CALL_TTFT_MS`] / [`ATTR_LLM_CALL_GENERATION_MS`]。
-    /// 当前为契约冻结空桩，实现由 rust-exec 在本波内落地。
-    pub fn record_call_timing(&mut self, _duration_ms: Option<u64>, _ttft_ms: Option<u64>) {
-        unimplemented!("wave-54 stub")
+    /// wave-54 C4（ADVISORY 采纳）：记录**协议归一**的上下文输入（anthropic 含 cache_read /
+    /// cache_creation，其余协议 = input）。
+    ///
+    /// 语义：只影响 `gen_ai.usage.context_ratio` 的**分子**——有值时优先用它，
+    /// 无值回退 `gen_ai.usage.input_tokens`；`gen_ai.usage.input_tokens` 本身不上报该值
+    /// （避免与 `gen_ai.usage.cache_read.input_tokens` 双计）。
+    pub fn record_context_normalized_input(&mut self, context_input_tokens: Option<u64>) {
+        self.context_normalized_input = context_input_tokens;
     }
 
-    /// 记录 usage 来源（wave-54 C1/C3 契约空桩）：映射 [`ATTR_AGENT_USAGE_ORIGIN`]
-    /// （`provider` | `estimated_chars`）。当前为契约冻结空桩，实现由 rust-exec 在本波内落地。
-    pub fn record_usage_origin(&mut self, _origin: Option<&'static str>) {
-        unimplemented!("wave-54 stub")
+    /// 记录本次调用的耗时与首包（wave-54 C1 契约）：映射 [`ATTR_LLM_CALL_DURATION_MS`] /
+    /// [`ATTR_LLM_CALL_TTFT_MS`] / [`ATTR_LLM_CALL_GENERATION_MS`]。
+    ///
+    /// 计算口径（C1/C2 同一公式）：`generation = duration - ttft` **当且仅当** ttft 存在且
+    /// `duration > ttft`；否则 `generation = duration`（`ttft > duration` 时按 C2 退化，
+    /// **不**抵扣、**不**产出负值）。只做赋值，落 span 在 `Drop`。
+    pub fn record_call_timing(&mut self, duration_ms: Option<u64>, ttft_ms: Option<u64>) {
+        self.call_duration_ms = duration_ms;
+        self.call_ttft_ms = ttft_ms;
+        // wave-54 C2（L3 收口）：累加到**当前活动 turn**（同一 task/线程上下文），
+        // 这样根 span 的真值不依赖「每个终态出口都记得显式调用」——所有 provider 路径
+        // 都会经此函数，Drop 时统一结算。门禁关闭（无 span）时不累加。
+        if self.span.is_some() {
+            accumulate_active_turn_call(duration_ms, ttft_ms, self.output_tokens);
+        }
+    }
+
+    /// 记录 usage 来源（wave-54 C1/C3 契约）：映射 [`ATTR_AGENT_USAGE_ORIGIN`]
+    /// （`provider` | `estimated_chars`）。`None` ⇒ 键缺席（禁止默认值占位）。
+    pub fn record_usage_origin(&mut self, origin: Option<&'static str>) {
+        self.usage_origin = origin;
     }
 }
 
@@ -2050,11 +2172,41 @@ impl Drop for LlmSpanGuard {
                     context_window as i64,
                 ));
             }
-            if let Some(context_ratio) = self.context_ratio {
+            // wave-54 C4：ratio 分子优先用协议归一输入（有值时），否则回退 raw input。
+            let context_ratio = match (self.context_normalized_input.or(self.input_tokens), self.context_window) {
+                (Some(input), Some(window)) if window > 0 => {
+                    Some((input as f64) / (window as f64))
+                }
+                _ => self.context_ratio,
+            };
+            if let Some(context_ratio) = context_ratio {
                 span.set_attribute(KeyValue::new(
                     ATTR_GEN_AI_USAGE_CONTEXT_RATIO,
                     context_ratio,
                 ));
+            }
+            // wave-54 C1：本次调用耗时 / 首包 / 生成耗时——键不存在即「未知」
+            // （buffered 无首包 ⇒ 无 ttft 键；`duration <= ttft` ⇒ generation 退化为 duration）。
+            if let Some(duration_ms) = self.call_duration_ms {
+                span.set_attribute(KeyValue::new(
+                    ATTR_LLM_CALL_DURATION_MS,
+                    duration_ms as i64,
+                ));
+                let generation_ms = match self.call_ttft_ms {
+                    Some(ttft_ms) if duration_ms > ttft_ms => duration_ms - ttft_ms,
+                    _ => duration_ms,
+                };
+                span.set_attribute(KeyValue::new(
+                    ATTR_LLM_CALL_GENERATION_MS,
+                    generation_ms as i64,
+                ));
+            }
+            if let Some(ttft_ms) = self.call_ttft_ms {
+                span.set_attribute(KeyValue::new(ATTR_LLM_CALL_TTFT_MS, ttft_ms as i64));
+            }
+            // wave-54 C3：usage 来源（未知 ⇒ 键缺席，估算值必须可辨识）。
+            if let Some(origin) = self.usage_origin {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_USAGE_ORIGIN, origin));
             }
             if let Some(cost) = self.cost_usd {
                 span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
@@ -2432,6 +2584,18 @@ struct ActiveTurn {
     /// wave-53 C4：本轮 `status != "success"` 的工具调用次数（根 span Drop 时回填
     /// [`ATTR_AGENT_TURN_TOOL_FAILURES`]；`0` ⇒ 不输出该键，禁止 0 占位）。
     tool_failures: u64,
+    /// wave-54 C2（收口到 guard）：本轮**有效调用**的 output tokens 之和
+    /// （有效 = `duration_ms > 0 && output_tokens > 0`，与 UI `isCountableCall` 同一判据）。
+    call_output_tokens: u64,
+    /// wave-54 C2：本轮有效调用的生成耗时之和（`gen = dur-ttft` 当 `ttft<dur`，否则 `=dur`）。
+    call_generation_ms: u64,
+    /// wave-54 C2：首个带 ttft 的有效调用的首包耗时（不跨 hop 采样）。
+    call_ttft_ms: Option<u64>,
+    /// wave-54 C2：有效调用数（`records.len()` 不等于它：planner-only 伪记录不算）。
+    call_count: u64,
+    /// wave-54 C2（Lead 裁决）：已计入调用的**原始耗时**之和（`Σdur`），
+    /// 用作 `agent.turn.duration_ms` 的物理下限（`elapsed ≥ Σdur` 在串行生产路径恒成立）。
+    call_duration_ms: u64,
 }
 
 /// turn 根 span 错误聚合前缀：工具执行失败（PA-154，谓词同 F5）。
@@ -2504,6 +2668,11 @@ fn register_active_turn(
         accumulated_cached_input_tokens: None,
         accumulated_error: None,
         tool_failures: 0,
+        call_output_tokens: 0,
+        call_generation_ms: 0,
+        call_ttft_ms: None,
+        call_count: 0,
+        call_duration_ms: 0,
     };
 
     // A9：优先按 tokio 任务 id 索引；无任务上下文时退回线程本地栈（不丢父 span）。
@@ -2633,6 +2802,93 @@ fn accumulate_active_turn_usage(input_tokens: Option<u64>, output_tokens: Option
             entry.accumulated_output_tokens += out;
         }
     });
+}
+
+/// wave-54 C2（L3 收口）：把一次调用的**耗时真值**累加到当前活动 turn。
+///
+/// 有效调用判据与 UI `isCountableCall` 完全一致：`duration_ms > 0 && output_tokens > 0`
+/// （planner-only 伪记录 dur/out 为 `None` ⇒ 不计入，也不计入 calls）。
+/// 生成耗时口径同 C1/C2：`gen = (ttft 存在且 dur > ttft) ? dur - ttft : dur`。
+fn accumulate_active_turn_call(
+    duration_ms: Option<u64>,
+    ttft_ms: Option<u64>,
+    output_tokens: Option<u64>,
+) {
+    let duration = duration_ms.unwrap_or(0);
+    let output = output_tokens.unwrap_or(0);
+    if duration == 0 || output == 0 {
+        return;
+    }
+    let generation_ms = match ttft_ms {
+        Some(ttft) if duration > ttft => duration - ttft,
+        _ => duration,
+    };
+    let merge = |entry: &mut ActiveTurn| {
+        entry.call_output_tokens = entry.call_output_tokens.saturating_add(output);
+        entry.call_generation_ms = entry.call_generation_ms.saturating_add(generation_ms);
+        entry.call_duration_ms = entry.call_duration_ms.saturating_add(duration);
+        entry.call_count = entry.call_count.saturating_add(1);
+        if entry.call_ttft_ms.is_none() {
+            entry.call_ttft_ms = ttft_ms;
+        }
+    };
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            merge(entry);
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            merge(entry);
+        }
+    });
+}
+
+/// wave-54 C2：读取当前活动 turn 的 per-call 加权真值（只读，不重置）。
+///
+/// 返回 `(加权速度, 首个 ttft, 有效调用数)`：`Σgen == 0` 或 `Σout == 0` ⇒ 速度为 `None`
+/// （无值即缺键，禁止 0 占位）；无有效调用 ⇒ `calls = 0`。
+fn read_active_turn_call_truth() -> (Option<f64>, Option<u64>, u64, u64, u64) {
+    let extract = |entry: &ActiveTurn| {
+        let speed = if entry.call_generation_ms > 0 && entry.call_output_tokens > 0 {
+            let candidate =
+                (entry.call_output_tokens as f64) / ((entry.call_generation_ms as f64) / 1_000.0);
+            if candidate.is_finite() && candidate > 0.0 {
+                Some(candidate)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        (
+            speed,
+            entry.call_ttft_ms,
+            entry.call_count,
+            entry.call_generation_ms,
+            entry.call_duration_ms,
+        )
+    };
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(extract)
+            .unwrap_or((None, None, 0, 0, 0));
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(extract)
+            .unwrap_or((None, None, 0, 0, 0))
+    })
 }
 
 /// 把一次调用的细分用量（思考 / 缓存命中）累加到当前活动 turn（wave-51 C3）。

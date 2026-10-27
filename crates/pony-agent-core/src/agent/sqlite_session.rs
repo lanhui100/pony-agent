@@ -150,6 +150,12 @@ fn derive_events_from_session(
                     reasoning_tokens: record.reasoning_tokens,
                     output_tokens: record.output_tokens,
                     total_tokens: record.total_tokens,
+                    // wave-54 C3：来源随记录透传（未知 ⇒ None）。
+                    origin: record
+                        .usage_origin
+                        .as_deref()
+                        .and_then(crate::agent::provider::usage_origin_from_label),
+                    cache_creation_input_tokens: None,
                 },
                 cache_hit_input_tokens: record.cache_hit_input_tokens,
                 cache_miss_input_tokens: record.cache_miss_input_tokens,
@@ -3506,6 +3512,8 @@ mod tests {
             input_text: None,
             output_text: None,
             updated_at,
+            usage_origin: None,
+            context_input_tokens: None,
         }
     }
 
@@ -5367,6 +5375,8 @@ mod tests {
             turn_duration_ms: Some(500),
             latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
             prefix_mutation_reasons: Vec::new(),
+            usage_origin: None,
+            context_input_tokens: None,
         }];
         session.turn_trace_history = vec![trace];
         assert!(backend.upsert_session("s1", &session));

@@ -26,7 +26,9 @@ describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
       expect(speed).toBeCloseTo(100, 2);
     });
 
-    it("模式 B：轮次完成（isSubmitting=false 或处于终态）时，速度计算为整轮综合速度 (turn.outputTokens / turn.turnDurationMs)", () => {
+    // wave-54 契约演进（ADR 0053）：整轮聚合口径（turn.outputTokens / turn.turnDurationMs）作废，
+    // 终态轮同样走 C2 唯一口径 Σout / Σgen（gen = dur − ttft）。
+    it("模式 B：轮次完成（isSubmitting=false 或处于终态）时，速度计算为 turn 加权口径 250/((2500−500)/1000) = 125 t/s", () => {
       const completedTurn: TurnTraceRecord = {
         turnId: "turn-completed-1",
         status: "completed",
@@ -49,8 +51,9 @@ describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
 
       // 处于终态 (isSubmitting = false)
       const speed = resolveTurnGenerationSpeed(completedTurn, { isSubmitting: false });
-      // 250 tokens / 2.5s = 100 tokens/s (综合整轮速度)
-      expect(speed).toBeCloseTo(100, 2);
+      // wave-54 C2：Σgen = 2500 − 500 = 2000ms ⇒ 250 / 2.0s = 125 t/s（不再是整轮 250/2.5 = 100）
+      expect(speed).toBeCloseTo(125, 2);
+      expect(speed).not.toBeCloseTo(100, 2);
     });
 
     it("生成中（isSubmitting = true）时，优先采用最近活跃调用并抵扣有效 TTFT", () => {
@@ -121,7 +124,7 @@ describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
       expect(resolveCallGenerationSpeed(noOutputRecord)).toBeNull();
     });
 
-    it("多调用 fallback：当 records 为空或均无效时，单调用允许退化回 turn 级指标", () => {
+    it("多调用 fallback：records 为空 ⇒ 无已完成调用且无活跃调用 ⇒ 速度无值（turn 级聚合不得作速度来源）", () => {
       const singleCallTurn: TurnTraceRecord = {
         turnId: "turn-single",
         status: "completed",
@@ -131,8 +134,9 @@ describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
       };
 
       const speed = resolveTurnGenerationSpeed(singleCallTurn, { isSubmitting: false });
-      // 120 / 2.0 = 60 t/s
-      expect(speed).toBeCloseTo(60, 2);
+      // wave-54 C2：Σgen/Σout 只能来自 per-call 分量；整轮聚合（120 / 2.0 = 60）不得回退成速度
+      expect(speed).toBeNull();
+      expect(speed).not.toBeCloseTo(60, 2);
     });
   });
 
@@ -155,10 +159,12 @@ describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
       expect(metrics.contextUsageDebugInfo).toEqual({
         inputTokens: 32768,
         contextWindow: 131072,
-        calculationMode: "turn_completed_aggregate",
-        generationSpeed: expect.any(Number),
+        // wave-54 §4：模式域收敛为 `turn_weighted | call_only | none`；
+        // 无 per-call 分量 ⇒ 无速度 ⇒ mode = "none"、generationSpeed = null。
+        calculationMode: "none",
+        generationSpeed: null,
       } satisfies ContextUsageDebugInfo);
-      expect(metrics.contextUsageDebugInfo.generationSpeed).toBeCloseTo(128, 2);
+      expect(metrics.contextUsageDebugInfo.generationSpeed).toBeNull();
     });
 
     it("当 contextWindow 无效或 <= 0 时，contextUsagePercentage 安全退化为 0", () => {

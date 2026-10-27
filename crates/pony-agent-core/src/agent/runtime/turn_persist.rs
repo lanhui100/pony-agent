@@ -301,6 +301,9 @@ impl AgentRuntime {
                     total_tokens,
                     first_token_latency_ms,
                     turn_duration_ms,
+                    // wave-54 C3/C4：来源/上下文口径由 store 侧按 per-call records 派生。
+                    usage_origin: None,
+                    context_input_tokens: None,
                     input_text: Some(user_message.to_string()),
                     output_text: return_text.as_deref().map(str::to_string),
                     updated_at: 0,
@@ -660,6 +663,9 @@ impl AgentRuntime {
                     total_tokens: None,
                     first_token_latency_ms,
                     turn_duration_ms,
+                    // wave-54 C3/C4：来源/上下文口径由 store 侧按 per-call records 派生。
+                    usage_origin: None,
+                    context_input_tokens: None,
                     input_text: Some(user_message.to_string()),
                     output_text: None,
                     updated_at: 0,
@@ -764,6 +770,9 @@ impl AgentRuntime {
                     total_tokens: None,
                     first_token_latency_ms: None,
                     turn_duration_ms: None,
+                    // wave-54 C3/C4：失败轮无 per-call records ⇒ 来源未知。
+                    usage_origin: None,
+                    context_input_tokens: None,
                     input_text: Some(user_message.to_string()),
                     output_text: None,
                     updated_at: 0,

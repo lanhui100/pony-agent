@@ -3348,6 +3348,8 @@ fn file_backend_roundtrip_restores_turn_trace_history() {
                 turn_duration_ms: Some(920),
                 latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                 prefix_mutation_reasons: Vec::new(),
+                usage_origin: None,
+                context_input_tokens: None,
             }],
             hook_trace_records: vec![HookTraceRecord {
                 hook_name: "audit.observe".to_string(),
@@ -3385,6 +3387,8 @@ fn file_backend_roundtrip_restores_turn_trace_history() {
             input_text: None,
             output_text: None,
             updated_at: 0,
+            context_input_tokens: None,
+            usage_origin: None,
         },
     );
 
@@ -3533,6 +3537,8 @@ fn file_backend_roundtrip_restores_runtime_generated_multi_boundary_hook_traces(
             input_text: None,
             output_text: None,
             updated_at: 0,
+            usage_origin: None,
+            context_input_tokens: None,
         },
     );
 
@@ -3643,6 +3649,8 @@ fn file_backend_roundtrip_restores_terminal_event_annotation_after_trace_update(
             input_text: None,
             output_text: None,
             updated_at: 0,
+            usage_origin: None,
+            context_input_tokens: None,
         },
     );
 
@@ -3759,6 +3767,8 @@ fn append_turn_trace_hook_records_updates_existing_trace_and_roundtrips() {
             input_text: None,
             output_text: None,
             updated_at: 0,
+            usage_origin: None,
+            context_input_tokens: None,
         },
     );
 
@@ -4031,6 +4041,8 @@ fn file_backend_roundtrip_restores_checkpoint_persist_evidence() {
             input_text: None,
             output_text: None,
             updated_at: 0,
+            usage_origin: None,
+            context_input_tokens: None,
         },
     );
 
@@ -4152,6 +4164,8 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
                 prefix_mutation_reasons: vec![
                     crate::agent::provider::PrefixMutationReason::SessionSummaryChanged,
                 ],
+                usage_origin: None,
+                context_input_tokens: None,
             }],
             hook_trace_records: vec![HookTraceRecord {
                 hook_name: "observe.sync-finalize-failturn".to_string(),
@@ -4192,6 +4206,8 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
             input_text: None,
             output_text: None,
             updated_at: 0,
+            context_input_tokens: None,
+            usage_origin: None,
         },
     );
 
@@ -4304,6 +4320,8 @@ fn file_backend_roundtrip_persists_failed_turn_into_visible_history() {
             input_text: None,
             output_text: None,
             updated_at: 0,
+            usage_origin: None,
+            context_input_tokens: None,
         },
     );
 
@@ -4423,6 +4441,8 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
                 prefix_mutation_reasons: vec![
                     crate::agent::provider::PrefixMutationReason::HistoryBoundaryShifted,
                 ],
+                usage_origin: None,
+                context_input_tokens: None,
             }],
             hook_trace_records: vec![HookTraceRecord {
                 hook_name: "observe.cancelled-finalize".to_string(),
@@ -4462,6 +4482,8 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
             input_text: None,
             output_text: None,
             updated_at: 0,
+            context_input_tokens: None,
+            usage_origin: None,
         },
     );
 
@@ -5357,6 +5379,8 @@ fn pa094_trace_and_message_views_same_source() {
                     reasoning_tokens: Some(10),
                     output_tokens: Some(50),
                     total_tokens: Some(160),
+                    origin: None,
+                    cache_creation_input_tokens: None,
                 },
                 cache_hit_input_tokens: Some(40),
                 cache_miss_input_tokens: Some(60),

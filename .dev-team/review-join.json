@@ -1,9 +1,47 @@
 {
   "verdict": "PASS",
   "audited_scopes": [
-    "src/lib/telemetry.ts",
-    "src/main.ts",
-    "crates/pony-agent-core/src/agent/otel/mod.rs"
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/projection.rs",
+    "crates/pony-agent-core/src/agent/session/types.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "src/lib/runtime/token-metrics.ts",
+    "src/components/HomeStatusPanel.vue",
+    "tests/acceptance/wave54"
   ],
-  "findings": []
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 2724,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n -A6 'match slot.previous' crates/pony-agent-core/src/agent/otel/mod.rs && git show HEAD:crates/pony-agent-core/src/agent/otel/mod.rs | sed -n '/fn unregister_active_turn/,/^}/p'",
+      "detail": "既有（wave-53，非本波引入）的嵌套回滚语义：同一 tokio task 内先后登记 A、B（B.slot.previous = A），若按 FIFO 先 drop A（unregister 判 !owns 直接 return，不动 B），再 drop B，则 B 会 guard.insert(task_id, previous=A)，把已结束的 A 条目回填进 ACTIVE_TURNS 且再无人摘除。本波新增的 call_output_tokens / call_generation_ms / call_duration_ms / call_ttft_ms / call_count 承载在同一 ActiveTurn 条目上，因此继承该生命周期语义。生产路径为「一 turn 一守卫、LIFO 退出」，正常顺序（先 drop 当前 turn 再开下一 turn）下 remove 命中，故当前不可达；仅当同 task 内两守卫乱序（FIFO）drop 时残留一条僵尸登记，后续 accumulate_* 会写进已结束 turn 的桶。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "line": 2137,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '2115,2145p' crates/pony-agent-core/src/agent/otel/mod.rs",
+      "detail": "record_call_timing 的根 span 累加依赖 self.output_tokens（由 record_usage 先写入），即隐含「先 record_usage、后 record_call_timing」的调用序；该前置条件只写在 tests/wave54_metric_truth.rs T7 的注释里，record_call_timing 文档未声明也未断言。若未来 provider 分支先报 timing 后报 usage，accumulate_active_turn_call 因 output=0 静默 return（无日志、无计数），根 span 的 speed/calls 会静默少算一跳。当前 4 个调用点（provider_decision / provider_decision_stream / provider_followup / provider_followup_stream）顺序均为 usage→timing，无现实缺陷。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 4238,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'input + cache_read' .dev-team/contract-matrix-wave54.md && sed -n '/fn context_input_tokens_for/,/^}/p' crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "detail": "冻结契约 C4 文字为「anthropic ⇒ input + cache_read」，实现（context_input_tokens_for）为 input + cache_read + cache_creation（anthropic 的 input 既不含 cache_read 也不含 cache_creation）。cache_creation>0 时口径比契约字面偏大，属「实现超集 / 契约文案滞后」。本审查按 anthropic 权威语义判为可接受，但契约文件为 Lead 只读写域，需 Lead 侧同步文案（本波未改契约文件）。"
+    },
+    {
+      "file": "tests/acceptance/wave54/token-speed-truth.spec.ts",
+      "line": 240,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "git diff tests/acceptance/wave54/token-speed-truth.spec.ts",
+      "detail": "本波工作树内修改了已冻结的验收文件（新增 T4-4 用例；T6-1/T6-2 的 Σgen 期望 47580→47579，容差 ±60 保留）。实测 diff 为「加强约束」：新增 call_only 断言与 not.toBe(100)/not.toBe(360) 判别式，无断言被删除或放宽；T4-4 对应上一轮 BLOCKING 7，属契约演进。治理上仍需 Lead 对该冻结文件改动留签字（执行者不得自裁验收），故记 ADVISORY。"
+    }
+  ]
 }

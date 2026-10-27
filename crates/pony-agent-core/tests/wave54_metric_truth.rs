@@ -1299,3 +1299,162 @@ fn t3_metrics_first_token_latency_first_wins() {
         "T3：正向对照——per-turn records 必须有 2 条（否则 first-wins 断言可能空转）"
     );
 }
+
+// ================================ T7 · 生产接线覆盖（L3-B ADVISORY-4 / B1 整改）
+
+const T7_MODEL_FIRST: &str = "wave54-t7-auto-call-1";
+const T7_MODEL_SECOND: &str = "wave54-t7-auto-call-2";
+const T7_MODEL_INVALID: &str = "wave54-t7-auto-call-invalid";
+
+const T7_FIRST_DURATION_MS: u64 = 1_200;
+const T7_FIRST_TTFT_MS: u64 = 200;
+const T7_FIRST_INPUT_TOKENS: u64 = 1_000;
+const T7_FIRST_OUTPUT_TOKENS: u64 = 100;
+const T7_SECOND_DURATION_MS: u64 = 1_800;
+const T7_SECOND_INPUT_TOKENS: u64 = 2_000;
+const T7_SECOND_OUTPUT_TOKENS: u64 = 200;
+/// 无效调用档：有耗时、无用量 ⇒ 不得计入 `calls` / `Σout` / `Σgen`。
+const T7_INVALID_DURATION_MS: u64 = 2_000;
+
+/// T7（L3-B ADVISORY-4）：**生产接线覆盖** —— 根 `agent.turn` 的 C2 真值必须由
+/// provider 侧守卫的既有调用**自行累加**得出，不得依赖调用方在每个终态出口逐点接线。
+///
+/// 装配方式（关键）：
+/// - `begin_turn_trace` 开根 span；
+/// - 两跳只调用 per-call 守卫（生产 provider 路径的真实接线）的
+///   `record_usage(Some(in), Some(out))` + `record_call_timing(Some(dur), Some(ttft))`；
+/// - **故意不调用** `TurnTraceGuard::record_turn_speed` / `record_turn_timing`
+///   —— 若根 span 仍能给出速度/basis/calls/ttft，即证明累加口径落在接线内部（B1 目标）；
+/// - 叠加一条无效调用（`record_usage(None, None)` + `record_call_timing(Some(2000), None)`）
+///   确认 `calls` 仍为 2、速度不变（无效调用不得污染 Σ）。
+///
+/// 真值：① gen = 1200 − 200 = 1000ms；② 无 ttft ⇒ gen = 1800ms
+/// ⇒ Σout = 300、Σgen = 2800ms ⇒ speed = 300 / 2.8 = 107.142857… t/s；turn ttft = 首跳 200ms。
+#[test]
+fn t7_root_span_accumulates_without_explicit_turn_calls() {
+    let _guard = gate_lock();
+
+    let expected_speed = (T7_FIRST_OUTPUT_TOKENS + T7_SECOND_OUTPUT_TOKENS) as f64
+        / (((T7_FIRST_DURATION_MS - T7_FIRST_TTFT_MS) + T7_SECOND_DURATION_MS) as f64 / 1_000.0);
+    // 若无效调用被误计入 Σ（Σgen = 1000 + 1800 + 2000），速度会掉到 62.5 t/s。
+    let polluted_speed = (T7_FIRST_OUTPUT_TOKENS + T7_SECOND_OUTPUT_TOKENS) as f64
+        / (((T7_FIRST_DURATION_MS - T7_FIRST_TTFT_MS) + T7_SECOND_DURATION_MS + T7_INVALID_DURATION_MS)
+            as f64
+            / 1_000.0);
+    assert!(
+        (expected_speed - 107.14285714285714).abs() <= 1e-6,
+        "T7 夹具自检：两跳加权速度必须是 107.14285714285714 t/s，实际 {expected_speed}"
+    );
+
+    let spans = run_export(Duration::from_millis(2_500), || {
+        let turn = otel::begin_turn_trace("sess-wave54-t7", "turn-wave54-t7", 7);
+
+        // ① 首跳：usage 必须先于 call_timing（后者结算时需要本次 output）。
+        let mut first = otel::start_llm_span_with_provider(
+            "openai-completions",
+            Some("PonyLlm"),
+            Some(T7_MODEL_FIRST),
+            "chat",
+        );
+        first.record_usage(Some(T7_FIRST_INPUT_TOKENS), Some(T7_FIRST_OUTPUT_TOKENS));
+        first.record_call_timing(Some(T7_FIRST_DURATION_MS), Some(T7_FIRST_TTFT_MS));
+        first.record_usage_origin(Some("provider"));
+        drop(first);
+
+        // ② 第二跳：无首包（ttft 缺失）⇒ gen = dur = 1800ms。
+        let mut second = otel::start_llm_span_with_provider(
+            "openai-completions",
+            Some("PonyLlm"),
+            Some(T7_MODEL_SECOND),
+            "chat",
+        );
+        second.record_usage(Some(T7_SECOND_INPUT_TOKENS), Some(T7_SECOND_OUTPUT_TOKENS));
+        second.record_call_timing(Some(T7_SECOND_DURATION_MS), None);
+        second.record_usage_origin(Some("provider"));
+        drop(second);
+
+        // ③ 无效调用：usage 全空 + 有耗时无输出 ⇒ 不是「已完成调用」。
+        let mut invalid = otel::start_llm_span_with_provider(
+            "openai-completions",
+            Some("PonyLlm"),
+            Some(T7_MODEL_INVALID),
+            "chat",
+        );
+        invalid.record_usage(None, None);
+        invalid.record_call_timing(Some(T7_INVALID_DURATION_MS), None);
+        drop(invalid);
+
+        // ★ 故意不调用 `turn.record_turn_speed(...)` / `turn.record_turn_timing(...)`：
+        //   根 span 的 C2 真值必须在 Drop 时由累加口径自行结算。
+        drop(turn);
+    });
+
+    // 正向对照：三条 `llm.chat` 子 span 确实导出了（否则下面的根 span 断言可能只是「没导出」）。
+    let chats = find_spans_named(&spans, "llm.chat");
+    assert_eq!(
+        chats.len(),
+        3,
+        "T7 正向对照：本用例必须导出恰好 3 个 `llm.chat` span，实际 {}；导出 span 全量：{:?}",
+        chats.len(),
+        spans
+            .iter()
+            .map(|span| (span.name.as_str(), span_keys(span)))
+            .collect::<Vec<_>>()
+    );
+
+    let root = find_span_with(&spans, "agent.turn", KEY_TURN_ID, "turn-wave54-t7");
+
+    // ---------- C2 核心：速度 == Σout/(Σgen/1000)，无需任何显式 turn 级接线 ----------
+    let wire_speed = wire_f64(root, KEY_TURN_SPEED).unwrap_or_else(|| {
+        panic!(
+            "T7（BLOCKING / B1 未收口）：根 `agent.turn` 必须在无显式 `record_turn_speed` 时自行累加输出 `{KEY_TURN_SPEED}`；属性全集：{:?}",
+            span_keys(root)
+        )
+    });
+    assert_close(
+        wire_speed,
+        expected_speed,
+        &format!("T7（C2）：`{KEY_TURN_SPEED}` 必须等于两层 per-call 累加的 Σout/(Σgen/1000)"),
+    );
+    assert!(
+        (wire_speed - polluted_speed).abs() > 1e-6,
+        "T7：无效调用（dur=2000 无输出）不得进入 Σ，速度不得被稀释成 {polluted_speed}，实际 {wire_speed}"
+    );
+    assert!(
+        wire_speed.is_finite() && wire_speed > 0.0,
+        "T7：速度必须是有限正值，实际 {wire_speed}"
+    );
+
+    // ---------- C2：basis / calls / ttft / duration ----------
+    assert_eq!(
+        require_str(root, KEY_TURN_SPEED_BASIS, "T7（C2）"),
+        "turn_weighted",
+        "T7（C2）：累加口径必须自带 `turn_weighted` 标记"
+    );
+    assert_eq!(
+        require_i64(root, KEY_TURN_CALLS, "T7（C2）"),
+        2,
+        "T7（C2）：`agent.turn.calls` 必须是两条**有效**已完成调用（无效调用不得计入）"
+    );
+    assert_eq!(
+        require_i64(root, KEY_TURN_TTFT, "T7（C2）"),
+        T7_FIRST_TTFT_MS as i64,
+        "T7（C2）：`agent.turn.ttft_ms` 必须是首个带 ttft 的 per-call 值（首跳 200ms）"
+    );
+    // Lead 裁决（2026-10-27）：`agent.turn.duration_ms` 语义为「墙钟耗时」，但取下限
+    // `max(elapsed, Σdur)` —— 生产环境取墙钟，下界为调用耗时之和，防止 0 值。
+    // 本用例为合成导出（墙钟 < 1ms），故确定取下界 Σdur = 1200 + 1800 = 3000ms
+    // （第 3 条无效调用 dur=2000 无 usage，不得进入 Σdur）。
+    assert_eq!(
+        require_i64(root, KEY_TURN_DURATION, "T7（C2）"),
+        (T7_FIRST_DURATION_MS + T7_SECOND_DURATION_MS) as i64,
+        "T7（C2）：`{KEY_TURN_DURATION}` 必须取 max(墙钟, Σdur) 的下界 3000ms（有效调用耗时之和，无效调用不计）"
+    );
+
+    // 正向对照：根 span 的聚合用量确实来自两条有效调用（100 + 200 = 300）。
+    assert_eq!(
+        require_i64(root, KEY_GEN_AI_OUTPUT, "T7 正向对照"),
+        (T7_FIRST_OUTPUT_TOKENS + T7_SECOND_OUTPUT_TOKENS) as i64,
+        "T7 正向对照：根 span 的 `gen_ai.usage.output_tokens` 必须聚合为 300（证明累加链路生效）"
+    );
+}

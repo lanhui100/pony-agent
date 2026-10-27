@@ -302,7 +302,11 @@ fn settle_timeline(state: &mut TraceProjectionState, turn_id: &str, turn_duratio
     }
     if let Some(timeline) = state.timeline.get_mut(turn_id) {
         if let Some(entry) = timeline.iter_mut().rev().find(|e| e.kind == "call_model") {
-            entry.turn_duration_ms = turn_duration_ms;
+            // wave-54 C5（§7.4）：整轮值只**补**缺失的 per-call 值，已有 per-call 真值不得覆盖
+            // （运行态产物 trace_timeline.rs 用的就是 per-call 语义，折叠产物必须同口径）。
+            if entry.turn_duration_ms.is_none() {
+                entry.turn_duration_ms = turn_duration_ms;
+            }
         }
     }
 }
@@ -921,7 +925,10 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                         turn_agg.total_tokens.saturating_add(aggregate.total_tokens);
                 }
                 if let Some(turn_agg) = state.by_turn.get_mut(turn_id) {
-                    turn_agg.first_token_latency_ms = *first_token_latency_ms;
+                    // wave-54 C5：轮级 TTFT 取**首次**（与 TraceProjection 一致）——
+                    // 后到的 `None`（buffered followup 无首包）不得冲刷已有真值。
+                    turn_agg.first_token_latency_ms =
+                        turn_agg.first_token_latency_ms.or(*first_token_latency_ms);
                     turn_agg.provider = Some(provider.clone());
                     turn_agg.model = Some(model.clone());
                 }
@@ -945,6 +952,10 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                             serde_json::from_value(serde_json::Value::String(reason.clone())).ok()
                         })
                         .collect(),
+                    // wave-54 C3：来源随 usage 透传；C4：重建路径无协议信息 ⇒
+                    // context_input_tokens 留空（UI 回退上下文解析，禁止臆造口径）。
+                    usage_origin: usage.origin.map(str::to_string),
+                    context_input_tokens: None,
                 });
                 // PA-094：per-turn ProviderCallCacheRecord 重建（design.md §5）。
                 // 重建字段集：request_kind、usage 四桶、cache_hit/cache_miss、
@@ -971,6 +982,10 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                             serde_json::from_value(serde_json::Value::String(reason.clone())).ok()
                         })
                         .collect(),
+                    // wave-54 C3：来源随 usage 透传；C4：重建路径无协议信息 ⇒
+                    // context_input_tokens 留空（UI 回退上下文解析，禁止臆造口径）。
+                    usage_origin: usage.origin.map(str::to_string),
+                    context_input_tokens: None,
                 };
                 // addReplacing：同一 (turn_id, step) 原位覆盖（与 totals 替换语义一致）。
                 if let Some(index) = state.record_index.get(&(turn_id.clone(), *step)).copied() {
@@ -1377,6 +1392,8 @@ mod tests {
             reasoning_tokens: Some(10),
             output_tokens: Some(50),
             total_tokens: Some(160),
+            origin: None,
+            cache_creation_input_tokens: None,
         };
         let usage_b = crate::agent::provider::TokenUsage {
             input_tokens: Some(200),
@@ -1385,6 +1402,8 @@ mod tests {
             reasoning_tokens: Some(20),
             output_tokens: Some(100),
             total_tokens: Some(320),
+            origin: None,
+            cache_creation_input_tokens: None,
         };
         let mk = |seq: u64, usage: crate::agent::provider::TokenUsage| {
             let cache_hit = usage.cache_hit_input_tokens;
@@ -1435,6 +1454,8 @@ mod tests {
             reasoning_tokens: Some(10),
             output_tokens: Some(50),
             total_tokens: Some(160),
+            origin: None,
+            cache_creation_input_tokens: None,
         };
         let mk = |seq: u64, turn: &str, step: u32| {
             (
@@ -1477,6 +1498,8 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(50),
             total_tokens: Some(150),
+            origin: None,
+            cache_creation_input_tokens: None,
         };
         let mk = |seq: u64, turn: &str| {
             (
@@ -1611,6 +1634,8 @@ mod tests {
                         reasoning_tokens: Some(10),
                         output_tokens: Some(50),
                         total_tokens: Some(160),
+                        origin: None,
+                        cache_creation_input_tokens: None,
                     },
                     cache_hit_input_tokens: Some(40),
                     cache_miss_input_tokens: Some(60),
@@ -1680,8 +1705,10 @@ mod tests {
         assert_eq!(trace.output_tokens, Some(50));
         assert_eq!(trace.total_tokens, Some(160));
         assert_eq!(trace.first_token_latency_ms, Some(88));
-        // 末条 call_model 补 turn_duration_ms（turn/end 结算）。
-        assert_eq!(model_entry.turn_duration_ms, Some(1200));
+        // 末条 call_model 的耗时语义：**per-call 真值**（wave-54 §5.6 契约演进——
+        // per-call 值不得被整轮值覆盖；本条 ProviderUsage 的 per-call dur=500ms，
+        // 整轮 1200ms 只补缺失项，不覆盖已有 per-call 值）。
+        assert_eq!(model_entry.turn_duration_ms, Some(500));
     }
 
     /// PA-094：无 StepStart 事件时（当前运行时未发射），chunk/usage 兜底创建
@@ -1774,6 +1801,8 @@ mod tests {
                 reasoning_tokens: None,
                 output_tokens: Some(50),
                 total_tokens: Some(150),
+                origin: None,
+                cache_creation_input_tokens: None,
             },
             cache_hit_input_tokens: None,
             cache_miss_input_tokens: None,
@@ -2048,6 +2077,8 @@ mod tests {
                     reasoning_tokens: None,
                     output_tokens: Some(output),
                     total_tokens: Some(total),
+                    origin: None,
+                    cache_creation_input_tokens: None,
                 },
                 cache_hit_input_tokens: None,
                 cache_miss_input_tokens: None,
@@ -2097,6 +2128,8 @@ mod tests {
             reasoning_tokens: Some(10),
             output_tokens: Some(50),
             total_tokens: Some(160),
+            origin: None,
+            cache_creation_input_tokens: None,
         };
         let events: Vec<(u64, TurnEvent)> = vec![
             (
@@ -2191,6 +2224,8 @@ mod tests {
                         reasoning_tokens: None,
                         output_tokens: Some(50),
                         total_tokens: Some(input + 50),
+                        origin: None,
+                        cache_creation_input_tokens: None,
                     },
                     cache_hit_input_tokens: None,
                     cache_miss_input_tokens: None,

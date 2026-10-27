@@ -19,6 +19,12 @@
  * 红相纪律：本文件所有失败必须来自 SUT（src/lib/runtime/token-metrics.ts 空桩 throw，
  * 或 SUT 计算/投影断言不成立）。禁止因缺文件 / import 失败 / 语法错误而红。
  * 测试基建（mock、fixture、flush）不得成为红相来源。
+ *
+ * wave-54 契约演进（ADR 0053）：速度口径由 per-call/整轮聚合改为 Σout/Σgen
+ *   `gen_i = (ttft_i 存在 且 dur_i > ttft_i) ? dur_i − ttft_i : dur_i`
+ * 本文件的投影速度断言已随之迁移：三跳夹具 Σout = 500 + 600 + 100 = 1200、
+ *   Σgen = (1000−150) + (1100−180) + (1200−200) = 850 + 920 + 1000 = 2770ms
+ *   ⇒ turn 加权速度 = 1200 / 2.77 = 433.2129963898917 t/s（不再是末跳 per-call 的 100 t/s）。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
@@ -59,6 +65,14 @@ const HOP_OUTPUTS = [500, 600, 100] as const;
 const TURN_ACCUMULATED_INPUT = 1_080_000;
 const TURN_ACCUMULATED_OUTPUT = 1_800;
 const TURN_ELAPSED_MS = 5_000;
+
+/**
+ * wave-54 契约演进（ADR 0053）：三跳夹具的 turn 加权速度真值（C2 唯一口径）。
+ *   Σout = 500 + 600 + 100 = 1200
+ *   Σgen = (1000−150) + (1100−180) + (1200−200) = 850 + 920 + 1000 = 2770ms
+ *   ⇒ speed = 1200 / 2.77 = 433.2129963898917 t/s（不再是末跳 per-call 的 100 t/s）。
+ */
+const WAVE54_THREE_HOP_WEIGHTED_SPEED = 433.2129963898917;
 
 function record(partial: Partial<ProviderCallCacheRecord> = {}): ProviderCallCacheRecord {
   return {
@@ -333,7 +347,7 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
     expect(resolveCallGenerationSpeed(record({ outputTokens: 0, turnDurationMs: 1_000 }))).toBe(0);
   });
 
-  it("T3-投影：已完成三跳轮状态栏速度取末跳 per-call 值 100 t/s（不得用整轮 output/elapsed）", () => {
+  it("T3-投影：已完成三跳轮状态栏速度为 turn 加权口径 433.213 t/s（Σout/Σgen；不得用末跳 per-call 或整轮 elapsed）", () => {
     const turn = completedTurn({
       turnId: "turn-t3-speed",
       inputTokens: TURN_ACCUMULATED_INPUT,
@@ -353,11 +367,15 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
     });
 
     const view = projection();
-    expect(view.sessionTokenGenerationSpeed.value).toBe(100);
+    // wave-54 C2 / ADR 0053：速度 = Σout/Σgen = 1200 / 2.77
+    expect(view.sessionTokenGenerationSpeed.value).toBe(WAVE54_THREE_HOP_WEIGHTED_SPEED);
+    expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
+    // 判别式：整轮 elapsed 口径（1800/5.0 = 360）与末跳 per-call（100）都不得出现
     expect(view.sessionTokenGenerationSpeed.value).not.toBe(360);
+    expect(view.sessionTokenGenerationSpeed.value).not.toBe(100);
   });
 
-  it("T4：活跃轮仅收到中间 hop_complete（无 turn:completed）即产出速度 100，不得为 null 或整轮值", async () => {
+  it("T4：活跃轮仅收到中间 hop_complete（无 turn:completed）即产出 turn 加权速度 433.213（Σout/Σgen），不得为 null 或整轮值", async () => {
     const { store, handlers } = await installTurnEventIngress();
     seedActiveTurn(store, liveTimelineWithoutMetrics());
     const view = projection();
@@ -370,8 +388,11 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
     await flushMicrotasks();
 
     expect(store.isSubmitting).toBe(true);
-    expect(view.sessionTokenGenerationSpeed.value).toBe(100);
+    // wave-54 C2 / ADR 0053：活跃轮同样走 Σout/Σgen（1200 / 2.77），不是末跳 per-call 值
+    expect(view.sessionTokenGenerationSpeed.value).toBe(WAVE54_THREE_HOP_WEIGHTED_SPEED);
+    expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
     expect(view.sessionTokenGenerationSpeed.value).not.toBeNull();
+    expect(view.sessionTokenGenerationSpeed.value).not.toBe(100);
     expect(view.sessionTokenGenerationSpeed.value).not.toBeCloseTo(375, 5);
   });
 });
@@ -441,7 +462,9 @@ describe("Wave-15 T5/T6 — S4 降级纪律与 R2 载荷", () => {
     store.$patch({ turnTraceHistory: [turn], traceTimeline: timeline, activeTurnId: null, isSubmitting: false });
     const view = projection();
     expect(view.contextDisplayTokens.value).toBe(370_000);
-    expect(view.sessionTokenGenerationSpeed.value).toBe(100);
+    // wave-54 C2 / ADR 0053：持久化 timeline 的 per-call 分量参与 Σout/Σgen 加权
+    expect(view.sessionTokenGenerationSpeed.value).toBe(WAVE54_THREE_HOP_WEIGHTED_SPEED);
+    expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
   });
 });
 
@@ -535,7 +558,9 @@ describe("Wave-15 A1–A5 — 对抗（红相纯度：失败必须落在 SUT 栈
 
     expect(first).toBe(370_000);
     expect(view.contextDisplayTokens.value).toBe(370_000);
-    expect(view.sessionTokenGenerationSpeed.value).toBe(100);
+    // wave-54 C2 / ADR 0053：同 step 重放保持加权口径（1200 / 2.77）且幂等
+    expect(view.sessionTokenGenerationSpeed.value).toBe(WAVE54_THREE_HOP_WEIGHTED_SPEED);
+    expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
   });
 
   it("A4：u64::MAX 级数值 → saturating 语义下不 panic/不溢出，前端无 NaN/Infinity", () => {

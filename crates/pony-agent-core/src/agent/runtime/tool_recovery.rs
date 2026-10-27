@@ -69,6 +69,9 @@ pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::Provid
             ProviderRequestKind::ToolFollowup,
             Some(provider_source_snapshot.as_str()),
             Some(provider_mode_snapshot.as_str()),
+            // wave-54 C4：恢复路径无协议信息（ProviderResponse 不带 protocol_label）⇒
+            // 不臆造口径，按非 anthropic 规则（input 已含缓存命中）。
+            None,
             token_usage_snapshot.as_ref(),
             None,
             Some(duration_ms),
@@ -309,6 +312,9 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
             ProviderRequestKind::ToolFollowup,
             Some(provider_source_snapshot.as_str()),
             Some(provider_mode_snapshot.as_str()),
+            // wave-54 C4：恢复路径无协议信息（ProviderResponse 不带 protocol_label）⇒
+            // 不臆造口径，按非 anthropic 规则（input 已含缓存命中）。
+            None,
             token_usage_snapshot.as_ref(),
             if latency_kind == ProviderLatencyKind::ProviderStream {
                 call_first_token_latency.get()
@@ -485,6 +491,9 @@ pub(super) fn build_local_tool_followup_recovery_response(
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            // wave-54 C3：占位 usage 无来源标注（未知）。
+            origin: None,
+            cache_creation_input_tokens: None,
         }),
     }
 }

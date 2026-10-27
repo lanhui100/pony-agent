@@ -1,0 +1,98 @@
+{
+  "verdict": "FAIL",
+  "id": "l3b-wave54",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave54.md",
+    "docs/decisions/0053-token-speed-truth-contract.md",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/projection.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_recovery.rs",
+    "crates/pony-agent-core/src/agent/session/types.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/agent/telemetry.rs",
+    "crates/pony-agent-core/src/agent/turn_event.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "src/lib/runtime/token-metrics.ts",
+    "src/lib/runtime/useTraceProjection.ts",
+    "src/components/HomeStatusPanel.vue",
+    "crates/pony-agent-core/tests/wave54_metric_truth.rs",
+    "tests/acceptance/wave54/token-speed-truth.spec.ts",
+    "tests/acceptance/wave54/adversarial.spec.ts",
+    "tests/acceptance/wave54/fixtures/eed9ba47-calls.json",
+    "tests/unit/token-speed-metrics.spec.ts",
+    "tests/acceptance/wave15/token-metrics-red.spec.ts",
+    "tests/acceptance/wave15/token-metrics-wire.spec.ts",
+    "tests/e2e/metrics-live-verification.spec.ts"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/turn_flow.rs",
+      "line": 2382,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "python3 -c \"recs=[(3000,500,100),(2000,None,0)];g=lambda d,t:(d-t) if (t is not None and d>t) else d;ro=sum(o for d,t,o in recs);rg=sum(g(d,t) for d,t,o in recs);c=[r for r in recs if r[0]>0 and r[2]>0];co=sum(r[2] for r in c);cg=sum(g(r[0],r[1]) for r in c);print('root span=%0.2f t/s calls=%d | UI=%0.2f t/s calls=%d'%(ro/(rg/1000),len(recs),co/(cg/1000),len(c)))\"; grep -n 'output_tokens.saturating_add\\|generation_ms =' crates/pony-agent-core/src/agent/turn_flow.rs | head -4; grep -n 'function isCountableCall' -A2 src/lib/runtime/token-metrics.ts; grep -n 'provider_call_records.push(recovery.provider_call_record)' crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "note": "Rust 与 TS 不是同一退化规则：`weighted_turn_speed`（turn_flow.rs:2381-2388）对**所有** record 累加 Σout/Σgen，`calls=records.len()`（:2404）；TS `resolveTurnWeightedSpeedDetail` 先按 §5 裁决 3 过滤 `dur>0 && out>0`（token-metrics.ts `isCountableCall`）再累加，`calls`=可计分量数。契约 §5.3（第 157-158 行）明文「只累计有效调用（dur>0 且 out>0）」。后果：根 span 的速度与 UI「生成速度」在含无效分量的轮次里不同值——恰好破坏本波「尺子与显示同源」的核心目标。反例可达路径：provider 恢复失败时 `build_local_tool_followup_recovery_response` 产出全空 usage（tool_recovery.rs:487-495），其 record 带 `turn_duration_ms=Some(..)`、`output_tokens=None`，并在 turn_stream.rs:885 被推进 `provider_call_records`；初始调用(out=100,dur=3000,ttft=500)+该恢复记录(dur=2000,out=None) ⇒ 根 span 22.22 t/s / calls=2，UI 40.00 t/s / calls=1（1.8× 偏差，方向固定为根 span 偏低）。同时违反 C2「同一公式同一退化规则」与 T2 的 Σ 对账前提。"
+    },
+    {
+      "file": "src/lib/runtime/token-metrics.ts",
+      "line": 90,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "node -e \"const r=[{contextInputTokens:5000,inputTokens:5000},{contextInputTokens:undefined,inputTokens:8000}];let impl=null;for(let i=r.length-1;i>=0;i--){if(r[i].contextInputTokens!=null){impl=r[i].contextInputTokens;break}}const last=r[r.length-1];const spec=last.contextInputTokens??last.inputTokens??null;console.log('impl=',impl,'| §5.1(末次调用回退该记录 input)=',spec)\"",
+      "note": "C4/§5.1 要求「恒取**末次已完成调用**的 contextInputTokens（缺失时回退该记录的 per-call inputTokens）」。`resolveContextInputTokens` 反向**跳过**缺失项，返回更早一次调用的值（反例：impl=5000，契约=8000），把历史上下文当成当前占用显示；同文件 `resolveTurnWeightedSpeedDetail` 的 `inputTokens` 走的是正确末条口径（`lastComponent.contextInputTokens ?? lastComponent.inputTokens`），于是同一轮里「可见输入」（useTraceProjection.ts:200 走本函数）与 `data-speed-debug` 的 `in=`（useTraceProjection.ts:327 走 state.inputTokens）可给出两个不同值，与 C6「缓存比与可见输入同源」的自洽要求相抵。可达性：仅当末次 record 有 input 无 contextInputTokens（部分 usage 上报 / 恢复占位 record）时触发；折叠重建场景两侧都回退 S1，不触发。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 348,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'serialize_struct(\"TokenUsage\", 7)' crates/pony-agent-core/src/agent/provider/mod.rs; sed -n '344,366p' crates/pony-agent-core/src/agent/provider/mod.rs | grep -c serialize_field",
+      "note": "手写 Serialize 声明 `serialize_struct(\"TokenUsage\", 7)`，实际最多写 8 个字段（inputTokens/cacheHitInputTokens/cacheHitSource?/reasoningTokens/outputTokens/totalTokens/cacheCreationInputTokens?/origin?）。serde_json 忽略 len 提示，当前线上形态（JSON 事件/会话）不受影响；但对依赖 len 的格式/严格序列化器是契约失真。旧数据兼容已逐项复算通过：新增 `origin`/`cacheCreationInputTokens` 走 `#[serde(default)]` 的内部 wire 结构，缺失即 None；`cacheHitSource` 的 skip 语义由手写 if 保持，反序列化不回退失败。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 128,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'isEstimatedUsage' src/components/HomeStatusPanel.vue; grep -n 'formatCompactInteger(inputTokensTotal)\\|formatCompactInteger(outputTokensTotal)\\|formatCompactInteger(cacheHitTokensTotal)' src/components/HomeStatusPanel.vue",
+      "note": "C3（契约第 46 行）「`estimated_chars` 时**数字**带 `≈` 前缀」，而 `isEstimatedUsage` 只作用于 `formatTokenSpeed`（速度）；输入/输出/缓存三个 token 数字仍按精确值渲染。`estimate_token_usage`（provider/mod.rs:4270）恰好同时估算 input 与 output，因此估算轮次的「输入 5.0K」会被当成真值展示，与本条契约的意图（估算不得静默当真值）不一致。冻结用例 T5-3 只断言速度位，故实现与冻结断言不冲突，仅覆盖缺口。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave54_metric_truth.rs",
+      "line": 842,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -c 'record_turn_speed_truth\\|weighted_turn_speed' crates/pony-agent-core/tests/wave54_metric_truth.rs; grep -n 'turn.record_turn_speed(Some(expected_speed))' crates/pony-agent-core/tests/wave54_metric_truth.rs; cargo test -p pony-agent-core --test wave54_metric_truth",
+      "note": "T2 冻结用例用 `turn.record_turn_speed(...)` 手工造属性，`record_turn_speed_truth` / `weighted_turn_speed` 在冻结测试中 0 次出现（grep 计数为 0）⇒ §6 B1 要求的「生产接线」无任何机器覆盖：删掉 turn_stream.rs:2417/2756、turn_sync.rs:924/1059 的四个调用点，T2 仍全绿（实跑 7 passed 已复现基线）。这是 B1 的验收缺口，也是一处上方 BLOCKING 能躲过门禁的原因（T2 的 Σ 不是由被测代码算出来的）。修法建议：T2 增一条走 `record_turn_speed_truth(&mut turn, &records, Some(dur))` 的 wire 断言（由 Test Agent 增量补，不改既有断言）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 294,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"print('merge(est(in=1000), provider(in=800)) => in=%d, origin=provider' % (1000+800))\"; grep -n 'USAGE_ORIGIN_PROVIDER, _)' -A2 crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "note": "清单第 3 条的两套归并口径**不直接冲突但语义张力真实**：`derive_usage_provenance_from_calls`（session/types.rs:762）在轮级把所有 record 的 origin 做「任一 estimated ⇒ estimated」保守降级；`merge_usage_origin`（stream_support.rs:294）在**单次累计**内做「provider 优先」。而 `merge_token_usage` 对 token 是**相加**语义（add_optional_u64），因此「估算片段 + provider 片段」的累计结果是 `origin=provider` 的**混合和**（1000+800=1800 被标成真值）——正是 C3 要禁止的「估算冒充真值」。当前可达性受限：`accumulated_token_usage`（turn_stream.rs:730/886/933）只喂轮级 totals/落库，不上 wire、不进 per-call span origin，故本轮未产生实际错标；建议把该累计的 origin 归并改为「任一 estimated ⇒ estimated」以与轮级口径统一。另一路 `estimate_token_usage` 的 origin 覆盖已逐点核对：provider/mod.rs 的 12 个估算调用点全部经该函数（含 responses_api 路径），无漏标站点；`payload_usage`/本地恢复占位 usage 显式 `origin=None`（未知不冒充）。"
+    }
+  ],
+  "checklist_evidence": {
+    "1_numeric_consistency": "fixture 手算（python，逐条求和）：Σout=4542、Σin=358633、Σcache=327808、Σdur=93154、Σgen=Σ(dur−ttft)=47579（与 fixture `genMs` 列逐条相等，无 dur<=ttft 项、无 out<=0 项）。turn.speed=4542/(47579/1000)=95.462284 ⇒ 95.46；两侧在同一 fixture 上得同一值（TS T6-2 实跑通过）。退化规则在大体上一致（ttft<dur 才抵扣、ttft>dur ⇒ gen=dur，A1-3=100 通过），但**有效调用过滤**不一致 ⇒ finding#1。端到端吞吐 4542/93.154=48.76，与 95.46 可判别（契约写 46.13 用的是 98.469s 整轮含空转；本波不作为 speed 输出）。",
+    "2_attribute_contract": "逐键核对：`llm.call.duration_ms`/`llm.call.ttft_ms`/`llm.call.generation_ms` 均 i64 且 None 不落键（otel/mod.rs:2122-2151）；`generation = duration - ttft`（ttft 存在且 dur>ttft）否则 `= duration`，与 `call_generation_ms`、`calculate_call_generation_speed`（turn_flow.rs:2319-2344）同一退化规则 ⇒ 加法自洽；`agent.turn.speed.basis=\"turn_weighted\"` 仅在 speed 有效时写入（otel/mod.rs:1768-1773）；`agent.usage.origin` 仅 `provider`|`estimated_chars`（`usage_origin_from_label` 白名单，未知⇒None）；`gen_ai.usage.context_window/context_ratio` 的 4 个调用点均传 `provider.context_window_tokens()`（ProviderManager 桥接真实能力，无能力⇒None⇒两键缺席），ratio 分子改用 `context_normalized_input`（anthropic=input+cache_read+cache_creation，stream_support.rs:270-289），且 `gen_ai.usage.input_tokens` 未被该归一值污染 ⇒ 不与 `gen_ai.usage.cache_read.*` 双计。",
+    "3_token_scope": "anthropic 的 `cache_creation_input_tokens` 只进 `context_input_tokens`（context 口径）与 ratio 分子，未并入 `cache_hit_input_tokens`、未进 `gen_ai.usage.cache_read.*`、未进成本/`usage_ledger`（本波不动 ledger）；`derive_cache_miss_input_tokens` 仍用 raw input，无重复计入。merge_usage_origin 与 derive_usage_provenance_from_calls 的张力见 finding#6。",
+    "4_security": "新增属性无 prompt/正文/凭据面：`agent.usage.origin` 为封闭枚举；`llm.call.*`/`agent.turn.*` 仅数值；`record_context_normalized_input` 只影响 ratio 分子。`data-speed-debug` 仅在 `isDebugLoggingEnabled()` 门控下渲染（HomeStatusPanel.vue:66/190），内容为 basis/calls/in/out/dur/ttft/gen/win/ratio/origin，均为 token/耗时诊断，无会话内容；`formatCompactInteger` 只做单位压缩。新增/改动代码中 src 侧 `unwrap()/expect()` 为 0（git diff 全量 grep 仅命中测试断言），错误路径不 panic。",
+    "5_serde_compat": "`ProviderCallCacheRecord.usage_origin/context_input_tokens` 与 `TurnTraceRecord.usage_origin/context_input_tokens` 均 `#[serde(default, skip_serializing_if = \"Option::is_none\")]` 且结构体级 `rename_all=\"camelCase\"` ⇒ 旧 JSON（无新键）可反序列化、新 JSON 旧读者忽略未知键；`TokenUsage` 手写 Deserialize 的内部 wire 结构每字段带 `#[serde(default)]`，旧 wire（无 origin/cacheCreationInputTokens）安全，未知 origin 值降级 None。唯一瑕疵：Serialize 的 len 提示 7 ≠ 实际 8（finding#3）。",
+    "receipts": [
+      "cargo test -p pony-agent-core --test wave54_metric_truth → exit 0 (7 passed)",
+      "npx vitest run tests/acceptance/wave54 tests/unit/token-speed-metrics.spec.ts → exit 0 (3 files / 28 tests)",
+      "npx vitest run tests/acceptance/wave15 tests/HomeSidebar.spec.ts → exit 0 (27 passed, 2 行既有 it.skip 未改动)",
+      "npm run typecheck (vue-tsc --noEmit) → exit 0"
+    ]
+  }
+}

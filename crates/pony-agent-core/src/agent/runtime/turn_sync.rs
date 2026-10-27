@@ -229,6 +229,8 @@ impl AgentRuntime {
                 ProviderRequestKind::ToolFollowup,
                 Some(response.provider_source.as_str()),
                 Some(response.provider_mode.as_str()),
+                // wave-54 C4：协议归一上下文输入口径（anthropic ⇒ input + cache_read）。
+                Some(provider.protocol_label()),
                 response.token_usage.as_ref(),
                 None,
                 Some(provider_call_duration_ms),
@@ -630,6 +632,8 @@ impl AgentRuntime {
             ProviderRequestKind::InitialRequest,
             Some(first_decision.provider_source.as_str()),
             Some(first_decision.provider_mode.as_str()),
+            // wave-54 C4：协议归一上下文输入口径（anthropic ⇒ input + cache_read）。
+            Some(provider.protocol_label()),
             first_decision.token_usage.as_ref(),
             None,
             initial_decision_duration_ms,
@@ -916,6 +920,12 @@ impl AgentRuntime {
                 error,
             );
             self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            // wave-54 C2：失败轮也落已发生调用的加权速度真值（无 records ⇒ 无 speed 键）。
+            crate::agent::turn_flow::record_turn_speed_truth(
+                &mut otel_turn_scope,
+                &provider_call_records,
+                Some(turn_started_at.elapsed().as_millis() as u64),
+            );
             otel_turn_scope.set_phase("failed");
             return result;
         }
@@ -1045,6 +1055,12 @@ impl AgentRuntime {
             session_summary: persisted.session_summary,
         };
         self.apply_terminal_envelope_to_turn_result(&mut result, &terminal_envelope);
+        // wave-54 C2：根 span 速度/耗时真值（生产路径唯一出口，数据源 = 本轮 per-call records）。
+        crate::agent::turn_flow::record_turn_speed_truth(
+            &mut otel_turn_scope,
+            &result.provider_call_records,
+            result.turn_duration_ms,
+        );
         otel_turn_scope.set_phase("completed");
         result
     }

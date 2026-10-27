@@ -23,22 +23,29 @@ const props = defineProps<{
   modelCallCount: number;
   toolCallCount: number;
   copied: boolean;
-  /** Wave-15 S1：当前上下文占用（最近一次模型调用 input_tokens），无 per-call 来源时为 null（显示 0）。 */
+  /** wave-54 C4：上下文占用（末次调用 contextInputTokens，回退 S1）；无数据为 null ⇒ 显示 `—`。 */
   inputTokensTotal: number | null;
-  outputTokensTotal: number;
-  cacheHitTokensTotal: number;
+  outputTokensTotal: number | null;
+  cacheHitTokensTotal: number | null;
   cacheHitRatio: string;
   tokenGenerationSpeed: number | null;
   tokenSpeedCalculationMode?: string;
   speedDebugInfo?: {
     mode?: string;
+    /** wave-54 C2/C6：`turn_weighted` | `call_only` | `none`。 */
+    basis?: string;
+    /** 参与求和的已完成调用数。 */
+    calls?: number;
     speed?: number | null;
     inputTokens?: number | null;
     outputTokens?: number | null;
     durationMs?: number | null;
+    genMs?: number | null;
     ttftMs?: number | null;
     contextWindow?: number | null;
     ratio?: string | null;
+    /** wave-54 C3：`estimated_chars` ⇒ 数字带 `≈` 前缀。 */
+    origin?: string | null;
   };
   showContextUsage: boolean;
   contextDisplayTokens: number | null;
@@ -59,30 +66,76 @@ const blockDetail = computed(() => resolveRuntimeStoreSafe()?.governanceBlockDet
 
 const debugAttrsEnabled = computed(() => isDebugLoggingEnabled());
 
+/** wave-54 C6：速度位基准（`turn_weighted` = 加权 N 次调用；`call_only` = 当前调用）。 */
+const speedBasis = computed(() => props.speedDebugInfo?.basis ?? props.tokenSpeedCalculationMode ?? "none");
+
+/** wave-54 C3：估算来源必须显式降级（`≈`），不得冒充真值。 */
+const isEstimatedUsage = computed(() => props.speedDebugInfo?.origin === "estimated_chars");
+
+const speedTooltip = computed(() => {
+  const calls = props.speedDebugInfo?.calls;
+  if (speedBasis.value === "call_only") {
+    return "当前调用的生成速度（单次调用，含生成耗时口径）";
+  }
+  if (speedBasis.value === "turn_weighted" && typeof calls === "number" && calls > 0) {
+    return `加权生成速度（${calls} 次调用，Σoutput/Σ生成耗时）`;
+  }
+  return "生成速度（加权，暂无已完成调用）";
+});
+
+/** C6 `data-speed-debug`：`basis=…;calls=…;in=…;out=…;dur=…;ttft=…;gen=…;win=…;ratio=…;origin=…`。 */
 const speedDebugString = computed(() => {
   const info = props.speedDebugInfo;
   const inVal = info?.inputTokens ?? props.inputTokensTotal ?? "-";
   const outVal = info?.outputTokens ?? props.outputTokensTotal ?? "-";
   const durVal = info?.durationMs ?? "-";
   const ttftVal = info?.ttftMs ?? "-";
+  const genVal = info?.genMs ?? "-";
   const winVal = info?.contextWindow ?? props.contextWindowTokens ?? "-";
   let ratioVal = info?.ratio ?? "-";
   if (ratioVal === "-" && props.contextWindowTokens && props.contextWindowTokens > 0 && inVal !== "-") {
     ratioVal = (Number(inVal) / props.contextWindowTokens).toFixed(3);
   }
-  return `in=${inVal};out=${outVal};dur=${durVal};ttft=${ttftVal};win=${winVal};ratio=${ratioVal}`;
+  return [
+    `basis=${speedBasis.value}`,
+    `calls=${info?.calls ?? 0}`,
+    `in=${inVal}`,
+    `out=${outVal}`,
+    `dur=${durVal}`,
+    `ttft=${ttftVal}`,
+    `gen=${genVal}`,
+    `win=${winVal}`,
+    `ratio=${ratioVal}`,
+    `origin=${info?.origin ?? "-"}`
+  ].join(";");
 });
 
+/**
+ * wave-54 C6 紧凑格式：`<1000` 原值；`<1e6` 一位小数 `1.9K`；`≥1e6` 一位小数 `1.2M`。
+ * 无数据（null / 非有限值）⇒ `—`（禁止渲染 `0`）。
+ */
 function formatCompactInteger(value?: number | null) {
-  if (value == null || !Number.isFinite(value)) { return ""; }
-  if (value >= 1_000_000) { return `${Math.round(value / 1_000_000)}M`; }
-  if (value >= 1_000) { return `${Math.round(value / 1_000)}K`; }
+  if (value == null || !Number.isFinite(value)) { return "—"; }
+  if (value >= 1_000_000) { return `${(value / 1_000_000).toFixed(1)}M`; }
+  if (value >= 1_000) { return `${(value / 1_000).toFixed(1)}K`; }
   return String(value);
 }
 
+/** 速度显示：无数据 `—`；估算来源加 `≈` 前缀（C3）。 */
 function formatTokenSpeed(value?: number | null) {
   if (value == null || !Number.isFinite(value)) { return "—"; }
-  return `${Math.round(value)} t/s`;
+  const text = `${Math.round(value)} t/s`;
+  return isEstimatedUsage.value ? `≈${text}` : text;
+}
+
+/**
+ * wave-54 C3：估算标记覆盖 token 三位（输入/输出/缓存），不只速度位。
+ * 无数据仍是 `—`（不渲染 `≈—`）。
+ */
+function formatTokenValue(value?: number | null) {
+  const text = formatCompactInteger(value);
+  if (text === "—") { return text; }
+  return isEstimatedUsage.value ? `≈${text}` : text;
 }
 </script>
 
@@ -134,42 +187,45 @@ function formatTokenSpeed(value?: number | null) {
       <div class="rounded-[0.45rem] bg-[#f6f0e8] px-3 py-2">
         <!-- Token metrics -->
         <div class="flex items-center justify-around text-[11px] leading-5 text-stone-600">
-          <!-- Wave-15 S1：「输入」口径 = 当前上下文占用（最近一次模型调用的 input_tokens），
-               非会话累计（S2 保留在消息级 tokenCount / 统计汇总）。 -->
+          <!-- wave-54 C4/C6：「输入」口径 = 末次调用 contextInputTokens（回退 S1），
+               无数据一律 `—`（禁止渲染 0）；估算来源加 `≈`。非会话累计。 -->
           <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-input-tokens">
             <Tooltip text="输入">
               <ArrowUp class="h-3 w-3 text-stone-400" />
             </Tooltip>
-            <Tooltip text="上下文输入（最近一次模型调用）">
-              <span class="inline-block min-w-[2.25rem] text-right">{{ formatCompactInteger(inputTokensTotal) || "0" }}</span>
+            <Tooltip text="上下文输入（最近一次模型调用，协议归一口径）">
+              <span class="inline-block min-w-[2.25rem] text-right">{{ formatTokenValue(inputTokensTotal) }}</span>
             </Tooltip>
           </span>
           <Tooltip text="输出">
             <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-output-tokens">
               <ArrowDown class="h-3 w-3 text-stone-400" />
-              <span class="inline-block min-w-[2.25rem] text-right">{{ formatCompactInteger(outputTokensTotal) || "0" }}</span>
+              <span class="inline-block min-w-[2.25rem] text-right">{{ formatTokenValue(outputTokensTotal) }}</span>
             </span>
           </Tooltip>
           <Tooltip text="缓存读取">
             <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-cache-tokens">
               <Zap class="h-3 w-3 text-stone-400" />
-              <span class="inline-block min-w-[2.25rem] text-right">{{ formatCompactInteger(cacheHitTokensTotal) || "0" }}</span>
+              <span class="inline-block min-w-[2.25rem] text-right">{{ formatTokenValue(cacheHitTokensTotal) }}</span>
               <span v-if="cacheHitRatio" class="inline-block min-w-[2.25rem] text-right text-stone-400">· {{ cacheHitRatio }}</span>
             </span>
           </Tooltip>
           <!-- 速度位在无数据时渲染 "—"（无数字文本节点），故预留宽度落在承载 span 自身，
                使其在 9 / 12 / 1234 三档（含注入探针）下宽度恒定。 -->
-          <Tooltip text="生成速度">
-            <span
-              class="inline-flex min-w-[4rem] items-center gap-1 tabular-nums"
-              data-testid="status-metric-token-speed"
-              :data-speed-mode="tokenSpeedCalculationMode || 'none'"
-              :data-speed-debug="debugAttrsEnabled ? speedDebugString : undefined"
-            >
+          <span
+            class="inline-flex min-w-[4rem] items-center gap-1 tabular-nums"
+            data-testid="status-metric-token-speed"
+            :data-speed-mode="tokenSpeedCalculationMode || 'none'"
+            :data-speed-basis="speedBasis"
+            :data-speed-debug="debugAttrsEnabled ? speedDebugString : undefined"
+          >
+            <Tooltip text="生成速度">
               <Gauge class="h-3 w-3 text-stone-400" />
-              {{ formatTokenSpeed(tokenGenerationSpeed) }}
-            </span>
-          </Tooltip>
+            </Tooltip>
+            <Tooltip :text="speedTooltip">
+              <span>{{ formatTokenSpeed(tokenGenerationSpeed) }}</span>
+            </Tooltip>
+          </span>
         </div>
 
         <!-- Wave-7 G2：拦截态横幅 UI（触及硬限额 opt-in 拦截） -->

@@ -238,7 +238,7 @@ describe("Wave-15 wire-replay（Rust 真实捕获 → 前端 S1/S3 投影）", (
     expect(view.contextDisplayTokens.value).not.toBe(aggregateInput);
   });
 
-  it("S3：速度由真实末跳 per-call 记录算出，投影值与前端口径一致（不得退化到整轮 elapsed）", () => {
+  it("S3：per-call 速度由末跳记录算出，投影速度取 wire 全量调用的 turn 加权口径（Σout/Σgen，不得退化到整轮 elapsed）", () => {
     const record = lastPersistedRecord();
     expect(record).not.toBeNull();
     expect(record?.outputTokens).toBe(wire.expectation.hopOutputs[2]);
@@ -261,7 +261,16 @@ describe("Wave-15 wire-replay（Rust 真实捕获 → 前端 S1/S3 投影）", (
     const store = useRuntimeStore();
     store.$patch({ turnTraceHistory: [turn], traceTimeline: turn.traceTimeline ?? [], activeTurnId: null, isSubmitting: false });
     const view = useTraceProjection({ liveTurnEnabled: ref(true) });
-    expect(view.sessionTokenGenerationSpeed.value).toBeCloseTo(expected as number, 6);
+    // wave-54 契约演进（ADR 0053）口径来源：投影速度不再是末跳 per-call（100000 t/s），
+    // 而是 wire 三条已完成调用的 turn 加权值：
+    //   Σout = 50 + 60 + 100 = 210
+    //   Σgen = 55 + (48−47) + (49−48) = 57ms  ← 第 1 条 ttft 55 === dur 55 ⇒ 不抵扣，gen = dur
+    //   ⇒ speed = 210 / 0.057 = 3684.210526315789 t/s
+    expect(view.sessionTokenGenerationSpeed.value).toBe(3684.210526315789);
+    expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
+    // 判别式：不得等于末跳 per-call 值（100000）或整轮 elapsed 口径（1257.49）
+    expect(view.sessionTokenGenerationSpeed.value).not.toBeCloseTo(expected as number, 6);
+    expect(view.sessionTokenGenerationSpeed.value).not.toBeCloseTo(accumulatedSpeed, 6);
   });
 
   it("S2 回归：wire 的整轮累加口径（turn:completed / 持久化轮级记录）保持不变", () => {

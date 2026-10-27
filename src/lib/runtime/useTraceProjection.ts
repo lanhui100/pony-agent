@@ -9,12 +9,12 @@ import {
 } from "@/lib/runtime/trace-projection";
 import { cloneProviderCallRecords, resolveProviderReturnedCacheHitInputTokens } from "@/lib/runtime/trace";
 import {
-  countTurnProviderCalls,
-  resolveCallGenerationSpeed,
+  resolveContextInputTokens,
   resolveCurrentContextInputTokens,
-  resolveDualModeTokenSpeedDetail,
+  resolveLastCallCacheInputTokens,
+  resolveTurnWeightedSpeedDetail,
   type TokenSpeedCalculationMode,
-  type TokenSpeedDetail,
+  type TurnWeightedSpeedDetail,
 } from "@/lib/runtime/token-metrics";
 import { recordMetricsSnapshot, reportMetricsAnomaly } from "@/lib/runtime/metrics-diagnostics";
 
@@ -47,30 +47,25 @@ function compareTurnTraceOrder(left: TurnTraceRecord, right: TurnTraceRecord) {
 }
 
 /**
- * S3 步骤 2：该轮 `call_model` 条目的 per-call 生成速度。
- *
- * `TraceTimelineEntry` 无 `latencyKind` 字段（§7.3），条目 TTFT 沿用既有 per-call 语义
- * （R2 落地后条目携带自身 first_token_latency_ms），因此按 `provider_stream` 参与抵扣。
+ * wave-54 §4：速度只保留一条解析器 `resolveTurnWeightedSpeedDetail`（C2 加权口径）。
+ * 旧的 `entryCallGenerationSpeed` / `turnTokenSpeed` / `resolveTurnCallGenerationSpeed`
+ * 与 dual-mode 遮蔽路径已删除——同一语义位不得再有两套分支。
  */
-function entryCallGenerationSpeed(entry: TraceTimelineEntry): number | null {
-  return resolveCallGenerationSpeed({
-    requestKind: "initial_request",
-    outputTokens: entry.outputTokens ?? null,
-    turnDurationMs: entry.turnDurationMs ?? null,
-    firstTokenLatencyMs: entry.firstTokenLatencyMs ?? null,
-    latencyKind: "provider_stream"
-  });
-}
 
-/** 整轮整体速度兜底（turn 级 outputTokens / turnDurationMs）。 */
-function turnTokenSpeed(turn: TurnTraceRecord): number | null {
-  if (turn.outputTokens == null || turn.turnDurationMs == null || turn.turnDurationMs <= 0) {
-    return null;
-  }
-
-  const speed = turn.outputTokens / (Math.max(turn.turnDurationMs, 1) / 1000);
-  return Number.isFinite(speed) ? speed : null;
-}
+/** 空详情（无任何轮次 / 全部无数据）。 */
+const EMPTY_SPEED_DETAIL: TurnWeightedSpeedDetail = {
+  speed: null,
+  mode: "none",
+  basis: "none",
+  calls: 0,
+  outputTokens: null,
+  genMs: null,
+  durationMs: null,
+  inputTokens: null,
+  cacheInputTokens: null,
+  ttftMs: null,
+  origin: null,
+};
 
 /** 剪贴板反馈：HomeSidebar（session-id 复制）与 TraceInspector（trace 复制）各自实例化。 */
 export function useCopyFeedback() {
@@ -202,9 +197,12 @@ export function useTraceProjection(options: {
 
   const retrievedSessionContext = computed(() => retrievedContext.value?.sessionContext ?? null);
 
-  // S1（§7.6 冻结解析序）：当前上下文占用 = 最近一次已完成模型调用的 per-call input。
-  // 多调用轮且无任何 per-call 来源时返回 null（S4 纪律），严禁回退整轮累加值。
-  const contextDisplayTokens = computed(() => resolveCurrentContextInputTokens(latestTurn.value));
+  // C4 取值序（wave-54 §1 C4）：「输入」= 末次调用的 contextInputTokens（协议归一值）
+  // → 回退 S1（wave-15 §7.6 冻结解析序）→ 无数据时 null（UI 渲染 `—`）。
+  const contextDisplayTokens = computed(
+    () => resolveContextInputTokens(latestTurn.value) ?? resolveCurrentContextInputTokens(latestTurn.value)
+  );
+
   const currentContextWindowTokens = computed(
     () =>
       retrievedSessionContext.value?.contextWindowTokens ??
@@ -252,86 +250,77 @@ export function useTraceProjection(options: {
   const sessionInputTokensTotal = computed(() =>
     orderedTurnTraces.value.reduce((sum, turn) => sum + (turn.inputTokens ?? 0), 0)
   );
-  const sessionCacheHitTokensTotal = computed(() =>
-    orderedTurnTraces.value.reduce(
-      (sum, turn) => sum + (providerReturnedCacheHitInputTokens(turn) ?? 0),
-      0
-    )
-  );
-  const sessionOutputTokensTotal = computed(() =>
-    orderedTurnTraces.value.reduce((sum, turn) => sum + (turn.outputTokens ?? 0), 0)
-  );
+  /**
+   * C6 显示纪律：`output` / `cache` 与 `contextInputTokens` 同法——无数据一律 null（UI `—`），
+   * 绝不把「无数据」伪装成 `0`。聚合语义（Σ 轮级累加）保持不变。
+   */
+  const sessionCacheHitTokensTotal = computed<number | null>(() => {
+    let hasValue = false;
+    let sum = 0;
+    for (const turn of orderedTurnTraces.value) {
+      const value = providerReturnedCacheHitInputTokens(turn);
+      if (value != null) {
+        hasValue = true;
+        sum += value;
+      }
+    }
+
+    return hasValue ? sum : null;
+  });
+  const sessionOutputTokensTotal = computed<number | null>(() => {
+    let hasValue = false;
+    let sum = 0;
+    for (const turn of orderedTurnTraces.value) {
+      if (turn.outputTokens != null) {
+        hasValue = true;
+        sum += turn.outputTokens;
+      }
+    }
+
+    return hasValue ? sum : null;
+  });
+  /** C6：缓存比的分子 = 末次已完成调用的缓存命中输入（与可见「输入」同源）。 */
+  const sessionLastCallCacheHitTokens = computed(() => resolveLastCallCacheInputTokens(latestTurn.value));
+  // C6：缓存比 = 末次调用 cache / 可见「输入」（同源分母），整数百分比。
+  // 会话累计口径 sessionInputTokensTotal / sessionCacheHitTokensTotal 保持不变（账单语义）。
   const sessionCacheHitRatio = computed(() => {
-    if (sessionInputTokensTotal.value <= 0) {
+    const denominator = contextDisplayTokens.value;
+    const cache = sessionLastCallCacheHitTokens.value;
+    if (denominator == null || !(denominator > 0) || cache == null) {
       return "";
     }
 
-    return `${Math.round((sessionCacheHitTokensTotal.value / sessionInputTokensTotal.value) * 100)}%`;
+    return `${Math.round((cache / denominator) * 100)}%`;
   });
   const showContextUsage = computed(() => !!latestTurn.value);
 
-  /**
-   * S3（§7.6 冻结解析序，步骤 2–4 属调用方职责，§7.8）：
-   * 1) 最后一条已完成 provider call record（record 级解析 + 守卫在 token-metrics）；
-   * 2) 否则该轮最后一条 `call_model` 条目的 per-call 指标；
-   * 3) 否则仅当轮内 provider call 数 ≤ 1 时回退 turn 级 output/duration；
-   * 4) 否则 null（严禁用整轮累加 output / elapsed 计算）。
-   */
-  function resolveTurnCallGenerationSpeed(turn: TurnTraceRecord): number | null {
-    const records = turn.providerCallRecords ?? [];
-    for (let i = records.length - 1; i >= 0; i--) {
-      const record = records[i];
-      if (!record) {
-        continue;
-      }
-      const speed = resolveCallGenerationSpeed(record);
-      if (speed != null) {
-        return speed;
-      }
-    }
-
-    const entries = turnTimelineCache.value.get(turn.turnId) ?? projectedTurnTimeline(turn);
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i]!;
-      if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
-        continue;
-      }
-      const speed = entryCallGenerationSpeed(entry);
-      if (speed != null) {
-        return speed;
-      }
-    }
-
-    if (countTurnProviderCalls(turn) <= 1) {
-      return turnTokenSpeed(turn);
-    }
-
-    return null;
-  }
-
-  // 当前模型生成速度与计算模式
-  const sessionTokenSpeedState = computed<TokenSpeedDetail>(() => {
+  // C2 单口径：`resolveTurnWeightedSpeedDetail` 是唯一解析器（§4）。
+  // 从最新轮次向前取第一条有速度的详情；全部无速度时保留最新轮次的详情（basis/calls/origin 仍可展示）。
+  const sessionTokenSpeedState = computed<TurnWeightedSpeedDetail>(() => {
     const turns = orderedTurnTraces.value;
+    let latestDetail: TurnWeightedSpeedDetail | null = null;
     for (let t = turns.length - 1; t >= 0; t--) {
       const turn = turns[t]!;
-      // 检查最新轮是否为活跃提交状态
       const isActive = isSubmitting.value && t === turns.length - 1;
-      const detail = resolveDualModeTokenSpeedDetail(turn, { isSubmitting: isActive, isActiveTurn: isActive });
+      const detail = resolveTurnWeightedSpeedDetail(turn, { isActiveTurn: isActive });
+      if (latestDetail == null) {
+        latestDetail = detail;
+      }
       if (detail.speed != null) {
         return detail;
       }
-      // 回退旧的 timeline per-call 解析
-      const legacySpeed = resolveTurnCallGenerationSpeed(turn);
-      if (legacySpeed != null) {
-        return { speed: legacySpeed, mode: "call_fallback" };
-      }
     }
-    return { speed: null, mode: "none" };
+
+    return latestDetail ?? EMPTY_SPEED_DETAIL;
   });
 
   const sessionTokenGenerationSpeed = computed<number | null>(() => sessionTokenSpeedState.value.speed);
   const tokenSpeedCalculationMode = computed<TokenSpeedCalculationMode>(() => sessionTokenSpeedState.value.mode);
 
+  /**
+   * C6 调试/`≈` 通道（§5 裁决 4：由 `origin` 子字段驱动，不新增 prop）：
+   * `data-speed-debug` = `basis=…;calls=…;in=…;out=…;dur=…;ttft=…;gen=…;win=…;ratio=…;origin=…`。
+   */
   const tokenSpeedDebugInfo = computed(() => {
     const state = sessionTokenSpeedState.value;
     const windowTokens = currentContextWindowTokens.value ?? null;
@@ -342,15 +331,20 @@ export function useTraceProjection(options: {
     }
     return {
       mode: state.mode,
+      basis: state.basis,
+      calls: state.calls,
       speed: state.speed,
       inputTokens: inTokens,
       outputTokens: state.outputTokens ?? null,
       durationMs: state.durationMs ?? null,
+      genMs: state.genMs ?? null,
       ttftMs: state.ttftMs ?? null,
       contextWindow: windowTokens,
       ratio,
+      origin: state.origin,
     };
   });
+
 
   // 状态变化时触发调试埋点与异常检测 (task-11)
   watch(

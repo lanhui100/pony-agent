@@ -48,7 +48,8 @@
 ### C4 上下文占用口径（协议归一）
 - 新字段 `ProviderCallCacheRecord.context_input_tokens` / `TurnTraceRecord.context_input_tokens`
   （camelCase `contextInputTokens`）：
-  - `protocol_label` 以 `anthropic` 开头 ⇒ `input + cache_read`（anthropic `input` 不含缓存）；
+  - `protocol_label` 以 `anthropic` 开头 ⇒ `input + cache_read + cache_creation`（anthropic `input` 既不含
+    cache_read 也不含 cache_creation；`cache_creation` 仅进上下文口径，不进 `cache_read` 上报）；
   - 其余协议 ⇒ `input`（已含缓存）。
 - UI「输入」位取值序：`contextInputTokens` → `resolveCurrentContextInputTokens()` → `—`。
 - `gen_ai.usage.context_window` / `context_ratio`：4 个 `record_speed_and_context` 调用点必须传
@@ -70,7 +71,7 @@
 ## 2. 验收用例（Test Agent 独占写域，冻结后只读）
 
 - **T1** `llm.chat` 四键：stream 调用 ⇒ duration/ttft/generation/origin 同时存在且
-  `duration == ttft + generation`；buffered 调用 ⇒ 无 ttft 键、generation == duration。
+  `duration == ttft + generation`（仅当 ttft 存在且 `duration > ttft`；否则 `generation == duration`）；buffered 调用 ⇒ 无 ttft 键、generation == duration。
 - **T2** 根 span：`agent.turn.speed.tokens_per_second == Σout/Σgen`（±1e-6）、`basis=turn_weighted`、
   duration/ttft/calls 存在；`gen_ai.usage.context_window/context_ratio` 在有窗口时存在且 ratio≈in/win。
 - **T3** 折叠不覆盖：`fold_all::<TraceProjectionState>` 给 step0(dur=500)、step1(无 dur) + TurnEnd(1200)
@@ -158,3 +159,37 @@ C3/C4 给 `TokenUsage` / `ProviderCallCacheRecord` / `TurnTraceRecord` 增字段
    `ttft>dur` 按 C2 退化 `gen=dur`（计入 Σgen）。
 4. **`≈` 通道**：由既有 `speedDebugInfo.origin` 子字段驱动（不新增 prop），并同步进 `data-speed-debug`。
 5. **`data-speed-basis`**：作为 C6 实现细节要求落地，但**不纳入**本波冻结断言（避免超契约扩测）。
+
+## 6. L3 方案审查后的裁决（Lead 2026-10-27 21:30，review-plan.json verdict=FAIL → 逐条闭环）
+
+- **B1 根 span 必须生产接线**：`record_turn_timing` / `record_turn_speed` 必须在 turn 终态真实调用（数据源 =
+  该轮 records 的 Σout/Σgen、首个带 ttft 的 per-call、`records.len()`）；仅测试调用视为未实现。
+- **B2 既有 lib 断言迁移（§5.6）**：`crates/pony-agent-core/src/agent/projection.rs:1699`
+  `Some(1200)` → `Some(500)`；这是 C5 的直接后果，属被取代的旧口径，非放宽。
+- **B3 轮级 origin 归并（§5.2 重申）**：任一 record 为 `estimated_chars` ⇒ 轮级 `estimated_chars`。
+- **B4 anthropic 归一含缓存写入（§5.7）**：`context_input = input + cache_read + cache_creation`；
+  `cache_creation_input_tokens` 只进 context 口径，不进 `gen_ai.usage.cache_read.*`（读≠写）。
+- **B5/B6 旧口径用例迁移（§5.8）**：`tests/unit/token-speed-metrics.spec.ts`（3 例）、
+  `tests/acceptance/wave15/*`（5 例）、`tests/HomeSidebar.spec.ts`（3 断言）、
+  `tests/e2e/metrics-live-verification.spec.ts` 由 Test Agent 迁移；Lead 已在 ADR 0053 记录「9 例旧断言随
+  口径变更迁移」，ADR 原文"历史冻结测试零改动"仅限于**未被本契约取代**的用例。
+- **B7 `call_only` 必须有断言（§5.9）**：Test Agent 在 wave54 冻结文件**增量**补一条（不改既有断言）。
+- **ADVISORY 采纳**：`context_ratio` 用归一化上下文输入（新增 `record_context_normalized_input`）；
+  T6 Σgen 以 fixture 求和 **47579** 为准（±60 容差保留）。
+- **ADVISORY 记录不修（已知限制，写入交付说明）**：事件折叠重建路径不回填 `contextInputTokens`
+  ⇒ 历史会话 C4 走 S1 回退；`TraceTimelineEntry.contextInputTokens` 本波不消费；buffer 与 stream 的
+  `gen` 在同一 Σ 内混算（全 buffered 轮的数值趋近端到端吞吐，属口径定义而非缺陷）。
+- **衍生豁免增补（§5.10）**：`session/store.rs` 的派生字段计算属「最小编译/持久化闭包」，允许。
+
+## 7. 收口签字（Lead 2026-10-27 22:05）
+
+- **冻结验收文件追加已批准**：`crates/pony-agent-core/tests/wave54_metric_truth.rs` 由 Test Agent 追加
+  `t7_root_span_accumulates_without_explicit_turn_calls`（生产接线覆盖）与 `tests/acceptance/wave54/` 追加
+  T4-4（`call_only` 可达性），均为**增量**（+159/-0 与 append-only），既有断言零改动 — Lead 签字认可。
+- **契约 C4 文案与实现对齐**：`context_input = input + cache_read + cache_creation`（见 §1 C4 修订与 §5.7）。
+- **已知限制（不修，交付说明携带）**：① `ActiveTurn` FIFO 乱序 drop 回填 `previous`（wave-53 既有，
+  生产 LIFO 不可达）；② `record_call_timing` 与 `record_usage` 的调用顺序隐含「usage 先于 timing」，
+  逆序会静默少算一次调用；③ 折叠重建路径 `contextInputTokens` 留空（历史会话回退 S1）；
+  ④ `tool_recovery` 两处构造无 protocol_label（按非 anthropic 口径）。
+- **审查收据**：`review-plan.json`(FAIL→闭环) / `review-l3a.json`(FAIL→闭环) / `review-l3b.json`(FAIL→闭环) /
+  `review-join.json`(PASS，范围 8 条闭合)，四份均通过 `dev-review-lint.py`。
