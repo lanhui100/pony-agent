@@ -88,3 +88,35 @@ test result: FAILED. 2 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; 
 
 error: test failed, to rerun pass `-p pony-agent-core --test observability_reporting_fixes_test`
 EXIT=101
+
+
+# ==========================================================================
+# [GREEN-REPAIR] 绿相收据（TEST-DEFECT 修复后）
+# 命令：cargo test -p pony-agent-core --test observability_reporting_fixes_test -- --test-threads=1
+# 说明：红相段（上）为 SUT 未实现时的 9 failed / 2 passed；本段为 Executor 实现落地 +
+#       Test Agent 修复 l2at_concurrent_init 的 Barrier 参与方缺陷后的绿相证据。
+# ==========================================================================
+
+    Blocking waiting for file lock on build directory
+   Compiling pony-agent-core v0.1.135 (/home/dm/pony-agent/crates/pony-agent-core)
+    Finished `test` profile [unoptimized] target(s) in 43.21s
+     Running tests/observability_reporting_fixes_test.rs (target/debug/deps/observability_reporting_fixes_test-34cb66f1094cb758)
+
+running 11 tests
+test c1_blank_version_falls_back_to_env ... ok
+test c1_explicit_version_wins ... ok
+test c1_invalid_version_rejected ... ok
+test c1_ponysentry_with_release ... ok
+test c2_governance_span_carries_session ... ok
+test c2_governance_without_turn_has_no_session ... ok
+test c3_all_none_root_has_no_keys ... ok
+test c3_usage_details_values ... ok
+test c3_wire_keys_and_root_aggregation ... ok
+test l2at_concurrent_init ... ok
+test t6_static_wiring ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.06s
+
+EXIT=0
+
+# [GREEN-REPAIR] exit code = 0，11 passed / 0 failed，finished in 14.06s（timeout 120 内完成，无挂死）

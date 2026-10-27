@@ -1016,7 +1016,11 @@ fn l2at_concurrent_init() {
         .collect();
 
     // 主线程也参与 Barrier，让两线程在 init 前对齐（确定性起跑）。
-    barrier.wait();
+    // TEST-DEFECT 修复（Lead 裁决，绿相发现）：`Barrier::new(3)` 的参与方是「主线程 + 2 worker」，
+    // worker 每轮各 wait 一次 ⇒ 主线程必须与 worker 同步 **3 轮**（原先只 wait 一次，第 2 轮必挂死）。
+    for _ in 0..3 {
+        barrier.wait();
+    }
 
     let mut failures: Vec<String> = Vec::new();
     for handle in handles {

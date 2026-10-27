@@ -3,7 +3,7 @@
   "wave": "wave-51",
   "agent": "test-agent-2 (Test Agent, 独立测试分权)",
   "kind": "红相验收 + L2-AT 对抗（冻结）",
-  "revision": "red-phase run #2（Lead 裁决 A 强化后终态；run #1 见 enhancement_history）",
+  "revision": "red-phase run #2 + TEST-DEFECT 修复后的绿相收据（test_defect_amendments / green_phase_receipt）",
   "contract": ".dev-team/contract-matrix-wave51.md §1/§2/§3/§7.2（v3 + Lead v4 三处裁决 + 裁决 A）",
   "test_file": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
   "test_file_lines": 1039,
@@ -167,5 +167,38 @@
       "failure_reason": "两 worker 均在 mod.rs:614 panic（stub），被 catch_unwind 捕获并转为失败信息 ⇒ 断言「不得 panic」失败",
       "panic_attribution": "SUT: crates/pony-agent-core/src/agent/otel/mod.rs:614 `init_with_service_version` 未实现"
     }
-  ]
+  ],
+  "test_defect_amendments": [
+    {
+      "id": "TD-1",
+      "case": "l2at_concurrent_init",
+      "defect": "Barrier 参与方数量与「每轮到场数」不一致：`Barrier::new(3)` 的 3 个参与方是「主线程 + 2 worker」，但主线程只 `barrier.wait()` 一次，worker 却每轮各 wait 一次（共 3 轮）⇒ 第 1 轮（round 0）可放行，round 1 起 worker 阻塞等待一个永不到场的主线程票，用例挂死。",
+      "discovered_stage": "绿相（Executor 独立复现；Test Agent 红相阶段未暴露）",
+      "root_cause": "Barrier 参与方 3 ≠ 每轮实际到场 2（主线程缺席 round 1/2）",
+      "why_red_phase_masked": "红相时 `otel::init_with_service_version` 仍是 `unimplemented!()` 桩，worker round 0 即 panic，`catch_unwind` 捕获后 `return Some(...)` 提前结束线程；两 worker 都不进入 round 1，主线程也无需再 wait ⇒ 缺陷被 panic 短路完全掩盖，红相只表现为断言失败（不是 hang）。",
+      "fix_diff": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs:1019-1024\n-    barrier.wait();\n+    // TEST-DEFECT 修复（Lead 裁决，绿相发现）：`Barrier::new(3)` 的参与方是「主线程 + 2 worker」，\n+    // worker 每轮各 wait 一次 ⇒ 主线程必须与 worker 同步 **3 轮**（原先只 wait 一次，第 2 轮必挂死）。\n+    for _ in 0..3 {\n+        barrier.wait();\n+    }",
+      "fix_scope": "单点：仅主线程 Barrier 同步循环；断言、迭代数（3 轮）、catch_unwind 语义、`Barrier::new(3)` 参与者设计（保持「主线程也是参与者」）零改动",
+      "residual_risk_note": "worker 若在某一轮 panic，仍会提前 return，主线程随后的 barrier.wait() 会等待不再到场的票 ⇒ 未来出现「实现重新 panic」时表现为 hang（CI 超时）而非快速失败。当前绿相无 panic，契约通过；如需 fail-fast，可后续改为 worker 不提前 return（每轮都到场、把 panic 信息累积到循环外返回）—— 该改动超出本次授权范围，未执行。",
+      "verification": {
+        "command": "timeout 120 cargo test -p pony-agent-core --test observability_reporting_fixes_test -- --test-threads=1",
+        "exit_code": 0,
+        "result": "11 passed; 0 failed; 0 ignored; finished in 14.06s",
+        "hang": "无（120s 硬超时内完成；l2at_concurrent_init 单独 ok）",
+        "raw_log": ".dev-team/red-phase-wave51.log（尾部 [GREEN-REPAIR] 段）"
+      }
+    }
+  ],
+  "green_phase_receipt": {
+    "command": "timeout 120 cargo test -p pony-agent-core --test observability_reporting_fixes_test -- --test-threads=1",
+    "exit_code": 0,
+    "summary": {
+      "total": 11,
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "duration_s": 14.06
+    },
+    "log_section": ".dev-team/red-phase-wave51.log 尾部 [GREEN-REPAIR]",
+    "note": "红相段仍保留在日志上半部（9 failed / 2 passed 的 SUT 未实现证据），两段物理并存，可审计「红→绿」全过程"
+  }
 }
