@@ -1287,10 +1287,19 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           }, () => safeInvoke<SessionOverview[]>("list_sessions"));
         // 后端 list_sessions 返回所有会话（含 archived: bool）；
         // sessionList 保留后端全量列表，由前端派生单一树（deriveSidebarTree）根据 showArchived 进行过滤与展示。
-        this.sessionList = filterDeletingSessions(
+        const filteredCatalog = filterDeletingSessions(
           catalog,
           this.deletingSessionSet
         );
+        // 如果当前活跃会话是正在进行中或未落盘的瞬态会话，且未在后端返回列表中，则必须保留在前端列表中，防止消失
+        const currentActiveSession = this.sessionList.find(
+          (session) => session.conversationId === this.sessionId
+        );
+        if (currentActiveSession && !filteredCatalog.some((s) => s.conversationId === this.sessionId)) {
+          this.sessionList = [currentActiveSession, ...filteredCatalog];
+        } else {
+          this.sessionList = filteredCatalog;
+        }
         return;
       }
 
@@ -3619,7 +3628,14 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
 
       debugLog("events:init");
 
+      const isEventForCurrentSession = (payload: TurnStreamEvent) => {
+        return !payload.sessionId || payload.sessionId === this.sessionId;
+      };
+
       const startedUnlisten = await safeListen<TurnStreamEvent>("turn:started", ({ payload }) => {
+        if (!isEventForCurrentSession(payload)) {
+          return;
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -3692,7 +3708,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
-        if (this.activeTurnId !== payload.turnId) {
+        if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           if (payload.sessionId) {
             const bg = this.runningSessionMap[payload.sessionId];
             if (bg && bg.turnId === payload.turnId) {
@@ -3761,6 +3777,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       const traceUnlisten = await safeListen<TurnStreamEvent>("turn:trace", ({ payload }) => {
+        if (!isEventForCurrentSession(payload)) {
+          return;
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -3803,6 +3822,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       const phaseChangedUnlisten = await safeListen<TurnStreamEvent>("turn:phase_changed", ({ payload }) => {
+        if (!isEventForCurrentSession(payload)) {
+          return;
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -3842,6 +3864,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       const checkpointPersistedUnlisten = await safeListen<TurnStreamEvent>("turn:checkpoint_persisted", ({ payload }) => {
+        if (!isEventForCurrentSession(payload)) {
+          return;
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -3881,6 +3906,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       const toolUnlisten = await safeListen<TurnStreamEvent>("turn:tool", ({ payload }) => {
+        if (!isEventForCurrentSession(payload)) {
+          return;
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -4027,7 +4055,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             return;
           }
         }
-        if (this.activeTurnId !== payload.turnId) {
+        if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           return;
         }
         if (!this.shouldProcessTurnEvent(payload)) {
@@ -4423,7 +4451,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             return;
           }
         }
-        if (this.activeTurnId !== payload.turnId) {
+        if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           return;
         }
         if (!this.shouldProcessTurnEvent(payload)) {
@@ -4633,7 +4661,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           }
         }
 
-        if (this.activeTurnId !== payload.turnId) {
+        if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           return;
         }
         if (!this.shouldProcessTurnEvent(payload)) {
@@ -4801,7 +4829,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           }
         }
 
-        if (this.activeTurnId !== payload.turnId) {
+        if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           return;
         }
         if (!this.shouldProcessTurnEvent(payload)) {
@@ -5153,6 +5181,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         modelId: selectedModel?.id ?? null,
         reasoningEffort: providerStore.currentReasoningEffort ?? null,
         workspaceMode: settingsStore.workspaceMode,
+        toolAuthorizationMode: this.toolAuthorizationMode ?? "workspace_write",
         sessionId: this.sessionId,
         nodeId: this.visibleNodeId,
         history: buildTurnHistory(this.messages),
