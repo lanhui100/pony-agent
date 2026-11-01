@@ -221,7 +221,12 @@ const provisionalRow = computed<SessionOverview | null>(() => {
   const row = sessionList.value.find(
     (session) => session.conversationId === sessionId.value
   );
-  return row && row.updatedAtMs === 0 && row.turnCount === 0 ? row : null;
+  if (!row) return null;
+  // 无论是初始双 0 瞬态，还是正在进行中/未生成更多轮次的当前活跃会话，只要 updatedAtMs 为 0 或处于运行/提交中，均视为 provisional 保持钉顶
+  if (row.updatedAtMs === 0 || isRunning(row)) {
+    return row;
+  }
+  return null;
 });
 
 function synthesizedTransient(): SessionOverview | null {
