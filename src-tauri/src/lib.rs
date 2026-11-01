@@ -23,7 +23,7 @@ use agent::control_plane::{
     RestoreBranchHeadCommand, RestoreBranchHeadResponse, ResumeGraphRunCommand,
     ResumeGraphRunStreamCommand, RetrievedContextQuery, RunTurnCommand, SessionRuntimeView,
     SessionRuntimeViewQuery, SkillInspectionQuery, SkillListQuery, StartGraphRunCommand,
-    StartGraphRunStreamCommand, StartTurnStreamCommand, StopGraphRunCommand, StopTurnCommand,
+    StartGraphRunStreamCommand, StopGraphRunCommand, StopTurnCommand,
     SwitchHistoryBranchCommand, SwitchHistoryBranchResponse, FailTurnForWatchdogCommand,
 };
 use agent::execution_control::{ExecutionCheckpoint, StopTurnResponse};
@@ -35,7 +35,6 @@ use agent::graph::GraphAskWaitBinding;
 use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{TurnInput, TurnResult};
 use agent::session::SessionOverview;
-use agent::session::TurnTraceRecord;
 use agent::tools::{builtin_turn_tool_contract_views, ToolDefinitionContractView};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,9 +49,16 @@ struct StreamDebugMetricsState {
     latest: Mutex<Value>,
 }
 
+/// 健康快照读（热路径：启动即调）。
+///
+/// W56-D：同步命令被 Tauri 内联执行在 WebView IPC 线程上（tauri-2.11.5
+/// ipc/protocol.rs:314 → webview/mod.rs:1742 on_message → manager/mod.rs:471
+/// run_invoke_handler，全程无 spawn），故改 async + `BlockingHelper::spawn`。
+/// 命令名/参数/成功返回形状不变；`State<'_, _>` 无法跨线程，改为在阻塞闭包内用
+/// `AppHandle::state::<HostControlPlane>()` 现取（不 unsafe、不克隆整状态）。
 #[tauri::command]
-fn health_check(control_plane: State<'_, HostControlPlane>) -> HostHealthSnapshot {
-    control_plane.health_snapshot()
+async fn health_check(app: AppHandle) -> Result<HostHealthSnapshot, String> {
+    BlockingHelper::spawn(move || app.state::<HostControlPlane>().health_snapshot()).await
 }
 
 #[tauri::command]
@@ -146,11 +152,6 @@ fn resume_graph_run_stream(
         })?;
     tauri_adapter::spawn_graph_run_stream(&app, prepared)?;
     Ok(response)
-}
-
-#[tauri::command]
-fn start_turn_stream(app: AppHandle, turn_id: String, input: TurnInput) -> Result<(), String> {
-    tauri_adapter::spawn_turn_stream(&app, StartTurnStreamCommand { turn_id, input })
 }
 
 #[tauri::command]
@@ -696,9 +697,13 @@ fn usage_governance_summary(
     control_plane.usage_governance_summary(session_id)
 }
 
+/// 会话列表（热路径：侧栏/启动都读，底层是同步 SQLite 全表读）。
+///
+/// W56-D：原为同步命令 ⇒ 在主线程内联跑 SQLite，UI 卡顿。现 async +
+/// `BlockingHelper::spawn`，SQLite 读落在 blocking 线程池；命令名/参数/成功返回形状不变。
 #[tauri::command]
-fn list_sessions(control_plane: State<'_, HostControlPlane>) -> Vec<SessionOverview> {
-    control_plane.list_sessions()
+async fn list_sessions(app: AppHandle) -> Result<Vec<SessionOverview>, String> {
+    BlockingHelper::spawn(move || app.state::<HostControlPlane>().list_sessions()).await
 }
 
 /// Trace tab 一键上传：手动上报指定会话的持久化 trace 至 PonySentry。
@@ -878,14 +883,6 @@ fn list_authorizations(
         .collect()
 }
 
-#[tauri::command]
-fn load_session_traces(
-    control_plane: State<'_, HostControlPlane>,
-    session_id: String,
-) -> Vec<TurnTraceRecord> {
-    control_plane.load_session_traces(&session_id)
-}
-
 /// PA-094：大字段外置——按引用加载 build_context_observation 全量 payload。
 /// 引用格式 `bco:<turn_id>:<seq>`；未命中返回 null（legacy 内嵌数据走 trace 字段）。
 #[tauri::command]
@@ -897,20 +894,30 @@ fn load_build_context_observation(
     control_plane.load_build_context_observation(&session_id, &observation_ref)
 }
 
+/// 会话运行时视图加载（热路径：会话切换/历史导航，底层同步 SQLite + 快照组装）。
+///
+/// W56-D：原同步命令在主线程内联执行 ⇒ 切换会话时 UI 卡死同类问题（ADR-0032）。
+/// 现 async + `BlockingHelper::spawn`；`State` 无法跨线程，故在阻塞闭包内用
+/// `AppHandle::state::<HostControlPlane>()` 现取（不 unsafe、不克隆整状态）；
+/// 参数名（turnId/sessionId/nodeId/runId）与成功返回形状不变。
 #[tauri::command]
-fn load_session_runtime_view(
-    control_plane: State<'_, HostControlPlane>,
+async fn load_session_runtime_view(
+    app: AppHandle,
     turn_id: Option<String>,
     session_id: Option<String>,
     node_id: Option<String>,
     run_id: Option<String>,
-) -> SessionRuntimeView {
-    control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
-        turn_id,
-        session_id,
-        node_id,
-        run_id,
+) -> Result<SessionRuntimeView, String> {
+    BlockingHelper::spawn(move || {
+        app.state::<HostControlPlane>()
+            .load_session_runtime_view(SessionRuntimeViewQuery {
+                turn_id,
+                session_id,
+                node_id,
+                run_id,
+            })
     })
+    .await
 }
 
 #[tauri::command]
@@ -1361,7 +1368,6 @@ pub fn run() {
             authorize_path,
             revoke_authorization,
             list_authorizations,
-            load_session_traces,
             load_build_context_observation,
             load_model_monitor_summary,
             load_model_monitor_session_drilldown,
@@ -1391,7 +1397,6 @@ pub fn run() {
             continue_graph_run_stream,
             resume_graph_run,
             resume_graph_run_stream,
-            start_turn_stream,
             stop_turn,
             stop_graph_run,
             fail_turn_for_watchdog,

@@ -150,7 +150,7 @@ function updateActiveTurnFromViewport() {
 
 function resolveTimelineViewport(): HTMLElement | null {
   const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
-  return viewport instanceof HTMLElement ? viewport : null;
+  return typeof HTMLElement !== "undefined" && viewport instanceof HTMLElement ? viewport : null;
 }
 
 function collectTimelineScrollMetrics() {
@@ -169,7 +169,10 @@ function setLatestTurnElementRef(
     return;
   }
 
-  targetRef.value = element instanceof HTMLElement ? element : null;
+  // 守卫：WebView 拆除 / 非 DOM 环境（SSR、v8 插桩单测）下 `HTMLElement` 可能不存在，
+  // 裸 `instanceof` 会抛 ReferenceError（未捕获错误），故先判类型存在再做 instanceof。
+  targetRef.value =
+    typeof HTMLElement !== "undefined" && element instanceof HTMLElement ? element : null;
 }
 
 function setLatestUserMessageRef(element: Element | ComponentPublicInstance | null, turnId: string) {
@@ -1267,7 +1270,10 @@ function clearRollbackExitingTurn(turnId: string | null) {
 }
 
 function handleTurnFlowAfterLeave(element: Element) {
-  const turnId = element instanceof HTMLElement ? element.dataset.turnId ?? null : null;
+  const turnId =
+    typeof HTMLElement !== "undefined" && element instanceof HTMLElement
+      ? element.dataset.turnId ?? null
+      : null;
   clearRollbackExitingTurn(turnId);
 }
 
@@ -1486,7 +1492,8 @@ async function handlePrimaryAction() {
 }
 
 function setComposerShellRef(element: unknown) {
-  composerShellRef.value = element instanceof HTMLElement ? element : null;
+  composerShellRef.value =
+    typeof HTMLElement !== "undefined" && element instanceof HTMLElement ? element : null;
 }
 
 function onShowReasoningContentChange(value: boolean) {

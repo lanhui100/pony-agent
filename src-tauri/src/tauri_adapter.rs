@@ -1,6 +1,4 @@
-use crate::agent::control_plane::{
-    HostControlPlane, PreparedGraphRunStream, StartTurnStreamCommand,
-};
+use crate::agent::control_plane::{HostControlPlane, PreparedGraphRunStream};
 use crate::agent::runtime::TurnStreamEvent;
 use crate::agent::turn_flow::TurnEventSink;
 use crate::turn_task_registry::TurnTaskRegistry;
@@ -88,20 +86,6 @@ where
     app.state::<TurnTaskRegistry>()
         .register(session_id, handle)
         .map_err(|e| format!("{task_kind} task register failed: {e}"))
-}
-
-pub fn spawn_turn_stream(app: &AppHandle, command: StartTurnStreamCommand) -> Result<(), String> {
-    // session_id 缺失时以 turn_id 兜底，避免多个无 session 任务共用空 key 互相替换
-    let session_id = command
-        .input
-        .session_id
-        .clone()
-        .unwrap_or_else(|| command.turn_id.clone());
-    spawn_stream_task(app, session_id, "turn", move |app, sink| {
-        let control_plane = app.state::<HostControlPlane>();
-        control_plane.start_turn_stream(sink, command);
-        Ok(())
-    })
 }
 
 pub fn spawn_graph_run_stream(
