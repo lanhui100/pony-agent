@@ -275,8 +275,12 @@ pub struct LayeredTurnContext {
     pub conversation_carry_mode: Option<ConversationCarryMode>,
 }
 
+/// semistable 段（宪法 + 技能清单）与其 Append-Only 变更通知。
 struct SemistableContextSection {
     note: String,
+    /// Wave-58 F1-3：会话中途配置变更只允许以**追加通知**的形式进入 volatile 段，
+    /// 绝不改写 semistable 段（否则整段历史 KV-Cache 头失效）。
+    delta_notice: Option<String>,
 }
 
 impl TurnContextBuilder for DefaultTurnContextBuilder {
@@ -416,7 +420,7 @@ fn build_layered_turn_context(
         .filter_map(to_provider_history_message)
         .collect::<Vec<_>>();
     let image_note = image_capability_note(provider, retrieved);
-    let base_semistable_context = provider_semistable_context_note(graph_name, retrieved);
+    let base_semistable_context = provider_semistable_context_note(graph_name, provider, retrieved);
     let memory_messages = build_memory_messages(retrieved);
     let mut reserved_messages = vec![
         base_system_messages[0].clone(),
@@ -431,6 +435,7 @@ fn build_layered_turn_context(
         planner_skills,
         image_note.as_deref(),
         None,
+        base_semistable_context.delta_notice.as_deref(),
     ));
     // 层序不变量：稳定层（System）必须全部排在动态层（Developer）之前。
     // 动态段若被插到稳定段之前，会打穿 provider 的前缀缓存命中（ADR 0007）。
@@ -470,6 +475,7 @@ fn build_layered_turn_context(
         planner_skills,
         image_note.as_deref(),
         history_truncation_note.as_deref(),
+        base_semistable_context.delta_notice.as_deref(),
     );
     let volatile_input_messages = vec![current_user_message];
     let volatile_input_observation_text = render_turn_input_for_observation(
@@ -517,6 +523,7 @@ fn build_layered_turn_context(
             planner_skills,
             image_note.as_deref(),
             None,
+            base_semistable_context.delta_notice.as_deref(),
         ));
         reserved_native_messages.push(json!({
             "role": "user",
@@ -577,6 +584,7 @@ fn build_layered_turn_context(
             planner_skills,
             image_note.as_deref(),
             native_transcript_note.as_deref(),
+            base_semistable_context.delta_notice.as_deref(),
         );
         native_volatile_input_messages = vec![json!({
             "role": "user",
@@ -814,8 +822,127 @@ fn openai_user_content_blocks(user_message: &str, images: &[TurnInputImage]) -> 
     blocks
 }
 
+/// 技能清单段标题（Wave-58 F1-2）。
+///
+/// 由 `workspace_hotloader::build_cached_prompt_prefix` 渲染；本模块只在预算门
+/// （F1-6 裁剪）、多行描述压平（F1-2）两处引用该标题，不重复渲染清单本身。
+const SKILL_CATALOG_TITLE: &str = "=== AVAILABLE REUSABLE SKILLS ===";
+
+/// Wave-58 D5'：技能清单窗口下限（tokens）。
+///
+/// 窗口小于该值时整段跳过技能清单：小窗口的前缀预算必须优先留给历史对话，
+/// 否则几十条清单会把 recent history 挤出上下文（已由既有单测证伪 8192 档）。
+const SKILL_CATALOG_WINDOW_FLOOR_TOKENS: u32 = 32_768;
+
+/// Wave-58 D5'：技能清单预算的硬顶（字节）。
+const SKILL_CATALOG_MAX_BUDGET_BYTES: usize = 16 * 1024;
+
+/// Wave-58 D5'：技能清单最多列出的条目数。
+const SKILL_CATALOG_MAX_ENTRIES: usize = 64;
+
+/// 解析会话指令/技能的发现根（Wave-58 F1-1）。
+///
+/// 优先级：会话工作区根（`env_info.cwd`，非空且绝对路径）→ 进程 cwd → `.`。
+/// 历史实现直接用 `std::env::current_dir()`，而桌面端进程 cwd 通常不是会话工作区，
+/// 于是项目 `AGENTS.md` / `CLAUDE.md` 与项目技能都发现不到（或在多工作区场景读到同一份）。
+/// 两条路径都不可得时用 `.` 兜底，**任何情况都不 panic**。
+fn resolve_session_instruction_root(retrieved: &RetrievedContextState) -> std::path::PathBuf {
+    let session_root = retrieved
+        .session_context
+        .env_info
+        .as_ref()
+        .map(|env_info| env_info.cwd.trim())
+        .filter(|cwd| !cwd.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|root| root.is_absolute());
+    if let Some(root) = session_root {
+        return root;
+    }
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// 技能清单预算（Wave-58 **D5'**，Lead 批准替代原 D5）。
+///
+/// 本模块只负责**按 provider 上下文窗口计算预算**，裁剪与 `omitted` 标记渲染统一由
+/// `workspace_hotloader::build_cached_prompt_prefix_with_budget` 完成（单一实现，不重复造轮子）。
+///
+/// 规则（不得自行扩缩）：
+/// - `window = provider.context_window_tokens()`；
+/// - `None` → 视为大窗口，清单不额外裁剪（`unlimited()`，仍受指令预算 64 KiB 约束）；
+/// - `window < `[`SKILL_CATALOG_WINDOW_FLOOR_TOKENS`] → **整段跳过技能清单**
+///   （预算 `new(0, 0)`：连标题都放不下，宪法照旧注入）；
+/// - `window >= ` 下限 → `max_bytes = min(16 KiB, window * 4 / 20)`（约 5% 窗口字节，
+///   硬顶 16 KiB）、`max_entries = `[`SKILL_CATALOG_MAX_ENTRIES`]。
+fn skill_catalog_budget(
+    provider: &ProviderManager,
+) -> crate::agent::workspace_hotloader::SkillCatalogBudget {
+    use crate::agent::workspace_hotloader::SkillCatalogBudget;
+    match provider.context_window_tokens() {
+        None => SkillCatalogBudget::unlimited(),
+        Some(window) if window < SKILL_CATALOG_WINDOW_FLOOR_TOKENS => {
+            SkillCatalogBudget::new(0, 0)
+        }
+        Some(window) => SkillCatalogBudget::new(
+            SKILL_CATALOG_MAX_BUDGET_BYTES.min((window as usize) * 4 / 20),
+            SKILL_CATALOG_MAX_ENTRIES,
+        ),
+    }
+}
+
+/// 把技能清单段内的多行描述压平成「一行一个技能」（Wave-58 F1-2）。
+///
+/// 背景：frontmatter 块标量（`|` / `>`）会让 `description` 自带换行，直接渲染会把
+/// 单条技能拆成多行，破坏 `- `name` [scope]: description` 的行契约。
+/// 这里只处理清单段内的续行：并入上一行条目并单空格连接；幂等（已压平的结果再跑不变）。
+///
+/// Wave-58 A3：`omitted skill:` / `omitted skills:` 诊断行永远独立成行，不参与压平
+/// （与 beta 的 `SkillScanReport::omission_markers` 追加到清单末尾的接缝，以「标记行独立」为准）。
+fn flatten_skill_catalog_lines(rendered: &str) -> String {
+    let Some(index) = rendered.find(SKILL_CATALOG_TITLE) else {
+        return rendered.to_string();
+    };
+    let (head, catalog) = rendered.split_at(index);
+    let mut lines: Vec<String> = Vec::new();
+    for line in catalog.split('\n') {
+        let is_entry = line.starts_with("- `");
+        // Wave-58 A3：`omitted skill:<name> (budget)` / `omitted skills: N more (...)`
+        // 是清单裁剪的**独立诊断行**（hotloader 的 `SkillScanReport::omission_markers` 也走同一格式），
+        // 必须保持单独成行：既不得并入上一条技能条目，也不得被后续行并入。
+        let is_omission_marker =
+            line.starts_with("omitted skill:") || line.starts_with("omitted skills:");
+        match lines.last_mut() {
+            // 续行：上一行是技能条目、本行非空、非新条目且非诊断标记 → 压平进上一条。
+            Some(last)
+                if !is_entry
+                    && !is_omission_marker
+                    && !line.trim().is_empty()
+                    && last.starts_with("- `") =>
+            {
+                last.push(' ');
+                last.push_str(line.trim());
+            }
+            _ => lines.push(line.to_string()),
+        }
+    }
+    let mut flattened = String::with_capacity(rendered.len());
+    flattened.push_str(head);
+    flattened.push_str(&lines.join("\n"));
+    flattened
+}
+
+/// semistable 段：会话标签 + 宪法（AGENTS.md / CLAUDE.md）+ 技能清单。
+///
+/// Wave-58 契约要点：
+/// - F1-1：发现根用**会话工作区根**（[`resolve_session_instruction_root`]），不再用进程 cwd；
+/// - F1-2：清单标题 `=== AVAILABLE REUSABLE SKILLS ===`，行格式 `- `name` [scope]: description`；
+/// - F1-3：由进程级单例 hotloader 的会话基线渲染，同一 `conversation_id` 第 2 轮起字节级不变，
+///   中途变更只以 `delta_notice` 返回，由调用方追加进 volatile 段；
+/// - F1-4（D4）：只注入 `name [scope]: description`，`SKILL.md` 正文一律不进提示词；
+/// - F1-6 / D5'：按 provider 上下文窗口决定是否注入技能清单（< 下限整段跳过），
+///   清单自身另有 16 KiB 级字节预算。
 fn provider_semistable_context_note(
     graph_name: &str,
+    provider: &ProviderManager,
     retrieved: &RetrievedContextState,
 ) -> SemistableContextSection {
     let mut note = format!(
@@ -823,24 +950,34 @@ fn provider_semistable_context_note(
         graph_name, retrieved.session_context.conversation_id
     );
 
-    // PA-148: 激活 WorkspaceHotloader，动态注入用户级（全局）+ 项目级指令规则
-    // （AGENTS.md / CLAUDE.md，全局层在前、项目层在后）
-    let hotloader = crate::agent::workspace_hotloader::WorkspaceHotloader::new();
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // PA-148 / Wave-58 F1-1：以会话工作区根为指令与技能发现根。
+    let workspace_root = resolve_session_instruction_root(retrieved);
+    // P0-4：每回合 `WorkspaceHotloader::new()` 会让缓存命中率归零，并丢失去会话基线
+    // （KV-Cache 头）保护；改用进程级单例，基线按 conversation_id 固化。
+    let hotloader = crate::agent::workspace_hotloader::get_global_workspace_hotloader();
     // PA-150：静态前缀装配受默认注入预算约束（超预算层被省略并留 `omitted` 标记）。
     let global_homes = crate::agent::workspace_hotloader::resolve_global_agent_homes();
-    if let Some((constitution, _)) = hotloader.resolve_constitution_with_budget(
-        &current_dir,
-        &global_homes,
-        crate::agent::workspace_hotloader::InstructionBudget::default(),
-    ) {
-        if !constitution.trim().is_empty() {
-            note.push_str("\n\n=== Workspace & User Instructions (AGENTS.md / CLAUDE.md) ===\n");
-            note.push_str(&constitution);
-        }
+    // Wave-58 D5'：技能清单预算按 provider 上下文窗口计算，裁剪与 omitted 标记由
+    // hotloader 的 `*_with_catalog` 入口统一渲染（单一实现）。
+    let catalog_budget = skill_catalog_budget(provider);
+    let (mut rendered, delta_notice) =
+        hotloader.resolve_session_prompt_context_with_budget_and_catalog(
+            &retrieved.session_context.conversation_id,
+            retrieved.session_context.turn_count,
+            &workspace_root,
+            &global_homes,
+            crate::agent::workspace_hotloader::InstructionBudget::default(),
+            catalog_budget,
+        );
+    // F1-2 格式兜底：块标量描述可能多行，压平后保证「一行一个技能」。
+    // 预算裁剪（D5'）已由 hotloader 完成，这里只做幂等的格式归一。
+    rendered = flatten_skill_catalog_lines(&rendered);
+    if !rendered.trim().is_empty() {
+        note.push_str("\n\n");
+        note.push_str(rendered.trim_end());
     }
 
-    SemistableContextSection { note }
+    SemistableContextSection { note, delta_notice }
 }
 
 fn build_volatile_context_messages(
@@ -848,8 +985,15 @@ fn build_volatile_context_messages(
     planner_skills: &[SkillDescriptor],
     image_note: Option<&str>,
     truncation_note: Option<&str>,
+    semistable_delta_note: Option<&str>,
 ) -> Vec<ProviderMessage> {
-    let note = volatile_context_note(retrieved, planner_skills, image_note, truncation_note);
+    let note = volatile_context_note(
+        retrieved,
+        planner_skills,
+        image_note,
+        truncation_note,
+        semistable_delta_note,
+    );
     if note.is_empty() {
         Vec::new()
     } else {
@@ -862,8 +1006,15 @@ fn build_native_volatile_context_messages(
     planner_skills: &[SkillDescriptor],
     image_note: Option<&str>,
     truncation_note: Option<&str>,
+    semistable_delta_note: Option<&str>,
 ) -> Vec<Value> {
-    let note = volatile_context_note(retrieved, planner_skills, image_note, truncation_note);
+    let note = volatile_context_note(
+        retrieved,
+        planner_skills,
+        image_note,
+        truncation_note,
+        semistable_delta_note,
+    );
     if note.is_empty() {
         Vec::new()
     } else {
@@ -879,6 +1030,7 @@ fn volatile_context_note(
     planner_skills: &[SkillDescriptor],
     image_note: Option<&str>,
     truncation_note: Option<&str>,
+    semistable_delta_note: Option<&str>,
 ) -> String {
     let mut notes = Vec::new();
 
@@ -959,6 +1111,14 @@ fn volatile_context_note(
 
     if let Some(note) = truncation_note {
         notes.push(note.to_string());
+    }
+
+    // Wave-58 F1-3：semistable 段的配置变更只以追加通知形式出现在这里，
+    // 绝不回写 semistable 段（KV-Cache 头保护）。
+    if let Some(note) = semistable_delta_note {
+        if !note.trim().is_empty() {
+            notes.push(note.trim_end().to_string());
+        }
     }
 
     notes.join(" ")

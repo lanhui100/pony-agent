@@ -36,3 +36,24 @@ ADR 0045 让用户级（全局）指令与技能**可见**，但随后对比 DSH
 - 用户可见：新增 `skill_load`；大指令文件不再整层消失而是截断；深层目录 `AGENTS.md` 随触碰进入上下文；同名技能按 rank 裁决（项目恒胜）。
 - 测试：`tests/wave42_global_config.rs`（20 例：C2 预算 ×6、C3 发现 ×7、C4 触达 7 含符号链接逃逸与 8 线程并发去重）、`tests/wave42_skill_body.rs`（6 例）；`wave37_tool_surface` 迁移至 29。
 - 未做（明确非目标）：watcher；`disable-model-invocation`/`whenToUse` 的模型面语义；技能资源目录（`references/`、`scripts/`）的可读代理；企业级策略层。
+
+
+## Wave-58 修订（2026-11-01）
+
+本 ADR 第 6 条「契约演进」与 ADR 0045 的注入点约定在 Wave-58 被再次修订，理由与结论如下：
+
+1. **semistable 段标题**：Wave-58 把会话前缀构造统一收敛到 `WorkspaceHotloader`（`resolve_session_prompt_context_with_budget_and_catalog`），因此该段的标题由 hotloader 生成，形如：
+
+   ```
+   === WORKSPACE CONSTITUTION & RULES ===
+   ...
+   === AVAILABLE REUSABLE SKILLS ===
+   - `name` [global|project]: description
+   ...
+   omitted skill:<name> (<reason>)
+   ```
+
+   ADR 0045 C6 冻结的标题 `=== Workspace & User Instructions (AGENTS.md / CLAUDE.md) ===` **不再适用**：该段现在同时承载宪法与技能清单（可能还含 `omitted` 诊断行），旧标题会让模型误判段内容边界。此变更**不改变**任何指令/技能的加载来源与优先级语义，只改变提示词里的段标题文本。
+2. **技能清单预算（D5'）**：清单注入受 provider 上下文窗口自适应约束（`< 32768` tokens 整段不注入；`>= 32768` 时字节预算 `min(16 KiB, window*4/20)`、条目上限 64，按 `(rank, 项目优先, name)` 从低优先级尾部丢弃并打 `omitted skill:<name> (budget)`）。本条**替代**本 ADR 决策 2 中「技能清单不受预算约束」的隐含假设。
+3. **触达即载的根层去重（D6'）**：会话内（`session_id` 非空）触达层跳过已被 semistable 承载的根层指令来源；无 `session_id` 的探针式调用保持决策 5 的既有行为不变。
+4. **技能信任的分域（D1）**：用户级全局技能根允许符号链接目录解析到根外（`npx skills`/Claude Code 标准安装形态），但 canonical 目标仍必须是名为 `SKILL.md` 的普通文件、无 `..`、受 262144 字节上限；项目级根保持严格 canonical 包含。本条**放宽**本 ADR 决策 1 中「两条路径都必须 canonical 后落在 canonical 根内」对**全局根**的要求。

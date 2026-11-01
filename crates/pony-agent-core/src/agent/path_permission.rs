@@ -655,6 +655,79 @@ fn push_contained_canonical_root(roots: &mut Vec<PathBuf>, candidate: &Path, bas
     }
 }
 
+/// 技能根的**分域信任策略**（Wave-58 F2-3 / 契约 D1）。
+///
+/// 与 [`trusted_skill_roots`] 的区别：后者只收录「canonical 后仍在全局 home 内」的窄口径根，
+/// 无法表达 D1 要求的「用户级全局根允许符号链接解析到根外」（`npx skills` / Claude Code 的
+/// 标准安装形态）。本结构把「根」与「是否允许逃逸」绑定，供加载侧
+/// [`crate::agent::skill_body::is_trusted_skill_file`] 使用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillTrustRoot {
+    /// 词法技能根（`<home>/skills` 或 `<ws>/.agents/skills` 等，不做 canonicalize）。
+    pub root: PathBuf,
+    /// 该根的 canonical 形态；无法解析时为 `None`。
+    pub canonical_root: Option<PathBuf>,
+    /// `true` = 用户级全局根：允许技能目录 / `SKILL.md` 为符号链接并解析到根外（D1）。
+    /// `false` = 项目级根：保持严格 canonical 包含判定。
+    pub allow_symlink_escape: bool,
+}
+
+/// 加载侧使用的分域策略技能根清单（Wave-58 F2-3 / 契约 D1）。
+///
+/// - 全局根（`<home>/skills`，`home` 来自 [`crate::agent::workspace_hotloader::resolve_global_agent_homes`]）：
+///   `allow_symlink_escape = true`，**不再要求**根自身 canonical 落在 home 内
+///   （用户自有域；项目级才是不可信输入）。
+/// - 项目根（`<ws>/{.agents,.claude,.dsh}/skills`）：`allow_symlink_escape = false`，且根自身
+///   canonical 后必须仍在 canonical(workspace) 内；逃逸根整根不采纳（`<ws>/.claude/skills ->
+///   /tmp/evil/skills` 不得让外部目录变成受信根）。
+///
+/// 结果按词法路径去重并保持「全局在前、项目在后」的顺序。
+pub fn trusted_skill_roots_with_policy(workspace_root: Option<&Path>) -> Vec<SkillTrustRoot> {
+    let mut roots: Vec<SkillTrustRoot> = Vec::new();
+    for home in crate::agent::workspace_hotloader::resolve_global_agent_homes() {
+        let root = home.join("skills");
+        if !root.is_dir() {
+            continue;
+        }
+        push_trust_root(&mut roots, root, true);
+    }
+    if let Some(workspace) = workspace_root {
+        let canonical_workspace = workspace.canonicalize().ok();
+        for dir in WORKSPACE_SKILL_DIRS {
+            let root = workspace.join(dir);
+            if !root.is_dir() {
+                continue;
+            }
+            // 项目级：根自身不得经符号链接逃出 workspace（否则外部目录会成为受信根）。
+            let Ok(canonical_root) = root.canonicalize() else {
+                continue;
+            };
+            let contained = canonical_workspace
+                .as_ref()
+                .map(|canonical| canonical_root.starts_with(canonical))
+                .unwrap_or(false);
+            if !contained {
+                continue;
+            }
+            push_trust_root(&mut roots, root, false);
+        }
+    }
+    roots
+}
+
+/// 追加策略根（按词法路径去重；重复出现时保留先入的较窄/较宽策略）。
+fn push_trust_root(roots: &mut Vec<SkillTrustRoot>, root: PathBuf, allow_symlink_escape: bool) {
+    if roots.iter().any(|existing| existing.root == root) {
+        return;
+    }
+    let canonical_root = root.canonicalize().ok();
+    roots.push(SkillTrustRoot {
+        root,
+        canonical_root,
+        allow_symlink_escape,
+    });
+}
+
 /// 路径是否落在受信只读根内（PA-149，fail-closed；全局根版本）。
 pub fn is_within_trusted_readonly_roots(path: &Path) -> bool {
     is_within_trusted_skill_roots(path, None)

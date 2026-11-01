@@ -1,4 +1,7 @@
 //! 工具触达即载子目录指令（PA-152）：只读发现，按目录浅→深排序。
+//!
+//! Wave-58 F3-3：候选文件名统一取自 `workspace_hotloader::INSTRUCTION_CANDIDATES`，
+//! 与根层（宪法注入）共用同一张表，禁止本模块自定义字面量。
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -6,6 +9,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use super::workspace_hotloader::ancestor_chain;
+use super::workspace_hotloader::INSTRUCTION_CANDIDATES;
 
 /// 一条待注入的子目录指令。
 pub struct TouchedInstruction {
@@ -16,9 +20,6 @@ pub struct TouchedInstruction {
 /// 单步触达注入的字节上限。
 pub const MAX_TOUCH_STEP_BYTES: usize = 16_384;
 
-/// 每级目录的指令文件名，按优先级从高到低取首个命中。
-const TOUCHED_INSTRUCTION_CANDIDATES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
-
 /// 单条指令超限时追加的截断标记（内容尾部，保证 `content.len() <= MAX_TOUCH_STEP_BYTES`）。
 const TOUCH_TRUNCATION_MARKER: &str = "\n[truncated]";
 
@@ -27,7 +28,7 @@ const TOUCH_TRUNCATION_MARKER: &str = "\n[truncated]";
 /// 语义（契约 C4）：
 /// - touched 必须落在 workspace_root 内（词法 `..` 逃逸与绝对越界一律返回空）；
 /// - 祖先链取 root→touched 父目录（含两端），浅→深排序；
-/// - 每级按 `AGENTS.md` → `CLAUDE.md` 首命中；
+/// - 每级按 `workspace_hotloader::INSTRUCTION_CANDIDATES` 顺序首命中（Wave-58 F3-3）；
 /// - `already_injected` 保存**绝对路径**，命中的层直接跳过（会话级去重）；
 /// - 单条超过 [`MAX_TOUCH_STEP_BYTES`] 时按 UTF-8 边界截断并追加 `[truncated]` 标记。
 ///
@@ -84,11 +85,15 @@ pub fn instructions_for_touched_path(
     entries
 }
 
-/// 每级首个**安全**的指令文件（`AGENTS.md` → `CLAUDE.md`）。
+/// 每级首个**安全**的指令文件（按 [`INSTRUCTION_CANDIDATES`] 顺序首命中）。
+///
+/// Wave-58 F3-3：候选表由 `workspace_hotloader::INSTRUCTION_CANDIDATES` 单一导出
+/// （`AGENTS.md` / `CLAUDE.md` / `.claude/CLAUDE.md` / `AGENTS.local.md` /
+/// `CLAUDE.local.md`），本模块不得再自带第二份字面量，否则根层与触达层会漂移。
 ///
 /// 安全 = canonical 目标仍在 canonical root 内 + 目标是普通文件（跟随符号链接后判定）。
 fn first_trusted_instruction(directory: &Path, canonical_root: &Path) -> Option<PathBuf> {
-    for candidate in TOUCHED_INSTRUCTION_CANDIDATES {
+    for candidate in INSTRUCTION_CANDIDATES {
         let path = directory.join(candidate);
         let Ok(canonical) = path.canonicalize() else {
             continue;

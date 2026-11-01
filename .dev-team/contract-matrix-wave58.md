@@ -56,3 +56,16 @@
 
 - F1-2 与 F2-3 的交互：清单必须只列「可加载」的技能，故 F1-2 的断言只对已通过信任谓词的技能生效。
 - F1-3 与 F3-1 的交互：根层来源集合由 `constitution_source_paths` 决定，与 semistable 段一致，不得各自计算。
+
+## 6. Lead 后续裁决（实现期追加，优先于上文冲突处）
+
+- **D5'（替代 D5）**：技能清单预算按 provider 窗口自适应。`window = provider.context_window_tokens()`；`None` → 不裁剪；`< 32768` → 整段跳过技能清单（宪法照旧）；`>= 32768` → `max_bytes = min(16KiB, window*4/20)`、`max_entries = 64`，超预算条目从**低优先级尾部**丢弃并输出 `omitted skill:<name> (budget)`（≤8 条 + `omitted skills: N more (catalog budget)` 折叠行）。裁剪前必须按 `(rank 升序, scope 项目优先, name 字典序)` 排序确定优先级，渲染顺序保持原返回顺序。
+  - 证据：本机全局根 116 技能 / 约 12KB 清单注入 8192 窗口后，`agent::context::tests::build_request_truncates_native_transcript_for_reasoning_provider` 与 `..._keeps_native_tool_roundtrip_on_turn_boundary` 变红；`HOME` 指向空目录复跑转绿 ⇒ 体积导致 recent history 被截断。
+- **D6'（Stage 3 生效条件）**：触达层跳过「根层指令来源」的充要条件是本次工具调用 `context.session_id` 非空（该会话前缀已由 semistable 承载根层指令）。`session_id` 为空时保持既有行为，故 wave42 C4 系列契约零改动。根层来源集合由 `constitution_source_paths(workspace_root, &resolve_global_agent_homes())` 给出。
+  - 后果：F3-1 用例由 Lead 修订为 `execute_with_context` + 非空 `session_id`（Wave-58 内冻结测试的唯一授权修改，Lead 执行）。
+- **D7（红相缺口处置）**：F1-* 与 F2-* 的红相因实现先行（DEV-58-1）不可得，改由 L3 审查以「实现 diff ↔ 契约矩阵 F 编号」逐条对照替代；F3-1/F3-3 保留真实断言失败红相。
+
+- **F2-7（会话基线有界化，Lead 补登授权）**：`WorkspaceHotloader.session_baselines` 必须有界（`MAX_SESSION_BASELINES = 1024`），超限按 LRU 淘汰；淘汰**只**降低「中途变更感知」精度（被淘汰会话下一轮视同首轮重建基线），**不得 panic**、不得影响未超限会话。淘汰必须输出一行可观测诊断（`[pony-agent][hotloader]` 前缀），禁止静默。
+  - 与 F1-3 的关系：F1-3「第 2 轮起字节不变」只在**未被淘汰**的会话内成立；活跃会话每轮都会刷新 `last_used`，因此实际只会淘汰长期不活跃会话。此权衡由本条目显式授权。
+  - 补登说明：该条目最初由 Lead 以 send_message 下发（未经契约矩阵登记），L3 审查正确指出程序瑕疵；此处补登并锁定新的 1024 上限与诊断要求。
+- **B1（L3-join 追加，跨工作区缓存隔离）**：`WorkspaceHotloader` 已成为进程级单例，因此 `skill_files` 与合并后的 `skills` 缓存**必须**按 canonical workspace root 分桶；缓存命中除 `mtime + file_size` 外必须比对 `fingerprint.path`。禁止出现「A 工作区的技能描述进入 B 工作区提示词」。

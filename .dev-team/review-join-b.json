@@ -1,0 +1,61 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/skill_body.rs",
+    "crates/pony-agent-core/src/agent/path_permission.rs",
+    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+    "crates/pony-agent-core/src/agent/instruction_touch.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/tests/wave58_skill_parsing.rs",
+    ".dev-team/contract-matrix-wave58.md"
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3b-wave58-review-join-b",
+    "fresh_context": true
+  },
+  "executed_by": "l3b-wave58-review-join-b",
+  "reviewed_commit": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
+  "attestation": {
+    "self_signed": false
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 827,
+      "rule": "LEAK",
+      "counterexample_cmd": "# E1（BLOCKING）跨工作区技能缓存污染：skill_files 键=scope:rank:folder 不含 workspace，快路径只比 mtime+size(841) 不比路径；context.rs:944 把 hotloader 改成进程单例后跨工作区可达 ⇒ B 工作区提示词出现 A 工作区的 description\ncd /tmp/w58b && CARGO_TARGET_DIR=/home/dm/pony-agent/target-test cargo run --offline -q --bin probe2 2>&1 | grep '^\\[E1\\]'\n# 预期 victim=ws-victim/VICTIM-PROJECT-DESC；实测 path=ws-poison/... + victim 提示词段含 POISON=true",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/skill_body.rs",
+      "line": 139,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "# E2（ADVISORY，fail-closed）同一 workspace 的符号链接别名 ⇒ 扫描列出但加载拒绝：matches_trust_root(333) 的 canonical 兜底被 139 的词法重判否决，D2/F2-3「列出⇒可加载」在路径别名（symlink/verbatim 前缀/卷大小写）下不成立\ncd /tmp/w58b && CARGO_TARGET_DIR=/home/dm/pony-agent/target-test cargo run --offline -q --bin probe2 2>&1 | grep '^\\[E2\\]'\n# 实测 load(alias ws) => Err(\"skill_out_of_allowed_root\")，而 scan(real) 已列出该技能",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/skill_body.rs",
+      "line": 115,
+      "rule": "LEAK",
+      "counterexample_cmd": "# E4（ADVISORY）授权复核(139)排在 metadata/尺寸判定(115-135)之后 ⇒ 越界但名为 SKILL.md 的目标返回 skill_too_large 并回显精确字节数，而非 out_of_allowed_root（信息泄露 + 授权结论依赖文件大小）\ncd /tmp/w58b && CARGO_TARGET_DIR=/home/dm/pony-agent/target-test cargo run --offline -q --bin probe2 2>&1 | grep 'outside big'\n# 实测 project->outside big = skill_too_large \"技能正文 307200 字节\"；对照 project->/etc/shadow = out_of_allowed_root",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 199,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "# D2（ADVISORY）omitted 报告无任何生产消费者：omission_markers/SkillScanReport 只在 tests 中出现，semistable 段走 scan_skills_with_budget（丢弃 omitted）⇒ 被跳过技能对模型/用户仍不可观测\ncd /home/dm/pony-agent && grep -rn --include=*.rs 'omission_markers\\|SkillScanReport' crates src-tauri | grep -v '/tests/'\n# 实测仅 workspace_hotloader.rs 自身定义/内部使用，0 处渲染进提示词或 UI",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 964,
+      "rule": "LEAK",
+      "counterexample_cmd": "# 信息泄露结论（ADVISORY）：技能清单行 = name [scope]: description（无路径）；omitted skill 标记无路径（可接受）。唯一进入模型可见提示词的绝对路径来自宪法段标题/省略标记（既有行为，F1-1 后锚定会话工作区）\ncd /home/dm/pony-agent && grep -n 'source_path.display()' crates/pony-agent-core/src/agent/workspace_hotloader.rs\n# 1585 为 \"## <heading> (<abs path>)\"，1640 为 \"omitted <abs path>\"；如要求提示词零路径需 Lead 另行裁决",
+      "severity": "ADVISORY"
+    }
+  ]
+}

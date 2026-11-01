@@ -1112,6 +1112,10 @@ struct TouchedInstructionSession {
     bytes_injected: usize,
     /// 最近一次访问序号（L3-B F6 LRU）。
     last_used: u64,
+    /// 根层指令来源是否已种子化（Wave-58 D6'）。
+    ///
+    /// 一次性判空：种子化要对磁盘做 canonicalize，不能在每次触达时重复计算。
+    root_seeded: bool,
 }
 
 impl TouchedInstructionMemory {
@@ -1156,6 +1160,73 @@ fn touch_injection_bucket_key(session_id: &str, workspace_root: &Path) -> String
     format!("session:{session_id}")
 }
 
+/// 根层指令来源种子化（Wave-58 **D6'**）。
+///
+/// 语义（Lead 裁决 D6'）：
+/// - **充要条件**：本次调用带 `session_id`（⇒ 该会话的 semistable 段已承载工作区根层
+///   `AGENTS.md` / `CLAUDE.md` 等指令），触达层才跳过根层，避免同一份根层规则每会话重复注入；
+/// - `session_id` 为空（探针 / 单元 / CLI 直接调用）→ 保持既有行为：根层照旧按触达注入；
+/// - 根层来源集合由 `workspace_hotloader::constitution_source_paths` 单一导出
+///   （与 semistable 段同源，Wave-58 F3-3/F3-4），按 `bucket_key` 一次性写入（`root_seeded`）；
+/// - 子目录层不受影响：永远按浅→深注入且会话内只注入一次。
+///
+/// **Wave-58 A2（L3 审查 ADVISORY）—— 与 semistable 根来源对等性**：
+/// 种子化的「跳过量」必须与 semistable 实际注入量对等，否则会出现
+/// 「根层指令既不在 semistable、又被触达层跳过」的零注入。这里采用最小闭包方案：
+/// **只有当 `constitution_source_paths(workspace_root)` 非空时才写入种子**（空集合说明
+/// 该根层无可注入指令，跳过也没有可丢的内容）。
+///
+/// 已知残余风险（如实记录，不在本波扩大改动面）：semistable 在 `env_info` 缺失时会回退到
+/// **进程 cwd** 作为发现根（见 `context.rs::resolve_session_instruction_root`），若此时进程 cwd
+/// 与工具层 `workspace_root` 不同源，则两边的根层来源集合不等对，理论上仍可能出现零注入窗口。
+/// 该窗口只存在于「无 `env_info` 且 cwd ≠ workspace root」的调用路径（桌面主链路由
+/// `store.rs::snapshot_env_info` 恒提供会话工作区根），彻底消除需要在 semistable 与触达层之间
+/// 增加「实际注入根」通道（建议随 wave-59 的 AGENTS.md/CLAUDE.md 语义变更一并设计）。
+fn seed_root_instruction_baseline(bucket_key: &str, workspace_root: &Path) {
+    // 一次性判空：已种子化过就不再触碰磁盘。
+    {
+        let memory = touched_instruction_memory()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if memory
+            .sessions
+            .get(bucket_key)
+            .map(|session| session.root_seeded)
+            .unwrap_or(false)
+        {
+            return;
+        }
+    }
+
+    let global_homes = crate::agent::workspace_hotloader::resolve_global_agent_homes();
+    let sources = crate::agent::workspace_hotloader::constitution_source_paths(
+        workspace_root,
+        &global_homes,
+    );
+    // Wave-58 A2：根层无可注入指令 → 不写入任何「已注入」指纹（跳过不产生收益，
+    // 只会带来「文件后到却永不注入」的风险）。
+    let seeded: Vec<String> = sources
+        .into_iter()
+        .map(|source| source.display().to_string())
+        .collect();
+
+    let mut memory = touched_instruction_memory()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    memory.tick();
+    let session = memory.sessions.entry(bucket_key.to_string()).or_default();
+    if session.root_seeded {
+        return;
+    }
+    session.root_seeded = true;
+    for display_path in seeded {
+        // 只登记「指纹」到 seen：种子不计入 bytes_injected（它本就没有被注入进工具结果）。
+        if session.seen.insert(display_path.clone()) {
+            session.order.push_back(display_path);
+        }
+    }
+}
+
 /// 计算并登记"触达即载"前置段落；无新指令时返回空串。
 ///
 /// L3-B F6/F8：
@@ -1168,6 +1239,13 @@ fn take_touched_instruction_prelude(
     session_id: &str,
 ) -> String {
     let bucket_key = touch_injection_bucket_key(session_id, workspace_root);
+
+    // Wave-58 D6'：带会话上下文时，工作区根层指令已由 semistable 段承载 →
+    // 先把它种子化进本会话的去重表，触达层只补真正的子目录指令。
+    // 无会话上下文（探针 / 单测 / CLI 直接调用）保持既有行为：根层照旧注入。
+    if !session_id.is_empty() {
+        seed_root_instruction_baseline(&bucket_key, workspace_root);
+    }
 
     // 1) 锁内快照：仅用于锁外文件读取时的预筛，真正判定在下面的临界区重做。
     let already_injected = {

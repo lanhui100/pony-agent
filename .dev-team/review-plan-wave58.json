@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "74b196cf-735c-4951-87de-1a086219b2fe",
+    "fresh_context": true
+  },
+  "executed_by": "74b196cf-735c-4951-87de-1a086219b2fe",
+  "attestation": {
+    "self_signed": false,
+    "transcribed_verbatim_by_lead": true,
+    "note": "Lead 裁决：允许在严格三字段外追加 v2 溯源字段（schema_version/reviewer/executed_by/reviewed_commit/attestation）；verdict 与 findings 由子代理原样产出，Lead 未改写结论。审查对象=Wave-58 工作树改动（相对 reviewed_commit 9af49dd 的未提交 diff）。"
+  },
+  "reviewed_commit": "9af49dd",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave58.md",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+    "crates/pony-agent-core/src/agent/skill_body.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/instruction_touch.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/path_permission.rs",
+    "crates/pony-agent-core/tests/wave58_context_skills.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 963,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'WORKSPACE CONSTITUTION & RULES' crates/pony-agent-core/src/agent/workspace_hotloader.rs # 生产路径改为 resolve_session_prompt_context_with_budget_and_catalog 后，semistable 段标题由 ADR-0045 C6 冻结的 '=== Workspace & User Instructions (AGENTS.md / CLAUDE.md) ===' 变成 '=== WORKSPACE CONSTITUTION & RULES ==='（hotloader:1269）；wave-58 契约矩阵未授权该 prompt 文本变更，frozen 测试也未断言旧标题，属静默行为漂移",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 1275,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "mkdir -p /tmp/ws58/.agents/skills/big && head -c 300000 /dev/zero | tr '\\0' 'a' > /tmp/ws58/.agents/skills/big/SKILL.md && cargo test -p pony-agent-core --test wave58_context_skills # F1-2 字面'无技能时不得出现该标题'：skills 为空但 omitted 非空（too_large/outside_root/duplicate_name）时仍渲染标题 '=== AVAILABLE REUSABLE SKILLS ==='（if !skills.is_empty() || !omitted.is_empty()），冻结用例只覆盖 skills=[]&omitted=[] 两个空集分支",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 498,
+      "rule": "LEAK",
+      "counterexample_cmd": "grep -n 'skills: RwLock<BTreeMap<PathBuf' -n crates/pony-agent-core/src/agent/workspace_hotloader.rs # 进程级单例下 skills / skill_files 按 workspace 分桶但无淘汰（仅 session_baselines 受 F2-7 的 1024 上限），长驻桌面进程每打开一个工作区永久驻留一份技能缓存",
+      "severity": "ADVISORY"
+    }
+  ]
+}

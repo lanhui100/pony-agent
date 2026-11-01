@@ -5,13 +5,44 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::SystemTime;
 
-/// 指令文档（AGENTS.md / CLAUDE.md）的候选文件名，按优先级从高到低。
-/// 项目级同时兼容 Claude Code 的 `.claude/CLAUDE.md` 布局。
-const CONSTITUTION_CANDIDATES: [&str; 3] = ["AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md"];
+use crate::agent::skill_body::{trust_skill_file, SkillTrustRejection};
 
-/// 同目录个人覆盖层（local overlay）候选文件名，按优先级从高到低。
-/// 排在基础候选之后加载，因此在同一目录内具有更高优先级。
-const LOCAL_OVERLAY_CANDIDATES: [&str; 2] = ["AGENTS.local.md", "CLAUDE.local.md"];
+/// 指令文档候选文件名的**单一来源**（wave-58 契约 F3-3 / 审查缺陷 P1-4）。
+///
+/// 根层（宪法注入：`resolve_constitution*`）与触达层（`instruction_touch`）必须
+/// 共用本常量，禁止任何模块再自带第二份字面量，否则同一目录在不同入口加载的
+/// 文件会不一致。
+///
+/// **顺序语义（严格分段，不得重排）**：
+/// - 前 3 项 = 基础候选（base），见 `CONSTITUTION_CANDIDATES`，按优先级从高到低；
+/// - 后 2 项 = 同目录个人覆盖层（local overlay），见 `LOCAL_OVERLAY_CANDIDATES`；
+///   覆盖层排在基础候选之后加载，因此在同一目录内具有更高优先级。
+///
+/// 本波**不改变**「同目录多候选首命中」语义（契约 D6）：每级目录先取基础候选
+/// 首命中，再取覆盖层首命中；`AGENTS.md` 与 `CLAUDE.md` 共存的语义变更留给 wave-59 + ADR。
+pub const INSTRUCTION_CANDIDATES: [&str; 5] = [
+    // —— 基础候选（base），高 → 低 ——
+    "AGENTS.md",
+    "CLAUDE.md",
+    // 项目级同时兼容 Claude Code 的 `.claude/CLAUDE.md` 布局。
+    ".claude/CLAUDE.md",
+    // —— local overlay 候选，高 → 低 ——
+    "AGENTS.local.md",
+    "CLAUDE.local.md",
+];
+
+/// 基础候选：引用 [`INSTRUCTION_CANDIDATES`] 前 3 项（保持既有常量名 / 类型 / 语义可用）。
+///
+/// 说明：const 上下文不支持范围切片（`Index` 尚未 const 稳定），故逐项引用；
+/// 这样仍是「单一来源」，改动候选表只需改 [`INSTRUCTION_CANDIDATES`]。
+const CONSTITUTION_CANDIDATES: [&str; 3] = [
+    INSTRUCTION_CANDIDATES[0],
+    INSTRUCTION_CANDIDATES[1],
+    INSTRUCTION_CANDIDATES[2],
+];
+
+/// local overlay 候选：引用 [`INSTRUCTION_CANDIDATES`] 后 2 项。
+const LOCAL_OVERLAY_CANDIDATES: [&str; 2] = [INSTRUCTION_CANDIDATES[3], INSTRUCTION_CANDIDATES[4]];
 
 /// 技能元数据解析所需的正文前缀上限：YAML frontmatter 足够，禁止整文件入内存。
 const SKILL_FRONTMATTER_READ_LIMIT: usize = 65_536;
@@ -104,6 +135,95 @@ pub struct HotloadedSkill {
     pub scope: AgentScope,
     /// 注入排序权重（wave-42 契约字段，数值越小越先注入）。
     pub rank: u16,
+}
+
+/// 技能扫描被跳过（omitted）的原因枚举（wave-58 契约 D2 / F2-6）。
+///
+/// 存在的意义：把「静默消失」变成可观测标记 `omitted skill:<name> (<reason>)`，
+/// 让模型与用户都能知道哪些技能存在但不可用、以及为什么不可用。
+/// `as_str` 的输出是稳定契约字面量（测试与提示词直接消费），禁止随意改名。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SkillOmissionReason {
+    /// 符号链接 / 路径逃逸出受信根。项目级根保持严格 canonical 包含判定（D1）。
+    OutsideRoot,
+    /// `SKILL.md` 超过 [`crate::agent::skill_body::MAX_SKILL_BODY_BYTES`]（F2-5）。
+    TooLarge,
+    /// 同名技能在去重中败出（去重键见 D3：`frontmatter.name`，缺省回落目录名）。
+    DuplicateName,
+    /// 候选入口不是普通文件（悬空符号链接、目录、FIFO 等）。
+    NotAFile,
+}
+
+impl SkillOmissionReason {
+    /// 稳定 snake_case 标记（写入 `omitted skill:<name> (<reason>)` 与测试断言）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OutsideRoot => "outside_root",
+            Self::TooLarge => "too_large",
+            Self::DuplicateName => "duplicate_name",
+            Self::NotAFile => "not_a_file",
+        }
+    }
+}
+
+/// 单条技能扫描跳过记录（wave-58 契约 F2-6）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillOmission {
+    /// 技能名（D3 去重键：`frontmatter.name`，缺省回落目录名）。
+    pub name: String,
+    /// 跳过原因。
+    pub reason: SkillOmissionReason,
+    /// 触发跳过的候选路径（技能目录或其 `SKILL.md`）。
+    pub path: PathBuf,
+}
+
+impl SkillOmission {
+    /// 稳定可观测标记 `omitted skill:<name> (<reason>)`（契约 D2 / F2-6）。
+    ///
+    /// wave-58 L3-B F-1：`name` 来自不可信技能内容 / 目录名，必须转义后才可进入模型可见文本，
+    /// 否则可伪造诊断行或段落标题。
+    pub fn marker(&self) -> String {
+        let name = sanitize_manifest_token(&self.name);
+        let name = if name.is_empty() {
+            sanitize_manifest_token(
+                &self
+                    .path
+                    .parent()
+                    .and_then(|directory| directory.file_name())
+                    .and_then(|folder| folder.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        } else {
+            name
+        };
+        // 额外硬化：名字里若内嵌诊断前缀（`omitted skill:`）会制造歧义诊断串，直接剔除。
+        let name = name.replace("omitted skill:", "");
+        let name = sanitize_manifest_token(&name);
+        let name = if name.is_empty() {
+            "unnamed-skill".to_string()
+        } else {
+            truncate_description(&name, MAX_SKILL_NAME_CHARS)
+        };
+        format!("omitted skill:{} ({})", name, self.reason.as_str())
+    }
+}
+
+/// 技能扫描报告（wave-58 契约 F2-6 / D2）。
+///
+/// `skills` 是**可加载**的技能清单（必须已过 [`crate::agent::skill_body::is_trusted_skill_file`]
+/// 同一信任谓词），`omitted` 是被跳过的候选及其原因。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkillScanReport {
+    pub skills: Vec<HotloadedSkill>,
+    pub omitted: Vec<SkillOmission>,
+}
+
+impl SkillScanReport {
+    /// 全部 `omitted skill:<name> (<reason>)` 标记（供提示词 / 可观测面直接消费）。
+    pub fn omission_markers(&self) -> Vec<String> {
+        self.omitted.iter().map(SkillOmission::marker).collect()
+    }
 }
 
 /// 指令注入预算上限（wave-42 契约桩）。
@@ -262,16 +382,189 @@ pub struct SessionDeltaUpdate {
     pub removed_skill_names: Vec<String>,
 }
 
+/// 会话基线注册表的容量上限（Wave-58 F2-7，Lead 裁决 1024）。
+///
+/// 背景：`session_baselines` 原为无界 `HashMap`，子代理会话 ID 每次新建，长驻进程会无界增长。
+/// 超限后按 LRU 淘汰；淘汰一律输出 `[pony-agent][hotloader]` 结构化诊断，**可观测而非静默**，
+/// 且被淘汰会话下一轮会以 notice 明确告知「前缀已 re-baseline」（不静默改写）。
+pub const MAX_SESSION_BASELINES: usize = 1024;
+
+/// 会话基线表（Wave-58 F2-7）：`session_id -> (快照, 已固化前缀字节, 最近使用序号)`。
+///
+/// LRU 写法与 `tools.rs` 的 `TouchedInstructionMemory` 对齐（单调 `sequence` + `last_used`
+/// 最小者先淘汰），避免引入额外依赖。
+/// 会话基线复合键（wave-58 L3-B F-2）：`(canonical workspace root, session_id)`。
+///
+/// 只按 `session_id` 分桶会让「同一 session 换绑工作区」整体回放旧工作区前缀（跨工作区串味），
+/// 因此 workspace 必须参与键；同一 session 同一 workspace 时行为与既有实现完全一致。
+type SessionBaselineKey = (String, String);
+
+#[derive(Debug, Default)]
+struct SessionBaselineRegistry {
+    entries: HashMap<SessionBaselineKey, SessionBaselineEntry>,
+    /// 单调递增访问序号（LRU 淘汰依据）。
+    sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SessionBaselineEntry {
+    snapshot: SessionBaselineSnapshot,
+    /// 首轮固化时使用的技能清单预算（wave-58 D5' / L3-裁决 A）。
+    ///
+    /// 回放时必须与本次传入的预算比对：预算变化（如 provider 窗口切换）不能用旧清单字节，
+    /// 而要用**基线内容**按新预算重渲染。
+    catalog_budget: SkillCatalogBudget,
+    /// 首轮扫描期的 omitted 诊断（wave-58 L3-B F-3）：预算变化触发重渲染时必须回放同一份标记，
+    /// 否则该轮 `outside_root` / `too_large` / `duplicate_name` 会静默消失。
+    omitted: Vec<SkillOmission>,
+    /// 首轮固化的**渲染结果**字节（回放即返回它，保证第 2 轮起前缀字节级不变）。
+    prefix: String,
+    /// 最近一次访问（读或写）时的访问序号。
+    last_used: u64,
+}
+
+impl SessionBaselineRegistry {
+    /// 触发一次访问并返回当前序号（饱和递增，永不 panic）。
+    fn tick(&mut self) -> u64 {
+        self.sequence = self.sequence.saturating_add(1);
+        self.sequence
+    }
+
+    /// 读取基线条目并标记该会话为最近使用；不存在时返回 `None`（复合键：workspace + session）。
+    fn touch_entry(&mut self, key: &SessionBaselineKey) -> Option<SessionBaselineEntry> {
+        let now = self.tick();
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = now;
+        Some(entry.clone())
+    }
+
+    /// 写入基线并做 LRU 淘汰（刚写入的条目永不作为淘汰对象）。
+    fn insert_entry(
+        &mut self,
+        key: SessionBaselineKey,
+        snapshot: SessionBaselineSnapshot,
+        catalog_budget: SkillCatalogBudget,
+        omitted: Vec<SkillOmission>,
+        prefix: String,
+    ) {
+        let now = self.tick();
+        let protected = key.clone();
+        self.entries.insert(
+            key,
+            SessionBaselineEntry {
+                snapshot,
+                catalog_budget,
+                omitted,
+                prefix,
+                last_used: now,
+            },
+        );
+        self.evict_overflow(&protected);
+    }
+
+    /// 容量超限时淘汰最久未使用的条目（Wave-58 F2-7）：逐条输出结构化诊断。
+    fn evict_overflow(&mut self, protected: &SessionBaselineKey) {
+        while self.entries.len() > MAX_SESSION_BASELINES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .filter(|(key, _)| *key != protected)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                return;
+            };
+            let evicted = self.entries.remove(&oldest);
+            eprintln!(
+                "[pony-agent][hotloader] session baseline evicted: workspace={} session={} reason=lru_capacity cap={MAX_SESSION_BASELINES} last_used={}",
+                oldest.0,
+                oldest.1,
+                evicted.map(|entry| entry.last_used).unwrap_or_default()
+            );
+        }
+    }
+}
+
+/// 技能缓存可驻留的 workspace 桶上限（wave-58 L3 L-1）。
+///
+/// 长驻桌面进程每打开一个工作区就会驻留一份技能缓存（技能多时每份数百 KB），
+/// 因此分桶表必须有界：超过上限按 LRU 淘汰最久未用工作区的桶，并同步清理其逐文件缓存。
+pub const MAX_SKILL_CACHE_WORKSPACES: usize = 16;
+
+/// 技能缓存分桶表（wave-58 L3 L-1）：`canonical workspace root -> (合并技能清单, 最近使用序号)`。
+///
+/// LRU 写法与 [`SessionBaselineRegistry`] 一致（单调 `sequence` + `last_used` 最小者先淘汰）。
+#[derive(Debug, Default)]
+struct SkillCacheRegistry {
+    entries: BTreeMap<PathBuf, SkillCacheEntry>,
+    /// 单调递增访问序号（LRU 淘汰依据）。
+    sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SkillCacheEntry {
+    skills: Vec<HotloadedSkill>,
+    /// 最近一次访问（读或写）时的访问序号。
+    last_used: u64,
+}
+
+impl SkillCacheRegistry {
+    /// 触发一次访问并返回当前序号（饱和递增，永不 panic）。
+    fn tick(&mut self) -> u64 {
+        self.sequence = self.sequence.saturating_add(1);
+        self.sequence
+    }
+
+    /// 读取桶内容并刷新 LRU 活跃度；未命中返回 `None`。
+    fn touch(&mut self, workspace: &Path) -> Option<Vec<HotloadedSkill>> {
+        let now = self.tick();
+        let entry = self.entries.get_mut(workspace)?;
+        entry.last_used = now;
+        Some(entry.skills.clone())
+    }
+
+    /// 写入（或更新）桶并做 LRU 淘汰，返回被淘汰的 workspace 列表（供调用方清理逐文件缓存）。
+    fn store(&mut self, workspace: PathBuf, skills: Vec<HotloadedSkill>) -> Vec<PathBuf> {
+        let now = self.tick();
+        self.entries.insert(
+            workspace.clone(),
+            SkillCacheEntry {
+                skills,
+                last_used: now,
+            },
+        );
+        let mut evicted: Vec<PathBuf> = Vec::new();
+        while self.entries.len() > MAX_SKILL_CACHE_WORKSPACES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .filter(|(candidate, _)| **candidate != workspace)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(candidate, _)| candidate.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest);
+            evicted.push(oldest);
+        }
+        evicted
+    }
+}
+
 /// 统一热加载与 KV-Cache 保护管理器
 #[derive(Debug, Default)]
 pub struct WorkspaceHotloader {
     constitution: RwLock<Option<ConstitutionCache>>,
-    /// 逐文件 Skill 缓存，键为 `{scope}:{目录名}`，避免重复读盘。
+    /// 逐文件 Skill 缓存，键为 `{canonical_workspace_root}:{scope}:{rank}:{folder}`。
+    ///
+    /// Wave-58 BLOCKING-1：进程级单例跨工作区复用，键必须含 workspace 身份，且命中判定必须
+    /// 比对 `fingerprint.path`（同尺寸 / 同 mtime 的不同文件不得互相冒充）。
     skill_files: RwLock<BTreeMap<String, HotloadedSkill>>,
-    /// 上次扫描的合并结果（按目录名去重，项目级覆盖全局级）。
-    skills: RwLock<Vec<HotloadedSkill>>,
-    /// 会话基线注册表：session_id -> SessionBaselineSnapshot
-    session_baselines: RwLock<HashMap<String, SessionBaselineSnapshot>>,
+    /// 上次扫描的合并结果，按 canonical workspace root 分桶（禁止跨工作区共享），
+    /// 并受 [`MAX_SKILL_CACHE_WORKSPACES`] 有界 LRU 约束（wave-58 L3 L-1）。
+    skills: RwLock<SkillCacheRegistry>,
+    /// 会话基线注册表（Wave-58 F2-7：有界 LRU，容量 [`MAX_SESSION_BASELINES`]）。
+    session_baselines: RwLock<SessionBaselineRegistry>,
 }
 
 static GLOBAL_HOTLOADER: std::sync::OnceLock<WorkspaceHotloader> = std::sync::OnceLock::new();
@@ -330,6 +623,37 @@ pub fn resolve_global_agent_homes() -> Vec<PathBuf> {
         dirs::config_dir().as_deref(),
         dirs::home_dir().as_deref(),
     )
+}
+
+/// 返回「当前会参与注入」的指令文件 **canonical 路径**清单（wave-58 契约 F3-4）。
+///
+/// 用途：会话首轮把根层已注入的来源种子化到 `TouchedInstructionMemory.seen`，
+/// 使触达层（`instruction_touch`）只注入真正的子目录指令，不再重复注入根层
+/// `AGENTS.md`（审查缺陷 P1-3 / 契约 F3-1）。触达层与 semistable 段必须共用本函数
+/// 的结果，不得各自计算来源集合（契约第 5 节自洽性检查）。
+///
+/// 顺序语义：与 [`WorkspaceHotloader::resolve_constitution_with_globals`] 的层级顺序一致
+/// ——全局根按 `global_homes` 顺序在前，项目祖先链（浅 → 深）在后；每级目录内按
+/// [`INSTRUCTION_CANDIDATES`] 分段语义先基础候选、再 local overlay。
+///
+/// **空桩（Protocol 冻结，执行者实现业务逻辑）**：只做纯路径计算，不读正文、不入预算；
+/// 不可读 / 不可采纳 / 越界符号链接的来源直接不出现（fail-closed）。
+pub fn constitution_source_paths(workspace_root: &Path, global_homes: &[PathBuf]) -> Vec<PathBuf> {
+    // 与宪法注入共用同一发现函数，保证「会注入什么」与「种子化什么」是同一来源集合，
+    // 不各自计算（契约第 5 节自洽性检查）。
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for source in discover_constitution_sources(workspace_root, global_homes) {
+        // fail-closed：不可 canonicalize（悬空符号链接 / 不可读 / 无权限）的来源本就不会被
+        // 注入，因此也不进入路径清单。
+        let Ok(canonical) = fs::canonicalize(&source.path) else {
+            continue;
+        };
+        // 同一物理文件经不同根到达（符号链接归一）时只记一次。
+        if !paths.iter().any(|existing| existing == &canonical) {
+            paths.push(canonical);
+        }
+    }
+    paths
 }
 
 impl WorkspaceHotloader {
@@ -447,135 +771,346 @@ impl WorkspaceHotloader {
 
     /// 可注入全局根目录的 Skills 扫描变体。
     ///
-    /// 扫描顺序即优先级（后者覆盖前者）：全局根按 `global_homes` 顺序，随后项目级
-    /// `.agents/skills` 与 `.claude/skills`。同名（同目录名）时项目级覆盖全局级。
+    /// **签名与语义保持不变**（wave-58 F2-6）：仍返回 `(技能清单, 是否完全命中缓存未变动)`，
+    /// 内部委托 [`Self::scan_skills_internal`]。扫描与加载共用同一信任谓词（D1），
+    /// 去重键为 frontmatter `name`（D3）；被跳过的候选只体现在报告的 `omitted` 里，
+    /// 不改变本方法的返回值形状。
     pub fn scan_skills_with_globals<P: AsRef<Path>>(
         &self,
         workspace_root: P,
         global_homes: &[PathBuf],
     ) -> (Vec<HotloadedSkill>, bool) {
-        let skill_dirs = discover_skill_dirs(workspace_root.as_ref(), global_homes);
-        let mut discovered: BTreeMap<String, HotloadedSkill> = BTreeMap::new();
+        let (report, hit) = self.scan_skills_internal(workspace_root.as_ref(), global_homes);
+        (report.skills, hit)
+    }
+
+    /// 技能扫描（带省略诊断），全局根按进程环境解析（wave-58 契约 F2-6 / D2）。
+    ///
+    /// 语义：`skills` 只包含**可加载**的技能（扫描与加载共用同一信任谓词，见 D1），
+    /// 被跳过的候选以 [`SkillOmission`] 逐条记录，供 `omitted skill:<name> (<reason>)` 标记。
+    pub fn scan_skills_report<P: AsRef<Path>>(&self, workspace_root: P) -> SkillScanReport {
+        let global_homes = resolve_global_agent_homes();
+        self.scan_skills_report_with_globals(workspace_root, &global_homes)
+    }
+
+    /// 技能扫描（带省略诊断），可注入全局根（wave-58 契约 F2-6 / D2）。
+    ///
+    /// 与 [`Self::scan_skills_with_globals`] 同源（都走 [`Self::scan_skills_internal`]），
+    /// 区别只在本方法返回被跳过候选的诊断明细。
+    pub fn scan_skills_report_with_globals<P: AsRef<Path>>(
+        &self,
+        workspace_root: P,
+        global_homes: &[PathBuf],
+    ) -> SkillScanReport {
+        self.scan_skills_internal(workspace_root.as_ref(), global_homes)
+            .0
+    }
+
+    /// 技能扫描的**唯一实现**（wave-58 F2-3 / F2-4 / F2-5 / F2-6）。
+    ///
+    /// 契约落点：
+    /// 1. **D1 分域信任**：每个候选的 `SKILL.md` 都经
+    ///    [`crate::agent::skill_body::trust_skill_file`]（`is_trusted_skill_file` 的内部实现）判定，
+    ///    与 `skill_load` 加载路径调用同一个谓词 —— 消除「清单里有、加载 404」（P1-6）。
+    ///    全局根允许符号链接逃逸；项目根严格 canonical 包含，且根自身不得逃出 workspace。
+    /// 2. **D2 可观测**：被跳过的候选逐条进入 `omitted`（outside_root / too_large /
+    ///    duplicate_name / not_a_file），不再静默消失（P2-1 / P2-8）。
+    /// 3. **D3 去重**：键 = frontmatter `name`（缺省回落目录名），同名先比 `rank`（小者胜），
+    ///    同 rank 比 canonical 路径字典序（确定性，不依赖遍历顺序），败者记 `duplicate_name`。
+    /// 4. **确定性**：目录项按名字排序后遍历；`omitted` 按 (name, reason, path) 排序去重。
+    /// 5. **P2-3**：同一物理技能根经不同路径到达（`<ws>/.claude/skills -> .agents/skills`）
+    ///    只扫描一次（canonical 根去重），避免重复 IO。
+    fn scan_skills_internal(
+        &self,
+        workspace_root: &Path,
+        global_homes: &[PathBuf],
+    ) -> (SkillScanReport, bool) {
+        let canonical_workspace = workspace_root.canonicalize().ok();
+        // Wave-58 BLOCKING-1：workspace 身份标签（canonical 优先），用于缓存键与合并结果分桶。
+        let workspace_label = canonical_workspace
+            .clone()
+            .unwrap_or_else(|| workspace_root.to_path_buf())
+            .display()
+            .to_string();
         let mut file_cache: BTreeMap<String, HotloadedSkill> = BTreeMap::new();
         let mut any_changed = false;
+        let mut omitted: Vec<SkillOmission> = Vec::new();
+        // (技能, canonical 的 SKILL.md 路径)：canonical 路径只用于 D3 同 rank tie-break。
+        let mut candidates: Vec<(HotloadedSkill, PathBuf)> = Vec::new();
 
-        for (scope, base_dir, rank) in skill_dirs {
-            let entries = match fs::read_dir(&base_dir) {
-                Ok(entries) => entries,
-                Err(_) => continue,
+        // —— 阶段 1：技能根筛选（分域信任 + canonical 去重）——
+        let mut scan_roots: Vec<(AgentScope, PathBuf, u16, bool, bool)> = Vec::new();
+        let mut seen_canonical_roots: HashSet<PathBuf> = HashSet::new();
+        for (scope, base_dir, rank) in discover_skill_dirs(workspace_root, global_homes) {
+            // D1：全局根（用户自有域）允许符号链接解析到根外；项目根保持严格包含。
+            let allow_symlink_escape = scope == AgentScope::Global;
+            let canonical_root = base_dir.canonicalize().ok();
+            let root_trusted = if allow_symlink_escape {
+                true
+            } else {
+                // 项目根自身不得经符号链接逃出 workspace（workspace 内容是不可信输入）。
+                match (canonical_workspace.as_ref(), canonical_root.as_ref()) {
+                    (Some(canonical_workspace), Some(canonical_root)) => {
+                        canonical_root.starts_with(canonical_workspace)
+                    }
+                    _ => false,
+                }
             };
+            // P2-3：同一物理根只扫描一次（保留先出现的 rank，即更高优先级那个）。
+            if let Some(canonical_root) = canonical_root {
+                if !seen_canonical_roots.insert(canonical_root) {
+                    continue;
+                }
+            }
+            scan_roots.push((scope, base_dir, rank, allow_symlink_escape, root_trusted));
+        }
 
-            for entry in entries.flatten() {
+        // —— 阶段 2：逐候选判定 + 解析 ——
+        for (scope, base_dir, rank, allow_symlink_escape, root_trusted) in scan_roots {
+            let Ok(read_dir) = fs::read_dir(&base_dir) else {
+                continue;
+            };
+            let mut entries: Vec<fs::DirEntry> = read_dir.flatten().collect();
+            // 确定性：不依赖 read_dir 顺序。
+            entries.sort_by_key(|entry| entry.file_name());
+
+            for entry in entries {
                 let path = entry.path();
-                if path.is_dir() {
-                    let folder_name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let skill_file = path.join("SKILL.md");
-                    if !skill_file.is_file() {
-                        continue;
-                    }
-
-                    let metadata = match fs::metadata(&skill_file) {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    };
-                    let mtime = metadata.modified().ok();
-                    let file_size = metadata.len();
-                    // B7：超过技能正文上限的文件按 TooLarge 语义整条跳过，
-                    // 不读取任何正文（否则 768MiB 级文件会被整份读入）。
-                    if file_size > crate::agent::skill_body::MAX_SKILL_BODY_BYTES as u64 {
-                        continue;
-                    }
-                    // 同一 scope 下可能存在多个技能根（.dsh/.agents/.claude），
-                    // 键中带上 rank 以免不同根的缓存互相覆盖。
-                    let cache_key = format!("{}:{}:{}", scope.as_str(), rank, folder_name);
-
-                    let cached = {
-                        let read_guard = self
-                            .skill_files
-                            .read()
-                            .unwrap_or_else(|poison| poison.into_inner());
-                        read_guard.get(&cache_key).cloned()
-                    };
-
-                    let skill = match cached {
-                        Some(existing)
-                            if existing.scope == scope
-                                && existing.rank == rank
-                                && existing.fingerprint.mtime == mtime
-                                && existing.fingerprint.file_size == file_size =>
-                        {
-                            existing
+                let folder_name = entry.file_name().to_string_lossy().to_string();
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                // 技能候选 = 目录 / 指向目录的符号链接；普通文件条目不是技能，静默忽略。
+                let is_dir_candidate = if file_type.is_dir() {
+                    true
+                } else if file_type.is_symlink() {
+                    match fs::metadata(&path) {
+                        Ok(metadata) if metadata.is_dir() => true,
+                        Ok(_) => false,
+                        Err(_) => {
+                            // 悬空目录符号链接（P2-8）：可观测标记，不得静默消失。
+                            omitted.push(SkillOmission {
+                                name: folder_name,
+                                reason: SkillOmissionReason::NotAFile,
+                                path,
+                            });
+                            continue;
                         }
-                        _ => {
-                            any_changed = true;
-                            // B7：只为解析 frontmatter 读取有界前缀。
-                            match FileFingerprint::compute_bounded(
-                                &skill_file,
-                                SKILL_FRONTMATTER_READ_LIMIT,
-                            ) {
-                                Some((fingerprint, content)) => {
-                                    let (parsed_name, description, user_invocable, allowed_tools) =
-                                        parse_skill_metadata(&content, &folder_name);
-                                    HotloadedSkill {
-                                        name: parsed_name,
-                                        description,
-                                        user_invocable,
-                                        allowed_tools,
-                                        path: skill_file,
-                                        fingerprint,
-                                        scope,
-                                        rank,
-                                    }
+                    }
+                } else {
+                    false
+                };
+                if !is_dir_candidate {
+                    continue;
+                }
+                let skill_file = path.join("SKILL.md");
+                // 目录内没有 SKILL.md：不是技能目录（既有语义：静默忽略，不产生噪音）。
+                if fs::symlink_metadata(&skill_file).is_err() {
+                    continue;
+                }
+
+                // D1 / F2-3：扫描与加载共用的同一信任谓词。
+                let trust = if root_trusted {
+                    trust_skill_file(&skill_file, &base_dir, allow_symlink_escape)
+                } else {
+                    Err(SkillTrustRejection::OutsideRoot)
+                };
+                let canonical = match trust {
+                    Ok(trusted) => trusted.canonical,
+                    Err(rejection) => {
+                        let reason = match rejection {
+                            SkillTrustRejection::OutsideRoot => SkillOmissionReason::OutsideRoot,
+                            SkillTrustRejection::TooLarge => SkillOmissionReason::TooLarge,
+                            SkillTrustRejection::NotAFile => SkillOmissionReason::NotAFile,
+                        };
+                        // F2-5：超限技能仍可有界读取 frontmatter 取真实 name（D3 去重键语义一致）；
+                        // 其余拒绝原因（越界 / 非文件）禁止读取目标内容，name 回落目录名。
+                        let name = if reason == SkillOmissionReason::TooLarge {
+                            skill_name_from_frontmatter_prefix(&skill_file).unwrap_or(folder_name)
+                        } else {
+                            folder_name
+                        };
+                        omitted.push(SkillOmission {
+                            name,
+                            reason,
+                            path: skill_file,
+                        });
+                        continue;
+                    }
+                };
+
+                let metadata = match fs::metadata(&skill_file) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        omitted.push(SkillOmission {
+                            name: folder_name,
+                            reason: SkillOmissionReason::NotAFile,
+                            path: skill_file,
+                        });
+                        continue;
+                    }
+                };
+                let mtime = metadata.modified().ok();
+                let file_size = metadata.len();
+                // Wave-58 BLOCKING-1：键必须含 workspace 身份 —— 进程级单例跨工作区复用，
+                // 只带 `scope:rank:folder` 会让 A 工作区的同名技能冒充 B 工作区的技能。
+                let cache_key = format!(
+                    "{}:{}:{}:{}",
+                    workspace_label,
+                    scope.as_str(),
+                    rank,
+                    folder_name
+                );
+
+                let cached = {
+                    let read_guard = self
+                        .skill_files
+                        .read()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    read_guard.get(&cache_key).cloned()
+                };
+
+                let skill = match cached {
+                    Some(existing)
+                        if existing.scope == scope
+                            && existing.rank == rank
+                            // BLOCKING-1：同尺寸 + 同 mtime 的不同文件不得互相冒充。
+                            && existing.fingerprint.path == skill_file
+                            && existing.path == skill_file
+                            && existing.fingerprint.mtime == mtime
+                            && existing.fingerprint.file_size == file_size =>
+                    {
+                        existing
+                    }
+                    _ => {
+                        any_changed = true;
+                        // B7：只为解析 frontmatter 读取有界前缀。
+                        match FileFingerprint::compute_bounded(
+                            &skill_file,
+                            SKILL_FRONTMATTER_READ_LIMIT,
+                        ) {
+                            Some((fingerprint, content)) => {
+                                let (parsed_name, description, user_invocable, allowed_tools) =
+                                    parse_skill_metadata(&content, &folder_name);
+                                HotloadedSkill {
+                                    name: parsed_name,
+                                    description,
+                                    user_invocable,
+                                    allowed_tools,
+                                    path: skill_file.clone(),
+                                    fingerprint,
+                                    scope,
+                                    rank,
                                 }
-                                None => continue,
                             }
-                        }
-                    };
-
-                    file_cache.insert(cache_key, skill.clone());
-                    // 同名技能裁决：rank 小者胜；rank 相同时项目层胜（不依赖遍历顺序）。
-                    match discovered.entry(folder_name) {
-                        std::collections::btree_map::Entry::Occupied(mut entry) => {
-                            let existing_rank = entry.get().rank;
-                            let challenger_wins = skill.rank < existing_rank
-                                || (skill.rank == existing_rank
-                                    && skill.scope == AgentScope::Project);
-                            if challenger_wins {
-                                entry.insert(skill);
+                            None => {
+                                omitted.push(SkillOmission {
+                                    name: folder_name,
+                                    reason: SkillOmissionReason::NotAFile,
+                                    path: skill_file,
+                                });
+                                continue;
                             }
-                        }
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(skill);
                         }
                     }
+                };
+
+                file_cache.insert(cache_key, skill.clone());
+                candidates.push((skill, canonical));
+            }
+        }
+
+        // —— 阶段 3：D3 去重（键 = frontmatter name，缺省目录名）——
+        let mut winners: BTreeMap<String, (HotloadedSkill, PathBuf)> = BTreeMap::new();
+        for (skill, canonical) in candidates {
+            match winners.entry(skill.name.clone()) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let challenger_wins = {
+                        let (existing, existing_canonical) = entry.get();
+                        skill.rank < existing.rank
+                            || (skill.rank == existing.rank && canonical < *existing_canonical)
+                    };
+                    if challenger_wins {
+                        let (loser, _) = entry.insert((skill, canonical));
+                        omitted.push(SkillOmission {
+                            name: loser.name,
+                            reason: SkillOmissionReason::DuplicateName,
+                            path: loser.path,
+                        });
+                    } else {
+                        omitted.push(SkillOmission {
+                            name: skill.name,
+                            reason: SkillOmissionReason::DuplicateName,
+                            path: skill.path,
+                        });
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((skill, canonical));
                 }
             }
         }
+        let merged: Vec<HotloadedSkill> = winners
+            .into_values()
+            .map(|(skill, _canonical)| skill)
+            .collect();
 
-        let merged: Vec<HotloadedSkill> = discovered.into_values().collect();
+        // 诊断项确定性排序并去掉完全重复项（同一 root 重复到达时不产生双份噪音）。
+        omitted.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.reason.cmp(&right.reason))
+                .then(left.path.cmp(&right.path))
+        });
+        omitted.dedup();
+
+        let report = SkillScanReport {
+            skills: merged,
+            omitted,
+        };
+        // 合并结果按 canonical workspace root 分桶（BLOCKING-1：单例不得跨工作区共享）。
+        let workspace_bucket = canonical_workspace
+            .clone()
+            .unwrap_or_else(|| workspace_root.to_path_buf());
         {
-            let read_guard = self
+            let mut guard = self
                 .skills
-                .read()
+                .write()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if !any_changed && *read_guard == merged {
-                return (read_guard.clone(), true);
+            if !any_changed && guard.touch(&workspace_bucket).as_ref() == Some(&report.skills) {
+                return (report, true);
             }
         }
 
-        *self
-            .skill_files
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = file_cache;
-        *self
+        // 写入分桶表并做 LRU 淘汰（wave-58 L3 L-1）：被淘汰工作区等同「首次访问」。
+        let evicted_workspaces = self
             .skills
             .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = merged.clone();
-        (merged, false)
+            .unwrap_or_else(|poison| poison.into_inner())
+            .store(workspace_bucket, report.skills.clone());
+
+        {
+            let mut guard = self
+                .skill_files
+                .write()
+                .unwrap_or_else(|poison| poison.into_inner());
+            // 只替换本工作区的缓存切片，其他工作区的条目保持不变。
+            let prefix = format!("{workspace_label}:");
+            guard.retain(|key, _| !key.starts_with(&prefix));
+            // 被淘汰工作区的逐文件缓存同步清除，避免内存泄漏。
+            for evicted in &evicted_workspaces {
+                let evicted_prefix = format!("{}:", evicted.display());
+                guard.retain(|key, _| !key.starts_with(&evicted_prefix));
+                eprintln!(
+                    "[pony-agent][hotloader] skill cache evicted: workspace={} reason=lru_capacity cap={MAX_SKILL_CACHE_WORKSPACES}",
+                    evicted.display()
+                );
+            }
+            for (key, value) in file_cache {
+                guard.insert(key, value);
+            }
+        }
+        (report, false)
     }
 
     /// 会话 KV-Cache 保护机制（Append-Only Delta Update）：
@@ -625,95 +1160,186 @@ impl WorkspaceHotloader {
         global_homes: &[PathBuf],
         budget: InstructionBudget,
     ) -> (String, Option<String>) {
-        let (current_constitution, _) = self
-            .resolve_constitution_with_budget(&workspace_root, global_homes, budget)
-            .unwrap_or_else(|| (String::new(), true));
-        let (current_skills, _) =
-            self.scan_skills_with_budget(&workspace_root, global_homes, budget);
-
-        let const_hash = fnv1a_hash(current_constitution.as_bytes());
-        let mut skill_hash_input = Vec::new();
-        for s in &current_skills {
-            skill_hash_input.extend_from_slice(s.name.as_bytes());
-            skill_hash_input.extend_from_slice(s.scope.as_str().as_bytes());
-            skill_hash_input.extend_from_slice(s.description.as_bytes());
-            skill_hash_input.extend_from_slice(&s.fingerprint.content_hash.to_le_bytes());
-        }
-        let skills_hash = fnv1a_hash(&skill_hash_input);
-
-        let mut baselines = self
-            .session_baselines
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner());
-
-        if turn_count <= 1 || !baselines.contains_key(session_id) {
-            // 首轮：固化静态 Baseline
-            let baseline = SessionBaselineSnapshot {
-                constitution_hash: const_hash,
-                constitution_content: current_constitution.clone(),
-                skills_hash,
-                skills: current_skills.clone(),
-                budget,
-            };
-            let static_prefix =
-                self.build_cached_prompt_prefix(Some(&current_constitution), &current_skills);
-            baselines.insert(session_id.to_string(), baseline);
-            return (static_prefix, None);
-        }
-
-        // 非首轮：取出会话固化的基线，保持最头部静态 Prompt 前缀字节级完全相同（KV-Cache Hit 100%）
-        let baseline = baselines.get(session_id).unwrap().clone();
-        let stable_prefix =
-            self.build_cached_prompt_prefix(Some(&baseline.constitution_content), &baseline.skills);
-
-        // 检测是否存在中途变更（预算变化同样视为配置变化：已固化前缀不得重算）
-        let const_changed = baseline.constitution_hash != const_hash;
-        let skills_changed = baseline.skills_hash != skills_hash;
-        let budget_changed = baseline.budget != budget;
-
-        if !const_changed && !skills_changed && !budget_changed {
-            return (stable_prefix, None);
-        }
-
-        // 计算增量并生成追加消息（Append-Only Notification）
-        let mut delta_notice =
-            String::from("Notice: Workspace configuration was updated mid-session:\n");
-        if const_changed {
-            delta_notice.push_str(
-                "- Workspace constitution/rules updated. Latest guidelines are active.\n",
-            );
-        }
-        if budget_changed {
-            delta_notice
-                .push_str("- Instruction injection budget changed. Baseline prefix is retained.\n");
-        }
-        if skills_changed {
-            let old_names: Vec<_> = baseline.skills.iter().map(|s| &s.name).collect();
-            let new_names: Vec<_> = current_skills.iter().map(|s| &s.name).collect();
-            let added: Vec<_> = new_names
-                .iter()
-                .filter(|n| !old_names.contains(n))
-                .collect();
-            let removed: Vec<_> = old_names
-                .iter()
-                .filter(|n| !new_names.contains(n))
-                .collect();
-            if !added.is_empty() {
-                delta_notice.push_str(&format!("- Newly installed skills: {:?}\n", added));
-            }
-            if !removed.is_empty() {
-                delta_notice.push_str(&format!("- Removed skills: {:?}\n", removed));
-            }
-        }
-
-        (stable_prefix, Some(delta_notice))
+        self.resolve_session_prompt_context_with_budget_and_catalog(
+            session_id,
+            turn_count,
+            workspace_root,
+            global_homes,
+            budget,
+            SkillCatalogBudget::unlimited(),
+        )
     }
 
-    /// 构造静态保真的 Prompt 前缀块，确保 Prompt Cache 最佳命中
+    /// 会话前缀变体：技能清单同时受 [`SkillCatalogBudget`] 约束（wave-58 D5'）。
+    ///
+    /// 供 `context.rs` 按 provider 上下文窗口计算清单预算后调用；`catalog_budget` 为
+    /// [`SkillCatalogBudget::unlimited`] 时与既有 [`Self::resolve_session_prompt_context_with_budget`]
+    /// 字节完全一致。超预算条目从尾部丢弃并输出 `omitted skill:<name> (budget)` 标记。
+    ///
+    /// 注意：为保证首轮固化的前缀可复现，调用方应传入**会话内稳定**的预算
+    /// （同一 provider 窗口）；中途变化只影响下一次渲染，不会被记为宪法/技能变更。
+    pub fn resolve_session_prompt_context_with_budget_and_catalog<P: AsRef<Path>>(
+        &self,
+        session_id: &str,
+        turn_count: usize,
+        workspace_root: P,
+        global_homes: &[PathBuf],
+        budget: InstructionBudget,
+        catalog_budget: SkillCatalogBudget,
+    ) -> (String, Option<String>) {
+        let workspace_root = workspace_root.as_ref();
+        let (current_constitution, _) = self
+            .resolve_constitution_with_budget(workspace_root, global_homes, budget)
+            .unwrap_or_else(|| (String::new(), true));
+        // Wave-58 D2 / L3-B4：走报告通道，omitted 诊断在生产路径不再被丢弃。
+        let (report, _) = self.scan_skills_internal(workspace_root, global_homes);
+        let current_skills = apply_skill_injection_budget(report.skills, budget);
+
+        let const_hash = fnv1a_hash(current_constitution.as_bytes());
+        let skills_hash = skill_set_hash(&current_skills);
+        // Wave-58 L3-B F-2：基线键 = (canonical workspace root, session_id)，同 session 换绑工作区
+        // 不会回放旧工作区前缀（跨工作区不得串味）。
+        let baseline_key: SessionBaselineKey = (
+            workspace_root
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_root.to_path_buf())
+                .display()
+                .to_string(),
+            session_id.to_string(),
+        );
+
+        // 快路径：锁内只取快照（渲染一律在锁外，L3-A4）。
+        let replayed = if turn_count <= 1 {
+            None
+        } else {
+            let mut baselines = self
+                .session_baselines
+                .write()
+                .unwrap_or_else(|poison| poison.into_inner());
+            baselines.touch_entry(&baseline_key)
+        };
+
+        if let Some(entry) = replayed {
+            // 非首轮：默认回放已固化的前缀字节（KV-Cache 头保护）。
+            let baseline = entry.snapshot;
+            let const_changed = baseline.constitution_hash != const_hash;
+            let skills_changed = baseline.skills_hash != skills_hash;
+            let budget_changed = baseline.budget != budget;
+            // L3 裁决 A：清单预算不一致（如 provider 窗口切换）时不能用旧清单字节，
+            // 必须用**基线内容**按**当前** catalog_budget 重渲染；宪法/技能正文仍取基线 ⇒ F1-3 不破。
+            // 渲染结果不回写基线（baseline 只存首轮事实，避免预算抖动引发反复重渲染）。
+            let catalog_changed = entry.catalog_budget != catalog_budget;
+            let replay_prefix = if catalog_changed {
+                // F-3：omitted 取首轮存档（同一份诊断标记），而不是写死为空。
+                self.render_prompt_prefix_with_budget(
+                    Some(&baseline.constitution_content),
+                    &baseline.skills,
+                    catalog_budget,
+                    &entry.omitted,
+                )
+            } else {
+                entry.prefix
+            };
+            if !const_changed && !skills_changed && !budget_changed && !catalog_changed {
+                return (replay_prefix, None);
+            }
+            let delta_notice = build_session_delta_notice(
+                &baseline,
+                &current_skills,
+                const_changed,
+                skills_changed,
+                budget_changed,
+                catalog_changed,
+            );
+            return (replay_prefix, Some(delta_notice));
+        }
+
+        // 需要（重新）固化基线：渲染在锁外完成，避免把全量渲染压进全局写锁。
+        let static_prefix = self.render_prompt_prefix_with_budget(
+            Some(&current_constitution),
+            &current_skills,
+            catalog_budget,
+            &report.omitted,
+        );
+        // L3 BLOCKING-2：中途未命中基线（LRU 淘汰 / 进程重启）必须可观测，不得静默改写前缀。
+        let notice = if turn_count > 1 {
+            eprintln!(
+                "[pony-agent][hotloader] session baseline missing: session={session_id} turn={turn_count} reason=not_retained (lru_capacity={MAX_SESSION_BASELINES} or process restart); prefix re-baselined"
+            );
+            Some(String::from(
+                "Notice: Session baseline was not retained (capacity or process restart); prompt prefix re-baselined.\n",
+            ))
+        } else {
+            None
+        };
+
+        let baseline = SessionBaselineSnapshot {
+            constitution_hash: const_hash,
+            constitution_content: current_constitution,
+            skills_hash,
+            skills: current_skills,
+            budget,
+        };
+        {
+            let mut baselines = self
+                .session_baselines
+                .write()
+                .unwrap_or_else(|poison| poison.into_inner());
+            baselines.insert_entry(
+                baseline_key,
+                baseline,
+                catalog_budget,
+                report.omitted.clone(),
+                static_prefix.clone(),
+            );
+        }
+        (static_prefix, notice)
+    }
+
+    /// 构造静态保真的 Prompt 前缀块，确保 Prompt Cache 最佳命中。
+    ///
+    /// **既有语义不变**（wave-58 D5'）：不裁剪技能清单；需要按窗口预算裁剪请调用
+    /// [`Self::build_cached_prompt_prefix_with_budget`]。
     pub fn build_cached_prompt_prefix(
         &self,
         constitution_content: Option<&str>,
         skills: &[HotloadedSkill],
+    ) -> String {
+        self.build_cached_prompt_prefix_with_budget(
+            constitution_content,
+            skills,
+            SkillCatalogBudget::unlimited(),
+        )
+    }
+
+    /// 构造静态 Prompt 前缀块，技能清单受 [`SkillCatalogBudget`] 约束（wave-58 D5'）。
+    ///
+    /// 裁剪语义：
+    /// - 裁剪前先按 `(rank 升序, 项目层优先, name 字典序)` 定优先级，**从低优先级**丢弃；
+    /// - 被丢弃的条目最多输出 8 条 `omitted skill:<name> (budget)` 标记，其余折叠为
+    ///   一行 `omitted skills: N more (catalog budget)`；
+    /// - 保留条目仍按传入顺序渲染（前缀不因裁剪改变顺序）；
+    /// - 宪法段不受目录预算影响（照旧完整渲染）；
+    /// - 预算连标题都放不下时整段清单不渲染（fail-safe，不输出半截标题）。
+    pub fn build_cached_prompt_prefix_with_budget(
+        &self,
+        constitution_content: Option<&str>,
+        skills: &[HotloadedSkill],
+        catalog_budget: SkillCatalogBudget,
+    ) -> String {
+        self.render_prompt_prefix_with_budget(constitution_content, skills, catalog_budget, &[])
+    }
+
+    /// 前缀渲染的唯一实现（wave-58 D5' + D2 / L3-B4）：技能清单预算裁剪 + omitted 标记。
+    ///
+    /// `omitted` 为扫描阶段被跳过的候选（[`SkillOmission`]），其标记与预算裁剪标记共用
+    /// ≤8 条具名上限与折叠行，一并计入清单段预算。
+    fn render_prompt_prefix_with_budget(
+        &self,
+        constitution_content: Option<&str>,
+        skills: &[HotloadedSkill],
+        catalog_budget: SkillCatalogBudget,
+        omitted: &[SkillOmission],
     ) -> String {
         let mut prefix = String::with_capacity(4096);
 
@@ -725,24 +1351,348 @@ impl WorkspaceHotloader {
             }
         }
 
-        if !skills.is_empty() {
-            prefix.push_str("=== AVAILABLE REUSABLE SKILLS ===\n");
-            prefix.push_str(
-                "The following project-specific skills are available and loadable on demand:\n",
-            );
-            for skill in skills {
-                prefix.push_str(&format!(
-                    "- `{}` [{}]: {}\n",
-                    skill.name,
-                    skill.scope.as_str(),
-                    skill.description
-                ));
+        if !skills.is_empty() || !omitted.is_empty() {
+            let header = "=== AVAILABLE REUSABLE SKILLS ===\n\
+                          The following project-specific skills are available and loadable on demand:\n";
+            let header_bytes = header.len();
+            if catalog_budget.max_bytes < header_bytes {
+                // 预算连标题都放不下：整段不渲染（宪法照旧），不输出半截清单。
+                return prefix;
             }
-            prefix.push_str("\n");
+            // wave-58 F2-1 / F1-2：块标量描述可能含换行，清单必须保持「每个技能一行」，
+            // 因此渲染时把描述内的换行压平为空格（`HotloadedSkill.description` 本身保持原文）。
+            let lines: Vec<String> = skills
+                .iter()
+                .map(|skill| {
+                    // wave-58 L3-B F-1：name / description 均为不可信文本，进入模型可见清单前转义
+                    // （换行与控制字符压平、反引号与连续等号剔除），并各自受限长。
+                    format!(
+                        "- `{}` [{}]: {}\n",
+                        manifest_display_name(skill),
+                        skill.scope.as_str(),
+                        manifest_description(skill)
+                    )
+                })
+                .collect();
+
+            // 1) 裁剪优先级（与 `scan_skills_with_budget` 的 `by_priority` 同口径）：
+            //    rank 小者优先 → 同 rank 项目层优先 → name 字典序 → 原返回顺序（确定性）。
+            //    注意：`scan_skills_internal` 的返回顺序是 name 字典序，**不是**优先级顺序，
+            //    因此绝不能用「从尾部丢弃」代替优先级裁剪，否则字典序靠后的项目技能会被
+            //    全局技能挤掉（wave-58 F1-6 大窗口分支）。
+            let mut priority: Vec<usize> = (0..skills.len()).collect();
+            priority.sort_by(|&left, &right| {
+                skills[left]
+                    .rank
+                    .cmp(&skills[right].rank)
+                    .then(skills[right].scope.cmp(&skills[left].scope))
+                    .then(skills[left].name.cmp(&skills[right].name))
+                    .then(left.cmp(&right))
+            });
+
+            // 2) 按优先级选取保留集合（字节预算 + 条目上限）。
+            let mut kept_flags = vec![false; skills.len()];
+            let mut kept_count = 0usize;
+            let mut used = header_bytes;
+            for &index in &priority {
+                if kept_count >= catalog_budget.max_entries {
+                    break;
+                }
+                let line_bytes = lines[index].len();
+                if used + line_bytes > catalog_budget.max_bytes {
+                    break;
+                }
+                used += line_bytes;
+                kept_flags[index] = true;
+                kept_count += 1;
+            }
+
+            // 3) 标记行同样吃预算：放不下时按优先级从低到高继续收缩保留集合（有界收敛）。
+            loop {
+                let dropped: Vec<usize> = priority
+                    .iter()
+                    .copied()
+                    .filter(|&index| !kept_flags[index])
+                    .collect();
+                let markers = catalog_marker_lines(omitted, skills, &dropped);
+                let markers_bytes: usize = markers.iter().map(String::len).sum();
+                if used + markers_bytes <= catalog_budget.max_bytes {
+                    // 4) 渲染：保留集合按**原返回顺序**输出（渲染顺序不因裁剪而变，前缀稳定），
+                    //    标记按被丢弃者的同一优先级顺序输出。
+                    prefix.push_str(header);
+                    for (index, line) in lines.iter().enumerate() {
+                        if kept_flags[index] {
+                            prefix.push_str(line);
+                        }
+                    }
+                    for marker in &markers {
+                        prefix.push_str(marker);
+                    }
+                    prefix.push_str("\n");
+                    return prefix;
+                }
+                // 丢掉优先级最低的保留项（`priority` 已按高→低排序，取反向首个保留者）。
+                match priority.iter().rev().copied().find(|&index| kept_flags[index]) {
+                    Some(weakest) => {
+                        kept_flags[weakest] = false;
+                        kept_count -= 1;
+                        used -= lines[weakest].len();
+                    }
+                    None => {
+                        // 已无条目可丢：仍要尽量输出扫描 omitted 标记（预算允许时）。
+                        let fallback = catalog_marker_lines(omitted, skills, &[]);
+                        let fallback_bytes: usize = fallback.iter().map(String::len).sum();
+                        if header_bytes + fallback_bytes <= catalog_budget.max_bytes {
+                            prefix.push_str(header);
+                            for marker in &fallback {
+                                prefix.push_str(marker);
+                            }
+                            prefix.push_str("\n");
+                        }
+                        return prefix;
+                    }
+                }
+            }
         }
 
         prefix
     }
+}
+
+/// 技能清单预算（wave-58 D5'）：字节上限 + 条目上限。
+///
+/// `unlimited()` 表示不裁剪（既有 [`WorkspaceHotloader::build_cached_prompt_prefix`] 语义）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SkillCatalogBudget {
+    /// 技能清单段允许占用的最大字节数（含标题与 `omitted` 标记行）。
+    pub max_bytes: usize,
+    /// 最多列出的技能条数。
+    pub max_entries: usize,
+}
+
+impl SkillCatalogBudget {
+    /// 不裁剪（既有行为）。
+    pub const fn unlimited() -> Self {
+        Self {
+            max_bytes: usize::MAX,
+            max_entries: usize::MAX,
+        }
+    }
+
+    /// 显式预算：字节上限 + 条目上限。
+    pub const fn new(max_bytes: usize, max_entries: usize) -> Self {
+        Self {
+            max_bytes,
+            max_entries,
+        }
+    }
+}
+
+impl Default for SkillCatalogBudget {
+    fn default() -> Self {
+        Self::unlimited()
+    }
+}
+
+/// 清单 token 转义（wave-58 L3-B F-1，安全）：技能名 / 描述 / `omitted` 标记都是模型可见
+/// 文本，必须防止恶意技能伪造条目行、伪造诊断行甚至伪造 `=== ... ===` 段落标题。
+///
+/// 规则（最小实现）：
+/// 1. 换行 / 回车 / 制表 / 其他控制字符压成单空格；
+/// 2. 连续空白折叠为一（`flatten_single_line` 已含该语义，这里统一复用）；
+/// 3. 删除 `` ` ``（避免提前闭合 `- `name`` 的行格式）；
+/// 4. 删除长度 ≥3 的连续等号串（避免伪造段落标题）。
+pub(crate) fn sanitize_manifest_token(raw: &str) -> String {
+    let flattened = flatten_single_line(raw);
+    let mut cleaned = String::with_capacity(flattened.len());
+    let mut equal_run = 0usize;
+    for character in flattened.chars() {
+        if character == '`' {
+            continue;
+        }
+        if character == '=' {
+            equal_run += 1;
+            if equal_run >= 3 {
+                // 三个及以上连续等号：整段丢弃（前面已写入的 1..2 个也回退掉）。
+                while cleaned.ends_with('=') {
+                    cleaned.pop();
+                }
+                continue;
+            }
+        } else {
+            equal_run = 0;
+        }
+        cleaned.push(character);
+    }
+    cleaned.trim().to_string()
+}
+
+/// 清单显示名（wave-58 L3-B F-1）：sanitize 后为空则回落目录名，再为空才用占位名。
+fn manifest_display_name(skill: &HotloadedSkill) -> String {
+    let sanitized = sanitize_manifest_token(&skill.name);
+    if !sanitized.is_empty() {
+        return truncate_description(&sanitized, MAX_SKILL_NAME_CHARS);
+    }
+    let folder = skill
+        .path
+        .parent()
+        .and_then(|directory| directory.file_name())
+        .and_then(|folder| folder.to_str())
+        .unwrap_or_default();
+    let fallback = sanitize_manifest_token(folder);
+    if fallback.is_empty() {
+        "unnamed-skill".to_string()
+    } else {
+        truncate_description(&fallback, MAX_SKILL_NAME_CHARS)
+    }
+}
+
+/// 清单描述（wave-58 L3-B F-1）：先 sanitize 再按 1024 字符截断。
+fn manifest_description(skill: &HotloadedSkill) -> String {
+    truncate_description(
+        &sanitize_manifest_token(&skill.description),
+        MAX_SKILL_DESCRIPTION_CHARS,
+    )
+}
+
+/// 清单里技能名的字符上限（wave-58 L3-B F-1）。
+const MAX_SKILL_NAME_CHARS: usize = 64;
+
+/// 清单裁剪标记（wave-58 D5'）：最多 [`MAX_SKILL_CATALOG_OMISSION_MARKERS`] 条具名标记，
+/// 其余折叠为一行计数标记。
+pub const MAX_SKILL_CATALOG_OMISSION_MARKERS: usize = 8;
+
+/// 生成清单尾部标记行（wave-58 D5' + D2 / L3-B4）。
+///
+/// 顺序与格式：
+/// 1. 扫描阶段被跳过的候选：`omitted skill:<name> (<reason>)`（D2 契约格式，`omitted` 顺序）；
+/// 2. 预算裁剪丢弃的条目：`omitted skill:<name> (budget)`（按 `dropped` 优先级顺序）；
+/// 3. 具名标记合计 ≤ [`MAX_SKILL_CATALOG_OMISSION_MARKERS`] 条，其余折叠为
+///    `omitted skills: N more (catalog budget)`。
+fn catalog_marker_lines(
+    omitted: &[SkillOmission],
+    skills: &[HotloadedSkill],
+    dropped: &[usize],
+) -> Vec<String> {
+    let mut named: Vec<String> = omitted.iter().map(SkillOmission::marker).collect();
+    named.extend(
+        dropped
+            .iter()
+            .filter_map(|&index| skills.get(index))
+            .map(|skill| format!("omitted skill:{} (budget)", skill.name)),
+    );
+    if named.is_empty() {
+        return Vec::new();
+    }
+    let total = named.len();
+    let mut lines: Vec<String> = named
+        .into_iter()
+        .take(MAX_SKILL_CATALOG_OMISSION_MARKERS)
+        .map(|marker| format!("{marker}\n"))
+        .collect();
+    let remaining = total.saturating_sub(MAX_SKILL_CATALOG_OMISSION_MARKERS);
+    if remaining > 0 {
+        lines.push(format!(
+            "omitted skills: {remaining} more (catalog budget)\n"
+        ));
+    }
+    lines
+}
+
+/// 技能集合指纹（会话基线变更检测用）：name + scope + description + 内容哈希。
+fn skill_set_hash(skills: &[HotloadedSkill]) -> u64 {
+    let mut hash_input = Vec::new();
+    for skill in skills {
+        hash_input.extend_from_slice(skill.name.as_bytes());
+        hash_input.extend_from_slice(skill.scope.as_str().as_bytes());
+        hash_input.extend_from_slice(skill.description.as_bytes());
+        hash_input.extend_from_slice(&skill.fingerprint.content_hash.to_le_bytes());
+    }
+    fnv1a_hash(&hash_input)
+}
+
+/// 按 [`InstructionBudget`] 丢弃超出注入预算的技能（既有 wave-42 语义，抽出供多处复用）。
+///
+/// 超限时从**最低优先级**开始丢弃：rank 大者先出局，同 rank 全局层先出局。
+fn apply_skill_injection_budget(
+    skills: Vec<HotloadedSkill>,
+    budget: InstructionBudget,
+) -> Vec<HotloadedSkill> {
+    let costs: Vec<usize> = skills.iter().map(skill_injection_cost).collect();
+    let mut total: usize = costs.iter().sum();
+    if total <= budget.max_bytes {
+        return skills;
+    }
+
+    // 优先级从高到低：rank 小者优先；同 rank 时项目层优先；再按既定列表顺序。
+    let mut by_priority: Vec<usize> = (0..skills.len()).collect();
+    by_priority.sort_by(|&left, &right| {
+        skills[left]
+            .rank
+            .cmp(&skills[right].rank)
+            .then(skills[right].scope.cmp(&skills[left].scope))
+            .then(left.cmp(&right))
+    });
+
+    let mut dropped: HashSet<usize> = HashSet::new();
+    for index in by_priority.into_iter().rev() {
+        if total <= budget.max_bytes {
+            break;
+        }
+        total -= costs[index];
+        dropped.insert(index);
+    }
+
+    skills
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !dropped.contains(index))
+        .map(|(_, skill)| skill)
+        .collect()
+}
+
+/// 会话中途变更 notice 的唯一拼装实现（wave-42 Append-Only 语义，逐字保持既有文案）。
+fn build_session_delta_notice(
+    baseline: &SessionBaselineSnapshot,
+    current_skills: &[HotloadedSkill],
+    const_changed: bool,
+    skills_changed: bool,
+    budget_changed: bool,
+    catalog_changed: bool,
+) -> String {
+    let mut delta_notice = String::from("Notice: Workspace configuration was updated mid-session:\n");
+    if const_changed {
+        delta_notice
+            .push_str("- Workspace constitution/rules updated. Latest guidelines are active.\n");
+    }
+    if budget_changed {
+        delta_notice
+            .push_str("- Instruction injection budget changed. Baseline prefix is retained.\n");
+    }
+    if catalog_changed {
+        delta_notice.push_str(
+            "- Skill catalog budget changed. Catalog re-rendered from the session baseline to fit the current context window.\n",
+        );
+    }
+    if skills_changed {
+        let old_names: Vec<_> = baseline.skills.iter().map(|s| &s.name).collect();
+        let new_names: Vec<_> = current_skills.iter().map(|s| &s.name).collect();
+        let added: Vec<_> = new_names
+            .iter()
+            .filter(|n| !old_names.contains(n))
+            .collect();
+        let removed: Vec<_> = old_names
+            .iter()
+            .filter(|n| !new_names.contains(n))
+            .collect();
+        if !added.is_empty() {
+            delta_notice.push_str(&format!("- Newly installed skills: {:?}\n", added));
+        }
+        if !removed.is_empty() {
+            delta_notice.push_str(&format!("- Removed skills: {:?}\n", removed));
+        }
+    }
+    delta_notice
 }
 
 /// 宪法来源候选：作用域 + 被采纳的文件 + 其作用域根（canonical 包含校验基准）。
@@ -1172,67 +2122,393 @@ fn clamp_to_budget(text: &str, max_bytes: usize) -> String {
     clamped
 }
 
-/// 解析 SKILL.md 的标准 YAML Frontmatter
-fn parse_skill_metadata(content: &str, fallback_name: &str) -> (String, String, bool, Vec<String>) {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return (
-            fallback_name.to_string(),
-            extract_fallback_description(content),
-            true,
-            Vec::new(),
-        );
+/// 技能描述的字符数上限（Agent Skills 规范；wave-58 契约 F2-2）。
+const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
+
+/// SKILL.md frontmatter 的解析结果（wave-58 契约 F2-1）。
+#[derive(Debug, Default)]
+struct SkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+    user_invocable: Option<bool>,
+    allowed_tools: Vec<String>,
+}
+
+/// frontmatter 字段取值的两种形态（标量 / 块列表）。
+#[derive(Debug)]
+enum FrontmatterValue {
+    Scalar(String),
+    List(Vec<String>),
+}
+
+/// 块标量风格（wave-58 契约 F2-1）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockScalarStyle {
+    /// `|`：字面风格 —— 续行以换行连接。
+    Literal,
+    /// `>`：折叠风格 —— 续行以空格连接，空行 run 合并为单换行。
+    Folded,
+}
+
+/// 块标量尾换行策略（YAML chomping）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockScalarChomp {
+    /// 默认（clip）：保留单个尾换行。
+    Clip,
+    /// `-`（strip）：去掉尾换行。
+    Strip,
+    /// `+`（keep）：保留尾空行。
+    Keep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlockScalarHeader {
+    style: BlockScalarStyle,
+    chomp: BlockScalarChomp,
+}
+
+/// 识别块标量头：`|` / `>` 之后允许一个 chomping 标记（`-` / `+`）、缩进指示符（`1`..=`9`）
+/// 与尾随空白 / 注释；其他内容（如 `|foo`）不算块标量，按普通标量处理（fail-safe）。
+fn parse_block_scalar_header(value: &str) -> Option<BlockScalarHeader> {
+    let mut characters = value.chars();
+    let style = match characters.next()? {
+        '|' => BlockScalarStyle::Literal,
+        '>' => BlockScalarStyle::Folded,
+        _ => return None,
+    };
+    let mut chomp = BlockScalarChomp::Clip;
+    let mut saw_chomp = false;
+    for character in characters {
+        match character {
+            '-' if !saw_chomp => {
+                chomp = BlockScalarChomp::Strip;
+                saw_chomp = true;
+            }
+            '+' if !saw_chomp => {
+                chomp = BlockScalarChomp::Keep;
+                saw_chomp = true;
+            }
+            '1'..='9' => {}
+            ' ' | '\t' => break,
+            _ => return None,
+        }
+    }
+    Some(BlockScalarHeader { style, chomp })
+}
+
+/// 去掉行首不超过 `indent` 个空白字符。
+fn strip_indent(line: &str, indent: usize) -> &str {
+    if indent == 0 {
+        return line;
+    }
+    let mut removed = 0usize;
+    let mut byte_index = 0usize;
+    for (position, character) in line.char_indices() {
+        if removed >= indent || (character != ' ' && character != '\t') {
+            byte_index = position;
+            break;
+        }
+        removed += 1;
+        byte_index = position + character.len_utf8();
+    }
+    &line[byte_index..]
+}
+
+/// 折叠标量拼装（`>`）：续行以空格连接，空行 run 合并为单换行（wave-58 F2-1）。
+fn fold_block_lines(lines: &[&str]) -> String {
+    let mut folded = String::new();
+    let mut pending_blank = 0usize;
+    let mut started = false;
+    for line in lines {
+        if line.trim().is_empty() {
+            pending_blank += 1;
+            continue;
+        }
+        if started {
+            if pending_blank == 0 {
+                folded.push(' ');
+            } else {
+                for _ in 0..pending_blank {
+                    folded.push('\n');
+                }
+            }
+        }
+        folded.push_str(line);
+        started = true;
+        pending_blank = 0;
+    }
+    folded
+}
+
+/// 读取块标量续行（wave-58 F2-1）：返回 (文本, 下一个待处理行号)。
+///
+/// 续行 = 空行或缩进更深（列 0 起算）的行；遇到列 0 起的非空行（下一个键 / 闭合 `---`）结束。
+/// 公共缩进取非空续行的最小缩进并剥离；尾部空行计入 chomping。
+fn read_block_scalar(lines: &[&str], start: usize, header: BlockScalarHeader) -> (String, usize) {
+    let mut collected: Vec<&str> = Vec::new();
+    let mut index = start;
+    while index < lines.len() {
+        let raw = lines[index];
+        if raw.trim().is_empty() || raw.starts_with(' ') || raw.starts_with('\t') {
+            collected.push(raw);
+            index += 1;
+            continue;
+        }
+        break;
     }
 
-    let mut name = fallback_name.to_string();
-    let mut description = String::new();
-    let mut user_invocable = true;
-    let mut allowed_tools = Vec::new();
+    let mut trailing_blank = 0usize;
+    while let Some(last) = collected.last() {
+        if last.trim().is_empty() {
+            collected.pop();
+            trailing_blank += 1;
+        } else {
+            break;
+        }
+    }
 
-    let rest = &trimmed[3..];
-    if let Some(end_idx) = rest.find("\n---") {
-        let frontmatter = &rest[..end_idx];
-        for line in frontmatter.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+    let common_indent = collected
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches(|c| c == ' ' || c == '\t').len())
+        .min()
+        .unwrap_or(0);
+    let dedented: Vec<&str> = collected
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                ""
+            } else {
+                strip_indent(line, common_indent)
             }
-            if let Some(colon_idx) = line.find(':') {
-                let key = line[..colon_idx].trim();
-                let val = line[colon_idx + 1..]
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'');
-                match key {
-                    "name" => {
-                        if !val.is_empty() {
-                            name = val.to_string();
-                        }
-                    }
-                    "description" => {
-                        description = val.to_string();
-                    }
-                    "user-invocable" => {
-                        user_invocable = val.parse().unwrap_or(true);
-                    }
-                    "allowed-tools" => {
-                        allowed_tools = val
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                    }
-                    _ => {}
+        })
+        .collect();
+
+    let mut text = match header.style {
+        BlockScalarStyle::Literal => dedented.join("\n"),
+        BlockScalarStyle::Folded => fold_block_lines(&dedented),
+    };
+    if !text.is_empty() {
+        match header.chomp {
+            BlockScalarChomp::Strip => {}
+            BlockScalarChomp::Clip => text.push('\n'),
+            BlockScalarChomp::Keep => {
+                text.push('\n');
+                for _ in 0..trailing_blank {
+                    text.push('\n');
                 }
             }
         }
     }
+    (text, index)
+}
 
-    if description.is_empty() {
+/// 读取块列表续行（`- item` 形态，wave-58 F2-1）：返回 (条目, 下一个待处理行号)。
+fn read_block_list(lines: &[&str], start: usize) -> (Vec<String>, usize) {
+    let mut items: Vec<String> = Vec::new();
+    let mut index = start;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if line.is_empty() {
+            index += 1;
+            continue;
+        }
+        if line == "-" || line.starts_with("- ") {
+            let item = unquote_scalar(line.trim_start_matches('-').trim());
+            if !item.is_empty() {
+                items.push(item);
+            }
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    (items, index)
+}
+
+/// 去掉两端成对的引号（单 / 双），并处理最小转义（`\"` `\n` `\\`）。
+fn unquote_scalar(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let (first, last) = (bytes[0], bytes[value.len() - 1]);
+        if first == b'"' && last == b'"' {
+            let inner = &value[1..value.len() - 1];
+            return inner
+                .replace("\\\"", "\"")
+                .replace("\\n", "\n")
+                .replace("\\\\", "\\");
+        }
+        if first == b'\'' && last == b'\'' {
+            return value[1..value.len() - 1].replace("''", "'");
+        }
+    }
+    value.to_string()
+}
+
+/// 把单个 frontmatter 字段写入解析结果。
+fn apply_frontmatter_field(parsed: &mut SkillFrontmatter, key: &str, value: FrontmatterValue) {
+    match (key, value) {
+        ("name", FrontmatterValue::Scalar(scalar)) => {
+            let scalar = scalar.trim();
+            if !scalar.is_empty() {
+                parsed.name = Some(scalar.to_string());
+            }
+        }
+        ("description", FrontmatterValue::Scalar(scalar)) => {
+            parsed.description = Some(scalar);
+        }
+        ("description", FrontmatterValue::List(items)) => {
+            parsed.description = Some(items.join(", "));
+        }
+        ("user-invocable", FrontmatterValue::Scalar(scalar)) => {
+            parsed.user_invocable = Some(scalar.trim().parse().unwrap_or(true));
+        }
+        ("allowed-tools", FrontmatterValue::List(items)) => {
+            parsed.allowed_tools = items;
+        }
+        ("allowed-tools", FrontmatterValue::Scalar(scalar)) => {
+            parsed.allowed_tools = scalar
+                .split(',')
+                .map(|item| unquote_scalar(item.trim()))
+                .filter(|item| !item.is_empty())
+                .collect();
+        }
+        _ => {}
+    }
+}
+
+/// 解析 frontmatter 围栏内的字段（wave-58 F2-1）；无 `---` 围栏时返回 `None`。
+fn parse_skill_frontmatter(content: &str) -> Option<SkillFrontmatter> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let rest = &trimmed[3..];
+    let lines: Vec<&str> = rest.lines().collect();
+    let mut parsed = SkillFrontmatter::default();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let raw = lines[index];
+        let line = raw.trim();
+        let indented = raw.starts_with(' ') || raw.starts_with('\t');
+        // 闭合围栏：列 0 起、内容恰为 `---`（容忍行尾空白 / CRLF）。
+        if !indented && line == "---" {
+            break;
+        }
+        if line.is_empty() || line.starts_with('#') {
+            index += 1;
+            continue;
+        }
+        // 缩进行属于上一字段的续行（块标量 / 块列表已消费），此处仅防御性跳过。
+        if indented {
+            index += 1;
+            continue;
+        }
+        let Some(colon_index) = line.find(':') else {
+            index += 1;
+            continue;
+        };
+        let key = line[..colon_index].trim().to_string();
+        let value = line[colon_index + 1..].trim().to_string();
+
+        if let Some(header) = parse_block_scalar_header(&value) {
+            let (block, next_index) = read_block_scalar(&lines, index + 1, header);
+            apply_frontmatter_field(&mut parsed, &key, FrontmatterValue::Scalar(block));
+            index = next_index;
+            continue;
+        }
+        if value.is_empty() {
+            let (items, next_index) = read_block_list(&lines, index + 1);
+            if !items.is_empty() {
+                apply_frontmatter_field(&mut parsed, &key, FrontmatterValue::List(items));
+            }
+            index = next_index.max(index + 1);
+            continue;
+        }
+
+        let scalar = unquote_scalar(&value);
+        if key == "allowed-tools" && scalar.starts_with('[') && scalar.ends_with(']') {
+            let items = scalar[1..scalar.len() - 1]
+                .split(',')
+                .map(|item| unquote_scalar(item.trim()))
+                .filter(|item| !item.is_empty())
+                .collect();
+            apply_frontmatter_field(&mut parsed, &key, FrontmatterValue::List(items));
+        } else {
+            apply_frontmatter_field(&mut parsed, &key, FrontmatterValue::Scalar(scalar));
+        }
+        index += 1;
+    }
+    Some(parsed)
+}
+
+/// 描述截断（wave-58 契约 F2-2）：超过 `max_chars` 字符时按字符（UTF-8 码点）边界截断。
+fn truncate_description(description: &str, max_chars: usize) -> String {
+    if description.chars().count() <= max_chars {
+        return description.to_string();
+    }
+    description.chars().take(max_chars).collect()
+}
+
+/// 把可能含换行的文本压平成单行（wave-58 F1-2 / F2-1：技能清单必须「一个技能一行」）。
+fn flatten_single_line(text: &str) -> String {
+    let mut flattened = String::with_capacity(text.len());
+    let mut last_was_space = false;
+    for character in text.chars() {
+        let normalized = if character == '\n' || character == '\r' || character == '\t' {
+            ' '
+        } else {
+            character
+        };
+        if normalized == ' ' {
+            if last_was_space {
+                continue;
+            }
+            last_was_space = true;
+        } else {
+            last_was_space = false;
+        }
+        flattened.push(normalized);
+    }
+    flattened.trim().to_string()
+}
+
+/// 解析 SKILL.md 的标准 YAML Frontmatter（wave-58 F2-1 / F2-2）。
+///
+/// 支持的最小 YAML 子集（手写，不引入外部依赖）：
+/// - 单行标量 `key: value`（值内可含 `:`；两端引号剥离）；
+/// - **块标量** `|` `|-` `|+` / `>` `>-` `>+`：字面以换行连接、折叠以空格连接并合并空行，
+///   自动剥离公共缩进，`description` 不再退化为字面量 `"|"` / `">"`；
+/// - `allowed-tools` 三形态：块列表（`- item`）、行内数组（`[a, b]`）、逗号分隔；
+/// - `description` 超过 [`MAX_SKILL_DESCRIPTION_CHARS`] 字符时按字符边界截断。
+fn parse_skill_metadata(content: &str, fallback_name: &str) -> (String, String, bool, Vec<String>) {
+    let Some(parsed) = parse_skill_frontmatter(content) else {
+        return (
+            fallback_name.to_string(),
+            truncate_description(
+                &extract_fallback_description(content),
+                MAX_SKILL_DESCRIPTION_CHARS,
+            ),
+            true,
+            Vec::new(),
+        );
+    };
+
+    let name = parsed
+        .name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| fallback_name.to_string());
+    let mut description = parsed.description.unwrap_or_default();
+    if description.trim().is_empty() {
         description = extract_fallback_description(content);
     }
-
-    (name, description, user_invocable, allowed_tools)
+    (
+        name,
+        truncate_description(description.trim_end(), MAX_SKILL_DESCRIPTION_CHARS),
+        parsed.user_invocable.unwrap_or(true),
+        parsed.allowed_tools,
+    )
 }
 
 fn extract_fallback_description(content: &str) -> String {
@@ -1244,6 +2520,22 @@ fn extract_fallback_description(content: &str) -> String {
         return trimmed.chars().take(200).collect();
     }
     "No description provided.".to_string()
+}
+
+/// 超限技能名的有界读取（wave-58 F2-5 / D3）：只读 frontmatter 前缀取 `name`。
+///
+/// 用于 `too_large` 的 omitted 记录 —— 该候选已通过信任判定（受信根内的普通文件），
+/// 因此可以有界读取前缀；读不到真实 name 时由调用方回落目录名。
+fn skill_name_from_frontmatter_prefix(skill_file: &Path) -> Option<String> {
+    let (_fingerprint, content) =
+        FileFingerprint::compute_bounded(skill_file, SKILL_FRONTMATTER_READ_LIMIT)?;
+    let (name, _description, _user_invocable, _allowed_tools) =
+        parse_skill_metadata(&content, "");
+    if name.trim().is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 impl WorkspaceHotloader {
@@ -1290,38 +2582,7 @@ impl WorkspaceHotloader {
         budget: InstructionBudget,
     ) -> (Vec<HotloadedSkill>, bool) {
         let (skills, hit) = self.scan_skills_with_globals(workspace_root, global_homes);
-        let costs: Vec<usize> = skills.iter().map(skill_injection_cost).collect();
-        let mut total: usize = costs.iter().sum();
-        if total <= budget.max_bytes {
-            return (skills, hit);
-        }
-
-        // 优先级从高到低：rank 小者优先；同 rank 时项目层优先；再按既定列表顺序。
-        let mut by_priority: Vec<usize> = (0..skills.len()).collect();
-        by_priority.sort_by(|&left, &right| {
-            skills[left]
-                .rank
-                .cmp(&skills[right].rank)
-                .then(skills[right].scope.cmp(&skills[left].scope))
-                .then(left.cmp(&right))
-        });
-
-        let mut dropped: HashSet<usize> = HashSet::new();
-        for index in by_priority.into_iter().rev() {
-            if total <= budget.max_bytes {
-                break;
-            }
-            total -= costs[index];
-            dropped.insert(index);
-        }
-
-        let kept = skills
-            .into_iter()
-            .enumerate()
-            .filter(|(index, _)| !dropped.contains(index))
-            .map(|(_, skill)| skill)
-            .collect();
-        (kept, hit)
+        (apply_skill_injection_budget(skills, budget), hit)
     }
 }
 

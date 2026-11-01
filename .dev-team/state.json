@@ -416,6 +416,216 @@
         "Tauri sync-command main-thread",
         "real Tauri E2E"
       ]
+    },
+    {
+      "wave": 58,
+      "theme": "context/skills loading fixes (audit 2026-11-01)",
+      "baseline_commit": "4e5764b",
+      "contract_matrix": ".dev-team/contract-matrix-wave58.md",
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4",
+        "task-5"
+      ],
+      "branches": {
+        "task-1": {
+          "owner": "protocol-agent",
+          "status": "in_progress",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+            "crates/pony-agent-core/src/agent/skill_body.rs",
+            "crates/pony-agent-core/src/agent/subagent_runtime.rs"
+          ]
+        },
+        "task-2": {
+          "owner": "test-agent",
+          "status": "blocked_by:task-1",
+          "write_scopes": [
+            "crates/pony-agent-core/tests/"
+          ]
+        },
+        "task-3": {
+          "owner": "executor-alpha",
+          "status": "blocked_by:task-2",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/context.rs",
+            "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+            "crates/pony-agent-core/src/agent/runtime/"
+          ]
+        },
+        "task-4": {
+          "owner": "executor-beta",
+          "status": "blocked_by:task-2",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+            "crates/pony-agent-core/src/agent/skill_body.rs",
+            "crates/pony-agent-core/src/agent/path_permission.rs"
+          ]
+        },
+        "task-5": {
+          "owner": "executor-alpha",
+          "status": "blocked_by:task-4",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/tools.rs",
+            "crates/pony-agent-core/src/agent/instruction_touch.rs"
+          ]
+        }
+      },
+      "deviations": [
+        {
+          "id": "DEV-58-1",
+          "rule": "dev-team 红相锚定先于实现",
+          "decision": "Stage1/Stage2 实现在 test-agent 红相交付前并行启动",
+          "rationale": "契约矩阵 .dev-team/contract-matrix-wave58.md 已由 Lead 在实现前冻结，测试由独立 Test Agent 依矩阵编写（非依实现），自证链未断；红相 commit 仍会在测试交付后由 Lead 锚定并逐条核对 F 编号与断言",
+          "risk": "若红相迟到，存在实现细节反向影响测试措辞的风险；由 Lead 在红相锚定时逐条比对 F 编号拦截"
+        }
+      ],
+      "decisions": [
+        {
+          "id": "D5'",
+          "date": "2026-11-01",
+          "supersedes": "D5",
+          "rule": "技能清单预算按 provider 窗口自适应：window<32768 整段跳过；>=32768 时 max_bytes=min(16KiB, window*4/20)、max_entries 上限、尾部丢弃并输出 omitted skill:<name> (budget) 标记（≤8 条 + 折叠行）。宪法段仍受 InstructionBudget 64KiB。",
+          "evidence": "本机全局根 116 技能/约 12KB 清单注入后，两条 8192 窗口既有单测（build_request_truncates_native_transcript_for_reasoning_provider / build_request_keeps_native_tool_roundtrip_on_turn_boundary）变红；HOME 指向空目录复跑转绿 ⇒ 清单体积导致 recent history 被截断",
+          "owner": "executor-alpha(context 侧计算) + executor-beta(prompt 前缀侧裁剪)"
+        }
+      ],
+      "red_commit": "9af49dd",
+      "red_phase_note": "F1/F2 红相缺失（实现先行，DEV-58-1）；F3-1/F3-3 保留真红相",
+      "join_barrier": {
+        "full_regression": {
+          "command": "CARGO_TARGET_DIR=target-test cargo test -p pony-agent-core",
+          "passed": 1798,
+          "failed": 0,
+          "targets": 100,
+          "exit": 0
+        },
+        "reviews": [
+          {
+            "id": "review-join-a",
+            "perspective": "并发/调度/状态/缓存",
+            "verdict": "FAIL",
+            "blocking": 1,
+            "advisory": 5,
+            "file": ".dev-team/review-join-a.json"
+          },
+          {
+            "id": "review-join-b",
+            "perspective": "安全/信任边界",
+            "verdict": "FAIL",
+            "blocking": 1,
+            "advisory": 4,
+            "file": ".dev-team/review-join-b.json"
+          },
+          {
+            "id": "review-join-a2",
+            "perspective": "并发/缓存/状态（复审）",
+            "verdict": "PASS",
+            "blocking": 0,
+            "advisory": 4,
+            "file": ".dev-team/review-join-a2.json"
+          },
+          {
+            "id": "review-join-b2",
+            "perspective": "安全/信任边界（复审）",
+            "verdict": "PASS",
+            "blocking": 0,
+            "advisory": 3,
+            "file": ".dev-team/review-join-b2.json"
+          }
+        ],
+        "round": 2,
+        "blocking_items": [
+          {
+            "id": "B1",
+            "title": "skill_files 缓存键不含 workspace，单例化后跨工作区假命中泄露技能描述",
+            "files": [
+              "crates/pony-agent-core/src/agent/workspace_hotloader.rs:827"
+            ],
+            "owner": "executor-beta",
+            "status": "fixing",
+            "found_by": [
+              "review-join-a",
+              "review-join-b"
+            ]
+          },
+          {
+            "id": "B2",
+            "title": "session_baselines LRU 淘汰后静默重建前缀，破坏 F1-3 字节稳定且契约未授权",
+            "files": [
+              "crates/pony-agent-core/src/agent/workspace_hotloader.rs:1048"
+            ],
+            "owner": "executor-beta",
+            "status": "fixing",
+            "found_by": [
+              "review-join-a"
+            ]
+          }
+        ],
+        "advisory_fix": [
+          {
+            "id": "A2",
+            "owner": "executor-alpha"
+          },
+          {
+            "id": "A3",
+            "owner": "executor-alpha"
+          },
+          {
+            "id": "B2b",
+            "owner": "executor-beta",
+            "note": "trust predicate 双判定漂移"
+          },
+          {
+            "id": "B3",
+            "owner": "executor-beta",
+            "note": "错误码语义/体积回显"
+          },
+          {
+            "id": "B4",
+            "owner": "executor-beta",
+            "note": "omitted 标记接入 semistable"
+          },
+          {
+            "id": "A4",
+            "owner": "executor-beta",
+            "note": "写锁范围（可 defer）"
+          }
+        ],
+        "round2_fixes": [
+          {
+            "id": "F-1",
+            "title": "清单/omitted 标记 token 未转义 → 可伪造条目行与段落标题",
+            "owner": "executor-beta",
+            "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs"
+          },
+          {
+            "id": "F-2",
+            "title": "会话基线只按 session_id 分桶 → 换绑工作区回放旧前缀",
+            "owner": "executor-beta",
+            "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs"
+          },
+          {
+            "id": "F-3",
+            "title": "catalog_budget 变化重渲染丢弃扫描期 omitted 标记",
+            "owner": "executor-beta",
+            "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs"
+          }
+        ],
+        "regression_tests_added": {
+          "file": "crates/pony-agent-core/tests/wave58_singleton_isolation.rs",
+          "cases": [
+            "r1_singleton_skill_cache_is_workspace_scoped",
+            "r2_singleton_session_baseline_is_workspace_scoped",
+            "r3_manifest_entries_cannot_forge_structure",
+            "r4_catalog_budget_change_keeps_omission_markers"
+          ],
+          "result": "4 passed / 0 failed"
+        }
+      },
+      "status": "join_barrier_round2_pass"
     }
   ],
   "counters": {

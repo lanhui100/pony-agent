@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a-wave58-concurrency-cache-review-r2",
+    "fresh_context": true
+  },
+  "executed_by": "l3a-wave58-concurrency-cache-review-r2",
+  "attestation": {
+    "self_signed": false,
+    "note": "第 2 轮复审：独立验证 executor-beta 对第 1 轮 2 条 BLOCKING 的修复（不采信对方结论）。审查对象为 Wave-58 未提交工作树（reviewed_commit 填基线 HEAD 9af49dd，改动尚未提交，故无交付 sha）。除契约要求的三字段外，provenance 为通过 dev-review-lint v2 机械门禁的最小补充。全部结论均来自本进程实跑：外部探针 /tmp/w58probe/probe.rs（只读依赖 target-test 的 rlib，未改动仓库任何文件）+ 原生 cargo 门禁。"
+  },
+  "reviewed_commit": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-wave58.md",
+    ".dev-team/review-join-a.json",
+    ".dev-team/review-join-b.json",
+    ".dev-team/wave58-delivery.md",
+    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/Cargo.toml"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 1109,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "【第 2 轮新增代码的 D2 残余：预算重渲染丢扫描期 omitted 标记】探针 /tmp/w58probe/probe.rs（实跑日志 /tmp/w58probe/out.log）。复现：CARGO_TARGET_DIR=target-test cargo build -p pony-agent-core --lib；RLIB=$(ls -t target-test/debug/deps/libpony_agent_core-*.rlib|head -1)；rustc --edition 2021 -C debuginfo=0 /tmp/w58probe/probe.rs -L dependency=target-test/debug/deps --extern pony_agent_core=$RLIB -o /tmp/w58probe/probe && /tmp/w58probe/probe | grep -E '^(PASS|FAIL)'。用例：wso/AGENTS.md='# O-CONST' + wso/.agents/skills/escaping/SKILL.md -> 符号链接到 workspace 外（outside_root），h=get_global_workspace_hotloader()，首轮 catalog_budget=unlimited() 渲染得 o1 含 'omitted skill:escaping (outside_root)'（PASS 4c），第 2 轮同一 session 传入 SkillCatalogBudget::new(4096,64) 触发重渲染 -> o2='=== WORKSPACE CONSTITUTION & RULES ===\\n# O-CONST\\n\\n'，标记整段消失（FAIL 4d）。判定链：1104-1110 的 catalog_changed 分支调用 render_prompt_prefix_with_budget(Some(&baseline.constitution_content), &baseline.skills, catalog_budget, &[]) —— 第四参数写死 &[]，而 SessionBaselineEntry（379-390）只存 snapshot/catalog_budget/prefix，不存扫描期 omitted ⇒ 只要 provider 窗口中途变化（D5' 预算变化 + 项目根存在越界/超限符号链接技能），D2/F2-3/F2-5 要求的 omitted 标记就被静默吞掉（有 delta notice 告知 catalog 已重渲染，故非完全静默）。影响为可观测性退化，fail-closed 与 F1-3 未被破坏（内容仍取基线）。修法：SessionBaselineEntry 增加 omitted: Vec<SkillOmission> 并在重渲染时回传。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 1311,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "【预算连标记都放不下时：裸标题 + 零条目 + 零标记（静默丢弃）】同上探针 FAIL 4a：wsm/AGENTS.md 存在 + 3 条项目技能，header.len()=152，SkillCatalogBudget::new(header+60, 64) → m1='=== WORKSPACE CONSTITUTION & RULES ===\\n# M-CONST\\n\\n=== AVAILABLE REUSABLE SKILLS ===\\nThe following project-specific skills are available and loadable on demand:\\n\\n'：标题在、条目 0 条、'omitted skill:' 标记 0 条，3 条技能被静默丢弃。判定链：1265-1276 逐条选入时 used 触顶 break 后仅剩 1 条，1279-1308 的收敛 loop 为让标记入预算把最后一条也丢掉，1309-1321 的 None 分支 fallback=catalog_marker_lines(omitted, skills, &[]) —— 第三个参数写死 &[]，只报扫描期 omitted、不报预算丢弃者，于是连 D5' 要求的折叠行 'omitted skills: N more (catalog budget)' 都没有。**可达性诚实说明**：skill_catalog_budget（context.rs:876-889）只会产出 0 或 [6553,16384] 字节，进入该盲带的概率为零（0 时 1228 行直接整段跳过），故本条按 ADVISORY 计，属公开 API 的防御性缺口；真实预算区间已实跑验证合规（PASS 4e：100 技能/6553B → entries=64、8 条具名标记 + 'omitted skills: 36 more' 之类折叠行）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 1091,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "【会话基线只按 session_id 分桶，未含 workspace 身份 ⇒ 同 id 跨工作区回放对方宪法】同上探针 PASS 5a：wsA/AGENTS.md='# AAA-CONST'、wsB/AGENTS.md='# BBB-CONST'，h.resolve_session_prompt_context_with_globals(\"probe-cross\",1,&wsa,&[]) 后 h.resolve_session_prompt_context_with_globals(\"probe-cross\",2,&wsb,&[]) → 返回 \"=== WORKSPACE CONSTITUTION & RULES ===\\n# AAA-CONST\\n\\n\"（wsA 内容），wsB 自己的宪法缺失，仅附 delta notice。判定链：1087-1092 快路径 baselines.touch_entry(session_id)，registry.entries 的键就是 session_id（373 行），workspace_root 只进入 skill_files 键（851-857）与 skills 分桶（966-968），不进入基线分桶。可达性：生产 conversation_id 为 uuid 派生（tui.rs:1425 'session-<uuid8>'、cli.rs:527 'cli-session-<uuid>'）且会话->工作区首轮即固化，故生产不可达，按 ADVISORY 计。但它正是「同进程多用例共用 conversation_id」的顺序依赖机制：agent::context::tests 全部用 conversation_id='session-1'（context.rs:1864），其中 test_layered_context_message_topology_...（2735）把 env_info.cwd 设为仓库根 /home/dm/pony-agent（有 .agents/skills 项目技能），其余用例 env_info=None 回落 crate 目录 ⇒ 谁先跑谁固化的基线成为全进程唯一基线，跨用例的 semistable 技能清单随线程调度漂移（当前断言未覆盖该字节面，故未红）。建议键改为 (canonical workspace root, session_id)。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave58_skill_parsing.rs",
+      "line": 138,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "【BLOCKING-1 修复零回归防护】grep -rn 'WorkspaceHotloader::new()' crates/pony-agent-core/tests/*.rs | wc -l 与 grep -rn 'get_global_workspace_hotloader' crates/pony-agent-core/tests/ —— 全部技能扫描用例都用独立实例 new()，无任何用例构造「两个工作区 + 同名同尺寸同 mtime 技能 + 进程级单例」；本轮唯一物理收据是本审查的外部探针 PASS 1b-1g（ws1 desc=AAAA/ws2 desc=BBBB、ws2 路径在 ws2 内、ws1 写回后 ws2 仍缓存命中 BBBB）。修复一旦被后续波次回退（例如把 851-857 的 workspace_label 从键里删掉），现有测试全绿、无红相拦截。建议把探针场景落成 tests/wave58_cross_workspace_cache.rs。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

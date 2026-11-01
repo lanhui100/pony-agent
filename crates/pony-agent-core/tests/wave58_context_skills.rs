@@ -56,7 +56,7 @@ use pony_agent_core::agent::provider::{
 };
 use pony_agent_core::agent::session::EnvironmentInfo;
 use pony_agent_core::agent::subagent_runtime::HostTurnEngine;
-use pony_agent_core::agent::tools::{ToolCall, ToolRouter};
+use pony_agent_core::agent::tools::{ToolCall, ToolExecutionContext, ToolRouter};
 use pony_agent_core::agent::workspace_hotloader::{
     constitution_source_paths, AgentScope, FileFingerprint, HotloadedSkill, WorkspaceHotloader,
     INSTRUCTION_CANDIDATES,
@@ -659,8 +659,18 @@ fn f3_1_root_layer_not_reinjected_on_touch() {
     let root = workspace.canonical();
     let router = ToolRouter::with_workspace_root(root.clone());
 
-    // Act：触达工作区内文件
-    let result = router.execute_with_workspace_root(&read_call("src/main.rs", "call-f3-1"), Some(&root));
+    // Lead 裁决 D6'（Wave-58）：触达层跳过根层指令的**前提**是本次调用处于会话中
+    // （session_id 非空 ⇒ 该会话前缀已由 semistable 段承载工作区根层指令）；
+    // 无 session_id 的探针式调用保持既有行为（wave42 C4 系列契约不变）。
+    let context = ToolExecutionContext {
+        workspace_root: Some(root.clone()),
+        workspace_id: None,
+        session_id: Some("w58-f3-1-session".to_string()),
+        dispatch_context: None,
+    };
+
+    // Act：会话内触达工作区内文件
+    let result = router.execute_with_context(&read_call("src/main.rs", "call-f3-1"), &context);
 
     // Assert
     assert_eq!(

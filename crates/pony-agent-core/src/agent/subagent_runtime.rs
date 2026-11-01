@@ -100,7 +100,51 @@ pub fn subagent_gate_enter(prompt: &str) -> Result<SubagentInflightGuard, String
 }
 
 /// 宿主默认引擎：独立 AgentRuntimeBuilder 建栈运行子代理 turn。
-pub struct HostTurnEngine;
+pub struct HostTurnEngine {
+    /// 父会话工作区根（wave-58 契约 F1-5）。
+    ///
+    /// 子代理必须以**父会话工作区根**构建 runtime（继承项目指令与项目技能），
+    /// 不得再固定 `compute_default_workspace_root()`；`None` 时才回落默认根。
+    pub workspace_root: Option<PathBuf>,
+}
+
+impl Default for HostTurnEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HostTurnEngine {
+    /// 无父上下文的引擎：`workspace_root = None`，`run_turn` 回落默认工作区根。
+    pub fn new() -> Self {
+        Self {
+            workspace_root: None,
+        }
+    }
+
+    /// 注入父会话工作区根，返回自身（契约 F1-5）。
+    pub fn with_workspace_root(mut self, root: Option<PathBuf>) -> Self {
+        self.workspace_root = root;
+        self
+    }
+
+    /// 子代理实际建栈根（Wave-58 F1-5）。
+    ///
+    /// 父会话工作区根优先（子代理由此继承父会话的项目指令与项目技能）；
+    /// 父根缺失或非绝对路径时回落 `compute_default_workspace_root()`；
+    /// 两者都不可得才用进程 cwd 兜底，任何情况都不 panic。
+    fn resolved_workspace_root(&self) -> PathBuf {
+        if let Some(root) = self
+            .workspace_root
+            .as_ref()
+            .filter(|root| root.is_absolute())
+        {
+            return root.clone();
+        }
+        crate::agent::workspace::compute_default_workspace_root()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+}
 
 impl SubagentTurnEngine for HostTurnEngine {
     fn run_turn(&self, prompt: &str, timeout_ms: u64) -> Result<SubagentRunOutcome, String> {
@@ -112,16 +156,14 @@ impl SubagentTurnEngine for HostTurnEngine {
         let session_id = format!("subagent-{}", Uuid::new_v4());
         let thread_session_id = session_id.clone();
         let prompt_owned = prompt.to_string();
+        // Wave-58 F1-5：建栈根必须在 spawn 前解析好并 move 进线程（`self` 不跨线程）。
+        let workspace_root = self.resolved_workspace_root();
 
         // AgentRuntime 的 Send+Sync 不作为对外契约假设：runtime 在工作线程
         // 内部构建并持有，跨线程只传 outcome（TurnResult: Clone + Send 数据）。
         let (tx, rx) = mpsc::channel::<Result<crate::agent::runtime::TurnResult, String>>();
         let worker = std::thread::spawn(move || {
             let result = catch_unwind(AssertUnwindSafe(move || {
-                let workspace_root: PathBuf = crate::agent::workspace::compute_default_workspace_root()
-                    .unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                    });
                 // 独立建栈：不共享宿主 SessionStore / ProviderRegistryStore。
                 let runtime = AgentRuntimeBuilder::new()
                     .workspace_root(workspace_root)
