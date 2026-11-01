@@ -12,7 +12,7 @@
 
 参见：
 
-- [Turn Lifecycle、Hooks 与 Recovery 架构基线](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/turn-lifecycle-hooks-and-recovery.md)
+- [Turn Lifecycle、Hooks 与 Recovery 架构基线](../../docs/architecture/turn-lifecycle-hooks-and-recovery.md)
 
 ## 正式命名
 
@@ -137,8 +137,8 @@
 
 对应 canonical specs：
 
-- [session-control-audit-surface-and-history-evidence-summary/spec.md](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/session-control-audit-surface-and-history-evidence-summary/spec.md)
-- [run-control-audit-surface-and-summary-first-explainability/spec.md](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/run-control-audit-surface-and-summary-first-explainability/spec.md)
+- [session-control-audit-surface-and-history-evidence-summary/spec.md](../../openspec/specs/session-control-audit-surface-and-history-evidence-summary/spec.md)
+- [run-control-audit-surface-and-summary-first-explainability/spec.md](../../openspec/specs/run-control-audit-surface-and-summary-first-explainability/spec.md)
 
 当前已成立的实现约束：
 

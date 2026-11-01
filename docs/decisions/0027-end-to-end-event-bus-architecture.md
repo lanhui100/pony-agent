@@ -34,3 +34,14 @@ Pony Agent 目前的事件机制呈点对点网状分布：
 1. `crates/pony-agent-core/src/agent/event_bus.rs` 成为核心事件广播基础设施；
 2. 前端跨组件、跨 Store 通信统一迁移至 `src/lib/event-bus.ts`；
 3. 后续多宿主（Web/CLI）仅需挂载对应的 EventBus Subscriber。
+
+## 落地现状（事实同步，2026-11-01）
+
+决定已采纳，但总线尚未成为实际事件通道。当前代码事实：
+
+- `crates/pony-agent-core/src/agent/event_bus.rs` 仅有定义与测试，无宿主订阅者；
+- 生产事件链路仍是 `TurnEventSink`（`crates/pony-agent-core/src/agent/turn_flow.rs`）→ Tauri `app.emit`（`src-tauri/src/tauri_adapter.rs`）→ 前端 `safeListen`；
+- `src/lib/event-bus.ts` 在前端无生产消费者，仅有单测；
+- 因此"端到端事件标准"尚未生效，多宿主复用目前实际由 `HostControlPlane` + `TurnEventSink` 承担。
+
+后续接入总线属于未完成工作，本 ADR 状态描述"决定已采纳"，不描述完工度。

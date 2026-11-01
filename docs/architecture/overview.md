@@ -4,7 +4,7 @@
 
 Pony Agent 的目标是构建一个可观察、可扩展的桌面智能体系统，而不是简单的聊天壳。
 
-在阅读本页前，若对 `context / state / memory / retrieval / checkpoint / transcript` 的含义还不稳定，先看 [架构术语表](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/terminology.md)。
+在阅读本页前，若对 `context / state / memory / retrieval / checkpoint / transcript` 的含义还不稳定，先看 [架构术语表](../../docs/architecture/terminology.md)。
 
 ## 目标分层图（规划态）
 
@@ -183,7 +183,7 @@ Pony Agent 的目标是构建一个可观察、可扩展的桌面智能体系统
 - `PA-014` 已把 graph stop/resume/checkpoint 提升到 graph 层：当前有 `GraphRunStopReason`、`GraphRunCheckpoint`、run 持久化 store、`stop_graph_run / resume_graph_run / load_graph_run_checkpoint`。
 - `PA-017` 已把附件资产从“只能 recent recall”推进到“可查询、可清理、可审计”的最小产品级状态：当前具备 `active / missing_payload / reclaimable / expired` 生命周期状态、最小查询面与显式 cleanup。
 - `PA-019` 已固定 graph planner 边界。
-- `PA-018` 已完成：runtime / graph / planner / 宿主默认查询面已经建立 retrieval-first 消费链路，`LongTermMemory` 也已有独立边界与项目级稳定事实来源。详见 [Context/State 子系统](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/context-state-subsystem.md)。
+- `PA-018` 已完成：runtime / graph / planner / 宿主默认查询面已经建立 retrieval-first 消费链路，`LongTermMemory` 也已有独立边界与项目级稳定事实来源。详见 [Context/State 子系统](../../docs/architecture/context-state-subsystem.md)。
 - `PA-024` 继续承接 retrieval observability / trace 展示语义。
 - `PA-025` 继续承接 `RetrievedContextState -> prompt/request` 映射、`Build Context` 语义与 cache-friendly prompt 边界。
 - 推荐顺序：

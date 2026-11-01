@@ -20,7 +20,7 @@
 ### 红队探针修正
 
 文件：
-- [trace_redteam_probe.rs](C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/bin/trace_redteam_probe.rs)
+- [trace_redteam_probe.rs](../../src-tauri/src/bin/trace_redteam_probe.rs)
 
 实际改动：
 - 使用 `start_turn_stream` 直接监听 `turn:delta / turn:completed / turn:failed`

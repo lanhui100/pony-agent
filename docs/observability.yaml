@@ -170,3 +170,15 @@ note: >-
   (3) 四维归属不变：不新增 metrics/logs 出口（N-A 结构性理由不变），issues 落点与异常码不变；
       新增键全部为附加式（旧属性值与既有签名零变更），tracing 唯一落点仍为
       `crates/pony-agent-core/src/agent/otel/mod.rs`。
+
+  【arch-remediation 归属登记（2026-11-01）｜架构评估缺陷修复波】
+  (1) tracing｜LLM 出网超时语义变更：provider 流式客户端原把 180s 设为 reqwest **总 deadline**
+      （`.timeout()`），会硬截断超过 180s 的长推理流；本波改为 connect_timeout 15s +
+      read/idle 180s（`provider/mod.rs`）。tracing 面不受影响：`llm.chat` 计时仍取真实首token/完成时刻，
+      仅"被误截断"的假失败消失；`otel::with_current_traceparent` 注入路径未改动。
+  (2) issues｜MCP 子进程环境隔离：`env_clear()` + 白名单透传后，启动失败仍经既有 `McpClientError`
+      → 既有 boundary 上报；secret store 明文回退告警走既有日志通道，**不新增出口/端点**。
+  (3) 沙箱可用性诚实化：`NativeSandboxBackend` 不再仅凭 PATH 探测即声称强制隔离，属安全语义修正，
+      不新增遥测维度；`SandboxRequest.allow_network` 仍无消费点（本波仅加"未强制"注释，登记为待办）。
+  (4) 四维归属不变：metrics / logs 仍为结构性 N-A（理由见上），issues/tracing 落点不变；
+      本波不新增端点、环境变量或依赖。前端启用 CSP 属渲染层安全收口，不新增遥测出口。

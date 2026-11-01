@@ -138,12 +138,12 @@ Phase 3 (P2) ──────────────── 专业场景扩展
 
 ## 4. 交叉参考
 
-- [Pony Agent 工具实现源码](C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/tools.rs)
-- [第一波工具面 OpenSpec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/first-wave-tool-surface/spec.md)
-- [第二波工具面 OpenSpec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/second-wave-tool-surface/spec.md)
-- [第三波工具面 OpenSpec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/third-wave-default-tool-alignment/spec.md)
-- [工具权限模型 OpenSpec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/tool-permission-contract/spec.md)
-- [工具可观测性 OpenSpec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/tool-observability-contract/spec.md)
-- [Codex 工具实现目录](C:/Users/HUAWEI/Documents/pony-agent/codex-openai/codex-rs/core/src/tools/handlers/)
-- [Claude Code 工具实现目录](C:/Users/HUAWEI/Documents/pony-agent/claude-code-sourcemap/restored-src/src/tools/)
-- [Codex / Hermes / Claude Code 对比说明（外部参考）](C:/Users/HUAWEI/Documents/pony-agent/docs/codex-hermes-claude-code-对比说明.md)
+- [Pony Agent 工具实现源码](../../crates/pony-agent-core/src/agent/tools.rs)
+- [第一波工具面 OpenSpec](../../openspec/specs/first-wave-tool-surface/spec.md)
+- [第二波工具面 OpenSpec](../../openspec/specs/second-wave-tool-surface/spec.md)
+- [第三波工具面 OpenSpec](../../openspec/specs/third-wave-default-tool-alignment/spec.md)
+- [工具权限模型 OpenSpec](../../openspec/specs/tool-permission-contract/spec.md)
+- [工具可观测性 OpenSpec](../../openspec/specs/tool-observability-contract/spec.md)
+- [Codex 工具实现目录](../../codex-openai/codex-rs/core/src/tools/handlers/)
+- [Claude Code 工具实现目录](../../claude-code-sourcemap/restored-src/src/tools/)
+- [Codex / Hermes / Claude Code 对比说明（外部参考）](../../docs/codex-hermes-claude-code-对比说明.md)

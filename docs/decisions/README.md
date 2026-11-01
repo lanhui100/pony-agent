@@ -73,6 +73,7 @@
 - [0050 配置页「全局轨迹上报」选项收敛为单行标签 + 右端开关](0050-trace-reporting-switch-ui-simplification.md)
 - [0051 可观测性上报三项修正（版本单一来源、治理 span 会话归属、思考/缓存 token 出口）](0051-observability-version-session-and-thinking-token-fixes.md)
 - [0053 token / 速度口径真值契约（wave-54）](0053-token-speed-truth-contract.md)
+- [0054 渲染层外泄通道收口：启用 CSP、markdown 外部资源 fail-closed 与密钥不回显](0054-render-layer-exfil-csp-and-secret-masking.md)
 
 ### 已接替
 

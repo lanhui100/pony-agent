@@ -229,4 +229,4 @@ npm run verify
   [planner.rs](crates/pony-agent-core/src/agent/planner.rs)
 - 宿主 retrieval-first 查询面：
   [control_plane.rs](crates/pony-agent-core/src/agent/control_plane.rs)
-  [lib.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/lib.rs)
+  [lib.rs](../../src-tauri/src/lib.rs)

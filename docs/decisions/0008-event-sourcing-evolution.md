@@ -105,3 +105,11 @@ Pony Agent 的会话数据目前是"状态快照"模型：`SessionSnapshot` 整�
 一句话概括：
 
 **不重写，翻转**——把"状态"降级为"投影"，把"事件"提升为"真源"，分四个阶段完成，每阶段可独立交付。
+## 落地现状（事实同步，2026-11-01）
+
+决定已采纳（阶段 1 写入侧落地），但正文所述终态尚未达成。当前代码事实：
+
+- **写入侧已落地**：`turn_events` 由 `FlushEvents` 写入，`seq` 计数器与事件行同事务（`crates/pony-agent-core/src/agent/sqlite_session.rs`），并带 epoch barrier。
+- **读侧仍以快照为真源**：规范化读路径仅在 `store_metadata` 的 `storage.normalized.v1.phase` 为 `observing`/`retired` 时启用；该 key 目前只在测试中写入（`sqlite_session.rs` 测试模块），生产读取仍走 `sessions.session_data` blob。`normalized_*` 表是纯双写、无生产读方。
+- **checkpoint 仍是快照复制**：`HistoryNode` 尚未改为 `event_seq_range` 引用，撤回仍是 `hydrate_session_from_node` 状态替换。
+- **追溯口径**：本 ADR 状态描述"决定已采纳"，工程完工度由任务系统跟踪；上述缺口属阶段 2/3 未完成，不改变本状态。

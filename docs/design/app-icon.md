@@ -37,7 +37,7 @@
 
 ## 文件
 
-- 生成脚本：[scripts/generate_app_icons.py](C:/Users/HUAWEI/Documents/pony-agent/scripts/generate_app_icons.py)
-- 当前默认导出目录：[src-tauri/icons](C:/Users/HUAWEI/Documents/pony-agent/src-tauri/icons)
-- 候选预览目录：[docs/design/icon-candidates](C:/Users/HUAWEI/Documents/pony-agent/docs/design/icon-candidates)
-- 应用内品牌组件：[src/components/PonyBrandIcon.vue](C:/Users/HUAWEI/Documents/pony-agent/src/components/PonyBrandIcon.vue)
+- 生成脚本：[scripts/generate_app_icons.py](../../scripts/generate_app_icons.py)
+- 当前默认导出目录：[src-tauri/icons](../../src-tauri/icons)
+- 候选预览目录：[docs/design/icon-candidates](../../docs/design/icon-candidates)
+- 应用内品牌组件：[src/components/PonyBrandIcon.vue](../../src/components/PonyBrandIcon.vue)

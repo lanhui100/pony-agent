@@ -29,7 +29,7 @@
    - 调度、沙箱执行、持久化与大模型交互必须位于 `crates/pony-agent-core` 及 `src-tauri`。
    - 前端（Vue 3 / TypeScript）仅作交互界面与状态展示，模型网络流量严禁直接走前端 `fetch`。
 2. **外部安全边界（Fail-Closed）**：
-   - 桌面打开外部链接统一调用 `src/lib/open-external-url.ts`，Rust 后端强制执行 HTTPS 协议与严格 host 白名单（`github.com`, `api.github.com`, `exa.ai`），Windows 平台使用 `ShellExecuteW` 唤起默认浏览器，严禁使用命令拼接。
+   - 桌面打开外部链接统一调用 `src/lib/open-external-url.ts`，Rust 后端强制执行 HTTPS 协议与严格 host 白名单（真值源：`src-tauri/src/platform.rs` 的 `ALLOWED_OPEN_HOSTS`，当前四项：`github.com`, `api.github.com`, `exa.ai`, `s3.local.ponyjob.top`），Windows 平台使用 `ShellExecuteW` 唤起默认浏览器，严禁使用命令拼接。白名单增删必须与本条文档同提交更新。
 3. **版本四处同步契约**：
    - `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`.version.json` 必须保持严格同步。
    - 任何涉及版本的提交由 `scripts/check-version-sync.ps1` 校验。
