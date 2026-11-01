@@ -214,6 +214,7 @@ mod tests {
                     model_id: None,
                     reasoning_effort: None,
                     workspace_mode: None,
+                    tool_authorization_mode: None,
                     session_id: Some("sse-test".to_string()),
                     node_id: None,
                     history: Vec::new(),
