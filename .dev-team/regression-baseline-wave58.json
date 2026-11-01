@@ -1,0 +1,10 @@
+{
+  "wave": 58,
+  "base_commit": "4e5764b",
+  "command": "CARGO_TARGET_DIR=target-test cargo test -p pony-agent-core --tests",
+  "test_binaries": 97,
+  "passed": 1777,
+  "failed": 0,
+  "failures": [],
+  "note": "baseline captured 16:20-16:44, 期间 protocol-agent 尚未改动源码（编译早于编辑）"
+}
