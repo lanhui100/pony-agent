@@ -1,0 +1,11 @@
+# 豁免文档分层包覆盖检查的模块清单
+# 本清单供 ponygo audit / ponygo status 读取
+# 每行一个包目录名（src/ 或 crates/ 下的直接子目录），# 开头为注释
+
+# 前端共享模块，由 src/stores、src/lib、src/types、src/components、src/assets 组成
+# 作为一体化单页应用（SPA）前端工程，其顶层文档承载于 docs/AGENTS.md 与 src-tauri/
+stores
+types
+components
+lib
+assets

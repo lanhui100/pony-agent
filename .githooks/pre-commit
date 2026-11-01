@@ -1,9 +1,12 @@
 #!/bin/sh
-# L1 pre-commit：秒级预算——暂存卫生 + 决策记录校验。不跑类型/测试/构建。
-pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/git-guard.ps1" pre-commit
-rc=$?
-if [ "$rc" -ne 0 ]; then
-  exit $rc
+# >>> ponygo-gate: adr-verify v1 >>>
+if [ -f "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" ]; then
+  bash "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" || exit 1
 fi
-pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/verify-decisions.ps1"
-exit $?
+# <<< ponygo-gate: adr-verify v1 <<<
+# L1 pre-commit：秒级预算——暂存卫生 + 决策记录校验。不跑类型/测试/构建。
+if command -v pwsh >/dev/null 2>&1; then
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/git-guard.ps1" pre-commit || exit $?
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/verify-decisions.ps1" || exit $?
+fi
+exit 0
