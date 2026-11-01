@@ -2655,7 +2655,12 @@ impl SessionBackend for SqliteSessionBackend {
         self.persist_commands_batch(vec![command])
     }
 
-    /// 批量规范化持久化命令（单个 SQLite BEGIN EXCLUSIVE 事务原子提交，附带 busy 退避重试）。
+    /// 批量规范化持久化命令（单个 `BEGIN IMMEDIATE` 事务原子提交，附带 busy 退避重试）。
+    ///
+    /// 这里必须是 **IMMEDIATE** 而不是 rusqlite 默认的 DEFERRED：本事务的第一批语句就是写操作，
+    /// DEFERRED 事务会先取共享锁、写时才尝试升级为写锁 —— 两个并发写事务都在升级点等待对方，
+    /// 直接落进 `SQLITE_BUSY`（SQLite 不对此做死锁回退）。IMMEDIATE 在事务开始就取写锁，
+    /// 把冲突收敛到事务入口，由下面的 busy 退避重试吸收。
     fn persist_commands_batch(&self, commands: Vec<PersistCommand>) -> PersistCommandOutcome {
         if commands.is_empty() {
             return PersistCommandOutcome::Succeeded;
@@ -2671,7 +2676,12 @@ impl SessionBackend for SqliteSessionBackend {
 
         let mut retries = 3;
         loop {
-            let tx = match conn.unchecked_transaction() {
+            // `save_store`/`persist_command` 拿的是 `&self`（不是 `&mut self`），
+            // 因此用 `Transaction::new_unchecked` 显式指定 IMMEDIATE 行为。
+            let tx = match rusqlite::Transaction::new_unchecked(
+                conn,
+                rusqlite::TransactionBehavior::Immediate,
+            ) {
                 Ok(tx) => tx,
                 Err(error) => {
                     if retries > 0 && error.to_string().contains("busy") {
@@ -2823,25 +2833,30 @@ impl SessionBackend for SqliteSessionBackend {
     /// 消息 → history；trace 表 → turn_trace_history + 节点 materialize；
     /// history_nodes/branches/cursor 直接读表。
 
-    fn save_store(&self, store: &PersistedStore) {
+    fn save_store(&self, store: &PersistedStore) -> Result<(), String> {
         // Borrow the pooled connection; never panic the caller on a write error
-        // — the turn loop must stay alive even if persistence hiccups.
+        // — the turn loop must stay alive even if persistence hiccups. 但失败必须**返回**给
+        // 调用方（T2-3）：此前只 eprintln 后返回 `()`，调用方无从得知会话根本没落盘。
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(e) => {
                 eprintln!("[pony-agent][session] SQLite open error: {e}");
-                return;
+                return Err(format!("open sqlite session store failed: {e}"));
             }
         };
         let conn = slot.as_ref().expect("connection initialized");
 
-        if let Err(e) = self.write_full_store(conn, store) {
+        let outcome = self.write_full_store(conn, store);
+        if let Err(e) = &outcome {
             eprintln!("[pony-agent][session] SQLite save error: {e}");
         }
 
         if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
+            // checkpoint 失败不影响数据正确性（只是 WAL 回收），保持既有"仅记录"语义。
             eprintln!("[pony-agent][session] SQLite checkpoint error: {e}");
         }
+
+        outcome
     }
 
     fn trace_storage_mode(&self) -> SeparateTraceTableMode {
@@ -3540,7 +3555,7 @@ mod tests {
             SeparateTraceTableMode::DualWrite,
         );
         let store = PersistedStore::default();
-        backend.save_store(&store);
+        let _ = backend.save_store(&store);
 
         let loaded = backend.load_store().unwrap();
         assert!(loaded.sessions.is_empty());
@@ -3601,7 +3616,7 @@ mod tests {
                 name: "默认工作区".to_string(),
                 root_path: root.display().to_string(),
             });
-        backend.save_store(&store);
+        let _ = backend.save_store(&store);
 
         let loaded = backend.load_store().unwrap();
         assert_eq!(loaded.workspaces.len(), 1);
@@ -3631,7 +3646,7 @@ mod tests {
             session.title_override = Some("用户命名".to_string());
             session.archived = true;
             store.sessions.insert("s1".to_string(), session);
-            backend.save_store(&store);
+            let _ = backend.save_store(&store);
 
             let loaded = backend.load_store().unwrap();
             let restored = loaded.sessions.get("s1").expect("session blob");
@@ -3690,10 +3705,10 @@ mod tests {
         store
             .sessions
             .insert("s2".to_string(), minimal_session("s2", "second", 2000));
-        backend.save_store(&store);
+        let _ = backend.save_store(&store);
 
         store.sessions.remove("s1");
-        backend.save_store(&store);
+        let _ = backend.save_store(&store);
 
         let loaded = backend.load_store().unwrap();
         assert_eq!(loaded.sessions.len(), 1);
@@ -3719,7 +3734,7 @@ mod tests {
         store
             .sessions
             .insert("s2".to_string(), minimal_session("s2", "second", 2000));
-        backend.save_store(&store);
+        let _ = backend.save_store(&store);
 
         let mut updated = minimal_session("s1", "first-updated", 3000);
         updated
@@ -3769,7 +3784,7 @@ mod tests {
         store
             .session_attachment_index
             .insert("s1".to_string(), vec!["asset:s1/file.dataurl".to_string()]);
-        backend.save_store(&store);
+        let _ = backend.save_store(&store);
 
         let mut attachment_assets = store.attachment_assets.clone();
         attachment_assets.remove("asset:s1/file.dataurl");
@@ -3806,7 +3821,7 @@ mod tests {
         let mut mismatched = minimal_session("payload-id", "mismatch", 1000);
         mismatched.conversation_id = "payload-id".to_string();
         store.sessions.insert("row-id".to_string(), mismatched);
-        backend.save_store(&store);
+        let _ = backend.save_store(&store);
 
         let loaded = backend.load_store().unwrap();
         assert_eq!(loaded.sessions.len(), 1);
@@ -3831,7 +3846,7 @@ mod tests {
 
         let mut store = PersistedStore::default();
         store.sessions.insert("s1".to_string(), session.clone());
-        backend.save_store(&store);
+        let _ = backend.save_store(&store);
 
         let mut updated = session.clone();
         updated.trace_migration_state = TraceMigrationState::DualWrite;
@@ -3905,7 +3920,7 @@ mod tests {
 
         let mut session = minimal_session("s1", "first", 1000);
         session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
-        backend.save_store(&PersistedStore {
+        let _ = backend.save_store(&PersistedStore {
             sessions: HashMap::from([("s1".to_string(), session)]),
             ..PersistedStore::default()
         });

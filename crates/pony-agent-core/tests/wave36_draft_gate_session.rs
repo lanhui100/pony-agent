@@ -14,11 +14,13 @@
 
 use pony_agent_core::agent::dispatcher::DispatchContext;
 use pony_agent_core::agent::governed_executor::build_governed_executor;
-use pony_agent_core::agent::tools::{ToolCall, ToolExecutor};
+use pony_agent_core::agent::dispatcher_composites::GovernedToolExecutor;
+use pony_agent_core::agent::tools::{ToolCall, ToolExecutionContext, ToolExecutor, ToolResult};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -83,7 +85,7 @@ fn create_draft_plan(executor: &impl ToolExecutor) -> Value {
 #[test]
 fn draft_gate_blocks_write_for_runtime_injected_session() {
     let workspace = temp_workspace();
-    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let executor = build_turn_scoped_executor(Some(workspace.clone()), None);
     executor.set_context(DispatchContext {
         session_id: Some(SESSION.to_string()),
         ..Default::default()
@@ -141,7 +143,7 @@ fn draft_gate_blocks_write_for_runtime_injected_session() {
 #[test]
 fn draft_gate_keeps_plan_control_exempt() {
     let workspace = temp_workspace();
-    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let executor = build_turn_scoped_executor(Some(workspace.clone()), None);
     executor.set_context(DispatchContext {
         session_id: Some(SESSION.to_string()),
         ..Default::default()
@@ -190,7 +192,7 @@ fn draft_gate_keeps_plan_control_exempt() {
 #[test]
 fn draft_gate_does_not_cross_block_other_sessions() {
     let workspace = temp_workspace();
-    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let executor = build_turn_scoped_executor(Some(workspace.clone()), None);
     executor.set_context(DispatchContext {
         session_id: Some(SESSION.to_string()),
         ..Default::default()
@@ -218,7 +220,7 @@ fn draft_gate_does_not_cross_block_other_sessions() {
 
     // (ii) 新 executor（无任何 Draft）在同一注入会话下写工具必须放行。
     let workspace2 = temp_workspace();
-    let clean_executor = build_governed_executor(Some(workspace2.clone()), None);
+    let clean_executor = build_turn_scoped_executor(Some(workspace2.clone()), None);
     clean_executor.set_context(DispatchContext {
         session_id: Some(SESSION.to_string()),
         ..Default::default()
@@ -248,7 +250,7 @@ fn draft_gate_does_not_cross_block_other_sessions() {
 fn draft_gate_fails_closed_when_context_session_is_missing() {
     // 分支 1：存在任一 Draft（其属主会话不是当前 context）⇒ 无会话上下文也必须拒绝。
     let workspace = temp_workspace();
-    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let executor = build_turn_scoped_executor(Some(workspace.clone()), None);
     executor.set_context(DispatchContext {
         session_id: Some(SESSION.to_string()),
         ..Default::default()
@@ -281,7 +283,7 @@ fn draft_gate_fails_closed_when_context_session_is_missing() {
 
     // 分支 2：无任何 Draft ⇒ 同一 session-less context 下写工具 Allow。
     let clean_workspace = temp_workspace();
-    let clean_executor = build_governed_executor(Some(clean_workspace.clone()), None);
+    let clean_executor = build_turn_scoped_executor(Some(clean_workspace.clone()), None);
     clean_executor.set_context(DispatchContext::default());
     let allowed = clean_executor.execute(&call(
         "Write",
@@ -299,4 +301,69 @@ fn draft_gate_fails_closed_when_context_session_is_missing() {
 
     let _ = fs::remove_dir_all(workspace);
     let _ = fs::remove_dir_all(clean_workspace);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T2-1 迁移垫片（测试本地，非生产 API）
+//
+// F2 已删除 `GovernedToolExecutor::set_context` 与其共享 `Mutex<DispatchContext>` 槽位：turn 级
+// 治理事实（session/turn/授权模式/审批证据）改为**每次调用**经
+// `ToolExecutionContext.dispatch_context` 传入。本文件的历史夹具以「先 set 再 execute」的形态
+// 注入 turn 事实，故此处提供最小注入壳：每次 `execute` 都把当前 turn 事实作为 per-call
+// 上下文交给**真实生产 adapter**，调用点与断言零改动。
+// 生产已删除 `set_context`：此垫片仅维持本文件既有 4 条用例的因果，**不进入生产路径**
+// （生产 adapter 由 `GovernedToolExecutor::new` 直接构造，本文件里它只是垫片的 inner）。
+// 生产路径自身的并发隔离由 `tests/concurrent_turn_context_isolation_red.rs` 直接断言。
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+struct TurnScopedExecutor {
+    inner: GovernedToolExecutor,
+    context: Mutex<DispatchContext>,
+}
+
+impl TurnScopedExecutor {
+    fn new(inner: GovernedToolExecutor) -> Self {
+        Self {
+            inner,
+            context: Mutex::new(DispatchContext::default()),
+        }
+    }
+
+    /// 设置本轮 turn 事实（垫片语义等价于旧的 `set_context`，但不再有跨调用共享槽位）。
+    fn set_context(&self, context: DispatchContext) {
+        *self.context.lock().expect("turn facts poisoned") = context;
+    }
+
+    /// 读回当前 turn 事实（仅供旧夹具的往返断言使用）。
+    fn context(&self) -> DispatchContext {
+        self.context.lock().expect("turn facts poisoned").clone()
+    }
+
+    fn turn_exec_context(&self, base: &ToolExecutionContext) -> ToolExecutionContext {
+        let mut scoped = base.clone();
+        let turn_facts = self.context();
+        if scoped.session_id.is_none() {
+            scoped.session_id = turn_facts.session_id.clone();
+        }
+        scoped.dispatch_context = Some(turn_facts);
+        scoped
+    }
+}
+
+impl ToolExecutor for TurnScopedExecutor {
+    fn execute(&self, call: &ToolCall) -> ToolResult {
+        self.execute_with_context(call, &ToolExecutionContext::default())
+    }
+
+    fn execute_with_context(&self, call: &ToolCall, exec_context: &ToolExecutionContext) -> ToolResult {
+        self.inner
+            .execute_with_context(call, &self.turn_exec_context(exec_context))
+    }
+}
+
+fn build_turn_scoped_executor(
+    workspace_root: Option<PathBuf>,
+    authorize_store: Option<Arc<pony_agent_core::agent::path_permission::AuthorizeStore>>,
+) -> TurnScopedExecutor {
+    TurnScopedExecutor::new(build_governed_executor(workspace_root, authorize_store))
 }

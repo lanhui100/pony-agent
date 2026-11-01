@@ -33,22 +33,70 @@ impl SessionBackend for FileSessionBackend {
         load_store_from_path(&self.storage_path)
     }
 
-    fn save_store(&self, store: &PersistedStore) {
+    fn save_store(&self, store: &PersistedStore) -> Result<(), String> {
         let Some(parent) = self.storage_path.parent() else {
-            return;
+            return Err(format!(
+                "session store path `{}` has no parent directory",
+                self.storage_path.display()
+            ));
         };
-        if fs::create_dir_all(parent).is_err() {
-            return;
-        }
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "create session store directory `{}` failed: {error}",
+                parent.display()
+            )
+        })?;
 
-        let Ok(serialized) = serde_json::to_string_pretty(store) else {
-            return;
-        };
+        let serialized = serde_json::to_string_pretty(store)
+            .map_err(|error| format!("serialize session store failed: {error}"))?;
         eprintln!(
             "[pony-agent][session] saving sessions to {}",
             self.storage_path.display()
         );
-        let _ = fs::write(&self.storage_path, serialized);
+        // T2-3：原子替换 —— 同目录写临时文件、`sync_all` 落盘、再 rename 到目标路径。
+        // 不能直接 `fs::write(&self.storage_path, ...)`：那是就地截断写，且会**跟随符号链接**
+        // 写穿到链接指向的另一个文件；进程中途被杀/断电会留下半截 JSON，整个会话库报废。
+        // 临时文件放在同目录，保证 rename 在同一文件系统内原子完成。
+        let temp_path = sibling_temp_path(&self.storage_path);
+        {
+            use std::io::Write;
+            // ADVISORY 修复：`File::create` 会截断已存在的同名文件（可被抢占/复用）；
+            // `create_new(true)` 保证新建独占，重名即失败（重名本身就是不应发生的异常）。
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .map_err(|error| {
+                format!(
+                    "create temporary session store `{}` failed: {error}",
+                    temp_path.display()
+                )
+            })?;
+            file.write_all(serialized.as_bytes()).map_err(|error| {
+                let _ = fs::remove_file(&temp_path);
+                format!(
+                    "write temporary session store `{}` failed: {error}",
+                    temp_path.display()
+                )
+            })?;
+            file.sync_all().map_err(|error| {
+                let _ = fs::remove_file(&temp_path);
+                format!(
+                    "flush temporary session store `{}` failed: {error}",
+                    temp_path.display()
+                )
+            })?;
+        }
+        fs::rename(&temp_path, &self.storage_path).map_err(|error| {
+            let _ = fs::remove_file(&temp_path);
+            format!(
+                "atomic replace of session store `{}` failed: {error}",
+                self.storage_path.display()
+            )
+        })?;
+        // ADVISORY 修复：rename 只保证"目录项替换"原子，目录项本身仍需 fsync 才能扛断电；
+        // 否则崩溃后可能出现"文件内容在、名字没落盘"的窗口。
+        sync_parent_directory(parent)
     }
 
     fn attachment_root(&self) -> Option<PathBuf> {
@@ -91,6 +139,56 @@ impl SessionBackend for FileSessionBackend {
             crate::agent::usage_ledger::day_summaries(conn, session_id)
                 .map_err(|error| error.to_string())
         })
+    }
+}
+
+/// 对目录自身做 fsync，确保 `rename` 产生的目录项真正落盘（POSIX 语义）。
+///
+/// Windows 上无法以文件方式打开目录，此处按平台降级为 no-op（NTFS 的元数据顺序由
+/// USN/日志保证，与 POSIX 的"必须 fsync 目录"不同）。
+fn sync_parent_directory(parent: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let dir = fs::File::open(parent).map_err(|error| {
+            format!(
+                "open session store directory `{}` for fsync failed: {error}",
+                parent.display()
+            )
+        })?;
+        dir.sync_all().map_err(|error| {
+            format!(
+                "fsync session store directory `{}` failed: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+    }
+    Ok(())
+}
+
+/// T2-3：同目录临时文件名（`<name>.tmp-<pid>-<nanos>`）。
+///
+/// 放在目标文件同一目录，保证 `fs::rename` 落在同一文件系统（跨文件系统 rename 会 `EXDEV`）。
+fn sibling_temp_path(target: &std::path::Path) -> PathBuf {
+    static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    // ADVISORY 修复：仅 pid+nanos 在同一进程内高频写盘时可能重名；再加一个进程内单调序号，
+    // 配合 `create_new(true)` 保证「不可能复用/覆盖别人的临时文件」。
+    let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "session-store".to_string());
+    let temp_name = format!(".{file_name}.tmp-{}-{stamp}-{seq}", std::process::id());
+    match target.parent() {
+        Some(parent) => parent.join(temp_name),
+        None => PathBuf::from(temp_name),
     }
 }
 
@@ -144,7 +242,9 @@ impl SessionBackend for MemorySessionBackend {
         None
     }
 
-    fn save_store(&self, _store: &PersistedStore) {}
+    fn save_store(&self, _store: &PersistedStore) -> Result<(), String> {
+        Ok(())
+    }
 
     fn attachment_root(&self) -> Option<PathBuf> {
         Some(self.attachment_root.clone())

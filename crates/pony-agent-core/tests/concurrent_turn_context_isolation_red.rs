@@ -176,15 +176,15 @@ fn concurrent_turns_must_not_share_the_authorization_context_slot() {
         let turn = turn.to_string();
         let mode = mode.to_string();
         handles.push(std::thread::spawn(move || {
-            executor.set_context(context(&session, &turn, &mode));
-            // ① 确保两个 turn 都已完成上下文写入，再各自发起调用（固定顺序，无 sleep）
-            barrier.wait();
+            // ① 先让两个 turn 都把自己的调用参数（含 turn 事实）准备好，再同时发起调用（固定顺序，无 sleep）
             let marker = format!("t2-call-{index}-{session}");
             let exec_context = ToolExecutionContext {
                 session_id: Some(session.clone()),
+                dispatch_context: Some(context(&session, &turn, &mode)),
                 workspace_root: None,
                 ..Default::default()
             };
+            barrier.wait();
             let _ = executor.execute_with_context(&call(&marker), &exec_context);
             // ② 双方调用都结束后再让主线程继续，避免提前 join 造成的时序噪声
             barrier.wait();
@@ -212,9 +212,13 @@ fn context_must_not_carry_over_to_the_next_turn() {
     let recorder = Arc::new(ContextRecorder::default());
     let executor = Arc::new(build_executor(Arc::clone(&recorder)));
 
-    // turn-1：会话 A 的只读 turn
-    executor.set_context(context("t2-carry-session-A", "t2-carry-turn-1", "read_only"));
-    let _ = executor.execute_with_context(&call("t2-carry-call-1"), &ToolExecutionContext::default());
+    // turn-1：会话 A 的只读 turn（turn 事实只随本次调用传入，不存在共享槽位）
+    let turn_one_context = ToolExecutionContext {
+        session_id: Some("t2-carry-session-A".to_string()),
+        dispatch_context: Some(context("t2-carry-session-A", "t2-carry-turn-1", "read_only")),
+        ..Default::default()
+    };
+    let _ = executor.execute_with_context(&call("t2-carry-call-1"), &turn_one_context);
 
     // turn-2：新 executor 语义上的“干净调用”——调用方没有提供任何会话事实
     let _ = executor.execute_with_context(&call("t2-carry-call-2"), &ToolExecutionContext::default());

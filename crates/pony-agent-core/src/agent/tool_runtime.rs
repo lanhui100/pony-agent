@@ -238,6 +238,9 @@ pub enum SandboxAvailability {
 #[serde(rename_all = "camelCase")]
 pub struct SandboxRequest {
     pub workspace_root: String,
+    /// ⚠️ 当前**未强制**：全仓没有任何代码消费本字段（只是各调用点固定写 `false`），
+    /// 因此它不代表"已做网络管控"，只是留给未来网络隔离实现的占位契约。
+    /// 判定"能否联网"时不要依赖本字段；真正的网络限制属后续工作。
     pub allow_network: bool,
     pub environment_allowlist: Vec<String>,
     /// When true the sandboxed child runs with a minimal environment: `env_clear` plus the

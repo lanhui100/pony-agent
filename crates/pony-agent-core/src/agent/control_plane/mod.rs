@@ -682,6 +682,23 @@ pub struct GraphRunStreamStartResponse {
     pub turn_id: String,
 }
 
+/// T7（安全 fail-open 修复）：goal 自动续轮/推进时，`TurnInput` 是授权事实的**唯一载体**
+/// （F2 之后 dispatch 层不再有兜底槽位）。历史实现给续轮合成 `tool_authorization_mode: None`，
+/// 于是 `GovernedPolicyEvaluator::evaluate_with_context` 里 `if let Some(auth_mode)` 直接跳过
+/// read_only 拒绝 ⇒ **只读会话在续轮后可写可执行**。
+///
+/// 口径：继承原会话的授权事实；缺失或取值非法时取**最严**（`read_only`），绝不回落 Allow。
+/// 注意 `plan_execution_approval` 不随续轮继承：审批证据绑定 `(session_id, plan_id)` 且有 TTL，
+/// 必须由宿主针对具体计划步重新下发（C-141-4/5）。
+fn continuation_tool_authorization_mode(inherited: Option<&str>) -> String {
+    match inherited.map(str::trim) {
+        Some("read_only") => "read_only".to_string(),
+        Some("workspace_write") => "workspace_write".to_string(),
+        Some("full_access") => "full_access".to_string(),
+        _ => "read_only".to_string(),
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedGraphRunStream {
     pub run_id: String,
@@ -1631,6 +1648,8 @@ impl HostControlPlane {
         sink: &S,
         mut prepared: PreparedGraphRunStream,
     ) -> Result<GraphRunTurnResponse, String> {
+        // T7：本 run 的授权事实来自原始输入，续轮必须继承它（不能丢成 None）。
+        let inherited_authorization_mode = prepared.input.tool_authorization_mode.clone();
         let mut consecutive_continues = 0;
         loop {
             let response = self.execute_graph_run_stream_step(sink, prepared)?;
@@ -1679,7 +1698,10 @@ impl HostControlPlane {
                 reasoning_effort: None,
                 workspace_id: None,
                 plan_execution_approval: None,
-                tool_authorization_mode: None,
+                // T7：继承原会话授权事实（缺失时 read_only），绝不回落为 None（=Allow）。
+                tool_authorization_mode: Some(continuation_tool_authorization_mode(
+                    inherited_authorization_mode.as_deref(),
+                )),
             };
 
             let next_cmd = ContinueGraphRunStreamCommand {
@@ -2268,6 +2290,8 @@ impl HostControlPlane {
         run_id: String,
         mut input: TurnInput,
     ) -> Result<GraphRunTurnResponse, String> {
+        // T7：同上——续轮/推进继承原会话授权事实（无事实时按 read_only 兜底）。
+        let inherited_authorization_mode = input.tool_authorization_mode.clone();
         let mut consecutive_continues = 0;
         loop {
             let response = self.advance_graph_run_step(run_id.clone(), input)?;
@@ -2315,7 +2339,10 @@ impl HostControlPlane {
                 reasoning_effort: None,
                 workspace_id: None,
                 plan_execution_approval: None,
-                tool_authorization_mode: None,
+                // T7：继承原会话授权事实（缺失时 read_only），绝不回落为 None（=Allow）。
+                tool_authorization_mode: Some(continuation_tool_authorization_mode(
+                    inherited_authorization_mode.as_deref(),
+                )),
             };
         }
     }
@@ -7269,10 +7296,10 @@ mod tests {
         fn load_store(&self) -> Option<PersistedStore> {
             self.inner.load_store()
         }
-        fn save_store(&self, store: &PersistedStore) {
+        fn save_store(&self, store: &PersistedStore) -> Result<(), String> {
             self.save_store_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.save_store(store);
+            self.inner.save_store(store)
         }
         fn trace_storage_mode(&self) -> crate::agent::session::SeparateTraceTableMode {
             self.inner.trace_storage_mode()

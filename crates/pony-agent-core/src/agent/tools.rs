@@ -1043,6 +1043,13 @@ pub struct ToolExecutionContext {
     /// 当前会话 id（wave-1 C5）：`TodoWrite` / `TodoList` / goal 工具参数缺省 session 时回退用它。
     /// 由 runtime / governed dispatch 注入；模型显式给出的 session 参数优先，不被覆盖。
     pub session_id: Option<String>,
+    /// T2-1：本次调用的 turn 级治理事实（session/run/turn/workspace/授权模式/审批证据）。
+    ///
+    /// 由 runtime 在**每次工具调用**处按本 turn 的事实构造、随调用显式传入 —— 取代此前
+    /// `GovernedToolExecutor` 上的共享 `Mutex<DispatchContext>` + `set_context`（并发 turn 会
+    /// 互相覆盖，把 A 会话的授权事实带进 B 会话的调用）。`None` 表示调用方未提供 turn 事实：
+    /// 治理链必须**明确降级**（session/turn 为空），绝不回退到任何全局或线程局部状态。
+    pub dispatch_context: Option<crate::agent::dispatcher::DispatchContext>,
 }
 
 /// wave-1 C5：工具参数未显式给 session 时回退到执行上下文注入的会话 id。

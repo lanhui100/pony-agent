@@ -1388,9 +1388,17 @@ pub fn provider_failure_message(
     None
 }
 
+/// T8：`turn:delta` 必须携带真实 `session_id`。
+///
+/// 历史缺陷：本 helper 没有 session 形参，事件一律发 `sessionId: null`。前端严格按
+/// sessionId 过滤后，**非真流式 provider**（`supports_true_streaming_decision()==false`
+/// → `decide_sync`/`BufferedResponse`，见 `turn_stream.rs` 的 buffered 分支）本应把整段回复
+/// 通过本 helper 分块渲染，但事件被整条丢弃 ⇒ 这类 provider 在 `turn:completed` 之前完全不渲染。
+#[allow(clippy::too_many_arguments)]
 fn stream_delta_chunks(
     sink: &impl TurnEventSink,
     turn_id: &str,
+    session_id: Option<&str>,
     phase: &str,
     text: Option<&str>,
     reasoning_content: Option<&str>,
@@ -1450,7 +1458,7 @@ fn stream_delta_chunks(
             None,
             None,
             None,
-            None,
+            session_id.map(str::to_string),
         );
 
         if index + 1 < chunks.len() {
@@ -1461,9 +1469,11 @@ fn stream_delta_chunks(
     first_token_latency_ms
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn stream_reasoning_chunks(
     sink: &impl TurnEventSink,
     turn_id: &str,
+    session_id: Option<&str>,
     phase: &str,
     reasoning_content: &str,
     started_at: &std::time::Instant,
@@ -1473,6 +1483,7 @@ pub fn stream_reasoning_chunks(
     stream_delta_chunks(
         sink,
         turn_id,
+        session_id,
         phase,
         None,
         Some(reasoning_content),
@@ -1482,9 +1493,11 @@ pub fn stream_reasoning_chunks(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn stream_text_chunks(
     sink: &impl TurnEventSink,
     turn_id: &str,
+    session_id: Option<&str>,
     phase: &str,
     text: &str,
     started_at: &std::time::Instant,
@@ -1494,6 +1507,7 @@ pub fn stream_text_chunks(
     stream_delta_chunks(
         sink,
         turn_id,
+        session_id,
         phase,
         Some(text),
         None,

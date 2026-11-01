@@ -20,6 +20,7 @@ impl AgentRuntime {
         initial_turn_first_token_latency_ms: Option<u64>,
         turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
+        governed_context: Option<&DispatchContext>,
     ) {
         let context_observation = build_context_observation(planning_request, tools);
         let mut hop_records = Vec::new();
@@ -100,7 +101,7 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
-                None,
+                input.session_id.clone(),
             );
 
             let running_tool_activities = running_tool_activities_with_history(
@@ -186,6 +187,8 @@ impl AgentRuntime {
                 workspace_root: self.resolve_session_workspace_root(input.session_id.as_deref()),
                 // L3 r2 A1：透传真实会话 id，触达注入按会话分桶（否则跨会话互相抑制）。
                 session_id: input.session_id.clone(),
+                // T2-1：turn 级治理事实随本次调用显式传入（并发 turn 之间不共享任何槽位）。
+                dispatch_context: governed_context.cloned(),
                 ..Default::default()
             };
             let (tool_result, invocation_record, capability_hook_trace_records) =
@@ -359,7 +362,7 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
-                None,
+                input.session_id.clone(),
             );
 
             // Design Decision 5 (PA-076 P1-1): a pending control outcome (`control_outcome_pending`,
@@ -1302,9 +1305,9 @@ impl AgentRuntime {
             &turn_id,
             0,
         );
-        // Bind the streamed turn's session/run/turn to the governed executor so an Ask control
-        // request persists against the real invocation (design.md Decision 5, P1-1 wiring).
-        self.apply_governed_turn_context(&input, &facts);
+        // T2-1：流式 turn 的 session/run/turn 事实在本 turn 内部解析，并随每次工具调用
+        // 显式下传（Ask 控制请求因此仍绑定真实调用；并发 turn 之间不再共享任何槽位）。
+        let governed_context = self.resolve_governed_turn_context(&input, &facts);
         // Consume a pending Ask resume injection (phase-4 P0) so the terminal tool result is
         // seeded into this turn's provider context.
         let ask_injection = self.take_pending_ask_injection(facts.run_id.as_deref());
@@ -2342,6 +2345,7 @@ impl AgentRuntime {
                 initial_turn_first_token_latency_ms,
                 &turn_started_at,
                 &mut provider_call_records,
+                governed_context.as_ref(),
             );
             // 工具子轮的成功/失败/取消都在 handle_stream_tool_turn 内部发射终态，外层拿不到
             // 返回值；这里按终态 checkpoint.status 回读相位（不改 helper 签名）。
@@ -2435,6 +2439,7 @@ impl AgentRuntime {
                     stream_reasoning_chunks(
                         sink,
                         &turn_id,
+                        input.session_id.as_deref(),
                         "calling_model",
                         reasoning_content,
                         &turn_started_at,
@@ -2447,6 +2452,7 @@ impl AgentRuntime {
             stream_text_chunks(
                 sink,
                 &turn_id,
+                input.session_id.as_deref(),
                 "calling_model",
                 &first_decision.output_text,
                 &turn_started_at,

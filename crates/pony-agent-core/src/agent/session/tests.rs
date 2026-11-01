@@ -5857,7 +5857,9 @@ impl SessionBackend for FailingCommandBackend {
     fn load_store(&self) -> Option<PersistedStore> {
         None
     }
-    fn save_store(&self, _store: &PersistedStore) {}
+    fn save_store(&self, _store: &PersistedStore) -> Result<(), String> {
+        Ok(())
+    }
     fn attachment_root(&self) -> Option<PathBuf> {
         Some(self.attachment_root.clone())
     }
@@ -5877,7 +5879,9 @@ impl SessionBackend for CorruptedEventBackend {
     fn load_store(&self) -> Option<PersistedStore> {
         None
     }
-    fn save_store(&self, _store: &PersistedStore) {}
+    fn save_store(&self, _store: &PersistedStore) -> Result<(), String> {
+        Ok(())
+    }
     fn attachment_root(&self) -> Option<PathBuf> {
         Some(self.attachment_root.clone())
     }

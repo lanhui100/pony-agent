@@ -1480,9 +1480,9 @@ impl ProviderManager {
         endpoint: &str,
         body: &Value,
     ) -> Result<reqwest::Response, String> {
+        // F7：15s 建连预算 + 180s **读空闲**预算；不设总 deadline，长推理流不再被 180s 截断。
         let client = build_streaming_http_client(
             Duration::from_secs(15),
-            Duration::from_secs(180),
             Duration::from_secs(180),
             endpoint,
         )?;
@@ -1522,9 +1522,9 @@ impl ProviderManager {
         endpoint: &str,
         body: &Value,
     ) -> Result<reqwest::Response, String> {
+        // F7：15s 建连预算 + 180s **读空闲**预算；不设总 deadline，长推理流不再被 180s 截断。
         let client = build_streaming_http_client(
             Duration::from_secs(15),
-            Duration::from_secs(180),
             Duration::from_secs(180),
             endpoint,
         )?;
@@ -2192,20 +2192,26 @@ fn client_for_endpoint(builder: reqwest::ClientBuilder, endpoint: &str) -> Resul
     builder.build().map_err(|error| format!("创建 HTTP client 失败：{}", error))
 }
 
+/// 流式请求的 HTTP 客户端。
+///
+/// F7：这里**不设总 deadline**。旧实现把 `.timeout()` 设成 180s，那是"整个请求（含读完响应体）"
+/// 的总时限 —— 长推理流（reasoning 静默 + 长输出）一旦超过 180s 就会被整体截断，表现为流在
+/// 中途断掉而不是超时报错。改为两类预算：
+/// - `connect_timeout`：建连预算（15s），连不上立刻失败；
+/// - `read_timeout`：**单次读空闲**预算（180s）。只要还有数据持续到达就不会被累计时长杀掉，
+///   真正卡死（180s 无任何字节）的连接仍然失败。
+///
+/// `pool_max_idle_per_host(0)`：provider 端每请求新建连接是刻意的隔离策略（沿用既有行为），
+/// 避免复用空闲连接把上一次被取消/半途中断的流状态带进新请求；它只是连接池策略，
+/// 不承担任何超时语义。
 fn build_streaming_http_client(
     connect_timeout: Duration,
     read_timeout: Duration,
-    timeout: Duration,
     endpoint: &str,
 ) -> Result<Client, String> {
-    let effective_timeout = if read_timeout > timeout {
-        read_timeout
-    } else {
-        timeout
-    };
     let builder = Client::builder()
         .connect_timeout(connect_timeout)
-        .timeout(effective_timeout)
+        .read_timeout(read_timeout)
         .http1_only()
         .pool_max_idle_per_host(0);
     client_for_endpoint(builder, endpoint)
@@ -6864,5 +6870,94 @@ mod tests {
         });
         let vision_sanitized = vision_manager.sanitize_request(&request);
         assert_eq!(vision_sanitized.images.len(), 1, "images must be preserved for vision model");
+    }
+
+    /// F7 真实验证：`build_streaming_http_client` 的 180s 语义必须是「读空闲」而不是
+    /// 「总 deadline」。用一个小 idle 预算 + 真本地 SSE 服务复现两件事：
+    /// ① 总时长 > idle（2.5s vs 1s）但间隙 < idle 的流必须完整读完（旧实现会被总 deadline 截断）；
+    /// ② 单次间隙 > idle 的连接必须失败为 timeout（真正卡死仍然有兜底）。
+    #[test]
+    fn streaming_client_uses_idle_read_timeout_not_total_deadline() {
+        fn spawn_dribbling_sse_server(frames: usize, gap: Duration) -> (String, thread::JoinHandle<Vec<u8>>) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind dribbling sse server");
+            let address = listener.local_addr().expect("read address");
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept sse request");
+                let mut buf = [0_u8; 4096];
+                let mut consumed = Vec::new();
+                loop {
+                    let read = stream.read(&mut buf).expect("read request");
+                    if read == 0 {
+                        break;
+                    }
+                    consumed.extend_from_slice(&buf[..read]);
+                    if consumed.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                    )
+                    .expect("write headers");
+                stream.flush().expect("flush headers");
+                for index in 0..frames {
+                    // 先睡后写：模拟「首包前后都有静默」的长推理流。
+                    thread::sleep(gap);
+                    let frame = format!(
+                        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"c{index}\"}}}}]}}\n\n"
+                    );
+                    stream.write_all(frame.as_bytes()).expect("write frame");
+                    stream.flush().expect("flush frame");
+                }
+                consumed
+            });
+            (format!("http://{}", address), handle)
+        }
+
+        let _guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+
+        // ① 总耗时 10 × 250ms = 2.5s ≫ idle 1s，但每次间隙只有 250ms → 必须成功。
+        let (success_endpoint, success_handle) =
+            spawn_dribbling_sse_server(10, Duration::from_millis(250));
+        let client = build_streaming_http_client(
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            &success_endpoint,
+        )
+        .expect("build streaming client");
+        let started = Instant::now();
+        let response = block_on(client.get(&success_endpoint).send()).expect("stream must connect");
+        assert!(response.status().is_success());
+        let body = block_on(response.text()).expect("long stream must not be cut by a total deadline");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed > Duration::from_secs(1),
+            "用例必须真的超过 idle 预算才有证明力，实际 {elapsed:?}"
+        );
+        assert!(
+            body.contains("c9"),
+            "10 帧必须全部读完（旧的总 deadline 会截断），实际正文={body:?}"
+        );
+        let _ = success_handle.join();
+
+        // ② 单次静默 1.5s > idle 300ms → 必须 timeout 失败（卡死兜底仍在）。
+        let (stalled_endpoint, stalled_handle) =
+            spawn_dribbling_sse_server(1, Duration::from_millis(1500));
+        let client = build_streaming_http_client(
+            Duration::from_secs(5),
+            Duration::from_millis(300),
+            &stalled_endpoint,
+        )
+        .expect("build stalled client");
+        let error = match block_on(client.get(&stalled_endpoint).send()) {
+            Ok(response) => block_on(response.text()).expect_err("stalled stream must time out"),
+            Err(error) => error,
+        };
+        assert!(
+            error.is_timeout(),
+            "180s 语义必须是读空闲超时，卡死的流要报 timeout，实际错误={error:?}"
+        );
+        let _ = stalled_handle.join();
     }
 }

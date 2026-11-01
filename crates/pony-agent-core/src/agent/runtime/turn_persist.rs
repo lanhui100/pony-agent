@@ -677,7 +677,8 @@ impl AgentRuntime {
     /// 命令面无活 TurnEventSink（命令行拿不到、不可复用 fail_stream_turn_with_hook_dispatch），
     /// 改用 SessionStore::record_turn_trace（按 turn_id 幂等 upsert，重复触发不会重复
     /// append 同 turn）+ update_execution_checkpoint（phase/status='failed'，写入 error）。
-    /// 该路径与阻塞 provider 读（provider/mod.rs build_streaming_http_client 15s/180s/180s）
+    /// 该路径与阻塞 provider 读（provider/mod.rs build_streaming_http_client：15s 建连 +
+    /// 180s 读空闲、无总 deadline）
     /// 解耦，前端 watchdog 触发时后端可立即落盘 failed trace。
     ///
     /// trace_steps 为空时用现有 failed 步 `telemetry_builder.failed_trace_before_tool()`。

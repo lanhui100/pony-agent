@@ -308,13 +308,20 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
     ) -> PermissionDecision {
         // 0. 检查前端传入的会话级授权模式 (tool_authorization_mode)
         if let Some(auth_mode) = context.tool_authorization_mode.as_deref() {
-            let is_write_or_exec = descriptor.identity.primitive_name == "write"
+            // T7（执行闸门半）：判定必须走**语义分类** `ToolKind`，不能只比手写字符串表 ——
+            // 旧写法只认 `primitive_name ∈ {write,edit,bash,execute}` 与小写 model_name，
+            // 而生产描述符是 `builtin:workspace_write_file` + model_name `Write`，
+            // 于是 `read_only` 闸门对 Write/Edit/Run **根本不触发**（等于 fail-open）。
+            let is_write_or_exec = matches!(
+                descriptor.kind,
+                crate::agent::tools::ToolKind::Write | crate::agent::tools::ToolKind::Execute
+            ) || descriptor.identity.primitive_name == "write"
                 || descriptor.identity.primitive_name == "edit"
                 || descriptor.identity.primitive_name == "bash"
                 || descriptor.identity.primitive_name == "execute"
-                || descriptor.identity.model_name == "write"
-                || descriptor.identity.model_name == "edit"
-                || descriptor.identity.model_name == "bash";
+                || descriptor.identity.model_name.eq_ignore_ascii_case("write")
+                || descriptor.identity.model_name.eq_ignore_ascii_case("edit")
+                || descriptor.identity.model_name.eq_ignore_ascii_case("bash");
 
             if auth_mode == "read_only" && is_write_or_exec {
                 return PermissionDecision {
@@ -589,6 +596,36 @@ mod tests {
         }
     }
 
+    /// T2-1 迁移辅助：替代已删除的 `GovernedToolExecutor::set_context`。
+    ///
+    /// turn 级事实现在随每次调用经 `ToolExecutionContext.dispatch_context` 显式传入，
+    /// executor 不再持有共享槽位。本包装只把「事实 + executor」绑在一起，让既有断言语义
+    /// 与 `executor.execute(&call)` 的调用形状保持不变。
+    struct BoundGoverned<'a> {
+        executor: &'a GovernedToolExecutor,
+        context: crate::agent::dispatcher::DispatchContext,
+    }
+
+    impl<'a> BoundGoverned<'a> {
+        fn new(executor: &'a GovernedToolExecutor, context: crate::agent::dispatcher::DispatchContext) -> Self {
+            Self { executor, context }
+        }
+
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            self.executor.execute_with_context(
+                call,
+                &ToolExecutionContext {
+                    dispatch_context: Some(self.context.clone()),
+                    ..Default::default()
+                },
+            )
+        }
+
+        fn dispatcher(&self) -> &GovernedDispatcher {
+            self.executor.dispatcher()
+        }
+    }
+
     #[test]
     fn governed_executor_matches_legacy_router_output_for_model_visible_tools() {
         let workspace = temp_workspace();
@@ -634,12 +671,12 @@ mod tests {
     fn governed_executor_ask_is_host_mediated_and_persists_the_question() {
         let workspace = temp_workspace();
         let governed = build_governed_executor(Some(workspace), None);
-        governed.set_context(crate::agent::dispatcher::DispatchContext {
+        let turn_context = crate::agent::dispatcher::DispatchContext {
             session_id: Some("session-ask".to_string()),
             run_id: Some("run-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             ..Default::default()
-        });
+        }; let governed = BoundGoverned::new(&governed, turn_context);
         let result = governed.execute(&same_call(
             "Ask",
             json!({ "question": "继续吗？", "description": "test" }),
@@ -666,13 +703,13 @@ mod tests {
     fn governed_executor_read_outside_workspace_requires_approval_and_persists_request() {
         let workspace = temp_workspace();
         let governed = build_governed_executor(Some(workspace.clone()), None);
-        governed.set_context(crate::agent::dispatcher::DispatchContext {
+        let turn_context = crate::agent::dispatcher::DispatchContext {
             session_id: Some("session-approval".to_string()),
             run_id: Some("run-appr".to_string()),
             turn_id: Some("turn-appr".to_string()),
             workspace_root: Some(workspace.display().to_string()),
             ..Default::default()
-        });
+        }; let governed = BoundGoverned::new(&governed, turn_context);
 
         // 创建一个真实存在的外部临时文件
         let ext_dir = temp_workspace();
@@ -852,7 +889,7 @@ mod tests {
     fn governed_executor_dispatches_plan_control_create_replace_merge_and_complete_step() {
         let workspace = temp_workspace();
         let governed = build_governed_executor(Some(workspace.clone()), None);
-        governed.set_context(crate::agent::dispatcher::DispatchContext {
+        let turn_context = crate::agent::dispatcher::DispatchContext {
             session_id: Some("session-1".to_string()),
             run_id: Some("run-1".to_string()),
             turn_id: Some("turn-1".to_string()),
@@ -866,7 +903,7 @@ mod tests {
                     .unwrap_or(u64::MAX),
             }),
             ..Default::default()
-        });
+        }; let governed = BoundGoverned::new(&governed, turn_context);
 
         // Create a draft plan with two steps.
         let created = governed.execute(&same_call(
@@ -964,10 +1001,10 @@ mod tests {
     fn governed_executor_plan_control_stale_revision_and_missing_op_fail_closed() {
         let workspace = temp_workspace();
         let governed = build_governed_executor(Some(workspace.clone()), None);
-        governed.set_context(crate::agent::dispatcher::DispatchContext {
+        let turn_context = crate::agent::dispatcher::DispatchContext {
             session_id: Some("session-1".to_string()),
             ..Default::default()
-        });
+        }; let governed = BoundGoverned::new(&governed, turn_context);
 
         // Set up a plan so a stale revision can be attempted.
         let created = governed.execute(&same_call(

@@ -179,40 +179,14 @@ pub struct NativeSandboxBackend {
 impl NativeSandboxBackend {
     /// 依据当前平台支持能力与系统工具探活
     pub fn detect() -> Self {
-        let availability = if cfg!(target_os = "linux") {
-            // Linux: 探活 bwrap (Bubblewrap) 或 landlock 能力
-            if Self::has_command("bwrap") {
-                SandboxAvailability::Available
-            } else {
-                SandboxAvailability::Unavailable
-            }
-        } else if cfg!(target_os = "macos") {
-            // macOS: 探活 sandbox-exec
-            if Self::has_command("sandbox-exec") {
-                SandboxAvailability::Available
-            } else {
-                SandboxAvailability::Unavailable
-            }
-        } else if cfg!(target_os = "windows") {
-            // Windows: 支持 Windows Job Object 隔离
-            SandboxAvailability::Available
-        } else {
-            SandboxAvailability::Unavailable
-        };
-
-        Self { availability }
-    }
-
-    fn has_command(cmd: &str) -> bool {
-        if let Ok(path) = std::env::var("PATH") {
-            for dir in std::env::split_paths(&path) {
-                let candidate = dir.join(cmd);
-                if candidate.is_file() {
-                    return true;
-                }
-            }
+        // 诚实性（T2-2）：`Available` 在本项目的语义是**「已强制隔离」**，不是
+        // 「本机存在某个同名二进制」。本 build 内没有任何代码用 `bwrap` / `sandbox-exec` /
+        // Windows Job Object 去 wrap 待执行命令（真正的强制实现属后续工作），
+        // 因此这里恒报 `Unavailable`：上层据此 fail-closed，绝不静默降级成
+        // 「看起来隔离了、其实直接跑」。等真实 wrap 落地后才允许按真实探活声明 `Available`。
+        Self {
+            availability: SandboxAvailability::Unavailable,
         }
-        false
     }
 }
 
@@ -224,13 +198,7 @@ impl SandboxBackend for NativeSandboxBackend {
     fn validate(&self, request: &SandboxRequest) -> Result<(), String> {
         match self.availability {
             SandboxAvailability::Available => {
-                if request.workspace_root.contains("..") {
-                    return Err(
-                        "Sandbox security policy violation: path traversal detected in workspace root"
-                            .to_string(),
-                    );
-                }
-                Ok(())
+                validate_workspace_root(&request.workspace_root, None)
             }
             SandboxAvailability::Unavailable => {
                 Err("Native sandbox backend is unavailable on this host system".to_string())
@@ -238,6 +206,78 @@ impl SandboxBackend for NativeSandboxBackend {
             SandboxAvailability::HostApprovedUnsandboxed => Ok(()),
         }
     }
+}
+
+/// workspace_root 的路径穿越校验（fail-closed）。
+///
+/// 语义（替代旧的 `contains("..")` 字符串匹配 —— 那既不规范化，也拦不住绝对路径逃逸）：
+/// 1. 先做**词法规范化**（逐 `Component` 处理 `.` / `..`，纯路径语义，不碰文件系统、不跟随符号链接）；
+/// 2. 规范化过程中若 `..` 越过基准根 ⇒ 拒绝；
+/// 3. 若后端持有沙箱 root，规范化后的路径必须**按组件**落在该 root 之下
+///    （`Path::starts_with` 是组件级比较，`/tmp/ab` 不会被误判为 `/tmp/a` 的子路径）；
+/// 4. 无 root 的后端以请求自身为基准，只拒绝越界与空值。
+fn validate_workspace_root(
+    workspace_root: &str,
+    sandbox_root: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if workspace_root.trim().is_empty() {
+        return Err(
+            "Sandbox security policy violation: empty workspace root is not allowed".to_string(),
+        );
+    }
+
+    let normalized = normalize_lexically(std::path::Path::new(workspace_root))?;
+    let Some(root) = sandbox_root else {
+        // ADVISORY 修复：没有配置沙箱 root 的后端**无法证明**绝对路径落在隔离范围内
+        // （`/etc/passwd` 规范化后依然"合法"）。此处 fail-closed 拒绝绝对路径，
+        // 而不是像旧实现那样直接放行 —— 一旦该分支被真后端启用，旧写法就是 fail-open。
+        if normalized.is_absolute() {
+            return Err(format!(
+                "Sandbox security policy violation: workspace root `{workspace_root}` is absolute but this backend has no sandbox root to contain it"
+            ));
+        }
+        return Ok(());
+    };
+
+    let normalized_root = normalize_lexically(root)?;
+    let candidate = if normalized.is_absolute() {
+        normalized
+    } else {
+        normalized_root.join(normalized)
+    };
+    let candidate = normalize_lexically(&candidate)?;
+    if candidate.starts_with(&normalized_root) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Sandbox security policy violation: workspace root `{workspace_root}` resolves outside the sandbox root `{}`",
+            normalized_root.display()
+        ))
+    }
+}
+
+/// 词法路径规范化：消掉 `.`、按栈处理 `..`；`..` 越过基准根时返回错误。
+fn normalize_lexically(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    use std::path::Component;
+
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!(
+                        "Sandbox security policy violation: path traversal detected in workspace root `{}`",
+                        path.display()
+                    ));
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
 }
 
 /// Linux/Unix 环境下的轻量级命名空间与工作区受限沙箱实现
@@ -256,14 +296,15 @@ impl LocalProcessSandboxBackend {
 
 impl SandboxBackend for LocalProcessSandboxBackend {
     fn availability(&self) -> SandboxAvailability {
-        SandboxAvailability::Available
+        // ADVISORY 修复（与 T2-2 诚实性口径一致）：本后端只做 workspace root 的**路径门禁**
+        // （`validate` 的词法规范化比较），并没有任何命名空间/文件系统/网络的强制包裹。
+        // `Available` 在本项目语义是"已强制隔离"，所以这里只能报 `Unavailable`，
+        // 让 `enforce_sandbox` fail-closed；等真正的 wrap 实现落地后再改回对应取值。
+        SandboxAvailability::Unavailable
     }
 
     fn validate(&self, request: &SandboxRequest) -> Result<(), String> {
-        if request.workspace_root.contains("..") {
-            return Err("Sandbox security policy violation: path traversal detected in workspace root".to_string());
-        }
-        Ok(())
+        validate_workspace_root(&request.workspace_root, self.workspace_root.as_deref())
     }
 }
 
@@ -278,6 +319,38 @@ mod tests {
             environment_allowlist: Vec::new(),
             isolate_environment: false,
         }
+    }
+
+    /// ADVISORY 修复：无配置 root 的后端必须拒绝绝对路径（旧实现直接放行 = fail-open）。
+    #[test]
+    fn validate_without_sandbox_root_rejects_absolute_paths() {
+        assert!(
+            validate_workspace_root("/etc/passwd", None).is_err(),
+            "无 root 时无法证明绝对路径被隔离，必须 fail-closed"
+        );
+        assert!(
+            validate_workspace_root("a/b", None).is_ok(),
+            "root 内相对路径应放行"
+        );
+        assert!(
+            validate_workspace_root("a/../../etc/passwd", None).is_err(),
+            "词法穿越必须被拒"
+        );
+    }
+
+    /// ADVISORY 修复：只做路径门禁的后端不得声称"已强制隔离"。
+    #[test]
+    fn local_process_backend_must_not_claim_enforced_isolation() {
+        let backend = LocalProcessSandboxBackend::new(".");
+        assert_eq!(
+            backend.availability(),
+            SandboxAvailability::Unavailable,
+            "没有 wrap 实现就不能报 Available；否则 enforce_sandbox 会放行未隔离的执行"
+        );
+        assert!(
+            enforce_sandbox(&backend, &sample_request()).is_err(),
+            "诚实化后 enforce_sandbox 必须 fail-closed"
+        );
     }
 
     #[test]

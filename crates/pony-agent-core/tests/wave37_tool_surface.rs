@@ -302,6 +302,9 @@ fn subargs(prompt: &str, _timeout_ms: u64) -> SubagentArgs {
 fn t3_0_subagent_without_engine_returns_capability_unavailable() {
     // 本测试进程内其他用例可能已注入引擎；若已注入则 capability_unavailable 不可达，
     // 此时该断言退化为验证已注入路径不会返回伪字符串。
+    // 确定性化（T7-a）：槽是进程级 OnceLock，check-then-use 必须与其他 C3 用例的
+    // 注入动作互斥——所有 `ensure_engine_wired` 均在 ENV_GUARD 内执行，故此处持锁即原子。
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     if subagent_engine().is_none() {
         let result: Result<SubagentResult, String> = subagent(subargs("probe", 1000));
         let err = result.err().unwrap_or_else(|| panic!("W37-C3-0: 槽为空时必须返回 Err（红相：现为假 ok）"));
@@ -347,6 +350,7 @@ fn t3_h_subagent_with_stub_engine_returns_real_output() {
 /// t3-I：失败 Stub → 结构化错误而非假 ok。
 #[test]
 fn t3_i_failing_stub_returns_structured_error() {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let stub = StubEngine::new();
     ensure_engine_wired(stub.clone());
 
@@ -368,6 +372,7 @@ fn t3_i_failing_stub_returns_structured_error() {
 /// t3-K：prompt 字节 > 200000 → prompt_too_large。
 #[test]
 fn t3_k_oversized_prompt_rejected() {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let stub = StubEngine::new();
     ensure_engine_wired(stub.clone());
 
@@ -390,8 +395,8 @@ fn t3_k_oversized_prompt_rejected() {
 ///ENV_GUARD 串行化 C3 并发族，防止其他用例竞争全局许可。
 #[test]
 fn t3_j_concurrency_over_limit_returns_busy() {
-    ensure_engine_wired(StubEngine::new());
     let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_engine_wired(StubEngine::new());
 
     // 占满 2 个全局并发许可（guard 保持存活至断言结束）。
     let _permit_a = pony_agent_core::agent::subagent_runtime::subagent_gate_enter("occupy-a")
@@ -417,6 +422,7 @@ fn t3_j_concurrency_over_limit_returns_busy() {
 /// t3-L：超时 → subagent_timeout。
 #[test]
 fn t3_l_timeout_returns_timeout_error() {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let stub = StubEngine::new();
     ensure_engine_wired(stub.clone());
 

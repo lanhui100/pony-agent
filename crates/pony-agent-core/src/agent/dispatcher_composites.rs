@@ -23,7 +23,7 @@
 use crate::agent::child_dispatch::{ChildDispatch, ChildDispatchRequest, ChildDispatchResult};
 use crate::agent::dispatcher::{
     aggregate_composite_permission, CompositeToolHandler, CompositeToolHandlerRequest,
-    DispatchContext, GovernedDispatcher, PermissionDecision, PermissionVerdict,
+    GovernedDispatcher, PermissionDecision, PermissionVerdict,
 };
 use crate::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
 use crate::agent::tools::{
@@ -34,7 +34,7 @@ use crate::agent::tools::{
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // Mirror of the private constants in `tools.rs` (kept in sync by contract; the legacy handlers
 // still own the canonical values until task 8.1 removes the old execution path).
@@ -62,42 +62,23 @@ const SUMMARY_ITEM_LIMIT: usize = 3;
 /// Bridges the legacy `ToolExecutor` contract onto a `GovernedDispatcher`. A runtime can route
 /// `ToolCall` executions through the governed pipeline by constructing this adapter around a
 /// dispatcher that has been given the registry, handlers, and composite handlers it needs.
+///
+/// T2-1：本适配器**不持有**任何 turn 级状态。session/run/turn/workspace/授权模式等事实随每次
+/// 调用经 `ToolExecutionContext.dispatch_context` 传入；此前的共享 `Mutex<DispatchContext>`
+/// 会在并发 turn 之间互相覆盖（A 会话的调用带着 B 会话的授权模式进入治理链），已删除。
 pub struct GovernedToolExecutor {
     dispatcher: GovernedDispatcher,
-    /// Session/run/turn/workspace facts for the current invocation. The runtime sets this per turn
-    /// so control requests persist against the real session (phase-4 Ask wiring, P1-1).
-    context: Mutex<DispatchContext>,
 }
 
 impl GovernedToolExecutor {
     pub fn new(dispatcher: GovernedDispatcher) -> Self {
-        Self {
-            dispatcher,
-            context: Mutex::new(DispatchContext::default()),
-        }
+        Self { dispatcher }
     }
 
     /// The underlying governed dispatcher, for callers that need direct access to the
     /// control-request store or budget configuration.
     pub fn dispatcher(&self) -> &GovernedDispatcher {
         &self.dispatcher
-    }
-
-    /// Set the session/run/turn/workspace facts for the current invocation. Called by the runtime
-    /// before each turn so a persisted `PendingControlRequest` is bound to the real session.
-    pub fn set_context(&self, context: DispatchContext) {
-        *self
-            .context
-            .lock()
-            .expect("governed executor context poisoned") = context;
-    }
-
-    /// Current invocation context.
-    pub fn context(&self) -> DispatchContext {
-        self.context
-            .lock()
-            .expect("governed executor context poisoned")
-            .clone()
     }
 }
 
@@ -108,11 +89,13 @@ impl ToolExecutor for GovernedToolExecutor {
 
     fn execute_with_context(&self, call: &ToolCall, exec_context: &ToolExecutionContext) -> ToolResult {
         let started_at = std::time::Instant::now();
-        let mut context = self
-            .context
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        // T2-1：turn 事实只来自本次调用携带的 `dispatch_context`。
+        // 显式降级（无 turn 事实时）：session/turn/授权模式为空，workspace 仍取 per-call exec_ctx；
+        // 这里刻意不读任何全局或线程局部状态，避免把"隐式默认值"变成新的串扰源。
+        let mut context = exec_context.dispatch_context.clone().unwrap_or_default();
+        if context.session_id.is_none() {
+            context.session_id = exec_context.session_id.clone();
+        }
         if let Some(workspace_root) = &exec_context.workspace_root {
             context.workspace_root = Some(workspace_root.display().to_string());
         }

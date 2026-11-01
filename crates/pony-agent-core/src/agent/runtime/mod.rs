@@ -239,12 +239,20 @@ impl AgentRuntime {
             .clone()
     }
 
-    /// Apply the real session/run/turn/workspace facts to the governed executor before a turn
-    /// executes, so a persisted `PendingControlRequest` (Ask) is bound to the real invocation
-    /// (design.md Decision 5, P1-1 wiring / P2-8). `None` run/turn facts (plain `run_turn`)
-    /// still bind the session; `host_control_available` stays `true` so an interactive host can
-    /// answer. When the executor is not governed this is a no-op.
-    pub(crate) fn apply_governed_turn_context(&self, input: &TurnInput, facts: &RunTurnFacts) {
+    /// 解析本 turn 的治理事实（session/run/turn/workspace/授权模式/审批证据），作为
+    /// `ToolExecutionContext.dispatch_context` 的载荷随**每次工具调用**显式下传（T2-1）。
+    ///
+    /// 返回值 `None` 表示本 runtime 的工具执行器不是治理适配器（无需注入）。本函数顺带完成
+    /// 会话的 workspace 归属盖章（每 turn 一次）；它**不再**把事实写进 executor 的共享槽位 ——
+    /// 那正是并发 turn 互相覆盖的根源。
+    ///
+    /// `None` run/turn 事实（plain `run_turn`）仍绑定会话；`host_control_available` 保持 `true`，
+    /// 以便交互式宿主可以应答控制请求。
+    pub(crate) fn resolve_governed_turn_context(
+        &self,
+        input: &TurnInput,
+        facts: &RunTurnFacts,
+    ) -> Option<DispatchContext> {
         // 三级树 #3（确定性根解析）：先按 input 盖章/归一（未注册 id 由 stamp
         // 归一为 default），随后一律以"盖章后的会话权威归属"解析工具根——
         // 前端 id 漂移/旧列表快照对后端免疫，杜绝"会话在新工作区、工具在默认 root"。
@@ -265,13 +273,13 @@ impl AgentRuntime {
             }
             break 'stamp sessions.read_workspace_owner(session_id);
         };
-        let Some(governed) = self
+        let governed = self
             .tool_executor
             .as_any()
-            .and_then(|any| any.downcast_ref::<GovernedToolExecutor>())
-        else {
-            return;
-        };
+            .and_then(|any| any.downcast_ref::<GovernedToolExecutor>());
+        if governed.is_none() {
+            return None;
+        }
         // PA-096 Phase 1：会话级 workspace root 解析——严格 Fail-closed 边界。
         // 若 stamped_owner 显式存在但无法解析（已删除/未注册），严禁回退宿主 root，
         // 传递 None 使下游工具层严格阻断。
@@ -299,7 +307,7 @@ impl AgentRuntime {
         } else {
             self.workspace_root.clone()
         };
-        governed.set_context(DispatchContext {
+        Some(DispatchContext {
             session_id: input.session_id.clone(),
             run_id: facts.run_id.clone(),
             turn_id: facts.turn_id.clone(),
@@ -307,7 +315,7 @@ impl AgentRuntime {
             host_control_available: true,
             plan_execution_approval: input.plan_execution_approval.clone(),
             tool_authorization_mode: input.tool_authorization_mode.clone(),
-        });
+        })
     }
 
     pub(crate) fn resolve_session_workspace_root(

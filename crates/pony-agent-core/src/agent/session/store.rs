@@ -2349,7 +2349,12 @@ impl SessionStore {
             workspaces: self.workspaces.clone(),
             path_authorizations: self.path_authorizations.entries(),
         };
-        self.backend.save_store(&store);
+        // T2-3：整包写盘失败必须可观测——否则"会话丢失"会被上层当成"保存成功"。
+        if let Err(error) = self.backend.save_store(&store) {
+            eprintln!(
+                "[pony-agent][session] save_to_backend 失败：会话库未落盘（数据可能丢失）：{error}"
+            );
+        }
     }
 
     fn save_session_to_backend(&self, session_id: &str) {
@@ -2404,7 +2409,12 @@ impl SessionStore {
             workspaces: self.workspaces.clone(),
             path_authorizations: self.path_authorizations.entries(),
         };
-        self.backend.save_store(&store);
+        // T2-3：同上——单会话回退整包写盘路径，失败不得静默。
+        if let Err(error) = self.backend.save_store(&store) {
+            eprintln!(
+                "[pony-agent][session] save_session_state_to_backend 失败：会话库未落盘（数据可能丢失）：{error}"
+            );
+        }
     }
 
     fn persist_session_and_trace_change(

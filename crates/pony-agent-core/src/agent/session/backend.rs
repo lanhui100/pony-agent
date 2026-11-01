@@ -213,7 +213,11 @@ impl PersistCommand {
 }
 pub trait SessionBackend: Send + Sync {
     fn load_store(&self) -> Option<PersistedStore>;
-    fn save_store(&self, store: &PersistedStore);
+    /// 整包写盘。**失败必须上报**（T2-3）：历史上这里返回 `()`，文件后端把
+    /// `create_dir_all` / 序列化 / `fs::write` 的失败全部静默吞掉，上层于是把
+    /// "会话丢失"当成"保存成功"。返回 `Err` 的调用方必须至少落一条可观测日志，
+    /// 不得用 `let _ =` 再吞一次。
+    fn save_store(&self, store: &PersistedStore) -> Result<(), String>;
     fn trace_storage_mode(&self) -> SeparateTraceTableMode {
         SeparateTraceTableMode::Off
     }

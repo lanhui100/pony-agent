@@ -16,6 +16,7 @@ impl AgentRuntime {
         first_token_latency_ms: Option<u64>,
         _turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
+        governed_context: Option<&DispatchContext>,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
         let context_observation = build_context_observation(planning_request, tools);
         let mut hop_records = Vec::new();
@@ -59,6 +60,8 @@ impl AgentRuntime {
                 workspace_root: self.resolve_session_workspace_root(session_id),
                 // L3 r2 A1：透传真实会话 id，触达注入按会话分桶（否则跨会话互相抑制）。
                 session_id: session_id.map(str::to_string),
+                // T2-1：turn 级治理事实随本次调用显式传入（并发 turn 之间不共享任何槽位）。
+                dispatch_context: governed_context.cloned(),
                 ..Default::default()
             };
             let (tool_result, invocation_record, capability_hook_trace_records) =
@@ -445,9 +448,10 @@ impl AgentRuntime {
     /// and still binds the input's session. A pending Ask resume injection (phase-4 P0) is
     /// consumed here and seeded into the turn's provider context.
     pub(crate) fn run_turn_with_facts(&self, input: TurnInput, facts: RunTurnFacts) -> TurnResult {
-        self.apply_governed_turn_context(&input, &facts);
+        // T2-1：turn 事实在**本 turn 内部**解析并随每次工具调用下传（不再写进 executor 共享槽位）。
+        let governed_context = self.resolve_governed_turn_context(&input, &facts);
         let ask_injection = self.take_pending_ask_injection(facts.run_id.as_deref());
-        self.run_turn_inner(input, ask_injection)
+        self.run_turn_inner(input, ask_injection, governed_context)
     }
 
 
@@ -455,6 +459,7 @@ impl AgentRuntime {
         &self,
         input: TurnInput,
         ask_injection: Option<GraphAskResumeInjection>,
+        governed_context: Option<DispatchContext>,
     ) -> TurnResult {
         let turn_started_at = Instant::now();
         // PA-095：同步入口事件 turn_id 一次性计算——started/failed/completed 全路径
@@ -700,6 +705,7 @@ impl AgentRuntime {
                 initial_visible_first_token_latency_ms,
                 &turn_started_at,
                 &mut provider_call_records,
+                governed_context.as_ref(),
             ) {
                 Ok(outcome) => (
                     outcome.assistant_message,

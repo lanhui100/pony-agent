@@ -30,6 +30,175 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 超时下限：零时长既无意义又容易触发「刚发出就超时」。
 pub const MIN_TIMEOUT: Duration = Duration::from_millis(1);
 
+/// F8a：MCP 子进程的环境白名单。
+///
+/// 第三方 MCP server 是**外部代码**，不允许继承父进程完整环境（provider API key、
+/// 内部 token、云厂商凭据都在其中）。启动前 `env_clear()`，再按下表 + `spec.env`
+/// 显式透传；非白名单变量一律丢弃。
+///
+/// 名单只保留"让 launcher 能跑起来"的变量：`npx`/`uvx`/`python` 依赖 PATH 与 HOME
+/// （家目录缓存/配置），Windows 还需 COMSPEC/SystemRoot/PATHEXT 才能解析命令。
+pub const MCP_ENV_ALLOWLIST: &[&str] = &[
+    // 命令解析与 shell
+    "PATH",
+    "PATHEXT",
+    "COMSPEC",
+    "SHELL",
+    // 用户归属与家目录（npm/npx/uvx 的缓存与配置根）
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    // Windows 系统盘符/系统根
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    // 临时目录
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    // 本地化（缺失会让部分 launcher 的输出编码/文案漂移）
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LANGUAGE",
+    "TZ",
+    // 注意：**故意不**透传 TLS 信任覆盖项（SSL_CERT_FILE / SSL_CERT_DIR /
+    // NODE_EXTRA_CA_CERTS / CURL_CA_BUNDLE / REQUESTS_CA_BUNDLE）。这些变量能把第三方
+    // server 的出站信任锚整体替换掉（等价 MITM 授权），收益远小于风险。
+    // 出站代理：MCP server 自身要联网时与 provider 保持同一出口策略
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+];
+
+/// F8a：构造 MCP 子进程的环境透传表（白名单变量 + `spec.env` 显式声明）。
+///
+/// 返回顺序稳定（白名单顺序在前，spec 覆写在后的语义由 `Command::env` 保证：
+/// 同名后写覆盖前写）。
+/// `spec.env` 中**禁止**的键：进程/加载器劫持向量与凭据通道。
+///
+/// 继承路径已由 [`MCP_ENV_ALLOWLIST`] 收口；`spec.env` 是"显式声明"，仍必须拒绝这些键 ——
+/// 否则一条配置就能给第三方 server 注入 `LD_PRELOAD`、劫持 `PATH` 解析、或借
+/// `SSH_AUTH_SOCK` 读取宿主 agent，等同把隔离面重新打开。
+const MCP_SPEC_ENV_DENYLIST: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "COMSPEC",
+    "SHELL",
+    "BASH_ENV",
+    "ENV",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONHOME",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+];
+
+/// 前缀拒绝：动态加载器与云厂商凭据族（`LD_*` / `DYLD_*` / `AWS_*`）。
+const MCP_SPEC_ENV_DENY_PREFIXES: &[&str] = &["LD_", "DYLD_", "AWS_"];
+
+fn is_denied_spec_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    MCP_SPEC_ENV_DENYLIST.iter().any(|denied| upper == *denied)
+        || MCP_SPEC_ENV_DENY_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+}
+
+/// 代理变量脱敏：`http://user:pass@proxy:8080` → `http://proxy:8080`。
+///
+/// 代理 URL 内嵌的 userinfo 是宿主凭据；第三方 MCP server 只需要知道"走哪个代理"，
+/// 不需要拿到宿主的代理账号口令。解析失败时按原样返回（不做猜测式改写）。
+fn redact_proxy_userinfo(value: &std::ffi::OsStr) -> std::ffi::OsString {
+    let Some(text) = value.to_str() else {
+        return value.to_os_string();
+    };
+    let Ok(mut parsed) = url::Url::parse(text) else {
+        return value.to_os_string();
+    };
+    let has_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
+    if !has_userinfo {
+        return value.to_os_string();
+    }
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return value.to_os_string();
+    }
+    // `set_username("")` 会留下 `http://@host`，剥掉悬空的 `@`。
+    std::ffi::OsString::from(parsed.as_str().replace("://@", "://"))
+}
+
+fn is_proxy_env_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "NO_PROXY"
+    )
+}
+
+fn mcp_child_env(spec_env: &[(String, String)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+    for name in MCP_ENV_ALLOWLIST {
+        // 白名单统一写大写：POSIX 下真实变量名本身即大写，Windows 侧
+        // `std::env::var_os` 走 `GetEnvironmentVariableW`，大小写不敏感。
+        if let Some(value) = std::env::var_os(name) {
+            let value = if is_proxy_env_name(name) {
+                redact_proxy_userinfo(&value)
+            } else {
+                value
+            };
+            vars.push((std::ffi::OsString::from(name), value));
+        }
+    }
+    for (key, value) in spec_env {
+        if is_denied_spec_env_key(key) {
+            // 只打印键名，绝不打印值（值可能就是凭据）。
+            eprintln!(
+                "[pony-agent] MCP server env 拒绝透传被禁键 `{key}`（进程/加载器劫持或凭据通道向量）。"
+            );
+            continue;
+        }
+        let value = if is_proxy_env_name(key) {
+            redact_proxy_userinfo(std::ffi::OsStr::new(value))
+        } else {
+            std::ffi::OsString::from(value)
+        };
+        vars.push((std::ffi::OsString::from(key), value));
+    }
+    vars
+}
+
+/// F8a：MCP 子进程环境隔离收口 —— 先 `env_clear()` 再按 [`MCP_ENV_ALLOWLIST`]
+/// 与 `spec.env` 透传。这是唯一允许为 MCP 子进程设置环境的入口。
+fn apply_mcp_child_env(command: &mut Command, spec_env: &[(String, String)]) {
+    command.env_clear();
+    for (key, value) in mcp_child_env(spec_env) {
+        command.env(key, value);
+    }
+}
+
 /// 一个 MCP server 的启动描述。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpServerSpec {
@@ -171,9 +340,9 @@ impl McpClient {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        for (key, value) in &spec.env {
-            command.env(key, value);
-        }
+        // F8a：MCP server 是第三方代码，绝不能继承父进程的完整环境
+        //（provider API key、内部 token、云厂商凭据都在其中）。
+        apply_mcp_child_env(&mut command, &spec.env);
 
         let mut child = command.spawn().map_err(|err| {
             McpClientError::Spawn(format!(
@@ -753,5 +922,141 @@ for raw in sys.stdin:
         let err = McpClient::connect(&spec, Duration::from_millis(200))
             .expect_err("connect must fail for missing binary");
         assert_eq!(err.code(), "spawn_failed");
+    }
+
+    /// ADVISORY 修复：`spec.env` 不得成为进程/加载器劫持通道。
+    #[test]
+    fn spec_env_must_reject_loader_hijack_and_tls_override_keys() {
+        let spec_env = vec![
+            ("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string()),
+            ("PATH".to_string(), "/tmp/evil-bin".to_string()),
+            ("AWS_SECRET_ACCESS_KEY".to_string(), "leaked".to_string()),
+            ("SSH_AUTH_SOCK".to_string(), "/tmp/agent.sock".to_string()),
+            ("SSL_CERT_FILE".to_string(), "/tmp/evil.pem".to_string()),
+            ("MCP_ALLOWED_TOKEN".to_string(), "third-party-token".to_string()),
+        ];
+        let vars = mcp_child_env(&spec_env);
+        let keys: Vec<String> = vars
+            .iter()
+            .map(|(key, _)| key.to_string_lossy().to_string())
+            .collect();
+        for denied in [
+            "LD_PRELOAD",
+            "AWS_SECRET_ACCESS_KEY",
+            "SSH_AUTH_SOCK",
+            "SSL_CERT_FILE",
+        ] {
+            assert!(
+                !keys.iter().any(|key| key == denied),
+                "`{denied}` 必须被拒绝透传给第三方 MCP server"
+            );
+        }
+        // PATH 由继承白名单提供（launcher 必需），但 spec 的同名值不得覆盖它。
+        let path_values: Vec<String> = vars
+            .iter()
+            .filter(|(key, _)| key.to_string_lossy() == "PATH")
+            .map(|(_, value)| value.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !path_values.iter().any(|value| value == "/tmp/evil-bin"),
+            "spec.env 不得覆盖 PATH（命令解析劫持），实际 {path_values:?}"
+        );
+        assert!(
+            keys.iter().any(|key| key == "MCP_ALLOWED_TOKEN"),
+            "非劫持向量的显式声明键必须照常透传（否则 MCP server 拿不到自己的凭据）"
+        );
+    }
+
+    /// ADVISORY 修复：TLS 信任覆盖项整体不透传（继承路径同理）。
+    #[test]
+    fn tls_trust_override_vars_are_never_inherited() {
+        for name in [
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "NODE_EXTRA_CA_CERTS",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+        ] {
+            assert!(
+                !MCP_ENV_ALLOWLIST.contains(&name),
+                "`{name}` 能把子进程的出站信任锚整体替换掉，不得出现在继承白名单中"
+            );
+        }
+    }
+
+    /// ADVISORY 修复：代理 URL 内嵌凭据必须脱敏后再交给子进程。
+    #[test]
+    fn proxy_userinfo_is_redacted_before_reaching_the_child() {
+        let redacted = redact_proxy_userinfo(std::ffi::OsStr::new(
+            "http://proxy-user:s3cr3t@proxy.local:8080",
+        ));
+        let text = redacted.to_string_lossy().to_string();
+        assert!(
+            !text.contains("s3cr3t") && !text.contains("proxy-user"),
+            "代理 userinfo 必须剥除，实际 {text}"
+        );
+        assert!(
+            text.contains("proxy.local:8080"),
+            "代理地址本身必须保留，实际 {text}"
+        );
+
+        // 无 userinfo 时原样返回（不做猜测式改写）。
+        let untouched = redact_proxy_userinfo(std::ffi::OsStr::new("http://proxy.local:8080"));
+        assert_eq!(untouched.to_string_lossy(), "http://proxy.local:8080");
+    }
+
+    /// F8a 真实验证：真实启动一个子进程（走 `/usr/bin/env python3` 这条需要 PATH
+    /// 的 launcher 路径），让它把自己看到的全部环境变量名 dump 出来，断言
+    /// ① 子进程只看到白名单 + `spec.env` 的变量（父进程完整环境未泄漏）；
+    /// ② PATH 被保留（否则 launcher 直接"命令找不到"）；
+    /// ③ `spec.env` 显式声明的变量照常透传。
+    #[test]
+    fn child_process_env_is_cleared_and_only_allowlisted_vars_survive() {
+        let (dir, script) = write_fake_server(
+            "env-dump",
+            &format!(
+                r#"
+import json, os, sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(sorted(os.environ.keys()), fh)
+{prelude}
+"#,
+                prelude = FAKE_SERVER_PRELUDE
+                    .replace("PROTOCOL", "\"2024-11-05\"")
+                    .replace("MODE", "\"ignored\"")
+            ),
+        );
+        let dump_path = dir.join("child-env.json");
+        let dump_arg = dump_path.to_string_lossy().to_string();
+        let mut spec = spec_for(&script, &[dump_arg.as_str()], "unit-env-dump");
+        spec = spec.with_env("PONY_MCP_TEST_TOKEN", "explicit-value");
+
+        let client = McpClient::connect(&spec, Duration::from_secs(10))
+            .expect("handshake must succeed: PATH preserved so python3 launcher resolves");
+        drop(client);
+
+        let raw = std::fs::read_to_string(&dump_path).expect("child must dump its env");
+        let child_keys: Vec<String> = serde_json::from_str(&raw).expect("env dump must be json");
+        let allowlist: std::collections::BTreeSet<&str> =
+            MCP_ENV_ALLOWLIST.iter().copied().collect();
+        let leaked: Vec<&String> = child_keys
+            .iter()
+            .filter(|key| !allowlist.contains(key.as_str()) && key.as_str() != "PONY_MCP_TEST_TOKEN")
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "MCP 子进程继承了白名单之外的父进程环境变量：{leaked:?}"
+        );
+        assert!(
+            child_keys.iter().any(|key| key == "PATH"),
+            "PATH 必须透传，否则 npx/uvx/python 无法启动：{child_keys:?}"
+        );
+        assert!(
+            child_keys.iter().any(|key| key == "PONY_MCP_TEST_TOKEN"),
+            "spec.env 显式声明的变量必须透传：{child_keys:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
