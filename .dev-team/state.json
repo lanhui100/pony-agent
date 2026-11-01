@@ -344,7 +344,86 @@
         "observability_audit_diff": "0 (--decl-approved)",
         "observability_declaration": "PASS/0"
       }
+    },
+    {
+      "wave": 55,
+      "theme": "architecture-assessment remediation (verified defects only: build gate / auth context isolation / sandbox honesty / persistence atomicity / render-layer exfil / doc truth)",
+      "baseline_commit": "5fa0ca6",
+      "tier": "B",
+      "tier_trigger": "security-sensitive + cross-module (blast-keywords: lock/thread/net/ipc) => B",
+      "commits": {
+        "fix_build": "9bf7862",
+        "red_freeze": "4bc7a7c",
+        "docs_governance": "115ce83"
+      },
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4",
+        "task-5",
+        "task-6"
+      ],
+      "branches": {
+        "rust": {
+          "owner": "rust-executor",
+          "status": "green",
+          "write_scopes": [
+            "crates/pony-agent-core/src/"
+          ],
+          "scope_audit": "pass (18 files, all under declared scope; test-dir edits were mechanical contract migrations reported and reviewed)"
+        },
+        "web": {
+          "owner": "frontend-executor",
+          "status": "green",
+          "write_scopes": [
+            "src/",
+            "src-tauri/src/",
+            "src-tauri/tauri.conf.json",
+            "index.html"
+          ]
+        },
+        "test": {
+          "owner": "test-agent",
+          "status": "green",
+          "write_scopes": [
+            "tests/",
+            "crates/pony-agent-core/tests/"
+          ]
+        }
+      },
+      "gates": {
+        "cargo_check_all_targets": 0,
+        "cargo_test_core": 0,
+        "cargo_test_workspace": "1 pre-existing failure (tool_router_regression edit missing expectedHash, reproduced at HEAD worktree) -> task-6",
+        "vitest_full": "0 (113 files / 1096 passed / 12 skipped)",
+        "typecheck": 0,
+        "secrets_scan": 0,
+        "version_sync": 0,
+        "observability_audit_diff": 0,
+        "observability_audit_ob2": "PASS (ob2 >= ob2)"
+      },
+      "regression_baseline": {
+        "note": "regression-baseline 未在改码前建立（流程偏差，已在 meta-retrospective 记录）；改用 HEAD 独立 worktree /tmp/pa-base 事后对照判定既有红，证据见 task-6",
+        "head_worktree_evidence": "cargo test -p pony-agent --test tool_router_regression @ HEAD => FAILED (same assertion)"
+      },
+      "deferred": [
+        "F10 CapabilityRegistry single source of truth",
+        "god-module splits",
+        "dependency cycles",
+        "sync/stream dual implementation",
+        "ts-rs type generation",
+        "Tauri sync-command main-thread",
+        "real Tauri E2E"
+      ]
     }
   ],
-  "counters": {}
+  "counters": {
+    "wave55": {
+      "functional_failures": 0,
+      "adversarial_failures": 0,
+      "impl_defect": 0,
+      "note": "single pre-existing failure escaped both counters because it predates the wave"
+    }
+  }
 }

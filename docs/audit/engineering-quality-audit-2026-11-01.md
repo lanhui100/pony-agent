@@ -54,7 +54,7 @@ npx openspec validate --all --strict  → 证据不足（本机未安装 openspe
 
 - **证据**：`node scripts/check-secrets.mjs --all` → exit 1，命中
   `crates/pony-agent-core/src/agent/secret_store.rs:382`
-  `let secret_value = "sk-plaintext-fallback-value";`
+  `let secret_value = "sk-<MASKED-IN-DOC>";`（真实字面量见源码；本页为避免自身触发扫描器而打码）
 - **性质**：测试占位符（非真实凭证），但违反本仓扫描器自带的处置建议——占位符前缀须含
   `mock|test|draft|dummy`；且该行**不在 HEAD**，属未提交工作树新增。
 - **阻断力**：`.github/workflows/ci.yml` 明文执行 `node scripts/check-secrets.mjs --all`，

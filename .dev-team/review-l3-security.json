@@ -1,0 +1,87 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "f98e7ce9-1550-42bf-aece-6946ff87b941",
+    "fresh_context": true
+  },
+  "executed_by": "f98e7ce9-1550-42bf-aece-6946ff87b941",
+  "attestation": {
+    "self_signed": false,
+    "transcribed_verbatim_by_lead": true,
+    "note": "L3 安全/协议一致性视角对抗审查（已修复项见 fix(web)/fix(core) 提交）"
+  },
+  "reviewed_commit": "e7430ac",
+  "audited_scopes": [
+    "src/",
+    "src-tauri/",
+    "index.html",
+    "crates/pony-agent-core/src/agent/"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/turn_flow.rs",
+      "line": 1427,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "读 turn_flow.rs:1401 `stream_delta_chunks`（无 session_id 形参）→ 1427 `emit_stream_event(..., session_id: None)`；调用方 turn_stream.rs:2451/2439（latency_kind != ProviderStream，即 supports_true_streaming_decision()==false 的 provider 走 decide_sync → BufferedResponse）。该路径下一条 turn:delta 序列化为 sessionId:null，被 src/stores/runtime.ts:3689-3697 严格过滤器丢弃（bg 分支 `if (payload.sessionId)` 也不命中）→ 非真流式 provider 的回复在 turn:completed 之前完全不渲染。复现：把任一 provider 配成非 SSE 决策（或 mock）跑一轮，抓 turn:delta payload，断言 sessionId===null。",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "src/lib/markdown.ts",
+      "line": 150,
+      "rule": "SECURITY",
+      "counterexample_cmd": "node -e 'console.log(new URL(\"/\\\\evil.com/a.png\",\"http://tauri.localhost/\").href)'  # => http://evil.com/a.png 。isInternalUrl(markdown.ts:60-79) 只拦 `startsWith(\"//\")`，`/\\evil.com/a.png` 与 `\\\\evil.com/a.png` 被判为站内 → img 元素保留（markdown.ts:148-156 的 blocked 表达式不命中）；WHATWG 对 http/https 基址把 `\\` 规范成 `/` ⇒ 协议相对外连。载荷：`![x](/\\evil.com/a.png)`。生产 CSP img-src 'self' data: 可兜住（Windows 基址 http://tauri.localhost），但 index.html 的 meta CSP 是注释态 ⇒ 纯浏览器预览/dev 下无 CSP，静默外连照常发生；同为‘白名单已剥离’的注释契约不符。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/lib/markdown.ts",
+      "line": 81,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "isAllowedExternalHref(\"https://github.com:8443/x\") === true（`new URL().hostname` 丢掉端口，markdown.ts:90-98），而 src-tauri/src/platform.rs:211 对显式端口（含 :443）一律 false。前端因此给该链接加 target=_blank/rel（markdown.ts:141-143）、点击进入 openExternalUrl → Rust 返回 url_allowlist_rejected，用户侧只得到 console.warn（open-external-url.ts:66-70）而无任何提示。两侧 host 列表本身逐字一致（github.com/api.github.com/exa.ai/s3.local.ponyjob.top），但归一化规则不同规，‘渲染层放行=后端放行’的同源真值假设不成立。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "index.html",
+      "line": 24,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "注释断言“Tauri prod enforce 以 tauri.conf.json app.security.csp 为准（单 CSP，不支持 dev/prod 分键）”，但 tauri-utils-2.10.1/src/config.rs:3041-3051 明确存在 `devCsp`（`dev_csp: Option<Csp>`，文档：If devCsp is not specified, this value is also injected on dev）。事实相反：不配 devCsp ⇒ prod CSP 同样注入 `tauri dev`，且本可在 devCsp 里放宽 ws://127.0.0.1:4176 而不动生产口径。该错误事实会诱导后续维护者直接往生产 csp 串里加 'unsafe-inline'/ws:（真实削弱）。核验：grep -n dev_csp ~/.cargo/registry/src/*/tauri-utils-2.10.1/src/config.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src-tauri/src/lib.rs",
+      "line": 627,
+      "rule": "LEAK",
+      "counterexample_cmd": "mask_service_api_key 泄漏 3 字符前缀 + 4 字符后缀；chars.len()<=8 时返回 \"•\".repeat(len) ⇒ 精确长度（bits 可枚举）。对 32 位随机 key 泄漏 7/32 ≈ 22 bit（可接受边界），但短 key（如 8 位的本地 token）长度+全掩码形态本身即指纹。追写入路径确认：ConfigGeneralSection.vue:131-133 beginEditExa 清空草稿、146 空草稿 early-return、149 仅提交 draft，掩码不进 model-value（230 行 `:model-value=\"exaEditing ? exaKey : ''\"`）⇒ 无“读掩码→写回掩码”覆盖真实 key 的数据损坏路径（该风险已封）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/components/config/ConfigGeneralSection.vue",
+      "line": 146,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "`if (!draft) return;` + beginEditExa 先清空草稿 ⇒ 用户再也无法删除已保存的 Exa key（只能整串覆盖），且空草稿提交无任何 UI 反馈（静默成功错觉）。复现：填 key 保存 → 点击编辑 → 直接点保存 → set_service_api_key 从未被调用，密钥仍在。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_client.rs",
+      "line": 105,
+      "rule": "SECURITY",
+      "counterexample_cmd": "env_clear 后仍透传 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/*_proxy（:82-90，常见形态 http://user:pass@proxy:8080 ⇒ 代理凭据进入第三方 MCP 子进程环境）与 TLS 信任库覆盖项 SSL_CERT_FILE/SSL_CERT_DIR/NODE_EXTRA_CA_CERTS/CURL_CA_BUNDLE/REQUESTS_CA_BUNDLE（:76-81，可让子进程接受攻击者 CA ⇒ 其出站流量可被 MITM）。更关键：105-112 把 spec.env 逐对直接 env() 写入且不与该白名单求交，与 :36-38 注释“非白名单变量一律丢弃”矛盾 ⇒ spec.env 可注入 AWS_*/SSH_AUTH_SOCK/LD_PRELOAD/NODE_OPTIONS/PATH。复现：spec.with_env(\"LD_PRELOAD\",\"/tmp/x.so\") 后 connect，子进程环境含 LD_PRELOAD（单测 env-dump 已证明 spec.env 原样透传）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sandbox.rs",
+      "line": 200,
+      "rule": "SECURITY",
+      "counterexample_cmd": "NativeSandboxBackend::validate 的 Available 分支调用 validate_workspace_root(root, None)，而 None 分支在词法规范化后直接 Ok ⇒ 绝对路径逃逸 `/etc/passwd` 被放行（与 tests/sandbox_isolation_honesty_red.rs:134-146 对沙箱后端的契约相反）。今日不可达（detect 恒 Unavailable，:186-190），属于一旦启用即 fail-open 的潜伏洞；同文件 LocalProcessSandboxBackend::availability 仍恒报 Available（:290-292）却无任何强制隔离，与 T2-2 的诚实性口径不一致。另：规范化纯词法，不解析符号链接/8.3 短名/大小写不敏感卷，Windows 尾随点与空格的 `.. ` 会作为 Normal 组件留在 root 内（`C:\\ws\\.. ` 被 OS 解析为父目录）；symlink `/root/esc -> /etc` 在 root 内 → 词法判定通过。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src-tauri/tauri.conf.json",
+      "line": 30,
+      "rule": "SECURITY",
+      "counterexample_cmd": "`style-src 'self' 'unsafe-inline'` + dangerousDisableAssetCspModification:[\"style-src\"]（:31-33）⇒ 关掉 Tauri 的 style nonce 注入后，内联样式全线放行：任何 HTML 注入点（当前 markdown 消毒已剥 style 属性/标签，但 class 属性仍在 ALLOWED_ATTR 内）可叠加任意 CSS 做 UI 伪装（伪造审批条/遮挡提示）。外泄面已被 img-src/font-src（'self' data:）+ media-src 'none' 锁死，故非外连通道。img-src 已无 https:（旧 meta 的 `img-src https:` 已消除），connect-src 仅 3 个应用自有 host + ipc:/http://ipc.localhost（Tauri 必需），script-src 'self' 在 Tauri 资产协议下等价于“仅打包脚本”（无同源用户内容、未启用 assetProtocol 通配 scope），未见削弱。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

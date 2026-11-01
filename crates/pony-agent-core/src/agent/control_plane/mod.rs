@@ -3228,6 +3228,45 @@ fn hook_class_key(hook_class: &crate::agent::hooks::HookClass) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T7 收据：goal 续轮/推进的**授权继承策略**（fail-closed 判据本身可测）。
+    ///
+    /// 说明（已知未覆盖项，交付说明中登记）：策略函数被私有地接在
+    /// `execute_graph_run_stream` / `advance_graph_run` 的续轮循环内，集成层要驱动真实续轮需要
+    /// 私有 mock provider，故此处只钉住"映射规则"，接线部分由代码审查覆盖。
+    #[test]
+    fn continuation_authorization_mode_inherits_known_modes_and_falls_back_to_read_only() {
+        assert_eq!(
+            continuation_tool_authorization_mode(Some("read_only")),
+            "read_only"
+        );
+        assert_eq!(
+            continuation_tool_authorization_mode(Some("workspace_write")),
+            "workspace_write"
+        );
+        assert_eq!(
+            continuation_tool_authorization_mode(Some("full_access")),
+            "full_access"
+        );
+
+        // fail-closed 判据：缺失 / 空串 / 未知值 / 大小写变体一律回落最严 read_only，
+        // 绝不允许"因为认不出来所以放行"。
+        for fallback in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("garbage"),
+            Some("allow_all"),
+            Some("READ_ONLY"),
+            Some("Full_Access"),
+        ] {
+            assert_eq!(
+                continuation_tool_authorization_mode(fallback),
+                "read_only",
+                "非法或缺失的授权模式必须保守回落 read_only，实际 {fallback:?}"
+            );
+        }
+    }
     use crate::agent::config::{
         ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
         ThinkingParamPattern,

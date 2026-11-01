@@ -1,0 +1,12 @@
+{
+  "wave": 55,
+  "status": "POST_HOC",
+  "reason": "改码前未跑全量基线（流程偏差）。改以 HEAD 独立 worktree 事后对照。",
+  "evidence": {
+    "worktree": "/tmp/pa-base @ 115ce83",
+    "cmd": "cargo test -p pony-agent --test tool_router_regression",
+    "result": "FAILED 1 of 15 (write_and_edit_tools_work_for_workspace_files, panic at :333)",
+    "conclusion": "该失败为 HEAD 既有，非本波引入"
+  },
+  "workspace_test_after_fix": "cargo test --workspace => 仅该 1 项失败（其余全绿）"
+}

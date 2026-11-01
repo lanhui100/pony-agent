@@ -30,6 +30,11 @@
 
 建议：抽出统一 `TurnLoop`，sync 实现为"stream + 收集型 sink"；删除 `turn_runner.rs` 的重复函数。
 
+补充（wave-55 L3-P 复核发现）：provider 流式读循环（`provider/mod.rs` ~2436 起的 `block_on(stream.next())`）内部
+**既无取消检查也无总时长上界**——只要持续有字节到达，连接与 turn 可长期占用；`stop_turn` 的取消标志不会在
+该循环内被观测。这是「取消语义名不副实」的最具体落点，与 `.dev-team/nfr-baseline.json` 的
+`external_call_timeout_exceptions[0].known_gap_ref` 指同一事实。
+
 ## 4. TS/Rust 契约手写（P1）
 
 `src/types/runtime.ts`（1546 行）与 Rust DTO 全靠人工同步，已出现漂移（本轮已修 `TurnStreamEvent.step`）。建议引入 `ts-rs` 或 `specta` 生成类型 + CI diff 门禁。
