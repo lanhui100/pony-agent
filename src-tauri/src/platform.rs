@@ -141,7 +141,7 @@ const ALLOWED_OPEN_HOSTS: [&str; 4] = [
 /// Pure allowlist check for URLs opened in the system browser.
 ///
 /// Only `https` URLs whose lowercased host exactly matches
-/// `{github.com, api.github.com, exa.ai}` pass; everything else fails closed.
+/// `{github.com, api.github.com, exa.ai, s3.local.ponyjob.top}` pass; everything else fails closed.
 /// Path/query/fragment are unrestricted.
 pub fn is_allowed_open_url(url: &str) -> bool {
     // Pre-check: raw control characters reject, even as a prefix/suffix.

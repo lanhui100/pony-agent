@@ -295,6 +295,39 @@ function refreshPlanGoalAfterTurn(
   }
 }
 
+/**
+ * F5b：turn 事件监听注册表（按 store 实例隔离，不进入响应式 state）。
+ * - `initPromise`：并发单例锁，避免并发初始化重复注册 12 个监听器；
+ * - `unlisteners`：全部 unlisten 句柄，供 `disposeTurnEvents()` 幂等清理。
+ */
+export interface TurnEventRegistry {
+  initPromise: Promise<void> | null;
+  unlisteners: Array<() => void>;
+}
+
+const turnEventRegistry = new WeakMap<object, TurnEventRegistry>();
+
+function turnEventRegistryFor(store: object): TurnEventRegistry {
+  let registry = turnEventRegistry.get(store);
+  if (!registry) {
+    registry = { initPromise: null, unlisteners: [] };
+    turnEventRegistry.set(store, registry);
+  }
+  return registry;
+}
+
+/** 注销注册表内全部句柄（幂等：调用后注册表为空）。 */
+function releaseTurnEventRegistry(registry: TurnEventRegistry): void {
+  const unlisteners = registry.unlisteners.splice(0);
+  for (const unlisten of unlisteners) {
+    try {
+      unlisten();
+    } catch (error) {
+      debugLog("events:unlisten:error", { error: String(error) });
+    }
+  }
+}
+
 export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState => {
     const persisted = loadPersistedRuntimeState(DEFAULT_SESSION_ID);
 
@@ -3628,13 +3661,82 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         return;
       }
 
+      // F5b：并发单例锁 —— 并发调用共享同一初始化 promise，杜绝重复注册监听器
+      // （旧实现每个并发调用都会把 12 个 `safeListen` 再注册一遍，且 unlisten 被 void 丢弃）。
+      const registry = turnEventRegistryFor(this);
+      if (!registry.initPromise) {
+        registry.initPromise = this.registerTurnEventListeners(registry).catch((error) => {
+          // A 级：注册中途失败（或本 action 抛错）⇒ 回滚已登记的句柄，避免半注册泄漏 +
+          // 后续重试造成 delta 双写；随后释放锁让下次调用可重试。
+          releaseTurnEventRegistry(registry);
+          registry.initPromise = null;
+          throw error;
+        });
+      }
+
+      try {
+        await registry.initPromise;
+      } catch (error) {
+        // 回滚已在上面完成；这里仅透传错误（也兜住 dispose 期间的 reject）。
+        registry.initPromise = null;
+        throw error;
+      }
+    },
+    /**
+     * F5b：可重入的事件监听清理路径。重建 / HMR / 切会话需要重新初始化前调用。
+     *
+     * A 级要点：**先等在飞初始化落定再清理**。否则在飞 init 会在 `initPromise = null`
+     * 之后继续 push 句柄并置 `eventsReady = true`，导致「dispose 了但监听器仍在」。
+     * 幂等：重复调用只会清理当次仍登记在册的句柄。
+     */
+    async disposeTurnEvents(): Promise<void> {
+      const registry = turnEventRegistry.get(this);
+
+      if (!registry) {
+        this.eventsReady = false;
+        return;
+      }
+
+      const inFlight = registry.initPromise;
+      registry.initPromise = null;
+
+      if (inFlight) {
+        try {
+          await inFlight;
+        } catch {
+          // 在飞 init 自身失败：其 catch 已回滚并释放锁，这里仅等它落定。
+        }
+      }
+
+      releaseTurnEventRegistry(registry);
+      this.eventsReady = false;
+    },
+    async registerTurnEventListeners(registry: TurnEventRegistry) {
       debugLog("events:init");
 
       const isEventForCurrentSession = (payload: TurnStreamEvent) => {
-        return !payload.sessionId || payload.sessionId === this.sessionId;
+        // F5a：严格 fail-closed —— sessionId 缺失/为空一律丢弃，不再「缺省放行」。
+        // 依据：每个活链路事件都必须携带 sessionId（Rust 侧 turn_stream 用
+        // `input.session_id` 下发），缺失即说明事件归属不可判定，宁可丢弃。
+        return (
+          typeof payload.sessionId === "string" &&
+          payload.sessionId.length > 0 &&
+          payload.sessionId === this.sessionId
+        );
       };
 
-      const startedUnlisten = await safeListen<TurnStreamEvent>("turn:started", ({ payload }) => {
+      // F5b（A 级）：**边等边登记** —— 每个句柄一注册成功就立刻进注册表，
+      // 任一次 `safeListen` reject 时由 `initializeTurnEvents` 的回滚路径统一 unlisten，
+      // 杜绝「前 N-1 个句柄随局部变量栈帧丢失 ⇒ 永久泄漏 + 重试后 delta 双写」。
+      const listen = async (
+        eventName: string,
+        handler: (payload: TurnStreamEvent) => void
+      ): Promise<void> => {
+        const unlisten = await safeListen<TurnStreamEvent>(eventName, ({ payload }) => handler(payload));
+        registry.unlisteners.push(unlisten);
+      };
+
+      await listen("turn:started", (payload) => {
         if (!isEventForCurrentSession(payload)) {
           return;
         }
@@ -3709,7 +3811,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         }
       });
 
-      const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
+      await listen("turn:delta", (payload) => {
         if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           if (payload.sessionId) {
             const bg = this.runningSessionMap[payload.sessionId];
@@ -3778,7 +3880,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         });
       });
 
-      const traceUnlisten = await safeListen<TurnStreamEvent>("turn:trace", ({ payload }) => {
+      await listen("turn:trace", (payload) => {
         if (!isEventForCurrentSession(payload)) {
           return;
         }
@@ -3823,7 +3925,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         });
       });
 
-      const phaseChangedUnlisten = await safeListen<TurnStreamEvent>("turn:phase_changed", ({ payload }) => {
+      await listen("turn:phase_changed", (payload) => {
         if (!isEventForCurrentSession(payload)) {
           return;
         }
@@ -3865,7 +3967,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
-      const checkpointPersistedUnlisten = await safeListen<TurnStreamEvent>("turn:checkpoint_persisted", ({ payload }) => {
+      await listen("turn:checkpoint_persisted", (payload) => {
         if (!isEventForCurrentSession(payload)) {
           return;
         }
@@ -3907,7 +4009,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
-      const toolUnlisten = await safeListen<TurnStreamEvent>("turn:tool", ({ payload }) => {
+      await listen("turn:tool", (payload) => {
         if (!isEventForCurrentSession(payload)) {
           return;
         }
@@ -3957,7 +4059,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
-      const outputEndUnlisten = await safeListen<TurnStreamEvent>("turn:output_end", ({ payload }) => {
+      await listen("turn:output_end", (payload) => {
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
@@ -4002,7 +4104,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         });
       });
 
-      const hopCompleteUnlisten = await safeListen<TurnStreamEvent>("turn:hop_complete", ({ payload }) => {
+      await listen("turn:hop_complete", (payload) => {
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -4024,7 +4126,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         });
       });
 
-      const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
+      await listen("turn:completed", (payload) => {
         // Wave-1 C6：turn 结束（含后台会话 turn）即刷新计划/目标面板；
         // 同一 turnId 只刷新一次，失败不影响主流程。
         refreshPlanGoalAfterTurn(payload.turnId, payload.sessionId ?? this.sessionId);
@@ -4423,7 +4525,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         });
       });
 
-      const failedUnlisten = await safeListen<TurnStreamEvent>("turn:failed", ({ payload }) => {
+      await listen("turn:failed", (payload) => {
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
@@ -4653,7 +4755,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         }, 0);
       });
 
-      const cancelledUnlisten = await safeListen<TurnStreamEvent>("turn:cancelled", ({ payload }) => {
+      await listen("turn:cancelled", (payload) => {
         // Detect terminal event for a background session's turn
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
@@ -4821,7 +4923,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         }, 0);
       });
 
-      const suspendedUnlisten = await safeListen<TurnStreamEvent>("turn:suspended", ({ payload }) => {
+      await listen("turn:suspended", (payload) => {
         // Detect terminal event for a background session's turn
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
@@ -4986,18 +5088,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         }, 0);
       });
 
-      void startedUnlisten;
-      void deltaUnlisten;
-      void traceUnlisten;
-      void phaseChangedUnlisten;
-      void checkpointPersistedUnlisten;
-      void toolUnlisten;
-      void outputEndUnlisten;
-      void hopCompleteUnlisten;
-      void completedUnlisten;
-      void failedUnlisten;
-      void cancelledUnlisten;
-      void suspendedUnlisten;
+      // 12 个句柄已在各自注册成功时逐条入表（见上方 `listen` 辅助函数），此处只需置就绪位。
       this.eventsReady = true;
     },
     async runBrowserPreviewTurn(requestId: string) {
@@ -5428,3 +5519,15 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     }
   }
 });
+
+// F5b：HMR 重建本模块前释放已注册的 12 个 turn 事件监听器（否则热更后监听器成倍泄漏）。
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    try {
+      void useRuntimeStore().disposeTurnEvents();
+    } catch (error) {
+      // 无 active pinia（单测/SSR 场景）：没有监听器需要清理。
+      debugLog("events:hmr-dispose:skipped", { error: String(error) });
+    }
+  });
+}

@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Save,
   Shield,
+  Trash2,
   TriangleAlert
 } from "lucide-vue-next";
 import { useSettingsStore } from "@/stores/settings";
@@ -107,46 +108,87 @@ function chooseMode(mode: "coding" | "work") {
 
 const exaKey = ref("");
 const exaSaving = ref(false);
+const exaClearing = ref(false);
 const exaKeyPresent = ref(false);
 const exaEditing = ref(false);
+/** 操作反馈（成功/失败一律显式提示，禁止静默无反应）。 */
+const exaNotice = ref("");
+/** F4c：宿主只回传掩码（`sk-…a1b2`），前端永不持有明文密钥。 */
+const exaKeyMasked = ref("");
 
-onMounted(async () => {
+async function refreshExaKeyMask() {
   if (!isTauriAvailable()) return;
   try {
-    const key = await safeInvoke<string>("get_service_api_key", { service: "exa" });
-    exaKey.value = key;
-    exaKeyPresent.value = !!key;
+    const masked = await safeInvoke<string>("get_service_api_key", { service: "exa" });
+    exaKeyMasked.value = masked ?? "";
+    exaKeyPresent.value = !!exaKeyMasked.value;
   } catch {
     // browser mode
   }
+}
+
+onMounted(async () => {
+  await refreshExaKeyMask();
 });
 
 function beginEditExa() {
+  // 掩码不可逆：进入编辑即清空草稿，必须整串重输才能覆盖旧密钥。
+  exaKey.value = "";
+  exaNotice.value = "";
   exaEditing.value = true;
 }
 
 function cancelEditExa() {
   exaEditing.value = false;
-  if (exaKeyPresent.value) {
-    safeInvoke<string>("get_service_api_key", { service: "exa" }).then(k => {
-      exaKey.value = k;
-    });
-  } else {
-    exaKey.value = "";
-  }
+  exaKey.value = "";
+  exaNotice.value = "";
+  void refreshExaKeyMask();
 }
 
 async function saveExaKey() {
   if (!isTauriAvailable()) return;
+  const draft = exaKey.value.trim();
+  // 空草稿不落盘（避免「未修改」被误写成清空密钥）；删除走显式 clearExaKey()。
+  if (!draft) {
+    exaNotice.value = "请输入新密钥；如需删除已保存的密钥，请点右侧「清除」。";
+    return;
+  }
   exaSaving.value = true;
+  exaNotice.value = "";
   try {
-    await safeInvoke("set_service_api_key", { service: "exa", key: exaKey.value });
-    exaKeyPresent.value = !!exaKey.value;
+    await safeInvoke("set_service_api_key", { service: "exa", key: draft });
+    exaKey.value = "";
     exaEditing.value = false;
-  } catch {
-    // ignore
+    await refreshExaKeyMask();
+    exaNotice.value = "Exa 密钥已保存。";
+  } catch (error) {
+    exaNotice.value = `保存失败：${String(error)}`;
   } finally {
     exaSaving.value = false;
+  }
+}
+
+/**
+ * 显式清除已保存的密钥。
+ *
+ * 后端 `set_service_api_key(service, "")` 即删除语义（config.rs:328-335：空 key 走
+ * `secret_store.delete`），故前端用空串提交即可完成清除，无需新增命令。
+ */
+async function clearExaKey() {
+  if (!isTauriAvailable()) return;
+  if (exaSaving.value || exaClearing.value) return;
+  exaClearing.value = true;
+  exaNotice.value = "";
+  try {
+    await safeInvoke("set_service_api_key", { service: "exa", key: "" });
+    exaKey.value = "";
+    exaEditing.value = false;
+    await refreshExaKeyMask();
+    exaNotice.value = exaKeyPresent.value ? "清除未生效，请重试。" : "已清除 Exa 密钥。";
+  } catch (error) {
+    exaNotice.value = `清除失败：${String(error)}`;
+  } finally {
+    exaClearing.value = false;
   }
 }
 
@@ -221,10 +263,10 @@ async function toggleAgentTraceReporting(enabled: boolean) {
           </div>
           <div class="relative flex-1 max-w-[480px]">
             <Input
-              :model-value="exaKey"
+              :model-value="exaEditing ? exaKey : ''"
               type="password"
               :disabled="!exaEditing || exaSaving"
-              placeholder="输入 Exa API Key"
+              :placeholder="!exaEditing && exaKeyPresent ? exaKeyMasked : '输入 Exa API Key'"
               class="bg-stone-100/80 text-[9px] tracking-[-0.03em]"
               @update:model-value="exaKey = $event"
             />
@@ -250,10 +292,23 @@ async function toggleAgentTraceReporting(enabled: boolean) {
               <template v-else>
                 <button
                   type="button"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-white hover:text-stone-700"
+                  class="inline-flex h-7 w-7 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-white hover:text-stone-700 disabled:pointer-events-none disabled:opacity-50"
+                  :disabled="exaClearing"
                   @click="beginEditExa()"
                 >
                   <Pencil class="h-3.5 w-3.5" />
+                </button>
+                <button
+                  v-if="exaKeyPresent"
+                  type="button"
+                  class="inline-flex h-7 w-7 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-white hover:text-stone-700 disabled:pointer-events-none disabled:opacity-50"
+                  :disabled="exaClearing"
+                  aria-label="清除已保存的 Exa 密钥"
+                  data-testid="config-exa-key-clear"
+                  @click="clearExaKey()"
+                >
+                  <LoaderCircle v-if="exaClearing" class="h-3.5 w-3.5 animate-spin" />
+                  <Trash2 v-else class="h-3.5 w-3.5" />
                 </button>
               </template>
             </div>
@@ -270,6 +325,16 @@ async function toggleAgentTraceReporting(enabled: boolean) {
             exa.ai
             <ExternalLink class="h-3 w-3" />
           </button>
+        </div>
+        <div
+          v-if="exaNotice"
+          class="max-w-[480px] text-[11px] leading-5"
+          :class="exaNotice.startsWith('已') ? 'text-emerald-700' : 'text-amber-700'"
+          role="status"
+          aria-live="polite"
+          data-testid="config-exa-key-notice"
+        >
+          {{ exaNotice }}
         </div>
       </div>
 

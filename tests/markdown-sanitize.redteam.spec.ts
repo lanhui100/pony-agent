@@ -265,14 +265,23 @@ describe("markdown sanitize redteam", () => {
   });
 
   // ── 正常功能回归：安全内容不受损 ──
-  it("keeps safe links, images and formatting", () => {
+  // T2-4 契约对齐（2026-11-01）：`sanitizeMarkdownHtml` 已强制外部资源白名单——
+  // 远程 `img[src]` 与非白名单外链 `href` 必须剥离（权威用例：
+  // tests/markdown-external-resource-allowlist.red.spec.ts）；白名单 host 仍保留。
+  // 故本条从「保留 example.com 链接与图片」翻转为「保留排版、剥离外部资源」。
+  it("keeps safe formatting and strips non-allowlisted external resources", () => {
     const out = sanitizeMarkdownHtml(
       '<h1>t</h1><p><a href="https://example.com">link</a><img src="https://example.com/a.png" alt="a"><strong>b</strong><code>c</code></p>',
     );
-    expect(out).toContain('<a href="https://example.com"');
-    expect(out).toContain('target="_blank"');
-    expect(out).toContain('<img src="https://example.com/a.png"');
+    expect(out).not.toContain('href="https://example.com"');
+    expect(out).not.toContain('src="https://example.com/a.png"');
     expect(out).toContain("<strong>b</strong>");
+    expectNeutralized(out);
+
+    // 白名单 host（与 src-tauri/src/platform.rs::ALLOWED_OPEN_HOSTS 同源）仍必须保留
+    const allowlisted = sanitizeMarkdownHtml('<a href="https://github.com/x">ok</a>');
+    expect(allowlisted).toContain('href="https://github.com/x"');
+    expect(allowlisted).toContain('target="_blank"');
   });
 
   it("keeps checkbox input disabled", () => {

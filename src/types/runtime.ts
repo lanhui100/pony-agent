@@ -1132,6 +1132,13 @@ export type TurnStreamEvent = {
   sessionSummary?: string | null;
   traceId?: string | null;
   costUsd?: number | null;
+  /**
+   * F9：逻辑 hop 索引（0-based，wire 对齐 Rust `TurnStreamEvent.step`：
+   * crates/pony-agent-core/src/agent/runtime/types.rs:190）。
+   * delta/chunk 携带所属 hop；`turn:trace(calling_model)` 携带即将发起的 followup hop 索引。
+   * 缺省 = 未知/step 0（Rust 侧 `#[serde(default)]`）。
+   */
+  step?: number | null;
 };
 
 export type ExecutionCheckpoint = {

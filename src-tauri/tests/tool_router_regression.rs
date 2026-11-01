@@ -320,13 +320,26 @@ fn write_and_edit_tools_work_for_workspace_files() {
     });
     assert_eq!(write_result.status, "ok");
 
+    // PA-076 wave-22 读前写硬不变量：`workspace_edit_file` 必须携带 `expectedHash`
+    //（被编辑文件当前内容的 hash），否则按 `fs_not_observed` 阻断。本用例写于该不变量之前，
+    // 属陈旧夹具：此处取 write 结果里既有契约字段 `contentHash`（= 刚写入内容 `alpha\nbeta\n`
+    // 的 sha256，与 edit 侧校验同一算法）作为 `expectedHash`。
+    // 因果不变：仍是 write → edit → 最终内容校验；不变量与绕过开关均未改动。
+    let write_payload = serde_json::from_str::<Value>(&write_result.output).expect("write output json");
+    let expected_hash = write_payload
+        .get("contentHash")
+        .and_then(Value::as_str)
+        .expect("write_file must expose contentHash")
+        .to_string();
+
     let edit_result = router.execute(&ToolCall {
         call_id: None,
         name: "workspace_edit_file".to_string(),
         arguments: json!({
             "path": "docs/plan.txt",
             "oldText": "beta",
-            "newText": "gamma"
+            "newText": "gamma",
+            "expectedHash": expected_hash
         }),
         plan: None,
     });

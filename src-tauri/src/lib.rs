@@ -620,10 +620,34 @@ fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
     Ok(saved)
 }
 
+/// 掩码化服务密钥：明文密钥**永不**跨越 IPC 边界回传前端（F4c / T4）。
+///
+/// - 未配置：返回空串（前端据此判定 `configured == false`）；
+/// - 已配置：返回不可逆展示掩码（如 `sk-…a1b2`）；长度 ≤ 8 的短密钥只回长度占位。
+fn mask_service_api_key(key: &str) -> String {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= 8 {
+        return "•".repeat(chars.len());
+    }
+
+    let prefix: String = chars[..3].iter().collect();
+    let suffix: String = chars[chars.len() - 4..].iter().collect();
+    format!("{prefix}…{suffix}")
+}
+
 #[tauri::command]
 fn get_service_api_key(service: String) -> Result<String, String> {
     let store = pony_agent_core::agent::config::ProviderRegistryStore::new();
-    Ok(store.get_service_api_key(&service).unwrap_or_default())
+    // F4c：仅回传掩码，禁止明文出 IPC（保存新 key 仍走 set_service_api_key 单向写入）。
+    Ok(store
+        .get_service_api_key(&service)
+        .map(|key| mask_service_api_key(&key))
+        .unwrap_or_default())
 }
 
 #[tauri::command]

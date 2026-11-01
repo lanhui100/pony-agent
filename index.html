@@ -3,11 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- 浏览器预览用 meta CSP：与 tauri.conf.json prod 口径一致。
-      说明：Tauri prod enforce 以 tauri.conf.json app.security.csp 为准（单 CSP，不支持 dev/prod 分键）；
-      `tauri dev`（devUrl http://127.0.0.1:4176 + HMR ws）需本地临时放宽 connect-src/script-src，不落库。
-      本 meta 仅覆盖纯浏览器预览（非 Tauri WebView）场景。 -->
-    <!-- <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-src 'none'" /> -->
+    <!-- ============================ CSP 说明（单一真值源：src-tauri/tauri.conf.json） ============================
+      ⚠ 生产 CSP 的唯一真值源是 `src-tauri/tauri.conf.json` → `app.security.csp`（Tauri 在构建期把它
+      注入 index.html 的 meta 与响应头，并按需追加 nonce）。下面的 meta 只是**镜像**，故意保持注释：
+      一旦启用，`script-src 'self'` 会直接打断 `npm run dev`/纯浏览器预览（Vite 注入的内联客户端与
+      HMR ws 无 nonce 可匹配）。这是刻意配置，不是漏配；改 CSP 请改 tauri.conf.json。
+      ── 取舍记录 1（connect-src 的 ponysentry host）────────────────────────────────
+      `https://ponysentry.ponyjob.top` 与 `.github/workflows/release.yml` 的
+      `VITE_PONYSENTRY_INGEST_URL` 缺省值同源（telemetry.ts:12 处亦有等价注释）：
+      发布版 issue 上报的 fetch 降级路径直连该 host，漏配会被 CSP 静默掐死。三处必须同改。
+      ── 取舍记录 2（tauri.conf.json 的 dangerousDisableAssetCspModification）────────
+      该项只关掉 **style-src 的 nonce 注入**（Tauri codegen 会给每个 `<style>` 打 nonce，运行期把
+      `'nonce-…'` 追加进 style-src；按 CSP3 只要存在 nonce，`'unsafe-inline'` 即失效 ⇒ Vue 的
+      `:style`/`style=` 全部被拦、UI 直接崩）。script-src 不受影响，仍由 Tauri 的 nonce/hash 机制
+      保护（仅对 `script[src^='http']` 注入，本项目全部为同源 `'self'` 脚本，无需 nonce）。
+      注：tauri.conf.json 是严格 JSON（未启用 config-json5 特性，见
+      tauri-utils-2.10.1/src/config/parse.rs:288-296），无法写行内注释，故取舍记录落在本文件。
+    ==================================================================================================== -->
+    <!-- 浏览器预览用 meta CSP：与 tauri.conf.json app.security.csp prod 口径一致（同串镜像）。
+      事实（勿再写成「Tauri 不支持 dev/prod 分键」——那是错的）：tauri-utils-2.10.1
+      config.rs:3041-3051 确有 `app.security.devCsp`，**且未配 devCsp 时生产 csp 也会注入 dev**。
+      本项目当前未配 devCsp ⇒ `tauri dev` 同样受上面的生产 CSP 约束；将来要放宽 dev，
+      **只能加 `app.security.devCsp`**（e.g. connect-src 增 ws://127.0.0.1:4176、script-src 容内联），
+      禁止往生产 `csp` 里加 'unsafe-inline' / ws:。
+      本 meta 仅覆盖纯浏览器预览（非 Tauri WebView）场景，默认保持注释：启用后 `script-src 'self'`
+      会打断 `npm run dev`（Vite 内联客户端 + HMR ws 无 nonce 可匹配）。 -->
+    <!-- <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://api.github.com https://s3.local.ponyjob.top https://ponysentry.ponyjob.top; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'self'; form-action 'self'" /> -->
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <title>Pony Agent</title>
     <script type="module" src="/src/main.ts"></script>

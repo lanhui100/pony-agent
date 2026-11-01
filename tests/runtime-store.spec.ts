@@ -4670,6 +4670,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6060",
         eventId: "event-turn-started-6060",
         eventType: "turn.model_call_started",
@@ -4703,6 +4704,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:delta")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6060",
         eventId: "event-turn-delta-6060",
         eventType: "turn.first_token",
@@ -4730,6 +4732,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:phase_changed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6060",
         eventId: "event-turn-phase-changed-6060",
         eventType: "turn.phase_changed",
@@ -4749,6 +4752,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:checkpoint_persisted")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6060",
         eventId: "event-turn-checkpoint-6060",
         eventType: "turn.checkpoint_persisted",
@@ -4851,6 +4855,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6060",
         eventId: "event-turn-completed-6060",
         eventType: "turn.completed",
@@ -4969,6 +4974,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:delta")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "8080",
         eventId: "event-turn-delta-8080",
         eventType: "turn.output_delta",
@@ -4982,6 +4988,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:output_end")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "8080",
         eventId: "event-turn-output-end-8080",
         eventType: "turn.output_end",
@@ -5014,6 +5021,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "8080",
         eventId: "event-turn-completed-8080",
         eventType: "turn.completed",
@@ -5073,6 +5081,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "turn-unlock",
         eventId: "event-turn-completed-unlock",
         eventType: "turn.completed",
@@ -5141,6 +5150,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "turn-old",
         eventId: "event-turn-completed-old",
         eventType: "turn.completed",
@@ -5233,6 +5243,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:output_end")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9090",
         eventId: "event-turn-output-end-9090",
         eventType: "turn.output_end",
@@ -5254,6 +5265,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9090",
         eventId: "event-turn-completed-9090",
         eventType: "turn.completed",
@@ -5347,6 +5359,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         eventId: "event-turn-started-7070",
         eventType: "turn.model_call_started",
@@ -5372,6 +5385,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:delta")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         eventId: "event-turn-delta-7070",
         eventType: "turn.first_token",
@@ -5439,6 +5453,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7272",
         eventType: "turn.created",
         phase: "building_context",
@@ -5455,6 +5470,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:trace")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7272",
         eventType: "turn.model_call_started"
       }
@@ -5465,6 +5481,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:tool")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7272",
         eventType: "turn.tool_call_started",
         phase: "executing_tool",
@@ -5484,6 +5501,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:tool")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7272",
         eventType: "turn.tool_call_completed",
         phase: "tool_result_integrating",
@@ -5555,6 +5573,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7373",
         eventId: "event-turn-started-7373",
         eventType: "turn.model_call_started",
@@ -5568,6 +5587,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:tool")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7373",
         eventId: "event-turn-tool-7373",
         eventType: "turn.tool_call_completed",
@@ -5591,6 +5611,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:delta")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7373",
         eventId: "event-turn-delta-7373-stale",
         eventType: "turn.first_token",
@@ -5610,6 +5631,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:tool")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7373",
         eventId: "event-turn-tool-7373",
         eventType: "turn.tool_call_completed",
@@ -5659,6 +5681,7 @@ describe("runtime session resilience", () => {
     // output_end：sequence 5, eventId A
     eventHandlers.get("turn:output_end")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "turn-seq",
         eventId: "output-end-A",
         eventType: "turn.output_end",
@@ -5676,6 +5699,7 @@ describe("runtime session resilience", () => {
     // completed：sequence 5, eventId B —— 同 sequence 不同 eventId，不应被去重丢弃
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "turn-seq",
         kind: "completed",
         eventId: "completed-B",
@@ -5731,6 +5755,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "turn-head",
         kind: "completed",
         eventId: "turn-head:2",
@@ -5840,6 +5865,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         providerName: "OpenAI",
         providerModel: "gpt-5",
@@ -5853,6 +5879,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:trace")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         phase: "calling_tool",
         traceSteps: store.traceSteps
@@ -5861,6 +5888,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:tool")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         phase: "calling_tool",
         toolActivities: [
@@ -5879,6 +5907,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:tool")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         phase: "calling_model",
         toolActivities: [
@@ -5897,6 +5926,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:trace")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         phase: "calling_model",
         traceSteps: store.traceSteps
@@ -5905,6 +5935,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:delta")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         text: "second model answer",
         firstTokenLatencyMs: 123
@@ -5913,6 +5944,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         text: "final answer",
         providerName: "OpenAI",
@@ -5983,6 +6015,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7171",
         providerName: "OpenAI",
         providerModel: "gpt-5",
@@ -6002,6 +6035,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:tool")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7171",
         phase: "calling_tool",
         toolActivities: [
@@ -6037,6 +6071,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7171",
         text: "backend final answer",
         providerName: "OpenAI",
@@ -6149,6 +6184,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "8181",
         providerName: "OpenAI",
         providerModel: "gpt-5",
@@ -6165,6 +6201,7 @@ describe("runtime session resilience", () => {
     // return_result.text 携带工具结果文本（与事件折叠重建同构）。
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "8181",
         text: "final answer",
         providerName: "OpenAI",
@@ -6240,6 +6277,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6262",
         text: "final answer",
         providerName: "OpenAI",
@@ -6307,6 +6345,7 @@ describe("runtime session resilience", () => {
     await store.submitTurn();
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6363",
         text: "final answer",
         providerName: "OpenAI",
@@ -6483,6 +6522,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6161",
         providerName: "OpenAI",
         providerModel: "gpt-5",
@@ -6492,6 +6532,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:delta")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6161",
         reasoningContent: "thinking: first pass"
       }
@@ -6499,6 +6540,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6161",
         text: "final answer",
         reasoningContent: "thinking: final pass",
@@ -6672,6 +6714,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:delta")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9191",
         eventId: "event-turn-delta-9191",
         eventType: "turn.output_delta",
@@ -6687,6 +6730,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9191",
         eventId: "event-turn-completed-9191",
         eventType: "turn.completed",
@@ -6909,6 +6953,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9191",
         text: "final answer after missing run id",
         providerName: "OpenAI",
@@ -6972,6 +7017,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6262",
         providerName: "OpenAI",
         providerModel: "gpt-5",
@@ -6981,6 +7027,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:trace")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6262",
         eventId: "6262:2",
         eventType: "turn.model_call_started",
@@ -7008,6 +7055,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:tool")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6262",
         eventId: "6262:3",
         eventType: "turn.tool_call_started",
@@ -7042,6 +7090,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "6262",
         eventId: "6262:4",
         eventType: "turn.completed",
@@ -7130,6 +7179,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         providerName: "OpenAI",
         providerModel: "gpt-5",
@@ -7139,6 +7189,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:failed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "7070",
         text: "failure response",
         reasoningContent: "failure reasoning",
@@ -7213,6 +7264,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "8080",
         providerName: "OpenAI",
         providerModel: "gpt-5",
@@ -7221,6 +7273,7 @@ describe("runtime session resilience", () => {
     });
     eventHandlers.get("turn:cancelled")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "8080",
         text: "用户终止，发送消息可继续。",
         error: "stopped_by_user",
@@ -7296,6 +7349,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:failed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9090",
         text: "old failed event",
         error: "old failure"
@@ -7303,6 +7357,7 @@ describe("runtime session resilience", () => {
     });
     eventHandlers.get("turn:cancelled")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9090",
         text: "old cancelled event",
         error: "old cancelled"
@@ -7371,6 +7426,7 @@ describe("runtime session resilience", () => {
     // 模拟重试成功：收到 turn:delta 事件并 flush 流式文本
     eventHandlers.get("turn:delta")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9191",
         eventId: "event-turn-delta-9191-1",
         eventType: "turn.first_token",
@@ -7389,6 +7445,7 @@ describe("runtime session resilience", () => {
     // 收到 turn:completed 事件
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "9191",
         eventId: "event-turn-completed-9191",
         eventType: "turn.completed",
@@ -8346,6 +8403,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "turn-head",
         eventId: "turn-head:1",
         eventType: "turn.started",
@@ -8360,6 +8418,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:completed")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "turn-head",
         eventId: "turn-head:2",
         eventType: "turn.completed",
@@ -8462,6 +8521,7 @@ describe("runtime session resilience", () => {
 
     eventHandlers.get("turn:started")?.({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: "turn-live",
         eventId: "turn-live:1",
         eventType: "turn.started",
@@ -9239,6 +9299,7 @@ describe("submission watchdog acceptance (red-phase)", () => {
       const dispatchDelta = (sequence: number) => {
         eventHandlers.get("turn:delta")?.({
           payload: {
+            sessionId: store.sessionId ?? undefined,
             turnId: "turn-watch-t1",
             kind: "delta",
             eventId: `t1-delta-${sequence}`,

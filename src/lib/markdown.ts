@@ -44,6 +44,123 @@ const SAFE_TAGS = new Set([
 
 
 /**
+ * 外链 host 白名单（**唯一真值源的镜像**）。
+ *
+ * 真值源：`src-tauri/src/platform.rs::ALLOWED_OPEN_HOSTS`（Rust 侧最终强制）。
+ * 增删必须两处同提交，否则前端渲染层会放行后端会拒绝的链接。
+ */
+export const ALLOWED_EXTERNAL_HOSTS = [
+  "github.com",
+  "api.github.com",
+  "exa.ai",
+  "s3.local.ponyjob.top",
+] as const;
+
+/**
+ * WHATWG URL 解析器把 `\` 当 `/` 处理，故所有「站内 / 协议相对 / 外链」判定前必须先归一。
+ * 否则 `/\evil.com/x.png`、`\\evil.com/x.png` 会被误判成站内相对路径，浏览器实际解析成
+ * 协议相对外连（`new URL("/\\evil.com/a.png", "http://tauri.localhost/")` → `http://evil.com/a.png`）。
+ */
+function normalizeBackslashes(value: string): string {
+  return value.replace(/\\/g, "/");
+}
+
+/**
+ * 站内地址：相对路径 / 锚点 / 查询串 —— 不产生外部网络动作。
+ * 协议相对（`//host/…`，含反斜杠绕行写法）一律按**外部**处理。
+ */
+function isInternalUrl(value: string): boolean {
+  const trimmed = normalizeBackslashes(value).trim();
+
+  if (!trimmed) {
+    return true;
+  }
+
+  if (trimmed.startsWith("#")) {
+    return true;
+  }
+
+  // 协议相对（//host/...）会随页面协议发起外连，按远程处理。
+  if (trimmed.startsWith("//")) {
+    return false;
+  }
+
+  // 无 scheme（/a、a/b、?x、./a、../a）即站内。
+  return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+}
+
+/** 取 URL 的原始 authority 段（`://` 之后到首个 `/?#` 之前）。 */
+function rawAuthority(url: string): string {
+  const schemeIndex = url.indexOf("://");
+
+  if (schemeIndex < 0) {
+    return "";
+  }
+
+  const rest = url.slice(schemeIndex + 3);
+  const end = rest.search(/[/?#]/);
+
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+/**
+ * 是否放行在系统浏览器打开的外链。
+ *
+ * 归一化规则**必须与 `platform.rs::is_allowed_open_url` 同规**，否则会出现
+ * 「前端放行 → 后端拒绝 → 点击静默失败（仅 console.warn）」：
+ *   - 仅 https；
+ *   - authority 必须纯 ASCII（防 punycode/Unicode 绕行）；
+ *   - 一律拒绝 userinfo（`user@host`）；
+ *   - 一律拒绝显式端口（含 `:443`，WHATWG 会把默认端口吃掉，故用原始串探测）；
+ *   - host 精确匹配白名单（小写、拒绝尾点）。
+ */
+export function isAllowedExternalHref(value: string): boolean {
+  const trimmed = normalizeBackslashes(value).trim();
+
+  if (isInternalUrl(trimmed)) {
+    return true;
+  }
+
+  if (!/^https:\/\//i.test(trimmed)) {
+    return false;
+  }
+
+  const authority = rawAuthority(trimmed);
+
+  if (!authority) {
+    return false;
+  }
+
+  // 非 ASCII authority（Unicode / punycode 混杂）一律拒绝 —— 与 Rust 侧同规。
+  // eslint-disable-next-line no-control-regex
+  if (!/^[\x20-\x7e]+$/.test(authority)) {
+    return false;
+  }
+
+  // userinfo 一律拒绝（`https://github.com@evil.test/` 这类伪装）。
+  if (authority.includes("@")) {
+    return false;
+  }
+
+  // 显式端口一律拒绝（含默认 `:443`）：Rust 侧用原始串探测同一规则。
+  if (authority.includes(":")) {
+    return false;
+  }
+
+  if (!/^[a-z0-9.-]+$/i.test(authority)) {
+    return false;
+  }
+
+  const host = authority.toLowerCase();
+
+  if (host.endsWith(".")) {
+    return false;
+  }
+
+  return (ALLOWED_EXTERNAL_HOSTS as readonly string[]).includes(host);
+}
+
+/**
  * String-based HTML sanitizer.
  *
  * Strips unsafe tags and attributes without building a DOM tree, avoiding the
@@ -53,9 +170,14 @@ const SAFE_TAGS = new Set([
  *   - <script> / <style> removed entirely (tag + content)
  *   - Tags not in SAFE_TAGS are removed (content preserved — "unwrap")
  *   - Safe tags: only SAFE_TAG_ATTRS keys + SAFE_GLOBAL_ATTRS survive
- *   - href/src verified by isSafeUrl()
- *   - <a href="…"> gets target="_blank" rel="noopener noreferrer"
+ *   - <a href="…"> 外链必须 https + 白名单 host（`ALLOWED_EXTERNAL_HOSTS`）：
+ *     命中则 target="_blank" rel="noopener noreferrer"；未命中剥离 href（文本保留），
+ *     且剥离 target/rel —— 杜绝「协议相对 / http / ftp / 非白名单 host」直跳。
+ *   - <img> 远程资源一律移除元素（禁静默外连：IP/UA 泄漏与像素追踪）；
+ *     data: 与站内相对路径保留（DOMPurify 默认已拒 data:text/*）。
  *   - <input> gets disabled="" and only "checkbox" type survives
+ *
+ * 交付契约（T2-4 红相）：tests/markdown-external-resource-allowlist.red.spec.ts
  *
  * Non-DOM early-return 契约（显式决策：直通）：
  *   - `typeof document === "undefined"` 时直接 `return html`（不过滤）。
@@ -66,10 +188,39 @@ const SAFE_TAGS = new Set([
  */
 if (typeof window !== "undefined") {
   DOMPurify.addHook("afterSanitizeAttributes", (node) => {
-    if (node.tagName === "A" && node.hasAttribute("href")) {
-      node.setAttribute("target", "_blank");
-      node.setAttribute("rel", "noopener noreferrer");
+    if (node.tagName === "A") {
+      if (!node.hasAttribute("href")) {
+        return;
+      }
+      const href = node.getAttribute("href") ?? "";
+      if (!isAllowedExternalHref(href)) {
+        node.removeAttribute("href");
+        node.removeAttribute("target");
+        node.removeAttribute("rel");
+        return;
+      }
+      if (!isInternalUrl(href)) {
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noopener noreferrer");
+      }
+      return;
     }
+
+    if (node.tagName === "IMG") {
+      // 归一化反斜杠后再判定：`/\evil.com/x.png` 在浏览器里等价于协议相对外连。
+      const src = normalizeBackslashes(node.getAttribute("src") ?? "").trim();
+      const blocked =
+        !src ||
+        src.startsWith("//") ||
+        /^https?:\/\//i.test(src) ||
+        // 兜底：任何非常见 scheme（blob:/filesystem:/…）一律拦下，只放行 data:image。
+        (!isInternalUrl(src) && !/^data:image\//i.test(src));
+      if (blocked) {
+        node.remove();
+      }
+      return;
+    }
+
     if (node.tagName === "INPUT") {
       if (node.getAttribute("type") !== "checkbox") {
         node.remove();

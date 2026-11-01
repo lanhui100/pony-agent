@@ -9,6 +9,15 @@ import packageJson from "../../package.json";
 
 // wave-18 C5：默认零 egress —— ingest 端点与客户端凭证**仅**取自环境变量，
 // 未配置即空串（禁止任何硬编码回落）。两者任一为空时 `reportError` 早退，不发 fetch。
+//
+// ⚠ 三处同源不变量（改一处必须同时改其余两处，否则发布版 issue 上报会被静默掐死）：
+//   1. `.github/workflows/release.yml` 的 `VITE_PONYSENTRY_INGEST_URL` 缺省值（发布构建烧录）；
+//   2. `src-tauri/tauri.conf.json` → `app.security.csp` 的 `connect-src` 白名单；
+//   3. 本常量（消费端，浏览器/降级路径的直连 fetch，见下方 `fetch(${INGEST_URL}/api/v1/ingest)`）。
+// 注：Tauri 宿主下首选走 IPC（`ponysentry_capture` → Rust 侧发网，不受 CSP 约束），
+// CSP 只约束浏览器预览与 IPC 失败后的 fetch 降级路径；仍必须配置，否则该降级面直接失效。
+// 注：本文件受 `tests/telemetry-credential.spec.ts` 族2 静态断言约束——**禁止**在此写出具体端点
+// 字面量（含注释），端点真值只在 release.yml 与 tauri.conf.json 两处出现。
 export const INGEST_URL =
   (import.meta.env?.VITE_PONYSENTRY_INGEST_URL as string) || "";
 export const CLIENT_TOKEN =

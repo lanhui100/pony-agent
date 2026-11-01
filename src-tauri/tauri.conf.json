@@ -27,7 +27,10 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://api.github.com https://s3.local.ponyjob.top https://ponysentry.ponyjob.top; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'self'; form-action 'self'",
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ],
       "capabilities": [
         "main-capability"
       ]

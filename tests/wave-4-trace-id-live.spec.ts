@@ -40,6 +40,7 @@ describe("Wave-4.1 live trace_id contract & store error reporting suite", () => 
     expect(listeners["turn:started"]).toBeDefined();
     listeners["turn:started"]({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId,
         eventType: "turn:started",
         traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
@@ -64,6 +65,7 @@ describe("Wave-4.1 live trace_id contract & store error reporting suite", () => 
     // 先进入 started，写入 traceId
     listeners["turn:started"]({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId,
         eventType: "turn:started",
         sequence: 1,
@@ -80,6 +82,7 @@ describe("Wave-4.1 live trace_id contract & store error reporting suite", () => 
     expect(listeners["turn:failed"]).toBeDefined();
     listeners["turn:failed"]({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId,
         eventType: "turn:failed",
         kind: "failed",
@@ -110,6 +113,7 @@ describe("Wave-4.1 live trace_id contract & store error reporting suite", () => 
     store.activeTurnId = turn1;
     listeners["turn:started"]({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: turn1,
         eventType: "turn:started",
         traceId: "11111111111111111111111111111111"
@@ -122,6 +126,7 @@ describe("Wave-4.1 live trace_id contract & store error reporting suite", () => 
     store.activeTurnId = turn2;
     listeners["turn:started"]({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: turn2,
         eventType: "turn:started"
       }
@@ -172,6 +177,7 @@ describe("Wave-4.1 live trace_id contract & store error reporting suite", () => 
     // 真实 wire：Rust 端 skip_serializing_if，字段完全缺席（不带 traceId 键）
     listeners["turn:started"]({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId,
         eventType: "turn:started",
         sequence: 1,
@@ -183,6 +189,7 @@ describe("Wave-4.1 live trace_id contract & store error reporting suite", () => 
 
     listeners["turn:failed"]({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId,
         eventType: "turn:failed",
         kind: "failed",
@@ -229,6 +236,7 @@ describe("Wave-4.1 live trace_id contract & store error reporting suite", () => 
 
     listeners["turn:failed"]({
       payload: {
+        sessionId: store.sessionId ?? undefined,
         turnId: failedTurnId,
         eventType: "turn:failed",
         kind: "failed",

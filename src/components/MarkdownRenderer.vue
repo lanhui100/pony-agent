@@ -2,12 +2,14 @@
 import { computed, onBeforeUnmount, ref, useAttrs, watch } from "vue";
 import {
   endsWithNaturalBoundary,
+  isAllowedExternalHref,
   isSimpleTextContent,
   markdownRenderEpoch,
   renderMarkdown,
   renderPartialMarkdown,
   splitMarkdownBlocks
 } from "@/lib/markdown";
+import { openExternalUrl } from "@/lib/open-external-url";
 
 defineOptions({
   inheritAttrs: false
@@ -31,6 +33,8 @@ const attrs = useAttrs();
 const renderedHtml = ref("");
 const unrenderedSuffix = ref("");
 const renderPending = ref(false);
+const blockedLinkNotice = ref("");
+let blockedLinkNoticeTimerId: number | null = null;
 let renderVersion = 0;
 let renderTimerId: number | null = null;
 let idleCallbackId: number | null = null;
@@ -68,6 +72,48 @@ function cancelScheduledRender() {
     cancelIdleCallback(idleCallbackId);
     idleCallbackId = null;
   }
+}
+
+/**
+ * F4b：markdown 内的链接点击统一拦截。
+ *
+ * 消毒层（`src/lib/markdown.ts`）已剥离非白名单 href，此处是第二道闸：
+ * - 站内锚点（`#…`）：交给浏览器默认行为（无外部网络动作）；
+ * - 白名单 https：`preventDefault` 后走 `openExternalUrl`（Rust 侧再强制校验）；
+ * - 其余（含已被剥离 href 的空值、相对路径、非白名单 host、http/ftp）：阻断 + 提示。
+ */
+function onMarkdownClick(event: MouseEvent) {
+  const eventTarget = event.target as Element | null;
+  const anchor = eventTarget?.closest?.("a") ?? null;
+
+  if (!anchor) {
+    return;
+  }
+
+  const href = (anchor.getAttribute("href") ?? "").trim();
+
+  if (href.startsWith("#")) {
+    return;
+  }
+
+  event.preventDefault();
+
+  const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(href);
+
+  if (hasScheme && isAllowedExternalHref(href)) {
+    void openExternalUrl(href);
+    return;
+  }
+
+  showBlockedLinkNotice();
+}
+
+function showBlockedLinkNotice() {
+  blockedLinkNotice.value = "已阻止打开未经安全校验的链接";
+  blockedLinkNoticeTimerId = window.setTimeout(() => {
+    blockedLinkNotice.value = "";
+    blockedLinkNoticeTimerId = null;
+  }, 3000);
 }
 
 function shouldRenderNow(content: string): boolean {
@@ -266,12 +312,19 @@ watch(markdownRenderEpoch, () => {
 
 onBeforeUnmount(() => {
   cancelScheduledRender();
+  if (blockedLinkNoticeTimerId != null) {
+    window.clearTimeout(blockedLinkNoticeTimerId);
+    blockedLinkNoticeTimerId = null;
+  }
 });
 </script>
 
 <template>
   <!-- 单一稳定根元素：无论 streaming 状态如何变化，不会替换 DOM 子树 -->
-  <div v-bind="attrs" :class="[wrapperClass, toneClass]">
+  <div v-bind="attrs" :class="[wrapperClass, toneClass]" @click="onMarkdownClick">
+    <div v-if="blockedLinkNotice" class="mr-blocked-link-notice" role="status" aria-live="polite">
+      {{ blockedLinkNotice }}
+    </div>
     <!-- 流式 + 纯文本快路径：直接显示文本，不加 v-html -->
     <div v-if="streaming && plainTextMode && content" class="markdown-body whitespace-pre-wrap">{{ content }}</div>
     <!-- 流式 + 正常 markdown 渲染路径 -->
@@ -297,6 +350,16 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.mr-blocked-link-notice {
+  margin: 4px 0;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(180, 120, 40, 0.1);
+  color: #8a5a1f;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .mr-streaming-raw {
   word-break: break-word;
   overflow-wrap: anywhere;
