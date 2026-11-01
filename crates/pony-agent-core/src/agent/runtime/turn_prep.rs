@@ -111,7 +111,7 @@ impl AgentRuntime {
         let effective_images =
             self.resolve_turn_images(input, &preliminary_retrieved, &provider)?;
         let tools = builtin_tools();
-        let planner_skills = self.capability_registry.list_skills_for_planner();
+        let planner_skills = self.capability_registry.read().unwrap_or_else(|e| e.into_inner()).list_skills_for_planner();
         let retrieved = if effective_images.is_empty() {
             preliminary_retrieved
         } else {
@@ -545,11 +545,12 @@ impl AgentRuntime {
         &self,
         tool_call: &ToolCall,
     ) -> CapabilityMediationEnvelope {
+        let registry = self.capability_registry.read().unwrap_or_else(|e| e.into_inner());
         let candidate_ids =
-            candidate_capability_ids_for_tool_name(&self.capability_registry, &tool_call.name);
+            candidate_capability_ids_for_tool_name(&registry, &tool_call.name);
         let resolved_capability = candidate_ids
             .first()
-            .and_then(|capability_id| self.capability_registry.inspect_capability(capability_id));
+            .and_then(|capability_id| registry.inspect_capability(capability_id));
         CapabilityMediationEnvelope {
             session_id: None,
             run_id: None,
@@ -581,6 +582,8 @@ impl AgentRuntime {
     ) -> CapabilityMediationEnvelope {
         let source = self
             .capability_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .inspect_skill_source(&skill.source_id);
         CapabilityMediationEnvelope {
             session_id: None,

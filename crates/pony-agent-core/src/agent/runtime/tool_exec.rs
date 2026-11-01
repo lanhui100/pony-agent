@@ -50,7 +50,8 @@ impl AgentRuntime {
         tool_call: &ToolCall,
         context: &ToolExecutionContext,
     ) -> CapabilityToolExecutionResult {
-        let action = match self.capability_registry.resolve_tool_call(tool_call) {
+        let registry = self.capability_registry.read().unwrap_or_else(|e| e.into_inner());
+        let action = match registry.resolve_tool_call(tool_call) {
             Ok(action) => action,
             Err(failure_kind) => {
                 runtime_log(format!(
@@ -58,8 +59,7 @@ impl AgentRuntime {
                     tool_call.name,
                     failure_kind.as_str()
                 ));
-                return self
-                    .capability_registry
+                return registry
                     .capability_failure_result(tool_call, failure_kind);
             }
         };
@@ -115,10 +115,12 @@ impl AgentRuntime {
         crate::agent::telemetry::CapabilityInvocationRecord,
         Vec<HookTraceRecord>,
     ) {
-        if let Some(skill) = self
+        let skill_opt = self
             .capability_registry
-            .match_executable_skill_tool_name(&tool_call.name)
-        {
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .match_executable_skill_tool_name(&tool_call.name);
+        if let Some(skill) = skill_opt {
             let mediation_envelope = self.build_skill_mediation_envelope(tool_call, &skill);
             let mediation = self.dispatch_capability_mediation_hooks(
                 CapabilityMediationHookPoint::SkillToolActionsResolve,
@@ -322,7 +324,8 @@ impl AgentRuntime {
             arguments: arguments.clone(),
         };
 
-        let result = match self.capability_registry.resolve_invocation(&request) {
+        let registry = self.capability_registry.read().unwrap_or_else(|e| e.into_inner());
+        let result = match registry.resolve_invocation(&request) {
             // design Decision 11 forbids echoing the request arguments back as resource content.
             // The real McpTransport-backed `McpResourceSurface` (mcp_resources.rs, which rejects
             // argument echoes) is not yet wired into this production registry path, so resource
@@ -330,16 +333,13 @@ impl AgentRuntime {
             // surface lands. Wiring McpResourceSurface is follow-up work; fail-closed is the
             // design-compliant terminal state before wiring. The `arguments` are never used as
             // content.
-            Ok(crate::agent::capability_bridge::CapabilityBridgeAction::Resource(_)) => self
-                .capability_registry
+            Ok(crate::agent::capability_bridge::CapabilityBridgeAction::Resource(_)) => registry
                 .resource_fetch_failure_result(&request, CapabilityFailureKind::SourceUnavailable),
             // Any other resolved action (Tool / PromptTemplate) reaching the resource entrypoint
             // is a registry shape violation and fails closed without echoing arguments.
-            Ok(_) => self
-                .capability_registry
+            Ok(_) => registry
                 .resource_fetch_failure_result(&request, CapabilityFailureKind::MalformedResponse),
-            Err(failure_kind) => self
-                .capability_registry
+            Err(failure_kind) => registry
                 .resource_fetch_failure_result(&request, failure_kind),
         };
 
@@ -471,6 +471,8 @@ impl AgentRuntime {
         let normalized_query = query.to_ascii_lowercase();
         let candidates = self
             .capability_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .list_capabilities(source_id, Some("tool"))
             .into_iter()
             .filter(|capability| {
@@ -578,7 +580,8 @@ impl AgentRuntime {
         request: &SkillInvocationRequest,
         context: &ToolExecutionContext,
     ) -> SkillToolExecutionResult {
-        let (skill, actions) = match self.capability_registry.resolve_skill_tool_actions(request) {
+        let registry = self.capability_registry.read().unwrap_or_else(|e| e.into_inner());
+        let (skill, actions) = match registry.resolve_skill_tool_actions(request) {
             Ok(resolved) => resolved,
             Err(failure_layer) => {
                 runtime_log(format!(
@@ -586,8 +589,7 @@ impl AgentRuntime {
                     request.skill_id,
                     failure_layer.as_str()
                 ));
-                return self
-                    .capability_registry
+                return registry
                     .skill_failure_result(request, failure_layer);
             }
         };

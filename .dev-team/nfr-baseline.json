@@ -56,10 +56,11 @@
       "code": "crates/pony-agent-core/src/agent/provider/mod.rs build_streaming_http_client (L2195-2218)",
       "semantics": "connect_timeout=15s + read/idle timeout=180s；不再有总 deadline",
       "why_not_base": "external_call_timeout_ms=3000 描述请求级往返预算；流式总时长由模型生成长度决定，套 3s 或套 180s 总 deadline 都会截断长推理（wave-55 修复的真实缺陷）",
-      "guarantee": "仅保证 idle 断开：连续 180s 无数据即断开。不保证总时长上界——持续有字节到达时连接与 turn 可长期占用；读循环内既无 elapsed 上界也无取消检查（provider/mod.rs L2437-2484）",
-      "known_gap_ref": "docs/architecture/structural-debt-proposals.md §3（取消语义：sync 路径零取消检查 + provider 读循环无 cancel/elapsed）",
-      "l3p_blocking_resolution": "按 L3-P 第 1 问选择方案 (b)：修正 guarantee 措辞与代码一致，不新增总时长上界（属产品决策：合法超长推理流不应被硬截断）；缺口登记而非掩盖。独立复审 /tmp/l3p-recheck.json 判定 Q1-RESOLVED",
-      "registered_at": "2026-11-01"
+      "guarantee": "provider 流式：180s 读空闲（idle）断开 + 30min 总时长上界（可注入配置，ProviderStreamGuard::new）+ 每 250ms 观测既有取消源（ExecutionControl::is_stop_requested），超限分别以 `provider_stream_deadline_exceeded` / `provider_stream_cancelled` 带 elapsed 与 parsed_bytes 退出。不再存在'无总时长上界'的缺口（wave-56 闭环）。",
+      "known_gap_ref": "已消解（wave-56）；seam：crates/pony-agent-core/src/agent/provider/mod.rs ProviderStreamGuard (L517-545)，生产接线 runtime/turn_stream.rs:1659",
+      "l3p_blocking_resolution": "wave-55 按方案(b)登记缺口 → wave-56 按方案(a)根治：新增总时长上界与取消观测，并保留可注入 seam 供测试（无需 sleep 30min）。",
+      "registered_at": "2026-11-01",
+      "updated_at": "2026-11-01 wave-56"
     }
   ],
   "logging_eprintln_exempt_note": "wave-55 新增 5 处生产 eprintln（MCP 环境禁用键丢弃 1、secret store 明文回退 2、save_store/save_session_state 失败 2），均带错误上下文、不含密文；按 L3-P 复审 ADV-1 修正此前高报的 6。JSON+trace_id 结构化收敛仍属 PA-119 债务"

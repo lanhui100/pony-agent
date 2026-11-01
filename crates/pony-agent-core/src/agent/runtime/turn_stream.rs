@@ -1653,10 +1653,18 @@ impl AgentRuntime {
             let turn_id_for_delta_emit = turn_id_for_stream.clone();
             let stream_session_id_for_delta_emit = stream_session_id.clone();
 
-            let decision = provider_decision_stream(
+            // T9（W56-A）：把既有取消源（ExecutionControlRegistry + 本 turn id）接进 provider 帧循环；
+            // 总时长上界用缺省 30min（可注入 seam 见 ProviderStreamGuard::new）。
+            let stream_turn_id_for_guard = turn_id.clone();
+            let stream_cancel_check = || control.is_stop_requested(stream_turn_id_for_guard.as_str());
+            let stream_guard = crate::agent::provider::ProviderStreamGuard::with_cancel_check(
+                &stream_cancel_check,
+            );
+            let decision = provider_decision_stream_guarded(
                 &prepared.provider,
                 &prepared.planning_request,
                 &prepared.tools,
+                &stream_guard,
                 move |delta| {
                     let flush_delta = |text: Option<String>, reasoning_content: Option<String>| {
                         let turn_latency =

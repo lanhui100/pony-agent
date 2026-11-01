@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { defineComponent, h, nextTick, watch } from "vue";
-import { mount } from "@vue/test-utils";
+import { enableAutoUnmount, mount } from "@vue/test-utils";
 import { TooltipProvider } from "reka-ui";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import {
@@ -705,7 +705,16 @@ describe("HomeWorkspace", () => {
     resetViewportMetrics();
   });
 
-  afterEach(() => {
+  // W56-T⑤ 收尾卫生：本文件大量 mount 后未显式 unmount；v8 插桩下（时序变慢）会有
+  // 待执行的 rAF/微任务在被测组件仍挂载时排队，等到 `vi.unstubAllGlobals()` 与环境拆除之后
+  // 才 flush，于是组件更新触发 ref 回调 => `ReferenceError: HTMLElement is not defined`
+  // （HomeWorkspace.vue:172 的 `element instanceof HTMLElement`）。
+  // 修法（测试写法，不改组件）：每个用例结束先卸载所有 wrapper（enableAutoUnmount 的钩子在
+  // describe 之后注册，按 Vitest stack 顺序先于本钩子执行），再 flush 一轮微/宏任务，
+  // 最后清定时器并还原本局全局 —— 保证任何组件更新都不会落在环境拆除之后。
+  afterEach(async () => {
+    await nextTick();
+    await Promise.resolve();
     for (const timer of rafTimers.values()) {
       clearTimeout(timer);
     }
@@ -714,6 +723,10 @@ describe("HomeWorkspace", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
+
+  // 注册在 afterEach 之后：Vitest 的 afterEach 按 stack 顺序执行（后注册先跑），
+  // 因此卸载发生在"清定时器/还原全局"之前。
+  enableAutoUnmount(afterEach);
 
   it("disables composer while switching session", async () => {
     const runtimeStore = useRuntimeStore();

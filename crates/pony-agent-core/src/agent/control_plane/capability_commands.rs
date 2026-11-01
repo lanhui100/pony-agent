@@ -91,12 +91,6 @@ impl HostControlPlane {
             runtime.apply_mcp_source_snapshot(command.snapshot.clone());
         }
 
-        let mut registry = self.capability_registry.write().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
-            e.into_inner()
-        });
-        registry.replace_mcp_source_snapshot(command.snapshot.clone());
-
         Ok(command.snapshot.source)
     }
 
@@ -122,17 +116,6 @@ impl HostControlPlane {
             runtime.dispatch_skill_source_ingress_hooks(&normalized_snapshot)?;
             runtime.apply_skill_source_snapshot(normalized_snapshot.clone())?;
         }
-
-        // Re-acquire as write lock and re-normalize: the registry may have changed
-        // between the read-lock normalization above and this write-lock application,
-        // so we re-normalize under the write lock to maintain consistency.
-        let mut registry = self.capability_registry.write().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
-            e.into_inner()
-        });
-        let normalized_snapshot =
-            normalize_skill_source_snapshot_against_capabilities(&registry, command.snapshot)?;
-        registry.replace_skill_source_snapshot(normalized_snapshot.clone())?;
 
         Ok(normalized_snapshot.source)
     }

@@ -16,6 +16,8 @@ use serde_json::Value;
 use std::sync::{Arc, RwLock};
 
 // ── Shared context snapshot from AgentRuntime ──
+// W56-C 注释：`TurnContext` 是未完成的自由函数调度原型（当前全仓零外部构造点）；
+// 其中的 `capability_registry` 保留为与 AgentRuntime 相同的 Arc<RwLock<CapabilityRegistry>> 单一真值类型。
 pub struct TurnContext {
     pub sessions: Arc<RwLock<SessionStore>>,
     pub tool_executor: Arc<dyn ToolExecutor + Send>,

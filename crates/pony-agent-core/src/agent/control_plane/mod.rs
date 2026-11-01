@@ -889,7 +889,7 @@ pub struct HostControlPlane {
     graph_runs: Arc<Mutex<GraphRunStore>>,
     graph_runner: GraphRunner,
     graph_planner: Box<dyn GraphPlanner>,
-    capability_registry: RwLock<CapabilityRegistry>,
+    capability_registry: Arc<RwLock<CapabilityRegistry>>,
     frontend_diagnostics: FrontendDiagnosticsStore,
     /// Governed dispatcher whose pending control-request store backs the Ask (`Interaction`)
     /// control surface (design.md Decision 5). Shared as `Arc` so the runtime executor and the
@@ -993,7 +993,7 @@ impl HostControlPlaneBuilder {
             Some(rt) => rt,
             None => AgentRuntimeBuilder::new().plan_store(plan_store.clone()).build(),
         };
-        let capability_registry = runtime.capability_registry_snapshot();
+        let capability_registry = runtime.capability_registry_handle();
         let sessions_rwlock = runtime.sessions_handle();
         // PA-091：注册事件持久化通道（缓冲 + turn 终态 flush）。
         // 闭包按 (session_id, turn_id) 累积事件，终态（completed/failed/cancelled）时经
@@ -1152,7 +1152,7 @@ impl HostControlPlaneBuilder {
             graph_planner: self
                 .graph_planner
                 .unwrap_or_else(|| Box::new(DefaultGraphPlanner)),
-            capability_registry: RwLock::new(capability_registry),
+            capability_registry,
             frontend_diagnostics: FrontendDiagnosticsStore::new(
                 default_frontend_diagnostics_sqlite_path(),
             ),

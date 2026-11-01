@@ -449,11 +449,139 @@ pub trait ProviderClient {
     where
         F: FnMut(ProviderStreamChunk);
 
+    /// T9：带取消/时长守卫的流式决策。默认实现**忽略守卫**（测试替身无需实现），
+    /// 生产实现（`ProviderManager`）必须真正把守卫接进帧循环。
+    fn decide_with_tools_stream_guarded<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        guard: &ProviderStreamGuard<'_>,
+        on_delta: F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        let _ = guard;
+        self.decide_with_tools_stream(request, tools, on_delta)
+    }
+
+    /// T9：带守卫的流式工具跟进（同上：默认忽略守卫）。
+    fn continue_with_tool_result_stream_guarded<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        guard: &ProviderStreamGuard<'_>,
+        on_delta: F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        let _ = guard;
+        self.continue_with_tool_result_stream(
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            tool_call,
+            tool_result,
+            on_delta,
+        )
+    }
+
     /// 模型能力里的上下文窗口（tokens）。wave-54 C4：`llm.chat` 据此输出
     /// `gen_ai.usage.context_window` / `context_ratio`；无窗口能力 ⇒ `None`
     /// （禁止 0 占位）。默认实现返回 `None`，由具备能力信息的实现覆盖。
     fn context_window_tokens(&self) -> Option<u32> {
         None
+    }
+}
+
+/// T9（W56-A）：provider 流式读循环的**取消观测 + 总时长上界**守卫。
+///
+/// 背景：帧循环里此前既没有取消检查（`is_stop_requested` 在生产路径恒为 `|| false`），
+/// 也没有总时长上界 —— 只要上游持续吐字节，连接与 turn 就会被永久占用，`stop_turn`
+/// 的取消标志不被观测。
+///
+/// 设计约束：
+/// - 取消源**复用**既有 `ExecutionControlRegistry`（由 runtime 传入闭包），本结构不持有
+///   第二套取消状态；
+/// - 按 `cancel_tick` **节流**检查（默认 250ms），不是每个 chunk 都查，避免读循环热路径退化；
+/// - `max_elapsed` 是**总时长**上界（默认 30min 宽松有限），只在超限时以明确错误码退出，
+///   不静默截断正常的长推理流；
+/// - 可注入：测试可构造极短上界 / 可控取消闭包，无需 sleep 30 分钟。
+#[derive(Clone, Copy)]
+pub struct ProviderStreamGuard<'a> {
+    max_elapsed: Duration,
+    cancel_tick: Duration,
+    cancel_check: Option<&'a dyn Fn() -> bool>,
+}
+
+impl std::fmt::Debug for ProviderStreamGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderStreamGuard")
+            .field("max_elapsed", &self.max_elapsed)
+            .field("cancel_tick", &self.cancel_tick)
+            .field("has_cancel_check", &self.cancel_check.is_some())
+            .finish()
+    }
+}
+
+impl<'a> ProviderStreamGuard<'a> {
+    /// 缺省总时长上界：30min（宽松但有限）。
+    pub const DEFAULT_MAX_ELAPSED: Duration = Duration::from_secs(30 * 60);
+    /// 缺省取消检查节流间隔。
+    pub const DEFAULT_CANCEL_TICK: Duration = Duration::from_millis(250);
+    /// 超时错误码（调用方可按前缀分类；不是静默截断）。
+    pub const DEADLINE_ERROR_CODE: &'static str = "provider_stream_deadline_exceeded";
+    /// 取消错误码。
+    pub const CANCELLED_ERROR_CODE: &'static str = "provider_stream_cancelled";
+
+    /// 无取消观测、仅保留缺省时长上界的守卫（等价于"未接取消源"，用于测试/同步路径）。
+    pub fn without_cancel() -> ProviderStreamGuard<'static> {
+        ProviderStreamGuard {
+            max_elapsed: Self::DEFAULT_MAX_ELAPSED,
+            cancel_tick: Self::DEFAULT_CANCEL_TICK,
+            cancel_check: None,
+        }
+    }
+
+    /// 接既有取消源（runtime 传 `&ExecutionControlRegistry` 派生的闭包；不新造取消状态）。
+    pub fn with_cancel_check(cancel_check: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            max_elapsed: Self::DEFAULT_MAX_ELAPSED,
+            cancel_tick: Self::DEFAULT_CANCEL_TICK,
+            cancel_check: Some(cancel_check),
+        }
+    }
+
+    /// 全参构造（测试注入短上界 / 零节流 / 可控取消）。
+    pub fn new(
+        max_elapsed: Duration,
+        cancel_tick: Duration,
+        cancel_check: Option<&'a dyn Fn() -> bool>,
+    ) -> Self {
+        Self {
+            max_elapsed,
+            cancel_tick,
+            cancel_check,
+        }
+    }
+
+    pub fn max_elapsed(&self) -> Duration {
+        self.max_elapsed
+    }
+
+    pub fn cancel_tick(&self) -> Duration {
+        self.cancel_tick
+    }
+
+    /// 当前是否已请求取消（无取消源时恒 false，绝不静默当成"已取消"）。
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel_check.map(|check| check()).unwrap_or(false)
     }
 }
 
@@ -599,8 +727,28 @@ impl ProviderManager {
         }
     }
 
+    /// 无守卫版本（保持既有调用面与测试替身语义；取消与时长上界不生效）。
     pub fn decide_with_tools_stream<F>(
         &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        on_delta: F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        self.decide_with_tools_stream_bounded(
+            &ProviderStreamGuard::without_cancel(),
+            request,
+            tools,
+            on_delta,
+        )
+    }
+
+    /// T9：带守卫的流式决策 —— runtime 生产路径由此进入，取消/时长上界真正生效。
+    pub fn decide_with_tools_stream_bounded<F>(
+        &self,
+        guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         mut on_delta: F,
@@ -638,12 +786,12 @@ impl ProviderManager {
 
             match self.config.protocol {
                 ProviderProtocol::OpenAiCompletions => self
-                    .send_openai_tool_decision_stream_request(request, tools, &mut |chunk| {
+                    .send_openai_tool_decision_stream_request(guard, request, tools, &mut |chunk| {
                         streamed_any_delta = true;
                         on_delta(chunk);
                     }),
                 ProviderProtocol::OpenAiResponses => self
-                    .send_responses_tool_decision_stream_request(request, tools, &mut |chunk| {
+                    .send_responses_tool_decision_stream_request(guard, request, tools, &mut |chunk| {
                         streamed_any_delta = true;
                         on_delta(chunk);
                     }),
@@ -765,8 +913,37 @@ impl ProviderManager {
         }
     }
 
+    /// 无守卫版本（保持既有调用面与测试替身语义）。
     pub fn continue_with_tool_result_stream<F>(
         &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        on_delta: F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        self.continue_with_tool_result_stream_bounded(
+            &ProviderStreamGuard::without_cancel(),
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            tool_call,
+            tool_result,
+            on_delta,
+        )
+    }
+
+    /// T9：带守卫的流式工具跟进（runtime 生产路径）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_with_tool_result_stream_bounded<F>(
+        &self,
+        guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
@@ -840,6 +1017,7 @@ impl ProviderManager {
                         let stream_fn_result = match self.config.protocol {
                             ProviderProtocol::OpenAiResponses => self
                                 .send_responses_tool_followup_stream_request(
+                                    guard,
                                     request,
                                     tools,
                                     accumulated_messages,
@@ -852,6 +1030,7 @@ impl ProviderManager {
                                     },
                                 ),
                             _ => self.send_openai_tool_followup_stream_request(
+                                guard,
                                 request,
                                 tools,
                                 accumulated_messages,
@@ -918,6 +1097,7 @@ impl ProviderManager {
             }
             ProviderProtocol::AnthropicMessages => self
                 .send_anthropic_tool_followup_stream_request(
+                    guard,
                     request,
                     tools,
                     accumulated_messages,
@@ -1008,6 +1188,7 @@ impl ProviderManager {
 
     fn send_openai_tool_followup_stream_request<F>(
         &self,
+        guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
@@ -1066,7 +1247,7 @@ impl ProviderManager {
             preview_json(&body, 1600)
         ));
 
-        self.stream_openai_request(&endpoint, &body, request, on_delta)
+        self.stream_openai_request(guard, &endpoint, &body, request, on_delta)
     }
 
     fn send_anthropic_tool_followup_request(
@@ -1142,6 +1323,7 @@ impl ProviderManager {
 
     fn send_anthropic_tool_followup_stream_request<F>(
         &self,
+        guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
@@ -1184,7 +1366,7 @@ impl ProviderManager {
             preview_json(&body, 1600)
         ));
 
-        self.stream_anthropic_request(&endpoint, &body, request, on_delta)
+        self.stream_anthropic_request(guard, &endpoint, &body, request, on_delta)
     }
 
     // ------------------------------------------------------------------
@@ -1241,6 +1423,7 @@ impl ProviderManager {
 
     fn send_responses_tool_decision_stream_request<F>(
         &self,
+        guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         on_delta: &mut F,
@@ -1265,6 +1448,7 @@ impl ProviderManager {
             Instant::now(),
             &endpoint,
             on_delta,
+            guard,
         )?;
         finalize_responses_stream_message(message, "decision", request).map(
             |(output_text, tool_call, reasoning_content, reasoning_content_value, token_usage)| {
@@ -1366,6 +1550,7 @@ impl ProviderManager {
 
     fn send_responses_tool_followup_stream_request<F>(
         &self,
+        guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
@@ -1399,6 +1584,7 @@ impl ProviderManager {
             Instant::now(),
             &endpoint,
             on_delta,
+            guard,
         )?;
         finalize_responses_stream_message(message, "followup", request).map(
             |(output_text, tool_call, reasoning_content, reasoning_content_value, token_usage)| {
@@ -1430,6 +1616,7 @@ impl ProviderManager {
 
     fn stream_openai_request<F>(
         &self,
+        guard: &ProviderStreamGuard<'_>,
         endpoint: &str,
         body: &Value,
         request: &ProviderRequest,
@@ -1440,7 +1627,13 @@ impl ProviderManager {
     {
         let response = self.post_openai_stream_response(endpoint, body)?;
         let message =
-            collect_openai_sse_message_from_response(response, Instant::now(), endpoint, on_delta)?;
+            collect_openai_sse_message_from_response(
+                response,
+                Instant::now(),
+                endpoint,
+                on_delta,
+                guard,
+            )?;
         let output_text = message.output_text.clone();
         let token_usage = message
             .token_usage
@@ -1572,6 +1765,7 @@ impl ProviderManager {
 
     fn stream_anthropic_request<F>(
         &self,
+        guard: &ProviderStreamGuard<'_>,
         endpoint: &str,
         body: &Value,
         request: &ProviderRequest,
@@ -1583,7 +1777,13 @@ impl ProviderManager {
         let started_at = Instant::now();
         let response = self.post_anthropic_stream_response(endpoint, body)?;
         let message =
-            collect_anthropic_sse_message_from_response(response, started_at, endpoint, on_delta)?;
+            collect_anthropic_sse_message_from_response(
+                response,
+                started_at,
+                endpoint,
+                on_delta,
+                guard,
+            )?;
 
         let output_text = message.output_text;
         let reasoning_content = message.reasoning_content;
@@ -1696,6 +1896,7 @@ impl ProviderManager {
 
     fn send_openai_tool_decision_stream_request<F>(
         &self,
+        guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         on_delta: &mut F,
@@ -1752,6 +1953,7 @@ impl ProviderManager {
             Instant::now(),
             &endpoint,
             on_delta,
+            guard,
         )?;
         let output_text = message.output_text.clone();
         let tool_call = message.tool_call.clone();
@@ -2036,6 +2238,45 @@ impl ProviderClient for ProviderManager {
         self.requested_name()
     }
 
+    fn decide_with_tools_stream_guarded<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        guard: &ProviderStreamGuard<'_>,
+        on_delta: F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        self.decide_with_tools_stream_bounded(guard, request, tools, on_delta)
+    }
+
+    fn continue_with_tool_result_stream_guarded<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        guard: &ProviderStreamGuard<'_>,
+        on_delta: F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        self.continue_with_tool_result_stream_bounded(
+            guard,
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            tool_call,
+            tool_result,
+            on_delta,
+        )
+    }
+
     fn name(&self) -> &str {
         self.name()
     }
@@ -2267,6 +2508,7 @@ fn collect_anthropic_sse_message_from_response<F>(
     started_at: Instant,
     endpoint: &str,
     on_delta: &mut F,
+    guard: &ProviderStreamGuard<'_>,
 ) -> Result<AnthropicStreamMessage, String>
 where
     F: FnMut(ProviderStreamChunk),
@@ -2434,10 +2676,40 @@ where
         Ok(())
     };
 
+    let mut last_cancel_check = started_at;
+    let mut parsed_bytes: usize = 0;
     loop {
+        // T9：①总时长上界 ②按 tick 节流的取消观测（与 openai/responses 帧骨架同口径）。
+        let elapsed = started_at.elapsed();
+        if elapsed > guard.max_elapsed() {
+            return Err(format!(
+                "{}: provider 流总时长超限; elapsed={}ms; max_elapsed={}ms; parsed_bytes={}; endpoint={}",
+                ProviderStreamGuard::DEADLINE_ERROR_CODE,
+                elapsed.as_millis(),
+                guard.max_elapsed().as_millis(),
+                parsed_bytes,
+                endpoint,
+            ));
+        }
+        let now = Instant::now();
+        if guard.cancel_tick().is_zero() || now.duration_since(last_cancel_check) >= guard.cancel_tick()
+        {
+            last_cancel_check = now;
+            if guard.cancel_requested() {
+                return Err(format!(
+                    "{}: SSE 流已按请求中止 (stop_requested); elapsed={}ms; parsed_bytes={}; endpoint={}",
+                    ProviderStreamGuard::CANCELLED_ERROR_CODE,
+                    started_at.elapsed().as_millis(),
+                    parsed_bytes,
+                    endpoint,
+                ));
+            }
+        }
+
         match block_on(stream.next()) {
             Some(Ok(bytes)) => {
                 let chunk_len = bytes.len();
+                parsed_bytes += chunk_len;
                 for &byte in bytes.iter() {
                     if byte == b'\n' {
                         let line_str = String::from_utf8_lossy(&line_buf);

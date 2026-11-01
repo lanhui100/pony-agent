@@ -206,6 +206,38 @@ impl CompositeToolHandler for BatchExecuteComposite {
             });
         }
 
+        // W56-B（task-10）：**整体预校验** —— 在派发任何子调用之前，先把每个子调用解析成
+        // 描述符并对齐本批量的允许子集合（`allowed_child_ids`）。只要有一个子调用不可派发，
+        // 整批立即判否（零派发、零副作用、`results` 缺省），杜绝"前 N-1 个已执行、第 N 个才报错"
+        // 的部分执行语义。错误码复用既有的 `child_not_allowed` 家族，不新造码。
+        //
+        // 注意：这里**不**按授权模式一刀切 —— `read_only` 下纯只读批量仍应正常执行。
+        let allowed_child_ids = children.allowed_child_ids();
+        let mut rejected_children: Vec<String> = Vec::new();
+        for request in &child_requests {
+            match children.registry().resolve(&request.descriptor_id) {
+                Some(descriptor) => {
+                    let descriptor_id = descriptor.identity.descriptor_id.as_str();
+                    if !allowed_child_ids.contains(descriptor_id) {
+                        rejected_children.push(format!(
+                            "`{}`（解析为 `{descriptor_id}`，不在本批量的允许子集合内）",
+                            request.descriptor_id
+                        ));
+                    }
+                }
+                None => rejected_children.push(format!(
+                    "`{}`（未注册的工具描述符，无法预校验）",
+                    request.descriptor_id
+                )),
+            }
+        }
+        if !rejected_children.is_empty() {
+            return Err(format!(
+                "child_not_allowed: workspace_batch 整体预校验失败，未派发任何子调用（零执行）：{}",
+                rejected_children.join("；")
+            ));
+        }
+
         let plan = build_batch_tool_plan(&child_requests, parallel, continue_on_error);
         let entries = if parallel {
             let results = children.dispatch_many(child_requests)?;

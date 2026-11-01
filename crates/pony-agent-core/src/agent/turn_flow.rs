@@ -2566,6 +2566,28 @@ pub fn provider_decision_stream<P, F>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
+    on_delta: F,
+) -> Result<ProviderDecision, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    // 无守卫版本：保持既有公开签名（既有调用方/测试夹具不受影响）。
+    provider_decision_stream_guarded(
+        provider,
+        request,
+        tools,
+        &crate::agent::provider::ProviderStreamGuard::without_cancel(),
+        on_delta,
+    )
+}
+
+/// T9：带取消/时长守卫的流式决策（runtime 生产路径由此进入）。
+pub fn provider_decision_stream_guarded<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    guard: &crate::agent::provider::ProviderStreamGuard<'_>,
     mut on_delta: F,
 ) -> Result<ProviderDecision, String>
 where
@@ -2581,7 +2603,7 @@ where
     );
     let start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;
-    let result = provider.decide_with_tools_stream(request, tools, |chunk| {
+    let result = provider.decide_with_tools_stream_guarded(request, tools, guard, |chunk| {
         if first_token_time.is_none() {
             first_token_time = Some(std::time::Instant::now());
         }

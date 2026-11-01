@@ -179,6 +179,7 @@ pub(crate) fn collect_openai_sse_message_from_response<F>(
     started_at: Instant,
     endpoint: &str,
     on_delta: &mut F,
+    guard: &ProviderStreamGuard<'_>,
 ) -> Result<OpenAiStreamMessage, String>
 where
     F: FnMut(ProviderStreamChunk),
@@ -190,7 +191,11 @@ where
     let mut finished: Option<Result<OpenAiStreamMessage, String>> = None;
 
     let read_result =
-        super::responses_api::sse_data_line_reader(response, started_at, endpoint, |data| {
+        super::responses_api::sse_data_line_reader_with_guard(
+            response,
+            started_at,
+            endpoint,
+            |data| {
             let acc = accumulator
                 .as_mut()
                 .expect("accumulator present until [DONE] finish");
@@ -207,7 +212,9 @@ where
                 return Ok(true);
             }
             Ok(false)
-        });
+            },
+            guard,
+        );
 
     match finished {
         Some(result) => result,

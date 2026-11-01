@@ -30,10 +30,11 @@
 
 建议：抽出统一 `TurnLoop`，sync 实现为"stream + 收集型 sink"；删除 `turn_runner.rs` 的重复函数。
 
-补充（wave-55 L3-P 复核发现）：provider 流式读循环（`provider/mod.rs` ~2436 起的 `block_on(stream.next())`）内部
-**既无取消检查也无总时长上界**——只要持续有字节到达，连接与 turn 可长期占用；`stop_turn` 的取消标志不会在
-该循环内被观测。这是「取消语义名不副实」的最具体落点，与 `.dev-team/nfr-baseline.json` 的
-`external_call_timeout_exceptions[0].known_gap_ref` 指同一事实。
+补充（wave-55 L3-P 复核发现，**wave-56 已闭环**）：provider 流式读循环内既无取消检查也无总时长上界的问题，
+已由 `ProviderStreamGuard`（`provider/mod.rs` L517-545）修掉：180s 读空闲 + 30min 可注入总时长上界 +
+每 250ms 观测既有取消源（`ExecutionControl::is_stop_requested`，接线于 `runtime/turn_stream.rs:1659`），
+超限分别以 `provider_stream_deadline_exceeded` / `provider_stream_cancelled` 退出。
+**仍待办**：sync 路径（`turn_sync.rs`）零取消检查问题未动（本波只覆盖流式路径）。
 
 ## 4. TS/Rust 契约手写（P1）
 

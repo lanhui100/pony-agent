@@ -833,6 +833,8 @@ export type TurnInput = {
   images?: TurnInputImage[];
   /** Workspace 归属（PA-079）：携带时在会话首次持久化盖章 */
   workspaceId?: string | null;
+  /** W36 / PA-141 审批证据 */
+  planExecutionApproval?: Record<string, unknown> | null;
 };
 
 export type TurnHistoryMessage = {

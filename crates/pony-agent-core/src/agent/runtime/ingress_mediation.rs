@@ -13,6 +13,8 @@ impl AgentRuntime {
             })
             .persist_mcp_source_snapshot(snapshot.clone());
         self.capability_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .replace_mcp_source_snapshot(snapshot);
     }
 
@@ -46,6 +48,8 @@ impl AgentRuntime {
             })
             .persist_skill_source_snapshot(snapshot.clone());
         self.capability_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .replace_skill_source_snapshot(snapshot)
     }
 
@@ -67,7 +71,11 @@ impl AgentRuntime {
     }
 
     pub fn capability_registry_snapshot(&self) -> CapabilityRegistry {
-        self.capability_registry.clone()
+        self.capability_registry.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn capability_registry_handle(&self) -> Arc<RwLock<CapabilityRegistry>> {
+        Arc::clone(&self.capability_registry)
     }
 
     pub fn register_hook_descriptor(
@@ -434,7 +442,7 @@ impl AgentRuntime {
         &self,
         capability_id: &str,
     ) -> Option<crate::agent::capability_bridge::CapabilityView> {
-        self.capability_registry.inspect_capability(capability_id)
+        self.capability_registry.read().unwrap_or_else(|e| e.into_inner()).inspect_capability(capability_id)
     }
 
     #[cfg(test)]
@@ -442,7 +450,7 @@ impl AgentRuntime {
         &self,
         source_id: &str,
     ) -> Option<crate::agent::capability_bridge::CapabilitySourceView> {
-        self.capability_registry.inspect_source(source_id)
+        self.capability_registry.read().unwrap_or_else(|e| e.into_inner()).inspect_source(source_id)
     }
 
     #[cfg(test)]
@@ -450,7 +458,7 @@ impl AgentRuntime {
         &self,
         skill_id: &str,
     ) -> Option<crate::agent::capability_bridge::SkillDescriptor> {
-        self.capability_registry.inspect_skill(skill_id)
+        self.capability_registry.read().unwrap_or_else(|e| e.into_inner()).inspect_skill(skill_id)
     }
 
     #[cfg(test)]
@@ -458,7 +466,7 @@ impl AgentRuntime {
         &self,
         source_id: &str,
     ) -> Option<crate::agent::capability_bridge::SkillSourceView> {
-        self.capability_registry.inspect_skill_source(source_id)
+        self.capability_registry.read().unwrap_or_else(|e| e.into_inner()).inspect_skill_source(source_id)
     }
 
     #[cfg(test)]
@@ -466,11 +474,11 @@ impl AgentRuntime {
         &mut self,
         capability: crate::agent::capability_bridge::CapabilityView,
     ) {
-        self.capability_registry.register_mcp_capability(capability);
+        self.capability_registry.write().unwrap_or_else(|e| e.into_inner()).register_mcp_capability(capability);
     }
 
     #[cfg(test)]
     pub fn remove_mcp_source_for_test(&mut self, source_id: &str) {
-        self.capability_registry.remove_source_for_test(source_id);
+        self.capability_registry.write().unwrap_or_else(|e| e.into_inner()).remove_source_for_test(source_id);
     }
 }

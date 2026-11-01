@@ -12,30 +12,18 @@ use super::*;
 /// 公共 SSE 帧阅读器：字节缓冲 / 1MB 行上限 / `data:` 前缀提取 / 尾行冲刷 /
 /// 流错误与解析错误的 elapsed 包装。`on_data_line` 返回 `Ok(true)` 表示提前结束
 /// （如 `[DONE]` 或终态事件），阅读器随即停止读取。
-pub(crate) fn sse_data_line_reader<F>(
+/// T9：带「取消 + 总时长上界」守卫的帧阅读器（生产路径入口）。
+pub(crate) fn sse_data_line_reader_with_guard<F>(
     response: reqwest::Response,
     started_at: Instant,
     endpoint: &str,
     on_data_line: F,
+    guard: &ProviderStreamGuard<'_>,
 ) -> Result<(), String>
 where
     F: FnMut(&str) -> Result<bool, String>,
 {
-    sse_data_line_reader_with_stop_checker(response, started_at, endpoint, on_data_line, || false)
-}
-
-pub(crate) fn sse_data_line_reader_with_stop_checker<F, S>(
-    response: reqwest::Response,
-    started_at: Instant,
-    endpoint: &str,
-    on_data_line: F,
-    is_stop_requested: S,
-) -> Result<(), String>
-where
-    F: FnMut(&str) -> Result<bool, String>,
-    S: FnMut() -> bool,
-{
-    read_sse_data_lines_with_stop_checker(
+    read_sse_data_lines_with_guard(
         BlockingChunks {
             stream: response.bytes_stream(),
             _marker: std::marker::PhantomData,
@@ -43,7 +31,7 @@ where
         started_at,
         endpoint,
         on_data_line,
-        is_stop_requested,
+        guard,
     )
 }
 
@@ -86,11 +74,14 @@ where
     read_sse_data_lines_with_stop_checker(chunks, started_at, endpoint, on_data_line, || false)
 }
 
+/// 兼容入口（既有单测/`read_sse_data_lines` 使用）：无总时长上界 + 零节流 ⇒
+/// 保持"每 chunk 检查取消"的历史语义；生产路径一律走 [`read_sse_data_lines_with_guard`]。
+#[allow(dead_code)]
 fn read_sse_data_lines_with_stop_checker<I, B, E, F, S>(
-    mut chunks: I,
+    chunks: I,
     started_at: Instant,
     endpoint: &str,
-    mut on_data_line: F,
+    on_data_line: F,
     mut is_stop_requested: S,
 ) -> Result<(), String>
 where
@@ -100,17 +91,98 @@ where
     F: FnMut(&str) -> Result<bool, String>,
     S: FnMut() -> bool,
 {
+    read_sse_data_lines_with_bounds(
+        chunks,
+        started_at,
+        endpoint,
+        on_data_line,
+        Duration::MAX,
+        Duration::ZERO,
+        &mut is_stop_requested,
+    )
+}
+
+/// T9：守卫入口 —— 由 `ProviderStreamGuard` 提供上界与节流参数。
+fn read_sse_data_lines_with_guard<I, B, E, F>(
+    chunks: I,
+    started_at: Instant,
+    endpoint: &str,
+    on_data_line: F,
+    guard: &ProviderStreamGuard<'_>,
+) -> Result<(), String>
+where
+    I: Iterator<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+    F: FnMut(&str) -> Result<bool, String>,
+{
+    let mut cancel_requested = || guard.cancel_requested();
+    read_sse_data_lines_with_bounds(
+        chunks,
+        started_at,
+        endpoint,
+        on_data_line,
+        guard.max_elapsed(),
+        guard.cancel_tick(),
+        &mut cancel_requested,
+    )
+}
+
+/// T9 帧循环核心：在既有帧骨架之上补两类守卫。
+///
+/// - **总时长上界**：`elapsed > max_elapsed` ⇒ 以 `provider_stream_deadline_exceeded` 退出，
+///   错误信息含已用时长 / 上界 / 已产出字节；只在超限时触发，正常长推理流不受影响。
+/// - **取消观测**：按 `cancel_tick` 节流检查取消源（缺省 250ms 一次），命中即以
+///   `provider_stream_cancelled` 退出；`Duration::ZERO` 等价于每 chunk 检查。
+#[allow(clippy::too_many_arguments)]
+fn read_sse_data_lines_with_bounds<I, B, E, F>(
+    mut chunks: I,
+    started_at: Instant,
+    endpoint: &str,
+    mut on_data_line: F,
+    max_elapsed: Duration,
+    cancel_tick: Duration,
+    cancel_requested: &mut dyn FnMut() -> bool,
+) -> Result<(), String>
+where
+    I: Iterator<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+    F: FnMut(&str) -> Result<bool, String>,
+{
     let mut line_buf: Vec<u8> = Vec::new();
     let mut total_bytes: usize = 0;
+    let mut last_cancel_check = started_at;
 
     loop {
-        if is_stop_requested() {
+        // ① 总时长上界（宽松但有限；超限才断，错误信息带证据）。
+        let elapsed = started_at.elapsed();
+        if elapsed > max_elapsed {
             return Err(format!(
-                "SSE 流已按请求中止 (stop_requested); elapsed={}ms; parsed_bytes={}; endpoint={}",
-                started_at.elapsed().as_millis(),
+                "{}: provider 流总时长超限; elapsed={}ms; max_elapsed={}ms; parsed_bytes={}; endpoint={}",
+                ProviderStreamGuard::DEADLINE_ERROR_CODE,
+                elapsed.as_millis(),
+                max_elapsed.as_millis(),
                 total_bytes,
                 endpoint,
             ));
+        }
+
+        // ② 取消观测（按 tick 节流，避免热路径每 chunk 都查）。
+        let now = Instant::now();
+        let tick_due = cancel_tick.is_zero()
+            || now.duration_since(last_cancel_check) >= cancel_tick;
+        if tick_due {
+            last_cancel_check = now;
+            if cancel_requested() {
+                return Err(format!(
+                    "{}: SSE 流已按请求中止 (stop_requested); elapsed={}ms; parsed_bytes={}; endpoint={}",
+                    ProviderStreamGuard::CANCELLED_ERROR_CODE,
+                    started_at.elapsed().as_millis(),
+                    total_bytes,
+                    endpoint,
+                ));
+            }
         }
 
         match chunks.next() {
@@ -466,6 +538,7 @@ pub(crate) fn collect_responses_sse_message_from_response<F>(
     started_at: Instant,
     endpoint: &str,
     on_delta: &mut F,
+    guard: &ProviderStreamGuard<'_>,
 ) -> Result<ResponsesStreamMessage, String>
 where
     F: FnMut(ProviderStreamChunk),
@@ -474,7 +547,7 @@ where
     let mut accumulator = Some(ResponsesSseAccumulator::default());
     let mut finished: Option<Result<ResponsesStreamMessage, String>> = None;
 
-    let read_result = sse_data_line_reader(response, started_at, endpoint, |data| {
+    let read_result = sse_data_line_reader_with_guard(response, started_at, endpoint, |data| {
         let acc = accumulator
             .as_mut()
             .expect("accumulator present until terminal finish");
@@ -484,7 +557,7 @@ where
             return Ok(true);
         }
         Ok(false)
-    });
+    }, guard);
 
     match finished {
         Some(result) => result,
@@ -878,6 +951,117 @@ pub(crate) fn parse_responses_output(payload: &Value) -> Result<ResponsesSyncOut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── T9（W56-A）守卫 seam：取消观测 / 总时长上界 ───────────────────────────────────
+    //
+    // 用内存 chunk 序列 + 可注入闭包驱动帧循环，**不 sleep 30 分钟**、不依赖网络。
+
+    /// 每 20ms 到达一个 chunk 的假流（用 TcpListener 的替代物：直接的手工迭代器）。
+    struct CountingChunks {
+        remaining: usize,
+        bytes: &'static [u8],
+    }
+
+    impl Iterator for CountingChunks {
+        type Item = Result<&'static [u8], String>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.remaining == 0 {
+                return None;
+            }
+            self.remaining -= 1;
+            // 每个 chunk 睡 5ms，模拟真实字节到达节奏（总时长足以跨越 tick 节流窗口）。
+            std::thread::sleep(Duration::from_millis(5));
+            Some(Ok(self.bytes))
+        }
+    }
+
+    fn drain_lines(chunks: CountingChunks) -> Result<usize, String> {
+        let mut lines = 0usize;
+        read_sse_data_lines_with_bounds(
+            chunks,
+            Instant::now(),
+            "https://example.invalid/sse",
+            |_data| {
+                lines += 1;
+                Ok(false)
+            },
+            Duration::from_secs(30),
+            Duration::from_millis(20),
+            &mut || false,
+        )?;
+        Ok(lines)
+    }
+
+    #[test]
+    fn t9_stream_guard_cancel_mid_stream_is_observed() {
+        // 取消源：第 3 次检查后变为"已取消"（复用闭包注入，不新造取消状态）。
+        let checks = std::cell::Cell::new(0usize);
+        let mut cancel = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 3
+        };
+        let chunks = CountingChunks {
+            remaining: 200,
+            bytes: b"data: {}\n\n",
+        };
+        let error = read_sse_data_lines_with_bounds(
+            chunks,
+            Instant::now(),
+            "https://example.invalid/sse",
+            |_data| Ok(false),
+            Duration::from_secs(30),
+            Duration::from_millis(1),
+            &mut cancel,
+        )
+        .expect_err("取消必须在流中途生效");
+        assert!(
+            error.starts_with(ProviderStreamGuard::CANCELLED_ERROR_CODE),
+            "取消必须以明确错误码退出，实际 {error}"
+        );
+        assert!(
+            error.contains("parsed_bytes=") && error.contains("elapsed="),
+            "取消错误信息必须带已用时长与产出字节，实际 {error}"
+        );
+    }
+
+    #[test]
+    fn t9_stream_guard_total_elapsed_bound_exits_with_evidence() {
+        let chunks = CountingChunks {
+            remaining: 200,
+            bytes: b"data: {}\n\n",
+        };
+        let error = read_sse_data_lines_with_bounds(
+            chunks,
+            Instant::now(),
+            "https://example.invalid/sse",
+            |_data| Ok(false),
+            // 注入极短上界（真实缺省是宽松的 30min）。
+            Duration::ZERO,
+            Duration::from_millis(1),
+            &mut || false,
+        )
+        .expect_err("超过总时长上界必须退出");
+        assert!(
+            error.starts_with(ProviderStreamGuard::DEADLINE_ERROR_CODE),
+            "上界必须以明确错误码退出，实际 {error}"
+        );
+        assert!(
+            error.contains("max_elapsed=") && error.contains("parsed_bytes="),
+            "上界错误信息必须带上界与产出字节，实际 {error}"
+        );
+    }
+
+    #[test]
+    fn t9_stream_guard_without_cancel_source_keeps_reading() {
+        // 无取消源 + 宽松上界 ⇒ 必须正常读完（防止把守卫写成"总是取消"）。
+        let lines = drain_lines(CountingChunks {
+            remaining: 5,
+            bytes: b"data: {}\n\n",
+        })
+        .expect("无取消源时必须正常读完");
+        assert_eq!(lines, 5, "5 个 data 行都必须被消费");
+    }
 
     #[test]
     fn responses_request_body_uses_store_false_and_flat_tool_names() {

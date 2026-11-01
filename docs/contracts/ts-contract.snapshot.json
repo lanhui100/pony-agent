@@ -1,0 +1,108 @@
+{
+  "generatedBy": "cargo test -p pony-agent-core --test ts_contract_snapshot (UPDATE_CONTRACT_SNAPSHOT=1)",
+  "notes": [
+    "键名来自 serde_json::to_value 的真实输出，禁止手工编辑本文件。",
+    "tsDeclarations 指向 TS 侧声明文件；检查脚本只报「Rust 有、TS 无」的漏声明。"
+  ],
+  "schemaVersion": 1,
+  "tsDeclarations": {
+    "TurnInput": "src/types/runtime.ts",
+    "TurnResult": "src/types/runtime.ts",
+    "TurnStreamEvent": "src/types/runtime.ts"
+  },
+  "types": {
+    "TurnInput": {
+      "rustSource": "crates/pony-agent-core/src/agent/runtime/types.rs:TurnInput",
+      "serdeKeys": [
+        "displayMessage",
+        "history",
+        "images",
+        "message",
+        "modelId",
+        "nodeId",
+        "planExecutionApproval",
+        "providerId",
+        "reasoningEffort",
+        "sessionId",
+        "toolAuthorizationMode",
+        "workspaceId",
+        "workspaceMode"
+      ]
+    },
+    "TurnResult": {
+      "rustSource": "crates/pony-agent-core/src/agent/runtime/types.rs:TurnResult",
+      "serdeKeys": [
+        "assistantMessage",
+        "buildContextObservation",
+        "cacheHitInputTokens",
+        "emittedAtMs",
+        "eventId",
+        "eventType",
+        "eventVersion",
+        "fallbackReason",
+        "firstTokenLatencyMs",
+        "hookTraceRecords",
+        "inputTokens",
+        "outputTokens",
+        "phase",
+        "providerCallRecords",
+        "providerMode",
+        "providerModel",
+        "providerName",
+        "providerProtocol",
+        "providerRequestedName",
+        "providerSource",
+        "reasoningTokens",
+        "sequence",
+        "sessionSummary",
+        "toolActivities",
+        "totalTokens",
+        "traceSteps",
+        "traceTimeline",
+        "turnDurationMs",
+        "userMessage"
+      ]
+    },
+    "TurnStreamEvent": {
+      "rustSource": "crates/pony-agent-core/src/agent/runtime/types.rs:TurnStreamEvent",
+      "serdeKeys": [
+        "buildContextObservation",
+        "cacheHitInputTokens",
+        "costUsd",
+        "emittedAtMs",
+        "error",
+        "eventId",
+        "eventType",
+        "eventVersion",
+        "fallbackReason",
+        "firstTokenLatencyMs",
+        "hookTraceRecords",
+        "inputTokens",
+        "kind",
+        "outputTokens",
+        "phase",
+        "providerCallRecords",
+        "providerMode",
+        "providerModel",
+        "providerName",
+        "providerProtocol",
+        "providerRequestedName",
+        "providerSource",
+        "reasoningContent",
+        "reasoningTokens",
+        "sequence",
+        "sessionId",
+        "sessionSummary",
+        "step",
+        "text",
+        "toolActivities",
+        "totalTokens",
+        "traceId",
+        "traceSteps",
+        "traceTimeline",
+        "turnDurationMs",
+        "turnId"
+      ]
+    }
+  }
+}

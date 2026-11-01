@@ -115,7 +115,9 @@ describe("wave-18b C6: .env.example 部署配置模板", () => {
     expect(content.includes("PONYSENTRY_BUILD_CLIENT_TOKEN")).toBe(true);
   });
 
-  it("C6-6 `.env.example` 本身不得触发 secret 门禁（全仓扫描中零违规）", () => {
+  // 该用例 spawn 全仓 secret 扫描（`runChecks({mode:"all"})`），CI/并发负载下会超过默认 5s；
+  // 显式放宽到 30s（只放宽超时，断言与覆盖不变）。
+  it("C6-6 `.env.example` 本身不得触发 secret 门禁（全仓扫描中零违规）", { timeout: 30_000 }, () => {
     // Arrange / Act
     const violations = runChecks({ mode: "all" });
     const offenders = violations

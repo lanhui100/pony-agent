@@ -72,7 +72,9 @@ pub(super) fn is_registry_tool_search_name(name: &str) -> bool {
 }
 
 
-#[derive(Clone, Deserialize)]
+// wave-56：补 `Serialize`（additive）——契约快照门禁需要把入参形状纳入序列化校验；
+// 反序列化语义（camelCase + 各字段 `#[serde(default)]`）保持不变。
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnInput {
     pub message: String,

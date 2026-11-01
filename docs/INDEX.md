@@ -7,12 +7,14 @@
 - [设计基础](design-foundations.md)
 - [仓库对比索引](repo-comparison-index.md)
 - [Spec 运行时历史一致性](spec-runtime-history-consistency.md)
+- [TS/Rust 契约快照与漂移门禁](contracts/README.md)
 - [上下文紧缩原则](context-compaction-principles.md)
 - [Codex / Hermes / Claude Code 对比说明](codex-hermes-claude-code-对比说明.md)
 
 ## 2. 架构
 
 - [架构总览](architecture/overview.md)
+- [结构性技术债提案](architecture/structural-debt-proposals.md)（已机器复核存在、按波次推进的实施清单与拆分轴）
 - [架构术语表](architecture/terminology.md)
 - [Context/State 子系统 V1](architecture/context-state-subsystem.md)
 - [Rust 运行时设计](architecture/runtime.md)
