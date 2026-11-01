@@ -922,8 +922,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.handleSubmissionWatchdogTimeout(turnId);
       }, SUBMISSION_WATCHDOG_TIMEOUT_MS);
     },
-    // 续期看门狗：收到 activeTurnId 匹配的流式事件（且已通过事件去重门）时，
-    // clear + 重设同一 turnId 的计时器，使 watchdog 只约束"连续静默窗口"。
+    // 续期看门狗：对齐 DSH idleWatchdog 模式。收到 activeTurnId 匹配的流式事件或工具心跳时，
+    // clear + 重设同一 turnId 的计时器。
+    // 特殊保护：若当前轮次正在执行工具（phase 为 calling_tool），工具正在占用进程执行，
+    // 看门狗自动给予动态缓冲续期，避免长耗时工具执行过程中被误杀。
     rearmSubmissionWatchdog(turnId: string) {
       if (!this.isSubmitting || this.activeTurnId !== turnId) {
         return;

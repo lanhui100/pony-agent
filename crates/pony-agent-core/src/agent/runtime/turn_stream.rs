@@ -433,33 +433,36 @@ impl AgentRuntime {
                 return;
             }
 
-            // Only abort the turn if the tool was intentionally stopped (e.g. user cancellation).
             // Tool execution errors (status "error") are fed back to the model so it can
             // decide how to respond — e.g. try a different path, use another tool, or
             // explain the problem to the user.
+            // 优化：仅当明确由用户请求取消（如 control.should_cancel_turn）时才判死 turn；
+            // 普通子工具超时或中断（如 timeout / interrupted）转为结构化错误反馈给模型，而非直接崩溃整个 turn。
             if tool_result.status == "aborted" {
-                let error = build_tool_execution_error(
-                    &current_tool_call.name,
-                    tool_result.output.as_str(),
-                );
-                self.fail_stream_turn_with_hook_dispatch(
-                    sink,
-                    control,
-                    input.session_id.as_deref(),
-                    turn_id,
-                    display_message,
-                    Some(provider_meta),
-                    Some(context_observation.clone()),
-                    self.telemetry_builder.failed_trace_after_tool(false),
-                    tool_activities.clone(),
-                    provider_call_records.clone(),
-                    hook_trace_records.clone(),
-                    first_token_latency.get(),
-                    Some(turn_started_at.elapsed().as_millis() as u64),
-                    completed_hops,
-                    error,
-                );
-                return;
+                if self.should_cancel_turn(control, turn_id) {
+                    let error = build_tool_execution_error(
+                        &current_tool_call.name,
+                        tool_result.output.as_str(),
+                    );
+                    self.fail_stream_turn_with_hook_dispatch(
+                        sink,
+                        control,
+                        input.session_id.as_deref(),
+                        turn_id,
+                        display_message,
+                        Some(provider_meta),
+                        Some(context_observation.clone()),
+                        self.telemetry_builder.failed_trace_after_tool(false),
+                        tool_activities.clone(),
+                        provider_call_records.clone(),
+                        hook_trace_records.clone(),
+                        first_token_latency.get(),
+                        Some(turn_started_at.elapsed().as_millis() as u64),
+                        completed_hops,
+                        error,
+                    );
+                    return;
+                }
             }
 
             // Consecutive-failure stop-loss: the same tool failing with the same error code
