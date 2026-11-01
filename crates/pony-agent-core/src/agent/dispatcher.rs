@@ -70,6 +70,9 @@ pub struct DispatchContext {
     /// 绑定 `(session_id, plan_id)` 并带 TTL（`now_ms < expires_at_ms` 才有效，C-141-4/5）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_execution_approval: Option<PlanExecutionApproval>,
+    /// 前端传入的授权模式：read_only | workspace_write | full_access
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_authorization_mode: Option<String>,
 }
 
 /// 宿主审批证据（PA-141，C-141-1 serde 形状冻结：camelCase）。
@@ -94,6 +97,7 @@ impl Default for DispatchContext {
             workspace_root: None,
             host_control_available: true,
             plan_execution_approval: None,
+            tool_authorization_mode: None,
         }
     }
 }

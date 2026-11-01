@@ -185,6 +185,7 @@ fn turn_input(message: &str, session_id: &str) -> TurnInput {
         images: Vec::new(),
         workspace_id: None,
         plan_execution_approval: None,
+        tool_authorization_mode: None,
     }
 }
 

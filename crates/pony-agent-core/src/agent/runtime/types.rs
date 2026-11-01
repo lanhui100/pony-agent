@@ -81,6 +81,8 @@ pub struct TurnInput {
     pub model_id: Option<String>,
     pub reasoning_effort: Option<ProviderReasoningEffort>,
     pub workspace_mode: Option<String>,
+    #[serde(default)]
+    pub tool_authorization_mode: Option<String>,
     pub session_id: Option<String>,
     pub node_id: Option<String>,
     #[serde(default)]

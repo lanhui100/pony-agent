@@ -1958,6 +1958,7 @@ pub fn build_turn_input(
         images: Vec::new(),
         workspace_id: state.active_workspace_id.clone(),
         plan_execution_approval: None,
+        tool_authorization_mode: None,
     }
 }
 

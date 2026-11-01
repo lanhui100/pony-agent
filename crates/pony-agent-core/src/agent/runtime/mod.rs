@@ -306,6 +306,7 @@ impl AgentRuntime {
             workspace_root: resolved_workspace_root,
             host_control_available: true,
             plan_execution_approval: input.plan_execution_approval.clone(),
+            tool_authorization_mode: input.tool_authorization_mode.clone(),
         });
     }
 

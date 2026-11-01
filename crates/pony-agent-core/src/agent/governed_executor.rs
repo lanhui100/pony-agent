@@ -306,6 +306,25 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
         final_arguments: &Value,
         context: &DispatchContext,
     ) -> PermissionDecision {
+        // 0. 检查前端传入的会话级授权模式 (tool_authorization_mode)
+        if let Some(auth_mode) = context.tool_authorization_mode.as_deref() {
+            let is_write_or_exec = descriptor.identity.primitive_name == "write"
+                || descriptor.identity.primitive_name == "edit"
+                || descriptor.identity.primitive_name == "bash"
+                || descriptor.identity.primitive_name == "execute"
+                || descriptor.identity.model_name == "write"
+                || descriptor.identity.model_name == "edit"
+                || descriptor.identity.model_name == "bash";
+
+            if auth_mode == "read_only" && is_write_or_exec {
+                return PermissionDecision {
+                    verdict: PermissionVerdict::Deny,
+                    decision_source: "tool_authorization_mode_read_only".to_string(),
+                    reason: Some("当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。".to_string()),
+                };
+            }
+        }
+
         // PA-141：审批证据**仅**来自宿主注入的 `DispatchContext`；
         // `final_arguments`（模型可控）不参与审批判定（C-141-3）。
         self.decide_with_context(

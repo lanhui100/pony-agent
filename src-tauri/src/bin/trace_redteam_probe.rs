@@ -263,7 +263,8 @@ fn run_probe(target: &ProbeTarget, prompt: &str, run_index: usize) {
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
-        plan_execution_approval: None,
+            plan_execution_approval: None,
+            tool_authorization_mode: None,
         },
     );
 

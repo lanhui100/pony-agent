@@ -1679,6 +1679,7 @@ impl HostControlPlane {
                 reasoning_effort: None,
                 workspace_id: None,
                 plan_execution_approval: None,
+                tool_authorization_mode: None,
             };
 
             let next_cmd = ContinueGraphRunStreamCommand {
@@ -2314,6 +2315,7 @@ impl HostControlPlane {
                 reasoning_effort: None,
                 workspace_id: None,
                 plan_execution_approval: None,
+                tool_authorization_mode: None,
             };
         }
     }

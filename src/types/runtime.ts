@@ -826,6 +826,7 @@ export type TurnInput = {
   modelId?: string | null;
   reasoningEffort?: ProviderReasoningEffort | null;
   workspaceMode?: "coding" | "work" | null;
+  toolAuthorizationMode?: ToolAuthorizationMode | null;
   sessionId?: string | null;
   nodeId?: string | null;
   history?: TurnHistoryMessage[];
