@@ -5,6 +5,17 @@ import { storeToRefs } from "pinia";
 import { ArrowDown, RotateCcw } from "lucide-vue-next";
 import type { ChatMessage, ConversationCheckpointEntry, HistoryNode, TraceTimelineEntry } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
+import { usePlanStore } from "@/stores/plan";
+import { useGoalStore } from "@/stores/goal";
+import { useTeamStore } from "@/stores/team";
+import { useWorkspacePanelsStore } from "@/stores/workspace-panels";
+import { safeInvoke } from "@/lib/tauri";
+import {
+  describeCompactionOutcome,
+  parseSlashCommand,
+  type DesktopSlashCommand,
+  type ManualCompactionOutcome
+} from "@/lib/chat/slash-commands";
 import { extractErrorMessage } from "@/lib/error-utils";
 import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
 import { isWorkspaceScrollDebugEnabled } from "@/lib/runtime/utils";
@@ -36,6 +47,10 @@ const props = withDefaults(
 const SYNTHETIC_KEEP_NODE_PREFIX = "synthetic-keep-";
 
 const runtimeStore = useRuntimeStore();
+const planStore = usePlanStore();
+const goalStore = useGoalStore();
+const teamStore = useTeamStore();
+const workspacePanelsStore = useWorkspacePanelsStore();
 const runtimeStoreSessionList = storeToRefs(runtimeStore).sessionList;
 
 const {
@@ -809,13 +824,8 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     });
   }
 
-  if (assistantAwaitingFirstSignal(turn)) {
-    events.push({
-      kind: "waiting",
-      key: `waiting-${turn.turnId}`,
-      order: Number.isFinite(assistantOrder) ? assistantOrder : Number.MAX_SAFE_INTEGER - 2
-    });
-  }
+  // Wave-59 F1：`waiting` 事件已删除 —— 「思考中」的唯一指示由底部状态条承载
+  // （workspace-runtime-status-slot），不再向事件流注入三点动画条目。
 
   if (
     modelEntries.length === 0 &&
@@ -947,10 +957,6 @@ function shouldShowReasoningBlock(message: ChatMessage | null) {
   return assistantDisplayedReasoning(message).trim().length > 0;
 }
 
-function assistantHasReasoningSignal(message: ChatMessage | null) {
-  return assistantDisplayedReasoning(message).trim().length > 0;
-}
-
 function assistantHasVisibleContent(message: ChatMessage | null) {
   if (!message) {
     return false;
@@ -962,34 +968,12 @@ function assistantHasVisibleContent(message: ChatMessage | null) {
   return Boolean(visibleContent.trim());
 }
 
-function assistantAwaitingFirstSignal(turn: TurnBucket) {
-  if (!isLastTurn.value(turn.turnId) || turn.tools.length > 0 || turn.mergedTools.length > 0) {
-    return false;
-  }
-
-  if (turn.assistant) {
-    return (
-      turn.assistant.status === "pending" &&
-      !assistantHasVisibleContent(turn.assistant) &&
-      !assistantHasReasoningSignal(turn.assistant)
-    );
-  }
-
-  const activeTurnId = runtimeStore.activeTurnId?.trim() || null;
-  return Boolean(
-    turn.user &&
-    isSubmitting.value &&
-    !sessionOperation.value &&
-    (!activeTurnId || activeTurnId === turn.turnId)
-  );
-}
 
 function shouldShowAgentArticle(turn: TurnBucket) {
-  // PA-118：agent 文章仅在“有可见内容 / 有可见推理 / 错误态 / 有工具 / 等待首个信号”时渲染；
+  // PA-118：agent 文章仅在“有可见内容 / 有可见推理 / 错误态 / 有工具”时渲染；
   // 取消回合（内容空、无推理、无工具）不渲染空 agent 壳/复制按钮行。
-  if (assistantAwaitingFirstSignal(turn)) {
-    return true;
-  }
+  // Wave-59 F1-3：等待首个信号（awaiting-first-signal）时同样返回 false ——
+  // 该状态不渲染空 agent 壳（无 article、无 workspace-agent-actions），等待指示只在底部状态条。
   if (turn.tools.length > 0) {
     return true;
   }
@@ -1041,6 +1025,22 @@ const isRuntimeStatusVisible = computed(() => {
   );
   if (hasActiveToolActivity) {
     return true;
+  }
+
+  // Wave-59 F4（D-59-3）：以 hop 级流式类型（Store.activeStreamKind）判定可见性。
+  // - "content"   ：本 hop 正文正在流式且已可见 ⇒ 隐藏（F4-3，沿用优化3）
+  // - "reasoning" ：本 hop 仅思考流式 ⇒ 状态条承载唯一「思考中」指示，保持可见
+  // - null        ：本 hop 尚无任何输出（如工具后的新 hop）⇒ 必须重新可见（F4-2 / RC8）
+  // - undefined   ：未接线（既有夹具）⇒ 回退下方旧判据，保证 wave-14 三例语义不变（F4-4）
+  // 仅在运行期生效：mode="info" 等非运行态不得被上一轮残留的 "content" 误隐藏。
+  if (isSubmitting.value) {
+    const activeStreamKind = runtimeStore.activeStreamKind;
+    if (activeStreamKind === "content") {
+      return false;
+    }
+    if (activeStreamKind === "reasoning" || activeStreamKind === null) {
+      return true;
+    }
   }
 
   // 检查最后一个可见轮次的 assistant 消息：如果正在 stream 且已有内容展示，则隐藏状态条
@@ -1106,13 +1106,24 @@ function shouldUseOptimizedAssistantStreaming(message: ChatMessage | null) {
 
 const streamingRenderPathLock = new Map<string, boolean>();
 
-function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, _content: string, streaming = false) {
+function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, content: string, streaming = false) {
   if (!message) {
     return false;
   }
 
-  // 非流式状态（包括最终完成消息或非最新轮次的中间消息），统一走 Markdown 渲染
+  // Wave-59 F3-3 / RC5：非流式（完成态 / 非最新轮次的中间消息）时，若流式期间已锁定为「纯文本」，
+  // **沿用同一条纯文本路径**（该路径自建 `.markdown-body` 承载节点），完成帧不替换承载节点。
+  // 锁不删除：后续任意一次重推导都必须得到同一结论，否则会在 trace 更新时来回切换。
+  // 注意：流式期间**不**短路，保留既有「检测到 markdown 语法即可平滑升级」的行为。
+  //
+  // Wave-59 A-59-2（审查裁决的**已批准例外**）：锁只在流式期有效。若 markdown 语法只在最后一个
+  // delta 才出现（流式期始终被判为纯文本），完成态必须切回 markdown 渲染 —— 此时允许**一次**子树替换，
+  // 因为「把 `**` / `|` 原样当纯文本显示」是正确性缺陷，优先级高于完成帧的节点身份（F3-3 在
+  // markdown 路径上仍成立：该路径的 `.markdown-body` 全程由 MarkdownRenderer 常驻承载）。
   if (!streaming && !isAssistantStreaming(message)) {
+    if (streamingRenderPathLock.get(message.id) === false && isSimpleTextContent(content)) {
+      return false;
+    }
     streamingRenderPathLock.delete(message.id);
     return true;
   }
@@ -1413,6 +1424,69 @@ async function handleUndoLastTurn() {
   await executeRollback(latestTurn.turnId, "transcript_only");
 }
 
+/** 斜杠命令在运行中被拒绝时的统一文案（Enter 与发送按钮共用）。 */
+const SLASH_COMMAND_BUSY_NOTICE = "当前正在运行，请等待本轮结束后再执行斜杠命令";
+
+/**
+ * C-8：桌面端斜杠命令通道 —— **唯一入口**，Enter 与发送按钮共用。
+ *
+ * 命中已知命令（`/plan`、`/tasks`、`/compact`）时不进入 `submitTurn`：
+ * 先清空文本草稿（不动待发送附件），再按命令执行动作，反馈统一走
+ * `runtimeStore.setSessionNotice()`（C-9，info 模式），不复用 sessionError。
+ *
+ * 运行中（isSubmitting）一律拒绝执行并给出统一提示：`/compact` 会在本轮进行中
+ * 改写会话历史，`/plan`、`/tasks` 的面板切换也与本轮状态无关，故三条命令同权拦截。
+ * 守卫只在此处存在一份，禁止在调用方重复判定。
+ */
+async function executeSlashCommand(command: DesktopSlashCommand) {
+  if (isSubmitting.value) {
+    runtimeStore.setSessionNotice(SLASH_COMMAND_BUSY_NOTICE);
+    return;
+  }
+
+  runtimeStore.draftMessage = "";
+  runtimeStore.setSessionNotice(null);
+
+  if (command === "plan") {
+    const hasPlanData =
+      planStore.plans.length > 0 || planStore.todos.length > 0 || goalStore.hasGoal;
+    if (!hasPlanData) {
+      runtimeStore.setSessionNotice("当前会话暂无计划");
+      return;
+    }
+    // 契约 C-8「切换面板」：与 HomeSidebar 点击标题同一 toggle 语义
+    // （同一面板再执行一次即收起，不同面板则切到目标面板）。
+    workspacePanelsStore.togglePanel("plan");
+    return;
+  }
+
+  if (command === "tasks") {
+    if (teamStore.tasks.length === 0) {
+      runtimeStore.setSessionNotice("当前暂无 Team 任务");
+      return;
+    }
+    workspacePanelsStore.togglePanel("tasks");
+    return;
+  }
+
+  // /compact：强制压缩当前会话上下文（真实压缩由后端 agent/compression.rs 执行）
+  try {
+    const outcome = await safeInvoke<ManualCompactionOutcome>("compact_session", {
+      sessionId: runtimeStore.sessionId,
+      force: true
+    });
+    runtimeStore.setSessionNotice(describeCompactionOutcome(outcome));
+  } catch (error) {
+    const reason = extractErrorMessage(String(error)) ?? String(error);
+    runtimeStore.setSessionNotice(`压缩失败：${reason}`);
+  }
+}
+
+/** 读取当前草稿命中的斜杠命令；未命中返回 null（保持既有普通消息提交行为）。 */
+function resolveSlashCommand(): DesktopSlashCommand | null {
+  return parseSlashCommand(runtimeStore.draftMessage);
+}
+
 function handleComposerKeydown(event: KeyboardEvent) {
   const isUndoShortcut =
     event.key.toLowerCase() === "z" &&
@@ -1433,6 +1507,12 @@ function handleComposerKeydown(event: KeyboardEvent) {
       return;
     }
     event.preventDefault();
+    // C-8：斜杠命令与发送按钮共用同一入口（运行中拒绝执行的守卫在 executeSlashCommand 内）。
+    const slashCommand = resolveSlashCommand();
+    if (slashCommand) {
+      void executeSlashCommand(slashCommand);
+      return;
+    }
     if (!isSubmitting.value) {
       timelineAutoScroll.setAutoFollowEnabled();
       runtimeStore.submitTurn();
@@ -1471,6 +1551,13 @@ function handleWindowKeydown(event: KeyboardEvent) {
 }
 
 async function handlePrimaryAction() {
+  // C-8：发送按钮同样走斜杠命令唯一入口（运行中拒绝执行的守卫在 executeSlashCommand 内）。
+  const slashCommand = resolveSlashCommand();
+  if (slashCommand) {
+    await executeSlashCommand(slashCommand);
+    return;
+  }
+
   if (isSubmitting.value) {
     // 正在运行/忙碌时，如果用户在输入框有内容，点击发送/回车视为排队/插队发送
     if (draftMessage.value.trim().length > 0) {
@@ -1600,6 +1687,8 @@ onBeforeUnmount(() => {
   }
   window.removeEventListener("storage", handleStreamingRenderConfigChanged);
   window.removeEventListener(STREAM_RENDER_CONFIG_CHANGED_EVENT, handleStreamingRenderConfigChanged);
+  // Wave-59 F3-3：渲染路径锁随组件生命周期清理（键为 message.id，跨会话不复用）。
+  streamingRenderPathLock.clear();
 });
 
 watch(rollbackInFlight, () => {

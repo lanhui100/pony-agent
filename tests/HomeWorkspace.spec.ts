@@ -1225,7 +1225,13 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
   });
 
-  it("shows a jumping-dot waiting state before the first assistant signal arrives", async () => {
+  /**
+   * wave-59 F1 契约演进（Lead 授权迁移，原意图不变、仅迁移断言锚点）：
+   * 原「等待首个信号 = 三点跳跃动画」的断言迁移为 F1-1（不得再有等待动画节点）
+   * + F1-2（底部状态条可见且标签非空，承载唯一「思考中」指示）。
+   * 原用例覆盖的状态迁移（无 assistant → 空 pending assistant → 工具到达）全部保留。
+   */
+  it("shows the status-bar waiting indication (not jumping dots) before the first assistant signal arrives", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
@@ -1246,8 +1252,24 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     const wrapper = mountWorkspace();
     await nextTick();
 
-    const waitingState = wrapper.get('[data-testid="assistant-awaiting-first-signal"]');
-    expect(waitingState.findAll(".assistant-waiting-dot")).toHaveLength(3);
+    // F1-1：等待首个信号期间不得渲染任何重复等待动画节点
+    expect(
+      wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists(),
+      "F1-1：等待首个信号期间不得再渲染 assistant-awaiting-first-signal 等待面板（重复指示）"
+    ).toBe(false);
+    expect(wrapper.findAll(".assistant-waiting-dot"), "F1-1：不得渲染三点跳跃动画").toHaveLength(0);
+    expect(wrapper.findAll(".assistant-waiting-panel"), "F1-1：不得渲染等待面板容器").toHaveLength(0);
+
+    // F1-2：唯一指示 = 底部状态条可见 + 标签非空（思考中/准备就绪中）
+    const statusSlot = wrapper.get('[data-testid="workspace-runtime-status-slot"]');
+    expect(
+      statusSlot.attributes("data-visible"),
+      'F1-2：等待首个信号期间底部状态条必须可见（data-visible="true"）'
+    ).toBe("true");
+    expect(
+      wrapper.get('[data-testid="agent-runtime-status-label"]').text().trim().length,
+      "F1-2：状态条标签不得为空（承载唯一「思考中」指示）"
+    ).toBeGreaterThan(0);
 
     runtimeStore.$patch({
       messages: [
@@ -1269,7 +1291,12 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
     await nextTick();
 
-    expect(wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists()).toBe(true);
+    // 空 pending assistant 同样不得渲染等待动画节点（F1-1）
+    expect(
+      wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists(),
+      "F1-1：空 pending assistant 不得渲染 assistant-awaiting-first-signal 等待面板"
+    ).toBe(false);
+    expect(wrapper.findAll(".assistant-waiting-dot"), "F1-1：不得渲染三点跳跃动画").toHaveLength(0);
 
     runtimeStore.$patch({
       messages: [
@@ -4256,7 +4283,12 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(toolRows[3]?.text()).toContain("search gamma");
   });
 
-  it("shows the first-signal waiting dots instead of a reasoning text placeholder for an empty pending assistant", async () => {
+  /**
+   * wave-59 F1 契约演进（Lead 授权迁移，原意图不变、仅迁移断言锚点）：
+   * 「空 pending assistant 不显示 reasoning 文本占位」的原意图保留；
+   * 「以三点动画作为等待指示」的断言迁移为 F1-1（不得再有等待动画节点）。
+   */
+  it("shows no first-signal waiting animation for an empty pending assistant (and no reasoning placeholder)", async () => {
     window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
 
     const runtimeStore = useRuntimeStore();
@@ -4280,8 +4312,13 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     await nextTick();
 
     expect(wrapper.find(".assistant-reasoning").exists()).toBe(false);
-    expect(wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists()).toBe(true);
-    expect(wrapper.findAll(".assistant-waiting-dot")).toHaveLength(3);
+    // F1-1：空 pending assistant 不得渲染三点等待动画（重复指示已由状态条承载）
+    expect(
+      wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists(),
+      "F1-1：空 pending assistant 不得渲染 assistant-awaiting-first-signal 等待面板"
+    ).toBe(false);
+    expect(wrapper.findAll(".assistant-waiting-dot"), "F1-1：不得渲染三点跳跃动画").toHaveLength(0);
+    expect(wrapper.findAll(".assistant-waiting-panel"), "F1-1：不得渲染等待面板容器").toHaveLength(0);
   });
 
   // KNOWN TEST DEBT: PopoverPortal rendering in jsdom environment is flaky

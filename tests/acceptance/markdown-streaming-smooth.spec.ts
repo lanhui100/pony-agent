@@ -244,12 +244,31 @@ describe("Markdown Bold & Streaming Smooth Acceptance", () => {
       await nextTick();
 
       // 追加包含 **加粗** 的内容
+      const streamedContent = "这是**“建筑工地的砌砖工”**，迅速进化为**“工地的总监理”**";
       await wrapper.setProps({
-        content: "这是**“建筑工地的砌砖工”**，迅速进化为**“工地的总监理”**"
+        content: streamedContent
       });
 
-      // 等待渲染调度
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 60));
+      // 条件等待（Lead 追加裁定 A / test-expert「禁止硬编码等待」）：
+      // 原实现是盲等 60ms 后断言；wave-59 把未渲染尾巴改为 stale-while-render 后，
+      // 正文可见时刻由「解析完成」决定，固定时长裕度不再成立（全量并发时会偶发不达标）。
+      // 这里改为等待组件以**本次内容长度**发出 `render-complete`，即「该次解析已落地」——
+      // 条件来自组件公开事件契约，不依赖断言的期望字符串；断言语义与阈值均未改动。
+      await vi.waitFor(
+        () => {
+          const events = wrapper.emitted("render-complete") ?? [];
+          const landed = events.some((event) => {
+            const payload = event[0] as { contentLength?: number; streaming?: boolean } | undefined;
+            return payload?.contentLength === streamedContent.length && payload?.streaming === true;
+          });
+          expect(
+            landed,
+            `等待 MarkdownRenderer 以 contentLength=${streamedContent.length}（streaming=true）发出 render-complete 超时；`
+              + `已收到事件：${JSON.stringify(events.map((event) => event[0]))}`
+          ).toBe(true);
+        },
+        { timeout: 5000, interval: 20 }
+      );
       await nextTick();
 
       // 断言：在任何流式瞬间，都不应该出现裸露的 **（如果作为 markdown 渲染中，应该被解析为 strong 或平滑显示）

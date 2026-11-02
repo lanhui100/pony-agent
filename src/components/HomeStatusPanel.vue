@@ -159,34 +159,46 @@ function formatTokenValue(value?: number | null) {
             <component :is="copied ? Check : Copy" class="h-3 w-3" />
           </button>
         </Tooltip>
-        <!-- Wave-17 C2：计数位数字原地变化（9 → 12 → 345）会横向推移相邻位点。
-             修法：承载 span 自身 `tabular-nums` + 固定最小宽度预留 4 位数字空间，
-             位数变化只消耗预留宽度，不移动图标与相邻位点。 -->
-        <Tooltip text="对话轮次数">
-          <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-turn-count">
-            <MessageSquareMore class="h-3 w-3 text-stone-400" />
-            <span class="inline-block min-w-[2.25rem] text-right">{{ turnCount }}</span>
-          </span>
-        </Tooltip>
-        <Tooltip text="模型调用次数">
-          <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-model-call-count">
-            <Orbit class="h-3 w-3 text-stone-400" />
-            <span class="inline-block min-w-[2.25rem] text-right">{{ modelCallCount }}</span>
-          </span>
-        </Tooltip>
-        <Tooltip text="工具调用次数">
-          <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-tool-call-count">
-            <Wrench class="h-3 w-3 text-stone-400" />
-            <span class="inline-block min-w-[2.25rem] text-right">{{ toolCallCount }}</span>
-          </span>
-        </Tooltip>
       </div>
     </div>
 
     <section class="border-t border-stone-200/60 pt-3 mt-3">
       <div class="rounded-[0.45rem] bg-[#f6f0e8] px-3 py-2">
-        <!-- Token metrics -->
-        <div class="flex items-center justify-around text-[11px] leading-5 text-stone-600">
+        <!--
+          Wave-59 F2-2：计数位由头部行下移至 token 指标卡内、token 行之上。
+          Wave-59 F2-4：本行**不得**使用 `justify-around`（避免与既有 token 行选择器歧义）。
+          Lead 视觉复核（真浏览器）：`justify-between` 会把三组「图标↔数字」拉开成三个孤立数字，
+          故改用 `grid grid-cols-3` —— 三列等宽、天然等距，成组感与 token 行一致。
+          Wave-17 C2：计数位数字原地变化（9 → 12 → 345）不得横向推移相邻位点 ——
+          承载 span 自身 `tabular-nums` + 内层固定最小宽度预留位数空间（位数变化只消耗预留宽度）。
+        -->
+        <div
+          class="grid grid-cols-3 items-center gap-2 text-[11px] leading-5 text-stone-600"
+          data-testid="status-metrics-counts"
+        >
+          <Tooltip text="对话轮次数">
+            <span class="inline-flex items-center justify-center gap-1 tabular-nums" data-testid="status-metric-turn-count">
+              <MessageSquareMore class="h-3 w-3 text-stone-400" />
+              <span class="inline-block min-w-[1.75rem] text-left">{{ turnCount }}</span>
+            </span>
+          </Tooltip>
+          <Tooltip text="模型调用次数">
+            <span class="inline-flex items-center justify-center gap-1 tabular-nums" data-testid="status-metric-model-call-count">
+              <Orbit class="h-3 w-3 text-stone-400" />
+              <span class="inline-block min-w-[1.75rem] text-left">{{ modelCallCount }}</span>
+            </span>
+          </Tooltip>
+          <Tooltip text="工具调用次数">
+            <span class="inline-flex items-center justify-center gap-1 tabular-nums" data-testid="status-metric-tool-call-count">
+              <Wrench class="h-3 w-3 text-stone-400" />
+              <span class="inline-block min-w-[1.75rem] text-left">{{ toolCallCount }}</span>
+            </span>
+          </Tooltip>
+        </div>
+
+        <!-- Token metrics（F2-2 允许计数行与 token 行之间一条 border-t；分隔线加在 token 行自身，
+             以保持本行仍是 `bg-[#f6f0e8]` 指标卡的直接子节点） -->
+        <div class="mt-2 flex items-center justify-around border-t border-stone-200/60 pt-2 text-[11px] leading-5 text-stone-600">
           <!-- wave-54 C4/C6：「输入」口径 = 末次调用 contextInputTokens（回退 S1），
                无数据一律 `—`（禁止渲染 0）；估算来源加 `≈`。非会话累计。 -->
           <span class="inline-flex items-center gap-1 tabular-nums" data-testid="status-metric-input-tokens">

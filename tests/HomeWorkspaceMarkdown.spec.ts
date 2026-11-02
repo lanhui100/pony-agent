@@ -262,7 +262,12 @@ describe("HomeWorkspace markdown rendering", () => {
     wrapper.unmount();
   }, 15000);
 
-  it("reveals streaming assistant content character by character with continuous release", async () => {
+  /**
+   * wave-59 F3 契约演进（Lead 授权迁移，原意图不变、仅迁移断言锚点）：
+   * 「流式正文逐字符 span（.assistant-streaming-char）释放」的原断言迁移为 F3-4：
+   * 内容区不得出现逐字符节点；原语义「正文随释放节奏逐步可见、不走 v-motion 包裹」保留。
+   */
+  it("reveals streaming assistant content with continuous release (no per-character nodes, F3-4)", async () => {
     const providerStore = useProviderStore();
     providerStore.$patch({
       registry: createProviderRegistry(),
@@ -316,15 +321,125 @@ describe("HomeWorkspace markdown rendering", () => {
     });
 
     await nextTick();
-    // "hello" is simple text (no markdown syntax), goes to char-by-char plain text path
     const streamingFlow = wrapper.find('[data-testid="assistant-streaming-flow"]');
     expect(streamingFlow.exists()).toBe(true);
-    // 首次同步后释放四个字符，后续字符由 60ms tick 平滑推进。
-    const chars = streamingFlow.findAll('.assistant-streaming-char');
-    expect(chars).toHaveLength(4);
+
+    // F3-4：内容区不得出现逐字符节点（D-59-2：逐字淡入已移除）
+    expect(wrapper.findAll('.assistant-streaming-char')).toHaveLength(0);
+
+    // 原语义保留：正文随释放节奏逐步可见（展示层为完整内容的前缀）
+    await vi.waitFor(() => {
+      expect(streamingFlow.text().length).toBeGreaterThan(0);
+    }, { timeout: 5000, interval: 20 });
+    expect('hello'.startsWith(streamingFlow.text())).toBe(true);
+
     // No v-motion opacity wrapper on streaming content
     expect(streamingFlow.classes()).not.toContain('assistant-response-panel');
     expect(wrapper.find('[data-testid="assistant-streaming-fade-batch"]').exists()).toBe(false);
+
+    wrapper.unmount();
+  }, 15000);
+
+  /**
+   * A-59-2 回归（契约 §7，审查 review-join-wave59 CORRECTNESS）：
+   * `streamingRenderPathLock` 的 `false`（纯文本路径）不得延续到完成态。
+   * 窄场景：纯文本流式期间锁已被置 false，**最后一个 delta 才引入 markdown 语法**且期间无渲染机会，
+   * 若完成态继续信任旧锁，`**` 会被原样当纯文本显示。
+   * 契约取舍：该窄场景下完成帧允许一次子树替换（正确性优先，登记为 RC5 的已知例外）。
+   */
+  it("A-59-2: 纯文本流式（锁 false）在最后才出现 markdown 语法时，完成态必须渲染 <strong> 而非原样 **", async () => {
+    const providerStore = useProviderStore();
+    providerStore.$patch({
+      registry: createProviderRegistry(),
+      selectedReasoningEffort: null
+    });
+
+    const runtimeStore = useRuntimeStore();
+    const turnId = "turn-lock-done";
+    const userMessage = {
+      id: "user-lock-done",
+      turnId,
+      role: "user" as const,
+      content: "继续",
+      status: "done" as const,
+      tokenCount: null
+    };
+    runtimeStore.$patch({
+      phase: "streaming_response",
+      activeTurnId: turnId,
+      isSubmitting: true,
+      sessionOperation: null,
+      error: null,
+      messages: [
+        userMessage,
+        {
+          id: "assistant-lock-done",
+          turnId,
+          role: "assistant",
+          content: "纯文本第一段",
+          status: "pending",
+          tokenCount: null,
+          modelName: "ppx/gpt-5.4"
+        }
+      ] as never
+    });
+
+    const wrapper = mount({
+      render() {
+        return h(TooltipProvider, null, {
+          default: () => h(HomeWorkspace)
+        });
+      }
+    }, {
+      global: {
+        stubs: {
+          ScrollArea: ScrollAreaStub,
+          Button: ButtonStub,
+          Switch: SwitchStub,
+          Transition: false,
+          TransitionGroup: false
+        }
+      }
+    });
+
+    await flushMarkdownRender();
+    // 自检：流式期间是纯文本（无 markdown 语法）——此时锁被置为 false
+    const sectionStreaming = wrapper.get('[data-testid="workspace-content-column"] section[data-turn-id]');
+    expect(sectionStreaming.find("strong").exists()).toBe(false);
+    expect(sectionStreaming.text()).toContain("纯文本第一段");
+
+    // Act：同一 tick 内补齐 markdown 语法并把消息转 done（期间不给渲染机会）
+    await runtimeStore.$patch({
+      isSubmitting: false,
+      phase: "ready",
+      messages: [
+        userMessage,
+        {
+          id: "assistant-lock-done",
+          turnId,
+          role: "assistant",
+          content: "纯文本第一段 **加粗收尾**",
+          status: "done",
+          tokenCount: null,
+          modelName: "ppx/gpt-5.4"
+        }
+      ] as never
+    });
+    await nextTick();
+    await flushMarkdownRender();
+
+    // Assert（完成态必须按 markdown 渲染，不得原样暴露 **）
+    const section = wrapper.get('[data-testid="workspace-content-column"] section[data-turn-id]');
+    const bodyText = section.text();
+    expect(
+      section.find("strong").exists(),
+      `A-59-2：完成态必须渲染 <strong>（锁 false 不得延续到完成态）；实际正文：${JSON.stringify(bodyText)}`
+    ).toBe(true);
+    expect(bodyText).toContain("加粗收尾");
+    expect(
+      bodyText,
+      `A-59-2：完成态不得把 markdown 语法原样显示；实际正文：${JSON.stringify(bodyText)}`
+    ).not.toContain("**");
 
     wrapper.unmount();
   }, 15000);

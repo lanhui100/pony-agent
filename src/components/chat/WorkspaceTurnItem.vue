@@ -55,9 +55,10 @@ export type MergedToolCall = {
   argumentsText?: string | null;
 };
 
+// Wave-59 F1-1：`waiting` 分支已从联合类型删除（编译期强制清空三点等待动画的渲染路径；
+// 「思考中」的唯一指示由底部状态条承载，见 HomeWorkspace 的 workspace-runtime-status-slot）。
 export type AgentTurnEvent =
   | { kind: "reasoning"; key: string; order: number; assistant: ChatMessage; reasoningContent: string; streaming: boolean }
-  | { kind: "waiting"; key: string; order: number }
   | { kind: "tools"; key: string; order: number; tools: MergedToolCall[] }
   | { kind: "content"; key: string; order: number; assistant: ChatMessage; content: string; streaming: boolean }
   | { kind: "error"; key: string; order: number };
@@ -82,6 +83,10 @@ const props = defineProps<{
   setAgentMessageRef: (element: Element | ComponentPublicInstance | null) => void;
   handleMarkdownRenderComplete: (payload: { contentLength: number; streaming: boolean }) => void;
   shouldUseMarkdownAssistantRendering: (message: ChatMessage | null, content: string, streaming?: boolean) => boolean;
+  /**
+   * 保留声明仅为维持调用方契约（HomeWorkspace 绑定 + 3 处直接挂载的本组件用例）。
+   * Wave-59 F3-4 起内容区不再按「流式优化是否启用」分叉，本 prop 不参与渲染决策。
+   */
   shouldUseOptimizedAssistantStreaming: (message: ChatMessage | null) => boolean;
   streamingReasoningStable: (reasoningContent: string, assistant: ChatMessage) => string;
   streamingReasoningFade: (reasoningContent: string, assistant: ChatMessage) => string;
@@ -148,21 +153,6 @@ onBeforeUnmount(() => {
   }
 });
 
-// 整块释放后的字符错落延时：每个字符相对前一个字符延迟一步开始淡入，
-// 形成"波浪式"逐字浮现效果；超过窗口后封顶，避免长文本总动画时长失控。
-const STREAM_CHAR_STAGGER_STEP_MS = 12;
-const STREAM_CHAR_STAGGER_CAP_MS = 480;
-
-function charStaggerDelayMs(index: number) {
-  return Math.min(index * STREAM_CHAR_STAGGER_STEP_MS, STREAM_CHAR_STAGGER_CAP_MS);
-}
-
-/** 将已按 model-hop 裁剪的可见文本拆为逐字数组，用于逐字淡入渲染 */
-function streamingVisibleChars(text: string) {
-  if (!text) return [];
-  return text.split("");
-}
-
 function userShellClass() {
   return "rounded-[0.45rem] bg-stone-900 px-3 py-2 text-stone-50 shadow-[0_1px_0_rgba(28,25,23,0.03)] sm:px-4";
 }
@@ -185,6 +175,14 @@ function shouldOpenReasoningBlock(_message: ChatMessage | null) {
 
 function isAssistantStreaming(message: ChatMessage | null) {
   return message?.status === "pending";
+}
+
+/**
+ * Wave-59 F3-4：正文走 markdown 渲染还是纯文本渲染（两条路径共用同一外层容器，
+ * 且承载正文的都是 `.markdown-body`，故 streaming→完成态不替换承载节点）。
+ */
+function assistantUsesMarkdownRendering(event: Extract<AgentTurnEvent, { kind: "content" }>) {
+  return props.shouldUseMarkdownAssistantRendering(event.assistant, event.content, event.streaming);
 }
 
 function latestTraceForTurn(turnId: string) {
@@ -388,24 +386,6 @@ const toolIconByCanonicalName: Record<string, any> = {
           </div>
         </details>
 
-        <Transition v-else-if="event.kind === 'waiting'" name="assistant-waiting-signal">
-          <div
-            class="assistant-waiting-panel"
-            role="status"
-            aria-label="等待回复开始"
-            data-testid="assistant-awaiting-first-signal"
-          >
-            <span class="assistant-waiting-dots" aria-hidden="true">
-              <span
-                v-for="index in 3"
-                :key="index"
-                class="assistant-waiting-dot"
-                :style="{ animationDelay: `${(index - 1) * 150}ms` }"
-              ></span>
-            </span>
-          </div>
-        </Transition>
-
         <div
           v-else-if="event.kind === 'tools'"
           v-motion
@@ -455,12 +435,20 @@ const toolIconByCanonicalName: Record<string, any> = {
             :data-streaming="event.streaming ? 'true' : undefined"
             @mouseup="handleSelectionAutoCopy"
           >
+            <!--
+              Wave-59 F3-4：内容区只有这一个容器（不再按 streaming 分叉成两棵子树）。
+              两条渲染路径都落在同一容器上，且正文承载节点都是 `.markdown-body`：
+              - markdown 路径：由 MarkdownRenderer 的常驻 `.markdown-body` 承载（F3-2/F3-3 身份不变）；
+              - 纯文本路径：本容器内自建 `.markdown-body`（逐字符 span 已按 D-59-2 移除）。
+              纯文本→完成态沿用纯文本路径由 HomeWorkspace.shouldUseMarkdownAssistantRendering 锁定，
+              因此完成帧不会替换承载节点（RC5）。
+            -->
             <div
-              v-if="shouldUseMarkdownAssistantRendering(event.assistant, event.content, event.streaming)"
-              :class="event.streaming ? 'assistant-streaming-content' : undefined"
+              class="assistant-streaming-content"
               :data-testid="event.streaming ? 'assistant-streaming-flow' : undefined"
             >
               <MarkdownRenderer
+                v-if="assistantUsesMarkdownRendering(event)"
                 :content="event.content"
                 :streaming="event.streaming"
                 :force-markdown-streaming="event.streaming"
@@ -471,22 +459,7 @@ const toolIconByCanonicalName: Record<string, any> = {
                 :tone-class="assistantTone(event.assistant)"
                 @render-complete="handleMarkdownRenderComplete"
               />
-            </div>
-            <!-- 纯文本路径：流式逐字与完成态共用同一容器，完成时不切换 DOM 子树 -->
-            <div
-              v-else
-              class="assistant-streaming-content"
-              :data-testid="event.streaming ? 'assistant-streaming-flow' : undefined"
-            >
-              <template v-if="shouldUseOptimizedAssistantStreaming(event.assistant)">
-                <span
-                  v-for="(char, i) in streamingVisibleChars(event.content)"
-                  :key="i"
-                  class="assistant-streaming-char"
-                  :style="{ animationDelay: `${charStaggerDelayMs(i)}ms` }"
-                >{{ char }}</span>
-              </template>
-              <template v-else>{{ event.content }}</template>
+              <div v-else class="markdown-body whitespace-pre-wrap">{{ event.content }}</div>
             </div>
           </div>
         </div>
@@ -840,76 +813,9 @@ const toolIconByCanonicalName: Record<string, any> = {
   will-change: opacity;
 }
 
-.assistant-streaming-char {
-  display: inline;
-  white-space: pre-wrap;
-  animation-name: assistant-stream-char-fade-in;
-  animation-duration: 160ms;
-  animation-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
-  animation-fill-mode: both;
-  will-change: opacity;
-}
-
-@keyframes assistant-stream-char-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
 @keyframes assistant-stream-fade-in {
   from { opacity: 0; }
   to   { opacity: 1; }
-}
-
-.assistant-waiting-panel {
-  display: inline-flex;
-  min-height: 1.7rem;
-  align-items: center;
-  padding: 0.1rem 0;
-}
-
-.assistant-waiting-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.34rem;
-}
-
-.assistant-waiting-dot {
-  width: 0.46rem;
-  height: 0.46rem;
-  border-radius: 9999px;
-  background: rgba(87, 83, 78, 0.58);
-  animation: assistant-waiting-dot-bounce 900ms cubic-bezier(0.2, 0.7, 0.35, 1) infinite both;
-}
-
-.assistant-waiting-signal-enter-active,
-.assistant-waiting-signal-leave-active {
-  transition:
-    opacity 220ms ease,
-    transform 220ms ease;
-}
-
-.assistant-waiting-signal-enter-from,
-.assistant-waiting-signal-leave-to {
-  opacity: 0;
-  transform: translateY(0.25rem);
-}
-
-@keyframes assistant-waiting-dot-bounce {
-  0%,
-  70%,
-  100% {
-    opacity: 0.42;
-    transform: translateY(0) scale(0.86);
-  }
-
-  35% {
-    opacity: 1;
-    transform: translateY(-0.34rem) scale(1.08);
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -922,17 +828,10 @@ const toolIconByCanonicalName: Record<string, any> = {
     transition: none !important;
   }
 
-  .assistant-streaming-fade,
-  .assistant-streaming-char,
-  .assistant-waiting-dot {
+  .assistant-streaming-fade {
     animation: none !important;
     opacity: 1 !important;
     transform: none !important;
-  }
-
-  .assistant-waiting-signal-enter-active,
-  .assistant-waiting-signal-leave-active {
-    transition: opacity 120ms ease !important;
   }
 }
 

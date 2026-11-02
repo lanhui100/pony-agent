@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3-join-wave59-r2-6b31d0",
+    "fresh_context": true
+  },
+  "executed_by": "l3-join-wave59-r2-6b31d0",
+  "reviewed_commit": "d3745a7",
+  "reviewed_subject": "working tree diff on top of d3745a7（复审：B-59-1/A-59-1/A-59-2 修复）",
+  "round": 2,
+  "verdict": "PASS",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "src/stores/runtime.ts",
+    "src/components/MarkdownRenderer.vue",
+    "src/components/HomeWorkspace.vue"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 2261,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vitest run --config /tmp/w59r2/vitest.config.mts /tmp/w59r2/leak.spec.ts  # 前台会话 A 正文流式(activeStreamKind=content)中切到会话 C(后台运行轮,calling_model,textBuffer 空)：实测 leaked=\"content\"、submitting=true、mode=\"responding\"、状态条 data-visible=\"false\"，而 C 无任何正文（F4-2/F1-2 同类零指示）",
+      "severity": "ADVISORY",
+      "summary": "B-59-1 的第五个入口未覆盖：switchSession 恢复后台运行轮（runtime.ts:2258-2271）直接置 isSubmitting=true/activeTurnId=bgTurn.turnId，但 activeStreamKind 不随会话切换复位（resetSessionRuntimeState:765 的 blankFields 与 createBlankSessionRuntimeFields 均不含该字段），于是另一会话残留的 \"content\" 会让 HomeWorkspace:1036-1039 把状态条判为 data-visible=false；目标轮在首个 delta 前（可能数秒的 calling_model）既无正文也无指示（建议：恢复后台轮时按 bgTurn.reasoningBuffer/textBuffer 推导或置 null）"
+    }
+  ]
+}

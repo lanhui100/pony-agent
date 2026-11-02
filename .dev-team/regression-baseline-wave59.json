@@ -1,0 +1,16 @@
+{
+  "wave": 59,
+  "baseline_commit": "d3745a77eb84788345251aacda452845423e07ff",
+  "command": "npx vitest run",
+  "summary": [
+    "  next: undefined,",
+    "  effect: [Circular *1],",
+    "  __v_isReadonly: true,",
+    "  isSSR: false",
+    "}",
+    ""
+  ],
+  "exit": 0,
+  "note": "114 files / 1100 passed / 12 skipped；含 2 条既有 expect stderr 噪声(vue readonly proxy)，非失败",
+  "captured_at": "2026-11-01T22:36:41+0800"
+}

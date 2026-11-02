@@ -1,5 +1,11 @@
 # Agent 消息 Streaming 渲染优化方案（v2 — 对抗审查修订版）
 
+> **状态（2026-11-02，wave-59 起）**：本文关于 `unrenderedSuffix` 纯文本暂存的方案**已被取代**。
+> 现行实现为「stale-while-render」：流式期间只呈现上一次渲染完成的 HTML，未渲染尾巴不以任何节点呈现，
+> 逐字符淡入整体移除。决策与根因见 [ADR 0056](decisions/0056-streaming-render-stale-while-render-and-hop-status.md)，
+> 契约见 `.dev-team/contracts/wave-59-desktop-uiux.md`。本文保留为历史方案与权衡记录；
+> 其中 `renderPartialMarkdown` / `autoCloseBoundaries` / `splitMarkdownBlocks` 仍在现行实现中使用。
+
 ## 概述
 
 当前 agent 消息的 streaming 渲染管线存在两个体验问题：

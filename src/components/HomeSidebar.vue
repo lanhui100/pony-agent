@@ -5,6 +5,7 @@ import { useRuntimeStore } from "@/stores/runtime";
 import { usePlanStore } from "@/stores/plan";
 import { useGoalStore } from "@/stores/goal";
 import { useTeamStore } from "@/stores/team";
+import { useWorkspacePanelsStore } from "@/stores/workspace-panels";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
 import TeamRosterPanel from "@/components/team/TeamRosterPanel.vue";
@@ -46,7 +47,9 @@ const {
   sessionId
 } = storeToRefs(runtimeStore);
 
-const activePanel = ref<"plan" | "roster" | "tasks" | "">("");
+// C-8：面板开合状态提升为共享 store，供斜杠命令处理器外部驱动。
+const workspacePanelsStore = useWorkspacePanelsStore();
+const { activePanel } = storeToRefs(workspacePanelsStore);
 const { copiedKey, copyText, resetCopy, dispose } = useCopyFeedback();
 
 // 状态面板消费活跃调用指标（liveTurnEnabled: true），每次模型调用产生时即刻更新
@@ -66,15 +69,15 @@ const {
 } = useTraceProjection({ liveTurnEnabled: ref(true) });
 
 function togglePlan() {
-  activePanel.value = activePanel.value === "plan" ? "" : "plan";
+  workspacePanelsStore.togglePlan();
 }
 
 function toggleRoster() {
-  activePanel.value = activePanel.value === "roster" ? "" : "roster";
+  workspacePanelsStore.toggleRoster();
 }
 
 function toggleTasks() {
-  activePanel.value = activePanel.value === "tasks" ? "" : "tasks";
+  workspacePanelsStore.toggleTasks();
 }
 
 watch(

@@ -16,6 +16,11 @@
  *
  * 零假测试律：所有用例均有硬断言；无 skip、无吞异常、无硬编码 sleep 等待。
  *
+ * wave-59 契约演进（Lead 授权迁移，原意图不变、仅迁移定位锚点）：
+ *   C2-2 的 counts 行锚点由 `status-panel-toggle` 头部行迁移至
+ *   `[data-testid="status-metrics-counts"]`（wave-59 F2-1/F2-2 计数位下移）；
+ *   C2-2a/b/c/d 四段物理口径与阈值（0.5px / 单调不减）保持原样。
+ *
  * 作者：test-agent（L2-T）。红相锚定后本文件冻结只读，任何修改需 Lead 批准。
  */
 import { expect, test } from "@playwright/test";
@@ -242,11 +247,111 @@ interface SlotMeasurement {
   ownLeftDelta: number;
 }
 
+/**
+ * C2-2 夹具数据注入（Lead 追加裁定 B，2026-11-01）：
+ *
+ * 背景：C2-2 的 Assert 2 要求「至少 6 个指标位直接渲染数字文本」，用于防止探针降级掩盖定位失效；
+ * 但 fresh page 没有任何会话/调用数据，4 个 token 指标位一律渲染 `—`（走 `[RED DEGRADED: PROBE-NODE]`），
+ * 使该前提在环境上不可满足（**基线原版 C2-2 同样红**，见 `.dev-team/wave59-green-receipts.md` §6.2）。
+ *
+ * 本夹具只**注入数据**让四个 token 位渲染真实数字，不改任何断言与阈值（0.5px / 单调不减 全部原样）。
+ * 注入源 = pinia runtime store 的一条已完成 turn（与 wave-17 C2-1 单测夹具同构）：
+ * - `contextDisplayTokens` ← providerCallRecords[].contextInputTokens ?? inputTokens（缺省回落 timeline call_model.inputTokens）
+ * - `sessionOutputTokensTotal` ← turn.outputTokens
+ * - `sessionCacheHitTokensTotal` ← Σ providerCallRecords[].cacheHitInputTokens
+ * - `sessionTokenGenerationSpeed` ← outputTokens / (durationMs − firstTokenLatencyMs)
+ */
+async function seedTokenMetricFixture(page: Page) {
+  await page.evaluate(() => {
+    const appEl = document.querySelector("#app") as unknown as Record<string, unknown>;
+    const globalProperties = (appEl.__vue_app__ as Record<string, unknown>).config as Record<string, unknown>;
+    const pinia = globalProperties.globalProperties as Record<string, unknown>;
+    const stores = (pinia.$pinia as Record<string, unknown>)._s as Map<string, Record<string, unknown>>;
+    const runtime = stores.get("runtime") as { $patch: (value: unknown) => void };
+
+    runtime.$patch({
+      sessionId: "w59-c22-fixture-session",
+      messages: [],
+      turnTraceHistory: [
+        {
+          turnId: "w59-c22-fixture-turn",
+          sessionId: "w59-c22-fixture-session",
+          title: "wave-59 C2-2 物理测量夹具",
+          phase: "completed",
+          traceSteps: [],
+          traceTimeline: [
+            {
+              id: "w59-c22-call-model",
+              kind: "call_model",
+              label: "调用模型",
+              state: "completed",
+              sequence: 1,
+              inputTokens: 1234,
+              outputTokens: 567,
+              cacheHitInputTokens: 89,
+              firstTokenLatencyMs: 321,
+              turnDurationMs: 4200,
+              durationMs: 4200
+            }
+          ],
+          toolActivities: [],
+          providerCallRecords: [
+            {
+              requestKind: "initial_request",
+              providerSource: "provider_decision",
+              providerMode: "live",
+              inputTokens: 1234,
+              cacheHitInputTokens: 89,
+              cacheMissInputTokens: 1145,
+              reasoningTokens: 0,
+              outputTokens: 567,
+              totalTokens: 1801,
+              firstTokenLatencyMs: 321,
+              turnDurationMs: 4200,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            }
+          ],
+          inputTokens: 1234,
+          cacheHitInputTokens: 89,
+          outputTokens: 567,
+          totalTokens: 1801,
+          firstTokenLatencyMs: 321,
+          turnDurationMs: 4200,
+          updatedAt: 1000,
+          sessionSummary: ""
+        }
+      ]
+    });
+  });
+
+  // 条件等待（禁止硬编码等待）：等到四个 token 位确实渲染出数字文本再开始测量，
+  // 避免在 Vue 重渲染落地前读到 `—`；超时即说明注入未生效（属夹具失效，必须显式暴露而非静默降级）。
+  await page.waitForFunction(
+    () => {
+      const tokenSlots = [
+        "status-metric-input-tokens",
+        "status-metric-output-tokens",
+        "status-metric-cache-tokens",
+        "status-metric-token-speed"
+      ];
+      return tokenSlots.every((testid) => {
+        const element = document.querySelector(`[data-testid="${testid}"]`);
+        return Boolean(element) && /\d/.test(element?.textContent ?? "");
+      });
+    },
+    undefined,
+    { timeout: 10_000 }
+  );
+}
+
 test("C2-2: HomeStatusPanel 指标位 tabular-nums 计算样式 + 等位数宽度稳定 + 相邻位左边缘不位移", async ({ page }) => {
   // Arrange
   await openHome(page);
   const statusPanel = page.getByTestId("status-panel-toggle");
   await expect(statusPanel).toBeVisible();
+  // 夹具注入（只注入数据；断言与阈值未改动）
+  await seedTokenMetricFixture(page);
 
   // Act：在真实页面的真实元素上做物理测量（全部读数在同一次 evaluate 内同步完成，
   //      避免 Vue 重渲染回写导致读数漂移）。
@@ -259,9 +364,11 @@ test("C2-2: HomeStatusPanel 指标位 tabular-nums 计算样式 + 等位数宽�
 
     const slots: RawSlot[] = [];
 
-    const header = document.querySelector('[data-testid="status-panel-toggle"]');
+    // wave-59 F2 契约演进（Lead 授权迁移，仅迁移定位锚点）：
+    // 三个计数位由 status-panel-toggle 头部行下移至 token 卡内的 status-metrics-counts 行。
+    const countsRow = document.querySelector('[data-testid="status-metrics-counts"]');
     const countLabels = ["轮次计数位", "模型调用计数位", "工具调用计数位"];
-    const countCarriers = header ? Array.from(header.querySelectorAll("span.inline-flex")) : [];
+    const countCarriers = countsRow ? Array.from(countsRow.querySelectorAll("span.inline-flex")) : [];
     countCarriers.forEach((element, index) => {
       slots.push({ label: countLabels[index] ?? `计数位#${index}`, rowId: "counts", element });
     });

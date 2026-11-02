@@ -1,0 +1,29 @@
+# Wave-59 开工前失败快照（executor, 2026-11-01T22:48:06+08:00）
+# 命令：npx vitest run --reporter=dot  (全量)
+# 结果：Test Files 10 failed | 110 passed (120); Tests 24 failed | 1106 passed | 12 skipped (1142); EXIT=1
+# 判读：下列失败均为并发波次既有问题/红相锚定，记录不修。
+
+tests/acceptance/wave17/tabular-nums-contract.spec.ts > wave-17 C2-1：HomeStatusPanel 指标位 tabular-nums class 契约 > C2-1: 轮次/模型调用/工具调用 三个计数位承载元素必须含 tabular-nums
+tests/acceptance/wave47-ob2-enforcement.spec.ts > ob2 变更级门禁与横切收口点验收测试 (L2-T & L2-AT) > T7-PONYGO-OB2-GATE: ponygo observe audit --level ob2 物理门禁为绿相 (Exit 0)
+tests/acceptance/wave59/wave59-f1-waiting-animation.spec.ts > wave-59 F1：移除重复的等待动画 > F1-1: awaiting-first-signal 下不得存在 .assistant-waiting-dot / .assistant-waiting-panel / assistant-awaiting-first-signal 节点
+tests/acceptance/wave59/wave59-f1-waiting-animation.spec.ts > wave-59 F1：移除重复的等待动画 > F1-3: awaiting-first-signal 时不得残留空 agent 壳（无 agent 文章容器、无 workspace-agent-actions）
+tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts > wave-59 F2：状态卡计数位下移 + 排列 > F2-1: 头部行不得再承载计数位，且必须保留「状态」标题与复制 Session ID 按钮
+tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts > wave-59 F2：状态卡计数位下移 + 排列 > F2-2: 新增 status-metrics-counts 行，位于 token 卡内、token 行之上，顺序为 轮次→模型调用→工具调用
+tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts > wave-59 F2：状态卡计数位下移 + 排列 > F2-3: 三个计数位自身或 ≤2 层祖先必须含 tabular-nums（wave-17 C2 口径的新锚点）
+tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts > wave-59 F2：状态卡计数位下移 + 排列 > F2-4: token 行结构不回归（4 个直接 span.inline-flex），且计数行不得使用 justify-around
+tests/acceptance/wave59/wave59-f3-streaming-dom-stability.spec.ts > wave-59 F3：streaming 闪跳（DOM 结构与节点身份） > F3-1: streaming 期间不得出现 .mr-streaming-raw / .streaming-unrendered-suffix / .mr-streaming-char 尾巴节点
+tests/acceptance/wave59/wave59-f3-streaming-dom-stability.spec.ts > wave-59 F3：streaming 闪跳（DOM 结构与节点身份） > F3-2a: streaming 首个渲染帧起，承载节点 .markdown-body 必须已存在（stale-while-render 前提）
+tests/acceptance/wave59/wave59-f3-streaming-dom-stability.spec.ts > wave-59 F3：streaming 闪跳（DOM 结构与节点身份） > F3-3a: MarkdownRenderer streaming→完成态切换，.markdown-body 身份不变且完成帧含完整内容
+tests/acceptance/wave59/wave59-f3-streaming-dom-stability.spec.ts > wave-59 F3：streaming 闪跳（DOM 结构与节点身份） > F3-3b: 生产路径（HomeWorkspace）streaming→完成态切换，正文承载节点 .markdown-body 身份不变且完成帧含完整内容
+tests/acceptance/wave59/wave59-f3-streaming-dom-stability.spec.ts > wave-59 F3：streaming 闪跳（DOM 结构与节点身份） > F3-4: WorkspaceTurnItem 内容区不得出现 .assistant-streaming-char 逐字符节点，流式与完成态共用同一容器
+tests/acceptance/wave59/wave59-f4-runtime-status-accuracy.spec.ts > wave-59 F4：底部状态消息准确性 > F4-1: hop 内 reasoning delta 后 mode=thinking，紧随 text delta 后必须切到 mode=responding
+tests/acceptance/wave59/wave59-f4-runtime-status-accuracy.spec.ts > wave-59 F4：底部状态消息准确性 > F4-2: 工具事件后的新 hop（尚无 reasoning/text delta）→ mode=thinking 且状态条 data-visible=true
+tests/acceptance/wave59/wave59-f4-runtime-status-accuracy.spec.ts > wave-59 F4：底部状态消息准确性 > F4-5: retrying 不得是冒充能力的不可达分支（要么 store 真实可触达，要么已显式删除）
+tests/HomeWorkspaceMarkdown.spec.ts > HomeWorkspace markdown rendering > reveals streaming assistant content with continuous release (no per-character nodes, F3-4)
+tests/HomeWorkspace.spec.ts > HomeWorkspace > shows no first-signal waiting animation for an empty pending assistant (and no reasoning placeholder)
+tests/HomeWorkspace.spec.ts > HomeWorkspace > shows the status-bar waiting indication (not jumping dots) before the first assistant signal arrives
+tests/MarkdownRenderer.spec.ts > MarkdownRenderer > keeps rendering new markdown content while forceMarkdownStreaming is active
+tests/MarkdownRenderer.spec.ts > MarkdownRenderer > renders markdown incrementally while forceMarkdownStreaming is active
+tests/MarkdownRenderer.spec.ts > MarkdownRenderer > renders the streaming suffix without any separate unrendered-suffix node (F3-1)
+tests/red-evidence-baseline/baseline-red.spec.ts > 基线红相取证（T7/T8/T9 的同一组断言） > T7 基线应当失败：/plan 命中时基线仍然提交 turn
+tests/red-evidence-baseline/baseline-red.spec.ts > 基线红相取证（T7/T8/T9 的同一组断言） > T8 基线应当失败：/compact 未触发 compact_session

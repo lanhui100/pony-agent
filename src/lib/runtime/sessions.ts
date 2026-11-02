@@ -82,6 +82,13 @@ export function cloneRetrievedContext(retrievedContext?: RetrievedContextState |
   };
 }
 
+/**
+ * Wave-59 A-59-5：hop 级流式类型（与 `stores/runtime.ts` 的 `ActiveStreamKind` 同构）。
+ * 该字段由 store 局部扩展 `RuntimeState` 承载，故此处以局部别名声明，避免改动
+ * `src/lib/runtime/types.ts`（并发写域）。
+ */
+type ActiveStreamKindValue = "reasoning" | "content" | null | undefined;
+
 export function createBlankSessionRuntimeFields() {
   return {
     sessionSummary: "",
@@ -95,7 +102,12 @@ export function createBlankSessionRuntimeFields() {
     inputTokens: null as number | null,
     outputTokens: null as number | null,
     totalTokens: null as number | null,
-    firstTokenLatencyMs: null as number | null
+    firstTokenLatencyMs: null as number | null,
+    /**
+     * Wave-59 A-59-5：hop 级流式类型属会话内瞬时态，会话切换/快照恢复一律清空
+     * （undefined = 尚未开始，交由消费侧回退旧判据）。
+     */
+    activeStreamKind: undefined as ActiveStreamKindValue
   };
 }
 
@@ -218,6 +230,8 @@ export function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: Ses
   state.streamBufferTurnId = null;
   state.streamBufferText = "";
   state.streamBufferReasoning = "";
+  // Wave-59 A-59-5：快照不含 hop 级流式类型 ⇒ 恢复时清除，杜绝跨会话瞬时态泄漏。
+  (state as RuntimeState & { activeStreamKind?: ActiveStreamKindValue }).activeStreamKind = undefined;
 }
 
 export function filterDeletingSessions(

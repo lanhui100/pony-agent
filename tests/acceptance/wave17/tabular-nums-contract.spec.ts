@@ -19,6 +19,11 @@
  *   （2 层上界 = 允许"承载 span 自身"或"该位的直接容器/行容器"两种等价实现，
  *    但不允许把 tabular-nums 撒在整个面板根节点上充数。）
  *
+ * wave-59 契约演进（Lead 授权迁移，原意图不变、仅迁移定位锚点）：
+ *   三个计数位（轮次/模型调用/工具调用）随 wave-59 F2 下移至 token 卡内的
+ *   `[data-testid="status-metrics-counts"]` 行；C2-1 的定位锚点由头部行迁移到该行，
+ *   断言口径（3 个位点 + 逐位点 tabular-nums + 数值自检）保持原样。
+ *
  * 作者：test-agent（L2-T）。红相锚定后本文件冻结只读，任何修改需 Lead 批准。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -107,16 +112,27 @@ describe("wave-17 C2-1：HomeStatusPanel 指标位 tabular-nums class 契约", (
     });
   }
 
+  /**
+   * 契约演进（wave-59 F2-1/F2-2，Lead 授权迁移）：三个计数位由 `status-panel-toggle` 头部行
+   * 下移至 token 指标卡内的 `status-metrics-counts` 行 —— **仅迁移定位锚点**，
+   * C2-1 的原断言语义（3 个位点、逐位点 tabular-nums、数值自检）保持不变。
+   */
   it("C2-1: 轮次/模型调用/工具调用 三个计数位承载元素必须含 tabular-nums", () => {
     // Arrange
     const wrapper = mountStatusPanel();
-    const header = wrapper.get('[data-testid="status-panel-toggle"]');
+
+    // Assert（锚点迁移后的存在性自检：选择器落空时必须给出定位失效的明确失败，而不是空断言）
+    expect(
+      wrapper.find('[data-testid="status-metrics-counts"]').exists(),
+      "C2-1 锚点（wave-59 F2-2）：计数位已下移至 [data-testid=\"status-metrics-counts\"] 行，该行必须存在"
+    ).toBe(true);
+    const countsRow = wrapper.get('[data-testid="status-metrics-counts"]');
 
     // Assert（结构锚点先自检，防止选择器落空造成空断言）
-    const countCarriers = header.findAll("span.inline-flex");
+    const countCarriers = countsRow.findAll("span.inline-flex");
     expect(
       countCarriers,
-      "status-panel-toggle 行内必须恰好存在 3 个计数承载 span（轮次/模型调用/工具调用）"
+      "status-metrics-counts 行内必须恰好存在 3 个计数承载 span（轮次/模型调用/工具调用）"
     ).toHaveLength(3);
 
     // Assert（逐位点 class 契约）

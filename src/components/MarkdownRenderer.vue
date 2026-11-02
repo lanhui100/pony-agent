@@ -31,16 +31,28 @@ const emit = defineEmits<{
 const attrs = useAttrs();
 
 const renderedHtml = ref("");
-const unrenderedSuffix = ref("");
 const renderPending = ref(false);
 const blockedLinkNotice = ref("");
 let blockedLinkNoticeTimerId: number | null = null;
 let renderVersion = 0;
 let renderTimerId: number | null = null;
 let idleCallbackId: number | null = null;
-let lastRenderedContentLength = 0;
-let lastRenderedFullContent = "";
-let streamRenderScheduled = false;
+/**
+ * Wave-59 F3 / RC3：上一次成功渲染所消费的**输入快照**。
+ *
+ * 必须是 `executeRender` 入口处取到的 `props.content`，而不是 await 之后的 `props.content`；
+ * 否则 await 期间到达的字符会被记成「已渲染」却没有进入 HTML，下一次渲染才补齐
+ * ⇒ 文字出现-消失-再出现（RC3）。
+ */
+let lastRenderedSource = "";
+/**
+ * Wave-59 F3：在飞渲染的版本号（null ⇒ 无在飞渲染）。
+ * 与 `renderDirty` 一起构成 stale-while-render 的补排闭环：渲染在飞期间到达的新内容
+ * 不再叠加新排程（不呈现尾巴），但**必须**被记为 dirty，落地后立刻补排一次，
+ * 否则被吞掉的增量会永远停在上一次快照（在线流式内容会卡住）。
+ */
+let renderInFlightVersion: number | null = null;
+let renderDirty = false;
 
 const PLAINTEXT_RENDER_COMPLETE_MIN_INTERVAL_MS = 120;
 const PLAINTEXT_RENDER_COMPLETE_MIN_CHARS = 24;
@@ -53,6 +65,16 @@ const plainTextMode = computed(() => {
   if (props.preferPlainTextStreaming) return true;
   return isSimpleTextContent(props.content);
 });
+
+/** 纯文本快路径的唯一渲染形态：转义后写入同一承载节点（不新增尾巴节点，不做逐字符动画）。 */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
 
 function cancelScheduledRender() {
   if (typeof window === "undefined") {
@@ -116,152 +138,161 @@ function showBlockedLinkNotice() {
   }, 3000);
 }
 
-function shouldRenderNow(content: string): boolean {
-  if (!props.streaming) {
-    return true;
-  }
-
-  // 流式模式下只要有新内容到达即可参与刷新，让增量块和尾部平滑过渡
-  if (content.length > lastRenderedContentLength) {
-    return true;
-  }
-
-  if (endsWithNaturalBoundary(content)) {
-    return true;
-  }
-
-  return false;
-}
-
+/**
+ * Wave-59 F3 / D-59-1「stale-while-render」：只呈现上一次渲染完成的 HTML。
+ *
+ * 未渲染的尾巴不再以任何独立节点呈现（RC1 的块级新行位移、RC2 的逐字符重播随之消失），
+ * 代价是可见文本滞后 ≤ 1 个渲染周期（16ms + parse）。
+ */
 async function executeRender(version: number) {
+  // RC3：输入快照在 await 之前取，保证「写入 renderedHtml 的 source」与「标记已渲染的 source」同一。
+  const source = props.content;
   try {
     let html: string;
     if (props.streaming) {
       // 块级增量优化与代码块隔离
-      const { committed, tail } = splitMarkdownBlocks(props.content);
+      const { committed, tail } = splitMarkdownBlocks(source);
       if (committed.length > 0) {
-        const committedHtmlList = await Promise.all(committed.map((b) => renderMarkdown(b)));
+        const committedHtmlList = await Promise.all(committed.map((block) => renderMarkdown(block)));
         const tailHtml = tail.trim() ? await renderPartialMarkdown(tail) : "";
         html = [...committedHtmlList, tailHtml].filter(Boolean).join("\n");
       } else {
-        html = await renderPartialMarkdown(props.content);
+        html = await renderPartialMarkdown(source);
       }
     } else {
-      html = await renderMarkdown(props.content);
+      html = await renderMarkdown(source);
     }
     if (version !== renderVersion) return;
     renderedHtml.value = html;
-    lastRenderedFullContent = props.content;
-    renderPending.value = false;
-    streamRenderScheduled = false;
-    lastRenderedContentLength = props.content.length;
-    unrenderedSuffix.value = "";
+    lastRenderedSource = source;
+    finishRender(version);
     emit("render-complete", {
-      contentLength: props.content.length,
+      contentLength: source.length,
       streaming: Boolean(props.streaming)
     });
   } catch (err) {
     console.error("[MarkdownRenderer] executeRender failed:", err);
     if (version !== renderVersion) return;
-    renderedHtml.value = "";
-    lastRenderedFullContent = props.content;
-    renderPending.value = false;
-    streamRenderScheduled = false;
-    lastRenderedContentLength = props.content.length;
-    unrenderedSuffix.value = props.content;
+    // 失败也保持正文可见：降级为转义纯文本，不得留下空白承载节点（F3-5 无白屏帧）。
+    renderedHtml.value = escapeHtml(source);
+    lastRenderedSource = source;
+    finishRender(version);
+    emit("render-complete", {
+      contentLength: source.length,
+      streaming: Boolean(props.streaming)
+    });
   }
 }
 
+/**
+ * 收尾一次渲染：清在飞标记，并在「在飞期间又来了新内容」时立即补排一次。
+ * 只有当前生效版本（version === renderVersion）才会走到这里，旧版本由版本守卫提前 return。
+ */
+function finishRender(version: number) {
+  if (renderInFlightVersion === version) {
+    renderInFlightVersion = null;
+  }
+  renderPending.value = false;
+  if (!renderDirty || renderInFlightVersion != null) {
+    return;
+  }
+  renderDirty = false;
+  if (props.streaming) {
+    scheduleStreamingRender();
+    return;
+  }
+  scheduleNonStreamingRender();
+}
+
 function scheduleStreamingRender() {
-  if (streamRenderScheduled) {
+  // 在飞期间的增量不叠加排程（stale-while-render：不呈现未渲染尾巴），只记 dirty 待补排。
+  if (renderInFlightVersion != null) {
+    renderDirty = true;
     return;
   }
 
   cancelScheduledRender();
   const version = ++renderVersion;
-  streamRenderScheduled = true;
+  renderInFlightVersion = version;
   renderPending.value = true;
 
-  // 流式增量更新采用紧凑微节流，优先通过微任务执行；不再套用长达 1800ms 的 rIC，避免在频繁推流时卡死
+  // F3-5②：承载节点尚无 HTML 时立即渲染（微任务内落地，避免「content > 0 但正文为空」的白屏帧）；
+  // 之后在已渲染内容之上做 16ms 紧凑节流增量（stale-while-render）。
+  if (!renderedHtml.value) {
+    void executeRender(version);
+    return;
+  }
+
   renderTimerId = window.setTimeout(() => {
     renderTimerId = null;
-    executeRender(version);
+    void executeRender(version);
   }, 16);
 }
 
 function scheduleNonStreamingRender(immediate = false) {
   cancelScheduledRender();
   const version = ++renderVersion;
+  renderDirty = false;
   // 不清空 renderedHtml，保持上一次渲染的内容可见，直到新渲染完成
   renderPending.value = Boolean(props.content.trim());
 
   if (!renderPending.value || typeof window === "undefined") {
+    // A-59-1：本分支不会安排任何渲染 ⇒ 不得留下在飞标记。
+    // 否则该实例后续的流式更新会被 `renderDirty` 判定为「等前一次渲染收尾」而永久吞掉
+    // （stale-while-render 闭环断裂：内容停在空白快照上）。
     renderPending.value = false;
+    renderInFlightVersion = null;
     return;
   }
 
-  if (immediate) {
-    executeRender(version);
+  // 只有真正排程/发起的渲染才登记在飞版本号（由 finishRender 或版本守卫收尾）。
+  renderInFlightVersion = version;
+
+  // F3-3：完成帧首次落地不排队，避免「先清空再重绘」；已渲染内容仍保留至新 HTML 落地。
+  if (immediate || !renderedHtml.value) {
+    void executeRender(version);
     return;
   }
 
   renderTimerId = window.setTimeout(() => {
     renderTimerId = null;
-    executeRender(version);
+    void executeRender(version);
   }, 16);
 }
 
 function handleContentChange(content: string) {
   if (props.streaming) {
-    // 纯文本快路径：跳过 markdown 解析，避免 v-html 重排
+    // 纯文本快路径：无 markdown 语法 ⇒ 同步转义写入承载节点（不解析、不排程、不产生尾巴节点）
     if (plainTextMode.value) {
-      const previousContent = lastRenderedFullContent;
-      if (renderedHtml.value || unrenderedSuffix.value || lastRenderedFullContent !== content) {
-        renderedHtml.value = "";
-        unrenderedSuffix.value = "";
-        lastRenderedContentLength = 0;
-        lastRenderedFullContent = content;
-        const now = Date.now();
-        const contentDelta = content.length - previousContent.length;
-        if (
-          previousContent.length > 0
-          && contentDelta > 0
-          && (
-            contentDelta >= PLAINTEXT_RENDER_COMPLETE_MIN_CHARS
-            || endsWithNaturalBoundary(content)
-            || now - lastPlainTextRenderCompleteAt >= PLAINTEXT_RENDER_COMPLETE_MIN_INTERVAL_MS
-          )
-        ) {
-          lastPlainTextRenderCompleteAt = now;
-          emit("render-complete", {
-            contentLength: content.length,
-            streaming: true
-          });
-        }
+      const previousContent = lastRenderedSource;
+      renderedHtml.value = escapeHtml(content);
+      lastRenderedSource = content;
+      const now = Date.now();
+      const contentDelta = content.length - previousContent.length;
+      if (
+        previousContent.length > 0
+        && contentDelta > 0
+        && (
+          contentDelta >= PLAINTEXT_RENDER_COMPLETE_MIN_CHARS
+          || endsWithNaturalBoundary(content)
+          || now - lastPlainTextRenderCompleteAt >= PLAINTEXT_RENDER_COMPLETE_MIN_INTERVAL_MS
+        )
+      ) {
+        lastPlainTextRenderCompleteAt = now;
+        emit("render-complete", {
+          contentLength: content.length,
+          streaming: true
+        });
       }
       return;
     }
 
-    if (content.length < lastRenderedContentLength) {
-      // Batch flush: content was moved to the fade span.
-      // Clear renderedHtml to prevent duplication with the separate fade <span>.
-      renderedHtml.value = "";
-      lastRenderedContentLength = 0;
-    }
-
-    if (streamRenderScheduled) {
-      unrenderedSuffix.value = content.slice(lastRenderedContentLength);
-      return;
-    }
-
-    if (!shouldRenderNow(content)) {
-      unrenderedSuffix.value = content.slice(lastRenderedContentLength);
-      return;
-    }
-
-    unrenderedSuffix.value = content.slice(lastRenderedContentLength);
+    // markdown 流式：排程器内部对「在飞渲染」去重并记 dirty（stale-while-render：不呈现未渲染尾巴）
     scheduleStreamingRender();
-  } else if (lastRenderedFullContent !== content) {
+    return;
+  }
+
+  if (lastRenderedSource !== content) {
     scheduleNonStreamingRender();
   }
 }
@@ -278,13 +309,9 @@ watch(
   () => props.streaming,
   (isStreaming, wasStreaming) => {
     if (wasStreaming && !isStreaming) {
-      // Streaming ended
-      streamRenderScheduled = false;
-      unrenderedSuffix.value = "";
+      // Streaming ended：保留当前已渲染 HTML 直到完整渲染落地（不重建节点、不清空正文）
+      renderDirty = false;
       lastPlainTextRenderCompleteAt = 0;
-
-      // Otherwise force a final full render immediately
-      lastRenderedContentLength = 0;
       scheduleNonStreamingRender(true);
     }
   }
@@ -293,10 +320,9 @@ watch(
 watch(markdownRenderEpoch, () => {
   cancelScheduledRender();
   renderPending.value = false;
-  streamRenderScheduled = false;
-  lastRenderedContentLength = 0;
-  lastRenderedFullContent = "";
-  unrenderedSuffix.value = "";
+  renderInFlightVersion = null;
+  renderDirty = false;
+  lastRenderedSource = "";
 
   if (!props.content.trim() || (props.streaming && plainTextMode.value)) {
     return;
@@ -320,32 +346,23 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <!-- 单一稳定根元素：无论 streaming 状态如何变化，不会替换 DOM 子树 -->
+  <!--
+    Wave-59 F3-2/F3-3：单一稳定根 + 唯一常驻承载节点。
+    - `.markdown-body` 无 v-if，从首帧起就存在（F3-2a），内容增长与 streaming→done 只替换
+      其 `v-html` 内容，不重建 DOM 节点（F3-2b/F3-3a 的节点身份断言）；
+    - 未渲染尾巴不以任何独立节点呈现（F3-1），也不再有逐字符 span（D-59-2）。
+  -->
   <div v-bind="attrs" :class="[wrapperClass, toneClass]" @click="onMarkdownClick">
     <div v-if="blockedLinkNotice" class="mr-blocked-link-notice" role="status" aria-live="polite">
       {{ blockedLinkNotice }}
     </div>
-    <!-- 流式 + 纯文本快路径：直接显示文本，不加 v-html -->
-    <div v-if="streaming && plainTextMode && content" class="markdown-body whitespace-pre-wrap">{{ content }}</div>
-    <!-- 流式 + 正常 markdown 渲染路径 -->
-    <template v-else-if="streaming">
-      <div v-if="renderedHtml" class="markdown-body" v-html="renderedHtml" />
-      <div v-if="forceMarkdownStreaming && unrenderedSuffix" class="mr-streaming-raw whitespace-pre-wrap">
-        <span v-for="(char, i) in unrenderedSuffix.split('')" :key="i" class="mr-streaming-char">{{ char }}</span>
-      </div>
-      <template v-if="!forceMarkdownStreaming">
-        <span v-if="unrenderedSuffix" class="streaming-unrendered-suffix whitespace-pre-wrap">{{ unrenderedSuffix }}</span>
-        <div v-else-if="content" class="whitespace-pre-wrap">{{ content }}</div>
-      </template>
-      <div v-else-if="content && !renderedHtml && !unrenderedSuffix" class="mr-streaming-raw whitespace-pre-wrap">
-        <span v-for="(char, i) in content.split('')" :key="i" class="mr-streaming-char">{{ char }}</span>
-      </div>
-    </template>
-    <!-- 最终渲染（非流式） -->
-    <template v-else>
-      <div v-if="renderedHtml" class="markdown-body" v-html="renderedHtml" />
-      <div v-else-if="content" class="whitespace-pre-wrap" :aria-busy="renderPending ? 'true' : undefined">{{ content }}</div>
-    </template>
+    <div
+      class="markdown-body"
+      :class="plainTextMode ? 'whitespace-pre-wrap' : undefined"
+      :data-streaming="streaming ? 'true' : undefined"
+      :aria-busy="renderPending ? 'true' : undefined"
+      v-html="renderedHtml"
+    />
   </div>
 </template>
 
@@ -358,40 +375,5 @@ onBeforeUnmount(() => {
   color: #8a5a1f;
   font-size: 12px;
   line-height: 1.6;
-}
-
-.mr-streaming-raw {
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  line-height: 1.7;
-  color: #3d342d;
-}
-
-.mr-streaming-char {
-  display: inline;
-  white-space: pre-wrap;
-  animation-name: mr-stream-char-fade-in;
-  animation-duration: 50ms;
-  animation-timing-function: ease-out;
-  animation-fill-mode: both;
-}
-
-@keyframes mr-stream-char-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(-0.04em);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mr-streaming-char {
-    animation: none !important;
-    opacity: 1 !important;
-    transform: none !important;
-  }
 }
 </style>

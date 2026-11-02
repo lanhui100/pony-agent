@@ -328,7 +328,22 @@ function releaseTurnEventRegistry(registry: TurnEventRegistry): void {
   }
 }
 
-export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState => {
+/**
+ * Wave-59 F4 / D-59-3：hop 级流式类型。
+ * - `undefined`：未接线（既有夹具 / 历史状态）⇒ 回退旧判据；
+ * - `null`：本 hop 尚无 reasoning/text 输出（如工具后的新 hop）⇒ 承载 hop 级等待；
+ * - `"reasoning"`：本 hop 正在流出推理；`"content"`：本 hop 已开始流出正文（优先）。
+ */
+export type ActiveStreamKind = "reasoning" | "content" | null;
+
+/**
+ * Wave-59 F4：本波新增 `activeStreamKind` 属于 store 内部流转字段。
+ * 局部扩展 `RuntimeState` 而不改 `src/lib/runtime/types.ts`（该文件与本波并发写域重叠），
+ * 语义与位置等价于在 RuntimeState 中声明。
+ */
+type RuntimeStateW59 = RuntimeState & { activeStreamKind?: ActiveStreamKind };
+
+export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeStateW59 => {
     const persisted = loadPersistedRuntimeState(DEFAULT_SESSION_ID);
 
       return {
@@ -339,6 +354,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         deletingSessionSet: {},
         sessionSwitchToken: 0,
         sessionError: null,
+        // C-9：成功/中性反馈通道（不得复用 sessionError 承载成功文案）。
+        sessionNotice: null,
         // PA-081：Workspace 树导航状态（注册表 + 激活项 localStorage 单一真相源）。
         workspaceList: [] as WorkspaceRecord[],
         workspaceListLoaded: false,
@@ -400,6 +417,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       streamBufferTurnId: null,
       streamBufferText: "",
       streamBufferReasoning: "",
+      /** Wave-59 F4 / D-59-3：hop 级流式类型（null=本 hop 无输出；undefined=未接线⇒旧判据）。 */
+      activeStreamKind: undefined as ActiveStreamKind | undefined,
       browserPreviewRunToken: 0,
       messages: persisted?.messages ?? [],
       attachmentAssets: persisted?.attachmentAssets ?? [],
@@ -538,26 +557,52 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             startTime: null
           };
         }
+        // C-9：无错误、无提交时，以 info 模式展示中性/成功反馈（如斜杠命令提示）。
+        if (state.sessionNotice?.trim()) {
+          return {
+            mode: "info",
+            label: state.sessionNotice.trim(),
+            startTime: null
+          };
+        }
         return null;
       }
       const activeAssistantMessage = state.activeTurnId
         ? state.messages.find((m) => m.turnId === state.activeTurnId && m.role === "assistant")
         : null;
-      const isStreamingReasoning = Boolean(
-        state.streamBufferReasoning ||
-        (activeAssistantMessage && activeAssistantMessage.reasoningContent)
-      );
-      const hasStreamingContent = Boolean(
-        state.streamBufferText ||
-        (activeAssistantMessage && activeAssistantMessage.content)
-      );
+      // Wave-59 F4 / D-59-3：hop 级流式类型优先于「本轮累计内容」判据。
+      // RC6（出现过 reasoning 就整轮 thinking）、RC7（多 hop 后仍判正在回复）由此消除；
+      // `undefined`（未接线/既有夹具）严格回退旧判据，保证 wave-14 三例语义不变（F4-4）。
+      const activeStreamKind = state.activeStreamKind;
+      const isStreamingReasoning = activeStreamKind === "reasoning"
+        ? true
+        : activeStreamKind === "content"
+          ? false
+          : Boolean(
+            state.streamBufferReasoning ||
+            (activeAssistantMessage && activeAssistantMessage.reasoningContent)
+          );
+      const hasStreamingContent = activeStreamKind === "content"
+        ? true
+        : activeStreamKind === "reasoning" || activeStreamKind === null
+          ? false
+          : Boolean(
+            state.streamBufferText ||
+            (activeAssistantMessage && activeAssistantMessage.content)
+          );
+      // RC9 / F4-5：retrying 的真实可达信号源 —— 超时（可重试错误）重试提交时，store 把
+      // `TIMEOUT_RETRY_PENDING_MESSAGE` 写进 pending assistant（见 submitTurn）；首个 delta 与
+      // `turn:started` 都会清空该占位文案 ⇒ 回到 calling_model 后重试信号自然清零。
+      // 无后端「最大重试次数」信号，故不传 retryMax（status.ts 缺省时降级为「正在重试…」，不虚构分母）。
+      const retryingAfterTimeout = activeAssistantMessage?.content === TIMEOUT_RETRY_PENDING_MESSAGE;
       return resolveAgentRuntimeStatus({
         isSubmitting: state.isSubmitting,
         phase: state.phase,
         toolActivities: state.toolActivities,
         turnStartedAt: state.activeTurnStartedAtMs ?? null,
         streamingReasoning: isStreamingReasoning,
-        hasStreamingContent
+        hasStreamingContent,
+        retryAttempt: retryingAfterTimeout ? 1 : undefined
       });
     },
     /**
@@ -720,6 +765,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       const blankFields = createBlankSessionRuntimeFields();
       this.phase = "idle";
       this.error = null;
+      this.sessionNotice = null;
       this.draftMessage = "";
       this.clearPendingAttachments();
       this.sessionHydrating = false;
@@ -736,6 +782,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = blankFields.outputTokens;
       this.totalTokens = blankFields.totalTokens;
       this.firstTokenLatencyMs = blankFields.firstTokenLatencyMs;
+      // Wave-59 A-59-5：hop 级流式类型属会话内瞬时态，不得跨会话继承（B-59-1 同类缺口）。
+      this.activeStreamKind = blankFields.activeStreamKind;
       this.activeProviderCallRecords = [];
       this.isSubmitting = false;
       this.activeTurnId = null;
@@ -1666,6 +1714,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = restoredState?.outputTokens ?? blankFields.outputTokens;
       this.totalTokens = restoredState?.totalTokens ?? blankFields.totalTokens;
       this.firstTokenLatencyMs = restoredState?.firstTokenLatencyMs ?? blankFields.firstTokenLatencyMs;
+      // Wave-59 A-59-5：会话快照不携带 hop 级瞬时态；恢复目标会话时一律清空，
+      // 由随后的「后台运行轮恢复」分支按该轮缓冲重新推导。
+      this.activeStreamKind = blankFields.activeStreamKind;
       this.activeProviderCallRecords = [];
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
@@ -2222,7 +2273,17 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (bgTurn.reasoningBuffer) {
           this.streamBufferReasoning = bgTurn.reasoningBuffer;
         }
+        // Wave-59 A-59-5：hop 级流式类型必须按**目标会话后台轮的真实缓冲**重新推导，
+        // 不得沿用切走前会话的瞬时值（否则本 hop 无正文却判「正文流式」，状态条被隐藏）。
+        this.activeStreamKind = bgTurn.textBuffer
+          ? "content"
+          : bgTurn.reasoningBuffer
+            ? "reasoning"
+            : null;
         delete this.runningSessionMap[nextSessionId];
+      } else {
+        // Wave-59 A-59-5：目标会话无后台运行轮 ⇒ 不携带任何 hop 级瞬时态。
+        this.activeStreamKind = undefined;
       }
 
       // 三级树 #3：冻结归属随会话切换同步——切回旧会话时从目录投影恢复，
@@ -3219,6 +3280,26 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
       this.scheduleDeferredPersist(OUTPUT_END_PERSIST_DELAY_MS);
     },
+    /**
+     * Wave-59 F4-5 / RC9：清空「超时重连中...」占位文案 —— retrying 的唯一可视信号。
+     *
+     * 与 `ensureAssistantMessage` 的 `assistant-${turnId}` id 约定**解耦**：清零路径不得依赖
+     * 单个 handler 的消息身份/门禁（历史/外部夹具可能使用其他 id），否则重试态会永久滞留。
+     * 幂等；给定 turnId 时只清理该轮，避免串轮误清。
+     */
+    clearTimeoutRetryPlaceholder(turnId?: string | null) {
+      for (const message of this.messages) {
+        if (message.role !== "assistant") {
+          continue;
+        }
+        if (turnId && message.turnId !== turnId) {
+          continue;
+        }
+        if (message.content === TIMEOUT_RETRY_PENDING_MESSAGE) {
+          message.content = "";
+        }
+      }
+    },
     ensureAssistantMessage(turnId: string, modelName?: string | null) {
       const messageId = `assistant-${turnId}`;
       const existingMessage = this.messages.find((item) => item.id === messageId && item.role === "assistant");
@@ -3737,6 +3818,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       };
 
       await listen("turn:started", (payload) => {
+        // Wave-59 F4-5 / D-59-9：retry 占位清零**不得**依赖 turnId 门禁。
+        // 生产路径里本地 requestId 与后端回传 turnId 可能不同（submitTurn 用本地 id 建消息，
+        // 后端事件带自己的 turnId），若把清零放在 `activeTurnId !== payload.turnId` 之后，
+        // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
+        if (isEventForCurrentSession(payload)) {
+          this.clearTimeoutRetryPlaceholder();
+        }
         if (!isEventForCurrentSession(payload)) {
           return;
         }
@@ -3752,6 +3840,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.streamBufferTurnId = null;
         this.streamBufferText = "";
         this.streamBufferReasoning = "";
+        // Wave-59 F4 / D-59-3：新一轮（含工具后的新 hop）起点 ⇒ 本 hop 尚无输出。
+        this.activeStreamKind = null;
         this.resetStreamDebugMetrics();
         this.clearPendingTraceTimeline();
 
@@ -3839,6 +3929,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         const deltaText = payload.text ?? "";
         const deltaReasoning = payload.reasoningContent ?? "";
 
+        // Wave-59 F4-5 / RC9：任何真实流式增量到达 ⇒ 「超时重连中...」占位作废（retrying 清零）。
+        // 不按 turnId 过滤：占位消息的 turnId 可能仍是本地 requestId（与后端事件 turnId 不同）。
+        if (deltaText || deltaReasoning) {
+          this.clearTimeoutRetryPlaceholder();
+        }
+
         const assistantMessage = this.ensureAssistantMessage(
           payload.turnId,
           buildAssistantModelLabel(this.providerName, this.providerModel)
@@ -3861,6 +3957,15 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
 
         if (deltaText) {
           this.streamBufferText += deltaText;
+        }
+
+        // Wave-59 F4 / D-59-3：记录本 hop 当前流式类型。
+        // 正文到达即锁定 "content"（同 hop 内后续 reasoning delta 不得把状态退回「思考中」）；
+        // 仅有 reasoning 时记 "reasoning" ⇒ 状态条「思考中」；正文一到立刻切「正在回复」。
+        if (deltaText) {
+          this.activeStreamKind = "content";
+        } else if (deltaReasoning && this.activeStreamKind !== "content") {
+          this.activeStreamKind = "reasoning";
         }
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
@@ -4024,6 +4129,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.flushBufferedStreamText(payload.turnId);
         this.flushPendingTraceTimeline();
 
+        // Wave-59 F4 / D-59-3：工具事件即 hop 边界 ⇒ 复位本 hop 流式类型
+        // （工具后的新 hop 在首个 delta 前必须回到「思考中」而不是「正在回复」，RC7/RC8）。
+        this.activeStreamKind = null;
+
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         debugLog("event:tool", {
           turnId: payload.turnId,
@@ -4060,6 +4169,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       await listen("turn:output_end", (payload) => {
+        // Wave-59 F4-5 / D-59-9：retry 占位清零**不得**依赖 turnId 门禁。
+        // 生产路径里本地 requestId 与后端回传 turnId 可能不同（submitTurn 用本地 id 建消息，
+        // 后端事件带自己的 turnId），若把清零放在 `activeTurnId !== payload.turnId` 之后，
+        // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
+        if (isEventForCurrentSession(payload)) {
+          this.clearTimeoutRetryPlaceholder();
+        }
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
@@ -4114,6 +4230,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.commitTurnEventCursor(payload);
         this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
+        // Wave-59 F4 / D-59-3：hop 完成 ⇒ 复位本 hop 流式类型（下一 hop 从「思考中」起算）。
+        this.activeStreamKind = null;
         // R4/Wave-15：hop 完成即产出该次调用的 per-call 值（不等 turn:completed）；无记录时保持既有值。
         this.applyActiveProviderCallRecords(payload.providerCallRecords);
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
@@ -4127,6 +4245,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       await listen("turn:completed", (payload) => {
+        // Wave-59 F4-5 / D-59-9：retry 占位清零**不得**依赖 turnId 门禁。
+        // 生产路径里本地 requestId 与后端回传 turnId 可能不同（submitTurn 用本地 id 建消息，
+        // 后端事件带自己的 turnId），若把清零放在 `activeTurnId !== payload.turnId` 之后，
+        // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
+        if (isEventForCurrentSession(payload)) {
+          this.clearTimeoutRetryPlaceholder();
+        }
         // Wave-1 C6：turn 结束（含后台会话 turn）即刷新计划/目标面板；
         // 同一 turnId 只刷新一次，失败不影响主流程。
         refreshPlanGoalAfterTurn(payload.turnId, payload.sessionId ?? this.sessionId);
@@ -4162,6 +4287,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           return;
         }
+        // Wave-59 B-59-1：终态必须无条件复位 hop 级流式类型。
+        // 末次模型调用按协议不保证发 turn:hop_complete，若只在 turn:started/hop_complete 复位，
+        // 本轮结束会残留 "content"，使下一轮 awaiting-first-signal 窗口被误判为「正文流式」
+        // 而隐藏状态条（F1-2 / F4-2 语义失效）。
+        this.activeStreamKind = null;
         if (!this.shouldProcessTurnEvent(payload)) {
           return;
         }
@@ -4526,6 +4656,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       await listen("turn:failed", (payload) => {
+        // Wave-59 F4-5 / D-59-9：retry 占位清零**不得**依赖 turnId 门禁。
+        // 生产路径里本地 requestId 与后端回传 turnId 可能不同（submitTurn 用本地 id 建消息，
+        // 后端事件带自己的 turnId），若把清零放在 `activeTurnId !== payload.turnId` 之后，
+        // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
+        if (isEventForCurrentSession(payload)) {
+          this.clearTimeoutRetryPlaceholder();
+        }
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
@@ -4558,6 +4695,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           return;
         }
+        // Wave-59 B-59-1：终态必须无条件复位 hop 级流式类型。
+        // 末次模型调用按协议不保证发 turn:hop_complete，若只在 turn:started/hop_complete 复位，
+        // 本轮结束会残留 "content"，使下一轮 awaiting-first-signal 窗口被误判为「正文流式」
+        // 而隐藏状态条（F1-2 / F4-2 语义失效）。
+        this.activeStreamKind = null;
         if (!this.shouldProcessTurnEvent(payload)) {
           return;
         }
@@ -4756,6 +4898,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       await listen("turn:cancelled", (payload) => {
+        // Wave-59 F4-5 / D-59-9：retry 占位清零**不得**依赖 turnId 门禁。
+        // 生产路径里本地 requestId 与后端回传 turnId 可能不同（submitTurn 用本地 id 建消息，
+        // 后端事件带自己的 turnId），若把清零放在 `activeTurnId !== payload.turnId` 之后，
+        // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
+        if (isEventForCurrentSession(payload)) {
+          this.clearTimeoutRetryPlaceholder();
+        }
         // Detect terminal event for a background session's turn
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
@@ -4768,6 +4917,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           return;
         }
+        // Wave-59 B-59-1：终态必须无条件复位 hop 级流式类型。
+        // 末次模型调用按协议不保证发 turn:hop_complete，若只在 turn:started/hop_complete 复位，
+        // 本轮结束会残留 "content"，使下一轮 awaiting-first-signal 窗口被误判为「正文流式」
+        // 而隐藏状态条（F1-2 / F4-2 语义失效）。
+        this.activeStreamKind = null;
         if (!this.shouldProcessTurnEvent(payload)) {
           return;
         }
@@ -4924,6 +5078,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       await listen("turn:suspended", (payload) => {
+        // Wave-59 F4-5 / D-59-9：retry 占位清零**不得**依赖 turnId 门禁。
+        // 生产路径里本地 requestId 与后端回传 turnId 可能不同（submitTurn 用本地 id 建消息，
+        // 后端事件带自己的 turnId），若把清零放在 `activeTurnId !== payload.turnId` 之后，
+        // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
+        if (isEventForCurrentSession(payload)) {
+          this.clearTimeoutRetryPlaceholder();
+        }
         // Detect terminal event for a background session's turn
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
@@ -4936,6 +5097,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (this.activeTurnId !== payload.turnId || !isEventForCurrentSession(payload)) {
           return;
         }
+        // Wave-59 B-59-1：终态必须无条件复位 hop 级流式类型。
+        // 末次模型调用按协议不保证发 turn:hop_complete，若只在 turn:started/hop_complete 复位，
+        // 本轮结束会残留 "content"，使下一轮 awaiting-first-signal 窗口被误判为「正文流式」
+        // 而隐藏状态条（F1-2 / F4-2 语义失效）。
+        this.activeStreamKind = null;
         if (!this.shouldProcessTurnEvent(payload)) {
           return;
         }
@@ -5213,6 +5379,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         return false;
       }
     },
+    /** C-9：设置/清空中性反馈文案（成功、空态提示等），由状态栏以 info 模式展示。 */
+    setSessionNotice(text: string | null) {
+      const trimmed = typeof text === "string" ? text.trim() : "";
+      this.sessionNotice = trimmed ? trimmed : null;
+    },
     async submitTurn(options?: { images?: TurnInputImage[] }) {
       if (this.isSubmitting) {
         return false;
@@ -5239,6 +5410,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       ) {
         return false;
       }
+
+      // C-9：提交新消息时清空上一条中性反馈，避免过期文案滞留在状态栏。
+      this.sessionNotice = null;
 
       this.isSubmitting = true;
 
@@ -5321,6 +5495,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
 
       this.isSubmitting = true;
       this.activeTurnStartedAtMs = Date.now();
+      // Wave-59 B-59-1：提交即进入「本 hop 尚无输出」——
+      // 不依赖上一轮的终态是否被消费到，也不等 turn:started，
+      // 保证 awaiting-first-signal 窗口一律按「思考中」呈现（F1-2 / F4-2）。
+      this.activeStreamKind = null;
       this.startSubmissionWatchdog(requestId);
       bindFrontendRecorderSession(this.sessionId);
       bindFrontendRecorderTurn(requestId);

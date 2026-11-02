@@ -8,7 +8,9 @@ export type AgentRuntimeMode =
   | "executing_tool"
   | "waiting_approval"
   | "retrying"
-  | "error";
+  | "error"
+  /** C-9：中性/成功反馈（如斜杠命令提示），非错误、非进行中。 */
+  | "info";
 
 export interface AgentRuntimeStatus {
   mode: AgentRuntimeMode;
@@ -51,14 +53,17 @@ export function resolveAgentRuntimeStatus(
   }
 
   // 0. 重试状态投射
+  // Wave-59 F4-5（RC9）：本分支由 `stores/runtime.ts` 的 agentRuntimeStatus getter 真实接线
+  // （超时重试提交时 `TIMEOUT_RETRY_PENDING_MESSAGE` 占位 → retryAttempt=1），不再是不可达分支。
+  // 缺省 retryMax 时降级为「正在重试…」：无后端「最大重试次数」信号，不得虚构分母冒充能力。
   if (typeof retryAttempt === "number" && retryAttempt > 0) {
-    const max = retryMax || 3;
+    const max = typeof retryMax === "number" && retryMax > 0 ? retryMax : null;
     return {
       mode: "retrying",
-      label: `正在重试（${retryAttempt}/${max}）...`,
+      label: max != null ? `正在重试（${retryAttempt}/${max}）...` : "正在重试…",
       startTime: turnStartedAt,
       retryAttempt,
-      retryMax: max,
+      retryMax: max ?? undefined,
     };
   }
 

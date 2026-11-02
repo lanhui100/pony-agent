@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { AlertCircle } from "lucide-vue-next";
+import { AlertCircle, CheckCircle2 } from "lucide-vue-next";
 import { formatElapsedSeconds, type AgentRuntimeStatus } from "@/lib/runtime/status";
 
 interface Props {
@@ -90,6 +90,19 @@ const displayLabel = computed(() => {
   // 当有耗时显示时，剥离末尾的省略号避免“思考中...，用时 5秒 ···”重复省略号
   return elapsedText.value ? raw.replace(/[…\.\s]+$/, "") : raw;
 });
+
+// C-9：info 为中性/成功反馈（斜杠命令提示），需与 error 区分语义色，且不做 shimmer 动效。
+const isInfoMode = computed(() => displayedStatus.value.mode === "info");
+
+const labelToneClass = computed(() => {
+  if (displayedStatus.value.mode === "error") {
+    return "text-rose-600 dark:text-rose-400 not-italic";
+  }
+  if (isInfoMode.value) {
+    return "text-emerald-600 dark:text-emerald-400 not-italic";
+  }
+  return "runtime-status-shimmer text-stone-500 dark:text-stone-300 italic";
+});
 </script>
 
 <template>
@@ -102,8 +115,14 @@ const displayLabel = computed(() => {
     :data-mode="displayedStatus.mode"
   >
     <div class="flex min-w-0 items-center">
+      <CheckCircle2
+        v-if="isInfoMode"
+        class="h-3.5 w-3.5 shrink-0 mr-1.5 text-emerald-500 dark:text-emerald-400"
+        data-testid="agent-runtime-status-icon"
+        :data-mode="displayedStatus.mode"
+      />
       <AlertCircle
-        v-if="displayedStatus.mode === 'error'"
+        v-else-if="displayedStatus.mode === 'error'"
         class="h-3.5 w-3.5 shrink-0 mr-1.5 text-rose-500"
         data-testid="agent-runtime-status-icon"
         :data-mode="displayedStatus.mode"
@@ -132,11 +151,11 @@ const displayLabel = computed(() => {
         />
       </span>
       <div
-        :class="displayedStatus.mode === 'error' ? 'text-rose-600 dark:text-rose-400 not-italic' : 'runtime-status-shimmer text-stone-500 dark:text-stone-300 italic'"
+        :class="labelToneClass"
         class="inline-flex min-w-0 max-w-full items-center font-normal"
       >
         <span
-          :class="displayedStatus.mode === 'error' ? 'text-rose-600 dark:text-rose-400 not-italic' : 'runtime-status-shimmer text-stone-500 dark:text-stone-300 italic'"
+          :class="labelToneClass"
           class="min-w-0 truncate font-normal"
           data-testid="agent-runtime-status-label"
         >{{ displayLabel }}</span>

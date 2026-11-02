@@ -1,3 +1,11 @@
+/**
+ * MarkdownRenderer 渲染契约单测。
+ *
+ * wave-59 F3 契约演进（Lead 授权迁移，原意图不变、仅迁移断言锚点）：
+ *   「未渲染尾巴以独立块级节点（.mr-streaming-raw / .streaming-unrendered-suffix）呈现」
+ *   「逐字符 span（.mr-streaming-char）」的原断言，迁移为 F3-1：
+ *   streaming 期间**不得**出现这三类节点；原用例对「内容最终完整渲染」的语义断言全部保留。
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
@@ -6,6 +14,15 @@ import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
 async function flushStreamingRender(waitMs = 220) {
   await new Promise<void>((resolve) => window.setTimeout(resolve, waitMs));
   await nextTick();
+}
+
+/** F3-1：streaming 期间不得出现的未渲染尾巴/逐字符节点（三类）。 */
+function streamingTailNodes(wrapper: ReturnType<typeof mount>) {
+  return {
+    raw: wrapper.findAll(".mr-streaming-raw").length,
+    suffix: wrapper.findAll(".streaming-unrendered-suffix").length,
+    char: wrapper.findAll(".mr-streaming-char").length
+  };
 }
 
 async function waitForMarkdownBody(wrapper: ReturnType<typeof mount>) {
@@ -110,7 +127,8 @@ describe("MarkdownRenderer", () => {
     expect(wrapper.find(".markdown-body").text()).toBe("hello");
 
     await wrapper.setProps({ content: "hello **world**" });
-    expect(wrapper.findAll(".mr-streaming-char").map((node) => node.text()).join("")).toBe("**world**");
+    // F3-1：新增字符不得以独立尾巴节点/逐字符 span 呈现（不新起块、不逐字重播）
+    expect(streamingTailNodes(wrapper)).toEqual({ raw: 0, suffix: 0, char: 0 });
 
     await flushStreamingRender();
     expect(wrapper.find(".markdown-body").html()).toContain("<strong>world</strong>");
@@ -149,23 +167,22 @@ describe("MarkdownRenderer", () => {
     });
 
     await nextTick();
-    // 首次 partial render 前以原始文本作为可见回退。
-    expect(wrapper.find(".streaming-unrendered-suffix").exists()).toBe(false);
-    expect(wrapper.find(".mr-streaming-raw").exists()).toBe(true);
-    expect(wrapper.text()).toBe("**bold text**");
+    // F3-1：首个 partial render 前不再以独立块级节点做「原始文本回退」
+    // （D-59-1 stale-while-render：未渲染尾巴不单独成块，文字允许滞后 ≤1 个 render 周期）。
+    expect(streamingTailNodes(wrapper)).toEqual({ raw: 0, suffix: 0, char: 0 });
 
     await flushStreamingRender();
     expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
-    expect(wrapper.find(".mr-streaming-raw").exists()).toBe(false);
+    expect(streamingTailNodes(wrapper)).toEqual({ raw: 0, suffix: 0, char: 0 });
 
     await wrapper.setProps({ streaming: false });
     await waitForMarkdownBody(wrapper);
     // 流式结束后保留最终 markdown HTML。
     expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
-    expect(wrapper.find(".mr-streaming-raw").exists()).toBe(false);
+    expect(streamingTailNodes(wrapper)).toEqual({ raw: 0, suffix: 0, char: 0 });
   });
 
-  it("shows only the unrendered streaming suffix as individual characters", async () => {
+  it("renders the streaming suffix without any separate unrendered-suffix node (F3-1)", async () => {
     const wrapper = mount(MarkdownRenderer, {
       props: {
         content: "abcd",
@@ -175,23 +192,64 @@ describe("MarkdownRenderer", () => {
       }
     });
 
+    // wave-59 F3-1 迁移：原断言「尾巴以逐字符 span 呈现（4 个字节点）」改为
+    // 「不得出现逐字符/独立尾巴节点」，同时保留「内容最终完整可见」的原语义。
     await nextTick();
-    expect(wrapper.findAll(".mr-streaming-char")).toHaveLength(4);
+    expect(streamingTailNodes(wrapper)).toEqual({ raw: 0, suffix: 0, char: 0 });
 
     await flushStreamingRender();
     expect(wrapper.find(".markdown-body").text()).toBe("abcd");
-    expect(wrapper.findAll(".mr-streaming-char")).toHaveLength(0);
+    expect(streamingTailNodes(wrapper)).toEqual({ raw: 0, suffix: 0, char: 0 });
 
-    // 解析完成后追加的新内容先以尾部字符层显示，下一轮 partial render 合并回 HTML。
+    // 解析完成后追加的新内容：同样不得以尾部字符层呈现，须在下一个 render 周期合并进 HTML。
     await wrapper.setProps({ content: "abcdefgh" });
-    const charsAfter = wrapper.findAll(".mr-streaming-char");
-    expect(charsAfter).toHaveLength(4);
-    expect(charsAfter[0]!.text()).toBe("e");
-    expect(charsAfter[3]!.text()).toBe("h");
+    expect(streamingTailNodes(wrapper)).toEqual({ raw: 0, suffix: 0, char: 0 });
 
     await flushStreamingRender();
     expect(wrapper.find(".markdown-body").text()).toBe("abcdefgh");
-    expect(wrapper.findAll(".mr-streaming-char")).toHaveLength(0);
+    expect(streamingTailNodes(wrapper)).toEqual({ raw: 0, suffix: 0, char: 0 });
+  });
+
+  /**
+   * A-59-1 回归（契约 §7，审查 review-join-wave59 CONCURRENCY）：
+   * `scheduleNonStreamingRender` 在「内容空白」时提前 return，却已写入 `renderInFlightVersion`；
+   * 该在飞标记只有 `executeRender` 收尾会清 → 之后同实例的流式更新被 `scheduleStreamingRender`
+   * 只记为 dirty 并永久吞掉（补排闭环断裂，正文永远停在旧快照）。
+   *
+   * 判据：清空后再次喂入流式内容，必须在**合理时限内**渲染出新内容（条件等待，禁止盲等）。
+   */
+  it("A-59-1: 非流式空白内容之后，同一实例的流式内容仍必须被渲染（在飞标记不得泄漏）", async () => {
+    const wrapper = mount(MarkdownRenderer, {
+      props: {
+        content: "**旧内容**",
+        streaming: true,
+        wrapperClass: "assistant-markdown"
+      }
+    });
+
+    await flushStreamingRender(200);
+    expect(wrapper.find(".markdown-body").html()).toContain("旧内容");
+
+    // 触发空白内容的非流式排程路径（历史上在此泄漏在飞标记）
+    await wrapper.setProps({ content: "", streaming: false });
+    await nextTick();
+    await flushStreamingRender(60);
+
+    // 再次流式输出新内容
+    await wrapper.setProps({ content: "**新内容**", streaming: true });
+    await nextTick();
+
+    await vi.waitFor(
+      () => {
+        expect(
+          wrapper.find(".markdown-body").html(),
+          "A-59-1：在飞标记泄漏会切断补排闭环 —— 正文停在旧快照（新内容永不渲染）"
+        ).toContain("新内容");
+      },
+      { timeout: 3000, interval: 20 }
+    );
+
+    wrapper.unmount();
   });
 
   it("transitions from plain text streaming to final markdown render when streaming ends", async () => {

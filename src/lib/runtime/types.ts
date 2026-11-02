@@ -43,6 +43,8 @@ export type RuntimeState = {
   deletingSessionSet: Record<string, boolean>;
   sessionSwitchToken: number;
   sessionError: string | null;
+  /** C-9：中性/成功反馈通道（如 `/compact` 归因文案），与 sessionError 语义隔离。 */
+  sessionNotice: string | null;
   // PA-081：Workspace 树导航状态。
   workspaceList: import("./workspace-api").WorkspaceRecord[];
   workspaceListLoaded: boolean;

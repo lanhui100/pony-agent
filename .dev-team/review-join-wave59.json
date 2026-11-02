@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3-join-wave59-4f2a9c",
+    "fresh_context": true
+  },
+  "executed_by": "l3-join-wave59-4f2a9c",
+  "reviewed_commit": "d3745a7",
+  "reviewed_subject": "working tree diff on top of d3745a7（未提交，wave-59 6 文件）",
+  "verdict": "FAIL",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "src/components/chat/WorkspaceTurnItem.vue",
+    "src/components/HomeWorkspace.vue",
+    "src/components/HomeStatusPanel.vue",
+    "src/components/MarkdownRenderer.vue",
+    "src/stores/runtime.ts",
+    "src/lib/runtime/status.ts"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4221,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vitest run --config /tmp/w59-review/vitest.config.mts /tmp/w59-review/residue.spec.ts  # 用真实 turn:started→delta→turn:completed 驱动 store，再进 submitTurn→turn:started 窗口；期望 mode=thinking/data-visible=true，实测 responding/false",
+      "severity": "BLOCKING",
+      "summary": "activeStreamKind 终态不复位：turn:completed(4221)/turn:failed(4620)/turn:cancelled(4850)/turn:suspended(5018) 均不写 null，而末次模型调用按协议不发 hop_complete，故每轮正常结束后残留 \"content\"；下一轮 submitTurn(isSubmitting=true, phase=calling_model) 到 turn:started 之间的 awaiting-first-signal 窗口被 HomeWorkspace:1038 直接 return false 隐藏状态条，且 mode 误判为 responding——三点动画已删，该窗口零进行中指示，违反 F1-2/F4-2（wave-59 F1 夹具因新 pinia 取 undefined 回退路径而未覆盖此序列）"
+    },
+    {
+      "file": "src/components/MarkdownRenderer.vue",
+      "line": 240,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vitest run --config /tmp/w59-review/vitest.config.mts /tmp/w59-review/renderer.spec.ts  # 组件级：streaming markdown → content=\"\"+streaming=false → 再 streaming 新内容；400ms 后 .markdown-body 仍停在旧 HTML",
+      "severity": "ADVISORY",
+      "summary": "stale-while-render 的补排闭环有缺口：scheduleNonStreamingRender 已写入 renderInFlightVersion=version，却在「内容为空白」时于 240-243 提前 return 而不启动任何渲染，该在飞标记只有 executeRender→finishRender 会清；此后同实例的流式更新全被 scheduleStreamingRender(209) 记为 dirty 并永久吞掉（正文停在旧快照）。当前唯一调用点 WorkspaceTurnItem 的空内容不产生 content 事件，故暂不可由 UI 触发，属契约级/回归防护缺口"
+    },
+    {
+      "file": "src/components/HomeWorkspace.vue",
+      "line": 1119,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vitest run --config /tmp/w59-review/vitest.config.mts /tmp/w59-review/plainlock.spec.ts  # 纯文本流式后同一 tick 内内容补上 ** 且 status→done，完成帧无 <strong>、原样显示 ** 语法",
+      "severity": "ADVISORY",
+      "summary": "streamingRenderPathLock=false 在完成态被当作永久结论（1119 分支不再复核 content），若最后一个 delta 才引入 markdown 语法且期间无渲染，完成消息会把 **/|/> 等语法原样当纯文本显示（本波新增锁带来的回归，wave-59 前完成态恒走 markdown）；窗口窄但确定可复现"
+    }
+  ]
+}
