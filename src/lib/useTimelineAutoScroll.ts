@@ -1,4 +1,5 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch, type ComputedRef, type Ref } from "vue";
+import { DEFAULT_SCROLL_INTENT } from "../../.agents/skills/streaming-motion/logic/intent";
 
 type ScrollAreaHandle = {
   scrollToBottom: (behavior?: ScrollBehavior) => void;
@@ -28,9 +29,15 @@ type UseTimelineAutoScrollOptions = {
 
 type ScrollTargetMode = "anchor" | "latest-user" | "latest-agent";
 
-const AUTO_SCROLL_THRESHOLD_PX = 260;
+// 视口阈值单源化：真值在 PDS-SM 的 intent reducer
+// （.agents/skills/streaming-motion/logic/intent.ts 的 DEFAULT_SCROLL_INTENT）。
+// 其中 pinTolerancePx 另有 CSS 镜像 --pds-pin-tolerance；idleResumeMs 只存在于 reducer，
+// 刻意不设 CSS 镜像（避免出现永不消费的令牌）。
+// 此处只做投影，禁止再写死数字 —— 否则 reducer 默认值、CSS 令牌、本文件会三处静默分裂。
+// 决策见 docs/decisions/0058-pds-budget-reducer-adoption.md。
+const AUTO_SCROLL_THRESHOLD_PX = DEFAULT_SCROLL_INTENT.pinTolerancePx;
 const PROGRAMMATIC_SCROLL_MAX_MS = 1600;
-const USER_SCROLL_IDLE_MS = 3000;
+const USER_SCROLL_IDLE_MS = DEFAULT_SCROLL_INTENT.idleResumeMs;
 const SCROLL_LERP_DURATION_MS = 320;
 const COMPENSATION_SCROLL_LERP_DURATION_MS = 160;
 const SCROLL_RAF_STUCK_TIMEOUT_MS = 500;

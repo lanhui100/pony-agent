@@ -1,9 +1,19 @@
 import { shallowReactive, type ComputedRef, type Ref } from "vue";
 import type { ChatMessage } from "@/types/runtime";
+import {
+  DEFAULT_REVEAL_BUDGET,
+  INITIAL_REVEAL_STATE,
+  stepReveal,
+  visiblePrefix,
+  type RevealBudgetConfig,
+  type RevealState
+} from "../../.agents/skills/streaming-motion/logic/budget";
 
-// ─── 逐字连续释放 ───────────────────────────────────────────
-// 每次 tick（60ms）释放基础字符，避免长回复在展示层严重滞后。
-const STREAM_RELEASE_CHARS_PER_TICK = 4;
+// ─── 逐字连续释放（PDS-SM L4 reducer 驱动） ──────────────────
+// 释放节奏的全部语义（每 tick 配额、积压加速、停滞收敛、降级）由
+// `.agents/skills/streaming-motion/logic/budget.ts` 的 stepReveal 承担，
+// 本文件只负责：按消息保存游标、读用户可配置速率、把结果投影成可见前缀。
+// 决策与验收见 docs/decisions/0058-pds-budget-reducer-adoption.md。
 const STREAM_RELEASE_CHARS_STORAGE_KEY = "pony-agent.stream-render.release-chars";
 
 function prefersReducedMotion() {
@@ -11,44 +21,35 @@ function prefersReducedMotion() {
     && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 }
 
-function readReleaseRate(): number {
-  if (prefersReducedMotion()) return Number.MAX_SAFE_INTEGER;
-  if (typeof window === "undefined") return STREAM_RELEASE_CHARS_PER_TICK;
+/** 用户可通过 localStorage 覆盖每 tick 释放的基础字符数（默认取 reducer 的默认值）。 */
+function resolveRevealBudget(): RevealBudgetConfig {
+  if (typeof window === "undefined") return DEFAULT_REVEAL_BUDGET;
   const raw = window.localStorage.getItem(STREAM_RELEASE_CHARS_STORAGE_KEY);
-  if (!raw) return STREAM_RELEASE_CHARS_PER_TICK;
+  if (!raw) return DEFAULT_REVEAL_BUDGET;
   const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : STREAM_RELEASE_CHARS_PER_TICK;
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_REVEAL_BUDGET;
+  // 显式夹到 >= 1：旧实现在 "0.5" 这类速率上算出 0，文字会停滞约 2s 直到停滞兜底触发。
+  // 那是缺陷而非特性，故不做等价保留（见 docs/decisions/0058 的「有意偏离」）。
+  return { ...DEFAULT_REVEAL_BUDGET, charsPerTick: Math.max(1, Math.floor(value)) };
 }
 
 // ─── Reasoning 淡入（保持原有简单增量模式） ─────────────────
 const STREAM_REASONING_FADE_CHARS = 3;
 
-// ─── 停滞收敛 ───────────────────────────────────────────────
-// 若 pending 消息的 content 在约 2s（60ms tick × 34）内未再增长，
-// 视为流已停滞（output_end 可能丢失/未到达），直接释放全部字符，
-// 避免逐字渲染无限续跑拖垮主线程。
-const STREAM_STALL_RELEASE_TICKS = 34;
-
 export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[]> | Ref<ChatMessage[]>) {
-  // 逐字释放：每条正在流式回复的消息已展示到第几个字符
-  const streamVisibleLengthByMessageId = shallowReactive<Record<string, number>>({});
+  // 逐字释放游标：每条正在流式回复的消息的完整 reducer 状态
+  const streamRevealStateByMessageId = shallowReactive<Record<string, RevealState>>({});
 
   // Reasoning 跟踪（不变）
   const streamSnapshotReasoningByMessageId = shallowReactive<Record<string, string>>({});
   const streamReasoningFadeTextByMessageId = shallowReactive<Record<string, string>>({});
   const streamReasoningFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
 
-  // 停滞检测：记录每条 pending 消息的 content 长度与连续未增长 tick 数
-  const streamLastContentLengthByMessageId = shallowReactive<Record<string, number>>({});
-  const streamStallTickCountByMessageId = shallowReactive<Record<string, number>>({});
-
   const PRESENTATION_MAPS = [
-    streamVisibleLengthByMessageId,
+    streamRevealStateByMessageId,
     streamSnapshotReasoningByMessageId,
     streamReasoningFadeTextByMessageId,
-    streamReasoningFadeKeyByMessageId,
-    streamLastContentLengthByMessageId,
-    streamStallTickCountByMessageId
+    streamReasoningFadeKeyByMessageId
   ];
 
   function syncPresentationMapValue<T extends string | number>(
@@ -87,6 +88,9 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
 
     if (pendingAssistants.length === 0) return;
 
+    const budget = resolveRevealBudget();
+    const reduceMotion = prefersReducedMotion();
+
     for (const message of pendingAssistants) {
       // ── Reasoning ────────────────────────────────────
       const nextReasoning = message.reasoningContent ?? "";
@@ -104,35 +108,21 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
       }
       syncPresentationMapValue(streamSnapshotReasoningByMessageId, message.id, nextReasoning);
 
-      // ── 主文本：逐字连续释放 ─────────────────────────
-      const nextText = message.content;
-      let currentLength = streamVisibleLengthByMessageId[message.id] ?? 0;
-
-      // 边界安全：如果内容变短了（极少发生的 reset），回退
-      if (currentLength > nextText.length) {
-        currentLength = nextText.length;
-      }
-
-      if (currentLength < nextText.length) {
-        // 停滞检测：content 未增长达到阈值 tick 数 → 直接释放全部字符
-        const previousContentLength = streamLastContentLengthByMessageId[message.id] ?? -1;
-        if (previousContentLength === nextText.length) {
-          streamStallTickCountByMessageId[message.id] = (streamStallTickCountByMessageId[message.id] ?? 0) + 1;
-        } else {
-          streamStallTickCountByMessageId[message.id] = 0;
-        }
-        streamLastContentLengthByMessageId[message.id] = nextText.length;
-
-        if ((streamStallTickCountByMessageId[message.id] ?? 0) >= STREAM_STALL_RELEASE_TICKS) {
-          currentLength = nextText.length;
-        } else {
-          const baseReleaseRate = readReleaseRate();
-          // 如果积压字符过多（>120字符），动态加速释放，避免极端长回复严重滞后
-          const backlog = nextText.length - currentLength;
-          const adaptiveBonus = backlog > 120 ? Math.floor(backlog / 8) : 0;
-          currentLength = Math.min(currentLength + baseReleaseRate + adaptiveBonus, nextText.length);
-        }
-        streamVisibleLengthByMessageId[message.id] = currentLength;
+      // ── 主文本：单次 reducer 推进 ────────────────────
+      // 只在"还没追上"时推进并持久化 —— 这正是重构前实现的写入时机：已追平
+      // （含内容被截短）时旧实现既不推进也不回写游标，于是截断后再次增长会瞬间
+      // 追平截断前的进度，而不是从新长度重新逐字打一遍。
+      // 因此这里**不能让 reducer 的夹取结果回写宿主游标**：`visible >= incomingLength`
+      // 时整段跳过，游标（高水位）与停滞计数都保持原样。
+      // 副带收益：已追平时不产生任何响应式写入，避免多余失效。
+      const incoming = message.content.length;
+      const previousReveal = streamRevealStateByMessageId[message.id] ?? INITIAL_REVEAL_STATE;
+      if (previousReveal.visible < incoming) {
+        streamRevealStateByMessageId[message.id] = stepReveal(
+          previousReveal,
+          { incomingLength: incoming, reduceMotion },
+          budget
+        );
       }
     }
   }
@@ -142,9 +132,9 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
     if (!message) return "";
     // 非流式状态（done/error）：直接返回完整内容，避免残留的逐字游标截断文本
     if (message.status !== "pending") return message.content;
-    const visibleLength = streamVisibleLengthByMessageId[message.id];
-    if (visibleLength == null) return message.content;
-    return message.content.slice(0, visibleLength);
+    const revealState = streamRevealStateByMessageId[message.id];
+    if (revealState == null) return message.content;
+    return visiblePrefix(message.content, revealState);
   }
 
   /** 兼容旧接口：返回全部可见内容 */
