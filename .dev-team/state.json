@@ -626,6 +626,35 @@
         }
       },
       "status": "join_barrier_round2_pass"
+    },
+    {
+      "wave": 59,
+      "theme": "PA-164 headless delivery form (event stream / exit codes / envelope / permission / bounded execution)",
+      "baseline_commit": "a0d6232",
+      "branch": "wave-59/headless",
+      "worktree": "/home/dm/wt/pony-wave59",
+      "tier": "B",
+      "tier_trigger": "cross-file (lib module + bin wiring + integration tests); external network IO (provider) => >= B, lightweight NFR",
+      "contract_matrix": ".dev-team/contract-matrix-wave59-headless.md",
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3"
+      ],
+      "branches": {
+        "headless": {
+          "owner": "executor-a",
+          "red_commit": null,
+          "green_commit": null,
+          "status": "red_anchored_pending_impl",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/headless.rs",
+            "crates/pony-agent-core/src/bin/cli.rs"
+          ]
+        }
+      },
+      "observability_dynamics": "touches LLM call + external CLI interface => audit-diff required at closure",
+      "regression_baseline": ".dev-team/regression-baseline-wave59.json"
     }
   ],
   "counters": {

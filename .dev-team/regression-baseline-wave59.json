@@ -1,0 +1,16 @@
+{
+  "wave": 59,
+  "task": "PA-164",
+  "branch": "wave-59/headless",
+  "base_commit": "a0d6232",
+  "captured_at": "2026-11-02T10:29:00+08:00",
+  "command_1": "CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test -p pony-agent-core --lib",
+  "result_1": "1195 passed; 0 failed; 0 ignored",
+  "exit_1": 0,
+  "command_2": "cargo test -p pony-agent-core --test cli_acceptance",
+  "result_2": "5 passed; 0 failed",
+  "exit_2": 0,
+  "exemptions": {
+    "frontend_vitest": "N/A — 本波不触及 src/ 前端代码与 UI 交互，判定不适用；理由落盘于此供 Phase 5 审计"
+  }
+}
