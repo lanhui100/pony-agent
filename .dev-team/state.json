@@ -644,9 +644,9 @@
       "branches": {
         "headless": {
           "owner": "executor-a",
-          "red_commit": null,
-          "green_commit": null,
-          "status": "red_anchored_pending_impl",
+          "red_commit": "fee5e31",
+          "green_commit": "46cc067",
+          "status": "green_verified",
           "write_scopes": [
             "crates/pony-agent-core/src/agent/headless.rs",
             "crates/pony-agent-core/src/bin/cli.rs"
@@ -654,7 +654,27 @@
         }
       },
       "observability_dynamics": "touches LLM call + external CLI interface => audit-diff required at closure",
-      "regression_baseline": ".dev-team/regression-baseline-wave59.json"
+      "regression_baseline": ".dev-team/regression-baseline-wave59.json",
+      "gates": {
+        "g1_headless_contract": "26 passed/exit0",
+        "g2_cli_acceptance": "5 passed/exit0",
+        "g3_lib": "1195 passed/exit0",
+        "g4_check_d_warnings": "exit0",
+        "g5_e2e": "PASS=30/FAIL=0/exit0",
+        "observability_audit_diff": "exit0",
+        "observability_check_declaration": "PASS/exit0"
+      },
+      "reviews": {
+        "plan": "review-plan-wave59.json (FAIL->adjudicated)",
+        "l3a": "review-join-a.json (FAIL->fixed)",
+        "l3b": "review-join-b.json (FAIL->fixed)",
+        "l3p": "review-l3p.json (FAIL->1 downgraded+fixed)"
+      },
+      "test_defects": 2,
+      "deferred_to": [
+        "PA-167"
+      ],
+      "meta_retrospective": ".dev-team/meta-retrospective-wave59.md"
     }
   ],
   "counters": {
