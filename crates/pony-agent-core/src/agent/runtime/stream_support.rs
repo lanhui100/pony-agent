@@ -2,6 +2,44 @@ use super::*;
 
 pub(super) const STREAM_REASONING_BATCH_CHARS: usize = 96;
 
+/// 工具参数别名归一（P1-2，真实 trace 实证 9 次无谓失败）。
+///
+/// 背景：job 系列工具的 JSON Schema 声明 camelCase（`jobId` / `timeoutMs`），而 Rust 侧
+/// serde 结构体字段是 snake_case。模型两种拼法都试过，于是分别被 schema 预检
+/// （`unexpected argument job_id`）与 serde 解析（`missing field job_id`）拒绝，来回振荡。
+///
+/// 修法：进入 schema 预检之前，把 snake_case 别名改写成 schema 口径；仅在目标键**缺席**时
+/// 改写（已按 schema 写的一律不动）。serde 侧另有 alias 兜底，host/direct 调用同样吃得住。
+pub(super) fn canonicalize_tool_argument_aliases(tool_call: &mut ToolCall) {
+    use crate::agent::tools::{TOOL_JOB_KILL, TOOL_JOB_OUTPUT, TOOL_JOB_START};
+    const ALIASES: &[(&str, &[(&str, &str)])] = &[
+        (
+            TOOL_JOB_OUTPUT,
+            &[("job_id", "jobId"), ("timeout_ms", "timeoutMs")],
+        ),
+        (TOOL_JOB_KILL, &[("job_id", "jobId")]),
+        (TOOL_JOB_START, &[("timeout_ms", "timeoutMs")]),
+    ];
+    let Some(entries) = ALIASES
+        .iter()
+        .find(|(tool, _)| tool_call.name.as_str() == *tool)
+        .map(|(_, entries)| *entries)
+    else {
+        return;
+    };
+    let Some(arguments) = tool_call.arguments.as_object_mut() else {
+        return;
+    };
+    for (snake, camel) in entries {
+        if arguments.contains_key(*camel) {
+            continue;
+        }
+        if let Some(value) = arguments.remove(*snake) {
+            arguments.insert((*camel).to_string(), value);
+        }
+    }
+}
+
 pub(super) fn normalize_tool_directive(
     mut tool_call: ToolCall,
     assistant_message: Option<Value>,
@@ -9,6 +47,7 @@ pub(super) fn normalize_tool_directive(
     reasoning_content: Option<&str>,
     reasoning_content_value: Option<&Value>,
 ) -> Result<NormalizedToolDirective, String> {
+    canonicalize_tool_argument_aliases(&mut tool_call);
     if !tool_call.name.trim().is_empty() {
         return Ok(NormalizedToolDirective {
             tool_call: Some(tool_call),
@@ -564,6 +603,9 @@ pub fn tool_failure_signal(
 pub(super) struct ConsecutiveFailureTracker {
     pub(super) signal: Option<(String, String, String)>,
     pub(super) count: usize,
+    /// 工具级连续失败：只看工具名，忽略入参与错误码（P1-3 第二道闸）。
+    pub(super) tool_name: Option<String>,
+    pub(super) tool_count: usize,
 }
 
 /// Match the dispatcher's persisted `PendingControlRequest` to the originating tool call. The
@@ -613,22 +655,40 @@ impl ConsecutiveFailureTracker {
     }
 
     /// Record one tool outcome signal; returns the updated consecutive-failure count.
+    ///
+    /// 同时维护「同工具连续失败」计数（`same_tool_count`）：既有指纹闸要求
+    /// `(工具, 入参指纹, 错误码)` 三元组完全一致，模型换参数/换错误码即可绕过；工具级
+    /// 计数只看工具名，用于拦住「反复锤同一工具」的卡死循环。
     pub(super) fn record(&mut self, signal: Option<(String, String, String)>) -> usize {
         match signal {
-            Some(next) if self.signal.as_ref() == Some(&next) => {
-                self.count += 1;
-                self.count
-            }
             Some(next) => {
-                self.signal = Some(next);
-                self.count = 1;
-                1
+                if self.tool_name.as_deref() == Some(next.0.as_str()) {
+                    self.tool_count += 1;
+                } else {
+                    self.tool_name = Some(next.0.clone());
+                    self.tool_count = 1;
+                }
+                if self.signal.as_ref() == Some(&next) {
+                    self.count += 1;
+                    self.count
+                } else {
+                    self.signal = Some(next);
+                    self.count = 1;
+                    1
+                }
             }
             None => {
                 self.signal = None;
                 self.count = 0;
+                self.tool_name = None;
+                self.tool_count = 0;
                 0
             }
         }
+    }
+
+    /// 同一工具连续失败次数（成功或换工具即归零）。
+    pub(super) fn same_tool_count(&self) -> usize {
+        self.tool_count
     }
 }

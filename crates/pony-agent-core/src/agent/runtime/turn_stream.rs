@@ -504,6 +504,34 @@ impl AgentRuntime {
                 );
                 return;
             }
+            // P1-3 第二道闸：同一工具连续失败（忽略入参/错误码差异）。既有指纹闸要求三元组
+            // 完全一致，模型换参数或换错误码即可绕过——实测 JobOutput 连续失败 5 次未停。
+            if consecutive_failures.same_tool_count()
+                >= max_consecutive_same_tool_failures_per_turn()
+            {
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
+                    input.session_id.as_deref(),
+                    turn_id,
+                    display_message,
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    self.telemetry_builder.failed_trace_after_tool(false),
+                    tool_activities.clone(),
+                    provider_call_records.clone(),
+                    hook_trace_records.clone(),
+                    first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    completed_hops,
+                    build_same_tool_consecutive_failure_error(
+                        max_consecutive_same_tool_failures_per_turn(),
+                        &current_tool_call.name,
+                        tool_result.output.as_str(),
+                    ),
+                );
+                return;
+            }
 
             let followup_model_hook_trace_records = self
                 .dispatch_hook_trace_records(TurnHookPoint::ModelCallStart)
@@ -559,7 +587,7 @@ impl AgentRuntime {
             let provider_call_started_at = Instant::now();
             // PA-095 #4：本次 followup call 的 hop 索引（Copy 捕获进 delta 闭包）。
             let followup_step = completed_hops as u32;
-            let response = match provider_followup_stream(
+            let response = match provider_followup_stream_with_mode(
                 provider,
                 planning_request,
                 tools,
@@ -658,6 +686,7 @@ impl AgentRuntime {
                         last_emit_for_client_clone.set(now);
                     }
                 },
+                crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
             ) {
                 Ok(response) => response,
                 Err(error) => {
@@ -883,12 +912,41 @@ impl AgentRuntime {
             }
 
             if let Some(next_tool_call) = response.tool_call.clone() {
-                if completed_hops >= max_tool_followups_per_turn() {
+                if turn_started_at.elapsed()
+                    >= std::time::Duration::from_secs(max_turn_wall_seconds() as u64)
+                {
+                    // P1-3：墙钟预算兜底——不再继续 follow-up，而是走恢复式收尾给出可读结论。
                     let recovery = recover_tool_followup_completion_stream(
                         sink,
                         provider,
                         planning_request,
-                        &user_message,
+                        &mut accumulated_messages,
+                        &hop_records,
+                        &next_tool_call,
+                        response.assistant_message.as_ref(),
+                        &build_turn_wall_budget_error(max_turn_wall_seconds()),
+                        &context_observation,
+                        turn_id,
+                        input.session_id.clone(),
+                        &first_token_latency,
+                        turn_started_at,
+                    );
+                    provider_call_records.push(recovery.provider_call_record);
+                    accumulated_token_usage = merge_token_usage(
+                        accumulated_token_usage,
+                        recovery.response.token_usage.as_ref(),
+                    );
+                    accumulated_fallback_reason = merge_fallback_reason(
+                        accumulated_fallback_reason,
+                        recovery.response.fallback_reason.clone(),
+                    );
+                    response = recovery.response;
+                } else if completed_hops >= max_tool_followups_per_turn() {
+                    let recovery = recover_tool_followup_completion_stream(
+                        sink,
+                        provider,
+                        planning_request,
+                        &mut accumulated_messages,
                         &hop_records,
                         &next_tool_call,
                         response.assistant_message.as_ref(),
@@ -935,7 +993,7 @@ impl AgentRuntime {
                             sink,
                             provider,
                             planning_request,
-                            &user_message,
+                            &mut accumulated_messages,
                             &hop_records,
                             &next_tool_call,
                             response.assistant_message.as_ref(),
@@ -1672,7 +1730,7 @@ impl AgentRuntime {
             let stream_guard = crate::agent::provider::ProviderStreamGuard::with_cancel_check(
                 &stream_cancel_check,
             );
-            let decision = provider_decision_stream_guarded(
+            let decision = provider_decision_stream_guarded_with_mode(
                 &prepared.provider,
                 &prepared.planning_request,
                 &prepared.tools,
@@ -1760,6 +1818,7 @@ impl AgentRuntime {
                         last_emit_for_client_clone.set(now);
                     }
                 },
+                crate::agent::turn_flow::LlmRequestMode::Initial,
             )?;
             if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
                 let turn_latency = if initial_turn_first_token_latency.get().is_none() {
@@ -1863,10 +1922,11 @@ impl AgentRuntime {
                 return Err(HOOK_FAILTURN_HANDLED_SENTINEL.to_string());
             }
             let started_at = Instant::now();
-            let decision = provider_decision(
+            let decision = provider_decision_with_mode(
                 &prepared.provider,
                 &prepared.planning_request,
                 &prepared.tools,
+                crate::agent::turn_flow::LlmRequestMode::Initial,
             )?;
             Ok((
                 decision,

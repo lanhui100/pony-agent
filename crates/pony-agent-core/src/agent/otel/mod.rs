@@ -138,6 +138,24 @@ pub const ATTR_LLM_CALL_GENERATION_MS: &str = "llm.call.generation_ms";
 /// 未记录 usage ⇒ 键不存在（估算值不得冒充真值）。
 pub const ATTR_AGENT_USAGE_ORIGIN: &str = "agent.usage.origin";
 
+/// 单次 `llm.chat` 请求的组装模式（字符串，`initial` | `tool_followup` | `tool_recovery`）。
+///
+/// 为什么需要它：恢复/重建类请求此前与普通 follow-up 在 trace 上**完全不可区分**——
+/// 生产事故（trace `38590d52…`）里末轮请求 input 从 18896 掉到 2311、cache_read=0，
+/// 只能靠 token 断崖反推「上下文被换掉了」。本键让「这条请求是不是重建过的」可直接查询。
+pub const ATTR_LLM_REQUEST_MODE: &str = "llm.request.mode";
+
+/// 单次请求实际发出的消息条数（I64；native transcript 优先，否则取分层 input 条数）。
+///
+/// 与 [`ATTR_LLM_REQUEST_MODE`] 联合使用：同轮相邻请求的条数/前缀发生跳变即为上下文重建信号。
+pub const ATTR_LLM_REQUEST_MESSAGES: &str = "llm.request.messages";
+
+/// 请求首条消息是否为 system 前缀（Bool）。
+///
+/// 上下文塌陷的最强指纹：`false` 表示本次调用在**没有 system prompt**的情况下发生
+/// （历史缺陷 `38590d52…` 的最终回答正是如此）。
+pub const ATTR_LLM_REQUEST_SYSTEM_PREFIX: &str = "llm.request.system_prefix";
+
 /// turn 速度口径标记（字符串）；wave-54 C2，取值 `turn_weighted`。
 pub const ATTR_AGENT_TURN_SPEED_BASIS: &str = "agent.turn.speed.basis";
 
@@ -1359,6 +1377,31 @@ pub fn llm_usage_detail_attributes(
     attributes
 }
 
+/// `llm.chat` 请求形状属性映射（纯函数，无网络、无全局态）。
+///
+/// 调用方：[`LlmSpanGuard::record_request_shape`]（落 span）与单测断言（同一出口）。
+/// 三键同生同灭：调用方必须给出真实的消息条数与前缀判定，禁止用 `false` 占位「未知」。
+pub fn llm_request_shape_attributes(
+    mode: &'static str,
+    messages: usize,
+    has_system_prefix: bool,
+) -> Vec<(String, AttrValue)> {
+    vec![
+        (
+            ATTR_LLM_REQUEST_MODE.to_string(),
+            AttrValue::Str(mode.to_string()),
+        ),
+        (
+            ATTR_LLM_REQUEST_MESSAGES.to_string(),
+            AttrValue::I64(saturating_token_count(messages as u64)),
+        ),
+        (
+            ATTR_LLM_REQUEST_SYSTEM_PREFIX.to_string(),
+            AttrValue::Bool(has_system_prefix),
+        ),
+    ]
+}
+
 /// `u64 -> i64` 安全饱和（契约 PA51-C3-T3）：超出 `i64::MAX` 钳到 `i64::MAX`。
 ///
 /// 为什么不能用 `as`：`u64 as i64` 对 `u64::MAX` 会产生 **-1**，把用量写成负数会污染
@@ -2002,6 +2045,7 @@ pub fn start_llm_span_with_provider(
         cost_details: None,
         usage_recorded: false,
         cost_recorded: false,
+        request_shape_attributes: Vec::new(),
     };
     if !spans_allowed() {
         return empty;
@@ -2023,6 +2067,7 @@ pub fn start_llm_span_with_provider(
     };
     LlmSpanGuard {
         span: Some(span),
+        request_shape_attributes: Vec::new(),
         input_tokens: None,
         output_tokens: None,
         reasoning_tokens: None,
@@ -2072,6 +2117,8 @@ pub struct LlmSpanGuard {
     usage_recorded: bool,
     /// wave-53 C2：是否记录过有效成本。
     cost_recorded: bool,
+    /// 请求形状属性（模式 / 消息条数 / 是否带 system 前缀）；空 ⇒ 不输出任何键。
+    request_shape_attributes: Vec<(String, AttrValue)>,
 }
 
 impl LlmSpanGuard {
@@ -2200,6 +2247,21 @@ impl LlmSpanGuard {
     pub fn record_usage_origin(&mut self, origin: Option<&'static str>) {
         self.usage_origin = origin;
     }
+
+    /// 记录本次请求的组装形状（模式 / 消息条数 / 是否带 system 前缀）。
+    ///
+    /// 语义：三键同生同灭，映射见 [`llm_request_shape_attributes`]；门禁关闭时为空操作。
+    /// `messages` 必须是**实际发出的**消息条数（native transcript 优先），`has_system_prefix`
+    /// 必须是对同一消息序列首条 role 的真实判定——两者都不得用占位值。
+    pub fn record_request_shape(
+        &mut self,
+        mode: &'static str,
+        messages: usize,
+        has_system_prefix: bool,
+    ) {
+        self.request_shape_attributes =
+            llm_request_shape_attributes(mode, messages, has_system_prefix);
+    }
 }
 
 impl Drop for LlmSpanGuard {
@@ -2304,6 +2366,13 @@ impl Drop for LlmSpanGuard {
                 to_key_values(llm_usage_detail_attributes(self.reasoning_tokens, self.cached_input_tokens))
             {
                 span.set_attribute(attribute);
+            }
+            // 请求形状（模式/条数/system 前缀）——上下文重建类缺陷的检索键。
+            if !self.request_shape_attributes.is_empty() {
+                let request_attributes = std::mem::take(&mut self.request_shape_attributes);
+                for attribute in to_key_values(request_attributes) {
+                    span.set_attribute(attribute);
+                }
             }
             span.end();
         }

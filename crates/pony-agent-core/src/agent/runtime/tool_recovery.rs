@@ -3,30 +3,26 @@ use super::*;
 pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::ProviderClient>(
     provider: &P,
     planning_request: &ProviderRequest,
-    user_message: &str,
+    accumulated_messages: &mut Vec<Value>,
     hop_records: &[ToolTurnHopRecord],
     blocked_tool_call: &ToolCall,
     blocked_assistant_message: Option<&Value>,
     recovery_reason: &str,
     context_observation: &BuildContextObservation,
 ) -> RecoveredToolFollowup {
-    let recovery_request = build_tool_followup_recovery_request(
-        planning_request,
-        provider.protocol(),
-        user_message,
-        hop_records,
-    );
+    let recovery_request = build_tool_followup_recovery_request(planning_request);
     let synthetic_tool_result =
         build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
     let started_at = Instant::now();
-    let mut response = provider_followup(
+    let mut response = provider_followup_with_mode(
         provider,
         &recovery_request,
         &[],
-        &mut vec![],
+        accumulated_messages,
         blocked_assistant_message,
         blocked_tool_call,
         &synthetic_tool_result,
+        crate::agent::turn_flow::LlmRequestMode::ToolRecovery,
     )
     .unwrap_or_else(|error| {
         build_local_tool_followup_recovery_response(&synthetic_tool_result, hop_records, &error)
@@ -87,7 +83,7 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
     sink: &impl TurnEventSink,
     provider: &P,
     planning_request: &ProviderRequest,
-    user_message: &str,
+    accumulated_messages: &mut Vec<Value>,
     hop_records: &[ToolTurnHopRecord],
     blocked_tool_call: &ToolCall,
     blocked_assistant_message: Option<&Value>,
@@ -98,12 +94,7 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
     first_token_latency: &Rc<Cell<Option<u64>>>,
     turn_started_at: &Instant,
 ) -> RecoveredToolFollowup {
-    let recovery_request = build_tool_followup_recovery_request(
-        planning_request,
-        provider.protocol(),
-        user_message,
-        hop_records,
-    );
+    let recovery_request = build_tool_followup_recovery_request(planning_request);
     let synthetic_tool_result =
         build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
     let started_at = Instant::now();
@@ -123,11 +114,11 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
     let last_emit_for_client = Rc::new(Cell::new(0u64));
     let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
 
-    let mut response = provider_followup_stream(
+    let mut response = provider_followup_stream_with_mode(
         provider,
         &recovery_request,
         &[],
-        &mut vec![],
+        accumulated_messages,
         blocked_assistant_message,
         blocked_tool_call,
         &synthetic_tool_result,
@@ -224,6 +215,7 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
                 last_emit_for_client_clone.set(now);
             }
         },
+        crate::agent::turn_flow::LlmRequestMode::ToolRecovery,
     )
     .unwrap_or_else(|error| {
         build_local_tool_followup_recovery_response(&synthetic_tool_result, hop_records, &error)
@@ -338,35 +330,23 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
 }
 
 
+/// 构建「冗余/超限工具调用恢复」请求。
+///
+/// 关键不变量：**`native_messages` 必须原样保留** planning_request 的完整 transcript
+/// （system 前缀 / 技能 / 记忆 / 历史对话 / 本轮用户输入）。被阻断的 assistant tool_call
+/// 与合成 tool result 由调用方通过 `accumulated_messages` 追加在尾部，与正常 follow-up
+/// 的拼装路径一致。
+///
+/// 历史缺陷（trace `38590d52…` 实证）：旧实现把 `native_messages` 整体替换为
+/// `[当前 user_message] + 本轮 hops`；而 native 流程下 provider 直接把该字段当 messages
+/// （`provider::openai_request_messages`）⇒ 末轮回答丢失 system prompt 与全部历史，
+/// 实测 input 18896 → 2311、cache_read=0。
 pub(super) fn build_tool_followup_recovery_request(
     planning_request: &ProviderRequest,
-    protocol: &crate::agent::provider::ProviderProtocol,
-    user_message: &str,
-    hop_records: &[ToolTurnHopRecord],
 ) -> ProviderRequest {
     let mut request = planning_request.clone();
-    request.native_messages =
-        tool_turn_native_transcript_prefix(protocol, user_message, hop_records);
     request.observation = Default::default();
     request
-}
-
-
-pub(super) fn tool_turn_native_transcript_prefix(
-    protocol: &crate::agent::provider::ProviderProtocol,
-    user_message: &str,
-    hop_records: &[ToolTurnHopRecord],
-) -> Vec<Value> {
-    let mut transcript = vec![provider_native_user_message(user_message)];
-    for hop in hop_records {
-        transcript.push(tool_request_assistant_message(protocol, hop));
-        transcript.push(provider_native_tool_result_message_for_protocol(
-            protocol,
-            &hop.tool_call,
-            &hop.tool_result,
-        ));
-    }
-    transcript
 }
 
 

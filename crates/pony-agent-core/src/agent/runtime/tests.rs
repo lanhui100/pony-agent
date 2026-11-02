@@ -597,6 +597,8 @@ impl crate::agent::tools::ToolExecutor for ErrorToolExecutor {
 struct MockHttpResponse {
     content_type: &'static str,
     body: String,
+    /// 响应前的确定性延迟（毫秒）——用于锁定「墙钟预算」类时序行为；默认 0。
+    delay_ms: u64,
 }
 
 
@@ -1038,6 +1040,9 @@ fn parse_content_length(headers: &str) -> usize {
 }
 
 fn write_http_response(stream: &mut TcpStream, response: MockHttpResponse) {
+    if response.delay_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(response.delay_ms));
+    }
     let payload = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         response.content_type,
@@ -1052,6 +1057,7 @@ fn json_response(body: serde_json::Value) -> MockHttpResponse {
     MockHttpResponse {
         content_type: "application/json",
         body: body.to_string(),
+        delay_ms: 0,
     }
 }
 
@@ -1080,6 +1086,7 @@ fn sse_response(chunks: &[serde_json::Value]) -> MockHttpResponse {
     MockHttpResponse {
         content_type: "text/event-stream",
         body,
+        delay_ms: 0,
     }
 }
 
@@ -6742,6 +6749,576 @@ fn start_turn_stream_streams_duplicate_tool_recovery_answer() {
         .last()
         .and_then(|record| record.first_token_latency_ms)
         .is_some());
+}
+
+/// 回归（trace `38590d52…` 实证）：重复工具调用的「冗余恢复」请求必须保留**完整**
+/// transcript（system 前缀 + 历史对话 + 本轮 hops），不得塌缩成 `[当前 user] + hops`。
+///
+/// 旧实现把 `native_messages` 整体替换为 transcript 前缀，而 native 流程下 provider 直接
+/// 把该字段当 messages ⇒ 末轮回答丢失 system prompt 与全部历史（实测 input 18896 → 2311、
+/// cache_read=0）。本用例锁定「恢复请求前缀 == 正常 follow-up 前缀」这一不变量。
+#[test]
+fn duplicate_tool_recovery_request_keeps_full_context() {
+    let duplicate_args = "{\"path\":\"tauri.conf.json\"}";
+    let server = MockHttpServer::start(vec![
+        sse_response(&[json!({
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "先读取配置文件。",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_workspace_read_file",
+                                "type": "function",
+                                "function": {
+                                    "name": "workspace_read_file",
+                                    "arguments": duplicate_args
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        })]),
+        sse_response(&[json!({
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "还想重复读取同一个文件。",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_workspace_read_file_again",
+                                "type": "function",
+                                "function": {
+                                    "name": "workspace_read_file",
+                                    "arguments": duplicate_args
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        })]),
+        sse_response(&[json!({
+            "choices": [
+                {
+                    "delta": {
+                        "content": "根据已读取的内容，tauri.conf.json 中 productName 是 Pony Agent。"
+                    }
+                }
+            ]
+        })]),
+    ]);
+    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let sink = RecordingTurnEventSink::new();
+
+    runtime.start_turn_stream(
+        &sink,
+        "turn-duplicate-recovery-context".to_string(),
+        TurnInput {
+            message: "读取 tauri.conf.json 并回答 productName".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            tool_authorization_mode: None,
+            session_id: Some("stream-duplicate-recovery-context".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+            plan_execution_approval: None,
+        },
+    );
+
+    let requests = server.finish();
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected decision + followup + recovery requests"
+    );
+
+    let messages_of = |raw: &str, label: &str| -> Vec<Value> {
+        let body: Value = serde_json::from_str(raw)
+            .unwrap_or_else(|e| panic!("{label} request should be json: {e}"));
+        body.get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| panic!("{label} request should carry messages"))
+    };
+    let decision_messages = messages_of(&requests[0], "decision");
+    let followup_messages = messages_of(&requests[1], "followup");
+    let recovery_messages = messages_of(&requests[2], "recovery");
+
+    assert_eq!(
+        decision_messages
+            .first()
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str),
+        Some("system"),
+        "决策请求首条消息必须是 system 前缀（否则本用例失去判定意义）"
+    );
+    assert_eq!(
+        recovery_messages.len(),
+        followup_messages.len() + 2,
+        "恢复请求 = 完整 transcript + 被阻断 assistant + 合成 tool result；followup={} recovery={}",
+        followup_messages.len(),
+        recovery_messages.len()
+    );
+    assert_eq!(
+        &recovery_messages[..followup_messages.len()],
+        &followup_messages[..],
+        "恢复请求前缀必须与正常 follow-up 完全一致（system/历史/本轮用户输入不得丢失）"
+    );
+
+    let blocked = &recovery_messages[followup_messages.len()];
+    assert_eq!(
+        blocked.get("role").and_then(Value::as_str),
+        Some("assistant"),
+        "恢复请求倒数第二条必须是被阻断的 assistant 消息"
+    );
+    assert!(
+        blocked
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| !calls.is_empty())
+            .unwrap_or(false),
+        "被阻断的 assistant 消息必须保留 tool_calls（否则 tool result 无对应调用）"
+    );
+    let synthetic = &recovery_messages[followup_messages.len() + 1];
+    assert_eq!(
+        synthetic.get("role").and_then(Value::as_str),
+        Some("tool")
+    );
+    assert!(
+        synthetic
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("blocked_redundant_followup"),
+        "合成 tool result 必须携带 blocked_redundant_followup 语义"
+    );
+    assert!(
+        recovery_messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .contains("读取 tauri.conf.json 并回答 productName")
+        }),
+        "恢复请求必须仍携带本轮用户输入"
+    );
+}
+
+/// P1-1：`llm.chat` 请求形状三键（mode / messages / system_prefix）的纯函数出口。
+///
+/// 语义锁定：native transcript 非空时以它为准（native 流程下 provider 直接拿它当
+/// messages），否则回退分层 `input`；`system_prefix` 必须是对**同一序列**首条 role 的真实判定。
+#[test]
+fn llm_request_shape_reports_native_transcript_and_system_prefix() {
+    let build = |native_messages: Vec<Value>, input: Vec<ProviderMessage>| ProviderRequest {
+        model: "gpt-5.4".to_string(),
+        input,
+        images: Vec::new(),
+        native_messages,
+        observation: Default::default(),
+        temperature: 0.0,
+        max_output_tokens: 1024,
+    };
+
+    let native_full = build(
+        vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "hi"}),
+        ],
+        vec![ProviderMessage::user("ignored")],
+    );
+    assert_eq!(
+        crate::agent::turn_flow::llm_request_shape(&native_full),
+        (2, true),
+        "native transcript 非空时必须优先于分层 input"
+    );
+
+    // 恢复请求若塌陷成「只有 user」，该指纹必须是 (n, false) —— 这是 P0 缺陷的检索键。
+    let collapsed = build(vec![json!({"role": "user", "content": "hi"})], Vec::new());
+    assert_eq!(
+        crate::agent::turn_flow::llm_request_shape(&collapsed),
+        (1, false),
+        "无 system 前缀必须如实报 false"
+    );
+
+    let layered = build(
+        Vec::new(),
+        vec![ProviderMessage::system("sys"), ProviderMessage::user("hi")],
+    );
+    assert_eq!(
+        crate::agent::turn_flow::llm_request_shape(&layered),
+        (2, true),
+        "native transcript 为空时回退分层 input 并如实判定 system 前缀"
+    );
+}
+
+/// P1-1：模式标签与属性映射是同一条出口（避免「枚举改了、属性没改」的静默漂移）。
+#[test]
+fn llm_request_mode_labels_and_attributes_stay_in_sync() {
+    assert_eq!(
+        crate::agent::turn_flow::LlmRequestMode::Initial.as_str(),
+        "initial"
+    );
+    assert_eq!(
+        crate::agent::turn_flow::LlmRequestMode::ToolFollowup.as_str(),
+        "tool_followup"
+    );
+    assert_eq!(
+        crate::agent::turn_flow::LlmRequestMode::ToolRecovery.as_str(),
+        "tool_recovery"
+    );
+
+    let attributes = crate::agent::otel::llm_request_shape_attributes(
+        crate::agent::turn_flow::LlmRequestMode::ToolRecovery.as_str(),
+        4,
+        false,
+    );
+    assert_eq!(attributes.len(), 3, "{attributes:?}");
+    assert_eq!(attributes[0].0, "llm.request.mode");
+    assert_eq!(
+        attributes[0].1,
+        crate::agent::otel::AttrValue::Str("tool_recovery".to_string())
+    );
+    assert_eq!(attributes[1].0, "llm.request.messages");
+    assert_eq!(attributes[1].1, crate::agent::otel::AttrValue::I64(4));
+    assert_eq!(attributes[2].0, "llm.request.system_prefix");
+    assert_eq!(attributes[2].1, crate::agent::otel::AttrValue::Bool(false));
+}
+
+/// P1-2a：job 系列工具的 snake_case 别名在 schema 预检前被改写成 schema 口径。
+///
+/// 真实 trace 里 `job_output` 两种拼法各被拒一次（`unexpected argument job_id` /
+/// `missing required argument jobId`），9 次调用全部失败。本用例锁定「预检前归一」。
+#[test]
+fn job_tool_argument_aliases_are_canonicalized_before_schema_check() {
+    let mut call = ToolCall {
+        call_id: None,
+        name: "job_output".to_string(),
+        arguments: json!({"job_id": "job-1", "timeout_ms": 5000, "wait": true}),
+        plan: None,
+    };
+    canonicalize_tool_argument_aliases(&mut call);
+    assert_eq!(
+        call.arguments,
+        json!({"jobId": "job-1", "timeoutMs": 5000, "wait": true}),
+        "snake_case 别名必须被改写成 schema 口径"
+    );
+
+    // 幂等：已按 schema 写好的参数不得被二次改写。
+    canonicalize_tool_argument_aliases(&mut call);
+    assert_eq!(
+        call.arguments,
+        json!({"jobId": "job-1", "timeoutMs": 5000, "wait": true})
+    );
+
+    // 双拼法并存时保持原样（让 schema 的 additionalProperties 门给出确定失败，不做静默取舍）。
+    let mut ambiguous = ToolCall {
+        call_id: None,
+        name: "job_kill".to_string(),
+        arguments: json!({"jobId": "a", "job_id": "b"}),
+        plan: None,
+    };
+    canonicalize_tool_argument_aliases(&mut ambiguous);
+    assert_eq!(ambiguous.arguments, json!({"jobId": "a", "job_id": "b"}));
+
+    // 非 job 工具零副作用。
+    let mut run = ToolCall {
+        call_id: None,
+        name: "Run".to_string(),
+        arguments: json!({"command": "ls", "timeout_ms": 1}),
+        plan: None,
+    };
+    canonicalize_tool_argument_aliases(&mut run);
+    assert_eq!(run.arguments, json!({"command": "ls", "timeout_ms": 1}));
+}
+
+/// P1-2a：serde 侧同样吃两种拼法（host / direct 调用不经过归一也要能解析）。
+#[test]
+fn job_args_accept_both_snake_and_camel_spellings() {
+    let camel: crate::agent::jobs::JobOutputArgs =
+        serde_json::from_value(json!({"jobId": "job-1", "timeoutMs": 10}))
+            .expect("camelCase must parse");
+    let snake: crate::agent::jobs::JobOutputArgs =
+        serde_json::from_value(json!({"job_id": "job-1", "timeout_ms": 10}))
+            .expect("snake_case must parse");
+    assert_eq!(camel.job_id, "job-1");
+    assert_eq!(snake.job_id, camel.job_id);
+    assert_eq!(snake.timeout_ms, camel.timeout_ms);
+
+    let kill: crate::agent::jobs::JobKillArgs = serde_json::from_value(json!({"jobId": "job-2"}))
+        .expect("job_kill camelCase must parse");
+    assert_eq!(kill.job_id, "job-2");
+
+    let start: crate::agent::jobs::JobStartArgs =
+        serde_json::from_value(json!({"command": "npm run dev", "timeoutMs": 1000}))
+            .expect("job_start camelCase must parse");
+    assert_eq!(start.timeout_ms, Some(1000));
+}
+
+/// P1-3：两个新闸门的环境变量解析（非法值一律回退默认，禁止静默取 0 造成「永不触发」）。
+#[test]
+fn turn_budget_and_same_tool_failure_limits_parse_env() {
+    assert_eq!(parse_max_turn_wall_seconds(Some("600")), 600);
+    assert_eq!(
+        parse_max_turn_wall_seconds(Some("0")),
+        DEFAULT_MAX_TURN_WALL_SECONDS
+    );
+    assert_eq!(
+        parse_max_turn_wall_seconds(Some("999999")),
+        DEFAULT_MAX_TURN_WALL_SECONDS
+    );
+    assert_eq!(
+        parse_max_turn_wall_seconds(Some("abc")),
+        DEFAULT_MAX_TURN_WALL_SECONDS
+    );
+    assert_eq!(parse_max_consecutive_same_tool_failures(Some("5")), 5);
+    assert_eq!(
+        parse_max_consecutive_same_tool_failures(Some("-1")),
+        DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES
+    );
+    assert_eq!(
+        parse_max_consecutive_same_tool_failures(None),
+        DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES
+    );
+}
+
+struct TurnWallOverrideGuard {
+    previous: usize,
+}
+
+impl TurnWallOverrideGuard {
+    fn set(seconds: usize) -> Self {
+        Self {
+            previous: set_turn_wall_override(seconds),
+        }
+    }
+}
+
+impl Drop for TurnWallOverrideGuard {
+    fn drop(&mut self) {
+        set_turn_wall_override(self.previous);
+    }
+}
+
+struct SameToolFailureOverrideGuard {
+    previous: usize,
+}
+
+impl SameToolFailureOverrideGuard {
+    fn set(limit: usize) -> Self {
+        Self {
+            previous: set_same_tool_failure_override(limit),
+        }
+    }
+}
+
+impl Drop for SameToolFailureOverrideGuard {
+    fn drop(&mut self) {
+        set_same_tool_failure_override(self.previous);
+    }
+}
+
+/// P1-3：同一工具连续失败（入参/错误码都不同）必须止损——既有指纹闸拦不住这种打转。
+///
+/// 真实 trace `dab6a42e…`：`JobOutput` 连续失败 5 次（参数各异）而回合继续跑，最终 942s / 71 次调用。
+#[test]
+fn same_tool_consecutive_failures_stop_turn_even_with_different_arguments() {
+    let _limit = SameToolFailureOverrideGuard::set(4);
+    struct AlwaysFailingExecutor;
+    impl crate::agent::tools::ToolExecutor for AlwaysFailingExecutor {
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            crate::agent::tools::ToolResult {
+                tool_name: call.name.clone(),
+                status: "error".to_string(),
+                output: json!({
+                    "ok": false,
+                    "tool": call.name,
+                    "error": {
+                        "code": "invalid_path",
+                        "message": "目标路径不存在，请检查后重试。"
+                    }
+                })
+                .to_string(),
+                duration_ms: 1,
+            }
+        }
+    }
+
+    // 5 个「同一工具、不同入参」的决策：三元组指纹每次都不同，只有工具级计数能拦住。
+    let server = MockHttpServer::start(vec![
+        json_response(decision_tool_call(
+            "workspace_read_file",
+            json!({ "path": "a.txt", "description": "尝试一" }),
+        )),
+        json_response(decision_tool_call(
+            "workspace_read_file",
+            json!({ "path": "b.txt", "description": "尝试二" }),
+        )),
+        json_response(decision_tool_call(
+            "workspace_read_file",
+            json!({ "path": "c.txt", "description": "尝试三" }),
+        )),
+        json_response(decision_tool_call(
+            "workspace_read_file",
+            json!({ "path": "d.txt", "description": "尝试四" }),
+        )),
+        json_response(decision_tool_call(
+            "workspace_read_file",
+            json!({ "path": "e.txt", "description": "尝试五" }),
+        )),
+    ]);
+    let runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(AlwaysFailingExecutor),
+    );
+
+    let result = runtime.run_turn(TurnInput {
+        message: "读取不存在的文件".to_string(),
+        display_message: None,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        workspace_mode: None,
+        tool_authorization_mode: None,
+        session_id: Some("same-tool-consecutive-failure".to_string()),
+        node_id: None,
+        history: Vec::new(),
+        images: Vec::new(),
+        workspace_id: None,
+        plan_execution_approval: None,
+    });
+
+    let requests = server.finish();
+    assert_eq!(
+        requests.len(),
+        max_consecutive_same_tool_failures_per_turn(),
+        "第 N 次同工具失败后必须立刻止损，不得继续 follow-up"
+    );
+    assert!(
+        result.phase != "ready",
+        "止损必须以失败相位收口，实际 phase={}",
+        result.phase
+    );
+    assert!(
+        result.assistant_message.contains("workspace_read_file")
+            || result.assistant_message.contains("连续失败"),
+        "错误文案必须指明是同一工具连续失败：{}",
+        result.assistant_message
+    );
+}
+
+/// P1-3：墙钟预算耗尽后不再 follow-up，而是走恢复式收尾（保留完整上下文）。
+#[test]
+fn turn_wall_budget_wraps_up_with_recovery_answer() {
+    let _budget = TurnWallOverrideGuard::set(1);
+    let final_text = "预算用尽，基于已获得的证据收尾。";
+    let mut slow_first = sse_response(&[json!({
+        "choices": [
+            {
+                "delta": {
+                    "reasoning_content": "先读配置。",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_slow",
+                            "type": "function",
+                            "function": {
+                                "name": "workspace_read_file",
+                                "arguments": "{\"path\":\"tauri.conf.json\"}"
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    })]);
+    slow_first.delay_ms = 1200;
+
+    let server = MockHttpServer::start(vec![
+        slow_first,
+        sse_response(&[json!({
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_after_budget",
+                                "type": "function",
+                                "function": {
+                                    "name": "workspace_read_file",
+                                    "arguments": "{\"path\":\"package.json\"}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        })]),
+        sse_response(&[json!({
+            "choices": [{ "delta": { "content": final_text } }]
+        })]),
+    ]);
+    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let sink = RecordingTurnEventSink::new();
+
+    runtime.start_turn_stream(
+        &sink,
+        "turn-wall-budget".to_string(),
+        TurnInput {
+            message: "读取两个配置文件".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            tool_authorization_mode: None,
+            session_id: Some("stream-turn-wall-budget".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+            plan_execution_approval: None,
+        },
+    );
+
+    let requests = server.finish();
+    assert_eq!(
+        requests.len(),
+        3,
+        "决策 + 一次 follow-up + 预算恢复请求（不得继续第二次 follow-up）"
+    );
+    let recovery: Value = serde_json::from_str(&requests[2]).expect("recovery request json");
+    let recovery_messages = recovery
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("recovery messages");
+    assert!(
+        recovery_messages.iter().any(|message| {
+            message
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("墙钟预算")
+        }),
+        "收尾请求必须携带墙钟预算原因（否则模型不知道为何停止）"
+    );
+    let events = sink.events.borrow();
+    assert!(
+        events.iter().any(|(name, payload)| name == "turn:delta"
+            && payload.text.as_deref() == Some(final_text)),
+        "预算收尾答案必须送达 UI"
+    );
 }
 
 #[test]

@@ -36,6 +36,8 @@ pub struct JobStartArgs {
     pub command: String,
     pub args: Option<Vec<String>>,
     pub cwd: Option<String>,
+    /// 工具 schema 声明 `timeoutMs`（camelCase），结构体是 snake_case：两种拼法都收。
+    #[serde(alias = "timeoutMs")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -48,8 +50,11 @@ pub struct JobStartResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobOutputArgs {
+    /// schema 口径是 `jobId`；模型也常发 `job_id`，两种拼法都收（见 stream_support 的别名归一）。
+    #[serde(alias = "jobId")]
     pub job_id: String,
     pub wait: Option<bool>,
+    #[serde(alias = "timeoutMs")]
     pub timeout_ms: Option<u64>,
     pub offset: Option<usize>,
 }
@@ -65,6 +70,7 @@ pub struct JobOutputResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobKillArgs {
+    #[serde(alias = "jobId")]
     pub job_id: String,
     pub reason: Option<String>,
 }

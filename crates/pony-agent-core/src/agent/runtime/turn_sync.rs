@@ -14,7 +14,7 @@ impl AgentRuntime {
         tool_call: ToolCall,
         initial_model_hook_trace_records: Vec<HookTraceRecord>,
         first_token_latency_ms: Option<u64>,
-        _turn_started_at: &Instant,
+        turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
         governed_context: Option<&DispatchContext>,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
@@ -192,6 +192,23 @@ impl AgentRuntime {
                     ),
                 ));
             }
+            // P1-3 第二道闸：同一工具连续失败（忽略入参/错误码差异），与流式路径同口径。
+            if consecutive_failures.same_tool_count()
+                >= max_consecutive_same_tool_failures_per_turn()
+            {
+                return Err(self.fail_sync_turn_result(
+                    Some(provider_meta),
+                    display_message,
+                    self.telemetry_builder.failed_trace_after_tool(false),
+                    tool_activities,
+                    hook_trace_records,
+                    build_same_tool_consecutive_failure_error(
+                        max_consecutive_same_tool_failures_per_turn(),
+                        &current_tool_call.name,
+                        tool_result.output.as_str(),
+                    ),
+                ));
+            }
 
             let tool_end_hook_outcome =
                 self.dispatch_hook_trace_records(TurnHookPoint::ToolCallEnd);
@@ -208,7 +225,7 @@ impl AgentRuntime {
             }
 
             let provider_call_started_at = Instant::now();
-            let response = match provider_followup(
+            let response = match provider_followup_with_mode(
                 provider,
                 planning_request,
                 tools,
@@ -216,6 +233,7 @@ impl AgentRuntime {
                 current_assistant_message.as_ref(),
                 &current_tool_call,
                 &tool_result,
+                crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
             ) {
                 Ok(response) => response,
                 Err(error) => {
@@ -295,11 +313,35 @@ impl AgentRuntime {
             }
 
             if let Some(next_tool_call) = response.tool_call.clone() {
-                if completed_hops >= max_tool_followups_per_turn() {
+                if turn_started_at.elapsed()
+                    >= std::time::Duration::from_secs(max_turn_wall_seconds() as u64)
+                {
+                    // P1-3：墙钟预算兜底——不硬失败，走恢复式收尾给出可读结论。
                     let recovery = recover_tool_followup_completion(
                         provider,
                         planning_request,
-                        &user_message,
+                        &mut accumulated_messages,
+                        &hop_records,
+                        &next_tool_call,
+                        response.assistant_message.as_ref(),
+                        &build_turn_wall_budget_error(max_turn_wall_seconds()),
+                        &context_observation,
+                    );
+                    provider_call_records.push(recovery.provider_call_record);
+                    accumulated_token_usage = merge_token_usage(
+                        accumulated_token_usage,
+                        recovery.response.token_usage.as_ref(),
+                    );
+                    accumulated_fallback_reason = merge_fallback_reason(
+                        accumulated_fallback_reason,
+                        recovery.response.fallback_reason.clone(),
+                    );
+                    response = recovery.response;
+                } else if completed_hops >= max_tool_followups_per_turn() {
+                    let recovery = recover_tool_followup_completion(
+                        provider,
+                        planning_request,
+                        &mut accumulated_messages,
                         &hop_records,
                         &next_tool_call,
                         response.assistant_message.as_ref(),
@@ -331,7 +373,7 @@ impl AgentRuntime {
                         let recovery = recover_tool_followup_completion(
                             provider,
                             planning_request,
-                            &user_message,
+                            &mut accumulated_messages,
                             &hop_records,
                             &next_tool_call,
                             response.assistant_message.as_ref(),

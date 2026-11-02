@@ -1025,6 +1025,23 @@ fn build_native_volatile_context_messages(
     }
 }
 
+/// 平台命令行口径（P1-2b）：真实 trace 里同一轮连续 3 次 `Run` 失败（exit 9009 即
+/// Windows「命令不存在」、255/128 为后续重试），根因是模型在 Windows 上沿用 POSIX 写法。
+///
+/// 环境事实里此前只给 `platform`，没给 `shell` 与语法口径；这里补一条最短指令，避免
+/// 把「该用什么语法」留给模型猜。未知平台返回空串（不编造口径）。
+fn shell_command_guidance(platform: &str) -> &'static str {
+    match platform.to_ascii_lowercase().as_str() {
+        "windows" => {
+            "命令语法：使用 Windows cmd/PowerShell 口径——列目录 dir、查命令 where、读文件 type、\
+文本搜索 findstr /s /n /i，禁止 ls/cat/which/grep，禁止 `VAR=value cmd` 内联赋值；\
+复杂脚本请整体改用 powershell -NoProfile -Command 执行。"
+        }
+        "linux" | "macos" => "命令语法：使用 POSIX shell（bash/sh）口径。",
+        _ => "",
+    }
+}
+
 fn volatile_context_note(
     retrieved: &RetrievedContextState,
     planner_skills: &[SkillDescriptor],
@@ -1043,13 +1060,22 @@ fn volatile_context_note(
         } else {
             "not a git repo".to_string()
         };
+        let shell_label = env_info.shell.as_deref().unwrap_or("unknown");
+        let guidance = shell_command_guidance(&env_info.platform);
+        let guidance_suffix = if guidance.is_empty() {
+            String::new()
+        } else {
+            format!(" {guidance}")
+        };
         notes.push(format!(
-            "Environment: cwd={}, platform={}, date={}, tz={}, {}. 工作区工具（搜索/读取/写入）仅限 cwd 目录内，依赖源码（如 ../crates）不在搜索范围内，需通过 path 参数或明确路径访问。",
+            "Environment: cwd={}, platform={}, shell={}, date={}, tz={}, {}.{} 工作区工具（搜索/读取/写入）仅限 cwd 目录内，依赖源码（如 ../crates）不在搜索范围内，需通过 path 参数或明确路径访问。",
             env_info.cwd,
             env_info.platform,
+            shell_label,
             env_info.current_date,
             env_info.timezone.as_deref().unwrap_or("unknown"),
             git_info,
+            guidance_suffix,
         ));
     }
 
@@ -2918,5 +2944,57 @@ mod tests {
         assert!(!BASE_SYSTEM_PROMPT.contains("Initialize pending items"));
         // 契约 §6 实测：v2 全文 3790 字节（含尾部换行）。
         assert_eq!(base_system_prompt().len(), 3790);
+    }
+
+    /// P1-2b：环境事实必须同时给出 `shell` 与平台命令口径。
+    ///
+    /// 真实 trace（session `pa_01a19b48` turn-3）里连续 3 次 `Run` 失败，其中 exit 9009 就是
+    /// Windows「命令不存在」——模型知道 platform 却仍写 POSIX 命令。本用例锁定「口径进上下文」。
+    #[test]
+    fn volatile_context_note_carries_shell_and_platform_command_guidance() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "deepseek-chat",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                ..Default::default()
+            },
+        );
+        let env_note_of = |platform: &str, shell: Option<&str>| -> String {
+            let mut session = session_snapshot(Vec::new(), Vec::new(), None);
+            session.env_info = Some(crate::agent::session::EnvironmentInfo {
+                cwd: "C:/work".to_string(),
+                platform: platform.to_string(),
+                shell: shell.map(str::to_string),
+                os_version: None,
+                current_date: "2026-11-02".to_string(),
+                timezone: Some("CST".to_string()),
+                is_git_repo: true,
+                git_branch: Some("main".to_string()),
+            });
+            let retrieved =
+                builder.retrieve_context_state("hi", &[], None, &session, None, None);
+            let request = builder.build_request("coding", &provider, &retrieved, &[]);
+            request
+                .input
+                .iter()
+                .find(|message| message.content.contains("Environment:"))
+                .map(|message| message.content.clone())
+                .expect("env note must be present")
+        };
+
+        let windows = env_note_of("windows", Some("C:\\Windows\\system32\\cmd.exe"));
+        assert!(windows.contains("shell=C:\\Windows\\system32\\cmd.exe"), "{windows}");
+        assert!(windows.contains("cmd/PowerShell"), "{windows}");
+        assert!(windows.contains("findstr"), "{windows}");
+        assert!(windows.contains("dir"), "{windows}");
+
+        let linux = env_note_of("linux", Some("bash"));
+        assert!(linux.contains("shell=bash"), "{linux}");
+        assert!(linux.contains("POSIX shell"), "{linux}");
+        assert!(!linux.contains("findstr"), "{linux}");
     }
 }

@@ -2515,10 +2515,66 @@ fn turn_event_cost_usd(
     .map(|estimate| estimate.total_cost_usd)
 }
 
+/// `llm.chat` 请求的组装模式（写入 span 属性 `llm.request.mode`）。
+///
+/// 三者共用一个 provider 调用出口，但上下文来源不同：`Initial` 是本轮首次请求、
+/// `ToolFollowup` 是工具结果续跑、`ToolRecovery` 是「重复/超限/预算」拦截后的收尾请求。
+/// 生产事故（trace `38590d52…`）证明恢复请求曾被静默换掉上下文，本枚举是它的显式标签。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LlmRequestMode {
+    /// 本轮首次决策请求（分层上下文新组装）。
+    Initial,
+    /// 工具执行结果续跑（正常 follow-up）。
+    ToolFollowup,
+    /// 拦截式收尾（重复调用 / follow-up 超限 / 墙钟预算耗尽）后的恢复请求。
+    ToolRecovery,
+}
+
+impl LlmRequestMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmRequestMode::Initial => "initial",
+            LlmRequestMode::ToolFollowup => "tool_followup",
+            LlmRequestMode::ToolRecovery => "tool_recovery",
+        }
+    }
+}
+
+/// 请求形状（实际发送的消息条数, 首条是否为 system 前缀）。
+///
+/// native transcript 非空时以它为准（native 流程下 provider 直接用它当 messages），
+/// 否则回退分层 `input`。纯函数：无网络、无全局态，供 span 属性与单测共用同一出口。
+pub fn llm_request_shape(request: &ProviderRequest) -> (usize, bool) {
+    if !request.native_messages.is_empty() {
+        let has_system_prefix = request
+            .native_messages
+            .first()
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str)
+            == Some("system");
+        return (request.native_messages.len(), has_system_prefix);
+    }
+    let has_system_prefix = matches!(
+        request.input.first().map(|message| &message.role),
+        Some(crate::agent::provider::ProviderRole::System)
+    );
+    (request.input.len(), has_system_prefix)
+}
+
+/// 兼容入口：等价于 [`provider_decision_with_mode`] 传 [`LlmRequestMode::Initial`]。
 pub fn provider_decision<P: ProviderClient>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
+) -> Result<ProviderDecision, String> {
+    provider_decision_with_mode(provider, request, tools, LlmRequestMode::Initial)
+}
+
+pub fn provider_decision_with_mode<P: ProviderClient>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    request_mode: LlmRequestMode,
 ) -> Result<ProviderDecision, String> {
     // Wave43：llm.chat 子 span（父 = 当前活动 turn）；token 用量取响应侧。
     let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
@@ -2526,6 +2582,12 @@ pub fn provider_decision<P: ProviderClient>(
         Some(provider.name()),
         Some(request.model.as_str()),
         "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix,
     );
     let start = std::time::Instant::now();
     let result = provider.decide_with_tools(request, tools);
@@ -2562,6 +2624,7 @@ pub fn provider_decision<P: ProviderClient>(
     result
 }
 
+/// 兼容入口：等价于 [`provider_decision_stream_with_mode`] 传 [`LlmRequestMode::Initial`]。
 pub fn provider_decision_stream<P, F>(
     provider: &P,
     request: &ProviderRequest,
@@ -2572,23 +2635,61 @@ where
     P: ProviderClient,
     F: FnMut(ProviderStreamChunk),
 {
-    // 无守卫版本：保持既有公开签名（既有调用方/测试夹具不受影响）。
-    provider_decision_stream_guarded(
+    provider_decision_stream_with_mode(provider, request, tools, on_delta, LlmRequestMode::Initial)
+}
+
+pub fn provider_decision_stream_with_mode<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    on_delta: F,
+    request_mode: LlmRequestMode,
+) -> Result<ProviderDecision, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    // 无守卫版本：不改变控制流，仅把请求模式透传给带守卫实现。
+    provider_decision_stream_guarded_with_mode(
         provider,
         request,
         tools,
         &crate::agent::provider::ProviderStreamGuard::without_cancel(),
         on_delta,
+        request_mode,
     )
 }
 
 /// T9：带取消/时长守卫的流式决策（runtime 生产路径由此进入）。
+/// 兼容入口：等价于 [`provider_decision_stream_guarded_with_mode`] 传 [`LlmRequestMode::Initial`]。
 pub fn provider_decision_stream_guarded<P, F>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
     guard: &crate::agent::provider::ProviderStreamGuard<'_>,
+    on_delta: F,
+) -> Result<ProviderDecision, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    provider_decision_stream_guarded_with_mode(
+        provider,
+        request,
+        tools,
+        guard,
+        on_delta,
+        LlmRequestMode::Initial,
+    )
+}
+
+pub fn provider_decision_stream_guarded_with_mode<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    guard: &crate::agent::provider::ProviderStreamGuard<'_>,
     mut on_delta: F,
+    request_mode: LlmRequestMode,
 ) -> Result<ProviderDecision, String>
 where
     P: ProviderClient,
@@ -2600,6 +2701,12 @@ where
         Some(provider.name()),
         Some(request.model.as_str()),
         "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix,
     );
     let start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;
@@ -2643,6 +2750,7 @@ where
     result
 }
 
+/// 兼容入口：等价于 [`provider_followup_with_mode`] 传 [`LlmRequestMode::ToolFollowup`]。
 pub fn provider_followup<P: ProviderClient>(
     provider: &P,
     request: &ProviderRequest,
@@ -2652,12 +2760,40 @@ pub fn provider_followup<P: ProviderClient>(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Result<crate::agent::provider::ProviderResponse, String> {
+    provider_followup_with_mode(
+        provider,
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        tool_call,
+        tool_result,
+        LlmRequestMode::ToolFollowup,
+    )
+}
+
+pub fn provider_followup_with_mode<P: ProviderClient>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+    request_mode: LlmRequestMode,
+) -> Result<crate::agent::provider::ProviderResponse, String> {
     // Wave43：llm.chat 子 span（工具结果后续轮）。
     let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
         provider.protocol_label(),
         Some(provider.name()),
         Some(request.model.as_str()),
         "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix,
     );
     let start = std::time::Instant::now();
     let result = provider.continue_with_tool_result(
@@ -2701,6 +2837,7 @@ pub fn provider_followup<P: ProviderClient>(
     result
 }
 
+/// 兼容入口：等价于 [`provider_followup_stream_with_mode`] 传 [`LlmRequestMode::ToolFollowup`]。
 pub fn provider_followup_stream<P, F>(
     provider: &P,
     request: &ProviderRequest,
@@ -2709,7 +2846,35 @@ pub fn provider_followup_stream<P, F>(
     assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
+    on_delta: F,
+) -> Result<crate::agent::provider::ProviderResponse, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    provider_followup_stream_with_mode(
+        provider,
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        tool_call,
+        tool_result,
+        on_delta,
+        LlmRequestMode::ToolFollowup,
+    )
+}
+
+pub fn provider_followup_stream_with_mode<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
     mut on_delta: F,
+    request_mode: LlmRequestMode,
 ) -> Result<crate::agent::provider::ProviderResponse, String>
 where
     P: ProviderClient,
@@ -2721,6 +2886,12 @@ where
         Some(provider.name()),
         Some(request.model.as_str()),
         "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix,
     );
     let start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;

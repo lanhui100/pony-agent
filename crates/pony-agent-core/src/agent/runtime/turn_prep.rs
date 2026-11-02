@@ -198,10 +198,11 @@ impl AgentRuntime {
                 // reasoning_content 完整回传给 API，本地 planner 决策没有该字段，
                 // 会被 DeepSeek 等 thinking 模式以 invalid_request_error 拒绝。
                 let started_at = Instant::now();
-                let decision = provider_decision(
+                let decision = provider_decision_with_mode(
                     &prepared.provider,
                     &prepared.planning_request,
                     &prepared.tools,
+                    crate::agent::turn_flow::LlmRequestMode::Initial,
                 )?;
                 (decision, Some(started_at.elapsed().as_millis() as u64))
             } else {
@@ -209,10 +210,11 @@ impl AgentRuntime {
                     Some(decision) => (decision, None),
                     None => {
                         let started_at = Instant::now();
-                        let decision = provider_decision(
+                        let decision = provider_decision_with_mode(
                             &prepared.provider,
                             &prepared.planning_request,
                             &prepared.tools,
+                            crate::agent::turn_flow::LlmRequestMode::Initial,
                         )?;
                         (decision, Some(started_at.elapsed().as_millis() as u64))
                     }

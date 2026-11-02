@@ -22,6 +22,109 @@ pub(super) const MAX_ALLOWED_CONSECUTIVE_TOOL_FAILURES_PER_TURN: usize = 16;
 pub(super) const MAX_CONSECUTIVE_TOOL_FAILURES_ENV: &str =
     "PONY_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN";
 
+/// 单轮墙钟预算（秒，P1-3）：超预算后不再继续 follow-up，而是在下一个工具调用边界
+/// 走「恢复式收尾」给出可读结论。默认 900s（15min）——真实长轮 trace `dab6a42e…`
+/// 跑了 942s / 71 次调用；预算是兜底，不是主止损手段（主止损见同工具连续失败）。
+pub(super) const DEFAULT_MAX_TURN_WALL_SECONDS: usize = 900;
+
+pub(super) const MAX_ALLOWED_TURN_WALL_SECONDS: usize = 7_200;
+
+pub(super) const MAX_TURN_WALL_SECONDS_ENV: &str = "PONY_AGENT_MAX_TURN_WALL_SECONDS";
+
+/// 同一工具「连续失败」上限（P1-3）：只看工具名，不看入参与错误码。
+///
+/// 为什么需要第二道闸：既有指纹闸是 `(工具, 入参指纹, 错误码)` 三元组，模型只要换参数或
+/// 换错误码就能绕过——实测 `JobOutput` 连续失败 5 次仍未被停（trace `dab6a42e…`）。
+pub(super) const DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES: usize = 4;
+
+pub(super) const MAX_ALLOWED_CONSECUTIVE_SAME_TOOL_FAILURES: usize = 16;
+
+pub(super) const MAX_CONSECUTIVE_SAME_TOOL_FAILURES_ENV: &str =
+    "PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES";
+
+pub(super) fn build_turn_wall_budget_error(limit_seconds: usize) -> String {
+    format!(
+        "本轮已运行超过 {limit_seconds} 秒（墙钟预算），已停止继续调用工具以避免长时间占用；\
+请基于已经获得的证据给出结论，并明确仍未完成的部分。如确需更长时限，可提高 PONY_AGENT_MAX_TURN_WALL_SECONDS。"
+    )
+}
+
+pub(super) fn build_same_tool_consecutive_failure_error(
+    limit: usize,
+    tool_name: &str,
+    output: &str,
+) -> String {
+    format!(
+        "工具 `{tool_name}` 已连续失败 {limit} 次（无论参数/错误码是否相同），已停止继续 follow-up \
+以避免在同一工具上打转；最后一次错误详情：{}。如属误判，可提高 PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES。",
+        preview_text(output, 200)
+    )
+}
+
+// 测试覆写为什么用 thread_local 而不是进程级 Atomic：turn 在调用线程上同步执行，thread_local
+// 既能让用例精确注入预算，又不会污染并行跑的其他用例（进程级覆写会让并发用例误触预算）。
+#[cfg(test)]
+thread_local! {
+    static TURN_WALL_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SAME_TOOL_FAILURE_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn set_turn_wall_override(value: usize) -> usize {
+    TURN_WALL_OVERRIDE.with(|slot| slot.replace(value))
+}
+
+#[cfg(test)]
+pub(super) fn set_same_tool_failure_override(value: usize) -> usize {
+    SAME_TOOL_FAILURE_OVERRIDE.with(|slot| slot.replace(value))
+}
+
+pub(super) fn max_turn_wall_seconds() -> usize {
+    #[cfg(test)]
+    {
+        let override_limit = TURN_WALL_OVERRIDE.with(|slot| slot.get());
+        if override_limit > 0 {
+            return override_limit;
+        }
+    }
+
+    static MAX_TURN_WALL_SECONDS: OnceLock<usize> = OnceLock::new();
+    *MAX_TURN_WALL_SECONDS.get_or_init(|| {
+        parse_max_turn_wall_seconds(std::env::var(MAX_TURN_WALL_SECONDS_ENV).ok().as_deref())
+    })
+}
+
+pub(super) fn parse_max_turn_wall_seconds(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (1..=MAX_ALLOWED_TURN_WALL_SECONDS).contains(value))
+        .unwrap_or(DEFAULT_MAX_TURN_WALL_SECONDS)
+}
+
+pub(super) fn max_consecutive_same_tool_failures_per_turn() -> usize {
+    #[cfg(test)]
+    {
+        let override_limit = SAME_TOOL_FAILURE_OVERRIDE.with(|slot| slot.get());
+        if override_limit > 0 {
+            return override_limit;
+        }
+    }
+
+    static MAX_SAME_TOOL_FAILURES: OnceLock<usize> = OnceLock::new();
+    *MAX_SAME_TOOL_FAILURES.get_or_init(|| {
+        parse_max_consecutive_same_tool_failures(
+            std::env::var(MAX_CONSECUTIVE_SAME_TOOL_FAILURES_ENV)
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+pub(super) fn parse_max_consecutive_same_tool_failures(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (1..=MAX_ALLOWED_CONSECUTIVE_SAME_TOOL_FAILURES).contains(value))
+        .unwrap_or(DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES)
+}
+
 pub(super) fn build_consecutive_tool_failure_error(limit: usize, tool_name: &str, code: &str, output: &str) -> String {
     format!(
         "工具 `{tool_name}` 连续 {limit} 次以同一错误 `{code}` 失败，已停止继续 follow-up 以避免无效重试；最后一次错误详情：{}。如属误判，可提高 PONY_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN。",
