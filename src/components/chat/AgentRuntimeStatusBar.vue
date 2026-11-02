@@ -76,6 +76,7 @@ onUnmounted(() => {
     clearTimeout(statusHoldTimer);
     statusHoldTimer = null;
   }
+  clearLabelMotionTimers();
 });
 
 const elapsedText = computed(() => {
@@ -102,6 +103,54 @@ const labelToneClass = computed(() => {
     return "text-emerald-600 dark:text-emerald-400 not-italic";
   }
   return "runtime-status-shimmer text-stone-500 dark:text-stone-300 italic";
+});
+
+// ─── wave-pds-3 §3.4：状态行交接（原位替换 + rise/fall） ───────────────────
+// 约束（契约 v5 R-B1）：
+// - label 节点**不得重建**（既有 wave-11.2 F3 语义，本波继续锁住）。
+// - rise 必须**真正生效**：`.runtime-status-shimmer` 与交接动效不能各写一条 `animation` 抢同一个简写
+//   （scoped 规则的 `(0,2,0)` 会恒定压过 primitives 的 `(0,1,0)`，rise 静默失效）。
+//   ⇒ 交接时把 `shimmer-sweep` 与 `runtime-status-label-rise` **并列在同一条 `animation` 声明里**。
+// - 两个相位（`enter` / `enter-b`）交替出现，让这条声明真的变化一次，动画才会重播（免定时器）。
+//   ⚠️ `enter-b` 是**刻意的第三枚举值**（不是笔误、不是非法值）：它存在的唯一目的就是让
+//   `animation` 声明真的变化一次以触发重播。删掉它 = rise 只在首次交接时播放（R-B1 回归）。
+// - 退场 fall：旧文案以绝对定位的幽灵节点在同一位置淡出下坠 180ms，纯视觉层，`aria-hidden`。
+const LABEL_FALL_MS = 180;
+/** 交接相位：`enter` / `enter-b` 交替，驱动「shimmer + rise」并列声明重播。
+ *  `enter-b` 是**刻意的第三枚举值**（非笔误）：两相位交替才能让 `animation` 简写真正变化一次，
+ *  从而重播 rise。若被当成非法值清理掉，rise 会退化为"只在首次交接时播放"。 */
+const labelHandoffPhase = ref<"enter" | "enter-b" | null>(null);
+/** 正在退场的旧文案（空 ⇒ 无幽灵节点）。 */
+const fadingLabel = ref("");
+let labelHandoffTick = 0;
+let labelFadeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearLabelMotionTimers() {
+  if (labelFadeTimer) {
+    clearTimeout(labelFadeTimer);
+    labelFadeTimer = null;
+  }
+}
+
+watch(displayLabel, (nextLabel, previousLabel) => {
+  if (nextLabel === previousLabel) {
+    return;
+  }
+
+  labelHandoffTick += 1;
+  labelHandoffPhase.value = labelHandoffTick % 2 === 1 ? "enter" : "enter-b";
+
+  // fall：旧文案下坠淡出。
+  if (previousLabel) {
+    fadingLabel.value = previousLabel;
+    if (labelFadeTimer) {
+      clearTimeout(labelFadeTimer);
+    }
+    labelFadeTimer = setTimeout(() => {
+      fadingLabel.value = "";
+      labelFadeTimer = null;
+    }, LABEL_FALL_MS);
+  }
 });
 </script>
 
@@ -152,12 +201,19 @@ const labelToneClass = computed(() => {
       </span>
       <div
         :class="labelToneClass"
-        class="inline-flex min-w-0 max-w-full items-center font-normal"
+        class="relative inline-flex min-w-0 max-w-full items-center font-normal"
       >
+        <!-- wave-pds-3 §3.4 fall：旧文案在同一位置淡出下坠，纯视觉层（不参与读屏）。 -->
+        <span
+          v-if="fadingLabel"
+          class="runtime-status-label-fall pointer-events-none absolute top-0 left-0 min-w-0 truncate font-normal"
+          aria-hidden="true"
+        >{{ fadingLabel }}</span>
         <span
           :class="labelToneClass"
           class="min-w-0 truncate font-normal"
           data-testid="agent-runtime-status-label"
+          :data-pds-status="labelHandoffPhase ?? undefined"
         >{{ displayLabel }}</span>
         <span
           v-if="elapsedText && displayedStatus.mode !== 'error'"
@@ -344,7 +400,82 @@ const labelToneClass = computed(() => {
   -webkit-text-fill-color: transparent;
 }
 
+/* wave-pds-3 §3.4 / R-B1：状态行交接。
+   rise **不许**再靠「另一条规则写 `animation`」去和 `.runtime-status-shimmer` 抢同一个简写
+   （scoped `(0,2,0)` 恒定压过 primitives `(0,1,0)` ⇒ rise 静默失效）。做法：
+   把 `shimmer-sweep` 与 `runtime-status-label-rise` **并列在同一条 `animation` 声明**里；
+   两个相位（`enter` / `enter-b`）交替下发，声明因此真的变化一次 ⇒ 动画重播（无需定时器）。
+   fall 由本组件自带（180ms），只作用于「旧文案幽灵节点」，label 本体始终原位、不重建。 */
+.runtime-status-shimmer[data-pds-status="enter"] {
+  animation:
+    shimmer-sweep 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite,
+    runtime-status-label-rise 240ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+
+.runtime-status-shimmer[data-pds-status="enter-b"] {
+  animation:
+    shimmer-sweep 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite,
+    runtime-status-label-rise-b 240ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+
+/* error / info 语义下 label 不挂 shimmer（没有扫光），交接只用 rise 单动画。
+   注：`enter-b` 是双相位重播用的**刻意第三枚举值**（与 `enter` 同构、只是名字不同），
+   不得按"非法值"删除；两个相位交替下发才能让 `animation` 简写变化并触发重播。 */
+[data-pds-status="enter"]:not(.runtime-status-shimmer) {
+  animation: runtime-status-label-rise 240ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+
+[data-pds-status="enter-b"]:not(.runtime-status-shimmer) {
+  animation: runtime-status-label-rise-b 240ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+
+@keyframes runtime-status-label-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes runtime-status-label-rise-b {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.runtime-status-label-fall {
+  animation: runtime-status-label-fall 180ms cubic-bezier(0, 0, 0.2, 1) both;
+}
+
+@keyframes runtime-status-label-fall {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  /* 降级：退场幽灵直接不渲染（动画被关掉后它会与 label 叠字）。 */
+  .runtime-status-label-fall {
+    display: none !important;
+    animation: none !important;
+  }
+
   .runtime-status-orbit,
   .runtime-status-orbit * {
     animation: none !important;
@@ -355,10 +486,21 @@ const labelToneClass = computed(() => {
   }
 
   .runtime-status-shimmer {
+    /* R-B7：降级时把「透明填充 + 扫光渐变」复位成文字自身的颜色（`currentColor`），
+       由 tone class（text-stone-500 / dark:text-stone-300）决定最终色值。
+       禁止硬编码灰：`#78716c` 在 dark + reduced-motion 下实测 3.6:1 < AA 4.5:1。 */
     background: none;
-    -webkit-text-fill-color: #78716c;
-    color: #78716c;
+    -webkit-text-fill-color: currentColor;
     animation: none;
+  }
+
+  /* 交接相位把 shimmer 与 rise 并列在同一条 `animation` 里，特异度高于上面的单类规则，
+     故降级时必须显式按同一批选择器关掉（否则降级下 rise 仍会播）。 */
+  .runtime-status-shimmer[data-pds-status="enter"],
+  .runtime-status-shimmer[data-pds-status="enter-b"],
+  [data-pds-status="enter"]:not(.runtime-status-shimmer),
+  [data-pds-status="enter-b"]:not(.runtime-status-shimmer) {
+    animation: none !important;
   }
 }
 </style>

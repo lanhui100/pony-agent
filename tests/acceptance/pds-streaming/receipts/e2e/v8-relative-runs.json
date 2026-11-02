@@ -1,5 +1,5 @@
 {
-  "criterion": "p95_stream - p95_idle <= 6ms 且 Long Task(>50ms)=0，连续 3 次全部满足",
+  "criterion": "同轮 A/B 差分：p95(B) − p95(A) ≤ 4ms；A、B 两段 Long Task(>50ms)=0；仅 B−A 超预算（其余正常）记 [SPIKE] 补测；p95(A) − p95(idle) ≤ 6ms；连续 3 轮全满足；idle p95 偏离基线 16.9ms 超 1.5ms 记 [LOAD-CONTAMINATED]（最多 8 轮）",
   "contractParams": {
     "chunkIntervalMs": 120,
     "maxChunkChars": 50,
@@ -12,58 +12,127 @@
     "idleFrames": 320,
     "usingContractParams": true
   },
-  "generatedAt": "2026-11-02T14:10:45.099Z",
-  "runs": [
+  "abBudgetMs": 4,
+  "frameworkSanityBudgetMs": 6,
+  "longTaskThresholdMs": 50,
+  "recordedIdleBaselineP95Ms": 16.9,
+  "idleDriftToleranceMs": 1.5,
+  "roundsRequired": 3,
+  "maxRounds": 8,
+  "generatedAt": "2026-11-02T17:21:50.921Z",
+  "summary": {
+    "roundsAttempted": 3,
+    "cleanPassed": 3,
+    "contaminated": 0,
+    "measurementInvalid": 0,
+    "spikes": 0,
+    "verdict": "pass"
+  },
+  "rounds": [
     {
-      "index": 1,
-      "startedAt": "2026-11-02T14:09:31.500Z",
-      "chunkIntervalMs": 120,
-      "maxChunkChars": 50,
-      "idleFrames": 319,
-      "streamFrames": 899,
-      "idleP50": 16.69999998807907,
-      "idleP95": 16.80000001192093,
-      "streamP50": 16.600000023841858,
-      "streamP95": 18.80000001192093,
-      "streamMax": 27.69999998807907,
-      "p95Delta": 2,
-      "longTaskCount": 0,
-      "growthChars": 3496,
-      "verdict": "pass"
+      "round": 1,
+      "startedAt": "2026-11-02T17:19:52.288Z",
+      "idle": {
+        "frames": 319,
+        "p50": 16.69999998807907,
+        "p95": 16.900000005960464,
+        "max": 21.100000023841858,
+        "tailFrames": 0,
+        "longTasks": 0,
+        "driftMs": 5.960465898624534e-9
+      },
+      "A": {
+        "frames": 899,
+        "p50": 16.69999998807907,
+        "p95": 17.099999994039536,
+        "max": 26.900000005960464,
+        "tailFrames": 0,
+        "longTasks": 0
+      },
+      "B": {
+        "frames": 899,
+        "p50": 16.69999998807907,
+        "p95": 17.19999998807907,
+        "max": 21.200000017881393,
+        "tailFrames": 253,
+        "longTasks": 0
+      },
+      "p95BMinusA": 0.09999999403953552,
+      "frameworkCheck": 0.19999998807907104,
+      "contaminated": false,
+      "tag": null,
+      "verdict": "pass",
+      "reasons": []
     },
     {
-      "index": 2,
-      "startedAt": "2026-11-02T14:09:55.996Z",
-      "chunkIntervalMs": 120,
-      "maxChunkChars": 50,
-      "idleFrames": 319,
-      "streamFrames": 899,
-      "idleP50": 16.69999998807907,
-      "idleP95": 17,
-      "streamP50": 16.600000023841858,
-      "streamP95": 21.5,
-      "streamMax": 33.80000001192093,
-      "p95Delta": 4.5,
-      "longTaskCount": 0,
-      "growthChars": 3496,
-      "verdict": "pass"
+      "round": 2,
+      "startedAt": "2026-11-02T17:20:31.829Z",
+      "idle": {
+        "frames": 319,
+        "p50": 16.69999998807907,
+        "p95": 16.900000005960464,
+        "max": 18.5,
+        "tailFrames": 0,
+        "longTasks": 0,
+        "driftMs": 5.960465898624534e-9
+      },
+      "A": {
+        "frames": 899,
+        "p50": 16.69999998807907,
+        "p95": 17.099999994039536,
+        "max": 26.599999994039536,
+        "tailFrames": 0,
+        "longTasks": 0
+      },
+      "B": {
+        "frames": 899,
+        "p50": 16.69999998807907,
+        "p95": 17.700000017881393,
+        "max": 21.600000023841858,
+        "tailFrames": 251,
+        "longTasks": 0
+      },
+      "p95BMinusA": 0.6000000238418579,
+      "frameworkCheck": 0.19999998807907104,
+      "contaminated": false,
+      "tag": null,
+      "verdict": "pass",
+      "reasons": []
     },
     {
-      "index": 3,
-      "startedAt": "2026-11-02T14:10:20.468Z",
-      "chunkIntervalMs": 120,
-      "maxChunkChars": 50,
-      "idleFrames": 319,
-      "streamFrames": 899,
-      "idleP50": 16.69999998807907,
-      "idleP95": 16.80000001192093,
-      "streamP50": 16.600000023841858,
-      "streamP95": 20,
-      "streamMax": 27.899999976158142,
-      "p95Delta": 3.199999988079071,
-      "longTaskCount": 0,
-      "growthChars": 3496,
-      "verdict": "pass"
+      "round": 3,
+      "startedAt": "2026-11-02T17:21:11.375Z",
+      "idle": {
+        "frames": 319,
+        "p50": 16.69999998807907,
+        "p95": 17,
+        "max": 19,
+        "tailFrames": 0,
+        "longTasks": 0,
+        "driftMs": 0.10000000000000142
+      },
+      "A": {
+        "frames": 899,
+        "p50": 16.69999998807907,
+        "p95": 17.099999994039536,
+        "max": 20.599999994039536,
+        "tailFrames": 0,
+        "longTasks": 0
+      },
+      "B": {
+        "frames": 899,
+        "p50": 16.69999998807907,
+        "p95": 18.100000023841858,
+        "max": 21.700000017881393,
+        "tailFrames": 253,
+        "longTasks": 0
+      },
+      "p95BMinusA": 1.0000000298023224,
+      "frameworkCheck": 0.09999999403953552,
+      "contaminated": false,
+      "tag": null,
+      "verdict": "pass",
+      "reasons": []
     }
   ]
 }

@@ -314,6 +314,22 @@ describe("wave-pds-3 附加护栏 · §3.4 状态行交接", () => {
       `R6：${COMPONENT} 内必须存在 fall（退场，180ms）动画规则（契约 §3.4）；实际：${JSON.stringify(fallRules)}`
     ).not.toHaveLength(0);
 
+    // Assert ④（契约 v7 R-B5）：`data-pds-status` 分支必须有**真** rise 断言。
+    //   上一轮的问题：rise 只写了注释/单独规则，被 `.runtime-status-shimmer` 的 `animation` 简写按特异度压掉，
+    //   于是"rise 空转"在结构上抓不到。这里锁**并列声明**：同一 `[data-pds-status="enter"]` 规则的
+    //   `animation` 里必须同时出现 shimmer 与 rise 两个动画名（缺一个就是空转）。
+    //   （computed `animation-name` 的实机验证在 Chromium 侧 `R6-b`，因为 jsdom 不实现 animation-name 取值。）
+    const enterPairRules = extractRulesMatching(componentCss, '[data-pds-status="enter"]').filter(
+      (rule) => /animation\s*:/.test(rule.body)
+        && /shimmer/.test(rule.body)
+        && /rise/.test(rule.body)
+    );
+    expect(
+      enterPairRules,
+      `R6（R-B5）：[data-pds-status="enter"] 的 animation 必须**并列**声明 shimmer 与 rise；`
+        + `实际 enter 规则=${JSON.stringify(extractRulesMatching(componentCss, '[data-pds-status="enter"]'))}`
+    ).not.toHaveLength(0);
+
     wrapper.unmount();
   });
 });

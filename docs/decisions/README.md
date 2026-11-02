@@ -76,6 +76,7 @@
 - [0054 渲染层外泄通道收口：启用 CSP、markdown 外部资源 fail-closed 与密钥不回显](0054-render-layer-exfil-csp-and-secret-masking.md)
 - [0057 流式动效抽象为框架无关规范（五层契约 + 纯 reducer + 机器门禁）](0057-streaming-motion-framework-agnostic-spec.md)
 - [0058 流式释放与视口阈值接入 PDS-SM reducer（等价重构 + 常量单源化）](0058-pds-budget-reducer-adoption.md)
+- [0059 流式视觉层接入：允许单个 inline 尾巴节点（修订 D-59-1 与 F3-1 部分断言）](0059-streaming-visual-layer-tail-node.md)
 - [0060 恢复请求保留完整上下文 + 轮次止损与请求形状可观测](0060-turn-context-integrity-and-loop-guards.md)
 
 ### 已接替

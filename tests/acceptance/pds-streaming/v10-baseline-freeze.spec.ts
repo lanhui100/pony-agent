@@ -182,8 +182,18 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
       expect(existsSync(VITEST_BIN), `V10-3：找不到 vitest 可执行文件：${VITEST_BIN}`).toBe(true);
 
       // Act
+      // 降低子进程自身的并行度：本用例是「全量套件里再跑一遍全量套件」，
+      // 与外部 worker 抢 CPU 时会把仓库里 5s 超时的重型用例（如 check-secrets 的全仓扫描）
+      // 挤到超时 → 制造与实现无关的假红（实测 1 次）。这不改变断言强度（仍是 exit 0 + 用例数自检）。
       const receipt = runVitest(
-        ["run", "--reporter=dot", "--exclude", "tests/acceptance/pds-streaming/**"],
+        [
+          "run",
+          "--no-file-parallelism",
+          "--maxWorkers=2",
+          "--reporter=dot",
+          "--exclude",
+          "tests/acceptance/pds-streaming/**"
+        ],
         600_000
       );
 

@@ -107,7 +107,9 @@ const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 const STREAM_RENDER_DISABLE_STORAGE_KEY = "pony-agent.stream-render.disable-optimization";
 const STREAM_RENDER_CONFIG_CHANGED_EVENT = "pony:stream-render-config-changed";
 const STREAMING_MARKDOWN_FOLLOW_DISTANCE_PX = 96;
-const STREAMING_PRESENTATION_TICK_MS = 60;
+// wave-pds-3 §4：释放节拍 60ms → 33ms（≈30Hz）。平滑感的另一半由 MarkdownRenderer 的
+// 尾巴遮罩浮现（§3.1）承担；`DEFAULT_REVEAL_BUDGET.charsPerTick` 保持 4 不动（契约 v3 裁定 ①）。
+const STREAMING_PRESENTATION_TICK_MS = 33;
 const COMPOSER_BUFFER_PX = 220;
 const streamDebugState = shallowReactive<Record<string, unknown>>({});
 const streamingRenderOptimizationDisabled = ref(false);
@@ -658,6 +660,21 @@ function cleanHopText(text: string): string {
   return text.replace(/^[\r\n]+/, "").replace(/[\r\n]+$/, "");
 }
 
+/**
+ * wave-pds-3 §1：**流式正文**的块边界语义依赖尾随空行。
+ *
+ * `splitMarkdownBlocks` 用「空行」判定「当前块已闭合、内容可移入 stableHtml」；而 `cleanHopText`
+ * 会把尾随换行一并剥掉，于是渲染层永远看不到「块已闭合」，`[data-stream-tail]` 在块闭合帧
+ * 无法归零（契约 §1：「存在未闭合尾巴文本时 =1；否则 =0」）。
+ *
+ * 故流式正文只剥**前导**换行（前导空行会让首块凭空多出间距），保留尾随换行 —— 对渲染结果
+ * 无影响（`marked` 会忽略尾随空行），只为把「块是否闭合」这一位信息透到渲染层。
+ */
+function cleanStreamingHopText(text: string): string {
+  if (!text) return "";
+  return text.replace(/^[\r\n]+/, "");
+}
+
 function modelEntryReasoningContent(
   turn: TurnBucket,
   entry: TraceTimelineEntry,
@@ -704,7 +721,8 @@ function modelEntryContent(
       (modelEntry) => modelEntry.text ?? "",
       completeContent
     );
-    return cleanHopText(currentContent);
+    // wave-pds-3：流式帧保留尾随换行（块闭合位信息透给 MarkdownRenderer 的尾巴切分）。
+    return cleanStreamingHopText(currentContent);
   }
 
   const traceText = entry.text ?? "";
@@ -836,7 +854,14 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     const rawContent = shouldUseOptimizedAssistantStreaming(turn.assistant)
       ? assistantDisplayContent(turn.assistant)
       : turn.assistant.content;
-    const cleanedContent = cleanHopText(rawContent);
+    const streamingContent = isAssistantStreaming(turn.assistant);
+    // wave-pds-3：只有在**会走 markdown 渲染路径**时才保留尾随换行（块闭合位信息透给
+    // MarkdownRenderer 的尾巴切分）。纯文本快路径（`whitespace-pre-wrap` 直接渲染）保持原样，
+    // 否则尾随空行会在流式期渲染成底部空行、完成帧又被剥掉 ⇒ 收尾回撤。
+    const keepsTrailingNewlines = streamingContent && !isSimpleTextContent(rawContent);
+    const cleanedContent = keepsTrailingNewlines
+      ? cleanStreamingHopText(rawContent)
+      : cleanHopText(rawContent);
     if (cleanedContent.trim()) {
       events.push({
         kind: "content",
@@ -844,7 +869,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
         order: modelOrder,
         assistant: turn.assistant,
         content: cleanedContent,
-        streaming: isAssistantStreaming(turn.assistant)
+        streaming: streamingContent
       });
     }
   }

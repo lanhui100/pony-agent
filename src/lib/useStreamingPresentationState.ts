@@ -173,7 +173,7 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
     if (!message) return undefined;
     return {
       animationName: "assistant-stream-fade-in",
-      animationDuration: "350ms",
+      animationDuration: "140ms",
       animationTimingFunction: "ease-out",
       animationFillMode: "both"
     };

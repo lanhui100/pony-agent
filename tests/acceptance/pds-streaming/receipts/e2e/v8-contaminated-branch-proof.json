@@ -1,0 +1,66 @@
+{
+  "criterion": "同轮 A/B 差分：p95(B) − p95(A) ≤ 4ms；A、B 两段 Long Task(>50ms)=0；p95(A) − p95(idle) ≤ 6ms；连续 3 轮全满足；idle p95 偏离基线 10ms 超 1.5ms 记 [LOAD-CONTAMINATED]（最多 1 轮）",
+  "contractParams": {
+    "chunkIntervalMs": 120,
+    "maxChunkChars": 50,
+    "streamFrames": 900,
+    "idleFrames": 320
+  },
+  "actualParams": {
+    "chunkIntervalMs": 120,
+    "streamFrames": 900,
+    "idleFrames": 320,
+    "usingContractParams": true
+  },
+  "abBudgetMs": 4,
+  "frameworkSanityBudgetMs": 6,
+  "longTaskThresholdMs": 50,
+  "recordedIdleBaselineP95Ms": 10,
+  "idleDriftToleranceMs": 1.5,
+  "roundsRequired": 3,
+  "maxRounds": 1,
+  "generatedAt": "2026-11-02T15:44:44.622Z",
+  "summary": {
+    "roundsAttempted": 1,
+    "cleanPassed": 0,
+    "contaminated": 1,
+    "verdict": "fail"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "startedAt": "2026-11-02T15:44:04.683Z",
+      "idle": {
+        "frames": 319,
+        "p50": 16.69999998807907,
+        "p95": 17,
+        "max": 21.100000023841858,
+        "tailFrames": 0,
+        "longTasks": 0,
+        "driftMs": 7
+      },
+      "A": {
+        "frames": 899,
+        "p50": 16.600000023841858,
+        "p95": 18.799999982118607,
+        "max": 26.5,
+        "tailFrames": 0,
+        "longTasks": 0
+      },
+      "B": {
+        "frames": 899,
+        "p50": 16.600000023841858,
+        "p95": 18.30000001192093,
+        "max": 29.900000005960464,
+        "tailFrames": 214,
+        "longTasks": 0
+      },
+      "p95BMinusA": -0.4999999701976776,
+      "frameworkCheck": 1.7999999821186066,
+      "contaminated": true,
+      "tag": "[LOAD-CONTAMINATED]",
+      "verdict": "load-contaminated",
+      "reasons": []
+    }
+  ]
+}

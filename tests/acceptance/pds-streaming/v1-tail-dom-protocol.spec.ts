@@ -4,7 +4,9 @@
  * 契约源（只读）：`.dev-team/contracts/wave-pds-3-streaming-visual.md`
  *   §1 DOM 协议（**v2**）：`<div class="markdown-body">`（身份稳定）+ `<span data-stream-tail data-tail-len="N">`；
  *      · 数量**恒 ≤ 1**：存在未闭合尾巴文本时 = 1，无尾巴时 = 0；
- *      · 尾巴 = 源文本的**严格后缀**，不 trim、不重排；`data-tail-len` == 尾巴文本字符数；
+ *      · 尾巴 = 源文本的**严格后缀**，不 trim、不重排；
+ *      · `data-tail-len` == **源尾巴字符数**（契约 v5 R-A3；v4 的"渲染后可见文本长度"已被覆盖）；
+ *        期望值一律由 `splitMarkdownBlocks(source).tail.length` 现算，不写死数字；
  *      · 尾巴非块级（display ∈ {inline, inline-block}）。
  *   §6 V1：三类历史尾巴/字符节点恒为 0。
  *   §0（F3-1 修订）：除 `[data-stream-tail]` 外，内容区不得有第二个尾巴节点。
@@ -26,6 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { useRuntimeStore } from "@/stores/runtime";
+import { splitMarkdownBlocks } from "@/lib/markdown";
 import {
   TAIL_LEN_ATTR,
   TAIL_SELECTOR,
@@ -274,40 +277,62 @@ describe("wave-pds-3 V1：内容区尾巴节点 DOM 协议（jsdom）", () => {
     wrapper.unmount();
   });
 
-  it("V1-5: 尾巴协议自洽 —— data-tail-len == 尾文本长度，且尾巴是源文本的严格后缀（不 trim）", async () => {
-    // Arrange
+  it("V1-5: data-tail-len == splitMarkdownBlocks 的源尾巴字符数（R-A3），纯文本尾仍为严格后缀", async () => {
+    // Arrange（契约 v5 变更说明）：
+    //   v4 曾把 `data-tail-len` 定义为「渲染后可见文本长度」，v5 R-A3 改回**源尾巴字符数**
+    //   —— 两者在 `**加粗**` 这类尾巴上必然不等（源 13 字符 vs 可见 9 字符），
+    //   因此本用例的夹具**必须含 markdown 语法的尾巴**，否则两种语义无法区分（v1–v4 的盲点）。
+    //   期望值全部由 `splitMarkdownBlocks` 现算：不写死数字，也不对实现让步。
     const pinia = createPinia();
     setActivePinia(pinia);
     const store = useRuntimeStore();
-    const steps = mdStreamSteps();
+    const steps = [
+      mdStreamSteps()[0]!,                                        // 纯文本尾巴（保留严格后缀判据）
+      "## 已定稿标题\n\n这是**加粗\n尾巴**继续",                    // 跨行加粗尾巴
+      "## 已定稿标题\n\n| a | b |\n| --- | --- |\n| 1 | 2",     // 表格尾巴
+      "## 已定稿标题\n\n- 一级项\n  - 二级项 A"                    // 嵌套列表尾巴
+    ];
     await patchAssistant(store, steps[0]!, "pending");
     const wrapper = mountWorkspace(pinia);
     await settleRender();
 
     const violations: Array<Record<string, unknown>> = [];
-    const observed: Array<{ declared: number | null; actual: number; text: string }> = [];
+    const observed: Array<{ step: number; declared: number | null; expected: number; tailText: string }> = [];
 
     // Act + Assert（逐步增长时校验协议自洽）
     for (let step = 0; step < steps.length; step += 1) {
       if (step > 0) {
         await patchAssistant(store, steps[step]!, "pending");
-        await settle(2, 24);
+        await settleRender();
       }
+      const source = steps[step]!;
+      const expected = splitMarkdownBlocks(source).tail.length;
       const probe = probeStreamNodes(contentColumn(wrapper));
+
       for (const tail of probe.tails) {
-        observed.push({ declared: tail.declaredLen, actual: tail.textLength, text: tail.text });
+        observed.push({ step, declared: tail.declaredLen, expected, tailText: tail.text });
+
+        // Assert ①（R-A3 主判据）：data-tail-len == 源尾巴字符数
         if (tail.declaredLen === null || Number.isNaN(tail.declaredLen)) {
           violations.push({ step, reason: `[${TAIL_LEN_ATTR}] 缺失或非数字`, declared: tail.declaredLen });
-          continue;
-        }
-        if (tail.declaredLen !== tail.textLength) {
-          violations.push({ step, reason: "data-tail-len 与尾巴文本长度不一致", declared: tail.declaredLen, actual: tail.textLength });
-        }
-        // 契约 v2 §1：尾巴 = 源文本的严格后缀（不 trim、不重排）
-        if (tail.textLength > 0 && !steps[step]!.endsWith(tail.text)) {
+        } else if (tail.declaredLen !== expected) {
           violations.push({
             step,
-            reason: "尾巴不是源文本的严格后缀（可能 trim/重排/自造文本）",
+            reason: "data-tail-len 必须等于 splitMarkdownBlocks 的源尾巴字符数（R-A3）",
+            declared: tail.declaredLen,
+            expected,
+            source: JSON.stringify(source)
+          });
+        }
+
+        // Assert ②：纯文本尾巴才做"严格后缀、不 trim"判据
+        //   （含 markdown 语法的尾巴，其可见文本天然不等于源后缀，这不是缺陷）
+        const tailSource = source.slice(source.length - expected);
+        const isPlainTail = !/[*_`#>|]|^\s*[-+]\s|^\d+\.\s|\n/m.test(tailSource);
+        if (isPlainTail && tail.textLength > 0 && !source.endsWith(tail.text)) {
+          violations.push({
+            step,
+            reason: "纯文本尾巴必须是源文本的严格后缀（不得 trim/重排）",
             tail: tail.text.slice(-40)
           });
         }
@@ -316,13 +341,13 @@ describe("wave-pds-3 V1：内容区尾巴节点 DOM 协议（jsdom）", () => {
 
     // Assert 自检：必须真的观测到非空尾巴
     expect(
-      observed.filter((entry) => entry.actual > 0).length,
+      observed.filter((entry) => entry.tailText.length > 0).length,
       `V1-5 自检：必须观测到非空尾巴节点（实际采样：${JSON.stringify(observed.slice(0, 3))}）`
     ).toBeGreaterThan(0);
 
     expect(
       violations,
-      `V1-5：尾巴协议不自洽：${JSON.stringify(violations)}`
+      `V1-5：尾巴协议不自洽：${JSON.stringify(violations, null, 1)}`
     ).toHaveLength(0);
 
     wrapper.unmount();

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, ref, shallowReactive } from "vue";
 import type { ComponentPublicInstance } from "vue";
 import { storeToRefs } from "pinia";
 import {
@@ -28,7 +28,12 @@ import {
 } from "lucide-vue-next";
 import type { ChatMessage } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
-import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
+import MarkdownRenderer, {
+  checkStreamTailCandidate,
+  isStreamTailReducedMotionActive,
+  isStreamTailTextSingleLine,
+  readStreamTailSwitchPreference
+} from "@/components/MarkdownRenderer.vue";
 import AskUserToolCallCard from "@/components/ask/AskUserToolCallCard.vue";
 import { isAskToolName } from "@/lib/runtime/ask-tools";
 import {
@@ -183,6 +188,175 @@ function isAssistantStreaming(message: ChatMessage | null) {
  */
 function assistantUsesMarkdownRendering(event: Extract<AgentTurnEvent, { kind: "content" }>) {
   return props.shouldUseMarkdownAssistantRendering(event.assistant, event.content, event.streaming);
+}
+
+// ─── wave-pds-3 v8：纯文本快路径的尾巴（契约 v8） ─────────────────────────────
+//
+// 背景：`isSimpleTextContent` 命中时正文走「纯文本快路径」——由本组件自建 `.markdown-body`
+// 直接插值 `event.content`，**不经过** MarkdownRenderer。v7 之前这条路径永远没有尾巴，
+// 而"没有 markdown 标记的普通回复"恰恰最该有浮现效果。
+//
+// 实现要点（与 MarkdownRenderer 共用同一套纯函数，避免两种语义）：
+// 1. 切分：取已释放文本里**最后一个空行（`\n\n`）之后**为尾巴；无空行则整段即尾巴。
+// 2. **绝不吞字**：`stable` 与 `tail` 都是同一字符串的连续切片，拼接后恒等于原文；
+//    下面还有一条运行时自检兜底（不等就退回"整段 stable、无尾巴"）。
+// 3. 遮罩：尾巴实际单行才启用（多行由 `data-pds-tail-multiline` 让 CSS 关掉），与 MarkdownRenderer 同源。
+// 4. 开关 off / reduced-motion / 非纯段落（资格门）= 不发尾巴，退回 wave-59 行为。
+// 5. 宽度来自 ResizeObserver 缓存（**不在渲染路径读 clientWidth**，避免每 tick 强制布局）。
+const plainTextTailSwitchOn = readStreamTailSwitchPreference();
+const plainTextTailReduceMotionQuery = typeof window !== "undefined" && typeof window.matchMedia === "function"
+  ? window.matchMedia("(prefers-reduced-motion: reduce)")
+  : null;
+/** 每条纯文本承载节点的内容宽度（px）；0/缺省 = 尚未测到（jsdom 等无布局环境）。 */
+const plainTextTailWidths = shallowReactive<Record<string, number>>({});
+const plainTextTailObservers = new Map<string, ResizeObserver>();
+let plainTextTailFontSpec = "";
+let plainTextTailMeasureText: ((text: string) => number) | null = null;
+
+function isPlainTextTailActive(): boolean {
+  return plainTextTailSwitchOn && !isStreamTailReducedMotionActive(plainTextTailReduceMotionQuery);
+}
+
+/** 最近一次挂载的纯文本承载节点（用于延迟解析测量器）。 */
+let plainTextTailMeasureElement: HTMLElement | null = null;
+
+/** 解析 canvas 测量器（代价高：getComputedStyle + canvas，只在首次/字号变化时调）。 */
+function refreshPlainTextTailMeasurer(element: HTMLElement | null) {
+  plainTextTailMeasureText = null;
+  if (!element || typeof window === "undefined" || element.clientWidth <= 0) return;
+  const context = document.createElement("canvas").getContext?.("2d") ?? null;
+  if (!context) return;
+  const style = window.getComputedStyle(element);
+  plainTextTailFontSpec = `${style.fontStyle || "normal"} ${style.fontWeight || "400"} `
+    + `${style.fontSize || "14px"} ${style.fontFamily || "sans-serif"}`;
+  context.font = plainTextTailFontSpec;
+  plainTextTailMeasureText = (text: string) => context.measureText(text).width;
+}
+
+/**
+ * 延迟解析测量器：ref 回调跑在挂载期，此时元素还没布局（`clientWidth === 0`），
+ * 直接解析会得到 null ⇒ 单行判定退化成"总是单行"，长段落尾巴会被误挂遮罩。
+ * 故首次真正需要测量时再解析一次并缓存（只在 null 时付代价）。
+ */
+function ensurePlainTextTailMeasurer(): ((text: string) => number) | null {
+  if (plainTextTailMeasureText) return plainTextTailMeasureText;
+  refreshPlainTextTailMeasurer(plainTextTailMeasureElement);
+  return plainTextTailMeasureText;
+}
+
+/**
+ * 纯文本承载节点的 ref 回调：按 event.key 跟踪宽度（ResizeObserver 只在**宽度变化**时写响应式，
+ * 因此不会与流式期的逐帧高度变化形成重渲染循环）。
+ */
+function setPlainTextTailBodyRef(key: string, element: unknown) {
+  const previous = plainTextTailObservers.get(key);
+  if (previous) {
+    previous.disconnect();
+    plainTextTailObservers.delete(key);
+  }
+  const target = element instanceof HTMLElement ? element : null;
+  if (!target) return;
+  plainTextTailMeasureElement = target;
+  refreshPlainTextTailMeasurer(target);
+  if (typeof ResizeObserver === "undefined") return;
+  const observer = new ResizeObserver((entries) => {
+    const entry = entries[0];
+    if (!entry) return;
+    const width = Number.isFinite(entry.contentRect?.width)
+      ? Math.max(0, Math.floor(entry.contentRect.width))
+      : 0;
+    if (width > 0 && plainTextTailWidths[key] !== width) {
+      plainTextTailWidths[key] = width;
+      // 宽度变化可能改变换行结论；顺带刷新一次字体测量器（只在真正变化时付代价）。
+      refreshPlainTextTailMeasurer(plainTextTailMeasureElement);
+    }
+  });
+  observer.observe(target);
+  plainTextTailObservers.set(key, observer);
+}
+
+onBeforeUnmount(() => {
+  for (const observer of plainTextTailObservers.values()) observer.disconnect();
+  plainTextTailObservers.clear();
+  plainTextTailMeasureText = null;
+});
+
+// 资格判定与 markdown 路径**同源**（v9 render-then-verify）。渲染期不能 await，故采用
+// 「按尾巴文本缓存的异步判定 + 未判定时乐观放行」：纯文本尾巴渲染的是**转义后的纯文本**
+// （不含任何块级标签），因此乐观放行最坏只是某类 exotic 文本多显示一帧尾巴。
+const plainTextTailEligibility = shallowReactive<Record<string, boolean>>({});
+const plainTextTailEligibilityPending = new Set<string>();
+const PLAIN_TEXT_TAIL_ELIGIBILITY_CACHE_LIMIT = 64;
+
+function evaluatePlainTextTailEligibility(tail: string) {
+  if (tail in plainTextTailEligibility || plainTextTailEligibilityPending.has(tail)) return;
+  plainTextTailEligibilityPending.add(tail);
+  void checkStreamTailCandidate(tail)
+    .then((candidate) => {
+      if (Object.keys(plainTextTailEligibility).length >= PLAIN_TEXT_TAIL_ELIGIBILITY_CACHE_LIMIT) {
+        for (const key of Object.keys(plainTextTailEligibility)) delete plainTextTailEligibility[key];
+      }
+      plainTextTailEligibility[tail] = candidate.eligible;
+    })
+    .catch(() => {
+      // 判定失败按"可发尾巴"处理：纯文本尾巴不含块级标签，不会带来语义风险。
+      plainTextTailEligibility[tail] = true;
+    })
+    .finally(() => {
+      plainTextTailEligibilityPending.delete(tail);
+    });
+}
+
+function isPlainTextTailEligible(tail: string): boolean {
+  const cached = plainTextTailEligibility[tail];
+  if (cached !== undefined) return cached;
+  evaluatePlainTextTailEligibility(tail);
+  return true;
+}
+
+interface PlainTextTailParts {
+  /** 尾巴之前（含尾部空行）的文本：与 `tail` 拼接后**恒等于**已释放文本。 */
+  stable: string;
+  /** 唯一尾巴文本（未闭合段）；空串 ⇒ 不渲染尾巴节点。 */
+  tail: string;
+  /** 尾巴是否实际单行（决定是否启用遮罩）。 */
+  singleLine: boolean;
+}
+
+const NO_PLAIN_TEXT_TAIL = (content: string): PlainTextTailParts => ({ stable: content, tail: "", singleLine: false });
+
+function splitPlainTextTail(key: string, content: string, streaming: boolean): PlainTextTailParts {
+  if (!streaming || !isPlainTextTailActive()) return NO_PLAIN_TEXT_TAIL(content);
+
+  const boundary = content.lastIndexOf("\n\n");
+  const stable = boundary >= 0 ? content.slice(0, boundary + 2) : "";
+  const tail = boundary >= 0 ? content.slice(boundary + 2) : content;
+  if (!tail.trim()) return NO_PLAIN_TEXT_TAIL(content);
+  // 契约 v7 §1 资格门：纯文本里若混入围栏/列表等构造，同样不发尾巴。
+  if (!isPlainTextTailEligible(tail)) return NO_PLAIN_TEXT_TAIL(content);
+  // 自检（v8 最要紧一条）：拼接必须与已释放文本逐字节相等，绝不吞字/重复。
+  if (`${stable}${tail}` !== content) return NO_PLAIN_TEXT_TAIL(content);
+
+  return {
+    stable,
+    tail,
+    singleLine: isStreamTailTextSingleLine(tail, plainTextTailWidths[key] ?? 0, ensurePlainTextTailMeasurer())
+  };
+}
+
+/** 按事件 key 预计算纯文本尾巴（模板只读结果，避免同一帧重复切分）。 */
+const plainTextTailByEventKey = computed<Record<string, PlainTextTailParts>>(() => {
+  const partsByKey: Record<string, PlainTextTailParts> = {};
+  for (const event of props.events) {
+    if (event.kind !== "content") continue;
+    if (assistantUsesMarkdownRendering(event)) continue;
+    partsByKey[event.key] = splitPlainTextTail(event.key, event.content, event.streaming);
+  }
+  return partsByKey;
+});
+
+function plainTextTailPartsFor(event: Extract<AgentTurnEvent, { kind: "content" }>): PlainTextTailParts {
+  return plainTextTailByEventKey.value[event.key] ?? NO_PLAIN_TEXT_TAIL(event.content);
 }
 
 function latestTraceForTurn(turnId: string) {
@@ -395,9 +569,22 @@ const toolIconByCanonicalName: Record<string, any> = {
           class="conversation-tool-panel space-y-0.5 transition-item-enter"
         >
           <template v-for="tool in event.tools" :key="tool.id">
-            <!-- PA-114: Ask 工具行渲染专属交互卡片，其余行保持通用渲染（F1-4）。 -->
-            <AskUserToolCallCard v-if="isAskToolName(tool.toolName)" :tool="tool" />
-            <div v-else class="flex flex-col py-0.5 text-[12px] leading-5">
+            <!--
+              PA-114: Ask 工具行渲染专属交互卡片，其余行保持通用渲染（F1-4）。
+              wave-pds-3 §1 / §3.3：每条工具行都必须带 `data-pds-tool-row` 锚点并挂入场消融
+              （`filter: blur(2px)→0`，220ms）。两种行体都靠属性/类透传到根节点，不改内部结构。
+            -->
+            <AskUserToolCallCard
+              v-if="isAskToolName(tool.toolName)"
+              :tool="tool"
+              data-pds-tool-row
+              class="pds-tool-row-enter"
+            />
+            <div
+              v-else
+              class="pds-tool-row-enter flex flex-col py-0.5 text-[12px] leading-5"
+              data-pds-tool-row
+            >
               <div class="flex items-center gap-2">
                 <component :is="toolIconByCanonicalName[tool.canonicalToolName ?? ''] ?? Wrench" class="h-3 w-3 shrink-0 text-stone-400" />
                 <span
@@ -459,7 +646,8 @@ const toolIconByCanonicalName: Record<string, any> = {
                 :tone-class="assistantTone(event.assistant)"
                 @render-complete="handleMarkdownRenderComplete"
               />
-              <div v-else class="markdown-body whitespace-pre-wrap">{{ event.content }}</div>
+              <!-- 纯文本快路径（v8）：尾巴 = 最后一个空行之后的未闭合段；stable/tail 为连续切片，拼接恒等于原文。整行书写，避免 `whitespace-pre-wrap` 把模板缩进当成正文。 -->
+              <div v-else class="markdown-body whitespace-pre-wrap" :ref="(element) => setPlainTextTailBodyRef(event.key, element)">{{ plainTextTailPartsFor(event).stable }}<span v-if="plainTextTailPartsFor(event).tail" data-stream-tail :data-tail-len="plainTextTailPartsFor(event).tail.length" :data-pds-tail-multiline="plainTextTailPartsFor(event).singleLine ? undefined : 'true'">{{ plainTextTailPartsFor(event).tail }}</span></div>
             </div>
           </div>
         </div>
@@ -756,17 +944,27 @@ const toolIconByCanonicalName: Record<string, any> = {
   will-change: opacity, transform;
 }
 
+/* wave-pds-3 §3.3：工具面板/思考面板入场 200ms → 220ms，并补 filter 消融（blur(2px)→0）。
+   入场节点是一次性节点（不是每 tick 重建），允许用 filter：它是"落定"信号，不是逐字浮现。 */
 .transition-item-enter {
-  animation: item-smooth-appear 200ms cubic-bezier(0.23, 1, 0.32, 1);
+  animation: item-smooth-appear 220ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+/* wave-pds-3 §3.3：工具行（契约 §1 的 `data-pds-tool-row`）补同类入场消融；
+   面板本身已有入场动画，行级再补一次是为了「新增一行」时只让该行显影，整块不闪。 */
+.pds-tool-row-enter {
+  animation: item-smooth-appear 220ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 @keyframes item-smooth-appear {
   from {
     opacity: 0;
+    filter: blur(2px);
     transform: translateY(4px);
   }
   to {
     opacity: 1;
+    filter: blur(0);
     transform: translateY(0);
   }
 }
@@ -810,20 +1008,24 @@ const toolIconByCanonicalName: Record<string, any> = {
 .assistant-streaming-fade {
   display: inline;
   white-space: pre-wrap;
-  will-change: opacity;
+  will-change: opacity, transform;
 }
 
-@keyframes assistant-stream-fade-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
+/* wave-pds-3 §3.2：reasoning 尾巴 350ms 纯透明度 → 140ms + translateY(2px)→0，ease-out。
+   注意（单一真值）：动画名由 `useStreamingPresentationState.assistantDisplayedReasoningFadeStyle`
+   以**内联样式**给出，而 `<style scoped>` 里的 @keyframes 会被 Vue 重命名（加 scope hash），
+   内联的全局名解析不到它。因此 `assistant-stream-fade-in` 的 keyframes 唯一真值放在
+   全局 `src/styles.css`（亦为契约 §3.2 的 140ms/位移判据所在）。此处不再重复定义。 */
 
 @media (prefers-reduced-motion: reduce) {
   .conversation-tool-panel,
   .conversation-reasoning-panel,
-  .assistant-response-panel {
+  .assistant-response-panel,
+  .transition-item-enter,
+  .pds-tool-row-enter {
     animation: none !important;
     opacity: 1 !important;
+    filter: none !important;
     transform: none !important;
     transition: none !important;
   }

@@ -1,12 +1,15 @@
 {
-  "note": "契约 v3 §5：绝对阈值作废；本文件是实现后 V8「余量+稳定性」判据的空闲基准",
+  "note": "契约 v6 §5：本文件只是 idle 基线留档（不参与判定）；V8 的判据是同轮 A/B 差分",
   "frames": 319,
   "p50": 16.69999998807907,
-  "p95": 16.900000005960464,
-  "max": 18,
+  "p95": 17,
+  "max": 17.599999994039536,
   "longTaskThresholdMs": 50,
-  "p95DeltaBudgetMs": 6,
-  "consecutiveRuns": 3,
+  "abBudgetMs": 4,
+  "frameworkSanityBudgetMs": 6,
+  "roundsRequired": 3,
+  "recordedIdleBaselineP95Ms": 16.9,
+  "idleDriftToleranceMs": 1.5,
   "params": "[params] deltaInterval=120ms maxChunk=50chars streamFrames=900 idleFrames=320 （契约值）",
-  "measuredAt": "2026-11-02T14:10:54.615Z"
+  "measuredAt": "2026-11-02T16:46:59.753Z"
 }

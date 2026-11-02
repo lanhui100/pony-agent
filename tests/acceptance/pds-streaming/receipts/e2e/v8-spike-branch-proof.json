@@ -1,0 +1,107 @@
+{
+  "criterion": "同轮 A/B 差分：p95(B) − p95(A) ≤ 4ms；A、B 两段 Long Task(>50ms)=0；仅 B−A 超预算（其余正常）记 [SPIKE] 补测；p95(A) − p95(idle) ≤ 6ms；连续 3 轮全满足；idle p95 偏离基线 16.9ms 超 1.5ms 记 [LOAD-CONTAMINATED]（最多 2 轮）",
+  "contractParams": {
+    "chunkIntervalMs": 120,
+    "maxChunkChars": 50,
+    "streamFrames": 900,
+    "idleFrames": 320
+  },
+  "actualParams": {
+    "chunkIntervalMs": 120,
+    "streamFrames": 900,
+    "idleFrames": 320,
+    "usingContractParams": true
+  },
+  "abBudgetMs": 4,
+  "frameworkSanityBudgetMs": 6,
+  "longTaskThresholdMs": 50,
+  "recordedIdleBaselineP95Ms": 16.9,
+  "idleDriftToleranceMs": 1.5,
+  "roundsRequired": 3,
+  "maxRounds": 2,
+  "generatedAt": "2026-11-02T17:09:34.919Z",
+  "summary": {
+    "roundsAttempted": 2,
+    "cleanPassed": 0,
+    "contaminated": 0,
+    "measurementInvalid": 2,
+    "spikes": 2,
+    "verdict": "fail"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "startedAt": "2026-11-02T17:07:46.269Z",
+      "idle": {
+        "frames": 319,
+        "p50": 16.69999998807907,
+        "p95": 16.900000005960464,
+        "max": 19.399999976158142,
+        "tailFrames": 0,
+        "longTasks": 0,
+        "driftMs": 5.960465898624534e-9
+      },
+      "A": {
+        "frames": 899,
+        "p50": 16.69999998807907,
+        "p95": 17.099999994039536,
+        "max": 21.100000023841858,
+        "tailFrames": 0,
+        "longTasks": 0
+      },
+      "B": {
+        "frames": 899,
+        "p50": 32.10000002384186,
+        "p95": 38.5,
+        "max": 41.79999998211861,
+        "tailFrames": 254,
+        "longTasks": 0
+      },
+      "p95BMinusA": 21.400000005960464,
+      "frameworkCheck": 0.19999998807907104,
+      "contaminated": false,
+      "tag": "[SPIKE]",
+      "verdict": "spike",
+      "reasons": [
+        "p95(B−A)=21.40ms > 4ms"
+      ]
+    },
+    {
+      "round": 2,
+      "startedAt": "2026-11-02T17:08:40.570Z",
+      "idle": {
+        "frames": 319,
+        "p50": 16.69999998807907,
+        "p95": 16.900000005960464,
+        "max": 18.400000005960464,
+        "tailFrames": 0,
+        "longTasks": 0,
+        "driftMs": 5.960465898624534e-9
+      },
+      "A": {
+        "frames": 899,
+        "p50": 16.69999998807907,
+        "p95": 17.19999998807907,
+        "max": 20.69999998807907,
+        "tailFrames": 0,
+        "longTasks": 0
+      },
+      "B": {
+        "frames": 899,
+        "p50": 32.10000002384186,
+        "p95": 38.70000001788139,
+        "max": 44.70000001788139,
+        "tailFrames": 250,
+        "longTasks": 0
+      },
+      "p95BMinusA": 21.500000029802322,
+      "frameworkCheck": 0.29999998211860657,
+      "contaminated": false,
+      "tag": "[SPIKE]",
+      "verdict": "spike",
+      "reasons": [
+        "p95(B−A)=21.50ms > 4ms"
+      ]
+    }
+  ]
+}

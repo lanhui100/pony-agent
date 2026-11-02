@@ -1,5 +1,9 @@
 @import "tailwindcss";
 @import "./assets/misans-font.css";
+/* wave-pds-3 V7-4：PDS-SM 原语层必须被真正引用，否则契约 §3 的动效与 §3.5 的降级规则全都不生效。
+   tokens 必须先于 primitives（后者消费前者的 --pds-* 变量）。 */
+@import "../.agents/skills/streaming-motion/tokens.css";
+@import "../.agents/skills/streaming-motion/primitives.css";
 
 :root {
   color-scheme: light;
@@ -108,4 +112,163 @@ aside [data-reka-scroll-area-viewport]::-webkit-scrollbar {
   display: none !important;
   width: 0 !important;
   height: 0 !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   wave-pds-3 · 流式视觉层（契约 .dev-team/contracts/wave-pds-3-streaming-visual.md v3）
+   §3.1 正文尾巴遮罩浮现 · §3.2 reasoning 尾巴 · §3.3 工具行入场 · §3.5 双轨降级
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* §3.2：reasoning 尾巴 `assistant-stream-fade-in` 的**唯一真值**在此（全局层）。
+   动画名由 `useStreamingPresentationState.assistantDisplayedReasoningFadeStyle()` 以**内联样式**
+   给出；SFC `<style scoped>` 里的同名 @keyframes 会被 Vue 加上 scope hash 重命名，内联的全局名
+   解析不到它 —— 所以只在这里定义一份。时长 140ms 由内联样式给出（见该函数注释），位移语义在此。 */
+@keyframes assistant-stream-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* §3.1：正文尾巴（契约 §1 的唯一尾巴节点）。
+   浮现由**静态遮罩**承担 —— 不是 animation：新字符自右端透明区进入，随吐字左移渐成实色，
+   内容推进时不会重启动画，故与 RC2 的「逐字符重播」闪跳本质不同（D-59-2 保持：零字符节点）。
+   `display` 取 inline-block（契约 §1 允许 {inline, inline-block}）：它与正文同流、不产生新行，
+   但拥有独立掩码盒，遮罩在真实浏览器里可靠生效（非替换 inline 盒的分段渲染不受此问题困扰）。 */
+[data-stream-tail] {
+  --pds-tail-fade: 1.5em;
+  display: inline-block;
+  max-width: 100%;
+  mask-image: linear-gradient(to right, #000 calc(100% - var(--pds-tail-fade)), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - var(--pds-tail-fade)), transparent 100%);
+}
+
+/* 契约 v5 R-A4：遮罩只在尾巴**实际单行**时启用。多行尾巴（未闭合块天然可能多行）由渲染层打
+   `data-pds-tail-multiline="true"`，这里优雅降级成无遮罩 —— 绝不为了压成一行去牺牲 markdown 语义。 */
+[data-stream-tail][data-pds-tail-multiline="true"] {
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+
+/* 尾巴内部是「已按 markdown 渲染的未闭合块」（例如 `<p>…</p>` / `<ul>…</ul>`）。
+   段落 margin 会撑高 inline-block 的盒子并制造额外的上下空隙，故把尾巴内部的块级外边距清零：
+   尾巴与已定稿块之间的间距由「尾巴本身在流中占位」决定，不再叠加段落 margin。 */
+[data-stream-tail] > * {
+  margin: 0 !important;
+}
+
+[data-stream-tail] > :first-child {
+  margin-top: 0 !important;
+}
+
+[data-stream-tail] > :last-child {
+  margin-bottom: 0 !important;
+}
+
+/* §3.5 降级（双轨 · 轨道一：系统媒体查询）──────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  /* 降级下尾巴不再呈现「浮现」——遮罩必须整条关掉，不得留半降级（V7-7）。 */
+  [data-stream-tail] {
+    mask-image: none !important;
+    -webkit-mask-image: none !important;
+  }
+
+  /* 注意：`[data-stream-tail]` **不得**出现在任何声明 `animation` 的规则里 ——
+     R7 要求尾巴的浮现只能由静态遮罩承担（出现 `animation:` 即判为「半 animation 浮现」）。 */
+  .assistant-streaming-fade,
+  .transition-item-enter,
+  .pds-tool-row-enter,
+  [data-pds-tool-row] {
+    animation: none !important;
+    transition: none !important;
+    opacity: 1 !important;
+    filter: none !important;
+    transform: none !important;
+  }
+
+  /* `.runtime-status-*`（状态行族）同样纳入降级：扫光/轨道/交接动画一律停（两轨对齐）。 */
+  .runtime-status-shimmer,
+  .runtime-status-orbit,
+  .runtime-status-orbit *,
+  .runtime-status-orbit *::after,
+  .runtime-status-label-fall {
+    animation: none !important;
+  }
+
+  /* 交接相位（shimmer 与 rise 并列声明，特异度更高）必须按同一批选择器关掉。 */
+  [data-pds-status="enter"],
+  [data-pds-status="enter-b"] {
+    animation: none !important;
+  }
+
+  .runtime-status-label-fall {
+    display: none !important;
+  }
+
+  .runtime-status-slot,
+  .runtime-status-slot-inner,
+  .runtime-status-row {
+    transition: none !important;
+  }
+}
+
+/* §3.5 降级（双轨 · 轨道二：应用内根属性 `data-pds-reduce-motion="true"`）────────
+   与 primitives.css 同源命名（契约 v3 裁定 ④：旧的 `data-reduce-motion` 已废止）。 */
+[data-pds-reduce-motion="true"] [data-stream-tail],
+[data-stream-tail][data-pds-reduce-motion="true"] {
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+}
+
+/* 注意：`[data-stream-tail]` **不得**出现在任何声明 `animation` 的规则里（R7）。 */
+[data-pds-reduce-motion="true"] .assistant-streaming-fade,
+[data-pds-reduce-motion="true"] .transition-item-enter,
+[data-pds-reduce-motion="true"] .pds-tool-row-enter,
+[data-pds-reduce-motion="true"] [data-pds-tool-row] {
+  animation: none !important;
+  transition: none !important;
+  opacity: 1 !important;
+  filter: none !important;
+  transform: none !important;
+}
+
+/* R-B2：属性轨必须与媒体轨对齐 —— `.runtime-status-orbit *::after` 是 1800ms 的卫星点呼吸，
+   此前只有媒体轨关掉了它（属性轨漏掉即"只在一轨降级"的真遗漏）。 */
+[data-pds-reduce-motion="true"] .runtime-status-shimmer,
+[data-pds-reduce-motion="true"] .runtime-status-orbit,
+[data-pds-reduce-motion="true"] .runtime-status-orbit *,
+[data-pds-reduce-motion="true"] .runtime-status-orbit *::after,
+[data-pds-reduce-motion="true"] .runtime-status-label-fall {
+  animation: none !important;
+}
+
+/* 交接相位（`data-pds-status="enter"/"enter-b"`）把 shimmer 与 rise 并列在同一条 animation 里，
+   特异度高于单类规则，降级时必须按同一批选择器显式关掉。 */
+[data-pds-reduce-motion="true"] [data-pds-status="enter"],
+[data-pds-reduce-motion="true"] [data-pds-status="enter-b"],
+[data-pds-status="enter"][data-pds-reduce-motion="true"],
+[data-pds-status="enter-b"][data-pds-reduce-motion="true"] {
+  animation: none !important;
+}
+
+[data-pds-reduce-motion="true"] .runtime-status-label-fall {
+  display: none !important;
+}
+
+[data-pds-reduce-motion="true"] .runtime-status-slot,
+[data-pds-reduce-motion="true"] .runtime-status-slot-inner,
+[data-pds-reduce-motion="true"] .runtime-status-row {
+  transition: none !important;
+}
+
+/* R-B6：属性轨的复位必须带 `!important` —— `.runtime-status-shimmer` 的 scoped 规则（含 scope 属性）
+   与本选择器特异度相同，靠层叠顺序会反压（实测降级后仍是渐变 + 透明填充）。
+   R-B7：复位色用 `currentColor`（跟随 tone class），不要硬编码灰。 */
+[data-pds-reduce-motion="true"] .runtime-status-shimmer {
+  background: none !important;
+  -webkit-text-fill-color: currentColor !important;
 }

@@ -7,13 +7,18 @@
   "firstContentFrameIndex": 7,
   "firstTextFrameIndex": 7,
   "frameDelta": {
-    "p50": 16.6,
-    "p95": 20.4,
-    "p99": 27.9,
-    "max": 56.0
+    "p50": 16.7,
+    "p95": 18.1,
+    "p99": 20.8,
+    "max": 25.8
   },
-  "tailFrames": 0,
+  "tailFrames": 253,
+  "tailLineCountDistribution": {
+    "1": 58,
+    "2": 65,
+    "3": 130
+  },
   "contentLengthFirst": 0,
-  "contentLengthLast": 3540,
+  "contentLengthLast": 3344,
   "scrollHeightRetractionsOver1px": 0
 }
