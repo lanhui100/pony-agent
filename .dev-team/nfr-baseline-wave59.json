@@ -24,7 +24,8 @@
     "wave59_on_timeout_process_exits_without_background_thread_stop_guarantee",
     "wave59_no_idempotent_cleanup_promise_after_timeout",
     "wave59_sink_buffer_released_by_process_exit_only",
-    "wave59_result_envelope_write_atomic_rename"
+    "wave59_result_envelope_write_atomic_rename",
+    "wave59_stdout_backpressure_out_of_scope"
   ],
   "wave59_headless_contract": {
     "applicable": true,
@@ -120,13 +121,24 @@
         "forbidden_claims": [
           "worker 已关闭",
           "worker 已回收",
-          "超时后已完成幂等清理"
+          "超时后已完成幂等清理",
+          "已对输出写设置超时",
+          "已保证背压下退出"
         ]
+      },
+      "stdout_backpressure_declaration": {
+        "key": "wave59_stdout_backpressure_out_of_scope",
+        "in_scope": "有界执行承诺仅覆盖「turn 到期收敛为 exit 7 + 封套终态」",
+        "out_of_scope": "stdout 写阻塞（消费者停读）：进程可能因管道背压延迟退出，不属承诺范围",
+        "root_cause": "POSIX 管道写满即阻塞，任何 CLI 同此语义，非本实现缺陷",
+        "no_output_write_timeout": "未对输出写设置超时，也不承诺背压下退出",
+        "observed": "--timeout-secs 1 + 停读消费者实测 rc=124（背压滞留，非 turn 未收敛）",
+        "verification": "正常消费者下毫秒级退出；A/B 两路双向复证（turn 侧已收敛，滞留发生在 flush 写）"
       }
     },
     "non_interactive_only": true,
     "interactive_prompt_forbidden": true,
     "external_call_timeout_applies": true
   },
-  "contract_version": "v4"
+  "contract_version": "v5"
 }

