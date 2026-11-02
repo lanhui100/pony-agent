@@ -1,1 +1,1 @@
-[31mArgument Error:[0m unknown argument: --output-format
+[31mArgument Error:[0m 无效的 --output-format 取值 `xml`（可选：text | jsonl | sse）（非法 --output-format 必须被拒绝，不得静默退化为 text）

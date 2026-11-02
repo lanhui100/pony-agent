@@ -571,3 +571,134 @@ PASS: E8: 无 panic
 headless-cli-e2e: PASS=11 FAIL=19 SKIP=0  (receipts: /home/dm/wt/pony-wave59/tests/acceptance/wave59/receipts)
 RESULT: FAIL
 E2E_EXIT=1
+
+================================================================================
+第四部分：TEST-DEFECT #2 夹具修复后（ask_user 补 required description）
+================================================================================
+captured_at: 2026-11-02T10:56:14+08:00
+夹具修复   : tests/acceptance/wave59/headless-cli-e2e.sh 的 ASK_ARGS 增加 "description" 字段
+  依据     : tools.rs:5362/5370/5381-5383 —— 所有内置工具 schema 经 with_description 注入
+             description 并列为 required；缺它会在参数校验阶段 invalid_arguments，
+             永远进不到 WaitingHost ⇒ turn:suspended 不可达（E6/E6b 原夹具 TEST-DEFECT）
+  断言改动 : 无（用例编号、期望码 6/4/7、纯净性断言、E6c 证据门禁全部原样）
+  附带卫生 : 每个 mock 实例启动前 truncate 其请求日志，确保 E6c「本轮收到请求」不被上一轮残留假绿
+  测试文件md5: 5f9b0a8d5f79d4bdcef926fb745b1b9a
+  stub md5   : 226dacbadcba0597b325673a03f54803（Executor 已落实现）
+--------------------------------------------------------------------------------
+[A] E2E（同一二进制 + 同一 mock，仅夹具补字段）
+  command   : CARGO_TARGET_DIR=/home/dm/pony-agent/target bash tests/acceptance/wave59/headless-cli-e2e.sh
+  exit_code : 0   →  RESULT: PASS（红相已转绿：Executor 实现已落地）
+  summary   : pass=30 fail=0 skip=0
+  E6  exit  : exit_code=6 
+  E6b exit  : exit_code=6 
+  E8  exit  : exit_code=7 elapsed_s=1 
+  E6c 证据  : mock-ask-requests.jsonl 非空（2 条请求）⇒ 真走到模型/工具链路
+  降级标注  : 无 [RED DEGRADED]（5 个 mock 实例全部可用）
+  关键行:
+    PASS: E6 ask_user 无应答方 → exit 6（suspended ⟹ PermissionDenied）
+    PASS: E6c mock(ask) 收到请求 —— 证明真走到模型/工具链路
+    PASS: E6: stdout 逐行合法 JSON + 无 ANSI
+    PASS: E6: 无 panic
+    PASS: E6b 默认档位 + ask_user → exit 6（默认 fail-closed 且不挂起）
+    PASS: E6b: stdout 逐行合法 JSON + 无 ANSI
+    PASS: E6b: 无 panic
+    PASS: E8 --timeout-secs 1 到期 → exit 7（Timeout，具体码断言）
+    PASS: E8b 到期即收工（耗时 1s < mock 的 5s 响应）
+    PASS: E8c 超时路径同样落盘 --result-json（终态证据）
+    PASS: E8d 封套 status=timeout 且 exit_code=7（自洽）
+    PASS: E8: stdout 逐行合法 JSON + 无 ANSI
+    PASS: E8: 无 panic
+--------------------------------------------------------------------------------
+[B] Rust 契约测试（同一实现）
+  command   : CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test -p pony-agent-core --test headless_contract
+  exit_code : 0
+  result    : test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+  error[E   : 0 行
+--------------------------------------------------------------------------------
+[C] 红→绿鉴别力证据（同一套断言，前后两轮对照）
+  轮次1(v2/v3 空桩)   : cargo 3 passed/22 failed, exit 101 ；E2E 13/10, exit 1
+  轮次2(v4 补强)      : cargo 3 passed/23 failed, exit 101 ；E2E 11/19, exit 1
+  轮次3(本轮机具修复) : cargo 26 passed/0 failed, exit 0 ；E2E 30/0, exit 0
+  ⇒ 断言随产品能力落地而转绿、随空桩而转红，非恒真断言。
+================================================================================
+以下为本轮两门禁完整原始输出：
+================================================================================
+---[ E2E 全文 ]---
+== reusing built binary: /home/dm/pony-agent/target/debug/ponycli
+== mock(text) listening on 127.0.0.1:34999 (pid 716328)
+== mock(tool) listening on 127.0.0.1:53649 (pid 716341)
+== mock(ask) listening on 127.0.0.1:36803 (pid 716350)
+== mock(garbage) listening on 127.0.0.1:54381 (pid 716360)
+== mock(slow) listening on 127.0.0.1:45083 (pid 716369)
+== ports: text=34999 tool=53649 ask=36803 garbage=54381 slow=45083
+PASS: E1 非法 --permission-mode → exit 2（Usage）
+PASS: E1: 无 panic
+PASS: E1b 非法值诊断落在 stderr（可读）
+PASS: E2 非法 --output-format → exit 2（Usage）
+PASS: E2: 无 panic
+PASS: E3 jsonl 正常 turn → exit 0
+PASS: E3: stdout 逐行合法 JSON + 无 ANSI
+PASS: E3: 无 panic
+PASS: E3c jsonl 模式 stdout 无人类可读横幅
+PASS: E4a --result-json 落盘
+PASS: E4b 封套 schema+字段集+status⟺exit_code+进程 Exit Code 交叉一致
+PASS: E5 provider 不可达 → exit 4（ProviderNetwork，具体码断言）
+PASS: E5: stdout 逐行合法 JSON + 无 ANSI
+PASS: E5: 无 panic
+PASS: E6 ask_user 无应答方 → exit 6（suspended ⟹ PermissionDenied）
+PASS: E6c mock(ask) 收到请求 —— 证明真走到模型/工具链路
+PASS: E6: stdout 逐行合法 JSON + 无 ANSI
+PASS: E6: 无 panic
+PASS: E6b 默认档位 + ask_user → exit 6（默认 fail-closed 且不挂起）
+PASS: E6b: stdout 逐行合法 JSON + 无 ANSI
+PASS: E6b: 无 panic
+PASS: E7 畸形响应 → exit 4（ProviderNetwork，具体码断言）
+PASS: E7: stdout 逐行合法 JSON + 无 ANSI
+PASS: E7: 无 panic
+PASS: E8 --timeout-secs 1 到期 → exit 7（Timeout，具体码断言）
+PASS: E8b 到期即收工（耗时 1s < mock 的 5s 响应）
+PASS: E8c 超时路径同样落盘 --result-json（终态证据）
+PASS: E8d 封套 status=timeout 且 exit_code=7（自洽）
+PASS: E8: stdout 逐行合法 JSON + 无 ANSI
+PASS: E8: 无 panic
+===================================================
+headless-cli-e2e: PASS=30 FAIL=0 SKIP=0  (receipts: /home/dm/wt/pony-wave59/tests/acceptance/wave59/receipts)
+RESULT: PASS
+E2E_EXIT=0
+
+---[ cargo test 全文 ]---
+   Compiling pony-agent-core v0.1.141 (/home/dm/wt/pony-wave59/crates/pony-agent-core)
+    Finished `test` profile [unoptimized] target(s) in 17.29s
+     Running tests/headless_contract.rs (/home/dm/pony-agent/target/debug/deps/headless_contract-4d6c98e65dcc4fbd)
+
+running 26 tests
+test c1_output_format_parses_frozen_cli_tokens ... ok
+test c1_jsonl_sink_treats_suspended_as_terminal ... ok
+test c1_jsonl_sink_output_contains_no_ansi_escapes ... ok
+test c1_output_format_rejects_unknown_token ... ok
+test c1_jsonl_sink_emits_one_valid_json_line_per_event ... ok
+test c2_classify_unknown_error_fails_closed_to_internal_not_success ... ok
+test c2_exit_code_values_are_frozen_and_unique ... ok
+test c1_sse_sink_frames_are_wellformed_and_ansi_free ... ok
+test c1_sink_outcome_tracks_terminal_events_only ... ok
+test c2_terminal_status_maps_to_frozen_exit_codes ... ok
+test c2_turn_failed_must_never_map_to_success ... ok
+test c3_failure_reason_is_transparent_passthrough ... ok
+test c3_result_envelope_schema_literal_is_frozen ... ok
+test c3_result_envelope_field_set_and_types ... ok
+test c3_suspended_envelope_implies_permission_denied_exit_code ... ok
+test c3_turn_status_tokens_are_the_frozen_five ... ok
+test c4_headless_options_shape_is_frozen ... ok
+test c4_headless_options_default_permission_mode_is_read_only ... ok
+test c4_permission_mode_maps_to_host_tool_authorization_mode ... ok
+test c4_permission_mode_parses_frozen_aliases_and_rejects_others ... ok
+test c5_timeout_outcome_maps_to_exit_code_7 ... ok
+test c5_no_budget_means_unbounded_and_still_completes ... ok
+test c5_fast_runner_within_budget_completes ... ok
+test c1_jsonl_sink_passes_through_every_event_kind ... ok
+test c2_classify_is_fail_closed_across_adversarial_inputs ... ok
+test c5_expired_budget_returns_timeout_without_hanging ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+EXIT_CODE=0

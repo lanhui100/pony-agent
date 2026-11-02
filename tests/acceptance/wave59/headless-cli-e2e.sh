@@ -137,8 +137,15 @@ MODEL_ID = "mock-alpha"
 READ_ARGS = json.dumps({"path": "package.json"})
 # E6/E6b：`ask_user` 在宿主声明层是 host-mediated（tools.rs:7452 `host_mediated=true`）⇒
 # 无头无应答方时 turn 立即返回并只发 `turn:suspended`。这是可控的 suspended 触发路径。
+# 注（TEST-DEFECT #2）：所有内置工具 schema 都会被 `with_description` 注入 `description`
+# 并列为 **required**（tools.rs:5370/5381-5383），缺它会在参数校验阶段 invalid_arguments，
+# 永远进不到 WaitingHost ⇒ suspended 不可达。故 ask_user 夹带 description。
 ASK_ARGS = json.dumps(
-    {"question": "无头模式下需要用户确认，是否继续？", "options": ["继续", "停止"]},
+    {
+        "question": "无头模式下需要用户确认，是否继续？",
+        "options": ["继续", "停止"],
+        "description": "向用户确认是否继续",
+    },
     ensure_ascii=False,
 )
 
@@ -426,6 +433,7 @@ if [ "$MOCK_READY" -eq 1 ]; then
   for mode in "${MOCK_MODES[@]}"; do
     port="$(free_port)"
     out="$RECEIPTS/mock-$mode.out"
+    : >"$RECEIPTS/mock-$mode-requests.jsonl"   # 证据门禁（E6c）要求「本轮」请求，非上一轮残留
     python3 "$WORK/mock.py" --port "$port" --log "$RECEIPTS/mock-$mode-requests.jsonl" --mode "$mode" >"$out" 2>&1 &
     pid=$!
     MOCK_PIDS+=("$pid")

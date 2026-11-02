@@ -1,0 +1,15 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "cli-session-bc7665d5-6234-4365-97e6-048691925254",
+  "turn_id": "turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "无头模式回答：任务完成。",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 20
+  },
+  "tool_calls": [],
+  "duration_ms": 106,
+  "failure_reason": null
+}
