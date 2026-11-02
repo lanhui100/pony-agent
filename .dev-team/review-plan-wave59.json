@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "388ad82a-b9ec-4e6d-9ad9-be0422510650",
+    "fresh_context": true
+  },
+  "executed_by": "388ad82a-b9ec-4e6d-9ad9-be0422510650",
+  "attestation": {
+    "self_signed": false,
+    "transcribed_verbatim_by_lead": true,
+    "note": "计划阶段三路独立架构评审（runtime / 持久化 / 前端）原始结论，作为本波修复范围来源"
+  },
+  "reviewed_commit": "5fa0ca6",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/",
+    "src/",
+    "src-tauri/",
+    "docs/"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher_composites.rs",
+      "line": 69,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cargo test --test concurrent_turn_context_isolation_red",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "line": 10127,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cargo check --workspace --all-targets",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "src/lib/markdown.ts",
+      "line": 96,
+      "rule": "SECURITY",
+      "counterexample_cmd": "npx vitest run tests/markdown-external-resource-allowlist.red.spec.ts",
+      "severity": "BLOCKING"
+    }
+  ]
+}

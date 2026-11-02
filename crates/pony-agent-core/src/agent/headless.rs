@@ -19,6 +19,7 @@ use crate::agent::turn_flow::TurnEventSink;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// 结果封套的固定 schema 标识（冻结值，不得按波次变更）。
@@ -172,6 +173,7 @@ pub enum HeadlessOutcome {
 /// | `Timeout` | `ExitCode::Timeout`(7) | 有界执行超时 |
 /// | `Cancelled` | `ExitCode::Internal`(1) | 无头下不可达（无交互取消源），保守归 Internal |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TurnStatus {
     Completed,
     Failed,
@@ -211,6 +213,9 @@ pub struct ResultEnvelope {
     pub usage: UsageSummary,
     pub tool_calls: Vec<ToolCallSummary>,
     pub duration_ms: u64,
+    /// v4（裁定 B3）：失败/挂起的 wire 原文（如 `control_outcome_pending` 等），
+    /// 透传不加工 —— 使 `suspended` / permission 类原因可辨识的最小手段；无则 `None`。
+    pub failure_reason: Option<String>,
 }
 
 /// JSON Lines 事件 sink：每个事件一行 JSON 对象。
@@ -220,8 +225,15 @@ pub struct ResultEnvelope {
 ///   `hop_complete` / `output_end` / `phase_changed` / `checkpoint_persisted` /
 ///   `completed` / `failed` / `cancelled` / `suspended` 等一律成行）；
 /// - `emit` 会被 **worker 线程**调用 ⇒ 实现必须 `Send + Sync`（内部用 `Mutex` 缓冲）。
+///
+/// v4（裁定 B7）：由 unit struct 改为**带私有状态的具名结构体**；字段私有，
+/// 外部只能经 [`JsonlSink::new`] 构造，故内部表示可自由演进而不破契约。
 #[derive(Debug, Default)]
-pub struct JsonlSink;
+pub struct JsonlSink {
+    /// 私有 sink 状态（缓冲行 + 已观测终态）；`emit` 在 worker 线程被调用，须 `Send + Sync`。
+    #[allow(dead_code)] // 空桩阶段尚无读取方；Executor 实现 `emit`/`finish` 后该告警自然消失
+    state: Mutex<Vec<String>>,
+}
 
 impl JsonlSink {
     pub fn new() -> Self {
@@ -248,8 +260,15 @@ impl TurnEventSink for JsonlSink {
 /// SSE 事件 sink：按 `event:/id:/data:` 帧格式输出。
 ///
 /// 契约要点同 [`JsonlSink`]：全事件透传 + `Send + Sync`（`Mutex` 缓冲）。
+///
+/// v4（裁定 B7）：由 unit struct 改为**带私有状态的具名结构体**；字段私有，
+/// 外部只能经 [`SseSink::new`] 构造。
 #[derive(Debug, Default)]
-pub struct SseSink;
+pub struct SseSink {
+    /// 私有 sink 状态（缓冲帧 + 已观测终态）；`emit` 在 worker 线程被调用，须 `Send + Sync`。
+    #[allow(dead_code)] // 空桩阶段尚无读取方；Executor 实现 `emit`/`finish` 后该告警自然消失
+    state: Mutex<Vec<String>>,
+}
 
 impl SseSink {
     pub fn new() -> Self {
@@ -283,10 +302,5 @@ pub fn run_with_deadline<F>(_timeout: Option<Duration>, _runner: F) -> HeadlessO
 where
     F: FnOnce() + Send + 'static,
 {
-    unimplemented!()
-}
-
-/// 无头执行编排入口：按 [`HeadlessOptions`] 驱动一轮执行并返回退出码。
-pub fn run_headless(_opts: &HeadlessOptions) -> ExitCode {
     unimplemented!()
 }

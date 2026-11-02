@@ -4,6 +4,7 @@
   "baseline_ref": ".dev-team/nfr-baseline.json",
   "delta_scope": "headless CLI (ponycli) contract freeze: structured event output / exit-code taxonomy / result envelope / non-interactive permission policy / bounded execution. 五项必填 NFR 全量重述（沿用 .dev-team/nfr-baseline.json 冻结值），本波仅新增 wave59_headless_contract 增量节点。v2 修订（Lead 裁定 D1/D2）：删除逐工具白名单承诺（allow_tools/decide），PermissionMode 改为宿主 tool_authorization_mode 三档透传；TurnStatus/HeadlessOutcome 新增 suspended 终态并映射 permission_denied(6)。既有 .dev-team/nfr-baseline.json 不修改。",
   "external_call_timeout_ms": 3000,
+  "external_call_timeout_scope": "仅约束本波新增的外部调用（结果封套落盘、sink flush 等）；不改既有 provider 流式 180s 读空闲预算与 30min 总时长上界（见 .dev-team/nfr-baseline.json 的 external_call_timeout_exceptions）",
   "retry": {
     "max_attempts": 1,
     "backoff_ms": 500,
@@ -19,10 +20,10 @@
   "resource_release": [
     "bounded_queue",
     "max_queue_capacity_1024",
-    "worker_thread_shutdown",
-    "wave59_jsonl_sink_finish_releases_buffer_once",
-    "wave59_sse_sink_finish_releases_buffer_once",
-    "wave59_timeout_path_idempotent_cleanup_then_exit",
+    "wave59_worker_not_preemptible_declared",
+    "wave59_on_timeout_process_exits_without_background_thread_stop_guarantee",
+    "wave59_no_idempotent_cleanup_promise_after_timeout",
+    "wave59_sink_buffer_released_by_process_exit_only",
     "wave59_result_envelope_write_atomic_rename"
   ],
   "wave59_headless_contract": {
@@ -45,7 +46,8 @@
       "final_text",
       "usage{input_tokens,output_tokens}",
       "tool_calls[{name,status}]",
-      "duration_ms"
+      "duration_ms",
+      "failure_reason"
     ],
     "turn_status_values": [
       "completed",
@@ -109,11 +111,22 @@
     "bounded_execution": {
       "timeout_source": "HeadlessOptions.timeout_secs",
       "max_turns_deferred_to": "PA-167（运行时限无公开接线口，v3 不声明）",
-      "silent_truncation_forbidden": true
+      "silent_truncation_forbidden": true,
+      "timeout_convergence_declaration": {
+        "worker_preemption": "not_supported（worker 不可抢占）",
+        "on_timeout": "进程以 timeout(7) 退出；不承诺后台 worker 线程已停止",
+        "idempotent_cleanup_after_timeout": "not_promised（不承诺幂等清理）",
+        "background_thread_liveness_probe": "not_promised",
+        "forbidden_claims": [
+          "worker 已关闭",
+          "worker 已回收",
+          "超时后已完成幂等清理"
+        ]
+      }
     },
     "non_interactive_only": true,
     "interactive_prompt_forbidden": true,
     "external_call_timeout_applies": true
   },
-  "contract_version": "v2"
+  "contract_version": "v4"
 }
