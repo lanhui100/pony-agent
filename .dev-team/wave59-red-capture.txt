@@ -1,0 +1,255 @@
+================================================================================
+wave-59 / PA-164 · 红相原始捕获 (RED PHASE RAW CAPTURE)
+================================================================================
+captured_at: 2026-11-02T10:35:05+08:00
+worktree   : /home/dm/wt/pony-wave59 (branch wave-59/headless)
+base_commit: a0d6232
+crate      : pony-agent-core (see Cargo.toml --test headless_contract)
+test_file  : crates/pony-agent-core/tests/headless_contract.rs
+stub       : crates/pony-agent-core/src/agent/headless.rs (contract v3, T1)
+contract   : .dev-team/contract-matrix-wave59-headless.md (Lead frozen, v2)
+env        : CARGO_TARGET_DIR=/home/dm/pony-agent/target
+command    : cargo test -p pony-agent-core --test headless_contract
+exit_code  : 101  (FAILED — 预期：空桩 unimplemented!() 原生 panic)
+--------------------------------------------------------------------------------
+[纯度门禁证据]
+  error[E...]  编译错误行数 : 0
+  panicked at  行数         : 22   (全部为 'not implemented'，即 unimplemented!() 原生失败)
+  test result               : test result: FAILED. 3 passed; 22 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  => 失败原因 = 语言原生 panic（未实现），不是编译错误；测试签名与空桩 v3 完全对齐。
+--------------------------------------------------------------------------------
+[用例清单] 25 个测试：22 FAILED / 3 ok
+  3 个 ok 的用例是【serde 形状锁】，在空桩阶段即成立（derive 已在空桩内），非空断言：
+    - c3_result_envelope_schema_literal_is_frozen   (schema 字面量 == pony.headless.result.v1)
+    - c3_result_envelope_field_set_and_types        (9 个契约字段 + 类型形状)
+    - c3_turn_status_tokens_are_the_frozen_five     (completed/failed/timeout/cancelled/suspended)
+  它们一旦字段改名/改 casing 立刻转红，属真实鉴别力断言（见 T3 阶段回归验证）。
+================================================================================
+以下为 cargo test 原始 stdout/stderr 全文（未裁剪）：
+================================================================================
+   Compiling pony-agent-core v0.1.141 (/home/dm/wt/pony-wave59/crates/pony-agent-core)
+    Finished `test` profile [unoptimized] target(s) in 35.05s
+     Running tests/headless_contract.rs (/home/dm/pony-agent/target/debug/deps/headless_contract-4d6c98e65dcc4fbd)
+
+running 25 tests
+test c1_jsonl_sink_passes_through_every_event_kind ... FAILED
+test c1_jsonl_sink_emits_one_valid_json_line_per_event ... FAILED
+test c1_jsonl_sink_treats_suspended_as_terminal ... FAILED
+test c1_output_format_parses_frozen_cli_tokens ... FAILED
+test c1_jsonl_sink_output_contains_no_ansi_escapes ... FAILED
+test c1_output_format_rejects_unknown_token ... FAILED
+test c1_sink_outcome_tracks_terminal_events_only ... FAILED
+test c1_sse_sink_frames_are_wellformed_and_ansi_free ... FAILED
+test c2_classify_is_fail_closed_across_adversarial_inputs ... FAILED
+test c2_classify_unknown_error_fails_closed_to_internal_not_success ... FAILED
+test c2_terminal_status_maps_to_frozen_exit_codes ... FAILED
+test c2_exit_code_values_are_frozen_and_unique ... FAILED
+test c2_turn_failed_must_never_map_to_success ... FAILED
+test c3_result_envelope_schema_literal_is_frozen ... ok
+test c3_result_envelope_field_set_and_types ... ok
+test c3_suspended_envelope_implies_permission_denied_exit_code ... FAILED
+test c4_headless_options_default_permission_mode_is_read_only ... FAILED
+test c3_turn_status_tokens_are_the_frozen_five ... ok
+test c4_permission_mode_maps_to_host_tool_authorization_mode ... FAILED
+test c4_headless_options_shape_is_frozen ... FAILED
+test c5_fast_runner_within_budget_completes ... FAILED
+test c4_permission_mode_parses_frozen_aliases_and_rejects_others ... FAILED
+test c5_timeout_outcome_maps_to_exit_code_7 ... FAILED
+test c5_expired_budget_returns_timeout_without_hanging ... FAILED
+test c5_no_budget_means_unbounded_and_still_completes ... FAILED
+
+failures:
+
+---- c1_jsonl_sink_passes_through_every_event_kind stdout ----
+
+thread 'c1_jsonl_sink_passes_through_every_event_kind' (572318) panicked at crates/pony-agent-core/src/agent/headless.rs:228:9:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- c1_jsonl_sink_emits_one_valid_json_line_per_event stdout ----
+
+thread 'c1_jsonl_sink_emits_one_valid_json_line_per_event' (572316) panicked at crates/pony-agent-core/src/agent/headless.rs:228:9:
+not implemented
+
+---- c1_jsonl_sink_treats_suspended_as_terminal stdout ----
+
+thread 'c1_jsonl_sink_treats_suspended_as_terminal' (572319) panicked at crates/pony-agent-core/src/agent/headless.rs:228:9:
+not implemented
+
+---- c1_output_format_parses_frozen_cli_tokens stdout ----
+
+thread 'c1_output_format_parses_frozen_cli_tokens' (572320) panicked at crates/pony-agent-core/src/agent/headless.rs:40:9:
+not implemented
+
+---- c1_jsonl_sink_output_contains_no_ansi_escapes stdout ----
+
+thread 'c1_jsonl_sink_output_contains_no_ansi_escapes' (572317) panicked at crates/pony-agent-core/src/agent/headless.rs:228:9:
+not implemented
+
+---- c1_output_format_rejects_unknown_token stdout ----
+
+thread 'c1_output_format_rejects_unknown_token' (572321) panicked at crates/pony-agent-core/src/agent/headless.rs:40:9:
+not implemented
+
+---- c1_sink_outcome_tracks_terminal_events_only stdout ----
+
+thread 'c1_sink_outcome_tracks_terminal_events_only' (572322) panicked at crates/pony-agent-core/src/agent/headless.rs:228:9:
+not implemented
+
+---- c1_sse_sink_frames_are_wellformed_and_ansi_free stdout ----
+
+thread 'c1_sse_sink_frames_are_wellformed_and_ansi_free' (572323) panicked at crates/pony-agent-core/src/agent/headless.rs:256:9:
+not implemented
+
+---- c2_classify_is_fail_closed_across_adversarial_inputs stdout ----
+
+thread 'c2_classify_is_fail_closed_across_adversarial_inputs' (572324) panicked at crates/pony-agent-core/src/agent/headless.rs:100:9:
+not implemented
+
+---- c2_classify_unknown_error_fails_closed_to_internal_not_success stdout ----
+
+thread 'c2_classify_unknown_error_fails_closed_to_internal_not_success' (572325) panicked at crates/pony-agent-core/src/agent/headless.rs:100:9:
+not implemented
+
+---- c2_terminal_status_maps_to_frozen_exit_codes stdout ----
+
+thread 'c2_terminal_status_maps_to_frozen_exit_codes' (572327) panicked at crates/pony-agent-core/src/agent/headless.rs:185:5:
+not implemented
+
+---- c2_exit_code_values_are_frozen_and_unique stdout ----
+
+thread 'c2_exit_code_values_are_frozen_and_unique' (572326) panicked at crates/pony-agent-core/src/agent/headless.rs:95:9:
+not implemented
+
+---- c2_turn_failed_must_never_map_to_success stdout ----
+
+thread 'c2_turn_failed_must_never_map_to_success' (572328) panicked at crates/pony-agent-core/src/agent/headless.rs:100:9:
+not implemented
+
+---- c3_suspended_envelope_implies_permission_denied_exit_code stdout ----
+
+thread 'c3_suspended_envelope_implies_permission_denied_exit_code' (572331) panicked at crates/pony-agent-core/src/agent/headless.rs:185:5:
+not implemented
+
+---- c4_headless_options_default_permission_mode_is_read_only stdout ----
+
+thread 'c4_headless_options_default_permission_mode_is_read_only' (572333) panicked at crates/pony-agent-core/src/agent/headless.rs:141:9:
+not implemented
+
+---- c4_permission_mode_maps_to_host_tool_authorization_mode stdout ----
+
+thread 'c4_permission_mode_maps_to_host_tool_authorization_mode' (572335) panicked at crates/pony-agent-core/src/agent/headless.rs:141:9:
+not implemented
+
+---- c4_headless_options_shape_is_frozen stdout ----
+
+thread 'c4_headless_options_shape_is_frozen' (572334) panicked at crates/pony-agent-core/src/agent/headless.rs:141:9:
+not implemented
+
+---- c5_fast_runner_within_budget_completes stdout ----
+
+thread 'c5_fast_runner_within_budget_completes' (572338) panicked at /home/dm/wt/pony-wave59/crates/pony-agent-core/src/agent/headless.rs:286:5:
+not implemented
+
+---- c4_permission_mode_parses_frozen_aliases_and_rejects_others stdout ----
+
+thread 'c4_permission_mode_parses_frozen_aliases_and_rejects_others' (572336) panicked at crates/pony-agent-core/src/agent/headless.rs:131:9:
+not implemented
+
+---- c5_timeout_outcome_maps_to_exit_code_7 stdout ----
+
+thread 'c5_timeout_outcome_maps_to_exit_code_7' (572340) panicked at crates/pony-agent-core/src/agent/headless.rs:185:5:
+not implemented
+
+---- c5_expired_budget_returns_timeout_without_hanging stdout ----
+
+thread 'c5_expired_budget_returns_timeout_without_hanging' (572337) panicked at /home/dm/wt/pony-wave59/crates/pony-agent-core/src/agent/headless.rs:286:5:
+not implemented
+
+---- c5_no_budget_means_unbounded_and_still_completes stdout ----
+
+thread 'c5_no_budget_means_unbounded_and_still_completes' (572339) panicked at /home/dm/wt/pony-wave59/crates/pony-agent-core/src/agent/headless.rs:286:5:
+not implemented
+
+
+failures:
+    c1_jsonl_sink_emits_one_valid_json_line_per_event
+    c1_jsonl_sink_output_contains_no_ansi_escapes
+    c1_jsonl_sink_passes_through_every_event_kind
+    c1_jsonl_sink_treats_suspended_as_terminal
+    c1_output_format_parses_frozen_cli_tokens
+    c1_output_format_rejects_unknown_token
+    c1_sink_outcome_tracks_terminal_events_only
+    c1_sse_sink_frames_are_wellformed_and_ansi_free
+    c2_classify_is_fail_closed_across_adversarial_inputs
+    c2_classify_unknown_error_fails_closed_to_internal_not_success
+    c2_exit_code_values_are_frozen_and_unique
+    c2_terminal_status_maps_to_frozen_exit_codes
+    c2_turn_failed_must_never_map_to_success
+    c3_suspended_envelope_implies_permission_denied_exit_code
+    c4_headless_options_default_permission_mode_is_read_only
+    c4_headless_options_shape_is_frozen
+    c4_permission_mode_maps_to_host_tool_authorization_mode
+    c4_permission_mode_parses_frozen_aliases_and_rejects_others
+    c5_expired_budget_returns_timeout_without_hanging
+    c5_fast_runner_within_budget_completes
+    c5_no_budget_means_unbounded_and_still_completes
+    c5_timeout_outcome_maps_to_exit_code_7
+
+test result: FAILED. 3 passed; 22 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p pony-agent-core --test headless_contract`
+EXIT_CODE=101
+
+================================================================================
+第二部分：真实二进制 E2E 红相（tests/acceptance/wave59/headless-cli-e2e.sh）
+================================================================================
+captured_at: 2026-11-02T10:35:28+08:00
+binary     : /home/dm/pony-agent/target/debug/ponycli (prebuilt from this worktree)
+mock       : 自包含 python3 OpenAI-SSE gateway × 3 实例（text/tool/garbage），随机端口
+command    : CARGO_TARGET_DIR=/home/dm/pony-agent/target bash tests/acceptance/wave59/headless-cli-e2e.sh
+exit_code  : 1 (RESULT: FAIL — 预期红相：CLI 尚未接线 --output-format/--result-json/--permission-mode)
+summary    : headless-cli-e2e: PASS=13 FAIL=10 SKIP=0  (receipts: /home/dm/wt/pony-wave59/tests/acceptance/wave59/receipts)
+--------------------------------------------------------------------------------
+[红相事实]
+  - E1/E2：非法参数当前退 1（契约要求 exit 2）⇒ CLI 参数校验未接线；
+  - E3/E5/E6/E6b/E7：stdout 出现 observability bootstrap 的 JSON 日志行（otel::init warn），
+    缺 seq/type 字段 ⇒ C1「jsonl 下 stdout 只承载事件」被真实击穿（非测试臆造，见 receipts/*.stdout）；
+  - E4：--result-json 未落盘 ⇒ C3 原子写缺失；
+  - 13 项 PASS 中 E5/E7 的「非 0 退出」当前由参数错误(1)而非 provider 错误满足，
+    T3 实现后必须重跑本脚本确认仍为红→绿（Lead 绿相门禁）。
+--------------------------------------------------------------------------------
+以下为 E2E 脚本原始 stdout 全文（未裁剪）：
+================================================================================
+== reusing built binary: /home/dm/pony-agent/target/debug/ponycli
+== mock(text) listening on 127.0.0.1:51525 (pid 574354)
+== mock(tool) listening on 127.0.0.1:54283 (pid 574367)
+== mock(garbage) listening on 127.0.0.1:33889 (pid 574377)
+== ports: text=51525 tool=54283 garbage=33889
+FAIL: E1 非法 --permission-mode 期望 exit 2，实际 1（stdout={"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或)
+PASS: E1: 无 panic
+PASS: E1b 非法值诊断落在 stderr（可读）
+FAIL: E2 非法 --output-format 期望 exit 2，实际 1
+PASS: E2: 无 panic
+FAIL: E3 jsonl 正常 turn 期望 exit 0，实际 1（stderr=[31mArgument Error:[0m unknown argument: --output-format )
+FAIL: E3: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E3: 无 panic
+PASS: E3c jsonl 模式 stdout 无人类可读横幅
+FAIL: E4a --result-json 未落盘（C3 原子写缺失）
+FAIL: E4b 无法断言封套（前置 E4a 失败）
+PASS: E5 provider 不可达 → 非 0 退出（实际 1）
+FAIL: E5: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E5: 无 panic
+PASS: E6 deny 模式未挂起（退出码 1）
+FAIL: E6: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E6: 无 panic
+PASS: E6b 默认审批档位未挂起（退出码 1）
+FAIL: E6b: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E6b: 无 panic
+PASS: E7 畸形响应 → 非 0 退出（实际 1）
+FAIL: E7: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E7: 无 panic
+===================================================
+headless-cli-e2e: PASS=13 FAIL=10 SKIP=0  (receipts: /home/dm/wt/pony-wave59/tests/acceptance/wave59/receipts)
+RESULT: FAIL
+E2E_EXIT=1

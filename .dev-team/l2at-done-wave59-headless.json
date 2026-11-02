@@ -1,0 +1,58 @@
+{
+  "wave": "wave-59",
+  "ticket": "PA-164",
+  "role": "L2-T independent tester (test-agent)",
+  "workspace": "/home/dm/wt/pony-wave59",
+  "branch": "wave-59/headless",
+  "frozen_contract": ".dev-team/contract-matrix-wave59-headless.md",
+  "contract_version_seen": "v2 (D1/D2) + v3 (A2: max_turns removed)",
+  "status": "RED_PHASE_CAPTURED",
+  "deliverables": {
+    "rust_contract_test": "crates/pony-agent-core/tests/headless_contract.rs",
+    "shell_e2e": "tests/acceptance/wave59/headless-cli-e2e.sh",
+    "red_capture": ".dev-team/wave59-red-capture.txt",
+    "e2e_receipts": "tests/acceptance/wave59/receipts/"
+  },
+  "cargo_test": {
+    "command": "CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test -p pony-agent-core --test headless_contract",
+    "exit_code": 101,
+    "tests_total": 25,
+    "passed": 3,
+    "failed": 22,
+    "failure_mode": "unimplemented!() native panic (not implemented) — acceptable red primitive; zero compile errors (error[E count = 0)",
+    "passing_are_pure_serde_shape_locks": [
+      "c3_result_envelope_schema_literal_is_frozen",
+      "c3_result_envelope_field_set_and_types",
+      "c3_turn_status_tokens_are_the_frozen_five"
+    ]
+  },
+  "shell_e2e": {
+    "command": "CARGO_TARGET_DIR=/home/dm/pony-agent/target bash tests/acceptance/wave59/headless-cli-e2e.sh",
+    "exit_code": 1,
+    "pass": 13,
+    "fail": 10,
+    "skip": 0,
+    "degraded": false,
+    "mock_gateway": "self-contained python3 OpenAI SSE gateway x3 (text/tool/garbage) on random ports",
+    "key_red_findings": [
+      "invalid --permission-mode / --output-format exit 1 instead of 2 (CLI flags not wired)",
+      "observability bootstrap writes JSON warn lines to stdout -> C1 stdout-purity violated in jsonl mode",
+      "--result-json not written -> C3 atomic write missing",
+      "stdout purity violations are real product behavior, captured in receipts/*.stdout"
+    ]
+  },
+  "contract_coverage": {
+    "C1_jsonl_sse_output": ["c1_output_format_parses_frozen_cli_tokens", "c1_output_format_rejects_unknown_token", "c1_jsonl_sink_emits_one_valid_json_line_per_event", "c1_jsonl_sink_passes_through_every_event_kind", "c1_jsonl_sink_output_contains_no_ansi_escapes", "c1_sink_outcome_tracks_terminal_events_only", "c1_jsonl_sink_treats_suspended_as_terminal", "c1_sse_sink_frames_are_wellformed_and_ansi_free"],
+    "C2_exit_codes": ["c2_exit_code_values_are_frozen_and_unique", "c2_classify_unknown_error_fails_closed_to_internal_not_success", "c2_turn_failed_must_never_map_to_success", "c2_classify_is_fail_closed_across_adversarial_inputs", "c2_terminal_status_maps_to_frozen_exit_codes"],
+    "C3_result_envelope": ["c3_result_envelope_schema_literal_is_frozen", "c3_result_envelope_field_set_and_types", "c3_turn_status_tokens_are_the_frozen_five", "c3_suspended_envelope_implies_permission_denied_exit_code"],
+    "C4_permission_mode": ["c4_permission_mode_maps_to_host_tool_authorization_mode", "c4_permission_mode_parses_frozen_aliases_and_rejects_others", "c4_headless_options_shape_is_frozen", "c4_headless_options_default_permission_mode_is_read_only"],
+    "C5_deadline": ["c5_fast_runner_within_budget_completes", "c5_no_budget_means_unbounded_and_still_completes", "c5_expired_budget_returns_timeout_without_hanging", "c5_timeout_outcome_maps_to_exit_code_7"],
+    "E2E": ["E1 invalid --permission-mode -> exit 2", "E2 invalid --output-format -> exit 2", "E3 jsonl happy path purity", "E4 result-json envelope + proc-exit cross-check", "E5 provider unreachable != 0", "E6 deny mode no hang", "E6b default mode no hang", "E7 malformed provider payload graceful"]
+  },
+  "notes": [
+    "L2-AT (adversarial) co-triggered by this agent: C2 adversarial classify inputs, jsonl ANSI injection, SSE ANSI injection, E5 dead-provider, E7 malformed payload.",
+    "C3 status<->exit_code self-consistency is asserted on real artifacts in E2E E4 (not on test-constructed objects) to avoid tautological fake tests.",
+    "No src/ file modified by test agent; write scope respected."
+  ],
+  "generated_at": "2026-11-02T10:36:00+08:00"
+}
