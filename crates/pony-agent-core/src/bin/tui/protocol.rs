@@ -85,6 +85,37 @@ pub struct AskUserQuestion {
     pub options: Vec<QuestionOption>,
 }
 
+/// 契约 F-M：单个问题的已答记录（`question_id` 与提问一一对应）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskAnswer {
+    pub question_id: String,
+    pub values: Vec<String>,
+}
+
+/// 契约 F-M：多问推进的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextQuestion {
+    /// 还有下一问，索引指向它。
+    Advance(usize),
+    /// 已经是最后一问（或没有问题）：可以提交了。
+    Finish,
+}
+
+/// 契约 F-M：多问逐个推进的纯函数。
+///
+/// `total == 0` ⇒ `Finish`；`current + 1 < total` ⇒ `Advance(current + 1)`；否则 `Finish`。
+pub fn next_question_index(current: usize, total: usize) -> NextQuestion {
+    if total == 0 {
+        return NextQuestion::Finish;
+    }
+    let next = current.saturating_add(1);
+    if next < total {
+        NextQuestion::Advance(next)
+    } else {
+        NextQuestion::Finish
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskUserState {
     pub request_id: String,
@@ -94,11 +125,13 @@ pub struct AskUserState {
     pub multi_selected_indices: Vec<usize>,
     pub custom_input: String,
     pub is_custom_input_active: bool,
+    /// 契约 F-M：已答集合（按提问顺序累积）；答完全部问题后由调用方一次性提交。
+    pub answers: Vec<AskAnswer>,
 }
 
 impl AskUserState {
     pub fn new(request_id: String, questions: Vec<AskUserQuestion>) -> Self {
-        Self {
+        let mut state = Self {
             request_id,
             questions,
             current_question_index: 0,
@@ -106,11 +139,63 @@ impl AskUserState {
             multi_selected_indices: Vec::new(),
             custom_input: String::new(),
             is_custom_input_active: false,
-        }
+            answers: Vec::new(),
+        };
+        state.sync_custom_input_focus();
+        state
+    }
+
+    /// 让「自定义输入」焦点与当前问题对齐。
+    ///
+    /// 无选项的问题**只有**自由输入，故默认即聚焦自定义输入；有选项时选中末位（= 自定义项）才算聚焦。
+    /// 旧实现在无选项问题上永远不聚焦，用户打字没有任何反应。
+    fn sync_custom_input_focus(&mut self) {
+        self.is_custom_input_active = match self.current_question() {
+            Some(question) => {
+                question.options.is_empty() || self.selected_option_index >= question.options.len()
+            }
+            None => false,
+        };
     }
 
     pub fn current_question(&self) -> Option<&AskUserQuestion> {
         self.questions.get(self.current_question_index)
+    }
+
+    /// 契约 F-M：记录当前问题的答案并推进到下一问（**不提交**，提交由调用方负责）。
+    ///
+    /// - `Advance(next)`：索引已推进到 `next`，并按新问题重置选择状态；
+    /// - `Finish`：已是最后一问，索引保持在末问（答案已记录，调用方据此提交全部答案）。
+    pub fn record_and_advance(&mut self, values: Vec<String>) -> NextQuestion {
+        let question_id = self
+            .current_question()
+            .map(|question| question.id.clone())
+            .unwrap_or_default();
+        self.answers.push(AskAnswer {
+            question_id,
+            values,
+        });
+        match next_question_index(self.current_question_index, self.questions.len()) {
+            NextQuestion::Advance(next) => {
+                self.current_question_index = next;
+                self.selected_option_index = 0;
+                self.multi_selected_indices.clear();
+                self.custom_input.clear();
+                self.sync_custom_input_focus();
+                NextQuestion::Advance(next)
+            }
+            NextQuestion::Finish => NextQuestion::Finish,
+        }
+    }
+
+    /// 已答问题数。
+    pub fn answered_count(&self) -> usize {
+        self.answers.len()
+    }
+
+    /// 是否已答完全部问题（没有问题视为未答完）。
+    pub fn all_answered(&self) -> bool {
+        !self.questions.is_empty() && self.answers.len() >= self.questions.len()
     }
 
     pub fn toggle_current_option(&mut self) {
@@ -133,6 +218,7 @@ impl AskUserState {
         if total > 0 {
             self.selected_option_index = (self.selected_option_index + 1) % total;
             self.is_custom_input_active = self.selected_option_index == options_len;
+            self.sync_custom_input_focus();
         }
     }
 
@@ -148,6 +234,7 @@ impl AskUserState {
                 self.selected_option_index -= 1;
             }
             self.is_custom_input_active = self.selected_option_index == options_len;
+            self.sync_custom_input_focus();
         }
     }
 }

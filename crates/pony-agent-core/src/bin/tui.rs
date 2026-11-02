@@ -7,15 +7,17 @@
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags, KeyCode,
-        KeyModifiers, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyboardEnhancementFlags, KeyCode, KeyModifiers, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use pony_agent_core::agent::config::{
-    ProviderModelCapabilities, ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
-    ResolvedProviderSelection, ThinkingParamPattern,
+    ProviderCapabilityPreset, ProviderModelCapabilities, ProviderModelConfig, ProviderReasoningEffort,
+    ProviderRegistryStore, ProviderRegistryView, ProviderSelectionResolver, ResolvedProviderSelection,
+    ThinkingParamPattern,
 };
 use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand, StopTurnCommand,
@@ -23,7 +25,10 @@ use pony_agent_core::agent::control_plane::{
 use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalData};
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::todo::{TodoItem, TodoStatus as StoreTodoStatus};
-use pony_agent_core::agent::runtime::{AgentRuntimeBuilder, TurnInput, TurnStreamEvent};
+use pony_agent_core::agent::runtime::{
+    compact_outcome_message, AgentRuntimeBuilder, ManualCompactionOutcome, TurnInput,
+    TurnStreamEvent,
+};
 use pony_agent_core::agent::session::SessionStore;
 use pony_agent_core::agent::turn_flow::TurnEventSink;
 use ratatui::{
@@ -94,6 +99,12 @@ pub enum UiEvent {
     InputMouse(crossterm::event::MouseEvent),
     /// 终端尺寸变化（SSH 初次上报晚到 / 用户拉伸窗口）：必须立即整屏重绘，否则保留旧尺寸画面。
     Resized,
+    /// 契约 F-C：bracketed paste 文本（由输入线程从 `Event::Paste` 转来）。
+    /// 只允许插入输入缓冲，**绝不**直接提交（粘贴后仍由用户按 Enter 决定）。
+    InputPaste(String),
+    /// 契约 F-E：输入泵退出（poll/read 出错）。stderr 已被 dup2 到日志文件，终端上看不到，
+    /// 故必须经事件通道把原因送到界面上，不能只 eprintln。
+    InputPumpFailed { error: String },
     ScrollWheel(bool), // true = ScrollUp, false = ScrollDown
     StreamDelta(String),
     StreamToolCall(String),
@@ -128,6 +139,10 @@ pub enum UiEvent {
     GoalUpdated(TuiGoal),
     /// 波次 43：本轮被宿主控制请求挂起（ask_user / approval），主循环据此拉取待决请求。
     TurnSuspended { run_id: Option<String> },
+    /// 契约 C-7：`/compact` 后台线程回执（真实压缩在后台线程执行，事件循环不阻塞 LLM）。
+    CompactFinished {
+        result: Result<ManualCompactionOutcome, String>,
+    },
 }
 
 /// wave-40 R1（契约冻结空桩）：Composer 中 Enter 键语义。
@@ -372,33 +387,32 @@ pub fn ask_question_from_pending(value: &serde_json::Value) -> AskUserQuestion {
         .map(|options| {
             options
                 .iter()
-                .filter_map(|option| {
-                    option
+                // 生产 schema 的 `ask_user.options` 是 **string 数组**（见 tools.rs 的 input_schema），
+                // 而历史实现只认 `{label, description}` 对象 ⇒ 真实模型给的选项会被整批丢掉，
+                // 面板只剩「自定义输入」。这里两种形状都接受：字符串 ⇒ 纯标签，对象 ⇒ 标签+说明。
+                .filter_map(|option| match option {
+                    serde_json::Value::String(label) => {
+                        (!label.trim().is_empty()).then(|| QuestionOption {
+                            label: label.clone(),
+                            description: None,
+                        })
+                    }
+                    other => other
                         .get("label")
                         .and_then(|label| label.as_str())
                         .map(|label| QuestionOption {
                             label: label.to_string(),
-                            description: option
+                            description: other
                                 .get("description")
                                 .and_then(|desc| desc.as_str())
                                 .map(str::to_string),
-                        })
+                        }),
                 })
                 .collect::<Vec<_>>()
         })
-        .filter(|options| !options.is_empty())
-        .unwrap_or_else(|| {
-            vec![
-                QuestionOption {
-                    label: "确认".to_string(),
-                    description: Some("继续执行该请求".to_string()),
-                },
-                QuestionOption {
-                    label: "取消".to_string(),
-                    description: Some("放弃该请求".to_string()),
-                },
-            ]
-        });
+        // 契约 F-M①：无 options 的提问**不伪造**「确认/取消」两项。
+        // 伪造会让一次 Enter 就回一个用户从没选过的"确认"，是真实缺陷；空列表 ⇒ 走自由输入。
+        .unwrap_or_default();
     AskUserQuestion {
         id: "q1".to_string(),
         header: value
@@ -475,13 +489,308 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/provider", "管理与切换模型提供商"),
     ("/models", "切换当前活跃模型"),
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
-    ("/plan", "切换/查看 Plan 计划模式"),
+    ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
     ("/tasks", "切换/查看 Team 任务看板（Ctrl+T）"),
     ("/clear", "清空当前消息上下文"),
-    ("/cost", "查看当前模型与网关配额信息"),
+    ("/compact", "压缩当前会话上下文"),
     ("/help", "查看所有支持的快捷指令"),
     ("/quit", "安全退出 TUI 界面"),
 ];
+
+/// 契约 C-5：斜杠命令解析口径（纯函数，可单测）。
+///
+/// 取 `trim()` 后**首个空白分隔 token** 与命令表做**大小写不敏感**比较；命中返回命令表中的
+/// 规范写法（如 `"/plan"`、`"/compact"`）。未命中返回 `None`——调用方按普通消息发送
+/// （`/etc/hosts 是什么` 之类不新增拦截）。
+pub fn match_command_token(input: &str) -> Option<&'static str> {
+    let token = input.trim().split_whitespace().next()?;
+    AVAILABLE_COMMANDS
+        .iter()
+        .map(|(cmd, _)| *cmd)
+        .find(|cmd| cmd.eq_ignore_ascii_case(token))
+}
+
+/// 契约 F-B：**分发口径**的斜杠命令解析（整串匹配）。
+///
+/// 只有整串（`trim()` 后、大小写不敏感）恰好等于命令表中的命令才返回规范写法；
+/// **首 token 命中但存在额外 token ⇒ `None`**，调用方把整串当普通消息发送给模型，
+/// 绝不吞掉正文（`/clear 这个需求怎么拆` 不得清空上下文）。
+/// 菜单补全/高亮请用 [`match_command_token`]（首 token 口径）。
+pub fn parse_command_input(input: &str) -> Option<&'static str> {
+    let trimmed = input.trim();
+    if trimmed.split_whitespace().nth(1).is_some() {
+        return None;
+    }
+    match_command_token(trimmed)
+}
+
+/// 整串（`trim()` 后）与历史别名大小写不敏感相等（别名不在命令表内，如 `/exit`、`/effort`）。
+fn input_is_alias(input: &str, alias: &str) -> bool {
+    input.trim().eq_ignore_ascii_case(alias)
+}
+
+/// 契约 F-C：粘贴文本归一化——CRLF / CR 统一为 LF，其余字符原样保留。
+///
+/// 终端 pasting 会把换行按平台习惯送上（Windows CRLF / 老终端 CR）；直接在缓冲里插入
+/// `\r` 会让后续按行渲染与提交判定出现幽灵空行，故在入口一次性归一。
+pub fn normalize_paste(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// 契约 F-D：终端恢复的 RAII 守卫。
+///
+/// 为什么需要它：`enable_raw_mode()` 之后的任何失败/panic（`execute!` 失败、`Terminal::new()`
+/// 失败、`build_control_plane` panic、`?` 提前返回）都会把用户终端留在 raw + 备用屏状态。
+/// 守卫在 raw mode 生效后**立刻**建立，作用域覆盖整个运行期：正常退出走显式 `restore()`，
+/// 异常路径由 `Drop` 兜底。
+pub struct TerminalGuard {
+    restore: Option<Box<dyn FnMut()>>,
+}
+
+impl TerminalGuard {
+    /// 接受任意 `FnMut() + 'static` 恢复闭包。
+    ///
+    /// 用泛型参数而非 `Box<dyn FnMut()>`：调用点既能直接传闭包
+    /// （`TerminalGuard::new(move || …)`），也能传已装箱的 `Box<dyn FnMut()>`，
+    /// 内部统一装箱存储，调用方无需关心间接层。
+    pub fn new(restore: impl FnMut() + 'static) -> Self {
+        Self {
+            restore: Some(Box::new(restore)),
+        }
+    }
+
+    /// 执行终端恢复。**幂等**：闭包只会被执行一次，重复调用静默 no-op。
+    ///
+    /// 恢复闭包**永不把 panic 传播出去**：在 `Drop`（尤其是 unwind 期间）再 panic 会直接
+    /// abort 进程并把终端留在 raw 态，这比丢一条诊断更糟。故这里捕获并写 stderr
+    /// （stderr 已被 dup2 到 `~/.pony-agent/tui-logs/tui-runtime.log`）。
+    pub fn restore(&mut self) {
+        if let Some(mut restore) = self.restore.take() {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| restore()));
+            if outcome.is_err() {
+                eprintln!(
+                    "[pony-tui] terminal restore closure panicked; swallowed to keep Drop panic-free"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+/// 契约 F-E：输入泵轮询结果的处置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputPumpAction {
+    Continue,
+    Stop,
+}
+
+/// 契约 F-E：`event::poll` 结果的确定性分流。
+///
+/// - `Ok(_)`（含 `Ok(false)` = 本轮无事件）：继续泵；
+/// - `Err(_)`：输入源已不可用（stdin 关闭 / 非 TTY / EINTR 等），必须退出线程——
+///   旧实现 `unwrap_or(false)` 会把它当成"无事件"，于是 50ms 一轮永久热旋，且用户毫无提示。
+pub fn classify_input_poll(result: std::io::Result<bool>) -> InputPumpAction {
+    match result {
+        Ok(_) => InputPumpAction::Continue,
+        Err(_) => InputPumpAction::Stop,
+    }
+}
+
+/// 契约 F-G：goal 自动续轮的取消令牌（Esc 置位、新一轮用户消息重置）。
+///
+/// 用 `Arc<AtomicBool>` 而非 channel：Esc 在 UI 线程置位、续轮循环在 turn 线程读取，
+/// 语义只要求"下一轮开始前看到"，不需要排队。
+#[derive(Clone, Debug, Default)]
+pub struct GoalRoundCancelToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl GoalRoundCancelToken {
+    pub fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// 请求取消：下一次轮次边界生效（已在跑的那一轮由 `stop_turn` 中止）。
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// 重置（新一轮用户消息提交时调用）。
+    pub fn reset(&self) {
+        self.cancelled.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+/// 契约 F-G：goal 自动续轮的轮次边界判定（纯函数，可单测）。
+///
+/// `cancelled`（用户已按 Esc）或已用满预算（`consecutive >= max`）都必须中止下一轮。
+pub fn should_abort_goal_rounds(cancelled: bool, consecutive: u32, max: u32) -> bool {
+    cancelled || consecutive >= max
+}
+
+/// 契约 P-1：解析「当前生效 provider id」的优先级（纯函数，可单测）。
+///
+/// 顺序：`state_id` 命中注册表 → 注册表选中项命中 → 注册表首个 provider → `None`。
+/// 为什么 state 优先：`/provider` 切换是用户显式动作，内存里的 `current_provider_id` 若不优先，
+/// 界面报"已切换"而发送仍走注册表旧值时就是**假成功**（本波 BLOCKING 项）。
+pub fn pick_active_provider_id(
+    state_id: Option<&str>,
+    registry_selected: Option<&str>,
+    provider_ids: &[&str],
+) -> Option<String> {
+    if let Some(id) = state_id {
+        if provider_ids.contains(&id) {
+            return Some(id.to_string());
+        }
+    }
+    if let Some(id) = registry_selected {
+        if provider_ids.contains(&id) {
+            return Some(id.to_string());
+        }
+    }
+    provider_ids.first().map(|id| (*id).to_string())
+}
+
+/// 契约 P-4：Ctrl+C 的三态语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtrlCAction {
+    InterruptTurn,
+    ClearDraft,
+    Exit,
+}
+
+/// 契约 P-4：Ctrl+C 行为判定（纯函数）。
+///
+/// 流式中 ⇒ 中断本轮（等价 Esc），**不退出**；否则有草稿 ⇒ 先清草稿（防误触丢整段输入）；
+/// 否则才退出。旧实现把「流式中 Ctrl+C」直接映射为 `break`，等于一次误触就杀掉整个 TUI。
+pub fn ctrl_c_action(is_streaming: bool, has_draft: bool) -> CtrlCAction {
+    if is_streaming {
+        CtrlCAction::InterruptTurn
+    } else if has_draft {
+        CtrlCAction::ClearDraft
+    } else {
+        CtrlCAction::Exit
+    }
+}
+
+/// 契约 P-5：一次性状态提示的存活时长（毫秒）。
+pub const STATUS_NOTICE_TTL_MS: u64 = 4_000;
+
+/// 契约 P-5：状态提示是否应当渲染（纯函数）。
+///
+/// 流式期让位给进度短语（思考中/生成中/执行中），非流式期在 TTL 内显示一次性提示。
+pub fn should_render_status_notice(is_streaming: bool, age_ms: u64, ttl_ms: u64) -> bool {
+    !is_streaming && age_ms < ttl_ms
+}
+
+/// 契约 F-N：计划模式横幅（诚实措辞）。
+///
+/// `/plan` 只是界面提示，**不限制工具执行**；旧文案容易让人误以为进入只读模式。
+pub fn plan_mode_banner(active: bool) -> Option<&'static str> {
+    if active {
+        Some("计划模式 · 仅界面提示，不限制工具执行")
+    } else {
+        None
+    }
+}
+
+/// 契约 F-M：Ask 提交判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskSubmitVerdict {
+    Submit,
+    Reject(&'static str),
+}
+
+/// 契约 F-M：Ask 提交判定（纯函数）。
+///
+/// 自由输入非空白 ⇒ 直接可提交（无选项的问题只有这一条路）；
+/// 否则必须有选项且已选中一项才可提交 —— 任何「空白提交」都必须被拒绝并给出可读理由，
+/// 而不是靠伪造的「确认/取消」两项让一次 Enter 蒙混过关。
+pub fn ask_submit_verdict(
+    has_options: bool,
+    selected: Option<usize>,
+    typed: &str,
+) -> AskSubmitVerdict {
+    if !typed.trim().is_empty() {
+        return AskSubmitVerdict::Submit;
+    }
+    if !has_options {
+        return AskSubmitVerdict::Reject("请输入回答后再提交（该问题没有可选项）");
+    }
+    match selected {
+        Some(_) => AskSubmitVerdict::Submit,
+        None => AskSubmitVerdict::Reject("请选择一个选项，或输入自定义回答后再提交"),
+    }
+}
+
+/// 契约 F-L：网关地址的用户可见展示（**必须剥离凭据**）。
+///
+/// 只保留 `scheme://host[:port]/path`：userinfo（`user:pass@`）、query（`?key=sk-…`）、
+/// fragment 全部丢弃，避免密钥/账号出现在屏幕与截图证据里。无 scheme 时走保守清洗分支
+/// （剥 `user[:pass]@` 与 `?`/`#` 之后的部分），空串返回空串，任何输入都不 panic。
+/// 超过 48 字符按**字符**省略（尾部 `…`，总长 ≤ 48）。
+pub fn gateway_display(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let sanitized = match url::Url::parse(trimmed) {
+        Ok(parsed) => {
+            let host = parsed.host_str().unwrap_or("");
+            if host.is_empty() {
+                // 非分层 URL（如 `mailto:`）：无可展示的 host，直接不给。
+                return String::new();
+            }
+            let mut out = format!("{}://{}", parsed.scheme(), host);
+            if let Some(port) = parsed.port() {
+                out.push(':');
+                out.push_str(&port.to_string());
+            }
+            let path = parsed.path();
+            if !path.is_empty() && path != "/" {
+                out.push_str(path);
+            }
+            out
+        }
+        Err(_) => {
+            // 无 scheme / 不可解析：保守清洗 —— 丢弃 query 与 fragment，再剥凭据前缀。
+            let without_query = trimmed
+                .split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .trim();
+            match without_query.rsplit_once('@') {
+                Some((_, host_and_path)) => host_and_path.to_string(),
+                None => without_query.to_string(),
+            }
+        }
+    };
+    gateway_display_ellipsize(&sanitized, 48)
+}
+
+/// 按**字符**省略：总长 ≤ `max`（含尾部 `…`）。
+fn gateway_display_ellipsize(text: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
 
 pub const REASONING_EFFORT_OPTIONS: &[(Option<ProviderReasoningEffort>, &str, &str)] = &[
     (None, "默认 (Default)", "遵循模型默认"),
@@ -673,6 +982,43 @@ pub fn extract_selected_text(lines: &[String], anchor: TextCoord, head: TextCoor
     }
 }
 
+/// 契约（修订11 步骤2）：布局缓存的逐帧统计。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderCacheStats {
+    /// 本帧重新布局的消息条数（全量重建时 = 消息数；复用帧 = 1）。
+    pub rebuilt_messages: usize,
+    /// 本帧直接复用缓存的消息条数。
+    pub reused_messages: usize,
+    /// 本帧实际布局出的行数（重建块的行和 / 复用帧仅末条的行数）。
+    pub laid_out_lines: usize,
+    /// 缓存里当前的总行数。
+    pub total_lines: usize,
+}
+
+/// 契约（修订11 步骤2）：按消息粒度的布局缓存。
+///
+/// 失效条件：终端宽度变化、消息条数变化、显式 `invalidate_render_cache()`
+/// （`/clear`、`/resume`、`reset_session_scope`、`Event::Resize`）。
+/// 其余每帧只重算**最后一条** —— 流式追加、工具动效帧、「最后一条 = 执行中」都只影响它。
+#[derive(Debug, Clone)]
+pub struct RenderCache {
+    cache_width: u16,
+    cache_msg_count: usize,
+    cache_lines: Vec<Vec<Line<'static>>>,
+    stats: RenderCacheStats,
+}
+
+impl Default for RenderCache {
+    fn default() -> Self {
+        Self {
+            cache_width: 0,
+            cache_msg_count: usize::MAX,
+            cache_lines: Vec::new(),
+            stats: RenderCacheStats::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiState {
     pub messages: Vec<ChatMessage>,
@@ -713,10 +1059,10 @@ pub struct TuiState {
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
     pub mouse_selection: MouseSelectionState,
-    pub scroll_offset: u16,
+    pub scroll_offset: u32,
     /// 最近一次渲染可滚动到的最大偏移；事件循环据此判断「是否已回到底部」，
     /// 避免滚轮/方向键下翻时永远无法恢复自动贴底。
-    pub max_scroll_offset: u16,
+    pub max_scroll_offset: u32,
     pub auto_scroll: bool,
     pub mode: InteractionMode,
     pub session_list: Vec<SessionItem>,
@@ -737,7 +1083,7 @@ pub struct TuiState {
     /// 最近一次计算的正文渲染区域 chat_rect
     pub last_chat_rect: Option<Rect>,
     /// 最近一次实际生效的滚动 offset（用于鼠标点击映射）
-    pub effective_scroll_offset: u16,
+    pub effective_scroll_offset: u32,
     /// 最近一次实际渲染的纯文本行列表（与渲染视觉行严格 1:1 对齐）
     pub rendered_lines_text: Vec<String>,
     // 进阶交互状态
@@ -751,6 +1097,15 @@ pub struct TuiState {
     pub pending_request: Option<PendingUiRequest>,
     /// 波次 44：Goal 横幅首次出现的时间点，用于与指标行做时间片交替（不挤在同一行右侧）。
     pub goal_banner_since: Option<std::time::Instant>,
+    /// 契约 P-3：覆盖层（审批 / 问答等模态弹窗）的 mode 栈；退出时按栈回退，空栈 ⇒ Normal。
+    pub mode_stack: Vec<InteractionMode>,
+    /// 契约 P-5：一次性状态提示（文案 + 产生时刻）。非流式期按 TTL 渲染，提交新消息时清空。
+    pub status_notice: Option<(String, std::time::Instant)>,
+    /// 契约 P-1：provider 注册表落盘路径覆盖（`None` ⇒ `ProviderRegistryStore::new()` 的默认路径）。
+    /// 抽出为字段是为了可注入：测试用临时目录，生产保持默认，不在热路径硬编码用户目录。
+    pub provider_registry_path: Option<PathBuf>,
+    /// 契约（修订11 步骤2）：按消息粒度的布局缓存（宽度/条数变化或显式失效时重建）。
+    render_cache: RenderCache,
 }
 
 impl Default for TuiState {
@@ -813,6 +1168,10 @@ impl Default for TuiState {
             goal_state: None,
             pending_request: None,
             goal_banner_since: None,
+            mode_stack: Vec::new(),
+            status_notice: None,
+            provider_registry_path: None,
+            render_cache: RenderCache::default(),
         }
     }
 }
@@ -826,6 +1185,195 @@ impl TuiState {
 
     pub fn transition_runtime_mode(&mut self, next: RuntimeMode) {
         self.runtime_mode = next;
+    }
+
+    /// 契约 P-1：取本次状态使用的注册表句柄（路径可注入，测试用临时目录）。
+    fn registry_store(&self) -> ProviderRegistryStore {
+        match self.provider_registry_path.as_deref() {
+            Some(path) => ProviderRegistryStore::with_path(path),
+            None => ProviderRegistryStore::new(),
+        }
+    }
+
+    /// 契约 P-5：写入一次性状态提示（非流式期按 TTL 渲染）。
+    pub fn set_status_notice(&mut self, notice: impl Into<String>) {
+        self.status_notice = Some((notice.into(), std::time::Instant::now()));
+    }
+
+    /// 契约 P-2：复位「会话作用域」状态（`/clear` 与 `/resume` 共用）。
+    ///
+    /// **不改 `session_id`**：切换会话由调用方负责（`/clear` 换新 id，`/resume` 用目标 id）。
+    /// 复位面覆盖本轮/本会话的一切瞬时态：正文、流式标志、用量与上下文计量、计划/任务板/目标、
+    /// 待决请求、滚动与补全索引、各选择器索引、一次性提示。
+    pub fn reset_session_scope(&mut self) {
+        self.messages.clear();
+        self.status_text = "Ready".to_string();
+        self.is_streaming = false;
+        self.turn_started_at = None;
+        self.runtime_mode = RuntimeMode::Ready;
+        self.turn_usage = None;
+        self.total_input_tokens = 0;
+        self.total_output_tokens = 0;
+        self.total_cache_hit_tokens = 0;
+        self.turn_cache_hit_tokens = 0;
+        self.last_context_tokens = 0;
+        self.context_window_tokens = 0;
+        self.plan_state = None;
+        self.task_board_state = None;
+        self.goal_state = None;
+        self.goal_banner_since = None;
+        self.pending_request = None;
+        self.scroll_offset = 0;
+        self.max_scroll_offset = 0;
+        self.effective_scroll_offset = 0;
+        self.auto_scroll = true;
+        self.selected_command_index = 0;
+        self.spinner_tick = 0;
+        self.selected_session_index = 0;
+        self.selected_provider_index = 0;
+        self.selected_model_index = 0;
+        self.selected_reasoning_effort_index = 0;
+        self.status_notice = None;
+        // 会话作用域复位 ⇒ 布局缓存必须失效（/clear 与 /resume 共用本方法）。
+        self.invalidate_render_cache();
+    }
+
+    /// 契约（修订11 步骤2）：显式失效布局缓存。
+    ///
+    /// 调用点：`/clear`、`/resume`（二者经 `reset_session_scope`）、`reset_session_scope` 本身、
+    /// `UiEvent::Resized`（宽度变化会重建，但这里提前清空可避免「宽度相同但布局语义变了」的边角）。
+    pub fn invalidate_render_cache(&mut self) {
+        self.render_cache.cache_lines.clear();
+        self.render_cache.cache_msg_count = usize::MAX;
+        self.render_cache.cache_width = 0;
+        self.render_cache.stats = RenderCacheStats::default();
+        // 全量文本与缓存同源，必须一起失效（否则复制路径会拿到旧文本）。
+        self.rendered_lines_text.clear();
+    }
+
+    /// 契约（修订11 步骤2）：当前帧的布局缓存统计（供测试/诊断）。
+    pub fn render_cache_stats(&self) -> RenderCacheStats {
+        self.render_cache.stats
+    }
+
+    /// 契约（修订11 步骤3）：按需重建「全量纯文本行」。
+    ///
+    /// 旧实现每帧把全部渲染行拼成纯文本（O(总行数) 字符串分配）；虚拟化后只在鼠标选区 /
+    /// OSC52 复制这类**真实需要全量文本**的路径调用，渲染热路径不再付出这份成本。
+    pub fn ensure_full_text(&mut self) {
+        let width = self
+            .last_chat_rect
+            .map(|rect| rect.width as usize)
+            .unwrap_or_else(|| self.render_cache.cache_width as usize);
+        self.ensure_render_cache(width, self.spinner_tick);
+        let mut text: Vec<String> = Vec::with_capacity(self.render_cache.stats.total_lines);
+        for block in &self.render_cache.cache_lines {
+            for line in block {
+                text.push(
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<Vec<_>>()
+                        .concat(),
+                );
+            }
+        }
+        self.rendered_lines_text = text;
+    }
+
+    /// 契约（修订11 步骤2）：保证布局缓存与「宽度 + 消息列表」一致。
+    ///
+    /// - 宽度或消息条数变化 ⇒ 全量重建；
+    /// - 否则复用 `0..n-1`，只重算最后一条（流式追加 / 工具动效 / `is_last` 都只影响末条）。
+    fn ensure_render_cache(&mut self, width: usize, spinner_tick: usize) {
+        let message_count = self.messages.len();
+        let width_u16 = u16::try_from(width).unwrap_or(u16::MAX);
+        let must_rebuild = self.render_cache.cache_width != width_u16
+            || self.render_cache.cache_msg_count != message_count
+            || self.render_cache.cache_lines.len() != message_count;
+
+        if must_rebuild {
+            self.render_cache.cache_width = width_u16;
+            self.render_cache.cache_msg_count = message_count;
+            self.render_cache.cache_lines = Vec::with_capacity(message_count);
+            let mut rebuilt_lines = 0usize;
+            let mut prev_role: Option<MessageRole> = None;
+            let mut has_preceding_lines = false;
+            for (idx, message) in self.messages.iter().enumerate() {
+                let block = message_lines_with_ctx(
+                    message,
+                    width,
+                    MessageRenderCtx {
+                        prev_role: prev_role.clone(),
+                        is_last: idx + 1 == message_count,
+                        has_preceding_lines,
+                        spinner_tick,
+                    },
+                );
+                has_preceding_lines = has_preceding_lines || !block.is_empty();
+                rebuilt_lines += block.len();
+                prev_role = Some(message.role.clone());
+                self.render_cache.cache_lines.push(block);
+            }
+            self.render_cache.stats.rebuilt_messages = message_count;
+            self.render_cache.stats.reused_messages = 0;
+            self.render_cache.stats.laid_out_lines = rebuilt_lines;
+        } else if message_count > 0 {
+            let idx = message_count - 1;
+            let has_preceding_lines = self.render_cache.cache_lines[..idx]
+                .iter()
+                .any(|block| !block.is_empty());
+            let prev_role = if idx == 0 {
+                None
+            } else {
+                Some(self.messages[idx - 1].role.clone())
+            };
+            let block = message_lines_with_ctx(
+                &self.messages[idx],
+                width,
+                MessageRenderCtx {
+                    prev_role,
+                    is_last: true,
+                    has_preceding_lines,
+                    spinner_tick,
+                },
+            );
+            let laid_out_lines = block.len();
+            self.render_cache.cache_lines[idx] = block;
+            self.render_cache.stats.rebuilt_messages = 1;
+            self.render_cache.stats.reused_messages = idx;
+            self.render_cache.stats.laid_out_lines = laid_out_lines;
+        } else {
+            self.render_cache.stats = RenderCacheStats::default();
+        }
+        self.render_cache.stats.total_lines = self
+            .render_cache
+            .cache_lines
+            .iter()
+            .map(|block| block.len())
+            .sum();
+    }
+
+    /// 契约 P-3：进入覆盖层（审批 / 问答等模态弹窗），把当前 mode 压栈。
+    ///
+    /// 重复进入同一层时不重复压栈（幂等）：否则同一弹窗被二次触发后，一次退出只会回到
+    /// 被覆盖的同名层，UI 会卡在弹窗态出不来。
+    pub fn begin_overlay(&mut self, overlay: InteractionMode) {
+        if self.mode == overlay {
+            return;
+        }
+        self.mode_stack.push(self.mode.clone());
+        self.mode = overlay;
+    }
+
+    /// 契约 P-3：退出覆盖层，按栈回退（空栈 ⇒ `Normal`）。
+    pub fn end_overlay(&mut self) {
+        self.mode = self.mode_stack.pop().unwrap_or(InteractionMode::Normal);
+        if self.mode == InteractionMode::AddingProvider {
+            // 回退到「新增提供商」表单时必须清空 composer：否则用户此前输入/粘贴的 api_key
+            // 会残留在输入缓冲，被当作普通消息发给模型（密钥外泄）。
+            self.clear_input();
+        }
     }
 
     pub fn runtime_status_display(&self) -> String {
@@ -981,9 +1529,20 @@ impl TuiState {
 
     pub fn select_current_provider(&mut self) {
         if !self.provider_list.is_empty() && self.selected_provider_index < self.provider_list.len() {
-            let p = &self.provider_list[self.selected_provider_index];
-            self.current_provider_id = p.id.clone();
-            self.status_text = format!("Switched provider to {}", p.name);
+            let selected = self.provider_list[self.selected_provider_index].clone();
+            self.current_provider_id = selected.id.clone();
+            // 契约 P-1：/provider 必须真正生效。发送路径经注册表解析 provider，只改内存
+            // 就会出现「界面说已切换、实际仍走旧 provider」的假成功，故这里落库
+            // （selected_provider_id），落库失败如实提示，绝不报成功。
+            let registry = self.registry_store();
+            let mut view = registry.load_view();
+            view.selected_provider_id = Some(selected.id.clone());
+            match registry.save_view(view) {
+                Ok(_) => self.set_status_notice(format!("已切换提供商 · {}", selected.name)),
+                Err(error) => {
+                    self.set_status_notice(format!("提供商切换保存失败: {error}"));
+                }
+            }
         }
         self.mode = InteractionMode::Normal;
     }
@@ -1049,7 +1608,7 @@ impl TuiState {
         let (next_effort, name, _) = &REASONING_EFFORT_OPTIONS[next_pos];
         self.reasoning_effort = next_effort.clone();
         self.selected_reasoning_effort_index = next_pos;
-        self.status_text = format!("已切换思考强度: {}", name);
+        self.set_status_notice(format!("已切换思考强度: {}", name));
         self.reasoning_effort.clone()
     }
 
@@ -1082,7 +1641,7 @@ impl TuiState {
         if self.selected_reasoning_effort_index < REASONING_EFFORT_OPTIONS.len() {
             let (eff, name, _) = &REASONING_EFFORT_OPTIONS[self.selected_reasoning_effort_index];
             self.reasoning_effort = eff.clone();
-            self.status_text = format!("已切换思考强度: {}", name);
+            self.set_status_notice(format!("已切换思考强度: {}", name));
         }
         self.mode = InteractionMode::Normal;
     }
@@ -1102,22 +1661,24 @@ impl TuiState {
 
     pub fn start_permission_approval(&mut self, request: PermissionRequest) {
         self.permission_state = Some(PermissionState::new(request));
-        self.mode = InteractionMode::PermissionApproval;
+        // 契约 P-3：审批弹窗是覆盖层，退出时按栈回退（不强行清成 Normal）。
+        self.begin_overlay(InteractionMode::PermissionApproval);
     }
 
     pub fn cancel_permission_approval(&mut self) {
         self.permission_state = None;
-        self.mode = InteractionMode::Normal;
+        self.end_overlay();
     }
 
     pub fn start_ask_user(&mut self, request_id: String, questions: Vec<AskUserQuestion>) {
         self.ask_user_state = Some(AskUserState::new(request_id, questions));
-        self.mode = InteractionMode::AskUserQuestion;
+        // 契约 P-3：问答弹窗同为覆盖层。
+        self.begin_overlay(InteractionMode::AskUserQuestion);
     }
 
     pub fn cancel_ask_user(&mut self) {
         self.ask_user_state = None;
-        self.mode = InteractionMode::Normal;
+        self.end_overlay();
     }
 
     pub fn toggle_plan_mode(&mut self) {
@@ -1185,17 +1746,17 @@ impl TuiState {
     pub fn matching_commands(&self) -> Vec<(&'static str, &'static str)> {
         if self.input_buffer.starts_with('/') {
             let filter = self.input_buffer.to_lowercase();
+            // 契约 C-6：必须返回全部匹配命令，行数上限由渲染侧按窗口可用行数裁定。
             AVAILABLE_COMMANDS
                 .iter()
                 .copied()
                 .filter(|(cmd, _)| cmd.to_lowercase().starts_with(&filter))
-                .take(8)
                 .collect()
         } else {
             Vec::new()
         }
     }
-    pub fn scroll_up(&mut self, delta: u16) {
+    pub fn scroll_up(&mut self, delta: u32) {
         if self.auto_scroll {
             // 如果之前处于自动贴底，第一次上翻时从当前最大偏移量开始扣减
             self.auto_scroll = false;
@@ -1203,7 +1764,7 @@ impl TuiState {
         self.scroll_offset = self.scroll_offset.saturating_sub(delta);
     }
 
-    pub fn scroll_down(&mut self, delta: u16, max_offset: u16) {
+    pub fn scroll_down(&mut self, delta: u32, max_offset: u32) {
         let next = self.scroll_offset.saturating_add(delta);
         if next >= max_offset {
             self.scroll_offset = max_offset;
@@ -1243,12 +1804,23 @@ pub fn resolve_context_window_tokens(state: &TuiState) -> u32 {
     DEFAULT_CONTEXT_WINDOW_TOKENS
 }
 
-pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u16 {
-    if total_lines > visible_height {
-        (total_lines - visible_height) as u16
-    } else {
-        0
-    }
+/// 契约 F-H：可滚动行数（u32 承载）。
+///
+/// 旧实现把 `(total - visible)` 直接 `as u16`：超过 65535 视觉行时回绕，滚动位置会突然跳到顶部
+/// （真实缺陷）。这里改为饱和转换，并把「是否可以再滚」交给调用方比较，语义不变。
+pub fn calculate_scroll_offset(total_lines: usize, visible_height: usize) -> u32 {
+    total_lines
+        .saturating_sub(visible_height)
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
+/// 契约 F-H：喂给 ratatui 的滚动偏移必须回到 u16（`Paragraph::scroll` 的入参类型）。
+///
+/// 饱和而不是截断：超过 u16::MAX 的逻辑偏移只能饱和渲染（终端行数上限所限），
+/// 但**内部状态**仍是 u32 真值，不再因为 cast 而回绕。
+pub fn clamp_render_scroll(offset: u32) -> u16 {
+    offset.min(u16::MAX as u32) as u16
 }
 
 // 状态感知动效字形集（精细化点阵与轨道流）：
@@ -1268,9 +1840,17 @@ pub fn mode_status_icon(mode: &RuntimeMode, tick: usize) -> &'static str {
     match mode {
         RuntimeMode::Thinking => THINKING_FRAMES[tick % THINKING_FRAMES.len()],
         RuntimeMode::Responding => RESPONDING_FRAMES[tick % RESPONDING_FRAMES.len()],
-        RuntimeMode::ExecutingTool(_) => EXECUTING_FRAMES[tick % EXECUTING_FRAMES.len()],
+        RuntimeMode::ExecutingTool(_) => executing_tool_frame(tick),
         _ => spinner_frame(tick),
     }
+}
+
+/// 契约 F-I：执行中工具行的动效帧。
+///
+/// 渲染路径只需要「当前是执行态 + tick」，不需要工具正文；旧调用点为此
+/// `msg.content.clone()` 构造了一个临时 `RuntimeMode::ExecutingTool(String)`（每帧一次正文拷贝）。
+fn executing_tool_frame(tick: usize) -> &'static str {
+    EXECUTING_FRAMES[tick % EXECUTING_FRAMES.len()]
 }
 
 impl TuiState {
@@ -1302,6 +1882,21 @@ impl TuiState {
 
     pub fn insert_newline(&mut self) {
         self.insert_char('\n');
+    }
+
+    /// 契约 F-C：把粘贴文本整段插入输入缓冲（CRLF/CR → LF），**不提交、不触发发送**。
+    ///
+    /// 与逐字符 `insert_char` 等价但一次性 `insert_str`：大段粘贴不会退化成 O(n²)，
+    /// 光标按字符数（非字节数）前移，CJK 安全。
+    pub fn insert_paste(&mut self, text: &str) {
+        let normalized = normalize_paste(text);
+        if normalized.is_empty() {
+            return;
+        }
+        let cursor = self.input_cursor.min(self.input_char_len());
+        let byte = self.input_byte_index(cursor);
+        self.input_buffer.insert_str(byte, &normalized);
+        self.input_cursor = cursor + normalized.chars().count();
     }
 
     pub fn backspace(&mut self) {
@@ -1893,33 +2488,30 @@ pub fn stream_usage_event(event_name: &str, payload: &TurnStreamEvent) -> Option
     })
 }
 
-/// wave-35c：解析当前活跃 provider id。
-/// 顺序：注册表 selected_provider_id → 首个 provider → state.current_provider_id
-///（仅当它确实命中注册表才有效——默认硬编码值 "ponyllm" 可能并不存在）。
-pub fn resolve_active_provider_id(_state: &TuiState) -> Option<String> {
-    let view = ProviderRegistryStore::new().load_view();
-    if view.providers.is_empty() {
-        return None;
-    }
-    if let Some(sel) = view.selected_provider_id.as_ref() {
-        if view.providers.iter().any(|p| &p.id == sel) {
-            return Some(sel.clone());
-        }
-    }
-    Some(view.providers[0].id.clone())
+/// wave-35c / 契约 P-1：解析当前活跃 provider id。
+///
+/// 口径改为 [`pick_active_provider_id`]：**state.current_provider_id 优先**（用户刚在 /provider
+/// 里选的必须立刻生效），其后注册表选中项，最后首个 provider。注册表句柄取自 state
+/// （路径可注入），不再在热路径上硬编码用户目录。
+pub fn resolve_active_provider_id(state: &TuiState) -> Option<String> {
+    let view = state.registry_store().load_view();
+    let provider_ids: Vec<&str> = view.providers.iter().map(|p| p.id.as_str()).collect();
+    pick_active_provider_id(
+        Some(state.current_provider_id.as_str()),
+        view.selected_provider_id.as_deref(),
+        &provider_ids,
+    )
 }
 
 /// wave-35c：启动同步——把 TuiState 的 current_provider_id / model 对齐注册表
 /// 选中项与 selected_model_id，使 header/状态一致，并保证后续 discovery 能命中。
-// 注意：当前无调用点。保留是为了不丢失「启动时把 current_provider_id / model
-// 对齐注册表选中项」的设计意图（wave-35c）；是否接入启动链路属行为变更，需另开工单裁决，
-// 故这里只屏蔽告警，不删除、也不擅自接线。
-#[allow(dead_code)]
+// 已于 wave-slash-1 批6 接线（`run_tui` 启动时调用）：注册表里持久化的选中 provider / model
+// 必须真正生效，否则 header 显示与发送口径分叉（此前只有 /models、/provider 面板读注册表）。
 fn sync_state_with_registry(state: &mut TuiState) {
     if let Some(id) = resolve_active_provider_id(state) {
         state.current_provider_id = id;
     }
-    let registry = ProviderRegistryStore::new();
+    let registry = state.registry_store();
     let view = registry.load_view();
     if let Some(p) = view.providers.iter().find(|p| p.id == state.current_provider_id) {
         if let Some(sel) = p.selected_model_id.as_ref() {
@@ -2825,6 +3417,56 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             .clamp(0.0, 100.0);
         segments.push(format!("上下文 {pct:.0}%"));
     }
+    // 契约 P-5 / F-N：一次性提示（非流式 + TTL 内）与非流式的计划模式横幅占左侧，
+    // 数值指标仍在右侧；两者都没有时走既有布局（workspace 左 + 指标右）。
+    let transient_left: Option<(String, Style)> = state
+        .status_notice
+        .as_ref()
+        .filter(|(_, at)| {
+            should_render_status_notice(
+                state.is_streaming,
+                at.elapsed().as_millis() as u64,
+                STATUS_NOTICE_TTL_MS,
+            )
+        })
+        .map(|(notice, _)| {
+            let danger = notice.contains("失败") || notice.contains("错误");
+            (
+                truncate_width(notice, 34),
+                if danger {
+                    Style::default().fg(theme::DANGER)
+                } else {
+                    muted()
+                },
+            )
+        })
+        .or_else(|| {
+            plan_mode_banner(state.mode == InteractionMode::PlanMode)
+                .map(|banner| (banner.to_string(), muted()))
+        });
+    if let Some((left_text, left_style)) = transient_left {
+        let right = segments.join(" · ");
+        let right_w = str_width(&right);
+        if right.is_empty() || RAIL + 2 + str_width(&left_text) + right_w > width {
+            return Line::from(vec![
+                Span::raw(" ".repeat(RAIL)),
+                Span::styled(
+                    ellipsize_width(&left_text, width.saturating_sub(RAIL)),
+                    left_style,
+                ),
+            ]);
+        }
+        let budget = width.saturating_sub(RAIL + 1 + right_w);
+        let left = ellipsize_width(&left_text, budget.max(6));
+        let used = RAIL + str_width(&left);
+        return Line::from(vec![
+            Span::raw(" ".repeat(RAIL)),
+            Span::styled(left, left_style),
+            Span::raw(" ".repeat(width.saturating_sub(used + right_w))),
+            Span::styled(right, ghost()),
+        ]);
+    }
+
     // 波次 44：Goal 与指标行按时间片交替（见 goal_banner_phase），
     // 且 Goal 相位**左对齐**成横幅，不与右对齐的数值指标混在同一排版里。
     let label_text = workspace_label(&state.workspace);
@@ -2858,18 +3500,19 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
     }
     let right = segments.join(" · ");
     let right_w = str_width(&right);
-    let label = workspace_label(&state.workspace);
+    // 契约 F-I：workspace_label 每帧只算一次（含 env::var 加锁 + 分配），本函数两处共用。
+    let label = &label_text;
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     if right_w == 0 {
         // v3 R11：全无值 → 只显示左侧 workspace，不产生孤立分隔符。
         spans.push(Span::raw(" ".repeat(RAIL)));
         spans.push(Span::styled(
-            ellipsize_width(&label, width.saturating_sub(RAIL)),
+            ellipsize_width(label, width.saturating_sub(RAIL)),
             ghost(),
         ));
     } else if width > RAIL + 1 + right_w {
-        let label = ellipsize_width(&label, width - RAIL - 1 - right_w);
+        let label = ellipsize_width(label, width - RAIL - 1 - right_w);
         let used = RAIL + str_width(&label);
         spans.push(Span::raw(" ".repeat(RAIL)));
         spans.push(Span::styled(label, ghost()));
@@ -3090,6 +3733,8 @@ fn compact_status(st: &str) -> String {
 
 /// 底部状态词：克制到只有一个短语（耗时与动画只在正文活动行出现一次）。
 fn status_word(state: &TuiState) -> (String, Style) {
+    // 说明：一次性提示（status_notice）与非流式横幅由 `metrics_line` 渲染 —— 本函数只服务
+    // 「流式进行中的那一行状态」，流式期按契约让位给进度短语，故这里不重复判定。
     let transient = compact_status(&state.status_text);
     match &state.runtime_mode {
         RuntimeMode::Ready => {
@@ -3117,6 +3762,290 @@ fn elapsed_label(state: &TuiState) -> String {
         .turn_started_at
         .map(|t| format_elapsed_seconds(t.elapsed().as_millis() as u64))
         .unwrap_or_default()
+}
+
+/// 单条消息渲染所需的跨消息上下文。
+///
+/// 为什么不是纯 `(message, width)`：轮间距取决于**前一条**消息角色；最后一条 ToolCall 是
+/// 「执行中」需要动效帧；System 行的前置空行沿用「前面已有渲染行」的语义。这些状态由调用方
+/// （`ui()` 的逐帧循环）注入，纯函数入口 [`message_lines_for`] 用中性默认值。
+struct MessageRenderCtx {
+    prev_role: Option<MessageRole>,
+    is_last: bool,
+    has_preceding_lines: bool,
+    spinner_tick: usize,
+}
+
+/// 把一条消息渲染成行（内部实现，带跨消息上下文）。
+fn message_lines_with_ctx(
+    message: &ChatMessage,
+    width: usize,
+    ctx: MessageRenderCtx,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let rail_blank = || blank_rail(Style::default());
+            let prev_is_tool = matches!(
+                ctx.prev_role,
+                Some(MessageRole::ToolCall) | Some(MessageRole::ToolResult)
+            );
+            match message.role {
+                MessageRole::User => {
+                    // 轮间距 2 行：长会话里一眼能扫到「新一轮提问」的节拍
+                    push_gap(&mut lines, 2);
+                    push_user_block(&mut lines, &message.content, width);
+                }
+                MessageRole::Assistant => {
+                    // 助手正文不再打 "pony" 字标：角色由轨道与留白承担，避免每轮都有一段品牌噪音。
+                    // 工具执行后恢复正文只用一行留白表示节奏。
+                    if prev_is_tool {
+                        push_blank(&mut lines);
+                    } else if ctx.prev_role.is_some() {
+                        push_gap(&mut lines, 2);
+                    }
+                    let body_w = width.saturating_sub(RAIL);
+                    let mut in_code = false;
+                    for raw in message.content.lines() {
+                        let trimmed = raw.trim_start();
+                        if trimmed.starts_with("```") {
+                            in_code = !in_code;
+                            if in_code {
+                                // 代码块开始：增加与上方正文文字的 1 行外呼吸留白间距
+                                push_blank(&mut lines);
+                                // 代码块内部：顶部内边距（带有陶土暗底色）
+                                push_code_band_padding(&mut lines, width);
+
+                                let lang = trimmed.trim_start_matches('`').trim();
+                                if !lang.is_empty() {
+                                    push_code_band_line(
+                                        &mut lines,
+                                        Line::from(Span::styled(
+                                            format!("// {}", lang),
+                                            Style::default().fg(theme::VSCODE_COMMENT).add_modifier(Modifier::ITALIC),
+                                        )),
+                                        width,
+                                    );
+                                }
+                            } else {
+                                // 代码块内部：底部内边距（带有陶土暗底色）
+                                push_code_band_padding(&mut lines, width);
+                                // 代码块结束：增加与下方后续文字的 1 行外呼吸留白间距（必须无条件插入空行，即便上一行是带底色的内衬行）
+                                lines.push(blank());
+                            }
+                            continue;
+                        }
+                        if in_code {
+                            // 代码块材质：使用 VS Code 经典暗色配色高亮与增强陶土色底衬
+                            push_code_band_line(
+                                &mut lines,
+                                Line::from(highlight_code_line(raw)),
+                                width,
+                            );
+                            continue;
+                        }
+                        if trimmed.is_empty() {
+                            push_blank(&mut lines);
+                            continue;
+                        }
+                        let body = Line::from(render_markdown_line(raw));
+                        push_prefixed(&mut lines, rail_blank(), rail_blank(), body, body_w);
+                    }
+                }
+                MessageRole::ToolCall | MessageRole::ToolResult => {
+                    // 工具行本身属于 assistant turn：若无正文先行，此处只留间距、不打字标。
+                    if !prev_is_tool && !matches!(ctx.prev_role, Some(MessageRole::Assistant)) {
+                        push_gap(&mut lines, 2);
+                    }
+                    let is_call = message.role == MessageRole::ToolCall;
+                    let running = is_call && ctx.is_last;
+                    let is_error = message.content.contains("失败")
+                        || message.content.contains("Error")
+                        || message.content.contains("error");
+                    let (glyph, glyph_style) = if is_call {
+                        if running {
+                            (
+                                executing_tool_frame(ctx.spinner_tick).to_string(),
+                                Style::default().fg(theme::ACCENT_DIM),
+                            )
+                        } else {
+                            (GLYPH_RUNNING.to_string(), faint())
+                        }
+                    } else if is_error {
+                        (GLYPH_FAIL.to_string(), Style::default().fg(theme::DANGER))
+                    } else {
+                        (GLYPH_DONE.to_string(), faint())
+                    };
+                    // 工具行是中间过程而非重点：动作名压到 MUTED/FAINT，只有失败回到 DANGER。
+                    let head_style = if is_error {
+                        Style::default().fg(theme::DANGER)
+                    } else if is_call {
+                        muted()
+                    } else {
+                        faint()
+                    };
+                    let (prefix, body) =
+                        tool_line_spans(&glyph, glyph_style, head_style, &message.content);
+                    push_prefixed(
+                        &mut lines,
+                        prefix,
+                        rail_blank(),
+                        Line::from(body),
+                        width.saturating_sub(RAIL),
+                    );
+                }
+                MessageRole::System => {
+                    let is_error = message.content.contains("Error")
+                        || message.content.contains("fail")
+                        || message.content.contains("失败");
+                    let (glyph, glyph_style) = if is_error {
+                        (GLYPH_FAIL, Style::default().fg(theme::DANGER))
+                    } else {
+                        ("·", faint())
+                    };
+                    let text_style = if is_error {
+                        Style::default().fg(theme::DANGER)
+                    } else {
+                        muted()
+                    };
+                    if ctx.has_preceding_lines && !prev_is_tool {
+                        push_blank(&mut lines);
+                    }
+                    let prefix = vec![Span::styled(format!("{} ", glyph), glyph_style)];
+                    for (i, raw) in message.content.lines().enumerate() {
+                        let (first, cont) = if i == 0 {
+                            (prefix.clone(), rail_blank())
+                        } else {
+                            (rail_blank(), rail_blank())
+                        };
+                        push_prefixed(
+                            &mut lines,
+                            first,
+                            cont,
+                            Line::from(Span::styled(raw.to_string(), text_style)),
+                            width.saturating_sub(RAIL),
+                        );
+                    }
+                    if message.content.is_empty() {
+                        push_prefixed(
+                            &mut lines,
+                            prefix,
+                            rail_blank(),
+                            Line::from(""),
+                            width.saturating_sub(RAIL),
+                        );
+                    }
+                }
+            }
+    lines
+}
+
+/// 契约 P-12（修订11 步骤1）：单条消息 → 渲染行（纯函数，可单测）。
+///
+/// 与 `ui()` 的逐帧渲染共用**同一份**实现；差异仅在于没有跨消息上下文（无前序角色、
+/// 不是最后一条、spinner 帧取 0），因此同一消息在会话中首次出现与单独渲染的行内容一致。
+pub fn message_lines_for(message: &ChatMessage, width: usize) -> Vec<Line<'static>> {
+    message_lines_with_ctx(
+        message,
+        width,
+        MessageRenderCtx {
+            prev_role: None,
+            is_last: false,
+            has_preceding_lines: false,
+            spinner_tick: 0,
+        },
+    )
+}
+
+/// 契约（修订11 步骤3）：从按消息分块的布局缓存里取出 `[start, end)` 行。
+///
+/// 复杂度是「跨块定位」而非「拼接全部行」：只 clone 落在窗口内的行。
+fn collect_window_lines(
+    blocks: &[Vec<Line<'static>>],
+    start: usize,
+    end: usize,
+) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(start));
+    if start >= end {
+        return out;
+    }
+    let mut cursor = 0usize;
+    for block in blocks {
+        let block_start = cursor;
+        let block_end = cursor + block.len();
+        cursor = block_end;
+        if block_end <= start {
+            continue;
+        }
+        if block_start >= end {
+            break;
+        }
+        let local_start = start.saturating_sub(block_start);
+        let local_end = (end - block_start).min(block.len());
+        out.extend(block[local_start..local_end].iter().cloned());
+    }
+    out
+}
+
+/// 鼠标选区高亮：选区用**绝对行号**表达，窗口可能只是全量行的一段，故需要 `first_line` 偏移。
+fn apply_selection_highlight(
+    lines: &mut [Line<'static>],
+    first_line: usize,
+    range: Option<(TextCoord, TextCoord)>,
+) {
+    let Some((start, end)) = range else {
+        return;
+    };
+    let highlight_style = Style::default().add_modifier(Modifier::REVERSED);
+    let last_line = first_line + lines.len().saturating_sub(1);
+    for line_idx in start.line..=end.line.min(last_line) {
+        let Some(local_idx) = line_idx.checked_sub(first_line) else {
+            continue;
+        };
+        let Some(old_line) = lines.get(local_idx) else {
+            continue;
+        };
+        let mut new_spans: Vec<Span<'static>> = Vec::new();
+        let mut current_col = 0usize;
+        for span in &old_line.spans {
+            let base_style = span.style;
+            let mut segment = String::new();
+            let mut in_sel = false;
+            for ch in span.content.chars() {
+                let is_sel = is_coord_selected(
+                    TextCoord {
+                        line: line_idx,
+                        col: current_col,
+                    },
+                    start,
+                    end,
+                );
+                if segment.is_empty() {
+                    in_sel = is_sel;
+                    segment.push(ch);
+                } else if in_sel == is_sel {
+                    segment.push(ch);
+                } else {
+                    let style = if in_sel {
+                        base_style.patch(highlight_style)
+                    } else {
+                        base_style
+                    };
+                    new_spans.push(Span::styled(std::mem::take(&mut segment), style));
+                    in_sel = is_sel;
+                    segment.push(ch);
+                }
+                current_col += 1;
+            }
+            if !segment.is_empty() {
+                let style = if in_sel {
+                    base_style.patch(highlight_style)
+                } else {
+                    base_style
+                };
+                new_spans.push(Span::styled(segment, style));
+            }
+        }
+        lines[local_idx] = Line::from(new_spans);
+    }
 }
 
 pub fn ui(f: &mut Frame, state: &mut TuiState) {
@@ -3238,8 +4167,15 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
 
     // ── 会话正文：轨道标记 + 单色正文 + 分层工具行 ─────────────────────────
     let width = chat_rect.width as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    // 契约（修订11 步骤3）：正文行来自布局缓存，按可见窗口切片后渲染；
+    // `body_lines` 仅承载「空态引导」（行数很少，无需虚拟化），
+    // `trailing_status_lines` 承载正文末尾的流式状态行。
+    let mut body_lines: Vec<Line<'static>> = Vec::new();
+    let mut trailing_status_lines: Vec<Line<'static>> = Vec::new();
     let rail_blank = || blank_rail(Style::default());
+
+    // 契约 F-I：命令匹配每帧只算一次（空态引导 / 斜杠菜单 / 补全共用同一结果）。
+    let frame_matching_commands = state.matching_commands();
 
     if state.messages.is_empty() {
         let mut splash: Vec<Line<'static>> = Vec::new();
@@ -3253,187 +4189,37 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             "  终端里的自主智能体。",
             Style::default().fg(theme::MUTED),
         )));
-        if state.matching_commands().is_empty() {
+        if frame_matching_commands.is_empty() {
             splash.push(blank());
             splash.extend(ascii_logo());
         }
         // 空态留白构图：按正文区 1/3 高度锚定，避免顶部挤、底部空。
         let top_pad = (chat_h as usize).saturating_sub(splash.len()) / 3;
         for _ in 0..top_pad {
-            lines.push(blank());
+            body_lines.push(blank());
         }
         for line in splash {
-            push_wrapped(&mut lines, line, width);
+            push_wrapped(&mut body_lines, line, width);
         }
     } else {
-        let mut prev_role: Option<MessageRole> = None;
-        let last_index = state.messages.len().saturating_sub(1);
-        for (idx, msg) in state.messages.iter().enumerate() {
-            let prev_is_tool = matches!(
-                prev_role,
-                Some(MessageRole::ToolCall) | Some(MessageRole::ToolResult)
-            );
-            match msg.role {
-                MessageRole::User => {
-                    // 轮间距 2 行：长会话里一眼能扫到「新一轮提问」的节拍
-                    push_gap(&mut lines, 2);
-                    push_user_block(&mut lines, &msg.content, width);
-                    prev_role = Some(MessageRole::User);
-                }
-                MessageRole::Assistant => {
-                    // 助手正文不再打 "pony" 字标：角色由轨道与留白承担，避免每轮都有一段品牌噪音。
-                    // 工具执行后恢复正文只用一行留白表示节奏。
-                    if prev_is_tool {
-                        push_blank(&mut lines);
-                    } else if prev_role.is_some() {
-                        push_gap(&mut lines, 2);
-                    }
-                    let body_w = width.saturating_sub(RAIL);
-                    let mut in_code = false;
-                    for raw in msg.content.lines() {
-                        let trimmed = raw.trim_start();
-                        if trimmed.starts_with("```") {
-                            in_code = !in_code;
-                            if in_code {
-                                // 代码块开始：增加与上方正文文字的 1 行外呼吸留白间距
-                                push_blank(&mut lines);
-                                // 代码块内部：顶部内边距（带有陶土暗底色）
-                                push_code_band_padding(&mut lines, width);
-
-                                let lang = trimmed.trim_start_matches('`').trim();
-                                if !lang.is_empty() {
-                                    push_code_band_line(
-                                        &mut lines,
-                                        Line::from(Span::styled(
-                                            format!("// {}", lang),
-                                            Style::default().fg(theme::VSCODE_COMMENT).add_modifier(Modifier::ITALIC),
-                                        )),
-                                        width,
-                                    );
-                                }
-                            } else {
-                                // 代码块内部：底部内边距（带有陶土暗底色）
-                                push_code_band_padding(&mut lines, width);
-                                // 代码块结束：增加与下方后续文字的 1 行外呼吸留白间距（必须无条件插入空行，即便上一行是带底色的内衬行）
-                                lines.push(blank());
-                            }
-                            continue;
-                        }
-                        if in_code {
-                            // 代码块材质：使用 VS Code 经典暗色配色高亮与增强陶土色底衬
-                            push_code_band_line(
-                                &mut lines,
-                                Line::from(highlight_code_line(raw)),
-                                width,
-                            );
-                            continue;
-                        }
-                        if trimmed.is_empty() {
-                            push_blank(&mut lines);
-                            continue;
-                        }
-                        let body = Line::from(render_markdown_line(raw));
-                        push_prefixed(&mut lines, rail_blank(), rail_blank(), body, body_w);
-                    }
-                    prev_role = Some(MessageRole::Assistant);
-                }
-                MessageRole::ToolCall | MessageRole::ToolResult => {
-                    // 工具行本身属于 assistant turn：若无正文先行，此处只留间距、不打字标。
-                    if !prev_is_tool && !matches!(prev_role, Some(MessageRole::Assistant)) {
-                        push_gap(&mut lines, 2);
-                    }
-                    let is_call = msg.role == MessageRole::ToolCall;
-                    let running = is_call && idx == last_index;
-                    let is_error = msg.content.contains("失败")
-                        || msg.content.contains("Error")
-                        || msg.content.contains("error");
-                    let (glyph, glyph_style) = if is_call {
-                        if running {
-                            (
-                                mode_status_icon(&RuntimeMode::ExecutingTool(msg.content.clone()), state.spinner_tick).to_string(),
-                                Style::default().fg(theme::ACCENT_DIM),
-                            )
-                        } else {
-                            (GLYPH_RUNNING.to_string(), faint())
-                        }
-                    } else if is_error {
-                        (GLYPH_FAIL.to_string(), Style::default().fg(theme::DANGER))
-                    } else {
-                        (GLYPH_DONE.to_string(), faint())
-                    };
-                    // 工具行是中间过程而非重点：动作名压到 MUTED/FAINT，只有失败回到 DANGER。
-                    let head_style = if is_error {
-                        Style::default().fg(theme::DANGER)
-                    } else if is_call {
-                        muted()
-                    } else {
-                        faint()
-                    };
-                    let (prefix, body) =
-                        tool_line_spans(&glyph, glyph_style, head_style, &msg.content);
-                    push_prefixed(
-                        &mut lines,
-                        prefix,
-                        rail_blank(),
-                        Line::from(body),
-                        width.saturating_sub(RAIL),
-                    );
-                    prev_role = Some(msg.role.clone());
-                }
-                MessageRole::System => {
-                    let is_error = msg.content.contains("Error")
-                        || msg.content.contains("fail")
-                        || msg.content.contains("失败");
-                    let (glyph, glyph_style) = if is_error {
-                        (GLYPH_FAIL, Style::default().fg(theme::DANGER))
-                    } else {
-                        ("·", faint())
-                    };
-                    let text_style = if is_error {
-                        Style::default().fg(theme::DANGER)
-                    } else {
-                        muted()
-                    };
-                    if !lines.is_empty() && !prev_is_tool {
-                        push_blank(&mut lines);
-                    }
-                    let prefix = vec![Span::styled(format!("{} ", glyph), glyph_style)];
-                    for (i, raw) in msg.content.lines().enumerate() {
-                        let (first, cont) = if i == 0 {
-                            (prefix.clone(), rail_blank())
-                        } else {
-                            (rail_blank(), rail_blank())
-                        };
-                        push_prefixed(
-                            &mut lines,
-                            first,
-                            cont,
-                            Line::from(Span::styled(raw.to_string(), text_style)),
-                            width.saturating_sub(RAIL),
-                        );
-                    }
-                    if msg.content.is_empty() {
-                        push_prefixed(
-                            &mut lines,
-                            prefix,
-                            rail_blank(),
-                            Line::from(""),
-                            width.saturating_sub(RAIL),
-                        );
-                    }
-                    prev_role = Some(MessageRole::System);
-                }
-            }
-        }
+        // 契约（修订11 步骤2）：命中缓存时只重算最后一条；脏则全量重建。
+        // 步骤3：正文行不再整体拷进临时缓冲 —— 渲染时按可见窗口从缓存切片。
+        state.ensure_render_cache(width, state.spinner_tick);
 
         // 进行中的一行极简状态（不打断阅读节奏，紧凑规整，不晃动）
         if state.is_streaming && !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
-            let need_blank = lines
+            let need_blank = state
+                .render_cache
+                .cache_lines
                 .last()
-                .map(|l| !l.spans.is_empty() && !l.spans.iter().all(|s| s.content.trim().is_empty()))
+                .and_then(|block| block.last())
+                .map(|line| {
+                    !line.spans.is_empty()
+                        && !line.spans.iter().all(|span| span.content.trim().is_empty())
+                })
                 .unwrap_or(false);
             if need_blank {
-                push_blank(&mut lines);
+                push_blank(&mut trailing_status_lines);
             }
             let (word, style) = status_word(state);
             let elapsed = elapsed_label(state);
@@ -3447,7 +4233,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 Style::default().fg(theme::ACCENT_DIM),
             )];
             push_prefixed(
-                &mut lines,
+                &mut trailing_status_lines,
                 prefix,
                 rail_blank(),
                 Line::from(Span::styled(text, style)),
@@ -3456,77 +4242,25 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         }
     }
 
-    // 高亮鼠标选区
-    if let Some((start, end)) = state.mouse_selection.normalized_range() {
-        let highlight_style = Style::default().add_modifier(Modifier::REVERSED);
-        for line_idx in start.line..=end.line.min(lines.len().saturating_sub(1)) {
-            let old_line = &lines[line_idx];
-            let mut new_spans: Vec<Span<'static>> = Vec::new();
-            let mut current_col = 0usize;
-
-            for span in &old_line.spans {
-                let content_str = span.content.as_ref();
-                let base_style = span.style;
-                let mut segment = String::new();
-                let mut in_sel = false;
-
-                for ch in content_str.chars() {
-                    let ch_col = current_col;
-                    let is_sel = is_coord_selected(
-                        TextCoord { line: line_idx, col: ch_col },
-                        start,
-                        end,
-                    );
-                    if segment.is_empty() {
-                        in_sel = is_sel;
-                        segment.push(ch);
-                    } else if in_sel == is_sel {
-                        segment.push(ch);
-                    } else {
-                        let style = if in_sel {
-                            base_style.patch(highlight_style)
-                        } else {
-                            base_style
-                        };
-                        new_spans.push(Span::styled(std::mem::take(&mut segment), style));
-                        in_sel = is_sel;
-                        segment.push(ch);
-                    }
-                    current_col += 1;
-                }
-
-                if !segment.is_empty() {
-                    let style = if in_sel {
-                        base_style.patch(highlight_style)
-                    } else {
-                        base_style
-                    };
-                    new_spans.push(Span::styled(segment, style));
-                }
-            }
-
-            lines[line_idx] = Line::from(new_spans);
-        }
-    }
-
-    // 精确滚动：行数即渲染行数（折行已按显示宽度预先完成）
+    // 精确滚动：总行数 = 布局缓存行数 + 正文末尾的流式状态行（空态用自身的引导行）。
     let visible = chat_rect.height as usize;
-    let total = lines.len();
+    let cache_total = if state.messages.is_empty() {
+        0
+    } else {
+        state.render_cache.stats.total_lines
+    };
+    let total = if state.messages.is_empty() {
+        body_lines.len()
+    } else {
+        cache_total + trailing_status_lines.len()
+    };
     let max_offset = total.saturating_sub(visible);
-    state.max_scroll_offset = max_offset as u16;
+    // 契约 F-H：max_scroll_offset 以 u32 承载（>65535 视觉行不再回绕跳顶）。
+    state.max_scroll_offset = calculate_scroll_offset(total, visible);
+    // usize → u32 的统一饱和口径（仅在 >4G 视觉行的不可能场景触发）。
+    let to_u32 = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
 
-    // 保存实际渲染的纯文本行（严格 1:1 对齐视觉行），供精准鼠标框选提取
-    state.rendered_lines_text = lines
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<Vec<_>>()
-                .concat()
-        })
-        .collect();
-    let effective_offset = if state.auto_scroll {
+    let effective_offset: u32 = if state.auto_scroll {
         let current = state.scroll_offset as usize;
         if current < max_offset {
             let diff = max_offset - current;
@@ -3538,24 +4272,52 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             } else {
                 1
             };
-            let next = (current + step).min(max_offset);
-            state.scroll_offset = next as u16;
+            let next = to_u32((current + step).min(max_offset));
+            state.scroll_offset = next;
             next
         } else {
-            let clamped = current.min(max_offset);
-            state.scroll_offset = clamped as u16;
+            let clamped = to_u32(current.min(max_offset));
+            state.scroll_offset = clamped;
             clamped
         }
     } else {
-        let clamped = (state.scroll_offset as usize).min(max_offset);
-        state.scroll_offset = clamped as u16;
+        let clamped = to_u32((state.scroll_offset as usize).min(max_offset));
+        state.scroll_offset = clamped;
         clamped
     };
-    state.effective_scroll_offset = effective_offset as u16;
+    state.effective_scroll_offset = effective_offset;
+
+    // 契约（修订11 步骤3）：只把窗口 `[start, start + visible)` 喂给 Paragraph，scroll 归零。
+    // 空态引导行很少，仍整份渲染（保留原有滚动语义），因此这里分两条路径。
+    let window_start = (effective_offset as usize).min(max_offset);
+    let (mut render_lines, render_scroll, first_line_index) = if state.messages.is_empty() {
+        (
+            body_lines,
+            clamp_render_scroll(effective_offset),
+            0usize,
+        )
+    } else {
+        let window_end = (window_start + visible).min(total);
+        let mut window = collect_window_lines(&state.render_cache.cache_lines, window_start, window_end);
+        // 末尾流式状态行（逻辑行号从 `cache_total` 起）。
+        if window_end > cache_total {
+            let from = window_start.saturating_sub(cache_total);
+            if from < trailing_status_lines.len() {
+                window.extend(trailing_status_lines[from..].iter().cloned());
+            }
+        }
+        (window, 0u16, window_start)
+    };
+    // 鼠标选区高亮：绝对行号 → 当前窗口行号（窗口只是全量行的一段）。
+    apply_selection_highlight(
+        &mut render_lines,
+        first_line_index,
+        state.mouse_selection.normalized_range(),
+    );
     f.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(render_lines)
             .style(Style::default().bg(theme::CANVAS))
-            .scroll((effective_offset as u16, 0)),
+            .scroll((render_scroll, 0)),
         chat_rect,
     );
 
@@ -3634,20 +4396,36 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 
     // ── 斜杠命令面板：浮于输入区之上，两条发丝线夹一段浅表面 ──────────────
-    let match_cmds = state.matching_commands();
+    let match_cmds = &frame_matching_commands;
     if !match_cmds.is_empty() && state.mode == InteractionMode::Normal {
-        // 菜单行数上限 8：命令表当前正好 8 条（含 /thinking），不能再把末尾 /quit 截掉。
-        let rows = match_cmds.len().min(8) as u16;
+        // 契约 C-6：行数上限随命令表与窗口可用行数自适应，不再硬编码 8。
+        // 菜单浮于输入带上方（上下发丝线各 1 + 与输入区呼吸 1），底边不得越过聊天区顶边，
+        // 故可用行数由 `band.y - chat_rect.y` 派生（预留 4 行）；窗口不足才截断，最少 3 行。
+        let available_rows = band
+            .y
+            .saturating_sub(chat_rect.y.saturating_add(4)) as usize;
+        let rows = match_cmds.len().min(available_rows.max(3)) as u16;
         let menu_h = rows + 2;
+        let selected = state
+            .selected_command_index
+            .min(match_cmds.len().saturating_sub(1));
+        let (window_start, window_end) = panel_window(match_cmds.len(), selected, rows as usize);
         let desc_w = match_cmds
             .iter()
-            .take(rows as usize)
+            .take(window_end)
+            .skip(window_start)
             .map(|(_, d)| str_width(d))
             .max()
             .unwrap_or(0);
         // 几何：竖条 1 + 空格 1 + 命令列 12 + 描述 + 右侧留白 2
-        let need_w = (16 + desc_w + 2) as u16;
-        let menu_w = need_w.clamp(28, content.width.min(64));
+        let need_w = (16usize + desc_w + 2).min(u16::MAX as usize) as u16;
+        // 契约 F-A：窄终端（24–33 列）下 `clamp(28, content.width.min(64))` 会 min > max
+        // 直接 panic（core cmp.rs:1092 min <= max）。先派生安全区间：max_w 至少 1（极端列宽
+        // 也不越界），min_w 取 28 但永不超过 max_w ⇒ min_w <= max_w 恒成立，结果必落在 [1, max_w]。
+        // 纵向不足时仍由下方 `menu_rect.y > chat_rect.y` 守卫整体跳过（不渲染残缺菜单）。
+        let max_w = content.width.min(64).max(1);
+        let min_w = 28.min(max_w);
+        let menu_w = need_w.clamp(min_w, max_w);
         let menu_y = band.y.saturating_sub(menu_h + 1); // 与输入区留一行呼吸
         let menu_rect = Rect {
             x: content.x,
@@ -3665,12 +4443,14 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             let inner = block.inner(menu_rect);
             f.render_widget(block, menu_rect);
 
-            let selected = state
-                .selected_command_index
-                .min(match_cmds.len().saturating_sub(1));
             let inner_w = inner.width as usize;
             let mut menu_lines: Vec<Line<'static>> = Vec::new();
-            for (idx, (cmd, desc)) in match_cmds.iter().enumerate().take(rows as usize) {
+            for (idx, (cmd, desc)) in match_cmds
+                .iter()
+                .enumerate()
+                .take(window_end)
+                .skip(window_start)
+            {
                 let is_sel = idx == selected;
                 let bg = if is_sel { theme::SURFACE_SEL } else { theme::SURFACE };
                 let cmd_col = pad_display(cmd, 11);
@@ -4292,7 +5072,13 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
             .current_question()
             .map(|q| q.multi_select)
             .unwrap_or(false);
-        let hint = if custom_focused {
+        let has_options = ask
+            .current_question()
+            .map(|question| !question.options.is_empty())
+            .unwrap_or(false);
+        let hint = if !has_options {
+            "输入回答 · ↵ 提交 · esc 取消"
+        } else if custom_focused {
             "输入自定义回答 · ↵ 提交 · esc 取消"
         } else if multi {
             "↑↓ 移动 · space 勾选 · ↵ 提交 · esc 取消"
@@ -4588,6 +5374,128 @@ pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
     );
 }
 
+/// 契约（修订13）：审计用 Ask 引导开关（fail-closed）。
+///
+/// **整条引导路径（含开关本身）都在 `#[cfg(debug_assertions)]` 下**：release 构建里
+/// 这个函数、解析函数与派发函数都不存在，环境变量无法开后门。
+#[cfg(debug_assertions)]
+pub fn audit_ask_bootstrap_enabled() -> bool {
+    cfg!(debug_assertions) && std::env::var("PONY_AUDIT_ASK_BOOTSTRAP").is_ok()
+}
+
+/// 契约（修订13）：解析 `PONY_AUDIT_ASK_BOOTSTRAP` 的 JSON（`{"prompt":…,"options":[…]}`）。
+///
+/// 解析失败一律 `None` —— 调用方按「未启用」处理（fail-closed），不猜、不兜底造问题。
+#[cfg(debug_assertions)]
+fn audit_ask_bootstrap_arguments() -> Option<serde_json::Value> {
+    let raw = std::env::var("PONY_AUDIT_ASK_BOOTSTRAP").ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let prompt = parsed.get("prompt")?.as_str()?.trim().to_string();
+    if prompt.is_empty() {
+        return None;
+    }
+    // 工具 schema 统一要求 `description`（`with_description` 注入的必填字段，模型每次调用都会带），
+    // 引导也必须给出，否则在参数校验阶段就被拒（invalid_arguments），永远到不了 WaitingHost。
+    let description = parsed
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("审计引导：拉起一次 Ask 闭环");
+    let mut arguments = serde_json::json!({
+        "question": prompt,
+        "description": description,
+    });
+    if let Some(options) = parsed.get("options").and_then(|value| value.as_array()) {
+        // 生产 schema 里 `ask_user.options` 是 **string 数组**（见 tools.rs 的 input_schema）。
+        // 审计 env 允许写 {"label":…,"description":…} 便于人读，这里统一降维成 label 字符串；
+        // 无法识别的条目 ⇒ 整体 fail-closed（返回 None），不猜。
+        let mut labels: Vec<String> = Vec::with_capacity(options.len());
+        for option in options {
+            match option {
+                serde_json::Value::String(label) => labels.push(label.clone()),
+                serde_json::Value::Object(map) => {
+                    labels.push(map.get("label")?.as_str()?.to_string());
+                }
+                _ => return None,
+            }
+        }
+        if !labels.is_empty() {
+            arguments["options"] =
+                serde_json::Value::Array(labels.into_iter().map(serde_json::Value::String).collect());
+        }
+    }
+    Some(arguments)
+}
+
+/// 契约（修订13）：用**生产 API** 造一条真实 pending Ask，之后什么都不做。
+///
+/// `dispatch_governed("builtin:ask_user")` 经既有治理管道判定 `WaitingHost` →
+/// `persist_pending_request` 写入 kind=`Interaction` 的 PendingControlRequest；
+/// 随后的面板拉起完全依赖既有 500ms `list_pending_asks` 轮询，
+/// 提交走既有 `submit_ask_answers` → `answer_ask` 的真实 CAS。
+/// **不往任何队列塞东西、不合成 request id、不绕过 CAS**。
+#[cfg(debug_assertions)]
+fn audit_ask_bootstrap(control_plane: &HostControlPlane, session_id: &str) {
+    let Some(arguments) = audit_ask_bootstrap_arguments() else {
+        eprintln!(
+            "[pony-tui][audit] PONY_AUDIT_ASK_BOOTSTRAP 解析失败，按未启用处理（fail-closed）"
+        );
+        return;
+    };
+    let context = pony_agent_core::agent::dispatcher::DispatchContext {
+        session_id: Some(session_id.to_string()),
+        host_control_available: true,
+        ..Default::default()
+    };
+    let outcome = control_plane.ask_dispatcher.dispatch_governed(
+        pony_agent_core::agent::tool_runtime::ToolDispatchRequest {
+            origin: pony_agent_core::agent::tool_runtime::InvocationOrigin::Model,
+            descriptor_id: "builtin:ask_user".to_string(),
+            call_id: format!("call-audit-ask-{}", uuid::Uuid::new_v4()),
+            arguments,
+        },
+        &context,
+    );
+    match outcome.control_outcome {
+        Some(control) if control.kind == pony_agent_core::agent::tools::ToolControlKind::WaitingHost => {
+            eprintln!(
+                "[pony-tui][audit] ask 引导已写入真实 pending request: {}（等待既有轮询拉起面板）",
+                control.request_id
+            );
+        }
+        other => eprintln!(
+            "[pony-tui][audit] ask 引导未产生 WaitingHost（control_outcome={other:?}，\
+             status={:?}，result={:?}），面板不会出现",
+            outcome.execution_status,
+            outcome
+                .result
+                .as_ref()
+                .map(|result| (result.status.clone(), result.output.chars().take(200).collect::<String>()))
+        ),
+    }
+}
+
+/// TUI 运行日志（stderr 被 dup2 到这里）的落盘路径。
+///
+/// 优先级：`PONY_TUI_RUNTIME_LOG`（审计/测试注入——每个 scenario 独占一个文件，避免把历史
+/// panic 算进本次结论）> `<home>/.pony-agent/tui-logs/tui-runtime.log`。
+fn tui_runtime_log_path() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("PONY_TUI_RUNTIME_LOG") {
+        let path = PathBuf::from(explicit);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+    Some(
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".pony-agent")
+            .join("tui-logs")
+            .join("tui-runtime.log"),
+    )
+}
+
 fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         std::env::remove_var("NO_COLOR");
@@ -4608,17 +5516,16 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     // 将底层 Rust 内核对 stderr/stdout 的日志直接重定向到文件或忽略，
     // 避免 [pony-runtime]、[pony-provider] 等原生 println/eprintln 打印污染 crossterm 屏幕，
     // 防止全屏 TUI 界面被破坏退化为终端滚屏输出。
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pony-agent")
-        .join("tui-logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    // wave-13：日志文件绑定只在 unix 分支使用（dup2 重定向）。声明移入 #[cfg(unix)] 块内，
-    // 使非 unix 目标（Windows CI）不存在该绑定，避免 `unused variable: log_file`。
+    // 日志绑定只在 unix 分支使用（dup2 重定向）；非 unix 目标（Windows CI）不进入该分支。
+    let runtime_log_path = tui_runtime_log_path();
+    if let Some(path) = runtime_log_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
     #[cfg(unix)]
-    {
-        let log_file = log_dir.join("tui-runtime.log");
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+    if let Some(path) = runtime_log_path.as_ref() {
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             use std::os::unix::io::AsRawFd;
             let fd = file.as_raw_fd();
             unsafe {
@@ -4628,6 +5535,23 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     enable_raw_mode()?;
+    // 契约 F-D：raw mode 生效后**立刻**建立 RAII 守卫（早于 Terminal::new / build_control_plane）。
+    // 之后任何 `?` 提前返回或 panic 都会经 Drop 恢复终端，不会把用户终端留在 raw + 备用屏。
+    // 键盘增强协议是否已 push 由共享标志在 restore 时读取（此时还未知）。
+    let keyboard_enhancement_for_restore = Arc::new(AtomicBool::new(false));
+    let flag_for_restore = Arc::clone(&keyboard_enhancement_for_restore);
+    let mut terminal_guard = TerminalGuard::new(Box::new(move || {
+        // 与旧 T2c 显式恢复同序：撤销键盘增强 → 关 bracketed paste → 退出 raw → 退出备屏
+        // → 关鼠标捕获 → 恢复光标。全部 `let _ =`：恢复路径不得再失败或 panic。
+        let mut out = io::stdout();
+        if flag_for_restore.load(Ordering::Relaxed) {
+            let _ = execute!(out, PopKeyboardEnhancementFlags);
+        }
+        let _ = execute!(out, DisableBracketedPaste);
+        let _ = disable_raw_mode();
+        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(out, crossterm::cursor::Show);
+    }));
     let mut stdout = io::stdout();
     let keyboard_enhancement_pushed =
         if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
@@ -4642,13 +5566,33 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             false
         };
+    if keyboard_enhancement_pushed {
+        keyboard_enhancement_for_restore.store(true, Ordering::Relaxed);
+    }
 
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // 契约 F-C：启用 bracketed paste —— 大段粘贴作为单个 `Event::Paste` 送达，
+    // 而不是被拆成成百上千个按键（后者会触发自动补全/回车提交等误动作）。
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = TuiState::default();
+    // 启动即与注册表对齐：`selected_provider_id` / `selected_model_id` 必须真正生效，
+    // 否则 header 显示的模型与实际发送口径分叉（wave-35c 遗留：sync 函数此前无调用点）。
+    sync_state_with_registry(&mut state);
     let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
+
+    // 契约（修订13）：审计专用 Ask 引导（仅 debug 构建 + 显式 env，fail-closed）。
+    // 只负责「经生产 API 造一条真实 pending Ask」，面板/提交/CAS 全走既有链路。
+    #[cfg(debug_assertions)]
+    if audit_ask_bootstrap_enabled() {
+        audit_ask_bootstrap(&control_plane, &state.session_id);
+    }
 
     // wave-38 D1：启动时将当前 workspace 登记到控制面，并记住 id。
     state.active_workspace_id = control_plane
@@ -4668,14 +5612,9 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     eprintln!("[pony-tui] running terminal restore (T2c)");
-    // wave-40 R3：先撤销键盘增强协议（若已 push），与既有的 raw mode / 备用屏恢复同批次，
-    // panic catch 路径也会经过这里。
-    if keyboard_enhancement_pushed {
-        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
-    }
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
-    let _ = terminal.show_cursor();
+    // wave-40 R3 + 契约 F-D：撤销键盘增强 / bracketed paste / raw mode / 备用屏 / 鼠标捕获的
+    // 整串恢复已收敛进 TerminalGuard 的闭包；这里只调用一次（幂等），Drop 兜底异常路径。
+    terminal_guard.restore();
 
     match result {
         Ok(inner) => inner,
@@ -4697,15 +5636,15 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pony-agent")
-        .join("tui-logs");
-    let _ = std::fs::create_dir_all(&log_dir);
+    let runtime_log_path = tui_runtime_log_path();
+    if let Some(path) = runtime_log_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
     #[cfg(unix)]
-    {
-        let log_file = log_dir.join("tui-runtime.log");
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+    if let Some(path) = runtime_log_path.as_ref() {
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             use std::os::unix::io::AsRawFd;
             let fd = file.as_raw_fd();
             unsafe {
@@ -4715,6 +5654,23 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     enable_raw_mode()?;
+    // 契约 F-D：raw mode 生效后**立刻**建立 RAII 守卫（早于 Terminal::new / build_control_plane）。
+    // 之后任何 `?` 提前返回或 panic 都会经 Drop 恢复终端，不会把用户终端留在 raw + 备用屏。
+    // 键盘增强协议是否已 push 由共享标志在 restore 时读取（此时还未知）。
+    let keyboard_enhancement_for_restore = Arc::new(AtomicBool::new(false));
+    let flag_for_restore = Arc::clone(&keyboard_enhancement_for_restore);
+    let mut terminal_guard = TerminalGuard::new(Box::new(move || {
+        // 与旧 T2c 显式恢复同序：撤销键盘增强 → 关 bracketed paste → 退出 raw → 退出备屏
+        // → 关鼠标捕获 → 恢复光标。全部 `let _ =`：恢复路径不得再失败或 panic。
+        let mut out = io::stdout();
+        if flag_for_restore.load(Ordering::Relaxed) {
+            let _ = execute!(out, PopKeyboardEnhancementFlags);
+        }
+        let _ = execute!(out, DisableBracketedPaste);
+        let _ = disable_raw_mode();
+        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(out, crossterm::cursor::Show);
+    }));
     let mut stdout = io::stdout();
     let keyboard_enhancement_pushed =
         if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
@@ -4729,8 +5685,18 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             false
         };
+    if keyboard_enhancement_pushed {
+        keyboard_enhancement_for_restore.store(true, Ordering::Relaxed);
+    }
 
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // 契约 F-C：启用 bracketed paste —— 大段粘贴作为单个 `Event::Paste` 送达，
+    // 而不是被拆成成百上千个按键（后者会触发自动补全/回车提交等误动作）。
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -4766,17 +5732,63 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
         tui_event_loop(&mut terminal, state, control_plane, rx, tx)
     }));
 
-    if keyboard_enhancement_pushed {
-        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
-    }
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
-    let _ = terminal.show_cursor();
+    // 契约 F-D：恢复统一走守卫（幂等；Drop 兜底 panic / `?` 路径，避免二次恢复）。
+    terminal_guard.restore();
 
     match result {
         Ok(inner) => inner,
         Err(payload) => std::panic::resume_unwind(payload),
     }
+}
+
+/// 契约 F-J：把远程发现的模型 id 写入 `view` 中指定 provider 的 `models`。
+///
+/// **职责边界**：只做**内存视图变换** —— 不读注册表、不落盘、不碰 UI 状态。
+/// 持久化由调用方执行（`ProviderRegistryStore::save_view(view)`），面板/状态刷新同样由调用方负责。
+///
+/// 语义：
+/// - 以该 provider 既有首个模型条目为模板克隆（保留协议 / 能力配置语义），无模板时按
+///   OpenAiCompletions 兜底构造合法条目；
+/// - **幂等**：同一 `(provider_id, models)` 重复调用结果一致（不追加、不改变顺序）；
+/// - `provider_id` 不在 `view` 中 ⇒ `Err`，且 `view` **保持原样**（半写入会让注册表状态不可预期）。
+pub fn apply_models_discovered(
+    view: &mut ProviderRegistryView,
+    provider_id: &str,
+    models: &[String],
+) -> Result<(), String> {
+    let Some(provider) = view.providers.iter_mut().find(|p| p.id == provider_id) else {
+        return Err(format!(
+            "provider {provider_id} 不在注册表中；模型发现结果未写入"
+        ));
+    };
+    let template = provider.models.first().cloned();
+    let protocol = provider.protocol.clone();
+    provider.models = models
+        .iter()
+        .map(|id| match &template {
+            Some(t) => {
+                let mut model = t.clone();
+                model.id = id.clone();
+                model.name = id.clone();
+                model.model = id.clone();
+                model
+            }
+            None => ProviderModelConfig {
+                id: id.clone(),
+                name: id.clone(),
+                model: id.clone(),
+                temperature: 0.2,
+                max_output_tokens: 8192,
+                capability_preset: ProviderCapabilityPreset::Auto,
+                reasoning_effort: None,
+                reasoning_budget_tokens: None,
+                protocol: Some(protocol.clone()),
+                base_url: None,
+                capabilities: Default::default(),
+            },
+        })
+        .collect();
+    Ok(())
 }
 
 /// wave-35：后台线程远程拉取 provider 模型目录（15s 超时、自带错误语义）。
@@ -4812,6 +5824,139 @@ fn spawn_model_discovery(_state: &TuiState, tx: &Sender<UiEvent>, provider_id: &
     });
 }
 
+/// 契约 F-M：当前问题已选中的选项索引。
+///
+/// 未选中 / 选中「自定义输入」槽位 / 无选项 ⇒ `None`（让 `ask_submit_verdict` 拒绝空白提交）。
+fn ask_selected_index(ask: &AskUserState) -> Option<usize> {
+    let question = ask.current_question()?;
+    if question.options.is_empty() || ask.is_custom_input_active {
+        return None;
+    }
+    if question.multi_select {
+        ask.multi_selected_indices.first().copied()
+    } else if ask.selected_option_index < question.options.len() {
+        Some(ask.selected_option_index)
+    } else {
+        None
+    }
+}
+
+/// 契约 F-M：当前问题的答案取值（自由输入优先，其次多选 / 单选标签）。
+fn ask_answer_values(ask: &AskUserState) -> Vec<String> {
+    let typed = ask.custom_input.trim();
+    if ask.is_custom_input_active && !typed.is_empty() {
+        return vec![typed.to_string()];
+    }
+    let Some(question) = ask.current_question() else {
+        return Vec::new();
+    };
+    if question.multi_select {
+        ask.multi_selected_indices
+            .iter()
+            .filter_map(|&index| question.options.get(index).map(|option| option.label.clone()))
+            .collect()
+    } else {
+        question
+            .options
+            .get(ask.selected_option_index)
+            .map(|option| vec![option.label.clone()])
+            .unwrap_or_default()
+    }
+}
+
+/// 契约 F-M：多问答案 → 提交载荷。
+///
+/// 单问保持既有 `{"answer": "<首个取值>"}` 形状（向后兼容控制面/图运行的消费口径）；
+/// 多问在其上追加 `answers: [{questionId, values}]`（附加键，不改旧键语义）。
+fn ask_answer_json(answers: &[(String, Vec<String>)]) -> serde_json::Value {
+    let first_value = answers
+        .first()
+        .and_then(|(_, values)| values.first().cloned())
+        .unwrap_or_default();
+    if answers.len() <= 1 {
+        return serde_json::json!({ "answer": first_value });
+    }
+    serde_json::json!({
+        "answer": first_value,
+        "answers": answers
+            .iter()
+            .map(|(question_id, values)| serde_json::json!({
+                "questionId": question_id,
+                "values": values,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// 契约 F-M：**全部问题答完后**一次性提交答案并恢复任务流。
+///
+/// 中途推进（`NextQuestion::Advance`）不得走到这里 —— 否则控制面会拿着半份答案继续执行。
+fn submit_ask_answers(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    tx: &Sender<UiEvent>,
+    answers: Vec<(String, Vec<String>)>,
+) {
+    let Some((request_id, version, run_id)) = state
+        .pending_request
+        .as_ref()
+        .filter(|handle| !handle.is_approval)
+        .map(|handle| (handle.request_id.clone(), handle.version, handle.run_id.clone()))
+    else {
+        return;
+    };
+    let answer_json = ask_answer_json(&answers);
+    match control_plane.answer_ask(&request_id, version, answer_json.clone()) {
+        Ok(_) => {
+            if let Some(run_id) = run_id {
+                // 查找该 ask wait 当前绑定的期望版本；缺失时回退到提交时的版本。
+                let waits_val = control_plane.graph_list_ask_waits(&run_id);
+                let resume_version = waits_val
+                    .as_array()
+                    .and_then(|waits| {
+                        waits.iter().find(|wait| {
+                            wait.get("requestId").and_then(|value| value.as_str())
+                                == Some(request_id.as_str())
+                        })
+                    })
+                    .and_then(|wait| wait.get("expectedVersion").and_then(|value| value.as_u64()))
+                    .unwrap_or(version);
+                match control_plane.graph_resume_ask(
+                    &run_id,
+                    &request_id,
+                    resume_version,
+                    answer_json,
+                ) {
+                    Ok(_) => {
+                        state.is_streaming = true;
+                        state.status_text = "Thinking...".to_string();
+                    }
+                    Err(error) => {
+                        state.set_status_notice(format!("恢复任务流失败: {error}"));
+                        state.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: format!("恢复任务流失败: {error}"),
+                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                        });
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            state.set_status_notice(format!("提交回答失败: {error}"));
+            state.messages.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("提交回答失败: {error}"),
+                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            });
+        }
+    }
+    let _ = tx.send(UiEvent::AskUserAnswered {
+        request_id,
+        answers,
+    });
+}
+
 fn tui_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut state: TuiState,
@@ -4820,40 +5965,59 @@ fn tui_event_loop(
     tx: Sender<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let current_turn_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    // 契约 F-G：goal 自动续轮的取消令牌（Esc 置位；新一轮用户消息提交时重置）。
+    let goal_round_cancel = GoalRoundCancelToken::new();
 
-    // 键盘与鼠标事件轮询线程
+    // 键盘与鼠标事件轮询线程。
+    // 契约 F-F：`NO_COLOR` 的进程级环境变量**只在单线程启动期改一次**（run_tui / demo 入口开头）。
+    // 多线程环境里 `env::remove_var` 与 libc 读环境变量竞争是 UB（Rust 2024 起直接标 unsafe），
+    // 故这里不再触碰进程环境。
     let tx_events = tx.clone();
     std::thread::spawn(move || {
-        // 确保在此线程中启用 ANSI 颜色支持
-        unsafe {
-            std::env::remove_var("NO_COLOR");
-        }
         loop {
-            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                match event::read() {
-                    Ok(Event::Key(key)) => {
-                        if key.kind == crossterm::event::KeyEventKind::Press {
-                            let _ = tx_events.send(UiEvent::InputKey(key));
-                        }
+            // 契约 F-E：`unwrap_or(false)` 会把 poll 错误伪装成「无事件」⇒ 50ms 热旋且零提示。
+            let poll_result = event::poll(Duration::from_millis(50));
+            let poll_error = poll_result.as_ref().err().map(|error| error.to_string());
+            if classify_input_poll(poll_result) == InputPumpAction::Stop {
+                let _ = tx_events.send(UiEvent::InputPumpFailed {
+                    error: poll_error.unwrap_or_else(|| "input poll failed".to_string()),
+                });
+                break;
+            }
+            let read_result = event::read();
+            let outbound = match read_result {
+                Ok(Event::Key(key)) => {
+                    if key.kind == crossterm::event::KeyEventKind::Press {
+                        Some(UiEvent::InputKey(key))
+                    } else {
+                        None
                     }
-                    Ok(Event::Resize(_, _)) => {
-                        let _ = tx_events.send(UiEvent::Resized);
+                }
+                Ok(Event::Resize(_, _)) => Some(UiEvent::Resized),
+                // 契约 F-C：粘贴文本原样交给主循环（插入缓冲，绝不提交）。
+                Ok(Event::Paste(text)) => Some(UiEvent::InputPaste(text)),
+                Ok(Event::Mouse(mouse)) => {
+                    use crossterm::event::MouseEventKind;
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => Some(UiEvent::ScrollWheel(true)),
+                        MouseEventKind::ScrollDown => Some(UiEvent::ScrollWheel(false)),
+                        _ => Some(UiEvent::InputMouse(mouse)),
                     }
-                    Ok(Event::Mouse(mouse)) => {
-                        use crossterm::event::MouseEventKind;
-                        match mouse.kind {
-                            MouseEventKind::ScrollUp => {
-                                let _ = tx_events.send(UiEvent::ScrollWheel(true));
-                            }
-                            MouseEventKind::ScrollDown => {
-                                let _ = tx_events.send(UiEvent::ScrollWheel(false));
-                            }
-                            _ => {
-                                let _ = tx_events.send(UiEvent::InputMouse(mouse));
-                            }
-                        }
-                    }
-                    _ => {}
+                }
+                // FocusGained/FocusLost 等事件：无 UI 语义，忽略。
+                Ok(_) => None,
+                Err(error) => {
+                    // 读失败与 poll 失败同类：输入源不可用 ⇒ 提示后退出，不再热旋。
+                    let _ = tx_events.send(UiEvent::InputPumpFailed {
+                        error: error.to_string(),
+                    });
+                    break;
+                }
+            };
+            // 契约 F-E：通道对端已关闭（事件循环退出）⇒ 立即结束线程，不做无意义热旋。
+            if let Some(event) = outbound {
+                if tx_events.send(event).is_err() {
+                    break;
                 }
             }
         }
@@ -4952,6 +6116,8 @@ fn tui_event_loop(
                 state.mouse_selection.debounce_until = None;
                 if let Some(normalized) = state.mouse_selection.normalized_range() {
                     if state.mouse_selection.copied_range != Some(normalized) {
+                        // 契约（修订11 步骤3）：全量纯文本只在复制/选区路径按需重建。
+                        state.ensure_full_text();
                         let lines = if !state.rendered_lines_text.is_empty() {
                             state.rendered_lines_text.clone()
                         } else {
@@ -4965,7 +6131,7 @@ fn tui_event_loop(
                             let _ = std::io::Write::flush(&mut stdout);
                             let _ = terminal.backend_mut();
                             state.mouse_selection.copied_range = Some(normalized);
-                            state.status_text = "已复制到剪贴板".to_string();
+                            state.set_status_notice("已复制到剪贴板");
                             dirty = true;
                         }
                     }
@@ -4996,6 +6162,8 @@ fn tui_event_loop(
                 dirty = true;
                 match event {
                 UiEvent::Resized => {
+                    // 契约（修订11 步骤2）：尺寸变化必须失效布局缓存。
+                    state.invalidate_render_cache();
                     // 尺寸变化后先清空物理终端，避免旧尺寸余晖与新画面叠加成「乱排」。
                     let _ = terminal.clear();
                     dirty = true;
@@ -5102,12 +6270,26 @@ fn tui_event_loop(
                     }
 
                     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                        // 有草稿时先清空，避免一次误触丢掉整段输入；空输入才真正退出。
-                        if !state.input_buffer.is_empty() && !state.is_streaming {
-                            state.clear_input();
-                            continue;
+                        // 契约 P-4：三态语义（纯函数裁定）——流式中 = 中断本轮（等价 Esc，不退出）；
+                        // 有草稿 = 先清草稿（防误触丢输入）；否则才退出。
+                        match ctrl_c_action(state.is_streaming, !state.input_buffer.is_empty()) {
+                            CtrlCAction::InterruptTurn => {
+                                goal_round_cancel.cancel();
+                                if let Some(turn_id) = current_turn_id.lock().unwrap().take() {
+                                    control_plane.stop_turn(StopTurnCommand { turn_id });
+                                }
+                                state.is_streaming = false;
+                                state.transition_runtime_mode(RuntimeMode::Ready);
+                                state.set_status_notice("已中断");
+                                dirty = true;
+                                continue;
+                            }
+                            CtrlCAction::ClearDraft => {
+                                state.clear_input();
+                                continue;
+                            }
+                            CtrlCAction::Exit => break,
                         }
-                        break;
                     }
 
                     // 1. 会话选择弹窗模式下的按键处理
@@ -5126,7 +6308,9 @@ fn tui_event_loop(
                                 if !state.session_list.is_empty() {
                                     let chosen = state.session_list[state.selected_session_index].clone();
                                     state.session_id = chosen.id.clone();
-                                    state.messages.clear();
+                                    // 契约 P-2：/resume 先复位会话作用域，再装载目标会话快照
+                                    // （否则上一个会话的用量/计划/目标/待决请求会串到新会话）。
+                                    state.reset_session_scope();
 
                                     // 彻底重构历史会话恢复：优先使用权威会话快照 session.history 与 turn_trace_history，确保 1:1 准确恢复
                                     let runtime_view = control_plane.load_session_runtime_view(pony_agent_core::agent::control_plane::SessionRuntimeViewQuery {
@@ -5239,7 +6423,7 @@ fn tui_event_loop(
                                         }
                                     }
 
-                                    state.scroll_offset = u16::MAX;
+                                    state.scroll_offset = u32::MAX;
                                     state.auto_scroll = true; // 确保加载完毕后消息贴底显示
                                     state.mode = InteractionMode::Normal;
                                     state.status_text = format!("Resumed {}", chosen.id);
@@ -5422,7 +6606,7 @@ fn tui_event_loop(
                                 if let Some(ref handle) = state.pending_request {
                                     if handle.is_approval {
                                         if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
-                                            state.status_text = format!("取消审批失败: {e}");
+                                            state.set_status_notice(format!("取消审批失败: {e}"));
                                             state.messages.push(ChatMessage {
                                                 role: MessageRole::System,
                                                 content: format!("取消审批失败: {e}"),
@@ -5455,7 +6639,7 @@ fn tui_event_loop(
                                 if let Some(ref handle) = state.pending_request {
                                     if handle.is_approval {
                                         if let Err(e) = control_plane.approve_control_request(&handle.request_id, handle.version) {
-                                            state.status_text = format!("审批同意失败: {e}");
+                                            state.set_status_notice(format!("审批同意失败: {e}"));
                                             state.messages.push(ChatMessage {
                                                 role: MessageRole::System,
                                                 content: format!("审批同意失败: {e}"),
@@ -5488,7 +6672,7 @@ fn tui_event_loop(
                                                     }
                                                 }
                                                 if let Err(e) = control_plane.approve_control_request(&handle.request_id, handle.version) {
-                                                    state.status_text = format!("审批执行失败: {e}");
+                                                    state.set_status_notice(format!("审批执行失败: {e}"));
                                                     state.messages.push(ChatMessage {
                                                         role: MessageRole::System,
                                                         content: format!("审批执行失败: {e}"),
@@ -5498,7 +6682,7 @@ fn tui_event_loop(
                                             }
                                             PermissionChoice::Deny => {
                                                 if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
-                                                    state.status_text = format!("审批拒绝失败: {e}");
+                                                    state.set_status_notice(format!("审批拒绝失败: {e}"));
                                                     state.messages.push(ChatMessage {
                                                         role: MessageRole::System,
                                                         content: format!("审批拒绝失败: {e}"),
@@ -5531,7 +6715,7 @@ fn tui_event_loop(
                                 if let Some(ref handle) = state.pending_request {
                                     if !handle.is_approval {
                                         if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
-                                            state.status_text = format!("取消提问失败: {e}");
+                                            state.set_status_notice(format!("取消提问失败: {e}"));
                                             state.messages.push(ChatMessage {
                                                 role: MessageRole::System,
                                                 content: format!("取消提问失败: {e}"),
@@ -5577,80 +6761,63 @@ fn tui_event_loop(
                                 }
                             }
                             KeyCode::Enter => {
-                                if let Some(ref ask) = state.ask_user_state {
-                                    let req_id = ask.request_id.clone();
-                                    let (q_id, answers_list) = if ask.is_custom_input_active {
-                                        let qid = ask.current_question().map(|q| q.id.clone()).unwrap_or_default();
-                                        (qid, vec![ask.custom_input.clone()])
-                                    } else if let Some(q) = ask.current_question() {
-                                        let selected_labels = if q.multi_select {
-                                            ask.multi_selected_indices
-                                                .iter()
-                                                .filter_map(|&idx| q.options.get(idx).map(|o| o.label.clone()))
-                                                .collect::<Vec<_>>()
-                                        } else {
-                                            q.options.get(ask.selected_option_index)
-                                                .map(|o| vec![o.label.clone()])
-                                                .unwrap_or_default()
-                                        };
-                                        (q.id.clone(), selected_labels)
+                                // 契约 F-M：先按纯函数裁定「这次 Enter 是不是一个有效提交」。
+                                // 空白回答一律拒绝并保持面板打开（不得靠伪造选项蒙混）。
+                                let mut finish_with: Option<Vec<(String, Vec<String>)>> = None;
+                                if let Some(ask) = state.ask_user_state.as_ref() {
+                                    let has_options = ask
+                                        .current_question()
+                                        .map(|question| !question.options.is_empty())
+                                        .unwrap_or(false);
+                                    let typed = if ask.is_custom_input_active {
+                                        ask.custom_input.clone()
                                     } else {
-                                        (String::new(), Vec::new())
+                                        String::new()
                                     };
-
-                                    let chosen_answer_str = answers_list.first().cloned().unwrap_or_default();
-                                    let answer_json = serde_json::json!({ "answer": chosen_answer_str });
-
-                                    if let Some(ref handle) = state.pending_request {
-                                        if !handle.is_approval {
-                                            let answer_res = control_plane.answer_ask(&handle.request_id, handle.version, answer_json.clone());
-                                            match answer_res {
-                                                Ok(_) => {
-                                                    if let Some(ref run_id) = handle.run_id {
-                                                        // 查找对应 graph_run 当前绑定的 ask wait 期望版本
-                                                        let waits_val = control_plane.graph_list_ask_waits(run_id);
-                                                        let resume_version = waits_val
-                                                            .as_array()
-                                                            .and_then(|waits| {
-                                                                waits.iter().find(|w| {
-                                                                    w.get("requestId").and_then(|r| r.as_str()) == Some(&handle.request_id)
-                                                                })
-                                                            })
-                                                            .and_then(|w| w.get("expectedVersion").and_then(|v| v.as_u64()))
-                                                            .unwrap_or(handle.version);
-
-                                                        if let Err(e) = control_plane.graph_resume_ask(run_id, &handle.request_id, resume_version, answer_json) {
-                                                            state.status_text = format!("恢复任务流失败: {e}");
-                                                            state.messages.push(ChatMessage {
-                                                                role: MessageRole::System,
-                                                                content: format!("恢复任务流失败: {e}"),
-                                                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                            });
-                                                        } else {
-                                                            state.is_streaming = true;
-                                                            state.status_text = "Thinking...".to_string();
-                                                        }
+                                    match ask_submit_verdict(has_options, ask_selected_index(ask), &typed) {
+                                        AskSubmitVerdict::Reject(reason) => {
+                                            state.set_status_notice(reason);
+                                            dirty = true;
+                                            continue;
+                                        }
+                                        AskSubmitVerdict::Submit => {
+                                            let values = ask_answer_values(ask);
+                                            if let Some(ask_mut) = state.ask_user_state.as_mut() {
+                                                match ask_mut.record_and_advance(values) {
+                                                    // 契约 F-M②：还有后续问题 ⇒ 只推进，**不提交**。
+                                                    NextQuestion::Advance(next) => {
+                                                        let total = ask_mut.questions.len();
+                                                        state.set_status_notice(format!(
+                                                            "已记录第 {} 问，请回答第 {}/{} 问",
+                                                            next,
+                                                            next + 1,
+                                                            total
+                                                        ));
                                                     }
-                                                }
-                                                Err(e) => {
-                                                    state.status_text = format!("提交回答失败: {e}");
-                                                    state.messages.push(ChatMessage {
-                                                        role: MessageRole::System,
-                                                        content: format!("提交回答失败: {e}"),
-                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                    });
+                                                    NextQuestion::Finish => {
+                                                        finish_with = Some(
+                                                            ask_mut
+                                                                .answers
+                                                                .iter()
+                                                                .map(|answer| {
+                                                                    (answer.question_id.clone(), answer.values.clone())
+                                                                })
+                                                                .collect(),
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-
-                                    let _ = tx.send(UiEvent::AskUserAnswered {
-                                        request_id: req_id,
-                                        answers: vec![(q_id, answers_list)],
-                                    });
                                 }
-                                state.pending_request = None;
-                                state.cancel_ask_user();
+                                if let Some(answers) = finish_with {
+                                    // 全部问题答完 ⇒ 一次性提交（answer_ask + graph_resume_ask）。
+                                    submit_ask_answers(&mut state, &control_plane, &tx, answers);
+                                    state.pending_request = None;
+                                    state.cancel_ask_user();
+                                }
+                                dirty = true;
+                                continue;
                             }
                             _ => {}
                         }
@@ -5721,6 +6888,9 @@ fn tui_event_loop(
                     // 2. 仅在正在运行（Streaming）态下 Esc 触发 Interrupt；静态下 Esc 仅用于清空输入缓冲区，不退出程序
                     if key.code == KeyCode::Esc {
                         if state.is_streaming {
+                            // 契约 F-G③：先置取消令牌 —— goal 续轮循环在**下一轮开始前**看到它即中止；
+                            // 已经在跑的那一轮仍由 stop_turn 打断。
+                            goal_round_cancel.cancel();
                             if let Some(turn_id) = current_turn_id.lock().unwrap().take() {
                                 control_plane.stop_turn(StopTurnCommand { turn_id });
                             }
@@ -5820,18 +6990,30 @@ fn tui_event_loop(
                                 continue;
                             }
                             let match_cmds = state.matching_commands();
-                            if !match_cmds.is_empty() && state.input_buffer.starts_with('/') && !state.input_buffer.ends_with(' ') && state.input_buffer != match_cmds[state.selected_command_index.min(match_cmds.len() - 1)].0 {
-                                let idx = state.selected_command_index.min(match_cmds.len() - 1);
-                                let completed = match_cmds[idx].0.to_string();
-                                state.set_input(&completed);
-                                continue;
+                            let selected_cmd = match_cmds
+                                .get(state.selected_command_index.min(match_cmds.len().saturating_sub(1)))
+                                .map(|(cmd, _)| *cmd);
+                            // 已命中（首 token 口径）选中命令时不补全，直接进入分发判定。
+                            if let Some(selected_cmd) = selected_cmd {
+                                if state.input_buffer.starts_with('/')
+                                    && !state.input_buffer.ends_with(' ')
+                                    && match_command_token(&state.input_buffer) != Some(selected_cmd)
+                                {
+                                    state.set_input(selected_cmd);
+                                    continue;
+                                }
                             }
                             let input = state.input_buffer.trim().to_string();
                             if !input.is_empty() {
                                 state.clear_input();
                                 state.selected_command_index = 0;
 
-                                if input == "/resume" {
+                                // 契约 F-B：分发口径 = **整串**匹配（大小写不敏感）。
+                                // `/clear 这个需求怎么拆` 这类「命令 + 正文」不再被当成命令吞掉，
+                                // 而是整串作为普通消息发送给模型。
+                                let known_command = parse_command_input(&input);
+
+                                if known_command == Some("/resume") {
                                     let raw_sessions = control_plane.list_sessions();
                                     let items: Vec<SessionItem> = raw_sessions
                                         .into_iter()
@@ -5845,7 +7027,7 @@ fn tui_event_loop(
                                     continue;
                                 }
 
-                                if input == "/provider" {
+                                if known_command == Some("/provider") {
                                     let registry = ProviderRegistryStore::new();
                                     let view = registry.load_view();
                                     let items: Vec<ProviderItem> = view
@@ -5862,7 +7044,7 @@ fn tui_event_loop(
                                     continue;
                                 }
 
-                                if input == "/models" {
+                                if known_command == Some("/models") {
                                     // wave-35b：cache-first + 始终后台刷新。
                                     // load_view 对空 models 会注入 default（config.rs:873-889），
                                     // 因此不能以「本地非空」判定免拉取：先开缓存面板，再无条件远程刷新。
@@ -5891,14 +7073,17 @@ fn tui_event_loop(
                                 }
 
                                 // 严格遵从 /quit 或 /exit 退出规范
-                                if input == "/exit" || input == "/quit" {
+                                if known_command == Some("/quit") || input_is_alias(&input, "/exit") {
                                     break;
                                 }
-                                if input == "/thinking" || input == "/effort" {
+                                // `/effort` 是 `/thinking` 的历史别名（不在命令表内，同样整串匹配）。
+                                if known_command == Some("/thinking")
+                                    || input_is_alias(&input, "/effort")
+                                {
                                     state.open_reasoning_effort_selector();
                                     continue;
                                 }
-                                if input == "/plan" {
+                                if known_command == Some("/plan") {
                                     let plans_val = control_plane.plan_list(&state.session_id);
                                     if let Some(plan_state) = tui_plan_from_value(&plans_val) {
                                         state.update_plan(plan_state);
@@ -5906,19 +7091,29 @@ fn tui_event_loop(
                                     state.toggle_plan_mode();
                                     continue;
                                 }
-                                if input == "/tasks" {
+                                if known_command == Some("/tasks") {
                                     sync_tasks_from_store(&mut state);
                                     state.toggle_task_board();
                                     continue;
                                 }
-                                if input == "/clear" {
-                                    state.clear_messages();
+                                if known_command == Some("/clear") {
+                                    // 契约 P-2：/clear = 复位会话作用域 + 换新 session_id。
+                                    state.reset_session_scope();
+                                    state.session_id =
+                                        format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                                    state.set_status_notice("上下文已清空");
                                     continue;
                                 }
-                                if input == "/help" {
+                                if known_command == Some("/help") {
                                     let mut help = String::from("命令列表");
                                     for (cmd, desc) in AVAILABLE_COMMANDS.iter() {
                                         help.push_str(&format!("\n{:<11}{}", cmd, desc));
+                                    }
+                                    // 契约 F-L：/cost 移除后网关需要可见入口；只展示剥离凭据后的
+                                    // scheme://host[:port]/path（userinfo/query/fragment 全丢弃）。
+                                    let gateway = gateway_display(&state.gateway_url);
+                                    if !gateway.is_empty() {
+                                        help.push_str(&format!("\n网关        {gateway}"));
                                     }
                                     state.messages.push(ChatMessage {
                                         role: MessageRole::System,
@@ -5927,11 +7122,17 @@ fn tui_event_loop(
                                     });
                                     continue;
                                 }
-                                if input == "/cost" {
-                                    state.messages.push(ChatMessage {
-                                        role: MessageRole::System,
-                                        content: format!("模型  {}\n网关  {}", state.model, state.gateway_url),
-                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                if known_command == Some("/compact") {
+                                    // 契约 C-7：真实压缩（LLM 摘要）必须在后台线程执行，
+                                    // 事件循环内不得同步阻塞；成功/失败均经 UiEvent 回主循环。
+                                    state.status_text = "正在压缩上下文…".to_string();
+                                    let cp = control_plane.clone();
+                                    let compact_target = state.session_id.clone();
+                                    let tx_compact = tx.clone();
+                                    std::thread::spawn(move || {
+                                        let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+                                        let result = cp.compact_session(Some(compact_target.as_str()), true);
+                                        let _ = tx_compact.send(UiEvent::CompactFinished { result });
                                     });
                                     continue;
                                 }
@@ -5939,6 +7140,8 @@ fn tui_event_loop(
                                 // wave-39 R8：新一轮开始前清空本轮回执，并按当前
                                 // provider/model 解析上下文窗口（解析不到则回退默认值）。
                                 state.begin_turn_usage();
+                                // 契约 P-5：提交新消息即清空一次性提示（不再与新一轮进度抢状态区）。
+                                state.status_notice = None;
                                 state.context_window_tokens = resolve_context_window_tokens(&state);
                                 state.add_user_message(&input);
                                 state.is_streaming = true;
@@ -5949,6 +7152,8 @@ fn tui_event_loop(
 
                                 let turn_id_str = format!("turn-{}", uuid::Uuid::new_v4());
                                 *current_turn_id.lock().unwrap() = Some(turn_id_str.clone());
+                                // 契约 F-G④：新一轮用户消息 = 新的取消周期，重置 Esc 令牌。
+                                goal_round_cancel.reset();
 
                                 let cp = control_plane.clone();
                                 // wave-36b：发送口径与 /models 面板来源一致（resolve_active_provider_id），
@@ -5961,6 +7166,10 @@ fn tui_event_loop(
                                 // workspace_id / reasoning_effort / session_id）。
                                 // 在 spawn 前组装，避免把整个 TuiState move 进线程。
                                 let turn_input = build_turn_input(&state, input, prov_id, mdl_id);
+                                // 契约 F-G：把取消令牌与 current_turn_id 句柄带进轮次线程，
+                                // 使 Esc 能取消「下一轮」并把 stop_turn 打到**当前**轮。
+                                let cancel_for_rounds = goal_round_cancel.clone();
+                                let current_turn_for_rounds = Arc::clone(&current_turn_id);
 
                                 std::thread::spawn(move || {
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
@@ -5975,8 +7184,13 @@ fn tui_event_loop(
                                     };
                                     cp.start_turn_stream(&sink, cmd);
 
-                                    let mut consecutive = 0;
-                                    while consecutive < pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES {
+                                    let mut consecutive: u32 = 0;
+                                    // 契约 F-G①：每轮开始前检查取消令牌（Esc）与预算，二者任一即停。
+                                    while !should_abort_goal_rounds(
+                                        cancel_for_rounds.is_cancelled(),
+                                        consecutive,
+                                        pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
+                                    ) {
                                         let active_goal = match pony_agent_core::agent::goal::active_goal_for_session(&session_id) {
                                             Some(g) => g,
                                             None => break,
@@ -5996,6 +7210,11 @@ fn tui_event_loop(
                                             updated_goal.max_goal_rounds,
                                         );
                                         let next_turn_id = format!("turn-goal-{round}-{}", uuid::Uuid::new_v4());
+                                        // 契约 F-G②：回写本轮 turn_id —— 否则 Esc 的 stop_turn 只会打到
+                                        // 已经结束的初始 turn，续轮在后台一路跑到预算耗尽。
+                                        *current_turn_for_rounds
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner()) = Some(next_turn_id.clone());
                                         let mut next_input = turn_input.clone();
                                         next_input.message = msg;
                                         next_input.display_message = Some(format!("[goal round {round}] 推进目标：{}", updated_goal.objective));
@@ -6067,6 +7286,15 @@ fn tui_event_loop(
                         _ => {}
                     }
                 }
+                // 契约 F-C：粘贴只插入输入缓冲，**绝不提交**；流式生成中与键盘编辑同样忽略。
+                // 守卫口径与 InputKey 分支一致（`if state.is_streaming { continue; }`）。
+                UiEvent::InputPaste(text) => {
+                    if state.is_streaming {
+                        continue;
+                    }
+                    state.insert_paste(&text);
+                    dirty = true;
+                }
                 UiEvent::StreamDelta(delta) => {
                     state.append_assistant_chunk(&delta);
                     if !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
@@ -6116,37 +7344,16 @@ fn tui_event_loop(
                     });
                 }
                 UiEvent::ModelsDiscovered { provider_id, ids } => {
-                    // 把远程目录写入该 provider 的 models 并持久化，然后打开选择面板。
+                    // 契约 F-J：视图变换收敛进 `apply_models_discovered`（幂等、可单测）；
+                    // 本臂只负责「调用 → 落盘 → 刷新 UI 状态」。
                     let registry = ProviderRegistryStore::new();
                     let mut view = registry.load_view();
-                    if let Some(p) = view.providers.iter_mut().find(|p| p.id == provider_id) {
-                        // 以既有第一个模型条目为模板克隆（保留该 provider 的协议/能力配置语义），
-                        // 无模板时按 OpenAiCompletions 兜底构造合法条目。
-                        let template = p.models.first().cloned();
-                        p.models = ids.iter().map(|id| match &template {
-                            Some(t) => {
-                                let mut m = t.clone();
-                                m.id = id.clone();
-                                m.name = id.clone();
-                                m.model = id.clone();
-                                m
-                            }
-                            None => pony_agent_core::agent::config::ProviderModelConfig {
-                                id: id.clone(),
-                                name: id.clone(),
-                                model: id.clone(),
-                                temperature: 0.2,
-                                max_output_tokens: 8192,
-                                capability_preset: pony_agent_core::agent::config::ProviderCapabilityPreset::Auto,
-                                reasoning_effort: None,
-                                reasoning_budget_tokens: None,
-                                protocol: Some(p.protocol.clone()),
-                                base_url: None,
-                                capabilities: Default::default(),
-                            },
-                        }).collect();
-                    }
-                    match registry.save_view(view) {
+                    let applied = apply_models_discovered(&mut view, &provider_id, &ids);
+                    let saved = match applied {
+                        Ok(()) => registry.save_view(view),
+                        Err(error) => Err(error),
+                    };
+                    match saved {
                         Ok(saved) => {
                             let items: Vec<ModelItem> = saved
                                 .providers
@@ -6170,7 +7377,7 @@ fn tui_event_loop(
                             state.status_text = format!("已加载 {n} 个模型");
                         }
                         Err(e) => {
-                            state.status_text = format!("模型目录保存失败: {e}");
+                            state.set_status_notice(format!("模型目录保存失败: {e}"));
                             state.messages.push(ChatMessage {
                                 role: MessageRole::System,
                                 content: format!("模型目录保存失败（{provider_id}）: {e}"),
@@ -6187,6 +7394,36 @@ fn tui_event_loop(
                     state.messages.push(ChatMessage {
                         role: MessageRole::System,
                         content: format!("模型列表拉取失败（{provider_id}）: {summary}"),
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                }
+                // 契约 F-E：输入泵已退出（poll/read 报错）。stderr 被 dup2 到日志文件，
+                // 全屏界面是用户唯一可见面 ⇒ 必须在这里显式告知，不能只写日志。
+                UiEvent::InputPumpFailed { error } => {
+                    let summary: String = error.chars().take(200).collect();
+                    state.status_text = format!("输入通道异常: {summary}");
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: format!(
+                            "输入通道异常，键盘/鼠标事件已停止（建议退出并重新启动 TUI）: {summary}"
+                        ),
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                    dirty = true;
+                }
+                // 契约 C-7：成功/失败都追加 System 消息；未压缩时如实说明，不谎报已压缩。
+                // 文案统一由 core 纯函数 `compact_outcome_message` 产出（审查 F4，避免多处漂移）。
+                UiEvent::CompactFinished { result } => {
+                    state.status_text = match &result {
+                        Ok(outcome) if outcome.compacted => {
+                            format!("已压缩 {} 条消息", outcome.compressed_count)
+                        }
+                        Ok(_) => "无需压缩".to_string(),
+                        Err(_) => "压缩失败".to_string(),
+                    };
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: compact_outcome_message(&result),
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
                 }

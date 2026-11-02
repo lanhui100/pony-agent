@@ -105,7 +105,22 @@ fn test_matching_commands_filter() {
 
     state.input_buffer = "/".to_string();
     let all = state.matching_commands();
-    assert_eq!(all.len(), 8, "命令表含 /thinking 在内共 8 条");
+    // wave-slash-1（契约 C-6）：期望值必须**从命令表推导**，不得再写死条目数（旧断言写死 8，
+    // 在命令表增删后必然假失败/假通过）。同时反向证明菜单不再被硬编码行数截断。
+    assert_eq!(
+        all.len(),
+        tui::AVAILABLE_COMMANDS.len(),
+        "输入 \"/\" 必须返回全部命令（命令表 {} 条）",
+        tui::AVAILABLE_COMMANDS.len()
+    );
+    assert_eq!(
+        all.iter().map(|(command, _)| *command).collect::<Vec<_>>(),
+        tui::AVAILABLE_COMMANDS
+            .iter()
+            .map(|(command, _)| *command)
+            .collect::<Vec<_>>(),
+        "斜杠菜单内容与顺序必须与 AVAILABLE_COMMANDS 同源"
+    );
 
     state.input_buffer = "/re".to_string();
     let re = state.matching_commands();
@@ -694,47 +709,44 @@ fn test_models_discovery_persists_ids_to_provider() {
     });
     store.save_view(view).unwrap();
 
-    // 模拟 ModelsDiscovered 分支：写 ids → save_view → 回读。
+    // 【批4 / F-J 治理】原为**复制式断言**：本用例在测试内重写了一遍 ModelsDiscovered 的映射
+    // 逻辑（template 克隆 + 逐字段填充），于是生产端改了映射、测试仍按老逻辑自测自过（假绿）。
+    // 现改为调用生产函数 `tui::apply_models_discovered`，落盘仍由事件臂负责（与本用例一致：
+    // 生产函数只做内存映射 → 这里显式 save_view → 回读断言），断言强度不降（内存 + 落盘都断言）。
     let ids = vec!["model-x".to_string(), "model-y".to_string()];
     let registry = pony_agent_core::agent::config::ProviderRegistryStore::with_path(&providers_file);
     let mut view = registry.load_view();
-    let template = view
+    tui::apply_models_discovered(&mut view, "disc-provider", &ids)
+        .expect("ModelsDiscovered 生产映射必须成功写入已注册 provider");
+
+    // 内存断言：写入顺序与 id 精确匹配（生产函数的契约面）。
+    let in_memory = view
         .providers
         .iter()
         .find(|p| p.id == "disc-provider")
-        .and_then(|p| p.models.first().cloned());
-    if let Some(p) = view.providers.iter_mut().find(|p| p.id == "disc-provider") {
-        p.models = ids.iter().map(|id| match &template {
-            Some(t) => {
-                let mut m = t.clone();
-                m.id = id.clone();
-                m.name = id.clone();
-                m.model = id.clone();
-                m
-            }
-            None => pony_agent_core::agent::config::ProviderModelConfig {
-                id: id.clone(),
-                name: id.clone(),
-                model: id.clone(),
-                temperature: 0.2,
-                max_output_tokens: 8192,
-                capability_preset: pony_agent_core::agent::config::ProviderCapabilityPreset::Auto,
-                reasoning_effort: None,
-                reasoning_budget_tokens: None,
-                protocol: Some(p.protocol.clone()),
-                base_url: None,
-                capabilities: Default::default(),
-            },
-        }).collect();
-    }
+        .expect("provider 必须仍在 view 中");
+    assert_eq!(in_memory.models.len(), 2, "内存中必须写入 2 个模型");
+    assert_eq!(in_memory.models[0].id, "model-x");
+    assert_eq!(in_memory.models[1].id, "model-y");
+    // 结构完整性：模型条目的可显示字段不得为空（生产函数负责从模板补全）。
+    assert!(
+        in_memory.models.iter().all(|m| !m.name.is_empty() && !m.model.is_empty()),
+        "生产映射写入的模型条目必须带非空 name/model（否则 UI 下拉会显示空白项）"
+    );
+
     registry.save_view(view).unwrap();
 
     let reloaded = pony_agent_core::agent::config::ProviderRegistryStore::with_path(&providers_file).load_view();
     let p = reloaded.providers.iter().find(|p| p.id == "disc-provider").expect("provider persisted");
     assert_eq!(p.models.len(), 2);
     assert_eq!(p.models[0].id, "model-x");
-    assert_eq!(p.models[0].name, "model-x");
     assert_eq!(p.models[1].id, "model-y");
+    // 物理落盘收据：注册表文件里必须真的出现两个模型 id。
+    let raw = std::fs::read_to_string(&providers_file).expect("providers.json 必须已落盘");
+    assert!(
+        raw.contains("model-x") && raw.contains("model-y"),
+        "落盘的 providers.json 必须包含两个发现到的模型 id"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
