@@ -1,0 +1,204 @@
+{
+ "applicability": {
+  "acceptance_tests_present": true,
+  "note": "无验收测试时 red/drift 规则判 not-applicable，绝不静默通过"
+ },
+ "repo_profile": {
+  "acceptance_dirs": [
+   "tests/acceptance"
+  ],
+  "has_acceptance": true,
+  "top_exts": [
+   [
+    "md",
+    1024
+   ],
+   [
+    "json",
+    356
+   ],
+   [
+    "png",
+    251
+   ],
+   [
+    "rs",
+    234
+   ],
+   [
+    "ts",
+    185
+   ],
+   [
+    "txt",
+    165
+   ]
+  ],
+  "test_scripts": {
+   "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
+   "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+   "cargo:test:regression": "cargo test --manifest-path src-tauri/Cargo.toml --test session_regression --test provider_registry_regression --test tool_router_regression --target-dir target-test",
+   "cargo:test:shared": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 test test",
+   "cargo:test:exact": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-a test",
+   "cargo:test:exact:b": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-b test",
+   "cargo:test:exact:c": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-c test",
+   "test": "npm run test:unit",
+   "test:unit": "vitest run",
+   "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
+   "test:e2e": "npm run build && playwright test",
+   "test:tauri:smoke": "node scripts/tauri-smoke.js",
+   "preview:e2e": "vite preview --host 127.0.0.1 --port 4175"
+  }
+ },
+ "run_id": "session-84463816-f9fb-4395-82f7-2ce7e353e6f9",
+ "task": "Wave-58 上下文构建与 Skills/AGENTS.md 加载机制修复",
+ "tier": "B",
+ "base": "4e5764b",
+ "head": "57c6412",
+ "work": {
+  "L": 2464,
+  "files": 7,
+  "board_tasks": [
+   "[Wave-58-P] 冻结 Wave-58 接口空桩（Protocol Agent）",
+   "[Wave-58-T] 编写 Wave-58 红相验收测试（Test Agent）",
+   "[Wave-58-A] Stage1 上下文根与技能清单注入（executor-alpha）",
+   "[Wave-58-B] Stage2 技能解析与扫描/加载信任一致性（executor-beta）",
+   "[Wave-58-C] Stage3 触达注入根层去重（executor-alpha）"
+  ],
+  "gates_seen_in_session": {
+   "unit": 3,
+   "accept": 3
+  }
+ },
+ "commits": [
+  {
+   "sha": "9af49dd1dba8",
+   "full": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
+   "subject": "test(wave-58): freeze context/skills loading acceptance tests",
+   "files": [
+    ".dev-team/contract-matrix-wave58.md",
+    ".dev-team/regression-baseline-wave58.json",
+    "crates/pony-agent-core/tests/wave58_context_skills.rs",
+    "crates/pony-agent-core/tests/wave58_skill_parsing.rs"
+   ],
+   "stat": "4 files changed, 1694 insertions(+)"
+  },
+  {
+   "sha": "57c6412dfa80",
+   "full": "57c6412dfa8015c74b41751d0dc5c7d680fb29df",
+   "subject": "feat(arch): complete wave-58 context and skills loading mechanism overhaul",
+   "files": [
+    ".dev-team/contract-matrix-wave58.md",
+    ".dev-team/meta-retrospective-wave58.md",
+    ".dev-team/review-join-a.json",
+    ".dev-team/review-join-a2.json",
+    ".dev-team/review-join-b.json",
+    ".dev-team/review-join-b2.json",
+    ".dev-team/review-plan-wave58.json",
+    ".dev-team/state.json",
+    ".dev-team/wave58-delivery.md",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/instruction_touch.rs",
+    "crates/pony-agent-core/src/agent/path_permission.rs",
+    "crates/pony-agent-core/src/agent/skill_body.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+    "crates/pony-agent-core/tests/wave58_context_skills.rs",
+    "crates/pony-agent-core/tests/wave58_singleton_isolation.rs",
+    "docs/decisions/0046-global-config-loading-wave42.md",
+    "management/task-system/02_REVIEWS/2026-11-01-context-skills-loading-audit.md"
+   ],
+   "stat": "20 files changed, 3374 insertions(+), 323 deletions(-)"
+  }
+ ],
+ "post_run_commits": [],
+ "foreign_commits": [],
+ "frozen_test_drift": [
+  {
+   "path": "crates/pony-agent-core/tests/wave58_context_skills.rs",
+   "anchor": "9af49dd1dba8",
+   "modified_by": "57c6412dfa80",
+   "subject": "feat(arch): complete wave-58 context and skills loading mechanism overhaul"
+  }
+ ],
+ "review_receipts": [
+  {
+   "file": ".dev-team/review-join-a.json",
+   "schema_version": 2,
+   "executed_by": "l3a-wave58-concurrency-cache-review",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "l3a-wave58-concurrency-cache-review",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-join-a2.json",
+   "schema_version": 2,
+   "executed_by": "l3a-wave58-concurrency-cache-review-r2",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "l3a-wave58-concurrency-cache-review-r2",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
+   "verdict": "PASS",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-join-b.json",
+   "schema_version": 2,
+   "executed_by": "l3b-wave58-review-join-b",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "l3b-wave58-review-join-b",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-join-b2.json",
+   "schema_version": 2,
+   "executed_by": "l3b-wave58-review-join-b2",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "l3b-wave58-review-join-b2",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
+   "verdict": "PASS",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-plan-wave58.json",
+   "schema_version": 2,
+   "executed_by": "74b196cf-735c-4951-87de-1a086219b2fe",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "74b196cf-735c-4951-87de-1a086219b2fe",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "9af49dd",
+   "verdict": "PASS",
+   "independent": true
+  }
+ ],
+ "mechanical_red_flags": [
+  "frozen_test_drift:crates/pony-agent-core/tests/wave58_context_skills.rs",
+  "self_signed_review:review-join-a.json",
+  "self_signed_review:review-join-a2.json",
+  "self_signed_review:review-join-b.json",
+  "self_signed_review:review-join-b2.json",
+  "self_signed_review:review-join.json",
+  "self_signed_review:review-l3-concurrency.json",
+  "self_signed_review:review-l3-security.json",
+  "self_signed_review:review-plan-wave58.json",
+  "self_signed_review:review-plan.json"
+ ],
+ "unknowns": [
+  "每个门禁实际抓到多少缺陷（gate_caught）需从 review JSON/测试日志判定",
+  "用户是否口头授权了自扩范围（scope）需读会话原文"
+ ],
+ "pack_hash": "a7301fc32be12569"
+}

@@ -77,11 +77,13 @@
 - [0051 可观测性上报三项修正（版本单一来源、治理 span 会话归属、思考/缓存 token 出口）](decisions/0051-observability-version-session-and-thinking-token-fixes.md)
 - [0052 可观测性语义轨补全（成本明细、未计价标记、枚举收敛、降级标记、可读 trace 名、工具调用 id）](decisions/0052-observability-semantic-completeness-fixes.md)
 - [0053 token / 速度口径真值契约（wave-54）](decisions/0053-token-speed-truth-contract.md)
+- [0056 流式正文渲染收敛（stale-while-render）与运行状态 hop 级判定](decisions/0056-streaming-render-stale-while-render-and-hop-status.md)
 
 ## 3.1 交付证据归档
 
 - [PA-118 进入会话页卡死修复：同口径实机 E2E 证据（BEFORE/AFTER 截图与驱动日志）](release/2026-10-14-pa118-deadlock-fix/README.md)
 - [Wave-17 IME 组合态回车守卫 + 动态数字抖动消除：NFR 达标报告](release/2026-10-16-wave17-ime-guard-numeric-jitter/NFR-COMPLIANCE.md)
+- [Wave-Slash-1 & TUI 深度加固交付说明](release/2026-11-02-wave-slash-1-tui-hardening/DELIVERY.md)
 
 ## 4. 开发指南
 

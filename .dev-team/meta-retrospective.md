@@ -1,60 +1,68 @@
-# 元框架复盘（Wave-55：架构评估缺陷修复波）
+# 元框架复盘（Wave-59：桌面端 UI/UX 四项优化）
 
-> 本轮对象：wave-55——按架构评估结论逐项机器复核后，只修可闭包的 P0/P1 缺陷（编译门禁、并发授权上下文、
-> 沙箱诚实性、持久化原子性、渲染层外泄、事件 sessionId、文档事实同步）。历史复盘见 `meta-retrospective-wave54.md`。
-> 交付区间：`5fa0ca6` → HEAD（9bf7862 build / 4bc7a7c 红相 / 115ce83 docs / 59a5df7 core / e7430ac web）。
-> 任务分级：B（安全敏感 + 跨模块，命中 blast-keywords：lock/thread/net/ipc）。
+> 本轮对象：wave-59 —— 按用户四项 UI/UX 反馈（等待动画去重 / 计数下移 / 流式闪跳 / 状态准确性）做根因诊断与修复。
+> 交付：`.dev-team/wave59-delivery.md`；契约：`.dev-team/contracts/wave-59-desktop-uiux.md`；ADR：`docs/decisions/0056-...md`。
+> 团队：Lead + test-agent + executor（常驻 3）+ 4 次 Subagent（2 路 L3 审查、诊断复核）。
+> 交付区间：`d3745a7` → 工作区未提交（见交付 §8「提交依赖外部波次」）。
 
-## 1. 通信拓扑与信噪比
+## 1. 通信拓扑与信噪比（Topology & Noise）
 
-- **拓扑**：Lead + 3 常驻 teammate（rust-executor / frontend-executor / test-agent），审查全部走 Subagent 池
-  （3 路 L3 + 1 路 L3-P + 1 路复审），Roster 峰值 4 ≤ 8，未挤占名册。
-- **写域正交有效**：`crates/pony-agent-core/src`（rust）、`src/ + src-tauri/ + index.html`（web）、
-  `tests/ + crates/pony-agent-core/tests`（test）三域零重叠，全程无脏写冲突。
-- **信噪比**：teammate 回执一律「结论 + 文件:行 + Exit Code」三段式，无过程性吹捧。
-  **真实浪费点**：L3/L3-P 的审查 JSON 首轮不满足 v2 schema（缺 `schema_version/reviewer/attestation`），
-  Lead 补写三轮才通过 `dev-review-lint` —— 派发 prompt 未前置收据骨架，是最大的 Token 漏损。
-- **重复劳动**：`cargo check --all-targets` 被 4 个成员各跑 ≥2 次；全量 `npx vitest run` 跑了 5 次。
-  缺「门禁命令白名单 + 单次收据共享」约定。
+- **拓扑选择基本正确**：test-agent 与 executor 是跨阶段有状态连续体（红相→绿相→复审），落为常驻 Teammate；
+  两路 L3 对抗审查（计划可验证性 / 合入正确性）属无状态投影，落为 fresh-context Subagent。名册峰值 3 ≤ 8。
+- **写域正交成立**：`src/**`（executor）‖ `tests/**`（test-agent）全程零冲突，无跨写域脏写。
+- **真实浪费点（Token）**：Lead 亲自做了全部根因诊断（RC1..RC9），期间 `HomeWorkspace.vue` 读了 3 次、
+  `stores/runtime.ts` 分段读了 5 次、`MarkdownRenderer.vue` 读了 2 次 —— 命中「≥5 文件 / 横跨 ≥3 模块」的
+  Explorer 委派阈值却未外派，注意力与上下文被读取动作吃掉。改进：诊断阶段先外派 E2 Explorer 出「根因候选 + 证据行号」，
+  Lead 只做定点复核。
+- **有效实践**：test-agent 在共享工作区被并发波次污染后，改用 `git archive d3745a7` 纯净快照采集红相，
+  并给出源码 md5 可复算 —— 这是本波最有复用价值的元协议动作。
+- **信噪比**：teammate 回执普遍「结论 + file:line + Exit Code」，无套话；executor 主动上报自检发现的新增回归
+  （`markdown-streaming-smooth` 由绿转红并自修），属正面行为。
 
-## 2. 门禁穿透与误杀率
+## 2. 门禁穿透与误杀率（Gate Penetration / False Negatives & Positives）
 
-- **抓到的真问题（本波最高价值）**：L3 两路各出 1 条 BLOCKING，都是**测试无法覆盖的语义缺口**：
-  1) `turn_flow::stream_delta_chunks` 无 session 形参 → 非真流式 provider 的 delta 被前端严格过滤整条丢弃
-     （修 fail-open 时**新引入**的功能破损）；
-  2) goal 续轮合成 `TurnInput` 丢 `tool_authorization_mode` → read_only 失效；test-agent 深挖出更底层根因：
-     旧闸门只比小写 `"write"/"edit"/"bash"`，而生产描述符是 `Write`/`workspace_run_command`，**闸门从未触发过**。
-  → 「机器全绿 ≠ 语义正确」：8/8 红相全绿时仍潜伏两处真实 fail-open。
-- **正确误杀**：L3-P 判 1 条 BLOCKING（NFR 基准 `guarantee` 声称"不存在无限挂起"夸大），拦下的是
-  「我们自己的基准在说谎」，按方案 (b) 修措辞 + 登记缺口，而非改代码迁就文字。
-- **假绿风险**：`cargo test --workspace` 首跑 101，红项是既有 flaky（`wave37 t3_0` 的 OnceLock check-then-use）；
-  若不复跑会误判回归。已"单跑 3 次 + 全量 3 次"确定性化并加锁，而非用 `--test-threads=1` 掩盖。
-- **流程穿透（如实记录）**：① 回归基线未在改码前建立（skill 硬门禁），只能用 HEAD 独立 worktree 事后对照；
-  ② 实现者改动了已冻结的红相文件（调用形状迁移本应只由 test-agent 做），Lead 核验"断言零改动"后接受；
-  ③ 一次提交用 `git add docs/` 过宽，误将 teammate 产出的审计文档一并纳入。
-  ④ Lead 在修 NFR 基准豁免计数时用 `open(p,'w')` 后才因 TypeError 中断，把 `.dev-team/nfr-baseline.json` 截断为空，
-  已 `git checkout --` 立即还原并重做（未造成交付污染）。教训：改账本类文件必须「先读入→改内存→再写」，且写前确认已成功解析。
+- **真实拦截（L3 价值 > 全部机器门禁）**：合入审查抓到 **1 BLOCKING** ——
+  `activeStreamKind` 在 `turn:completed/failed/cancelled/suspended` 四路终态均不复位，而末次模型调用按协议不发
+  `hop_complete`，故每轮结束后残留 `"content"`；下一轮 `submitTurn` 到 `turn:started` 的 awaiting-first-signal 窗口
+  被判 `responding` 且状态条隐藏，三点动画又已删除 ⇒ **该窗口零进行中指示**（违反 F1-2/F4-2）。
+  该缺陷在 18 条验收用例全绿的情况下未被任何机器门禁发现：F1 夹具用新 pinia（`activeStreamKind=undefined` 走回退路径），
+  **恰好掩盖了"状态残渣"这一类缺陷**。
+- **另 2 条 ADVISORY 同样是本波新引入的回归**：`MarkdownRenderer.scheduleNonStreamingRender` 在空白内容提前 return
+  却已置在飞标记 ⇒ 后续流式更新被 dirty 永久吞掉；`streamingRenderPathLock=false` 延续到完成态 ⇒ 末帧才出现的
+  markdown 语法被原样显示。二者均由审查给出可跑反例（`/tmp/w59-review/*.spec.ts`）。
+- **门禁穿透（流程）**：Lead 在 `update_goal complete` 之前未执行 Phase 5 元复盘、Phase 6 入队与 L3 审查，
+  属流程偏离，本文件与两路 review JSON 为事后补做；补做后才发现上述 1 BLOCKING。
+- **误杀**：0 条 BLOCKING 误判；7 条计划阶段 ADVISORY 中 3 条（F3-5② 口径未落契约、F4-5 夹具自证、F4-2 钉死文案）
+  被 Lead 采纳为契约修订 D-59-7/8/9 与 A-59-3/4，其余 4 条登记为可接受或已覆盖。
+- **门禁自身假绿**：`dev-meta-lint.py` 仅 glob 判 `review-plan*.json` / `review-join*.json` 是否存在 ——
+  历史波次残留文件即可让它变绿。本波主动产出 wave-59 专属两份收据并点名此机制缺陷。
 
-## 3. 分工契约与隔离有效性
+## 3. 分工契约与隔离有效性（Contract Isolation）
 
-- **测试分权有效**：红相由 test-agent 独立编写，多次挡回实现（T7 红相证明修复前 Write 真落盘）；
-  `c141_1` 断言改写采用「生产可观察行为」而非「适配垫片自证」，是分权制的正收益。
-- **契约迁移边界模糊**：删除 `set_context` 属 API 形状变更，测试迁移与实现同批落地，
-  导致「红相先于实现」在物理上不可复现（迁移时 F2 已落地）。应先冻结 API 形状再冻结红相。
-- **节奏不均**：frontend-executor 前半程空转等红相，test-agent 串行写 5 个测试文件，一人忙一人等。
-- **Lead 负载**：全部 git 写、门禁复跑、基准修订、ADR/提案、审查收据补写都在 Lead；
-  teammate 未覆盖「文档治理」「收据 schema 合规」两类工作。
+- **测试分权成立**：test-agent 独立依契约矩阵写 18 条验收 + 迁移 6 条既有断言（仅换定位锚点，物理口径 0.5px / 单调不减未动）；
+  executor 全程只读测试，两次「测试红」均改实现而非改断言。红相/绿相均有 md5 钉版溯源。
+- **契约冻结有效但有一次缺口**：F3-5② 的**收窄口径只写在红相收据 §6，未同步到契约矩阵**，直到 L3 审查才暴露；
+  说明「裁定落收据 ≠ 裁定落契约」。已在 §7 补登记 D-59-7。
+- **共享工作区隔离失败（本波最大教训）**：工作区内另有一个**仍在活动**的波次（slash commands / TUI，写入时间到次日 09:02）
+  与 wave-59 同文件混改（`stores/runtime.ts` getter 区域两波改动落在同一 hunk、`status.ts`、`HomeWorkspace.vue`）。
+  后果：① 无法提交（hunk 级切分不可行，强行提交会产出不可构建中间态）；② 全量门禁数字持续漂移（1139→1142→1144）；
+  ③ `wave47-ob2` 因他人改 `docs/observability.yaml` 而红，一度干扰归因。**Roster 内正交 ≠ 工作区正交**。
 
-## 4. 元协议迭代建议
+## 4. 元协议迭代建议（Self-Evolving Protocol）
 
-1. **审查收据骨架前置**：在 L3/L3-P 派发模板里内联最小 JSON（`schema_version/reviewer.session_id/attestation`）
-   并附 `dev-review-lint` 自检一行；本波 3 次往返即可省。
-2. **API 形状先冻结再冻结红相**：含公共方法删除/改签的任务，先用 Protocol Agent 落新形状空桩并锚定，
-   再冻结红相，否则「红相先于实现」不可验证。
-3. **NFR 基准官方支持 `exceptions[]`**：本波流式 idle 语义套不上 `external_call_timeout_ms=3000`，
-   首轮只能靠 L3-P 抓出。建议 schema 增加例外条目（`guarantee` 必须可被代码行验证、`known_gap_ref` 必填），
-   并让 `dev-nfr-lint` 禁止例外中出现绝对化承诺词，除非有 elapsed 上界证据。
-4. **门禁去重**：全量 `cargo test --workspace` 与 `npx vitest run` 由 Lead 在栅栏跑一次并落收据，
-   teammate 只跑自身 scope 子集——本波可省 5 次重复全量跑。
-5. **既有 flaky 进基线白名单**：`regression-baseline-<wave>.json` 增 `known_flaky[]`，
-   后续波次直接比对而非重新定责（本波为一条既有 flaky 花了 2 轮取证）。
+1. **共享工作区存在外部活动会话时，红相/绿相一律在 `git archive <base>` 快照或独立 worktree 采集**，并把源码 md5 写入收据。
+   （本波已验证有效，建议写进 `dev-team` 的「红相采集」条款，替代「在共享工作区直接跑」。）
+2. **状态机类改动必须补「终态残留」用例**：断言「turning terminal → 立即开新轮」窗口内的 UI 语义；
+   夹具禁止用全新 store 实例掩盖跨轮残渣（本波 F1 夹具即栽在此）。
+3. **L3 对抗审查必须在 `update_goal complete` 之前强制跑**；契约中任何「口径收窄」必须当场落契约矩阵，
+   不得只落在红相收据（否则交付说明会过度声称覆盖，本波 F3-5 一度把 RC1..RC5 全清当成已证）。
+4. **提交前置检查「是否存在外部活动会话」**：若有，先做无损快照（`git stash create` + 未跟踪文件打包），
+   并把「待提交文件清单 + hunk 切分可行性结论」写入交付说明，再交给人裁决提交时机。
+5. **诊断阶段优先外派 Explorer**：Lead 亲自读 ≥5 文件属反模式，改为 E2 Explorer 出「根因候选 + path:line + 反证」。
+
+## 5. 审查两轮闭环（2026-11-02 追加）
+
+- **r1 → FAIL**：1 BLOCKING（B-59-1 `activeStreamKind` 终态不复位）+ 2 ADVISORY。**三条都是本波新引入的回归**，而当时 18 条验收用例与全量机器门禁全绿 —— 说明"夹具覆盖契约断言"不等于"门禁覆盖状态机"。
+- **r1 修复 → r2 PASS**：三处改动均以「守卫之后 / 早退之前」为落点，2 条 ADVISORY 由复审自建 5+6 个探针独立复验（`/tmp/w59r2/*`）。
+- **r2 新发现 A-59-5**（同类第五入口：会话切换携带 hop 级瞬时态）→ 当轮修复，并新增 F1-5 覆盖；验收用例 18 → 23。
+- **变异敏感性自证**：test-agent 用 6 个 mutant 反向验证新用例确能捕获对应缺陷（M1..M4/M6 真红、M5 对照 PASS 如实登记）—— 这是本波最值得固化为流程的动作：**新增门禁必须附 mutant 反证**。

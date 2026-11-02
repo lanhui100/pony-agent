@@ -1,0 +1,360 @@
+{
+ "applicability": {
+  "acceptance_tests_present": true,
+  "note": "无验收测试时 red/drift 规则判 not-applicable，绝不静默通过"
+ },
+ "repo_profile": {
+  "acceptance_dirs": [
+   "tests/acceptance"
+  ],
+  "has_acceptance": true,
+  "top_exts": [
+   [
+    "md",
+    1024
+   ],
+   [
+    "json",
+    356
+   ],
+   [
+    "png",
+    251
+   ],
+   [
+    "rs",
+    234
+   ],
+   [
+    "ts",
+    185
+   ],
+   [
+    "txt",
+    165
+   ]
+  ],
+  "test_scripts": {
+   "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
+   "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+   "cargo:test:regression": "cargo test --manifest-path src-tauri/Cargo.toml --test session_regression --test provider_registry_regression --test tool_router_regression --target-dir target-test",
+   "cargo:test:shared": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 test test",
+   "cargo:test:exact": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-a test",
+   "cargo:test:exact:b": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-b test",
+   "cargo:test:exact:c": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-c test",
+   "test": "npm run test:unit",
+   "test:unit": "vitest run",
+   "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
+   "test:e2e": "npm run build && playwright test",
+   "test:tauri:smoke": "node scripts/tauri-smoke.js",
+   "preview:e2e": "vite preview --host 127.0.0.1 --port 4175"
+  }
+ },
+ "run_id": "session-6a7b2174-7f3e-4ed9-83c8-3fe48d8bfe05",
+ "task": "架构评估逐项复核并实施修复(wave-55)：编译门禁/并发授权上下文/沙箱诚实性/持久化原子性/渲染层外泄/事件sessionId/文档事实同步",
+ "tier": "B",
+ "base": "5fa0ca6",
+ "head": "9001182",
+ "work": {
+  "L": 1843,
+  "files": 29,
+  "board_tasks": [
+   "F1 恢复 cargo --all-targets 编译门禁（113 处 TurnInput 构造缺字段）",
+   "T2 红相冻结：为已复核缺陷编写独立验收测试",
+   "T3 Rust 核心缺陷修复（授权上下文/沙箱/持久化/provider/MCP/密钥/registry）",
+   "T4 前端/宿主渲染层安全与会话隔离修复",
+   "T5 治理收口：ADR 状态、白名单与文档漂移修正",
+   "T6 修陈旧夹具：tool_router_regression 的 edit 未传 expectedHash（HEAD 既有红）",
+   "T7 BLOCKING 修授权上下文 fail-open：goal 续轮丢失 tool_authorization_mode",
+   "T8 BLOCKING 修 turn:delta 缺 sessionId 导致 buffered provider 不渲染",
+   "W56-A 取消语义闭环：provider 流加取消观测与总时长上界",
+   "W56-B BatchExecute 在 read_only 下整体拒绝",
+   "W56-C CapabilityRegistry 单一真值（消除双副本与非原子双写）",
+   "W56-D Tauri 热路径同步命令 async 化（解 UI 主线程阻塞）",
+   "W56-T 红相与契约测试（BatchExecute / Registry 单真值 / 取消&elapsed / IPC 契约 / 覆盖率门禁）",
+   "W57-A TS/Rust 契约漂移机械门禁（serde 快照 + Node 比对，零新依赖）"
+  ],
+  "gates_seen_in_session": {
+   "accept": 27,
+   "unit": 28
+  }
+ },
+ "commits": [
+  {
+   "sha": "9bf78627a3f1",
+   "full": "9bf78627a3f15ef812795b2c579ad593dc3c6c6a",
+   "subject": "fix(core): restore all-targets build by filling TurnInput.tool_authorization_mode in test constructors",
+   "files": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/sse_adapter.rs"
+   ],
+   "stat": "3 files changed, 113 insertions(+)"
+  },
+  {
+   "sha": "4bc7a7c0a6ac",
+   "full": "4bc7a7c0a6accac2a6d9981c8d57b40f86f84930",
+   "subject": "test(arch-remediation): freeze red-phase acceptance tests for verified architecture defects",
+   "files": [
+    "crates/pony-agent-core/tests/concurrent_turn_context_isolation_red.rs",
+    "crates/pony-agent-core/tests/sandbox_isolation_honesty_red.rs",
+    "crates/pony-agent-core/tests/session_persistence_observability_red.rs",
+    "tests/markdown-external-resource-allowlist.red.spec.ts",
+    "tests/runtime-session-event-isolation.red.spec.ts"
+   ],
+   "stat": "5 files changed, 816 insertions(+)"
+  },
+  {
+   "sha": "115ce83d48f0",
+   "full": "115ce83d48f0d496a180c7a6d3431b4a001161b3",
+   "subject": "docs(governance): sync ADR facts, whitelist truth and doc links; add ADR 0054 and debt proposals [decl-change-approved]",
+   "files": [
+    "AGENTS.md",
+    "docs/INDEX.md",
+    "docs/analysis/builtin-tool-surface-comparison-2026-06-22.md",
+    "docs/analysis/trace-redteam-2026-06-01.md",
+    "docs/architecture/context-state-subsystem.md",
+    "docs/architecture/overview.md",
+    "docs/architecture/session-control-plane-and-audit-surface.md",
+    "docs/architecture/structural-debt-proposals.md",
+    "docs/audit/engineering-quality-audit-2026-11-01.md",
+    "docs/decisions/0008-event-sourcing-evolution.md",
+    "docs/decisions/0027-end-to-end-event-bus-architecture.md",
+    "docs/decisions/0054-render-layer-exfil-csp-and-secret-masking.md",
+    "docs/decisions/README.md",
+    "docs/design/app-icon.md",
+    "docs/observability.yaml"
+   ],
+   "stat": "15 files changed, 327 insertions(+), 22 deletions(-)"
+  },
+  {
+   "sha": "59a5df7e8aa5",
+   "full": "59a5df7e8aa54efeafd4d5031fd5b640634ce833",
+   "subject": "fix(core): close verified concurrency/security/persistence defects (wave-55)",
+   "files": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/dispatcher_composites.rs",
+    "crates/pony-agent-core/src/agent/governed_executor.rs",
+    "crates/pony-agent-core/src/agent/mcp_client.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/sandbox.rs",
+    "crates/pony-agent-core/src/agent/secret_store.rs",
+    "crates/pony-agent-core/src/agent/session/backend.rs",
+    "crates/pony-agent-core/src/agent/session/file_backend.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/session/tests.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/tests/concurrent_turn_context_isolation_red.rs",
+    "crates/pony-agent-core/tests/non_streaming_provider_session_id_red.rs",
+    "crates/pony-agent-core/tests/read_only_authorization_continuation_red.rs",
+    "crates/pony-agent-core/tests/wave36_draft_gate_session.rs",
+    "crates/pony-agent-core/tests/wave36_plan_execution_approval.rs",
+    "crates/pony-agent-core/tests/wave37_tool_surface.rs"
+   ],
+   "stat": "25 files changed, 1630 insertions(+), 209 deletions(-)"
+  },
+  {
+   "sha": "e7430ac1108d",
+   "full": "e7430ac1108d3dc447eb8937c02312e3c8f352d7",
+   "subject": "fix(web): close render-layer exfil channel and session-event fail-open (wave-55)",
+   "files": [
+    "index.html",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/platform.rs",
+    "src-tauri/tauri.conf.json",
+    "src-tauri/tests/tool_router_regression.rs",
+    "src/components/MarkdownRenderer.vue",
+    "src/components/config/ConfigGeneralSection.vue",
+    "src/lib/markdown.ts",
+    "src/lib/telemetry.ts",
+    "src/stores/runtime.ts",
+    "src/types/runtime.ts",
+    "tests/markdown-sanitize.redteam.spec.ts",
+    "tests/runtime-store.spec.ts",
+    "tests/wave-4-trace-id-live.spec.ts"
+   ],
+   "stat": "14 files changed, 599 insertions(+), 62 deletions(-)"
+  },
+  {
+   "sha": "90011820dd07",
+   "full": "90011820dd076f5f3a0b5c75594a219ac783f488",
+   "subject": "chore(wave-55): close-out ledger, review receipts, NFR baseline amendment and meta-retrospective",
+   "files": [
+    ".dev-team/meta-retrospective-wave54.md",
+    ".dev-team/meta-retrospective.md",
+    ".dev-team/nfr-baseline.json",
+    ".dev-team/regression-baseline-wave55.json",
+    ".dev-team/review-join.json",
+    ".dev-team/review-l3-concurrency.json",
+    ".dev-team/review-l3-security.json",
+    ".dev-team/review-plan.json",
+    ".dev-team/state.json",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "docs/architecture/structural-debt-proposals.md",
+    "docs/audit/engineering-quality-audit-2026-11-01.md"
+   ],
+   "stat": "12 files changed, 454 insertions(+), 322 deletions(-)"
+  }
+ ],
+ "post_run_commits": [
+  {
+   "sha": "57c6412dfa80",
+   "full": "57c6412dfa8015c74b41751d0dc5c7d680fb29df",
+   "subject": "feat(arch): complete wave-58 context and skills loading mechanism overhaul",
+   "files": [
+    ".dev-team/contract-matrix-wave58.md",
+    ".dev-team/meta-retrospective-wave58.md",
+    ".dev-team/review-join-a.json",
+    ".dev-team/review-join-a2.json",
+    ".dev-team/review-join-b.json",
+    ".dev-team/review-join-b2.json",
+    ".dev-team/review-plan-wave58.json",
+    ".dev-team/state.json",
+    ".dev-team/wave58-delivery.md",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/instruction_touch.rs",
+    "crates/pony-agent-core/src/agent/path_permission.rs",
+    "crates/pony-agent-core/src/agent/skill_body.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+    "crates/pony-agent-core/tests/wave58_context_skills.rs",
+    "crates/pony-agent-core/tests/wave58_singleton_isolation.rs",
+    "docs/decisions/0046-global-config-loading-wave42.md",
+    "management/task-system/02_REVIEWS/2026-11-01-context-skills-loading-audit.md"
+   ]
+  },
+  {
+   "sha": "0a1fdde203e8",
+   "full": "0a1fdde203e8e894eec82729141e90e9069f592c",
+   "subject": "feat(arch): complete wave-56 and wave-57-A structural hardening",
+   "files": [
+    ".dev-team/nfr-baseline.json",
+    "crates/pony-agent-core/src/agent/control_plane/capability_commands.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/dispatcher_composites.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+    "crates/pony-agent-core/src/agent/provider/responses_api.rs",
+    "crates/pony-agent-core/src/agent/runtime/ingress_mediation.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_exec.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_runner.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/tests/provider_stream_guard_red.rs",
+    "crates/pony-agent-core/tests/read_only_batch_deny_red.rs",
+    "crates/pony-agent-core/tests/ts_contract_snapshot.rs",
+    "docs/INDEX.md",
+    "docs/architecture/structural-debt-proposals.md",
+    "docs/contracts/README.md",
+    "docs/contracts/ts-contract.snapshot.json",
+    "package.json",
+    "scripts/check-ts-contract.mjs",
+    "src/types/runtime.ts",
+    "tests/HomeWorkspace.spec.ts",
+    "tests/env-example.spec.ts",
+    "tests/ipc-contract-shape.spec.ts",
+    "vitest.config.ts"
+   ]
+  },
+  {
+   "sha": "d321153be20b",
+   "full": "d321153be20b41c54e4f30990500de4bfb7d37ad",
+   "subject": "perf(ipc): move hot-path Tauri commands off the IPC thread and drop dead IPC wrappers",
+   "files": [
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/tauri_adapter.rs",
+    "src/components/HomeWorkspace.vue"
+   ]
+  }
+ ],
+ "foreign_commits": [],
+ "frozen_test_drift": [
+  {
+   "path": "crates/pony-agent-core/tests/concurrent_turn_context_isolation_red.rs",
+   "anchor": "4bc7a7c0a6ac",
+   "modified_by": "59a5df7e8aa5",
+   "subject": "fix(core): close verified concurrency/security/persistence defects (wave-55)"
+  }
+ ],
+ "review_receipts": [
+  {
+   "file": ".dev-team/review-join.json",
+   "schema_version": 2,
+   "executed_by": "lead-recheck",
+   "reviewer_kind": "lead",
+   "reviewer_session": "lead-recheck",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "e7430ac1108d3dc447eb8937c02312e3c8f352d7",
+   "verdict": "PASS",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-l3-concurrency.json",
+   "schema_version": 2,
+   "executed_by": "623bc388-f119-49da-9e2c-b13d37677041",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "623bc388-f119-49da-9e2c-b13d37677041",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "59a5df7",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-l3-security.json",
+   "schema_version": 2,
+   "executed_by": "f98e7ce9-1550-42bf-aece-6946ff87b941",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "f98e7ce9-1550-42bf-aece-6946ff87b941",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "e7430ac",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-plan.json",
+   "schema_version": 2,
+   "executed_by": "388ad82a-b9ec-4e6d-9ad9-be0422510650",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "388ad82a-b9ec-4e6d-9ad9-be0422510650",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "5fa0ca6",
+   "verdict": "FAIL",
+   "independent": true
+  }
+ ],
+ "mechanical_red_flags": [
+  "frozen_test_drift:crates/pony-agent-core/tests/concurrent_turn_context_isolation_red.rs",
+  "impl_commit_modified_frozen_test:59a5df7e8aa5",
+  "impl_commit_modified_frozen_test:e7430ac1108d",
+  "red_commit_after_impl",
+  "self_signed_review:review-join-a.json",
+  "self_signed_review:review-join-a2.json",
+  "self_signed_review:review-join-b.json",
+  "self_signed_review:review-join-b2.json",
+  "self_signed_review:review-join.json",
+  "self_signed_review:review-l3-concurrency.json",
+  "self_signed_review:review-l3-security.json",
+  "self_signed_review:review-plan-wave58.json",
+  "self_signed_review:review-plan.json"
+ ],
+ "unknowns": [
+  "每个门禁实际抓到多少缺陷（gate_caught）需从 review JSON/测试日志判定",
+  "用户是否口头授权了自扩范围（scope）需读会话原文"
+ ],
+ "pack_hash": "02173c45b6ff7d24"
+}

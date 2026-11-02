@@ -626,6 +626,166 @@
         }
       },
       "status": "join_barrier_round2_pass"
+    },
+    {
+      "wave": 59,
+      "theme": "desktop UI/UX 四项优化（等待动画去重 / 计数下移 / 流式闪跳 / 状态准确性）",
+      "baseline_commit": "d3745a77eb84788345251aacda452845423e07ff",
+      "contract_matrix": ".dev-team/contracts/wave-59-desktop-uiux.md",
+      "tier": "B",
+      "tasks": [
+        "task-1",
+        "task-2"
+      ],
+      "branches": {
+        "task-1": {
+          "owner": "test-agent",
+          "status": "completed",
+          "write_scopes": [
+            "tests/acceptance/wave59/",
+            "tests/e2e/wave59-stream-stability.spec.ts"
+          ]
+        },
+        "task-2": {
+          "owner": "executor",
+          "status": "completed",
+          "write_scopes": [
+            "src/components/chat/WorkspaceTurnItem.vue",
+            "src/components/HomeWorkspace.vue",
+            "src/components/HomeStatusPanel.vue",
+            "src/components/MarkdownRenderer.vue",
+            "src/lib/runtime/status.ts",
+            "src/stores/runtime.ts"
+          ]
+        }
+      },
+      "status": "completed",
+      "red_commit": null,
+      "red_phase_note": "共享工作区存在并发波次（wave-slash-1）未提交改动，未做 git 提交；红相在 git archive d3745a7 纯净快照采集（.dev-team/wave59-red-receipts.md §1）",
+      "delivery": ".dev-team/wave59-delivery.md",
+      "join_barrier": {
+        "typecheck": {
+          "command": "npm run typecheck",
+          "exit": 0
+        },
+        "full_vitest": {
+          "command": "npx vitest run",
+          "exit": 1,
+          "passed": 1138,
+          "failed": 1,
+          "skipped": 12,
+          "failed_items": [
+            "tests/acceptance/wave47-ob2-enforcement.spec.ts > T7（并发波次既有失败）"
+          ]
+        },
+        "build": {
+          "command": "npm run build",
+          "exit": 0
+        },
+        "e2e_f3_5": {
+          "command": "npx playwright test tests/e2e/wave59-stream-stability.spec.ts",
+          "exit": 0,
+          "frames": 102,
+          "scroll_retractions": 0,
+          "blank_frames": 0,
+          "console_errors": 0
+        },
+        "e2e_c2_2": {
+          "command": "npx playwright test tests/e2e/wave17-browser-gate.spec.ts -g C2-2",
+          "exit": 0
+        },
+        "observability": {
+          "audit_diff_exit": 0,
+          "check_declaration_exit": 0,
+          "applicability": "N-A（纯前端渲染层）"
+        },
+        "reviews": [
+          {
+            "id": "l3-plan-wave59",
+            "file": ".dev-team/review-plan-wave59.json",
+            "verdict": "PASS",
+            "blocking": 0,
+            "advisory": 7,
+            "stage": "post-hoc 契约审计"
+          },
+          {
+            "id": "l3-join-wave59",
+            "file": ".dev-team/review-join-wave59.json",
+            "verdict": "FAIL",
+            "blocking": 1,
+            "advisory": 2,
+            "round": 1
+          },
+          {
+            "id": "l3-join-wave59-r2",
+            "file": ".dev-team/review-join-wave59-r2.json",
+            "verdict": "PASS",
+            "blocking": 0,
+            "advisory": 1,
+            "round": 2
+          }
+        ],
+        "fixes": [
+          {
+            "id": "B-59-1",
+            "summary": "activeStreamKind 终态四路 + submitTurn 复位",
+            "status": "fixed",
+            "verified_by": "r2"
+          },
+          {
+            "id": "A-59-1",
+            "summary": "MarkdownRenderer 在飞标记只在真正排程时登记",
+            "status": "fixed",
+            "verified_by": "r2"
+          },
+          {
+            "id": "A-59-2",
+            "summary": "streamingRenderPathLock 仅流式期有效，完成态非纯文本必修 markdown",
+            "status": "fixed",
+            "verified_by": "r2"
+          },
+          {
+            "id": "A-59-5",
+            "summary": "activeStreamKind 不跨会话残留（后台轮按 buffer 推导 + 快照清除）",
+            "status": "fixed",
+            "verified_by": "F1-5"
+          }
+        ]
+      },
+      "decisions": [
+        {
+          "id": "D-59-5",
+          "rule": "F2 计数行排版：grid grid-cols-3 + 载体 justify-center + 数字 min-w-[1.75rem] text-left；testid 与 wave-17 C2 物理口径不变",
+          "owner": "executor",
+          "by": "lead"
+        },
+        {
+          "id": "D-59-6",
+          "rule": "授权 test-agent：① markdown-streaming-smooth 盲等改 vi.waitFor；② wave17 C2-2 夹具 token 注入（阈值零改动）",
+          "owner": "test-agent",
+          "by": "lead"
+        }
+      ],
+      "evidence": [
+        "docs/release/evidence/wave-59/01-status-panel-counts.png",
+        "docs/release/evidence/wave-59/02-awaiting-first-signal.png",
+        "docs/release/evidence/wave-59/03-status-tool-running.png",
+        "docs/release/evidence/wave-59/04-streaming-final.png",
+        "docs/release/evidence/wave-59/05-streaming-mid.png"
+      ],
+      "acceptance_tests": {
+        "files": 5,
+        "cases": 23,
+        "exit": 0
+      },
+      "meta_retrospective": ".dev-team/meta-retrospective.md",
+      "queue": "enqueued pending (session-e17642a6-b180-4ab4-abae-ee3260f00c36)",
+      "adr": "docs/decisions/0056-streaming-render-stale-while-render-and-hop-status.md",
+      "pending_commit_reason": "共享工作区存在另一活动波次未提交改动；runtime.ts/status.ts/HomeWorkspace.vue 同文件混改，hunk 级切分不可行",
+      "snapshot": {
+        "stash_create": "62792c1c1c2dc0db2e211144bd537557ec3ac924",
+        "untracked_tar": "/tmp/pony-untracked-20261102T090813.tar.gz"
+      }
     }
   ],
   "counters": {
@@ -634,6 +794,9 @@
       "adversarial_failures": 0,
       "impl_defect": 0,
       "note": "single pre-existing failure escaped both counters because it predates the wave"
+    },
+    "wave59": {
+      "functional_failures": 0
     }
   }
 }
