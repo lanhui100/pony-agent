@@ -1,0 +1,68 @@
+/**
+ * Pony Design System — Streaming Motion (PDS-SM)
+ * L2 令牌层：纯 CSS 自定义属性，零 JS、零选择器逻辑。
+ *
+ * 契约：本文件只声明变量，不声明任何 animation / transition。
+ *       消费方 @import 后即可被 primitives.css 与宿主样式引用。
+ *
+ * 参数来源与适用前提（见 docs/decisions/0057）：
+ * - 缓动曲线与时长来自 Claude Desktop 逆向还原方案，经本项目校准；
+ * - `--pds-pin-tolerance` / `--pds-input-cooldown` 是 intent.ts 默认值的 CSS 镜像，
+ *   两者必须同步修改（改一处不改另一处 = 静默分裂）。
+ */
+
+:root {
+  /* ── 缓动（6 条，覆盖 streaming 的全部语义） ───────────────────── */
+  /* token 级消解：先快后极缓，模拟"对焦" */
+  --pds-ease-resolve: cubic-bezier(0.16, 1, 0.3, 1);
+  /* 块级入场：略带回弹的减速 */
+  --pds-ease-enter: cubic-bezier(0.22, 1, 0.36, 1);
+  /* 高度展开：瞬间打开到八成再吃满 */
+  --pds-ease-expand: cubic-bezier(0.19, 1, 0.22, 1);
+  /* 状态行抬升 / 下落 */
+  --pds-ease-rise: cubic-bezier(0.3, 0.7, 0.4, 1);
+  --pds-ease-fall: cubic-bezier(0, 0, 0.2, 1);
+  /* 消息级过冲（+30% 果冻感） */
+  --pds-ease-overshoot: cubic-bezier(0.34, 1.3, 0.64, 1);
+
+  /* ── 时长（4 档，全部可被降级块整体关闭） ─────────────────────── */
+  /* 关键约束：reveal 必须短于 token 到达间隔，否则动画积压成拖影 */
+  --pds-dur-reveal: 120ms;
+  --pds-dur-base: 200ms;
+  --pds-dur-block: 300ms;
+  --pds-dur-message: 450ms;
+  --pds-dur-status-in: 240ms;
+  --pds-dur-status-out: 180ms;
+
+  /* ── 位移与形变距离 ──────────────────────────────────────────── */
+  --pds-reveal-shift: 4px;
+  --pds-block-shift: 5px;
+  --pds-message-shift: 12px;
+  --pds-status-rise-shift: 6px;
+  --pds-status-fall-shift: -4px;
+  --pds-block-blur: 4px;
+  --pds-block-scale: 0.9;
+
+  /* ── 视口物理 ──────────────────────────────────────────────────── */
+  /* `--pds-pin-tolerance` 与 `--pds-input-cooldown` 是 logic/intent.ts 里
+     DEFAULT_SCROLL_INTENT 的 CSS 镜像（改一处不改另一处 = 静默分裂）。
+     另两个**没有** JS 镜像，只是给宿主的布局/节奏参考：
+       - `--pds-bottom-buffer`：滚动容器底部留白，JS 侧无对应参数（由宿主样式决定）；
+       - `idleResumeMs`（3000ms）：仅存在于 intent.ts，不设 CSS 镜像，避免出现永不消费的令牌。 */
+  /* 最新一行下方预留的弹性缓冲，使阅读焦点落在黄金分割线而非贴底 */
+  --pds-bottom-buffer: 35vh;
+  /* 距底容差：小于等于该值视为"贴底"，可重新吸附。
+     上游 Claude 用 40px；本仓 wave-14 实测 40px 会频繁误判并产生 ±1 行抖动，
+     故校准为 260px —— 引用该值时必须连同适用前提一起引用。 */
+  --pds-pin-tolerance: 260px;
+  /* 用户物理操作后的冷却窗口：窗口内禁止任何程序化滚动 */
+  --pds-input-cooldown: 150ms;
+
+  /* ── 可选方言：三点等待波（optional dialect） ─────────────────── */
+  /* 启用前必读 anti-patterns.md §4：该图形不得与状态文案重复播报同一事实。 */
+  --pds-dot-size: 3px;
+  --pds-dot-gap: 3.5px;
+  --pds-dot-stagger: 150ms;
+  --pds-dur-dots: 1900ms;
+  --pds-dot-color: currentColor;
+}

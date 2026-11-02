@@ -1,0 +1,237 @@
+/**
+ * Pony Design System — Streaming Motion (PDS-SM)
+ * L3 原语层：@keyframes + 由 data-pds-* 属性驱动的零 JS 效用类。
+ *
+ * 依赖 tokens.css 先被加载。宿主只需在 DOM 上写属性，不需要 import 任何 JS。
+ *
+ * 属性契约（宿主框架唯一需要实现的东西）：
+ *   data-pds-reveal                     ← 新追加的尾巴节点（每 tick 重建）
+ *   data-pds-block-enter                ← 一次性落定的块（段落/代码块/工具卡）
+ *   data-pds-message-enter              ← 整条消息首次挂载
+ *   data-pds-expand / data-pds-expanded ← 高度折叠容器
+ *   data-pds-status="enter" | "exit"    ← 状态行交接
+ *   data-pds-dots                       ← 三点等待波（可选方言）
+ *   data-pds-reduce-motion="true"       ← 应用内降级开关（宿主根节点）
+ */
+
+/* ==========================================================================
+   P1 token 级揭示 —— 尾巴节点
+   只准 opacity + transform。该节点每个 tick 重建，用 filter 会逐 tick
+   创建/销毁合成层（见 anti-patterns.md §2）。
+   ========================================================================== */
+
+@keyframes pds-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(var(--pds-reveal-shift));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 注意：**不要**给本选择器加 `will-change`。尾巴节点每 tick 重建，
+   `will-change` 会在每次重建时触发一次层提升 + 销毁，与 anti-patterns §2 是同一类问题
+   （凡是触发层提升的属性，在"每 tick 重建"的节点上都同样有害）。
+   `opacity` + `transform` 的动画本身即走合成器，无需显式提升。 */
+[data-pds-reveal] {
+  display: inline;
+  animation: pds-reveal var(--pds-dur-reveal) var(--pds-ease-resolve) both;
+}
+
+/* ==========================================================================
+   P2 块级入场 —— 一次性落定，允许 blur
+   关键：0%→30% 保持 opacity:0，先让 blur/scale/位移归位，再显影。
+   若不拆这两段，会看到"形变发生一次、显影再发生一次"的双闪。
+   注意：`both` 会在节点重建时重播；只用于身份稳定的块（anti-patterns.md §5）。
+   ========================================================================== */
+
+@keyframes pds-block-enter {
+  0% {
+    opacity: 0;
+    filter: blur(var(--pds-block-blur));
+    transform: translateY(var(--pds-block-shift)) scale(var(--pds-block-scale));
+  }
+  30% {
+    opacity: 0;
+    filter: blur(var(--pds-block-blur));
+    transform: none;
+  }
+  100% {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+}
+
+[data-pds-block-enter] {
+  animation: pds-block-enter var(--pds-dur-block) var(--pds-ease-enter) both;
+}
+
+/* ==========================================================================
+   P3 消息级入场 —— 整条消息只播一次（不是逐字）
+   ========================================================================== */
+
+@keyframes pds-message-enter {
+  from {
+    opacity: 0;
+    transform: translateY(var(--pds-message-shift));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+[data-pds-message-enter] {
+  animation: pds-message-enter var(--pds-dur-message) var(--pds-ease-overshoot);
+}
+
+/* ==========================================================================
+   P4 高度折叠 —— Grid 0fr ↔ 1fr
+   用尺寸过渡取代 scrollHeight 测量，消除同步布局与视口抖动。
+   唯一被允许的布局动画，且必须作用在已知内部高度的容器上。
+   注意：子元素 overflow:hidden 会裁剪焦点环与外投影，容器需预留内边距。
+   ========================================================================== */
+
+[data-pds-expand] {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--pds-dur-base) var(--pds-ease-expand);
+}
+
+[data-pds-expand][data-pds-expanded="true"] {
+  grid-template-rows: 1fr;
+}
+
+[data-pds-expand] > * {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  align-self: start;
+}
+
+/* ==========================================================================
+   P5 状态行交接 —— 升降代替硬切
+   ========================================================================== */
+
+@keyframes pds-status-rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--pds-status-rise-shift));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pds-status-fall {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(var(--pds-status-fall-shift));
+  }
+}
+
+[data-pds-status="enter"] {
+  animation: pds-status-rise var(--pds-dur-status-in) var(--pds-ease-rise) both;
+}
+
+[data-pds-status="exit"] {
+  animation: pds-status-fall var(--pds-dur-status-out) var(--pds-ease-fall) both;
+}
+
+/* ==========================================================================
+   P6 三点等待波（可选方言）
+   三阶位移：下沉蓄力 → 冲顶 → 落回驻留 → 淡出。
+   周期 1.9s 刻意偏慢：传达"在长考"而非"卡死"。
+   相位延迟仅 150ms：成波不成跑马灯，视觉安静。
+   ========================================================================== */
+
+@keyframes pds-dot {
+  0%,
+  8% {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  22% {
+    opacity: 1;
+    transform: translateY(-2.5px);
+  }
+  36%,
+  70% {
+    opacity: 1;
+    transform: none;
+  }
+  90%,
+  100% {
+    opacity: 0;
+    transform: none;
+  }
+}
+
+[data-pds-dots] {
+  display: inline-flex;
+  gap: var(--pds-dot-gap);
+  position: relative;
+  top: 0.26em;
+}
+
+[data-pds-dots] > * {
+  width: var(--pds-dot-size);
+  height: var(--pds-dot-size);
+  border-radius: 50%;
+  background: var(--pds-dot-color);
+  opacity: 0;
+  animation: pds-dot var(--pds-dur-dots) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+[data-pds-dots] > *:nth-child(2) {
+  animation-delay: var(--pds-dot-stagger);
+}
+
+[data-pds-dots] > *:nth-child(3) {
+  animation-delay: calc(var(--pds-dot-stagger) * 2);
+}
+
+/* ==========================================================================
+   降级（双轨）：系统偏好 + 应用开关
+   一律 animation:none —— 元素直接呈现声明的终态样式。
+   禁止用"把时长压到 0.01ms"代替：那仍会闪一帧且存在 fill-mode 竞态。
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  [data-pds-reveal],
+  [data-pds-block-enter],
+  [data-pds-message-enter],
+  [data-pds-status],
+  [data-pds-dots] > * {
+    animation: none !important;
+  }
+
+  [data-pds-expand] {
+    transition: none !important;
+  }
+}
+
+[data-pds-reduce-motion="true"] [data-pds-reveal],
+[data-pds-reduce-motion="true"] [data-pds-block-enter],
+[data-pds-reduce-motion="true"] [data-pds-message-enter],
+[data-pds-reduce-motion="true"] [data-pds-status],
+[data-pds-reduce-motion="true"] [data-pds-dots] > *,
+[data-pds-reveal][data-pds-reduce-motion="true"],
+[data-pds-block-enter][data-pds-reduce-motion="true"],
+[data-pds-message-enter][data-pds-reduce-motion="true"],
+[data-pds-status][data-pds-reduce-motion="true"] {
+  animation: none !important;
+}
+
+[data-pds-reduce-motion="true"] [data-pds-expand],
+[data-pds-expand][data-pds-reduce-motion="true"] {
+  transition: none !important;
+}
