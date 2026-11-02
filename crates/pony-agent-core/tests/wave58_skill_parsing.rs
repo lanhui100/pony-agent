@@ -99,11 +99,16 @@ impl Drop for TempDir {
 }
 
 /// 环境变量守卫：Drop 时恢复修改前的取值（panic 路径同样恢复）。
+///
+/// 唯一消费者是 Unix 专属的符号链接用例（`#[cfg(unix)]`），故守卫本身同样按 unix 编译，
+/// 以免在 Windows 上成为 dead_code（CI 以 `-D warnings` 编译测试目标）。
+#[cfg(unix)]
 struct EnvGuard {
     key: &'static str,
     previous: Option<OsString>,
 }
 
+#[cfg(unix)]
 impl EnvGuard {
     fn set(key: &'static str, value: &Path) -> Self {
         let previous = std::env::var_os(key);
@@ -112,6 +117,7 @@ impl EnvGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         match self.previous.take() {
@@ -122,8 +128,10 @@ impl Drop for EnvGuard {
 }
 
 /// 环境变量串行锁：`$PONY_AGENT_HOME` 是进程级状态，读写它的用例统一在锁内串行。
+#[cfg(unix)]
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(unix)]
 fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }
