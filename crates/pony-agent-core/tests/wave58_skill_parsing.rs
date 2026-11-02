@@ -36,6 +36,8 @@ use pony_agent_core::agent::workspace_hotloader::{
     AgentScope, SkillOmissionReason, SkillScanReport, WorkspaceHotloader,
 };
 
+/// 仅 Unix 专属符号链接用例会注入该环境变量；Windows 上不编译，避免 dead_code。
+#[cfg(unix)]
 const PONY_AGENT_HOME_ENV: &str = "PONY_AGENT_HOME";
 
 /// 契约 F2-2 冻结的描述上限（单位：字符）。

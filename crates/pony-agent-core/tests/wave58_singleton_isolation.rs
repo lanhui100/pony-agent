@@ -73,6 +73,8 @@ impl TempDir {
         &self.root
     }
 
+    /// 唯一消费者是 Unix 专属用例（`#[cfg(unix)]`）；按 unix 编译以免 Windows 上成为 dead_code。
+    #[cfg(unix)]
     fn mkdir(&self, relative: &str) -> PathBuf {
         let path = self.root.join(relative);
         fs::create_dir_all(&path).expect("创建临时子目录失败");
