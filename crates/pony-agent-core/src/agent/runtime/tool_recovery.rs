@@ -132,6 +132,12 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
         blocked_tool_call,
         &synthetic_tool_result,
         move |delta| {
+            // ADR 0055 P0-2：首包时点信号（StreamStart）不承载内容，也**不参与** UI 首字延迟口径——
+            // 此处提前返回，UI 的 `first_token_latency` 语义仍是「首个内容增量」；trace span 侧
+            // 的 `llm.call.ttft_ms` 由 `turn_flow` 的独立 `on_delta` 采集，不受本处影响。
+            if matches!(delta, ProviderStreamChunk::StreamStart) {
+                return;
+            }
             // 单次时钟采样：保证 call TTFT ≤ turn TTFT 的数学不变式，
             // 避免两次独立 elapsed() 采样点漂移导致的时序反转 flake。
             let latency = if call_first_token_latency_for_emit.get().is_none()
@@ -156,6 +162,9 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
             };
             let mut did_emit = false;
             match delta {
+                ProviderStreamChunk::StreamStart => {
+                    // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
+                }
                 ProviderStreamChunk::Text(text) => {
                     if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush() {
                         emitted_reasoning_chars_for_emit.set(

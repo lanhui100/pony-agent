@@ -670,7 +670,7 @@ fn c2_governance_without_turn_has_no_session() {
 
 // ============================================================ PA51-C3 · 细分用量出口
 
-const KEY_REASONING: &str = "gen_ai.usage.reasoning.output_tokens";
+const KEY_REASONING: &str = "llm.reasoning.output_tokens";
 const KEY_CACHED: &str = "gen_ai.usage.cache_read.input_tokens";
 
 /// PA51-C3-T1/T2/T3：纯函数值级契约（不依赖 wire varint 反解）。

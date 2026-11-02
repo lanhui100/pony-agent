@@ -53,8 +53,8 @@
 
 | Span | 关键属性 | Langfuse 侧呈现 |
 | :--- | :--- | :--- |
-| `agent.turn`（root） | `langfuse.session.id` / `langfuse.trace.name` / `gen_ai.operation.name=agent.turn` / `agent.turn.id|sequence|phase`；整轮聚合 `gen_ai.usage.input_tokens|output_tokens`，以及（wave-51）`gen_ai.usage.reasoning.output_tokens|cache_read.input_tokens`（有值才输出） | SPAN（trace 根） |
-| `llm.chat` | `gen_ai.system` / `gen_ai.request.model` + `langfuse.observation.model.name` / `gen_ai.usage.input_tokens|output_tokens` /（wave-51）`gen_ai.usage.reasoning.output_tokens|cache_read.input_tokens` | **GENERATION**（带 model 与 token 用量；Langfuse 会从 input 减 cache_read、从 output 减 reasoning） |
+| `agent.turn`（root） | `langfuse.session.id` / `langfuse.trace.name` / `langfuse.release`（ADR 0055） / `gen_ai.operation.name=agent.turn` / `agent.turn.id|sequence|phase`；整轮聚合 `gen_ai.usage.input_tokens|output_tokens`，以及（wave-51）`llm.reasoning.output_tokens`（ADR 0055 迁出用量前缀） / `gen_ai.usage.cache_read.input_tokens`（有值才输出） | SPAN（trace 根） |
+| `llm.chat` | `gen_ai.system` / `gen_ai.request.model` + `langfuse.observation.model.name` / `gen_ai.usage.input_tokens|output_tokens` /（wave-51）`llm.reasoning.output_tokens`（ADR 0055 迁出用量前缀） / `gen_ai.usage.cache_read.input_tokens` / `llm.context.window_tokens`|`llm.context.ratio`（ADR 0055） / `llm.context.cache_hit_ratio`（ADR 0055） | **GENERATION**（带 model 与 token 用量；Langfuse 会从 input 减 cache_read；reasoning 与上下文键已迁出 `gen_ai.usage.` 前缀以免污染 usage.total） |
 | `tool.call` | `gen_ai.tool.name` / `langfuse.observation.type=tool` / `agent.tool.status|duration_ms|error` | **TOOL** |
 | `governance.decide` | `gen_ai.operation.name=governance.decide` / `governance.window|decision|policy_version|unpriced_turns` +（wave-51）`langfuse.session.id` | SPAN（wave-51 起进入语义轨，可按会话过滤） |
 

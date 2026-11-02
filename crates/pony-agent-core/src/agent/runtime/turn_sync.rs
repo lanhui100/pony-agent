@@ -85,7 +85,8 @@ impl AgentRuntime {
                 .iter()
                 .find(|activity| activity.parent_activity_id.is_none())
             {
-                crate::agent::otel::record_tool_call_span_with_call_id(
+                let otel_tool_error_kind = turn_tool_activity_error_kind(otel_top_activity);
+                crate::agent::otel::record_tool_call_span_with_call_id_and_kind(
                     crate::agent::otel::ToolSpanInput {
                         tool_name: otel_top_activity
                             .canonical_tool_name
@@ -102,6 +103,7 @@ impl AgentRuntime {
                         error: turn_tool_activity_error_text(otel_top_activity),
                     },
                     current_tool_call.call_id.clone(),
+                    otel_tool_error_kind.as_deref(),
                 );
             }
             tool_activities.extend(annotate_capability_tool_activities(
@@ -466,11 +468,13 @@ impl AgentRuntime {
         // 复用同一 id，保证"每个 turn:started 必有配对 turn:end"的配对不变式。
         let sync_turn_id = Self::sync_turn_event_id(&input);
         // Wave43 task-8 挂载切片：turn root span（agent.turn）在入口创建，函数返回时 Drop
-        // 自动结束 span，覆盖同步轮全部终态出口。TurnInput 无 turn 序号，按契约回退 sequence = 0。
+        // 自动结束 span，覆盖同步轮全部终态出口。
+        // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
+        let sync_turn_sequence = self.session_turn_sequence(input.session_id.as_deref());
         let mut otel_turn_scope = crate::agent::otel::begin_turn_trace(
             input.session_id.as_deref().unwrap_or(""),
             &sync_turn_id,
-            0,
+            sync_turn_sequence,
         );
         // Wave-7 B003（同步入口同构）：**turn 启动前**的用量治理判定（一次性、fail-open）。
         // 与流式入口同一策略与同一决策入口，避免「只挡流式 ⇒ 可绕过」。

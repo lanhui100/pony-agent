@@ -25,7 +25,7 @@
 //!   Σ 由**同 trace 的 `llm.chat` 线级属性**反解，而非复用本地常量 ⇒ 两侧任一处口径漂移都会红）、
 //!   `agent.turn.speed.basis == "turn_weighted"`、
 //!   `agent.turn.duration_ms` / `agent.turn.ttft_ms` / `agent.turn.calls` 存在；
-//!   有窗口能力 ⇒ `gen_ai.usage.context_window` + `context_ratio ≈ in/win` 存在；
+//!   有窗口能力 ⇒ `llm.context.window_tokens` + `llm.context.ratio ≈ in/win` 存在（ADR 0055 改键名）；
 //!   无窗口能力 ⇒ 两键**都不存在**（禁止 0 占位）。
 //!   另含非正/NaN 速度不得落 wire（`agent.turn.speed.tokens_per_second` 缺键）。
 //! - **T3**（C5）折叠不覆盖：
@@ -569,8 +569,8 @@ const KEY_TURN_TTFT: &str = "agent.turn.ttft_ms";
 const KEY_TURN_CALLS: &str = "agent.turn.calls";
 const KEY_TURN_SPEED: &str = "agent.turn.speed.tokens_per_second";
 const KEY_CALL_SPEED: &str = "gen_ai.speed.tokens_per_second";
-const KEY_CONTEXT_WINDOW: &str = "gen_ai.usage.context_window";
-const KEY_CONTEXT_RATIO: &str = "gen_ai.usage.context_ratio";
+const KEY_CONTEXT_WINDOW: &str = "llm.context.window_tokens";
+const KEY_CONTEXT_RATIO: &str = "llm.context.ratio";
 const KEY_GEN_AI_INPUT: &str = "gen_ai.usage.input_tokens";
 const KEY_GEN_AI_OUTPUT: &str = "gen_ai.usage.output_tokens";
 const KEY_REQUEST_MODEL: &str = "gen_ai.request.model";
@@ -938,7 +938,7 @@ fn t2_turn_weighted_speed_wire() {
     assert_eq!(
         require_i64(first, KEY_CONTEXT_WINDOW, "T2（C4）"),
         T2_WINDOW_TOKENS,
-        "T2（C4）：有窗口能力时必须输出 `gen_ai.usage.context_window` = {T2_WINDOW_TOKENS}"
+        "T2（C4）：有窗口能力时必须输出 `llm.context.window_tokens` = {T2_WINDOW_TOKENS}"
     );
     let ratio = wire_f64(first, KEY_CONTEXT_RATIO).unwrap_or_else(|| {
         panic!(
@@ -950,7 +950,7 @@ fn t2_turn_weighted_speed_wire() {
     assert_close(
         ratio,
         expected_ratio,
-        "T2（C4）：`gen_ai.usage.context_ratio` 必须 ≈ in/win = 0.1",
+        "T2（C4）：`llm.context.ratio` 必须 ≈ in/win = 0.1",
     );
 
     // ---------- C4：无窗口能力 ⇒ 两键都不存在（禁止 0 占位） ----------

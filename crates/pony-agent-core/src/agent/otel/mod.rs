@@ -43,12 +43,18 @@ pub const ATTR_GEN_AI_USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 /// 输出 token 数。
 pub const ATTR_GEN_AI_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
 
-/// 思考（推理）token 数（wave-51 C3 契约键；**semconv 标准名**）。
+/// 思考（推理）token 数（wave-51 C3 契约键；ADR 0055 起重命名为自有维度）。
 ///
 /// semconv 口径（OTel GenAI registry `gen_ai.usage.reasoning.output_tokens`）：该值 SHOULD 已包含在
 /// [`ATTR_GEN_AI_USAGE_OUTPUT_TOKENS`] 之内（`output_tokens` 含思考 token，禁止二次相加）。
 /// 由 [`llm_usage_detail_attributes`] 在有值时产出；缺失 ⇒ **不得输出该键**。
-pub const ATTR_GEN_AI_USAGE_REASONING_TOKENS: &str = "gen_ai.usage.reasoning.output_tokens";
+///
+/// ADR 0055（探针实测）：Langfuse 把该键**独立叠加**在 `output` 之上并计入 `usage.total`，
+/// 与 semconv「已包含于 output」相矛盾 ⇒ 用 semconv 键名会让每次调用的 total 多出思考 token
+/// （探针 A 组：input 1000 + output 200 + reasoning 50 ⇒ total 1250，正确值应为 1200）。
+/// 故键名改为**非** `gen_ai.usage.` 前缀的 `llm.reasoning.output_tokens`：仍留档在 span 属性里，
+/// 不再污染 `usage.total`。
+pub const ATTR_GEN_AI_USAGE_REASONING_TOKENS: &str = "llm.reasoning.output_tokens";
 
 /// 缓存命中输入 token 数（wave-51 C3 契约键；**semconv 标准名**）。
 ///
@@ -62,10 +68,32 @@ pub const ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS: &str = "gen_ai.usage.cache_read
 pub const ATTR_GEN_AI_SPEED_TOKENS_PER_SECOND: &str = "gen_ai.speed.tokens_per_second";
 
 /// 上下文窗口总大小（tokens）。
-pub const ATTR_GEN_AI_USAGE_CONTEXT_WINDOW: &str = "gen_ai.usage.context_window";
+///
+/// ADR 0055：键名**必须**避开 `gen_ai.usage.` 前缀。Langfuse OTel ingest 会把
+/// `gen_ai.usage.*` 下的**每一个数值键**都并入 observation 的 `usageDetails` 并求和成
+/// `usage.total`，因此窗口容量（如 1,000,000）一旦挂在该前缀下，会把每次调用的 token
+/// 总量抬高约 100 万（实测 trace `f47fd028`：`total=1,007,675`，真实约 7,675）。
+/// 窗口容量是**容量**不是**用量**，故改用本仓自有 `llm.context.*` 维度。
+pub const ATTR_GEN_AI_USAGE_CONTEXT_WINDOW: &str = "llm.context.window_tokens";
 
 /// 上下文使用比例（0.0 ~ 1.0）。
-pub const ATTR_GEN_AI_USAGE_CONTEXT_RATIO: &str = "gen_ai.usage.context_ratio";
+///
+/// ADR 0055：同上，比例是派生指标而非用量，禁止落在 `gen_ai.usage.` 前缀下。
+pub const ATTR_GEN_AI_USAGE_CONTEXT_RATIO: &str = "llm.context.ratio";
+
+/// 前缀缓存命中率（0.0 ~ 1.0）：`cached_input_tokens / input_tokens`（ADR 0055 P1-5）。
+///
+/// 存在理由：真实 trace `f47fd028` / `a1751e1b` 均在同一轮第 7 次调用出现
+/// `cache_read=0` 且 ttft 从 ~7s 跳到 17.5s（整段前缀重算）。客户端侧同一轮内
+/// system / history 前缀是字节稳定的（volatile 段位置固定在历史之后，`current_date` 只到日），
+/// 因此该断崖属**上游侧**缓存失效；本键把它变成可直接查询/告警的派生指标。
+pub const ATTR_LLM_CONTEXT_CACHE_HIT_RATIO: &str = "llm.context.cache_hit_ratio";
+
+/// Langfuse trace release：与 `service.version` 同值（ADR 0055）。
+///
+/// 现状缺口：真实 trace `f47fd028` 的 `version=0.1.167` 但 `release=null`——Langfuse 只从
+/// `service.version` 资源属性填 `version`，`release` 需 span 属性显式给出，导致按发布线筛选失效。
+pub const ATTR_LANGFUSE_RELEASE: &str = "langfuse.release";
 
 /// 整轮综合生成速度（t/s）。
 pub const ATTR_AGENT_TURN_SPEED_TOKENS_PER_SECOND: &str = "agent.turn.speed.tokens_per_second";
@@ -634,6 +662,21 @@ fn normalize_service_version(value: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// 进程内已解析的 `service.version`（init 时写入，供 span 级 `langfuse.release` 复用）。
+static RESOLVED_SERVICE_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 当前进程的发布版本（`langfuse.release` 取值；ADR 0055）。
+///
+/// 取值顺序：init 阶段已解析的 `service.version` → env [`ENV_PONY_OTEL_SERVICE_VERSION`]
+/// → 本 crate 的 `CARGO_PKG_VERSION`（与 resource 三级优先保持同源，禁止另起口径）。
+pub fn current_release_version() -> String {
+    RESOLVED_SERVICE_VERSION
+        .get()
+        .cloned()
+        .or_else(|| env_non_empty(ENV_PONY_OTEL_SERVICE_VERSION))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// 解析 resource 归因属性（PA-153 + wave-51 C1）：`service.version` + `deployment.environment`。
 ///
 /// 语义：`env` 取值 **trim 后非空**即覆盖默认（既有语义不变）；空白串等同未设置（回落默认）。
@@ -740,12 +783,21 @@ pub fn init_with_service_version(
         build_runtime_exporter(&config, runtime.handle().clone())?
     };
 
+    let resource_attributes = resolve_resource_attributes(env_non_empty, service_version);
+    // ADR 0055：把解析后的 `service.version` 固化为进程级 release 真值，供 span 级
+    // `langfuse.release` 复用（避免 span 层另起口径导致版本漂移）。
+    if let Some((_, version)) = resource_attributes
+        .iter()
+        .find(|(key, _)| key == RESOURCE_SERVICE_VERSION)
+    {
+        let _ = RESOLVED_SERVICE_VERSION.set(version.clone());
+    }
     let resource = opentelemetry_sdk::Resource::builder()
         .with_service_name(config.service_name.clone())
         // PA-153：resource 补齐归因维度（service.version / deployment.environment）；
         // 每份 ResourceSpans 各一次，值来自显式入参 / env 覆盖 / 构建档位默认（wave-51 C1）。
         .with_attributes(
-            resolve_resource_attributes(env_non_empty, service_version)
+            resource_attributes
                 .into_iter()
                 .map(|(key, value)| KeyValue::new(key, opentelemetry::Value::String(value.into()))),
         )
@@ -1590,13 +1642,18 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
     if spans_allowed() {
         if let Some(state) = current_state() {
             let user_id = env_non_empty(ENV_PONY_OTEL_USER_ID);
-            let attributes = to_key_values(turn_span_attributes(&TurnSpanInput {
+            let mut attributes = to_key_values(turn_span_attributes(&TurnSpanInput {
                 session_id: session_id.to_string(),
                 user_id,
                 turn_id: turn_id.to_string(),
                 sequence,
                 phase: String::new(),
             }));
+            // ADR 0055：trace.release 需 span 属性显式给出（resource `service.version` 只填 version）。
+            attributes.push(KeyValue::new(
+                ATTR_LANGFUSE_RELEASE,
+                current_release_version(),
+            ));
             let mut span = state.tracer.build_with_context(
                 opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
                     .with_kind(opentelemetry::trace::SpanKind::Internal)
@@ -2185,6 +2242,17 @@ impl Drop for LlmSpanGuard {
                     context_ratio,
                 ));
             }
+            // ADR 0055 P1-5：前缀缓存命中率（有缓存真值且有输入才输出）。
+            if let (Some(cached), Some(input), true) = (
+                self.cached_input_tokens,
+                self.input_tokens,
+                self.input_tokens.unwrap_or(0) > 0,
+            ) {
+                span.set_attribute(KeyValue::new(
+                    ATTR_LLM_CONTEXT_CACHE_HIT_RATIO,
+                    cached as f64 / input as f64,
+                ));
+            }
             // wave-54 C1：本次调用耗时 / 首包 / 生成耗时——键不存在即「未知」
             // （buffered 无首包 ⇒ 无 ttft 键；`duration <= ttft` ⇒ generation 退化为 duration）。
             if let Some(duration_ms) = self.call_duration_ms {
@@ -2340,6 +2408,36 @@ pub fn record_tool_call_span(input: &ToolSpanInput) {
 /// wave-53 C4：`status != "success"` ⇒ 累加当前活动 turn 的工具失败计数（供根 span
 /// `agent.turn.tool_failures` / `agent.turn.degraded`）。既有错误聚合谓词（F5）零变更。
 pub fn record_tool_call_span_with_call_id(input: ToolSpanInput, call_id: Option<String>) {
+    record_tool_call_span_with_call_id_and_kind(input, call_id, None);
+}
+
+/// 工具错误种类中**不得**提升为整轮 error 的白名单（ADR 0055）。
+///
+/// `non_zero_exit` 是命令级语义信号（`grep` 无匹配返回 1、`git diff --quiet` 有差异返回 1
+/// 都属正常），把它算作整轮失败会让「错误率」失去意义：实测最近 3 条生产 trace
+/// （`f47fd028` / `a1751e1`, `a66af1c4`）全部 `phase=completed` + `outcome=error`
+/// （`tool_error: tool_failed`），而轮次本身已正常给出答复。
+///
+/// 语义边界：工具 span 仍然保持 `status=ERROR` + `agent.tool.error`（失败事实不隐藏），
+/// `agent.turn.tool_failures` / `agent.turn.degraded` 计数不改（降级语义不变），
+/// 仅**不**把根 span 的 outcome 与状态码改为 error。
+pub(crate) fn tool_error_kind_is_turn_fatal(kind: Option<&str>) -> bool {
+    match kind.map(str::trim) {
+        Some(kind) if kind.eq_ignore_ascii_case("non_zero_exit") => false,
+        // 未知/缺失种类 fail-closed：照旧提升为整轮错误（不许靠缺字段洗白失败率）。
+        _ => true,
+    }
+}
+
+/// 带工具错误种类的工具 span 记录入口（ADR 0055 附加式 API）。
+///
+/// 与 [`record_tool_call_span_with_call_id`] 的唯一差别：`error_kind` 参与
+/// [`tool_error_kind_is_turn_fatal`] 判定，决定是否向活动 turn 聚合根错误。
+pub fn record_tool_call_span_with_call_id_and_kind(
+    input: ToolSpanInput,
+    call_id: Option<String>,
+    error_kind: Option<&str>,
+) {
     if !spans_allowed() {
         return;
     }
@@ -2356,8 +2454,9 @@ pub fn record_tool_call_span_with_call_id(input: ToolSpanInput, call_id: Option<
     }
     // F5 失败谓词（`failed` / `error` / 带 error 摘要）：同一判定既写子 span 状态，
     // 也向活动 turn 聚合（PA-154：根 span 承接失败，否则按根状态告警全漏）。
+    // ADR 0055：`non_zero_exit` 只算「降级」，不再污染整轮 outcome / 根状态。
     let failed = input.status == "failed" || input.status == "error" || input.error.is_some();
-    if failed {
+    if failed && tool_error_kind_is_turn_fatal(error_kind) {
         mark_active_turn_error(TURN_ERROR_PREFIX_TOOL_FAILED);
     }
     // T11：span 必须覆盖**真实执行区间**。此前 `start_child_span` + 立即 `end()` 只覆盖
@@ -4594,5 +4693,55 @@ mod tests {
             end.duration_since(start).expect("end 必须晚于 start"),
             std::time::Duration::from_secs(1)
         );
+    }
+}
+#[cfg(test)]
+mod adr0055_tests {
+    use super::*;
+
+    /// ADR 0055 P0-4：`non_zero_exit` 是命令级语义信号，不得提升为整轮 error。
+    #[test]
+    fn non_zero_exit_is_not_turn_fatal() {
+        assert!(!tool_error_kind_is_turn_fatal(Some("non_zero_exit")));
+        assert!(!tool_error_kind_is_turn_fatal(Some(" NON_ZERO_EXIT ")));
+    }
+
+    /// fail-closed：未知/缺失种类照旧提升为整轮错误（不许靠缺字段洗白失败率）。
+    #[test]
+    fn unknown_or_missing_error_kind_stays_turn_fatal() {
+        assert!(tool_error_kind_is_turn_fatal(Some("handler_error")));
+        assert!(tool_error_kind_is_turn_fatal(Some("timeout")));
+        assert!(tool_error_kind_is_turn_fatal(Some("")));
+        assert!(tool_error_kind_is_turn_fatal(None));
+    }
+
+    /// ADR 0055 P0-1：上下文容量/比例必须避开 `gen_ai.usage.` 前缀（否则被并入 usage.total）。
+    #[test]
+    fn context_keys_are_outside_gen_ai_usage_prefix() {
+        for key in [
+            ATTR_GEN_AI_USAGE_CONTEXT_WINDOW,
+            ATTR_GEN_AI_USAGE_CONTEXT_RATIO,
+            ATTR_LLM_CONTEXT_CACHE_HIT_RATIO,
+            ATTR_GEN_AI_USAGE_REASONING_TOKENS,
+        ] {
+            assert!(
+                !key.starts_with("gen_ai.usage."),
+                "ADR 0055：{key} 不得落在 gen_ai.usage.* 前缀下（Langfuse 会求和进 usage.total）"
+            );
+        }
+        // 用量三键必须保持 semconv 名（Langfuse 靠它们做扣减与计费）。
+        assert_eq!(ATTR_GEN_AI_USAGE_INPUT_TOKENS, "gen_ai.usage.input_tokens");
+        assert_eq!(ATTR_GEN_AI_USAGE_OUTPUT_TOKENS, "gen_ai.usage.output_tokens");
+        assert_eq!(
+            ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS,
+            "gen_ai.usage.cache_read.input_tokens"
+        );
+    }
+
+    /// ADR 0055 P2：`langfuse.release` 是唯一能填充 trace.release 的键（探针实测）。
+    #[test]
+    fn langfuse_release_key_contract() {
+        assert_eq!(ATTR_LANGFUSE_RELEASE, "langfuse.release");
+        assert!(!current_release_version().trim().is_empty());
     }
 }

@@ -299,6 +299,13 @@ struct AnthropicStreamMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderStreamChunk {
+    /// 首个上游流事件（**不含内容**）：仅承载「首包已到达」的时点信号（ADR 0055 P0-2）。
+    ///
+    /// 存在理由：纯工具调用轮次没有 text / reasoning 增量，此前 `on_delta` 一次都不触发，
+    /// 于是 `llm.call.ttft_ms` 缺失、`generation_ms` 退化成整段耗时，速度被系统性低估
+    /// （实测 trace `f47fd028`：15 次调用中 6 次无 ttft，整轮速度显示 31.8 tok/s，
+    /// 按真实首包口径约 52 tok/s）。该变体**不得**被当作内容消费，消费者必须忽略。
+    StreamStart,
     Text(String),
     Reasoning(String),
 }
@@ -2524,6 +2531,8 @@ where
     let mut content_block_types: BTreeMap<usize, String> = BTreeMap::new();
 
     let mut saw_events = false;
+    // ADR 0055 P0-2：首包时点信号（仅工具调用块响应不含 text/thinking 增量，须在此兜底）。
+    let mut first_chunk_emitted = false;
     let mut current_event = String::new();
     let mut current_data = String::new();
     let mut line_buf: Vec<u8> = Vec::new();
@@ -2533,6 +2542,10 @@ where
 
     // Helper closure to process a complete SSE event
     let mut handle_event = |event_type: &str, data: &str| -> Result<(), String> {
+        if !first_chunk_emitted {
+            first_chunk_emitted = true;
+            on_delta(ProviderStreamChunk::StreamStart);
+        }
         match event_type {
             "content_block_start" => {
                 saw_events = true;

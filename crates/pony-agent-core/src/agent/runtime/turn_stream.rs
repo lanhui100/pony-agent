@@ -205,7 +205,8 @@ impl AgentRuntime {
                 .iter()
                 .find(|activity| activity.parent_activity_id.is_none())
             {
-                crate::agent::otel::record_tool_call_span_with_call_id(
+                let otel_tool_error_kind = turn_tool_activity_error_kind(otel_top_activity);
+                crate::agent::otel::record_tool_call_span_with_call_id_and_kind(
                     crate::agent::otel::ToolSpanInput {
                         tool_name: otel_top_activity
                             .canonical_tool_name
@@ -222,6 +223,7 @@ impl AgentRuntime {
                         error: turn_tool_activity_error_text(otel_top_activity),
                     },
                     current_tool_call.call_id.clone(),
+                    otel_tool_error_kind.as_deref(),
                 );
             }
             tool_activities.extend(annotate_capability_tool_activities(
@@ -566,6 +568,12 @@ impl AgentRuntime {
                 &current_tool_call,
                 &tool_result,
                 move |delta| {
+                    // ADR 0055 P0-2：首包时点信号（StreamStart）不承载内容，也**不参与** UI 首字延迟口径——
+                    // 此处提前返回，UI 的 `first_token_latency` 语义仍是「首个内容增量」；trace span 侧
+                    // 的 `llm.call.ttft_ms` 由 `turn_flow` 的独立 `on_delta` 采集，不受本处影响。
+                    if matches!(delta, ProviderStreamChunk::StreamStart) {
+                        return;
+                    }
                     let flush_delta = |text: Option<String>,
                                        reasoning_content: Option<String>,
                                        latency: Option<u64>| {
@@ -617,6 +625,9 @@ impl AgentRuntime {
 
                     let mut did_emit = false;
                     match delta {
+                        ProviderStreamChunk::StreamStart => {
+                            // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
+                        }
                         ProviderStreamChunk::Text(text) => {
                             if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush()
                             {
@@ -1299,11 +1310,12 @@ impl AgentRuntime {
     ) {
         // Wave43 task-8 挂载切片：turn root span（agent.turn）在流式轮唯一顶层入口创建，
         // 函数返回时 Drop 自动结束 span，覆盖整轮生命周期（含同步执行的工具子轮）。
-        // TurnInput 无 turn 序号，按契约回退 sequence = 0。
+        // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
+        let turn_sequence = self.session_turn_sequence(input.session_id.as_deref());
         let mut otel_turn_scope = crate::agent::otel::begin_turn_trace(
             input.session_id.as_deref().unwrap_or(""),
             &turn_id,
-            0,
+            turn_sequence,
         );
         // T2-1：流式 turn 的 session/run/turn 事实在本 turn 内部解析，并随每次工具调用
         // 显式下传（Ask 控制请求因此仍绑定真实调用；并发 turn 之间不再共享任何槽位）。
@@ -1704,12 +1716,19 @@ impl AgentRuntime {
                             stream_session_id_for_delta_emit.clone(),
                         );
                     };
+                    // ADR 0055 P0-2：首包时点信号无内容，不参与 UI 首字延迟口径（同上）。
+                    if matches!(delta, ProviderStreamChunk::StreamStart) {
+                        return;
+                    }
                     if initial_call_first_token_latency_for_emit.get().is_none() {
                         let value = initial_decision_started_at.elapsed().as_millis() as u64;
                         initial_call_first_token_latency_for_emit.set(Some(value));
                     }
                     let mut did_emit = false;
                     match delta {
+                        ProviderStreamChunk::StreamStart => {
+                            // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
+                        }
                         ProviderStreamChunk::Text(text) => {
                             if let Some(reasoning) =
                                 reasoning_batcher_for_emit.borrow_mut().flush()

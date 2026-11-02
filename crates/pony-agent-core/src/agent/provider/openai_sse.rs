@@ -19,8 +19,9 @@ struct OpenAiSseAccumulator {
     tool_calls: BTreeMap<usize, PartialOpenAiToolCall>,
     token_usage: Option<TokenUsage>,
     saw_data: bool,
+    /// ADR 0055 P0-2：首个 SSE data 事件是否已发出 `StreamStart` 时点信号。
+    saw_first_chunk: bool,
 }
-
 #[derive(Debug, Default)]
 struct PartialOpenAiToolCall {
     id: Option<String>,
@@ -66,14 +67,27 @@ impl OpenAiSseAccumulator {
             merge_openai_stream_tool_calls(&mut self.tool_calls, delta);
         }
 
+        let mut emitted_content = false;
         if !delta_text.is_empty() {
             self.output_text.push_str(&delta_text);
             on_delta(ProviderStreamChunk::Text(delta_text));
+            emitted_content = true;
         }
 
         if !delta_reasoning.is_empty() {
             self.reasoning_content.push_str(&delta_reasoning);
             on_delta(ProviderStreamChunk::Reasoning(delta_reasoning));
+            emitted_content = true;
+        }
+        // ADR 0055 P0-2：首包时点信号。**仅当该首包不含 text/reasoning 增量时**才需要它
+        // （纯工具调用轮次的后续 chunk 不会有内容增量，否则 ttft 永久缺失、速度分母退化成整段耗时）。
+        // 首包本身带内容时既有 Text/Reasoning 增量已完成时点采集，不再额外发信号 ⇒
+        // 既有「内容增量顺序」契约零变更。
+        if !self.saw_first_chunk {
+            self.saw_first_chunk = true;
+            if !emitted_content {
+                on_delta(ProviderStreamChunk::StreamStart);
+            }
         }
         // 字符串分片（如 DeepSeek 思考模式）逐片到达，value 只需在 finish() 中
         // 用完整累计文本回填；结构化值（如数组块）保留首块语义。
@@ -94,6 +108,7 @@ impl OpenAiSseAccumulator {
             tool_calls,
             token_usage,
             saw_data,
+            saw_first_chunk: _,
         } = self;
         if !saw_data {
             return Err(format!(
@@ -465,4 +480,57 @@ fn extract_openai_delta_reasoning_content(delta: &Value) -> Option<String> {
 
 fn extract_openai_delta_reasoning_value(delta: &Value) -> Option<Value> {
     delta.get("reasoning_content").cloned()
+}
+
+#[cfg(test)]
+mod adr0055_tests {
+    use super::*;
+
+    /// ADR 0055 P0-2：纯工具调用响应（只有 tool_calls 增量、无 text/reasoning）也必须发出
+    /// 一次 `StreamStart`，否则 ttft 永久缺失、速度分母退化成整段耗时。
+    #[test]
+    fn stream_start_emitted_for_tool_call_only_chunk() {
+        let mut acc = OpenAiSseAccumulator::default();
+        let payload = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Read","arguments":"{\"path\":"}}]}}]}"#;
+        let mut seen: Vec<ProviderStreamChunk> = Vec::new();
+        let mut on_delta = |chunk: ProviderStreamChunk| seen.push(chunk);
+        acc.push_payload(payload, &mut on_delta).expect("chunk 必须可解析");
+        assert_eq!(
+            seen,
+            vec![ProviderStreamChunk::StreamStart],
+            "首个 SSE 事件必须恰好发出一次 StreamStart，且不得产生任何内容增量"
+        );
+    }
+
+    /// 首包自带内容时**不**发 `StreamStart`：既有「内容增量顺序」契约零变更
+    /// （时点已由首个 Text 增量采集，无需额外信号）。
+    #[test]
+    fn no_stream_start_when_first_chunk_carries_content() {
+        let mut acc = OpenAiSseAccumulator::default();
+        let first = r#"{"choices":[{"delta":{"content":"你好"}}]}"#;
+        let second = r#"{"choices":[{"delta":{"content":"世界"}}]}"#;
+        let mut seen: Vec<ProviderStreamChunk> = Vec::new();
+        let mut on_delta = |chunk: ProviderStreamChunk| seen.push(chunk);
+        acc.push_payload(first, &mut on_delta).unwrap();
+        acc.push_payload(second, &mut on_delta).unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                ProviderStreamChunk::Text("你好".to_string()),
+                ProviderStreamChunk::Text("世界".to_string()),
+            ]
+        );
+    }
+
+    /// 首个内容增量之后再来的工具调用块不会补发 `StreamStart`（幂等：全流至多一次且只在开头）。
+    #[test]
+    fn stream_start_is_emitted_at_most_once() {
+        let mut acc = OpenAiSseAccumulator::default();
+        let tool_only = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"Run","arguments":"{}"}}]}}]}"#;
+        let mut seen: Vec<ProviderStreamChunk> = Vec::new();
+        let mut on_delta = |chunk: ProviderStreamChunk| seen.push(chunk);
+        acc.push_payload(tool_only, &mut on_delta).unwrap();
+        acc.push_payload(tool_only, &mut on_delta).unwrap();
+        assert_eq!(seen, vec![ProviderStreamChunk::StreamStart]);
+    }
 }

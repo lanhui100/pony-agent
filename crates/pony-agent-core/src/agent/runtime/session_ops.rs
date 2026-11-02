@@ -33,6 +33,24 @@ impl AgentRuntime {
             .load_turn_traces(session_id)
     }
 
+    /// 当前会话已登记轮次数（ADR 0055：OTel `agent.turn.sequence` 的真值源）。
+    ///
+    /// 语义：返回**本轮开启前**已存在的轮次数，调用方可直接当作 0-based 序号。
+    /// 此前两个 turn 入口（流式 `turn_stream` / 同步 `turn_sync`）均硬编码 `sequence = 0`，
+    /// 导致所有 trace 同名 `pony-agent#turn-0@…`，按名检索与多轮聚合全部失真。
+    pub fn session_turn_sequence(&self, session_id: Option<&str>) -> u64 {
+        let session_key = session_id.unwrap_or(crate::agent::session::DEFAULT_SESSION_ID);
+        let count = self
+            .sessions
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .turn_trace_count(session_key);
+        u64::try_from(count).unwrap_or(u64::MAX)
+    }
+
     pub fn load_session_snapshot(&self, session_id: Option<&str>) -> SessionSnapshot {
         self.load_session_snapshot_at(session_id, None)
     }

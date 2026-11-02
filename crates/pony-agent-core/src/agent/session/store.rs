@@ -1671,6 +1671,18 @@ impl SessionStore {
             .unwrap_or_default()
     }
 
+    /// 会话内**已有**轮次总数（ADR 0055：OTel turn 序号真值源）。
+    ///
+    /// 语义：返回已登记的 trace 行数，不含当前正在开启的 new turn ⇒ 调用方可直接把它当作
+    /// 0-based 的 `agent.turn.sequence`。只读、不 clone 记录（避免每轮多一次深拷贝）。
+    /// 未知会话 ⇒ 0（等价于「本轮是第一轮」）。
+    pub fn turn_trace_count(&self, session_id: &str) -> usize {
+        self.sessions
+            .get(session_id)
+            .map(|session| session.turn_trace_history.len())
+            .unwrap_or_default()
+    }
+
     pub fn remove_session(&mut self, session_id: &str) -> Vec<SessionOverview> {
         if self.sessions.remove(session_id).is_some() {
             delete_session_attachment_dir(&self.attachment_root, session_id);

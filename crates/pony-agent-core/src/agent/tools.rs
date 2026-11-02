@@ -3086,13 +3086,20 @@ impl ToolRouter {
 
         let succeeded = exit_code == Some(0);
         let error_payload = (!succeeded).then(|| {
+            // ADR 0055：Windows 退出码 9009 = 「找不到命令」，属可自愈的错误而非环境故障，
+            // 直接给出去向明确的纠错提示（真实 trace 连续两条生产轮次的首个命令即撞 9009）。
+            let base_message = format!(
+                "命令执行完成，但退出码为 {}。",
+                exit_code.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())
+            );
+            let message = match windows_command_not_found_hint(cfg!(windows), exit_code, &command) {
+                Some(hint) => format!("{base_message}{hint}"),
+                None => base_message,
+            };
             json!({
                 "code": "non_zero_exit",
                 "kind": "non_zero_exit",
-                "message": format!(
-                    "命令执行完成，但退出码为 {}。",
-                    exit_code.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())
-                ),
+                "message": message,
                 "exitCode": exit_code
             })
         });
@@ -7726,6 +7733,33 @@ fn denied_run_command_reason(command: &str) -> Option<String> {
 ///
 /// 命中网络类子命令标记（`push`/`fetch`/`clone`/`pull`/`ls-remote`）时，给出「网络/认证/代理」
 /// 三类可能原因与可自检步骤；未命中时逐字返回既有默认文案，保持既有断言可继续成立。
+/// Windows 退出码 9009 的纠错提示（ADR 0055）。
+///
+/// `9009` 由 `CreateProcessW` 在「可执行文件不存在」时回填，等价于「这条命令在 Windows 上不存在」。
+/// 实测（trace `f47fd028` / `a1751e1b`）两条生产轮次的**首个**命令即撞 9009，且模型随后仍反复
+/// 试探 POSIX 工具 ⇒ 在错误消息里直接给替换建议，比让模型自行猜测省 1~2 个 hop。
+///
+/// 语义边界：只**追加上下文提示**，不改变 `code` / `kind` / `exitCode` 任何既有字段，
+/// 也不把失败改写成成功（非零退出仍是 error）。
+/// `is_windows` 作显式入参 ⇒ 纯函数可在 Linux CI 上被单测覆盖。
+fn windows_command_not_found_hint(
+    is_windows: bool,
+    exit_code: Option<i32>,
+    command: &str,
+) -> Option<String> {
+    if !is_windows || exit_code != Some(9009) {
+        return None;
+    }
+    let _ = command;
+    Some(
+        " 该退出码在 Windows 上表示「命令不存在」（cmd 的 9009）。请改用 Windows 等价写法：\
+路径与文件用 dir / where 替代 ls / which；文本搜索用 findstr /s /n /i 关键词 *；\
+查看文件用 type 替代 cat；环境变量用 set VAR=value && cmd 而非 NAME=value cmd；\
+或整体改用 powershell -NoProfile -Command 执行。"
+            .to_string(),
+    )
+}
+
 fn classify_timeout_hint(command: &str) -> String {
     const NETWORK_COMMAND_MARKERS: [&str; 5] = ["push", "fetch", "clone", "pull", "ls-remote"];
     if NETWORK_COMMAND_MARKERS
@@ -11001,6 +11035,18 @@ mod tests {
     }
 
     #[test]
+    /// ADR 0055 P1-6：Windows 9009（命令不存在）必须附纠错提示，其它平台/退出码不得污染消息。
+    #[test]
+    fn windows_command_not_found_hint_only_for_9009_on_windows() {
+        let hint = windows_command_not_found_hint(true, Some(9009), "grep -rn foo .")
+            .expect("Windows + 9009 必须给出提示");
+        assert!(hint.contains("9009"));
+        assert!(hint.contains("findstr") && hint.contains("dir"));
+        assert!(windows_command_not_found_hint(false, Some(9009), "grep -rn foo .").is_none());
+        assert!(windows_command_not_found_hint(true, Some(1), "false").is_none());
+        assert!(windows_command_not_found_hint(true, None, "false").is_none());
+    }
+
     fn classify_timeout_hint_classifies_network_commands_and_keeps_default() {
         let network_hint = classify_timeout_hint("git push origin main");
         for marker in [

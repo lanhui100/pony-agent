@@ -4,7 +4,7 @@
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
 service: pony-agent
 kind: desktop
-reviewed_at: "2026-10-27"
+reviewed_at: "2026-11-01"
 
 dimensions:
   tracing:
@@ -182,3 +182,60 @@ note: >-
       不新增遥测维度；`SandboxRequest.allow_network` 仍无消费点（本波仅加"未强制"注释，登记为待办）。
   (4) 四维归属不变：metrics / logs 仍为结构性 N-A（理由见上），issues/tracing 落点不变；
       本波不新增端点、环境变量或依赖。前端启用 CSP 属渲染层安全收口，不新增遥测出口。
+
+  【wave-slash-1 归属登记（2026-11-01）｜斜杠命令 /compact：手动压缩控制面 + Tauri 命令】
+  (1) tracing｜**适用（维度适用）但本功能当前不产生 span —— 如实声明，不是"沿用既有 span"**：
+      手动压缩**不经过** turn 执行路径（`turn_flow::provider_decision_stream_guarded` 的
+      `llm.chat` 子 span 与 `begin_turn_trace` 的 `agent.turn` 根 span 都只在 turn 作用域内创建），
+      压缩发生在 `agent/runtime/compaction_ops.rs`（不走 turn_flow），因此：
+      **压缩调用在 trace 中不可见**（零 span）；provider HTTP 层仅在存在活动 trace 上下文时透传
+      traceparent，手动压缩没有活动上下文 ⇒ 亦无 traceparent 注入。
+      结构性理由：压缩是**会话维护动作**（用户主动触发的上下文整理），不隶属于任何一轮 turn，
+      没有可供挂载的 turn 根 span；若强行用零散 span 表达，只会产出无父的孤儿 span，污染会话瀑布图。
+      欠账登记见本节末「待办/欠账」第 (D1) 条（编号 `OBS-DEBT-COMPACT-SPAN-1`）。
+  (2) issues｜**适用**，落点不变（`crates/pony-agent-core/src/agent/ponysentry/client.rs`）：
+      `compact_session` 失败经既有 `Result<_, String>` 上抛给宿主（TUI 追加 System 消息、
+      桌面经 notice 展示、CLI 打印错误行），LLM 失败**不静默吞掉**（契约 C-1 第 5 条）；
+      不新增异常码、不新增 ingest 出口、不改上报门禁。
+  (3) metrics｜**结构性 N/A，理由与本文档 metrics 维度声明同源**：该命令是桌面端进程内 IPC 入口，
+      无常驻监听地址、无 Service、不进集群，Prometheus pull 模型（稳定可达的 /metrics）前提结构上不成立；
+      手动压缩是用户主动触发的会话动作，其频次/压缩量不构成需要抓取的进程指标面。
+  (4) logs｜**结构性 N/A，理由与本文档 logs 维度声明同源**：节点侧 fluentd 只按容器日志路径
+      （/var/log/containers/*.log）tail，桌面端进程不在容器内、不产生该路径。压缩结果以单行
+      `runtime_log`（`compact:session=... compressed=... kept=...`）落入既有本地取证面
+      `<app_data_dir>/logs/pony-agent.log`；不上送 Loki 仍是结构性选择而非缺口。
+  (5) 不新增依赖、环境变量、托管端点与对外契约字段的遥测；返回结构为 core 内
+      `ManualCompactionOutcome`（camelCase 序列化由既有 Tauri DTO 约定保证）。
+      四维归属结论：tracing / issues 适用且落点不变，metrics / logs 仍为结构性 N/A。
+  (6) 待办/欠账（D1）｜编号 `OBS-DEBT-COMPACT-SPAN-1`：**手动压缩当前零 span，trace 不可见**。
+      主责：exec-rust（本波实现者）/ 后续 tracing 责任面。
+      触发条件（满足任一条即须先补 span 再谈"已接 tracing"）：
+      (a) 观测需求要求按会话看到压缩耗时或压缩次数；
+      (b) 压缩被纳入 trace 对账/成本口径；
+      (c) 出现"压缩后上下文异常"类排障需要 trace 证据。
+      落地前置（必须先定义，不许边写边定）：span 名（建议 `agent.session.compact`）、
+      session 归属键（复用 `langfuse.session.id` 既有 helper）、父 span 语义（无 turn 上下文时
+      作为 root span，并显式标注 `pony.compact.parent=none`），以及成功/未压缩/失败三态属性。
+
+  【ADR 0055 归属登记（2026-11-01）｜真实 trace 审计驱动的四项口径修复 + 三项优化】
+  (1) tracing｜用量口径（**适用**，落点不变 `agent/otel/mod.rs`）：上下文容量/比例迁出 `gen_ai.usage.`
+      前缀（→ `llm.context.window_tokens` / `llm.context.ratio`），思考 token 迁至
+      `llm.reasoning.output_tokens`。依据：Langfuse OTel ingest 把 `gen_ai.usage.*` 的每个数值键
+      求和进 `usage.total`，导致每次调用 total 被抬高 1,000,000（真实 trace `f47fd028`：
+      total=1,007,675，真值约 7,675）；合成探针（12 例）实测改键名后 total 恢复 1,200。
+      用量三键（input/output/cache_read）保持 semconv 名不动：它们是 Langfuse 扣减与计费依据。
+  (2) tracing｜首包时点（**适用**）：新增 `ProviderStreamChunk::StreamStart`（无内容事件），
+      由 openai_sse 首个 SSE data 事件与 anthropic 首个 SSE 事件各发一次，使纯工具调用步骤也能
+      记录 `llm.call.ttft_ms`（此前 15 次调用中 6 次缺失、速度被系统性低估）。
+      该变体不携带内容、不进 UI 增量、不新增出口。
+  (3) tracing｜轮次序号与错误语义（**适用**）：`agent.turn.sequence` 改取会话已登记轮次数
+      （原两处硬编码 0，导致所有 trace 同名 `pony-agent#turn-0@…`）；
+      `non_zero_exit` 不再提升为整轮 `outcome=error`/根状态 ERROR，只保留
+      `agent.turn.tool_failures` / `agent.turn.degraded`（保留工具子 span 的 ERROR 与错误摘要）。
+      依据：3/3 生产 trace 曾因 `grep` 无匹配 exit 1 被记为整轮失败。
+  (4) tracing｜新增派生指标与归因键（**适用**）：`llm.context.cache_hit_ratio`
+      （= `cache_read/input`，把「同一轮第 7 次调用前缀缓存全失效」变成可告警指标）；
+      根 span 增 `langfuse.release`（= 已解析 `service.version`，修复 `trace.release=null`）。
+  (5) issues / logs / metrics｜**四维归属不变**：本波不新增异常码、不新增日志出口、
+      不新增端点/环境变量/依赖；metrics 仍为结构性 N/A（同本文档 metrics 维度声明）。
+      tracing 唯一落点仍 `crates/pony-agent-core/src/agent/otel/mod.rs`（新增入口均为附加式）。

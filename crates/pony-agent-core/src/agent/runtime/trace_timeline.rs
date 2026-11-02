@@ -160,6 +160,23 @@ pub(super) fn turn_tool_activity_error_text(activity: &TurnToolActivity) -> Opti
     }
 }
 
+/// 工具活动的结构化错误种类（`kind` 优先，回退 `code`）。
+///
+/// ADR 0055：OTel 侧据该种类判定「是否把工具失败提升为整轮 error」
+/// （`non_zero_exit` 属命令级语义信号，不提升）。非结构化错误/无错误 ⇒ `None`，
+/// 由调用方按 fail-closed 处理。
+pub(super) fn turn_tool_activity_error_kind(activity: &TurnToolActivity) -> Option<String> {
+    let error = activity.error.as_ref()?;
+    match error {
+        Value::Object(map) => map
+            .get("kind")
+            .or_else(|| map.get("code"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
 /// 在 parent activity 及其分组子活动中定位 parent 自身的错误文本。
 pub(super) fn timeline_tool_error_text(
     parent: &TurnToolActivity,
