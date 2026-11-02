@@ -1,1 +1,1 @@
-[31mArgument Error:[0m 无效的 --permission-mode 取值 `accept-all`（可选：deny | workspace-write | full-access）
+[31mArgument Error:[0m 无效的 --permission-mode 取值 `accept-all`（可选：deny | read-only | read_only | workspace-write | workspace_write | full-access | full_access）

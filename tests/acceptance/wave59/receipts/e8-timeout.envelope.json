@@ -1,7 +1,7 @@
 {
   "schema": "pony.headless.result.v1",
-  "session_id": "cli-session-e14d99a8-82cf-4f07-93bb-b8feceae19e6",
-  "turn_id": "turn-2d2867b1-2191-40e4-9e3d-ca68472f56ac",
+  "session_id": "cli-session-a2e560a9-960d-469b-945a-745912625402",
+  "turn_id": "turn-65adbfe6-b5de-48b5-9e2b-e798061d5565",
   "status": "timeout",
   "exit_code": 7,
   "final_text": "",

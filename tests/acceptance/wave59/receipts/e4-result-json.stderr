@@ -1,32 +1,32 @@
-{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https://otel.ponyjob.top）","trace_id":null,"ts":"2026-11-02T02:55:37.684Z"}
+{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https://otel.ponyjob.top）","trace_id":null,"ts":"2026-11-02T03:19:39.590Z"}
 [1;32m=== Pony Agent CLI (Claude-Code Style) ===[0m
   Model:       mock-alpha
-  Gateway:     http://127.0.0.1:34999
-  Workspace:   /tmp/pony-headless-e2e.uLlVe6/iso/project
-[pony-agent][session] loading sessions from /tmp/pony-headless-e2e.uLlVe6/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
-[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.uLlVe6/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
+  Gateway:     http://127.0.0.1:43965
+  Workspace:   /tmp/pony-headless-e2e.NDc3Oo/iso/project
+[pony-agent][session] loading sessions from /tmp/pony-headless-e2e.NDc3Oo/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
+[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.NDc3Oo/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
 [1;34m[Pony Agent] Running turn...[0m
-[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.uLlVe6/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
-[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.uLlVe6/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
-[pony-runtime] turn:start id=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 requested=ponyllm provider=ponyllm protocol=openai-completions model=mock-alpha message_preview=say hi
-[pony-agent][runtime] emit turn:started event_type=turn.created turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(1) phase=Some("calling_model") text_len=6 tools=0
-[pony-agent][runtime] emit turn:trace event_type=turn.model_call_started turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(2) phase=Some("calling_model") text_len=0 tools=0
+[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.NDc3Oo/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
+[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.NDc3Oo/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
+[pony-runtime] turn:start id=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb requested=ponyllm provider=ponyllm protocol=openai-completions model=mock-alpha message_preview=say hi
+[pony-agent][runtime] emit turn:started event_type=turn.created turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(1) phase=Some("calling_model") text_len=6 tools=0
+[pony-agent][runtime] emit turn:trace event_type=turn.model_call_started turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(2) phase=Some("calling_model") text_len=0 tools=0
 [pony-provider] decision:start mode=stream requested=ponyllm provider=ponyllm protocol=openai-completions model=mock-alpha tools=45 api_key_present=true 
-[pony-provider] request:openai decision-stream endpoint=http://127.0.0.1:34999/v1/chat/completions model=mock-alpha safe_tools=Run,Ask,Read,ReadDocument,List,Search,Glob,WebFetch,WebSearch,MCPResource,ToolSearch,Write,Edit,BatchExecute,Plan,ViewImage,TodoWrite,TodoList,create_goal,get_goal,update_goal,Present,Find,GitDiff,JobStart,JobOutput,JobKill,JobList,skill_load
+[pony-provider] request:openai decision-stream endpoint=http://127.0.0.1:43965/v1/chat/completions model=mock-alpha safe_tools=Run,Ask,Read,ReadDocument,List,Search,Glob,WebFetch,WebSearch,MCPResource,ToolSearch,Write,Edit,BatchExecute,Plan,ViewImage,TodoWrite,TodoList,create_goal,get_goal,update_goal,Present,Find,GitDiff,JobStart,JobOutput,JobKill,JobList,skill_load
 [pony-provider] with_openai_request_options pattern=None supports_reasoning=false reasoning_effort=None
-[pony-provider] request:openai decision-stream messages=System:You are Pony Agent, an AI agent that collaborate...(+3746 chars) | Developer:Active domain profile: coding.\n\n- Focus on cod...(+288 chars) | Developer:Session label: graph=state-machine-v1 / session=...(+48 chars) | Developer:Environment: cwd=/tmp/pony-headless-e2e.uLlVe6/i...(+330 chars) | User:say hi body_chars=22984 body_preview={"max_tokens":4096,"messages":[{"content":"You are Pony Agent, an AI agent that collaborates with the user inside a shared workspace.\n\n- Reply in Chinese unless the user explicitly requests another language.\n- Respect existing code, project conventions, and user changes.\n- Tool coordination and engineering integrity contracts:\n  * Read-before-write policy: Always inspect and read existing files before modifying or overwriting them.\n  * Objective receipts: Judge progress by machine evidence — command exit codes, test assertions, compiler output — never by assumption. Investigate any non-zero exit before moving on.\n  * Anti-entropy boundary: Make changes within the minimal necessary closure; do not refactor unrelated code or silently alter shared contracts.\n  * Task planning: For multi-step work, track steps with `TodoWrite` and keep statuses current.\n  * Handoff receipt contract:...(+22084 chars)
-[pony-agent][runtime] emit turn:delta event_type=turn.output_delta turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(3) phase=Some("calling_model") text_len=24 tools=0
-[pony-agent][runtime] emit turn:delta event_type=turn.output_delta turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(4) phase=Some("calling_model") text_len=12 tools=0
+[pony-provider] request:openai decision-stream messages=System:You are Pony Agent, an AI agent that collaborate...(+3746 chars) | Developer:Active domain profile: coding.\n\n- Focus on cod...(+288 chars) | Developer:Session label: graph=state-machine-v1 / session=...(+48 chars) | Developer:Environment: cwd=/tmp/pony-headless-e2e.NDc3Oo/i...(+330 chars) | User:say hi body_chars=22984 body_preview={"max_tokens":4096,"messages":[{"content":"You are Pony Agent, an AI agent that collaborates with the user inside a shared workspace.\n\n- Reply in Chinese unless the user explicitly requests another language.\n- Respect existing code, project conventions, and user changes.\n- Tool coordination and engineering integrity contracts:\n  * Read-before-write policy: Always inspect and read existing files before modifying or overwriting them.\n  * Objective receipts: Judge progress by machine evidence — command exit codes, test assertions, compiler output — never by assumption. Investigate any non-zero exit before moving on.\n  * Anti-entropy boundary: Make changes within the minimal necessary closure; do not refactor unrelated code or silently alter shared contracts.\n  * Task planning: For multi-step work, track steps with `TodoWrite` and keep statuses current.\n  * Handoff receipt contract:...(+22084 chars)
+[pony-agent][runtime] emit turn:delta event_type=turn.output_delta turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(3) phase=Some("calling_model") text_len=24 tools=0
+[pony-agent][runtime] emit turn:delta event_type=turn.output_delta turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(4) phase=Some("calling_model") text_len=12 tools=0
 [pony-provider] usage:openai raw={"completion_tokens":20,"prompt_tokens":12,"total_tokens":32}
 [pony-provider] usage:openai decision-stream input=Some(12) cache_hit_input=None cache_hit_source=None reasoning=None output=Some(20) total=Some(32)
 [pony-provider] decision:success mode=live tool_call=none output_preview=无头模式回答：任务完成。 
-[pony-agent][runtime] emit turn:trace event_type=turn.trace_updated turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(5) phase=Some("response_ready") text_len=0 tools=0
-[pony-agent][runtime] event flush dropped: backend without event support session=cli-session-bc7665d5-6234-4365-97e6-048691925254 turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 events=5
-[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.uLlVe6/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
-[pony-agent][runtime] emit turn:output_end event_type=turn.output_end turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(6) phase=Some("streaming_response") text_len=36 tools=0
-[pony-agent][runtime] emit turn:phase_changed event_type=turn.phase_changed turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(7) phase=Some("checkpointing") text_len=0 tools=0
-[pony-agent][runtime] emit turn:checkpoint_persisted event_type=turn.checkpoint_persisted turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(8) phase=Some("checkpointing") text_len=0 tools=0
-[pony-agent][runtime] emit turn:completed event_type=turn.completed turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 seq=Some(9) phase=Some("completed") text_len=36 tools=0
-[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.uLlVe6/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
-[pony-agent][runtime] event flush dropped: backend without event support session=cli-session-bc7665d5-6234-4365-97e6-048691925254 turn=turn-5cf96c05-8e01-4138-a4f3-80d1a424dbf7 events=4
-[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.uLlVe6/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
+[pony-agent][runtime] emit turn:trace event_type=turn.trace_updated turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(5) phase=Some("response_ready") text_len=0 tools=0
+[pony-agent][runtime] event flush dropped: backend without event support session=cli-session-de91d080-790d-41a2-a891-e3821f1317fa turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb events=5
+[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.NDc3Oo/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
+[pony-agent][runtime] emit turn:output_end event_type=turn.output_end turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(6) phase=Some("streaming_response") text_len=36 tools=0
+[pony-agent][runtime] emit turn:phase_changed event_type=turn.phase_changed turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(7) phase=Some("checkpointing") text_len=0 tools=0
+[pony-agent][runtime] emit turn:checkpoint_persisted event_type=turn.checkpoint_persisted turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(8) phase=Some("checkpointing") text_len=0 tools=0
+[pony-agent][runtime] emit turn:completed event_type=turn.completed turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb seq=Some(9) phase=Some("completed") text_len=36 tools=0
+[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.NDc3Oo/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
+[pony-agent][runtime] event flush dropped: backend without event support session=cli-session-de91d080-790d-41a2-a891-e3821f1317fa turn=turn-c471513e-2a85-4a2d-ad69-283dc9d59abb events=4
+[pony-agent][session] saving sessions to /tmp/pony-headless-e2e.NDc3Oo/iso/e4/home/.pony-agent/cli-state/cli-sessions.json
