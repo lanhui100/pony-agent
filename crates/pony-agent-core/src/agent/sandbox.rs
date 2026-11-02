@@ -231,7 +231,10 @@ fn validate_workspace_root(
         // ADVISORY 修复：没有配置沙箱 root 的后端**无法证明**绝对路径落在隔离范围内
         // （`/etc/passwd` 规范化后依然"合法"）。此处 fail-closed 拒绝绝对路径，
         // 而不是像旧实现那样直接放行 —— 一旦该分支被真后端启用，旧写法就是 fail-open。
-        if normalized.is_absolute() {
+        // Windows 上 `/etc/passwd` 这类「有根但无盘符」的路径 `is_absolute()` 为 false，
+        // 实际使用时却相对**当前盘根**解析（等价绝对路径）。只看 is_absolute() 会在这里 fail-open，
+        // 故 `has_root()` 同样必须拒绝（实测：CI Windows 用该断言抓到 fail-open）。
+        if normalized.is_absolute() || normalized.has_root() {
             return Err(format!(
                 "Sandbox security policy violation: workspace root `{workspace_root}` is absolute but this backend has no sandbox root to contain it"
             ));
@@ -335,6 +338,12 @@ mod tests {
         assert!(
             validate_workspace_root("a/../../etc/passwd", None).is_err(),
             "词法穿越必须被拒"
+        );
+        // Windows 盘符绝对路径（POSIX 断言之外的补强；`C:\\...` 在 Unix 上不是绝对路径）。
+        #[cfg(windows)]
+        assert!(
+            validate_workspace_root(r"C:\Windows\System32\drivers\etc\hosts", None).is_err(),
+            "Windows 盘符绝对路径同样必须 fail-closed"
         );
     }
 
