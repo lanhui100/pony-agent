@@ -11034,7 +11034,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// ADR 0055 P1-6：Windows 9009（命令不存在）必须附纠错提示，其它平台/退出码不得污染消息。
     #[test]
     fn windows_command_not_found_hint_only_for_9009_on_windows() {
@@ -11047,6 +11046,7 @@ mod tests {
         assert!(windows_command_not_found_hint(true, None, "false").is_none());
     }
 
+    #[test]
     fn classify_timeout_hint_classifies_network_commands_and_keeps_default() {
         let network_hint = classify_timeout_hint("git push origin main");
         for marker in [

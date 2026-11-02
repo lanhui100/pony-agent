@@ -1435,7 +1435,8 @@ impl WorkspaceHotloader {
                 match priority.iter().rev().copied().find(|&index| kept_flags[index]) {
                     Some(weakest) => {
                         kept_flags[weakest] = false;
-                        kept_count -= 1;
+                        // 收缩只做减法：丢弃条目不会让 kept_count 反过来逼近 max_entries，
+                        // 故此处不再维护 kept_count（避免死赋值）。
                         used -= lines[weakest].len();
                     }
                     None => {
