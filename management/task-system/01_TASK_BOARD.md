@@ -2,7 +2,7 @@
 
 ## Roadmap Layers
 
-- 宿主与入口：`PA-015 / PA-023`
+- 宿主与入口：`PA-015 / PA-023` / **交付形态四件套：`PA-164`(Headless) → `PA-165`(ACP) / `PA-166`(SDK)**
 - graph 编排：`PA-012 / PA-013 / PA-014 / PA-019`
 - runtime 执行：`PA-010 / PA-025`
 - 状态、上下文与记忆：`PA-011 / PA-016 / PA-017 / PA-018`
@@ -12,6 +12,16 @@
 - core 基础设施边界：`PA-044`
 
 ## Backlog
+
+- **交付形态四件套登记（2026-11-02）**：TUI 已完全具备；Headless 部分具备；SDK / ACP 完全缺失。三张卡如下，**串行依赖**（PA-164 先冻结事件契约与退出码，否则 165/166 会催生第二套事件 schema）。
+- `PA-164` Headless 交付形态补全（P1，Complexity B）— **建议优先，约 4~4.5 人日**
+  说明：`bin/cli.rs`（608 行）已有参数面/管道/事件 sink 骨架，但退出码恒 0（`turn:failed` 只 eprintln 不传播）、无 JSONL/SSE 结构化输出、stdout 被横幅污染、`tool_authorization_mode` 恒 None（`ask_user` 无头下可能挂起）、无 timeout/max-turns、无验收与 npm script。**成本低的关键**：`TurnEventSink` seam + `agent/sse_adapter.rs::format_sse_event` 已存在，帧格式无需重造。契约 C1~C6：输出模式 / 退出码分类学（fail-closed，禁 `_ => 0`）/ 结果封套 / 非交互审批策略（默认 deny）/ 有界执行 / 真实进程验收。任务卡：`03_TASKS/PA-164-headless-delivery-form.md`。
+- `PA-165` ACP（Agent Client Protocol）宿主接入（P2，Complexity C，**依赖 PA-164**）— 约 7~8 人日
+  说明：现状三宿主均走 Tauri IPC 专有通道（`src-tauri/src/tauri_adapter.rs:17`），无通用协议面；DSH 已多宿主平铺。实现 JSON-RPC 2.0 over stdio 服务端（initialize / session.new|load|cancel / prompt / request_permission 反向调用 / session-update 事件映射）。卡点：ACP 上游版本漂移须先锁版本；无外部客户端时以手写帧回放为验收真值。任务卡：`03_TASKS/PA-165-acp-host-protocol.md`。
+- `PA-166` 跨进程 SDK 可编程驱动（P2，Complexity C，**依赖 PA-164**）— 约 9~10 人日
+  说明：现状唯一 SDK 是同进程 Rust crate，三宿主编译期直连 core，仓外调用方无法驱动。提供 JSON-RPC over stdio + 薄客户端（`crates/pony-agent-sdk` / `packages/pony-sdk`），覆盖并发会话隔离、流式订阅、审批回调、事件队列有界背压、崩溃传播；同时是 PA-110 跨进程 subagent 委派的地基。任务卡：`03_TASKS/PA-166-cross-process-sdk.md`。
+- `PA-167` Headless 工具级授权与交互应答缺口（P2，Complexity C）— wave-59 撤销项承接
+  说明：PA-164 契约 v3/v4 裁定撤销 `--allow-tools` 与 `--max-turns`，理由是**宿主无接线口**（策略求值器由 runtime 内部注册 `governed_executor.rs:463-469`；跳数上限 `runtime/limits.rs:76` 为 `pub(super)`），声明即静默谎报。本卡补齐 5 项：可注入 `ToolPolicyEvaluator`、无头审批应答协议（fail-closed 默认 deny）、`turn:suspended` 增 `control_reason`、公开 `max_tool_hops`、`host_control_available` 可注入（当前 `runtime/mod.rs:316` 硬编码 true，使 `interaction_unavailable` 逃生口不可达）。需与 PA-165 ACP 的 `session/request_permission` 对齐，避免两套应答机制。任务卡：`03_TASKS/PA-167-headless-authorization-gaps.md`。
 
 - `PA-119` pony-agent-core 结构化日志迁移（P2，Complexity C）
   说明：`crates/pony-agent-core` 目前无 tracing/log 依赖，诊断输出统一为裸 `eprintln!`（`history_commands.rs` 实测 12 处），不满足 `.dev-team/nfr-baseline.json` 的 `logging{format:json,trace_id_required}`。本次 PA-118 死锁修复按「最小闭包」原则**未**引入日志框架，改以显式豁免落盘（`logging_legacy_eprintln_exempt=true` + `logging_debt_ref="PA-119"`，见 `.dev-team/contract-matrix-deadlock.md` §3.1）。**到期条款：PA-119 完成时必须重跑 PA-118 波次的 L3-P 五问并关闭该豁免**（将 `logging_legacy_eprintln_exempt` 置 false 并重过 `nfr-lint.py --self-test`）。
