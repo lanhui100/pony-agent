@@ -49,6 +49,7 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 mod ask_plan_commands;
 mod capability_commands;
+mod compaction_commands;
 mod graph_projection;
 mod history_commands;
 mod message_projection;

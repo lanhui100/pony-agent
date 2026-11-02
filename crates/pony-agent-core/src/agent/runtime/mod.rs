@@ -79,6 +79,7 @@ use std::time::Instant;
 
 pub mod turn_runner;
 
+mod compaction_ops;
 mod ingress_mediation;
 mod session_ops;
 mod tool_exec;
@@ -98,6 +99,8 @@ mod turn_stream;
 mod types;
 
 pub use builder::{AgentRuntimeBuilder, DesktopRuntimePreset};
+pub use compaction_ops::{compact_outcome_message, ManualCompactionOutcome};
+pub(crate) use compaction_ops::compact_session_with_sessions;
 pub use types::{PlannerGraphDecisionDispatchOutcome, RunTurnFacts, SUSPENDED_TURN_PHASE, TurnInput, TurnResult, TurnStreamEvent};
 
 use blocked_records::*;

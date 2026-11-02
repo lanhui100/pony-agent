@@ -10,7 +10,9 @@ use pony_agent_core::agent::control_plane::{
 };
 use pony_agent_core::agent::graph::GraphRunStore;
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
-use pony_agent_core::agent::runtime::{AgentRuntimeBuilder, TurnInput, TurnStreamEvent};
+use pony_agent_core::agent::runtime::{
+    compact_outcome_message, AgentRuntimeBuilder, TurnInput, TurnStreamEvent,
+};
 use pony_agent_core::agent::session::{FileSessionBackend, SessionStore};
 use pony_agent_core::agent::turn_flow::TurnEventSink;
 use std::io::{self, BufRead, Read, Write};
@@ -28,7 +30,6 @@ pub enum SubCommand {
 pub enum SlashCommand {
     Clear,
     Compact,
-    Cost,
     Help,
     Exit,
     Unknown(String),
@@ -43,7 +44,6 @@ impl SlashCommand {
         match trimmed {
             "/clear" => Some(SlashCommand::Clear),
             "/compact" => Some(SlashCommand::Compact),
-            "/cost" => Some(SlashCommand::Cost),
             "/help" => Some(SlashCommand::Help),
             "/exit" | "/quit" => Some(SlashCommand::Exit),
             other => Some(SlashCommand::Unknown(other.to_string())),
@@ -410,7 +410,6 @@ fn print_help() {
     println!("\x1b[1;33mCommands & Slash-commands:\x1b[0m");
     println!("  /clear    Clear the current context and start a fresh session");
     println!("  /compact  Compact the current conversation history");
-    println!("  /cost     Show total tokens used and cost estimates");
     println!("  /help     Show this help message");
     println!("  /exit     Exit the interactive session");
 }
@@ -585,16 +584,16 @@ fn main() {
                     continue;
                 }
                 SlashCommand::Compact => {
-                    println!("\x1b[33m⚡ Compact triggered: summarizing prior turns...\x1b[0m");
-                    run_turn_interactive(&control_plane, &session_id, "系统内部指令：请提炼总结前面的对话关键背景以压缩上下文。");
-                    continue;
-                }
-                SlashCommand::Cost => {
-                    println!("\x1b[36m📊 Session Cost & Usage:\x1b[0m");
-                    println!("  Session ID:   {}", session_id);
-                    println!("  Model:        {}", args.model);
-                    println!("  Tariff:       PolyLLM Standard ($3.00/1M in, $15.00/1M out, $0.75/1M cache)");
-                    println!("  Budget Limit: Configured via PONY_MAX_BUDGET_USD / CostTracker");
+                    // 契约 C-4：CLI 的 `/compact` 走控制面真实压缩（C-2/C-1），
+                    // 不再用"发一条请总结对话的提示词"伪装压缩。
+                    // 文案复用 core 纯函数（审查 F4），TUI/CLI 同一套措辞。
+                    let result = control_plane.compact_session(Some(session_id.as_str()), true);
+                    let color = match &result {
+                        Ok(outcome) if outcome.compacted => "\x1b[32m",
+                        Ok(_) => "\x1b[33m",
+                        Err(_) => "\x1b[31m",
+                    };
+                    println!("{color}{}\x1b[0m", compact_outcome_message(&result));
                     continue;
                 }
                 SlashCommand::Unknown(u) => {

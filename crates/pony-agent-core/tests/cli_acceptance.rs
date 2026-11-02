@@ -67,7 +67,12 @@ fn test_slash_command_parsing() {
     use cli::SlashCommand;
     assert_eq!(SlashCommand::parse("/clear"), Some(SlashCommand::Clear));
     assert_eq!(SlashCommand::parse("/compact"), Some(SlashCommand::Compact));
-    assert_eq!(SlashCommand::parse("/cost"), Some(SlashCommand::Cost));
+    // wave-slash-1（契约 C-4）：`/cost` 已从 CLI 与 TUI 命令表移除（金额/配额核算为非目标），
+    // 因此它必须退化为普通未知斜杠输入，而不是被静默吞掉。
+    assert_eq!(
+        SlashCommand::parse("/cost"),
+        Some(SlashCommand::Unknown("/cost".to_string()))
+    );
     assert_eq!(SlashCommand::parse("/help"), Some(SlashCommand::Help));
     assert_eq!(SlashCommand::parse("/exit"), Some(SlashCommand::Exit));
     assert_eq!(SlashCommand::parse("/quit"), Some(SlashCommand::Exit));

@@ -33,7 +33,7 @@ use agent::frontend_diagnostics::{
 };
 use agent::graph::GraphAskWaitBinding;
 use agent::graph::GraphRunCheckpoint;
-use agent::runtime::{TurnInput, TurnResult};
+use agent::runtime::{ManualCompactionOutcome, TurnInput, TurnResult};
 use agent::session::SessionOverview;
 use agent::tools::{builtin_turn_tool_contract_views, ToolDefinitionContractView};
 use serde_json::{json, Value};
@@ -1049,6 +1049,29 @@ fn delete_session(
     control_plane.delete_session(DeleteSessionCommand { session_id })
 }
 
+/// 手动上下文压缩（桌面 `/compact`，契约 C-3）。
+///
+/// 命令名 `compact_session`，参数 `sessionId` / `force`（缺省按 `true` 处理，用户主动触发即强制），
+/// 返回 camelCase 的 `ManualCompactionOutcome`（由 core 的 `serde(rename_all = "camelCase")` 保证）。
+///
+/// 该命令内部会发起真实 LLM 摘要调用（网络 IO，秒级），按 W56-D 惯例不能同步内联在
+/// WebView IPC 线程上；`State<'_, _>` 无法跨线程，故 async + `BlockingHelper::spawn`，
+/// 在阻塞闭包内用 `AppHandle::state::<HostControlPlane>()` 现取。
+#[tauri::command]
+async fn compact_session(
+    app: AppHandle,
+    session_id: Option<String>,
+    force: Option<bool>,
+) -> Result<ManualCompactionOutcome, String> {
+    let force = force.unwrap_or(true);
+    BlockingHelper::spawn(move || {
+        app.state::<HostControlPlane>()
+            .compact_session(session_id.as_deref(), force)
+    })
+    .await
+    .and_then(|outcome| outcome)
+}
+
 #[tauri::command]
 fn list_available_tools() -> Vec<ToolDefinitionContractView> {
     builtin_turn_tool_contract_views()
@@ -1355,6 +1378,7 @@ pub fn run() {
             health_check,
             list_sessions,
             upload_session_trace,
+            compact_session,
             get_workspace_root,
             usage_governance_summary,
             import_attachment,
