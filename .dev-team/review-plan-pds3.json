@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "b9d37323-c9d0-41ed-bf3a-28baf3289022",
+    "fresh_context": true
+  },
+  "executed_by": "b9d37323-c9d0-41ed-bf3a-28baf3289022",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "verdict": "PASS",
+  "wave": "pds-3",
+  "reviewed_commit": "8e51bd5",
+  "audited_scopes": [
+    ".dev-team/contracts/wave-pds-3-streaming-visual.md"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contracts/wave-pds-3-streaming-visual.md",
+      "line": 1,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'charsPerTick 4→2' .dev-team/contracts/wave-pds-3-streaming-visual.md",
+      "severity": "ADVISORY",
+      "note": "§4 与 V10 互斥（冻结基线断言每 tick 4 字）；已撤销该改动 v2"
+    },
+    {
+      "file": ".dev-team/contracts/wave-pds-3-streaming-visual.md",
+      "line": 1,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "node -e \"console.log(16.9 > 16.7)\"",
+      "severity": "ADVISORY",
+      "note": "16.7ms 绝对帧阈值物理不可达（60Hz 空闲 p95=16.9ms）；改相对基线 v2"
+    },
+    {
+      "file": ".dev-team/contracts/wave-pds-3-streaming-visual.md",
+      "line": 1,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n '尾巴 ≤1 行' .dev-team/contracts/wave-pds-3-streaming-visual.md",
+      "severity": "ADVISORY",
+      "note": "单行硬约束逼实现劈块，切坏表格/标题/加粗/列表；已取消 v5"
+    }
+  ]
+}

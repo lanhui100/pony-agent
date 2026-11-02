@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "2485b3fc-9b7e-47b1-9916-b1622d1646bd",
+    "fresh_context": true
+  },
+  "executed_by": "2485b3fc-9b7e-47b1-9916-b1622d1646bd",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "verdict": "PASS",
+  "wave": "pds-3",
+  "reviewed_commit": "f3979e49bfd212cee3ab2b03c68cc771b7b9c094",
+  "audited_scopes": [
+    "src/components/MarkdownRenderer.vue",
+    "src/components/chat/WorkspaceTurnItem.vue",
+    "src/components/HomeWorkspace.vue",
+    "src/components/chat/AgentRuntimeStatusBar.vue",
+    "src/styles.css",
+    "src/lib/useStreamingPresentationState.ts"
+  ],
+  "findings": [
+    {
+      "file": "src/components/MarkdownRenderer.vue",
+      "line": 301,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'renderNonEligibleTail' src/components/MarkdownRenderer.vue",
+      "severity": "ADVISORY",
+      "note": "非资格路径每 tick 渲染 2 次；V8 预算内，登记为后续优化"
+    },
+    {
+      "file": "src/components/chat/WorkspaceTurnItem.vue",
+      "line": 310,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'isPlainTextTailEligible' src/components/chat/WorkspaceTurnItem.vue",
+      "severity": "ADVISORY",
+      "note": "纯文本资格门实际不生效（乐观放行）；该路径为文本插值无 HTML，无风险"
+    },
+    {
+      "file": "src/styles.css",
+      "line": 1,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn 'data-pds-reduce-motion' src/ | grep -v styles.css | grep -v '\\.vue'",
+      "severity": "ADVISORY",
+      "note": "data-pds-reduce-motion 无 UI 写入者；属性轨已支持未接线，媒体轨承担降级"
+    }
+  ]
+}

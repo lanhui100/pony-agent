@@ -802,14 +802,14 @@
       "branches": {
         "test": {
           "owner": "test-agent",
-          "status": "pending",
+          "status": "completed",
           "write_scopes": [
             "tests/acceptance/pds-streaming/"
           ]
         },
         "impl": {
           "owner": "executor",
-          "status": "pending",
+          "status": "completed",
           "write_scopes": [
             "src/components/MarkdownRenderer.vue",
             "src/components/chat/WorkspaceTurnItem.vue",
@@ -821,7 +821,25 @@
         }
       },
       "nfr": "N-A（纯渲染层：无出网/后台任务/LLM 调用/新增对外接口）；帧预算与节点上限见契约 §5，由 V1/V8 承载",
-      "baseline_commit": "42508d543a03b1c625c9f68b04f7e59dc5a96467"
+      "baseline_commit": "42508d543a03b1c625c9f68b04f7e59dc5a96467",
+      "status": "completed",
+      "deliver_commit": "f3979e49bfd212cee3ab2b03c68cc771b7b9c094",
+      "contract_versions": "v1→v11（实施期修订 10 版）",
+      "acceptance": {
+        "jsdom": 76,
+        "chromium": 10,
+        "frozen": 68,
+        "full_suite": "132 files / 1274 passed"
+      },
+      "reviews": [
+        "review-plan-pds3.json(PASS)",
+        "review-join-pds3.json(PASS)",
+        "round-2 B PASS",
+        "round-3 A PASS",
+        "round-4 A PASS"
+      ],
+      "meta_retrospective": ".dev-team/meta-retrospective.md",
+      "known_limits": 6
     }
   ],
   "counters": {
@@ -833,6 +851,12 @@
     },
     "wave59": {
       "functional_failures": 0
+    },
+    "pds-3": {
+      "functional_failures": 0,
+      "adversarial_failures": 0,
+      "impl_defect": 0,
+      "note": "三轮实施返工均源于契约缺陷而非实现缺陷（见 ADR 0059 追加记录）"
     }
   }
 }
