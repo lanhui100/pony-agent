@@ -15,6 +15,9 @@
 //!   该值恒等于 1（语义空洞）；真正的「工具跳数上限」在 `runtime/limits.rs:76` 是
 //!   `pub(super)` 内部原子量，宿主无公开接线口 ⇒ 声明即静默谎报，已连同 `--allow-tools`
 //!   一并登记 PA-167。本文件不构造、不断言该字段。
+//! - **v4（B3/B7）**：`ResultEnvelope` 新增 `failure_reason: Option<String>`（失败/挂起的 wire
+//!   原文，透传不加工）；`TurnStatus` serde 令牌改为**小写**（`"completed"` / `"suspended"` …）。
+//!   本文件对令牌的断言按小写锁死。
 //! - **D2（新增）**：`turn:suspended` 必须作为**终态**被测。事实：审批/ask 触发时 turn 立即
 //!   返回且只发 `turn:suspended`（`runtime/turn_stream.rs:376-438`），`bin/cli.rs` 的 sink 不认
 //!   该事件 ⇒ 死循环挂死。这是在测本波最真实的缺陷，不是补覆盖率。
@@ -91,6 +94,15 @@ fn non_empty_lines(chunks: &[String]) -> Vec<String> {
 }
 
 fn envelope(status: TurnStatus, exit_code: i32) -> ResultEnvelope {
+    envelope_with_reason(status, exit_code, None)
+}
+
+/// v4（B3）：`failure_reason` 是失败/挂起场景的 wire 原文（无则 `None`）。
+fn envelope_with_reason(
+    status: TurnStatus,
+    exit_code: i32,
+    failure_reason: Option<&str>,
+) -> ResultEnvelope {
     ResultEnvelope {
         schema: RESULT_ENVELOPE_SCHEMA.to_string(),
         session_id: "session-headless-contract".to_string(),
@@ -107,6 +119,7 @@ fn envelope(status: TurnStatus, exit_code: i32) -> ResultEnvelope {
             status: "ok".to_string(),
         }],
         duration_ms: 1234,
+        failure_reason: failure_reason.map(str::to_string),
     }
 }
 
@@ -592,6 +605,8 @@ fn c3_result_envelope_field_set_and_types() {
         "usage",
         "tool_calls",
         "duration_ms",
+        // v4（B3）：失败/挂起原因，consumer 靠它区分 suspended 的具体触发源
+        "failure_reason",
     ];
 
     // Assert 1: 字段存在
@@ -610,6 +625,15 @@ fn c3_result_envelope_field_set_and_types() {
     assert!(obj["session_id"].is_string(), "session_id 必须是字符串");
     assert!(obj["turn_id"].is_string(), "turn_id 必须是字符串");
     assert!(obj["status"].is_string(), "status 必须序列化为字符串令牌");
+    assert!(
+        obj.contains_key("failure_reason"),
+        "v4 契约要求 `failure_reason` 恒定出现在 wire 上（无失败时为 null，不得 skip）：{serialized}"
+    );
+    assert!(
+        obj["failure_reason"].is_null() || obj["failure_reason"].is_string(),
+        "failure_reason 必须是字符串或 null，实际 {}",
+        obj["failure_reason"]
+    );
 
     let usage = obj["usage"]
         .as_object()
@@ -670,12 +694,11 @@ fn c3_turn_status_tokens_are_the_frozen_five() {
     })
     .collect();
 
-    // Assert 1: 小写归一后必须精确等于契约五态（防 casing 漂移把 consumer 的等值判断打空）
-    let normalized: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
+    // Assert 1: v4 冻结为**小写**令牌，必须逐字相等（casing 漂移会把 consumer 的等值判断打空）
     assert_eq!(
-        normalized,
+        tokens,
         vec!["completed", "failed", "timeout", "cancelled", "suspended"],
-        "TurnStatus 序列化令牌必须为契约五态（大小写归一），实际 {tokens:?}"
+        "TurnStatus 序列化令牌必须为 v4 冻结的小写五态，实际 {tokens:?}"
     );
 
     // Assert 2: 令牌两两不同（否则 consumer 无法区分终态）
@@ -725,6 +748,43 @@ fn c3_suspended_envelope_implies_permission_denied_exit_code() {
         obj.get("exit_code").and_then(Value::as_i64),
         Some(0),
         "status=Suspended 却以 exit_code=0 落盘 —— 无头调用方会把挂起当成功"
+    );
+}
+
+/// v4（B3）：`failure_reason` 是**透传**的 wire 原文，不得加工/包装。
+///
+/// 存在理由：`suspended` 有多种触发源（审批 / ask / 控制面 pending），consumer 只能靠这条
+/// 原文区分；若被上层改写或丢成 null，排障与门禁都会失真。
+#[test]
+fn c3_failure_reason_is_transparent_passthrough() {
+    // Arrange
+    let wire_reason = "control_outcome_pending";
+
+    // Act
+    let serialized = serde_json::to_value(envelope_with_reason(
+        TurnStatus::Suspended,
+        exit_code_for(TurnStatus::Suspended).code(),
+        Some(wire_reason),
+    ))
+    .expect("ResultEnvelope 必须可序列化");
+
+    // Assert 1: 原文逐字透传
+    assert_eq!(
+        serialized.get("failure_reason").and_then(Value::as_str),
+        Some(wire_reason),
+        "failure_reason 必须逐字透传 wire 原文（不得加工/包装），实际 {serialized}"
+    );
+
+    // Assert 2: 挂起态仍自洽（exit 6 + 小写 status）
+    assert_eq!(
+        serialized.get("exit_code").and_then(Value::as_i64),
+        Some(6),
+        "Suspended 封套的 exit_code 必须为 6，实际 {serialized}"
+    );
+    assert_eq!(
+        serialized.get("status").and_then(Value::as_str),
+        Some("suspended"),
+        "v4 令牌必须为小写 suspended，实际 {serialized}"
     );
 }
 

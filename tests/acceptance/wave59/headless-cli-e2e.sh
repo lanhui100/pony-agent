@@ -12,13 +12,17 @@
 #   E4  C3     `--result-json <path>` 落盘封套：schema == pony.headless.result.v1、
 #              字段齐全、`status==completed ⟺ exit_code==0`，且 exit_code 与真实进程
 #              Exit Code 交叉一致（该不变量只能在真实产物上黑盒断言，见 Rust 测试头注）
-#   E5  C2     provider 不可达（本地已关闭端口）→ 进程 Exit Code != 0（绝不退 0），
+#   E5  C2     provider 不可达（本地已关闭端口）→ **exit == 4**（ProviderNetwork 具体码），
 #              stdout 仍是纯净 JSONL（无 ANSI），stderr 无 panic
-#   E6  C4     `--permission-mode deny` + mock 返回工具调用 → 无审批应答方时**禁止挂起**
-#              （timeout 兜底判定），stdout 纯净
-#   E6b C4/D1  不传 `--permission-mode`（默认必须 fail-closed=read_only）→ 同样不得挂起
-#   E7  L2-AT  provider 返回畸形 JSON（200 + 非 JSON 体）→ 进程不 panic、Exit Code != 0、
+#   E6  C4/D2  `--permission-mode deny`(=read_only) + mock 返回 **host-mediated** 工具
+#              `ask_user` → 无审批/ask 应答方 ⇒ suspended 终态 ⇒ **exit == 6**，且不得挂起
+#   E6c 证据   mock(ask) 必须真的收到请求（排除「参数错误早退」造成的假绿）
+#   E6b C4/D1  不传 `--permission-mode`（默认必须 fail-closed=read_only）同样 → **exit == 6**
+#   E7  L2-AT  provider 返回畸形 JSON（200 + 非 JSON 体）→ **exit == 4**、不 panic、
 #              stdout 纯净 JSONL
+#   E8  C5     `--timeout-secs 1` + mock 慢响应（固定 5s）⇒ **exit == 7**，
+#              `--result-json` 落盘 `status=="timeout"` 且 `exit_code==7`，耗时远小于 5s
+#              （E8c/E8d 分别是「超时也落盘」与「封套自洽」两道断言）
 #
 # 契约 v2/v3 说明（Lead 裁定，见 .dev-team/contract-matrix-wave59-headless.md）：
 #   - `--permission-mode` 取值为 deny|read-only|read_only → read_only、
@@ -115,8 +119,10 @@ run_cli() { # $1 = env root, 其余 = ponycli 参数
 # ---------------------------------------------------------------------------
 # 2. 自包含 mock OpenAI gateway（内嵌 python，参考 tests/acceptance/l2at-tui-workspace.sh）
 #    mode: text    = 正常文本回复
-#          tool    = 无条件返回一个工具调用（验证 deny 模式不挂起）
+#          tool    = 返回 Read 工具调用（只读工具，read_only 下合法）
+#          ask     = 返回 host-mediated `ask_user` 工具调用（可控 suspended 触发路径）
 #          garbage = 200 + 非 JSON 体（L2-AT 畸形 payload）
+#          slow    = 固定 sleep 5s 才应答（E8 超时用例的确定性慢响应源）
 # ---------------------------------------------------------------------------
 cat >"$WORK/mock.py" <<'PY'
 import argparse
@@ -129,6 +135,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL_ID = "mock-alpha"
 READ_ARGS = json.dumps({"path": "package.json"})
+# E6/E6b：`ask_user` 在宿主声明层是 host-mediated（tools.rs:7452 `host_mediated=true`）⇒
+# 无头无应答方时 turn 立即返回并只发 `turn:suspended`。这是可控的 suspended 触发路径。
+ASK_ARGS = json.dumps(
+    {"question": "无头模式下需要用户确认，是否继续？", "options": ["继续", "停止"]},
+    ensure_ascii=False,
+)
 
 
 def message_text(message):
@@ -232,11 +244,23 @@ class Handler(BaseHTTPRequestHandler):
             self._raw(200, "<html>gateway exploded</html>")
             return
 
+        if self.server.mode == "slow":
+            # E8：故意慢响应，验证 --timeout-secs 到期由客户端收工（不是网关先答）
+            time.sleep(5.0)
+
+        if self.server.mode == "ask" and not has_tool_message:
+            # E6/E6b：host-mediated 工具 ⇒ 无审批应答方时 turn 必须 suspended（exit 6）
+            if stream:
+                self._stream_tool_call("ask_user", ASK_ARGS)
+            else:
+                self._json_tool_call("ask_user", ASK_ARGS)
+            return
+
         if self.server.mode == "tool" and not has_tool_message:
             if stream:
-                self._stream_tool_call()
+                self._stream_tool_call("Read", READ_ARGS)
             else:
-                self._json_tool_call()
+                self._json_tool_call("Read", READ_ARGS)
             return
 
         answer = "无头模式回答：任务完成。" if not has_tool_message else "工具被拒绝或已执行，任务完成。"
@@ -256,7 +280,8 @@ class Handler(BaseHTTPRequestHandler):
             "usage": {"prompt_tokens": 12, "completion_tokens": 20, "total_tokens": 32},
         })
 
-    def _json_tool_call(self):
+    def _json_tool_call(self, tool_name="Read", tool_args=None):
+        tool_args = READ_ARGS if tool_args is None else tool_args
         self._json(200, {
             "id": self.state.next_id(),
             "object": "chat.completion",
@@ -267,11 +292,11 @@ class Handler(BaseHTTPRequestHandler):
                 "finish_reason": "tool_calls",
                 "message": {
                     "role": "assistant",
-                    "content": "我先读取 package.json。",
+                    "content": "我先调用工具。",
                     "tool_calls": [{
-                        "id": "call_wave59_read_1",
+                        "id": "call_wave59_%s_1" % tool_name,
                         "type": "function",
-                        "function": {"name": "Read", "arguments": READ_ARGS},
+                        "function": {"name": tool_name, "arguments": tool_args},
                     }],
                 },
             }],
@@ -333,10 +358,11 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _stream_tool_call(self):
+    def _stream_tool_call(self, tool_name="Read", tool_args=None):
+        tool_args = READ_ARGS if tool_args is None else tool_args
         try:
             self._start_sse()
-            self._sse(self._delta({"role": "assistant", "content": "我先读取 package.json。"}))
+            self._sse(self._delta({"role": "assistant", "content": "我先调用工具。"}))
             self._sse({
                 "id": "chatcmpl-wave59",
                 "object": "chat.completion.chunk",
@@ -347,9 +373,9 @@ class Handler(BaseHTTPRequestHandler):
                     "finish_reason": "tool_calls",
                     "delta": {"tool_calls": [{
                         "index": 0,
-                        "id": "call_wave59_read_1",
+                        "id": "call_wave59_%s_1" % tool_name,
                         "type": "function",
-                        "function": {"name": "Read", "arguments": READ_ARGS},
+                        "function": {"name": tool_name, "arguments": tool_args},
                     }]},
                 }],
             })
@@ -364,7 +390,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--log", required=True)
-    parser.add_argument("--mode", default="text", choices=["text", "tool", "garbage"])
+    parser.add_argument("--mode", default="text", choices=["text", "tool", "ask", "garbage", "slow"])
     args = parser.parse_args()
     state = State(args.log)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
@@ -389,7 +415,7 @@ PY
 }
 
 MOCK_PORTS=()
-MOCK_MODES=("text" "tool" "garbage")
+MOCK_MODES=("text" "tool" "ask" "garbage" "slow")
 MOCK_READY=1
 if ! command -v python3 >/dev/null 2>&1; then
   log "[RED DEGRADED: ARG-ONLY] python3 missing → 无法起 mock gateway，网络类用例跳过"
@@ -421,8 +447,10 @@ fi
 
 PORT_TEXT="${MOCK_PORTS[0]:-0}"
 PORT_TOOL="${MOCK_PORTS[1]:-0}"
-PORT_GARBAGE="${MOCK_PORTS[2]:-0}"
-log "== ports: text=$PORT_TEXT tool=$PORT_TOOL garbage=$PORT_GARBAGE"
+PORT_ASK="${MOCK_PORTS[2]:-0}"
+PORT_GARBAGE="${MOCK_PORTS[3]:-0}"
+PORT_SLOW="${MOCK_PORTS[4]:-0}"
+log "== ports: text=$PORT_TEXT tool=$PORT_TOOL ask=$PORT_ASK garbage=$PORT_GARBAGE slow=$PORT_SLOW"
 
 # 已关闭端口（连接必然被拒）——用于 provider 网络失败用例
 DEAD_PORT="$(free_port)"
@@ -530,8 +558,8 @@ assert_no_panic "E2" "$E2.stdout" "$E2.stderr"
 # E3~E7: 需要 mock gateway
 # ---------------------------------------------------------------------------
 if [ "$MOCK_READY" -ne 1 ]; then
-  log "[RED DEGRADED: ARG-ONLY] E3/E4/E5/E6/E7 未执行（mock gateway 不可用）"
-  for case in E3 E4 E5 E6 E7; do skip "$case (degraded: arg-only)"; done
+  log "[RED DEGRADED: ARG-ONLY] E3/E4/E5/E6/E6b/E7/E8 未执行（mock gateway 不可用）"
+  for case in E3 E4 E5 E6 E6b E7 E8; do skip "$case (degraded: arg-only)"; done
 else
   # ---- E3: jsonl 正常路径 ------------------------------------------------
   E3="$RECEIPTS/e3-jsonl-happy"
@@ -621,48 +649,63 @@ PY
     >"$E5.stdout" 2>"$E5.stderr"
   rc=$?
   echo "exit_code=$rc" >"$E5.exit"
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
-    ok "E5 provider 不可达 → 非 0 退出（实际 $rc）"
+  if [ "$rc" -eq 4 ]; then
+    ok "E5 provider 不可达 → exit 4（ProviderNetwork，具体码断言）"
+  elif [ "$rc" -eq 124 ]; then
+    bad "E5 provider 不可达时进程挂起（timeout 124）—— 无界等待"
   elif [ "$rc" -eq 0 ]; then
     bad "E5 provider 不可达却以 0 退出 —— 失败被吞（C2 fail-closed 被击穿）"
   else
-    bad "E5 provider 不可达时进程挂起（timeout 124）—— 无界等待"
+    bad "E5 provider 不可达期望 exit 4（ProviderNetwork），实际 $rc"
   fi
   assert_jsonl_pure "$E5.stdout" "E5" 0
   assert_no_panic "E5" "$E5.stdout" "$E5.stderr"
 
-  # ---- E6: deny 模式 + 工具调用 → 不得挂起 -------------------------------
-  E6="$RECEIPTS/e6-deny-mode-no-hang"
+  # ---- E6: 显式 deny（=read_only）档位 + host-mediated 工具 ⇒ suspended 终态 ----
+  # 触发路径：mock 返回 `ask_user` 工具调用；该工具在宿主声明层是 host-mediated
+  # （tools.rs:7452 `host_mediated=true`）⇒ 无审批/ask 应答方时 runtime 立即返回并只发
+  # `turn:suspended`（runtime/turn_stream.rs:376-438）⇒ 契约 v2 D2 要求 exit 6、且不得挂起。
+  E6="$RECEIPTS/e6-ask-suspended-explicit-deny"
   env_root="$(fresh_env e6)"
   run_cli "$env_root" \
-    --output-format jsonl --permission-mode deny -p "read the package.json" \
-    -g "http://127.0.0.1:$PORT_TOOL" --key mock-key -m mock-alpha \
+    --output-format jsonl --permission-mode deny -p "ask me something" \
+    -g "http://127.0.0.1:$PORT_ASK" --key mock-key -m mock-alpha \
     >"$E6.stdout" 2>"$E6.stderr"
   rc=$?
   echo "exit_code=$rc" >"$E6.exit"
-  if [ "$rc" -eq 124 ]; then
-    bad "E6 deny 模式无审批应答方时挂起（timeout 124）—— C4 禁止挂起进程"
+  if [ "$rc" -eq 6 ]; then
+    ok "E6 ask_user 无应答方 → exit 6（suspended ⟹ PermissionDenied）"
+  elif [ "$rc" -eq 124 ]; then
+    bad "E6 ask_user 无应答方时挂起（timeout 124）—— C4/D2 禁止挂起进程"
   else
-    ok "E6 deny 模式未挂起（退出码 $rc）"
+    bad "E6 ask_user 无应答方期望 exit 6（suspended⟹PermissionDenied），实际 $rc"
+  fi
+  # E6c：证据门禁——mock 必须真的被请求过，排除「参数错误早退」造成的假通过
+  if [ -s "$RECEIPTS/mock-ask-requests.jsonl" ]; then
+    ok "E6c mock(ask) 收到请求 —— 证明真走到模型/工具链路"
+  else
+    bad "E6c mock(ask) 未收到任何请求 —— 未触达 suspended 路径，本用例结论不可信"
   fi
   assert_jsonl_pure "$E6.stdout" "E6" 0
   assert_no_panic "E6" "$E6.stdout" "$E6.stderr"
 
-  # ---- E6b: 不传 --permission-mode（默认 fail-closed = read_only）同样不得挂起 ----
+  # ---- E6b: 不传 --permission-mode（默认必须 fail-closed=read_only）+ host-mediated 工具 ----
   # 缺陷背景：契约 v2 之前 CLI 默认传 None，宿主对 None 判定等价于「完全不受限」。
-  # 此例锁「默认档位既不放行写入、也不挂起」。
-  E6B="$RECEIPTS/e6b-default-permission-mode"
+  # 此例同时锁两件事：①默认档位不得放行；②默认档位下 ask 挂起必须收敛为 exit 6（不得挂死）。
+  E6B="$RECEIPTS/e6b-ask-suspended-default-mode"
   env_root="$(fresh_env e6b)"
   run_cli "$env_root" \
-    --output-format jsonl -p "read the package.json" \
-    -g "http://127.0.0.1:$PORT_TOOL" --key mock-key -m mock-alpha \
+    --output-format jsonl -p "ask me something" \
+    -g "http://127.0.0.1:$PORT_ASK" --key mock-key -m mock-alpha \
     >"$E6B.stdout" 2>"$E6B.stderr"
   rc=$?
   echo "exit_code=$rc" >"$E6B.exit"
-  if [ "$rc" -eq 124 ]; then
-    bad "E6b 默认审批档位下挂起（timeout 124）—— 默认必须 fail-closed 且不得挂起"
+  if [ "$rc" -eq 6 ]; then
+    ok "E6b 默认档位 + ask_user → exit 6（默认 fail-closed 且不挂起）"
+  elif [ "$rc" -eq 124 ]; then
+    bad "E6b 默认档位下挂起（timeout 124）—— 默认必须 fail-closed 且不得挂起"
   else
-    ok "E6b 默认审批档位未挂起（退出码 $rc）"
+    bad "E6b 默认档位 + ask_user 期望 exit 6，实际 $rc"
   fi
   assert_jsonl_pure "$E6B.stdout" "E6b" 0
   assert_no_panic "E6b" "$E6B.stdout" "$E6B.stderr"
@@ -676,15 +719,77 @@ PY
     >"$E7.stdout" 2>"$E7.stderr"
   rc=$?
   echo "exit_code=$rc" >"$E7.exit"
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
-    ok "E7 畸形响应 → 非 0 退出（实际 $rc）"
+  if [ "$rc" -eq 4 ]; then
+    ok "E7 畸形响应 → exit 4（ProviderNetwork，具体码断言）"
+  elif [ "$rc" -eq 124 ]; then
+    bad "E7 provider 返回畸形 JSON 时进程挂起（timeout 124）"
   elif [ "$rc" -eq 0 ]; then
     bad "E7 provider 返回畸形 JSON 却以 0 退出 —— 解析失败被吞"
   else
-    bad "E7 provider 返回畸形 JSON 时进程挂起（timeout 124）"
+    bad "E7 畸形响应期望 exit 4（ProviderNetwork），实际 $rc"
   fi
   assert_jsonl_pure "$E7.stdout" "E7" 0
   assert_no_panic "E7" "$E7.stdout" "$E7.stderr"
+
+  # ---- E8: 有界执行——`--timeout-secs 1` 到期 ⇒ exit 7 + 封套 status=timeout ----
+  # 确定性来源：mock(slow) 固定 sleep 5s 才应答，超时预算 1s ⇒ 客户端必须在到期时收工，
+  # 断言的是**结局**（具体退出码 7 + 落盘终态），不是「猜时序」。
+  E8="$RECEIPTS/e8-timeout"
+  E8_RESULT="$WORK/result-wave59-timeout.json"
+  env_root="$(fresh_env e8)"
+  e8_started=$(date +%s)
+  run_cli "$env_root" \
+    --output-format jsonl --timeout-secs 1 --result-json "$E8_RESULT" -p "slow request" \
+    -g "http://127.0.0.1:$PORT_SLOW" --key mock-key -m mock-alpha \
+    >"$E8.stdout" 2>"$E8.stderr"
+  rc=$?
+  e8_elapsed=$(( $(date +%s) - e8_started ))
+  echo "exit_code=$rc" >"$E8.exit"
+  echo "elapsed_s=$e8_elapsed" >>"$E8.exit"
+  if [ "$rc" -eq 7 ]; then
+    ok "E8 --timeout-secs 1 到期 → exit 7（Timeout，具体码断言）"
+  elif [ "$rc" -eq 124 ]; then
+    bad "E8 脚本级 timeout 先触发（124）—— --timeout-secs 未生效"
+  else
+    bad "E8 --timeout-secs 1 期望 exit 7（Timeout），实际 $rc"
+  fi
+  if [ "$e8_elapsed" -le 4 ]; then
+    ok "E8b 到期即收工（耗时 ${e8_elapsed}s < mock 的 5s 响应）"
+  else
+    bad "E8b 耗时 ${e8_elapsed}s —— 未见超时收敛（mock 固定慢响应 5s）"
+  fi
+  cp "$E8_RESULT" "$E8.envelope.json" 2>/dev/null || true
+  if [ -f "$E8_RESULT" ]; then
+    ok "E8c 超时路径同样落盘 --result-json（终态证据）"
+    if python3 - "$E8_RESULT" <<'PY8' >>"$LOG" 2>"$WORK/e8.err"
+import json
+import sys
+
+env = json.load(open(sys.argv[1], encoding="utf-8"))
+problems = []
+status = str(env.get("status", "")).lower()
+if env.get("schema") != "pony.headless.result.v1":
+    problems.append("schema 期望 pony.headless.result.v1，实际 %r" % (env.get("schema"),))
+if status != "timeout":
+    problems.append("status 期望 timeout（契约 v4 小写令牌），实际 %r" % (env.get("status"),))
+if env.get("exit_code") != 7:
+    problems.append("exit_code 期望 7，实际 %r" % (env.get("exit_code"),))
+if problems:
+    print("; ".join(problems), file=sys.stderr)
+    sys.exit(1)
+print("ok: 超时封套 status=timeout exit_code=7")
+PY8
+    then
+      ok "E8d 封套 status=timeout 且 exit_code=7（自洽）"
+    else
+      bad "E8d 超时封套违规 —— $(tr '\n' ' ' <"$WORK/e8.err")"
+    fi
+  else
+    bad "E8c 超时路径未落盘 --result-json"
+    bad "E8d 无法断言超时封套（前置 E8c 失败）"
+  fi
+  assert_jsonl_pure "$E8.stdout" "E8" 0
+  assert_no_panic "E8" "$E8.stdout" "$E8.stderr"
 fi
 
 # ---------------------------------------------------------------------------

@@ -253,3 +253,321 @@ PASS: E7: 无 panic
 headless-cli-e2e: PASS=13 FAIL=10 SKIP=0  (receipts: /home/dm/wt/pony-wave59/tests/acceptance/wave59/receipts)
 RESULT: FAIL
 E2E_EXIT=1
+
+================================================================================
+第三部分：v4 补强后红相重锚（TEST-DEFECT 修复：E8 + 具体码断言 + suspended 覆盖）
+================================================================================
+captured_at: 2026-11-02T10:44:41+08:00
+contract   : v4（新增 ResultEnvelope.failure_reason / TurnStatus 小写令牌）
+stub_md5   : f385f5ad4b2deb7da9536bce378f3f87
+test_md5   : c53dc61e11a3d95df84e9aed064a7751
+e2e_md5    : 180a99973dde6818119f16ed76bf2aa6
+--------------------------------------------------------------------------------
+[A] Rust 契约测试
+  command   : CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test -p pony-agent-core --test headless_contract
+  exit_code : 101
+  result    : test result: FAILED. 3 passed; 23 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  error[E   : 0 行（必须为 0）
+  panicked  : 23 行（全部 unimplemented!() 原生失败）
+  用例总数  : 26（3 ok = 纯 serde 形状锁；23 FAILED = 空桩未实现）
+  v4 对齐   : 新增 c3_failure_reason_is_transparent_passthrough；
+              TurnStatus 令牌断言收紧为**逐字小写**（completed/failed/timeout/cancelled/suspended）；
+              封套字段集加入 failure_reason（恒在 wire 上，无失败时为 null）
+  原始输出尾部:
+    
+    failures:
+        c1_jsonl_sink_emits_one_valid_json_line_per_event
+        c1_jsonl_sink_output_contains_no_ansi_escapes
+        c1_jsonl_sink_passes_through_every_event_kind
+        c1_jsonl_sink_treats_suspended_as_terminal
+        c1_output_format_parses_frozen_cli_tokens
+        c1_output_format_rejects_unknown_token
+        c1_sink_outcome_tracks_terminal_events_only
+        c1_sse_sink_frames_are_wellformed_and_ansi_free
+        c2_classify_is_fail_closed_across_adversarial_inputs
+        c2_classify_unknown_error_fails_closed_to_internal_not_success
+        c2_exit_code_values_are_frozen_and_unique
+        c2_terminal_status_maps_to_frozen_exit_codes
+        c2_turn_failed_must_never_map_to_success
+        c3_failure_reason_is_transparent_passthrough
+        c3_suspended_envelope_implies_permission_denied_exit_code
+        c4_headless_options_default_permission_mode_is_read_only
+        c4_headless_options_shape_is_frozen
+        c4_permission_mode_maps_to_host_tool_authorization_mode
+        c4_permission_mode_parses_frozen_aliases_and_rejects_others
+        c5_expired_budget_returns_timeout_without_hanging
+        c5_fast_runner_within_budget_completes
+        c5_no_budget_means_unbounded_and_still_completes
+        c5_timeout_outcome_maps_to_exit_code_7
+    
+    test result: FAILED. 3 passed; 23 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    
+    error: test failed, to rerun pass `-p pony-agent-core --test headless_contract`
+    EXIT_CODE=101
+--------------------------------------------------------------------------------
+[B] 真实二进制 E2E（补强后）
+  command   : CARGO_TARGET_DIR=/home/dm/pony-agent/target bash tests/acceptance/wave59/headless-cli-e2e.sh
+  exit_code : 1 (RESULT: FAIL — 预期红相)
+  summary   : headless-cli-e2e: PASS=11 FAIL=19 SKIP=0  (receipts: /home/dm/wt/pony-wave59/tests/acceptance/wave59/receipts)
+  mock      : text/tool/ask/garbage/slow 共 5 实例全部起成功（SKIP=0，未降级）
+  v4 补强点 :
+    - 新增 E8：--timeout-secs 1 + mock(slow) 固定 5s 慢响应 ⇒ 断言 exit==7、
+      --result-json 落盘 status==timeout 且 exit_code==7、耗时 <=4s（E8b/E8c/E8d 三道）
+    - E5 收紧为 exit==4（ProviderNetwork 具体码，原为「非 0」）
+    - E7 收紧为 exit==4
+    - E6/E6b 改为 mock(ask) 返回 host-mediated ask_user ⇒ 断言 exit==6（原为「未挂起」宽断言），
+      并新增 E6c「mock 必须真收到请求」证据门禁，杜绝参数错误早退造成的假绿
+  RED-DEGRADED 标注: 无（5 个 mock 实例全部可用，三条 suspended/timeout 路径均有可控触发源）
+  本轮新增失败项（均为真实产品缺口，非测试缺陷）:
+    - E5 期望 4 实际 1 / E7 期望 4 实际 1 / E6·E6b 期望 6 实际 1 / E8 期望 7 实际 1
+    - E6c mock(ask) 未收到请求（CLI 在参数阶段即退，未触达模型链路）
+  原始输出尾部:
+    FAIL: E5: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+    PASS: E5: 无 panic
+    FAIL: E6 ask_user 无应答方期望 exit 6（suspended⟹PermissionDenied），实际 1
+    FAIL: E6c mock(ask) 未收到任何请求 —— 未触达 suspended 路径，本用例结论不可信
+    FAIL: E6: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+    PASS: E6: 无 panic
+    FAIL: E6b 默认档位 + ask_user 期望 exit 6，实际 1
+    FAIL: E6b: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+    PASS: E6b: 无 panic
+    FAIL: E7 畸形响应期望 exit 4（ProviderNetwork），实际 1
+    FAIL: E7: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+    PASS: E7: 无 panic
+    FAIL: E8 --timeout-secs 1 期望 exit 7（Timeout），实际 1
+    PASS: E8b 到期即收工（耗时 0s < mock 的 5s 响应）
+    FAIL: E8c 超时路径未落盘 --result-json
+    FAIL: E8d 无法断言超时封套（前置 E8c 失败）
+    FAIL: E8: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+    PASS: E8: 无 panic
+    ===================================================
+    headless-cli-e2e: PASS=11 FAIL=19 SKIP=0  (receipts: /home/dm/wt/pony-wave59/tests/acceptance/wave59/receipts)
+    RESULT: FAIL
+    E2E_EXIT=1
+================================================================================
+以下为 v4 补强后两次门禁的完整原始输出：
+================================================================================
+---[ cargo test 全文 ]---
+   Compiling pony-agent-core v0.1.141 (/home/dm/wt/pony-wave59/crates/pony-agent-core)
+    Finished `test` profile [unoptimized] target(s) in 17.47s
+     Running tests/headless_contract.rs (/home/dm/pony-agent/target/debug/deps/headless_contract-4d6c98e65dcc4fbd)
+
+running 26 tests
+test c1_jsonl_sink_output_contains_no_ansi_escapes ... FAILED
+test c1_jsonl_sink_emits_one_valid_json_line_per_event ... FAILED
+test c1_jsonl_sink_treats_suspended_as_terminal ... FAILED
+test c1_jsonl_sink_passes_through_every_event_kind ... FAILED
+test c1_output_format_parses_frozen_cli_tokens ... FAILED
+test c1_sink_outcome_tracks_terminal_events_only ... FAILED
+test c1_output_format_rejects_unknown_token ... FAILED
+test c1_sse_sink_frames_are_wellformed_and_ansi_free ... FAILED
+test c2_classify_is_fail_closed_across_adversarial_inputs ... FAILED
+test c2_classify_unknown_error_fails_closed_to_internal_not_success ... FAILED
+test c2_exit_code_values_are_frozen_and_unique ... FAILED
+test c2_terminal_status_maps_to_frozen_exit_codes ... FAILED
+test c2_turn_failed_must_never_map_to_success ... FAILED
+test c3_failure_reason_is_transparent_passthrough ... FAILED
+test c3_result_envelope_schema_literal_is_frozen ... ok
+test c3_result_envelope_field_set_and_types ... ok
+test c3_suspended_envelope_implies_permission_denied_exit_code ... FAILED
+test c3_turn_status_tokens_are_the_frozen_five ... ok
+test c4_headless_options_default_permission_mode_is_read_only ... FAILED
+test c4_headless_options_shape_is_frozen ... FAILED
+test c4_permission_mode_maps_to_host_tool_authorization_mode ... FAILED
+test c4_permission_mode_parses_frozen_aliases_and_rejects_others ... FAILED
+test c5_expired_budget_returns_timeout_without_hanging ... FAILED
+test c5_fast_runner_within_budget_completes ... FAILED
+test c5_no_budget_means_unbounded_and_still_completes ... FAILED
+test c5_timeout_outcome_maps_to_exit_code_7 ... FAILED
+
+failures:
+
+---- c1_jsonl_sink_output_contains_no_ansi_escapes stdout ----
+
+thread 'c1_jsonl_sink_output_contains_no_ansi_escapes' (637309) panicked at crates/pony-agent-core/src/agent/headless.rs:240:9:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- c1_jsonl_sink_emits_one_valid_json_line_per_event stdout ----
+
+thread 'c1_jsonl_sink_emits_one_valid_json_line_per_event' (637308) panicked at crates/pony-agent-core/src/agent/headless.rs:240:9:
+not implemented
+
+---- c1_jsonl_sink_treats_suspended_as_terminal stdout ----
+
+thread 'c1_jsonl_sink_treats_suspended_as_terminal' (637311) panicked at crates/pony-agent-core/src/agent/headless.rs:240:9:
+not implemented
+
+---- c1_jsonl_sink_passes_through_every_event_kind stdout ----
+
+thread 'c1_jsonl_sink_passes_through_every_event_kind' (637310) panicked at crates/pony-agent-core/src/agent/headless.rs:240:9:
+not implemented
+
+---- c1_output_format_parses_frozen_cli_tokens stdout ----
+
+thread 'c1_output_format_parses_frozen_cli_tokens' (637312) panicked at crates/pony-agent-core/src/agent/headless.rs:41:9:
+not implemented
+
+---- c1_sink_outcome_tracks_terminal_events_only stdout ----
+
+thread 'c1_sink_outcome_tracks_terminal_events_only' (637314) panicked at crates/pony-agent-core/src/agent/headless.rs:240:9:
+not implemented
+
+---- c1_output_format_rejects_unknown_token stdout ----
+
+thread 'c1_output_format_rejects_unknown_token' (637313) panicked at crates/pony-agent-core/src/agent/headless.rs:41:9:
+not implemented
+
+---- c1_sse_sink_frames_are_wellformed_and_ansi_free stdout ----
+
+thread 'c1_sse_sink_frames_are_wellformed_and_ansi_free' (637315) panicked at crates/pony-agent-core/src/agent/headless.rs:275:9:
+not implemented
+
+---- c2_classify_is_fail_closed_across_adversarial_inputs stdout ----
+
+thread 'c2_classify_is_fail_closed_across_adversarial_inputs' (637316) panicked at crates/pony-agent-core/src/agent/headless.rs:101:9:
+not implemented
+
+---- c2_classify_unknown_error_fails_closed_to_internal_not_success stdout ----
+
+thread 'c2_classify_unknown_error_fails_closed_to_internal_not_success' (637317) panicked at crates/pony-agent-core/src/agent/headless.rs:101:9:
+not implemented
+
+---- c2_exit_code_values_are_frozen_and_unique stdout ----
+
+thread 'c2_exit_code_values_are_frozen_and_unique' (637318) panicked at crates/pony-agent-core/src/agent/headless.rs:96:9:
+not implemented
+
+---- c2_terminal_status_maps_to_frozen_exit_codes stdout ----
+
+thread 'c2_terminal_status_maps_to_frozen_exit_codes' (637319) panicked at crates/pony-agent-core/src/agent/headless.rs:187:5:
+not implemented
+
+---- c2_turn_failed_must_never_map_to_success stdout ----
+
+thread 'c2_turn_failed_must_never_map_to_success' (637320) panicked at crates/pony-agent-core/src/agent/headless.rs:101:9:
+not implemented
+
+---- c3_failure_reason_is_transparent_passthrough stdout ----
+
+thread 'c3_failure_reason_is_transparent_passthrough' (637321) panicked at crates/pony-agent-core/src/agent/headless.rs:187:5:
+not implemented
+
+---- c3_suspended_envelope_implies_permission_denied_exit_code stdout ----
+
+thread 'c3_suspended_envelope_implies_permission_denied_exit_code' (637324) panicked at crates/pony-agent-core/src/agent/headless.rs:187:5:
+not implemented
+
+---- c4_headless_options_default_permission_mode_is_read_only stdout ----
+
+thread 'c4_headless_options_default_permission_mode_is_read_only' (637326) panicked at crates/pony-agent-core/src/agent/headless.rs:142:9:
+not implemented
+
+---- c4_headless_options_shape_is_frozen stdout ----
+
+thread 'c4_headless_options_shape_is_frozen' (637327) panicked at crates/pony-agent-core/src/agent/headless.rs:142:9:
+not implemented
+
+---- c4_permission_mode_maps_to_host_tool_authorization_mode stdout ----
+
+thread 'c4_permission_mode_maps_to_host_tool_authorization_mode' (637328) panicked at crates/pony-agent-core/src/agent/headless.rs:142:9:
+not implemented
+
+---- c4_permission_mode_parses_frozen_aliases_and_rejects_others stdout ----
+
+thread 'c4_permission_mode_parses_frozen_aliases_and_rejects_others' (637329) panicked at crates/pony-agent-core/src/agent/headless.rs:132:9:
+not implemented
+
+---- c5_expired_budget_returns_timeout_without_hanging stdout ----
+
+thread 'c5_expired_budget_returns_timeout_without_hanging' (637330) panicked at /home/dm/wt/pony-wave59/crates/pony-agent-core/src/agent/headless.rs:305:5:
+not implemented
+
+---- c5_fast_runner_within_budget_completes stdout ----
+
+thread 'c5_fast_runner_within_budget_completes' (637331) panicked at /home/dm/wt/pony-wave59/crates/pony-agent-core/src/agent/headless.rs:305:5:
+not implemented
+
+---- c5_no_budget_means_unbounded_and_still_completes stdout ----
+
+thread 'c5_no_budget_means_unbounded_and_still_completes' (637332) panicked at /home/dm/wt/pony-wave59/crates/pony-agent-core/src/agent/headless.rs:305:5:
+not implemented
+
+---- c5_timeout_outcome_maps_to_exit_code_7 stdout ----
+
+thread 'c5_timeout_outcome_maps_to_exit_code_7' (637333) panicked at crates/pony-agent-core/src/agent/headless.rs:187:5:
+not implemented
+
+
+failures:
+    c1_jsonl_sink_emits_one_valid_json_line_per_event
+    c1_jsonl_sink_output_contains_no_ansi_escapes
+    c1_jsonl_sink_passes_through_every_event_kind
+    c1_jsonl_sink_treats_suspended_as_terminal
+    c1_output_format_parses_frozen_cli_tokens
+    c1_output_format_rejects_unknown_token
+    c1_sink_outcome_tracks_terminal_events_only
+    c1_sse_sink_frames_are_wellformed_and_ansi_free
+    c2_classify_is_fail_closed_across_adversarial_inputs
+    c2_classify_unknown_error_fails_closed_to_internal_not_success
+    c2_exit_code_values_are_frozen_and_unique
+    c2_terminal_status_maps_to_frozen_exit_codes
+    c2_turn_failed_must_never_map_to_success
+    c3_failure_reason_is_transparent_passthrough
+    c3_suspended_envelope_implies_permission_denied_exit_code
+    c4_headless_options_default_permission_mode_is_read_only
+    c4_headless_options_shape_is_frozen
+    c4_permission_mode_maps_to_host_tool_authorization_mode
+    c4_permission_mode_parses_frozen_aliases_and_rejects_others
+    c5_expired_budget_returns_timeout_without_hanging
+    c5_fast_runner_within_budget_completes
+    c5_no_budget_means_unbounded_and_still_completes
+    c5_timeout_outcome_maps_to_exit_code_7
+
+test result: FAILED. 3 passed; 23 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p pony-agent-core --test headless_contract`
+EXIT_CODE=101
+
+---[ E2E 全文 ]---
+== reusing built binary: /home/dm/pony-agent/target/debug/ponycli
+== mock(text) listening on 127.0.0.1:33427 (pid 637762)
+== mock(tool) listening on 127.0.0.1:42337 (pid 637773)
+== mock(ask) listening on 127.0.0.1:52981 (pid 637786)
+== mock(garbage) listening on 127.0.0.1:55275 (pid 637796)
+== mock(slow) listening on 127.0.0.1:35515 (pid 637806)
+== ports: text=33427 tool=42337 ask=52981 garbage=55275 slow=35515
+FAIL: E1 非法 --permission-mode 期望 exit 2，实际 1（stdout={"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或)
+PASS: E1: 无 panic
+PASS: E1b 非法值诊断落在 stderr（可读）
+FAIL: E2 非法 --output-format 期望 exit 2，实际 1
+PASS: E2: 无 panic
+FAIL: E3 jsonl 正常 turn 期望 exit 0，实际 1（stderr=[31mArgument Error:[0m unknown argument: --output-format )
+FAIL: E3: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E3: 无 panic
+PASS: E3c jsonl 模式 stdout 无人类可读横幅
+FAIL: E4a --result-json 未落盘（C3 原子写缺失）
+FAIL: E4b 无法断言封套（前置 E4a 失败）
+FAIL: E5 provider 不可达期望 exit 4（ProviderNetwork），实际 1
+FAIL: E5: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E5: 无 panic
+FAIL: E6 ask_user 无应答方期望 exit 6（suspended⟹PermissionDenied），实际 1
+FAIL: E6c mock(ask) 未收到任何请求 —— 未触达 suspended 路径，本用例结论不可信
+FAIL: E6: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E6: 无 panic
+FAIL: E6b 默认档位 + ask_user 期望 exit 6，实际 1
+FAIL: E6b: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E6b: 无 panic
+FAIL: E7 畸形响应期望 exit 4（ProviderNetwork），实际 1
+FAIL: E7: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E7: 无 panic
+FAIL: E8 --timeout-secs 1 期望 exit 7（Timeout），实际 1
+PASS: E8b 到期即收工（耗时 0s < mock 的 5s 响应）
+FAIL: E8c 超时路径未落盘 --result-json
+FAIL: E8d 无法断言超时封套（前置 E8c 失败）
+FAIL: E8: stdout 纯净性违规 —— 第 1 行缺 `seq` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 第 1 行缺 `type` 字段：'{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https:/' 
+PASS: E8: 无 panic
+===================================================
+headless-cli-e2e: PASS=11 FAIL=19 SKIP=0  (receipts: /home/dm/wt/pony-wave59/tests/acceptance/wave59/receipts)
+RESULT: FAIL
+E2E_EXIT=1
