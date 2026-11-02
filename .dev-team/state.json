@@ -786,6 +786,42 @@
         "stash_create": "62792c1c1c2dc0db2e211144bd537557ec3ac924",
         "untracked_tar": "/tmp/pony-untracked-20261102T090813.tar.gz"
       }
+    },
+    {
+      "wave": "pds-3",
+      "theme": "流式视觉层接入（PDS-SM 落地：节奏细化 / 尾巴浮现 / 工具与状态入场 / 正文尾节点）",
+      "tier": "B",
+      "tier_basis": "跨 4 个 src 模块 + 修订 D-59-1 与 F3-1 部分断言 + 冻结门禁迁移 + 需真浏览器帧预算证据",
+      "contract_matrix": ".dev-team/contracts/wave-pds-3-streaming-visual.md",
+      "execution": "serial WIP=1（写域强耦合于同一条渲染链路，并行 ROI 不成立）",
+      "roster": [
+        "lead",
+        "test-agent",
+        "executor"
+      ],
+      "branches": {
+        "test": {
+          "owner": "test-agent",
+          "status": "pending",
+          "write_scopes": [
+            "tests/acceptance/pds-streaming/"
+          ]
+        },
+        "impl": {
+          "owner": "executor",
+          "status": "pending",
+          "write_scopes": [
+            "src/components/MarkdownRenderer.vue",
+            "src/components/chat/WorkspaceTurnItem.vue",
+            "src/components/HomeWorkspace.vue",
+            "src/components/chat/AgentRuntimeStatusBar.vue",
+            "src/styles.css",
+            "src/lib/useStreamingPresentationState.ts"
+          ]
+        }
+      },
+      "nfr": "N-A（纯渲染层：无出网/后台任务/LLM 调用/新增对外接口）；帧预算与节点上限见契约 §5，由 V1/V8 承载",
+      "baseline_commit": "42508d543a03b1c625c9f68b04f7e59dc5a96467"
     }
   ],
   "counters": {

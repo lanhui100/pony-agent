@@ -1,0 +1,69 @@
+{
+  "criterion": "p95_stream - p95_idle <= 6ms 且 Long Task(>50ms)=0，连续 3 次全部满足",
+  "contractParams": {
+    "chunkIntervalMs": 120,
+    "maxChunkChars": 50,
+    "streamFrames": 900,
+    "idleFrames": 320
+  },
+  "actualParams": {
+    "chunkIntervalMs": 120,
+    "streamFrames": 900,
+    "idleFrames": 320,
+    "usingContractParams": true
+  },
+  "generatedAt": "2026-11-02T14:10:45.099Z",
+  "runs": [
+    {
+      "index": 1,
+      "startedAt": "2026-11-02T14:09:31.500Z",
+      "chunkIntervalMs": 120,
+      "maxChunkChars": 50,
+      "idleFrames": 319,
+      "streamFrames": 899,
+      "idleP50": 16.69999998807907,
+      "idleP95": 16.80000001192093,
+      "streamP50": 16.600000023841858,
+      "streamP95": 18.80000001192093,
+      "streamMax": 27.69999998807907,
+      "p95Delta": 2,
+      "longTaskCount": 0,
+      "growthChars": 3496,
+      "verdict": "pass"
+    },
+    {
+      "index": 2,
+      "startedAt": "2026-11-02T14:09:55.996Z",
+      "chunkIntervalMs": 120,
+      "maxChunkChars": 50,
+      "idleFrames": 319,
+      "streamFrames": 899,
+      "idleP50": 16.69999998807907,
+      "idleP95": 17,
+      "streamP50": 16.600000023841858,
+      "streamP95": 21.5,
+      "streamMax": 33.80000001192093,
+      "p95Delta": 4.5,
+      "longTaskCount": 0,
+      "growthChars": 3496,
+      "verdict": "pass"
+    },
+    {
+      "index": 3,
+      "startedAt": "2026-11-02T14:10:20.468Z",
+      "chunkIntervalMs": 120,
+      "maxChunkChars": 50,
+      "idleFrames": 319,
+      "streamFrames": 899,
+      "idleP50": 16.69999998807907,
+      "idleP95": 16.80000001192093,
+      "streamP50": 16.600000023841858,
+      "streamP95": 20,
+      "streamMax": 27.899999976158142,
+      "p95Delta": 3.199999988079071,
+      "longTaskCount": 0,
+      "growthChars": 3496,
+      "verdict": "pass"
+    }
+  ]
+}

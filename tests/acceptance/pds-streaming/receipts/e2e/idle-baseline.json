@@ -1,0 +1,12 @@
+{
+  "note": "契约 v3 §5：绝对阈值作废；本文件是实现后 V8「余量+稳定性」判据的空闲基准",
+  "frames": 319,
+  "p50": 16.69999998807907,
+  "p95": 16.900000005960464,
+  "max": 18,
+  "longTaskThresholdMs": 50,
+  "p95DeltaBudgetMs": 6,
+  "consecutiveRuns": 3,
+  "params": "[params] deltaInterval=120ms maxChunk=50chars streamFrames=900 idleFrames=320 （契约值）",
+  "measuredAt": "2026-11-02T14:10:54.615Z"
+}
