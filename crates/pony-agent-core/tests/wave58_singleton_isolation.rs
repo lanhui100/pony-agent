@@ -98,6 +98,7 @@ impl Drop for TempDir {
 }
 
 /// 环境变量守卫（本文件目前不需要改写环境，保留给未来用例；未使用时不产生副作用）。
+#[allow(dead_code)] // 占位夹具：当前用例不需要改写环境，保留给未来用例（见 set 的同款 allow）。
 struct EnvGuard {
     key: &'static str,
     previous: Option<OsString>,
@@ -121,6 +122,7 @@ impl Drop for EnvGuard {
     }
 }
 
+#[allow(dead_code)] // 同上：占位串行锁，保留给未来用例。
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[allow(dead_code)]

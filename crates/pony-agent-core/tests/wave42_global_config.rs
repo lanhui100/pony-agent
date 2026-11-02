@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[allow(dead_code)] // 同上：占位串行锁，保留给未来用例。
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn env_lock() -> MutexGuard<'static, ()> {
@@ -93,6 +94,7 @@ impl Drop for TempDir {
 }
 
 /// 环境变量守卫：Drop 时恢复修改前的取值（panic 路径同样生效）。
+#[allow(dead_code)] // 占位夹具：当前用例不需要改写环境，保留给未来用例（见 set 的同款 allow）。
 struct EnvGuard {
     key: &'static str,
     previous: Option<OsString>,

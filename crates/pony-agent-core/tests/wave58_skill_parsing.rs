@@ -22,16 +22,19 @@
 //!   内串行 + `EnvGuard` 恢复原值；
 //! - 符号链接用例是 Unix 专属（`#[cfg(unix)]`），Windows 上不伪造 link 语义。
 
+/// 仅 Unix 符号链接用例的 EnvGuard 使用 ⇒ Windows 上不编译。
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use pony_agent_core::agent::skill_body::{
-    load_skill_body_for_workspace, resolve_skill_by_name, MAX_SKILL_BODY_BYTES,
-};
+use pony_agent_core::agent::skill_body::MAX_SKILL_BODY_BYTES;
+#[cfg(unix)]
+use pony_agent_core::agent::skill_body::{load_skill_body_for_workspace, resolve_skill_by_name};
 use pony_agent_core::agent::workspace_hotloader::{
     AgentScope, SkillOmissionReason, SkillScanReport, WorkspaceHotloader,
 };
@@ -72,6 +75,7 @@ impl TempDir {
         &self.root
     }
 
+    #[cfg(unix)]
     fn canonical(&self) -> PathBuf {
         self.root
             .canonicalize()
