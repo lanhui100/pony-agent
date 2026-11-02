@@ -2,527 +2,615 @@
   "scenario": "input-edit",
   "pass": 87,
   "fail": 0,
+  "skipped": 0,
   "checks": [
     {
       "id": "abc.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "abc.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "abc.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "abc.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "abc.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.ansi size=3637"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.ansi size=3633"
     },
     {
       "id": "abc.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.png size=128630"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/abc.png size=127882"
     },
     {
       "id": "input_edit.abc",
       "desc": "typed text lands in the composer",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='abc' expected='abc'"
     },
     {
       "id": "inserted.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "inserted.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "inserted.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "inserted.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "inserted.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.ansi size=3637"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.ansi size=3633"
     },
     {
       "id": "inserted.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.png size=129431"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/inserted.png size=128669"
     },
     {
       "id": "input_edit.inserted",
       "desc": "Left + X inserts in the middle without losing the tail",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='abXc' expected='abXc'"
     },
     {
       "id": "backspace.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "backspace.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "backspace.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "backspace.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "backspace.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.ansi size=3637"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.ansi size=3633"
     },
     {
       "id": "backspace.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.png size=128980"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/backspace.png size=128230"
     },
     {
       "id": "input_edit.backspace",
       "desc": "Right + Backspace deletes the character at the end",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='abX' expected='abX'"
     },
     {
       "id": "word_cleared.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "word_cleared.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "word_cleared.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "word_cleared.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "word_cleared.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.ansi size=3633"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.ansi size=3629"
     },
     {
       "id": "word_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.png size=138735"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/word_cleared.png size=138044"
     },
     {
       "id": "input_edit.word_cleared",
       "desc": "Ctrl+W deletes the whole word",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='' expected=''"
     },
     {
       "id": "tab_complete.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "tab_complete.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "tab_complete.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "tab_complete.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "tab_complete.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.ansi size=3634"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.ansi size=3629"
     },
     {
       "id": "tab_complete.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.png size=68071"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/tab_complete.png size=67428"
     },
     {
       "id": "input_edit.tab_complete",
       "desc": "Tab completes '/mo' to '/models'",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='/models' expected='/models'"
     },
     {
       "id": "ctrl_u_cleared.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "ctrl_u_cleared.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "ctrl_u_cleared.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "ctrl_u_cleared.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "ctrl_u_cleared.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.ansi size=3633"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.ansi size=3629"
     },
     {
       "id": "ctrl_u_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.png size=138735"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/ctrl_u_cleared.png size=138044"
     },
     {
       "id": "input_edit.ctrl_u_cleared",
       "desc": "Ctrl+U clears the composer",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='' expected=''"
     },
     {
       "id": "multiline.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "multiline.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "multiline.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "multiline.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "multiline.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.ansi size=3810"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.ansi size=3806"
     },
     {
       "id": "multiline.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.png size=129924"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/multiline.png size=129178"
     },
     {
       "id": "input_edit.multiline",
       "desc": "Ctrl+J inserts a newline (two visual rows)",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='line1\\nline2' expected='line1\\nline2'"
     },
     {
       "id": "esc_cleared.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "esc_cleared.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "esc_cleared.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "esc_cleared.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "esc_cleared.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=3782"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.ansi size=3778"
     },
     {
       "id": "esc_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.png size=138735"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/esc_cleared.png size=138044"
     },
     {
       "id": "input_edit.esc_cleared",
       "desc": "Esc clears the composer",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='' expected=''"
     },
     {
       "id": "draft.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "draft.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "draft.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "draft.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "draft.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.ansi size=3637"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.ansi size=3633"
     },
     {
       "id": "draft.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.png size=128666"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft.png size=127913"
     },
     {
       "id": "input_edit.draft",
       "desc": "draft text is present before Ctrl-C",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='draft' expected='draft'"
     },
     {
       "id": "input_edit.typed_text_column",
       "desc": "typed text starts at the same column as the empty-state placeholder (5)",
       "ok": true,
+      "status": "pass",
       "evidence": "typed_col=5"
     },
     {
       "id": "input_edit.multiline_visual_rows",
       "desc": "multi-line draft occupies two distinct composer rows",
       "ok": true,
+      "status": "pass",
       "evidence": "composer_rows=2 buffer='line1\\nline2'"
     },
     {
       "id": "draft_cleared.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "draft_cleared.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "draft_cleared.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "draft_cleared.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "draft_cleared.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.ansi size=3633"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.ansi size=3629"
     },
     {
       "id": "draft_cleared.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.png size=138735"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/draft_cleared.png size=138044"
     },
     {
       "id": "input_edit.ctrl_c_with_draft_clears_only",
       "desc": "Ctrl-C with a draft clears the composer instead of quitting",
       "ok": true,
+      "status": "pass",
       "evidence": "buffer='' exit_marker=False"
     },
     {
       "id": "input_edit.ctrl_c_draft_still_running",
       "desc": "TUI is still painting its composer after the first Ctrl-C",
       "ok": true,
+      "status": "pass",
       "evidence": "› 写下任务，或输入 / 查看命令"
     },
     {
       "id": "exit.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "exit.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.YQXXal/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.YQXXal/iso-inpu"
+      "status": "pass",
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.GWkmOQ/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.GWkmOQ/iso-inpu"
     },
     {
       "id": "exit.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "exit.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.ansi size=493"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.ansi size=801"
     },
     {
       "id": "exit.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=74931"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/exit.png size=131717"
     },
     {
       "id": "shell.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "shell.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.YQXXal/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.YQXXal/iso-inpu"
+      "status": "pass",
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.GWkmOQ/iso-input-edit/xdg-config XDG_DATA_HOME=/tmp/tui-audit.GWkmOQ/iso-inpu"
     },
     {
       "id": "shell.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "shell.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.ansi size=548"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.ansi size=856"
     },
     {
       "id": "shell.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=86715"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/input-edit/shell.png size=143954"
     },
     {
       "id": "input_edit.ctrl_c_empty_exits",
       "desc": "a second Ctrl-C on the empty composer exits the process normally",
       "ok": true,
+      "status": "pass",
       "evidence": "exit_code=0 row :: home LANG=en_US.UTF-8 /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$?"
     },
     {
       "id": "input_edit.terminal_restored",
       "desc": "alternate screen is left after exit",
       "ok": true,
+      "status": "pass",
       "evidence": "tui_band=False"
     },
     {
       "id": "input_edit.shell_alive",
       "desc": "the pane still runs commands after exit",
       "ok": true,
+      "status": "pass",
       "evidence": "bash-5.2$ echo AUDIT_SHELL_ALIVE=ok"
     },
     {
       "id": "input_edit.pane_command_is_shell",
       "desc": "pane foreground command is a shell again",
       "ok": true,
+      "status": "pass",
       "evidence": "pane_current_command='bash'"
     }
   ]

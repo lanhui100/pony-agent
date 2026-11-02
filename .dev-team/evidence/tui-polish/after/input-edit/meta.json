@@ -1,10 +1,10 @@
 {
   "phase": "after",
   "scenario": "input-edit",
-  "index": 16,
+  "index": 20,
   "cols": 120,
   "rows": 34,
   "bin": "/home/dm/pony-agent/target/debug/pony",
-  "started_at": "2026-10-20T07:40:47+08:00",
+  "started_at": "2026-11-02T11:57:31+08:00",
   "duration_ms": 12000
 }

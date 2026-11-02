@@ -138,6 +138,14 @@ def message_text(message: dict) -> str:
     return ""
 
 
+# 批7 S-ASK：ask_user 工具调用的模型侧载荷。工具名用模型可见名 `Ask`，
+# 参数遵循 `tools.rs` 的 ask_user input_schema（question 必填、options 可选）。
+ASK_TOOL_ARGS = {
+    "question": "请选择本次审计要走的分支：",
+    "options": ["分支 A · 冒烟", "分支 B · 全量"],
+}
+
+
 def scenario_for(messages: list[dict], forced: str | None) -> str:
     if forced:
         return forced
@@ -152,6 +160,9 @@ def scenario_for(messages: list[dict], forced: str | None) -> str:
         return "401"
     if "慢速" in last_user:
         return "slow"
+    # 批7 S-ASK：驱动一次真实的 ask_user 工具调用（模型侧工具名 `Ask`）。
+    if "提问" in last_user or "ask me" in low:
+        return "ask"
     if "长文" in last_user:
         return "long"
     if has_tool:
@@ -226,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model") or "mock-alpha"
         stream = bool(body.get("stream"))
         forced = os.environ.get("MOCK_SCENARIO") or (query.get("scenario", [None])[0])
-        scenario = scenario_for(messages, forced if forced in ("ok", "401", "slow", "long") else None)
+        scenario = scenario_for(messages, forced if forced in ("ok", "401", "slow", "long", "ask") else None)
         if forced == "ok":
             scenario = "tool"
 
@@ -292,6 +303,8 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        ask = scenario == "ask"
+        read_args = json.dumps({"path": "package.json", "description": "读取 package.json 确认项目信息"})
         self._json(
             200,
             {
@@ -308,11 +321,11 @@ class Handler(BaseHTTPRequestHandler):
                             "content": FIRST_TURN_TEXT,
                             "tool_calls": [
                                 {
-                                    "id": "call_mock_read_1",
+                                    "id": "call_mock_ask_1" if ask else "call_mock_read_1",
                                     "type": "function",
                                     "function": {
-                                        "name": "Read",
-                                        "arguments": json.dumps({"path": "package.json", "description": "读取 package.json 确认项目信息"}),
+                                        "name": "Ask" if ask else "Read",
+                                        "arguments": json.dumps(ASK_TOOL_ARGS, ensure_ascii=False) if ask else read_args,
                                     },
                                 }
                             ],
@@ -368,7 +381,7 @@ class Handler(BaseHTTPRequestHandler):
             elif scenario == "long":
                 delay = 0.0
                 texts = split_text(LONG_TEXT, 12)
-            elif scenario == "tool":
+            elif scenario in ("tool", "ask"):
                 delay = self.state.chunk_delay_ms / 1000.0
                 texts = split_text(FIRST_TURN_TEXT, 8)
             else:
@@ -386,8 +399,15 @@ class Handler(BaseHTTPRequestHandler):
                 if delay:
                     time.sleep(delay)
 
-            if scenario == "tool":
-                args = json.dumps({"path": "package.json", "description": "读取 package.json 确认项目信息"})
+            if scenario in ("tool", "ask"):
+                if scenario == "ask":
+                    args = json.dumps(ASK_TOOL_ARGS, ensure_ascii=False)
+                    tool_name = "Ask"
+                    call_id = "call_mock_ask_1"
+                else:
+                    args = json.dumps({"path": "package.json", "description": "读取 package.json 确认项目信息"})
+                    tool_name = "Read"
+                    call_id = "call_mock_read_1"
                 self._sse(
                     self._delta(
                         model,
@@ -395,9 +415,9 @@ class Handler(BaseHTTPRequestHandler):
                             "tool_calls": [
                                 {
                                     "index": 0,
-                                    "id": "call_mock_read_1",
+                                    "id": call_id,
                                     "type": "function",
-                                    "function": {"name": "Read", "arguments": ""},
+                                    "function": {"name": tool_name, "arguments": ""},
                                 }
                             ]
                         },

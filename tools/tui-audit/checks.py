@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import unicodedata
 from datetime import datetime, timezone
 
@@ -112,23 +113,50 @@ def metrics_row_index(cap: "Capture") -> int | None:
 
 
 class Checks:
+    """Assertion collector with a three-state verdict per check.
+
+    `add()` keeps the historical boolean shape (plus an explicit ``status``);
+    `add_status()` is the entry point for checks that can be legitimately
+    *unevaluable* (e.g. evidence source missing).  A ``skipped`` check is
+    neither a pass nor a fail: silently counting it as a pass is exactly the
+    "always-true assertion" defect this harness must not have.
+    """
+
     def __init__(self, scenario: str):
         self.scenario = scenario
         self.items: list[dict] = []
 
     def add(self, cid: str, desc: str, ok: bool, evidence: str) -> None:
+        self.add_status(cid, desc, "pass" if ok else "fail", evidence)
+
+    def add_status(self, cid: str, desc: str, status: str, evidence: str) -> None:
+        if status not in CHECK_STATUSES:
+            raise ValueError(f"unknown check status {status!r} (allowed: {CHECK_STATUSES})")
         self.items.append(
-            {"id": cid, "desc": desc, "ok": bool(ok), "evidence": clip(evidence)}
+            {
+                "id": cid,
+                "desc": desc,
+                "ok": status == "pass",
+                "status": status,
+                "evidence": clip(evidence),
+            }
         )
 
     def failures(self) -> int:
-        return sum(1 for item in self.items if not item["ok"])
+        return sum(1 for item in self.items if item.get("status", "fail") == "fail")
+
+    def skipped(self) -> int:
+        return sum(1 for item in self.items if item.get("status") == "skipped")
+
+    def passes(self) -> int:
+        return len(self.items) - self.failures() - self.skipped()
 
     def as_dict(self) -> dict:
         return {
             "scenario": self.scenario,
-            "pass": len(self.items) - self.failures(),
+            "pass": self.passes(),
             "fail": self.failures(),
+            "skipped": self.skipped(),
             "checks": self.items,
         }
 
@@ -163,6 +191,7 @@ class Ctx:
                 self.extra = json.load(fh)
         self.cols = int(self.meta["cols"])
         self.rows = int(self.meta["rows"])
+        self.scenario = str(self.meta.get("scenario", ""))
         self.captures: dict[str, Capture] = {}
         for name in sorted(os.listdir(self.dir)):
             if name.endswith(".txt"):
@@ -174,21 +203,184 @@ class Ctx:
                 self.captures[base] = cap
 
 
+def capture_or_fail(c: Checks, ctx: "Ctx", name: str) -> "Capture | None":
+    """取证据 capture；**缺失时记一条 FAIL 并返回 None，绝不抛异常**。
+
+    畸形/半截证据目录（例如只剩 main 的目录）必须让审计「报红」而不是「崩溃」：
+    traceback 会让 run_audit 的 RESULT 行消失，看起来像没跑过，比失败更难发现。
+    """
+    cap = ctx.captures.get(name)
+    if cap is None:
+        c.add(
+            f"{ctx.scenario}.capture_present",
+            f"evidence capture `{name}` is present",
+            False,
+            f"missing capture: {name} (present: {sorted(ctx.captures)})",
+        )
+    return cap
+
+
 # ---------------------------------------------------------------------------
 # generic assertions
 # ---------------------------------------------------------------------------
 PANIC_RE = re.compile(r"panicked at|thread '.*' panicked|RUST_BACKTRACE|stack backtrace")
 
+CHECK_STATUSES = ("pass", "fail", "skipped")
+
+# 批7 S-CONTRAST：正文可读性下限（WCAG 大字号/次要色的宽松下限）与 AA 记录线。
+CONTRAST_FLOOR = 3.0
+CONTRAST_AA = 4.5
+
+
+def _linear_channel(value: int) -> float:
+    channel = max(0, min(255, int(value))) / 255.0
+    return channel / 12.92 if channel <= 0.03928 else ((channel + 0.055) / 1.055) ** 2.4
+
+
+def relative_luminance(rgb: tuple[int, int, int]) -> float:
+    r, g, b = rgb
+    return (
+        0.2126 * _linear_channel(r)
+        + 0.7152 * _linear_channel(g)
+        + 0.0722 * _linear_channel(b)
+    )
+
+
+def contrast_ratio(
+    fg: tuple[int, int, int], bg: tuple[int, int, int]
+) -> float:
+    """WCAG 2.x 对比度：(L_bright + 0.05) / (L_dark + 0.05)。
+
+    边界自证：纯白 on 纯黑 = 21.0；同一颜色 = 1.0（test-agent 用 `python3 -c` 断言这两个端点）。
+    """
+    light = max(relative_luminance(fg), relative_luminance(bg))
+    dark = min(relative_luminance(fg), relative_luminance(bg))
+    return (light + 0.05) / (dark + 0.05)
+
+
+def hex_rgb(rgb: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def rendered_text_pairs(cap: "Capture") -> dict[tuple[tuple[int, int, int], tuple[int, int, int]], int]:
+    """解析 `*.ansi` 的 SGR，统计**可读文本**单元格的 (fg, bg) 出现次数。
+
+    只取字母/数字/CJK（`str.isalnum()`）—— 发丝线、色带块、圆点等装饰字形不参与可读性判定，
+    否则会把「装饰低对比」误当成「文字不可读」。
+    """
+    with open(cap.ansi_path, encoding="utf-8", errors="replace") as fh:
+        ansi = fh.read()
+    grid = ansi_render.parse_ansi(ansi, cap.cols, cap.rows)
+    pairs: dict[tuple[tuple[int, int, int], tuple[int, int, int]], int] = {}
+    for row in grid:
+        for cell in row:
+            ch = cell.ch
+            if not ch or ch.isspace() or not ch.isalnum():
+                continue
+            fg = cell.style.fg or ansi_render.DEFAULT_FG
+            bg = cell.style.bg or ansi_render.DEFAULT_BG
+            key = (fg, bg)
+            pairs[key] = pairs.get(key, 0) + 1
+    return pairs
+
+# F-K：TUI 的 stderr 被 dup2 到 `<HOME>/.pony-agent/tui-logs/tui-runtime.log`，
+# 因此「只看 tmux capture」的 no_panic 断言结构上不可能失败（panic 会进日志而不是屏幕）。
+# 日志路径必须可注入，两级：
+#   1) 显式参数（`extra.json["runtime_log"]` 或函数入参）
+#   2) 环境变量 `PONY_TUI_RUNTIME_LOG`
+#   3) 默认 `os.path.expanduser("~")/.pony-agent/tui-logs/tui-runtime.log`（经 expanduser ⇒ 可被 $HOME 重定向）
+RUNTIME_LOG_ENV = "PONY_TUI_RUNTIME_LOG"
+RUNTIME_LOG_DEFAULT = os.path.join(".pony-agent", "tui-logs", "tui-runtime.log")
+
+_runtime_log_override: str | None = None
+_runtime_log_offset: int = 0
+
+
+def set_runtime_log_override(path: str | None, offset: int = 0) -> None:
+    """Per-run override (from `extra.json["runtime_log"]` / `runtime_log_offset`).
+
+    `offset` is the log size **when this scenario started**: only bytes appended afterwards
+    belong to this run. Without it, a stale log full of historical panics (e.g. an old
+    `~/.pony-agent/tui-logs/tui-runtime.log` from another build) would fail the check.
+    """
+    global _runtime_log_override, _runtime_log_offset
+    _runtime_log_override = path or None
+    _runtime_log_offset = max(0, int(offset or 0))
+
+
+def runtime_log_offset() -> int:
+    return _runtime_log_offset
+
+
+def runtime_log_path(explicit: str | None = None) -> str:
+    if explicit:
+        return explicit
+    if _runtime_log_override:
+        return _runtime_log_override
+    env_path = os.environ.get(RUNTIME_LOG_ENV)
+    if env_path:
+        return env_path
+    return os.path.join(os.path.expanduser("~"), RUNTIME_LOG_DEFAULT)
+
+
+def read_runtime_log(path: str, offset: int = 0) -> str | None:
+    """Return the log text **after `offset` bytes**, or None when unavailable.
+
+    Scoping by byte offset is what makes the check honest: the TUI appends to its own log, so
+    "current run" == "bytes appended since the scenario started". A shorter file than the
+    recorded offset (rotated / replaced) is read from the beginning instead of erroring.
+    """
+    try:
+        with open(path, "rb") as fh:
+            if offset > 0:
+                try:
+                    fh.seek(offset)
+                except OSError:
+                    fh.seek(0)
+            data = fh.read()
+    except OSError:
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def panic_scan(text: str) -> list[str]:
+    """All panic/backtrace markers found in `text` (empty list = clean)."""
+    return [match.group(0) for match in PANIC_RE.finditer(text or "")]
+
+
+def no_panic_verdict(capture_text: str, log_text: str | None) -> tuple[str, str]:
+    """F-K：双源 no_panic 三态判定（纯函数，可单测）。
+
+    - capture 命中 panic ⇒ ("fail", ...)（屏幕上的 panic 是硬证据）；
+    - 日志不可得（None）⇒ ("skipped", ...)：既不算通过也不判失败；
+    - 日志命中 panic ⇒ ("fail", ...)；
+    - 两源都干净 ⇒ ("pass", ...)。
+    """
+    capture_hits = panic_scan(capture_text)
+    if capture_hits:
+        return ("fail", f"capture matched {capture_hits[0]!r}")
+    if log_text is None:
+        return ("skipped", "tui runtime log unavailable (stderr is dup2'd to the log, not the capture)")
+    log_hits = panic_scan(log_text)
+    if log_hits:
+        return ("fail", f"runtime log matched {log_hits[0]!r}")
+    return ("pass", "no panic tokens in capture or tui runtime log")
+
 
 def common_checks(c: Checks, cap: Capture, *, allow_ni: bool = False) -> None:
     text = cap.text()
 
-    m = PANIC_RE.search(text)
-    c.add(
+    # F-K：双源判定 —— tmux capture + **本场景新增**的 TUI 运行日志（stderr dup2 目标）。
+    log_path = runtime_log_path()
+    log_offset = runtime_log_offset()
+    log_text = read_runtime_log(log_path, log_offset)
+    panic_status, panic_evidence = no_panic_verdict(text, log_text)
+    c.add_status(
         f"{cap.name}.no_panic",
-        "capture contains no Rust panic/backtrace",
-        m is None,
-        f"matched {m.group(0)!r}" if m else "no panic tokens in capture",
+        f"capture and tui runtime log ({log_path} from byte {log_offset}) "
+        "contain no Rust panic/backtrace",
+        panic_status,
+        panic_evidence,
     )
 
     if not allow_ni:
@@ -494,16 +686,47 @@ def separator_checks(c: Checks, cap: Capture) -> None:
     )
 
 
-DESC_PAIRS = [
-    ("/resume", "选择并恢复历史会话"),
-    ("/provider", "管理与切换模型提供商"),
-    ("/models", "切换当前活跃模型"),
-    ("/thinking", "设置思考强度 (Reasoning Effort)"),
-    ("/clear", "清空当前消息上下文"),
-    ("/cost", "查看当前模型与网关配额信息"),
-    ("/help", "查看所有支持的快捷指令"),
-    ("/quit", "安全退出 TUI 界面"),
-]
+# ---------------------------------------------------------------------------
+# command table: derived from the single source of truth
+# ---------------------------------------------------------------------------
+TUI_SOURCE = os.path.normpath(
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "..",
+        "crates",
+        "pony-agent-core",
+        "src",
+        "bin",
+        "tui.rs",
+    )
+)
+
+
+def load_available_commands(path: str = TUI_SOURCE) -> list[tuple[str, str]]:
+    """Parse `tui.rs::AVAILABLE_COMMANDS` — the single source of truth (contract C-6).
+
+    The audit must never hardcode the command literals: a hardcoded list silently
+    drifts from the real menu, which is exactly the defect this harness exists to
+    catch.  Parsing the table keeps expectation == implementation by construction.
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    start = src.find("pub const AVAILABLE_COMMANDS")
+    if start < 0:
+        raise SystemExit(f"AVAILABLE_COMMANDS not found in {path}")
+    end = src.find("];", start)
+    if end < 0:
+        raise SystemExit(f"AVAILABLE_COMMANDS table is not terminated in {path}")
+    pairs = re.findall(r'\("(/[^"\s]+)"\s*,\s*"([^"]*)"\)', src[start:end])
+    if not pairs:
+        raise SystemExit(f"AVAILABLE_COMMANDS parsed to an empty table in {path}")
+    return pairs
+
+
+AVAILABLE_COMMANDS = load_available_commands()
+COMMANDS = [cmd for cmd, _ in AVAILABLE_COMMANDS]
+DESC_PAIRS = list(AVAILABLE_COMMANDS)
 
 
 def desc_columns(cap: Capture) -> dict[str, int | None]:
@@ -667,7 +890,9 @@ def footer_text(cap: Capture) -> str:
 # per-scenario assertions
 # ---------------------------------------------------------------------------
 def check_empty(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     header_checks(c, cap)
     input_checks(c, cap)
@@ -697,16 +922,19 @@ def check_empty(c: Checks, ctx: Ctx) -> None:
         placeholder_col == 5,
         f"placeholder_col={placeholder_col}",
     )
+    # 空态引导块复用 `AVAILABLE_COMMANDS.iter().take(4)`，故期望同样是命令表前 4 条。
     command_table_checks(
         c,
         cap,
         "empty",
-        required=["/resume", "/provider", "/models", "/thinking"],
+        required=COMMANDS[:4],
     )
 
 
 def check_conversation(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     header_checks(c, cap)
     input_checks(c, cap)
@@ -812,11 +1040,13 @@ def mock_chat_requests(log_path: str | None) -> list[dict]:
 
 
 def check_slash(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     input_checks(c, cap, require_placeholder=False)
     text = cap.text()
-    commands = ["/resume", "/provider", "/models", "/thinking", "/clear", "/cost", "/help", "/quit"]
+    commands = COMMANDS
     missing = [cmd for cmd in commands if cmd not in text]
     c.add(
         "slash.all_commands_listed",
@@ -877,7 +1107,9 @@ def check_slash(c: Checks, ctx: Ctx) -> None:
 
 
 def check_models_panel(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     text = cap.text()
     title = next((ln for ln in cap.lines if "模型" in ln and "↑↓" in ln), "")
@@ -934,7 +1166,9 @@ def check_models_panel(c: Checks, ctx: Ctx) -> None:
 
 
 def check_provider_panel(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     text = cap.text()
     c.add(
@@ -967,7 +1201,9 @@ def check_provider_panel(c: Checks, ctx: Ctx) -> None:
 
 
 def check_sessions_panel(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     text = cap.text()
     c.add(
@@ -1006,7 +1242,9 @@ def check_sessions_panel(c: Checks, ctx: Ctx) -> None:
 
 
 def check_add_provider(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     text = cap.text()
     c.add(
@@ -1034,8 +1272,10 @@ def check_add_provider(c: Checks, ctx: Ctx) -> None:
 
 
 def check_streaming(c: Checks, ctx: Ctx) -> None:
-    mid = ctx.captures["mid"]
-    final = ctx.captures["final"]
+    mid = capture_or_fail(c, ctx, "mid")
+    final = capture_or_fail(c, ctx, "final")
+    if mid is None or final is None:
+        return
     common_checks(c, mid)
     common_checks(c, final)
 
@@ -1088,7 +1328,9 @@ def check_streaming(c: Checks, ctx: Ctx) -> None:
 
 
 def check_error(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     input_checks(c, cap)
     text = cap.text()
@@ -1135,8 +1377,10 @@ def check_error(c: Checks, ctx: Ctx) -> None:
 
 
 def check_narrow(c: Checks, ctx: Ctx) -> None:
-    empty = ctx.captures["empty"]
-    conv = ctx.captures["conversation"]
+    empty = capture_or_fail(c, ctx, "empty")
+    conv = capture_or_fail(c, ctx, "conversation")
+    if empty is None or conv is None:
+        return
     for cap in (empty, conv):
         common_checks(c, cap)
         input_checks(c, cap)
@@ -1176,8 +1420,10 @@ def check_narrow(c: Checks, ctx: Ctx) -> None:
 
 
 def check_wide(c: Checks, ctx: Ctx) -> None:
-    empty = ctx.captures["empty"]
-    conv = ctx.captures["conversation"]
+    empty = capture_or_fail(c, ctx, "empty")
+    conv = capture_or_fail(c, ctx, "conversation")
+    if empty is None or conv is None:
+        return
     for cap in (empty, conv):
         common_checks(c, cap)
         input_checks(c, cap)
@@ -1213,8 +1459,10 @@ def check_wide(c: Checks, ctx: Ctx) -> None:
 
 
 def check_scrolled(c: Checks, ctx: Ctx) -> None:
-    before = ctx.captures["before"]
-    after = ctx.captures["after"]
+    before = capture_or_fail(c, ctx, "before")
+    after = capture_or_fail(c, ctx, "after")
+    if before is None or after is None:
+        return
     common_checks(c, before)
     common_checks(c, after)
     input_checks(c, after)
@@ -1261,15 +1509,292 @@ def check_scrolled(c: Checks, ctx: Ctx) -> None:
     )
 
 
+def check_paste_multiline(c: Checks, ctx: Ctx) -> None:
+    """批7 S-PASTE：bracketed paste 必须原样进入 composer（换行/缩进/中文），且**绝不自动提交**。"""
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
+    common_checks(c, cap)
+    text = cap.text()
+    lines = cap.lines
+
+    def row_of(needle: str) -> int | None:
+        return next((i for i, ln in enumerate(lines) if needle in ln), None)
+
+    first, second, fourth = row_of("第一行中文"), row_of("缩进第二行"), row_of("第四行")
+    c.add(
+        "paste.lines_present_and_ordered",
+        "pasted lines 1/2/4 are present in the composer and keep their order",
+        first is not None and second is not None and fourth is not None
+        and first < second < fourth,
+        f"rows first={first} second={second} fourth={fourth}",
+    )
+    # 缩进：第二行必须比第一行更靠右（≥2 列），证明行内前导空格没有被吃掉。
+    first_col = col_of(lines[first], "第一行中文") if first is not None else None
+    second_col = col_of(lines[second], "缩进第二行") if second is not None else None
+    c.add(
+        "paste.indentation_preserved",
+        "line 2 keeps its two-space indent (starts >= 2 cols right of line 1)",
+        first_col is not None and second_col is not None and second_col >= first_col + 2,
+        f"first_col={first_col} second_col={second_col}",
+    )
+    blank_ok = (
+        second is not None
+        and fourth is not None
+        and fourth == second + 2
+        and lines[second + 1].strip() == ""
+    )
+    c.add(
+        "paste.blank_line_preserved",
+        "the empty third line survives between line 2 and line 4",
+        blank_ok,
+        f"second={second} fourth={fourth} between={lines[second + 1]!r}"
+        if second is not None and fourth is not None
+        else "rows missing",
+    )
+    # 未提交：既没有流式状态，也没有任何 assistant/工具行（粘贴后必须停在 composer）。
+    submitted = any(
+        token in text for token in ("Thinking", "先看一下项目", "生成中", "思考中")
+    )
+    c.add(
+        "paste.not_submitted",
+        "paste never auto-submits (no streaming status, no assistant/tool transcript rows)",
+        not submitted and fourth is not None,
+        "streaming/transcript markers found" if submitted else "composer still holds the paste",
+    )
+    c.add(
+        "paste.no_carriage_return",
+        "no literal CR (^M / \\r) leaked into the buffer",
+        "^M" not in text and "\r" not in text,
+        "found CR residue" if ("^M" in text or "\r" in text) else "no CR tokens",
+    )
+
+
+def check_resize_invalidate(c: Checks, ctx: Ctx) -> None:
+    """批7 S-RESIZE：缩窗必须重排；还原后必须与首帧逐行一致（布局缓存失效的核心断言）。"""
+    original = capture_or_fail(c, ctx, "original")
+    narrow = capture_or_fail(c, ctx, "narrow")
+    restored = capture_or_fail(c, ctx, "restored")
+    if original is None or narrow is None or restored is None:
+        return
+    # narrow 是 80×24 的真实捕获：按捕获尺寸而不是 meta 的 120×34 校正，避免误判行/列数。
+    narrow.cols, narrow.rows = 80, 24
+    for cap in (original, narrow, restored):
+        common_checks(c, cap)
+
+    narrow_max = max((dw(ln) for ln in narrow.lines), default=0)
+    original_max = max((dw(ln) for ln in original.lines), default=0)
+    c.add(
+        "resize.narrow_window_rewrapped",
+        "narrow pane (80x24) re-lays out the transcript to <= 80 cols and differs from the wide frame",
+        len(narrow.lines) == 24 and narrow_max <= 80 and original_max > 80
+        and narrow.lines != original.lines,
+        f"narrow_rows={len(narrow.lines)} narrow_max_w={narrow_max} "
+        f"original_max_w={original_max} identical={narrow.lines == original.lines}",
+    )
+    c.add(
+        "resize.restored_matches_original",
+        "after restoring 120x34 the frame is row-for-row identical to the first frame",
+        restored.lines == original.lines,
+        "identical"
+        if restored.lines == original.lines
+        else f"first mismatch row={next((i for i, (a, b) in enumerate(zip(original.lines, restored.lines)) if a != b), 'length')} "
+        f"(rows {len(original.lines)} vs {len(restored.lines)})",
+    )
+
+
+def check_ask_panel(c: Checks, ctx: Ctx) -> None:
+    """批7 S-ASK：真实 Ask 面板（--demo-ask-user 注入）出现 → 选项导航 → 提交关闭 → 5s 不重开。"""
+    panel = capture_or_fail(c, ctx, "panel")
+    navigated = capture_or_fail(c, ctx, "navigated")
+    submitted = capture_or_fail(c, ctx, "submitted")
+    settled = capture_or_fail(c, ctx, "settled")
+    if panel is None or navigated is None or submitted is None or settled is None:
+        return
+    common_checks(c, panel)
+    ptext = panel.text()
+
+    c.add(
+        "ask.panel_visible",
+        "ask panel shows the question, at least one option and the key hint",
+        "请选择本次交付的执行架构" in ptext
+        and "单体轻量架构" in ptext
+        and "esc 取消" in ptext,
+        next((clip(ln) for ln in panel.lines if "请选择本次交付" in ln), "question row missing"),
+    )
+    c.add(
+        "ask.custom_input_hint",
+        "ask panel offers the free-text (custom input) row",
+        "自定义输入" in ptext,
+        next((clip(ln) for ln in panel.lines if "自定义输入" in ln), "custom-input row missing"),
+    )
+
+    def focused_row(cap: "Capture") -> str | None:
+        for ln in cap.lines:
+            if "▌" in ln:
+                return ln.strip()
+        return None
+
+    before, after = focused_row(panel), focused_row(navigated)
+    c.add(
+        "ask.option_navigation",
+        "Down moves the focus marker from the first to the second option",
+        before is not None
+        and after is not None
+        and before != after
+        and "单体轻量架构" in before
+        and "微服务" in after,
+        f"before={before!r} after={after!r}",
+    )
+    submitted_text = submitted.text()
+    c.add(
+        "ask.submit_closes_panel",
+        "Enter submits and closes the panel (question/hints gone)",
+        "请选择本次交付" not in submitted_text and "esc 取消" not in submitted_text,
+        next((clip(ln) for ln in submitted.lines if "请选择本次交付" in ln), "panel closed"),
+    )
+    settled_text = settled.text()
+    c.add(
+        "ask.not_reopened_after_5s",
+        "panel stays closed 5s after submit (no re-poll reopen)",
+        "请选择本次交付" not in settled_text and "esc 取消" not in settled_text,
+        next((clip(ln) for ln in settled.lines if "请选择本次交付" in ln), "still closed after 5s"),
+    )
+    # 注：真实 Ask 闭环（pending request + answer_ask CAS）由 `ask-loop` 场景断言覆盖；
+    # 本场景只验证 `--demo-ask-user` 注入的纯 UI 形态，故不再登记缺口项。
+
+
+def check_ask_loop(c: Checks, ctx: Ctx) -> None:
+    """批8（修订13）：Ask **真实闭环** —— 面板 → 导航 → 提交 → 关闭 → 不重开 → 无 CAS 失败文案。"""
+    panel = capture_or_fail(c, ctx, "panel")
+    navigated = capture_or_fail(c, ctx, "navigated")
+    submitted = capture_or_fail(c, ctx, "submitted")
+    settled = capture_or_fail(c, ctx, "settled")
+    if panel is None or navigated is None or submitted is None or settled is None:
+        return
+    common_checks(c, panel)
+
+    ptext = panel.text()
+    c.add(
+        "askloop.panel_visible",
+        "bootstrap ask raised a real panel (prompt + option + esc hint)",
+        "请选择本次审计的 Ask 闭环分支" in ptext
+        and "分支 A · 冒烟" in ptext
+        and "esc 取消" in ptext,
+        next((clip(ln) for ln in panel.lines if "请选择本次审计" in ln), "prompt row missing"),
+    )
+
+    # 生产 API 侧证据：运行日志里必须留下「已写入真实 pending request: control-…」。
+    log_text = read_runtime_log(runtime_log_path(), runtime_log_offset()) or ""
+    c.add(
+        "askloop.bootstrap_pending_created",
+        "bootstrap persisted a real pending request through dispatch_governed (control-… id)",
+        "ask 引导已写入真实 pending request" in log_text and "control-" in log_text,
+        next(
+            (clip(ln) for ln in log_text.splitlines() if "ask 引导" in ln),
+            "no bootstrap log line",
+        ),
+    )
+
+    def focused_row(cap: "Capture") -> str | None:
+        # 去掉闪烁光标（▏）与多余空白：焦点行的判据是「哪一行带 ▌ 轨标」，不是光标帧。
+        for ln in cap.lines:
+            if "▌" in ln:
+                return " ".join(ln.replace("▏", " ").split())
+        return None
+
+    before, after = focused_row(panel), focused_row(navigated)
+    c.add(
+        "askloop.option_navigation",
+        "Down moves the focus marker from option 1 to option 2",
+        before is not None
+        and after is not None
+        and before != after
+        and "分支 A · 冒烟" in before
+        and "分支 B · 全量" in after,
+        f"before={before!r} after={after!r}",
+    )
+
+    submitted_text = submitted.text()
+    settled_text = settled.text()
+    c.add(
+        "askloop.submit_closes_panel",
+        "Enter answers the real pending ask and closes the panel",
+        "请选择本次审计的 Ask 闭环分支" not in submitted_text
+        and "esc 取消" not in submitted_text,
+        next((clip(ln) for ln in submitted.lines if "请选择本次审计" in ln), "panel closed"),
+    )
+    c.add(
+        "askloop.not_reopened_after_5s",
+        "consumed ask never reopens within 5s (CAS consumption really happened)",
+        "请选择本次审计的 Ask 闭环分支" not in settled_text
+        and "esc 取消" not in settled_text,
+        next((clip(ln) for ln in settled.lines if "请选择本次审计" in ln), "still closed after 5s"),
+    )
+    # 负向断言：CAS/版本/提交失败类文案不得出现在提交后屏幕。
+    failure_tokens = ("提交回答失败", "取消提问失败", "失败", "version", "重试", "冲突", "CAS")
+    hits = [token for token in failure_tokens if token in settled_text]
+    c.add(
+        "askloop.no_cas_failure_copy",
+        "no CAS/version/submit-failure copy appears after submitting the ask",
+        not hits,
+        f"hits={hits}" if hits else "no failure tokens on the settled screen",
+    )
+
+
+def check_contrast(c: Checks, ctx: Ctx) -> None:
+    """批7 S-CONTRAST：从真实 SGR 求可读文本的 WCAG 对比度（下限 3.0；<4.5 仅记录不阻断）。"""
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
+    common_checks(c, cap)
+    pairs = rendered_text_pairs(cap)
+    measured = sorted(
+        ((contrast_ratio(fg, bg), fg, bg, count) for (fg, bg), count in pairs.items()),
+        key=lambda item: item[0],
+    )
+    c.add(
+        "contrast.pairs_measured",
+        "at least three distinct text (fg,bg) pairs were parsed from main.ansi",
+        len(measured) >= 3,
+        f"pairs={len(measured)} " + ", ".join(
+            f"{hex_rgb(fg)}/{hex_rgb(bg)}={ratio:.2f}" for ratio, fg, bg, _ in measured[:6]
+        ),
+    )
+    worst = measured[0] if measured else None
+    c.add(
+        "contrast.min_ratio_meets_floor",
+        f"every readable text pair has WCAG contrast >= {CONTRAST_FLOOR}",
+        worst is not None and worst[0] >= CONTRAST_FLOOR,
+        "all pairs: "
+        + ", ".join(f"{hex_rgb(fg)} on {hex_rgb(bg)}={ratio:.2f}" for ratio, fg, bg, _ in measured)
+        if measured
+        else "no text pairs parsed",
+    )
+    aa_gaps = [
+        f"{hex_rgb(fg)} on {hex_rgb(bg)}={ratio:.2f}"
+        for ratio, fg, bg, _ in measured
+        if ratio < CONTRAST_AA
+    ]
+    c.add_status(
+        "contrast.aa_gaps_recorded",
+        f"pairs below AA ({CONTRAST_AA}) are recorded, not blocking",
+        "skipped",
+        "AA 未达标（记录项，不阻断）: " + ("; ".join(aa_gaps) if aa_gaps else "none"),
+    )
+
+
 def check_help(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
+    cap = capture_or_fail(c, ctx, "main")
+    if cap is None:
+        return
     common_checks(c, cap)
     input_checks(c, cap)
     text = cap.text()
     row, line = first_line(cap.lines, "命令列表")
     if row is None:
         row, line = first_line(cap.lines, "Commands:")
-    commands = ["/resume", "/provider", "/models", "/thinking", "/clear", "/cost", "/help", "/quit"]
+    commands = COMMANDS
     missing = [cmd for cmd in commands if cmd not in text]
     c.add(
         "help.commands_listed",
@@ -1288,34 +1813,6 @@ def check_help(c: Checks, ctx: Ctx) -> None:
     )
 
 
-def check_cost(c: Checks, ctx: Ctx) -> None:
-    cap = ctx.captures["main"]
-    common_checks(c, cap)
-    input_checks(c, cap)
-    text = cap.text()
-    model_line = next(
-        (ln for ln in cap.lines if re.search(r"(Model:|模型)", ln)),
-        "",
-    )
-    gateway_line = next(
-        (ln for ln in cap.lines if re.search(r"(Gateway:|网关)", ln)),
-        "",
-    )
-    c.add(
-        "cost.model_line",
-        "/cost shows the active model",
-        bool(model_line) and "mock-alpha" in model_line,
-        f"row :: {clip(model_line)}" if model_line else "missing model row",
-    )
-    separator_checks(c, cap)
-    c.add(
-        "cost.gateway_line",
-        "/cost shows the gateway endpoint",
-        bool(gateway_line) and "http" in gateway_line,
-        f"row :: {clip(gateway_line)}" if gateway_line else "missing gateway row",
-    )
-
-
 def check_input_edit(c: Checks, ctx: Ctx) -> None:
     steps = [
         ("abc", "abc", "typed text lands in the composer"),
@@ -1329,7 +1826,9 @@ def check_input_edit(c: Checks, ctx: Ctx) -> None:
         ("draft", "draft", "draft text is present before Ctrl-C"),
     ]
     for name, expected, desc in steps:
-        cap = ctx.captures[name]
+        cap = capture_or_fail(c, ctx, name)
+        if cap is None:
+            continue
         common_checks(c, cap)
         got = input_text(cap)
         c.add(
@@ -1338,7 +1837,9 @@ def check_input_edit(c: Checks, ctx: Ctx) -> None:
             got == expected,
             f"buffer={got!r} expected={expected!r}",
         )
-    abc = ctx.captures["abc"]
+    abc = capture_or_fail(c, ctx, "abc")
+    if abc is None:
+        return
     typed_col = composer_text_column(abc, "abc")
     c.add(
         "input_edit.typed_text_column",
@@ -1346,7 +1847,9 @@ def check_input_edit(c: Checks, ctx: Ctx) -> None:
         typed_col == 5,
         f"typed_col={typed_col}",
     )
-    multiline = ctx.captures["multiline"]
+    multiline = capture_or_fail(c, ctx, "multiline")
+    if multiline is None:
+        return
     visuals = input_region_line_count(multiline)
     c.add(
         "input_edit.multiline_visual_rows",
@@ -1355,7 +1858,9 @@ def check_input_edit(c: Checks, ctx: Ctx) -> None:
         f"composer_rows={visuals} buffer={input_text(multiline)!r}",
     )
 
-    draft_cleared = ctx.captures["draft_cleared"]
+    draft_cleared = capture_or_fail(c, ctx, "draft_cleared")
+    if draft_cleared is None:
+        return
     common_checks(c, draft_cleared)
     got = input_text(draft_cleared)
     c.add(
@@ -1371,8 +1876,10 @@ def check_input_edit(c: Checks, ctx: Ctx) -> None:
         next((clip(ln) for ln in draft_cleared.lines if "写下任务" in ln or "输入任务" in ln), "composer missing"),
     )
 
-    exit_cap = ctx.captures["exit"]
-    shell_cap = ctx.captures["shell"]
+    exit_cap = capture_or_fail(c, ctx, "exit")
+    shell_cap = capture_or_fail(c, ctx, "shell")
+    if exit_cap is None or shell_cap is None:
+        return
     common_checks(c, exit_cap, allow_ni=True)
     common_checks(c, shell_cap, allow_ni=True)
     m = re.search(r"AUDIT_EXIT=(\d+)", exit_cap.text())
@@ -1405,8 +1912,10 @@ def check_input_edit(c: Checks, ctx: Ctx) -> None:
 
 
 def check_ctrl_c(c: Checks, ctx: Ctx) -> None:
-    exit_cap = ctx.captures["exit"]
-    shell_cap = ctx.captures["shell"]
+    exit_cap = capture_or_fail(c, ctx, "exit")
+    shell_cap = capture_or_fail(c, ctx, "shell")
+    if exit_cap is None or shell_cap is None:
+        return
     common_checks(c, exit_cap, allow_ni=True)
     common_checks(c, shell_cap, allow_ni=True)
     m = re.search(r"AUDIT_EXIT=(\d+)", exit_cap.text())
@@ -1533,7 +2042,11 @@ SCENARIOS = {
     "wide": check_wide,
     "scrolled": check_scrolled,
     "help": check_help,
-    "cost": check_cost,
+    "paste-multiline": check_paste_multiline,
+    "resize-invalidate": check_resize_invalidate,
+    "ask-panel": check_ask_panel,
+    "ask-loop": check_ask_loop,
+    "contrast": check_contrast,
     "ctrl-c": check_ctrl_c,
     "input-edit": check_input_edit,
     "non-tty": check_non_tty,
@@ -1649,12 +2162,25 @@ def aggregate(phase_dir: str, compare_dir: str | None = None) -> int:
     phase_dir = os.path.abspath(phase_dir)
     with open(os.path.join(phase_dir, "bin-info.json"), encoding="utf-8") as fh:
         bin_info = json.load(fh)
+    # 契约（修订14）：只统计**本次实际执行**的场景。
+    # runner 在每个场景开始时把名字写进 `run-scenarios.txt`；目录里多出来的（陈旧/手工残留）
+    # 一律忽略并在 report.md 记一行 —— 否则旧 assertions.json 会被当成本次结果（假绿）。
+    manifest_path = os.path.join(phase_dir, "run-scenarios.txt")
+    manifest: list[str] | None = None
+    if os.path.exists(manifest_path):
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = [line.strip() for line in fh if line.strip()]
+    executed = set(manifest or [])
     scenarios = []
+    ignored_stale: list[str] = []
     for name in sorted(os.listdir(phase_dir)):
         sdir = os.path.join(phase_dir, name)
         a_path = os.path.join(sdir, "assertions.json")
         m_path = os.path.join(sdir, "meta.json")
         if not (os.path.isdir(sdir) and os.path.exists(a_path) and os.path.exists(m_path)):
+            continue
+        if manifest is not None and name not in executed:
+            ignored_stale.append(name)
             continue
         with open(a_path, encoding="utf-8") as fh:
             assertions = json.load(fh)
@@ -1674,12 +2200,14 @@ def aggregate(phase_dir: str, compare_dir: str | None = None) -> int:
                 ),
                 "pass": assertions.get("pass", 0),
                 "fail": assertions.get("fail", 0),
+                "skipped": assertions.get("skipped", 0),
                 "checks": assertions.get("checks", []),
             }
         )
     scenarios.sort(key=lambda item: item["index"])
     total_pass = sum(s["pass"] for s in scenarios)
     total_fail = sum(s["fail"] for s in scenarios)
+    total_skipped = sum(s["skipped"] for s in scenarios)
     failed_scenarios = [s["name"] for s in scenarios if s["fail"]]
     report = {
         "phase": bin_info.get("phase"),
@@ -1687,10 +2215,13 @@ def aggregate(phase_dir: str, compare_dir: str | None = None) -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
             "scenarios": len(scenarios),
-            "checks": total_pass + total_fail,
+            "checks": total_pass + total_fail + total_skipped,
             "pass": total_pass,
             "fail": total_fail,
+            "skipped": total_skipped,
             "failed_scenarios": failed_scenarios,
+            "manifest": "run-scenarios.txt" if manifest is not None else None,
+            "ignored_stale_scenarios": ignored_stale,
         },
         "scenarios": scenarios,
     }
@@ -1714,6 +2245,14 @@ def aggregate(phase_dir: str, compare_dir: str | None = None) -> int:
     md.append(f"| mtime | `{bin_info.get('mtime')}` |")
     md.append(f"| version | `{bin_info.get('version')}` |")
     md.append(f"| generated_at | `{report['generated_at']}` |")
+    if ignored_stale:
+        md.append(
+            "| ignored stale scenario dirs | "
+            + ", ".join(f"`{name}`" for name in ignored_stale)
+            + " |"
+        )
+    if manifest is None:
+        md.append("| scenario manifest | `<missing>` · 未过滤（旧 run 的目录都会被统计） |")
     md.append(
         f"| result | **{total_pass} pass / {total_fail} fail** across "
         f"{len(scenarios)} scenarios |"
@@ -1750,24 +2289,145 @@ def aggregate(phase_dir: str, compare_dir: str | None = None) -> int:
                 f"[{cap}.png]({scen['evidence_dir']}/{cap}.png)" for cap in scen["captures"]
             )
             md.append(f"- screenshots: {links}")
-        md.append(f"- checks: {scen['pass']} pass / {scen['fail']} fail")
+        md.append(
+            f"- checks: {scen['pass']} pass / {scen['fail']} fail"
+            + (f" / {scen['skipped']} skipped" if scen.get("skipped") else "")
+        )
         md.append("")
         md.append("| result | check | evidence |")
         md.append("| --- | --- | --- |")
         for chk in scen["checks"]:
             ev = chk["evidence"].replace("|", "\\|")
-            md.append(
-                f"| {'PASS' if chk['ok'] else 'FAIL'} | `{chk['id']}` — {chk['desc']} | {ev} |"
+            # 三态：skipped 是「不可判定/记录项」，不得在报告里被读成 FAIL。
+            verdict = {"pass": "PASS", "fail": "FAIL", "skipped": "SKIP"}.get(
+                chk.get("status", "pass" if chk["ok"] else "fail"), "FAIL"
             )
+            md.append(f"| {verdict} | `{chk['id']}` — {chk['desc']} | {ev} |")
         md.append("")
     md_path = os.path.join(phase_dir, "report.md")
     with open(md_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(md) + "\n")
 
     print(json.dumps({"report_json": json_path, "report_md": md_path,
-                      "pass": total_pass, "fail": total_fail,
+                      "pass": total_pass, "fail": total_fail, "skipped": total_skipped,
                       "failed_scenarios": failed_scenarios}, ensure_ascii=False))
     return 0
+
+
+# ---------------------------------------------------------------------------
+# self check: F-K runtime-log scoping (stale logs must never fail a clean run)
+# ---------------------------------------------------------------------------
+def runtime_log_selftest() -> list[str]:
+    """F-K 回归自检：**历史遗留日志不得影响本次结论**。
+
+    覆盖四个判定：
+    1. 旧日志（含 `panicked at`）本身必须被判 `fail` —— 证明扫描不是恒真；
+    2. 作用域注入（extra.json/env 指向本场景日志）后，即便默认路径上压着旧日志也必须 `pass`；
+    3. 同一文件「旧前缀 + 本次追加」⇒ 从起始 offset 读必须 `pass`，从 0 读必须 `fail`；
+    4. 日志缺失 ⇒ `skipped`（不得静默算通过）。
+    """
+    problems: list[str] = []
+    legacy_text = "thread 'main' panicked at src/bin/tui.rs:612:5\nstack backtrace:\n"
+    with tempfile.TemporaryDirectory(prefix="tui-audit-fk-") as tmp:
+        legacy_path = os.path.join(tmp, "legacy-tui-runtime.log")
+        current_path = os.path.join(tmp, "scenario-tui-runtime.log")
+        with open(legacy_path, "w", encoding="utf-8") as fh:
+            fh.write(legacy_text)
+        with open(current_path, "w", encoding="utf-8") as fh:
+            fh.write("=== scenario run ===\nall good\n")
+
+        status, _ = no_panic_verdict("clean capture", read_runtime_log(legacy_path))
+        if status != "fail":
+            problems.append(f"legacy log must be detected as fail (got {status})")
+
+        set_runtime_log_override(current_path, 0)
+        status, evidence = no_panic_verdict(
+            "clean capture", read_runtime_log(runtime_log_path(), runtime_log_offset())
+        )
+        if status != "pass":
+            problems.append(
+                f"scoped clean log must pass while a stale log exists on disk (got {status}: {evidence})"
+            )
+
+        combined = os.path.join(tmp, "combined-tui-runtime.log")
+        with open(combined, "w", encoding="utf-8") as fh:
+            fh.write(legacy_text)
+        offset = os.path.getsize(combined)
+        with open(combined, "a", encoding="utf-8") as fh:
+            fh.write("=== this run ===\nall good\n")
+        set_runtime_log_override(combined, offset)
+        status, _ = no_panic_verdict(
+            "clean capture", read_runtime_log(runtime_log_path(), runtime_log_offset())
+        )
+        if status != "pass":
+            problems.append(f"offset-scoped read must ignore the legacy prefix (got {status})")
+        status, _ = no_panic_verdict("clean capture", read_runtime_log(combined, 0))
+        if status != "fail":
+            problems.append(f"unscoped read must still see the legacy prefix (got {status})")
+
+        set_runtime_log_override(os.path.join(tmp, "absent.log"), 0)
+        status, _ = no_panic_verdict(
+            "clean capture", read_runtime_log(runtime_log_path(), runtime_log_offset())
+        )
+        if status != "skipped":
+            problems.append(f"missing log must be skipped, not pass/fail (got {status})")
+
+        os.environ[RUNTIME_LOG_ENV] = current_path
+        set_runtime_log_override(None, 0)
+        if runtime_log_path() != current_path:
+            problems.append("env injection (PONY_TUI_RUNTIME_LOG) must take precedence over default")
+        os.environ.pop(RUNTIME_LOG_ENV, None)
+
+    set_runtime_log_override(None, 0)
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# self check: derived expectations must match tui.rs::AVAILABLE_COMMANDS
+# ---------------------------------------------------------------------------
+def selfcheck(tui_source: str = TUI_SOURCE) -> int:
+    """Static self-check for the derived command table (contract C-6 / gate G5).
+
+    Fails when the parse yields an empty/duplicated/malformed table, so a broken
+    derivation can never silently make every command assertion vacuous.
+    """
+    try:
+        table = load_available_commands(tui_source)
+    except OSError as exc:
+        print(f"SELFCHECK FAIL: cannot read {tui_source}: {exc}", file=sys.stderr)
+        return 1
+    problems: list[str] = []
+    seen: set[str] = set()
+    for cmd, desc in table:
+        if not re.fullmatch(r"/[a-z][a-z0-9-]*", cmd):
+            problems.append(f"malformed command {cmd!r}")
+        if cmd in seen:
+            problems.append(f"duplicated command {cmd!r}")
+        seen.add(cmd)
+        if not desc.strip():
+            problems.append(f"empty description for {cmd!r}")
+    if table and table[0][0] != "/resume":
+        problems.append(f"first command is {table[0][0]!r}, expected '/resume'")
+    runtime_log_problems = runtime_log_selftest()
+    problems.extend(runtime_log_problems)
+    # S-CONTRAST：WCAG 公式端点自证（21.0 = 纯白/纯黑；1.0 = 同色）。
+    if abs(contrast_ratio((255, 255, 255), (0, 0, 0)) - 21.0) > 1e-9:
+        problems.append("contrast_ratio(white, black) must be exactly 21.0")
+    if abs(contrast_ratio((18, 16, 14), (18, 16, 14)) - 1.0) > 1e-9:
+        problems.append("contrast_ratio(same, same) must be exactly 1.0")
+    print(
+        json.dumps(
+            {
+                "tui_source": tui_source,
+                "commands": [cmd for cmd, _ in table],
+                "count": len(table),
+                "runtime_log_selftest": "pass" if not runtime_log_problems else "fail",
+                "problems": problems,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0 if not problems else 1
 
 
 # ---------------------------------------------------------------------------
@@ -1779,6 +2439,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p_check = sub.add_parser("check", help="assert one scenario evidence directory")
     p_check.add_argument("--dir", required=True)
+
+    p_self = sub.add_parser(
+        "selfcheck",
+        help="verify the command expectations derived from tui.rs::AVAILABLE_COMMANDS",
+    )
+    p_self.add_argument("--tui-source", default=TUI_SOURCE)
 
     p_agg = sub.add_parser("aggregate", help="build report.json/report.md for a phase")
     p_agg.add_argument("--phase-dir", required=True)
@@ -1792,6 +2458,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "check":
         ctx = Ctx(args.dir)
+        set_runtime_log_override(
+            ctx.extra.get("runtime_log"),
+            int(ctx.extra.get("runtime_log_offset") or 0),
+        )
         scenario = ctx.meta["scenario"]
         fn = SCENARIOS.get(scenario)
         if fn is None:
@@ -1806,6 +2476,9 @@ def main(argv: list[str] | None = None) -> int:
             f"RESULT scenario={scenario} pass={payload['pass']} fail={payload['fail']}"
         )
         return 0
+
+    if args.command == "selfcheck":
+        return selfcheck(args.tui_source)
 
     return aggregate(args.phase_dir, args.compare)
 

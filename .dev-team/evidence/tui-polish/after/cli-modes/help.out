@@ -1,4 +1,5 @@
-pony 0.1.127 — 交互式 TUI Agent
+{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https://otel.ponyjob.top）","trace_id":null,"ts":"2026-11-02T03:57:43.675Z"}
+pony 0.1.141 — 交互式 TUI Agent
 
 用法: pony [选项]
 

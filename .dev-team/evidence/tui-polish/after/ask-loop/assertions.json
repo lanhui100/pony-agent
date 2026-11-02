@@ -1,0 +1,92 @@
+{
+  "scenario": "ask-loop",
+  "pass": 12,
+  "fail": 0,
+  "skipped": 0,
+  "checks": [
+    {
+      "id": "panel.no_panic",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-loop/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
+    },
+    {
+      "id": "panel.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "panel.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "status": "pass",
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent model-ppx-default"
+    },
+    {
+      "id": "panel.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "panel.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-loop/panel.ansi size=2345"
+    },
+    {
+      "id": "panel.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-loop/panel.png size=79284"
+    },
+    {
+      "id": "askloop.panel_visible",
+      "desc": "bootstrap ask raised a real panel (prompt + option + esc hint)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "◆ 提问 请选择本次审计的 Ask 闭环分支："
+    },
+    {
+      "id": "askloop.bootstrap_pending_created",
+      "desc": "bootstrap persisted a real pending request through dispatch_governed (control-… id)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "[pony-tui][audit] ask 引导已写入真实 pending request: control-000000000000（等待既有轮询拉起面板）"
+    },
+    {
+      "id": "askloop.option_navigation",
+      "desc": "Down moves the focus marker from option 1 to option 2",
+      "ok": true,
+      "status": "pass",
+      "evidence": "before='▌ ● 分支 A · 冒烟' after='▌ ● 分支 B · 全量'"
+    },
+    {
+      "id": "askloop.submit_closes_panel",
+      "desc": "Enter answers the real pending ask and closes the panel",
+      "ok": true,
+      "status": "pass",
+      "evidence": "panel closed"
+    },
+    {
+      "id": "askloop.not_reopened_after_5s",
+      "desc": "consumed ask never reopens within 5s (CAS consumption really happened)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "still closed after 5s"
+    },
+    {
+      "id": "askloop.no_cas_failure_copy",
+      "desc": "no CAS/version/submit-failure copy appears after submitting the ask",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no failure tokens on the settled screen"
+    }
+  ]
+}

@@ -69,7 +69,12 @@ case "$BIN" in /*) ;; *) BIN="$ROOT/$BIN" ;; esac
 [ -x "$BIN" ] || die "binary not executable: $BIN"
 
 EVID="$ROOT/.dev-team/evidence/tui-polish/$PHASE"
+# 契约（修订14）：本次 phase 目录必须从零开始。陈旧场景目录（例如已删除场景的旧证据）
+# 若被 aggregate 读进 report，就会把上一轮的 assertions.json 当成本次结果 —— 数字虚高即假绿。
+# `baseline` 与 `after` 是不同 phase 目录，互不影响；baseline 比较读的是 `$EVID/../baseline`。
+rm -rf "$EVID"
 mkdir -p "$EVID"
+: > "$EVID/run-scenarios.txt"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tui-audit.XXXXXX")"
 SOCK="tui-audit-$$"
 MOCK_PID=""
@@ -239,6 +244,8 @@ begin_scenario() { # $1 name, $2 cols, $3 rows
   SESS="audit-$SCEN_INDEX-$SCEN_NAME"
   SCEN_STARTED="$(date -Is)"
   SCEN_T0=$SECONDS
+  # 契约（修订14）：把「本次实际执行的场景」写成清单，report 只认这份清单。
+  printf '%s\n' "$SCEN_NAME" >> "$EVID/run-scenarios.txt"
   echo
   echo "== [$SCEN_INDEX] $SCEN_NAME (${COLS}x${ROWS})"
 }
@@ -260,6 +267,13 @@ begin_tui_scenario() { # name cols rows
   start_mock "$SCEN_DIR"
   make_fixture "$ISO" "$PORT"
   env_prefix
+  # F-K（no_panic 双源）：TUI 的 stderr 被 dup2 进 tui-runtime.log，而判分进程的 $HOME
+  # 与 TUI 进程（HOME=$ISO/home）不同 ⇒ 判分侧会读到真实用户的历史日志。这里给**本场景**
+  # 独占一个日志文件并显式注入 PONY_TUI_RUNTIME_LOG；同时记录起始 offset（本场景只扫新增字节）。
+  SCEN_RUNTIME_LOG="$SCEN_DIR/tui-runtime.log"
+  : > "$SCEN_RUNTIME_LOG"
+  SCEN_RUNTIME_LOG_OFFSET="$(stat -c%s "$SCEN_RUNTIME_LOG" 2>/dev/null || echo 0)"
+  ENV_ARGS+=("PONY_TUI_RUNTIME_LOG=$SCEN_RUNTIME_LOG")
   tmux -L "$SOCK" new-session -d -s "$SESS" -x "$COLS" -y "$ROWS" -c "$ROOT" \
     "${ENV_ARGS[@]}" "$BIN" >/dev/null 2>&1 || die "tmux new-session failed ($SESS)"
   wait_ready || warn "$SCEN_NAME: TUI did not show composer prompt in 20s"
@@ -318,12 +332,19 @@ capture() { # $1 session, $2 dir, $3 name
   fi
 }
 
-write_extra() { # $1 json string
-  python3 - "$SCEN_DIR/extra.json" "$1" <<'PY'
+write_extra() { # $1 json string（自动合并本场景 runtime_log / runtime_log_offset）
+  python3 - "$SCEN_DIR/extra.json" "$1" "${SCEN_RUNTIME_LOG:-}" \
+           "${SCEN_RUNTIME_LOG_OFFSET:-0}" <<'PY'
 import json
 import sys
-json.dump(json.loads(sys.argv[2]), open(sys.argv[1], "w", encoding="utf-8"),
-          ensure_ascii=False, indent=2)
+
+path, raw, log_path, offset = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+payload = json.loads(raw)
+if log_path:
+    # checks.py 优先读 extra.json 的注入项（其次 env，最后默认路径）。
+    payload.setdefault("runtime_log", log_path)
+    payload.setdefault("runtime_log_offset", int(offset or 0))
+json.dump(payload, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PY
 }
 
@@ -523,10 +544,94 @@ scn_help() {
   end_scenario
 }
 
-scn_cost() {
-  begin_tui_scenario cost 120 34
-  send_line "/cost"
-  wait_for "$SESS" "网关|Gateway:" 10 || warn "cost: cost line not seen"
+scn_paste_multiline() {
+  begin_tui_scenario paste-multiline 120 34
+  # 批7 S-PASTE：`paste-buffer -p` 会用 \e[200~…\e[201~ 包住内容（bracketed paste），
+  # 与真实终端粘贴同一条通路；内容含中文、行内缩进与空行。
+  tmux -L "$SOCK" set-buffer -b audit-paste $'第一行中文\n  缩进第二行\n\n第四行'
+  tmux -L "$SOCK" paste-buffer -p -b audit-paste -t "$SESS"
+  sleep 0.8
+  capture "$SESS" "$SCEN_DIR" main
+  write_extra '{}'
+  end_scenario
+}
+
+scn_resize_invalidate() {
+  begin_tui_scenario resize-invalidate 120 34
+  send_line "长文滚动测试"
+  wait_for "$SESS" "这是最后一行" 30 || warn "resize-invalidate: long answer tail not seen"
+  wait_for "$SESS" "$TURN_SETTLED_RE" 20 || true
+  sleep 0.5
+  capture "$SESS" "$SCEN_DIR" original
+  # tmux 无客户端时 window-size 跟随客户端；显式 manual 才能让 resize-window 生效。
+  tmux -L "$SOCK" set-option -t "$SESS" window-size manual
+  tmux -L "$SOCK" resize-window -t "$SESS" -x 80 -y 24
+  sleep 1.0
+  capture "$SESS" "$SCEN_DIR" narrow
+  tmux -L "$SOCK" resize-window -t "$SESS" -x 120 -y 34
+  sleep 1.0
+  capture "$SESS" "$SCEN_DIR" restored
+  write_extra '{}'
+  end_scenario
+}
+
+scn_ask_panel() {
+  # 批7 S-ASK：`--demo-ask-user` 会注入一个真实的 Ask 面板（同一渲染/键盘通路），
+  # 无需 mock 也无法伪造：面板、选项导航、提交关闭都是真终端交互。
+  begin_scenario ask-panel 120 34
+  prepare_iso
+  env_prefix
+  SCEN_RUNTIME_LOG="$SCEN_DIR/tui-runtime.log"
+  : > "$SCEN_RUNTIME_LOG"
+  SCEN_RUNTIME_LOG_OFFSET="$(stat -c%s "$SCEN_RUNTIME_LOG" 2>/dev/null || echo 0)"
+  ENV_ARGS+=("PONY_TUI_RUNTIME_LOG=$SCEN_RUNTIME_LOG")
+  tmux -L "$SOCK" new-session -d -s "$SESS" -x "$COLS" -y "$ROWS" -c "$ROOT" \
+    "${ENV_ARGS[@]}" "$BIN" --demo-ask-user >/dev/null 2>&1 || die "tmux new-session failed ($SESS)"
+  wait_for "$SESS" "请选择本次交付的执行架构" 20 || warn "ask-panel: question not seen"
+  sleep 0.5
+  capture "$SESS" "$SCEN_DIR" panel
+  send_key Down
+  sleep 0.6
+  capture "$SESS" "$SCEN_DIR" navigated
+  send_key Enter
+  sleep 0.8
+  capture "$SESS" "$SCEN_DIR" submitted
+  sleep 5
+  capture "$SESS" "$SCEN_DIR" settled
+  write_extra '{}'
+  end_scenario
+}
+
+scn_ask_loop() {
+  # 批8（修订13）：Ask **真实闭环** —— 用生产 API 造一条真实 pending Ask（debug 引导），
+  # 面板拉起/提交/CAS 消费全部走既有链路；本场景只负责驱动键盘与取证。
+  begin_scenario ask-loop 120 34
+  prepare_iso
+  env_prefix
+  SCEN_RUNTIME_LOG="$SCEN_DIR/tui-runtime.log"
+  : > "$SCEN_RUNTIME_LOG"
+  SCEN_RUNTIME_LOG_OFFSET="$(stat -c%s "$SCEN_RUNTIME_LOG" 2>/dev/null || echo 0)"
+  ENV_ARGS+=("PONY_TUI_RUNTIME_LOG=$SCEN_RUNTIME_LOG")
+  ENV_ARGS+=("PONY_AUDIT_ASK_BOOTSTRAP={\"prompt\":\"请选择本次审计的 Ask 闭环分支：\",\"options\":[{\"label\":\"分支 A · 冒烟\",\"description\":\"只跑冒烟\"},{\"label\":\"分支 B · 全量\",\"description\":\"跑全量\"}]}")
+  tmux -L "$SOCK" new-session -d -s "$SESS" -x "$COLS" -y "$ROWS" -c "$ROOT" \
+    "${ENV_ARGS[@]}" "$BIN" >/dev/null 2>&1 || die "tmux new-session failed ($SESS)"
+  wait_for "$SESS" "请选择本次审计的 Ask 闭环分支" 20 || warn "ask-loop: bootstrap ask panel not seen"
+  sleep 0.5
+  capture "$SESS" "$SCEN_DIR" panel
+  send_key Down
+  sleep 0.6
+  capture "$SESS" "$SCEN_DIR" navigated
+  send_key Enter
+  sleep 0.8
+  capture "$SESS" "$SCEN_DIR" submitted
+  sleep 5
+  capture "$SESS" "$SCEN_DIR" settled
+  write_extra '{}'
+  end_scenario
+}
+
+scn_contrast() {
+  begin_tui_scenario contrast 120 34
   sleep 0.4
   capture "$SESS" "$SCEN_DIR" main
   write_extra '{}'
@@ -675,7 +780,8 @@ scn_cli_modes() {
 # ---------------------------------------------------------------------------
 for scenario in empty conversation slash-menu models-panel provider-panel \
                 sessions-panel add-provider streaming error narrow wide \
-                scrolled help cost ctrl-c input-edit non-tty cli-modes; do
+                scrolled help paste-multiline resize-invalidate ask-panel ask-loop contrast \
+                ctrl-c input-edit non-tty cli-modes; do
   if ! should_run "$scenario"; then
     continue
   fi
@@ -693,7 +799,11 @@ for scenario in empty conversation slash-menu models-panel provider-panel \
     wide) scn_wide ;;
     scrolled) scn_scrolled ;;
     help) scn_help ;;
-    cost) scn_cost ;;
+    paste-multiline) scn_paste_multiline ;;
+    resize-invalidate) scn_resize_invalidate ;;
+    ask-panel) scn_ask_panel ;;
+    ask-loop) scn_ask_loop ;;
+    contrast) scn_contrast ;;
     ctrl-c) scn_ctrl_c ;;
     input-edit) scn_input_edit ;;
     non-tty) scn_non_tty ;;

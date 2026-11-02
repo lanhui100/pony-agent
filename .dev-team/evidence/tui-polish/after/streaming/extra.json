@@ -1,3 +1,5 @@
 {
-  "mock_log": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mock-requests.jsonl"
+  "mock_log": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/mock-requests.jsonl",
+  "runtime_log": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/streaming/tui-runtime.log",
+  "runtime_log_offset": 0
 }

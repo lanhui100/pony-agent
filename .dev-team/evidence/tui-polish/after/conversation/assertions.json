@@ -2,125 +2,146 @@
   "scenario": "conversation",
   "pass": 20,
   "fail": 0,
+  "skipped": 0,
   "checks": [
     {
       "id": "main.no_panic",
-      "desc": "capture contains no Rust panic/backtrace",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
       "ok": true,
-      "evidence": "no panic tokens in capture"
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
     },
     {
       "id": "main.no_standalone_role_label",
       "desc": "no standalone role label line \"你\" (role shown by material, not label)",
       "ok": true,
+      "status": "pass",
       "evidence": "no line equals \"你\""
     },
     {
       "id": "main.within_terminal_width",
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "main.capture_rows",
       "desc": "capture has exactly pane height rows (34)",
       "ok": true,
+      "status": "pass",
       "evidence": "rows=34 pane_rows=34"
     },
     {
       "id": "main.artifact_ansi",
       "desc": "ansi artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=3448"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.ansi size=3862"
     },
     {
       "id": "main.artifact_png",
       "desc": "png artifact exists for screenshot review",
       "ok": true,
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=144164"
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/conversation/main.png size=144947"
     },
     {
       "id": "main.header",
       "desc": "header shows brand + workspace",
       "ok": true,
+      "status": "pass",
       "evidence": "row 0 :: pony · pony-agent mock-alpha"
     },
     {
       "id": "main.input_padded_from_left_edge",
       "desc": "input prompt has left padding (>0 cols from terminal edge)",
       "ok": true,
+      "status": "pass",
       "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "main.input_placeholder",
       "desc": "composer shows placeholder guidance when empty",
       "ok": true,
+      "status": "pass",
       "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
     },
     {
       "id": "conversation.user_message_visible",
       "desc": "user prompt is rendered in the transcript",
       "ok": true,
+      "status": "pass",
       "evidence": "row 4 :: ▌ 读取 package.json 并总结"
     },
     {
       "id": "conversation.user_role_rail",
       "desc": "user message is distinguished by a rail/block, not a text label",
       "ok": true,
+      "status": "pass",
       "evidence": "row 3 :: ▌"
     },
     {
       "id": "conversation.tool_line_visible",
       "desc": "tool activity line (Read) is visible with a status glyph",
       "ok": true,
-      "evidence": "row 8 :: ✓ 读取 (Read) · 收集路径 package.json 的上下文。"
+      "status": "pass",
+      "evidence": "row 6 :: ✓ 读取 (Read) · 收集路径 package.json 的上下文。"
     },
     {
       "id": "conversation.final_answer_visible",
       "desc": "final assistant answer (mock round 2) is visible",
       "ok": true,
-      "evidence": "row 10 :: 结论"
+      "status": "pass",
+      "evidence": "row 7 :: 结论"
     },
     {
       "id": "conversation.text_columns_aligned",
       "desc": "user body / assistant body / tool text start on the same column",
       "ok": true,
+      "status": "pass",
       "evidence": "user_col=5 assistant_col=5 tool_col=5"
     },
     {
       "id": "conversation.aligned_columns_padded",
       "desc": "shared text column is inset from the terminal edge",
       "ok": true,
+      "status": "pass",
       "evidence": "shared_col=5"
     },
     {
       "id": "conversation.no_error_rendered",
       "desc": "successful turn shows no error message",
       "ok": true,
+      "status": "pass",
       "evidence": "no Error:/失败 rows in transcript"
     },
     {
       "id": "conversation.mock_followup_has_tool_round",
       "desc": "mock receipt proves the final model round carried a tool result",
       "ok": true,
+      "status": "pass",
       "evidence": "chat_requests=1 tool_round_requests=1 roles=[['system', 'system', 'system', 'system', 'user', 'assistant', 'tool']] scenarios=['final']"
     },
     {
       "id": "main.separator_single_header_rule",
       "desc": "exactly one full ▁ rule remains: the header hairline (composer top rule removed)",
       "ok": true,
+      "status": "pass",
       "evidence": "rule_rows=[1]"
     },
     {
       "id": "main.separator_header_rule_geometry",
       "desc": "header rule lives on row 1, starts at content column 3 and spans 114 cols",
       "ok": true,
+      "status": "pass",
       "evidence": "row=1 start=3 expected_start=3 width=114 expected_width=114"
     },
     {
       "id": "conversation.footer_metrics",
       "desc": "footer is the composer metrics line after the turn (status phrase removed by wave-39)",
       "ok": true,
+      "status": "pass",
       "evidence": "footer :: /home/dm/pony-agent ↑32 ↓64 · 缓存 0% · 上下文 0%"
     }
   ]
