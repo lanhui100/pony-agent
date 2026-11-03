@@ -1,0 +1,167 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "60e7cb8",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "fa32f3de-dca3-4468-89f1-8da8e78befbf",
+    "fresh_context": true
+  },
+  "executed_by": "fa32f3de-dca3-4468-89f1-8da8e78befbf",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "git diff 52a7a21 60e7cb8 -- crates/pony-agent-core/src/agent/",
+    "git diff 52a7a21 60e7cb8 -- crates/pony-agent-core/tests/（实测 0 行；冻结测试与三处契约迁移落在红相锚点 52a7a21）",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/runtime/builder.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/src/agent/stop_escalation.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/trace_timeline.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs",
+    "crates/pony-agent-core/tests/wave37_tool_surface.rs",
+    "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs",
+    ".dev-team/nfr-baseline.json",
+    ".dev-team/contracts/wave-61-team-activation.md",
+    ".dev-team/green-phase-wave61-team.json",
+    ".dev-team/red-phase-wave61-team.json",
+    ".dev-team/regression-baseline-wave61-team.json",
+    ".dev-team/wave61-team-delivery.md",
+    "窗口基准说明：HEAD=60e7cb8，但工作区另有并发会话的未提交 wave-61 v1.2 修复（context.rs / tools.rs / subagent_runtime.rs / provider/mod.rs + 4 个测试文件）；本报告全部结论与行号仅对 commit 60e7cb8 生效，复现命令统一走 git show 60e7cb8:<path>。"
+  ],
+  "six_questions": [
+    {
+      "question": "1. 外部调用超时：subagent_runtime.rs 的 SUBAGENT_* 常量与 HostTurnEngine::run_turn 的超时是否在 external_call_timeout_ms(≤3000) 基准内",
+      "baseline_field": "external_call_timeout_ms=3000；external_call_timeout_exceptions 仅 1 条（surface=provider streaming (SSE) HTTP client）",
+      "code_evidence": "crates/pony-agent-core/src/agent/orchestration.rs:237",
+      "verdict": "FAIL"
+    },
+    {
+      "question": "2. 日志与防吞：新增行有无裸 eprintln / 吞异常，区分既有语义允许与新增吞异常",
+      "baseline_field": "logging.format=json；logging_scope=new_structured_logging_surface_only；logging_legacy_eprintln_exempt=true；logging_eprintln_exempt_scope=existing_style_non_json_lock_poison_recovery_diagnostics；logging_eprintln_exempt_covers_new_lines=5；logging_compliance_claimed=false",
+      "code_evidence": "crates/pony-agent-core/src/agent/stop_escalation.rs:139",
+      "verdict": "PASS"
+    },
+    {
+      "question": "3. 资源泄漏：注册进 OnceLock 的 Arc<dyn SubagentTurnEngine>、HostTurnEngine 每次 run_turn 自建 runtime 是否泄漏线程/句柄",
+      "baseline_field": "resource_release（含 worker_thread_shutdown / wave9_timeout_path_idempotent_cleanup_then_liveness_probe）",
+      "code_evidence": "crates/pony-agent-core/src/agent/subagent_runtime.rs:201",
+      "verdict": "FAIL"
+    },
+    {
+      "question": "4. 并发与幂等：注册幂等（首写者胜）、嵌套 build() 重入、SUBAGENT_MAX_CONCURRENT 饥饿风险",
+      "baseline_field": "concurrency_lock=mutex；lock_scope_bounded=true；lock_reentrancy_forbidden=true（基准内无 subagent_max_concurrent 键；SUBAGENT_MAX_CONCURRENT=2 仅存在于代码 subagent_runtime.rs:58）",
+      "code_evidence": "crates/pony-agent-core/src/agent/orchestration.rs:256",
+      "verdict": "FAIL"
+    },
+    {
+      "question": "5. 配置与自检：本次是否引入需要新配置项的开关",
+      "baseline_field": "无新增配置（本波基线只增 3 个冻结事实字段 team_tool_surface_exact_count / subagent_engine_registration_required_in / team_policy_prompt_injected_when_wired，无开关项）",
+      "code_evidence": "crates/pony-agent-core/src/agent/context.rs:84",
+      "verdict": "PASS"
+    },
+    {
+      "question": "6. 契约兼容性：29→39 是 additive 还是 breaking；三处冻结契约迁移是否有兼容性证据；有无删除/重编号",
+      "baseline_field": "team_tool_surface_exact_count=39；契约 C1.3 变更类型表（模型/协议面 additive、provider 数组前缀 breaking 一次性、冻结测试面 breaking）",
+      "code_evidence": "crates/pony-agent-core/src/agent/tools.rs:7449",
+      "verdict": "PASS"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 286,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '286,296p' crates/pony-agent-core/src/agent/orchestration.rs; git show 60e7cb8:crates/pony-agent-core/src/agent/tools.rs | sed -n '1599,1615p'",
+      "severity": "BLOCKING",
+      "note": "模型可见的 `workflow` 在本波接线后返回伪造成功：execute_workflow 通过 subagent_runtime_wired 门后调用 orchestration::workflow（:286-296），只把 steps 的 id 抄进 executed_steps 就返回 status=\"success\"，没有任何执行；ToolResult 再包成 status=\"ok\"/ok:true（tools.rs:1606-1615）。本波 C2 首次让该门在生产为真，等于把 W25 已消灭的『假能力回执』重新放到模型面上。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 66,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show 60e7cb8:crates/pony-agent-core/src/agent/context.rs | sed -n '66p' | grep -c 'Bash'; git show 60e7cb8:crates/pony-agent-core/src/agent/tools.rs | grep -c '\"Bash\"'",
+      "severity": "BLOCKING",
+      "note": "策略段引用本仓不存在的工具名 `Bash`（context.rs:66）——模型可见 39 项里 shell 能力是 Run/run_command 与 BatchExecute，tools.rs 无任何 \"Bash\" 工具；模型据此可能调用不存在的工具。附加必查结论：10 项常量（tools.rs:156-165）逐名核对通过，AGENT_TEAM_POLICY_PROMPT 全文 0 次出现 wait_agent / team_task_get，故不触发该条最高判据；但『只引用真实工具』同一规则仍被 `Bash` 违反。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 256,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'subagent_gate_enter' crates/pony-agent-core/src/agent/orchestration.rs; git show 60e7cb8:crates/pony-agent-core/src/agent/subagent_runtime.rs | grep -n 'subagent_gate_enter\\|SUBAGENT_MAX_CONCURRENT'",
+      "severity": "BLOCKING",
+      "note": "同一静态并发许可被取两次：orchestration::subagent 在调用引擎前先占 1 个许可（:256），HostTurnEngine::run_turn 入口再占 1 个（subagent_runtime.rs:153），两者命中同一 SUBAGENT_INFLIGHT（:60/:67-80），中途不归还。SUBAGENT_MAX_CONCURRENT=2 ⇒ 单次 subagent 占满全部许可，生产有效并发由 2 降为 1；第二个并发 subagent 与『子代理内再派生 subagent』必然 subagent_busy。冻结用例 t3_j（wave37_tool_surfa"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 237,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'SUBAGENT_TURN_TIMEOUT_MS' crates/pony-agent-core/src/agent/orchestration.rs; python3 -c \"import json;d=json.load(open('.dev-team/nfr-baseline.json'));print('timeout=',d['external_call_timeout_ms']);print('exceptions=',[e['surface'] for e in d['external_call_timeout_exceptions']]);print('subagent_keys=',[k for k in d if k.startswith('subagent')])\"",
+      "severity": "BLOCKING",
+      "note": "引擎级超时未纳入基准映射：SUBAGENT_TURN_TIMEOUT_MS=120_000（:237）被三处生产调用点传入 run_turn（:265/:276/:595），为 external_call_timeout_ms=3000 的 40 倍；baseline 的 external_call_timeout_exceptions 只有 provider streaming 一条，不含该期限，且 nfr-baseline.json 内不存在任何 subagent_* 键（代码注释自称的 subagent_turn_timeout_ms 基准在本基准内不可寻）。本波 C2 使该 120s "
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+      "line": 201,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show 60e7cb8:crates/pony-agent-core/src/agent/subagent_runtime.rs | sed -n '196,215p'; python3 -c \"import json;print(json.load(open('.dev-team/nfr-baseline.json'))['resource_release'])\"",
+      "severity": "ADVISORY",
+      "note": "超时路径有意遗留工作线程与其自建 runtime：run_turn 在每调用一个 std::thread 内 AgentRuntimeBuilder::build() 建栈（:165-170），成功/panic 分支 join 回收（:215/:227），超时分支（:201-207）直接 Err 返回并自认『工作线程被有意遗留（孤儿）』，无 reaper、无 stop API。因 120s 外层期限 < provider 读空闲 180s，孤儿属常态路径；且外层许可在返回时已 Drop ⇒ 反复超时可累积多个持 runtime/句柄的线程，最长存活到 provider 通道 30min 上界。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 66,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show 60e7cb8:crates/pony-agent-core/src/agent/context.rs | grep -c 'FS_STALE_VERSION'; grep -n 'fs_not_observed' crates/pony-agent-core/src/agent/tools.rs | head -3",
+      "severity": "ADVISORY",
+      "note": "策略段要求模型分支处理 `FS_STALE_VERSION`（context.rs:66），该错误码全仓不存在：文件写入的 CAS/观察门实际返回 fs_not_observed（tools.rs:2446/:2658）或 expectedHash 不匹配路径（:2414-2510）。模型会等待一个永不出现的码，重试语义落空。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 68,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '100,104p' crates/pony-agent-core/src/agent/orchestration.rs; sed -n '400,404p' crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "ADVISORY",
+      "note": "策略段断言『A peer message starts with its sender name』（context.rs:68），实现不成立：SendMessageArgs 只有 target/message/mode（orchestration.rs:100-104），入队 QueuedMessage.content = args.message 原文（:400-404），全仓无 sender 前缀拼接，drive_teammate_turn 也只是 `- {content}` 平铺（:588-590）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 2052,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git diff 52a7a21 60e7cb8 -- crates/pony-agent-core/src/agent/ | grep -c '^+.*eprintln!' && python3 -c \"import json;d=json.load(open('.dev-team/nfr-baseline.json'));print(d['logging_eprintln_exempt_covers_new_lines'],d['logging_eprintln_exempt_scope'])\"",
+      "severity": "ADVISORY",
+      "note": "本窗口新增 6 处裸 eprintln（control_plane/mod.rs:2052/:2074/:2141 与 stop_escalation.rs:139/:214/:223），均为锁中毒恢复诊断并带错误上下文，命中 logging_eprintln_exempt_scope（语义允许，故 Q2 PASS）；但 baseline 的 logging_eprintln_exempt_covers_new_lines=5 是 wave-55 口径，新增后该计数失真，需下波同步（logging_compliance_claimed 仍为 false，不构成合规否决）。生产侧吞异常审查：唯一"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/builder.rs",
+      "line": 149,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show 60e7cb8:crates/pony-agent-core/src/agent/runtime/builder.rs | sed -n '136,155p'; git show 60e7cb8:crates/pony-agent-core/src/agent/runtime/builder.rs | grep -c 'log_json\\|eprintln'",
+      "severity": "ADVISORY",
+      "note": "首写者胜的静默后果：ensure_host_subagent_engine 在槽非空时直接 return（:147），注册 Err 丢弃（:153）且不留任何诊断（builder.rs 全文件 0 处日志调用）。进程内第一次 build() 的 workspace_root 被固化进全局槽；若该次 build 早于宿主确定工作区（桌面端常见时序），后续带真实根的 build 静默无效，子代理回落 compute_default_workspace_root()（subagent_runtime.rs:136-146），wave-58 F1-5『子代理以父会话根建栈』被无声降级。契约 C2.4 "
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 63,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'wait_agent' .dev-team/contracts/wave-61-team-activation.md | head -3 && grep -c 'wait_agent' crates/pony-agent-core/src/agent/context.rs && grep -n 'TEAM_POLICY_ANCHOR' crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "severity": "ADVISORY",
+      "note": "冻结契约留痕缺项：契约 C3.4 第 4 项要求策略段覆盖 wait_agent 语义（含『无活跃成员时立即 noProgress』），实测该关键词被实现整体移除并以 list_agents 重列语义替代（context.rs:71/:73），偏差只写在 wave61-team-delivery.md §5.3，未回流到 FROZEN 契约 C4 的迁移留痕表；且 C3 断言只校验标题锚串 + System 条数（wave61_team_activation.rs:313-341），契约所称『7 类语义关键词是机器判定依据』并未落到测试，正文后续被改写不会红。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 144,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '139,146p' crates/pony-agent-core/src/agent/control_plane/mod.rs && grep -rn 'StopTurnCommand {' --include=*.rs crates/ | wc -l",
+      "severity": "ADVISORY",
+      "note": "公共 API 破坏性变更未登记：StopTurnCommand 新增 pub 字段 stop_reason（窗口内的 wave-60 提交 680499c 引入，非 wave-61），对 crate 外的结构体字面量构造属 breaking；wave61-team-delivery.md §4『不可逆面登记』未记录该项（本仓 4 处构造点已同步，站内编译不受影响）。"
+    }
+  ]
+}

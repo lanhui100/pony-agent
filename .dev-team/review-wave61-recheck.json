@@ -1,0 +1,199 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "922e960",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "39bf1c29-7b9f-4b0d-b523-6f042d70fc06",
+    "fresh_context": true
+  },
+  "executed_by": "39bf1c29-7b9f-4b0d-b523-6f042d70fc06",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "git diff 52a7a21 922e960 -- crates/pony-agent-core/src/agent/ crates/pony-agent-core/tests/（union diff：wave-60 的 execution_control/stop_escalation/control_plane/provider 与 wave-61 的 tools/orchestration/context/subagent_runtime/builder；wave-60 部分仅审其与 4 条 blocker、六问的交互，不重审 wave-60 契约）",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/runtime/builder.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs（冻结验收，12 用例）",
+    "crates/pony-agent-core/tests/pa110_teams_acceptance.rs",
+    "crates/pony-agent-core/tests/wave37_tool_surface.rs",
+    "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs",
+    "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs",
+    "crates/pony-agent-core/tests/orchestration_acceptance_test.rs / teammate_e2e_communication_test.rs / team_task_order_contract.rs",
+    ".dev-team/contracts/wave-61-team-activation.md（FROZEN v1.3：C1/C6/C7/C8/C9 与 §6.2）",
+    ".dev-team/nfr-baseline.json（逐字段）+ .dev-team/nfr-lint.py 实测 exit 1（6 条 = 契约 §6.1 已声明的既有漂移，未新增错误条数）"
+  ],
+  "closed_blockers": [
+    {
+      "id": "B1",
+      "status": "OPEN",
+      "evidence": "部分关闭。已关：spawn 不再丢 prompt —— orchestration.rs:344-365（register_teammate 后 auto_drive 且 prompt 非空才投递）+ tools.rs:1639 走 spawn_teammate_in_workspace；send 已有真实消费方 —— orchestration.rs:452-470 入队后 spawn 驱动线程调 drive_teammate_turn_in（:737-819），冻结用例 c7 断言引擎计数增量 + lead 信箱回执（tests/wave61_team_activation.rs:761-885），实测 cargo test --test wave61_team_activation exit 0。未关：interrupt_agent 仍只翻状态位（orchestration.rs:562-575），且策略段/工具描述反向承诺『中断当前回合』（context.rs:72 与 tools.rs:6053），违反 FROZEN C7-A4 的②③（必须在策略段/工具描述与测试注释里显式登记『只在下一次 drain 前停止』）；冻结测试对 interrupt 只出现在两处名单常量（wave61_team_activation.rs:88/124），零行为断言。⇒ 三件中两件 CLOSED、一件 OPEN，B1 整体判 OPEN（另见 findings #2/#9）。"
+    },
+    {
+      "id": "B2",
+      "status": "CLOSED",
+      "evidence": "调用期根透传已真实落地：tools.rs:1579（subagent）/1639（spawn_teammate）/1689（send_message）均传 Some(self.workspace_root.as_path())；orchestration.rs:262-315 subagent_in_workspace → engine.run_turn_in（:306）、drive_teammate_turn_in（:768 同样传根）；subagent_runtime.rs:291-300 HostTurnEngine 覆写 run_turn_in（Some(root) 优先，None 回落 resolved_workspace_root），trait 默认实现（:45-60）委托 run_turn 保兼容。冻结用例 c8 以独立子进程注入 RootRecordingEngine 断言 Some(root) 逐字透传 + None 原样透传（wave61_team_activation.rs:927-991），cargo test -p pony-agent-core --test wave61_team_activation exit 0。残留缺口（不改判 CLOSED，另记 finding #8）：传的是 ToolRouter 默认根（tools.rs:4928）而非会话级 resolved_workspace_root（tools.rs:4903-4927）。"
+    },
+    {
+      "id": "Q3",
+      "status": "CLOSED",
+      "evidence": "超时许可守恒已修：subagent_runtime.rs:190 取 inflight → :206 在 std::thread::spawn 的 move 闭包内 `let _inflight = inflight;`，超时分支（:242-249 return subagent_timeout）不再 Drop 父线程 guard ⇒ 孤儿线程存活期间许可不外泄，在跑 turn 数 ≤ SUBAGENT_MAX_CONCURRENT=2（:85）。回归：cargo test -p pony-agent-core --test wave37_tool_surface（t3_l timeout / t3_j busy / t3_k oversize）exit 0。副作用已在契约 C6.2 登记为已知限制（孤儿最长到 provider 30min 上界），但 nfr-baseline.json:70 的 guarantee 仍写『许可提前归还』，与修复后事实相反（finding #12）。"
+    },
+    {
+      "id": "Q4",
+      "status": "CLOSED",
+      "evidence": "双重扣许可已消除：subagent_runtime.rs:284-286 HostTurnEngine::gates_concurrency_internally()==true；orchestration.rs:276-280 为单一条件分支，全文件 subagent_gate_enter 仅出现 1 次（:279）⇒ 自持引擎单次 subagent 调用只扣 1 个许可，注入式 Stub 仍走入口门（wave37 t3_j/t3_k exit 0，wave-37 C3.2 未回退）。注意：契约 C6-A3『有效并发恢复为 2』仍无压测/并发用例（契约 §8 自认 [UNVERIFIED]），本次未新增用例（只读约束）。"
+    }
+  ],
+  "six_questions": [
+    {
+      "question": "1. 外部调用超时：SUBAGENT_TURN_TIMEOUT_MS=120000 是否按契约 §6.2 合规登记为 NFR 豁免，新增队友驱动是否同一预算",
+      "baseline_field": "external_call_timeout_ms=3000；external_call_timeout_exceptions[1]（surface=subagent turn (HostTurnEngine / orchestration::subagent run_turn)，registered_at=2026-11-03 wave-61 v1.3）；subagent_turn_timeout_ms=120000",
+      "code_evidence": "crates/pony-agent-core/src/agent/orchestration.rs:237（常量）、:306、:768（驱动同一预算）；.dev-team/nfr-baseline.json:64-74",
+      "verdict": "PASS"
+    },
+    {
+      "question": "2. 日志与防吞：新增行有无裸 eprintln / 吞异常，是否落在豁免口径内",
+      "baseline_field": "logging.format=json；logging_scope=new_structured_logging_surface_only；logging_eprintln_exempt_scope=existing_style_non_json_lock_poison_recovery_diagnostics；logging_eprintln_exempt_covers_new_lines=5；logging_compliance_claimed=false",
+      "code_evidence": "crates/pony-agent-core/src/agent/orchestration.rs:464（非锁中毒 eprintln，出豁免口径）、:354/:774/:811（`let _ =` 吞错且无日志）",
+      "verdict": "FAIL"
+    },
+    {
+      "question": "3. 资源释放：新增的后台驱动线程、队友信箱、全局 static 是否成对回收，队列是否有界",
+      "baseline_field": "resource_release=[bounded_queue, max_queue_capacity_1024, fire_and_forget, worker_thread_shutdown, wave9_* 幂等清理]；subagent_max_concurrent=2",
+      "code_evidence": "crates/pony-agent-core/src/agent/orchestration.rs:461（每消息一线程，无 join/登记）、:512（lead 信箱无上界）、:240/:242（进程级 static 无回收面）；subagent_runtime.rs:206（许可守恒，已修）",
+      "verdict": "FAIL"
+    },
+    {
+      "question": "4. 并发与幂等：双扣许可是否消除、驱动是否去重/串行、失败是否可重放、内嵌 build 是否可重入",
+      "baseline_field": "concurrency_lock=mutex；lock_scope_bounded=true；lock_reentrancy_forbidden=true；lock_acquisition_timeout_ms=2000；subagent_max_concurrent=2",
+      "code_evidence": "双扣已修：subagent_runtime.rs:284-286 + orchestration.rs:276-280（subagent_gate_enter 全文仅 1 处 :279）；注册幂等：runtime/builder.rs:145-153（首写者胜）；未修：orchestration.rs:746（drain 后失败不回滚）与 :461（无驱动去重、状态可抖动）",
+      "verdict": "FAIL"
+    },
+    {
+      "question": "5. 配置与自检：是否引入需要新配置项的开关，门控是否单一真源、基线增量是否与源码一致",
+      "baseline_field": "team_tool_surface_exact_count=38；team_policy_prompt_injected_when_wired=true；subagent_engine_registration_required_in=[tauri,harness,tui]；subagent_max_concurrent=2；subagent_turn_timeout_ms=120000；subagent_max_prompt_bytes=200000",
+      "code_evidence": "crates/pony-agent-core/src/agent/context.rs:76-87（唯一判定 + reserved 计数同源）；runtime/builder.rs:87（唯一注册点）；四值与源码常量逐值相等（tools.rs 38 项清单、subagent_runtime.rs:83/:85、orchestration.rs:237）",
+      "verdict": "PASS"
+    },
+    {
+      "question": "6. 契约兼容性：38 项面、三处冻结测试迁移、新增公开面是 additive 还是 breaking",
+      "baseline_field": "team_tool_surface_exact_count=38；契约 C1.3 变更类型表（模型/协议面 additive 9 项、provider 数组前缀一次性 breaking、workflow 无变更）",
+      "code_evidence": "crates/pony-agent-core/src/agent/tools.rs:7455-7478（9 项 ModelVisible、workflow 仍 Internal）；subagent_runtime.rs:45-60（run_turn_in 默认实现，additive，不破坏既有 impl）；四处测试迁移为 38 项（wave37_tool_surface.rs / wave25_capability_honesty_test.rs / tool_surface_wave20_contract.rs / provider/mod.rs 测试），实测全部 exit 0",
+      "verdict": "PASS"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 746,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '740,782p' crates/pony-agent-core/src/agent/orchestration.rs && sed -n '186,192p' crates/pony-agent-core/src/agent/subagent_runtime.rs && grep -n 'subagent_busy' crates/pony-agent-core/src/agent/subagent_runtime.rs",
+      "severity": "BLOCKING",
+      "note": "CORRECTNESS/DATA_LOSS —— drive 先 drain 后跑 turn，引擎返回 Err 时已消费的消息不回收：:746 drain_inbox 已把消息从信箱取走，:768 才调引擎；Err 分支（:770-780）只把状态置 Inactive + 给 lead 投一条『turn failed』，消息内容永久丢失且不入队重试。而 send_message 在 :452-470 已向模型返回 delivered:true。可达性极高：许可只有 2，两个在跑 turn（另一队友或子代理）时第三条 send_message 必命中 subagent_busy（subagent"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 72,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '72p' crates/pony-agent-core/src/agent/context.rs && sed -n '6053p' crates/pony-agent-core/src/agent/tools.rs && sed -n '562,575p' crates/pony-agent-core/src/agent/orchestration.rs && grep -n 'interrupt' crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "severity": "BLOCKING",
+      "note": "CONTRACT_BREAK —— interrupt_agent 的用户可见承诺与实现相反，且 FROZEN C7-A4 要求的『显式登记』反向落地：策略段写 'interrupt_agent aborts one teammate's current turn'（context.rs:72），工具描述写『中断目标智能体当前正在执行的回合并保留其待办收件箱』（tools.rs:6053），但实现 only 翻状态位（orchestration.rs:562-575），drive 只在两个检查点观察（:742 进入前、drain 前），已进入的 turn 继续跑完并照常写工作区、照常给 lea"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 461,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '452,470p' crates/pony-agent-core/src/agent/orchestration.rs && sed -n '737,760p' crates/pony-agent-core/src/agent/orchestration.rs && sed -n '796,819p' crates/pony-agent-core/src/agent/orchestration.rs && sed -n '68,73p' crates/pony-agent-core/src/agent/context.rs",
+      "severity": "BLOCKING",
+      "note": "CONCURRENCY/LIFECYCLE —— 无驱动去重/串行化：send_message_in_workspace 对每条消息无条件 set Running + spawn 一个驱动线程（:458-467），drive 的检查点 #1 只在 Inactive 时提前退出（:742）；turn 运行期间（状态=Running）到达的消息会开第二个并发 turn（第一条已被前一个 drive drain 走，第二条由新线程 drain 并独立 run_turn_in），同一队友出现两个并发 turn、并发写同一工作区；两个驱动各自在收口时无条件写 Inactive（:800-807），于是 "
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 354,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '344,365p' crates/pony-agent-core/src/agent/orchestration.rs && sed -n '770,816p' crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "ADVISORY",
+      "note": "ERROR_SWALLOW —— spawn_teammate_in_workspace 用 `let _ = send_message_in_workspace(...)` 丢弃入队/驱动失败，无日志、无回执，工具仍向模型返回 status:ok 与 member.status=Active（tools.rs:1639-1652）；同一 `let _ =` 模式见 :774 与 :811（给 lead 投递失败即静默）。与 :464 的 eprintln 只覆盖后台驱动失败不同，这条路径连诊断都没有。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 464,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git diff 52a7a21 922e960 -- crates/pony-agent-core/src/agent/ | grep -n '^+.*eprintln!' && grep -rn 'eprintln!' crates/pony-agent-core/src/agent/ | wc -l && python3 -c \"import json;d=json.load(open('.dev-team/nfr-baseline.json'));print(d['logging_eprintln_exempt_scope'],d['logging_eprintln_exempt_covers_new_lines'])\"",
+      "severity": "ADVISORY",
+      "note": "LOGGING —— 新增非锁中毒 eprintln（'[team] teammate drive failed'）落在 logging_eprintln_exempt_scope（=existing_style_non_json_lock_poison_recovery_diagnostics）之外：无 trace_id、无结构化字段，且 logging_eprintln_exempt_covers_new_lines=5 已失真（本 union diff 新增 7 行 eprintln，其中 6 行属锁中毒、1 行不属；全仓 agent/ 共 244 处）。logging_complian"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 512,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '505,530p' crates/pony-agent-core/src/agent/orchestration.rs && sed -n '809,816p' crates/pony-agent-core/src/agent/orchestration.rs && python3 -c \"import json;print(json.load(open('.dev-team/nfr-baseline.json'))['resource_release'])\"",
+      "severity": "ADVISORY",
+      "note": "RESOURCE —— TEAMMATE_INBOXES 无容量上界：新驱动路径每次队友 turn 成功都向 lead 信箱追加一条完整回执（:811-815），失败也追加一条（:774-778），而只有模型主动调用 drain_inbox 才消费；lead 信箱、TEAMMATES 名册均为进程级 static（:240/:242），无 turn/session 终态回收面（对比 control_plane 有成对的 register/unregister_turn_event_sink）。与 baseline resource_release 的 bounded_queue / max_q"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 461,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'std::thread::spawn' crates/pony-agent-core/src/agent/orchestration.rs && grep -n 'thread::Builder' crates/pony-agent-core/src/agent/orchestration.rs | wc -l && grep -n 'std::thread::spawn' crates/pony-agent-core/src/agent/subagent_runtime.rs",
+      "severity": "ADVISORY",
+      "note": "ROBUSTNESS —— 每条消息一次 std::thread::spawn，无 fallible 处理：spawn 失败（本次审查环境已两次实测 fork EAGAIN：`timeout 120 python3 ...` 与并发的 bash 派生返回 'Resource temporarily unavailable'，故该风险在本机不是假设）会 panic 在工具执行线程上，而不是给模型返回结构化错误；同一模式见 :289（subagent 后台路径，既有）与 :353-361（spawn auto-drive）。团队工具已进模型面且 lead 循环里会反复调用，缺 JobRegistr"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 768,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'subagent_gate_enter' crates/pony-agent-core/src/agent/orchestration.rs crates/pony-agent-core/src/agent/subagent_runtime.rs && sed -n '760,770p' crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "ADVISORY",
+      "note": "CONTRACT(C6) —— 队友驱动绕过入口门：drive_teammate_turn_in 直接调 engine.run_turn_in（:768），不经 subagent_gate_enter；对 HostTurnEngine 无碍（引擎自持门，:190，含体积门），但对注入式引擎（默认 gates_concurrency_internally=false）这条新生产路径既不扣并发许可也不做 200KB 体积门 —— C6-A3『subagent_gate_enter 单次路径计数=1』只覆盖 subagent()，未覆盖队友驱动路径；宿主自定义引擎下 team 路径可无界并发。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1579,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1572,1582p;1636,1642p;1686,1692p' crates/pony-agent-core/src/agent/tools.rs && sed -n '4903,4929p' crates/pony-agent-core/src/agent/tools.rs",
+      "severity": "ADVISORY",
+      "note": "CONTRACT(C8.4) —— 透传的是 router 默认根而非会话根：三个团队调用点都用 self.workspace_root（:1579/:1639/:1689），即 resolved_workspace_root 的兜底分支（:4928）；而 job_start / skill_load / 文件类工具均走 resolved_workspace_root(context, ws_id)（:2055/:2154/:2262，优先 context.workspace_root 与 workspace_id resolver，:4903-4927）。会话绑定到非默认 workspace"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "line": 772,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '761,810p' crates/pony-agent-core/tests/wave61_team_activation.rs && grep -n 'prompts' crates/pony-agent-core/tests/wave61_team_activation.rs && grep -rn 'spawn_teammate_in_workspace' crates/pony-agent-core/tests/",
+      "severity": "ADVISORY",
+      "note": "COVERAGE/假绿缺口 —— c7 用的是库层 spawn_teammate（纯登记，:772），不是模型入口 spawn_teammate_in_workspace，故 B1 的『spawn 不再丢弃 prompt / auto-drive』修复零断言：把 :344-365 整段退化成原桩，12 个冻结用例仍全绿。另外 c7 的 RecordingEngine 记录了 prompt（:706/:725）却从未断言 prompt 含消息内容（C7-A1 明文要求『入参 prompt 含该消息内容』）；c8 用合成 temp 目录而非 C8-A1 字面的 ToolRouter.workspa"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa110_teams_acceptance.rs",
+      "line": 204,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '168,225p' crates/pony-agent-core/tests/pa110_teams_acceptance.rs && git diff 52a7a21 922e960 --stat -- crates/pony-agent-core/tests/pa110_teams_acceptance.rs",
+      "severity": "ADVISORY",
+      "note": "PROCESS/TEST —— 实施者改写了先前波次冻结的验收用例：ac05 三次入队从生产入口 send_message 改为新 seam enqueue_message（:187-221），顺序/条数断言逐字保留并写明迁移理由，但①队列语义不再覆盖模型可见入口②按 AGENTS.md『验收测试一经冻结，实施者只读不可改』这属需 Lead 追认的测试迁移。附带语义后果：send_message 现为『入队即后台消费』，其 pending_inbox_len 与队列可观测性不再稳定，属于对外语义变更（advisory）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 68,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"import re;s=open('crates/pony-agent-core/src/agent/context.rs').read();t=re.search(r'AGENT_TEAM_POLICY_PROMPT: &str = r#\\\"(.*?)\\\"#;',s,re.S).group(1);print({w:t.count(w) for w in ['Bash','FS_STALE_VERSION','wait_agent','team_task_get','Run','cas_conflict']})\" && grep -rn 'TeammateStatus::Failed' crates/pony-agent-core/src | wc -l && sed -n '514,519p;756,761p' crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "ADVISORY",
+      "note": "HONESTY —— 策略段两处与实现不符（L3-P P7 仍未收口）：①:68 'A peer message starts with its sender name'，但 enqueue_message 存的是原文（orchestration.rs:514-518），drive 只做 `- {content}` 平铺（:758-760），全仓无 sender 前缀拼接；②:70/:71 宣传 provisioning / failed 两个状态，TeammateStatus 枚举虽含（:55-61），但全仓无任何写入点（仅 :699 读），模型会等一个永不出现的状态。策略段与真实工具名/错"
+    },
+    {
+      "file": ".dev-team/nfr-baseline.json",
+      "line": 70,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '64,74p' .dev-team/nfr-baseline.json && sed -n '200,208p' crates/pony-agent-core/src/agent/subagent_runtime.rs && python3 -c \"import json;d=json.load(open('.dev-team/nfr-baseline.json'));print(d['team_tool_surface_exact_count'],d['subagent_max_concurrent'],d['subagent_turn_timeout_ms'],d['subagent_max_prompt_bytes'])\"",
+      "severity": "ADVISORY",
+      "note": "NFR_FIELD —— 豁免条目的 guarantee 文本与修复后代码相矛盾：仍写『孤儿工作线程与许可提前归还属 wave-61 C6.2 已登记的已知限制』，但 C6.2 已把许可 move 进工作线程（subagent_runtime.rs:206）⇒ 超时不再提前归还，取而代之的新后果是『孤儿最长占许可到 provider 30min 上界，期间 subagent/队友 drive 持续 subagent_busy』，该后果未登记；条目 surface 也只写 orchestration::subagent 的 run_turn，未覆盖新调用点 drive_teammate_turn"
+    }
+  ]
+}

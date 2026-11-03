@@ -1533,11 +1533,11 @@ impl ToolRouter {
                 "workspace_batch 不允许递归调用 workspace_batch。".to_string(),
                 Some("请把嵌套批量调用拆成多个叶子工具调用。".to_string()),
             ),
-            Some(TOOL_SUBAGENT) => self.execute_subagent(call),
+            Some(TOOL_SUBAGENT) => self.execute_subagent(call, context),
             Some(TOOL_WORKFLOW) => self.execute_workflow(call),
-            Some(TOOL_SPAWN_TEAMMATE) => self.execute_spawn_teammate(call),
+            Some(TOOL_SPAWN_TEAMMATE) => self.execute_spawn_teammate(call, context),
             Some(TOOL_LIST_AGENTS) => self.execute_list_agents(call),
-            Some(TOOL_SEND_MESSAGE) => self.execute_send_message(call),
+            Some(TOOL_SEND_MESSAGE) => self.execute_send_message(call, context),
             Some(TOOL_INTERRUPT_AGENT) => self.execute_interrupt_agent(call),
             Some(TOOL_DRAIN_INBOX) => self.execute_drain_inbox(call),
             Some(TOOL_TEAM_TASK_CREATE) => self.execute_team_task_create(call),
@@ -1568,15 +1568,24 @@ impl ToolRouter {
         }
     }
 
-    fn execute_subagent(&self, call: &ToolCall) -> ToolResult {
+    fn execute_subagent(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_SUBAGENT);
         }
 
+        // Wave-61 C8.4：与文件工具**同源**解析工作区根（会话上下文 → workspaceId resolver →
+        // 构造默认 root），保证子代理与文件工具落在同一根；解析失败按文件工具口径 fail-closed。
+        let workspace_root = match self
+            .resolved_workspace_root(context, self.extract_call_workspace_id(call, context))
+        {
+            Ok(root) => root,
+            Err((code, message)) => return error_result(TOOL_SUBAGENT, &code, message, None),
+        };
+
         let args: Result<SubagentArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             // Wave-61 C8.4：把宿主真实工作区根传给子代理（父会话项目指令/技能随之继承）。
-            Ok(args) => match subagent_in_workspace(args, Some(self.workspace_root.as_path())) {
+            Ok(args) => match subagent_in_workspace(args, Some(workspace_root.as_path())) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SUBAGENT.to_string(),
                     status: "ok".to_string(),
@@ -1627,16 +1636,25 @@ impl ToolRouter {
         }
     }
 
-    fn execute_spawn_teammate(&self, call: &ToolCall) -> ToolResult {
+    fn execute_spawn_teammate(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_SPAWN_TEAMMATE);
         }
+
+        let workspace_root = match self
+            .resolved_workspace_root(context, self.extract_call_workspace_id(call, context))
+        {
+            Ok(root) => root,
+            Err((code, message)) => {
+                return error_result(TOOL_SPAWN_TEAMMATE, &code, message, None)
+            }
+        };
 
         let args: Result<SpawnTeammateArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
             // Wave-61 C7 + C8.4：派生队友后把它的初始 prompt 真正投递并驱动（引擎在位时），
             // 不再"只登记成员、模型却收到 ok"。
-            Ok(args) => match spawn_teammate_in_workspace(args, Some(self.workspace_root.as_path())) {
+            Ok(args) => match spawn_teammate_in_workspace(args, Some(workspace_root.as_path())) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SPAWN_TEAMMATE.to_string(),
                     status: "ok".to_string(),
@@ -1678,15 +1696,24 @@ impl ToolRouter {
         }
     }
 
-    fn execute_send_message(&self, call: &ToolCall) -> ToolResult {
+    fn execute_send_message(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_SEND_MESSAGE);
         }
 
+        let workspace_root = match self
+            .resolved_workspace_root(context, self.extract_call_workspace_id(call, context))
+        {
+            Ok(root) => root,
+            Err((code, message)) => {
+                return error_result(TOOL_SEND_MESSAGE, &code, message, None)
+            }
+        };
+
         let args: Result<SendMessageArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            // Wave-61 C7/C8.4：入队成功后由后台线程真实驱动队友 turn，并以宿主工作区根建栈。
-            Ok(args) => match send_message_in_workspace(args, Some(self.workspace_root.as_path())) {
+            // Wave-61 C7/C8.4：入队成功后由后台线程真实驱动队友 turn，并以同源解析的工作区根建栈。
+            Ok(args) => match send_message_in_workspace(args, Some(workspace_root.as_path())) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SEND_MESSAGE.to_string(),
                     status: "ok".to_string(),
@@ -6050,7 +6077,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_INTERRUPT_AGENT,
-            description: "中断目标智能体当前正在执行的回合并保留其待办收件箱。",
+            description: "把指定队友标记为中断并保留其待办收件箱：当前回合会在下一次收件箱 drain 边界前停止（引擎无回合内 stop API，不会立即中止正在执行的 turn）。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {

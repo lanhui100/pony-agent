@@ -1,0 +1,105 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "922e960",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "plan-gate-wave61",
+    "fresh_context": true
+  },
+  "executed_by": "plan-gate-wave61",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "closing-phase rerun：此前一次方案审查因环境资源耗尽丢失，本审查在实施收口期补跑，审查对象=FROZEN v1.3 契约 + commit 922e960 的已实施结果（只读，唯一写入为本文件）。已实跑物理收据：cargo test -p pony-agent-core --test pa110_teams_acceptance / wave61_team_activation / wave37_tool_surface / wave25_capability_honesty_test / tool_surface_wave20_contract，全部 Exit 0（5+12+9+4+2 用例）。F1/F3 的竞态与丢失路径为源码级推演（只读约束下未新增压测/注入用例），非实测复现——这一点如实标注，不得据本文件的 FAIL 反推测试红相。"
+  },
+  "audited_scopes": [
+    ".dev-team/contracts/wave-61-team-activation.md",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/runtime/builder.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs",
+    "crates/pony-agent-core/tests/pa110_teams_acceptance.rs",
+    "crates/pony-agent-core/tests/teammate_e2e_communication_test.rs",
+    "crates/pony-agent-core/tests/wave37_tool_surface.rs",
+    "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs",
+    "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs",
+    "deepseek-harness/packages/experimental/tool-agent-team/src/index.ts:160-400"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 452,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '452,472p;737,800p' crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "BLOCKING",
+      "note": "C7 把『驱动』放进库层 send_message，每次调用 std::thread::spawn（:461）派生 detached 线程，无 per-target 单飞、无队列所有权：同一队友可被并发跑 2 个 turn（吃满 SUBAGENT_MAX_CONCURRENT=2，饿死 subagent 工具），且 drive_teammate_turn_in 先 drain_inbox（:746）后 run_turn_in（:764），任一失败（subagent_busy / subagent_timeout / prompt_too_large）时已 drain 的消息既无 requeue 也无重试，而工具回执仍是 delivered:true。更小的等价设计：库层 send_message 保持纯入队，把『置 Running + 派生驱动』只放在工具层 execute_send_message（tools.rs:1681，唯一模型可见入口）——可同时消除 enqueue_message 公共 seam 与 F2 的冻结测试改写。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa110_teams_acceptance.rs",
+      "line": 187,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show 922e960 -- crates/pony-agent-core/tests/pa110_teams_acceptance.rs | sed -n '1,60p'",
+      "severity": "BLOCKING",
+      "note": "实施提交内改写了冻结验收用例 test_ac05_message_queuing_and_steering：send_message → 新增公共 seam orchestration::enqueue_message（该公共 API 的唯一消费者就是这条被改的用例）。该文件不在契约 C4 声明的 6 个演进面内，C4 迁移表无此条留痕（FROZEN v1.3 无对应 delta）；后果是公共 send_message 的 Queue/Steer 顺序语义失去任何断言，而该语义现在依赖进程级 OnceLock（同二进制内任何 build()/注入引擎都会开启后台消费）→ 用例注释自证实测竞态 left:4/right:3、复跑 0。违反 AGENTS.md『验收测试一经冻结，实施者只读不可改』。建议：把 seam 降为私有/cfg(test) 并回退该用例主体（由 Test Agent/Lead 裁决），或先按 F1 把驱动上移后恢复原用例。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 742,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '789,815p' crates/pony-agent-core/src/agent/orchestration.rs && grep -n 'sleep(Duration::from_millis(60))' crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "severity": "ADVISORY",
+      "note": "状态机无 per-message 记账：① 成功路径先 set_teammate_status(Inactive)（:798-806）再向 lead 投递回执（:808-814）→ 按策略段『re-list until inactive』行事的读者可观测到 inactive 而回执尚未入箱（本波 c7 用例正是靠 sleep(60ms) 才稳定）；② Inactive 同时被当作『被 interrupt/不要启动』的检查点（:742-744），而它也是正常 turn 结束后的空闲态 → 某次 send 写入的 Running 与上一轮收口的 Inactive 交错时，新派生线程会在检查点直接 Ok(None)，消息永久留在队列且无错误无回执（send 已回 delivered:true）；宿主侧 drive_teammate_turn 对任何已完成过一轮的 idle 成员恒为 no-op。建议：先入回执再改状态，并用独立字段（stop_requested / drive_generation）表达中停止，不复用 Inactive。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 63,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'sender' crates/pony-agent-core/src/agent/orchestration.rs; sed -n '756,761p' crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "ADVISORY",
+      "note": "策略段有两条声明在代码中无对应物：①『A peer message starts with its sender name』——QueuedMessage 无 sender 字段（orchestration.rs:114-118），combined_prompt 只拼 content（:756-761）；契约 C3.4-5 引用的『orchestration.rs:115 QueuedMessage 的 sender 字段』实际不存在（真值源失真）。②『a running target receives the message at its nearest step boundary』——实现是另起线程跑新 turn（:461），无 step 边界注入、无串行化。写域切分/任务板/收尾纪律在代码层亦无任何强制点（write_scopes 不参与写工具校验），全部为劝告；契约 P7 承诺『未补齐则策略段须改写』未执行。建议：补 sender 前缀或删句，并把『协作协议为 advisory、无强制点』登记为 known limitation（是否降级为已知局限由 Lead 裁决）。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "line": 832,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '830,845p' crates/pony-agent-core/tests/wave61_team_activation.rs; grep -rn 'spawn_teammate_in_workspace' crates/pony-agent-core/tests/ || echo 'NO TOOL-PATH TEST'",
+      "severity": "ADVISORY",
+      "note": "C7 主断言偏弱：observed.any(Running|Active)（:832-838）可被 spawn 时的默认 Active（:375）单独满足，与是否被驱动无关；有判别力的只剩末尾 Inactive 与引擎计数。覆盖缺口：① 用例走库层 spawn_teammate/send_message，从未经过模型真正触达的 execute_spawn_teammate → spawn_teammate_in_workspace 自动投递+驱动分支（删掉该分支 c7 仍全绿）；② C8 用例直接调 orchestration::subagent_in_workspace，未覆盖 tools.rs:1578 的 Some(self.workspace_root.as_path()) 接线，而 C8-A1 声称『与 ToolRouter.workspace_root 逐字节相等』——ToolRouter 未参与。建议补一条经 ToolRouter 的端到端断言，并把 (a) 收紧为『必须观测到 Running』。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 764,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '763,772p' crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "ADVISORY",
+      "note": "队友驱动路径直接 engine.run_turn_in，完全绕过 subagent_gate_enter：契约 C6.1 把默认 gates_concurrency_internally()==false 定义为『入口门兜住』，但该兜底只存在于 orchestration::subagent（:276-280）；队友驱动是第三个入口且无门 → 注入式 Stub/宿主自定义引擎下 oversize/busy 门在此路径缺席（HostTurnEngine 自持门，生产暂不受影响）。契约『许可唯一真源』的论证不成立。建议：驱动路径同样按 gates_concurrency_internally() 决定是否过门，并在 C6 登记该入口。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-team-activation.md",
+      "line": 454,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'gates_concurrency_internally' crates/pony-agent-core/tests || echo 'C6-A3 无行为断言'",
+      "severity": "ADVISORY",
+      "note": "C6-A3（3 并发下同时在跑引擎数 ≤2 且 =2）没有对应测试：tests 目录对 gates_concurrency_internally 零命中；测试侧只有 t3_j 用『手工占满 2 个许可』验证 busy，不验证自持引擎只扣 1 个。契约 §8.5 自认『并发收益未压测』→ 本波头号修复（有效并发 1→2）只能证明代码存在（源码 grep + 单分支结构），不能证明行为正确。建议：用 barrier+计数 Stub 落一条 ≤2 且 =2 的断言。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 7466,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'PONY_.*TEAM\\|team_tools_enabled\\|TEAM_ENABLED' crates/pony-agent-core/src | head || echo 'NO KILL-SWITCH'",
+      "severity": "ADVISORY",
+      "note": "缺少 kill-switch：9 项可见性写死在 tool_exposure_for_name（:7466-7474），策略段与驱动由进程级 OnceLock 决定；生产若发现团队工具引发问题，回滚路径只有『代码回退 + 重新发版』，无法用配置/环境变量在单会话内关掉，契约也无回滚章节。建议：AgentRuntimeBuilder::build() 启动期读一次 PONY_AGENT_TEAM=off（或既有 config），把 9 项 exposure 与 agent_team_policy_enabled() 收到同一开关（启动期一次读，不破坏 per-turn 前缀稳定），并在契约登记回滚步骤。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 76,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '76,86p' crates/pony-agent-core/src/agent/context.rs && grep -n 'ensure_host_subagent_engine' crates/pony-agent-core/src/agent/runtime/builder.rs",
+      "severity": "ADVISORY",
+      "note": "过度设计（可裁剪的复杂度，非 C1）：agent_team_policy_enabled() 门控在生产已无判别力——三条宿主 + CLI 全部经 runtime/builder.rs:79 的 ensure_host_subagent_engine（:87），任何 build() 之后 subagent_runtime_wired()==true 恒定；『未接线』只剩从未 build 的测试进程。为此 test-only 状态付出的成本是 reserved_system_message_extra_count() + 3 个消费点同步 + C9『单次求值』条款及专用用例。更小的等价设计：策略段与 BASE 一样无条件注入（extra 恒为 1），C9 与 extra 计数机制整体消失，fail-closed 只保留在工具 handler 层。（对照结论：C1 的『工具面全常驻』与 DSH install() 的无条件注册一致，未引入额外复杂度，不判过度设计；C7 的全局 Mutex 本身是既有结构，问题在新增的线程/驱动位置而非 Mutex 数量。）"
+    }
+  ]
+}

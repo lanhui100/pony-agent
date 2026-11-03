@@ -555,5 +555,127 @@
       "c8": "HEAD 无 run_turn_in / subagent_in_workspace（各 0 处）→ 该用例在 HEAD 上编译即失败（无法运行，而非假绿）；接口落地后实测透传正确 → 绿"
     },
     "remaining_deviation": 0
+  },
+  "v1_3_pa110_migration": {
+    "generated_at": "2026-11-03T10:59:03+08:00",
+    "file": "crates/pony-agent-core/tests/pa110_teams_acceptance.rs",
+    "case": "test_ac05_message_queuing_and_steering",
+    "change": "3 次 send_message(...) → enqueue_message(...)（纯入队 seam，orchestration.rs:479）；顺序断言 messages[0]=Steer / [1]=Regular1 / [2]=Regular2 与 len()==3 逐字未改；interrupt_agent 段未动；用例头追加旧断言→新断言+理由",
+    "reason": "wave-61 C7 让 send_message 入队后立即后台驱动队友（真实消费），与『3 条都留在收件箱』互斥（实测 left:4/right:3、复跑 0 的竞态）；队列语义改由 enqueue seam 验证，驱动语义由 c7_send_message_drives_teammate_turn 覆盖",
+    "runs": [
+      {
+        "iteration": 1,
+        "pa110": {
+          "command": "cargo test -p pony-agent-core --test pa110_teams_acceptance -- --nocapture",
+          "exit_code": 0,
+          "passed": 5,
+          "failed": 0,
+          "log": "/tmp/pa110-run1.log"
+        },
+        "wave61": {
+          "command": "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture",
+          "exit_code": 0,
+          "passed": 12,
+          "failed": 0,
+          "log": "/tmp/w61-run1.log"
+        }
+      },
+      {
+        "iteration": 2,
+        "pa110": {
+          "command": "cargo test -p pony-agent-core --test pa110_teams_acceptance -- --nocapture",
+          "exit_code": 0,
+          "passed": 5,
+          "failed": 0,
+          "log": "/tmp/pa110-run2.log"
+        },
+        "wave61": {
+          "command": "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture",
+          "exit_code": 0,
+          "passed": 12,
+          "failed": 0,
+          "log": "/tmp/w61-run2.log"
+        }
+      },
+      {
+        "iteration": 3,
+        "pa110": {
+          "command": "cargo test -p pony-agent-core --test pa110_teams_acceptance -- --nocapture",
+          "exit_code": 0,
+          "passed": 5,
+          "failed": 0,
+          "log": "/tmp/pa110-run3.log"
+        },
+        "wave61": {
+          "command": "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture",
+          "exit_code": 0,
+          "passed": 12,
+          "failed": 0,
+          "log": "/tmp/w61-run3.log"
+        }
+      }
+    ],
+    "race_observed": false,
+    "note": "连跑 3 次全部 exit 0、逐用例全绿；未使用 sleep 掩盖，未放宽断言（无 >= / #[ignore] / 删除用例）"
+  },
+  "v1_4_snapshot": {
+    "generated_at": "2026-11-03T11:09:06+08:00",
+    "command": "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture",
+    "exit_code": 0,
+    "runs": [
+      {
+        "iteration": 1,
+        "exit_code": 0,
+        "passed": 14,
+        "failed": 0,
+        "log": "/tmp/w61-v14-run1.log"
+      },
+      {
+        "iteration": 2,
+        "exit_code": 0,
+        "passed": 14,
+        "failed": 0,
+        "log": "/tmp/w61-v14-run2.log"
+      },
+      {
+        "iteration": 3,
+        "exit_code": 0,
+        "passed": 14,
+        "failed": 0,
+        "log": "/tmp/w61-v14-run3.log"
+      }
+    ],
+    "passed_cases": [
+      "c1_product_names_do_not_fall_back_to_run",
+      "c1_team_tools_are_model_visible",
+      "c1_workflow_stub_is_not_model_visible",
+      "c2_builder_registers_subagent_engine",
+      "c3_team_policy_absent_when_unwired",
+      "c3_team_policy_system_message_present_when_wired",
+      "c5_same_gate_source",
+      "c7_send_message_drives_teammate_turn",
+      "c7b_single_flight_per_target",
+      "c7c_requeue_on_engine_error",
+      "c8_subagent_turn_uses_parent_workspace_root",
+      "c9_policy_gate_evaluated_once",
+      "probe_child_env",
+      "v13_child_env"
+    ],
+    "case_count": 14,
+    "changes": {
+      "c7 强化": "「至少一次 Running 或 Active」→ 状态迁移序列断言（去重序列必须含 Active→Running→Inactive 且索引单调递增）；另加 Assert (d)：引擎收到的 prompt 必须含本次 send 文本（排除仅 spawn 初始 prompt 触发的伪绿）",
+      "c7b_single_flight_per_target": "同一 target 连续两次 send（背靠背，间隔 <10ms）→ 同时在途引擎调用峰值 == 1；两条文本都被消费且各只被消费一次",
+      "c7c_requeue_on_engine_error": "引擎返回 subagent_busy → 消息按原序回滚入队（不丢）、成员回 Inactive、lead 收件箱收到含 subagent_busy 的错误回执且无成功回执"
+    },
+    "child_process_evidence": {
+      "c7": "C7_OK calls=1 sequence=[\"Active\", \"Running\", \"Inactive\"] final=Some(Inactive)",
+      "c7b": "C7B_OK calls=1 peak=1 prompts=1  （两条文本被合并进同一 prompt，单飞成立）",
+      "c7c": "C7C_OK contents=[\"c7c-alpha\", \"c7c-beta\", \"c7c-trigger\"]  （原序回滚）",
+      "c8": "C8_OK records=[Some(\"/tmp/wave61-c8-parent-root-...\"), None]"
+    },
+    "c10_landed": true,
+    "note": "Executor 的 C10（单飞 DRIVING 集合 + requeue_messages）已落地，故三条用例真实通过；用例数 14（含 2 个 env 入口 probe_child_env / v13_child_env），Lead 预期 15 的差额为『c7 属强化而非新增』",
+    "race_observed": false,
+    "remaining_deviation": 0
   }
 }

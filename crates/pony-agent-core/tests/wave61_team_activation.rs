@@ -43,7 +43,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use pony_agent_core::agent::config::{
@@ -470,8 +470,10 @@ fn v13_child_env() {
     };
     match mode.as_str() {
         "c7" => run_c7_body(),
+        "c7b" => run_c7b_body(),
+        "c7c" => run_c7c_body(),
         "c8" => run_c8_body(),
-        other => panic!("未知 {V13_CHILD_ENV}={other}（只允许 c7|c8）"),
+        other => panic!("未知 {V13_CHILD_ENV}={other}（只允许 c7|c7b|c7c|c8）"),
     }
 }
 
@@ -598,6 +600,44 @@ fn c7_send_message_drives_teammate_turn() {
     );
 }
 
+/// C7b（C10 单飞）：同一 target 连续两次 `send_message`（间隔 < 10ms）必须只有一个在途驱动，
+/// 两条消息都被消费且各只消费一次。真值断言在隔离子进程（`v13_child_env=c7b`）内执行。
+#[test]
+fn c7b_single_flight_per_target() {
+    let outcome = run_v13_child("c7b");
+    assert!(
+        outcome.status.success(),
+        "C7b 失败：单飞语义不成立（连续两次 send 产生了并发驱动或丢消息）。子进程 Exit={:?}\n--- child stdout ---\n{}\n--- child stderr ---\n{}",
+        outcome.status.code(),
+        outcome.stdout,
+        outcome.stderr
+    );
+    assert!(
+        outcome.stdout.contains("C7B_OK"),
+        "C7b 失败：子进程成功退出但未输出 `C7B_OK` 标记\nstdout:\n{}",
+        outcome.stdout
+    );
+}
+
+/// C7c（C10 失败补偿）：引擎返回 `subagent_busy` 时，消息必须原序回滚入队（不丢），
+/// 成员回到 `Inactive`，lead 收件箱收到含真实错误码的回执且绝无成功回执。
+#[test]
+fn c7c_requeue_on_engine_error() {
+    let outcome = run_v13_child("c7c");
+    assert!(
+        outcome.status.success(),
+        "C7c 失败：引擎失败时未做入队回滚/错误回执。子进程 Exit={:?}\n--- child stdout ---\n{}\n--- child stderr ---\n{}",
+        outcome.status.code(),
+        outcome.stdout,
+        outcome.stderr
+    );
+    assert!(
+        outcome.stdout.contains("C7C_OK"),
+        "C7c 失败：子进程成功退出但未输出 `C7C_OK` 标记\nstdout:\n{}",
+        outcome.stdout
+    );
+}
+
 // ============================================================
 // C8：子代理 turn 必须携带父会话工作区根（Wave-61 C8.3）
 // ============================================================
@@ -694,48 +734,132 @@ fn run_child_probe(mode: &str) -> ChildOutcome {
     }
 }
 
-// ---- v1.3 子进程隔离 + C7 计数 Stub 引擎 ----
+// ---- v1.3/v1.4 子进程隔离 + C7 可观测 Stub 引擎 ----
 
 const V13_CHILD_ENV: &str = "PONY_WAVE61_V13_CHILD";
 /// C7 的 Stub 引擎固定回执文本（用于断言 lead 收件箱里的队友回执确实来自引擎，而非合成串）。
 const C7_STUB_REPLY: &str = "c7-stub-teammate-reply";
 
-/// 计数 Stub 引擎：记录调用次数、收到的 prompt，以及**调用时刻**观测到的队友状态。
-struct RecordingEngine {
-    calls: AtomicUsize,
-    prompts: Mutex<Vec<String>>,
-    observed_statuses: Mutex<Vec<String>>,
-    reply: String,
+/// 状态序列观测器：轮询线程与引擎回调共用同一个序列，保证时序因果可复现。
+#[derive(Default)]
+struct StatusWatch {
+    /// 去重后的状态序列（仅在"与上一个不同"时追加，允许重复采样被折叠）。
+    sequence: Mutex<Vec<String>>,
+    /// 被观测的成员 target（spawn 后填充）。
+    target: Mutex<String>,
 }
 
-impl RecordingEngine {
-    fn new(reply: &str) -> Self {
-        Self {
-            calls: AtomicUsize::new(0),
-            prompts: Mutex::new(Vec::new()),
-            observed_statuses: Mutex::new(Vec::new()),
-            reply: reply.to_string(),
+impl StatusWatch {
+    fn set_target(&self, target: &str) {
+        *self.target.lock().unwrap() = target.to_string();
+    }
+
+    /// 采样一次当前名单状态；仅当目标成员存在且状态与序列末位不同才追加。
+    fn sample(&self) {
+        let target = self.target.lock().unwrap().clone();
+        if target.is_empty() {
+            return;
         }
+        let Ok(list) = orchestration::list_agents() else {
+            return;
+        };
+        let Some(member) = list.agents.iter().find(|item| item.target == target) else {
+            return;
+        };
+        let status = format!("{:?}", member.status);
+        let mut sequence = self.sequence.lock().unwrap();
+        if sequence.last() != Some(&status) {
+            sequence.push(status);
+        }
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        self.sequence.lock().unwrap().clone()
     }
 }
 
-impl SubagentTurnEngine for RecordingEngine {
+/// 可观测 Stub 引擎（C7 强化 / C7b 单飞 / C7c 失败补偿共用）。
+///
+/// 能力：调用计数、**同时在途峰值**（`fetch_max`）、收到的 prompt 全文、
+/// 调用时刻的目标状态采样（写入 [`StatusWatch`]）、可注入失败码、可选"闸门"用于制造确定性重叠窗口。
+struct ScenarioEngine {
+    calls: AtomicUsize,
+    in_flight: AtomicUsize,
+    peak_in_flight: AtomicUsize,
+    prompts: Mutex<Vec<String>>,
+    reply: String,
+    fail_with: Option<String>,
+    watch: Option<Arc<StatusWatch>>,
+    gate: Option<Arc<(Mutex<bool>, Condvar)>>,
+}
+
+impl ScenarioEngine {
+    fn new(reply: &str) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            in_flight: AtomicUsize::new(0),
+            peak_in_flight: AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+            reply: reply.to_string(),
+            fail_with: None,
+            watch: None,
+            gate: None,
+        }
+    }
+
+    fn with_watch(mut self, watch: Arc<StatusWatch>) -> Self {
+        self.watch = Some(watch);
+        self
+    }
+
+    fn with_failure(mut self, code: &str) -> Self {
+        self.fail_with = Some(code.to_string());
+        self
+    }
+
+    fn with_gate(mut self, gate: Arc<(Mutex<bool>, Condvar)>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+}
+
+impl SubagentTurnEngine for ScenarioEngine {
     fn run_turn(&self, prompt: &str, _timeout_ms: u64) -> Result<SubagentRunOutcome, String> {
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.prompts.lock().unwrap().push(prompt.to_string());
-        // 在引擎真实执行窗口内采样一次名单状态（同步实现下外部轮询可能错过 Running 窗口）。
-        if let Ok(list) = orchestration::list_agents() {
-            for member in list.agents {
-                self.observed_statuses
-                    .lock()
-                    .unwrap()
-                    .push(format!("{:?}", member.status));
+        // 调用时刻采样：同步实现下外部 20ms 轮询可能错过极短的 Running 窗口。
+        if let Some(watch) = &self.watch {
+            watch.sample();
+        }
+        // 确定性重叠窗口：调用方放行前本调用一直"在途"（不依赖 sleep 制造时序）。
+        if let Some(gate) = &self.gate {
+            let (lock, condvar) = &**gate;
+            let mut released = lock.lock().unwrap_or_else(|err| err.into_inner());
+            let mut waited = Duration::ZERO;
+            while !*released && waited < Duration::from_secs(3) {
+                let (next, timeout) = condvar
+                    .wait_timeout(released, Duration::from_millis(20))
+                    .unwrap_or_else(|err| err.into_inner());
+                released = next;
+                waited += Duration::from_millis(20);
+                let _ = timeout;
             }
         }
-        Ok(SubagentRunOutcome {
-            final_text: self.reply.clone(),
-            session_id: "c7-stub-session".to_string(),
-        })
+        let result = match &self.fail_with {
+            Some(code) => Err(code.clone()),
+            None => Ok(SubagentRunOutcome {
+                final_text: self.reply.clone(),
+                session_id: "scenario-stub-session".to_string(),
+            }),
+        };
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        result
     }
 }
 
@@ -757,48 +881,77 @@ fn run_v13_child(mode: &str) -> ChildOutcome {
     }
 }
 
-/// C7 真实断言体（仅在隔离子进程内执行）：spawn → send → 轮询 → 三项断言。
-fn run_c7_body() {
-    sandbox_env();
-    // Arrange：注入计数 Stub 引擎（本进程首个写者，必然成功）。
-    let engine = Arc::new(RecordingEngine::new(C7_STUB_REPLY));
+/// 注入 Stub 引擎并派生一个**不自动驱动**的队友（空初始 prompt → spawn 不触发首个 turn）。
+///
+/// 返回 `(engine, target)`。若 spawn 会因非空 prompt 自动驱动，则 C7 的"send 驱动"语义无法与
+/// spawn 自身驱动区分，故这里用空 prompt 精确隔离被测因果。
+fn spawn_inert_teammate(engine: Arc<ScenarioEngine>, tag: &str) -> (Arc<ScenarioEngine>, String) {
     let _ = set_subagent_engine(engine.clone() as Arc<dyn SubagentTurnEngine>);
     assert!(
         subagent_runtime_wired(),
         "C7 前置失败：Stub 引擎注入后必须已接线"
     );
-
-    let name = format!("c7-probe-{}-{}", std::process::id(), unique_stamp());
+    let name = format!("{tag}-{}-{}", std::process::id(), unique_stamp());
     let spawned = orchestration::spawn_teammate(SpawnTeammateArgs {
-        name: name.clone(),
+        name,
         role: Some("probe".to_string()),
-        description: "c7 probe teammate".to_string(),
-        prompt: "c7 probe prompt".to_string(),
+        description: format!("{tag} probe teammate"),
+        prompt: String::new(),
         context: None,
     })
     .expect("C7 前置失败：spawn_teammate 必须成功");
-    let target = spawned.member.target.clone();
+    assert_eq!(
+        spawned.member.status,
+        TeammateStatus::Active,
+        "C7 前置失败：空 prompt 派生后成员必须处于 Active（未被自动驱动）"
+    );
+    (engine, spawned.member.target)
+}
 
-    // 轮询线程：每 20ms 采样一次名单状态（小步轮询，非忙等）。
+fn teammate_status_of(target: &str) -> Option<TeammateStatus> {
+    orchestration::list_agents().ok().and_then(|list| {
+        list.agents
+            .into_iter()
+            .find(|member| member.target == target)
+            .map(|member| member.status)
+    })
+}
+
+/// 轮询等待条件成立（20ms 步进、上限 `limit`；不忙等、不靠固定 sleep 猜时序）。
+fn wait_until(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    condition()
+}
+
+/// C7 真实断言体（仅在隔离子进程内执行）：状态迁移序列 + 回执 + 引擎真实调用。
+fn run_c7_body() {
+    sandbox_env();
+    let watch = Arc::new(StatusWatch::default());
+    let engine = Arc::new(ScenarioEngine::new(C7_STUB_REPLY).with_watch(Arc::clone(&watch)));
+    let (engine, target) = spawn_inert_teammate(engine, "c7-probe");
+    watch.set_target(&target);
+    // spawn 后（send 前）确定性采样：必须是 Active。
+    watch.sample();
+
+    // 20ms 轮询线程：记录去重状态序列。
     let stop = Arc::new(AtomicBool::new(false));
-    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let poller = {
         let stop = Arc::clone(&stop);
-        let seen = Arc::clone(&seen);
-        let target = target.clone();
+        let watch = Arc::clone(&watch);
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
-                if let Ok(list) = orchestration::list_agents() {
-                    if let Some(member) = list.agents.iter().find(|item| item.target == target) {
-                        seen.lock().unwrap().push(format!("{:?}", member.status));
-                    }
-                }
+                watch.sample();
                 std::thread::sleep(Duration::from_millis(20));
             }
         })
     };
 
-    // Act：发送消息（应驱动队友 turn）。
     let calls_before = engine.calls.load(Ordering::SeqCst);
     orchestration::send_message(SendMessageArgs {
         target: target.clone(),
@@ -807,38 +960,47 @@ fn run_c7_body() {
     })
     .expect("C7 前置失败：send_message 必须成功");
 
-    // 轮询等待成员回到 Inactive（上限 5s）。
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last_status: Option<TeammateStatus> = None;
-    while Instant::now() < deadline {
-        if let Ok(list) = orchestration::list_agents() {
-            if let Some(member) = list.agents.iter().find(|item| item.target == target) {
-                last_status = Some(member.status.clone());
-                if member.status == TeammateStatus::Inactive {
-                    break;
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let reached_inactive = wait_until(Duration::from_secs(5), || {
+        teammate_status_of(&target) == Some(TeammateStatus::Inactive)
+    });
     std::thread::sleep(Duration::from_millis(60));
     stop.store(true, Ordering::SeqCst);
     let _ = poller.join();
+    watch.sample();
 
-    let polled = seen.lock().unwrap().clone();
-    let in_engine = engine.observed_statuses.lock().unwrap().clone();
-    let observed: Vec<String> = polled.iter().chain(in_engine.iter()).cloned().collect();
+    let sequence = watch.snapshot();
+    let calls_after = engine.calls.load(Ordering::SeqCst);
 
-    // Assert (a)：期间至少一次观察到 Running 或 Active。
+    // Assert (a)（强化）：状态迁移序列必须观测到 Active → Running → Inactive，且索引单调递增。
+    let position = |want: &str| sequence.iter().position(|status| status == want);
+    let (active, running, inactive) = (
+        position("Active"),
+        position("Running"),
+        position("Inactive"),
+    );
     assert!(
-        observed
-            .iter()
-            .any(|status| status == "Running" || status == "Active"),
-        "C7-A 失败：send_message 期间从未观察到成员处于 Running/Active（观测样本 {observed:?}）—— \
-         说明消息只入队、未驱动任何 turn"
+        reached_inactive,
+        "C7-A 失败：5s 轮询窗口内成员未回到 Inactive（观测序列 {sequence:?}）"
+    );
+    assert!(
+        active.is_some(),
+        "C7-A 失败：未观测到 Active（spawn 后、send 前）——观测序列 {sequence:?}"
+    );
+    assert!(
+        running.is_some(),
+        "C7-A 失败：未观测到 Running（send 驱动期间）——观测序列 {sequence:?}"
+    );
+    assert!(
+        inactive.is_some(),
+        "C7-A 失败：未观测到 Inactive（收口）——观测序列 {sequence:?}"
+    );
+    assert!(
+        active < running && running < inactive,
+        "C7-A 失败：状态迁移必须单调 Active → Running → Inactive，实际序列 {sequence:?}\
+         （位置 Active={active:?} / Running={running:?} / Inactive={inactive:?}）"
     );
 
-    // Assert (b)：lead 收件箱能取到队友回执（Stub 引擎的固定文本）。
+    // Assert (b)：lead 收件箱能取到队友回执（Stub 引擎固定文本）。
     let inbox = orchestration::drain_inbox(ReadInboxArgs {
         target: "lead".to_string(),
     })
@@ -858,8 +1020,7 @@ fn run_c7_body() {
             .collect::<Vec<_>>()
     );
 
-    // Assert (c)：引擎真实被调用（计数 ≥ 1，且 send 之后确有增量——排除 spawn 期间的空跑）。
-    let calls_after = engine.calls.load(Ordering::SeqCst);
+    // Assert (c)：引擎真实被调用（≥1 且 send 之后确有增量）。
     assert!(
         calls_after >= 1,
         "C7-C 失败：Stub 引擎调用次数为 0——send_message 未触达 SubagentTurnEngine（伪造成功）"
@@ -869,17 +1030,193 @@ fn run_c7_body() {
         "C7-C' 失败：send_message 前后引擎调用次数无增量（before={calls_before}, after={calls_after}）"
     );
 
-    // 收尾断言：成员最终状态必须回到 Inactive（轮询上限内）。
-    assert_eq!(
-        last_status,
-        Some(TeammateStatus::Inactive),
-        "C7 失败：5s 轮询窗口内成员未回到 Inactive"
+    // Assert (d)：驱动确实消费了**本次 send 的文本**（排除"仅 spawn 的初始 prompt 触发"）。
+    let prompts = engine.prompts();
+    assert!(
+        prompts
+            .iter()
+            .any(|prompt| prompt.contains("please review the workspace diff")),
+        "C7-D 失败：引擎收到的 prompt 中不含本次 send 的消息文本；实际 prompts={prompts:?}"
     );
 
     println!(
-        "C7_OK calls={calls_after} observed={} final={last_status:?}",
-        observed.len()
+        "C7_OK calls={calls_after} sequence={sequence:?} final={:?}",
+        teammate_status_of(&target)
     );
+}
+
+/// C7b 真实断言体：同一 target 连续两次 send（间隔 < 10ms）必须单飞——
+/// 同时在途调用峰值 == 1，且两条消息文本都被处理且各只处理一次。
+fn run_c7b_body() {
+    sandbox_env();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let engine = Arc::new(ScenarioEngine::new("c7b-stub-reply").with_gate(Arc::clone(&gate)));
+    let (engine, target) = spawn_inert_teammate(engine, "c7b-probe");
+
+    // 两次 send 背靠背（间隔远小于 10ms）。
+    orchestration::send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "c7b-first-alpha".to_string(),
+        mode: Some(MessageDeliveryMode::Queue),
+    })
+    .expect("C7b 前置失败：第一次 send_message 必须成功");
+    orchestration::send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "c7b-second-beta".to_string(),
+        mode: Some(MessageDeliveryMode::Queue),
+    })
+    .expect("C7b 前置失败：第二次 send_message 必须成功");
+
+    // 确定性确保已有一个在途调用（闸门使其保持"在途"，不靠 sleep 猜时序）。
+    let entered = wait_until(Duration::from_secs(2), || {
+        engine.in_flight.load(Ordering::SeqCst) >= 1
+    });
+    // 放行闸门，让所有在途/排队调用跑完。
+    {
+        let (lock, condvar) = &*gate;
+        *lock.lock().unwrap_or_else(|err| err.into_inner()) = true;
+        condvar.notify_all();
+    }
+    assert!(
+        entered,
+        "C7b 前置失败：2s 内没有任何引擎调用进入执行（send 未驱动）"
+    );
+
+    // 等待静默：状态回到 Inactive、无在途调用、调用数连续两次采样不变。
+    let mut stable = 0usize;
+    let mut last_calls = usize::MAX;
+    let _ = wait_until(Duration::from_secs(5), || {
+        let calls = engine.calls.load(Ordering::SeqCst);
+        if calls == last_calls && engine.in_flight.load(Ordering::SeqCst) == 0 {
+            stable += 1;
+        } else {
+            stable = 0;
+            last_calls = calls;
+        }
+        stable >= 3 && teammate_status_of(&target) == Some(TeammateStatus::Inactive)
+    });
+
+    let peak = engine.peak_in_flight.load(Ordering::SeqCst);
+    let calls = engine.calls.load(Ordering::SeqCst);
+    let prompts = engine.prompts();
+    let joined = prompts.join("\n");
+
+    // Assert 1（单飞）：同时在途调用峰值 == 1（不允许两个并发驱动线程）。
+    assert_eq!(
+        peak, 1,
+        "C7b 失败：同一 target 的同时在途引擎调用峰值为 {peak}（期望 1）——\
+         两次 send_message 各自派生了并发驱动线程，违反 C10 单飞语义。prompts={prompts:?}"
+    );
+
+    // Assert 2（不丢消息）：两条文本都必须被处理。
+    assert!(
+        joined.contains("c7b-first-alpha"),
+        "C7b 失败：第一条消息文本未被任何引擎调用消费；prompts={prompts:?}"
+    );
+    assert!(
+        joined.contains("c7b-second-beta"),
+        "C7b 失败：第二条消息文本未被任何引擎调用消费；prompts={prompts:?}"
+    );
+
+    // Assert 3（不重复消费）：每条文本只能出现在一次引擎调用里。
+    for needle in ["c7b-first-alpha", "c7b-second-beta"] {
+        let hits = prompts
+            .iter()
+            .filter(|prompt| prompt.contains(needle))
+            .count();
+        assert_eq!(
+            hits, 1,
+            "C7b 失败：`{needle}` 被 {hits} 次引擎调用重复消费（期望 1）；prompts={prompts:?}"
+        );
+    }
+    assert!(calls >= 1, "C7b 失败：引擎从未被调用（send 未驱动）");
+
+    println!("C7B_OK calls={calls} peak={peak} prompts={}", prompts.len());
+}
+
+/// C7c 真实断言体：引擎失败（`subagent_busy`）时必须**回滚入队**（消息不丢、顺序不变）、
+/// 成员回到 Inactive，并把错误回执投递到 lead 收件箱。
+fn run_c7c_body() {
+    sandbox_env();
+    let engine = Arc::new(ScenarioEngine::new("unused").with_failure("subagent_busy"));
+    let (engine, target) = spawn_inert_teammate(engine, "c7c-probe");
+
+    // 先用纯入队 seam 造两条确定顺序的积压消息（不驱动），再由 send_message 触发一次驱动作业。
+    for text in ["c7c-alpha", "c7c-beta"] {
+        orchestration::enqueue_message(SendMessageArgs {
+            target: target.clone(),
+            message: text.to_string(),
+            mode: Some(MessageDeliveryMode::Queue),
+        })
+        .expect("C7c 前置失败：enqueue_message 必须成功");
+    }
+    orchestration::send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "c7c-trigger".to_string(),
+        mode: Some(MessageDeliveryMode::Queue),
+    })
+    .expect("C7c 前置失败：send_message 必须成功");
+
+    // 等待收口：驱动失败后成员必须回到 Inactive。
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            teammate_status_of(&target) == Some(TeammateStatus::Inactive)
+        }),
+        "C7c 失败：引擎失败后 5s 内成员未回到 Inactive（实际 {:?}）",
+        teammate_status_of(&target)
+    );
+    assert_eq!(
+        engine.calls.load(Ordering::SeqCst),
+        1,
+        "C7c 前置失败：期望一次驱动作业命中引擎一次，实际 {}",
+        engine.calls.load(Ordering::SeqCst)
+    );
+
+    // Assert 1（不丢消息 + 顺序不变）：三条消息必须仍在目标收件箱，且相对顺序不变。
+    let inbox = orchestration::drain_inbox(ReadInboxArgs {
+        target: target.clone(),
+    })
+    .expect("C7c 失败：目标收件箱必须仍存在");
+    let contents: Vec<String> = inbox
+        .messages
+        .iter()
+        .map(|message| message.content.clone())
+        .collect();
+    let expected = vec![
+        "c7c-alpha".to_string(),
+        "c7c-beta".to_string(),
+        "c7c-trigger".to_string(),
+    ];
+    assert_eq!(
+        contents, expected,
+        "C7c 失败：引擎失败后消息未按原顺序回滚入队（期望 {expected:?}，实际 {contents:?}）——\
+         失败补偿缺失导致消息丢失"
+    );
+
+    // Assert 2（不伪造成功）：lead 收件箱必须收到错误回执，且含真实错误码。
+    let lead_inbox = orchestration::drain_inbox(ReadInboxArgs {
+        target: "lead".to_string(),
+    })
+    .expect("C7c 失败：lead 收件箱必须存在");
+    let lead_contents: Vec<String> = lead_inbox
+        .messages
+        .iter()
+        .map(|message| message.content.clone())
+        .collect();
+    assert!(
+        lead_contents
+            .iter()
+            .any(|message| message.contains("subagent_busy")),
+        "C7c 失败：lead 收件箱未收到含 `subagent_busy` 的错误回执（实际 {lead_contents:?}）"
+    );
+    assert!(
+        !lead_contents
+            .iter()
+            .any(|message| message.contains(C7_STUB_REPLY)),
+        "C7c 失败：引擎失败路径出现了成功回执（伪造成功）"
+    );
+
+    println!("C7C_OK contents={contents:?}");
 }
 
 /// 记录 `run_turn_in` 收到的 workspace_root 的 Stub 引擎。

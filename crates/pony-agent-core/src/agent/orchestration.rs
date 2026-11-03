@@ -105,10 +105,83 @@ pub struct SendMessageArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageResult {
+    /// 消息 id。
     pub message_id: String,
+    /// 是否已成功**入队**（历史语义，保持不变；不等于"已被引擎处理"）。
     pub delivered: bool,
     pub mode: MessageDeliveryMode,
     pub pending_inbox_len: usize,
+    /// Wave-61 C10.2（additive）：本条消息是否已被引擎消费完成。
+    ///
+    /// 后台驱动是异步的，入队返回时恒为 `false`；调用方不得把 `delivered=true` 当作
+    /// "已处理"。消费失败时整批消息会被放回收件箱（不丢失），并另投一条错误回执给 Lead。
+    #[serde(default)]
+    pub processed: bool,
+    /// Wave-61 C10.2（additive）：投递阶段，`queued`（仅入队）/ `driving`（已派发驱动）。
+    #[serde(default)]
+    pub delivery_state: String,
+}
+
+/// Wave-61 C10.2：投递阶段取值（字符串化，避免新增枚举破坏 `SendMessageResult` 的向后兼容）。
+pub const DELIVERY_STATE_QUEUED: &str = "queued";
+/// Wave-61 C10.2：已派发后台驱动。
+pub const DELIVERY_STATE_DRIVING: &str = "driving";
+
+/// Wave-61 C10.1：正在被驱动的 target 集合（进程级单飞标记）。
+///
+/// 语义：同一 target 同时最多只有**一个**驱动循环；后续 `send_message` 只入队，
+/// 由在跑的循环消费（detached fan-out 会让同 target 并发多驱动、状态抖动）。
+static DRIVING: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+
+/// 单飞标记的 RAII 句柄：**任何**退出路径（成功 / 引擎错误 / panic 展开）都会清除标记。
+struct DrivingGuard(String);
+
+impl Drop for DrivingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut lock) = DRIVING.lock() {
+            if let Some(set) = lock.as_mut() {
+                set.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// 尝试占据 target 的单飞标记；返回 `Some(guard)` 表示本次调用负责驱动。
+fn begin_driving(target: &str) -> Option<DrivingGuard> {
+    let mut lock = DRIVING.lock().ok()?;
+    let set = lock.get_or_insert_with(std::collections::HashSet::new);
+    if !set.insert(target.to_string()) {
+        return None;
+    }
+    Some(DrivingGuard(target.to_string()))
+}
+
+/// 该 target 是否已有驱动在跑（观测用）。
+pub fn is_driving(target: &str) -> bool {
+    DRIVING
+        .lock()
+        .ok()
+        .and_then(|lock| {
+            lock.as_ref()
+                .map(|set| set.contains(target))
+        })
+        .unwrap_or(false)
+}
+
+/// Wave-61 C10.2：把整批消息按**原顺序**放回收件箱队首（失败补偿，绝不丢消息）。
+fn requeue_messages(target: &str, messages: &[QueuedMessage]) {
+    let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
+    if inbox_lock.is_none() {
+        *inbox_lock = Some(HashMap::new());
+    }
+    let inbox_map = inbox_lock.as_mut().unwrap();
+    let deque = inbox_map
+        .entry(target.to_string())
+        .or_insert_with(VecDeque::new);
+    // 逆序 push_front ⇒ 回填后队首顺序与 drain 前一致。
+    for message in messages.iter().rev() {
+        deque.push_front(message.clone());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,20 +526,44 @@ pub fn send_message_in_workspace(
     args: SendMessageArgs,
     workspace_root: Option<&std::path::Path>,
 ) -> Result<SendMessageResult, String> {
-    let (result, drive_target) = enqueue_message(args)?;
+    let (mut result, drive_target) = enqueue_message(args)?;
 
-    if drive_target != "lead" && crate::agent::subagent_runtime::subagent_engine().is_some() {
-        let owner = workspace_root.map(std::path::Path::to_path_buf);
-        set_teammate_status(&drive_target, TeammateStatus::Running);
-        std::thread::spawn(move || {
-            if let Err(err) = drive_teammate_turn_in(&drive_target, owner.as_deref()) {
-                set_teammate_status(&drive_target, TeammateStatus::Inactive);
-                eprintln!("[team] teammate drive failed ({}): {}", drive_target, err);
-            }
-        });
+    if drive_target != LEAD_TARGET && crate::agent::subagent_runtime::subagent_engine().is_some() {
+        // Wave-61 C10.1：**每 target 单飞**。已有驱动在跑时只入队并返回，由在跑的循环消费；
+        // 绝不为同一 target 派生第二个 detached 线程（会造成并发多驱动与状态抖动）。
+        if let Some(guard) = begin_driving(&drive_target) {
+            let owner = workspace_root.map(std::path::Path::to_path_buf);
+            // C10.3：进入驱动前先置 `Running`（`Active` 由入队/派生阶段给出，收口回 `Inactive`）。
+            set_teammate_status(&drive_target, TeammateStatus::Running);
+            std::thread::spawn(move || {
+                // guard 随线程存活/Drop ⇒ 所有退出路径（含 panic 展开）都清除单飞标记。
+                let _guard = guard;
+                if let Err(err) = drive_loop_in(&drive_target, owner.as_deref()) {
+                    eprintln!("[team] teammate drive failed ({}): {}", drive_target, err);
+                }
+            });
+            result.delivery_state = DELIVERY_STATE_DRIVING.to_string();
+        }
     }
 
     Ok(result)
+}
+
+/// Wave-61 C10.1：驱动循环（由后台线程执行，配合 [`DrivingGuard`] 单飞）。
+///
+/// `loop { drain → 空则退出 → run_turn → 投递回执 }`，直到收件箱为空才结束；失败由
+/// [`drive_teammate_turn_in`] 做「放回队首 + 置 Inactive + 投递错误回执」补偿后返回 Err，
+/// 本循环随即停止（把剩下的工作留给下一次 `send_message` 触发）。
+fn drive_loop_in(
+    target: &str,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<(), String> {
+    loop {
+        match drive_teammate_turn_in(target, workspace_root)? {
+            Some(_reply) => continue, // 已处理一批，再 drain 看是否还有
+            None => return Ok(()),    // 收件箱已空（或被中断检查点拦下）
+        }
+    }
 }
 
 /// 纯入队 seam：只把消息写进目标收件箱，**不触发**任何驱动/状态机副作用。
@@ -534,6 +631,8 @@ pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, Stri
             delivered: true,
             mode,
             pending_inbox_len: len,
+            processed: false,
+            delivery_state: DELIVERY_STATE_QUEUED.to_string(),
         },
         args.target,
     ))
@@ -768,12 +867,22 @@ pub fn drive_teammate_turn_in(
             match engine.run_turn_in(&combined_prompt, SUBAGENT_TURN_TIMEOUT_MS, workspace_root) {
                 Ok(outcome) => outcome.final_text,
                 Err(err) => {
-                    // 失败收口：状态回 Inactive + 错误文本进 Lead 收件箱（不含任何假成功）。
+                    // Wave-61 C10.2 失败补偿：把本轮 drain 的整批消息**按原顺序放回队首**
+                    // （消息绝不丢失：引擎侧 busy/timeout/prompt_too_large/任意 Err 都不吞消息），
+                    // 状态回 Inactive，并把错误文本投递 Lead 收件箱（不含任何假成功）。
+                    // 说明：`prompt_too_large` 这类确定性失败会再次失败，直到调用方拆分消息；
+                    // 这里不做静默丢弃，也不伪造成成功回执。
+                    requeue_messages(target, &result.messages);
                     set_teammate_status(target, TeammateStatus::Inactive);
-                    if target != "lead" {
+                    if target != LEAD_TARGET {
                         let _ = send_message(SendMessageArgs {
-                            target: "lead".to_string(),
-                            message: format!("Teammate '{}' turn failed: {}", target, err),
+                            target: LEAD_TARGET.to_string(),
+                            message: format!(
+                                "Teammate '{}' turn failed ({} message(s) requeued): {}",
+                                target,
+                                result.messages.len(),
+                                err
+                            ),
                             mode: Some(MessageDeliveryMode::Queue),
                         });
                     }

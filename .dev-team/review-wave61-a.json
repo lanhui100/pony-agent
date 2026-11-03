@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "60e7cb8",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "5782bf78-769c-4696-aa2a-4975904b26c6",
+    "fresh_context": true
+  },
+  "executed_by": "5782bf78-769c-4696-aa2a-4975904b26c6",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    ".dev-team/contracts/wave-61-team-activation.md",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs",
+    "crates/pony-agent-core/tests/orchestration_acceptance_test.rs",
+    "crates/pony-agent-core/tests/wave37_tool_surface.rs",
+    "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs",
+    "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs",
+    "crates/pony-agent-core/tests/pa110_teams_acceptance.rs",
+    "crates/pony-agent-core/src/agent/runtime/builder.rs",
+    "crates/pony-agent-core/src/agent/runtime/trace_timeline.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/parallel_tools.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/src/agent/stop_escalation.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 7450,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test pa110_teams_acceptance -- --exact test_ac02_workflow_dag_execution  # exit 0，实测 workflow() 不执行任何 step 仍返回 status=success。推理链：tools.rs:7450 把 TOOL_WORKFLOW 并入 ModelVisible → tools.rs:1600-1602 的 fail-closed 门只在 !subagent_runtime_wired() 时生效，而 runtime/builder.rs:86 的 C2 注册使生产进程恒为 wired → orchestration.rs:286-297 的 workflow() 是纯桩（只回显 step.id + status=success）=> 模型面拿到伪造成功回执（wave-25 假能力缺陷类，与 C2 接线叠加后 100% 可达）。",
+      "severity": "BLOCKING",
+      "note": "CORRECTNESS"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 256,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "git show 60e7cb8:crates/pony-agent-core/src/agent/orchestration.rs | sed -n '256p' ; git show 60e7cb8:crates/pony-agent-core/src/agent/subagent_runtime.rs | sed -n '153p'  # 同一次 subagent 调用链上出现两次 subagent_gate_enter（orchestration.rs:256 入口门 + subagent_runtime.rs:153 引擎门），SUBAGENT_MAX_CONCURRENT=2（subagent_runtime.rs:58）=> 单次调用扣 2 个许可：第 2 个并发调用必返 subagent_busy，有效并发退化为 1；子代理内部再派生 subagent 时许可已满 => 嵌套派生恒 busy（NFR subagent_max_concurrent=2 违约，直接冲突 C1.4「第一 turn 就能派生队友」目标）。C2 接线（builder.rs:86）是使其从不可达变为生产可达的唯一原因。",
+      "severity": "BLOCKING",
+      "note": "CONCURRENCY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+      "line": 153,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "subagent_runtime.rs:153 的 _inflight 绑定在 run_turn 函数作用域；:198-207 超时分支 return Err 时 guard 立即 Drop 归还许可，而工作线程（:176 起，已声明为有意遗留的孤儿会话）仍在跑完整 AgentRuntime => 许可计数低于真实并发，可同时存在 >2 个运行中的子代理 turn 且每个孤儿持有一整套 runtime（.dev-team/nfr-baseline.json:70-71 已登记为 wave-61 C6.2 已知限制，故记 advisory）。",
+      "severity": "ADVISORY",
+      "note": "TIMEOUT"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 3230,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "control_plane/mod.rs:3230 与 runtime/trace_timeline.rs:198 把判定改成 message_count > 2 + context.rs:84 reserved_system_message_extra_count()，而该函数读的是当前读取进程的 OnceLock 接线态；但 control_plane/mod.rs:2933 与 :3088-3096 聚合的是持久化 session.turn_trace_history。=> 同一条历史 trace（如 message_count=3，采样于未接线宿主或旧构建）在已接线进程被判未用检索、在未接线进程被判用了检索，retrieval_participation_count 随读者进程/构建版本漂移，跨宿主与跨版本不可比。建议把补偿量随 trace 落盘（或改用 prefix/instruction_scope_sources 判定）而非读当前进程状态。",
+      "severity": "ADVISORY",
+      "note": "CORRECTNESS"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 7211,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "grep -rn execute_calls_with_router crates/pony-agent-core/src  # 仅命中 parallel_tools.rs:167 的定义，turn 循环尚未接入 => 当前不阻塞。但 tools.rs:7211-7224 把 subagent/workflow（default_timeout_ms=120000）与 drain_inbox/send_message（共享状态；drain 是消费式破坏操作）全部标 concurrent_safe=true：一旦 W28b 把并发引擎接进 turn 循环，长时团队调用会与只读工具同处并发分区（parallel_tools.rs:119-141），drain_inbox 双发会重复消费同一条信箱消息、send_message 并发下投递序不确定。",
+      "severity": "ADVISORY",
+      "note": "CONCURRENCY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 234,
+      "rule": "LEAK",
+      "counterexample_cmd": "orchestration.rs:234/238/240 的 TEAM_TASKS / TEAMMATES / TEAMMATE_INBOXES 均为进程级 static Mutex，全仓无 reset/clear 调用点；spawn_teammate（:299-337）只插入不删除 => C1/C2 让团队工具首次在生产可达后，同一进程内多个会话共享同一任务板与信箱，成员/任务/信箱条目随会话数无界增长且不随 turn/session 终态回收（control_plane 侧有成对的 register/unregister_turn_event_sink，团队状态侧没有等价释放面）。",
+      "severity": "ADVISORY",
+      "note": "LEAK"
+    }
+  ]
+}

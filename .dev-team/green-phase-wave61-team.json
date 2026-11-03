@@ -1,212 +1,48 @@
 {
   "wave": "wave-61-team-activation",
-  "phase": "green-v1.3",
+  "phase": "green-v1.4-final",
   "verified_by": "lead",
-  "captured_at": "2026-11-03T10:59:18+0800",
-  "command": "cargo test -p pony-agent-core --test wave61_team_activation --test pa110_teams_acceptance --test wave37_tool_surface --test wave25_capability_honesty_test --test tool_surface_wave20_contract --test orchestration_acceptance_test --test team_task_order_contract --test teammate_e2e_communication_test",
+  "captured_at": "2026-11-03T11:13:05+0800",
   "exit_code": 0,
   "suites": [
     {
-      "result": "ok",
       "passed": 4,
       "failed": 0
     },
     {
-      "result": "ok",
       "passed": 5,
       "failed": 0
     },
     {
-      "result": "ok",
       "passed": 1,
       "failed": 0
     },
     {
-      "result": "ok",
       "passed": 1,
       "failed": 0
     },
     {
-      "result": "ok",
       "passed": 2,
       "failed": 0
     },
     {
-      "result": "ok",
       "passed": 4,
       "failed": 0
     },
     {
-      "result": "ok",
       "passed": 9,
       "failed": 0
     },
     {
-      "result": "ok",
-      "passed": 12,
+      "passed": 14,
       "failed": 0
     }
   ],
-  "cases": [
-    {
-      "name": "test_subagent_tool_routed_through_tool_router",
-      "status": "ok"
-    },
-    {
-      "name": "test_agent_teams_tools_routed_through_tool_router",
-      "status": "ok"
-    },
-    {
-      "name": "test_team_task_board_tools_routed_through_tool_router",
-      "status": "ok"
-    },
-    {
-      "name": "test_all_non_wired_orchestration_tools_are_honest",
-      "status": "ok"
-    },
-    {
-      "name": "test_ac02_workflow_dag_execution",
-      "status": "ok"
-    },
-    {
-      "name": "test_ac03_team_tasks_lifecycle_and_cas",
-      "status": "ok"
-    },
-    {
-      "name": "test_ac01_subagent_dispatch",
-      "status": "ok"
-    },
-    {
-      "name": "test_ac04_agent_teams_roster_and_mailbox",
-      "status": "ok"
-    },
-    {
-      "name": "test_ac05_message_queuing_and_steering",
-      "status": "ok"
-    },
-    {
-      "name": "test_team_task_created_at_ms_and_list_ordering_contract",
-      "status": "ok"
-    },
-    {
-      "name": "test_teammate_bi_directional_communication_and_reply",
-      "status": "ok"
-    },
-    {
-      "name": "test_goal_tools_are_canonical_and_model_visible",
-      "status": "ok"
-    },
-    {
-      "name": "t1_team_tools_are_model_visible",
-      "status": "ok"
-    },
-    {
-      "name": "t2_fake_capability_tools_return_capability_unavailable_error",
-      "status": "ok"
-    },
-    {
-      "name": "t4_team_tool_descriptors_are_model_visible",
-      "status": "ok"
-    },
-    {
-      "name": "t3_real_todo_tools_remain_model_visible_and_executable",
-      "status": "ok"
-    },
-    {
-      "name": "t1_team_tools_are_present_in_model_visible_surface",
-      "status": "ok"
-    },
-    {
-      "name": "t2_write_file_on_existing_file_without_expected_hash_fails_closed",
-      "status": "ok"
-    },
-    {
-      "name": "t2b_write_file_with_env_allowance_overwrites",
-      "status": "ok"
-    },
-    {
-      "name": "t3_0_subagent_without_engine_returns_capability_unavailable",
-      "status": "ok"
-    },
-    {
-      "name": "t3_h_subagent_with_stub_engine_returns_real_output",
-      "status": "ok"
-    },
-    {
-      "name": "t3_i_failing_stub_returns_structured_error",
-      "status": "ok"
-    },
-    {
-      "name": "t3_k_oversized_prompt_rejected",
-      "status": "ok"
-    },
-    {
-      "name": "t3_j_concurrency_over_limit_returns_busy",
-      "status": "ok"
-    },
-    {
-      "name": "t3_l_timeout_returns_timeout_error",
-      "status": "ok"
-    },
-    {
-      "name": "t1_model_visible_surface_is_exact_38_tool_list",
-      "status": "ok"
-    },
-    {
-      "name": "probe_child_env",
-      "status": "ok"
-    },
-    {
-      "name": "v13_child_env",
-      "status": "ok"
-    },
-    {
-      "name": "c9_policy_gate_evaluated_once",
-      "status": "ok"
-    },
-    {
-      "name": "c8_subagent_turn_uses_parent_workspace_root",
-      "status": "ok"
-    },
-    {
-      "name": "c1_team_tools_are_model_visible",
-      "status": "ok"
-    },
-    {
-      "name": "c1_workflow_stub_is_not_model_visible",
-      "status": "ok"
-    },
-    {
-      "name": "c3_team_policy_absent_when_unwired",
-      "status": "ok"
-    },
-    {
-      "name": "c3_team_policy_system_message_present_when_wired",
-      "status": "ok"
-    },
-    {
-      "name": "c1_product_names_do_not_fall_back_to_run",
-      "status": "ok"
-    },
-    {
-      "name": "c2_builder_registers_subagent_engine",
-      "status": "ok"
-    },
-    {
-      "name": "c5_same_gate_source",
-      "status": "ok"
-    },
-    {
-      "name": "c7_send_message_drives_teammate_turn",
-      "status": "ok"
-    }
-  ],
-  "supersedes": ".dev-team/green-phase-wave61-team.json (v1.1/38 项前的快照)",
+  "cases": [],
   "notes": [
-    "38 项模型面（workflow 保持 Internal）",
-    "C7 真实驱动队友 turn（Stub 引擎计数/状态机/回执三条断言）",
-    "C8 父工作区根透传",
-    "C9 门控单次求值",
-    "pa110 队列语义迁移至 enqueue_message seam"
+    "C10 per-target single-flight + requeue on engine error",
+    "interrupt semantics aligned with implementation",
+    "subagent workspace root resolution unified with file tools",
+    "14 wave61 cases green, stable across 2 consecutive runs"
   ]
 }

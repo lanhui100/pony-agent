@@ -1,7 +1,7 @@
 # Wave-61 契约：Agent Team 激活（工具面 × 宿主接线 × 策略提示 × 并发守恒）
 
 - 契约编号：wave-61-team-activation
-- 状态：`FROZEN v1.3（wave-61；v1.3 = L3-A/L3-P 复审裁决：C6.1 自持门能力标志 / C7 真实能力 / C8 工作区根透传 / C9 单次求值 / Q1 120s 登记为 NFR 豁免）`
+- 状态：`FROZEN v1.4（wave-61；v1.4 = 方案/复审收口：C4 面⑦ AC-05 seam 迁移 / C10 驱动可靠性 / C11 已知局限显式登记）`
 - 作者：Protocol Agent（协议特派员）；v1.1/v1.2 由 Lead 裁决驱动演进
 - 唯一写域：`.dev-team/`（本文件 + `.dev-team/nfr-baseline.json` + `.dev-team/nfr-baseline.schema.json` 的**增量**声明；schema 只含 wave-61 自己的字段）
 - 禁止写域：任何 Rust 源码与测试（含 `crates/**`、`src-tauri/**`、`tests/**`）、`.dev-team/state.json`
@@ -325,7 +325,7 @@ C2 只增加"生产路径上确实会接线"，**不删除**任何 fail-closed �
 
 ---
 
-## C4 冻结测试演进门禁（6 个面，Test Agent 执行，Lead 一票冻结）
+## C4 冻结测试演进门禁（7 个面，Test Agent 执行，Lead 一票冻结）
 
 > **纪律**：冻结断言只能**收紧或等价改写**，**不得放宽**（禁删用例、禁 `#[ignore]`、禁换成 `println!`、禁吞异常）。
 > 每条改写必须在本节留痕（旧断言 → 新断言 + 理由 + 真值源）。
@@ -384,6 +384,20 @@ C2 只增加"生产路径上确实会接线"，**不删除**任何 fail-closed �
   追加 `registry.resolve("workflow").exposure == Internal`（C1.7）与 9 项 `ModelVisible` 断言；
   既有 `resolve("ToolSearch") == Deferred`、`snapshot_id == "builtin-tool-catalog-v1"` 断言**不得**改动。
 
+### C4.6b 面⑦：`crates/pony-agent-core/tests/pa110_teams_acceptance.rs`（AC-05 队列顺序用例）
+
+- 用例：`ac05_...`（AC-05 队列/插队顺序语义，`tests/pa110_teams_acceptance.rs:171-221`）。
+- **旧断言**：3 次经模型可见入口 `send_message(...)`（`Queue`、`Queue`、`Steer`）后校验收件箱顺序与条数。
+- **新断言**：同样 3 次入队改经 **additive seam** `orchestration::enqueue_message(...)`（`orchestration.rs:576`，纯入队、无驱动副作用），
+  **顺序/条数断言逐字未改**（`:204-220`）。
+- **理由**：C7 起 `send_message` 在入队后**立即后台驱动**队友 turn（真实执行，`send_message_in_workspace` `:525-552`），
+  入队与消费竞态会让队列观测面不稳定；队列语义必须由纯入队 seam 验证，而"入队即真实驱动 + 回执"语义由
+  `c7_send_message_drives_teammate_turn`（`tests/wave61_team_activation.rs:585`）覆盖。
+- **授权**：**Lead 一票授权**（冻结测试迁移特批）；**提交号**：`922e960`（`feat(wave-61-team): real teammate execution
+  + workspace-root propagation + honest 38-tool surface`）。
+- 断言强度：未放宽（顺序/条数断言逐字保留）；新增 seam 是被测出口，覆盖点从"模型入口"下移到"队列层"，
+  模型入口一侧由 C7-A1/C7-A3 补偿。
+
 ### C4.7 面⑤/⑥ 的执行方式（编译衍生同步豁免）
 
 面⑤/⑥ 与被迁移的生产代码同处 `crates/pony-agent-core/src/agent/tools.rs`（同 crate、同编译单元），**不单独出红相**，
@@ -398,7 +412,7 @@ C2 只增加"生产路径上确实会接线"，**不删除**任何 fail-closed �
 
 - **C4-A1**：`cargo test -p pony-agent-core --test tool_surface_wave20_contract --test wave37_tool_surface --test wave25_capability_honesty_test` 全绿（Exit 0）。
 - **C4-A2**：`cargo test -p pony-agent-core --lib` 全绿（面④/⑤/⑥）。
-- **C4-A3**：`git diff` 中上述 6 个面的断言数量只增不减（旧断言逐条可映射）。
+- **C4-A3**：`git diff` 中上述 7 个面的断言数量只增不减（旧断言逐条可映射；面⑦的 seam 迁移以 `922e960` 为留痕基准）。
 - **C4-A4**：冻结由 Lead 一票决定：本文件状态为 `FROZEN v1.2`，测试断言后续改动必须走 successor 契约。
 
 ---
@@ -461,6 +475,11 @@ DSH 中团队工具注册与策略段由**同一个** `install()` 同步注册�
 
 **规则**：许可所有权必须 **move 进工作线程**（`std::thread::spawn` 的 move 闭包内持有），线程正常结束或
 `catch_unwind` 展开结束时才释放；父线程的超时返回**不得**释放许可。
+
+> **实施状态（v1.4 实测，已闭环）**：`subagent_runtime.rs:206` `let _inflight = inflight;` 已把许可 move 进工作线程
+> （注释 `Wave-61 C.2`），父线程超时返回不再提前归还许可 → 原缺陷（并发可突破 2）已消除。
+> **残余后果（必须登记）**：孤儿线程会**持续占用许可**直到其自建 runtime 结束（provider 通道 30min 上界），
+> 期间新的 `subagent()` / `drive_teammate_turn_in()` 会持续命中 `subagent_busy` —— 见 §6.2 豁免条目的 `guarantee`。
 
 - **C6-A1**：超时路径下（父线程已返回 `subagent_timeout`），孤儿线程存活期间不得出现"在跑 turn 数 > 2"；
   线程结束后许可可重新获取。
@@ -558,7 +577,67 @@ splice 起点 `1 + 0` 会与实际已 push 的 2 条 System 错位 → 下标越
 - **C9-A3**：splice 下标 == 实际 System 消息条数（`1 + extra`），越界在结构上不可能；
   native 与 normalized 两条路径的 extra 取值一致。
 
-## 审查收据（L3-A / L3-P @`60e7cb8`）
+## C10 驱动可靠性契约（方案审查收据要求）
+
+**依据**：方案审查 @`922e960` BLOCKING（`orchestration.rs:452`）与复审 @`922e960` BLOCKING（`:746` 丢消息 / `:461` 无单飞）。
+规则：队友消息的"入队 → 驱动 → 回执"链路必须**既不丢失也不并发重复**，且状态机器可观察。
+
+### C10.1 每目标单飞（同一 target 同时最多一个驱动循环）
+
+- 进程级单飞标记：`static DRIVING: Mutex<Option<HashSet<String>>>`（`orchestration.rs:134`），
+  由 RAII 句柄 `DrivingGuard`（`:138-147`）持有——**任何**退出路径（成功 / 引擎 Err / panic 展开）都清除标记（`Drop` `:141-146`）。
+- `begin_driving(target)`（`:150-158`）返回 `Some(guard)` 才允许派生驱动线程；已有人在跑时**只入队**、不派生第二个线程
+  （`send_message_in_workspace` `:533-549`）。
+- 驱动体为**循环** `drive_loop_in`（`:556-568`）：`loop { drain → 空则退出 → run_turn → 投递回执 }`，直到收件箱为空才结束。
+- **C10-A1**：同一 target 并发 `send_message` N 次时，同时在跑的驱动循环数 ≤ 1；
+  `is_driving(target)`（`:161-168`）在驱动结束后必须为 `false`（无标记泄漏）。
+- **C10-A2**：驱动循环在"收件箱非空"期间持续消费——入队 K 条消息后，引擎 `run_turn` 调用次数与消息批次一致且**最终收件箱为空**。
+- **C10-A3**：`DrivingGuard` 的清除点只有一个 `Drop` 实现；panic 展开路径同样清除（无 `mem::forget`/无手工漏清）。
+
+### C10.2 失败补偿（消息绝不丢失、不得声称已处理）
+
+- 引擎返回 `Err`（`subagent_busy` / `subagent_timeout` / `prompt_too_large` / 任意错误）时：
+  1. 本轮 drain 出的整批消息**按原顺序放回队首**（`requeue_messages` `:170-…`，`drive_teammate_turn_in` `:869`）；
+  2. 成员状态回 `Inactive`（`:870`）；
+  3. 向 Lead 收件箱投递**错误回执**（含 target、被回队条数、错误文本；`:872-882`），不含任何假成功；
+  4. 函数返回 `Err`（`:883`）——上层不得把它呈现为"已处理"。
+- 确定性失败（如 `prompt_too_large`）会**反复失败而消息仍在队列**（不静默丢弃），由调用方拆分消息解决。
+- **C10-A4**：注入返回 `Err("subagent_busy")` 的 Stub 引擎后，`send_message` 的返回值/回执**不得**声称 `delivered`/已处理；
+  收件箱条数在失败后与失败前**相等**，且队首顺序与入队顺序逐条一致。
+- **C10-A5**：失败后 `list_agents` 中该成员状态为 `Inactive`，且 Lead 收件箱新增一条错误回执（`drain_inbox` 可取，内容含错误码）。
+
+### C10.3 状态可观察序列
+
+- 引擎在位时，成员状态序列必须为 **`Active`（入队/派生）→ `Running`（驱动开始）→ `Inactive`（收口）**
+  （`set_teammate_status` 调用点：`:537` Running、`:853` Running、`:899-906`/`:871` Inactive），且全部经 `list_agents` 可观测。
+- 无引擎降级路径沿用既有 `Active` 口径（`:888`），**不**伪造 `Inactive`（fail-closed，与 C7 诚实性一致）。
+- **C10-A6**：以记录型 Stub 引擎跑一次 `send_message`，采样 `list_agents` 必须依次观测到 `Running` 与 `Inactive`
+  （不得跳过 `Running`，也不得在 turn 仍在执行时报告 `Inactive`）。
+
+> **实施状态（本契约写作时的实测）**：C10.1/C10.2/C10.3 已在**工作树**落地
+> （`DELIVERY_STATE_DRIVING` `:128`、`DRIVING` `:134`、`DrivingGuard` `:138-147`、`begin_driving` `:150-158`、
+> `is_driving` `:161-168`、`requeue_messages` `:170-…`、`drive_loop_in` `:556-568`），但**尚未提交**；
+> `crates/pony-agent-core/tests/**` 中暂无引用 `is_driving` / `requeue_messages` / `DELIVERY_STATE_DRIVING` 的用例
+> → **C10-A1..A6 目前为无断言状态（假绿风险）**，Test Agent 必须补用例，否则 C10 视为未收口。
+
+## C11 已知局限与劝告性条款登记（不得隐藏）
+
+以下条款经实测确认**在本仓无代码强制点**，属**协议劝告**或**已接受风险**；本契约显式登记，禁止在文档/UI 中反向承诺：
+
+| # | 局限 | 实测证据 | 定性 / 处置 |
+|---|---|---|---|
+| L1 | 策略段「A peer message starts with its sender name」无代码对应 | `QueuedMessage`（`orchestration.rs:114-119`）只有 `id`/`content`/`is_steer`，**无 sender 字段**；入队存原文（`:576` 起 `enqueue_message`），驱动仅 `- {content}` 平铺（`:857-860`） | **劝告**（非强制）；策略段该句须在 successor 中改写或实现补齐 |
+| L2 | 策略段「running 目标在最近 step 边界接收」无代码对应 | 实现实为"新起线程跑新 turn"（`drive_loop_in` `:556-568` + `drive_teammate_turn_in` `:836`），不存在 step 边界抢占点 | **劝告**；措辞应改为"入队并在下一次驱动循环被消费" |
+| L3 | 协作协议（写域切分 / 任务板 / 收尾纪律）无代码强制点 | `team_task_*` 只维护数据结构；无 write-scope 校验、无收尾门（Lead 收尾仅靠策略段第 7 条） | **劝告**；不得在任何位置声称"强制/校验" |
+| L4 | `provisioning` / `failed` 两状态**无任何写入点** | `TeammateStatus` 枚举含两状态（`:55-61`），全仓仅读（`list_agents`），无 setter 调用 | **劝告 + 待修**：策略段宣传这两态会让模型等待永不出现的状态 |
+| L5 | `interrupt_agent` 承诺与实现不一致（复审 BLOCKING） | 实现只翻状态位（`:661-675`），驱动仅在两个检查点观察（`:841` 进入前、`:845` drain 前）；**已进入的 turn 跑完并照常写工作区、照常发回执**；而工具描述（`tools.rs:6053`）与策略段（`context.rs:72`）写"aborts ... current turn" | **C7-A4 要求的三处登记未同步**（契约②/策略段③/测试注释）；必须补齐并改写承诺为"下一次 drain 前停止"；**不得**承诺立即停止 |
+| L6 | 无 kill-switch | 无配置开关可关闭团队工具/策略段；回滚只能代码回退（revert `60e7cb8`/`922e960`） | **已接受风险** + 后续 backlog（不阻塞本波） |
+| L7 | `spawn_teammate` 自动驱动分支与 C8 `ToolRouter` 接线**无独立用例** | `c7_send_message_drives_teammate_turn` 覆盖主路径；`spawn` 的 auto-drive（`:344-365`）与 tools→会话根链路无断言 | **覆盖缺口**：登记为待补用例（C7/C8 主路径已覆盖，故不阻塞） |
+
+> **纪律**：L1–L7 中任何一条被修复后，必须在 successor 契约中删除对应行；**不得**在 L 未修复期间于策略段/工具描述/
+> 发布说明中出现超出口径的承诺（诚实性底线，wave-25 冻结面同源）。
+
+## 审查收据（L3-A / L3-P @`60e7cb8`；方案审查 / 复审 @`922e960`）
 
 ### A. L3-A（`.dev-team/review-wave61-a.json`）：`verdict: FAIL`，7 findings（2 BLOCKING / 5 ADVISORY）
 
@@ -603,6 +682,43 @@ splice 起点 `1 + 0` 会与实际已 push 的 2 条 System 错位 → 下标越
 > P4 由 §6.2 NFR 豁免 + C6.3 收口；**C7 / C8 / C9 为 v1.3 新增的实施面，其断言在实现落地前视为红相**。
 > L3-A/L3-P 的最终 PASS 由 Lead 在下一轮复审给出。
 
+### D. 方案审查（收口期补跑，`.dev-team/review-plan-wave61-team.json`）：FAIL @`922e960`，9 findings（2 BLOCKING / 7 ADVISORY）
+
+| # | 严重度 | 位置 | 规则 | 处置（v1.4） |
+|---|---|---|---|---|
+| D1 | **BLOCKING** | `orchestration.rs:452` | CONCURRENCY（库层驱动无单飞与丢消息） | **C10.1 + C10.2** |
+| D2 | **BLOCKING** | `tests/pa110_teams_acceptance.rs:187` | CONTRACT_BREAK（AC-05 迁移未落契约） | **C4.6b 面⑦**（Lead 授权 + `922e960` 留痕；旧→新断言与理由已写入 C4） |
+| D3 | ADVISORY | `orchestration.rs:742` | CORRECTNESS | 驱动检查点/顺序 → **C10.1 / C10.3** |
+| D4 | ADVISORY | `context.rs:63` | CORRECTNESS | 策略段留痕与断言强度 → **C11 L1/L2/L5 + C10 断言补强** |
+| D5 | ADVISORY | `tests/wave61_team_activation.rs:832` | CORRECTNESS | 用例断言不足（假绿缺口）→ **C10 实施状态声明**（无 C10 断言即视为未收口） |
+| D6 | ADVISORY | `orchestration.rs:764` | CONCURRENCY | 队友驱动路径的并发面 → 见 E8（C6-A3 覆盖范围缺口登记） |
+| D7 | ADVISORY | 本契约 `:454`（v1.3 C6.1 段） | CONCURRENCY | 契约与实现一致性 → v1.3 已按 `gates_concurrency_internally()` 实现改写，v1.4 复核通过 |
+| D8 | ADVISORY | `tools.rs:7466` | NFR_VIOLATION | 工具面项数口径 → **C1.2 / C1-A1**（38 项）复核 |
+| D9 | ADVISORY | `context.rs:76` | NFR_VIOLATION | 策略段门控 → **C3.1 / C9-A1**（单次求值）复核 |
+
+> D3–D9 审查件仅给位置+规则（无摘要文本），故按"位置+规则→契约条款"映射，未编造意图。
+
+### E. 复审（`.dev-team/review-wave61-recheck.json`）：FAIL @`922e960`，13 findings（3 BLOCKING / 10 ADVISORY）
+
+| # | 严重度 | 位置 | 要点 | 处置（v1.4） |
+|---|---|---|---|---|
+| E1 | **BLOCKING** | `orchestration.rs:746` | DATA_LOSS：先 drain 后跑 turn，Err 时消息已消费不回收；`send_message` 已返回 `delivered:true` | **C10.2**（回队首 + Inactive + 错误回执 + 返回 Err） |
+| E2 | **BLOCKING** | `context.rs:72` | `interrupt_agent` 承诺与实现相反，C7-A4 要求的三处登记反向落地 | **C11 L5** + C7-A4（补齐 commit 前必须改写承诺口径） |
+| E3 | **BLOCKING** | `orchestration.rs:461` | 无驱动去重/串行化：running 期间新消息会并发起第二个 turn、状态抖动 | **C10.1**（单飞标记 + DrivingGuard） |
+| E4 | ADVISORY | `orchestration.rs:354` | `let _ = send_message_in_workspace(...)` 吞错、仍回 status:ok | 登记 backlog（不在本波写域） |
+| E5 | ADVISORY | `orchestration.rs:464` | 新增非锁中毒 eprintln 落在豁免口径之外；`covers_new_lines=5` 失真 | §6.1 已存档；**不改既有值** → backlog（PA-119） |
+| E6 | ADVISORY | `orchestration.rs:512` | `TEAMMATE_INBOXES` 无容量上界，回执含完整模型输出 | backlog（与 `resource_release` 的 bounded_queue 口径对齐） |
+| E7 | ADVISORY | `orchestration.rs:461` | 每消息 `thread::spawn` 无 fallible 处理（实测 EAGAIN） | backlog（JobRegistry/线程池兜底） |
+| E8 | ADVISORY | `orchestration.rs:768` | 队友驱动绕过入口门：注入式引擎下 team 路径无许可/无体积门 | **C6-A3 覆盖范围缺口**，登记；successor 须扩展到 `drive_teammate_turn_in` |
+| E9 | ADVISORY | `tools.rs:1579` | 透传的是 router 默认根而非**会话根**（`resolved_workspace_root(context, ws_id)` 未被团队路径使用） | **C8 缺口登记**：C8-A1 只锁"透传"，未锁"会话绑定根"；successor 须补 |
+| E10 | ADVISORY | `tests/wave61_team_activation.rs:772` | c7 用库层 `spawn_teammate`（非模型入口），spawn auto-drive 修复零断言；c7 未断言 prompt 含消息内容 | 见 **C11 L7**；C7-A1 断言须补"prompt 含消息内容" |
+| E11 | ADVISORY | `tests/pa110_teams_acceptance.rs:204` | 实施者改写冻结用例需 Lead 追认 | **C4.6b 面⑦** 已按 Lead 一票授权 + `922e960` 留痕 ✔ |
+| E12 | ADVISORY | `context.rs:68` | 策略段 sender 前缀与 `provisioning`/`failed` 两态均无实现对应 | **C11 L1 / L4** |
+| E13 | ADVISORY | `.dev-team/nfr-baseline.json:70` | 豁免条目 `guarantee` 与 C6.2 修复后代码矛盾（许可已 move 进线程） | **§6.2 已校正**（surface 扩展到 `drive_teammate_turn_in`；guarantee 改为"孤儿占许可至 30min 上界"） |
+
+> **收口判定**：E1/E2/E3 由 C10 + C11 承担（C10 实现已在工作树、**用例待补**；E2 的承诺改写属 Executor 的 src 写域，
+> 本契约只登记"必须补齐，不得承诺立即停止"）。E4–E7、E9、E10 登记为 backlog/缺口，不伪造为已修。
+
 ## 6. NFR 基准增量（`.dev-team/nfr-baseline.json`，additive-only）
 
 追加字段（不改动任何既有字段；同步在 schema 中**增量**声明为可选属性，不进入顶层 `required`，
@@ -642,11 +758,11 @@ splice 起点 `1 + 0` 会与实际已 push 的 2 条 System 错位 → 下标越
 
 | 字段 | 值 |
 |---|---|
-| `surface` | subagent turn（`HostTurnEngine` / `orchestration::subagent` 的 `run_turn`） |
+| `surface` | subagent turn（`HostTurnEngine` / `orchestration::subagent` 的 `run_turn` / 队友驱动 `drive_teammate_turn_in`，`orchestration.rs:836`） |
 | `code` | `crates/pony-agent-core/src/agent/orchestration.rs:237 SUBAGENT_TURN_TIMEOUT_MS = 120_000`（调用点 `:265`/`:276`/`:595`） |
 | `semantics` | turn 级端到端预算（经 `run_turn(prompt, timeout_ms)` 注入），非 `external_call_timeout_ms = 3000` 的请求级往返预算 |
 | `why_not_base` | 120000 是「一次子代理 turn 从建栈到产出」的总预算，套 3000ms 会截断任何真实子代理回合（含 provider 生成与工具往返）；与 `provider streaming (SSE)` 例外同性质 |
-| `guarantee` | 超时以结构化 `subagent_timeout: orphan session_id=…` 返回；孤儿线程与许可提前归还属 C6.2 已登记的**已知限制**（引擎无 stop API） |
+| `guarantee` | 超时以结构化 `subagent_timeout: orphan session_id=…` 返回；**许可已 move 进工作线程（C6.2 已闭环，`subagent_runtime.rs:206`）**，故不再提前归还；残余后果＝孤儿线程持续占许可直到 provider 通道 30min 上界，期间 `subagent`/队友驱动会持续 `subagent_busy`（引擎无 stop API，已登记） |
 | `known_gap_ref` | L3-P@`60e7cb8` Q1 FAIL / finding `orchestration.rs:237`；C6.3 基线复登 `subagent_turn_timeout_ms=120000` |
 | `l3p_blocking_resolution` | v1.3 按 Lead 裁决：登记豁免 + 基线复登；**不修改** `external_call_timeout_ms=3000`、不放宽既有 streaming 例外 |
 
@@ -677,8 +793,16 @@ git status --porcelain -- .dev-team/
 3. **[UNVERIFIED]** 9 项团队工具进入 provider payload 后，各 provider 侧是否存在工具数量/字节上限截断（未测真实请求体积）。
 4. **[UNVERIFIED]** 多宿主同进程时 `workspace_root` 首写者语义的实际影响（C2.4）。
 5. **[VERIFIED @工作树]** C6.1 已由 Executor 以 `gates_concurrency_internally()` 自持门标志实现（`subagent_runtime.rs:38-47`/`:164-166`、`orchestration.rs:255-266`）；**并发收益（有效并发恢复 2）未压测** → 仍属 [UNVERIFIED]。
-6. **[UNVERIFIED]** C7（真实能力：驱动执行/状态迁移/回执来源）、C8（`run_turn_in` 根透传）、C9（单次求值）在 `@60e7cb8` 时**尚未实现**（C8/C9 的符号在工作树中不存在）；其断言在实现落地前视为红相。
-7. **[UNVERIFIED]** C7-A4 的"下一次 drain 前停止"语义未做端到端计时验证（引擎无 stop API，只能以 drain 时序断言近似）。
+6. **[VERIFIED @`922e960` + 工作树]** C7/C8/C9 已实现：`run_turn_in`（`subagent_runtime.rs:53` 默认实现 / `:294` HostTurnEngine 覆写）、
+   `subagent_in_workspace`（`orchestration.rs:335`）、`drive_teammate_turn_in`（`:836`）、
+   `agent_team_policy_enabled()` 在组装内单次求值（`context.rs:454` `let team_policy_injected = …`）；用例 `c7_*`/`c8_*`/`c9_*`（`tests/wave61_team_activation.rs:585/611/634`）。
+   **仍属 [UNVERIFIED]**：c7 的断言强度（复审 E10：未断言 prompt 含消息内容、未覆盖模型入口 auto-drive）。
+7. **[VERIFIED @工作树]** C10.1/C10.2/C10.3 已实现（`DRIVING` `orchestration.rs:134`、`DrivingGuard` `:138-147`、`begin_driving` `:150-158`、
+   `requeue_messages` `:170-…`、`drive_loop_in` `:556-568`），但**未提交**且 **`tests/**` 无任何 C10 断言** → C10-A1..A6 处于假绿风险，
+   在用例补齐前**不得**声称 C10 已收口。
+8. **[UNVERIFIED]** C7-A4 的"下一次 drain 前停止"语义未做端到端计时验证（引擎无 stop API，只能以 drain 时序断言近似）；
+   `interrupt_agent` 的承诺口径（工具描述 + 策略段）尚未按 C11 L5 改写。
+9. **[UNVERIFIED]** 复审 E9 指出的"团队路径透传 router 默认根而非会话根"未验证：C8-A1 只锁"透传"链，未锁 `workspace_id` 会话绑定链。
 
 ---
 
