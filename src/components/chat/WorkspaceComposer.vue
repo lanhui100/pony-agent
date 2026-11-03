@@ -9,10 +9,8 @@ import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useAskStore } from "@/stores/ask";
 import { pickFiles } from "@/lib/runtime/file-attachments";
-import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
 import { recordFrontendInstant } from "@/lib/frontend-flight-recorder";
 import { isImeComposingEvent } from "@/lib/ime";
-import { isDebugLoggingEnabled } from "@/lib/runtime/utils";
 import Button from "@/components/ui/Button.vue";
 import Switch from "@/components/ui/Switch.vue";
 import {
@@ -76,55 +74,6 @@ const modelSubmenuDirection = ref<'left' | 'right'>('right');
 const reasoningSubmenuDirection = ref<'left' | 'right'>('right');
 const modelSubmenuRef = ref<HTMLElement | null>(null);
 const reasoningSubmenuRef = ref<HTMLElement | null>(null);
-
-// 上下文用量与生成速度接入 (需求 1 & task-8)
-const {
-  contextDisplayTokens,
-  currentContextWindowTokens,
-  sessionTokenGenerationSpeed,
-  tokenSpeedCalculationMode
-} = useTraceProjection({ liveTurnEnabled: ref(true) });
-
-function formatCompactTokenInteger(value?: number | null) {
-  if (value == null || !Number.isFinite(value)) { return "0"; }
-  if (value >= 1_000_000) { return `${Math.round(value / 1_000_000)}M`; }
-  if (value >= 1_000) { return `${Math.round(value / 1_000)}K`; }
-  return String(value);
-}
-
-const contextUsagePercentage = computed(() => {
-  if (contextDisplayTokens.value == null || !currentContextWindowTokens.value || currentContextWindowTokens.value <= 0) {
-    return 0;
-  }
-  const ratio = (contextDisplayTokens.value / currentContextWindowTokens.value) * 100;
-  return Math.min(100, Math.max(0, ratio < 1 && ratio > 0 ? 1 : Math.round(ratio)));
-});
-
-const contextUsageTooltip = computed(() => {
-  const speedStr = sessionTokenGenerationSpeed.value != null
-    ? ` · 速度: ${Math.round(sessionTokenGenerationSpeed.value)} t/s (${tokenSpeedCalculationMode.value})`
-    : "";
-  if (contextDisplayTokens.value == null) {
-    return `上下文用量：暂无数据${speedStr}`;
-  }
-  if (!currentContextWindowTokens.value || currentContextWindowTokens.value <= 0) {
-    return `上下文用量：${formatCompactTokenInteger(contextDisplayTokens.value)}${speedStr}`;
-  }
-  const exactPercentage = ((contextDisplayTokens.value / currentContextWindowTokens.value) * 100);
-  const displayPercent = exactPercentage > 0 && exactPercentage < 1 ? "<1" : String(Math.round(exactPercentage));
-  return `上下文用量：${displayPercent}% · ${formatCompactTokenInteger(contextDisplayTokens.value)} / ${formatCompactTokenInteger(currentContextWindowTokens.value)}${speedStr}`;
-});
-
-const contextDebugString = computed(() => {
-  const inVal = contextDisplayTokens.value ?? "-";
-  const winVal = currentContextWindowTokens.value ?? "-";
-  const pctVal = contextUsagePercentage.value;
-  const modeVal = tokenSpeedCalculationMode.value;
-  const speedVal = sessionTokenGenerationSpeed.value != null ? Math.round(sessionTokenGenerationSpeed.value) : "-";
-  return `in=${inVal};win=${winVal};pct=${pctVal};mode=${modeVal};speed=${speedVal}`;
-});
-
-const debugAttrsEnabled = computed(() => isDebugLoggingEnabled());
 
 const modelSearchQuery = ref("");
 const modelSearchDebounced = ref("");
@@ -1120,49 +1069,6 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="flex min-w-0 flex-wrap items-center gap-2">
-          <!-- 上下文窗口圆形进度条 (模型左侧) -->
-          <TooltipRoot :delay-duration="200">
-            <TooltipTrigger as-child>
-              <span tabindex="0" class="inline-flex cursor-help">
-                <div
-                  class="flex items-center justify-center p-0.5 text-stone-400 hover:text-stone-600 transition-colors"
-                  data-testid="workspace-context-usage-circle"
-                  aria-label="上下文用量"
-                  :data-context-debug="debugAttrsEnabled ? contextDebugString : undefined"
-                >
-                  <svg class="h-3.5 w-3.5 -rotate-90 transform" viewBox="0 0 20 20">
-                    <circle
-                      cx="10"
-                      cy="10"
-                      r="7.5"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2.4"
-                      class="opacity-20"
-                    />
-                    <circle
-                      cx="10"
-                      cy="10"
-                      r="7.5"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2.4"
-                      stroke-linecap="round"
-                      :stroke-dasharray="2 * Math.PI * 7.5"
-                      :stroke-dashoffset="(2 * Math.PI * 7.5) * (1 - contextUsagePercentage / 100)"
-                      class="transition-all duration-500 ease-out text-stone-500 hover:text-stone-700"
-                    />
-                  </svg>
-                </div>
-              </span>
-            </TooltipTrigger>
-            <TooltipPortal>
-              <TooltipContent role="tooltip" side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs text-stone-700 shadow-sm">
-                {{ contextUsageTooltip }}
-              </TooltipContent>
-            </TooltipPortal>
-          </TooltipRoot>
-
           <div ref="menuRef" class="relative">
             <TooltipRoot :delay-duration="300">
               <TooltipTrigger as-child>
