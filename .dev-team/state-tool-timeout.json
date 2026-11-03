@@ -37,5 +37,76 @@
     "B004": "CT-5 hint 指向 job_start",
     "B005": "真·promote",
     "B006": "3 ADVISORY"
-  }
+  },
+  "waves": [
+    {
+      "id": "v2-v3",
+      "scope": "默认120s/上限600s/删启发式/证据timedOut",
+      "commit": "94f1053"
+    },
+    {
+      "id": "v3",
+      "scope": "CT-5 hint 指向 job_start（含冻结断言迁移）",
+      "commit": "7675017"
+    },
+    {
+      "id": "v4-v6",
+      "scope": "promote 实现 + L3 双路 FAIL + 改 opt-in",
+      "commit": "11a93ff"
+    },
+    {
+      "id": "B008",
+      "scope": "promoted 条目回收",
+      "commit": "5cdce74"
+    },
+    {
+      "id": "B009",
+      "scope": "取消接线 + POSIX 进程组收口",
+      "commit": "87b3a19"
+    },
+    {
+      "id": "B012",
+      "scope": "job 层会话归属",
+      "commit": "0ebfd9a"
+    },
+    {
+      "id": "B010",
+      "scope": "promote 结果恢复熔断输入 + 禁止重复执行",
+      "commit": "0b6c5c2"
+    },
+    {
+      "id": "B011",
+      "scope": "UI 已转后台徽标",
+      "commit": "7b2876d"
+    },
+    {
+      "id": "B013",
+      "scope": "promoted 终态清理临时脚本",
+      "commit": "0e795ff"
+    },
+    {
+      "id": "v7",
+      "scope": "promote 默认开启（opt-out）",
+      "commit": "1968edf2"
+    },
+    {
+      "id": "v8",
+      "scope": "timeoutMs 分桶参与指纹",
+      "commit": "b5107687"
+    }
+  ],
+  "objective_status": {
+    "default_120s": true,
+    "cap_600s": true,
+    "heuristic_removed": true,
+    "promote_default_on": true,
+    "hint_points_to_job": true,
+    "fingerprint_keeps_timeout": true,
+    "timedout_structured": true
+  },
+  "residual_risks": [
+    "Windows 真机端到端未验证（.cmd 清理与 Job Object 路径）",
+    "trace 时间线仍把 promoted 记为 completed（会牵动 V10 冻结快照，另立卡）",
+    "基线既有红 tui_acceptance::test_provider_selector_state_logic（外部 commit 22241e9）"
+  ]
 }
