@@ -553,7 +553,22 @@ describe("HomeSidebar", () => {
           phase: "completed",
           inputTokens: 8437,
           cacheHitInputTokens: 4352,
-          outputTokens: 1366
+          outputTokens: 1366,
+          // wave-61 §5.1（D5，Lead 一票裁决 2026-11-03）：补一条 per-call 记录，只加数据、不改断言强度。
+          // 原意图：本用例要验证「输入/输出/缓存三位有值 ⇒ 其 tooltip 语义可达」。
+          // 缺陷根因：`sessionCacheHitTokensTotal` 由 `providerCallRecords[].cacheHitInputTokens` 求和，
+          //   仅有 turn 级 `cacheHitInputTokens` 时该值为 null ⇒ 按 §2 E-2 缓存位整个不渲染。
+          // 修正：补 per-call 记录（含 cacheHitInputTokens / cacheMissInputTokens / outputTokens），
+          //   **刻意不提供 `turnDurationMs` / `firstTokenLatencyMs`** ⇒ 生成速度仍无值，
+          //   使「速度位缺席 ⇒ 其 tooltip 缺席」的条件断言前提保持成立（只补缓存维度）。
+          providerCallRecords: [
+            createProviderCallRecord({
+              inputTokens: 8437,
+              cacheHitInputTokens: 4352,
+              cacheMissInputTokens: 4085,
+              outputTokens: 1366
+            })
+          ]
         })
       ]
     });
@@ -572,7 +587,25 @@ describe("HomeSidebar", () => {
     //   迁移理由：wave-61 §2 E-2 让「无值位点」整个不渲染，其内层 Tooltip 随之消失；
     //             本夹具无 per-call 分量 ⇒ 只有速度位缺席，其余三位在场。
     //   等价断言：输入/输出/缓存读取三个基础标签仍在；速度位缺席 ⇒ 其 tooltip 亦缺席。
-    expect(tooltipTexts).toEqual(expect.arrayContaining(["输入", "输出", "缓存读取"]));
+    // wave-61 §5.1（D5，Lead 一票裁决 2026-11-03：**恢复强断言**，用补夹具而非放宽断言）：
+    //   夹具已补 per-call 缓存记录 ⇒ 输入/输出/缓存三位均在场 ⇒ 「缓存读取」可无条件精确包含。
+    expect(
+      tooltipTexts,
+      `wave-61 §5.1（R6）：输入/输出/缓存三位有值 ⇒ 三个基础标签必须可达；实际 tooltip 文案：${JSON.stringify(tooltipTexts)}`
+    ).toEqual(expect.arrayContaining(["输入", "输出", "缓存读取"]));
+
+    // 夹具自检（Lead 指定）：缓存位必须真实渲染且文本非空 —— 防止将来夹具退化后
+    // 「tooltip 名单」断言退化成与数据无关的空断言。
+    const cacheSlot = statusPanel.querySelector<HTMLElement>('[data-testid="status-metric-cache-tokens"]');
+    expect(
+      cacheSlot,
+      "D5 夹具自检：补齐 per-call 记录后缓存位 status-metric-cache-tokens 必须在 DOM（否则强断言无从成立）"
+    ).not.toBeNull();
+    expect(
+      (cacheSlot?.textContent ?? "").trim(),
+      "D5 夹具自检：缓存位文本必须非空（值来自 providerCallRecords[].cacheHitInputTokens）"
+    ).not.toBe("");
+
     expect(
       tooltipTexts,
       "wave-61 §5.1（R6）条件等价断言：速度位不存在 ⇒ 其 tooltip 亦不得存在"

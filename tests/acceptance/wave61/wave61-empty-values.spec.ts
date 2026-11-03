@@ -26,7 +26,8 @@ import {
   TOKEN_SLOT_TESTIDS,
   allElements,
   collectTooltipTexts,
-  mountStatusPanel
+  mountStatusPanel,
+  semanticChildren
 } from "./wave61-harness";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -185,10 +186,18 @@ describe("wave-61 §2 空值契约（E-1..E-5）", () => {
     ).toBe(true);
     const cacheSlot = cacheSlotProbe;
 
-    // Assert（契约主体 1：尾段移出行内 —— 只剩「图标 + 值」两个子节点）
+    // Assert（契约主体 1：尾段移出行内 —— 只剩「图标 + 值」两个**语义**子节点）
+    //
+    // 用例缺陷修正（2026-11-03，Lead 复核授权「用例自身缺陷重写豁免」）：
+    //   缺陷根因：原断言用 `children.length === 2`，但挂载把 `Teleport` 桩成 `teleport: true`，
+    //   缓存位内两个 `Tooltip`（图标 + 值）各渲染一个 `TELEPORT-STUB` ⇒ DOM 实得 4，
+    //   该断言在任何实现下不可满足（原实现同样如此），属测试环境渲染噪声而非 SUT 缺陷。
+    //   修正：只统计非 `teleport-stub` 的语义子节点。原意图（尾段 `· 12%` 不在行内）不弱化：
+    //   仍由「语义子节点恰为 2」+「行内无 `·` / `%`」+「比率出现在 tooltip 文案」三重覆盖。
+    const cacheChildren = semanticChildren(cacheSlot.element);
     expect(
-      cacheSlot.element.children.length,
-      `E-2（R1）：缓存位行内必须只剩「图标 + 值」两个子节点；实际 ${cacheSlot.element.children.length} 个`
+      cacheChildren.length,
+      `E-2（R1）：缓存位行内必须只剩「图标 + 值」两个语义子节点；实际 ${cacheChildren.length} 个：${cacheChildren.map((node) => node.tagName.toLowerCase()).join(" | ")}（已排除 teleport-stub）`
     ).toBe(2);
     expect(cacheSlot.text(), "E-2（R1）：行内不得再出现 `· 12%` 尾段").not.toContain("·");
     expect(cacheSlot.text(), "E-2（R1）：行内不得再出现百分比尾段（实测 86px > 63.5px track）").not.toContain("%");
@@ -213,10 +222,27 @@ describe("wave-61 §2 空值契约（E-1..E-5）", () => {
     ).toBe(true);
 
     // Assert（契约主体 3：无比率时不渲染比率文案）
+    //
+    // 用例缺陷修正（2026-11-03，Lead 复核授权「用例自身缺陷重写豁免」）：
+    //   缺陷根因：原断言对**全部** tooltip 文案扫 `\d+%`，而圆环 tooltip 天然含
+    //   `上下文用量：<1% · …`（契约 §1 L-2 语义）⇒ 该断言与 L-2 直接冲突，任何正确实现都会红。
+    //   修正：把百分比检查限定在「缓存位相关 tooltip」（文案含 `缓存读取` 或 `命中率`），
+    //   原意图（ratio 为空时不得出现比率文案）保持不变。
     const emptyRatioTooltips = collectTooltipTexts(emptyRatioWrapper);
+    const cacheRelatedTooltips = emptyRatioTooltips.filter(
+      (text) => text.includes("缓存读取") || text.includes("命中率")
+    );
     expect(
-      emptyRatioTooltips.some((text) => /\d+%/.test(text)),
-      `E-2：cacheHitRatio 为空串时 tooltip 不得出现比率百分比；实际 tooltip 文案：${JSON.stringify(emptyRatioTooltips)}`
+      cacheRelatedTooltips.length,
+      `E-2：缓存位必须有 tooltip 文案（锚点自检，防止空集上的恒真断言）；实际 tooltip 文案：${JSON.stringify(emptyRatioTooltips)}`
+    ).toBeGreaterThan(0);
+    expect(
+      cacheRelatedTooltips.some((text) => /\d+%/.test(text)),
+      `E-2：cacheHitRatio 为空串时缓存位相关 tooltip 不得出现比率百分比；实际 ${JSON.stringify(cacheRelatedTooltips)}`
+    ).toBe(false);
+    expect(
+      emptyRatioTooltips.some((text) => /命中率\s*[\d.]+%/.test(text)),
+      `E-2：cacheHitRatio 为空串时不得渲染「命中率 x%」；实际 ${JSON.stringify(emptyRatioTooltips)}`
     ).toBe(false);
 
     emptyRatioWrapper.unmount();
@@ -259,23 +285,58 @@ describe("wave-61 §2 空值契约（E-1..E-5）", () => {
   });
 
   it("E-4: 计数行/token 行各自为空时整行折叠；两行皆空且无拦截横幅时外层 section 整段折叠（裁决 R5）", () => {
-    // Arrange 1：三个计数位全空，token 位有值。
+    // Arrange 1：三个计数位全空 **且圆环无值**，token 位有值（⇒ 计数行可见位点数为 0）。
+    //
+    // 用例缺陷修正（2026-11-03，Lead 复核授权「用例自身缺陷重写豁免」）：
+    //   缺陷根因：本分支原先只置空三个计数位，却仍沿用默认夹具的
+    //   `contextDisplayTokens: 9 / contextWindowTokens: 200000` —— 按契约 §1 L-2 圆环是
+    //   计数行的**第 4 个位点**，圆环有值时计数行可见位点数 = 1（不是 0），
+    //   因此「计数行必须不渲染」与契约语义冲突（SUT 行为正确，是用例夹具自相矛盾）。
+    //   修正：本分支同时把圆环数据置空（`contextDisplayTokens: null`），使「可见位点数 = 0」成立。
+    //   原意图保持不变：整行折叠只由「可见位点数为 0」触发。
     const countsEmptyWrapper = mountStatusPanel({
       turnCount: 0,
       modelCallCount: 0,
-      toolCallCount: 0
+      toolCallCount: 0,
+      contextDisplayTokens: null
     });
 
-    // Assert（契约主体 1）
+    // Assert（契约主体 1：可见位点数为 0 ⇒ 整行折叠）
     expect(
       countsEmptyWrapper.find(countsRowSelector).exists(),
-      "E-4：计数行可见位点数为 0 ⇒ 计数行必须整个不渲染"
+      "E-4：计数行可见位点数为 0（三计数位 + 圆环皆无值）⇒ 计数行必须整个不渲染"
     ).toBe(false);
     expect(
       countsEmptyWrapper.find(tokensRowSelector).exists(),
       "E-4：计数行为空不得连带折叠 token 行（token 位仍有值）"
     ).toBe(true);
     countsEmptyWrapper.unmount();
+
+    // Arrange 1b（反向哨兵 · 把语义显式冻结，防止将来被误判为「折叠」）：
+    //   三个计数位全 0，但圆环有值 ⇒ 计数行**仍必须渲染**，且行内只剩圆环 1 个位点。
+    const ringOnlyWrapper = mountStatusPanel({
+      turnCount: 0,
+      modelCallCount: 0,
+      toolCallCount: 0
+    });
+
+    // Assert（反向哨兵 1：计数行必须仍在，可见位点数为 1 而非 0）
+    const ringOnlyCountsRow = ringOnlyWrapper.find(countsRowSelector);
+    expect(
+      ringOnlyCountsRow.exists(),
+      "E-4 反向哨兵：计数位全 0 但圆环有值 ⇒ 计数行**必须仍渲染**（可见位点数 1；契约 §1 L-2 圆环是计数行第 4 个位点）"
+    ).toBe(true);
+
+    // Assert（反向哨兵 2：行内仅剩圆环位 —— 三个计数位按 E-1 各自不渲染）
+    expect(
+      ringOnlyCountsRow.findAll('[data-testid^="status-metric-"]'),
+      "E-4 反向哨兵：三个计数位为 0 ⇒ 必须各自不渲染（行内不得残留 0 占位）"
+    ).toHaveLength(0);
+    expect(
+      ringOnlyCountsRow.findAll(ringSelector),
+      "E-4 反向哨兵：圆环位必须仍在计数行内（唯一位点）"
+    ).toHaveLength(1);
+    ringOnlyWrapper.unmount();
 
     // Arrange 2：四个 token 位全空，计数位有值。
     const tokensEmptyWrapper = mountStatusPanel({
@@ -345,10 +406,20 @@ describe("wave-61 §2 空值契约（E-1..E-5）", () => {
     allEmptyWrapper.unmount();
 
     // Arrange 4（裁决 E-4 防连坐）：用量治理拦截横幅在场时，卡容器保留、只折叠两行指标行。
-    const blockedStore = useRuntimeStore();
-    blockedStore.$patch({
-      governanceDecision: { kind: "Block", current: 1.234, limit: 5, reason: "wave-61 契约用例" }
-    });
+    //
+    // 夹具说明（2026-11-03 实测）：`governanceDecision` 不在 runtime store 的 `state()` 声明里
+    // （由事件处理器动态赋值）；pinia 的 `$patch(object)` 对**未声明键**静默丢弃 ⇒ 必须直接赋值。
+    const blockedStore = useRuntimeStore() as unknown as { governanceDecision: unknown };
+    blockedStore.governanceDecision = {
+      kind: "Block",
+      current: 1.234,
+      limit: 5,
+      reason: "wave-61 契约用例"
+    };
+    expect(
+      (useRuntimeStore() as unknown as { governanceBlockDetail: unknown }).governanceBlockDetail,
+      "E-4：夹具自检 —— 拦截决策必须已生效（否则下方横幅断言会因夹具失效而变成空断言）"
+    ).not.toBeNull();
     const blockedWrapper = mountStatusPanel(ALL_EMPTY_OVERRIDES);
 
     // Assert（契约主体 5：安全/拦截语义优先 —— 横幅必须照常渲染）

@@ -122,6 +122,23 @@ export function allElements(root: Element): Element[] {
   return [root, ...Array.from(root.querySelectorAll("*"))];
 }
 
+/**
+ * 取元素「语义子节点」：排除 jsdom 下 `Tooltip`（`TooltipPortal`）为每个 tooltip 渲染的
+ * `<teleport-stub>` 占位元素。
+ *
+ * 为什么必须排除（用例缺陷根因，2026-11-03 Lead 复核）：
+ *   测试挂载使用 `stubs: { teleport: true }`（reka-ui 的 TooltipContent 走 Portal），
+ *   于是位点内的两个 `Tooltip`（图标 + 值）各会在 jsdom DOM 里渲染一个 `TELEPORT-STUB` 子节点，
+ *   使「位点内部只有「图标 + 值」两个子节点」（契约 §1 L-4）在 **DOM 层面**恒为 4。
+ *   这是**测试环境渲染噪声**，不是实现缺陷（迁移前的原实现同样如此）。
+ *   原意图不变：位点语义上只允许「1 个图标 + 1 个值」两个节点，不得插入宽度预留盒。
+ */
+export function semanticChildren(element: Element): Element[] {
+  return Array.from(element.children).filter(
+    (child) => child.tagName.toLowerCase() !== "teleport-stub"
+  );
+}
+
 /** 统计带指定 class token 的元素（class token 含 `[`/`#`/`]`，不能用 CSS 选择器安全表达）。 */
 export function countByClassToken(root: Element, classToken: string): number {
   return allElements(root).filter((element) => element.classList.contains(classToken)).length;

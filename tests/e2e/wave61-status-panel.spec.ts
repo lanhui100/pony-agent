@@ -30,6 +30,27 @@
  *
  * 零假测试律：全部用例硬断言；无 skip、无吞异常、无硬编码 sleep（只用显式条件等待）。
  *
+ * ── D7 用例缺陷修正（2026-11-03，Lead 复核 G-4 首轮红）───────────────────────────
+ *   现象：G-4b 对 `status-metric-turn-count` 的 easing 断言失败，实测 `"linear"`。
+ *   根因（用例缺陷，非 SUT）：CSS Animation 的 `animation-timing-function` 在 Web Animations API 中
+ *     落到**每个关键帧**的 `easing`（`getKeyframes()[i].easing`），而 `effect.getTiming().easing` 恒为 `"linear"`。
+ *   修正：缓动改读 `getKeyframes()[0].easing`；`duration` 仍读 `getTiming().duration`；并新增
+ *     「关键帧 ≥2」前置断言。原意图（200ms + 精确缓动 + opacity/translateY/scale 语义）**未弱化**。
+ *
+ * ── D8 用例缺陷修正（2026-11-03，Lead 真实浏览器取证后裁决）─────────────────────
+ *   现象：G-4c 计数行第 4 列（圆环位）rect.width 实测 59.41px ⇒ `widthSpread` 超阈。
+ *   根因（**非实现缺陷**）：测量发生在**入场动画进行中**，圆环位 `scale(0.92)→1` 使
+ *     `getBoundingClientRect().width` 随 transform 缩放（63.5×0.92≈58.42；动画结束后回到 63.5；
+ *     `offsetWidth` 两态恒 64）。Lead 已取证。
+ *   修正：新增 `waitForStatusPanelAnimationsSettled()`（等待 `animation.finished` 收敛，**禁止硬 sleep**），
+ *     G-4c / §5.2(R7) / G-4e 测量与截图前均先收敛，并显式断言「仍 running 的动画数 = 0」。
+ *   原意图不变：等列栅格 + 两行列中心对齐 ≤0.5px + `min-w` 预留真实生效。
+ *
+ * ── 契约 L-3 追加裁决 R8（2026-11-03，实现侧修）─────────────────────────────────
+ *   栅格自动流式下隐藏位点会让后位点左移（工具位为 0 时圆环落到第 3 列）；实现已为 8 个位点加
+ *   `col-start-1..4` 显式列位。本文件的 G-4c（列中心对齐 ≤0.5px）**不需要改** ——
+ *   R8 正是「空值不渲染 × 两行对齐」的必要条件，G-4c 首轮红即为该缺陷的物理证据。
+ *
  * 作者：test-agent（L2-T）。冻结后 executor 只读。
  */
 import { expect, test } from "@playwright/test";
@@ -228,9 +249,18 @@ interface CollectedAnimation {
   testid: string | null;
   animationName: string;
   duration: number | string | null;
-  easing: string | null;
-  /** 关键帧（仅保留断言需要的 opacity / transform 字段）。 */
-  keyframes: Array<{ offset: number | null; opacity: string | null; transform: string | null }>;
+  /**
+   * `effect.getTiming().easing`。CSS Animation 下**恒为 `"linear"`**（仅作诊断信息保留，不作契约判定）——
+   * 见下方 D7 用例缺陷记录：`animation-timing-function` 在 WAAPI 里落到**每个关键帧**的 `easing`。
+   */
+  timingEasing: string | null;
+  /** 关键帧（保留断言需要的 easing / opacity / transform 字段）。 */
+  keyframes: Array<{
+    offset: number | null;
+    easing: string | null;
+    opacity: string | null;
+    transform: string | null;
+  }>;
 }
 
 /**
@@ -246,8 +276,13 @@ async function installAnimationCollector(page: Page): Promise<void> {
       testid: string | null;
       animationName: string;
       duration: number | string | null;
-      easing: string | null;
-      keyframes: Array<{ offset: number | null; opacity: string | null; transform: string | null }>;
+      timingEasing: string | null;
+      keyframes: Array<{
+        offset: number | null;
+        easing: string | null;
+        opacity: string | null;
+        transform: string | null;
+      }>;
     };
     document.addEventListener(
       "animationstart",
@@ -268,9 +303,12 @@ async function installAnimationCollector(page: Page): Promise<void> {
             testid: target.getAttribute("data-testid"),
             animationName: animationEvent.animationName,
             duration: (timing?.duration ?? null) as number | string | null,
-            easing: (timing?.easing ?? null) as string | null,
+            timingEasing: (timing?.easing ?? null) as string | null,
             keyframes: computedKeyframes.map((keyframe) => ({
               offset: (keyframe as { offset?: number }).offset ?? null,
+              // D7（用例缺陷修正）：CSS Animation 的 animation-timing-function 在 WAAPI 中
+              // 落在**每个关键帧**的 easing 上；`getTiming().easing` 恒为 "linear"。
+              easing: ((keyframe as { easing?: string }).easing ?? null) as string | null,
               opacity: ((keyframe as { opacity?: string }).opacity ?? null) as string | null,
               transform: ((keyframe as { transform?: string }).transform ?? null) as string | null
             }))
@@ -285,6 +323,48 @@ async function installAnimationCollector(page: Page): Promise<void> {
 async function collectAnimations(page: Page): Promise<CollectedAnimation[]> {
   return page.evaluate(
     () => (window as unknown as { __wave61Animations?: CollectedAnimation[] }).__wave61Animations ?? []
+  );
+}
+
+/**
+ * 等待状态面板两行 8 个位点上的入场动画**全部收敛**后返回「仍 running 的动画数」（期望 0）。
+ *
+ * ── D8 用例缺陷修正（2026-11-03，Lead 真实浏览器取证后裁决）─────────────────────
+ *   现象：G-4c 计数行第 4 列（圆环位）实测 `rect.width = 59.41px`，`widthSpread` 超阈。
+ *   根因（**不是实现缺陷**）：测量发生在**入场动画进行中** —— 圆环位入场含 `scale(0.92)→1`，
+ *     动画期 `getBoundingClientRect().width` 会被 transform 缩放（63.5 × 0.92 ≈ 58.42）。
+ *     Lead 取证：圆环位 动画中 rect.width=58.42 / 动画结束后=63.5；`offsetWidth` 两态恒 64。
+ *   修法（采用 A，禁止硬 sleep）：测量前用 Web Animations API 的 `finished` 收敛动画，
+ *     并对「是否仍有 running 动画」做显式断言（把根因冻结成门禁，防止回归）。
+ *   原意图不变：等列栅格 + 两行列中心对齐 ≤0.5px + `min-w` 预留真实生效。
+ *   §5.2(R7) 的三档宽度测量同样必须在收敛后读取（会被同一 transform 污染）。
+ */
+async function waitForStatusPanelAnimationsSettled(page: Page): Promise<number> {
+  return page.evaluate(
+    async ({ countsRow, tokensRow, ring }) => {
+      const roots = [countsRow, tokensRow, ring]
+        .map((selector) => document.querySelector(selector))
+        .filter((element): element is Element => element != null);
+      if (roots.length === 0) {
+        return -1;
+      }
+      const collectRunning = (): Animation[] =>
+        roots
+          .flatMap((root) => [root, ...Array.from(root.querySelectorAll("*"))])
+          .flatMap((element) => element.getAnimations())
+          .filter((animation) => animation.playState === "running");
+
+      // 收敛循环（显式条件，无固定 sleep）：每个 running 动画 await 其 finished。
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const running = collectRunning();
+        if (running.length === 0) {
+          return 0;
+        }
+        await Promise.all(running.map((animation) => animation.finished.catch(() => undefined)));
+      }
+      return collectRunning().length;
+    },
+    { countsRow: COUNTS_ROW, tokensRow: TOKENS_ROW, ring: RING }
   );
 }
 
@@ -435,7 +515,7 @@ test("G-4b: 空数据 → 位点/DOM 不存在（count=0）；注入数据 → �
   );
   expect(
     numericSlotAnimations.length,
-    `G-4b：数值位点从「不存在」→「有值」必须播放入场动画；实际捕获 ${animations.length} 条 animationstart（位点内 ${numericSlotAnimations.length} 条）：${JSON.stringify(animations.map((entry) => `${entry.testid}/${entry.animationName}/${entry.duration}/${entry.easing}`))}`
+    `G-4b：数值位点从「不存在」→「有值」必须播放入场动画；实际捕获 ${animations.length} 条 animationstart（位点内 ${numericSlotAnimations.length} 条）：${JSON.stringify(animations.map((entry) => `${entry.testid}/${entry.animationName}/${entry.duration}/${entry.keyframes[0]?.easing ?? "(no-keyframe)"}`))}`
   ).toBeGreaterThan(0);
 
   const ringAnimations = animations.filter((entry) => entry.testid === "status-context-usage");
@@ -445,14 +525,33 @@ test("G-4b: 空数据 → 位点/DOM 不存在（count=0）；注入数据 → �
   ).toBeGreaterThan(0);
 
   // Assert 4（契约参数：200ms + cubic-bezier(0.3, 0.7, 0.4, 1)）
+  //
+  // ── D7 用例缺陷修正（2026-11-03，Lead 复核 G-4 首轮红：`status-metric-turn-count` easing 实测 "linear"）──
+  //   缺陷根因：原断言读 `effect.getTiming().easing`。对 **CSS Animation**，WAAPI 把
+  //   `animation-timing-function` 解析到**每个关键帧**的 `easing` 字段（`getKeyframes()[i].easing`），
+  //   而 `effect.getTiming().easing` 恒为 `"linear"` ⇒ 原断言在正确实现下必然失败（用例缺陷，非 SUT 缺陷）。
+  //   修正：缓动改读 `getKeyframes()[0].easing`；时长仍读 `getTiming().duration`（=200ms，原本已通过）。
+  //   原意图**未弱化**：仍精确断言 200ms 与 `cubic-bezier(0.3, 0.7, 0.4, 1)`，并额外要求
+  //   「关键帧 ≥2 且首/末帧 opacity/transform 语义正确」（见 Assert 5）。
   for (const entry of [...numericSlotAnimations, ...ringAnimations]) {
+    // Assert 4a（关键帧可读：首/末帧必须存在 —— easing 的承载面）
+    expect(
+      entry.keyframes.length,
+      `G-4b：${entry.testid} 的入场关键帧必须可读且至少 2 帧（缓动承载在关键帧上）；实际 ${JSON.stringify(entry.keyframes)}（animation=${entry.animationName}）`
+    ).toBeGreaterThanOrEqual(2);
+
+    // Assert 4b（时长：取自 effect.getTiming().duration）
     expect(
       Number(entry.duration),
       `G-4b：${entry.testid} 入场动画时长必须为 ${EXPECTED_DURATION_MS}ms；实际 ${entry.duration}（animation=${entry.animationName}）`
     ).toBe(EXPECTED_DURATION_MS);
+
+    // Assert 4c（缓动：取自 getKeyframes()[0].easing —— 见 D7 根因说明）
+    const keyframeEasing = entry.keyframes[0]!.easing;
     expect(
-      normalizeEasing(entry.easing),
-      `G-4b：${entry.testid} 入场动画缓动必须为 ${EXPECTED_EASING}；实际 "${entry.easing}"`
+      normalizeEasing(keyframeEasing),
+      `G-4b：${entry.testid} 入场动画缓动必须为 ${EXPECTED_EASING}（WAAPI 口径：getKeyframes()[0].easing；`
+        + `getTiming().easing 对 CSS Animation 恒为 "linear"，仅作诊断：${JSON.stringify(entry.timingEasing)}）；实际 "${keyframeEasing}"`
     ).toBe(normalizeEasing(EXPECTED_EASING));
   }
 
@@ -508,7 +607,15 @@ test("G-4c: 两行同为 4 列时，上下 4 个列中心的 x 坐标差 ≤ 0.5
   await openHome(page);
   await seedStatusPanelFixture(page);
 
-  // Act：一次 evaluate 内同步读取两行全部列中心（避免 Vue 重渲染导致读数漂移）
+  // Act 1（D8）：等入场动画收敛后再测量 —— 动画期 `rect.width` 会被 `scale(0.92)` 缩放而失真。
+  const runningAfterSettle = await waitForStatusPanelAnimationsSettled(page);
+  expect(
+    runningAfterSettle,
+    `G-4c（D8）：列宽/列中心测量前，位点入场动画必须已全部收敛（仍有 ${runningAfterSettle} 条 running；`
+      + "动画期 getBoundingClientRect 会被 transform 缩放污染，实测圆环位 58.42 vs 63.5）"
+  ).toBe(0);
+
+  // Act 2：一次 evaluate 内同步读取两行全部列中心（避免 Vue 重渲染导致读数漂移）
   const geometry = await page.evaluate(
     ({ countsRow, tokensRow }) => {
       const readRow = (selector: string) => {
@@ -571,7 +678,14 @@ test("§5.2(R7): 同一 token 位点在 9 / 12 / 1234 三档文本下自身宽�
   await seedStatusPanelFixture(page);
   await expect(page.locator(TOKENS_ROW)).toBeVisible();
 
-  // Act：在真实布局里改写位点内数字文本节点，同步读取三档下的自身宽度与溢出量
+  // Act 1（D8）：三档宽度测量必须在入场动画收敛后读取（否则 `scale(0.92)` 会污染 rect.width）。
+  const runningAfterSettle = await waitForStatusPanelAnimationsSettled(page);
+  expect(
+    runningAfterSettle,
+    `§5.2(R7)（D8）：位点自身宽度测量前，入场动画必须已全部收敛（仍有 ${runningAfterSettle} 条 running）`
+  ).toBe(0);
+
+  // Act 2：在真实布局里改写位点内数字文本节点，同步读取三档下的自身宽度与溢出量
   const probe = await page.evaluate(
     ({ tokensRow, tokenTestid }) => {
       const row = document.querySelector(tokensRow);
@@ -670,6 +784,11 @@ test("G-4e: 关键旅程截图落盘 docs/release/evidence/wave-61-status-panel/
   await expect(page.locator(COUNTS_ROW)).toBeVisible();
   await expect(page.locator(TOKENS_ROW)).toBeVisible();
   await expect(page.locator(RING)).toBeVisible();
+  // D8 同源要求：截图取**稳态**（入场动画已收敛），避免拍到 scale(0.92) 的中间帧。
+  expect(
+    await waitForStatusPanelAnimationsSettled(page),
+    "G-4e（D8）：截图前入场动画必须已收敛（否则会拍到 scale(0.92) 中间帧）"
+  ).toBe(0);
   await expect(page.getByTestId("home-right-sidebar-shell")).toHaveAttribute("data-open", "true");
 
   // Act 3：截图（全页 + 视口两张，互为佐证）

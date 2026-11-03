@@ -27,7 +27,8 @@ import {
   SLOT_MIN_WIDTH_CEILING_REM,
   allElements,
   collectTooltipTexts,
-  mountStatusPanel
+  mountStatusPanel,
+  semanticChildren
 } from "./wave61-harness";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -357,24 +358,44 @@ describe("wave-61 §1 布局契约（L-1..L-5）", () => {
       ).toEqual([]);
     }
 
-    // Assert（契约主体 4：无「值 + 尾段」的分裂结构的位点，其元素子节点必须恰为「图标 + 值」两个）
+    // Assert（契约主体 4：位点的**语义**子节点必须恰为「1 个图标 + 1 个值文本」）。
+    //
+    // 用例缺陷修正（2026-11-03，Lead 复核授权「用例自身缺陷重写豁免」）：
+    //   缺陷根因：本用例原先用 `slot.element.children.length === 2`。但测试挂载把
+    //   `Teleport` 桩成 `teleport: true`，位点内两个 `Tooltip`（图标 + 值）各渲染一个
+    //   `TELEPORT-STUB` 子节点 ⇒ DOM 实得 4（`svg | TELEPORT-STUB | span | TELEPORT-STUB`），
+    //   该断言在**任何**实现下都不可满足（迁移前的原实现同样如此），属测试环境渲染噪声，非 SUT 缺陷。
+    //   修正：只统计非 `teleport-stub` 的语义子节点（`semanticChildren`）。
+    //   原意图保持不变且不弱化：「位点内不得插入第三个节点（宽度预留盒）」，
+    //   由「语义子节点恰为 2」+「1 图标 + 1 值」+ 下方 `widthReservationViolations`（无 min-w*/text-right）三重覆盖。
     for (const testid of [...COUNT_SLOT_TESTIDS, "status-metric-input-tokens", "status-metric-output-tokens", "status-metric-token-speed"]) {
       const slot = tokensRow.find(`[data-testid="${testid}"]`).exists()
         ? tokensRow.get(`[data-testid="${testid}"]`)
         : countsRow.get(`[data-testid="${testid}"]`);
+      const children = semanticChildren(slot.element);
       expect(
-        slot.element.children.length,
-        `L-4：${testid} 必须只含「图标 + 值文本」两个子节点（多余子节点即宽度预留盒）；实际 ${slot.element.children.length} 个：${Array.from(slot.element.children).map((node) => node.className || node.tagName).join(" | ")}`
+        children.length,
+        `L-4：${testid} 的语义子节点必须恰为「图标 + 值文本」两个（多余节点即宽度预留盒）；实际 ${children.length} 个：${children.map((node) => node.tagName.toLowerCase()).join(" | ")}（已排除 teleport-stub）`
       ).toBe(2);
+      expect(
+        children.filter((node) => node.tagName.toLowerCase() === "svg").length,
+        `L-4：${testid} 必须恰有 1 个图标（svg）；实际 ${children.map((node) => node.tagName.toLowerCase()).join(" | ")}`
+      ).toBe(1);
+      expect(
+        children.filter((node) => node.tagName.toLowerCase() === "span").length,
+        `L-4：${testid} 必须恰有 1 个值文本节点（span）；实际 ${children.map((node) => node.tagName.toLowerCase()).join(" | ")}`
+      ).toBe(1);
     }
 
     // Assert（裁决 R1：缓存比率尾段 `· 12%` 已**移出行内**（并入 tooltip），
     //   故缓存位在行内只保留「图标 + 值」两个子节点，且不得再出现 `·` / 百分比尾段；
     //   尾段去向（tooltip 文案）由 `wave61-empty-values.spec.ts` 的 E-2 用例把关。
     const cacheSlot = tokensRow.get('[data-testid="status-metric-cache-tokens"]');
+    // 同上的用例缺陷修正：排除 teleport-stub 后统计语义子节点（原意图：尾段不在行内）。
+    const cacheChildren = semanticChildren(cacheSlot.element);
     expect(
-      cacheSlot.element.children.length,
-      `L-4：缓存位行内必须只剩「图标 + 值」两个子节点（裁决 R1：尾段移出行内）；实际 ${cacheSlot.element.children.length} 个`
+      cacheChildren.length,
+      `L-4：缓存位行内必须只剩「图标 + 值」两个语义子节点（裁决 R1：尾段移出行内）；实际 ${cacheChildren.length} 个：${cacheChildren.map((node) => node.tagName.toLowerCase()).join(" | ")}（已排除 teleport-stub）`
     ).toBe(2);
     expect(
       cacheSlot.text(),
