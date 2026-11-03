@@ -168,11 +168,26 @@ fn test_ac04_agent_teams_roster_and_mailbox() {
     assert!(fail_res.is_err());
 }
 
+/// AC-05 队列/插队（Steer）顺序语义。
+///
+/// ## wave-61 v1.3 迁移说明（Lead 一票裁决，Test Agent 执行）
+///
+/// - **旧断言**：3 次 `orchestration/tools::send_message(...)`（Queue、Queue、Steer）后
+///   `drain_inbox` 必须原样读到 **3 条**消息（`messages[0]`=插队，`[1]`/`[2]`=常规）。
+/// - **新断言**：同样 3 次入队改经 additive seam `orchestration::enqueue_message(...)`（纯入队，
+///   不驱动、不改状态机），`drain_inbox` 的四条顺序断言**逐字不变**。
+/// - **理由**：Executor 按 wave-61 C7 让 `send_message` 在入队后**立即后台驱动**队友 turn（真实执行），
+///   后台消费会把队列读空，与本用例「队列语义」的观测面互斥（实测竞态 `left:4 / right:3`、
+///   复跑为 `0`）。队列顺序语义改由 `enqueue_message` 这条纯入队 seam 验证；
+///   「入队即真实驱动 + 回执」语义由 wave-61 `c7_send_message_drives_teammate_turn` 覆盖。
+/// - **未放宽**：断言条数、顺序、`is_steer` 标志、`messages.len()==3` 精确相等全部保持原样；
+///   下方 `interrupt_agent` 段一字未改。
 #[test]
 fn test_ac05_message_queuing_and_steering() {
+    use pony_agent_core::agent::orchestration::enqueue_message;
     use pony_agent_core::agent::tools::{
-        drain_inbox, interrupt_agent, send_message, spawn_teammate, InterruptAgentArgs,
-        MessageDeliveryMode, ReadInboxArgs, SendMessageArgs, SpawnTeammateArgs, TeammateStatus,
+        drain_inbox, interrupt_agent, spawn_teammate, InterruptAgentArgs, MessageDeliveryMode,
+        ReadInboxArgs, SendMessageArgs, SpawnTeammateArgs, TeammateStatus,
     };
 
     let target = "steer-worker".to_string();
@@ -185,20 +200,21 @@ fn test_ac05_message_queuing_and_steering() {
     }).unwrap();
 
     // 1. 发送普通排队消息 (Queue / FIFO)
-    send_message(SendMessageArgs {
+    //    wave-61 v1.3：改用纯入队 seam（不驱动），避免后台消费与本用例的顺序观测竞态。
+    enqueue_message(SendMessageArgs {
         target: target.clone(),
         message: "Regular task 1".to_string(),
         mode: Some(MessageDeliveryMode::Queue),
     }).unwrap();
 
-    send_message(SendMessageArgs {
+    enqueue_message(SendMessageArgs {
         target: target.clone(),
         message: "Regular task 2".to_string(),
         mode: Some(MessageDeliveryMode::Queue),
     }).unwrap();
 
     // 2. 发送紧急插队消息 (Steer / Head Priority)
-    send_message(SendMessageArgs {
+    enqueue_message(SendMessageArgs {
         target: target.clone(),
         message: "Emergency steer instruction!".to_string(),
         mode: Some(MessageDeliveryMode::Steer),

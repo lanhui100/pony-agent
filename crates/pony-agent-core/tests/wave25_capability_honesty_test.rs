@@ -25,7 +25,16 @@
 //! | T4（`t4_fake_capability_descriptors_are_not_model_visible`） | `exposure != ModelVisible` 即违规（允许 Internal/Deferred） | 更名 `t4_team_tool_descriptors_are_model_visible`，`exposure == ModelVisible` 才合法（方向反转，强度不变） | C4.3 + `tools.rs:7341` |
 //! | T2（`t2_fake_capability_tools_return_capability_unavailable_error`，`:210` 起） | 未接线 fail-closed | **保持不变**（本契约 C2.3 的锚点用例；该文件不构建 runtime，进程内槽为空，语义仍成立） | C2.3 / C4.3 |
 //!
-//! 未放宽任何断言：T1/T4 均为方向反转（not → is）；T2/T3 一字未改。
+//! ### v1.2 二次迁移（Lead 裁决，L3-P BLOCKING：`workflow` 退回 `Internal`）
+//!
+//! | 项 | v1 断言 | v1.2 断言（当前） | 理由 / 真值源 |
+//! |---|---|---|---|
+//! | `EXPECTED_MODEL_VISIBLE_TOOLS` | 39 项（含 `workflow`） | 38 项（不含 `workflow`） | `workflow` handler 只回显 `step.id` 并返回 `status:"success"`（`orchestration.rs:286-297`），暴露即伪造成功 |
+//! | `TEAM_TOOLS` | 10 项（含 `workflow`） | 9 项（不含 `workflow`） | 同上；`workflow` 转由 T4b 反向守卫 |
+//! | T4 | 9 项必须 `ModelVisible` | 9 项必须 `ModelVisible` + **新增** `workflow` 必须非 `ModelVisible` | 契约 v1.2 |
+//! | T2（`:210` 起） | 10 个 handler 未接线 fail-closed | **保持不变**（`workflow` handler 仍在，仍须返回 `capability_unavailable`） | C2.3 |
+//!
+//! 未放宽任何断言：T1/T4 均为方向反转（not → is）＋ v1.2 追加反向守卫；T2/T3 一字未改。
 //!
 //! 公开 API 说明（集成测试只能使用 crate 公开 API）：
 //! `provider::anthropic_tools_payload` 是私有函数，无法直接调用。它的模型可见面来源是
@@ -41,9 +50,8 @@ use serde_json::{json, Value};
 
 /// 10 个团队工具名（wave-61 C1.1 冻结名单；原名 `FAKE_CAPABILITY_TOOLS`，
 /// 迁移到 C4.3 后语义为"必须模型可见的团队工具"，内容与顺序不变）。
-const TEAM_TOOLS: [&str; 10] = [
+const TEAM_TOOLS: [&str; 9] = [
     "subagent",
-    "workflow",
     "spawn_teammate",
     "list_agents",
     "send_message",
@@ -63,8 +71,10 @@ const TEAM_TOOLS: [&str; 10] = [
 /// - W42/PA-149 新增 1 项真实实现的工具（skill_load 按需加载技能正文）；
 /// - W61-C1 重新纳入 10 项团队工具（subagent/workflow/spawn_teammate/list_agents/send_message/
 ///   interrupt_agent/drain_inbox/team_task_create/team_task_update/team_task_list），
-///   插在 `ViewImage` 之后、`TodoWrite` 之前（契约 C1.2）。总计 39 项。
-const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 39] = [
+///   插在 `ViewImage` 之后、`TodoWrite` 之前（契约 C1.2）。总计 39 项；
+/// - v1.2（Lead 裁决）：`workflow` 因 handler 是桩（`orchestration.rs:286-297`）退回 `Internal`，
+///   模型面 39 → 38 项。总计 38 项。
+const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 38] = [
     "Run",
     "Ask",
     "Read",
@@ -82,7 +92,6 @@ const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 39] = [
     "Plan",
     "ViewImage",
     "subagent",
-    "workflow",
     "spawn_teammate",
     "list_agents",
     "send_message",
@@ -178,7 +187,7 @@ fn t1_team_tools_are_present_in_model_visible_surface() {
     let missing: Vec<&&str> = expected.difference(&actual).collect();
     assert!(
         leaked.is_empty() && missing.is_empty(),
-        "T1 失败：模型可见工具面与冻结的 39 名清单（含 wave-61 C1.2 的 10 项团队工具）不一致。\n\
+        "T1 失败：模型可见工具面与冻结的 38 名清单（含 wave-61 v1.2 C1.2 的 9 项团队工具）不一致。\n\
          期望（{} 项）：{expected:?}\n\
          实际（{} 项）：{actual:?}\n\
          多出的（未登记工具回流）：{leaked:?}\n\
@@ -419,7 +428,7 @@ fn t3_real_todo_tools_remain_model_visible_and_executable() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T4：这 10 个工具的 descriptor exposure 必须是 ModelVisible（wave-61 迁移：方向反转）
+// T4：这 9 个工具的 descriptor exposure 必须是 ModelVisible（wave-61 v1.2）
 //
 // 契约 C4.3：旧断言「exposure != ModelVisible 即违规（允许 Internal/Deferred）」→
 // 新断言「exposure == ModelVisible 才合法」。强度不变（逐名逐 descriptor 校验），
@@ -459,5 +468,20 @@ fn t4_team_tool_descriptors_are_model_visible() {
          期望：exposure == ModelVisible。\n实际违规：\n- {}",
         violations.len(),
         violations.join("\n- ")
+    );
+
+    // T4b（契约 v1.2 反向守卫，Lead 裁决 L3-P BLOCKING）：`workflow` 必须**非** ModelVisible。
+    // 真值源：`agent/orchestration.rs:286-297` —— workflow handler 只回显 step.id 并返回
+    // `status:"success"`，是桩；暴露即伪造成功。恢复条件＝真实 DAG 引擎落地后走新契约重新登记。
+    let workflow = registry
+        .resolve("workflow")
+        .expect("T4b: `workflow` descriptor 必须存在（handler 仍保留，供真实 DAG 引擎接管）");
+    assert_ne!(
+        workflow.exposure,
+        ToolExposure::ModelVisible,
+        "T4b 失败：`workflow`（桩 handler，orchestration.rs:286-297）不得为 ModelVisible。\
+         期望：Internal（契约 v1.2）；实际：{:?}，descriptor_id=`{}`",
+        workflow.exposure,
+        workflow.identity.descriptor_id
     );
 }

@@ -25,6 +25,14 @@
 //!   ＋ 槽位排序键 `(!visible, product_first_index)`（`tools.rs:555-566`）
 //!   ＋ kind 真值源 `tools.rs:7297-7304`。
 //! - 未放宽任何断言：原 29 项保留其逐字相对顺序（仅插入 10 项）；其余 8 个用例保持原样。
+//!
+//! Wave-61 v1.2 迁移（Lead 裁决，L3-P BLOCKING：`workflow` 退回 `Internal`）：
+//! - 旧断言：`t1_model_visible_surface_is_exact_39_tool_list`，`names.len() == 39`，清单第 18 项为 `workflow`。
+//! - 新断言：`t1_model_visible_surface_is_exact_38_tool_list`，`names.len() == 38`，清单不含 `workflow`，
+//!   并新增反向守卫 `assert!(!names.contains(&"workflow"))`。
+//! - 理由与真值源：`workflow` handler 只回显 `step.id` 并返回 `status:"success"`
+//!   （`agent/orchestration.rs:286-297`），属桩实现，暴露即伪造成功；恢复条件＝真实 DAG 引擎落地。
+//! - 未放宽：其余 37 项逐字顺序不变，仅摘除 `workflow`；其余 8 个用例保持原样。
 
 use pony_agent_core::agent::orchestration::{subagent, SubagentArgs, SubagentResult};
 use pony_agent_core::agent::subagent_runtime::{
@@ -91,14 +99,20 @@ fn parse_code(result: &pony_agent_core::agent::tools::ToolResult) -> String {
 // ============================================================
 
 #[test]
-fn t1_model_visible_surface_is_exact_39_tool_list() {
+fn t1_model_visible_surface_is_exact_38_tool_list() {
     let views = pony_agent_core::agent::tools::builtin_turn_tool_contract_views();
     let names: Vec<&str> = views.iter().map(|v| v.name.as_str()).collect();
 
     assert_eq!(
         names.len(),
-        39,
-        "W37-C1 × W42/PA-149 × W61-C1 模型可见工具面必须为 39 项（29 + 10 项团队工具）"
+        38,
+        "W37-C1 × W42/PA-149 × W61-C1(v1.2) 模型可见工具面必须为 38 项（29 + 9 项团队工具；workflow 退回 Internal）"
+    );
+
+    // 契约 v1.2 反向守卫：`workflow` 是桩 handler（orchestration.rs:286-297），不得进模型面。
+    assert!(
+        !names.contains(&"workflow"),
+        "W61 v1.2: workflow 桩 handler 不得出现在模型可见面（暴露即伪造成功；恢复条件＝真实 DAG 引擎）"
     );
 
     let expected = vec![
@@ -118,10 +132,9 @@ fn t1_model_visible_surface_is_exact_39_tool_list() {
         "BatchExecute",
         "Plan",
         "ViewImage",
-        // W61-C1 新增 10 项团队工具，按 builtin_tools 定义序（tools.rs:5925-6138）
-        // 插在 view_image(:5894) 与 todo_write(:6147) 之间（契约 C1.2，非猜测位置）。
+        // W61-C1 新增 9 项团队工具（v1.2：workflow 退回 Internal 故不在此列），按 builtin_tools
+        // 定义序（tools.rs:5925-6138）插在 view_image(:5894) 与 todo_write(:6147) 之间。
         "subagent",
-        "workflow",
         "spawn_teammate",
         "list_agents",
         "send_message",
@@ -147,7 +160,7 @@ fn t1_model_visible_surface_is_exact_39_tool_list() {
         //（与 `builtin_turn_tool_contract_views()` 实测输出一致，非猜测位置）。
         "skill_load",
     ];
-    assert_eq!(names, expected, "W37-C1 × W42 × W61 39 项精确清单（含顺序）");
+    assert_eq!(names, expected, "W37-C1 × W42 × W61(v1.2) 38 项精确清单（含顺序）");
 
     // C1.1 表：kind / exposure / priority / permission facts
     // （ToolKind::as_str 为 snake_case：read/search/execute）
@@ -178,9 +191,9 @@ fn t1_model_visible_surface_is_exact_39_tool_list() {
     // W61-C1 表（契约 C4.2）：10 项团队工具的 kind / exposure / permission scope。
     // kind 真值源 tools.rs:7297-7304；exposure 真值源 tools.rs:7341；权限 facts 真值源
     // tools.rs:7418-7460（10 项均 permission_scope=None、requires_approval=false，本波不得改动）。
-    let team_tool_kinds: [(&str, &str); 10] = [
+    // 契约 v1.2：`workflow` 退回 Internal，不再属于模型面，故不在此表（其 kind 仍为 composite）。
+    let team_tool_kinds: [(&str, &str); 9] = [
         ("subagent", "composite"),
-        ("workflow", "composite"),
         ("spawn_teammate", "interactive"),
         ("list_agents", "interactive"),
         ("send_message", "interactive"),

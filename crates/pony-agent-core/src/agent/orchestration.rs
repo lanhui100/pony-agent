@@ -235,6 +235,8 @@ static TEAM_TASKS: Mutex<Option<HashMap<String, TeamTaskItem>>> = Mutex::new(Non
 
 /// 子代理 turn 超时（NFR 基线：subagent_turn_timeout_ms=120000）。
 const SUBAGENT_TURN_TIMEOUT_MS: u64 = 120_000;
+/// 名册里的 Lead 伪成员 target（与 `list_agents` / `spawn_teammate` 建队时同源）。
+const LEAD_TARGET: &str = "lead";
 static TEAMMATES: Mutex<Option<HashMap<String, TeammateMember>>> = Mutex::new(None);
 /// 每个 Teammate 对应的优先级双端信箱 (双端队列支持普通排队 push_back 与插队 push_front)
 static TEAMMATE_INBOXES: Mutex<Option<HashMap<String, VecDeque<QueuedMessage>>>> = Mutex::new(None);
@@ -248,21 +250,46 @@ static TEAMMATE_INBOXES: Mutex<Option<HashMap<String, VecDeque<QueuedMessage>>>>
 ///   `output:None`，后台结果仅记录日志后丢弃。
 /// `workflow()` 保持 wave-38 范围现状，勿动。
 pub fn subagent(args: SubagentArgs) -> Result<SubagentResult, String> {
+    subagent_in_workspace(args, None)
+}
+
+/// Wave-61 C8.3：显式工作区根的子代理入口（`None` = 引擎自行解析）。
+///
+/// 桌面宿主的真实工作区在 `ToolRouter.workspace_root`（`tools.rs:1358`），并不等于
+/// `compute_default_workspace_root()`；由 tools 层把该根传进来，子代理才能继承父会话的
+/// 项目指令与项目技能（wave-58 F1-5）。许可门与错误契约与 [`subagent`] 完全一致
+/// （`subagent` 只是本函数 `None` 的薄封装，旧签名保留给既有测试）。
+pub fn subagent_in_workspace(
+    args: SubagentArgs,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<SubagentResult, String> {
     let engine = crate::agent::subagent_runtime::subagent_engine().ok_or_else(|| {
         "capability_unavailable: subagent engine not wired (HostTurnEngine missing)".to_string()
     })?;
-    // 入口统一门：oversize/busy 在 orchestration 层先于引擎调用判定
-    //（契约 C3.2 测试 J/K 以 Stub 引擎注入验证，门必须位于入口）。
-    let _gate = crate::agent::subagent_runtime::subagent_gate_enter(&args.prompt)?;
+    // 入口门（oversize / busy）：**只对不自持门的引擎**生效。
+    //
+    // Wave-61 C.1：`HostTurnEngine::run_turn` 内部已持门（`gates_concurrency_internally()`
+    // 返回 true），入口若再持门则一次调用扣两个许可 → 有效并发从 2 掉到 1。因此对自持引擎
+    // 跳过入口门（许可唯一真源＝引擎）。
+    // 注入式引擎（测试 Stub / 宿主自定义）默认不自持，入口门必须兜住 —— wave-37 C3.2
+    // 契约要求「Stub 引擎注入场景下 busy/oversize 契约同样生效」（t3_j / t3_k 的锚点）。
+    let gate = if engine.gates_concurrency_internally() {
+        None
+    } else {
+        Some(crate::agent::subagent_runtime::subagent_gate_enter(&args.prompt)?)
+    };
     let subagent_id = format!("subagent-{}", Uuid::new_v4());
     let is_bg = args.run_in_background.unwrap_or(false);
 
     if is_bg {
         let bg_id = subagent_id.clone();
-        let gate = _gate;
+        let bg_root = workspace_root.map(std::path::Path::to_path_buf);
         std::thread::spawn(move || {
-            let _gate = gate; // 后台 turn 全程占许可
-            if let Err(err) = engine.run_turn(&args.prompt, SUBAGENT_TURN_TIMEOUT_MS) {
+            // 后台 turn 全程占许可（仅非自持引擎会携带 Some）。
+            let _gate = gate;
+            if let Err(err) =
+                engine.run_turn_in(&args.prompt, SUBAGENT_TURN_TIMEOUT_MS, bg_root.as_deref())
+            {
                 eprintln!("[subagent] background turn failed ({}): {}", bg_id, err);
             }
         });
@@ -273,7 +300,9 @@ pub fn subagent(args: SubagentArgs) -> Result<SubagentResult, String> {
         });
     }
 
-    match engine.run_turn(&args.prompt, SUBAGENT_TURN_TIMEOUT_MS) {
+    // 同步路径：许可 guard 活到本次调用结束（仅非自持引擎会携带 Some）。
+    let _gate = gate;
+    match engine.run_turn_in(&args.prompt, SUBAGENT_TURN_TIMEOUT_MS, workspace_root) {
         Ok(outcome) => Ok(SubagentResult {
             subagent_id,
             status: "completed".to_string(),
@@ -296,7 +325,48 @@ pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {
     })
 }
 
+/// 派生队友（**纯登记**，不含投递/驱动）。
+///
+/// 库层语义保持 wave-61 之前不变：冻结用例
+/// （`tests/pa110_teams_acceptance.rs:209`、`tests/teammate_e2e_communication_test.rs`）
+/// 依赖「派生本身不往收件箱塞消息」这一可观测事实。模型可见的工具入口用
+/// [`spawn_teammate_in_workspace`]（登记 + 投递初始 prompt + 驱动）。
 pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, String> {
+    let (result, _target, _prompt) = register_teammate(args)?;
+    Ok(result)
+}
+
+/// Wave-61 C7 + C8.3：派生队友并在引擎在位时**真实启动**它的首个 turn。
+///
+/// 注册成员后把 `args.prompt` 作为首条消息投递进该队友收件箱并（引擎在位时）后台驱动一次
+/// —— 否则模型收到 `status:ok` 却没人真正开始工作，与 `workflow` 桩同类的假能力
+/// （L3-A/L3-P 裁决 BLOCKING-1）。无引擎时保持纯登记（fail-closed，不伪造进展）。
+pub fn spawn_teammate_in_workspace(
+    args: SpawnTeammateArgs,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<SpawnTeammateResult, String> {
+    let auto_drive = crate::agent::subagent_runtime::subagent_engine().is_some();
+    let (result, target, initial_prompt) = register_teammate(args)?;
+
+    // Wave-61 C7：引擎在位时把初始 prompt 投递并驱动（复用 send_message 的入队 + 后台
+    // drive 通路，不新造存储；无引擎时保持纯登记，行为与既有 `spawn_teammate` 一致）。
+    if auto_drive && !initial_prompt.trim().is_empty() {
+        let _ = send_message_in_workspace(
+            SendMessageArgs {
+                target,
+                message: initial_prompt,
+                mode: Some(MessageDeliveryMode::Queue),
+            },
+            workspace_root,
+        );
+    }
+
+    Ok(result)
+}
+
+/// 登记队友（成员表 + 独立收件箱）并返回 (结果, target, 初始 prompt)。
+fn register_teammate(args: SpawnTeammateArgs) -> Result<(SpawnTeammateResult, String, String), String> {
+    let initial_prompt = args.prompt.clone();
     let target = args.name.to_lowercase().replace(' ', "-");
     let member = TeammateMember {
         target: target.clone(),
@@ -327,16 +397,22 @@ pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, St
         map.insert(target.clone(), member.clone());
     }
 
-    // 2. 初始化该 Agent 的独立收件箱（无锁嵌套，避免跨 Mutex 死锁）
+    // 2. 初始化该 Agent 的独立收件箱（无锁嵌套，避免跨 Mutex 死锁）。
+    //    Wave-61 C7：同时为 `lead` 建箱 —— 队友 turn 的回执与错误都要投递到 lead 收件箱，
+    //    `lead` 是建队时必定存在的伪成员（与 `list_agents` 同源），其收件箱必须同源初始化。
     {
         let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
         if inbox_lock.is_none() {
             *inbox_lock = Some(HashMap::new());
         }
-        inbox_lock.as_mut().unwrap().insert(target, VecDeque::new());
+        let inbox_map = inbox_lock.as_mut().unwrap();
+        inbox_map
+            .entry(LEAD_TARGET.to_string())
+            .or_insert_with(VecDeque::new);
+        inbox_map.insert(target.clone(), VecDeque::new());
     }
 
-    Ok(SpawnTeammateResult { member })
+    Ok((SpawnTeammateResult { member }, target, initial_prompt))
 }
 
 pub fn list_agents() -> Result<ListAgentsResult, String> {
@@ -361,8 +437,46 @@ pub fn list_agents() -> Result<ListAgentsResult, String> {
     })
 }
 
-/// 支持排队 (Queue) 与插队 (Steer) 发送消息
+/// 支持排队 (Queue) 与插队 (Steer) 发送消息。
+///
+/// Wave-61 C7.1：入队成功后，若子代理引擎在位则**后台**驱动一次队友 turn ——
+/// 让 `send_message` 产生真实效果（不再是"只入队却永远没人跑"的假能力）。
+/// 无引擎时仅入队（fail-closed）。工作区根见 [`send_message_in_workspace`]。
 pub fn send_message(args: SendMessageArgs) -> Result<SendMessageResult, String> {
+    send_message_in_workspace(args, None)
+}
+
+/// Wave-61 C7.1 + C8.3：入队后若子代理引擎在位，**后台**驱动一次队友 turn，
+/// 让 `send_message` 在模型可见路径上产生真实效果（而不是只入队却永远没人跑）。
+/// 无引擎时仅入队（保持 fail-closed，不伪造成功）。
+pub fn send_message_in_workspace(
+    args: SendMessageArgs,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<SendMessageResult, String> {
+    let (result, drive_target) = enqueue_message(args)?;
+
+    if drive_target != "lead" && crate::agent::subagent_runtime::subagent_engine().is_some() {
+        let owner = workspace_root.map(std::path::Path::to_path_buf);
+        set_teammate_status(&drive_target, TeammateStatus::Running);
+        std::thread::spawn(move || {
+            if let Err(err) = drive_teammate_turn_in(&drive_target, owner.as_deref()) {
+                set_teammate_status(&drive_target, TeammateStatus::Inactive);
+                eprintln!("[team] teammate drive failed ({}): {}", drive_target, err);
+            }
+        });
+    }
+
+    Ok(result)
+}
+
+/// 纯入队 seam：只把消息写进目标收件箱，**不触发**任何驱动/状态机副作用。
+///
+/// 这是队列层入口：`send_message_in_workspace`（以及库层 `send_message`）在调用本函数
+/// 拿到结果后，才按需把 `Running` 置位并派生后台 drive；因此：
+/// - 需要「只验证排队 / 插队顺序」的调用方（含契约测试）用本 seam，观测面不含驱动竞态；
+/// - 需要「入队即真实驱动」的调用方用 `send_message_in_workspace`。
+/// 返回 `(入队结果, 目标 target)`，便于驱动方复用同一 target 文本。
+pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, String), String> {
     let mode = args.mode.unwrap_or(MessageDeliveryMode::Queue);
     let msg_id = format!("msg-{}", Uuid::new_v4());
 
@@ -414,12 +528,34 @@ pub fn send_message(args: SendMessageArgs) -> Result<SendMessageResult, String> 
         deque.len()
     };
 
-    Ok(SendMessageResult {
-        message_id: msg_id,
-        delivered: true,
-        mode,
-        pending_inbox_len: len,
-    })
+    Ok((
+        SendMessageResult {
+            message_id: msg_id,
+            delivered: true,
+            mode,
+            pending_inbox_len: len,
+        },
+        args.target,
+    ))
+}
+
+/// 队友状态写入（独立作用域持锁，绝不与收件箱锁嵌套，避免锁序反转）。
+fn set_teammate_status(target: &str, status: TeammateStatus) {
+    if let Ok(mut lock) = TEAMMATES.lock() {
+        if let Some(map) = lock.as_mut() {
+            if let Some(member) = map.get_mut(target) {
+                member.status = status;
+            }
+        }
+    }
+}
+
+/// 读取队友当前状态（无锁嵌套）。
+fn teammate_status(target: &str) -> Option<TeammateStatus> {
+    TEAMMATES
+        .lock()
+        .ok()
+        .and_then(|lock| lock.as_ref().and_then(|map| map.get(target).map(|m| m.status.clone())))
 }
 
 /// 打断正在运行的智能体（保留其信箱队列）
@@ -440,9 +576,29 @@ pub fn interrupt_agent(args: InterruptAgentArgs) -> Result<InterruptAgentResult,
 
 /// 读取并消费目标智能体收件箱的消息
 pub fn drain_inbox(args: ReadInboxArgs) -> Result<ReadInboxResult, String> {
+    // Wave-61 C7：`lead` 等**已存在成员**可能还没有独立信箱（历史上只有 spawn 的 target 才会
+    // 建箱），此时惰性建空箱并返回空结果，而不是把「团队健在但某人还没收过信」误报成错误。
+    // 完全不认识的 target 仍保持原错误语义（fail-closed，不放宽到任意字符串）。
+    let known_member = {
+        // 独立作用域持 TEAMMATES 锁，绝不与收件箱锁嵌套（防锁序反转）。
+        TEAMMATES
+            .lock()
+            .ok()
+            .and_then(|lock| lock.as_ref().map(|map| map.contains_key(&args.target)))
+            .unwrap_or(false)
+    };
+
     let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
     let inbox_map = inbox_lock.as_mut().ok_or_else(|| "No inboxes".to_string())?;
-    let deque = inbox_map.get_mut(&args.target).ok_or_else(|| format!("No inbox for {}", args.target))?;
+    if !inbox_map.contains_key(&args.target) {
+        if !known_member {
+            return Err(format!("No inbox for {}", args.target));
+        }
+        inbox_map.insert(args.target.clone(), VecDeque::new());
+    }
+    let deque = inbox_map
+        .get_mut(&args.target)
+        .ok_or_else(|| format!("No inbox for {}", args.target))?;
 
     let messages: Vec<QueuedMessage> = deque.drain(..).collect();
     Ok(ReadInboxResult {
@@ -567,6 +723,26 @@ pub fn wait_agent(args: WaitAgentArgs) -> Result<WaitAgentResult, String> {
 
 /// 自动驱动队员处理消息的循环执行回路：若在位真实引擎则驱动真实 Turn，并可回信给 sender/lead
 pub fn drive_teammate_turn(target: &str) -> Result<Option<String>, String> {
+    drive_teammate_turn_in(target, None)
+}
+
+/// Wave-61 C7 + C8.3：显式工作区根版本的队友驱动回路。
+///
+/// 状态机（C7.2）：`Running`（进入）→ 执行 turn → `Inactive`（收口，成功与失败都收口）。
+/// - `interrupt_agent` 只需把状态翻成 `Inactive`，本函数在两个检查点观察它并提前返回；
+/// - 已知限制（C7.4）：引擎无 stop API，**已经进入**的 turn 无法中途打断，只能在其返回后
+///   由收口状态机覆盖 —— 这是当前引擎契约的硬边界，不做伪 stop；
+/// - 失败不再伪造成 `[Execution error]` 文本回执，而是把错误文本投递到 Lead 收件箱并返回
+///   `Err`（`drain_inbox` 可取），让上层看到真实失败。
+pub fn drive_teammate_turn_in(
+    target: &str,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<Option<String>, String> {
+    // 检查点 #1（drain 之前）：已被 `interrupt_agent` 置为 Inactive → 本轮不再启动。
+    if teammate_status(target) == Some(TeammateStatus::Inactive) {
+        return Ok(None);
+    }
+
     let result = drain_inbox(ReadInboxArgs {
         target: target.to_string(),
     })?;
@@ -574,14 +750,8 @@ pub fn drive_teammate_turn(target: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    // 自动更新队员状态为 Running
-    if let Ok(mut team_lock) = TEAMMATES.lock() {
-        if let Some(team_map) = team_lock.as_mut() {
-            if let Some(member) = team_map.get_mut(target) {
-                member.status = TeammateStatus::Running;
-            }
-        }
-    }
+    // 启动前置：成员置为 Running（对 `list_agents` 可见，C7.5 的行为锚点）。
+    set_teammate_status(target, TeammateStatus::Running);
 
     // 整合收件箱内的消息内容
     let mut combined_prompt = format!("You are teammate '{}'. Incoming messages:\n", target);
@@ -590,26 +760,53 @@ pub fn drive_teammate_turn(target: &str) -> Result<Option<String>, String> {
     }
     combined_prompt.push_str("\nProcess these messages and provide your response or action report.");
 
-    // 如果挂载了真实模型引擎，则执行真实 Turn
-    let final_reply = if let Some(engine) = crate::agent::subagent_runtime::subagent_engine() {
-        match engine.run_turn(&combined_prompt, SUBAGENT_TURN_TIMEOUT_MS) {
-            Ok(outcome) => outcome.final_text,
-            Err(err) => format!("[Execution error]: {}", err),
-        }
-    } else {
-        format!("Processed {} message(s) for teammate {}", result.messages.len(), target)
-    };
-
-    // 状态流转回到 Active
-    if let Ok(mut team_lock) = TEAMMATES.lock() {
-        if let Some(team_map) = team_lock.as_mut() {
-            if let Some(member) = team_map.get_mut(target) {
-                member.status = TeammateStatus::Active;
+    // 如果挂载了真实模型引擎，则执行真实 Turn（C8：以父会话工作区根建栈）。
+    let engine = crate::agent::subagent_runtime::subagent_engine();
+    let engine_was_wired = engine.is_some();
+    let final_reply = match engine {
+        Some(engine) => {
+            match engine.run_turn_in(&combined_prompt, SUBAGENT_TURN_TIMEOUT_MS, workspace_root) {
+                Ok(outcome) => outcome.final_text,
+                Err(err) => {
+                    // 失败收口：状态回 Inactive + 错误文本进 Lead 收件箱（不含任何假成功）。
+                    set_teammate_status(target, TeammateStatus::Inactive);
+                    if target != "lead" {
+                        let _ = send_message(SendMessageArgs {
+                            target: "lead".to_string(),
+                            message: format!("Teammate '{}' turn failed: {}", target, err),
+                            mode: Some(MessageDeliveryMode::Queue),
+                        });
+                    }
+                    return Err(err);
+                }
             }
         }
-    }
+        None => {
+            // 无引擎：保持既有降级回执与状态口径（fail-closed，不驱动真实 turn）。
+            // 注意：`Running → Inactive` 收口只适用于**引擎真正执行**的路径（C7.2）；
+            // 无引擎时沿用既有 `Active` 口径，避免与冻结的 e2e 用例
+            // （`tests/teammate_e2e_communication_test.rs` 第 5 步）冲突。
+            set_teammate_status(target, TeammateStatus::Active);
+            format!(
+                "Processed {} message(s) for teammate {}",
+                result.messages.len(),
+                target
+            )
+        }
+    };
 
-    // 将产出的答复作为回执发送给 lead
+    // 收口（C7.2）：引擎真正执行过 → `Running → Inactive`；无引擎的降级路径沿用既有
+    // `Active` 口径（见上方 None 分支注释，避免与冻结 e2e 用例冲突）。
+    set_teammate_status(
+        target,
+        if engine_was_wired {
+            TeammateStatus::Inactive
+        } else {
+            TeammateStatus::Active
+        },
+    );
+
+    // 将产出的答复作为回执发送给 lead（经既有 TEAMMATE_INBOXES 投递，`drain_inbox` 可取）。
     if target != "lead" {
         let _ = send_message(SendMessageArgs {
             target: "lead".to_string(),

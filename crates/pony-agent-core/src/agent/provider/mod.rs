@@ -5169,10 +5169,9 @@ mod tests {
                 "BatchExecute".to_string(),
                 "Plan".to_string(),
                 "ViewImage".to_string(),
-                // Wave-61 C1：10 项团队工具进入模型可见面（按 builtin_tools 定义序插在
-                // ViewImage 之后、TodoWrite 之前；product 名 == primitive 小写原名）。
+                // Wave-61 C1：9 项团队工具进入模型可见面（按 builtin_tools 定义序插在
+                // ViewImage 之后、TodoWrite 之前；`workflow` 桩实现保持 Internal）。
                 "subagent".to_string(),
-                "workflow".to_string(),
                 "spawn_teammate".to_string(),
                 "list_agents".to_string(),
                 "send_message".to_string(),
@@ -5203,17 +5202,13 @@ mod tests {
 
     #[test]
     fn fallback_tool_payload_filters_internal_builtin_but_keeps_dynamic_tools() {
-        // W28 附带必修 + Wave-61 C1 迁移（契约 C4.4「面④」）。
+        // W28 附带必修 + Wave-61 C1/C1.7 迁移（契约 C4.4「面④」）。
         //
-        // 迁移理由（真值源）：C1 之后 `tool_exposure_for_name()` 已把 10 项团队工具并入
-        // `ModelVisible`，其余 builtin 均为 `ModelVisible`/`Deferred`（tool_search、
-        // workspace_path_info、spill_read），因此 `builtin_tools()` 里**不存在** exposure=Internal
-        // 的名字 —— 原用例以 `subagent` 当 Internal 样例的前提消失（找不到等价的 Internal
-        // builtin 可替换）。按契约 C4.4 的规则改写为**更严**的断言，不删用例、不放宽：
-        // ① 全量 builtin 名字的 Internal 集合必须恰为空集（回归守卫：未来谁把某个 builtin
-        //    标回 Internal，本用例立即变红）；
-        // ② 动态工具 `mcp__demo__echo` 必须照旧透传；
-        // ③ 现已 ModelVisible 的 builtin（subagent）经 fallback 分支也不得被摘除。
+        // 迁移理由（真值源）：C1 之后团队工具并入 `ModelVisible`，但 `workflow` 因
+        // `orchestration::workflow()` 仍是桩实现（只回显 step.id + status="success"）被
+        // L3-P 裁决**保持 Internal**。因此 `builtin_tools()` 的 Internal 集合恰为
+        // {`workflow`}：既保留了本用例「Internal builtin 必须被 fallback 摘除」的原始立意，
+        // 又把集合钉成精确值（回归守卫：任何 builtin 的 exposure 漂移都会让本用例变红）。
         let builtin_names: Vec<String> = crate::agent::tools::builtin_tools()
             .into_iter()
             .map(|tool| tool.name.to_string())
@@ -5222,13 +5217,20 @@ mod tests {
             .iter()
             .filter(|name| is_internal_builtin_tool_name(name))
             .collect();
-        assert!(
-            internal_builtins.is_empty(),
-            "Wave-61 C1 后 builtin_tools() 不得再存在 exposure=Internal 的名字（模型面不依赖 fallback \
-             摘除任何 builtin）；实际仍为 Internal：{internal_builtins:?}"
+        let internal_names: Vec<&str> = internal_builtins.iter().map(|name| name.as_str()).collect();
+        assert_eq!(
+            internal_names,
+            vec!["workflow"],
+            "Wave-61 L3-P 后 builtin_tools() 的 exposure=Internal 集合必须恰为 [workflow]\
+             （模型面只允许通过 fallback 摘除这一个桩实现）；实际：{internal_names:?}"
         );
 
         let tools = vec![
+            ToolDefinition {
+                name: "workflow",
+                description: "wave-61：仍为 Internal 的桩实现",
+                input_schema: json!({"type": "object"}),
+            },
             ToolDefinition {
                 name: "subagent",
                 description: "wave-61：已 ModelVisible 的 builtin",
@@ -5280,10 +5282,9 @@ mod tests {
                 "BatchExecute".to_string(),
                 "Plan".to_string(),
                 "ViewImage".to_string(),
-                // Wave-61 C1：10 项团队工具进入模型可见面（按 builtin_tools 定义序插在
-                // ViewImage 之后、TodoWrite 之前；product 名 == primitive 小写原名）。
+                // Wave-61 C1：9 项团队工具进入模型可见面（按 builtin_tools 定义序插在
+                // ViewImage 之后、TodoWrite 之前；`workflow` 桩实现保持 Internal）。
                 "subagent".to_string(),
-                "workflow".to_string(),
                 "spawn_teammate".to_string(),
                 "list_agents".to_string(),
                 "send_message".to_string(),

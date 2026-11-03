@@ -32,6 +32,33 @@ pub struct SubagentRunOutcome {
 pub trait SubagentTurnEngine: Send + Sync {
     /// 以给定 prompt 运行一个完整子代理 turn。
     fn run_turn(&self, prompt: &str, timeout_ms: u64) -> Result<SubagentRunOutcome, String>;
+
+    /// 引擎是否在 `run_turn` 内部**自行**获取并发/体积许可（许可唯一真源）。
+    ///
+    /// 默认 `false`：注入式引擎（测试 Stub、宿主自定义引擎）不自持，由
+    /// [`crate::agent::orchestration::subagent`] 入口门兜住 —— wave-37 C3.2 契约要求
+    /// 「Stub 引擎注入场景下 busy/oversize 契约同样生效」。
+    ///
+    /// [`HostTurnEngine`] 返回 `true`：它在 `run_turn` 内调用 [`subagent_gate_enter`]，
+    /// 因此入口门必须**跳过**，否则一次调用会扣两个许可（有效并发被压成 1）。
+    fn gates_concurrency_internally(&self) -> bool {
+        false
+    }
+
+    /// 以**显式工作区根**运行一个子代理 turn（Wave-61 C8，additive）。
+    ///
+    /// 默认实现原样委托 [`SubagentTurnEngine::run_turn`]，因此既有 Stub/宿主引擎零改动，
+    /// 也不会因新增方法而破坏 `impl SubagentTurnEngine for X`（默认方法不要求覆写）。
+    /// [`HostTurnEngine`] 覆写它：`Some(root)` 用该 root 建栈，`None` 回落既有解析链。
+    fn run_turn_in(
+        &self,
+        prompt: &str,
+        timeout_ms: u64,
+        workspace_root: Option<&std::path::Path>,
+    ) -> Result<SubagentRunOutcome, String> {
+        let _ = workspace_root;
+        self.run_turn(prompt, timeout_ms)
+    }
 }
 
 static SUBAGENT_ENGINE: OnceLock<Arc<dyn SubagentTurnEngine>> = OnceLock::new();
@@ -146,23 +173,37 @@ impl HostTurnEngine {
     }
 }
 
-impl SubagentTurnEngine for HostTurnEngine {
-    fn run_turn(&self, prompt: &str, timeout_ms: u64) -> Result<SubagentRunOutcome, String> {
-        // 1) prompt 体积门 + 2) 并发门：入口统一过门（Guard Drop 归还许可，
+impl HostTurnEngine {
+    /// 以**显式工作区根**运行一个子代理 turn（Wave-61 C8 的共用实现）。
+    ///
+    /// `workspace_root` 必须是绝对路径（调用方负责）：父会话/宿主的真实工作区根，
+    /// 使子代理继承父会话的项目指令与项目技能（wave-58 F1-5）。回落规则（`None` →
+    /// `resolved_workspace_root()`）由 [`SubagentTurnEngine::run_turn_in`] 处理。
+    fn run_turn_with_root(
+        &self,
+        prompt: &str,
+        timeout_ms: u64,
+        workspace_root: PathBuf,
+    ) -> Result<SubagentRunOutcome, String> {
+        // 1) prompt 体积门 + 2) 并发门：引擎是许可的唯一真源（Guard Drop 归还许可，
         //    panic 展开路径同样安全）。
-        let _inflight = subagent_gate_enter(prompt)?;
+        let inflight = subagent_gate_enter(prompt)?;
 
         // 3) 独立会话：子代理会话 id 预生成，超时后可标注孤儿。
         let session_id = format!("subagent-{}", Uuid::new_v4());
         let thread_session_id = session_id.clone();
         let prompt_owned = prompt.to_string();
-        // Wave-58 F1-5：建栈根必须在 spawn 前解析好并 move 进线程（`self` 不跨线程）。
-        let workspace_root = self.resolved_workspace_root();
+        // Wave-58 F1-5：建栈根已在调用方解析好并作为参数传入，此处直接 move 进线程
+        //（`self` 不跨线程）。
 
         // AgentRuntime 的 Send+Sync 不作为对外契约假设：runtime 在工作线程
         // 内部构建并持有，跨线程只传 outcome（TurnResult: Clone + Send 数据）。
         let (tx, rx) = mpsc::channel::<Result<crate::agent::runtime::TurnResult, String>>();
         let worker = std::thread::spawn(move || {
+            // Wave-61 C.2：并发许可必须**随工作线程**存活。父线程在超时分支提前 return 时
+            // worker 仍在跑（孤儿会话），若许可留在父线程会被提前归还，实际并发会突破
+            // SUBAGENT_MAX_CONCURRENT。move 进本线程后，只有线程真正结束才归还。
+            let _inflight = inflight;
             let result = catch_unwind(AssertUnwindSafe(move || {
                 // 独立建栈：不共享宿主 SessionStore / ProviderRegistryStore。
                 let runtime = AgentRuntimeBuilder::new()
@@ -234,5 +275,31 @@ impl SubagentTurnEngine for HostTurnEngine {
                 }
             }
         }
+    }
+}
+
+impl SubagentTurnEngine for HostTurnEngine {
+    /// 本引擎在 `run_turn` 内持门（见 `subagent_gate_enter`），故 orchestration 入口门必须跳过，
+    /// 避免一次调用扣两个许可（Wave-61 C.1 双重扣减修正）。
+    fn gates_concurrency_internally(&self) -> bool {
+        true
+    }
+
+    fn run_turn(&self, prompt: &str, timeout_ms: u64) -> Result<SubagentRunOutcome, String> {
+        self.run_turn_with_root(prompt, timeout_ms, self.resolved_workspace_root())
+    }
+
+    /// Wave-61 C8：显式工作区根优先（桌面宿主的真实工作区在 `ToolRouter.workspace_root`，
+    /// 不等同于 `compute_default_workspace_root()`）；`None` 时回落既有解析链。
+    fn run_turn_in(
+        &self,
+        prompt: &str,
+        timeout_ms: u64,
+        workspace_root: Option<&std::path::Path>,
+    ) -> Result<SubagentRunOutcome, String> {
+        let root = workspace_root
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| self.resolved_workspace_root());
+        self.run_turn_with_root(prompt, timeout_ms, root)
     }
 }

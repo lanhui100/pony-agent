@@ -54,7 +54,8 @@ pub use crate::agent::goal::{
     GoalActivation, GoalData, UpdateGoalAction, UpdateGoalArgs, UpdateGoalResult,
 };
 pub use crate::agent::orchestration::{
-    drain_inbox, interrupt_agent, list_agents, send_message, spawn_teammate, subagent,
+    drain_inbox, interrupt_agent, list_agents, send_message, send_message_in_workspace,
+    spawn_teammate, spawn_teammate_in_workspace, subagent, subagent_in_workspace,
     team_task_create, team_task_get, team_task_list, team_task_update, wait_agent, workflow,
     InterruptAgentArgs, InterruptAgentResult, ListAgentsResult, MessageDeliveryMode, QueuedMessage,
     ReadInboxArgs, ReadInboxResult, SendMessageArgs, SendMessageResult, SpawnTeammateArgs,
@@ -1574,7 +1575,8 @@ impl ToolRouter {
 
         let args: Result<SubagentArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            Ok(args) => match subagent(args) {
+            // Wave-61 C8.4：把宿主真实工作区根传给子代理（父会话项目指令/技能随之继承）。
+            Ok(args) => match subagent_in_workspace(args, Some(self.workspace_root.as_path())) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SUBAGENT.to_string(),
                     status: "ok".to_string(),
@@ -1632,7 +1634,9 @@ impl ToolRouter {
 
         let args: Result<SpawnTeammateArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            Ok(args) => match spawn_teammate(args) {
+            // Wave-61 C7 + C8.4：派生队友后把它的初始 prompt 真正投递并驱动（引擎在位时），
+            // 不再"只登记成员、模型却收到 ok"。
+            Ok(args) => match spawn_teammate_in_workspace(args, Some(self.workspace_root.as_path())) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SPAWN_TEAMMATE.to_string(),
                     status: "ok".to_string(),
@@ -1681,7 +1685,8 @@ impl ToolRouter {
 
         let args: Result<SendMessageArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            Ok(args) => match send_message(args) {
+            // Wave-61 C7/C8.4：入队成功后由后台线程真实驱动队友 turn，并以宿主工作区根建栈。
+            Ok(args) => match send_message_in_workspace(args, Some(self.workspace_root.as_path())) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SEND_MESSAGE.to_string(),
                     status: "ok".to_string(),
@@ -6540,10 +6545,10 @@ mod contract_view_tests {
                 "BatchExecute",
                 "Plan",
                 "ViewImage",
-                // Wave-61 C1：10 项团队工具进入模型可见面（插在 ViewImage 之后、TodoWrite 之前，
-                // 与本文件 `characterization_product_surface_...` 的 39 项清单同序）。
+                // Wave-61 C1：9 项团队工具进入模型可见面（插在 ViewImage 之后、TodoWrite 之前，
+                // 与本文件 `characterization_product_surface_...` 的 38 项清单同序；
+                // `workflow` 因桩实现保持 Internal，不在可见面）。
                 "subagent",
-                "workflow",
                 "spawn_teammate",
                 "list_agents",
                 "send_message",
@@ -6588,9 +6593,9 @@ mod contract_view_tests {
                 "workspace_batch",
                 "plan_control",
                 "view_image",
-                // Wave-61 C1：10 项团队工具的 primitive 同样插入 view_image 之后。
+                // Wave-61 C1：9 项团队工具的 primitive 同样插入 view_image 之后
+                //（`workflow` 保持 Internal，不在可见面）。
                 "subagent",
-                "workflow",
                 "spawn_teammate",
                 "list_agents",
                 "send_message",
@@ -6644,8 +6649,8 @@ mod contract_view_tests {
         );
         assert_eq!(
             names.len(),
-            39,
-            "Wave-61 C1 后模型可见工具面 39 项（29 既有 + 10 团队工具）"
+            38,
+            "Wave-61 C1 后模型可见工具面 38 项（29 既有 + 9 团队工具；workflow 桩实现不暴露）"
         );
         assert_eq!(
             names,
@@ -6666,10 +6671,9 @@ mod contract_view_tests {
                 "BatchExecute",
                 "Plan",
                 "ViewImage",
-                // Wave-61 C1：10 项团队工具按 builtin_tools() 定义序插入 ViewImage 之后
-                //（product 名 == primitive 小写原名，契约 C1.2）。
+                // Wave-61 C1：9 项团队工具按 builtin_tools() 定义序插入 ViewImage 之后
+                //（product 名 == primitive 小写原名；`workflow` 因桩实现保持 Internal）。
                 "subagent",
-                "workflow",
                 "spawn_teammate",
                 "list_agents",
                 "send_message",
@@ -6842,8 +6846,8 @@ mod contract_view_tests {
         assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
         assert_eq!(
             names.len(),
-            39,
-            "Wave-61 C1 后模型可见面 39 项（29 既有 + 10 团队工具）"
+            38,
+            "Wave-61 C1 后模型可见面 38 项（29 既有 + 9 团队工具；workflow 桩实现不暴露）"
         );
         assert!(registry.resolve("Run").is_some());
         assert!(registry.resolve("workspace.run_command").is_some());
@@ -6854,7 +6858,6 @@ mod contract_view_tests {
         // Wave-61 C1：10 项团队工具的 descriptor 必须可解析且已 ModelVisible。
         for name in [
             "subagent",
-            "workflow",
             "spawn_teammate",
             "list_agents",
             "send_message",
@@ -6870,6 +6873,15 @@ mod contract_view_tests {
                 "{name} 必须已在模型可见面（Wave-61 C1）"
             );
         }
+        // `workflow` 是桩实现（只回显 step.id + status="success"），必须保持 Internal，
+        // 不得进模型可见面（诚实性优先；恢复条件＝真实 DAG 引擎落地）。
+        assert_eq!(
+            registry
+                .resolve("workflow")
+                .map(|descriptor| descriptor.exposure.clone()),
+            Some(ToolExposure::Internal),
+            "workflow 桩实现不得进入模型可见面（Wave-61 L3-P 裁决）"
+        );
         assert_eq!(
             registry
                 .resolve("ToolSearch")
@@ -7443,11 +7455,15 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         | TOOL_JOB_LIST => ToolExposure::ModelVisible,
         // W42/PA-149：技能正文按需加载进入常驻模型可见面。
         TOOL_SKILL_LOAD => ToolExposure::ModelVisible,
-        // Wave-61 C1：10 项团队/子代理工具进入常驻模型可见面（29 → 39）。
+        // Wave-61 C1：9 项团队/子代理工具进入常驻模型可见面（29 → 38）。
         // 可见性**不**随 `subagent_runtime_wired` 变化（契约 C1.4）：工具面逐 turn 恒定，
         // 「可用/可执行」才由 :152 的运行时判定收口（10 处 fail-closed 门保持不变）。
+        //
+        // `workflow` **不**在可见面：`orchestration::workflow()` 目前是桩实现（只回显 step.id
+        // 并返回 status="success"，无真实 DAG 执行），接线后模型会拿到**伪造成功**回执
+        // —— 诚实性优先（L3-P 裁决）。恢复条件＝真实 DAG 执行引擎落地并独立验收；
+        // 届时把它加回本分支，并把模型可见面计数改回 39。
         TOOL_SUBAGENT
-        | TOOL_WORKFLOW
         | TOOL_SPAWN_TEAMMATE
         | TOOL_LIST_AGENTS
         | TOOL_SEND_MESSAGE

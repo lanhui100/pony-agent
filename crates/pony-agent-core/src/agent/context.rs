@@ -63,12 +63,12 @@ pub fn base_system_prompt() -> &'static str {
 pub const AGENT_TEAM_POLICY_PROMPT: &str = r#"Agent Teams is available in this session
 
 - Shared workspace: the Team Lead and every teammate share one working directory and filesystem; edits are immediately visible to every member. Split write work into disjoint scopes, record the expected write scopes on shared tasks, and use task dependencies when work must be ordered. Write-scope overlap is advisory, not a lock.
-- Prefer read/edit/write for file changes. If a file operation returns FS_STALE_VERSION, read the current file, rebase the intended change onto the new content, and retry. Bash, formatters, code generators, and scripts are not fully protected by the filesystem version guard: coordinate them explicitly and have the Lead review the final diff and run tests.
+- Prefer read/edit/write for file changes. If a file operation returns cas_conflict (content-addressed CAS mismatch), read the current file, rebase the intended change onto the new content, and retry. Run and other process-spawning paths are not covered by the filesystem version guard: coordinate them explicitly and have the Lead review the final diff and run tests.
 - Use the target returned by spawn_teammate or list_agents as the send_message / interrupt_agent target, and as the owner when assigning or filtering shared tasks.
 - send_message: a running target receives the message at its nearest step boundary; an inactive target is started or resumed. A peer message starts with its sender name. A successful send does not mean the recipient has processed it.
 - Member states: inactive means no turn is executing; it does not describe task completion, success, failure, or waiting for other agents. provisioning means member creation is in progress; failed means member creation failed.
 - Shared-task workflow: team_task_list reads the board and each row echoes its current revision; team_task_update with action claim plus expected_revision takes the task, then perform the work and team_task_update with action complete and the new expected_revision. Task readiness never starts an owner.
-- Member status has exactly one source: the status field returned by list_agents (running / inactive / provisioning / failed). To move a required member forward, send_message wakes it; a running member picks the message up at its nearest step boundary. Re-list with list_agents and team_task_list after each action instead of assuming progress.
+- Member status has exactly one source: the status field returned by list_agents (provisioning / active / running / inactive / failed). To move a required member forward, send_message wakes it; a running member picks the message up at its nearest step boundary. Re-list with list_agents and team_task_list after each action instead of assuming progress.
 - Role lifecycle: spawn_teammate derives a teammate when work needs a writer or a longer independent run; maintain the shared task board with team_task_*; interrupt_agent aborts one teammate's current turn.
 - The Lead must not give the final answer while a required teammate is still running or provisioning: re-run list_agents plus team_task_list until every required member is inactive with its task complete, or failed, and report any failure honestly."#;
 
@@ -448,8 +448,12 @@ fn build_layered_turn_context(
     let current_user_message = ProviderMessage::user(effective_user_message_text.clone());
     // Wave-61 C3.3：团队策略段作为**紧跟 BASE 之后的第二条 System 消息**进入稳定层。
     // 门控值来自进程级 OnceLock，bootstrap 后恒定 ⇒ 同进程内不会随 turn 抖动前缀。
+    //
+    // Wave-61 C9：门控在本次组装里**只求值一次**并复用（input 路径 / native 预留 / native 稳定层
+    // 三处必须同真同假；重复求值会在 false→true 的竞态窗口内产生段序错位与 splice 越界）。
+    let team_policy_injected = agent_team_policy_enabled();
     let mut base_system_messages = vec![ProviderMessage::system(BASE_SYSTEM_PROMPT)];
-    if agent_team_policy_enabled() {
+    if team_policy_injected {
         base_system_messages.push(ProviderMessage::system(AGENT_TEAM_POLICY_PROMPT));
     }
     let domain_profile_prompt = infer_domain_profile_prompt(graph_name, &retrieved.turn_context);
@@ -544,7 +548,7 @@ fn build_layered_turn_context(
             "role": "system",
             "content": BASE_SYSTEM_PROMPT,
         })];
-        if agent_team_policy_enabled() {
+        if team_policy_injected {
             reserved_native_messages.push(json!({
                 "role": "system",
                 "content": AGENT_TEAM_POLICY_PROMPT,
@@ -554,8 +558,11 @@ fn build_layered_turn_context(
             "role": "system",
             "content": base_semistable_context.note.clone(),
         }));
+        // semistable 段此刻恒为末位，domain profile 固定插在它之前 —— 插入下标由长度推导，
+        // 不再二次读取门控（C9：消除 false→true 窗口内的 splice 越界/段序错位）。
+        let domain_insert_index = reserved_native_messages.len() - 1;
         reserved_native_messages.splice(
-            1 + reserved_system_message_extra_count()..1 + reserved_system_message_extra_count(),
+            domain_insert_index..domain_insert_index,
             domain_profile_messages.iter().map(|message| {
                 json!({
                     "role": "system",
@@ -610,7 +617,7 @@ fn build_layered_turn_context(
             "role": "system",
             "content": BASE_SYSTEM_PROMPT,
         })];
-        if agent_team_policy_enabled() {
+        if team_policy_injected {
             native_base_system_messages.push(json!({
                 "role": "system",
                 "content": AGENT_TEAM_POLICY_PROMPT,
