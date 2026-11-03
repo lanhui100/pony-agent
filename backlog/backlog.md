@@ -21,11 +21,6 @@
   - 描述：跨轮对话与历史继续流转时的 `calls` 继承与累计逻辑缺乏专门的隔离回归用例验证，需补齐端到端契约与状态重载测试。
   - 登记来源：wave-55 遗留债登记
 
-- [ ] `B008` - P0: promoted 作业的 `ManagedProcess` 条目永不回收（每 run 泄漏 1 条目 + Windows Job 句柄）
-  - 路径：`crates/pony-agent-core/src/agent/process.rs`（poll 不 remove）、`tools.rs` promote 早返回跳过二次 kill、`ProcessManager::shutdown` 零生产调用方
-  - 描述：L3-A BLOCKING。promote 后 `legacy_run_session_id()` 每 Run 唯一，`shutdown(session)` 无生产调用方 ⇒ 设计所称「由 shutdown 收口」不可达；promoted 进程只能靠模型 `job_kill`。
-  - 登记来源：`.dev-team/review-promote-A.json`（2026-11-04）
-
 - [ ] `B009` - P0: promote 后取消失效（用户 Stop 停不下来）
   - 路径：`crates/pony-agent-core/src/agent/tools.rs:3004`（`CommandCancelWatcher` 随函数返回 drop）
   - 描述：L3-A BLOCKING，实测 cancel 后 `sleep 5` 仍跑完 exit 0。需把 turn 取消语义延续到 promoted 作业（或把 promoted 注册进可取消集合）。
@@ -44,6 +39,12 @@
   - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）
 
 ## 已完成
+
+- [x] `B008` - P0: promoted 作业的 `ManagedProcess` 条目永不回收（每 run 泄漏 1 条目 + Windows Job 句柄）
+  - 路径：`crates/pony-agent-core/src/agent/process.rs`（poll 不 remove）、`tools.rs` promote 早返回跳过二次 kill、`ProcessManager::shutdown` 零生产调用方
+  - 描述：L3-A BLOCKING。promote 后 `legacy_run_session_id()` 每 Run 唯一，`shutdown(session)` 无生产调用方 ⇒ 设计所称「由 shutdown 收口」不可达；promoted 进程只能靠模型 `job_kill`。
+  - 登记来源：`.dev-team/review-promote-A.json`（2026-11-04）
+  - 结果：已修复（`jobs.rs` `released` 标志 + `release_promoted_entry()`，复用 `kill_if_exists` 的已退出回收；两条 `#[cfg(test)]` 单测断言 `is_tracked=false`；promote 7 / pa105 5 全绿）。
 
 - [x] `B005` - P1: 真·promote：Run 超时把运行中命令转后台 job（DSH 对齐）
   - 路径：`crates/pony-agent-core/src/agent/jobs.rs`（新增 promote 适配层）、`crates/pony-agent-core/src/agent/tools.rs:3011,3122-3176`

@@ -198,6 +198,8 @@ struct JobSession {
     /// promoted job 的粘性截断标记（`job_start` 自建作业恒 false，不对外声称）。
     stdout_truncated: AtomicBool,
     stderr_truncated: AtomicBool,
+    /// B008：promoted 作业进入终态后，`ProcessManager` 里的条目是否已回收（一次性开关）。
+    released: AtomicBool,
     kind: JobKind,
     #[cfg(windows)]
     #[allow(dead_code)]
@@ -220,7 +222,7 @@ impl JobSession {
             handle,
         } = &self.kind
         {
-            return match manager.poll(session_id, handle) {
+            let outcome = match manager.poll(session_id, handle) {
                 Ok(result) => {
                     self.append_poll_output(&result);
                     if result.state == ProcessState::Exited {
@@ -233,9 +235,9 @@ impl JobSession {
                             "failed".to_string()
                         };
                         *status_guard = status.clone();
-                        (status, code)
+                        Some((status, code))
                     } else {
-                        ("running".to_string(), None)
+                        None
                     }
                 }
                 Err(_) => {
@@ -243,9 +245,17 @@ impl JobSession {
                     self.is_alive.store(false, Ordering::Release);
                     *status_guard = "failed".to_string();
                     let code = *self.exit_code.lock().unwrap();
-                    ("failed".to_string(), code)
+                    Some(("failed".to_string(), code))
                 }
             };
+            // B008：终态后回收 ProcessManager 条目。必须在**释放 `status` 锁之后**再进
+            // ProcessManager（那里还会取 child/state 锁），避免跨模块持锁。
+            let reached_terminal = outcome.is_some();
+            drop(status_guard);
+            if reached_terminal {
+                self.release_promoted_entry(manager, session_id, handle);
+            }
+            return outcome.unwrap_or_else(|| ("running".to_string(), None));
         }
 
         // Check if deadline passed
@@ -309,6 +319,21 @@ impl JobSession {
         }
     }
 
+    /// B008：promoted 作业进入终态后回收 `ProcessManager` 里的条目。
+    ///
+    /// 复用既有回收机制：`ProcessManager::kill_inner` 对「已退出」的条目会移除 entry
+    /// （**不新造 release API**）。`released.swap(true, AcqRel)` 保证只调一次；调用方必须在
+    /// **释放 `status` 锁之后**调用，避免持锁跨模块（ProcessManager 还要取 child/state 锁）。
+    /// 回收失败不改变作业语义：ring buffer 里已读内容不受影响，`job_output` 仍可读到终态输出。
+    fn release_promoted_entry(&self, manager: &ProcessManager, session_id: &str, handle: &str) {
+        if self.released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Err(error) = manager.kill_if_exists(session_id, handle) {
+            eprintln!("[jobs] promoted entry release failed for `{handle}`: {error}");
+        }
+    }
+
     fn kill_internal(&self, reason: Option<&str>) -> bool {
         // 契约 v4 / B005：promoted 作业的终止走 `ProcessManager::cancel`（自有进程树语义），
         // 不走 `child.kill`（此处无 Child 所有权）。
@@ -330,6 +355,9 @@ impl JobSession {
             }
             self.is_alive.store(false, Ordering::Release);
             *status_guard = "killed".to_string();
+            // B008：kill 后同步回收条目（放锁后再进 ProcessManager）。
+            drop(status_guard);
+            self.release_promoted_entry(manager, session_id, handle);
             return true;
         }
 
@@ -651,6 +679,7 @@ pub fn job_start_with_workspace_root(
         deadline,
         stdout_truncated: AtomicBool::new(false),
         stderr_truncated: AtomicBool::new(false),
+        released: AtomicBool::new(false),
         kind: JobKind::Owned,
         #[cfg(windows)]
         job,
@@ -720,6 +749,7 @@ pub fn register_promoted(
         deadline: None,
         stdout_truncated: AtomicBool::new(stdout_truncated),
         stderr_truncated: AtomicBool::new(stderr_truncated),
+        released: AtomicBool::new(false),
         kind: JobKind::Promoted {
             manager,
             session_id,
@@ -811,4 +841,166 @@ pub fn job_list(_args: JobListArgs) -> Result<JobListResult, String> {
         })
         .collect();
     Ok(JobListResult { jobs })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::tool_runtime::{ProcessStartRequest, SandboxRequest};
+
+    /// 被 promote 的作业在进入终态后，必须把 `ProcessManager` 里的条目回收掉（B008）。
+    ///
+    /// 断言口径：`ProcessManager::is_tracked` —— 回收只删条目，不影响 ring buffer 里已读内容
+    /// （`job_output` 仍能读到终态输出，由 `run_timeout_promote_test` 的 P2/P3/P5 覆盖）。
+    fn sandbox_request() -> SandboxRequest {
+        SandboxRequest {
+            workspace_root: ".".to_string(),
+            allow_network: false,
+            environment_allowlist: Vec::new(),
+            isolate_environment: false,
+        }
+    }
+
+    fn start(manager: &ProcessManager, session_id: &str, program: &str, args: &[&str]) -> String {
+        manager
+            .start(&ProcessStartRequest {
+                session_id: session_id.to_string(),
+                program: program.to_string(),
+                arguments: args.iter().map(|arg| arg.to_string()).collect(),
+                sandbox: sandbox_request(),
+            })
+            .expect("start must succeed")
+    }
+
+    /// 轮询进程直到终态（或超时），返回终态那次 poll 的结果（含最后一段输出）。
+    fn poll_until_exited(
+        manager: &ProcessManager,
+        session_id: &str,
+        handle: &str,
+    ) -> Option<ProcessPollResult> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let result = manager.poll(session_id, handle).expect("poll must succeed");
+            if result.state == ProcessState::Exited {
+                return Some(result);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// 自然结束的 promoted 作业：`update_status` 检出终态后条目被回收。
+    #[test]
+    fn promoted_job_releases_manager_entry_after_natural_exit() {
+        let manager = ProcessManager::new();
+        let session_id = "b008-natural";
+        #[cfg(windows)]
+        let handle = start(&manager, session_id, "cmd", &["/C", "echo done"]);
+        #[cfg(not(windows))]
+        let handle = start(&manager, session_id, "sh", &["-c", "echo done"]);
+
+        let first_read = poll_until_exited(&manager, session_id, &handle)
+            .expect("helper command must exit before the deadline");
+
+        // 用终态那次 poll 的输出作为 promote 首读快照（真实链路里快照来自 Run 的 poll 累积）。
+        let job_id = register_promoted(
+            manager.clone(),
+            session_id.to_string(),
+            handle.clone(),
+            "echo done".to_string(),
+            &first_read.stdout,
+            &first_read.stderr,
+            first_read.stdout_truncated,
+            first_read.stderr_truncated,
+        )
+        .expect("register_promoted must succeed");
+        assert!(
+            manager.is_tracked(session_id, &handle),
+            "注册后条目应仍被 ProcessManager 追踪"
+        );
+
+        // 驱动到终态：update_status → poll 看到 Exited → 置 completed → 回收条目。
+        let out = job_output(JobOutputArgs {
+            job_id: job_id.clone(),
+            wait: Some(true),
+            timeout_ms: Some(5_000),
+            offset: None,
+        })
+        .expect("job_output must succeed");
+        assert_eq!(out.status, "completed", "natural exit must converge to completed");
+        assert_eq!(out.exit_code, Some(0), "exit code must be preserved");
+        assert!(
+            out.output.contains("done"),
+            "回收不得影响已读输出，实际 output={:?}",
+            out.output
+        );
+        let tracked_after_terminal = manager.is_tracked(session_id, &handle);
+        eprintln!(
+            "[b008] natural exit: tracked_after_register=true tracked_after_terminal={tracked_after_terminal}"
+        );
+        assert!(
+            !tracked_after_terminal,
+            "B008：promoted 作业终态后 ProcessManager 条目必须被回收（不得残留泄漏）"
+        );
+
+        // 幂等：再读一次终态仍可读（回收只删 ProcessManager 条目，ring buffer 不变）。
+        let again = job_output(JobOutputArgs {
+            job_id,
+            wait: Some(false),
+            timeout_ms: Some(0),
+            offset: None,
+        })
+        .expect("job_output after release must still succeed");
+        assert_eq!(again.status, "completed", "回收后仍须读到终态状态");
+        assert!(
+            again.output.contains("done"),
+            "回收后 ring buffer 内容必须保留，实际 output={:?}",
+            again.output
+        );
+    }
+
+    /// 被 `job_kill` 终止的 promoted 作业：kill 路径同样回收条目。
+    #[test]
+    fn promoted_job_releases_manager_entry_after_job_kill() {
+        let manager = ProcessManager::new();
+        let session_id = "b008-killed";
+        #[cfg(windows)]
+        let handle = start(&manager, session_id, "cmd", &["/C", "ping -n 6 127.0.0.1 >nul"]);
+        #[cfg(not(windows))]
+        let handle = start(&manager, session_id, "sh", &["-c", "sleep 5"]);
+
+        let job_id = register_promoted(
+            manager.clone(),
+            session_id.to_string(),
+            handle.clone(),
+            "long running".to_string(),
+            "",
+            "",
+            false,
+            false,
+        )
+        .expect("register_promoted must succeed");
+
+        let killed = job_kill(JobKillArgs {
+            job_id: job_id.clone(),
+            reason: Some("b008".to_string()),
+        })
+        .expect("job_kill must succeed");
+        assert!(killed.killed, "running promoted job must report killed=true");
+        let tracked_after_kill = manager.is_tracked(session_id, &handle);
+        eprintln!("[b008] job_kill: tracked_after_kill={tracked_after_kill}");
+        assert!(
+            !tracked_after_kill,
+            "B008：promoted 作业被 kill 后 ProcessManager 条目必须被回收（不得残留泄漏）"
+        );
+
+        let out = job_output(JobOutputArgs {
+            job_id,
+            wait: Some(false),
+            timeout_ms: Some(0),
+            offset: None,
+        })
+        .expect("job_output after kill must still succeed");
+        assert_eq!(out.status, "killed", "kill 后仍必须能读到终态状态");
+    }
 }
