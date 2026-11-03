@@ -1,0 +1,246 @@
+{
+  "status": "FAIL",
+  "num_total": 19,
+  "num_failed": 18,
+  "num_passed": 1,
+  "failures": [
+    {
+      "test": "wave-61 §1 L-1：composer 圆环移除（迁移的离开方） L-1(离开方): WorkspaceComposer 内不存在圆环 DOM（testid / aria-label / dashoffset 三路取证）",
+      "file": "tests/acceptance/wave61/wave61-composer-scope.spec.ts",
+      "exception": "AssertionError: L-1：composer 内不得再存在 [data-testid=\"workspace-context-usage-circle\"]: expected [ DOMWrapper{ …(3) } ] to have a length of +0 but got 1",
+      "stack_head": [
+        "AssertionError: L-1：composer 内不得再存在 [data-testid=\"workspace-context-usage-circle\"]: expected [ DOMWrapper{ …(3) } ] to have a length of +0 but got 1",
+        "    at Proxy.<anonymous> (file:///home/dm/pony-agent/node_modules/@vitest/expect/dist/index.js:1389:20)",
+        "    at Proxy.<anonymous> (file:///home/dm/pony-agent/node_modules/@vitest/expect/dist/index.js:1156:15)",
+        "    at Proxy.methodWrapper (file:///home/dm/pony-agent/node_modules/chai/index.js:1700:25)",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-composer-scope.spec.ts:109:7"
+      ]
+    },
+    {
+      "test": "wave-61 §1 L-1：composer 圆环移除（迁移的离开方） L-1(离开方): WorkspaceComposer.vue 源码不再包含圆环 testid 与专属 computed",
+      "file": "tests/acceptance/wave61/wave61-composer-scope.spec.ts",
+      "exception": "AssertionError: L-1：WorkspaceComposer.vue 不得再包含符号 \"workspace-context-usage-circle\"（契约 L-1：DOM / data-testid / 专属 computed 一并移除）: expected true to be false // Object.is equality",
+      "stack_head": [
+        "AssertionError: L-1：WorkspaceComposer.vue 不得再包含符号 \"workspace-context-usage-circle\"（契约 L-1：DOM / data-testid / 专属 computed 一并移除）: expected true to be false // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-composer-scope.spec.ts:152:9",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §2 空值契约（E-1..E-5） E-1: 计数位为 0 / 非有限值时，该位点整个 DOM 节点不渲染（逐位点隔离验证）",
+      "file": "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+      "exception": "AssertionError: E-1（turnCount=0）：status-metric-turn-count 整个 DOM 节点必须不渲染（禁止渲染 0 占位）: expected true to be false // Object.is equality",
+      "stack_head": [
+        "AssertionError: E-1（turnCount=0）：status-metric-turn-count 整个 DOM 节点必须不渲染（禁止渲染 0 占位）: expected true to be false // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-empty-values.spec.ts:109:9",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §2 空值契约（E-1..E-5） E-2: token 位为 null / 非有限 / ≤0 时不渲染（逐位点隔离验证）",
+      "file": "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+      "exception": "AssertionError: E-2（input=null）：其余 token 位仍有值 ⇒ token 行必须仍渲染（反向哨兵）: expected false to be true // Object.is equality",
+      "stack_head": [
+        "AssertionError: E-2（input=null）：其余 token 位仍有值 ⇒ token 行必须仍渲染（反向哨兵）: expected false to be true // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-empty-values.spec.ts:156:9",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §2 空值契约（E-1..E-5） E-2(裁决 R1): 缓存比率尾段不再行内渲染（并入缓存位 tooltip）—— 行内只留图标+值，比率信息不丢失",
+      "file": "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+      "exception": "AssertionError: E-2（R1）：缓存位行内必须只剩「图标 + 值」两个子节点；实际 3 个: expected 3 to be 2 // Object.is equality",
+      "stack_head": [
+        "AssertionError: E-2（R1）：缓存位行内必须只剩「图标 + 值」两个子节点；实际 3 个: expected 3 to be 2 // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-empty-values.spec.ts:192:7",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §2 空值契约（E-1..E-5） E-3: contextDisplayTokens 为 null 或 contextWindowTokens 缺失/≤0 时，圆环位不渲染",
+      "file": "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+      "exception": "AssertionError: E-3 正向对照：contextDisplayTokens=9 / contextWindowTokens=200000 ⇒ 圆环位必须渲染: expected false to be true // Object.is equality",
+      "stack_head": [
+        "AssertionError: E-3 正向对照：contextDisplayTokens=9 / contextWindowTokens=200000 ⇒ 圆环位必须渲染: expected false to be true // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-empty-values.spec.ts:257:7",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §2 空值契约（E-1..E-5） E-4: 计数行/token 行各自为空时整行折叠；两行皆空且无拦截横幅时外层 section 整段折叠（裁决 R5）",
+      "file": "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+      "exception": "AssertionError: E-4：计数行可见位点数为 0 ⇒ 计数行必须整个不渲染: expected true to be false // Object.is equality",
+      "stack_head": [
+        "AssertionError: E-4：计数行可见位点数为 0 ⇒ 计数行必须整个不渲染: expected true to be false // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-empty-values.spec.ts:273:7",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §2 空值契约（E-1..E-5） E-5: 任何位点不得出现 `—` / `0` / `≈—` 等占位文本（有值态与全空态双向验证）",
+      "file": "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+      "exception": "AssertionError: E-5：全空态不得出现 `—` 占位文本: expected '状态000————' not to contain '—'",
+      "stack_head": [
+        "AssertionError: E-5：全空态不得出现 `—` 占位文本: expected '状态000————' not to contain '—'",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-empty-values.spec.ts:405:51",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §1 布局契约（L-1..L-5） L-1: 上下文圆环的唯一渲染位置 = status-metrics-counts 行内，且面板内恰好 1 处",
+      "file": "tests/acceptance/wave61/wave61-layout.spec.ts",
+      "exception": "AssertionError: L-1：圆环位 [data-testid=\"status-context-usage\"] 必须位于计数行内（契约 §1 L-1/L-2）: expected false to be true // Object.is equality",
+      "stack_head": [
+        "AssertionError: L-1：圆环位 [data-testid=\"status-context-usage\"] 必须位于计数行内（契约 §1 L-1/L-2）: expected false to be true // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-layout.spec.ts:102:7",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §1 布局契约（L-1..L-5） L-2: 计数行 4 位点顺序固定为 轮次→模型调用→工具调用→圆环；圆环 testid 不得带 status-metric- 前缀",
+      "file": "tests/acceptance/wave61/wave61-layout.spec.ts",
+      "exception": "AssertionError: L-2：计数行位点顺序必须为 轮次 → 模型调用 → 工具调用 → 上下文圆环: expected [ 'status-metric-turn-count', …(2) ] to deeply equal [ 'status-metric-turn-count', …(3) ]",
+      "stack_head": [
+        "AssertionError: L-2：计数行位点顺序必须为 轮次 → 模型调用 → 工具调用 → 上下文圆环: expected [ 'status-metric-turn-count', …(2) ] to deeply equal [ 'status-metric-turn-count', …(3) ]",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-layout.spec.ts:141:7",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §1 布局契约（L-1..L-5） L-2(圆环语义): 百分比 clamp(round(tokens/window*100),1,100) + data-context-debug 字面量 + aria-label + tooltip 文案",
+      "file": "tests/acceptance/wave61/wave61-layout.spec.ts",
+      "exception": "AssertionError: L-2：圆环位必须存在（有值夹具）: expected false to be true // Object.is equality",
+      "stack_head": [
+        "AssertionError: L-2：圆环位必须存在（有值夹具）: expected false to be true // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-layout.spec.ts:182:77",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §1 布局契约（L-1..L-5） L-3: 计数行与 token 行必须同为 4 等列栅格（grid grid-cols-4 items-center），token 行锚点 status-metrics-tokens",
+      "file": "tests/acceptance/wave61/wave61-layout.spec.ts",
+      "exception": "AssertionError: L-3：token 行必须新增 [data-testid=\"status-metrics-tokens\"] 锚点（取代 wave-17/59 的 justify-around class 锚点）: expected false to be true // Object.is equality",
+      "stack_head": [
+        "AssertionError: L-3：token 行必须新增 [data-testid=\"status-metrics-tokens\"] 锚点（取代 wave-17/59 的 justify-around class 锚点）: expected false to be true // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-layout.spec.ts:260:7",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §1 布局契约（L-1..L-5） L-4: 位点 = inline-flex/justify-center/gap-1.5 且 min-w 预留上移到容器；图标↔值之间无宽度预留盒",
+      "file": "tests/acceptance/wave61/wave61-layout.spec.ts",
+      "exception": "AssertionError: L-4：token 行必须存在（§1 L-3 新增 [data-testid=\"status-metrics-tokens\"] 锚点）: expected false to be true // Object.is equality",
+      "stack_head": [
+        "AssertionError: L-4：token 行必须存在（§1 L-3 新增 [data-testid=\"status-metrics-tokens\"] 锚点）: expected false to be true // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-layout.spec.ts:310:7",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §1 布局契约（L-1..L-5） L-5: 栅格 gap-x-2；计数行/token 行之间保留 border-t 分隔与 mt-2/pt-2；卡内 px-3 py-2 不变",
+      "file": "tests/acceptance/wave61/wave61-layout.spec.ts",
+      "exception": "AssertionError: L-5：token 行必须存在: expected false to be true // Object.is equality",
+      "stack_head": [
+        "AssertionError: L-5：token 行必须存在: expected false to be true // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-layout.spec.ts:416:73",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §3 动效契约（M-1..M-5） M-1: 入场动画存在且参数精确（200ms / cubic-bezier(0.3,0.7,0.4,1) / opacity 0→1 / translateY(4px)→0 + 圆环 scale(0.92)）",
+      "file": "tests/acceptance/wave61/wave61-motion.spec.ts",
+      "exception": "AssertionError: M-1：圆环位 [data-testid=\"status-context-usage\"] 必须存在（scale(0.92) 的载体）: expected null not to be null",
+      "stack_head": [
+        "AssertionError: M-1：圆环位 [data-testid=\"status-context-usage\"] 必须存在（scale(0.92) 的载体）: expected null not to be null",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-motion.spec.ts:225:88",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-61 §3 动效契约（M-1..M-5） M-3: 只动合成层（入场声明与关键帧不得驱动 width/height/margin/gap 等布局属性）",
+      "file": "tests/acceptance/wave61/wave61-motion.spec.ts",
+      "exception": "AssertionError: M-3：未找到入场动效证据，无法判定合成层约束（§3 M-3 以 M-1 的入场动效为前提）。",
+      "stack_head": [
+        "AssertionError: M-3：未找到入场动效证据，无法判定合成层约束（§3 M-3 以 M-1 的入场动效为前提）。",
+        "  读取的 CSS 面：src/components/HomeStatusPanel.vue + src/styles.css",
+        "  含 200ms 的规则数：0",
+        "  @keyframes：assistant-stream-fade-in: expected null not to be null",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-motion.spec.ts:359:11"
+      ]
+    },
+    {
+      "test": "wave-61 §3 动效契约（M-1..M-5） M-4: reduced-motion 双轨降级（@media prefers-reduced-motion 与 [data-pds-reduce-motion=\"true\"] 均关闭入场）",
+      "file": "tests/acceptance/wave61/wave61-motion.spec.ts",
+      "exception": "AssertionError: M-4：未找到入场动效证据，无法判定降级分支（§3 M-4 以 M-1 的入场动效为前提）。",
+      "stack_head": [
+        "AssertionError: M-4：未找到入场动效证据，无法判定降级分支（§3 M-4 以 M-1 的入场动效为前提）。",
+        "  读取的 CSS 面：src/components/HomeStatusPanel.vue + src/styles.css",
+        "  含 200ms 的规则数：0",
+        "  @keyframes：assistant-stream-fade-in: expected null not to be null",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-motion.spec.ts:394:107"
+      ]
+    },
+    {
+      "test": "wave-61 §3 动效契约（M-1..M-5） M-5: 动效不改变位点顺序 / testid / tabular-nums 承载链（wave-17 C2 不回归）",
+      "file": "tests/acceptance/wave61/wave61-motion.spec.ts",
+      "exception": "AssertionError: M-5：token 行 [data-testid=\"status-metrics-tokens\"] 必须存在: expected null not to be null",
+      "stack_head": [
+        "AssertionError: M-5：token 行 [data-testid=\"status-metrics-tokens\"] 必须存在: expected null not to be null",
+        "    at /home/dm/pony-agent/tests/acceptance/wave61/wave61-motion.spec.ts:439:77",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    }
+  ],
+  "wave": "wave-61",
+  "phase": "red",
+  "exit_code": 1,
+  "scope": "tests/acceptance/wave61（L-1..L-5 / E-1..E-5 / M-1..M-5 + composer 走方半边；含 §5.1/§5.2 二轮裁决 R1/R4/R5/R6 修订）",
+  "command": "npx vitest run tests/acceptance/wave61 --reporter=dot",
+  "json_command": "npx vitest run tests/acceptance/wave61 --reporter=json --outputFile=.dev-team/wave61-red-vitest.json",
+  "contract_source": ".dev-team/contracts/wave-61-status-panel.md（§1/§2/§3/§4 + §5.1 追加授权 + §5.2 判别力补偿）",
+  "failure_attribution": "SUT 未实现：HomeStatusPanel.vue 仍为 wave-59 版（计数行 grid-cols-3 / token 行 flex justify-around / 无 status-context-usage 圆环位 / 无 status-metrics-tokens 锚点 / 空值仍渲染 0 与 — / 缓存比率尾段仍在行内 / 无 .status-slot-enter 与 @keyframes）；WorkspaceComposer.vue 仍保留 workspace-context-usage-circle 与专属 computed。全部失败为断言在**已挂载的被测组件树**上求值所得，无 import/语法错误、无 Harness 超时、无 skip。",
+  "already_green_in_baseline": [
+    {
+      "test": "M-2: 不做退场动画",
+      "reason": "基线既无 leave 规则/关键帧也无 TransitionGroup（因为还完全没有入场动效），本用例为负向守卫，基线即绿（未伪造为失败）"
+    }
+  ],
+  "lead_rulings_landed": {
+    "R1": "E-2 用例改判：缓存比率尾段不再行内渲染，改为断言「行内只剩图标+值」+「比率文本并入 tooltip 文案」",
+    "R4": "M-1 机制钉死为「.status-slot-enter 静态 class + .status-slot-enter--ring + @keyframes」，M-2 追加 TransitionGroup 负断言",
+    "R5": "E-4 断言外层 section（pt-3 mt-3）整段折叠 + border-t 不残留 + 拦截横幅在场时卡容器保留",
+    "L-2": "新增圆环语义用例：pct=clamp(round(ratio*100),1,100) 上下限、data-context-debug 字面量、aria-label、tooltip 文案",
+    "L-4": "min-w 表更新为 3rem/3rem/3.5rem/3rem 并断言任何位点 min-w ≤ 3.5rem",
+    "L-5": "追加 gap-y-0 断言"
+  }
+}

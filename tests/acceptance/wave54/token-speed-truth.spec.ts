@@ -311,16 +311,38 @@ describe("wave-54 T5：HomeStatusPanel 显示纪律（C6）", () => {
     setActivePinia(createPinia());
   });
 
-  it("T5-1: inputTokensTotal=null ⇒ 输入位文本为 `—`（禁止渲染 0）", () => {
+  /**
+   * wave-61 §5 授权迁移（Lead 一票，原意图保真）：
+   *   原意图：`inputTokensTotal=null` 时输入位**不得渲染 0**（禁止把"无数据"伪装成"0 token"）。
+   *   迁移理由：wave-61 §2 E-2/E-5 把空值表达从占位文本 `—` 改为「位点整个不渲染」，
+   *             §2 E-5 明令禁止 `—` 占位文本（`formatCompactInteger` 的 `—` 分支随之作废）。
+   *   等价断言：输入位整个 DOM 节点不存在（既无 `0`、也无 `—`）＋ 其余 token 位反向哨兵仍在。
+   */
+  it("T5-1: inputTokensTotal=null ⇒ 输入位整个 DOM 不渲染（禁止渲染 0 / —）", () => {
     // Arrange
     const wrapper = mountStatusPanel({ ...STATUS_PANEL_BASE_PROPS, inputTokensTotal: null });
 
     // Act
-    const inputCarrier = wrapper.get('[data-testid="status-metric-input-tokens"]');
+    const inputCarrier = wrapper.find('[data-testid="status-metric-input-tokens"]');
 
-    // Assert
-    expect(inputCarrier.text().trim()).toBe("—");
-    expect(inputCarrier.text()).not.toContain("0");
+    // Assert（wave-61 §5 迁移后的等价断言：位点不存在）
+    expect(
+      inputCarrier.exists(),
+      "T5-1：inputTokensTotal=null ⇒ 输入位整个 DOM 不渲染（禁止渲染 0 / —）"
+    ).toBe(false);
+    expect(
+      wrapper.findAll('[data-testid="status-metric-input-tokens"]'),
+      "T5-1：输入位不得以任何形态残留在 DOM"
+    ).toHaveLength(0);
+
+    // Assert（反向哨兵：其余 token 位仍有值 ⇒ 不是整行塌陷掩盖的结果）
+    expect(
+      wrapper.find('[data-testid="status-metric-output-tokens"]').exists(),
+      "T5-1：输出位仍有真值，必须继续渲染"
+    ).toBe(true);
+
+    // Assert（E-5：面板内不得出现占位文本）
+    expect(wrapper.text(), "T5-1：面板内不得出现 `—` 占位文本").not.toContain("—");
 
     wrapper.unmount();
   });

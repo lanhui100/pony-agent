@@ -1,0 +1,20 @@
+{
+  "wave": "61",
+  "baseline_commit": "c575243",
+  "recorded_at": "2026-11-03T09:2x:00+08:00",
+  "worktree_note": "工作区存在其它波次（wave-60 stop-sequence）未提交变更；本波提交一律定向 git add，禁止 git add .",
+  "commands": [
+    {
+      "cmd": "npx vitest run --reporter=dot",
+      "exit_code": 0,
+      "result": "Test Files 134 passed (134); Tests 1286 passed | 12 skipped (1298)",
+      "duration_s": 296.04,
+      "executed_by": "Lead",
+      "scope": "全量前端单测/验收测试（vitest include 覆盖 tests/acceptance/** 与 tests/*.spec.ts）"
+    }
+  ],
+  "not_applicable": {
+    "cargo_check": "本波为纯前端 UI 变更（src/components/*.vue），不触及 Rust 源码；工作区已有的 crates/** 变更为 wave-60 在飞产物，不属本波",
+    "tauri_build": "不涉及打包配置"
+  }
+}

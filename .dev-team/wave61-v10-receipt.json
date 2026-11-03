@@ -1,0 +1,42 @@
+{
+  "wave": "wave-61",
+  "phase": "red",
+  "status": "FAIL",
+  "exit_code": 1,
+  "scope": "§5.1 追加授权 R3：FROZEN_FILES 重锚后的验证（V10-1 必须转绿；V10-2/V10-3 为下游实跑，红相期必红）",
+  "command": "npx vitest run tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts --reporter=dot",
+  "num_total": 3,
+  "num_failed": 2,
+  "num_passed": 1,
+  "notes": {
+    "V10-1": "已由红转绿（哈希重锚生效）",
+    "V10-2": "下游实跑 tests/useStreamingPresentationState.spec.ts + tests/acceptance/wave59/：红相期必红（F2-2/F2-4 等价断言等待新实现）",
+    "V10-3": "下游实跑既有全量单测：红相期必红（同上）"
+  },
+  "failures": [
+    {
+      "test": "wave-pds-3 V10：既有基线不回归 V10-2: 实跑冻结基线（14 例 + wave-59 23 例）—— exit code 0",
+      "file": "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts",
+      "exception": "AssertionError: V10-2：冻结基线实跑必须 exit 0；实际 exit=1",
+      "stack_head": [
+        "AssertionError: V10-2：冻结基线实跑必须 exit 0；实际 exit=1",
+        "tone-200/60 pt-2 text-[11px] leading-5 text-stone-600\">",
+        "        <!-- wave-54 C4/C6：「输入」口径 = 末次调用 contextInputTokens（回退 S1），",
+        "               无数据一律 `—`（禁止渲染 0）；估算来源加 `≈`。非会话累计。 --><span class=\"inline-flex items-center gap-1 tabular-nums\" data-testid=\"status-metric-input-tokens\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" data-state=\"closed\" data-grace-area-trigger=\"\" class=\"lucide h-3 w-3 text-stone-400 lucide-arrow-up-icon lucide-arrow-up h-3 w-3 text-stone-400\"><path d=\"m5 12 7-7 7 7\"></path><path d=\"M12 19V5\"></path></svg><teleport-stub to=\"body\" disabled=\"false\" defer=\"false\" forcemount=\"false\"></teleport-stub><span data-state=\"closed\" data-grace-area-trigger=\"\" class=\"inline-block min-w-[2.25rem] text-right\">900</span>",
+        "        <teleport-stub to=\"body\" disabled=\"false\" defer=\"false\" forcemount=\"false\"></teleport-stub></span><span data-state=\"closed\" data-grace-area-trigger=\"\" class=\"inline-flex items-center gap-1 tabular-nums\" data-testid=\"status-metric-output-tokens\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"lucide h-3 w-3 text-stone-400 lucide-arrow-down-icon lucide-arrow-down h-3 w-3 text-stone-400\" aria-hidden=\"true\"><path d=\"M12 5v14\"></path><path d=\"m19 12-7 7-7-7\"></path></svg><span class=\"inline-block min-w-[2.25rem] text-right\">1.2K</span></span>"
+      ]
+    },
+    {
+      "test": "wave-pds-3 V10：既有基线不回归 V10-3: 实跑既有全量单测（排除本波新增验收目录）—— exit code 0",
+      "file": "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts",
+      "exception": "AssertionError: V10-3：既有全量单测必须 exit 0；实际 exit=1",
+      "stack_head": [
+        "AssertionError: V10-3：既有全量单测必须 exit 0；实际 exit=1",
+        "— 既有 3 位计数断言语义不得被污染）",
+        "",
+        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/23]⎯",
+        ""
+      ]
+    }
+  ]
+}

@@ -21,6 +21,25 @@
  *   `[data-testid="status-metrics-counts"]`（wave-59 F2-1/F2-2 计数位下移）；
  *   C2-2a/b/c/d 四段物理口径与阈值（0.5px / 单调不减）保持原样。
  *
+ * ── wave-61 契约 §5 授权迁移（Lead 一票，原意图保真）────────────────────────────
+ * 迁移点：C2-2 位点集合与 token 行锚点。
+ *   原意图：对 HomeStatusPanel 的**全部指标位**逐位做 C2-2a/b/c/d 四段物理测量
+ *           （等位数宽度漂移 ≤0.5px / 相邻位左边缘位移 ≤0.5px / 宽度单调不减），
+ *           并保证「直接渲染数字文本的位点 ≥ 6」，防止探针降级掩盖定位失效。
+ *   迁移理由：wave-61 §1 L-1/L-2/L-3 把「上下文圆环」并入计数行成为第 4 个位点
+ *           （位点总数 3+4+1 = 8），并把 token 行从 `div.flex.items-center.justify-around`
+ *           改为 `grid grid-cols-4` + 新增锚点 `[data-testid="status-metrics-tokens"]`；
+ *           旧 class 锚点与 `measurements.length === 7` 必然失效。
+ *   等价断言：0.5px 阈值（Assert 4/5）、宽度单调不减（Assert 6）、
+ *           tabular-nums 计算值（Assert 3）、真实数字文本覆盖率 ≥6（Assert 2）**全部原样不变**；
+ *           仅「位点总数 7 ⇒ 8」与「token 行定位方式」随契约迁移。圆环位无数字文本，
+ *           走既有 `[RED DEGRADED: PROBE-NODE]` 探针路径（该位点仍参与四段测量）。
+ * ── wave-61 §5.1 追加授权（Lead 二轮裁决 R2，2026-11-03）──────────────────────
+ * 夹具 `seedTokenMetricFixture` 补一条 `call_tool` 工具活动（traceTimeline + toolActivities 各一条）。
+ *   原意图不变：位点总数 8 与「3 个计数位全可见」必须同时成立。
+ *   迁移理由：§2 E-1 使 0 值计数位整个不渲染 ⇒ `toolCallCount=0` 时 8 位点算术上不可达。
+ *   等价性：只加数据，不改任何断言、阈值与测量口径。
+ *
  * 作者：test-agent（L2-T）。红相锚定后本文件冻结只读，任何修改需 Lead 批准。
  */
 import { expect, test } from "@playwright/test";
@@ -292,9 +311,28 @@ async function seedTokenMetricFixture(page: Page) {
               firstTokenLatencyMs: 321,
               turnDurationMs: 4200,
               durationMs: 4200
+            },
+            // wave-61 §5.1 追加授权（R2）：本夹具必须补一条 call_tool 工具活动。
+            // 理由：契约 §2 E-1 让「0 值计数位」整个不渲染 ⇒ 不补该活动时 toolCallCount=0 被隐藏，
+            // 「位点总数 8」在算术上不可达（3 计数 + 4 token + 1 圆环 需要三个计数位全可见）。
+            // 只加数据，不改任何断言与阈值。
+            {
+              id: "w59-c22-call-tool",
+              kind: "call_tool",
+              label: "调用工具",
+              state: "completed",
+              sequence: 2,
+              durationMs: 120
             }
           ],
-          toolActivities: [],
+          toolActivities: [
+            {
+              id: "w59-c22-tool-activity",
+              name: "read_file",
+              status: "done",
+              description: "wave-61 R2 夹具：保证 toolCallCount 有值"
+            }
+          ],
           providerCallRecords: [
             {
               requestKind: "initial_request",
@@ -366,15 +404,22 @@ test("C2-2: HomeStatusPanel 指标位 tabular-nums 计算样式 + 等位数宽�
 
     // wave-59 F2 契约演进（Lead 授权迁移，仅迁移定位锚点）：
     // 三个计数位由 status-panel-toggle 头部行下移至 token 卡内的 status-metrics-counts 行。
+    // wave-61 §5 迁移：改用既有 testid 前缀识别 3 个计数位（排除同行的圆环位），
+    // 并把圆环位作为第 8 个位点纳入测量（位点总数 3 + 4 + 1 = 8）。
     const countsRow = document.querySelector('[data-testid="status-metrics-counts"]');
     const countLabels = ["轮次计数位", "模型调用计数位", "工具调用计数位"];
-    const countCarriers = countsRow ? Array.from(countsRow.querySelectorAll("span.inline-flex")) : [];
+    const countCarriers = countsRow ? Array.from(countsRow.querySelectorAll('[data-testid^="status-metric-"]')) : [];
     countCarriers.forEach((element, index) => {
       slots.push({ label: countLabels[index] ?? `计数位#${index}`, rowId: "counts", element });
     });
+    const ringSlotElement = countsRow ? countsRow.querySelector('[data-testid="status-context-usage"]') : null;
+    if (ringSlotElement) {
+      slots.push({ label: "上下文圆环位", rowId: "counts", element: ringSlotElement });
+    }
 
     const tokenLabels = ["输入 token 位", "输出 token 位", "缓存 token 位", "生成速度位"];
-    const tokenRow = document.querySelector("div.justify-around");
+    // wave-61 §5 迁移：token 行锚点由 `div.justify-around` 改为契约 testid 锚点。
+    const tokenRow = document.querySelector('[data-testid="status-metrics-tokens"]');
     if (tokenRow) {
       Array.from(tokenRow.children)
         .filter((element) => element.matches("span.inline-flex"))
@@ -484,15 +529,16 @@ test("C2-2: HomeStatusPanel 指标位 tabular-nums 计算样式 + 等位数宽�
     });
   });
 
-  // Assert 1（位点完整性）：契约 C2-1 明列 4 个 token 指标位 + 3 个计数位。
+  // Assert 1（位点完整性）：契约 C2-1 的 4 个 token 位 + 3 个计数位，
+  // 加上 wave-61 §1 L-1/L-2 并入计数行的上下文圆环位 = 8 个位点。
   expect(
     measurements.length,
-    `HomeStatusPanel 必须渲染 7 个指标位，实际 ${measurements.length} 个；测得：${JSON.stringify(measurements.map((slot) => slot.label))}`
-  ).toBe(7);
+    `HomeStatusPanel 必须渲染 8 个指标位（3 计数 + 4 token + 1 圆环），实际 ${measurements.length} 个；测得：${JSON.stringify(measurements.map((slot) => slot.label))}`
+  ).toBe(8);
 
   // Assert 2（真实数字文本覆盖率）：防止探针降级路径掩盖选择器落空。
-  //   轮次/模型调用/工具调用 + 输入/输出/缓存 这 6 个位点在首页必然渲染数字（无数据显示 "0"），
-  //   只有「生成速度」可能为 "—"。因此真实数字文本位点数必须 ≥ 6。
+  //   轮次/模型调用/工具调用 + 输入/输出/缓存 这 6 个位点在首页必然渲染数字（夹具注入后为真值），
+  //   只有「生成速度」与「上下文圆环」可能走探针路径。因此真实数字文本位点数必须 ≥ 6（阈值未改）。
   const realTextSlots = measurements.filter((slot) => slot.source === "real-text");
   expect(
     realTextSlots.length,

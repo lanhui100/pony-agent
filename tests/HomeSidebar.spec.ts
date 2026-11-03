@@ -567,10 +567,16 @@ describe("HomeSidebar", () => {
     const tooltipTexts = Array.from(tooltipStubs).map((el) => el.getAttribute("data-tooltip"));
 
     // Token labels are now tooltips instead of visible text
-    expect(tooltipTexts).toContain("输入");
-    expect(tooltipTexts).toContain("输出");
-    expect(tooltipTexts).toContain("缓存读取");
-    expect(tooltipTexts).toContain("生成速度");
+    // ── wave-61 §5.1 追加授权（Lead 二轮裁决 R6，2026-11-03）───────────────────────
+    //   原意图：token 位的语义标签必须**可达**（从可见文本迁移为 tooltip 后不丢语义）。
+    //   迁移理由：wave-61 §2 E-2 让「无值位点」整个不渲染，其内层 Tooltip 随之消失；
+    //             本夹具无 per-call 分量 ⇒ 只有速度位缺席，其余三位在场。
+    //   等价断言：输入/输出/缓存读取三个基础标签仍在；速度位缺席 ⇒ 其 tooltip 亦缺席。
+    expect(tooltipTexts).toEqual(expect.arrayContaining(["输入", "输出", "缓存读取"]));
+    expect(
+      tooltipTexts,
+      "wave-61 §5.1（R6）条件等价断言：速度位不存在 ⇒ 其 tooltip 亦不得存在"
+    ).not.toContain("生成速度");
     // wave-54 C6（ADR 0053）：紧凑格式 <1e6 取一位小数（8437 ⇒ 8.4K、1366 ⇒ 1.4K），
     // 不再四舍五入成整数 K；Token 文本仍移除。
     expect(statusPanelText).not.toContain("Token");
@@ -578,15 +584,87 @@ describe("HomeSidebar", () => {
     expect(statusPanelText).toContain("1.4K");
     expect(statusPanelText).toMatch(/\d\.\dK/);
     // wave-54 C6 / ADR 0053：该夹具无 per-call 分量（无 providerCallRecords、无 turnDurationMs）
-    // ⇒ 速度无值，必须显示 `—`（旧的整轮聚合回退已废除，故不再出现带 t/s 的数字）。
+    // ⇒ 速度无值。
+    // wave-61 §5 授权迁移（Lead 一票，原意图保真）：
+    //   原意图：速度位空值时**不得**显示带 t/s 的数字（旧整轮聚合回退已废除）；
+    //   迁移理由：wave-61 §2 E-2/E-5 把「空值」的表达从占位文本 `—` 改为「位点整个不渲染」，
+    //             §2 E-5 明令禁止 `—` 占位文本；
+    //   等价断言：速度位在无值时**不存在于 DOM**（比"存在但显示 —"更强的同义断言：既不显示数字，
+    //             也不显示占位符）。
     const speedCarrier = statusPanel.querySelector<HTMLElement>('[data-testid="status-metric-token-speed"]');
-    expect(speedCarrier).not.toBeNull();
-    expect(speedCarrier?.textContent?.trim()).toBe("—");
+    expect(
+      speedCarrier,
+      "wave-61 §5 迁移：速度无值 ⇒ 速度位整个 DOM 不渲染（禁止 `—` 占位）"
+    ).toBeNull();
+    expect(
+      statusPanelText,
+      "wave-61 §5 迁移：状态面板内不得再出现 `—` 占位文本"
+    ).not.toContain("—");
     // No "总计" suffix in labels
     expect(statusPanelText).not.toContain("输入总计");
     expect(statusPanelText).not.toContain("缓存读取总计");
     expect(statusPanelText).not.toContain("输出总计");
   });
+  it("wave-61 §5.1（R6 正向半边）：速度位在场时其 tooltip 必须存在（原意图双向可验）", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-status-speed-present",
+          title: "status speed present",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "speed-call-model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              inputTokens: 1000,
+              outputTokens: 500,
+              turnDurationMs: 2000,
+              firstTokenLatencyMs: 0
+            }
+          ],
+          providerCallRecords: [
+            createProviderCallRecord({
+              inputTokens: 1000,
+              outputTokens: 500,
+              turnDurationMs: 2000,
+              firstTokenLatencyMs: 0
+            })
+          ],
+          inputTokens: 1000,
+          outputTokens: 500,
+          turnDurationMs: 2000,
+          firstTokenLatencyMs: 0
+        })
+      ]
+    });
+
+    const wrapper = await mountSidebar();
+    await flushAll();
+
+    const statusPanel = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")!;
+    const tooltipStubs = statusPanel.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const tooltipTexts = Array.from(tooltipStubs).map((el) => el.getAttribute("data-tooltip"));
+
+    // Assert（锚点自检：速度位必须在场 —— 该夹具带 per-call 分量，speed 可算）
+    const speedCarrier = statusPanel.querySelector<HTMLElement>('[data-testid="status-metric-token-speed"]');
+    expect(
+      speedCarrier,
+      "R6 正向：带 per-call 分量的夹具下速度位必须渲染（否则本用例无法证明 tooltip 的在场分支）"
+    ).not.toBeNull();
+
+    // Assert（契约主体：速度位在场 ⇒ 其 tooltip 语义可达）
+    expect(
+      tooltipTexts,
+      `R6 正向：速度位在场时 tooltipTexts 必须包含「生成速度」；实际 ${JSON.stringify(tooltipTexts)}`
+    ).toContain("生成速度");
+
+    wrapper.unmount();
+  });
+
   // PA-096：原 build_context 混合用例的状态面板负断言半边（trace 正断言半边在 TraceInspector.spec）。
   // 注：trace 面板已不在本树内，此负断言验证状态面板自身不渲染请求细节。
   it("状态面板不暴露 build-context 请求细节", async () => {

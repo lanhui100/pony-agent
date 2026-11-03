@@ -8,8 +8,22 @@
  * 产物：.dev-team/evidence/wave15/browser-smoke-<phase>.png + stdout JSON 摘要
  *
  * 覆盖边界（不做冒充）：无 Tauri 宿主 → 不产生真实 provider 用量，本脚本只对
- * 「圆环/输入框渲染 + Console Error=0 + 交互链路无未捕获异常」负责；
+ * 「圆环归属/输入框渲染 + Console Error=0 + 交互链路无未捕获异常」负责；
  * S1/S3 数值正确性由 tests/acceptance/wave15/*.spec.ts（含 wire-replay）承担。
+ *
+ * ── wave-61 契约 §5 授权迁移（Lead 一票，原意图保真）────────────────────────────
+ * 迁移点：上下文圆环的可见性与 stroke-dashoffset 取样点。
+ *   原意图：确认「上下文圆环渲染出来」且其进度环 `stroke-dashoffset` 可读（此前圆环常驻
+ *           composer，无数据也渲染，故可见性恒真）。
+ *   迁移理由：wave-61 §1 L-1/L-2 把圆环迁入状态面板计数行（`status-context-usage`），
+ *           且 §2 E-3 规定「无上下文数据时圆环整个不渲染」；本脚本跑的是无 Tauri 宿主的
+ *           dev preview，runtime store 无任何会话数据 ⇒ 圆环**按契约应当缺席**。
+ *   等价断言：迁移后本脚本的门禁改为守住两条不变量 ——
+ *           ① composer 区域不得再出现圆环（旧 testid 计数 = 0）；
+ *           ② 数据缺席时状态面板圆环不渲染（§2 E-3），若出现则必须可读到 dashoffset。
+ *           圆环的「有数据时可见 + dashoffset 数值口径」由
+ *           `tests/e2e/wave61-status-panel.spec.ts`（G-4a/G-4b）与
+ *           `tests/e2e/metrics-live-verification.spec.ts`（真实注入链路）承担。
  */
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
@@ -66,7 +80,10 @@ async function main() {
     pageErrors: [],
     appLayoutShell: false,
     composerInput: false,
-    contextUsageCircle: false,
+    // wave-61 §5 迁移：圆环已迁出 composer（旧锚点计数必须为 0）。
+    composerContextRingCount: null,
+    // wave-61 §5 迁移：状态面板圆环锚点（无数据时按 §2 E-3 应当缺席）。
+    statusPanelRingCount: null,
     circleStrokeDashoffset: null,
     submitAttempted: false,
     streamingFallbackRendered: false,
@@ -96,11 +113,17 @@ async function main() {
     await page.goto(BASE_URL, { waitUntil: "networkidle" });
     result.appLayoutShell = await page.locator('[data-testid="app-layout-shell"]').isVisible();
     result.composerInput = await page.locator('[data-testid="workspace-composer-input"]').isVisible();
-    result.contextUsageCircle = await page.locator('[data-testid="workspace-context-usage-circle"]').isVisible();
-    result.circleStrokeDashoffset = await page
-      .locator('[data-testid="workspace-context-usage-circle"] circle')
-      .last()
-      .getAttribute("stroke-dashoffset");
+    // wave-61 §5 迁移：composer 内圆环必须消失（旧锚点计数 = 0）。
+    result.composerContextRingCount = await page.locator('[data-testid="workspace-context-usage-circle"]').count();
+    // wave-61 §5 迁移：圆环新位点在状态面板计数行；无数据时按 §2 E-3 不渲染。
+    result.statusPanelRingCount = await page.locator('[data-testid="status-context-usage"]').count();
+    result.circleStrokeDashoffset =
+      result.statusPanelRingCount > 0
+        ? await page
+            .locator('[data-testid="status-context-usage"] circle')
+            .last()
+            .getAttribute("stroke-dashoffset")
+        : null;
 
     const homeShot = path.join(EVIDENCE_DIR, `browser-smoke-${PHASE}.png`);
     await page.screenshot({ path: homeShot });
@@ -129,11 +152,19 @@ async function main() {
     }
   }
 
+  // wave-61 §5 迁移后的门禁组合：
+  //   ① composer 圆环必须消失（旧锚点计数 = 0）；
+  //   ② 无数据 dev preview 下状态面板圆环必须不渲染（§2 E-3），出现即说明空值契约破了；
+  //   ③ 若圆环出现，则 dashoffset 必须可读（不得是渲染了却读不到进度的半实现）。
+  const ringInvariantsHold =
+    result.composerContextRingCount === 0 &&
+    result.statusPanelRingCount === 0 &&
+    (result.statusPanelRingCount === 0 || result.circleStrokeDashoffset !== null);
   const ok =
     result.viteReady &&
     result.appLayoutShell &&
     result.composerInput &&
-    result.contextUsageCircle &&
+    ringInvariantsHold &&
     result.consoleErrors.length === 0 &&
     result.pageErrors.length === 0;
 

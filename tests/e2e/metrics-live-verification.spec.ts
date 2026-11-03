@@ -1,3 +1,17 @@
+/**
+ * Wave-2 metrics 实时验证门禁。
+ *
+ * ── wave-61 契约 §5 授权迁移（Lead 一票，原意图保真）────────────────────────────
+ * 迁移点：上下文圆环的定位锚点。
+ *   原意图：真实浏览器里读**圆环的真实状态**——可见性、`data-context-debug` 字面量
+ *           （`in=…;win=…;pct=…;mode=…;speed=…`）、以及进度环 `stroke-dashoffset` 与
+ *           百分比口径的数值一致性（21% ⇒ offset ≈ 2πr(1−0.21)，容差 0.6）。
+ *   迁移理由：wave-61 §1 L-1/L-2 把圆环从 composer 迁入状态面板计数行，位点 testid 由
+ *           `workspace-context-usage-circle` 改为 `status-context-usage`（属性与字形结构不变）。
+ *           旧 testid 已不存在，`getByTestId` 必然落空。
+ *   等价断言：`data-context-debug` 三处字面量、`toBeVisible()`、`circle` 结构与
+ *           `stroke-dashoffset` 数值容差**全部原样保留**，仅替换定位锚点。
+ */
 import { test, expect, type Page, type Route } from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -244,7 +258,8 @@ test("真实浏览器 E2E 物理验证：调试属性门控与速度双模渲染
   await injectActiveTurnStore(page);
 
   const tokenSpeedElDefault = page.getByTestId("status-metric-token-speed");
-  const usageCircleDefault = page.getByTestId("workspace-context-usage-circle");
+  // wave-61 §5 迁移：圆环锚点改为 status-context-usage（data-context-debug 字面量口径不变）。
+  const usageCircleDefault = page.getByTestId("status-context-usage");
 
   await expect(tokenSpeedElDefault).toBeVisible();
   await expect(tokenSpeedElDefault).toHaveText(/267\s*t\/s/);
@@ -288,7 +303,8 @@ test("真实浏览器 E2E 物理验证：调试属性门控与速度双模渲染
     "basis=turn_weighted;calls=1;in=42000;out=800;dur=4000;ttft=1000;gen=3000;win=200000;ratio=0.210;origin=-"
   );
 
-  const usageCircle = page.getByTestId("workspace-context-usage-circle");
+  // wave-61 §5 迁移：同上，仅替换定位锚点。
+  const usageCircle = page.getByTestId("status-context-usage");
   await expect(usageCircle).toBeVisible();
 
   const activeContextDebug = await usageCircle.getAttribute("data-context-debug");

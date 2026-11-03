@@ -1,0 +1,74 @@
+{
+  "status": "FAIL",
+  "num_total": 32,
+  "num_failed": 5,
+  "num_passed": 25,
+  "failures": [
+    {
+      "test": "HomeSidebar 状态面板中的 token 标签不显示总计字样",
+      "file": "tests/HomeSidebar.spec.ts",
+      "exception": "AssertionError: wave-61 §5.1（R6）条件等价断言：速度位不存在 ⇒ 其 tooltip 亦不得存在: expected [ '状态概览', …(10) ] to not include '生成速度'",
+      "stack_head": [
+        "AssertionError: wave-61 §5.1（R6）条件等价断言：速度位不存在 ⇒ 其 tooltip 亦不得存在: expected [ '状态概览', …(10) ] to not include '生成速度'",
+        "    at Proxy.<anonymous> (file:///home/dm/pony-agent/node_modules/@vitest/expect/dist/index.js:1319:15)",
+        "    at Proxy.<anonymous> (file:///home/dm/pony-agent/node_modules/@vitest/expect/dist/index.js:1156:15)",
+        "    at Proxy.methodWrapper (file:///home/dm/pony-agent/node_modules/chai/index.js:1700:25)",
+        "    at /home/dm/pony-agent/tests/HomeSidebar.spec.ts:579:11"
+      ]
+    },
+    {
+      "test": "wave-17 C2-1：HomeStatusPanel 指标位 tabular-nums class 契约 C2-1: 输入/输出/缓存/速度 四个 token 指标位承载元素必须含 tabular-nums",
+      "file": "tests/acceptance/wave17/tabular-nums-contract.spec.ts",
+      "exception": "Error: Unable to get [data-testid=\"status-metrics-tokens\"] within: <section class=\"pb-16\" data-open=\"true\">",
+      "stack_head": [
+        "Error: Unable to get [data-testid=\"status-metrics-tokens\"] within: <section class=\"pb-16\" data-open=\"true\">",
+        "  <div class=\"flex w-full items-center justify-between gap-2 text-left\" data-testid=\"status-panel-toggle\">",
+        "    <div class=\"flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" data-state=\"closed\" data-grace-area-trigger=\"\" class=\"lucide h-3.5 w-3.5 lucide-scan-search-icon lucide-scan-search h-3.5 w-3.5\">",
+        "        <path d=\"M3 7V5a2 2 0 0 1 2-2h2\"></path>",
+        "        <path d=\"M17 3h2a2 2 0 0 1 2 2v2\"></path>"
+      ]
+    },
+    {
+      "test": "wave-54 T5：HomeStatusPanel 显示纪律（C6） T5-1: inputTokensTotal=null ⇒ 输入位整个 DOM 不渲染（禁止渲染 0 / —）",
+      "file": "tests/acceptance/wave54/token-speed-truth.spec.ts",
+      "exception": "AssertionError: T5-1：inputTokensTotal=null ⇒ 输入位整个 DOM 不渲染（禁止渲染 0 / —）: expected true to be false // Object.is equality",
+      "stack_head": [
+        "AssertionError: T5-1：inputTokensTotal=null ⇒ 输入位整个 DOM 不渲染（禁止渲染 0 / —）: expected true to be false // Object.is equality",
+        "    at /home/dm/pony-agent/tests/acceptance/wave54/token-speed-truth.spec.ts:332:7",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26",
+        "    at file:///home/dm/pony-agent/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20"
+      ]
+    },
+    {
+      "test": "wave-59 F2：状态卡计数位下移 + 排列 F2-2: 新增 status-metrics-counts 行，位于 token 卡内、token 行之上，顺序为 轮次→模型调用→工具调用",
+      "file": "tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts",
+      "exception": "Error: Unable to get [data-testid=\"status-metrics-tokens\"] within: <section class=\"pb-16\" data-open=\"true\">",
+      "stack_head": [
+        "Error: Unable to get [data-testid=\"status-metrics-tokens\"] within: <section class=\"pb-16\" data-open=\"true\">",
+        "  <div class=\"flex w-full items-center justify-between gap-2 text-left\" data-testid=\"status-panel-toggle\">",
+        "    <div class=\"flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" data-state=\"closed\" data-grace-area-trigger=\"\" class=\"lucide h-3.5 w-3.5 lucide-scan-search-icon lucide-scan-search h-3.5 w-3.5\">",
+        "        <path d=\"M3 7V5a2 2 0 0 1 2-2h2\"></path>",
+        "        <path d=\"M17 3h2a2 2 0 0 1 2 2v2\"></path>"
+      ]
+    },
+    {
+      "test": "wave-59 F2：状态卡计数位下移 + 排列 F2-4: token 行结构不回归（4 个直接 span.inline-flex），且计数行不得使用 justify-around",
+      "file": "tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts",
+      "exception": "Error: Unable to get [data-testid=\"status-metrics-tokens\"] within: <section class=\"pb-16\" data-open=\"true\">",
+      "stack_head": [
+        "Error: Unable to get [data-testid=\"status-metrics-tokens\"] within: <section class=\"pb-16\" data-open=\"true\">",
+        "  <div class=\"flex w-full items-center justify-between gap-2 text-left\" data-testid=\"status-panel-toggle\">",
+        "    <div class=\"flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" data-state=\"closed\" data-grace-area-trigger=\"\" class=\"lucide h-3.5 w-3.5 lucide-scan-search-icon lucide-scan-search h-3.5 w-3.5\">",
+        "        <path d=\"M3 7V5a2 2 0 0 1 2-2h2\"></path>",
+        "        <path d=\"M17 3h2a2 2 0 0 1 2 2v2\"></path>"
+      ]
+    }
+  ],
+  "wave": "wave-61",
+  "phase": "red",
+  "exit_code": 1,
+  "scope": "§5/§5.1 授权迁移的 4 个可在 jsdom 层运行的冻结文件",
+  "command": "npx vitest run tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts tests/acceptance/wave17/tabular-nums-contract.spec.ts tests/HomeSidebar.spec.ts tests/acceptance/wave54/token-speed-truth.spec.ts --reporter=dot",
+  "failure_attribution": "迁移后的等价断言先红：新锚点 status-metrics-tokens / 圆环位缺席 / 空值仍渲染 / 速度位仍在（其 tooltip 仍在）—— 归属 SUT 未实现，非测试缺陷。"
+}

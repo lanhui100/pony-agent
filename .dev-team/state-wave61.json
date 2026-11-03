@@ -1,0 +1,43 @@
+{
+  "wave": "wave-61-status-panel",
+  "theme": "上下文占用圆环迁移到右侧状态面板第一行 + 状态栏间距/对齐 + 空值与零值不渲染 + 有值入场动效",
+  "tier": "A+（单模块前端 UI；无外部 IO/网络/并发面；触发面：UI 交互 + 冻结验收测试迁移）",
+  "baseline_commit": "c575243",
+  "baseline_receipt": ".dev-team/regression-baseline-wave61.json",
+  "contract": ".dev-team/contracts/wave-61-status-panel.md",
+  "team": {
+    "lead": "契约冻结 / 裁决 / 门禁 / 真实浏览器验收",
+    "test-agent": "L2-T/L2-AT 独立验收测试（唯一测试写手）",
+    "executor": "L2-E 业务实现（唯一 src 写手）",
+    "reviewers": "L3-A 布局物理 / L3-B 契约一致性（Subagent 池，不占常驻名额）"
+  },
+  "protocol_role_note": "本波无新增 Interface/Schema/Type，契约以 .md 矩阵承载（Lead 直接落盘），故未派生专职 Protocol Agent；该偏差在此登记备审计。",
+  "branches": {
+    "status-panel": {
+      "owner": "executor",
+      "write_scopes": [
+        "src/components/HomeStatusPanel.vue",
+        "src/components/chat/WorkspaceComposer.vue",
+        "src/styles.css"
+      ],
+      "test_scopes": ["tests/acceptance/wave61/", "tests/e2e/wave61-status-panel.spec.ts", "tests/（§5/§5.1 授权迁移 8 文件）"],
+      "status": "red_anchored",
+      "red_commit": "<red-anchor>",
+      "green_commit": null
+    }
+  },
+  "plan_reviews": {
+    "l3a": { "file": ".dev-team/review-plan-wave61-a.json", "verdict": "FAIL(处置完毕)", "lint_exit": 0 },
+    "l3b": { "file": ".dev-team/review-plan-wave61-b.json", "verdict": "FAIL(处置完毕)", "lint_exit": 0 }
+  },
+  "adjudications": [
+    "R1 缓存比率尾段移出行内、并入 tooltip（实测 86px > 63.5px track）",
+    "R2 wave17 e2e 夹具补 call_tool，使 8 位点可达",
+    "R3 v10-baseline-freeze 哈希按 §5 授权重锚",
+    "R4 入场动效机制钉死为静态 class .status-slot-enter + @keyframes（不用 TransitionGroup，Tooltip 根为 Fragment）",
+    "R5 无可见行且无拦截横幅时外层 section 整段折叠",
+    "R6 HomeSidebar tooltip 断言按「位点 → tooltip」同生共死迁移",
+    "R7 栅格化后补「位点自身宽度 Δ≤0.5px」等价判别断言"
+  ],
+  "coordination_note": "共享工作区存在并发波次（wave-60 stop-sequence / wave-61-team）未提交变更：本波 git 写一律定向 add 本波文件，禁止 git add . / git reset --hard / git clean。"
+}

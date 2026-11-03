@@ -1,6 +1,14 @@
 /**
  * wave-pds-3 · V10：既有基线不回归（冻结 + **真实执行**）—— vitest
  *
+ * ── wave-61 §5.1 追加授权（Lead 二轮裁决 R3，2026-11-03）──────────────────────
+ * `FROZEN_FILES` 中 `tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts` 的 SHA-256 **重锚**。
+ *   原意图：哈希冻结防止「改测试让它绿」——任何未经授权的改测试都会立刻变红。
+ *   迁移理由：wave-61 §5 已由 Lead 一票授权迁移该文件的 token 行锚点（class ⇒ `status-metrics-tokens`），
+ *             授权成立后锚必须随授权同步，否则 G-1 永红（冻结会退化为"禁止合法迁移"的死锁）。
+ *   等价性：只重算**被 §5 授权改动的这一个文件**的哈希，其余 7 个锚逐字未动；
+ *           V10-2/V10-3 的「子进程真实执行」判据不变。
+ *
  * 契约源（只读）：`.dev-team/contracts/wave-pds-3-streaming-visual.md` §6 V10
  *   「既有 `tests/useStreamingPresentationState.spec.ts`(14) + `tests/acceptance/wave59/`(23) + 全量单测全绿」。
  *
@@ -46,8 +54,8 @@ const FROZEN_FILES: Array<{ path: string; sha256: string; note: string }> = [
   },
   {
     path: "tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts",
-    sha256: "167f2c771e06c991f5724c5748243584ae4cc2f3b21a800c6af5b9cba7f527cc",
-    note: "wave-59 F2（4 例）"
+    sha256: "5e1e73872390fec02e5ba79bcdd7fa00563d5b5b5dcab3bd62ae514e922ededb",
+    note: "wave-59 F2（4 例）· wave-61 授权重锚"
   },
   {
     path: "tests/acceptance/wave59/wave59-f3-streaming-dom-stability.spec.ts",

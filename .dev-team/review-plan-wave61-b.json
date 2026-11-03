@@ -1,0 +1,106 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-mvzzstz2tfc1k1",
+    "fresh_context": true
+  },
+  "executed_by": "session-mvzzstz2tfc1k1",
+  "reviewed_commit": "c575243983aecd2fc51128e799d5200273037c75",
+  "reviewed_subject": "冻结契约 .dev-team/contracts/wave-61-status-panel.md 对照 src/components/HomeStatusPanel.vue、src/components/chat/WorkspaceComposer.vue、src/styles.css、tests/acceptance/{wave59,wave61,wave17,wave54,pds-streaming}、tests/e2e（含 test-agent 09:30 已落地的 §5 迁移）",
+  "stage": "pre-implementation（契约冻结后、实现前的事前对抗审查，视角：契约一致性与可实施性）",
+  "verdict": "FAIL",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    ".dev-team/contracts/wave-61-status-panel.md",
+    "src/components/HomeStatusPanel.vue",
+    "src/components/chat/WorkspaceComposer.vue",
+    "src/styles.css",
+    "src/lib/runtime/useTraceProjection.ts",
+    "tests/acceptance/wave59/",
+    "tests/acceptance/wave61/",
+    "tests/acceptance/wave17/tabular-nums-contract.spec.ts",
+    "tests/acceptance/wave54/token-speed-truth.spec.ts",
+    "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts",
+    "tests/e2e/",
+    "tests/HomeSidebar.spec.ts",
+    ".dev-team/regression-baseline-wave61.json"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 87,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vitest run tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts -t \"V10-1\" 2>&1 | tail -6",
+      "severity": "BLOCKING",
+      "summary": "§5 漏掉哈希冻结锚，缺陷已物理复现（我刚实测）：tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts:48-52 用 SHA-256 锚死 tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts（锚 167f2c77…），test-agent 按 §5 迁移该文件后实测 sha 变为 5e1e7387…；运行上述命令得 `Tests 1 failed | 2 skipped`，`expected [ {…} ] to have a length of +0 but got 1`（v10-baseline-freeze.spec.ts:121），exit 1。同文件 :162-173 另断言 wave59 四文件用例数之和恰为 23。⇒ 只要执行 §5，G-1（npx vitest run Exit 0）必然不可达。契约必须显式处置：把 v10-baseline-freeze 列入 §5 并声明『重锚 + 修订冻结测试自身』的代价，或给出豁免与替代凭证；现状是契约授权了一个会让门禁变红的动作却没有任何条目承认它。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 93,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '296,312p;380,400p;507,514p' tests/e2e/wave17-browser-gate.spec.ts",
+      "severity": "BLOCKING",
+      "summary": "§5 第 3 行『位点总数改 8』在既有 C2-2 夹具下算术上不可达（迁移已落地，缺陷已定型）：夹具 tests/e2e/wave17-browser-gate.spec.ts:296-311 的 traceTimeline 只有一条 call_model、toolActivities: []，而 src/lib/runtime/useTraceProjection.ts:236-248 的 sessionToolCallCount 只累加 call_tool 条目 ⇒ toolCallCount=0 ⇒ E-1 后工具位点整个不渲染。于是计数行只剩 轮次+模型调用+圆环 = 3，加 token 4 = 7，而迁移后的断言（:510-513）要求 `.toBe(8)` ⇒ 该 e2e 必红；同时 Assert 2 的 `realTextSlots >= 6` 仍恰好 6 而通过，失败信息会指向『位点缺失』而非『夹具缺 tool 调用』，排障成本高。§5 必须同时授权：① 该夹具补一条 `kind: \"call_tool\"` 的 traceTimeline 条目（新 e2e 夹具 tests/e2e/wave61-status-panel.spec.ts:161-168 已这么做，可对照）；② 注明计数位发现口径已改为 `[data-testid^=\"status-metric-\"]`（:384-392），否则圆环会被当作第 4 个计数位。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 61,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && node --input-type=module -e 'import { JSDOM } from \"jsdom\"; const d = new JSDOM(\"<div id=a></div>\", { pretendToBeVisual: true }); for (const k of [\"window\",\"document\",\"Node\",\"Element\",\"SVGElement\",\"HTMLElement\",\"MutationObserver\",\"requestAnimationFrame\"]) Object.defineProperty(globalThis,k,{value:k===\"window\"?d.window:d.window[k],configurable:true,writable:true}); const { createApp, h, TransitionGroup, Fragment, Teleport, defineComponent } = await import(\"vue\"); const Tip = defineComponent({ setup(_, { slots }) { return () => h(Fragment, null, [slots.default?.(), h(Teleport, { to: \"body\" }, h(\"i\", null, \"t\"))]); } }); const Host = defineComponent({ setup() { return () => h(TransitionGroup, { tag: \"div\", \"data-testid\": \"counts\" }, { default: () => [h(Tip, { key: \"a\" }, { default: () => h(\"span\", { class: \"inline-flex\" }, \"9\") })] }); } }); createApp(Host).mount(d.window.document.getElementById(\"a\")); console.log(d.window.document.getElementById(\"a\").innerHTML);'",
+      "severity": "BLOCKING",
+      "summary": "M-1 未钉死实现机制，而 Vue 的自然写法会静默不出动画：现有每个位点都被 Tooltip 包裹，Tooltip 根是 Fragment（reka-ui TooltipRoot → PopperRoot=Fragment：trigger 克隆元素 + TooltipPortal），故 `<TransitionGroup tag=\"div\">` 包裹位点时 Vue 只打 console.warn『Component inside <Transition> renders non-element root node that cannot be animated』（node_modules/@vue/runtime-core/dist/runtime-core.cjs.js:4638），span 上不挂任何 enter-* 类（反例输出：`<div data-testid=\"counts\"><span class=\"inline-flex\">9</span>…`，零动画类）。console.warn 不计入 G-4d 的 console error ⇒ 该失效在门禁上静默。已冻结的 tests/acceptance/wave61/wave61-motion.spec.ts:91-135 只认『真实位点 class 上静态声明的 200ms + cubic-bezier(0.3,0.7,0.4,1) + 被引用的 @keyframes』，Transition 运行期类名在稳态 DOM 中不存在 ⇒ 用 Transition/TransitionGroup 必红。M-1 必须写明：入场由位点容器自身静态 class 的 @keyframes 承载（禁止用 Transition/TransitionGroup 包现有 Tooltip 子节点），并注明『静态 class』意味着每次挂载（会话切换、侧栏重挂）都会重播，超出『从无到有』语义需 Lead 一句话决定接受或加 one-shot 标记。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 52,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '143,166p' src/components/HomeStatusPanel.vue && sed -n '288,306p' tests/acceptance/wave61/wave61-empty-values.spec.ts && sed -n '210,214p' src/lib/runtime/useTraceProjection.ts",
+      "severity": "BLOCKING",
+      "summary": "E-4 只规定『bg-[#f6f0e8] 卡内容区不渲染』，未规定外层分隔壳是否随折：src/components/HomeStatusPanel.vue:165 的 `<section class=\"border-t border-stone-200/60 pt-3 mt-3\">` 在卡消失后仍渲染，头部下方会留下 1px 分隔线 + 12px padding + 12px margin 的空带（面板根另有 pb-16，:143）——正是用户原话『视觉空洞』。而『turnCount=0 是会话刚创建的常态』已由 src/lib/runtime/useTraceProjection.ts:212（sessionTurnCount = orderedTurnTraces.length，无数据即 0）确证：冷启动时 3 计数=0、token 全 null、圆环 null ⇒ E-4 整卡塌陷是常态而非边角；此时面板头部只剩『状态 + 复制按钮』。冻结用例 tests/acceptance/wave61/wave61-empty-values.spec.ts:288-306 只检查卡内是否还有 border-t（卡都没了自然为空），『保留 py-2 空卡』与『连外壳一起折叠』两种实现都绿 ⇒ 契约必须裁决：整段（含 border-t/mt-3/pt-3）随卡折叠，或保留空卡并给空态占位；否则视觉缺陷由实现者自由裁量产生。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 24,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'REMOVED_SYMBOLS' -A6 tests/acceptance/wave61/wave61-composer-scope.spec.ts | head -12 && grep -n 'contextDebugString\\|data-context-debug\\|aria-label=\"上下文用量\"' src/components/chat/WorkspaceComposer.vue src/components/HomeStatusPanel.vue | head",
+      "severity": "ADVISORY",
+      "summary": "L-1 只写了『离开方』义务（composer 内 DOM/testid/专属 computed 一并移除），未指派『到达方』义务：tests/acceptance/wave61/wave61-composer-scope.spec.ts:45-50 强制 contextUsagePercentage / contextDebugString / stroke-dashoffset 在 composer 源码中消失，而 §5:94 又要求 metrics-live 的 data-context-debug 字面量原样保留。若 HomeStatusPanel 不同步重建 percentage / tooltip / contextDebugString，则圆环丢失 aria-label『上下文用量』与悬浮说明（无障碍回归，无任何门禁覆盖），且 §5 第 4 行迁移条目不可能实现。请在 L-1 正文写明：percentage 计算、tooltip 文案、data-context-debug 调试串的承接位置 = HomeStatusPanel，composer 侧只删不迁。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 65,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && node --input-type=module -e 'import { compileStyle } from \"@vue/compiler-sfc\"; for (const s of [\"[data-pds-reduce-motion=true] .slot{animation:none}\", \":global([data-pds-reduce-motion=true]) .slot{animation:none}\"]) console.log(compileStyle({ source: s, id: \"data-v-x\", scoped: true, filename: \"a.vue\" }).code);'",
+      "severity": "ADVISORY",
+      "summary": "M-4 双轨降级在 scoped CSS 中可行，但写法被钉死：实测 compileStyle 把 `[data-pds-reduce-motion=\"true\"] .slot` 编译为 `[data-pds-reduce-motion=true] .slot[data-v-x]`（根属性挂在 html/documentElement，见 src/components/MarkdownRenderer.vue:33 的读取口径），命中正常，**不需要 :global()**；而 `:global([data-pds-reduce-motion=\"true\"]) .slot` 会被编译成只剩 `[data-pds-reduce-motion=true]{animation:none}`（后代选择器被丢弃）⇒ 运行期降级完全失效。冻结用例 tests/acceptance/wave61/wave61-motion.spec.ts:373-383 只解析 SFC 源码选择器文本，对 :global 写法同样判绿 ⇒ 假绿通道。契约需明令：属性轨写在组件 `<style scoped>` 内、用祖先选择器 `[data-pds-reduce-motion=\"true\"] .<enter-class>`，禁用 :global() 前缀；并说明因 scoped 已可满足，§0 写域里对 src/styles.css 的兜底授权不应被使用（避免与 styles.css:219-255 的手工双轨重复维护）。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 36,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'lg:w-\\[20rem\\]' src/App.vue | head -3 && grep -n 'viewport-class' src/components/HomeSidebar.vue && grep -n 'min-w-\\[4.25rem\\]\\|min-w-\\[3rem\\]' tests/acceptance/wave61/wave61-harness.ts",
+      "severity": "ADVISORY",
+      "summary": "L-4 的宽度预算与 L-3 的 4 等列栅格自相矛盾：右栏 lg=20rem（src/App.vue:247/254）、ScrollArea viewport px-4（src/components/HomeSidebar.vue:99）、卡 px-3 ⇒ 卡内容宽 ≈ 320−32−24 = 264px；grid-cols-4（Tailwind v4 = repeat(4,minmax(0,1fr))）+ gap-x-2 下每列 (264−24)/4 = 60px，而 L-4 要求速度位 min-w-[4.25rem]=68px（wave61-harness.ts:59 已照抄）⇒ 该位点必然溢出自列（居中后左右各 4px 侵入 gap 与内边距），『预留下限』在栅格里实际不可满足。另：4 等列 + justify-center 使位点左边缘由列决定，wave-17 C2-2c『位数变化相邻位点左边缘漂移 ≤0.5px』变成结构性恒真，原缺陷（位数推移相邻位点）在该断言下不再可鉴别，而 L-4 把功劳记在 min-w 上。建议：速度位改 min-w-[3.75rem]（或两行改 repeat(4,minmax(max-content,1fr))），并在 §1 注明 C2-2c 的鉴别力已由栅格接管。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 92,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '140,152p' tests/acceptance/wave17/tabular-nums-contract.spec.ts && git diff -- tests/acceptance/wave17/tabular-nums-contract.spec.ts | head -40",
+      "severity": "ADVISORY",
+      "summary": "§5 两行『原意图保真』已发生减损（迁移已落地，可复现）：tests/acceptance/wave17/tabular-nums-contract.spec.ts:146 把 `countsRow.findAll(\"span.inline-flex\")` 改成 `findAll('[data-testid^=\"status-metric-\"]')`，原断言的『行内承载元素恰 3 个，多一个即结构漂移』探针能力消失（圆环混入、出现额外包裹层都不再报警），退化为与 wave59 F2-2 / wave61 L-2/L-3 重复的 testid 列表断言。等价迁移应为：先断言『计数行位点元素总数 = 4（3 计数 + 1 圆环）』（如 `countsRow.findAll('[data-testid^=\"status-metric-\"], [data-testid=\"status-context-usage\"]')` 长度 4），再按前缀过滤出 3 个计数位，既保原增量证伪力又不违 L-2。"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 78,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '228,262p;420,436p' tests/e2e/wave61-status-panel.spec.ts",
+      "severity": "ADVISORY",
+      "summary": "G-4b 文本『getAnimations() 命中』与已冻结实现对不上，需契约同步口径：tests/e2e/wave61-status-panel.spec.ts:236-262 是在 `animationstart` 事件回调里同步调用 getAnimations()/getKeyframes() 取样（因为 200ms 一次性动画结束后会从列表消失，:231-235 注释已写明），G-4a/G-4b 也一律先 `seedStatusPanelFixture(page)`（:335/:413）才断言『有值态』。契约若只写『getAnimations() 命中』而不写取样窗口与『被测态 = 注入夹具后』，实现者用 fill:none + 轮询取样会得到假红（动画已结束），或误以为空数据页也要有圆环。请把冻结 e2e 的取样口径（animationstart 同步取样 + M-1 要求 fill-mode both/forwards 以稳定终态）与夹具前置条件回写进 §4。"
+    }
+  ]
+}

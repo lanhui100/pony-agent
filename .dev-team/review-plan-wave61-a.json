@@ -1,0 +1,137 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contracts/wave-61-status-panel.md",
+    "src/components/HomeStatusPanel.vue",
+    "src/components/chat/WorkspaceComposer.vue",
+    "src/components/HomeSidebar.vue",
+    "src/App.vue",
+    "tests/e2e/wave17-browser-gate.spec.ts",
+    "tests/e2e/metrics-live-verification.spec.ts",
+    "tests/e2e/wave61-status-panel.spec.ts",
+    "tests/acceptance/wave17/tabular-nums-contract.spec.ts",
+    "tests/acceptance/wave15/browser-smoke.mjs",
+    "tests/acceptance/wave54/token-speed-truth.spec.ts",
+    "tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts",
+    "tests/acceptance/wave61/wave61-harness.ts",
+    "tests/acceptance/wave61/wave61-layout.spec.ts",
+    "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+    "tests/acceptance/wave61/wave61-motion.spec.ts",
+    "tests/HomeSidebar.spec.ts",
+    "tests/wave-5-cost.spec.ts",
+    "src/lib/runtime/token-metrics.ts"
+  ],
+  "reviewed_commit": "c575243983aecd2fc51128e799d5200273037c75",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-mvzzstz2tfc1k1",
+    "fresh_context": true
+  },
+  "executed_by": "session-mvzzstz2tfc1k1",
+  "attestation": {
+    "self_signed": true,
+    "degraded": false,
+    "note": "审查员 A（布局物理与回归风险视角）。只读源码，唯一写入为本文件。物理收据均为真实 Chromium（vite preview 127.0.0.1:4175 + dist 构建产物），viewports 1440x900 与 1024x768。审查时工作树 dirty（HEAD c575243）：wave-61 的 tests 迁移已落盘、src 尚未实施，故所有结论按「契约+已迁移测试」判定。"
+  },
+  "answers": {
+    "q1_available_width_and_overflow": {
+      "conclusion": "右侧「状态」面板指标卡**内容宽 = 278px（xl≥1280）/ 262px（lg 1024–1279）**；4 等列 + gap-x-2 后单列 track = 63.5px / 59.5px。契约 L-4 的速度位 min-w-[4.25rem]=68px 已大于列宽 → 溢出 4.5px(xl)/8.5px(lg)（实测 overflowRight=+4.5/+8.5）；缓存位（E-2 保留 ratio 尾段）单行自然宽 = 12+6+24+6+31 = 79px，在 63.5px 列内被 flex 压缩成**两行**（实测位点 h=20→40、行高 20→40）。⇒ 4 等列 + 契约 min-w 既溢出又换行，L-3「4 列物理对齐」与 L-5「单行 leading-5」不可同时成立。",
+      "evidence": "src/App.vue:247,254（lg:w-[20rem] / xl:w-[21rem]）；src/components/HomeSidebar.vue:98（border 1px×2）、:99（viewport-class px-4 = 32px）；src/components/HomeStatusPanel.vue:166（px-3 = 24px）；dist CSS `.grid-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}`。",
+      "math": "xl: 336-2-32-24 = 278；(278-3×8)/4 = 63.5；速度 68-63.5 = +4.5；缓存 79-63.5 = +15.5。lg: 320-2-32-24 = 262；(262-24)/4 = 59.5；速度 68-59.5 = +8.5；缓存 79-59.5 = +19.5。实测 11px/tabular-nums 文本宽：9=7、12=14、1234=28、3.5K=24、·12%=31、267 t/s=37、≈267 t/s=44。",
+      "measured": "1440：cardContent=278, track=63.5, 速度位 w=68 overflowRight=+4.5, 行高=40（换行）；1024：cardContent=262, track=59.5, 速度位 overflowRight=+8.5, 缓存位 h=40。修法：速度 min-w 降到 ≤3.5rem（56px）并允许速度列独占更宽（grid-cols-[repeat(3,minmax(0,1fr))_4.25rem]），或把缓存 ratio 尾段移出同一行。"
+    },
+    "q2_c22_still_satisfiable": {
+      "conclusion": "可满足，但保证来自 grid 的等分 track，而不是契约 L-4 声称的 min-w。`.grid-cols-4` = minmax(0,1fr)：列宽只由容器宽决定；位点作为 grid item（默认 stretch）被拉满列宽，改文本只改内层文本，不动自身宽度，更不动邻列。实测 9/12/1234 三档：stretch 与 justify-items:center 两种实现下，相邻位点左边缘 Δ = 0/0/0，自身左边缘 Δ = 0。即使执行者用 fit-content 居中，4 位数 28px + 图标 12 + gap 6 = 46px ≤ min-w 48px，预留把 1→4 位全吸收。⇒ wave-17 C2-2a/b/c/d（0.5px / 单调不减）在新结构下不回归；但 L-4「min-w 保证 ≤0.5px」是错误归因，且该 min-w 正是 Q1 溢出的成因。",
+      "evidence": "tests/e2e/wave17-browser-gate.spec.ts:429-441（样本与同行读数）、:519-523（C2-2c 只测**相邻位**，自身位移仅作证据）；src/components/HomeStatusPanel.vue:176（现 grid-cols-3，将改 4）。",
+      "bound": "3rem 只覆盖到 4 位数（46px）；5 位数（12345 = 35+18 = 53px）超出 min-w ⇒ fit-content 居中时自身左边缘漂移 2.5px。C2-2c 不测自身，故仍绿；但 L-4「位数变化不漂移」只对 ≤4 位成立。"
+    },
+    "q3_empty_value_conflicts": {
+      "conclusion": "(:330-346) 不会超时 —— 该夹具四个 token 值均 > 0（实测 1.2K / 567 / 89·7% / 146 t/s），E-2 下仍渲染。(:490-500) 会失败，且 §5「位点总数改 8」**不可达**：同一夹具 seed 后 turnCount=1、modelCallCount=1、**toolCallCount=0**（traceTimeline 只有 call_model、toolActivities 为空），按 E-1 工具位不渲染 ⇒ 计数行只剩 2 位，加圆环 1 位 + token 4 位 = **实测上限 7**，而迁移后 Assert 1 已硬写 8（:513）。Assert 2（realText ≥ 6）恰好 6，零余量。⇒ §5 的迁移不够：必须要么在 e2e 夹具里补一条 call_tool（夹具改写需 §5 追加授权），要么把断言改为按行期望（计数行 3 / token 行 4 / 圆环 1 各自断言）。注：新建的 tests/e2e/wave61-status-panel.spec.ts 夹具**已**含 call_tool（故 G-4c 那套能凑齐 8），两个 gate 用的是不同夹具。",
+      "evidence": "tests/e2e/wave17-browser-gate.spec.ts:264-346（夹具）、:505-513（Assert 1 = 8）、:490-500 原注释；契约 §5:93；契约 §2 E-1/E-4；tests/e2e/wave61-status-panel.spec.ts:152-156（call_tool 夹具）。",
+      "measured": "seed 后实测：turn=1 / model=1 / tool=0；token = 1.2K / 567 / 89·7% / 146 t/s；ring data-context-debug = in=1234;win=1000000;pct=1;mode=turn_weighted;speed=146（圆环在 E-3 下会渲染）⇒ 2+1+4 = 7。"
+    },
+    "q4_context_debug_literal": {
+      "conclusion": "字面量可逐字保持：HomeStatusPanel 已持有全部同源 props（contextDisplayTokens / contextWindowTokens / tokenGenerationSpeed / tokenSpeedCalculationMode），mode 直取 prop、speed 用 Math.round 后与 composer 完全同值。但**取整/钳制规则未被契约钉住**：现式 = Math.min(100, Math.max(0, 0<ratio<1 ? 1 : Math.round(ratio)))，其中「<1% 抬到 1%」在默认夹具下真实命中（实测 pct=1 而非 0）。§5 只钉 pct=21 一档，不覆盖下限/上限分支；且 src/lib/runtime/token-metrics.ts:534-563 另有一套无 1% 下限的 percentage 实现，易被误复用 → 静默变 pct=0。另 data-context-debug 的挂载点必须在 testid 元素本身（现挂在 div[data-testid=workspace-context-usage-circle]），契约未规定。",
+      "evidence": "src/components/chat/WorkspaceComposer.vue:95-101（公式+1% 下限）、:118-124（拼装）、:1136-1163（挂载点）；tests/e2e/metrics-live-verification.spec.ts:296（唯一字面量断言）；src/lib/runtime/token-metrics.ts:534-563。"
+    },
+    "q5_uncovered_frozen_assertions": {
+      "conclusion": "已迁移落盘后仍有 2 处硬伤 + 3 处未钉死的约束：**(a)** tests/HomeSidebar.spec.ts 同一用例内 :573 要求存在 text=\"生成速度\" 的 tooltip，:592 又要求承载该 tooltip 的速度位整节点缺席 —— 二者互斥，任何实现都不可能同时通过；**(b)** G-4c「4 列宽度相等 ≤0.5px」(:547) 与 L-4 速度位 min-w 4.25rem 互斥（实测 63.5 vs 68 = 差 4.5px）；**(c)** 圆环几何 r=7.5/viewBox 20 只被 tests/e2e/metrics-live-verification.spec.ts:303 硬编码冻结，契约 §5 未声明；**(d)** pct 的 1% 下限 / 100 上限未被契约钉死；**(e)** grid 逐位点隐藏会让后续位点前移列（语义列错位）。原报告的 wave17 tabular-nums 3↔4 与 browser-smoke fresh-page 可见性两项，test-agent 已随迁移修好（tabular-nums 改 [data-testid^=status-metric-]、browser-smoke 改 ringInvariantsHold），不再构成缺陷。",
+      "evidence": "见 findings。"
+    }
+  },
+  "findings": [
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 37,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "L-4 的预留下限与该面板真实可用宽度自相矛盾：速度位 min-w-[4.25rem]=68px > 4 等列 track 63.5px(xl)/59.5px(lg) → 溢出 4.5/8.5px；缓存位（E-2 要求保留 ratio 尾段）单行需 79px → 被压成两行（实测 h 20→40），行高翻倍，L-3「两行 4 列对齐」与 L-5「单行 leading-5」同时失守。修法二选一：速度 min-w 降到 ≤3.5rem，或把第二行改成 grid-cols-[repeat(3,minmax(0,1fr))_4.25rem] 并放宽卡内 padding。",
+      "counterexample_cmd": "(npm run preview:e2e >/tmp/w61.log 2>&1 &) ; sleep 6 ; node --input-type=module -e 'import{chromium}from\"playwright\";const b=await chromium.launch();const p=await b.newPage({viewport:{width:1440,height:900}});await p.goto(\"http://127.0.0.1:4175/\",{waitUntil:\"domcontentloaded\"});await p.waitForSelector(\"[data-testid=status-metrics-counts]\");const out=await p.evaluate(()=>{const card=document.querySelector(\"[data-testid=status-metrics-counts]\").parentElement;const cw=card.clientWidth-24;const host=document.createElement(\"div\");host.style.cssText=\"width:\"+cw+\"px\";card.appendChild(host);const row=document.createElement(\"div\");row.style.cssText=\"display:grid;grid-template-columns:repeat(4,minmax(0,1fr));column-gap:8px;font-size:11px;line-height:20px;font-variant-numeric:tabular-nums\";host.appendChild(row);const mk=(mw,t)=>{const s=document.createElement(\"span\");s.style.cssText=\"display:flex;align-items:center;justify-content:center;gap:6px;min-width:\"+mw+\"px\";const i=document.createElement(\"span\");i.style.cssText=\"display:block;width:12px;height:12px\";s.appendChild(i);t.forEach((x)=>{const v=document.createElement(\"span\");v.textContent=x;s.appendChild(v)});return s};[48,48,48,68].forEach((mw,i)=>row.appendChild(mk(mw,[[\"42.0K\"],[\"1.4K\"],[\"3.5K\",\"\\u00b7 12%\"],[\"267 t/s\"]][i])));const rr=row.getBoundingClientRect();const o={cardContent:cw,track:+((rr.width-24)/4).toFixed(1),rowH:+rr.height.toFixed(1),slots:Array.from(row.children).map((s)=>{const q=s.getBoundingClientRect();return{w:+q.width.toFixed(1),overflowRight:+(q.right-rr.right).toFixed(1),h:+q.height.toFixed(1)}})};host.remove();return o});console.log(JSON.stringify(out));await b.close();'"
+    },
+    {
+      "file": "tests/e2e/wave61-status-panel.spec.ts",
+      "line": 547,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "G-4c Assert 3「4 列宽度相等（spread ≤0.5px）」与契约 L-4 的 min-w 直接互斥：stretch 下三列为 track 63.5px、速度位被 min-width 撑到 68px ⇒ spread = 4.5px > 0.5px，该断言必红（若改成 fit-content 居中，则 spread = 68-48 = 20px）。要么降 min-w，要么给速度列单独列宽并放宽该哨兵（例如只对前三列做等宽哨兵）。",
+      "counterexample_cmd": "(npm run preview:e2e >/tmp/w61.log 2>&1 &) ; sleep 6 ; node --input-type=module -e 'import{chromium}from\"playwright\";const b=await chromium.launch();const p=await b.newPage({viewport:{width:1440,height:900}});await p.goto(\"http://127.0.0.1:4175/\",{waitUntil:\"domcontentloaded\"});await p.waitForSelector(\"[data-testid=status-metrics-counts]\");const out=await p.evaluate(()=>{const card=document.querySelector(\"[data-testid=status-metrics-counts]\").parentElement;const cw=card.clientWidth-24;const host=document.createElement(\"div\");host.style.cssText=\"width:\"+cw+\"px\";card.appendChild(host);const row=document.createElement(\"div\");row.style.cssText=\"display:grid;grid-template-columns:repeat(4,minmax(0,1fr));column-gap:8px;font-size:11px;line-height:20px;font-variant-numeric:tabular-nums\";host.appendChild(row);const mk=(mw,t)=>{const s=document.createElement(\"span\");s.style.cssText=\"display:flex;align-items:center;justify-content:center;gap:6px;min-width:\"+mw+\"px\";const i=document.createElement(\"span\");i.style.cssText=\"display:block;width:12px;height:12px\";s.appendChild(i);t.forEach((x)=>{const v=document.createElement(\"span\");v.textContent=x;s.appendChild(v)});return s};[48,48,48,68].forEach((mw,i)=>row.appendChild(mk(mw,[[\"42.0K\"],[\"1.4K\"],[\"3.5K\",\"\\u00b7 12%\"],[\"267 t/s\"]][i])));const rr=row.getBoundingClientRect();const o={cardContent:cw,track:+((rr.width-24)/4).toFixed(1),rowH:+rr.height.toFixed(1),slots:Array.from(row.children).map((s)=>{const q=s.getBoundingClientRect();return{w:+q.width.toFixed(1),overflowRight:+(q.right-rr.right).toFixed(1),h:+q.height.toFixed(1)}})};host.remove();return o});console.log(JSON.stringify(out));await b.close();'"
+    },
+    {
+      "file": "tests/e2e/wave17-browser-gate.spec.ts",
+      "line": 513,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "迁移后 Assert 1 硬写 8（3 计数 + 4 token + 1 圆环），但本文件自己的冻结夹具（:264-346）只 seed 了一条 call_model、toolActivities 为空 ⇒ toolCallCount=0，E-1 下工具位不渲染，实测上限 = 2 计数 + 4 token + 1 圆环 = 7 ⇒ 必红。须二选一：夹具补一条 call_tool（数据改写需 §5 追加授权），或把断言改成按行期望（计数行按可见数断言 / token 行 4 / 圆环 1）。次要风险：:395 与 :406 仍按 `span.inline-flex` 标签匹配 token 位与圆环位，若实现改用 div（L-4 只约束 class 不约束标签）会静默少计。",
+      "counterexample_cmd": "(npm run preview:e2e >/tmp/w61.log 2>&1 &) ; sleep 6 ; node --input-type=module -e 'import{chromium}from\"playwright\";const b=await chromium.launch();const p=await b.newPage({viewport:{width:1440,height:900}});await p.goto(\"http://127.0.0.1:4175/?debug=1\",{waitUntil:\"domcontentloaded\"});await p.waitForSelector(\"[data-testid=status-metrics-counts]\");await p.evaluate(()=>{const rt=document.querySelector(\"#app\").__vue_app__.config.globalProperties.$pinia._s.get(\"runtime\");rt.$patch({sessionId:\"w59-c22-fixture-session\",messages:[],turnTraceHistory:[{turnId:\"t1\",sessionId:\"w59-c22-fixture-session\",title:\"t\",phase:\"completed\",traceSteps:[],toolActivities:[],traceTimeline:[{id:\"c1\",kind:\"call_model\",label:\"m\",state:\"completed\",sequence:1,inputTokens:1234,outputTokens:567,cacheHitInputTokens:89,firstTokenLatencyMs:321,turnDurationMs:4200,durationMs:4200}],providerCallRecords:[{requestKind:\"initial_request\",providerSource:\"provider_decision\",providerMode:\"live\",inputTokens:1234,cacheHitInputTokens:89,cacheMissInputTokens:1145,reasoningTokens:0,outputTokens:567,totalTokens:1801,firstTokenLatencyMs:321,turnDurationMs:4200,latencyKind:\"provider_stream\",prefixMutationReasons:[]}],inputTokens:1234,cacheHitInputTokens:89,outputTokens:567,totalTokens:1801,firstTokenLatencyMs:321,turnDurationMs:4200,updatedAt:1000,sessionSummary:\"\"}]})});await p.waitForTimeout(1200);const r=await p.evaluate(()=>{const slot=(id)=>{const e=document.querySelector(\"[data-testid=\"+id+\"]\");return e?(e.textContent||\"\").trim():\"ABSENT\"};const ring=document.querySelector(\"[data-testid=workspace-context-usage-circle]\");return{counts:[\"status-metric-turn-count\",\"status-metric-model-call-count\",\"status-metric-tool-call-count\"].map((id)=>id+\"=\"+slot(id)),tokens:[\"status-metric-input-tokens\",\"status-metric-output-tokens\",\"status-metric-cache-tokens\",\"status-metric-token-speed\"].map((id)=>id+\"=\"+slot(id)),ringDebug:ring?ring.getAttribute(\"data-context-debug\"):\"ABSENT\"}});console.log(JSON.stringify(r));await b.close();'"
+    },
+    {
+      "file": "tests/HomeSidebar.spec.ts",
+      "line": 573,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "同一用例内两条断言互斥、任何实现都无法同时通过：:573 `expect(tooltipTexts).toContain(\"生成速度\")` 要求存在文本恰为「生成速度」的 tooltip，而唯一提供它是 src/components/HomeStatusPanel.vue:234-236（位于 status-metric-token-speed 位点内部）；:592 又要求该位点 `toBeNull()`。§5 只授权改空值文本断言（:581-584），未授权动 :573 ⇒ 迁移后的用例恒红。需 §5 追加一行授权：把 :573 改为条件断言（位点缺席时其 tooltip 亦缺席）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && npx vitest run tests/HomeSidebar.spec.ts -t \"状态面板中的 token 标签不显示总计字样\" ; sed -n 570,575p tests/HomeSidebar.spec.ts ; sed -n 588,594p tests/HomeSidebar.spec.ts ; grep -n 'Tooltip text=\"生成速度\"' src/components/HomeStatusPanel.vue"
+    },
+    {
+      "file": "tests/e2e/metrics-live-verification.spec.ts",
+      "line": 303,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "圆环迁移后仍用 2π×7.5×(1-21%) 校验 stroke-dashoffset（容差 0.6），即 r=7.5 / viewBox 20 被硬冻结；契约 §5 只写「位置随迁移」，未声明几何不变。而新位点是 48–63.5px 的行内小格，执行者为塞进计数行很可能缩小 SVG 或改 r → 该断言静默失败。建议 §5 补一句「圆环几何（两 circle、r=7.5、dasharray=2πr、dashoffset=2πr(1-pct/100)）原样保留」。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 296,306p tests/e2e/metrics-live-verification.spec.ts; sed -n 1150,1165p src/components/chat/WorkspaceComposer.vue"
+    },
+    {
+      "file": "src/components/chat/WorkspaceComposer.vue",
+      "line": 95,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "迁移时 contextUsagePercentage 的取整/钳制规则未进契约：现式为 Math.min(100, Math.max(0, ratio<1 && ratio>0 ? 1 : Math.round(ratio)))，「0<ratio<1% 抬到 1%」分支在默认夹具下真实命中（实测 pct=1），且 src/lib/runtime/token-metrics.ts:534-563 存在另一套无 1% 下限的实现，易被误复用 → 静默变 pct=0。建议 §5 显式要求逐字搬运该式（含 1% 下限与 100 上限），并要求 data-context-debug 挂在 testid 元素本身。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 95,101p src/components/chat/WorkspaceComposer.vue; sed -n 525,565p src/lib/runtime/token-metrics.ts"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 127,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "E-5 禁止任何位点出现「0」，但 E-2 的隐藏门槛是**原始值** ≤0；formatTokenSpeed 用 Math.round，原始速度 0.4 t/s 会渲染出「0 t/s」（真值却踩 E-5 字面禁令）。契约需把显示值下限写清（Math.round 后 ≤0 亦隐藏，或 <1 显示「<1 t/s」），否则同一份数据在「隐藏」与「显示 0」之间取决于小数位。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 124,129p src/components/HomeStatusPanel.vue; sed -n 43,56p .dev-team/contracts/wave-61-status-panel.md"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 176,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "grid-cols-4 是固定 4 条 track，E-1/E-2 逐位点隐藏后剩余位点按 DOM 序自动前移：工具位为 0 时圆环落到第 3 列（工具列）；计数全 0 而圆环有值时圆环独占第 1 列（轮次列）。列中心仍对齐（G-4c 单独看会绿），但「轮次列 ↔ 输入列」的语义对应被打散，与 L-3 意图相反。建议 §1 增补：隐藏位点保留占位（v-show / 占位节点）或显式 grid-column。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 43,54p .dev-team/contracts/wave-61-status-panel.md; (npm run preview:e2e >/tmp/w61.log 2>&1 &) ; sleep 6 ; node --input-type=module -e 'import{chromium}from\"playwright\";const b=await chromium.launch();const p=await b.newPage({viewport:{width:1440,height:900}});await p.goto(\"http://127.0.0.1:4175/?debug=1\",{waitUntil:\"domcontentloaded\"});await p.waitForTimeout(1500);const r=await p.evaluate(()=>{const rows=document.querySelectorAll(\"[data-testid=status-metrics-counts]\")[0];return{turn:rows.children[0].textContent.trim(),tool:rows.children[2].textContent.trim()}});console.log(JSON.stringify(r));await b.close();'"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-status-panel.md",
+      "line": 34,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "L-4 写「内部只有『图标 + 值文本』两个子节点」，但 E-2（:48）要求缓存位在 ratio 非空时保留尾段 ⇒ 该位点必然 3 个子节点，两条文互斥。wave61 验收已自行把缓存位排除在「2 子节点」断言外（tests/acceptance/wave61/wave61-layout.spec.ts 的 children.length===2 循环不含 cache），但执行者按字面实施会删掉比例尾段。建议 L-4 改为「最多两个内容段（缓存位允许值 + 比例尾段）」。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 34,37p .dev-team/contracts/wave-61-status-panel.md; sed -n 47,49p .dev-team/contracts/wave-61-status-panel.md"
+    }
+  ]
+}

@@ -10,6 +10,17 @@
  * 零假测试律：每个用例先做「结构锚点自检」（位点数量/文本），再断言契约；
  * 选择器落空会立刻因数量断言失败而报警，不会静默变空断言。
  *
+ * ── wave-61 契约 §5 授权迁移（Lead 一票，原意图保真）────────────────────────────
+ * 迁移点：token 行定位锚点（本文件常量 `TOKEN_ROW`）。
+ *   原意图：token 指标行**恰好 4 个直接承载位**（输入/输出/缓存/生成速度），且该行仍直接位于
+ *           `bg-[#f6f0e8]` 指标卡内、位于计数行之下。
+ *   迁移理由：wave-61 §1 L-3 以新增 `data-testid="status-metrics-tokens"` 取代 class 选择器
+ *           `div.flex.items-center.justify-around`（新契约两行同栅格 `grid grid-cols-4`，
+ *           `justify-around` 已不存在，class 锚点必然落空）。
+ *   等价断言：F2-2/F2-4 对 token 行的全部断言语义（4 个直接承载位、位于卡内、位于计数行之后）
+ *           一字不改，仅把定位从 class 换成契约 testid 锚点。
+ *   未迁移：计数行「3 个 `status-metric-` 位点」断言保持原样（wave-61 §5 明确该集合仍为 3）。
+ *
  * 作者：test-agent（L2-T）。冻结后 executor 只读。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -39,8 +50,12 @@ const COUNT_TESTIDS = [
 const HEADER = '[data-testid="status-panel-toggle"]';
 /** F2-2：计数行（本轮新增的锚点）。 */
 const COUNTS_ROW = '[data-testid="status-metrics-counts"]';
-/** 既有 token 指标行（wave-17 C2-1 / wave-54 C4 口径，结构不得回归）。 */
-const TOKEN_ROW = "div.flex.items-center.justify-around";
+/**
+ * 既有 token 指标行（wave-17 C2-1 / wave-54 C4 口径，结构不得回归）。
+ * wave-61 §5 授权迁移：class 选择器 `div.flex.items-center.justify-around` ⇒ testid 锚点
+ * `[data-testid="status-metrics-tokens"]`（原意图「token 行恰好 4 个承载位」不变）。
+ */
+const TOKEN_ROW = '[data-testid="status-metrics-tokens"]';
 /** token 指标卡锚点（`#f6f0e8` 卡的 class，用 classList 精确匹配而非 CSS 选择器）。 */
 const TOKEN_CARD_CLASS = "bg-[#f6f0e8]";
 

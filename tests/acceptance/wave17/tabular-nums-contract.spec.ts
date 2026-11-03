@@ -24,6 +24,19 @@
  *   `[data-testid="status-metrics-counts"]` 行；C2-1 的定位锚点由头部行迁移到该行，
  *   断言口径（3 个位点 + 逐位点 tabular-nums + 数值自检）保持原样。
  *
+ * ── wave-61 契约 §5 授权迁移（Lead 一票，原意图保真）────────────────────────────
+ * 迁移点 1：C2-1 计数位定位（`countsRow.findAll("span.inline-flex")` ⇒ `[data-testid^="status-metric-"]`）。
+ *   原意图：计数行内**恰好 3 个**计数承载位（轮次/模型调用/工具调用），逐个必须承载 tabular-nums。
+ *   迁移理由：wave-61 §1 L-1/L-2 把「上下文圆环」作为**第 4 个位点**装入同一计数行
+ *           （`data-testid="status-context-usage"`，不带 `status-metric-` 前缀），
+ *           于是 `span.inline-flex` 计数从 3 变 4 —— 原选择器会把圆环位误计为第 4 个计数位。
+ *   等价断言：位点集合仍为**既有 3 个计数位**、顺序不变、逐位点 tabular-nums、数值自检
+ *           （9 / 12 / 345）全部原样保留，仅把「位点识别方式」从 class 换成既有 testid 前缀。
+ * 迁移点 2：C2-1 token 位定位（`div.flex.items-center.justify-around` ⇒ `[data-testid="status-metrics-tokens"]`）。
+ *   原意图：token 行**恰好 4 个直接承载位**（输入/输出/缓存/生成速度），逐个必须承载 tabular-nums。
+ *   迁移理由：wave-61 §1 L-3 两行改为 `grid grid-cols-4`，`justify-around` class 不再存在。
+ *   等价断言：4 个直接承载位 + 逐位点 tabular-nums + 数值自检（9 / 12 / 345 / 43 t/s）原样保留。
+ *
  * 作者：test-agent（L2-T）。红相锚定后本文件冻结只读，任何修改需 Lead 批准。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -129,10 +142,11 @@ describe("wave-17 C2-1：HomeStatusPanel 指标位 tabular-nums class 契约", (
     const countsRow = wrapper.get('[data-testid="status-metrics-counts"]');
 
     // Assert（结构锚点先自检，防止选择器落空造成空断言）
-    const countCarriers = countsRow.findAll("span.inline-flex");
+    // wave-61 §5 迁移点 1：改用既有 testid 前缀识别计数位，排除同行的圆环位（status-context-usage）。
+    const countCarriers = countsRow.findAll('[data-testid^="status-metric-"]');
     expect(
       countCarriers,
-      "status-metrics-counts 行内必须恰好存在 3 个计数承载 span（轮次/模型调用/工具调用）"
+      "status-metrics-counts 行内必须恰好存在 3 个计数承载位（轮次/模型调用/工具调用；圆环位不计入）"
     ).toHaveLength(3);
 
     // Assert（逐位点 class 契约）
@@ -155,7 +169,8 @@ describe("wave-17 C2-1：HomeStatusPanel 指标位 tabular-nums class 契约", (
   it("C2-1: 输入/输出/缓存/速度 四个 token 指标位承载元素必须含 tabular-nums", () => {
     // Arrange
     const wrapper = mountStatusPanel();
-    const tokenRow = wrapper.get("div.flex.items-center.justify-around");
+    // wave-61 §5 迁移点 2：token 行锚点由 class 选择器迁移到契约 testid。
+    const tokenRow = wrapper.get('[data-testid="status-metrics-tokens"]');
 
     // 只取该行的**直接子元素**承载 span（排除更深层的嵌套 span）。
     const tokenCarriers = tokenRow

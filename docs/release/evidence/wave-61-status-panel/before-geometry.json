@@ -1,0 +1,57 @@
+{
+  "phase": "before",
+  "capturedAt": "2026-11-03T01:22:55.168Z",
+  "signals": {
+    "consoleErrors": [],
+    "pageErrors": []
+  },
+  "geometry": {
+    "sidebarWidth": {
+      "left": 1104,
+      "right": 1440,
+      "top": 36,
+      "width": 336,
+      "centerX": 1272
+    },
+    "countsRow": {
+      "left": 1133,
+      "right": 1411,
+      "top": 130,
+      "width": 278,
+      "centerX": 1272
+    },
+    "tokenRow": null,
+    "counts": [
+      {
+        "left": 1133,
+        "right": 1220.33,
+        "top": 130,
+        "width": 87.33,
+        "centerX": 1176.66
+      },
+      {
+        "left": 1228.33,
+        "right": 1315.66,
+        "top": 130,
+        "width": 87.33,
+        "centerX": 1271.99
+      },
+      {
+        "left": 1323.66,
+        "right": 1411,
+        "top": 130,
+        "width": 87.34,
+        "centerX": 1367.33
+      }
+    ],
+    "tokens": [],
+    "circle": {
+      "left": 860.44,
+      "right": 878.44,
+      "top": 839,
+      "width": 18,
+      "centerX": 869.44
+    },
+    "circleText": ""
+  }
+}
