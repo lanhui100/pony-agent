@@ -7,115 +7,45 @@
     "fresh_context": true
   },
   "executed_by": "session-mvzzstz2tfc1k1:wave61-join-a",
-  "reviewed_commit": "cf783b000628c340871fd29f4b6eabec06129fe2",
+  "reviewed_commit": "cf783b0",
   "attestation": {
     "self_signed": false,
-    "note": "只读审查：HEAD cf783b0 + 工作区未提交绿相改动（git diff c575243 / b1d62f3 均含工作区）。未改动任何被审文件。",
-    "basis": "机械收据（本机亲跑）：vitest 8 files / 49 passed / 2 skipped（wave61 三件套 + wave59-f2 + wave17-tabular + wave54-token-speed + HomeSidebar）Exit 0；vue-tsc --noEmit Exit 0；playwright tests/e2e/wave61-status-panel.spec.ts 6 passed（G-4a/4b/4c/R7/4d/4e）Exit 0；sha256sum 8 个 FROZEN_FILES 逐字比对（仅 wave59-f2 重锚为 5e1e7387… 与文件实际哈希一致）。wave15 browser-smoke 两次复跑均未能跑完（首跑 Chromium launch 报 pthread_create: Resource temporarily unavailable；次跑 vite dev server 未就绪），属本机线程/端口资源抖动、无断言级失败，该项以源码逻辑审查替代（findings #5）。"
+    "note": "只读审查 HEAD cf783b0（wave-61 实现提交 5c0eb40 + 用例重写 cf783b0）；未改动任何被审文件。物理收据：npx vitest run tests/acceptance/wave61 --pool=threads --no-file-parallelism ⇒ Exit 0 / 4 files / 19 passed（layout 6、empty-values 6、motion 5、composer-scope 2）。迁移后旧冻结用例（wave17-tabular / wave59-f2 / wave54-token-speed / HomeSidebar / v10-freeze）复跑在本机 >10min 未收敛（HomeSidebar 体量 + 本机 worker 资源抖动），已主动 kill，未取得 Exit Code，故本收据不据此放行，该面由 G-1 全量门禁承担。"
   },
   "audited_scopes": [
     "src/components/HomeStatusPanel.vue",
-    "src/components/chat/WorkspaceComposer.vue",
-    "tests/acceptance/wave61/",
-    "tests/acceptance/wave61",
-    "tests/e2e/wave61-status-panel.spec.ts"
+    "src/components/chat/WorkspaceComposer.vue"
   ],
   "findings": [
     {
       "file": "src/components/HomeStatusPanel.vue",
-      "line": 162,
-      "rule": "CORRECTNESS",
-      "severity": "ADVISORY",
-      "detail": "L-2 括注「无 window 时退化为已用量」在 E-3 门禁下不可达：contextUsageTooltip 仅在 showContextRing=true（要求 window>0 且 tokens 非 null）时挂到 Tooltip，故 162 行分支为死分支，且其文案是「暂无数据」而非契约括注的已用量。建议删分支或把契约括注改为「无 window 不渲染」。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '121,127p;158,168p' src/components/HomeStatusPanel.vue && grep -n '无 window 时退化' .dev-team/contracts/wave-61-status-panel.md"
-    },
-    {
-      "file": "src/components/HomeStatusPanel.vue",
-      "line": 124,
+      "line": 122,
       "rule": "CONTRACT_BREAK",
       "severity": "ADVISORY",
-      "detail": "§2 标题「空值 / 零值一律不渲染」与 E-3 字面（只写 ==null）不一致：contextDisplayTokens=0 时 showContextRing 为 true，渲染 0% 空环 + tooltip「上下文用量：0% · 0 / 200K」，与用户诉求③（零值不显示）相反。建议 gate 改 isPositiveFiniteNumber(tokens) 或契约补 E-3b。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '121,127p;133,141p' src/components/HomeStatusPanel.vue && sed -n '60,70p' .dev-team/contracts/wave-61-status-panel.md"
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '121,127p;133,141p;159,168p' src/components/HomeStatusPanel.vue",
+      "detail": "E-3 字面只挡 null/窗口≤0，故 contextDisplayTokens=0 时 showContextRing=true ⇒ 渲染 0% 空环 + tooltip「上下文用量：0% · 0 / 200K」，与诉求③/§2 标题「零值不渲染」相反（E-1/E-2 用 >0，E-3 未对齐）。建议 gate 改 isPositiveFiniteNumber(tokens) 或契约补 E-3b —— 口径由 Lead 一票裁定，故仅登记不阻塞。"
     },
     {
       "file": "src/components/HomeStatusPanel.vue",
       "line": 321,
       "rule": "CORRECTNESS",
       "severity": "ADVISORY",
-      "detail": "可访问性弱于迁移前：圆环位是无 tabindex 的 span；reka TooltipTrigger 只挂 hover/focus 监听、不注入 tabindex，故键盘永不聚焦 => tooltip 仅鼠标可达；svg 带 aria-hidden 且位点无可及文本，aria-label 落在 generic span 上按 ARIA 不产生名称。迁移前 composer 有 tabindex=0 + cursor-help；G-4a 只断言 aria-label 存在，覆盖不到可达性。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '320,327p' src/components/HomeStatusPanel.vue && grep -c tabindex node_modules/reka-ui/dist/Tooltip/TooltipTrigger.js && git show c575243:src/components/chat/WorkspaceComposer.vue | grep -n -e 'tabindex=.0.' -e 'cursor-help' | head -3"
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show c575243:src/components/chat/WorkspaceComposer.vue | grep -n -e 'tabindex=.0.' -e 'cursor-help' && sed -n '320,327p' src/components/HomeStatusPanel.vue",
+      "detail": "迁移丢了两处既有语义：composer 原触发器带 tabindex=\"0\" + cursor-help，新圆环位两者皆无，reka TooltipTrigger 不注入 tabindex ⇒ tooltip 键盘不可达；且 aria-label 落在无 role 的 span 上、svg 为 aria-hidden，名称未被 AT 暴露。L-2「逐字保真」清单未列这两项，属契约未覆盖的退化，建议补回 tabindex=\"0\" 与 cursor-help。"
     },
     {
-      "file": "tests/e2e/wave61-status-panel.spec.ts",
-      "line": 604,
-      "rule": "CONTRACT_BREAK",
-      "severity": "ADVISORY",
-      "detail": "裁决 R8（隐藏中间位点后位点不得左移）无任何机器断言：G-4c 夹具 8 位点全可见，自动流式与显式 col-start 结果同形；E-4 反向哨兵只断言圆环在行内、不断言列位。故删除 col-start-4 仍全绿，R8 的裁决理由本身不受回归保护。建议补「toolCallCount=0 时圆环列中心 = 速度位列中心」。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'col-start' tests/acceptance/wave61 tests/e2e/wave61-status-panel.spec.ts | grep -v '^.*\\.md' ; sed -n '604,645p' tests/e2e/wave61-status-panel.spec.ts"
-    },
-    {
-      "file": "tests/acceptance/wave15/browser-smoke.mjs",
-      "line": 159,
-      "rule": "CONTRACT_BREAK",
-      "severity": "ADVISORY",
-      "detail": "§5 授权口径是「同上，迁移定位」，但原断言「圆环可见 + stroke-dashoffset 可读」被反转为「圆环必须不存在」（statusPanelRingCount===0 无条件成立）；且第 3 个合取项 `(ringCount===0 || dashoffset!==null)` 在 ringCount===0 恒真下是死逻辑。后果：若 dev preview 将来有真数据，门禁假红且永不再验证圆环可见性。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '148,172p' tests/acceptance/wave15/browser-smoke.mjs"
-    },
-    {
-      "file": "tests/HomeSidebar.spec.ts",
-      "line": 612,
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 26,
       "rule": "CORRECTNESS",
       "severity": "ADVISORY",
-      "detail": "§5.1 授权的 R6 迁移把单一定向断言 toContain('生成速度') 改成 not.toContain + 另起一例（:696）证正向分支，属跨用例条件化：单文件内不再同时验证两态，若新用例被单独 skip/改名，正向覆盖会静默丢失。当前两态都被真断言覆盖，故仅登记。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '596,615p;676,697p' tests/HomeSidebar.spec.ts"
-    },
-    {
-      "file": "src/components/chat/WorkspaceComposer.vue",
-      "line": 293,
-      "rule": "CONTRACT_BREAK",
-      "severity": "ADVISORY",
-      "detail": "联合 diff 里 composer 的 8 行新增（wave-60 §C7 stopping 主按钮禁用/文案）与 HomeWorkspace/stop-sequence/stores/types/status.ts 非本波因果面：wave-61 自身实现提交 5c0eb40 对 composer 是 0 增 94 删（纯删除，与交付说明一致），那 8 行由 wave-60 收口提交引入（另有 wave-60 契约覆盖）。归因须按提交分离，勿计入本波写域。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && git -c core.preloadIndex=false diff --numstat 5c0eb40^ 5c0eb40 -- src/components/chat/WorkspaceComposer.vue && git -c core.preloadIndex=false diff b1d62f3 -- src/components/chat/WorkspaceComposer.vue | grep -n '^+[^+]'"
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n '显示 `—`' src/components/HomeStatusPanel.vue",
+      "detail": "inputTokensTotal 的 JSDoc 仍写「无数据为 null ⇒ 显示 `—`」，与 §2 E-5「不渲染」相反（纯文档漂移，行为已正确：empty-values 6/6 绿）。建议随本波修注释，防止后续按旧注释回退。"
     }
   ],
-  "contract_matrix": [
-    { "rule": "L-1", "contract_line": 23, "impl": "src/components/HomeStatusPanel.vue:318-351（圆环唯一渲染位）; WorkspaceComposer.vue 无 status-context-usage-circle / contextUsagePercentage / contextDebugString / stroke-dashoffset 残留", "status": "PASS" },
-    { "rule": "L-2", "contract_line": 27, "impl": "HomeStatusPanel.vue:133-141（clamp pct）/ 173-182（data-context-debug 五段字面量）/ 159-168（tooltip 文案）/ 320-326（testid status-context-usage 无 status-metric- 前缀 + aria-label）", "status": "PASS", "note": "括注死分支与零值缺口见 findings #1/#2" },
-    { "rule": "L-3", "contract_line": 32, "impl": "HomeStatusPanel.vue:288 与 :359 同为 grid grid-cols-4 items-center；token 行锚点 :360 status-metrics-tokens；R8 显式列位 :293/:302/:311/:322 与 :366/:378/:389/:403", "status": "PASS" },
-    { "rule": "L-4", "contract_line": 41, "impl": "八个位点均 inline-flex justify-center gap-1.5（:293/:302/:311/:322/:366/:378/:389/:403），min-w 上移容器（计数 3rem、token 3rem、速度 3.5rem、圆环 3rem），值节点无 min-w/text-right", "status": "PASS" },
-    { "rule": "L-5", "contract_line": 56, "impl": "HomeStatusPanel.vue:288 gap-x-2 gap-y-0；:359 border-t + mt-2/pt-2；:275 px-3 py-2 未变", "status": "PASS" },
-    { "rule": "E-1", "contract_line": 62, "impl": "HomeStatusPanel.vue:291/:300/:309 v-if isPositiveFiniteNumber；:227-230 可见计数位统计", "status": "PASS" },
-    { "rule": "E-2", "contract_line": 64, "impl": "HomeStatusPanel.vue:365/:376/:388/:402 四位点 v-if；:232-240 visibleTokenSlotCount", "status": "PASS" },
-    { "rule": "E-3", "contract_line": 69, "impl": "HomeStatusPanel.vue:122-127 showContextRing（tokens 非 null + window>0）；:320 v-if 挂载", "status": "PASS", "note": "tokens===0 未被覆盖，见 finding #2" },
-    { "rule": "E-4", "contract_line": 71, "impl": "HomeStatusPanel.vue:246-248 showMetricsCard（含 blockDetail 例外）；:274 外层 section v-if；:287 计数行 v-if；:358 token 行连同 border-t 折叠；治理横幅 :419-441 不受连坐", "status": "PASS" },
-    { "rule": "E-5", "contract_line": 77, "impl": "HomeStatusPanel.vue:188-192/:195-209 删除 `—` 分支；面板全文无 `—` 占位（HomeSidebar/wave54/wave61 E-5 用例断言 not.toContain('—') 实测绿）", "status": "PASS" },
-    { "rule": "M-1", "contract_line": 83, "impl": "HomeStatusPanel.vue:450-479 静态 class .status-slot-enter / --ring + @keyframes，200ms cubic-bezier(0.3,0.7,0.4,1)，圆环附加 scale(0.92)->1", "status": "PASS" },
-    { "rule": "M-2", "contract_line": 89, "impl": "全文件无 TransitionGroup / leave 钩子；v-if 即时移除", "status": "PASS" },
-    { "rule": "M-3", "contract_line": 90, "impl": "HomeStatusPanel.vue:450-471 keyframes 仅 opacity/transform", "status": "PASS" },
-    { "rule": "M-4", "contract_line": 91, "impl": "HomeStatusPanel.vue:482-499 prefers-reduced-motion + [data-pds-reduce-motion=true] 双轨（与 src/styles.css:173-255 同约定，scoped 选择器经 data-v 作用正常）", "status": "PASS" },
-    { "rule": "M-5", "contract_line": 93, "impl": "位点顺序/testid 未变；tabular-nums 挂在位点容器（:293 等）并向下继承；wave17 C2 用例实测绿", "status": "PASS" }
-  ],
-  "migration_audit": {
-    "verdict": "PASS",
-    "authorized_migrations": 8,
-    "items": [
-      { "file": "tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts", "change": "TOKEN_ROW class 选择器 => [data-testid=status-metrics-tokens]", "honesty": "PASS：仅换锚点，F2-2/F2-4 的 4 位点/卡内/位次断言语义未动；计数位集合仍为 3" },
-      { "file": "tests/acceptance/wave17/tabular-nums-contract.spec.ts", "change": "C2-1 位点识别 span.inline-flex => [data-testid^=status-metric-]；token 行改 testid", "honesty": "PASS：3 位点 + 逐位 tabular-nums + 数值 9/12/345 自检原样" },
-      { "file": "tests/e2e/wave17-browser-gate.spec.ts", "change": "位点 7=>8、token 行锚点换 testid、夹具补 call_tool", "honesty": "PASS：0.5px 阈值、单调性、realText>=6 与 tabular-nums 计算值一字未改；仅加数据与锚点（§5.1 R2 授权）" },
-      { "file": "tests/e2e/metrics-live-verification.spec.ts", "change": "圆环锚点 workspace-context-usage-circle => status-context-usage", "honesty": "PASS：data-context-debug 三处字面量、toBeVisible、dashoffset 容差 0.6 原样" },
-      { "file": "tests/acceptance/wave15/browser-smoke.mjs", "change": "圆环可见性取样点迁移", "honesty": "PARTIAL：移位成立，但可见性断言被反转为「必须不存在」+ 一处死合取项（finding #5）§5 原意未完全保真" },
-      { "file": "tests/HomeSidebar.spec.ts", "change": "速度位空值 — => 位点不存在；补 per-call 夹具恢复「缓存读取」强断言；新增 R6 正向例", "honesty": "PASS（附保留意见 finding #6）：断言强度总体上升（多了缓存位非空自检），但两态验证被拆到两例" },
-      { "file": "tests/acceptance/wave54/token-speed-truth.spec.ts", "change": "T5-1 空值 — => 位点不存在", "honesty": "PASS：新增「其余 token 位仍在」反向哨兵 + 全面板无 — 断言，强于原断言" },
-      { "file": "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts", "change": "FROZEN_FILES 仅 wave59-f2 重锚 5e1e7387…，note 标注 wave-61 授权重锚", "honesty": "PASS：实测 sha256sum 8 文件逐个比对——7 个逐字未动，wave59-f2 实际哈希 = 5e1e73872390fec02e5ba79bcdd7fa00563d5b5b5dcab3bd62ae514e922ededb 与新锚一致；无越权重锚" }
-    ],
-    "post_freeze_test_rewrites": "PASS：12 处冻结测试重写（wave61 harness/layout/empty-values/e2e + HomeSidebar）均有「缺陷根因 + 原意图 + 等价断言」注释，且 Lead 授权收据见 .dev-team/wave61-red-receipts.md §9/§10（D5/D7/D8）。逐条复核结论：teleport-stub 子节点口径（语义子节点 + 1 svg + 1 span 三重断言）、WAAPI keyframe easing 口径（getKeyframes()[0].easing + 关键帧>=2）、动画收敛后再测（waitForStatusPanelAnimationsSettled + running===0）均为「原断言不可满足/测量被 transform 污染」的用例缺陷，非阈值放宽。"
-  },
-  "nfr_six": {
-    "external_call_timeout": "N/A：两文件零 fetch/safeInvoke/safeInvoke/tauri 调用，数据全部来自既有 props（contextDisplayTokens/contextWindowTokens/session* 由 HomeSidebar 单向传入），无新增 IO 路径。",
-    "structured_logging_and_exceptions": "N/A：无新增 try/catch、无新增 debugLog/console；data-context-debug 是既有 isDebugLoggingEnabled() 门控下的 DOM 属性快照（非日志通道），与迁移前同一开关。既有 resolveRuntimeStoreSafe() 吞异常属存量，本波未动。",
-    "resource_release": "N/A：未新增定时器、事件监听、订阅或全局缓存；composer 侧为净移除（删除一个 useTraceProjection 实例与 4 个 computed，旧实现本就未 dispose，故净减少）。CSS 入场动画由浏览器回收，无 JS 句柄。",
-    "concurrency_and_idempotency": "N/A：两文件无共享可变状态写入，全部 computed 纯函数由 props 推导；同一 props 下渲染幂等（G-4b 空->有值单向转换 + E-4 折叠均为纯判定）。wave-60 stopping 的幂等由 store 单一真源承载，属另一波契约。",
-    "config_and_self_check": "N/A（实证）：无新增 env/配置文件读取；唯一开关沿用 localStorage 'pony-agent.debug.runtime-logs'，wave61-layout L-2 用例已对开/关两态与恢复做清理断言（try/finally 还原）。",
-    "contract_compatibility": "PASS（实证）：7 个 status-metric-* testid 与 data-speed-mode/basis/debug 字面量逐字保留；data-context-debug 五段格式与 debug 门控不变（metrics-live E2E 仅换锚点后仍绿）；旧 workspace-context-usage-circle 按 L-1 下线，§5 授权迁移其 2 处引用；memory/DB/label 等不可逆面无改动。"
+  "evidence": {
+    "l1_composer_ring_removed": "grep -n 'context-usage-circle|contextUsagePercentage|contextDebugString|contextDisplayTokens|useTraceProjection|TokenGenerationSpeed|currentContextWindowTokens' src/components/chat/WorkspaceComposer.vue ⇒ 无命中；git diff --stat c575243 HEAD -- WorkspaceComposer.vue ⇒ 94 deletions, 0 insertions；wave-61 实现提交 5c0eb40 --stat 仅含 HomeStatusPanel.vue(+318/-) 与 WorkspaceComposer.vue(-94) ⇒ 无夹带写域。",
+    "testid_and_literals": "7 个 status-metric-* 全量保留（turn-count/model-call-count/tool-call-count/input-tokens/output-tokens/cache-tokens/token-speed），新增 status-context-usage（无 status-metric- 前缀，符合 L-2）与 status-metrics-tokens（L-3）；data-context-debug 五段字面量 in=…;win=…;pct=…;mode=…;speed=… 与 debug 门控未变。",
+    "l_e_m_landing": "L-1..L-5 / E-1..E-5 / M-1..M-5 逐条对照 HomeStatusPanel.vue:288/293/302/311/322/359/366/378/389/403/450-499 全部落地；E-4 治理横幅例外正确（showMetricsCard 含 blockDetail 分支、横幅在卡内）。",
+    "nfr_six_structural_na": "无外部 IO（零 fetch/safeInvoke，数据全部沿用既有 props）⇒ timeout N/A；无新增日志/try-catch（data-context-debug 仍是既有 debug 开关下的 DOM 快照）⇒ logging N/A；无新增定时器/监听/订阅，composer 侧净减 1 个 useTraceProjection 实例 ⇒ 资源释放 N/A；全 computed 纯推导、同 props 幂等 ⇒ 并发 N/A；无新增 env（沿用 pony-agent.debug.runtime-logs，layout 用例已断言两态并清理）⇒ config N/A；7 个 testid 与 data-speed-* 字面量逐字保留、data-context-debug 格式不变 ⇒ 契约兼容 PASS。"
   }
 }
