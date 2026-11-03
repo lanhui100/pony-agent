@@ -35,6 +35,21 @@ pub const JOB_BUFFER_CAP: usize = 2 * 1024 * 1024;
 /// Maximum retained completed/killed jobs in history.
 pub const MAX_HISTORY_JOBS: usize = 64;
 
+/// 契约 B012：跨会话访问作业的错误码（`error.code` 与 `error.kind` 同值）。
+pub const JOB_NOT_OWNED_CODE: &str = "job_not_owned";
+
+/// 契约 B012：作业归属判定。仅当**双方都有 owner 且不相等**时拒绝；任一侧为 `None`
+/// （内部直调 / 未提供会话上下文）一律放行，保持既有单测与内部调用不受限。
+fn ensure_owned(job: &JobSession, caller: Option<&str>) -> Result<(), String> {
+    match (job.owner.as_deref(), caller) {
+        (Some(owner), Some(caller)) if owner != caller => {
+            // message 不得含任何作业输出/命令行，避免拒绝响应成为泄露通道。
+            Err(format!("{JOB_NOT_OWNED_CODE}: job not owned by caller"))
+        }
+        _ => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobStartArgs {
     pub command: String,
@@ -201,6 +216,9 @@ struct JobSession {
     stderr_truncated: AtomicBool,
     /// B008：promoted 作业进入终态后，`ProcessManager` 里的条目是否已回收（一次性开关）。
     released: AtomicBool,
+    /// B012：作业归属的会话 id（`job_start` / promote 时的 `ToolExecutionContext.session_id`）。
+    /// `None` = 无归属（内部直调 / 未提供上下文），对任意 caller 放行。
+    owner: Option<String>,
     /// B009：promoted 作业继承的取消令牌。promote 后前台 Run 的 `CommandCancelWatcher` 会随函数
     /// 返回被 drop，用户 Stop 就再也停不下这条命令；watcher 线程改由此字段判定取消。
     cancel: Option<Arc<CancellationToken>>,
@@ -541,9 +559,22 @@ pub fn job_start(args: JobStartArgs) -> Result<JobStartResult, String> {
 
 /// Session-anchored variant (TASK-2-WIRE target): `workspace_root=Some(ws)` pins the default
 /// cwd and the boundary check to the session workspace root.
+/// 无归属的 `job_start_with_workspace_root`（内部/单测直调路径，等价 `owner = None`）。
+///
+/// 契约 B012 只约束**工具路径**；既有直接调用方（内部逻辑、冻结集成测试）保持原签名不受限。
 pub fn job_start_with_workspace_root(
     args: JobStartArgs,
     workspace_root: Option<&Path>,
+) -> Result<JobStartResult, String> {
+    job_start_scoped(args, workspace_root, None)
+}
+
+/// 带会话归属的 `job_start`（工具路径用）：`owner` 记入 `JobSession.owner`，供后续
+/// `job_output_scoped` / `job_kill_scoped` / `job_list_scoped` 做归属校验。
+pub fn job_start_scoped(
+    args: JobStartArgs,
+    workspace_root: Option<&Path>,
+    owner: Option<&str>,
 ) -> Result<JobStartResult, String> {
     let cwd = validate_and_resolve_cwd_with_root(args.cwd.as_deref(), workspace_root)?;
 
@@ -684,6 +715,7 @@ pub fn job_start_with_workspace_root(
         stdout_truncated: AtomicBool::new(false),
         stderr_truncated: AtomicBool::new(false),
         released: AtomicBool::new(false),
+        owner: owner.map(str::to_string),
         cancel: None,
         kind: JobKind::Owned,
         #[cfg(windows)]
@@ -711,7 +743,7 @@ pub fn job_start_with_workspace_root(
 /// 一个**短生命周期** watcher 线程（20ms tick）：令牌取消 ⇒ `kill_internal` 落 `killed`；
 /// 作业进入终态（或 `JobSession` 被回收）⇒ 线程立即退出，禁止常驻泄漏。
 // 参数个数由契约可测接缝固定（manager + 租借三元组 + 命令行 + 首读快照 + 两个截断标记 +
-// 取消令牌）；不合并成结构体是为了让接缝与调用点逐字对应契约签名，避免额外类型。
+// 取消令牌 + owner）；不合并成结构体是为了让接缝与调用点逐字对应契约签名，避免额外类型。
 #[allow(clippy::too_many_arguments)]
 pub fn register_promoted(
     manager: ProcessManager,
@@ -723,6 +755,7 @@ pub fn register_promoted(
     stdout_truncated: bool,
     stderr_truncated: bool,
     cancel: Option<Arc<CancellationToken>>,
+    owner: Option<&str>,
 ) -> Result<String, String> {
     let buffer = Arc::new(Mutex::new(RingBuffer::new(JOB_BUFFER_CAP)));
     // 契约 CT-P7b：首读快照若本身已超过 ring buffer 容量，同样置 truncated 标记。
@@ -760,6 +793,7 @@ pub fn register_promoted(
         stdout_truncated: AtomicBool::new(stdout_truncated),
         stderr_truncated: AtomicBool::new(stderr_truncated),
         released: AtomicBool::new(false),
+        owner: owner.map(str::to_string),
         cancel: cancel.clone(),
         kind: JobKind::Promoted {
             manager,
@@ -809,12 +843,26 @@ fn spawn_cancel_watcher(weak: std::sync::Weak<JobSession>) {
         .ok();
 }
 
+/// 无归属校验的 `job_output`（内部/单测直调路径，等价 `caller = None`）。
+///
+/// 契约 B012 只约束**工具路径**；既有直接调用方（内部逻辑、冻结集成测试）保持原签名不受限。
 pub fn job_output(args: JobOutputArgs) -> Result<JobOutputResult, String> {
+    job_output_scoped(args, None)
+}
+
+/// 带调用方归属的 `job_output`（工具路径用）：`caller` 与作业 owner 都有值且不等 ⇒
+/// `job_not_owned`，且**在校验通过前不读任何输出**。
+pub fn job_output_scoped(
+    args: JobOutputArgs,
+    caller: Option<&str>,
+) -> Result<JobOutputResult, String> {
     let session = registry()
         .lock()
         .unwrap()
         .get(&args.job_id)
         .ok_or_else(|| format!("Job `{}` not found", args.job_id))?;
+    // 契约 B012：归属校验先于任何输出读取（拒绝响应不得夹带作业输出）。
+    ensure_owned(&session, caller)?;
 
     let should_wait = args.wait.unwrap_or(false);
     let timeout = Duration::from_millis(args.timeout_ms.unwrap_or(30_000));
@@ -855,12 +903,21 @@ pub fn job_output(args: JobOutputArgs) -> Result<JobOutputResult, String> {
     }
 }
 
+/// 无归属校验的 `job_kill`（内部/单测直调路径，等价 `caller = None`）。
 pub fn job_kill(args: JobKillArgs) -> Result<JobKillResult, String> {
+    job_kill_scoped(args, None)
+}
+
+/// 带调用方归属的 `job_kill`（工具路径用）：归属校验**必须早于** `kill_internal`，
+/// 否则就是「拒了但照杀」。
+pub fn job_kill_scoped(args: JobKillArgs, caller: Option<&str>) -> Result<JobKillResult, String> {
     let session = registry()
         .lock()
         .unwrap()
         .get(&args.job_id)
         .ok_or_else(|| format!("Job `{}` not found", args.job_id))?;
+    // 契约 B012：归属校验**必须在 kill_internal 之前**，否则就是「拒了但照杀」。
+    ensure_owned(&session, caller)?;
 
     let killed = session.kill_internal(args.reason.as_deref());
 
@@ -870,10 +927,19 @@ pub fn job_kill(args: JobKillArgs) -> Result<JobKillResult, String> {
     })
 }
 
+/// 无归属过滤的 `job_list`（内部/单测直调路径，等价 `caller = None`）。
 pub fn job_list(_args: JobListArgs) -> Result<JobListResult, String> {
+    job_list_scoped(_args, None)
+}
+
+/// 带调用方归属的 `job_list`（工具路径用）：非 owner 的作业被**过滤掉**（不暴露存在性）。
+pub fn job_list_scoped(_args: JobListArgs, caller: Option<&str>) -> Result<JobListResult, String> {
     let sessions = registry().lock().unwrap().list();
     let jobs = sessions
         .into_iter()
+        // 契约 B012：非 owner 的作业**直接过滤掉**（列表接口泄露存在性同样算泄露），
+        // 而不是返回错误 —— 错误会让调用方区分「不存在」与「存在但无权」。
+        .filter(|session| ensure_owned(session, caller).is_ok())
         .map(|session| {
             let (status, _) = session.update_status();
             JobListItem {
@@ -959,6 +1025,7 @@ mod tests {
             first_read.stdout_truncated,
             first_read.stderr_truncated,
             None,
+            None,
         )
         .expect("register_promoted must succeed");
         assert!(
@@ -1037,6 +1104,7 @@ mod tests {
             false,
             false,
             Some(token.clone()),
+            None,
         )
         .expect("register_promoted must succeed");
 
@@ -1113,6 +1181,7 @@ mod tests {
             "",
             false,
             false,
+            None,
             None,
         )
         .expect("register_promoted must succeed");

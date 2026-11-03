@@ -26,7 +26,8 @@
 
 use crate::agent::process::ProcessManager;
 pub use crate::agent::jobs::{
-    job_kill, job_list, job_output, register_promoted, job_start, job_start_with_workspace_root,
+    job_kill, job_kill_scoped, job_list, job_list_scoped, job_output, job_output_scoped,
+    register_promoted, job_start, job_start_scoped, job_start_with_workspace_root,
     JobKillArgs, JobKillResult, JobListArgs, JobListItem, JobListResult,
     JobOutputArgs, JobOutputResult, JobStartArgs, JobStartResult,
     JOB_BUFFER_CAP, MAX_HISTORY_JOBS,
@@ -1574,9 +1575,9 @@ impl ToolRouter {
             Some(TOOL_FUZZY_FILE_SEARCH) => self.execute_find(call, context),
             Some(TOOL_GIT_DIFF_REMOTE) => self.execute_git_diff(call, context),
             Some(TOOL_JOB_START) => self.execute_job_start(call, context),
-            Some(TOOL_JOB_OUTPUT) => self.execute_job_output(call),
-            Some(TOOL_JOB_KILL) => self.execute_job_kill(call),
-            Some(TOOL_JOB_LIST) => self.execute_job_list(),
+            Some(TOOL_JOB_OUTPUT) => self.execute_job_output(call, context),
+            Some(TOOL_JOB_KILL) => self.execute_job_kill(call, context),
+            Some(TOOL_JOB_LIST) => self.execute_job_list(context),
             // W42/PA-149：技能正文按需加载。
             Some(TOOL_SKILL_LOAD) => self.execute_skill_load(call, context),
             _ => error_result(
@@ -2200,7 +2201,9 @@ impl ToolRouter {
         let root = self
             .resolved_workspace_root(context, self.extract_call_workspace_id(call, context))
             .ok();
-        match job_start_with_workspace_root(args, root.as_deref()) {
+        // 契约 B012：作业归属取会话上下文（`None` = 无上下文，对任意 caller 放行）。
+        let owner = context.session_id.as_deref();
+        match job_start_scoped(args, root.as_deref(), owner) {
             Ok(res) => ToolResult {
                 tool_name: TOOL_JOB_START.to_string(),
                 status: "ok".to_string(),
@@ -2215,7 +2218,7 @@ impl ToolRouter {
         }
     }
 
-    fn execute_job_output(&self, call: &ToolCall) -> ToolResult {
+    fn execute_job_output(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let args: JobOutputArgs = match serde_json::from_value(call.arguments.clone()) {
             Ok(args) => args,
             Err(err) => {
@@ -2227,7 +2230,7 @@ impl ToolRouter {
                 )
             }
         };
-        match job_output(args) {
+        match job_output_scoped(args, context.session_id.as_deref()) {
             Ok(res) => ToolResult {
                 tool_name: TOOL_JOB_OUTPUT.to_string(),
                 status: "ok".to_string(),
@@ -2238,11 +2241,11 @@ impl ToolRouter {
                 })),
                 duration_ms: 0,
             },
-            Err(err) => error_result(TOOL_JOB_OUTPUT, "job_output_failed", err, None),
+            Err(err) => job_tool_error(TOOL_JOB_OUTPUT, "job_output_failed", err),
         }
     }
 
-    fn execute_job_kill(&self, call: &ToolCall) -> ToolResult {
+    fn execute_job_kill(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let args: JobKillArgs = match serde_json::from_value(call.arguments.clone()) {
             Ok(args) => args,
             Err(err) => {
@@ -2254,7 +2257,7 @@ impl ToolRouter {
                 )
             }
         };
-        match job_kill(args) {
+        match job_kill_scoped(args, context.session_id.as_deref()) {
             Ok(res) => ToolResult {
                 tool_name: TOOL_JOB_KILL.to_string(),
                 status: "ok".to_string(),
@@ -2265,12 +2268,13 @@ impl ToolRouter {
                 })),
                 duration_ms: 0,
             },
-            Err(err) => error_result(TOOL_JOB_KILL, "job_kill_failed", err, None),
+            Err(err) => job_tool_error(TOOL_JOB_KILL, "job_kill_failed", err),
         }
     }
 
-    fn execute_job_list(&self) -> ToolResult {
-        match job_list(JobListArgs {}) {
+    fn execute_job_list(&self, context: &ToolExecutionContext) -> ToolResult {
+        // 契约 B012：非 owner 的作业在 lib 层被过滤掉（列表接口不泄露存在性）。
+        match job_list_scoped(JobListArgs {}, context.session_id.as_deref()) {
             Ok(res) => ToolResult {
                 tool_name: TOOL_JOB_LIST.to_string(),
                 status: "ok".to_string(),
@@ -2281,7 +2285,7 @@ impl ToolRouter {
                 })),
                 duration_ms: 0,
             },
-            Err(err) => error_result(TOOL_JOB_LIST, "job_list_failed", err, None),
+            Err(err) => job_tool_error(TOOL_JOB_LIST, "job_list_failed", err),
         }
     }
 
@@ -3229,6 +3233,8 @@ impl ToolRouter {
                             // B009：把 turn 取消令牌交给 promoted job，使 Stop 仍能终止它
                             // （前台 Run 的 watcher 会随本次返回被 drop）。
                             cancellation.clone(),
+                            // B012：promoted 作业同样记归属会话。
+                            context.session_id.as_deref(),
                         ) {
                             Ok(job_id) => {
                                 // 红线：promote 路径不得 kill / cancel / 删除批处理脚本，
@@ -9118,6 +9124,22 @@ fn capability_unavailable_result(tool_name: &str) -> ToolResult {
     )
 }
 
+/// 契约 B012：`job_*` 工具的错误映射 —— 归属拒绝使用独立错误码 `job_not_owned`
+/// （`error.kind` 与 `code` 同值），其余错误沿用各工具既有的兜底码。
+///
+/// 拒绝文案固定为通用中文，**不含**作业输出/命令行（lib 层的英文 `Err` 前缀不直接外露）。
+fn job_tool_error(tool_name: &str, fallback_code: &str, error: String) -> ToolResult {
+    if error.starts_with(crate::agent::jobs::JOB_NOT_OWNED_CODE) {
+        return error_result(
+            tool_name,
+            crate::agent::jobs::JOB_NOT_OWNED_CODE,
+            "该作业不属于当前会话，已拒绝访问。".to_string(),
+            None,
+        );
+    }
+    error_result(tool_name, fallback_code, error, None)
+}
+
 fn error_result(tool_name: &str, code: &str, message: String, hint: Option<String>) -> ToolResult {
     ToolResult {
         tool_name: tool_name.to_string(),
@@ -9739,6 +9761,155 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// B012：job_* 工具的会话归属在**工具路径**上的物理证据（error 码 + owner 正控读到 marker）。
+    ///
+    /// 与 `tests/job_session_scope_test.rs` 同源但用途不同：那条是可执行验收，这条专门打印
+    /// 真实载荷，供回执引用（`--nocapture`）。
+    #[test]
+    fn job_tools_enforce_session_ownership_b012() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+        let owner_ctx = ToolExecutionContext {
+            workspace_root: Some(workspace.clone()),
+            session_id: Some("sess-A".to_string()),
+            ..Default::default()
+        };
+        let other_ctx = ToolExecutionContext {
+            workspace_root: Some(workspace.clone()),
+            session_id: Some("sess-B".to_string()),
+            ..Default::default()
+        };
+
+        const MARKER: &str = "B012-SCOPE-MARKER";
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd",
+            vec![
+                "/C".to_string(),
+                format!("echo {MARKER} & ping -n 6 127.0.0.1 >nul"),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = (
+            "sh",
+            vec!["-c".to_string(), format!("echo {MARKER}; sleep 5")],
+        );
+
+        let call = |name: &str, arguments: serde_json::Value, tag: &str| ToolCall {
+            name: name.to_string(),
+            arguments,
+            call_id: Some(format!("b012-{tag}")),
+            plan: None,
+        };
+
+        let started = router.execute_with_context(
+            &call(
+                TOOL_JOB_START,
+                json!({ "command": program, "args": args, "cwd": workspace.display().to_string() }),
+                "start",
+            ),
+            &owner_ctx,
+        );
+        assert_eq!(started.status, "ok", "job_start 必须成功：{}", started.output);
+        let start_payload: Value = serde_json::from_str(&started.output).expect("job_start json");
+        let job_id = start_payload["result"]["job_id"]
+            .as_str()
+            .expect("job_start 载荷必须含 job_id")
+            .to_string();
+
+        let read_args = json!({ "jobId": job_id, "wait": false });
+        // 前置：owner 必须真实读到 marker（否则「跨会话不泄露」无鉴别力）。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let probe = router.execute_with_context(
+                &call(TOOL_JOB_OUTPUT, read_args.clone(), "probe"),
+                &owner_ctx,
+            );
+            if probe.output.contains(MARKER) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "owner(sess-A) 读不到作业输出 marker：{}",
+                probe.output
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        // 1) 跨会话读：必须 job_not_owned，且响应不回显 marker。
+        let denied_read = router.execute_with_context(
+            &call(TOOL_JOB_OUTPUT, read_args.clone(), "denied-read"),
+            &other_ctx,
+        );
+        eprintln!(
+            "[b012] cross-session job_output: status={} payload={}",
+            denied_read.status, denied_read.output
+        );
+        assert_eq!(denied_read.status, "error");
+        let denied_read_payload: Value =
+            serde_json::from_str(&denied_read.output).expect("denied read json");
+        assert_eq!(
+            denied_read_payload["error"]["code"].as_str(),
+            Some(crate::agent::jobs::JOB_NOT_OWNED_CODE)
+        );
+        assert_eq!(
+            denied_read_payload["error"]["kind"].as_str(),
+            Some(crate::agent::jobs::JOB_NOT_OWNED_CODE)
+        );
+        assert!(
+            !denied_read.output.contains(MARKER),
+            "拒绝响应不得泄露作业输出：{}",
+            denied_read.output
+        );
+
+        // 2) 跨会话杀：必须 job_not_owned，且作业仍 running（拒了不得照杀）。
+        let denied_kill = router.execute_with_context(
+            &call(TOOL_JOB_KILL, json!({ "jobId": job_id }), "denied-kill"),
+            &other_ctx,
+        );
+        eprintln!(
+            "[b012] cross-session job_kill: status={} payload={}",
+            denied_kill.status, denied_kill.output
+        );
+        assert_eq!(denied_kill.status, "error");
+        let denied_kill_payload: Value =
+            serde_json::from_str(&denied_kill.output).expect("denied kill json");
+        assert_eq!(
+            denied_kill_payload["error"]["code"].as_str(),
+            Some(crate::agent::jobs::JOB_NOT_OWNED_CODE)
+        );
+
+        // 3) owner 正控：仍能读到 marker 且状态 running。
+        let owner_read = router.execute_with_context(
+            &call(TOOL_JOB_OUTPUT, read_args, "owner-read"),
+            &owner_ctx,
+        );
+        eprintln!(
+            "[b012] owner job_output: status={} payload={}",
+            owner_read.status, owner_read.output
+        );
+        assert_eq!(owner_read.status, "ok", "owner 读取必须成功：{}", owner_read.output);
+        assert!(owner_read.output.contains(MARKER), "owner 必须读到 marker");
+        assert!(
+            owner_read.output.contains("\"running\""),
+            "被拒绝的跨会话 kill 不得生效：作业必须仍 running，实际 {}",
+            owner_read.output
+        );
+
+        // 4) owner 自己 kill 收尾（正控：owner 有权终止）。
+        let owner_kill = router.execute_with_context(
+            &call(TOOL_JOB_KILL, json!({ "jobId": job_id }), "owner-kill"),
+            &owner_ctx,
+        );
+        eprintln!(
+            "[b012] owner job_kill: status={} payload={}",
+            owner_kill.status, owner_kill.output
+        );
+        assert_eq!(owner_kill.status, "ok", "owner 必须能终止自己的作业");
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 
     fn temp_workspace() -> PathBuf {
         let unique = SystemTime::now()
