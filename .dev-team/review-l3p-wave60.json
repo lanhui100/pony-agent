@@ -1,0 +1,83 @@
+{
+  "verdict": "FAIL",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "755bf11f-272b-4111-b8a8-cad528221824",
+    "fresh_context": true
+  },
+  "executed_by": "755bf11f-272b-4111-b8a8-cad528221824",
+  "reviewed_commit": "1a16a51",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    ".dev-team/contracts/wave-60-interruptible-stop.md",
+    ".dev-team/nfr-baseline-wave60.json",
+    "crates/pony-agent-core/src",
+    "src-tauri/src",
+    "src",
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/src/agent/stop_escalation.rs",
+    "crates/pony-agent-core/src/agent/stop_sequence.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/responses_api.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/tauri_adapter.rs",
+    "src-tauri/src/turn_task_registry.rs",
+    "src/stores/runtime.ts",
+    "src/types/runtime.ts",
+    "src/lib/runtime/status.ts",
+    "src/lib/runtime/stop-sequence.ts",
+    "src/components/HomeWorkspace.vue",
+    "src/components/chat/WorkspaceComposer.vue"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/stop_escalation.rs",
+      "line": 185,
+      "rule": "NFR_VIOLATION",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "grep -n 'eprintln' crates/pony-agent-core/src/agent/stop_escalation.rs   # 185 为监视线程 spawn 失败的业务错误，非锁毒化（豁免仅覆盖 139/194），走裸 eprintln，违反 logging.format=json / trace_id_required"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/stop_escalation.rs",
+      "line": 184,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "sed -n '163,188p' crates/pony-agent-core/src/agent/stop_escalation.rs   # 注释声称『降级为同步收口』，实际仅 eprintln；emitter 已在 :163 take 走、checkpoint 未收口，C5 宽限保证(≤2s 必达终态)在该分支缺失"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 2067,
+      "rule": "LEAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "grep -rn 'take_emitter\\|emitters.remove\\|register_emitter' crates/pony-agent-core/src/agent/stop_escalation.rs; sed -n '2067,2073p' crates/pony-agent-core/src/agent/control_plane/mod.rs   # register 写两张表(2055/2060)，unregister 只清 sinks.remove，emitter 仅 on_stop_accepted 时被取走 ⇒ 未停止的 turn 永久驻留 Arc<sink>"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2526,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'let _ = self.tx.send(UiEvent::Stop' crates/pony-agent-core/src/bin/tui.rs   # 2526/2532 两个新增停止事件通道均 let _ 丢弃 SendError；接收端消失即表面已退出，无替代处置（沿用本文件既有模式）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6395,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '6395,6406p;7026,7036p' crates/pony-agent-core/src/bin/tui.rs   # if-let 临时 MutexGuard 存活至块尾，stop_turn 现同步回调 sink.emit 落在 current_turn_id 锁作用域内（lock_scope_bounded）；当前 TuiTurnSink 不重入故不成死锁"
+    },
+    {
+      "file": "src-tauri/src/tauri_adapter.rs",
+      "line": 75,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '73,77p' src-tauri/src/tauri_adapter.rs   # let _ = run_stream_task(...) 丢弃 Err（含 turn/session 失败上下文），仅函数内 eprintln；本波仅加 turn_id 字段，属既有形态"
+    }
+  ]
+}

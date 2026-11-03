@@ -1,0 +1,31 @@
+{
+  "wave": "60",
+  "baseline_commit": "7510042",
+  "external_call_timeout_ms": 3000,
+  "retry": {"max_attempts": 1, "backoff_ms": 500, "backoff_cap_ms": 1000},
+  "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "logging": {"format": "json", "trace_id": true, "trace_id_required": true, "trace_id_field": "trace_id"},
+  "logging_scope": "new_structured_logging_surface_only",
+  "logging_legacy_eprintln_exempt": true,
+  "resource_release": [
+    "stop_escalation_supervisor_single_thread_exits_at_grace",
+    "turn_event_sink_registry_unregisters_on_turn_cleanup",
+    "provider_stalled_read_loop_exits_on_cancel_code",
+    "tauri_turn_task_handle_reclaimed_on_turn_id_key"
+  ],
+  "wave60": {
+    "stop_poll_tick_ms": 250,
+    "stop_grace_ms": 2000,
+    "stop_sequence_ms": 500,
+    "stop_ack_latency_ms": 100,
+    "cancel_read_exit_bound_ms": 1000,
+    "terminal_emit_idempotent_per_turn": true,
+    "supervisor_must_not_emit_when_turn_already_terminal": true,
+    "surface_neutral_core": "stop_escalation/stop_sequence 不得引用 tauri 类型"
+  },
+  "deferred": [
+    {"id": "wave60-A9", "item": "per-turn cancellation token 注入 dispatcher/tools（长工具执行期进程不被立即终止）", "expiry": "wave-61 或独立 backlog", "evidence": ".dev-team/contracts/wave-60-interruptible-stop.md §6-ter A9"}
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-mvzyc34igfx3ch:wave60-b",
+    "fresh_context": true
+  },
+  "executed_by": "session-mvzyc34igfx3ch:wave60-b",
+  "reviewed_commit": "1a16a51c38ff329b7afa420a4d236d51984f29b1",
+  "attestation": {
+    "self_signed": false,
+    "basis": "只读审查：工作树未提交变更 + 冻结契约/验收测试；实测 cargo test（core lib 1209 / wave60 25 / provider 84 / tauri registry 3）、vitest stop-*.spec.ts 12、npm run contract:check Exit 0"
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src,src-tauri/src,src",
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/src/agent/stop_escalation.rs",
+    "crates/pony-agent-core/src/agent/stop_sequence.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/tauri_adapter.rs",
+    "src-tauri/src/turn_task_registry.rs",
+    "src/stores/runtime.ts",
+    "src/types/runtime.ts",
+    "src/lib/runtime/status.ts",
+    "src/lib/runtime/stop-sequence.ts",
+    "src/components/HomeWorkspace.vue",
+    "src/components/chat/WorkspaceComposer.vue"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/stop_escalation.rs",
+      "line": 142,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "detail": "C5/NFR resource_release：emitters 表只在 on_stop_accepted 的 take_emitter 中 remove；正常终态（未 stop）的 turn 永不清表 ⇒ 跨轮残留、随 turn 数线性增长（每项持 Arc<TauriTurnEventSink>+AppHandle），与同文件『表项不随 turn 数量无限增长』注释相反。unregister_turn_event_sink 只清 turn_event_sinks，不触达本表。非崩溃型泄漏，故判 ADVISORY。",
+      "counterexample_cmd": "grep -n \"emitters.insert\\|emitters.remove\" crates/pony-agent-core/src/agent/stop_escalation.rs && sed -n '2067,2075p' crates/pony-agent-core/src/agent/control_plane/mod.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/stop_escalation.rs",
+      "line": 7,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "detail": "表面中立字面门禁：grep 命中 2 行（stop_escalation.rs:7、:10），两处均为模块文档注释（『严禁引用 tauri』的说明文字），无 use tauri、无任何 tauri 类型引用，依赖确为 0 ⇒ 实质合规但字面 grep ≠ 0。若 Lead 按字面门禁判定，需改写这两行注释（零成本）。",
+      "counterexample_cmd": "grep -rn \"tauri\" crates/pony-agent-core/src/agent/stop_*.rs"
+    },
+    {
+      "file": "src/types/runtime.ts",
+      "line": 1108,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "TS/Rust 漂移：Rust emit_stream_stop_requested 发 kind=\"stop_requested\"，而 TS TurnStreamEvent.kind 为封闭联合且未含该值（StopReason/StopTurnResponse 已对齐）。现有消费者只读 turnId/stopReason，无运行时故障，仅类型面无法表达该事件 ⇒ ADVISORY。",
+      "counterexample_cmd": "grep -n 'kind: \"stop_requested\"' crates/pony-agent-core/src/agent/turn_flow.rs; grep -c 'stop_requested' src/types/runtime.ts"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6393,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "契约 §0 非目标 5（不改 Ctrl+C 三态）：进入 stopping 后 is_streaming 仍为 true，Ctrl+C 恒落 InterruptTurn 分支并被 stopping 守卫短路为空操作 ⇒『interrupt → 再按退出』第三态在终态事件到达前不可达；若 A9 长工具期间无终态，只能靠 /quit 退出。无纯函数级反例 ⇒ ADVISORY。",
+      "counterexample_cmd": "sed -n '6386,6410p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6400,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "C2『被接受才呈现』：TUI 忽略 control_plane.stop_turn 返回的 accepted/state，无条件 apply_stop_requested；not_found/already_terminal 时本地仍显示『正在停止…』。影响限于短暂假进行态（终态事件随即清空）⇒ ADVISORY。",
+      "counterexample_cmd": "sed -n '6396,6404p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 5415,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "C7 受理口径：safeInvoke 返回 null（IPC 失败/不可用）时跳过 accepted===false 守卫直接 enterStoppingPhase，在无后端受理的情况下呈现『正在停止…』，只能等 submission watchdog 兜底退出 ⇒ ADVISORY。",
+      "counterexample_cmd": "sed -n '5404,5416p' src/stores/runtime.ts"
+    },
+    {
+      "file": "src-tauri/src/lib.rs",
+      "line": 166,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "detail": "作用域校验：stop_turn(turn_id) 无 session 归属校验，任一调用方可停任意已知 turn_id（跨会话/跨窗口）。属既有语义（旧实现同样按 turn_id 取 checkpoint，且更宽：连带 abort 整个 session 表项），本波已收窄为单 turn，无新增越权面；桌面本地单用户面 ⇒ ADVISORY。",
+      "counterexample_cmd": "git show HEAD:src-tauri/src/lib.rs | sed -n '157,176p'"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 2193,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "detail": "C5 复用副作用：fail_turn_for_watchdog 改为经 self.stop_turn（watchdog 原因）⇒ 额外派发一条 turn:stop_requested 并挂起 2s 宽限监督。正常路径 checkpoint 随即置 failed、监督者零派发；若 failed 落盘耗时 > stop_grace_ms，监督者会先发 turn:cancelled，与 watchdog 的 failed 终态构成双终态竞态（契约未定义该路径）⇒ ADVISORY。",
+      "counterexample_cmd": "sed -n '2188,2200p' crates/pony-agent-core/src/agent/control_plane/mod.rs; sed -n '2210,2245p' crates/pony-agent-core/src/agent/control_plane/mod.rs"
+    }
+  ]
+}

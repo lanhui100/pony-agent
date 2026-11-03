@@ -43,6 +43,7 @@ use crate::agent::turn_flow::{ProviderEventMeta, TurnEventSink};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -139,6 +140,8 @@ pub struct ResumeGraphRunStreamCommand {
 #[derive(Clone)]
 pub struct StopTurnCommand {
     pub turn_id: String,
+    /// wave-60 C1：结构化停止原因；`None` ⇒ 缺省 `user`（UI 显式停止）。
+    pub stop_reason: Option<crate::agent::stop_escalation::StopReason>,
 }
 
 #[derive(Clone)]
@@ -883,6 +886,32 @@ impl<'a, S: TurnEventSink> TurnEventSink for RecordingTurnEventSink<'a, S> {
     }
 }
 
+/// wave-60 C5：把「监督者收口」接到该 turn 已注册的事件出口上（`turn:cancelled` 走同一 sink）。
+///
+/// 存在意义：core 不引用任何宿主表面；宿主只注入 sink，收口事件自然经同一条通道下发。
+struct SinkTerminalEmitter<S> {
+    sink: Arc<S>,
+}
+
+impl<S> crate::agent::stop_escalation::TerminalEmitter for SinkTerminalEmitter<S>
+where
+    S: crate::agent::turn_flow::TurnEventSink + Send + Sync + 'static,
+{
+    fn emit_cancelled(
+        &self,
+        turn_id: &str,
+        session_id: Option<&str>,
+        stop_reason: crate::agent::stop_escalation::StopReason,
+    ) {
+        crate::agent::turn_flow::emit_supervisor_cancelled(
+            self.sink.as_ref(),
+            turn_id.to_string(),
+            session_id.map(str::to_string),
+            stop_reason,
+        );
+    }
+}
+
 pub struct HostControlPlane {
     runtime: RwLock<AgentRuntime>,
     sessions_rwlock: Arc<RwLock<SessionStore>>,
@@ -905,6 +934,12 @@ pub struct HostControlPlane {
     /// PA-095 #3：本控制面的缓冲 flush 请求通道句柄（会话绑定路由用）。
     #[cfg_attr(not(test), allow(dead_code))]
     event_flush_channel: Arc<crate::agent::turn_flow::EventFlushFn>,
+    /// wave-60 C2：按 `turn_id` 注册的**立即应答**事件出口（`stop_turn` 被接受时同步派发
+    /// `turn:stop_requested`）。`Send + Sync` 上界是硬要求：本控制面是宿主 managed state。
+    turn_event_sinks:
+        Mutex<HashMap<String, Arc<dyn crate::agent::turn_flow::TurnEventSink + Send + Sync>>>,
+    /// wave-60 C5：宽限期收口监督者（与 `execution_control` 共用同一 registry 句柄）。
+    stop_escalation: Arc<crate::agent::stop_escalation::StopEscalation>,
 }
 
 impl HostControlPlane {
@@ -929,6 +964,8 @@ pub struct HostControlPlaneBuilder {
     graph_planner: Option<Box<dyn GraphPlanner>>,
     ask_dispatcher: Option<Arc<GovernedDispatcher>>,
     plan_store: Option<PlanStore>,
+    /// wave-60 C5：宽限期收口参数/监督者注入（缺省 2000/250 ms + 共享 registry）。
+    stop_escalation: Option<Arc<crate::agent::stop_escalation::StopEscalation>>,
 }
 
 impl HostControlPlaneBuilder {
@@ -941,6 +978,7 @@ impl HostControlPlaneBuilder {
             graph_planner: None,
             ask_dispatcher: None,
             plan_store: None,
+            stop_escalation: None,
         }
     }
 
@@ -985,6 +1023,15 @@ impl HostControlPlaneBuilder {
 
     pub fn plan_store(mut self, plan_store: PlanStore) -> Self {
         self.plan_store = Some(plan_store);
+        self
+    }
+
+    /// wave-60 C5：注入宽限期收口监督者（测试用毫秒级小值；生产用缺省 2000/250 ms）。
+    pub fn stop_escalation(
+        mut self,
+        stop_escalation: Arc<crate::agent::stop_escalation::StopEscalation>,
+    ) -> Self {
+        self.stop_escalation = Some(stop_escalation);
         self
     }
 
@@ -1142,12 +1189,13 @@ impl HostControlPlaneBuilder {
             .ask_dispatcher
             .or_else(|| runtime.governed_dispatcher())
             .unwrap_or_else(default_ask_dispatcher);
+        let execution_control = self
+            .execution_control
+            .unwrap_or_else(ExecutionControlRegistry::new);
         HostControlPlane {
             runtime: RwLock::new(runtime),
             sessions_rwlock,
-            execution_control: self
-                .execution_control
-                .unwrap_or_else(ExecutionControlRegistry::new),
+            execution_control: execution_control.clone(),
             graph_runs,
             graph_runner: self.graph_runner.unwrap_or_else(GraphRunner::new),
             graph_planner: self
@@ -1162,6 +1210,14 @@ impl HostControlPlaneBuilder {
             // PA-095 #3：块内必然赋值（通道注册无条件执行）。
             event_persist_channel,
             event_flush_channel,
+            turn_event_sinks: Mutex::new(HashMap::new()),
+            // wave-60 C5：监督者与 checkpoint 读写面共用同一 registry 句柄（唯一真值源）。
+            stop_escalation: self.stop_escalation.unwrap_or_else(|| {
+                Arc::new(crate::agent::stop_escalation::StopEscalation::with_registry(
+                    crate::agent::stop_escalation::StopEscalationConfig::default(),
+                    execution_control.clone(),
+                ))
+            }),
         }
     }
 }
@@ -1978,8 +2034,114 @@ impl HostControlPlane {
         let _ = crate::agent::turn_flow::flush_session_buffered_events(&session_id_for_flush);
     }
 
+    /// wave-60 C2：注册某 turn 的**即时事件出口**（宿主角色的唯一注入点）。
+    ///
+    /// 语义（契约 §2 C2 / C5）：
+    /// - `stop_turn` 被接受时**同步**经该 sink 派发**恰好一条** `turn:stop_requested`；
+    /// - 注册同时为该 turn 绑定一个"经同一 sink 发 `turn:cancelled`"的终端发射器，故宿主
+    ///   只需注入 sink 即可打通「停止受理 → 宽限期收口」整链（C5）。
+    ///
+    /// `Send + Sync + 'static` 上界是硬要求：本控制面是宿主 managed state（跨线程共享），
+    /// 事件出口也允许在监督线程上被调用。
+    pub fn register_turn_event_sink<S>(&self, turn_id: &str, sink: Arc<S>)
+    where
+        S: crate::agent::turn_flow::TurnEventSink + Send + Sync + 'static,
+    {
+        {
+            let mut sinks = self.turn_event_sinks.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] turn event sink lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
+            sinks.insert(
+                turn_id.to_string(),
+                Arc::clone(&sink) as Arc<dyn crate::agent::turn_flow::TurnEventSink + Send + Sync>,
+            );
+        }
+        self.stop_escalation.register_emitter(
+            turn_id,
+            Arc::new(crate::agent::control_plane::SinkTerminalEmitter { sink }),
+        );
+    }
+
+    /// wave-60 C2/C5：注销某 turn 的即时事件出口（turn 终态/宿主清理时调用；幂等）。
+    ///
+    /// 释放面必须与 `register_turn_event_sink` **成对**：注册时同时写入了
+    /// `turn_event_sinks` 与监督者的 emitter 表，注销时两者都回收（否则 emitter 表
+    /// 按 turn 无界增长 —— L3-P LEAK）。
+    pub fn unregister_turn_event_sink(&self, turn_id: &str) {
+        {
+            let mut sinks = self.turn_event_sinks.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] turn event sink lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
+            sinks.remove(turn_id);
+        }
+        self.stop_escalation.unregister_emitter(turn_id);
+    }
+
+    /// wave-60 C1/C2：停止某轮（唯一入口）。
+    ///
+    /// 副作用顺序**固定**（契约 §2 C2 + §C6 的 core 侧对应）：
+    /// 1. `request_stop`（唯一取消源：checkpoint 的 `stop_requested_at_ms` 即读通道/监督者
+    ///    观测的取消位）——被接受时同步派发**恰好一条** `turn:stop_requested`，未被接受
+    ///    则**不派发**；
+    /// 2. 启动宽限期监督（C5）：宽限期内循环仍未退出 ⇒ 幂等收口 checkpoint + 一条终态。
     pub fn stop_turn(&self, command: StopTurnCommand) -> StopTurnResponse {
-        self.execution_control.request_stop(&command.turn_id)
+        let stop_reason = command
+            .stop_reason
+            .unwrap_or(crate::agent::stop_escalation::StopReason::User);
+        let response = self.execution_control.request_stop(&command.turn_id, stop_reason);
+        if !response.accepted {
+            return response;
+        }
+
+        // ① 立即应答（同步、同一次调用内、终态之前）。
+        let session_id = self
+            .execution_control
+            .load_checkpoint(Some(&command.turn_id), None)
+            .and_then(|checkpoint| checkpoint.session_id);
+        // L3-A BLOCKING-4 兜底：接受但**尚未注册 sink**（注册时序窗口）⇒ 必须留一条结构化
+        // 告警，绝不静默丢事件（正确修法是把注册前移到"turn 可被 stop"之前，见 T3 宿主侧）。
+        match self.turn_event_sink_for(&command.turn_id) {
+            Some(sink) => {
+                crate::agent::turn_flow::emit_stream_stop_requested(
+                    sink.as_ref(),
+                    command.turn_id.clone(),
+                    session_id.clone(),
+                    stop_reason,
+                );
+            }
+            None => crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "stop accepted but no turn event sink registered; turn:stop_requested not dispatched",
+                None,
+                &[
+                    ("turn_id", serde_json::json!(&command.turn_id)),
+                    ("session_id", serde_json::json!(session_id)),
+                    ("stop_reason", serde_json::json!(stop_reason.as_str())),
+                ],
+            ),
+        };
+
+        // ② 宽限期监督（C5）：与①同一取消源，到点仍未退出即由监督者收口。
+        self.stop_escalation.on_stop_accepted(
+            &command.turn_id,
+            session_id.as_deref(),
+            stop_reason,
+        );
+        response
+    }
+
+    /// 取某 turn 注册的事件出口（**克隆后立即释放锁**，绝不在持锁时调用 sink）。
+    fn turn_event_sink_for(
+        &self,
+        turn_id: &str,
+    ) -> Option<Arc<dyn crate::agent::turn_flow::TurnEventSink + Send + Sync>> {
+        let sinks = self.turn_event_sinks.lock().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] turn event sink lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        sinks.get(turn_id).cloned()
     }
 
     /// watchdog 兜底（契约 watchdog-fix backend）：前端 watchdog 触发时立即按 turn_id
@@ -2046,7 +2208,10 @@ impl HostControlPlane {
         // update_execution_checkpoint 会把 status 置 'failed'，若先置 failed 则
         // request_stop 的 "already_terminal" 守卫会让首次触发误返回 accepted=false；
         // 且尽早下发停止位，让仍阻塞在 provider 读的任务尽快感知停止。
-        let response = self.execution_control.request_stop(&command.turn_id);
+        let response = self.stop_turn(StopTurnCommand {
+            turn_id: command.turn_id.clone(),
+            stop_reason: Some(crate::agent::stop_escalation::StopReason::Watchdog),
+        });
 
         // O1（RACE_DOUBLE_WRITE_TERMINAL）：watchdog 与自然完成竞态——request_stop
         // 拒绝（already_terminal）或当前 checkpoint 已是终态（phase/status 属
@@ -2158,7 +2323,12 @@ impl HostControlPlane {
                     turn_id: Some(turn_id.to_string()),
                     session_id: None,
                 })
-                .map(|_| self.execution_control.request_stop(turn_id))
+                .map(|_| {
+                    self.execution_control.request_stop(
+                        turn_id,
+                        crate::agent::stop_escalation::StopReason::User,
+                    )
+                })
             })
         };
 
@@ -4647,6 +4817,7 @@ mod tests {
             .expect("checkpoint should exist");
         let stop = control_plane.stop_turn(StopTurnCommand {
             turn_id: "turn-stream".to_string(),
+            stop_reason: None,
         });
 
         assert_eq!(checkpoint.turn_id, "turn-stream");
@@ -4656,7 +4827,9 @@ mod tests {
         assert!(!checkpoint.resumable);
         assert!(!checkpoint.replayable);
         assert!(stop.accepted);
-        assert_eq!(stop.state, "running");
+        // wave-60 C1（A5 derivative：纯取值迁移）：state 的封闭集合为
+        // {"stopping","not_found","already_terminal"}，旧值 "running" 已废弃。
+        assert_eq!(stop.state, "stopping");
     }
 
     #[test]

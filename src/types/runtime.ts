@@ -25,6 +25,9 @@ export type RuntimePhase =
   | "ready"
   | "completed"
   | "cancelled"
+  /** wave-60 §C7/A2：停止请求已受理（**进行中态，非终态**）。终态仍只有
+   * completed/failed/cancelled 三选一；`stopping` 必须有兜底退出（终态/watchdog）。 */
+  | "stopping"
   | "calling_model"
   | "calling_tool"
   | "failed"
@@ -1102,7 +1105,11 @@ export type TurnStreamEvent = {
   eventId?: string | null;
   sessionId?: string | null;
   turnId: string;
-  kind: "started" | "delta" | "trace" | "tool" | "output_end" | "completed" | "failed" | "cancelled" | "suspended";
+  /**
+   * wave-60 §C2 追加值：`"stop_requested"` = 停止请求已受理的**即时事件**（非终态，
+   * 终态仍只有 completed/failed/cancelled 三选一）。契约纪律：只能追加，禁止重排/删除既有值。
+   */
+  kind: "started" | "delta" | "trace" | "tool" | "output_end" | "completed" | "failed" | "cancelled" | "suspended" | "stop_requested";
   eventType?: TurnLifecycleEventType | string | null;
   eventVersion?: string | null;
   sequence?: number | null;
@@ -1155,6 +1162,19 @@ export type TurnStreamEvent = {
  * 契约纪律：只能追加，禁止重命名/删除既有值。
  */
 export type StopReason = "user" | "parent" | "hook" | "watchdog" | "legacy";
+
+/**
+ * wave-60 §C1：`stop_turn` 应答（wire 对齐 Rust `StopTurnResponse`）。
+ *
+ * `state` 是**封闭集合** `{"stopping","not_found","already_terminal"}`；旧的 `"running"` 已废弃。
+ * `accepted=false` ⇒ 不得把前端呈现切到 stopping（§C7 的「被接受后」判据）。
+ */
+export type StopTurnResponse = {
+  turnId: string;
+  accepted: boolean;
+  state: "stopping" | "not_found" | "already_terminal";
+  stopReason?: StopReason | null;
+};
 
 export type ExecutionCheckpoint = {
   contractVersion?: string | null;

@@ -561,6 +561,9 @@ pub fn emit_stream_cancelled(
     provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
     error: String,
     session_id: Option<String>,
+    // wave-60 C3：该轮 checkpoint 记录的停止原因（wire 值）；`None` ⇒ 按 `"legacy"` 下发
+    // （历史迁移无原因记录，绝不虚构 `"user"`）。
+    stop_reason: Option<String>,
 ) {
     emit_event(
         sink,
@@ -604,7 +607,127 @@ pub fn emit_stream_cancelled(
             hook_trace_records: None,
             session_summary: None,
             step: None,
-            stop_reason: None,
+            // wave-60 C3：`turn:cancelled` 必须携带该轮 checkpoint 的 stop_reason；
+            // 无记录（历史迁移/非 stop 路径）⇒ `"legacy"`（契约 §2 C3）。
+            stop_reason: Some(stop_reason.unwrap_or_else(|| {
+                crate::agent::stop_escalation::StopReason::Legacy
+                    .as_str()
+                    .to_string()
+            })),
+        },
+    );
+}
+
+/// wave-60 C2：`stop_turn` 被接受时的**立即应答**事件（`turn:stop_requested`）。
+///
+/// 语义：不改变 turn 的终态归属（终态仍只有 completed/failed/cancelled 三选一），
+/// 只把"停止请求已受理、正在收口"这一事实同步推给表面。载荷字段按契约 §2 C2：
+/// `turnId` / `sessionId`（checkpoint 有则带）/ `stopReason` / `requestedAtMs`（wire 即
+/// `emittedAtMs`，由 [`emit_event`] 统一盖章）/ `kind="stop_requested"` / `phase=Some("stopping")`。
+pub fn emit_stream_stop_requested(
+    sink: &(impl TurnEventSink + ?Sized),
+    turn_id: String,
+    session_id: Option<String>,
+    stop_reason: crate::agent::stop_escalation::StopReason,
+) -> TurnEventEnvelope {
+    emit_event(
+        sink,
+        "turn:stop_requested",
+        TurnStreamEvent {
+            event_id: None,
+            session_id,
+            turn_id,
+            trace_id: crate::agent::otel::exported_trace_id(),
+            cost_usd: None,
+            kind: "stop_requested".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: Some("stopping".to_string()),
+            text: None,
+            reasoning_content: None,
+            error: None,
+            provider_requested_name: None,
+            provider_name: None,
+            provider_protocol: None,
+            provider_model: None,
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            trace_steps: None,
+            trace_timeline: None,
+            tool_activities: None,
+            provider_call_records: None,
+            hook_trace_records: None,
+            session_summary: None,
+            step: None,
+            stop_reason: Some(stop_reason.as_str().to_string()),
+        },
+    )
+}
+
+/// wave-60 C5：宽限期监督者派发终态（`turn:cancelled`）的**表面中立**入口。
+///
+/// 由宿主适配层在 [`crate::agent::stop_escalation::TerminalEmitter`] 内调用，使监督者
+/// 收口的事件与循环自身发出的终态走同一条 sink/事件通道（载荷形状一致，
+/// `stopReason` 为该轮 checkpoint 记录的原因）。
+pub fn emit_supervisor_cancelled(
+    sink: &(impl TurnEventSink + ?Sized),
+    turn_id: String,
+    session_id: Option<String>,
+    stop_reason: crate::agent::stop_escalation::StopReason,
+) {
+    emit_event(
+        sink,
+        "turn:cancelled",
+        TurnStreamEvent {
+            event_id: None,
+            session_id,
+            turn_id,
+            trace_id: crate::agent::otel::exported_trace_id(),
+            cost_usd: None,
+            kind: "cancelled".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: Some("cancelled".to_string()),
+            // 契约 §0 非目标 2：落库/线上的哨兵句语义不变（呈现层改走 stopReason）。
+            text: Some("用户终止，发送消息可继续。".to_string()),
+            reasoning_content: None,
+            error: Some("stopped_by_user".to_string()),
+            provider_requested_name: None,
+            provider_name: None,
+            provider_protocol: None,
+            provider_model: None,
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            trace_steps: None,
+            trace_timeline: None,
+            tool_activities: None,
+            provider_call_records: None,
+            hook_trace_records: None,
+            session_summary: None,
+            step: None,
+            stop_reason: Some(stop_reason.as_str().to_string()),
         },
     );
 }
@@ -942,7 +1065,7 @@ pub fn emit_turn_failed(
 }
 
 pub fn emit_event(
-    sink: &impl TurnEventSink,
+    sink: &(impl TurnEventSink + ?Sized),
     name: &str,
     payload: TurnStreamEvent,
 ) -> TurnEventEnvelope {

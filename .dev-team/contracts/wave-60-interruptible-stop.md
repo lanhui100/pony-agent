@@ -127,6 +127,16 @@ StopReason = "user" | "parent" | "hook" | "watchdog" | "legacy"
 | A6 | T4 写域扩容 | 增 `src/lib/runtime/status.ts`、`src/lib/runtime/stop-sequence.ts`、`src/lib/runtime/cancelled-turn.ts`、`src/components/chat/WorkspaceComposer.vue`、`src/components/chat/AgentRuntimeStatusBar.vue` |
 | A7 | 已知事实（免重复侦察） | `phaseLabel` 在 `src/` 中**零消费者**；`stopRequested`（HomeWorkspace.vue:102）为**死变量**；TUI sink 的 `_ => {}`（tui.rs:2453）丢弃 `turn:cancelled`；`should_render_status_notice` 在流式期间抑制 notice（tui.rs:3426） |
 
+
+## 6-ter. 补遗 v3（Lead 一票裁决，2026-11-03，绿相验收前生效）
+
+| # | 偏离 | 裁决 |
+|---|---|---|
+| A8 | `register_turn_event_sink` 实际形参为 `Arc<S>, S: TurnEventSink + Send + Sync + 'static`（非字面 `Arc<dyn TurnEventSink>`） | **接受**。`HostControlPlane` 需 `Send+Sync`，而 `TuiTurnSink` 持 `mpsc::Sender`（Send 非 Sync），`dyn` 对象无法满足；冻结测试与 TUI 均原样编译 |
+| A9 | C6「②取消该 turn 的取消令牌」未引入第二套 token，取消源复用 `ExecutionControlRegistry` 唯一停止位 | **接受为 SCOPE-DEFERRED**：`abort` 仅作 L2 表项回收，不冒充"已停止"；长工具执行期间循环在**下一个检查点**退出，UI 由 C5 宽限期（2s）先解锁。登记 backlog：`per-turn cancellation token 注入 dispatcher/tools` |
+| A10 | emitter 由 core 在 `register_turn_event_sink` 时绑定到同一 sink（Tauri 侧不再造第二条事件通道） | **接受**（单一事件通道，去重更安全） |
+| A11 | `tests/stop_contract_wave60.rs` 存在 1 条 dead_code 警告 | **接受**（测试文件冻结期不改；收口前如零成本可清理，不阻断） |
+
 ## 6. 熔断与回滚
 
 - 每任务连续失败 3 次触发隔离（`quarantine/wave60-<task>-<ts>`），定向 `git stash`/`git checkout -- <scope>`，**禁止** `git reset --hard`/`git clean -fd`。

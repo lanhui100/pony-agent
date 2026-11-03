@@ -8,6 +8,8 @@ export type AgentRuntimeMode =
   | "executing_tool"
   | "waiting_approval"
   | "retrying"
+  /** wave-60 §C7：停止请求已受理、终态未到（进行中态，仅流式期可见）。 */
+  | "stopping"
   | "error"
   /** C-9：中性/成功反馈（如斜杠命令提示），非错误、非进行中。 */
   | "info";
@@ -50,6 +52,17 @@ export function resolveAgentRuntimeStatus(
 
   if (!isSubmitting) {
     return null;
+  }
+
+  // wave-60 §C7 / 补遗 v2 A2：停止请求受理后优先呈现「正在停止…」。
+  // 口径：仅在 `isSubmitting`（流式进行中）时返回 —— 终态后本函数恒返回 null，
+  // 「已停止」由 `sessionNotice` 承载，二者不互相冒充。
+  if (phase === "stopping") {
+    return {
+      mode: "stopping",
+      label: "正在停止…",
+      startTime: turnStartedAt,
+    };
   }
 
   // 0. 重试状态投射

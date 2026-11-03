@@ -423,7 +423,10 @@ struct RequestStopToolExecutor {
 impl crate::agent::tools::ToolExecutor for RequestStopToolExecutor {
     fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
         std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
-        let _ = self.control.request_stop(&self.turn_id);
+        let _ = self.control.request_stop(
+            &self.turn_id,
+            crate::agent::stop_escalation::StopReason::User,
+        );
         StubToolExecutor.execute(call)
     }
 }
@@ -3883,7 +3886,10 @@ fn start_turn_stream_can_emit_cancelled_when_stop_requested_before_plan() {
     let control = ExecutionControlRegistry::new();
 
     control.register_turn("turn-cancelled", Some("stop-session"), None);
-    let response = control.request_stop("turn-cancelled");
+    let response = control.request_stop(
+        "turn-cancelled",
+        crate::agent::stop_escalation::StopReason::User,
+    );
     assert!(response.accepted);
 
     runtime.start_turn_stream_with_control(
@@ -10764,7 +10770,12 @@ mod parity {
                 control_plane.event_flush_channel(),
             );
             control.register_turn("parity-cancel-turn", Some("parity-cancel"), None);
-            assert!(control.request_stop("parity-cancel-turn").accepted);
+            assert!(control
+                .request_stop(
+                    "parity-cancel-turn",
+                    crate::agent::stop_escalation::StopReason::User
+                )
+                .accepted);
             control_plane.start_turn_stream(
                 &crate::agent::turn_flow::NoopTurnEventSink,
                 StartTurnStreamCommand {

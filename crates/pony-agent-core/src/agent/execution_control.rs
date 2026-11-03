@@ -1,8 +1,18 @@
 use crate::agent::hooks::PersistedEffectEvidence;
+use crate::agent::stop_escalation::StopReason;
 use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+/// wave-60 C1：`StopTurnResponse.state` 的**封闭**取值集合（`"running"` 已废弃）。
+///
+/// 契约 §2 C1：`{"stopping","not_found","already_terminal"}`；新增值只能追加。
+pub const STOP_TURN_STATE_STOPPING: &str = "stopping";
+/// C1：未知 turn。
+pub const STOP_TURN_STATE_NOT_FOUND: &str = "not_found";
+/// C1：已处终态（cancelled/completed/failed）。
+pub const STOP_TURN_STATE_ALREADY_TERMINAL: &str = "already_terminal";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,10 +89,15 @@ impl ExecutionControlRegistry {
         });
         // PA-095 #3：重注册保留已设置的停止请求——turn 开始前 request_stop
         // 的语义应跨注册存活（否则宿主预注册+停止会被入口注册覆盖丢失）。
+        // wave-60 C1：`stop_requested_at_ms` 与 `stop_reason` **一并结转**（原因粘滞）。
         let carried_stop_requested_at_ms =
             state.turns.get(turn_id).and_then(|checkpoint| {
                 checkpoint.stop_requested_at_ms
             });
+        let carried_stop_reason = state
+            .turns
+            .get(turn_id)
+            .and_then(|checkpoint| checkpoint.stop_reason.clone());
         let mut checkpoint = ExecutionCheckpoint {
             contract_version: execution_checkpoint_contract_version().to_string(),
             turn_id: turn_id.to_string(),
@@ -113,7 +128,7 @@ impl ExecutionControlRegistry {
             started_at_ms: now,
             updated_at_ms: now,
             stop_requested_at_ms: carried_stop_requested_at_ms,
-            stop_reason: None,
+            stop_reason: carried_stop_reason,
         };
         refresh_execution_checkpoint_projection(&mut checkpoint);
         state.turns.insert(turn_id.to_string(), checkpoint);
@@ -136,7 +151,19 @@ impl ExecutionControlRegistry {
         checkpoint.updated_at_ms = now_timestamp_ms();
     }
 
-    pub fn request_stop(&self, turn_id: &str) -> StopTurnResponse {
+    /// wave-60 C1：结构化停止请求。
+    ///
+    /// 语义（契约 §2 C1，`state` 取值封闭）：
+    /// - 运行中（`status == "running"`）且此前未请求过停止 ⇒ `accepted=true, state="stopping"`，
+    ///   同时落盘 `stop_requested_at_ms` 与 `stop_reason`（wire 值）；
+    /// - 运行中但此前已请求过停止 ⇒ `accepted=false, state="stopping"`（**幂等**：不重复派发，
+    ///   也**不改写**首次记录的原因 —— 粘滞）；
+    /// - 未知 turn ⇒ `accepted=false, state="not_found"`（不回带原因）；
+    /// - 已终态 ⇒ `accepted=false, state="already_terminal"`。
+    ///
+    /// 本方法是**唯一**的停止置位点：checkpoint 的 `stop_requested_at_ms` 即读通道/宽限监督
+    /// 观测的唯一取消源（不新建第二套取消状态）。
+    pub fn request_stop(&self, turn_id: &str, stop_reason: StopReason) -> StopTurnResponse {
         let mut state = self.state.lock().unwrap_or_else(|e| {
             eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
             e.into_inner()
@@ -145,7 +172,7 @@ impl ExecutionControlRegistry {
             return StopTurnResponse {
                 turn_id: turn_id.to_string(),
                 accepted: false,
-                state: "not_found".to_string(),
+                state: STOP_TURN_STATE_NOT_FOUND.to_string(),
                 stop_reason: None,
             };
         };
@@ -154,23 +181,35 @@ impl ExecutionControlRegistry {
             return StopTurnResponse {
                 turn_id: turn_id.to_string(),
                 accepted: false,
-                state: "already_terminal".to_string(),
+                state: STOP_TURN_STATE_ALREADY_TERMINAL.to_string(),
                 stop_reason: None,
             };
         }
 
-        if checkpoint.stop_requested_at_ms.is_none() {
-            checkpoint.stop_requested_at_ms = Some(now_timestamp_ms());
-            checkpoint.updated_at_ms = checkpoint
-                .stop_requested_at_ms
-                .unwrap_or(checkpoint.updated_at_ms);
+        // 幂等第 2 次：仍 running 但停止位已在位 ⇒ 不重复接受、不改写原因。
+        if checkpoint.stop_requested_at_ms.is_some() {
+            let sticky = checkpoint
+                .stop_reason
+                .clone()
+                .or_else(|| Some(stop_reason.as_str().to_string()));
+            return StopTurnResponse {
+                turn_id: turn_id.to_string(),
+                accepted: false,
+                state: STOP_TURN_STATE_STOPPING.to_string(),
+                stop_reason: sticky,
+            };
         }
+
+        let now = now_timestamp_ms();
+        checkpoint.stop_requested_at_ms = Some(now);
+        checkpoint.stop_reason = Some(stop_reason.as_str().to_string());
+        checkpoint.updated_at_ms = now;
 
         StopTurnResponse {
             turn_id: turn_id.to_string(),
             accepted: true,
-            state: "running".to_string(),
-            stop_reason: None,
+            state: STOP_TURN_STATE_STOPPING.to_string(),
+            stop_reason: Some(stop_reason.as_str().to_string()),
         }
     }
 
@@ -342,7 +381,7 @@ mod tests {
     fn request_stop_rejects_missing_and_terminal_turns() {
         let registry = ExecutionControlRegistry::new();
 
-        let missing = registry.request_stop("missing");
+        let missing = registry.request_stop("missing", StopReason::User);
         assert!(!missing.accepted);
         assert_eq!(missing.state, "not_found");
 
@@ -352,7 +391,7 @@ mod tests {
             checkpoint.phase = "ready".to_string();
         });
 
-        let terminal = registry.request_stop("turn-1");
+        let terminal = registry.request_stop("turn-1", StopReason::User);
         assert!(!terminal.accepted);
         assert_eq!(terminal.state, "already_terminal");
     }

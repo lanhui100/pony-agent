@@ -2,7 +2,8 @@ pub use pony_agent_core::agent;
 mod blocking_helper;
 mod platform;
 mod tauri_adapter;
-mod turn_task_registry;
+/// wave-60 C6（A1 裁决）：注册表需被 `src-tauri/tests/` 直接引用 ⇒ 改 `pub mod`。
+pub mod turn_task_registry;
 
 use crate::blocking_helper::BlockingHelper;
 use crate::turn_task_registry::TurnTaskRegistry;
@@ -96,6 +97,9 @@ fn start_graph_run_stream(
             goal,
             input,
         })?;
+    // wave-60 L3-A BLOCKING-4：prepare（已 register_turn ⇒ turn 可被 stop）之后、spawn 之前
+    // 同步注册本 turn 的事件出口，消除"可被 stop 但无 sink"的窗口。
+    tauri_adapter::register_turn_sink(&app, &prepared.turn_id);
     tauri_adapter::spawn_graph_run_stream(&app, prepared)?;
     Ok(response)
 }
@@ -123,6 +127,8 @@ fn continue_graph_run_stream(
             run_id,
             input,
         })?;
+    // wave-60 L3-A BLOCKING-4：同上（prepare → 注册 sink → spawn）。
+    tauri_adapter::register_turn_sink(&app, &prepared.turn_id);
     tauri_adapter::spawn_graph_run_stream(&app, prepared)?;
     Ok(response)
 }
@@ -150,27 +156,41 @@ fn resume_graph_run_stream(
             run_id,
             input,
         })?;
+    // wave-60 L3-A BLOCKING-4：同上（prepare → 注册 sink → spawn）。
+    tauri_adapter::register_turn_sink(&app, &prepared.turn_id);
     tauri_adapter::spawn_graph_run_stream(&app, prepared)?;
     Ok(response)
 }
 
+/// wave-60 C6：停止一轮（副作用顺序**固定**，顺序反转视为 FAIL）。
+///
+/// ① `request_stop`（经 `HostControlPlane::stop_turn`：置位唯一取消源 + 同步派发恰好一条
+///    `turn:stop_requested` + 启动宽限期监督）→ ② 取消令牌（与①**同一取消源**：checkpoint
+///    的停止位即 provider 读通道与监督者观测的取消位，不新建第二套取消状态）→
+///    ③ `abort_turn` 该轮句柄（**仅 L2 兜底**：`spawn_blocking` 不可抢占，abort 只是表项回收，
+///    绝不据此向用户呈现"已停止"）。
 #[tauri::command]
 fn stop_turn(
     control_plane: State<'_, HostControlPlane>,
     task_registry: State<'_, TurnTaskRegistry>,
     turn_id: String,
+    stop_reason: Option<String>,
 ) -> StopTurnResponse {
-    let checkpoint = control_plane.load_execution_checkpoint(ExecutionCheckpointQuery {
-        turn_id: Some(turn_id.clone()),
-        session_id: None,
+    // ① 请求停止（C1 应答语义 + C2 立即应答事件 + C5 宽限监督）。
+    let response = control_plane.stop_turn(StopTurnCommand {
+        turn_id: turn_id.clone(),
+        stop_reason: stop_reason
+            .as_deref()
+            .and_then(|wire| wire.parse::<agent::stop_escalation::StopReason>().ok()),
     });
-    if let Some(ref cp) = checkpoint {
-        if let Some(ref session_id) = cp.session_id {
-            task_registry.abort_session(session_id);
-        }
-    }
-    task_registry.abort_session(&turn_id);
-    control_plane.stop_turn(StopTurnCommand { turn_id })
+
+    // ② 取消令牌：已由①置位（唯一取消源）。未知 wire 原因/未接受时也不重复置位——
+    //    request_stop 是唯一置位点，避免"两套取消状态"造成观测分叉。
+
+    // ③ L2 兜底：只回收该 turn 的句柄（绝不再按 session 连带 abort 同会话其它轮次）。
+    task_registry.abort_turn(&turn_id);
+
+    response
 }
 
 #[tauri::command]

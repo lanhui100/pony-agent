@@ -107,6 +107,10 @@ impl AgentRuntime {
             // PA-095 #3：cancelled 终态事件必须携带 session_id——否则进入空会话
             // 缓冲，flush 被 skip，事件流丢失 turn:cancelled 终态（对拍/重建缺终态）。
             session_id.map(|id| id.to_string()),
+            // wave-60 C3：终态携带该轮 checkpoint 记录的停止原因（无记录 ⇒ 下游落 legacy）。
+            control
+                .load_checkpoint(Some(turn_id), None)
+                .and_then(|checkpoint| checkpoint.stop_reason),
         );
     }
 

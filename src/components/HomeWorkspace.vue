@@ -19,6 +19,7 @@ import {
 import { extractErrorMessage } from "@/lib/error-utils";
 import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
 import { isWorkspaceScrollDebugEnabled } from "@/lib/runtime/utils";
+import { StopSequenceState } from "@/lib/runtime/stop-sequence";
 import { useStreamingPresentationState } from "@/lib/useStreamingPresentationState";
 import { isSimpleTextContent } from "@/lib/markdown";
 
@@ -60,7 +61,9 @@ const {
   isSubmitting,
   messages,
   pendingQueuedMessages,
+  activeTurnId,
   agentRuntimeStatus,
+  phase,
   sessionId,
   sessionOperation,
   traceTimeline,
@@ -99,7 +102,9 @@ const scrollAnchorRef = ref<HTMLElement | null>(null);
 const composerShellRef = ref<HTMLElement | null>(null);
 const latestUserMessageRef = ref<HTMLElement | null>(null);
 const latestAgentMessageRef = ref<HTMLElement | null>(null);
-const stopRequested = ref(false);
+// wave-60 §C8：双击 Esc 的纯判定状态机（窗口 `stop_sequence_ms=500`，可注入语义与 Rust 侧一致）。
+// 上膛/命中只在这里判定，停止态本身由 store 的 `phase="stopping"` 单一真源承载。
+const stopSequenceState = new StopSequenceState();
 const scrollToLatestHovered = ref(false);
 let hoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let streamingPresentationTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1030,6 +1035,12 @@ const isRuntimeStatusVisible = computed(() => {
     return false;
   }
 
+  // wave-60 §C7 / A2：stopping 是**进行中**态，其唯一可见载体就是状态条
+  // （终态「已停止」才落 sessionNotice）。故不得被下方「正文流式时隐藏状态条」规则吞掉。
+  if (phase.value === "stopping") {
+    return true;
+  }
+
   // 会话全局操作（如切换中、初始化中）或错误态，必须显示
   if (sessionOperation.value || agentRuntimeStatus.value.mode === "error") {
     return true;
@@ -1556,6 +1567,13 @@ function handleWindowKeydown(event: KeyboardEvent) {
     return;
   }
 
+  // wave-60 §C8：流式中双击 Esc ⇒ 停止本轮（窗口 `stop_sequence_ms`=500，同身份）。
+  // 非流式态**不参与**双击判定、不 preventDefault —— 既有 Esc 语义（各弹窗/输入框）保持不变。
+  if (event.key === "Escape") {
+    handleStopSequenceEscape(event);
+    return;
+  }
+
   const isUndoShortcut =
     event.key.toLowerCase() === "z" &&
     (event.ctrlKey || event.metaKey) &&
@@ -1575,6 +1593,49 @@ function handleWindowKeydown(event: KeyboardEvent) {
   }
 }
 
+/**
+ * wave-60 §C8：「流式」判据（双击 Esc 的准入条件）。
+ *
+ * 只认**正在流式输出**（思考 / 回复 / 重试）的轮次；工具执行态与非流式态不参与双击停止。
+ * 与 Rust 侧 `stop_sequence.rs` 判据表对齐：窗口内同身份第 2 次才发**恰好一次**停止请求。
+ */
+const STOP_SEQUENCE_ELIGIBLE_MODES = new Set(["thinking", "responding", "retrying"]);
+
+function canStopByDoubleEscape(): boolean {
+  if (!isSubmitting.value) {
+    return false;
+  }
+  // 已进入 stopping ⇒ 不再重复发请求（幂等由 store 的 phase 单一真源承担）。
+  if (phase.value === "stopping") {
+    return false;
+  }
+  return STOP_SEQUENCE_ELIGIBLE_MODES.has(agentRuntimeStatus.value?.mode ?? "");
+}
+
+/** wave-60 §C8：Esc 双击 → 触发一次 `stopTurn()`；第 1 次仅「上膛」。 */
+function handleStopSequenceEscape(event: KeyboardEvent) {
+  if (!canStopByDoubleEscape()) {
+    // 非流式 Esc 现有行为不变：不参与双击判定，也不拦截事件。
+    stopSequenceState.reset();
+    return;
+  }
+  event.preventDefault();
+  const triggered = stopSequenceState.press(
+    {
+      sessionId: sessionId.value ?? null,
+      turnId: activeTurnId.value ?? null,
+      // generation 用本轮开始时间戳承载身份代次：同一 turnId 被重新拉起时也判为身份变化。
+      generation: runtimeStore.activeTurnStartedAtMs ?? 0
+    },
+    Date.now()
+  );
+  if (!triggered) {
+    return;
+  }
+  // 命中即发**一次**停止请求；`stopping` 态由 store 在同一微任务内落地（单一真源）。
+  void runtimeStore.stopTurn();
+}
+
 async function handlePrimaryAction() {
   // C-8：发送按钮同样走斜杠命令唯一入口（运行中拒绝执行的守卫在 executeSlashCommand 内）。
   const slashCommand = resolveSlashCommand();
@@ -1591,14 +1652,12 @@ async function handlePrimaryAction() {
       return;
     }
 
-    const stopped = await runtimeStore.stopTurn();
-    if (stopped) {
-      stopRequested.value = true;
-    }
+    // wave-60 §C7：停止请求被受理后 由 store 在同一微任务内置 `phase="stopping"`
+    // （单一真源），此处不再维护第二份「已请求停止」的组件内状态（补遗 v2 A7 死变量已删除）。
+    await runtimeStore.stopTurn();
     return;
   }
 
-  stopRequested.value = false;
   timelineAutoScroll.setAutoFollowEnabled();
   await runtimeStore.submitTurn();
 }
@@ -1809,10 +1868,19 @@ watch(isSubmitting, (submitting, wasSubmitting) => {
   syncStreamingPresentationState();
   scheduleStreamingPresentationTimer();
   if (!submitting) {
-    stopRequested.value = false;
+    // wave-60 §C8：本轮结束（终态/unlock）⇒ 双击 Esc 的上膛失效。
+    stopSequenceState.reset();
   }
   handleSubmittingChange(submitting, wasSubmitting);
 });
+
+// wave-60 §C8：身份（session/turn/generation）或流式态变化 ⇒ 上膛失效，避免跨轮误触发。
+watch(
+  () => [sessionId.value, activeTurnId.value, runtimeStore.activeTurnStartedAtMs ?? 0, isSubmitting.value] as const,
+  () => {
+    stopSequenceState.reset();
+  }
+);
 
 watch(
   () => messages.value.length,

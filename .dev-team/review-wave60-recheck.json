@@ -1,0 +1,30 @@
+{
+  "verdict": "PASS",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "recheck-wave60",
+    "fresh_context": true
+  },
+  "executed_by": "recheck-wave60",
+  "reviewed_commit": "52a7a2182ca7470c10a638f14b968f0bd692c2f6",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/stop_escalation.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/tauri_adapter.rs"
+  ],
+  "findings": [
+    {
+      "file": "src-tauri/src/lib.rs",
+      "line": 102,
+      "rule": "LEAK",
+      "counterexample_cmd": "sed -n '102,103p' src-tauri/src/lib.rs && sed -n '105,111p' src-tauri/src/tauri_adapter.rs && grep -rn 'unregister_turn_event_sink' src-tauri/src",
+      "severity": "ADVISORY",
+      "note": "残留（非原 4 条 BLOCKING）：sink/emitter 在 spawn 之前注册，但回收只发生在 run_stream_task 内创建的 TaskCleanupGuard；若 TurnTaskRegistry::register 超限失败（max_concurrent=3，turn_task_registry.rs:39-45）并 abort 尚未被首次 poll 的任务，守卫从未创建 ⇒ 该 turn 的 sink+emitter 表项无回收点（仅 TaskCleanupGuard::drop 一处调用 unregister_turn_event_sink）。建议 spawn 失败分支补一次 unregister_turn_event_sink，不影响本轮 4 条判定。"
+    }
+  ]
+}

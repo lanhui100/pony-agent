@@ -859,7 +859,7 @@
       "branches": {
         "protocol": {
           "owner": "protocol-agent",
-          "status": "pending",
+          "status": "completed",
           "write_scopes": [
             "crates/pony-agent-core/src/agent/stop_escalation.rs",
             "crates/pony-agent-core/src/agent/stop_sequence.rs",
@@ -869,7 +869,7 @@
         },
         "test": {
           "owner": "test-agent",
-          "status": "pending",
+          "status": "completed",
           "write_scopes": [
             "crates/pony-agent-core/tests/",
             "src-tauri/tests/",
@@ -879,7 +879,7 @@
         },
         "core": {
           "owner": "executor-core",
-          "status": "pending",
+          "status": "completed",
           "write_scopes": [
             "crates/pony-agent-core/src/agent/execution_control.rs",
             "crates/pony-agent-core/src/agent/control_plane/",
@@ -891,7 +891,7 @@
         },
         "surface": {
           "owner": "executor-surface",
-          "status": "pending",
+          "status": "completed",
           "write_scopes": [
             "src/stores/runtime.ts",
             "src/components/HomeWorkspace.vue",
@@ -901,10 +901,36 @@
         }
       },
       "gates": {
-        "regression_baseline": "pending",
-        "red_commit": null,
+        "regression_baseline": ".dev-team/regression-baseline-wave60.json",
+        "protocol_commit": "6930ef1",
+        "red_commit": "f8769fe",
+        "red_tag": "wave-60-red",
         "green_commit": null,
-        "join_barrier": null
+        "join_barrier": "in_progress",
+        "reviews": {
+          "l3a": {
+            "file": ".dev-team/review-wave60-a.json",
+            "verdict": "FAIL(1 BLOCKING)",
+            "resolved": "FIXED(见 recheck)"
+          },
+          "l3b": {
+            "file": ".dev-team/review-wave60-b.json",
+            "verdict": "PASS(8 ADVISORY)"
+          },
+          "l3p": {
+            "file": ".dev-team/review-l3p-wave60.json",
+            "verdict": "FAIL(2 BLOCKING)",
+            "resolved": "FIXED(见 recheck)"
+          },
+          "recheck": {
+            "file": ".dev-team/review-wave60-recheck.json",
+            "verdict": "PASS(4/4 FIXED)"
+          }
+        },
+        "observability": {
+          "audit_diff": "exit 0",
+          "check_declaration": "PASS(exit 0)"
+        }
       }
     }
   ],

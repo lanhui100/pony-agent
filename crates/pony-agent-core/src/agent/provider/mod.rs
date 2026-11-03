@@ -2691,6 +2691,17 @@ where
 
     let mut last_cancel_check = started_at;
     let mut parsed_bytes: usize = 0;
+    // wave-60 C4：停滞读可中断——单次 `next()` 最多等一个 tick；到点无 chunk 即回到
+    // 循环顶部重查取消位与总时长上界（取消后 ≤ 2×tick 内退出）。零节流（测试注入）
+    // 退化为缺省 tick，避免 `timeout(0)` 忙等。
+    let poll_tick = {
+        let cancel_tick = guard.cancel_tick();
+        if cancel_tick.is_zero() {
+            ProviderStreamGuard::DEFAULT_CANCEL_TICK
+        } else {
+            cancel_tick
+        }
+    };
     loop {
         // T9：①总时长上界 ②按 tick 节流的取消观测（与 openai/responses 帧骨架同口径）。
         let elapsed = started_at.elapsed();
@@ -2719,8 +2730,9 @@ where
             }
         }
 
-        match block_on(stream.next()) {
-            Some(Ok(bytes)) => {
+        match block_on(tokio::time::timeout(poll_tick, stream.next())) {
+            Err(_stalled) => continue,
+            Ok(Some(Ok(bytes))) => {
                 let chunk_len = bytes.len();
                 parsed_bytes += chunk_len;
                 for &byte in bytes.iter() {
@@ -2755,7 +2767,7 @@ where
                 }
                 total_bytes += chunk_len;
             }
-            Some(Err(error)) => {
+            Ok(Some(Err(error))) => {
                 return Err(format!(
                     "读取 Anthropic SSE 流失败: {}; elapsed={}ms; parsed_bytes={}; endpoint={}",
                     error,
@@ -2764,7 +2776,7 @@ where
                     endpoint,
                 ));
             }
-            None => break,
+            Ok(None) => break,
         }
     }
 

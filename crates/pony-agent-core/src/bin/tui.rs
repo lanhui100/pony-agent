@@ -30,6 +30,9 @@ use pony_agent_core::agent::runtime::{
     TurnStreamEvent,
 };
 use pony_agent_core::agent::session::SessionStore;
+use pony_agent_core::agent::stop_escalation::StopReason;
+// wave-60 §C8：双击 Esc 的纯判定状态机（与桌面端 `src/lib/runtime/stop-sequence.ts` 同判据）。
+use pony_agent_core::agent::stop_sequence::{StopIdentity, StopSequenceState, STOP_SEQUENCE_MS};
 use pony_agent_core::agent::turn_flow::TurnEventSink;
 use ratatui::{
     backend::CrosstermBackend,
@@ -139,6 +142,15 @@ pub enum UiEvent {
     GoalUpdated(TuiGoal),
     /// 波次 43：本轮被宿主控制请求挂起（ask_user / approval），主循环据此拉取待决请求。
     TurnSuspended { run_id: Option<String> },
+    /// wave-60 §C2/C9：停止请求已受理（**不是**终态）⇒ 进入「正在停止…」。
+    /// 由 `TuiTurnSink` 的 `turn:stop_requested` 分支投递。
+    StopRequested { turn_id: String },
+    /// wave-60 §C9：`turn:cancelled` 终态 ⇒ 由事件驱动「已停止」并退出流式态
+    /// （此前该事件被 sink 的 `_ => {}` 丢弃）。`stop_reason` = 结构化停止原因（wire `stopReason`）。
+    StopTerminal {
+        turn_id: String,
+        stop_reason: Option<String>,
+    },
     /// 契约 C-7：`/compact` 后台线程回执（真实压缩在后台线程执行，事件循环不阻塞 LLM）。
     CompactFinished {
         result: Result<ManualCompactionOutcome, String>,
@@ -687,6 +699,36 @@ pub fn ctrl_c_action(is_streaming: bool, has_draft: bool) -> CtrlCAction {
 /// 契约 P-5：一次性状态提示的存活时长（毫秒）。
 pub const STATUS_NOTICE_TTL_MS: u64 = 4_000;
 
+/// wave-60 §C8：当前墙钟毫秒（供 `StopSequenceState::press` 注入；纯读数，无副作用）。
+pub fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// wave-60 §C8：生成本次按键的停止身份，并维护「generation 代次」。
+///
+/// 口径：`turn_id` 变化（新一轮 / 轮次收口）⇒ generation 自增 ⇒ 旧上膛失效；
+/// 同一 turn_id 的连续按键保持同一 generation，双击判定才可能命中。
+pub fn next_stop_identity(
+    generation: &mut u64,
+    current_turn: &mut Option<String>,
+    session_id: &str,
+    turn_id: Option<&str>,
+) -> StopIdentity {
+    let turn = turn_id.unwrap_or("").to_string();
+    if current_turn.as_deref() != Some(turn.as_str()) {
+        *generation = (*generation).wrapping_add(1);
+        *current_turn = Some(turn.clone());
+    }
+    StopIdentity {
+        session_id: Some(session_id.to_string()),
+        turn_id: turn,
+        generation: *generation,
+    }
+}
+
 /// 契约 P-5：状态提示是否应当渲染（纯函数）。
 ///
 /// 流式期让位给进度短语（思考中/生成中/执行中），非流式期在 TTL 内显示一次性提示。
@@ -1104,6 +1146,12 @@ pub struct TuiState {
     /// 契约 P-1：provider 注册表落盘路径覆盖（`None` ⇒ `ProviderRegistryStore::new()` 的默认路径）。
     /// 抽出为字段是为了可注入：测试用临时目录，生产保持默认，不在热路径硬编码用户目录。
     pub provider_registry_path: Option<PathBuf>,
+    /// wave-60 §C9：停止请求进行中的轮次（`Some(turn_id)` = 「正在停止…」，**不是**终态）。
+    /// 终态由 `turn:cancelled` 事件清空；流式期经 `status_word` 呈现，不走 notice 通道。
+    pub stopping_turn_id: Option<String>,
+    /// wave-60 §C9：当前流式轮的 turn_id（新一轮开始时覆盖）。
+    /// 用于 `apply_stop_terminal` 在**无在飞停止请求**时拒绝旧轮迟到的终态。
+    pub streaming_turn_id: Option<String>,
     /// 契约（修订11 步骤2）：按消息粒度的布局缓存（宽度/条数变化或显式失效时重建）。
     render_cache: RenderCache,
 }
@@ -1171,6 +1219,8 @@ impl Default for TuiState {
             mode_stack: Vec::new(),
             status_notice: None,
             provider_registry_path: None,
+            stopping_turn_id: None,
+            streaming_turn_id: None,
             render_cache: RenderCache::default(),
         }
     }
@@ -1198,6 +1248,54 @@ impl TuiState {
     /// 契约 P-5：写入一次性状态提示（非流式期按 TTL 渲染）。
     pub fn set_status_notice(&mut self, notice: impl Into<String>) {
         self.status_notice = Some((notice.into(), std::time::Instant::now()));
+    }
+
+    /// wave-60 §C9：`turn:stop_requested` 驱动的**纯状态迁移** —— 只进入「正在停止…」。
+    ///
+    /// 不变量：
+    /// - `is_streaming` **保持 `true`**：终态只能由 `turn:cancelled|completed|failed` 事件驱动；
+    /// - 不写 `messages`：禁止在按键/请求路径本地伪造「已中断」类终态文案。
+    pub fn apply_stop_requested(&mut self, turn_id: &str) {
+        self.stopping_turn_id = Some(turn_id.to_string());
+        // 请求目标即当前流式轮（goal 续轮会换 turn_id，以请求为准同步）。
+        self.streaming_turn_id = Some(turn_id.to_string());
+        self.status_text = "正在停止…".to_string();
+    }
+
+    /// wave-60 §C9：`turn:cancelled` 驱动的**纯状态迁移** —— 收口终态「已停止」。
+    ///
+    /// 语义：
+    /// - 与在飞停止请求的 `turn_id` 不一致（陈旧事件）⇒ 忽略；
+    /// - 无在飞停止请求时，只接受**当前流式轮**的终态：`turn_id` 与当前流式轮不等（旧轮终态
+    ///   迟到）⇒ 忽略，绝不允许旧轮终态拆掉现行轮；
+    /// - `stop_reason == Some("user")` ⇒ 「已停止（用户中断）」；其余（watchdog/parent/hook/legacy/None）
+    ///   一律中性「已停止」，不得冒充用户主动停止；
+    /// - **不**吞掉已流式正文、**不**追加本地伪造的终态消息。
+    pub fn apply_stop_terminal(&mut self, turn_id: &str, stop_reason: Option<&str>) {
+        match self.stopping_turn_id.as_deref() {
+            // 在飞停止请求：只认同一轮。
+            Some(stopping) if stopping != turn_id => return,
+            Some(_) => {}
+            // 无在飞停止请求：只认当前流式轮（old-turn 终态不得拆新轮）。
+            None => {
+                if let Some(active) = self.streaming_turn_id.as_deref() {
+                    if active != turn_id {
+                        return;
+                    }
+                }
+            }
+        }
+        self.stopping_turn_id = None;
+        self.streaming_turn_id = None;
+        self.is_streaming = false;
+        self.transition_runtime_mode(RuntimeMode::Ready);
+        self.status_text = match stop_reason {
+            Some("user") => "已停止（用户中断）".to_string(),
+            _ => "已停止".to_string(),
+        };
+        // 非流式期的可见性走既有一致性通道（P-5 一次性提示，受 `should_render_status_notice` 门禁）。
+        let notice = self.status_text.clone();
+        self.set_status_notice(notice);
     }
 
     /// 契约 P-2：复位「会话作用域」状态（`/clear` 与 `/resume` 共用）。
@@ -1234,6 +1332,9 @@ impl TuiState {
         self.selected_model_index = 0;
         self.selected_reasoning_effort_index = 0;
         self.status_notice = None;
+        // wave-60 §C8/C9：会话作用域复位 ⇒ 停止请求态、当前流式轮与双击上膛一并失效。
+        self.stopping_turn_id = None;
+        self.streaming_turn_id = None;
         // 会话作用域复位 ⇒ 布局缓存必须失效（/clear 与 /resume 共用本方法）。
         self.invalidate_render_cache();
     }
@@ -2437,6 +2538,19 @@ impl TurnEventSink for TuiTurnSink {
                 // wave-43：Ask/审批把轮次挂起——主循环据此拉取真实待决请求并打开对话框。
                 // run_id 以控制面快照为准（此处不猜），因此这里只发信号。
                 let _ = self.tx.send(UiEvent::TurnSuspended { run_id: None });
+            }
+            "turn:stop_requested" => {
+                // wave-60 §C2/C9：请求受理事件 ≠ 终态；只驱动「正在停止…」（不置 is_streaming=false）。
+                let _ = self.tx.send(UiEvent::StopRequested {
+                    turn_id: payload.turn_id,
+                });
+            }
+            "turn:cancelled" => {
+                // wave-60 §C9：终态由该事件驱动（此前被 `_ => {}` 静默丢弃 → 只能靠本地伪造终态）。
+                let _ = self.tx.send(UiEvent::StopTerminal {
+                    turn_id: payload.turn_id,
+                    stop_reason: payload.stop_reason,
+                });
             }
             "turn:completed" | "turn:output_end" => {
                 // wave-39 R8'（契约 v2）：usage 只由 turn:output_end 发射；turn:completed
@@ -3733,6 +3847,11 @@ fn compact_status(st: &str) -> String {
 
 /// 底部状态词：克制到只有一个短语（耗时与动画只在正文活动行出现一次）。
 fn status_word(state: &TuiState) -> (String, Style) {
+    // wave-60 §C9：停止请求受理后，**流式行**优先呈现「正在停止…」（终态未到前不得伪造）。
+    // 走本通道而非 `status_notice`：后者被 `should_render_status_notice` 在流式期抑制（P-5 契约）。
+    if state.stopping_turn_id.is_some() {
+        return ("正在停止…".to_string(), Style::default().fg(theme::WARN));
+    }
     // 说明：一次性提示（status_notice）与非流式横幅由 `metrics_line` 渲染 —— 本函数只服务
     // 「流式进行中的那一行状态」，流式期按契约让位给进度短语，故这里不重复判定。
     let transient = compact_status(&state.status_text);
@@ -4207,7 +4326,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         state.ensure_render_cache(width, state.spinner_tick);
 
         // 进行中的一行极简状态（不打断阅读节奏，紧凑规整，不晃动）
-        if state.is_streaming && !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
+        // wave-60 §C9：stopping 是用户此刻唯一关心的进行中态 ⇒ 即便正处于工具执行也保留该行，
+        // 否则「正在停止…」在工具执行期不可见（终态由 turn:cancelled 驱动，见 apply_stop_terminal）。
+        if state.is_streaming
+            && (state.stopping_turn_id.is_some()
+                || !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)))
+        {
             let need_blank = state
                 .render_cache
                 .cache_lines
@@ -6071,6 +6195,12 @@ fn tui_event_loop(
         false
     };
 
+    // wave-60 §C8：流式中双击 Esc 的判定状态机（窗口 `stop_sequence_ms`=500，与桌面端同判据）。
+    // generation 承载「同一 turn_id 的一次出现」：turn_id 变化 ⇒ 身份变化 ⇒ 上膛失效。
+    let mut stop_sequence = StopSequenceState::new(STOP_SEQUENCE_MS);
+    let mut stop_sequence_generation: u64 = 0;
+    let mut stop_sequence_turn_id: Option<String> = None;
+
     // 事件驱动重绘：无输入、无流式时不做无意义的 60fps 全屏重绘（省 CPU / 省电）。
     let mut dirty = true;
     loop {
@@ -6274,13 +6404,23 @@ fn tui_event_loop(
                         // 有草稿 = 先清草稿（防误触丢输入）；否则才退出。
                         match ctrl_c_action(state.is_streaming, !state.input_buffer.is_empty()) {
                             CtrlCAction::InterruptTurn => {
-                                goal_round_cancel.cancel();
-                                if let Some(turn_id) = current_turn_id.lock().unwrap().take() {
-                                    control_plane.stop_turn(StopTurnCommand { turn_id });
+                                // wave-60 §C9：Ctrl+C 单按保留「立即中断」语义（不要求双击），
+                                // 但同样走「请求 → 事件驱动终态」：此处不置 `is_streaming=false`、
+                                // 不打印任何「已中断」类终态文案（防假终态）。
+                                // 已受理的停止请求在等终态 ⇒ 不重复派发。
+                                if state.stopping_turn_id.is_none() {
+                                    goal_round_cancel.cancel();
+                                    // NFR `lock_scope_bounded`：先取再放 —— 绝不在持锁期间调用
+                                    // `stop_turn`（其会同步回调 sink.emit，存在锁重入/死锁风险）。
+                                    let stopping_turn = { current_turn_id.lock().unwrap().take() };
+                                    if let Some(turn_id) = stopping_turn {
+                                        control_plane.stop_turn(StopTurnCommand {
+                                            turn_id: turn_id.clone(),
+                                            stop_reason: Some(StopReason::User),
+                                        });
+                                        state.apply_stop_requested(&turn_id);
+                                    }
                                 }
-                                state.is_streaming = false;
-                                state.transition_runtime_mode(RuntimeMode::Ready);
-                                state.set_status_notice("已中断");
                                 dirty = true;
                                 continue;
                             }
@@ -6885,22 +7025,37 @@ fn tui_event_loop(
                         continue;
                     }
 
-                    // 2. 仅在正在运行（Streaming）态下 Esc 触发 Interrupt；静态下 Esc 仅用于清空输入缓冲区，不退出程序
+                    // 2. 流式态 Esc = 停止本轮（双击）；静态下 Esc 仅用于清空输入缓冲区，不退出程序
                     if key.code == KeyCode::Esc {
                         if state.is_streaming {
-                            // 契约 F-G③：先置取消令牌 —— goal 续轮循环在**下一轮开始前**看到它即中止；
-                            // 已经在跑的那一轮仍由 stop_turn 打断。
-                            goal_round_cancel.cancel();
-                            if let Some(turn_id) = current_turn_id.lock().unwrap().take() {
-                                control_plane.stop_turn(StopTurnCommand { turn_id });
+                            // 已受理的停止请求在等终态 ⇒ 不重复派发（幂等），也不伪造终态。
+                            if state.stopping_turn_id.is_none() {
+                                // wave-60 §C8/C9：**双击** Esc（窗口 `stop_sequence_ms`=500，同身份）才发
+                                // **恰好一次**停止请求；第 1 次仅「上膛」。发出请求后只进「正在停止…」，
+                                // 终态一律由 `turn:cancelled` 事件驱动 —— 此处**不得**本地伪造终态。
+                                let current_turn = current_turn_id.lock().unwrap().clone();
+                                let identity = next_stop_identity(
+                                    &mut stop_sequence_generation,
+                                    &mut stop_sequence_turn_id,
+                                    state.session_id.as_str(),
+                                    current_turn.as_deref(),
+                                );
+                                if stop_sequence.press(identity, now_epoch_ms()) {
+                                    // 契约 F-G③：先置取消令牌 —— goal 续轮循环在**下一轮开始前**看到它即中止；
+                                    // 已经在跑的那一轮仍由 stop_turn 打断。
+                                    goal_round_cancel.cancel();
+                                    // NFR `lock_scope_bounded`：先取再放 —— 绝不在持锁期间调用
+                                    // `stop_turn`（其会同步回调 sink.emit，存在锁重入/死锁风险）。
+                                    let stopping_turn = { current_turn_id.lock().unwrap().take() };
+                                    if let Some(turn_id) = stopping_turn {
+                                        control_plane.stop_turn(StopTurnCommand {
+                                            turn_id: turn_id.clone(),
+                                            stop_reason: Some(StopReason::User),
+                                        });
+                                        state.apply_stop_requested(&turn_id);
+                                    }
+                                }
                             }
-                            state.is_streaming = false;
-                            state.status_text = "Interrupted".to_string();
-                            state.messages.push(ChatMessage {
-                                role: MessageRole::System,
-                                content: "已中断本轮生成。".to_string(),
-                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                            });
                         } else {
                             // 静态时不退出，只清空输入框
                             state.clear_input();
@@ -7152,6 +7307,10 @@ fn tui_event_loop(
 
                                 let turn_id_str = format!("turn-{}", uuid::Uuid::new_v4());
                                 *current_turn_id.lock().unwrap() = Some(turn_id_str.clone());
+                                // wave-60 §C9：新一轮开始必须**清掉上一轮遗留的 stopping 态**，
+                                // 否则新轮会误显「正在停止…」并拦掉 Esc/Ctrl+C（旧轮终态早已收口）。
+                                state.stopping_turn_id = None;
+                                state.streaming_turn_id = Some(turn_id_str.clone());
                                 // 契约 F-G④：新一轮用户消息 = 新的取消周期，重置 Esc 令牌。
                                 goal_round_cancel.reset();
 
@@ -7312,12 +7471,34 @@ fn tui_event_loop(
                 }
                 UiEvent::StreamCompleted => {
                     state.is_streaming = false;
+                    state.stopping_turn_id = None;
+                    state.streaming_turn_id = None;
+                    // wave-60 §C8：本轮结束 ⇒ 双击 Esc 的上膛失效。
+                    stop_sequence.reset();
                     state.transition_runtime_mode(RuntimeMode::Completed);
                     state.status_text = "Turn completed".to_string();
                     sync_tasks_from_store(&mut state);
                     if let Some(goal_data) = pony_agent_core::agent::goal::active_goal_for_session(&state.session_id) {
                         state.set_goal(tui_goal_from_goal(&goal_data));
                     }
+                }
+                // wave-60 §C2/C9：停止请求受理 ⇒ 只进「正在停止…」（流式态保持，终态未到）。
+                UiEvent::StopRequested { turn_id } => {
+                    state.apply_stop_requested(&turn_id);
+                }
+                // wave-60 §C9：`turn:cancelled` 终态 ⇒ 事件驱动「已停止」并退出流式态。
+                UiEvent::StopTerminal { turn_id, stop_reason } => {
+                    // 无在飞停止请求时，`apply_stop_terminal` 只认「当前流式轮」。goal 续轮在
+                    // 轮次线程内换 turn_id（不经过事件循环），故此处以 `current_turn_id` 兜底同步。
+                    if state.stopping_turn_id.is_none() {
+                        let active_turn = { current_turn_id.lock().unwrap().clone() };
+                        if let Some(active_turn) = active_turn {
+                            state.streaming_turn_id = Some(active_turn);
+                        }
+                    }
+                    state.apply_stop_terminal(&turn_id, stop_reason.as_deref());
+                    // wave-60 §C8：turn 结束 ⇒ 双击 Esc 的上膛失效。
+                    stop_sequence.reset();
                 }
                 // wave-39 R8：本轮 token 回执 → 幂等覆盖计入累计指标。
                 UiEvent::StreamUsage {
@@ -7335,6 +7516,10 @@ fn tui_event_loop(
                 }
                 UiEvent::StreamFailed(err) => {
                     state.is_streaming = false;
+                    // wave-60 §C7/C9：失败是终态之一 ⇒ 必须清 stopping 兜底态（不得卡在「正在停止…」）。
+                    state.stopping_turn_id = None;
+                    state.streaming_turn_id = None;
+                    stop_sequence.reset();
                     state.transition_runtime_mode(RuntimeMode::Failed(err.clone()));
                     state.status_text = format!("Turn failed: {}", err);
                     state.messages.push(ChatMessage {

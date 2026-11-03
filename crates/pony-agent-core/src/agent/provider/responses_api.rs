@@ -12,7 +12,8 @@ use super::*;
 /// 公共 SSE 帧阅读器：字节缓冲 / 1MB 行上限 / `data:` 前缀提取 / 尾行冲刷 /
 /// 流错误与解析错误的 elapsed 包装。`on_data_line` 返回 `Ok(true)` 表示提前结束
 /// （如 `[DONE]` 或终态事件），阅读器随即停止读取。
-/// T9：带「取消 + 总时长上界」守卫的帧阅读器（生产路径入口）。
+/// T9：带「取消 + 总时长上界」守卫的帧阅读器（生产路径入口）；
+/// wave-60 C4：**停滞读可中断**（见 [`read_sse_data_lines_with_guard_stream`]）。
 pub(crate) fn sse_data_line_reader_with_guard<F>(
     response: reqwest::Response,
     started_at: Instant,
@@ -23,11 +24,8 @@ pub(crate) fn sse_data_line_reader_with_guard<F>(
 where
     F: FnMut(&str) -> Result<bool, String>,
 {
-    read_sse_data_lines_with_guard(
-        BlockingChunks {
-            stream: response.bytes_stream(),
-            _marker: std::marker::PhantomData,
-        },
+    read_sse_data_lines_with_guard_stream(
+        response.bytes_stream(),
         started_at,
         endpoint,
         on_data_line,
@@ -35,25 +33,67 @@ where
     )
 }
 
-/// futures Stream → Iterator 适配（逐 chunk block_on），使帧循环可对任意
-/// chunk 序列（含测试用内存序列）复用；不点名具体 chunk 类型，避免引入
-/// bytes 直接依赖。
-struct BlockingChunks<S, B, E> {
-    stream: S,
-    _marker: std::marker::PhantomData<fn() -> (B, E)>,
+/// 单次 chunk 取数结果（wave-60 C4 的节拍语义）。
+enum ChunkPoll<B, E> {
+    /// 取到一个 chunk 或一个流错误。
+    Item(Result<B, E>),
+    /// 一个 tick 内无 chunk 到达（**停滞读**）⇒ 帧循环立即重查取消位与总时长上界。
+    Stalled,
+    /// 流已结束。
+    End,
 }
 
-impl<S, B, E> Iterator for BlockingChunks<S, B, E>
+/// C4：停滞读的观测节拍——`cancel_tick` 为零节流（测试注入）时退化为缺省 tick，
+/// 避免 `timeout(0)` 造成忙等空转。
+fn streaming_poll_tick(cancel_tick: Duration) -> Duration {
+    if cancel_tick.is_zero() {
+        ProviderStreamGuard::DEFAULT_CANCEL_TICK
+    } else {
+        cancel_tick
+    }
+}
+
+/// wave-60 C4：**可中断**的生产帧循环入口。
+///
+/// 缺陷面：旧实现 `block_on(stream.next())` 在无 chunk 到达时永久阻塞，取消位永不被观测
+/// （只有 30min 总时长上界）。修法：把「单次 chunk 取数」包进
+/// `tokio::time::timeout(stop_poll_tick_ms, next())` —— 到点无 chunk 即返回
+/// [`ChunkPoll::Stalled`]，帧循环随即重查取消位与总时长上界，因此停滞读在取消后
+/// ≤ 2 × tick 内以 `ProviderStreamGuard::CANCELLED_ERROR_CODE` 退出（契约 C4 判据
+/// `tick + tick`，本机 CI 硬上界 1000ms）。
+///
+/// 回归约束：有 chunk 的正常长流**不受影响** —— 取数一到达就立即处理，
+/// tick 只是"单次最多等这么久"，不累加、不截断。
+fn read_sse_data_lines_with_guard_stream<S, B, E, F>(
+    mut stream: S,
+    started_at: Instant,
+    endpoint: &str,
+    mut on_data_line: F,
+    guard: &ProviderStreamGuard<'_>,
+) -> Result<(), String>
 where
     S: futures_util::Stream<Item = Result<B, E>> + Unpin,
     B: AsRef<[u8]>,
     E: std::fmt::Display,
+    F: FnMut(&str) -> Result<bool, String>,
 {
-    type Item = Result<B, E>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        block_on(futures_util::StreamExt::next(&mut self.stream))
-    }
+    let poll_tick = streaming_poll_tick(guard.cancel_tick());
+    let mut cancel_requested = || guard.cancel_requested();
+    read_sse_data_lines_core::<B, E>(
+        started_at,
+        endpoint,
+        &mut on_data_line,
+        guard.max_elapsed(),
+        guard.cancel_tick(),
+        &mut cancel_requested,
+        &mut |_tick| {
+            match block_on(tokio::time::timeout(poll_tick, stream.next())) {
+                Err(_stalled) => ChunkPoll::Stalled,
+                Ok(None) => ChunkPoll::End,
+                Ok(Some(item)) => ChunkPoll::Item(item),
+            }
+        },
+    )
 }
 
 /// 帧循环核心：对任意「chunk 字节序列 + 可 Display 错误」的迭代器工作，
@@ -102,32 +142,6 @@ where
     )
 }
 
-/// T9：守卫入口 —— 由 `ProviderStreamGuard` 提供上界与节流参数。
-fn read_sse_data_lines_with_guard<I, B, E, F>(
-    chunks: I,
-    started_at: Instant,
-    endpoint: &str,
-    on_data_line: F,
-    guard: &ProviderStreamGuard<'_>,
-) -> Result<(), String>
-where
-    I: Iterator<Item = Result<B, E>>,
-    B: AsRef<[u8]>,
-    E: std::fmt::Display,
-    F: FnMut(&str) -> Result<bool, String>,
-{
-    let mut cancel_requested = || guard.cancel_requested();
-    read_sse_data_lines_with_bounds(
-        chunks,
-        started_at,
-        endpoint,
-        on_data_line,
-        guard.max_elapsed(),
-        guard.cancel_tick(),
-        &mut cancel_requested,
-    )
-}
-
 /// T9 帧循环核心：在既有帧骨架之上补两类守卫。
 ///
 /// - **总时长上界**：`elapsed > max_elapsed` ⇒ 以 `provider_stream_deadline_exceeded` 退出，
@@ -149,6 +163,38 @@ where
     B: AsRef<[u8]>,
     E: std::fmt::Display,
     F: FnMut(&str) -> Result<bool, String>,
+{
+    // 兼容入口：把「同步迭代器」适配成"永不 stall"的取数闭包——历史语义（每 chunk 一取）
+    // 完全不变，停滞读的可中断性只由生产路径 [`read_sse_data_lines_with_guard_stream`]
+    // 提供（避免给内存序列测试引入无意义的 tick 等待）。
+    read_sse_data_lines_core::<B, E>(
+        started_at,
+        endpoint,
+        &mut on_data_line,
+        max_elapsed,
+        cancel_tick,
+        cancel_requested,
+        &mut |_tick| match chunks.next() {
+            Some(item) => ChunkPoll::Item(item),
+            None => ChunkPoll::End,
+        },
+    )
+}
+
+/// 帧循环核心（T9 守卫 + C4 停滞读节拍）：唯一一份帧骨架，两种取数方式共用。
+#[allow(clippy::too_many_arguments)]
+fn read_sse_data_lines_core<B, E>(
+    started_at: Instant,
+    endpoint: &str,
+    on_data_line: &mut dyn FnMut(&str) -> Result<bool, String>,
+    max_elapsed: Duration,
+    cancel_tick: Duration,
+    cancel_requested: &mut dyn FnMut() -> bool,
+    fetch: &mut dyn FnMut(Duration) -> ChunkPoll<B, E>,
+) -> Result<(), String>
+where
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
 {
     let mut line_buf: Vec<u8> = Vec::new();
     let mut total_bytes: usize = 0;
@@ -185,8 +231,12 @@ where
             }
         }
 
-        match chunks.next() {
-            Some(Ok(bytes)) => {
+        match fetch(cancel_tick) {
+            ChunkPoll::Stalled => {
+                // C4：停滞读——一个 tick 内无 chunk ⇒ 回到循环顶部立即重查取消/上界。
+                continue;
+            }
+            ChunkPoll::Item(Ok(bytes)) => {
                 let chunk_len = bytes.as_ref().len();
                 for &byte in bytes.as_ref().iter() {
                     if byte == b'\n' {
@@ -213,7 +263,7 @@ where
                 }
                 total_bytes += chunk_len;
             }
-            Some(Err(error)) => {
+            ChunkPoll::Item(Err(error)) => {
                 return Err(format!(
                     "读取 provider SSE 流失败: {}; elapsed={}ms; parsed_bytes={}; endpoint={}",
                     error,
@@ -222,7 +272,7 @@ where
                     endpoint,
                 ));
             }
-            None => break,
+            ChunkPoll::End => break,
         };
     }
 

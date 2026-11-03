@@ -41,6 +41,7 @@ import type {
   SessionOverview,
   SessionRuntimeView,
   SessionSnapshot,
+  StopTurnResponse,
   ToolActivity,
   TraceTimelineEntry,
   TurnInput,
@@ -140,7 +141,6 @@ import {
   previewMessageStateDeltaMessages,
   reuseStableChatMessages
 } from "@/lib/runtime/messages";
-import { CANCELLED_TURN_MESSAGE } from "@/lib/runtime/cancelled-turn";
 import {
   attachmentDedupKey,
   bytesToDataUrl,
@@ -452,6 +452,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         ready: "已就绪",
         completed: "本轮完成",
         cancelled: "已停止",
+        // wave-60 §C7：停止请求受理后、终态事件之前的进行中文案。
+        stopping: "正在停止…",
         calling_model: "模型处理中",
         calling_tool: "工具处理中",
         failed: "失败"
@@ -4958,11 +4960,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           buildAssistantModelLabel(payload.providerName, payload.providerModel)
         );
 
-        // PA-118：哨兵句（用户终止提示）为后端占位文本，不写入展示内容——
-        // 保留此前已流式内容（未流式则保持空串）；其他非空文本照旧使用；null 仍 fallback。
-        if (payload.text != null && payload.text.trim() !== CANCELLED_TURN_MESSAGE) {
-          assistantMessage.content = payload.text;
-        } else if (payload.text == null) {
+        // wave-60 §C7：终态呈现改由 `stopReason` 通道承载 —— **禁止**用后端占位文本
+        // （`CANCELLED_TURN_MESSAGE` 哨兵句或任意 text）覆盖已流式正文；已接收正文一律保留。
+        // 哨兵句仍留在**落库内容/历史读取**侧（`lib/runtime/cancelled-turn.ts` 与
+        // `lib/runtime/messages.ts` 的 strip 行为不动，§0 非目标 2）。
+        // 仅当后端完全未给文本且本轮从未产生正文时补中性占位（保持历史节点非空）。
+        if (payload.text == null && !assistantMessage.content.trim()) {
           assistantMessage.content = "本轮已停止。";
         }
         assistantMessage.reasoningContent = normalizeReasoningContent(payload.reasoningContent ?? null);
@@ -4984,6 +4987,16 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
 
         // Keep terminal UI state consistent even before deferred trace work runs.
         this.phase = resolveRuntimePhaseFromEvent(payload, "cancelled");
+        // wave-60 §C7 / 补遗 v2 A2：终态文案唯一通道是 `sessionNotice`
+        // （`phaseLabel` 在 src/ 内零消费者；`resolveAgentRuntimeStatus` 在 !isSubmitting 时恒返回 null）。
+        // `stopReason` 存在才呈现：`user` ⇒ 可继续提示；其余（watchdog/parent/hook/legacy）⇒ 中性「已停止」。
+        // 旧后端缺该字段时保持既有行为（不凭空造终态文案）。
+        if (payload.stopReason != null) {
+          this.sessionNotice =
+            payload.stopReason === "user"
+              ? "你已停止本轮 · 发送新消息可继续"
+              : "已停止";
+        }
         this.error = null;
         this.traceSteps = cancelledTraceSteps;
         this.toolActivities = terminalToolActivities;
@@ -5075,6 +5088,26 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             turnId: payload.turnId
           });
         }, 0);
+      });
+
+      // wave-60 §C2 / §C7：`turn:stop_requested` 是「停止请求已受理」的即时事件（**不是**终态）。
+      // 跨窗口/重连路径下本地可能还没进 stopping，这里必须补切；本地已 stopping 则幂等无操作。
+      await listen("turn:stop_requested", (payload) => {
+        if (!isEventForCurrentSession(payload)) {
+          return;
+        }
+        // 后台会话轮次由 runningSessionMap 承载，不得改动当前会话的进行中态。
+        if (payload.sessionId && this.runningSessionMap[payload.sessionId]) {
+          return;
+        }
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+        this.enterStoppingPhase();
+        debugLog("event:stop-requested", {
+          turnId: payload.turnId,
+          stopReason: payload.stopReason ?? null
+        });
       });
 
       await listen("turn:suspended", (payload) => {
@@ -5369,15 +5402,37 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             response.runControlAuditSummary ?? null
           );
         } else {
-          await safeInvoke("stop_turn", {
+          const stopResponse = await safeInvoke<StopTurnResponse | null>("stop_turn", {
             turnId: this.activeTurnId
           });
+          // wave-60 §C1：`accepted=false`（not_found / already_terminal / 已 stopping）⇒ 不切 stopping。
+          if (stopResponse && stopResponse.accepted === false) {
+            return false;
+          }
         }
+        // wave-60 §C7 / NFR `stop_ack_latency_ms`：RPC 被接受后**同一微任务内**进入 stopping，
+        // 不等终态事件（终态仍只由 turn:cancelled/completed/failed 驱动）。
+        this.enterStoppingPhase();
         return true;
       } catch (error) {
         this.error = `停止当前轮次失败：${String(error)}`;
         return false;
       }
+    },
+    /**
+     * wave-60 §C7 / 补遗 v2 A2：进入 `stopping` 进行中态（幂等、无副作用文案）。
+     *
+     * 分工：进行中态落 `phase="stopping"`（→ `phaseLabel` / `agentRuntimeStatus` 的 stopping 分支），
+     * 终态文案落 `sessionNotice`；两者不得互相冒充。
+     */
+    enterStoppingPhase() {
+      if (!this.activeTurnId || !this.isSubmitting) {
+        return;
+      }
+      if (this.phase === "stopping") {
+        return;
+      }
+      this.phase = "stopping";
     },
     /** C-9：设置/清空中性反馈文案（成功、空态提示等），由状态栏以 info 模式展示。 */
     setSessionNotice(text: string | null) {
