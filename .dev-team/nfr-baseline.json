@@ -63,5 +63,12 @@
       "updated_at": "2026-11-01 wave-56"
     }
   ],
-  "logging_eprintln_exempt_note": "wave-55 新增 5 处生产 eprintln（MCP 环境禁用键丢弃 1、secret store 明文回退 2、save_store/save_session_state 失败 2），均带错误上下文、不含密文；按 L3-P 复审 ADV-1 修正此前高报的 6。JSON+trace_id 结构化收敛仍属 PA-119 债务"
+  "logging_eprintln_exempt_note": "wave-55 新增 5 处生产 eprintln（MCP 环境禁用键丢弃 1、secret store 明文回退 2、save_store/save_session_state 失败 2），均带错误上下文、不含密文；按 L3-P 复审 ADV-1 修正此前高报的 6。JSON+trace_id 结构化收敛仍属 PA-119 债务",
+  "team_tool_surface_exact_count": 39,
+  "subagent_engine_registration_required_in": [
+    "tauri",
+    "harness",
+    "tui"
+  ],
+  "team_policy_prompt_injected_when_wired": true
 }

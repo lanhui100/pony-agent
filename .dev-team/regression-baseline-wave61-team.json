@@ -1,0 +1,130 @@
+{
+  "wave": "wave-61-team-activation",
+  "captured_at": "2026-11-03T09:30:37+0800",
+  "command": "cargo test -p pony-agent-core --test wave37_tool_surface --test pa110_teams_acceptance --test tool_surface_wave20_contract --test orchestration_acceptance_test --test team_task_order_contract --test teammate_e2e_communication_test",
+  "exit_code": 0,
+  "suites": [
+    {
+      "result": "ok",
+      "passed": 4,
+      "failed": 0
+    },
+    {
+      "result": "ok",
+      "passed": 5,
+      "failed": 0
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "result": "ok",
+      "passed": 2,
+      "failed": 0
+    },
+    {
+      "result": "ok",
+      "passed": 9,
+      "failed": 0
+    }
+  ],
+  "cases": [
+    {
+      "name": "test_subagent_tool_routed_through_tool_router",
+      "status": "ok"
+    },
+    {
+      "name": "test_team_task_board_tools_routed_through_tool_router",
+      "status": "ok"
+    },
+    {
+      "name": "test_agent_teams_tools_routed_through_tool_router",
+      "status": "ok"
+    },
+    {
+      "name": "test_all_non_wired_orchestration_tools_are_honest",
+      "status": "ok"
+    },
+    {
+      "name": "test_ac01_subagent_dispatch",
+      "status": "ok"
+    },
+    {
+      "name": "test_ac02_workflow_dag_execution",
+      "status": "ok"
+    },
+    {
+      "name": "test_ac04_agent_teams_roster_and_mailbox",
+      "status": "ok"
+    },
+    {
+      "name": "test_ac03_team_tasks_lifecycle_and_cas",
+      "status": "ok"
+    },
+    {
+      "name": "test_ac05_message_queuing_and_steering",
+      "status": "ok"
+    },
+    {
+      "name": "test_team_task_created_at_ms_and_list_ordering_contract",
+      "status": "ok"
+    },
+    {
+      "name": "test_teammate_bi_directional_communication_and_reply",
+      "status": "ok"
+    },
+    {
+      "name": "test_goal_tools_are_canonical_and_model_visible",
+      "status": "ok"
+    },
+    {
+      "name": "test_stub_tools_are_no_longer_model_visible",
+      "status": "ok"
+    },
+    {
+      "name": "t2_write_file_on_existing_file_without_expected_hash_fails_closed",
+      "status": "ok"
+    },
+    {
+      "name": "t2b_write_file_with_env_allowance_overwrites",
+      "status": "ok"
+    },
+    {
+      "name": "t3_0_subagent_without_engine_returns_capability_unavailable",
+      "status": "ok"
+    },
+    {
+      "name": "t3_i_failing_stub_returns_structured_error",
+      "status": "ok"
+    },
+    {
+      "name": "t3_j_concurrency_over_limit_returns_busy",
+      "status": "ok"
+    },
+    {
+      "name": "t3_h_subagent_with_stub_engine_returns_real_output",
+      "status": "ok"
+    },
+    {
+      "name": "t3_k_oversized_prompt_rejected",
+      "status": "ok"
+    },
+    {
+      "name": "t3_l_timeout_returns_timeout_error",
+      "status": "ok"
+    },
+    {
+      "name": "t1_model_visible_surface_is_exact_29_tool_list",
+      "status": "ok"
+    }
+  ],
+  "baseline_commit": "c575243",
+  "workspace_note": "工作区存在另一并发会话未提交改动（19 files, wave-60/61 streaming）；本基线针对团队/子代理相关测试套件，全绿。"
+}

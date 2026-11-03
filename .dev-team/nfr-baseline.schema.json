@@ -66,6 +66,10 @@
           "type": "string",
           "minLength": 1,
           "description": "wave-1 新增（additive-only）：承载 trace id 的 JSON 字段名（当前全仓库无结构化日志面，仍属 PA-119 债务，不主张已满足）。"
+        },
+        "trace_id": {
+          "type": "boolean",
+          "description": "既有声明字段（未在 schema 中登记的漂移，wave-61 补登记；仅类型声明，强制校验仍由 nfr-lint.py 的 python 独占分支负责，见 nfr-lint.py docstring 第 4 条）。"
         }
       },
       "required": ["format", "trace_id_required"],
@@ -274,6 +278,26 @@
         "evidence"
       ],
       "additionalProperties": false
+    },
+    "team_tool_surface_exact_count": {
+      "type": "integer",
+      "const": 39,
+      "description": "wave-61 新增（additive-only，未进入顶层 required）：模型可见工具面精确项数。29（W37-C1 × W42/PA-149 基线）+ 10 项团队工具（subagent/workflow/spawn_teammate/list_agents/send_message/interrupt_agent/drain_inbox/team_task_create/team_task_update/team_task_list）= 39。契约：.dev-team/contracts/wave-61-team-activation.md C1-A1。"
+    },
+    "subagent_engine_registration_required_in": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["tauri", "harness", "tui"]
+      },
+      "description": "wave-61 新增（additive-only，未进入顶层 required）：必须经由 core 唯一注册点 crates/pony-agent-core/src/agent/runtime/builder.rs:79 AgentRuntimeBuilder::build() 获得 SubagentTurnEngine 的三条宿主。语义是「受益于注册」而非「必须修改这三处源码」——宿主侧 set_subagent_engine 出现次数必须为 0（C2-A2）。契约：wave-61 C2.1。"
+    },
+    "team_policy_prompt_injected_when_wired": {
+      "type": "boolean",
+      "const": true,
+      "description": "wave-61 新增（additive-only，未进入顶层 required）：subagent_runtime_wired() 为 true 时必须在 System 稳定前缀层注入静态 Agent Team 策略段（标题行 `Agent Teams is available in this session`）；为 false 时完全不注入。契约：wave-61 C3-A1/C5-A1。"
     }
   },
   "required": [
