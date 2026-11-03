@@ -932,6 +932,31 @@
           "check_declaration": "PASS(exit 0)"
         }
       }
+    },
+    {
+      "wave": "63",
+      "theme": "剩余待办：composer stopping 禁用态 / TUI stopping 期按键反馈 / V10 元测试递归守卫",
+      "tier": "A",
+      "tier_basis": "三项独立小改（UI 读态 + 纯状态迁移 + 测试基建守卫）；跨 3 处但每处 <50 行，并发写域正交",
+      "roster": [
+        "lead",
+        "test-agent",
+        "executor-surface"
+      ],
+      "commits": {
+        "composer": "86042d4",
+        "v10_guard": "93bdca3",
+        "red": "2866ebe",
+        "green": "889fb98"
+      },
+      "red_tag": "wave-63-red",
+      "green_tag": "wave-63",
+      "gates": {
+        "tui_key_feedback": "6 passed",
+        "tui_regressions": "12/16/3/6 passed",
+        "all_targets": "Exit 0",
+        "v10_spec": "4 passed x2 (205s/206s)"
+      }
     }
   ],
   "counters": {
