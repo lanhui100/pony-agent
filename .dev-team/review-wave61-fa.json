@@ -1,0 +1,117 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "ed6d35e",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "e5ecbdd9-50a8-4655-b828-912048414f17",
+    "fresh_context": true
+  },
+  "executed_by": "e5ecbdd9-50a8-4655-b828-912048414f17",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    ".dev-team/contracts/wave-61-team-activation.md",
+    ".dev-team/review-wave61-recheck.json",
+    ".dev-team/wave61-team-delivery.md",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/runtime/builder.rs",
+    "crates/pony-agent-core/src/agent/runtime_helper.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs"
+  ],
+  "closed_blockers": [
+    {
+      "id": "B1",
+      "status": "CLOSED",
+      "evidence": "两处承诺已同源改写为『下一次 drain 边界前停止』且显式否认立即中止：crates/pony-agent-core/src/agent/context.rs:72（'the drive loop stops before its next drain boundary (the engine has no mid-turn stop API, so an already-running turn is not aborted immediately)'）与 crates/pony-agent-core/src/agent/tools.rs:6080（工具描述同口径）。实现一致：orchestration.rs:659-675 interrupt_agent 只置 Inactive，orchestration.rs:841-843 在 drain 前才观察，已进入的 turn 不被打断（repro 中 interrupt 前后引擎调用照常返回）。残留 C7-A4 ③（测试注释登记）未落地，见 finding #3。"
+    },
+    {
+      "id": "C10.1",
+      "status": "CLOSED",
+      "evidence": "per-target 互斥+RAII 存在且生效：orchestration.rs:134 static DRIVING、:137-147 DrivingGuard(Drop 唯一清除点，无 mem::forget)、:150-158 begin_driving、:534-546 仅拿到 guard 才 spawn。实证：target/debug/deps/wave61_team_activation-c5ca20b909773c7c c7b_single_flight_per_target --exact 连跑 60 次 60/60 exit 0（peak_in_flight==1，tests/wave61_team_activation.rs:1104-1109）；/tmp/repro_strand 中在途期间第二次 send 后 engine_calls 仍为 1（未开出第二个 turn）。并发缺陷不在单飞，而在循环退出条件，见 finding #1。"
+    },
+    {
+      "id": "C10.2",
+      "status": "CLOSED",
+      "evidence": "orchestration.rs:869-885：requeue_messages(:172-188，逆序 push_front) 整批回队首 → set_teammate_status(Inactive) → 向 LEAD 投错误回执（含 target/条数/错误文本）→ return Err，drive_loop_in(:561-566) 经 `?` 终止。冻结用例 c7c 逐字断言三条消息原序仍在收件箱 + lead 收件箱含 subagent_busy + 无成功回执（tests/wave61_team_activation.rs:1175-1216），cargo 测试二进制 14/14 exit 0。"
+    },
+    {
+      "id": "C10.3",
+      "status": "CLOSED",
+      "evidence": "真能产出三态而非恒定态：spawn 时 Active（orchestration.rs:448）→ 驱动前/引擎调用前置 Running（:537、:853）→ 收口 Inactive（:909-916，仅引擎在位路径）。repro 采样 sequence=Active→Running→Inactive；冻结用例 tests/wave61_team_activation.rs:975-1001 断言 position(Active)<position(Running)<position(Inactive) 且 5s 内回 Inactive（非默认值可满足：Running 只在驱动期出现，Inactive 需引擎回调后才能观测）。"
+    },
+    {
+      "id": "C8-ROOT",
+      "status": "CLOSED",
+      "evidence": "三个团队 handler 与文件工具同一解析路径且 fail-closed：tools.rs:1576-1589（subagent）、:1640-1656（spawn_teammate）、:1700-1716（send_message）均 `self.resolved_workspace_root(context, self.extract_call_workspace_id(call, context))` → `*_in_workspace(args, Some(root))`；解析定义 tools.rs:4930-4961（context.workspace_root → resolver(workspaceId) → 默认根，未注册 workspaceId 返回 invalid_workspace），与文件/Run 工具 :2880-2885、:3492 同源；Err 走 error_result(code,message) 而非 panic。上轮 E9（传 router 默认根）已消除。缺口：仅冻结用例 c8 断言 orchestration seam 透传，handler→resolved_workspace_root 这一跳无用例（契约 :805 自登记 UNVERIFIED）。"
+    },
+    {
+      "id": "C10-TESTS",
+      "status": "CLOSED",
+      "evidence": "c7/c7b/c7c 为真断言且子进程隔离真实：run_v13_child 以 current_exe + --exact + 环境变量起独立进程（tests/wave61_team_activation.rs:867-886），c3 unwired 分支还断言引擎槽为空作为隔离前置（:498-505）；计数型 Stub 的 calls/peak_in_flight 不可能被默认值满足（peak==1 与 calls>=1 互斥于『零调用』），c7c 断言队列逐字相等。c1 断言 38 项逐字逐序、c8 断言 Some(root)/None 双向透传，均非『代码存在』型。c5/c9 为契约 C5-A3/C9-A1 明定的源码级判定（弱断言，见 finding #7）。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 561,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cat > /tmp/repro_strand.rs <<'EOF'  (见下方推理链的等价最小复现：Stub 引擎在 run_turn 内以 Condvar 阻塞；spawn 空 prompt 队友 → send A → 等引擎进入 → send B → 放行)  EOF ; rustc --edition 2021 -L dependency=target/debug/deps --extern pony_agent_core=$(ls -t target/debug/deps/libpony_agent_core-*.rlib|head -1) -o /tmp/repro_strand /tmp/repro_strand.rs && timeout 60 /tmp/repro_strand  → 实测输出: send2 ok delivery_state=queued pending_inbox_len=1 / engine_calls=1 / status=Some(\"Inactive\") / target_inbox_after=[\"MSG-B-second\"] / RESULT=SECOND_MESSAGE_STRANDED / 再发第三条后才 target_inbox_after_third_send=[] engine_calls=2。推理链：orchestration.rs:561-566 循环以 drive_teammate_turn_in 返回值决定继续/退出，而 :841-843 的退出条件是『status==Inactive』（turn 收口时 :909-916 必置 Inactive），不是『收件箱为空』；:594-598 Queue 模式下 Running 不被改写；:534 begin_driving 返回 None ⇒ 在途期间到达的消息既",
+      "severity": "BLOCKING",
+      "note": "CONCURRENCY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "line": 605,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "c7b 的两条 send 背靠背入队（:1076-1092），随后才等引擎 entered（:1094-1096）⇒ 两次 enqueue 都在首次 drain 之前，峰值==1 与『两条都被消费』仅在『同一批 drain 走』时成立；实测 target/debug/deps/wave61_team_activation-* c7b_single_flight_per_target --exact 连跑 60 次 60/60 通过，说明该用例从未覆盖『turn 在途期间到达』（finding #1 的窗口），且 `run_c7b_body` 未断言 `drain_inbox` 最终为空（只查 prompts 命中 :1111-1129）。",
+      "severity": "ADVISORY",
+      "note": "CORRECTNESS"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "line": 88,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git show ed6d35e:crates/pony-agent-core/tests/wave61_team_activation.rs | grep -n -i interrupt → 仅 2 行命中（:88 TEAM_TOOLS、:124 EXPECTED_38），无任何 C7-A4 ③ 要求的『断言注释』，也无 interrupt 行为断言；对比 context.rs:72 与 tools.rs:6080 已改（② 已闭）。",
+      "severity": "ADVISORY",
+      "note": "CONTRACT_BREAK"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 68,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'nearest step boundary' crates/pony-agent-core/src/agent/context.rs → :68 与 :71 仍在承诺 running 目标会在最近 step 边界收到消息；C11 L2（契约 :630）要求改写为『入队并在下一次驱动循环被消费』；且 /tmp/repro_strand 证明在途消息连『下一次驱动循环』都不会被消费（被滞留到再下一次 send）。",
+      "severity": "ADVISORY",
+      "note": "CONTRACT_BREAK"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 119,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -rn 'processed' crates/pony-agent-core/src/agent/orchestration.rs → 仅 :119 声明与 :634 赋 false，全仓无置 true 点、无消费方；:635-641 失败（含 subagent_busy）路径上 `delivered` 仍为 true，而 C10-A4 首句要求『send_message 的返回值/回执不得声称 delivered/已处理』；冻结用例 c7c 只断言回队与错误回执（:1175-1216），对 send_message 返回值零断言。",
+      "severity": "ADVISORY",
+      "note": "CORRECTNESS"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 538,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "grep -n 'std::thread::spawn' crates/pony-agent-core/src/agent/orchestration.rs → :538 与 :289 均为不可失败化的 `std::thread::spawn`；本审查环境曾出现 fork/thread EAGAIN，spawn 失败会在工具执行线程 panic（guard 虽经 Drop 清理，但模型侧拿到的是 panic 而非 error_result）。",
+      "severity": "ADVISORY",
+      "note": "CONCURRENCY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "line": 527,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '527,585p' crates/pony-agent-core/tests/wave61_team_activation.rs → c5 断言 tools.rs 中字面量 `subagent_runtime_wired()` 出现 11 次、锚串文件含该函数名；c9（:674-718）断言函数体直接调用次数 ≤1。两者都是源码文本计数（`matches()` 会命中注释与字符串），把任一门替换成 `true` 仍可通过。",
+      "severity": "ADVISORY",
+      "note": "CORRECTNESS"
+    }
+  ]
+}

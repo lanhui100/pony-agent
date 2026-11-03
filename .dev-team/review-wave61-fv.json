@@ -1,0 +1,74 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewed_commit": "e403302",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "33f7c92d-82b5-4694-b51a-96fa5d506e82",
+    "fresh_context": true
+  },
+  "executed_by": "33f7c92d-82b5-4694-b51a-96fa5d506e82",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "cmd: git diff 6b9e23a e403302 -- crates/pony-agent-core/src/agent/orchestration.rs crates/pony-agent-core/tests/wave61_team_activation.rs（+39/-18 与 +141 行，仅 2 文件落在审查面）",
+    "crates/pony-agent-core/src/agent/orchestration.rs#interrupt_agent (696-725)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#send_message_in_workspace (549-577)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#drive_loop_in (584-602)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#drive_teammate_turn_in 检查点 #1/#2 (902-935)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#DRIVING/DrivingGuard/begin_driving/is_driving (130-193)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#INTERRUPTED/mark_interrupted/take_interrupted (159-181)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#requeue_messages/set_teammate_status/teammate_status (195-209, 677-693)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#enqueue_message/list_agents/drain_inbox 锁序 (515-535, 611-674, 728-758)",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs#c7e_interrupt_when_idle_does_not_strand_next_message + run_c7e_body (666-690, 1384-1496)",
+    ".dev-team/contracts/wave-61-team-activation.md#C10.1-C10.3 (596-640)",
+    "cmd: PONY_WAVE61_V13_CHILD=c7e cargo test -p pony-agent-core --test wave61_team_activation -q v13_child_env -- --nocapture → `C7E_OK calls=1 delivery_state=driving prompts=1 final=Some(Inactive)`，test result: ok. 1 passed（e403302 源码实跑）",
+    "cmd: cargo test -p pony-agent-core --test wave61_team_activation -q → 16 passed; 0 failed; EXIT=0（c7e 单跑连跑 5 次均 passed）",
+    "cmd: cargo test -p pony-agent-core --test pa110_teams_acceptance -q → 5 passed; 0 failed; EXIT=0",
+    "cmd: timeout 60 /tmp/repro_stale_marker → 该二进制 mtime 11:46:08（早于 e403302 提交时间 11:57:58，仍是 6b9e23a 旧码）实跑输出 `engine_calls=0 pending=1 status=Running` / `RESULT=STALE_INTERRUPT_MARKER_STRANDED`：只能复现旧缺陷，不能验证修复，故以 in-tree c7e 为等价验证",
+    "cmd: cargo test -p pony-agent-core -q → 全量 1210 用例中仅 1 条与本 diff 无关的既存失败（otel_resource_env_test:277，见 findings[3]）"
+  ],
+  "closed_blockers": [
+    {
+      "id": "stale-interrupt-marker",
+      "status": "CLOSED",
+      "evidence": "三处修复均在场且互补：① orchestration.rs:703 `let inflight_drive = is_driving(&args.target);` + :716-718 `if inflight_drive { mark_interrupted(&args.target); }` ⇒ 空闲态 interrupt 不再写一次性标记（:705-714 只翻状态位，:711-713 prev/new_status）；② :558-561 `if let Some(guard) = begin_driving(&drive_target) { let _ = take_interrupted(&drive_target);` ⇒ 派生新驱动前清除残留标记（在 begin_driving 成功、set_teammate_status(Running) :564 与 spawn :565 之前）；③ :912-915 检查点 #1 命中中断时 set_teammate_status(Inactive) 后返回 Ok(None)（此时尚未 drain，无消息需回填），:927-931 检查点 #2 命中时 requeue_messages + Inactive + Ok(None) ⇒ 不再留在 Running。实证（e403302 源码实跑）：`PONY_WAVE61_V13_CHILD=c7e ... --nocapture` → `C7E_OK calls=1 delivery_state=driving prompts=1 final=Some(Inactive)`，即 空闲 interrupt → send 后 engine_calls==1、prompt 含 `c7e-alpha`、pending==0、终态 Inactive、is_driving==false；16/16 用例通过（c7e 单跑 5/5）。反证：旧二进制 /tmp/repro_stale_marker（6b9e23a 构建）仍输出 engine_calls=0 / pending=1 / status=Running / RESULT=STALE_INTERRUPT_MARKER_STRANDED，修复前后行为对照成立。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 703,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '703,718p' crates/pony-agent-core/src/agent/orchestration.rs  # is_driving 读锁外、mark_interrupted 在 TEAMMATES 临界区之后（:716-718），二者非原子",
+      "severity": "ADVISORY",
+      "note": "CONCURRENCY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "line": 668,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '666,670p;1394p' crates/pony-agent-core/tests/wave61_team_activation.rs  # 注释仍写『置 Inactive + 打 stale 标记』/『置 Inactive 并打一次性 stale 标记』",
+      "severity": "ADVISORY",
+      "note": "CORRECTNESS"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 688,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test wave61_team_activation -q 2>&1 | grep -B2 -A3 'never used' → warning: function `teammate_status` is never used --> orchestration.rs:688",
+      "severity": "ADVISORY",
+      "note": "NFR_VIOLATION"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/otel_resource_env_test.rs",
+      "line": 277,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test otel_resource_env_test -q → pa153_t2_env_overrides_service_version_and_environment FAILED（2/2 稳定复现），断言 `!fallback.contains(\"staging\")` 失败",
+      "severity": "ADVISORY",
+      "note": "NFR_VIOLATION"
+    }
+  ]
+}

@@ -85,3 +85,17 @@ spawn_teammate / list_agents / send_message / interrupt_agent / drain_inbox / te
 2. `--lib` 全量单测在并发构建压力下多次因 `failed to spawn thread: EAGAIN` 失败（环境线程耗尽，非断言失败）；低载时曾 1210/0。
 3. 既有 schema 漂移（`nfr-baseline.schema.json` 3 处既有字段）未修，登记 backlog。
 4. `HostTurnEngine.workspace_root` 首写者胜（同进程多根）——契约 C2.4 登记。
+
+## 8. 终审 recheck 链（三轮复核）
+
+| 轮次 | 审查者 | 对象 commit | verdict | 处置 |
+|---|---|---|---|---|
+| recheck-1 | L3-A 并发/生命周期 | `ed6d35e` | FAIL（1 BLOCKING） | 驱动循环以 `status==Inactive` 退出 ⇒ 在途消息滞留 → v1.5 改为「收件箱为空」唯一退出（`6b9e23a`） |
+| recheck-1 | L3-P 生产六问 | `ed6d35e` | **PASS**（6 问全 PASS，7 ADVISORY） | 无阻断；ADVISORY 已登记/修正 |
+| recheck-2 | 聚焦复核 v1.5 | `6b9e23a` | FAIL（1 BLOCKING，新回归） | 空闲态 interrupt 写 stale 标记吞掉下一次驱动 → v1.6 修复（`e403302`） |
+| recheck-3 | 最终确认 | `e403302` | **PASS**（stale-marker CLOSED，4 ADVISORY） | 收口 |
+
+收据：`review-wave61-fa.json`、`review-wave61-fp.json`、`review-wave61-fr.json`、`review-wave61-fv.json`（四份均通过 `dev-review-lint.py`）。
+v1.6 后门禁：8 套件 **42 用例全绿**（wave61 16）、`cargo check --all-targets` exit 0、`wave61` 连跑 3 次一致。
+
+**已知环境噪声（与本波无因果，已在基线 commit `52a7a21` 上复现）**：`otel_resource_env_test::pa153_t2_env_overrides_service_version_and_environment` 在 base 与本分支同样失败，属既存失败。

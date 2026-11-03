@@ -1,0 +1,120 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewed_commit": "ed6d35e",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "42df588f-341b-410e-a29e-dfaa2756566e",
+    "fresh_context": true
+  },
+  "executed_by": "42df588f-341b-410e-a29e-dfaa2756566e",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "git diff 52a7a21 ed6d35e -- crates/pony-agent-core/ (21 files)；真值一律取 `git show ed6d35e:<path>`，不采工作区 HEAD（60fdc0d）",
+    "窗口内混入 wave-60 提交（680499c/bcd7137/ee336f3）：控制面/停止/streaming 变更按 `git blame ed6d35e` 归属，wave-61 仅 60e7cb8 / 922e960 / ed6d35e",
+    ".dev-team/nfr-baseline.json + nfr-baseline.schema.json（字段值、豁免条目、schema 增量声明）",
+    ".dev-team/contracts/wave-61-team-activation.md（FROZEN v1.4：C1/C6/C7/C8/C9/C10/C11、§6.2、审查收据 E/D 段）",
+    "客观事实清单交叉核对：green-phase-wave61-team.json / red-phase-wave61-team.json / regression-baseline-wave61-team.json / wave61-team-delivery.md（四者与 ed6d35e 逐字节一致，`git diff --stat ed6d35e -- <file>` 为空）",
+    "额外必查（BLOCKING 级）：AGENT_TEAM_POLICY_PROMPT 真名口径 + 38 项精确清单 + workflow=Internal —— 静态判定全部通过（见 six_questions[5] 与 findings F4）",
+    "轻量取证声明：未运行 cargo（环境 fork/EAGAIN 风险）；测试面以 ed6d35e 源码断言 + 收据交叉核对，NFR 门禁实跑（skill lint exit 0 / 严格门 exit 1，6 条既有漂移）"
+  ],
+  "six_questions": [
+    {
+      "question": "外部调用超时 ↔ external_call_timeout_ms(≤3000) + 契约 §6.2 登记的 subagent_turn_timeout_ms=120000 豁免：豁免是否合规（有 rationale、值未改、surface 明确）",
+      "baseline_field": "external_call_timeout_ms=3000（未变）；external_call_timeout_exceptions[1] = subagent turn / 120000；契约 §6.2 与 C6.3（subagent_max_concurrent=2、subagent_turn_timeout_ms=120000、subagent_max_prompt_bytes=200000）",
+      "code_evidence": "crates/pony-agent-core/src/agent/orchestration.rs:310（SUBAGENT_TURN_TIMEOUT_MS = 120_000，基线/契约引用 :237 系 60e7cb8 行号，符号未变）+ 调用点 :364/:378/:867；实现 seam crates/pony-agent-core/src/agent/subagent_runtime.rs:288-304；豁免 guarantee 引用的 subagent_runtime.rs:206 `let _inflight = inflight;` 实测命中",
+      "verdict": "PASS"
+    },
+    {
+      "question": "日志与防吞 ↔ logging.format=json + trace_id：本波新增行有无裸 eprintln/吞异常（对照 logging_eprintln_exempt_* 与豁免 scope）；`let _ =` 是否都在契约允许处",
+      "baseline_field": "logging.format=json / logging.trace_id_required=true / logging_eprintln_exempt_scope=existing_style_non_json_lock_poison_recovery_diagnostics / logging_eprintln_exempt_covers_new_lines=5 / logging_compliance_claimed=false / logging_debt_ref=PA-119",
+      "code_evidence": "wave-61 新增裸 eprintln = 1 处：crates/pony-agent-core/src/agent/orchestration.rs:542（非锁中毒，落在豁免 scope 外）；窗口内另 6 处锁中毒 eprintln（control_plane/mod.rs:2052/2074/2141、stop_escalation.rs:139/214/223）经 blame 属 wave-60 680499c，在豁免 scope 内；`let _ =` 允许处 = crates/pony-agent-core/src/agent/runtime/builder.rs:153（C2.2 明文要求该形态）；非允许处 = orchestration.rs:427（spawn 自动驱动吞错，契约 §E E4 已登记）",
+      "verdict": "PASS"
+    },
+    {
+      "question": "资源释放 ↔ resource_release：单飞 guard、许可 guard、驱动线程、子代理 worker 线程的生命周期与泄漏面",
+      "baseline_field": "resource_release[bounded_queue, max_queue_capacity_1024, fire_and_forget, worker_thread_shutdown, wave9_*]；契约 C6.2（许可 move 进工作线程）/C10.1（DrivingGuard）",
+      "code_evidence": "crates/pony-agent-core/src/agent/subagent_runtime.rs:190（唯一取门）/202-206（许可 move 进 worker，父线程超时不归还）/240-277（超时遗留孤儿＝已登记已知限制）；crates/pony-agent-core/src/agent/orchestration.rs:134-157（DRIVING + DrivingGuard 单一 Drop 清除）/534-544（guard move 进驱动线程）",
+      "verdict": "PASS"
+    },
+    {
+      "question": "并发与幂等 ↔ concurrency_lock：许可单点扣减是否成立（全仓 subagent_gate_enter 调用点计数）、自持门标志是否可能导致某引擎既不进门也不扣许可（漏扣风险）、注入式引擎路径是否仍受门保护",
+      "baseline_field": "concurrency_lock=mutex / lock_scope_bounded=true / subagent_max_concurrent=2 / subagent_max_prompt_bytes=200000；契约 C6.1/C6-A2/C6-A3、C2.2 注册幂等（OnceLock 首写者胜）",
+      "code_evidence": "subagent_gate_enter 全仓 5 处引用：src 2 处调用（orchestration.rs:352 入口门，位于唯一条件分支 :349-353；subagent_runtime.rs:190 引擎内门，HostTurnEngine 专用）+ tests 3 处（wave37_tool_surface.rs:478/480/494）；gates_concurrency_internally 仅 2 个定义（subagent_runtime.rs:44 默认 false、:284 HostTurnEngine=true），全仓零测试/宿主覆写 → 单次 subagent() 恰扣 1 次、无现存漏扣；队友驱动路径 orchestration.rs:867 不取门（契约 §E E8 已登记缺口，见 F2）",
+      "verdict": "PASS"
+    },
+    {
+      "question": "配置与自检 ↔ 基准 config/self-check：本波是否引入新配置项/env（应为无）",
+      "baseline_field": "config/self-check：wave-61 新增配置项=0、新增 env=0；nfr-baseline 增量 6 字段已在 schema 声明；严格门 nfr-lint.py 维持 HEAD 既有 6 条漂移",
+      "code_evidence": "wave-61 三提交（60e7cb8 / 922e960 / ed6d35e）不触任何配置文件；crates/pony-agent-core/src/agent/runtime/builder.rs:87/145-154 仅注册引擎、无新配置项；新增 env 仅测试面 crates/pony-agent-core/tests/wave61_team_activation.rs:2028（PONY_WAVE61_V13_CHILD）与 :341（PONY_TEAM_POLICY_PROBE）；实跑：dev-nfr-lint.py exit 0，.dev-team/nfr-lint.py exit 1 = 6 条既有漂移（observability / external_call_timeout_exceptions / logging_eprintln_exempt_note / logging.trace_id），wave-61 新增 6 字段均已声明（python3 json+schema 校验通过）",
+      "verdict": "PASS"
+    },
+    {
+      "question": "契约兼容性 ↔ 契约矩阵：模型面 29→38 的变更类型（additive/breaking）、4 处冻结契约迁移（wave20/wave37/wave25/pa110）是否都有迁移留痕且只收紧不放宽；有无删除/重编号",
+      "baseline_field": "team_tool_surface_exact_count=38；契约 C1.3（provider payload additive + 工具数组前缀一次性 breaking）、C4.1/C4.2/C4.3/C4.6b、C4-A3（断言只增不减）",
+      "code_evidence": "crates/pony-agent-core/src/agent/tools.rs:7493-7502（9 项入 ModelVisible、无 TOOL_WORKFLOW、`_ => Internal` 覆盖 workflow）；provider_contract_views 过滤 tools.rs:623-632（+tool_search 白名单）⇒ 28 既有可见名 + 9 + tool_search = 38；冻结面迁移：tests/wave37_tool_surface.rs:99-146（38 逐序 + workflow 负向）、tests/wave25_capability_honesty_test.rs:77/158/439（38 常量 + T4b 反向守卫）、tests/tool_surface_wave20_contract.rs:28-40（workflow 负向 + 反向防泄漏）、tests/pa110_teams_acceptance.rs:171-215（enqueue_message seam，4 条顺序断言逐字保留）；四文件 #[test] 数 2/9/4/5 前后不变，删除断言仅 workflow 一条（按 v1.2 裁决反转，非放宽）",
+      "verdict": "PASS"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 542,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "git show ed6d35e:crates/pony-agent-core/src/agent/orchestration.rs | sed -n '536,545p'",
+      "severity": "ADVISORY",
+      "note": "NFR_VIOLATION"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 867,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "git grep -n \"subagent_gate_enter\" ed6d35e -- crates/pony-agent-core/src",
+      "severity": "ADVISORY",
+      "note": "CONCURRENCY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 534,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "git show ed6d35e:crates/pony-agent-core/src/agent/orchestration.rs | sed -n '529,568p'",
+      "severity": "ADVISORY",
+      "note": "CONCURRENCY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 68,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "git show ed6d35e:crates/pony-agent-core/src/agent/context.rs | sed -n '63,73p'",
+      "severity": "ADVISORY",
+      "note": "CORRECTNESS"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+      "line": 300,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git show ed6d35e:crates/pony-agent-core/src/agent/subagent_runtime.rs | sed -n '294,304p'",
+      "severity": "ADVISORY",
+      "note": "CONTRACT_BREAK"
+    },
+    {
+      "file": ".dev-team/wave61-team-delivery.md",
+      "line": 31,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n '6p;31p;43p;54p;78p' .dev-team/wave61-team-delivery.md; python3 -c \"import json;d=json.load(open('.dev-team/green-phase-wave61-team.json'));print(sum(s['passed'] for s in d['suites']),len(d['cases']))\"",
+      "severity": "ADVISORY",
+      "note": "NFR_VIOLATION"
+    },
+    {
+      "file": ".dev-team/contracts/wave-61-team-activation.md",
+      "line": 633,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git show ed6d35e:crates/pony-agent-core/src/agent/orchestration.rs | sed -n '838,848p'; sed -n '633p' .dev-team/contracts/wave-61-team-activation.md",
+      "severity": "ADVISORY",
+      "note": "CONTRACT_BREAK"
+    }
+  ]
+}
