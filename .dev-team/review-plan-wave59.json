@@ -1,82 +1,45 @@
 {
   "schema_version": 2,
+  "verdict": "FAIL",
   "reviewer": {
     "kind": "subagent",
-    "session_id": "l3-plan-wave59-9c4e1b",
+    "session_id": "388ad82a-b9ec-4e6d-9ad9-be0422510650",
     "fresh_context": true
   },
-  "executed_by": "l3-plan-wave59-9c4e1b",
-  "reviewed_commit": "d3745a7",
-  "reviewed_subject": "working tree diff on top of d3745a7（未提交）",
-  "stage": "post-hoc（契约冻结后追认审计，非事前评审——如实标注）",
-  "verdict": "PASS",
+  "executed_by": "388ad82a-b9ec-4e6d-9ad9-be0422510650",
   "attestation": {
     "self_signed": false,
-    "degraded": false
+    "transcribed_verbatim_by_lead": true,
+    "note": "计划阶段三路独立架构评审（runtime / 持久化 / 前端）原始结论，作为本波修复范围来源"
   },
+  "reviewed_commit": "5fa0ca6",
   "audited_scopes": [
-    ".dev-team/contracts/wave-59-desktop-uiux.md",
-    "tests/acceptance/wave59/",
-    "tests/e2e/wave59-stream-stability.spec.ts",
-    ".dev-team/wave59-delivery.md",
-    "docs/observability.yaml"
+    "crates/pony-agent-core/src/",
+    "src/",
+    "src-tauri/",
+    "docs/"
   ],
   "findings": [
     {
-      "file": "tests/e2e/wave59-stream-stability.spec.ts",
-      "line": 312,
+      "file": "crates/pony-agent-core/src/agent/dispatcher_composites.rs",
+      "line": 69,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cargo test --test concurrent_turn_context_isolation_red",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "line": 10127,
       "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "grep -n 'content 长度 > 0 时文本不得为空' .dev-team/contracts/wave-59-desktop-uiux.md; grep -n 'FIRST_TEXT_MAX_FRAME_LAG' tests/e2e/wave59-stream-stability.spec.ts",
-      "severity": "ADVISORY",
-      "summary": "F3-5② 门禁宽于冻结契约：契约要求「content>0 的任一帧文本不得为空」，e2e 收窄为「首个非空正文帧之后不得为空 + 首帧容忍 4 帧」；收窄只写在 test-agent 红相收据 §6.1，契约矩阵与交付决策（D-59-5/6）均未落，门禁与契约文本无法机器对齐"
+      "counterexample_cmd": "cargo check --workspace --all-targets",
+      "severity": "BLOCKING"
     },
     {
-      "file": "tests/e2e/wave59-stream-stability.spec.ts",
-      "line": 119,
-      "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "grep -c '\"done\"' tests/e2e/wave59-stream-stability.spec.ts",
-      "severity": "ADVISORY",
-      "summary": "F3-5 采样窗口永不进入 streaming→完成态（合成 assistant 恒 status=pending，全文无 done），RC5「完成瞬间闪一下」在真浏览器零覆盖；交付 §1 却以 F3-5 作为 RC1..RC5 全部消除的物理证据"
-    },
-    {
-      "file": "tests/acceptance/wave59/wave59-f4-runtime-status-accuracy.spec.ts",
-      "line": 411,
-      "rule": "CORRECTNESS",
-      "counterexample_cmd": "grep -n 'TIMEOUT_RETRY_PENDING_MESSAGE' tests/acceptance/wave59/wave59-f4-runtime-status-accuracy.spec.ts",
-      "severity": "ADVISORY",
-      "summary": "F4-5 路线 A 的可达性是夹具自证：直接把 TIMEOUT_RETRY_PENDING_MESSAGE 写进 pending assistant 再断言 getter 返回 retrying，未驱动 submitTurn 的可重试错误路径；分支即便在生产不可达（占位永不写入）该用例仍绿——正是契约禁止的「不可达分支冒充能力」检测盲区"
-    },
-    {
-      "file": "tests/acceptance/wave59/wave59-f4-runtime-status-accuracy.spec.ts",
-      "line": 276,
-      "rule": "CORRECTNESS",
-      "counterexample_cmd": "grep -n 'label: \"思考中...\"' tests/acceptance/wave59/wave59-f4-runtime-status-accuracy.spec.ts",
-      "severity": "ADVISORY",
-      "summary": "F4-2 用 toEqual 把 store label 精确钉死为「思考中...」，契约只要求 mode=thinking 与 data-visible=true；文案属展示层且同波 F1-2 用 /思考中|准备就绪/ 正则判，文案微调即误杀"
-    },
-    {
-      "file": ".dev-team/contracts/wave-59-desktop-uiux.md",
-      "line": 87,
-      "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "grep -n 'mode=\\\"error\\\"\\|sessionError\\|sessionOperation\\|activeStreamKind' tests/acceptance/wave59/*.spec.ts | grep -v 'null'",
-      "severity": "ADVISORY",
-      "summary": "F4 只覆盖单 hop 三态，未覆盖 error/sessionError/sessionOperation 分支（isRuntimeStatusVisible 对二者强制 visible=true，可压过 F4-3 的隐藏契约）与 ≥3 连续 hop 的 activeStreamKind 复位；契约 §4 亦未登记这些语义"
-    },
-    {
-      "file": ".dev-team/contracts/wave-59-desktop-uiux.md",
-      "line": 113,
-      "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "git diff d3745a7 -- docs/observability.yaml | grep -c 'wave-59'",
-      "severity": "ADVISORY",
-      "summary": "D-59-4 无可机器判定物：docs/observability.yaml 无 wave-59 条目（同日 wave-slash-1 与 ADR-0055 均新增登记块），交付却把 check-declaration.sh exit 0 当作 D-59-4 收据，而该检查与 wave-59 归属无因果，「已按 N-A 登记」不可证伪"
-    },
-    {
-      "file": ".dev-team/wave59-delivery.md",
-      "line": 46,
-      "rule": "NFR_VIOLATION",
-      "counterexample_cmd": "npx vitest run tests/acceptance/wave47-ob2-enforcement.spec.ts --reporter=verbose",
-      "severity": "ADVISORY",
-      "summary": "交付时全量单测 exit=1（wave47-ob2 T7 因 docs/observability.yaml 未批准变更）；「0 新增失败」靠归因而非绿相收据，并发波落地后须重跑全量并留 exit 0 物理凭证"
+      "file": "src/lib/markdown.ts",
+      "line": 96,
+      "rule": "SECURITY",
+      "counterexample_cmd": "npx vitest run tests/markdown-external-resource-allowlist.red.spec.ts",
+      "severity": "BLOCKING"
     }
   ]
 }

@@ -20,6 +20,7 @@ pub mod git_search;
 pub mod goal;
 pub mod graph;
 pub mod governed_executor;
+pub mod headless;
 pub mod hook_commands;
 pub mod hooks;
 pub mod image_artifact;

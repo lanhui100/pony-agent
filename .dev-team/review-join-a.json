@@ -1,73 +1,88 @@
 {
-  "schema_version": 2,
   "verdict": "FAIL",
-  "reviewer": {
-    "kind": "subagent",
-    "session_id": "l3a-wave58-concurrency-cache-review",
-    "fresh_context": true
-  },
-  "executed_by": "l3a-wave58-concurrency-cache-review",
-  "attestation": {
-    "self_signed": false,
-    "note": "审查对象为 Wave-58 未提交工作树（git diff + git status），reviewed_commit 填基线 HEAD（工作树改动尚未提交，故无交付 sha）。provenance 字段由 dev-review-lint.py v2 强制要求，除契约要求的三字段（verdict/audited_scopes/findings）外为通过机械门禁所必需的最小补充。"
-  },
-  "reviewed_commit": "9af49dd1dba84aff14f7d28ccede7f77c4daecf8",
   "audited_scopes": [
-    ".dev-team/contract-matrix-wave58.md",
-    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
-    "crates/pony-agent-core/src/agent/tools.rs",
-    "crates/pony-agent-core/src/agent/context.rs",
-    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
-    "crates/pony-agent-core/src/agent/instruction_touch.rs",
-    "crates/pony-agent-core/src/agent/skill_body.rs",
-    "crates/pony-agent-core/src/agent/path_permission.rs",
-    "crates/pony-agent-core/src/agent/session/store.rs",
-    "crates/pony-agent-core/src/agent/provider/mod.rs",
-    "crates/pony-agent-core/tests/wave58_context_skills.rs",
-    "crates/pony-agent-core/tests/context_cache_red_contract.rs"
+    "crates/pony-agent-core/src/agent/headless.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    ".dev-team/contract-matrix-wave59-headless.md",
+    "crates/pony-agent-core/tests/headless_contract.rs",
+    "tests/acceptance/wave59/headless-cli-e2e.sh",
+    "tests/acceptance/wave59/receipts/*",
+    ".dev-team/nfr-baseline-wave59.json",
+    "crates/pony-agent-core/src/agent/runtime_helper.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
+    "Cargo.toml"
   ],
   "findings": [
     {
-      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
-      "line": 1048,
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 554,
       "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "最小用例（新增 tests/w58_lru_baseline.rs 后 `cargo test -p pony-agent-core --test w58_lru_baseline`）：let h = WorkspaceHotloader::new(); fs::write(&ws.join(\"AGENTS.md\"), \"# V1\").unwrap(); let (p1, _) = h.resolve_session_prompt_context_with_globals(\"A\", 1, &ws, &[]); for i in 0..MAX_SESSION_BASELINES { h.resolve_session_prompt_context_with_globals(&format!(\"s{i}\"), 1, &ws, &[]); } fs::write(&ws.join(\"AGENTS.md\"), \"# V2-REWRITE\").unwrap(); let (p2, notice) = h.resolve_session_prompt_context_with_globals(\"A\", 2, &ws, &[]); assert!(p1.contains(\"# V1\")); assert!(p2.contains(\"# V1\") && !p2.contains(\"V2-REWRITE\") && notice.is_some(), \"第2轮前缀被改动：{p2}\"); —— 实际 p2 含 V2-REWRITE 且 notice=None（prefix 被静默改写）。判定链：1048 行 `!baselines.contains(session_id)` 在 LRU 淘汰后为真 → 走首轮分支用 current_constitution/current_skills 重建并返回 (static_prefix, None)；容量上限见 365 行 MAX_SESSION_BASELINES=256、淘汰见 418-434。",
+      "counterexample_cmd": "cd /tmp && W=$(mktemp -d) && mkdir -p $W/{home,xc,xd,xk,proj} && cd $W/proj && env HOME=$W/home XDG_CONFIG_HOME=$W/xc XDG_DATA_HOME=$W/xd XDG_CACHE_HOME=$W/xk NO_COLOR=1 /home/dm/pony-agent/target/debug/ponycli --output-format sse -p hi -g http://127.0.0.1:1 --key k -m mock-alpha 2>/dev/null >$W/sse.out; echo \"frames=$(grep -c '^event:' $W/sse.out) blank_separators=$(grep -c '^$' $W/sse.out)\"  # 实测 frames=4 blank_separators=0：SSE 帧之间没有空行终止符（WHATWG SSE 规定空行才派发事件）。符合规范的解析器切分整段 stdout 只得 1 个事件，4 条 data 行拼接后 json.loads 报 'Extra data: line 2 column 1' ⇒ --output-format sse 对任何 EventSource/SSE 客户端不可消费，C1 的 sse 交付形态失效。",
       "severity": "BLOCKING"
     },
     {
-      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
-      "line": 841,
-      "rule": "CORRECTNESS",
-      "counterexample_cmd": "跨工作区假命中：ws1/.agents/skills/dup/SKILL.md 与 ws2/.agents/skills/dup/SKILL.md 均为 `---\\nname: dup\\ndescription: AAAA\\n---`（等长，仅描述内容不同），`touch -d '2026-01-01 00:00:00'` 两个文件后：let h = get_global_workspace_hotloader(); assert!(h.scan_skills(&ws1).0[0].description.contains(\"AAAA\")); assert!(h.scan_skills(&ws2).0[0].description.contains(\"BBBB\"), \"{:#?}\", h.scan_skills(&ws2).0[0].description); —— 实际 ws2 返回 ws1 的描述且 path 仍指向 ws1（项目带 rank 是工作区无关常量 100/200/300，缓存键 827 行 `{scope}:{rank}:{folder}`，命中判定只比 scope/rank/mtime/file_size，不比 path；mtime 为 Option，两端 modified() 不可得时 None==None 亦命中）。context.rs 本波改为进程级单例 get_global_workspace_hotloader 后该陈旧条目直接进入提示词，并使 skill_load 因 path 不在 ws2 受信根而 OutOfAllowedRoot（F2-3「列出⇒可加载」被打破）。修复：缓存键纳入技能根路径，或命中判定增加 existing.path == skill_file。",
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 757,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "cd /tmp && W=$(mktemp -d) && mkdir -p $W/{home,xc,xd,xk,proj} && cd $W/proj && env HOME=$W/home XDG_CONFIG_HOME=$W/xc XDG_DATA_HOME=$W/xd XDG_CACHE_HOME=$W/xk NO_COLOR=1 bash -c 'timeout 4 /home/dm/pony-agent/target/debug/ponycli --output-format jsonl --timeout-secs 1 -p \"say hi\" -g http://127.0.0.1:1 --key k -m mock-alpha 2>/dev/null | (sleep 9; cat >/dev/null); echo rc=${PIPESTATUS[0]}'  # rc=124：turn 本身毫秒级结束（同命令接快速消费者 exit=4，实测 3/3 次），但 flush_events 在写满管道缓冲（本次 stdout 134987B > 64KiB）时无超时、无界阻塞；--timeout-secs 只约束 turn，不约束收尾写出 ⇒ C5「有界执行」不覆盖进程总墙钟时间。",
       "severity": "ADVISORY"
     },
     {
-      "file": "crates/pony-agent-core/src/agent/tools.rs",
-      "line": 1228,
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 758,
       "rule": "CORRECTNESS",
-      "counterexample_cmd": "根层指令零注入用例：ws 下写 AGENTS.md(\"# ROOT-MARKER\")，进程 cwd 指向无 AGENTS.md 的目录；构造 RetrievedContextState{session_context.env_info: None, conversation_id: \"s\", turn_count: 1} 并 build_layered_turn_context → semistable 段按 F1-1 回落进程 cwd（不含 ROOT-MARKER）；随后 router.execute_with_context(&read_call(\"src/main.rs\"), &ToolExecutionContext{workspace_root: Some(ws), session_id: Some(\"s\"), ..}) → seed_root_instruction_baseline 用 constitution_source_paths(ws) 把 ws/AGENTS.md 记为已注入并置 root_seeded=true（1172-1210），触达层按 seen 跳过 → ROOT-MARKER 既不在 semistable（用进程 cwd）也不在工具结果（被种子化抑制），且无任何 omitted 标记。充要条件只校验 session_id 非空，未校验「semistable 的发现根 == 触达层 workspace_root」。session/store.rs:2903/2936 生产快照恒为 Some(env_info)，但 F1-1 明确允许 None/非绝对路径的降级，CLI/图/tests 路径可触发。",
+      "counterexample_cmd": "cd /tmp && W=$(mktemp -d) && mkdir -p $W/{home,xc,xd,xk,proj} && cd $W/proj && env HOME=$W/home XDG_CONFIG_HOME=$W/xc XDG_DATA_HOME=$W/xd XDG_CACHE_HOME=$W/xk NO_COLOR=1 bash -c '/home/dm/pony-agent/target/debug/ponycli --output-format jsonl -p \"say hi\" -g http://127.0.0.1:1 --key k -m mock-alpha 2>/dev/null | head -c 200 >/dev/null; echo cli_rc=${PIPESTATUS[0]}'  # cli_rc=4 且 stderr 无任何写失败诊断：`let _ = writeln!/flush` 吞掉 EPIPE，135KB 事件流被下游关断后静默截断为 200B，调用方无法从退出码或诊断区分「事件已投递」与「事件被丢弃」。",
       "severity": "ADVISORY"
     },
     {
-      "file": "crates/pony-agent-core/src/agent/context.rs",
-      "line": 909,
-      "rule": "CORRECTNESS",
-      "counterexample_cmd": "catalog 预算裁剪用例：build_cached_prompt_prefix_with_budget(Some(\"c\"), &skills_two, SkillCatalogBudget::new(header_bytes + 40, 64)) 使 1 条保留、1 条被丢弃 → hotloader 输出末两行为 `- \\`a\\` [project]: desc a\\nomitted skill:z (budget)\\n`；再经 provider_semistable_context_note 的 flatten_skill_catalog_lines 处理，`is_entry(line)==false && last.starts_with(\"- `\")` 成立 → 标记被并进上一条技能行，输出变成 `- \\`a\\` [project]: desc a omitted skill:z (budget)`，D5'/D2 要求的 `omitted skill:<name> (budget)` 独立标记行不再存在（断言 `rendered.lines().any(|l| l.starts_with(\"omitted skill:\"))` 失败）。",
-      "severity": "ADVISORY"
-    },
-    {
-      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
-      "line": 1044,
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 499,
       "rule": "NFR_VIOLATION",
-      "counterexample_cmd": "锁粒度用例：`cargo test -p pony-agent-core --test w58_lock_scope` 起 8 线程、每线程对同一 hotloader 以不同 conversation_id 各调 resolve_session_prompt_context_with_budget_and_catalog 100 次（process 级单例 + write 锁），统计 wall-clock 与并发度 —— 1044-1132 行全程持有 session_baselines.write()，锁内执行 constitution+skills 全量克隆（≤64KiB 文本 + Vec<HotloadedSkill>）、evict_overflow 的 O(n≤256) 全表 min_by_key，以及整段 build_cached_prompt_prefix_with_budget 渲染（字符串格式化与排序）；相比 wave-57 每请求 WorkspaceHotloader::new()（无共享锁），本波把所有会话的每次 provider 请求串行化在同一把全局写锁上，子代理扇出时线性排队。建议锁内只做 clone/insert（渲染移到锁外，用克隆出的 snapshot 渲染）。",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && grep -c 'wave59_jsonl_sink_finish_releases_buffer_once\\|wave59_sse_sink_finish_releases_buffer_once' .dev-team/nfr-baseline-wave59.json  # 输出 0：headless.rs:499 与 :538 文档引用的 NFR 键不存在于冻结基线；实际冻结键是 nfr-baseline-wave59.json:26 的 wave59_sink_buffer_released_by_process_exit_only，其语义（仅进程退出释放缓冲）与本实现 finish()=mem::take 相反。",
       "severity": "ADVISORY"
     },
     {
-      "file": "crates/pony-agent-core/src/agent/subagent_runtime.rs",
-      "line": 117,
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 1159,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && sed -n '1128,1160p' crates/pony-agent-core/src/bin/cli.rs  # REPL 两处 `let _ = persist_turn_result(...)` 丢弃返回值：写盘失败（本应升级 Internal=1）与单轮 failed（envelope 内 status=failed/exit_code=1）最终都由 `finish(ExitCode::Success)` 收口为进程 0 ⇒ C2「turn:failed 绝不退 0」与 C3 status⟺exit_code 在 TTY 多轮路径上不成立（基线 REPL 语义未被契约覆盖，故 ADVISORY）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 589,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && grep -n 'CliTurnSink::new' crates/pony-agent-core/src/bin/cli.rs; grep -n 'self.seq += 1' crates/pony-agent-core/src/agent/headless.rs  # 每轮 run_single_turn 新建 sink（cli.rs:589）⇒ SinkBuffer.seq 每轮从 1 重排；REPL 多轮下同一 stdout jsonl/sse 流出现重复 seq，以 seq 去重/排序的消费者会丢事件。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 369,
+      "rule": "LEAK",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && sed -n '355,372p' crates/pony-agent-core/src/agent/headless.rs  # SinkBuffer.lines 是无上限 Vec<String>（无 bounded_queue / max_queue_capacity_1024 依据）：超时后 take_events() 已移交缓冲，但 worker 仍持有 sink Arc 继续 push，这些行永不写出且无上限，直到进程退出（drop(observability) 最长约 2.5s 窗口）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 465,
       "rule": "CONTRACT_BREAK",
-      "counterexample_cmd": "接线缺口用例：`grep -rn \"HostTurnEngine\" --include=*.rs src-tauri/ crates/ | grep -v tests/` → 仅 orchestration.rs:252 的错误字符串与 subagent_runtime.rs 自身定义；全仓无 `HostTurnEngine { .. }`/`.with_workspace_root(..)` 生产构造点，且 SubagentTurnEngine::run_turn(&self, prompt, timeout_ms) 签名不含任何父会话上下文，run_turn 内无法派生父根。故 F1-5 只在测试里由 `HostTurnEngine { workspace_root: Some(root) }` 手工满足（tests/wave58_context_skills.rs:567），生产路径即便接线也只能拿到 None → resolved_workspace_root 回落 compute_default_workspace_root()，与改前行为等价。需 Lead 裁决接线归属（host 侧注入 or 增加带上下文的 run_turn 变体）。",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && sed -n '600,612p' crates/pony-agent-core/src/bin/cli.rs  # 超时路径先 observed_outcome() 再 take_events() 取快照：worker 在快照之后发出的终态事件被丢弃，stdout 事件流停在 turn:delta/turn:trace 且没有 turn:timeout 终止标记，而 envelope 写 status=timeout ⇒ 机器消费方无法区分「流被截断」与「turn 仍在跑」（B1 已接受 worker 不可抢占，但未声明终止标记缺位）。",
       "severity": "ADVISORY"
     }
-  ]
+  ],
+  "reviewed_commit": "9706859",
+  "attestation": {
+    "self_signed": false,
+    "transcribed_verbatim_by_lead": true,
+    "note": "Lead 仅补充机器校验所需元数据；verdict/audited_scopes/findings 为审查者原文，未改写"
+  },
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "4abf81c4-c7d5-4c0f-b23c-0d23e564d43b",
+    "fresh_context": true,
+    "perspective": "L3-A concurrency/scheduling"
+  },
+  "executed_by": "4abf81c4-c7d5-4c0f-b23c-0d23e564d43b",
+  "schema_version": 2
 }

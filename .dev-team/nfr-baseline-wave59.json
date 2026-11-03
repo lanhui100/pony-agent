@@ -1,0 +1,144 @@
+{
+  "wave": 59,
+  "stage": "Stage-1 Protocol",
+  "baseline_ref": ".dev-team/nfr-baseline.json",
+  "delta_scope": "headless CLI (ponycli) contract freeze: structured event output / exit-code taxonomy / result envelope / non-interactive permission policy / bounded execution. 五项必填 NFR 全量重述（沿用 .dev-team/nfr-baseline.json 冻结值），本波仅新增 wave59_headless_contract 增量节点。v2 修订（Lead 裁定 D1/D2）：删除逐工具白名单承诺（allow_tools/decide），PermissionMode 改为宿主 tool_authorization_mode 三档透传；TurnStatus/HeadlessOutcome 新增 suspended 终态并映射 permission_denied(6)。既有 .dev-team/nfr-baseline.json 不修改。",
+  "external_call_timeout_ms": 3000,
+  "external_call_timeout_scope": "仅约束本波新增的外部调用（结果封套落盘、sink flush 等）；不改既有 provider 流式 180s 读空闲预算与 30min 总时长上界（见 .dev-team/nfr-baseline.json 的 external_call_timeout_exceptions）",
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 500,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "resource_release": [
+    "bounded_queue",
+    "max_queue_capacity_1024",
+    "wave59_worker_not_preemptible_declared",
+    "wave59_on_timeout_process_exits_without_background_thread_stop_guarantee",
+    "wave59_no_idempotent_cleanup_promise_after_timeout",
+    "wave59_sink_buffer_released_by_process_exit_only",
+    "wave59_result_envelope_write_atomic_rename",
+    "wave59_stdout_backpressure_out_of_scope"
+  ],
+  "wave59_headless_contract": {
+    "applicable": true,
+    "stub_file": "crates/pony-agent-core/src/agent/headless.rs",
+    "stub_phase": "protocol_freeze_unimplemented_bodies",
+    "stub_purity_rule": "仅 use / 类型与枚举定义 / impl 方法签名 / 常量 / unimplemented!() 函数体；禁止分支计算、字符串处理、IO 与默认值业务逻辑",
+    "event_sink_trait": "crate::agent::turn_flow::TurnEventSink",
+    "event_sink_methods": [
+      "emit(name:&str, payload:TurnStreamEvent)",
+      "persist(default_empty)"
+    ],
+    "result_envelope_schema": "pony.headless.result.v1",
+    "result_envelope_fields": [
+      "schema",
+      "session_id",
+      "turn_id",
+      "status",
+      "exit_code",
+      "final_text",
+      "usage{input_tokens,output_tokens}",
+      "tool_calls[{name,status}]",
+      "duration_ms",
+      "failure_reason"
+    ],
+    "turn_status_values": [
+      "completed",
+      "failed",
+      "timeout",
+      "cancelled",
+      "suspended"
+    ],
+    "turn_status_exit_map": {
+      "completed": "success(0)",
+      "failed": "classify_failure(err) → 未知归 internal(1)",
+      "suspended": "permission_denied(6)",
+      "timeout": "timeout(7)",
+      "cancelled": "internal(1)（无头下不可达，保守归类）"
+    },
+    "headless_outcome_values": [
+      "completed",
+      "failed",
+      "timeout",
+      "cancelled",
+      "suspended"
+    ],
+    "output_formats": [
+      "text",
+      "jsonl",
+      "sse"
+    ],
+    "permission_modes": [
+      "read_only",
+      "workspace_write",
+      "full_access"
+    ],
+    "permission_mode_cli_aliases": {
+      "read_only": [
+        "deny",
+        "read-only",
+        "read_only"
+      ],
+      "workspace_write": [
+        "workspace-write",
+        "workspace_write"
+      ],
+      "full_access": [
+        "full-access",
+        "full_access"
+      ]
+    },
+    "permission_mode_truth_source": "crates/pony-agent-core/src/agent/governed_executor.rs:310-333（仅 read_only 有实际分支；workspace_write/full_access 与 None 判定等价 —— 已知局限，如实登记）",
+    "per_tool_allowlist_absent": true,
+    "per_tool_allowlist_absent_reason": "宿主无策略求值注入接缝（evaluator 由 runtime 内部注册），逐工具白名单会是「承诺了未发生的授权」= 静默谎报（PA-131 同类裁决），故 v2 删除 allow_tools 与 decide()",
+    "exit_code_map": {
+      "success": 0,
+      "internal": 1,
+      "usage": 2,
+      "config": 3,
+      "provider_network": 4,
+      "tool_failure": 5,
+      "permission_denied": 6,
+      "timeout": 7
+    },
+    "bounded_execution": {
+      "timeout_source": "HeadlessOptions.timeout_secs",
+      "max_turns_deferred_to": "PA-167（运行时限无公开接线口，v3 不声明）",
+      "silent_truncation_forbidden": true,
+      "timeout_convergence_declaration": {
+        "worker_preemption": "not_supported（worker 不可抢占）",
+        "on_timeout": "进程以 timeout(7) 退出；不承诺后台 worker 线程已停止",
+        "idempotent_cleanup_after_timeout": "not_promised（不承诺幂等清理）",
+        "background_thread_liveness_probe": "not_promised",
+        "forbidden_claims": [
+          "worker 已关闭",
+          "worker 已回收",
+          "超时后已完成幂等清理",
+          "已对输出写设置超时",
+          "已保证背压下退出"
+        ]
+      },
+      "stdout_backpressure_declaration": {
+        "key": "wave59_stdout_backpressure_out_of_scope",
+        "in_scope": "有界执行承诺仅覆盖「turn 到期收敛为 exit 7 + 封套终态」",
+        "out_of_scope": "stdout 写阻塞（消费者停读）：进程可能因管道背压延迟退出，不属承诺范围",
+        "root_cause": "POSIX 管道写满即阻塞，任何 CLI 同此语义，非本实现缺陷",
+        "no_output_write_timeout": "未对输出写设置超时，也不承诺背压下退出",
+        "observed": "--timeout-secs 1 + 停读消费者实测 rc=124（背压滞留，非 turn 未收敛）",
+        "verification": "正常消费者下毫秒级退出；A/B 两路双向复证（turn 侧已收敛，滞留发生在 flush 写）"
+      }
+    },
+    "non_interactive_only": true,
+    "interactive_prompt_forbidden": true,
+    "external_call_timeout_applies": true
+  },
+  "contract_version": "v5"
+}

@@ -16,6 +16,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// 日志单文件体积上限（字节）= 512KiB（Wave-4 C4.2；与 NFR `observability.log_file_max_bytes` 对齐）。
@@ -137,10 +138,23 @@ fn build_json_line(
     serde_json::Value::Object(record).to_string()
 }
 
-/// 缺省写出路径（stdout + 可选文件 sink）；失败静默降级。
+/// 进程级输出目标开关：默认 `false`（stdout）⇒ 既有调用方行为逐字节不变。
+static LOG_TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// 把 JSON 日志行的缺省输出目标从 stdout 改道 stderr（幂等）。调用方：无头 CLI 在
+/// `--output-format jsonl|sse` 下必须让 stdout 只承载结构化事件（wave-59 契约 C1）；
+/// 落盘 sink 不受影响，TUI/Tauri/测试不调用 ⇒ 默认行为不变。
+pub fn set_stderr_output(enabled: bool) {
+    LOG_TO_STDERR.store(enabled, Ordering::SeqCst);
+}
+
+/// 缺省写出路径（stdout，或经 [`set_stderr_output`] 改道的 stderr；+ 可选文件 sink），失败静默降级。
 fn emit_stdout_and_file(line: &str) {
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
+    let mut handle: Box<dyn Write> = if LOG_TO_STDERR.load(Ordering::SeqCst) {
+        Box::new(std::io::stderr())
+    } else {
+        Box::new(std::io::stdout())
+    };
     let _ = writeln!(handle, "{line}");
     let _ = handle.flush();
     drop(handle);

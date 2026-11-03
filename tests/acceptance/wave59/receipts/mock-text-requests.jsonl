@@ -1,0 +1,2 @@
+{"path": "/v1/chat/completions", "mode": "text", "stream": true, "roles": ["system", "system", "system", "system", "user"], "authorization": "<redacted>", "ts": 1793589579.4591224}
+{"path": "/v1/chat/completions", "mode": "text", "stream": true, "roles": ["system", "system", "system", "system", "user"], "authorization": "<redacted>", "ts": 1793589579.6947632}
