@@ -9,14 +9,14 @@
 //! - 禁止 `#[ignore]` / `catch` 吞异常 / 空断言 / 以「命令 Exit 0」代替断言；
 //! - 只使用 core 的**公开 API**（不读实现、不加 `mod` 声明到 `src/`）。
 //!
-//! 本文件刻意只依赖**当前已落地的签名**（`ExecutionControlRegistry::request_stop(&str)`），
+//! 本文件按**冻结签名** `ExecutionControlRegistry::request_stop(&self, turn_id: &str, stop_reason: StopReason)` 编写，
 //! 以便红相失败信息是「断言不成立」而不是「编译错误」——
 //! 现状实测：`state="running"`、`stop_reason=None`，正是 C1 要求被点名的缺陷。
-//! 需要新签名的判据（带显式 reason 的 stop → `request_stop(turn_id, StopReason)`、C2 立即应答、
-//! C5 宽限期）落在 `stop_escalation_wave60.rs`；若 Executor 把 `request_stop` 改成 2 参，
-//! 本文件在绿相阶段同步改调用形状（判据不删不弱化）。
+//! 需要注册面/监督面的判据（C2 立即应答、C5 宽限期、显式 reason 的 checkpoint 落盘）
+//! 落在 `stop_escalation_wave60.rs`；两文件判据互补、互不重复。
 
 use pony_agent_core::agent::execution_control::{ExecutionControlRegistry, StopTurnResponse};
+use pony_agent_core::agent::stop_escalation::StopReason;
 use pony_agent_core::agent::runtime::TurnStreamEvent;
 use pony_agent_core::agent::turn_flow::{emit_stream_failed, TurnEventSink};
 use std::sync::Mutex;
@@ -85,7 +85,7 @@ fn c1_stop_turn_accepts_running_turn_as_stopping() {
     let registry = running_registry("turn-c1-accept", Some("session-c1"));
 
     // Act
-    let response = registry.request_stop("turn-c1-accept");
+    let response = registry.request_stop("turn-c1-accept", StopReason::User);
 
     // Assert
     assert_eq!(response.turn_id, "turn-c1-accept");
@@ -109,7 +109,7 @@ fn c1_stop_turn_unknown_turn_is_not_found() {
     let registry = running_registry("turn-c1-existing", Some("session-c1"));
 
     // Act
-    let response = registry.request_stop("turn-c1-does-not-exist");
+    let response = registry.request_stop("turn-c1-does-not-exist", StopReason::User);
 
     // Assert
     assert!(!response.accepted, "C1：未知 turn 不得被接受");
@@ -133,7 +133,7 @@ fn c1_stop_turn_terminal_turn_is_already_terminal() {
         });
 
         // Act
-        let response = registry.request_stop(&turn_id);
+        let response = registry.request_stop(&turn_id, StopReason::User);
 
         // Assert
         assert!(
@@ -155,8 +155,8 @@ fn c1_repeated_stop_is_idempotent_and_reports_stopping() {
     let registry = running_registry("turn-c1-idempotent", Some("session-c1"));
 
     // Act
-    let first = registry.request_stop("turn-c1-idempotent");
-    let second = registry.request_stop("turn-c1-idempotent");
+    let first = registry.request_stop("turn-c1-idempotent", StopReason::User);
+    let second = registry.request_stop("turn-c1-idempotent", StopReason::User);
 
     // Assert
     assert!(first.accepted, "C1：第 1 次 stop 必须被接受");
@@ -180,7 +180,7 @@ fn c1_checkpoint_persists_stop_reason_and_carries_over_reregistration() {
     let registry = running_registry("turn-c1-checkpoint", Some("session-c1"));
 
     // Act
-    let response = registry.request_stop("turn-c1-checkpoint");
+    let response = registry.request_stop("turn-c1-checkpoint", StopReason::User);
     let checkpoint = registry
         .load_checkpoint(Some("turn-c1-checkpoint"), None)
         .expect("C1：注册过的 turn 必须有 checkpoint");
