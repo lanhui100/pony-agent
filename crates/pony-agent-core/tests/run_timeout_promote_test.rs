@@ -1,4 +1,7 @@
-//! 契约验收测试：Run 超时 promote（真·后台接续）· 契约 v6 · CT-P1..P5 + CT-P7/P7a/P7b/P8
+//! 契约验收测试：Run 超时 promote（真·后台接续）· 契约 v7 · CT-P1..P5 + CT-P7/P7a/P7b/P8/P9
+//!
+//! v7 变更（Lead 裁决）：promote **默认值翻转为开启**（5 个前置阻塞 B008/B009/B010/B011/B013
+//! 已关闭）。opt-out 兼容路径由 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=0` 保留。
 //!
 //! 契约真源：`.dev-team/designs/run-timeout-promote.md` §2（CT-P1..P5）＋
 //! `.dev-team/contracts/tool-timeout-policy.md` §波次四（CT-P7 / CT-P7a / CT-P7b）＋
@@ -11,14 +14,17 @@
 //! - CT-P2 → `ct_p2_promoted_job_streams_output_after_timeout`（显式 `=1`）
 //! - CT-P3 → `ct_p3_job_kill_terminates_promoted_job`（显式 `=1`）
 //! - CT-P5 → `ct_p5_kill_after_timer_does_not_fire_on_promoted_job`（显式 `=1`）
-//! - CT-P7（默认关闭）→ `ct_p4_promote_default_off_keeps_timeout_error_path`（原 CT-P4 升级：不设 env）
+//! - CT-P7（显式 opt-out `=0`）→ `ct_p4_promote_default_off_keeps_timeout_error_path`（原 CT-P4 迁移：
+//!   v7 起默认开启，本用例改为断显式关闭路径；名称按 Lead 要求保持不变）
+//! - CT-P9（默认开启）→ `ct_p9_default_is_promote_on`（**不设任何 env** 也必须 promote）
 //! - CT-P7a（先 poll 再判超时）→ `ct_p6_already_exited_process_is_not_promoted`（显式 `=1`，负例）
 //! - CT-P7b（promoted 输出截断标记）→ `ct_p7_promoted_output_truncation_is_flagged`（显式 `=1`）
 //! - CT-P8 / B009（promote 后取消生效）→ `ct_p8_cancel_terminates_promoted_job`（显式 `=1`）
 //!
 //! ## env 串行约束（必读，新增用例必须遵守）
-//! v6 起 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT` **默认关闭（opt-in）**：依赖 promote 的用例必须显式
-//! `=1` 开启，P4 断的则是**默认**（不设 env）。该 env 是**进程级全局**：`cargo test` 默认在同一
+//! v7 起 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT` **默认开启（opt-out）**：`=0`/`false` 关闭。
+//! 依赖 promote 的用例仍显式 `=1`（声明式，不依赖默认值漂移）；P4 断**显式关闭**路径，
+//! P9 断**默认开启**路径（先 `remove_var`）。该 env 是**进程级全局**：`cargo test` 默认在同一
 //! 测试二进制内多线程并发跑用例，不串行就会互相污染（P4 读到别的用例设的 `1`，或反之）。
 //! 故本文件**所有**用例统一持 `GATE_LOCK` 串行执行，env 一律经 `EnvVarGuard`（Drop 复位，
 //! panic 安全）。测试二进制之间是独立进程，互不影响；但**本文件内禁止新增不持锁的用例**。
@@ -28,7 +34,7 @@
 //! shell 的 `sleep`（Windows 用 `ping` 计时）真实进程；deadline 统一取 300ms。
 //! 其中 `thread::sleep` 仅用于**断言时序不变量**（「1s 后仍存活」「kill 后不再产出」），
 //! 不是同步轮询——同步一律用 `job_output(wait:true)` 的条件等待。
-//! 总耗时预算 ≈ 16s（CT-P7b 造 3MiB 输出、CT-P8 需跨过命令本该结束的时刻，见各自用例注释）。
+//! 总耗时预算 ≈ 17s（CT-P7b 造 3MiB 输出、CT-P8 需跨过命令本该结束的时刻，见各自用例注释）。
 //!
 //! ## CT-P8 的「无残留进程」口径（Lead 裁决）
 //! - `#[cfg(unix)]`：promote 后按命令判别串扫 `/proc/<pid>/cmdline` 取到该作业的 **进程组 pgid**，
@@ -525,22 +531,18 @@ fn ct_p3_job_kill_terminates_promoted_job() {
     );
 }
 
-// ── CT-P7（含原 CT-P4 升级）────────────────────────────────────────────────
+// ── CT-P7 / CT-P4：显式 opt-out 兼容路径 ───────────────────────────────────
 
-/// CT-P7：v6 起 promote **默认关闭（opt-in）** —— **不设 env** 时行为与波次一完全一致：
+/// CT-P7：**显式 opt-out**（`PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=0`）时行为与波次一完全一致：
 /// `error.code=timeout`、无 `promoted`/`jobId`、进程被清理（无后台作业可续读）。
 ///
-/// 与 `ct_p1/p2/p3/p5` 的区别即契约核心：那四例必须显式 `=1` 才会 promote，本用例断默认态。
+/// 语义变更（v7 默认值翻转）：promote **默认开启**后，本用例从「断默认态」迁移为「断显式关闭态」；
+/// 默认开启态由 `ct_p9_default_is_promote_on` 覆盖。名称按 Lead 要求保持不变。
 #[test]
 fn ct_p4_promote_default_off_keeps_timeout_error_path() {
     let _gate = gate_lock();
-
-    // Arrange：默认态自检 —— 本用例不得读到任何「被别的用例设过」的 env（GATE_LOCK 串行保证）。
-    assert!(
-        std::env::var_os(PROMOTE_ENV).is_none(),
-        "CT-P7：默认关闭路径要求 env `{PROMOTE_ENV}` 未被设置；\
-         读到值说明本文件的用例串行/复位约束失效"
-    );
+    // Arrange：显式关闭 promote（opt-out 兼容路径）。
+    let _env = EnvVarGuard::set(PROMOTE_ENV, "0");
 
     // Act
     let (status, payload) = run_command(LONG_RUNNING_COMMAND, 300, "p4");
@@ -548,7 +550,7 @@ fn ct_p4_promote_default_off_keeps_timeout_error_path() {
     // Assert：回到现状错误路径。
     assert_eq!(
         status, "error",
-        "CT-P7：promote 关闭时到期必须返回 error（波次一现状），payload={payload}"
+        "CT-P7：显式 opt-out 时到期必须返回 error（波次一现状），payload={payload}"
     );
     assert_eq!(
         payload
@@ -556,21 +558,21 @@ fn ct_p4_promote_default_off_keeps_timeout_error_path() {
             .and_then(|error| error.get("code"))
             .and_then(Value::as_str),
         Some("timeout"),
-        "CT-P7：promote 关闭时必须保留 error.code=timeout，payload={payload}"
+        "CT-P7：显式 opt-out 时必须保留 error.code=timeout，payload={payload}"
     );
     assert_eq!(
         payload.get("timedOut").and_then(Value::as_bool),
         Some(true),
-        "CT-P7：promote 关闭时仍须保留 CT-4 的 timedOut=true 证据，payload={payload}"
+        "CT-P7：显式 opt-out 时仍须保留 CT-4 的 timedOut=true 证据，payload={payload}"
     );
     assert!(
         payload.get("jobId").map(Value::is_null).unwrap_or(true),
-        "CT-P7：promote 关闭时不得注册/返回任何 jobId，payload={payload}"
+        "CT-P7：显式 opt-out 时不得注册/返回任何 jobId，payload={payload}"
     );
     assert_ne!(
         payload.get("promoted").and_then(Value::as_bool),
         Some(true),
-        "CT-P7：promote 关闭时不得出现 promoted=true，payload={payload}"
+        "CT-P7：显式 opt-out 时不得出现 promoted=true，payload={payload}"
     );
 
     // 「进程被清理」的可观测形式：job registry 里不得存在仍在运行的该命令作业。
@@ -583,7 +585,7 @@ fn ct_p4_promote_default_off_keeps_timeout_error_path() {
         .find(|job| job.command.contains(LONG_RUNNING_COMMAND) && job.status == "running");
     assert!(
         survivor.is_none(),
-        "CT-P7：promote 关闭时到期必须清理进程，不得留有仍运行的作业，\
+        "CT-P7：显式 opt-out 时到期必须清理进程，不得留有仍运行的作业，\
          实测残留 job={:?}",
         survivor.map(|job| (job.job_id.clone(), job.command.clone(), job.status.clone()))
     );
@@ -907,5 +909,65 @@ fn ct_p8_cancel_terminates_promoted_job() {
         later.status != "running",
         "CT-P8：取消后状态不得回退为 running，实际 `{}`",
         later.status
+    );
+}
+
+// ── CT-P9：默认开启 ────────────────────────────────────────────────────────
+
+/// CT-P9：promote **默认开启** —— **不设置任何 env** 时，Run 到期必须 promote（ok + promoted + jobId）。
+///
+/// 与 `ct_p4_promote_default_off_keeps_timeout_error_path`（显式 `=0`）互为对照：两者共同锁定
+/// 「默认开、显式关」的默认值语义。先 `remove_var` 清掉可能被前序用例遗留的值
+/// （`GATE_LOCK` 串行 ⇒ 无并发写者）。
+#[test]
+fn ct_p9_default_is_promote_on() {
+    let _gate = gate_lock();
+
+    // Arrange：默认态 —— env 必须不存在。
+    std::env::remove_var(PROMOTE_ENV);
+    assert!(
+        std::env::var_os(PROMOTE_ENV).is_none(),
+        "CT-P9：默认态要求 env `{PROMOTE_ENV}` 不存在（用例间 env 污染 = 本文件串行约束失效）"
+    );
+
+    // Act：300ms deadline 的 5s 长命令，未设任何 env。
+    let (status, payload) = run_command(LONG_RUNNING_COMMAND, 300, "p9");
+    // 红相：默认仍关闭时这里会 panic（错误载荷没有 jobId）。
+    let job_id = promoted_job_id(&payload);
+    let _guard = PromotedJobGuard::new(Some(job_id.clone()));
+
+    // Assert：默认路径 = promote 路径。
+    assert_eq!(
+        status, "ok",
+        "CT-P9：默认（未设 env）时到期必须返回 ok（promote 默认开启），payload={payload}"
+    );
+    assert_eq!(
+        payload.get("promoted").and_then(Value::as_bool),
+        Some(true),
+        "CT-P9：默认（未设 env）时必须 promoted=true，payload={payload}"
+    );
+    assert_eq!(
+        payload.get("timedOut").and_then(Value::as_bool),
+        Some(true),
+        "CT-P9：默认路径必须保留 timedOut=true，payload={payload}"
+    );
+    assert_ne!(
+        payload
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str),
+        Some("timeout"),
+        "CT-P9：默认（promote 开启）时不得再产生 error.code=timeout，payload={payload}"
+    );
+
+    // 清理：走 job_kill，并断言对 promoted 作业确实生效。
+    let kill = job_kill(JobKillArgs {
+        job_id: job_id.clone(),
+        reason: Some("ct_p9 cleanup".to_string()),
+    })
+    .expect("CT-P9：job_kill 必须接受本次 promote 出的作业");
+    assert!(
+        kill.killed,
+        "CT-P9：job_kill 必须返回 killed=true（job={job_id}）"
     );
 }

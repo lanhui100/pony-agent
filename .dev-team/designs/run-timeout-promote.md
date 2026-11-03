@@ -65,22 +65,30 @@ promote 关闭时不加宽限，`kill_after` 时长与波次一逐字一致。
   故无法区分「哪一段丢了」。
 
 
-## 5. v6 收口：promote 改为**默认关闭（opt-in 预览）**
+## 5. v7 收口：promote 为**默认开启（opt-out）**
 
-> 触发：L3-A / L3-B 双路复核 `8488d05` 均判 FAIL（3+3 BLOCKING），契约 v6 CT-P7 裁决默认关闭。
-> 实现：`run_promote_on_timeout_enabled()` 仅 `1`/`true`/`on`/`yes` 开启；未设置、空串、未识别值
-> （含 `0`/`false`/`off`/`no`/垃圾值）一律 **fail-safe 关闭**。关闭时不延后 `kill_after`（宽限只属于
-> promote 开启路径），行为与波次一逐字一致：`error.code=timeout` + 进程被清理。
+> v6 曾因 A-3/A-6/B-1/B-2/B-4 五条 BLOCKING 收成「默认关闭（opt-in 预览）」；
+> B008–B013 绿相落地后（v7 / CT-P9）默认值翻回**开启**：env 缺失即 promote，
+> `0`/`false`/`off`/`no` 才回到波次一语义，未识别值回落默认并打 warn。
 
-**为什么不得默认开启（五条 BLOCKING 未闭合，各自登记 backlog）**
+> 历史：v6 曾因 L3-A / L3-B 双路复核 `8488d05` 判 FAIL（3+3 BLOCKING），把默认值收成「关闭（opt-in）」。
 
-| # | 未闭合事实 | Backlog |
-| :-- | :--- | :--- |
-| A-3 | promoted 的 `ManagedProcess` 条目永不回收（每 run 泄漏 1 条目 + Windows Job 句柄）；`ProcessManager::shutdown` 零生产调用方 ⇒ 设计 §4 所称「session shutdown 收口」实际不可达 | B008 |
-| A-6 | promote 后 `CommandCancelWatcher` 已 drop ⇒ 用户 Stop 停不下来（实测 cancel 后命令仍跑完） | B009 |
-| B-1 | promote 成功会摘掉 `error.code=timeout`，使连续失败熔断、超时指纹归一、非幂等盲重试防护同时失去输入 | B010 |
-| B-2 | `timedOut`/`promoted` 无消费方，UI/trace 会按 status 判成「成功完成」；`ok:true` + `exitCode:null` 破坏成功路径不变量 | B011 |
-| B-4 | job 层无会话归属（跨会话 list/read/kill）；Windows `.cmd` 残留含命令原文 | B012 |
+**v7 实现（CT-P9，opt-out）**：`run_promote_on_timeout_enabled()` 的取值规则 ——
+env **缺失** ⇒ 开启；`1`/`true`/`on`/`yes`（trim + 大小写不敏感）⇒ 开启；
+`0`/`false`/`off`/`no` ⇒ 关闭；**未识别值 ⇒ 回落默认「开启」并打 warn**
+（`[tools] unrecognized PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=…; falling back to default (promote enabled)`），
+杜绝「开关拼错却静默生效」。关闭路径不延后 `kill_after`（宽限只属于开启路径），
+行为与波次一逐字一致：`error.code=timeout` + 进程被清理。
+
+**v6 曾提出的五条 BLOCKING —— 现均已绿相闭合（默认开启的前提）**
+
+| # | v6 事实 | 闭合卡 | 现状 |
+| :-- | :--- | :--- | :--- |
+| A-3 | promoted 的 `ManagedProcess` 条目永不回收 | B008 | `release_promoted_entry()` 终态回收（`released` 守卫、放锁后调用） |
+| A-6 | promote 后 `CommandCancelWatcher` 已 drop ⇒ 用户 Stop 停不下来 | B009 | job 侧 `spawn_cancel_watcher`（20ms tick）+ POSIX `process_group(0)`/`killpg` 收口 |
+| B-1 | promote 摘掉 `error.code=timeout` ⇒ 熔断/指纹/盲重试失去输入 | B010 | `tool_failure_signal` 对 `ok + timedOut:true` 产出 `("…", 归一指纹, "timeout")` |
+| B-2 | `timedOut/promoted` 无消费方，UI 判成「成功完成」 | B011 | 前端 `tool-result-meta.ts` + 工具行「已转后台」徽标 |
+| B-4 | job 层无会话归属、Windows `.cmd` 残留 | B012 / B013 | `owner` 归属校验（`job_not_owned`）+ 脚本清理移交 job 生命周期 |
 
 **本波同时修掉的两条低成本真缺陷（与默认值无关，关闭态也生效）**
 
@@ -92,8 +100,12 @@ promote 关闭时不加宽限，`kill_after` 时长与波次一逐字一致。
   每次 `poll` 追加）一旦丢弃字节就置对应流的 truncated 标记，`job_output` 以
   `stdoutTruncated`/`stderrTruncated` 透传，禁止静默丢字节。
 
-**开启前提**：A-3/A-6/B-1/B-2/B-4（B008–B012）全部闭合后，才可讨论把默认值翻回开启；
-在此之前 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=1` 仅供预览与验收测试使用。
+**已知风险（保留）**
+
+- **Windows 真机 e2e 未验证**：本机为 Linux，Windows 侧仅有编译期保证 —— `<ws>/.tmp/pony-agent-run-{sid}.cmd`
+  的生命周期清理（B013）走同一终态回收点、Job Object 语义未改，但真机路径（kill/promote/脚本删除）
+  尚未实跑；发版前需在 Windows 上补一次 promote 全链路 e2e。
+- 关闭开关（`=0`）仍保留，供需要波次一语义（`error.code=timeout` + 立即 kill）的调用方使用。
 
 ### 5.1 实现期发现：`kill_after` 与「先 poll 再判超时」的相互作用
 

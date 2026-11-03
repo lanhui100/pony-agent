@@ -82,3 +82,16 @@
 - B-1：promote 成功会摘掉 `error.code=timeout`，使两道连续失败熔断、超时指纹归一、非幂等盲重试防护同时失去输入。→ `B010`
 - B-2：`timedOut/promoted` 无消费方，UI/trace 按 status 判成「成功完成」；`ok:true` + `exitCode:null` 破坏成功路径不变量。→ `B011`
 - B-4：job 层无会话归属（跨会话 list/read/kill）；Windows `.cmd` 残留含命令原文。→ `B012`
+
+## 波次五：CT-P9（B008–B013 闭合后的默认翻转，v7）
+
+> 裁决：B008（条目回收）/ B009（取消接线 + 进程组收口）/ B010（熔断输入）/ B011（前端可见性）/
+> B012（会话归属）/ B013（Windows `.cmd` 生命周期清理）全部绿相落地后，promote 的默认值**翻回开启**，
+> 语义从「opt-in 预览」变为 **opt-out**：默认就是产品行为，需要旧语义的调用方显式关掉。
+
+| ID | 契约 | 验收 |
+| :--- | :--- | :--- |
+| CT-P9 | `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT` **默认开启**（opt-out）：env **缺失** ⇒ 开启；`1`/`true`/`on`/`yes`（trim + 大小写不敏感）⇒ 开启；`0`/`false`/`off`/`no` ⇒ 关闭（回到 `error.code=timeout` 的波次一行为，CT-P6a）；**未识别值 ⇒ 回落默认「开启」并打一条 warn**（`[tools] unrecognized PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=…; falling back to default (promote enabled)`），禁止「开关拼错却静默生效」 | 不设 env ⇒ `promoted=true` + `jobId`（`ct_p9_default_is_promote_on`）；显式 `0` ⇒ `error.code=timeout`（`ct_p4_*`） |
+
+**已知风险（保留）**：Windows 真机 e2e 未验证 —— 本机为 Linux；Windows 侧仅保证
+`<ws>/.tmp/pony-agent-run-{sid}.cmd` 的生命周期清理（B013）与 Job Object 语义未改，但真机路径未实跑。

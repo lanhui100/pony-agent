@@ -217,9 +217,10 @@ const MAX_RUN_TIMEOUT_MS: u64 = 600_000;
 /// 通用 `ToolExecutionPolicy` 默认 deadline（**非** Run 专属）：契约只覆盖 Run，
 /// 其他工具的默认 deadline 维持 10s，不随 [`DEFAULT_RUN_TIMEOUT_MS`] 变化。
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 10_000;
-/// 契约 v6 / CT-P7：Run 到期「promote 成后台 job」的开关 env。**默认关闭（opt-in 预览）**；
-/// 仅 `1`/`true`/`on`/`yes` 开启，未识别值一律关闭（fail-safe）。关闭时行为与波次一逐字一致
-/// （kill + `error.code=timeout`）。不得默认开启的理由见 `run-timeout-promote.md` §5（B008–B012）。
+/// 契约 v7 / CT-P9：Run 到期「promote 成后台 job」的开关 env。**默认开启（opt-out）**：
+/// env 缺失即开启；`0`/`false`/`off`/`no` 关闭后行为与波次一逐字一致
+/// （kill + `error.code=timeout`）；未识别值回落默认开启并打 warn。
+/// 背景与已知风险（含 Windows 真机 e2e 未验证）见 `run-timeout-promote.md` §5。
 const RUN_PROMOTE_ON_TIMEOUT_ENV: &str = "PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT";
 /// promote 开启时给 `kill_after` 安全网加的宽限期：定时器必须**晚于** poll 循环的 deadline
 /// 到达，否则两者同毫秒时定时器线程先醒、会在 promote 之前抢杀进程（进而使 P1/P2/P5 必红）。
@@ -8174,18 +8175,26 @@ pub fn classify_timeout_hint(command: &str) -> String {
     TIMEOUT_HINT_BACKGROUND_ADVICE.to_string()
 }
 
-/// 契约 v6 / CT-P7：Run 超时 promote 开关（**opt-in，默认关闭**）。
+/// 契约 v7 / CT-P9：Run 超时 promote 开关（**默认开启，opt-out**）。
 ///
-/// 语义：仅 env 值为 `1`/`true`/`on`/`yes`（大小写不敏感，允许前后空白）时开启；
-/// env 未设置、空串或任何未识别值（含 `0`/`false`/`off`/`no`/垃圾值）一律视为**关闭**
-/// —— fail-safe：拿不准就不 promote，回到「kill + `error.code=timeout`」的波次一行为。
+/// 语义（BT014 默认翻转）：
+/// - env **缺失** ⇒ `true`（默认 promote）；
+/// - `1`/`true`/`on`/`yes`（trim + 大小写不敏感）⇒ `true`；
+/// - `0`/`false`/`off`/`no` ⇒ `false`（回到「kill + `error.code=timeout`」的波次一行为）；
+/// - **未识别值** ⇒ 回落默认 `true`，但打一条 warn —— 避免「开关拼错却静默生效」。
 fn run_promote_on_timeout_enabled() -> bool {
-    match std::env::var(RUN_PROMOTE_ON_TIMEOUT_ENV) {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
-        ),
-        Err(_) => false,
+    let Ok(value) = std::env::var(RUN_PROMOTE_ON_TIMEOUT_ENV) else {
+        return true;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => true,
+        "0" | "false" | "off" | "no" => false,
+        _ => {
+            eprintln!(
+                "[tools] unrecognized {RUN_PROMOTE_ON_TIMEOUT_ENV}={value:?}; falling back to default (promote enabled)"
+            );
+            true
+        }
     }
 }
 
