@@ -33,6 +33,20 @@ import { describe, expect, it } from "vitest";
 import { REPO_ROOT } from "./pds-streaming-harness";
 
 /**
+ * wave-63 T2：**嵌套守卫**（元测试递归防护）。
+ *
+ * 本文件会 `spawnSync(vitest)` 跑子进程；若子进程再收集到本文件，就会「全量里再跑全量」递归放大
+ * （本工作区曾实测 >20min 不收敛，使「全量 vitest」不可用作门禁）。
+ * 守卫由**两道互补机制**构成：
+ *   ① 本文件启动的子进程一律带 `PDS_V10_NESTED=1`（见 `runVitest`）；
+ *   ② 本文件一旦以 `PDS_V10_NESTED=1` 被收集，**直接跳过 V10-1..V10-3** 并打印一行原因
+ *      —— 即使将来有人误删子进程的 `--exclude`，递归深度也恒为 1。
+ * V10-4 是本守卫的**自证**：真实 spawn 一次嵌套运行，断言它确实走了跳过分支。
+ */
+const NESTED_GUARD_ENV = "PDS_V10_NESTED";
+const NESTED_RUN = process.env[NESTED_GUARD_ENV] === "1";
+
+/**
  * 冻结文件内容锚（SHA-256，2026-11-02 红相锚定前实测）。
  * 这些文件**只读**：契约 §7 规定 Executor 禁止修改 `tests/**`，Test Agent 禁止修改 wave59 目录。
  */
@@ -94,7 +108,8 @@ function runVitest(args: string[], timeoutMs: number): RunReceipt {
     cwd: REPO_ROOT,
     encoding: "utf8",
     timeout: timeoutMs,
-    env: { ...process.env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1" }
+    // wave-63 T2：子进程一律带嵌套标记 ⇒ 嵌套运行中的本文件自行跳过（递归深度恒为 1）。
+    env: { ...process.env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1", [NESTED_GUARD_ENV]: "1" }
   });
   const stdout = result.stdout ?? "";
   const stderr = result.stderr ?? "";
@@ -111,6 +126,18 @@ function sha256Of(relativePath: string): string {
 }
 
 describe("wave-pds-3 V10：既有基线不回归", () => {
+  // wave-63 T2 嵌套守卫：以 PDS_V10_NESTED=1 被收集 ⇒ 不注册任何真实判据（只登记一条 skipped），
+  // 从根上禁止「元测试递归放大」。单层运行时本分支不生效，V10-1..V10-4 全部照常执行。
+  if (NESTED_RUN) {
+    console.log(
+      `[V10-GUARD] 检测到 ${NESTED_GUARD_ENV}=1（嵌套元测试运行）⇒ 跳过 V10-1..V10-3，避免递归放大`
+    );
+    it.skip("V10-GUARD: 嵌套运行跳过元测试（防递归放大）", () => {
+      throw new Error("V10-GUARD 失效：嵌套运行时本文件不得执行任何真实判据");
+    });
+    return;
+  }
+
   it("V10-1: 冻结基线文件内容未被触碰（SHA-256 锚定）", () => {
     // Arrange
     const missing = FROZEN_FILES.filter((entry) => !existsSync(resolve(REPO_ROOT, entry.path)));
@@ -229,5 +256,53 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
       ).toBeGreaterThan(500);
     },
     660_000
+  );
+
+  /**
+   * wave-63 T2：**嵌套守卫自证**（真实执行，非自述）。
+   *
+   * 真实 spawn 一次带 `PDS_V10_NESTED=1` 的子进程运行本文件，断言：
+   *  ① 子进程 exit 0（跳过不是失败）；
+   *  ② 子进程输出里出现守卫日志 ⇒ 嵌套分支**确实被执行过**；
+   *  ③ 子进程里本文件唯一的判据被 skip（1 skipped），且 V10-2/V10-3 的「实跑」判据**没有**被执行
+   *     ⇒ 递归深度恒为 1，不会「全量里再跑全量」。
+   */
+  it(
+    "V10-4: 嵌套守卫自证（PDS_V10_NESTED=1 ⇒ 跳过且不递归）",
+    () => {
+      // Arrange
+      expect(existsSync(VITEST_BIN), `V10-4：找不到 vitest 可执行文件：${VITEST_BIN}`).toBe(true);
+
+      // Act：真实 spawn 一次「嵌套运行」（runVitest 会注入 PDS_V10_NESTED=1）
+      const receipt = runVitest(
+        ["run", "--reporter=default", "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts"],
+        180_000
+      );
+
+      // Assert ①：跳过不算失败
+      expect(
+        receipt.exitCode,
+        `V10-4：嵌套运行必须 exit 0（守卫跳过而非失败）；实际 exit=${receipt.exitCode}\n${receipt.combined.slice(-3000)}`
+      ).toBe(0);
+
+      // Assert ②：嵌套分支确实被执行过一次（守卫日志出现）
+      expect(
+        receipt.combined.includes("[V10-GUARD]"),
+        `V10-4：嵌套运行必须打印守卫日志 [V10-GUARD]（证明走了跳过分支）；实际输出：\n${receipt.combined.slice(-3000)}`
+      ).toBe(true);
+
+      // Assert ③：本文件在嵌套运行里只登记 1 条且被跳过
+      expect(
+        /Tests\s+1 skipped/.test(receipt.combined),
+        `V10-4：嵌套运行必须恰有 1 条 skipped 判据（实际输出：\n${receipt.combined.slice(-3000)}）`
+      ).toBe(true);
+
+      // Assert ④：V10-2/V10-3 的「实跑」判据在嵌套运行里不得执行（否则说明仍在递归）
+      expect(
+        /实跑既有全量单测/.test(receipt.combined) || /✓ V10-2/.test(receipt.combined),
+        `V10-4：嵌套运行不得执行 V10-2/V10-3 的实跑判据（否则递归未被拦住）；实际输出：\n${receipt.combined.slice(-3000)}`
+      ).toBe(false);
+    },
+    200_000
   );
 });
