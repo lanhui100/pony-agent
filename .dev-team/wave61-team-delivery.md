@@ -99,3 +99,18 @@ spawn_teammate / list_agents / send_message / interrupt_agent / drain_inbox / te
 v1.6 后门禁：8 套件 **42 用例全绿**（wave61 16）、`cargo check --all-targets` exit 0、`wave61` 连跑 3 次一致。
 
 **已知环境噪声（与本波无因果，已在基线 commit `52a7a21` 上复现）**：`otel_resource_env_test::pa153_t2_env_overrides_service_version_and_environment` 在 base 与本分支同样失败，属既存失败。
+
+## 9. 端到端真机举证（mock provider，非单测）
+
+脚本：`crates/pony-agent-core/examples/w61_e2e_probe.rs`（evidence harness；输出 `docs/release/evidence/wave-61-team/e2e-probe.txt`）。
+命令：`XDG_CONFIG_HOME=<tmp> XDG_DATA_HOME=<tmp> cargo run -p pony-agent-core --example w61_e2e_probe` → **EXIT=0 / RESULT=E2E_OK**
+
+| 观测点 | 结果 |
+|---|---|
+| 运行时接线 | `STEP0 engine_wired=true`（`AgentRuntimeBuilder::build()` 注册 HostTurnEngine） |
+| 对外请求工具面 | `STEP2 missing_team_tools=[]`（9 项团队工具全部在 38 项 `tools` 数组中） |
+| 团队策略段 | `STEP2 policy_in_system=true`（system 消息含 `Agent Teams is available in this session`） |
+| 队友真实执行 | `MOCK_REQ n=2` / `teammate_requests=1`（队友 turn 由 HostTurnEngine 起独立子运行时并发出独立 provider 请求） |
+| 回执闭环 | `STEP5 lead_replies=["Teammate 'tester' finished turn:\nprobe-ok"]` |
+
+举证期间发现并修复的既有缺陷（**C12**）：provider 层 `block_on(request.json(body).send())` 等在 runtime 之外构造 reqwest/tokio future，裸线程（子代理 worker）调用即 panic `no reactor running`（`Client::execute_request → tokio::time::sleep`）。已把 15 处改为 `block_on(async move { … .await })`，使 provider 层与运行时上下文解耦；该缺陷在 Stub 引擎路径下不可见，是 C2 让真实引擎生产可达后才暴露。
