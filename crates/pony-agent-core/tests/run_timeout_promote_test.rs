@@ -1,7 +1,8 @@
-//! 契约验收测试：Run 超时 promote（真·后台接续）· 契约 v6 · CT-P1..P5 + CT-P7/P7a/P7b
+//! 契约验收测试：Run 超时 promote（真·后台接续）· 契约 v6 · CT-P1..P5 + CT-P7/P7a/P7b/P8
 //!
 //! 契约真源：`.dev-team/designs/run-timeout-promote.md` §2（CT-P1..P5）＋
-//! `.dev-team/contracts/tool-timeout-policy.md` §波次四（CT-P7 / CT-P7a / CT-P7b）。
+//! `.dev-team/contracts/tool-timeout-policy.md` §波次四（CT-P7 / CT-P7a / CT-P7b）＋
+//! `B009`（CT-P8：promote 后用户取消必须生效）。
 //! 本文件是**外部黑盒验收**（integration test，独立 crate）：只经 `ToolRouter` 与 job_* 工具族
 //! 断言可观测行为，不复制实现结构、不读私有字段、不吞异常、不使用永真断言。
 //!
@@ -13,6 +14,7 @@
 //! - CT-P7（默认关闭）→ `ct_p4_promote_default_off_keeps_timeout_error_path`（原 CT-P4 升级：不设 env）
 //! - CT-P7a（先 poll 再判超时）→ `ct_p6_already_exited_process_is_not_promoted`（显式 `=1`，负例）
 //! - CT-P7b（promoted 输出截断标记）→ `ct_p7_promoted_output_truncation_is_flagged`（显式 `=1`）
+//! - CT-P8 / B009（promote 后取消生效）→ `ct_p8_cancel_terminates_promoted_job`（显式 `=1`）
 //!
 //! ## env 串行约束（必读，新增用例必须遵守）
 //! v6 起 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT` **默认关闭（opt-in）**：依赖 promote 的用例必须显式
@@ -22,11 +24,18 @@
 //! panic 安全）。测试二进制之间是独立进程，互不影响；但**本文件内禁止新增不持锁的用例**。
 //!
 //! ## 真实进程与总时长
-//! CT-P1..P7b 必须真的让子进程跨过 deadline（才能验收「到期不杀、转后台继续」），因此依赖本地
+//! CT-P1..P8 必须真的让子进程跨过 deadline（才能验收「到期不杀、转后台继续」），因此依赖本地
 //! shell 的 `sleep`（Windows 用 `ping` 计时）真实进程；deadline 统一取 300ms。
 //! 其中 `thread::sleep` 仅用于**断言时序不变量**（「1s 后仍存活」「kill 后不再产出」），
 //! 不是同步轮询——同步一律用 `job_output(wait:true)` 的条件等待。
-//! 总耗时预算 ≈ 10s（CT-P7b 造 3MiB 输出，见该用例注释）。
+//! 总耗时预算 ≈ 16s（CT-P7b 造 3MiB 输出、CT-P8 需跨过命令本该结束的时刻，见各自用例注释）。
+//!
+//! ## CT-P8 的「无残留进程」口径（Lead 裁决）
+//! - `#[cfg(unix)]`：promote 后按命令判别串扫 `/proc/<pid>/cmdline` 取到该作业的 **进程组 pgid**，
+//!   cancel 后 ≤1s 内不得有**任何**进程仍处于这些 pgid（读 `/proc/<pid>/stat` 的 pgrp 字段判定）。
+//!   只断 Unix，**不**断言跨平台一致；pgid 复用在 1s 窗口内风险可忽略（已在用例注释说明）。
+//! - `#[cfg(windows)]`：本断言 **N/A** —— Windows 的进程树由 Job Object 覆盖（`jobs.rs` 的
+//!   `job` 字段），本仓 Linux 环境无法验证，不做假断言。
 //!
 //! ## 清理约定
 //! 谁创建谁清理：每个 promote 出来的 job 都由 `PromotedJobGuard` 在 Drop 中 `job_kill`，
@@ -35,12 +44,14 @@
 //! 跨会话归属尚未收口，故测试侧显式 kill，不依赖 session shutdown。
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use pony_agent_core::agent::budget::CancellationToken;
 use pony_agent_core::agent::sandbox::TestSandboxBackend;
 use pony_agent_core::agent::tools::{
-    job_kill, job_list, job_output, JobKillArgs, JobListArgs, JobOutputArgs, ToolCall, ToolRouter,
+    job_kill, job_list, job_output, JobKillArgs, JobListArgs, JobOutputArgs, ToolCall,
+    ToolExecutionContext, ToolRouter,
 };
 use serde_json::{json, Value};
 
@@ -130,6 +141,16 @@ const TRUNCATION_COMMAND: &str =
     "ping -n 2 127.0.0.1 >nul & powershell -NoProfile -Command \"[Console]::Out.Write('x' * 3000000)\"";
 #[cfg(not(windows))]
 const TRUNCATION_COMMAND: &str = "sleep 0.4; head -c 3000000 /dev/zero | tr '\\0' 'x'";
+
+/// CT-P8 / B009：promote 后用户取消必须生效。命令 5s 后才产出 `done` —— 取消若失效，
+/// 可见后果就是 `done` 最终出现且 status 长期 running。
+#[cfg(windows)]
+const CANCEL_COMMAND: &str = "ping -n 6 127.0.0.1 >nul & echo done-ct-p8";
+#[cfg(not(windows))]
+const CANCEL_COMMAND: &str = "sleep 5; echo done-ct-p8";
+
+/// 进程组发现的判别串（uniq 标记：避免与同机其它波次并发跑的 `sleep 5` / `echo done` 混淆）。
+const CANCEL_COMMAND_MARKER: &str = "done-ct-p8";
 
 // ── harness ────────────────────────────────────────────────────────────────
 
@@ -228,6 +249,108 @@ impl JobOutputView {
             "killed" | "exited" | "completed" | "failed"
         )
     }
+}
+
+// ── CT-P8 的 Unix 进程组存活探测（Windows：N/A，由 Job Object 覆盖）──────────
+
+/// CT-P8（Unix 专用）：扫 `/proc` 找出「命令判别串匹配且自身是进程组组长」的进程，
+/// 返回其进程组 pgid（去重）。
+///
+/// 实测（本机 Linux）：Run 命令经 `ProcessManager` 以 `sh -lc ...` 启动，子进程**自成进程组**
+/// （`pgrp == pid`），孙进程（如 `sleep`）继承同一 pgid —— 因此按 pgid 探测能覆盖整棵进程树。
+/// 只取进程组组长，避免把「命令行里恰好含判别串」的无关 shell 误当成作业组分。
+#[cfg(unix)]
+fn process_groups_matching(marker: &str) -> Vec<i32> {
+    let mut groups = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return groups;
+    };
+    let own_pid = std::process::id();
+    let own_pgrp = proc_pgrp(own_pid);
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == own_pid {
+            continue;
+        }
+        let Some(cmdline) = proc_cmdline(pid) else {
+            continue;
+        };
+        if !cmdline.contains(marker) {
+            continue;
+        }
+        let Some(pgrp) = proc_pgrp(pid) else {
+            continue;
+        };
+        // 只认进程组组长；并排除本测试进程所在组（防把外层 shell 误当作业组）。
+        if pgrp == pid as i32 && Some(pgrp) != own_pgrp {
+            groups.push(pgrp);
+        }
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+/// CT-P8（Unix 专用）：返回仍处于给定进程组中的存活 pid（不看 cmdline，只看 pgrp，
+/// 因此能抓到被 `killpg` 漏掉的孙进程）。
+#[cfg(unix)]
+fn live_pids_in_groups(groups: &[i32]) -> Vec<u32> {
+    let mut pids = Vec::new();
+    if groups.is_empty() {
+        return pids;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return pids;
+    };
+    let own_pid = std::process::id();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == own_pid {
+            continue;
+        }
+        if let Some(pgrp) = proc_pgrp(pid) {
+            if groups.contains(&pgrp) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids
+}
+
+/// 读 `/proc/<pid>/cmdline`（NUL 分隔 → 空格连接）。
+#[cfg(unix)]
+fn proc_cmdline(pid: u32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        raw.iter()
+            .map(|byte| if *byte == 0 { ' ' } else { *byte as char })
+            .collect(),
+    )
+}
+
+/// 读 `/proc/<pid>/stat` 的 pgrp 字段。
+/// 格式：`pid (comm) state ppid pgrp session ...`（comm 可能含空格/括号，故从最后一个 `)` 之后解析）。
+#[cfg(unix)]
+fn proc_pgrp(pid: u32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    let mut fields = stat[close + 1..].split_whitespace();
+    let _state = fields.next()?;
+    let _ppid = fields.next()?;
+    fields.next()?.parse().ok()
 }
 
 // ── CT-P1 ──────────────────────────────────────────────────────────────────
@@ -622,5 +745,164 @@ fn ct_p7_promoted_output_truncation_is_flagged() {
         !tail.output.is_empty(),
         "CT-P7b：截断不得导致输出整体为空（必须保留边界内字节），实际 output_len={}",
         tail.output.len()
+    );
+}
+
+// ── CT-P8 / B009 ───────────────────────────────────────────────────────────
+
+/// CT-P8（B009）：promote **之后**用户取消（同一 turn 的 `CancellationToken`）必须终止后台作业 ——
+/// `CommandCancelWatcher` 不得随 Run 返回而 drop（L3 复核 B 路实测：cancel 后命令仍跑完）。
+///
+/// 断言链：① promote 成功且 jobId 可续读；② cancel 前仍在 running；③ `token.cancel()` 后 ≤1s 内
+/// 状态转非 running（`killed`/`failed`，20ms tick 条件轮询，非盲等）；④ 跨过命令本该产出 `done`
+/// 的时刻（5s）复核输出里**没有** `done` —— 证明进程真被终止，而不是状态字段撒谎。
+///
+/// 时序预算 ≈5.5s（0.3s promote + ≤1s 取消窗口 + 等到 5s 后复核）。
+#[test]
+fn ct_p8_cancel_terminates_promoted_job() {
+    let _gate = gate_lock();
+    let _env = enable_promote();
+
+    // Arrange：带取消令牌的执行上下文（令牌由本用例在 promote 成功之后才 cancel）。
+    let started = Instant::now();
+    let token = Arc::new(CancellationToken::new());
+    let workspace = unique_workspace("p8");
+    std::fs::create_dir_all(&workspace).expect("create temp workspace");
+
+    let router = ToolRouter::with_workspace_root(workspace.clone())
+        .with_sandbox_backend(TestSandboxBackend::available());
+    let call = ToolCall {
+        name: "workspace_run_command".to_string(),
+        arguments: json!({
+            "command": CANCEL_COMMAND,
+            "cwd": workspace.display().to_string(),
+            "timeoutMs": 300,
+            "description": "CT-P8 取消 promoted job",
+        }),
+        call_id: Some("call-p8".to_string()),
+        plan: None,
+    };
+    let context = ToolExecutionContext {
+        workspace_root: Some(workspace.clone()),
+        cancellation: Some(token.clone()),
+        ..Default::default()
+    };
+
+    // Act 1：到期 promote（沿用 CT-P1 的既有断言口径）。
+    let result = router.execute_with_context(&call, &context);
+    let _ = std::fs::remove_dir_all(&workspace);
+    let payload: Value = serde_json::from_str(&result.output).unwrap_or_else(|error| {
+        panic!(
+            "CT-P8：run_command 输出必须是合法 JSON（{}）: {}",
+            error, result.output
+        )
+    });
+    let job_id = promoted_job_id(&payload);
+    let _guard = PromotedJobGuard::new(Some(job_id.clone()));
+
+    // Assert 1：先决条件 —— 必须先真的 promote，否则本用例证明不了「取消 promoted 作业」。
+    assert_eq!(
+        result.status, "ok",
+        "CT-P8：先决条件 —— promote 必须成功返回 ok，payload={payload}"
+    );
+    assert_eq!(
+        payload.get("promoted").and_then(Value::as_bool),
+        Some(true),
+        "CT-P8：先决条件 —— 结果必须 promoted=true，payload={payload}"
+    );
+
+    let alive = read_job(&job_id, false, 0, 0);
+    assert_eq!(
+        alive.status, "running",
+        "CT-P8：promote 之后、cancel 之前作业必须在运行（命令 5s 才结束），实际 `{}`",
+        alive.status
+    );
+
+    // Arrange 2（Unix）：cancel **之前**先采集该作业的进程组 —— promoted 作业不对外暴露 pid
+    // （`job_list` 的 pid 固定为 0），故按命令判别串从 /proc 反查进程组组长。
+    #[cfg(unix)]
+    let job_groups = process_groups_matching(CANCEL_COMMAND_MARKER);
+    #[cfg(unix)]
+    assert!(
+        !job_groups.is_empty(),
+        "CT-P8：先决条件 —— promote 后应能在 /proc 找到命令 `{}` 的进程组（否则无法做「无残留进程」探测）",
+        CANCEL_COMMAND
+    );
+    // 正控：cancel 之前进程组里**必须**有存活进程（shell + 孙进程），否则「取消后为空」的断言没有鉴别力。
+    #[cfg(unix)]
+    let members_before_cancel = live_pids_in_groups(&job_groups);
+    #[cfg(unix)]
+    assert!(
+        !members_before_cancel.is_empty(),
+        "CT-P8：正控失败 —— cancel 前进程组 {:?} 内没有任何存活进程，         说明 pgid 探测失效，「取消后无残留」将退化为永真断言",
+        job_groups
+    );
+
+    // Act 2：用户取消（等价于 turn Stop）。
+    token.cancel();
+
+    // Assert 2/3：单一 ≤1s 窗口内同时收敛两件事（20ms tick 条件轮询，非盲等）：
+    //   a) job 状态转非 running；b) （Unix）该作业进程组内再无存活成员。
+    let deadline = Instant::now() + Duration::from_millis(1_000);
+    let mut observed = read_job(&job_id, false, 0, 0);
+    #[cfg(unix)]
+    let mut survivors = live_pids_in_groups(&job_groups);
+    while Instant::now() < deadline {
+        let status_settled = observed.status != "running";
+        #[cfg(unix)]
+        let groups_settled = survivors.is_empty();
+        #[cfg(not(unix))]
+        let groups_settled = true;
+        if status_settled && groups_settled {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        observed = read_job(&job_id, false, 0, 0);
+        #[cfg(unix)]
+        {
+            survivors = live_pids_in_groups(&job_groups);
+        }
+    }
+
+    // 失败原因必须可区分（Lead 裁决）：
+    //   ① job 状态仍 running ⇒ 取消监听（CommandCancelWatcher）未接或已随 Run 返回 drop；
+    //   ② job 已停但进程组内仍有存活 ⇒ 只杀了直接子进程，孙进程未被 killpg 回收。
+    assert_ne!(
+        observed.status, "running",
+        "CT-P8（B009）失败原因①：token.cancel() 后 promoted job 状态仍为 `running` \
+         ⇒ 取消监听未接/已随 Run 返回 drop（用户 Stop 停不下来）。",
+    );
+    assert!(
+        observed.status == "killed" || observed.status == "failed",
+        "CT-P8：取消后的终态必须是 killed 或 failed，实际 `{}`",
+        observed.status
+    );
+    #[cfg(unix)]
+    assert!(
+        survivors.is_empty(),
+        "CT-P8（B009）失败原因②：job 状态已停（`{}`）但作业进程组内仍有存活进程 {:?} \
+         ⇒ 只杀了直接子进程，孙进程未被 killpg 回收。pgid={:?}",
+        observed.status,
+        survivors,
+        job_groups
+    );
+
+    // Assert 3：跨过命令本该产出 done 的时刻（5s）复核 —— 取消真实终止了进程，done 永不到来。
+    let until_command_would_finish = Duration::from_millis(5_500).saturating_sub(started.elapsed());
+    if !until_command_would_finish.is_zero() {
+        std::thread::sleep(until_command_would_finish);
+    }
+    let later = read_job(&job_id, false, 0, 0);
+    assert!(
+        !later.output.contains("done"),
+        "CT-P8：取消后进程不得继续产出（done 不应出现，说明进程仍存活），\
+         实际 status=`{}` output={:?}",
+        later.status,
+        later.output
+    );
+    assert!(
+        later.status != "running",
+        "CT-P8：取消后状态不得回退为 running，实际 `{}`",
+        later.status
     );
 }

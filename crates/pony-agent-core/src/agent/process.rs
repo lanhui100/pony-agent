@@ -466,6 +466,14 @@ impl ProcessManager {
         Ok(())
     }
 
+    /// 测试专用：读取受管进程的 pid（用于进程组存活探针，生产代码不依赖 pid）。
+    #[cfg(test)]
+    pub(crate) fn pid_of(&self, session_id: &str, handle: &str) -> Result<u32, String> {
+        let entry = self.lookup(session_id, handle)?;
+        let pid = entry.child.lock().expect("process child poisoned").id();
+        Ok(pid)
+    }
+
     /// 该 handle 的进程是否是被 `kill_after` 安全网终止的（未跟踪/已回收 ⇒ false）。
     ///
     /// Run 的 poll 循环用它在「看到 Exited」时区分自然退出与超时击杀：安全网击杀必须仍按
@@ -635,6 +643,14 @@ impl ProcessManager {
         // Windows 弹窗修复：控制台子进程（cmd/powershell）不得弹出可见控制台窗口。
         #[cfg(windows)]
         hide_console_window(&mut command);
+        // B009：POSIX 上让子进程自成进程组长（pgid == pid）。否则 `terminate` 只能杀直接子进程，
+        // shell 被杀后它派生的孙进程（`sleep 5` 之类）会变孤儿（PPID=1）继续跑。
+        // Windows 侧维持 Job Object（kill-on-close）语义，不做改动。
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         // P2-1：以 CREATE_SUSPENDED 创建子进程，使 Job 纳管严格先于子进程执行，收敛
         // spawn→assign 逃逸窗口。`creation_flags` 是覆盖语义，故此处必须同时带上
         // CREATE_NO_WINDOW（与上一行等价）；主线程在 assign_and_verify 成功后恢复。
@@ -998,6 +1014,13 @@ impl ProcessManager {
             let reap_result = kill_and_reap(&mut child, "failed to terminate managed child");
             #[cfg(not(windows))]
             let reap_result: Result<(), String> = {
+                // B009：子进程是进程组长（spawn 时 process_group(0)），先 killpg 收整个组，
+                // 再对直接子进程 kill + reap 兜底（killpg 对非组长返回 ESRCH，无害）。
+                let pgid = child.id() as i32;
+                // SAFETY：killpg 只发信号，不读写内存；pgid 来自本管理器刚 spawn 的子进程。
+                unsafe {
+                    let _ = libc::killpg(pgid, libc::SIGKILL);
+                }
                 let _ = child.kill();
                 for _ in 0..KILL_REAP_ATTEMPTS {
                     match child.try_wait() {

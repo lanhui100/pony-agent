@@ -3226,6 +3226,9 @@ impl ToolRouter {
                             &stderr,
                             stdout_truncated,
                             stderr_truncated,
+                            // B009：把 turn 取消令牌交给 promoted job，使 Stop 仍能终止它
+                            // （前台 Run 的 watcher 会随本次返回被 drop）。
+                            cancellation.clone(),
                         ) {
                             Ok(job_id) => {
                                 // 红线：promote 路径不得 kill / cancel / 删除批处理脚本，

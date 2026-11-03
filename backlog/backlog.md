@@ -21,10 +21,6 @@
   - 描述：跨轮对话与历史继续流转时的 `calls` 继承与累计逻辑缺乏专门的隔离回归用例验证，需补齐端到端契约与状态重载测试。
   - 登记来源：wave-55 遗留债登记
 
-- [ ] `B009` - P0: promote 后取消失效（用户 Stop 停不下来）
-  - 路径：`crates/pony-agent-core/src/agent/tools.rs:3004`（`CommandCancelWatcher` 随函数返回 drop）
-  - 描述：L3-A BLOCKING，实测 cancel 后 `sleep 5` 仍跑完 exit 0。需把 turn 取消语义延续到 promoted 作业（或把 promoted 注册进可取消集合）。
-
 - [ ] `B010` - P0: promote 成功摘掉 `error.code=timeout`，三道防线失去输入
   - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs:580/:591`、`runtime/recovery.rs:180`
   - 描述：L3-B BLOCKING。连续失败熔断、超时指纹归一、非幂等盲重试防护均以 `status=="error"` 为前提；promote 改为 ok 后三者在「命令超时」场景永不触发。这是 promote 默认关闭的主因（契约 CT-P7）。
@@ -39,6 +35,11 @@
   - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）
 
 ## 已完成
+
+- [x] `B009` - P0: promote 后取消失效（用户 Stop 停不下来）
+  - 路径：`crates/pony-agent-core/src/agent/tools.rs:3004`（`CommandCancelWatcher` 随函数返回 drop）
+  - 描述：L3-A BLOCKING，实测 cancel 后 `sleep 5` 仍跑完 exit 0。需把 turn 取消语义延续到 promoted 作业（或把 promoted 注册进可取消集合）。
+  - 结果：已修复。promoted 作业登记 `CancellationToken` + 作业级 watcher（终态即退出）⇒ cancel 后 ≤1s 转 killed；`process.rs` POSIX 侧 spawn 改 `process_group(0)` + `terminate` 先 `killpg` 再 reap ⇒ 消灭孙进程孤儿。验收：`ct_p8`（含 `/proc` 组内无存活正控与分流断言）8 例全绿。
 
 - [x] `B008` - P0: promoted 作业的 `ManagedProcess` 条目永不回收（每 run 泄漏 1 条目 + Windows Job 句柄）
   - 路径：`crates/pony-agent-core/src/agent/process.rs`（poll 不 remove）、`tools.rs` promote 早返回跳过二次 kill、`ProcessManager::shutdown` 零生产调用方

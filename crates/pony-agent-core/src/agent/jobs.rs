@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::agent::budget::CancellationToken;
 use crate::agent::process::ProcessManager;
 use crate::agent::tool_runtime::{ProcessBackend, ProcessPollResult, ProcessState};
 
@@ -200,6 +201,9 @@ struct JobSession {
     stderr_truncated: AtomicBool,
     /// B008：promoted 作业进入终态后，`ProcessManager` 里的条目是否已回收（一次性开关）。
     released: AtomicBool,
+    /// B009：promoted 作业继承的取消令牌。promote 后前台 Run 的 `CommandCancelWatcher` 会随函数
+    /// 返回被 drop，用户 Stop 就再也停不下这条命令；watcher 线程改由此字段判定取消。
+    cancel: Option<Arc<CancellationToken>>,
     kind: JobKind,
     #[cfg(windows)]
     #[allow(dead_code)]
@@ -680,6 +684,7 @@ pub fn job_start_with_workspace_root(
         stdout_truncated: AtomicBool::new(false),
         stderr_truncated: AtomicBool::new(false),
         released: AtomicBool::new(false),
+        cancel: None,
         kind: JobKind::Owned,
         #[cfg(windows)]
         job,
@@ -701,8 +706,12 @@ pub fn job_start_with_workspace_root(
 /// promote 时刻已经累计读到的输出，`*_truncated` 是对应流的粘性截断标记（设计 §4 要求透传）。
 ///
 /// 失败（registry 不可用等）返回 `Err`，调用方负责回落到既有「kill + timeout 错误」路径。
-// 参数个数由 B005 契约的可测接缝固定（manager + 租借三元组 + 命令行 + 首读快照 + 两个截断
-// 标记 = 8）；不合并成结构体是为了让接缝与调用点逐字对应契约签名，避免额外类型。
+/// B009：`cancel` 是前台 Run 继承的 turn 取消令牌。promote 之后前台 Run 的
+/// `CommandCancelWatcher` 随函数返回被 drop，用户 Stop 再也停不下命令；因此注册时额外 spawn
+/// 一个**短生命周期** watcher 线程（20ms tick）：令牌取消 ⇒ `kill_internal` 落 `killed`；
+/// 作业进入终态（或 `JobSession` 被回收）⇒ 线程立即退出，禁止常驻泄漏。
+// 参数个数由契约可测接缝固定（manager + 租借三元组 + 命令行 + 首读快照 + 两个截断标记 +
+// 取消令牌）；不合并成结构体是为了让接缝与调用点逐字对应契约签名，避免额外类型。
 #[allow(clippy::too_many_arguments)]
 pub fn register_promoted(
     manager: ProcessManager,
@@ -713,6 +722,7 @@ pub fn register_promoted(
     first_stderr: &str,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    cancel: Option<Arc<CancellationToken>>,
 ) -> Result<String, String> {
     let buffer = Arc::new(Mutex::new(RingBuffer::new(JOB_BUFFER_CAP)));
     // 契约 CT-P7b：首读快照若本身已超过 ring buffer 容量，同样置 truncated 标记。
@@ -750,6 +760,7 @@ pub fn register_promoted(
         stdout_truncated: AtomicBool::new(stdout_truncated),
         stderr_truncated: AtomicBool::new(stderr_truncated),
         released: AtomicBool::new(false),
+        cancel: cancel.clone(),
         kind: JobKind::Promoted {
             manager,
             session_id,
@@ -759,8 +770,43 @@ pub fn register_promoted(
         job: None,
     });
 
-    registry().lock().unwrap().insert(job_id.clone(), session);
+    registry().lock().unwrap().insert(job_id.clone(), session.clone());
+    spawn_cancel_watcher(Arc::downgrade(&session));
     Ok(job_id)
+}
+
+/// B009：promoted 作业的取消观察者（短生命周期，20ms tick）。
+///
+/// 退出条件（三者任一即退出，保证不常驻）：
+/// 1. `JobSession` 已被回收（`Weak::upgrade` 失败）；
+/// 2. 作业已进入终态（`status != "running"`，含被 `job_kill` 或自然结束）；
+/// 3. 令牌已取消 ⇒ 调 [`JobSession::kill_internal`] 落 `killed` 后退出。
+fn spawn_cancel_watcher(weak: std::sync::Weak<JobSession>) {
+    std::thread::Builder::new()
+        .name("promoted-cancel-watch".to_string())
+        .spawn(move || {
+            const TICK: Duration = Duration::from_millis(20);
+            loop {
+                let Some(session) = weak.upgrade() else {
+                    return;
+                };
+                let cancelled = session
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled());
+                let status = session.status.lock().unwrap().clone();
+                if status != "running" {
+                    return;
+                }
+                if cancelled {
+                    let _ = session.kill_internal(Some("cancelled"));
+                    return;
+                }
+                drop(session);
+                std::thread::sleep(TICK);
+            }
+        })
+        .ok();
 }
 
 pub fn job_output(args: JobOutputArgs) -> Result<JobOutputResult, String> {
@@ -912,6 +958,7 @@ mod tests {
             &first_read.stderr,
             first_read.stdout_truncated,
             first_read.stderr_truncated,
+            None,
         )
         .expect("register_promoted must succeed");
         assert!(
@@ -959,6 +1006,94 @@ mod tests {
         );
     }
 
+    /// B009：promote 后取消令牌生效 —— watcher 终止进程组、作业落 `killed`、条目被回收。
+    ///
+    /// 同时输出物理证据：cancel→终态耗时、进程组（pgid）是否已无存活成员。
+    #[test]
+    fn promoted_job_cancel_token_terminates_process_group() {
+        let manager = ProcessManager::new();
+        let session_id = "b009-cancel";
+        #[cfg(windows)]
+        let handle = start(
+            &manager,
+            session_id,
+            "cmd",
+            &["/C", "ping -n 6 127.0.0.1 >nul & echo done"],
+        );
+        #[cfg(not(windows))]
+        let handle = start(&manager, session_id, "sh", &["-c", "sleep 5; echo done"]);
+
+        // 进程组长的 pid（= pgid）：必须在 cancel 之前取，回收后条目就没了。
+        let pgid = manager.pid_of(session_id, &handle).expect("pid_of");
+
+        let token = Arc::new(CancellationToken::new());
+        let job_id = register_promoted(
+            manager.clone(),
+            session_id.to_string(),
+            handle.clone(),
+            "cancel watch".to_string(),
+            "",
+            "",
+            false,
+            false,
+            Some(token.clone()),
+        )
+        .expect("register_promoted must succeed");
+
+        let before = job_output(JobOutputArgs {
+            job_id: job_id.clone(),
+            wait: Some(false),
+            timeout_ms: Some(0),
+            offset: None,
+        })
+        .expect("job_output before cancel");
+        assert_eq!(before.status, "running", "cancel 之前作业必须仍在运行");
+
+        // Act：等价于用户 Stop。
+        let started = Instant::now();
+        token.cancel();
+        let mut status = "running".to_string();
+        while started.elapsed() < Duration::from_secs(1) {
+            status = job_output(JobOutputArgs {
+                job_id: job_id.clone(),
+                wait: Some(false),
+                timeout_ms: Some(0),
+                offset: None,
+            })
+            .expect("job_output after cancel")
+            .status;
+            if status != "running" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let elapsed = started.elapsed();
+
+        #[cfg(unix)]
+        let pgid_alive = {
+            // SAFETY：只发信号 0（探针），不读写内存。
+            let rc = unsafe { libc::killpg(pgid as i32, 0) };
+            rc == 0
+        };
+        #[cfg(windows)]
+        let pgid_alive = false; // Windows 走 Job Object（kill-on-close），无 POSIX 进程组。
+        eprintln!(
+            "[b009] cancel → status={status} in {elapsed:?}; pgid={pgid} alive={pgid_alive}; tracked={}",
+            manager.is_tracked(session_id, &handle)
+        );
+
+        assert_ne!(status, "running", "B009：cancel 后 1s 内作业必须离开 running");
+        assert_eq!(status, "killed", "B009：取消后的终态必须是 killed");
+        assert!(
+            !pgid_alive,
+            "B009：cancel 后进程组（pgid={pgid}）内不得再有存活进程（否则孙进程变孤儿继续跑）"
+        );
+        assert!(
+            !manager.is_tracked(session_id, &handle),
+            "B009/B008：cancel 后 ProcessManager 条目必须被回收"
+        );
+    }
+
     /// 被 `job_kill` 终止的 promoted 作业：kill 路径同样回收条目。
     #[test]
     fn promoted_job_releases_manager_entry_after_job_kill() {
@@ -978,6 +1113,7 @@ mod tests {
             "",
             false,
             false,
+            None,
         )
         .expect("register_promoted must succeed");
 
