@@ -1696,13 +1696,13 @@ impl ProviderManager {
         );
         // Wave-4 C3：outbound 级联注入 traceparent（无活跃 turn 时原样透传，零改动）。
         let request = crate::agent::otel::with_current_traceparent(request);
-        let response = block_on(request.json(body).send()).map_err(|error| {
+        let response = block_on(async move { request.json(body).send().await }).map_err(|error| {
             format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
         })?;
 
         let status = response.status();
         if !status.is_success() {
-            let text = block_on(response.text()).map_err(|error| {
+            let text = block_on(async move { response.text().await }).map_err(|error| {
                 format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
             })?;
 
@@ -1749,13 +1749,13 @@ impl ProviderManager {
         }
         // Wave-4 C3：outbound 级联注入 traceparent。
         let request = crate::agent::otel::with_current_traceparent(request);
-        let response = block_on(request.json(body).send()).map_err(|error| {
+        let response = block_on(async move { request.json(body).send().await }).map_err(|error| {
             format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
         })?;
 
         let status = response.status();
         if !status.is_success() {
-            let text = block_on(response.text()).map_err(|error| {
+            let text = block_on(async move { response.text().await }).map_err(|error| {
                 format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
             })?;
 
@@ -2089,13 +2089,13 @@ impl ProviderManager {
         );
         // Wave-4 C3：outbound 级联注入 traceparent（无活跃 turn 时原样透传，零改动）。
         let request = crate::agent::otel::with_current_traceparent(request);
-        let response = block_on(request.json(body).send())
+        let response = block_on(async move { request.json(body).send().await })
         .map_err(|error| {
             format_request_error("调用 provider 失败", &error, started_at.elapsed())
         })?;
 
         let status = response.status();
-        let text = block_on(response.text()).map_err(|error| {
+        let text = block_on(async move { response.text().await }).map_err(|error| {
             format_request_error("读取 provider 返回失败", &error, started_at.elapsed())
         })?;
 
@@ -2141,12 +2141,12 @@ impl ProviderManager {
         }
         // Wave-4 C3：outbound 级联注入 traceparent。
         let request = crate::agent::otel::with_current_traceparent(request);
-        let response = block_on(request.json(body).send()).map_err(|error| {
+        let response = block_on(async move { request.json(body).send().await }).map_err(|error| {
             format_request_error("调用 provider 失败", &error, started_at.elapsed())
         })?;
 
         let status = response.status();
-        let text = block_on(response.text()).map_err(|error| {
+        let text = block_on(async move { response.text().await }).map_err(|error| {
             format_request_error("读取 provider 返回失败", &error, started_at.elapsed())
         })?;
 
@@ -2730,7 +2730,11 @@ where
             }
         }
 
-        match block_on(tokio::time::timeout(poll_tick, stream.next())) {
+        // Wave-61 C12：`tokio::time::timeout(...)` 必须在 **async 上下文内**构造 ——
+        // 若在 `block_on(...)` 之前就地求值，调用线程没有 reactor 时会直接在 future 构造
+        // 阶段 panic（`no reactor running`），而 `runtime_helper::block_on` 的静态 Runtime
+        // 兜底只在进入 block_on 之后才生效，救不了这一段。故把构造移进 async 块。
+        match block_on(async { tokio::time::timeout(poll_tick, stream.next()).await }) {
             Err(_stalled) => continue,
             Ok(Some(Ok(bytes))) => {
                 let chunk_len = bytes.len();
@@ -7270,7 +7274,7 @@ mod tests {
         let started = Instant::now();
         let response = block_on(client.get(&success_endpoint).send()).expect("stream must connect");
         assert!(response.status().is_success());
-        let body = block_on(response.text()).expect("long stream must not be cut by a total deadline");
+        let body = block_on(async move { response.text().await }).expect("long stream must not be cut by a total deadline");
         let elapsed = started.elapsed();
         assert!(
             elapsed > Duration::from_secs(1),
@@ -7292,7 +7296,7 @@ mod tests {
         )
         .expect("build stalled client");
         let error = match block_on(client.get(&stalled_endpoint).send()) {
-            Ok(response) => block_on(response.text()).expect_err("stalled stream must time out"),
+            Ok(response) => block_on(async move { response.text().await }).expect_err("stalled stream must time out"),
             Err(error) => error,
         };
         assert!(

@@ -1,8 +1,8 @@
 {
   "wave": "wave-61-team-activation",
-  "phase": "green-v1.6-final",
+  "phase": "green-v1.7-final",
   "verified_by": "lead",
-  "captured_at": "2026-11-03T11:57:58+0800",
+  "captured_at": "2026-11-03T13:15:04+0800",
   "exit_code": 0,
   "suites": [
     {
@@ -44,8 +44,18 @@
     "cargo check -p pony-agent-core --all-targets -> exit 0"
   ],
   "notes": [
-    "v1.6: 空闲态 interrupt 不再写 stale 标记；派生新驱动前清残留标记；检查点命中即 requeue+Inactive",
-    "16 wave61 用例全绿（含 c7d 在途消息、c7e 空闲中断回归）",
-    "连跑 3 次一致"
-  ]
+    "C12: reqwest/tokio futures 全部移入 async 块构造（15 处）→ 裸线程安全",
+    "8 套件 42 用例全绿"
+  ],
+  "e2e_probe": {
+    "command": "XDG_CONFIG_HOME=<tmp> XDG_DATA_HOME=<tmp> cargo run -p pony-agent-core --example w61_e2e_probe",
+    "exit_code": 0,
+    "result": "E2E_OK",
+    "evidence": "docs/release/evidence/wave-61-team/e2e-probe.log",
+    "observations": [
+      "parent provider request 38 tools incl. 9 team tools; system contains 'Agent Teams is available in this session'",
+      "teammate drive issued a second real provider request (teammate_requests=1) with same 38-tool surface",
+      "Lead inbox received teammate receipt 'probe-ok'"
+    ]
+  }
 }

@@ -3361,7 +3361,9 @@ impl ToolRouter {
                     .header("Content-Type", "application/json");
                 // Wave-4 C3：工具出网在活跃 turn 内级联 traceparent（无活跃 turn 时零改动）。
                 let request = crate::agent::otel::with_current_traceparent(request);
-                block_on(request.body(body.to_string()).send())
+                // `body` 由 `FnMut` 闭包按引用捕获，先克隆出 owned 字符串再 move 进 async 块。
+                let body_text = body.to_string();
+                block_on(async move { request.body(body_text).send().await })
                 .map_err(|error| {
                     if is_reqwest_timeout_error(&error) {
                         format!("timeout: Exa 搜索请求超时：{}。", error)
@@ -3388,7 +3390,7 @@ impl ToolRouter {
         };
 
         let status = response.status();
-        let response_body = match block_on(response.text()) {
+        let response_body = match block_on(async move { response.text().await }) {
             Ok(value) => value,
             Err(error) => {
                 return error_result(
@@ -8186,7 +8188,7 @@ impl PinnedSender for ReqwestPinnedSender {
             .map_err(WebFetchTransportError::ClientBuild)?;
         // Wave-4 C3：工具出网在活跃 turn 内级联 traceparent（无活跃 turn 时零改动）。
         let request = crate::agent::otel::with_current_traceparent(client.get(parsed));
-        let response = block_on(request.send()).map_err(|error| {
+        let response = block_on(async move { request.send().await }).map_err(|error| {
             if is_reqwest_timeout_error(&error) {
                 WebFetchTransportError::Request(format!("timeout: 抓取 URL 超时：{}。", error))
             } else {

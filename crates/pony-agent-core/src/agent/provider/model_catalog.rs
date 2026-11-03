@@ -24,11 +24,11 @@ pub fn fetch_model_ids(
 
     // Wave-4 C3：所有 outbound 请求在存在活跃 span 时都透传 traceparent（无活跃 turn 零改动）。
     let request = crate::agent::otel::with_current_traceparent(request);
-    let response = block_on(request.send())
+    let response = block_on(async move { request.send().await })
         .map_err(|error| format_request_error("获取模型列表失败", &error, started_at.elapsed()))?;
 
     let status = response.status();
-    let body = block_on(response.text()).map_err(|error| {
+    let body = block_on(async move { response.text().await }).map_err(|error| {
         format_request_error("读取模型列表返回失败", &error, started_at.elapsed())
     })?;
 

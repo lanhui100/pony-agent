@@ -87,7 +87,9 @@ where
         guard.cancel_tick(),
         &mut cancel_requested,
         &mut |_tick| {
-            match block_on(tokio::time::timeout(poll_tick, stream.next())) {
+            // Wave-61 C12：timeout future 必须在 async 块内构造（理由同 provider/mod.rs:
+            // 无 reactor 的调用线程在 future 构造阶段即 panic，block_on 的兜底来不及生效）。
+            match block_on(async { tokio::time::timeout(poll_tick, stream.next()).await }) {
                 Err(_stalled) => ChunkPoll::Stalled,
                 Ok(None) => ChunkPoll::End,
                 Ok(Some(item)) => ChunkPoll::Item(item),

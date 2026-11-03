@@ -205,6 +205,13 @@ impl HostTurnEngine {
             // SUBAGENT_MAX_CONCURRENT。move 进本线程后，只有线程真正结束才归还。
             let _inflight = inflight;
             let result = catch_unwind(AssertUnwindSafe(move || {
+                // Wave-61 C12.2：本 worker 是裸 `std::thread::spawn`（**无** reactor），
+                // 之所以安全，是因为 provider 侧所有 reqwest/tokio future（`send()` /
+                // `text()` / `stream.next()` / `tokio::time::timeout(...)`）都已在 **async
+                // 块内**构造，future 自身的创建不再触碰 `Handle::current()`；
+                // 实际轮询统一走 `runtime_helper::block_on`（无 handle 时回落到进程级静态
+                // Runtime）。因此这里**不需要**再 `rt.enter()`，保持裸线程即可。
+
                 // 独立建栈：不共享宿主 SessionStore / ProviderRegistryStore。
                 let runtime = AgentRuntimeBuilder::new()
                     .workspace_root(workspace_root)

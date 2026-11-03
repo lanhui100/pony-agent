@@ -1,7 +1,7 @@
 # Wave-61 契约：Agent Team 激活（工具面 × 宿主接线 × 策略提示 × 并发守恒）
 
 - 契约编号：wave-61-team-activation
-- 状态：`FROZEN v1.4（wave-61；v1.4 = 方案/复审收口：C4 面⑦ AC-05 seam 迁移 / C10 驱动可靠性 / C11 已知局限显式登记）`
+- 状态：`FROZEN v1.7（wave-61；v1.7 = 真机举证 BLOCKING 收口：C12 子代理工作线程运行时上下文 / recheck 链 fa·fp·fr·fv 登记 / e2e_probe 客观事实入账）`
 - 作者：Protocol Agent（协议特派员）；v1.1/v1.2 由 Lead 裁决驱动演进
 - 唯一写域：`.dev-team/`（本文件 + `.dev-team/nfr-baseline.json` + `.dev-team/nfr-baseline.schema.json` 的**增量**声明；schema 只含 wave-61 自己的字段）
 - 禁止写域：任何 Rust 源码与测试（含 `crates/**`、`src-tauri/**`、`tests/**`）、`.dev-team/state.json`
@@ -637,6 +637,64 @@ splice 起点 `1 + 0` 会与实际已 push 的 2 条 System 错位 → 下标越
 > **纪律**：L1–L7 中任何一条被修复后，必须在 successor 契约中删除对应行；**不得**在 L 未修复期间于策略段/工具描述/
 > 发布说明中出现超出口径的承诺（诚实性底线，wave-25 冻结面同源）。
 
+## C12 子代理工作线程的运行时上下文契约（真机举证发现的新 BLOCKING）
+
+### C12.1 事实（链式证据）
+
+1. **provider 流读取依赖 tokio reactor**：`crates/pony-agent-core/src/agent/provider/mod.rs:9` `use crate::agent::runtime_helper::block_on;`，
+   流读取路径 `block_on(tokio::time::timeout(poll_tick, stream.next()))`（`provider/mod.rs:2733`；同构路径
+   `provider/responses_api.rs:90`，注释见 `:60`）。`tokio::time::timeout` 需要**调用线程处于 tokio runtime 上下文**。
+2. **子代理 worker 是裸线程**：`HostTurnEngine::run_turn` 用 `std::thread::spawn(...)` 起 worker
+   （`crates/pony-agent-core/src/agent/subagent_runtime.rs` worker 闭包），该线程**没有** reactor 上下文。
+3. **后果**：真机举证时队友 turn 在**首次 provider 调用**处 panic → 被 `catch_unwind` 映射为
+   `Err("subagent_engine_panicked")`（`subagent_runtime.rs` 的 `mapped` 分支），表现为"队友永远不产出回执"，
+   且错误信息不含 `no reactor running` 根因（被 catch_unwind 吞成通用串）。
+4. **为何测试从未暴露**：注入式 Stub 引擎不调用 provider 流读取；而 **C2（宿主引擎接线）首次让 `HostTurnEngine`
+   这条路径在生产可达** —— 即 C12 是 C2 的**暴露面**，不是新引入的回归。
+
+### C12.2 规则
+
+worker 闭包内、**构建 `AgentRuntimeBuilder` 之前**创建并**进入** current-thread tokio runtime：
+
+```rust
+let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()
+    .expect("subagent tokio runtime");
+let _enter = rt.enter();
+// 之后才 AgentRuntimeBuilder::new()…build() + run_turn(...)
+```
+
+- `rt` 与 `EnterGuard` 必须活到**整个 turn 生命周期**（闭包结束即 Drop），与 `AgentRuntime` 同域；
+- **panic 捕获语义不变**：`catch_unwind` 仍包裹闭包主体，panic 仍映射为 `subagent_engine_panicked`；
+- **孤儿语义不变**：父线程超时返回仍遗留 worker（C6.2/C10 的既有口径不变，许可仍 move 进 worker 线程）。
+
+> **实施状态（v1.7 实测，工作树）**：已实现于 `subagent_runtime.rs:208-220`
+> （`new_current_thread().enable_all().build()` + `let _enter = rt.enter();` 位于 `AgentRuntimeBuilder::new()` 之前，
+> 注释标注 `Wave-61 C12`）；**尚未提交**。
+
+### C12.3 验收断言
+
+- **C12-A1**（真机举证）：举证脚本 `examples/w61_e2e_probe.rs`（**临时产物**，用后已清理）输出 `RESULT=E2E_OK`；
+  其中 STEP5 断言 `teammate_requests >= 1`（mock provider 侧计数）且 `lead_replies` 含 mock provider 的固定回执文本。
+- **C12-A2**（根因消失）：队友 turn 执行线程内**不出现** `no reactor running`；
+  失败路径不得只有 `subagent_engine_panicked` 而无根因（若仍 panic，必须保留原始 panic 文本可定位）。
+- **C12-A3**（不回归）：既有 8 套件（`wave61_team_activation` / `pa110_teams_acceptance` / `wave37_tool_surface` /
+  `wave25_capability_honesty_test` / `tool_surface_wave20_contract` / `orchestration_acceptance_test` /
+  `team_task_order_contract` / `teammate_e2e_communication_test`）与 `cargo test -p pony-agent-core --lib` 全绿。
+
+### C12.4 真机举证客观事实入账（evidence）
+
+| 项 | 内容 |
+|---|---|
+| 举证方式 | 临时 example：`examples/w61_e2e_probe.rs`（跑 mock provider + 真实 `orchestration::send_message` / 队友驱动链路） |
+| 观察输出 | `RESULT=E2E_OK`；STEP5 `teammate_requests >= 1`；`lead_replies` 含 mock provider 固定回执 |
+| 修复前 | 同一脚本在首次 provider 调用处 panic（`subagent_engine_panicked`） |
+| 产物留存 | **已清理**（`examples/w61_e2e_probe.rs` 在仓库中不存在）→ 仓库内**不可复现**，故标注 **[EVIDENCE-LEAD]**（由 Lead 真机执行并回报） |
+| 结构化引用 | `.dev-team/green-phase-wave61-team.json` 的 `e2e_probe` 字段（命令 + 输出 + 产物留存状态） |
+
+> **[EVIDENCE-LEAD]** 标记含义：该证据来自 Lead 的真机执行回报，本次会话无法独立重放（临时产物已删）；
+> 其结构化形态已登记在 green-phase 的 `e2e_probe` 字段。C12-A1 的可复现化（把 probe 转成常驻 `#[ignore]` 用例或
+> 独立 bin）登记为 backlog，不阻塞本波。
+
 ## 审查收据（L3-A / L3-P @`60e7cb8`；方案审查 / 复审 @`922e960`）
 
 ### A. L3-A（`.dev-team/review-wave61-a.json`）：`verdict: FAIL`，7 findings（2 BLOCKING / 5 ADVISORY）
@@ -718,6 +776,26 @@ splice 起点 `1 + 0` 会与实际已 push 的 2 条 System 错位 → 下标越
 
 > **收口判定**：E1/E2/E3 由 C10 + C11 承担（C10 实现已在工作树、**用例待补**；E2 的承诺改写属 Executor 的 src 写域，
 > 本契约只登记"必须补齐，不得承诺立即停止"）。E4–E7、E9、E10 登记为 backlog/缺口，不伪造为已修。
+
+### F. recheck 链（`fa` / `fp` / `fr` / `fv`）与真机举证 C12
+
+| 件 | verdict | reviewed_commit | findings | 说明 |
+|---|---|---|---|---|
+| `.dev-team/review-wave61-fa.json` | **FAIL** | `ed6d35e` | 7（1 BLOCKING：`orchestration.rs:561` CONCURRENCY） | 驱动/中断并发面；已由 `6b9e23a`/`e403302` 修复链收口 |
+| `.dev-team/review-wave61-fp.json` | **PASS** | `ed6d35e` | 7（0 BLOCKING） | 方案面通过 |
+| `.dev-team/review-wave61-fr.json` | **FAIL** | `6b9e23a` | 8（1 BLOCKING：`orchestration.rs:892` CONCURRENCY） | 驱动循环/中断标记面；由 `e403302` 修复（idle interrupt 不再滞留下次驱动 + stale marker + 回归用例） |
+| `.dev-team/review-wave61-fv.json` | **PASS** | `e403302` | 4（0 BLOCKING） | 终审通过；含 `c7e_interrupt_when_idle_does_not_strand_next_message` 实跑收据（`C7E_OK calls=1 delivery_state=driving prompts=1 final=Some(Inactive)`） |
+| 收口提交 | `8481eda` | — | — | `chore(wave-61-team): final recheck chain receipts (A FAIL→closed, P PASS, v1.5/v1.6 regressions closed)` |
+
+**真机举证（本轮新增 BLOCKING）**：真机 e2e 举证暴露 **C12**——`HostTurnEngine` worker 为裸 `std::thread::spawn`、
+无 tokio reactor，而 provider 流读取用 `block_on(tokio::time::timeout(...))`（`provider/mod.rs:2733`、`responses_api.rs:90`）
+→ 队友 turn 在首次 provider 调用处 panic（映射为 `subagent_engine_panicked`）。
+
+**C12 与 C2 的关系（必须显式记录）**：C2（宿主引擎接线收敛到 `runtime/builder.rs:79`）**首次让 `HostTurnEngine`
+在生产路径可达**；此前该路径只被测试以 Stub 引擎覆盖，Stub 不触发 provider 流读取，故该缺陷**不可见**。
+即：C2 是**暴露面**、C12 是**被暴露的既有依赖缺口**（reactor 上下文），二者不互为回归。
+处置：C12.2 规则 + C12.3 断言（A1 真机 / A2 `no reactor running` 消失 / A3 8 套件与 `--lib` 不回归），
+实现已在工作树（`subagent_runtime.rs:208-220`）。
 
 ## 6. NFR 基准增量（`.dev-team/nfr-baseline.json`，additive-only）
 
