@@ -21,9 +21,6 @@
   - 描述：跨轮对话与历史继续流转时的 `calls` 继承与累计逻辑缺乏专门的隔离回归用例验证，需补齐端到端契约与状态重载测试。
   - 登记来源：wave-55 遗留债登记
 
-- [ ] `B010` - P0: promote 成功摘掉 `error.code=timeout`，三道防线失去输入
-  - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs:580/:591`、`runtime/recovery.rs:180`
-  - 描述：L3-B BLOCKING。连续失败熔断、超时指纹归一、非幂等盲重试防护均以 `status=="error"` 为前提；promote 改为 ok 后三者在「命令超时」场景永不触发。这是 promote 默认关闭的主因（契约 CT-P7）。
 
 - [ ] `B011` - P1: `timedOut/promoted` 无消费方，UI/trace 把仍在跑的命令显示为「成功完成」
   - 路径：`src/components/chat/WorkspaceTurnItem.vue:631`、`src/lib/runtime/trajectory-core.ts:320`、`src/lib/runtime/trace.ts:378`；`ok:true` + `exitCode:null` 破坏成功路径不变量
@@ -57,6 +54,11 @@
   - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）；本机 Linux 无法验证，需 Windows CI 或目标机验证。
 
 ## 已完成
+
+- [x] `B010` - P0: promote 成功摘掉 `error.code=timeout`，三道防线失去输入
+  - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs:580/:591`、`runtime/recovery.rs:180`
+  - 描述：L3-B BLOCKING。连续失败熔断、超时指纹归一、非幂等盲重试防护均以 `status=="error"` 为前提；promote 改为 ok 后三者在「命令超时」场景永不触发。这是 promote 默认关闭的主因（契约 CT-P7）。
+  - 结果：已修复。`tool_failure_signal` 对 `status==ok && timedOut==true`（promote）产出与 error 路径逐字相同的 `(tool, 归一化指纹, "timeout")` ⇒ 指纹归一闪与两道连续失败闸重获输入；promote 文案补「不要重复执行同一命令」。未改阈值/错误码/签名。验收 `timeout_signal_promote_test` 3 passed（红相：promote ⇒ None）。
 
 - [x] `B012` - P0: job 层无会话归属（跨会话 list/read/kill）；Windows `.cmd` 残留含命令原文
   - 路径：`crates/pony-agent-core/src/agent/jobs.rs`（全局 REGISTRY、`JobListArgs{}` 空）、`tools.rs` Windows 批处理写入与 promote 早返回跳过删除

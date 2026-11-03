@@ -577,12 +577,35 @@ pub fn tool_failure_signal(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Option<(String, String, String)> {
-    if tool_result.status != "error" || tool_result_control_outcome_pending(tool_result) {
+    if tool_result_control_outcome_pending(tool_result) {
         return None;
     }
     let Ok(parsed) = serde_json::from_str::<Value>(&tool_result.output) else {
         return None;
     };
+    // 契约 B010（CT-B010-1）：Run 到期 promote 成后台作业后，结果是 `status="ok"` 且**没有**
+    // `error.code=timeout` —— 若不在这里补一条 timeout 类信号，连续失败熔断、超时指纹归一、
+    // 非幂等盲重试防护会同时失去输入。判定口径只看载荷根级事实：`timedOut == true`。
+    // 指纹与 error 路径**共用同一归一化面**（Run 类工具去掉/归一 timeoutMs），保证
+    // 「同命令同超时稳定、不同命令可区分」。
+    if tool_result.status == "ok" {
+        if parsed.get("timedOut").and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
+        let normalized_args = if is_run_class_tool_name(&tool_call.name) {
+            normalize_run_timeout_argument_value(&tool_call.arguments)
+        } else {
+            canonicalize_tool_argument_value(&tool_call.arguments)
+        };
+        return Some((
+            tool_call.name.clone(),
+            normalized_args.to_string(),
+            "timeout".to_string(),
+        ));
+    }
+    if tool_result.status != "error" {
+        return None;
+    }
     let error = parsed.get("error")?;
     let code = error
         .get("kind")
@@ -690,5 +713,102 @@ impl ConsecutiveFailureTracker {
     /// 同一工具连续失败次数（成功或换工具即归零）。
     pub(super) fn same_tool_count(&self) -> usize {
         self.tool_count
+    }
+}
+
+#[cfg(test)]
+mod b010_timeout_signal_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run_call(command: &str, timeout_ms: u64) -> ToolCall {
+        ToolCall {
+            name: "workspace_run_command".to_string(),
+            arguments: json!({
+                "command": command,
+                "cwd": "/repo",
+                "timeoutMs": timeout_ms,
+                "description": "b010",
+            }),
+            call_id: Some("call-b010".to_string()),
+            plan: None,
+        }
+    }
+
+    /// promote 成功载荷（status=ok + 根部 timedOut=true + promoted/jobId）。
+    fn promoted_result(timeout_ms: u64) -> ToolResult {
+        ToolResult {
+            tool_name: "workspace_run_command".to_string(),
+            status: "ok".to_string(),
+            duration_ms: 0,
+            output: json!({
+                "ok": true,
+                "command": "pnpm test",
+                "timeoutMs": timeout_ms,
+                "timedOut": true,
+                "promoted": true,
+                "jobId": "job-b010",
+                "exitCode": serde_json::Value::Null,
+                "error": serde_json::Value::Null,
+            })
+            .to_string(),
+        }
+    }
+
+    /// 波次一的超时错误载荷（status=error + error.code=timeout）。
+    fn timeout_error_result(timeout_ms: u64) -> ToolResult {
+        ToolResult {
+            tool_name: "workspace_run_command".to_string(),
+            status: "error".to_string(),
+            duration_ms: 0,
+            output: json!({
+                "ok": false,
+                "command": "pnpm test",
+                "timeoutMs": timeout_ms,
+                "timedOut": true,
+                "error": { "code": "timeout", "kind": "timeout", "message": "超时" },
+            })
+            .to_string(),
+        }
+    }
+
+    /// 普通成功载荷（不得产生失败信号）。
+    fn plain_ok_result() -> ToolResult {
+        ToolResult {
+            tool_name: "workspace_run_command".to_string(),
+            status: "ok".to_string(),
+            duration_ms: 0,
+            output: json!({ "ok": true, "exitCode": 0, "timedOut": false }).to_string(),
+        }
+    }
+
+    /// 契约 B010：promote 载荷必须产出与 timeout 错误路径**完全一致**的三元组，
+    /// 且指纹对命令敏感；普通成功载荷不得产出信号。
+    #[test]
+    fn promote_result_yields_same_timeout_signal_as_error_path() {
+        let call = run_call("pnpm test", 120_000);
+        let promote = tool_failure_signal(&call, &promoted_result(120_000));
+        let error = tool_failure_signal(&call, &timeout_error_result(120_000));
+        eprintln!("[b010] promote signal      = {promote:?}");
+        eprintln!("[b010] timeout-error signal = {error:?}");
+        assert_eq!(
+            promote, error,
+            "B010：promote 与 timeout 错误路径必须产出同一 (tool, fingerprint, code) 三元组"
+        );
+
+        let other_call = run_call("pnpm build", 120_000);
+        let other = tool_failure_signal(&other_call, &promoted_result(120_000));
+        eprintln!("[b010] other-command signal = {other:?}");
+        let promote_fingerprint = promote.expect("promote 必须产生信号").1;
+        let other_fingerprint = other.expect("promote 必须产生信号").1;
+        assert_ne!(
+            promote_fingerprint, other_fingerprint,
+            "B010：不同 command 必须产生不同指纹"
+        );
+
+        assert!(
+            tool_failure_signal(&call, &plain_ok_result()).is_none(),
+            "B010：非 timeout 的成功载荷不得产生失败信号（不得放宽为「所有 ok 都算失败」）"
+        );
     }
 }

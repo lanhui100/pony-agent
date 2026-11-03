@@ -3263,7 +3263,7 @@ impl ToolRouter {
                                         "summary": {
                                             "text": format!(
                                                 "命令在 {} 执行超过超时上限 {} ms，已转为后台作业（jobId={}）：\
-用 `job_output` 续读增量输出、`job_kill` 终止。",
+用 `job_output` 续读增量输出、`job_kill` 终止；**不要重复执行同一命令**（它已在后台继续运行）。",
                                                 self.display_workspace_relative(&cwd),
                                                 timeout_ms,
                                                 job_id
