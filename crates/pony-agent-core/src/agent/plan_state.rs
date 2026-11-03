@@ -714,6 +714,8 @@ mod tests {
             arguments,
             session_id: session_id.map(ToString::to_string),
             workspace_root: None,
+            // wave-62 A1（derivative 字段填充）：新增字段在本用例无需取消语义。
+            cancellation: None,
         }
     }
 

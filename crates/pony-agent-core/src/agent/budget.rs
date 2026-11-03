@@ -16,6 +16,17 @@ pub struct CancellationToken {
     cancelled: AtomicBool,
 }
 
+/// wave-62 T0（纯类型面）：`DispatchContext` 派生 `PartialEq/Eq` 需要该 impl。
+/// 语义说明：取消令牌是运行时**句柄**，不参与「事实」比较；故按**指针身份**比较
+/// （同一 `Arc` 克隆体相等），保持 Eq 的自反/对称/传递三律，不引入新的取消语义。
+impl PartialEq for CancellationToken {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Eq for CancellationToken {}
+
 impl CancellationToken {
     pub fn new() -> Self {
         Self {

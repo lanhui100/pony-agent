@@ -767,6 +767,8 @@ mod tests {
             arguments,
             session_id: None,
             workspace_root: None,
+            // wave-62 A1（derivative 字段填充）：本用例不涉及取消语义。
+            cancellation: None,
         }
     }
 

@@ -73,6 +73,12 @@ pub struct DispatchContext {
     /// 前端传入的授权模式：read_only | workspace_write | full_access
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_authorization_mode: Option<String>,
+    /// wave-62 C2：本 turn 的取消令牌（运行时**句柄**，不进线缆 ⇒ `#[serde(skip)]`）。
+    ///
+    /// `Some` ⇒ dispatcher 闸门必须观测它（turn 被 stop ⇒ 本次调用 fail-closed 为
+    /// `Cancelled`，沿用既有错误词表）；`None` ⇒ 行为与此前完全一致（向后兼容）。
+    #[serde(skip)]
+    pub turn_cancellation: Option<Arc<crate::agent::budget::CancellationToken>>,
 }
 
 /// 宿主审批证据（PA-141，C-141-1 serde 形状冻结：camelCase）。
@@ -98,6 +104,7 @@ impl Default for DispatchContext {
             host_control_available: true,
             plan_execution_approval: None,
             tool_authorization_mode: None,
+            turn_cancellation: None,
         }
     }
 }
@@ -433,6 +440,16 @@ pub(crate) fn handler_failure(message: String) -> DispatchError {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
         if well_formed {
+            // wave-62 C5：桥接层把 `Run` 的取消结果转成 `tool_cancelled: …` —— 它属于**取消**
+            // 语义（legacy status = `aborted`），但**错误码必须原样保留** `tool_cancelled`
+            // （不得被改写成 `cancelled`，也不得新增码）。
+            if code == "tool_cancelled" {
+                return DispatchError {
+                    code: code.to_string(),
+                    message: rest.to_string(),
+                    cancelled: true,
+                };
+            }
             return DispatchError::new(code.to_string(), rest.to_string());
         }
     }
@@ -805,7 +822,16 @@ impl Inner {
             self.clock.now_ms(),
             max_duration_ms,
         ));
+        // wave-62 A2（融合而非复用）：本调用**自有**取消令牌（composite 的 `children.cancel()`
+        // 只 cancel 它，绝不 cancel turn 令牌毒化整轮）；turn 令牌另经 `context.turn_cancellation`
+        // 在闸门/收口处**并集**判定。`turn_cancellation: None` 时行为与 wave-61 完全一致。
         let cancellation = Arc::new(CancellationToken::new());
+        let turn_cancellation = context.turn_cancellation.clone();
+        let turn_cancelled = || {
+            turn_cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+        };
 
         // Steps 2-4: raw validation, hooks, final validation, permission/sandbox decision.
         let ready = match self.preflight_descriptor(&request.origin, context, request, descriptor) {
@@ -829,14 +855,26 @@ impl Inner {
             }
             PermissionVerdict::Allow => {
                 // Steps 5-6: gates, then handler execution.
-                if let Err(error) =
+                // wave-62 A2：闸门与收口都判「自有令牌 OR turn 令牌」。
+                let gate = if turn_cancelled() {
+                    Err(DispatchError::cancelled("tool invocation cancelled"))
+                } else {
                     check_budget_gates(&cancellation, &ledger, self.clock.as_ref())
-                {
+                };
+                if let Err(error) = gate {
                     error.into_outcome(&request.descriptor_id)
                 } else {
                     let started = Instant::now();
-                    let handler_result = self.run_handler(request, &ready, &ledger, &cancellation, context);
-                    self.finalize_execution(descriptor, request, handler_result, &ledger, started)
+                    let handler_result =
+                        self.run_handler(request, &ready, &ledger, &cancellation, context);
+                    self.finalize_execution(
+                        descriptor,
+                        request,
+                        handler_result,
+                        &ledger,
+                        started,
+                        turn_cancelled(),
+                    )
                 }
             }
         };
@@ -1058,6 +1096,9 @@ impl Inner {
                     session_id: context.session_id.clone(),
                     // PA-080 P1-2：会话级 workspace root 透传，工具权限判定锚定会话 workspace。
                     workspace_root: context.workspace_root.clone(),
+                    // wave-62 A1：把 turn 令牌交给 handler（桥接层再透传给工具上下文），
+                    // 子进程类工具因此能在运行期观测 stop。
+                    cancellation: context.turn_cancellation.clone(),
                 })
                 .map_err(handler_failure);
         }
@@ -1125,8 +1166,19 @@ impl Inner {
         handler_result: Result<Value, DispatchError>,
         ledger: &BudgetLedger,
         started: Instant,
+        turn_cancelled: bool,
     ) -> ToolOutcome {
+        // wave-62 C2/C5：**取消优先**。优先级：
+        // ① handler 自己报告了取消（如 `Run` 的 `tool_cancelled`）⇒ **保真其错误码**，
+        //    不覆盖成通用 `cancelled`（契约补遗 v2：码必须原样保留）；
+        // ② 本轮 turn 令牌已取消 ⇒ fail-closed 为 `Cancelled`；
+        // ③ 其余按原语义。
         match handler_result {
+            Err(error) if error.cancelled => error.into_outcome(&request.descriptor_id),
+            _ if turn_cancelled => {
+                DispatchError::cancelled("tool invocation cancelled")
+                    .into_outcome(&request.descriptor_id)
+            }
             Ok(value) => {
                 let output = render_output(&value);
                 if let Err(message) = ledger.reserve_bytes(output.len() as u64) {
@@ -1461,6 +1513,8 @@ impl ChildDispatchRunner for Inner {
             arguments: ready.final_arguments.clone(),
             session_id: ctx.context.session_id.clone(),
             workspace_root: ctx.context.workspace_root.clone(),
+            // wave-62 A1：同一桥接语义（turn 令牌随请求下传，不得在直派路径丢失）。
+            cancellation: ctx.context.turn_cancellation.clone(),
         }) {
             Ok(value) => {
                 let output = render_output(&value);

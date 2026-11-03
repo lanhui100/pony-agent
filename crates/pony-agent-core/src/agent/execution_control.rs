@@ -1,9 +1,10 @@
+use crate::agent::budget::CancellationToken;
 use crate::agent::hooks::PersistedEffectEvidence;
 use crate::agent::stop_escalation::StopReason;
 use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// wave-60 C1：`StopTurnResponse.state` 的**封闭**取值集合（`"running"` 已废弃）。
 ///
@@ -65,6 +66,10 @@ pub struct StopTurnResponse {
 #[derive(Default)]
 struct RegistryState {
     turns: HashMap<String, ExecutionCheckpoint>,
+    /// wave-62 C1：每 turn 一个取消令牌。
+    /// `register_turn` 负责创建/结转；`request_stop` 被接受时 `cancel()`；
+    /// 只读出口是 [`ExecutionControlRegistry::cancellation_token`]。
+    tokens: HashMap<String, Arc<CancellationToken>>,
 }
 
 /// PA-095 #3：可克隆（Arc 共享内部状态）——宿主与 builder 需各持一份句柄
@@ -132,6 +137,16 @@ impl ExecutionControlRegistry {
         };
         refresh_execution_checkpoint_projection(&mut checkpoint);
         state.turns.insert(turn_id.to_string(), checkpoint);
+
+        // wave-62 C1：每 turn 一个取消令牌。重注册**沿用既有实例**（取消态跨注册存活，
+        // 否则"先 stop 后重注册"会让已置的停止对工具层不可见）；令牌只存在于 registry
+        // 内部表，绝不进入 `ExecutionCheckpoint` 的序列化结构。
+        let token = state
+            .tokens
+            .get(turn_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(CancellationToken::new()));
+        state.tokens.insert(turn_id.to_string(), token);
     }
 
     pub fn update<F>(&self, turn_id: &str, update: F)
@@ -168,6 +183,23 @@ impl ExecutionControlRegistry {
             eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
             e.into_inner()
         });
+        // wave-62 C1：只有**被接受**的停止才 cancel 该 turn 的取消令牌（拒绝路径不得置位，
+        // 否则"已终态/未知/重复 stop"会误杀工具层仍在跑的调用）。
+        let response = Self::apply_stop_request(&mut state, turn_id, stop_reason);
+        if response.accepted {
+            if let Some(token) = state.tokens.get(turn_id) {
+                token.cancel();
+            }
+        }
+        response
+    }
+
+    /// `request_stop` 的 checkpoint 侧状态迁移（唯一实现；accept/拒绝判定全在此处）。
+    fn apply_stop_request(
+        state: &mut RegistryState,
+        turn_id: &str,
+        stop_reason: StopReason,
+    ) -> StopTurnResponse {
         let Some(checkpoint) = state.turns.get_mut(turn_id) else {
             return StopTurnResponse {
                 turn_id: turn_id.to_string(),
@@ -211,6 +243,18 @@ impl ExecutionControlRegistry {
             state: STOP_TURN_STATE_STOPPING.to_string(),
             stop_reason: Some(stop_reason.as_str().to_string()),
         }
+    }
+
+    /// wave-62 C1：只读访问器（未知 turn ⇒ `None`）。
+    ///
+    /// 返回的是**同一实例**的 `Arc` 克隆：调用方（runtime / dispatcher）观测到的取消态与
+    /// registry 内一致；`request_stop` 被接受时由本表唯一置位。
+    pub fn cancellation_token(&self, turn_id: &str) -> Option<Arc<CancellationToken>> {
+        let state = self.state.lock().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        state.tokens.get(turn_id).cloned()
     }
 
     pub fn is_stop_requested(&self, turn_id: &str) -> bool {

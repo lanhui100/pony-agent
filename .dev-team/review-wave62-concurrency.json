@@ -1,0 +1,56 @@
+{
+  "verdict": "FAIL",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a-wave62",
+    "fresh_context": true
+  },
+  "executed_by": "l3a-wave62",
+  "reviewed_commit": "d3defb0ec134110aab05690a88f9ee8f19e35505",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/budget.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1057,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "rm -rf /tmp/l3a-r && cp -a /home/dm/wt/pony-wave62 /tmp/l3a-r && cat > /tmp/l3a-r/crates/pony-agent-core/tests/l3a_repro_prod_run.rs <<'RS'\n//! L3-A wave-62 反例探针：生产默认执行引擎（governed executor / dispatcher）上的\n//! `workspace_run_command` 是否真正被 turn 令牌杀死。\n//! 只读探针：不改动任何被测源码；仅通过公开 API 观测。\n\nuse pony_agent_core::agent::budget::CancellationToken;\nuse pony_agent_core::agent::dispatcher::DispatchContext;\nuse pony_agent_core::agent::governed_executor::build_governed_executor_with_sandbox_backend;\nuse pony_agent_core::agent::sandbox::TestSandboxBackend;\nuse pony_agent_core::agent::tool_runtime::SandboxBackend;\nuse pony_agent_core::agent::tools::{ToolCall, ToolExecutionContext, ToolExecutor};\nuse serde_json::json;\nuse std::sync::{mpsc, Arc};\nuse std::time::{Duration, Instant};\n\n#[test]\nfn l3a_repro_production_governed_run_ignores_turn_token() {\n    let workspace = std::env::temp_dir().join(format!(\"l3a-repro-{}-{:?}\", std::process::id(), std::thread::current().id()));\n    std::fs::create_dir_all(&workspace).expect(\"workspace\");\n    let marker = workspace.join(\"l3a-leaked.txt\");\n    let executor = build_governed_executor_with_sandbox_backend(\n        Some(workspace.clone()),\n        None,\n        Some(Arc::new(TestSandboxBackend::available()) as Arc<dyn SandboxBackend>),\n    );\n    let token = Arc::new(CancellationToken::new());\n    let ctx = ToolExecutionContext {\n        workspace_root: Some(workspace.clone()),\n        session_id: Some(\"l3a\".to_string()),\n        dispatch_context: Some(DispatchContext {\n            session_id: Some(\"l3a\".to_string()),\n            run_id: Some(\"run-l3a\".to_string()),\n            turn_id: Some(\"turn-l3a\".to_string()),\n            workspace_root: Some(workspace.display().to_string()),\n            turn_cancellation: Some(Arc::clone(&token)),\n            ..Default::default()\n        }),\n        ..Default::default()\n    };\n    let command = format!(\"sleep 1.5; echo leaked > '{}'\", marker.display());\n    let call = ToolCall {\n        call_id: Some(\"call-l3a\".to_string()),\n        name: \"Run\".to_string(),\n        arguments: json!({ \"command\": command, \"description\": \"l3a repro\", \"timeoutMs\": 10_000 }),\n        plan: None,\n    };\n\n    let (tx, rx) = mpsc::channel();\n    std::thread::spawn(move || {\n        let _ = tx.send(executor.execute_with_context(&call, &ctx));\n    });\n\n    std::thread::sleep(Duration::from_millis(300));\n    let cancelled_at = Instant::now();\n    token.cancel();\n    let result = rx.recv_timeout(Duration::from_secs(30)).expect(\"dispatch must return\");\n    let exit_ms = cancelled_at.elapsed().as_millis() as u64;\n    println!(\"L3A-REPRO status={} exit_ms={} output={}\", result.status, exit_ms, result.output);\n    std::thread::sleep(Duration::from_millis(1600));\n    println!(\"L3A-REPRO marker_exists={} (true ⇒ 子进程未被取消杀死)\", marker.exists());\n    assert!(\n        exit_ms <= 1000,\n        \"C3 违约：cancel → 返回耗时 {exit_ms}ms > 1000ms 硬上界（turn 令牌未到达子进程轮询）\"\n    );\n    assert!(!marker.exists(), \"C3 违约：取消未真正杀死子进程，命令继续执行并写出副作用\");\n    let _ = std::fs::remove_dir_all(&workspace);\n}\nRS\ncd /tmp/l3a-r && CARGO_TARGET_DIR=/home/dm/pony-agent/target-check cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test l3a_repro_prod_run -j 1 -- --nocapture",
+      "detail": "生产默认引擎（builder.rs:96 build_governed_executor）路径上 turn 令牌到不了子进程：ToolExecutionContext.cancellation 只在 ToolRouter 内被消费（tools.rs:2970 建 watcher），而 dispatcher 的 RouterPrimitiveHandler 用 ToolExecutionContext{..Default::default()} 重建上下文（governed_executor.rs:360），且 PrimitiveToolHandlerRequest 无 token 字段 ⇒ 生产 turn 里 CommandCancelWatcher 永不 spawn。实测（探针已跑通）：cancel 后 1217ms 才返回（>1000ms 上界），返回 aborted/cancelled 只是 finalize_execution 的事后改判，子进程照跑完并写出副作用文件 marker_exists=true。C3 的 ≤1s + 真杀进程在生产链路未达成；wave62_tool_cancel.rs 的 c3 用例直连 ToolRouter，绕过了该边界所以为绿。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3048,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'if cancelled {' -A 9 crates/pony-agent-core/src/agent/tools.rs; grep -n 'retry_cleanup_error\\|is_tracked' crates/pony-agent-core/src/agent/tools.rs",
+      "detail": "取消分支只做了一次 cancel(→kill/terminate)，terminate 成功时按设计保留 tracked 条目（process.rs:424 不 remove，wave-9 注释：第二次幂等 kill 才真正释放），随后直接 return aborted。超时分支正因此才无条件二次 kill_if_exists。若“主循环先看到 cancel”而非 watcher 先杀，条目会永久留在 ProcessManager 表（每命令一个 legacy session 条目，含 Arc<ManagedProcess> 与缓冲）。建议取消分支同样补一次 kill_if_exists 幂等释放。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 855,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'children.cancel()' crates/pony-agent-core/src/agent/dispatcher.rs crates/pony-agent-core/tests/dispatcher_matrix.rs; sed -n 848,860p crates/pony-agent-core/src/agent/dispatcher.rs",
+      "detail": "Composite 语义混用：child_dispatch.rs:291 children.cancel() 取消的就是 self.context.cancellation——turn_cancellation 为 Some 时该 Arc 即 turn 令牌，于是子级 cancel 会升级为整轮取消（本轮后续工具全部 fail-closed），且 855 的 turn_cancelled 立刻为 true 把父级结果改写成 Cancelled；而 852-854 的注释声称“子级 cancel 不得改写父级”，与该实现相反。当前仅测试调用（无生产 caller），但顺带把 request_stop 从“唯一停止置位点”变成双源。建议子级 cancel 用独立子 token，或 composite 子上下文显式清空 turn_cancellation。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 2970,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'process_group\\|setsid\\|killpg' crates/pony-agent-core/src/agent/process.rs; grep -n 'child.kill()' -A 3 crates/pony-agent-core/src/agent/process.rs",
+      "detail": "“杀整棵进程树”未达成：Unix 侧 terminate 只 child.kill() 直接子进程（无 process_group/setsid/killpg，仅 Windows 有 Job Object），被取消命令 fork 出的孙进程会存活。契约 C3 判据（直接子进程 try_wait 已退出 + 同 shell 副作用文件不出现）恰好掩盖该缺口。属 ProcessManager 既有语义（超时分支同源），故记 ADVISORY。"
+    }
+  ]
+}

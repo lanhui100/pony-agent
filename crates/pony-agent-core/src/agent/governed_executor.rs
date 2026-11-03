@@ -363,6 +363,9 @@ impl PrimitiveToolHandler for RouterPrimitiveHandler {
                 .as_deref()
                 .map(std::path::PathBuf::from),
             session_id: request.session_id.clone(),
+            // wave-62 A1（C5）：**必须**透传取消令牌——此前 `Default::default()` 在这里把
+            // turn 令牌丢掉，真实 app 的 `Run` 因此永不观测 stop（双路 L3 复现的 BLOCKING）。
+            cancellation: request.cancellation.clone(),
             ..Default::default()
         };
         let result = self.router.execute_with_context(

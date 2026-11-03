@@ -455,6 +455,8 @@ mod tests {
             arguments: serde_json::json!({ "path": "data.csv" }),
             session_id: None,
             workspace_root: None,
+            // wave-62 A1（derivative 字段填充）：本用例不涉及取消语义。
+            cancellation: None,
         };
         let value = handler.execute(&request).expect("handler should convert");
         assert_eq!(value["format"], serde_json::json!("csv"));
@@ -466,6 +468,7 @@ mod tests {
             arguments: serde_json::json!({}),
             session_id: None,
             workspace_root: None,
+            cancellation: None,
         };
         let error = handler.execute(&missing).expect_err("missing path must fail");
         assert!(error.contains("missing_argument"), "{error}");
