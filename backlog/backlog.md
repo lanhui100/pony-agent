@@ -22,10 +22,6 @@
   - 登记来源：wave-55 遗留债登记
 
 
-- [ ] `B011` - P1: `timedOut/promoted` 无消费方，UI/trace 把仍在跑的命令显示为「成功完成」
-  - 路径：`src/components/chat/WorkspaceTurnItem.vue:631`、`src/lib/runtime/trajectory-core.ts:320`、`src/lib/runtime/trace.ts:378`；`ok:true` + `exitCode:null` 破坏成功路径不变量
-  - 描述：L3-B。需在 UI/trace/遥测补 promoted 呈现（可停入口、后台标记），并明确 exitCode 语义。
-
 
 - [ ] `B006` - P2: Run 超时三处 ADVISORY（L3 审查 2026-11-04 遗留）
   - 路径：`crates/pony-agent-core/src/agent/tools.rs:3006-3033`、`crates/pony-agent-core/src/agent/process.rs:433-443`、`crates/pony-agent-core/src/agent/orchestration.rs:334`
@@ -54,6 +50,12 @@
   - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）；本机 Linux 无法验证，需 Windows CI 或目标机验证。
 
 ## 已完成
+
+- [x] `B011` - P1: `timedOut/promoted` 无消费方，UI/trace 把仍在跑的命令显示为「成功完成」
+  - 路径：`src/components/chat/WorkspaceTurnItem.vue:631`、`src/lib/runtime/trajectory-core.ts:320`、`src/lib/runtime/trace.ts:378`；`ok:true` + `exitCode:null` 破坏成功路径不变量
+  - 描述：L3-B。需在 UI/trace/遥测补 promoted 呈现（可停入口、后台标记），并明确 exitCode 语义。
+  - 结果：已修复（最小可见切片）。新增 `src/lib/runtime/tool-result-meta.ts`（`parsePromotedToolResult` fail-safe + `promotedToolBadgeLabel`）；`WorkspaceTurnItem.vue` 在 done/error 分支前渲染「已转后台」徽标（promoted 时不再显示成功/失败图标），结果文本取自 `turn.tools` 中 role=tool 的 `content`（即后端 ToolResult.output）。验收 `tests/tool-result-meta.spec.ts` 8 passed、`runtime-store` 119、`typecheck` Exit 0、全量 `test:unit` 139 files/1316 passed。
+  - 未做（状态机语义）：`trajectory-core.ts`/`trace.ts` 仍把 promoted 记为 completed，如需「后台运行中」状态需独立卡（会牵动 V10 冻结快照）。
 
 - [x] `B010` - P0: promote 成功摘掉 `error.code=timeout`，三道防线失去输入
   - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs:580/:591`、`runtime/recovery.rs:180`

@@ -37,6 +37,10 @@ import MarkdownRenderer, {
 import AskUserToolCallCard from "@/components/ask/AskUserToolCallCard.vue";
 import { isAskToolName } from "@/lib/runtime/ask-tools";
 import {
+  parsePromotedToolResult,
+  promotedToolBadgeLabel
+} from "@/lib/runtime/tool-result-meta";
+import {
   PopoverClose,
   PopoverContent,
   PopoverPortal,
@@ -98,6 +102,34 @@ const props = defineProps<{
   assistantDisplayedReasoningFadeStyle: (message: ChatMessage | null) => Record<string, string> | undefined;
   assistantDisplayedReasoningFadeKey: (message: ChatMessage | null) => number;
 }>();
+
+/** B011：promote 结果徽标的悬浮说明（契约要求的固定文案）。 */
+const PROMOTED_TOOL_BADGE_TITLE = "命令已转入后台作业，可用 job_output 续读、job_kill 终止";
+
+/**
+ * B011：tool 消息 id → 工具结果文本。
+ *
+ * 结果正文取自 `ChatMessage.content`：`syncToolMessages` 把 `ToolActivity.resultText` 写进
+ * tool 消息的 `content`（见 `src/stores/runtime.ts`），`MergedToolCall` 本身不携带结果正文。
+ * 只用**本 turn** 的 tool 消息建表，避免跨 turn 串读；`content` 为空时解析会 fail-safe。
+ */
+const toolResultTextById = computed<Map<string, string>>(() => {
+  const map = new Map<string, string>();
+  for (const message of props.turn.tools) {
+    if (message.role !== "tool") continue;
+    map.set(message.id, message.content ?? "");
+  }
+  return map;
+});
+
+/**
+ * B011：该工具行的「已转后台」徽标文案；非 promote（含解析失败）返回 `null`。
+ *
+ * promote 为真时调用方**不得**再渲染 error/warning 图标（两者互斥，见模板）。
+ */
+function promotedToolBadge(tool: MergedToolCall): string | null {
+  return promotedToolBadgeLabel(parsePromotedToolResult(toolResultTextById.value.get(tool.id)));
+}
 
 const runtimeStore = useRuntimeStore();
 const { isSubmitting, sessionOperation, turnTraceHistory } = storeToRefs(runtimeStore);
@@ -627,6 +659,12 @@ const toolIconByCanonicalName: Record<string, any> = {
                 <span class="conversation-tool-status flex shrink-0 items-center gap-1 leading-none">
                   <span class="text-[11px] text-stone-400" :class="tool.durationSeconds != null ? 'visible' : 'invisible'">{{ tool.durationSeconds != null ? (tool.durationSeconds).toFixed(1) + 's' : '0.0s' }}</span>
                   <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
+                  <!-- B011：promote 结果用「已转后台」徽标替代 done/error 图标（互斥，避免误显示失败） -->
+                  <span
+                    v-else-if="promotedToolBadge(tool)"
+                    class="conversation-tool-promoted-badge shrink-0 rounded border border-stone-500/40 px-1 text-[11px] leading-4 text-stone-400"
+                    :title="PROMOTED_TOOL_BADGE_TITLE"
+                  >{{ promotedToolBadge(tool) }}</span>
                   <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
                   <AlertTriangle v-else-if="tool.status === 'error'" class="h-3 w-3 shrink-0 text-rose-400" aria-label="工具调用失败" :aria-hidden="false" />
                 </span>
