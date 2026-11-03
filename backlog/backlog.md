@@ -36,7 +36,7 @@
 - [x] `B004` - P1: Run 超时提示指向后台路径（CT-5 契约演进波次）
   - 路径：`crates/pony-agent-core/src/agent/tools.rs`（`classify_timeout_hint`，约 :7963-7978）
   - 描述：超时 hint 原只给「缩短命令 / 更大 timeoutMs」，不提已 ModelVisible 的 `job_start`/`job_output`；trace `pa_01a1a134` turn-0 正是超时后闷头重试。
-  - 验收：契约 v3（CT-5/CT-5a）；冻结断言迁移 `71b9280`（wave9_green 逐字文案 + 3 标记断言）；实现 `TD_B004`（单一真源文案、`pub classify_timeout_hint`、schema `:5864` 与 `browser-preview.ts:35` 逐字同步）；`tool_timeout_policy_test` 15 passed、`wave9_green_acceptance_test` 2 passed。
+  - 验收：契约 v3（CT-5/CT-5a）；冻结断言迁移 `71b9280`（wave9_green 逐字文案 + 3 标记断言）；实现 `7675017`（单一真源文案、`pub classify_timeout_hint`、schema `:5864` 与 `browser-preview.ts:35` 逐字同步）；`tool_timeout_policy_test` 15 passed、`wave9_green_acceptance_test` 2 passed。
 
 - [ ] `B005` - P1: 真·promote：Run 超时把运行中命令转后台 job（DSH 对齐）
   - 路径：`crates/pony-agent-core/src/agent/jobs.rs`（新增 promote 适配层）、`crates/pony-agent-core/src/agent/tools.rs:3011,3122-3176`
@@ -52,7 +52,7 @@
 
 - [x] `B004` - P1: Run 超时提示指向后台路径（CT-5 契约演进波次）
   - 路径：`crates/pony-agent-core/src/agent/tools.rs`（`classify_timeout_hint`，约 :7961）；
-  - 描述：超时 hint 目前只给「缩短命令 / 更大 timeoutMs」，不提已 ModelVisible 的 `job_start`/`job_output`；trace `pa_01a1a134` turn-0 正是超时后闷头重试。改文案会撞冻结用例 `crates/pony-agent-core/tests/wave9_green_acceptance_test.rs:143`（逐字断言默认文案），已完成：契约 v3（CT-5/CT-5a）+ 冻结断言迁移 commit `71b9280` + 实现 commit `TD_B004`。
+  - 描述：超时 hint 目前只给「缩短命令 / 更大 timeoutMs」，不提已 ModelVisible 的 `job_start`/`job_output`；trace `pa_01a1a134` turn-0 正是超时后闷头重试。改文案会撞冻结用例 `crates/pony-agent-core/tests/wave9_green_acceptance_test.rs:143`（逐字断言默认文案），已完成：契约 v3（CT-5/CT-5a）+ 冻结断言迁移 commit `71b9280` + 实现 commit `7675017`。
   - 登记来源：tool-timeout-policy 波次一（契约 v2 明确延后）
 
 - [x] `B000` - P0: 修复 `npx vitest run` 全量门禁偶发 exit=1（ReferenceError: window is not defined @ src/stores/runtime.ts:904）
