@@ -191,7 +191,11 @@ pub(super) fn timeline_tool_error_text(
 pub(super) fn build_context_uses_retrieval(
     build_context_observation: &BuildContextObservation,
 ) -> bool {
-    build_context_observation.message_count > 2
+    // Wave-61 C3.7：`message_count > 2` 是「用了检索」的代理判定，其基线含「BASE + 至少一条
+    // 动态层」。已接线进程会多一条团队策略 System 消息（context.rs `reserved_system_message_extra_count`），
+    // 若不补偿会让该代理判定恒真，这里按实际注入条数抬高阈值。
+    build_context_observation.message_count
+        > 2 + crate::agent::context::reserved_system_message_extra_count()
         || !build_context_observation.prefix_mutation_reasons.is_empty()
         || !build_context_observation
             .semi_stable_context_text

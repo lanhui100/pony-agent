@@ -6540,7 +6540,18 @@ mod contract_view_tests {
                 "BatchExecute",
                 "Plan",
                 "ViewImage",
-                // W25：subagent/workflow/team_task_* 未接线，已从模型可见面摘除。
+                // Wave-61 C1：10 项团队工具进入模型可见面（插在 ViewImage 之后、TodoWrite 之前，
+                // 与本文件 `characterization_product_surface_...` 的 39 项清单同序）。
+                "subagent",
+                "workflow",
+                "spawn_teammate",
+                "list_agents",
+                "send_message",
+                "interrupt_agent",
+                "drain_inbox",
+                "team_task_create",
+                "team_task_update",
+                "team_task_list",
                 "TodoWrite",
                 "TodoList",
                 "create_goal",
@@ -6577,7 +6588,17 @@ mod contract_view_tests {
                 "workspace_batch",
                 "plan_control",
                 "view_image",
-                // W25：未接线的子代理/团队工具已从模型可见面摘除。
+                // Wave-61 C1：10 项团队工具的 primitive 同样插入 view_image 之后。
+                "subagent",
+                "workflow",
+                "spawn_teammate",
+                "list_agents",
+                "send_message",
+                "interrupt_agent",
+                "drain_inbox",
+                "team_task_create",
+                "team_task_update",
+                "team_task_list",
                 "todo_write",
                 "todo_list",
                 "create_goal",
@@ -6623,8 +6644,8 @@ mod contract_view_tests {
         );
         assert_eq!(
             names.len(),
-            29,
-            "W42/PA-149 模型可见工具面 29 项（基线 28 + skill_load）"
+            39,
+            "Wave-61 C1 后模型可见工具面 39 项（29 既有 + 10 团队工具）"
         );
         assert_eq!(
             names,
@@ -6645,7 +6666,18 @@ mod contract_view_tests {
                 "BatchExecute",
                 "Plan",
                 "ViewImage",
-                // W25：subagent/workflow/team_task_* 未接线，已从模型可见面摘除。
+                // Wave-61 C1：10 项团队工具按 builtin_tools() 定义序插入 ViewImage 之后
+                //（product 名 == primitive 小写原名，契约 C1.2）。
+                "subagent",
+                "workflow",
+                "spawn_teammate",
+                "list_agents",
+                "send_message",
+                "interrupt_agent",
+                "drain_inbox",
+                "team_task_create",
+                "team_task_update",
+                "team_task_list",
                 "TodoWrite",
                 "TodoList",
                 "create_goal",
@@ -6810,8 +6842,8 @@ mod contract_view_tests {
         assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
         assert_eq!(
             names.len(),
-            29,
-            "W42/PA-149 模型可见面 29 项（基线 28 + skill_load）"
+            39,
+            "Wave-61 C1 后模型可见面 39 项（29 既有 + 10 团队工具）"
         );
         assert!(registry.resolve("Run").is_some());
         assert!(registry.resolve("workspace.run_command").is_some());
@@ -6819,6 +6851,25 @@ mod contract_view_tests {
         assert!(registry.resolve("Present").is_some());
         assert!(registry.resolve("JobList").is_some());
         assert!(registry.resolve("skill_load").is_some());
+        // Wave-61 C1：10 项团队工具的 descriptor 必须可解析且已 ModelVisible。
+        for name in [
+            "subagent",
+            "workflow",
+            "spawn_teammate",
+            "list_agents",
+            "send_message",
+            "interrupt_agent",
+            "drain_inbox",
+            "team_task_create",
+            "team_task_update",
+            "team_task_list",
+        ] {
+            assert_eq!(
+                registry.resolve(name).map(|descriptor| descriptor.exposure.clone()),
+                Some(ToolExposure::ModelVisible),
+                "{name} 必须已在模型可见面（Wave-61 C1）"
+            );
+        }
         assert_eq!(
             registry
                 .resolve("ToolSearch")
@@ -7249,6 +7300,20 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_JOB_LIST => "JobList",
         // W42/PA-149：`skill_load` 的产品名保持小写原样（契约面按此名断言，见 C1-5）。
         TOOL_SKILL_LOAD => TOOL_SKILL_LOAD,
+        // Wave-61 C1.6：10 项团队/子代理工具同样「小写原名透传」（与 TOOL_SKILL_LOAD 同构）。
+        // 不登记会让 `model_visible_tool_name()` 回落字面量 "Run"，把 telemetry 的 tool activity
+        //（telemetry.rs:306/332/508/576）记成 `Run`，污染 trace 取证面；也避免 descriptor 的
+        // canonical_name 被误标成 "Run"。注意：**不新增 CamelCase 别名**（契约 C1.1，别名表不变）。
+        TOOL_SUBAGENT => TOOL_SUBAGENT,
+        TOOL_WORKFLOW => TOOL_WORKFLOW,
+        TOOL_SPAWN_TEAMMATE => TOOL_SPAWN_TEAMMATE,
+        TOOL_LIST_AGENTS => TOOL_LIST_AGENTS,
+        TOOL_SEND_MESSAGE => TOOL_SEND_MESSAGE,
+        TOOL_INTERRUPT_AGENT => TOOL_INTERRUPT_AGENT,
+        TOOL_DRAIN_INBOX => TOOL_DRAIN_INBOX,
+        TOOL_TEAM_TASK_CREATE => TOOL_TEAM_TASK_CREATE,
+        TOOL_TEAM_TASK_UPDATE => TOOL_TEAM_TASK_UPDATE,
+        TOOL_TEAM_TASK_LIST => TOOL_TEAM_TASK_LIST,
         _ => return None,
     };
     Some(mapped)
@@ -7378,6 +7443,19 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         | TOOL_JOB_LIST => ToolExposure::ModelVisible,
         // W42/PA-149：技能正文按需加载进入常驻模型可见面。
         TOOL_SKILL_LOAD => ToolExposure::ModelVisible,
+        // Wave-61 C1：10 项团队/子代理工具进入常驻模型可见面（29 → 39）。
+        // 可见性**不**随 `subagent_runtime_wired` 变化（契约 C1.4）：工具面逐 turn 恒定，
+        // 「可用/可执行」才由 :152 的运行时判定收口（10 处 fail-closed 门保持不变）。
+        TOOL_SUBAGENT
+        | TOOL_WORKFLOW
+        | TOOL_SPAWN_TEAMMATE
+        | TOOL_LIST_AGENTS
+        | TOOL_SEND_MESSAGE
+        | TOOL_INTERRUPT_AGENT
+        | TOOL_DRAIN_INBOX
+        | TOOL_TEAM_TASK_CREATE
+        | TOOL_TEAM_TASK_UPDATE
+        | TOOL_TEAM_TASK_LIST => ToolExposure::ModelVisible,
         _ => ToolExposure::Internal,
     }
 }

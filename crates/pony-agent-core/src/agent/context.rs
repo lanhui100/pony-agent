@@ -47,6 +47,44 @@ pub fn base_system_prompt() -> &'static str {
     BASE_SYSTEM_PROMPT
 }
 
+// ==========================================================
+// Wave-61 C3：Agent Team 策略段（稳定层第二条 System 消息）
+// ==========================================================
+
+/// Wave-61 C3 团队策略段：**静态常量**，逐字冻结，禁止任何运行期插值。
+///
+/// 契约约束（`.dev-team/contracts/wave-61-team-activation.md` C3.2/C3.3/C3.4）：
+/// - 首行锚串 `Agent Teams is available in this session` 与参考实现
+///   `deepseek-harness/packages/experimental/tool-agent-team/src/index.ts:35` 同源；
+/// - 与 BASE_SYSTEM_PROMPT 一样属于**稳定层**（`ProviderRole::System`），紧跟 BASE 之后，
+///   保住 provider 前缀缓存（ADR 0007）；成员名单/角色/路径/计数等变化事实**不得**进本段；
+/// - 文本严禁包含 `session=` / `graph=` 子串：`provider::looks_like_dynamic_prefix_content`
+///   会把命中的 System 消息判为动态前缀（`Observation` 的 stable/semi-stable 分层会错位）。
+pub const AGENT_TEAM_POLICY_PROMPT: &str = r#"Agent Teams is available in this session
+
+- Shared workspace: the Team Lead and every teammate share one working directory and filesystem; edits are immediately visible to every member. Split write work into disjoint scopes, record the expected write scopes on shared tasks, and use task dependencies when work must be ordered. Write-scope overlap is advisory, not a lock.
+- Prefer read/edit/write for file changes. If a file operation returns FS_STALE_VERSION, read the current file, rebase the intended change onto the new content, and retry. Bash, formatters, code generators, and scripts are not fully protected by the filesystem version guard: coordinate them explicitly and have the Lead review the final diff and run tests.
+- Use the target returned by spawn_teammate or list_agents as the send_message / interrupt_agent target, and as the owner when assigning or filtering shared tasks.
+- send_message: a running target receives the message at its nearest step boundary; an inactive target is started or resumed. A peer message starts with its sender name. A successful send does not mean the recipient has processed it.
+- Member states: inactive means no turn is executing; it does not describe task completion, success, failure, or waiting for other agents. provisioning means member creation is in progress; failed means member creation failed.
+- Shared-task workflow: team_task_list reads the board and each row echoes its current revision; team_task_update with action claim plus expected_revision takes the task, then perform the work and team_task_update with action complete and the new expected_revision. Task readiness never starts an owner.
+- Member status has exactly one source: the status field returned by list_agents (running / inactive / provisioning / failed). To move a required member forward, send_message wakes it; a running member picks the message up at its nearest step boundary. Re-list with list_agents and team_task_list after each action instead of assuming progress.
+- Role lifecycle: spawn_teammate derives a teammate when work needs a writer or a longer independent run; maintain the shared task board with team_task_*; interrupt_agent aborts one teammate's current turn.
+- The Lead must not give the final answer while a required teammate is still running or provisioning: re-run list_agents plus team_task_list until every required member is inactive with its task complete, or failed, and report any failure honestly."#;
+
+/// 团队策略段是否注入的唯一判定（与 `tools.rs` 的 10 处 fail-closed 门同源）。
+pub fn agent_team_policy_enabled() -> bool {
+    crate::agent::tools::subagent_runtime_wired()
+}
+
+/// 稳定层里除 BASE 之外额外注入的 System 消息条数（0 或 1）。
+///
+/// Wave-61 C3.7：trace 侧「用了检索」的代理判定（`message_count > 2`）依赖这个额外条数，
+/// 否则第 2 条 System 消息会让该代理判定恒真。
+pub fn reserved_system_message_extra_count() -> usize {
+    usize::from(agent_team_policy_enabled())
+}
+
 /// 提示层序不变量：稳定层（System）必须全部排在动态层（Developer）之前。
 /// 动态层若插到稳定层之前会打穿 provider 前缀缓存（ADR 0007）。
 pub fn prompt_layers_are_ordered(messages: &[ProviderMessage]) -> bool {
@@ -408,7 +446,12 @@ fn build_layered_turn_context(
             retrieved.turn_context.user_message.clone()
         };
     let current_user_message = ProviderMessage::user(effective_user_message_text.clone());
-    let base_system_messages = vec![ProviderMessage::system(BASE_SYSTEM_PROMPT)];
+    // Wave-61 C3.3：团队策略段作为**紧跟 BASE 之后的第二条 System 消息**进入稳定层。
+    // 门控值来自进程级 OnceLock，bootstrap 后恒定 ⇒ 同进程内不会随 turn 抖动前缀。
+    let mut base_system_messages = vec![ProviderMessage::system(BASE_SYSTEM_PROMPT)];
+    if agent_team_policy_enabled() {
+        base_system_messages.push(ProviderMessage::system(AGENT_TEAM_POLICY_PROMPT));
+    }
     let domain_profile_prompt = infer_domain_profile_prompt(graph_name, &retrieved.turn_context);
     let domain_profile_messages = build_domain_profile_messages(provider, domain_profile_prompt);
     let instruction_scope_sources = applicable_instruction_sources(retrieved);
@@ -422,9 +465,7 @@ fn build_layered_turn_context(
     let image_note = image_capability_note(provider, retrieved);
     let base_semistable_context = provider_semistable_context_note(graph_name, provider, retrieved);
     let memory_messages = build_memory_messages(retrieved);
-    let mut reserved_messages = vec![
-        base_system_messages[0].clone(),
-    ];
+    let mut reserved_messages = base_system_messages.clone();
     reserved_messages.extend(domain_profile_messages.clone());
     reserved_messages.push(ProviderMessage::developer(
         base_semistable_context.note.clone(),
@@ -498,18 +539,23 @@ fn build_layered_turn_context(
     let mut native_volatile_input_messages = Vec::new();
     let conversation_carry_mode = if provider.requires_provider_native_tool_flow() {
         let native_memory = build_native_memory_messages(retrieved);
-        let mut reserved_native_messages = vec![
-            json!({
+        // Wave-61 C3.3：native 路径与 normalized-input 路径保持同构（策略段紧跟 BASE）。
+        let mut reserved_native_messages: Vec<Value> = vec![json!({
+            "role": "system",
+            "content": BASE_SYSTEM_PROMPT,
+        })];
+        if agent_team_policy_enabled() {
+            reserved_native_messages.push(json!({
                 "role": "system",
-                "content": BASE_SYSTEM_PROMPT,
-            }),
-            json!({
-                "role": "system",
-                "content": base_semistable_context.note.clone(),
-            }),
-        ];
+                "content": AGENT_TEAM_POLICY_PROMPT,
+            }));
+        }
+        reserved_native_messages.push(json!({
+            "role": "system",
+            "content": base_semistable_context.note.clone(),
+        }));
         reserved_native_messages.splice(
-            1..1,
+            1 + reserved_system_message_extra_count()..1 + reserved_system_message_extra_count(),
             domain_profile_messages.iter().map(|message| {
                 json!({
                     "role": "system",
@@ -564,6 +610,12 @@ fn build_layered_turn_context(
             "role": "system",
             "content": BASE_SYSTEM_PROMPT,
         })];
+        if agent_team_policy_enabled() {
+            native_base_system_messages.push(json!({
+                "role": "system",
+                "content": AGENT_TEAM_POLICY_PROMPT,
+            }));
+        }
         native_domain_profile_messages = domain_profile_messages
             .iter()
             .map(|message| {

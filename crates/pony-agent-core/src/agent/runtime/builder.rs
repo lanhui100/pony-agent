@@ -77,6 +77,14 @@ impl AgentRuntimeBuilder {
     }
 
     pub fn build(self) -> AgentRuntime {
+        // Wave-61 C2：宿主子代理引擎的**唯一**注册点（三条宿主 tauri / non-tauri harness / tui
+        // 以及 cli 全部经由本函数建栈，见契约 C2.1）。把注册收敛在这里，宿主侧零改动。
+        //
+        // 幂等与不阻断：槽是 `OnceLock`（subagent_runtime.rs:37-45），首写者胜、重复注册返回
+        // `Err("subagent engine already set")`；`build()` 返回 `AgentRuntime` 而非 `Result`，
+        // 故注册失败（含已注册、含 HostTurnEngine 自建栈的嵌套 build）一律忽略，**不** panic、
+        // **不**改变返回值。公共 API `set_subagent_engine` / `subagent_engine` 语义不变。
+        ensure_host_subagent_engine(self.workspace_root.clone());
         let sessions = self.sessions.unwrap_or_else(SessionStore::new);
         let shared_authorizations = sessions.path_authorizations();
         let plan_store = self.plan_store;
@@ -123,4 +131,24 @@ impl DesktopRuntimePreset {
     pub fn build() -> AgentRuntime {
         Self::builder().build()
     }
+}
+
+/// Wave-61 C2：把宿主子代理引擎（[`HostTurnEngine`]）幂等注册进进程级槽。
+///
+/// 语义约束（契约 C2.2）：
+/// - 传**本 builder 的** `workspace_root`（`with_workspace_root`），满足 wave-58 F1-5「子代理必须
+///   以父会话工作区根建栈」；`None` 时引擎按其既有规则回落 `compute_default_workspace_root()`。
+/// - 槽已接线（含本进程内更早的 `build()`、或测试/宿主经公开 API 显式注入）时**不覆盖**，
+///   首写者胜是该 `OnceLock` 的既定语义。
+/// - 注册失败（`Err("subagent engine already set")` 等）一律忽略：`build()` 不返回 `Result`，
+///   不得 panic、不得改变返回值、不得阻断宿主启动。
+fn ensure_host_subagent_engine(workspace_root: Option<std::path::PathBuf>) {
+    use crate::agent::subagent_runtime::{
+        set_subagent_engine, subagent_engine, HostTurnEngine,
+    };
+    if subagent_engine().is_some() {
+        return;
+    }
+    let engine = HostTurnEngine::new().with_workspace_root(workspace_root);
+    let _ = set_subagent_engine(std::sync::Arc::new(engine));
 }

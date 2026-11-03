@@ -3224,7 +3224,10 @@ fn trace_uses_retrieval(trace: &crate::agent::session::TurnTraceRecord) -> bool 
         .build_context_observation
         .as_ref()
         .map(|observation| {
-            observation.message_count > 2
+            // Wave-61 C3.7：已接线进程会多注入一条团队策略 System 消息，按实际条数抬高
+            // `message_count > 2` 这个「用了检索」代理判定的阈值（与 trace_timeline 同源）。
+            observation.message_count
+                > 2 + crate::agent::context::reserved_system_message_extra_count()
                 || !observation.prefix_mutation_reasons.is_empty()
                 || !observation.semi_stable_context_text.trim().is_empty()
         })

@@ -1,0 +1,208 @@
+{
+  "wave": "wave-61-team-activation",
+  "phase": "green",
+  "agent": "executor",
+  "verified_by": "lead",
+  "captured_at": "2026-11-03T10:23:47+0800",
+  "commands": [
+    {
+      "cmd": "cargo test -p pony-agent-core --test wave61_team_activation --test tool_surface_wave20_contract --test wave37_tool_surface --test wave25_capability_honesty_test --test orchestration_acceptance_test --test pa110_teams_acceptance --test team_task_order_contract --test teammate_e2e_communication_test",
+      "exit_code": 0,
+      "suites": [
+        {
+          "result": "ok",
+          "passed": 4,
+          "failed": 0
+        },
+        {
+          "result": "ok",
+          "passed": 5,
+          "failed": 0
+        },
+        {
+          "result": "ok",
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "result": "ok",
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "result": "ok",
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "result": "ok",
+          "passed": 4,
+          "failed": 0
+        },
+        {
+          "result": "ok",
+          "passed": 9,
+          "failed": 0
+        },
+        {
+          "result": "ok",
+          "passed": 7,
+          "failed": 0
+        }
+      ],
+      "cases": [
+        {
+          "name": "test_subagent_tool_routed_through_tool_router",
+          "status": "ok"
+        },
+        {
+          "name": "test_team_task_board_tools_routed_through_tool_router",
+          "status": "ok"
+        },
+        {
+          "name": "test_agent_teams_tools_routed_through_tool_router",
+          "status": "ok"
+        },
+        {
+          "name": "test_all_non_wired_orchestration_tools_are_honest",
+          "status": "ok"
+        },
+        {
+          "name": "test_ac03_team_tasks_lifecycle_and_cas",
+          "status": "ok"
+        },
+        {
+          "name": "test_ac02_workflow_dag_execution",
+          "status": "ok"
+        },
+        {
+          "name": "test_ac01_subagent_dispatch",
+          "status": "ok"
+        },
+        {
+          "name": "test_ac04_agent_teams_roster_and_mailbox",
+          "status": "ok"
+        },
+        {
+          "name": "test_ac05_message_queuing_and_steering",
+          "status": "ok"
+        },
+        {
+          "name": "test_team_task_created_at_ms_and_list_ordering_contract",
+          "status": "ok"
+        },
+        {
+          "name": "test_teammate_bi_directional_communication_and_reply",
+          "status": "ok"
+        },
+        {
+          "name": "test_goal_tools_are_canonical_and_model_visible",
+          "status": "ok"
+        },
+        {
+          "name": "t1_team_tools_are_model_visible",
+          "status": "ok"
+        },
+        {
+          "name": "t2_fake_capability_tools_return_capability_unavailable_error",
+          "status": "ok"
+        },
+        {
+          "name": "t4_team_tool_descriptors_are_model_visible",
+          "status": "ok"
+        },
+        {
+          "name": "t3_real_todo_tools_remain_model_visible_and_executable",
+          "status": "ok"
+        },
+        {
+          "name": "t1_team_tools_are_present_in_model_visible_surface",
+          "status": "ok"
+        },
+        {
+          "name": "t3_i_failing_stub_returns_structured_error",
+          "status": "ok"
+        },
+        {
+          "name": "t3_l_timeout_returns_timeout_error",
+          "status": "ok"
+        },
+        {
+          "name": "t3_0_subagent_without_engine_returns_capability_unavailable",
+          "status": "ok"
+        },
+        {
+          "name": "t3_h_subagent_with_stub_engine_returns_real_output",
+          "status": "ok"
+        },
+        {
+          "name": "t3_k_oversized_prompt_rejected",
+          "status": "ok"
+        },
+        {
+          "name": "t2b_write_file_with_env_allowance_overwrites",
+          "status": "ok"
+        },
+        {
+          "name": "t3_j_concurrency_over_limit_returns_busy",
+          "status": "ok"
+        },
+        {
+          "name": "t2_write_file_on_existing_file_without_expected_hash_fails_closed",
+          "status": "ok"
+        },
+        {
+          "name": "t1_model_visible_surface_is_exact_39_tool_list",
+          "status": "ok"
+        },
+        {
+          "name": "probe_child_env",
+          "status": "ok"
+        },
+        {
+          "name": "c3_team_policy_system_message_present_when_wired",
+          "status": "ok"
+        },
+        {
+          "name": "c3_team_policy_absent_when_unwired",
+          "status": "ok"
+        },
+        {
+          "name": "c1_team_tools_are_model_visible",
+          "status": "ok"
+        },
+        {
+          "name": "c1_product_names_do_not_fall_back_to_run",
+          "status": "ok"
+        },
+        {
+          "name": "c2_builder_registers_subagent_engine",
+          "status": "ok"
+        },
+        {
+          "name": "c5_same_gate_source",
+          "status": "ok"
+        }
+      ]
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --lib -q",
+      "exit_code": 0,
+      "result": "1210 passed; 0 failed; 0 ignored"
+    },
+    {
+      "cmd": "cargo check -p pony-agent-core --all-targets",
+      "exit_code": 0,
+      "note": "仅 stop_contract_wave60 既有 dead_code warning"
+    }
+  ],
+  "red_anchor_commit": "52a7a21",
+  "baseline_receipt": ".dev-team/regression-baseline-wave61-team.json",
+  "implemented": {
+    "C1": "tools.rs 10 项团队工具 -> ModelVisible（29→39）",
+    "C1.6": "model_visible_tool_name_opt 小写原名透传（防 telemetry 记成 Run）",
+    "C2": "runtime/builder.rs build() 内幂等注册 HostTurnEngine",
+    "C3": "context.rs 静态策略段作为第二条 System 消息（门控 subagent_runtime_wired）",
+    "C3.7": "trace_timeline.rs / control_plane/mod.rs 检索代理阈值补偿"
+  }
+}

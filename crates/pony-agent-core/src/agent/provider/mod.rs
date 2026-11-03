@@ -5169,8 +5169,18 @@ mod tests {
                 "BatchExecute".to_string(),
                 "Plan".to_string(),
                 "ViewImage".to_string(),
-                // W25：子代理/团队工具（subagent/workflow/team_task_*）未接线，已从模型
-                // 可见工具面摘除（handler 返回 capability_unavailable）。此处对齐实测面。
+                // Wave-61 C1：10 项团队工具进入模型可见面（按 builtin_tools 定义序插在
+                // ViewImage 之后、TodoWrite 之前；product 名 == primitive 小写原名）。
+                "subagent".to_string(),
+                "workflow".to_string(),
+                "spawn_teammate".to_string(),
+                "list_agents".to_string(),
+                "send_message".to_string(),
+                "interrupt_agent".to_string(),
+                "drain_inbox".to_string(),
+                "team_task_create".to_string(),
+                "team_task_update".to_string(),
+                "team_task_list".to_string(),
                 "TodoWrite".to_string(),
                 "TodoList".to_string(),
                 // W20 goal 工具为模型可见面成员（实测 surface 尾部）。
@@ -5193,12 +5203,35 @@ mod tests {
 
     #[test]
     fn fallback_tool_payload_filters_internal_builtin_but_keeps_dynamic_tools() {
-        // W28 附带必修：非 builtin 集合不得把 Internal 的 builtin 工具透传回模型面，
-        // 同时必须保留未知的动态工具（mcp__server__tool）。
+        // W28 附带必修 + Wave-61 C1 迁移（契约 C4.4「面④」）。
+        //
+        // 迁移理由（真值源）：C1 之后 `tool_exposure_for_name()` 已把 10 项团队工具并入
+        // `ModelVisible`，其余 builtin 均为 `ModelVisible`/`Deferred`（tool_search、
+        // workspace_path_info、spill_read），因此 `builtin_tools()` 里**不存在** exposure=Internal
+        // 的名字 —— 原用例以 `subagent` 当 Internal 样例的前提消失（找不到等价的 Internal
+        // builtin 可替换）。按契约 C4.4 的规则改写为**更严**的断言，不删用例、不放宽：
+        // ① 全量 builtin 名字的 Internal 集合必须恰为空集（回归守卫：未来谁把某个 builtin
+        //    标回 Internal，本用例立即变红）；
+        // ② 动态工具 `mcp__demo__echo` 必须照旧透传；
+        // ③ 现已 ModelVisible 的 builtin（subagent）经 fallback 分支也不得被摘除。
+        let builtin_names: Vec<String> = crate::agent::tools::builtin_tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        let internal_builtins: Vec<&String> = builtin_names
+            .iter()
+            .filter(|name| is_internal_builtin_tool_name(name))
+            .collect();
+        assert!(
+            internal_builtins.is_empty(),
+            "Wave-61 C1 后 builtin_tools() 不得再存在 exposure=Internal 的名字（模型面不依赖 fallback \
+             摘除任何 builtin）；实际仍为 Internal：{internal_builtins:?}"
+        );
+
         let tools = vec![
             ToolDefinition {
                 name: "subagent",
-                description: "internal stub",
+                description: "wave-61：已 ModelVisible 的 builtin",
                 input_schema: json!({"type": "object"}),
             },
             ToolDefinition {
@@ -5212,7 +5245,7 @@ mod tests {
             .iter()
             .filter_map(|entry| entry.get("name").and_then(Value::as_str))
             .collect();
-        assert_eq!(names, vec!["mcp__demo__echo"]);
+        assert_eq!(names, vec!["subagent", "mcp__demo__echo"]);
     }
 
     #[test]
@@ -5247,8 +5280,18 @@ mod tests {
                 "BatchExecute".to_string(),
                 "Plan".to_string(),
                 "ViewImage".to_string(),
-                // W25：子代理/团队工具（subagent/workflow/team_task_*）未接线，已从模型
-                // 可见工具面摘除（handler 返回 capability_unavailable）。此处对齐实测面。
+                // Wave-61 C1：10 项团队工具进入模型可见面（按 builtin_tools 定义序插在
+                // ViewImage 之后、TodoWrite 之前；product 名 == primitive 小写原名）。
+                "subagent".to_string(),
+                "workflow".to_string(),
+                "spawn_teammate".to_string(),
+                "list_agents".to_string(),
+                "send_message".to_string(),
+                "interrupt_agent".to_string(),
+                "drain_inbox".to_string(),
+                "team_task_create".to_string(),
+                "team_task_update".to_string(),
+                "team_task_list".to_string(),
                 "TodoWrite".to_string(),
                 "TodoList".to_string(),
                 // W20 goal 工具为模型可见面成员（实测 surface 尾部）。
