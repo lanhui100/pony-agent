@@ -1969,6 +1969,7 @@ mod tests {
             started_at_ms: 0,
             updated_at_ms: 0,
             stop_requested_at_ms: None,
+            stop_reason: None,
         }
     }
 

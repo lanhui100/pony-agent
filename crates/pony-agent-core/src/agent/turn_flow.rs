@@ -542,6 +542,7 @@ pub fn emit_stream_failed(
             hook_trace_records,
             session_summary: None,
             step: None,
+            stop_reason: None,
         },
     )
 }
@@ -603,6 +604,7 @@ pub fn emit_stream_cancelled(
             hook_trace_records: None,
             session_summary: None,
             step: None,
+            stop_reason: None,
         },
     );
 }
@@ -790,6 +792,7 @@ pub fn emit_stream_event_with_step(
             },
             session_summary,
             step,
+            stop_reason: None,
         },
     )
 }
@@ -1582,6 +1585,7 @@ mod tests {
             hook_trace_records: None,
             session_summary: None,
             step: None,
+            stop_reason: None,
         }
     }
 

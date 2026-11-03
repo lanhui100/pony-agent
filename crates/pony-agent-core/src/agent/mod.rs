@@ -55,6 +55,8 @@ pub mod sqlite_session;
 pub mod spill;
 pub mod subagent_runtime;
 pub mod sse_adapter;
+pub mod stop_escalation;
+pub mod stop_sequence;
 pub mod telemetry;
 pub mod terminal;
 pub mod todo;

@@ -1,0 +1,22 @@
+{
+  "wave": "60",
+  "baseline_commit": "7510042",
+  "recorded_at": "2026-11-03T08:56:00+08:00",
+  "commands": [
+    {
+      "cmd": "cargo check --manifest-path crates/pony-agent-core/Cargo.toml --all-targets",
+      "exit_code": 0,
+      "stdout_tail": "Finished `dev` profile [unoptimized] target(s) in 1m 07s"
+    },
+    {
+      "cmd": "npx vitest run --reporter=dot",
+      "exit_code": 0,
+      "result": "Test Files 132 passed (132); Tests 1274 passed | 12 skipped (1286)",
+      "duration_s": 240.76
+    }
+  ],
+  "note": "全量前端基线绿；核心 crate check 绿。src-tauri 侧基线以 cargo check --manifest-path src-tauri/Cargo.toml 在实现阶段补录（Lead 执行）。",
+  "preexisting_dirty": [
+    "M tests/acceptance/pds-streaming/receipts/e2e/v8-relative-runs.json (非本波，禁止提交)"
+  ]
+}

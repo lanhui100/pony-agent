@@ -840,6 +840,72 @@
       ],
       "meta_retrospective": ".dev-team/meta-retrospective.md",
       "known_limits": 6
+    },
+    {
+      "wave": "60",
+      "theme": "可中断停止（结构化 stop_reason + 立即应答 + 可中断读通道 + 宽限期收口 + 双击 Esc）",
+      "tier": "B",
+      "tier_basis": "跨 core/tauri/TUI/前端 4 面 + 事件契约增量 + 阻塞读通道与线程注册表；命中 blast 关键字 thread/lock/io",
+      "contract_matrix": ".dev-team/contracts/wave-60-interruptible-stop.md",
+      "execution": "双写域并行（core-rust 串行 T1→T2→T3；surfaces 串行 T4→T5）",
+      "baseline_commit": "7510042",
+      "roster": [
+        "lead",
+        "protocol-agent",
+        "test-agent",
+        "executor-core",
+        "executor-surface"
+      ],
+      "branches": {
+        "protocol": {
+          "owner": "protocol-agent",
+          "status": "pending",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/stop_escalation.rs",
+            "crates/pony-agent-core/src/agent/stop_sequence.rs",
+            "crates/pony-agent-core/src/agent/mod.rs",
+            "src/types/runtime.ts"
+          ]
+        },
+        "test": {
+          "owner": "test-agent",
+          "status": "pending",
+          "write_scopes": [
+            "crates/pony-agent-core/tests/",
+            "src-tauri/tests/",
+            "tests/acceptance/stop/",
+            "tests/stop-"
+          ]
+        },
+        "core": {
+          "owner": "executor-core",
+          "status": "pending",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/execution_control.rs",
+            "crates/pony-agent-core/src/agent/control_plane/",
+            "crates/pony-agent-core/src/agent/turn_flow.rs",
+            "crates/pony-agent-core/src/agent/runtime/",
+            "crates/pony-agent-core/src/agent/provider/",
+            "src-tauri/src/"
+          ]
+        },
+        "surface": {
+          "owner": "executor-surface",
+          "status": "pending",
+          "write_scopes": [
+            "src/stores/runtime.ts",
+            "src/components/HomeWorkspace.vue",
+            "src/lib/runtime/",
+            "crates/pony-agent-core/src/bin/tui.rs"
+          ]
+        }
+      },
+      "gates": {
+        "regression_baseline": "pending",
+        "red_commit": null,
+        "green_commit": null,
+        "join_barrier": null
+      }
     }
   ],
   "counters": {

@@ -81,6 +81,7 @@ impl HostControlPlane {
             started_at_ms: checkpoint.created_at_ms,
             updated_at_ms: checkpoint.updated_at_ms,
             stop_requested_at_ms: None,
+            stop_reason: None,
         };
         refresh_execution_checkpoint_projection(&mut checkpoint);
         checkpoint
@@ -171,6 +172,7 @@ impl HostControlPlane {
             started_at_ms: trace.emitted_at_ms.unwrap_or(trace.updated_at),
             updated_at_ms: trace.updated_at,
             stop_requested_at_ms: None,
+            stop_reason: None,
         };
         refresh_execution_checkpoint_projection(&mut checkpoint);
         checkpoint

@@ -4411,6 +4411,7 @@ fn turn_stream_event_step_serde_roundtrip() {
         hook_trace_records: None,
         session_summary: None,
         step: Some(2),
+        stop_reason: None,
     };
     let json = serde_json::to_string(&payload).expect("serialize");
     assert!(json.contains(r#""step":2"#), "step serializes: {json}");
@@ -4484,6 +4485,7 @@ fn runtime_can_build_graph_turn_handoff_from_stable_turn_artifacts() {
         started_at_ms: 0,
         updated_at_ms: 0,
         stop_requested_at_ms: None,
+        stop_reason: None,
     };
 
     let handoff = runtime.build_graph_turn_handoff(

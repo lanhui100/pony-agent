@@ -3934,6 +3934,7 @@ mod tests {
                 hook_trace_records: None,
                 session_summary: None,
                 step: None,
+                stop_reason: None,
             },
         );
 

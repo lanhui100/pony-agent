@@ -1141,7 +1141,20 @@ export type TurnStreamEvent = {
    * 缺省 = 未知/step 0（Rust 侧 `#[serde(default)]`）。
    */
   step?: number | null;
+  /**
+   * wave-60 §1/§C3：结构化停止原因（wire 对齐 Rust `TurnStreamEvent.stop_reason`）。
+   * 追加字段：旧 payload 缺省 ⇒ `null`（Rust 侧 `#[serde(default)]`）。
+   * `turn:cancelled` 携带该轮原因，`turn:completed`/`turn:failed` ⇒ `null`。
+   */
+  stopReason?: StopReason | null;
 };
+
+/**
+ * wave-60 §1 结构化停止原因（唯一词汇表，与 Rust
+ * `crates/pony-agent-core/src/agent/stop_escalation.rs` 的 `StopReason` 同名同值）。
+ * 契约纪律：只能追加，禁止重命名/删除既有值。
+ */
+export type StopReason = "user" | "parent" | "hook" | "watchdog" | "legacy";
 
 export type ExecutionCheckpoint = {
   contractVersion?: string | null;

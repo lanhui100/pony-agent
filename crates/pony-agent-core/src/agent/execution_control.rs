@@ -37,6 +37,9 @@ pub struct ExecutionCheckpoint {
     pub started_at_ms: u64,
     pub updated_at_ms: u64,
     pub stop_requested_at_ms: Option<u64>,
+    /// wave-60 §1：结构化停止原因（wire `stopReason`，取值见 `StopReason::as_str`）；
+    /// 未记录 ⇒ `None`（终态呈现按 `"legacy"` 处理）。
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -45,6 +48,8 @@ pub struct StopTurnResponse {
     pub turn_id: String,
     pub accepted: bool,
     pub state: String,
+    /// wave-60 C1：被接受时回带该轮的停止原因（wire `stopReason`）。
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -108,6 +113,7 @@ impl ExecutionControlRegistry {
             started_at_ms: now,
             updated_at_ms: now,
             stop_requested_at_ms: carried_stop_requested_at_ms,
+            stop_reason: None,
         };
         refresh_execution_checkpoint_projection(&mut checkpoint);
         state.turns.insert(turn_id.to_string(), checkpoint);
@@ -140,6 +146,7 @@ impl ExecutionControlRegistry {
                 turn_id: turn_id.to_string(),
                 accepted: false,
                 state: "not_found".to_string(),
+                stop_reason: None,
             };
         };
 
@@ -148,6 +155,7 @@ impl ExecutionControlRegistry {
                 turn_id: turn_id.to_string(),
                 accepted: false,
                 state: "already_terminal".to_string(),
+                stop_reason: None,
             };
         }
 
@@ -162,6 +170,7 @@ impl ExecutionControlRegistry {
             turn_id: turn_id.to_string(),
             accepted: true,
             state: "running".to_string(),
+            stop_reason: None,
         }
     }
 
@@ -394,6 +403,7 @@ mod tests {
             started_at_ms: 0,
             updated_at_ms: 0,
             stop_requested_at_ms: None,
+            stop_reason: None,
         };
 
         refresh_execution_checkpoint_projection(&mut checkpoint);

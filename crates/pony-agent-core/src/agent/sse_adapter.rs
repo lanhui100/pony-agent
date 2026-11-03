@@ -184,6 +184,7 @@ mod tests {
             hook_trace_records: None,
             session_summary: None,
             step: None,
+            stop_reason: None,
         };
 
         let frame = format_sse_event("turn:delta", &payload).expect("serialization should succeed");
@@ -276,6 +277,7 @@ mod tests {
             hook_trace_records: None,
             session_summary: None,
             step: None,
+            stop_reason: None,
         };
 
         // Emit twice

@@ -190,6 +190,12 @@ pub struct TurnStreamEvent {
     /// followup hop 索引（≥1，初始 call 的 step/start 由 turn:started 承担）。
     #[serde(default)]
     pub step: Option<u32>,
+    /// wave-60 §1/§C3：结构化停止原因（wire `stopReason`，取值见
+    /// `crate::agent::stop_escalation::StopReason`）。为**追加**字段：
+    /// `#[serde(default)]` + TS 可选，旧消费者不读即行为不变；
+    /// `turn:cancelled` 携带该轮原因（无记录 ⇒ `"legacy"`），`turn:completed`/`turn:failed` ⇒ `None`。
+    #[serde(default)]
+    pub stop_reason: Option<String>,
 }
 
 

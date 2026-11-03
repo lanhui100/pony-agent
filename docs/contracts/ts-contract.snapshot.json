@@ -94,6 +94,7 @@
         "sessionId",
         "sessionSummary",
         "step",
+        "stopReason",
         "text",
         "toolActivities",
         "totalTokens",

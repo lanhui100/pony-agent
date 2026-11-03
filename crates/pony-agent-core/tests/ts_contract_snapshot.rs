@@ -79,6 +79,9 @@ fn turn_stream_event_sample() -> Value {
         hook_trace_records: Some(Vec::new()),
         session_summary: Some("contract summary".to_string()),
         step: Some(1),
+        // wave-60：追加 wire 字段（`#[serde(default)]`，非 skip_serializing_if，
+        // 但按本夹具「必须给值，否则快照漏键」的约定填 Some，覆盖线缆键 stopReason）。
+        stop_reason: Some("user".to_string()),
     };
     serde_json::to_value(&event).expect("TurnStreamEvent must serialize")
 }

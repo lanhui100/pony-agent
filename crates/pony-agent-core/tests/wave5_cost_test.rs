@@ -169,6 +169,7 @@ fn k2_event_cost_usd_camel_case_and_skip_serializing_none() {
         hook_trace_records: None,
         session_summary: None,
         step: None,
+        stop_reason: None,
         cost_usd: Some(0.012345),
     };
 
