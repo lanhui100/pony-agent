@@ -14,7 +14,7 @@
 | `cargo test --test tui_stop_wave60 --test tui_stop_static_wave60 --test tui_batch2_regression --test tui_batch3_regression -j 1` | Exit 0 · 12 / 16 / 3 / 6 passed |
 | `cargo check --all-targets -j 1` | Exit 0（仅既有 dead_code 警告） |
 | `npx vitest run tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts` ×2 | Exit 0 · 4 passed · 205s / 206s（幂等收敛；原单跑 3m10s 但嵌套会放大） |
-| `npx vitest run`（全量，V10 修后） | 见交付时的最终收据（本文件末尾追加） |
+| `npx vitest run`（全量，V10 修后） | **Exit 0 · 138 files / 1308 passed | 12 skipped · 275.59s**（修复前 >20min 不收敛） |
 
 ## 3. 红相与分权
 - 第 2 项走红相→绿相：`crates/pony-agent-core/tests/tui_stop_key_feedback.rs`（3 用例）先锚定（`2866ebe`，tag `wave-63-red`），实现后转绿；Executor 全程未改测试。
