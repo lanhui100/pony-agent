@@ -1,0 +1,42 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "src/lib/runtime/browser-preview.ts"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3029,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && for i in $(seq 1 $(nproc)); do (while :; do :; done) & done; for i in $(seq 1 50); do cargo test -q -p pony-agent-core --test tool_timeout_policy_test ct4_timeout_path_evidence_marks_timed_out_true 2>&1 | grep -E 'test result|panicked'; done; kill $(jobs -p) 2>/dev/null; sed -n '3004,3008p;3029,3035p;3071p' crates/pony-agent-core/src/agent/tools.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 212,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -o 'DEFAULT_RUN_TIMEOUT_MS: u64 = [0-9_]*' crates/pony-agent-core/src/agent/tools.rs | head -1; grep -o 'SUBAGENT_TURN_TIMEOUT_MS: u64 = [0-9_]*' crates/pony-agent-core/src/agent/orchestration.rs | head -1; python3 -c \"import json;print('nfr subagent_turn_timeout_ms=',json.load(open('.dev-team/nfr-baseline.json'))['subagent_turn_timeout_ms'])\"; sed -n '250,257p' crates/pony-agent-core/src/agent/subagent_runtime.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3006,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '3004,3007p' crates/pony-agent-core/src/agent/tools.rs && sed -n '433,443p' crates/pony-agent-core/src/agent/process.rs",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "078b406f-ca91-4488-b50a-3eecedd48c88",
+    "fresh_context": true
+  },
+  "executed_by": "078b406f-ca91-4488-b50a-3eecedd48c88",
+  "reviewed_commit": "fecc512f2359c4c00d7275865ce5bcf71113ff79",
+  "attestation": {
+    "self_signed": false,
+    "note": "独立 fresh-context subagent，与 executor(test-agent/executor) 不同会话；审的是 fecc512 之上的未提交工作区 diff"
+  }
+}

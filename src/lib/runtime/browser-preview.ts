@@ -32,7 +32,7 @@ export const defaultAvailableTools: AvailableTool[] = [
         },
         timeoutMs: {
           type: "integer",
-          description: "命令超时毫秒数，默认 10000，最大 120000"
+          description: "命令超时毫秒数，默认 120000，最大 600000"
         }
       },
       required: ["command"],

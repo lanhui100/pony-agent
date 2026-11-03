@@ -112,3 +112,13 @@
 - v2（本轮）：L3 verifier 复核 10 项（8 TRUE / 2 PARTIAL）后修订两处**论据**（结论不变）：
   ① P1-1 由「多 tool_use 一律报错」改为「Anthropic 报错 / OpenAI `first()` 静默丢弃」（`provider/mod.rs:3222`）；
   ② P1-2 的 `degraded` 论据改为「trace 面板不渲染 + `src/` 内同名不同义消费」；同时按 verifier 补正 P0-3（stderr 已是结构化字段，缺口在分类与产品面）、P1-3（重放无视 `record.trace_id`）。
+
+## 7. 整改跟踪
+
+| 优化点 | 状态 | 证据 |
+| :--- | :--- | :--- |
+| P0-2 Run 超时（默认/上限/证据字段） | **已整改（波次一）** | 契约 [tool-timeout-policy v2](../.dev-team/contracts/tool-timeout-policy.md)；实现 `tools.rs:210-218`（120s/600s + 常量隔离）、`:2866`（删子串启发式）、`:7974`（`resolve_run_timeout_ms`）、`:3159/:3220`（`timedOut` 证据）；验收测试 `tests/tool_timeout_policy_test.rs`（13 例，红相 `fecc512`） |
+| P0-2 超时提示指向后台（CT-5） | 已登记 `B004` | 撞冻结用例 `wave9_green_acceptance_test.rs:143`，需契约演进波次 |
+| P0-2 真·promote（超时转后台 job） | 已登记 `B005` | 需 `jobs.rs` 适配层 + 进程所有权重构（侦察结论见契约 v2 §波次二） |
+| P0-2 指纹区分「延长超时」 | **不做（设计裁决）** | 与 `wave9_adversarial_test.rs:55/:255`、`harness_optimizations_test.rs:215` 的刻意反重试风暴语义冲突；模型不得靠加大 timeout 绕过熔断 |
+| P0-1 / P0-3 / P1-* | 待排期 | 见 §2 与 §3 |

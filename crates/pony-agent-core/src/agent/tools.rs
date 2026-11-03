@@ -207,8 +207,15 @@ const MAX_SEGMENT_LINES: usize = 400;
 const DEFAULT_SEGMENT_LINES: usize = 80;
 const DEFAULT_LIST_LIMIT: usize = 40;
 const SUMMARY_ITEM_LIMIT: usize = 3;
-const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000;
-const MAX_RUN_TIMEOUT_MS: u64 = 120_000;
+/// 契约 CT-1（`tool-timeout-policy.md` v2）：Run 未显式传 `timeoutMs` 时的统一默认值，
+/// 与命令文本无关（CT-2 已删除按命令子串自适应的旧启发式）。
+const DEFAULT_RUN_TIMEOUT_MS: u64 = 120_000;
+/// 契约 CT-1/CT-3：Run 的 `timeoutMs` 协议上限，显式值一律夹紧到闭区间
+/// `[1, MAX_RUN_TIMEOUT_MS]`。
+const MAX_RUN_TIMEOUT_MS: u64 = 600_000;
+/// 通用 `ToolExecutionPolicy` 默认 deadline（**非** Run 专属）：契约只覆盖 Run，
+/// 其他工具的默认 deadline 维持 10s，不随 [`DEFAULT_RUN_TIMEOUT_MS`] 变化。
+const DEFAULT_TOOL_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_WEB_TIMEOUT_MS: u64 = 15_000;
 /// Hard cap on a fetched response body (design Decision 8 / phase-4..7 review P1-4): never read a
 /// response unbounded; past this the body is truncated and surfaced honestly.
@@ -415,7 +422,8 @@ impl Default for ToolExecutionPolicy {
         Self {
             concurrent_safe: false,
             cancellable: true,
-            default_timeout_ms: DEFAULT_RUN_TIMEOUT_MS,
+            // 通用工具默认 deadline 与 Run 默认超时解耦（契约只覆盖 Run）。
+            default_timeout_ms: DEFAULT_TOOL_TIMEOUT_MS,
             result_budget_bytes: MAX_FULL_READ_BYTES as usize,
         }
     }
@@ -2859,23 +2867,9 @@ impl ToolRouter {
                 return error_result(TOOL_WORKSPACE_RUN_COMMAND, &code, message, None)
             }
         };
-        let default_timeout = if command.contains("build")
-            || command.contains("test")
-            || command.contains("cargo")
-            || command.contains("check")
-            || command.contains("install")
-        {
-            // 编译/构建/测试类长耗时命令自适应默认 60s
-            60_000
-        } else {
-            DEFAULT_RUN_TIMEOUT_MS
-        };
-        let timeout_ms = call
-            .arguments
-            .get("timeoutMs")
-            .and_then(Value::as_u64)
-            .map(|value| value.clamp(1, MAX_RUN_TIMEOUT_MS))
-            .unwrap_or(default_timeout);
+        // 契约 CT-1/CT-2/CT-3：超时解析统一走 `resolve_run_timeout_ms`（已删除按命令子串
+        // 自适应的旧启发式；未传 `timeoutMs` 时任何命令都取默认值）。
+        let timeout_ms = resolve_run_timeout_ms(&call.arguments, command);
 
         // Sandbox gate (design Decision 7, PA-076 task 5.5, phase-5 review P1-2): the legacy
         // Run always runs `enforce_sandbox`. With no backend registered it fails closed via
@@ -3166,6 +3160,8 @@ impl ToolRouter {
                 json!({
                     "command": command,
                     "timeoutMs": timeout_ms,
+                    // 契约 CT-4：超时路径在证据根级显式标记 `timedOut: true`。
+                    "timedOut": true,
                     "exitCode": exit_code,
                     "stdout": stdout,
                     "stderr": stderr,
@@ -3225,6 +3221,8 @@ impl ToolRouter {
                 "command": command,
                 "delegateTool": "run_shell",
                 "timeoutMs": timeout_ms,
+                // 契约 CT-4：未走超时路径 ⇒ 根级显式 `timedOut: false`（不靠缺失推断）。
+                "timedOut": false,
                 "exitCode": exit_code,
                 "stdout": stdout,
                 "stderr": stderr,
@@ -5863,7 +5861,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     },
                     "timeoutMs": {
                         "type": "integer",
-                        "description": "命令超时毫秒数，默认 10000（构建/测试/检查类命令自适应为 60000），最大 120000"
+                        "description": "命令超时毫秒数，默认 120000，最大 600000"
                     }
                 },
                 "required": ["command"],
@@ -7967,6 +7965,36 @@ fn classify_timeout_hint(command: &str) -> String {
         return "命令疑似网络类操作，超时可能来自网络/认证/代理三类原因之一：请依次自检 `git ls-remote <remote-url>` 是否可连通、`git config --get remote.origin.url` 是否指向预期远端、SSH 身份自检（`ssh -T git@<host>`）是否有效；确认后再重试，或显式传入更大的 timeoutMs。".to_string();
     }
     "请缩短命令执行时间，或显式传入更大的 timeoutMs。".to_string()
+}
+
+/// 契约 CT-1/CT-2/CT-3 的可测接缝：解析一次 Run 调用的生效超时（毫秒）。
+///
+/// 语义（`tool-timeout-policy.md` v2）：
+/// - CT-2：不再按命令文本做子串启发式（旧 `build`/`test`/`cargo`/`check`/`install` ⇒ 60s），
+///   未传 `timeoutMs` 时任何命令（含空命令）一律取 [`DEFAULT_RUN_TIMEOUT_MS`]；
+/// - CT-3：显式整数按闭区间 `[1, MAX_RUN_TIMEOUT_MS]` 夹紧（`<1` ⇒ 1，含负数；`>MAX` ⇒ MAX）；
+///   非数字（如 `"x"`）、非整数（如 `1.5`）、`null` 一律回落 [`DEFAULT_RUN_TIMEOUT_MS`]；
+///   区间内原样保留。
+///
+/// `command` 仅为契约签名的前向兼容入参（CT-2 之后不再参与判定），因此不读其值。
+pub fn resolve_run_timeout_ms(arguments: &serde_json::Value, command: &str) -> u64 {
+    let _ = command;
+    let Some(requested) = arguments.get("timeoutMs") else {
+        return DEFAULT_RUN_TIMEOUT_MS;
+    };
+    if let Some(requested) = requested.as_u64() {
+        return requested.clamp(1, MAX_RUN_TIMEOUT_MS);
+    }
+    // 负整数（JSON `-5`）`as_u64` 为 None，但契约 CT-3 要求走「<1 ⇒ 1」夹紧分支，
+    // 而不是非法输入 fallback。
+    if let Some(requested) = requested.as_i64() {
+        return if requested < 1 {
+            1
+        } else {
+            requested.min(MAX_RUN_TIMEOUT_MS as i64) as u64
+        };
+    }
+    DEFAULT_RUN_TIMEOUT_MS
 }
 
 /// wave-9 P1-3：识别 POSIX 行首内联环境变量赋值形态（私有纯函数，平台无关）。
