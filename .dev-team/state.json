@@ -932,6 +932,34 @@
           "check_declaration": "PASS(exit 0)"
         }
       }
+    },
+    {
+      "wave": "62",
+      "theme": "工具级取消（清偿 wave-60 §6-ter A9）：turn 令牌下沉到 dispatcher 与 Run 子进程",
+      "tier": "B",
+      "tier_basis": "跨 6 核心模块 + 并发/进程生命周期；命中 blast 关键字 thread/spawn/lock/Command",
+      "isolation": "worktree /home/dm/wt/pony-wave62 · branch wave-62/tool-cancel（主工作区被并发 wave-61 占用）",
+      "baseline_commit": "60e7cb8",
+      "protocol_commit": [
+        "4c0fdc4",
+        "1266e49"
+      ],
+      "red_commit": "e4bd02e",
+      "red_tag": "wave-62-red",
+      "contract_matrix": ".dev-team/contracts/wave-62-tool-cancel.md",
+      "roster": [
+        "lead",
+        "protocol-agent",
+        "test-agent",
+        "executor-core"
+      ],
+      "gates": {
+        "regression_baseline": "wave-60 基线沿用（--lib 1210）",
+        "l3a": "FAIL(1 BLOCKING)→修复",
+        "l3b": "FAIL(1 BLOCKING)→修复",
+        "recheck": "见 review-wave62-recheck.json"
+      },
+      "merge_status": "pending（wave-61 未收口，禁止 merge）"
     }
   ],
   "counters": {

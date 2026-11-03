@@ -66,10 +66,9 @@ pub struct StopTurnResponse {
 #[derive(Default)]
 struct RegistryState {
     turns: HashMap<String, ExecutionCheckpoint>,
-    /// wave-62 C1（字段面冻结，行为归属 wave62-T2）：每 turn 一个取消令牌。
+    /// wave-62 C1：每 turn 一个取消令牌。
     /// `register_turn` 负责创建/结转；`request_stop` 被接受时 `cancel()`；
     /// 只读出口是 [`ExecutionControlRegistry::cancellation_token`]。
-    #[allow(dead_code)]
     tokens: HashMap<String, Arc<CancellationToken>>,
 }
 
@@ -93,8 +92,6 @@ impl ExecutionControlRegistry {
             eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
             e.into_inner()
         });
-        // wave62-T2 TODO：在此为该 turn 创建/结转 `tokens[turn_id]`（`Arc<CancellationToken>`），
-        // 语义与下面 `stop_requested_at_ms` 的结转保持一致（重复注册沿用同一实例更佳）。
         // PA-095 #3：重注册保留已设置的停止请求——turn 开始前 request_stop
         // 的语义应跨注册存活（否则宿主预注册+停止会被入口注册覆盖丢失）。
         // wave-60 C1：`stop_requested_at_ms` 与 `stop_reason` **一并结转**（原因粘滞）。
@@ -140,6 +137,16 @@ impl ExecutionControlRegistry {
         };
         refresh_execution_checkpoint_projection(&mut checkpoint);
         state.turns.insert(turn_id.to_string(), checkpoint);
+
+        // wave-62 C1：每 turn 一个取消令牌。重注册**沿用既有实例**（取消态跨注册存活，
+        // 否则"先 stop 后重注册"会让已置的停止对工具层不可见）；令牌只存在于 registry
+        // 内部表，绝不进入 `ExecutionCheckpoint` 的序列化结构。
+        let token = state
+            .tokens
+            .get(turn_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(CancellationToken::new()));
+        state.tokens.insert(turn_id.to_string(), token);
     }
 
     pub fn update<F>(&self, turn_id: &str, update: F)
@@ -176,6 +183,23 @@ impl ExecutionControlRegistry {
             eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
             e.into_inner()
         });
+        // wave-62 C1：只有**被接受**的停止才 cancel 该 turn 的取消令牌（拒绝路径不得置位，
+        // 否则"已终态/未知/重复 stop"会误杀工具层仍在跑的调用）。
+        let response = Self::apply_stop_request(&mut state, turn_id, stop_reason);
+        if response.accepted {
+            if let Some(token) = state.tokens.get(turn_id) {
+                token.cancel();
+            }
+        }
+        response
+    }
+
+    /// `request_stop` 的 checkpoint 侧状态迁移（唯一实现；accept/拒绝判定全在此处）。
+    fn apply_stop_request(
+        state: &mut RegistryState,
+        turn_id: &str,
+        stop_reason: StopReason,
+    ) -> StopTurnResponse {
         let Some(checkpoint) = state.turns.get_mut(turn_id) else {
             return StopTurnResponse {
                 turn_id: turn_id.to_string(),
@@ -221,11 +245,16 @@ impl ExecutionControlRegistry {
         }
     }
 
-    /// wave-62 C1：只读访问器（未知 turn ⇒ `None`）。行为归属 wave62-T2，
-    /// 本桩仅冻结签名与返回类型。
+    /// wave-62 C1：只读访问器（未知 turn ⇒ `None`）。
+    ///
+    /// 返回的是**同一实例**的 `Arc` 克隆：调用方（runtime / dispatcher）观测到的取消态与
+    /// registry 内一致；`request_stop` 被接受时由本表唯一置位。
     pub fn cancellation_token(&self, turn_id: &str) -> Option<Arc<CancellationToken>> {
-        let _ = turn_id;
-        todo!("wave62")
+        let state = self.state.lock().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        state.tokens.get(turn_id).cloned()
     }
 
     pub fn is_stop_requested(&self, turn_id: &str) -> bool {

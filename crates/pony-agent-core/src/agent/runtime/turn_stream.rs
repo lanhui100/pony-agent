@@ -189,6 +189,8 @@ impl AgentRuntime {
                 session_id: input.session_id.clone(),
                 // T2-1：turn 级治理事实随本次调用显式传入（并发 turn 之间不共享任何槽位）。
                 dispatch_context: governed_context.cloned(),
+                // wave-62 C3：子进程类工具据此观察本轮停止（与 dispatch 闸门同一令牌实例）。
+                cancellation: governed_context.and_then(|context| context.turn_cancellation.clone()),
                 ..Default::default()
             };
             let (tool_result, invocation_record, capability_hook_trace_records) =
@@ -1377,7 +1379,12 @@ impl AgentRuntime {
         );
         // T2-1：流式 turn 的 session/run/turn 事实在本 turn 内部解析，并随每次工具调用
         // 显式下传（Ask 控制请求因此仍绑定真实调用；并发 turn 之间不再共享任何槽位）。
-        let governed_context = self.resolve_governed_turn_context(&input, &facts);
+        let mut governed_context = self.resolve_governed_turn_context(&input, &facts);
+        // wave-62 C2/C3：把本 turn 的取消令牌注入治理事实（registry 是唯一创建点）。
+        // 之后 dispatch 闸门复用同一令牌，工具层（run_command）也据此真杀子进程。
+        if let Some(context) = governed_context.as_mut() {
+            context.turn_cancellation = control.cancellation_token(&turn_id);
+        }
         // Consume a pending Ask resume injection (phase-4 P0) so the terminal tool result is
         // seeded into this turn's provider context.
         let ask_injection = self.take_pending_ask_injection(facts.run_id.as_deref());

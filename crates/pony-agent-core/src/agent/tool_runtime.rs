@@ -2,6 +2,7 @@ use crate::agent::tools::{
     ToolDefinitionContractView, ToolExposure, ToolOutcome, ToolRegistrySnapshot,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -31,7 +32,7 @@ pub trait ToolDispatcher: Send + Sync {
     fn dispatch(&self, request: ToolDispatchRequest) -> ToolOutcome;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrimitiveToolHandlerRequest {
     pub descriptor_id: String,
@@ -46,6 +47,12 @@ pub struct PrimitiveToolHandlerRequest {
     /// 锚定在会话 workspace 而非进程 cwd。`None` 时 handler 回退构造时的默认 root。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
+    /// wave-62 A1（C5 桥接修复）：本轮的取消令牌（运行时**句柄**，不进线缆 ⇒ `#[serde(skip)]`）。
+    ///
+    /// 桥接层（`RouterPrimitiveHandler`）必须把它透传进重建的 `ToolExecutionContext`，
+    /// 否则子进程类工具（`Run`）在真实 app 里观测不到 stop（wave-60 A9 未清偿）。
+    #[serde(skip)]
+    pub cancellation: Option<Arc<crate::agent::budget::CancellationToken>>,
 }
 
 pub trait PrimitiveToolHandler: Send + Sync {

@@ -1,0 +1,64 @@
+{
+  "verdict": "PASS",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "recheck-wave62",
+    "fresh_context": true
+  },
+  "executed_by": "recheck-wave62",
+  "reviewed_commit": "e4bd02ea714dd5c0dfe5ff1974fff50d18588fc6",
+  "attestation": {
+    "self_signed": false
+  },
+  "note": "审查对象=worktree /home/dm/wt/pony-wave62 的工作树内容（HEAD e4bd02e + 未提交修复 10 文件）；修复尚未 commit，故 reviewed_commit 记录为 HEAD sha。门禁命令均在 CARGO_TARGET_DIR=/home/dm/pony-agent/target-check 且 -j 1 下执行。",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/governed_executor.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/agent/execution_control.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3048,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n 3048,3085p crates/pony-agent-core/src/agent/tools.rs",
+      "severity": "ADVISORY",
+      "note": "取消分支与 timeout 分支的清理动作已对齐（cancel + kill_if_exists 幂等二次 kill + is_tracked 探针 + remove_windows_batch_script），但两处仍不对称：(a) still_tracked 时只 warn 日志、不升级为 fail-closed 码（timeout 分支升级为 environment_unavailable）；(b) 不返回 error_result_with_evidence 的 exitCode/stdout/stderr 部分证据。契约 A3 未要求升级，故不判 BLOCKING。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/execution_control.rs",
+      "line": 152,
+      "rule": "LEAK",
+      "counterexample_cmd": "grep -n 'tokens.remove' crates/pony-agent-core/src/agent/execution_control.rs",
+      "severity": "ADVISORY",
+      "note": "tokens 表只增不减：turn 进入终态后无任何回收路径（grep 为空），长生命周期 runtime 中每 turn 残留一个 Arc<CancellationToken>+map 条目。与既有 turns 表同款增长模式（非本波新增缺陷），故仅 ADVISORY。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/process.rs",
+      "line": 949,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'setsid\\|process_group' crates/pony-agent-core/src/agent/process.rs",
+      "severity": "ADVISORY",
+      "note": "④ 登记为上游已知局限（不改判）：Unix 路径仍是直接子进程 child.kill()+reap，无 setsid/killpg；模块自述第 26 行明写 'non-Windows behavior is direct-child lifecycle only'。取消确实杀死被 spawn 的 shell，但孙进程（如 sleep 本体）可能成为孤儿，'杀整棵进程树' 契约在 Unix 未达成。Windows 侧由 Job Object 兜住。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 828,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn 'children.cancel' crates/pony-agent-core/tests/ ; CARGO_TARGET_DIR=/home/dm/pony-agent/target-check cargo test -p pony-agent-core --test wave62_tool_cancel -j 1",
+      "severity": "ADVISORY",
+      "note": "A2 仅靠代码结构成立（children.cancel() → child_dispatch.rs:292 取消 dispatcher 自有 token，dispatcher.rs:828），缺一条'composite children.cancel() 之后 turn 令牌仍未取消'的回归断言；现有 child_cancellation_fails_closed_as_cancelled 只覆盖自有 token 的 fail-closed，wave62 的 7 例无 composite 场景。属测试覆盖缺口，非实现缺陷。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/execution_control.rs",
+      "line": 96,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n 70,100p crates/pony-agent-core/src/agent/execution_control.rs",
+      "severity": "ADVISORY",
+      "note": "遗留文档漂移：第 96-97 行仍写 'wave62-T2 TODO：在此为该 turn 创建/结转 tokens[turn_id]'，而下方 148-152 行已实现；第 72 行 #[allow(dead_code)] 亦已失效（tokens 已在 148/193/260 三处使用）。建议随本波收尾清理，避免误导后续读者。"
+    }
+  ]
+}

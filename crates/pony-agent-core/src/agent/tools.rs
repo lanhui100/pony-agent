@@ -90,6 +90,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -2964,6 +2965,15 @@ impl ToolRouter {
         // 无管道/已退出属正常竞态（幂等容忍由调用方决定）。
         let _ = self.process_manager.close_stdin(&session_id, &handle);
 
+        // wave-62 C3：取消观察者（turn 令牌 ⇒ 真杀子进程树），随命令结束自动退出。
+        let cancellation = context.cancellation.clone();
+        let _cancel_watcher = CommandCancelWatcher::spawn(
+            cancellation.clone(),
+            self.process_manager.clone(),
+            session_id.clone(),
+            handle.clone(),
+        );
+
         // Arm the kill timer as a safety net and run a bounded poll loop until `Exited`. The
         // loop accumulates per-poll output; truncation flags are sticky per stream.
         self.process_manager
@@ -2976,8 +2986,20 @@ impl ToolRouter {
         let mut exit_code: Option<i32> = None;
         let mut timed_out = false;
         let mut timeout_cleanup_error: Option<String> = None;
+        let mut cancelled = false;
 
         loop {
+            // wave-62 C3：**取消优先**——令牌已取消 ⇒ 立即终止进程树并以 aborted 返回，
+            // 不等待命令自然结束、也不被 timeout 分支抢先。
+            if cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                // 幂等补杀：watcher 通常已先杀；此处再兜一次（错误忽略，证据由 aborted 结果承载）。
+                let _ = self.process_manager.cancel(&session_id, &handle);
+                cancelled = true;
+                break;
+            }
             if Instant::now() >= deadline {
                 if let Err(error) = self.process_manager.kill_if_exists(&session_id, &handle) {
                     timeout_cleanup_error = Some(error);
@@ -2993,6 +3015,13 @@ impl ToolRouter {
                     stderr_truncated |= result.stderr_truncated;
                     if result.state == ProcessState::Exited {
                         exit_code = result.exit_code;
+                        // 取消与自然退出竞态：令牌已取消 ⇒ 仍按取消语义返回（取消优先）。
+                        if cancellation
+                            .as_ref()
+                            .is_some_and(|token| token.is_cancelled())
+                        {
+                            cancelled = true;
+                        }
                         break;
                     }
                 }
@@ -3014,6 +3043,48 @@ impl ToolRouter {
                 }
             }
             thread::sleep(Duration::from_millis(20));
+        }
+
+        if cancelled {
+            // wave-62 A3（取消路径对称清理）：与 `timed_out` 分支同口径 —— 幂等二次 kill
+            // （首次可能只做终止并保留条目，第二次才真正回收）+ 存活探针留证，
+            // 不让被取消命令的进程条目滞留；watcher 已随命令结束退出。
+            let first_cleanup_error = self.process_manager.cancel(&session_id, &handle).err();
+            let retry_cleanup_error = self
+                .process_manager
+                .kill_if_exists(&session_id, &handle)
+                .err();
+            let cleanup_error = first_cleanup_error.or(retry_cleanup_error);
+            let still_tracked = self.process_manager.is_tracked(&session_id, &handle);
+            if let Some(error) = cleanup_error.as_ref() {
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "run_command cancel path cleanup failed",
+                    None,
+                    &[
+                        ("session_id", json!(session_id)),
+                        ("handle", json!(handle)),
+                        ("error", json!(error.to_string())),
+                    ],
+                );
+            }
+            if still_tracked {
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "run_command process entry still tracked after cancel cleanup",
+                    None,
+                    &[
+                        ("session_id", json!(session_id)),
+                        ("handle", json!(handle)),
+                    ],
+                );
+            }
+            remove_windows_batch_script(batch_script_path.as_deref());
+            return aborted_result(
+                TOOL_WORKSPACE_RUN_COMMAND,
+                "tool_cancelled",
+                "本轮已被停止，命令进程已终止。".to_string(),
+            );
         }
 
         if timed_out {
@@ -8793,6 +8864,62 @@ pub(crate) fn tool_error_from_output(status: &str, parsed: &Value) -> Option<Too
             .and_then(Value::as_str)
             .map(ToString::to_string),
     })
+}
+
+/// wave-62 C3：`workspace_run_command` 的取消观察者（子进程生命周期内有效）。
+///
+/// 背景：`spawn_blocking` 不可抢占，`ProcessManager` 只有在被显式 `cancel`/超时定时器命中时
+/// 才会终止子进程；因此"turn 被停止"必须有一条**运行期**观察者把取消翻译成真杀进程。
+///
+/// 语义：
+/// - 每 `TICK_MS` 分片检查一次 turn 令牌（总节拍 ≤ 契约 `turn_cancel_poll_ms` = 100ms）；
+/// - 令牌一旦取消 ⇒ `ProcessManager::cancel`（真终止进程树，而非仅回收句柄）；
+/// - `Drop` 置位 stop 并 `join` ⇒ 线程随命令结束退出，**不泄漏常驻线程**（join 最长等一个分片）；
+/// - 无令牌（`None`）⇒ 不建线程（零开销、行为与 wave-61 及之前完全一致）。
+struct CommandCancelWatcher {
+    stop: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl CommandCancelWatcher {
+    /// 分片间隔：≤100ms 轮询上界下仍能快速响应取消，也让 `Drop` 的 join 很快返回。
+    const TICK_MS: u64 = 10;
+
+    fn spawn(
+        token: Option<Arc<crate::agent::budget::CancellationToken>>,
+        process_manager: ProcessManager,
+        session_id: String,
+        handle: String,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let Some(token) = token else {
+            return Self { stop, join: None };
+        };
+        let stop_for_thread = Arc::clone(&stop);
+        let join = thread::spawn(move || {
+            while !stop_for_thread.load(Ordering::SeqCst) {
+                if token.is_cancelled() {
+                    // 幂等：句柄可能已被主循环/超时定时器回收，错误无需上抛。
+                    let _ = process_manager.cancel(&session_id, &handle);
+                    return;
+                }
+                thread::sleep(Duration::from_millis(Self::TICK_MS));
+            }
+        });
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for CommandCancelWatcher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 fn aborted_result(tool_name: &str, code: &str, message: String) -> ToolResult {

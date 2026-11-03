@@ -62,6 +62,9 @@ impl AgentRuntime {
                 session_id: session_id.map(str::to_string),
                 // T2-1：turn 级治理事实随本次调用显式传入（并发 turn 之间不共享任何槽位）。
                 dispatch_context: governed_context.cloned(),
+                // wave-62 C3：治理事实里若带本轮令牌（stream 路径注入），工具层据此可被取消。
+                // 同步入口（`run_turn`）无 registry 句柄 ⇒ `None`，行为与 wave-61 一致。
+                cancellation: governed_context.and_then(|context| context.turn_cancellation.clone()),
                 ..Default::default()
             };
             let (tool_result, invocation_record, capability_hook_trace_records) =
