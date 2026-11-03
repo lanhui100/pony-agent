@@ -59,6 +59,12 @@ jobs:
           RUSTFLAGS: -D warnings
         run: npm run cargo:check:shared
 
+      # tools/tui-audit/*.py 需要 Pillow（render_ansi.py: from PIL import Image）。
+      # Windows runner 预装 Python 但不带 Pillow ⇒ tui_audit_*_regression 4 例因
+      # ModuleNotFoundError: No module named 'PIL' 恒红（既有 Windows 可移植性缺口）。
+      - name: Python 审计依赖（tools/tui-audit 需要 Pillow）
+        run: python3 -m pip install --disable-pip-version-check pillow
+
       - name: Core 单元与集成测试（含 Windows Job 生命周期）
         run: npm run cargo:test:shared -- --package=pony-agent-core
 
