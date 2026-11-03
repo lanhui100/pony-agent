@@ -893,10 +893,13 @@ fn ct_p8_cancel_terminates_promoted_job() {
         std::thread::sleep(until_command_would_finish);
     }
     let later = read_job(&job_id, false, 0, 0);
+    // 用唯一判别串（而非泛化的 "done"）断言：该串即 5s 后才会产出的尾部输出，
+    // 与 /proc 进程组探测共用同一个 marker（跨平台使用，避免 cfg 分支下的 dead_code）。
     assert!(
-        !later.output.contains("done"),
-        "CT-P8：取消后进程不得继续产出（done 不应出现，说明进程仍存活），\
+        !later.output.contains(CANCEL_COMMAND_MARKER),
+        "CT-P8：取消后进程不得继续产出（`{}` 不应出现，说明进程仍存活），\
          实际 status=`{}` output={:?}",
+        CANCEL_COMMAND_MARKER,
         later.status,
         later.output
     );
