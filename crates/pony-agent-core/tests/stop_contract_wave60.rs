@@ -35,6 +35,10 @@ impl RecordingSink {
         Self::default()
     }
 
+    // wave-61-team CI 修复（2026-11-03）：该辅助方法在 wave-60 收口后已无调用方，
+    // 而 CI 的 Windows 测试步骤带 `-D warnings` ⇒ `-D dead-code` 使整个测试二进制编译失败。
+    // 仅抑制 lint、不改任何断言（冻结用例语义不变）；如需删除 helper 属独立技术债清理。
+    #[allow(dead_code)]
     fn names(&self) -> Vec<String> {
         self.captured
             .lock()
