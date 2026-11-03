@@ -1,0 +1,153 @@
+{
+  "verdict": "FAIL",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3b-promote",
+    "fresh_context": true
+  },
+  "executed_by": "l3b-promote",
+  "reviewed_commit": "8488d05",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/process.rs",
+    "crates/pony-agent-core/src/agent/jobs.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/tests/tool_timeout_policy_test.rs",
+    "crates/pony-agent-core/tests/harness_optimizations_test.rs",
+    "crates/pony-agent-core/tests/wave9_adversarial_test.rs",
+    "crates/pony-agent-core/tests/wave9_green_acceptance_test.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/recovery.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "src/components/chat/WorkspaceTurnItem.vue",
+    "src/lib/runtime/trajectory-core.ts",
+    "src/lib/runtime/trace.ts",
+    "src/lib/runtime/messages.ts",
+    ".dev-team/contracts/tool-timeout-policy.md",
+    ".dev-team/designs/run-timeout-promote.md",
+    "crates/pony-agent-core/tests/run_timeout_promote_test.rs"
+  ],
+  "answers": {
+    "Q1_blast_radius": "存在被默认值改变的**生产逻辑**，且无一处被契约/设计登记：(a) crates/pony-agent-core/src/agent/runtime/stream_support.rs:580 `if tool_result.status != \"error\" ... return None` ⇒ promote 结果 status=ok 拿不到失败信号，`ConsecutiveFailureTracker::record(None)`（stream_support.rs:680-686）把两道连续失败闸清零，turn_stream.rs:479-500 / turn_sync.rs:178-205 的熔断对重复超时**永不触发**；(b) 同一文件 :591 `code == \"timeout\"` 的指纹归一（去掉 timeoutMs、剥离内联 env 前缀，stream_support.rs:528-541 注释明写「模型不得靠加大 timeout 绕过熔断」）在默认路径上变成死代码；(c) crates/pony-agent-core/src/agent/recovery.rs:180 `!tool_is_idempotent && raw_error.contains(\"timeout\") ⇒ Abort`（非幂等工具禁止盲重试）彻底失效——模型拿到 ok+jobId 后会重跑同一条非幂等命令而第一条仍在后台运行，产生重复副作用。前端/TUI 侧**没有** `error.code==\"timeout\"` 消费方（src/lib/update-check.ts:55/219 是更新检查的自有错误码；crates/pony-agent-core/src/bin/tui.rs 无 Run 超时分支；bin/cli.rs:603 是 headless 宿主到点标记），所以第 1 问的爆炸半径集中在 Rust 运行时的三道闸：熔断信号消失、超时指纹归一失效、非幂等盲重试防护失效。",
+    "Q2_schema_compat": "`timedOut:true + status:ok` 在**所有**既有消费方都被当作成功：Rust 侧没有任何代码读 `timedOut`/`promoted`（grep 全仓仅 tools.rs:3174/3175 写入），`tool_failure_signal`(stream_support.rs:576-598) 只看 status；UI 侧 src/components/chat/WorkspaceTurnItem.vue:631 只在 `tool.status === 'error'` 画失败图标，src/lib/runtime/trajectory-core.ts:320-328 把非 error 映射成 `completed`，src/lib/runtime/trace.ts:378-380 同样落 `completed`，src/lib/runtime/messages.ts:79 的 normalize 只会产出 pending/error/done ⇒ 超时被 promote 的 Run 在时间线与 trace 里渲染成**成功完成**，而后台进程仍在跑，且 UI 无任何 job 可视/可停入口（`job_*` 只对模型暴露）。另有 schema 不变量破坏：成功路径 tools.rs:3301 用 `succeeded = exit_code == Some(0)` 建立「ok ⇒ exitCode==0」，promote 路径 tools.rs:3177 给出 `\"ok\": true` + `\"exitCode\": null`，任何按 ok/exitCode 推断成功的消费方都会误判。job_output 侧是纯加键（jobs.rs:69-75，owned 作业 skip_serializing_if=none），无破坏。",
+    "Q3_env_failsafe": "解析本身是 fail-safe 的：tools.rs:8097-8105 `trim().to_ascii_lowercase()` 后匹配 `0|false|off|no` ⇒ `\"true \"`、`\" FALSE \"`、`\"0 \"` 都正确；空串/拼写错误（`\"flase\"`、`\"disable\"`、`\"nope\"`）落到「非关闭集合」= 默认开启，与 CT-P6 的默认值语义一致，**但没有任何 warn 日志**，运维以为关掉了而实际仍开着。文档一致性：契约 CT-P6（.dev-team/contracts/tool-timeout-policy.md:59）只写 `0`/`false` 关闭，实现与设计（designs/run-timeout-promote.md:38）多收 `off`/`no` ⇒ 契约表与实现有**单向漂移**（往安全方向），应回填契约。",
+    "Q4_security": "(1) 跨会话：jobs 注册表是**进程级全局**且无会话维度——jobs.rs:433 `registry()` 静态、jobs.rs:386-431 `HashMap<job_id, Arc<JobSession>>`、jobs.rs:93 `pub struct JobListArgs {}`（空结构）、jobs.rs:783-806 `job_list` 返回全部作业、jobs.rs:768 `job_kill` 只按 job_id 取、tools.rs:2220-2266 `execute_job_output`/`execute_job_kill` 只透传模型参数而不注入/校验 `context.session_id`。因此同进程内另一会话（含 subagent，subagent 与主 agent 共用进程）可 `job_list` 枚举 → `job_output` 读别的 workspace 的命令 stdout/stderr → `job_kill` 杀别人的进程。该缺陷对 job_start 作业是既有的，但本 diff 把**每一次前台超时**都自动塞进该全局命名空间（promote 结果里 jobId 直接回到模型），暴露面从「模型显式开作业」扩大到「任何超时」。对照组：ProcessManager 层是有归属检查的（process.rs:1036-1050 跨 session 句柄 fail-closed），漏洞只在 job 层。(2) 越权 kill：`job_kill` 无 session 校验（同上），且 promoted 分支 jobs.rs:316 `let _ = manager.cancel(...)` 忽略失败仍返回 killed=true（jobs.rs:317-324），越权/失败都表现为成功。(3) Windows `.cmd` 残留：promote 分支 tools.rs:3162 早返回绕过 3299 的 `remove_windows_batch_script`，脚本内容是把整条命令逐字写入（tools.rs:2914-2960），含 `curl -H 'Authorization: …'`、`set TOKEN=… && …` 这类密文即永久落盘；全仓没有任何 `.tmp` 清扫器（`remove_windows_batch_script` 仅 5 个显式调用点 + tools.rs:8964 定义），设计 §4 把它「移交 job 生命周期（本波未实现）」，而该 owner 并不存在；同时命令行也存进 jobs.rs:690 `command_line`，被跨会话 `job_list` 一并暴露。(4) 生命周期不可收口：`legacy_run_session_id()` 每次 Run 唯一（tools.rs:8871-8877），而 `ProcessManager::shutdown` 在 src/src-tauri 内**零生产调用方**（仅 process.rs:1559/1820 测试），设计 §4 的「由 session shutdown 收口」不可达。",
+    "Q5_contract_closure": "CT-P1..CT-P6c 逐条均有实现：P1 tools.rs:3142-3201（ok+timedOut+promoted+jobId，无 error.code=timeout，测试 ct_p1 通过）；P2 jobs.rs:212-247 + 722-766（poll 增量入 RingBuffer，ct_p2 通过）；P3 jobs.rs:303-325（cancel 路径，ct_p3 通过）；P4 tools.rs:3049-3056 + 3142 门控 + 回落 3227-3262（ct_p4 通过）；P5 process.rs:439-472（定时器先查撤防位）+ tools.rs:3019-3024（+1000ms 宽限，ct_p5 通过）；P6 tools.rs:8097-8105（env，无模型可见新参数，run_command schema 未改）；P6a 4 文件 pin（见 Q6）；P6b tools.rs:3019-3024 + process.rs:456-471（关闭时 `kill_after_duration == timeout_ms`，与波次一逐字一致）；P6c promote 路径确实不调用 kill_if_exists/cancel/remove_windows_batch_script（tools.rs:3162 早返回）。`job_list.kind` 已实现（jobs.rs:102-103 字段、jobs.rs:173-177 label、jobs.rs:795 赋值），无需断言。**未闭合的实质**：契约正文的熔断/非幂等防线（Q1）与 shutdown 收口（Q4.4）无任何条款承接。",
+    "Q6_test_freeze": "4 个测试文件的 diff **只加 pin、未改任何断言**。逐 hunk 核对：harness_optimizations_test.rs 3 个 hunk（文件头注释 :5-11、`use std::sync::Once` :12、pin 函数 :22-25、用法 :296）；tool_timeout_policy_test.rs 3 个 hunk（注释 :51-54、pin 函数 :69-72、`execute_run_command` 内 :503）；wave9_adversarial_test.rs 3 个 hunk（注释 :14-20、pin 函数 :28-31、用法 :116）；wave9_green_acceptance_test.rs 3 个 hunk（注释 :19-25、pin 函数 :33-36、`Harness::new` 内 :53）。`git diff --numstat` 四文件分别为 16/0、19/0、17/0、16/0，**删除行数全为 0**，无断言/常量被改写。偏差（非断言层）：harness_optimizations/wave9_adversarial 的 pin 落在**单个用例体**内而非契约要求的「文件级」（这两个文件内仅该用例真跑 Run，故实际有效）；tools.rs:11426-11438 的 lib 用例用 Drop `remove_var` 复位，并行 lib 二进制里会让开关在中途回落到默认值，属顺序依赖。"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3142,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "CT-P6 默认开启把「Run 超时」从 status=error 改成 status=ok，等于把唯一的超时结构化信号从 turn 层全部摘除，而契约/设计对此零登记：stream_support.rs:580 (`status != \"error\" → None`) ⇒ stream_support.rs:680-686 的 record(None) 清零 ⇒ turn_stream.rs:479-500 与 turn_sync.rs:178-205 的「同指纹/同工具连续失败」熔断对重复超时永不触发；stream_support.rs:591 的 timeout 指纹归一（stream_support.rs:528-541 明写「模型不得靠加大 timeout 绕过熔断」）在默认路径变死代码；recovery.rs:180 的「非幂等工具超时禁止盲重试」失效，模型可重跑仍在后台运行的非幂等命令（git push / terraform apply / 部署）产生重复副作用。契约 .dev-team/contracts/tool-timeout-policy.md:5-7 立论正是反重试风暴，本 diff 让该防线无输入。",
+      "counterexample_cmd": "grep -n 'status != \"error\"' crates/pony-agent-core/src/agent/runtime/stream_support.rs; grep -n 'self.signal = None' -B6 crates/pony-agent-core/src/agent/runtime/stream_support.rs; grep -n 'raw_error.to_lowercase().contains(\"timeout\")' -A4 crates/pony-agent-core/src/agent/recovery.rs   # 三处防线全部以 status=error / raw_error 含 timeout 为输入，promote 后均不触发",
+      "note": ""
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/jobs.rs",
+      "line": 667,
+      "rule": "SECURITY",
+      "severity": "BLOCKING",
+      "detail": "promoted 作业进入**无会话维度**的进程级注册表：jobs.rs:433 registry() 为静态、jobs.rs:93 `JobListArgs {}` 为空、jobs.rs:783-806 job_list 返回全部作业、jobs.rs:768 job_kill 只按 job_id、tools.rs:2220-2266 三个 job 工具执行器不注入也不校验 context.session_id。同进程内其它会话（含共用进程的 subagent）可枚举→读取→终止别的 workspace 的 promoted 进程与输出。既有 job_start 已有此洞，但本 diff 让「每次前台超时」自动进入该命名空间，暴露面显著扩大；且 promoted 作业 pid 固定为 0（jobs.rs:697），运维无法对账。",
+      "counterexample_cmd": "grep -n 'pub struct JobListArgs' crates/pony-agent-core/src/agent/jobs.rs; sed -n '2220,2246p' crates/pony-agent-core/src/agent/tools.rs   # 入参只有模型给的 jobId，session 归属无处校验（对照 process.rs:1036-1050 shutdown/lookup 是有归属检查的）",
+      "note": ""
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3162,
+      "rule": "LEAK",
+      "severity": "BLOCKING",
+      "detail": "promoted 进程没有任何回收路径：promote 分支早返回，跳过了 3288-3299 的 kill_if_exists+remove_windows_batch_script；ProcessManager 的条目只在 kill_inner（process.rs:404-424，且需 exited 或第二次调用才 remove）与 shutdown（process.rs:472-495）里被摘除，而 shutdown 在 src/src-tauri 零生产调用方（grep 仅命中 process.rs 测试），且 handle 所属 session_id 是每次 Run 唯一的 legacy-run-{nanos}（tools.rs:8871-8877）⇒ 自然结束后条目永久滞留（每个 promoted Run 泄漏一个 ManagedProcess 条目 + RingBuffer）。叠加 jobs.rs:399-419 的 MAX_HISTORY_JOBS=64 淘汰：淘汰一个已结束的 promoted 作业只丢 JobSession（jobs.rs:410），manager 条目依旧在；遇到队首是 running 就 `break`（jobs.rs:411-415）导致 order 队列无界增长。",
+      "counterexample_cmd": "grep -rn '\\.shutdown(' crates/pony-agent-core/src src-tauri/src --include=*.rs   # 仅 process.rs:1559/1820 测试调用；sed -n '3155,3165p;3285,3300p' crates/pony-agent-core/src/agent/tools.rs",
+      "note": ""
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3162,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "detail": "Windows 批处理脚本（<root>/.tmp/pony-agent-run-{session_id}.cmd，写入点 tools.rs:2961-2962（builder tools.rs:8955），内容是整条命令原文）在 promote 路径被有意保留（CT-P6c 红线），但**没有任何代码会再删它**：remove_windows_batch_script 只有 5 个显式调用点（tools.rs:2984/3087/3133/3265/3299），无 .tmp 清扫器、无启动清场；脚本里若有内联密文（curl -H 'Authorization: …'、set TOKEN=… && …）则永久落在用户 workspace（可能是 git 仓库）内；命令行另存于 jobs.rs:671/695 command_line（经 jobs.rs:791 job_list 对外），随跨会话 job_list 暴露。设计与契约把它登记为「移交 job 生命周期（本波未实现）」，而 Q4.4 已证该 owner 不存在。",
+      "counterexample_cmd": "grep -n 'remove_windows_batch_script' crates/pony-agent-core/src/agent/tools.rs; grep -rn 'fs::write(&batch_path' crates/pony-agent-core/src/agent/tools.rs   # 对比写入点与删除点：promote 早返回落在两者之外",
+      "note": ""
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3174,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "结果 schema 语义自相矛盾且对既有消费方不可见：`\"ok\": true` + `\"exitCode\": null` + `timedOut:true` + `status:\"ok\"`。成功路径的不变量是 `succeeded = exit_code == Some(0)`（tools.rs:3301、3336），此载荷破坏它；`timedOut`/`promoted` 全仓无人读（仅此处写入），所以「其实超时了」只对模型可见：UI 仍按 status 渲染——WorkspaceTurnItem.vue:631 只在 status==='error' 显示失败图标、trajectory-core.ts:320-328 映射 completed、trace.ts:378-380 落 completed、messages.ts:79 归一为 done —— 时间线/trace 把仍在后台跑的命令显示为「成功完成」，且没有任何 job 可视/可停入口。",
+      "counterexample_cmd": "grep -rn 'timedOut\\|promoted' crates/pony-agent-core/src src --include=*.rs --include=*.ts --include=*.vue; sed -n '3170,3185p' crates/pony-agent-core/src/agent/tools.rs; sed -n '626,633p' src/components/chat/WorkspaceTurnItem.vue",
+      "note": ""
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 8097,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "开关解析本身正确（trim + ascii lowercase，`\"true \"`/`\" FALSE \"`/`\"0 \"` 均按预期），但**未识别值静默回落为开启且不告警**：`\"flase\"`/`\"disable\"`/`\"\"` 都被当作默认 on，运维无法察觉 kill-switch 未生效；另外契约 CT-P6（contracts/tool-timeout-policy.md:59）只写 `0`/`false` 关闭，实现与设计（designs/run-timeout-promote.md:38）另收 `off`/`no`，属契约表与实现单向漂移，应回填契约或收窄实现。",
+      "counterexample_cmd": "sed -n '8093,8105p' crates/pony-agent-core/src/agent/tools.rs; sed -n '59p' .dev-team/contracts/tool-timeout-policy.md; sed -n '38p' .dev-team/designs/run-timeout-promote.md",
+      "note": ""
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3203,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "两处工程瑕疵：(1) `register_promoted` 无任何失败路径（jobs.rs:667-722 恒返回 Ok），故设计 §3.1 承诺的「注册失败⇒回落 kill+timeout」分支（tools.rs:3203-3214）是死代码，覆盖率证据不可采信；(2) 撤防（3146）与注册（3149）之间仍有 1000ms 竞态窗——poll 循环若被调度/调试暂停超过宽限，定时器会先杀进程，而工具仍返回 ok+promoted+jobId 并宣称「已转为后台作业」，该 job 之后才显示 failed，属「既报接续又已死」的半吊子状态（设计 §3.1 只堵了正常调度路径）。另 jobs.rs:316 `let _ = manager.cancel(...)` 忽略失败仍返回 killed=true。",
+      "counterexample_cmd": "sed -n '667,722p' crates/pony-agent-core/src/agent/jobs.rs; sed -n '3142,3225p' crates/pony-agent-core/src/agent/tools.rs",
+      "note": ""
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 11433,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "lib 用例 PromoteOffPin 在 Drop 里 `remove_var`（tools.rs:11426-11438）：cargo 默认并行跑同一个 lib 测试二进制，开关会在用例结束后对同二进制内的其它用例回落到默认 on，形成顺序依赖/潜在 flaky（4 个集成测试文件用 `Once` 且不复位，才是可接受的写法）；契约要求的 pin 是「文件级」，而 harness_optimizations_test.rs:296 与 wave9_adversarial_test.rs:116 实为**单用例级**（经查这两个文件内只有该用例真跑 Run，故当前有效，但与契约文字不一致）。断言层无改动（numstat 16/0、19/0、17/0、16/0）。",
+      "counterexample_cmd": "git diff --numstat crates/pony-agent-core/tests/; sed -n '11426,11440p' crates/pony-agent-core/src/agent/tools.rs; grep -n 'pin_promote_off();' crates/pony-agent-core/tests/*.rs",
+      "note": ""
+    },
+    {
+      "file": "crates/pony-agent-core/tests/run_timeout_promote_test.rs",
+      "line": 259,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "冻结验收里存在零判别力断言：`assert!(probe.status == \"running\" || probe.is_terminal())` —— is_terminal() 已覆盖 killed/exited/completed/failed，加上 running 即实现可能返回的全集，永真。该文件冻结于 8488d05（不在本次 diff 内），但作为 CT-P1 的「反证」应当收紧（例如断言 status==\"running\" 或 cursor>0）。",
+      "counterexample_cmd": "sed -n '250,262p' crates/pony-agent-core/tests/run_timeout_promote_test.rs",
+      "note": ""
+    }
+  ],
+  "contract_closure": {
+    "CT-P1": "implemented tools.rs:3142-3201",
+    "CT-P2": "implemented jobs.rs:212-247,722-766",
+    "CT-P3": "implemented jobs.rs:303-325",
+    "CT-P4": "implemented tools.rs:3049-3056,3142,3195-3215",
+    "CT-P5": "implemented process.rs:439-472 + tools.rs:3019-3024",
+    "CT-P6": "implemented tools.rs:8097-8105 (文档漂移 off/no，见 finding)",
+    "CT-P6a": "implemented (4 file pins, assertions untouched)",
+    "CT-P6b": "implemented process.rs:456-471 + tools.rs:3019-3024",
+    "CT-P6c": "implemented (early return skips kill/cancel/rm script)；cleanup owner 不存在，见 finding",
+    "job_list.kind": "implemented jobs.rs:102-103,173-177,795"
+  },
+  "test_runs": [
+    {
+      "cmd": "cargo test -p pony-agent-core --test run_timeout_promote_test",
+      "exit_code": 0,
+      "result": "5 passed; 0 failed; finished in 7.66s",
+      "note": "按单 target 约束只跑此一个 target，未跑全量、未跑 4 个 pinned 文件"
+    }
+  ],
+  "scope_gaps": [
+    "CT-P6a 的「4 个 pinned 文件全绿」未由本审查执行（单 target 约束），仅静态核对其 pin 位置与断言未变；门禁 #1 需由 executor/评审 A 出机器回执。",
+    "cfg(windows) 分支（.cmd 写入/删除、ping 计时命令）在本机 Linux 不可编译不可运行，相关结论来自源码阅读。",
+    "UI 结论来自源码阅读（WorkspaceTurnItem.vue / trajectory-core.ts / trace.ts），未跑浏览器。",
+    "ProcessManager 条目泄漏未做运行时计数取证（不修改源码、不新增测试文件；结论由 process.rs:404-424/472-495 的唯一摘除点推导）。"
+  ],
+  "normalization_note": "Lead 归一化：非标准 rule(ENV_PARSING/TEST_DISCIPLINE)→CONTRACT_BREAK；severity(HIGH/MEDIUM/LOW)→BLOCKING/ADVISORY。原始取值保留在 findings[].original_* 未改写语义。"
+}

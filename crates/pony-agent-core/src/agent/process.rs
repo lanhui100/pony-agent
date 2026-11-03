@@ -303,6 +303,12 @@ enum ExitState {
 struct ManagedProcess {
     session_id: String,
     description: String,
+    /// 契约 v4 / B005：`kill_after` 安全网的一次性撤防开关。Run 到期被 promote 成后台 job 后
+    /// 置 `true`，定时器线程醒来先查此标志，已撤防则不再 kill（进程交 job 生命周期管辖）。
+    kill_after_disarmed: AtomicBool,
+    /// 契约 v6 / CT-P7a：本次退出是否由 `kill_after` 安全网造成。Run 的 poll 循环据此把
+    /// 「被安全网 SIGKILL」与「自然退出」区分开，避免把真超时误报成 `non_zero_exit(-1)`。
+    kill_after_fired: AtomicBool,
     child: Mutex<Child>,
     state: Mutex<ExitState>,
     stdin: Mutex<Option<ChildStdin>>,
@@ -430,16 +436,60 @@ impl ProcessManager {
 
     /// Arm a background timer that kills `handle` after `duration`. Used to implement
     /// timeouts/cancellation for runs that outlive their budget.
+    ///
+    /// 契约 v4 / B005：定时器醒来先查 `kill_after_disarmed`；已撤防（见
+    /// [`ProcessManager::disarm_kill_after`]）则放弃 kill，进程交给后台 job 生命周期管辖。
     pub fn kill_after(&self, session_id: &str, handle: &str, duration: Duration) {
         let this = self.clone();
         let session_id = session_id.to_string();
         let handle = handle.to_string();
         std::thread::spawn(move || {
             std::thread::sleep(duration);
+            if this.is_kill_after_disarmed(&session_id, &handle) {
+                return;
+            }
+            // 先留证再杀：Run 侧 poll 到 Exited 时据此判定「这是超时被杀，不是自然退出」。
+            this.mark_kill_after_fired(&session_id, &handle);
             if let Err(error) = this.kill_if_exists(&session_id, &handle) {
                 eprintln!("[process] kill_after cleanup failed for `{handle}`: {error}");
             }
         });
+    }
+
+    /// 撤防该 handle 的 `kill_after` 安全网（幂等）。未知/已回收的 handle 返回 `Err`，
+    /// 由调用方决定是否回落既有清理路径（Run 的 promote 分支据此 fail-safe）。
+    pub fn disarm_kill_after(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        let entry = self.lookup(session_id, handle)?;
+        entry
+            .kill_after_disarmed
+            .store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// 该 handle 的进程是否是被 `kill_after` 安全网终止的（未跟踪/已回收 ⇒ false）。
+    ///
+    /// Run 的 poll 循环用它在「看到 Exited」时区分自然退出与超时击杀：安全网击杀必须仍按
+    /// 超时结果返回，否则 `sleep 5` + 300ms 这类真超时会被误报成 `non_zero_exit(-1)`。
+    pub fn was_killed_by_kill_after(&self, session_id: &str, handle: &str) -> bool {
+        match self.lookup(session_id, handle) {
+            Ok(entry) => entry.kill_after_fired.load(Ordering::SeqCst),
+            Err(_) => false,
+        }
+    }
+
+    /// 定时器线程在真正 kill 之前置位「安全网已开火」。
+    fn mark_kill_after_fired(&self, session_id: &str, handle: &str) {
+        if let Ok(entry) = self.lookup(session_id, handle) {
+            entry.kill_after_fired.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// 定时器线程使用的撤防探针：handle 已消失（进程/条目均回收）时视为无需 kill。
+    fn is_kill_after_disarmed(&self, session_id: &str, handle: &str) -> bool {
+        match self.lookup(session_id, handle) {
+            Ok(entry) => entry.kill_after_disarmed.load(Ordering::SeqCst),
+            Err(_) => true,
+        }
     }
 
     /// Terminate and remove every process owned by `session_id`. Returns the number of processes
@@ -814,6 +864,8 @@ impl ProcessManager {
         let entry = Arc::new(ManagedProcess {
             session_id: request.session_id.clone(),
             description: describe_command(&request.program, &request.arguments),
+            kill_after_disarmed: AtomicBool::new(false),
+            kill_after_fired: AtomicBool::new(false),
             child: Mutex::new(child),
             state: Mutex::new(ExitState::Running),
             stdin: Mutex::new(stdin_pipe),

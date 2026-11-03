@@ -26,7 +26,7 @@
 
 use crate::agent::process::ProcessManager;
 pub use crate::agent::jobs::{
-    job_kill, job_list, job_output, job_start, job_start_with_workspace_root,
+    job_kill, job_list, job_output, register_promoted, job_start, job_start_with_workspace_root,
     JobKillArgs, JobKillResult, JobListArgs, JobListItem, JobListResult,
     JobOutputArgs, JobOutputResult, JobStartArgs, JobStartResult,
     JOB_BUFFER_CAP, MAX_HISTORY_JOBS,
@@ -216,6 +216,13 @@ const MAX_RUN_TIMEOUT_MS: u64 = 600_000;
 /// 通用 `ToolExecutionPolicy` 默认 deadline（**非** Run 专属）：契约只覆盖 Run，
 /// 其他工具的默认 deadline 维持 10s，不随 [`DEFAULT_RUN_TIMEOUT_MS`] 变化。
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 10_000;
+/// 契约 v6 / CT-P7：Run 到期「promote 成后台 job」的开关 env。**默认关闭（opt-in 预览）**；
+/// 仅 `1`/`true`/`on`/`yes` 开启，未识别值一律关闭（fail-safe）。关闭时行为与波次一逐字一致
+/// （kill + `error.code=timeout`）。不得默认开启的理由见 `run-timeout-promote.md` §5（B008–B012）。
+const RUN_PROMOTE_ON_TIMEOUT_ENV: &str = "PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT";
+/// promote 开启时给 `kill_after` 安全网加的宽限期：定时器必须**晚于** poll 循环的 deadline
+/// 到达，否则两者同毫秒时定时器线程先醒、会在 promote 之前抢杀进程（进而使 P1/P2/P5 必红）。
+const PROMOTE_KILL_AFTER_GRACE_MS: u64 = 1_000;
 const DEFAULT_WEB_TIMEOUT_MS: u64 = 15_000;
 /// Hard cap on a fetched response body (design Decision 8 / phase-4..7 review P1-4): never read a
 /// response unbounded; past this the body is truncated and surfaced honestly.
@@ -3000,10 +3007,24 @@ impl ToolRouter {
             handle.clone(),
         );
 
+        // 契约 v6 / CT-P7：Run 到期是否 promote 成后台 job（opt-in，默认关闭）。
+        // `mut`：若检测到进程是被 `kill_after` 安全网打死的，就必须按超时处理、不得 promote。
+        let mut promote_on_timeout = run_promote_on_timeout_enabled();
+
         // Arm the kill timer as a safety net and run a bounded poll loop until `Exited`. The
         // loop accumulates per-poll output; truncation flags are sticky per stream.
+        //
+        // promote 开启时安全网延后一个宽限窗口。原因（实测竞态，勿删）：`kill_after` 是
+        // 「arming 后 sleep timeout_ms」，而下面的 `deadline` 是 arming **之后**才算的、并且
+        // 循环每 20ms 才检查一次到期 ⇒ 定时器线程必然先于循环的到期判定醒来，会在 promote
+        // 之前把进程杀掉。宽限让循环始终先到 deadline、先撤防，定时器只作崩溃兜底。
+        let kill_after_duration = if promote_on_timeout {
+            Duration::from_millis(timeout_ms.saturating_add(PROMOTE_KILL_AFTER_GRACE_MS))
+        } else {
+            Duration::from_millis(timeout_ms)
+        };
         self.process_manager
-            .kill_after(&session_id, &handle, Duration::from_millis(timeout_ms));
+            .kill_after(&session_id, &handle, kill_after_duration);
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -3014,6 +3035,11 @@ impl ToolRouter {
         let mut timeout_cleanup_error: Option<String> = None;
         let mut cancelled = false;
 
+        // 到期后的确认窗口（CT-P7a）：`deadline` 只是「该判超时了」的时点，不是「进程已死」的
+        // 证据；极短 timeoutMs（如 1ms）下命令往往在 spawn 后数毫秒内就正常退出。
+        const TIMEOUT_CONFIRM_MS: u64 = 20;
+
+        let mut wait_error: Option<String> = None;
         loop {
             // wave-62 C3：**取消优先**——令牌已取消 ⇒ 立即终止进程树并以 aborted 返回，
             // 不等待命令自然结束、也不被 timeout 分支抢先。
@@ -3026,49 +3052,119 @@ impl ToolRouter {
                 cancelled = true;
                 break;
             }
+
+            // CT-P7a：**先 poll，再判超时**。先看进程是否已经退出，退出即走正常成功路径，
+            // 绝不把「已成功退出」误报成 timeout/promoted。
+            let polled = poll_run_child(
+                &self.process_manager,
+                &session_id,
+                &handle,
+                &mut stdout,
+                &mut stderr,
+                &mut stdout_truncated,
+                &mut stderr_truncated,
+            );
+            let exited = match polled {
+                Ok(RunPollOutcome::Exited { exit_code: code }) => {
+                    exit_code = code;
+                    if self
+                        .process_manager
+                        .was_killed_by_kill_after(&session_id, &handle)
+                    {
+                        // 被 `kill_after` 安全网打死 ≠ 自然退出：仍按超时结果返回，
+                        // 否则真超时会被误报成 non_zero_exit(-1)（且绝不会 promote 尸体）。
+                        timed_out = true;
+                        promote_on_timeout = false;
+                    }
+                    true
+                }
+                Ok(RunPollOutcome::Running) => false,
+                Err(error) => {
+                    wait_error = Some(error);
+                    true
+                }
+            };
+            if exited {
+                // 取消与自然退出竞态：令牌已取消 ⇒ 仍按取消语义返回（取消优先）。
+                if wait_error.is_none()
+                    && cancellation
+                        .as_ref()
+                        .is_some_and(|token| token.is_cancelled())
+                {
+                    cancelled = true;
+                }
+                break;
+            }
+
+            // 只在「已 poll 且确认仍在运行」之后才判到期。
             if Instant::now() >= deadline {
+                // CT-P7a 的确认轮次（仅 promote 开启时）：到期瞬间进程可能正在退出
+                // （`echo hi` + `timeoutMs:1` 即此类），再给一个 tick 并 poll 一次；这期间退出
+                // ⇒ 正常成功，不判超时、不 promote。
+                //
+                // 为什么**不**在 promote 关闭时做：契约 CT-P7 要求关闭路径的 `kill_after` 仍按
+                // `timeout_ms` 整点开火（不加宽限）。到期后再 poll 只会看到「被安全网 SIGKILL」
+                // 的 -1 退出码，无法区分「自然退出」与「被超时杀掉」，反而会把真超时误报成
+                // non_zero_exit。关闭路径因此保持到期即杀（与波次一逐字一致）。
+                if promote_on_timeout {
+                    thread::sleep(Duration::from_millis(TIMEOUT_CONFIRM_MS));
+                    let confirmed = poll_run_child(
+                        &self.process_manager,
+                        &session_id,
+                        &handle,
+                        &mut stdout,
+                        &mut stderr,
+                        &mut stdout_truncated,
+                        &mut stderr_truncated,
+                    );
+                    let exited_after_deadline = match confirmed {
+                        Ok(RunPollOutcome::Exited { exit_code: code }) => {
+                            exit_code = code;
+                            if self
+                                .process_manager
+                                .was_killed_by_kill_after(&session_id, &handle)
+                            {
+                                timed_out = true;
+                                promote_on_timeout = false;
+                            }
+                            true
+                        }
+                        Ok(RunPollOutcome::Running) => false,
+                        Err(error) => {
+                            wait_error = Some(error);
+                            true
+                        }
+                    };
+                    if exited_after_deadline {
+                        break;
+                    }
+                    // 契约 CT-P1：到期**不杀**，进程所有权交回 job 侧；清理动作由 promote
+                    // 分支决定（红线：此处不得 kill / 删批处理脚本）。
+                    timed_out = true;
+                    break;
+                }
                 if let Err(error) = self.process_manager.kill_if_exists(&session_id, &handle) {
                     timeout_cleanup_error = Some(error);
                 }
                 timed_out = true;
                 break;
             }
-            match self.process_manager.poll(&session_id, &handle) {
-                Ok(result) => {
-                    stdout.push_str(&result.stdout);
-                    stderr.push_str(&result.stderr);
-                    stdout_truncated |= result.stdout_truncated;
-                    stderr_truncated |= result.stderr_truncated;
-                    if result.state == ProcessState::Exited {
-                        exit_code = result.exit_code;
-                        // 取消与自然退出竞态：令牌已取消 ⇒ 仍按取消语义返回（取消优先）。
-                        if cancellation
-                            .as_ref()
-                            .is_some_and(|token| token.is_cancelled())
-                        {
-                            cancelled = true;
-                        }
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let cleanup = self.process_manager.kill_if_exists(&session_id, &handle).err();
-                    let message = match cleanup {
-                        Some(cleanup) => {
-                            format!("轮询命令状态失败：{error}；清理进程树失败：{cleanup}。")
-                        }
-                        None => format!("轮询命令状态失败：{error}。"),
-                    };
-                    remove_windows_batch_script(batch_script_path.as_deref());
-                    return error_result(
-                        TOOL_WORKSPACE_RUN_COMMAND,
-                        "wait_failed",
-                        message,
-                        Some("请重试，或更换更简单的命令。".to_string()),
-                    );
-                }
-            }
             thread::sleep(Duration::from_millis(20));
+        }
+
+        if let Some(error) = wait_error {
+            let cleanup = self.process_manager.kill_if_exists(&session_id, &handle).err();
+            let message = match cleanup {
+                Some(cleanup) => format!("轮询命令状态失败：{error}；清理进程树失败：{cleanup}。"),
+                None => format!("轮询命令状态失败：{error}。"),
+            };
+            remove_windows_batch_script(batch_script_path.as_deref());
+            return error_result(
+                TOOL_WORKSPACE_RUN_COMMAND,
+                "wait_failed",
+                message,
+                Some("请重试，或更换更简单的命令。".to_string()),
+            );
         }
 
         if cancelled {
@@ -3114,6 +3210,92 @@ impl ToolRouter {
         }
 
         if timed_out {
+            if promote_on_timeout {
+                // 契约 CT-P1..CT-P5：到期不杀，撤防 `kill_after` 安全网后把仍在运行的进程
+                // 登记成后台 job。任一步失败 ⇒ 回落到下面的波次一 kill + timeout 错误路径
+                // （CT-P4 兼容语义：绝不出现「既报 timeout 又留活进程」的半吊子状态）。
+                let disarm = self.process_manager.disarm_kill_after(&session_id, &handle);
+                match disarm {
+                    Ok(()) => {
+                        match register_promoted(
+                            self.process_manager.clone(),
+                            session_id.clone(),
+                            handle.clone(),
+                            command.to_string(),
+                            &stdout,
+                            &stderr,
+                            stdout_truncated,
+                            stderr_truncated,
+                        ) {
+                            Ok(job_id) => {
+                                // 红线：promote 路径不得 kill / cancel / 删除批处理脚本，
+                                // 也不进入 cleanupError 逻辑 —— 进程继续由 job 生命周期管辖。
+                                return ToolResult {
+                                    tool_name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+                                    status: "ok".to_string(),
+                                    output: json_string(json!({
+                                        "ok": true,
+                                        "cwd": self.display_workspace_relative(&cwd),
+                                        "absoluteCwd": cwd.display().to_string(),
+                                        "command": command,
+                                        "delegateTool": "run_shell",
+                                        "timeoutMs": timeout_ms,
+                                        // CT-P1：到期事实（timedOut）与接续事实（promoted/jobId）
+                                        // 必须同时可见，且不得再出现 error.code=timeout。
+                                        "timedOut": true,
+                                        "promoted": true,
+                                        "jobId": job_id,
+                                        "exitCode": Value::Null,
+                                        "stdout": stdout,
+                                        "stderr": stderr,
+                                        "stdoutTruncated": stdout_truncated,
+                                        "stderrTruncated": stderr_truncated,
+                                        "error": Value::Null,
+                                        "summary": {
+                                            "text": format!(
+                                                "命令在 {} 执行超过超时上限 {} ms，已转为后台作业（jobId={}）：\
+用 `job_output` 续读增量输出、`job_kill` 终止。",
+                                                self.display_workspace_relative(&cwd),
+                                                timeout_ms,
+                                                job_id
+                                            )
+                                        },
+                                        "permission": {
+                                            "requiresApproval": false,
+                                            "permissionScope": "workspace.execute",
+                                            "hostMediated": false,
+                                            "permissionProfile": "builtin",
+                                            "approvalMode": "none",
+                                            "decisionSource": "runtime"
+                                        }
+                                    })),
+                                    duration_ms: 0,
+                                };
+                            }
+                            Err(error) => crate::agent::otel::log::log_json_with_fields(
+                                "warn",
+                                "run_command promote register failed; falling back to timeout kill",
+                                None,
+                                &[
+                                    ("session_id", json!(session_id)),
+                                    ("handle", json!(handle)),
+                                    ("error", json!(error)),
+                                ],
+                            ),
+                        }
+                    }
+                    Err(error) => crate::agent::otel::log::log_json_with_fields(
+                        "warn",
+                        "run_command promote disarm failed; falling back to timeout kill",
+                        None,
+                        &[
+                            ("session_id", json!(session_id)),
+                            ("handle", json!(handle)),
+                            ("error", json!(error)),
+                        ],
+                    ),
+                }
+            }
             // wave-9 P1-1：无条件二次调用幂等清理。首次 `kill_if_exists` 对**仍在运行**的进程
             // 只做终止并保留条目（终态可轮询），第二次调用才真正释放条目；旧的 `or_else` 在首次
             // 清理报错时会短路掉第二次调用，留下被追踪的句柄。此处改为无条件重试，并保留首个
@@ -7979,6 +8161,21 @@ pub fn classify_timeout_hint(command: &str) -> String {
     TIMEOUT_HINT_BACKGROUND_ADVICE.to_string()
 }
 
+/// 契约 v6 / CT-P7：Run 超时 promote 开关（**opt-in，默认关闭**）。
+///
+/// 语义：仅 env 值为 `1`/`true`/`on`/`yes`（大小写不敏感，允许前后空白）时开启；
+/// env 未设置、空串或任何未识别值（含 `0`/`false`/`off`/`no`/垃圾值）一律视为**关闭**
+/// —— fail-safe：拿不准就不 promote，回到「kill + `error.code=timeout`」的波次一行为。
+fn run_promote_on_timeout_enabled() -> bool {
+    match std::env::var(RUN_PROMOTE_ON_TIMEOUT_ENV) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        ),
+        Err(_) => false,
+    }
+}
+
 /// 契约 CT-1/CT-2/CT-3 的可测接缝：解析一次 Run 调用的生效超时（毫秒）。
 ///
 /// 语义（`tool-timeout-policy.md` v2）：
@@ -8738,6 +8935,39 @@ fn web_access_deny_message(reason: &WebAccessDenyReason) -> String {
         WebAccessDenyReason::TooManyRedirects { limit } => {
             format!("重定向次数超过上限 {limit}。")
         }
+    }
+}
+
+/// 一次 Run `poll` 的结论（只关心「是否已退出」与退出码）。
+enum RunPollOutcome {
+    Running,
+    Exited { exit_code: Option<i32> },
+}
+
+/// 对 Run 的受管进程做一次 poll，并把增量输出累加进调用方的累积器（截断标记 sticky）。
+///
+/// 契约 CT-P7a：超时判定必须建立在「**已 poll 且仍在运行**」之上。把 poll + 累加抽成单一
+/// 实现，供「常规轮询」与「到期后的确认轮次」共用，避免两处语义漂移。
+fn poll_run_child(
+    process_manager: &ProcessManager,
+    session_id: &str,
+    handle: &str,
+    stdout: &mut String,
+    stderr: &mut String,
+    stdout_truncated: &mut bool,
+    stderr_truncated: &mut bool,
+) -> Result<RunPollOutcome, String> {
+    let result = process_manager.poll(session_id, handle)?;
+    stdout.push_str(&result.stdout);
+    stderr.push_str(&result.stderr);
+    *stdout_truncated |= result.stdout_truncated;
+    *stderr_truncated |= result.stderr_truncated;
+    if result.state == ProcessState::Exited {
+        Ok(RunPollOutcome::Exited {
+            exit_code: result.exit_code,
+        })
+    } else {
+        Ok(RunPollOutcome::Running)
     }
 }
 
@@ -11295,6 +11525,23 @@ mod tests {
 
     #[test]
     fn run_command_returns_timeout_error_when_command_exceeds_deadline() {
+        // 契约 v5 / CT-P6：本用例锁的是「promote 关闭」时的波次一超时错误路径（到期必须
+        // `error.code=timeout`），而 promote 默认开启会把同一输入变成 ok+promoted。
+        // 故在用例内 pin 开关为关闭，并在退出（含 panic）时复位，避免污染同二进制的其它用例。
+        struct PromoteOffPin;
+        impl PromoteOffPin {
+            fn new() -> Self {
+                std::env::set_var(RUN_PROMOTE_ON_TIMEOUT_ENV, "0");
+                Self
+            }
+        }
+        impl Drop for PromoteOffPin {
+            fn drop(&mut self) {
+                std::env::remove_var(RUN_PROMOTE_ON_TIMEOUT_ENV);
+            }
+        }
+
+        let _promote_off = PromoteOffPin::new();
         let workspace = temp_workspace();
         // Legacy Run fails closed without a sandbox backend (phase-5 review P1-2), so this
         // success path registers an explicitly available backend.

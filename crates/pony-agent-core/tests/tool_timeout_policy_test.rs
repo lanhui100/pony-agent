@@ -48,12 +48,28 @@
 //!    因此依赖本地 shell 的 `sleep`（Windows `ping`）真实进程；deadline 取 200ms，远大于调度
 //!    抖动，属确定性触发而非 sleep 竞猜。被测子进程的"睡"不是测试自身的等待同步。
 //! 5) **CT-5 为纯函数验收**（S2）：只断 `classify_timeout_hint` 文本标记，不真跑进程。
+//! 6) **契约 v5 CT-P6a：本文件验证 promote 关闭时的超时语义。** 文件级在 `pin_promote_off()`
+//!    一次性 pin `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=0`（`Once` 幂等、同值，并行安全），
+//!    CT-4 的三条断言因此在 promote 开关落地后仍按波次一语义成立（到期 ⇒ `error.code=timeout`）。
+//!    promote **开启**路径由 `tests/run_timeout_promote_test.rs`（CT-P1..P5）覆盖，两文件互不重叠。
+
+use std::sync::Once;
 
 use pony_agent_core::agent::sandbox::TestSandboxBackend;
 use pony_agent_core::agent::tools::{
     classify_timeout_hint, resolve_run_timeout_ms, ToolCall, ToolRouter,
 };
 use serde_json::{json, Value};
+
+/// 契约 v5 CT-P6a：文件级 pin「promote 关闭」。
+///
+/// promote 默认开启后，Run 到期会返回 ok + `promoted/jobId` 而非 `error.code=timeout`；
+/// 本文件的 CT-4 断言语义是**关闭路径**（波次一原状）。`Once` 保证同值只写一次：
+/// 所有用例在触达 Run 之前都经过这里，写入 happens-before 后续读取，恰好一次 + 同值 ⇒ 并行安全。
+fn pin_promote_off() {
+    static PIN: Once = Once::new();
+    PIN.call_once(|| std::env::set_var("PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT", "0"));
+}
 
 /// 契约值（来自契约 CT-1/CT-2/CT-3，不是对实现的镜像复制：
 /// 实现若与契约不符，本常量保持不变，用例必须红）。
@@ -483,6 +499,9 @@ fn execute_run_command(
     timeout_ms: Option<u64>,
     tag: &str,
 ) -> (String, Value) {
+    // 契约 v5 CT-P6a：本文件只验收「promote 关闭」的波次一语义。
+    pin_promote_off();
+
     let workspace = unique_workspace(tag);
     std::fs::create_dir_all(&workspace).expect("create temp workspace");
 

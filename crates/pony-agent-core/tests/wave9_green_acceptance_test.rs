@@ -16,11 +16,24 @@
 //! 并追加 `job_start` / `job_output` / `600000` 三条标记断言。除此之外未改动任何其他用例。
 //!
 //! 环境事实：本机 Linux x86_64、无 rustup。
+//!
+//! 契约 v5 CT-P6a（Lead 授权迁移）：本文件验证 promote **关闭**时的超时语义。
+//! `Harness::new` 在构造 router 之前调用 `pin_promote_off()`，一次性 pin
+//! `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=0`（`Once` 幂等、同值，并行安全），使两条用例的
+//! 超时断言（error 路径 / hint 文案）保持波次一语义。promote 开启路径由
+//! `tests/run_timeout_promote_test.rs`（CT-P1..P5）覆盖。除本 pin 外未改任何断言。
 
 use pony_agent_core::agent::sandbox::TestSandboxBackend;
 use pony_agent_core::agent::tools::{ToolCall, ToolRouter};
 use serde_json::{json, Value};
+use std::sync::Once;
 use std::time::{Duration, Instant};
+
+/// 契约 v5 CT-P6a：文件级 pin「promote 关闭」（同值只写一次 ⇒ 并行安全；原因见文件头）。
+fn pin_promote_off() {
+    static PIN: Once = Once::new();
+    PIN.call_once(|| std::env::set_var("PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT", "0"));
+}
 
 /// 默认非网络类超时 hint 文案（契约 `tool-timeout-policy.md` v3 CT-5 要求逐字保持）。
 ///
@@ -36,6 +49,9 @@ struct Harness {
 
 impl Harness {
     fn new(tag: &str) -> Self {
+        // 契约 v5 CT-P6a：本文件验收的是「promote 关闭」时的超时语义。
+        pin_promote_off();
+
         let workspace = std::env::temp_dir().join(format!(
             "wave9_green_{}_{}",
             tag,

@@ -35,11 +35,78 @@ Run 超时命中
 
 - `process.rs`：`ManagedProcess` 增 `kill_after_disarmed: AtomicBool`；`kill_after` 线程醒来先查该标志；新增 `pub fn disarm_kill_after(&self, session_id, handle)`。
 - `jobs.rs`：`JobKind { Owned, Promoted { manager: ProcessManager, session_id: String, handle: String } }`；`register_promoted(...)`；`job_output`/`job_kill`/`job_list` 分支；promoted 输出追加进既有 `RingBuffer`。
-- `tools.rs`：`run_command` 超时分支按 promote 开关分流；新增 `promote_switch()` 读 env（默认真）。
+- `tools.rs`：`run_command` 超时分支按 promote 开关分流；新增 `run_promote_on_timeout_enabled()` 读 env（默认真，`0`/`false`/`off`/`no` 关）。
 - 兼容：错误码、JobStart 语义、`job_output` 对外 JSON 键不删不改，只增 `kind`。
+
+### 3.1 实现期修订：`kill_after` 与 poll deadline 的竞态（executor，B005 实测）
+
+设计原文只写「到期撤防」，实测不足：`kill_after` 在 **arming 后**才 sleep `timeout_ms`，而 poll 循环的
+`deadline` 是 arming **之后**才算出的、且每 20ms 才检查一次 —— 定时器线程必然先于循环的到期判定醒来，
+于是它会在 promote 之前把进程杀掉，CT-P1/CT-P2/CT-P5 必红（且是稳定红，不是偶发）。
+
+因此 promote 开启时给安全网**加宽限**：`kill_after` 的时长取 `timeout_ms + PROMOTE_KILL_AFTER_GRACE_MS`
+（1000ms），poll 循环在 deadline 处（≤20ms 内）醒来 → 先 `disarm_kill_after` → 再 `register_promoted`。
+定时器保留为「循环崩溃/卡死」的兜底网：若撤防失败或注册失败，promote 分支整体回落波次一的
+kill + `error.code=timeout` 路径（CT-P4 兼容语义），不会出现「既报 timeout 又留活进程」的半吊子状态。
+promote 关闭时不加宽限，`kill_after` 时长与波次一逐字一致。
 
 ## 4. 风险
 
 - `poll` 的「取走即清空」意味着 promote 后的输出只能靠 jobs 侧持续 poll；若两次 poll 间隔内 `BoundedBuffer` 溢出（64 KiB），promoted 输出会丢——首读后的 `truncated` 标记必须透传。
 - `kill_after` 线程每 Run 一条（B006-③），promote 后进程存活更久，需确保 `shutdown(session)` 能收到（`ProcessManager` 的 session 仍是原 `legacy_run_session_id()`）。
 - turn 结束/取消时 promoted job 的归属未定：本波约定「turn 结束不杀 promoted job，由 session shutdown 收口」，需在测试与文档写明。
+- **已知风险：Windows 批处理脚本清理责任移交 job 生命周期（本波未实现）。** Windows 上 Run 先把命令写入
+  `<workspace>/.tmp/pony-agent-run-{session_id}.cmd` 再 `cmd /C` 执行；promote 路径按红线**不得**调用
+  `remove_windows_batch_script`（`promoted` 进程仍在读该脚本），于是该临时文件在 promoted 进程结束前不再被
+  任何代码删除。本波只保证「不误删」，收口方式是随 `ProcessManager::shutdown(session)` / 工作区 `.tmp`
+  清理由后续波次（job 生命周期收口）承担；若后续不做，Windows 工作区会累积一次性 `.cmd` 残片。
+- **已知风险：截断标记是「粘性 OR」而非逐段精确。** promoted job 的 `stdout_truncated`/`stderr_truncated`
+  由每次 `poll` 的布尔标记 OR 累计（`job_output` 以 `Some(bool)` 透传）；`poll` 只给布尔不给丢弃字节数，
+  故无法区分「哪一段丢了」。
+
+
+## 5. v6 收口：promote 改为**默认关闭（opt-in 预览）**
+
+> 触发：L3-A / L3-B 双路复核 `8488d05` 均判 FAIL（3+3 BLOCKING），契约 v6 CT-P7 裁决默认关闭。
+> 实现：`run_promote_on_timeout_enabled()` 仅 `1`/`true`/`on`/`yes` 开启；未设置、空串、未识别值
+> （含 `0`/`false`/`off`/`no`/垃圾值）一律 **fail-safe 关闭**。关闭时不延后 `kill_after`（宽限只属于
+> promote 开启路径），行为与波次一逐字一致：`error.code=timeout` + 进程被清理。
+
+**为什么不得默认开启（五条 BLOCKING 未闭合，各自登记 backlog）**
+
+| # | 未闭合事实 | Backlog |
+| :-- | :--- | :--- |
+| A-3 | promoted 的 `ManagedProcess` 条目永不回收（每 run 泄漏 1 条目 + Windows Job 句柄）；`ProcessManager::shutdown` 零生产调用方 ⇒ 设计 §4 所称「session shutdown 收口」实际不可达 | B008 |
+| A-6 | promote 后 `CommandCancelWatcher` 已 drop ⇒ 用户 Stop 停不下来（实测 cancel 后命令仍跑完） | B009 |
+| B-1 | promote 成功会摘掉 `error.code=timeout`，使连续失败熔断、超时指纹归一、非幂等盲重试防护同时失去输入 | B010 |
+| B-2 | `timedOut`/`promoted` 无消费方，UI/trace 会按 status 判成「成功完成」；`ok:true` + `exitCode:null` 破坏成功路径不变量 | B011 |
+| B-4 | job 层无会话归属（跨会话 list/read/kill）；Windows `.cmd` 残留含命令原文 | B012 |
+
+**本波同时修掉的两条低成本真缺陷（与默认值无关，关闭态也生效）**
+
+- **CT-P7a：先 poll 再判超时。** 旧实现按「到期即判超时」，`echo hi` + `timeoutMs:1` 这类「命令早已正常退出、
+  只是判定时刻已过」的调用会被误报成 timeout/promoted。现改为：每轮先 `poll`，退出即走正常成功路径；
+  仅在「已 poll 且确认仍在 Running」之后才看到期，且到期后还有一次 20ms 确认轮（`TIMEOUT_CONFIRM_MS`），
+  确认轮里退出同样按成功返回。
+- **CT-P7b：ring buffer 溢出必须可见。** `RingBuffer::push` 返回被丢弃字节数；promoted 路径（首读快照 +
+  每次 `poll` 追加）一旦丢弃字节就置对应流的 truncated 标记，`job_output` 以
+  `stdoutTruncated`/`stderrTruncated` 透传，禁止静默丢字节。
+
+**开启前提**：A-3/A-6/B-1/B-2/B-4（B008–B012）全部闭合后，才可讨论把默认值翻回开启；
+在此之前 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=1` 仅供预览与验收测试使用。
+
+### 5.1 实现期发现：`kill_after` 与「先 poll 再判超时」的相互作用
+
+把 deadline 检查挪到 poll 之后，关闭路径立刻暴露一个反例（实测红）：关闭路径的 `kill_after` 仍按
+`timeout_ms` 整点开火，而定时器比 poll 循环的到期判定早几微秒醒来 ⇒ 循环下一次 poll 看到的是
+**被安全网 SIGKILL 的 Exited(-1)**，于是 `sleep 5` + 300ms 被误报成 `non_zero_exit` 而不是 `timeout`。
+
+两条配套修正（都必要）：
+
+1. `ManagedProcess` 增 `kill_after_fired: AtomicBool`：定时器**先留证再杀**，Run 的 poll 循环看到 Exited 时
+   查 `ProcessManager::was_killed_by_kill_after(...)`；若为真则仍按超时结果返回，并把 `promote_on_timeout`
+   置 false（绝不为「尸体」建 promoted job）。这样「安全网击杀」与「自然退出」不再混淆。
+2. 到期后的 20ms 确认轮（`TIMEOUT_CONFIRM_MS`）**只在 promote 开启时执行**：关闭路径不能有确认轮——
+   那 20ms 里安全网已经开火，确认轮只能看到 -1，反而把真超时变成 `non_zero_exit`。开启路径有
+   `PROMOTE_KILL_AFTER_GRACE_MS` 的 1s 宽限，确认轮安全（也正因如此 `echo hi` + `timeoutMs:1` 在
+   开启路径稳定返回成功）。

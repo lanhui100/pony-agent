@@ -11,10 +11,24 @@
 //!      全部指纹必须一致（固定迭代，禁止 sleep + 概率等待）。
 //!
 //! 环境事实：本机 Linux x86_64、无 rustup，`#[cfg(windows)]` 分支不可编译/不可运行。
+//!
+//! 契约 v5 CT-P6a（Lead 授权迁移）：本文件验证 promote **关闭**时的超时语义。
+//! `test_adversarial_2_oversized_stdout_timeout_payload_is_intact` 在触达 Run 之前调用
+//! `pin_promote_off()` 一次性 pin `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=0`（`Once` 幂等、同值，
+//! 并行安全），使断言仍是「到期 ⇒ error.code=timeout + 证据键」的波次一语义。
+//! promote 开启路径由 `tests/run_timeout_promote_test.rs`（CT-P1..P5）覆盖。除本 pin 外本文件未改任何断言。
+
+use std::sync::Once;
 
 use pony_agent_core::agent::runtime::tool_failure_signal;
 use pony_agent_core::agent::tools::{ToolCall, ToolResult};
 use serde_json::{json, Value};
+
+/// 契约 v5 CT-P6a：文件级 pin「promote 关闭」（同值只写一次 ⇒ 并行安全；原因见文件头）。
+fn pin_promote_off() {
+    static PIN: Once = Once::new();
+    PIN.call_once(|| std::env::set_var("PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT", "0"));
+}
 
 /// 构造 `error.kind == "timeout"` 的 Run 失败结果（`output` 为 JSON 字符串）。
 fn wave9_timeout_result() -> ToolResult {
@@ -97,6 +111,9 @@ fn test_adversarial_1_fingerprint_traversal_resists_rephrasing() {
 fn test_adversarial_2_oversized_stdout_timeout_payload_is_intact() {
     use pony_agent_core::agent::sandbox::TestSandboxBackend;
     use pony_agent_core::agent::tools::ToolRouter;
+
+    // 契约 v5 CT-P6a：本用例验收「promote 关闭」的超时错误载荷。
+    pin_promote_off();
 
     let workspace = std::env::temp_dir().join(format!(
         "wave9_adversarial_oversize_{}",

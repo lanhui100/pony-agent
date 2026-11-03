@@ -51,3 +51,34 @@
 2. `cargo test -p pony-agent-core` 无新增失败（对照基线回执）。
 3. `cargo clippy -p pony-agent-core` 无新增 warning（改动文件范围）。
 4. L3 子代理复核 diff：无夹带重构、无改写冻结验收测试。
+
+## 波次三：CT-P6（promote 开关与兼容路径，v5 裁决）
+
+| ID | 契约 | 验收 |
+| :--- | :--- | :--- |
+| CT-P6 | promote **默认开启**；开关为进程级 env `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT`，值 `0`/`false` 关闭。**不新增模型可见参数**（避免扩张工具面） | promote 测试默认路径断言 promoted；关闭时断言 error 路径 |
+| CT-P6a | 关闭 promote 时，超时语义与波次一完全一致（CT-4 的 error 路径描述**仅在 promote 关闭时成立**）：`error.code=timeout`、无 `promoted`/`jobId`、进程被清理 | 既有 4 个测试文件的超时断言在文件级 pin `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=0` 后全绿 |
+| CT-P6b | promote 开启时 `kill_after` 安全网延后 `PROMOTE_KILL_AFTER_GRACE_MS`（1000ms）并在到期时 disarm；关闭时行为不变 | `--lib agent::process` 全绿 + P5 通过 |
+| CT-P6c | promote 路径不执行 `kill_if_exists`/`cancel`/`remove_windows_batch_script`；Windows 批处理脚本清理移交 job 生命周期（本波未实现，登记风险） | L3 审查 diff |
+
+**冻结断言迁移（Lead 授权）**：`tool_timeout_policy_test.rs`（ct4 三条）、`harness_optimizations_test.rs:314`、`wave9_adversarial_test.rs:138`、
+`wave9_green_acceptance_test.rs:99/:162` 需在**文件级** pin `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=0`（同值幂等，不受并行影响）；
+`src/agent/tools.rs:11443` 单测同理由 executor 在用例内 pin。
+
+## 波次四：CT-P7（L3 复核后的收口裁决，v6）
+
+> L3-A/L3-B 双路复核 `8488d05` 均判 **FAIL**（3+3 BLOCKING）。裁决：**promote 改为默认关闭（opt-in）**，
+> 在下列防线补齐前不得默认开启；本波同时修两条「低成本真缺陷」。
+
+| ID | 契约 | 验收 |
+| :--- | :--- | :--- |
+| CT-P7 | `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT` **默认关闭**；`1`/`true`/`on`/`yes` 开启。未识别值 → 关闭（fail-safe） | 默认路径断言 error.code=timeout；显式开启断言 promoted |
+| CT-P7a | 先 poll 再判超时：进程已退出（如 `echo hi` + `timeoutMs:1`）必须返回正常成功结果，不得被报成 promoted | 新增用例：已退出进程在极短超时下不得 promoted |
+| CT-P7b | promoted 的 RingBuffer 溢出必须置 truncated 标记并透传到 `job_output`，禁止静默丢字节 | 用例：大输出 promoted 后 `stdoutTruncated=true` |
+
+**未闭合的 BLOCKING（不得默认开启的理由，各自登记 backlog）**
+- A-3：promoted 的 `ManagedProcess` 条目永不回收（每 run 泄漏 1 条目 + Windows Job 句柄）；`ProcessManager::shutdown` 零生产调用方 ⇒ 设计所称收口不可达。→ `B008`
+- A-6：promote 后 `CommandCancelWatcher` 已 drop ⇒ 用户 Stop 停不下来（实测 cancel 后命令跑完）。→ `B009`
+- B-1：promote 成功会摘掉 `error.code=timeout`，使两道连续失败熔断、超时指纹归一、非幂等盲重试防护同时失去输入。→ `B010`
+- B-2：`timedOut/promoted` 无消费方，UI/trace 按 status 判成「成功完成」；`ok:true` + `exitCode:null` 破坏成功路径不变量。→ `B011`
+- B-4：job 层无会话归属（跨会话 list/read/kill）；Windows `.cmd` 残留含命令原文。→ `B012`

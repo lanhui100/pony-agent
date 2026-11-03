@@ -3,6 +3,13 @@
 //! 2. TodoWrite 工具命名映射正确，且不降级为 Run；
 //! 3. BatchExecute 子调用失败时，父级 Activity/Telemetry 必须包含子调用错误信息，不能为 null；
 //! 4. 搜索工具默认忽略 target/、node_modules/、.git/。
+//!
+//! 契约 v5 CT-P6a：本文件验证 promote **关闭**时的超时语义。`test_run_command_timeout_payload_keeps_evidence`
+//! 在触达 Run 之前调用 `pin_promote_off()` 一次性 pin `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT=0`
+//! （`Once` 幂等、同值，并行安全），使断言仍是「到期 ⇒ error.code=timeout」的波次一语义。
+//! promote 开启路径由 `tests/run_timeout_promote_test.rs`（CT-P1..P5）覆盖。
+
+use std::sync::Once;
 
 use pony_agent_core::agent::runtime::{
     max_tool_followups_per_turn, parse_max_tool_followups_per_turn,
@@ -10,6 +17,12 @@ use pony_agent_core::agent::runtime::{
 use pony_agent_core::agent::tools::{
     canonical_tool_name, model_visible_tool_name,
 };
+
+/// 契约 v5 CT-P6a：文件级 pin「promote 关闭」（同值只写一次 ⇒ 并行安全；原因见文件头）。
+fn pin_promote_off() {
+    static PIN: Once = Once::new();
+    PIN.call_once(|| std::env::set_var("PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT", "0"));
+}
 
 #[test]
 fn test_tool_followups_limit_500() {
@@ -278,6 +291,9 @@ fn test_run_command_timeout_payload_keeps_evidence() {
     use pony_agent_core::agent::sandbox::TestSandboxBackend;
     use pony_agent_core::agent::tools::{ToolCall, ToolRouter};
     use serde_json::{json, Value};
+
+    // 契约 v5 CT-P6a：本用例验收「promote 关闭」的超时错误载荷。
+    pin_promote_off();
 
     let workspace = std::env::temp_dir().join(format!(
         "wave9_timeout_evidence_{}",

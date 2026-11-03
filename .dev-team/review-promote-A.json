@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a-promote",
+    "fresh_context": true
+  },
+  "executed_by": "l3a-promote",
+  "reviewed_commit": "8488d05",
+  "attestation": {
+    "self_signed": false
+  },
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/process.rs",
+    "crates/pony-agent-core/src/agent/jobs.rs",
+    "crates/pony-agent-core/src/agent/tools.rs"
+  ],
+  "answers": {
+    "Q1_kill_after_grace_race": "宽限**没有消除**竞态，只把「必然先杀」改成「~975ms 预算」。算式：定时器在 `kill_after()` 调用时刻 T0 起 sleep(timeout+1000)（tools.rs:3019-3025），循环 deadline 在 T0+ε 才计算（tools.rs:3026）且每轮只有顶部检查（tools.rs:3048）、轮末 sleep 20ms（tools.rs:3096）⇒ 撤防最早发生在 T0+timeout+ε+≤20ms，定时器最早醒来 T0+timeout+1000 ⇒ 余量 ≈ 980ms-ε。timeout_ms=1 或 200 时余量的**绝对值不变**（仍是 ~980ms），所以小 timeout 既不更安全也不更危险。剩余窗口有两种：(a) poll 循环线程被延迟 >~980ms（优先级反转、cgroup CPU 配额节流、swap/页错误风暴、调试器断点）⇒ 定时器先杀；(b) 定时器自身的 check-then-act TOCTOU（process.rs:445 读标志、process.rs:448 才 kill，撤防可落在两者之间）。更关键的是失败模式**不是 fail-safe**：定时器赢后 `kill_if_exists` 只做 terminate 并**保留条目**（process.rs:426），于是 `disarm_kill_after` 仍返回 Ok（process.rs:456），`register_promoted` 照常成功 ⇒ 工具仍返回 ok+promoted+jobId 宣称「已转后台」，而进程其实已被杀（只有后续 job_output 才看得出 failed）。promote 前没有任何 liveness 复核。判定：契约 CT-P6b 字面达标（延后+撤防+P5 绿），但「消除定时器先杀」这个目标未达成，属未登记残余风险。",
+    "Q2_disarm_atomicity": "内存序**足够且过强**：store/load 都是 SeqCst（process.rs:459-460、467），happens-before 一定成立（SeqCst 全局总序），不存在可见性问题；撤防位本身从 false→true 单向，无需与其它数据同步。真正的问题不在内存序而在**复合操作不原子**：`is_kill_after_disarmed`(查) 与 `kill_if_exists`(杀) 是两次独立加锁（process.rs:445→448，kill 再在 kill_inner 里 lookup 一次），撤防无论多强都无法阻止「已越过检查点」的 kill。建议把撤防校验下沉到与 terminate 同一临界区（`entry.state` 锁内再查一次 kill_after_disarmed），或用 channel/Condvar 让定时器在 disarm 处被唤醒取消。另：SeqCst 与文件其余 Release/Acquire 风格不一致（无害，仅一致性问题）。",
+    "Q3_promoted_job_lifecycle": "(1) turn 结束：不杀（设计 §4 已声明），且即便 ToolRouter/ProcessManager 被 drop 也不会终止子进程——jobs 侧持有 ProcessManager clone（jobs.rs:709-713），Unix 上子进程另有独立 pgid，会脱离父进程继续跑。(2) 用户取消：**杀不到**（见 F3，已实测）。(3) `ProcessManager::shutdown(session)`：会杀（process.rs:474-496 terminate+remove），但**全仓零生产调用方**（仅 process.rs:1559/1820 两处测试；src-tauri 无 ProcessManager 引用），且 promoted 进程挂在每次 Run 唯一的 `legacy-run-*` session id 下（tools.rs:8871-8877、2912），会话级 shutdown 即便接线也对不上号 ⇒ 设计 §4「由 session shutdown 收口」实际不可达。(4) 泄漏：**会泄漏且无回收路径**（F2）——promoted 的 ManagedProcess 条目永不被 remove（poll_inner 不 remove，process.rs:869-913；job_kill 只调一次 cancel→terminate，terminate 按设计保留条目，process.rs:952-957；promote 分支早返回跳过 tools.rs:3232 的二次 kill_if_exists），每个 promoted run 泄漏一个条目（Child/stdin/2×64KiB 缓冲，Windows 上还有 Job Object 句柄）。(5) MAX_HISTORY_JOBS=64：对 promoted **同样适用**（同一 insert 路径，jobs.rs:718），溢出时**只丢历史不杀进程**（jobs.rs:404-419 只做 active_jobs.remove）；实测 70 次 job_start + 1 个长跑 promoted 后 registry=64（63 dead + 1 running），淘汰循环被队首 running 条目挡一次但下一个 insert 就继续淘汰，只会有瞬时 +1 越界，不是无界增长；registry 里永远 running 的条目只出现在进程真的还活着时（符合语义）。",
+    "Q4_output_correctness": "分两层，答案不同：(a) **ProcessManager 层（64KiB BoundedBuffer）不会静默丢**——truncated 是进程生命周期内粘性累积、`drain()` 不清除（process.rs:190-195、200-204），promote 时首读标记透传（tools.rs:3156-3157 → jobs.rs:707-708），之后每次 poll 的布尔标记 OR 进 job（jobs.rs:295-300）⇒ 该层溢出一定置位，`job_output` 也一定透传 `Some(true)`（jobs.rs:745-751）。(b) **job RingBuffer 层（2MiB）会静默丢且 truncated 不置位**——`RingBuffer::push` 直接 `pop_front()` 丢最旧字节并只推进 head_cursor（jobs.rs:127-135），完全不碰 `stdout_truncated`/`stderr_truncated`；`read_from` 在客户端 offset 已被覆盖时从 0 重发、只回 total 作 cursor（jobs.rs:141-156），不给「有缺口」信号。物理反例：单次 `job_output(wait:true)` 内部只在退出循环后才读一次 buffer（jobs.rs:739-741），期间每 20ms 一次 update_status→poll→append ⇒ 一个 1.07MiB/s 的 promoted 生产者就足以在**一次调用内**把 2MiB 环形缓冲写爆：实测 cursor=3,276,804、returned=2,097,152、lost=1,179,652、`stdoutTruncated=false`。另外 `poll` 把丢弃字节数丢掉了（process.rs:897 `_stdout_dropped`），`drain_stats`（process.rs:501）没被 jobs 侧使用，即使 truncated=true 也无法告诉模型丢了多少。`job_list` 也会驱动 poll（jobs.rs:788）却从不读 buffer，同样把数据推进这个静默丢弃区。",
+    "Q5_concurrency_locks": "**未发现死锁**。锁序是严格层次：`registry()`(jobs.rs:433 全局 Mutex) → `JobSession.status`(jobs.rs:204/312) → `JobSession.buffer`(jobs.rs:287/741) → `ProcessManager.inner.processes`(process.rs:1036) → `ManagedProcess.state`(process.rs:871/959) → `child`(process.rs:873/972) → `stdin`(process.rs:880/999)；process.rs 内 state→child→stdin 次序在 poll_inner/terminate/write_stdin_inner 三处一致（write_stdin_inner 先 drop(state) 再取 stdin，无双持反向）；jobs 侧从不反向取 registry，process.rs 也完全不引用 jobs ⇒ 无环。`job_output`/`job_kill`/`job_list` 取 registry 的临时 guard 都在 let 语句结束即释放（jobs.rs:723-727、769-773、784），不会持锁跑循环。唯一真实隐患是**持锁做阻塞 IO**：`JobRegistry::insert` 在**持有全局 registry 锁**时调用 `s.update_status()`（jobs.rs:408）→ promoted 分支进 `manager.poll()`（jobs.rs:218），进程刚退出时 poll 会 `wait_for_drain` 最长 500ms（process.rs:1022-1032）⇒ 这段时间内所有 job_output/job_list/job_kill 以及 promote 自己的 `register_promoted`（jobs.rs:718）全部头部阻塞。这是延迟/惊群问题（F6），不是死锁。",
+    "Q6_cancel_watcher": "确认：`CommandCancelWatcher` 在 run_command 作用域内（tools.rs:3002），promote 分支 `return`（tools.rs:3162）时按 RAII drop，drop 只置 stop 并 join（tools.rs:9126-9133），**不杀进程**。此后 turn 取消对该 promoted 进程**完全无效**——唯一能收口的是 `job_kill`（模型手动）或 `ProcessManager::shutdown`（无生产调用方）。实测：promote 后 `CancellationToken::cancel()`，400ms 后仍 running，5.6s 后 status=completed（`sleep 5` 正常退出、exit 0），即「用户按了停止，命令照跑完」。**构成『用户以为停了其实还在跑』的风险**，且比单纯 UX 问题更重：(a) UI/trace 里该 turn 已结束/被中止（B 报告另述 status=ok 被渲染成 completed），后台仍有真进程与子进程树在改工作区；(b) 无任何可视化/可停入口（job_* 只对模型暴露）；(c) 无自动回收（F2）。另外有一处更小的窗口：取消若落在「循环已 break 出 deadline」到 `register_promoted` 之间（数十 µs ~ 10ms watcher tick），watcher 仍活着会先杀进程，随后 promote 仍返回 ok+promoted 的死 job。"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/jobs.rs",
+      "line": 129,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "detail": "promoted 作业的唯一输出通道是 2MiB `RingBuffer`，而 `push` 溢出时静默 `pop_front()` 丢最旧字节（jobs.rs:127-135），**不设置** `stdout_truncated`/`stderr_truncated`；`read_from` 对已覆盖的 offset 从 0 重发且只回 total（jobs.rs:141-156），不暴露缺口；`job_output` 只透传 ProcessManager 层的布尔标记（jobs.rs:745-751），于是「丢字节 + stdoutTruncated=false」同时成立。触发极易：单次 `job_output(wait:true)` 期间 buffer 只在最后读一次（jobs.rs:739-741），每 20ms 的 update_status→poll→append 会持续写入；1.07MiB/s 的 promoted 生产者即可在一次调用内写爆 2MiB。实测 lost=1,179,652 bytes 且 stdoutTruncated=false。同类旁证：`job_list` 也驱动 poll 却从不读 buffer（jobs.rs:788）；`poll` 丢弃 dropped 字节数（process.rs:897）。契约/设计 §4 只承诺「truncated 透传」，实现只覆盖到 ProcessManager 层，job 层静默丢数据。修复方向：RingBuffer 增截断位并在 push 溢出时置位（与 job 的两个 sticky 标记同源），或把 `dropped` 计数一并透传；至少 `read_from` 应报告 gap。",
+      "counterexample_cmd": "cd /tmp/promote_repro && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --offline --quiet -- ringloss   # 探针源码 /tmp/promote_repro/src/main.rs（仓库外，只用公开 API）；实测输出: cursor=3276804 returned_bytes=2097152 lost_bytes=1179652 stdoutTruncated=false"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/process.rs",
+      "line": 955,
+      "rule": "LEAK",
+      "severity": "BLOCKING",
+      "detail": "promoted 的 `ManagedProcess` 条目**没有任何回收路径**。链路：(1) promote 分支在 tools.rs:3162 早返回，跳过 tools.rs:3228-3238「无条件二次 kill_if_exists」的释放语义（wave-9 P1-1 正是为此加的）；(2) 之后唯一会碰该 handle 的是 `poll`（process.rs:869-913，从不 remove）与 `cancel`（jobs.rs:316）；(3) `terminate` 按设计只把 state 置 Exited 并保留条目（process.rs:952-957 的文档与 969 的 `return Ok(())`），真释放只发生在 `kill_inner` 对**已退出**条目（process.rs:408-424）或 `shutdown`；(4) `shutdown` 全仓零生产调用方。结果：每个 promoted run（进程自然退出、被 job_kill、或永不被 poll）都在 `Inner::processes` 里永久留一条：`Child` + stdin + 2×64KiB BoundedBuffer + 字符串，Windows 上还留 Job Object 句柄；该表随 promoted 次数无界增长，并被 jobs 侧持有的 `ProcessManager` clone（jobs.rs:709）延续到 registry 淘汰之后。修复：jobs 侧在 promoted 作业收敛为终态（poll 见 Exited 或 kill 之后）补一次 `kill_if_exists` 幂等释放。",
+      "counterexample_cmd": "grep -n 'fn terminate' -A 16 crates/pony-agent-core/src/agent/process.rs | head -20; grep -n 'pub fn shutdown' crates/pony-agent-core/src/agent/process.rs; grep -rn '\\.shutdown(' --include=*.rs crates src-tauri/src | grep -v 'otel\\|lsp\\.\\|stdio_mcp\\|Shutdown::'   # 仅 process.rs:1559/1820（测试）命中 ⇒ 零生产收口方，条目永不释放"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3002,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "promote 后进程失去唯一的运行期所有者，设计 §4 声称的「由 session shutdown 收口」不存在。`_cancel_watcher` 作用域在 run_command 内，promote 早返回（tools.rs:3162）即 drop（Drop 只 stop+join，不杀）；turn 令牌取消再也到不了该进程。设计 §4 的兜底 `ProcessManager::shutdown` 无任何生产调用方，且 promoted 进程挂在每次 Run 唯一的 `legacy-run-{nanos}` session 下（tools.rs:2912/8871-8877），会话级 shutdown 即使接线也匹配不上。实测 cancel 后 `sleep 5` 仍跑完并 exit 0。风险：用户在 UI 上停止本轮后，后台真实进程树（含子进程）继续改工作区，且无 UI/API 展示与停止入口。修复二选一：(a) turn 结束/取消时把 promoted job 一并 job_kill（并把 jobId 回写到 turn 结束清理点）；(b) 真正接线 shutdown：给 ToolRouter/运行期持有 `legacy_run_session_id` 集合或按 agent 会话分桶，并在 session 释放时调用。",
+      "counterexample_cmd": "cd /tmp/promote_repro && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --offline --quiet -- cancel   # 实测: token.cancel() 后 400ms status=running；5.6s 后 status=completed（sleep 5 正常跑完）；探针源码 /tmp/promote_repro/src/main.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/process.rs",
+      "line": 445,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "detail": "宽限只是把窗口从「必然先杀」推迟成 ~980ms 预算，未消除竞态，且撤防校验是 check-then-act（process.rs:445 查 → 448 kill → kill_inner 再次 lookup），撤防落在两者之间时 kill 照发。失败模式不是 fail-safe：定时器赢后条目仍被保留，`disarm_kill_after` 仍 Ok、`register_promoted` 仍成功，工具照样返回 ok+promoted+jobId（无 liveness 复核）。建议：撤防校验下沉到 `terminate` 的同一临界区（持 `entry.state` 锁再查 kill_after_disarmed），或让定时器用 channel/Condvar 可被 disarm 取消；并在 promote 前补一次 `is_tracked`+state 存活探针，否则回落 timeout 错误路径。",
+      "counterexample_cmd": "sed -n '439,470p' crates/pony-agent-core/src/agent/process.rs; sed -n '3019,3026p' crates/pony-agent-core/src/agent/tools.rs   # 定时器 sleep(timeout+1000) 起算于 arming，deadline 起算于其后且每轮仅顶部检查 ⇒ 余量≈1000ms-loop_latency，仅靠墙钟余量、无同步"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 3048,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "deadline 检查先于 poll，且轮末固定 sleep 20ms（tools.rs:3096）⇒ 任何 `timeoutMs <= ~20ms` 的命令都会在**从未 poll 过**的情况下被判超时并 promote，即使进程早已退出。实测 `echo hi` + timeoutMs=1/5 均返回 ok + promoted=true + exitCode=null + stdout=\"\"，随后 job_output 才显示 completed + \"hi\\n\"。语义上把「瞬间完成」记成「超时转后台」，并把 stdout/exitCode 证据从工具结果里挪走（CT-P4 的 evidence 契约只对关闭路径成立）。建议：deadline 到期时先做一次 poll，若已 Exited 则走正常成功/失败路径。",
+      "counterexample_cmd": "cd /tmp/promote_repro && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --offline --quiet -- deadpromote   # 实测: cmd=\"echo hi\" timeoutMs=1 → promoted=true exitCode=null stdout=\"\"；job_output → completed \"hi\\n\""
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/jobs.rs",
+      "line": 408,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "detail": "`JobRegistry::insert` 在**持有全局 registry 互斥锁**时调用 `update_status()`（jobs.rs:399-419），promoted 分支会进 `manager.poll()`（jobs.rs:218），进程刚退出时 poll 内 `wait_for_drain` 最长 500ms（process.rs:1022-1032）⇒ 期间所有 job_output/job_list/job_kill 与 promote 注册（jobs.rs:718）全被头部阻塞；promote 注册被阻塞会把 run_command 的返回推迟到 deadline 之后（虽然此时已 disarm，不会误杀，但违反「到期即返回」的时延预期）。锁序本身无环（见 Q5 结论），属持锁阻塞 IO 而非死锁。建议淘汰检查移到锁外（先快照候选 id，再在锁外 update_status，最后回锁删除）。",
+      "counterexample_cmd": "sed -n '399,419p' crates/pony-agent-core/src/agent/jobs.rs; sed -n '1022,1032p' crates/pony-agent-core/src/agent/process.rs   # insert 持锁 → update_status → poll → wait_for_drain(≤500ms)"
+    }
+  ],
+  "verification_receipts": {
+    "frozen_promote_target": "cargo test -p pony-agent-core --test run_timeout_promote_test → 5 passed / 0 failed (7.65s)",
+    "process_lib_target": "cargo test -p pony-agent-core --lib agent::process → 16 passed / 0 failed (0.82s, 1194 filtered out)",
+    "repro_harness": "仓库外只读探针 /tmp/promote_repro（path 依赖 crates/pony-agent-core，仅用公开 API：ToolRouter::with_workspace_root/execute_with_context、job_start/job_output/job_kill/job_list）；未修改、未新增仓库内任何文件，未执行 git 写操作。"
+  }
+}
