@@ -319,11 +319,18 @@ interface PlainTextTailParts {
   stable: string;
   /** 唯一尾巴文本（未闭合段）；空串 ⇒ 不渲染尾巴节点。 */
   tail: string;
+  /** `tail` 的前段（尾巴除去热区）；与 `hot` 拼接恒等于 `tail`。 */
+  tailBody: string;
+  /** 热区：尾巴最后若干字符，每次重建都会重播一次短淡入，制造"逐字浮现"。 */
+  hot: string;
   /** 尾巴是否实际单行（决定是否启用遮罩）。 */
   singleLine: boolean;
 }
 
-const NO_PLAIN_TEXT_TAIL = (content: string): PlainTextTailParts => ({ stable: content, tail: "", singleLine: false });
+const NO_PLAIN_TEXT_TAIL = (content: string): PlainTextTailParts => ({ stable: content, tail: "", tailBody: "", hot: "", singleLine: false });
+
+/** 热区宽度（字符）：只让最后 N 个字重播淡入。中文一个字符即有明显视觉量，取 10。 */
+const PLAIN_TEXT_TAIL_HOT_CHARS = 10;
 
 function splitPlainTextTail(key: string, content: string, streaming: boolean): PlainTextTailParts {
   if (!streaming || !isPlainTextTailActive()) return NO_PLAIN_TEXT_TAIL(content);
@@ -337,9 +344,15 @@ function splitPlainTextTail(key: string, content: string, streaming: boolean): P
   // 自检（v8 最要紧一条）：拼接必须与已释放文本逐字节相等，绝不吞字/重复。
   if (`${stable}${tail}` !== content) return NO_PLAIN_TEXT_TAIL(content);
 
+  const hotLen = Math.min(PLAIN_TEXT_TAIL_HOT_CHARS, tail.length);
+  const tailBody = hotLen > 0 ? tail.slice(0, tail.length - hotLen) : tail;
+  const hot = hotLen > 0 ? tail.slice(tail.length - hotLen) : "";
+
   return {
     stable,
     tail,
+    tailBody,
+    hot,
     singleLine: isStreamTailTextSingleLine(tail, plainTextTailWidths[key] ?? 0, ensurePlainTextTailMeasurer())
   };
 }
@@ -658,7 +671,7 @@ const toolIconByCanonicalName: Record<string, any> = {
                 @render-complete="handleMarkdownRenderComplete"
               />
               <!-- 纯文本快路径（v8）：尾巴 = 最后一个空行之后的未闭合段；stable/tail 为连续切片，拼接恒等于原文。整行书写，避免 `whitespace-pre-wrap` 把模板缩进当成正文。 -->
-              <div v-else class="markdown-body whitespace-pre-wrap" :ref="(element) => setPlainTextTailBodyRef(event.key, element)">{{ plainTextTailPartsFor(event).stable }}<span v-if="plainTextTailPartsFor(event).tail" data-stream-tail :data-tail-len="plainTextTailPartsFor(event).tail.length" :data-pds-tail-multiline="plainTextTailPartsFor(event).singleLine ? undefined : 'true'">{{ plainTextTailPartsFor(event).tail }}</span></div>
+              <div v-else class="markdown-body whitespace-pre-wrap" :ref="(element) => setPlainTextTailBodyRef(event.key, element)">{{ plainTextTailPartsFor(event).stable }}<span v-if="plainTextTailPartsFor(event).tail" data-stream-tail :data-tail-len="plainTextTailPartsFor(event).tail.length" :data-tail-hot="plainTextTailPartsFor(event).hot ? 'true' : undefined" :data-pds-tail-multiline="plainTextTailPartsFor(event).singleLine ? undefined : 'true'">{{ plainTextTailPartsFor(event).tailBody }}<span v-if="plainTextTailPartsFor(event).hot" data-pds-tail-hot>{{ plainTextTailPartsFor(event).hot }}</span></span></div>
             </div>
           </div>
         </div>

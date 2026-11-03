@@ -170,6 +170,32 @@ aside [data-reka-scroll-area-viewport]::-webkit-scrollbar {
 }
 
 /* §3.5 降级（双轨 · 轨道一：系统媒体查询）──────────────────────────────── */
+/* ==========================================================================
+   wave-pds-4：尾巴热区逐字浮现
+   尾巴最后 N 个字符单独成节点；v-html / 模板每次重建都会重播这段短动画，
+   于是"新到的那几个字"从模糊中浮现，已到字符落在尾巴前段保持稳定。
+   仅 150ms、仅 ≤10 字，故不会像 wave-59 那样整段重播造成闪烁。
+   ========================================================================== */
+@keyframes pds-tail-hot-reveal {
+  from {
+    opacity: 0.12;
+    filter: blur(2.5px);
+    transform: translateY(1px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+}
+
+[data-pds-tail-hot] {
+  animation: pds-tail-hot-reveal 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* 注意：热区**不**关闭尾巴遮罩——冻结门禁 V13-2 要求「尾巴单行 ⇒ mask-image 为渐变」。
+   两者叠加的实际观感：热区自身淡入 + 尾巴右缘 1.5em 渐变，热区动画占主导。 */
+
 @media (prefers-reduced-motion: reduce) {
   /* 降级下尾巴不再呈现「浮现」——遮罩必须整条关掉，不得留半降级（V7-7）。 */
   [data-stream-tail] {
@@ -182,6 +208,7 @@ aside [data-reka-scroll-area-viewport]::-webkit-scrollbar {
   .assistant-streaming-fade,
   .transition-item-enter,
   .pds-tool-row-enter,
+  [data-pds-tail-hot],
   [data-pds-tool-row] {
     animation: none !important;
     transition: none !important;
@@ -228,6 +255,7 @@ aside [data-reka-scroll-area-viewport]::-webkit-scrollbar {
 [data-pds-reduce-motion="true"] .assistant-streaming-fade,
 [data-pds-reduce-motion="true"] .transition-item-enter,
 [data-pds-reduce-motion="true"] .pds-tool-row-enter,
+[data-pds-reduce-motion="true"] [data-pds-tail-hot],
 [data-pds-reduce-motion="true"] [data-pds-tool-row] {
   animation: none !important;
   transition: none !important;
