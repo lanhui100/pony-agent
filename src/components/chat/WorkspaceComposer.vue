@@ -288,6 +288,11 @@ const primaryActionDisabled = computed(() => {
   if (sessionOperation.value) {
     return true;
   }
+  // wave-60 §C7：停止请求已受理 ⇒ 主按钮进入「进行中」禁用外观（不得重复派发停止请求）。
+  // 真源是 store 的 `phase==="stopping"`（同一微任务内翻转），此处只读、不另存一份状态。
+  if (isSubmitting.value && runtimeStore.phase === "stopping") {
+    return true;
+  }
   if (isSubmitting.value) {
     return false;
   }
@@ -301,6 +306,9 @@ const primaryActionTitle = computed(() => {
       return runtimeStore.queueDeliveryMode === "steer"
         ? "立即插队发送（在当前回合步骤完成后优先执行）"
         : "排队发送（当前回合完成后按序执行）";
+    }
+    if (runtimeStore.phase === "stopping") {
+      return "正在停止…（等待本轮安全边界收口）";
     }
     return "请求在安全边界停止当前运行。";
   }
