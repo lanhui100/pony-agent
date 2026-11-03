@@ -1,8 +1,8 @@
 {
   "wave": "wave-61-team-activation",
-  "phase": "green-v1.5-final",
+  "phase": "green-v1.6-final",
   "verified_by": "lead",
-  "captured_at": "2026-11-03T11:44:13+0800",
+  "captured_at": "2026-11-03T11:57:58+0800",
   "exit_code": 0,
   "suites": [
     {
@@ -34,19 +34,18 @@
       "failed": 0
     },
     {
-      "passed": 15,
+      "passed": 16,
       "failed": 0
     }
   ],
-  "total_passed": 41,
+  "total_passed": 42,
   "commands": [
     "8 suites: wave61_team_activation(15)/pa110(5)/wave37(9)/wave25(4)/wave20(2)/orchestration_acceptance(4)/team_task_order(1)/teammate_e2e(1)",
     "cargo check -p pony-agent-core --all-targets -> exit 0"
   ],
   "notes": [
-    "C10-A2 驱动循环以收件箱为空为退出条件（含 turn 在途新到消息）",
-    "中断改为 INTERRUPTED 标记 + drain 后引擎前检查点",
-    "新增只读 seam inbox_pending_len（测试非破坏性观测）",
-    "c7d 在途消息用例 3 连跑稳定绿"
+    "v1.6: 空闲态 interrupt 不再写 stale 标记；派生新驱动前清残留标记；检查点命中即 requeue+Inactive",
+    "16 wave61 用例全绿（含 c7d 在途消息、c7e 空闲中断回归）",
+    "连跑 3 次一致"
   ]
 }

@@ -771,5 +771,49 @@
     },
     "race_observed": false,
     "remaining_deviation": 0
+  },
+  "v1_7_snapshot": {
+    "generated_at": "2026-11-03T11:51:56+08:00",
+    "command": "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture",
+    "exit_code": 0,
+    "case_count": 16,
+    "runs": [
+      {
+        "iteration": 1,
+        "exit_code": 0,
+        "passed": 16,
+        "failed": 0,
+        "log": "/tmp/w61-v17-run1.log"
+      },
+      {
+        "iteration": 2,
+        "exit_code": 0,
+        "passed": 16,
+        "failed": 0,
+        "log": "/tmp/w61-v17-run2.log"
+      },
+      {
+        "iteration": 3,
+        "exit_code": 0,
+        "passed": 16,
+        "failed": 0,
+        "log": "/tmp/w61-v17-run3.log"
+      }
+    ],
+    "new_case": {
+      "name": "c7e_interrupt_when_idle_does_not_strand_next_message",
+      "location": "tests/wave61_team_activation.rs：父用例 + 子进程分支 v13_child_env=\"c7e\" → run_c7e_body()",
+      "sequence": "spawn（不 send，空闲 Active）→ interrupt_agent（Inactive + 一次性 stale 标记）→ send_message(\"c7e-alpha\")",
+      "assertions": [
+        "(a) 引擎调用次数 == 1（stale 标记不得吞掉驱动）",
+        "(b) 引擎收到的 prompt 含 c7e-alpha",
+        "(c) 最终 Inactive 且 inbox_pending_len == 0",
+        "(d) delivery_state 与实际驱动一致：取值 ∈ {queued, driving}；声称 driving 时 engine_calls ≥ 1；驱动结束后 is_driving == false"
+      ],
+      "observation_policy": "只用只读 seam（inbox_pending_len / list_agents / is_driving）20ms 步进轮询，上限 5s；无破坏性 drain 轮询、无 sleep 掩盖",
+      "physical_evidence": "C7E_OK calls=1 delivery_state=driving prompts=1 final=Some(Inactive)"
+    },
+    "race_observed": false,
+    "remaining_deviation": 0
   }
 }

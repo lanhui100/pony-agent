@@ -556,6 +556,9 @@ pub fn send_message_in_workspace(
         // Wave-61 C10.1：**每 target 单飞**。已有驱动在跑时只入队并返回，由在跑的循环消费；
         // 绝不为同一 target 派生第二个 detached 线程（会造成并发多驱动与状态抖动）。
         if let Some(guard) = begin_driving(&drive_target) {
+            // Wave-61 C10-A2：新驱动启动前清掉**残留**的中断标记，防止历史标记把本次驱动
+            // 在检查点 #1 直接打断（空转地把消息留在收件箱、状态卡 `Running`）。
+            let _ = take_interrupted(&drive_target);
             let owner = workspace_root.map(std::path::Path::to_path_buf);
             // C10.3：进入驱动前先置 `Running`（`Active` 由入队/派生阶段给出，收口回 `Inactive`）。
             set_teammate_status(&drive_target, TeammateStatus::Running);
@@ -691,20 +694,33 @@ fn teammate_status(target: &str) -> Option<TeammateStatus> {
 
 /// 打断正在运行的智能体（保留其信箱队列）
 pub fn interrupt_agent(args: InterruptAgentArgs) -> Result<InterruptAgentResult, String> {
-    let mut lock = TEAMMATES.lock().unwrap();
-    let map = lock.as_mut().ok_or_else(|| "No active team".to_string())?;
-    let member = map.get_mut(&args.target).ok_or_else(|| format!("Teammate target not found: {}", args.target))?;
+    // Wave-61 C10-A2 回归修正：先读「是否真有驱动在跑」。
+    // - 在跑：置一次性中断标记，驱动循环会在下一次 drain 边界前停下（C7.4）；
+    // - 空闲：**只**翻状态位，不写标记 —— 否则残留标记会被下一次 `send_message` 派生的
+    //   驱动在检查点 #1 误消费，导致消息滞留、成员永久卡 `Running`。
+    // 说明：`is_driving` 使用独立的 `DRIVING` 锁，且在取 `TEAMMATES` 锁**之前**调用，
+    // 避免与驱动线程形成锁嵌套（无锁序反转）。
+    let inflight_drive = is_driving(&args.target);
 
-    let prev = member.status.clone();
-    member.status = TeammateStatus::Inactive;
+    let (prev, new_status) = {
+        let mut lock = TEAMMATES.lock().unwrap();
+        let map = lock.as_mut().ok_or_else(|| "No active team".to_string())?;
+        let member = map
+            .get_mut(&args.target)
+            .ok_or_else(|| format!("Teammate target not found: {}", args.target))?;
+        let prev = member.status.clone();
+        member.status = TeammateStatus::Inactive;
+        (prev, TeammateStatus::Inactive)
+    };
 
-    // Wave-61 C7.4：独立的中断标记（一次性消费）——驱动循环会在下一次 drain 边界前停下。
-    mark_interrupted(&args.target);
+    if inflight_drive {
+        mark_interrupted(&args.target);
+    }
 
     Ok(InterruptAgentResult {
         success: true,
         previous_status: prev,
-        new_status: TeammateStatus::Inactive,
+        new_status,
     })
 }
 
@@ -889,7 +905,12 @@ pub fn drive_teammate_turn_in(
 ) -> Result<Option<String>, String> {
     // 检查点 #1（drain 之前）：已被 `interrupt_agent` 标记 → 消费标记并停止本轮驱动
     // （C7.4：中断在下一次 drain 边界前生效；引擎无回合内 stop API）。
+    //
+    // 真·在途中断的收口口径与 C10.2 一致：本检查点尚未 drain，故无消息需要回填；但必须
+    // 显式把成员状态收到 `Inactive`，绝不留在 `Running`（否则名单里会永久显示"运行中"）。
+    // 若本检查点被挪到 drain 之后调用，则同样先 `requeue_messages` 再收口（见检查点 #2）。
     if take_interrupted(target) {
+        set_teammate_status(target, TeammateStatus::Inactive);
         return Ok(None);
     }
 

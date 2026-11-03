@@ -473,8 +473,9 @@ fn v13_child_env() {
         "c7b" => run_c7b_body(),
         "c7c" => run_c7c_body(),
         "c7d" => run_c7d_body(),
+        "c7e" => run_c7e_body(),
         "c8" => run_c8_body(),
-        other => panic!("未知 {V13_CHILD_ENV}={other}（只允许 c7|c7b|c7c|c7d|c8）"),
+        other => panic!("未知 {V13_CHILD_ENV}={other}（只允许 c7|c7b|c7c|c7d|c7e|c8）"),
     }
 }
 
@@ -658,6 +659,30 @@ fn c7d_inflight_message_not_stranded() {
     assert!(
         outcome.stdout.contains("C7D_OK"),
         "C7d 失败：子进程成功退出但未输出 `C7D_OK` 标记\nstdout:\n{}",
+        outcome.stdout
+    );
+}
+
+/// C7e（C7.4 回归）：空闲态 `interrupt_agent` 留下的一次性中断标记**不得吞掉后续驱动**。
+///
+/// 时序：spawn（不 send，保持空闲）→ `interrupt_agent`（置 Inactive + 打 stale 标记）→
+/// `send_message("c7e-alpha")`（必须真实驱动一次）。全部等待使用只读观测
+/// （`inbox_pending_len` + `list_agents`），禁止破坏性 drain 轮询、禁止 sleep 掩盖。
+/// 断言 (a) 引擎调用次数 == 1；(b) prompt 含 `c7e-alpha`；(c) 最终 `Inactive` 且 `pending == 0`；
+/// (d) `delivery_state` 与实际驱动一致（不得"声称 driving 但 engine_calls == 0"）。
+#[test]
+fn c7e_interrupt_when_idle_does_not_strand_next_message() {
+    let outcome = run_v13_child("c7e");
+    assert!(
+        outcome.status.success(),
+        "C7e 失败：空闲态 interrupt 的 stale 标记吞掉了后续驱动。子进程 Exit={:?}\n--- child stdout ---\n{}\n--- child stderr ---\n{}",
+        outcome.status.code(),
+        outcome.stdout,
+        outcome.stderr
+    );
+    assert!(
+        outcome.stdout.contains("C7E_OK"),
+        "C7e 失败：子进程成功退出但未输出 `C7E_OK` 标记\nstdout:\n{}",
         outcome.stdout
     );
 }
@@ -1353,6 +1378,120 @@ fn run_c7d_body() {
     );
 
     println!("C7D_OK calls={calls} peak={peak} prompts={}", prompts.len());
+}
+
+/// C7e 真实断言体：空闲 interrupt → send 仍必须驱动一次。
+fn run_c7e_body() {
+    sandbox_env();
+    let engine = Arc::new(ScenarioEngine::new("c7e-stub-reply"));
+    let (engine, target) = spawn_inert_teammate(engine, "c7e-probe");
+    assert_eq!(
+        teammate_status_of(&target),
+        Some(TeammateStatus::Active),
+        "C7e 前置失败：spawn 后（未 send）成员必须空闲 Active"
+    );
+
+    // 空闲态打断：置 Inactive 并打一次性 stale 标记。
+    let interrupted = orchestration::interrupt_agent(orchestration::InterruptAgentArgs {
+        target: target.clone(),
+        reason: Some("c7e idle interrupt".to_string()),
+    })
+    .expect("C7e 前置失败：interrupt_agent 必须成功");
+    assert!(interrupted.success, "C7e 前置失败：interrupt 未生效");
+    assert_eq!(
+        interrupted.new_status,
+        TeammateStatus::Inactive,
+        "C7e 前置失败：interrupt 后必须为 Inactive"
+    );
+    assert_eq!(
+        engine.calls.load(Ordering::SeqCst),
+        0,
+        "C7e 前置失败：空闲态尚未 send，引擎不应已被调用"
+    );
+
+    // 被打断后再投递：stale 标记不得吞掉这次驱动。
+    let send_result = orchestration::send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "c7e-alpha".to_string(),
+        mode: Some(MessageDeliveryMode::Queue),
+    })
+    .expect("C7e 前置失败：send_message 必须成功");
+    let claimed_state = send_result.delivery_state.clone();
+
+    // 只读轮询：待处理数归零 + 状态 Inactive（20ms 步进、上限 5s）。
+    let converged = wait_until(Duration::from_secs(5), || {
+        orchestration::inbox_pending_len(&target) == 0
+            && teammate_status_of(&target) == Some(TeammateStatus::Inactive)
+            && !orchestration::is_driving(&target)
+    });
+    // 静默确认：调用数稳定。
+    let mut stable = 0usize;
+    let mut last_calls = usize::MAX;
+    let _ = wait_until(Duration::from_secs(5), || {
+        let calls = engine.calls.load(Ordering::SeqCst);
+        if calls == last_calls && engine.in_flight.load(Ordering::SeqCst) == 0 {
+            stable += 1;
+        } else {
+            stable = 0;
+            last_calls = calls;
+        }
+        stable >= 3
+    });
+
+    let calls = engine.calls.load(Ordering::SeqCst);
+    let prompts = engine.prompts();
+    let pending_left = orchestration::inbox_pending_len(&target);
+    let status = teammate_status_of(&target);
+    let still_driving = orchestration::is_driving(&target);
+
+    // Assert (a)：stale 标记不得吞掉这次驱动 —— 引擎必须恰好被调用 1 次。
+    assert_eq!(
+        calls, 1,
+        "C7e 失败：引擎调用次数 == {calls}（期望 1）——空闲态 interrupt 的一次性 stale 标记\
+         吞掉了后续 send 的驱动。claimed_delivery_state={claimed_state:?}；prompts={prompts:?}"
+    );
+
+    // Assert (b)：驱动确实消费了本次消息。
+    assert!(
+        prompts.iter().any(|prompt| prompt.contains("c7e-alpha")),
+        "C7e 失败：引擎收到的 prompt 不含 `c7e-alpha`；prompts={prompts:?}"
+    );
+
+    // Assert (c)：收敛到 Inactive 且待处理队列为空（只读观测）。
+    assert!(
+        converged,
+        "C7e 失败：5s 内未收敛到「pending == 0 且 Inactive 且非 driving」\
+         （实际 pending={pending_left}, status={status:?}, driving={still_driving}）"
+    );
+    assert_eq!(
+        pending_left, 0,
+        "C7e 失败：收件箱仍有 {pending_left} 条待处理消息"
+    );
+    assert_eq!(
+        status,
+        Some(TeammateStatus::Inactive),
+        "C7e 失败：最终状态必须为 Inactive"
+    );
+
+    // Assert (d)：delivery_state 与实际驱动一致。
+    assert!(
+        claimed_state == orchestration::DELIVERY_STATE_DRIVING
+            || claimed_state == orchestration::DELIVERY_STATE_QUEUED,
+        "C7e 失败：delivery_state 取值非法（{claimed_state:?}），期望 {{queued, driving}}"
+    );
+    assert!(
+        claimed_state != orchestration::DELIVERY_STATE_DRIVING || calls >= 1,
+        "C7e 失败：投递结果声称 driving 但 engine_calls == {calls}（声明与真实驱动不一致）"
+    );
+    assert!(
+        !still_driving,
+        "C7e 失败：驱动已结束却仍残留 driving 标记（delivery_state 与实际驱动不一致）"
+    );
+
+    println!(
+        "C7E_OK calls={calls} delivery_state={claimed_state} prompts={} final={status:?}",
+        prompts.len()
+    );
 }
 
 /// 记录 `run_turn_in` 收到的 workspace_root 的 Stub 引擎。

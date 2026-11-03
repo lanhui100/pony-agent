@@ -1,0 +1,113 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "6b9e23a",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "recheck-f-wave61-v15",
+    "fresh_context": true
+  },
+  "executed_by": "recheck-f-wave61-v15",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/orchestration.rs#drive_loop_in (581-599)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#drive_teammate_turn_in (886-988)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#DrivingGuard/begin_driving (134-157)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#mark_interrupted/take_interrupted/INTERRUPTED (159-181, 693-709)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#inbox_pending_len (744-757)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#requeue_messages (195-209)",
+    "crates/pony-agent-core/src/agent/orchestration.rs#send_message_in_workspace (549-574)",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs#c7d_inflight_message_not_stranded + run_c7d_body (649-663, 1247-1356)",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs#run_turn_in / resolved_workspace_root (159-177, 286-303)",
+    "crates/pony-agent-core/src/agent/context.rs#AGENT_TEAM_POLICY_PROMPT (65-74)",
+    ".dev-team/contracts/wave-61-team-activation.md#C10/C11 (576-650)",
+    "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture (15 passed, exit 0)",
+    "cargo test -p pony-agent-core --test pa110_teams_acceptance --test teammate_e2e_communication_test (6 passed, exit 0)"
+  ],
+  "closed_blockers": [
+    {
+      "id": "C10-A2-strand",
+      "status": "CLOSED",
+      "evidence": "orchestration.rs:593-598 循环唯一正常退出条件是 drive_teammate_turn_in 返回 Ok(None)，而 Ok(None) 只有两种来源：:899-902 收件箱为空、:906-910/:892-894 中断检查点；成功批次 (:987 Ok(Some)) 一律 continue 继续 drain ⇒ turn 在途期间入队（DRIVING 单飞不另起驱动, :558-570）的消息由同一循环消费。失败批次 :929-950 requeue_messages(原序 push_front, :196-209) + Inactive + 向 LEAD 投错误回执 + return Err，drive_loop_in 经 `?` 立即退出（无 busy 自旋）。DRIVING 仅由 DrivingGuard::Drop (:139-147) 清除，closure 持 `_guard` (:564) 覆盖成功/失败/panic。实证：c7d_inflight_message_not_stranded 通过（calls==2、prompts[0] 含 MSG-A / prompts[1] 含 MSG-B、peak==1、pending==0、Inactive），`cargo test -p pony-agent-core --test wave61_team_activation` = 15 passed / exit 0。注意：本行仅针对上轮上报的『turn 正常收口后消息滞留』路径；同契约面在『中断标记残留』路径上出现新的 BLOCKING，见 findings[0]。"
+    },
+    {
+      "id": "C10.2-requeue",
+      "status": "CLOSED",
+      "evidence": "orchestration.rs:929-950 引擎 Err 分支 requeue_messages(:196-209 逆序 push_front 保原序) → set_teammate_status(Inactive) → send_message 向 LEAD 投『Teammate ... turn failed (N message(s) requeued)』→ return Err；冻结用例 c7c_requeue_on_engine_error 与 pa110 ac05 均通过。"
+    },
+    {
+      "id": "C10.3-status-machine",
+      "status": "CLOSED",
+      "evidence": "引擎在位路径 Active(入队 :627-631)→Running(:561/:913)→Inactive(:969-976)。但中断检查点 #1 提前返回时不复位状态，会留下 Running 卡死（见 findings[1]）。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 892,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cat > /tmp/repro_stale_marker.rs <<'RS'  // Stub engine 计数 + spawn_teammate(空 prompt) -> interrupt_agent(空闲态) -> send_message(Queue) -> sleep 1.2s -> 打印 delivery_state/inbox_pending_len/engine_calls/list_agents().status/is_driving ; RS ; RLIB=$(ls -t target/debug/deps/libpony_agent_core-*.rlib|head -1); rustc - --edition 2021 -L dependency=target/debug/deps --extern pony_agent_core=\"$RLIB\" -o /tmp/repro_stale_marker < /tmp/repro_stale_marker.rs && timeout 60 /tmp/repro_stale_marker ; 实测输出: interrupt ok status=Inactive / send ok delivery_state=driving pending_inbox_len=1 / after 1.2s: engine_calls=0 pending=1 status=Running is_driving=false / prompts=[] / send2 ok delivery_state=driving pending_inbox_len=2 / after send2: engine_calls=1 pending=0 status=Inactive / RESULT=STALE_INTERRUPT_MARKER_STRANDED",
+      "severity": "BLOCKING",
+      "note": "C10-A2 回归（6b9e23a 引入）—— 一次性中断标记 stale 存活，吞掉下一次 send 驱动的整批消息。链路：interrupt_agent 无条件 mark_interrupted(:702)（不校验目标是否真有在跑的 turn）；随后 send_message 入队并把状态置 Active→Running 并派生驱动(:558-569，delivery_state=driving)；新驱动在检查点 #1 take_interrupted 命中(:892-894) 立即 Ok(None) ⇒ drive_loop_in 立刻正常返回(:596)，消息连同刚上报的 delivery_state=driving 一起留在收件箱，无驱动线程、无回执、无重试触发（is_driving=false，engine 调用次数 0）。实测消息不是丢失而是被无限期滞留：直到**再一次** send_message 才被同批消费（复现中 send2 后 engine_calls=1、pending=0，单批 prompt 同时含两条消息）。同在 ed6d35e 上该序列是可用的（检查点 #1 判 status==Inactive，而 Queue 入队已把状态置 Active ⇒ 不会被误拦），故属本提交新引入的可达回归，且与刚修复的 C10-A2 属同一契约面、同样违反诚实性（返回值声称 driving）。建议修法（最小闭包）：interrupt_agent 仅在 `is_driving(target) || status==Running` 时置标记；或 send_message_in_workspace 在 begin_driving 成功后、派生驱动前清除该 target 的残留标记；并补一条『interrupt(空闲) → send → 必须被消费』的用例。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 893,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "timeout 60 /tmp/repro_stale_marker → after 1.2s: engine_calls=0 pending=1 status=Running is_driving=false（无任何 turn 在跑，状态却停在 Running，且永远不会自愈）",
+      "severity": "ADVISORY",
+      "note": "C10.3 观测面失真（与 findings[0] 同源）—— 检查点 #1 命中后只 return Ok(None)，不复位状态；而 send_message_in_workspace:561 已在派生驱动前置 `Running`，于是『无 turn 在跑』与 status=Running 长期不一致（复现中 1.2s 内保持 Running）。影响面：wait_agent(:843-853) 以 status==Running 判定 has_active_peer ⇒ lead 会被告知仍有活跃同伴；策略段也教模型以 list_agents 的状态为唯一真源。修法：检查点 #1/#2 的提前返回路径统一 set_teammate_status(Inactive)。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 596,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '549,574p;593,599p' crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "ADVISORY",
+      "note": "单飞终止竞态未变（上轮 FP findings 之一，未随 6b9e23a 收口）：send_message 先 enqueue(:553) 再 begin_driving(:558)；若入队落在在跑循环最后一次 drain 返回空(:596) 之后、DrivingGuard Drop 之前，begin_driving 返回 None 且该循环不再 drain ⇒ 消息滞留直到下一次 send。窄窗口且回执如实给出 delivery_state=queued / pending_inbox_len>0（无假成功），故不阻塞；建议 successor 把『队列空』与『单飞标记清除』放进同一临界区，或驱动循环退出前持锁复检队列。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 685,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture 2>&1 | grep -A3 'never used' → warning: function `teammate_status` is never used --> orchestration.rs:685（lib 生成 1 warning）",
+      "severity": "ADVISORY",
+      "note": "6b9e23a 把检查点 #1 从 `teammate_status(target)==Inactive` 改为 `take_interrupted` 后，私有 helper `teammate_status`(:685-690) 变成死代码，编译新增 1 条 dead_code 警告（ed6d35e 上该函数在 :841 有唯一调用点）。无 -D warnings 门禁、不影响测试结论，但属本次提交未清理的残留（同类：INTERRUPTED 标记无任何测试直接引用）。建议删除或加既有语义的单测引用，避免告警长期漂移。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave61_team_activation.rs",
+      "line": 1247,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'interrupt' crates/pony-agent-core/tests/wave61_team_activation.rs crates/pony-agent-core/tests/pa110_teams_acceptance.rs → 仅工具名清单/冻结字面量命中；c7d 全体（:1247-1356）只覆盖『turn 在途期间到达的消息』，0 处覆盖 interrupt 后的队列语义",
+      "severity": "ADVISORY",
+      "note": "c7d 本身为真断言且符合 Lead 裁决：断言 calls==2(:1312-1318)、prompts[0] 含 c7d-MSG-A / prompts[1] 含 c7d-MSG-B(:1320-1332)、最终 Inactive 且 pending==0 双重断言(:1334-1348)、peak==1(:1349-1354)；等待与收尾一律用只读 seam `inbox_pending_len`(:1288、:1309)，无破坏性 drain_inbox 轮询。缺口：新增的中断标记（一次性消费）零用例覆盖，findings[0] 的回归因此对 15 个全绿用例完全隐形；建议补『interrupt(空闲/失败后) → send → 必须被消费且状态回 Inactive』与『turn 在途 → interrupt → 整批 requeue 保序』两条。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+      "line": 300,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '294,303p' crates/pony-agent-core/src/agent/subagent_runtime.rs; sed -n '163,175p' crates/pony-agent-core/src/agent/subagent_runtime.rs; grep -rn 'run_turn_in(' crates/pony-agent-core/src/agent/tools.rs crates/pony-agent-core/src/agent/orchestration.rs",
+      "severity": "ADVISORY",
+      "note": "上轮 FP findings 之一，未升级：HostTurnEngine::run_turn_in 对 Some(root) 直接使用，缺少契约 C8 规则 2 的『非绝对路径回落 resolved_workspace_root()』守卫（resolved_workspace_root:163-175 自身带 is_absolute 过滤，此分支绕过）。当前全部调用点传的都是绝对根（tools.rs 的 resolved 根、orchestration 的 owner、测试 temp 根），无现存可达违规 ⇒ 维持 ADVISORY，不作 BLOCKING。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/orchestration.rs",
+      "line": 566,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'eprintln!' crates/pony-agent-core/src/agent/orchestration.rs; python3 -c \"import json;d=json.load(open('.dev-team/nfr-baseline.json'));print(d['logging_eprintln_exempt_scope'],d['logging_eprintln_exempt_covers_new_lines'])\"",
+      "severity": "ADVISORY",
+      "note": "上轮 FP findings 之一，未升级：`[team] teammate drive failed` 仍落在 logging_eprintln_exempt_scope（existing_style_non_json_lock_poison_recovery_diagnostics）之外，无 trace_id/结构化字段，logging_eprintln_exempt_covers_new_lines 未覆盖本波新增行；Lead 已裁决 PA-119 backlog，故维持 ADVISORY（发布/审计不得引用该字段声称新增 eprintln 全覆盖）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/context.rs",
+      "line": 68,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '68p;71p;73p' crates/pony-agent-core/src/agent/context.rs; grep -n 'sender' crates/pony-agent-core/src/agent/orchestration.rs | head; grep -rn 'TeammateStatus::Provisioning\\|TeammateStatus::Failed' crates/pony-agent-core/src --include=*.rs | grep -v 'enum\\|=>\\|list_agents\\|match' | wc -l",
+      "severity": "ADVISORY",
+      "note": "上轮 FP findings 之一，未升级：策略段仍保留三处无实现对应的承诺 —— ①『A peer message starts with its sender name』（QueuedMessage 无 sender 字段、prompt 只平铺 `- {content}` orchestration.rs:916-920）；②『a running target receives the message at its nearest step boundary』（实现为新起驱动循环跑新 turn，无 step 抢占点）；③provisioning/failed 两态仍无写入点。契约 C11 L1/L2/L4 已登记为劝告并要求 successor 改写，Lead 已接受，故维持 ADVISORY（不新增 BLOCKING）；但发布说明/收尾文档同样不得照抄这三句。"
+    }
+  ]
+}
