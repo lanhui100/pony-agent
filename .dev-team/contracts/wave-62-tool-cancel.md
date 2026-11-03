@@ -56,3 +56,14 @@
 2. `cargo test --lib` 无新增失败
 3. `cargo check --all-targets` Exit 0
 4. wave-60 六测试全绿（不得修改其断言）
+
+## 5. 补遗 v2（Lead 一票裁决，2026-11-03，双路 L3 均 FAIL 后生效）
+
+**BLOCKING（两路独立复现，同一根因）**：`GovernedToolExecutor → GovernedDispatcher → RouterPrimitiveHandler` 在桥接处用 `ToolExecutionContext{..Default::default()}` 重建上下文，且 `PrimitiveToolHandlerRequest` 无取消字段 ⇒ `turn_stream.rs` 注入的 turn 令牌在这一层丢失；真实 app 中 stop 后 `Run` 仍跑完（wave-60 A9 未清偿）。冻结 C3 用例直连 `ToolRouter`，覆盖不到该桥接。
+
+| # | 追加判据 | 说明 |
+|---|---|---|
+| **C5（新增，端到端）** | 经**生产默认执行器** `build_governed_executor_with_sandbox_backend(...)` 执行 `Run`（`sleep 1.5; echo leaked > marker`），`DispatchContext.turn_cancellation=Some(token)`；执行 200ms 后 `token.cancel()` ⇒ **≤1000ms** 返回 `status=="aborted"` 且错误码 `tool_cancelled`，并且 marker 文件**不存在**（副作用未发生）。 | 判据必须由 Test Agent 写入 `tests/wave62_tool_cancel_e2e.rs`（新文件），实现后必须绿 |
+| **A1 桥接修复** | `PrimitiveToolHandlerRequest` 增取消字段并把 `ToolExecutionContext.cancellation` 透传到 `RouterPrimitiveHandler` 重建的上下文；不得用 `Default::default()` 丢掉取消态。 | 允许改 `tool_runtime.rs` / `governed_executor.rs` / `tools.rs` |
+| **A2 融合而非复用（L3-A ADVISORY 2）** | dispatcher 不得直接"复用 turn 令牌作为本轮令牌"（否则 composite `children.cancel()` 会 cancel turn 令牌、毒化整轮）。改为：dispatcher 保留自己的调用令牌，闸门/收口判「自有令牌 OR turn 令牌」；`None` 时行为不变。 | 既有 `child_cancellation_fails_closed_as_cancelled` 必须继续绿 |
+| **A3 取消路径对称清理（L3-A ADVISORY 1）** | `cancelled` 分支须与 `timed_out` 分支同样做幂等二次 kill + 进程条目回收（`kill_if_exists`/`try_wait` 证据），不得让被取消命令的进程条目滞留。 | |
