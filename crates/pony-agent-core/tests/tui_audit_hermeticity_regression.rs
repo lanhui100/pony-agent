@@ -86,6 +86,13 @@ fn python_json_with_env(code: &str, home: Option<&Path>, runtime_log: Option<Opt
     command.arg("-c").arg(code).current_dir(repo_root());
     if let Some(home) = home {
         command.env("HOME", home);
+        // Windows 可移植性（wave-61-team CI 修复）：CPython 在 Windows 上用 `USERPROFILE`
+        // （回退 HOMEDRIVE+HOMEPATH）解析 `~`，不读 `HOME` —— 只注入 HOME 时
+        // `runtime_log_path()` 仍指向 runner 真实家目录，H1c 断言必红。
+        // 这里同时注入 Windows 家目录变量，使「HOME 重定向」在两个平台语义一致。
+        command.env("USERPROFILE", home);
+        command.env("HOMEDRIVE", home.parent().unwrap_or(home));
+        command.env("HOMEPATH", home.file_name().unwrap_or_default());
     }
     match runtime_log {
         Some(Some(path)) => {
