@@ -222,8 +222,11 @@ fn wave9_run_call(
     }
 }
 
-/// P0-1：Run 类工具在 `timeout` 下的指纹必须对 `timeoutMs` 与行首内联 env 前缀归一化。
-/// 红相：当前实现仅剔除 `description`，三次指纹互不相同。
+/// Run 类工具在 `timeout` 下的指纹归一化面。
+///
+/// **契约 v8 迁移**：`timeoutMs` 不再「一律剔除」，而是按 **2 的幂分桶**参与指纹
+/// （bucket = floor(log2(ms))）—— 延长超时=新策略；同桶内微小抖动仍归一。
+/// 措辞与行首内联 env 前缀仍必须归一。重试风暴由「同工具连续失败 4 次」这条不看参数的粗闸兜底。
 #[test]
 fn test_tool_failure_signal_normalizes_network_retry_timeout() {
     use pony_agent_core::agent::runtime::tool_failure_signal;
@@ -251,14 +254,17 @@ fn test_tool_failure_signal_normalizes_network_retry_timeout() {
     assert_eq!(sig_b.2, "timeout", "错误码必须为 timeout");
     assert_eq!(sig_c.2, "timeout", "错误码必须为 timeout");
 
-    assert_eq!(
+    // 契约 v8：延长超时=新策略 —— 60_000(bucket15) vs 180_000(bucket17) 跨桶 ⇒ 指纹必须不同；
+    // 放开这一点不会放大重试风暴：风暴由「同工具连续失败 4 次」粗闸（不看参数）兜底。
+    assert_ne!(
         sig_a.1, sig_b.1,
-        "仅 timeoutMs 不同的同一核心命令，指纹必须相同（否则模型加大超时重试即可绕过连续失败断路器）。\n a={}\n b={}",
+        "契约 v8：跨桶（60_000 bucket15 vs 180_000 bucket17）必须产生不同指纹（延长超时=新策略）。\n a={}\n b={}",
         sig_a.1, sig_b.1
     );
+    // 行首内联 env 前缀不同、timeoutMs 同桶（60_000 vs 60_000）⇒ 仍必须归一为同一指纹。
     assert_eq!(
         sig_a.1, sig_c.1,
-        "仅行首内联 env 前缀不同的同一核心命令，指纹必须相同（否则模型换前缀重试即可绕过断路器）。\n a={}\n c={}",
+        "契约 v8：仅行首内联 env 前缀不同、同桶的同一核心命令，指纹必须相同（否则换前缀即可绕过断路器）。\n a={}\n c={}",
         sig_a.1, sig_c.1
     );
 }

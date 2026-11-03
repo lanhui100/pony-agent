@@ -529,7 +529,26 @@ fn strip_leading_inline_env_prefixes(command: &str) -> &str {
 fn normalize_run_timeout_argument_value(value: &Value) -> Value {
     let mut normalized = canonicalize_tool_argument_value(value);
     if let Value::Object(map) = &mut normalized {
-        map.remove("timeoutMs");
+        // 契约 v8（B015）：`timeoutMs` 不再整体删除，而是按 2 的幂**分桶**后写回同名键。
+        //
+        // 语义：延长超时 = 换新策略（落进更大的桶 ⇒ 指纹改变），因此「同一命令 + 明显更长的超时」
+        // 不会再被既有 timeout 指纹吞掉；但同一量级内的抖动（120s vs 121s）仍归一到同一桶，
+        // 避免模型靠微调毫秒数绕过指纹。真正的防重试风暴由「同工具连续失败 4 次」闸兜底
+        // ——那道闸**不看参数**，故分桶不会放宽它。
+        //
+        // bucket = floor(log2(ms))，写回 `1u64 << bucket`；`timeoutMs` 缺失/非 u64 时与既有行为
+        // 一致：不写该键（归化结果里不出现）。
+        match value.get("timeoutMs").and_then(Value::as_u64) {
+            Some(ms) => {
+                // `ilog2(0)` 未定义：0 与 1 同归 0 号桶（1ms），避免下溢 panic
+                // （真实生效值由 `resolve_run_timeout_ms` 夹紧到 ≥1）。
+                let bucket = if ms == 0 { 0 } else { ms.ilog2() };
+                map.insert("timeoutMs".to_string(), Value::from(1u64 << bucket));
+            }
+            None => {
+                map.remove("timeoutMs");
+            }
+        }
         if let Some(Value::String(command)) = map.get("command") {
             let stripped = strip_leading_inline_env_prefixes(command);
             if !stripped.is_empty() {
@@ -780,6 +799,70 @@ mod b010_timeout_signal_tests {
             duration_ms: 0,
             output: json!({ "ok": true, "exitCode": 0, "timedOut": false }).to_string(),
         }
+    }
+
+    /// 契约 v8 / B015：`timeoutMs` 按 2 的幂分桶后参与指纹。
+    ///
+    /// 等价类：同桶 ⇒ 同指纹；跨桶 ⇒ 不同指纹；缺失 ⇒ 不写该键（与既有归一化一致）。
+    #[test]
+    fn timeout_ms_buckets_follow_power_of_two() {
+        fn normalized_timeout(ms: u64) -> u64 {
+            let normalized = normalize_run_timeout_argument_value(&json!({
+                "command": "pnpm test",
+                "timeoutMs": ms,
+            }));
+            normalized
+                .get("timeoutMs")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(|| panic!("timeoutMs={ms} 归一化后必须写回同名键：{normalized}"))
+        }
+
+        let cases = [
+            (120_000u64, 65_536u64, 16u32),
+            (121_000, 65_536, 16),
+            (300_000, 262_144, 18),
+            (600_000, 524_288, 19),
+            (60_000, 32_768, 15),
+        ];
+        for (requested, expected, bucket) in cases {
+            let actual = normalized_timeout(requested);
+            eprintln!(
+                "[b015] timeoutMs={requested} ⇒ bucket={bucket} ⇒ 归一值={actual}（期望 {expected}）"
+            );
+            assert_eq!(actual, expected, "B015：timeoutMs={requested} 必须分桶到 {expected}");
+            assert_eq!(
+                bucket,
+                if requested == 0 { 0 } else { requested.ilog2() },
+                "B015：桶号必须是 floor(log2)"
+            );
+        }
+
+        // 同桶等价、跨桶不等价（指纹由同一函数产生）。
+        let same_bucket = normalize_run_timeout_argument_value(&json!({
+            "command": "pnpm test", "timeoutMs": 120_000u64,
+        }));
+        let same_bucket_2 = normalize_run_timeout_argument_value(&json!({
+            "command": "pnpm test", "timeoutMs": 121_000u64,
+        }));
+        let bigger_bucket = normalize_run_timeout_argument_value(&json!({
+            "command": "pnpm test", "timeoutMs": 600_000u64,
+        }));
+        assert_eq!(same_bucket, same_bucket_2, "B015：同桶必须归一到同一指纹");
+        assert_ne!(same_bucket, bigger_bucket, "B015：跨桶必须产生不同指纹");
+
+        // 缺失/非 u64：不写该键（与既有归一化结果一致）。
+        let missing = normalize_run_timeout_argument_value(&json!({ "command": "pnpm test" }));
+        eprintln!("[b015] 缺失 timeoutMs ⇒ 归一化结果={missing}");
+        assert!(
+            missing.get("timeoutMs").is_none(),
+            "B015：timeoutMs 缺失时不得凭空写入该键"
+        );
+        let non_integer =
+            normalize_run_timeout_argument_value(&json!({ "command": "pnpm test", "timeoutMs": 1.5 }));
+        assert!(
+            non_integer.get("timeoutMs").is_none(),
+            "B015：非 u64 的 timeoutMs 同样不写该键"
+        );
     }
 
     /// 契约 B010：promote 载荷必须产出与 timeout 错误路径**完全一致**的三元组，

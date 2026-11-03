@@ -62,6 +62,11 @@
   - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）
 
 ## 已完成
+- [x] `B015` - P1: 重试指纹保留 timeoutMs 语义（延长=新策略，分桶实现）
+  - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs::normalize_run_timeout_argument_value`
+  - 结果：`timeoutMs` 由「整体剔除」改为 `floor(log2)` 分桶值写回（同桶同指纹、跨桶异指纹）；防风暴仍由同工具 4 次闸兜底；迁移 3 处原冻结断言。验收 `timeout_signal_promote_test` 4 passed、adversarial 4、harness 12。
+
+
 
 - [x] `B013` - P1: Windows 一次性批处理脚本残留（含命令原文）
   - 路径：`crates/pony-agent-core/src/agent/tools.rs`（`<ws>/.tmp/pony-agent-run-{sid}.cmd` 写入与 promote 早返回跳过删除）

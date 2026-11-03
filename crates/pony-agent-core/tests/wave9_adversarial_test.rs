@@ -63,8 +63,12 @@ fn wave9_run_call(command: &str, timeout_ms: u64, description: &str, call_id: &s
     }
 }
 
-/// 对抗 1：指纹穿越 —— 4 种不同措辞 / 前缀 / 超时值重试同一核心命令，归一化指纹必须恒等。
-/// 红相：当前实现仅剔除 `description`，`timeoutMs` 与内联 env 前缀均参与指纹。
+/// 对抗 1：指纹穿越 —— 4 种不同措辞 / 前缀 / 超时值重试同一核心命令。
+///
+/// **契约 v8 迁移**：`timeoutMs` 不再「一律剔除」，而是按 **2 的幂分桶**参与指纹
+/// （bucket = floor(log2(ms))）—— 延长超时=新策略；同桶内的微小抖动仍归一。
+/// 措辞/行首 env 前缀/Windows `set` 前缀仍必须归一（不得被用来绕过断路器）。
+/// 重试风暴由「同工具连续失败 4 次」这条不看参数的粗闸兜底。
 #[test]
 fn test_adversarial_1_fingerprint_traversal_resists_rephrasing() {
     let result = wave9_timeout_result();
@@ -95,14 +99,28 @@ fn test_adversarial_1_fingerprint_traversal_resists_rephrasing() {
         fingerprints.push(signal.1);
     }
 
-    let baseline = fingerprints[0].clone();
-    for (index, fingerprint) in fingerprints.iter().enumerate() {
-        assert_eq!(
-            *fingerprint, baseline,
-            "对抗 1 失败：变体 #{} 的归一化指纹与基线不同，断路器可被措辞/前缀/超时值绕过。\n baseline={}\n variant ={}",
-            index, baseline, fingerprint
-        );
-    }
+    // 契约 v8：延长超时=新策略（timeoutMs 按 2 的幂分桶：a=60_000→bucket15、b=600_000→bucket19、
+    // c=60_000→bucket15、d=120_000→bucket16）；措辞/env 前缀仍归一；风暴由「同工具连续失败 4 次」闸兜底。
+    assert_eq!(
+        fingerprints[0], fingerprints[2],
+        "契约 v8：同核心命令 + 同桶（60_000 与 60_000，bucket=15）指纹必须相同 —— 措辞/env 前缀不得绕过；\n a={}\n c={}",
+        fingerprints[0], fingerprints[2]
+    );
+    assert_ne!(
+        fingerprints[0], fingerprints[1],
+        "契约 v8：跨桶（60_000 bucket=15 vs 600_000 bucket=19）必须产生不同指纹 —— 延长超时=新策略；\n a={}\n b={}",
+        fingerprints[0], fingerprints[1]
+    );
+    assert_ne!(
+        fingerprints[0], fingerprints[3],
+        "契约 v8：跨桶（60_000 bucket=15 vs 120_000 bucket=16）必须产生不同指纹；\n a={}\n d={}",
+        fingerprints[0], fingerprints[3]
+    );
+    assert_ne!(
+        fingerprints[1], fingerprints[3],
+        "契约 v8：跨桶（600_000 bucket=19 vs 120_000 bucket=16）必须产生不同指纹；\n b={}\n d={}",
+        fingerprints[1], fingerprints[3]
+    );
 }
 
 /// 对抗 2：载荷边界 —— 超大 stdout 的超时命令，错误载荷必须不 panic、不截断成空、JSON 可解析。
@@ -255,9 +273,12 @@ fn test_adversarial_3_concurrent_same_signal_fingerprint_is_deterministic() {
     }
 }
 
-/// 对抗 3（变体面）：并发线程各自使用不同的重试变体（超时值 / 内联 env 前缀 / `set` 前缀），
-/// 但核心命令相同 —— 归一化后的指纹仍必须全局唯一一致。
-/// 红相：当前实现下并发变体产生 4 种不同指纹。
+/// 对抗 3（变体面）：并发线程各自使用不同的重试变体（超时值 / 内联 env 前缀 / `set` 前缀）。
+///
+/// **契约 v8 迁移**：核心命令归一后，指纹按 `timeoutMs` 的 2 的幂桶分组 ——
+/// t0=60_000(bucket15) 与 t2=60_000(bucket15) 必须相同；t1=300_000(bucket18)、t3=90_000(bucket16)
+/// 与前两者跨桶，必须不同。线程内的 50 次采样仍必须完全一致（并发确定性）。
+/// 重试风暴由「同工具连续失败 4 次」粗闸兜底（不看参数）。
 #[test]
 fn test_adversarial_3_concurrent_retry_variants_share_one_fingerprint() {
     use std::sync::Mutex;
@@ -308,12 +329,37 @@ fn test_adversarial_3_concurrent_retry_variants_share_one_fingerprint() {
     let samples = collected.into_inner().expect("collector mutex poisoned");
     assert_eq!(samples.len(), THREADS * ITERATIONS);
 
-    let baseline = samples[0].1.clone();
+    // 线程内 50 次采样必须完全一致（并发确定性；禁止 flaky）。
+    let mut per_thread: Vec<Option<String>> = vec![None; THREADS];
     for (thread_index, fingerprint) in &samples {
-        assert_eq!(
-            *fingerprint, baseline,
-            "对抗 3 变体面失败：线程 {} 的归一化指纹与基线不同，并发重试变体可绕过断路器。\n baseline={}\n variant ={}",
-            thread_index, baseline, fingerprint
-        );
+        match &per_thread[*thread_index] {
+            None => per_thread[*thread_index] = Some(fingerprint.clone()),
+            Some(existing) => assert_eq!(
+                existing, fingerprint,
+                "对抗 3 变体面失败：线程 {} 的并发采样出现非确定性指纹\n first={}\n later={}",
+                thread_index, existing, fingerprint
+            ),
+        }
     }
+    let fingerprints: Vec<String> = per_thread
+        .into_iter()
+        .map(|fingerprint| fingerprint.expect("每个线程都必须至少采样一次"))
+        .collect();
+
+    // 契约 v8：按 timeoutMs 的 2 的幂桶分组（t0=60_000→15、t1=300_000→18、t2=60_000→15、t3=90_000→16）。
+    assert_eq!(
+        fingerprints[0], fingerprints[2],
+        "契约 v8：同桶 + 同核心命令（60_000 vs 60_000，bucket15）必须同指纹 —— env 前缀不得绕过；\n t0={}\n t2={}",
+        fingerprints[0], fingerprints[2]
+    );
+    assert_ne!(
+        fingerprints[0], fingerprints[1],
+        "契约 v8：跨桶（60_000 bucket15 vs 300_000 bucket18）必须不同指纹 —— 延长超时=新策略；\n t0={}\n t1={}",
+        fingerprints[0], fingerprints[1]
+    );
+    assert_ne!(
+        fingerprints[0], fingerprints[3],
+        "契约 v8：跨桶（60_000 bucket15 vs 90_000 bucket16）必须不同指纹；\n t0={}\n t3={}",
+        fingerprints[0], fingerprints[3]
+    );
 }

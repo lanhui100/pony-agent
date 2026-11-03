@@ -310,3 +310,54 @@ fn promoted_run_result_guides_to_job_output() {
         signal.2
     );
 }
+
+// ── 契约 v8：timeoutMs 分桶参与指纹 ─────────────────────────────────────────
+
+/// 契约 v8：同一命令的 `timeoutMs` 按 **2 的幂分桶**参与指纹（bucket = floor(log2(ms))）——
+/// 120_000 与 121_000 同桶（bucket=16）⇒ 指纹相同；300_000（bucket=18）与 600_000（bucket=19）
+/// 跨桶 ⇒ 彼此不同、且都与前两者不同。期望指纹序列 = [A, A, B, C]。
+///
+/// 语义动机：延长超时=新策略（不计入同指纹熔断）；重试风暴由「同工具连续失败 4 次」粗闸兜底。
+#[test]
+fn timeout_ms_bucket_decides_fingerprint_equivalence() {
+    // Arrange
+    const TIMEOUTS: [u64; 4] = [120_000, 121_000, 300_000, 600_000];
+
+    // Act
+    let mut fingerprints: Vec<String> = Vec::new();
+    for timeout_ms in TIMEOUTS {
+        let call = run_call("pnpm test", timeout_ms);
+        let signal = tool_failure_signal(&call, &timeout_error_result(timeout_ms))
+            .unwrap_or_else(|| panic!("契约 v8：timeoutMs={timeout_ms} 必须产生失败信号"));
+        assert_eq!(
+            signal.2, "timeout",
+            "契约 v8：timeoutMs={timeout_ms} 的错误码位必须为 timeout，实际 `{}`",
+            signal.2
+        );
+        fingerprints.push(signal.1);
+    }
+
+    // Assert 1：同桶（120_000 与 121_000，floor(log2)=16）⇒ 指纹相同。
+    assert_eq!(
+        fingerprints[0], fingerprints[1],
+        "契约 v8：同桶（120_000 与 121_000 均 bucket=16）必须产生相同指纹，\
+         否则微小抖动即被当成新策略。a={} a'={}",
+        fingerprints[0], fingerprints[1]
+    );
+    // Assert 2：跨桶 ⇒ 指纹互不相同。
+    assert_ne!(
+        fingerprints[0], fingerprints[2],
+        "契约 v8：跨桶（120_000 bucket=16 vs 300_000 bucket=18）必须产生不同指纹。a={} b={}",
+        fingerprints[0], fingerprints[2]
+    );
+    assert_ne!(
+        fingerprints[0], fingerprints[3],
+        "契约 v8：跨桶（120_000 bucket=16 vs 600_000 bucket=19）必须产生不同指纹。a={} c={}",
+        fingerprints[0], fingerprints[3]
+    );
+    assert_ne!(
+        fingerprints[2], fingerprints[3],
+        "契约 v8：跨桶（300_000 bucket=18 vs 600_000 bucket=19）必须产生不同指纹。b={} c={}",
+        fingerprints[2], fingerprints[3]
+    );
+}

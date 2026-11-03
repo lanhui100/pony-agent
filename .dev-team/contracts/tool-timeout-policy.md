@@ -95,3 +95,14 @@
 
 **已知风险（保留）**：Windows 真机 e2e 未验证 —— 本机为 Linux；Windows 侧仅保证
 `<ws>/.tmp/pony-agent-run-{sid}.cmd` 的生命周期清理（B013）与 Job Object 语义未改，但真机路径未实跑。
+
+## 波次六：CT-P10（timeoutMs 分桶参与指纹，v8）
+
+| ID | 契约 | 验收 |
+| :--- | :--- | :--- |
+| CT-P10 | `normalize_run_timeout_argument_value` 不再整体剔除 `timeoutMs`，改为按 `floor(log2(ms))` 分桶后以 `1u64 << bucket` 写回同名键：同桶 ⇒ 同指纹（120_000/121_000 ⇒ 65_536），跨桶 ⇒ 异指纹（300_000 ⇒ 262_144、600_000 ⇒ 524_288、60_000 ⇒ 32_768）；缺失/非 u64 仍不写该键 | `timeout_ms_bucket_decides_fingerprint_equivalence`：120k/121k/300k/600k ⇒ `[A, A, B, C]` |
+| CT-P10a | 「延长超时=新策略」不放宽防重试风暴：**同工具连续失败 4 次**闸不看参数，仍为兜底 | `wave9_adversarial`（4）+ `harness_optimizations`（12）迁移后全绿 |
+
+> 迁移说明：`wave9_adversarial_test.rs:55/:255`、`harness_optimizations_test.rs:215` 三处原「仅 timeoutMs 不同 ⇒ 指纹相同」断言，按 v8 改为「跨桶不同、同桶相同」，
+> 每处注明契约依据。这是本轮唯一一处**有意反转既有冻结语义**的改动，依据是用户批准的原始设计条目「重试指纹保留 timeoutMs 语义（延长=新策略）」，
+> 且兜底闸不变。
