@@ -684,14 +684,6 @@ fn set_teammate_status(target: &str, status: TeammateStatus) {
     }
 }
 
-/// 读取队友当前状态（无锁嵌套）。
-fn teammate_status(target: &str) -> Option<TeammateStatus> {
-    TEAMMATES
-        .lock()
-        .ok()
-        .and_then(|lock| lock.as_ref().and_then(|map| map.get(target).map(|m| m.status.clone())))
-}
-
 /// 打断正在运行的智能体（保留其信箱队列）
 pub fn interrupt_agent(args: InterruptAgentArgs) -> Result<InterruptAgentResult, String> {
     // Wave-61 C10-A2 回归修正：先读「是否真有驱动在跑」。

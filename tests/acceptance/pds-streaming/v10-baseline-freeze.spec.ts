@@ -93,7 +93,12 @@ const FROZEN_FILES: Array<{ path: string; sha256: string; note: string }> = [
   }
 ];
 
-const VITEST_BIN = resolve(REPO_ROOT, "node_modules/.bin/vitest");
+// wave-61-team CI 修复（2026-11-03）：原实现直接 spawn `node_modules/.bin/vitest`。
+// 在 Windows runner（ci.yml 的 verify job = windows-latest）上该路径是 sh 脚本，
+// spawnSync 立即失败（status=null、error=EACCES/ENOENT），使 V10-2/3/4 在 CI 恒红；
+// 本地（Linux）与 macOS 上游 runner 则表现正常。改为「node 可执行 + vitest.mjs 入口」的
+// 跨平台形态：不依赖 .bin 的 shell/batch 垫片，Windows/macOS/Linux 同一路径。
+const VITEST_ENTRY = resolve(REPO_ROOT, "node_modules/vitest/vitest.mjs");
 
 interface RunReceipt {
   exitCode: number | null;
@@ -104,7 +109,7 @@ interface RunReceipt {
 
 /** 真实子进程执行 vitest（不是读历史收据，也不是「跑过了」的自述）。 */
 function runVitest(args: string[], timeoutMs: number): RunReceipt {
-  const result = spawnSync(VITEST_BIN, args, {
+  const result = spawnSync(process.execPath, [VITEST_ENTRY, ...args], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     timeout: timeoutMs,
@@ -160,7 +165,7 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
     "V10-2: 实跑冻结基线（14 例 + wave-59 23 例）—— exit code 0",
     () => {
       // Arrange
-      expect(existsSync(VITEST_BIN), `V10-2：找不到 vitest 可执行文件：${VITEST_BIN}`).toBe(true);
+      expect(existsSync(VITEST_ENTRY), `V10-2：找不到 vitest 入口：${VITEST_ENTRY}`).toBe(true);
 
       // Act：真实执行
       const receipt = runVitest(
@@ -214,7 +219,7 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
     "V10-3: 实跑既有全量单测（排除本波新增验收目录）—— exit code 0",
     () => {
       // Arrange
-      expect(existsSync(VITEST_BIN), `V10-3：找不到 vitest 可执行文件：${VITEST_BIN}`).toBe(true);
+      expect(existsSync(VITEST_ENTRY), `V10-3：找不到 vitest 入口：${VITEST_ENTRY}`).toBe(true);
 
       // Act
       // 降低子进程自身的并行度：本用例是「全量套件里再跑一遍全量套件」，
@@ -271,7 +276,7 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
     "V10-4: 嵌套守卫自证（PDS_V10_NESTED=1 ⇒ 跳过且不递归）",
     () => {
       // Arrange
-      expect(existsSync(VITEST_BIN), `V10-4：找不到 vitest 可执行文件：${VITEST_BIN}`).toBe(true);
+      expect(existsSync(VITEST_ENTRY), `V10-4：找不到 vitest 入口：${VITEST_ENTRY}`).toBe(true);
 
       // Act：真实 spawn 一次「嵌套运行」（runVitest 会注入 PDS_V10_NESTED=1）
       const receipt = runVitest(
