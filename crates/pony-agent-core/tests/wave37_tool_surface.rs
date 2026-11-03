@@ -12,6 +12,19 @@
 //! （ADR 0045 派生的全局/项目配置分层契约），模型可见工具面由 28 项演进为 29 项，故 C1
 //! 精确清单同步追加 `skill_load`，用例更名为 `t1_model_visible_surface_is_exact_29_tool_list`；
 //! 其余 8 个用例保持原样，未放宽任何断言。
+//!
+//! Wave-61 迁移（Test Agent 执行，契约 `.dev-team/contracts/wave-61-team-activation.md` C4.2）：
+//! - 旧断言：`t1_model_visible_surface_is_exact_29_tool_list`，`names.len() == 29`，`expected`
+//!   为 29 项逐字清单（`ViewImage` 与 `TodoWrite` 相邻）。
+//! - 新断言：`t1_model_visible_surface_is_exact_39_tool_list`，`names.len() == 39`，`expected`
+//!   为契约 C1.2 的 39 项逐字清单（含顺序）：10 项团队工具插入 `ViewImage` 之后、`TodoWrite`
+//!   之前；并新增这 10 项的 kind / exposure / permission scope 表检查。
+//! - 理由与真值源：`tool_exposure_for_name()`（`tools.rs:7341`，原 `:7381` `_ => Internal`）
+//!   ＋ 10 项定义序（`tools.rs:5925`/`:5952`/`:5983`/`:6014`/`:6023`/`:6047`/`:6066`/`:6081`/
+//!   `:6110`/`:6138`，夹在 `view_image`(`:5894`) 与 `todo_write`(`:6147`) 之间）
+//!   ＋ 槽位排序键 `(!visible, product_first_index)`（`tools.rs:555-566`）
+//!   ＋ kind 真值源 `tools.rs:7297-7304`。
+//! - 未放宽任何断言：原 29 项保留其逐字相对顺序（仅插入 10 项）；其余 8 个用例保持原样。
 
 use pony_agent_core::agent::orchestration::{subagent, SubagentArgs, SubagentResult};
 use pony_agent_core::agent::subagent_runtime::{
@@ -74,18 +87,18 @@ fn parse_code(result: &pony_agent_core::agent::tools::ToolResult) -> String {
 }
 
 // ============================================================
-// C1 工具面：模型可见面 29 项精确清单（Wave-42 迁移：28 + skill_load）
+// C1 工具面：模型可见面 39 项精确清单（Wave-61 迁移：29 + 10 项团队工具）
 // ============================================================
 
 #[test]
-fn t1_model_visible_surface_is_exact_29_tool_list() {
+fn t1_model_visible_surface_is_exact_39_tool_list() {
     let views = pony_agent_core::agent::tools::builtin_turn_tool_contract_views();
     let names: Vec<&str> = views.iter().map(|v| v.name.as_str()).collect();
 
     assert_eq!(
         names.len(),
-        29,
-        "W37-C1 × W42/PA-149 模型可见工具面必须为 29 项（28 + skill_load）"
+        39,
+        "W37-C1 × W42/PA-149 × W61-C1 模型可见工具面必须为 39 项（29 + 10 项团队工具）"
     );
 
     let expected = vec![
@@ -105,6 +118,18 @@ fn t1_model_visible_surface_is_exact_29_tool_list() {
         "BatchExecute",
         "Plan",
         "ViewImage",
+        // W61-C1 新增 10 项团队工具，按 builtin_tools 定义序（tools.rs:5925-6138）
+        // 插在 view_image(:5894) 与 todo_write(:6147) 之间（契约 C1.2，非猜测位置）。
+        "subagent",
+        "workflow",
+        "spawn_teammate",
+        "list_agents",
+        "send_message",
+        "interrupt_agent",
+        "drain_inbox",
+        "team_task_create",
+        "team_task_update",
+        "team_task_list",
         "TodoWrite",
         "TodoList",
         "create_goal",
@@ -122,7 +147,7 @@ fn t1_model_visible_surface_is_exact_29_tool_list() {
         //（与 `builtin_turn_tool_contract_views()` 实测输出一致，非猜测位置）。
         "skill_load",
     ];
-    assert_eq!(names, expected, "W37-C1 × W42 29 项精确清单（含顺序）");
+    assert_eq!(names, expected, "W37-C1 × W42 × W61 39 项精确清单（含顺序）");
 
     // C1.1 表：kind / exposure / priority / permission facts
     // （ToolKind::as_str 为 snake_case：read/search/execute）
@@ -148,6 +173,44 @@ fn t1_model_visible_surface_is_exact_29_tool_list() {
         let scope = view.permission_facts.permission_scope.as_deref().unwrap_or("");
         let expected_scope = if name.starts_with("Job") { "workspace.execute" } else { "workspace.read" };
         assert_eq!(scope, expected_scope, "{name} permission scope");
+    }
+
+    // W61-C1 表（契约 C4.2）：10 项团队工具的 kind / exposure / permission scope。
+    // kind 真值源 tools.rs:7297-7304；exposure 真值源 tools.rs:7341；权限 facts 真值源
+    // tools.rs:7418-7460（10 项均 permission_scope=None、requires_approval=false，本波不得改动）。
+    let team_tool_kinds: [(&str, &str); 10] = [
+        ("subagent", "composite"),
+        ("workflow", "composite"),
+        ("spawn_teammate", "interactive"),
+        ("list_agents", "interactive"),
+        ("send_message", "interactive"),
+        ("interrupt_agent", "interactive"),
+        ("drain_inbox", "interactive"),
+        ("team_task_create", "write"),
+        ("team_task_update", "write"),
+        ("team_task_list", "read"),
+    ];
+    for (name, expected_kind) in team_tool_kinds {
+        let view = views.iter().find(|v| v.name == name).unwrap_or_else(|| {
+            panic!("W61-C1: {name} 未出现在模型可见工具面（红相：exposure 未改为 ModelVisible）")
+        });
+        assert_eq!(view.kind, expected_kind, "{name} kind");
+        assert_eq!(view.exposure, "model_visible", "{name} exposure");
+        assert_eq!(
+            view.permission_facts.permission_scope, None,
+            "{name} 权限 facts 的 permission_scope 必须保持 None（契约 C1.3 不得改动）"
+        );
+        assert_eq!(
+            view.permission_facts.requires_approval,
+            Some(false),
+            "{name} requires_approval 必须保持 false（契约 C1.3 不得改动）"
+        );
+        // 产品名 == primitive 名（小写原形，契约 C1.1：不得新增 CamelCase 别名）。
+        assert_eq!(
+            view.execution_primitive, name,
+            "{name} execution_primitive 必须为自身 primitive 名"
+        );
+        assert_eq!(view.name, name, "{name} product 名必须原样透传小写原名");
     }
 }
 

@@ -8,12 +8,24 @@
 //! 「完成」回执，实际什么都没发生。
 //!
 //! W25 契约（`docs/audit/agent-core-improvement-plan.md` §W25）：
-//! - T1：模型可见工具面**双向**锁定——名字集合精确等于 21 个真实工具（既防假能力回流，
+//! - T1：模型可见工具面**双向**锁定——名字集合精确等于冻结清单（既防未登记能力回流，
 //!   也防真实工具被误摘）；
 //! - T2：直接经 `ToolRouter` 调用必须返回 `status != "ok"` 且错误码
 //!   `capability_unavailable`，message 非空且含可行动指引（指向 improvement-plan / W29）；
 //! - T3：回归保护——真实工具 `TodoWrite` / `TodoList` 仍在模型可见面且可执行；
-//! - T4：这 10 个 descriptor 的 `exposure` 不再是 `ModelVisible`（允许 Internal/Deferred）。
+//! - T4：这 10 个 descriptor 的 `exposure` 必须为 `ModelVisible`（见下方 wave-61 迁移）。
+//!
+//! ## wave-61 迁移说明（Test Agent 执行，契约 `.dev-team/contracts/wave-61-team-activation.md` C4.3）
+//!
+//! | 项 | 旧断言（W25 ~ W42） | 新断言（wave-61） | 理由 / 真值源 |
+//! |---|---|---|---|
+//! | 常量名 | `FAKE_CAPABILITY_TOOLS` | `TEAM_TOOLS`（内容与 10 项顺序不变） | 这 10 项不再是"假能力桩"，而是 wave-61 C1 落地的团队工具；名称随语义修正 |
+//! | `EXPECTED_MODEL_VISIBLE_TOOLS` | 29 项 | 39 项（契约 C1.2 逐字一致，团队工具插在 `ViewImage` 之后） | C1-A1 |
+//! | T1（`t1_fake_capability_tools_are_absent_from_model_visible_surface`） | 10 项"逐个不得出现" | 更名 `t1_team_tools_are_present_in_model_visible_surface`，10 项"逐个**必须**出现"；双向集合相等断言保留（现为 39 项） | C4.3：方向反转，强度不变 |
+//! | T4（`t4_fake_capability_descriptors_are_not_model_visible`） | `exposure != ModelVisible` 即违规（允许 Internal/Deferred） | 更名 `t4_team_tool_descriptors_are_model_visible`，`exposure == ModelVisible` 才合法（方向反转，强度不变） | C4.3 + `tools.rs:7341` |
+//! | T2（`t2_fake_capability_tools_return_capability_unavailable_error`，`:210` 起） | 未接线 fail-closed | **保持不变**（本契约 C2.3 的锚点用例；该文件不构建 runtime，进程内槽为空，语义仍成立） | C2.3 / C4.3 |
+//!
+//! 未放宽任何断言：T1/T4 均为方向反转（not → is）；T2/T3 一字未改。
 //!
 //! 公开 API 说明（集成测试只能使用 crate 公开 API）：
 //! `provider::anthropic_tools_payload` 是私有函数，无法直接调用。它的模型可见面来源是
@@ -27,8 +39,9 @@ use pony_agent_core::agent::tools::{
 };
 use serde_json::{json, Value};
 
-/// 10 个「假能力」工具名（审计 G-02 / W25 契约冻结名单）。
-const FAKE_CAPABILITY_TOOLS: [&str; 10] = [
+/// 10 个团队工具名（wave-61 C1.1 冻结名单；原名 `FAKE_CAPABILITY_TOOLS`，
+/// 迁移到 C4.3 后语义为"必须模型可见的团队工具"，内容与顺序不变）。
+const TEAM_TOOLS: [&str; 10] = [
     "subagent",
     "workflow",
     "spawn_teammate",
@@ -41,15 +54,17 @@ const FAKE_CAPABILITY_TOOLS: [&str; 10] = [
     "team_task_list",
 ];
 
-/// 生产工具面投影 `builtin_turn_tool_contract_views()` 的 29 个真实工具名
+/// 生产工具面投影 `builtin_turn_tool_contract_views()` 的 39 个真实工具名
 /// （== `builtin_tool_surface().provider_contract_views()` == Anthropic/OpenAI tools payload 数据源）。
 ///
 /// 演进历史：
-/// - W25 基线：21 项（彻底移除了 10 个假能力工具）。
+/// - W25 基线：21 项（移除了 10 个假能力工具）；
 /// - W37-C1 新增 7 项已真实实现的工具（Present, Find, GitDiff, JobStart, JobOutput, JobKill, JobList）；
-/// - W42/PA-149 新增 1 项真实实现的工具（skill_load 按需加载技能正文）。
-/// 总计 29 项真实生产工具，10 个假能力工具绝不回流。
-const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 29] = [
+/// - W42/PA-149 新增 1 项真实实现的工具（skill_load 按需加载技能正文）；
+/// - W61-C1 重新纳入 10 项团队工具（subagent/workflow/spawn_teammate/list_agents/send_message/
+///   interrupt_agent/drain_inbox/team_task_create/team_task_update/team_task_list），
+///   插在 `ViewImage` 之后、`TodoWrite` 之前（契约 C1.2）。总计 39 项。
+const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 39] = [
     "Run",
     "Ask",
     "Read",
@@ -66,6 +81,16 @@ const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 29] = [
     "BatchExecute",
     "Plan",
     "ViewImage",
+    "subagent",
+    "workflow",
+    "spawn_teammate",
+    "list_agents",
+    "send_message",
+    "interrupt_agent",
+    "drain_inbox",
+    "team_task_create",
+    "team_task_update",
+    "team_task_list",
     "TodoWrite",
     "TodoList",
     "create_goal",
@@ -118,27 +143,27 @@ fn has_actionable_guidance(message: &str, hint: &str) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T1：模型可见工具面不得出现这 10 个假能力工具名
+// T1：模型可见工具面必须包含这 10 个团队工具名（wave-61 迁移：方向反转）
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
-fn t1_fake_capability_tools_are_absent_from_model_visible_surface() {
-    // Arrange：原始内置目录（内部注册，仍保留给 W29 接管）+ 模型可见投影
+fn t1_team_tools_are_present_in_model_visible_surface() {
+    // Arrange：原始内置目录（仍须保留 10 项 handler）+ 模型可见投影
     let raw_catalog: Vec<&str> = builtin_tools().iter().map(|tool| tool.name).collect();
     let visible = model_visible_tool_names();
 
     println!("[W25][T1] model_visible_tools = {visible:?}");
 
-    // Arrange 断言：这 10 个工具必须仍作为内部注册存在（否则「摘除可见面」是假象，
-    // 且 W29 无法接管真实实现；见 improvement-plan §W25「保留 handler 供 W29 接管」）。
-    let unregistered: Vec<&str> = FAKE_CAPABILITY_TOOLS
+    // Arrange 断言：这 10 个工具必须仍作为内置注册存在（否则可见面无从谈起，
+    // 且 handler 会被摘除；见 improvement-plan §W25「保留 handler 供 W29 接管」）。
+    let unregistered: Vec<&str> = TEAM_TOOLS
         .iter()
         .copied()
         .filter(|name| !raw_catalog.contains(name))
         .collect();
     assert!(
         unregistered.is_empty(),
-        "T1 Arrange 失败：以下假能力工具已从 builtin_tools() 内部目录消失，W29 将无 handler 可接管。\
-         期望：10 个名字全部保留在内部目录；实际缺失：{unregistered:?}；当前内部目录共 {} 项",
+        "T1 Arrange 失败：以下团队工具已从 builtin_tools() 内置目录消失。\
+         期望：10 个名字全部保留在内置目录；实际缺失：{unregistered:?}；当前内置目录共 {} 项",
         raw_catalog.len()
     );
 
@@ -148,31 +173,31 @@ fn t1_fake_capability_tools_are_absent_from_model_visible_surface() {
     let expected: std::collections::BTreeSet<&str> =
         EXPECTED_MODEL_VISIBLE_TOOLS.iter().copied().collect();
 
-    // Assert 1（双向）：不得多（假能力回流），也不得少（真实工具被误摘）
+    // Assert 1（双向）：不得多（未登记工具回流），也不得少（真实工具/团队工具被误摘）
     let leaked: Vec<&&str> = actual.difference(&expected).collect();
     let missing: Vec<&&str> = expected.difference(&actual).collect();
     assert!(
         leaked.is_empty() && missing.is_empty(),
-        "T1 失败：模型可见工具面与冻结的 21 名清单不一致。\n\
+        "T1 失败：模型可见工具面与冻结的 39 名清单（含 wave-61 C1.2 的 10 项团队工具）不一致。\n\
          期望（{} 项）：{expected:?}\n\
          实际（{} 项）：{actual:?}\n\
-         多出的（假能力回流 / 未登记工具）：{leaked:?}\n\
-         缺失的（真实工具被误摘）：{missing:?}",
+         多出的（未登记工具回流）：{leaked:?}\n\
+         缺失的（真实工具/团队工具被误摘）：{missing:?}",
         expected.len(),
         actual.len()
     );
 
-    // Assert 2（显式二次确认）：10 个假能力名字逐个不得出现，失败信息直指审计 G-02 名单
-    let fake_leaks: Vec<&str> = FAKE_CAPABILITY_TOOLS
+    // Assert 2（显式二次确认，wave-61 方向反转）：10 个团队工具名字逐个**必须**出现
+    let team_missing: Vec<&str> = TEAM_TOOLS
         .iter()
         .copied()
-        .filter(|name| actual.contains(name))
+        .filter(|name| !actual.contains(name))
         .collect();
     assert!(
-        fake_leaks.is_empty(),
-        "T1 失败：模型可见工具面仍包含假能力工具。\
-         期望：{FAKE_CAPABILITY_TOOLS:?} 全部不出现在模型可见面；\
-         实际泄漏：{fake_leaks:?}；实际模型可见面（{} 项）：{actual:?}",
+        team_missing.is_empty(),
+        "T1 失败：模型可见工具面缺失团队工具。\
+         期望：{TEAM_TOOLS:?} 全部出现在模型可见面（wave-61 C1.1）；\
+         实际缺失：{team_missing:?}；实际模型可见面（{} 项）：{actual:?}",
         actual.len()
     );
 
@@ -394,29 +419,34 @@ fn t3_real_todo_tools_remain_model_visible_and_executable() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T4：这 10 个工具的 descriptor exposure 不得再是 ModelVisible
+// T4：这 10 个工具的 descriptor exposure 必须是 ModelVisible（wave-61 迁移：方向反转）
+//
+// 契约 C4.3：旧断言「exposure != ModelVisible 即违规（允许 Internal/Deferred）」→
+// 新断言「exposure == ModelVisible 才合法」。强度不变（逐名逐 descriptor 校验），
+// 且「调用时 fail-closed」不由此用例放宽：它由 C2.3 锚点用例 T2（`:210` 起，未接线进程内
+// 经 ToolRouter 调用必须返回 capability_unavailable）与 C5-A2 覆盖，T2 一字未改。
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
-fn t4_fake_capability_descriptors_are_not_model_visible() {
+fn t4_team_tool_descriptors_are_model_visible() {
     // Arrange
     let registry =
         ToolRegistrySnapshot::builtin().expect("builtin registry snapshot 必须可构建");
 
-    // Act + Assert：descriptor 必须存在（保留给 W29），且 exposure != ModelVisible
+    // Act + Assert：descriptor 必须存在，且 exposure == ModelVisible（wave-61 C1.1）
     let mut violations: Vec<String> = Vec::new();
 
-    for name in FAKE_CAPABILITY_TOOLS {
+    for name in TEAM_TOOLS {
         match registry.resolve(name) {
             None => violations.push(format!(
-                "`{name}`: descriptor 缺失（期望存在且 exposure 为 Internal/Deferred，\
-                 以便 W29 接管真实实现）"
+                "`{name}`: descriptor 缺失（期望存在且 exposure == ModelVisible，\
+                 wave-61 C1.1 / tools.rs:7341）"
             )),
             Some(descriptor) => {
-                if descriptor.exposure == ToolExposure::ModelVisible {
+                if descriptor.exposure != ToolExposure::ModelVisible {
                     violations.push(format!(
-                        "`{name}`: descriptor exposure=ModelVisible（期望 Internal 或 Deferred），\
-                         descriptor_id=`{}`",
-                        descriptor.identity.descriptor_id
+                        "`{name}`: descriptor exposure={:?}（期望 ModelVisible；\
+                         原 `_ => Internal` 兜底须被 C1 覆盖），descriptor_id=`{}`",
+                        descriptor.exposure, descriptor.identity.descriptor_id
                     ));
                 }
             }
@@ -425,8 +455,8 @@ fn t4_fake_capability_descriptors_are_not_model_visible() {
 
     assert!(
         violations.is_empty(),
-        "T4 失败：{} 个假能力工具 descriptor 仍被标记为模型可见。\
-         期望：exposure ∈ {{Internal, Deferred}}。\n实际违规：\n- {}",
+        "T4 失败：{} 个团队工具 descriptor 未被标记为模型可见。\
+         期望：exposure == ModelVisible。\n实际违规：\n- {}",
         violations.len(),
         violations.join("\n- ")
     );

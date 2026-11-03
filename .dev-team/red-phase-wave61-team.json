@@ -1,0 +1,486 @@
+{
+  "wave": "wave-61-team-activation",
+  "phase": "red",
+  "agent": "test-agent",
+  "role": "independent-test-agent",
+  "contract": ".dev-team/contracts/wave-61-team-activation.md",
+  "generated_at": "2026-11-03T09:53:16+08:00",
+  "workspace": "/home/dm/pony-agent",
+  "grading": {
+    "tier": "L3",
+    "rationale": "跨模块集成（tools/context/runtime/subagent_runtime）+ 进程级 OnceLock 单例 + 源码级同源证据"
+  },
+  "red_phase_requirement": "新测试必须在当前实现下真实失败；失败原因必须是团队工具缺失 / 未接线 / 策略段缺失，不得因编译错误或测试自身缺陷而红",
+  "red_phase_satisfied": true,
+  "new_test_file": "crates/pony-agent-core/tests/wave61_team_activation.rs",
+  "new_case_count": 7,
+  "process_isolation": {
+    "reason": "subagent_runtime::SUBAGENT_ENGINE 是进程级 OnceLock（subagent_runtime.rs:37-45），首写者胜且不可复位；同进程内 wired/unwired 用例会互相污染",
+    "mechanism": "父用例 c3_* 用 std::process::Command 递归调用本测试二进制 --exact probe_child_env，以 PONY_TEAM_POLICY_PROBE=wired|unwired 分派；父进程断言子进程 exit code 与 stdout 标记 TEAM_POLICY=present|absent，真实断言在子进程内执行",
+    "skipped_or_ignored_cases": 0
+  },
+  "migrations": [
+    {
+      "file": "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs",
+      "change": "10 条 assert!(!names.contains(...)) → assert!(names.contains(...))（用例更名 t1_team_tools_are_model_visible）；新增反向断言『registry 中非 ModelVisible 的内置工具（tool_search 白名单例外）不得出现在可见面』",
+      "contract": "C4.1"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave37_tool_surface.rs",
+      "change": "t1 更名 t1_model_visible_surface_is_exact_39_tool_list；29 项精确清单（含顺序）→ 39 项（团队工具插在 ViewImage 之后、TodoWrite 之前）；新增 10 项 kind/exposure/permission scope 表检查；文件头追加 wave-61 迁移说明",
+      "contract": "C4.2"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs",
+      "change": "FAKE_CAPABILITY_TOOLS → TEAM_TOOLS；EXPECTED_MODEL_VISIBLE_TOOLS 29 → 39；T1 更名且『逐个不得出现』反转为『逐个必须出现』；T4 更名 t4_team_tool_descriptors_are_model_visible 且 exposure != ModelVisible → == ModelVisible；T2（:210 未接线 fail-closed 锚点）一字未改",
+      "contract": "C4.3"
+    }
+  ],
+  "deviations": [
+    {
+      "item": "c1_product_names_do_not_fall_back_to_run",
+      "status": "resolved_by_lead_adjudication",
+      "original_concern": "曾据契约 C1.1 认为禁止为这 10 项新增 model_visible_tool_name_opt() 映射分支，故只断言 product_visible_tool_name",
+      "lead_adjudication": "C1.6 优先于对 C1.1 的该解读：C1.1 只禁 CamelCase 别名（builtin_aliases_for_primitive 保持 vec![同名]），允许并要求小写原名透传映射；C1.6（契约 v1.1，第 146 行起）明确要求 10 项登记小写透传，否则 telemetry.rs:306/332/508/576 会把团队工具记成 Run，污染 trace 取证面",
+      "current_assertions": [
+        "model_visible_tool_name(name) == name（逐 10 项，C1-A6；当前红）",
+        "product_visible_tool_name(name) == name（逐 10 项，C1-A7；当前绿保留）",
+        "39 项清单中 Run 槽位唯一（防产品名塌缩）"
+      ],
+      "current_state": "该用例当前为红（红相成立，失败原因为团队工具未登记小写透传）"
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "new-red-suite",
+      "command": "cargo test -p pony-agent-core --test wave61_team_activation",
+      "exit_code": 101,
+      "log_path": "/tmp/w61-red-new.log",
+      "compile_succeeded": true,
+      "summary": {
+        "passed": 3,
+        "failed": 4,
+        "ignored": 0
+      },
+      "sections": [
+        {
+          "target": "tests/wave61_team_activation.rs",
+          "summary": {
+            "passed": 3,
+            "failed": 4,
+            "ignored": 0
+          },
+          "cases": [
+            {
+              "name": "probe_child_env",
+              "status": "ok"
+            },
+            {
+              "name": "c1_team_tools_are_model_visible",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:141:5",
+                "panicking_thread": "c1_team_tools_are_model_visible",
+                "first_reason_line": "assertion `left == right` failed: C1-A1 失败：模型可见工具面必须为 39 项（29 既有 + 10 团队）。实际 29 项：[\"Run\", \"Ask\", \"Read\", \"ReadDocument\", \"List\", \"Search\", \"Glob\", \"WebFetch\", \"WebSearch\", \"MCPResource\", \"ToolSearch\", \"Write\", \"Edit\", \"BatchExecute\", \"Plan\", \"ViewImage\", \"TodoWrite\", \"TodoList\", \"create_goal\", \"get_goal\", \"update_goal\", \"Present\", \"Find\", \"GitDiff\", \"JobStart\", \"JobOutput\", \"JobKill\", \"JobList\", \"skill_load\"]"
+              }
+            },
+            {
+              "name": "c3_team_policy_absent_when_unwired",
+              "status": "ok"
+            },
+            {
+              "name": "c1_product_names_do_not_fall_back_to_run",
+              "status": "ok"
+            },
+            {
+              "name": "c3_team_policy_system_message_present_when_wired",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:366:5",
+                "panicking_thread": "c3_team_policy_system_message_present_when_wired",
+                "first_reason_line": "C3-A1 失败（红相）：已接线路径未注入团队策略段。子进程 Exit=Some(101)"
+              }
+            },
+            {
+              "name": "c5_same_gate_source",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:431:5",
+                "panicking_thread": "c5_same_gate_source",
+                "first_reason_line": "C5-A1/A3 失败：src 下不存在团队策略段锚串 `Agent Teams is available in this session`（C3 未落地）"
+              }
+            },
+            {
+              "name": "c2_builder_registers_subagent_engine",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:246:5",
+                "panicking_thread": "c2_builder_registers_subagent_engine",
+                "first_reason_line": "C2-A3/A4 失败：`AgentRuntimeBuilder::build()`（runtime/builder.rs:79）未注册 HostTurnEngine，故构建后 `subagent_runtime_wired()` 仍为 false —— 生产路径上 10 项团队工具会全部 fail-closed（tools.rs:1571-1573 等 10 处 capability_unavailable）"
+              }
+            }
+          ]
+        }
+      ],
+      "note": "红相门禁：4 条用例真实失败；失败原因均为『团队工具缺失 / 未接线 / 策略段缺失』，非编译错误",
+      "superseded_by": "new-red-suite-c1a6",
+      "superseded_reason": "Lead 裁决 C1.6 优先：c1_product_names_do_not_fall_back_to_run 增加 C1-A6 断言并重排注释，行号已变；以 new-red-suite-c1a6 为准"
+    },
+    {
+      "run_id": "migrated-wave20",
+      "command": "cargo test -p pony-agent-core --test tool_surface_wave20_contract",
+      "exit_code": 101,
+      "log_path": "/tmp/w61-red-w20.log",
+      "compile_succeeded": true,
+      "summary": {
+        "passed": 1,
+        "failed": 1,
+        "ignored": 0
+      },
+      "sections": [
+        {
+          "target": "tests/tool_surface_wave20_contract.rs",
+          "summary": {
+            "passed": 1,
+            "failed": 1,
+            "ignored": 0
+          },
+          "cases": [
+            {
+              "name": "test_goal_tools_are_canonical_and_model_visible",
+              "status": "ok"
+            },
+            {
+              "name": "t1_team_tools_are_model_visible",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs:25:5",
+                "panicking_thread": "t1_team_tools_are_model_visible",
+                "first_reason_line": "subagent must be exposed to models (wave-61 C1)"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "migrated-wave37",
+      "command": "cargo test -p pony-agent-core --test wave37_tool_surface",
+      "exit_code": 101,
+      "log_path": "/tmp/w61-red-w37.log",
+      "compile_succeeded": true,
+      "summary": {
+        "passed": 8,
+        "failed": 1,
+        "ignored": 0
+      },
+      "sections": [
+        {
+          "target": "tests/wave37_tool_surface.rs",
+          "summary": {
+            "passed": 8,
+            "failed": 1,
+            "ignored": 0
+          },
+          "cases": [
+            {
+              "name": "t2b_write_file_with_env_allowance_overwrites",
+              "status": "ok"
+            },
+            {
+              "name": "t3_0_subagent_without_engine_returns_capability_unavailable",
+              "status": "ok"
+            },
+            {
+              "name": "t2_write_file_on_existing_file_without_expected_hash_fails_closed",
+              "status": "ok"
+            },
+            {
+              "name": "t3_i_failing_stub_returns_structured_error",
+              "status": "ok"
+            },
+            {
+              "name": "t3_h_subagent_with_stub_engine_returns_real_output",
+              "status": "ok"
+            },
+            {
+              "name": "t3_j_concurrency_over_limit_returns_busy",
+              "status": "ok"
+            },
+            {
+              "name": "t3_k_oversized_prompt_rejected",
+              "status": "ok"
+            },
+            {
+              "name": "t3_l_timeout_returns_timeout_error",
+              "status": "ok"
+            },
+            {
+              "name": "t1_model_visible_surface_is_exact_39_tool_list",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave37_tool_surface.rs:98:5",
+                "panicking_thread": "t1_model_visible_surface_is_exact_39_tool_list",
+                "first_reason_line": "assertion `left == right` failed: W37-C1 × W42/PA-149 × W61-C1 模型可见工具面必须为 39 项（29 + 10 项团队工具）"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "migrated-wave25",
+      "command": "cargo test -p pony-agent-core --test wave25_capability_honesty_test",
+      "exit_code": 101,
+      "log_path": "/tmp/w61-red-w25.log",
+      "compile_succeeded": true,
+      "summary": {
+        "passed": 2,
+        "failed": 2,
+        "ignored": 0
+      },
+      "sections": [
+        {
+          "target": "tests/wave25_capability_honesty_test.rs",
+          "summary": {
+            "passed": 2,
+            "failed": 2,
+            "ignored": 0
+          },
+          "cases": [
+            {
+              "name": "t2_fake_capability_tools_return_capability_unavailable_error",
+              "status": "ok"
+            },
+            {
+              "name": "t4_team_tool_descriptors_are_model_visible",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs:456:5",
+                "panicking_thread": "t4_team_tool_descriptors_are_model_visible",
+                "first_reason_line": "T4 失败：10 个团队工具 descriptor 未被标记为模型可见。期望：exposure == ModelVisible。"
+              }
+            },
+            {
+              "name": "t3_real_todo_tools_remain_model_visible_and_executable",
+              "status": "ok"
+            },
+            {
+              "name": "t1_team_tools_are_present_in_model_visible_surface",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs:179:5",
+                "panicking_thread": "t1_team_tools_are_present_in_model_visible_surface",
+                "first_reason_line": "T1 失败：模型可见工具面与冻结的 39 名清单（含 wave-61 C1.2 的 10 项团队工具）不一致。"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "migrated-combined",
+      "command": "cargo test -p pony-agent-core --no-fail-fast --test tool_surface_wave20_contract --test wave37_tool_surface --test wave25_capability_honesty_test",
+      "exit_code": 101,
+      "log_path": "/tmp/w61-migrated.log",
+      "compile_succeeded": true,
+      "summary": {
+        "passed": 11,
+        "failed": 4,
+        "ignored": 0
+      },
+      "sections": [
+        {
+          "target": "tests/tool_surface_wave20_contract.rs",
+          "summary": {
+            "passed": 1,
+            "failed": 1,
+            "ignored": 0
+          },
+          "cases": [
+            {
+              "name": "t1_team_tools_are_model_visible",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs:25:5",
+                "panicking_thread": "t1_team_tools_are_model_visible",
+                "first_reason_line": "subagent must be exposed to models (wave-61 C1)"
+              }
+            },
+            {
+              "name": "test_goal_tools_are_canonical_and_model_visible",
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "target": "tests/wave25_capability_honesty_test.rs",
+          "summary": {
+            "passed": 2,
+            "failed": 2,
+            "ignored": 0
+          },
+          "cases": [
+            {
+              "name": "t2_fake_capability_tools_return_capability_unavailable_error",
+              "status": "ok"
+            },
+            {
+              "name": "t4_team_tool_descriptors_are_model_visible",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs:456:5",
+                "panicking_thread": "t4_team_tool_descriptors_are_model_visible",
+                "first_reason_line": "T4 失败：10 个团队工具 descriptor 未被标记为模型可见。期望：exposure == ModelVisible。"
+              }
+            },
+            {
+              "name": "t1_team_tools_are_present_in_model_visible_surface",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs:179:5",
+                "panicking_thread": "t1_team_tools_are_present_in_model_visible_surface",
+                "first_reason_line": "T1 失败：模型可见工具面与冻结的 39 名清单（含 wave-61 C1.2 的 10 项团队工具）不一致。"
+              }
+            },
+            {
+              "name": "t3_real_todo_tools_remain_model_visible_and_executable",
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "target": "tests/wave37_tool_surface.rs",
+          "summary": {
+            "passed": 8,
+            "failed": 1,
+            "ignored": 0
+          },
+          "cases": [
+            {
+              "name": "t2_write_file_on_existing_file_without_expected_hash_fails_closed",
+              "status": "ok"
+            },
+            {
+              "name": "t3_0_subagent_without_engine_returns_capability_unavailable",
+              "status": "ok"
+            },
+            {
+              "name": "t1_model_visible_surface_is_exact_39_tool_list",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave37_tool_surface.rs:98:5",
+                "panicking_thread": "t1_model_visible_surface_is_exact_39_tool_list",
+                "first_reason_line": "assertion `left == right` failed: W37-C1 × W42/PA-149 × W61-C1 模型可见工具面必须为 39 项（29 + 10 项团队工具）"
+              }
+            },
+            {
+              "name": "t2b_write_file_with_env_allowance_overwrites",
+              "status": "ok"
+            },
+            {
+              "name": "t3_i_failing_stub_returns_structured_error",
+              "status": "ok"
+            },
+            {
+              "name": "t3_h_subagent_with_stub_engine_returns_real_output",
+              "status": "ok"
+            },
+            {
+              "name": "t3_j_concurrency_over_limit_returns_busy",
+              "status": "ok"
+            },
+            {
+              "name": "t3_l_timeout_returns_timeout_error",
+              "status": "ok"
+            },
+            {
+              "name": "t3_k_oversized_prompt_rejected",
+              "status": "ok"
+            }
+          ]
+        }
+      ],
+      "note": "三文件合并跑（--no-fail-fast）：未迁移用例全绿，仅方向反转/清单扩展的 4 条用例按预期红"
+    },
+    {
+      "run_id": "new-red-suite-c1a6",
+      "command": "cargo test -p pony-agent-core --test wave61_team_activation",
+      "exit_code": 101,
+      "log_path": "/tmp/w61-red-new.log",
+      "compile_succeeded": true,
+      "summary": {
+        "passed": 2,
+        "failed": 5,
+        "ignored": 0
+      },
+      "note": "Lead 裁决 C1.6 优先后重跑：c1_product_names_do_not_fall_back_to_run 由绿转红（model_visible_tool_name 回落 Run），5 失败 / 2 通过",
+      "supersedes": "new-red-suite",
+      "sections": [
+        {
+          "target": "tests/wave61_team_activation.rs",
+          "summary": {
+            "passed": 2,
+            "failed": 5,
+            "ignored": 0
+          },
+          "cases": [
+            {
+              "name": "probe_child_env",
+              "status": "ok"
+            },
+            {
+              "name": "c1_product_names_do_not_fall_back_to_run",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:206:5",
+                "panicking_thread": "c1_product_names_do_not_fall_back_to_run",
+                "first_reason_line": "C1-A6 失败：`model_visible_tool_name()`（tools.rs:7257-7261）对未登记的团队工具回落 `unwrap_or(\"Run\")`。契约 C1.6 要求 `model_visible_tool_name_opt()`（:7216-7252）为这 10 项登记小写原名透传（与 `TOOL_SKILL_LOAD => TOOL_SKILL_LOAD` 同构），否则 telemetry.rs:306/332/508/576 会把团队工具记成 `Run`。实际违规：[\"`subagent` → telemetry/trace 名 `Run`（期望小写原名，禁止回落 `Run`）\", \"`workflow` → telemetry/trace 名 `Run`（期望小写原名，禁止回落 `Run`）\", \"`spawn_teammate` → telemetry/trace 名 `Run`（期望小写原名，禁止回落 `Run`）\", \"`list_agents` → telemetry/trace 名 `Run`（期望小写原名，禁止回落 `Run`）\", \"`"
+              }
+            },
+            {
+              "name": "c1_team_tools_are_model_visible",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:144:5",
+                "panicking_thread": "c1_team_tools_are_model_visible",
+                "first_reason_line": "assertion `left == right` failed: C1-A1 失败：模型可见工具面必须为 39 项（29 既有 + 10 团队）。实际 29 项：[\"Run\", \"Ask\", \"Read\", \"ReadDocument\", \"List\", \"Search\", \"Glob\", \"WebFetch\", \"WebSearch\", \"MCPResource\", \"ToolSearch\", \"Write\", \"Edit\", \"BatchExecute\", \"Plan\", \"ViewImage\", \"TodoWrite\", \"TodoList\", \"create_goal\", \"get_goal\", \"update_goal\", \"Present\", \"Find\", \"GitDiff\", \"JobStart\", \"JobOutput\", \"JobKill\", \"JobList\", \"skill_load\"]"
+              }
+            },
+            {
+              "name": "c3_team_policy_absent_when_unwired",
+              "status": "ok"
+            },
+            {
+              "name": "c3_team_policy_system_message_present_when_wired",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:389:5",
+                "panicking_thread": "c3_team_policy_system_message_present_when_wired",
+                "first_reason_line": "C3-A1 失败（红相）：已接线路径未注入团队策略段。子进程 Exit=Some(101)"
+              }
+            },
+            {
+              "name": "c5_same_gate_source",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:454:5",
+                "panicking_thread": "c5_same_gate_source",
+                "first_reason_line": "C5-A1/A3 失败：src 下不存在团队策略段锚串 `Agent Teams is available in this session`（C3 未落地）"
+              }
+            },
+            {
+              "name": "c2_builder_registers_subagent_engine",
+              "status": "FAILED",
+              "red_failure": {
+                "assertion_site": "crates/pony-agent-core/tests/wave61_team_activation.rs:269:5",
+                "panicking_thread": "c2_builder_registers_subagent_engine",
+                "first_reason_line": "C2-A3/A4 失败：`AgentRuntimeBuilder::build()`（runtime/builder.rs:79）未注册 HostTurnEngine，故构建后 `subagent_runtime_wired()` 仍为 false —— 生产路径上 10 项团队工具会全部 fail-closed（tools.rs:1571-1573 等 10 处 capability_unavailable）"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
