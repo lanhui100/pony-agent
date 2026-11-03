@@ -23,7 +23,7 @@ const props = defineProps<{
   modelCallCount: number;
   toolCallCount: number;
   copied: boolean;
-  /** wave-54 C4：上下文占用（末次调用 contextInputTokens，回退 S1）；无数据为 null ⇒ 显示 `—`。 */
+  /** wave-54 C4：上下文占用（末次调用 contextInputTokens，回退 S1）；无数据/零值 ⇒ 该位点整个不渲染（wave-61 §2 E-2/E-5）。 */
   inputTokensTotal: number | null;
   outputTokensTotal: number | null;
   cacheHitTokensTotal: number | null;
