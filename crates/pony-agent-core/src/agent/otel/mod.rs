@@ -680,8 +680,14 @@ fn normalize_service_version(value: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// 进程内已解析的 `service.version`（init 时写入，供 span 级 `langfuse.release` 复用）。
-static RESOLVED_SERVICE_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// 进程内已解析的 `service.version`（**每次 init 覆盖写入**，供 span 级 `langfuse.release` 复用）。
+///
+/// wave-61-team CI 修复（2026-11-03）：原为 `OnceLock<String>`（首写者胜），而 PA-153-T2 的
+/// 「先覆盖、后置空白」双相位验收要求第二次 init 重新解析 env —— OnceLock 会让首个相位的
+/// `9.9.9-wave45` 残留到第二相位，使 `otel_resource_env_test` 恒红（该用例在基线 commit
+/// `52a7a21` 上同样红，属**既有**缺陷；本次修复以「每次 init 覆盖」恢复 init 期快照语义）。
+/// 生产路径单次 init，行为不变；只有「同进程多次 init」（测试/关闭后重启）才可见差异。
+static RESOLVED_SERVICE_VERSION: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 /// 当前进程的发布版本（`langfuse.release` 取值；ADR 0055）。
 ///
@@ -689,8 +695,9 @@ static RESOLVED_SERVICE_VERSION: std::sync::OnceLock<String> = std::sync::OnceLo
 /// → 本 crate 的 `CARGO_PKG_VERSION`（与 resource 三级优先保持同源，禁止另起口径）。
 pub fn current_release_version() -> String {
     RESOLVED_SERVICE_VERSION
-        .get()
-        .cloned()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
         .or_else(|| env_non_empty(ENV_PONY_OTEL_SERVICE_VERSION))
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
@@ -808,7 +815,9 @@ pub fn init_with_service_version(
         .iter()
         .find(|(key, _)| key == RESOURCE_SERVICE_VERSION)
     {
-        let _ = RESOLVED_SERVICE_VERSION.set(version.clone());
+        if let Ok(mut guard) = RESOLVED_SERVICE_VERSION.write() {
+            *guard = Some(version.clone());
+        }
     }
     let resource = opentelemetry_sdk::Resource::builder()
         .with_service_name(config.service_name.clone())
