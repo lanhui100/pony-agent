@@ -1649,13 +1649,48 @@ impl TuiState {
         }
     }
 
-    pub fn select_current_provider(&mut self) {
+    pub fn delete_current_provider(&mut self) -> Result<String, &'static str> {
+        if self.provider_list.is_empty() {
+            return Err("当前列表无提供商");
+        }
+        if self.selected_provider_index >= self.provider_list.len() {
+            return Err("选择项无效");
+        }
+        let target = self.provider_list[self.selected_provider_index].clone();
+        if target.id == "ponyllm" {
+            return Err("内置提供商 [ponyllm] 不可删除");
+        }
+
+        let registry = self.registry_store();
+        let mut view = registry.load_view();
+        view.providers.retain(|p| p.id != target.id);
+
+        if self.current_provider_id == target.id {
+            let next_id = view
+                .providers
+                .first()
+                .map(|p| p.id.clone())
+                .unwrap_or_else(|| "ponyllm".to_string());
+            self.current_provider_id = next_id.clone();
+            view.selected_provider_id = Some(next_id);
+        }
+
+        if let Err(_e) = registry.save_view(view.clone()) {
+            return Err("保存注册表失败");
+        }
+
+        self.provider_list.remove(self.selected_provider_index);
+        if self.selected_provider_index >= self.provider_list.len() && !self.provider_list.is_empty() {
+            self.selected_provider_index = self.provider_list.len() - 1;
+        }
+
+        Ok(format!("已删除提供商 · {}", target.name))
+    }
+
+    pub fn select_current_provider(&mut self) -> Option<ProviderItem> {
         if !self.provider_list.is_empty() && self.selected_provider_index < self.provider_list.len() {
             let selected = self.provider_list[self.selected_provider_index].clone();
             self.current_provider_id = selected.id.clone();
-            // 契约 P-1：/provider 必须真正生效。发送路径经注册表解析 provider，只改内存
-            // 就会出现「界面说已切换、实际仍走旧 provider」的假成功，故这里落库
-            // （selected_provider_id），落库失败如实提示，绝不报成功。
             let registry = self.registry_store();
             let mut view = registry.load_view();
             view.selected_provider_id = Some(selected.id.clone());
@@ -1665,8 +1700,10 @@ impl TuiState {
                     self.set_status_notice(format!("提供商切换保存失败: {error}"));
                 }
             }
+            Some(selected)
+        } else {
+            None
         }
-        self.mode = InteractionMode::Normal;
     }
 
     pub fn open_model_selector(&mut self, list: Vec<ModelItem>) {
@@ -2278,43 +2315,43 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
-/// 彩色 init 头部（参考 Antigravity CLI banner）：
-/// 左侧是品牌渐变色的几何「P」标识 —— 12×16 像素网格，用「▀」半块字符逐格上/下双色渲染
-/// （实心块、无点阵断裂）；渐变在运行时按对角位置在 4 个品牌色标间插值，过渡跨度大。
-/// 右侧是版本 / 模型(提供商) / 工作区信息列，垂直居中；整块随会话向上滚动。
+/// 彩色 init 头部（严格忠实还原 PonyFun / PonyGo 官方标志性折线双人字形图案）：
+/// 采用 PonyFun 标志性的纯直线几何镜像折角结构（无内旋，干练通透），
+/// 配色方案采用原版主对角线流光渐变（暖橙 → 鲜红 → 洋红紫 → 深靛紫），
+/// 采用「▀」「▄」高精半块字符逐格双色渲染，右侧对齐品牌控制台信息列。
 fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
-    // 「P」字形掩码（12×16）：'#' 为实心像素，手工对齐保证边缘整齐、无孤立凸点。
+    // PonyFun 官方折角结构掩码（20×16）
     const SHAPE: [&str; 16] = [
-        "............",
-        ".##########.",
-        ".##########.",
-        ".##......##.",
-        ".##......##.",
-        ".##......##.",
-        ".##......##.",
-        ".##########.",
-        ".##########.",
-        ".##.........",
-        ".##.........",
-        ".##.........",
-        ".##.........",
-        ".##.........",
-        ".##.........",
-        "............",
+        ".....####...........",
+        "....######..........",
+        "...########.........",
+        "..###..#####........",
+        "..##....####........",
+        ".###.....###........",
+        ".##.......###.......",
+        "###.......####......",
+        "......####.......###",
+        ".......###.......##.",
+        "........###.....###.",
+        "........####....##..",
+        "........#####..###..",
+        ".........########...",
+        "..........######....",
+        "...........####.....",
     ];
-    // 品牌渐变色标：亮橙 → 正红 → 洋红 → 深紫（跨度大，过渡明显）。
+    // 经典四级主对角线渐变色标：暖橙 → 鲜红 → 洋红紫 → 深靛紫
     const STOPS: [(f32, u8, u8, u8); 4] = [
-        (0.00, 255, 146, 56),
-        (0.32, 244, 62, 52),
-        (0.64, 196, 30, 124),
-        (1.00, 96, 40, 158),
+        (0.00, 249, 115, 22),   // Orange 500 (#f97316)
+        (0.33, 239, 68, 68),    // Red 500 (#ef4444)
+        (0.66, 168, 85, 247),   // Purple 500 (#a855f7)
+        (1.00, 79, 70, 229),    // Indigo 600 (#4f46e5)
     ];
-    const COLS: usize = 12;
+    const COLS: usize = 20;
     const ROWS: usize = 16;
 
     let pixel_color = |x: usize, y: usize| -> ratatui::style::Color {
-        let t = (x as f32 / (COLS - 1).max(1) as f32) * 0.6
-            + (y as f32 / (ROWS - 1).max(1) as f32) * 0.4;
+        let t = (x as f32 / (COLS - 1).max(1) as f32) * 0.4
+            + (y as f32 / (ROWS - 1).max(1) as f32) * 0.6;
         let mut lo = STOPS[0];
         let mut hi = STOPS[STOPS.len() - 1];
         for pair in STOPS.windows(2) {
@@ -2337,24 +2374,31 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
     let info = [
         Line::from(vec![
             Span::styled(
-                "pony",
+                "Pony",
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(ratatui::style::Color::Rgb(249, 115, 22))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" v{}", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(theme::INK),
+                " Agent",
+                Style::default()
+                    .fg(theme::INK)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme::MUTED),
             ),
         ]),
-        Line::from(Span::styled(
-            format!("{} ({})", state.model, state.current_provider_id),
-            Style::default().fg(theme::MUTED),
-        )),
-        Line::from(Span::styled(
-            state.workspace.display().to_string(),
-            Style::default().fg(theme::MUTED),
-        )),
+        Line::from(vec![
+            Span::styled("模型 · ", Style::default().fg(theme::MUTED)),
+            Span::styled(state.model.clone(), Style::default().fg(theme::INK).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({})", state.current_provider_id), Style::default().fg(theme::GHOST)),
+        ]),
+        Line::from(vec![
+            Span::styled("工作区 · ", Style::default().fg(theme::MUTED)),
+            Span::styled(state.workspace.display().to_string(), Style::default().fg(theme::MUTED)),
+        ]),
     ];
 
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -2381,7 +2425,7 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
         }
         // 信息列垂直居中于 8 行标识（占第 3~5 行）。
         if let Some(info_line) = line.checked_sub(2).and_then(|i| info.get(i)) {
-            spans.push(Span::raw("   "));
+            spans.push(Span::raw("    "));
             spans.extend(info_line.spans.clone());
         }
         out.push(Line::from(spans));
@@ -4722,7 +4766,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             "提供商".to_string()
         };
         let rect = panel_rect(84, shown as u16 + 4);
-        let body = draw_panel(f, rect, &title, "↑↓ 选择 · ↵ 确认 · a 新增 · esc 取消");
+        let body = draw_panel(f, rect, &title, "↑↓ 选择 · ↵ 选模型 · a 新增 · d 删除 · esc 取消");
         let inner_w = body.width as usize;
         let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.provider_list.is_empty() {
@@ -6616,6 +6660,21 @@ fn tui_event_loop(
                             KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('+') => {
                                 state.start_add_provider();
                             }
+                            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
+                                match state.delete_current_provider() {
+                                    Ok(msg) => {
+                                        state.set_status_notice(msg.clone());
+                                        state.messages.push(ChatMessage {
+                                            role: MessageRole::System,
+                                            content: msg,
+                                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                        });
+                                    }
+                                    Err(err) => {
+                                        state.set_status_notice(err);
+                                    }
+                                }
+                            }
                             KeyCode::Up => {
                                 state.prev_provider();
                             }
@@ -6623,12 +6682,31 @@ fn tui_event_loop(
                                 state.next_provider();
                             }
                             KeyCode::Enter => {
-                                state.select_current_provider();
-                                state.messages.push(ChatMessage {
-                                    role: MessageRole::System,
-                                    content: format!("已切换提供商为: {}", state.current_provider_id),
-                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                });
+                                if let Some(selected) = state.select_current_provider() {
+                                    state.messages.push(ChatMessage {
+                                        role: MessageRole::System,
+                                        content: format!("已切换提供商为: {}", selected.name),
+                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                    });
+                                    // 二级联动：自动打开该 provider 的 model 选择菜单
+                                    let registry = state.registry_store();
+                                    let view = registry.load_view();
+                                    let current_prov = view.providers.iter().find(|p| p.id == selected.id).cloned();
+                                    if let Some(p) = current_prov {
+                                        let items: Vec<ModelItem> = p
+                                            .models
+                                            .iter()
+                                            .map(|m| ModelItem { id: m.id.clone(), name: m.name.clone() })
+                                            .collect();
+                                        state.open_model_selector(items);
+                                        state.status_text = "正在拉取模型列表…".to_string();
+                                        spawn_model_discovery(&state, &tx, &p.id);
+                                    } else {
+                                        state.open_model_selector(Vec::new());
+                                    }
+                                } else {
+                                    state.mode = InteractionMode::Normal;
+                                }
                             }
                             _ => {}
                         }
@@ -7325,6 +7403,31 @@ fn tui_event_loop(
                                     continue;
                                 }
 
+                                // 预先检查当前 provider 是否有 API key
+                                let prov_id = resolve_active_provider_id(&state)
+                                    .unwrap_or_else(|| state.current_provider_id.clone());
+                                {
+                                    let registry = state.registry_store();
+                                    let key_opt = registry.provider_api_key(Some(&prov_id));
+                                    if key_opt.as_deref().unwrap_or("").trim().is_empty() {
+                                        let view = registry.load_view();
+                                        let prov_cfg = view.providers.iter().find(|p| p.id == prov_id);
+                                        let env_name = prov_cfg.map(|p| p.api_key_env_var.as_str()).unwrap_or("API_KEY");
+                                        let prov_name = prov_cfg.map(|p| p.name.as_str()).unwrap_or(&prov_id);
+                                        let err_msg = format!(
+                                            "当前提供商 [{}] 未配置 API Key，请在 /provider 中配置或设置环境变量 [{}]",
+                                            prov_name, env_name
+                                        );
+                                        state.add_user_message(&input);
+                                        state.messages.push(ChatMessage {
+                                            role: MessageRole::System,
+                                            content: err_msg,
+                                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                        });
+                                        continue;
+                                    }
+                                }
+
                                 // wave-39 R8：新一轮开始前清空本轮回执，并按当前
                                 // provider/model 解析上下文窗口（解析不到则回退默认值）。
                                 state.begin_turn_usage();
@@ -7348,10 +7451,7 @@ fn tui_event_loop(
                                 goal_round_cancel.reset();
 
                                 let cp = control_plane.clone();
-                                // wave-36b：发送口径与 /models 面板来源一致（resolve_active_provider_id），
-                                // 避免 state.current_provider_id 漂移导致 base_url/key 错配 401。
-                                let prov_id = resolve_active_provider_id(&state)
-                                    .unwrap_or_else(|| state.current_provider_id.clone());
+
                                 let mdl_id = state.model.clone();
                                 let tx_stream = tx.clone();
                                 // wave-38 R1.4：唯一发送点改用 build_turn_input（携带

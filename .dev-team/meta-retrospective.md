@@ -106,3 +106,30 @@
 3. **性能门禁必须四件套**：阈值 + 采样窗口 + 同轮对照 + 污染策略，缺一即变成骰子。
 4. **门禁执行与文件写入互斥**：门禁脚本开头加"工作树 mtime 静默 N 秒"检查。
 5. **术语纪律**：描述成果时必须附带"用户可见变化是什么/有没有"，避免把等价重构说成功能上线。
+
+---
+
+# 元框架复盘（Wave-TUI-Provider：TUI Provider 诊断与交互美化）
+
+> 本轮对象：TUI Provider 错误诊断、初始 Splash 页面 P 标美化设计、Provider 增删与二级联动 Model 菜单。
+> 团队：Lead + Protocol Agent + Test Agent + Executor。
+
+## 1. 通信拓扑与信噪比
+- **组织架构与执行流**：严格执行 Dev-Team 分权制，由 Protocol Agent 制定契约并落盘，Test Agent 编写验收测试并红相锚定，Executor 仅负责在 `crates/pony-agent-core/src/bin/tui.rs` 内实现逻辑。
+- **tmux 物理沙盒隔离验证**：使用后台独立 tmux 实例运行真实 TUI 交互（包含键盘事件注入与终端字符捕获），获得了 100% 真实的 Exit 0 与物理收据，避免了无断言假通过。
+
+## 2. 门禁穿透与真实测试
+- **测试用例覆盖**：
+  - 新增 `crates/pony-agent-core/tests/tui_provider_refactor_test.rs`，包含 Provider 删除与 SecretStore 清理联动测试、Key 诊断提示规范断言；
+  - tmux 物理验证覆盖：
+    1. Provider Key 缺失预检拦截与结构化指引提示；
+    2. 14×16 现代几何倒角与青蓝-琥珀微光渐变的矢量 P 元素块及一体化头部卡片；
+    3. `/provider` 列表下 `d` 删除自定义 provider 逻辑以及内置 `ponyllm` 保护；
+    4. 回车选中 Provider 后无缝进入二级 Model 选择菜单。
+
+## 3. 分工契约与隔离有效性
+- 契约文档 `.dev-team/contracts/tui-provider-refactor.md` 明确了状态机流转与操作边界。
+- 业务代码改动严格限制在 `crates/pony-agent-core/src/bin/tui.rs`。
+
+## 4. 元协议迭代建议
+- 终端 TUI 类交互类特性，借助 tmux 驱动输入与捕获屏幕输出是极佳的物理收据手段，应固化为 TUI 验收的标准模式。
