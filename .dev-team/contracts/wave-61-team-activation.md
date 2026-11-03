@@ -1,9 +1,9 @@
 # Wave-61 契约：Agent Team 激活（工具面 × 宿主接线 × 策略提示）
 
 - 契约编号：wave-61-team-activation
-- 状态：`RFC`（待 Lead 一票冻结；冻结后本节改为 `FROZEN`）
+- 状态：`FROZEN v1.1（wave-61，Lead one-vote freeze @069587a；v1.1 增补 C1.6 + C4 面⑤/⑥）`
 - 作者：Protocol Agent（协议特派员）
-- 唯一写域：`.dev-team/`（本文件 + `.dev-team/nfr-baseline.json` + `.dev-team/nfr-baseline.schema.json` 的**增量**声明）
+- 唯一写域：`.dev-team/`（本文件 + `.dev-team/nfr-baseline.json` + `.dev-team/nfr-baseline.schema.json` 的**增量**声明；schema 只含 wave-61 的 3 个字段）
 - 禁止写域：任何 Rust 源码与测试（含 `crates/**`、`src-tauri/**`、`tests/**`）、`.dev-team/state.json`
 - 分级：L3（协议契约 + 跨模块集成 + 宿主 bootstrap）
 
@@ -143,6 +143,24 @@ product 名（对外模型名）＝ primitive 名本身：`model_visible_tool_na
 - **C1-A4**：既有 29 项中每一项的 `kind` / `exposure` / `permission_facts` 与迁移前一致（仅新增项进入可见面，不改旧项）。
 - **C1-A5**（可执行性）：在 `subagent_runtime_wired() == false` 的进程内直接经 ToolRouter 调 `subagent`，返回 `error.code == "capability_unavailable"`；在 wired 进程中经 Dispatcher 以 `InvocationOrigin::Model` 调 `subagent`，**不得**出现 `origin_not_authorized`。
 
+### C1.6 产品名登记条款（trace 证据不污染）
+
+`model_visible_tool_name_opt()`（`crates/pony-agent-core/src/agent/tools.rs:7216-7252`）必须为 10 个团队工具
+登记「**小写原名透传**」映射（与 `TOOL_SKILL_LOAD => TOOL_SKILL_LOAD`（`:7251`）**同构**），即
+`spawn_teammate => "spawn_teammate"`、`subagent => "subagent"`、…、`team_task_list => "team_task_list"` 共 10 条。
+
+**因果（为什么必须登记，而不是靠 `product_visible_tool_name` 的原样透传）**：
+`model_visible_tool_name()`（`:7257-7261`）对未登记名回落字面量 `"Run"`（`unwrap_or("Run")`），而
+`crates/pony-agent-core/src/agent/telemetry.rs` 的 tool activity 记录点（`:306`、`:332`、`:508`、`:576`）正是用
+`model_visible_tool_name(&<tool>.name)` 生成 trace 里的 tool `name`；`product_canonical_tool_name`（`tools.rs:7271-7273`）
+同源。若不登记，团队工具在 trace / 用户可见的副作用面里会被**记成 `Run`**，直接污染我们本波赖以定因的
+`toolDefinitionsText` / tool-activity 证据链（即 §0 的取证面被污染）。
+
+- **C1-A6**：`model_visible_tool_name("spawn_teammate") == "spawn_teammate"`（**不得**回落 `"Run"`）；
+  对 10 个团队工具名逐一成立。
+- **C1-A7**：`product_visible_tool_name` / `product_canonical_tool_name` 对 10 个名字返回原名（与 C1.2 模型面名一致），
+  且 `model_visible_tool_name_opt` 的既有映射（含 `time_now => "Run"` 等）**不得**改动。
+
 ---
 
 ## C2 宿主引擎接线契约（注册点收敛到 core）
@@ -272,7 +290,7 @@ C2 只增加"生产路径上确实会接线"，**不删除**任何 fail-closed �
 
 ---
 
-## C4 冻结测试演进门禁（4 个面，Test Agent 执行，Lead 一票冻结）
+## C4 冻结测试演进门禁（6 个面，Test Agent 执行，Lead 一票冻结）
 
 > **纪律**：冻结断言只能**收紧或等价改写**，**不得放宽**（禁止删除用例、禁止"只跑不报错"、禁止 `#[ignore]`、
 > 禁止把断言换成 `println!`）。每条改写必须在本节留痕（旧断言 → 新断言 + 理由 + 真值源）。
@@ -329,13 +347,39 @@ C2 只增加"生产路径上确实会接线"，**不删除**任何 fail-closed �
   `M crates/pony-agent-core/src/agent/provider/mod.rs`，属 wave-60/61 streaming 工作）。Test Agent 迁移以上三处时
   **必须**与 Lead 确认时序，避免 hunk 冲突；本契约只登记规则，不主张写入时机。
 
-### C4.5 门禁
+### C4.5 面⑤：`crates/pony-agent-core/src/agent/tools.rs:6611`（src 内 characterization 用例）
+
+- 用例：`characterization_product_surface_keeps_unique_names_and_json_object_schemas`
+  （`assert_eq!(tools.len(), 45)` 于 `:6621-6625`；`assert_eq!(names.len(), 29)` 于 `:6626-6630`；
+  29 项逐字清单于 `:6631-6663`）。
+- 新断言：`names.len() == 39` 且 29 项清单替换为 C1.2 的 39 行（团队工具插在 `ViewImage` 之后、`TodoWrite` 之前）；
+  `tools.len() == 45`（**内部注册数不变**，C1 只改 exposure，不增定义）+ `input_schema` 的 object/properties 校验保留。
+
+### C4.6 面⑥：`crates/pony-agent-core/src/agent/tools.rs:6802`（src 内 registry 投影用例）
+
+- 用例：`builtin_registry_projects_the_existing_product_surface`（`assert_eq!(names.len(), 29)` 于 `:6812-6816`）。
+- 新断言：`names.len() == 39`；`registry.resolve("subagent") / resolve("team_task_list")` 的
+  `exposure == ModelVisible`（逐个 10 项）；既有 `resolve("ToolSearch") == Deferred`、
+  `snapshot_id == "builtin-tool-catalog-v1"` 断言**不得**改动。
+
+### C4.7 面⑤/⑥ 的执行方式（编译衍生同步豁免）
+
+面⑤/⑥ 与被迁移的生产代码同处 `crates/pony-agent-core/src/agent/tools.rs`（同一 crate、同一编译单元），
+**不单独出红相**（无法在 C1 实现落地前产生"仅这两处失败"的独立红相），故按
+**「编译衍生同步豁免 + Lead 复核 diff」** 处置：
+
+1. Test Agent 在 C1 实现同一次提交内完成两处断言同步（29 → 39、清单逐字）；
+2. 豁免仅限于"无独立红相"这一点，**不放宽断言**（数量与逐字清单都改严/等价，不删用例、不改 `#[ignore]`）；
+3. Lead 必须逐行复核这两处 diff，确认旧断言可一一映射到新断言（C4-A3）；
+4. 若两处未同步，`cargo test -p pony-agent-core --lib` 必红（C4-A2），视同门禁失败。
+
+### C4.8 门禁
 
 - **C4-A1**：迁移后 `cargo test -p pony-agent-core --test tool_surface_wave20_contract --test wave37_tool_surface --test wave25_capability_honesty_test`
   全绿（机器 Exit Code 0）。
-- **C4-A2**：迁移后 `cargo test -p pony-agent-core --lib` 全绿（面④三处）。
-- **C4-A3**：`git diff` 中上述 4 个面的断言数量只增不减（人工/脚本核对：旧断言逐条可映射到新断言）。
-- **C4-A4**：冻结由 Lead 一票决定：本文件状态改 `FROZEN` 后，测试断言任何后续改动必须走新契约（本文件的 successor）。
+- **C4-A2**：迁移后 `cargo test -p pony-agent-core --lib` 全绿（面④/⑤/⑥）。
+- **C4-A3**：`git diff` 中上述 6 个面的断言数量只增不减（人工/脚本核对：旧断言逐条可映射到新断言）。
+- **C4-A4**：冻结由 Lead 一票决定：本文件状态已是 `FROZEN v1.1`（@069587a），测试断言任何后续改动必须走新契约（本文件的 successor）。
 
 ---
 
@@ -372,14 +416,32 @@ DSH 中团队工具注册与策略段由**同一个** `install()` 同步注册�
 > 说明：`subagent_engine_registration_required_in` 的语义是"这三条宿主必须**受益于**注册"，实现方式是
 > 收敛在 `builder.rs:79`，**不是**要求这三处的源码被修改（C2-A2 反向约束）。
 
+### 6.1 既有 schema 漂移存档（**HEAD 已存在，本波不修**）
+
+严格门禁 `python3 .dev-team/nfr-lint.py`（`additionalProperties: false` + 未知字段拒绝）在 **HEAD 上已经红**。
+基线口径：以 **c575243**（wave-61 提交前的 HEAD）导出 instance+schema 后重跑，实测 **6 条错误**（`PRE_CHANGE_EXIT=1`），
+错误项为 `$.observability`、`$.external_call_timeout_exceptions`、`$.logging_eprintln_exempt_note`、
+`$.logging.trace_id` 四个"instance 有、schema 未登记"的漂移（由此前波次只改 instance 未改 schema 造成）。
+
+**Lead 裁决（wave-61）**：该漂移与「团队工具面 / 宿主接线 / 策略提示」无因果关系，属**既有**缺陷；
+按抗熵底线**禁止夹带修复进本波提交**。Protocol Agent 已按此裁决**回退**全部补登记动作
+（`observability` / `external_call_timeout_exceptions` / `logging_eprintln_exempt_note` / `logging.trace_id` 四处均已移出 schema）。
+
+→ **登记为 dev-backlog 候选**（范围：`.dev-team/nfr-baseline.schema.json` 三处顶层既有字段登记
+`observability` / `external_call_timeout_exceptions` / `logging_eprintln_exempt_note`，外加一处嵌套字段
+`logging.trace_id`；纯增量声明即可，不得删除或改写既有取值）。
+→ 本波 `nfr-baseline.schema.json` **只**新增 wave-61 自己的 3 个字段声明；严格门在回退后与 HEAD **同为失败**
+（exit code 见 §7，必须如实回报，不得为变绿而改 schema）。
+
 ## 7. 门禁与收据命令
 
 ```bash
 # NFR 门禁（技能脚本，必须 Exit 0）
 python3 /home/dm/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline.json
 
-# 仓库严格门禁（jsonschema + additionalProperties:false，必须 Exit 0）
-python3 .dev-team/nfr-lint.py .dev-team/nfr-baseline.json
+# 仓库严格门禁（jsonschema + additionalProperties:false）
+# 预期：非 0（HEAD 既有漂移，见 §6.1）；正确调用形式无位置参数（该脚本只接受 --instance/--schema）
+python3 .dev-team/nfr-lint.py
 
 # 写域收据（只允许 .dev-team/ 下文件变化）
 git status --porcelain -- .dev-team/
@@ -401,5 +463,6 @@ git status --porcelain -- .dev-team/
 ## 附：本契约的写入边界声明
 
 本契约由 Protocol Agent 写入，**只**新增/修改 `.dev-team/contracts/wave-61-team-activation.md`、
-`.dev-team/nfr-baseline.json`（追加 3 字段）、`.dev-team/nfr-baseline.schema.json`（追加 3 个可选属性声明）。
+`.dev-team/nfr-baseline.json`（追加 3 字段）、`.dev-team/nfr-baseline.schema.json`（**只**追加 wave-61 自己的
+3 个字段声明；按 Lead 裁决已**回退**所有既有字段补登记动作，漂移仅存档于 §6.1 并登记为 dev-backlog 候选）。
 未触碰任何 Rust 源码、测试、`.dev-team/state.json`。

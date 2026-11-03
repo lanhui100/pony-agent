@@ -66,10 +66,6 @@
           "type": "string",
           "minLength": 1,
           "description": "wave-1 新增（additive-only）：承载 trace id 的 JSON 字段名（当前全仓库无结构化日志面，仍属 PA-119 债务，不主张已满足）。"
-        },
-        "trace_id": {
-          "type": "boolean",
-          "description": "既有声明字段（未在 schema 中登记的漂移，wave-61 补登记；仅类型声明，强制校验仍由 nfr-lint.py 的 python 独占分支负责，见 nfr-lint.py docstring 第 4 条）。"
         }
       },
       "required": ["format", "trace_id_required"],
