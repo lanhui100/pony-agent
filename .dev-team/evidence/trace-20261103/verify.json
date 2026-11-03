@@ -1,0 +1,190 @@
+{
+  "meta": {
+    "verified_by": "lead (独立 verifier subagent 未在时限内返回，改由 Lead 逐条核对)",
+    "verified_at": "2026-11-03T21:12+08:00",
+    "method": "grep/read 直读源码 + ClickHouse/Tempo 交叉查询",
+    "independence": "reduced (same agent as report author)"
+  },
+  "verdicts": [
+    {
+      "id": 1,
+      "claim": "turn_span_attributes 只输出固定 7 组属性，不含对话内容/token",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+          "line": 1250,
+          "snippet": "pub fn turn_span_attributes(...) -> Vec<(String, AttrValue)> { let mut attributes = Vec::with_capacity(7);"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "claim": "全仓无 langfuse.observation.input/output、无 gen_ai.prompt/completion",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "(grep)",
+          "line": 0,
+          "snippet": "grep -rn 上述四键 --include=*.rs crates src-tauri → 0 命中"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "claim": "force_export_session_trace 只取 session_id/turn_id/sequence/phase，建 span 即 end",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+          "line": 1217,
+          "snippet": "turn_span_attributes(&TurnSpanInput{session_id,user_id:None,turn_id,sequence,phase})"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+          "line": 1233,
+          "snippet": "let mut span = ...build_with_context(...); span.end();"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "claim": "DEFAULT_RUN_TIMEOUT_MS=10_000 / MAX=120_000；build|test|cargo|check|install 自适应 60_000",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/tools.rs",
+          "line": 210,
+          "snippet": "const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000; ... MAX_RUN_TIMEOUT_MS: u64 = 120_000;"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/tools.rs",
+          "line": 2863,
+          "snippet": "let default_timeout = if command.contains(\"build\")||... { 60_000 } else { DEFAULT_RUN_TIMEOUT_MS };"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "claim": "同工具连续失败 4 次熔断（DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES=4）",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/runtime/limits.rs",
+          "line": 38,
+          "snippet": "pub(super) const DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES: usize = 4;"
+        }
+      ],
+      "note": "触发后是否『换策略』未逐行验证（终结路径在 turn_stream fail_stream_turn_*），报告措辞已限定为『终结整轮、不换策略』"
+    },
+    {
+      "id": 6,
+      "claim": "非零退出统一 non_zero_exit，仅 Windows 9009 特判",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/tools.rs",
+          "line": 3199,
+          "snippet": "let base_message = format!(\"命令执行完成，但退出码为 {}。\", ...); match windows_command_not_found_hint(...)"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "claim": "provider 多 tool_use 直接 Err；parallel_tools 无生产接线",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
+          "line": 3444,
+          "snippet": "if count > 1 { return Err(\"Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。\") }"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/parallel_tools.rs",
+          "line": 13,
+          "snippet": "//! 把 provider 的多调用接入本引擎需要改造回合循环 … 已单列为计划 W28b"
+        },
+        {
+          "path": "(grep)",
+          "line": 0,
+          "snippet": "parallel_tools 引用仅 mod.rs:31 与 tests/wave28_parallel_tools_test.rs"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "claim": "失败轮只下发 text:\"This turn failed.\" + error",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
+          "line": 520,
+          "snippet": "phase: Some(\"failed\"), text: Some(\"This turn failed.\"), error: Some(error)"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "claim": "上传文案把 flush 的 turn 数说成『已成功上传至 Langfuse』，无 trace_id，4s 清空",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "src/components/telemetry/TelemetryPage.vue",
+          "line": 83,
+          "snippet": "uploadFeedback.value = `已成功上传该会话 Trace（共 ${count} 轮对话）`; showToast(`... 至 Langfuse`, \"success\")"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "claim": "前端不呈现 agent.turn.degraded / tool_failures",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "src/components/HomeTracePanel.vue",
+          "line": 743,
+          "snippet": "（turn 头仅输入/输出/速度/缓存/延时；grep src 内 degraded 命中均为 capability/transcript 语义，非 agent.turn 口径）"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "claim": "超时提示从不指向后台 JobStart（job_start 已 ModelVisible）",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/tools.rs",
+          "line": 7961,
+          "snippet": "fn classify_timeout_hint → 只给网络自检 / 『显式传入更大的 timeoutMs』"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/tools.rs",
+          "line": 7554,
+          "snippet": "TOOL_JOB_START | TOOL_JOB_OUTPUT | TOOL_JOB_KILL | TOOL_JOB_LIST => ToolExposure::ModelVisible"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "claim": "degraded 口径不一致（desktop/core 初始断言）",
+      "verdict": "PARTIAL",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+          "line": 1984,
+          "snippet": "let degraded = tool_failures > 0 && phase_snapshot.as_deref() == Some(\"completed\"); // wave-53 C4 设计分流"
+        }
+      ],
+      "note": "非缺陷：degraded 仅在 completed 输出属刻意语义拆分；真实缺口是前端不呈现该字段。报告已按此改写。"
+    }
+  ],
+  "summary": {
+    "true": 11,
+    "partial": 1,
+    "false": 0
+  },
+  "notes": [
+    "独立 verifier subagent 启动后未在时限内落盘，Lead 自行完成 12 条复核；独立性下降，已在本文件与报告 §5 明示。",
+    "turn-2 cancelled 的触发动机、手工上传路径是否被点击仍未取证，均标 UNVERIFIED。"
+  ]
+}

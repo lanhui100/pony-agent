@@ -1,0 +1,189 @@
+{
+  "session": "pa_01a1a134-0bfa-791d-82fa-0b5eb3808905",
+  "scope": "桌面端（Vue3/TS）UI + trace 上传/导出链路（otel 导出模块 payload 根因归本文件）",
+  "findings": [
+    {
+      "id": "D1",
+      "area": "payload",
+      "conclusion": "otel 模块整体只写元数据/计数型属性，源码中不存在任何 input/output 内容通道：无 langfuse.observation.input/output、无 gen_ai.prompt/completion、无 span event（全仓仅 .dev-team 计划文档出现过该键名）。turn 根 span 属性集是固定 7 项（session/trace 名/operation/turn id/sequence/phase/user），llm span 只有 sys/enum/model/token 数，请求形状只记『条数+是否有 system 前缀』。这与 Langfuse 侧 input/output 恒空、而 token 属性可见完全一致（属性链路通畅 ⇒ 不是 collector 丢属性）。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1250, "snippet": "pub fn turn_span_attributes(input: &TurnSpanInput) -> Vec<(String, AttrValue)> { let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(7);"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1393, "snippet": "pub fn llm_request_shape_attributes(mode: &'static str, messages: usize, has_system_prefix: bool) -> ... // 只写 mode/messages 计数/system_prefix 布尔"},
+        {"path": "docs/architecture/agent-trace-pipeline.md", "line": 56, "snippet": "| `agent.turn`（root） | `langfuse.session.id` / `langfuse.trace.name` / ... | SPAN（trace 根） |  ← 契约表四类 span 均无 input/output 行"},
+        {"path": ".dev-team/plan-otel-langfuse-migration.md", "line": 61, "snippet": "| 工具调用 | `tool.call` | ... `langfuse.observation.input`/`output`、error status |  ← 计划里的唯一 payload 项从未实现"}
+      ],
+      "impact": "上传成功后 Langfuse 只有 span 名/耗时/token，用户消息、系统提示词、模型输出、工具入参与结果全部不可见；trace 作为『排查证据』的价值衰减为纯指标。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D2",
+      "area": "payload",
+      "conclusion": "手动上传的重放路径是『空壳重放』：force_export_session_trace 只读取 TurnTraceRecord 的 session_id/turn_id/sequence/phase 四个字段，其余（error、first_token_latency_ms、turn_duration_ms、input/output/cache/reasoning tokens、tool_activities、trace_steps、provider_*）一律丢弃；随后 build span 立刻 span.end()（时长≈0），也不创建任何子 span。即『一键上传』上传的树比本地已有记录更贫瘠，属刻意裁剪而非技术限制。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1217, "snippet": "let mut attributes = to_key_values(turn_span_attributes(&TurnSpanInput { session_id: record_session.to_string(), user_id: None, turn_id: record.turn_id.clone(), sequence: ..., phase: record.phase.clone() }));"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1233, "snippet": "span.end();  // 建 span 后立即 end：无子 span、无时长、无 ttft/token"},
+        {"path": "crates/pony-agent-core/src/agent/session/types.rs", "line": 734, "snippet": "pub first_token_latency_ms: Option<u64>, pub turn_duration_ms: Option<u64>,  ← 记录已带真值，重放未用"},
+        {"path": "crates/pony-agent-core/src/agent/session/types.rs", "line": 706, "snippet": "pub trace_steps: Vec<TurnTraceStep>, pub trace_timeline: Vec<TraceTimelineEntry>,  ← 阶段/工具活动本地齐备，重放未用"}
+      ],
+      "impact": "turn-0（164.7s、ttft 7247ms、degraded）与 turn-3（failed）的手工上传版本在 Langfuse 上既无时长也无 ttft/错误语义，无法作为复盘依据；若全局开关开着，同名 trace 会同时存在『有指标的实时版』与『零指标的手工版』，造成二次误判。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D3",
+      "area": "payload",
+      "conclusion": "工具侧 payload 在调用点是现成可用的（tool_activities_after_result 产物含 arguments_text/result_text），但 ToolSpanInput 只有 tool_name/status/duration_ms/error 四个字段，构造处只挑这四个 → 参数与结果在离 wire 最近的一步被丢掉。模型侧同理：start_llm_span_with_provider 调用点手持完整 ProviderRequest（messages），也只上报计数。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 396, "snippet": "pub struct ToolSpanInput { pub tool_name: String, pub status: String, pub duration_ms: Option<u64>, pub error: Option<String> }"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs", "line": 218, "snippet": "crate::agent::otel::record_tool_call_span_with_call_id_and_kind(crate::agent::otel::ToolSpanInput { tool_name: ..., status: ..., duration_ms: ..., error: ... },"},
+        {"path": "src/types/runtime.ts", "line": 111, "snippet": "export type ToolActivity = { ... argumentsText?: string | null; resultText?: string | null; ... }  ← 本地数据本有参数/结果"},
+        {"path": "crates/pony-agent-core/src/agent/turn_flow.rs", "line": 2707, "snippet": "let mut llm_span = crate::agent::otel::start_llm_span_with_provider(provider.protocol_label(), Some(provider.name()), Some(request.model.as_str()), \"chat\");  ← request 在手，仅传 model"}
+      ],
+      "impact": "『看不到工具入参与结果』是实现裁剪，不是隐私设计或体积限制；补齐只需在既有调用点扩参，成本低、风险小。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D4",
+      "area": "payload",
+      "conclusion": "排除两个常见误判：①ponysentry::sanitize 只做路径/token/JSON 密钥的替换式脱敏（[USER_HOME]/Bearer [REDACTED_SECRET]），不会清空或大幅截断内容；②属性写入路径 push_str 只跳过空串，没有任何长度上限/截断开关，截断仅存在于 degraded_warn 日志（512 字符）。故 input/output 为空与脱敏、限额无关。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/ponysentry/sanitizer.rs", "line": 59, "snippet": "pub fn sanitize(input: &str) -> String { let mut s = input.to_string(); // 仅 RE_UNIX_HOME/RE_BEARER/RE_KEY_VALUE_SECRET 替换"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 2699, "snippet": "fn push_str(attributes: &mut Vec<(String, AttrValue)>, key: &str, value: &str) { if !value.is_empty() { ... } }  // 无长度上限"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 2592, "snippet": "const WARN_MESSAGE_MAX_CHARS: usize = 512;  // 仅用于降级日志文本，不作用于 span 属性"}
+      ],
+      "impact": "定位收窄：零内容 100% 属于『从未采集/从未映射』，修复无需先做脱敏与体积治理的连带改造（但补齐 payload 时必须同时设计脱敏与上限）。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D5",
+      "area": "upload_feedback",
+      "conclusion": "上传反馈存在但有语义缺口：useInvoke 返回值被消费，成功文案『已成功上传会话 Trace（包含 N 轮对话链路）至 Langfuse』把后端返回的「完成 flush 的 turn 数」表述为『已上传成功』；无 trace_id、无跳转链接、无条数/字节明细，且 4s 后 feedback 与按钮态一起自动清空，无任何本地回执。用户无法自证『这次上传产生了哪条 Langfuse trace』。",
+      "evidence": [
+        {"path": "src/components/telemetry/TelemetryPage.vue", "line": 73, "snippet": "const count = await safeInvoke<number>(\"upload_session_trace\", { sessionId: runtimeStore.sessionId });"},
+        {"path": "src/components/telemetry/TelemetryPage.vue", "line": 84, "snippet": "showToast(`已成功上传会话 Trace（包含 ${count} 轮对话链路）至 Langfuse`, \"success\");"},
+        {"path": "src/components/telemetry/TelemetryPage.vue", "line": 92, "snippet": "uploadTimer = setTimeout(() => { uploadState.value = \"idle\"; uploadFeedback.value = \"\"; }, 4000);"}
+      ],
+      "impact": "『4 个 turn 上传成功』这一事实只能靠 DB 侧反查确认；产品内没有回执让用户/支持人员把 Langfuse trace 与本地会话对上。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D6",
+      "area": "upload_feedback",
+      "conclusion": "部分失败被吞成整体失败：分块导出时若某块 flush 报错（或 3000ms 总预算耗尽），函数直接返回 Err，已成功 flush 的 delivered 计数被丢弃，前端因此显示『上传失败』——而实际可能已上传前若干块，且这些 trace 已在 Langfuse 落库（无回滚）。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1236, "snippet": "flush_state(&state, chunk_timeout_ms).map_err(|message| format!(\"otel::force_export_session_trace：{message}\"))?;  // delivered 未随 Err 返回"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1204, "snippet": "\"otel::force_export_session_trace：整体导出预算已耗尽（{FORCE_EXPORT_FLUSH_TIMEOUT_MS}ms），剩余 {skipped} 个 chunk 未发送\""},
+        {"path": "crates/pony-agent-core/src/agent/control_plane/query_commands.rs", "line": 56, "snippet": "pub async fn upload_session_trace(&self, session_id: &str) -> Result<usize, String> { ... }  // 只有 Ok(count)/Err(msg) 两态，无部分成功"}
+      ],
+      "impact": "用户可能重复点击『上传』重试（进而产生重复 trace），或误判云端无数据。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D7",
+      "area": "upload_semantics",
+      "conclusion": "上传语义是『当前活跃会话全部 turn』，无会话选择、无去重、无上传后回填 trace_id：前端强制要求 runtimeStore.sessionId，非活跃会话无法上传；force_export 每次新建 trace（文档明示允许产生多条 trace）；register_turn_exported_trace_id 只在实时 turn 路径调用，手工上传不写回 record.trace_id，因此本地记录不带这次上传的链路 id。",
+      "evidence": [
+        {"path": "src/components/telemetry/TelemetryPage.vue", "line": 65, "snippet": "showToast(\"未找到当前活跃会话 ID\", \"error\");  // 无活跃会话即不可上传；无历史会话选择器"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1176, "snippet": "/// 失败语义：导出失败返回 `Err(String)`；重复调用幂等（数量契约不变，允许产生多条 trace）。"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1721, "snippet": "register_turn_exported_trace_id(turn_id, trace_id);  // 仅 begin_turn_trace（实时路径），手工重放不登记"}
+      ],
+      "impact": "重复上传=重复 trace（Langfuse 侧同名不可辨），且本地无 trace_id 可用于『跳转/比对』；想复盘历史会话必须先切回该会话。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D8",
+      "area": "trace_ui",
+      "conclusion": "桌面 trace 面板的信息面比上传面丰富得多：turn 头展示 输入/输出/速度/缓存命中/延时，timeline 详情能展开 build_context 的稳定前缀/半稳定/本轮输入/工具定义/请求消息，以及工具 参数/结果/耗时/权限/审批/失败分类。但缺三块：①turn 级 degraded（completed + 工具失败）无任何呈现，前端根本没有 toolFailures 字段消费；②无工具失败条数汇总；③turn 级『ERROR』只有 red icon，没有原因分类（failed vs tool_failed）区分。",
+      "evidence": [
+        {"path": "src/components/HomeTracePanel.vue", "line": 743, "snippet": "function buildTurnAggregateMetrics(turn) { ... metrics.push(`输入 ...`); `输出 ...`; `速度 ... t/s`; `缓存 ...`; `延时 ... ms`;  // 无 degraded / 工具失败计数"},
+        {"path": "src/components/HomeTracePanel.vue", "line": 378, "snippet": "if (turn.phase === \"failed\" || turn.error) { return AlertTriangle; }  // 只有二值图标，无『部分工具失败』状态"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 227, "snippet": "pub const ATTR_AGENT_TURN_DEGRADED: &str = \"agent.turn.degraded\";  // 后端已落该语义，前端无对应字段/展示"}
+      ],
+      "impact": "turn-0 这类『完成的降级轮』在桌面端看起来与健康轮无异，用户不会想到去看 trace，也不会预警『工具失败了但模型兜住了』。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D9",
+      "area": "trace_ui",
+      "conclusion": "工具详情缺结构化退出码/标准错误：ToolActivity 类型无 exitCode/stderr 字段，详情只能把 resultText 整体当作『结果/错误』文本块渲染；RunShell 明明稳定返回 cwd/timeout/exitCode/stdout/stderr，却在 UI（与上传）侧坍缩成一段字符串。turn-3 里『多次 Run 退出码 101』因此无法在桌面端被解析成结构化事实。",
+      "evidence": [
+        {"path": "src/components/HomeTracePanel.vue", "line": 1142, "snippet": "function buildToolMessageDetail(activity) { if (activity.argumentsText?.trim()) lines.push(`参数:...`); if (activity.resultText?.trim()) lines.push(`${activity.status === \"error\" ? \"错误\" : \"结果\"}:...`);"},
+        {"path": "src/types/runtime.ts", "line": 111, "snippet": "export type ToolActivity = { id; name; status; description; argumentsText?; resultText?; durationSeconds?; error?: Record<string, unknown> | null; }  // 无 exitCode/stderr 字段"},
+        {"path": "src/lib/runtime/browser-preview.ts", "line": 10, "snippet": "\"...稳定返回 cwd、timeout、exitCode、stdout 和 stderr。\"  // 后端有此形状，前端类型未承载"}
+      ],
+      "impact": "『退出码 101』这类关键失败信号只能靠肉眼在长文本里找；结构化失败率统计与告警都无从建立。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D10",
+      "area": "streaming_ux",
+      "conclusion": "等待期可观测性只有『一条状态文案 + 每秒刷新的用时』：状态机在无内容时统一归为 thinking（『思考中...』），有内容才切 responding；没有任何『已发出请求、尚未收到首字』的阶段提示，也没有 per-call 进度（第 N 次模型调用 / 第 M 个工具）。ttft 7247ms 期间用户看到的只是『思考中…，用时 7 秒 ···』。真正的保底是一条 240s 连续静默看门狗（rearm 语义），长任务只要有事件就不会报错——即 164.7s 的 turn 全程没有软性『仍在等待』升级提示。",
+      "evidence": [
+        {"path": "src/lib/runtime/status.ts", "line": 143, "snippet": "if (phase === \"calling_model\") { if (streamingReasoning || hasStreamingContent === false) { return { mode: \"thinking\", label: \"思考中...\", startTime: turnStartedAt }; }"},
+        {"path": "src/components/chat/AgentRuntimeStatusBar.vue", "line": 84, "snippet": "const elapsed = Math.max(0, now.value - startTime); return `，用时 ${formatElapsedSeconds(elapsed)} ···`;  // 唯一量化反馈"},
+        {"path": "src/stores/runtime.ts", "line": 240, "snippet": "const SUBMISSION_WATCHDOG_TIMEOUT_MS = 240_000;  // 仅兜底『终态丢失』，不表达『首字很慢』"}
+      ],
+      "impact": "7 秒首字 + 30s 单次生成在 UI 上无法区分『正常慢』与『卡死』，用户倾向手动中断，浪费已完成的模型调用。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D11",
+      "area": "streaming_ux",
+      "conclusion": "可中断性存在但覆盖不全：主按钮在有 draft 时切换为『停止』（workspace-stop-turn），停止请求期间显示『正在停止…（等待本轮安全边界收口）』；但『双击 ESC 快速停止』的白名单只含 thinking/responding/retrying，工具执行（executing_tool）期该快捷键不可用——恰是 164.7s 长轮次占比最大的阶段。",
+      "evidence": [
+        {"path": "src/components/HomeWorkspace.vue", "line": 1602, "snippet": "const STOP_SEQUENCE_ELIGIBLE_MODES = new Set([\"thinking\", \"responding\", \"retrying\"]);"},
+        {"path": "src/components/chat/WorkspaceComposer.vue", "line": 1368, "snippet": ":data-testid=\"isSubmitting && !draftMessage.trim() ? 'workspace-stop-turn' : 'workspace-submit-action'\"  // 停止按钮存在"},
+        {"path": "src/components/chat/WorkspaceComposer.vue", "line": 311, "snippet": "return \"正在停止…（等待本轮安全边界收口）\";"}
+      ],
+      "impact": "长工具阶段用户只能用鼠标点停止；且停止后无『已产生的部分结果是否保留』说明（见 D13）。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D12",
+      "area": "error_ux",
+      "conclusion": "ErrorBoundary 只兜组件渲染异常（onErrorCaptured + 局部重试按钮 + reportError），与 turn/tool 运行期失败零交集：它不会、也不该捕获 tool_failed/failed/degraded。因此不能把它当作『错误呈现已覆盖』的证据。",
+      "evidence": [
+        {"path": "src/components/common/ErrorBoundary.vue", "line": 53, "snippet": "onErrorCaptured((err: unknown, _instance, info: string) => { hasError.value = true; ... reportError({ errorType: ..., tags: { source: \"error_boundary\" } });"},
+        {"path": "src/components/common/ErrorBoundary.vue", "line": 4, "snippet": "<h4 class=\"text-sm font-semibold text-red-800\">组件渲染异常</h4>  // 文案即限定渲染异常"}
+      ],
+      "impact": "排查会误以为『有 ErrorBoundary 兜底』，实际运行期失败只能走消息态与状态条。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D13",
+      "area": "error_ux",
+      "conclusion": "失败轮次在聊天区有呈现但无可恢复动作：历史折叠时 phase==='failed' 或有 traceError ⇒ assistant 消息 status='error' 且带 errorDetail；运行期状态条 error 模式可见；但全前端没有任何『重试本轮/重新生成/从失败点继续』入口（grep 重新生成/重试本轮/regenerate 无命中），『重试』只是 composer 里被当成自然语言发给模型的关键词。degraded 降级轮则完全无标记。",
+      "evidence": [
+        {"path": "src/lib/runtime/messages.ts", "line": 471, "snippet": "const traceError = traceErrorDetail(currentTrace); const hasTraceError = currentTrace?.phase === \"failed\" || Boolean(traceError); ... status: hasErrorState ? \"error\" : \"done\", errorDetail"},
+        {"path": "src/components/HomeWorkspace.vue", "line": 1046, "snippet": "if (sessionOperation.value || agentRuntimeStatus.value.mode === \"error\") { return true; }  // 只控制状态条可见性"},
+        {"path": "src/components/chat/WorkspaceComposer.vue", "line": 570, "snippet": "if ([\"重试\", \"retry\"].includes(normalized)) {  // 『重试』是对话文本，不是 UI 动作"}
+      ],
+      "impact": "turn-3 失败（122.3s + 退出码 101）后用户只能整轮重打一遍提示，无法一键重放同轮；降级轮（turn-0）甚至不会被识别为『需要复核』。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D14",
+      "area": "upload_semantics",
+      "conclusion": "上传入口是条件渲染的：Trace tab 与上传按钮仅在 workspaceMode === 'coding' 时出现（availableTabs 只给 coding 保留 trace），非 coding 会话连本地 trace 读面都没有；面板有一句『与全局开关互不影响』的解释，但全文未说明『上传里含/不含哪些内容』。",
+      "evidence": [
+        {"path": "src/components/telemetry/TelemetryPage.vue", "line": 111, "snippet": "const availableTabs = computed(() => isCoding.value ? [{ id: \"trace\", label: \"Trace\" }, { id: \"metrics\", label: \"指标\" }] : [{ id: \"metrics\", label: \"指标\" }]);"},
+        {"path": "src/components/telemetry/TelemetryPage.vue", "line": 226, "snippet": "v-if=\"isCoding && activeTab === 'trace'\"  // 上传按钮的可见条件"},
+        {"path": "src/components/config/ConfigGeneralSection.vue", "line": 458, "snippet": "<span class=\"text-[13px] font-medium text-stone-900\">全局轨迹上报</span>  // ADR 0050 定稿为『无隐私说明』的单行开关"}
+      ],
+      "impact": "目标受众（桌面开发者）在多数非 coding 会话下拿不到 trace 读面；而『上传什么』无文案，用户对『已上传成功』的预期（含对话内容）与实际（仅元数据）相反。",
+      "confidence": "verified"
+    },
+    {
+      "id": "D15",
+      "area": "upload_semantics",
+      "conclusion": "旁路授权语义在实现上是对的（逐 span 打 pony.otel.forced 标，关闭态只放行带标 span，且不改全局开关末态），但用户侧无可核对凭证：无上传记录（何时/哪会话/几条/trace_id），成功与失败都不写本地日志/状态文件，只有 4s toast。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1225, "snippet": "attributes.push(KeyValue::new(ATTR_PONY_OTEL_FORCED, true));  // 逐 span 授权标"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 3539, "snippet": "fn retain_exportable(batch: Vec<SpanData>) -> Vec<SpanData> { if spans_allowed() { return batch; } batch.into_iter().filter(|span| is_forced_attributes(&span.attributes)).collect() }"},
+        {"path": "src-tauri/src/lib.rs", "line": 732, "snippet": "async fn upload_session_trace(control_plane: State<'_, HostControlPlane>, session_id: String) -> Result<usize, String> { control_plane.upload_session_trace(&session_id).await }  // 无落盘回执"}
+      ],
+      "impact": "『用户点击即授权』的合规链缺一环：无法事后审计用户在某时刻上传了哪些会话数据。",
+      "confidence": "verified"
+    }
+  ],
+  "coverage": "已读并逐行核对：crates/pony-agent-core/src/agent/otel/mod.rs（属性常量全集、turn/llm/tool/governance span 构造、TurnTraceGuard::drop 聚合、force_export_session_trace 重放、push_str 脱敏、retain_exportable、导出预算常量）、otel/log.rs、ponysentry/sanitizer.rs、agent/session/types.rs（TurnTraceRecord 全字段）、control_plane/query_commands.rs::upload_session_trace、src-tauri/src/lib.rs 命令壳、src/components/telemetry/TelemetryPage.vue（上传交互全量）、src/components/TraceInspector.vue、src/components/HomeTracePanel.vue（指标/详情/工具详情/turn 头）、src/lib/runtime/{trace.ts,status.ts,phases.ts,messages.ts,useTraceProjection.ts,browser-preview.ts}、src/stores/{runtime.ts(看门狗/错误/降级),settings.ts}、src/components/chat/{AgentRuntimeStatusBar,WorkspaceComposer,WorkspaceTurnItem}.vue、src/components/HomeWorkspace.vue、src/components/common/ErrorBoundary.vue、src/components/config/ConfigGeneralSection.vue、src/types/{runtime,settings}.ts、docs/architecture/agent-trace-pipeline.md、docs/observability.yaml（tracing 归属与历次 wave 记录）、docs/decisions/0047*、docs/decisions/0055*、.dev-team/plan-otel-langfuse-migration.md。\n未覆盖/需他人补：[UNVERIFIED] 我未直连 ClickHouse，故『4 条 trace 上的 ttft/degraded/耗时来自实时导出而非手工重放』是从代码能力反推的（D2：重放版本不可能有这些属性），需用 trace_id 前缀或 span 数与本地 traceId 比对确认；[UNVERIFIED] otel-collector transform 是否会丢弃 langfuse.observation.* 属性无法在本仓验证，但『token 属性可见而 input 为空』已足够说明属性通道通畅、内容从未产生；[UNVERIFIED] Langfuse 版本对 langfuse.observation.input 的接收形态（字符串 vs JSON）需按部署版本核对，属修复方案设计前提，不影响本清单结论。"
+}

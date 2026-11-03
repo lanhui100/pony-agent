@@ -43,6 +43,7 @@
 - [Trace 诊断与收口报告 (pa_01a12a3f)](analysis/trace-analysis-pa-01a12a3f.md)
 - [Trace 诊断与收口报告 (pa_01a12d88)](analysis/trace-analysis-pa-01a12d88.md)
 - [Trace 诊断与闭环优化收口报告 (a0fa4c67)](analysis/trace-analysis-pa-0af4c67.md)
+- [桌面端 Trace 诊断评估（pa_01a1a134 · 4 turn，2026-11-03）](analysis/trace-analysis-pa-01a1a134.md)
 - [可观测性四维上报审计（真实会话 pa_01a17b23，2026-10-27）](audit/observability-audit-2026-10-27.md)
 - [可观测性四维上报审计（真实会话 pa_01a17c85，第二轮，2026-10-27）](audit/observability-audit-2026-10-27b.md)
 - [工程质量管理审计（ponygo 元框架 + 仓库门禁实测，2026-11-01）](audit/engineering-quality-audit-2026-11-01.md)

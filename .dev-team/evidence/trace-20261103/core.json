@@ -1,0 +1,212 @@
+{
+  "scope": "Rust core / backend only: crates/pony-agent-core + src-tauri. Read-only analysis; no source file modified.",
+  "session": "pa_01a1a134 (release 0.1.176, gemini-3.8-flash)",
+  "findings": [
+    {
+      "id": "C1",
+      "area": "tool_timeout",
+      "conclusion": "Run 的 60s 不是硬上限，而是\"命令字符串子串匹配(build/test/cargo/check/install)触发的自适应默认值\"；真正硬上限是 MAX_RUN_TIMEOUT_MS=120_000，且由入参 clamp 强制执行。turn-0 命中的 60000 ms 正是这条自适应分支的默认值。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 210, "snippet": "const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000;\nconst MAX_RUN_TIMEOUT_MS: u64 = 120_000;"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 2859, "snippet": "let default_timeout = if command.contains(\"build\") || command.contains(\"test\") || command.contains(\"cargo\") || command.contains(\"check\") || command.contains(\"install\") { 60_000 } else { DEFAULT_RUN_TIMEOUT_MS };"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 2877, "snippet": ".map(|value| value.clamp(1, MAX_RUN_TIMEOUT_MS)).unwrap_or(default_timeout);"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 5866, "snippet": "\"description\": \"命令超时毫秒数，默认 10000（构建/测试/检查类命令自适应为 60000），最大 120000\""}
+      ],
+      "impact": "turn-0 的 `timeout: 命令执行超过超时上限 60000 ms，已终止。`：cargo build/check 冷启动编译在本机必然超过 60s（本仓 157k 行 Rust），默认值判死是结构性的，不是偶发。另外子串匹配是误伤来源：任何命令文本里含 check/test/build 字样都会拿到 60s。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C2",
+      "area": "tool_timeout",
+      "conclusion": "超时后没有任何\"后台继续/延长到 120s 以上/分片\"的代码路径：超时分支只产出 timeout 错误 + classify_timeout_hint 文案，提示内容只有\"缩短命令\"或\"显式传入更大的 timeoutMs\"（上限仍 120s）；已在模型可见面的 JobStart/JobOutput 后台工具在提示里从未被提及，也没有 Run 超时 → 自动转后台的迁移逻辑。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 7961, "snippet": "fn classify_timeout_hint(command: &str) -> String { ... \"请缩短命令执行时间，或显式传入更大的 timeoutMs。\".to_string()"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 3156, "snippet": "None => format!(\"命令执行超过超时上限 {} ms，已终止。\", timeout_ms),"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 7558, "snippet": "TOOL_PRESENT | TOOL_FUZZY_FILE_SEARCH | TOOL_GIT_DIFF_REMOTE | TOOL_JOB_START | TOOL_JOB_OUTPUT | TOOL_JOB_KILL | TOOL_JOB_LIST => ToolExposure::ModelVisible,"}
+      ],
+      "impact": "turn-0 的 Run 被杀后，模型只有两条出路（重试/换命令），无法把长构建转成 job_start 后台轮询，也没有\"本轮预算内分片执行\"的引导。后台能力存在但不可被发现 = 事实上的缺失路径。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C3",
+      "area": "retry",
+      "conclusion": "\"延长超时后重试\"会被判成同一个失败信号：timeout 类失败的入参指纹会删掉 timeoutMs 字段（并剥离行首 NAME=value 前缀），因此同一条命令用更大超时重试仍累加同一 (工具, 指纹, 'timeout') 计数，达到 DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN=3 即熔断整轮。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/runtime/stream_support.rs", "line": 591, "snippet": "let normalized_args = if code == \"timeout\" && is_run_class_tool_name(&tool_call.name) { normalize_run_timeout_argument_value(&tool_call.arguments) }"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/stream_support.rs", "line": 532, "snippet": "map.remove(\"timeoutMs\"); ... strip_leading_inline_env_prefixes(command)"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/limits.rs", "line": 24, "snippet": "pub(super) const DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN: usize = 3;"}
+      ],
+      "impact": "把 C1/C2 串成闭环：任何 >120s 的构建在一轮内不可解 —— 60s 默认超时 → 重试 120s 再超时 → 第 3 次同信号 → 熔断整轮。turn-0/turn-3 的连续失败与最终 turn 失败都可由这条链解释。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C4",
+      "area": "retry",
+      "conclusion": "退出码 101（Rust panic / cargo 编译失败）完全没有被分类：非零退出一律归到 code/kind=non_zero_exit，唯一的退出码特判是 Windows 9009（命令不存在）。stderr 不做摘要、不做错误归因，整段（最多 64KB 环形缓冲截断）原样回灌模型。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 3198, "snippet": "let base_message = format!(\"命令执行完成，但退出码为 {}。\", exit_code ...);\nlet message = match windows_command_not_found_hint(cfg!(windows), exit_code, &command) { Some(hint) => ..., None => base_message };"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 3206, "snippet": "json!({ \"code\": \"non_zero_exit\", \"kind\": \"non_zero_exit\", \"message\": message, \"exitCode\": exit_code })"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 7948, "snippet": "if !is_windows || exit_code != Some(9009) { return None; }"}
+      ],
+      "impact": "turn-3 中退出码 101 出现 4 次：模型每次只能拿到\"退出码为 101\"这句话，没有\"cargo 编译错误/panic=101、请读 stderr 前 N 行\"的定向提示，因此它换着命令重试而不是修编译错误；配合 C5 最终熔断。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C5",
+      "area": "retry",
+      "conclusion": "熔断存在两道闸（同指纹连续 3 次；同工具连续 4 次，忽略入参/错误码），但触发后的处理是\"直接终结整轮\"，不升级策略、不换工具、不降级为总结；这就是 turn-3 `status_message=failed` 的产生点。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/runtime/limits.rs", "line": 38, "snippet": "pub(super) const DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES: usize = 4;"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs", "line": 509, "snippet": "if consecutive_failures.same_tool_count() >= max_consecutive_same_tool_failures_per_turn() { self.fail_stream_turn_with_hook_dispatch(..., build_same_tool_consecutive_failure_error(...)); return; }"},
+        {"path": "crates/pony-agent-core/src/agent/recovery.rs", "line": 199, "snippet": "if ctx.consecutive_failures >= self.config.max_consecutive_tool_failures { return RecoveryAction::CircuitBreakTurn { ... }"}
+      ],
+      "impact": "turn-3 的 7 次 Run 中 4 次连续失败（101/101/1/101）恰好在同工具闸值上 ⇒ 该轮以 failed 收尾、122.3s 白烧。turn-0 只有 1 次工具失败、未触发熔断，因此是 completed+degraded 而不是 failed。",
+      "confidence": "inferred"
+    },
+    {
+      "id": "C6",
+      "area": "error_semantics",
+      "conclusion": "`turn_error: tool_failed` 与 `failed` 是两个不同代码分支：phase==\"failed\" 时根 span 只写 Status::error(phase)（无归因文案）+ outcome=error；phase!=\"failed\" 但有子 span 错误聚合时才写 `turn_error: <reason>`。degraded 仅在 phase==completed 且工具失败计数>0 时为 true。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1870, "snippet": "if phase == \"failed\" { span.set_status(opentelemetry::trace::Status::error(phase.clone())); }"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1884, "snippet": "(false, Some(reason)) => { span.set_status(...turn_error_status_message(&reason)); span.set_attribute(...ATTR_AGENT_TURN_OUTCOME, \"error\"); }"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1986, "snippet": "let degraded = tool_failures > 0 && phase_snapshot.as_deref() == Some(\"completed\");"}
+      ],
+      "impact": "turn-0（outcome=error + status=turn_error: tool_failed + degraded=true）实际是\"轮次成功、子工具超时\"；turn-3（status=failed）才是真失败但反而丢失归因。对下游告警/成功率统计，两者都是 outcome=error，无法区分\"降级答完\"与\"整轮崩\"。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C7",
+      "area": "error_semantics",
+      "conclusion": "失败轮对前端/用户只下发固定英文文案 \"This turn failed.\" + 原始 error 字符串，不带本轮已产出的 assistant 正文；只有 trace_steps / tool_activities 被保留。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/turn_flow.rs", "line": 520, "snippet": "text: Some(\"This turn failed.\".to_string()),\n error: Some(error),"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/turn_persist.rs", "line": 430, "snippet": "self.update_execution_checkpoint(control, turn_id, \"failed\", ... Some(\"failed\"), Some(&error));"}
+      ],
+      "impact": "turn-3 用户看到的是通用英文失败文案 + \"工具 `Run` 已连续失败 4 次…\"，本轮前 6 次工具调用得到的分析结论没有作为正文呈现，表现为\"跑了 2 分钟什么也没给\"。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C8",
+      "area": "context",
+      "conclusion": "结构性往返放大：回合循环一次 hop 只执行一个工具调用（current_tool_call 单数），且 provider 层对\"一条 assistant 消息里多个 tool_use\"直接返回错误 —— 并行工具引擎 parallel_tools 已实现但全仓零生产接线（仅 mod.rs 声明 + 自身测试引用）。因此 LLM 往返次数 ≈ 工具调用次数。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/provider/mod.rs", "line": 3444, "snippet": "return Err(\"Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。\".to_string());"},
+        {"path": "crates/pony-agent-core/src/agent/provider/mod.rs", "line": 2638, "snippet": "if tool_call.is_some() { return Err(\"Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。\") }"},
+        {"path": "crates/pony-agent-core/src/agent/parallel_tools.rs", "line": 13, "snippet": "把 provider 的多调用接入本引擎需要改造回合循环（turn_sync/turn_stream 的单 hop 结构），已单列为计划 W28b"}
+      ],
+      "impact": "turn-0 的 14 次 llm.chat 与 14 次工具调用是 1:1 的必然结果，不是模型偏好；每次往返都要重发全量累积上下文 ⇒ 308k 累计 input tokens。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C9",
+      "area": "context",
+      "conclusion": "现有唯一能在单 hop 内并行的手段是 workspace_batch(parallel=true)，但它被只读白名单硬门限，Run/Write 无法批量；纯读场景理论上可把 N 次 Read 压成 1 次往返。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 187, "snippet": "const READ_ONLY_BATCH_CHILD_PRIMITIVES: &[&str] = &[LIST_FILES, READ_FILE, READ_FILE_SEGMENT, READ_DOCUMENT, PATH_INFO, SEARCH_TEXT, GLOB_FILES];"},
+        {"path": "crates/pony-agent-core/src/agent/dispatcher_composites.rs", "line": 241, "snippet": "let plan = build_batch_tool_plan(&child_requests, parallel, continue_on_error);\nlet entries = if parallel { ... }"}
+      ],
+      "impact": "turn-0 的 14 个工具里含多次 Read；若走 workspace_batch(parallel) 可减少 3–5 次 LLM 往返（每跳 4.3–11.8s）。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C10",
+      "area": "context",
+      "conclusion": "turn 内没有压缩、没有历史剪枝：自动压缩只在 turn 起点（turn_prep）触发一次，turn 内 accumulated_messages 单调增长，且每 hop 用 messages.clone() 全量复制两次。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/runtime/turn_prep.rs", "line": 40, "snippet": "if crate::agent::compression::should_compress(&current_snapshot.history, &provider, &config) { ... }"},
+        {"path": "crates/pony-agent-core/src/agent/provider/mod.rs", "line": 3469, "snippet": "*accumulated_messages = messages.clone();\n    messages"},
+        {"path": "crates/pony-agent-core/src/agent/jobs.rs", "line": 29, "snippet": "pub const JOB_BUFFER_CAP: usize = 2 * 1024 * 1024;  // 对照：单工具输出缓冲上限"}
+      ],
+      "impact": "turn-0 累计 input 308k、cache_read 228,987（74%）说明前缀缓存生效但上下文仍在每跳全量重发；一旦 exceed context 只能等下一轮起点压缩，轮内无兜底。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C11",
+      "area": "context",
+      "conclusion": "工具结果回灌没有\"摘要/只回错误行\"策略：OpenAI 兼容路径只做 12k 字符的 head(4500)+tail(2500) 摘录（中部直接丢，cargo 编译错误常在中部），Anthropic 原生路径完全无上限、原样内联。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/provider/mod.rs", "line": 3809, "snippet": "const OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS: usize = 12_000;\nconst OPENAI_TOOL_RESULT_HEAD_CHARS: usize = 4_500;\nconst OPENAI_TOOL_RESULT_TAIL_CHARS: usize = 2_500;"},
+        {"path": "crates/pony-agent-core/src/agent/provider/mod.rs", "line": 3802, "snippet": "fn anthropic_tool_result_content(tool_result: &ToolResult) -> Value { json!([{ \"type\": \"text\", \"text\": tool_result.output }]) }"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 3231, "snippet": "\"stdout\": stdout, \"stderr\": stderr, \"stdoutTruncated\": stdout_truncated, \"stderrTruncated\": stderr_truncated,"}
+      ],
+      "impact": "构建/测试类失败输出既撑上下文（每跳重发）又可能被摘录策略切断关键错误行，模型倾向于反复重跑同一命令（turn-3 的 7 次 Run）。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C12",
+      "area": "dedupe",
+      "conclusion": "同 turn 重复调用检测存在，但指纹只做\"key 排序 + 丢弃 description\"，字符串值不归一（不做路径规范化、不剥 ./、不折叠空白/大小写），因此同一文件用 `src/a.rs`、`./src/a.rs`、`.\" + \"/src/a.rs` 三种写法就是三个不同指纹，去重被绕过；命中重复时也不复用上次结果，而是再发一次 LLM 完成请求（额外往返），并附错误文案。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/runtime/stream_support.rs", "line": 446, "snippet": "if key == \"description\" { continue; }\n... normalized.insert(key, canonicalize_tool_argument_value(entry));"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/stream_support.rs", "line": 543, "snippet": "pub(super) fn tool_call_signature(tool_call: &ToolCall) -> String { format!(\"{}:{}\", tool_call.name, serde_json::to_string(&normalized)...) }"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs", "line": 993, "snippet": "if !seen_tool_signatures.insert(next_signature) { let recovery = recover_tool_followup_completion_stream(..., &build_duplicate_tool_call_error(&next_tool_call), ...) }"}
+      ],
+      "impact": "turn-0 的多次 1ms Read：完全相同的入参重复会被拦截（不会产生 1ms 执行记录），因此这些 1ms 读大概率是同文件的参数/路径变体读 —— 现有指纹无法识别，也不返回缓存结果。归因为推断，机制为已验证。",
+      "confidence": "inferred"
+    },
+    {
+      "id": "C13",
+      "area": "dedupe",
+      "conclusion": "read_file 只回前 4000 字符（120KB 以下文件也截断），不返回总行数、不给分段建议，只在末尾写\"当前仅展示前 4000 个字符\"；这直接诱导模型对同一文件反复 Read 试图看到后续内容（segment 工具存在但未被引导使用）。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 3708, "snippet": "truncate_preview(&content, 4000)"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 7668, "snippet": "\"{}\\n\\n[内容已截断，当前仅展示前 {} 个字符]\"  // 无总行数、无 offset/limit 引导"},
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 186, "snippet": "const MAX_FULL_READ_BYTES: u64 = 120_000;"}
+      ],
+      "impact": "trace 中多次 1ms Read 的行为成因之一；同时 4000 字符 ≈ 1.2k tokens 的碎片反复入上下文，推高 input tokens 与往返数。归因为推断，代码为已验证。",
+      "confidence": "inferred"
+    },
+    {
+      "id": "C14",
+      "area": "observability",
+      "conclusion": "tool.call span 的属性面只有 gen_ai.tool.name / langfuse.observation.type / agent.tool.status / agent.tool.duration_ms / agent.tool.error / gen_ai.tool.call.id：没有 exitCode、没有结构化 error kind（timeout 与 non_zero_exit 只能靠字符串文本区分）、没有 timeoutMs、没有 stderr 摘要、没有重试次数与熔断触发计数。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1428, "snippet": "pub fn tool_span_attributes(input: &ToolSpanInput) -> Vec<(String, AttrValue)> { push_str(&mut attributes, ATTR_GEN_AI_TOOL_NAME, &input.tool_name); ... }"},
+        {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 2531, "snippet": "if input.status != \"success\" { accumulate_active_turn_tool_failure(); }"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/trace_timeline.rs", "line": 168, "snippet": "pub(super) fn turn_tool_activity_error_kind(activity: &TurnToolActivity) -> Option<String> { ... kind/code ... }  // 只用于 turn-fatal 判定，未落 span 属性"}
+      ],
+      "impact": "在 Langfuse 上只能靠 `agent.tool.error` 文本 grep 出 60s 超时与 101 失败；无法按错误种类聚合\"本轮因超时损失多少秒\"，也无法区分\"超时\"vs\"编译错误\"两类 Run 失败。",
+      "confidence": "verified"
+    },
+    {
+      "id": "C15",
+      "area": "observability",
+      "conclusion": "Run 超时分支本身不写任何结构化日志（同函数的取消分支会写 warn 日志），自动压缩成功/失败也只走 eprintln，不产生 span 或结构化日志；provider 流式失败降级同样只有 eprintln。",
+      "evidence": [
+        {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 3094, "snippet": "\"run_command cancel path cleanup failed\"  // 仅取消路径有 log_json_with_fields，超时路径无对应日志"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/turn_prep.rs", "line": 77, "snippet": "eprintln!(\"[pony-agent] auto compaction completed: compressed {} messages, kept {}\", ...)"},
+        {"path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs", "line": 1965, "snippet": "eprintln!(\"[pony-agent] 流式决策失败，fallback 到同步决策 ...\")"}
+      ],
+      "impact": "turn-1 的单次 30.7s llm.chat 与 turn-0 的 60s 超时在日志面没有可检索的结构化痕迹（全仓 267 处 eprintln! 属同类问题），排障必须依赖 trace 文本与本地 stderr。",
+      "confidence": "verified"
+    }
+  ],
+  "coverage": {
+    "searched": [
+      "crates/pony-agent-core/src/agent/tools.rs (13974 行，超时常量/run_command/job_*/read_file/工具面/别名/退出码提示)",
+      "crates/pony-agent-core/src/agent/runtime/{turn_stream.rs, turn_persist.rs, turn_prep.rs, limits.rs, stream_support.rs, trace_timeline.rs, tool_exec.rs, compaction_ops.rs}",
+      "crates/pony-agent-core/src/agent/{otel/mod.rs, provider/mod.rs, parallel_tools.rs, dispatcher_composites.rs, recovery.rs, retry.rs, compression.rs, process.rs, jobs.rs, hooks.rs, turn_flow.rs}",
+      "src-tauri/src/{lib.rs, turn_task_registry.rs, tauri_adapter.rs, platform.rs, main.rs}",
+      "docs/observability.yaml, docs/architecture/agent-trace-pipeline.md"
+    ],
+    "keywords": [
+      "60000 / 60_000 / 命令执行超过超时上限 / timeoutMs / MAX_RUN_TIMEOUT_MS / DEFAULT_RUN_TIMEOUT_MS",
+      "consecutive / streak / same_tool_count / CircuitBreakTurn / max_consecutive",
+      "exit code 101 / non_zero_exit / tool_error_kind_is_turn_fatal / 9009 / classify_timeout_hint",
+      "turn_error / tool_failed / degraded / tool_failures / set_phase / status_message",
+      "accumulated_messages / build_context / should_compress / apply_compression / messages.clone",
+      "dedupe / tool_call_signature / seen_tool_signatures / canonicalize_tool_argument",
+      "parallel / tool_use / ensure_single_anthropic_tool_call / OPENAI_TOOL_RESULT_*"
+    ],
+    "not_covered": [
+      "前端 UI 侧（Vue 组件、失败态展示、trace 面板）——由前端队友负责",
+      "Langfuse/OTLP 导出 payload 取证（otel exporter 报文、session 归属、cost 计算）——由遥测队友负责",
+      "crates/pony-agent-core/src/agent/provider/{openai_sse.rs, responses_api.rs} 的多 tool_calls 丢弃细节（只确认了 Anthropic 路径的硬错误与 parallel_tools 未接线）",
+      "crates/pony-agent-core/src/agent/jobs.rs 的 JobStart 后台进程生命周期语义（只确认工具已挂模型可见面 + 2MB 缓冲）",
+      "provider HTTP 重试时序（PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS=5 与 turn-1 的 30.7s 单次调用是否相关未验证）",
+      "governance.decide 0ms span 的覆盖率语义（只确认 span 存在）",
+      "turn-0 14 次 llm.chat 与 14 次工具的逐条对账（依赖 trace payload，未在本任务取证）"
+    ]
+  }
+}
