@@ -1,0 +1,17 @@
+   --> crates/pony-agent-core/src/agent/orchestration.rs:688:4
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+    Finished `dev` profile [unoptimized] target(s) in 0.51s
+     Running `target/debug/examples/w61_e2e_probe`
+STEP0b providers_saved=true
+STEP0 engine_wired=true
+MOCK_REQ n=1 bytes=57317 is_teammate=true
+STEP1 phase=ready assistant_len=8 assistant_preview="probe-ok"
+STEP1b tool_activities=[]
+STEP2 request_bytes=57317 missing_team_tools=[] policy_in_system=true has_Run=true
+STEP3 spawn_ok=true
+STEP4 send_ok=true
+POLL pending=2 driving=true requests=1
+POLL pending=0 driving=true requests=1
+MOCK_REQ n=2 bytes=57482 is_teammate=true
+STEP5 provider_requests=2 teammate_requests=1 lead_replies=["Teammate 'tester' finished turn:\nprobe-ok"]
+RESULT=E2E_OK
