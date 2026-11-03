@@ -1,6 +1,7 @@
 # 契约矩阵：Run 工具超时策略（tool-timeout-policy）· v2
 
 > 依据：桌面端 trace `pa_01a1a134` 诊断 P0-2 + DSH 超时设计（`/home/dm/deepseek-harness` @ de5d733a18）。
+> v3 修订（Lead 裁决，2026-11-04）：新增 CT-5/CT-5a（hint 指向后台执行）与 S2 接缝，授权迁移 wave9 冻结断言。
 > v2 修订（Lead 裁决，2026-11-04）：撤销原 CT-6（指纹区分 timeoutMs），CT-5（hint 文案）延后波次二。
 > 修订依据：侦察证实现有冻结验收测试 `wave9_adversarial_test.rs:55/:255`、`harness_optimizations_test.rs:215`
 > 明确要求「仅 timeoutMs 不同 ⇒ 指纹相同」，且这是刻意的反重试风暴设计（模型不得靠加大 timeout 绕过熔断）。
@@ -22,6 +23,18 @@
 | :--- | :--- | :--- |
 | CT-5 | 超时 hint 增加「后台执行 job_start」与「显式更大 timeoutMs（上限 600000）」 | 撞 `wave9_green_acceptance_test.rs:143` 逐字断言 → 需契约演进 + 冻结测试迁移提交 |
 | CT-6′ | 真·promote（超时把运行中命令转后台 job） | 侦察结论：Run 进程所有权在 `ProcessManager`（`process.rs:306`）、`poll` 为「取走即清空」（`:869-872`）、`kill_after` 无 disarm API（`:433-443`）、取消 watcher 随函数返回 drop；需 jobs.rs 适配层 + 生命周期重构，非局部补丁 |
+
+## 波次二之先行项：CT-5（v3 新增，本波实施）
+
+| ID | 契约 | 验收方式（机器） |
+| :--- | :--- | :--- |
+| CT-5 | `classify_timeout_hint` 两条分支都必须给出「后台执行」与「上限」两条出路：非网络分支文案为「长任务请改用后台执行 `job_start`（`job_output` 取增量输出、`job_kill` 终止，无超时上限）；或显式传入更大的 timeoutMs（上限 600000）；仍不足时缩短或拆分命令。」；网络分支保留既有网络自检四标记并**追加**同样的后台/上限建议 | 断言 hint 同时含 `job_start`、`job_output`、`600000`；网络分支另含 `网络/认证/代理`、`git ls-remote`、`git config --get remote.origin.url`、`SSH 身份自检` |
+| CT-5a | 工具 schema 文案（`tools.rs:5864`）追加后台执行指引，前端副本 `src/lib/runtime/browser-preview.ts:35` 逐字同步 | 两处字符串相等且含 `job_start` |
+
+**可测接缝（新增 S2）**：`pub fn classify_timeout_hint(command: &str) -> String`（`agent/tools.rs`）。
+
+**冻结测试迁移（契约演进授权）**：`crates/pony-agent-core/tests/wave9_green_acceptance_test.rs:21` 的 `DEFAULT_TIMEOUT_HINT`
+常量与 `:189` 的逐字断言由 **test-agent** 更新为新文案（Lead 授权，独立提交 `test(freeze)`），并追加 3 条标记断言。
 
 ## 非目标
 

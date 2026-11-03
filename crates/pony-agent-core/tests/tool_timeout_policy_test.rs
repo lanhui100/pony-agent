@@ -1,11 +1,11 @@
-//! 契约验收测试：Run 工具超时策略（`tool-timeout-policy.md` · Phase 1）
+//! 契约验收测试：Run 工具超时策略（`tool-timeout-policy.md` · 波次一 + v3 先行项）
 //!
-//! 契约真源：`.dev-team/contracts/tool-timeout-policy.md` §1 CT-1..CT-4（Lead 裁决 v2：
-//! CT-5 延后到波次二、CT-6 撤销）。
+//! 契约真源：`.dev-team/contracts/tool-timeout-policy.md`（v3：CT-1..CT-4 与 CT-5/S2；
+//! v2 裁决已撤销原 CT-6「指纹区分 timeoutMs」）。
 //! 本文件是**外部黑盒验收**（integration test，独立 crate），只通过契约声明的可测接缝断言，
 //! 不复制实现结构、不读取私有常量、不吞异常、不使用永真断言。
 //!
-//! ## 覆盖矩阵（CT → 用例，共 13 个）
+//! ## 覆盖矩阵（CT → 用例，共 15 个）
 //! - CT-1 → `ct1_contract_default_timeout_constant_observable_via_seam`、
 //!   `ct1_contract_max_timeout_constant_observable_via_seam`
 //! - CT-2 → `ct2_former_heuristic_commands_all_resolve_to_default`、
@@ -17,11 +17,18 @@
 //! - CT-4 → `ct4_timeout_path_evidence_marks_timed_out_true`、
 //!   `ct4_success_path_evidence_marks_timed_out_false`、
 //!   `ct4_success_path_reports_default_timeout_when_absent`
+//! - CT-5 / S2 → `ct5_non_network_hint_points_to_background_jobs`、
+//!   `ct5_network_hint_keeps_self_checks_and_points_to_background_jobs`
 //!
-//! ## 按 Lead 裁决删除/延后的范围（本文件**不含**这些用例）
-//! - CT-5（`classify_timeout_hint` 文案）：延后到波次二 —— 改文案会撞冻结用例
-//!   `wave9_green_acceptance_test.rs:143` 的逐字断言。
-//! - CT-6（`tool_failure_fingerprint` 含 `timeoutMs`）：**撤销** —— 与冻结用例
+//! ## 契约演进记录
+//! - **CT-5（v3 新增，本波实施）**：`classify_timeout_hint` 由私有改 `pub`（S2）。原先「延后到
+//!   波次二」的唯一阻塞项是撞 `wave9_green_acceptance_test.rs` 的逐字断言；Lead 已授权冻结
+//!   断言迁移（契约演进，独立 `test(freeze)` 提交），该文件 `DEFAULT_TIMEOUT_HINT` 常量与逐字
+//!   断言已同步为 CT-5 新文案，并追加 `job_start`/`job_output`/`600000` 三条标记断言；故本文件
+//!   只断三条标记，避免两处重复维护同一逐字文本。
+//! - **CT-5a（schema 文案同步）**：不在本文件验收范围（属 `tools.rs` schema 与前端副本的字符串
+//!   相等性，由 executor 侧 src 单测覆盖，见契约 CT-5a）。
+//! - **CT-6（撤销，本文件不含）**：`tool_failure_fingerprint` 含 `timeoutMs` 与冻结用例
 //!   `harness_optimizations_test.rs:215` / `wave9_adversarial_test.rs` 的
 //!   「仅 timeoutMs 不同 ⇒ 指纹相同」语义相反，该语义是刻意的反重试风暴设计。
 //!
@@ -40,9 +47,12 @@
 //! 4) **CT-4 的真实进程依赖**：超时用例必须真的让一个子进程跑过 deadline 才会产生超时证据，
 //!    因此依赖本地 shell 的 `sleep`（Windows `ping`）真实进程；deadline 取 200ms，远大于调度
 //!    抖动，属确定性触发而非 sleep 竞猜。被测子进程的"睡"不是测试自身的等待同步。
+//! 5) **CT-5 为纯函数验收**（S2）：只断 `classify_timeout_hint` 文本标记，不真跑进程。
 
 use pony_agent_core::agent::sandbox::TestSandboxBackend;
-use pony_agent_core::agent::tools::{resolve_run_timeout_ms, ToolCall, ToolRouter};
+use pony_agent_core::agent::tools::{
+    classify_timeout_hint, resolve_run_timeout_ms, ToolCall, ToolRouter,
+};
 use serde_json::{json, Value};
 
 /// 契约值（来自契约 CT-1/CT-2/CT-3，不是对实现的镜像复制：
@@ -377,6 +387,80 @@ fn ct4_success_path_reports_default_timeout_when_absent() {
         CONTRACT_DEFAULT_TIMEOUT_MS,
         payload
     );
+}
+
+// ---------------------------------------------------------------------------
+// CT-5 / S2：超时 hint 必须给出「后台执行」与「上限」两条出路
+// ---------------------------------------------------------------------------
+
+/// 非网络命令：hint 必须指向后台执行（`job_start` + `job_output` 取增量输出）并写明上限 600000。
+///
+/// 逐字文案由冻结用例 `wave9_green_acceptance_test::timeout_hint_classifies_network_commands`
+/// 以 `DEFAULT_TIMEOUT_HINT` 常量驱动断言（契约演进授权迁移），此处只断 CT-5 的三条标记，
+/// 避免同一逐字文本在两地重复维护。
+#[test]
+fn ct5_non_network_hint_points_to_background_jobs() {
+    // Arrange
+    let command = "cargo build --release";
+
+    // Act
+    let hint = classify_timeout_hint(command);
+
+    // Assert
+    assert!(
+        !hint.trim().is_empty(),
+        "CT-5：非网络命令 `{}` 的 hint 不得为空串，实测 hint={:?}",
+        command,
+        hint
+    );
+    for marker in ["job_start", "job_output", "600000"] {
+        assert!(
+            hint.contains(marker),
+            "CT-5：非网络命令 `{}` 的 hint 必须同时给出后台执行与上限出路（缺标记 `{}`），实测 hint={}",
+            command,
+            marker,
+            hint
+        );
+    }
+}
+
+/// 网络命令：四网络自检标记必须保留，且**追加**同样的后台执行/上限建议。
+///
+/// 契约 CT-5 原文「网络分支保留既有网络自检四标记并**追加**同样的后台/上限建议」⇒
+/// 网络分支同样必须含 `job_start`/`job_output`/`600000`。
+#[test]
+fn ct5_network_hint_keeps_self_checks_and_points_to_background_jobs() {
+    // Arrange
+    let command = "git push --dry-run";
+
+    // Act
+    let hint = classify_timeout_hint(command);
+
+    // Assert 1：既有四网络自检标记一字不少。
+    for marker in [
+        "网络/认证/代理",
+        "git ls-remote",
+        "git config --get remote.origin.url",
+        "SSH 身份自检",
+    ] {
+        assert!(
+            hint.contains(marker),
+            "CT-5：网络命令 `{}` 的 hint 必须保留网络自检标记 `{}`，实测 hint={}",
+            command,
+            marker,
+            hint
+        );
+    }
+    // Assert 2：同样的后台执行/上限退出路必须追加。
+    for marker in ["job_start", "job_output", "600000"] {
+        assert!(
+            hint.contains(marker),
+            "CT-5：网络命令 `{}` 的 hint 必须追加后台执行/上限出路（缺标记 `{}`），实测 hint={}",
+            command,
+            marker,
+            hint
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

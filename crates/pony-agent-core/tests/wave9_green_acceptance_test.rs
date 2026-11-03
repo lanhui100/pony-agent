@@ -7,8 +7,13 @@
 //! 1. P1-1 超时清理的行为存活代理 —— `ProcessManager::tracked_count` 是 `#[cfg(test)]` 的
 //!    crate 内部 API，集成测试不可达；因此以「超时后执行通道仍可用」的行为代理验收，
 //!    内部不变量（tracked_count == 0）由 process.rs 的 crate 内单测覆盖，此处不重复。
-//! 2. P1-2 超时 hint 分类 —— 网络类命令给出「网络/认证/代理」三类可能 + 自检步骤，
-//!    非网络类命令逐字保持默认文案。
+//! 2. P1-2 超时 hint 分类 —— 网络类命令给出「网络/认证/代理」三类可能 + 自检步骤；
+//!    非网络类命令逐字等于默认文案。
+//!
+//! 契约演进（`tool-timeout-policy.md` v3 · Lead 授权，独立 `test(freeze)` 提交）：
+//! 本文件 `DEFAULT_TIMEOUT_HINT` 由「请缩短命令执行时间，或显式传入更大的 timeoutMs。」
+//! 迁移为 CT-5 新文案（增加「后台执行 job_start」与「上限 600000」两条出路），逐字断言保留，
+//! 并追加 `job_start` / `job_output` / `600000` 三条标记断言。除此之外未改动任何其他用例。
 //!
 //! 环境事实：本机 Linux x86_64、无 rustup。
 
@@ -17,8 +22,11 @@ use pony_agent_core::agent::tools::{ToolCall, ToolRouter};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
-/// 默认非网络类超时 hint 文案（契约 P1-2 要求逐字保持）。
-const DEFAULT_TIMEOUT_HINT: &str = "请缩短命令执行时间，或显式传入更大的 timeoutMs。";
+/// 默认非网络类超时 hint 文案（契约 `tool-timeout-policy.md` v3 CT-5 要求逐字保持）。
+///
+/// v3 迁移：原文案为「请缩短命令执行时间，或显式传入更大的 timeoutMs。」，现按 CT-5 增加
+/// 「后台执行 `job_start`」与「显式更大 timeoutMs（上限 600000）」两条出路（Lead 授权迁移）。
+const DEFAULT_TIMEOUT_HINT: &str = "长任务请改用后台执行 `job_start`（`job_output` 取增量输出、`job_kill` 终止，无超时上限）；或显式传入更大的 timeoutMs（上限 600000）；仍不足时缩短或拆分命令。";
 
 /// 建立隔离的临时 workspace + ToolRouter（每个用例独立目录，用后即清）。
 struct Harness {
@@ -138,7 +146,7 @@ fn run_command_timeout_leaves_no_process_entry() {
 }
 
 /// P1-2 超时 hint 分类：网络类命令给出「网络/认证/代理」三类可能 + 三步自检；
-/// 非网络类命令逐字保持默认文案。
+/// 非网络类命令逐字等于默认文案（v3 CT-5：两分支都必须给出后台执行 `job_start` 与上限 `600000`）。
 #[test]
 fn timeout_hint_classifies_network_commands() {
     let harness = Harness::new("timeout_hint");
@@ -189,4 +197,19 @@ fn timeout_hint_classifies_network_commands() {
         plain_hint, DEFAULT_TIMEOUT_HINT,
         "非网络类命令的 hint 必须逐字保持默认文案（不得被网络分类污染）"
     );
+
+    // CT-5（v3）：默认文案必须同时给出「后台执行」与「上限」两条出路，而不只是缩短命令。
+    for marker in ["job_start", "job_output", "600000"] {
+        assert!(
+            plain_hint.contains(marker),
+            "非网络类超时 hint 必须含标记 `{marker}`（CT-5：后台执行 + 上限 600000），实测 hint：{plain_hint}"
+        );
+    }
+    // 网络类 hint 同样必须追加后台执行/上限建议，且保留网络自检。
+    for marker in ["job_start", "600000"] {
+        assert!(
+            network_hint.contains(marker),
+            "网络类超时 hint 必须含标记 `{marker}`（CT-5：后台执行 + 上限 600000），实测 hint：{network_hint}"
+        );
+    }
 }
