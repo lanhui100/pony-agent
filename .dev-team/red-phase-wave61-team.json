@@ -482,5 +482,78 @@
         }
       ]
     }
-  ]
+  ],
+  "v1_2_snapshot": {
+    "generated_at": "2026-11-03T10:35:29+08:00",
+    "command": "cargo test -p pony-agent-core --test wave61_team_activation --test tool_surface_wave20_contract --test wave37_tool_surface --test wave25_capability_honesty_test",
+    "exit_code": 0,
+    "log_path": "/tmp/w61-v12-gate.log",
+    "note": "v1.2（workflow 退回 Internal → 模型面 38 项；策略段口径 Run/cas_conflict）迁移后快照：4 个测试二进制全绿，共 23 用例（8+2+9+4），无失败无 ignored。断言与 src 均已符合 v1.2，故无『断言未满足』或『src 未实施』的残留差异。",
+    "suites": [
+      {
+        "target": "tests/tool_surface_wave20_contract.rs",
+        "passed": 2,
+        "failed": 0
+      },
+      {
+        "target": "tests/wave25_capability_honesty_test.rs",
+        "passed": 4,
+        "failed": 0
+      },
+      {
+        "target": "tests/wave37_tool_surface.rs",
+        "passed": 9,
+        "failed": 0
+      },
+      {
+        "target": "tests/wave61_team_activation.rs",
+        "passed": 8,
+        "failed": 0
+      }
+    ],
+    "supersedes_red_phase": true,
+    "supersedes_note": "本波 v1.2 后 red 阶段（39 项 / workflow 可见 / 策略段缺失）已被 Executor 实施收口；runs[] 保留为历史物理收据，以 v1_2_snapshot 为当前判定。"
+  },
+  "v1_3_snapshot": {
+    "generated_at": "2026-11-03T10:45:07+08:00",
+    "command": "cargo test -p pony-agent-core --test wave61_team_activation",
+    "exit_code": 0,
+    "log_path": "/tmp/w61-v13-f.log",
+    "summary": {
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0
+    },
+    "passed_cases": [
+      "c1_product_names_do_not_fall_back_to_run",
+      "c1_team_tools_are_model_visible",
+      "c1_workflow_stub_is_not_model_visible",
+      "c2_builder_registers_subagent_engine",
+      "c3_team_policy_absent_when_unwired",
+      "c3_team_policy_system_message_present_when_wired",
+      "c5_same_gate_source",
+      "c7_send_message_drives_teammate_turn",
+      "c8_subagent_turn_uses_parent_workspace_root",
+      "c9_policy_gate_evaluated_once",
+      "probe_child_env",
+      "v13_child_env"
+    ],
+    "failed_cases": [],
+    "new_cases_v1_3": [
+      "c7_send_message_drives_teammate_turn",
+      "c8_subagent_turn_uses_parent_workspace_root",
+      "c9_policy_gate_evaluated_once"
+    ],
+    "child_process_evidence": {
+      "c7": "C7_OK calls=1 observed=6 final=Some(Inactive)  （子进程 stderr/stdout 实跑：引擎被调用 1 次、轮询采样 6 次、成员最终 Inactive）",
+      "c8": "C8_OK records=[Some(\"/tmp/wave61-c8-parent-root-...\"), None]  （父根逐字透传 + None 原样透传）"
+    },
+    "assertion_liveness_proof": {
+      "note": "三条新用例在当前实现下为绿，必须证明其断言非空：以 HEAD（v1.2 实现）为反证基线。",
+      "c9": "HEAD 的 build_layered_turn_context 内 agent_team_policy_enabled() 直接调用 3 次 → 断言 (≤1 + 存在局部绑定) 在 HEAD 上必红；当前为 1 次 + let team_policy_injected 绑定 → 绿",
+      "c7": "HEAD 的 send_message 函数体内 run_turn 引用数 0（只入队 + 改状态，不驱引擎、不回执 lead inbox）→ 断言 (b)(c) 在 HEAD 上必红；当前子进程实跑 calls=1 且 lead inbox 命中 stub 回执 → 绿",
+      "c8": "HEAD 无 run_turn_in / subagent_in_workspace（各 0 处）→ 该用例在 HEAD 上编译即失败（无法运行，而非假绿）；接口落地后实测透传正确 → 绿"
+    },
+    "remaining_deviation": 0
+  }
 }

@@ -277,8 +277,8 @@
     },
     "team_tool_surface_exact_count": {
       "type": "integer",
-      "const": 39,
-      "description": "wave-61 新增（additive-only，未进入顶层 required）：模型可见工具面精确项数。29（W37-C1 × W42/PA-149 基线）+ 10 项团队工具（subagent/workflow/spawn_teammate/list_agents/send_message/interrupt_agent/drain_inbox/team_task_create/team_task_update/team_task_list）= 39。契约：.dev-team/contracts/wave-61-team-activation.md C1-A1。"
+      "const": 38,
+      "description": "wave-61 新增（additive-only，未进入顶层 required）：模型可见工具面精确项数。29（W37-C1 × W42/PA-149 基线）+ 9 项团队工具（subagent/spawn_teammate/list_agents/send_message/interrupt_agent/drain_inbox/team_task_create/team_task_update/team_task_list）= 38；workflow 按 v1.2 C1.7 保持 Internal（实现是桩，orchestration.rs:286-297），不进模型面。契约：wave-61 C1-A1/C1-A8。"
     },
     "subagent_engine_registration_required_in": {
       "type": "array",
@@ -294,6 +294,21 @@
       "type": "boolean",
       "const": true,
       "description": "wave-61 新增（additive-only，未进入顶层 required）：subagent_runtime_wired() 为 true 时必须在 System 稳定前缀层注入静态 Agent Team 策略段（标题行 `Agent Teams is available in this session`）；为 false 时完全不注入。契约：wave-61 C3-A1/C5-A1。"
+    },
+    "subagent_max_concurrent": {
+      "type": "integer",
+      "const": 2,
+      "description": "wave-61 v1.2 复登（值不得改动，真值源 crates/pony-agent-core/src/agent/subagent_runtime.rs SUBAGENT_MAX_CONCURRENT）：子代理并发上限；口径见 wave-37 基线 nfr-baseline-wave37.json。契约：wave-61 C6.3/C6-A4。"
+    },
+    "subagent_turn_timeout_ms": {
+      "type": "integer",
+      "const": 120000,
+      "description": "wave-61 v1.2 复登（值不得改动，真值源 orchestration.rs SUBAGENT_TURN_TIMEOUT_MS）：端到端子代理 turn 预算，非 external_call_timeout_ms(<=3000) 的请求级往返预算；与流式例外同性质，故独立字段登记。契约：wave-61 C6.3/C6-A4。"
+    },
+    "subagent_max_prompt_bytes": {
+      "type": "integer",
+      "const": 200000,
+      "description": "wave-61 v1.2 复登（值不得改动，真值源 subagent_runtime.rs SUBAGENT_MAX_PROMPT_BYTES）：子代理 prompt 字节上限（超出即 prompt_too_large）。契约：wave-61 C6.3/C6-A4。"
     }
   },
   "required": [

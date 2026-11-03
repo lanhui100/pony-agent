@@ -61,14 +61,28 @@
       "l3p_blocking_resolution": "wave-55 按方案(b)登记缺口 → wave-56 按方案(a)根治：新增总时长上界与取消观测，并保留可注入 seam 供测试（无需 sleep 30min）。",
       "registered_at": "2026-11-01",
       "updated_at": "2026-11-01 wave-56"
+    },
+    {
+      "surface": "subagent turn (HostTurnEngine / orchestration::subagent run_turn)",
+      "code": "crates/pony-agent-core/src/agent/orchestration.rs:237 SUBAGENT_TURN_TIMEOUT_MS = 120_000（调用点 :265/:276/:595）",
+      "semantics": "turn 级端到端预算（经 run_turn(prompt, timeout_ms) 注入），非请求级往返预算",
+      "why_not_base": "external_call_timeout_ms=3000 描述单次外部往返预算；120000 覆盖一次子代理 turn 的建栈+provider 生成+工具往返，套 3000ms 会截断任何真实子代理回合（与 provider streaming 例外同性质）",
+      "guarantee": "超时以结构化 `subagent_timeout: orphan session_id=…` 返回；孤儿工作线程与许可提前归还属 wave-61 C6.2 已登记的已知限制（引擎无 stop API，最长存活到 provider 通道 30min 上界）",
+      "known_gap_ref": "L3-P@60e7cb8 Q1 FAIL / finding orchestration.rs:237；基线复登见 wave-61 C6.3（subagent_turn_timeout_ms=120000 / subagent_max_concurrent=2 / subagent_max_prompt_bytes=200000）",
+      "l3p_blocking_resolution": "wave-61 v1.3 按 Lead 裁决：登记 NFR 豁免 + 基线复登；不修改 external_call_timeout_ms=3000，不放宽既有 streaming 例外",
+      "registered_at": "2026-11-03",
+      "updated_at": "2026-11-03 wave-61 v1.3"
     }
   ],
   "logging_eprintln_exempt_note": "wave-55 新增 5 处生产 eprintln（MCP 环境禁用键丢弃 1、secret store 明文回退 2、save_store/save_session_state 失败 2），均带错误上下文、不含密文；按 L3-P 复审 ADV-1 修正此前高报的 6。JSON+trace_id 结构化收敛仍属 PA-119 债务",
-  "team_tool_surface_exact_count": 39,
+  "team_tool_surface_exact_count": 38,
   "subagent_engine_registration_required_in": [
     "tauri",
     "harness",
     "tui"
   ],
-  "team_policy_prompt_injected_when_wired": true
+  "team_policy_prompt_injected_when_wired": true,
+  "subagent_max_concurrent": 2,
+  "subagent_turn_timeout_ms": 120000,
+  "subagent_max_prompt_bytes": 200000
 }
