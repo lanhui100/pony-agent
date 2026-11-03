@@ -1,8 +1,8 @@
 {
   "wave": "wave-61-team-activation",
-  "phase": "green-v1.4-final",
+  "phase": "green-v1.5-final",
   "verified_by": "lead",
-  "captured_at": "2026-11-03T11:13:05+0800",
+  "captured_at": "2026-11-03T11:44:13+0800",
   "exit_code": 0,
   "suites": [
     {
@@ -34,15 +34,19 @@
       "failed": 0
     },
     {
-      "passed": 14,
+      "passed": 15,
       "failed": 0
     }
   ],
-  "cases": [],
+  "total_passed": 41,
+  "commands": [
+    "8 suites: wave61_team_activation(15)/pa110(5)/wave37(9)/wave25(4)/wave20(2)/orchestration_acceptance(4)/team_task_order(1)/teammate_e2e(1)",
+    "cargo check -p pony-agent-core --all-targets -> exit 0"
+  ],
   "notes": [
-    "C10 per-target single-flight + requeue on engine error",
-    "interrupt semantics aligned with implementation",
-    "subagent workspace root resolution unified with file tools",
-    "14 wave61 cases green, stable across 2 consecutive runs"
+    "C10-A2 驱动循环以收件箱为空为退出条件（含 turn 在途新到消息）",
+    "中断改为 INTERRUPTED 标记 + drain 后引擎前检查点",
+    "新增只读 seam inbox_pending_len（测试非破坏性观测）",
+    "c7d 在途消息用例 3 连跑稳定绿"
   ]
 }

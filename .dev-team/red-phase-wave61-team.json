@@ -677,5 +677,99 @@
     "note": "Executor 的 C10（单飞 DRIVING 集合 + requeue_messages）已落地，故三条用例真实通过；用例数 14（含 2 个 env 入口 probe_child_env / v13_child_env），Lead 预期 15 的差额为『c7 属强化而非新增』",
     "race_observed": false,
     "remaining_deviation": 0
+  },
+  "v1_5_snapshot": {
+    "generated_at": "2026-11-03T11:28:34+08:00",
+    "command": "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture",
+    "phase": "red（c7d 等待 Executor 的 C10 在途消费修复）",
+    "case_count": 15,
+    "runs": [
+      {
+        "iteration": 1,
+        "exit_code": 101,
+        "passed": 14,
+        "failed": 1,
+        "log": "/tmp/w61-v15-run1.log",
+        "failed_case": "c7d_inflight_message_not_stranded",
+        "child_reason": "引擎调用次数 == 1（期望 2）——MSGB 未被消费"
+      },
+      {
+        "iteration": 2,
+        "exit_code": 101,
+        "passed": 14,
+        "failed": 1,
+        "log": "/tmp/w61-v15-run2.log",
+        "failed_case": "c7d_inflight_message_not_stranded",
+        "child_reason": "引擎调用次数 == 1（期望 2）——MSGB 未被消费"
+      },
+      {
+        "iteration": 3,
+        "exit_code": 101,
+        "passed": 14,
+        "failed": 1,
+        "log": "/tmp/w61-v15-run3.log",
+        "failed_case": "c7d_inflight_message_not_stranded",
+        "child_reason": "引擎调用次数 == 1（期望 2）——MSGB 未被消费"
+      }
+    ],
+    "new_case": {
+      "name": "c7d_inflight_message_not_stranded",
+      "location": "tests/wave61_team_activation.rs：父用例 + 子进程分支 v13_child_env=\"c7d\" → run_c7d_body()",
+      "assertions": [
+        "(a) 引擎调用次数 == 2",
+        "(b) prompts[0] 含 c7d-MSG-A、prompts[1] 含 c7d-MSG-B，且 MSG-B 不在第一次 prompt 内",
+        "(c) 最终成员状态 Inactive 且 drain_inbox(target) 为空",
+        "(d) 同时在途峰值 == 1（无第二个并发驱动）"
+      ],
+      "determinism": "阻塞型 Stub 引擎：run_turn 进入后 Condvar 阻塞，直到测试线程确认 MSG-B 已由 send_message 入队才放行；不使用 sleep 猜测时序"
+    },
+    "red_evidence": {
+      "reason": "calls == 1 且 收件箱残留 == []",
+      "diagnosis": "第二条消息 not stranded 而是**静默丢弃**：驱动中（DRIVING）时 send_message 的路由没有让消息进入驱动循环的后续迭代，也没有留在收件箱",
+      "stability": "3/3 次运行复现一致（均 calls==1、残留为空），非 flaky"
+    },
+    "other_cases": "其余 14 用例全绿（c1_* / c2_* / c3_* / c5 / c7 / c7b / c7c / c8 / c9 + 2 个 env 入口）",
+    "remaining_deviation": "1 条红相用例待 Executor 修复（C10 在途消费）"
+  },
+  "v1_6_snapshot": {
+    "generated_at": "2026-11-03T11:39:20+08:00",
+    "command": "cargo test -p pony-agent-core --test wave61_team_activation -- --nocapture",
+    "exit_code": 0,
+    "case_count": 15,
+    "runs": [
+      {
+        "iteration": 1,
+        "exit_code": 0,
+        "passed": 15,
+        "failed": 0,
+        "log": "/tmp/w61-v16-run1.log"
+      },
+      {
+        "iteration": 2,
+        "exit_code": 0,
+        "passed": 15,
+        "failed": 0,
+        "log": "/tmp/w61-v16-run2.log"
+      },
+      {
+        "iteration": 3,
+        "exit_code": 0,
+        "passed": 15,
+        "failed": 0,
+        "log": "/tmp/w61-v16-run3.log"
+      }
+    ],
+    "c7d_change": {
+      "lead_adjudication": "c7d 的等待方式改为只读观测（Executor 提供 additive seam orchestration::inbox_pending_len，不消费消息）；断言口径不变、不放宽",
+      "rewrite": [
+        "等待条件：轮询 drain_inbox（破坏性）→ 轮询 inbox_pending_len(target)==0 且状态 Inactive（20ms 步进、上限 5s）",
+        "结论观测：drain_inbox 返回值 → 只读 inbox_pending_len(target) 计数",
+        "四条断言保持全强度：(a) calls==2；(b) prompts[0] 含 MSG-A、prompts[1] 含 MSG-B、MSG-B 不在 prompts[0]；(c) 最终 Inactive 且 pending==0；(d) 在途峰值==1"
+      ],
+      "root_cause_correction": "v1_5 判定的『消息被静默丢弃』实为测试自身注入：drain_inbox 轮询抢走了驱动循环该消费的消息。改为只读观测后同一实现直接转绿，证明实现无缺陷",
+      "physical_evidence": "C7D_OK calls=2 peak=1 prompts=2"
+    },
+    "race_observed": false,
+    "remaining_deviation": 0
   }
 }

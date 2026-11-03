@@ -1,5 +1,7 @@
 # Wave-61 交付说明：Agent Team 激活（工具面 × 宿主接线 × 策略提示）
 
+> 最终状态：契约 FROZEN **v1.5**；模型可见工具面 **38 项**；红相 `52a7a21` → 实施 `60e7cb8`/`922e960` → 收口 `ed6d35e`(+ v1.5 驱动循环修正)。
+
 - 骨架分级：B（跨模块：tools / runtime / context / control_plane / provider 测试面）
 - 红相锚定：`52a7a21` `test(wave-61-team): freeze red-phase acceptance tests (C1-C5) + migrate 3 frozen contracts`
 - 绿相实施：`60e7cb8` `feat(wave-61-team): expose team tools, wire host subagent engine, inject team policy prompt`
@@ -28,7 +30,7 @@ spawn_teammate / list_agents / send_message / interrupt_agent / drain_inbox / te
 
 | 契约 | 内容 | 落点 |
 |---|---|---|
-| C1 | 10 项团队工具 `ModelVisible`（模型面 29 → 39 项） | `tools.rs:7422-7437` |
+| C1 | 9 项团队工具 `ModelVisible`（模型面 29 → **38** 项；`workflow` 因桩退回 Internal，见 §6） | `tools.rs` `tool_exposure_for_name` |
 | C1.6 | `model_visible_tool_name_opt` 小写原名透传（否则 telemetry 把工具记成 `Run`，污染 trace） | `tools.rs:7282-7295` |
 | C2 | `AgentRuntimeBuilder::build()` 内 `OnceLock` 幂等注册 `HostTurnEngine`（tauri / harness / tui / cli 四条宿主零改动获益） | `runtime/builder.rs:79-104` + `:135-152` |
 | C3 | 静态团队策略段作为 `BASE_SYSTEM_PROMPT` 之后的第二条 `System` 消息，门控 `subagent_runtime_wired()` | `context.rs:50-88`、`:449-455`、`:548-566`、`:613` |
@@ -51,7 +53,7 @@ spawn_teammate / list_agents / send_message / interrupt_agent / drain_inbox / te
 ## 4. 不可逆面登记
 
 - 无 DB schema / 序列化编号 / Loki label 变更。
-- 工具面 29 → 39 属 `additive`；**反向不可逆点**：团队工具一旦进入模型面，旧客户端缓存前缀失效一次（可回滚，重新构建即恢复）。
+- 工具面 29 → 38 属 `additive`；**反向不可逆点**：团队工具一旦进入模型面，旧客户端缓存前缀失效一次（可回滚，重新构建即恢复）。
 - 三条冻结契约的断言语义被强化（不可见 → 必须可见），回退需连带回退契约（已在契约 C4 留痕）。
 
 ## 5. 已知限制与遗留

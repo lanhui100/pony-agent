@@ -472,8 +472,9 @@ fn v13_child_env() {
         "c7" => run_c7_body(),
         "c7b" => run_c7b_body(),
         "c7c" => run_c7c_body(),
+        "c7d" => run_c7d_body(),
         "c8" => run_c8_body(),
-        other => panic!("未知 {V13_CHILD_ENV}={other}（只允许 c7|c7b|c7c|c8）"),
+        other => panic!("未知 {V13_CHILD_ENV}={other}（只允许 c7|c7b|c7c|c7d|c8）"),
     }
 }
 
@@ -634,6 +635,29 @@ fn c7c_requeue_on_engine_error() {
     assert!(
         outcome.stdout.contains("C7C_OK"),
         "C7c 失败：子进程成功退出但未输出 `C7C_OK` 标记\nstdout:\n{}",
+        outcome.stdout
+    );
+}
+
+/// C7d（C10 修复）：**在途期间到达的消息不得被滞留（stranded）**。
+///
+/// 阻塞型 Stub 引擎让第一次 turn 停在闸门上；期间第二条 `send_message` 入队；放行后驱动循环
+/// 必须继续消费该消息（第二次引擎调用），而不是把消息留在收件箱里等下一次外部触发。
+/// 断言 (a) 调用次数 == 2、(b) 两次 prompt 分别含 MSG-A / MSG-B、(c) 最终 `Inactive` 且收件箱空、
+/// (d) 在途峰值 == 1（不允许第二个并发驱动线程）。
+#[test]
+fn c7d_inflight_message_not_stranded() {
+    let outcome = run_v13_child("c7d");
+    assert!(
+        outcome.status.success(),
+        "C7d 失败（红相）：在途消息被滞留——放行后驱动循环未继续消费。子进程 Exit={:?}\n--- child stdout ---\n{}\n--- child stderr ---\n{}",
+        outcome.status.code(),
+        outcome.stdout,
+        outcome.stderr
+    );
+    assert!(
+        outcome.stdout.contains("C7D_OK"),
+        "C7d 失败：子进程成功退出但未输出 `C7D_OK` 标记\nstdout:\n{}",
         outcome.stdout
     );
 }
@@ -1217,6 +1241,118 @@ fn run_c7c_body() {
     );
 
     println!("C7C_OK contents={contents:?}");
+}
+
+/// C7d 真实断言体：在途消息不得滞留（闸门保证确定性，无 sleep 猜测）。
+fn run_c7d_body() {
+    sandbox_env();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let engine = Arc::new(ScenarioEngine::new("c7d-stub-reply").with_gate(Arc::clone(&gate)));
+    let (_engine, target) = spawn_inert_teammate(engine, "c7d-probe");
+    let engine = _engine;
+
+    // 1) send(MSG-A)：驱动线程进入引擎后会被闸门挡住（确定性重叠窗口）。
+    orchestration::send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "c7d-MSG-A".to_string(),
+        mode: Some(MessageDeliveryMode::Queue),
+    })
+    .expect("C7d 前置失败：send(MSG-A) 必须成功");
+    assert!(
+        wait_until(Duration::from_secs(2), || {
+            engine.calls.load(Ordering::SeqCst) >= 1
+        }),
+        "C7d 前置失败：2s 内引擎第一次调用未进入（send 未驱动）"
+    );
+
+    // 2) 在途期间入队 MSG-B（此时引擎仍被闸门阻塞）。
+    orchestration::send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "c7d-MSG-B".to_string(),
+        mode: Some(MessageDeliveryMode::Queue),
+    })
+    .expect("C7d 前置失败：send(MSG-B) 必须成功");
+
+    // 3) 放行闸门，让第一次 turn 结束；驱动循环必须继续消费 MSG-B。
+    {
+        let (lock, condvar) = &*gate;
+        *lock.lock().unwrap_or_else(|err| err.into_inner()) = true;
+        condvar.notify_all();
+    }
+
+    // 4) 轮询直到「待处理数 == 0 且成员 Inactive」（上限 5s、20ms 小步）。
+    //
+    //    关键（Lead 裁决）：必须用**只读观测** seam `inbox_pending_len`；破坏性的 `drain_inbox`
+    //    轮询会把驱动循环本该消费的消息抢走并丢弃，属测试自身注入的竞态，不是实现缺陷。
+    let pending_zero_and_inactive = wait_until(Duration::from_secs(5), || {
+        orchestration::inbox_pending_len(&target) == 0
+            && teammate_status_of(&target) == Some(TeammateStatus::Inactive)
+    });
+    // 静默等待：调用数稳定 + 无在途调用。
+    let mut stable = 0usize;
+    let mut last_calls = usize::MAX;
+    let _ = wait_until(Duration::from_secs(5), || {
+        let calls = engine.calls.load(Ordering::SeqCst);
+        if calls == last_calls && engine.in_flight.load(Ordering::SeqCst) == 0 {
+            stable += 1;
+        } else {
+            stable = 0;
+            last_calls = calls;
+        }
+        stable >= 3
+    });
+
+    let calls = engine.calls.load(Ordering::SeqCst);
+    let peak = engine.peak_in_flight.load(Ordering::SeqCst);
+    let prompts = engine.prompts();
+    // 只读观测待处理条数（不消费，避免测试自身抢走消息）。
+    let pending_left = orchestration::inbox_pending_len(&target);
+    let status = teammate_status_of(&target);
+
+    // Assert (a)：必须发生两次引擎调用（第二次由同一驱动循环消费 MSG-B）。
+    assert_eq!(
+        calls, 2,
+        "C7d 失败：引擎调用次数 == {calls}（期望 2）——放行后驱动循环未继续消费在途期间入队的消息。\
+         判定口径：收件箱残留非空＝消息被**滞留**；收件箱为空但引擎只跑了 {calls} 次＝消息被**静默丢弃**。\
+         实际待处理残留={pending_left}；prompts={prompts:?}"
+    );
+
+    // Assert (b)：两次 prompt 分别含 MSG-A 与 MSG-B（各一次）。
+    assert!(
+        prompts[0].contains("c7d-MSG-A"),
+        "C7d 失败：第一次 prompt 不含 MSG-A；prompts={prompts:?}"
+    );
+    assert!(
+        prompts[1].contains("c7d-MSG-B"),
+        "C7d 失败：第二次 prompt 不含 MSG-B（在途消息未被后续循环消费）；prompts={prompts:?}"
+    );
+    assert!(
+        !prompts[0].contains("c7d-MSG-B"),
+        "C7d 失败：MSG-B 在第一次 turn 就已入 prompt（闸门时序被破坏，断言无效）"
+    );
+
+    // Assert (c)：最终状态 Inactive 且待处理队列为空（只读观测，不消费）。
+    assert!(
+        pending_zero_and_inactive,
+        "C7d 失败：5s 内未收敛到「待处理数 == 0 且 Inactive」（实际 pending={pending_left}, status={status:?}）——消息被滞留"
+    );
+    assert_eq!(
+        pending_left, 0,
+        "C7d 失败：收件箱仍有 {pending_left} 条待处理消息（在途消息被滞留）"
+    );
+    assert_eq!(
+        status,
+        Some(TeammateStatus::Inactive),
+        "C7d 失败：最终成员状态必须为 Inactive"
+    );
+
+    // Assert (d)：不允许第二个并发驱动线程。
+    assert_eq!(
+        peak, 1,
+        "C7d 失败：同时在途引擎调用峰值 == {peak}（期望 1）——出现了第二个并发驱动"
+    );
+
+    println!("C7D_OK calls={calls} peak={peak} prompts={}", prompts.len());
 }
 
 /// 记录 `run_turn_in` 收到的 workspace_root 的 Stub 引擎。

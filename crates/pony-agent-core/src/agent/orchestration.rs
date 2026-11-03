@@ -156,6 +156,30 @@ fn begin_driving(target: &str) -> Option<DrivingGuard> {
     Some(DrivingGuard(target.to_string()))
 }
 
+/// Wave-61 C10-A2 配套：被 `interrupt_agent` 标记为中断的 target（一次性消费）。
+///
+/// 中断语义不能用「status == Inactive」表达：收口（turn 正常结束）同样会把状态置回
+/// `Inactive`，两者混用会让驱动循环把「本轮刚结束」误判成「被中断」而提前退出，
+/// 导致 turn 在途期间到达的消息滞留（C10-A2 缺陷）。故用独立的一次性标记。
+static INTERRUPTED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+
+/// 标记某队友被中断（由 `interrupt_agent` 调用）。
+fn mark_interrupted(target: &str) {
+    if let Ok(mut lock) = INTERRUPTED.lock() {
+        lock.get_or_insert_with(std::collections::HashSet::new)
+            .insert(target.to_string());
+    }
+}
+
+/// 消费中断标记：返回 `true` 表示该 target 已被中断且标记 hereby 清除。
+fn take_interrupted(target: &str) -> bool {
+    INTERRUPTED
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.as_mut().map(|set| set.remove(target)))
+        .unwrap_or(false)
+}
+
 /// 该 target 是否已有驱动在跑（观测用）。
 pub fn is_driving(target: &str) -> bool {
     DRIVING
@@ -558,10 +582,18 @@ fn drive_loop_in(
     target: &str,
     workspace_root: Option<&std::path::Path>,
 ) -> Result<(), String> {
+    // Wave-61 C10-A2：以「收件箱为空」为**唯一**正常退出条件。
+    // - 成功：处理完一批后继续 drain —— turn 在途期间新到的消息（因 `DRIVING` 单飞不会
+    //   另起驱动）由此被同一循环消费，绝不滞留；
+    // - 失败：`drive_teammate_turn_in` 已按 C10.2 把整批原序放回队首并置 `Inactive`，
+    //   这里立即 `?` 退出（避免 `subagent_busy` / `prompt_too_large` 这类确定性失败自旋），
+    //   消息留在收件箱等待下一次 `send_message` 或外部驱动；
+    // - 中断：`take_interrupted` 命中时单批驱动返回 `Ok(None)`，循环随之结束；
+    // - `DRIVING` 标记由调用方持有的 `DrivingGuard` 清除，覆盖成功/失败/panic 全部路径。
     loop {
         match drive_teammate_turn_in(target, workspace_root)? {
-            Some(_reply) => continue, // 已处理一批，再 drain 看是否还有
-            None => return Ok(()),    // 收件箱已空（或被中断检查点拦下）
+            Some(_reply) => continue,
+            None => return Ok(()),
         }
     }
 }
@@ -666,6 +698,9 @@ pub fn interrupt_agent(args: InterruptAgentArgs) -> Result<InterruptAgentResult,
     let prev = member.status.clone();
     member.status = TeammateStatus::Inactive;
 
+    // Wave-61 C7.4：独立的中断标记（一次性消费）——驱动循环会在下一次 drain 边界前停下。
+    mark_interrupted(&args.target);
+
     Ok(InterruptAgentResult {
         success: true,
         previous_status: prev,
@@ -704,6 +739,21 @@ pub fn drain_inbox(args: ReadInboxArgs) -> Result<ReadInboxResult, String> {
         target: args.target,
         messages,
     })
+}
+
+/// Wave-61 C10-A2 配套（additive，只读）：某队友收件箱里**待消费**的消息条数。
+///
+/// 供外部观察者（测试 / UI / 观测）等待"收件箱已空"而**不**像 [`drain_inbox`] 那样
+/// 破坏性消费消息 —— 后者会把驱动循环应消费的消息抢走（C7d 的竞态根因）。
+pub fn inbox_pending_len(target: &str) -> usize {
+    TEAMMATE_INBOXES
+        .lock()
+        .ok()
+        .and_then(|lock| {
+            lock.as_ref()
+                .and_then(|map| map.get(target).map(|deque| deque.len()))
+        })
+        .unwrap_or(0)
 }
 
 pub fn team_task_create(args: TeamTaskCreateArgs) -> Result<TeamTaskItem, String> {
@@ -837,8 +887,9 @@ pub fn drive_teammate_turn_in(
     target: &str,
     workspace_root: Option<&std::path::Path>,
 ) -> Result<Option<String>, String> {
-    // 检查点 #1（drain 之前）：已被 `interrupt_agent` 置为 Inactive → 本轮不再启动。
-    if teammate_status(target) == Some(TeammateStatus::Inactive) {
+    // 检查点 #1（drain 之前）：已被 `interrupt_agent` 标记 → 消费标记并停止本轮驱动
+    // （C7.4：中断在下一次 drain 边界前生效；引擎无回合内 stop API）。
+    if take_interrupted(target) {
         return Ok(None);
     }
 
@@ -846,10 +897,19 @@ pub fn drive_teammate_turn_in(
         target: target.to_string(),
     })?;
     if result.messages.is_empty() {
+        // 收件箱为空＝唯一退出条件（Wave-61 C10-A2）。循环由 `drive_loop_in` 负责。
         return Ok(None);
     }
 
-    // 启动前置：成员置为 Running（对 `list_agents` 可见，C7.5 的行为锚点）。
+    // 检查点 #2（引擎调用之前）：drain 期间到来的中断 → 整批原序放回队首后停止，
+    // 不丢弃任何消息、也不跑一个"已被要求停下"的 turn。
+    if take_interrupted(target) {
+        requeue_messages(target, &result.messages);
+        set_teammate_status(target, TeammateStatus::Inactive);
+        return Ok(None);
+    }
+
+    // 启动前置：成员置为 Running（对 `list_agents` 可见；C10.3 迁移序 Active → Running → Inactive）。
     set_teammate_status(target, TeammateStatus::Running);
 
     // 整合收件箱内的消息内容
