@@ -20,15 +20,28 @@
         "src/components/chat/WorkspaceComposer.vue",
         "src/styles.css"
       ],
-      "test_scopes": ["tests/acceptance/wave61/", "tests/e2e/wave61-status-panel.spec.ts", "tests/（§5/§5.1 授权迁移 8 文件）"],
-      "status": "red_anchored",
-      "red_commit": "<red-anchor>",
-      "green_commit": null
+      "test_scopes": [
+        "tests/acceptance/wave61/",
+        "tests/e2e/wave61-status-panel.spec.ts",
+        "tests/（§5/§5.1 授权迁移 8 文件）"
+      ],
+      "status": "green_verified",
+      "red_commit": "b1d62f3",
+      "green_commit": "5c0eb40",
+      "test_fix_commit": "cf783b0"
     }
   },
   "plan_reviews": {
-    "l3a": { "file": ".dev-team/review-plan-wave61-a.json", "verdict": "FAIL(处置完毕)", "lint_exit": 0 },
-    "l3b": { "file": ".dev-team/review-plan-wave61-b.json", "verdict": "FAIL(处置完毕)", "lint_exit": 0 }
+    "l3a": {
+      "file": ".dev-team/review-plan-wave61-a.json",
+      "verdict": "FAIL(处置完毕)",
+      "lint_exit": 0
+    },
+    "l3b": {
+      "file": ".dev-team/review-plan-wave61-b.json",
+      "verdict": "FAIL(处置完毕)",
+      "lint_exit": 0
+    }
   },
   "adjudications": [
     "R1 缓存比率尾段移出行内、并入 tooltip（实测 86px > 63.5px track）",
@@ -39,5 +52,15 @@
     "R6 HomeSidebar tooltip 断言按「位点 → tooltip」同生共死迁移",
     "R7 栅格化后补「位点自身宽度 Δ≤0.5px」等价判别断言"
   ],
-  "coordination_note": "共享工作区存在并发波次（wave-60 stop-sequence / wave-61-team）未提交变更：本波 git 写一律定向 add 本波文件，禁止 git add . / git reset --hard / git clean。"
+  "coordination_note": "共享工作区存在并发波次（wave-60 stop-sequence / wave-61-team）未提交变更：本波 git 写一律定向 add 本波文件，禁止 git add . / git reset --hard / git clean。",
+  "gates": {
+    "G-1": "137 files / 1303 passed（排除嵌套 spawn 文件）+ 两条子命令手动等价 Exit 0",
+    "G-2": "vue-tsc --noEmit Exit 0",
+    "G-3": "npm run build Exit 0",
+    "G-4": "playwright wave61 6 passed Exit 0",
+    "G-5": "audit-diff Exit 0 + check-declaration PASS"
+  },
+  "known_issues": [
+    "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts 在 vitest 内嵌套 spawn vitest 时，机器负载下子进程 pool write EPIPE（既有脆弱点，非本波因果面；其断言目标已用手动等价子命令 Exit 0 证明）"
+  ]
 }

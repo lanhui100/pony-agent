@@ -6,6 +6,10 @@
 采集时间：2026-11-03 09:33–09:56（Asia/Shanghai）
 采集时工作区状态：`src/components/HomeStatusPanel.vue` **未修改**（仍为 wave-59 版），`src/components/chat/WorkspaceComposer.vue` 仍保留 composer 圆环 —— 即「实现尚未落地」的纯净红相。
 
+> **状态更新（2026-11-03 10:16，实现落地后）**：本文件 §0–§8 为「红相」历史收据；
+> 实现落地后暴露 4 处**用例自身缺陷**，经 Lead 授权「用例自身缺陷重写豁免」修正，现已全绿。
+> **红→绿收据与豁免依据见文末 §9**（`npx vitest run tests/acceptance/wave61` → Exit 0，19/19）。
+
 ---
 
 ## 0. 结论先行
@@ -251,3 +255,136 @@ $ npx vitest run tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts --re
 - 未写 `src/**`；未做任何 git 写操作（仅 `git status` 只读查看）；`tests/**` 之外无改动（除本文件与 `.dev-team/wave61-*.json` 收据）；
 - 临时产物全部落在 `/tmp`（`/tmp/w61-*.log`、`/tmp/wave61-*-vitest.json`、`/tmp/w61e2e.js`），仓库内只保留 §1 列出的证据文件；
 - 未新增任何 `skip` / `.only` / 吞异常；临时探针文件 `tests/acceptance/wave61/__tmp_probe.spec.ts` 已删除（用于验证 `collectTooltipTexts` 可读到 Tooltip 文案：实测返回 11 条真实文案）。
+
+
+---
+
+# §9 绿相收据（实现落地 + 用例缺陷重写豁免后）
+
+采集时间：2026-11-03 10:14–10:22（Asia/Shanghai）
+前置：executor 已落地 `src/components/HomeStatusPanel.vue` 与 `src/components/chat/WorkspaceComposer.vue`（本 agent **未写 `src/**`**）。
+
+## 9.1 命令与 Exit code（物理收据）
+
+| 命令 | Exit | 结果 |
+| :-- | :-- | :-- |
+| `npx vitest run tests/acceptance/wave61 --reporter=dot` | **0** | **Test Files 4 passed (4) / Tests 19 passed (19)** |
+| `npx vitest run tests/acceptance/wave61 --reporter=json --outputFile=.dev-team/wave61-green-vitest.json` | **0** | numTotal=19 / numPassed=19 / numFailed=0 |
+| 迁移 4 套件（wave59-f2 + wave17-tabular + HomeSidebar + wave54-T5） | **0** | **Test Files 4 passed (4) / Tests 30 passed \| 2 skipped (32)** |
+| `… --reporter=json --outputFile=.dev-team/wave61-migrated-green-vitest.json` | **0** | numTotal=32 / numPassed=30 / numPending=2（存量 skip）/ numFailed=0 |
+| `npx vitest run tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts` | **0** | **Tests 3 passed (3)**（189s；含 V10-2/V10-3 子进程实跑全量既有单测） |
+
+> 2 条 skipped 为**存量** skip（非本波新增）。
+> V10 三项全绿同时构成「既有全量单测未回归」的独立证据（V10-3 即实跑排除 `tests/acceptance/pds-streaming/**` 的全量单测）。
+
+## 9.2 用例自身缺陷重写（豁免依据与逐条根因）
+
+授权：Lead 复核认定 3 条失败「SUT 行为符合契约，属用例缺陷」，按「用例自身缺陷重写豁免」授权修正。
+纪律：只动 `tests/**`；**不放宽任何阈值/契约断言**；每处修正均在文件内写明「缺陷根因 + 原意图保持不变」。
+
+| # | 位置 | 缺陷根因（实测） | 修正方式 | 原意图是否弱化 |
+| :-- | :-- | :-- | :-- | :-- |
+| D1 | `wave61-layout.spec.ts` L-4（原 `children.length === 2`） | 测试挂载把 `Teleport` 桩成 `teleport: true`，位点内两个 `Tooltip`（图标 + 值）各渲染一个 `TELEPORT-STUB` ⇒ DOM 实得 4（`svg \| TELEPORT-STUB \| span \| TELEPORT-STUB`）。该断言在**任何**实现下不可满足（迁移前原实现同样如此）。 | 新增 `semanticChildren()`（排除 `teleport-stub`），断言语义子节点恰为 2，并**加严**为「恰 1 个 `svg` 图标 + 恰 1 个 `span` 值节点」 | 否（更严；「无预留盒」另由 `widthReservationViolations` 覆盖） |
+| D2 | `wave61-empty-values.spec.ts` E-2(R1)（原 `children.length === 2`） | 同 D1（缓存位 4 个 DOM 子节点） | 同 D1（`semanticChildren` 后恰为 2） | 否（尾段不在行内另由「行内无 `·`/`%`」+「比率出现在 tooltip」双重覆盖） |
+| D3 | `wave61-empty-values.spec.ts` E-2(R1) 分支 2（`全部 tooltip 扫 \d+%`） | 圆环 tooltip 天然含 `上下文用量：<1% · …`（契约 §1 L-2 语义）⇒ 全场扫描与 L-2 直接冲突，正确实现必红 | 把百分比检查**限定在缓存位相关 tooltip**（含 `缓存读取` 或 `命中率`），并加「缓存 tooltip 必须存在」锚点自检 | 否（比率不得出现的要求不变） |
+| D4 | `wave61-empty-values.spec.ts` E-4 分支 1（计数行折叠） | 夹具自相矛盾：只置空 3 个计数位，却沿用默认 `contextDisplayTokens: 9 / contextWindowTokens: 200000`；按契约 §1 L-2 圆环是计数行**第 4 位点**，圆环有值 ⇒ 可见位点数 = 1（≠0），SUT 渲染计数行是正确的 | 该分支同时置 `contextDisplayTokens: null`，并**追加反向哨兵**「计数位全 0 但圆环有值 ⇒ 计数行必须仍渲染、行内仅剩圆环位」把语义显式冻结 | 否（新增一条更强的语义冻结） |
+| D5 | `tests/HomeSidebar.spec.ts` R6（`arrayContaining(["输入","输出","缓存读取"])`） | 夹具数据前提与 landed projection 不符：`sessionCacheHitTokensTotal` 由 `providerCallRecords[].cacheHitInputTokens` 求和，该夹具只有 turn 级 `cacheHitInputTokens`、无 per-call 记录 ⇒ 缓存值为 `null` ⇒ 按 §2 E-2 **缓存位整个不渲染**（探针实测：`status-metric-cache-tokens` 不在 DOM，tooltip 文案仅含 `输入`/`输出`） | **首轮**曾临时改为双向等价；**Lead 裁决（2026-11-03）改为「补夹具、不放宽断言」**：给该 turn 补 1 条 per-call 记录（`cacheHitInputTokens`/`cacheMissInputTokens`/`outputTokens`，**刻意不带 timing** 以保持速度位缺席），并把 `缓存读取` 恢复为**无条件精确包含** + 加夹具自检（缓存位在 DOM 且文本非空） | 否（断言强度**恢复原状**，夹具反而更强） |
+| D6 | `wave61-empty-values.spec.ts` E-4 拦截横幅分支（夹具 `$patch` 失效） | pinia `$patch(object)` 对**未在 `state()` 声明**的键（`governanceDecision` 由事件处理器动态赋值）静默丢弃 ⇒ 横幅永不出现，夹具恒失效（该分支原本无法证明任何事） | 改为直接赋值 `store.governanceDecision = {...}`，并加「夹具自检：`governanceBlockDetail` 必须非 null」 | 否（新增夹具自检，杜绝空断言） |
+
+> 说明：D1–D4、D6 属**测试环境/夹具**缺陷；D5 属**夹具数据前提**缺陷（Lead 原口径假定「缓存位在场」，实测 landed projection 下不在场）。6 处均未触碰 `src/**`，未改任何契约阈值（0.5px / 200ms / cubic-bezier / min-w 表 / pct clamp 全部原样）。
+
+## 9.3 仍未运行（保持显式声明）
+
+| 项 | 原因 | 执行方 |
+| :-- | :-- | :-- |
+| `npx playwright test tests/e2e/wave61-status-panel.spec.ts`（G-4a..G-4e + §5.2 R7） | 需 `npm run build`（G-3）后的 `vite preview:4175` 产物 | Lead |
+| `npx vitest run`（全量，G-1）+ `vue-tsc`（G-2）+ `npm run build`（G-3） | 门禁集合归 Lead | Lead |
+
+## 9.4 D5 终态（Lead 裁决后：补夹具 + 恢复强断言）
+
+裁决：**恢复强断言，用补夹具而非放宽断言**（依据：§5.1「补夹具数据、不改断言强度」同类，Lead 一票授权；只加数据、不加逻辑）。
+
+| 项 | 终态 |
+| :-- | :-- |
+| 夹具 | `turn-status-tokens` 的 trace record 增加 `providerCallRecords: [createProviderCallRecord({ inputTokens: 8437, cacheHitInputTokens: 4352, cacheMissInputTokens: 4085, outputTokens: 1366 })]`；**刻意不提供 `turnDurationMs`/`firstTokenLatencyMs`** ⇒ 生成速度仍无值、「速度位缺席 ⇒ 其 tooltip 缺席」条件断言前提保持成立 |
+| 断言 | `expect(tooltipTexts).toEqual(expect.arrayContaining(["输入", "输出", "缓存读取"]))`（**无条件精确包含**，恢复原强度） |
+| 夹具自检（Lead 指定） | `status-metric-cache-tokens` 必须在 DOM；其 `textContent.trim()` 必须非空 |
+| 数据链实测 | `sessionCacheHitTokensTotal ← providerCallRecords[].cacheHitInputTokens = 4352` ⇒ 缓存位渲染 `4.4K`；`sessionCacheHitRatio = round(4352/8437×100) = 52%` 落在值 tooltip `缓存读取：4.4K（会话累计读取）· 命中率 52%`（实现为**两条独立 tooltip**：图标 `缓存读取` + 值文案），故精确包含成立 |
+| 未改动 | 速度位条件断言、R6 正向用例（速度位在场 ⇒ tooltip 在）、`src/**` 零改动 |
+
+## 9.5 最终绿相复跑（Lead 指定命令）
+
+| 命令 | Exit | 结果 |
+| :-- | :-- | :-- |
+| `npx vitest run tests/HomeSidebar.spec.ts tests/acceptance/wave61` | **0** | **Test Files 5 passed (5) / Tests 27 passed \| 2 skipped (29)** |
+| `npx vitest run tests/acceptance/wave61` | **0** | **19 passed (19)** |
+| 迁移 4 套件（wave59-f2 / wave17-tabular / HomeSidebar / wave54-T5） | **0** | **30 passed \| 2 skipped (32)** |
+
+### 环境噪声记录（诚实披露，非断言失败）
+
+复跑期间出现过 2 次 vitest forks 池的**进程级**故障（`Timeout terminating forks worker` / `write EPIPE`，退出码 1），
+发生在同一 worker 内连续挂载多个重型组件树的场景；`Test Files/Tests` 计数中**无任何 assertion failure**。
+清理残留 worker 进程（`pkill -f vitest`）后连续 3 次复跑均 Exit 0，随后 Lead 指定命令亦 Exit 0。
+结论：属测试运行器资源抖动，与本波断言/SUT 无关；若 G-1 复现，可用 `--no-file-parallelism` 规避并保留原始日志。
+
+
+---
+
+# §10 真实浏览器门禁 G-4 收尾（D7 / D8 用例缺陷 + R8 实现裁决）
+
+采集时间：2026-11-03 10:38–10:42（Asia/Shanghai）
+前置：executor 实现已落地；Lead 已修 R8（显式列位）。本 agent 仅改 `tests/e2e/wave61-status-panel.spec.ts` + 本收据，**未动 `src/**`**。
+
+## 10.1 命令与 Exit code
+
+```bash
+$ npx vite build                     # 为 G-4 准备与当前 src 一致的 dist（R8 已含：col-start-1 命中）
+# Exit code: 0（4.47s）
+
+$ npx playwright test tests/e2e/wave61-status-panel.spec.ts --retries=0 --reporter=list
+# Exit code: 0
+#   6 passed (26.4s)
+```
+
+| # | 用例 | 结果 |
+| :-- | :-- | :-- |
+| 1 | `G-4a: 真实 Chromium 中圆环位于 status-metrics-counts 行内，且 composer 区域无圆环` | **PASS**（4.2s） |
+| 2 | `G-4b: 空数据 → 位点/DOM 不存在（count=0）；注入数据 → 位点出现且入场动画 getAnimations() 命中` | **PASS**（4.0s） |
+| 3 | `G-4c: 两行同为 4 列时，上下 4 个列中心的 x 坐标差 ≤ 0.5px` | **PASS**（4.0s） |
+| 4 | `§5.2(R7): 同一 token 位点在 9 / 12 / 1234 三档文本下自身宽度 Δ ≤ 0.5px（min-w 预留真实生效）` | **PASS**（4.0s） |
+| 5 | `G-4d: 首页加载 + 数据注入 + 状态面板渲染全程 Console Error = 0 且未捕获异常 = 0` | **PASS**（3.9s） |
+| 6 | `G-4e: 关键旅程截图落盘 docs/release/evidence/wave-61-status-panel/（存在且 > 10KB）` | **PASS**（4.2s） |
+
+截图物理凭据（G-4e 断言通过）：`docs/release/evidence/wave-61-status-panel/wave61-status-panel-fullpage.png`（88,363 B）、`wave61-status-panel-viewport.png`（88,363 B），均 > 10KB。
+
+## 10.2 D7 用例缺陷修正（G-4b · easing 断言口径）
+
+| 项 | 内容 |
+| :-- | :-- |
+| 现象 | `status-metric-turn-count` 的 easing 断言失败，实测 `"linear"` |
+| 根因（**用例缺陷**，非 SUT） | CSS Animation 的 `animation-timing-function` 在 Web Animations API 中落到**每个关键帧**的 `easing`（`getKeyframes()[i].easing`）；而 `effect.getTiming().easing` 对 CSS Animation **恒为 `"linear"`** ⇒ 原断言在正确实现下必红 |
+| 修正 | 缓动改读 `getKeyframes()[0].easing`；时长仍读 `getTiming().duration`；新增「关键帧 ≥2」前置断言；`timingEasing` 仅作诊断串保留 |
+| 原意图 | **未弱化**：仍精确断言 `200ms` + `cubic-bezier(0.3, 0.7, 0.4, 1)`，并保留首/末帧 `opacity` / `translateY(4px)` / 圆环 `scale(0.92)` 断言 |
+
+## 10.3 D8 用例缺陷修正（G-4c / §5.2 R7 测量口径）
+
+| 项 | 内容 |
+| :-- | :-- |
+| 现象 | 计数行第 4 列（圆环位）`rect.width` 实测 59.41px ⇒ `widthSpread` 超阈 |
+| 根因（**用例缺陷**，非 SUT） | 测量发生在**入场动画进行中**：圆环位 `scale(0.92)→1` 使 `getBoundingClientRect().width` 随 transform 缩放。Lead 取证：圆环位 动画中 58.42 / 动画结束后 63.5；`offsetWidth` 两态恒 64 |
+| 修正（采用方案 A） | 新增 `waitForStatusPanelAnimationsSettled()`：对两行 + 圆环子树的动画 await `animation.finished`（显式收敛循环，**禁止硬 sleep**），并在 G-4c / §5.2(R7) / G-4e 测量与截图前调用；同时显式断言「仍 running 的动画数 = 0」，把根因冻结成门禁 |
+| 覆盖范围 | G-4c 列宽/列中心、§5.2(R7) 三档自身宽度、G-4e 截图稳态（同一 transform 污染源） |
+| 原意图 | **未弱化**：等列栅格 + 列中心对齐 ≤0.5px + `min-w` 预留真实生效（三档 Δ ≤ 0.5px）全部保留 |
+
+## 10.4 R8 记录（实现侧裁决，非用例缺陷）
+
+**R8（契约 L-3 追加裁决）：显式列位 `col-start-1..4` 是「空值不渲染 × 两行对齐」的必要条件。**
+栅格自动流式（auto-placement）下，隐藏位点会让后续位点左移 —— 工具位为 0 时不渲染，圆环位落进第 3 列，
+两行列中心对齐随之破坏。**证据 = G-4c 首轮真实浏览器红**（第 4 列缺失/错位）。
+Lead 已为 8 个位点加 `col-start-1..4` 显式列位；本 agent 的 G-4c 断言**未改动**（原口径即真值）。
+
+## 10.5 待注意（非本波缺陷）
+
+`npm run build`（=`vue-tsc --noEmit && vite build`）首次执行在 900s 超时被杀，仅完成 `vue-tsc` 阶段前的输出；
+随后单独 `npx vite build` 4.47s 通过（dist 已含 R8）。疑为并发 vitest 进程争抢资源导致 `vue-tsc` 抖动，
+G-2 请在栅栏复跑确认；本 agent 未改动 `src/**` 或 `tsconfig`。

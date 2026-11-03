@@ -31,6 +31,10 @@
 
 **L-3 两行同栅格**：计数行与 token 行**必须**同为 4 等列栅格（`grid grid-cols-4 items-center`），
 使上下两行 4 个列中心物理对齐；token 行新增锚点 `data-testid="status-metrics-tokens"`。
+> 裁决 R8（Lead，真浏览器实测追加）：位点必须**显式占位** —— `col-start-1..4` 固定绑定
+> （计数行：轮次 1 / 模型 2 / 工具 3 / 圆环 4；token 行：输入 1 / 输出 2 / 缓存 3 / 速度 4）。
+> 理由：`grid` 自动流式布局下任一隐藏位点都会让其后的位点左移（实测：工具位为 0 时圆环落到第 3 列、
+> 与 token 行错列 ⇒ `G-4c` 列宽/列中心断言必红）。显式列位是「空值不渲染」与「两行物理对齐」能同时成立的**必要条件**。
 > 迁移说明：既有 wave-17/59 用 class 选择器（`div.flex.items-center.justify-around`）定位 token 行，
 > 本契约以 testid 取代 class 锚点（Lead 授权迁移，原意图「token 行恰好 4 个承载位」不变）。
 

@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "5c0eb40",
+  "reviewed_subject": "wave-61 状态面板实现提交（工作区 HomeStatusPanel.vue 与该提交逐字一致；证据目录产物复核）",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "365c9aca-0646-4485-96ae-793b4fe4d282",
+    "fresh_context": true
+  },
+  "executed_by": "365c9aca-0646-4485-96ae-793b4fe4d282",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "src/components/HomeStatusPanel.vue",
+    "src/components/chat/WorkspaceComposer.vue",
+    "docs/release/evidence/wave-61-status-panel"
+  ],
+  "findings": [
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 289,
+      "rule": "NFR_VIOLATION",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "python3 -c 'import json; g=json.load(open(\"docs/release/evidence/wave-61-status-panel/after-geometry.json\"))[\"geometry\"]; print(\"counts\",[c[\"centerX\"] for c in g[\"counts\"]],\"tokens\",[c[\"centerX\"] for c in g[\"tokens\"]])' ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/after-valued-status-panel.png\").convert(\"RGB\")).astype(int); m=(a[196:219,40:637].mean(axis=2)<200); c=np.where(m.any(axis=0))[0]+40; print([(int(c[i]),int(c[i+1]),int(c[i+1]-c[i])) for i in range(len(c)-1) if c[i+1]-c[i]>60])' ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/before-valued-status-panel.png\").convert(\"RGB\")).astype(int); m=(a[196:219,40:637].mean(axis=2)<200); c=np.where(m.any(axis=0))[0]+40; print([(int(c[i]),int(c[i+1]),int(c[i+1]-c[i])) for i in range(len(c)-1) if c[i+1]-c[i]>60])'",
+      "detail": "计数行 grid-cols-4 + col-start-N 显式占位：toolCallCount=0（无工具会话＝常态，本证据快照即此态）时第 3 列整列空置，实测第二组墨迹右缘 x=284(2x) 到圆环墨迹 x=539 之间 127.5px CSS 空白（行宽 278px 的 46%），行内间距节律变成 50px 与 127.5px；before 同行为 76/75.5px 均匀。after-geometry.json 的 counts 只有 3 个列中心（1164.75/1236.25/1379.25，缺 1307.75），圆环被空列隔到最右，读作独立徽标而非「与轮次同行」的一组 —— 用户诉求 2 的「间距设计和对齐都不美观」在最常见状态下原样复现。成因是契约 L-3 裁决 R8 + L-4 强制 justify-center，修复需 Lead 重新裁决（缺席时收列则放弃缺席态的跨行对齐；或保留空列但补视觉导线），executor 无法在不改冻结契约的前提下消除。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 327,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '320,341p' src/components/HomeStatusPanel.vue ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/after-valued-status-panel.png\").convert(\"RGB\")).astype(int); print(\"ring_track\",a[207,540].tolist(),\"card_bg\",a[207,610].tolist())'",
+      "detail": "圆环位只渲染 14px SVG、无百分比文本（契约 L-4:52 该行预算「18+30=100%」即含文本位，min-w-[3rem] 因此失去依据）：轨道 #d5d1c8 对卡底 #f6f0e8 对比 1.36:1，墨迹 13×13px，21% 弧仅约 3px 短划。它是全行唯一「无值」位点，视觉上更像 loading spinner 而非「上下文占用」；百分比只存在于 hover tooltip，旧 composer 的 cursor-help 提示也已丢失（可读性弱于同排计数）。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 323,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "git -c core.preloadIndex=false show 5c0eb40^:src/components/chat/WorkspaceComposer.vue | sed -n '1126p' ; sed -n '320,324p' src/components/HomeStatusPanel.vue",
+      "detail": "键盘可达性回退：迁移前圆环 trigger 是 <span tabindex=\"0\" class=\"inline-flex cursor-help\">，迁移后是裸 <span>（reka TooltipTrigger as-child 不注入 tabindex）⇒ 圆环 tooltip 这一唯一含上下文百分比的位置键盘不可达。同理缓存命中率由行内「· 21%」移入值 tooltip（216/395 行）后变成鼠标专属，键盘用户从此拿不到该数据。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 403,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'whitespace-nowrap' src/components/HomeStatusPanel.vue || echo 'MISSING whitespace-nowrap (contract L-4:51)'",
+      "detail": "契约 L-4:51 明确要求速度位 whitespace-nowrap（「溢出 min-w 亦不换行」），实现全文件无此 class。xl 实测「146 t/s」内容 54px / 63.5px track 尚有余量（右缘留 4.5px，未贴边溢出）；但估算态 formatTokenSpeed 前置 ≈ 且 ≥1000 t/s 时内容约 66px > 63.5px（lg 仅 59.5px），值文本可在空格处折成两行、行高 20→40px 并顶高整行。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 124,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '120,127p' src/components/HomeStatusPanel.vue",
+      "detail": "showContextRing 只判 contextDisplayTokens != null：该值为 0 时仍渲染圆环（弧 0%、tooltip「上下文用量：0% · 0 / 200K」），与用户真值源「零值不显示」相悖；resolveContextInputTokens 可返回 0，边缘可达。契约 E-3 只覆盖 null / 窗口非法，实现照抄契约，需补 >0 判定。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 347,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '347p;482,499p' src/components/HomeStatusPanel.vue",
+      "detail": "reduced-motion 双轨只降级入场（482-499 行仅覆盖 .status-slot-enter*）；圆环弧仍带 transition-all duration-500，降级下每次进度更新仍扫 500ms，与 src/styles.css:189-217「状态行族降级时 transition:none」的既有约定不一致（契约 M-4 只写入场，属遗漏而非违约）。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 293,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/before-valued-status-panel.png\").convert(\"RGB\")).astype(int); m=(a[196:219,40:637].mean(axis=2)<200); c=np.where(m.any(axis=0))[0]+40; print([(int(c[i]),int(c[i+1])) for i in range(len(c)-1) if 3<c[i+1]-c[i]<60])' ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/after-valued-status-panel.png\").convert(\"RGB\")).astype(int); m=(a[196:219,40:637].mean(axis=2)<200); c=np.where(m.any(axis=0))[0]+40; print([(int(c[i]),int(c[i+1])) for i in range(len(c)-1) if 3<c[i+1]-c[i]<60])'",
+      "detail": "图标↔值空白实测（2x→CSS）：计数位 10→17px(5.0→8.5)、输入 25→19(12.5→9.5)、输出 45→19(22.5→9.5)、缓存 37→16(18.5→8.0)、速度 11→16(5.5→8.0)。token 行确实明显收紧（配对感来自删除 text-right / min-w 预留盒），但计数位反而松了 3.5px。另：两行各位点均自身居中，首列图标上下错位 10.5px（计数 97..118 vs token 76..91 @2x），列中心对齐达标但图标未形成垂直导线。"
+    }
+  ]
+}

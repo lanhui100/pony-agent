@@ -1,0 +1,92 @@
+{
+  "phase": "after",
+  "capturedAt": "2026-11-03T02:51:19.472Z",
+  "signals": {
+    "consoleErrors": [],
+    "pageErrors": []
+  },
+  "geometry": {
+    "sidebarWidth": {
+      "left": 1104,
+      "right": 1440,
+      "top": 36,
+      "width": 336,
+      "centerX": 1272
+    },
+    "countsRow": {
+      "left": 1133,
+      "right": 1411,
+      "top": 130,
+      "width": 278,
+      "centerX": 1272
+    },
+    "tokenRow": {
+      "left": 1133,
+      "right": 1411,
+      "top": 158,
+      "width": 278,
+      "centerX": 1272
+    },
+    "counts": [
+      {
+        "left": 1133,
+        "right": 1196.5,
+        "top": 130,
+        "width": 63.5,
+        "centerX": 1164.75
+      },
+      {
+        "left": 1204.5,
+        "right": 1268,
+        "top": 130,
+        "width": 63.5,
+        "centerX": 1236.25
+      },
+      {
+        "left": 1347.5,
+        "right": 1411,
+        "top": 133,
+        "width": 63.5,
+        "centerX": 1379.25
+      }
+    ],
+    "tokens": [
+      {
+        "left": 1133,
+        "right": 1196.5,
+        "top": 167,
+        "width": 63.5,
+        "centerX": 1164.75
+      },
+      {
+        "left": 1204.5,
+        "right": 1268,
+        "top": 167,
+        "width": 63.5,
+        "centerX": 1236.25
+      },
+      {
+        "left": 1276,
+        "right": 1339.5,
+        "top": 167,
+        "width": 63.5,
+        "centerX": 1307.75
+      },
+      {
+        "left": 1347.5,
+        "right": 1411,
+        "top": 167,
+        "width": 63.5,
+        "centerX": 1379.25
+      }
+    ],
+    "circle": {
+      "left": 1347.5,
+      "right": 1411,
+      "top": 133,
+      "width": 63.5,
+      "centerX": 1379.25
+    },
+    "circleText": ""
+  }
+}

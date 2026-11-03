@@ -118,11 +118,12 @@ function isPositiveFiniteNumber(value: number | null | undefined): value is numb
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-/** §2 E-3：圆环位仅在「已有用量 + 合法窗口（>0）」同时成立时渲染。 */
+/** §2 E-3：圆环位仅在「已有用量（>0） + 合法窗口（>0）」同时成立时渲染。 */
 const showContextRing = computed(
   () =>
-    props.contextDisplayTokens != null &&
-    Number.isFinite(props.contextDisplayTokens) &&
+    // wave-61 §2 E-3/E-5：零值同样视为「无值」—— 0 token 不得渲染成 0% 空环
+    // （用户诉求「零值不显示」对圆环位同样成立；有值才入场）。
+    isPositiveFiniteNumber(props.contextDisplayTokens) &&
     isPositiveFiniteNumber(props.contextWindowTokens)
 );
 
