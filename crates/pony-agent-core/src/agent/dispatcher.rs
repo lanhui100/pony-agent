@@ -73,6 +73,12 @@ pub struct DispatchContext {
     /// 前端传入的授权模式：read_only | workspace_write | full_access
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_authorization_mode: Option<String>,
+    /// wave-62 C2：本 turn 的取消令牌（运行时**句柄**，不进线缆 ⇒ `#[serde(skip)]`）。
+    ///
+    /// `Some` ⇒ dispatcher 闸门必须观测它（turn 被 stop ⇒ 本次调用 fail-closed 为
+    /// `Cancelled`，沿用既有错误词表）；`None` ⇒ 行为与此前完全一致（向后兼容）。
+    #[serde(skip)]
+    pub turn_cancellation: Option<Arc<crate::agent::budget::CancellationToken>>,
 }
 
 /// 宿主审批证据（PA-141，C-141-1 serde 形状冻结：camelCase）。
@@ -98,6 +104,7 @@ impl Default for DispatchContext {
             host_control_available: true,
             plan_execution_approval: None,
             tool_authorization_mode: None,
+            turn_cancellation: None,
         }
     }
 }

@@ -1050,6 +1050,10 @@ pub struct ToolExecutionContext {
     /// 互相覆盖，把 A 会话的授权事实带进 B 会话的调用）。`None` 表示调用方未提供 turn 事实：
     /// 治理链必须**明确降级**（session/turn 为空），绝不回退到任何全局或线程局部状态。
     pub dispatch_context: Option<crate::agent::dispatcher::DispatchContext>,
+    /// wave-62 C3：本 turn 的取消令牌。`Some` ⇒ 子进程类工具（`workspace_run_command`）
+    /// 执行期间须按 `turn_cancel_poll_ms`(≤100ms) 轮询，被取消时终止子进程并返回
+    /// `status="aborted"`（错误码沿用既有 `tool_cancelled`）。
+    pub cancellation: Option<std::sync::Arc<crate::agent::budget::CancellationToken>>,
 }
 
 /// wave-1 C5：工具参数未显式给 session 时回退到执行上下文注入的会话 id。

@@ -1,9 +1,10 @@
+use crate::agent::budget::CancellationToken;
 use crate::agent::hooks::PersistedEffectEvidence;
 use crate::agent::stop_escalation::StopReason;
 use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// wave-60 C1：`StopTurnResponse.state` 的**封闭**取值集合（`"running"` 已废弃）。
 ///
@@ -65,6 +66,11 @@ pub struct StopTurnResponse {
 #[derive(Default)]
 struct RegistryState {
     turns: HashMap<String, ExecutionCheckpoint>,
+    /// wave-62 C1（字段面冻结，行为归属 wave62-T2）：每 turn 一个取消令牌。
+    /// `register_turn` 负责创建/结转；`request_stop` 被接受时 `cancel()`；
+    /// 只读出口是 [`ExecutionControlRegistry::cancellation_token`]。
+    #[allow(dead_code)]
+    tokens: HashMap<String, Arc<CancellationToken>>,
 }
 
 /// PA-095 #3：可克隆（Arc 共享内部状态）——宿主与 builder 需各持一份句柄
@@ -87,6 +93,8 @@ impl ExecutionControlRegistry {
             eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
             e.into_inner()
         });
+        // wave62-T2 TODO：在此为该 turn 创建/结转 `tokens[turn_id]`（`Arc<CancellationToken>`），
+        // 语义与下面 `stop_requested_at_ms` 的结转保持一致（重复注册沿用同一实例更佳）。
         // PA-095 #3：重注册保留已设置的停止请求——turn 开始前 request_stop
         // 的语义应跨注册存活（否则宿主预注册+停止会被入口注册覆盖丢失）。
         // wave-60 C1：`stop_requested_at_ms` 与 `stop_reason` **一并结转**（原因粘滞）。
@@ -211,6 +219,13 @@ impl ExecutionControlRegistry {
             state: STOP_TURN_STATE_STOPPING.to_string(),
             stop_reason: Some(stop_reason.as_str().to_string()),
         }
+    }
+
+    /// wave-62 C1：只读访问器（未知 turn ⇒ `None`）。行为归属 wave62-T2，
+    /// 本桩仅冻结签名与返回类型。
+    pub fn cancellation_token(&self, turn_id: &str) -> Option<Arc<CancellationToken>> {
+        let _ = turn_id;
+        todo!("wave62")
     }
 
     pub fn is_stop_requested(&self, turn_id: &str) -> bool {
