@@ -2,6 +2,9 @@
  * Wave-61 冻结验收（L2-T）— §1 布局契约 L-1..L-5（jsdom / class + DOM 结构层）
  *
  * 契约源（只读）：`.dev-team/contracts/wave-61-status-panel.md` §1（含 Lead 二轮裁决 R1/R4/R5 修订版）。
+ * 增补（wave-61.1，用户追加诉求 + Lead 一票裁决）：§1 L-2 增加「圆环后内联百分比」
+ *   —— 圆环位内 `[data-testid="status-context-usage-percent"]` 文本 `{{pct}}%`，位于 SVG 之后；
+ *   对应用例：`L-2b(圆环百分比)`（独立复算 clamp(round(ratio*100),1,100) + 环后兄弟关系 + 永不 0%）。
  * 用户诉求（契约 §0）：上下文圆环迁入右侧状态面板第一行、与计数同行；图标↔值亲密性可读。
  *
  * 分层说明（关键）：
@@ -245,6 +248,103 @@ describe("wave-61 §1 布局契约（L-1..L-5）", () => {
         window.localStorage.setItem(DEBUG_KEY, EVIDENCE_KEY_BACKUP);
       }
     }
+  });
+
+  it("L-2b(圆环百分比): 圆环位内必须内联渲染 `<pct>%`，且该文本为圆环 SVG 的后继兄弟（环后）", () => {
+    // 契约来源：wave-61.1 用户追加诉求 + Lead 一票裁决（§1 L-2 增补）——
+    //   「圆环后内联显示百分比，例：◔ 21%」，位点内、环后、同 `gap-1.5` 间距。
+    // 独立复算口径（与实现同一语义，但本测试**独立实现**，不引用 src 符号）：
+    //   pct = min(100, max(1, round(tokens / window * 100)))；tokens > 0 时下限恒为 1%（永不 0%）。
+    const expectedPercent = (tokens: number, windowTokens: number): string =>
+      `${Math.min(100, Math.max(1, Math.round((tokens / windowTokens) * 100)))}%`;
+
+    const assertRingPercent = (
+      wrapper: ReturnType<typeof mountStatusPanel>,
+      tokens: number,
+      windowTokens: number,
+      label: string
+    ) => {
+      // Assert（锚点自检：圆环位必须存在）
+      const ringProbe = wrapper.find(ringSelector);
+      expect(ringProbe.exists(), `L-2b（${label}）：圆环位必须存在`).toBe(true);
+      const ring = ringProbe;
+
+      // Assert（契约主体 1：百分比文本节点存在且唯一）
+      const percentProbe = ring.find('[data-testid="status-context-usage-percent"]');
+      expect(
+        percentProbe.exists(),
+        `L-2b（${label}）：圆环位内必须存在 [data-testid="status-context-usage-percent"]（wave-61.1 追加：环后内联百分比）`
+      ).toBe(true);
+      expect(
+        wrapper.findAll('[data-testid="status-context-usage-percent"]'),
+        `L-2b（${label}）：百分比文本在面板内必须唯一（不得重复渲染）`
+      ).toHaveLength(1);
+
+      // Assert（契约主体 2：文本严格等于独立复算值）
+      const expected = expectedPercent(tokens, windowTokens);
+      expect(
+        percentProbe.text().trim(),
+        `L-2b（${label}）：百分比文本必须严格等于 clamp(round(tokens/window*100),1,100) 的复算值；tokens=${tokens} / window=${windowTokens}`
+      ).toBe(expected);
+
+      // Assert（契约主体 3：格式纪律 —— 纯整数百分比；永不 `0%`）
+      expect(
+        percentProbe.text().trim(),
+        `L-2b（${label}）：百分比必须是「整数%」形态（不得出现小数/占位符）`
+      ).toMatch(/^\d+%$/);
+      expect(
+        percentProbe.text().trim(),
+        `L-2b（${label}）：百分比永不出现 0%（contextUsagePercentage 已 clamp 下限 1）`
+      ).not.toBe("0%");
+      expect(
+        Number(percentProbe.text().trim().replace("%", "")),
+        `L-2b（${label}）：百分比数值必须落在 [1, 100]`
+      ).toBeGreaterThanOrEqual(1);
+
+      // Assert（契约主体 4：位置纪律 —— 百分比是圆环 SVG 的**后继兄弟**，即「环后」）
+      const svgProbe = ring.find("svg");
+      expect(
+        svgProbe.exists(),
+        `L-2b（${label}）：圆环位内必须有 SVG 圆环（百分比要挂在环后）`
+      ).toBe(true);
+      expect(
+        svgProbe.element.nextElementSibling,
+        `L-2b（${label}）：百分比文本节点必须是圆环 SVG 的后继兄弟（环后）；实际后继=${(svgProbe.element.nextElementSibling as HTMLElement | null)?.outerHTML.slice(0, 120) ?? "(无)"}`
+      ).toBe(percentProbe.element);
+      expect(
+        ring.element.contains(percentProbe.element),
+        `L-2b（${label}）：百分比必须与圆环同属一个位点（不得漂到行级）`
+      ).toBe(true);
+
+      wrapper.unmount();
+    };
+
+    // 帧 1（下限 1%）：9 / 200000 ⇒ round(0.0045%)=0 ⇒ clamp 到 1%
+    assertRingPercent(mountStatusPanel({ contextDisplayTokens: 9, contextWindowTokens: 200_000 }), 9, 200_000, "下限 9/200000");
+
+    // 帧 2（中值 21%）：42000 / 200000 ⇒ 21%（与 e2e 夹具同源）
+    assertRingPercent(
+      mountStatusPanel({ contextDisplayTokens: 42_000, contextWindowTokens: 200_000 }),
+      42_000,
+      200_000,
+      "中值 42000/200000"
+    );
+
+    // 帧 3（上限 100%）：210000 / 200000 ⇒ round(105)=105 ⇒ clamp 到 100%
+    assertRingPercent(
+      mountStatusPanel({ contextDisplayTokens: 210_000, contextWindowTokens: 200_000 }),
+      210_000,
+      200_000,
+      "上限 210000/200000"
+    );
+
+    // 帧 4（恰好 100%）：200000 / 200000
+    assertRingPercent(
+      mountStatusPanel({ contextDisplayTokens: 200_000, contextWindowTokens: 200_000 }),
+      200_000,
+      200_000,
+      "满窗 200000/200000"
+    );
   });
 
   it("L-3: 计数行与 token 行必须同为 4 等列栅格（grid grid-cols-4 items-center），token 行锚点 status-metrics-tokens", () => {

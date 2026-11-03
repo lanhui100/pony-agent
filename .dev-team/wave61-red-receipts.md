@@ -388,3 +388,46 @@ Lead 已为 8 个位点加 `col-start-1..4` 显式列位；本 agent 的 G-4c �
 `npm run build`（=`vue-tsc --noEmit && vite build`）首次执行在 900s 超时被杀，仅完成 `vue-tsc` 阶段前的输出；
 随后单独 `npx vite build` 4.47s 通过（dist 已含 R8）。疑为并发 vitest 进程争抢资源导致 `vue-tsc` 抖动，
 G-2 请在栅栏复跑确认；本 agent 未改动 `src/**` 或 `tsconfig`。
+
+
+---
+
+# §11 wave-61.1 增补冻结断言（圆环后内联百分比）
+
+采集时间：2026-11-03 11:25–11:35（Asia/Shanghai）
+授权：用户追加诉求 + Lead 一票裁决（属契约 §1 L-2 增补）；本 agent **只动 `tests/**`**，未改阈值、未动 `src/**`。
+
+## 11.1 增补内容
+
+| 层 | 用例 | 断言要点 |
+| :-- | :-- | :-- |
+| jsdom（`wave61-layout.spec.ts`） | `L-2b(圆环百分比): 圆环位内必须内联渲染 \`<pct>%\`，且该文本为圆环 SVG 的后继兄弟（环后）` | ① `[data-testid="status-context-usage-percent"]` 存在且**面板内唯一**；② 文本严格等于**独立复算**的 `min(100, max(1, round(tokens/window*100)))%`（不引用 src 符号）；③ 形态 `/^\d+%$/` 且**永不 `0%`**、数值 ∈ [1,100]；④ `svg.nextElementSibling === percent节点`（**环后兄弟**）+ 与圆环同属一个位点 |
+| jsdom 边界帧 | 同上（4 个夹具帧） | 下限 `9/200000 ⇒ 1%`；中值 `42000/200000 ⇒ 21%`；超窗 `210000/200000 ⇒ 100%`；满窗 `200000/200000 ⇒ 100%` |
+| 真实浏览器（`wave61-status-panel.spec.ts`） | `§L-2b(wave-61.1): 真实浏览器中圆环位内联百分比为 21%（42000/200000），唯一且无 console error` | `toHaveCount(1)` + `toHaveText("21%")` + `insideRing` + `afterSvg`（后继兄弟）+ 圆环位整体文本含 `21%` 且**不含 `0%`** + console/pageerror = 0 |
+
+## 11.2 命令与 Exit code
+
+```bash
+$ npx vite build                                   # dist 需含 wave-61.1 百分比节点（本次 3.56s）
+# Exit code: 0
+
+$ npx vitest run tests/acceptance/wave61 --reporter=dot
+# Exit code: 0    → Test Files 4 passed (4) / Tests 20 passed (20)
+
+$ npx playwright test tests/e2e/wave61-status-panel.spec.ts --retries=0 --reporter=list
+# Exit code: 0    → 7 passed (32.2s)
+```
+
+真实浏览器 7 条明细（全 PASS）：
+
+| # | 用例 | 耗时 |
+| :-- | :-- | :-- |
+| 1 | G-4a 圆环在计数行内 / composer 无圆环 | 4.3s |
+| 2 | G-4b 空值 count=0 + 入场动画命中 | 4.4s |
+| 3 | **§L-2b(wave-61.1) 圆环内联百分比 21%** | 4.2s |
+| 4 | G-4c 两行 4 列中心 ≤0.5px | 4.3s |
+| 5 | §5.2(R7) 三档自身宽度 Δ≤0.5px | 4.3s |
+| 6 | G-4d console/pageerror = 0 | 4.0s |
+| 7 | G-4e 截图落盘 >10KB | 4.4s |
+
+> 注：e2e 依赖 `dist` 产物，故先 `npx vite build`（3.56s，Exit 0）再跑；`npm run build` 的 `vue-tsc` 段属 G-2 门禁，仍由 Lead 在栅栏复跑。

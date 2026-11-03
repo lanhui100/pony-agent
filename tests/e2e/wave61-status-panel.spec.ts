@@ -37,6 +37,11 @@
  *   修正：缓动改读 `getKeyframes()[0].easing`；`duration` 仍读 `getTiming().duration`；并新增
  *     「关键帧 ≥2」前置断言。原意图（200ms + 精确缓动 + opacity/translateY/scale 语义）**未弱化**。
  *
+ * ── §1 L-2b 增补（wave-61.1，用户追加诉求 + Lead 一票裁决）─────────────────────
+ *   圆环后内联百分比：`[data-testid="status-context-usage-percent"]`，文本 `<pct>%`，位于 SVG 之后。
+ *   本文件新增 `§L-2b(wave-61.1)`：真实浏览器注入 42000/200000 ⇒ 文本 `21%`、`toHaveCount(1)`、
+ *   环后兄弟关系成立、无 `0%`、无 console error。
+ *
  * ── D8 用例缺陷修正（2026-11-03，Lead 真实浏览器取证后裁决）─────────────────────
  *   现象：G-4c 计数行第 4 列（圆环位）rect.width 实测 59.41px ⇒ `widthSpread` 超阈。
  *   根因（**非实现缺陷**）：测量发生在**入场动画进行中**，圆环位 `scale(0.92)→1` 使
@@ -596,6 +601,63 @@ test("G-4b: 空数据 → 位点/DOM 不存在（count=0）；注入数据 → �
     `G-4b：圆环位入场首帧必须 scale(0.92)；实际 transform=${ringFirstFrame.transform}`
   ).toBeCloseTo(0.92, 2);
 
+  expectNoBrowserErrors(signals);
+});
+
+// ── §1 L-2b（wave-61.1 追补）：圆环后内联百分比 ──────────────────────────────
+
+test("§L-2b(wave-61.1): 真实浏览器中圆环位内联百分比为 21%（42000/200000），唯一且无 console error", async ({ page }) => {
+  // Arrange：收集器先挂（登录期错误也不放过），注入夹具 -> contextDisplayTokens=42000 / window=200000
+  const signals = attachSignalCollectors(page);
+  await openHome(page);
+  await seedStatusPanelFixture(page);
+
+  // Assert 1（锚点自检：圆环位与百分比节点都必须存在且唯一）
+  await expect(page.locator(RING), "§L-2b：圆环位必须存在").toHaveCount(1);
+  const percent = page.locator('[data-testid="status-context-usage-percent"]');
+  await expect(
+    percent,
+    "§L-2b：圆环位内必须存在唯一的 [data-testid=\"status-context-usage-percent\"]（wave-61.1 追加：环后内联百分比）"
+  ).toHaveCount(1);
+
+  // Assert 2（契约主体：文本严格等于 42000/200000 ⇒ 21%）
+  await expect(
+    percent,
+    "§L-2b：百分比文本必须为 21%（clamp(round(42000/200000*100),1,100)）"
+  ).toHaveText("21%");
+
+  // Assert 3（位置纪律：该文本是圆环 SVG 的后继兄弟 = 「环后」，且与圆环同属一个位点）
+  const placement = await page.evaluate(({ ring }) => {
+    const ringEl = document.querySelector(ring);
+    const percentEl = document.querySelector('[data-testid="status-context-usage-percent"]');
+    const svgEl = ringEl ? ringEl.querySelector("svg") : null;
+    return {
+      ringFound: ringEl != null,
+      percentFound: percentEl != null,
+      svgFound: svgEl != null,
+      insideRing: ringEl != null && percentEl != null && ringEl.contains(percentEl),
+      afterSvg: svgEl != null && percentEl != null && svgEl.nextElementSibling === percentEl,
+      siblingTag: svgEl?.nextElementSibling?.getAttribute("data-testid") ?? null
+    };
+  }, { ring: RING });
+
+  expect(placement.ringFound, "§L-2b：圆环位必须存在（位置断言前提）").toBe(true);
+  expect(placement.percentFound, "§L-2b：百分比节点必须存在（位置断言前提）").toBe(true);
+  expect(placement.svgFound, "§L-2b：圆环 SVG 必须存在（环后判断基准）").toBe(true);
+  expect(
+    placement.insideRing,
+    "§L-2b：百分比必须渲染在圆环位内部（同一位点，不得漂到行级）"
+  ).toBe(true);
+  expect(
+    placement.afterSvg,
+    `§L-2b：百分比必须是圆环 SVG 的后继兄弟（环后）；实际 SVG 后继 = ${placement.siblingTag ?? "(无)"}`
+  ).toBe(true);
+
+  // Assert 4（圆环位整体文本亦包含百分比，且不出现 0% 空环文案）
+  await expect(page.locator(RING), "§L-2b：圆环位整体文本必须含 21%").toContainText("21%");
+  await expect(page.locator(RING), "§L-2b：不得出现 0% 空环文案（pct 下限 1）").not.toContainText("0%");
+
+  // Assert 5（G-4d 同源：全程零 console error / 零未捕获异常）
   expectNoBrowserErrors(signals);
 });
 

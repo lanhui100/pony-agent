@@ -363,6 +363,9 @@ const showMetricsCard = computed(
                   class="status-ring-arc transition-all duration-500 ease-out text-stone-500 hover:text-stone-700"
                 />
               </svg>
+              <!-- wave-61.1（用户追加诉求）：圆环后内联展示百分比，使圆环位不再只能靠 hover 读懂；
+                   `contextUsagePercentage` 已 clamp(1..100)，故不会出现 `0%` 空环文案（§2 E-5）。 -->
+              <span class="status-ring-percent text-stone-600" data-testid="status-context-usage-percent">{{ contextUsagePercentage }}%</span>
             </span>
           </Tooltip>
         </div>

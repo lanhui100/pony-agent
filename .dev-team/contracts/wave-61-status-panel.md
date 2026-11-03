@@ -26,7 +26,9 @@
 **L-2 同行**：计数行 4 个位点顺序固定 = 轮次 → 模型调用 → 工具调用 → 上下文圆环。
 圆环位 testid = `status-context-usage`，**不得**使用 `status-metric-` 前缀（既有 3 位 testid 的计数断言语义必须保持独立）。
 圆环语义（迁移自 composer，逐字保真）：百分比 = `clamp(round(tokens/window*100), 1, 100)`（有值且比例 >0 时下限 1%、上限 100%）；
-`data-context-debug` 字面量 `in=…;win=…;pct=…;mode=…;speed=…`；`aria-label="上下文用量"`；tooltip 文案
+`data-context-debug` 字面量 `in=…;win=…;pct=…;mode=…;speed=…`；`aria-label="上下文用量"`；
+**圆环后内联展示百分比文本**（wave-61.1 用户追加诉求）：`<pct>%`，锚点 `data-testid="status-context-usage-percent"`，
+与 SVG 同为该位点直接子节点、位于 SVG 之后、`gap-1.5` 分隔、`tabular-nums`；因 pct 已 clamp(1..100)，**永不出现 `0%`**；tooltip 文案
 `上下文用量：{pct}% · {used} / {window} · 速度: {n} t/s ({mode})`（无 window 时退化为已用量）。
 
 **L-3 两行同栅格**：计数行与 token 行**必须**同为 4 等列栅格（`grid grid-cols-4 items-center`），
@@ -52,7 +54,7 @@
 | 计数位（3） | `min-w-[3rem]` (48) | 18+28=46 | 通过 |
 | token 位（输入/输出/缓存） | `min-w-[3rem]` (48) | 18+31=49 | 通过（缓存尾段已移出，见 E-2 / R1） |
 | 速度位 | `min-w-[3.5rem]` (56) | 18+44=62（≥1000 t/s 极端值） | 通过（≤63.5；`whitespace-nowrap`，溢出 min-w 亦不换行） |
-| 圆环位 | `min-w-[3rem]` (48) | 18+30=`100%` | 通过 |
+| 圆环位（含百分比文本） | `min-w-[3rem]` (48) | 图标 14 + gap 6 + `100%` 30 = 50 | 通过（列宽 63.5 兜底，`min-w` 仅为下限） |
 
 任何位点 `min-w` 不得超过 3.5rem（4.25rem=68px 会撑破 63.5px track，Reviewer-A 实测）。
 
