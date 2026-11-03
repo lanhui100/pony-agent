@@ -219,6 +219,10 @@ struct JobSession {
     /// B012：作业归属的会话 id（`job_start` / promote 时的 `ToolExecutionContext.session_id`）。
     /// `None` = 无归属（内部直调 / 未提供上下文），对任意 caller 放行。
     owner: Option<String>,
+    /// B013：promote 时移交的临时脚本（Windows `<ws>/.tmp/pony-agent-run-{sid}.cmd`）。
+    /// 前台 Run 在 promote 路径上**不得**自己删除它（进程仍可能读该脚本），清理责任移交
+    /// job 生命周期：在终态回收点（[`JobSession::release_promoted_entry`]）删除，POSIX 恒 `None`。
+    cleanup_script: Option<PathBuf>,
     /// B009：promoted 作业继承的取消令牌。promote 后前台 Run 的 `CommandCancelWatcher` 会随函数
     /// 返回被 drop，用户 Stop 就再也停不下这条命令；watcher 线程改由此字段判定取消。
     cancel: Option<Arc<CancellationToken>>,
@@ -353,6 +357,16 @@ impl JobSession {
         }
         if let Err(error) = manager.kill_if_exists(session_id, handle) {
             eprintln!("[jobs] promoted entry release failed for `{handle}`: {error}");
+        }
+        // B013：终态之后才删临时脚本（promote 路径前台不删，进程此前可能仍在读它）。
+        // 失败**只**打 warn：不改 status、不 panic、不把 killed 变 failed，也不影响 ring buffer。
+        if let Some(path) = self.cleanup_script.as_deref() {
+            if let Err(error) = std::fs::remove_file(path) {
+                eprintln!(
+                    "[jobs] promoted cleanup script removal failed for `{}`: {error}",
+                    path.display()
+                );
+            }
         }
     }
 
@@ -716,6 +730,7 @@ pub fn job_start_scoped(
         stderr_truncated: AtomicBool::new(false),
         released: AtomicBool::new(false),
         owner: owner.map(str::to_string),
+        cleanup_script: None,
         cancel: None,
         kind: JobKind::Owned,
         #[cfg(windows)]
@@ -743,7 +758,7 @@ pub fn job_start_scoped(
 /// 一个**短生命周期** watcher 线程（20ms tick）：令牌取消 ⇒ `kill_internal` 落 `killed`；
 /// 作业进入终态（或 `JobSession` 被回收）⇒ 线程立即退出，禁止常驻泄漏。
 // 参数个数由契约可测接缝固定（manager + 租借三元组 + 命令行 + 首读快照 + 两个截断标记 +
-// 取消令牌 + owner）；不合并成结构体是为了让接缝与调用点逐字对应契约签名，避免额外类型。
+// 取消令牌 + owner + 待清理脚本）；不合并成结构体是为了让接缝与调用点逐字对应契约签名，避免额外类型。
 #[allow(clippy::too_many_arguments)]
 pub fn register_promoted(
     manager: ProcessManager,
@@ -756,6 +771,7 @@ pub fn register_promoted(
     stderr_truncated: bool,
     cancel: Option<Arc<CancellationToken>>,
     owner: Option<&str>,
+    cleanup_script: Option<PathBuf>,
 ) -> Result<String, String> {
     let buffer = Arc::new(Mutex::new(RingBuffer::new(JOB_BUFFER_CAP)));
     // 契约 CT-P7b：首读快照若本身已超过 ring buffer 容量，同样置 truncated 标记。
@@ -794,6 +810,7 @@ pub fn register_promoted(
         stderr_truncated: AtomicBool::new(stderr_truncated),
         released: AtomicBool::new(false),
         owner: owner.map(str::to_string),
+        cleanup_script,
         cancel: cancel.clone(),
         kind: JobKind::Promoted {
             manager,
@@ -1026,6 +1043,7 @@ mod tests {
             first_read.stderr_truncated,
             None,
             None,
+            None,
         )
         .expect("register_promoted must succeed");
         assert!(
@@ -1105,6 +1123,7 @@ mod tests {
             false,
             Some(token.clone()),
             None,
+            None,
         )
         .expect("register_promoted must succeed");
 
@@ -1181,6 +1200,7 @@ mod tests {
             "",
             false,
             false,
+            None,
             None,
             None,
         )

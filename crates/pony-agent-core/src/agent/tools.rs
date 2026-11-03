@@ -3235,6 +3235,10 @@ impl ToolRouter {
                             cancellation.clone(),
                             // B012：promoted 作业同样记归属会话。
                             context.session_id.as_deref(),
+                            // B013：把仍在被读取的临时批处理脚本移交 job 生命周期清理。
+                            // POSIX 下 `batch_script_path` 天然为 None；Windows 下是
+                            // `<ws>/.tmp/pony-agent-run-{session_id}.cmd`（spawn 前写入）。
+                            batch_script_path.clone(),
                         ) {
                             Ok(job_id) => {
                                 // 红线：promote 路径不得 kill / cancel / 删除批处理脚本，

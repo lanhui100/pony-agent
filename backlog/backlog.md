@@ -44,12 +44,6 @@
   - 描述：① 轮询 deadline 与 `kill_after` 存在窄竞态：deadline 前最后一次 poll 若跨过杀点，会读成 Exited → `non_zero_exit`（丢 timeout hint，且指纹带 timeoutMs），高负载下可让 `tool_timeout_policy_test` 偶发红；② `DEFAULT_RUN_TIMEOUT_MS=120_000` 与 `subagent_turn_timeout_ms=120_000` 预算碰撞，子代理内默认 Run 挂死会先撞子代理超时，拿不到工具级证据；③ `kill_after` 无 disarm，每次 Run 留一条睡满 timeout 的线程（默认 120s / 显式 600s）。
   - 登记来源：`.dev-team/review-tool-timeout.json`（verdict PASS, 3 ADVISORY）
 
-- [ ] `B013` - P1: Windows 一次性批处理脚本残留（含命令原文）
-  - 路径：`crates/pony-agent-core/src/agent/tools.rs`（`<ws>/.tmp/pony-agent-run-{sid}.cmd` 写入与 promote 早返回跳过删除）
-  - 描述：promote 路径按红线不删脚本，清理责任移交 job 生命周期但未实现 ⇒ Windows 上每 Run 累积一个含整条命令原文的 `.cmd`（可能含内联凭据）。需在 job 终态回收时删除对应脚本（沿用 B008 的 `release_promoted_entry`），并加 `.tmp` 陈旧文件清扫器。
-  - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）；本机 Linux 无法验证，需 Windows CI 或目标机验证。
-
-## 已完成
 
 - [x] `B011` - P1: `timedOut/promoted` 无消费方，UI/trace 把仍在跑的命令显示为「成功完成」
   - 路径：`src/components/chat/WorkspaceTurnItem.vue:631`、`src/lib/runtime/trajectory-core.ts:320`、`src/lib/runtime/trace.ts:378`；`ok:true` + `exitCode:null` 破坏成功路径不变量
@@ -68,6 +62,14 @@
   - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）
 
 ## 已完成
+
+- [x] `B013` - P1: Windows 一次性批处理脚本残留（含命令原文）
+  - 路径：`crates/pony-agent-core/src/agent/tools.rs`（`<ws>/.tmp/pony-agent-run-{sid}.cmd` 写入与 promote 早返回跳过删除）
+  - 描述：promote 路径按红线不删脚本，清理责任移交 job 生命周期但未实现 ⇒ Windows 上每 Run 累积一个含整条命令原文的 `.cmd`（可能含内联凭据）。需在 job 终态回收时删除对应脚本（沿用 B008 的 `release_promoted_entry`），并加 `.tmp` 陈旧文件清扫器。
+  - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）；本机 Linux 无法验证，需 Windows CI 或目标机验证。
+
+## 已完成
+  - 结果：已修复（Linux 可验证形态）。`register_promoted` 末尾增 `cleanup_script: Option<PathBuf>`；终态回收点 `release_promoted_entry` 里 `remove_file`，失败只 warn、不改作业状态；promote 分支传 `batch_script_path.clone()`（POSIX 恒 None）。验收 `promote_script_cleanup_test` 3 passed（删除 / None 兼容 / 清理失败不污染状态）。Windows 真机端到端仍未验证（需 CI 或目标机跑一次 promoted run 后检查 `<ws>/.tmp` 无残留）。
 
 - [x] `B009` - P0: promote 后取消失效（用户 Stop 停不下来）
   - 路径：`crates/pony-agent-core/src/agent/tools.rs:3004`（`CommandCancelWatcher` 随函数返回 drop）
