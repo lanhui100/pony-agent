@@ -24,7 +24,7 @@
 | CT-5 | 超时 hint 增加「后台执行 job_start」与「显式更大 timeoutMs（上限 600000）」 | 撞 `wave9_green_acceptance_test.rs:143` 逐字断言 → 需契约演进 + 冻结测试迁移提交 |
 | CT-6′ | 真·promote（超时把运行中命令转后台 job） | 侦察结论：Run 进程所有权在 `ProcessManager`（`process.rs:306`）、`poll` 为「取走即清空」（`:869-872`）、`kill_after` 无 disarm API（`:433-443`）、取消 watcher 随函数返回 drop；需 jobs.rs 适配层 + 生命周期重构，非局部补丁 |
 
-## 波次二之先行项：CT-5（v3 新增，本波实施）
+## 波次二之先行项：CT-5（v3 新增，**已实施** commit `TD_B004`）
 
 | ID | 契约 | 验收方式（机器） |
 | :--- | :--- | :--- |

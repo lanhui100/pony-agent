@@ -32,7 +32,7 @@ export const defaultAvailableTools: AvailableTool[] = [
         },
         timeoutMs: {
           type: "integer",
-          description: "命令超时毫秒数，默认 120000，最大 600000"
+          description: "命令超时毫秒数，默认 120000，最大 600000；长任务请改用后台执行 `job_start`（`job_output` 取增量输出、`job_kill` 终止，无超时上限）"
         }
       },
       required: ["command"],

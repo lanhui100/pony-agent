@@ -5861,7 +5861,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     },
                     "timeoutMs": {
                         "type": "integer",
-                        "description": "命令超时毫秒数，默认 120000，最大 600000"
+                        "description": "命令超时毫秒数，默认 120000，最大 600000；长任务请改用后台执行 `job_start`（`job_output` 取增量输出、`job_kill` 终止，无超时上限）"
                     }
                 },
                 "required": ["command"],
@@ -7956,15 +7956,27 @@ fn windows_command_not_found_hint(
     )
 }
 
-fn classify_timeout_hint(command: &str) -> String {
+/// 契约 CT-5（`tool-timeout-policy.md` v3）：超时 hint 必须同时给出「后台执行」与「显式上限」
+/// 两条出路。非网络分支**逐字**等于该文案；网络分支在既有网络自检文案后**追加**同一段文案
+/// （单一真源，避免两条分支文案漂移）。
+const TIMEOUT_HINT_BACKGROUND_ADVICE: &str = "长任务请改用后台执行 `job_start`（`job_output` 取增量输出、`job_kill` 终止，无超时上限）；或显式传入更大的 timeoutMs（上限 600000）；仍不足时缩短或拆分命令。";
+
+/// 契约 CT-5 / 可测接缝 S2：按命令文本分类给出超时纠错 hint。
+///
+/// 命中网络类子命令标记（`push`/`fetch`/`clone`/`pull`/`ls-remote`）时，先给「网络/认证/代理」
+/// 三类可能原因与可自检步骤，再追加与默认分支相同的「后台执行 / 上限 600000」出路；
+/// 未命中时逐字返回 [`TIMEOUT_HINT_BACKGROUND_ADVICE`]（非网络命令不得被网络分类污染）。
+pub fn classify_timeout_hint(command: &str) -> String {
     const NETWORK_COMMAND_MARKERS: [&str; 5] = ["push", "fetch", "clone", "pull", "ls-remote"];
     if NETWORK_COMMAND_MARKERS
         .iter()
         .any(|marker| command.contains(marker))
     {
-        return "命令疑似网络类操作，超时可能来自网络/认证/代理三类原因之一：请依次自检 `git ls-remote <remote-url>` 是否可连通、`git config --get remote.origin.url` 是否指向预期远端、SSH 身份自检（`ssh -T git@<host>`）是否有效；确认后再重试，或显式传入更大的 timeoutMs。".to_string();
+        return format!(
+            "命令疑似网络类操作，超时可能来自网络/认证/代理三类原因之一：请依次自检 `git ls-remote <remote-url>` 是否可连通、`git config --get remote.origin.url` 是否指向预期远端、SSH 身份自检（`ssh -T git@<host>`）是否有效；确认后再重试。{TIMEOUT_HINT_BACKGROUND_ADVICE}"
+        );
     }
-    "请缩短命令执行时间，或显式传入更大的 timeoutMs。".to_string()
+    TIMEOUT_HINT_BACKGROUND_ADVICE.to_string()
 }
 
 /// 契约 CT-1/CT-2/CT-3 的可测接缝：解析一次 Run 调用的生效超时（毫秒）。
@@ -11356,8 +11368,9 @@ mod tests {
 
         let default_hint = classify_timeout_hint("sleep 5");
         assert_eq!(
-            default_hint, "请缩短命令执行时间，或显式传入更大的 timeoutMs。",
-            "非网络类超时 hint 必须与既有默认文案逐字一致"
+            default_hint,
+            "长任务请改用后台执行 `job_start`（`job_output` 取增量输出、`job_kill` 终止，无超时上限）；或显式传入更大的 timeoutMs（上限 600000）；仍不足时缩短或拆分命令。",
+            "非网络类超时 hint 必须逐字等于 CT-5 默认文案（后台执行 + 上限 600000）"
         );
     }
 
