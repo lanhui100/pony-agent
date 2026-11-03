@@ -1,0 +1,41 @@
+{
+  "wave": "TT (tool-timeout-policy)",
+  "date": "2026-11-04",
+  "tier": "B",
+  "contract": ".dev-team/contracts/tool-timeout-policy.md#v2",
+  "red_commit": "fecc512",
+  "green_commit": "94f1053",
+  "gates": {
+    "acceptance": {
+      "cmd": "cargo test -p pony-agent-core --test tool_timeout_policy_test",
+      "exit": 0,
+      "result": "13 passed"
+    },
+    "regression": {
+      "cmd": "wave9_green_acceptance_test + wave9_adversarial_test + harness_optimizations_test",
+      "exit": 0,
+      "result": "12/4/2 passed"
+    },
+    "clippy": {
+      "exit": 0,
+      "note": "改动行零新增 warning"
+    },
+    "audit_diff": {
+      "exit": 0
+    },
+    "review": {
+      "file": ".dev-team/review-tool-timeout.json",
+      "verdict": "PASS",
+      "advisory": 3,
+      "lint_exit": 0
+    }
+  },
+  "baseline_exemption": "共享工作区存在其他波次未提交改动，未做全量回归基线快照；改用『改动前后同名 target 对照 + 既有冻结用例全绿』作为回归证据",
+  "known_red_baseline": "tui_acceptance::test_provider_selector_state_logic（commit 22241e9 外部波次引入，非本波）",
+  "observability": "docs/observability.yaml 四维归属不变（无新增对外接口/网络 IO/后台任务/LLM 调用/UI 交互面）；audit-diff Exit 0",
+  "deferred": {
+    "B004": "CT-5 hint 指向 job_start",
+    "B005": "真·promote",
+    "B006": "3 ADVISORY"
+  }
+}
