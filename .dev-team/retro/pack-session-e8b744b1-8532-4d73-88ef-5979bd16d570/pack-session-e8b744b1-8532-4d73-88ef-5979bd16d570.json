@@ -1,0 +1,191 @@
+{
+ "applicability": {
+  "acceptance_tests_present": true,
+  "note": "无验收测试时 red/drift 规则判 not-applicable，绝不静默通过"
+ },
+ "repo_profile": {
+  "acceptance_dirs": [
+   "tests/acceptance"
+  ],
+  "has_acceptance": true,
+  "top_exts": [
+   [
+    "md",
+    1053
+   ],
+   [
+    "json",
+    382
+   ],
+   [
+    "png",
+    268
+   ],
+   [
+    "rs",
+    247
+   ],
+   [
+    "ts",
+    212
+   ],
+   [
+    "txt",
+    179
+   ]
+  ],
+  "test_scripts": {
+   "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
+   "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+   "cargo:test:regression": "cargo test --manifest-path src-tauri/Cargo.toml --test session_regression --test provider_registry_regression --test tool_router_regression --target-dir target-test",
+   "cargo:test:shared": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 test test",
+   "cargo:test:exact": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-a test",
+   "cargo:test:exact:b": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-b test",
+   "cargo:test:exact:c": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-c test",
+   "test": "npm run test:unit",
+   "test:unit": "vitest run",
+   "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
+   "test:e2e": "npm run build && playwright test",
+   "test:tauri:smoke": "node scripts/tauri-smoke.js",
+   "preview:e2e": "vite preview --host 127.0.0.1 --port 4175"
+  }
+ },
+ "run_id": "session-e8b744b1-8532-4d73-88ef-5979bd16d570",
+ "task": "wave-pds-3 流式视觉层接入（尾巴节点+遮罩浮现，契约 v1→v11）",
+ "tier": "B",
+ "base": "8e51bd5",
+ "head": "fb2a74a",
+ "work": {
+  "L": 2140,
+  "files": 18,
+  "board_tasks": [
+   "[wave-pds-3/test] 编写并冻结流式视觉层验收 V1–V10",
+   "[wave-pds-3/impl] 实施流式视觉层四项改造（契约 §1–§4）"
+  ],
+  "gates_seen_in_session": {
+   "unit": 9,
+   "accept": 12,
+   "browser": 9
+  }
+ },
+ "commits": [
+  {
+   "sha": "b0493690e7ca",
+   "full": "b0493690e7ca8015f19e3a521d9360037cdcece3",
+   "subject": "fix(core): 恢复请求保留完整上下文并补齐轮次止损与请求形状可观测",
+   "files": [
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/jobs.rs",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/limits.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_recovery.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "docs/decisions/0060-turn-context-integrity-and-loop-guards.md",
+    "docs/decisions/README.md",
+    "docs/observability.yaml"
+   ],
+   "stat": "15 files changed, 1269 insertions(+), 68 deletions(-)"
+  },
+  {
+   "sha": "f3979e49bfd2",
+   "full": "f3979e49bfd212cee3ab2b03c68cc771b7b9c094",
+   "subject": "feat(streaming): 接入流式视觉层（唯一 inline 尾巴 + 单行遮罩浮现）",
+   "files": [
+    ".dev-team/contracts/wave-pds-3-streaming-visual.md",
+    "docs/decisions/0059-streaming-visual-layer-tail-node.md",
+    "docs/decisions/README.md",
+    "src/components/HomeWorkspace.vue",
+    "src/components/MarkdownRenderer.vue",
+    "src/components/chat/AgentRuntimeStatusBar.vue",
+    "src/components/chat/WorkspaceTurnItem.vue",
+    "src/lib/useStreamingPresentationState.ts",
+    "src/styles.css",
+    "tests/acceptance/pds-streaming/contract-motion-rhythm-guards.spec.ts",
+    "tests/acceptance/pds-streaming/e2e/pds-streaming-visual.pw.ts",
+    "tests/acceptance/pds-streaming/receipts/RECEIPT.md",
+    "tests/acceptance/pds-streaming/receipts/e2e/aggregate-summary.json",
+    "tests/acceptance/pds-streaming/receipts/e2e/idle-baseline.json",
+    "tests/acceptance/pds-streaming/receipts/e2e/v8-contaminated-branch-proof.json",
+    "tests/acceptance/pds-streaming/receipts/e2e/v8-old-criterion-evidence.json",
+    "tests/acceptance/pds-streaming/receipts/e2e/v8-relative-runs.json",
+    "tests/acceptance/pds-streaming/receipts/e2e/v8-spike-branch-proof.json",
+    "tests/acceptance/pds-streaming/v1-tail-dom-protocol.spec.ts",
+    "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts",
+    "tests/acceptance/pds-streaming/v11-tail-split-semantics.spec.ts",
+    "tests/acceptance/pds-streaming/v12-tail-eligibility.spec.ts",
+    "tests/acceptance/pds-streaming/v13-plain-text-tail.spec.ts",
+    "tests/acceptance/pds-streaming/v14-eligibility-completeness.spec.ts"
+   ],
+   "stat": "24 files changed, 3974 insertions(+), 345 deletions(-)"
+  },
+  {
+   "sha": "fb2a74a0d3c9",
+   "full": "fb2a74a0d3c928d359123af81a6c59ca6bdeff03",
+   "subject": "chore(wave-pds-3): 收口 —— 元复盘、审查收据与状态账本",
+   "files": [
+    ".dev-team/meta-retrospective.md",
+    ".dev-team/review-join-pds3.json",
+    ".dev-team/review-plan-pds3.json",
+    ".dev-team/state.json"
+   ],
+   "stat": "4 files changed, 162 insertions(+), 3 deletions(-)"
+  }
+ ],
+ "post_run_commits": [],
+ "foreign_commits": [],
+ "frozen_test_drift": [],
+ "review_receipts": [
+  {
+   "file": ".dev-team/review-join-pds3.json",
+   "schema_version": 2,
+   "executed_by": "2485b3fc-9b7e-47b1-9916-b1622d1646bd",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "2485b3fc-9b7e-47b1-9916-b1622d1646bd",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "f3979e49bfd212cee3ab2b03c68cc771b7b9c094",
+   "verdict": "PASS",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-plan-pds3.json",
+   "schema_version": 2,
+   "executed_by": "b9d37323-c9d0-41ed-bf3a-28baf3289022",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "b9d37323-c9d0-41ed-bf3a-28baf3289022",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "8e51bd5",
+   "verdict": "PASS",
+   "independent": true
+  }
+ ],
+ "mechanical_red_flags": [
+  "impl_commit_modified_frozen_test:f3979e49bfd2",
+  "self_signed_review:review-join-a.json",
+  "self_signed_review:review-join-a2.json",
+  "self_signed_review:review-join-b.json",
+  "self_signed_review:review-join-b2.json",
+  "self_signed_review:review-join-pds3.json",
+  "self_signed_review:review-join-wave59-r2.json",
+  "self_signed_review:review-join-wave59.json",
+  "self_signed_review:review-join.json",
+  "self_signed_review:review-l3-concurrency.json",
+  "self_signed_review:review-l3-security.json",
+  "self_signed_review:review-plan-pds3.json",
+  "self_signed_review:review-plan-wave58.json",
+  "self_signed_review:review-plan-wave59.json",
+  "self_signed_review:review-plan.json"
+ ],
+ "unknowns": [
+  "每个门禁实际抓到多少缺陷（gate_caught）需从 review JSON/测试日志判定",
+  "用户是否口头授权了自扩范围（scope）需读会话原文"
+ ],
+ "pack_hash": "d1389a10df1a79c7"
+}
