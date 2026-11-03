@@ -699,6 +699,12 @@ pub fn ctrl_c_action(is_streaming: bool, has_draft: bool) -> CtrlCAction {
 /// 契约 P-5：一次性状态提示的存活时长（毫秒）。
 pub const STATUS_NOTICE_TTL_MS: u64 = 4_000;
 
+/// wave-63 §T3：stopping 期间按键的状态提示文案。
+///
+/// 必须走 `status_text` / `status_word` 通道（流式期唯一可见的状态位），
+/// **不得**改用 `status_notice`（流式期被 `should_render_status_notice` 抑制，等于静默吞）。
+pub const STOPPING_KEY_HINT: &str = "已请求停止，等待安全收口…";
+
 /// wave-60 §C8：当前墙钟毫秒（供 `StopSequenceState::press` 注入；纯读数，无副作用）。
 pub fn now_epoch_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1260,6 +1266,21 @@ impl TuiState {
         // 请求目标即当前流式轮（goal 续轮会换 turn_id，以请求为准同步）。
         self.streaming_turn_id = Some(turn_id.to_string());
         self.status_text = "正在停止…".to_string();
+    }
+
+    /// wave-63 §T3：stopping 期间的按键反馈（**不静默吞**、也**不重复派发**停止请求）。
+    ///
+    /// 返回语义（调用约定）：
+    /// - `true` ⇒ 当前**不在** stopping，调用方按原逻辑处理按键，且本调用**不改**任何文案；
+    /// - `false` ⇒ 已在 stopping：只把状态提示换成「已请求停止，等待安全收口…」，调用方
+    ///   **不得**再发 `stop_turn`、不得改写 `stopping_turn_id`、不得本地伪造终态
+    ///   （终态只能由 `turn:cancelled` 事件驱动）。
+    pub fn note_stopping_key(&mut self) -> bool {
+        if self.stopping_turn_id.is_none() {
+            return true;
+        }
+        self.status_text = STOPPING_KEY_HINT.to_string();
+        false
     }
 
     /// wave-60 §C9：`turn:cancelled` 驱动的**纯状态迁移** —— 收口终态「已停止」。
@@ -3850,7 +3871,15 @@ fn status_word(state: &TuiState) -> (String, Style) {
     // wave-60 §C9：停止请求受理后，**流式行**优先呈现「正在停止…」（终态未到前不得伪造）。
     // 走本通道而非 `status_notice`：后者被 `should_render_status_notice` 在流式期抑制（P-5 契约）。
     if state.stopping_turn_id.is_some() {
-        return ("正在停止…".to_string(), Style::default().fg(theme::WARN));
+        // wave-63 §T3：stopping 期间若用户再次按键，`status_text` 被换成「等待安全收口」提示，
+        // 该提示必须在流式行可见 —— 故 stopping 分支优先透出它，否则回落「正在停止…」。
+        let transient = compact_status(&state.status_text);
+        let word = if transient.contains("等待安全收口") {
+            transient
+        } else {
+            "正在停止…".to_string()
+        };
+        return (word, Style::default().fg(theme::WARN));
     }
     // 说明：一次性提示（status_notice）与非流式横幅由 `metrics_line` 渲染 —— 本函数只服务
     // 「流式进行中的那一行状态」，流式期按契约让位给进度短语，故这里不重复判定。
@@ -6408,7 +6437,9 @@ fn tui_event_loop(
                                 // 但同样走「请求 → 事件驱动终态」：此处不置 `is_streaming=false`、
                                 // 不打印任何「已中断」类终态文案（防假终态）。
                                 // 已受理的停止请求在等终态 ⇒ 不重复派发。
-                                if state.stopping_turn_id.is_none() {
+                                // wave-63 §T3：此时按键**不得静默吞** —— `note_stopping_key` 会置
+                                // 「等待安全收口」提示（流式行可见）并返回 false，拦下重复派发。
+                                if state.note_stopping_key() {
                                     goal_round_cancel.cancel();
                                     // NFR `lock_scope_bounded`：先取再放 —— 绝不在持锁期间调用
                                     // `stop_turn`（其会同步回调 sink.emit，存在锁重入/死锁风险）。
@@ -7029,7 +7060,9 @@ fn tui_event_loop(
                     if key.code == KeyCode::Esc {
                         if state.is_streaming {
                             // 已受理的停止请求在等终态 ⇒ 不重复派发（幂等），也不伪造终态。
-                            if state.stopping_turn_id.is_none() {
+                            // wave-63 §T3：此时按键**不得静默吞** —— `note_stopping_key` 置
+                            // 「等待安全收口」提示（流式行可见）并返回 false。
+                            if state.note_stopping_key() {
                                 // wave-60 §C8/C9：**双击** Esc（窗口 `stop_sequence_ms`=500，同身份）才发
                                 // **恰好一次**停止请求；第 1 次仅「上膛」。发出请求后只进「正在停止…」，
                                 // 终态一律由 `turn:cancelled` 事件驱动 —— 此处**不得**本地伪造终态。
