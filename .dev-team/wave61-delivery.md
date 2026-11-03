@@ -47,6 +47,11 @@
 - **R6** `HomeSidebar` tooltip 断言按「位点 → tooltip」同生共死迁移，并用补夹具恢复无条件精确包含（D5）。
 - **R7** 栅格化会让「相邻位左边缘不漂移」变恒真 ⇒ 补「位点自身宽度 Δ≤0.5px」等价判别断言（判别力补偿）。
 - **R8** 显式 `col-start-N` 是「空值不渲染 × 两行对齐」同时成立的必要条件（真浏览器实测：仅自动流式布局时圆环会落到第 3 列）。
+- **R9（收口阶段裁决，取代 R8）**：位点缺席时收列 `repeat(N, minmax(0,1fr))`，消除 `toolCallCount=0` 时
+  第 3 列空置造成的 127.5px 视觉空洞（Reviewer-B BLOCKING 处置）；代价是两行严格列中心对齐只在可见位点数相同时成立。
+- 收口阶段同时修复 4 条 Reviewer ADVISORY：速度位补 `whitespace-nowrap`（≈+≥1000 t/s 不折行）、
+  圆环位恢复 `tabindex="0" + cursor-help`（百分比 tooltip 键盘可达）、缓存值 tooltip 补 `tabindex="0"`
+  （命中率移入 tooltip 后的键盘可达）、`reduced-motion` 双轨同时关闭弧的 `transition-all`。
 - §5/§5.1 共授权迁移 10 处既有冻结断言，逐处文件头写明「原意图 / 迁移理由 / 等价断言」；未授权项零改动。
 
 ## 5. 不可逆面登记

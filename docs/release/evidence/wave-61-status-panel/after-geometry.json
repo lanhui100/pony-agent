@@ -1,6 +1,6 @@
 {
   "phase": "after",
-  "capturedAt": "2026-11-03T02:51:19.472Z",
+  "capturedAt": "2026-11-03T03:16:40.685Z",
   "signals": {
     "consoleErrors": [],
     "pageErrors": []
@@ -30,24 +30,24 @@
     "counts": [
       {
         "left": 1133,
-        "right": 1196.5,
+        "right": 1220.33,
         "top": 130,
-        "width": 63.5,
-        "centerX": 1164.75
+        "width": 87.33,
+        "centerX": 1176.66
       },
       {
-        "left": 1204.5,
-        "right": 1268,
+        "left": 1228.33,
+        "right": 1315.66,
         "top": 130,
-        "width": 63.5,
-        "centerX": 1236.25
+        "width": 87.33,
+        "centerX": 1271.99
       },
       {
-        "left": 1347.5,
+        "left": 1323.66,
         "right": 1411,
         "top": 133,
-        "width": 63.5,
-        "centerX": 1379.25
+        "width": 87.34,
+        "centerX": 1367.33
       }
     ],
     "tokens": [
@@ -81,11 +81,11 @@
       }
     ],
     "circle": {
-      "left": 1347.5,
+      "left": 1323.66,
       "right": 1411,
       "top": 133,
-      "width": 63.5,
-      "centerX": 1379.25
+      "width": 87.34,
+      "centerX": 1367.33
     },
     "circleText": ""
   }

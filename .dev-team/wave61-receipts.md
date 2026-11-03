@@ -96,3 +96,18 @@ $ bash ~/.agents/skills/observability-onboarding/scripts/check-declaration.sh .
 | 几何读数（列中心） | `after-geometry.json`（计数行与 token 行 4 列中心 x 完全相同：1164.75 / 1236.25 / 1307.75 / 1379.25） |
 
 > 像素级自动 diff 在本仓不适用（`.dev-team/contract-matrix-wave52.md:23` 已裁定），以 G-4c 几何断言 + 前后截图人工对眼作为门禁。
+
+## G-6 收口阶段 R9 变更后的复跑（Lead）
+
+裁决 R9（收列替代显式列位）+ 4 条 ADVISORY 修复后重跑全部前端门禁：
+
+```bash
+$ npx vue-tsc --noEmit                                  # Exit 0
+$ npx vitest run tests/acceptance/wave61                # Exit 0 ; 19 passed (19)
+$ npx vite build                                        # Exit 0
+$ npx playwright test tests/e2e/wave61-status-panel.spec.ts --retries=1
+# Exit 0 ; 6 passed (26.1s)
+```
+
+视觉复核（重采集）：`after-valued-status-panel.png` —— `toolCallCount=0` 时计数行 3 个位点均匀铺满整行，
+127.5px 空洞消失；console error / pageerror 均为 0（见 `after-geometry.json`）。

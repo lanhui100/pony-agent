@@ -2,7 +2,7 @@
   "schema_version": 2,
   "verdict": "FAIL",
   "reviewed_commit": "5c0eb40",
-  "reviewed_subject": "wave-61 状态面板实现提交（工作区 HomeStatusPanel.vue 与该提交逐字一致；证据目录产物复核）",
+  "reviewed_subject": "wave-61 状态面板实现提交 + 工作树快照（HomeStatusPanel.vue sha256 3242e1c2…，含审查期间并发落地的 E-3 >0 修复；证据目录 PNG/geometry 产自 5c0eb40 等价渲染）",
   "reviewer": {
     "kind": "subagent",
     "session_id": "365c9aca-0646-4485-96ae-793b4fe4d282",
@@ -21,7 +21,7 @@
   "findings": [
     {
       "file": "src/components/HomeStatusPanel.vue",
-      "line": 289,
+      "line": 290,
       "rule": "NFR_VIOLATION",
       "severity": "BLOCKING",
       "counterexample_cmd": "python3 -c 'import json; g=json.load(open(\"docs/release/evidence/wave-61-status-panel/after-geometry.json\"))[\"geometry\"]; print(\"counts\",[c[\"centerX\"] for c in g[\"counts\"]],\"tokens\",[c[\"centerX\"] for c in g[\"tokens\"]])' ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/after-valued-status-panel.png\").convert(\"RGB\")).astype(int); m=(a[196:219,40:637].mean(axis=2)<200); c=np.where(m.any(axis=0))[0]+40; print([(int(c[i]),int(c[i+1]),int(c[i+1]-c[i])) for i in range(len(c)-1) if c[i+1]-c[i]>60])' ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/before-valued-status-panel.png\").convert(\"RGB\")).astype(int); m=(a[196:219,40:637].mean(axis=2)<200); c=np.where(m.any(axis=0))[0]+40; print([(int(c[i]),int(c[i+1]),int(c[i+1]-c[i])) for i in range(len(c)-1) if c[i+1]-c[i]>60])'",
@@ -29,23 +29,23 @@
     },
     {
       "file": "src/components/HomeStatusPanel.vue",
-      "line": 327,
+      "line": 328,
       "rule": "NFR_VIOLATION",
       "severity": "ADVISORY",
-      "counterexample_cmd": "sed -n '320,341p' src/components/HomeStatusPanel.vue ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/after-valued-status-panel.png\").convert(\"RGB\")).astype(int); print(\"ring_track\",a[207,540].tolist(),\"card_bg\",a[207,610].tolist())'",
+      "counterexample_cmd": "sed -n '321,342p' src/components/HomeStatusPanel.vue ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/after-valued-status-panel.png\").convert(\"RGB\")).astype(int); print(\"ring_track\",a[207,540].tolist(),\"card_bg\",a[207,610].tolist())'",
       "detail": "圆环位只渲染 14px SVG、无百分比文本（契约 L-4:52 该行预算「18+30=100%」即含文本位，min-w-[3rem] 因此失去依据）：轨道 #d5d1c8 对卡底 #f6f0e8 对比 1.36:1，墨迹 13×13px，21% 弧仅约 3px 短划。它是全行唯一「无值」位点，视觉上更像 loading spinner 而非「上下文占用」；百分比只存在于 hover tooltip，旧 composer 的 cursor-help 提示也已丢失（可读性弱于同排计数）。"
     },
     {
       "file": "src/components/HomeStatusPanel.vue",
-      "line": 323,
+      "line": 324,
       "rule": "NFR_VIOLATION",
       "severity": "ADVISORY",
-      "counterexample_cmd": "git -c core.preloadIndex=false show 5c0eb40^:src/components/chat/WorkspaceComposer.vue | sed -n '1126p' ; sed -n '320,324p' src/components/HomeStatusPanel.vue",
-      "detail": "键盘可达性回退：迁移前圆环 trigger 是 <span tabindex=\"0\" class=\"inline-flex cursor-help\">，迁移后是裸 <span>（reka TooltipTrigger as-child 不注入 tabindex）⇒ 圆环 tooltip 这一唯一含上下文百分比的位置键盘不可达。同理缓存命中率由行内「· 21%」移入值 tooltip（216/395 行）后变成鼠标专属，键盘用户从此拿不到该数据。"
+      "counterexample_cmd": "git -c core.preloadIndex=false show 5c0eb40^:src/components/chat/WorkspaceComposer.vue | sed -n '1126p' ; sed -n '321,325p' src/components/HomeStatusPanel.vue",
+      "detail": "键盘可达性回退：迁移前圆环 trigger 是 <span tabindex=\"0\" class=\"inline-flex cursor-help\">，迁移后是裸 <span>（reka TooltipTrigger as-child 不注入 tabindex）⇒ 圆环 tooltip 这一唯一含上下文百分比的位置键盘不可达。同理缓存命中率由行内「· 21%」移入值 tooltip（217/396 行）后变成鼠标专属，键盘用户从此拿不到该数据。"
     },
     {
       "file": "src/components/HomeStatusPanel.vue",
-      "line": 403,
+      "line": 404,
       "rule": "CONTRACT_BREAK",
       "severity": "ADVISORY",
       "counterexample_cmd": "grep -n 'whitespace-nowrap' src/components/HomeStatusPanel.vue || echo 'MISSING whitespace-nowrap (contract L-4:51)'",
@@ -53,23 +53,15 @@
     },
     {
       "file": "src/components/HomeStatusPanel.vue",
-      "line": 124,
-      "rule": "CORRECTNESS",
-      "severity": "ADVISORY",
-      "counterexample_cmd": "sed -n '120,127p' src/components/HomeStatusPanel.vue",
-      "detail": "showContextRing 只判 contextDisplayTokens != null：该值为 0 时仍渲染圆环（弧 0%、tooltip「上下文用量：0% · 0 / 200K」），与用户真值源「零值不显示」相悖；resolveContextInputTokens 可返回 0，边缘可达。契约 E-3 只覆盖 null / 窗口非法，实现照抄契约，需补 >0 判定。"
-    },
-    {
-      "file": "src/components/HomeStatusPanel.vue",
-      "line": 347,
+      "line": 348,
       "rule": "NFR_VIOLATION",
       "severity": "ADVISORY",
-      "counterexample_cmd": "sed -n '347p;482,499p' src/components/HomeStatusPanel.vue",
-      "detail": "reduced-motion 双轨只降级入场（482-499 行仅覆盖 .status-slot-enter*）；圆环弧仍带 transition-all duration-500，降级下每次进度更新仍扫 500ms，与 src/styles.css:189-217「状态行族降级时 transition:none」的既有约定不一致（契约 M-4 只写入场，属遗漏而非违约）。"
+      "counterexample_cmd": "sed -n '348p;483,500p' src/components/HomeStatusPanel.vue",
+      "detail": "reduced-motion 双轨只降级入场（483-500 行仅覆盖 .status-slot-enter*）；圆环弧仍带 transition-all duration-500，降级下每次进度更新仍扫 500ms，与 src/styles.css:189-217「状态行族降级时 transition:none」的既有约定不一致（契约 M-4 只写入场，属遗漏而非违约）。"
     },
     {
       "file": "src/components/HomeStatusPanel.vue",
-      "line": 293,
+      "line": 294,
       "rule": "NFR_VIOLATION",
       "severity": "ADVISORY",
       "counterexample_cmd": "python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/before-valued-status-panel.png\").convert(\"RGB\")).astype(int); m=(a[196:219,40:637].mean(axis=2)<200); c=np.where(m.any(axis=0))[0]+40; print([(int(c[i]),int(c[i+1])) for i in range(len(c)-1) if 3<c[i+1]-c[i]<60])' ; python3 -c 'from PIL import Image; import numpy as np; a=np.asarray(Image.open(\"docs/release/evidence/wave-61-status-panel/after-valued-status-panel.png\").convert(\"RGB\")).astype(int); m=(a[196:219,40:637].mean(axis=2)<200); c=np.where(m.any(axis=0))[0]+40; print([(int(c[i]),int(c[i+1])) for i in range(len(c)-1) if 3<c[i+1]-c[i]<60])'",

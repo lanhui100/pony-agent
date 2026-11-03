@@ -141,6 +141,19 @@ const contextUsagePercentage = computed(() => {
   return Math.min(100, Math.max(0, ratio < 1 && ratio > 0 ? 1 : Math.round(ratio)));
 });
 
+/**
+ * §1 L-3 / 裁决 R9（Reviewer-B BLOCKING 处置）：位点缺席时**收列**，不留空列。
+ * 保留 `grid-cols-4` class（冻结结构断言需要），仅在可见位点数 <4 时用内联 style 覆盖列模板，
+ * 使「空值不渲染」不再产生 46% 行宽的视觉空洞（toolCallCount=0 是会话早期常态）。
+ * 取舍：两行的严格列中心对齐只在两行可见位点数相同时成立（G-4c 的 4/4 夹具即此态）。
+ */
+function rowGridStyle(visibleSlotCount: number): Record<string, string> | undefined {
+  if (visibleSlotCount <= 0 || visibleSlotCount >= 4) {
+    return undefined;
+  }
+  return { gridTemplateColumns: `repeat(${visibleSlotCount}, minmax(0, 1fr))` };
+}
+
 /** §1 L-2 圆环 tooltip 的紧凑整数（与迁移前 composer 文案逐字保真）。 */
 function formatCompactTokenInteger(value: number) {
   if (value >= 1_000_000) { return `${Math.round(value / 1_000_000)}M`; }
@@ -287,11 +300,12 @@ const showMetricsCard = computed(
         <div
           v-if="visibleCountSlotCount > 0"
           class="grid grid-cols-4 items-center gap-x-2 gap-y-0 text-[11px] leading-5 text-stone-600"
+          :style="rowGridStyle(visibleCountSlotCount)"
           data-testid="status-metrics-counts"
         >
           <Tooltip v-if="isPositiveFiniteNumber(turnCount)" text="对话轮次数">
             <span
-              class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums col-start-1"
+              class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums"
               data-testid="status-metric-turn-count"
             >
               <MessageSquareMore class="h-3 w-3 text-stone-400" />
@@ -300,7 +314,7 @@ const showMetricsCard = computed(
           </Tooltip>
           <Tooltip v-if="isPositiveFiniteNumber(modelCallCount)" text="模型调用次数">
             <span
-              class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums col-start-2"
+              class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums"
               data-testid="status-metric-model-call-count"
             >
               <Orbit class="h-3 w-3 text-stone-400" />
@@ -309,7 +323,7 @@ const showMetricsCard = computed(
           </Tooltip>
           <Tooltip v-if="isPositiveFiniteNumber(toolCallCount)" text="工具调用次数">
             <span
-              class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums col-start-3"
+              class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums"
               data-testid="status-metric-tool-call-count"
             >
               <Wrench class="h-3 w-3 text-stone-400" />
@@ -320,8 +334,9 @@ const showMetricsCard = computed(
                §2 E-3：无用量 / 窗口非法时整个位点不渲染。 -->
           <Tooltip v-if="showContextRing" :text="contextUsageTooltip">
             <span
-              class="status-slot-enter status-slot-enter--ring inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums col-start-4"
+              class="status-slot-enter status-slot-enter--ring inline-flex min-w-[3rem] cursor-help items-center justify-center gap-1.5 tabular-nums"
               data-testid="status-context-usage"
+              tabindex="0"
               aria-label="上下文用量"
               :data-context-debug="debugAttrsEnabled ? contextDebugString : undefined"
             >
@@ -345,7 +360,7 @@ const showMetricsCard = computed(
                   stroke-linecap="round"
                   :stroke-dasharray="2 * Math.PI * 7.5"
                   :stroke-dashoffset="(2 * Math.PI * 7.5) * (1 - contextUsagePercentage / 100)"
-                  class="transition-all duration-500 ease-out text-stone-500 hover:text-stone-700"
+                  class="status-ring-arc transition-all duration-500 ease-out text-stone-500 hover:text-stone-700"
                 />
               </svg>
             </span>
@@ -358,13 +373,14 @@ const showMetricsCard = computed(
         <div
           v-if="visibleTokenSlotCount > 0"
           class="mt-2 grid grid-cols-4 items-center gap-x-2 gap-y-0 border-t border-stone-200/60 pt-2 text-[11px] leading-5 text-stone-600"
+          :style="rowGridStyle(visibleTokenSlotCount)"
           data-testid="status-metrics-tokens"
         >
           <!-- wave-54 C4/C6：「输入」口径 = 末次调用 contextInputTokens（回退 S1），
                估算来源加 `≈`。非会话累计；无值不渲染（§2 E-2/E-5）。 -->
           <span
             v-if="isPositiveFiniteNumber(inputTokensTotal)"
-            class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums col-start-1"
+            class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums"
             data-testid="status-metric-input-tokens"
           >
             <Tooltip text="输入">
@@ -376,7 +392,7 @@ const showMetricsCard = computed(
           </span>
           <Tooltip v-if="isPositiveFiniteNumber(outputTokensTotal)" text="输出">
             <span
-              class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums col-start-2"
+              class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums"
               data-testid="status-metric-output-tokens"
             >
               <ArrowDown class="h-3 w-3 text-stone-400" />
@@ -387,21 +403,22 @@ const showMetricsCard = computed(
                行内只保留「图标 + 值」两个节点。 -->
           <span
             v-if="isPositiveFiniteNumber(cacheHitTokensTotal)"
-            class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums col-start-3"
+            class="status-slot-enter inline-flex min-w-[3rem] items-center justify-center gap-1.5 tabular-nums"
             data-testid="status-metric-cache-tokens"
           >
             <Tooltip text="缓存读取">
               <Zap class="h-3 w-3 text-stone-400" />
             </Tooltip>
             <Tooltip :text="cacheValueTooltip">
-              <span>{{ formatTokenValue(cacheHitTokensTotal) }}</span>
+              <!-- R1 副作用补偿：命中率已移入本 tooltip，必须保留键盘可达（tabindex + cursor-help）。 -->
+              <span tabindex="0" class="cursor-help">{{ formatTokenValue(cacheHitTokensTotal) }}</span>
             </Tooltip>
           </span>
           <!-- §1 L-4：速度位预留下限 3.5rem（Lead 实测：4.25rem 会撑破 4 列 track），
                预留落在位点容器自身，值节点不带 min-w / text-right。 -->
           <span
             v-if="isPositiveFiniteNumber(tokenGenerationSpeed)"
-            class="status-slot-enter inline-flex min-w-[3.5rem] items-center justify-center gap-1.5 tabular-nums col-start-4"
+            class="status-slot-enter inline-flex min-w-[3.5rem] items-center justify-center gap-1.5 whitespace-nowrap tabular-nums"
             data-testid="status-metric-token-speed"
             :data-speed-mode="tokenSpeedCalculationMode || 'none'"
             :data-speed-basis="speedBasis"
@@ -488,6 +505,11 @@ const showMetricsCard = computed(
     opacity: 1 !important;
     transform: none !important;
   }
+
+  /* §3 M-4：降级不仅覆盖入场，弧的进度过渡同样关闭（否则每次进度更新仍扫 500ms）。 */
+  .status-ring-arc {
+    transition: none !important;
+  }
 }
 
 /* §3 M-4 双轨降级 · 轨道二：应用内根属性 `data-pds-reduce-motion="true"`（挂在 documentElement）。 */
@@ -497,5 +519,9 @@ const showMetricsCard = computed(
   transition: none !important;
   opacity: 1 !important;
   transform: none !important;
+}
+
+[data-pds-reduce-motion="true"] .status-ring-arc {
+  transition: none !important;
 }
 </style>
