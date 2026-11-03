@@ -573,15 +573,26 @@ const toolIconByCanonicalName: Record<string, any> = {
               PA-114: Ask 工具行渲染专属交互卡片，其余行保持通用渲染（F1-4）。
               wave-pds-3 §1 / §3.3：每条工具行都必须带 `data-pds-tool-row` 锚点并挂入场消融
               （`filter: blur(2px)→0`，220ms）。两种行体都靠属性/类透传到根节点，不改内部结构。
+              wave-pds-4：行级入场补齐与「思考过程」块**完全相同**的 motion 层
+              （`opacity 0→1, y 4→0, 160ms easeOut`）；此前该块有 motion+Css 两层，
+              工具行只有 Css 一层，造成两者手感不一致。
             -->
             <AskUserToolCallCard
               v-if="isAskToolName(tool.toolName)"
               :tool="tool"
+              v-motion
+              :initial="{ opacity: 0, y: 4 }"
+              :animate="{ opacity: 1, y: 0 }"
+              :transition="{ duration: 0.16, ease: 'easeOut' }"
               data-pds-tool-row
               class="pds-tool-row-enter"
             />
             <div
               v-else
+              v-motion
+              :initial="{ opacity: 0, y: 4 }"
+              :animate="{ opacity: 1, y: 0 }"
+              :transition="{ duration: 0.16, ease: 'easeOut' }"
               class="pds-tool-row-enter flex flex-col py-0.5 text-[12px] leading-5"
               data-pds-tool-row
             >
