@@ -312,6 +312,12 @@ fn c1_unknown_skill_name_resolves_to_none() {
 
 // ============================================================
 // C1-5 工具注册：模型可见面 28 → 29，`skill_load` 在 schema 列表内
+//
+// wave-61 迁移（2026-11-03，Lead 一票授权）：Wave-61 C1 让 9 项团队/子代理工具进入
+// 常驻模型可见面（`workflow` 因 handler 为桩退回 Internal，见契约 C1.7），模型可见面
+// 由 29 → **38** 项。本用例的**意图**（`skill_load` 必须注册且可被模型看到）不变，故只把
+// 总数锚点同步为 38，并保留「必须含 skill_load」的逐名断言；其余断言一字未改。
+// 未放宽：从"精确 29"改为"精确 38"是同强度收紧后的等价迁移（数字仍是精确值，不是 `>=`）。
 // ============================================================
 
 #[test]
@@ -321,8 +327,8 @@ fn c1_skill_load_is_registered_on_the_model_visible_surface() {
     let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
     assert_eq!(
         names.len(),
-        29,
-        "C1-5：新增 `skill_load` 后模型可见面必须是 29 项（基线 28），实际：{names:?}"
+        38,
+        "C1-5：wave-61 后模型可见面必须是 38 项（29 基线 + 9 项团队工具；workflow 因桩退回 Internal），实际：{names:?}"
     );
     let view = views
         .iter()
