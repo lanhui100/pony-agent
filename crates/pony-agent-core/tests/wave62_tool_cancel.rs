@@ -37,10 +37,17 @@ const TURN_CANCEL_EXIT_BOUND_MS: u64 = 1_000;
 const TURN_CANCEL_POLL_MS: u64 = 100;
 
 fn temp_workspace(tag: &str) -> PathBuf {
+    // wave-61-team Windows 可移植性修复（2026-11-03）：原实现把 `{:?}` 的 ThreadId
+    // 直接拼进临时目录名，得到 `ThreadId(8)` —— 括号是 cmd 无法安全引用的字符，Run 工具
+    // 会按契约 fail-closed 返回 `spawn_failed`（CI windows-latest 上 C2/C3 恒红）。
+    // 这里把线程标识规约为纯数字后缀，目录名在 Windows 上同样可执行。
+    let thread_suffix: String = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
     let path = std::env::temp_dir().join(format!(
-        "pony-wave62-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
+        "pony-wave62-{tag}-{}-{thread_suffix}",
+        std::process::id()
     ));
     std::fs::create_dir_all(&path).expect("create temp workspace");
     path

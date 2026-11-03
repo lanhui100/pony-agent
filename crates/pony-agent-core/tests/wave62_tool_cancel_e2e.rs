@@ -31,10 +31,15 @@ const TURN_CANCEL_EXIT_BOUND_MS: u64 = 1_000;
 const SIDE_EFFECT_SETTLE_MS: u64 = 1_600;
 
 fn temp_workspace(tag: &str) -> PathBuf {
+    // wave-61-team Windows 可移植性修复：ThreadId 的 `( )` 是 cmd 无法安全引用的字符，
+    // 拼进临时目录名会让 Run 工具 fail-closed（spawn_failed）。规约为纯数字后缀。
+    let thread_suffix: String = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
     let path = std::env::temp_dir().join(format!(
-        "pony-wave62-e2e-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
+        "pony-wave62-e2e-{tag}-{}-{thread_suffix}",
+        std::process::id()
     ));
     std::fs::create_dir_all(&path).expect("create e2e temp workspace");
     path
