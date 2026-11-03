@@ -1,190 +1,248 @@
 {
   "meta": {
-    "verified_by": "lead (独立 verifier subagent 未在时限内返回，改由 Lead 逐条核对)",
-    "verified_at": "2026-11-03T21:12+08:00",
-    "method": "grep/read 直读源码 + ClickHouse/Tempo 交叉查询",
-    "independence": "reduced (same agent as report author)"
+    "verified_by": "L3 independent verifier subagent (concurrent with lead's own self-check)",
+    "verified_at": "2026-11-03T21:15+08:00",
+    "git_head": "1b592d8 feat(streaming): 尾巴热区逐字浮现（让动效真正可见）",
+    "method": "grep/read 直读源码逐条定位（未修改任何文件）；lead 的先行自检记录原样保留在 prior_selfcheck 键，未删除",
+    "independence": "full（与报告作者不同 subagent，十条逐条独立定位）"
   },
   "verdicts": [
     {
       "id": 1,
-      "claim": "turn_span_attributes 只输出固定 7 组属性，不含对话内容/token",
+      "claim": "crates/pony-agent-core/src/agent/otel/mod.rs:1250 附近 turn_span_attributes 只输出固定 7 组属性（session_id/trace name/operation/turn_id/sequence/phase/user_id 可选），不含任何对话内容或 token。",
       "verdict": "TRUE",
       "evidence": [
         {
           "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
           "line": 1250,
-          "snippet": "pub fn turn_span_attributes(...) -> Vec<(String, AttrValue)> { let mut attributes = Vec::with_capacity(7);"
-        }
-      ]
-    },
-    {
-      "id": 2,
-      "claim": "全仓无 langfuse.observation.input/output、无 gen_ai.prompt/completion",
-      "verdict": "TRUE",
-      "evidence": [
-        {
-          "path": "(grep)",
-          "line": 0,
-          "snippet": "grep -rn 上述四键 --include=*.rs crates src-tauri → 0 命中"
-        }
-      ]
-    },
-    {
-      "id": 3,
-      "claim": "force_export_session_trace 只取 session_id/turn_id/sequence/phase，建 span 即 end",
-      "verdict": "TRUE",
-      "evidence": [
-        {
-          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
-          "line": 1217,
-          "snippet": "turn_span_attributes(&TurnSpanInput{session_id,user_id:None,turn_id,sequence,phase})"
+          "snippet": "pub fn turn_span_attributes(input: &TurnSpanInput) -> Vec<(String, AttrValue)> {\n    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(7);\n    push_str(&mut attributes, ATTR_LANGFUSE_SESSION_ID, &input.session_id);"
         },
         {
           "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
-          "line": 1233,
-          "snippet": "let mut span = ...build_with_context(...); span.end();"
+          "line": 1276,
+          "snippet": "if let Some(user_id) = input.user_id.as_deref() {\n        push_str(&mut attributes, ATTR_LANGFUSE_USER_ID, user_id);\n    }\n    attributes"
         }
-      ]
+      ],
+      "note": "6 个必出键 + 可选 user_id = 上限 7，函数体内无任何 message/content/prompt/token 键，与断言完全一致。范围提醒：该函数本身如此，但实时路径的 turn span 之后还会 set_attribute 追加 usage/cost/degraded（otel/mod.rs:1975-1995），所以「只有 7 属性」只对强制重放路径成立，引用时不要外推。"
+    },
+    {
+      "id": 2,
+      "claim": "全仓 absence 断言：grep -rn \"langfuse.observation.input|langfuse.observation.output|gen_ai.prompt|gen_ai.completion\" 在 crates/ 与 src-tauri/ 下零命中（除注释/文档）。",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+          "line": 220,
+          "snippet": "pub const ATTR_AGENT_TURN_DEGRADED: &str = \"agent.turn.degraded\";\n// 同文件属性常量区：无 langfuse.observation.input/output、无 gen_ai.prompt/completion"
+        },
+        {
+          "path": "docs/analysis/trace-analysis-pa-01a1a134.md",
+          "line": 33,
+          "snippet": "- **代码事实**：... 全仓无 `langfuse.observation.input/output`、无 `gen_ai.prompt/completion`、无 span event"
+        }
+      ],
+      "note": "实跑 grep 于 crates/、src/、src-tauri/ = 0 命中（连注释里都没有）；整仓唯一命中是上述分析文档本身在「描述缺失」。比断言更强：不是「除注释外零命中」，而是代码里一处都没有。"
+    },
+    {
+      "id": 3,
+      "claim": "crates/pony-agent-core/src/agent/otel/mod.rs:1217 附近 force_export_session_trace 只读取 record 的 session_id/turn_id/sequence/phase，构建 span 后立即 span.end()，不写 duration/error/token/子 span。",
+      "verdict": "TRUE",
+      "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+          "line": 1218,
+          "snippet": "let mut attributes = to_key_values(turn_span_attributes(&TurnSpanInput {\n    session_id: record_session.to_string(),\n    user_id: None,\n    turn_id: record.turn_id.clone(),\n    sequence: record.sequence.unwrap_or(offset as u64),\n    phase: record.phase.clone(),\n}));"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+          "line": 1229,
+          "snippet": "let mut span = state.tracer.build_with_context(\n    opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)\n        .with_kind(opentelemetry::trace::SpanKind::Internal)\n        .with_attributes(attributes),\n    &opentelemetry::Context::new(),\n);\nspan.end();"
+        }
+      ],
+      "note": "SpanBuilder 未设 start_time/end_time（duration 恒 0）、未 set_status、无子 span，只有 turn 属性 + pony.otel.forced=true。补充事实（非建议）：TurnTraceRecord 里有 trace_id / error / input_tokens / output_tokens / turn_duration_ms（session/types.rs:681+），重放路径全不读——连 record.trace_id 也不读，所以重放产生的是与原始 trace_id 无关的新 trace，前端拿不到回执 id。"
     },
     {
       "id": 4,
-      "claim": "DEFAULT_RUN_TIMEOUT_MS=10_000 / MAX=120_000；build|test|cargo|check|install 自适应 60_000",
+      "claim": "tools.rs:210 DEFAULT_RUN_TIMEOUT_MS=10_000、MAX_RUN_TIMEOUT_MS=120_000；tools.rs:2863-2877 对含 build/test/cargo/check/install 的命令自适应默认 60_000，用户可传 timeoutMs 上限 120_000。",
       "verdict": "TRUE",
       "evidence": [
         {
           "path": "crates/pony-agent-core/src/agent/tools.rs",
           "line": 210,
-          "snippet": "const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000; ... MAX_RUN_TIMEOUT_MS: u64 = 120_000;"
+          "snippet": "const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000;\nconst MAX_RUN_TIMEOUT_MS: u64 = 120_000;"
         },
         {
           "path": "crates/pony-agent-core/src/agent/tools.rs",
-          "line": 2863,
-          "snippet": "let default_timeout = if command.contains(\"build\")||... { 60_000 } else { DEFAULT_RUN_TIMEOUT_MS };"
+          "line": 2862,
+          "snippet": "let default_timeout = if command.contains(\"build\")\n    || command.contains(\"test\") || command.contains(\"cargo\")\n    || command.contains(\"check\") || command.contains(\"install\")\n{ 60_000 } else { DEFAULT_RUN_TIMEOUT_MS };"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/tools.rs",
+          "line": 2877,
+          "snippet": ".map(|value| value.clamp(1, MAX_RUN_TIMEOUT_MS))"
         }
-      ]
+      ],
+      "note": "行号与值全部吻合。实现细节（不影响判定）：对整条命令串做大小写敏感 contains，所以除 `cargo build` 外，含 check/install 子串的命令（如 `git checkout`）也会拿到 60s 默认值——是更宽松而非更严格，不构成夸大。"
     },
     {
       "id": 5,
-      "claim": "同工具连续失败 4 次熔断（DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES=4）",
+      "claim": "limits.rs:24-42：DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES=4；并确认该闸触发后是「终结整轮」而非「换策略/降级继续」。",
       "verdict": "TRUE",
       "evidence": [
         {
           "path": "crates/pony-agent-core/src/agent/runtime/limits.rs",
           "line": 38,
           "snippet": "pub(super) const DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES: usize = 4;"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+          "line": 512,
+          "snippet": "if consecutive_failures.same_tool_count()\n    >= max_consecutive_same_tool_failures_per_turn()\n{\n    self.fail_stream_turn_with_hook_dispatch( ... build_same_tool_consecutive_failure_error( ... ));\n    return;"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+          "line": 204,
+          "snippet": "if consecutive_failures.same_tool_count()\n    >= max_consecutive_same_tool_failures_per_turn()\n{\n    return Err(self.fail_sync_turn_result( ... build_same_tool_consecutive_failure_error( ... )));"
         }
       ],
-      "note": "触发后是否『换策略』未逐行验证（终结路径在 turn_stream fail_stream_turn_*），报告措辞已限定为『终结整轮、不换策略』"
+      "note": "常量 4 在行 38（落在 24-42 区间）。两条运行时路径都是直接终结：流式 fail_stream_turn_with_hook_dispatch + return，同步返回 Err(fail_sync_turn_result)；无换工具、无降级继续、无退避重试。另同文件还有更早的指纹闸 DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN=3（行 18），两道独立闸，断言只写第二道（4），不冲突。"
     },
     {
       "id": 6,
-      "claim": "非零退出统一 non_zero_exit，仅 Windows 9009 特判",
+      "claim": "tools.rs:3198 附近：Run 非零退出统一映射 non_zero_exit，除 Windows 9009 外无按退出码分类；并确认 stderr 是否以结构化字段回灌模型。",
       "verdict": "TRUE",
       "evidence": [
         {
           "path": "crates/pony-agent-core/src/agent/tools.rs",
-          "line": 3199,
-          "snippet": "let base_message = format!(\"命令执行完成，但退出码为 {}。\", ...); match windows_command_not_found_hint(...)"
+          "line": 3194,
+          "snippet": "let succeeded = exit_code == Some(0);\nlet error_payload = (!succeeded).then(|| { ... match windows_command_not_found_hint(cfg!(windows), exit_code, &command) ... json!({ \"code\": \"non_zero_exit\", \"kind\": \"non_zero_exit\", \"message\": message, \"exitCode\": exit_code })"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/tools.rs",
+          "line": 3230,
+          "snippet": "\"stdout\": stdout,\n\"stderr\": stderr,\n\"stdoutTruncated\": stdout_truncated,\n\"stderrTruncated\": stderr_truncated,\n\"error\": error_payload,"
         }
-      ]
+      ],
+      "note": "非零退出确实只有一个 code=non_zero_exit；唯一特判是 9009 的文案提示（tools.rs:7948 `exit_code != Some(9009)`）。stderr 是结构化顶层字段（不拼进 message），另有 stderrTruncated 布尔。限定：超时分支不走 non_zero_exit，而用独立 code=timeout / environment_unavailable（tools.rs:3149-3174），但那不是「按退出码分类」，不构成反例。"
     },
     {
       "id": 7,
-      "claim": "provider 多 tool_use 直接 Err；parallel_tools 无生产接线",
-      "verdict": "TRUE",
+      "claim": "parallel_tools.rs 引擎是否在生产路径接线（谁调用它？grep 引用），以及 provider 侧对一次响应多个 tool_use 的处理（provider/mod.rs:2638,3444）——断言是「单 hop 单工具、多 tool_use 直接报错」。",
+      "verdict": "PARTIAL",
       "evidence": [
+        {
+          "path": "crates/pony-agent-core/src/agent/mod.rs",
+          "line": 31,
+          "snippet": "pub mod parallel_tools;"
+        },
         {
           "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
           "line": 3444,
-          "snippet": "if count > 1 { return Err(\"Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。\") }"
+          "snippet": "if count > 1 {\n    return Err(\"Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。\".to_string());\n}"
         },
         {
-          "path": "crates/pony-agent-core/src/agent/parallel_tools.rs",
-          "line": 13,
-          "snippet": "//! 把 provider 的多调用接入本引擎需要改造回合循环 … 已单列为计划 W28b"
-        },
-        {
-          "path": "(grep)",
-          "line": 0,
-          "snippet": "parallel_tools 引用仅 mod.rs:31 与 tests/wave28_parallel_tools_test.rs"
+          "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
+          "line": 3218,
+          "snippet": "let tool_call = message.get(\"tool_calls\").and_then(Value::as_array).and_then(|calls| calls.first())?;"
         }
-      ]
+      ],
+      "note": "两半不同命：(a) 引擎未接线成立——全仓对 parallel_tools 的唯一生产引用就是 agent/mod.rs:31 的 `pub mod`，execute_calls / execute_calls_with_router（parallel_tools.rs:64、:167）零生产调用者；模块头自述「接入需改造回合循环，已单列为计划 W28b」。(b)「多 tool_use 直接报错」只对 Anthropic 成立（2638 流式、3444 非流式）；OpenAI 侧 extract_openai_tool_call 用 `.first()` 静默丢弃多余调用（:3222），既不报错也不执行。断言把两家统一说成「直接报错」属夸大，准确表述应为「Anthropic 报错、OpenAI 静默丢失」。"
     },
     {
       "id": 8,
-      "claim": "失败轮只下发 text:\"This turn failed.\" + error",
+      "claim": "turn_flow.rs:520 附近：失败轮只下发 text:\"This turn failed.\" + error，不含已产出的 assistant 文本。",
       "verdict": "TRUE",
       "evidence": [
         {
           "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
           "line": 520,
-          "snippet": "phase: Some(\"failed\"), text: Some(\"This turn failed.\"), error: Some(error)"
+          "snippet": "text: Some(\"This turn failed.\".to_string()),\nreasoning_content: None,\nerror: Some(error),"
+        },
+        {
+          "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
+          "line": 481,
+          "snippet": "pub fn emit_stream_failed( ... turn_duration_ms: Option<u64>, ... error: String, session_id: Option<String> ) -> TurnEventEnvelope"
         }
-      ]
+      ],
+      "note": "emit_stream_failed 是失败终态唯一装配点（ponysentry/mod.rs:143 注释同口径），参数里根本没有 assistant 正文通道，故失败事件必然只带固定文案 + error。限定：流式期间已逐字下发的 delta 不会被撤回，前端可自行保留已显示文本——「失败事件不含正文」为真，「用户看不到已产出正文」不成立。"
     },
     {
       "id": 9,
-      "claim": "上传文案把 flush 的 turn 数说成『已成功上传至 Langfuse』，无 trace_id，4s 清空",
+      "claim": "src/components/telemetry/TelemetryPage.vue:73-92：上传结果文案把「flush 完成的 turn 数」表述为「已成功上传至 Langfuse」，且 4s 自动清空、无 trace_id 回执。",
       "verdict": "TRUE",
       "evidence": [
         {
           "path": "src/components/telemetry/TelemetryPage.vue",
           "line": 83,
-          "snippet": "uploadFeedback.value = `已成功上传该会话 Trace（共 ${count} 轮对话）`; showToast(`... 至 Langfuse`, \"success\")"
+          "snippet": "uploadFeedback.value = `已成功上传该会话 Trace（共 ${count} 轮对话）`;\nshowToast(`已成功上传会话 Trace（包含 ${count} 轮对话链路）至 Langfuse`, \"success\");"
+        },
+        {
+          "path": "src/components/telemetry/TelemetryPage.vue",
+          "line": 96,
+          "snippet": "uploadTimer = setTimeout(() => {\n  uploadState.value = \"idle\";\n  uploadFeedback.value = \"\";\n}, 4000);"
         }
-      ]
+      ],
+      "note": "count 确系 flush 语义：force_export_session_trace 明确「返回值是实际完成 flush 的 turn 数」（otel/mod.rs:1185，单测 :3875），flush_state 只验 force_flush 返回（:3577-3602），不校验 Langfuse 是否受理；前端却写成「已成功上传…至 Langfuse」。整页 grep trace_id/traceId = 0 命中，确认无回执 id。微差：内联文案说「已成功上传该会话 Trace」，「至 Langfuse」只出现在 toast——不影响判定。"
     },
     {
       "id": 10,
-      "claim": "前端不呈现 agent.turn.degraded / tool_failures",
-      "verdict": "TRUE",
+      "claim": "src/components/HomeTracePanel.vue:743 附近：前端不存在 degraded / tool_failures 字段呈现（grep degraded 在 src/ 的命中，确认是否仅出现在 types 而未被 UI 消费）。",
+      "verdict": "PARTIAL",
       "evidence": [
         {
           "path": "src/components/HomeTracePanel.vue",
           "line": 743,
-          "snippet": "（turn 头仅输入/输出/速度/缓存/延时；grep src 内 degraded 命中均为 capability/transcript 语义，非 agent.turn 口径）"
-        }
-      ]
-    },
-    {
-      "id": 11,
-      "claim": "超时提示从不指向后台 JobStart（job_start 已 ModelVisible）",
-      "verdict": "TRUE",
-      "evidence": [
-        {
-          "path": "crates/pony-agent-core/src/agent/tools.rs",
-          "line": 7961,
-          "snippet": "fn classify_timeout_hint → 只给网络自检 / 『显式传入更大的 timeoutMs』"
+          "snippet": "function buildTurnAggregateMetrics(turn: TurnTraceRecord) { ... }  // 本文件 grep degraded / tool_failures 均 0 命中"
         },
         {
-          "path": "crates/pony-agent-core/src/agent/tools.rs",
-          "line": 7554,
-          "snippet": "TOOL_JOB_START | TOOL_JOB_OUTPUT | TOOL_JOB_KILL | TOOL_JOB_LIST => ToolExposure::ModelVisible"
-        }
-      ]
-    },
-    {
-      "id": 12,
-      "claim": "degraded 口径不一致（desktop/core 初始断言）",
-      "verdict": "PARTIAL",
-      "evidence": [
-        {
-          "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
-          "line": 1984,
-          "snippet": "let degraded = tool_failures > 0 && phase_snapshot.as_deref() == Some(\"completed\"); // wave-53 C4 设计分流"
+          "path": "src/components/chat/WorkspaceComposer.vue",
+          "line": 267,
+          "snippet": "actionSummary?.startReason === \"restart_from_checkpoint\" ||\n    actionSummary?.degraded ||"
         }
       ],
-      "note": "非缺陷：degraded 仅在 completed 输出属刻意语义拆分；真实缺口是前端不呈现该字段。报告已按此改写。"
+      "note": "主旨成立、论据错：HomeTracePanel 内 0 命中，src/ 全域 `tool_failures` 也 0 命中，所以「trace 面板不呈现 agent.turn.degraded / agent.turn.tool_failures」为真。但括号里的推论「仅出现在 types 而未被 UI 消费」是错的——`degraded` 在 UI 里被真实消费（WorkspaceComposer.vue:267 决定按钮语义，另有 stores/runtime.ts:2059、lib/runtime/history.ts:208/240 数据通路）；这些是 history/checkpoint 降级，与 agent.turn.degraded 同名字不同义。准确说法：「同名不同义的 degraded 有渲染，OTel 的 agent.turn.degraded 没有」。"
     }
   ],
   "summary": {
-    "true": 11,
-    "partial": 1,
+    "true": 8,
+    "partial": 2,
     "false": 0
   },
+  "prior_selfcheck": {
+    "_note": "此键原样保留 lead 在我落盘前写入的同名文件内容，未被我的复核覆盖或删除；其中独立性标注为 reduced。",
+    "meta": {
+      "verified_by": "lead (独立 verifier subagent 未在时限内返回，改由 Lead 逐条核对)",
+      "verified_at": "2026-11-03T21:12+08:00",
+      "method": "grep/read 直读源码 + ClickHouse/Tempo 交叉查询",
+      "independence": "reduced (same agent as report author)"
+    },
+    "verdicts": [
+      {"id": 1, "claim": "turn_span_attributes 只输出固定 7 组属性，不含对话内容/token", "verdict": "TRUE", "evidence": [{"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1250, "snippet": "pub fn turn_span_attributes(...) -> Vec<(String, AttrValue)> { let mut attributes = Vec::with_capacity(7);"}]},
+      {"id": 2, "claim": "全仓无 langfuse.observation.input/output、无 gen_ai.prompt/completion", "verdict": "TRUE", "evidence": [{"path": "(grep)", "line": 0, "snippet": "grep -rn 上述四键 --include=*.rs crates src-tauri → 0 命中"}]},
+      {"id": 3, "claim": "force_export_session_trace 只取 session_id/turn_id/sequence/phase，建 span 即 end", "verdict": "TRUE", "evidence": [{"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1217, "snippet": "turn_span_attributes(&TurnSpanInput{session_id,user_id:None,turn_id,sequence,phase})"}, {"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1233, "snippet": "let mut span = ...build_with_context(...); span.end();"}]},
+      {"id": 4, "claim": "DEFAULT_RUN_TIMEOUT_MS=10_000 / MAX=120_000；build|test|cargo|check|install 自适应 60_000", "verdict": "TRUE", "evidence": [{"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 210, "snippet": "const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000; ... MAX_RUN_TIMEOUT_MS: u64 = 120_000;"}, {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 2863, "snippet": "let default_timeout = if command.contains(\"build\")||... { 60_000 } else { DEFAULT_RUN_TIMEOUT_MS };"}]},
+      {"id": 5, "claim": "同工具连续失败 4 次熔断（DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES=4）", "verdict": "TRUE", "evidence": [{"path": "crates/pony-agent-core/src/agent/runtime/limits.rs", "line": 38, "snippet": "pub(super) const DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES: usize = 4;"}], "note": "触发后是否『换策略』未逐行验证（终结路径在 turn_stream fail_stream_turn_*），报告措辞已限定为『终结整轮、不换策略』"},
+      {"id": 6, "claim": "非零退出统一 non_zero_exit，仅 Windows 9009 特判", "verdict": "TRUE", "evidence": [{"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 3199, "snippet": "let base_message = format!(\"命令执行完成，但退出码为 {}。\", ...); match windows_command_not_found_hint(...)"}]},
+      {"id": 7, "claim": "provider 多 tool_use 直接 Err；parallel_tools 无生产接线", "verdict": "TRUE", "evidence": [{"path": "crates/pony-agent-core/src/agent/provider/mod.rs", "line": 3444, "snippet": "if count > 1 { return Err(\"Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。\") }"}, {"path": "crates/pony-agent-core/src/agent/parallel_tools.rs", "line": 13, "snippet": "//! 把 provider 的多调用接入本引擎需要改造回合循环 … 已单列为计划 W28b"}, {"path": "(grep)", "line": 0, "snippet": "parallel_tools 引用仅 mod.rs:31 与 tests/wave28_parallel_tools_test.rs"}]},
+      {"id": 8, "claim": "失败轮只下发 text:\"This turn failed.\" + error", "verdict": "TRUE", "evidence": [{"path": "crates/pony-agent-core/src/agent/turn_flow.rs", "line": 520, "snippet": "phase: Some(\"failed\"), text: Some(\"This turn failed.\"), error: Some(error)"}]},
+      {"id": 9, "claim": "上传文案把 flush 的 turn 数说成『已成功上传至 Langfuse』，无 trace_id，4s 清空", "verdict": "TRUE", "evidence": [{"path": "src/components/telemetry/TelemetryPage.vue", "line": 83, "snippet": "uploadFeedback.value = `已成功上传该会话 Trace（共 ${count} 轮对话）`; showToast(`... 至 Langfuse`, \"success\")"}]},
+      {"id": 10, "claim": "前端不呈现 agent.turn.degraded / tool_failures", "verdict": "TRUE", "evidence": [{"path": "src/components/HomeTracePanel.vue", "line": 743, "snippet": "（turn 头仅输入/输出/速度/缓存/延时；grep src 内 degraded 命中均为 capability/transcript 语义，非 agent.turn 口径）"}]},
+      {"id": 11, "claim": "超时提示从不指向后台 JobStart（job_start 已 ModelVisible）", "verdict": "TRUE", "evidence": [{"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 7961, "snippet": "fn classify_timeout_hint → 只给网络自检 / 『显式传入更大的 timeoutMs』"}, {"path": "crates/pony-agent-core/src/agent/tools.rs", "line": 7554, "snippet": "TOOL_JOB_START | TOOL_JOB_OUTPUT | TOOL_JOB_KILL | TOOL_JOB_LIST => ToolExposure::ModelVisible"}]},
+      {"id": 12, "claim": "degraded 口径不一致（desktop/core 初始断言）", "verdict": "PARTIAL", "evidence": [{"path": "crates/pony-agent-core/src/agent/otel/mod.rs", "line": 1984, "snippet": "let degraded = tool_failures > 0 && phase_snapshot.as_deref() == Some(\"completed\"); // wave-53 C4 设计分流"}], "note": "非缺陷：degraded 仅在 completed 输出属刻意语义拆分；真实缺口是前端不呈现该字段。报告已按此改写。"}
+    ],
+    "summary": {
+      "true": 11,
+      "partial": 1,
+      "false": 0
+    },
+    "notes": [
+      "独立 verifier subagent 启动后未在时限内落盘，Lead 自行完成 12 条复核；独立性下降，已在本文件与报告 §5 明示。",
+      "turn-2 cancelled 的触发动机、手工上传路径是否被点击仍未取证，均标 UNVERIFIED。"
+    ]
+  },
   "notes": [
-    "独立 verifier subagent 启动后未在时限内落盘，Lead 自行完成 12 条复核；独立性下降，已在本文件与报告 §5 明示。",
-    "turn-2 cancelled 的触发动机、手工上传路径是否被点击仍未取证，均标 UNVERIFIED。"
+    "我的复核覆盖断言 1-10（十条全数独立定位）。lead 自检里另有 id 11-12 两条（超时提示分类、degraded 口径分流），不在我的任务范围内，未复核，原样保留在 prior_selfcheck。",
+    "唯一实质性纠错（可能与 lead 结论冲突）：id 10 的 lead 判定 TRUE 而我判 PARTIAL——`degraded` 在 src/ 并非「仅出现于 types」，WorkspaceComposer.vue:267 真实消费了它（history/checkpoint 语义）。结论层面「trace 面板不呈现 agent.turn.degraded」仍成立，但支撑论据必须改写，否则报告 §5/§6 的 grep 论证会被读者用一行 grep 推翻。",
+    "id 7 的 lead 判定 TRUE 而我判 PARTIAL：OpenAI 侧多 tool_calls 是 `.first()` 静默丢弃（provider/mod.rs:3222），不是直接报错；写进报告前建议改为「Anthropic 报错 / OpenAI 静默丢失」。"
   ]
 }

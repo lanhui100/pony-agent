@@ -22,9 +22,10 @@
   若不做对照 producer，会把全局问题误判成单端 bug。
 - **命中（Lead 纠偏）**：desktop-optimizer 断言 degraded「口径不一致」，Lead 复核 `otel/mod.rs:1986` 后确认
   `degraded` 仅在 `phase=completed` 输出，属**设计分流**而非缺陷——报告已按「设计分流 + UI 未呈现」改写，避免误杀。
-- **风险（未闭合）**：三个 Teammate 均由低成本快模型承载，其结论属 E2 判断型；虽有 8 处 Lead 抽验，
-  但抽验覆盖不等于全量复核，故报告对推断项显式标 `[UNVERIFIED]`/`inferred`，并把决定结论走向的关键项
-  （payload 缺失根因、parallel_tools 未接线、上传反馈文案）交给独立 verifier 全量复核。
+- **风险（本轮已部分闭合）**：三个 Teammate 均由低成本快模型承载，其结论属 E2 判断型；Lead 抽验 8 处后
+  另派 L3 verifier 逐条复核 10 项，结果 **8 TRUE / 2 PARTIAL / 0 FALSE**。两处 PARTIAL 都是**论据夸大**
+  （OpenAI 多 tool_calls 实为 `first()` 静默丢弃而非报错；`src/` 内确有同名不同义的 `degraded` 消费），
+  报告已按纠正改写——这证明「结论层正确、证据层夸大」是低成本模型的典型失效模式，**证据层必须逐条机械核对**。
 - **N-A（编码门禁）**：本轮零源码改动、零契约变更、零网络/IO 行为变更，故
   NFR 基准表、L2-T/L2-AT 红相、L3-P 六问、observability `audit-diff` 均不适用；理由：交付面为只读诊断文档。
 
@@ -38,12 +39,15 @@
 
 ## 4. 元协议迭代建议（Self-Evolving Protocol）
 
-1. **诊断型任务需要独立分支**：`dev-team` 全文以「编码交付」为假设（红相/契约/NFR/栅栏），对「只读诊断」类任务缺少
+1. **verifier 的「独立」必须靠证据不对称而非自我声明**：本轮 verifier 在 `verify.json` 里自填
+   `independence=full`，实际与三路队友同基座模型，只有上下文隔离。建议 SKILL.md 把「独立」定义收紧为
+   「不同基座模型 + 只给证据包不给执行者叙述」，并要求 verifier 显式披露基座模型。
+2. **诊断型任务需要独立分支**：`dev-team` 全文以「编码交付」为假设（红相/契约/NFR/栅栏），对「只读诊断」类任务缺少
    最小路径定义（本次靠 Lead 临场裁剪，过程记 N-A）。建议 SKILL.md 增「R 级（Research/诊断）」：允许无红相、无 NFR，
    但强制「事实层（取证）/ 解释层（映射）/ 裁决层（Lead）」三段分离 + 独立 verifier。
-2. **证据 JSON 契约应内建 `confidence` 与 `coverage` 字段**（本轮三份都自发采用，说明是刚需），并规定 E2 型结论
+3. **证据 JSON 契约应内建 `confidence` 与 `coverage` 字段**（本轮三份都自发采用，说明是刚需），并规定 E2 型结论
    必须由非同一模型复核——否则「低成本快模型 + 并行」会放大同源误判。
-3. **共享工作区多波次并发**：`.dev-team/meta-retrospective.md`、`state.json` 这类单文件账本在多 shell 并行时必然冲突，
+4. **共享工作区多波次并发**：`.dev-team/meta-retrospective.md`、`state.json` 这类单文件账本在多 shell 并行时必然冲突，
    建议按波次分文件（`meta-retrospective-<wave>.md`）并由 lint 接受目录级聚合。
-4. **trace 取证工具化**：本轮「找最近一次上传 trace」共 6 次 kubectl/curl 手工拼装（ClickHouse 表名、Map 列函数坑、
+5. **trace 取证工具化**：本轮「找最近一次上传 trace」共 6 次 kubectl/curl 手工拼装（ClickHouse 表名、Map 列函数坑、
    Tempo TraceQL 的 `client.service.name` 归因），应收敛为 `resolve-issues` 的一个 verb（`rca.py latest --producer desktop`）。
