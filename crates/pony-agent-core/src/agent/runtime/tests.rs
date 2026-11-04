@@ -12470,3 +12470,240 @@ fn run_turn_stops_batch_at_interactive_ask_and_leaves_remaining_calls_unexecuted
         request_bodies.len()
     );
 }
+
+// ─────────── D3b（P1-1 / B018）：**流式**主路径的**批量**工具执行 ───────────
+
+/// 流式决策一次携带**多个** `tool_calls`（同一 SSE delta 的数组、`index` 保序）。
+///
+/// 旧行为：SSE 累积器只保留 `index == 0` 的调用（其余静默丢弃）⇒ 本用例同时锁「解析层不再丢」。
+fn sse_decision_tool_calls_batch(calls: &[(&str, serde_json::Value)]) -> MockHttpResponse {
+    let tool_calls: Vec<serde_json::Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (name, arguments))| {
+            json!({
+                "index": index,
+                "id": format!("call_{}", name),
+                "type": "function",
+                "function": { "name": name, "arguments": arguments.to_string() }
+            })
+        })
+        .collect();
+    sse_response(&[json!({
+        "choices": [
+            {
+                "delta": {
+                    "content": "一次执行这些工具。",
+                    "reasoning_content": "需要一次执行多个工具调用。",
+                    "tool_calls": tool_calls
+                }
+            }
+        ]
+    })])
+}
+
+/// D3b ①：流式决策一次返回 2 个 `tool_calls` ⇒ **两个工具都执行**（两份工具结果、两条 hop），
+/// 且批后**一次** followup 的请求体是「1 条 assistant（含全部 tool_calls）+ 2 条 `role=tool`」。
+#[test]
+fn start_turn_stream_executes_batch_of_tool_calls_and_backfills_one_assistant_plus_n_tool_messages() {
+    let final_text = "流式批内两个工具都已执行完成。";
+    let server = MockHttpServer::start(vec![
+        sse_decision_tool_calls_batch(&[
+            ("workspace_list_files", json!({"path": ".", "limit": 40})),
+            ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+        ]),
+        // N>1 的批后 followup 走 D2 批量入口（同步 post 后回放，非真增量）⇒ 该响应是**非流式** JSON。
+        json_completion(final_text),
+    ]);
+    let executed: Arc<Mutex<Vec<ToolCall>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(RecordingToolExecutor {
+            calls: Arc::clone(&executed),
+        }),
+    );
+    let sink = RecordingTurnEventSink::new();
+
+    runtime.start_turn_stream(
+        &sink,
+        "turn-stream-batch".to_string(),
+        TurnInput {
+            message: "先看目录再读配置。".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            tool_authorization_mode: None,
+            session_id: Some("stream-batch-tool-calls".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+            plan_execution_approval: None,
+        },
+    );
+    let request_bodies = server.finish();
+
+    // ① 两个调用都执行，且顺序 = 上游顺序。
+    let recorded = executed.lock().unwrap().clone();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "批内两个调用都必须执行，实际 {recorded:?}"
+    );
+    assert_eq!(recorded[0].name, "workspace_list_files");
+    assert_eq!(recorded[1].name, "workspace_read_file");
+
+    // ② 两份工具结果 ⇒ 两条顶层工具活动；逐调用一条 hop/工具事件（per-call 语义不放宽）。
+    {
+        let events = sink.events.borrow();
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("流式批执行必须收口到 turn:completed");
+        let activities = completed
+            .tool_activities
+            .as_ref()
+            .expect("turn:completed 必须携带工具活动");
+        assert_eq!(activities.len(), 2, "两份工具结果 ⇒ 两条工具活动");
+        assert_eq!(activities[0].name, "List");
+        assert_eq!(activities[1].name, "Read");
+        let per_call_tool_ends = events
+            .iter()
+            .filter(|(name, payload)| {
+                name == "turn:tool" && payload.phase.as_deref() == Some("tool_result_integrating")
+            })
+            .count();
+        assert_eq!(
+            per_call_tool_ends, 2,
+            "逐调用一条 hop/工具事件（批不吞掉第二个调用的事件）"
+        );
+    }
+
+    // ③ 批后只有**一次** followup（初始决策 1 + 批后 1 = 2），形状为 1 assistant + N tool。
+    assert_eq!(
+        request_bodies.len(),
+        2,
+        "批执行后应只发一次 followup，实际请求数 {}",
+        request_bodies.len()
+    );
+    let followup: serde_json::Value =
+        serde_json::from_str(&request_bodies[1]).expect("followup 请求体必须是 JSON");
+    let messages = followup["messages"]
+        .as_array()
+        .expect("followup 请求体必须带 messages 数组");
+    let assistant_with_tool_calls: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter(|message| message["role"] == "assistant" && message.get("tool_calls").is_some())
+        .collect();
+    assert_eq!(
+        assistant_with_tool_calls.len(),
+        1,
+        "回填必须恰为一条 assistant 消息（携带全部 tool_calls），实际 messages={messages:?}"
+    );
+    let assistant_tool_calls = assistant_with_tool_calls[0]["tool_calls"]
+        .as_array()
+        .expect("assistant 消息的 tool_calls 必须是数组");
+    assert_eq!(
+        assistant_tool_calls.len(),
+        2,
+        "assistant 消息必须携带批内全部 2 个 tool_calls，实际 {assistant_tool_calls:?}"
+    );
+    let tool_messages: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert_eq!(
+        tool_messages.len(),
+        2,
+        "N 个结果必须各占一条 role=tool 消息，实际 messages={messages:?}"
+    );
+    assert_eq!(tool_messages[0]["tool_call_id"], "call_workspace_list_files");
+    assert_eq!(tool_messages[1]["tool_call_id"], "call_workspace_read_file");
+}
+
+/// D3b ③：流式批内出现 Ask（`ToolKind::Interactive`）⇒ 执行到 Ask 即悬挂，**剩余调用不执行**。
+#[test]
+fn start_turn_stream_stops_batch_at_interactive_ask_and_leaves_remaining_calls_unexecuted() {
+    let server = MockHttpServer::start(vec![sse_decision_tool_calls_batch(&[
+        ("workspace_list_files", json!({"path": ".", "limit": 40})),
+        ("ask_user", json!({"question": "继续吗？"})),
+        ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+    ])]);
+    let executed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(AskPendingToolExecutor {
+            executed: Arc::clone(&executed),
+        }),
+    );
+    let sink = RecordingTurnEventSink::new();
+
+    runtime.start_turn_stream(
+        &sink,
+        "turn-stream-batch-ask".to_string(),
+        TurnInput {
+            message: "先看目录，再问我，最后读配置。".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            tool_authorization_mode: None,
+            session_id: Some("stream-batch-ask-terminator".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+            plan_execution_approval: None,
+        },
+    );
+    let request_bodies = server.finish();
+
+    // Ask 之后的第三个调用**不得**执行：执行次数恰为 2（List + ask_user）。
+    let recorded = executed.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["workspace_list_files".to_string(), "ask_user".to_string()],
+        "批必须在 Ask 处终止，剩余调用不得执行"
+    );
+    assert!(
+        !recorded.iter().any(|name| name == "workspace_read_file"),
+        "Ask 之后的调用绝不允许执行，实际 {recorded:?}"
+    );
+
+    // 挂起（既非完成也非失败），且没有发出 followup 请求。
+    {
+        let events = sink.events.borrow();
+        let event_names = || {
+            events
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            events.iter().any(|(name, payload)| {
+                name == "turn:suspended" && payload.phase.as_deref() == Some(SUSPENDED_TURN_PHASE)
+            }),
+            "流式批到 Ask 必须悬挂，实际事件 {:?}",
+            event_names()
+        );
+        assert!(
+            !events.iter().any(|(name, _)| name == "turn:completed"),
+            "Ask 挂起后不得 emit turn:completed：{:?}",
+            event_names()
+        );
+        assert!(
+            !events.iter().any(|(name, _)| name == "turn:failed"),
+            "Ask 挂起后不得 emit turn:failed：{:?}",
+            event_names()
+        );
+    }
+    assert_eq!(
+        request_bodies.len(),
+        1,
+        "Ask 挂起后不得再发 followup，实际请求数 {}",
+        request_bodies.len()
+    );
+}

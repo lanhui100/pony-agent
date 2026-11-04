@@ -116,3 +116,18 @@ N>1 未接 retry（避免 accumulated 二次追加）。
 - **已知偏差（D3b 前须处理）**：① 非 pending 的交互工具停批后剩余调用直接丢弃（无批内重放）；
   ② 批内第 2..N 个调用未过 `normalize_tool_directive`；③ 重复调用闸只查批内首个（另有 per-call hop 限额硬停）；
   ④ native transcript 仍 per-call 形状；⑤ `anthropic_rejects_multiple_tool_calls` 缺 `#[test]`（HEAD 即 dead_code），D3b 翻转时需补。
+
+## 9. D3b 已完成（流式主路径批执行）
+
+- `turn_stream.rs:120` `handle_stream_tool_turn` 收整批 `Vec<ToolCall>`：批内顺序执行，逐调用保留
+  hop/工具事件/hook/两条熔断闸/pending/aborted 语义（仅缩进）；`:706` 交互工具作批终止符；
+  `:779` 批后一次 followup；`:1075` 整批出批。
+- `turn_flow.rs:3098` `provider_followup_stream_with_calls`（N==1 逐字委派 1:1；N>1 走 D2 批量入口，回放式）。
+- `openai_sse.rs` 流式累积器收全批；`provider` 流式 followup/decision 上报 plural。
+- 收尾：删除 `ensure_single_anthropic_tool_call` 及 3 处调用；其单测补 `#[test]` 并翻转为
+  `anthropic_accepts_multiple_tool_calls`（2 个 ⇒ 返回 2 个）。
+- 门禁：`--lib` 1236/0、clippy 零新增、lifecycle 7 / stop_contract 7 / promote 9 / turn_failed 4、audit-diff 0。
+
+**仍待（下一波）**：① Anthropic **流式**与 OpenAI **Responses 流式**解析仍单值 ⇒ 这两路批退化为单调用；
+② N>1 followup 非真增量（无 ttft）；③ 批内仅首个过 `normalize_tool_directive`、重复签名闸只查首个；
+④ 非 pending 交互工具停批后余下丢弃；⑤ `parallel_tools` 并发接线（本目标第二clause）仍未做。

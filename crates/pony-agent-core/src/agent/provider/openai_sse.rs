@@ -5,6 +5,9 @@ use super::*;
 #[derive(Debug, Clone)]
 pub(crate) struct OpenAiStreamMessage {
     pub(crate) output_text: String,
+    /// D3b（P1-1 / B018）：本次流式响应携带的**整批**调用（按 SSE `index` 保序）。
+    /// 单值字段 `tool_call` 仍是首元素的兼容视图（D1a 不变量），批执行读本字段。
+    pub(crate) tool_calls: Vec<ToolCall>,
     pub(crate) tool_call: Option<ToolCall>,
     pub(crate) reasoning_content: Option<String>,
     pub(crate) reasoning_content_value: Option<Value>,
@@ -117,10 +120,13 @@ impl OpenAiSseAccumulator {
             ));
         }
 
-        let tool_call = tool_calls
+        // D3b：不再丢弃多余调用——按 `index` 保序收集整批（空洞调用逐项跳过）。
+        let tool_calls: Vec<ToolCall> = tool_calls
             .into_iter()
-            .next()
-            .and_then(|(_, partial)| partial_openai_tool_call_to_tool_call(partial));
+            .filter_map(|(_, partial)| partial_openai_tool_call_to_tool_call(partial))
+            .collect();
+        // 单值字段 = 首元素（D1a 兼容视图），既有单调用语义逐字不变。
+        let tool_call = tool_calls.first().cloned();
 
         if output_text.is_empty() && tool_call.is_none() {
             return Err(format!(
@@ -146,6 +152,7 @@ impl OpenAiSseAccumulator {
 
         Ok(OpenAiStreamMessage {
             output_text,
+            tool_calls,
             tool_call,
             reasoning_content: if reasoning_content.trim().is_empty() {
                 None
@@ -343,6 +350,8 @@ where
 
     Ok(OpenAiStreamMessage {
         output_text: combined,
+        // 纯文本收集器（仅测试用）：不解析 tool_calls，故整批恒为空。
+        tool_calls: Vec::new(),
         tool_call: None,
         reasoning_content: if reasoning.trim().is_empty() {
             None

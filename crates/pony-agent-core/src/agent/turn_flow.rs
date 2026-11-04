@@ -3082,6 +3082,101 @@ pub fn provider_followup_with_calls(
     result
 }
 
+/// D3b（P1-1 / B018）：**整批**工具结果的流式 followup（与 [`provider_followup_with_calls`] 的
+/// 流式对偶，供 `runtime/turn_stream.rs` 批执行后一次性回填）。
+///
+/// 分派（与 D2 的 `continue_with_tool_results_stream` 同序，双层保险）：
+/// - `N == 1` ⇒ **逐字委派** [`provider_followup_stream_with_mode`]（既有 1:1 流式入口与其
+///   `llm.chat` span / ttft / 速度口径零改动，单调用回归靠既有用例锁住）；
+/// - `N > 1` ⇒ 本函数的 `llm.chat` span 只做「已解析用量」记账后走
+///   [`ProviderManager::continue_with_tool_results_stream`]。
+///
+/// **已知偏差（设计 §7 / executor2 声明）**：`N > 1` 的传输沿用既有同步 `post_*` 通道，结果按
+/// 「reasoning → text」一次性回放为增量，**不是**逐 token 真增量（`on_delta` 仍会被调用，UI 形状
+/// 与「非流式 provider」分支一致）。真增量留作后续波次。
+#[allow(clippy::too_many_arguments)]
+pub fn provider_followup_stream_with_calls<F>(
+    provider: &ProviderManager,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+    on_delta: F,
+    request_mode: LlmRequestMode,
+) -> Result<crate::agent::provider::ProviderResponse, String>
+where
+    F: FnMut(ProviderStreamChunk),
+{
+    // N == 1：逐字委派既有 1:1 流式入口（含其 span 与 latency 采集，不复制逻辑）。
+    if calls.len() == 1 && results.len() == 1 {
+        return provider_followup_stream_with_mode(
+            provider,
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            &calls[0],
+            &results[0],
+            on_delta,
+            request_mode,
+        );
+    }
+
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix,
+    );
+    let start = std::time::Instant::now();
+    let result = provider.continue_with_tool_results_stream(
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        calls,
+        results,
+        on_delta,
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
+            // 批量路径没有真增量 ⇒ 无 ttft 可比，速度分母退化为整段耗时（与 D2 同步批量一致）。
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            llm_span.record_call_timing(Some(elapsed_ms), None);
+            llm_span.record_usage_origin(usage.origin);
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            llm_span.record_context_normalized_input(
+                crate::agent::runtime::context_input_tokens_for(
+                    Some(provider.protocol_label()),
+                    Some(usage),
+                ),
+            );
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
+}
+
 /// 兼容入口：等价于 [`provider_followup_stream_with_mode`] 传 [`LlmRequestMode::ToolFollowup`]。
 pub fn provider_followup_stream<P, F>(
     provider: &P,

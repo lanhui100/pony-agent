@@ -1498,8 +1498,10 @@ impl ProviderManager {
             .unwrap_or_default();
         let reasoning_content = extract_anthropic_thinking_text(&content);
         let reasoning_content_value = extract_anthropic_thinking_value(&content);
-        ensure_single_anthropic_tool_call(&content)?;
-        let tool_call = extract_anthropic_tool_call(&content);
+        // D3b：多 `tool_use` 不再拒绝——整批上报，由运行时批执行消费（单值字段仍是首元素
+        // 视图，D1a 不变量；N 个调用的回填形态见 D1b 批量构造器）。
+        let tool_calls = extract_anthropic_tool_calls(&content);
+        let tool_call = tool_calls.first().cloned();
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("anthropic tool follow-up missing text or tool call".to_string());
         }
@@ -1507,7 +1509,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
-            tool_calls: tool_calls_from_single(&tool_call),
+            tool_calls,
             tool_call,
             reasoning_content,
             reasoning_content_value,
@@ -1715,8 +1717,10 @@ impl ProviderManager {
             .unwrap_or_default();
         let reasoning_content = extract_anthropic_thinking_text(&content);
         let reasoning_content_value = extract_anthropic_thinking_value(&content);
-        ensure_single_anthropic_tool_call(&content)?;
-        let tool_call = extract_anthropic_tool_call(&content);
+        // D3b：多 `tool_use` 不再拒绝——整批上报，由运行时批执行消费（单值字段仍是首元素
+        // 视图，D1a 不变量；N 个调用的回填形态见 D1b 批量构造器）。
+        let tool_calls = extract_anthropic_tool_calls(&content);
+        let tool_call = tool_calls.first().cloned();
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("anthropic tool follow-up missing text or tool call".to_string());
         }
@@ -1724,7 +1728,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
-            tool_calls: tool_calls_from_single(&tool_call),
+            tool_calls,
             tool_call,
             reasoning_content,
             reasoning_content_value,
@@ -2079,7 +2083,8 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
-            tool_calls: tool_calls_from_single(&message.tool_call),
+            // D3b：流式响应里的**整批**调用全量上报（单值仍是首元素视图）。
+            tool_calls: message.tool_calls.clone(),
             tool_call: message.tool_call,
             reasoning_content: message.reasoning_content.clone(),
             reasoning_content_value: message.reasoning_content_value.clone(),
@@ -2387,11 +2392,14 @@ impl ProviderManager {
         )?;
         let output_text = message.output_text.clone();
         let tool_call = message.tool_call.clone();
+        // D3b：决策流也可能一次携带多个 `tool_calls`（并行调用），整批上报给运行时批执行。
+        let tool_calls = message.tool_calls.clone();
         if let Some(ref tc) = tool_call {
             provider_log(format!(
-                "decision:stream-tool-call name={} call_id={}",
+                "decision:stream-tool-call name={} call_id={} batch={}",
                 tc.name,
-                tc.call_id.as_deref().unwrap_or("(none)")
+                tc.call_id.as_deref().unwrap_or("(none)"),
+                tool_calls.len()
             ));
         }
         if output_text.trim().is_empty() && tool_call.is_none() {
@@ -2420,7 +2428,7 @@ impl ProviderManager {
 
         Ok(ProviderDecision {
             output_text,
-            tool_calls: tool_calls_from_single(&tool_call),
+            tool_calls,
             tool_call,
             reasoning_content: message.reasoning_content,
             reasoning_content_value: message.reasoning_content_value,
@@ -2484,7 +2492,7 @@ impl ProviderManager {
         let output_text = extract_anthropic_text_blocks(content);
         let reasoning_content = extract_anthropic_thinking_text(content);
         let reasoning_content_value = extract_anthropic_thinking_value(content);
-        ensure_single_anthropic_tool_call(content)?;
+        // D3b：多 `tool_use` 不再拒绝（批量执行已落地）——整批上报，单值是首元素视图。
         Ok(ProviderDecision {
             output_text: output_text.clone(),
             tool_calls: extract_anthropic_tool_calls(content),
@@ -3924,22 +3932,6 @@ pub fn extract_anthropic_tool_calls(content: &[Value]) -> Vec<ToolCall> {
 /// P1-1：复数解析的兼容包装（既有调用点语义不变：只取首个）。
 fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
     extract_anthropic_tool_calls(content).into_iter().next()
-}
-
-/// P1-1（部分）：多 `tool_use` 目前仍**拒绝**（批量执行未落地，见
-/// `.dev-team/designs/multi-tool-call-execution.md`），但错误信息必须可诊断：
-/// 带上「收到 N 个」与各自工具名，便于 trace/日志直接定位上游行为。
-fn ensure_single_anthropic_tool_call(content: &[Value]) -> Result<(), String> {
-    let calls = extract_anthropic_tool_calls(content);
-    if calls.len() > 1 {
-        let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
-        return Err(format!(
-            "Anthropic 返回了多个工具调用（收到 {} 个：{}），但当前运行时仅支持单工具调用。",
-            calls.len(),
-            names.join(", ")
-        ));
-    }
-    Ok(())
 }
 
 fn openai_messages_with_tool_result(
@@ -6425,28 +6417,25 @@ mod tests {
         );
     }
 
-    fn anthropic_rejects_multiple_tool_calls() {
+    /// D3b 收尾（原 `anthropic_rejects_multiple_tool_calls`，缺 `#[test]` 时从未运行）：
+    /// 批量执行已落地 ⇒ 多 `tool_use` **不再拒绝**，解析层按出现顺序返回整批。
+    #[test]
+    fn anthropic_accepts_multiple_tool_calls() {
         let content = vec![
             json!({ "type": "tool_use", "id": "toolu_1", "name": "List", "input": {} }),
             json!({ "type": "tool_use", "id": "toolu_2", "name": "Read", "input": {} }),
         ];
 
-        // P1-1 未完成前（批量执行未落地）仍**保持 Err**，本用例只锁「诊断信息被丰富」：
-        // 必须带「收到 N 个」与各工具名，便于直接定位上游一次给了几个、分别是什么。
-        let error = ensure_single_anthropic_tool_call(&content)
-            .expect_err("multiple calls should fail clearly until P1-1 batch execution lands");
-        assert!(
-            error.contains("多个工具调用"),
-            "既有语义锁：仍须说明「多个工具调用」，实际 {error}"
+        let calls = extract_anthropic_tool_calls(&content);
+        assert_eq!(
+            calls.len(),
+            2,
+            "D3b：2 个 tool_use 必须原样返回 2 个调用（不再 Err），实际 {calls:?}"
         );
-        assert!(
-            error.contains("收到 2 个"),
-            "P1-1：新诊断必须带「收到 N 个」，实际 {error}"
-        );
-        assert!(
-            error.contains("List") && error.contains("Read"),
-            "P1-1：新诊断必须列出各工具名，实际 {error}"
-        );
+        assert_eq!(calls[0].name, "List");
+        assert_eq!(calls[0].call_id.as_deref(), Some("toolu_1"));
+        assert_eq!(calls[1].name, "Read");
+        assert_eq!(calls[1].call_id.as_deref(), Some("toolu_2"));
     }
 
     #[test]
