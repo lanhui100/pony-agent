@@ -71,7 +71,10 @@
   - 描述：本轮已消除**静默截断**（OpenAI 保留首个 + 结构化告警 `multi_tool_calls_dropped`；Anthropic Err 消息带数量与名字；新增 `extract_*_tool_calls` 复数 pub 接缝）。真正执行 N 个调用仍需独立一波：约 350–550 行 / 4–5 文件，最大风险在**批量回填协议形态**——沿用 1:1 的 `anthropic_assistant_content_for_tool_result` 会让同一 assistant 内容重复 N 次触发 Anthropic 400，必须一次 assistant + N 个 tool_result；Ask 类交互工具须作批终止符。
   - 设计文档：`.dev-team/designs/multi-tool-call-execution.md`
   - 登记来源：W28b 侦察 + 本轮 D 卡裁决（2026-11-04）
-
+  - **进展（2026-11-04）**：已消除静默截断（`extract_*_tool_calls` 复数接缝 + OpenAI 丢弃告警 + Anthropic 诊断）；
+    D1b 已交付两个批量回填纯函数 `openai_messages_with_tool_results` / `anthropic_messages_with_tool_results`
+    （1 assistant + N tool / 1 assistant + 1 user(N tool_result)，含「assistant 恰 1 条」负向护栏与 N=1 等价 legacy 的单测）。
+  - **剩余（须新会话 + L3 复核）**：D1a 类型字段 `tool_calls: Vec<ToolCall>` + 15 处字面量（含 3 处外部冻结：`otel_trace_migration_test.rs:1276/:1302`、`observability_reporting_fixes_test.rs:1119`，需 test-agent 迁移）→ D2 provider 批 API → D3 两条运行时循环批执行（Ask 作批终止符）。原估 350-550 行经实测修正为 **900-1500 行 / 10-13 文件**。
 ## 已完成
 - [x] `B015` - P1: 重试指纹保留 timeoutMs 语义（延长=新策略，分桶实现）
   - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs::normalize_run_timeout_argument_value`

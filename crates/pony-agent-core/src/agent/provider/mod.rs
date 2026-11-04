@@ -4348,6 +4348,200 @@ fn anthropic_messages_with_tool_result(
     messages
 }
 
+// ───────────────────────── D1b（P1-1 切片一）：批量工具结果的**纯函数**回填构造器 ─────────────
+//
+// 为什么单列一套（而不是改旧 1:1 构造器）：旧路径被 8 个 provider 入口与两条运行时循环直接调用，
+// 改签名等于把「批量执行」的风险提前注入当前行为。这里只**新增**纯函数，供后续波次的批量执行
+// 调用；单调用路径继续走旧构造器，行为逐字不变。
+//
+// 回填形态（唯一会让上游 400 的地方，务必按此）：
+// - OpenAI：1 条 assistant（**全部** tool_calls）+ N 条 `role="tool"`（各带 tool_call_id）；
+// - Anthropic：1 条 assistant（**全部** tool_use）+ 1 条 `role="user"`，其 content 为 N 个
+//   `tool_result` 块。**绝不**为每个调用各发一条 assistant。
+
+/// OpenAI 的 `tool_calls` 数组载荷（保序，index 按位置补齐）。
+fn openai_tool_calls_payload(calls: &[ToolCall]) -> Vec<Value> {
+    calls
+        .iter()
+        .map(|call| {
+            json!({
+                "id": call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
+                "type": "function",
+                "function": {
+                    "name": openai_safe_tool_name(&call.name),
+                    "arguments": call.arguments.to_string()
+                }
+            })
+        })
+        .collect()
+}
+
+/// 批量版 assistant 消息：**一条**消息承载全部 `tool_calls`。
+fn openai_assistant_message_for_tool_results(
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+) -> Value {
+    let Some(message) = assistant_message else {
+        return json!({
+            "role": "assistant",
+            "content": Value::Null,
+            "reasoning_content": Value::String(TOOL_CALL_REASONING_PLACEHOLDER.to_string()),
+            "tool_calls": openai_tool_calls_payload(calls)
+        });
+    };
+
+    let mut normalized = normalize_openai_assistant_message(message);
+    let matched: Vec<Value> = normalized
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|raw| {
+            raw.iter()
+                .filter(|item| {
+                    calls
+                        .iter()
+                        .any(|call| openai_tool_call_matches_executed_call(item, call))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 上游原始消息已含**全部**待回填调用 ⇒ 原样（去掉无关/未执行的调用，防串号）。
+    if matched.len() == calls.len() && !calls.is_empty() {
+        normalized["tool_calls"] = Value::Array(matched);
+        normalized["role"] = Value::String("assistant".to_string());
+        return normalized;
+    }
+
+    // 否则按执行列表重建（顺序 = 执行顺序）。
+    json!({
+        "role": "assistant",
+        "content": normalized.get("content").cloned().unwrap_or(Value::Null),
+        "reasoning_content": normalized_reasoning_or_placeholder(&normalized),
+        "tool_calls": openai_tool_calls_payload(calls)
+    })
+}
+
+/// D1b：构造 **1 assistant + N tool 消息** 的 OpenAI 回填序列（纯函数，不触网、无全局态）。
+///
+/// - `messages`：已经解析好的基础消息（原样前置，函数不读 `ProviderRequest`）；
+/// - `assistant`：上游 assistant 消息（含 tool_calls；缺失时按 `calls` 合成）；
+/// - 长度不匹配（`calls.len() != results.len()`）⇒ `Err`（消息里带两个真实长度）。
+pub fn openai_messages_with_tool_results(
+    messages: &[Value],
+    assistant: &Value,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+) -> Result<Vec<Value>, String> {
+    if calls.len() != results.len() {
+        return Err(format!(
+            "tool_calls/tool_results length mismatch: calls={} results={}",
+            calls.len(),
+            results.len()
+        ));
+    }
+
+    let mut out: Vec<Value> = messages.to_vec();
+    out.push(openai_assistant_message_for_tool_results(
+        Some(assistant),
+        calls,
+    ));
+    for (call, result) in calls.iter().zip(results.iter()) {
+        out.push(openai_followup_tool_result_message(call, result));
+    }
+    Ok(out)
+}
+
+/// Anthropic 批量版 assistant content：一条 assistant 消息的 content 含**全部** tool_use 块。
+fn anthropic_assistant_content_for_tool_results(
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+) -> Vec<Value> {
+    let all_ids: Vec<&str> = calls
+        .iter()
+        .map(|call| call.call_id.as_deref().unwrap_or("toolu_local"))
+        .collect();
+
+    // 上游 content 已含全部 tool_use 块 ⇒ 原样使用（保留 text/thinking 块与 id）。
+    if let Some(content) = assistant_message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .filter(|content| {
+            all_ids.iter().all(|id| {
+                content.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        && block.get("id").and_then(Value::as_str) == Some(*id)
+                })
+            })
+        })
+    {
+        return content.clone();
+    }
+
+    let mut content = assistant_message
+        .and_then(|message| message.get("reasoning_content"))
+        .map(anthropic_reasoning_blocks)
+        .unwrap_or_default();
+    if let Some(text) = assistant_message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+    if content.is_empty() {
+        content.push(json!({ "type": "text", "text": "" }));
+    }
+    for call in calls {
+        content.push(json!({
+            "type": "tool_use",
+            "id": call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+            "name": call.name,
+            "input": call.arguments
+        }));
+    }
+    content
+}
+
+/// D1b：构造 **1 assistant（全部 tool_use）+ 1 user（N 个 tool_result）** 的 Anthropic 回填序列。
+///
+/// 红线：**绝不能**为每个调用各发一条 assistant（上游会以「同内容重复 + tool_use id 失配」400）。
+/// 长度不匹配 ⇒ `Err`（消息里带两个真实长度）。
+pub fn anthropic_messages_with_tool_results(
+    messages: &[Value],
+    assistant: &Value,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+) -> Result<Vec<Value>, String> {
+    if calls.len() != results.len() {
+        return Err(format!(
+            "tool_calls/tool_results length mismatch: calls={} results={}",
+            calls.len(),
+            results.len()
+        ));
+    }
+
+    let mut out: Vec<Value> = messages.to_vec();
+    out.push(json!({
+        "role": "assistant",
+        "content": anthropic_assistant_content_for_tool_results(Some(assistant), calls)
+    }));
+    let blocks: Vec<Value> = calls
+        .iter()
+        .zip(results.iter())
+        .map(|(call, result)| {
+            json!({
+                "type": "tool_result",
+                "tool_use_id": call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+                "content": anthropic_tool_result_content(result),
+                "is_error": result.status != "ok"
+            })
+        })
+        .collect();
+    out.push(json!({ "role": "user", "content": blocks }));
+    Ok(out)
+}
+
 fn anthropic_assistant_content_for_tool_result(
     assistant_message: Option<&Value>,
     tool_call: &ToolCall,
@@ -5532,6 +5726,233 @@ mod tests {
             "function": { "name": "Read", "arguments": "{}" } } ] });
         assert!(openai_dropped_tool_calls_warning("s", &single, None).is_none());
         assert!(openai_dropped_tool_calls_warning("s", &json!({}), None).is_none());
+    }
+
+    // ───────────── D1b：批量回填构造器（纯函数）的形状锁 ─────────────
+
+    fn batch_fixture() -> (Vec<Value>, Value, Vec<ToolCall>, Vec<ToolResult>) {
+        let base = vec![json!({ "role": "user", "content": "do three things" })];
+        let calls = vec![
+            ToolCall {
+                call_id: Some("call_1".to_string()),
+                name: "Read".to_string(),
+                arguments: json!({ "path": "a.txt" }),
+                plan: None,
+            },
+            ToolCall {
+                call_id: Some("call_2".to_string()),
+                name: "List".to_string(),
+                arguments: json!({}),
+                plan: None,
+            },
+            ToolCall {
+                call_id: Some("call_3".to_string()),
+                name: "Search".to_string(),
+                arguments: json!({ "query": "x" }),
+                plan: None,
+            },
+        ];
+        let results = ["A", "B", "C"]
+            .iter()
+            .map(|text| ToolResult {
+                tool_name: "t".to_string(),
+                status: "ok".to_string(),
+                output: text.to_string(),
+                duration_ms: 0,
+            })
+            .collect();
+        let assistant = json!({
+            "role": "assistant",
+            "content": null,
+            "reasoning_content": "thinking",
+            "tool_calls": calls.iter().map(|call| json!({
+                "id": call.call_id.clone().unwrap(),
+                "type": "function",
+                "function": {
+                    "name": call.name.clone(),
+                    "arguments": call.arguments.to_string()
+                }
+            })).collect::<Vec<_>>()
+        });
+        (base, assistant, calls, results)
+    }
+
+    /// OpenAI：恰 1 条 assistant（含全部 tool_calls）+ N 条 role=tool（各自 tool_call_id）。
+    #[test]
+    fn openai_batch_tool_results_shape_is_one_assistant_and_n_tool_messages() {
+        let (base, assistant, calls, results) = batch_fixture();
+        let messages = openai_messages_with_tool_results(&base, &assistant, &calls, &results)
+            .expect("D1b：长度一致必须成功");
+        eprintln!(
+            "[D1b] openai batch messages = {}",
+            serde_json::to_string(&messages).expect("serialize")
+        );
+
+        assert_eq!(
+            messages.len(),
+            1 + 1 + calls.len(),
+            "D1b：= 基础消息 + 1 assistant + N tool"
+        );
+        let assistants = messages
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .count();
+        assert_eq!(assistants, 1, "D1b：assistant 必须恰 1 条（N 条即为上游 400 事故）");
+        let tool_messages: Vec<&Value> = messages
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+            .collect();
+        assert_eq!(tool_messages.len(), calls.len(), "D1b：role=tool 必须恰 N 条");
+        for (index, (message, result)) in tool_messages.iter().zip(results.iter()).enumerate() {
+            assert_eq!(
+                message.get("tool_call_id").and_then(Value::as_str),
+                calls[index].call_id.as_deref(),
+                "D1b：tool_call_id 必须与调用一一对应（保序）"
+            );
+            assert_eq!(
+                message.get("content").and_then(Value::as_str),
+                Some(result.output.as_str()),
+                "D1b：tool 消息 content 必须是该调用结果"
+            );
+        }
+        let assistant_message = messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .expect("assistant 存在");
+        assert_eq!(
+            assistant_message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(calls.len()),
+            "D1b：assistant 必须承载全部 tool_calls"
+        );
+    }
+
+    /// Anthropic：恰 1 条 assistant（N 个 tool_use）+ 恰 1 条 user（N 个 tool_result）。
+    #[test]
+    fn anthropic_batch_tool_results_shape_is_one_assistant_and_one_user() {
+        let (base, assistant, calls, results) = batch_fixture();
+        let messages = anthropic_messages_with_tool_results(&base, &assistant, &calls, &results)
+            .expect("D1b：长度一致必须成功");
+        eprintln!(
+            "[D1b] anthropic batch messages = {}",
+            serde_json::to_string(&messages).expect("serialize")
+        );
+
+        assert_eq!(messages.len(), 1 + 2, "D1b：= 基础消息 + 1 assistant + 1 user");
+        let assistants = messages
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .count();
+        assert_eq!(
+            assistants, 1,
+            "D1b（负向护栏）：anthropic 批量回填的 assistant 必须恰 1 条，N 条会触发上游 400"
+        );
+        let users: Vec<&Value> = messages
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .collect();
+        assert_eq!(users.len(), 2, "D1b：基础 user + 回填 user");
+        let tool_results: Vec<&Value> = users
+            .last()
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .expect("回填 user 的 content 必须是数组")
+            .iter()
+            .collect();
+        assert_eq!(tool_results.len(), calls.len(), "D1b：tool_result 块必须恰 N 个");
+        let tool_uses = messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .expect("assistant content 必须是数组");
+        assert_eq!(
+            tool_uses
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .count(),
+            calls.len(),
+            "D1b：assistant 必须承载全部 tool_use"
+        );
+        for (index, block) in tool_results.iter().enumerate() {
+            assert_eq!(
+                block.get("tool_use_id").and_then(Value::as_str),
+                calls[index].call_id.as_deref(),
+                "D1b：tool_use_id 必须与调用一一对应（保序）"
+            );
+        }
+    }
+
+    /// 长度不匹配 ⇒ Err（带两个真实长度）。
+    #[test]
+    fn batch_tool_results_reject_length_mismatch() {
+        let (base, assistant, calls, mut results) = batch_fixture();
+        results.pop();
+        let openai_error = openai_messages_with_tool_results(&base, &assistant, &calls, &results)
+            .expect_err("D1b：长度不匹配必须 Err");
+        let anthropic_error =
+            anthropic_messages_with_tool_results(&base, &assistant, &calls, &results)
+                .expect_err("D1b：长度不匹配必须 Err");
+        eprintln!("[D1b] mismatch errors = {openai_error} | {anthropic_error}");
+        for error in [openai_error, anthropic_error] {
+            assert!(error.contains("calls=3"), "D1b：错误必须带 calls 长度：{error}");
+            assert!(error.contains("results=2"), "D1b：错误必须带 results 长度：{error}");
+        }
+    }
+
+    /// N=1 时与既有 1:1 构造器的形状语义等价（避免第二套口径）。
+    #[test]
+    fn batch_tool_results_single_call_matches_legacy_shape() {
+        let (base, assistant, calls, results) = batch_fixture();
+        let single_call = vec![calls[0].clone()];
+        let single_result = vec![results[0].clone()];
+
+        let batch = openai_messages_with_tool_results(
+            &base,
+            &assistant,
+            &single_call,
+            &single_result,
+        )
+        .expect("D1b：单调用批量构造必须成功");
+        let legacy_assistant = openai_assistant_message_for_tool_result(
+            Some(&assistant),
+            &calls[0],
+        );
+        let legacy_tool = openai_followup_tool_result_message(&calls[0], &results[0]);
+        eprintln!(
+            "[D1b] single-call openai: batch_assistant={} legacy_assistant={}",
+            batch[batch.len() - 2], legacy_assistant
+        );
+        assert_eq!(
+            batch[batch.len() - 2].get("tool_calls"),
+            Some(&json!([legacy_assistant
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.first())
+                .cloned()
+                .expect("legacy assistant 含 1 个 tool_call")])),
+            "D1b：单调用时 assistant 的 tool_calls 必须与 legacy 单值构造一致"
+        );
+        assert_eq!(
+            batch[batch.len() - 1], legacy_tool,
+            "D1b：单调用时 tool 消息必须与 legacy 单值构造逐字一致"
+        );
+
+        let anthropic_batch = anthropic_messages_with_tool_results(
+            &base,
+            &assistant,
+            &single_call,
+            &single_result,
+        )
+        .expect("D1b：单调用批量构造必须成功");
+        let legacy_content = anthropic_assistant_content_for_tool_result(Some(&assistant), &calls[0]);
+        assert_eq!(
+            anthropic_batch[anthropic_batch.len() - 2].get("content"),
+            Some(&Value::Array(legacy_content)),
+            "D1b：单调用时 anthropic assistant content 必须与 legacy 一致"
+        );
     }
 
     fn anthropic_rejects_multiple_tool_calls() {
