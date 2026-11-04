@@ -6149,7 +6149,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// P1-1：多调用被丢弃时必须有**结构化告警行**（不再静默截断）。
     #[test]
     fn openai_multiple_tool_calls_emit_structured_dropped_warning() {
