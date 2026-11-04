@@ -58,3 +58,32 @@
 | R3 | 并发批 ⇒ 工具间竞态（同一文件读写） | 默认串行；并发需开关 + 工具 `concurrent_safe` 白名单 |
 | R4 | 熔断/止损闸计数口径漂移 | 明确按调用计数（§3.3），并有单测锁 |
 | R5 | 批执行中用户 Stop | 复用 turn 取消令牌（`DispatchContext.turn_cancellation`），逐调用检查 |
+
+## 6. 交接：D2 / D3（2026-11-04，会话上下文耗尽处停下）
+
+**状态**：D1a（`6d743b82`）与 D1b（`a57f636b`）已交付并验证；D2/D3 未开工，工作树 clean。
+
+**D2 定稿签名**（`provider/mod.rs`）：
+```rust
+pub fn continue_with_tool_results(
+    &self, request: &ProviderRequest, tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>, assistant_message: Option<&Value>,
+    calls: &[ToolCall], results: &[ToolResult],
+) -> Result<ProviderResponse, String>;
+
+pub fn continue_with_tool_results_stream<F>(
+    &self, request: &ProviderRequest, tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>, assistant_message: Option<&Value>,
+    calls: &[ToolCall], results: &[ToolResult], on_delta: F,
+) -> Result<ProviderResponse, String> where F: FnMut(ProviderStreamChunk);
+```
+分派：长度不匹配 ⇒ 早退 Err（不构造请求）；`calls.len()==1` ⇒ **直接委派**既有 1:1 入口（N=1 回归锁）；
+`N>1` ⇒ D1b 构造器组装 messages，走既有 `post_openai_json` / anthropic post 通道（不新写 HTTP 层）。
+
+**写域**：`provider/mod.rs` + `runtime/tests.rs`（并把 `struct MockHttpServer` 提 `pub(crate)`，仅可见性）。
+
+**验收**：① wire 级请求体（OpenAI `role=tool` 恰 N；Anthropic 1 条 user 含 N 个 `tool_result`）；
+② N=1 委派等价（既有 1:1 用例全绿）；③ 长度不匹配 ⇒ mock 零请求。
+
+**D3**：`turn_stream.rs::handle_stream_tool_turn` 与 `turn_sync.rs` 同构循环改批执行 —— Ask（`ToolKind::Interactive`）
+作批终止符、per-call 熔断闸保持、批后**一次** followup；落地前做一次 Anthropic 真实回放（唯一会 400 的地方）。
