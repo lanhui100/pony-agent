@@ -9984,20 +9984,25 @@ mod tests {
             _history: &[crate::agent::session::TurnHistoryMessage],
             _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
         ) -> Option<crate::agent::provider::ProviderDecision> {
+            let forced_call = ToolCall {
+                call_id: Some("forced-stream-tool-call".to_string()),
+                name: self.tool_name.clone(),
+                arguments: self.arguments.clone(),
+                plan: Some(ToolPlan {
+                    kind: "forced".to_string(),
+                    summary: format!("强制执行工具 `{}`。", self.tool_name),
+                    parallel: false,
+                    continue_on_error: false,
+                    steps: Vec::new(),
+                }),
+            };
             Some(crate::agent::provider::ProviderDecision {
                 output_text: String::new(),
-                tool_call: Some(ToolCall {
-                    call_id: Some("forced-stream-tool-call".to_string()),
-                    name: self.tool_name.clone(),
-                    arguments: self.arguments.clone(),
-                    plan: Some(ToolPlan {
-                        kind: "forced".to_string(),
-                        summary: format!("强制执行工具 `{}`。", self.tool_name),
-                        parallel: false,
-                        continue_on_error: false,
-                        steps: Vec::new(),
-                    }),
-                }),
+                // D1a：复数视图与单值字段同源派生（永不漂移）。
+                tool_calls: crate::agent::provider::tool_calls_from_single(&Some(
+                    forced_call.clone(),
+                )),
+                tool_call: Some(forced_call),
                 reasoning_content: None,
                 reasoning_content_value: None,
                 assistant_message: None,

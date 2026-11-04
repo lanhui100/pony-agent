@@ -460,6 +460,7 @@ pub(super) fn build_local_tool_followup_recovery_response(
 
     ProviderResponse {
         output_text: output_text.clone(),
+        tool_calls: Vec::new(),
         tool_call: None,
         reasoning_content: None,
         reasoning_content_value: None,

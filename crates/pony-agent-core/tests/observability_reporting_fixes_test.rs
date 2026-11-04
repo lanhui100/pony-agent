@@ -1119,6 +1119,8 @@ impl ProviderClient for MockUsageProvider {
         Ok(ProviderDecision {
             output_text: "ok".to_string(),
             tool_call: None,
+            // D1a：`tool_calls` 与 `tool_call` 等价派生位，此处为 None ⇒ 空 vec
+            tool_calls: Vec::new(),
             reasoning_content: None,
             reasoning_content_value: None,
             assistant_message: None,

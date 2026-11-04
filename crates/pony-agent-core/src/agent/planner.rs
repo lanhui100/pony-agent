@@ -506,6 +506,7 @@ impl LocalTurnPlanner {
 
         Some(ProviderDecision {
             output_text: String::new(),
+            tool_calls: crate::agent::provider::tool_calls_from_single(&Some(tool_call.clone())),
             tool_call: Some(tool_call),
             reasoning_content: None,
             reasoning_content_value: None,

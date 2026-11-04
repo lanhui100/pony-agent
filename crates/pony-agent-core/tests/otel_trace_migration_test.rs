@@ -1276,6 +1276,8 @@ fn wave2_turn_flow_calculates_and_records_speed() {
             Ok(ProviderDecision {
                 output_text: "hi".to_string(),
                 tool_call: None,
+                // D1a：`tool_calls` 与 `tool_call` 等价派生位，此处为 None ⇒ 空 vec
+                tool_calls: Vec::new(),
                 reasoning_content: None,
                 reasoning_content_value: None,
                 assistant_message: Some(serde_json::json!({"role": "assistant", "content": "hi"})),
@@ -1302,6 +1304,8 @@ fn wave2_turn_flow_calculates_and_records_speed() {
             Ok(ProviderDecision {
                 output_text: "hi".to_string(),
                 tool_call: None,
+                // D1a：`tool_calls` 与 `tool_call` 等价派生位，此处为 None ⇒ 空 vec
+                tool_calls: Vec::new(),
                 reasoning_content: None,
                 reasoning_content_value: None,
                 assistant_message: Some(serde_json::json!({"role": "assistant", "content": "hi"})),

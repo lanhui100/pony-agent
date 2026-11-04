@@ -63,6 +63,7 @@ fn anthropic_tool_turn_transcript_uses_native_tool_blocks() {
     };
     let response = ProviderResponse {
         output_text: "Cargo.toml 和 src。".to_string(),
+        tool_calls: Vec::new(),
         tool_call: None,
         reasoning_content: None,
         reasoning_content_value: None,
@@ -275,20 +276,25 @@ impl TurnPlanner for ForcedToolPlanner {
         _history: &[TurnHistoryMessage],
         _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
     ) -> Option<ProviderDecision> {
+        let forced_call = ToolCall {
+            call_id: Some("forced-tool-call".to_string()),
+            name: self.tool_name.clone(),
+            arguments: self.arguments.clone(),
+            plan: Some(crate::agent::tools::ToolPlan {
+                kind: "forced".to_string(),
+                summary: format!("强制执行工具 `{}`。", self.tool_name),
+                parallel: false,
+                continue_on_error: false,
+                steps: Vec::new(),
+            }),
+        };
         Some(ProviderDecision {
             output_text: String::new(),
-            tool_call: Some(ToolCall {
-                call_id: Some("forced-tool-call".to_string()),
-                name: self.tool_name.clone(),
-                arguments: self.arguments.clone(),
-                plan: Some(crate::agent::tools::ToolPlan {
-                    kind: "forced".to_string(),
-                    summary: format!("强制执行工具 `{}`。", self.tool_name),
-                    parallel: false,
-                    continue_on_error: false,
-                    steps: Vec::new(),
-                }),
-            }),
+            // D1a：复数视图与单值字段同源派生（永不漂移）。
+            tool_calls: crate::agent::provider::tool_calls_from_single(&Some(
+                forced_call.clone(),
+            )),
+            tool_call: Some(forced_call),
             reasoning_content: None,
             reasoning_content_value: None,
             assistant_message: None,
@@ -330,9 +336,8 @@ impl TurnPlanner for AskOnceThenDeferPlanner {
             .ask_forced
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            return Some(ProviderDecision {
-                output_text: String::new(),
-                tool_call: Some(ToolCall {
+            return Some({
+                let forced_call = ToolCall {
                     call_id: Some("forced-ask-call".to_string()),
                     name: self.tool_name.clone(),
                     arguments: self.arguments.clone(),
@@ -343,14 +348,22 @@ impl TurnPlanner for AskOnceThenDeferPlanner {
                         continue_on_error: false,
                         steps: Vec::new(),
                     }),
-                }),
-                reasoning_content: None,
-                reasoning_content_value: None,
-                assistant_message: None,
-                provider_source: "planner_preflight".to_string(),
-                provider_mode: "preflight".to_string(),
-                fallback_reason: None,
-                token_usage: None,
+                };
+                ProviderDecision {
+                    output_text: String::new(),
+                    // D1a：复数视图与单值字段同源派生（永不漂移）。
+                    tool_calls: crate::agent::provider::tool_calls_from_single(&Some(
+                        forced_call.clone(),
+                    )),
+                    tool_call: Some(forced_call),
+                    reasoning_content: None,
+                    reasoning_content_value: None,
+                    assistant_message: None,
+                    provider_source: "planner_preflight".to_string(),
+                    provider_mode: "preflight".to_string(),
+                    fallback_reason: None,
+                    token_usage: None,
+                }
             });
         }
         None
@@ -3870,6 +3883,53 @@ fn fail_stream_turn_with_hook_dispatch_forwards_partial_text() {
     assert_eq!(
         without_text, "This turn failed.",
         "B017：无正文时必须逐字保持既有占位文案（兼容锁）"
+    );
+}
+
+/// D1a：`tool_calls` 与 `tool_call` 在所有构造点**同源派生、永不漂移**。
+///
+/// 取一个真实的 src 内构造点（`ForcedToolPlanner::preflight_decision`，见上方）作为代表：
+/// 它走 `tool_calls_from_single(&Some(call))` 派生路径，断言两字段严格一致。
+#[test]
+fn provider_decision_tool_calls_matches_single_tool_call() {
+    let planner = ForcedToolPlanner {
+        tool_name: "Read".to_string(),
+        arguments: json!({ "path": "Cargo.toml" }),
+    };
+    let decision = planner
+        .preflight_decision("read it", &[], &[])
+        .expect("D1a：forced planner 必须给出决策");
+
+    let single = decision
+        .tool_call
+        .as_ref()
+        .expect("D1a：该构造点必须带 tool_call");
+    // `ToolCall` 未实现 PartialEq ⇒ 逐字段比对（call_id / name / arguments / plan）。
+    let from_plural = decision
+        .tool_calls
+        .first()
+        .expect("D1a：有 tool_call 时 tool_calls 不得为空");
+    eprintln!(
+        "[D1a] tool_call={:?} tool_calls_len={} plural={:?}",
+        single.name,
+        decision.tool_calls.len(),
+        from_plural.name
+    );
+    assert_eq!(
+        decision.tool_calls.len(),
+        1,
+        "D1a：有 tool_call 的构造点，tool_calls 必须恰 1 个"
+    );
+    assert_eq!(from_plural.call_id, single.call_id, "D1a：call_id 不得漂移");
+    assert_eq!(from_plural.name, single.name, "D1a：name 不得漂移");
+    assert_eq!(
+        from_plural.arguments, single.arguments,
+        "D1a：arguments 不得漂移"
+    );
+    assert_eq!(
+        from_plural.plan.as_ref().map(|plan| plan.kind.clone()),
+        single.plan.as_ref().map(|plan| plan.kind.clone()),
+        "D1a：plan.kind 不得漂移"
     );
 }
 

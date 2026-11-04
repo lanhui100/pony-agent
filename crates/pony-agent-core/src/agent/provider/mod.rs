@@ -223,6 +223,12 @@ pub enum ConversationCarryMode {
 pub struct ProviderResponse {
     pub output_text: String,
     pub tool_call: Option<ToolCall>,
+    /// D1a（P1-1 切片一）：本次响应里的**全部**工具调用（顺序即上游顺序）。
+    ///
+    /// 不变量：`tool_calls` 与 `tool_call` 永远一致 —— 单值字段是首元素的派生视图
+    /// （单调用路径逐字不变；批量执行在后续波次接这个字段）。
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
     pub reasoning_content: Option<String>,
     pub reasoning_content_value: Option<Value>,
     pub assistant_message: Option<Value>,
@@ -230,6 +236,11 @@ pub struct ProviderResponse {
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
     pub token_usage: Option<TokenUsage>,
+}
+
+/// D1a：由单值 `tool_call` 派生复数视图（保证两字段永远一致）。
+pub fn tool_calls_from_single(tool_call: &Option<ToolCall>) -> Vec<ToolCall> {
+    tool_call.iter().cloned().collect()
 }
 
 pub fn build_context_observation(
@@ -279,6 +290,12 @@ pub fn build_context_observation(
 pub struct ProviderDecision {
     pub output_text: String,
     pub tool_call: Option<ToolCall>,
+    /// D1a（P1-1 切片一）：本次响应里的**全部**工具调用（顺序即上游顺序）。
+    ///
+    /// 不变量：`tool_calls` 与 `tool_call` 永远一致 —— 单值字段是首元素的派生视图
+    /// （单调用路径逐字不变；批量执行在后续波次接这个字段）。
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
     pub reasoning_content: Option<String>,
     pub reasoning_content_value: Option<Value>,
     pub assistant_message: Option<Value>,
@@ -1183,6 +1200,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            tool_calls: tool_calls_from_single(&tool_call),
             tool_call,
             reasoning_content: extract_openai_message_reasoning_content(message),
             reasoning_content_value: extract_openai_message_reasoning_value(message),
@@ -1315,6 +1333,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            tool_calls: tool_calls_from_single(&tool_call),
             tool_call,
             reasoning_content,
             reasoning_content_value,
@@ -1418,6 +1437,7 @@ impl ProviderManager {
 
         Ok(ProviderDecision {
             output_text: parsed.output_text.clone(),
+            tool_calls: tool_calls_from_single(&parsed.tool_call),
             tool_call: parsed.tool_call.clone(),
             reasoning_content: parsed.reasoning_content.clone(),
             reasoning_content_value: parsed.reasoning_content_value.clone(),
@@ -1473,6 +1493,7 @@ impl ProviderManager {
                 };
                 ProviderDecision {
                     output_text: output_text.clone(),
+                    tool_calls: tool_calls_from_single(&tool_call),
                     tool_call,
                     reasoning_content: reasoning_content.clone(),
                     reasoning_content_value: reasoning_content_value.clone(),
@@ -1545,6 +1566,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: parsed.output_text.clone(),
+            tool_calls: tool_calls_from_single(&parsed.tool_call),
             tool_call: parsed.tool_call,
             reasoning_content: parsed.reasoning_content.clone(),
             reasoning_content_value: parsed.reasoning_content_value.clone(),
@@ -1609,6 +1631,7 @@ impl ProviderManager {
                 };
                 ProviderResponse {
                     output_text,
+                    tool_calls: tool_calls_from_single(&tool_call),
                     tool_call,
                     reasoning_content,
                     reasoning_content_value,
@@ -1665,6 +1688,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            tool_calls: tool_calls_from_single(&message.tool_call),
             tool_call: message.tool_call,
             reasoning_content: message.reasoning_content.clone(),
             reasoning_content_value: message.reasoning_content_value.clone(),
@@ -1817,6 +1841,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            tool_calls: tool_calls_from_single(&tool_call),
             tool_call,
             reasoning_content,
             reasoning_content_value,
@@ -1898,6 +1923,7 @@ impl ProviderManager {
 
         Ok(ProviderDecision {
             output_text: extract_openai_message_text(message).unwrap_or_default(),
+            tool_calls: tool_calls_from_single(&decision_tool_call),
             tool_call: decision_tool_call,
             reasoning_content: extract_openai_message_reasoning_content(message),
             reasoning_content_value: extract_openai_message_reasoning_value(message),
@@ -2005,6 +2031,7 @@ impl ProviderManager {
 
         Ok(ProviderDecision {
             output_text,
+            tool_calls: tool_calls_from_single(&tool_call),
             tool_call,
             reasoning_content: message.reasoning_content,
             reasoning_content_value: message.reasoning_content_value,
@@ -2071,6 +2098,7 @@ impl ProviderManager {
         ensure_single_anthropic_tool_call(content)?;
         Ok(ProviderDecision {
             output_text: output_text.clone(),
+            tool_calls: extract_anthropic_tool_calls(content),
             tool_call: extract_anthropic_tool_call(content),
             reasoning_content,
             reasoning_content_value: reasoning_content_value.clone(),
@@ -4211,6 +4239,7 @@ fn local_tool_followup_fallback_response(
 
     ProviderResponse {
         output_text: output_text.clone(),
+        tool_calls: Vec::new(),
         tool_call: None,
         reasoning_content: None,
         reasoning_content_value: None,

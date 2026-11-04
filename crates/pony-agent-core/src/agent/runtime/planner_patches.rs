@@ -178,6 +178,7 @@ pub(crate) fn apply_planner_patches(
 pub(super) fn ensure_planner_decision(decision: &mut Option<ProviderDecision>) -> &mut ProviderDecision {
     decision.get_or_insert_with(|| ProviderDecision {
         output_text: String::new(),
+        tool_calls: Vec::new(),
         tool_call: None,
         reasoning_content: None,
         reasoning_content_value: None,
