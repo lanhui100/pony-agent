@@ -942,9 +942,12 @@ fn t6_static_wiring() {
         .unwrap_or_else(|err| panic!("PA51-C3-T6：必须能读到 {}：{err}", turn_flow_path.display()));
 
     let detail_calls = turn_flow.matches("record_usage_details(").count();
+    // PA51-C3-T6 契约演进（P1-1 / B018 的 D2–D3b）：turn_flow 新增两处批量 followup 包装
+    // （`provider_followup_with_calls` / `provider_followup_stream_with_calls`），各自承担一次
+    // usage 记录 ⇒ 合法接线点由 4 变为 6。仍保持「精确相等」以防漏接/多接。
     assert_eq!(
-        detail_calls, 4,
-        "PA51-C3-T6：`turn_flow.rs` 必须恰好 4 处 `record_usage_details(` 接线（不得漏接/多接），实际 {detail_calls}"
+        detail_calls, 6,
+        "PA51-C3-T6：`turn_flow.rs` 必须恰好 6 处 `record_usage_details(` 接线（4 处 1:1 + 2 处批量包装；不得漏接/多接），实际 {detail_calls}"
     );
 
     let host_lib_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
