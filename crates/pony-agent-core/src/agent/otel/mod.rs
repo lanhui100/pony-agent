@@ -4976,7 +4976,7 @@ mod p0_1_tool_payload_tests {
         // 采集开关的关闭路径由 `tests/otel_tool_payload_test.rs::capture_switch_disables_payload_keys`
         // 用文件级锁 + EnvVarGuard 覆盖。
         let huge = format!(
-            "{{\"command\":\"curl -H 'authorization: Bearer sk-live-TOPSECRET-0123456789' \
+            "{{\"command\":\"curl -H 'authorization: Bearer sk-test-TOPSECRET-0123456789' \
 https://api.example.com\",\"stdout\":\"{}\"}}",
             "y".repeat(10 * 1024)
         );
@@ -5020,7 +5020,7 @@ https://api.example.com\",\"stdout\":\"{}\"}}",
             input.len()
         );
         assert!(input.ends_with(TOOL_PAYLOAD_TRUNCATION_MARKER), "P0-1：必须带截断标记");
-        assert!(!input.contains("sk-live-TOPSECRET-0123456789"), "P0-1：裸 token 必须脱敏");
+        assert!(!input.contains("sk-test-TOPSECRET-0123456789"), "P0-1：裸 token 必须脱敏");
         assert!(!input.contains("/home/"), "P0-1：家目录路径必须脱敏");
         assert_eq!(output, "{\"ok\":true,\"exitCode\":0}", "P0-1：短预览原样（脱敏后）");
     }

@@ -164,11 +164,13 @@ fn sensitive_previews_are_sanitized() {
     //  - JSON 敏感键值 `"api_key": "..."` ⇒ 整个值被替换；
     //  - `Bearer <token>` ⇒ 被替换；
     //  - `/home/<user>` ⇒ `[USER_HOME]`。
-    const FAKE_TOKEN: &str = "sk-live-TOPSECRET-9876543210";
+    // `check-secrets` 门禁要求匹配串含 test/mock/dummy/example/fake 或 `sk-test` 前缀；
+    // 换用等价假值后，sanitize 的 `sk-`（≥16 位）与 Bearer 规则仍会命中 ⇒ 断言语义不变。
+    const FAKE_TOKEN: &str = "sk-test-TOPSECRET-9876543210";
     // 裸 token（不带 JSON 键、不带 Bearer）：依赖 sanitize 的**新增裸 token 规则**脱敏。
-    const BARE_SK: &str = "sk-abcdef1234567890abcdef";
-    const BARE_GHP: &str = "ghp_0123456789abcdefghij0123456789abcdef"; // ghp_ + 36 位
-    const BARE_AKIA: &str = "AKIAABCDEFGHIJKLMNOP"; // AKIA + 16 位大写
+    const BARE_SK: &str = "sk-testabcdef1234567890abcdef";
+    const BARE_GHP: &str = "ghp_test0123456789abcdefghij0123456789abcdef"; // ghp_ + 40 位（形状等价）
+    const BARE_AKIA: &str = "AKIAIOSFODNN7EXAMPLE"; // AWS 官方示例串（AKIA + 16 位大写）
 
     let args = format!(
         r#"{{"api_key":"{FAKE_TOKEN}","note":"Bearer {FAKE_TOKEN}","path":"/home/dm/pony-agent/secret.ts","raw":"{BARE_SK} {BARE_GHP} {BARE_AKIA}"}}"#

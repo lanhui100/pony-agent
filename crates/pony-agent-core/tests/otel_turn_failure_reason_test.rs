@@ -182,7 +182,8 @@ fn existing_turn_attribute_set_is_unchanged() {
 #[test]
 fn failed_reason_is_sanitized() {
     // Arrange：包装形态（Bearer 凭证）+ 家目录路径 —— 二者都在 `ponysentry::sanitize` 脱敏面内。
-    const FAKE_TOKEN: &str = "sk-live-TOPSECRET-9876543210";
+    // 假值必须落在 `check-secrets` 的安全集（`sk-test` 前缀）；Bearer 规则仍会脱敏 ⇒ 断言语义不变。
+    const FAKE_TOKEN: &str = "sk-test-TOPSECRET-9876543210";
     let reason = format!(
         "tool_failed: provider 401 (Authorization: Bearer {FAKE_TOKEN}) at /home/dm/pony-agent/secret.ts"
     );
