@@ -3788,6 +3788,91 @@ fn decision_blank_tool_call(arguments: serde_json::Value) -> serde_json::Value {
     })
 }
 
+
+/// B017：失败轮保留已产出正文 —— `fail_stream_turn_with_hook_dispatch` 的 `partial_text` 透传。
+///
+/// 覆盖两面：
+/// 1. `Some(正文)` ⇒ `turn:failed` 事件 text **含**该正文（trace `pa_01a1a134` turn-3 场景：
+///    工具反复失败直到熔断，用户不该只看到 "This turn failed."）；
+/// 2. `None` ⇒ 事件 text 逐字仍是 `This turn failed.`（历史冻结断言的兼容锁）。
+#[test]
+fn fail_stream_turn_with_hook_dispatch_forwards_partial_text() {
+    let runtime = AgentRuntime::new();
+    let control = crate::agent::execution_control::ExecutionControlRegistry::new();
+
+    // ① Some(正文)
+    control.register_turn("turn-b017-with-text", None, None);
+    let sink = RecordingTurnEventSink::new();
+    runtime.fail_stream_turn_with_hook_dispatch(
+        &sink,
+        &control,
+        None,
+        "turn-b017-with-text",
+        "user message",
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+        1,
+        "provider exploded".to_string(),
+        Some("已经产出的一段正文".to_string()),
+    );
+    let events = sink.events.borrow();
+    let failed = events
+        .iter()
+        .find(|(name, _)| name == "turn:failed")
+        .unwrap_or_else(|| panic!("必须发出 turn:failed，实际事件={:?}", events.len()));
+    let with_text = failed.1.text.clone().unwrap_or_default();
+    drop(events);
+    eprintln!("[b017] partial_text=Some ⇒ turn:failed text={with_text:?}");
+    assert!(
+        with_text.contains("已经产出的一段正文"),
+        "B017：失败事件正文必须保留已产出内容，实际 text={with_text:?}"
+    );
+    assert_ne!(
+        with_text, "This turn failed.",
+        "B017：有正文时不得退化成占位文案"
+    );
+
+    // ② None（兼容锁）
+    control.register_turn("turn-b017-no-text", None, None);
+    let sink_without = RecordingTurnEventSink::new();
+    runtime.fail_stream_turn_with_hook_dispatch(
+        &sink_without,
+        &control,
+        None,
+        "turn-b017-no-text",
+        "user message",
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+        1,
+        "provider exploded".to_string(),
+        None,
+    );
+    let events = sink_without.events.borrow();
+    let failed = events
+        .iter()
+        .find(|(name, _)| name == "turn:failed")
+        .expect("必须发出 turn:failed");
+    let without_text = failed.1.text.clone().unwrap_or_default();
+    drop(events);
+    eprintln!("[b017] partial_text=None ⇒ turn:failed text={without_text:?}");
+    assert_eq!(
+        without_text, "This turn failed.",
+        "B017：无正文时必须逐字保持既有占位文案（兼容锁）"
+    );
+}
+
 #[test]
 fn start_turn_stream_uses_sink_for_empty_input_failure() {
     let mut runtime = AgentRuntime::new();

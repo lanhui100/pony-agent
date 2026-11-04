@@ -4818,28 +4818,18 @@ mod tests {
     fn stop_turn_and_checkpoint_queries_share_same_registry_surface() {
         let _cp_lock = control_plane_test_lock();
         let control_plane = HostControlPlane::new();
-        let sink = NoopSink;
 
-        control_plane.start_turn_stream(
-            &sink,
-            StartTurnStreamCommand {
-                turn_id: "turn-stream".to_string(),
-                input: TurnInput {
-                    message: "   ".to_string(),
-                    display_message: None,
-                    provider_id: None,
-                    model_id: None,
-                    reasoning_effort: None,
-                    workspace_mode: None,
-                    tool_authorization_mode: None,
-                    session_id: Some("stream-session".to_string()),
-                    node_id: None,
-                    history: Vec::new(),
-                    images: Vec::new(),
-                    workspace_id: None,
-                    plan_execution_approval: None,
-                },
-            },
+        // wave-64 terminal-once 之后：`start_turn_stream` 是**同步跑完整轮**的入口，用它造的
+        // 全空白 message turn 会在 prepare 阶段就被判失败并置终态，于是随后 `stop_turn` 必然
+        // 返回 `already_terminal`——这不是 registry 面的问题，而是 fixture 拿不到「仍在运行」的轮次。
+        //
+        // 本用例的意图是「`stop_turn` 与 `load_execution_checkpoint` 共用同一 registry 面」，
+        // 故直接用运行时会话命中的同一个 API（`ExecutionControlRegistry::register_turn`）造一个
+        // **真正 running** 的轮次：两条查询/命令随后都落到同一份 registry 状态上。
+        control_plane.execution_control.register_turn(
+            "turn-stream",
+            Some("stream-session"),
+            None,
         );
 
         let checkpoint = control_plane

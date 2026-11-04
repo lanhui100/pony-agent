@@ -45,6 +45,8 @@ impl AgentRuntime {
         turn_duration_ms: Option<u64>,
         completed_hops: usize,
         error: String,
+        // B017：本轮失败前**已产出**的 assistant 正文（`None`/全空白 ⇒ 回落既有占位文案）。
+        partial_text: Option<String>,
     ) {
         if !claim_failed_terminal(control, turn_id) {
             return;
@@ -65,6 +67,7 @@ impl AgentRuntime {
             turn_duration_ms,
             completed_hops,
             error,
+            partial_text,
         );
     }
 
@@ -141,9 +144,15 @@ impl AgentRuntime {
         let mut seen_tool_signatures = BTreeSet::from([tool_call_signature(&current_tool_call)]);
         let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
+        // B017：本轮**已产出**的 assistant 正文累积器。每进入一次 hop 循环就把该 hop 的 assistant
+        // 正文追加进来（`current_assistant_output_text` 只在新 hop 响应到达时更新，故不会重复计入）。
+        // 用途：失败终态（hook 失败 / 熔断闸）把它交给 `emit_stream_failed`，避免 trace
+        // `pa_01a1a134` turn-3 那种「失败轮只剩 This turn failed.」的正文丢失。
+        let mut accumulated_turn_text = String::new();
 
         loop {
             completed_hops += 1;
+            accumulated_turn_text.push_str(&current_assistant_output_text);
             let trace_steps = self.telemetry_builder.trace_tool_active();
             self.update_execution_checkpoint(
                 control,
@@ -281,6 +290,8 @@ impl AgentRuntime {
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     completed_hops,
                     error,
+                    // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                    Some(accumulated_turn_text.clone()),
                 );
                 return;
             }
@@ -443,6 +454,8 @@ impl AgentRuntime {
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     completed_hops,
                     error,
+                    // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                    Some(accumulated_turn_text.clone()),
                 );
                 return;
             }
@@ -574,6 +587,8 @@ impl AgentRuntime {
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         completed_hops,
                         error,
+                        // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                        Some(accumulated_turn_text.clone()),
                     );
                     return;
                 }
@@ -610,6 +625,8 @@ impl AgentRuntime {
                             .unwrap_or("unknown"),
                         tool_result.output.as_str(),
                     ),
+                    // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                    Some(accumulated_turn_text.clone()),
                 );
                 return;
             }
@@ -638,6 +655,8 @@ impl AgentRuntime {
                         &current_tool_call.name,
                         tool_result.output.as_str(),
                     ),
+                    // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                    Some(accumulated_turn_text.clone()),
                 );
                 return;
             }
@@ -822,6 +841,8 @@ impl AgentRuntime {
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         completed_hops,
                         error,
+                        // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                        Some(accumulated_turn_text.clone()),
                     );
                     return;
                 }
@@ -982,6 +1003,8 @@ impl AgentRuntime {
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     completed_hops,
                     error,
+                    // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                    Some(accumulated_turn_text.clone()),
                 );
                 return;
             }
@@ -1012,6 +1035,8 @@ impl AgentRuntime {
                             Some(turn_started_at.elapsed().as_millis() as u64),
                             completed_hops,
                             error,
+                            // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                            Some(accumulated_turn_text.clone()),
                         );
                         return;
                     }
@@ -1100,6 +1125,8 @@ impl AgentRuntime {
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         completed_hops,
                         build_tool_hop_limit_error(max_tool_hops_per_turn()),
+                        // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                        Some(accumulated_turn_text.clone()),
                     );
                     return;
                 } else {
@@ -1163,6 +1190,8 @@ impl AgentRuntime {
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         completed_hops,
                         error,
+                        // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                        Some(accumulated_turn_text.clone()),
                     );
                     return;
                 }
@@ -1311,6 +1340,8 @@ impl AgentRuntime {
                     turn_duration_ms,
                     completed_hops,
                     error,
+                    // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                    Some(accumulated_turn_text.clone()),
                 );
                 return;
             }
@@ -1337,6 +1368,8 @@ impl AgentRuntime {
                     turn_duration_ms,
                     completed_hops,
                     error,
+                    // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
+                    Some(accumulated_turn_text.clone()),
                 );
                 return;
             }
@@ -2218,6 +2251,8 @@ impl AgentRuntime {
                             Some(turn_started_at.elapsed().as_millis() as u64),
                             0,
                             hook_error,
+                            // B017：本函数（首轮决策 / 收尾 hook）作用域内没有「已渲染正文」累积器，传 None 走既有占位文案。
+                            None,
                         );
                     }
                     otel_turn_scope.set_phase("failed");
@@ -3008,6 +3043,8 @@ impl AgentRuntime {
                 turn_duration_ms,
                 0,
                 error,
+                // B017：本函数（首轮决策 / 收尾 hook）作用域内没有「已渲染正文」累积器，传 None 走既有占位文案。
+                None,
             );
             otel_turn_scope.set_phase("failed");
             return;
@@ -3035,6 +3072,8 @@ impl AgentRuntime {
                 turn_duration_ms,
                 0,
                 error,
+                // B017：本函数（首轮决策 / 收尾 hook）作用域内没有「已渲染正文」累积器，传 None 走既有占位文案。
+                None,
             );
             otel_turn_scope.set_phase("failed");
             return;
