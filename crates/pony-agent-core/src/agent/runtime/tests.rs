@@ -12707,3 +12707,517 @@ fn start_turn_stream_stops_batch_at_interactive_ask_and_leaves_remaining_calls_u
         request_bodies.len()
     );
 }
+
+// ─────────── D4（W28b）：批内执行段的**并发接线**（`PONY_AGENT_PARALLEL_TOOLS`，默认关） ───────────
+
+const PARALLEL_PROBE_DELAY_MS: u64 = 60;
+
+/// 用例级开关覆写守卫：panic 也能还原（并行跑的其他用例不受影响）。
+struct ParallelToolsFlag(Option<bool>);
+
+impl Drop for ParallelToolsFlag {
+    fn drop(&mut self) {
+        set_parallel_tools_override(self.0);
+    }
+}
+
+fn with_parallel_tools(enabled: bool) -> ParallelToolsFlag {
+    ParallelToolsFlag(set_parallel_tools_override(Some(enabled)))
+}
+
+/// 并发探针执行器：记录每次调用**进入时**的在途并发数，并累计实测峰值。
+///
+/// - `entries`：`(工具名, 进入时在途并发数)`，按真实进入顺序（并发下非确定，只作并发证据）；
+/// - `peak`：实测峰值并发 —— `>= 2` 才证明并发**确实发生**（不是「两个都执行了」）；
+/// - `delay`：制造重叠窗口；若执行仍是串行的，`peak` 恒为 1；
+/// - `ask_user` 复用 D3a 的挂起标记形态（`control_outcome_pending`），其余调用返回 ok。
+struct ConcurrencyProbeToolExecutor {
+    entries: Arc<Mutex<Vec<(String, usize)>>>,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+    delay: std::time::Duration,
+}
+
+impl ConcurrencyProbeToolExecutor {
+    fn new(delay_ms: u64) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(Vec::new())),
+            active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            delay: std::time::Duration::from_millis(delay_ms),
+        }
+    }
+
+    fn executed_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// 该工具每次调用「进入时」的在途并发数（1 = 独占执行）。
+    fn entry_concurrency_of(&self, name: &str) -> Vec<usize> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(executed, _)| executed == name)
+            .map(|(_, active_at_entry)| *active_at_entry)
+            .collect()
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::agent::tools::ToolExecutor for ConcurrencyProbeToolExecutor {
+    fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+        let active_at_entry =
+            self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        self.peak
+            .fetch_max(active_at_entry, std::sync::atomic::Ordering::SeqCst);
+        self.entries
+            .lock()
+            .unwrap()
+            .push((call.name.clone(), active_at_entry));
+        std::thread::sleep(self.delay);
+        self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+
+        let is_ask = crate::agent::tools::canonical_tool_name(&call.name)
+            .map(|canonical| canonical == "ask_user")
+            .unwrap_or(false);
+        if is_ask {
+            return crate::agent::tools::ToolResult {
+                tool_name: call.name.clone(),
+                status: "error".to_string(),
+                output: json!({
+                    "ok": false,
+                    "error": {
+                        "code": "control_outcome_pending",
+                        "kind": "control_outcome_pending",
+                        "message": "Ask 等待宿主应答。"
+                    }
+                })
+                .to_string(),
+                duration_ms: 0,
+            };
+        }
+        crate::agent::tools::ToolResult {
+            tool_name: call.name.clone(),
+            status: "ok".to_string(),
+            // 结果自带「被执行的是哪个调用」的证据：并发下完成顺序不定，回填后仍须与调用一一对应。
+            output: json!({ "executed": call.name, "arguments": call.arguments }).to_string(),
+            duration_ms: 1,
+        }
+    }
+}
+
+/// 从 followup 请求体里取出 `role=tool` 消息的 `tool_call_id` 序列（= 批内回填顺序的唯一证据）。
+fn followup_tool_call_ids(request_body: &str) -> Vec<String> {
+    let followup: serde_json::Value =
+        serde_json::from_str(request_body).expect("followup 请求体必须是 JSON");
+    followup["messages"]
+        .as_array()
+        .expect("followup 请求体必须带 messages 数组")
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| {
+            message["tool_call_id"]
+                .as_str()
+                .expect("tool 消息必须带 tool_call_id")
+                .to_string()
+        })
+        .collect()
+}
+
+/// 从 followup 请求体里取出 `(tool_call_id, content)` 序列：既验顺序，也验「结果与调用一一对应」。
+fn followup_tool_messages(request_body: &str) -> Vec<(String, String)> {
+    let followup: serde_json::Value =
+        serde_json::from_str(request_body).expect("followup 请求体必须是 JSON");
+    followup["messages"]
+        .as_array()
+        .expect("followup 请求体必须带 messages 数组")
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| {
+            (
+                message["tool_call_id"]
+                    .as_str()
+                    .expect("tool 消息必须带 tool_call_id")
+                    .to_string(),
+                message["content"]
+                    .as_str()
+                    .expect("tool 消息必须带 content")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+fn parallel_batch_turn_input(message: &str, session_id: &str) -> TurnInput {
+    TurnInput {
+        message: message.to_string(),
+        display_message: None,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        workspace_mode: None,
+        tool_authorization_mode: None,
+        session_id: Some(session_id.to_string()),
+        node_id: None,
+        history: Vec::new(),
+        images: Vec::new(),
+        workspace_id: None,
+        plan_execution_approval: None,
+    }
+}
+
+/// D4 ①（同步路径）：开关**开** + 2 个并发安全调用 ⇒ 都执行、回填**保序**，且并发确实发生。
+#[test]
+fn run_turn_parallel_tools_executes_concurrent_safe_segment_concurrently() {
+    let _flag = with_parallel_tools(true);
+    let final_text = "两个工具都已执行完成。";
+    let server = MockHttpServer::start(vec![
+        json_response(decision_tool_calls_batch(&[
+            ("workspace_list_files", json!({"path": ".", "limit": 40})),
+            ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+        ])),
+        json_completion(final_text),
+    ]);
+    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let observed = ConcurrencyProbeToolExecutor {
+        entries: Arc::clone(&probe.entries),
+        active: Arc::clone(&probe.active),
+        peak: Arc::clone(&probe.peak),
+        delay: probe.delay,
+    };
+    let runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(observed),
+    );
+
+    let result = runtime.run_turn(parallel_batch_turn_input(
+        "先看目录再读配置。",
+        "sync-parallel-tools",
+    ));
+    let request_bodies = server.finish();
+
+    assert_eq!(result.phase, "ready");
+    assert_eq!(result.assistant_message, final_text);
+    // 两个都执行。
+    assert_eq!(
+        probe.executed_names(),
+        vec![
+            "workspace_list_files".to_string(),
+            "workspace_read_file".to_string()
+        ],
+        "批内两个安全调用都必须执行"
+    );
+    // 并发**确实发生**（不是只断「都执行了」）。
+    assert!(
+        probe.peak() >= 2,
+        "并发段必须真的重叠执行，实测峰值并发 {}",
+        probe.peak()
+    );
+    // 回填保序：tool 消息顺序 = 上游顺序（与完成先后无关）。
+    assert_eq!(request_bodies.len(), 2, "批后只发一次 followup");
+    assert_eq!(
+        followup_tool_call_ids(&request_bodies[1]),
+        vec![
+            "call_workspace_list_files".to_string(),
+            "call_workspace_read_file".to_string()
+        ],
+        "回填顺序必须与批内原序一致"
+    );
+    // 结果与调用**一一对应**（并发完成顺序不同，但 results[i] 必须属于 calls[i]）。
+    let tool_messages = followup_tool_messages(&request_bodies[1]);
+    assert!(
+        tool_messages[0].1.contains("workspace_list_files"),
+        "第 1 条结果必须来自第 1 个调用，实际 {}",
+        tool_messages[0].1
+    );
+    assert!(
+        tool_messages[1].1.contains("workspace_read_file"),
+        "第 2 条结果必须来自第 2 个调用，实际 {}",
+        tool_messages[1].1
+    );
+    // per-call 语义不丢：两条顶级工具活动。
+    assert_eq!(result.tool_activities.len(), 2);
+    assert_eq!(result.tool_activities[0].name, "List");
+    assert_eq!(result.tool_activities[1].name, "Read");
+}
+
+/// D4 ②（同步路径）：开关**开** + 混入 `Run`（非并发安全）⇒ 并发段只含安全子集，
+/// `Run` 独占执行（进入时在途并发恒为 1），回填仍保序。
+#[test]
+fn run_turn_parallel_tools_keeps_run_out_of_parallel_segment() {
+    let _flag = with_parallel_tools(true);
+    let server = MockHttpServer::start(vec![
+        json_response(decision_tool_calls_batch(&[
+            ("workspace_list_files", json!({"path": ".", "limit": 40})),
+            ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+            ("workspace_run_command", json!({"command": "echo hi"})),
+        ])),
+        json_completion("三个工具都已执行完成。"),
+    ]);
+    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let observed = ConcurrencyProbeToolExecutor {
+        entries: Arc::clone(&probe.entries),
+        active: Arc::clone(&probe.active),
+        peak: Arc::clone(&probe.peak),
+        delay: probe.delay,
+    };
+    let runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(observed),
+    );
+
+    let result = runtime.run_turn(parallel_batch_turn_input(
+        "读两个文件，再跑一条命令。",
+        "sync-parallel-tools-mixed",
+    ));
+    let request_bodies = server.finish();
+
+    assert_eq!(result.phase, "ready");
+    assert_eq!(
+        probe.executed_names(),
+        vec![
+            "workspace_list_files".to_string(),
+            "workspace_read_file".to_string(),
+            "workspace_run_command".to_string()
+        ]
+    );
+    // 并发只发生在安全子集（List + Read）：峰值恰为 2。
+    assert_eq!(
+        probe.peak(),
+        2,
+        "并发段只应包含两个安全调用，实测峰值 {}",
+        probe.peak()
+    );
+    // `Run` 绝不与任何调用重叠：进入时在途并发恒为 1。
+    assert_eq!(
+        probe.entry_concurrency_of("workspace_run_command"),
+        vec![1],
+        "Run 必须在并发段全部结束后独占执行"
+    );
+    assert_eq!(
+        followup_tool_call_ids(&request_bodies[1]),
+        vec![
+            "call_workspace_list_files".to_string(),
+            "call_workspace_read_file".to_string(),
+            "call_workspace_run_command".to_string()
+        ],
+        "回填顺序必须与批内原序一致"
+    );
+    assert_eq!(result.tool_activities.len(), 3);
+}
+
+/// D4 ③（同步路径）：开关**关**（默认）⇒ 逐字现状：逐调用顺序执行，永不重叠。
+#[test]
+fn run_turn_parallel_tools_off_keeps_serial_execution() {
+    let _flag = with_parallel_tools(false);
+    let server = MockHttpServer::start(vec![
+        json_response(decision_tool_calls_batch(&[
+            ("workspace_list_files", json!({"path": ".", "limit": 40})),
+            ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+        ])),
+        json_completion("两个工具都已执行完成。"),
+    ]);
+    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let observed = ConcurrencyProbeToolExecutor {
+        entries: Arc::clone(&probe.entries),
+        active: Arc::clone(&probe.active),
+        peak: Arc::clone(&probe.peak),
+        delay: probe.delay,
+    };
+    let runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(observed),
+    );
+
+    let result = runtime.run_turn(parallel_batch_turn_input(
+        "先看目录再读配置。",
+        "sync-parallel-tools-off",
+    ));
+    let request_bodies = server.finish();
+
+    assert_eq!(result.phase, "ready");
+    assert_eq!(
+        probe.executed_names(),
+        vec![
+            "workspace_list_files".to_string(),
+            "workspace_read_file".to_string()
+        ]
+    );
+    assert_eq!(
+        probe.peak(),
+        1,
+        "开关关时必须逐调用顺序执行（实测峰值 {}）",
+        probe.peak()
+    );
+    assert_eq!(
+        followup_tool_call_ids(&request_bodies[1]),
+        vec![
+            "call_workspace_list_files".to_string(),
+            "call_workspace_read_file".to_string()
+        ]
+    );
+    assert_eq!(result.tool_activities.len(), 2);
+}
+
+/// D4 ①（流式主路径）：开关**开** + 2 个并发安全调用 ⇒ 都执行、并发确实发生、回填保序。
+#[test]
+fn start_turn_stream_parallel_tools_executes_concurrent_safe_segment_concurrently() {
+    let _flag = with_parallel_tools(true);
+    let final_text = "流式批内两个工具都已执行完成。";
+    let server = MockHttpServer::start(vec![
+        sse_decision_tool_calls_batch(&[
+            ("workspace_list_files", json!({"path": ".", "limit": 40})),
+            ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+        ]),
+        json_completion(final_text),
+    ]);
+    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let observed = ConcurrencyProbeToolExecutor {
+        entries: Arc::clone(&probe.entries),
+        active: Arc::clone(&probe.active),
+        peak: Arc::clone(&probe.peak),
+        delay: probe.delay,
+    };
+    let mut runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(observed),
+    );
+    let sink = RecordingTurnEventSink::new();
+
+    runtime.start_turn_stream(
+        &sink,
+        "turn-stream-parallel".to_string(),
+        parallel_batch_turn_input("先看目录再读配置。", "stream-parallel-tools"),
+    );
+    let request_bodies = server.finish();
+
+    assert_eq!(
+        probe.executed_names(),
+        vec![
+            "workspace_list_files".to_string(),
+            "workspace_read_file".to_string()
+        ]
+    );
+    assert!(
+        probe.peak() >= 2,
+        "流式路径的并发段也必须真的重叠执行，实测峰值 {}",
+        probe.peak()
+    );
+    assert_eq!(request_bodies.len(), 2, "批后只发一次 followup");
+    assert_eq!(
+        followup_tool_call_ids(&request_bodies[1]),
+        vec![
+            "call_workspace_list_files".to_string(),
+            "call_workspace_read_file".to_string()
+        ]
+    );
+    // 结果与调用一一对应（并发保序回填）。
+    let tool_messages = followup_tool_messages(&request_bodies[1]);
+    assert!(
+        tool_messages[0].1.contains("workspace_list_files")
+            && tool_messages[1].1.contains("workspace_read_file"),
+        "并发段的结果必须按原序对回各自调用，实际 {tool_messages:?}"
+    );
+    // per-call 语义不丢：逐调用一条工具事件（批不吞掉第二个调用的事件）。
+    let events = sink.events.borrow();
+    let per_call_tool_ends = events
+        .iter()
+        .filter(|(name, payload)| {
+            name == "turn:tool" && payload.phase.as_deref() == Some("tool_result_integrating")
+        })
+        .count();
+    assert_eq!(per_call_tool_ends, 2);
+    let completed = events
+        .iter()
+        .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+        .expect("流式并发批执行必须收口到 turn:completed");
+    assert_eq!(
+        completed
+            .tool_activities
+            .as_ref()
+            .map(|activities| activities.len()),
+        Some(2)
+    );
+}
+
+/// D4 ④（流式主路径）：开关**开** + 批内含 Ask ⇒ Ask **不进并发段**（独占执行、在途并发恒 1），
+/// 且仍是批终止符（其后调用不执行、本轮悬挂、不发 followup）。
+#[test]
+fn start_turn_stream_parallel_tools_keeps_ask_out_of_parallel_segment_and_still_terminates_batch() {
+    let _flag = with_parallel_tools(true);
+    let server = MockHttpServer::start(vec![sse_decision_tool_calls_batch(&[
+        ("workspace_list_files", json!({"path": ".", "limit": 40})),
+        ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+        ("ask_user", json!({"question": "继续吗？"})),
+    ])]);
+    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let observed = ConcurrencyProbeToolExecutor {
+        entries: Arc::clone(&probe.entries),
+        active: Arc::clone(&probe.active),
+        peak: Arc::clone(&probe.peak),
+        delay: probe.delay,
+    };
+    let mut runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(observed),
+    );
+    let sink = RecordingTurnEventSink::new();
+
+    runtime.start_turn_stream(
+        &sink,
+        "turn-stream-parallel-ask".to_string(),
+        parallel_batch_turn_input(
+            "先看目录、再读配置，最后问我。",
+            "stream-parallel-ask",
+        ),
+    );
+    let request_bodies = server.finish();
+
+    assert_eq!(
+        probe.executed_names(),
+        vec![
+            "ask_user".to_string(),
+            "workspace_list_files".to_string(),
+            "workspace_read_file".to_string()
+        ]
+    );
+    // 安全段确实并发（List + Read），Ask 独占。
+    assert!(
+        probe.peak() >= 2,
+        "安全段必须并发执行，实测峰值 {}",
+        probe.peak()
+    );
+    assert_eq!(
+        probe.entry_concurrency_of("ask_user"),
+        vec![1],
+        "交互类工具（批终止符）绝不进并发段"
+    );
+    let events = sink.events.borrow();
+    assert!(
+        events.iter().any(|(name, payload)| {
+            name == "turn:suspended" && payload.phase.as_deref() == Some(SUSPENDED_TURN_PHASE)
+        }),
+        "批到 Ask 必须悬挂"
+    );
+    assert!(!events.iter().any(|(name, _)| name == "turn:completed"));
+    assert!(!events.iter().any(|(name, _)| name == "turn:failed"));
+    drop(events);
+    assert_eq!(
+        request_bodies.len(),
+        1,
+        "Ask 挂起后不得再发 followup，实际请求数 {}",
+        request_bodies.len()
+    );
+}

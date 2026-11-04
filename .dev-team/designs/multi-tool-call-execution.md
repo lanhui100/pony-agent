@@ -131,3 +131,20 @@ N>1 未接 retry（避免 accumulated 二次追加）。
 **仍待（下一波）**：① Anthropic **流式**与 OpenAI **Responses 流式**解析仍单值 ⇒ 这两路批退化为单调用；
 ② N>1 followup 非真增量（无 ttft）；③ 批内仅首个过 `normalize_tool_directive`、重复签名闸只查首个；
 ④ 非 pending 交互工具停批后余下丢弃；⑤ `parallel_tools` 并发接线（本目标第二clause）仍未做。
+
+## 10. D4 已完成（parallel_tools 并发接线，开关默认关）
+
+- 开关 `PONY_AGENT_PARALLEL_TOOLS`（默认关，仅 `1/true/on/yes` 开；未识别 fail-safe 关）。
+- `runtime/batch_plan.rs`：`plan_batch_segments`（关⇒每调用一段串行；开⇒连续 `concurrent_safe` 且非交互、段长≥2 才并发）、
+  `execute_segment_in_parallel`（`parallel_tools::execute_calls` + `Mutex<Vec<(usize,…)>>` 按指针同一性回收后原序展开，panic 隔离）、
+  `execute_tool_call_with_turn_context`（收敛两条路径原本内联的上下文构造）。
+- 接入：`turn_sync.rs:294` / `turn_stream.rs:735` 段循环；预/后阶段用函数内宏保持同一段代码文本。
+- 测试：5 条运行时用例（峰并发≥2、Run/Ask 在途并发恒 1、关时峰 1、结果与调用一一对应）+ 3 条规划单测；`-- parallel_tools` 12 passed。
+- 门禁：`--lib` 1244/0、clippy 零新增、lifecycle 7 / stop_contract 7 / promote 9 / turn_failed 4、audit-diff 0。
+
+**开关开启时的已知差异**：并发段按「整段预→整体执行→整段后」推进（后置调用的 hook/工具事件先于前一调用执行发生；
+若某 hook `fail_turn` 则整段不执行）；并发上限 `min(段长,8)`。
+
+**整体收口状态**：A/B/C 全部完成；D 的「多 tool_use 不再一律 Err」与「接入 parallel_tools 可并发子集」均已落地。
+遗留（非本目标）：Anthropic/Responses **流式**解析仍单值；N>1 followup 非真增量；批内仅首个过 `normalize_tool_directive`；
+non-pending 交互工具停批后余下丢弃；Windows 真机 e2e 未验证。

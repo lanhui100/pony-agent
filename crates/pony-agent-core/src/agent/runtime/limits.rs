@@ -42,6 +42,13 @@ pub(super) const MAX_ALLOWED_CONSECUTIVE_SAME_TOOL_FAILURES: usize = 16;
 pub(super) const MAX_CONSECUTIVE_SAME_TOOL_FAILURES_ENV: &str =
     "PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES";
 
+/// 批内并发执行开关（D4 / W28b）：`PONY_AGENT_PARALLEL_TOOLS`。
+///
+/// **默认关**（fail-safe）：只有显式 `1/true/on/yes`（大小写不敏感、允许首尾空白）才开启；
+/// 未设置、空串、任何其它取值（含拼写错误）一律按**关闭**处理 —— 并发是「可能改变工具间时序」
+/// 的语义级变更，绝不能因为一个环境变量写错而被动开启。
+pub(super) const PARALLEL_TOOLS_ENV: &str = "PONY_AGENT_PARALLEL_TOOLS";
+
 pub(super) fn build_turn_wall_budget_error(limit_seconds: usize) -> String {
     format!(
         "本轮已运行超过 {limit_seconds} 秒（墙钟预算），已停止继续调用工具以避免长时间占用；\
@@ -67,6 +74,8 @@ pub(super) fn build_same_tool_consecutive_failure_error(
 thread_local! {
     static TURN_WALL_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SAME_TOOL_FAILURE_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `Some(bool)` ⇒ 用例显式覆写并发开关（`None` = 未覆写，回落 env）。
+    static PARALLEL_TOOLS_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -77,6 +86,35 @@ pub(super) fn set_turn_wall_override(value: usize) -> usize {
 #[cfg(test)]
 pub(super) fn set_same_tool_failure_override(value: usize) -> usize {
     SAME_TOOL_FAILURE_OVERRIDE.with(|slot| slot.replace(value))
+}
+
+/// 测试专用：设置并发开关覆写，返回先前的覆写值（便于用例收尾还原）。
+#[cfg(test)]
+pub(super) fn set_parallel_tools_override(value: Option<bool>) -> Option<bool> {
+    PARALLEL_TOOLS_OVERRIDE.with(|slot| slot.replace(value))
+}
+
+/// 批内并发执行是否开启（`PONY_AGENT_PARALLEL_TOOLS`，**默认关**、fail-safe）。
+pub(super) fn parallel_tools_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(override_value) = PARALLEL_TOOLS_OVERRIDE.with(|slot| slot.get()) {
+            return override_value;
+        }
+    }
+
+    static PARALLEL_TOOLS_ENABLED: OnceLock<bool> = OnceLock::new();
+    *PARALLEL_TOOLS_ENABLED.get_or_init(|| {
+        parse_parallel_tools_enabled(std::env::var(PARALLEL_TOOLS_ENV).ok().as_deref())
+    })
+}
+
+/// 解析开关取值：仅 `1/true/on/yes`（大小写不敏感、允许首尾空白）为开；其余一律关。
+pub(super) fn parse_parallel_tools_enabled(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        Some("1") | Some("true") | Some("on") | Some("yes")
+    )
 }
 
 pub(super) fn max_turn_wall_seconds() -> usize {

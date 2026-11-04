@@ -49,13 +49,21 @@ impl AgentRuntime {
             .collect();
         let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
+        // D4（W28b / B018 后续）：批内执行段规划见 `batch_plan`；开关 `PONY_AGENT_PARALLEL_TOOLS`
+        // 默认关 ⇒ 每段都是「预阶段 → 执行 → 后阶段」的单调用段，逐调用交织语义与本波之前逐字一致。
+        let mut executed_calls: Vec<ToolCall> = Vec::new();
+        let mut executed_results: Vec<ToolResult> = Vec::new();
+        // 交互类工具（批终止符）命中标记：后阶段置位，段循环据此停批。
+        let mut sync_batch_terminated: bool;
 
-        loop {
-            // ── 1) 执行本 hop 的**整批**调用（批内顺序；批长 1 即既有单调用语义）──
-            let mut executed_calls: Vec<ToolCall> = Vec::with_capacity(current_tool_calls.len());
-            let mut executed_results: Vec<ToolResult> =
-                Vec::with_capacity(current_tool_calls.len());
-            for tool_call in current_tool_calls.iter() {
+        // 预阶段（逐调用、保序）：hop 限额/计数、ToolCallStart hook。
+        //
+        // 为什么用函数内宏：本阶段与后阶段共享 10+ 个可变局部状态（hop_records / tool_activities /
+        // hook_trace_records / 熔断跟踪器 / …），提取成方法会把「逐调用语义等价」藏进重构本身；
+        // 宏展开的是**同一段代码文本**，`return` 也直接结束本函数，行为与内联逐字等价。
+        macro_rules! sync_tool_call_pre {
+            ($tool_call:expr) => {{
+                let tool_call: &ToolCall = $tool_call;
                 // hop 限额仍按**调用**计数：批内任一调用将越过上限即硬停，
                 // 与批间同口径（不因批而放宽；批长 1 时该闸恒被批间闸先命中）。
                 if completed_hops >= max_tool_hops_per_turn() {
@@ -88,20 +96,17 @@ impl AgentRuntime {
                     ));
                 }
 
-                let execution_context = ToolExecutionContext {
-                    workspace_root: self.resolve_session_workspace_root(session_id),
-                    // L3 r2 A1：透传真实会话 id，触达注入按会话分桶（否则跨会话互相抑制）。
-                    session_id: session_id.map(str::to_string),
-                    // T2-1：turn 级治理事实随本次调用显式传入（并发 turn 之间不共享任何槽位）。
-                    dispatch_context: governed_context.cloned(),
-                    // wave-62 C3：治理事实里若带本轮令牌（stream 路径注入），工具层据此可被取消。
-                    // 同步入口（`run_turn`）无 registry 句柄 ⇒ `None`，行为与 wave-61 一致。
-                    cancellation: governed_context.and_then(|context| context.turn_cancellation.clone()),
-                    ..Default::default()
-                };
-                let (tool_result, invocation_record, capability_hook_trace_records) =
-                    self.execute_registered_tool_call_with_context(tool_call, &execution_context);
-                hook_trace_records.extend(capability_hook_trace_records);
+            }};
+        }
+
+        // 后阶段（逐调用、保序）：记账、tool span、熔断闸、取消 / pending / aborted 判定、批终止符。
+        macro_rules! sync_tool_call_post {
+            ($tool_call:expr, $outcome:expr) => {{
+                let tool_call: &ToolCall = $tool_call;
+                let tool_outcome = $outcome;
+                let tool_result = tool_outcome.result;
+                let invocation_record = tool_outcome.invocation_record;
+                hook_trace_records.extend(tool_outcome.capability_hook_trace_records);
                 runtime_log(format!(
                     "turn:tool-result hop={} name={} status={} output_preview={}",
                     completed_hops,
@@ -276,6 +281,59 @@ impl AgentRuntime {
                         executed_calls.len(),
                         current_tool_calls.len().saturating_sub(executed_calls.len())
                     ));
+                    sync_batch_terminated = true;
+                }
+            }};
+        }
+
+        loop {
+            // ── 1) 执行本 hop 的**整批**调用（段内可并发；规划与引擎接线见 `batch_plan`）──
+            executed_calls.clear();
+            executed_results.clear();
+            sync_batch_terminated = false;
+            for segment in plan_batch_segments(&current_tool_calls) {
+                // 1a) 预阶段：逐调用（保序）计 hop、跑 ToolCallStart hook。
+                for tool_call in current_tool_calls[segment.calls.clone()].iter() {
+                    sync_tool_call_pre!(tool_call);
+                }
+                // 1b) 执行阶段：并发段整段交 `parallel_tools` 引擎（结果保序）；其余逐调用顺序执行。
+                let outcomes: Vec<ToolCallOutcome> = if segment.parallel {
+                    let segment_calls: Vec<ToolCall> =
+                        current_tool_calls[segment.calls.clone()].to_vec();
+                    match execute_segment_in_parallel(&segment_calls, |call| {
+                        self.execute_tool_call_with_turn_context(session_id, governed_context, call)
+                    }) {
+                        Ok(outcomes) => outcomes,
+                        Err(error) => {
+                            // fail-safe：引擎入参校验失败（段长恒一致 ⇒ 生产不可达）退回逐调用执行。
+                            runtime_log(format!("turn:tool-parallel-fallback error={error}"));
+                            segment_calls
+                                .iter()
+                                .map(|call| {
+                                    self.execute_tool_call_with_turn_context(
+                                        session_id,
+                                        governed_context,
+                                        call,
+                                    )
+                                })
+                                .collect()
+                        }
+                    }
+                } else {
+                    vec![self.execute_tool_call_with_turn_context(
+                        session_id,
+                        governed_context,
+                        &current_tool_calls[segment.calls.start],
+                    )]
+                };
+                // 1c) 后阶段：逐调用（保序）回填；交互类工具命中即停批（后续段不执行）。
+                for (tool_call, outcome) in current_tool_calls[segment.calls.clone()]
+                    .iter()
+                    .zip(outcomes.into_iter())
+                {
+                    sync_tool_call_post!(tool_call, outcome);
+                }
+                if sync_batch_terminated {
                     break;
                 }
             }

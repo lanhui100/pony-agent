@@ -88,6 +88,7 @@ mod tool_exec;
 mod turn_persist;
 mod turn_prep;
 
+mod batch_plan;
 mod blocked_records;
 mod builder;
 mod limits;
@@ -105,6 +106,7 @@ pub use compaction_ops::{compact_outcome_message, ManualCompactionOutcome};
 pub(crate) use compaction_ops::compact_session_with_sessions;
 pub use types::{PlannerGraphDecisionDispatchOutcome, RunTurnFacts, SUSPENDED_TURN_PHASE, TurnInput, TurnResult, TurnStreamEvent};
 
+use batch_plan::*;
 use blocked_records::*;
 use limits::*;
 pub use limits::{max_tool_followups_per_turn, parse_max_tool_followups_per_turn};

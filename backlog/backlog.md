@@ -66,7 +66,9 @@
   - 描述：P0-3 第二刀给 `emit_stream_failed` 加了 `partial_text`，但 5 个调用点里只有 `turn_stream.rs:2626`（保存附件失败）能直接拿到已渲染正文；工具失败/熔断这类**主失败路径**走 `turn_persist.rs:478`，正文在 per-hop `model_hop_trace_contents` 里，需要给 helper + 3 个调用点加参数（小重构）才能接上。trace `pa_01a1a134` turn-3 正是这类场景。
   - 登记来源：P0-3 第二刀实现回执（2026-11-04）
 
-- [ ] `B018` - P1: provider 多工具调用真正执行（P1-1 完整切片）
+## 已完成
+
+- [x] `B018` - P1: provider 多工具调用真正执行（P1-1 完整切片）
   - 路径：`crates/pony-agent-core/src/agent/provider/{mod.rs,openai_sse.rs}`、`runtime/{turn_stream.rs,turn_sync.rs}`
   - 描述：本轮已消除**静默截断**（OpenAI 保留首个 + 结构化告警 `multi_tool_calls_dropped`；Anthropic Err 消息带数量与名字；新增 `extract_*_tool_calls` 复数 pub 接缝）。真正执行 N 个调用仍需独立一波：约 350–550 行 / 4–5 文件，最大风险在**批量回填协议形态**——沿用 1:1 的 `anthropic_assistant_content_for_tool_result` 会让同一 assistant 内容重复 N 次触发 Anthropic 400，必须一次 assistant + N 个 tool_result；Ask 类交互工具须作批终止符。
   - 设计文档：`.dev-team/designs/multi-tool-call-execution.md`
@@ -75,7 +77,8 @@
     D1b 已交付两个批量回填纯函数 `openai_messages_with_tool_results` / `anthropic_messages_with_tool_results`
     （1 assistant + N tool / 1 assistant + 1 user(N tool_result)，含「assistant 恰 1 条」负向护栏与 N=1 等价 legacy 的单测）。
   - **剩余（须新会话 + L3 复核）**：D1a（`6d743b82`）与 D2（`8f33eb27`）已完成；剩余 D3：`turn_sync.rs` 循环批执行（D3a）→ `turn_stream.rs::handle_stream_tool_turn` 批执行（D3b，产品主路径）→ 之后删除 `ensure_single_anthropic_tool_call` 的 >1 Err 并翻转其单测。详见设计文档 §7。原估 350-550 行经实测修正为 **900-1500 行 / 10-13 文件**。
-## 已完成
+  - 结果（2026-11-04 收口）：D1b `a57f636b`（批量回填纯函数）→ D1a `6d743b82`（tool_calls 复数位）→ D2 `8f33eb27`（provider 批量 followup）→ D3a `c3704fab`（turn_sync 批执行）→ D3b `efbb9195`（turn_stream 批执行 + 删除 Anthropic >1 Err）→ D4（parallel_tools 并发接线，开关 `PONY_AGENT_PARALLEL_TOOLS` 默认关）。`--lib` 1244/0。
+  - 遗留（另开卡）：Anthropic/Responses 流式解析仍单值；N>1 followup 非真增量；批内仅首个过 normalize_tool_directive；non-pending 交互工具停批后余下丢弃。
 - [x] `B015` - P1: 重试指纹保留 timeoutMs 语义（延长=新策略，分桶实现）
   - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs::normalize_run_timeout_argument_value`
   - 结果：`timeoutMs` 由「整体剔除」改为 `floor(log2)` 分桶值写回（同桶同指纹、跨桶异指纹）；防风暴仍由同工具 4 次闸兜底；迁移 3 处原冻结断言。验收 `timeout_signal_promote_test` 4 passed、adversarial 4、harness 12。

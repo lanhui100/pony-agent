@@ -162,16 +162,22 @@ impl AgentRuntime {
         // 用途：失败终态（hook 失败 / 熔断闸）把它交给 `emit_stream_failed`，避免 trace
         // `pa_01a1a134` turn-3 那种「失败轮只剩 This turn failed.」的正文丢失。
         let mut accumulated_turn_text = String::new();
+        // D4（W28b / B018 后续）：批内执行段规划见 `batch_plan`；开关 `PONY_AGENT_PARALLEL_TOOLS`
+        // 默认关 ⇒ 每段都是「预阶段 → 执行 → 后阶段」的单调用段，逐调用交织语义与本波之前逐字一致。
+        let mut executed_calls: Vec<ToolCall> = Vec::new();
+        let mut executed_results: Vec<ToolResult> = Vec::new();
+        // 交互类工具（批终止符）命中标记：后阶段置位，段循环据此停批。
+        let mut stream_batch_terminated: bool;
 
-        loop {
-            accumulated_turn_text.push_str(&current_assistant_output_text);
-            // ── 1) 执行本 hop 的**整批**调用（批内顺序；批长 1 即既有单调用语义）──
-            let mut executed_calls: Vec<ToolCall> = Vec::with_capacity(current_tool_calls.len());
-            let mut executed_results: Vec<ToolResult> =
-                Vec::with_capacity(current_tool_calls.len());
-            for tool_call in current_tool_calls.iter() {
-                // 批内局部沿用既有 per-call 逻辑（逐调用一条 hop / 一套事件 / 一道熔断闸）。
-                let current_tool_call = tool_call.clone();
+        // 预阶段（逐调用、保序）：hop 限额/计数、检查点、取消检查、工具事件、ToolCallStart hook。
+        //
+        // 为什么用函数内宏：本阶段与后阶段共享 20+ 个可变局部状态（hop_records / tool_activities /
+        // hook_trace_records / 熔断跟踪器 / …），提取成方法要么塞一长串参数、要么引入上下文结构体，
+        // 都会把「逐调用语义等价」藏进重构本身；宏展开的是**同一段代码文本**，`return` 也直接结束
+        // 本函数，行为与内联逐字等价。
+        macro_rules! stream_tool_call_pre {
+            ($tool_call:expr) => {{
+                let current_tool_call: ToolCall = $tool_call.clone();
                 // hop 限额仍按**调用**计数：批内任一调用将越过上限即硬停，与批间同口径
                 // （不因批而放宽；批长 1 时该闸恒被批间闸先命中，行为不变）。
                 if completed_hops >= max_tool_hops_per_turn() {
@@ -339,19 +345,17 @@ impl AgentRuntime {
                     return;
                 }
 
-                let execution_context = ToolExecutionContext {
-                    workspace_root: self.resolve_session_workspace_root(input.session_id.as_deref()),
-                    // L3 r2 A1：透传真实会话 id，触达注入按会话分桶（否则跨会话互相抑制）。
-                    session_id: input.session_id.clone(),
-                    // T2-1：turn 级治理事实随本次调用显式传入（并发 turn 之间不共享任何槽位）。
-                    dispatch_context: governed_context.cloned(),
-                    // wave-62 C3：子进程类工具据此观察本轮停止（与 dispatch 闸门同一令牌实例）。
-                    cancellation: governed_context.and_then(|context| context.turn_cancellation.clone()),
-                    ..Default::default()
-                };
-                let (tool_result, invocation_record, capability_hook_trace_records) =
-                    self.execute_registered_tool_call_with_context(&current_tool_call, &execution_context);
-                hook_trace_records.extend(capability_hook_trace_records);
+            }};
+        }
+
+        // 后阶段（逐调用、保序）：记账、tool span、熔断闸、取消 / pending / aborted 判定、批终止符。
+        macro_rules! stream_tool_call_post {
+            ($tool_call:expr, $outcome:expr) => {{
+                let current_tool_call: ToolCall = $tool_call.clone();
+                let tool_outcome = $outcome;
+                let tool_result = tool_outcome.result;
+                let invocation_record = tool_outcome.invocation_record;
+                hook_trace_records.extend(tool_outcome.capability_hook_trace_records);
                 all_tools_ok &= tool_result.status == "ok";
                 // Wave43 task-8 挂载切片：实时路径「工具执行结束 → 产生 TurnToolActivity」单点。
                 // 一层工具执行 = 一个 tool.call span：只对顶层活动（parent_activity_id 为 None）记录，
@@ -717,6 +721,62 @@ impl AgentRuntime {
                         executed_calls.len(),
                         current_tool_calls.len().saturating_sub(executed_calls.len())
                     ));
+                    stream_batch_terminated = true;
+                }
+            }};
+        }
+
+        loop {
+            accumulated_turn_text.push_str(&current_assistant_output_text);
+            // ── 1) 执行本 hop 的**整批**调用（段内可并发；规划与引擎接线见 `batch_plan`）──
+            executed_calls.clear();
+            executed_results.clear();
+            stream_batch_terminated = false;
+            for segment in plan_batch_segments(&current_tool_calls) {
+                // 1a) 预阶段：逐调用（保序）计 hop、发工具事件、跑 ToolCallStart hook。
+                for tool_call in current_tool_calls[segment.calls.clone()].iter() {
+                    stream_tool_call_pre!(tool_call);
+                }
+                // 1b) 执行阶段：并发段整段交 `parallel_tools` 引擎（结果保序）；其余逐调用顺序执行。
+                let outcomes: Vec<ToolCallOutcome> = if segment.parallel {
+                    let segment_calls: Vec<ToolCall> =
+                        current_tool_calls[segment.calls.clone()].to_vec();
+                    let session_id = input.session_id.as_deref();
+                    match execute_segment_in_parallel(&segment_calls, |call| {
+                        self.execute_tool_call_with_turn_context(session_id, governed_context, call)
+                    }) {
+                        Ok(outcomes) => outcomes,
+                        Err(error) => {
+                            // fail-safe：引擎入参校验失败（段长恒一致 ⇒ 生产不可达）退回逐调用执行。
+                            runtime_log(format!("turn:tool-parallel-fallback error={error}"));
+                            segment_calls
+                                .iter()
+                                .map(|call| {
+                                    self.execute_tool_call_with_turn_context(
+                                        session_id,
+                                        governed_context,
+                                        call,
+                                    )
+                                })
+                                .collect()
+                        }
+                    }
+                } else {
+                    let session_id = input.session_id.as_deref();
+                    vec![self.execute_tool_call_with_turn_context(
+                        session_id,
+                        governed_context,
+                        &current_tool_calls[segment.calls.start],
+                    )]
+                };
+                // 1c) 后阶段：逐调用（保序）回填；交互类工具命中即停批（后续段不执行）。
+                for (tool_call, outcome) in current_tool_calls[segment.calls.clone()]
+                    .iter()
+                    .zip(outcomes.into_iter())
+                {
+                    stream_tool_call_post!(tool_call, outcome);
+                }
+                if stream_batch_terminated {
                     break;
                 }
             }
