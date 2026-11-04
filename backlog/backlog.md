@@ -66,6 +66,12 @@
   - 描述：P0-3 第二刀给 `emit_stream_failed` 加了 `partial_text`，但 5 个调用点里只有 `turn_stream.rs:2626`（保存附件失败）能直接拿到已渲染正文；工具失败/熔断这类**主失败路径**走 `turn_persist.rs:478`，正文在 per-hop `model_hop_trace_contents` 里，需要给 helper + 3 个调用点加参数（小重构）才能接上。trace `pa_01a1a134` turn-3 正是这类场景。
   - 登记来源：P0-3 第二刀实现回执（2026-11-04）
 
+- [ ] `B018` - P1: provider 多工具调用真正执行（P1-1 完整切片）
+  - 路径：`crates/pony-agent-core/src/agent/provider/{mod.rs,openai_sse.rs}`、`runtime/{turn_stream.rs,turn_sync.rs}`
+  - 描述：本轮已消除**静默截断**（OpenAI 保留首个 + 结构化告警 `multi_tool_calls_dropped`；Anthropic Err 消息带数量与名字；新增 `extract_*_tool_calls` 复数 pub 接缝）。真正执行 N 个调用仍需独立一波：约 350–550 行 / 4–5 文件，最大风险在**批量回填协议形态**——沿用 1:1 的 `anthropic_assistant_content_for_tool_result` 会让同一 assistant 内容重复 N 次触发 Anthropic 400，必须一次 assistant + N 个 tool_result；Ask 类交互工具须作批终止符。
+  - 设计文档：`.dev-team/designs/multi-tool-call-execution.md`
+  - 登记来源：W28b 侦察 + 本轮 D 卡裁决（2026-11-04）
+
 ## 已完成
 - [x] `B015` - P1: 重试指纹保留 timeoutMs 语义（延长=新策略，分桶实现）
   - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs::normalize_run_timeout_argument_value`

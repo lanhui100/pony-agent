@@ -1172,6 +1172,7 @@ impl ProviderManager {
         let message = first_openai_message(&payload)?;
         let output_text = extract_openai_message_text(message).unwrap_or_default();
         let tool_call = extract_openai_tool_call(message);
+        warn_on_dropped_openai_tool_calls("openai_followup_sync", message, tool_call.as_ref());
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("openai tool follow-up missing text or tool call".to_string());
         }
@@ -1888,9 +1889,16 @@ impl ProviderManager {
         });
         provider_log_token_usage("openai decision", &token_usage);
 
+        let decision_tool_call = extract_openai_tool_call(message);
+        warn_on_dropped_openai_tool_calls(
+            "openai_decision",
+            message,
+            decision_tool_call.as_ref(),
+        );
+
         Ok(ProviderDecision {
             output_text: extract_openai_message_text(message).unwrap_or_default(),
-            tool_call: extract_openai_tool_call(message),
+            tool_call: decision_tool_call,
             reasoning_content: extract_openai_message_reasoning_content(message),
             reasoning_content_value: extract_openai_message_reasoning_value(message),
             assistant_message: Some(normalize_openai_assistant_message(message)),
@@ -3215,12 +3223,62 @@ fn extract_openai_message_text(message: &Value) -> Option<String> {
     }
 }
 
-fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
-    let tool_call = message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .and_then(|calls| calls.first())?;
+/// P1-1 最小切片（public 纯函数）：解析 OpenAI assistant message 里的**全部** `tool_calls`。
+///
+/// 顺序与上游数组一致；缺失/非数组/单条畸形 ⇒ 该条跳过（绝不 panic）。
+/// 单数版 [`Self::extract_openai_tool_call`] 只是本函数首元素的兼容包装，行为不变。
+pub fn extract_openai_tool_calls(message: &Value) -> Vec<ToolCall> {
+    let Some(raw_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    raw_calls
+        .iter()
+        .filter_map(parse_single_openai_tool_call)
+        .collect()
+}
 
+/// P1-1：复数解析的兼容包装（既有调用点语义不变：只取首个）。
+fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
+    extract_openai_tool_calls(message).into_iter().next()
+}
+
+/// P1-1 最小切片：OpenAI 非流式响应含**多个** `tool_calls` 时不再静默丢弃。
+///
+/// 本轮**只做「消除静默截断」**：仍只执行首个（与既有单数版一致），但对被丢弃的调用打一条
+/// 结构化告警（`dropped=N` + 各 name + kept），让 trace/日志能直接看出「上游一次给了几个」。
+/// 批量执行（1 assistant + N tool_result 回填、Ask 作批终止符）见
+/// `.dev-team/designs/multi-tool-call-execution.md`，**不在本轮**。
+fn warn_on_dropped_openai_tool_calls(stage: &str, message: &Value, kept: Option<&ToolCall>) {
+    if let Some(line) = openai_dropped_tool_calls_warning(stage, message, kept) {
+        provider_log(line);
+    }
+}
+
+/// 组装「多调用被丢弃」的结构化告警行（纯函数，便于单测锁字段）。
+///
+/// 格式：`multi_tool_calls_dropped stage=<stage> received=<N> dropped=<N-1> dropped_names=[…] kept=Some("…")`
+/// 语义：`stage` 区分 OpenAl 的两条非流式入口（decision / followup_sync），`dropped_names`
+/// 列出**未执行**的调用名（模型侧可据此判断是不是自己给多了）。
+fn openai_dropped_tool_calls_warning(
+    stage: &str,
+    message: &Value,
+    kept: Option<&ToolCall>,
+) -> Option<String> {
+    let calls = extract_openai_tool_calls(message);
+    if calls.len() <= 1 {
+        return None;
+    }
+    let dropped_names: Vec<&str> = calls.iter().skip(1).map(|call| call.name.as_str()).collect();
+    Some(format!(
+        "multi_tool_calls_dropped stage={stage} received={} dropped={} dropped_names={:?} kept={:?}",
+        calls.len(),
+        calls.len() - 1,
+        dropped_names,
+        kept.map(|call| call.name.as_str())
+    ))
+}
+
+fn parse_single_openai_tool_call(tool_call: &Value) -> Option<ToolCall> {
     let id = tool_call
         .get("id")
         .and_then(Value::as_str)
@@ -3422,26 +3480,44 @@ fn extract_anthropic_thinking_text(content: &[Value]) -> Option<String> {
         .and_then(extract_reasoning_text_from_value)
 }
 
-fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
-    let block = content
+/// P1-1 最小切片（public 纯函数）：解析 Anthropic content blocks 里的**全部** `tool_use`。
+///
+/// 顺序按出现顺序；`text` / `thinking` 等其它块被忽略；畸形块跳过（绝不 panic）。
+/// 单数版 [`Self::extract_anthropic_tool_call`] 只是本函数首元素的兼容包装，行为不变。
+pub fn extract_anthropic_tool_calls(content: &[Value]) -> Vec<ToolCall> {
+    content
         .iter()
-        .find(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))?;
-
-    Some(ToolCall {
-        call_id: block.get("id").and_then(Value::as_str).map(str::to_string),
-        name: block.get("name").and_then(Value::as_str)?.to_string(),
-        arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
-        plan: None,
-    })
+        .filter_map(|block| {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                return None;
+            }
+            Some(ToolCall {
+                call_id: block.get("id").and_then(Value::as_str).map(str::to_string),
+                name: block.get("name").and_then(Value::as_str)?.to_string(),
+                arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
+                plan: None,
+            })
+        })
+        .collect()
 }
 
+/// P1-1：复数解析的兼容包装（既有调用点语义不变：只取首个）。
+fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
+    extract_anthropic_tool_calls(content).into_iter().next()
+}
+
+/// P1-1（部分）：多 `tool_use` 目前仍**拒绝**（批量执行未落地，见
+/// `.dev-team/designs/multi-tool-call-execution.md`），但错误信息必须可诊断：
+/// 带上「收到 N 个」与各自工具名，便于 trace/日志直接定位上游行为。
 fn ensure_single_anthropic_tool_call(content: &[Value]) -> Result<(), String> {
-    let count = content
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .count();
-    if count > 1 {
-        return Err("Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。".to_string());
+    let calls = extract_anthropic_tool_calls(content);
+    if calls.len() > 1 {
+        let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
+        return Err(format!(
+            "Anthropic 返回了多个工具调用（收到 {} 个：{}），但当前运行时仅支持单工具调用。",
+            calls.len(),
+            names.join(", ")
+        ));
     }
     Ok(())
 }
@@ -5418,15 +5494,68 @@ mod tests {
     }
 
     #[test]
+    /// P1-1：多调用被丢弃时必须有**结构化告警行**（不再静默截断）。
+    #[test]
+    fn openai_multiple_tool_calls_emit_structured_dropped_warning() {
+        let message = json!({
+            "tool_calls": [
+                { "id": "call_1", "type": "function",
+                  "function": { "name": "Read", "arguments": "{\"path\":\"a.txt\"}" } },
+                { "id": "call_2", "type": "function",
+                  "function": { "name": "List", "arguments": "{}" } },
+            ]
+        });
+        let kept = extract_openai_tool_call(&message);
+        let line = openai_dropped_tool_calls_warning(
+            "openai_decision",
+            &message,
+            kept.as_ref(),
+        )
+        .expect("P1-1：2 个 tool_calls 必须产出告警行");
+        // 真实日志通道（与生产同一路径），便于 --nocapture 取证。
+        provider_log(line.clone());
+        eprintln!("[D] dropped-warning line = {line}");
+
+        assert!(line.contains("received=2"), "P1-1：必须带 received=2，实际 {line}");
+        assert!(line.contains("dropped=1"), "P1-1：必须带 dropped=1，实际 {line}");
+        assert!(
+            line.contains("List"),
+            "P1-1：dropped_names 必须列出被丢弃的调用名，实际 {line}"
+        );
+        assert!(
+            line.contains(r#"kept=Some("Read")"#),
+            "P1-1：kept 必须标明实际执行的首个调用，实际 {line}"
+        );
+
+        // 单调用/无调用 ⇒ 不得产生噪音告警。
+        let single = json!({ "tool_calls": [ { "id": "call_1", "type": "function",
+            "function": { "name": "Read", "arguments": "{}" } } ] });
+        assert!(openai_dropped_tool_calls_warning("s", &single, None).is_none());
+        assert!(openai_dropped_tool_calls_warning("s", &json!({}), None).is_none());
+    }
+
     fn anthropic_rejects_multiple_tool_calls() {
         let content = vec![
             json!({ "type": "tool_use", "id": "toolu_1", "name": "List", "input": {} }),
             json!({ "type": "tool_use", "id": "toolu_2", "name": "Read", "input": {} }),
         ];
 
-        assert!(ensure_single_anthropic_tool_call(&content)
-            .expect_err("multiple calls should fail clearly")
-            .contains("多个工具调用"));
+        // P1-1 未完成前（批量执行未落地）仍**保持 Err**，本用例只锁「诊断信息被丰富」：
+        // 必须带「收到 N 个」与各工具名，便于直接定位上游一次给了几个、分别是什么。
+        let error = ensure_single_anthropic_tool_call(&content)
+            .expect_err("multiple calls should fail clearly until P1-1 batch execution lands");
+        assert!(
+            error.contains("多个工具调用"),
+            "既有语义锁：仍须说明「多个工具调用」，实际 {error}"
+        );
+        assert!(
+            error.contains("收到 2 个"),
+            "P1-1：新诊断必须带「收到 N 个」，实际 {error}"
+        );
+        assert!(
+            error.contains("List") && error.contains("Read"),
+            "P1-1：新诊断必须列出各工具名，实际 {error}"
+        );
     }
 
     #[test]
