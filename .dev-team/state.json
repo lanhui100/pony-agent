@@ -957,6 +957,63 @@
         "all_targets": "Exit 0",
         "v10_spec": "4 passed x2 (205s/206s)"
       }
+    },
+    {
+      "wave": 64,
+      "theme": "stop terminal status: 桌面停止即时生效 + 终态由最后一条状态消息唯一承载（stopped/error）",
+      "tier": "B",
+      "tier_triggers": [
+        "blast-keywords: lock/thread/io (stop_escalation/control_plane)",
+        "UI 交互+并发停止路径",
+        "跨 core/tauri/frontend 模块"
+      ],
+      "baseline_commit": "06472465",
+      "contract": ".dev-team/contracts/wave-64-stop-terminal-status.md",
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3"
+      ],
+      "branches": {
+        "test-agent": {
+          "status": "in_progress",
+          "write_scopes": [
+            "tests/acceptance/wave64/",
+            "crates/pony-agent-core/tests/stop_graph_run_wave64.rs",
+            "tests/stop-stop-turn.spec.ts",
+            "tests/HomeWorkspace.spec.ts"
+          ]
+        },
+        "executor-fe": {
+          "status": "pending",
+          "write_scopes": [
+            "src/lib/runtime/status.ts",
+            "src/components/chat/AgentRuntimeStatusBar.vue",
+            "src/stores/runtime.ts",
+            "src/components/HomeWorkspace.vue",
+            "src/components/chat/WorkspaceTurnItem.vue",
+            "src/lib/runtime/constants.ts"
+          ]
+        },
+        "executor-rs": {
+          "status": "pending",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+            "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+            "crates/pony-agent-core/src/agent/stop_escalation.rs",
+            "src-tauri/src/lib.rs"
+          ]
+        }
+      },
+      "regression_baseline": ".dev-team/regression-baseline-wave64.json",
+      "observability": {
+        "touched": [
+          "UI 交互",
+          "后台任务(停止监督)",
+          "LLM 调用路径(取消归类)"
+        ],
+        "gate": "audit-diff.sh + check-declaration.sh"
+      }
     }
   ],
   "counters": {

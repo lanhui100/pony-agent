@@ -1,0 +1,16 @@
+{
+  "wave": 64,
+  "baseline_commit": "06472465",
+  "captured_at": "2026-11-04T11:05:30+08:00",
+  "frontend": {
+    "command": "npx vitest run tests/stop-stop-turn.spec.ts tests/HomeWorkspace.spec.ts tests/runtime-status.spec.ts tests/workspace-runtime-status-integration.spec.ts tests/workspace-turn-item-layout.spec.ts",
+    "exit_code": 0,
+    "result": "5 files passed / 94 tests passed, 7 skipped"
+  },
+  "rust": {
+    "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test stop_contract_wave60 --test stop_escalation_wave60 --target-dir target-test",
+    "exit_code": null,
+    "note": "由 executor-rs 在实施前重跑并回填（Lead 预跑成本过高，按波次门禁在 Join Barrier 前补齐）"
+  },
+  "exemption_note": "Rust 基线延后至 Join Barrier 前由 executor-rs 补跑（既有 wave-60 三套停止用例），不改变基线绿→现红即回归的判定口径"
+}

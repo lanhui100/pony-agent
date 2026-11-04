@@ -859,18 +859,24 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     const wrapper = mountWorkspace();
     await nextTick();
 
+    // wave-64 §2 F2 契约演进迁移（原判据：`workspace-error-detail` 面板存在 / 复制按钮存在 ⇒ 作废）：
+    // 消息区不再渲染「错误详情」折叠面板，失败摘要仍由消息正文承载。
+    // 说明：本场景 `messages` 为空（仅剩 failed trace 历史），不存在 turn:failed 终态信号，
+    // 终态状态行不适用；状态行承载错误的判据由 wave-64 验收用例（f1_turn_failed_*）覆盖。
     expect(wrapper.text()).toContain("tool chain exploded");
-    expect(wrapper.get('[data-testid="workspace-error-detail"]').text()).toContain("tool chain exploded");
-    expect(wrapper.get('[data-testid="workspace-error-copy-turn-failed"]').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("错误详情");
+    expect(wrapper.find('[data-testid="workspace-error-detail"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="workspace-error-copy-turn-failed"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("需要我帮你做什么？");
   });
 
-  it("renders error assistant details in a collapsible message block", async () => {
+  it("renders failed turn body inline while the terminal status row carries the error", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
-      phase: "ready",
-      error: null,
+      phase: "failed",
+      // wave-64 §2 F1/F2：终态错误由 store.error 派生为状态行 error 模式（label = 真实错误文案）。
+      error: "stack line 1",
       messages: [
         createMessage({
           id: "assistant-error",
@@ -887,11 +893,17 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.text()).toContain("错误详情");
-    await wrapper.find("summary").trigger("click");
-    await nextTick();
-    expect(wrapper.get('[data-testid="workspace-error-detail"]').text()).toContain("stack line 1");
-    expect(wrapper.get('[data-testid="workspace-error-copy-turn-error"]').exists()).toBe(true);
+    // wave-64 §2 F2 契约演进迁移（原判据：「错误详情」折叠面板 + workspace-error-detail ⇒ 作废）：
+    // 错误改由唯一的终态状态行承载；消息区不再有错误详情面板，失败轮正文照常渲染。
+    expect(wrapper.text()).not.toContain("错误详情");
+    expect(wrapper.find('[data-testid="workspace-error-detail"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="workspace-error-copy-turn-error"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("请求失败");
+
+    const statusSlot = wrapper.get('[data-testid="workspace-runtime-status-slot"]');
+    expect(statusSlot.attributes("data-visible")).toBe("true");
+    expect(statusSlot.get('[data-testid="agent-runtime-status-bar"]').attributes("data-mode")).toBe("error");
+    expect(statusSlot.get('[data-testid="agent-runtime-status-label"]').text()).toContain("stack line 1");
   });
 
   it("shows a resume CTA when the next submission will resume a paused run", async () => {

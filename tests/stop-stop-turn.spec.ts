@@ -4,7 +4,8 @@
 // 判据：
 // 1. 点击停止后**立即**（RPC ack 后，不等终态）进入 `stopping`：`phaseLabel === "正在停止…"`，
 //    且状态区（`agentRuntimeStatus`）有值并含「正在停止」；停止按钮禁用外观由 isSubmitting 承载。
-// 2. 收到 `turn:cancelled` 且 `stopReason === "user"` ⇒ `sessionNotice === "你已停止本轮 · 发送新消息可继续"`，
+// 2. 收到 `turn:cancelled` ⇒ 终态由**唯一的终态状态消息**承载：`agentRuntimeStatus.mode === "stopped"`
+//    + `label === "已停止"`，`sessionNotice === null`（wave-64 契约演进：停止文案不再写 notice），
 //    且**不得**用哨兵句覆盖已流式正文。
 // 3. `turn:stop_requested` 到达时若本地尚未 stopping ⇒ 必须补切 stopping（跨窗口/重连路径）。
 // 4. `stopping` 必须有兜底退出：终态事件到达后不得永久卡在「正在停止…」。
@@ -29,8 +30,8 @@ vi.mock("@/lib/tauri", () => ({
 
 /** 被 C7 明令禁止用于覆盖正文的哨兵句（§0 非目标：仍留在落库内容，但不得覆盖实时呈现）。 */
 const CANCELLED_TURN_SENTINEL = "用户终止，发送消息可继续。";
-/** C7：user 停止的终态状态消息（落 `sessionNotice`，可持久到终态之后）。 */
-const STOPPED_BY_USER_NOTICE = "你已停止本轮 · 发送新消息可继续";
+/** wave-64 §2 F1：user 停止的终态标签（唯一终态状态消息的 label）。 */
+const STOPPED_LABEL = "已停止";
 const STREAMED_TEXT = "这是已经流式输出出来的正文";
 
 type EventHandler = (event: { payload: unknown }) => void;
@@ -72,8 +73,10 @@ function seedStreamingTurn(store: ReturnType<typeof useRuntimeStore>, turnId = "
     phase: "calling_model",
     messages: [
       createMessage({ id: "user-1", turnId, role: "user", content: "请解释一下" }),
+      // id 必须与 store 的 `ensureAssistantMessage` 键一致（`assistant-${turnId}`），
+      // 否则终态事件作用在另一条消息上，「正文不被覆盖」的断言会假绿。
       createMessage({
-        id: "assistant-1",
+        id: `assistant-${turnId}`,
         turnId,
         role: "assistant",
         content: STREAMED_TEXT,
@@ -138,11 +141,12 @@ describe("wave-60 C7 桌面端停止呈现", () => {
     };
     handlers.get("turn:cancelled")?.({ payload: cancelledPayload });
 
-    // Assert：终态呈现
+    // Assert：终态呈现（wave-64 契约演进迁移：sessionNotice 判据 → stopped 模式判据）
     expect(store.phase).toBe("cancelled");
     expect(store.phaseLabel).toBe("已停止");
-    expect(store.sessionNotice).toBe(STOPPED_BY_USER_NOTICE);
-    expect(store.agentRuntimeStatus?.label ?? "").toContain("你已停止本轮");
+    expect(store.agentRuntimeStatus?.mode).toBe("stopped");
+    expect(store.agentRuntimeStatus?.label).toBe(STOPPED_LABEL);
+    expect(store.sessionNotice).toBeNull();
     expect(store.isSubmitting).toBe(false);
     expect(store.activeTurnId).toBeNull();
 
@@ -174,10 +178,12 @@ describe("wave-60 C7 桌面端停止呈现", () => {
       } satisfies TurnStreamEvent
     });
 
-    // Assert：非 user 原因不得冒充「你已停止」
+    // Assert：非 user 原因同样落 stopped 终态，且不得冒充「你已停止本轮」文案（notice 不再承载停止）
     expect(store.phase).toBe("cancelled");
-    expect(store.sessionNotice ?? "").toContain("已停止");
-    expect(store.sessionNotice ?? "").not.toContain("你已停止本轮");
+    expect(store.agentRuntimeStatus?.mode).toBe("stopped");
+    expect(store.agentRuntimeStatus?.label).toBe(STOPPED_LABEL);
+    expect(store.agentRuntimeStatus?.label ?? "").not.toContain("你已停止本轮");
+    expect(store.sessionNotice).toBeNull();
   });
 
   it("c7_stop_requested_event_backfills_stopping_state", async () => {

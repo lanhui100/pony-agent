@@ -1,0 +1,124 @@
+{
+  "wave": "wave-64",
+  "task": "task-1",
+  "agent": "test-agent",
+  "role": "independent-test-agent",
+  "contract": ".dev-team/contracts/wave-64-stop-terminal-status.md",
+  "head": "06472465",
+  "tier": "L3",
+  "status": "red-phase-frozen",
+  "files": {
+    "new": [
+      "tests/acceptance/wave64/f1-stopped-terminal-status.spec.ts",
+      "tests/acceptance/wave64/f2-no-placeholder-message.spec.ts",
+      "tests/acceptance/wave64/f1-f2-workspace-terminal-status.spec.ts",
+      "crates/pony-agent-core/tests/stop_graph_run_wave64.rs"
+    ],
+    "migrated": [
+      "tests/stop-stop-turn.spec.ts",
+      "tests/HomeWorkspace.spec.ts",
+      "tests/runtime-store.spec.ts"
+    ],
+    "receipts": [
+      ".dev-team/wave64-red-receipts.md"
+    ]
+  },
+  "red_receipts": {
+    "frontend": {
+      "command": "npx vitest run tests/acceptance/wave64 tests/stop-stop-turn.spec.ts tests/HomeWorkspace.spec.ts tests/runtime-store.spec.ts",
+      "exit_code": 1,
+      "summary": "Test Files 6 failed (6); Tests 15 failed | 193 passed | 7 skipped (215)",
+      "failure_is_target_behavior": true
+    },
+    "rust": {
+      "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test stop_graph_run_wave64 --target-dir target-test",
+      "exit_code": 101,
+      "compiled": true,
+      "summary": "test result: FAILED. 3 passed; 2 failed",
+      "failing": [
+        "r1_stop_graph_run_dispatches_single_stop_requested_and_grace_cancels_turn (实际事件序列 = [], 缺 turn:stop_requested / turn:cancelled)",
+        "r2_provider_stream_cancelled_terminates_cancelled_not_failed (实际事件序列 = [..., turn:failed])"
+      ],
+      "passing_at_head": [
+        "r1_stop_graph_run_unknown_run_keeps_error_and_emits_nothing",
+        "r2_tool_aborted_during_user_stop_terminates_cancelled_not_failed",
+        "r2_non_user_failure_still_terminates_failed"
+      ]
+    },
+    "typecheck": {
+      "command": "npm run typecheck",
+      "exit_code": 0
+    },
+    "gate_regression_runtime_status": {
+      "command": "npx vitest run tests/runtime-status.spec.ts",
+      "exit_code": 0,
+      "summary": "11 passed"
+    }
+  },
+  "migrated_assertions": [
+    {
+      "file": "tests/stop-stop-turn.spec.ts",
+      "it": "c7_user_cancelled_shows_stopped_notice_and_keeps_streamed_body",
+      "from": "sessionNotice === \"你已停止本轮 · 发送新消息可继续\" + agentRuntimeStatus.label 含「你已停止本轮」",
+      "to": "agentRuntimeStatus.mode === \"stopped\" + label === \"已停止\" + sessionNotice === null（保留 C7 其余语义断言）"
+    },
+    {
+      "file": "tests/stop-stop-turn.spec.ts",
+      "it": "c7_non_user_stop_reason_shows_plain_stopped_notice",
+      "from": "sessionNotice 含「已停止」且不含「你已停止本轮」",
+      "to": "agentRuntimeStatus.mode === \"stopped\" + label === \"已停止\" + sessionNotice === null"
+    },
+    {
+      "file": "tests/HomeWorkspace.spec.ts",
+      "it": "shows a failure summary when a saved session has failed trace history but no transcript",
+      "from": "workspace-error-detail 面板存在 + workspace-error-copy-turn-failed 按钮存在",
+      "to": "消息区无「错误详情」面板/无 workspace-error-detail/无复制按钮；失败摘要正文仍可见"
+    },
+    {
+      "file": "tests/HomeWorkspace.spec.ts",
+      "it": "renders failed turn body inline while the terminal status row carries the error（原 renders error assistant details in a collapsible message block）",
+      "from": "「错误详情」折叠面板 + workspace-error-detail + 复制按钮",
+      "to": "状态行 error 模式承载真实错误（data-visible=true / data-mode=error / label 含错误文案）+ 消息区无错误详情面板 + 失败轮正文「请求失败」照常渲染"
+    },
+    {
+      "file": "tests/runtime-store.spec.ts",
+      "it": "restores a cancelled browser-preview turn without writing a placeholder body（原 restores a cancelled browser-preview turn from persisted canonical terminal evidence）",
+      "from": "取消后 messages[1].content === \"本轮已停止。\"（live + restore 两处）",
+      "to": "live：content === \"\"（禁止写入占位）；restore：content 不含「本轮已停止。」；其余终态证据断言（phase / turn.cancelled / eventVersion）保留"
+    }
+  ],
+  "uncovered": [
+    {
+      "item": "R2 第 1 条（工具 aborted + should_cancel_turn ⇒ cancelled）的「红相」",
+      "reason": "以真实流式轮黑盒夹具在 HEAD 实测已是 turn:cancelled（turn_stream.rs:263 的 should_cancel 检查早于 :451 的 aborted 分支），故该条为绿；契约 §1 事实基线在该分支上不成立。已保留为回归护栏（夹具自检：stop 请求被接受 + provider 真实被请求）。",
+      "suggestion": "由 Lead 裁决是否修订契约 §1 事实基线；若坚持该条为缺陷，需给出可复现的具体时序（如 aborted 结果到达与 stop 置位顺序反转的入口）。"
+    },
+    {
+      "item": "HomeWorkspace.spec.ts:863 场景的「状态行承载错误」断言",
+      "reason": "该场景 messages 为空、仅剩 failed trace 历史、store.error 为 null，不存在任何终态 error 信号，`agentRuntimeStatus` 在该状态下按契约不产出状态行；强行断言会变成与契约无关的假红。已如实迁移为「无错误详情面板 + 失败摘要正文可见」，状态行承载错误由 wave64 验收用例与 :890 迁移用例覆盖。",
+      "suggestion": "若 Lead 要求该场景也出状态行，需要新契约条目（终态 error 允许从 traceHistory 派生）后再加断言。"
+    },
+    {
+      "item": "真实浏览器 E2E（Playwright browser-preview 通道 Console Error=0 + 截图）",
+      "reason": "契约 §5 门禁条目，属 Lead/集成阶段执行；本测试者按写域只交付 jsdom 组件/契约层与 Rust 黑盒收据。",
+      "suggestion": "执行器落地后由 Lead 跑 browser-preview 并把截图落 docs/release/evidence/wave-64/。"
+    },
+    {
+      "item": "R2 第 3 条「非用户取消的真实失败仍 turn:failed」的强断言",
+      "reason": "现有用例只断言「无停止请求时不出现 turn:cancelled」；未断言必出 turn:failed，因为 injected executor 返 error 时的 follow-up 路径不必然在单 hop 内终态（事件序列可能继续 hop）。属弱化但非空断言。",
+      "suggestion": "如需要强断言，建议在 wave-62 工具失败语义稳定后，用「工具 error + 连续失败阈值」夹具补 turn:failed 终态断言。"
+    }
+  ],
+  "discipline": {
+    "only_wrote_tests": true,
+    "no_git_write_ops": true,
+    "no_out_of_scope_files": true,
+    "no_skip_or_swallowed_assertions": true,
+    "forbidden_edits_touched": []
+  },
+  "notes": [
+    "Rust 集成测试通过 ISOLATE_PROCESS_DATA_DIR 把 XDG_DATA_HOME/HOME/LOCALAPPDATA 重定向到本进程独有临时沙箱（SessionStore::new() 在生产分支会指向用户真实 sessions.db）。",
+    "宽限监督注入 StopEscalationConfig::for_test(60ms, 5ms)，禁止 sleep 2000ms 真实宽限期。",
+    "前端夹具的 assistant 消息 id 与 store 的 ensureAssistantMessage 键（assistant-${turnId}）保持一致，避免终态事件作用到另一条消息导致假绿（已同步修正 stop-stop-turn.spec.ts 的旧夹具）。"
+  ]
+}

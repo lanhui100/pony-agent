@@ -3420,7 +3420,7 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
-  it("restores a cancelled browser-preview turn from persisted canonical terminal evidence", async () => {
+  it("restores a cancelled browser-preview turn without writing a placeholder body", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(9090);
 
@@ -3438,7 +3438,10 @@ describe("runtime session resilience", () => {
     await submitPromise;
 
     expect(store.phase).toBe("cancelled");
-    expect(store.messages[1]?.content).toBe("本轮已停止。");
+    // wave-64 §2 F2 契约演进迁移（原判据：content === "本轮已停止。" ⇒ 作废）：
+    // 浏览器预览取消路径同样**禁止**写入取消占位正文（未产出正文时 content 保持为空）。
+    expect(store.messages[1]?.content).toBe("");
+    expect(store.messages[1]?.content ?? "").not.toContain("本轮已停止。");
     expect(store.turnTraceHistory[0]?.eventType).toBe("turn.cancelled");
     expect(store.turnTraceHistory[0]?.eventVersion).toBe("turn-event-v1");
 
@@ -3450,7 +3453,8 @@ describe("runtime session resilience", () => {
 
     expect(restoredStore.sessionId).toBe("browser-cancelled-session");
     expect(restoredStore.phase).toBe("cancelled");
-    expect(restoredStore.messages[1]?.content).toBe("本轮已停止。");
+    // wave-64 §2 F2：恢复路径同样不得复活取消占位正文。
+    expect(restoredStore.messages[1]?.content ?? "").not.toContain("本轮已停止。");
 
     nowSpy.mockRestore();
   });
