@@ -523,6 +523,9 @@ fn ot4_tool_span_attributes_carry_tool_semantics() {
         status: "success".to_string(),
         duration_ms: Some(42),
         error: None,
+        // ADR 0061（P0-1）：新增可选 payload 预览字段一律 None ⇒ 属性集与历史逐字相同。
+        args_preview: None,
+        result_preview: None,
     });
 
     assert_eq!(require_str(&attrs, "gen_ai.tool.name"), "bash");
@@ -546,6 +549,9 @@ fn ot4_tool_span_attributes_carry_error_and_omit_absent_duration() {
         status: "failed".to_string(),
         duration_ms: None,
         error: Some("exit status 1".to_string()),
+        // ADR 0061（P0-1）：新增可选 payload 预览字段一律 None ⇒ 属性集与历史逐字相同。
+        args_preview: None,
+        result_preview: None,
     });
 
     // 失败工具仍须可路由、可识别为 tool 观察（B5：不在本轮虚断言 span status 语义）。

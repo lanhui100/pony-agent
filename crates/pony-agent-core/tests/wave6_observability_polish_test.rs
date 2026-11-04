@@ -112,6 +112,9 @@ fn k4_1_child_spans_contain_session_id_on_wire() {
             status: "success".to_string(),
             duration_ms: Some(25),
             error: None,
+            // ADR 0061（P0-1）：新增可选 payload 预览字段一律 None ⇒ 属性集与历史逐字相同。
+            args_preview: None,
+            result_preview: None,
         });
     }
 

@@ -30,8 +30,10 @@
 //! 契约演进（2026-10-27 17:35 Lead 裁决 = 方案 a「附加式 API，历史冻结工件零改动」）：
 //! C3/C6 的落地形态改为**附加入口** —— `start_llm_span_with_provider` /
 //! `llm_span_attributes_with_provider` / `tool_span_attributes_with_call_id` /
-//! `record_tool_call_span_with_call_id`；既有 3 参 `start_llm_span` 与
-//! `LlmSpanInput` / `ToolSpanInput` 结构体**零变更**（否则 6 个历史冻结测试目标 E0061/E0063 编译红）。
+//! `record_tool_call_span_with_call_id`；既有 3 参 `start_llm_span` 入口零变更。
+//! `LlmSpanInput` / `ToolSpanInput` 的**结构体形状由 ADR 0061 演进**（新增可选 payload 预览字段），
+//! **语义零变更**：新增字段一律 `None` 时，属性集与历史逐字相同 —— 后来人若要让这两个结构体再变，
+//! 必须保持「`None` ⇒ 零新增属性」这条不变量，否则历史冻结断言会静默失效。
 //! 本文件只调用附加入口，**不触碰** `src/` 与任何历史冻结测试文件。
 //!
 //! 替代理由（硬约束「无法纯单元/线级验证时改纯函数或 wire 解码」）：
@@ -906,6 +908,9 @@ fn tool_input(tool_name: &str, status: &str, error: Option<&str>) -> ToolSpanInp
         status: status.to_string(),
         duration_ms: Some(120),
         error: error.map(|value| value.to_string()),
+        // ADR 0061（P0-1）：结构体新增可选 payload 预览；本用例不传 ⇒ 属性集与历史逐字相同。
+        args_preview: None,
+        result_preview: None,
     }
 }
 
@@ -1178,6 +1183,9 @@ fn t6_tool_call_id() {
         status: "success".to_string(),
         duration_ms: Some(42),
         error: None,
+        // ADR 0061（P0-1）：新增可选 payload 预览字段一律 None ⇒ 属性集与历史逐字相同。
+        args_preview: None,
+        result_preview: None,
     };
 
     let with_id = otel::tool_span_attributes_with_call_id(&input, Some("call_1"));

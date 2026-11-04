@@ -195,6 +195,26 @@ pub const ATTR_LANGFUSE_TRACE_NAME: &str = "langfuse.trace.name";
 /// Langfuse observation 类型；工具 span 固定取 [`OBSERVATION_TYPE_TOOL`]。
 pub const ATTR_LANGFUSE_OBSERVATION_TYPE: &str = "langfuse.observation.type";
 
+/// P0-1：工具 span 的入参预览（脱敏 + 截断后）。仅当采集开关开启且输入非 `None` 时输出。
+pub const ATTR_LANGFUSE_OBSERVATION_INPUT: &str = "langfuse.observation.input";
+
+/// P0-1：工具 span 的结果预览（脱敏 + 截断后）。仅当采集开关开启且输入非 `None` 时输出。
+pub const ATTR_LANGFUSE_OBSERVATION_OUTPUT: &str = "langfuse.observation.output";
+
+/// P0-1：工具 span payload 采集开关（**默认开启**，opt-out）。
+///
+/// 取 `0`/`false`/`off`/`no`（trim + 大小写不敏感）关闭；未识别值回落默认并 warn
+/// （与 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT` 同一口径）。关闭时只影响
+/// [`ATTR_LANGFUSE_OBSERVATION_INPUT`] / [`ATTR_LANGFUSE_OBSERVATION_OUTPUT`] 两个键，
+/// 既有 span 属性（`gen_ai.tool.name` 等）一律不受影响。
+pub const ENV_CAPTURE_TOOL_PAYLOADS: &str = "PONY_OTEL_CAPTURE_TOOL_PAYLOADS";
+
+/// P0-1：单个预览字段的字节上限（脱敏后、含截断标记）。
+pub const TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES: usize = 2 * 1024;
+
+/// P0-1：截断标记（追加在被截断预览末尾）。
+const TOOL_PAYLOAD_TRUNCATION_MARKER: &str = "…[truncated]";
+
 /// Langfuse observation 模型名：与 [`ATTR_GEN_AI_REQUEST_MODEL`] 同值双写。
 pub const ATTR_LANGFUSE_OBSERVATION_MODEL_NAME: &str = "langfuse.observation.model.name";
 
@@ -402,6 +422,11 @@ pub struct ToolSpanInput {
     pub duration_ms: Option<u64>,
     /// 错误摘要；`None` 时不得输出 [`ATTR_AGENT_TOOL_ERROR`]。
     pub error: Option<String>,
+    /// P0-1：入参预览（调用方传原始串即可；本模块内统一脱敏 + 截断）。
+    /// `None` ⇒ **不输出** [`ATTR_LANGFUSE_OBSERVATION_INPUT`]（禁止空串占位）。
+    pub args_preview: Option<String>,
+    /// P0-1：结果预览（同上）。`None` ⇒ 不输出 [`ATTR_LANGFUSE_OBSERVATION_OUTPUT`]。
+    pub result_preview: Option<String>,
 }
 
 /// trace 装配配置。
@@ -1445,7 +1470,85 @@ pub fn tool_span_attributes(input: &ToolSpanInput) -> Vec<(String, AttrValue)> {
         push_str(&mut attributes, ATTR_AGENT_TOOL_ERROR, error);
     }
 
+    // P0-1：入参/结果预览（默认开启采集）。`None` ⇒ 不写键；非 None ⇒ 走统一的
+    // 「脱敏 → UTF-8 安全截断 → push_str（再脱敏一次，幂等）」链路。
+    if capture_tool_payloads_enabled() {
+        if let Some(args) = input.args_preview.as_deref() {
+            push_tool_payload_preview(
+                &mut attributes,
+                ATTR_LANGFUSE_OBSERVATION_INPUT,
+                args,
+            );
+        }
+        if let Some(result) = input.result_preview.as_deref() {
+            push_tool_payload_preview(
+                &mut attributes,
+                ATTR_LANGFUSE_OBSERVATION_OUTPUT,
+                result,
+            );
+        }
+    }
+
     attributes
+}
+
+/// P0-1：工具 span payload 采集开关判定（默认开启 = opt-out）。
+///
+/// env 缺失 ⇒ `true`；`1`/`true`/`on`/`yes` ⇒ `true`；`0`/`false`/`off`/`no` ⇒ `false`；
+/// 未识别值 ⇒ 回落默认 `true` 并 warn（避免「开关拼错却静默生效」）。
+fn capture_tool_payloads_enabled() -> bool {
+    let Ok(value) = std::env::var(ENV_CAPTURE_TOOL_PAYLOADS) else {
+        return true;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => true,
+        "0" | "false" | "off" | "no" => false,
+        _ => {
+            eprintln!(
+                "[otel] unrecognized {ENV_CAPTURE_TOOL_PAYLOADS}={value:?}; falling back to default (tool payload capture enabled)"
+            );
+            true
+        }
+    }
+}
+
+/// P0-1：写出一个 payload 预览属性。
+///
+/// 顺序固定为「先脱敏、再截断、最后 `push_str`」：
+/// 1. 先脱敏 ⇒ 截断不会把凭据切成「前缀残缺但仍可识别」的碎片留在属性里；
+/// 2. 再截断到 [`TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES`]（**含**截断标记），保证属性长度有硬上界；
+/// 3. `push_str` 内部还会再脱敏一次 —— 对已脱敏文本是**幂等**的（替换标记不再命中任何规则），
+///    因此不会把长度顶回上限之上，同时保持「所有字符串属性统一过 PonySentry」这一不变量。
+fn push_tool_payload_preview(
+    attributes: &mut Vec<(String, AttrValue)>,
+    key: &str,
+    raw: &str,
+) {
+    if raw.is_empty() {
+        return;
+    }
+    let sanitized = crate::agent::ponysentry::sanitize(raw);
+    let truncated = truncate_tool_payload_preview(&sanitized);
+    push_str(attributes, key, &truncated);
+}
+
+/// P0-1：按 **char 边界**把预览截到 [`TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES`] 以内，并追加截断标记。
+///
+/// 不切出非法 UTF-8：从「预算末尾」向前回退到最近的 `is_char_boundary` 位置。
+/// 未超限的文本原样返回（不追加标记）。
+fn truncate_tool_payload_preview(text: &str) -> String {
+    if text.len() <= TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES {
+        return text.to_string();
+    }
+    let budget = TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES.saturating_sub(TOOL_PAYLOAD_TRUNCATION_MARKER.len());
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = String::with_capacity(end + TOOL_PAYLOAD_TRUNCATION_MARKER.len());
+    truncated.push_str(&text[..end]);
+    truncated.push_str(TOOL_PAYLOAD_TRUNCATION_MARKER);
+    truncated
 }
 
 
@@ -3735,6 +3838,8 @@ mod tests {
             status: "failed".to_string(),
             duration_ms: Some(3),
             error: Some("curl -H 'authorization: Bearer sk-live-ABCDEFGHIJK'".to_string()),
+            args_preview: None,
+            result_preview: None,
         });
         let error = str_attr(&tool_attrs, ATTR_AGENT_TOOL_ERROR);
         assert!(
@@ -4822,4 +4927,81 @@ mod adr0055_tests {
         assert_eq!(ATTR_LANGFUSE_RELEASE, "langfuse.release");
         assert!(!current_release_version().trim().is_empty());
     }
+}
+
+#[cfg(test)]
+mod p0_1_tool_payload_tests {
+    use super::*;
+
+    /// P0-1：真实属性输出的物理凭证 —— 脱敏 + 2KB 截断 + 截断标记。
+    ///
+    /// 与 `tests/otel_tool_payload_test.rs`（黑盒验收）互补：这里打印**真实属性值**，
+    /// 供回执引用，并锁住「先脱敏后截断、属性长度有硬上界」的实现顺序。
+    #[test]
+    fn tool_span_payload_preview_is_sanitized_then_truncated() {
+        // 注意：本模块单测**不得**改 env（lib 测试二进制内并行执行，env 是进程级全局）。
+        // 采集开关的关闭路径由 `tests/otel_tool_payload_test.rs::capture_switch_disables_payload_keys`
+        // 用文件级锁 + EnvVarGuard 覆盖。
+        let huge = format!(
+            "{{\"command\":\"curl -H 'authorization: Bearer sk-live-TOPSECRET-0123456789' \
+https://api.example.com\",\"stdout\":\"{}\"}}",
+            "y".repeat(10 * 1024)
+        );
+        let attrs = tool_span_attributes(&ToolSpanInput {
+            tool_name: "workspace_run_command".to_string(),
+            status: "success".to_string(),
+            duration_ms: Some(12),
+            error: None,
+            args_preview: Some(huge),
+            result_preview: Some("{\"ok\":true,\"exitCode\":0}".to_string()),
+        });
+
+        let input = attrs
+            .iter()
+            .find(|(key, _)| key == ATTR_LANGFUSE_OBSERVATION_INPUT)
+            .and_then(|(_, value)| match value {
+                AttrValue::Str(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("采集开启时入参预览必须写出");
+        let output = attrs
+            .iter()
+            .find(|(key, _)| key == ATTR_LANGFUSE_OBSERVATION_OUTPUT)
+            .and_then(|(_, value)| match value {
+                AttrValue::Str(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("采集开启时结果预览必须写出");
+
+        eprintln!(
+            "[p0-1] {ATTR_LANGFUSE_OBSERVATION_INPUT} len={} prefix={:?} suffix={:?}",
+            input.len(),
+            &input[..input.len().min(80)],
+            &input[input.len().saturating_sub(24)..]
+        );
+        eprintln!("[p0-1] {ATTR_LANGFUSE_OBSERVATION_OUTPUT} = {output:?}");
+
+        assert!(
+            input.len() <= TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES,
+            "P0-1：属性长度必须有硬上界，实际 {}",
+            input.len()
+        );
+        assert!(input.ends_with(TOOL_PAYLOAD_TRUNCATION_MARKER), "P0-1：必须带截断标记");
+        assert!(!input.contains("sk-live-TOPSECRET-0123456789"), "P0-1：裸 token 必须脱敏");
+        assert!(!input.contains("/home/"), "P0-1：家目录路径必须脱敏");
+        assert_eq!(output, "{\"ok\":true,\"exitCode\":0}", "P0-1：短预览原样（脱敏后）");
+    }
+
+    /// P0-1：UTF-8 安全 —— 多字节字符不得被切成半个码点。
+    #[test]
+    fn truncation_respects_char_boundaries() {
+        let text = "中".repeat(2000); // 6000 字节
+        let truncated = truncate_tool_payload_preview(&text);
+        assert!(truncated.len() <= TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES);
+        assert!(truncated.ends_with(TOOL_PAYLOAD_TRUNCATION_MARKER));
+        let body = truncated.trim_end_matches(TOOL_PAYLOAD_TRUNCATION_MARKER);
+        assert!(body.chars().all(|ch| ch == '中'), "P0-1：截断后不得出现替换字符/半个码点");
+        assert_eq!(body.len() % 3, 0, "P0-1：UTF-8 边界必须对齐");
+    }
+
 }

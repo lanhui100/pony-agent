@@ -259,6 +259,9 @@ fn tool_input(tool_name: &str, status: &str, error: Option<&str>) -> ToolSpanInp
         status: status.to_string(),
         duration_ms: Some(12),
         error: error.map(|text| text.to_string()),
+        // ADR 0061（P0-1）：新增可选 payload 预览；一律 None ⇒ 属性集与历史逐字相同。
+        args_preview: None,
+        result_preview: None,
     }
 }
 

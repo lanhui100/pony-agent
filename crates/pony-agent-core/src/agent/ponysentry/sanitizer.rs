@@ -9,6 +9,30 @@ static RE_MAC_HOME: LazyLock<Regex> =
 static RE_WIN_HOME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)[A-Za-z]:\\Users\\[^\s\\]+").unwrap());
 
+// ── 裸 token 形态（P0-1 安全前置）───────────────────────────────────────────────
+//
+// 背景：既有规则只覆盖「键值 / Bearer / Basic」形态，**裸 token**（如 `sk-live-…` 直接出现在
+// 命令行、JSON 之外的文本、URL 片段里）会原样留在 span 属性中。P0-1 默认开启工具 span 的
+// 入参/结果预览后，这就是真实的凭据外泄面，故在此补齐业界常见前缀形态。
+//
+// 取向：**宁可多脱敏**。这些前缀（`sk-` / `ghp_` / `xox?-` / `AKIA` / `AIza`）在正常业务文本中
+// 极少出现，误伤代价远小于漏报代价。
+/// OpenAI / Anthropic 形态（含 `sk-ant-`、`sk-proj-` 等变体）：`sk-` 后 ≥16 个 token 字符。
+static RE_SK_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bsk-[A-Za-z0-9_-]{16,}").unwrap());
+/// GitHub 形态：`ghp_` / `gho_` / `ghs_` / `ghu_` + ≥20 位。
+static RE_GITHUB_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bgh[pous]_[A-Za-z0-9]{20,}").unwrap());
+/// Slack 形态：`xox[abposr]-` + ≥10 位。
+static RE_SLACK_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bxox[abposr]-[A-Za-z0-9-]{10,}").unwrap());
+/// AWS Access Key ID 形态。
+static RE_AWS_ACCESS_KEY_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bAKIA[0-9A-Z]{16}\b").unwrap());
+/// Google API key 形态。
+static RE_GOOGLE_API_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bAIza[0-9A-Za-z_-]{35,}").unwrap());
+
 static RE_BEARER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)bearer\s+[a-zA-Z0-9_\.\-]{10,}").unwrap());
 static RE_BASIC: LazyLock<Regex> =
@@ -67,6 +91,14 @@ pub fn sanitize(input: &str) -> String {
     // 2. Bearer / Basic tokens
     s = RE_BEARER.replace_all(&s, "Bearer [REDACTED_SECRET]").to_string();
     s = RE_BASIC.replace_all(&s, "Basic [REDACTED_SECRET]").to_string();
+
+    // 2b. 裸 token 形态（P0-1）：无键名/无 `Bearer` 前缀也要脱敏。
+    // 顺序放在 Bearer/Basic 之后：带前缀的形态已整体替换，此处只兜裸 token。
+    s = RE_SK_TOKEN.replace_all(&s, "[REDACTED_SECRET]").to_string();
+    s = RE_GITHUB_TOKEN.replace_all(&s, "[REDACTED_SECRET]").to_string();
+    s = RE_SLACK_TOKEN.replace_all(&s, "[REDACTED_SECRET]").to_string();
+    s = RE_AWS_ACCESS_KEY_ID.replace_all(&s, "[REDACTED_SECRET]").to_string();
+    s = RE_GOOGLE_API_KEY.replace_all(&s, "[REDACTED_SECRET]").to_string();
 
     // 3. Key-Value secrets in JSON strings like {"apiKey": "xxx"}
     s = RE_KEY_VALUE_SECRET
@@ -150,6 +182,92 @@ mod tests {
         let rendered = serde_json::to_string(&sanitized).expect("serialize");
         assert!(!rendered.contains("secret123"), "凭据泄漏：{rendered}");
         assert!(!rendered.contains("abcdefghij"), "凭据泄漏：{rendered}");
+    }
+
+    /// P0-1 安全前置：**裸 token**（无键名 / 无 `Bearer` 前缀）必须被识别并整体替换。
+    ///
+    /// 覆盖 OpenAI/Anthropic、GitHub、Slack、AWS、Google 五类常见前缀形态；
+    /// 同时校验**不误伤**普通短词（否则会污染 trace 可读性）。
+    #[test]
+    fn bare_tokens_are_redacted_by_prefix_shape() {
+        let cases = [
+            (
+                "sk",
+                "curl -H 'x' sk-live-TOPSECRET-9876543210",
+                "sk-live-TOPSECRET-9876543210",
+            ),
+            (
+                "sk-ant",
+                "key=sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+                "sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+            ),
+            (
+                "sk-proj",
+                "sk-proj-AbCdEfGhIjKlMnOpQrStUvWx",
+                "sk-proj-AbCdEfGhIjKlMnOpQrStUvWx",
+            ),
+            (
+                "github",
+                "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            ),
+            (
+                "github-oauth",
+                "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            ),
+            (
+                "github-server",
+                "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            ),
+            (
+                "github-user",
+                "ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                "ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            ),
+            (
+                "slack",
+                "xoxb-1234567890-abcdefghij",
+                "xoxb-1234567890-abcdefghij",
+            ),
+            (
+                "slack-app",
+                "xoxa-1234567890-abcdefghij",
+                "xoxa-1234567890-abcdefghij",
+            ),
+            (
+                "aws",
+                "AKIAIOSFODNN7EXAMPLE",
+                "AKIAIOSFODNN7EXAMPLE",
+            ),
+            (
+                "google",
+                "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+                "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+            ),
+        ];
+
+        for (label, input, secret) in cases {
+            let sanitized = sanitize(input);
+            assert!(
+                !sanitized.contains(secret),
+                "P0-1：{label} 形态的裸 token 必须脱敏，实际={sanitized}"
+            );
+            assert!(
+                sanitized.contains("[REDACTED_SECRET]"),
+                "P0-1：{label} 形态必须替换为 [REDACTED_SECRET]，实际={sanitized}"
+            );
+        }
+
+        // 不误伤：普通短词/普通文件名不得被替换。
+        for benign in ["sk-short", "task-runner", "disk-usage-report", "ghost_writer"] {
+            let sanitized = sanitize(benign);
+            assert_eq!(
+                sanitized, benign,
+                "P0-1：普通文本 `{benign}` 不得被裸 token 规则误伤"
+            );
+        }
     }
 
     /// H2 回归：非枚举的 `*token*` 键一律脱敏（含大小写变体与后缀形态）。

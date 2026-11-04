@@ -56,9 +56,16 @@
 | `agent.turn`（root） | `langfuse.session.id` / `langfuse.trace.name` / `langfuse.release`（ADR 0055） / `gen_ai.operation.name=agent.turn` / `agent.turn.id|sequence|phase`；整轮聚合 `gen_ai.usage.input_tokens|output_tokens`，以及（wave-51）`llm.reasoning.output_tokens`（ADR 0055 迁出用量前缀） / `gen_ai.usage.cache_read.input_tokens`（有值才输出） | SPAN（trace 根） |
 | `llm.chat` | `gen_ai.system` / `gen_ai.request.model` + `langfuse.observation.model.name` / `gen_ai.usage.input_tokens|output_tokens` /（wave-51）`llm.reasoning.output_tokens`（ADR 0055 迁出用量前缀） / `gen_ai.usage.cache_read.input_tokens` / `llm.context.window_tokens`|`llm.context.ratio`（ADR 0055） / `llm.context.cache_hit_ratio`（ADR 0055） | **GENERATION**（带 model 与 token 用量；Langfuse 会从 input 减 cache_read；reasoning 与上下文键已迁出 `gen_ai.usage.` 前缀以免污染 usage.total） |
 | `tool.call` | `gen_ai.tool.name` / `langfuse.observation.type=tool` / `agent.tool.status|duration_ms|error` | **TOOL** |
+| `tool.call` · input | `langfuse.observation.input`（工具入参预览；先过 `ponysentry::sanitize` 脱敏，再按 **2048 字节/字段** UTF-8 安全截断、超限追加 `…[truncated]`） | TOOL 观察的 **input**（Langfuse 侧可读） |
+| `tool.call` · output | `langfuse.observation.output`（工具结果预览；同一条脱敏 + 2KB 截断链路） | TOOL 观察的 **output** |
 | `governance.decide` | `gen_ai.operation.name=governance.decide` / `governance.window|decision|policy_version|unpriced_turns` +（wave-51）`langfuse.session.id` | SPAN（wave-51 起进入语义轨，可按会话过滤） |
 
 父 span 解析：按 `tokio::task::Id` 索引 + `thread_local` 兜底（非 tokio 上下文如 TUI/CLI 同步路径）。
+
+**工具 payload 采集开关（P0-1）**：`PONY_OTEL_CAPTURE_TOOL_PAYLOADS` **默认开启**（opt-out）；
+`0`/`false`/`off`/`no` 关闭（未识别值回落默认并打 warn）。关闭时只影响上面两行 input/output 两键，
+`gen_ai.tool.name` 等既有属性不受影响；`ToolSpanInput` 的 `args_preview` / `result_preview` 为 `None`
+时**不写键**（禁止空串占位）。取舍见 [ADR 0061](../decisions/0061-tool-span-payload-previews.md)。
 
 ## 3. 手工验证（上线后复跑）
 

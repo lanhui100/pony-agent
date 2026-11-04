@@ -223,6 +223,11 @@ impl AgentRuntime {
                             .duration_seconds
                             .map(|seconds| (seconds * 1000.0).round() as u64),
                         error: turn_tool_activity_error_text(otel_top_activity),
+                        // P0-1：工具 span 的入参/结果预览（trace 可复盘的最小切片）。
+                        // 此处传原始串即可 —— 脱敏与 2KB 截断统一在 `tool_span_attributes` 内完成
+                        // （`None` ⇒ 不写键；序列化失败也不写，绝不用空串占位）。
+                        args_preview: serde_json::to_string(&current_tool_call.arguments).ok(),
+                        result_preview: Some(tool_result.output.clone()),
                     },
                     current_tool_call.call_id.clone(),
                     otel_tool_error_kind.as_deref(),
