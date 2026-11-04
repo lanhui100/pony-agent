@@ -2402,6 +2402,8 @@ impl AgentRuntime {
                 None,
                 error,
                 input.session_id.clone(),
+                // P0-3：工具选择分派即失败，`stream_text_chunks` 尚未调用 ⇒ 没有任何已渲染正文。
+                None,
             );
             otel_turn_scope.set_phase("failed");
             return;
@@ -2619,6 +2621,9 @@ impl AgentRuntime {
                     None,
                     error,
                     input.session_id.clone(),
+                    // P0-3：首轮回复正文已由 `stream_text_chunks` 渲染出去（`completed_text`），
+                    // 失败（保存附件）后仍须保留它，避免失败轮只剩占位文案。
+                    Some(completed_text.clone()),
                 );
                 otel_turn_scope.set_phase("failed");
                 return;

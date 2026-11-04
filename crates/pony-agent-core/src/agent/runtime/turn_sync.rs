@@ -490,6 +490,9 @@ impl AgentRuntime {
             None,
             error,
             input.session_id.clone(),
+            // P0-3：同步/CLI 非流式路径失败时**未向 UI 分片渲染**任何 assistant 正文
+            // （`TurnInput` 只有 user message 与图片），故无已产出正文可保留。
+            None,
         )
     }
 

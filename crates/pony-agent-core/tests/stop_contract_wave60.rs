@@ -239,6 +239,8 @@ fn c3_cancelled_event_wire_carries_stop_reason() {
         None,
         "stopped_by_user".to_string(),
         Some("session-c3".to_string()),
+        // `partial_text` 为 P0-3 新增可选正文承载位；本用例验证 stop 合同，传 None 保持历史语义。
+        None,
     );
     let baseline = sink
         .events_named("turn:failed")
@@ -292,6 +294,8 @@ fn c3_failed_terminal_event_carries_no_stop_reason() {
         None,
         "provider_error".to_string(),
         Some("session-c3".to_string()),
+        // `partial_text` 为 P0-3 新增可选正文承载位；本用例验证 stop 合同，传 None 保持历史语义。
+        None,
     );
 
     // Assert

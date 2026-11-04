@@ -478,6 +478,50 @@ pub fn provider_event_meta(provider: &ProviderManager) -> ProviderEventMeta {
     }
 }
 
+/// 失败轮无正文时的既有文案（历史冻结断言逐字依赖，**不得**改动）。
+const LEGACY_FAILED_TURN_TEXT: &str = "This turn failed.";
+
+/// 正文部分的字节上限（后缀另计，总长仍远低于 8192 字节硬上界）。
+const FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES: usize = 4096;
+
+/// 截断标记（追加在正文末尾）。
+const FAILED_PARTIAL_TEXT_TRUNCATION_MARKER: &str = "…[truncated]";
+
+/// 正文之后的失败说明后缀。
+const FAILED_PARTIAL_TEXT_SUFFIX: &str = "\n\n（该轮失败前已产出以上内容）";
+
+/// P0-3（第二刀）：组装失败轮事件正文。
+///
+/// - `partial_text = Some(非空白)` ⇒ `截断后正文 + 失败说明后缀`（保留已产出内容，仍可识别为失败轮）；
+/// - `None` / 全空白 ⇒ 逐字 [`LEGACY_FAILED_TURN_TEXT`]（兼容锁）。
+///
+/// 截断是 **UTF-8 安全**的：从预算末尾向前回退到最近的 `is_char_boundary` 位置，
+/// 绝不切出半个码点；标记计入正文预算，故正文部分不超过 [`FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES`]。
+fn build_failed_turn_text(partial_text: Option<&str>) -> String {
+    let Some(body) = partial_text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return LEGACY_FAILED_TURN_TEXT.to_string();
+    };
+    let truncated = truncate_failed_partial_text(body);
+    format!("{truncated}{FAILED_PARTIAL_TEXT_SUFFIX}")
+}
+
+/// 按 char 边界把正文截到 [`FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES`] 以内，超限追加截断标记。
+fn truncate_failed_partial_text(text: &str) -> String {
+    if text.len() <= FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES {
+        return text.to_string();
+    }
+    let budget = FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES
+        .saturating_sub(FAILED_PARTIAL_TEXT_TRUNCATION_MARKER.len());
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = String::with_capacity(end + FAILED_PARTIAL_TEXT_TRUNCATION_MARKER.len());
+    truncated.push_str(text[..end].trim_end());
+    truncated.push_str(FAILED_PARTIAL_TEXT_TRUNCATION_MARKER);
+    truncated
+}
+
 pub fn emit_stream_failed(
     sink: &impl TurnEventSink,
     turn_id: String,
@@ -492,6 +536,9 @@ pub fn emit_stream_failed(
     hook_trace_records: Option<Vec<HookTraceRecord>>,
     error: String,
     session_id: Option<String>,
+    // P0-3（第二刀）：本轮失败前**已产出/已渲染**的正文。`Some(非空白)` 时保留正文，
+    // `None`/全空白 ⇒ 回落既有 `"This turn failed."`（兼容锁，防历史断言破）。
+    partial_text: Option<String>,
 ) -> TurnEventEnvelope {
     // Wave-5 P0：CLI/TUI 形态的 turn 失败上报（开关默认关；桌面端由前端 `TurnExecutionFailed`
     // 上报，故用进程级开关隔离，避免重复）。旁路上报：内部吞错，绝不改变轮次返回。
@@ -517,7 +564,7 @@ pub fn emit_stream_failed(
             sequence: None,
             emitted_at_ms: None,
             phase: Some("failed".to_string()),
-            text: Some("This turn failed.".to_string()),
+            text: Some(build_failed_turn_text(partial_text.as_deref())),
             reasoning_content: None,
             error: Some(error),
             provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
@@ -1061,6 +1108,8 @@ pub fn emit_turn_failed(
         None,
         error,
         session_id,
+        // P0-3：兼容包装只接 turn_id/trace_steps/error，没有正文入参（旧签名保持兼容）。
+        None,
     );
 }
 

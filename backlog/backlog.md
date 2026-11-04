@@ -61,6 +61,11 @@
   - 描述：L3-B BLOCKING。`ProcessManager` 有归属检查但 job 层没有；同进程其它会话/subagent 可枚举、读取、终止他人作业与输出。`.cmd` 内含整条命令原文且无清扫器。
   - 登记来源：`.dev-team/review-promote-B.json`（2026-11-04）
 
+- [ ] `B017` - P1: 失败轮正文承载只接到次要路径，主失败路径仍丢正文
+  - 路径：`crates/pony-agent-core/src/agent/runtime/turn_persist.rs:478`（`fail_stream_turn_with_hook_dispatch`）
+  - 描述：P0-3 第二刀给 `emit_stream_failed` 加了 `partial_text`，但 5 个调用点里只有 `turn_stream.rs:2626`（保存附件失败）能直接拿到已渲染正文；工具失败/熔断这类**主失败路径**走 `turn_persist.rs:478`，正文在 per-hop `model_hop_trace_contents` 里，需要给 helper + 3 个调用点加参数（小重构）才能接上。trace `pa_01a1a134` turn-3 正是这类场景。
+  - 登记来源：P0-3 第二刀实现回执（2026-11-04）
+
 ## 已完成
 - [x] `B015` - P1: 重试指纹保留 timeoutMs 语义（延长=新策略，分桶实现）
   - 路径：`crates/pony-agent-core/src/agent/runtime/stream_support.rs::normalize_run_timeout_argument_value`

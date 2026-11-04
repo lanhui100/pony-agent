@@ -489,6 +489,10 @@ impl AgentRuntime {
             Some(hook_trace_records),
             error,
             session_id.map(str::to_string),
+            // P0-3：本 helper（hook 失败分派）作用域内只有 trace/tool 活动，没有「已渲染正文」；
+            // 唯一来源是 per-hop `model_hop_trace_contents`，透传需给本函数与 3 个调用点新增参数
+            // （属重构，按卡要求不做），故此处传 None。
+            None,
         );
     }
 
