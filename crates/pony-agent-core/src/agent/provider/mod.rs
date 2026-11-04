@@ -1133,6 +1133,396 @@ impl ProviderManager {
         }
     }
 
+    // ───────────────────── D2（P1-1 切片二）：批量工具结果 followup 入口 ─────────────────────
+    //
+    // 分派顺序**不可变**（设计 `multi-tool-call-execution.md` §6）：
+    //   1) `calls.len() != results.len()` ⇒ 立刻 `Err`，**不构造任何请求**（零 HTTP）；
+    //   2) `calls.len() == 1` ⇒ 逐字委派既有 1:1 入口（N=1 行为零改动，靠既有用例回归）；
+    //   3) `N > 1` ⇒ D1b 批量构造器组装 messages，复用既有 `post_*` 通道与解析尾巴。
+    // 既有 1:1 入口与 `turn_stream.rs` / `turn_sync.rs` 调用面**不动**：批量语义只在 D3 接线后生效。
+
+    /// D2：批量工具结果 followup（同步）。
+    ///
+    /// 参数语义与 1:1 入口一致，只是 `calls`/`results` 为**按执行顺序**的整批；
+    /// `accumulated_messages` 与 1:1 路径一样被更新为「含本次回填的完整转录」。
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_with_tool_results(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        calls: &[ToolCall],
+        results: &[ToolResult],
+    ) -> Result<ProviderResponse, String> {
+        // 1) 长度不匹配：先于任何请求构造 / provider 日志 / 鉴权检查早退。
+        if calls.len() != results.len() {
+            return Err(format!(
+                "tool_calls/tool_results length mismatch: calls={} results={}",
+                calls.len(),
+                results.len()
+            ));
+        }
+        if calls.is_empty() {
+            return Err("tool_calls/tool_results must not be empty".to_string());
+        }
+        // 2) N=1：逐字委派既有 1:1 入口（不复制其逻辑）。
+        if calls.len() == 1 {
+            return self.continue_with_tool_result(
+                request,
+                tools,
+                accumulated_messages,
+                assistant_message,
+                &calls[0],
+                &results[0],
+            );
+        }
+
+        // 3) N>1：批量回填。
+        let request_cow = self.sanitize_request(request);
+        let request = request_cow.as_ref();
+        provider_log(format!(
+            "followup:start mode=sync-batch requested={} provider={} protocol={} model={} calls={} ",
+            self.config.requested_name,
+            self.config.provider_name,
+            self.protocol_label(),
+            request.model,
+            calls.len()
+        ));
+        if self.config.api_key.is_none() {
+            let error = format!(
+                "provider {} missing API key; please save a key in the model config page (field: {}).",
+                self.config.provider_name, self.config.api_key_env_var
+            );
+            provider_log(format!("followup:error {}", error));
+            return Err(error);
+        }
+
+        match self.config.protocol {
+            ProviderProtocol::OpenAiCompletions => self.send_openai_tool_followup_batch_request(
+                request,
+                tools,
+                accumulated_messages,
+                assistant_message,
+                calls,
+                results,
+            ),
+            ProviderProtocol::OpenAiResponses => self.send_responses_tool_followup_batch_request(
+                request,
+                tools,
+                accumulated_messages,
+                assistant_message,
+                calls,
+                results,
+            ),
+            ProviderProtocol::AnthropicMessages => self
+                .send_anthropic_tool_followup_batch_request(
+                    request,
+                    tools,
+                    accumulated_messages,
+                    assistant_message,
+                    calls,
+                    results,
+                ),
+        }
+    }
+
+    /// D2：批量工具结果 followup（流式入口）。分派顺序与同步入口逐字一致。
+    ///
+    /// N>1 的传输沿用 §6 指定的既有同步 `post_*` 通道（不新写 HTTP 层），整段结果按
+    /// 「reasoning → text」顺序回放为增量——与既有 `!supports_streaming` 分支同一语义
+    /// （`continue_with_tool_result_stream_bounded`），因此批量路径**不是**逐 token 增量。
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_with_tool_results_stream<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        calls: &[ToolCall],
+        results: &[ToolResult],
+        mut on_delta: F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        if calls.len() != results.len() {
+            return Err(format!(
+                "tool_calls/tool_results length mismatch: calls={} results={}",
+                calls.len(),
+                results.len()
+            ));
+        }
+        if calls.is_empty() {
+            return Err("tool_calls/tool_results must not be empty".to_string());
+        }
+        if calls.len() == 1 {
+            return self.continue_with_tool_result_stream(
+                request,
+                tools,
+                accumulated_messages,
+                assistant_message,
+                &calls[0],
+                &results[0],
+                on_delta,
+            );
+        }
+
+        let response = self.continue_with_tool_results(
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            calls,
+            results,
+        )?;
+        if let Some(reasoning_content) = response.reasoning_content.clone() {
+            on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
+        }
+        on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
+        Ok(response)
+    }
+
+    /// D2：OpenAI chat completions 的批量回填（1 assistant + N tool），复用 `post_openai_json`。
+    #[allow(clippy::too_many_arguments)]
+    fn send_openai_tool_followup_batch_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        calls: &[ToolCall],
+        results: &[ToolResult],
+    ) -> Result<ProviderResponse, String> {
+        let endpoint = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        provider_log(format!(
+            "request:openai followup-sync-batch endpoint={} model={} calls={}",
+            endpoint,
+            request.model,
+            calls.len()
+        ));
+        let messages = openai_followup_messages_for_tool_results(
+            request,
+            accumulated_messages,
+            assistant_message,
+            calls,
+            results,
+        )?;
+        {
+            let tool_call_ids = calls
+                .iter()
+                .map(|call| {
+                    call.call_id
+                        .clone()
+                        .unwrap_or_else(|| "tool_call_local".to_string())
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            provider_log(format!(
+                "request:openai followup-sync-batch tool_call_ids={} messages={}",
+                tool_call_ids,
+                messages.len(),
+            ));
+        }
+        let body = with_openai_request_options(
+            json!({
+                "model": request.model,
+                "messages": messages,
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "stream": false,
+                "tool_choice": "auto",
+                "tools": openai_tools_payload(tools)
+            }),
+            &self.config,
+        );
+        let body = apply_openai_tool_capability(body, tools, &self.config);
+        provider_log(format!(
+            "request:openai followup-sync-batch body_preview={}",
+            preview_json(&body, 1600)
+        ));
+        // 与 `send_openai_tool_followup_request` **同一** post 通道与解析尾巴。
+        let payload = self.post_openai_json(&endpoint, &body)?;
+        let message = first_openai_message(&payload)?;
+        let output_text = extract_openai_message_text(message).unwrap_or_default();
+        let tool_call = extract_openai_tool_call(message);
+        warn_on_dropped_openai_tool_calls(
+            "openai_followup_sync_batch",
+            message,
+            tool_call.as_ref(),
+        );
+        if output_text.trim().is_empty() && tool_call.is_none() {
+            return Err("openai tool follow-up missing text or tool call".to_string());
+        }
+
+        let token_usage = extract_openai_usage(&payload)
+            .unwrap_or_else(|| estimate_token_usage(request, &output_text));
+        provider_log_token_usage("openai followup-sync-batch", &token_usage);
+
+        Ok(ProviderResponse {
+            output_text: output_text.clone(),
+            tool_calls: tool_calls_from_single(&tool_call),
+            tool_call,
+            reasoning_content: extract_openai_message_reasoning_content(message),
+            reasoning_content_value: extract_openai_message_reasoning_value(message),
+            assistant_message: Some(normalize_openai_assistant_message(message)),
+            provider_source: "provider_followup_sync".to_string(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(token_usage),
+        })
+    }
+
+    /// D2：OpenAI Responses 的批量回填（chat 形态转录 → 请求边界转换），复用 `post_openai_json`。
+    #[allow(clippy::too_many_arguments)]
+    fn send_responses_tool_followup_batch_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        calls: &[ToolCall],
+        results: &[ToolResult],
+    ) -> Result<ProviderResponse, String> {
+        let endpoint = self.responses_endpoint();
+        provider_log(format!(
+            "request:responses followup-sync-batch endpoint={} model={} calls={}",
+            endpoint,
+            request.model,
+            calls.len()
+        ));
+        let messages = openai_followup_messages_for_tool_results(
+            request,
+            accumulated_messages,
+            assistant_message,
+            calls,
+            results,
+        )?;
+        let mut conversion_request = request.clone();
+        conversion_request.native_messages = messages;
+        let body = build_responses_request_body(&conversion_request, tools, &self.config, false);
+        provider_log(format!(
+            "request:responses followup-sync-batch body_preview={}",
+            preview_json(&body, 1600)
+        ));
+        let payload = self.post_openai_json(&endpoint, &body)?;
+        let parsed = parse_responses_output(&payload)?;
+        if parsed.dropped_function_calls > 0 {
+            provider_log(format!(
+                "followup:responses dropped_function_calls={}",
+                parsed.dropped_function_calls
+            ));
+        }
+        let token_usage = parsed
+            .token_usage
+            .clone()
+            .unwrap_or_else(|| estimate_token_usage(request, &parsed.output_text));
+        provider_log_token_usage("responses followup-sync-batch", &token_usage);
+
+        let assistant_message = responses_chat_assistant_message(&parsed);
+
+        Ok(ProviderResponse {
+            output_text: parsed.output_text.clone(),
+            tool_calls: tool_calls_from_single(&parsed.tool_call),
+            tool_call: parsed.tool_call,
+            reasoning_content: parsed.reasoning_content.clone(),
+            reasoning_content_value: parsed.reasoning_content_value.clone(),
+            assistant_message: Some(assistant_message),
+            provider_source: "provider_followup_sync".to_string(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(token_usage),
+        })
+    }
+
+    /// D2：Anthropic 的批量回填（1 assistant 含全部 tool_use + 1 user 含 N 个 tool_result），
+    /// 复用 `post_anthropic_json` 与既有解析尾巴。
+    #[allow(clippy::too_many_arguments)]
+    fn send_anthropic_tool_followup_batch_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        calls: &[ToolCall],
+        results: &[ToolResult],
+    ) -> Result<ProviderResponse, String> {
+        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
+        provider_log(format!(
+            "request:anthropic followup-sync-batch endpoint={} model={} calls={}",
+            endpoint,
+            request.model,
+            calls.len()
+        ));
+        let messages = anthropic_followup_messages_for_tool_results(
+            request,
+            accumulated_messages,
+            assistant_message,
+            calls,
+            results,
+        )?;
+        let body = with_anthropic_request_options(
+            json!({
+                "model": request.model,
+                "system": anthropic_system_text(&request.input),
+                "messages": messages,
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "tools": anthropic_tools_payload(tools),
+                "tool_choice": {
+                    "type": "auto",
+                    "disable_parallel_tool_use": true
+                }
+            }),
+            &self.config,
+        );
+        let body = apply_anthropic_tool_capability(body, tools, &self.config);
+        provider_log(format!(
+            "request:anthropic followup-sync-batch messages={} body_preview={}",
+            body.get("messages")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+            preview_json(&body, 1600)
+        ));
+        // 与 `send_anthropic_tool_followup_request` **同一** post 通道与解析尾巴。
+        let payload = self.post_anthropic_json(&endpoint, &body)?;
+
+        let output_text = extract_anthropic_output_text(&payload).unwrap_or_default();
+        let content = payload
+            .get("content")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let reasoning_content = extract_anthropic_thinking_text(&content);
+        let reasoning_content_value = extract_anthropic_thinking_value(&content);
+        ensure_single_anthropic_tool_call(&content)?;
+        let tool_call = extract_anthropic_tool_call(&content);
+        if output_text.trim().is_empty() && tool_call.is_none() {
+            return Err("anthropic tool follow-up missing text or tool call".to_string());
+        }
+        let assistant_message = Some(anthropic_native_assistant_message(&content));
+
+        Ok(ProviderResponse {
+            output_text: output_text.clone(),
+            tool_calls: tool_calls_from_single(&tool_call),
+            tool_call,
+            reasoning_content,
+            reasoning_content_value,
+            assistant_message,
+            provider_source: "provider_followup_sync".to_string(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_anthropic_usage(&payload)
+                    .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+            ),
+        })
+    }
+
     fn send_openai_tool_followup_request(
         &self,
         request: &ProviderRequest,
@@ -4569,6 +4959,55 @@ pub fn anthropic_messages_with_tool_results(
         .collect();
     out.push(json!({ "role": "user", "content": blocks }));
     Ok(out)
+}
+
+/// D2：批量回填的 OpenAI chat 转录（基础转录 + 1 assistant + N tool），并写回累积转录。
+///
+/// 基础转录口径与 1:1 路径一致：`accumulated_messages` 为空时用请求自带的消息，
+/// 否则在其后追加；构造完成后 `accumulated_messages` 更新为本次完整转录。
+fn openai_followup_messages_for_tool_results(
+    request: &ProviderRequest,
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+) -> Result<Vec<Value>, String> {
+    let base = if accumulated_messages.is_empty() {
+        openai_request_messages(request)
+    } else {
+        accumulated_messages.clone()
+    };
+    // D1b 构造器要求 `&Value`：缺失 assistant 时用 `Null` 触发「按 calls 重建」分支
+    // （与 1:1 路径 `assistant_message=None` 的合成形态一致）。
+    let assistant = assistant_message.cloned().unwrap_or(Value::Null);
+    let messages = normalize_openai_messages(openai_messages_with_tool_results(
+        &base,
+        &assistant,
+        calls,
+        results,
+    )?);
+    *accumulated_messages = messages.clone();
+    Ok(messages)
+}
+
+/// D2：批量回填的 Anthropic 转录（基础转录 + 1 assistant 含全部 tool_use + 1 user 含 N 个
+/// `tool_result`），并写回累积转录。基础转录口径与 1:1 路径一致。
+fn anthropic_followup_messages_for_tool_results(
+    request: &ProviderRequest,
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+) -> Result<Vec<Value>, String> {
+    let base = if accumulated_messages.is_empty() {
+        anthropic_conversation_messages(request)
+    } else {
+        accumulated_messages.clone()
+    };
+    let assistant = assistant_message.cloned().unwrap_or(Value::Null);
+    let messages = anthropic_messages_with_tool_results(&base, &assistant, calls, results)?;
+    *accumulated_messages = messages.clone();
+    Ok(messages)
 }
 
 fn anthropic_assistant_content_for_tool_result(

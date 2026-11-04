@@ -710,7 +710,7 @@ fn next_mock_owner_token() -> String {
     format!("own{}-{seq}", std::process::id())
 }
 
-struct MockHttpServer {
+pub(crate) struct MockHttpServer {
     base_url: String,
     /// 本 server 的归属令牌（同时出现在 `base_url` 的路径段里）。
     owner_token: String,
@@ -11835,4 +11835,419 @@ fn wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_t
     assert_eq!(checkpoint.output_tokens, Some(WAVE15_AGGREGATE_OUTPUT));
 
     let _ = server.finish();
+}
+
+// ───────────────────── D2（P1-1 切片二）：批量工具结果 followup 入口 ─────────────────────
+//
+// 三个断言面（设计 `multi-tool-call-execution.md` §6 验收）：
+// ① N=2 的 wire 级请求体（OpenAI `role=tool` 恰 2 条且 `tool_call_id` 保序；
+//    Anthropic 恰 1 条 `role=user` 承载 2 个 `tool_result`）；
+// ② N=1 时与既有 1:1 入口**逐字等价**（走的就是同一条代码路径）；
+// ③ 长度不匹配 ⇒ `Err` 且 mock server **零请求**（含流式入口）。
+
+fn d2_batch_provider_selection(base_url: String) -> ResolvedProviderSelection {
+    test_provider_selection(base_url)
+}
+
+fn d2_anthropic_provider_selection(base_url: String) -> ResolvedProviderSelection {
+    let mut selection = test_provider_selection(base_url);
+    selection.requested_name = "test-anthropic".to_string();
+    selection.provider_name = "test-anthropic".to_string();
+    selection.protocol = crate::agent::provider::ProviderProtocol::AnthropicMessages;
+    selection.auth_type = crate::agent::provider::ProviderAuthType::XApiKey;
+    selection.api_key_env_var = "ANTHROPIC_API_KEY".to_string();
+    selection.model = "claude-sonnet-5".to_string();
+    selection.thinking_param_pattern = ThinkingParamPattern::None;
+    selection
+}
+
+fn d2_batch_provider_request() -> ProviderRequest {
+    ProviderRequest {
+        model: "gpt-5.4".to_string(),
+        input: vec![ProviderMessage::user("一次响应里调用了两个工具，请汇总结果")],
+        images: Vec::new(),
+        native_messages: Vec::new(),
+        observation: ProviderRequestObservation::default(),
+        temperature: 0.2,
+        max_output_tokens: 1024,
+    }
+}
+
+fn d2_batch_tools() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "read_file",
+            description: "读取文件内容。",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "list_dir",
+            description: "列出目录内容。",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+    ]
+}
+
+fn d2_tool_call(call_id: &str, name: &str) -> ToolCall {
+    ToolCall {
+        call_id: Some(call_id.to_string()),
+        name: name.to_string(),
+        arguments: json!({ "path": "." }),
+        plan: None,
+    }
+}
+
+fn d2_tool_result(name: &str, output: &str) -> ToolResult {
+    ToolResult {
+        tool_name: name.to_string(),
+        status: "ok".to_string(),
+        output: output.to_string(),
+        duration_ms: 1,
+    }
+}
+
+/// ① wire 级请求体断言（N=2）。
+#[test]
+fn d2_batch_tool_results_wire_shape_openai_and_anthropic() {
+    // ---- OpenAI chat completions：1 assistant（全部 tool_calls）+ **N 条** role=tool ----
+    let openai_server = MockHttpServer::start(vec![json_response(json!({
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "两个工具结果已汇总。"
+                }
+            }
+        ],
+        "usage": { "prompt_tokens": 30, "completion_tokens": 8, "total_tokens": 38 }
+    }))]);
+    let openai_manager = ProviderManager::new(d2_batch_provider_selection(
+        openai_server.base_url.clone(),
+    ));
+    let request = d2_batch_provider_request();
+    let tools = d2_batch_tools();
+    let calls = vec![
+        d2_tool_call("call_read", "read_file"),
+        d2_tool_call("call_list", "list_dir"),
+    ];
+    let results = vec![
+        d2_tool_result("read_file", "read ok"),
+        d2_tool_result("list_dir", "list ok"),
+    ];
+    let mut openai_accumulated = Vec::new();
+    let openai_response = openai_manager
+        .continue_with_tool_results(
+            &request,
+            &tools,
+            &mut openai_accumulated,
+            None,
+            &calls,
+            &results,
+        )
+        .expect("批量 followup（OpenAI）应成功");
+
+    let openai_recorded = openai_server.finish();
+    assert_eq!(
+        openai_recorded.len(),
+        1,
+        "整批工具结果必须只发一次 followup 请求，实际 {} 次",
+        openai_recorded.len()
+    );
+    let openai_body: Value =
+        serde_json::from_str(&openai_recorded[0]).expect("openai body 应为 json");
+    assert_eq!(
+        openai_body.get("stream").and_then(Value::as_bool),
+        Some(false),
+        "N>1 走既有同步 post 通道"
+    );
+    let openai_messages = openai_body
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("openai messages");
+    let tool_messages: Vec<&Value> = openai_messages
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+        .collect();
+    assert_eq!(
+        tool_messages.len(),
+        2,
+        "N=2 时 role=tool 消息必须恰 2 条（每调用一条），实际 {openai_messages:?}"
+    );
+    let tool_message_ids: Vec<&str> = tool_messages
+        .iter()
+        .map(|message| {
+            message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .expect("role=tool 必须带 tool_call_id")
+        })
+        .collect();
+    assert_eq!(
+        tool_message_ids,
+        vec!["call_read", "call_list"],
+        "tool 消息的 tool_call_id 必须与执行顺序一致"
+    );
+    let assistant_tool_messages: Vec<&Value> = openai_messages
+        .iter()
+        .filter(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+                && message
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .map(|calls| !calls.is_empty())
+                    .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(
+        assistant_tool_messages.len(),
+        1,
+        "回填的 assistant 必须是**一条**消息承载全部 tool_calls"
+    );
+    let assistant_tool_call_ids: Vec<&str> = assistant_tool_messages[0]
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .expect("assistant tool_calls")
+        .iter()
+        .map(|call| call.get("id").and_then(Value::as_str).expect("tool_call id"))
+        .collect();
+    assert_eq!(
+        assistant_tool_call_ids,
+        vec!["call_read", "call_list"],
+        "assistant.tool_calls 顺序必须与执行顺序一致"
+    );
+    assert_eq!(openai_response.output_text, "两个工具结果已汇总。");
+    assert_eq!(openai_response.provider_source, "provider_followup_sync");
+    // 累积转录被更新为「基础 + assistant + 2 tool」，供下一跳复用。
+    assert_eq!(openai_accumulated.len(), openai_messages.len());
+
+    // ---- Anthropic：1 assistant（全部 tool_use）+ **1 条** user（N 个 tool_result）----
+    let anthropic_server = MockHttpServer::start(vec![json_response(json!({
+        "content": [{ "type": "text", "text": "两个工具结果已汇总。" }],
+        "usage": { "input_tokens": 20, "output_tokens": 9 }
+    }))]);
+    let anthropic_manager = ProviderManager::new(d2_anthropic_provider_selection(
+        anthropic_server.base_url.clone(),
+    ));
+    let anthropic_calls = vec![
+        d2_tool_call("toolu_read", "read_file"),
+        d2_tool_call("toolu_list", "list_dir"),
+    ];
+    let anthropic_results = vec![
+        d2_tool_result("read_file", "read ok"),
+        d2_tool_result("list_dir", "list ok"),
+    ];
+    let mut anthropic_request = request.clone();
+    anthropic_request.model = "claude-sonnet-5".to_string();
+    let mut anthropic_accumulated = Vec::new();
+    let anthropic_response = anthropic_manager
+        .continue_with_tool_results(
+            &anthropic_request,
+            &tools,
+            &mut anthropic_accumulated,
+            None,
+            &anthropic_calls,
+            &anthropic_results,
+        )
+        .expect("批量 followup（Anthropic）应成功");
+
+    let anthropic_recorded = anthropic_server.finish();
+    assert_eq!(
+        anthropic_recorded.len(),
+        1,
+        "整批工具结果必须只发一次 followup 请求，实际 {} 次",
+        anthropic_recorded.len()
+    );
+    let anthropic_body: Value =
+        serde_json::from_str(&anthropic_recorded[0]).expect("anthropic body 应为 json");
+    let anthropic_messages = anthropic_body
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("anthropic messages");
+    assert_eq!(
+        anthropic_messages.len(),
+        3,
+        "基础 user + 1 assistant + 1 user(tool_result)，实际 {anthropic_messages:?}"
+    );
+    let assistant_blocks = anthropic_messages[1]
+        .get("content")
+        .and_then(Value::as_array)
+        .expect("assistant content blocks");
+    let tool_use_ids: Vec<&str> = assistant_blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .map(|block| block.get("id").and_then(Value::as_str).expect("tool_use id"))
+        .collect();
+    assert_eq!(
+        tool_use_ids,
+        vec!["toolu_read", "toolu_list"],
+        "assistant 必须承载全部 tool_use 且保序"
+    );
+    let tool_result_messages: Vec<&Value> = anthropic_messages
+        .iter()
+        .filter(|message| {
+            message
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(
+        tool_result_messages.len(),
+        1,
+        "N 个 tool_result 必须收在**一条** user 消息里（拆成多条会触发上游 400）"
+    );
+    assert_eq!(
+        tool_result_messages[0].get("role").and_then(Value::as_str),
+        Some("user")
+    );
+    let tool_result_blocks = tool_result_messages[0]
+        .get("content")
+        .and_then(Value::as_array)
+        .expect("tool_result blocks");
+    assert_eq!(tool_result_blocks.len(), 2, "user.content 必须含 2 个 tool_result");
+    assert!(tool_result_blocks
+        .iter()
+        .all(|block| block.get("type").and_then(Value::as_str) == Some("tool_result")));
+    let tool_result_ids: Vec<&str> = tool_result_blocks
+        .iter()
+        .map(|block| {
+            block
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .expect("tool_result 必须带 tool_use_id")
+        })
+        .collect();
+    assert_eq!(
+        tool_result_ids,
+        vec!["toolu_read", "toolu_list"],
+        "tool_result 的 tool_use_id 必须与执行顺序一致"
+    );
+    assert_eq!(anthropic_response.output_text, "两个工具结果已汇总。");
+    assert_eq!(anthropic_response.provider_source, "provider_followup_sync");
+    assert_eq!(anthropic_accumulated.len(), anthropic_messages.len());
+}
+
+/// ② N=1：批量入口必须**逐字委派**既有 1:1 入口（同请求体 / 同响应 / 同累积转录）。
+#[test]
+fn d2_batch_tool_results_single_call_delegates_to_one_to_one_entry() {
+    let server = MockHttpServer::start(vec![
+        json_completion("单调用回填完成。"),
+        json_completion("单调用回填完成。"),
+    ]);
+    let manager = ProviderManager::new(d2_batch_provider_selection(server.base_url.clone()));
+    let request = d2_batch_provider_request();
+    let tools = d2_batch_tools();
+    let calls = vec![d2_tool_call("call_one", "read_file")];
+    let results = vec![d2_tool_result("read_file", "read ok")];
+    let assistant = json!({
+        "role": "assistant",
+        "content": "先读文件。",
+        "tool_calls": [{
+            "id": "call_one",
+            "type": "function",
+            "function": { "name": "read_file", "arguments": "{\"path\":\".\"}" }
+        }]
+    });
+
+    let mut batch_accumulated = Vec::new();
+    let batch_response = manager
+        .continue_with_tool_results(
+            &request,
+            &tools,
+            &mut batch_accumulated,
+            Some(&assistant),
+            &calls,
+            &results,
+        )
+        .expect("N=1 批量入口应成功");
+    let mut legacy_accumulated = Vec::new();
+    let legacy_response = manager
+        .continue_with_tool_result(
+            &request,
+            &tools,
+            &mut legacy_accumulated,
+            Some(&assistant),
+            &calls[0],
+            &results[0],
+        )
+        .expect("既有 1:1 入口应成功");
+
+    let recorded = server.finish();
+    assert_eq!(recorded.len(), 2, "两个入口各发一次请求");
+    let batch_body: Value = serde_json::from_str(&recorded[0]).expect("batch body 应为 json");
+    let legacy_body: Value = serde_json::from_str(&recorded[1]).expect("legacy body 应为 json");
+    assert_eq!(
+        batch_body, legacy_body,
+        "N=1 时批量入口的 wire 请求体必须与既有 1:1 入口逐字相同（委派等价）"
+    );
+    assert_eq!(batch_response.output_text, legacy_response.output_text);
+    assert_eq!(
+        batch_response.provider_source, legacy_response.provider_source,
+        "N=1 必须落在既有 provider_source（provider_followup_sync）"
+    );
+    assert_eq!(
+        batch_accumulated, legacy_accumulated,
+        "累积转录必须与 1:1 路径完全一致"
+    );
+}
+
+/// ③ 长度不匹配：返回 `Err` 且 mock server **零请求**（同步 + 流式入口各验一次）。
+#[test]
+fn d2_batch_tool_results_length_mismatch_sends_zero_requests() {
+    let sync_server = MockHttpServer::start(vec![json_completion("不该被调用")]);
+    let stream_server = MockHttpServer::start(vec![json_completion("不该被调用")]);
+    let sync_manager = ProviderManager::new(d2_batch_provider_selection(
+        sync_server.base_url.clone(),
+    ));
+    let stream_manager = ProviderManager::new(d2_batch_provider_selection(
+        stream_server.base_url.clone(),
+    ));
+    let request = d2_batch_provider_request();
+    let tools = d2_batch_tools();
+    let calls = vec![
+        d2_tool_call("call_a", "read_file"),
+        d2_tool_call("call_b", "list_dir"),
+    ];
+    let results = vec![d2_tool_result("read_file", "read ok")];
+    let expected = "tool_calls/tool_results length mismatch: calls=2 results=1";
+
+    let mut accumulated = Vec::new();
+    let sync_error = sync_manager
+        .continue_with_tool_results(&request, &tools, &mut accumulated, None, &calls, &results)
+        .expect_err("长度不匹配必须返回 Err");
+    assert_eq!(sync_error, expected);
+    let stream_error = stream_manager
+        .continue_with_tool_results_stream(
+            &request,
+            &tools,
+            &mut accumulated,
+            None,
+            &calls,
+            &results,
+            |_chunk| {},
+        )
+        .expect_err("长度不匹配（流式入口）必须返回 Err");
+    assert_eq!(stream_error, expected);
+    assert!(
+        accumulated.is_empty(),
+        "长度不匹配不得写入累积转录，实际 {accumulated:?}"
+    );
+
+    let sync_recorded = sync_server.finish();
+    let stream_recorded = stream_server.finish();
+    assert!(
+        sync_recorded.is_empty(),
+        "长度不匹配时同步入口不得发任何请求，实际记录 {} 条：{sync_recorded:?}",
+        sync_recorded.len()
+    );
+    assert!(
+        stream_recorded.is_empty(),
+        "长度不匹配时流式入口不得发任何请求，实际记录 {} 条：{stream_recorded:?}",
+        stream_recorded.len()
+    );
 }
