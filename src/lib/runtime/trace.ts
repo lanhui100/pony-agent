@@ -18,6 +18,7 @@ import type {
 import { errorLog } from "./utils";
 import { safeInvoke } from "../tauri";
 import { resolveFallbackTimelineRuntimePhase } from "./phases";
+import { parsePromotedToolResult } from "@/lib/runtime/tool-result-meta";
 
 export function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage["status"] {
   switch (status) {
@@ -383,13 +384,21 @@ export function buildFallbackRuntimeTraceTimeline(options: {
         toolState = "cancelled";
       }
 
+      // B016：hop 内任一 activity 的 Run 结果是 promote 载荷 ⇒ 该 hop 带加性 `promoted: true`。
+      // 仅 `true` 时写入：普通 hop 的条目形状逐字不变（V10 冻结快照不漂移）。
+      const hopActivities = toolActivitiesForHop(normalizedToolActivities, parentTool.id);
+      const promoted = hopActivities.some(
+        (activity) => parsePromotedToolResult(activity.resultText).promoted
+      );
+
       timeline.push(createTimelineEntry("call_tool", sequence, modelIndex + 1, {
         label: `CALL TOOL #${modelIndex + 1} · ${parentTool.name}`,
         state: toolState,
-        toolActivities: toolActivitiesForHop(normalizedToolActivities, parentTool.id),
+        toolActivities: hopActivities,
         text: parentTool.description ?? null,
         // PA-100：真实结构化错误，不再用 description 冒充（后端同语义修复的镜像）。
-        error: extractActivityErrorText(parentTool)
+        error: extractActivityErrorText(parentTool),
+        ...(promoted ? { promoted: true } : {})
       }));
       sequence += 1;
     }
@@ -582,7 +591,10 @@ export function createTimelineEntry(
     outputTokens: patch.outputTokens ?? null,
     totalTokens: patch.totalTokens ?? null,
     firstTokenLatencyMs: patch.firstTokenLatencyMs ?? null,
-    turnDurationMs: patch.turnDurationMs ?? null
+    turnDurationMs: patch.turnDurationMs ?? null,
+    // B016：加性字段只在该 hop 确实是 promote 结果时写入；普通条目的形状逐字不变，
+    // 避免 V10 冻结快照漂移。
+    ...(patch.promoted ? { promoted: true } : {})
   };
 }
 

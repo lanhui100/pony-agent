@@ -310,6 +310,13 @@ export type TraceTimelineEntry = {
   durationMs?: number | null;
   durationSeconds?: number | null;
   turnDurationMs?: number | null;
+  /**
+   * B016：该 hop 是否由 Run 到期 promote 成后台作业（加性字段，仅 `true` 时写入）。
+   *
+   * 只做**可见性**：`state` 仍为 `completed`，不引入新状态（V10 冻结快照依赖既有枚举）。
+   * 取值统一来自 `parsePromotedToolResult(tool.resultText)`（B011 的唯一解析实现）。
+   */
+  promoted?: boolean;
 };
 
 export type PrefixMutationReason =

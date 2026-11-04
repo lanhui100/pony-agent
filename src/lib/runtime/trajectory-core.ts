@@ -4,6 +4,7 @@
  */
 
 import type { TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
+import { parsePromotedToolResult } from "@/lib/runtime/tool-result-meta";
 
 export type TrajectoryCellKind =
   | "system"
@@ -58,6 +59,13 @@ export interface TrajectoryRecordCell {
   cacheHitTokens?: number;
   isError: boolean;
   rawEntry?: TraceTimelineEntry;
+  /**
+   * B016：该 cell 对应的 Run 结果是否为「到期 promote 成后台作业」（加性字段，仅 `true` 时写入）。
+   *
+   * 只做**可见性**：`status` 仍映射为 `completed`，不引入新状态、不改既有映射。
+   * 取值统一来自 `parsePromotedToolResult(activity.resultText)`（B011 的唯一解析实现）。
+   */
+  promoted?: boolean;
 }
 
 export interface TrajectoryFilterState {
@@ -275,6 +283,13 @@ export function deriveTrajectoryRecords(
         }
 
         const resolvedDurationMs = resolveEntryEffectiveDurationMs(entry);
+        // B016：tool 条目内任一 activity 的 Run 结果是 promote 载荷 ⇒ 该 cell 带加性 `promoted: true`。
+        // 仅 `true` 时写入：普通 cell 的字段形状逐字不变（V10 冻结快照不漂移）。
+        const promoted =
+          entry.kind === "call_tool" &&
+          (entry.toolActivities ?? []).some(
+            (activity) => parsePromotedToolResult(activity.resultText).promoted
+          );
         cells.push({
           id: entry.id,
           turnId: turn.turnId,
@@ -291,6 +306,7 @@ export function deriveTrajectoryRecords(
           cacheHitTokens: entry.cacheHitInputTokens ?? undefined,
           isError,
           rawEntry: entry,
+          ...(promoted ? { promoted: true } : {}),
         });
       }
     } else {
@@ -338,6 +354,8 @@ export function deriveTrajectoryRecords(
             status,
             durationMs: (toolObj.durationMs as number) || (tool.durationSeconds ? Math.round(tool.durationSeconds * 1000) : 0),
             isError,
+            // B016：无 traceTimeline 的兜底路径同样加性标记（仅 `true` 时写入）。
+            ...(parsePromotedToolResult(tool.resultText).promoted ? { promoted: true } : {}),
           });
         }
       }
