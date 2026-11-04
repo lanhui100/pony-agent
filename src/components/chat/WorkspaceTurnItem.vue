@@ -37,7 +37,9 @@ import MarkdownRenderer, {
 import AskUserToolCallCard from "@/components/ask/AskUserToolCallCard.vue";
 import { isAskToolName } from "@/lib/runtime/ask-tools";
 import {
+  exitCodeClassLabel,
   parsePromotedToolResult,
+  parseToolExitMeta,
   promotedToolBadgeLabel
 } from "@/lib/runtime/tool-result-meta";
 import {
@@ -130,6 +132,22 @@ const toolResultTextById = computed<Map<string, string>>(() => {
  */
 function promotedToolBadge(tool: MergedToolCall): string | null {
   return promotedToolBadgeLabel(parsePromotedToolResult(toolResultTextById.value.get(tool.id)));
+}
+
+/**
+ * P1-2：工具行的退出码分类徽标（`label` + 悬浮 `title`）；不可显示时返回 `null`。
+ *
+ * 只做**辅助信息位**：不参与 pending/done/error/promoted 四个既有分支的渲染条件，
+ * 因此不会改变工具行主状态的可见性。
+ */
+function exitCodeBadge(tool: MergedToolCall): { label: string; title: string } | null {
+  const meta = parseToolExitMeta(toolResultTextById.value.get(tool.id));
+  const label = exitCodeClassLabel(meta);
+  if (!label) {
+    return null;
+  }
+  const code = meta.exitCode === undefined || meta.exitCode === null ? "?" : String(meta.exitCode);
+  return { label, title: `退出码 ${code} · ${label}` };
 }
 
 const runtimeStore = useRuntimeStore();
@@ -641,6 +659,12 @@ const toolIconByCanonicalName: Record<string, any> = {
                   >{{ promotedToolBadge(tool) }}</span>
                   <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
                   <AlertTriangle v-else-if="tool.status === 'error'" class="h-3 w-3 shrink-0 text-rose-400" aria-label="工具调用失败" :aria-hidden="false" />
+                  <!-- P1-2：退出码分类（与「已转后台」同一辅助信息区；独立 v-if，不改上面三个分支的条件） -->
+                  <span
+                    v-if="exitCodeBadge(tool)"
+                    class="conversation-tool-exit-class text-[11px] text-stone-400"
+                    :title="exitCodeBadge(tool)?.title"
+                  >{{ exitCodeBadge(tool)?.label }}</span>
                 </span>
               </div>
             </div>
