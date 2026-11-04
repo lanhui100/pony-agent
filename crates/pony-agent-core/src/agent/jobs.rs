@@ -355,8 +355,22 @@ impl JobSession {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
-        if let Err(error) = manager.kill_if_exists(session_id, handle) {
-            eprintln!("[jobs] promoted entry release failed for `{handle}`: {error}");
+        // B008（Windows 实测）：`cancel` 之后子进程的退出状态是**异步**可见的，首次
+        // `kill_if_exists` 可能仍走「running ⇒ 保留条目」分支，导致条目泄漏（CI Windows 实测
+        // `tracked=true`）。故做有界重试；最终仍失败只 warn，不改变作业语义。
+        let mut released = false;
+        for _ in 0..20 {
+            if let Err(error) = manager.kill_if_exists(session_id, handle) {
+                eprintln!("[jobs] promoted entry release failed for `{handle}`: {error}");
+            }
+            if !manager.is_tracked(session_id, handle) {
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !released {
+            eprintln!("[jobs] promoted entry still tracked after release retries: `{handle}`");
         }
         // B013：终态之后才删临时脚本（promote 路径前台不删，进程此前可能仍在读它）。
         // 失败**只**打 warn：不改 status、不 panic、不把 killed 变 failed，也不影响 ring buffer。
