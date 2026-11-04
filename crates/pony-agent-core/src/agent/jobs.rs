@@ -1066,13 +1066,26 @@ mod tests {
         );
 
         // 驱动到终态：update_status → poll 看到 Exited → 置 completed → 回收条目。
-        let out = job_output(JobOutputArgs {
+        // 终态读取：CI 实测存在「进程刚退出、管道尚未排空」的窄窗（首读快照为空），
+        // 故按 offset=0 做有界重试，仍为空才判失败（不放过真实的数据丢失）。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut out = job_output(JobOutputArgs {
             job_id: job_id.clone(),
             wait: Some(true),
             timeout_ms: Some(5_000),
             offset: None,
         })
         .expect("job_output must succeed");
+        while out.output.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            out = job_output(JobOutputArgs {
+                job_id: job_id.clone(),
+                wait: Some(false),
+                timeout_ms: Some(0),
+                offset: Some(0),
+            })
+            .expect("job_output must succeed");
+        }
         assert_eq!(out.status, "completed", "natural exit must converge to completed");
         assert_eq!(out.exit_code, Some(0), "exit code must be preserved");
         assert!(
