@@ -9,6 +9,7 @@ import Tooltip from "@/components/ui/Tooltip.vue";
 import { useSettingsStore } from "@/stores/settings";
 import { useRuntimeStore } from "@/stores/runtime";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
+import { formatUploadFeedback, type UploadTraceReceipt } from "@/lib/runtime/upload-receipt";
 
 /**
  * PA-096：二级观测页（原"遥测"，ADR 0013 更名）。
@@ -70,18 +71,29 @@ async function uploadSessionTrace() {
   uploadFeedback.value = "上传中…";
 
   try {
-    const count = await safeInvoke<number>("upload_session_trace", {
+    // P1-3：后端返回结构化回执 `{ turns, traceIds, failures }`。
+    // 兼容旧宿主（仅返回 turn 数）：归一成最小回执，避免升级窗口里文案失真。
+    const response = await safeInvoke<UploadTraceReceipt | number>("upload_session_trace", {
       sessionId: runtimeStore.sessionId
     });
+    const receipt: UploadTraceReceipt =
+      typeof response === "number"
+        ? { turns: response, traceIds: [], failures: [] }
+        : (response ?? {});
 
-    if (count === 0) {
-      uploadState.value = "done";
-      uploadFeedback.value = "本会话暂无 Trace 数据";
-      showToast("当前会话暂无已完成的持久化 Trace 数据可上传", "info");
+    // 文案以 `formatUploadFeedback` 为唯一口径：只有它知道「全部成功 / 部分成功 / 没有可上传」
+    // 的区别，不再把「flush 轮数」直接说成「已成功上传至 Langfuse」。
+    const feedback = formatUploadFeedback(receipt);
+    uploadFeedback.value = feedback;
+    uploadState.value = "done";
+    const failures = receipt.failures?.length ?? 0;
+    const hasUploaded = (receipt.traceIds?.length ?? 0) > 0 || (receipt.turns ?? 0) > 0;
+    if (failures > 0) {
+      showToast(feedback, "error", 5000);
+    } else if (!hasUploaded) {
+      showToast(feedback, "info");
     } else {
-      uploadState.value = "done";
-      uploadFeedback.value = `已成功上传该会话 Trace（共 ${count} 轮对话）`;
-      showToast(`已成功上传会话 Trace（包含 ${count} 轮对话链路）至 Langfuse`, "success");
+      showToast(feedback, "success");
     }
   } catch (err) {
     uploadState.value = "error";

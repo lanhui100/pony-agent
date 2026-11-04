@@ -1,10 +1,11 @@
 //! 手动上传 Trace → OTel/Langfuse 重放迁移契约（Wave43 D5/D6）。
 //!
-//! 冻结契约：
-//! 1. `HostControlPlane::upload_session_trace` 入口签名不变：`Result<usize, String>`，
-//!    返回成功导出的 turn 数（前端提示「已上传包含 N 轮对话的 Trace」依赖该返回值）；
+//! 冻结契约（P1-3 契约更新：返回**结构化回执**，不再是裸 turn 数）：
+//! 1. `HostControlPlane::upload_session_trace` 入口签名：
+//!    `Result<crate::agent::otel::UploadTraceReceipt, String>`
+//!    （`turns` / `trace_ids` / `failures`；前端提示与失败明细依赖该结构）；
 //! 2. 实现必须转调 `otel::force_export_session_trace`（旁路全局开关 = 用户点击即逐次授权）；
-//! 3. 空会话不发起任何导出，直接 `Ok(0)`（零 egress）；
+//! 3. 空会话不发起任何导出，直接 `Ok(UploadTraceReceipt::default())`（零 egress）；
 //! 4. 控制面实现不得再引用 PonySentry trace 模块。
 //!
 //! 行为级证明在 `otel_trace_migration_test.rs` 的 OT-6（本地 OTLP sink + wire 级断言）；
@@ -38,7 +39,8 @@ const QUERY_COMMANDS: &str = "crates/pony-agent-core/src/agent/control_plane/que
 #[test]
 fn upload_session_trace_delegates_to_otel_replay() {
     let source = read_repo_source(QUERY_COMMANDS);
-    let body = slice_after(&source, "pub async fn upload_session_trace(", 1_200);
+    // 窗口随签名长度调整（P1-3 起返回类型变长：`Result<UploadTraceReceipt, String>`）。
+    let body = slice_after(&source, "pub async fn upload_session_trace(", 2_000);
 
     assert!(
         body.contains("crate::agent::otel::force_export_session_trace("),
@@ -51,24 +53,24 @@ fn upload_session_trace_delegates_to_otel_replay() {
 }
 
 #[test]
-fn upload_session_trace_keeps_result_usize_contract() {
+fn upload_session_trace_keeps_structured_receipt_contract() {
     let source = read_repo_source(QUERY_COMMANDS);
-    // 签名冻结：前端 toast 依赖「已上传 N 轮」的数值语义。
+    // 签名冻结（P1-3 契约更新）：前端回执文案依赖 `turns/traceIds/failures` 结构化语义，
+    // 不再使用裸 turn 数。
     assert!(
-        source.contains(
-            "pub async fn upload_session_trace(&self, session_id: &str) -> Result<usize, String>"
-        ),
-        "D5：upload_session_trace 签名必须保持 `(&self, session_id: &str) -> Result<usize, String>`"
+        source.contains("-> Result<crate::agent::otel::UploadTraceReceipt, String>"),
+        "P1-3：upload_session_trace 必须返回结构化回执 `-> Result<UploadTraceReceipt, String>`"
     );
 }
 
 #[test]
 fn empty_session_short_circuits_with_zero_egress() {
     let source = read_repo_source(QUERY_COMMANDS);
-    let body = slice_after(&source, "pub async fn upload_session_trace(", 1_200);
+    // 窗口随签名长度调整（P1-3 起返回类型变长：`Result<UploadTraceReceipt, String>`）。
+    let body = slice_after(&source, "pub async fn upload_session_trace(", 2_000);
 
     assert!(
-        body.contains("traces.is_empty()") && body.contains("Ok(0)"),
-        "D5：空会话必须直接返回 Ok(0)，不得触发导出，实际片段：{body}"
+        body.contains("traces.is_empty()") && body.contains("UploadTraceReceipt::default()"),
+        "P1-3：空会话必须直接返回 `Ok(UploadTraceReceipt::default())`（零 egress，语义同旧 Ok(0)），实际片段：{body}"
     );
 }

@@ -11,7 +11,8 @@
 //!    `langfuse.observation.model.name` / token 用量键；缺失值不输出该键。
 //! 3. OT-4 工具属性：`gen_ai.tool.name` / `langfuse.observation.type=tool` / status / duration / error。
 //! 4. turn 属性：session/trace name/operation/turn id/sequence/phase + user_id 有则带。
-//! 5. OT-6 手动导出旁路（A4）：签名冻结、`Ok(2)` 数量契约、**不改变 gate 末态**、
+//! 5. OT-6 手动导出旁路（A4 + P1-3 回执）：签名冻结为 `Result<UploadTraceReceipt, String>`、
+//!    `receipt.turns == 2` 回执契约、**不改变 gate 末态**、
 //!    真实落到本地 sink 的 `POST /v1/traces` + wire 级 body 断言。
 //! 6. OT-7 退役守卫：13 个待退役符号 0 命中 + 8 个保留面符号仍存在（双向，防过度删除）。
 //! 7. OT-8 设置持久化：缺省 false / camelCase 键往返 / legacy 无键容错（本地临时文件），
@@ -593,21 +594,37 @@ fn ot6_force_export_bypasses_closed_gate_and_keeps_gate_state() {
     let (port, sink) = spawn_otlp_sink(Duration::from_millis(1_500));
     otel::init(local_config(port)).expect("D3/A3：本地回环端点必须可装配");
 
+    // P1-3：两条 turn 各带真实 trace_id ⇒ 回执的 `trace_ids` 与 `turns` 口径可比
+    // （实现只在 record.trace_id 已知时收集 id；不带 id 时 trace_ids 合法为空）。
     let traces = vec![
-        turn_record("sess-otel-ot6", "turn-otel-ot6-1", "completed"),
-        turn_record("sess-otel-ot6", "turn-otel-ot6-2", "failed"),
+        TurnTraceRecord {
+            trace_id: Some("0123456789abcdef0123456789abcdef".to_string()),
+            ..turn_record("sess-otel-ot6", "turn-otel-ot6-1", "completed")
+        },
+        TurnTraceRecord {
+            trace_id: Some("fedcba9876543210fedcba9876543210".to_string()),
+            ..turn_record("sess-otel-ot6", "turn-otel-ot6-2", "failed")
+        },
     ];
 
-    // 签名冻结（A4）：函数指针类型检查，签名漂移即编译失败。
-    let seam: fn(&str, &[TurnTraceRecord]) -> Result<usize, String> =
+    // 签名冻结（A4 + P1-3 回执）：函数指针类型检查，签名漂移即编译失败。
+    let seam: fn(&str, &[TurnTraceRecord]) -> Result<otel::UploadTraceReceipt, String> =
         otel::force_export_session_trace;
 
     // Act 1：门禁**关闭**下逐次授权导出（旁路）。
     otel::set_reporting_enabled(false);
+    let receipt = seam("sess-otel-ot6", &traces).expect("A4/OT-6：手动导出必须成功返回结构化回执");
     assert_eq!(
-        seam("sess-otel-ot6", &traces),
-        Ok(2),
-        "A4/OT-6：手动导出必须返回成功导出的 turn 数（2 条记录 ⇒ Ok(2)）"
+        receipt.turns, 2,
+        "A4/OT-6：手动导出回执 turns 必须为 2（2 条记录；P1-3 结构化回执）"
+    );
+    // P1-3：`turns` 计已成功 flush 的 chunk；`trace_id` 可能缺失（未采样/未 init/历史记录），
+    // 故 id 数只能 ≤ turns —— 相等不是全局不变量。
+    assert!(
+        receipt.trace_ids.len() <= receipt.turns,
+        "P1-3：回执 trace_ids 数不得多于 turns（{} > {}）",
+        receipt.trace_ids.len(),
+        receipt.turns
     );
     assert!(
         !otel::is_reporting_enabled(),
@@ -616,10 +633,17 @@ fn ot6_force_export_bypasses_closed_gate_and_keeps_gate_state() {
 
     // Act 2：门禁**开启**下重复导出，数量契约不变且门禁末态保持 true（副作用检测）。
     otel::set_reporting_enabled(true);
+    let repeated = seam("sess-otel-ot6", &traces).expect("OT-6：重复调用必须成功返回结构化回执");
     assert_eq!(
-        seam("sess-otel-ot6", &traces),
-        Ok(2),
-        "OT-6：重复调用数量契约不变（幂等重放，允许产生多条 trace）"
+        repeated.turns, 2,
+        "OT-6：重复调用回执 turns 契约不变（幂等重放，允许产生多条 trace）"
+    );
+    // 同上：`trace_id` 可能缺失，id 数只能 ≤ turns。
+    assert!(
+        repeated.trace_ids.len() <= repeated.turns,
+        "P1-3：重复调用回执 trace_ids 数不得多于 turns（{} > {}）",
+        repeated.trace_ids.len(),
+        repeated.turns
     );
     assert!(
         otel::is_reporting_enabled(),

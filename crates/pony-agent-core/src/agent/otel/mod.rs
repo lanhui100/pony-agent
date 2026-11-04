@@ -1201,18 +1201,45 @@ impl TurnScope {
     }
 }
 
+/// P1-3：手动上传 trace 的**结构化回执**（前端直接消费 `turns` / `traceIds` / `failures`）。
+///
+/// 语义：
+/// - `turns`：真正完成 flush 的 turn 数（不是入队条数）；
+/// - `trace_ids`：**成功导出**的 trace id（按导出顺序；无 trace_id 的 turn 不计入）；
+/// - `failures`：每批失败原因（空 = 全部成功）。**部分成功时二者同时非空** —— 既不把失败
+///   吞成成功，也不因为一批失败就丢弃已成功的 turn。
+#[derive(serde::Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadTraceReceipt {
+    pub turns: usize,
+    pub trace_ids: Vec<String>,
+    pub failures: Vec<String>,
+}
+
 /// 手动上传的强制导出入口（旁路全局开关）。
 ///
 /// 调用方：控制面 `upload_session_trace` 转调（用户点击上传按钮 = 逐次授权）。
-/// 语义：把 `traces` 重放为 span 树并强制导出，返回成功导出的 turn 数；
+/// 语义：把 `traces` 重放为 span 树并强制导出，返回**结构化回执**（P1-3）；
 /// **不受** [`is_reporting_enabled`] 约束，且**不得改变**该开关的末态（用后复原）。
-/// 失败语义：导出失败返回 `Err(String)`；重复调用幂等（数量契约不变，允许产生多条 trace）。
+/// 失败语义：空入参 ⇒ `Ok(空回执)`；单批失败只进 `failures`（已成功的 turn/trace_id 仍返回），
+/// 只有「回执本身不可构造」这类不变量破坏才 `Err`。重复调用幂等（允许产生多条 trace）。
 pub fn force_export_session_trace(
     session_id: &str,
     traces: &[crate::agent::session::TurnTraceRecord],
-) -> Result<usize, String> {
-    let state = current_state()
-        .ok_or_else(|| "otel::force_export_session_trace：尚未 init，无法导出".to_string())?;
+) -> Result<UploadTraceReceipt, String> {
+    // P1-3：空列表 ⇒ 空回执（**不** Err），让「无可上传内容」与「上传失败」在调用方彻底分开。
+    if traces.is_empty() {
+        return Ok(UploadTraceReceipt::default());
+    }
+    // P1-3：导出器未初始化属于「失败」而不是「崩溃」——原因写进回执 failures，
+    // 让前端如实显示「未完成上传」，而不是静默吞掉或只抛一个恐慌式错误。
+    let Some(state) = current_state() else {
+        return Ok(UploadTraceReceipt {
+            turns: 0,
+            trace_ids: Vec::new(),
+            failures: vec!["otel::force_export_session_trace：尚未 init，无法导出".to_string()],
+        });
+    };
 
     // A8：按批量管道上限分块重放，**每块 flush 成功后才计入已交付**；
     // 返回值是「实际完成 flush 的 turn 数」，不是入队条数。
@@ -1224,7 +1251,7 @@ pub fn force_export_session_trace(
     // 3000ms 导致的 N×3000ms（如 2 块 6s）超时膨胀。
     let total_deadline = std::time::Instant::now()
         + Duration::from_millis(FORCE_EXPORT_FLUSH_TIMEOUT_MS);
-    let mut delivered: usize = 0;
+    let mut receipt = UploadTraceReceipt::default();
     let chunks: Vec<&[crate::agent::session::TurnTraceRecord]> =
         traces.chunks(FORCE_EXPORT_CHUNK_TURNS).collect();
     let total_chunks = chunks.len();
@@ -1233,13 +1260,16 @@ pub fn force_export_session_trace(
         let remaining = total_deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             let skipped = total_chunks - chunk_idx;
-            return Err(format!(
+            receipt.failures.push(format!(
                 "otel::force_export_session_trace：整体导出预算已耗尽（{FORCE_EXPORT_FLUSH_TIMEOUT_MS}ms），剩余 {skipped} 个 chunk 未发送"
             ));
+            break;
         }
         let chunk_timeout_ms = (remaining.as_millis() as u64)
             .min(FORCE_EXPORT_FLUSH_TIMEOUT_MS)
             .max(1);
+        // 本批 trace id 先暂存：只有本批 flush 成功才计入成功回执（部分成功不得被吞）。
+        let mut chunk_trace_ids: Vec<String> = Vec::with_capacity(chunk.len());
 
         for (offset, record) in chunk.iter().enumerate() {
             let record_session = record
@@ -1266,13 +1296,31 @@ pub fn force_export_session_trace(
                 &opentelemetry::Context::new(),
             );
             span.end();
+            if let Some(trace_id) = record
+                .trace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                chunk_trace_ids.push(trace_id.to_string());
+            }
         }
-        flush_state(&state, chunk_timeout_ms)
-            .map_err(|message| format!("otel::force_export_session_trace：{message}"))?;
-        delivered += chunk.len();
+        match flush_state(&state, chunk_timeout_ms) {
+            Ok(()) => {
+                receipt.turns += chunk.len();
+                receipt.trace_ids.extend(chunk_trace_ids);
+            }
+            Err(message) => {
+                receipt.failures.push(format!(
+                    "chunk {}/{}: {message}",
+                    chunk_idx + 1,
+                    total_chunks
+                ));
+            }
+        }
     }
 
-    Ok(delivered)
+    Ok(receipt)
 }
 
 /// turn 属性映射（纯函数，无网络、无全局态）。
@@ -4008,9 +4056,10 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let exported = force_export_session_trace("sess-forced-upload", &traces)
+        let receipt = force_export_session_trace("sess-forced-upload", &traces)
             .expect("关闭态手动上传必须成功（旁路按 span 打标）");
-        assert_eq!(exported, 2, "A8：返回值必须是实际完成 flush 的 turn 数");
+        assert_eq!(receipt.turns, 2, "A8/P1-3：回执 turns 必须是实际完成 flush 的 turn 数");
+        assert!(receipt.failures.is_empty(), "P1-3：成功导出不得带失败原因：{receipt:?}");
         assert!(!is_reporting_enabled(), "F6：手动上传不得改写门禁末态");
 
         shutdown();
@@ -4143,9 +4192,11 @@ mod tests {
         let result = force_export_session_trace("sess-probe-600", &traces);
         let elapsed = started.elapsed();
 
+        // P1-3：失败不再以 Err 表达，而是进入回执 failures（不静默、不 panic）。
+        let receipt = result.expect("P1-3：失败路径也必须返回回执（不得 panic）");
         assert!(
-            result.is_err(),
-            "黑洞端点下单块导出必须返回 Err（不得 panic）：{result:?}"
+            !receipt.failures.is_empty(),
+            "黑洞端点下单块导出必须把失败写进回执 failures：{receipt:?}"
         );
         assert!(
             elapsed <= Duration::from_millis(3_250),
@@ -4193,9 +4244,11 @@ mod tests {
         let result = force_export_session_trace("sess-probe-4chunk", &traces);
         let elapsed = started.elapsed();
 
+        // P1-3：多块失败同样进回执 failures（部分成功时已成功的 turn 仍保留在 turns/traceIds）。
+        let receipt = result.expect("P1-3：失败路径也必须返回回执（不得 panic）");
         assert!(
-            result.is_err(),
-            "黑洞端点下多块导出必须返回 Err：{result:?}"
+            !receipt.failures.is_empty(),
+            "黑洞端点下多块导出必须把失败写进回执 failures：{receipt:?}"
         );
         assert!(
             elapsed <= Duration::from_millis(3_250),

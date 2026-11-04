@@ -727,12 +727,14 @@ async fn list_sessions(app: AppHandle) -> Result<Vec<SessionOverview>, String> {
 }
 
 /// Trace tab 一键上传：手动上报指定会话的持久化 trace 至 PonySentry。
-/// 返回实际上报的 turn 数量（空会话返回 0）。
+///
+/// P1-3：返回**结构化回执**（`{ turns, traceIds, failures }`，camelCase），前端据此给出
+/// 「全部成功 / 部分成功 / 没有可上传」三态反馈；空会话返回空回执而不是 `0`。
 #[tauri::command]
 async fn upload_session_trace(
     control_plane: State<'_, HostControlPlane>,
     session_id: String,
-) -> Result<usize, String> {
+) -> Result<pony_agent_core::agent::otel::UploadTraceReceipt, String> {
     control_plane.upload_session_trace(&session_id).await
 }
 

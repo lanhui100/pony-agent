@@ -52,11 +52,18 @@ impl HostControlPlane {
     /// 手动上传指定会话的 trace 至 Langfuse（Trace tab 一键上传，D5 迁移）。
     ///
     /// 读取会话全部持久化 turn trace，经 OTel 重放为 span 树并强制导出（旁路全局上报开关：
-    /// 用户点击即逐次授权）。返回导出的 turn 数；无 trace 返回 `Ok(0)`。
-    pub async fn upload_session_trace(&self, session_id: &str) -> Result<usize, String> {
+    /// 用户点击即逐次授权）。
+    ///
+    /// P1-3：返回**结构化回执**（`turns` / `traceIds` / `failures`），透传
+    /// [`crate::agent::otel::force_export_session_trace`] 的结果；无 trace 返回 `Ok(空回执)`
+    /// （不是 `Ok(0)`，让调用方能区分「没有可上传」与「上传了但失败」）。
+    pub async fn upload_session_trace(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::agent::otel::UploadTraceReceipt, String> {
         let traces = self.load_session_traces(session_id);
         if traces.is_empty() {
-            return Ok(0);
+            return Ok(crate::agent::otel::UploadTraceReceipt::default());
         }
         // task-10：导出是**阻塞**调用（每块最长 3000ms），必须移出 async worker，
         // 否则一次手动上传会把 tokio worker 占住数秒。非 async 上下文（std 单测/CLI）
