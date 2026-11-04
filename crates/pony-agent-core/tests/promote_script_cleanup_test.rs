@@ -17,7 +17,7 @@
 //! 本文件是**外部黑盒验收**（integration test，独立 crate）：只经 `ProcessBackend` 与
 //! `jobs` 公开 API 操作，不读私有字段、不吞异常、不使用永真断言。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pony_agent_core::agent::jobs::{
@@ -256,7 +256,7 @@ fn undeletable_script_path() -> PathBuf {
 
 #[cfg(not(windows))]
 fn undeletable_script_path() -> PathBuf {
-    Path::new("/proc/1/pony-agent-b013-does-not-exist.cmd").to_path_buf()
+    std::path::Path::new("/proc/1/pony-agent-b013-does-not-exist.cmd").to_path_buf()
 }
 
 /// CT-B013-3：脚本清理失败不得 panic、不得把作业状态改成失败。
