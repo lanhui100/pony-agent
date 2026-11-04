@@ -4380,6 +4380,8 @@ mod tests {
                     updated_at: 0,
                     usage_origin: None,
                     context_input_tokens: None,
+                    degraded: None,
+                    tool_failures: None,
                 },
             );
         }
@@ -4515,6 +4517,8 @@ mod tests {
                     updated_at: 0,
                     context_input_tokens: None,
                     usage_origin: None,
+                    degraded: None,
+                    tool_failures: None,
                 },
             );
             runtime.record_turn_trace_for_test(
@@ -4612,6 +4616,8 @@ mod tests {
                     updated_at: 0,
                     context_input_tokens: None,
                     usage_origin: None,
+                    degraded: None,
+                    tool_failures: None,
                 },
             );
         }

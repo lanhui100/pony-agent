@@ -810,6 +810,10 @@ export type TurnTraceRecord = {
   /** PA-094：大字段外置引用（`bco:<turn_id>:<seq>`）。新数据走引用（按需加载），
    *  legacy 内嵌数据保留 buildContextObservation 读取兼容。 */
   buildContextObservationRef?: string | null;
+  /** C2：本轮是否降级（有工具失败但轮次正常收尾）；后端仅在 `true` 时写键。 */
+  degraded?: boolean;
+  /** C2：本轮工具失败次数；后端仅在 `> 0` 时写键。 */
+  toolFailures?: number;
   sessionSummary?: string | null;
   fallbackReason?: string | null;
   error?: string | null;

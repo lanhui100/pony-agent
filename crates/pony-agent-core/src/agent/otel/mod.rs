@@ -3366,6 +3366,15 @@ fn accumulate_active_turn_tool_failure() {
 ///
 /// 语义：与 [`take_active_turn_cost`] 同为**读取**（登记项由
 /// [`unregister_active_turn`] 摘除，无需在此清零）；`0` ⇒ 根 span 不输出该键。
+/// C1（P1-2 收尾）：读取当前活动 turn 的累计工具失败计数（供会话 `TurnTraceRecord`
+/// 回填 `tool_failures` / `degraded`，与根 span **同源同口径**）。
+///
+/// 只读不清零：登记项由 [`unregister_active_turn`] 摘除，因此 trace 落库与 span 收尾
+/// 谁先谁后都能读到同一个数。
+pub(crate) fn active_turn_tool_failures() -> u64 {
+    take_active_turn_tool_failures()
+}
+
 fn take_active_turn_tool_failures() -> u64 {
     if let Some(task_id) = current_task_id() {
         let guard = ACTIVE_TURNS

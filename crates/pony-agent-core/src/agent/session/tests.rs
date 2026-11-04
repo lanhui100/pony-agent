@@ -3389,6 +3389,8 @@ fn file_backend_roundtrip_restores_turn_trace_history() {
             updated_at: 0,
             context_input_tokens: None,
             usage_origin: None,
+            degraded: None,
+            tool_failures: None,
         },
     );
 
@@ -3539,6 +3541,8 @@ fn file_backend_roundtrip_restores_runtime_generated_multi_boundary_hook_traces(
             updated_at: 0,
             usage_origin: None,
             context_input_tokens: None,
+            degraded: None,
+            tool_failures: None,
         },
     );
 
@@ -3651,6 +3655,8 @@ fn file_backend_roundtrip_restores_terminal_event_annotation_after_trace_update(
             updated_at: 0,
             usage_origin: None,
             context_input_tokens: None,
+            degraded: None,
+            tool_failures: None,
         },
     );
 
@@ -3769,6 +3775,8 @@ fn append_turn_trace_hook_records_updates_existing_trace_and_roundtrips() {
             updated_at: 0,
             usage_origin: None,
             context_input_tokens: None,
+            degraded: None,
+            tool_failures: None,
         },
     );
 
@@ -4043,6 +4051,8 @@ fn file_backend_roundtrip_restores_checkpoint_persist_evidence() {
             updated_at: 0,
             usage_origin: None,
             context_input_tokens: None,
+            degraded: None,
+            tool_failures: None,
         },
     );
 
@@ -4208,6 +4218,8 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
             updated_at: 0,
             context_input_tokens: None,
             usage_origin: None,
+            degraded: None,
+            tool_failures: None,
         },
     );
 
@@ -4322,6 +4334,8 @@ fn file_backend_roundtrip_persists_failed_turn_into_visible_history() {
             updated_at: 0,
             usage_origin: None,
             context_input_tokens: None,
+            degraded: None,
+            tool_failures: None,
         },
     );
 
@@ -4484,6 +4498,8 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
             updated_at: 0,
             context_input_tokens: None,
             usage_origin: None,
+            degraded: None,
+            tool_failures: None,
         },
     );
 

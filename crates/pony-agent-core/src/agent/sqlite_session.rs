@@ -3529,6 +3529,8 @@ mod tests {
             updated_at,
             usage_origin: None,
             context_input_tokens: None,
+            degraded: None,
+            tool_failures: None,
         }
     }
 

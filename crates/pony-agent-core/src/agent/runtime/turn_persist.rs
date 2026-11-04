@@ -249,6 +249,8 @@ impl AgentRuntime {
         );
         // 内存更新同步（快），SQLite 落库通过后台队列异步执行，
         // 避免 trace（可观测性）写盘阻塞主对话执行路径。
+        // C1：健康度字段取自 OTel 同一计数器（与根 span 的 tool_failures/degraded 同源同口径）。
+        let (degraded, tool_failures) = Self::session_trace_health_fields(phase);
         let (session_key, mutation) = self
             .sessions
             .write()
@@ -306,6 +308,8 @@ impl AgentRuntime {
                     context_input_tokens: None,
                     input_text: Some(user_message.to_string()),
                     output_text: return_text.as_deref().map(str::to_string),
+                    degraded,
+                    tool_failures,
                     updated_at: 0,
                 },
             );
@@ -415,6 +419,21 @@ impl AgentRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// C1（P1-2 收尾）：把 **OTel 侧同一计数器**回填到会话 trace 记录。
+    ///
+    /// 口径与根 span 完全一致（**不新建第二份统计**）：
+    /// - `tool_failures`：`agent.turn.tool_failures` 的同一计数，`> 0` 才落值；
+    /// - `degraded`：同一计数 `> 0` **且** `phase == "completed"`（部分失败但轮次正常收尾）。
+    ///
+    /// 返回 `(degraded, tool_failures)`，两个 `Option` 都会被 `TurnTraceRecord` 的
+    /// 值敏感序列化过滤（`Some(false)`/`Some(0)` 同样不写键）。
+    fn session_trace_health_fields(phase: &str) -> (Option<bool>, Option<usize>) {
+        let failures = crate::agent::otel::active_turn_tool_failures();
+        let tool_failures = usize::try_from(failures).ok().filter(|count| *count > 0);
+        let degraded = (phase == "completed" && tool_failures.is_some()).then_some(true);
+        (degraded, tool_failures)
+    }
+
     pub(crate) fn fail_stream_turn_with_hook_dispatch(
         &self,
         sink: &impl TurnEventSink,
@@ -620,6 +639,8 @@ impl AgentRuntime {
             // Wave-15 R2：失败轮同样按序号写入已发生调用的 per-call 指标。
             &provider_call_records,
         );
+        // C1：失败轮的健康度字段（同一 OTel 计数器；phase="failed" ⇒ degraded=None）。
+        let failed_turn_health = Self::session_trace_health_fields("failed");
         self.sessions
             .write()
             .unwrap_or_else(|e| {
@@ -673,6 +694,10 @@ impl AgentRuntime {
                     context_input_tokens: None,
                     input_text: Some(user_message.to_string()),
                     output_text: None,
+                    // C1：失败轮同样取同一 OTel 计数；`phase="failed"` ⇒ degraded 天然为 None
+                    // （与根 span 语义一致：degraded 只在「有工具失败但轮次 completed」时成立）。
+                    degraded: failed_turn_health.0,
+                    tool_failures: failed_turn_health.1,
                     updated_at: 0,
                 },
             );
@@ -729,6 +754,8 @@ impl AgentRuntime {
             None,
         );
         // 必需行为 1：按 turn_id 幂等 upsert 持久化 failed trace。
+        // C1：watchdog 失败落盘同样带健康度字段（同源同口径）。
+        let failed_turn_health = Self::session_trace_health_fields("failed");
         self.sessions
             .write()
             .unwrap_or_else(|e| {
@@ -781,6 +808,10 @@ impl AgentRuntime {
                     context_input_tokens: None,
                     input_text: Some(user_message.to_string()),
                     output_text: None,
+                    // C1：失败轮同样取同一 OTel 计数；`phase="failed"` ⇒ degraded 天然为 None
+                    // （与根 span 语义一致：degraded 只在「有工具失败但轮次 completed」时成立）。
+                    degraded: failed_turn_health.0,
+                    tool_failures: failed_turn_health.1,
                     updated_at: 0,
                 },
             );

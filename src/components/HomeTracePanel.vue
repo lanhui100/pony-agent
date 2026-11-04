@@ -28,6 +28,7 @@ import type {
   TurnTraceRecord
 } from "@/types/runtime";
 import Tooltip from "@/components/ui/Tooltip.vue";
+import { turnHealthLabel, turnHealthTitle } from "@/lib/runtime/turn-health";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import {
   computeVirtualTurnWindow,
@@ -1520,6 +1521,15 @@ function resolveBuildContextObservation(
                   }"
                 />
                 <span class="truncate">{{ turn.title }}</span>
+              </div>
+              <!-- C2：轮次健康度（降级 / 工具失败 N）。独立 v-if，不改上方标题与指标行的渲染条件。 -->
+              <div
+                v-if="turnHealthLabel(turn)"
+                class="pl-[1.125rem] text-[11px] text-stone-400"
+                :title="turnHealthTitle(turn) ?? undefined"
+                data-turn-health
+              >
+                {{ turnHealthLabel(turn) }}
               </div>
               <div v-if="buildTurnMetricItems(turn).length" class="pl-[1.125rem] flex flex-nowrap items-center gap-x-3 text-[10px] leading-[1.15] text-stone-400">
                 <Tooltip v-for="item in buildTurnMetricItems(turn)" :key="item.tooltip" :text="item.tooltip">

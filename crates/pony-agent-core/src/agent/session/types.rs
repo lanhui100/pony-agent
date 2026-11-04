@@ -743,8 +743,29 @@ pub struct TurnTraceRecord {
     pub input_text: Option<String>,
     #[serde(default)]
     pub output_text: Option<String>,
+    /// C1（P1-2 收尾）：本轮是否**降级**（有工具失败但轮次仍 completed）。
+    ///
+    /// 与 OTel 根 span 的 `agent.turn.degraded` **同源同口径**（`tool_failures > 0 && phase ==
+    /// "completed"`）。序列化按**值**过滤：`None`/`Some(false)` 都不写键（避免给 UI 制造噪音）。
+    #[serde(default, skip_serializing_if = "degraded_flag_is_absent")]
+    pub degraded: Option<bool>,
+    /// C1：本轮工具失败次数（来自 OTel `agent.turn.tool_failures` 同一计数器）。
+    ///
+    /// 序列化按**值**过滤：`None`/`Some(0)` 都不写键（`0` 不是「信息」，只是噪音）。
+    #[serde(default, skip_serializing_if = "tool_failure_count_is_absent")]
+    pub tool_failures: Option<usize>,
     #[serde(default)]
     pub updated_at: u64,
+}
+
+/// C1：`degraded` 的序列化过滤 —— 仅 `Some(true)` 才写键。
+fn degraded_flag_is_absent(value: &Option<bool>) -> bool {
+    !matches!(value, Some(true))
+}
+
+/// C1：`tool_failures` 的序列化过滤 —— 仅 `Some(n)` 且 `n > 0` 才写键。
+fn tool_failure_count_is_absent(value: &Option<usize>) -> bool {
+    !matches!(value, Some(count) if *count > 0)
 }
 
 impl TurnTraceRecord {

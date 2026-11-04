@@ -172,9 +172,9 @@ describe("TelemetryPage", () => {
       sessionId: expect.any(String)
     });
     await Promise.resolve();
-    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("已成功上传该会话 Trace（共 3 轮对话）");
+    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("已成功上传 3 轮对话至 Langfuse。");
     // Wave43 D5/UI-2：上传目标由 PonySentry 迁移到 Langfuse，全页不得残留旧品牌。
-    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("已成功上传会话 Trace（包含 3 轮对话链路）至 Langfuse");
+    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("已成功上传 3 轮对话至 Langfuse。");
     expect(wrapper.html()).not.toContain("PonySentry");
     // Wave43 U3/A5：单会话上传为逐次授权动作，需常驻「与全局开关互不影响」的独立说明。
     expect(wrapper.find('[data-testid="telemetry-upload-independent-note"]').exists()).toBe(true);
@@ -183,8 +183,8 @@ describe("TelemetryPage", () => {
     tauriMocks.mockSafeInvoke.mockResolvedValueOnce(0);
     await uploadBtn.trigger("click");
     await Promise.resolve();
-    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("本会话暂无 Trace 数据");
-    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("当前会话暂无已完成的持久化 Trace 数据可上传");
+    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("当前会话没有可上传的 Trace 数据。");
+    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("当前会话没有可上传的 Trace 数据。");
 
     // 3. 上传异常友好 Toast 与错误提示
     tauriMocks.mockSafeInvoke.mockRejectedValueOnce(new Error("服务端响应异常 (401)"));
