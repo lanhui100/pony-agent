@@ -12251,3 +12251,222 @@ fn d2_batch_tool_results_length_mismatch_sends_zero_requests() {
         stream_recorded.len()
     );
 }
+
+// ─────────── D3a（P1-1 / B018）：非流式路径的**批量**工具执行 ───────────
+
+/// 一次上游响应携带**多个**调用（保序），供批执行用例使用。
+fn decision_tool_calls_batch(calls: &[(&str, serde_json::Value)]) -> serde_json::Value {
+    let tool_calls: Vec<serde_json::Value> = calls
+        .iter()
+        .map(|(name, arguments)| {
+            json!({
+                "id": format!("call_{}", name),
+                "type": "function",
+                "function": { "name": name, "arguments": arguments.to_string() }
+            })
+        })
+        .collect();
+    json!({
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "一次执行这些工具。",
+                    "reasoning_content": "需要一次执行多个工具调用。",
+                    "tool_calls": tool_calls
+                }
+            }
+        ]
+    })
+}
+
+/// Ask 类工具执行器：`ask_user` 返回 `control_outcome_pending`（真实治理层的挂起标记形态），
+/// 其余调用透传 Stub；每次调用都记录名字，用于断言「批到 Ask 即停」。
+struct AskPendingToolExecutor {
+    executed: Arc<Mutex<Vec<String>>>,
+}
+
+impl crate::agent::tools::ToolExecutor for AskPendingToolExecutor {
+    fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+        self.executed.lock().unwrap().push(call.name.clone());
+        let is_ask = crate::agent::tools::canonical_tool_name(&call.name)
+            .map(|canonical| canonical == "ask_user")
+            .unwrap_or(false);
+        if !is_ask {
+            return StubToolExecutor.execute(call);
+        }
+        crate::agent::tools::ToolResult {
+            tool_name: call.name.clone(),
+            status: "error".to_string(),
+            output: json!({
+                "ok": false,
+                "error": {
+                    "code": "control_outcome_pending",
+                    "kind": "control_outcome_pending",
+                    "message": "Ask 等待宿主应答。"
+                }
+            })
+            .to_string(),
+            duration_ms: 0,
+        }
+    }
+}
+
+/// D3a ①：OpenAI 一次返回 2 个 `tool_calls` ⇒ **两个工具都执行**（两份工具结果），
+/// 且批后**一次** followup 的请求体是「1 条 assistant（含全部 tool_calls）+ 2 条 `role=tool`」。
+#[test]
+fn run_turn_executes_batch_of_openai_tool_calls_and_backfills_one_assistant_plus_n_tool_messages() {
+    let final_text = "两个工具都已执行完成。";
+    let server = MockHttpServer::start(vec![
+        json_response(decision_tool_calls_batch(&[
+            ("workspace_list_files", json!({"path": ".", "limit": 40})),
+            ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+        ])),
+        json_completion(final_text),
+    ]);
+    let executed: Arc<Mutex<Vec<ToolCall>>> = Arc::new(Mutex::new(Vec::new()));
+    let runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(RecordingToolExecutor {
+            calls: Arc::clone(&executed),
+        }),
+    );
+
+    let result = runtime.run_turn(TurnInput {
+        message: "先看目录再读配置。".to_string(),
+        display_message: None,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        workspace_mode: None,
+        tool_authorization_mode: None,
+        session_id: Some("sync-batch-tool-calls".to_string()),
+        node_id: None,
+        history: Vec::new(),
+        images: Vec::new(),
+        workspace_id: None,
+        plan_execution_approval: None,
+    });
+    let request_bodies = server.finish();
+
+    assert_eq!(result.phase, "ready");
+    assert_eq!(result.assistant_message, final_text);
+
+    // ① 两个调用都执行，且顺序 = 上游顺序。
+    let recorded = executed.lock().unwrap().clone();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "批内两个调用都必须执行，实际 {recorded:?}"
+    );
+    assert_eq!(recorded[0].name, "workspace_list_files");
+    assert_eq!(recorded[1].name, "workspace_read_file");
+
+    // ② 两份工具结果（逐调用一条 hop 记录 ⇒ 两条顶层工具活动）。
+    assert_eq!(result.tool_activities.len(), 2);
+    // 工具活动用模型可见名（`List` / `Read`），顺序 = 批内执行顺序。
+    assert_eq!(result.tool_activities[0].name, "List");
+    assert_eq!(result.tool_activities[1].name, "Read");
+
+    // ③ 批后只有**一次** followup 请求（初始决策 1 + 批后 1 = 2），且形状为 1 assistant + N tool。
+    assert_eq!(
+        request_bodies.len(),
+        2,
+        "批执行后应只发一次 followup，实际请求数 {}",
+        request_bodies.len()
+    );
+    let followup: serde_json::Value =
+        serde_json::from_str(&request_bodies[1]).expect("followup 请求体必须是 JSON");
+    let messages = followup["messages"]
+        .as_array()
+        .expect("followup 请求体必须带 messages 数组");
+    let assistant_with_tool_calls: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter(|message| {
+            message["role"] == "assistant" && message.get("tool_calls").is_some()
+        })
+        .collect();
+    assert_eq!(
+        assistant_with_tool_calls.len(),
+        1,
+        "回填必须恰为一条 assistant 消息（携带全部 tool_calls），实际 messages={messages:?}"
+    );
+    let assistant_tool_calls = assistant_with_tool_calls[0]["tool_calls"]
+        .as_array()
+        .expect("assistant 消息的 tool_calls 必须是数组");
+    assert_eq!(
+        assistant_tool_calls.len(),
+        2,
+        "assistant 消息必须携带批内全部 2 个 tool_calls，实际 {assistant_tool_calls:?}"
+    );
+    let tool_messages: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert_eq!(
+        tool_messages.len(),
+        2,
+        "N 个结果必须各占一条 role=tool 消息，实际 messages={messages:?}"
+    );
+    assert_eq!(tool_messages[0]["tool_call_id"], "call_workspace_list_files");
+    assert_eq!(tool_messages[1]["tool_call_id"], "call_workspace_read_file");
+}
+
+/// D3a ③：批内出现 Ask（`ToolKind::Interactive`）⇒ 执行到 Ask 即悬挂，**剩余调用不执行**。
+#[test]
+fn run_turn_stops_batch_at_interactive_ask_and_leaves_remaining_calls_unexecuted() {
+    let server = MockHttpServer::start(vec![json_response(decision_tool_calls_batch(&[
+        ("workspace_list_files", json!({"path": ".", "limit": 40})),
+        ("ask_user", json!({"question": "继续吗？"})),
+        ("workspace_read_file", json!({"path": "tauri.conf.json"})),
+    ]))]);
+    let executed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(AskPendingToolExecutor {
+            executed: Arc::clone(&executed),
+        }),
+    );
+
+    let result = runtime.run_turn(TurnInput {
+        message: "先看目录，再问我，最后读配置。".to_string(),
+        display_message: None,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        workspace_mode: None,
+        tool_authorization_mode: None,
+        session_id: Some("sync-batch-ask-terminator".to_string()),
+        node_id: None,
+        history: Vec::new(),
+        images: Vec::new(),
+        workspace_id: None,
+        plan_execution_approval: None,
+    });
+    let request_bodies = server.finish();
+
+    // Ask 之后的第三个调用**不得**执行：执行次数恰为 2（List + ask_user）。
+    let recorded = executed.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["workspace_list_files".to_string(), "ask_user".to_string()],
+        "批必须在 Ask 处终止，剩余调用不得执行"
+    );
+    assert!(
+        !recorded.iter().any(|name| name == "workspace_read_file"),
+        "Ask 之后的调用绝不允许执行，实际 {recorded:?}"
+    );
+
+    // 挂起（既非完成也非失败），且没有发出 followup 请求。
+    assert_eq!(result.phase, SUSPENDED_TURN_PHASE);
+    assert!(result
+        .fallback_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("control_outcome_pending")));
+    assert_eq!(
+        request_bodies.len(),
+        1,
+        "Ask 挂起后不得再发 followup，实际请求数 {}",
+        request_bodies.len()
+    );
+}

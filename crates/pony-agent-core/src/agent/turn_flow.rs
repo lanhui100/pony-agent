@@ -3013,6 +3013,75 @@ pub fn provider_followup_with_mode<P: ProviderClient>(
     result
 }
 
+/// D3a：**批量**工具结果 followup（同步路径 N>1）。
+///
+/// 与 [`provider_followup_with_mode`] **同一** otel 口径（`llm.chat` 子 span + 请求形状 + usage/
+/// 耗时/成本记录），只是把「一份结果」换成「按执行顺序的一批结果」，交 provider 的
+/// `continue_with_tool_results` 组装 1 assistant + N 结果（D2 入口，形状由 D1b 构造器保证）。
+///
+/// 只接具体类型 `ProviderManager`：D2 的批量入口是固有方法而非 `ProviderClient` 的 trait 方法，
+/// 扩 trait 会把批量语义渗透到所有测试替身；批执行只发生在生产实现上（测试用 mock HTTP）。
+#[allow(clippy::too_many_arguments)]
+pub fn provider_followup_with_calls(
+    provider: &ProviderManager,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+    request_mode: LlmRequestMode,
+) -> Result<crate::agent::provider::ProviderResponse, String> {
+    // Wave43：llm.chat 子 span（工具结果后续轮）。
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix,
+    );
+    let start = std::time::Instant::now();
+    let result = provider.continue_with_tool_results(
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        calls,
+        results,
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            llm_span.record_call_timing(Some(elapsed_ms), None);
+            llm_span.record_usage_origin(usage.origin);
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
+}
+
 /// 兼容入口：等价于 [`provider_followup_stream_with_mode`] 传 [`LlmRequestMode::ToolFollowup`]。
 pub fn provider_followup_stream<P, F>(
     provider: &P,

@@ -105,3 +105,14 @@ N>1 未接 retry（避免 accumulated 二次追加）。
 
 **验收**（两波共用）：① 2 个调用都被执行且顺序保序；② 批后 followup 请求体 1 assistant + N 结果；
 ③ 单调用路径逐字不变；④ 熔断闸仍按 per-call 计数；⑤ 落地前做一次 Anthropic 真实回放（400 风险点）。
+
+## 8. D3a 已完成（turn_sync 批执行）—— 待提交
+
+- `turn_sync.rs:15` 签名改整批 `Vec<ToolCall>`；批内顺序执行（沿用原治理/沙箱/预算入口，逐调用 hop 与熔断计数）；
+  批后**一次** followup（N==1 逐字走 1:1，N>1 走 D2 批量入口）；`sync_tool_call_ends_batch`（`ToolKind::Interactive`）作批终止符。
+- `provider/mod.rs` 三条 OpenAI **非流式**入口不再丢弃多余调用（`tool_call` 单数入口逐字不变）——
+  不改它 `tool_calls` 恒 ≤1，批执行无从成立，属必要越界。
+- 门禁：`--lib` 1233/0、clippy 零新增、lifecycle 7 / stop_contract 7 / promote 9 全绿、audit-diff 0。
+- **已知偏差（D3b 前须处理）**：① 非 pending 的交互工具停批后剩余调用直接丢弃（无批内重放）；
+  ② 批内第 2..N 个调用未过 `normalize_tool_directive`；③ 重复调用闸只查批内首个（另有 per-call hop 限额硬停）；
+  ④ native transcript 仍 per-call 形状；⑤ `anthropic_rejects_multiple_tool_calls` 缺 `#[test]`（HEAD 即 dead_code），D3b 翻转时需补。

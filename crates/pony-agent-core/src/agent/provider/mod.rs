@@ -1348,12 +1348,11 @@ impl ProviderManager {
         let payload = self.post_openai_json(&endpoint, &body)?;
         let message = first_openai_message(&payload)?;
         let output_text = extract_openai_message_text(message).unwrap_or_default();
+        // D3a：非流式入口**不再丢弃**多余调用——整批 `tool_calls` 全量上报给运行时批执行
+        // （`runtime/turn_sync.rs`）；单值字段仍是首元素派生视图（D1a 不变量）。
+        let tool_calls = extract_openai_tool_calls(message);
+        // 单值字段继续走既有单数入口（= 复数版首元素的兼容包装，行为逐字不变）。
         let tool_call = extract_openai_tool_call(message);
-        warn_on_dropped_openai_tool_calls(
-            "openai_followup_sync_batch",
-            message,
-            tool_call.as_ref(),
-        );
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("openai tool follow-up missing text or tool call".to_string());
         }
@@ -1364,7 +1363,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
-            tool_calls: tool_calls_from_single(&tool_call),
+            tool_calls,
             tool_call,
             reasoning_content: extract_openai_message_reasoning_content(message),
             reasoning_content_value: extract_openai_message_reasoning_value(message),
@@ -1578,8 +1577,10 @@ impl ProviderManager {
         let payload = self.post_openai_json(&endpoint, &body)?;
         let message = first_openai_message(&payload)?;
         let output_text = extract_openai_message_text(message).unwrap_or_default();
+        // D3a：非流式入口**不再丢弃**多余调用（整批上报，运行时批执行）。
+        let tool_calls = extract_openai_tool_calls(message);
+        // 单值字段继续走既有单数入口（= 复数版首元素的兼容包装，行为逐字不变）。
         let tool_call = extract_openai_tool_call(message);
-        warn_on_dropped_openai_tool_calls("openai_followup_sync", message, tool_call.as_ref());
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("openai tool follow-up missing text or tool call".to_string());
         }
@@ -1590,7 +1591,7 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
-            tool_calls: tool_calls_from_single(&tool_call),
+            tool_calls,
             tool_call,
             reasoning_content: extract_openai_message_reasoning_content(message),
             reasoning_content_value: extract_openai_message_reasoning_value(message),
@@ -2304,16 +2305,14 @@ impl ProviderManager {
         });
         provider_log_token_usage("openai decision", &token_usage);
 
+        // D3a：非流式决策**不再丢弃**多余调用——整批 `tool_calls` 全量上报，由运行时批执行。
+        let decision_tool_calls = extract_openai_tool_calls(message);
+        // 单值字段继续走既有单数入口（= 复数版首元素的兼容包装，行为逐字不变）。
         let decision_tool_call = extract_openai_tool_call(message);
-        warn_on_dropped_openai_tool_calls(
-            "openai_decision",
-            message,
-            decision_tool_call.as_ref(),
-        );
 
         Ok(ProviderDecision {
             output_text: extract_openai_message_text(message).unwrap_or_default(),
-            tool_calls: tool_calls_from_single(&decision_tool_call),
+            tool_calls: decision_tool_calls,
             tool_call: decision_tool_call,
             reasoning_content: extract_openai_message_reasoning_content(message),
             reasoning_content_value: extract_openai_message_reasoning_value(message),
@@ -3662,10 +3661,10 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
 
 /// P1-1 最小切片：OpenAI 非流式响应含**多个** `tool_calls` 时不再静默丢弃。
 ///
-/// 本轮**只做「消除静默截断」**：仍只执行首个（与既有单数版一致），但对被丢弃的调用打一条
-/// 结构化告警（`dropped=N` + 各 name + kept），让 trace/日志能直接看出「上游一次给了几个」。
-/// 批量执行（1 assistant + N tool_result 回填、Ask 作批终止符）见
-/// `.dev-team/designs/multi-tool-call-execution.md`，**不在本轮**。
+/// D3a 之后 OpenAI 的三条非流式入口（decision / followup_sync / followup_sync_batch）都已
+/// 整批上报给运行时批执行，**本告警失去真实触发点**（不再有调用被丢弃）；保留纯函数与其单测
+/// 作为 D1a「静默截断」的回归凭证，待 D3b（流式站点批执行）落地后连同单测一并删除。
+#[allow(dead_code)]
 fn warn_on_dropped_openai_tool_calls(stage: &str, message: &Value, kept: Option<&ToolCall>) {
     if let Some(line) = openai_dropped_tool_calls_warning(stage, message, kept) {
         provider_log(line);
@@ -3677,6 +3676,9 @@ fn warn_on_dropped_openai_tool_calls(stage: &str, message: &Value, kept: Option<
 /// 格式：`multi_tool_calls_dropped stage=<stage> received=<N> dropped=<N-1> dropped_names=[…] kept=Some("…")`
 /// 语义：`stage` 区分 OpenAl 的两条非流式入口（decision / followup_sync），`dropped_names`
 /// 列出**未执行**的调用名（模型侧可据此判断是不是自己给多了）。
+///
+/// D3a 之后仅由单测调用（生产入口不再丢弃），见 [`warn_on_dropped_openai_tool_calls`] 的说明。
+#[allow(dead_code)]
 fn openai_dropped_tool_calls_warning(
     stage: &str,
     message: &Value,

@@ -64,7 +64,8 @@ use crate::agent::turn_flow::{
     emit_stream_failed, emit_turn_failed, normalize_user_message, preview_text,
     provider_decision_stream_guarded_with_mode, provider_decision_with_mode,
     provider_event_meta, provider_failure_message, provider_followup_stream_with_mode,
-    provider_followup_with_mode, runtime_log, stream_reasoning_chunks, stream_text_chunks,
+    provider_followup_with_calls, provider_followup_with_mode, runtime_log,
+    stream_reasoning_chunks, stream_text_chunks,
     token_usage_parts, ModelHopTraceContent, PersistedTurnOutcome, PlannedTurn, PreparedTurn,
     ProviderEventMeta, SyncToolTurnOutcome, TurnEventEnvelope, TurnEventSink,
 };

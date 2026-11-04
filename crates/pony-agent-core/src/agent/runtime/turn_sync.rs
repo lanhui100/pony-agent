@@ -1,6 +1,17 @@
 use super::*;
 
 impl AgentRuntime {
+    /// D3a（P1-1 / B018）：同步工具轮驱动 —— 一次上游响应里的**整批**工具调用都在本函数内执行。
+    ///
+    /// 批语义（`.dev-team/designs/multi-tool-call-execution.md` §3）：
+    /// - 批内**顺序**执行，逐调用复用 `execute_registered_tool_call_with_context`（治理/沙箱/预算
+    ///   路径与单调用完全一致），逐调用一条 [`ToolTurnHopRecord`]、逐调用计 hop 与熔断
+    ///   （per-call 计数语义，不因批而放宽）；
+    /// - 批执行完**一次** followup 回填整批结果（N>1 走 provider 的批量入口）；
+    /// - 交互类工具（`ToolKind::Interactive`：Ask / Permission 等）是**批终止符**：执行到它即停，
+    ///   其后调用不执行（Ask 的 `control_outcome_pending` 直接挂起本轮，剩余调用留给恢复后的
+    ///   下一 hop 重新规划）；
+    /// - **批长 1**（绝大多数场景）逐字走既有 1:1 路径：同一执行入口 + 同一 `provider_followup_with_mode`。
     fn handle_sync_tool_turn(
         &self,
         session_id: Option<&str>,
@@ -11,7 +22,7 @@ impl AgentRuntime {
         tools: &[ToolDefinition],
         planning_request: &ProviderRequest,
         first_decision: &ProviderDecision,
-        tool_call: ToolCall,
+        tool_calls: Vec<ToolCall>,
         initial_model_hook_trace_records: Vec<HookTraceRecord>,
         first_token_latency_ms: Option<u64>,
         turn_started_at: &Instant,
@@ -21,7 +32,7 @@ impl AgentRuntime {
         let context_observation = build_context_observation(planning_request, tools);
         let mut hop_records = Vec::new();
         let mut tool_activities = Vec::new();
-        let mut current_tool_call = tool_call;
+        let mut current_tool_calls = tool_calls;
         let mut current_assistant_message = first_decision.assistant_message.clone();
         let mut current_assistant_output_text = first_decision.output_text.clone();
         let mut current_assistant_reasoning = first_decision.reasoning_content.clone();
@@ -31,218 +42,270 @@ impl AgentRuntime {
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
         let mut accumulated_token_usage = first_decision.token_usage.clone();
         let mut hook_trace_records = initial_model_hook_trace_records;
-        let mut seen_tool_signatures = BTreeSet::from([tool_call_signature(&current_tool_call)]);
+        // 批内每个调用的签名都入集：跨 hop 的「同调用重放」判定口径不变（per-call）。
+        let mut seen_tool_signatures: BTreeSet<String> = current_tool_calls
+            .iter()
+            .map(tool_call_signature)
+            .collect();
         let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
 
         loop {
-            completed_hops += 1;
-            runtime_log(format!(
-                "turn:tool-execute hop={} name={} args={}",
-                completed_hops, current_tool_call.name, current_tool_call.arguments
-            ));
-            let tool_start_hook_outcome =
-                self.dispatch_hook_trace_records(TurnHookPoint::ToolCallStart);
-            hook_trace_records.extend(tool_start_hook_outcome.trace_records.clone());
-            if let Some(error) = tool_start_hook_outcome.fail_turn_error {
-                return Err(self.fail_sync_turn_result(
-                    Some(provider_meta),
-                    display_message,
-                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                    self.telemetry_builder
-                        .tool_activities_running(&current_tool_call),
-                    hook_trace_records,
-                    error,
-                ));
-            }
-
-            let execution_context = ToolExecutionContext {
-                workspace_root: self.resolve_session_workspace_root(session_id),
-                // L3 r2 A1：透传真实会话 id，触达注入按会话分桶（否则跨会话互相抑制）。
-                session_id: session_id.map(str::to_string),
-                // T2-1：turn 级治理事实随本次调用显式传入（并发 turn 之间不共享任何槽位）。
-                dispatch_context: governed_context.cloned(),
-                // wave-62 C3：治理事实里若带本轮令牌（stream 路径注入），工具层据此可被取消。
-                // 同步入口（`run_turn`）无 registry 句柄 ⇒ `None`，行为与 wave-61 一致。
-                cancellation: governed_context.and_then(|context| context.turn_cancellation.clone()),
-                ..Default::default()
-            };
-            let (tool_result, invocation_record, capability_hook_trace_records) =
-                self.execute_registered_tool_call_with_context(&current_tool_call, &execution_context);
-            hook_trace_records.extend(capability_hook_trace_records);
-            runtime_log(format!(
-                "turn:tool-result hop={} name={} status={} output_preview={}",
-                completed_hops,
-                tool_result.tool_name,
-                tool_result.status,
-                preview_text(&tool_result.output, 160)
-            ));
-            all_tools_ok &= tool_result.status == "ok";
-            // Wave43 task-8 挂载切片：实时路径「工具执行结束 → 产生 TurnToolActivity」单点。
-            // 一层工具执行 = 一个 tool.call span：只对顶层活动（parent_activity_id 为 None）记录，
-            // 子调用活动从属顶层活动，避免 span 基数爆炸。
-            let otel_activity_batch = self
-                .telemetry_builder
-                .tool_activities_after_result(&current_tool_call, &tool_result);
-            if let Some(otel_top_activity) = otel_activity_batch
-                .iter()
-                .find(|activity| activity.parent_activity_id.is_none())
-            {
-                let otel_tool_error_kind = turn_tool_activity_error_kind(otel_top_activity);
-                crate::agent::otel::record_tool_call_span_with_call_id_and_kind(
-                    crate::agent::otel::ToolSpanInput {
-                        tool_name: otel_top_activity
-                            .canonical_tool_name
-                            .clone()
-                            .unwrap_or_else(|| otel_top_activity.name.clone()),
-                        status: if otel_top_activity.status == "done" {
-                            "success".to_string()
-                        } else {
-                            "failed".to_string()
-                        },
-                        duration_ms: otel_top_activity
-                            .duration_seconds
-                            .map(|seconds| (seconds * 1000.0).round() as u64),
-                        error: turn_tool_activity_error_text(otel_top_activity),
-                        // P0-1：工具 span 的入参/结果预览（trace 可复盘的最小切片）。
-                        // 此处传原始串即可 —— 脱敏与 2KB 截断统一在 `tool_span_attributes` 内完成
-                        // （`None` ⇒ 不写键；序列化失败也不写，绝不用空串占位）。
-                        args_preview: serde_json::to_string(&current_tool_call.arguments).ok(),
-                        result_preview: Some(tool_result.output.clone()),
-                    },
-                    current_tool_call.call_id.clone(),
-                    otel_tool_error_kind.as_deref(),
-                );
-            }
-            tool_activities.extend(annotate_capability_tool_activities(
-                otel_activity_batch,
-                invocation_record,
-            ));
-            hop_records.push(ToolTurnHopRecord {
-                assistant_message: current_assistant_message.clone(),
-                assistant_output_text: current_assistant_output_text.clone(),
-                assistant_reasoning_content: current_assistant_reasoning.clone(),
-                assistant_reasoning_content_value: current_assistant_reasoning_value.clone(),
-                tool_call: current_tool_call.clone(),
-                tool_result: tool_result.clone(),
-            });
-
-            // Design Decision 5 (PA-076 P1-1): a pending control outcome (`control_outcome_pending`,
-            // surfaced as a structured `error.code`) means the dispatcher persisted an
-            // `Interaction`/`Approval` `PendingControlRequest` instead of producing a
-            // provider-consumable result. The run must pause — bind the Ask wait to the graph run
-            // when a store + run are available, and return a suspended outcome — never feed the
-            // pending marker back to the provider as an ordinary tool error.
-            if tool_result_control_outcome_pending(&tool_result) {
-                let suspension = self.suspend_turn_for_control_outcome(
-                    &current_tool_call,
-                    &tool_result,
-                );
-                if let Some(request) = &suspension.pending_request {
-                    runtime_log(format!(
-                        "turn:ask-suspend hop={} request={} kind={:?} call_id={} bound_run={:?}",
-                        completed_hops,
-                        request.request_id,
-                        request.request_kind,
-                        request.call_id,
-                        suspension.bound_run_id
+            // ── 1) 执行本 hop 的**整批**调用（批内顺序；批长 1 即既有单调用语义）──
+            let mut executed_calls: Vec<ToolCall> = Vec::with_capacity(current_tool_calls.len());
+            let mut executed_results: Vec<ToolResult> =
+                Vec::with_capacity(current_tool_calls.len());
+            for tool_call in current_tool_calls.iter() {
+                // hop 限额仍按**调用**计数：批内任一调用将越过上限即硬停，
+                // 与批间同口径（不因批而放宽；批长 1 时该闸恒被批间闸先命中）。
+                if completed_hops >= max_tool_hops_per_turn() {
+                    return Err(self.fail_sync_turn_result(
+                        Some(provider_meta),
+                        display_message,
+                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                        tool_activities,
+                        hook_trace_records,
+                        build_tool_hop_limit_error(max_tool_hops_per_turn()),
                     ));
                 }
-                return Err(self.build_suspended_turn_result(
-                    Some(provider_meta),
-                    display_message,
-                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                    tool_activities,
-                    hook_trace_records,
-                    &suspension,
+                completed_hops += 1;
+                runtime_log(format!(
+                    "turn:tool-execute hop={} name={} args={}",
+                    completed_hops, tool_call.name, tool_call.arguments
                 ));
+                let tool_start_hook_outcome =
+                    self.dispatch_hook_trace_records(TurnHookPoint::ToolCallStart);
+                hook_trace_records.extend(tool_start_hook_outcome.trace_records.clone());
+                if let Some(error) = tool_start_hook_outcome.fail_turn_error {
+                    return Err(self.fail_sync_turn_result(
+                        Some(provider_meta),
+                        display_message,
+                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                        self.telemetry_builder
+                            .tool_activities_running(tool_call),
+                        hook_trace_records,
+                        error,
+                    ));
+                }
+
+                let execution_context = ToolExecutionContext {
+                    workspace_root: self.resolve_session_workspace_root(session_id),
+                    // L3 r2 A1：透传真实会话 id，触达注入按会话分桶（否则跨会话互相抑制）。
+                    session_id: session_id.map(str::to_string),
+                    // T2-1：turn 级治理事实随本次调用显式传入（并发 turn 之间不共享任何槽位）。
+                    dispatch_context: governed_context.cloned(),
+                    // wave-62 C3：治理事实里若带本轮令牌（stream 路径注入），工具层据此可被取消。
+                    // 同步入口（`run_turn`）无 registry 句柄 ⇒ `None`，行为与 wave-61 一致。
+                    cancellation: governed_context.and_then(|context| context.turn_cancellation.clone()),
+                    ..Default::default()
+                };
+                let (tool_result, invocation_record, capability_hook_trace_records) =
+                    self.execute_registered_tool_call_with_context(tool_call, &execution_context);
+                hook_trace_records.extend(capability_hook_trace_records);
+                runtime_log(format!(
+                    "turn:tool-result hop={} name={} status={} output_preview={}",
+                    completed_hops,
+                    tool_result.tool_name,
+                    tool_result.status,
+                    preview_text(&tool_result.output, 160)
+                ));
+                all_tools_ok &= tool_result.status == "ok";
+                // Wave43 task-8 挂载切片：实时路径「工具执行结束 → 产生 TurnToolActivity」单点。
+                // 一层工具执行 = 一个 tool.call span：只对顶层活动（parent_activity_id 为 None）记录，
+                // 子调用活动从属顶层活动，避免 span 基数爆炸。
+                let otel_activity_batch = self
+                    .telemetry_builder
+                    .tool_activities_after_result(tool_call, &tool_result);
+                if let Some(otel_top_activity) = otel_activity_batch
+                    .iter()
+                    .find(|activity| activity.parent_activity_id.is_none())
+                {
+                    let otel_tool_error_kind = turn_tool_activity_error_kind(otel_top_activity);
+                    crate::agent::otel::record_tool_call_span_with_call_id_and_kind(
+                        crate::agent::otel::ToolSpanInput {
+                            tool_name: otel_top_activity
+                                .canonical_tool_name
+                                .clone()
+                                .unwrap_or_else(|| otel_top_activity.name.clone()),
+                            status: if otel_top_activity.status == "done" {
+                                "success".to_string()
+                            } else {
+                                "failed".to_string()
+                            },
+                            duration_ms: otel_top_activity
+                                .duration_seconds
+                                .map(|seconds| (seconds * 1000.0).round() as u64),
+                            error: turn_tool_activity_error_text(otel_top_activity),
+                            // P0-1：工具 span 的入参/结果预览（trace 可复盘的最小切片）。
+                            // 此处传原始串即可 —— 脱敏与 2KB 截断统一在 `tool_span_attributes` 内完成
+                            // （`None` ⇒ 不写键；序列化失败也不写，绝不用空串占位）。
+                            args_preview: serde_json::to_string(&tool_call.arguments).ok(),
+                            result_preview: Some(tool_result.output.clone()),
+                        },
+                        tool_call.call_id.clone(),
+                        otel_tool_error_kind.as_deref(),
+                    );
+                }
+                tool_activities.extend(annotate_capability_tool_activities(
+                    otel_activity_batch,
+                    invocation_record,
+                ));
+                hop_records.push(ToolTurnHopRecord {
+                    assistant_message: current_assistant_message.clone(),
+                    assistant_output_text: current_assistant_output_text.clone(),
+                    assistant_reasoning_content: current_assistant_reasoning.clone(),
+                    assistant_reasoning_content_value: current_assistant_reasoning_value.clone(),
+                    tool_call: tool_call.clone(),
+                    tool_result: tool_result.clone(),
+                });
+
+                // Design Decision 5 (PA-076 P1-1): a pending control outcome (`control_outcome_pending`,
+                // surfaced as a structured `error.code`) means the dispatcher persisted an
+                // `Interaction`/`Approval` `PendingControlRequest` instead of producing a
+                // provider-consumable result. The run must pause — bind the Ask wait to the graph run
+                // when a store + run are available, and return a suspended outcome — never feed the
+                // pending marker back to the provider as an ordinary tool error.
+                if tool_result_control_outcome_pending(&tool_result) {
+                    let suspension = self.suspend_turn_for_control_outcome(
+                        tool_call,
+                        &tool_result,
+                    );
+                    if let Some(request) = &suspension.pending_request {
+                        runtime_log(format!(
+                            "turn:ask-suspend hop={} request={} kind={:?} call_id={} bound_run={:?}",
+                            completed_hops,
+                            request.request_id,
+                            request.request_kind,
+                            request.call_id,
+                            suspension.bound_run_id
+                        ));
+                    }
+                    return Err(self.build_suspended_turn_result(
+                        Some(provider_meta),
+                        display_message,
+                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                        tool_activities,
+                        hook_trace_records,
+                        &suspension,
+                    ));
+                }
+
+                // Only abort the turn if the tool was intentionally stopped (e.g. user cancellation).
+                // Tool execution errors (status "error") are fed back to the model so it can
+                // decide how to respond — e.g. try a different path, use another tool, or
+                // explain the problem to the user.
+                if tool_result.status == "aborted" {
+                    return Err(self.fail_sync_turn_result(
+                        Some(provider_meta),
+                        display_message,
+                        self.telemetry_builder.failed_trace_after_tool(false),
+                        tool_activities,
+                        hook_trace_records,
+                        build_tool_execution_error(
+                            &tool_call.name,
+                            tool_result.output.as_str(),
+                        ),
+                    ));
+                }
+
+                // Consecutive-failure stop-loss: the same tool failing with the same error code
+                // `limit` times in a row means the model is retrying a doomed invocation. Stop the
+                // follow-up loop and surface the real error instead of burning the remaining
+                // follow-up budget on identical retries.
+                let failure_signal = tool_failure_signal(tool_call, &tool_result);
+                let failure_count = consecutive_failures.record(failure_signal.clone());
+                if failure_count >= max_consecutive_tool_failures_per_turn() {
+                    return Err(self.fail_sync_turn_result(
+                        Some(provider_meta),
+                        display_message,
+                        self.telemetry_builder.failed_trace_after_tool(false),
+                        tool_activities,
+                        hook_trace_records,
+                        build_consecutive_tool_failure_error(
+                            max_consecutive_tool_failures_per_turn(),
+                            &tool_call.name,
+                            failure_signal
+                                .as_ref()
+                                .map(|(_, _, code)| code.as_str())
+                                .unwrap_or("unknown"),
+                            tool_result.output.as_str(),
+                        ),
+                    ));
+                }
+                // P1-3 第二道闸：同一工具连续失败（忽略入参/错误码差异），与流式路径同口径。
+                if consecutive_failures.same_tool_count()
+                    >= max_consecutive_same_tool_failures_per_turn()
+                {
+                    return Err(self.fail_sync_turn_result(
+                        Some(provider_meta),
+                        display_message,
+                        self.telemetry_builder.failed_trace_after_tool(false),
+                        tool_activities,
+                        hook_trace_records,
+                        build_same_tool_consecutive_failure_error(
+                            max_consecutive_same_tool_failures_per_turn(),
+                            &tool_call.name,
+                            tool_result.output.as_str(),
+                        ),
+                    ));
+                }
+
+                let tool_end_hook_outcome =
+                    self.dispatch_hook_trace_records(TurnHookPoint::ToolCallEnd);
+                hook_trace_records.extend(tool_end_hook_outcome.trace_records.clone());
+                if let Some(error) = tool_end_hook_outcome.fail_turn_error {
+                    return Err(self.fail_sync_turn_result(
+                        Some(provider_meta),
+                        display_message,
+                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                        tool_activities,
+                        hook_trace_records,
+                        error,
+                    ));
+                }
+                // 逐调用记录（供批后一次性回填）+ 跨 hop 重放签名（per-call 口径不变）。
+                seen_tool_signatures.insert(tool_call_signature(tool_call));
+                executed_results.push(tool_result.clone());
+                executed_calls.push(tool_call.clone());
+                // 批终止符：交互类工具（Ask / Permission…）执行完即停批，后续调用不执行。
+                if sync_tool_call_ends_batch(tool_call) {
+                    runtime_log(format!(
+                        "turn:tool-batch-terminator hop={} name={} executed={} skipped={}",
+                        completed_hops,
+                        tool_call.name,
+                        executed_calls.len(),
+                        current_tool_calls.len().saturating_sub(executed_calls.len())
+                    ));
+                    break;
+                }
             }
 
-            // Only abort the turn if the tool was intentionally stopped (e.g. user cancellation).
-            // Tool execution errors (status "error") are fed back to the model so it can
-            // decide how to respond — e.g. try a different path, use another tool, or
-            // explain the problem to the user.
-            if tool_result.status == "aborted" {
-                return Err(self.fail_sync_turn_result(
-                    Some(provider_meta),
-                    display_message,
-                    self.telemetry_builder.failed_trace_after_tool(false),
-                    tool_activities,
-                    hook_trace_records,
-                    build_tool_execution_error(
-                        &current_tool_call.name,
-                        tool_result.output.as_str(),
-                    ),
-                ));
-            }
-
-            // Consecutive-failure stop-loss: the same tool failing with the same error code
-            // `limit` times in a row means the model is retrying a doomed invocation. Stop the
-            // follow-up loop and surface the real error instead of burning the remaining
-            // follow-up budget on identical retries.
-            let failure_signal = tool_failure_signal(&current_tool_call, &tool_result);
-            let failure_count = consecutive_failures.record(failure_signal.clone());
-            if failure_count >= max_consecutive_tool_failures_per_turn() {
-                return Err(self.fail_sync_turn_result(
-                    Some(provider_meta),
-                    display_message,
-                    self.telemetry_builder.failed_trace_after_tool(false),
-                    tool_activities,
-                    hook_trace_records,
-                    build_consecutive_tool_failure_error(
-                        max_consecutive_tool_failures_per_turn(),
-                        &current_tool_call.name,
-                        failure_signal
-                            .as_ref()
-                            .map(|(_, _, code)| code.as_str())
-                            .unwrap_or("unknown"),
-                        tool_result.output.as_str(),
-                    ),
-                ));
-            }
-            // P1-3 第二道闸：同一工具连续失败（忽略入参/错误码差异），与流式路径同口径。
-            if consecutive_failures.same_tool_count()
-                >= max_consecutive_same_tool_failures_per_turn()
-            {
-                return Err(self.fail_sync_turn_result(
-                    Some(provider_meta),
-                    display_message,
-                    self.telemetry_builder.failed_trace_after_tool(false),
-                    tool_activities,
-                    hook_trace_records,
-                    build_same_tool_consecutive_failure_error(
-                        max_consecutive_same_tool_failures_per_turn(),
-                        &current_tool_call.name,
-                        tool_result.output.as_str(),
-                    ),
-                ));
-            }
-
-            let tool_end_hook_outcome =
-                self.dispatch_hook_trace_records(TurnHookPoint::ToolCallEnd);
-            hook_trace_records.extend(tool_end_hook_outcome.trace_records.clone());
-            if let Some(error) = tool_end_hook_outcome.fail_turn_error {
-                return Err(self.fail_sync_turn_result(
-                    Some(provider_meta),
-                    display_message,
-                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                    tool_activities,
-                    hook_trace_records,
-                    error,
-                ));
-            }
-
+            // ── 2) 批后**一次** followup：N==1 走既有 1:1 入口（逐字不变），N>1 走批量入口 ──
             let provider_call_started_at = Instant::now();
-            let response = match provider_followup_with_mode(
-                provider,
-                planning_request,
-                tools,
-                &mut accumulated_messages,
-                current_assistant_message.as_ref(),
-                &current_tool_call,
-                &tool_result,
-                crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
-            ) {
+            let followup_result = if executed_calls.len() == 1 {
+                provider_followup_with_mode(
+                    provider,
+                    planning_request,
+                    tools,
+                    &mut accumulated_messages,
+                    current_assistant_message.as_ref(),
+                    &executed_calls[0],
+                    &executed_results[0],
+                    crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
+                )
+            } else {
+                provider_followup_with_calls(
+                    provider,
+                    planning_request,
+                    tools,
+                    &mut accumulated_messages,
+                    current_assistant_message.as_ref(),
+                    &executed_calls,
+                    &executed_results,
+                    crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
+                )
+            };
+            let response = match followup_result {
                 Ok(response) => response,
                 Err(error) => {
                     return Err(build_failed_turn_result(
@@ -289,7 +352,20 @@ impl AgentRuntime {
                 ));
             }
 
-            if let Some(next_tool_call) = response.tool_call.take() {
+            // 本 hop 之后是否还有调用：单值字段是「还有调用」的总开关（恢复路径会把它清空），
+            // 复数位给出整批（D3a 起 OpenAI 非流式入口全量上报；测试替身只填单值时回落单批）。
+            let mut next_tool_calls: Vec<ToolCall> = match response.tool_call.take() {
+                Some(single) => {
+                    let mut calls = std::mem::take(&mut response.tool_calls);
+                    if calls.is_empty() {
+                        calls.push(single);
+                    }
+                    calls
+                }
+                None => Vec::new(),
+            };
+
+            if let Some(next_tool_call) = next_tool_calls.first().cloned() {
                 let normalized = match normalize_tool_directive(
                     next_tool_call,
                     response.assistant_message.take(),
@@ -309,18 +385,24 @@ impl AgentRuntime {
                         ));
                     }
                 };
-                response.tool_call = normalized.tool_call;
+                response.tool_call = normalized.tool_call.clone();
                 response.assistant_message = normalized.assistant_message;
-                // 空洞 tool call 已丢弃时，用兜底文本继续本轮（不进工具执行）。
-                if response.tool_call.is_none()
-                    && response.output_text.trim().is_empty()
-                    && !normalized.output_text.trim().is_empty()
-                {
-                    response.output_text = normalized.output_text;
+                match normalized.tool_call {
+                    Some(normalized_call) => next_tool_calls[0] = normalized_call,
+                    None => {
+                        // 空洞 tool call 已丢弃 ⇒ 整批作废：余下调用没有可回填的 assistant
+                        // 锚点，不能单独执行；用兜底文本继续本轮（不进工具执行）。
+                        next_tool_calls.clear();
+                        if response.output_text.trim().is_empty()
+                            && !normalized.output_text.trim().is_empty()
+                        {
+                            response.output_text = normalized.output_text;
+                        }
+                    }
                 }
             }
 
-            if let Some(next_tool_call) = response.tool_call.clone() {
+            if let Some(next_tool_call) = next_tool_calls.first().cloned() {
                 if turn_started_at.elapsed()
                     >= std::time::Duration::from_secs(max_turn_wall_seconds() as u64)
                 {
@@ -376,6 +458,7 @@ impl AgentRuntime {
                         build_tool_hop_limit_error(max_tool_hops_per_turn()),
                     ));
                 } else {
+                    // 重复调用闸：按**调用**判定（批内首个）；命中则恢复式收尾，不整批重放。
                     let next_signature = tool_call_signature(&next_tool_call);
                     if !seen_tool_signatures.insert(next_signature) {
                         let recovery = recover_tool_followup_completion(
@@ -404,7 +487,7 @@ impl AgentRuntime {
                         current_assistant_reasoning = response.reasoning_content.clone();
                         current_assistant_reasoning_value =
                             response.reasoning_content_value.clone();
-                        current_tool_call = next_tool_call;
+                        current_tool_calls = next_tool_calls;
                         continue;
                     }
                 }
@@ -748,6 +831,8 @@ impl AgentRuntime {
             first_token_latency_ms,
         ) = if let Some(tool_call) = resolved_tool_call {
             let initial_visible_first_token_latency_ms = None;
+            // D3a：首个 hop 的整批调用 = planner 修补后的首个调用 + 上游响应的余下调用（保序）。
+            let tool_calls = sync_tool_batch(tool_call, &first_decision.tool_calls);
             match self.handle_sync_tool_turn(
                 input.session_id.as_deref(),
                 user_message.clone(),
@@ -757,7 +842,7 @@ impl AgentRuntime {
                 &tools,
                 &planning_request,
                 &first_decision,
-                tool_call,
+                tool_calls,
                 planning_hook_trace_records.clone(),
                 initial_visible_first_token_latency_ms,
                 &turn_started_at,
@@ -1128,4 +1213,31 @@ impl AgentRuntime {
         result
     }
 
+}
+
+
+/// D3a（P1-1 / B018）：批终止符判定 —— **交互类**工具执行后立即结束本批。
+///
+/// 判定真源是工具注册表的 `ToolKind`（`tools::tool_kind_for_name`：纯函数、名字先 canonicalize
+/// 再查表），不另设名字白名单——新增交互工具只要登记 kind 即自动获得批终止语义。
+///
+/// 为什么必须停批（设计 §3.1）：交互类工具（Ask / Permission 等）等待宿主应答期间，若继续执行
+/// 批内其余调用，会出现「已经停顿却仍在改工作区」的不可解释状态。Ask 的
+/// `control_outcome_pending` 结果本就会让本轮挂起（不产生 followup），这里的判定是同一语义的
+/// **兜底**：即便某个交互工具没有产生挂起标记，也绝不越过它继续执行批内后续调用。
+fn sync_tool_call_ends_batch(tool_call: &ToolCall) -> bool {
+    crate::agent::tools::tool_kind_for_name(&tool_call.name)
+        == crate::agent::tools::ToolKind::Interactive
+}
+
+/// D3a：首个 hop 的整批调用 —— planner 修补/治理过的首个调用 + 上游响应的**余下**调用（保序）。
+///
+/// 首个调用必须用 planner 侧 `resolved_tool_call`（工具选择 hook 可改写、空洞调用已修补）；
+/// 余下调用没有等价的 planner 通道，按上游顺序原样入批（D3a 不新增 second..N 的 planner 修补，
+/// 见设计 §7 的偏差说明）。
+fn sync_tool_batch(resolved_first: ToolCall, decision_calls: &[ToolCall]) -> Vec<ToolCall> {
+    let mut batch = Vec::with_capacity(decision_calls.len().max(1));
+    batch.push(resolved_first);
+    batch.extend(decision_calls.iter().skip(1).cloned());
+    batch
 }
