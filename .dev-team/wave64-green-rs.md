@@ -129,3 +129,38 @@ LIBTEST_EXIT=0
    与前波行为一致，仅记录一条 debug 日志。
 2. 非终态的非 running 状态（`suspended` 等）不参与闸门竞争（无并发终态可言）。
 3. `turn_sync.rs`（非流式）仍按 Lead 裁决不动，其 aborted→failed 与 terminal-once 闸门无关。
+
+---
+
+# 追加 2：L3 delta 复审 BLOCKING 收口（prepare_turn Err 未过闸 + 全文件闸门覆盖自查）
+
+## 1. 修复
+- `turn_stream.rs` `prepare_turn` 的 `Err` 分支（原 1553 行）补 terminal-once 闸门：
+  `if !claim_failed_terminal(control, &turn_id) { return; }` —— `prepare_turn` 内 auto-compaction 属
+  网络调用（可超 C5 宽限期 2000ms），期间监督者可能已收口 cancelled；未抢到 `running→failed`
+  者静默返回（不 persist trace、不 emit `turn:failed`），不再覆盖已落盘终态。
+
+## 2. 全文件闸门覆盖自查（`turn_stream.rs`）
+| 口径 | 计数 | 结论 |
+|---|---|---|
+| 直接失败终态发射点（`emit_turn_failed` / `emit_stream_failed`） | **10** | 10/10 均位于 `if !claim_failed_terminal(control, &turn_id)` 之后（逐一机器核对：1526→1534、1556→1559、1671→1717、1734→1780、2252→2295、2322→2365、2411→2461、2478→2528、2582→2626、2806→2850） |
+| `fail_stream_turn_with_hook_dispatch` 调用点 | **15** | 15/15 改为过闸门包装 `fail_stream_turn_gated_dispatch`；文件内裸调用仅剩 1 处（包装函数内部转发本身） |
+| 闸门插入点合计 | **10** | 与本轮 Lead 复审口径「共 10 处内联」一致（此前 9 处 + 本次补的 prepare_turn） |
+
+范围外（已核对、按裁决不动）：
+- `turn_persist.rs:478` 的 `emit_stream_failed` 属 `fail_stream_turn_with_hook_dispatch` 内部，
+  已由调用侧包装统一过闸；
+- `turn_sync.rs:479` 属**非流式**同步轮（桌面流式路径不走它，Lead 裁决 A/C 不动）。
+
+## 3. 门禁
+```
+$ cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test stop_graph_run_wave64 --test stop_contract_wave60 --test stop_escalation_wave60 --test stop_interruptible_read_wave60 --target-dir target-test
+stop_contract_wave60 7 passed / stop_escalation_wave60 9 passed / stop_graph_run_wave64 6 passed / stop_interruptible_read_wave60 3 passed
+EXIT=0
+$ cargo check -p pony-agent-core --target-dir target-check
+CHECK_EXIT=0   （零 warning）
+```
+
+## 4. ADVISORY 确认（本轮不动）
+`src/stores/runtime.ts:4843` 失败轮用 wire 4096B 截断正文覆盖已流式正文：属**既有行为**，非本波回归；
+前端不在本任务写域，本轮未改、未做任何验证。

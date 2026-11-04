@@ -1,0 +1,87 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewed_commit": "801cafe05e1d43f79a3bce3eff403bbbfd140f9a",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-ad203415-47ce-458e-afd3-2c0ed4ca2ce7/l3-recheck-w64",
+    "fresh_context": true
+  },
+  "executed_by": "session-ad203415-47ce-458e-afd3-2c0ed4ca2ce7/l3-recheck-w64",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "scope": "wave-64 narrow recheck only: (1) turn_stream.rs 全部直接 failed 发射点的 terminal-once 闸门逐点闭合；(2) C5 抢先置 cancelled 后是否静默退出（不 persist failed trace / 不 emit turn:failed）"
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/tests/stop_graph_run_wave64.rs",
+    "crates/pony-agent-core/tests/stop_contract_wave60.rs",
+    "crates/pony-agent-core/tests/stop_escalation_wave60.rs",
+    "crates/pony-agent-core/tests/stop_interruptible_read_wave60.rs",
+    "src/stores/runtime.ts"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4843,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "title": "失败轮归一化正文仍以 wire（最长 4096 字节截断版）覆盖已流式正文",
+      "detail": "HEAD 版本已带 `if (normalizedFailedContent != null)` 空值守卫（上一版 review 描述为无条件覆盖，已按实测修正），但归一化结果非 null 时依旧无条件写回 content。Rust 侧 build_failed_turn_text 对已产出正文按 FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES=4096 截断并追加截断标记（turn_flow.rs:485/508-520）。若失败前流式正文 > 4096 字节，用户可见正文在 turn:failed 时被替换为截断版。非本次 delta 引入，不阻断。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES: usize = 4096' crates/pony-agent-core/src/agent/turn_flow.rs && sed -n '4843,4846p' src/stores/runtime.ts"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 1556,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "title": "新增的 prepare_turn Err 闸门尚无回归测试钉住（无测试断言 source=inline_stream_failed 的抑制留痕）",
+      "detail": "本轮新补的 1556 处（上轮 BLOCKING 修复点）目前只由代码等价性证明：tests/ 与 src/ 中除 turn_stream.rs:18 自身外无 'inline_stream_failed' 引用，也没有「prepare_turn 失败 + C5 已 escalate」的合成用例。建议后续补一条与 r3_in_band_closure_after_grace_escalation_keeps_single_cancelled_terminal 同构的用例（断言 checkpoint 保持 cancelled、无 turn:failed、无 failed trace）。不阻断本轮：机制与已过闸的 9 处逐字同构，且门禁全绿。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'inline_stream_failed' crates/pony-agent-core/tests crates/pony-agent-core/src   # 仅 turn_stream.rs:18"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+      "line": 54,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "title": "claim_terminal_status 对「非 running 且非终态」的 status 直接放行且不写终态位",
+      "detail": "`if status != \"running\" { return true; }`（turn_control.rs:54-56）意味着只有 running 会做 CAS 置位。当前安全：C5 宽限监督只从 running escalate，终态只有 completed/failed/cancelled 三值（47-53 行早退），且内联失败块每个分支都以 return 结束、不可重入。但若未来有调用方在失败派发前写入中间 status（如 streaming/cancelling），terminal-once 将不再成立。建议引入新 status 值时同步收紧此处口径。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '42,66p' crates/pony-agent-core/src/agent/runtime/turn_control.rs"
+    }
+  ],
+  "gates": {
+    "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test stop_graph_run_wave64 --test stop_contract_wave60 --test stop_escalation_wave60 --test stop_interruptible_read_wave60 --target-dir target-test": "exit 0（stop_contract_wave60 7 passed / stop_escalation_wave60 9 passed / stop_graph_run_wave64 6 passed / stop_interruptible_read_wave60 3 passed；0 failed）",
+    "grep -n \"claim_failed_terminal|claim_terminal_status|fail_stream_turn_gated_dispatch|emit_turn_failed|emit_stream_failed\" crates/pony-agent-core/src/agent/runtime/turn_stream.rs": "exit 0（emit_turn_failed 8 + emit_stream_failed 2 = 10 处直接发射；claim_failed_terminal 调用 11 处 = 10 内联闸门 + 1 包装器内闸门；fail_stream_turn_gated_dispatch 15 处）",
+    "python3 逐点闭合校验（每个 emit 行 → 最近上游 claim_failed_terminal 行）": "exit 0（ALL_POINTS_GATED = True；10/10 emit 均有同 turn 闸门、闸门块含 return、闸门与该 emit 之间无其他 emit）",
+    "grep -rn fail_stream_turn_with_hook_dispatch crates/pony-agent-core/src（排除 turn_stream.rs）": "exit 1（仅 turn_persist.rs:418 定义 + turn_persist.rs:681 注释 ⇒ 包装器是唯一调用路径，无旁路）",
+    "grep -n \"persist_turn_trace|emit_turn_failed|emit_stream_failed|update_execution_checkpoint\" crates/pony-agent-core/src/agent/runtime/turn_prep.rs": "exit 1（prepare_turn 内部零 persist / 零 emit / 零 checkpoint 写 ⇒ 失败本身不落 failed trace）",
+    "python3 /home/dm/.agents/skills/dev-team/scripts/dev-review-lint.py .dev-team/review-wave64-recheck.json --repo /home/dm/pony-agent --head HEAD": "exit 0（[PASS] dev-review-lint 校验通过）"
+  },
+  "recheck_notes": {
+    "reviewed_tree": "交付 head 801cafe0 之上带未提交工作树改动（turn_stream.rs 新增 1556 处闸门 6 行）；reviewed_commit 记 head sha，修复体本身为工作树 diff（git diff 已逐字核对）。",
+    "prior_blocking_closed": "上轮 BLOCKING（prepare_turn Err 未过闸，旧行号 1553）已闭合：现 turn_stream.rs:1556-1558 为 `if !claim_failed_terminal(control, &turn_id) { return; }`，位于该分支任何 persist/emit 之前，且早于 otel_turn_scope.set_phase。",
+    "point_by_point": {
+      "1534 <- gate 1526": "用量治理 Block 分支",
+      "1559 <- gate 1556": "prepare_turn Err（本轮修复点）",
+      "1717 <- gate 1671": "planner preflight fail_turn_error",
+      "1780 <- gate 1734": "planner preflight blocked_error",
+      "2295 <- gate 2252": "流式决策失败（非 cancel 分类）",
+      "2365 <- gate 2322": "normalize_tool_directive Err",
+      "2461 <- gate 2411": "tool_selection fail_turn_error",
+      "2528 <- gate 2478": "tool_selection blocked_error",
+      "2626 <- gate 2582": "provider_failure_message（emit_stream_failed）",
+      "2850 <- gate 2806": "save_input_attachments Err（emit_stream_failed）"
+    },
+    "wrapper_coverage": "fail_stream_turn_gated_dispatch 15 处（264/430/561/589/621/809/969/999/1087/1150/1298/1324/2205/2995/3022），闸门在包装器首行且未抢到即 return；全仓无绕过包装器直调 fail_stream_turn_with_hook_dispatch 的路径。",
+    "silent_exit_proof": "C5 escalate 置 status=cancelled 后，claim_terminal_status 在 turn_control.rs:51-53 直接返回 false 且不写任何字段（仅 load_checkpoint）；调用方随即 return，跳过 update_execution_checkpoint / persist_turn_trace / emit_turn_failed 三处，唯一副作用是 turn_stream.rs:14-21 的 debug 级 log_terminal_dispatch_suppressed（source=inline_stream_failed）。邻近 cancel 分支另有 cancel_stream_turn 闸门（r3 用例实测打印 'terminal dispatch suppressed ... source: cancel_stream_turn'），两条终态路径互斥。",
+    "no_checkpoint_or_suspended": "无 checkpoint ⇒ claim_terminal_status 返回 true（放行），但该情形 C5 同样读不到 checkpoint 无法收口（supervise_until_grace 早退），不产生重复终态。",
+    "gate_atomicity": "判定+置位在 control.update 的 registry 锁内对 status==running 再 re-check，CAS 原子；C5 escalate_now 用同一把锁与同一 status 位，二者恰一方成功。",
+    "true_failure_semantics": "无停止请求时 status=running 必被 CAS 成 failed，随后照旧写 failed checkpoint + persist trace + emit turn:failed（r2_non_user_failure_still_terminates_failed 通过）。",
+    "test_evidence": "stop_graph_run_wave64 6 passed 含 r2_non_user_failure_still_terminates_failed（真失败仍收口 failed）、r2_provider_stream_cancelled_terminates_cancelled_not_failed、r3_in_band_closure_after_grace_escalation_keeps_single_cancelled_terminal（单终态）；stop_escalation_wave60 9 passed 含 c5_grace_escalation_cancels_running_checkpoint_and_dispatches_exactly_once。"
+  }
+}

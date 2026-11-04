@@ -254,3 +254,14 @@ note: >-
       `timeout_ms`↔`timeoutMs`）、环境事实补 `shell` 与平台命令语法口径、
       单轮墙钟预算（`PONY_AGENT_MAX_TURN_WALL_SECONDS`，默认 900s）与同工具连续失败闸
       （`PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES`，默认 4）。
+
+  【2026-11-04 归属登记｜wave-64 停止终态呈现（UI 交互 + 取消归类）】
+  (1) 四维归属结论：**不变**。本波不改对外接口/端点/环境变量/依赖，不新增异常码，
+      不新增日志出口与 metrics 面（metrics 仍为结构性 N/A，理由同本文档 metrics 维度声明）。
+  (2) tracing｜**适用**（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`）：
+      用户停止轮此前经 `turn_stream` 的失败分支被记为 `failed`，本波归为 `cancelled`
+      （`claim_terminal_status` 闸门保证同一 turn 恰好一条终态），故 span 的
+      `outcome` / `agent.turn.failed_reason` 口径随之更准确（无新增字段）。
+  (3) 非遥测变更（仅登记，不新增观测面）：`stop_graph_run` 与 `stop_turn` 停止语义对齐
+      （C2 即时事件 + C5 宽限监督）；前端终态状态消息承担「已停止 / 生成失败」呈现，
+      移除消息区「错误详情」面板（错误明细仍在 store `errorDetail` 与右侧 Trace）。

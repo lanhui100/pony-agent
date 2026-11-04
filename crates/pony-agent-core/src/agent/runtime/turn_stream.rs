@@ -1550,6 +1550,12 @@ impl AgentRuntime {
         let prepared = match self.prepare_turn(&input, true, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
+                // wave-64 R1（BLOCKING，terminal-once）：`prepare_turn` 内含 auto-compaction 等
+                // 网络调用（耗时可能超过 C5 宽限期），期间宽限监督可先行把该轮收口为 cancelled；
+                // 此时必须静默退出（不 persist、不 emit），禁止第二条 turn:failed 覆盖已落盘终态。
+                if !claim_failed_terminal(control, &turn_id) {
+                    return;
+                }
                 emit_turn_failed(
                     sink,
                     turn_id,

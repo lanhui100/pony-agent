@@ -1013,6 +1013,27 @@
           "LLM 调用路径(取消归类)"
         ],
         "gate": "audit-diff.sh + check-declaration.sh"
+      },
+      "red_commit": "af599ef4",
+      "impl_commit": "<见 git log --grep=wave-64>",
+      "status": "green",
+      "reviews": {
+        "l3a": "FAIL->fixed",
+        "l3b": "FAIL->fixed",
+        "l3p": "PASS",
+        "delta": "FAIL->fixed"
+      },
+      "gates": {
+        "frontend": "vitest 229 passed / typecheck 0",
+        "rust": "cargo test 25 passed (7+9+6+3) / check 0",
+        "browser": "playwright 1 passed, console error 0",
+        "observability": "audit-diff 0 / check-declaration PASS"
+      },
+      "counters": {
+        "blobkings_found": 4,
+        "blockings_fixed": 4,
+        "advisories": 13,
+        "red_reruns": 3
       }
     }
   ],
