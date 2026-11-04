@@ -1,0 +1,148 @@
+{
+ "applicability": {
+  "acceptance_tests_present": true,
+  "note": "无验收测试时 red/drift 规则判 not-applicable，绝不静默通过"
+ },
+ "repo_profile": {
+  "acceptance_dirs": [
+   "tests/acceptance"
+  ],
+  "has_acceptance": true,
+  "top_exts": [
+   [
+    "md",
+    1079
+   ],
+   [
+    "json",
+    434
+   ],
+   [
+    "png",
+    280
+   ],
+   [
+    "rs",
+    268
+   ],
+   [
+    "ts",
+    223
+   ],
+   [
+    "txt",
+    182
+   ]
+  ],
+  "test_scripts": {
+   "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
+   "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+   "cargo:test:regression": "cargo test --manifest-path src-tauri/Cargo.toml --test session_regression --test provider_registry_regression --test tool_router_regression --target-dir target-test",
+   "cargo:test:shared": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 test test",
+   "cargo:test:exact": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-a test",
+   "cargo:test:exact:b": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-b test",
+   "cargo:test:exact:c": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-c test",
+   "test": "npm run test:unit",
+   "test:unit": "vitest run",
+   "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
+   "test:e2e": "npm run build && playwright test",
+   "test:tauri:smoke": "node scripts/tauri-smoke.js",
+   "preview:e2e": "vite preview --host 127.0.0.1 --port 4175"
+  }
+ },
+ "run_id": "session-fd0c79a3-8a75-4506-ab8f-e55ab7dc97cf",
+ "task": "桌面端 trace（pa_01a1a134·4turn）诊断评估：dev team 三路取证+Lead 复核，产出优化点清单与优先级",
+ "tier": "B",
+ "base": "d80e646^",
+ "head": "d80e646",
+ "work": {
+  "L": 0,
+  "files": 0,
+  "board_tasks": [
+   "Trace 取证：pg session 4 turn 全量事实基线",
+   "Rust 核心侧优化点映射（agent loop / 工具超时 / 重试 / 上下文）",
+   "桌面端 UI/遥测上传侧优化点映射",
+   "[红相] 冻结 Run 超时策略验收测试",
+   "[绿相] 实现 Run 超时策略改造",
+   "[绿相补充] 常量隔离 + 前端 schema 文案同步",
+   "[红相·契约演进] CT-5 hint 指向后台执行（含冻结断言迁移）",
+   "[绿相] CT-5 hint 指向后台执行",
+   "[红相] 冻结 Run 超时 promote 验收测试（CT-P1..P5）",
+   "[绿相] 实现 Run 超时 promote（CT-P1..P5）",
+   "[B008] promoted 条目回收",
+   "[B009·红相] 取消终止 promoted 作业",
+   "[B012·红相] job 层会话归属",
+   "[B012·绿相] job 层会话归属",
+   "[B010·红相] promote 结果恢复熔断输入 + 防重复执行指引"
+  ],
+  "gates_seen_in_session": {
+   "accept": 15,
+   "unit": 15
+  }
+ },
+ "commits": [
+  {
+   "sha": "d80e646497c6",
+   "full": "d80e646497c681a2886eebdafd292fc7e1ecad55",
+   "subject": "docs(analysis): 桌面端 trace 诊断评估（pa_01a1a134 · 4 turn）",
+   "files": [
+    ".dev-team/evidence/trace-20261103/core.json",
+    ".dev-team/evidence/trace-20261103/desktop.json",
+    ".dev-team/evidence/trace-20261103/forensics.json",
+    ".dev-team/evidence/trace-20261103/verify.json",
+    ".dev-team/meta-retrospective-trace-20261103.md",
+    "docs/INDEX.md",
+    "docs/analysis/trace-analysis-pa-01a1a134.md"
+   ],
+   "stat": "7 files changed, 3366 insertions(+)"
+  }
+ ],
+ "post_run_commits": [],
+ "foreign_commits": [],
+ "frozen_test_drift": [],
+ "review_receipts": [],
+ "mechanical_red_flags": [
+  "self_signed_review:review-join-a.json",
+  "self_signed_review:review-join-a2.json",
+  "self_signed_review:review-join-b.json",
+  "self_signed_review:review-join-b2.json",
+  "self_signed_review:review-join-pds3.json",
+  "self_signed_review:review-join-wave59-r2.json",
+  "self_signed_review:review-join-wave59.json",
+  "self_signed_review:review-join-wave61-a.json",
+  "self_signed_review:review-join-wave61-b.json",
+  "self_signed_review:review-join.json",
+  "self_signed_review:review-l3-concurrency.json",
+  "self_signed_review:review-l3-security.json",
+  "self_signed_review:review-l3p-wave60.json",
+  "self_signed_review:review-l3p.json",
+  "self_signed_review:review-plan-pds3.json",
+  "self_signed_review:review-plan-wave58.json",
+  "self_signed_review:review-plan-wave59.json",
+  "self_signed_review:review-plan-wave61-a.json",
+  "self_signed_review:review-plan-wave61-b.json",
+  "self_signed_review:review-plan-wave61-team.json",
+  "self_signed_review:review-plan.json",
+  "self_signed_review:review-promote-A.json",
+  "self_signed_review:review-promote-B.json",
+  "self_signed_review:review-tool-timeout.json",
+  "self_signed_review:review-wave60-a.json",
+  "self_signed_review:review-wave60-b.json",
+  "self_signed_review:review-wave60-recheck.json",
+  "self_signed_review:review-wave61-a.json",
+  "self_signed_review:review-wave61-fa.json",
+  "self_signed_review:review-wave61-fp.json",
+  "self_signed_review:review-wave61-fr.json",
+  "self_signed_review:review-wave61-fv.json",
+  "self_signed_review:review-wave61-l3p.json",
+  "self_signed_review:review-wave61-recheck.json",
+  "self_signed_review:review-wave62-concurrency.json",
+  "self_signed_review:review-wave62-contract.json",
+  "self_signed_review:review-wave62-recheck.json"
+ ],
+ "unknowns": [
+  "每个门禁实际抓到多少缺陷（gate_caught）需从 review JSON/测试日志判定",
+  "用户是否口头授权了自扩范围（scope）需读会话原文"
+ ],
+ "pack_hash": "87d695edc611a702"
+}

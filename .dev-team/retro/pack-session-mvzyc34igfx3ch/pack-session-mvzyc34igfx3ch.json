@@ -1,0 +1,596 @@
+{
+ "applicability": {
+  "acceptance_tests_present": true,
+  "note": "无验收测试时 red/drift 规则判 not-applicable，绝不静默通过"
+ },
+ "repo_profile": {
+  "acceptance_dirs": [
+   "tests/acceptance"
+  ],
+  "has_acceptance": true,
+  "top_exts": [
+   [
+    "md",
+    1079
+   ],
+   [
+    "json",
+    434
+   ],
+   [
+    "png",
+    280
+   ],
+   [
+    "rs",
+    268
+   ],
+   [
+    "ts",
+    223
+   ],
+   [
+    "txt",
+    182
+   ]
+  ],
+  "test_scripts": {
+   "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
+   "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+   "cargo:test:regression": "cargo test --manifest-path src-tauri/Cargo.toml --test session_regression --test provider_registry_regression --test tool_router_regression --target-dir target-test",
+   "cargo:test:shared": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 test test",
+   "cargo:test:exact": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-a test",
+   "cargo:test:exact:b": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-b test",
+   "cargo:test:exact:c": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-c test",
+   "test": "npm run test:unit",
+   "test:unit": "vitest run",
+   "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
+   "test:e2e": "npm run build && playwright test",
+   "test:tauri:smoke": "node scripts/tauri-smoke.js",
+   "preview:e2e": "vite preview --host 127.0.0.1 --port 4175"
+  }
+ },
+ "run_id": "session-mvzyc34igfx3ch",
+ "task": "wave-60 可中断停止（结构化 stop_reason + 立即应答 + 可中断读通道 + 宽限期收口 + 双击 Esc）",
+ "tier": "B",
+ "base": "7510042",
+ "head": "680499c",
+ "work": {
+  "L": 1585,
+  "files": 22,
+  "board_tasks": [
+   "wave60-T0 Protocol 空桩冻结（stop_reason / stop_escalation / stop_sequence 类型面）",
+   "wave60-T1 独立验收测试（C1–C9 红相）",
+   "wave60-T2 core 实现（stop 契约 + 可中断读通道 + 宽限期收口 + tauri 接线）",
+   "wave60-T4 桌面端呈现（stopping 双态 + stopReason 文案 + 双击 Esc）",
+   "wave60-T5 TUI 停止状态机（双击 Esc + 事件驱动终态 + 渲染可见）",
+   "wave62-T0 协议桩：turn 取消令牌字段面（DispatchContext/ToolExecutionContext/accessor）",
+   "wave62-T1 独立验收测试（C1–C4 红相）",
+   "wave62-T2 实现：turn 取消令牌 → dispatcher 闸门 → run_command 真杀子进程",
+   "wave63-T1 测试基建：V10 元测试递归守卫 + TUI stopping 按键反馈红相",
+   "wave63-T2 TUI：stopping 期按键反馈（不重复派发、不静默吞）"
+  ],
+  "gates_seen_in_session": {
+   "unit": 14,
+   "accept": 14,
+   "type": 5
+  }
+ },
+ "commits": [
+  {
+   "sha": "934fe130cd92",
+   "full": "934fe130cd928c646cfd93bc11f9a7a06fdd6894",
+   "subject": "chore(wave-pds-3): 刷新 V8 帧预算收据并补提交复盘包",
+   "files": [
+    ".dev-team/retro/pack-session-e17642a6-b180-4ab4-abae-ee3260f00c36/PACK-session-e17642a6-b180-4ab4-abae-ee3260f00c36.md",
+    ".dev-team/retro/pack-session-e17642a6-b180-4ab4-abae-ee3260f00c36/pack-session-e17642a6-b180-4ab4-abae-ee3260f00c36.json",
+    ".dev-team/retro/pack-session-e8b744b1-8532-4d73-88ef-5979bd16d570/PACK-session-e8b744b1-8532-4d73-88ef-5979bd16d570.md",
+    ".dev-team/retro/pack-session-e8b744b1-8532-4d73-88ef-5979bd16d570/pack-session-e8b744b1-8532-4d73-88ef-5979bd16d570.json",
+    "tests/acceptance/pds-streaming/receipts/e2e/v8-relative-runs.json"
+   ],
+   "stat": "5 files changed, 1026 insertions(+), 32 deletions(-)"
+  },
+  {
+   "sha": "6930ef1c6437",
+   "full": "6930ef1c6437e74a984731d443d61b95c40f4d68",
+   "subject": "chore(protocol): freeze wave-60 stop contract & interface stubs",
+   "files": [
+    ".dev-team/contracts/wave-60-interruptible-stop.md",
+    ".dev-team/regression-baseline-wave60.json",
+    ".dev-team/state.json",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/control_plane/graph_projection.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/src/agent/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/agent/sse_adapter.rs",
+    "crates/pony-agent-core/src/agent/stop_escalation.rs",
+    "crates/pony-agent-core/src/agent/stop_sequence.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/tests/ts_contract_snapshot.rs",
+    "crates/pony-agent-core/tests/wave5_cost_test.rs",
+    "docs/contracts/ts-contract.snapshot.json",
+    "src/types/runtime.ts"
+   ],
+   "stat": "18 files changed, 470 insertions(+), 1 deletion(-)"
+  },
+  {
+   "sha": "f8769fecca01",
+   "full": "f8769fecca0131d9518374b6bd30ce71b51b9cb2",
+   "subject": "test(wave-60): freeze red-phase acceptance tests (C1-C9, 40 cases)",
+   "files": [
+    "crates/pony-agent-core/tests/stop_contract_wave60.rs",
+    "crates/pony-agent-core/tests/stop_escalation_wave60.rs",
+    "crates/pony-agent-core/tests/stop_interruptible_read_wave60.rs",
+    "crates/pony-agent-core/tests/stop_sequence_wave60.rs",
+    "crates/pony-agent-core/tests/tui_stop_static_wave60.rs",
+    "crates/pony-agent-core/tests/tui_stop_wave60.rs",
+    "src-tauri/tests/stop_registry_wave60.rs",
+    "tests/stop-sequence.spec.ts",
+    "tests/stop-stop-turn.spec.ts"
+   ],
+   "stat": "9 files changed, 1921 insertions(+)"
+  },
+  {
+   "sha": "c575243983ae",
+   "full": "c575243983aecd2fc51128e799d5200273037c75",
+   "subject": "test(wave-60): migrate request_stop call shape to frozen 2-arg signature",
+   "files": [
+    "crates/pony-agent-core/tests/stop_contract_wave60.rs"
+   ],
+   "stat": "1 file changed, 10 insertions(+), 10 deletions(-)"
+  },
+  {
+   "sha": "069587a75959",
+   "full": "069587a7595911fd107b66571cd2cacfb7439f22",
+   "subject": "chore(protocol): freeze wave-61 team activation contract & NFR baseline (C1-C5)",
+   "files": [
+    ".dev-team/contracts/wave-61-team-activation.md",
+    ".dev-team/nfr-baseline.json",
+    ".dev-team/nfr-baseline.schema.json",
+    ".dev-team/regression-baseline-wave61-team.json"
+   ],
+   "stat": "4 files changed, 567 insertions(+), 1 deletion(-)"
+  },
+  {
+   "sha": "1a16a51c38ff",
+   "full": "1a16a51c38ff329b7afa420a4d236d51984f29b1",
+   "subject": "chore(protocol): freeze wave-61 contract v1.1 (C1.6 product names, C4 five/six migration surfaces)",
+   "files": [
+    ".dev-team/contracts/wave-61-team-activation.md",
+    ".dev-team/nfr-baseline.schema.json"
+   ],
+   "stat": "2 files changed, 73 insertions(+), 14 deletions(-)"
+  },
+  {
+   "sha": "b1d62f352302",
+   "full": "b1d62f352302ac6099ac8da7970a067b6f4cadc8",
+   "subject": "test(wave-61-status-panel): freeze red-phase acceptance tests & authorized anchor migrations",
+   "files": [
+    ".dev-team/contracts/wave-61-status-panel.md",
+    ".dev-team/regression-baseline-wave61.json",
+    ".dev-team/review-plan-wave61-a.json",
+    ".dev-team/review-plan-wave61-b.json",
+    ".dev-team/state-wave61.json",
+    ".dev-team/tools/wave61-capture.mjs",
+    ".dev-team/wave61-migrated-vitest.json",
+    ".dev-team/wave61-red-purity-migrated.json",
+    ".dev-team/wave61-red-purity.json",
+    ".dev-team/wave61-red-receipt-migrated.json",
+    ".dev-team/wave61-red-receipt.json",
+    ".dev-team/wave61-red-receipts.md",
+    ".dev-team/wave61-red-vitest.json",
+    ".dev-team/wave61-v10-receipt.json",
+    ".dev-team/wave61-v10-vitest.json",
+    "docs/release/evidence/wave-61-status-panel/before-empty-composer-footer.png",
+    "docs/release/evidence/wave-61-status-panel/before-empty-status-panel.png",
+    "docs/release/evidence/wave-61-status-panel/before-geometry.json",
+    "docs/release/evidence/wave-61-status-panel/before-valued-status-panel.png",
+    "tests/HomeSidebar.spec.ts",
+    "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts",
+    "tests/acceptance/wave15/browser-smoke.mjs",
+    "tests/acceptance/wave17/tabular-nums-contract.spec.ts",
+    "tests/acceptance/wave54/token-speed-truth.spec.ts",
+    "tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts",
+    "tests/acceptance/wave61/wave61-composer-scope.spec.ts",
+    "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+    "tests/acceptance/wave61/wave61-harness.ts",
+    "tests/acceptance/wave61/wave61-layout.spec.ts",
+    "tests/acceptance/wave61/wave61-motion.spec.ts",
+    "tests/e2e/metrics-live-verification.spec.ts",
+    "tests/e2e/wave17-browser-gate.spec.ts",
+    "tests/e2e/wave61-status-panel.spec.ts"
+   ],
+   "stat": "33 files changed, 4119 insertions(+), 38 deletions(-)"
+  },
+  {
+   "sha": "52a7a2182ca7",
+   "full": "52a7a2182ca7470c10a638f14b968f0bd692c2f6",
+   "subject": "test(wave-61-team): freeze red-phase acceptance tests (C1-C5) + migrate 3 frozen contracts",
+   "files": [
+    ".dev-team/red-phase-wave61-team.json",
+    "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs",
+    "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs",
+    "crates/pony-agent-core/tests/wave37_tool_surface.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs"
+   ],
+   "stat": "5 files changed, 1390 insertions(+), 57 deletions(-)"
+  },
+  {
+   "sha": "680499cee148",
+   "full": "680499cee14804ffde7b46da407e3b82fc6906f4",
+   "subject": "feat(wave-60): 可中断停止（结构化 stop_reason + 立即应答 + 可中断读通道 + 宽限期收口 + 双击 Esc）",
+   "files": [
+    ".dev-team/contracts/wave-60-interruptible-stop.md",
+    ".dev-team/nfr-baseline-wave60.json",
+    ".dev-team/review-l3p-wave60.json",
+    ".dev-team/review-wave60-a.json",
+    ".dev-team/review-wave60-b.json",
+    ".dev-team/review-wave60-recheck.json",
+    ".dev-team/state.json",
+    ".dev-team/wave60-delivery.md",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/responses_api.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/stop_escalation.rs",
+    "crates/pony-agent-core/src/agent/stop_sequence.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/tauri_adapter.rs",
+    "src-tauri/src/turn_task_registry.rs",
+    "src/components/HomeWorkspace.vue",
+    "src/lib/runtime/status.ts",
+    "src/stores/runtime.ts",
+    "src/types/runtime.ts"
+   ],
+   "stat": "25 files changed, 1639 insertions(+), 162 deletions(-)"
+  }
+ ],
+ "post_run_commits": [
+  {
+   "sha": "22241e977009",
+   "full": "22241e9770090db91888ab25cf4503fdba0ed9db",
+   "subject": "feat(tui): optimize provider diagnostics, add secondary model menu and ponyfun branding",
+   "files": [
+    ".dev-team/contracts/tui-provider-refactor.md",
+    ".dev-team/meta-retrospective.md",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/tests/tui_provider_refactor_test.rs",
+    "docs/screenshots/tui_key_error_diagnostic.png",
+    "docs/screenshots/tui_provider_menu.png",
+    "docs/screenshots/tui_secondary_model_menu.png",
+    "docs/screenshots/tui_splash_ponyfun_logo.png"
+   ]
+  },
+  {
+   "sha": "49522cc6c33e",
+   "full": "49522cc6c33e8106ee43acccf187888569fd8beb",
+   "subject": "fix(ci): 抑制 wave-60 遗留死代码 names() 的 -D warnings 编译失败（Windows 测试步骤）",
+   "files": [
+    "crates/pony-agent-core/tests/stop_contract_wave60.rs"
+   ]
+  },
+  {
+   "sha": "b527a05ab374",
+   "full": "b527a05ab374c76d10e10c26b7c7315a248a946e",
+   "subject": "fix(ci): unblock main — 移除 wave-61 遗留死代码 teammate_status（deny-warnings）+ V10 元测试跨平台 spawn vitest.mjs",
+   "files": [
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts"
+   ]
+  },
+  {
+   "sha": "a06e254f105f",
+   "full": "a06e254f105f63c6782ef4deba04f74bc3e585c7",
+   "subject": "fix(wave-61-team): reactor-agnostic provider futures (C12) + e2e probe evidence",
+   "files": [
+    ".dev-team/contracts/wave-61-team-activation.md",
+    ".dev-team/green-phase-wave61-team.json",
+    "crates/pony-agent-core/examples/w61_e2e_probe.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/model_catalog.rs",
+    "crates/pony-agent-core/src/agent/provider/responses_api.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/tools.rs"
+   ]
+  },
+  {
+   "sha": "889fb980cff8",
+   "full": "889fb980cff807c466377a0ff1ffc3058be49fa4",
+   "subject": "feat(wave-63): TUI stopping 期按键不再静默吞（有可见反馈、不重复派发）",
+   "files": [
+    "crates/pony-agent-core/src/bin/tui.rs"
+   ]
+  },
+  {
+   "sha": "93bdca3b18d6",
+   "full": "93bdca3b18d6aaa67b40cd509bf10792161a5659",
+   "subject": "test(wave-63): guard V10 meta-test recursion (nested env marker + self-proof)",
+   "files": [
+    "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts"
+   ]
+  },
+  {
+   "sha": "e403302083a2",
+   "full": "e403302083a2b3f5e4965c5ee9b660b82c2e0400",
+   "subject": "fix(wave-61-team): idle interrupt must not strand next drive (stale marker) + regression test",
+   "files": [
+    ".dev-team/green-phase-wave61-team.json",
+    ".dev-team/red-phase-wave61-team.json",
+    ".dev-team/review-wave61-fr.json",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs"
+   ]
+  },
+  {
+   "sha": "a09c10c71f4e",
+   "full": "a09c10c71f4e13c221b2888d86d0aab5bb81057b",
+   "subject": "feat(wave-62): 工具级取消（turn 令牌下沉到 dispatcher 与 Run 子进程，清偿 wave-60 A9）",
+   "files": [
+    ".dev-team/review-wave62-concurrency.json",
+    ".dev-team/review-wave62-contract.json",
+    ".dev-team/review-wave62-recheck.json",
+    ".dev-team/state.json",
+    ".dev-team/wave62-delivery.md",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/document_conversion.rs",
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/src/agent/governed_executor.rs",
+    "crates/pony-agent-core/src/agent/image_artifact.rs",
+    "crates/pony-agent-core/src/agent/plan_state.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/tools.rs"
+   ]
+  },
+  {
+   "sha": "6b9e23a91586",
+   "full": "6b9e23a91586e0ef96ec32c0ea7e7824a035d1c0",
+   "subject": "fix(wave-61-team): drive loop drains until inbox empty (C10-A2) + interrupt marker + non-destructive inbox probe",
+   "files": [
+    ".dev-team/green-phase-wave61-team.json",
+    ".dev-team/red-phase-wave61-team.json",
+    ".dev-team/wave61-team-delivery.md",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs"
+   ]
+  },
+  {
+   "sha": "c8997af10a6a",
+   "full": "c8997af10a6a13c33ef273fd05707e2b3029297d",
+   "subject": "feat(wave-61.1): 圆环后内联显示上下文占用百分比",
+   "files": [
+    ".dev-team/contracts/wave-61-status-panel.md",
+    ".dev-team/wave61-red-receipts.md",
+    "docs/release/evidence/wave-61-status-panel/after-geometry.json",
+    "docs/release/evidence/wave-61-status-panel/after-valued-status-panel.png",
+    "docs/release/evidence/wave-61-status-panel/wave61-status-panel-fullpage.png",
+    "docs/release/evidence/wave-61-status-panel/wave61-status-panel-viewport.png",
+    "src/components/HomeStatusPanel.vue",
+    "tests/acceptance/wave61/wave61-layout.spec.ts",
+    "tests/e2e/wave61-status-panel.spec.ts"
+   ]
+  },
+  {
+   "sha": "ed6d35ef8b72",
+   "full": "ed6d35ef8b72b0e4b410fdb73f9661c5f10a0820",
+   "subject": "chore(wave-61-team): finalize v1.4 — single-flight driving, honest interrupt semantics, review receipts & meta retrospective",
+   "files": [
+    ".dev-team/contracts/wave-61-team-activation.md",
+    ".dev-team/green-phase-wave61-team.json",
+    ".dev-team/meta-retrospective-wave61-team.md",
+    ".dev-team/nfr-baseline.json",
+    ".dev-team/red-phase-wave61-team.json",
+    ".dev-team/review-plan-wave61-team.json",
+    ".dev-team/review-wave61-a.json",
+    ".dev-team/review-wave61-l3p.json",
+    ".dev-team/review-wave61-recheck.json",
+    ".dev-team/wave61-team-delivery.md",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs"
+   ]
+  },
+  {
+   "sha": "cf783b000628",
+   "full": "cf783b000628c340871fd29f4b6eabec06129fe2",
+   "subject": "test(wave-61-status-panel): 用例缺陷重写 D1-D8（夹具/测量口径/缓动口径）",
+   "files": [
+    "tests/HomeSidebar.spec.ts",
+    "tests/acceptance/wave61/wave61-empty-values.spec.ts",
+    "tests/acceptance/wave61/wave61-harness.ts",
+    "tests/acceptance/wave61/wave61-layout.spec.ts",
+    "tests/e2e/wave61-status-panel.spec.ts"
+   ]
+  },
+  {
+   "sha": "4c0fdc48fb5a",
+   "full": "4c0fdc48fb5a6587a9fc8e4eb8388bb2318b0973",
+   "subject": "chore(protocol): freeze wave-62 turn-cancellation field surface",
+   "files": [
+    ".dev-team/contracts/wave-62-tool-cancel.md",
+    "crates/pony-agent-core/src/agent/budget.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/tools.rs"
+   ]
+  },
+  {
+   "sha": "922e960bb0ac",
+   "full": "922e960bb0ac7ab912f72d2664c3c19283ffebbf",
+   "subject": "feat(wave-61-team): real teammate execution + workspace-root propagation + honest 38-tool surface",
+   "files": [
+    ".dev-team/green-phase-wave61-team.json",
+    ".dev-team/wave61-team-delivery.md",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/orchestration.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/subagent_runtime.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/tests/pa110_teams_acceptance.rs",
+    "crates/pony-agent-core/tests/tool_surface_wave20_contract.rs",
+    "crates/pony-agent-core/tests/wave25_capability_honesty_test.rs",
+    "crates/pony-agent-core/tests/wave37_tool_surface.rs",
+    "crates/pony-agent-core/tests/wave61_team_activation.rs"
+   ]
+  },
+  {
+   "sha": "60e7cb84a20a",
+   "full": "60e7cb84a20a31780cde105077d97c0f009b72bc",
+   "subject": "feat(wave-61-team): expose team tools, wire host subagent engine, inject team policy prompt",
+   "files": [
+    ".dev-team/green-phase-wave61-team.json",
+    "crates/pony-agent-core/src/agent/context.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/builder.rs",
+    "crates/pony-agent-core/src/agent/runtime/trace_timeline.rs",
+    "crates/pony-agent-core/src/agent/tools.rs"
+   ]
+  },
+  {
+   "sha": "056f8dff3cde",
+   "full": "056f8dff3cde7b122ef8c7cf59fd969a3e431fbf",
+   "subject": "chore(protocol): freeze wave-59 headless interface stubs & NFR baseline (contract v3)",
+   "files": [
+    ".dev-team/contract-matrix-wave59-headless.md",
+    ".dev-team/nfr-baseline-wave59.json",
+    ".dev-team/regression-baseline-wave59.json",
+    ".dev-team/state.json",
+    "crates/pony-agent-core/src/agent/headless.rs",
+    "crates/pony-agent-core/src/agent/mod.rs"
+   ]
+  }
+ ],
+ "foreign_commits": [],
+ "frozen_test_drift": [],
+ "review_receipts": [
+  {
+   "file": ".dev-team/review-l3p-wave60.json",
+   "schema_version": 2,
+   "executed_by": "755bf11f-272b-4111-b8a8-cad528221824",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "755bf11f-272b-4111-b8a8-cad528221824",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "1a16a51",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-plan-wave61-a.json",
+   "schema_version": 2,
+   "executed_by": "session-mvzzstz2tfc1k1",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "session-mvzzstz2tfc1k1",
+   "fresh_context": true,
+   "self_signed": true,
+   "reviewed_commit": "c575243983aecd2fc51128e799d5200273037c75",
+   "verdict": "FAIL",
+   "independent": false
+  },
+  {
+   "file": ".dev-team/review-plan-wave61-b.json",
+   "schema_version": 2,
+   "executed_by": "session-mvzzstz2tfc1k1",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "session-mvzzstz2tfc1k1",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "c575243983aecd2fc51128e799d5200273037c75",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-wave60-a.json",
+   "schema_version": 2,
+   "executed_by": "5202ba6b-57ef-46b0-995c-ac9267753886",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "5202ba6b-57ef-46b0-995c-ac9267753886",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "52a7a2182ca7470c10a638f14b968f0bd692c2f6",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-wave60-b.json",
+   "schema_version": 2,
+   "executed_by": "session-mvzyc34igfx3ch:wave60-b",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "session-mvzyc34igfx3ch:wave60-b",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "1a16a51c38ff329b7afa420a4d236d51984f29b1",
+   "verdict": "PASS",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-wave60-recheck.json",
+   "schema_version": 2,
+   "executed_by": "recheck-wave60",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "recheck-wave60",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "52a7a2182ca7470c10a638f14b968f0bd692c2f6",
+   "verdict": "PASS",
+   "independent": true
+  }
+ ],
+ "mechanical_red_flags": [
+  "impl_commit_modified_frozen_test:6930ef1c6437",
+  "red_commit_after_impl",
+  "self_signed_review:review-join-a.json",
+  "self_signed_review:review-join-a2.json",
+  "self_signed_review:review-join-b.json",
+  "self_signed_review:review-join-b2.json",
+  "self_signed_review:review-join-pds3.json",
+  "self_signed_review:review-join-wave59-r2.json",
+  "self_signed_review:review-join-wave59.json",
+  "self_signed_review:review-join-wave61-a.json",
+  "self_signed_review:review-join-wave61-b.json",
+  "self_signed_review:review-join.json",
+  "self_signed_review:review-l3-concurrency.json",
+  "self_signed_review:review-l3-security.json",
+  "self_signed_review:review-l3p-wave60.json",
+  "self_signed_review:review-l3p.json",
+  "self_signed_review:review-plan-pds3.json",
+  "self_signed_review:review-plan-wave58.json",
+  "self_signed_review:review-plan-wave59.json",
+  "self_signed_review:review-plan-wave61-a.json",
+  "self_signed_review:review-plan-wave61-b.json",
+  "self_signed_review:review-plan-wave61-team.json",
+  "self_signed_review:review-plan.json",
+  "self_signed_review:review-promote-A.json",
+  "self_signed_review:review-promote-B.json",
+  "self_signed_review:review-tool-timeout.json",
+  "self_signed_review:review-wave60-a.json",
+  "self_signed_review:review-wave60-b.json",
+  "self_signed_review:review-wave60-recheck.json",
+  "self_signed_review:review-wave61-a.json",
+  "self_signed_review:review-wave61-fa.json",
+  "self_signed_review:review-wave61-fp.json",
+  "self_signed_review:review-wave61-fr.json",
+  "self_signed_review:review-wave61-fv.json",
+  "self_signed_review:review-wave61-l3p.json",
+  "self_signed_review:review-wave61-recheck.json",
+  "self_signed_review:review-wave62-concurrency.json",
+  "self_signed_review:review-wave62-contract.json",
+  "self_signed_review:review-wave62-recheck.json"
+ ],
+ "unknowns": [
+  "每个门禁实际抓到多少缺陷（gate_caught）需从 review JSON/测试日志判定",
+  "用户是否口头授权了自扩范围（scope）需读会话原文"
+ ],
+ "pack_hash": "2025ed919e50357b"
+}
