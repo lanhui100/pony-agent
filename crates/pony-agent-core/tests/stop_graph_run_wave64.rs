@@ -38,7 +38,7 @@ use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::context::DefaultTurnContextBuilder;
 use pony_agent_core::agent::control_plane::{
     ExecutionCheckpointQuery, HostControlPlane, HostControlPlaneBuilder, StartGraphRunStreamCommand,
-    StopGraphRunCommand,
+    StopGraphRunCommand, StopTurnCommand,
 };
 use pony_agent_core::agent::execution_control::ExecutionControlRegistry;
 use pony_agent_core::agent::graph::GraphRunStore;
@@ -357,6 +357,10 @@ struct MockProviderServer {
     addr: String,
     requests: Arc<Mutex<Vec<String>>>,
     shutdown: Arc<AtomicBool>,
+    /// 上游**已收到**请求的确定性信号（用例以它作为「in-band 循环已进入 provider 读」的握手点）。
+    seen: Arc<AtomicBool>,
+    /// SSE 停帧的**释放闸门**：置 true 后 mock 关闭连接，in-band 循环随即恢复并收口。
+    release: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -366,8 +370,12 @@ impl MockProviderServer {
         let port = listener.local_addr().expect("mock provider 地址").port();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
         let requests_for_thread = Arc::clone(&requests);
         let shutdown_for_thread = Arc::clone(&shutdown);
+        let seen_for_thread = Arc::clone(&seen);
+        let release_for_thread = Arc::clone(&release);
         let reply = Arc::new(reply);
 
         let handle = std::thread::spawn(move || {
@@ -383,6 +391,7 @@ impl MockProviderServer {
                     .lock()
                     .expect("mock provider request lock poisoned")
                     .push(body);
+                seen_for_thread.store(true, Ordering::SeqCst);
                 match reply.as_ref() {
                     MockReply::JsonToolCall => {
                         write_http_json(&mut stream, &tool_call_completion_body());
@@ -394,8 +403,11 @@ impl MockProviderServer {
                         let _ = stream.write_all(headers.as_bytes());
                         let _ = stream.flush();
                         let deadline = Instant::now() + Duration::from_secs(5);
-                        while !shutdown_for_thread.load(Ordering::SeqCst) && Instant::now() < deadline {
-                            std::thread::sleep(Duration::from_millis(5));
+                        while !shutdown_for_thread.load(Ordering::SeqCst)
+                            && !release_for_thread.load(Ordering::SeqCst)
+                            && Instant::now() < deadline
+                        {
+                            std::thread::sleep(Duration::from_millis(2));
                         }
                     }
                 }
@@ -407,8 +419,23 @@ impl MockProviderServer {
             addr: format!("127.0.0.1:{port}"),
             requests,
             shutdown,
+            seen,
+            release,
             handle: Some(handle),
         }
+    }
+
+    /// 等待上游真正收到请求（确定性握手，禁止盲等固定时长）。
+    fn wait_request(&self, timeout: Duration) -> bool {
+        wait_until(
+            || self.seen.load(Ordering::SeqCst),
+            timeout.as_millis() as u64,
+        )
+    }
+
+    /// 打开 SSE 停帧的释放闸门：mock 关闭连接 ⇒ in-band 循环恢复（真实错误返回路径）。
+    fn release_stream(&self) {
+        self.release.store(true, Ordering::SeqCst);
     }
 
     fn request_count(&self) -> usize {
@@ -771,5 +798,130 @@ fn r2_non_user_failure_still_terminates_failed() {
         sink.events_named("turn:cancelled").is_empty(),
         "R2 回归：无停止请求的失败不得被归类为 turn:cancelled，实际事件序列 = {:?}",
         sink.names()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R3：C5 宽限监督已 escalate 之后，in-band 循环收口不得追加第二条终态
+// ---------------------------------------------------------------------------
+
+/// R3 专用宽限期：必须**先于** provider 读通道的取消观测节拍（`DEFAULT_CANCEL_TICK = 250ms`）
+/// 到点，才能构造确定性的「escalation 先、in-band 后」时序（不依赖任何真实 2s 宽限）。
+const TEST_GRACE_MS_R3: u64 = 40;
+
+/// R3（L3-A BLOCKING）：C5 宽限监督已经 escalate（checkpoint 置 cancelled + 派发一条
+/// `turn:cancelled`）之后，in-band 流式循环恢复并收口（命中停止位 / 真实错误返回）
+/// ⇒ **必须仍只派发恰好一条 `turn:cancelled`**，且不得被后续 `turn:failed` 覆盖或追加。
+///
+/// 确定性时序（无盲等）：
+/// 1. 上游 mock 收到请求即置 `seen`（夹具握手点：in-band 循环已进入 provider 读通道）；
+/// 2. 主线程 `stop_turn` ⇒ C2 派发 `turn:stop_requested` + 启动 C5 宽限监督（注入 40ms）；
+/// 3. 轮询到宽限监督派发的**第一条** `turn:cancelled`（checkpoint 已 cancelled）；
+/// 4. 打开 mock 停帧释放闸门 ⇒ in-band 循环恢复（EOF/取消码）并尝试收口；
+/// 5. 断言 `turn:cancelled` 恰一条、`turn:failed` 零条、checkpoint 终态 cancelled。
+#[test]
+fn r3_in_band_closure_after_grace_escalation_keeps_single_cancelled_terminal() {
+    // Arrange：本地回环 provider 停帧（可控唤醒点）+ 注入毫秒级宽限监督
+    let server = MockProviderServer::start(MockReply::SseStall);
+    let registry = ExecutionControlRegistry::new();
+    let turn_id = "turn-wave64-r3";
+    let session_id = "session-wave64-r3";
+    registry.register_turn(turn_id, Some(session_id), None);
+
+    // 控制面只用于「注册宿主事件出口（sink）+ C2/C5 入口」；宽限监督用测试注入小值。
+    let plane_registry = registry.clone();
+    let control_plane = HostControlPlaneBuilder::new()
+        .runtime(
+            AgentRuntimeBuilder::new()
+                .session_store(isolated_session_store())
+                .build(),
+        )
+        .graph_run_store(GraphRunStore::new())
+        .execution_control(plane_registry.clone())
+        .stop_escalation(Arc::new(StopEscalation::with_registry(
+            StopEscalationConfig::for_test(TEST_GRACE_MS_R3, TEST_POLL_TICK_MS),
+            plane_registry,
+        )))
+        .build();
+
+    let sink = Arc::new(RecordingSink::new());
+    control_plane.register_turn_event_sink(turn_id, Arc::clone(&sink));
+
+    // in-band 流式轮（真实运行时 + 本地回环 provider）在独立线程执行，主线程负责停止与唤醒。
+    let runtime = runtime_with(server.base_url.clone(), true, Box::new(PlainAbortingExecutor));
+    let registry_for_worker = registry.clone();
+    let sink_for_worker = Arc::clone(&sink);
+    let turn_id_for_worker = turn_id.to_string();
+    let worker = std::thread::spawn(move || {
+        runtime.start_turn_stream_with_control(
+            sink_for_worker.as_ref(),
+            &registry_for_worker,
+            turn_id_for_worker,
+            test_turn_input(session_id, "跨宽限期收口的轮次"),
+        );
+    });
+
+    // Act ①：确认 in-band 循环已进入 provider 读通道（确定性握手，非盲等）
+    assert!(
+        server.wait_request(Duration::from_millis(WAIT_BUDGET_MS)),
+        "R3 夹具自检：in-band 循环必须真实打到本地回环 provider"
+    );
+    let stop_response = control_plane.stop_turn(StopTurnCommand {
+        turn_id: turn_id.to_string(),
+        stop_reason: Some(StopReason::User),
+    });
+    assert!(
+        stop_response.accepted,
+        "R3 夹具自检：活跃 turn 的停止请求必须被接受（state={}）",
+        stop_response.state
+    );
+
+    // Act ②：等宽限监督 escalate（第一条 turn:cancelled 已落盘）
+    let escalated = wait_until(
+        || sink.events_named("turn:cancelled").len() >= 1,
+        WAIT_BUDGET_MS,
+    );
+    assert!(
+        escalated,
+        "R3 夹具自检：宽限期（注入 {TEST_GRACE_MS_R3}ms）到点后监督者必须收口并派发 turn:cancelled；实际事件序列 = {:?}",
+        sink.names()
+    );
+    let escalated_checkpoint = registry
+        .load_checkpoint(Some(turn_id), None)
+        .expect("R3：活跃 turn 必须有 checkpoint");
+    assert_eq!(
+        escalated_checkpoint.status, "cancelled",
+        "R3 夹具自检：escalate 之后 checkpoint 必须已是 cancelled"
+    );
+
+    // Act ③：打开闸门，令 in-band 循环恢复并收口（命中停止位 / 真实错误返回）
+    server.release_stream();
+    assert!(
+        wait_until(|| worker.is_finished(), WAIT_BUDGET_MS),
+        "R3：释放闸门后 in-band 循环必须在 {WAIT_BUDGET_MS}ms 内收口（事件序列 = {:?}）",
+        sink.names()
+    );
+    worker.join().expect("in-band 线程不得 panic");
+
+    // Assert：终态**恰好一次**、且不得被 failed 追加
+    let cancelled = sink.events_named("turn:cancelled");
+    assert_eq!(
+        cancelled.len(),
+        1,
+        "R3：C5 escalation 之后 in-band 收口不得再派发第二条终态 —— turn:cancelled 必须恰好一条；实际事件序列 = {:?}",
+        sink.names()
+    );
+    assert_eq!(
+        sink.events_named("turn:failed").len(),
+        0,
+        "R3：已 cancelled 的轮次不得被后续 turn:failed 覆盖/追加；实际事件序列 = {:?}",
+        sink.names()
+    );
+    let final_checkpoint = registry
+        .load_checkpoint(Some(turn_id), None)
+        .expect("R3：turn 必须有 checkpoint");
+    assert_eq!(
+        final_checkpoint.status, "cancelled",
+        "R3：in-band 收口后 checkpoint 终态必须仍是 cancelled"
     );
 }

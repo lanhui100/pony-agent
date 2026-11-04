@@ -120,5 +120,40 @@
     "Rust 集成测试通过 ISOLATE_PROCESS_DATA_DIR 把 XDG_DATA_HOME/HOME/LOCALAPPDATA 重定向到本进程独有临时沙箱（SessionStore::new() 在生产分支会指向用户真实 sessions.db）。",
     "宽限监督注入 StopEscalationConfig::for_test(60ms, 5ms)，禁止 sleep 2000ms 真实宽限期。",
     "前端夹具的 assistant 消息 id 与 store 的 ensureAssistantMessage 键（assistant-${turnId}）保持一致，避免终态事件作用到另一条消息导致假绿（已同步修正 stop-stop-turn.spec.ts 的旧夹具）。"
-  ]
+  ],
+  "round2": {
+    "trigger": "L3 审查 3 条收口（Lead）",
+    "test_side_fixes": [
+      "tests/acceptance/wave64/f1-f2-workspace-terminal-status.spec.ts: f1_terminal_status_row_leaves_terminal_mode_after_new_submission 增加 bars.length > 0 前置断言（消除空集合 for 假绿）；全 wave64 目录自查无其它断言类集合循环",
+      "新增 f2_failed_wire_empty_compat_text_does_not_become_body",
+      "新增 f2_failed_wire_partial_text_suffix_is_stripped_from_content",
+      "新增 f2_failed_wire_partial_text_suffix_is_not_rendered_in_message_area",
+      "新增 f2_background_session_failed_does_not_persist_placeholder_body"
+    ],
+    "frontend": {
+      "command": "npx vitest run tests/acceptance/wave64 tests/stop-stop-turn.spec.ts tests/HomeWorkspace.spec.ts tests/runtime-store.spec.ts",
+      "exit_code": 0,
+      "summary": "Test Files 6 passed (6); Tests 212 passed | 7 skipped (219)"
+    },
+    "rust": {
+      "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test stop_graph_run_wave64 --target-dir target-test",
+      "exit_code": 0,
+      "summary": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+    },
+    "red_receipts_preserved": true,
+    "note": "第一轮红相收据原样保留；本轮转绿因 executor-fe / executor-rs 实现已落地，而非放宽断言。"
+  },
+  "round3": {
+    "trigger": "Lead 追加 R3（L3-A BLOCKING · terminal-once）",
+    "added_tests": [
+      "crates/pony-agent-core/tests/stop_graph_run_wave64.rs::r3_in_band_closure_after_grace_escalation_keeps_single_cancelled_terminal"
+    ],
+    "fixture": "本地回环 mock provider SSE 停帧（seen 握手 + release 闸门）+ StopEscalationConfig::for_test(40ms,5ms)（刻意 < ProviderStreamGuard::DEFAULT_CANCEL_TICK=250ms）+ 独立线程跑真实 start_turn_stream_with_control；主线程 stop_turn 触发 C2+C5，确认 escalation 事件后再放行 in-band 收口",
+    "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test stop_graph_run_wave64 --target-dir target-test",
+    "exit_code": 101,
+    "summary": "5 passed; 1 failed（R3 红相成立）",
+    "failure": "同一 turn 派发两条 turn:cancelled：[\"turn:started\",\"turn:trace\",\"turn:stop_requested\",\"turn:cancelled\",\"turn:cancelled\"]，turn:failed=0",
+    "expected_after_fix": "turn:cancelled == 1、turn:failed == 0、checkpoint cancelled",
+    "receipts_section": ".dev-team/wave64-red-receipts.md §5"
+  }
 }

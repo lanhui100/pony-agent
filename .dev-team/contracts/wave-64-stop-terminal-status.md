@@ -45,6 +45,11 @@
 ### F2 不得另起消息（前端）
 - `turn:cancelled` 时**禁止**向助手消息 content 写入 `本轮已停止。` 占位（浏览器预览取消路径同规则）。
 - `turn:failed` 时**禁止**写入 `本轮执行失败，请查看右侧 trace。` 占位正文。
+- `turn:failed` 的 wire `text` 归一化（Lead 裁决，L3-B BLOCKING 收口）：后端恒发 text，其中
+  ① `"This turn failed."`（零正文兼容锁）⇒ **不得**写入正文（终态状态行承载错误）；
+  ② `正文 + "\n\n（该轮失败前已产出以上内容）"` ⇒ 只落**正文部分**（剥掉失败说明后缀），
+  保证「已产出正文照常渲染」而**不额外增加错误文案**。该归一化对**前台轮与后台会话轮**
+  （`runningSessionMap` 分支 / `updatePersistedBackgroundSession`）同等生效。
 - 消息区**不再渲染**「错误详情」折叠面板（`WorkspaceTurnItem` error 分支、`HomeWorkspace` 的 error 事件注入与 `shouldRenderAssistantAsError` 正文抑制一并移除）；失败轮已产出的正文照常渲染。
 - 错误明细仍保留在 store 的 `errorDetail` 与右侧 Trace 面板（不新增 UI）。
 

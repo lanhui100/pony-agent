@@ -10,6 +10,11 @@ export type AgentRuntimeMode =
   | "retrying"
   /** wave-60 §C7：停止请求已受理、终态未到（进行中态，仅流式期可见）。 */
   | "stopping"
+  /**
+   * wave-64 §2 F1：停止的**终态**（`turn:cancelled` 后由 store 按 phase 派生）。
+   * 与 `stopping`（进行中）严格区分：中性 stone 语义色、lucide `Pause`、无 shimmer、无耗时计时。
+   */
+  | "stopped"
   | "error"
   /** C-9：中性/成功反馈（如斜杠命令提示），非错误、非进行中。 */
   | "info";
@@ -56,7 +61,8 @@ export function resolveAgentRuntimeStatus(
 
   // wave-60 §C7 / 补遗 v2 A2：停止请求受理后优先呈现「正在停止…」。
   // 口径：仅在 `isSubmitting`（流式进行中）时返回 —— 终态后本函数恒返回 null，
-  // 「已停止」由 `sessionNotice` 承载，二者不互相冒充。
+  // 终态「已停止」由 `stores/runtime.ts` 的 `agentRuntimeStatus` getter 以
+  // `mode === "stopped"` 派生承载（wave-64 §2 F1，不再落 `sessionNotice`），二者不互相冒充。
   if (phase === "stopping") {
     return {
       mode: "stopping",

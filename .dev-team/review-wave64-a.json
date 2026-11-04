@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-bfd2044a-b5f4-4892-9b84-b17b03ff34bb:wave64-l3a",
+    "fresh_context": true
+  },
+  "executed_by": "session-bfd2044a-b5f4-4892-9b84-b17b03ff34bb:wave64-l3a",
+  "reviewed_commit": "778717ec",
+  "attestation": {
+    "self_signed": false,
+    "note": "只读审查 wave-64 未提交工作区改动中的三个 Rust 文件（control_plane/mod.rs、runtime/turn_control.rs、runtime/turn_stream.rs），未改动任何源码/测试；他人未提交改动（otel/sanitizer/tool-result-meta/P1-2 徽标、前端 F1/F2 文件）不纳入本审查。机器收据：cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test stop_graph_run_wave64 --target-dir target-test ⇒ Exit 0，5 passed / 0 failed（r1_stop_graph_run_dispatches_single_stop_requested_and_grace_cancels_turn、r1_stop_graph_run_unknown_run_keeps_error_and_emits_nothing、r2_tool_aborted_during_user_stop_terminates_cancelled_not_failed、r2_provider_stream_cancelled_terminates_cancelled_not_failed、r2_non_user_failure_still_terminates_failed）。该绿收据只覆盖'无运行中轮的 run'与'无 C5 监督的运行中轮'两种夹具，不覆盖 BLOCKING 项的并发时序。"
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/tests/stop_graph_run_wave64.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+      "line": 101,
+      "rule": "CONCURRENCY",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'emit_stream_cancelled(' crates/pony-agent-core/src/agent/runtime/turn_control.rs && grep -n 'fn escalate_now\\|checkpoint.status = \"cancelled\"\\|emitter.emit_cancelled' crates/pony-agent-core/src/agent/stop_escalation.rs && grep -n 'fn emit_event' crates/pony-agent-core/src/agent/turn_flow.rs  # 触发序列（无 terminal-once 守卫 ⇒ 同一 turn 两条 turn:cancelled）：① 桌面点停止 → stop_graph_run → stop_turn → request_stop(accepted) 置停止位 + 取消令牌，并在同一次调用内 on_stop_accepted 起监督线程（宽限 2000ms，stop_escalation.rs:155-232）；② 该轮此刻阻塞在**不轮询取消令牌**的环节（MCP/LSP/web 工具、或 provider/non-streaming 同步决策；followup 读通道连 guard 都没有，见 provider/mod.rs:924-944），宽限到点 escalate_now 命中 status==\"running\" ⇒ 置 checkpoint=cancelled 并经 emitter 派发第 1 条 turn:cancelled（stop_escalation.rs:272-302）；③ 该阻塞调用返回后，turn_stream.rs:101 / :494 / :902 命中 should_cancel_turn（停止位仍在）⇒ cancel_stream_turn 无条件 update checkpoint 且无条件 emit_stream_cancelled（turn_control.rs:62、:101）⇒ 第 2 条 turn:cancelled，且经 emit_event 分配新 sequence 落库为第 2 条 terminal 事件（turn_flow.rs:1116-1160，无去重、cancelled 属 terminal）。契约 §2 R1 ③ 的『恰好一条 turn:cancelled』被破坏。冻结用例无判别力：tests/stop_graph_run_wave64.rs:205 的 R1 用例只 prepare 出活跃 turn（无运行中轮），所以宽限收口时 checkpoint 必然仍 running 且之后不再有人收口，恰好 1 条；r2_* 用例没有接 StopEscalation，C5 不参与。",
+      "detail": "根因是终态派发缺少'该 turn 已收口'的单一闸门：C5 只保证监督者自身幂等（stop_escalation.rs:281 的 status!=running 原子判定），而运行中轮的 in-band 收口（cancel_stream_turn / fail_stream_turn_*）完全不看 checkpoint 是否已被 C5 置为终态。wave-64 让桌面停止第一次走进 C5（control_plane/mod.rs:2341-2346），因此这条既有竞态第一次变成桌面用户可见 + 事件溯源落库可见。建议：在 ExecutionControlRegistry 上加 terminal-once CAS（update 闭包内 status==terminal 时返回'已收口'并让调用方跳过 emit，或让 cancel_stream_turn 先 CAS 再 emit），并补一条'宽限到点后 in-band 仍收口'的用例。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 743,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '637,646p;739,770p' crates/pony-agent-core/src/agent/runtime/turn_stream.rs && grep -n 'ProviderStreamGuard::without_cancel' crates/pony-agent-core/src/agent/provider/mod.rs  # 推演：工具跟进读通道由 provider_followup_stream_with_mode → ProviderManager::continue_with_tool_result_stream（无守卫版本，provider/mod.rs:924-944）发起，guard 恒为 without_cancel ⇒ 该通道**永远不会**产出 provider_stream_cancelled。于是 743 行新增的取消码归类在本路径恒为 Failed：用户停止 + 跟进读随后以真实错误结束（停帧后连接被关 ⇒ 'Anthropic/OpenAI 流式返回中未找到 SSE 事件'，provider/mod.rs:2792-2797 一类）⇒ fail_stream_turn_with_hook_dispatch（turn_persist.rs:436-450）把 checkpoint 从 C5 已写的 cancelled 覆盖回 failed 并派发 turn:failed。事件序列 cancelled→failed，F1 的终态状态行落到 error（真实错误文案）而用户是主动停止。",
+      "detail": "四条决策路径对'已停止 + 真实错误'的口径不一致：initial streaming 决策的 or_else 闭包是'有停止位就一律取消'（turn_stream.rs:2034-2048、:2075-2089），而工具跟进（:743）与两条同步决策（:2063、:2101）是'必须有取消码才取消'；classify_stream_error 的真值表（turn_control.rs:30-35）只承认后者。契约 §2 R2 只字面约束了取消码路径，但 R2 标题『用户取消不得被归类为错误』与 F1 在 cancelled 之后又出现 failed 的组合下被破坏。建议：把'有停止位'的判据统一到一处（例如在 fail_stream_turn_with_hook_dispatch 入口先查 should_cancel_turn），并给 followup 读通道接上 cancel guard（wave-60 C4 只接了 initial decision，turn_stream.rs:1806 是唯一一处 with_cancel_check）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 2342,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '2311,2347p;2349,2362p' crates/pony-agent-core/src/agent/control_plane/mod.rs && grep -n 'pub fn request_stop' -A 16 crates/pony-agent-core/src/agent/graph.rs  # 触发序列（TOCTOU：先派发后校验）：① 线程 S 在 2311-2331 快照到 phase=Running、active_turn_id=A 后出锁；② 线程 T（运行中轮）在此窗口内自然完成该轮并把 run 推到 Completed/Failed/Cancelled；③ 线程 S 在 2336-2347 仍对 A 调 stop_turn（若 A 在此瞬间仍 running 则 request_stop 被接受 ⇒ 同步派发 turn:stop_requested + 起宽限监督，副作用已发生）；④ 线程 S 到 2354-2362 才 request_stop(run) ⇒ run 已终态返回 None ⇒ `.ok_or_else` 返回 Err(\"cannot be stopped\")。结果：调用方拿到错误返回，但事件已派发、监督线程已启动，与契约 §2 R1『graph run 已终态 / run 不存在时保持既有错误返回，不派发任何事件』相反。",
+      "detail": "三段式（快照→stop_turn→回填）把'判定 run 可停'与'真正停 run'拆成两个临界区，中间没有版本/CAS 校验，也没有'先停 run 再停 turn'的顺序保证；旧实现同样先 stop turn 后 request_stop，但窗口被锁压缩，本次改成出锁后执行把窗口从微秒级放大到'一次 checkpoint 查询 + 一次 sink emit + 一次线程 spawn'。最小修法：把 ② 与 ③ 对调（先在同一个 graph_runs 临界区内完成 request_stop 并持有 lifecycle，成功后再出锁调 stop_turn），或在 stop_turn 前用 run 的 updated_at_ms/version 做一次 CAS 复核。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 2034,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '2034,2060p;2075,2101p' crates/pony-agent-core/src/agent/runtime/turn_stream.rs && sed -n '12,35p' crates/pony-agent-core/src/agent/runtime/turn_control.rs  # 推演：同一输入类（cancel_requested=true, error=<真实错误>）在两处得到相反结论——or_else 闭包判 Cancelled 且**不记录 error**（原本的 eprintln 根因日志被跳过），而 classify_stream_error/单测 r2_classify_stream_error_truth_table 第 ③ 例判定必须是 Failed。触发：用户按停止的同时 provider 返回 401/连接重置；实际落到 cancelled，turn_trace/checkpoint 的 error 字段只有 stopped_by_user，真实根因既不进日志（eprintln 在 else 分支之后）也不进 trace ⇒ 事后无法归因。",
+      "detail": "闭包里的注释自相矛盾：『取消码本身不参与本判定，故非取消错误的 fallback 语义逐字不变』——实际上非取消错误在此时**不再** fallback 到 decide_sync，控制流是被改变的（只是走向 cancelled 而非 failed）。这是刻意的产品选择（停止窗口内不暴露错误），但需要与 classify_stream_error 的单一判据对齐，否则两处规则必然漂移。建议：把'有停止位即取消'提升为 classify_stream_error 的唯一规则（或在契约里显式写明两处差异），并至少把被丢弃的 error 记入 warn 日志/trace。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 2337,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '2336,2347p' crates/pony-agent-core/src/agent/control_plane/mod.rs && grep -n 'fn load_execution_checkpoint' -A 20 crates/pony-agent-core/src/agent/control_plane/query_commands.rs  # 推演：这个 guard 既不是 turn 存在性判据、也不校验取回的 checkpoint 属于 active_turn_id（execution_control 缺失时会回退到 graph-run 投影 / trace boundary 的 checkpoint，可能是别的 turn）。若它返回 None（或返回别人的 checkpoint），turn_stop=None，stop_graph_run 仍返回 Ok，调用方无法区分'没有活跃 turn'与'停止被静默跳过'，且没有 stop_turn 那种结构化 warn（mod.rs:2114-2123）。R1 ①② 因此不是硬保证，只是默认路径的副作用。",
+      "detail": "语义上正确性靠下游 request_stop 的 not_found/already_terminal 兜底（execution_control.rs:203-219），所以不会误派发；但'成功返回 + 零派发 + 零日志'三者同时成立时不可诊断。建议：把 guard 换成 execution_control 的直接存在性/状态检查（load_checkpoint(turn_id) 且 stop_requested 可接受），失败时补一条与 stop_turn 同款 warn，或在 GraphRunControlResponse 里显式区分 skip 原因。"
+    }
+  ],
+  "evidence": {
+    "lock_order_verified_pass": "graph_runs 的两个临界区（control_plane/mod.rs:2311-2331 快照、:2349-2385 回填）内只调 store 操作与纯构造器（GraphRunner::request_stop / record_control_boundary_evidence：graph.rs:690-719、:766-776；build_graph_run_command_boundary_evidence：graph_projection.rs:342-376 无锁），不再触达 execution_control / turn_event_sinks / emitters / sessions / load_execution_checkpoint ⇒ 清单 1 的锁序红线已真正解除；旧实现（在 graph_runs 临界区内调 load_execution_checkpoint）确会经由 attach_session_persisted_effect_evidence 取 sessions_rwlock（graph_projection.rs:187-210），并可能在回退路径经 load_graph_run（query_commands.rs:382-389，std::sync::Mutex 不可重入）自死锁，本改动是对的方向。stop_turn 的取锁顺序 execution_control → turn_event_sinks（mod.rs:2136-2145，克隆后立即释放）→ stop_escalation.emitters（stop_escalation.rs:228-232）与 register_turn_event_sink（mod.rs:2051-2065）同向，无交叉嵌套。",
+    "idempotency_verified_pass": "重复 stop / stop 与自然结束竞态下 turn:stop_requested 不重复：唯一受理路径 apply_stop_request 在 execution_control 的短锁内做 running/停止位/终态三判定（execution_control.rs:198-240），第二次必然 accepted=false ⇒ mod.rs:2105-2124 整段不执行。R1 用例 :239-273 也对重复 stop 断言了两类事件各 1 条（同进程内实测通过）。",
+    "sentinel_control_flow_verified_pass": "STREAM_CANCELLED_HANDLED_SENTINEL 只在 planned 的 Err 臂被消费（turn_stream.rs:2116-2121：set_phase(\"cancelled\") + return），两条产出点（:2048、:2089）都在 planned 闭包内、都是 `return Err(...)` 从闭包返回，既不进 checkpoint/trace/persist，也不进 emit_turn_failed（该臂在 :2122 的 HOOK 分支与 :2148 的 failed 分支之前 return）；start_turn_stream_with_control_and_facts 返回 ()（:1432），哨兵无外泄通道；or_else 外没有第二个 `?`/match 会二次收口（Ok 臂继续走正常流程，其余 Err 臂各自 return）。",
+    "error_code_prefix_verified_pass": "CANCELLED_ERROR_CODE=\"provider_stream_cancelled\" 与 DEADLINE_ERROR_CODE=\"provider_stream_deadline_exceeded\" 互不为前缀（provider/mod.rs:546-548），starts_with 不会误判；且 guard 的取消闭包就是 control.is_stop_requested(turn_id)（turn_stream.rs:1805），所以'取消码但无停止位 ⇒ failed'在单轮内实际不可达，不会把取消码当错误文案外泄。风险在对侧：followup 读通道根本接不到 guard，见 findings[1]。",
+    "stop_latency_answer": "R1 落地后桌面 stop_graph_run 的终态上界 = stop ack（同步 turn:stop_requested）→ C5 宽限 2000ms + 一个 tick 250ms ⇒ 约 2.0–2.25s（StopEscalationConfig::default，stop_escalation.rs:70-84；supervise_until_grace :233-263）。不经 C5 的残余路径：① active_turn_id 为 None（轮间/仅 planner）⇒ 零 turn 事件，只有 run→Paused；② 运行中 turn 的 sink 未注册 ⇒ stop_turn 只落 warn（mod.rs:2105-2124）、监督者 take_emitter 得 None ⇒ escalate_now 只改 checkpoint、零派发（stop_escalation.rs:301），前端拿不到终态；桌面三条命令入口都在 prepare 后、spawn 前注册（src-tauri/src/lib.rs:102/131/160），但 execute_graph_run_stream 的 goal 轮自续（control_plane/mod.rs:1744-1775 prepare_continue_graph_run_stream）不会为新 turn_id 重新注册 ⇒ 该轮停止时无 sink/emitter；③ checkpoint 解析失败 ⇒ 见 findings[4]。",
+    "thread_lifecycle_verified": "stop_escalation 每 turn 至多一条监督线程（on_stop_accepted 只在 accepted 后调用一次，stop_escalation.rs:155-232），线程内 sleep(tick.min(remaining)) 有上界、到点或见到非 running 即退出（:233-263），emitter 在 on_stop_accepted 时被 take 出表（:228-232），宿主 TaskCleanupGuard::drop 注销 sink 与 emitter（src-tauri/src/tauri_adapter.rs:44-49、:120-123）⇒ 本改动没有新增忙等/常驻线程/线程泄漏。"
+  }
+}

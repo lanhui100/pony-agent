@@ -1,0 +1,148 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewed_commit": "778717ec",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "66e7421b-3e59-4350-a2de-0ee336d59fa3",
+    "fresh_context": true
+  },
+  "executed_by": "66e7421b-3e59-4350-a2de-0ee336d59fa3",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "git diff -- crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "git diff -- crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "git diff -- crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "git diff -- src/lib/runtime/status.ts",
+    "git diff -- src/components/chat/AgentRuntimeStatusBar.vue",
+    "git diff -- src/stores/runtime.ts",
+    "git diff -- src/components/HomeWorkspace.vue",
+    "git diff -- src/components/chat/WorkspaceTurnItem.vue（仅 wave-64 段落：AgentTurnEvent error 变体删除 / 错误详情面板删除 / storeToRefs 收敛；P1-2 退出码徽标段落按任务书排除，见 finding 7）",
+    "crates/pony-agent-core/tests/stop_graph_run_wave64.rs（只读）",
+    "tests/acceptance/wave64/（f1-stopped-terminal-status / f2-no-placeholder-message / f1-f2-workspace-terminal-status，只读）",
+    "tests/stop-stop-turn.spec.ts、tests/HomeWorkspace.spec.ts、tests/runtime-store.spec.ts（契约 §4 迁移，git show af599ef4 核对）",
+    ".dev-team/contracts/wave-64-stop-terminal-status.md",
+    ".dev-team/nfr-baseline.json",
+    ".dev-team/wave64-green-fe.md",
+    ".dev-team/wave64-green-rs.md",
+    ".dev-team/wave64-red-receipts.md",
+    "docs/release/evidence/wave-64（实存 stopped-terminal-status.png，人工核验内容与 F1 一致）",
+    "crates/pony-agent-core/src/agent/stop_escalation.rs（只读：监督线程有界性与回收）",
+    "crates/pony-agent-core/src/agent/execution_control.rs（只读：request_stop 幂等判定）",
+    "crates/pony-agent-core/src/agent/turn_flow.rs（只读：turn:failed / turn:cancelled / turn:stop_requested 载荷）",
+    "作用域说明：HEAD=778717ec，wave-64 改动全部为工作区未提交 diff；工作区另有他人未提交改动（otel/sanitizer/tool-result-meta/P1-2 徽标）未纳入判定，仅 finding 7 记录其在写域文件内的混入事实。"
+  ],
+  "six_questions": [
+    {
+      "question": "1. 外部调用超时：本波是否新增/放宽无硬超时的外部 IO（含 stop_escalation 线程 wait/轮询是否 bounded）",
+      "baseline_field": "external_call_timeout_ms=3000；deadlock_watchdog_timeout_ms=5000",
+      "code_evidence": "crates/pony-agent-core/src/agent/control_plane/mod.rs:2336-2347（新增的 load_execution_checkpoint + stop_turn 均为进程内短锁调用，无网络）；crates/pony-agent-core/src/agent/stop_escalation.rs:236-268（deadline=now+stop_grace_ms，缺省 2000ms，sleep 取 tick.min(remaining)）；本波 diff 内 0 处 HTTP/IO 调用",
+      "verdict": "PASS"
+    },
+    {
+      "question": "2. 日志规范与防吞：新增/修改异常路径是否有裸 pass / 吞错 / 无上下文裸打印（STREAM_CANCELLED_HANDLED_SENTINEL 与 cancel 分支可观测性）",
+      "baseline_field": "logging.format=json；logging.trace_id_required=true；logging_scope=new_structured_logging_surface_only",
+      "code_evidence": "本波 0 处新增 eprintln（diff 内新增日志仅 stop_turn 既有 log_json_with_fields warn 路径，control_plane/mod.rs:2114-2124）；但 turn_stream.rs:2032-2048 与 :2076-2089 的取消分派丢弃原始 error 且不落任何结构化记录，:2116-2120 哨兵分支只 set_phase(\"cancelled\") —— 见 findings[3]（ADVISORY，可从 checkpoint/事件侧观测，非静默 blackhole）",
+      "verdict": "PASS"
+    },
+    {
+      "question": "3. 资源泄漏：监督线程必退性、sink/emitter 回收、graph_runs 锁外调用、TurnEventSink 泄漏",
+      "baseline_field": "resource_release（bounded_queue / worker_thread_shutdown / 幂等清理）",
+      "code_evidence": "stop_escalation.rs:249-268 监督线程在『checkpoint 非 running』或 deadline 到点即 return（必退，每 turn 至多 1 个）；emitter 由 take_emitter(:216-222)/unregister_emitter(:212) 成对回收；control_plane/mod.rs:2062-2080 register/unregister_turn_event_sink 成对 + src-tauri/src/tauri_adapter.rs:33-48 Drop 守卫按 turn_id 回收；stop_graph_run 的两处 graph_runs 临界区（:2309-2331 / :2349-2390）内不含 load_execution_checkpoint / stop_turn / sink / emitters",
+      "verdict": "PASS"
+    },
+    {
+      "question": "4. 并发与幂等：stop 幂等、是否可能重复终态、AB/BA 锁序、新增无界等待",
+      "baseline_field": "concurrency_lock=mutex；lock_scope_bounded=true；lock_reentrancy_forbidden=true；lock_forbidden_calls=[resolve_graph_run_for_retrieval, load_graph_run, load_execution_checkpoint, load_active_graph_run_for_session]",
+      "code_evidence": "幂等：execution_control.rs:212-233（already_terminal / stop_requested 已在位 ⇒ accepted=false，不改写 stop_reason）⇒ stop_turn 早退零派发，测试 stop_graph_run_wave64.rs:280-292 实测重复 stop 仍恰好 1 条 stop_requested + 1 条 cancelled；锁序：graph_runs 锁内只做只读快照（:2309-2331），stop_turn 全程锁外，无 AB/BA；新增等待均有上界（stop_grace_ms=2000 / tick=250）。重复终态风险见 findings[4]（ADVISORY）",
+      "verdict": "PASS"
+    },
+    {
+      "question": "5. 配置与自检：本波是否引入新配置项/新可注入参数，是否登记且缺省安全",
+      "baseline_field": "config 基线（.dev-team/nfr-baseline.json + 契约 §0/§2）；wave-60 已登记 stop_grace_ms=2000 / stop_poll_tick_ms=250",
+      "code_evidence": "本波 diff 内 0 处新增配置键 / env 读取 / 可注入参数（`git diff | grep -E '^\\+.*(env::var|const .*MS|Config)'` 仅命中既有 StopEscalationConfig 引用）；stop_graph_run 复用 plane 级 StopEscalationConfig（control_plane/mod.rs:1215-1220 缺省 2000/250），未放宽",
+      "verdict": "PASS"
+    },
+    {
+      "question": "6. 契约兼容性：三处对外可见契约变更的 additive/breaking 判定 + 消费方普查 + §4 迁移核实",
+      "baseline_field": "契约 §2 F1/F2 + §4 测试迁移 + §0 非目标（落库哨兵句 / TUI / 错误码不变）",
+      "code_evidence": "(a) sessionNotice 不再承载停止 = breaking-内部语义，已登记（契约 F1 + §4），消费方普查：src/ 内仅 runtime.ts:591 读、types.ts:47 声明、status.ts:64 注释（注释漂移见 findings[5]），tests 迁移属实（git show af599ef4 -- tests/stop-stop-turn.spec.ts）；(b) 消息区移除「错误详情」面板 = breaking-UI，消费方普查：HomeWorkspace.vue:791/857/882/1193 与 WorkspaceTurnItem.vue:71/154/712 为唯一实现，tests/HomeWorkspace.spec.ts:867-869/898-900 已迁移为 not.toContain + 状态行断言（未删断言）；(c) stop_graph_run 新增派发 turn:stop_requested / turn:cancelled = additive-事件，消费方已存在（runtime.ts:5141 监听 turn:stop_requested；turn:cancelled 监听为既有），TUI 不调用 stop_graph_run（grep --include=*.rs crates/pony-agent-core/src 0 命中 tui.rs），§0 非目标 2 未被破坏；§4 三处既有用例迁移经 git show af599ef4 逐条核对属实",
+      "verdict": "PASS"
+    }
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4722,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '4720,4724p' src/stores/runtime.ts && grep -rn 'DEFAULT_FAILED_TURN_MESSAGE' src/ | grep -v '^src/lib/runtime/constants.ts'  # 后台会话 turn:failed 分支仍以 payload.text ?? 占位正文 写入消息 content，F2『禁止写占位正文』未覆盖该分支",
+      "severity": "ADVISORY",
+      "method": "machine",
+      "non_machine_reason": null,
+      "note": "实际可达性低（core 侧 turn_flow.rs:567 text 恒为 Some），故非阻塞；但属 live 写入路径且未在契约 §4 登记为偏离。"
+    },
+    {
+      "file": "tests/acceptance/wave64/f2-no-placeholder-message.spec.ts",
+      "line": 150,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '150,168p' tests/acceptance/wave64/f2-no-placeholder-message.spec.ts && sed -n '560,570p' crates/pony-agent-core/src/agent/turn_flow.rs && sed -n '4808,4814p' src/stores/runtime.ts  # 验收夹具省略 text（None），但线上 core 恒发 text=Some(build_failed_turn_text) ⇒ 真实失败轮正文落 'This turn failed.' 或 '<正文>\\n\\n（该轮失败前已产出以上内容）'",
+      "severity": "ADVISORY",
+      "method": "machine",
+      "non_machine_reason": null,
+      "note": "F2 字面判据（禁止中文占位字面）已绿；但夹具与线上 wire 形状不一致，『失败不得另起消息』在生产路径只能证明一半，建议补一条带 text 的用例或让 core 对无正文失败轮不发 text。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 2034,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '2030,2050p;2076,2092p;2113,2122p' crates/pony-agent-core/src/agent/runtime/turn_stream.rs  # 取消分派分支丢弃原始 stream_initial_decision error（改写前该 error 由 eprintln 记录），哨兵分支仅 set_phase(\"cancelled\")，无 json+trace_id 结构化记录",
+      "severity": "ADVISORY",
+      "method": "non-machine",
+      "non_machine_reason": "『吞错/可观测性是否充分』无机器判据，需人工判定『取消路径的根因是否必须留痕』；既有基线仅约束新增日志面格式（logging_scope=new_structured_logging_surface_only），未强制新增日志，故不构成基线违约。",
+      "note": "建议在取消分派处补一条 log_json_with_fields(level=info, msg=\"stream decision aborted by stop request\", fields=[turn_id, error 前缀])，避免 provider 侧真实失败在停止场景下不可取证。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 2342,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '2341,2347p' crates/pony-agent-core/src/agent/control_plane/mod.rs && sed -n '280,303p' crates/pony-agent-core/src/agent/stop_escalation.rs && grep -n 'fn cancel_stream_turn' -A 75 crates/pony-agent-core/src/agent/runtime/turn_control.rs | grep -n 'emit_stream_cancelled'  # 监督者 escalate_now 与循环自收口 cancel_stream_turn 均无条件派发 turn:cancelled，无 per-turn once 门闩",
+      "severity": "ADVISORY",
+      "method": "non-machine",
+      "non_machine_reason": "重复终态需要『循环被不可抢占调用阻塞 > 宽限期后仍返回取消码』的时序，无法用现有夹具机械触发；判定基于代码路径可达性推演，非实测反例。",
+      "note": "触发场景恰是本波要解决的『慢停止』：T+2000ms 监督者先派发终态，循环解阻塞后再派发第二条 turn:cancelled（前端 commitTurnTraceTimeline 按 turnId 幂等，用户可见影响为 trace 时间线被空 trace 覆盖，非重复消息）。契约 R1『恰好一条』仅在『循环已死』的测试夹具下成立；建议由 checkpoint 终态做派发门闩（escalate 后置 status=cancelled 已具备原子性，循环侧 emit 前应复检）。"
+    },
+    {
+      "file": "src/lib/runtime/status.ts",
+      "line": 64,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '62,66p' src/lib/runtime/status.ts && grep -n 'mode: \"stopped\"' src/stores/runtime.ts  # 写域内文件仍声明『「已停止」由 sessionNotice 承载』，与 F1 新契约（stopped 模式承载）直接矛盾",
+      "severity": "ADVISORY",
+      "method": "machine",
+      "non_machine_reason": null,
+      "note": "陈旧契约注释会误导后续维护者回退 F1 语义；建议随本波一并删除/改写该行注释。"
+    },
+    {
+      "file": "docs/release/evidence/wave-64",
+      "line": 1,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && ls -A docs/release/evidence/wave-64  # 仅 stopped-terminal-status.png（11:39 落盘，内容符合 F1：Pause 图标 + stone 中性色「已停止」+ 消息区无额外中止消息/错误详情）；契约 §5 要求的 Console Error=0 机器收据（日志/stdout）仍缺",
+      "severity": "ADVISORY",
+      "method": "machine",
+      "non_machine_reason": null,
+      "note": "截图证据部分已补齐（非本审查产出，11:39 由并发会话落盘；审查时点以 docs 目录实存为准）；executor-fe 收据 §3.4 自认剩余 §5 项由 Lead 分派。observability.yaml 为文件级声明（reviewed_at 2026-11-01），本波未新增 IO/错误边界，未见结构性缺口，但 audit-diff.sh 运行收据同样缺失。"
+    },
+    {
+      "file": "src/components/chat/WorkspaceTurnItem.vue",
+      "line": 664,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git diff -- src/components/chat/WorkspaceTurnItem.vue | grep -n '^+.*exitCode'  # 写域文件内混入他人未提交 P1-2 退出码徽标（imports:40-41 / exitCodeBadge:143 / 模板:664-667），非本波改动",
+      "severity": "ADVISORY",
+      "method": "machine",
+      "non_machine_reason": null,
+      "note": "不影响本波判据（已逐块排除），但导致 wave64 绿相收据的测试运行包含非本波代码，且该文件无法按 wave-64 单波原子提交；提交时须按块分离。"
+    }
+  ]
+}

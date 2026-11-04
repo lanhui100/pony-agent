@@ -1,0 +1,107 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "0dd70e55-9750-4c70-a55c-498a38bf1eb9",
+    "fresh_context": true,
+    "role": "L3-B adversarial reviewer (contract / frontend state machine / user-visible semantics / test authenticity)"
+  },
+  "executed_by": "0dd70e55-9750-4c70-a55c-498a38bf1eb9",
+  "reviewed_commit": "778717ecfda24c7b1b04d060119789c041effcd4",
+  "attestation": {
+    "self_signed": false,
+    "note": "工作区另含他人未提交改动（otel/sanitizer/tool-result-meta/P1-2 徽标），未纳入本次判定；本审查只读，未做任何 git 写操作，仅写本 JSON。"
+  },
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contracts/wave-64-stop-terminal-status.md",
+    "src/lib/runtime/status.ts",
+    "src/components/chat/AgentRuntimeStatusBar.vue",
+    "src/stores/runtime.ts",
+    "src/components/HomeWorkspace.vue",
+    "src/components/chat/WorkspaceTurnItem.vue",
+    "src/lib/runtime/constants.ts",
+    "tests/acceptance/wave64/",
+    "tests/stop-stop-turn.spec.ts",
+    "tests/HomeWorkspace.spec.ts",
+    "tests/runtime-store.spec.ts",
+    "docs/release/evidence/wave-64/",
+    "docs/observability.yaml"
+  ],
+  "findings": [
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4722,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "F2 不完整：`turn:failed` 的**后台会话（runningSessionMap）分支**仍把占位正文写进落库助手消息 —— `content: payload.text ?? DEFAULT_FAILED_TURN_MESSAGE`（即「本轮执行失败，请查看右侧 trace。」）。该 patch 经 updatePersistedBackgroundSession→persistSessionState 写入持久化 messages（runtime.ts:1310-1318 `nextContent` 非空即覆盖 content），用户切回该后台会话时恢复出的助手正文就是这句占位，且会顶掉该轮已流式产出的正文（bgTurn.textBuffer 未被采用）。这既是契约 §2 F2「turn:failed 时禁止写入占位正文」的直接违例，也正是用户诉求②「出错不得有额外错误信息」。旁证：executor 自述收据 .dev-team/wave64-green-fe.md 第 3 节「constants.ts 未改动（DEFAULT_FAILED_TURN_MESSAGE 仍被后台会话写入路径 turn:failed 的 bg 分支使用）」；新增 12 例验收用例无一覆盖 bg 分支。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'payload.text ?? DEFAULT_FAILED_TURN_MESSAGE' src/stores/runtime.ts",
+      "evidence": "grep 命中 4722 行，exit=0（该表达式即占位正文的唯一存活写入点；另 grep -rn '本轮已停止|本轮执行失败' src/ 仅剩注释、constants.ts 常量定义与此行）"
+    },
+    {
+      "file": ".dev-team/contracts/wave-64-stop-terminal-status.md",
+      "line": 70,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "detail": "§5 门禁仅部分执行：真实浏览器门禁要求「Console Error = 0 + 关键截图落 docs/release/evidence/wave-64/」，当前目录只有 1 张 stopped-terminal-status.png（11:39 才出现），无 Console Error=0 的机器收据（.dev-team/evidence/ 下无 wave64 browser gate 日志）；docs/observability.yaml 未改动、也没有 wave-64 四维归属/N-A 结构性说明（wave64-green-fe.md §3.4 自认「未做…由 Lead 分派」）。前端单测/typecheck 两道门禁已真实执行（见 attachments）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && ls -A docs/release/evidence/wave-64/ && git status --porcelain docs/observability.yaml && ls -d .dev-team/evidence/wave64 2>&1",
+      "evidence": "ls -A 仅 stopped-terminal-status.png；git status 对 observability.yaml 空输出；.dev-team/evidence/wave64 不存在"
+    },
+    {
+      "file": "src/lib/runtime/status.ts",
+      "line": 64,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "注释与冻结契约自相矛盾：本文件第 63-64 行仍写「终态后本函数恒返回 null，『已停止』由 `sessionNotice` 承载」，而 wave-64 §2 F1 与 §4 已明确 sessionNotice **不再**承载停止文案、改由 stopped 状态模式承载（store 注释亦如此）。本文件是本波写域，残留旧口径会让下一波读者按错误契约改代码（F1 语义回归风险）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '60,66p' src/lib/runtime/status.ts",
+      "evidence": "第 64 行原文：// 「已停止」由 `sessionNotice` 承载，二者不互相冒充。"
+    },
+    {
+      "file": "src/components/chat/AgentRuntimeStatusBar.vue",
+      "line": 187,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "detail": "可访问性细节：stopped 的 lucide `Pause` 图标既无 `aria-hidden` 也无 `aria-label`/`role=\"img\"`，而同组件内装饰性轨道 span 显式 `aria-hidden=\"true\"`（:205）、工具行 AlertTriangle 显式 `aria-label`（WorkspaceTurnItem.vue:661），口径不一致。当前 lucide svg 无 title 故多数读屏不会播报，实际风险低；但终态语义完全依赖 label 文本，若后续给图标加 title 会出现重复播报。建议补 `aria-hidden=\"true\"`。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n -A 6 '<Pause' src/components/chat/AgentRuntimeStatusBar.vue",
+      "evidence": "Pause 分支仅 class/data-testid/data-mode 三个属性，无 aria-*；同文件 :205 轨道 span 有 aria-hidden"
+    },
+    {
+      "file": "tests/acceptance/wave64/f1-f2-workspace-terminal-status.spec.ts",
+      "line": 385,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "detail": "测试真实性（弱断言/潜在假绿）：f1_terminal_status_row_leaves_terminal_mode_after_new_submission 只对 `findAll('[data-testid=\"agent-runtime-status-bar\"]')` 做 for 循环断言「没有 stopped」，未先断言 `bars.length > 0`。若未来实现让新提交期不挂状态行（或选择器改名），循环零次迭代即恒真通过，用例从「终态行退出 stopped」退化为空断言。建议补 `expect(bars.length).toBeGreaterThan(0)` 并同时断言新的 data-mode（connecting/thinking）。其余新用例（lucide-pause/无 emerald/无 shimmer/无 elapsed/真实错误文案/正文保留）经核验为真实断言，无 skip、无 catch 吞异常。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '380,392p' tests/acceptance/wave64/f1-f2-workspace-terminal-status.spec.ts",
+      "evidence": "381-390 行：patch 后直接 findAll + for 循环，无 length/存在性断言"
+    }
+  ],
+  "machine_gates": [
+    {
+      "cmd": "npx vitest run tests/acceptance/wave64 tests/stop-stop-turn.spec.ts tests/HomeWorkspace.spec.ts tests/runtime-store.spec.ts",
+      "exit_code": 0,
+      "result": "Test Files 6 passed (6) / Tests 208 passed | 7 skipped (215)"
+    },
+    {
+      "cmd": "npx vitest run tests/runtime-status.spec.ts tests/workspace-runtime-status-integration.spec.ts tests/workspace-turn-item-layout.spec.ts",
+      "exit_code": 0,
+      "result": "3 files / 17 tests passed"
+    },
+    {
+      "cmd": "npm run typecheck",
+      "exit_code": 0,
+      "result": "vue-tsc --noEmit 无输出"
+    },
+    {
+      "cmd": "grep -rn \"本轮已停止\\|本轮执行失败\" src/",
+      "exit_code": 0,
+      "result": "8 处：6 处注释、constants.ts:12 常量定义、runtime.ts:4722 存活占位写入（BLOCKING 依据）、runtime.ts:5772/5774 为 errorDetail/error 文案（允许）"
+    }
+  ],
+  "verified_ok": [
+    "F1 语义分离：stopped 与 stopping 在类型、isStoppedMode、labelToneClass、图标分支、elapsed 条件上均独立；stopped 无 shimmer（labelToneClass 不含 runtime-status-shimmer）、无 elapsed（:233）、startTime=null；stone 中性色 + dark:stone-400，根容器 text-stone-400 无绿；`data-mode` 在根节点(:171)与图标(:191)均可用于选择器",
+    "优先序与契约一致：sessionOperation > sessionError > state.error(messages>0) > sessionNotice > phase 派生（runtime.ts:555-618）；恢复路径 canonicalTerminalPhase 经 resolveRestoredPersistedPhase 回填 phase（phases.ts:199-217 / runtime.ts:1788），刷新后 stopped/error 仍成立",
+    "turn:cancelled 已不再写 sessionNotice（runtime.ts:5040-5046），cancelBrowserPreviewTurn 已删除占位（:976-978），submitTurn 异常分支已删除占位并落 errorDetail（:5764-5774）",
+    "F2 面板移除彻底：AgentTurnEvent 收窄（WorkspaceTurnItem.vue:71-78）、error 分支/复制态/latestTraceForTurn/assistantErrorDetail/copyErrorDetail 全删、无残留 CSS/未使用 import（Copy/ChevronDown 仍被其他按钮使用）；HomeWorkspace 的 error 事件注入与 shouldRenderAssistantAsError 正文抑制已删，失败轮正文照常渲染（HomeWorkspace.spec.ts:905 覆盖）",
+    "可访问性：状态行 role=status/aria-live=polite/aria-atomic 在终态切换时仍在（AgentRuntimeStatusBar.vue:168-170）；错误详情面板移除后错误文本改由状态行 label 承载（真实错误文案），读屏可及性未丢失"
+  ]
+}

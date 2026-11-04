@@ -2295,11 +2295,20 @@ impl HostControlPlane {
         })
     }
 
+    /// wave-64 R1：图运行停止必须让**活跃 turn** 享有与 `stop_turn` 相同的 C2/C5 语义。
+    ///
+    /// 锁序红线（blast `lock`）：`graph_runs` 锁内**只做只读快照**（存在性 / 终态判定 /
+    /// 取活跃 turn id），**绝不**在锁内调用 `stop_turn` / 事件出口 / 宽限监督 —— 它们分别取
+    /// `execution_control`、`turn_event_sinks`、`emitters`、`sessions` 的锁，与 `graph_runs`
+    /// 构成反序死锁；且 `graph_runs` 是 `std::sync::Mutex`（非重入），锁内再经
+    /// `load_execution_checkpoint` 的 graph-run 回退路径重入即**自死锁**。
+    /// 故：先出锁，再受理 turn 停止，结果回填 `turn_stop`。
     pub fn stop_graph_run(
         &self,
         command: StopGraphRunCommand,
     ) -> Result<GraphRunControlResponse, String> {
-        let turn_stop = {
+        // ① 锁内只读快照：只取判定结果与活跃 turn id（克隆后立即出锁）。
+        let active_turn_id = {
             let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
                 eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
                 e.into_inner()
@@ -2318,20 +2327,11 @@ impl HostControlPlane {
                     command.run_id
                 ));
             }
-            run.active_turn_id.as_deref().and_then(|turn_id| {
-                self.load_execution_checkpoint(ExecutionCheckpointQuery {
-                    turn_id: Some(turn_id.to_string()),
-                    session_id: None,
-                })
-                .map(|_| {
-                    self.execution_control.request_stop(
-                        turn_id,
-                        crate::agent::stop_escalation::StopReason::User,
-                    )
-                })
-            })
+            run.active_turn_id.clone()
         };
 
+        // ② graph 侧受理（含终态校验）**先于**任何 turn 事件派发：本步失败 ⇒ 返回 Err 且零派发
+        //    （wave-64 A3：快照与受理之间 run 可能已转终态，此时必须保持"Err ⇒ 无事件"）。
         let (lifecycle, control_boundary_evidence) = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
                 eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
@@ -2371,6 +2371,36 @@ impl HostControlPlane {
             };
             (lifecycle, evidence)
         };
+
+        // ③ graph 侧已受理 ⇒ 才受理 turn 停止：复用 `stop_turn` 的唯一受理路径（C2 同步派发
+        //    **恰好一条** `turn:stop_requested` + C5 宽限监督）。幂等由 `stop_turn` 自身保证：
+        //    重复 stop / 已终态 / turn 不存在 ⇒ `accepted=false` ⇒ 零派发。
+        let turn_stop = active_turn_id.as_deref().and_then(|turn_id| {
+            if self
+                .load_execution_checkpoint(ExecutionCheckpointQuery {
+                    turn_id: Some(turn_id.to_string()),
+                    session_id: None,
+                })
+                .is_none()
+            {
+                // wave-64 A5：活跃 turn 无 checkpoint（不存在/已回收）不得静默返回 Ok —— 留一条
+                // 可见留痕（沿用结构化日志，不新增 eprintln 面），指示"图已停、轮未受理停止"。
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "stop_graph_run: active turn has no execution checkpoint; turn stop not accepted",
+                    None,
+                    &[
+                        ("run_id", serde_json::json!(command.run_id)),
+                        ("turn_id", serde_json::json!(turn_id)),
+                    ],
+                );
+                return None;
+            }
+            Some(self.stop_turn(StopTurnCommand {
+                turn_id: turn_id.to_string(),
+                stop_reason: Some(crate::agent::stop_escalation::StopReason::User),
+            }))
+        });
 
         let checkpoint = lifecycle.run.active_turn_id.as_ref().and_then(|turn_id| {
             self.load_execution_checkpoint(ExecutionCheckpointQuery {

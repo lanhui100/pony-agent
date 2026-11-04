@@ -66,11 +66,12 @@ export type MergedToolCall = {
 
 // Wave-59 F1-1：`waiting` 分支已从联合类型删除（编译期强制清空三点等待动画的渲染路径；
 // 「思考中」的唯一指示由底部状态条承载，见 HomeWorkspace 的 workspace-runtime-status-slot）。
+// wave-64 §2 F2：`error` 分支同样删除（编译期强制清空消息区「错误详情」折叠面板的渲染路径；
+// 错误改由唯一的终态状态消息 + 右侧 Trace 承载）。
 export type AgentTurnEvent =
   | { kind: "reasoning"; key: string; order: number; assistant: ChatMessage; reasoningContent: string; streaming: boolean }
   | { kind: "tools"; key: string; order: number; tools: MergedToolCall[] }
-  | { kind: "content"; key: string; order: number; assistant: ChatMessage; content: string; streaming: boolean }
-  | { kind: "error"; key: string; order: number };
+  | { kind: "content"; key: string; order: number; assistant: ChatMessage; content: string; streaming: boolean };
 
 export type TurnBucket = {
   turnId: string;
@@ -132,9 +133,9 @@ function promotedToolBadge(tool: MergedToolCall): string | null {
 }
 
 const runtimeStore = useRuntimeStore();
-const { isSubmitting, sessionOperation, turnTraceHistory } = storeToRefs(runtimeStore);
+const { isSubmitting, sessionOperation } = storeToRefs(runtimeStore);
 
-const copiedErrorDetail = ref(false);
+// wave-64 §2 F2：「错误详情」面板已移除 ⇒ 其复制态与本组件对 turnTraceHistory 的读取一并删除。
 const copiedAssistantResponse = ref(false);
 const copiedUserMessage = ref(false);
 
@@ -404,35 +405,8 @@ function plainTextTailPartsFor(event: Extract<AgentTurnEvent, { kind: "content" 
   return plainTextTailByEventKey.value[event.key] ?? NO_PLAIN_TEXT_TAIL(event.content);
 }
 
-function latestTraceForTurn(turnId: string) {
-  return [...turnTraceHistory.value].reverse().find((trace) => trace.turnId === turnId) ?? null;
-}
-
-function assistantErrorDetail(turn: TurnBucket): string {
-  if (turn.assistant?.status !== "error") return "";
-
-  const latestTrace = latestTraceForTurn(turn.turnId);
-  const modelError = [...(latestTrace?.traceTimeline ?? [])]
-    .reverse()
-    .find((entry) => entry.kind === "call_model" && entry.error?.trim())
-    ?.error?.trim();
-
-  return modelError || latestTrace?.error?.trim() || turn.assistant.errorDetail?.trim() || "";
-}
-
-function copyErrorDetail(_turnId: string, text: string) {
-  copiedErrorDetail.value = true;
-
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    void navigator.clipboard.writeText(text);
-  }
-
-  if (typeof window !== "undefined") {
-    window.setTimeout(() => {
-      copiedErrorDetail.value = false;
-    }, 1200);
-  }
-}
+// wave-64 §2 F2：`latestTraceForTurn` / `assistantErrorDetail` / `copyErrorDetail` 随
+// 「错误详情」折叠面板一并移除 —— 错误明细保留在 store 的 `errorDetail` 与右侧 Trace 面板。
 
 function copyAssistantResponse(_turnId: string, content: string) {
   copiedAssistantResponse.value = true;
@@ -714,38 +688,8 @@ const toolIconByCanonicalName: Record<string, any> = {
           </div>
         </div>
 
-        <!-- Error detail panel (raw error for debugging) -->
-        <details
-          v-else-if="event.kind === 'error'"
-          class="conversation-disclosure conversation-error-panel group"
-        >
-          <summary class="conversation-disclosure-summary text-rose-700">
-            <div class="flex min-w-0 items-center gap-2">
-              <AlertTriangle class="h-3.5 w-3.5 shrink-0 text-rose-500" />
-              <span class="text-rose-700">错误详情</span>
-            </div>
-            <div class="ml-auto flex items-center gap-1">
-              <button
-                class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-rose-50 hover:text-rose-600"
-                type="button"
-                :data-testid="`workspace-error-copy-${turn.turnId}`"
-                @click.stop="copyErrorDetail(turn.turnId, assistantErrorDetail(turn))"
-              >
-                <component
-                  :is="copiedErrorDetail ? Check : Copy"
-                  class="h-3 w-3"
-                />
-              </button>
-              <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
-            </div>
-          </summary>
-          <div
-            class="whitespace-pre-wrap break-words px-3 py-2 text-[11px] leading-4 text-rose-900"
-            data-testid="workspace-error-detail"
-          >
-            {{ assistantErrorDetail(turn) }}
-          </div>
-        </details>
+        <!-- wave-64 §2 F2：消息区不再渲染「错误详情」折叠面板（`event.kind === "error"` 分支已删除，
+             类型联合已同步收窄）。错误明细保留在 store 的 `errorDetail` 与右侧 Trace 面板。 -->
       </template>
 
       <div

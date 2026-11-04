@@ -84,7 +84,6 @@ import {
   BROWSER_PREVIEW_TRACE_TITLE,
   CACHED_STATE_VERSION,
   DEFAULT_FAILED_TURN_ERROR,
-  DEFAULT_FAILED_TURN_MESSAGE,
   DEFAULT_SESSION_ID,
   HYDRATION_TIMEOUT_MS,
   MAX_BG_REASONING_BUFFER_CHARS,
@@ -343,6 +342,63 @@ export type ActiveStreamKind = "reasoning" | "content" | null;
  */
 type RuntimeStateW59 = RuntimeState & { activeStreamKind?: ActiveStreamKind };
 
+/**
+ * wave-64 §2 F1：失败终态的**真实错误文案**解析（用于刷新/恢复后 `state.error` 未持久化的场景）。
+ *
+ * 语义序：最近一条 error 助手消息的 `errorDetail` > 最近一条失败 trace 的 `error` > 默认错误码。
+ * 严禁回落到占位正文（`DEFAULT_FAILED_TURN_MESSAGE`「本轮执行失败，请查看右侧 trace。」已废除）。
+ * 注意：本函数**不读** `state.error` —— 该字段同时承载「后端连接失败」等非轮次错误，
+ * 其展示口径由 `agentRuntimeStatus` 的既有 error 分支（要求 messages 非空）独管。
+ */
+function resolveTerminalFailureLabel(state: RuntimeStateW59): string {
+  const messages = state.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "assistant" && message.errorDetail?.trim()) {
+      return message.errorDetail.trim();
+    }
+  }
+
+  const traces = state.turnTraceHistory ?? [];
+  for (let index = traces.length - 1; index >= 0; index -= 1) {
+    const error = traces[index]?.error?.trim();
+    if (error) {
+      return error;
+    }
+  }
+
+  return DEFAULT_FAILED_TURN_ERROR;
+}
+
+/** core 失败轮「零正文兼容锁」文案（`turn_flow.rs` 的 `LEGACY_FAILED_TURN_TEXT`，逐字）。 */
+const FAILED_TURN_EMPTY_WIRE_TEXT = "This turn failed.";
+/** core 失败轮在已产出正文后追加的说明后缀（`turn_flow.rs` 的 `FAILED_PARTIAL_TEXT_SUFFIX`，含前导空行）。 */
+const FAILED_TURN_WIRE_SUFFIX = "\n\n（该轮失败前已产出以上内容）";
+
+/**
+ * wave-64 §2 F2（契约修订 / L3-B BLOCKING 收口）：失败轮 wire `text` 归一化。
+ *
+ * 线上 core **恒发** `text`，但其中没有用户需要的新信息：
+ * - 零正文 ⇒ 逐字 `"This turn failed."`（兼容锁）⇒ 返回 `null`：**不写正文**，错误由终态状态行承载；
+ * - 有正文 ⇒ `正文 + "\n\n（该轮失败前已产出以上内容）"` ⇒ 剥掉后缀与尾部空行，只返回正文部分。
+ *
+ * 返回 `null` 时调用方**不得**写 `content`（保留已产出正文）；返回字符串时才写该正文。
+ * 前台轮与后台会话轮（`runningSessionMap` / `updatePersistedBackgroundSession`）同等生效。
+ */
+function normalizeFailedTurnContent(text: string | null | undefined): string | null {
+  if (typeof text !== "string") {
+    return null;
+  }
+  if (text.trim() === FAILED_TURN_EMPTY_WIRE_TEXT) {
+    return null;
+  }
+  if (text.endsWith(FAILED_TURN_WIRE_SUFFIX)) {
+    const body = text.slice(0, text.length - FAILED_TURN_WIRE_SUFFIX.length).trimEnd();
+    return body.trim().length > 0 ? body : null;
+  }
+  return text.trim().length > 0 ? text : null;
+}
+
 export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeStateW59 => {
     const persisted = loadPersistedRuntimeState(DEFAULT_SESSION_ID);
 
@@ -564,6 +620,27 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return {
             mode: "info",
             label: state.sessionNotice.trim(),
+            startTime: null
+          };
+        }
+        // wave-64 §2 F1：**终态状态消息**是停止/失败的唯一承载面，由 `phase` 派生 ——
+        // `canonicalTerminalPhase` 在恢复路径上经 `resolveRestoredPersistedPhase` 喂给 `phase`，
+        // 故刷新/恢复后仍成立。优先序（Lead 裁决）：sessionOperation > sessionError > error >
+        // sessionNotice（斜杠命令瞬时反馈）> 终态兜底；`stopped` 无 shimmer、无耗时（startTime=null）。
+        if (state.phase === "cancelled") {
+          return {
+            mode: "stopped",
+            label: "已停止",
+            startTime: null
+          };
+        }
+        // 失败终态：`state.error` 分支已覆盖实时事件路径（且要求 messages 非空），
+        // 这里兜底恢复路径（`error` 不持久化），同样要求存在轮次消息，避免把启动期
+        // 「后端连接失败」等非轮次错误塞进消息区状态行。
+        if (state.phase === "failed" && state.messages.length > 0) {
+          return {
+            mode: "error",
+            label: resolveTerminalFailureLabel(state),
             startTime: null
           };
         }
@@ -924,7 +1001,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         turnId,
         buildAssistantModelLabel(this.providerName, this.providerModel)
       );
-      assistantMessage.content = "本轮已停止。";
+      // wave-64 §2 F2：取消**不得**另起消息 —— 禁止向助手消息正文写占位（如「本轮已停止。」）。
+      // 终态由唯一的状态消息（`agentRuntimeStatus.mode === "stopped"`）承载，正文保持已产出内容。
       assistantMessage.reasoningContent = null;
       assistantMessage.status = "done";
 
@@ -4669,7 +4747,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
             this.updatePersistedBackgroundSession(payload.sessionId, payload.turnId, {
-              content: payload.text ?? DEFAULT_FAILED_TURN_MESSAGE,
+              // wave-64 §2 F2（契约修订）：后台会话轮同样走 wire text 归一化 ——
+              // `null` ⇒ 不写 content（保留已流式产出的正文），后缀说明文案一律剥离。
+              content: normalizeFailedTurnContent(payload.text),
               reasoningContent: payload.reasoningContent ?? null,
               status: "error",
               modelName: buildAssistantModelLabel(payload.providerName, payload.providerModel),
@@ -4755,7 +4835,15 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         // a separate control-plane orchestration action, not a silent frontend timer.
 
         // Standard failed path:
-        assistantMessage.content = payload.text ?? DEFAULT_FAILED_TURN_MESSAGE;
+        // wave-64 §2 F2：失败**不得**另起消息 —— 占位正文「本轮执行失败，请查看右侧 trace。」
+        // 已废除。core 线上恒发 `text`：零正文兼容锁（`"This turn failed."`）与失败说明后缀
+        // 均由 `normalizeFailedTurnContent` 归一化；归一化为 `null`（纯占位/零正文）时
+        // **不得**写 content，一律保留本轮已产出的正文。失败终态由唯一的状态消息
+        // （`agentRuntimeStatus.mode === "error"`）承载。
+        const normalizedFailedContent = normalizeFailedTurnContent(payload.text);
+        if (normalizedFailedContent != null) {
+          assistantMessage.content = normalizedFailedContent;
+        }
         assistantMessage.status = "error";
         assistantMessage.errorDetail = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
 
@@ -4960,14 +5048,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           buildAssistantModelLabel(payload.providerName, payload.providerModel)
         );
 
-        // wave-60 §C7：终态呈现改由 `stopReason` 通道承载 —— **禁止**用后端占位文本
-        // （`CANCELLED_TURN_MESSAGE` 哨兵句或任意 text）覆盖已流式正文；已接收正文一律保留。
+        // wave-60 §C7 + wave-64 §2 F2：**禁止**用后端占位文本（`CANCELLED_TURN_MESSAGE` 哨兵句
+        // 或任意 text）覆盖已流式正文；已接收正文一律保留。
+        // wave-64 §2 F2 起进一步**禁止**在未产出正文时补占位「本轮已停止。」——
+        // 取消不再另起消息，终态由唯一的状态消息（`agentRuntimeStatus.mode === "stopped"`）承载。
         // 哨兵句仍留在**落库内容/历史读取**侧（`lib/runtime/cancelled-turn.ts` 与
         // `lib/runtime/messages.ts` 的 strip 行为不动，§0 非目标 2）。
-        // 仅当后端完全未给文本且本轮从未产生正文时补中性占位（保持历史节点非空）。
-        if (payload.text == null && !assistantMessage.content.trim()) {
-          assistantMessage.content = "本轮已停止。";
-        }
         assistantMessage.reasoningContent = normalizeReasoningContent(payload.reasoningContent ?? null);
         assistantMessage.status = "done";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
@@ -4987,16 +5073,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
 
         // Keep terminal UI state consistent even before deferred trace work runs.
         this.phase = resolveRuntimePhaseFromEvent(payload, "cancelled");
-        // wave-60 §C7 / 补遗 v2 A2：终态文案唯一通道是 `sessionNotice`
-        // （`phaseLabel` 在 src/ 内零消费者；`resolveAgentRuntimeStatus` 在 !isSubmitting 时恒返回 null）。
-        // `stopReason` 存在才呈现：`user` ⇒ 可继续提示；其余（watchdog/parent/hook/legacy）⇒ 中性「已停止」。
-        // 旧后端缺该字段时保持既有行为（不凭空造终态文案）。
-        if (payload.stopReason != null) {
-          this.sessionNotice =
-            payload.stopReason === "user"
-              ? "你已停止本轮 · 发送新消息可继续"
-              : "已停止";
-        }
+        // wave-64 §2 F1：停止终态的唯一承载面是状态消息（`agentRuntimeStatus.mode === "stopped"`，
+        // 由 `phase` 派生、刷新/恢复后仍成立）。`sessionNotice` 不再承载停止文案 ——
+        // 该通道只保留 C-9 斜杠命令的中性反馈用途。
         this.error = null;
         this.traceSteps = cancelledTraceSteps;
         this.toolActivities = terminalToolActivities;
@@ -5718,9 +5797,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           requestId,
           buildAssistantModelLabel(selectedProviderName, selectedModelName)
         );
-        assistantMessage.content = DEFAULT_FAILED_TURN_MESSAGE;
+        // wave-64 §2 F2：提交异常同样不得写占位正文（「本轮执行失败，请查看右侧 trace。」已废除）。
+        // 失败终态由唯一的状态消息（`agentRuntimeStatus.mode === "error"`）承载，
+        // 错误明细保留在 `errorDetail` 与右侧 Trace。
         assistantMessage.reasoningContent = null;
         assistantMessage.status = "error";
+        assistantMessage.errorDetail = `本轮执行失败：${String(error)}`;
         assistantMessage.modelName = buildAssistantModelLabel(selectedProviderName, selectedModelName);
         this.error = `本轮执行失败：${String(error)}`;
         this.phase = "failed";

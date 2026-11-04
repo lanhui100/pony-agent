@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import type { ChatMessage, TurnStreamEvent } from "@/types/runtime";
+import { loadPersistedRuntimeState } from "@/lib/runtime/sessions";
 import { useRuntimeStore } from "@/stores/runtime";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -172,6 +173,129 @@ describe("wave-64 F2 终态不得另起消息", () => {
     expect(assistant?.content ?? "").not.toContain(FAILED_PLACEHOLDER);
     // F2：错误明细仍保留在 store（不新增 UI，但事实不能丢）
     expect(assistant?.errorDetail).toBe(REAL_ERROR);
+  });
+
+  it("f2_failed_wire_empty_compat_text_does_not_become_body", async () => {
+    // Arrange：wire `text` 为「零正文兼容锁」逐字文案（契约 §2 F2 归一化条款①）
+    const store = useRuntimeStore();
+    const handlers = installEventCapture();
+    seedStreamingTurn(store, "");
+    await store.initializeTurnEvents();
+
+    // Act
+    handlers.get("turn:failed")?.({
+      payload: {
+        sessionId: "session-stop",
+        turnId: "turn-stop",
+        kind: "failed",
+        phase: "failed",
+        text: "This turn failed.",
+        error: REAL_ERROR
+      } satisfies TurnStreamEvent
+    });
+
+    // Assert：不得把 wire 文案写成正文（终态状态行承载错误）
+    const assistant = assistantOf(store);
+    expect(assistant).not.toBeNull();
+    expect(assistant?.content ?? "", "F2：wire 兼容锁文案不得写入正文").not.toContain("This turn failed.");
+    expect(assistant?.content, "F2：零正文失败轮不得凭空生成正文").toBe("");
+    expect(store.agentRuntimeStatus?.mode).toBe("error");
+    expect(store.agentRuntimeStatus?.label).toBe(REAL_ERROR);
+  });
+
+  it("f2_failed_wire_partial_text_suffix_is_stripped_from_content", async () => {
+    // Arrange：wire `text` = 正文 + 失败说明后缀（契约 §2 F2 归一化条款②）
+    const body = "这是失败前已经产出的正文";
+    const wireSuffix = "（该轮失败前已产出以上内容）";
+    const store = useRuntimeStore();
+    const handlers = installEventCapture();
+    seedStreamingTurn(store, "");
+    await store.initializeTurnEvents();
+
+    // Act
+    handlers.get("turn:failed")?.({
+      payload: {
+        sessionId: "session-stop",
+        turnId: "turn-stop",
+        kind: "failed",
+        phase: "failed",
+        text: `${body}\n\n${wireSuffix}`,
+        error: REAL_ERROR
+      } satisfies TurnStreamEvent
+    });
+
+    // Assert：只落正文部分，失败说明后缀必须被剥离
+    const assistant = assistantOf(store);
+    expect(assistant?.content).toBe(body);
+    expect(assistant?.content ?? "", "F2：失败说明后缀必须被剥离").not.toContain(wireSuffix);
+    expect(assistant?.errorDetail).toBe(REAL_ERROR);
+  });
+
+  it("f2_background_session_failed_does_not_persist_placeholder_body", async () => {
+    // Arrange：先让「后台会话」有持久化状态与正在跑的轮次
+    const store = useRuntimeStore();
+    const handlers = installEventCapture();
+    seedStreamingTurn(store, "");
+    store.$patch({
+      sessionId: "session-bg",
+      messages: [
+        createMessage({ id: "user-bg", turnId: "turn-bg", role: "user", content: "后台跑的轮次" }),
+        createMessage({
+          id: "assistant-turn-bg",
+          turnId: "turn-bg",
+          role: "assistant",
+          content: "",
+          status: "streaming"
+        })
+      ]
+    });
+    store.persistHistory();
+    // 切到前台会话，把后台会话登记进 runningSessionMap（与真实切会话路径同构）
+    store.$patch({
+      sessionId: "session-foreground",
+      isSubmitting: true,
+      activeTurnId: "turn-fg",
+      phase: "calling_model",
+      messages: [
+        createMessage({ id: "user-fg", turnId: "turn-fg", role: "user", content: "前台轮次" })
+      ],
+      runningSessionMap: {
+        "session-bg": {
+          turnId: "turn-bg",
+          phase: "calling_model",
+          textBuffer: "",
+          reasoningBuffer: ""
+        }
+      }
+    });
+    await store.initializeTurnEvents();
+
+    // Act：后台会话的 turn:failed
+    handlers.get("turn:failed")?.({
+      payload: {
+        sessionId: "session-bg",
+        turnId: "turn-bg",
+        kind: "failed",
+        phase: "failed",
+        error: REAL_ERROR
+      } satisfies TurnStreamEvent
+    });
+
+    // Assert：后台分支同样不得落失败占位正文（错误明细保留在 errorDetail）
+    const persisted = loadPersistedRuntimeState("session-bg");
+    expect(persisted, "F2 夹具自检：后台会话必须有持久化状态").not.toBeNull();
+    const bgAssistant = persisted?.messages.find(
+      (message) => message.turnId === "turn-bg" && message.role === "assistant"
+    );
+    expect(bgAssistant, "F2：后台失败轮必须仍然落一条助手消息（保留终态事实）").toBeTruthy();
+    expect(bgAssistant?.content ?? "", "F2：后台分支禁止落失败占位正文").not.toContain(
+      FAILED_PLACEHOLDER
+    );
+    expect(bgAssistant?.content, "F2：后台分支零正文时不得凭空生成正文").toBe("");
+    expect(bgAssistant?.errorDetail).toBe(REAL_ERROR);
+    // 前台会话不受后台终态污染
+    expect(store.activeTurnId).toBe("turn-fg");
+    expect(store.isSubmitting).toBe(true);
   });
 
   it("f2_failed_turn_keeps_already_streamed_body", async () => {

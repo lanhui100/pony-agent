@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { AlertCircle, CheckCircle2 } from "lucide-vue-next";
+import { AlertCircle, CheckCircle2, Pause } from "lucide-vue-next";
 import { formatElapsedSeconds, type AgentRuntimeStatus } from "@/lib/runtime/status";
 
 interface Props {
@@ -95,12 +95,19 @@ const displayLabel = computed(() => {
 // C-9：info 为中性/成功反馈（斜杠命令提示），需与 error 区分语义色，且不做 shimmer 动效。
 const isInfoMode = computed(() => displayedStatus.value.mode === "info");
 
+// wave-64 §2 F1：stopped 为「停止终态」（非进行中）：lucide Pause + 中性 stone 语义色，
+// 禁止 emerald/绿系（非本项目色彩体系）、禁止 shimmer 扫光、禁止耗时计时。
+const isStoppedMode = computed(() => displayedStatus.value.mode === "stopped");
+
 const labelToneClass = computed(() => {
   if (displayedStatus.value.mode === "error") {
     return "text-rose-600 dark:text-rose-400 not-italic";
   }
   if (isInfoMode.value) {
     return "text-emerald-600 dark:text-emerald-400 not-italic";
+  }
+  if (isStoppedMode.value) {
+    return "text-stone-600 dark:text-stone-400 not-italic";
   }
   return "runtime-status-shimmer text-stone-500 dark:text-stone-300 italic";
 });
@@ -176,6 +183,15 @@ watch(displayLabel, (nextLabel, previousLabel) => {
         data-testid="agent-runtime-status-icon"
         :data-mode="displayedStatus.mode"
       />
+      <!-- wave-64 §2 F1：停止终态用语义化的暂停图标（中性 stone），不得复用 info 的 CheckCircle2。
+           装饰性图标对读屏隐藏，语义由 label 文本「已停止」承载（与同组件轨道 span 的 aria 口径一致）。 -->
+      <Pause
+        v-else-if="isStoppedMode"
+        class="h-3.5 w-3.5 shrink-0 mr-1.5 text-stone-500 dark:text-stone-400"
+        data-testid="agent-runtime-status-icon"
+        :data-mode="displayedStatus.mode"
+        aria-hidden="true"
+      />
       <!--
         Wave-11 契约 §2.9：纯 CSS「轨道 + 卫星点」微动效，禁止 JS 定时器/rAF 驱动。
         根节点 data-testid=agent-runtime-status-icon + 类 runtime-status-orbit，
@@ -216,7 +232,7 @@ watch(displayLabel, (nextLabel, previousLabel) => {
           :data-pds-status="labelHandoffPhase ?? undefined"
         >{{ displayLabel }}</span>
         <span
-          v-if="elapsedText && displayedStatus.mode !== 'error'"
+          v-if="elapsedText && displayedStatus.mode !== 'error' && !isStoppedMode"
           class="shrink-0 text-[12px] italic font-normal tabular-nums"
           data-testid="agent-runtime-status-elapsed"
         >{{ elapsedText }}</span>

@@ -791,7 +791,8 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       }
 
       const content = modelEntryContent(turn, entry, modelEntries);
-      if (content.trim() && !shouldRenderAssistantAsError(turn)) {
+      // wave-64 §2 F2：失败轮已产出的正文照常渲染（不再按错误态抑制正文）。
+      if (content.trim()) {
         events.push({
           kind: "content",
           key: modelEventKey("content", turn.assistant, entry, entryIndex),
@@ -853,8 +854,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   if (
     modelEntries.length === 0 &&
     turn.assistant &&
-    assistantHasVisibleContent(turn.assistant) &&
-    !shouldRenderAssistantAsError(turn)
+    assistantHasVisibleContent(turn.assistant)
   ) {
     const rawContent = shouldUseOptimizedAssistantStreaming(turn.assistant)
       ? assistantDisplayContent(turn.assistant)
@@ -879,13 +879,8 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     }
   }
 
-  if (shouldRenderAssistantAsError(turn) && assistantErrorDetail(turn)) {
-    events.push({
-      kind: "error",
-      key: `error-${turn.turnId}`,
-      order: Number.isFinite(modelOrder) ? modelOrder + 0.1 : assistantOrder + 0.1
-    });
-  }
+  // wave-64 §2 F2：不再向事件流注入 `error` 条目 —— 消息区的「错误详情」折叠面板已移除，
+  // 错误明细改由唯一的状态消息（`agentRuntimeStatus.mode === "error"`）与右侧 Trace 承载。
 
   const orderedEvents = events.sort((left, right) => {
     if (left.order !== right.order) {
@@ -1000,10 +995,11 @@ function assistantHasVisibleContent(message: ChatMessage | null) {
 
 
 function shouldShowAgentArticle(turn: TurnBucket) {
-  // PA-118：agent 文章仅在“有可见内容 / 有可见推理 / 错误态 / 有工具”时渲染；
+  // PA-118：agent 文章仅在“有可见内容 / 有可见推理 / 有工具”时渲染；
   // 取消回合（内容空、无推理、无工具）不渲染空 agent 壳/复制按钮行。
   // Wave-59 F1-3：等待首个信号（awaiting-first-signal）时同样返回 false ——
   // 该状态不渲染空 agent 壳（无 article、无 workspace-agent-actions），等待指示只在底部状态条。
+  // wave-64 §2 F2：错误态不再是文章渲染条件（「错误详情」面板已移除，空正文不再渲染空壳）。
   if (turn.tools.length > 0) {
     return true;
   }
@@ -1012,8 +1008,7 @@ function shouldShowAgentArticle(turn: TurnBucket) {
   }
   return (
     assistantHasVisibleContent(turn.assistant) ||
-    shouldShowReasoningBlock(turn.assistant) ||
-    shouldRenderAssistantAsError(turn)
+    shouldShowReasoningBlock(turn.assistant)
   );
 }
 
@@ -1036,13 +1031,23 @@ const isRuntimeStatusVisible = computed(() => {
   }
 
   // wave-60 §C7 / A2：stopping 是**进行中**态，其唯一可见载体就是状态条
-  // （终态「已停止」才落 sessionNotice）。故不得被下方「正文流式时隐藏状态条」规则吞掉。
+  // （终态改由 wave-64 §2 F1 的 stopped 模式承载）。故不得被下方「正文流式时隐藏状态条」规则吞掉。
   if (phase.value === "stopping") {
     return true;
   }
 
+  // wave-64 §2 F1：终态状态行（stopped / error）必须**常显**，位置固定在消息区末尾；
+  // 不得被下方「正文流式时隐藏状态条」规则误吞（终态期间 assistant.status 已非 pending，
+  // 但仍在此处显式短路，避免未来流式判据变化造成静默回归）。
+  if (
+    agentRuntimeStatus.value.mode === "stopped" ||
+    agentRuntimeStatus.value.mode === "error"
+  ) {
+    return true;
+  }
+
   // 会话全局操作（如切换中、初始化中）或错误态，必须显示
-  if (sessionOperation.value || agentRuntimeStatus.value.mode === "error") {
+  if (sessionOperation.value) {
     return true;
   }
 
@@ -1185,30 +1190,8 @@ function latestTraceForTurn(turnId: string) {
   return [...turnTraceHistory.value].reverse().find((trace) => trace.turnId === turnId) ?? null;
 }
 
-function assistantErrorDetail(turn: TurnBucket): string {
-  if (turn.assistant?.status !== "error") return "";
-
-  const latestTrace = latestTraceForTurn(turn.turnId);
-  const modelError = [...(latestTrace?.traceTimeline ?? [])]
-    .reverse()
-    .find((entry) => entry.kind === "call_model" && entry.error?.trim())
-    ?.error?.trim();
-
-  return modelError || latestTrace?.error?.trim() || turn.assistant.errorDetail?.trim() || "";
-}
-
-function shouldRenderAssistantAsError(turn: TurnBucket): boolean {
-  if (turn.assistant?.status !== "error") {
-    return false;
-  }
-
-  const latestTrace = latestTraceForTurn(turn.turnId);
-  if (latestTrace?.phase === "completed") {
-    return false;
-  }
-
-  return true;
-}
+// wave-64 §2 F2：`assistantErrorDetail` 与 `shouldRenderAssistantAsError` 已随消息区
+// 「错误详情」折叠面板一并移除 —— 错误由唯一的状态消息与右侧 Trace 承载（本文件不再消费）。
 
 function checkpointEntryForTurn(turnId: string) {
   return checkpointEntryByTurnId.value.get(turnId) ?? null;

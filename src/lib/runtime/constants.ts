@@ -9,7 +9,8 @@ export const CACHED_STATE_VERSION = 2;
 export const DEFAULT_SESSION_ID = "local-dev-session";
 
 export const DEFAULT_BROWSER_SESSION_SUMMARY = "浏览器预览会话";
-export const DEFAULT_FAILED_TURN_MESSAGE = "本轮执行失败，请查看右侧 trace。";
+// wave-64 §2 F2：失败轮占位正文「本轮执行失败，请查看右侧 trace。」已废除（终态由唯一的状态消息承载），
+// 常量随最后一处运行时引用（`stores/runtime.ts` 的后台会话 `turn:failed` 分支）一并删除。
 export const DEFAULT_FAILED_TURN_ERROR = "本轮执行失败。";
 export const TIMEOUT_RETRY_PENDING_MESSAGE = "超时后错误重连中...";
 export const HYDRATION_TIMEOUT_MS = 15000;

@@ -346,6 +346,40 @@ describe("wave-64 F1 终态状态行 + F2 消息区不得渲染错误详情", ()
     expect(text).toContain(STREAMED_TEXT);
   });
 
+  it("f2_failed_wire_partial_text_suffix_is_not_rendered_in_message_area", async () => {
+    // Arrange：失败轮 wire text = 正文 + 失败说明后缀（契约 §2 F2 归一化条款②）
+    const body = "这是失败前已经产出的正文";
+    const wireSuffix = "（该轮失败前已产出以上内容）";
+    const store = useRuntimeStore();
+    const handlers = installEventCapture();
+    seedStreamingTurn(store, "");
+    await store.initializeTurnEvents();
+    handlers.get("turn:failed")?.({
+      payload: {
+        sessionId: "session-stop",
+        turnId: "turn-stop",
+        kind: "failed",
+        phase: "failed",
+        text: `${body}\n\n${wireSuffix}`,
+        error: REAL_ERROR
+      } satisfies TurnStreamEvent
+    });
+
+    // Act
+    const wrapper = mountWorkspace();
+    await nextTick();
+    const text = wrapper.text();
+
+    // Assert：只渲染正文部分，失败说明后缀不得出现（不得「另起错误文案」）
+    expect(text).toContain(body);
+    expect(text, "F2：wire 失败说明后缀不得渲染进消息区").not.toContain(wireSuffix);
+    // Assert：错误由状态行承载
+    const slot = wrapper.get('[data-testid="workspace-runtime-status-slot"]');
+    expect(slot.attributes("data-visible")).toBe("true");
+    expect(slot.get('[data-testid="agent-runtime-status-bar"]').attributes("data-mode")).toBe("error");
+    expect(slot.get('[data-testid="agent-runtime-status-label"]').text()).toBe(REAL_ERROR);
+  });
+
   it("f1_terminal_status_row_leaves_terminal_mode_after_new_submission", async () => {
     // Arrange：先落到 stopped 终态
     const store = useRuntimeStore();
@@ -383,6 +417,8 @@ describe("wave-64 F1 终态状态行 + F2 消息区不得渲染错误详情", ()
 
     // Assert：终态状态行消失（不再以 stopped 呈现）
     const bars = wrapper.findAll('[data-testid="agent-runtime-status-bar"]');
+    // 前置断言：集合不得为空 —— 空集合上的 for 恒真属假绿（L3 审查项）。
+    expect(bars.length, "F1：新一轮提交期间状态行必须存在（否则下面的「不得为 stopped」断言恒真）").toBeGreaterThan(0);
     for (const bar of bars) {
       expect(bar.attributes("data-mode")).not.toBe("stopped");
     }

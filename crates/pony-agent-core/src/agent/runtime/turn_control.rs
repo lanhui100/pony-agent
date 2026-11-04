@@ -1,5 +1,98 @@
 use super::*;
 
+/// wave-64 R2：流式轮次的**错误归类**（取消 vs 失败）——唯一判据，纯函数、无副作用。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StreamErrorClass {
+    /// 用户已请求停止 **且** provider 读通道以取消码结束 ⇒ 终态必须是 `turn:cancelled`。
+    Cancelled,
+    /// 其余一切错误 ⇒ 保持既有 `turn:failed` 语义（逐字不变）。
+    Failed,
+}
+
+/// wave-64 R2 归类判据（契约 §2 R2）：
+///
+/// - `cancel_requested == true`（该轮已有停止请求，唯一取消源 = checkpoint 停止位）
+///   **且** `error` 以 `ProviderStreamGuard::CANCELLED_ERROR_CODE`
+///   （wire 码 `provider_stream_cancelled`）开头 ⇒ [`StreamErrorClass::Cancelled`]；
+/// - 其余情况（含"有停止请求但错误不是取消码"、"取消码但无停止请求"）⇒
+///   [`StreamErrorClass::Failed`]，即真实失败路径的行为完全不变 —— 绝不把真实错误吞成取消。
+pub(crate) fn classify_stream_error(cancel_requested: bool, error: &str) -> StreamErrorClass {
+    if cancel_requested
+        && error.starts_with(crate::agent::provider::ProviderStreamGuard::CANCELLED_ERROR_CODE)
+    {
+        StreamErrorClass::Cancelled
+    } else {
+        StreamErrorClass::Failed
+    }
+}
+
+/// wave-64 R1（BLOCKING，terminal-once 闸门）：尝试占有该轮的**终态派发权**。
+///
+/// 唯一真值源是 checkpoint `status`（与 C5 宽限监督者共用同一登记表，绝不新建第二套状态）：
+/// - `running` ⇒ 在 registry 锁内**原子 CAS** 到 `target`（`"cancelled"` / `"failed"`），
+///   抢到者返回 `true`（继续 persist_trace + 派发终态）；
+/// - 已是任一终态（`completed` / `failed` / `cancelled`）⇒ 返回 `false`
+///   （已有终态派发者，调用方必须静默退出：不再持久化终态、不再派发事件）；
+/// - 无 checkpoint（未注册轮次/纯内存子路径）或非终态的非 `running`（如 `suspended`）
+///   ⇒ 无并发终态可竞，返回 `true`（保持既有行为不变）。
+///
+/// 与 [`crate::agent::stop_escalation`] 的 `escalate_now` 互斥：后者同样以
+/// "`status == running` 才置 cancelled" 的锁内判定收口，两者抢的是同一状态位，
+/// 故宽限期收口与 in-band 收口至多一方派发终态。
+pub(crate) fn claim_terminal_status(
+    control: &ExecutionControlRegistry,
+    turn_id: &str,
+    target: &str,
+) -> bool {
+    let Some(checkpoint) = control.load_checkpoint(Some(turn_id), None) else {
+        return true;
+    };
+    let status = checkpoint.status.trim().to_lowercase();
+    if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+        return false;
+    }
+    if status != "running" {
+        return true;
+    }
+    let mut claimed = false;
+    control.update(turn_id, |checkpoint| {
+        if checkpoint.status.trim().eq_ignore_ascii_case("running") {
+            checkpoint.status = target.to_string();
+            checkpoint.phase = target.to_string();
+            claimed = true;
+        }
+    });
+    claimed
+}
+
+/// 终态已被抢占时的**结构化**留痕（debug 级；不得用裸 eprintln，沿用 nfr logging 约束）。
+pub(crate) fn log_terminal_dispatch_suppressed(turn_id: &str, target: &str, source: &str) {
+    crate::agent::otel::log::log_json_with_fields(
+        "debug",
+        "terminal dispatch suppressed: turn already has a terminal status (terminal-once gate)",
+        None,
+        &[
+            ("turn_id", serde_json::json!(turn_id)),
+            ("target_status", serde_json::json!(target)),
+            ("source", serde_json::json!(source)),
+        ],
+    );
+}
+
+/// 用户已请求停止但仍进入 fallback/失败路径时的结构化留痕（含原始 error，便于对拍）。
+pub(crate) fn log_stop_short_circuit(turn_id: &str, error: &str, scope: &str) {
+    crate::agent::otel::log::log_json_with_fields(
+        "warn",
+        "turn stop requested while streaming decision failed; classified cancelled instead of fallback/failed",
+        None,
+        &[
+            ("turn_id", serde_json::json!(turn_id)),
+            ("scope", serde_json::json!(scope)),
+            ("error", serde_json::json!(error)),
+        ],
+    );
+}
+
 impl AgentRuntime {
     pub(super) fn should_cancel_turn(&self, control: &ExecutionControlRegistry, turn_id: &str) -> bool {
         control.is_stop_requested(turn_id)
@@ -22,6 +115,13 @@ impl AgentRuntime {
         turn_duration_ms: Option<u64>,
         build_context_observation: Option<BuildContextObservation>,
     ) {
+        // wave-64 R1（BLOCKING，terminal-once）：C5 宽限监督可能已先行收口并派发了一条
+        // `turn:cancelled`；此时 in-band 循环再命中停止位必须**静默退出**，禁止第二条终态、
+        // 禁止用 in-band 结果覆盖已落盘的终态 checkpoint/trace。
+        if !claim_terminal_status(control, turn_id, "cancelled") {
+            log_terminal_dispatch_suppressed(turn_id, "cancelled", "cancel_stream_turn");
+            return;
+        }
         let error = "stopped_by_user".to_string();
         let attachments = self
             .save_input_attachments_for_session(session_id, input_images)
@@ -267,4 +367,49 @@ impl AgentRuntime {
         }
     }
 
+}
+
+#[cfg(test)]
+mod wave64_classify_tests {
+    use super::*;
+
+    /// wave-64 R2：归类判据真值表（实现级单测；验收层另有行为级黑盒用例）。
+    #[test]
+    fn r2_classify_stream_error_truth_table() {
+        let cancel_code = format!(
+            "{}: SSE 流已按请求中止 (stop_requested); elapsed=3ms; parsed_bytes=0; endpoint=http://127.0.0.1/v1",
+            crate::agent::provider::ProviderStreamGuard::CANCELLED_ERROR_CODE
+        );
+
+        // ① 取消码 + 停止位 ⇒ 取消（禁止沦为 failed）。
+        assert_eq!(
+            classify_stream_error(true, &cancel_code),
+            StreamErrorClass::Cancelled,
+            "R2：provider 取消码 + 用户停止位必须归类为取消"
+        );
+        // ② 取消码但无停止位 ⇒ 仍失败（不得把真实错误吞成取消）。
+        assert_eq!(
+            classify_stream_error(false, &cancel_code),
+            StreamErrorClass::Failed,
+            "R2：无停止位的取消码不得被归类为取消"
+        );
+        // ③ 有停止位但错误是真实失败 ⇒ 失败（真实失败行为逐字不变）。
+        assert_eq!(
+            classify_stream_error(true, "error sending request: connection reset by peer"),
+            StreamErrorClass::Failed,
+            "R2：非取消码的真实错误不得被归类为取消"
+        );
+        // ④ 其他 provider 错误码（超时）⇒ 失败，不得因前缀相近而误判。
+        assert_eq!(
+            classify_stream_error(
+                true,
+                &format!(
+                    "{}: provider 流总时长超限",
+                    crate::agent::provider::ProviderStreamGuard::DEADLINE_ERROR_CODE
+                )
+            ),
+            StreamErrorClass::Failed,
+            "R2：超时错误码不得被误判为取消"
+        );
+    }
 }

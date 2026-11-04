@@ -1,6 +1,108 @@
 use super::*;
 
+/// wave-64 R2：流式决策因用户停止而中断、取消终态已在 fallback 之前派发时的控制流哨兵。
+///
+/// 仅在本模块内用作标记（绝不下发到宿主表面，也不进入任何落库字段）。
+const STREAM_CANCELLED_HANDLED_SENTINEL: &str = "__wave64_stream_cancelled_handled__";
+
+/// wave-64 R1（BLOCKING）：终态失败派发的 **terminal-once 闸门**（内联 failed 派发块共用）。
+///
+/// `false` ⇒ 该轮已有终态派发者（C5 宽限监督已收口 cancelled / 已派发过 failed）：
+/// 调用方必须立即 `return`，不得再 persist_trace、不得再 emit `turn:failed`。
+fn claim_failed_terminal(control: &ExecutionControlRegistry, turn_id: &str) -> bool {
+    let claimed = super::turn_control::claim_terminal_status(control, turn_id, "failed");
+    if !claimed {
+        super::turn_control::log_terminal_dispatch_suppressed(
+            turn_id,
+            "failed",
+            "inline_stream_failed",
+        );
+    }
+    claimed
+}
+
 impl AgentRuntime {
+    /// wave-64 R1（BLOCKING）：终态失败派发的过闸门版本 —— 除 terminal-once 闸门外，
+    /// 与 `fail_stream_turn_with_hook_dispatch` **逐字等价**（原参数原样转发）。
+    ///
+    /// 未抢到 `running → failed` 的调用者静默返回（结构化 debug 留痕），
+    /// 从而杜绝 C5 已派发 `turn:cancelled` 之后再冒出一条 `turn:failed`。
+    #[allow(clippy::too_many_arguments)]
+    fn fail_stream_turn_gated_dispatch(
+        &self,
+        sink: &impl TurnEventSink,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        completed_hops: usize,
+        error: String,
+    ) {
+        if !claim_failed_terminal(control, turn_id) {
+            return;
+        }
+        self.fail_stream_turn_with_hook_dispatch(
+            sink,
+            control,
+            session_id,
+            turn_id,
+            user_message,
+            provider_meta,
+            build_context_observation,
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            first_token_latency_ms,
+            turn_duration_ms,
+            completed_hops,
+            error,
+        );
+    }
+
+    /// wave-64 R2：流式轮的取消收口统一调用面（调用点已判定为"用户取消"）。
+    ///
+    /// 只做参数装配，语义完全复用 [`AgentRuntime::cancel_stream_turn`]
+    /// （`turn:cancelled` + `stopReason` 取该轮 checkpoint 记录的原因 + checkpoint 置 cancelled）。
+    #[allow(clippy::too_many_arguments)]
+    fn cancel_stream_turn_for_stop<S: TurnEventSink>(
+        &self,
+        sink: &S,
+        control: &ExecutionControlRegistry,
+        turn_id: &str,
+        input: &TurnInput,
+        display_message: &str,
+        provider_meta: &ProviderEventMeta,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        first_token_latency_ms: Option<u64>,
+        turn_started_at: &Instant,
+        build_context_observation: Option<BuildContextObservation>,
+    ) {
+        self.cancel_stream_turn(
+            sink,
+            control,
+            turn_id,
+            input.session_id.as_deref(),
+            display_message,
+            &input.images,
+            Some(provider_meta),
+            trace_steps,
+            tool_activities,
+            first_token_latency_ms,
+            Some(turn_started_at.elapsed().as_millis() as u64),
+            build_context_observation,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn handle_stream_tool_turn<S: TurnEventSink>(
         &self,
@@ -159,7 +261,7 @@ impl AgentRuntime {
             );
             if let Some(error) = tool_start_hook_outcome.fail_turn_error {
                 let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                self.fail_stream_turn_with_hook_dispatch(
+                self.fail_stream_turn_gated_dispatch(
                     sink,
                     control,
                     input.session_id.as_deref(),
@@ -325,7 +427,7 @@ impl AgentRuntime {
             );
             if let Some(error) = tool_end_hook_outcome.fail_turn_error {
                 let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                self.fail_stream_turn_with_hook_dispatch(
+                self.fail_stream_turn_gated_dispatch(
                     sink,
                     control,
                     input.session_id.as_deref(),
@@ -456,7 +558,7 @@ impl AgentRuntime {
                         &current_tool_call.name,
                         tool_result.output.as_str(),
                     );
-                    self.fail_stream_turn_with_hook_dispatch(
+                    self.fail_stream_turn_gated_dispatch(
                         sink,
                         control,
                         input.session_id.as_deref(),
@@ -484,7 +586,7 @@ impl AgentRuntime {
             let failure_signal = tool_failure_signal(&current_tool_call, &tool_result);
             let failure_count = consecutive_failures.record(failure_signal.clone());
             if failure_count >= max_consecutive_tool_failures_per_turn() {
-                self.fail_stream_turn_with_hook_dispatch(
+                self.fail_stream_turn_gated_dispatch(
                     sink,
                     control,
                     input.session_id.as_deref(),
@@ -516,7 +618,7 @@ impl AgentRuntime {
             if consecutive_failures.same_tool_count()
                 >= max_consecutive_same_tool_failures_per_turn()
             {
-                self.fail_stream_turn_with_hook_dispatch(
+                self.fail_stream_turn_gated_dispatch(
                     sink,
                     control,
                     input.session_id.as_deref(),
@@ -697,7 +799,14 @@ impl AgentRuntime {
             ) {
                 Ok(response) => response,
                 Err(error) => {
-                    self.fail_stream_turn_with_hook_dispatch(
+                    // wave-64 R2 / A2（可达性说明）：本通道（工具结果后续轮）**没有**取消观测面 ——
+                    // `provider_followup_stream_with_mode` 内部使用 `ProviderStreamGuard::without_cancel()`
+                    // （见 `provider/mod.rs` 的 `continue_with_tool_result_stream`），故此处永远不会
+                    // 收到 `provider_stream_cancelled` 取消码，不存在"取消码 ⇒ cancelled"的分流。
+                    // 用户停止在本通道的表现是：随后命中循环头/回读检查点的 `should_cancel_turn`
+                    // 分支（in-band 取消），或 C5 宽限监督先行收口；两者都经 terminal-once 闸门，
+                    // 确保至多一条终态。
+                    self.fail_stream_turn_gated_dispatch(
                         sink,
                         control,
                         input.session_id.as_deref(),
@@ -857,7 +966,7 @@ impl AgentRuntime {
                 &response.provider_mode,
                 response.fallback_reason.as_deref(),
             ) {
-                self.fail_stream_turn_with_hook_dispatch(
+                self.fail_stream_turn_gated_dispatch(
                     sink,
                     control,
                     input.session_id.as_deref(),
@@ -887,7 +996,7 @@ impl AgentRuntime {
                 ) {
                     Ok(normalized) => normalized,
                     Err(error) => {
-                        self.fail_stream_turn_with_hook_dispatch(
+                        self.fail_stream_turn_gated_dispatch(
                             sink,
                             control,
                             input.session_id.as_deref(),
@@ -975,7 +1084,7 @@ impl AgentRuntime {
                     );
                     response = recovery.response;
                 } else if completed_hops >= max_tool_hops_per_turn() {
-                    self.fail_stream_turn_with_hook_dispatch(
+                    self.fail_stream_turn_gated_dispatch(
                         sink,
                         control,
                         input.session_id.as_deref(),
@@ -1038,7 +1147,7 @@ impl AgentRuntime {
             let attachments = match self.save_input_attachments(input) {
                 Ok(attachments) => attachments,
                 Err(error) => {
-                    self.fail_stream_turn_with_hook_dispatch(
+                    self.fail_stream_turn_gated_dispatch(
                         sink,
                         control,
                         input.session_id.as_deref(),
@@ -1186,7 +1295,7 @@ impl AgentRuntime {
                 let mut checkpoint_terminal_hook_trace_records = hook_trace_records.clone();
                 checkpoint_terminal_hook_trace_records
                     .extend(checkpoint_hook_trace_records.clone());
-                self.fail_stream_turn_with_hook_dispatch(
+                self.fail_stream_turn_gated_dispatch(
                     sink,
                     control,
                     input.session_id.as_deref(),
@@ -1212,7 +1321,7 @@ impl AgentRuntime {
             terminal_hook_trace_records.extend(checkpoint_hook_trace_records.clone());
             terminal_hook_trace_records.extend(finalize_hook_trace_records.clone());
             if let Some(error) = finalize_hook_outcome.fail_turn_error {
-                self.fail_stream_turn_with_hook_dispatch(
+                self.fail_stream_turn_gated_dispatch(
                     sink,
                     control,
                     input.session_id.as_deref(),
@@ -1413,6 +1522,10 @@ impl AgentRuntime {
             } = &governance.decision
             {
                 // L3 B3：阻断属**预期内用户状态**，标记后跳过 issue 上报（仍会发 turn:failed 事件）。
+                // wave-64 R1（BLOCKING，terminal-once）：仅抢到终态派发权者才继续。
+                if !claim_failed_terminal(control, &turn_id) {
+                    return;
+                }
                 crate::agent::ponysentry::mark_turn_failure_expected(&turn_id);
                 let error = format!(
                     "用量治理已阻断本轮：当前已用 ${current:.6}，上限 ${limit:.6}（触发 {reason}）。\
@@ -1547,6 +1660,11 @@ impl AgentRuntime {
             None,
         );
         if let Some(error) = preflight_dispatch.fail_turn_error.take() {
+            // wave-64 R1（BLOCKING，terminal-once）：已有终态派发者（如 C5 宽限监督已收口
+            // cancelled）⇒ 禁止二次派发 turn:failed、禁止覆盖已落盘的终态。
+            if !claim_failed_terminal(control, &turn_id) {
+                return;
+            }
             let trace_steps = self.telemetry_builder.failed_trace_before_tool();
             self.update_execution_checkpoint(
                 control,
@@ -1605,6 +1723,11 @@ impl AgentRuntime {
             return;
         }
         if let Some(error) = preflight_dispatch.blocked_error.take() {
+            // wave-64 R1（BLOCKING，terminal-once）：已有终态派发者（如 C5 宽限监督已收口
+            // cancelled）⇒ 禁止二次派发 turn:failed、禁止覆盖已落盘的终态。
+            if !claim_failed_terminal(control, &turn_id) {
+                return;
+            }
             let trace_steps = self.telemetry_builder.failed_trace_before_tool();
             self.update_execution_checkpoint(
                 control,
@@ -1963,6 +2086,33 @@ impl AgentRuntime {
                 // 保证 follow-up 回传的 assistant 消息带完整 reasoning_content。
                 if supports_true_streaming_decision {
                     stream_initial_decision().or_else(|error| {
+                        // wave-64 R2：用户已请求停止 ⇒ **不得**再降级为同步决策（那会把取消
+                        // 吞成不可中断的阻塞调用，或让后续错误被误判为真实失败）。直接按
+                        // 取消收口并返回（取消码本身不参与本判定，故非取消错误的 fallback
+                        // 语义逐字不变 —— 契约 §2 R2 / C4）。
+                        if self.should_cancel_turn(control, &turn_id) {
+                            // wave-64 A4：取消收口前留一条**结构化**日志（含 turn_id 与原始 error），
+                            // 避免"有停止位即取消"把根因彻底丢弃（不得新增 eprintln 面）。
+                            super::turn_control::log_stop_short_circuit(
+                                &turn_id,
+                                &error,
+                                "native_tool_flow",
+                            );
+                            self.cancel_stream_turn_for_stop(
+                                sink,
+                                control,
+                                &turn_id,
+                                &input,
+                                &prepared.display_message,
+                                &prepared_provider_meta,
+                                self.telemetry_builder.failed_trace_before_tool(),
+                                Vec::new(),
+                                None,
+                                &turn_started_at,
+                                Some(prepared.build_context_observation.clone()),
+                            );
+                            return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
+                        }
                         // 仅诊断：不改变控制流（失败仍然 fallback 到同步决策），
                         // 只是不再像过去的 `|_|` 那样把根因吞掉。Windows CI 上真实
                         // 原因（连接级 `client error (SendRequest)`）曾被完全掩盖，
@@ -1986,6 +2136,30 @@ impl AgentRuntime {
                     None => {
                         if supports_true_streaming_decision {
                             stream_initial_decision().or_else(|error| {
+                                // wave-64 R2：同 native_tool_flow 分支 —— 用户已请求停止时
+                                // 不再 fallback，直接按取消收口（见上方判据说明）。
+                                if self.should_cancel_turn(control, &turn_id) {
+                                    // wave-64 A4：同 native_tool_flow 分支的结构化留痕。
+                                    super::turn_control::log_stop_short_circuit(
+                                        &turn_id,
+                                        &error,
+                                        "no_preflight_decision",
+                                    );
+                                    self.cancel_stream_turn_for_stop(
+                                        sink,
+                                        control,
+                                        &turn_id,
+                                        &input,
+                                        &prepared.display_message,
+                                        &prepared_provider_meta,
+                                        self.telemetry_builder.failed_trace_before_tool(),
+                                        Vec::new(),
+                                        None,
+                                        &turn_started_at,
+                                        Some(prepared.build_context_observation.clone()),
+                                    );
+                                    return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
+                                }
                                 // 同 1855 处：仅记录根因，控制流不变（失败即 fallback）。
                                 eprintln!(
                                     "[pony-agent] 流式决策失败，fallback 到同步决策 \
@@ -2011,12 +2185,18 @@ impl AgentRuntime {
         ) = match planned {
             Ok(result) => result,
             Err(error) => {
+                if error == STREAM_CANCELLED_HANDLED_SENTINEL {
+                    // wave-64 R2：取消终态已在 fallback 之前派发（判据见上方 `or_else`），
+                    // 这里只落相位，绝不重复派发终态、也不派生 turn:failed。
+                    otel_turn_scope.set_phase("cancelled");
+                    return;
+                }
                 if error == HOOK_FAILTURN_HANDLED_SENTINEL {
                     if let Some((hook_trace_records, hook_error)) =
                         pending_model_call_fail_turn.borrow_mut().take()
                     {
                         let trace_steps = self.telemetry_builder.failed_trace_before_tool();
-                        self.fail_stream_turn_with_hook_dispatch(
+                        self.fail_stream_turn_gated_dispatch(
                             sink,
                             control,
                             input.session_id.as_deref(),
@@ -2035,6 +2215,35 @@ impl AgentRuntime {
                         );
                     }
                     otel_turn_scope.set_phase("failed");
+                    return;
+                }
+                // wave-64 R2：provider 读通道以取消码 `provider_stream_cancelled` 结束且
+                // 该轮已有用户停止请求 ⇒ 归 `turn:cancelled`（checkpoint 终态 cancelled），
+                // **禁止**派生 `turn:failed`；其余错误逐字走下方既有 failed 路径。
+                if super::turn_control::classify_stream_error(
+                    self.should_cancel_turn(control, &turn_id),
+                    &error,
+                ) == super::turn_control::StreamErrorClass::Cancelled
+                {
+                    self.cancel_stream_turn_for_stop(
+                        sink,
+                        control,
+                        &turn_id,
+                        &input,
+                        &prepared.display_message,
+                        &prepared_provider_meta,
+                        self.telemetry_builder.failed_trace_before_tool(),
+                        Vec::new(),
+                        None,
+                        &turn_started_at,
+                        Some(prepared.build_context_observation.clone()),
+                    );
+                    otel_turn_scope.set_phase("cancelled");
+                    return;
+                }
+                // wave-64 R1（BLOCKING，terminal-once）：已有终态派发者（如 C5 宽限监督已收口
+                // cancelled）⇒ 禁止二次派发 turn:failed、禁止覆盖已落盘的终态。
+                if !claim_failed_terminal(control, &turn_id) {
                     return;
                 }
                 let trace_steps = self.telemetry_builder.failed_trace_before_tool();
@@ -2102,6 +2311,11 @@ impl AgentRuntime {
             ) {
                 Ok(normalized) => normalized,
                 Err(error) => {
+                    // wave-64 R1（BLOCKING，terminal-once）：已有终态派发者（如 C5 宽限监督已收口
+                    // cancelled）⇒ 禁止二次派发 turn:failed、禁止覆盖已落盘的终态。
+                    if !claim_failed_terminal(control, &turn_id) {
+                        return;
+                    }
                     let trace_steps = self.telemetry_builder.failed_trace_before_tool();
                     self.update_execution_checkpoint(
                         control,
@@ -2186,6 +2400,11 @@ impl AgentRuntime {
             resolved_tool_call,
         );
         if let Some(error) = tool_selection_dispatch.fail_turn_error.take() {
+            // wave-64 R1（BLOCKING，terminal-once）：已有终态派发者（如 C5 宽限监督已收口
+            // cancelled）⇒ 禁止二次派发 turn:failed、禁止覆盖已落盘的终态。
+            if !claim_failed_terminal(control, &turn_id) {
+                return;
+            }
             let trace_steps = self.telemetry_builder.failed_trace_before_tool();
             self.update_execution_checkpoint(
                 control,
@@ -2248,6 +2467,11 @@ impl AgentRuntime {
             return;
         }
         if let Some(error) = tool_selection_dispatch.blocked_error.take() {
+            // wave-64 R1（BLOCKING，terminal-once）：已有终态派发者（如 C5 宽限监督已收口
+            // cancelled）⇒ 禁止二次派发 turn:failed、禁止覆盖已落盘的终态。
+            if !claim_failed_terminal(control, &turn_id) {
+                return;
+            }
             let trace_steps = self.telemetry_builder.failed_trace_before_tool();
             self.update_execution_checkpoint(
                 control,
@@ -2347,6 +2571,11 @@ impl AgentRuntime {
             &first_decision.provider_mode,
             first_decision.fallback_reason.as_deref(),
         ) {
+            // wave-64 R1（BLOCKING，terminal-once）：已有终态派发者（如 C5 宽限监督已收口
+            // cancelled）⇒ 禁止二次派发 turn:failed、禁止覆盖已落盘的终态。
+            if !claim_failed_terminal(control, &turn_id) {
+                return;
+            }
             let trace_steps = self.telemetry_builder.failed_trace_before_tool();
             self.update_execution_checkpoint(
                 control,
@@ -2566,6 +2795,11 @@ impl AgentRuntime {
         let attachments = match self.save_input_attachments(&input) {
             Ok(attachments) => attachments,
             Err(error) => {
+                // wave-64 R1（BLOCKING，terminal-once）：已有终态派发者（如 C5 宽限监督已收口
+                // cancelled）⇒ 禁止二次派发 turn:failed、禁止覆盖已落盘的终态。
+                if !claim_failed_terminal(control, &turn_id) {
+                    return;
+                }
                 let trace_steps = self.telemetry_builder.failed_trace_before_tool();
                 self.update_execution_checkpoint(
                     control,
@@ -2752,7 +2986,7 @@ impl AgentRuntime {
         if let Some(error) = checkpoint_hook_outcome.fail_turn_error {
             let mut checkpoint_terminal_hook_trace_records = planner_hook_trace_records.clone();
             checkpoint_terminal_hook_trace_records.extend(checkpoint_hook_trace_records.clone());
-            self.fail_stream_turn_with_hook_dispatch(
+            self.fail_stream_turn_gated_dispatch(
                 sink,
                 control,
                 input.session_id.as_deref(),
@@ -2779,7 +3013,7 @@ impl AgentRuntime {
         terminal_hook_trace_records.extend(checkpoint_hook_trace_records.clone());
         terminal_hook_trace_records.extend(finalize_hook_trace_records.clone());
         if let Some(error) = finalize_hook_outcome.fail_turn_error {
-            self.fail_stream_turn_with_hook_dispatch(
+            self.fail_stream_turn_gated_dispatch(
                 sink,
                 control,
                 input.session_id.as_deref(),
