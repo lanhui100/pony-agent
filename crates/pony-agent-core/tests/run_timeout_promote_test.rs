@@ -190,7 +190,6 @@ fn run_command(command: &str, timeout_ms: u64, tag: &str) -> (String, Value) {
     };
 
     let result = router.execute(&call);
-    let _ = std::fs::remove_dir_all(&workspace);
 
     let payload: Value = serde_json::from_str(&result.output).unwrap_or_else(|error| {
         panic!(
@@ -198,6 +197,15 @@ fn run_command(command: &str, timeout_ms: u64, tag: &str) -> (String, Value) {
             error, result.output
         )
     });
+
+    // Windows 实测（CI）：promoted 作业仍在跑，若此处删掉 workspace，其 cwd 随之消失，
+    // cmd 后续片段会报「The system cannot find the path specified.」⇒ 用例假红。
+    // 故 promote 结果保留目录（由 OS 临时目录清理），非 promote 仍立即回收。
+    let promoted = payload.get("jobId").and_then(Value::as_str).is_some();
+    if !promoted {
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     (result.status, payload)
 }
 
