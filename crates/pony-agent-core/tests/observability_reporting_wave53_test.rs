@@ -1045,6 +1045,8 @@ fn t5_trace_name_readable() {
         turn_id: "turn-abc-raw-id".to_string(),
         sequence: 7,
         phase: "completed".to_string(),
+        // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
+        failed_reason: None,
     });
 
     assert_eq!(
@@ -1084,6 +1086,8 @@ fn t5_trace_name_readable() {
         turn_id: "1793090889676".to_string(),
         sequence: 0,
         phase: "completed".to_string(),
+        // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
+        failed_reason: None,
     });
     assert_eq!(
         pure_str(&same_seq_a, KEY_TRACE_NAME),
@@ -1098,6 +1102,8 @@ fn t5_trace_name_readable() {
         turn_id: "1793090889677".to_string(),
         sequence: 0,
         phase: "completed".to_string(),
+        // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
+        failed_reason: None,
     });
     assert_ne!(
         pure_str(&same_seq_a, KEY_TRACE_NAME),
@@ -1114,6 +1120,8 @@ fn t5_trace_name_readable() {
         turn_id: "turn-seq-10".to_string(),
         sequence: 10,
         phase: "completed".to_string(),
+        // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
+        failed_reason: None,
     });
     assert_eq!(
         pure_str(&padded, KEY_TRACE_NAME),
@@ -1129,6 +1137,8 @@ fn t5_trace_name_readable() {
         turn_id: String::new(),
         sequence: 3,
         phase: "completed".to_string(),
+        // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
+        failed_reason: None,
     });
     assert_eq!(
         pure_str(&empty_turn, KEY_TRACE_NAME),
@@ -1145,6 +1155,8 @@ fn t5_trace_name_readable() {
         turn_id: "abc".to_string(),
         sequence: 1,
         phase: "completed".to_string(),
+        // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
+        failed_reason: None,
     });
     assert_eq!(
         pure_str(&short_turn, KEY_TRACE_NAME),
@@ -1161,6 +1173,8 @@ fn t5_trace_name_readable() {
         turn_id: "turn-会话-阶段测试".to_string(),
         sequence: 2,
         phase: "completed".to_string(),
+        // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
+        failed_reason: None,
     });
     assert_eq!(
         pure_str(&unicode_turn, KEY_TRACE_NAME),

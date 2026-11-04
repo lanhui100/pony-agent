@@ -393,6 +393,8 @@ fn turn_input() -> TurnSpanInput {
         turn_id: "turn-otel-1".to_string(),
         sequence: 7,
         phase: "completed".to_string(),
+        // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
+        failed_reason: None,
     }
 }
 

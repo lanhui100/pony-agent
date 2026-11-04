@@ -233,6 +233,10 @@ pub const ATTR_AGENT_TURN_SEQUENCE: &str = "agent.turn.sequence";
 /// turn 终态相位（如 `completed` / `failed` / `cancelled`）。
 pub const ATTR_AGENT_TURN_PHASE: &str = "agent.turn.phase";
 
+/// P0-3：失败轮的**归因说明**（如 `tool_failed: timeout`）。仅当有非空白原因时输出，值走
+/// [`crate::agent::ponysentry::sanitize`]；成功/取消轮不输出该键。
+pub const ATTR_AGENT_TURN_FAILED_REASON: &str = "agent.turn.failed_reason";
+
 /// turn 终态错误聚合结论（PA-154）：**仅**本轮聚合到子 span 错误时输出（值固定 `error`）；
 /// 全成功轮次**不输出该键**（保持「有 = 有错」的单义语义，避免污染失败率看板）。
 pub const ATTR_AGENT_TURN_OUTCOME: &str = "agent.turn.outcome";
@@ -394,6 +398,8 @@ pub struct TurnSpanInput {
     pub sequence: u64,
     /// turn 终态相位，映射到 [`ATTR_AGENT_TURN_PHASE`]。
     pub phase: String,
+    /// P0-3：失败轮归因（`None`/全空白 ⇒ **不输出** [`ATTR_AGENT_TURN_FAILED_REASON`]）。
+    pub failed_reason: Option<String>,
 }
 
 /// LLM 子 span 的属性映射输入。
@@ -1160,6 +1166,8 @@ impl TurnScope {
             turn_id: turn_id.to_string(),
             sequence,
             phase: String::new(),
+            // P0-3：turn span 起建时尚无失败归因（失败时由 `TurnTraceGuard::drop` 写入）。
+            failed_reason: None,
         }));
         let mut span = state.tracer.build_with_context(
             opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
@@ -1245,6 +1253,8 @@ pub fn force_export_session_trace(
                 turn_id: record.turn_id.clone(),
                 sequence: record.sequence.unwrap_or(offset as u64),
                 phase: record.phase.clone(),
+                // P0-3：历史 trace 导出保持既有行为（不回填归因）。
+                failed_reason: None,
             }));
             // F6：逐 span 打「用户逐次授权」标记，只有这些 span 在关闭态被采样与放行。
             attributes.push(KeyValue::new(ATTR_PONY_OTEL_FORCED, true));
@@ -1297,8 +1307,21 @@ pub fn turn_span_attributes(input: &TurnSpanInput) -> Vec<(String, AttrValue)> {
     if let Some(user_id) = input.user_id.as_deref() {
         push_str(&mut attributes, ATTR_LANGFUSE_USER_ID, user_id);
     }
+    // P0-3：失败原因**只能追加在最后**（既有键序与取值逐字不变）。
+    if let Some(reason) = turn_failed_reason_value(input.failed_reason.as_deref()) {
+        push_str(&mut attributes, ATTR_AGENT_TURN_FAILED_REASON, &reason);
+    }
 
     attributes
+}
+
+/// P0-3：失败原因 → 属性值的**单一映射**（`turn_span_attributes` 与 `TurnTraceGuard::drop` 共用，
+/// 禁止两处各写一份文案/脱敏口径）。
+///
+/// `None` / 全空白（trim 后为空）⇒ `None`（不写键）；否则返回 `sanitize` 后的文本。
+fn turn_failed_reason_value(reason: Option<&str>) -> Option<String> {
+    let reason = reason.map(str::trim).filter(|text| !text.is_empty())?;
+    Some(crate::agent::ponysentry::sanitize(reason))
 }
 
 /// 协议标签 → `gen_ai.system` 枚举值（wave-53 C3）。
@@ -1803,6 +1826,8 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
                 turn_id: turn_id.to_string(),
                 sequence,
                 phase: String::new(),
+                // P0-3：turn span 起建时尚无失败归因（失败时由 `TurnTraceGuard::drop` 写入）。
+                failed_reason: None,
             }));
             // ADR 0055：trace.release 需 span 属性显式给出（resource `service.version` 只填 version）。
             attributes.push(KeyValue::new(
@@ -1980,8 +2005,15 @@ impl Drop for TurnTraceGuard {
         // 其余相位由聚合到的子 span 错误承接 `turn_error: <reason>`。
         if let Some(span) = self.span.as_mut() {
             match (phase_failed, aggregated_error) {
-                (true, _) => {
+                (true, reason) => {
                     span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, "error"));
+                    // P0-3：失败轮把归因写到根 span —— 复用同一映射（含脱敏），不另写文案。
+                    if let Some(value) = turn_failed_reason_value(reason.as_deref()) {
+                        span.set_attribute(KeyValue::new(
+                            ATTR_AGENT_TURN_FAILED_REASON,
+                            value,
+                        ));
+                    }
                 }
                 (false, Some(reason)) => {
                     span.set_status(opentelemetry::trace::Status::error(
@@ -3820,6 +3852,7 @@ mod tests {
             turn_id: "turn-1".to_string(),
             sequence: 0,
             phase: "failed".to_string(),
+            failed_reason: None,
         });
         let session = str_attr(&attrs, ATTR_LANGFUSE_SESSION_ID);
         assert!(
