@@ -1700,6 +1700,11 @@ impl TuiState {
                     self.set_status_notice(format!("提供商切换保存失败: {error}"));
                 }
             }
+            // 选择完成后收起选择器（与 cancel_provider_selector 同语义）。
+            // 回归来源：22241e9 重构丢失该复位 ⇒ 选中 provider 后菜单不关闭，
+            // tui_acceptance::test_provider_selector_state_logic 因此变红。
+            self.provider_list.clear();
+            self.mode = InteractionMode::Normal;
             Some(selected)
         } else {
             None
