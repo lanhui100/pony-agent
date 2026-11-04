@@ -87,3 +87,21 @@ pub fn continue_with_tool_results_stream<F>(
 
 **D3**：`turn_stream.rs::handle_stream_tool_turn` 与 `turn_sync.rs` 同构循环改批执行 —— Ask（`ToolKind::Interactive`）
 作批终止符、per-call 熔断闸保持、批后**一次** followup；落地前做一次 Anthropic 真实回放（唯一会 400 的地方）。
+
+## 7. D2 已完成（`8f33eb27`）与 D3 剩余范围
+
+**D2 已交付**：`continue_with_tool_results` / `continue_with_tool_results_stream`（provider/mod.rs:1149/:1236），
+三步分派 + 3 条 wire 级测试；`--lib` 1231/0。已知偏差：N>1 流式走同步 post 后回放（非真增量）；
+N>1 未接 retry（避免 accumulated 二次追加）。
+
+**D3 剩余（运行时循环批执行）**，建议分两波：
+- D3a `turn_sync.rs`（无流式，形态简单）：`current_tool_call: Option<ToolCall>` → 批；
+  逐调用执行 + 逐调用 hop 记录；批后**一次** `continue_with_tool_results`；Ask（`ToolKind::Interactive`）作批终止符。
+- D3b `turn_stream.rs::handle_stream_tool_turn`（约 1300 行，产品主路径）：同构改写，注意四条 recovery 分支
+  （wall budget / followup limit / hop limit / duplicate signature）与两条熔断闸的批语义；真流式增量留作后续。
+- 两波都落地后，**删除** `ensure_single_anthropic_tool_call` 的 >1 Err（当前仍 Err，是本目标 D 项未完成的最直观标志），
+  并同步翻转 src 单测 `anthropic_rejects_multiple_tool_calls`。
+- `parallel_tools` 并发接线仍为独立可选项（开关默认关）；Ask 不可与其它工具同批。
+
+**验收**（两波共用）：① 2 个调用都被执行且顺序保序；② 批后 followup 请求体 1 assistant + N 结果；
+③ 单调用路径逐字不变；④ 熔断闸仍按 per-call 计数；⑤ 落地前做一次 Anthropic 真实回放（400 风险点）。
