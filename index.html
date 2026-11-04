@@ -45,8 +45,9 @@
           flex-direction: column;
           align-items: center;
           justify-content: center;
-          background: radial-gradient(circle at top, rgba(248, 226, 184, 0.25), transparent 45%),
-                      linear-gradient(180deg, #fdfbf9 0%, #faf7f2 50%, #f4ede2 100%);
+          background: rgba(253, 251, 249, 0.65);
+          backdrop-filter: blur(24px) saturate(1.8);
+          -webkit-backdrop-filter: blur(24px) saturate(1.8);
           user-select: none;
           -webkit-user-select: none;
           transition: opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.35s cubic-bezier(0.16, 1, 0.3, 1);
@@ -60,7 +61,7 @@
           display: flex;
           flex-direction: column;
           align-items: center;
-          gap: 16px;
+          gap: 18px;
         }
         .loading-badge {
           width: 52px;
@@ -68,47 +69,53 @@
           border-radius: 14px;
           box-shadow: 0 10px 25px -4px rgba(217, 119, 6, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
           animation: loading-pulse 2.2s ease-in-out infinite;
+          will-change: transform;
         }
         .loading-brand-title {
-          font-family: -apple-system, BlinkMacSystemFont, "Montserrat", "Arial Black", "Impact", "Trebuchet MS", "Segoe UI", sans-serif;
-          font-size: 2.1rem;
-          font-weight: 900;
-          letter-spacing: 0.18em;
-          text-transform: uppercase;
-          background: linear-gradient(135deg, #1c1917 0%, #44403c 45%, #b45309 100%);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-          text-shadow: 0 2px 12px rgba(217, 119, 6, 0.12);
+          font-family: "Inter", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+          font-size: 1.85rem;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          color: #1c1917;
           margin: 0;
-          padding-left: 0.18em;
+          text-align: center;
         }
         .loading-progress-bar {
           width: 140px;
           height: 3px;
-          background: rgba(120, 113, 108, 0.12);
+          background: rgba(120, 113, 108, 0.14);
           border-radius: 9999px;
           overflow: hidden;
           position: relative;
           margin-top: 4px;
+          contain: strict;
         }
         .loading-progress-indicator {
           position: absolute;
           top: 0;
-          bottom: 0;
-          left: -40%;
-          width: 40%;
-          background: linear-gradient(90deg, #d97706, #f59e0b);
+          left: 0;
+          height: 100%;
+          width: 100%;
+          background: #d97706;
           border-radius: 9999px;
-          animation: loading-shimmer 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+          transform-origin: left center;
+          animation: loading-bar-move 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+          will-change: transform;
         }
         @keyframes loading-pulse {
-          0%, 100% { transform: scale(1); filter: drop-shadow(0 4px 10px rgba(245, 158, 11, 0.25)); }
-          50% { transform: scale(1.05); filter: drop-shadow(0 8px 18px rgba(245, 158, 11, 0.38)); }
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.04); }
         }
-        @keyframes loading-shimmer {
-          0% { left: -40%; width: 40%; }
-          50% { left: 30%; width: 50%; }
-          100% { left: 100%; width: 40%; }
+        @keyframes loading-bar-move {
+          0% {
+            transform: translateX(-100%) scaleX(0.2);
+          }
+          50% {
+            transform: translateX(10%) scaleX(0.5);
+          }
+          100% {
+            transform: translateX(100%) scaleX(0.2);
+          }
         }
       </style>
       <div class="loading-title-container">

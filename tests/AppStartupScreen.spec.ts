@@ -15,7 +15,7 @@ describe("AppStartupScreen Component", () => {
     expect(screen.exists()).toBe(true);
     expect(screen.text()).toContain("Pony Agent");
     expect(screen.text()).toContain("正在加载测试引擎...");
-    expect(screen.classes()).toContain("backdrop-blur-xl");
+    expect(screen.classes()).toContain("backdrop-blur-2xl");
   });
 
   it("does not render when isInitializing is false", () => {
