@@ -3399,7 +3399,10 @@ impl ToolRouter {
                 "code": "non_zero_exit",
                 "kind": "non_zero_exit",
                 "message": message,
-                "exitCode": exit_code
+                "exitCode": exit_code,
+                // P0-3：退出码分类（与 `exitCode` 同层，只加字段；`code`/`kind`/`message` 逐字不改）。
+                // `exit_code = None`（拿不到退出码，如被信号终止且无 status code）时为 null。
+                "exitCodeClass": exit_code.map(classify_exit_code)
             })
         });
 
@@ -8960,6 +8963,30 @@ fn web_access_deny_message(reason: &WebAccessDenyReason) -> String {
     }
 }
 
+/// P0-3：把进程退出码归类成可检索的**分类名**（trace 诊断的第一刀）。
+///
+/// 口径（本卡冻结的最小集合）：
+/// - `101` ⇒ `compile_or_panic`（cargo/编译失败、Rust panic 的典型码）
+/// - `127` ⇒ `command_not_found`（shell「命令不存在」约定码）
+/// - `126` ⇒ `not_executable`（shell「找到但不可执行」约定码）
+/// - `130` ⇒ `interrupted`（128 + SIGINT(2)，用户中断）
+/// - `137` ⇒ `killed`（128 + SIGKILL(9)，被强杀）
+/// - `143` ⇒ `terminated`（128 + SIGTERM(15)，被正常终止）
+/// - 其余（含 `0` / 负数）⇒ `general_failure`（兜底；本函数不做「是否成功」判断）
+///
+/// 纯函数：无 IO、无 env、无状态，便于单测与未来的前端/后端共用口径。
+pub fn classify_exit_code(exit_code: i32) -> &'static str {
+    match exit_code {
+        101 => "compile_or_panic",
+        127 => "command_not_found",
+        126 => "not_executable",
+        130 => "interrupted",
+        137 => "killed",
+        143 => "terminated",
+        _ => "general_failure",
+    }
+}
+
 /// 一次 Run `poll` 的结论（只关心「是否已退出」与退出码）。
 enum RunPollOutcome {
     Running,
@@ -9922,6 +9949,33 @@ mod tests {
         assert_eq!(owner_kill.status, "ok", "owner 必须能终止自己的作业");
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// P0-3：退出码分类的 7 条映射 + 边界（0 / 负数 / 普通失败码）。
+    ///
+    /// 锁住「分类口径」本身：与 `run_exit_code_class_test`（真实进程黑盒）互补，
+    /// 这条纯函数单测保证常量表不被无意改掉，且兜底分支永不返回空串。
+    #[test]
+    fn classify_exit_code_maps_known_codes_and_falls_back() {
+        let cases: [(i32, &str); 11] = [
+            (101, "compile_or_panic"),
+            (127, "command_not_found"),
+            (126, "not_executable"),
+            (130, "interrupted"),
+            (137, "killed"),
+            (143, "terminated"),
+            (7, "general_failure"),
+            (1, "general_failure"),
+            (255, "general_failure"),
+            (0, "general_failure"),  // 成功码不参与分类：兜底而非 panic
+            (-1, "general_failure"), // 异常/平台自定义码同样兜底
+        ];
+        for (code, expected) in cases {
+            let actual = classify_exit_code(code);
+            eprintln!("[p0-3] classify_exit_code({code}) = {actual}");
+            assert_eq!(actual, expected, "P0-3：退出码 {code} 分类不符");
+            assert!(!actual.is_empty(), "P0-3：分类名不得为空串");
+        }
     }
 
     fn temp_workspace() -> PathBuf {
