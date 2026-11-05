@@ -1085,9 +1085,9 @@
         "red_phase": "EXIT 101, 12/12 unimplemented!() native panic, dev-red-purity pure_red=true",
         "green_phase": "cargo check --all-targets 0; acceptance 15/15; regressions 52/52; RUSTFLAGS=-D warnings 0",
         "observability": "audit-diff 0; check-declaration 0",
-        "review": "review-lint 5/5 EXIT 0 (DEGRADED Lead double-review; 3 L3 subagents stalled)",
+        "review": "review-lint 5/5 EXIT 0 (3 L3 subagents stalled => Lead double-review DEGRADED); PTY smoke independently PASS",
         "meta": "dev-meta-lint EXIT 0",
-        "pty": "DEGRADED_HARNESS_FALSE_NEGATIVE; process exit + ESC[?1049l + resume hint verified on raw bytes; termios readback impossible (pts destroyed)"
+        "pty": "PASS: Tier-1 PTY dynamic smoke with wrapper-held pts; /quit + SIGTERM; termios restored (stty rc=0); resume hint visible; negative control proves harness neutrality; 0 failed / 0 degraded"
       },
       "tags": [
         "wave-1-tui-session-resilience",

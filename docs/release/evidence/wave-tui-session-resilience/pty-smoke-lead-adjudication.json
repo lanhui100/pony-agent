@@ -1,7 +1,7 @@
 {
   "ticket": "tui-session-resilience C7/C8 PTY dynamic smoke",
   "original_verdict": "PASS",
-  "lead_adjudication": "DEGRADED_HARNESS_FALSE_NEGATIVE",
+  "lead_adjudication": "PASS_SUPERSEDES_DEGRADED",
   "binary_sha256": "31f74be5b86c1d92b4462011d9c32471e2df92da1e84c63a89c28311d1b4ba80",
   "true_assertions": [
     "quit: 已进入真实 TUI（capture-pane 含 Composer ›）",
@@ -54,5 +54,14 @@
     "SIGTERM handler logged",
     "real sessions.db untouched"
   ],
-  "degraded_scope": "termios readback impossible in this PTY harness; C8 acceptance remains [RED DEGRADED: STATIC-ONLY] for that single assertion"
+  "degraded_scope": "无；C8 由 [RED DEGRADED: STATIC-ONLY] 测试级断言 + Tier-1 真实 PTY 动态冒烟 PASS 共同闭合",
+  "superseded_by": "pty-smoke-receipt.json (wrapper-held pts, 2026-11-06T02:22:12+08:00)",
+  "reversal_reason": "原 FAIL 源于 tmux 在 pony 退出时销毁 pts：capture-pane 为空且 stty -F 返回 No such file。PTY 冒烟执行者改用 pty-holding wrapper（wrapper 记录 pony exit code 后 exec sleep 保持 pts 存活，自身不写 termios），使退出后同一 pts 的 termios 可读。",
+  "dynamic_evidence": {
+    "quit": "PRE -isig/-icanon/-echo/-opost → POST isig icanon echo opost (stty rc=0); pony exit=0; pane 显示「继续该会话请运行：pony resume session-aaa7a995」; raw hint_pos=17174 > last_leave=17131",
+    "sigterm": "PRE raw → POST isig icanon echo opost (stty rc=0); pony exit=0; SIGTERM handler logged; pane 显示 pony resume session-66a6bf52; raw hint_pos=9179 > last_leave=9136",
+    "negative_control": "python tty.setraw 不还原 + 同一 wrapper ⇒ POST 仍为 -isig/-icanon/-echo/-opost，raw_leak_persists=true，证明 wrapper/harness 不会自行修复 termios",
+    "isolation": "真实 ~/.local/share/PonyAgent/sessions.db mtime 前后不变；无外部 OTel/Sentry 端点痕迹"
+  },
+  "final_verdict": "PASS (0 failed, 0 degraded)"
 }

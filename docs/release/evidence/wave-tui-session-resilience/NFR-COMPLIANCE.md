@@ -12,4 +12,4 @@
 
 机器收据：cargo check --all-targets EXIT 0；RUSTFLAGS=-D warnings EXIT 0；验收 15/15；回归 52/52；audit-diff EXIT 0；check-declaration EXIT 0。
 
-局限：PTY termios 读回因 tmux 销毁 pts 不可测（DEGRADED），其余 C8 动态断言通过，见 pty-smoke-lead-adjudication.json。
+PTY 动态冒烟已由 pty-holding wrapper 打通：/quit 与 SIGTERM 双路径退出后同一 pts 的 termios 由 `-isig/-icanon/-echo/-opost` 复原为 `isig/icanon/echo/opost`（stty rc=0），负控制证明 wrapper 不自行修复；C8 动态 PASS，0 degraded。见 pty-smoke-receipt.json / pty-smoke-final-run.stdout / pty-smoke-negative-control.json。

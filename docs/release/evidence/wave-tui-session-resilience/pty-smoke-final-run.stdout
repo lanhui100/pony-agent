@@ -1,0 +1,61 @@
+[02:22:08] binary=/home/dm/pony-agent-worktrees/tui-session-resilience/target/debug/pony
+[02:22:08] real_db_before mtime_ns=1793895519417974320
+[02:22:08] env tools: tmux=/usr/bin/tmux script=/usr/bin/script stty=/usr/bin/stty lsof=/usr/bin/lsof
+[02:22:08] === CASE quit trigger=quit ===
+[02:22:08]   launch rc=0 sock=dsh-tui-smoke-quit-1158349 port=50763 (dead loopback)
+[02:22:08]   PASS: quit: 已进入真实 TUI（capture-pane 含 Composer ›） | actual=ready=True ›=True pane_bytes=4019 pane_tail=[48;2;18;16;14m[38;2;104;98;90m/home/dm/pony-agent-worktrees/tui-session-resilience[39m
+[02:22:08]   PASS: quit: 退出前真实 pony 进程存活且持有 pts | actual=wrapper_pid=1158362 pony_pid=1158364 tty=/dev/pts/0 cmd=1158364 Sl+  /home/dm/pony-agent-worktrees/tui-session-resilience/target/debug/pony
+[02:22:08]   PASS: quit: 退出前 TUI 确实处于 raw mode（判据判别力自检） | actual=rc=0 raw_flags=['-isig', '-icanon', '-echo', '-opost']
+[02:22:10]   PASS: quit: 退出后 pony 进程不存在（C8） | actual=pony_pid=1158364 gone=True alive=False ps=<gone> wrapper_alive=True (wrapper=sleep, 非 pony)
+[02:22:10]   PASS: quit: pony 自身 exit code = 0（正常/信号接管均优雅退出） | actual=pony-exit-code.txt=0
+[02:22:10]   post-exit pane bytes=71 tail=继续该会话请运行：ponyresumesession-aaa7a995
+[02:22:10]   PASS: quit: 原始字节含 ESC[?1049l（退出备用屏，C7） | actual=stream_raw_positions=[17131] pane_ansi_has=False raw_len=17204
+[02:22:10]   PASS: quit: 屏幕/原始字节含 `pony resume <session_id>` 提示（C7） | actual=pane_match=pony resume session-aaa7a995 raw_match=b'pony resume session-aaa7a995' pane_tail=继续该会话请运行：ponyresumesession-aaa7a995
+[02:22:10]   PASS: quit: resume 提示出现在退出备用屏之后（C7 时序） | actual=raw_last_leave=17131 raw_hint=17174 raw_ordering=True pane_ordering=False
+[02:22:10]   post stty: rc=0 negative=[] positive=['isig', 'icanon', 'echo', 'opost']
+[02:22:10]   PASS: quit: 退出后同一 pts 可 stty -F 测量（pty 未随 pony 消失） | actual=tty=/dev/pts/0 rc=0 out=speed 38400 baud; rows 34; columns 120; line = 0;
+intr = ^C; quit = ^\; erase = ^?; kill = ^U; eof = ^D; eol = <undef>;
+
+[02:22:10]   PASS: quit: 退出后 -isig/-icanon/-echo/-opost 未同时残留（C7 termios） | actual=rc=0 remaining_negative=[]
+[02:22:10]   PASS: quit: 退出后 echo/icanon/isig 复原（C7 termios） | actual=rc=0 positive=['isig', 'icanon', 'echo', 'opost'] full=b cread -clocal -crtscts
+-ignbrk -brkint -ignpar -parmrk -inpck -istrip -inlcr -igncr icrnl ixon -ixoff
+-iuclc -ixany -imaxbel iutf8
+opost -olcuc -ocrnl onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0
+isig icanon iexten echo echoe echok -echonl -noflsh -xcase -tostop -echoprt
+echoctl echoke -flusho -extproc
+[02:22:10]   PASS: quit: termios 判据判别力自检（退出前 raw / 退出后复原，同一 pts） | actual=tty=/dev/pts/0 PRE_negative=['-isig', '-icanon', '-echo', '-opost'] POST_negative=[] POST_positive=['isig', 'icanon', 'echo', 'opost']
+[02:22:10]   PASS: quit: 退出后无活线程持有 /dev/tty（C8） | actual=pony_pid=1158364 alive=False lsof=[] fd_links=[] /proc/1158364 exists=False
+[02:22:10]   PASS: quit: 隔离——会话库只落在收据目录，真实用户库未被写入 | actual=real_db=mtime_ns=1793895519417974320 iso_dbs=['/tmp/dsh-tui-session-resilience-smoke/iso-quit/xdg/PonyAgent/sessions.db']
+[02:22:10]   PASS: quit: 运行日志捕获到统一终端还原（T2c） | actual=log_bytes=166 has_restore=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-quit/xdg/PonyAgent/sessions.db|[pony-tui] running terminal restore (T2c)|
+[02:22:10]   PASS: quit: fail-closed——运行日志无外部 OTel/Sentry 端点痕迹 | actual=external_endpoint_hits=[] log_bytes=166
+[02:22:10] === CASE sigterm trigger=sigterm ===
+[02:22:10]   launch rc=0 sock=dsh-tui-smoke-sigterm-1158349 port=54941 (dead loopback)
+[02:22:10]   PASS: sigterm: 已进入真实 TUI（capture-pane 含 Composer ›） | actual=ready=True ›=True pane_bytes=4019 pane_tail=[48;2;18;16;14m[38;2;104;98;90m/home/dm/pony-agent-worktrees/tui-session-resilience[39m
+[02:22:10]   PASS: sigterm: 退出前真实 pony 进程存活且持有 pts | actual=wrapper_pid=1158485 pony_pid=1158487 tty=/dev/pts/0 cmd=1158487 Sl+  /home/dm/pony-agent-worktrees/tui-session-resilience/target/debug/pony
+[02:22:10]   PASS: sigterm: 退出前 TUI 确实处于 raw mode（判据判别力自检） | actual=rc=0 raw_flags=['-isig', '-icanon', '-echo', '-opost']
+[02:22:12]   PASS: sigterm: 退出后 pony 进程不存在（C8） | actual=pony_pid=1158487 gone=True alive=False ps=<gone> wrapper_alive=True (wrapper=sleep, 非 pony)
+[02:22:12]   PASS: sigterm: pony 自身 exit code = 0（正常/信号接管均优雅退出） | actual=pony-exit-code.txt=0
+[02:22:12]   post-exit pane bytes=71 tail=继续该会话请运行：ponyresumesession-66a6bf52
+[02:22:12]   PASS: sigterm: 原始字节含 ESC[?1049l（退出备用屏，C7） | actual=stream_raw_positions=[9058, 9136] pane_ansi_has=False raw_len=9209
+[02:22:12]   PASS: sigterm: 屏幕/原始字节含 `pony resume <session_id>` 提示（C7） | actual=pane_match=pony resume session-66a6bf52 raw_match=b'pony resume session-66a6bf52' pane_tail=继续该会话请运行：ponyresumesession-66a6bf52
+[02:22:12]   PASS: sigterm: resume 提示出现在退出备用屏之后（C7 时序） | actual=raw_last_leave=9136 raw_hint=9179 raw_ordering=True pane_ordering=False
+[02:22:12]   post stty: rc=0 negative=[] positive=['isig', 'icanon', 'echo', 'opost']
+[02:22:12]   PASS: sigterm: 退出后同一 pts 可 stty -F 测量（pty 未随 pony 消失） | actual=tty=/dev/pts/0 rc=0 out=speed 38400 baud; rows 34; columns 120; line = 0;
+intr = ^C; quit = ^\; erase = ^?; kill = ^U; eof = ^D; eol = <undef>;
+
+[02:22:12]   PASS: sigterm: 退出后 -isig/-icanon/-echo/-opost 未同时残留（C7 termios） | actual=rc=0 remaining_negative=[]
+[02:22:12]   PASS: sigterm: 退出后 echo/icanon/isig 复原（C7 termios） | actual=rc=0 positive=['isig', 'icanon', 'echo', 'opost'] full=b cread -clocal -crtscts
+-ignbrk -brkint -ignpar -parmrk -inpck -istrip -inlcr -igncr icrnl ixon -ixoff
+-iuclc -ixany -imaxbel iutf8
+opost -olcuc -ocrnl onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0
+isig icanon iexten echo echoe echok -echonl -noflsh -xcase -tostop -echoprt
+echoctl echoke -flusho -extproc
+[02:22:12]   PASS: sigterm: termios 判据判别力自检（退出前 raw / 退出后复原，同一 pts） | actual=tty=/dev/pts/0 PRE_negative=['-isig', '-icanon', '-echo', '-opost'] POST_negative=[] POST_positive=['isig', 'icanon', 'echo', 'opost']
+[02:22:12]   PASS: sigterm: 退出后无活线程持有 /dev/tty（C8） | actual=pony_pid=1158487 alive=False lsof=[] fd_links=[] /proc/1158487 exists=False
+[02:22:12]   PASS: sigterm: 隔离——会话库只落在收据目录，真实用户库未被写入 | actual=real_db=mtime_ns=1793895519417974320 iso_dbs=['/tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db']
+[02:22:12]   PASS: sigterm: 运行日志捕获到统一终端还原（T2c） | actual=log_bytes=208 has_restore=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db|[pony-tui] shutdown signal 15 received|[pony-tui] running terminal restore (T2c)|
+[02:22:12]   PASS: sigterm: fail-closed——运行日志无外部 OTel/Sentry 端点痕迹 | actual=external_endpoint_hits=[] log_bytes=208
+[02:22:12]   PASS: sigterm: 运行日志捕获到 SIGTERM 信号接管 | actual=has_signal_notice=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db|[pony-tui] shutdown signal 15 received|[pony-tui] running terminal restore (T2c)|
+[02:22:12]   PASS: 全局: 真实用户会话库 mtime 全程未变（隔离） | actual=before=1793895519417974320 after=1793895519417974320
+[02:22:12] VERDICT=PASS failed=0 degraded=[]
+{"verdict": "PASS", "failed": [], "degraded": []}

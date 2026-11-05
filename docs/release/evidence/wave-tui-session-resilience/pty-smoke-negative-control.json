@@ -1,0 +1,22 @@
+{
+  "purpose": "negative control: wrapper/harness must NOT restore termios by itself",
+  "tmux_socket": "dsh-tui-smoke-control-1165088",
+  "new_session_rc": 0,
+  "tty": "/dev/pts/0",
+  "wrapper_pid": 1165101,
+  "child": "/tmp/dsh-tui-session-resilience-smoke/control-negative/raw_no_restore.py",
+  "wrapper": "/tmp/dsh-tui-session-resilience-smoke/control-negative/wrapper.sh",
+  "child_exit_code": "0",
+  "pre_stty_rc": 0,
+  "post_stty_rc": 0,
+  "post_stty": "speed 38400 baud; rows 34; columns 120; line = 0;\nintr = ^C; quit = ^\\; erase = ^?; kill = ^U; eof = ^D; eol = <undef>;\neol2 = <undef>; swtch = <undef>; start = ^Q; stop = ^S; susp = ^Z; rprnt = ^R;\nwerase = ^W; lnext = ^V; discard = ^O; min = 1; time = 0;\n-parenb -parodd -cmspar cs8 -hupcl -cstopb cread -clocal -crtscts\n-ignbrk -brkint -ignpar -parmrk -inpck -istrip -inlcr -igncr -icrnl -ixon -ixoff\n-iuclc -ixany -imaxbel iutf8\n-opost -olcuc -ocrnl onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0\n-isig -icanon -iexten -echo -echoe -echok -echonl -noflsh -xcase -tostop\n-echoprt echoctl echoke -flusho -extproc\n",
+  "post_negative_flags": [
+    "-isig",
+    "-icanon",
+    "-echo",
+    "-opost"
+  ],
+  "post_positive_flags": [],
+  "pane_text": "RAW-CONTROL-READY",
+  "raw_leak_persists": true
+}

@@ -32,6 +32,6 @@
 
 ## 未覆盖 / 局限
 
-- PTY 动态验证：本次未拉起真实 `pony` 进程做退出后 `ps` / termios / `/dev/tty` 持有断言；冻结验收用例 C8 明确标注 `[RED DEGRADED: STATIC-ONLY]`，本收据不冒充动态通过。真实 PTY 冒烟留给 Lead 的 Join Barrier。
+- PTY 动态验证：Join Barrier 已由 Lead + PTY 冒烟执行者用 pty-holding wrapper 完成（`docs/release/evidence/wave-tui-session-resilience/pty-smoke-receipt.json`）：/quit 与 SIGTERM 双路径进程退出、termios 由 raw 复原（stty rc=0）、`pony resume <id>` 提示可见、负控制证明 wrapper 不自行修复；VERDICT=PASS，0 failed / 0 degraded。冻结验收用例 C8 的静态标注保留为测试层事实，不冒充动态；动态证据另计。
 - `session/mod.rs` 的 3 行纯 re-export 由 Lead 裁决为 `lead-assembly` 白名单例外（无业务逻辑，避免检查点纯函数双真值源）。
 - 未新增重试预算、网络端点、环境变量、依赖、持久化 schema 字段或外部异常码。
