@@ -11,6 +11,10 @@ use serde_json::json;
 
 const MAX_LOCAL_BATCH_PATHS: usize = 6;
 
+/// W1b：本地 planner 只处理**短**的显式文件/工作区查询；长句（尤其含“增加/实现/为什么”
+/// 的复合需求）必须交还模型，避免把一句话里的斜杠或“上述”误判成工具意图。
+const MAX_LOCAL_PLANNER_MESSAGE_CHARS: usize = 120;
+
 /// 契约 C1 / NFR `auto_continue_max`：同一用户消息系列内允许的**连续**自动续行上限。
 ///
 /// 计数由宿主续行循环（`HostControlPlane::advance_graph_run` / TUI 循环）持有：每成功发起一轮
@@ -230,6 +234,10 @@ impl LocalTurnPlanner {
         user_message: &str,
         history: &[TurnHistoryMessage],
     ) -> Option<ToolCall> {
+        // W1b：长复合消息不交给本地启发式（用户是在描述需求，不是让 planner 读文件）。
+        if user_message.chars().count() > MAX_LOCAL_PLANNER_MESSAGE_CHARS {
+            return None;
+        }
         let lowered = user_message.to_lowercase();
         let explicit_paths = Self::extract_explicit_paths(user_message);
         let explicit_path = explicit_paths.first().cloned();
@@ -523,10 +531,17 @@ impl LocalTurnPlanner {
             "该文件",
             "该目录",
             "该路径",
-            "它",
-            "上面",
-            "刚才",
-            "上述",
+            // W1b：裸“上述/上面/刚才/它”太宽——用户说“上述消息”时并不是让 planner 读文件；
+            // 只有与“文件/目录/路径”组成明确指代时才启用历史路径。
+            "上述文件",
+            "上述目录",
+            "上述路径",
+            "上面的文件",
+            "上面的目录",
+            "上面的路径",
+            "刚才的文件",
+            "刚才的目录",
+            "刚才的路径",
         ];
         const ASCII_NEEDLES: &[&str] = &[
             "this file",
@@ -878,6 +893,20 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 fn looks_like_path(segment: &str) -> bool {
     if segment.starts_with("http://") || segment.starts_with("https://") {
         return false;
+    }
+
+    // W1b：`/斜杠命令` 这类“斜杠 + 中文命令描述”不是文件路径；已知 TUI 斜杠命令也不是。
+    // 只看 slash 后是否至少含一个 ASCII 字母数字段，避免把中文命令词当根路径。
+    if let Some(rest) = segment.strip_prefix('/') {
+        const KNOWN_SLASH_COMMANDS: &[&str] = &[
+            "resume", "provider", "models", "thinking", "plan", "tasks", "agents", "clear",
+            "compact", "help", "update", "quit", "exit",
+        ];
+        if KNOWN_SLASH_COMMANDS.iter().any(|cmd| rest.eq_ignore_ascii_case(cmd))
+            || !rest.chars().any(|ch| ch.is_ascii_alphanumeric())
+        {
+            return false;
+        }
     }
 
     // 契约 C5（W1）：退化段不是路径。历史正文里的 "tester / reviewer" 会被
@@ -1707,5 +1736,32 @@ mod tests {
                 "契约 C5：{segment:?} 必须判定为路径"
             );
         }
+    }
+
+    // ── W1b：长复合需求 / 斜杠命令词 / “上述消息”不得被本地 planner 劫持 ──
+
+    #[test]
+    fn w1b_long_feature_request_is_left_to_model() {
+        let message = "当前项目的tui中为什么没有思考消息？另外增加/斜杠命令，可以折叠中间过程，包括思考消息、工具调用、agent team、后台运行等，仅以状态消息显示当前的上述消息，以及轮次最终的agent消息；再有就是agent消息向上滚动，消息底部应该与输入框有一定的间距，以便增强阅读体验。dev team实施";
+        assert!(
+            LocalTurnPlanner.preflight_decision(message, &[], &[]).is_none(),
+            "W1b：长复合需求必须交还模型，不得被本地 planner 劫持"
+        );
+    }
+
+    #[test]
+    fn w1b_slash_command_word_is_not_a_path() {
+        assert!(!looks_like_path("/clear"));
+        assert!(!looks_like_path("/斜杠命令"));
+        assert!(looks_like_path("/home/a"));
+    }
+
+    #[test]
+    fn w1b_above_message_is_not_a_file_reference() {
+        let history = [history("assistant", "见 /home/a/file.rs")];
+        assert!(
+            LocalTurnPlanner.preflight_decision("上述消息怎么改？", &history, &[]).is_none(),
+            "W1b：'上述消息' 不是文件指代，不得把历史路径当焦点"
+        );
     }
 }
