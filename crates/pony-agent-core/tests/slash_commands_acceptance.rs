@@ -48,10 +48,10 @@ use pony_agent_core::agent::runtime_helper::TestRuntimeGuard;
 use pony_agent_core::agent::session::{FileSessionBackend, SessionStore, TurnHistoryMessage};
 use pony_agent_core::agent::tools::{ToolCall, ToolExecutor, ToolResult};
 
-/// 契约 C-4 冻结的完整命令表（顺序固定，共 10 条）。
-const CONTRACT_COMMANDS: [&str; 10] = [
+/// 契约 C-4 冻结的完整命令表（顺序固定，共 11 条）。
+const CONTRACT_COMMANDS: [&str; 11] = [
     "/resume", "/provider", "/models", "/thinking", "/plan", "/tasks", "/clear", "/compact", "/help",
-    "/quit",
+    "/update", "/quit",
 ];
 
 // ── 沙箱与测试脚手架 ───────────────────────────────────────────────────────────────────
@@ -775,4 +775,54 @@ fn g3e_overlong_error_is_truncated_to_200_chars() {
         message.contains(&"错误".repeat(100)),
         "G-3e: 截断必须按字符边界进行（CJK 不得被劈开）"
     );
+}
+
+// ── T6：/update 命令解析与面向用户反馈契约 ──────────────────────────────────────────
+
+#[test]
+fn t6a_update_command_parsing_and_matching() {
+    assert_eq!(tui::parse_command_input("/update"), Some("/update"));
+    assert_eq!(tui::parse_command_input("/UPDATE"), Some("/update"));
+    assert_eq!(tui::parse_command_input("  /update  "), Some("/update"));
+    assert_eq!(tui::parse_command_input("/update trailing text"), None);
+}
+
+#[test]
+fn t6b_semver_parsing_and_comparison() {
+    assert_eq!(tui::parse_semver_triple("0.1.153"), Some((0, 1, 153)));
+    assert_eq!(tui::parse_semver_triple("v0.1.180"), Some((0, 1, 180)));
+    assert_eq!(tui::parse_semver_triple("invalid"), None);
+
+    assert!(tui::is_newer_semver("0.1.180", "0.1.153"));
+    assert!(tui::is_newer_semver("v0.2.0", "0.1.999"));
+    assert!(!tui::is_newer_semver("0.1.153", "0.1.153"));
+    assert!(!tui::is_newer_semver("0.1.150", "0.1.153"));
+}
+
+#[test]
+fn t6c_update_feedback_formatting_both_cases() {
+    // 1. 无新版（已经是最新版）的简明反馈
+    let no_update = tui::UpdateCheckOutcome {
+        current_version: "0.1.180".to_string(),
+        latest_version: "0.1.180".to_string(),
+        has_update: false,
+        release_notes: None,
+        release_url: None,
+    };
+    let no_update_msg = tui::format_update_feedback(&no_update);
+    assert_eq!(no_update_msg, "当前已是最新版本（v0.1.180），无需升级。");
+
+    // 2. 有新版本的详细升级指引反馈
+    let has_update = tui::UpdateCheckOutcome {
+        current_version: "0.1.153".to_string(),
+        latest_version: "0.1.180".to_string(),
+        has_update: true,
+        release_notes: Some("修复了一些已知问题".to_string()),
+        release_url: Some("https://github.com/lanhui100/pony-agent/releases/tag/v0.1.180".to_string()),
+    };
+    let update_msg = tui::format_update_feedback(&has_update);
+    assert!(update_msg.contains("发现新版本：v0.1.180"));
+    assert!(update_msg.contains("当前版本：v0.1.153"));
+    assert!(update_msg.contains("修复了一些已知问题"));
+    assert!(update_msg.contains("升级指引"));
 }

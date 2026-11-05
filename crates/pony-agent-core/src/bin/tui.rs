@@ -155,6 +155,10 @@ pub enum UiEvent {
     CompactFinished {
         result: Result<ManualCompactionOutcome, String>,
     },
+    /// `/update` 检查更新后台回执
+    UpdateCheckFinished {
+        result: Result<UpdateCheckOutcome, String>,
+    },
 }
 
 /// wave-40 R1（契约冻结空桩）：Composer 中 Enter 键语义。
@@ -506,6 +510,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "清空当前消息上下文"),
     ("/compact", "压缩当前会话上下文"),
     ("/help", "查看所有支持的快捷指令"),
+    ("/update", "检查更新与升级新版本"),
     ("/quit", "安全退出 TUI 界面"),
 ];
 
@@ -539,6 +544,127 @@ pub fn parse_command_input(input: &str) -> Option<&'static str> {
 /// 整串（`trim()` 后）与历史别名大小写不敏感相等（别名不在命令表内，如 `/exit`、`/effort`）。
 fn input_is_alias(input: &str, alias: &str) -> bool {
     input.trim().eq_ignore_ascii_case(alias)
+}
+
+/// `/update` 检测结果数据
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCheckOutcome {
+    pub current_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+    pub release_notes: Option<String>,
+    pub release_url: Option<String>,
+}
+
+/// 解析语义化三元组版本号 `vX.Y.Z` 或 `X.Y.Z`
+pub fn parse_semver_triple(v: &str) -> Option<(u64, u64, u64)> {
+    let clean = v.trim().trim_start_matches(|c| c == 'v' || c == 'V');
+    let mut parts = clean.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// 比较候选版本是否严格高于当前版本
+pub fn is_newer_semver(candidate: &str, current: &str) -> bool {
+    match (parse_semver_triple(candidate), parse_semver_triple(current)) {
+        (Some(c), Some(cur)) => c > cur,
+        _ => false,
+    }
+}
+
+/// 执行远端发布检查（支持 GitHub Releases API，失败时回退 MinIO/S3）
+pub async fn perform_update_check() -> Result<UpdateCheckOutcome, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let client = reqwest::Client::builder()
+        .user_agent("pony-tui")
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+
+    // 1. 优先尝试 GitHub Releases API
+    let gh_url = "https://api.github.com/repos/lanhui100/pony-agent/releases/latest";
+    let gh_res = client.get(gh_url).send().await;
+
+    let mut latest_version_opt = None;
+    let mut notes_opt = None;
+    let mut release_url_opt = None;
+
+    if let Ok(resp) = gh_res {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                    let clean_tag = tag.trim().trim_start_matches(|c| c == 'v' || c == 'V').to_string();
+                    latest_version_opt = Some(clean_tag);
+                    notes_opt = json.get("body").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    release_url_opt = json.get("html_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                }
+            }
+        }
+    }
+
+    // 2. 若 GitHub 不可用/被限流，尝试 S3 fallback
+    if latest_version_opt.is_none() {
+        let fallback_url = "https://s3.local.ponyjob.top/pony-agent-releases/latest.json";
+        if let Ok(resp) = client.get(fallback_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                        let clean_tag = tag.trim().trim_start_matches(|c| c == 'v' || c == 'V').to_string();
+                        latest_version_opt = Some(clean_tag);
+                    }
+                }
+            }
+        }
+    }
+
+    let latest_version = match latest_version_opt {
+        Some(v) => v,
+        None => return Err("无法获取最新版本信息，请检查网络连接。".to_string()),
+    };
+
+    let has_update = is_newer_semver(&latest_version, &current_version);
+    if release_url_opt.is_none() {
+        release_url_opt = Some(format!("https://github.com/lanhui100/pony-agent/releases/tag/v{}", latest_version));
+    }
+
+    Ok(UpdateCheckOutcome {
+        current_version,
+        latest_version,
+        has_update,
+        release_notes: notes_opt,
+        release_url: release_url_opt,
+    })
+}
+
+/// 格式化面向用户的 /update 检查与升级反馈文案
+pub fn format_update_feedback(outcome: &UpdateCheckOutcome) -> String {
+    if outcome.has_update {
+        let mut msg = format!(
+            "✨ 发现新版本：v{}（当前版本：v{}）\n",
+            outcome.latest_version, outcome.current_version
+        );
+        if let Some(notes) = &outcome.release_notes {
+            let trimmed = notes.trim();
+            if !trimmed.is_empty() {
+                msg.push_str(&format!("\n📝 更新说明：\n{}\n", trimmed));
+            }
+        }
+        if let Some(url) = &outcome.release_url {
+            msg.push_str(&format!("\n🔗 发布页面：{}", url));
+        }
+        msg.push_str("\n\n💡 升级指引：\n- 源码开发环境：git pull && npm run cli:build\n- 桌面端：在设置中点击「检查更新」并一键升级");
+        msg
+    } else {
+        format!(
+            "当前已是最新版本（v{}），无需升级。",
+            outcome.current_version
+        )
+    }
 }
 
 /// 契约 F-C：粘贴文本归一化——CRLF / CR 统一为 LF，其余字符原样保留。
@@ -7407,6 +7533,21 @@ fn tui_event_loop(
                                     });
                                     continue;
                                 }
+                                if known_command == Some("/update") {
+                                    state.status_text = "正在检查新版本…".to_string();
+                                    let tx_update = tx.clone();
+                                    std::thread::spawn(move || {
+                                        let rt = tokio::runtime::Builder::new_current_thread()
+                                            .enable_all()
+                                            .build();
+                                        let result = match rt {
+                                            Ok(runtime) => runtime.block_on(perform_update_check()),
+                                            Err(e) => Err(format!("异步运行时启动失败: {e}")),
+                                        };
+                                        let _ = tx_update.send(UiEvent::UpdateCheckFinished { result });
+                                    });
+                                    continue;
+                                }
 
                                 // 预先检查当前 provider 是否有 API key
                                 let prov_id = resolve_active_provider_id(&state)
@@ -7747,6 +7888,27 @@ fn tui_event_loop(
                     state.messages.push(ChatMessage {
                         role: MessageRole::System,
                         content: compact_outcome_message(&result),
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                }
+                UiEvent::UpdateCheckFinished { result } => {
+                    let content = match &result {
+                        Ok(outcome) => {
+                            state.status_text = if outcome.has_update {
+                                format!("发现新版本 v{}", outcome.latest_version)
+                            } else {
+                                "已是最新版本".to_string()
+                            };
+                            format_update_feedback(outcome)
+                        }
+                        Err(err) => {
+                            state.status_text = "检查更新失败".to_string();
+                            format!("检查更新失败：{}", err)
+                        }
+                    };
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content,
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
                 }
