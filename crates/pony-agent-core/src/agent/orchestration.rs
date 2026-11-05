@@ -13,6 +13,12 @@ pub struct SubagentArgs {
     pub description: String,
     pub run_in_background: Option<bool>,
     pub fork_context: Option<bool>,
+    /// W2（additive）：可选 provider 覆盖；`None` = 继承宿主 provider。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// W2（additive）：可选 model 覆盖；`None` = 继承宿主 model。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +82,12 @@ pub struct SpawnTeammateArgs {
     pub description: String,
     pub prompt: String,
     pub context: Option<String>, // fresh | fork
+    /// W2（additive）：可选 provider 覆盖；`None` = 继承宿主 provider。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// W2（additive）：可选 model 覆盖；`None` = 继承宿主 model。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,6 +419,45 @@ pub fn subagent_in_workspace(
         }),
         Err(err) => Err(err),
     }
+}
+
+/// W2（接口桩，未实现）：带 provider 选择的子代理入口。
+///
+/// 语义对齐 [`subagent_in_workspace`]，额外接受 `host_selection`（宿主当前选择）与
+/// `args.provider_id`/`args.model_id`（显式覆盖）。当前返回 `not_implemented`。
+pub fn subagent_in_workspace_with_provider(
+    args: SubagentArgs,
+    workspace_root: Option<&std::path::Path>,
+    host_selection: Option<&crate::agent::config::ResolvedProviderSelection>,
+) -> Result<SubagentResult, String> {
+    let _ = (args, workspace_root, host_selection);
+    Err("not_implemented".to_string())
+}
+
+/// W2（接口桩，未实现）：按 host 继承 + 显式覆盖解析子代理/队友实际使用的 provider 选择。
+///
+/// 契约：`provider_id`/`model_id` 同时为 `None` ⇒ 继承 `host`；给出任一者 ⇒ 覆盖对应维度。
+/// 当前阶段只落接口面，实现由 W2 GREEN 补齐（绝不在桩里伪造解析结果）。
+pub fn resolve_teammate_provider_selection(
+    host: Option<&crate::agent::config::ResolvedProviderSelection>,
+    provider_id: Option<&str>,
+    model_id: Option<&str>,
+) -> Result<crate::agent::config::ResolvedProviderSelection, String> {
+    let _ = (host, provider_id, model_id);
+    Err("not_implemented".to_string())
+}
+
+/// W2（接口桩，未实现）：带 provider 选择的队友生成入口。
+///
+/// 语义对齐 [`spawn_teammate_in_workspace`]，额外接受 `host_selection`（宿主当前选择）与
+/// `args.provider_id`/`args.model_id`（显式覆盖）。当前返回 `not_implemented`。
+pub fn spawn_teammate_in_workspace_with_provider(
+    args: SpawnTeammateArgs,
+    workspace_root: Option<&std::path::Path>,
+    host_selection: Option<&crate::agent::config::ResolvedProviderSelection>,
+) -> Result<SpawnTeammateResult, String> {
+    let _ = (args, workspace_root, host_selection);
+    Err("not_implemented".to_string())
 }
 
 pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {

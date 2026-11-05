@@ -668,6 +668,7 @@ fn f3_1_root_layer_not_reinjected_on_touch() {
         session_id: Some("w58-f3-1-session".to_string()),
         dispatch_context: None,
         cancellation: None,
+        provider_selection: None,
     };
 
     // Act：会话内触达工作区内文件

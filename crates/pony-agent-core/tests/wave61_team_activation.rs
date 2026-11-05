@@ -947,6 +947,8 @@ fn spawn_inert_teammate(engine: Arc<ScenarioEngine>, tag: &str) -> (Arc<Scenario
         description: format!("{tag} probe teammate"),
         prompt: String::new(),
         context: None,
+        provider_id: None,
+        model_id: None,
     })
     .expect("C7 前置失败：spawn_teammate 必须成功");
     assert_eq!(
@@ -1557,6 +1559,8 @@ fn run_c8_body() {
         description: "c8 probe".to_string(),
         run_in_background: Some(false),
         fork_context: None,
+        provider_id: None,
+        model_id: None,
     };
 
     // (1) Some(root)：父根必须逐字透传。

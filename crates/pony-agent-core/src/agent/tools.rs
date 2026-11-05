@@ -1073,6 +1073,10 @@ pub struct ToolExecutionContext {
     /// 执行期间须按 `turn_cancel_poll_ms`(≤100ms) 轮询，被取消时终止子进程并返回
     /// `status="aborted"`（错误码沿用既有 `tool_cancelled`）。
     pub cancellation: Option<std::sync::Arc<crate::agent::budget::CancellationToken>>,
+    /// W2（additive）：本 turn 宿主当前生效的 provider 选择（子代理/队友 provider 继承源）。
+    ///
+    /// `None` = 调用方未注入（工具层不得自行猜测或回退任何全局 provider 状态）。
+    pub provider_selection: Option<crate::agent::config::ResolvedProviderSelection>,
 }
 
 /// wave-1 C5：工具参数未显式给 session 时回退到执行上下文注入的会话 id。

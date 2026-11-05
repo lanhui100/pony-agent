@@ -13,6 +13,8 @@ fn test_teammate_bi_directional_communication_and_reply() {
         description: "Focus on UI/UX and styling".to_string(),
         prompt: "You are alice".to_string(),
         context: None,
+        provider_id: None,
+        model_id: None,
     }).expect("spawn alice should succeed");
     assert_eq!(alice.member.target, "alice");
 
@@ -22,6 +24,8 @@ fn test_teammate_bi_directional_communication_and_reply() {
         description: "Focus on database and APIs".to_string(),
         prompt: "You are bob".to_string(),
         context: None,
+        provider_id: None,
+        model_id: None,
     }).expect("spawn bob should succeed");
     assert_eq!(bob.member.target, "bob");
 

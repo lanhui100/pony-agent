@@ -618,6 +618,13 @@ impl ProviderManager {
         Self { config }
     }
 
+    /// W2（additive）：当前生效的 provider 选择真值（宿主继承源）。
+    ///
+    /// 只读借用，不复制、不重解析；队友/子代理继承宿主 provider 时以此为准。
+    pub fn selection(&self) -> &ResolvedProviderSelection {
+        &self.config
+    }
+
     pub fn requested_name(&self) -> &str {
         &self.config.requested_name
     }

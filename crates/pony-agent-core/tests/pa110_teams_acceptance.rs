@@ -45,6 +45,8 @@ fn test_ac01_subagent_dispatch() {
         description: "Codebase analysis".to_string(),
         run_in_background: Some(false),
         fork_context: Some(false),
+        provider_id: None,
+        model_id: None,
     };
     let res = subagent(args).expect("subagent call should succeed");
     assert!(!res.subagent_id.is_empty());
@@ -147,6 +149,8 @@ fn test_ac04_agent_teams_roster_and_mailbox() {
         description: "Evaluates security risks".to_string(),
         prompt: "Review diffs".to_string(),
         context: Some("fresh".to_string()),
+        provider_id: None,
+        model_id: None,
     }).expect("spawn_teammate should succeed");
 
     assert_eq!(spawn_res.member.target, "test-evaluator");
@@ -197,6 +201,8 @@ fn test_ac05_message_queuing_and_steering() {
         description: "Worker for steering test".to_string(),
         prompt: "Run tasks".to_string(),
         context: None,
+        provider_id: None,
+        model_id: None,
     }).unwrap();
 
     // 1. 发送普通排队消息 (Queue / FIFO)

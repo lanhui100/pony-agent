@@ -247,6 +247,24 @@ pub struct ResolvedProviderSelection {
     pub thinking_param_pattern: ThinkingParamPattern,
 }
 
+/// W2（机械适配）：`ToolExecutionContext` 派生 `Debug` 后需要本类型的 `Debug`。
+///
+/// 手写而非 `derive`：`api_key` 必须脱敏，禁止被调试日志/错误上下文带出。
+impl std::fmt::Debug for ResolvedProviderSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedProviderSelection")
+            .field("requested_name", &self.requested_name)
+            .field("provider_name", &self.provider_name)
+            .field("protocol", &self.protocol)
+            .field("base_url", &self.base_url)
+            .field("auth_type", &self.auth_type)
+            .field("api_key_env_var", &self.api_key_env_var)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
 pub trait ProviderSelectionResolver: Send + Sync {
     fn resolve_provider_selection(
         &self,

@@ -368,6 +368,8 @@ fn subargs(prompt: &str, _timeout_ms: u64) -> SubagentArgs {
         description: "wave37 red-phase".to_string(),
         run_in_background: Some(false),
         fork_context: None,
+        provider_id: None,
+        model_id: None,
     }
     // timeout 由契约经引擎参数携带；SubagentArgs 无 timeout 字段，
     // 测试通过 prompt 侧标注由 Stub 自行处理（超时测试用 sleep 注入）。

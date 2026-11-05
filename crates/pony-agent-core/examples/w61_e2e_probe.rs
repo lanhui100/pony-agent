@@ -227,6 +227,8 @@ fn main() {
             description: "probe teammate".to_string(),
             prompt: "probe: 报告一句话".to_string(),
             context: None,
+            provider_id: None,
+            model_id: None,
         },
         Some(ws.as_path()),
     );

@@ -59,6 +59,22 @@ pub trait SubagentTurnEngine: Send + Sync {
         let _ = workspace_root;
         self.run_turn(prompt, timeout_ms)
     }
+
+    /// 以**显式 provider 选择**运行一个子代理 turn（W2，additive 接口桩）。
+    ///
+    /// 默认实现忽略 `selection` 并原样委托 [`SubagentTurnEngine::run_turn_in`]：
+    /// 既有 Stub/宿主引擎零改动、既有 `run_turn`/`run_turn_in` 语义不变；
+    /// 覆写（真实 provider 继承/自定义）由 W2 GREEN 补齐。
+    fn run_turn_with_selection(
+        &self,
+        prompt: &str,
+        timeout_ms: u64,
+        workspace_root: Option<&std::path::Path>,
+        selection: Option<&crate::agent::config::ResolvedProviderSelection>,
+    ) -> Result<SubagentRunOutcome, String> {
+        let _ = selection;
+        self.run_turn_in(prompt, timeout_ms, workspace_root)
+    }
 }
 
 static SUBAGENT_ENGINE: OnceLock<Arc<dyn SubagentTurnEngine>> = OnceLock::new();
