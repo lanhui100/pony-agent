@@ -1,0 +1,34 @@
+   pony  ·  pony-agent                                                                                     mock-alpha
+   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+
+   ▌
+   ▌ 慢速 请给我一个流式回答
+   ▌
+     正在分析
+
+     我先把问题拆成几个部分：
+
+       · 第一部分：读取上下文
+       · 第二部分：整理结论e":"stop accepted but no turn event sink registered; turn:stop_requested not dispatched","ses
+sio    · 第三部分：输出建议am_cancelled: SSE 流已按请求中止 (stop_requested); elapsed=2601ms; parsed_bytes=1490; endpoin
+t=h                40487/v1/chat/completions","level":"warn","message":"turn stop requested while streaming decision fai
+led; classified cancelled instead of fallback/failed","scope":"no_preflight_decision","trace_id":"f648f68b432241e1940d4f
+0386b4889f","ts":"2026-11-05T12:49:02.864Z","turn_id":"turn-b3b2d644-b578-4a2e-a1c9-0fd37ba9e994"}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   › 写下任务，或输入 / 查看命令
+
+     已停止（用户中断）                                                                                     上下文 0%

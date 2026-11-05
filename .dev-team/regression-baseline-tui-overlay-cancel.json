@@ -1,0 +1,12 @@
+{
+  "base_commit": "d710bb34",
+  "command": "cargo test -p pony-agent-core --test tui_interaction_acceptance --test tui_interaction_adversarial --test tui_render_layout",
+  "exit_code": 0,
+  "suites": {
+    "tui_interaction_acceptance": {"passed": 14, "failed": 0},
+    "tui_interaction_adversarial": {"passed": 7, "failed": 0},
+    "tui_render_layout": {"passed": 12, "failed": 0}
+  },
+  "raw_receipt": "/tmp/pony-tui-baseline.log",
+  "classification": "B: existing double-Esc state machine plus multiple user-visible behaviors; no new network or external I/O"
+}

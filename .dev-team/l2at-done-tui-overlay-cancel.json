@@ -1,0 +1,99 @@
+{
+  "ticket": "l2at-tui-overlay-cancel",
+  "owner": "tui-test2 (independent Test Agent)",
+  "status": "red-frozen",
+  "frozen_at": "2026-11-05T20:48:37+08:00",
+  "contract": ".dev-team/contract-matrix-tui-overlay-cancel.md",
+  "adr": "docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md",
+  "frozen_write_scope": [
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "tests/acceptance/l2at-tui-overlay-cancel.sh",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/",
+    ".dev-team/l2at-done-tui-overlay-cancel.json"
+  ],
+  "src_untouched": true,
+  "red_phase": {
+    "git_commit": "d710bb3423a22eda4818e9878f3a5d1687351aca",
+    "bin_sha256": "e2faae5e0e6b0c30aa4615ba2d19aa135c236812c27dab221e4edd6fde2bcd58",
+    "tui_src_sha256": "6858d4e202cf7fa18fb24fe677f22585585364c4378ab659c177d12090885e42",
+    "rust_native": {
+      "command": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2",
+      "exit_code": 101,
+      "result": "9 passed / 4 failed",
+      "receipt": "tests/acceptance/receipts/l2at-tui-overlay-cancel/red.log",
+      "meta": "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-meta.txt",
+      "expected_failures": ["O1", "O2", "J1", "C9"],
+      "compat_passed_not_faked": ["O3", "O4", "O5", "O6", "O7", "O8"]
+    },
+    "pty_real_link": {
+      "command": "bash tests/acceptance/l2at-tui-overlay-cancel.sh",
+      "exit_code": 1,
+      "result": "PASS=11 / FAIL=2",
+      "receipt": "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-pty.log",
+      "meta": "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-pty-meta.txt",
+      "expected_failures": ["C9", "J1"],
+      "frames": [
+        "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.png",
+        "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.png",
+        "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.png",
+        "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+        "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-2-ask-cancelled.png",
+        "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.png"
+      ]
+    }
+  },
+  "failing_assertions_and_source_attribution": [
+    {
+      "id": "O1",
+      "test": "o1_history_and_question_share_one_frame_without_wiping_scrollback",
+      "assertion": "同一帧必须同时可见 HISTORY_SENTINEL 与 QUESTION_SENTINEL",
+      "observed": "Ask 挂起时整个 chat_rect 被 Clear + SURFACE 覆盖，历史哨兵不可见",
+      "source": "crates/pony-agent-core/src/bin/tui.rs:4992-5016（mode != Normal ⇒ f.render_widget(Clear, chat_rect)）",
+      "attribution": "断言失败 = 被测源码的清屏分支，不是编译/夹具问题"
+    },
+    {
+      "id": "O2",
+      "test": "o2_toggling_ask_keeps_message_geometry_and_uncovered_rows_stable",
+      "assertion": "仅切换 Ask 显示时 state.last_chat_rect 必须完全一致",
+      "observed": "关闭 Rect{x:3,y:3,w:114,h:27} vs 打开 Rect{x:3,y:3,w:114,h:21}（差 6 行 = inline_ask_height）",
+      "source": "crates/pony-agent-core/src/bin/tui.rs:4822-4831（ask_top = bottom_top - inline_ask_height；chat_h = ask_top - chat_top）",
+      "attribution": "断言失败 = 消息区高度被 Ask 扣减，不是测试几何口径错误（同一状态/宽度/滚动）"
+    },
+    {
+      "id": "J1",
+      "test": "j1_resume_summary_prefers_description_and_hides_structured_json",
+      "assertion": "pony resume 恢复帧不得出现结构化 arguments JSON（\"path\" / \"lineCount\"）",
+      "observed": "恢复帧出现 `✓ Read · {\"description\":\"收集路径package.json的上下文。\",\"limit\":40,\"lineCount\":80,\"path\":\"package.json\"}`",
+      "source": "crates/pony-agent-core/src/bin/tui.rs:6886-6905（detail_preview = arguments_text.or(result_text)，未使用 description）",
+      "attribution": "断言失败 = 恢复视图的摘要选择，不是 PTY 抓帧噪声（同帧 assistant 历史正文可见，说明 resume 本身成功）"
+    },
+    {
+      "id": "C9",
+      "test": "c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable",
+      "assertion": "双击 Esc 后累计原始 stdout 不得出现 core 告警 `stop accepted but no turn event sink registered; turn:stop_requested not dispatched`",
+      "observed": "真实进程 stdout 出现该告警（Rust 累计原始字节 + PTY pipe-pane stream.raw 双源一致）",
+      "source": "crates/pony-agent-core/src/bin/tui.rs:8230-8283（轮次线程仅 start_turn_stream，未在调用前 register_turn_event_sink / 结束后 unregister）；告警源 crates/pony-agent-core/src/agent/control_plane/mod.rs:2078-2095",
+      "attribution": "断言失败 = TUI 未注册既有 sink；不是环境噪声（同一进程随后仍显示「正在停止…」「已停止（用户中断）」，说明运行时自身的 cancelled 事件可达，缺的是控制面 stop_requested 出口与宽限收口通道）"
+    }
+  ],
+  "acceptance_for_implementation_green": {
+    "rust": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2   (exit 0；13 用例含 O1-O8/J1/C9)",
+    "pty": "bash tests/acceptance/l2at-tui-overlay-cancel.sh   (exit 0；PASS=16 FAIL=0)",
+    "lead_gate": [
+      "cargo check --manifest-path crates/pony-agent-core/Cargo.toml --all-targets  (Lead 统一跑，逐项保留原生 Exit Code)",
+      "既有 TUI 回归（tui_render_layout / tui_stop_wave60 / tui_stop_key_feedback / tui_dialog_wave39 等）",
+      "docs/observability.yaml 四维归属不变说明 + audit-diff.sh / check-declaration.sh"
+    ],
+    "green_evidence_required": "当前构建真实 PTY 三类帧：Ask 打开、Ask 取消、普通流式双击停止终态（脚本已物理落盘，绿相重跑覆盖同名文件）"
+  },
+  "known_coverage_limits": [
+    "O1「历史与问题同帧」只能在渲染层判定：PONY_AUDIT_ASK_BOOTSTRAP 的 pending Ask 归属启动期临时 session id，未能与 resume 历史在同一进程复现，故 PTY 帧只证明「面板与 header/Composer/指标行不互相遮挡」。",
+    "J1「交互 Ask 的结构化 arguments/result 不得成为摘要」这一分支尚无公共接缝：hydrate_state_from_session 私有；tools/tui-audit/mock_llm.py 的 ask 场景缺 schema 必填 description，被工具参数校验拒绝（该文件不在本票写域，未修改）。实现者需在 description 优先这一决策点同时按既有 ask_user/ask/builtin:ask/builtin:ask_user 分类抑制结构化摘要。",
+    "C9「注册项不得跨 turn 泄漏」不可由黑盒观察（控制面 sink 表私有，且契约禁止新增接口）：黑盒只证明（a）每轮有已注册 sink、（b）停止链路可达；成对 unregister 由代码评审 + core 成对 API 语义约束。"
+  ],
+  "no_fake_policy": {
+    "red_not_faked": "O3-O8 在红相全部通过，未修改断言强度制造失败",
+    "compile_path_sane": "红相此前先跑通 --no-run，4 条失败均为运行期断言，不是编译/harness 错误；harness 失败在 Rust 侧显式 panic『HARNESS ERROR』与断言失败区分",
+    "no_business_code_changed": "crates/pony-agent-core/src 下 0 处改动（red-meta.txt 记录）"
+  }
+}

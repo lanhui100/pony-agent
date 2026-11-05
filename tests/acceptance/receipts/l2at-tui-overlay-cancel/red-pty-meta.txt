@@ -1,0 +1,5 @@
+# l2at-tui-overlay-cancel PTY RED receipt (frozen)
+generated_at=2026-11-05T20:49:16+08:00
+shell_exit=1 (仅两条预期断言失败：C9 / J1；O1 几何与 O4-O8 兼容项通过)
+assertions: PASS=11 FAIL=2
+frames: s1-stop-esc/{s1-0-streaming,s1-1-stopping,s1-2-stopped}.png, s2-ask-overlay/{s2-1-ask-open,s2-2-ask-cancelled}.png, s3-resume-summary/s3-1-resume.png

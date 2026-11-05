@@ -1,0 +1,24 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "applicable": false,
+    "reason": "仅调整 TUI 覆盖布局与既有取消事件的用户可见投影；不新增网络或外部 IO，不新增重试。"
+  },
+  "concurrency_lock": {
+    "applicable": false,
+    "reason": "不新增共享可变状态、锁或持锁调用；双击与终态幂等复用 StopSequenceState、apply_stop_terminal 及既有锁边界。"
+  },
+  "logging": {
+    "applicable": false,
+    "reason": "不新增日志出口、异常上报或遥测字段；仅复用现有 TUI 状态提示，四维可观测性归属不变。",
+    "format": "json",
+    "trace_id": true
+  },
+  "resource_release": [
+    {
+      "applicable": true,
+      "handle": "每个初始 turn 与 goal 续轮的 TuiTurnSink 及对应 stop_escalation terminal emitter 注册项",
+      "release": "复用 register_turn_event_sink / unregister_turn_event_sink；每个 turn 的 start_turn_stream 调用结束后注销一次，两个内部表成对回收，早退路径同样释放。"
+    }
+  ]
+}

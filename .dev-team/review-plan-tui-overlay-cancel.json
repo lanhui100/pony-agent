@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "reviewer": {"kind": "subagent", "session_id": "f7200285-df05-471f-a36e-949cd6f85809", "fresh_context": true},
+  "executed_by": "f7200285-df05-471f-a36e-949cd6f85809",
+  "reviewed_commit": "d710bb34",
+  "attestation": {"self_signed": false},
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "tests/acceptance/l2at-tui-overlay-cancel.sh",
+    "docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md",
+    "docs/observability.yaml"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8230,
+      "rule": "LEAK",
+      "counterexample_cmd": "Existing production has zero register_turn_event_sink calls; pair registration and unregister around every initial and goal-continuation start_turn_stream call, with real PTY slow-stream double-Esc validation.",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 4999,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "Ask must not clear the entire chat; non-Ask modal clearing remains unchanged. Preserve original chat geometry and cover only the bounded lower region.",
+      "severity": "ADVISORY"
+    }
+  ]
+}

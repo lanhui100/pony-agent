@@ -1,0 +1,87 @@
+    Finished `test` profile [unoptimized] target(s) in 0.26s
+     Running tests/tui_overlay_cancel_acceptance.rs (target/debug/deps/tui_overlay_cancel_acceptance-88546c09fe4903a3)
+
+running 13 tests
+test c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable ... FAILED
+test o1_history_and_question_share_one_frame_without_wiping_scrollback ... FAILED
+test o2_toggling_ask_keeps_message_geometry_and_uncovered_rows_stable ... FAILED
+test o3_ask_panel_survives_wide_narrow_and_tiny_terminals ... ok
+test o4_double_escape_arms_then_fires_exactly_once_and_only_shows_stopping ... ok
+test o5_user_cancel_terminal_shows_user_readable_stop_without_new_message ... ok
+test o6_repeated_escape_and_duplicate_or_stale_terminal_are_idempotent ... ok
+test o7_ask_escape_closes_panel_without_fabricating_answers_or_stop ... ok
+test o8_cancel_status_never_leaks_internal_payload ... ok
+test tui::wave43_unit_tests::test_ask_question_from_pending_mapping ... ok
+test tui::wave43_unit_tests::test_pending_ui_request_from_value ... ok
+test tui::wave43_unit_tests::test_permission_request_from_pending_mapping ... ok
+test j1_resume_summary_prefers_description_and_hides_structured_json ... FAILED
+
+failures:
+
+---- c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable stdout ----
+
+thread 'c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable' (2786765) panicked at crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs:838:5:
+C9：TUI 未在每轮 start_turn_stream 前注册 turn event sink，控制面 stop_turn 因此无法派发 turn:stop_requested（core 已打印告警）。屏幕 = "pony·pony-agentmock-alpha▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▄▀▀▀▀▄▄▀▀▀▀▀▀▀▀▄▄▀▀▀▀▀▀PonyAgent·v0.1.154▄▀▀▀▀▀▄模型·mock-alpha(fakep)▀▀▀▀▀▀▀工作区·/home/dm/pony-agent▀▀▀▄▀▀▀▀▀▀▀▀▄▄▀▀▀▀▀▀▀▀▀终端里的自主智能体。描述一个任务开始，或输入命令：/resume选择并恢复历史会话/provider管理与切换模型提供商/models切换当前活跃模型/thinking设置思考强度(ReasoningEffort)键入/查看全部命令›写下任务，或输入/查看命令/home/dm/pony-agent慢速请给我一个流式回答▌▌慢速请给我一个流式回答▌·连接中0秒写下任务，或输入/查看命令上下文0%•●•·•●•1·•●正在分析生成中1秒生成中1秒2我先把问题拆成几个部分：生成中2秒{\"level\":\"warn\",\"message\":\"stopacceptedbutnoturneventsinkregistered;turn:stop_requestednotdispatched\",\"session_id\":\"session-dc511306\",\"stop_reason\":\"user\",\"trace_id\":null,\"ts\":\"2026-11-05T12:48:14.818Z\",\"turn_id\":\"turn-2e87c7e9-9646-462f-9c4a-27a59f2bfaea\"}正在停止…2秒{\"error\":\"provider_stream_cancelled:SSE流已按请求中止(stop_requested);elapsed=2161ms;parsed_bytes=1052;endpoint=http://127.0.0.1:36083/v1/chat/completions\",\"level\":\"warn\",\"message\":\"turnstoprequestedwhilestreamingdecisionfailed;classifiedcancelledinsteadoffallback/failed\",\"scope\":\"no_preflight_decision\",\"trace_id\":\"eb4ecdb38fab4e218373b8e2fb088610\",\"ts\":\"2026-11-05T12:48:15.002Z\",\"turn_id\":\"turn-2e87c7e9-9646-462f-9c4a-27a59f2bfaea\"}·第一部分：读取上下文正在停止…2秒已停止（用户中断）"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- o1_history_and_question_share_one_frame_without_wiping_scrollback stdout ----
+
+thread 'o1_history_and_question_share_one_frame_without_wiping_scrollback' (2787495) panicked at crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs:140:5:
+O1：Ask 打开后历史消息必须仍在同一帧可见（不得整区 Clear）。首帧屏幕 =
+   pony  ·  pony-agent-core                                                                          gemini-3.8-flash   
+   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   
+     ◆ 提 问  验 收 分 支  QUESTION_SENTINEL_o1_overlay                                                                       
+    ▌ ● 分 支  A  先 做 冒 烟                                                                                                 
+      ○ 分 支  B  直 接 全 量                                                                                                 
+      > 自 定 义 输 入 …                                                                                                     
+      ↑↓ 移 动  · ↵ 确 认  · esc 取 消                                                                                        
+                                                                                                                        
+                                                                                                                        
+     ◆ 等 待 你 的 选 择 …                                                                                                    
+     ~/pony-agent/crates/pony-agent-core                                                                                
+
+---- o2_toggling_ask_keeps_message_geometry_and_uncovered_rows_stable stdout ----
+
+thread 'o2_toggling_ask_keeps_message_geometry_and_uncovered_rows_stable' (2787496) panicked at crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs:186:5:
+assertion `left == right` failed: O2：仅切换 Ask 显示时 chat_rect 必须完全一致（Ask 不得从消息区扣除高度）；关闭时 = Rect { x: 3, y: 3, width: 114, height: 27 }，打开时 = Rect { x: 3, y: 3, width: 114, height: 21 }
+  left: Rect { x: 3, y: 3, width: 114, height: 27 }
+ right: Rect { x: 3, y: 3, width: 114, height: 21 }
+
+---- j1_resume_summary_prefers_description_and_hides_structured_json stdout ----
+
+thread 'j1_resume_summary_prefers_description_and_hides_structured_json' (2786766) panicked at crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs:891:5:
+J1：恢复视图把工具的结构化 arguments JSON 反显成了消息摘要，用户可见面不得出现内部协议字段。屏幕 = "[pony-agent][session]loadingsessionsfromSQLite/tmp/l2at-overlay-ijwl7on9/iso/xdg-data/PonyAgent/sessions.dbpony·pony-agentmock-alpha▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▌▌读取package.json并总结▌✓Read·{\"description\":\"收集路径package.json的上下文。\",\"limit\":40,\"lineCount\":80,\"path\":\"package.json\"}结论package.json显示这是pony-agent，版本0.1.125。//json{\"name\":\"pony-agent\",\"version\":\"0.1.125\"}·包管理器：npm·关键信息：私有项目、使用Vite构建如果需要，我可以继续列出依赖清单。›写下任务，或输入/查看命令/home/dm/pony-agent"
+
+
+failures:
+    c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable
+    j1_resume_summary_prefers_description_and_hides_structured_json
+    o1_history_and_question_share_one_frame_without_wiping_scrollback
+    o2_toggling_ask_keeps_message_geometry_and_uncovered_rows_stable
+
+test result: FAILED. 9 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.33s
+
+error: test failed, to rerun pass `-p pony-agent-core --test tui_overlay_cancel_acceptance`

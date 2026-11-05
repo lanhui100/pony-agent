@@ -1,0 +1,19 @@
+{
+  "latest_real_tui_session": "session-9d420654",
+  "observed_window_asia_shanghai": ["2026-11-05T19:47:32.068+08:00", "2026-11-05T19:50:18.705+08:00"],
+  "trace_server_readback": [
+    {"turn": "turn-b39f59e8-1c7d-453f-95b7-f146dee8f78f", "trace_id": "ac3fbbc231fb3849b00c1fd3202667eb", "tempo_batches_received": true},
+    {"turn": "turn-1ab2bdf8-fccf-4129-a743-87e0068d2118", "trace_id": "9ec66bb22b58cb48343b6783ea690419", "tempo_batches_received": true},
+    {"turn": "turn-1b039d51-e886-4273-81c6-1076677794ba", "trace_id": "f00c3d7a8c62085d69af7cc3b0184a9d", "tempo_batches_received": true}
+  ],
+  "resource_evidence": {"client.service.name": "pony-agent-dev", "ingest.client.kind": "device", "langfuse.session.id": "session-9d420654"},
+  "issue_server_readback": {
+    "issue_id": "42f32099-f059-4968-9041-a66a92411984",
+    "event_id": "b2029703-70e7-4f9c-a1ae-a5bd3cadbdb4",
+    "turn_id": "turn-b39f59e8-1c7d-453f-95b7-f146dee8f78f",
+    "trace_id": "ac3fbbc231fb3849b00c1fd3202667eb",
+    "received": true
+  },
+  "limits": "No error issue is asserted for the cancelled or suspended turns. This is a precise three-turn readback, not a historical completeness audit.",
+  "source": "independent subagent cce2b6af-a150-4fa7-801c-aaa51571171e; local runtime log 122985 and 123829; Tempo/PonySentry authenticated readback"
+}

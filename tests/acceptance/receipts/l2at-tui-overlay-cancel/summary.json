@@ -1,0 +1,9 @@
+{
+  "ticket": "l2at-tui-overlay-cancel",
+  "pass": 11,
+  "fail": 2,
+  "failed_assertions": [
+    "C9 控制面 stop_turn 未命中已注册 sink（原始输出出现：stop accepted but no turn event sink registered）",
+    "J1 恢复视图把结构化 arguments JSON 反显为消息摘要（description 优先未生效）"
+  ]
+}

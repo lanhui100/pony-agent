@@ -1,0 +1,8 @@
+# l2at-tui-overlay-cancel RED receipt (native cargo test)
+generated_at=2026-11-05T20:48:37+08:00
+git_commit=d710bb3423a22eda4818e9878f3a5d1687351aca
+src_modified=0 (0 = 未改 src)
+bin=target/debug/pony sha256=e2faae5e0e6b0c30aa4615ba2d19aa135c236812c27dab221e4edd6fde2bcd58
+tui_src=crates/pony-agent-core/src/bin/tui.rs sha256=6858d4e202cf7fa18fb24fe677f22585585364c4378ab659c177d12090885e42
+cargo_test_exit=101
+cargo_test_suite=tui_overlay_cancel_acceptance: 9 passed / 4 failed (o1,o2,j1,c9 = expected red; o3-o8 passed = compat, not faked)
