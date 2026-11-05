@@ -843,6 +843,8 @@ fn t3_gen_ai_system_enum_convergence() {
         input_tokens: Some(100),
         output_tokens: Some(50),
         operation: "chat".to_string(),
+        prompt_preview: None,
+        completion_preview: None,
     };
     let attributes = otel::llm_span_attributes_with_provider(&llm_input, Some("PonyLlm"));
     assert_eq!(
@@ -870,6 +872,8 @@ fn t3_gen_ai_system_enum_convergence() {
             input_tokens: None,
             output_tokens: None,
             operation: "chat".to_string(),
+            prompt_preview: None,
+            completion_preview: None,
         },
         None,
     );
@@ -1047,6 +1051,8 @@ fn t5_trace_name_readable() {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     });
 
     assert_eq!(
@@ -1088,6 +1094,8 @@ fn t5_trace_name_readable() {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     });
     assert_eq!(
         pure_str(&same_seq_a, KEY_TRACE_NAME),
@@ -1104,6 +1112,8 @@ fn t5_trace_name_readable() {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     });
     assert_ne!(
         pure_str(&same_seq_a, KEY_TRACE_NAME),
@@ -1122,6 +1132,8 @@ fn t5_trace_name_readable() {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     });
     assert_eq!(
         pure_str(&padded, KEY_TRACE_NAME),
@@ -1139,6 +1151,8 @@ fn t5_trace_name_readable() {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     });
     assert_eq!(
         pure_str(&empty_turn, KEY_TRACE_NAME),
@@ -1157,6 +1171,8 @@ fn t5_trace_name_readable() {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     });
     assert_eq!(
         pure_str(&short_turn, KEY_TRACE_NAME),
@@ -1175,6 +1191,8 @@ fn t5_trace_name_readable() {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     });
     assert_eq!(
         pure_str(&unicode_turn, KEY_TRACE_NAME),

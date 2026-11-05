@@ -396,6 +396,8 @@ fn turn_input() -> TurnSpanInput {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     }
 }
 
@@ -453,6 +455,8 @@ fn llm_input() -> LlmSpanInput {
         input_tokens: Some(10),
         output_tokens: Some(20),
         operation: "chat".to_string(),
+        prompt_preview: None,
+        completion_preview: None,
     }
 }
 
@@ -502,6 +506,8 @@ fn ot3_llm_span_attributes_omit_absent_model_and_token_keys() {
         input_tokens: None,
         output_tokens: None,
         operation: "chat".to_string(),
+        prompt_preview: None,
+        completion_preview: None,
     };
 
     let attrs = otel::llm_span_attributes(&input);

@@ -1,0 +1,31 @@
+{
+  "task_id": "P0-1",
+  "title": "全链路 Payload 可观测性 NFR 商业基准",
+  "version": "1.0.0",
+  "benchmarks": {
+    "timeout": {
+      "external_export_timeout_ms": 3000,
+      "description": "外部可观测性导出器（Langfuse/OTel HTTP exporter）调用硬超时不得超过 3000ms，超时需 Fail-open 且不得阻断核心业务执行"
+    },
+    "resource_leak": {
+      "memory_leak_policy": "zero_leak",
+      "goroutine_or_task_leak": "zero_leak",
+      "description": "在长期运行与高频对话下，脱敏/截断/span 导出通道无未释放缓冲区、任务堆积或内存持续攀升"
+    },
+    "latency_overhead": {
+      "p99_sanitization_and_truncation_overhead_ms": 2.0,
+      "description": "单次 Payload 脱敏与安全截断的处理耗时 P99 需低于 2.0ms，避免对 Agent 响应造成感知延迟"
+    },
+    "logging_and_tracing": {
+      "mandatory_fields": [
+        "trace_id",
+        "span_id"
+      ],
+      "description": "所有导出异常或关键可观测性日志中必须包含 trace_id 供全链路检索排查"
+    },
+    "resilience": {
+      "fail_open": true,
+      "unrecognized_env_action": "fallback_to_enabled_with_warning"
+    }
+  }
+}

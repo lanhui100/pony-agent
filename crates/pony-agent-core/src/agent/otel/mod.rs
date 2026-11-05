@@ -43,6 +43,12 @@ pub const ATTR_GEN_AI_USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 /// 输出 token 数。
 pub const ATTR_GEN_AI_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
 
+/// P0-1：OTel GenAI 语义轨 Prompt 预览（脱敏 + 截断后）。
+pub const ATTR_GEN_AI_PROMPT: &str = "gen_ai.prompt";
+
+/// P0-1：OTel GenAI 语义轨 Completion 预览（脱敏 + 截断后）。
+pub const ATTR_GEN_AI_COMPLETION: &str = "gen_ai.completion";
+
 /// 思考（推理）token 数（wave-51 C3 契约键；ADR 0055 起重命名为自有维度）。
 ///
 /// semconv 口径（OTel GenAI registry `gen_ai.usage.reasoning.output_tokens`）：该值 SHOULD 已包含在
@@ -212,8 +218,14 @@ pub const ENV_CAPTURE_TOOL_PAYLOADS: &str = "PONY_OTEL_CAPTURE_TOOL_PAYLOADS";
 /// P0-1：单个预览字段的字节上限（脱敏后、含截断标记）。
 pub const TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES: usize = 2 * 1024;
 
+/// P0-1：LLM / Turn span 单个预览字段的字节上限（4096 字节 = 4KB，脱敏后、含截断标记）。
+pub const LLM_PAYLOAD_PREVIEW_LIMIT_BYTES: usize = 4 * 1024;
+
 /// P0-1：截断标记（追加在被截断预览末尾）。
 const TOOL_PAYLOAD_TRUNCATION_MARKER: &str = "…[truncated]";
+
+/// P0-1：LLM / Turn payload 采集开关环境变量（契约定义：默认开启，opt-out）。
+pub const ENV_CAPTURE_LLM_PAYLOADS: &str = "PONY_AGENT_CAPTURE_LLM_PAYLOADS";
 
 /// Langfuse observation 模型名：与 [`ATTR_GEN_AI_REQUEST_MODEL`] 同值双写。
 pub const ATTR_LANGFUSE_OBSERVATION_MODEL_NAME: &str = "langfuse.observation.model.name";
@@ -400,6 +412,10 @@ pub struct TurnSpanInput {
     pub phase: String,
     /// P0-3：失败轮归因（`None`/全空白 ⇒ **不输出** [`ATTR_AGENT_TURN_FAILED_REASON`]）。
     pub failed_reason: Option<String>,
+    /// P0-1：用户输入 Prompt 预览（`None` ⇒ 不输出 `gen_ai.prompt` 与 `langfuse.observation.input`）。
+    pub prompt_preview: Option<String>,
+    /// P0-1：最终输出 Response 预览（`None` ⇒ 不输出 `gen_ai.completion` 与 `langfuse.observation.output`）。
+    pub response_preview: Option<String>,
 }
 
 /// LLM 子 span 的属性映射输入。
@@ -415,6 +431,10 @@ pub struct LlmSpanInput {
     pub output_tokens: Option<u64>,
     /// 操作名，映射到 [`ATTR_GEN_AI_OPERATION_NAME`]。
     pub operation: String,
+    /// P0-1：输入 Prompt 预览（`None` ⇒ 不输出 `gen_ai.prompt` 与 `langfuse.observation.input`）。
+    pub prompt_preview: Option<String>,
+    /// P0-1：输出 Completion 预览（`None` ⇒ 不输出 `gen_ai.completion` 与 `langfuse.observation.output`）。
+    pub completion_preview: Option<String>,
 }
 
 /// 工具子 span 的属性映射输入。
@@ -1168,6 +1188,8 @@ impl TurnScope {
             phase: String::new(),
             // P0-3：turn span 起建时尚无失败归因（失败时由 `TurnTraceGuard::drop` 写入）。
             failed_reason: None,
+            prompt_preview: None,
+            response_preview: None,
         }));
         let mut span = state.tracer.build_with_context(
             opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
@@ -1285,6 +1307,8 @@ pub fn force_export_session_trace(
                 phase: record.phase.clone(),
                 // P0-3：历史 trace 导出保持既有行为（不回填归因）。
                 failed_reason: None,
+                prompt_preview: None,
+                response_preview: None,
             }));
             // F6：逐 span 打「用户逐次授权」标记，只有这些 span 在关闭态被采样与放行。
             attributes.push(KeyValue::new(ATTR_PONY_OTEL_FORCED, true));
@@ -1358,6 +1382,26 @@ pub fn turn_span_attributes(input: &TurnSpanInput) -> Vec<(String, AttrValue)> {
     // P0-3：失败原因**只能追加在最后**（既有键序与取值逐字不变）。
     if let Some(reason) = turn_failed_reason_value(input.failed_reason.as_deref()) {
         push_str(&mut attributes, ATTR_AGENT_TURN_FAILED_REASON, &reason);
+    }
+
+    // P0-1：用户输入 Prompt 与最终输出 Response 预览（双轨输出：OTel + Langfuse）。
+    if capture_llm_payloads_enabled() {
+        if let Some(prompt) = input.prompt_preview.as_deref() {
+            push_llm_payload_preview(
+                &mut attributes,
+                ATTR_GEN_AI_PROMPT,
+                ATTR_LANGFUSE_OBSERVATION_INPUT,
+                prompt,
+            );
+        }
+        if let Some(response) = input.response_preview.as_deref() {
+            push_llm_payload_preview(
+                &mut attributes,
+                ATTR_GEN_AI_COMPLETION,
+                ATTR_LANGFUSE_OBSERVATION_OUTPUT,
+                response,
+            );
+        }
     }
 
     attributes
@@ -1447,6 +1491,26 @@ pub fn llm_span_attributes_with_provider(
     // 展示名通道：空串/全空白等价于缺失（禁止空串占位）。
     if let Some(provider_name) = provider_name.filter(|name| !name.trim().is_empty()) {
         push_str(&mut attributes, ATTR_GEN_AI_PROVIDER_NAME, provider_name);
+    }
+
+    // P0-1：LLM 请求 Prompt 与 Completion 预览（双轨输出：OTel + Langfuse）。
+    if capture_llm_payloads_enabled() {
+        if let Some(prompt) = input.prompt_preview.as_deref() {
+            push_llm_payload_preview(
+                &mut attributes,
+                ATTR_GEN_AI_PROMPT,
+                ATTR_LANGFUSE_OBSERVATION_INPUT,
+                prompt,
+            );
+        }
+        if let Some(completion) = input.completion_preview.as_deref() {
+            push_llm_payload_preview(
+                &mut attributes,
+                ATTR_GEN_AI_COMPLETION,
+                ATTR_LANGFUSE_OBSERVATION_OUTPUT,
+                completion,
+            );
+        }
     }
 
     attributes
@@ -1561,6 +1625,66 @@ pub fn tool_span_attributes(input: &ToolSpanInput) -> Vec<(String, AttrValue)> {
     }
 
     attributes
+}
+
+/// P0-1：LLM / Turn span payload 采集开关判定（默认开启 = opt-out）。
+///
+/// env 缺失 ⇒ `true`；`1`/`true`/`on`/`yes` ⇒ `true`；`0`/`false`/`off`/`no` ⇒ `false`；
+/// 未识别值 ⇒ 回落默认 `true` 并 warn（避免「开关拼错却静默生效」）。
+pub fn capture_llm_payloads_enabled() -> bool {
+    let Ok(value) = std::env::var(ENV_CAPTURE_LLM_PAYLOADS) else {
+        return true;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => true,
+        "0" | "false" | "off" | "no" => false,
+        _ => {
+            eprintln!(
+                "[otel] unrecognized {ENV_CAPTURE_LLM_PAYLOADS}={value:?}; falling back to default (llm payload capture enabled)"
+            );
+            true
+        }
+    }
+}
+
+/// P0-1：双轨写出 LLM / Turn payload 预览属性（OTel GenAI 语义轨与 Langfuse 语义轨）。
+///
+/// 顺序固定为「先脱敏、再截断、最后 `push_str`」：
+/// 1. 先脱敏 ⇒ 截断不会把凭据切成「前缀残缺但仍可识别」的碎片留在属性里；
+/// 2. 再截断到 [`LLM_PAYLOAD_PREVIEW_LIMIT_BYTES`]（4096 字节，**含**截断标记），保证属性长度有硬上界；
+/// 3. `push_str` 内部还会再脱敏一次 —— 对已脱敏文本是**幂等**的。
+fn push_llm_payload_preview(
+    attributes: &mut Vec<(String, AttrValue)>,
+    otel_key: &str,
+    langfuse_key: &str,
+    raw: &str,
+) {
+    if raw.is_empty() {
+        return;
+    }
+    let sanitized = crate::agent::ponysentry::sanitize(raw);
+    let truncated = truncate_llm_payload_preview(&sanitized);
+    push_str(attributes, otel_key, &truncated);
+    push_str(attributes, langfuse_key, &truncated);
+}
+
+/// P0-1：按 **char 边界**把 LLM / Turn 预览截到 [`LLM_PAYLOAD_PREVIEW_LIMIT_BYTES`] 以内，并追加截断标记。
+///
+/// 不切出非法 UTF-8：从「预算末尾」向前回退到最近的 `is_char_boundary` 位置。
+/// 未超限的文本原样返回（不追加标记）。
+fn truncate_llm_payload_preview(text: &str) -> String {
+    if text.len() <= LLM_PAYLOAD_PREVIEW_LIMIT_BYTES {
+        return text.to_string();
+    }
+    let budget = LLM_PAYLOAD_PREVIEW_LIMIT_BYTES.saturating_sub(TOOL_PAYLOAD_TRUNCATION_MARKER.len());
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = String::with_capacity(end + TOOL_PAYLOAD_TRUNCATION_MARKER.len());
+    truncated.push_str(&text[..end]);
+    truncated.push_str(TOOL_PAYLOAD_TRUNCATION_MARKER);
+    truncated
 }
 
 /// P0-1：工具 span payload 采集开关判定（默认开启 = opt-out）。
@@ -1876,6 +2000,8 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
                 phase: String::new(),
                 // P0-3：turn span 起建时尚无失败归因（失败时由 `TurnTraceGuard::drop` 写入）。
                 failed_reason: None,
+                prompt_preview: None,
+                response_preview: None,
             }));
             // ADR 0055：trace.release 需 span 属性显式给出（resource `service.version` 只填 version）。
             attributes.push(KeyValue::new(
@@ -2249,6 +2375,8 @@ pub fn start_llm_span_with_provider(
             input_tokens: None,
             output_tokens: None,
             operation: operation.to_string(),
+            prompt_preview: None,
+            completion_preview: None,
         },
         provider_name,
     ));
@@ -3910,6 +4038,8 @@ mod tests {
             sequence: 0,
             phase: "failed".to_string(),
             failed_reason: None,
+            prompt_preview: None,
+            response_preview: None,
         });
         let session = str_attr(&attrs, ATTR_LANGFUSE_SESSION_ID);
         assert!(
@@ -5097,6 +5227,47 @@ https://api.example.com\",\"stdout\":\"{}\"}}",
         let body = truncated.trim_end_matches(TOOL_PAYLOAD_TRUNCATION_MARKER);
         assert!(body.chars().all(|ch| ch == '中'), "P0-1：截断后不得出现替换字符/半个码点");
         assert_eq!(body.len() % 3, 0, "P0-1：UTF-8 边界必须对齐");
+    }
+
+    /// P0-1：LLM / Turn span 预览脱敏与 4KB 安全截断
+    #[test]
+    fn llm_payload_preview_is_sanitized_and_truncated_to_4k() {
+        let huge = format!(
+            "Prompt with /home/dm/path and secret sk-test-TOPSECRET-9876543210 {}",
+            "A".repeat(5000)
+        );
+        let attrs = llm_span_attributes(&LlmSpanInput {
+            provider_kind: "openai".to_string(),
+            model: Some("gpt-4o".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            operation: "chat".to_string(),
+            prompt_preview: Some(huge),
+            completion_preview: Some("Normal response".to_string()),
+        });
+
+        let prompt_ot = attrs
+            .iter()
+            .find(|(key, _)| key == ATTR_GEN_AI_PROMPT)
+            .and_then(|(_, value)| match value {
+                AttrValue::Str(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("gen_ai.prompt 必须写出");
+        let prompt_lf = attrs
+            .iter()
+            .find(|(key, _)| key == ATTR_LANGFUSE_OBSERVATION_INPUT)
+            .and_then(|(_, value)| match value {
+                AttrValue::Str(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("langfuse.observation.input 必须写出");
+
+        assert_eq!(prompt_ot, prompt_lf);
+        assert!(prompt_ot.len() <= LLM_PAYLOAD_PREVIEW_LIMIT_BYTES);
+        assert!(prompt_ot.ends_with(TOOL_PAYLOAD_TRUNCATION_MARKER));
+        assert!(!prompt_ot.contains("sk-test-TOPSECRET-9876543210"));
+        assert!(!prompt_ot.contains("/home/dm"));
     }
 
 }

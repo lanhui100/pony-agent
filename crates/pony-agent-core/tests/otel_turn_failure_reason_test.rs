@@ -39,6 +39,8 @@ fn turn_input(phase: &str, user_id: Option<&str>, failed_reason: Option<&str>) -
         sequence: 3,
         phase: phase.to_string(),
         failed_reason: failed_reason.map(str::to_string),
+        prompt_preview: None,
+        response_preview: None,
     }
 }
 

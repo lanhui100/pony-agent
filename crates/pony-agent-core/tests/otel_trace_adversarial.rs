@@ -401,6 +401,8 @@ fn at2_oversized_payload_stays_bounded_and_does_not_panic() {
         phase: huge('p'),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     };
 
     let attrs = catch_labeled("AT-2 turn_span_attributes（64KB×4 超大 payload）", || {
@@ -467,6 +469,8 @@ fn at2_empty_session_and_user_values_omit_keys() {
         phase: "completed".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     };
 
     let attrs = catch_labeled("AT-2 turn_span_attributes（空 session/user）", || {
@@ -499,6 +503,8 @@ fn at2_injection_shaped_strings_are_verbatim_not_promoted_to_keys() {
         phase: "completed\"\n".to_string(),
         // `failed_reason` 为 P0-3 新增可选归因位；本用例不验证失败归因，传 None 保持历史语义。
         failed_reason: None,
+        prompt_preview: None,
+        response_preview: None,
     };
 
     let attrs = catch_labeled("AT-2 turn_span_attributes（注入形状 payload）", || {

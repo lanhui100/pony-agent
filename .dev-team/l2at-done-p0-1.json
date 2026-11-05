@@ -1,0 +1,19 @@
+{
+  "task_id": "P0-1",
+  "phase": "red_phase",
+  "status": "red_confirmed",
+  "test_file": "crates/pony-agent-core/tests/otel_llm_payload_test.rs",
+  "cases": [
+    "llm_chat_span_payload_preview_sanitized_and_truncated",
+    "agent_turn_span_payload_preview_contract",
+    "llm_payload_capture_switch_opt_out",
+    "adversarial_oversized_multi_byte_utf8_truncation_no_panic"
+  ],
+  "verification": {
+    "command": "cargo test -p pony-agent-core --test otel_llm_payload_test",
+    "exit_code": 101,
+    "failure_category": "compile_time_contract_missing",
+    "failure_summary": "LlmSpanInput / TurnSpanInput 缺少 prompt_preview 与 completion_preview / response_preview 契约字段及对应属性生成实现"
+  },
+  "timestamp": "2026-11-04T22:12:00+08:00"
+}
