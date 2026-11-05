@@ -1,0 +1,304 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pony-agent.local/contracts/tool-descriptor.v1.schema.json",
+  "version": "pony-tool-descriptor-v1",
+  "title": "Pony Agent Tool Descriptor v1",
+  "description": "ADR 0065/0064 的工具描述符契约（工具身份、顺序、权限事实、schema 的单一真值源）。字段为 ToolDescriptor 的 serde 线缆形状（camelCase）。命名空间：builtin:/mcp:/skill:/plugin:/dynamic:，外部工具 modelName 固定 mcp__<server>__<tool> / plugin__<name>__<tool>；与内建名或保留别名冲突必须 fail-closed（ADR 0065 决策 7，校验在 ToolRegistrySnapshot::from_descriptors）。**以代码为准（schema 是投影）**：`tools.rs::ToolDescriptorSource` 现为 4 变体（builtin/mcp/skill/dynamic），插件工具暂挂 `dynamic`，其 `descriptorId` 形如 `dynamic:plugin:<name>:<tool>`（`plugin_host/mod.rs::plugin_tool_descriptor_id`）；未新增 Plugin 变体前本枚举不含 plugin 值，`plugin__` 命名空间仍由 modelName 前缀规则强制。 **source 枚举取自代码实况（`tools.rs::ToolDescriptorSource` 现为 4 值）；外部来源以 modelName 前缀 `mcp__` / `plugin__` 加 `handlerProvenance.sourceId`（`mcp:<server>` / `plugin:<name>`）区分，不靠新增 source 枚举值。**",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "identity",
+    "description",
+    "inputSchema",
+    "kind",
+    "exposure",
+    "permissionDeclaration",
+    "executionPolicy",
+    "handlerProvenance",
+    "sourceRevision"
+  ],
+  "properties": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "descriptorId",
+        "modelName",
+        "canonicalName",
+        "primitiveName",
+        "source"
+      ],
+      "properties": {
+        "descriptorId": {
+          "type": "string",
+          "minLength": 3,
+          "pattern": "^(builtin|mcp|skill|dynamic):[A-Za-z0-9_.:/-]+$",
+          "description": "registry 唯一键；前缀必须与 source 一致（registry 构造期校验，不符即拒绝快照）。"
+        },
+        "modelName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "模型可见名；外部来源必须是命名空间形式，不得占用内建/保留别名。"
+        },
+        "canonicalName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "primitiveName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "enum": [
+            "builtin",
+            "mcp",
+            "skill",
+            "dynamic"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "const": "mcp"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "descriptorId": {
+                "pattern": "^mcp:"
+              },
+              "modelName": {
+                "pattern": "^mcp__[A-Za-z0-9_.-]+__[A-Za-z0-9_.-]+$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "const": "builtin"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "descriptorId": {
+                "pattern": "^builtin:"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "const": "skill"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "descriptorId": {
+                "pattern": "^skill:"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "const": "dynamic"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "descriptorId": {
+                "pattern": "^dynamic:"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "modelName"
+            ],
+            "properties": {
+              "modelName": {
+                "pattern": "^plugin__"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "modelName": {
+                "pattern": "^plugin__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "aliases": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "一别名只能解析到一个 descriptor（歧义别名在 registry 构造期被拒）。"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "inputSchema": {
+      "type": "object",
+      "description": "工具参数 JSON Schema；dispatcher 的第 2 步（raw schema 校验）即用此值。"
+    },
+    "kind": {
+      "enum": [
+        "read",
+        "search",
+        "write",
+        "execute",
+        "batch_execute",
+        "interactive",
+        "composite",
+        "external"
+      ]
+    },
+    "exposure": {
+      "enum": [
+        "model_visible",
+        "internal",
+        "deferred"
+      ],
+      "description": "deferred 只能经 ToolSearch 提权进入当轮 TurnToolView（轮末/来源替换即失效）。"
+    },
+    "permissionDeclaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scopes",
+        "requiresApproval",
+        "hostMediated"
+      ],
+      "properties": {
+        "scopes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "workspace_read",
+              "workspace_write",
+              "workspace_execute",
+              "capability_discovery"
+            ]
+          }
+        },
+        "requiresApproval": {
+          "type": "boolean"
+        },
+        "hostMediated": {
+          "type": "boolean"
+        },
+        "approvalMode": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "description": "权限事实只来自声明；只读模式/审批判定不得按工具名嗅探（ADR 0065 决策 5）。"
+    },
+    "executionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "concurrentSafe",
+        "cancellable",
+        "defaultTimeoutMs",
+        "resultBudgetBytes"
+      ],
+      "properties": {
+        "concurrentSafe": {
+          "type": "boolean"
+        },
+        "cancellable": {
+          "type": "boolean"
+        },
+        "defaultTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "进程内工具预算缺省值。mcp/plugin 的单次外部往返预算不取此值，统一按 NFR external_call_timeout_ms(<=3000) 由 BudgetLedger 预约。"
+        },
+        "resultBudgetBytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "displayMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "displayNameZh": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "handlerProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handlerKind",
+        "sourceId"
+      ],
+      "properties": {
+        "handlerKind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "外部来源为 mcp:<server> / plugin:<name>，用于与 CapabilityRegistry 的来源元数据关联（ADR 0066 决策 4）。插件工具当前 source=dynamic，但 sourceId 仍为 plugin:<name>（plugin_host/mod.rs::PluginHostProvider）。"
+        }
+      }
+    },
+    "sourceRevision": {
+      "type": "string",
+      "minLength": 1,
+      "description": "来源版本；换表/提权/审批绑定都以 snapshot+revision 为准，revision 变化使在途 control request fail-closed。"
+    },
+    "composedDescriptorIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "composite 的子 descriptor；引用未知子项或存在环即拒绝快照。"
+    }
+  }
+}

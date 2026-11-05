@@ -276,3 +276,32 @@ note: >-
       JSON 日志从 stdout/pane 改道 `PONY_TUI_RUNTIME_LOG`，修复其覆盖全屏消息区的缺陷；
       本地取证面随之迁至该运行日志，格式与字段不变；运行日志不可写/重定向失败时不改道，
       不新增日志出口、Loki 上送或敏感信息边界。
+
+  【ADR 0065/0066/0067 归属登记（2026-11-05）｜可扩展性三层模型：MCP 通道闭合（T2）+ 进程外插件宿主（T3）】
+  新增两类**外部能力运行面**：MCP stdio server（`crates/pony-agent-core/src/agent/mcp_config.rs` +
+  `mcp_client.rs`）与进程外插件宿主（`crates/pony-agent-core/src/agent/plugin_host/`）。
+  (1) tracing｜**适用（沿用既有落点，不新增出口）**：外部调用不新建 span 族，一律在既有
+      `tool.call` span 之下以属性表达（descriptor_id / source_id / error.code），
+      span 落点仍为 `crates/pony-agent-core/src/agent/otel/mod.rs`。
+      失败语义经分源错误码进入既有 `agent.turn.tool_failures` 口径
+      （`mcp_server_unavailable` / `mcp_tool_not_found` / `mcp_timeout` / `mcp_resources_not_wired` /
+      `plugin_unavailable` / `plugin_timeout`），不新增 span 名。
+  (2) issues｜**适用（沿用既有落点）**：外部能力失败经既有 `ponysentry/client.rs` 边界上报，
+      `reason` 取上述分源码，与 turn 失败归因合流；不新增 ingest 出口、不新增异常码族。
+  (3) metrics｜**结构性 N/A，理由与本文档 metrics 维度声明同源且更明确**：
+      MCP server 与插件宿主是**随会话生命周期起停的子进程**（`env_clear()` + 白名单、进程组回收），
+      桌面端本身无常驻监听地址、无 Service、不进集群，Prometheus pull 模型的前提（稳定可达的
+      `/metrics`）结构上不成立；子进程的启动/调用/超时/失败计数是**单进程内事件流**，其正确
+      观测载体是 tracing span 属性与本地 JSON 日志，而不是一个需要被抓取的端点。
+      因此 plugin/MCP 的运行事实（`plugin_host_spawn_total` 语义的启动次数、`plugin_host_call_total`
+      语义的调用次数、`plugin_host_call_duration_ms` 语义的耗时、`plugin_host_timeout_total` 语义的
+      超时、`plugin_host_fail_closed_total` 语义的 fail-closed 计数）**已收口到 tracing span + 结构化
+      日志**，不上推 Prometheus。为让巡检变绿而伪造 `/metrics` 或把 applicable 翻成 true 已被明确拒绝。
+  (4) logs｜**结构性 N/A，理由与本文档 logs 维度声明同源**：节点侧 fluentd 只按容器日志路径 tail，
+      桌面端进程不在容器内。MCP/插件日志走既有本地取证面（`<app_data_dir>/logs/pony-agent.log`，
+      单行 JSON）：只记 server/plugin 名、命令哈希、工具名、参数 digest 与分源错误码，
+      **绝不记凭据**（配置只允许 `${env:VAR}` 间接引用，启动沿用 `env_clear()` + F8a 白名单）。
+      插件侧复用既有 `[pony-agent][plugin][audit]` 结构化行（事件名见 `plugin_audit_events()`）。
+  (5) 本波不新增依赖、托管端点或环境变量；新增的唯一环境变量是 `PONY_AGENT_HOME`（配置目录定位，
+      默认 `config_dir/pony-agent`），属本地配置面而非遥测出口。
+  四维归属结论：tracing / issues 适用且落点不变，metrics / logs 仍为结构性 N/A（机制与理由同上）。

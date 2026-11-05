@@ -1,5 +1,6 @@
 use crate::agent::tools::{
-    ToolDefinitionContractView, ToolExposure, ToolOutcome, ToolRegistrySnapshot,
+    ToolDefinitionContractView, ToolExposure, ToolOutcome, ToolProvider, ToolProviderError,
+    ToolRegistrySnapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -61,6 +62,68 @@ pub trait PrimitiveToolHandler: Send + Sync {
 
 pub trait RuntimeClock: Send + Sync {
     fn now_ms(&self) -> u64;
+}
+
+/// The `PrimitiveToolHandler` binding for an external tool source (ADR 0065 decision 6).
+///
+/// It is the *only* bridge from a [`ToolProvider`] into the governed pipeline: the provider is
+/// reached by stable `descriptor_id`, and its structured [`ToolProviderError`] is turned into the
+/// dispatcher's `code: message` handler-failure shape so the source-specific code
+/// (`mcp_server_unavailable` / `mcp_tool_not_found` / `mcp_timeout` / `plugin_unavailable`)
+/// survives into `error.code` instead of collapsing to `handler_error`.
+///
+/// It cannot fabricate permission evidence, control outcomes, or lifecycle telemetry — by the time
+/// it runs, authorization, budget reservation, and control binding have already happened in the
+/// dispatcher.
+pub struct ExternalToolHandler {
+    provider: Arc<dyn ToolProvider>,
+}
+
+thread_local! {
+    /// 当前 provider 调用的取消令牌（作用域线程局部）。
+    ///
+    /// `ToolProvider::call` 的签名（ADR 0065 冻结）没有取消参数，但外部调用（MCP stdio /
+    /// 插件 IPC）可能长时间阻塞；桥接层若丢掉 `PrimitiveToolHandlerRequest.cancellation`，
+    /// 停止按钮对它们就完全失效。这里用与 `current_provider_selection()` 同构的作用域透传，
+    /// 让 provider 实现能在发起/收尾时观测取消，而不改动冻结的 trait 签名。
+    static PROVIDER_CANCELLATION: std::cell::RefCell<Option<Arc<crate::agent::budget::CancellationToken>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 当前作用域内的 provider 取消令牌（无作用域时 `None`）。
+pub fn current_provider_cancellation() -> Option<Arc<crate::agent::budget::CancellationToken>> {
+    PROVIDER_CANCELLATION.with(|slot| slot.borrow().clone())
+}
+
+fn with_provider_cancellation<T>(
+    cancellation: Option<Arc<crate::agent::budget::CancellationToken>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous = PROVIDER_CANCELLATION.with(|slot| slot.replace(cancellation));
+    let result = f();
+    PROVIDER_CANCELLATION.with(|slot| slot.replace(previous));
+    result
+}
+
+impl ExternalToolHandler {
+    pub fn new(provider: Arc<dyn ToolProvider>) -> Self {
+        Self { provider }
+    }
+
+    pub fn source_id(&self) -> &str {
+        self.provider.source_id()
+    }
+}
+
+impl PrimitiveToolHandler for ExternalToolHandler {
+    fn execute(&self, request: &PrimitiveToolHandlerRequest) -> Result<Value, String> {
+        // ADVISORY：把取消令牌透传给 provider（作用域局部，不改冻结的 trait 签名）。
+        with_provider_cancellation(request.cancellation.clone(), || {
+            self.provider
+                .call(&request.descriptor_id, request.arguments.clone())
+                .map_err(ToolProviderError::into_handler_message)
+        })
+    }
 }
 
 #[derive(Default)]

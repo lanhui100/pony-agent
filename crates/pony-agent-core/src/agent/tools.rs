@@ -700,6 +700,47 @@ impl ToolRegistrySnapshot {
     }
 }
 
+/// Structured failure from an external [`ToolProvider`]. The `code` is carried verbatim into the
+/// governed dispatcher's `error.code` so callers can distinguish failure sources
+/// (`mcp_server_unavailable` / `mcp_tool_not_found` / `mcp_timeout` / `plugin_unavailable`, …)
+/// instead of collapsing every external failure into `handler_error` (ADR 0065 decision 9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolProviderError {
+    pub code: String,
+    pub message: String,
+}
+
+impl ToolProviderError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    /// `code: message` shape the dispatcher's `handler_failure` lifts back into `error.code`.
+    pub fn into_handler_message(self) -> String {
+        format!("{}: {}", self.code, self.message)
+    }
+}
+
+/// In-process abstract of an external tool source (ADR 0065 decision 6, the L1 extension seam).
+///
+/// MCP servers (ADR 0066) and the plugin host (ADR 0067) are both implementations of this trait —
+/// **the one and only** external tool channel: an external capability must never bypass the
+/// governed dispatcher pipeline (authorization, budget reservation, lifecycle evidence).
+///
+/// Contract:
+/// - `list_tools` returns descriptors owned by `source_id`; the registry rejects descriptors that
+///   claim another source, a builtin namespace, or a reserved builtin alias.
+/// - `call` receives the stable `descriptor_id` (not the model-visible name), so model-name or
+///   alias shapes never become dispatch truth.
+pub trait ToolProvider: Send + Sync {
+    fn source_id(&self) -> &str;
+    fn list_tools(&self) -> Vec<ToolDescriptor>;
+    fn call(&self, descriptor_id: &str, arguments: Value) -> Result<Value, ToolProviderError>;
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolSurface {
     pub registry: ToolRegistrySnapshot,
@@ -1396,6 +1437,216 @@ pub struct ToolRouter {
     root_resolver: Option<Arc<dyn Fn(&str) -> Option<std::path::PathBuf> + Send + Sync>>,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Primitive dispatch table（ADR 0065 decision 2）
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One primitive dispatch arm: `(router, call, execution context) -> legacy ToolResult`.
+///
+/// A plain `fn` pointer (no `dyn`, no allocation): the table is a compile-time inventory of the
+/// legacy `ToolRouter` surface, so `execute_internal` is only a table lookup plus the two special
+/// arms (`allow_batch` gate / `deferred_to_registry`).
+pub type PrimitiveDispatchFn = fn(&ToolRouter, &ToolCall, &ToolExecutionContext) -> ToolResult;
+
+/// `&'static str`（canonical primitive 名）→ handler。
+///
+/// 表顺序 = `builtin_tools()` 定义序（`primitive_dispatch_table_covers_every_builtin_primitive`
+/// 的全覆盖遍历断言依赖该等价关系；查表本身与顺序无关）。
+///
+/// 不变量（ADR 0065）：表必须**恰好**覆盖 `builtin_tools()` 的 45 个 primitive，一个不多一个
+/// 不少——这条不变量是失去 `match` 穷尽性检查后的替代门禁。
+static PRIMITIVE_DISPATCH_TABLE: &[(&str, PrimitiveDispatchFn)] = &[
+    // `time_now`：无参 primitive，签名适配为忽略 call/context。
+    (TOOL_TIME_NOW, |router, _call, _context| router.time_now()),
+    (TOOL_ECHO_INPUT, |router, call, _context| router.echo_input(call)),
+    // `ask_user` 由 host-mediated Ask 通道（控制面）执行，legacy router 只负责 fail-closed。
+    (TOOL_ASK_USER, unsupported_primitive_handler),
+    (TOOL_WORKSPACE_READ_FILE, |router, call, context| {
+        router.with_touched_instructions(call, context, router.read_file(call, context))
+    }),
+    // `workspace_read_document` 绑定 registry 内的 `ReadDocumentHandler`（governed executor）。
+    (TOOL_WORKSPACE_READ_DOCUMENT, unsupported_primitive_handler),
+    (TOOL_WORKSPACE_READ_FILE_SEGMENT, |router, call, context| {
+        router.read_file_segment(call, context)
+    }),
+    (TOOL_WORKSPACE_LIST_FILES, |router, call, context| {
+        router.list_files(call, context)
+    }),
+    (TOOL_WORKSPACE_PATH_INFO, |router, call, context| {
+        router.path_info(call, context)
+    }),
+    (TOOL_WORKSPACE_SEARCH_TEXT, |router, call, context| {
+        router.search_text(call, context)
+    }),
+    (TOOL_WORKSPACE_GLOB_FILES, |router, call, context| {
+        router.glob_files(call, context)
+    }),
+    (TOOL_WEB_FETCH_URL, |router, call, _context| router.web_fetch(call)),
+    (TOOL_WEB_SEARCH_QUERY, |router, call, _context| {
+        router.web_search(call)
+    }),
+    (TOOL_MCP_RESOURCE_READ, mcp_resource_read_deferred_handler),
+    (TOOL_TOOL_SEARCH, tool_search_deferred_handler),
+    (TOOL_WORKSPACE_WRITE_FILE, |router, call, context| {
+        router.with_touched_instructions(call, context, router.write_file(call, context))
+    }),
+    (TOOL_WORKSPACE_EDIT_FILE, |router, call, context| {
+        router.with_touched_instructions(call, context, router.edit_file(call, context))
+    }),
+    (TOOL_WORKSPACE_RUN_COMMAND, |router, call, context| {
+        router.run_command(call, context)
+    }),
+    (TOOL_WORKSPACE_BATCH, |router, call, context| {
+        router.batch(call, context)
+    }),
+    (TOOL_WORKSPACE_GATHER_CONTEXT, |router, call, context| {
+        router.gather_context(call, context)
+    }),
+    // `plan_control` 绑定 registry 内的 `PlanControlHandler`（governed executor）。
+    (TOOL_PLAN_CONTROL, unsupported_primitive_handler),
+    // `view_image` 绑定 registry 内的 `ViewImageHandler`（governed executor）。
+    (TOOL_VIEW_IMAGE, unsupported_primitive_handler),
+    (TOOL_SUBAGENT, |router, call, context| {
+        router.execute_subagent(call, context)
+    }),
+    (TOOL_WORKFLOW, |router, call, _context| {
+        router.execute_workflow(call)
+    }),
+    (TOOL_SPAWN_TEAMMATE, |router, call, context| {
+        router.execute_spawn_teammate(call, context)
+    }),
+    (TOOL_LIST_AGENTS, |router, call, _context| {
+        router.execute_list_agents(call)
+    }),
+    (TOOL_SEND_MESSAGE, |router, call, context| {
+        router.execute_send_message(call, context)
+    }),
+    (TOOL_INTERRUPT_AGENT, |router, call, _context| {
+        router.execute_interrupt_agent(call)
+    }),
+    (TOOL_DRAIN_INBOX, |router, call, _context| {
+        router.execute_drain_inbox(call)
+    }),
+    (TOOL_TEAM_TASK_CREATE, |router, call, _context| {
+        router.execute_team_task_create(call)
+    }),
+    (TOOL_TEAM_TASK_UPDATE, |router, call, _context| {
+        router.execute_team_task_update(call)
+    }),
+    (TOOL_TEAM_TASK_LIST, |router, call, _context| {
+        router.execute_team_task_list(call)
+    }),
+    (TOOL_TODO_WRITE, |router, call, context| {
+        router.execute_todo_write(call, context)
+    }),
+    (TOOL_TODO_LIST, |router, call, context| {
+        router.execute_todo_list(call, context)
+    }),
+    (TOOL_SPILL_READ, |router, call, _context| {
+        router.execute_spill_read(call)
+    }),
+    (TOOL_CREATE_GOAL, |router, call, context| {
+        router.execute_create_goal(call, context)
+    }),
+    (TOOL_GET_GOAL, |router, call, context| {
+        router.execute_get_goal(call, context)
+    }),
+    (TOOL_UPDATE_GOAL, |router, call, context| {
+        router.execute_update_goal(call, context)
+    }),
+    (TOOL_PRESENT, |router, call, context| {
+        router.execute_present(call, context)
+    }),
+    (TOOL_FUZZY_FILE_SEARCH, |router, call, context| {
+        router.execute_find(call, context)
+    }),
+    (TOOL_GIT_DIFF_REMOTE, |router, call, context| {
+        router.execute_git_diff(call, context)
+    }),
+    (TOOL_JOB_START, |router, call, context| {
+        router.execute_job_start(call, context)
+    }),
+    (TOOL_JOB_OUTPUT, |router, call, context| {
+        router.execute_job_output(call, context)
+    }),
+    (TOOL_JOB_KILL, |router, call, context| {
+        router.execute_job_kill(call, context)
+    }),
+    (TOOL_JOB_LIST, |router, _call, context| {
+        router.execute_job_list(context)
+    }),
+    (TOOL_SKILL_LOAD, |router, call, context| {
+        router.execute_skill_load(call, context)
+    }),
+];
+
+/// Every canonical primitive the dispatch table covers, in table order. Feeds the coverage
+/// assertion that replaces the compiler's exhaustive `match` check.
+pub fn primitive_dispatch_table() -> Vec<&'static str> {
+    PRIMITIVE_DISPATCH_TABLE
+        .iter()
+        .map(|(primitive, _)| *primitive)
+        .collect()
+}
+
+/// Resolve one canonical primitive to its dispatch arm. Unknown primitives have no arm.
+fn primitive_dispatch_fn(primitive: &str) -> Option<PrimitiveDispatchFn> {
+    PRIMITIVE_DISPATCH_TABLE
+        .iter()
+        .find(|(name, _)| *name == primitive)
+        .map(|(_, handler)| *handler)
+}
+
+/// Fallback arm shared by primitives whose execution lives in the governed dispatcher (a dedicated
+/// registry handler) instead of the legacy `ToolRouter`. Byte-identical to the legacy
+/// `unsupported_tool` outcome, so no observable behaviour changes.
+fn unsupported_primitive_handler(
+    _router: &ToolRouter,
+    call: &ToolCall,
+    _context: &ToolExecutionContext,
+) -> ToolResult {
+    unsupported_tool_result(call)
+}
+
+/// `deferred_to_registry` arm (ADR 0065): MCPResource is executed through the capability/registry
+/// proxy, never by the legacy router.
+fn mcp_resource_read_deferred_handler(
+    _router: &ToolRouter,
+    _call: &ToolCall,
+    _context: &ToolExecutionContext,
+) -> ToolResult {
+    error_result(
+        TOOL_MCP_RESOURCE_READ,
+        "deferred_to_registry",
+        "MCPResource 由 capability registry 代理执行。".to_string(),
+        Some("请通过 runtime 注册工具执行入口调用该工具。".to_string()),
+    )
+}
+
+/// `deferred_to_registry` arm (ADR 0065): ToolSearch is executed through the capability/registry
+/// proxy, never by the legacy router.
+fn tool_search_deferred_handler(
+    _router: &ToolRouter,
+    _call: &ToolCall,
+    _context: &ToolExecutionContext,
+) -> ToolResult {
+    error_result(
+        TOOL_TOOL_SEARCH,
+        "deferred_to_registry",
+        "ToolSearch 由 capability registry 代理执行。".to_string(),
+        Some("请通过 runtime 注册工具执行入口调用该工具。".to_string()),
+    )
+}
+
+fn unsupported_tool_result(call: &ToolCall) -> ToolResult {
+    error_result(
+        &call.name,
+        "unsupported_tool",
+        format!("当前 runtime 尚未实现工具 `{}`。", call.name),
+        Some("请改用 list_available_tools 中返回的工具名。".to_string()),
+    )
+}
+
 impl ToolRouter {
     pub fn new() -> Self {
         Self {
@@ -1520,78 +1771,31 @@ impl ToolRouter {
         allow_batch: bool,
         context: &ToolExecutionContext,
     ) -> ToolResult {
-        match canonical_tool_name(&call.name) {
-            Some(TOOL_TIME_NOW) => self.time_now(),
-            Some(TOOL_ECHO_INPUT) => self.echo_input(call),
-            Some(TOOL_WORKSPACE_LIST_FILES) => self.list_files(call, context),
-            Some(TOOL_WORKSPACE_READ_FILE) => {
-                self.with_touched_instructions(call, context, self.read_file(call, context))
+        // ADR 0065 decision 2：名称 → 分派臂改为 `&'static str → fn` 表查（零 `dyn`）。
+        // 仅保留两条特殊臂：`allow_batch` 递归闸门与 `deferred_to_registry`（registry 代理执行）。
+        let Some(primitive) = canonical_tool_name(&call.name) else {
+            return unsupported_tool_result(call);
+        };
+        match primitive {
+            TOOL_WORKSPACE_BATCH if allow_batch => return self.batch(call, context),
+            TOOL_WORKSPACE_BATCH => {
+                return error_result(
+                    TOOL_WORKSPACE_BATCH,
+                    "nested_batch_not_allowed",
+                    "workspace_batch 不允许递归调用 workspace_batch。".to_string(),
+                    Some("请把嵌套批量调用拆成多个叶子工具调用。".to_string()),
+                )
             }
-            Some(TOOL_WORKSPACE_READ_FILE_SEGMENT) => self.read_file_segment(call, context),
-            Some(TOOL_WORKSPACE_PATH_INFO) => self.path_info(call, context),
-            Some(TOOL_WORKSPACE_SEARCH_TEXT) => self.search_text(call, context),
-            Some(TOOL_WORKSPACE_GLOB_FILES) => self.glob_files(call, context),
-            Some(TOOL_WORKSPACE_WRITE_FILE) => {
-                self.with_touched_instructions(call, context, self.write_file(call, context))
+            TOOL_MCP_RESOURCE_READ => {
+                return mcp_resource_read_deferred_handler(self, call, context)
             }
-            Some(TOOL_WORKSPACE_EDIT_FILE) => {
-                self.with_touched_instructions(call, context, self.edit_file(call, context))
-            }
-            Some(TOOL_WORKSPACE_RUN_COMMAND) => self.run_command(call, context),
-            Some(TOOL_WEB_FETCH_URL) => self.web_fetch(call),
-            Some(TOOL_WEB_SEARCH_QUERY) => self.web_search(call),
-            Some(TOOL_MCP_RESOURCE_READ) => error_result(
-                TOOL_MCP_RESOURCE_READ,
-                "deferred_to_registry",
-                "MCPResource 由 capability registry 代理执行。".to_string(),
-                Some("请通过 runtime 注册工具执行入口调用该工具。".to_string()),
-            ),
-            Some(TOOL_TOOL_SEARCH) => error_result(
-                TOOL_TOOL_SEARCH,
-                "deferred_to_registry",
-                "ToolSearch 由 capability registry 代理执行。".to_string(),
-                Some("请通过 runtime 注册工具执行入口调用该工具。".to_string()),
-            ),
-            Some(TOOL_WORKSPACE_GATHER_CONTEXT) => self.gather_context(call, context),
-            Some(TOOL_WORKSPACE_BATCH) if allow_batch => self.batch(call, context),
-            Some(TOOL_WORKSPACE_BATCH) => error_result(
-                TOOL_WORKSPACE_BATCH,
-                "nested_batch_not_allowed",
-                "workspace_batch 不允许递归调用 workspace_batch。".to_string(),
-                Some("请把嵌套批量调用拆成多个叶子工具调用。".to_string()),
-            ),
-            Some(TOOL_SUBAGENT) => self.execute_subagent(call, context),
-            Some(TOOL_WORKFLOW) => self.execute_workflow(call),
-            Some(TOOL_SPAWN_TEAMMATE) => self.execute_spawn_teammate(call, context),
-            Some(TOOL_LIST_AGENTS) => self.execute_list_agents(call),
-            Some(TOOL_SEND_MESSAGE) => self.execute_send_message(call, context),
-            Some(TOOL_INTERRUPT_AGENT) => self.execute_interrupt_agent(call),
-            Some(TOOL_DRAIN_INBOX) => self.execute_drain_inbox(call),
-            Some(TOOL_TEAM_TASK_CREATE) => self.execute_team_task_create(call),
-            Some(TOOL_TEAM_TASK_UPDATE) => self.execute_team_task_update(call),
-            Some(TOOL_TEAM_TASK_LIST) => self.execute_team_task_list(call),
-            Some(TOOL_TODO_WRITE) => self.execute_todo_write(call, context),
-            Some(TOOL_TODO_LIST) => self.execute_todo_list(call, context),
-            Some(TOOL_SPILL_READ) => self.execute_spill_read(call),
-            Some(TOOL_CREATE_GOAL) => self.execute_create_goal(call, context),
-            Some(TOOL_GET_GOAL) => self.execute_get_goal(call, context),
-            Some(TOOL_UPDATE_GOAL) => self.execute_update_goal(call, context),
-            // W37-C1：七项新工具派发臂（直连 lib 函数）。
-            Some(TOOL_PRESENT) => self.execute_present(call, context),
-            Some(TOOL_FUZZY_FILE_SEARCH) => self.execute_find(call, context),
-            Some(TOOL_GIT_DIFF_REMOTE) => self.execute_git_diff(call, context),
-            Some(TOOL_JOB_START) => self.execute_job_start(call, context),
-            Some(TOOL_JOB_OUTPUT) => self.execute_job_output(call, context),
-            Some(TOOL_JOB_KILL) => self.execute_job_kill(call, context),
-            Some(TOOL_JOB_LIST) => self.execute_job_list(context),
-            // W42/PA-149：技能正文按需加载。
-            Some(TOOL_SKILL_LOAD) => self.execute_skill_load(call, context),
-            _ => error_result(
-                &call.name,
-                "unsupported_tool",
-                format!("当前 runtime 尚未实现工具 `{}`。", call.name),
-                Some("请改用 list_available_tools 中返回的工具名。".to_string()),
-            ),
+            TOOL_TOOL_SEARCH => return tool_search_deferred_handler(self, call, context),
+            _ => {}
+        }
+        match primitive_dispatch_fn(primitive) {
+            Some(handler) => handler(self, call, context),
+            // 表缺臂即 fail-closed：名称已知但没有分派实现，绝不静默放行。
+            None => unsupported_tool_result(call),
         }
     }
 
@@ -6824,9 +7028,10 @@ fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
 mod contract_view_tests {
     use super::{
         builtin_tools, builtin_turn_tool_contract_views, canonical_tool_name,
-        default_permission_facts_for_name, model_visible_tool_name, product_canonical_tool_name,
-        ToolDescriptor, ToolDescriptorSource, ToolExposure, ToolHandlerProvenance, ToolIdentity,
-        ToolKind, ToolRegistrySnapshot, TOOL_WORKSPACE_PATH_INFO, TOOL_WORKSPACE_RUN_COMMAND,
+        default_permission_facts_for_name, model_visible_tool_name, primitive_dispatch_table,
+        product_canonical_tool_name, ToolDescriptor, ToolDescriptorSource, ToolExposure,
+        ToolHandlerProvenance, ToolIdentity, ToolKind, ToolRegistrySnapshot,
+        TOOL_WORKSPACE_PATH_INFO, TOOL_WORKSPACE_RUN_COMMAND,
     };
     use serde_json::json;
 
@@ -6947,6 +7152,47 @@ mod contract_view_tests {
             product_canonical_tool_name(TOOL_WORKSPACE_RUN_COMMAND),
             "Run"
         );
+    }
+
+    /// ADR 0065 decision 2：`execute_internal` 从 72 行 `match` 改为 fn 指针表后，编译期穷尽性
+    /// 检查消失，必须由本遍历断言补回——表与 `builtin_tools()` 的 45 个 primitive 必须**双射**
+    /// （每个恰好一次，无缺无多余），且表内每个 key 都能被 `canonical_tool_name` 归一化回自身
+    /// （否则该臂永久不可达）。
+    #[test]
+    fn primitive_dispatch_table_covers_every_builtin_primitive() {
+        let table = primitive_dispatch_table();
+        let mut sorted_table = table.clone();
+        sorted_table.sort_unstable();
+        sorted_table.dedup();
+        assert_eq!(
+            sorted_table.len(),
+            table.len(),
+            "primitive dispatch table contains duplicate primitives: {table:?}"
+        );
+
+        let mut builtin_primitives = builtin_tools()
+            .iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        builtin_primitives.sort_unstable();
+
+        assert_eq!(
+            builtin_primitives.len(),
+            45,
+            "builtin_tools() 的 primitive 数已变化；分派表必须同步"
+        );
+        assert_eq!(
+            sorted_table, builtin_primitives,
+            "分派表必须是 45 个内建 primitive 的双射（缺臂 ⇒ 工具静默变 unsupported_tool）"
+        );
+
+        for primitive in table.iter().copied() {
+            assert_eq!(
+                canonical_tool_name(primitive),
+                Some(primitive),
+                "分派表 key `{primitive}` 未被 canonical_tool_name 归一化回自身 ⇒ 该臂不可达"
+            );
+        }
     }
 
     #[test]

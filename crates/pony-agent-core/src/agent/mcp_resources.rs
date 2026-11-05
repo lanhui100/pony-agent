@@ -119,6 +119,19 @@ pub struct McpResourceReadResult {
     pub truncated: bool,
 }
 
+/// 资源面未接线（ADR 0066 decision 6）：v1 结构性 fail-closed 的可读错误码。
+///
+/// 语义：不是"来源临时不可用"（那是 `capability_source_unavailable`），而是**本版本没有把
+/// 资源读取接进生产路径**。接线属后续任务，保持 fail-closed 是设计要求的终态。
+pub const MCP_RESOURCES_NOT_WIRED: &str = "mcp_resources_not_wired";
+
+/// 构造「资源面未接线」的结构化错误串（`<code>: <说明>`，可被 dispatcher/宿主按码分源）。
+pub fn resources_not_wired_error(source_id: &str) -> String {
+    format!(
+        "{MCP_RESOURCES_NOT_WIRED}: MCP source `{source_id}` 的资源读取在 v1 未接线（资源面保持 fail-closed，接线见后续任务）。"
+    )
+}
+
 /// Source-bound, read-only MCP resource surface.
 #[derive(Clone)]
 pub struct McpResourceSurface {

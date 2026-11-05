@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": { "kind": "subagent", "session_id": "phase0-three-views", "fresh_context": true },
+  "executed_by": "lead",
+  "attestation": {
+    "self_signed": false,
+    "transcribed_verbatim_by_lead": true,
+    "note": "Phase-0 三路独立视角（产品/领域 9a82f7be、系统架构 38c54ccd、工程风险 84b9321c）对 ADR 0064-0068 切分提案的评审结论摘要；据此修订了波次（T1 先行、T2 串行、T4 分骨架/冻结）与 Non-Goals（T5 出批、hooks 不迁移、远程 MCP 不做）"
+  },
+  "reviewed_commit": "7a5269ed",
+  "audited_scopes": [
+    "docs/decisions/0064-extensibility-three-layer-model.md",
+    "docs/decisions/0065-tool-surface-single-truth.md",
+    "docs/decisions/0066-mcp-channel-closure.md",
+    "docs/decisions/0067-plugin-host-protocol-and-hooks-sandbox.md",
+    "docs/decisions/0068-contract-versioning-and-conformance-kit.md"
+  ],
+  "findings": [
+    {
+      "file": "docs/decisions/0064-extensibility-three-layer-model.md",
+      "line": 1,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "产品视角：只有 T2 有用户可见价值；缺 T5（MCP 管理页/授权记录/通用工具渲染 fallback/错误码文案）时 T2 上线即「装了但不知道装了什么」。处置：写为 Non-Goal + backlog B023。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/decisions/0064-extensibility-three-layer-model.md",
+      "line": 1,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "架构视角：T1∥T2 不成立（dispatcher.rs:471,489 registry 构造期固定；provider/mod.rs:3541 按数组长度推断会静默翻转）。处置：W1=T1∥T3，W2=T2∥T4。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/decisions/0067-plugin-host-protocol-and-hooks-sandbox.md",
+      "line": 1,
+      "rule": "SECURITY",
+      "counterexample_cmd": "工程风险视角：hooks 迁协议会破坏存量配置、插件宿主=任意代码执行。处置：hooks 迁移列 Non-Goal，只做 argv 双形态 + env 白名单 + 默认关闭；插件首次加载需显式信任。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/decisions/0068-contract-versioning-and-conformance-kit.md",
+      "line": 1,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "产品/架构视角：T4 与 T2 并行冻结会在单一实现者时二次修订。处置：T4 拆 W2 骨架（schema+正例）与 W3 冻结（golden+全绿）。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

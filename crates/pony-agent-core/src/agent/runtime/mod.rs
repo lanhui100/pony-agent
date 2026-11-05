@@ -49,7 +49,7 @@ use crate::agent::telemetry::{
 };
 use std::path::PathBuf;
 use crate::agent::tools::{
-    builtin_tools, canonical_tool_name, default_permission_facts_for_name, tool_error_from_output,
+    canonical_tool_name, default_permission_facts_for_name, tool_error_from_output,
     ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutor, ToolResult,
 };
 use crate::agent::tool_runtime::{

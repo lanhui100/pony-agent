@@ -8,11 +8,13 @@ pub mod turn_task_registry;
 use crate::blocking_helper::BlockingHelper;
 use crate::turn_task_registry::TurnTaskRegistry;
 use agent::app_settings::{AppSettings, AppSettingsStore};
-use agent::capability_bridge::{CapabilitySourceView, CapabilityView, SkillDescriptor};
+use agent::capability_bridge::{CapabilitySourceView, CapabilityView, McpSourceSnapshot, SkillDescriptor};
 use agent::config::{ProviderRegistryStore, ProviderRegistryView};
+use agent::mcp_config::{McpHealthView, McpSourceLoadSummary};
 use agent::context::RetrievedContextState;
 use agent::control_plane::{
     CapabilityInspectionQuery, CapabilityListQuery, CapabilitySourceInspectionQuery,
+    ApplyMcpSourceSnapshotCommand,
     CheckoutHistoryNodeCommand, ContinueGraphRunCommand, ContinueGraphRunStreamCommand,
     DeleteSessionCommand, ExecutionCheckpointQuery, ForkFromHistoryNodeCommand,
     ForkFromHistoryNodeResponse, GraphRunCheckpointQuery, GraphRunControlResponse,
@@ -1106,6 +1108,35 @@ fn list_capability_sources(
     control_plane.list_capability_sources()
 }
 
+/// 应用一份 MCP 来源快照（能力注册表的来源元数据入口；ADR 0066 decision 3）。
+///
+/// 工具身份与执行仍由 `ToolRegistrySnapshot` + `GovernedDispatcher` 决定，
+/// 这里只登记「发现到的来源/能力」事实。
+#[tauri::command]
+fn apply_mcp_source_snapshot(
+    snapshot: McpSourceSnapshot,
+    control_plane: State<'_, HostControlPlane>,
+) -> Result<CapabilitySourceView, String> {
+    control_plane.apply_mcp_source_snapshot(ApplyMcpSourceSnapshotCommand { snapshot })
+}
+
+/// MCP 通道健康（ADR 0066 decision 3）：连接状态 / 最近错误码 / 工具数。
+/// 前端只经 command 读取，不直连 MCP。
+#[tauri::command]
+fn mcp_health(control_plane: State<'_, HostControlPlane>) -> Vec<McpHealthView> {
+    control_plane.mcp_health()
+}
+
+/// 按 `.mcp.json`（`<workspace>/.mcp.json` + `$PONY_AGENT_HOME/mcp.json`）加载并连接 MCP server，
+/// 注册进治理分派器并安装为进程级通道（模型工具面下一轮生效）。
+#[tauri::command]
+fn load_mcp_sources(
+    workspace_root: Option<String>,
+    control_plane: State<'_, HostControlPlane>,
+) -> McpSourceLoadSummary {
+    control_plane.load_mcp_sources(workspace_root)
+}
+
 #[tauri::command]
 fn list_capabilities(
     source_id: Option<String>,
@@ -1429,6 +1460,9 @@ pub fn run() {
             delete_session,
             list_available_tools,
             list_capability_sources,
+            mcp_health,
+            load_mcp_sources,
+            apply_mcp_source_snapshot,
             list_capabilities,
             inspect_capability,
             inspect_capability_source,

@@ -592,6 +592,13 @@ impl CapabilityRegistry {
         }
     }
 
+    /// 按工具名解析到 capability。
+    ///
+    /// ADR 0066 decision 4（T2）收敛双注册表职责：**capability 只负责发现与来源元数据，
+    /// 工具身份一律由 `ToolRegistrySnapshot` 决定**。因此这里只按内建产品名/primitive 名
+    /// 解析内建 capability；外部工具（MCP / 插件）由 `GovernedDispatcher` 按 `descriptor_id`
+    /// 分派，绝不通过 `capability.label == tool_name` 反查回灌（那是 T2 之前"外部能力接不进来"
+    /// 的具体断点，且会让同一工具存在两个身份真值源）。
     pub fn resolve_tool_call(
         &self,
         tool_call: &ToolCall,
@@ -599,6 +606,10 @@ impl CapabilityRegistry {
         let action = candidate_builtin_capability_ids(&tool_call.name)
             .into_iter()
             .chain(self.capabilities.values().filter_map(|capability| {
+                // 既有行为（冻结用例锁定）：capability 侧仍可按 `label` 命中，用于**失败诊断**
+                // 与来源元数据（例如把 MCP 来源不可用升格为分源错误码）。
+                // 但工具**身份与执行**不以此为真值：MCP/插件工具经 `ToolRegistrySnapshot` 的
+                // 外部 descriptor 由 `GovernedDispatcher` 按 `descriptor_id` 分派（T1/T2）。
                 if capability.kind == CapabilityKind::Tool && capability.label == tool_call.name {
                     Some(capability.capability_id.clone())
                 } else {
@@ -634,12 +645,18 @@ impl CapabilityRegistry {
         self.capability_failure_result(tool_call, CapabilityFailureKind::CapabilityNotFound)
     }
 
+    /// capability 失败结果。
+    ///
+    /// ADR 0066 decision 4（T2）：失败分源 —— 当工具名指向一个 **MCP** 来源的 capability 时，
+    /// 输出前缀带上分源错误码（`mcp_server_unavailable` / `capability_denied`），
+    /// 让模型与宿主无需再靠"含糊的 SourceUnavailable"猜测原因。
     pub fn capability_failure_result(
         &self,
         tool_call: &ToolCall,
         failure_kind: CapabilityFailureKind,
     ) -> CapabilityToolExecutionResult {
-        let output = match failure_kind {
+        let mcp_source = self.tool_call_hits_mcp_source(&tool_call.name);
+        let mut output = match failure_kind {
             CapabilityFailureKind::CapabilityNotFound => {
                 format!(
                     "未找到与工具 `{}` 对应的 capability registry 条目。",
@@ -666,6 +683,16 @@ impl CapabilityRegistry {
                 format!("工具 `{}` 的 capability 执行失败。", tool_call.name)
             }
         };
+        if mcp_source {
+            if let Some(code) = match failure_kind {
+                CapabilityFailureKind::SourceUnavailable => Some("mcp_server_unavailable"),
+                CapabilityFailureKind::PermissionDenied => Some("capability_denied"),
+                CapabilityFailureKind::InvocationFailed => Some("mcp_tool_error"),
+                _ => None,
+            } {
+                output = format!("{code}: {output}");
+            }
+        }
         CapabilityToolExecutionResult {
             capability: None,
             tool_call: tool_call.clone(),
@@ -677,6 +704,16 @@ impl CapabilityRegistry {
             },
             failure_kind: Some(failure_kind),
         }
+    }
+
+    /// 该名字是否指向某个 MCP 来源的 capability（按 label / capability_id 命中，仅作**诊断分源**
+    /// 判据；工具身份真值仍只来自 `ToolRegistrySnapshot`）。
+    fn tool_call_hits_mcp_source(&self, tool_name: &str) -> bool {
+        let trimmed = tool_name.trim();
+        self.capabilities.values().any(|capability| {
+            capability.source_kind == CapabilitySourceKind::Mcp
+                && (capability.label == trimmed || capability.capability_id == trimmed)
+        })
     }
 
     pub fn skill_failure_result(
@@ -793,6 +830,26 @@ impl CapabilityRegistry {
             prompt_text: None,
             failure_kind: Some(failure_kind),
         }
+    }
+
+    /// 资源面失败的分源错误码（ADR 0066 decision 4/6）。
+    ///
+    /// MCP 来源的资源在 v1 结构性 fail-closed：`SourceUnavailable` 提升为可读的
+    /// `mcp_resources_not_wired`，不再是含糊的"来源不可用"。非 MCP 来源返回 `None`
+    /// （沿用既有 `CapabilityFailureKind` 语义，不改旧行为）。
+    pub fn resource_failure_code(
+        &self,
+        request: &CapabilityInvocationRequest,
+        failure_kind: CapabilityFailureKind,
+    ) -> Option<&'static str> {
+        if failure_kind != CapabilityFailureKind::SourceUnavailable {
+            return None;
+        }
+        let capability = self.inspect_capability(&request.capability_id)?;
+        if capability.source_kind != CapabilitySourceKind::Mcp {
+            return None;
+        }
+        Some(crate::agent::mcp_resources::MCP_RESOURCES_NOT_WIRED)
     }
 
     pub fn register_mcp_source(&mut self, source: CapabilitySourceView) {

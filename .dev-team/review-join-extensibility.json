@@ -1,0 +1,145 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewed_commit": "working-tree@7a5269ed+",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/governed_executor.rs",
+    "crates/pony-agent-core/src/agent/mcp_config.rs",
+    "crates/pony-agent-core/src/agent/plugin_host/transport.rs",
+    "crates/pony-agent-core/src/agent/plugin_host/capability.rs",
+    "crates/pony-agent-core/src/agent/plugin_host/supervisor.rs",
+    "crates/pony-agent-core/src/agent/hook_commands.rs",
+    "src-tauri/src/lib.rs"
+  ],
+  "reviewers": [
+    {
+      "id": "l3a-deep",
+      "perspective": "并发/调度/状态流转/资源泄漏",
+      "verdict": "FAIL",
+      "repro": "/tmp/audit-repro (3 个可复现 bin)"
+    },
+    {
+      "id": "l3a-quick",
+      "perspective": "并发/状态（快审）",
+      "verdict": "FAIL"
+    },
+    {
+      "id": "l3b-deep",
+      "perspective": "安全/协议/权限边界",
+      "verdict": "FAIL"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 1016,
+      "rule": "CONCURRENCY",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /tmp/audit-repro && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --offline -q --bin audit_repro  # 授权用 G1 descriptor、执行用 G2 handler：read_only 下放行了 G2 的 Execute handler"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 1682,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /tmp/audit-repro && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --offline -q --bin child_pin  # PinnedSurfaceRunner::preflight 经 Deref 落 live surface，子派发按新 descriptor 授权却跑钉住的旧 handler"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 743,
+      "rule": "LEAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /tmp/audit-repro && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --offline -q --bin provider_leak  # register_tool_provider 只 insert 不剪除，换源后旧 provider/子进程永久存活"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_config.rs",
+      "line": 570,
+      "rule": "SECURITY",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "mcpServers.x={command:bash,args:[-c,touch /tmp/pwn]} + tools/list 返回 annotations.readOnlyHint=true → --permission-mode read_only 下不被 deny（权限事实取自 server 自报）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_config.rs",
+      "line": 412,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "requires_approval:true（snake_case）被 as_bool→unwrap_or(false) 静默忽略 → 外部进程默认零审批"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tool_runtime.rs",
+      "line": 93,
+      "rule": "TIMEOUT",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "ExternalToolHandler::execute 丢弃 PrimitiveToolHandlerRequest.cancellation（descriptor 声明 cancellable:true），取消只能等 provider 自身超时"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_config.rs",
+      "line": 892,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "shutdown_mcp_tool_channel 全仓无调用方；Arc::try_unwrap 在 dispatcher 仍持 Arc 时静默失败 → 卸载/退出都不回收"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_config.rs",
+      "line": 946,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "intern 的 Box::leak 无上界：每次换入新描述即持续增长（按 value 去重仅限同一字符串）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/plugin_host/capability.rs",
+      "line": 86,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "HTTP_PROXY=user:pass@10.0.0.1:8080 → Url::parse 失败即原样透传，代理凭据进入插件子进程"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/mcp_config.rs",
+      "line": 737,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "server 报错含 'sk-live-abc123' 或 'Authorization: Bearer abc' → redact_secrets 前缀表未覆盖，原样落日志"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/plugin_host/transport.rs",
+      "line": 312,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "服务端发起的 JSON-RPC 请求（method+id，如 ping/roots/sampling）被当通知丢弃且不应答 → 对端挂起"
+    },
+    {
+      "file": "src-tauri/src/lib.rs",
+      "line": 1133,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "load_mcp_sources 是同步 command，在 IPC 线程做 spawn+握手（每 server ≤20s，串行），与 BlockingHelper 约定相悖"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/plugin_host/transport.rs",
+      "line": 12,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "Windows 无 process_group，孙进程仅尽力回收（ADR 已记，无 Job Object 兜底）"
+    }
+  ],
+  "re_review": {
+    "reviewer": "independent re-review (subagent 8a8a36d8)",
+    "verdict": "PASS",
+    "resolution": "7 条 BLOCKING 全部修复并经复审逐条复核（含 3 台可复现 repro 翻转：audit_repro 执行 G1 handler、provider_leak live providers=1、child_pin 子调用转 pending）；首轮唯一未清 ADVISORY（ErrorCode 新码未注册）已追加注册（Mcp 5 / Plugin 15，append-only）。",
+    "remaining_advisories": [
+      "Windows 无进程组：孙进程尽力回收（需 Job Object，契约变更）",
+      "插件审计无持久化总线（归 observability/T5）",
+      "confine_dir 仍有 TOCTOU 窗口（openat2/O_NOFOLLOW 逐段未做）",
+      "load_mcp_config_from 可显式自授信（显式信任语义，生产入口仍受 env 闸门）"
+    ],
+    "final_gates": {
+      "cargo check -p pony-agent-core": "0",
+      "cargo test -p pony-agent-core --lib": "1300 passed / 0 failed",
+      "acceptance suites": "23 + 16 + 11 + 28 passed / 0 failed",
+      "gen-extension-points --check": "0",
+      "audit-diff --base 7a5269ed": "0 (OK)"
+    }
+  }
+}

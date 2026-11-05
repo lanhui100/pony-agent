@@ -159,10 +159,20 @@ impl GovernedPolicyEvaluator {
         // merge / complete_step / replace / start_execution 全被 Deny,plan 永远无法
         // 离开 Draft(自锁死)。豁免按 canonical primitive 名判定,不影响其它写类描述符。
         if let Some(plan_store) = &self.plan_store {
+            // L3-B-C（计划门禁漂移）：判定必须与 read_only 闸门**同口径**——按**权限事实**
+            // （`kind` + descriptor 声明的 scopes）判定，而不是只看 `kind`。否则外部工具
+            // （MCP/插件，`kind = External`）只要声明 `workspace_write` 就能在 Draft 计划期
+            // 绕过写保护（实测 builtin 同语义为 Deny）。
             let is_write_or_exec = matches!(
                 descriptor.kind,
                 crate::agent::tools::ToolKind::Write | crate::agent::tools::ToolKind::Execute
-            );
+            ) || descriptor.permission_declaration.scopes.iter().any(|scope| {
+                matches!(
+                    scope,
+                    crate::agent::tools::ToolPermissionScope::WorkspaceWrite
+                        | crate::agent::tools::ToolPermissionScope::WorkspaceExecute
+                )
+            });
             if is_write_or_exec && descriptor.identity.primitive_name == TOOL_PLAN_CONTROL {
                 // ── W36 / PA-141（方案 b，C-141-2..8）：宿主审批闸门 ─────────────────────
                 // 触发面：`start_execution`，或目标 plan 仍处 Draft 的 `complete_step`
@@ -278,7 +288,27 @@ impl GovernedPolicyEvaluator {
             }
         }
 
-        // 4. 默认放行
+        // 4. 外部来源尊重 `requires_approval`（ADR 0066 decision 5 / T2 裁决，fail-closed）。
+        //
+        // 口径：**只有**外部来源（MCP / 插件 / 动态工具，即 provenance 不是 `builtin-tools`）
+        // 且 descriptor 显式声明 `requires_approval` 时才要求宿主审批；内建工具行为保持不变
+        // （绝不能顺手把 45 个内建工具的审批面一起翻掉）。
+        // 位置刻意放在最后一步之前：用户工具规则（Allow/Ask/Deny）、Plan 草稿门禁、路径授权
+        // 的既有结果优先，本条只把"原本会默认放行"的外部工具提升为 Ask。
+        if descriptor.handler_provenance.source_id != "builtin-tools"
+            && descriptor.permission_declaration.requires_approval
+        {
+            return PermissionDecision {
+                verdict: PermissionVerdict::ApprovalRequired,
+                decision_source: "external_requires_approval".to_string(),
+                reason: Some(format!(
+                    "外部工具 `{}`（来源 `{}`）声明需要审批，调用前需要宿主授权。",
+                    descriptor.identity.model_name, descriptor.handler_provenance.source_id
+                )),
+            };
+        }
+
+        // 5. 默认放行
         PermissionDecision {
             verdict: PermissionVerdict::Allow,
             decision_source: "governed_default".to_string(),
@@ -308,20 +338,31 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
     ) -> PermissionDecision {
         // 0. 检查前端传入的会话级授权模式 (tool_authorization_mode)
         if let Some(auth_mode) = context.tool_authorization_mode.as_deref() {
-            // T7（执行闸门半）：判定必须走**语义分类** `ToolKind`，不能只比手写字符串表 ——
-            // 旧写法只认 `primitive_name ∈ {write,edit,bash,execute}` 与小写 model_name，
-            // 而生产描述符是 `builtin:workspace_write_file` + model_name `Write`，
-            // 于是 `read_only` 闸门对 Write/Edit/Run **根本不触发**（等于 fail-open）。
-            let is_write_or_exec = matches!(
-                descriptor.kind,
-                crate::agent::tools::ToolKind::Write | crate::agent::tools::ToolKind::Execute
-            ) || descriptor.identity.primitive_name == "write"
-                || descriptor.identity.primitive_name == "edit"
-                || descriptor.identity.primitive_name == "bash"
-                || descriptor.identity.primitive_name == "execute"
-                || descriptor.identity.model_name.eq_ignore_ascii_case("write")
-                || descriptor.identity.model_name.eq_ignore_ascii_case("edit")
-                || descriptor.identity.model_name.eq_ignore_ascii_case("bash");
+            // T7（执行闸门半）：判定走**语义分类** `ToolKind`。
+            // ADR 0065 decision 5（PA-076 T1）：权限判定只读 descriptor 声明的权限事实
+            // （`ToolPermissionFacts` = `kind` + typed `ToolPermissionDeclaration.scopes`），
+            // **名称不参与权限判定**。此前的 `primitive_name ∈ {write,edit,bash,execute}` /
+            // model_name 小写嗅探是真实漏洞：外部写工具（MCP / 插件）名字不在字面量表内，
+            // 只读模式下会被直接放行（fail-open）；反过来，字面量判据也无法覆盖将来新增的
+            // 写类 primitive。声明 workspace.write / workspace.execute 即视为写/执行类，
+            // 与工具叫什么名字无关。
+            let declares_write_or_exec = descriptor
+                .permission_declaration
+                .scopes
+                .iter()
+                .any(|scope| {
+                    matches!(
+                        scope,
+                        crate::agent::tools::ToolPermissionScope::WorkspaceWrite
+                            | crate::agent::tools::ToolPermissionScope::WorkspaceExecute
+                    )
+                });
+            let is_write_or_exec = declares_write_or_exec
+                || matches!(
+                    descriptor.kind,
+                    crate::agent::tools::ToolKind::Write
+                        | crate::agent::tools::ToolKind::Execute
+                );
 
             if auth_mode == "read_only" && is_write_or_exec {
                 return PermissionDecision {
@@ -1149,5 +1190,120 @@ mod tests {
             "{}",
             unknown.output
         );
+    }
+
+    // ── ADR 0065 decision 5：只读闸门读 descriptor 权限事实，不嗅探工具名 ────────────────
+
+    fn gate_descriptor(
+        model_name: &str,
+        kind: crate::agent::tools::ToolKind,
+        scopes: &[crate::agent::tools::ToolPermissionScope],
+    ) -> crate::agent::tools::ToolDescriptor {
+        crate::agent::tools::ToolDescriptor {
+            identity: crate::agent::tools::ToolIdentity {
+                descriptor_id: format!("test:{model_name}"),
+                model_name: model_name.to_string(),
+                canonical_name: model_name.to_string(),
+                primitive_name: model_name.to_string(),
+                source: crate::agent::tools::ToolDescriptorSource::Dynamic,
+            },
+            aliases: vec![model_name.to_string()],
+            description: String::new(),
+            input_schema: json!({ "type": "object" }),
+            kind,
+            exposure: crate::agent::tools::ToolExposure::ModelVisible,
+            permission_declaration: crate::agent::tools::ToolPermissionDeclaration {
+                scopes: scopes.iter().cloned().collect(),
+                requires_approval: false,
+                host_mediated: false,
+                approval_mode: None,
+            },
+            execution_policy: crate::agent::tools::ToolExecutionPolicy::default(),
+            display_metadata: crate::agent::tools::ToolDisplayMetadata::default(),
+            handler_provenance: crate::agent::tools::ToolHandlerProvenance {
+                handler_kind: "test".to_string(),
+                source_id: "external-test".to_string(),
+            },
+            source_revision: "test-v1".to_string(),
+            composed_descriptor_ids: Vec::new(),
+        }
+    }
+
+    /// 只读模式的真实漏洞回归：外部写工具的名字不含 write/edit/bash 字面量，
+    /// 旧嗅探逻辑会直接放行（fail-open）。权限事实（声明的 workspace.write scope）才是指标。
+    #[test]
+    fn read_only_gate_denies_by_declared_permission_facts_not_by_tool_name() {
+        use crate::agent::tools::ToolKind;
+        use crate::agent::tools::ToolPermissionScope;
+
+        let evaluator = GovernedPolicyEvaluator::default();
+        let read_only_context = crate::agent::dispatcher::DispatchContext {
+            tool_authorization_mode: Some("read_only".to_string()),
+            ..Default::default()
+        };
+
+        let external_writer = gate_descriptor(
+            "mcp__demo__purge",
+            ToolKind::External,
+            &[ToolPermissionScope::WorkspaceWrite],
+        );
+        let denied = evaluator.evaluate_with_context(
+            &external_writer,
+            &InvocationOrigin::Model,
+            &json!({}),
+            &read_only_context,
+        );
+        assert_eq!(denied.verdict, PermissionVerdict::Deny);
+        assert_eq!(
+            denied.decision_source,
+            "tool_authorization_mode_read_only",
+            "an external write tool must be denied in read-only mode even though its name \
+             contains no write/edit/bash literal"
+        );
+
+        let external_executor = gate_descriptor(
+            "mcp__demo__run",
+            ToolKind::External,
+            &[ToolPermissionScope::WorkspaceExecute],
+        );
+        assert_eq!(
+            evaluator
+                .evaluate_with_context(
+                    &external_executor,
+                    &InvocationOrigin::Model,
+                    &json!({}),
+                    &read_only_context
+                )
+                .verdict,
+            PermissionVerdict::Deny
+        );
+
+        // A write-kind descriptor is denied even when it declares no scope at all.
+        let unnamed_writer = gate_descriptor("custom_mutator", ToolKind::Write, &[]);
+        assert_eq!(
+            evaluator
+                .evaluate_with_context(
+                    &unnamed_writer,
+                    &InvocationOrigin::Model,
+                    &json!({}),
+                    &read_only_context
+                )
+                .verdict,
+            PermissionVerdict::Deny
+        );
+
+        // Read-only facts stay allowed (the gate must not become a blanket deny).
+        let reader = gate_descriptor(
+            "mcp__demo__peek",
+            ToolKind::Read,
+            &[ToolPermissionScope::WorkspaceRead],
+        );
+        let allowed = evaluator.evaluate_with_context(
+            &reader,
+            &InvocationOrigin::Model,
+            &json!({}),
+            &read_only_context,
+        );
+        assert_eq!(allowed.verdict, PermissionVerdict::Allow);
     }
 }

@@ -82,6 +82,13 @@
 - [0062 TUI 退出还原与 `pony resume <session-id>` 续接入口](0062-tui-exit-restore-and-resume-entry.md)
 - [0063 TUI Ask 覆盖层与取消反馈的用户可见边界](0063-tui-ask-user-overlay-and-cancel-feedback.md)
 
+- [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
+- [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)
+- [0066 MCP 通道闭合（T2）](0066-mcp-channel-closure.md)
+- [0067 进程外插件宿主协议 v1 与 hooks 沙箱加固（T3）](0067-plugin-host-protocol-and-hooks-sandbox.md)
+- [0068 五份契约版本化、conformance kit 与扩展点归属表（T4）](0068-contract-versioning-and-conformance-kit.md)
+- [0069 初始化页品牌标走终端图形协议（sixel/kitty/iTerm2），字符画降级为回退](proposed/0069-tui-splash-image-protocol.md)
+
 ### 已接替
 
 - [0024 PonySentry Agent Trace 上报契约与生命周期状态机](superseded/0024-ponysentry-agent-trace-ingest.md) —— 被 [0047](0047-agent-trace-otel-langfuse-migration.md) 接替（服务端 Trace 能力下线，改走 OTel → Langfuse）

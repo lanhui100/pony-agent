@@ -110,7 +110,10 @@ impl AgentRuntime {
         );
         let effective_images =
             self.resolve_turn_images(input, &preliminary_retrieved, &provider)?;
-        let tools = builtin_tools();
+        // ADR 0065 decision 8 / ADR 0066（T2）：模型工具面 = 内建面 + 已接入的外部工具
+        //（MCP/插件），外部条目按 (source_id, model_name) 稳定追加、会话内冻结；
+        // MCP 未配置或连接失败时该入口只返回内建面（fail-soft，不阻断会话启动）。
+        let tools = crate::agent::mcp_config::surface_tool_definitions();
         let planner_skills = self.capability_registry.read().unwrap_or_else(|e| e.into_inner()).list_skills_for_planner();
         let retrieved = if effective_images.is_empty() {
             preliminary_retrieved

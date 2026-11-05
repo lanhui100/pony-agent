@@ -39,7 +39,7 @@
     "test:tauri:smoke": "node scripts/tauri-smoke.js",
     "secrets:check": "node scripts/check-secrets.mjs --staged",
     "secrets:check:all": "node scripts/check-secrets.mjs --all",
-    "verify": "npm run version:check && npm run secrets:check && npm run test:unit && npm run build && npm run contract:check && npm run cargo:check:shared",
+    "verify": "npm run version:check && npm run secrets:check && npm run test:unit && npm run build && npm run contract:check && npm run cargo:check:shared && npm run ext:check",
     "preview": "vite preview",
     "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri",
@@ -51,7 +51,9 @@
     "version:minor": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -Segment minor",
     "version:major": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -Segment major",
     "version:dryrun": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -DryRun",
-    "version:show": "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"Get-Content .version.json | ConvertFrom-Json | ForEach-Object { Write-Host ('core: {0}.{1}.{2}' -f $_.core.major, $_.core.minor, $_.core.patch); Write-Host ('tauri: {0}.{1}.{2}' -f $_.tauri.major, $_.tauri.minor, $_.tauri.patch) }\""
+    "version:show": "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"Get-Content .version.json | ConvertFrom-Json | ForEach-Object { Write-Host ('core: {0}.{1}.{2}' -f $_.core.major, $_.core.minor, $_.core.patch); Write-Host ('tauri: {0}.{1}.{2}' -f $_.tauri.major, $_.tauri.minor, $_.tauri.patch) }\"",
+    "ext:check": "node scripts/gen-extension-points.mjs --check",
+    "conformance:test": "cargo test -p pony-agent-core --test conformance"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",

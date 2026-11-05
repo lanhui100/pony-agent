@@ -467,10 +467,22 @@ pub struct GovernedDispatcher {
     inner: Arc<Inner>,
 }
 
-pub(crate) struct Inner {
+/// One atomically published **tool surface generation**: the registry snapshot, the primitive
+/// handler table bound to it, and the turn tool view derived from that snapshot.
+///
+/// ADR 0065 decision 3: a generation is immutable once published and replaced wholesale, so no
+/// observer can ever see "descriptor visible but its handler is not ready" (or the reverse:
+/// a handler reachable whose descriptor vanished).
+#[derive(Clone)]
+pub(crate) struct ToolSurfaceGeneration {
     registry: Arc<ToolRegistrySnapshot>,
+    handlers: BTreeMap<String, Arc<dyn PrimitiveToolHandler>>,
+    turn_view: TurnToolView,
+}
+
+pub(crate) struct Inner {
+    surface: RwLock<Arc<ToolSurfaceGeneration>>,
     clock: Arc<dyn RuntimeClock>,
-    handlers: Mutex<BTreeMap<String, Arc<dyn PrimitiveToolHandler>>>,
     composite_handlers: Mutex<BTreeMap<String, Arc<dyn CompositeToolHandler>>>,
     composite_authority: Mutex<BTreeMap<String, BTreeSet<String>>>,
     pre_dispatch_hooks: Mutex<Vec<Arc<dyn PreDispatchHook>>>,
@@ -478,20 +490,49 @@ pub(crate) struct Inner {
     sandbox_backend: RwLock<Option<Arc<dyn SandboxBackend>>>,
     lifecycle_observers: Mutex<Vec<Arc<dyn DispatchLifecycleObserver>>>,
     pending_requests: Mutex<BTreeMap<String, PendingControlRequest>>,
-    turn_view: RwLock<TurnToolView>,
     default_context: RwLock<DispatchContext>,
     config: Mutex<DispatchBudgetConfig>,
     request_seq: AtomicU64,
     nonce_seq: AtomicU64,
 }
 
+impl Inner {
+    /// The currently published tool surface generation (cheap `Arc` clone).
+    fn surface(&self) -> Arc<ToolSurfaceGeneration> {
+        Arc::clone(&self.surface.read().expect("dispatcher tool surface poisoned"))
+    }
+
+    /// Copy-on-write publish of the current generation. Every mutation of the surface (handler
+    /// registration, turn-view replacement, atomic swap) goes through this one door.
+    fn mutate_surface(&self, mutate: impl FnOnce(&mut ToolSurfaceGeneration)) {
+        let mut guard = self
+            .surface
+            .write()
+            .expect("dispatcher tool surface poisoned");
+        let mut next = ToolSurfaceGeneration::clone(guard.as_ref());
+        mutate(&mut next);
+        *guard = Arc::new(next);
+    }
+
+    /// Publish a whole generation atomically.
+    fn publish_surface(&self, next: ToolSurfaceGeneration) {
+        *self
+            .surface
+            .write()
+            .expect("dispatcher tool surface poisoned") = Arc::new(next);
+    }
+}
+
 impl GovernedDispatcher {
     pub fn new(registry: Arc<ToolRegistrySnapshot>, clock: Arc<dyn RuntimeClock>) -> Self {
         let turn_view = registry.default_turn_tool_view();
         let inner = Arc::new(Inner {
-            registry: Arc::clone(&registry),
+            surface: RwLock::new(Arc::new(ToolSurfaceGeneration {
+                registry: Arc::clone(&registry),
+                handlers: BTreeMap::new(),
+                turn_view,
+            })),
             clock,
-            handlers: Mutex::new(BTreeMap::new()),
             composite_handlers: Mutex::new(BTreeMap::new()),
             composite_authority: Mutex::new(BTreeMap::new()),
             pre_dispatch_hooks: Mutex::new(Vec::new()),
@@ -499,7 +540,6 @@ impl GovernedDispatcher {
             sandbox_backend: RwLock::new(None),
             lifecycle_observers: Mutex::new(Vec::new()),
             pending_requests: Mutex::new(BTreeMap::new()),
-            turn_view: RwLock::new(turn_view),
             default_context: RwLock::new(DispatchContext::default()),
             config: Mutex::new(DispatchBudgetConfig::default()),
             request_seq: AtomicU64::new(0),
@@ -515,11 +555,228 @@ impl GovernedDispatcher {
         descriptor_id: impl Into<String>,
         handler: Arc<dyn PrimitiveToolHandler>,
     ) {
+        let descriptor_id = descriptor_id.into();
         self.inner
-            .handlers
-            .lock()
-            .expect("dispatcher handler registry poisoned")
-            .insert(descriptor_id.into(), handler);
+            .mutate_surface(|surface| {
+                surface.handlers.insert(descriptor_id, handler);
+            });
+    }
+
+    /// ADR 0065 decision 3 — the atomic tool-surface swap seam (T2's prerequisite).
+    ///
+    /// Publishes **snapshot + primitive handler table + derived turn view as one unit**: either
+    /// the whole generation becomes visible or none of it does, so an observer can never see a
+    /// descriptor whose handler is not yet registered (that intermediate state is exactly what a
+    /// two-step "set registry, then register handlers" API would expose to a concurrent dispatch).
+    ///
+    /// Contract (ADR 0065 decision 3, frozen as the outward-facing seam T2 builds on):
+    /// - **整面替换 (wholesale replacement)**: `handlers` replaces the primitive handler table —
+    ///   it is not a merge. The published generation swaps registry snapshot + handler table +
+    ///   derived turn view together, so no entry of the previous surface (descriptor *or*
+    ///   execution body) survives the swap.
+    /// - `snapshot_id` must match `registry.snapshot_id` (both are the same fact; the argument is
+    ///   the caller's assertion, re-checked against the snapshot it hands over).
+    /// - **整面自洽校验 (whole-surface self-consistency)**: the pair is validated before anything
+    ///   is published. Rejected with `Err` + the previous surface left fully intact when:
+    ///   (a) a descriptor introduced by this swap has no handler — that would create exactly the
+    ///   visible-but-unexecutable entry the atomic unit must make unobservable; (b) a descriptor
+    ///   that already had a handler loses it — a swap may not silently amputate an execution body;
+    ///   (c) a handler names a descriptor the new snapshot does not own — a stale/ghost binding;
+    ///   (d) duplicate handlers for one descriptor. Descriptors that were already published
+    ///   without a handler (builtin handlers registered separately after construction) are not
+    ///   retroactively required to have one; dispatch keeps failing closed with
+    ///   `no_handler_registered` for them.
+    /// - Composite handlers/authority are not part of the swap (they are builtin-only, registered
+    ///   at assembly time); external descriptors must not declare composites.
+    pub fn swap_tool_surface(
+        &self,
+        snapshot_id: &str,
+        registry: ToolRegistrySnapshot,
+        handlers: Vec<(String, Arc<dyn PrimitiveToolHandler>)>,
+    ) -> Result<(), String> {
+        let snapshot_id = snapshot_id.trim();
+        if snapshot_id.is_empty() {
+            return Err("tool surface snapshot id cannot be empty".to_string());
+        }
+        if snapshot_id != registry.snapshot_id {
+            return Err(format!(
+                "tool surface snapshot id `{snapshot_id}` does not match registry snapshot `{}`",
+                registry.snapshot_id
+            ));
+        }
+
+        let mut handler_table: BTreeMap<String, Arc<dyn PrimitiveToolHandler>> = BTreeMap::new();
+        for (descriptor_id, handler) in handlers {
+            let descriptor_id = descriptor_id.trim().to_string();
+            if descriptor_id.is_empty() {
+                return Err("tool surface handler descriptor id cannot be empty".to_string());
+            }
+            if handler_table.insert(descriptor_id.clone(), handler).is_some() {
+                return Err(format!(
+                    "tool surface contains a duplicate handler for descriptor `{descriptor_id}`"
+                ));
+            }
+        }
+
+        // Atomicity precondition (ADR 0065 decision 3): the generation is only published when
+        // descriptors and handlers agree for every entry this swap actually *introduces* —
+        //   (a) a descriptor that is new relative to the current surface must arrive with its
+        //       handler (otherwise the swap itself would create a visible-but-unexecutable
+        //       entry: the exact torn state the atomic unit must make unobservable), and
+        //   (b) a descriptor that already had a handler must keep one (a swap may not silently
+        //       amputate the execution body of a retained, already-executable descriptor).
+        //
+        // Descriptors that were already published *without* a handler (e.g. a dispatcher whose
+        // builtin handlers are registered separately after construction) are not retroactively
+        // required to have one: that configuration predates the swap, and dispatch keeps failing
+        // closed with `no_handler_registered`.
+        //
+        // A handler whose descriptor the snapshot does not own is a stale binding and is rejected
+        // too. Nothing is published on rejection, so the previous surface stays fully intact.
+        let current = self.inner.surface();
+        let missing_handlers = registry
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.identity.descriptor_id.as_str())
+            .filter(|descriptor_id| {
+                if handler_table.contains_key(*descriptor_id) {
+                    return false;
+                }
+                let previously_known = current
+                    .registry
+                    .descriptors
+                    .iter()
+                    .any(|descriptor| descriptor.identity.descriptor_id == *descriptor_id);
+                !previously_known || current.handlers.contains_key(*descriptor_id)
+            })
+            .collect::<Vec<_>>();
+        if !missing_handlers.is_empty() {
+            return Err(format!(
+                "tool surface swap rejected: descriptors without a handler: {}",
+                missing_handlers.join(", ")
+            ));
+        }
+        let unknown_handlers = handler_table
+            .keys()
+            .filter(|descriptor_id| {
+                registry
+                    .descriptors
+                    .iter()
+                    .all(|descriptor| &descriptor.identity.descriptor_id != *descriptor_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown_handlers.is_empty() {
+            return Err(format!(
+                "tool surface swap rejected: handlers without a descriptor in snapshot `{snapshot_id}`: {}",
+                unknown_handlers.join(", ")
+            ));
+        }
+
+        let registry = Arc::new(registry);
+        let turn_view = registry.default_turn_tool_view();
+        self.inner.publish_surface(ToolSurfaceGeneration {
+            registry,
+            handlers: handler_table,
+            turn_view,
+        });
+        Ok(())
+    }
+
+    /// ADR 0065 decision 6: adopt an external [`ToolProvider`] as a governed tool source.
+    ///
+    /// The provider's descriptors join the registry snapshot atomically together with their
+    /// `ExternalToolHandler` bindings (one `ToolSurfaceGeneration` publish), so the external
+    /// descriptors become model-visible only at the same instant they become executable. Every
+    /// external invocation then walks the full governed pipeline — origin authorization, schema
+    /// validation, policy decision, budget reservation, exactly-once lifecycle record — because
+    /// it is dispatched by `descriptor_id` through the same handler table as builtin tools.
+    ///
+    /// Re-registering the same `source_id` replaces that source **wholesale**: its previous
+    /// descriptors and their handler bindings are pruned in the same atomic publish, so a reload
+    /// can never leave a stale `Arc<dyn ToolProvider>` (and, for MCP, a live child process) bound
+    /// to a descriptor the new snapshot no longer owns. The pruned bindings are dropped as part of
+    /// the publish; `McpToolProvider`/`McpClient` release their child process in `Drop`.
+    pub fn register_tool_provider(
+        &self,
+        provider: Arc<dyn crate::agent::tools::ToolProvider>,
+    ) -> Result<(), String> {
+        use crate::agent::tool_runtime::ExternalToolHandler;
+        use crate::agent::tools::ToolDescriptorSource;
+
+        let source_id = provider.source_id().trim().to_string();
+        if source_id.is_empty() {
+            return Err("tool provider source id cannot be empty".to_string());
+        }
+        if source_id == "builtin-tools" {
+            return Err("tool provider cannot claim the builtin-tools source".to_string());
+        }
+
+        let descriptors = provider.list_tools();
+        for descriptor in &descriptors {
+            let descriptor_id = &descriptor.identity.descriptor_id;
+            if descriptor.identity.source == ToolDescriptorSource::Builtin {
+                return Err(format!(
+                    "tool provider `{source_id}` cannot register builtin descriptor `{descriptor_id}`"
+                ));
+            }
+            if descriptor.handler_provenance.source_id != source_id {
+                return Err(format!(
+                    "tool provider `{source_id}` returned descriptor `{descriptor_id}` owned by source `{}`",
+                    descriptor.handler_provenance.source_id
+                ));
+            }
+        }
+
+        let current = self.inner.surface();
+        let base_snapshot_id = current
+            .registry
+            .snapshot_id
+            .split("::")
+            .next()
+            .unwrap_or(current.registry.snapshot_id.as_str())
+            .to_string();
+        let next_snapshot_id = format!("{base_snapshot_id}::{source_id}");
+        // Registry-side validation (identity, namespace, provenance, reserved aliases, duplicate
+        // ids/aliases) happens here — an invalid external descriptor never becomes visible.
+        let next_registry = current
+            .registry
+            .replace_source(&source_id, next_snapshot_id.clone(), descriptors.clone())?;
+
+        // L3-B3：同一 `source_id` 重注册 = **该来源整代替换**，不是叠加。
+        // 先剪除该来源的旧 descriptor binding（handler 表），再装入新 binding；被剪除的
+        // `Arc<dyn PrimitiveToolHandler>` 在此处释放 ⇒ `Arc<dyn ToolProvider>` 引用计数归零 ⇒
+        // provider/子进程随之 Drop（MCP 重载不再永久持有上一代 server 子进程）。
+        let replaced_source_ids = current
+            .registry
+            .descriptors
+            .iter()
+            .filter(|descriptor| {
+                descriptor.handler_provenance.source_id == source_id
+                    && descriptor.identity.source != ToolDescriptorSource::Builtin
+            })
+            .map(|descriptor| descriptor.identity.descriptor_id.clone())
+            .collect::<Vec<_>>();
+
+        let mut handlers = current.handlers.clone();
+        for descriptor_id in &replaced_source_ids {
+            handlers.remove(descriptor_id);
+        }
+        for descriptor in &descriptors {
+            handlers.insert(
+                descriptor.identity.descriptor_id.clone(),
+                Arc::new(ExternalToolHandler::new(Arc::clone(&provider))),
+            );
+        }
+
+        let next_registry = Arc::new(next_registry);
+        let turn_view = next_registry.default_turn_tool_view();
+        self.inner.publish_surface(ToolSurfaceGeneration {
+            registry: next_registry,
+            handlers,
+            turn_view,
+        });
+        Ok(())
     }
 
     /// Register a composite handler. Children are limited to the descriptor's declared
@@ -601,20 +858,15 @@ impl GovernedDispatcher {
 
     /// Replace the current turn tool view. Model origins may only reach descriptors visible in
     /// this view; a snapshot mismatch with the registry fails closed at dispatch.
+    ///
+    /// The view is part of the published tool-surface generation, so replacing it is a
+    /// copy-on-write publish of that generation (never a torn update).
     pub fn set_turn_view(&self, view: TurnToolView) {
-        *self
-            .inner
-            .turn_view
-            .write()
-            .expect("dispatcher turn view poisoned") = view;
+        self.inner.mutate_surface(|surface| surface.turn_view = view);
     }
 
     pub fn turn_view(&self) -> TurnToolView {
-        self.inner
-            .turn_view
-            .read()
-            .expect("dispatcher turn view poisoned")
-            .clone()
+        self.inner.surface().turn_view.clone()
     }
 
     pub fn set_default_context(&self, context: DispatchContext) {
@@ -660,9 +912,13 @@ impl GovernedDispatcher {
         pipeline.outcome
     }
 
-    /// Current registry truth source.
-    pub fn registry(&self) -> &ToolRegistrySnapshot {
-        self.inner.registry.as_ref()
+    /// Current registry truth source (the snapshot of the published tool-surface generation).
+    ///
+    /// Returns the `Arc` rather than a borrow because the surface can be swapped atomically
+    /// (`swap_tool_surface` / `register_tool_provider`): a borrowed reference would have to be
+    /// held across a publish, which the generation model deliberately forbids.
+    pub fn registry(&self) -> Arc<ToolRegistrySnapshot> {
+        Arc::clone(&self.inner.surface().registry)
     }
 
     /// Injected clock (expiry / decision timestamps).
@@ -778,7 +1034,12 @@ impl Inner {
         request: &ToolDispatchRequest,
         context: &DispatchContext,
     ) -> PipelineOutcome {
-        let Some(descriptor) = self.resolve_descriptor(&request.descriptor_id) else {
+        // L3-B1（ADR 0065 decision 3 / 单一真值）：**每次 top-level dispatch 在入口捕获一次
+        // surface generation**，并把它贯穿 preflight / handler / 生命周期记录 / 子派发。
+        // 任何中途重读 live slot 都会让一次 publish（`swap_tool_surface` / `register_tool_provider`）
+        // 把一次调用撕成两代：「按 G1 授权、跑 G2 执行体」。
+        let surface = self.surface();
+        let Some(descriptor) = Self::resolve_descriptor_in(&surface, &request.descriptor_id) else {
             return PipelineOutcome {
                 outcome: DispatchError::new(
                     "unknown_descriptor",
@@ -791,7 +1052,7 @@ impl Inner {
         };
 
         // Step 1: origin authorization + exposure.
-        if let Err(error) = self.authorize_origin(&request.origin, descriptor) {
+        if let Err(error) = self.authorize_origin(&request.origin, &descriptor, &surface) {
             return PipelineOutcome {
                 outcome: error.into_outcome(&request.descriptor_id),
                 decision: None,
@@ -834,7 +1095,7 @@ impl Inner {
         };
 
         // Steps 2-4: raw validation, hooks, final validation, permission/sandbox decision.
-        let ready = match self.preflight_descriptor(&request.origin, context, request, descriptor) {
+        let ready = match self.preflight_descriptor(&request.origin, context, request, &descriptor) {
             Ok(ready) => ready,
             Err(error) => {
                 return PipelineOutcome {
@@ -848,7 +1109,7 @@ impl Inner {
         let outcome = match ready.decision.verdict {
             PermissionVerdict::Deny => deny_outcome(&request.descriptor_id, &ready),
             PermissionVerdict::ApprovalRequired | PermissionVerdict::WaitingHost => {
-                match self.persist_pending_request(context, request, &ready) {
+                match self.persist_pending_request(context, request, &ready, &surface) {
                     Ok(outcome) => outcome,
                     Err(error) => error.into_outcome(&request.descriptor_id),
                 }
@@ -866,9 +1127,9 @@ impl Inner {
                 } else {
                     let started = Instant::now();
                     let handler_result =
-                        self.run_handler(request, &ready, &ledger, &cancellation, context);
+                        self.run_handler(request, &ready, &ledger, &cancellation, context, &surface);
                     self.finalize_execution(
-                        descriptor,
+                        &descriptor,
                         request,
                         handler_result,
                         &ledger,
@@ -890,6 +1151,7 @@ impl Inner {
         &self,
         origin: &InvocationOrigin,
         descriptor: &ToolDescriptor,
+        surface: &ToolSurfaceGeneration,
     ) -> Result<(), DispatchError> {
         match origin {
             InvocationOrigin::Model => {
@@ -902,17 +1164,16 @@ impl Inner {
                         ),
                     ));
                 }
-                let view = self
-                    .turn_view
-                    .read()
-                    .expect("dispatcher turn view poisoned")
-                    .clone();
-                if view.snapshot_id != self.registry.snapshot_id {
+                // Turn view and registry ship in the same generation, so this check is a
+                // consistency invariant of the published surface (it can only trip if a caller
+                // installed a hand-built view from another snapshot generation).
+                let view = &surface.turn_view;
+                if view.snapshot_id != surface.registry.snapshot_id {
                     return Err(DispatchError::new(
                         "turn_view_snapshot_mismatch",
                         format!(
                             "turn view snapshot `{}` does not match registry snapshot `{}`",
-                            view.snapshot_id, self.registry.snapshot_id
+                            view.snapshot_id, surface.registry.snapshot_id
                         ),
                     ));
                 }
@@ -1086,9 +1347,15 @@ impl Inner {
         ledger: &Arc<BudgetLedger>,
         cancellation: &Arc<CancellationToken>,
         context: &DispatchContext,
+        surface: &Arc<ToolSurfaceGeneration>,
     ) -> Result<Value, DispatchError> {
         let descriptor = &ready.descriptor;
-        if let Some(handler) = self.get_primitive_handler(&descriptor.identity.descriptor_id) {
+        // 执行体必须来自**同一次捕获的代**，不得再读 live slot（L3-B1）。
+        if let Some(handler) = surface
+            .handlers
+            .get(&descriptor.identity.descriptor_id)
+            .cloned()
+        {
             return handler
                 .execute(&PrimitiveToolHandlerRequest {
                     descriptor_id: descriptor.identity.descriptor_id.clone(),
@@ -1113,8 +1380,14 @@ impl Inner {
                 ledger,
                 cancellation,
             );
+            // The child runner is pinned to the surface generation this composite started in: its
+            // `registry()` (read by composites for conservative permission aggregation) must agree
+            // with the handlers the children are dispatched to.
             let child_dispatch = ChildDispatch::new(
-                Arc::clone(self) as Arc<dyn ChildDispatchRunner>,
+                Arc::new(PinnedSurfaceRunner {
+                    inner: Arc::clone(self),
+                    surface: Arc::clone(surface),
+                }) as Arc<dyn ChildDispatchRunner>,
                 child_context,
             );
             let composite_request = CompositeToolHandlerRequest {
@@ -1196,27 +1469,27 @@ impl Inner {
         }
     }
 
-    fn get_primitive_handler(&self, descriptor_id: &str) -> Option<Arc<dyn PrimitiveToolHandler>> {
-        self.handlers
-            .lock()
-            .expect("dispatcher handler registry poisoned")
-            .get(descriptor_id)
-            .cloned()
-    }
-
-    /// Resolve a raw invocation name to a descriptor. The registry snapshot matches aliases
-    /// (product names, primitives, namespaced aliases); the dispatcher additionally matches the
-    /// canonical `descriptor_id` itself so callers can invoke a tool by its stable identity.
-    fn resolve_descriptor(&self, raw_name: &str) -> Option<&ToolDescriptor> {
-        if let Some(descriptor) = self.registry.resolve(raw_name) {
-            return Some(descriptor);
+    /// Resolve a raw invocation name **inside a pinned generation**. The registry snapshot matches
+    /// aliases (product names, primitives, namespaced aliases); the dispatcher additionally matches
+    /// the canonical `descriptor_id` itself so callers can invoke a tool by its stable identity.
+    ///
+    /// Returns an owned descriptor so the caller cannot accidentally keep borrowing the slot.
+    fn resolve_descriptor_in(
+        surface: &ToolSurfaceGeneration,
+        raw_name: &str,
+    ) -> Option<ToolDescriptor> {
+        if let Some(descriptor) = surface.registry.resolve(raw_name) {
+            return Some(descriptor.clone());
         }
         let trimmed = raw_name.trim();
-        self.registry
+        surface
+            .registry
             .descriptors
             .iter()
             .find(|descriptor| descriptor.identity.descriptor_id == trimmed)
+            .cloned()
     }
+
 
     fn get_composite_handler(&self, descriptor_id: &str) -> Option<Arc<dyn CompositeToolHandler>> {
         self.composite_handlers
@@ -1250,6 +1523,7 @@ impl Inner {
         context: &DispatchContext,
         request: &ToolDispatchRequest,
         ready: &PreflightedChild,
+        surface: &ToolSurfaceGeneration,
     ) -> Result<ToolOutcome, DispatchError> {
         if !context.host_control_available {
             return Err(DispatchError::new(
@@ -1312,7 +1586,7 @@ impl Inner {
             run_id: context.run_id.clone(),
             turn_id: context.turn_id.clone().unwrap_or_else(|| "unknown".to_string()),
             call_id: request.call_id.clone(),
-            descriptor_snapshot_id: self.registry.snapshot_id.clone(),
+            descriptor_snapshot_id: surface.registry.snapshot_id.clone(),
             descriptor_id: ready.descriptor.identity.descriptor_id.clone(),
             final_args_digest: ready.final_args_digest.clone(),
             policy_digest: ready.policy_digest.clone(),
@@ -1410,18 +1684,50 @@ impl Inner {
     }
 }
 
-impl ChildDispatchRunner for Inner {
+/// `ChildDispatchRunner` bound to one published tool-surface generation.
+///
+/// The trait's `registry()` hands out a `&ToolRegistrySnapshot` (composites read descriptor facts
+/// for conservative permission aggregation), which a swappable slot cannot lend out safely. The
+/// runner therefore owns the pinned `Arc` of the generation it was created for, so children
+/// resolve descriptors and handlers from **the same** generation — never a mix of old registry and
+/// new handlers.
+pub(crate) struct PinnedSurfaceRunner {
+    inner: Arc<Inner>,
+    surface: Arc<ToolSurfaceGeneration>,
+}
+
+impl std::ops::Deref for PinnedSurfaceRunner {
+    type Target = Inner;
+
+    fn deref(&self) -> &Inner {
+        self.inner.as_ref()
+    }
+}
+
+impl PinnedSurfaceRunner {
+    /// L3-B2：descriptor 解析必须用**钉住的代**，不能经 `Deref` 落到 `Inner` 的 live slot。
+    ///
+    /// 否则一次 publish 会让子调用「按新 descriptor 授权、跑钉住的旧 handler」——两个方向都是
+    /// 撕裂。此 inherent 方法遮蔽 `Deref` 目标的同名方法。
+    fn resolve_descriptor(&self, raw_name: &str) -> Option<ToolDescriptor> {
+        Inner::resolve_descriptor_in(&self.surface, raw_name)
+    }
+}
+
+impl ChildDispatchRunner for PinnedSurfaceRunner {
     fn preflight(
         &self,
         ctx: &ChildDispatchContext,
         request: &ChildDispatchRequest,
     ) -> Result<PreflightedChild, DispatchError> {
-        let descriptor = self.resolve_descriptor(&request.descriptor_id).ok_or_else(|| {
-            DispatchError::new(
-                "unknown_descriptor",
-                format!("unknown tool descriptor `{}`", request.descriptor_id),
-            )
-        })?;
+        let descriptor = self
+            .resolve_descriptor(&request.descriptor_id)
+            .ok_or_else(|| {
+                DispatchError::new(
+                    "unknown_descriptor",
+                    format!("unknown tool descriptor `{}`", request.descriptor_id),
+                )
+            })?;
         let descriptor_id = descriptor.identity.descriptor_id.clone();
         if ctx.lineage.contains(&descriptor_id) {
             return Err(DispatchError::new(
@@ -1473,7 +1779,7 @@ impl ChildDispatchRunner for Inner {
                 call_id: request.call_id.clone(),
                 arguments: request.arguments.clone(),
             },
-            descriptor,
+            &descriptor,
         )
     }
 
@@ -1497,7 +1803,13 @@ impl ChildDispatchRunner for Inner {
                 return DispatchError::new("budget_exhausted", message).into_outcome(&request.descriptor_id);
             }
         };
-        let Some(handler) = self.get_primitive_handler(&ready.descriptor.identity.descriptor_id)
+        // Pinned generation: the child must run against the handlers of the surface it was
+        // authorized in, never a handler published after its authorization.
+        let Some(handler) = self
+            .surface
+            .handlers
+            .get(&ready.descriptor.identity.descriptor_id)
+            .cloned()
         else {
             return DispatchError::new(
                 "no_handler_registered",
@@ -1547,26 +1859,27 @@ impl ChildDispatchRunner for Inner {
             call_id: request.call_id.clone(),
             arguments: ready.final_arguments.clone(),
         };
-        match self.persist_pending_request(&ctx.context, &top_request, &ready) {
+        match self.persist_pending_request(&ctx.context, &top_request, &ready, &self.surface) {
             Ok(outcome) => outcome,
             Err(error) => error.into_outcome(&request.descriptor_id),
         }
     }
 
     fn composite_handler(&self, descriptor_id: &str) -> Option<Arc<dyn CompositeToolHandler>> {
-        self.get_composite_handler(descriptor_id)
+        Inner::get_composite_handler(self, descriptor_id)
     }
 
     fn allowed_children_for(&self, descriptor: &ToolDescriptor) -> BTreeSet<String> {
-        self.allowed_children_for(descriptor)
+        Inner::allowed_children_for(self, descriptor)
     }
 
     fn registry(&self) -> &ToolRegistrySnapshot {
-        self.registry.as_ref()
+        // Pinned generation: never a mix of a new registry with old handlers.
+        self.surface.registry.as_ref()
     }
 
     fn emit(&self, record: &DispatchLifecycleRecord) {
-        self.emit(record);
+        Inner::emit(self, record);
     }
 }
 
@@ -1851,7 +2164,8 @@ mod tests {
     use crate::agent::tool_runtime::FakeClock;
     use crate::agent::tools::{
         ToolDescriptorSource, ToolDisplayMetadata, ToolExecutionPolicy, ToolHandlerProvenance,
-        ToolIdentity, ToolPermissionDeclaration, ToolPermissionScope,
+        ToolIdentity, ToolPermissionDeclaration, ToolPermissionScope, ToolProvider,
+        ToolProviderError,
     };
     use serde_json::json;
 
@@ -3175,5 +3489,319 @@ mod tests {
             validate_against_schema(&passed, &schema, "$", 0)
                 .expect("negative/zero integers must pass the gate into the parser");
         }
+    }
+
+    // ── ADR 0065：工具面原子换入（swap_tool_surface）与外部工具通道（ToolProvider） ──────────
+
+    /// An `mcp__demo__echo`-shaped external descriptor (source `demo`, reserved-alias free).
+    fn external_descriptor(tool: &str, exposure: ToolExposure) -> ToolDescriptor {
+        let descriptor_id = format!("mcp:demo:{tool}");
+        let model_name = format!("mcp__demo__{tool}");
+        ToolDescriptor {
+            identity: ToolIdentity {
+                descriptor_id: descriptor_id.clone(),
+                model_name: model_name.clone(),
+                canonical_name: model_name.clone(),
+                primitive_name: model_name.clone(),
+                source: ToolDescriptorSource::Mcp,
+            },
+            aliases: vec![descriptor_id, model_name],
+            description: "external test tool".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
+                "additionalProperties": false,
+            }),
+            kind: ToolKind::External,
+            exposure,
+            permission_declaration: ToolPermissionDeclaration::default(),
+            execution_policy: ToolExecutionPolicy::default(),
+            display_metadata: ToolDisplayMetadata::default(),
+            handler_provenance: ToolHandlerProvenance {
+                handler_kind: "external".to_string(),
+                source_id: "demo".to_string(),
+            },
+            source_revision: "demo-v1".to_string(),
+            composed_descriptor_ids: Vec::new(),
+        }
+    }
+
+    struct StubProvider {
+        source_id: String,
+        descriptors: Vec<ToolDescriptor>,
+        result: Result<Value, ToolProviderError>,
+    }
+
+    impl StubProvider {
+        fn new(descriptors: Vec<ToolDescriptor>, result: Result<Value, ToolProviderError>) -> Self {
+            Self {
+                source_id: "demo".to_string(),
+                descriptors,
+                result,
+            }
+        }
+    }
+
+    impl ToolProvider for StubProvider {
+        fn source_id(&self) -> &str {
+            &self.source_id
+        }
+
+        fn list_tools(&self) -> Vec<ToolDescriptor> {
+            self.descriptors.clone()
+        }
+
+        fn call(
+            &self,
+            _descriptor_id: &str,
+            _arguments: Value,
+        ) -> Result<Value, ToolProviderError> {
+            self.result.clone()
+        }
+    }
+
+    #[test]
+    fn swap_tool_surface_publishes_registry_and_handlers_as_one_unit() {
+        let first = registry(vec![descriptor(
+            "builtin:first",
+            ToolKind::Read,
+            ToolExposure::ModelVisible,
+        )]);
+        let dispatcher = dispatcher_for(Arc::clone(&first));
+        dispatcher.register_handler("builtin:first", echo_handler());
+        assert_eq!(
+            dispatch(
+                &dispatcher,
+                InvocationOrigin::Model,
+                "builtin:first",
+                "call-1",
+                json!({ "text": "one" })
+            )
+            .execution_status,
+            ToolExecutionStatus::Ok
+        );
+
+        // Swap to a generation that no longer contains `builtin:first` and whose handler table
+        // only covers `builtin:second`: the old handler must not survive the swap.
+        let second = ToolRegistrySnapshot::from_descriptors(
+            "test-snapshot-2",
+            vec![descriptor(
+                "builtin:second",
+                ToolKind::Read,
+                ToolExposure::ModelVisible,
+            )],
+        )
+        .expect("second snapshot must build");
+        dispatcher
+            .swap_tool_surface(
+                "test-snapshot-2",
+                second,
+                vec![("builtin:second".to_string(), echo_handler())],
+            )
+            .expect("consistent surface must swap");
+
+        assert_eq!(dispatcher.registry().snapshot_id, "test-snapshot-2");
+        assert_eq!(dispatcher.turn_view().snapshot_id, "test-snapshot-2");
+        assert_eq!(
+            error_code(&dispatch(
+                &dispatcher,
+                InvocationOrigin::Model,
+                "builtin:first",
+                "call-2",
+                json!({ "text": "one" })
+            ))
+            .as_deref(),
+            Some("unknown_descriptor"),
+            "a descriptor from the replaced generation must disappear with its handler table"
+        );
+        assert_eq!(
+            dispatch(
+                &dispatcher,
+                InvocationOrigin::Model,
+                "builtin:second",
+                "call-3",
+                json!({ "text": "two" })
+            )
+            .execution_status,
+            ToolExecutionStatus::Ok
+        );
+
+        // Swapping in a descriptor without a handler is rejected before publishing: the torn
+        // "visible but unexecutable" state is exactly what the atomic swap must make impossible,
+        // and a rejected swap leaves the previous surface intact.
+        let third = ToolRegistrySnapshot::from_descriptors(
+            "test-snapshot-3",
+            vec![
+                descriptor("builtin:second", ToolKind::Read, ToolExposure::ModelVisible),
+                descriptor("builtin:third", ToolKind::Read, ToolExposure::ModelVisible),
+            ],
+        )
+        .expect("third snapshot must build");
+        assert!(
+            dispatcher
+                .swap_tool_surface(
+                    "test-snapshot-3",
+                    third.clone(),
+                    vec![("builtin:second".to_string(), echo_handler())],
+                )
+                .is_err(),
+            "a visible descriptor without a handler must reject the swap"
+        );
+        assert_eq!(
+            dispatcher.registry().snapshot_id,
+            "test-snapshot-2",
+            "a rejected swap must not publish a partial surface"
+        );
+
+        // The same rules reject a handler table that names a descriptor the snapshot lacks.
+        assert!(dispatcher
+            .swap_tool_surface(
+                "test-snapshot-3",
+                third.clone(),
+                vec![
+                    ("builtin:second".to_string(), echo_handler()),
+                    ("builtin:third".to_string(), echo_handler()),
+                    ("builtin:ghost".to_string(), echo_handler()),
+                ],
+            )
+            .is_err());
+        assert_eq!(dispatcher.registry().snapshot_id, "test-snapshot-2");
+
+        // The caller's snapshot id is re-checked against the snapshot it hands over.
+        let mismatched = ToolRegistrySnapshot::from_descriptors(
+            "test-snapshot-4",
+            vec![descriptor(
+                "builtin:fourth",
+                ToolKind::Read,
+                ToolExposure::ModelVisible,
+            )],
+        )
+        .expect("fourth snapshot must build");
+        assert!(dispatcher
+            .swap_tool_surface("test-snapshot-5", mismatched, Vec::new())
+            .is_err());
+        assert_eq!(dispatcher.registry().snapshot_id, "test-snapshot-2");
+
+        // A consistent generation still swaps, and a descriptor without a handler that is simply
+        // absent from the surface keeps failing closed at dispatch (registry never fabricates one).
+        dispatcher
+            .swap_tool_surface(
+                "test-snapshot-3",
+                third,
+                vec![
+                    ("builtin:second".to_string(), echo_handler()),
+                    ("builtin:third".to_string(), echo_handler()),
+                ],
+            )
+            .expect("a complete generation must swap");
+        assert_eq!(
+            dispatch(
+                &dispatcher,
+                InvocationOrigin::Model,
+                "builtin:third",
+                "call-5",
+                json!({ "text": "three" })
+            )
+            .execution_status,
+            ToolExecutionStatus::Ok
+        );
+    }
+
+    #[test]
+    fn register_tool_provider_runs_external_descriptors_through_the_governed_pipeline() {
+        let dispatcher = dispatcher_for(registry(vec![descriptor(
+            "builtin:first",
+            ToolKind::Read,
+            ToolExposure::ModelVisible,
+        )]));
+        dispatcher.register_handler("builtin:first", echo_handler());
+
+        let provider = Arc::new(StubProvider::new(
+            vec![external_descriptor("echo", ToolExposure::ModelVisible)],
+            Ok(json!({ "external": "ok" })),
+        ));
+        dispatcher
+            .register_tool_provider(provider)
+            .expect("valid external descriptors must register");
+
+        // The external descriptor is model-visible and executable in the same generation.
+        assert_eq!(
+            dispatcher.registry().snapshot_id,
+            "test-snapshot-1::demo",
+            "registering a source re-versions the snapshot"
+        );
+        assert!(dispatcher
+            .registry()
+            .resolve("mcp__demo__echo")
+            .is_some());
+        let outcome = dispatch(
+            &dispatcher,
+            InvocationOrigin::Model,
+            "mcp__demo__echo",
+            "call-1",
+            json!({ "text": "hi" }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        assert!(
+            outcome
+                .result
+                .as_ref()
+                .expect("ok outcome carries a result")
+                .output
+                .contains("external"),
+            "the provider result must be returned verbatim"
+        );
+        // Builtin handlers survive a provider registration.
+        assert_eq!(
+            dispatch(
+                &dispatcher,
+                InvocationOrigin::Model,
+                "builtin:first",
+                "call-2",
+                json!({ "text": "one" })
+            )
+            .execution_status,
+            ToolExecutionStatus::Ok
+        );
+
+        // A structured provider failure keeps its source-specific error code.
+        let failing = Arc::new(StubProvider::new(
+            vec![external_descriptor("flaky", ToolExposure::ModelVisible)],
+            Err(ToolProviderError::new(
+                "mcp_timeout",
+                "server did not answer in time",
+            )),
+        ));
+        dispatcher
+            .register_tool_provider(failing)
+            .expect("a second source registration must succeed");
+        assert_eq!(
+            error_code(&dispatch(
+                &dispatcher,
+                InvocationOrigin::Model,
+                "mcp__demo__flaky",
+                "call-3",
+                json!({ "text": "hi" })
+            ))
+            .as_deref(),
+            Some("mcp_timeout"),
+            "external failures must stay distinguishable per source"
+        );
+
+        // An external provider cannot smuggle in a builtin descriptor.
+        let mut smuggled = external_descriptor("smuggle", ToolExposure::ModelVisible);
+        smuggled.identity = ToolIdentity {
+            descriptor_id: "builtin:smuggle".to_string(),
+            model_name: "smuggle".to_string(),
+            canonical_name: "smuggle".to_string(),
+            primitive_name: "smuggle".to_string(),
+            source: ToolDescriptorSource::Builtin,
+        };
+        let bad = Arc::new(StubProvider::new(vec![smuggled], Ok(json!({}))));
+        assert!(
+            dispatcher.register_tool_provider(bad).is_err(),
+            "external providers must not register builtin descriptors"
+        );
     }
 }

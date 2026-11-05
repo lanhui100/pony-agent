@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pony-agent.local/contracts/mcp-config.v1.schema.json",
+  "version": "mcp-config-v1",
+  "title": "Pony Agent MCP Configuration v1",
+  "description": "ADR 0066 决策 1/2/7 的 MCP 配置契约（版本串取 ADR 0066 决策 1 的 `mcp-config-v1`；ADR 0068 决策 1 表格把同一产物记作 `mcp-binding-v1`，两处不一致待裁决，本文件不擅自改名）。两层载体：<workspace>/.mcp.json（项目级）与 $PONY_AGENT_HOME/mcp.json（全局），键沿用 mcpServers 以兼容既有生态写法。配置层 fail-soft（单条坏配置只禁用该条，不拖垮启动），调用层 fail-closed。凭据只允许 ${env:VAR} 间接引用，禁止字面量 secret；未知字段容忍（前向兼容），未知必需字段 fail-closed 仅禁用该条。v1 只支持 stdio：出现 url 即视为远程传输声明并拒绝。",
+  "type": "object",
+  "required": ["mcpServers"],
+  "additionalProperties": true,
+  "properties": {
+    "mcpServers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/serverSpec" },
+      "description": "键为 server 名（外部工具命名空间 mcp__<server>__<tool> 的 <server> 段）。"
+    }
+  },
+  "definitions": {
+    "serverSpec": {
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "stdio 启动命令；启动前 env_clear() + F8a 白名单 scrub。"
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "参数数组；解析时不使用 shell 拼接。"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^\\$\\{env:[A-Za-z_][A-Za-z0-9_]*\\}$"
+          },
+          "description": "只允许 ${env:VAR} 间接引用（ADR 0066 决策 2）；字面量 secret 在配置加载期即拒绝。"
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "子进程工作目录；必须可解析且不越出允许范围，否则仅禁用该条。"
+        },
+        "disabled": {
+          "type": "boolean",
+          "description": "true = 保留配置但不连接、不产生工具面条目。"
+        }
+      },
+      "additionalProperties": true,
+      "not": { "required": ["url"] },
+      "description": "未知字段容忍（前向兼容）；url 属远程传输，v1 明确非目标（另立 ADR），故在此拒绝。"
+    }
+  }
+}

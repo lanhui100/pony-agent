@@ -6,6 +6,44 @@
 
 ## 待办
 
+- [x] `B019` - P1: T1 工具面单一真值闭合与外部工具通道（ADR 0065，W1）
+  - 路径：`crates/pony-agent-core/src/agent/{tools.rs,dispatcher.rs,governed_executor.rs,provider/mod.rs}`
+  - 描述：execute_internal 分派表化、`swap_tool_surface` 原子换入、拆 `is_builtin_tool_definition_set`、修只读模式按名嗅探漏洞、`ToolProvider` + `ExternalToolHandler`。
+  - 验收：cargo test -p pony-agent-core 全绿；45 内建工具表面不变量逐字节不变；外部 descriptor 经治理分派可执行。
+
+- [x] `B020` - P1: T2 MCP 通道闭合（ADR 0066，W2，依赖 B019）
+  - 路径：`crates/pony-agent-core/src/agent/{mcp_client.rs,mcp_resources.rs,capability_bridge.rs}`、`src-tauri/src/lib.rs`、`docs/observability.yaml`
+  - 描述：`.mcp.json` 配置加载（凭据只允许 `${env:VAR}`）+ host 命令 + MCP 工具→外部 descriptor + 错误码分源 + 脱敏。
+  - 验收：fixture stdio server 三跳、崩溃→`mcp_server_unavailable`、无残留进程、日志无 secret 字面量。
+
+- [x] `B021` - P1: T3 进程外插件宿主协议 v1 与 hooks 沙箱加固（ADR 0067，W1）
+  - 路径：`crates/pony-agent-core/src/agent/plugin_host/`、`hook_commands.rs`
+  - 描述：stdio JSON-RPC + `pony-plugin-v1` manifest + 能力默认拒绝 + 超时杀进程组；hooks 增 argv 形态与 env 白名单，legacy 保持可用。
+  - 验收：fixture 插件全链路；env 集合精确等于白名单；apiVersion 不符拒绝。
+
+- [x] `B022` - P1: T4 五份契约版本化 + conformance kit + 扩展点归属表（ADR 0068，W2 骨架 / W3 冻结）
+  - 路径：`docs/contracts/`、`crates/pony-agent-core/{tests/conformance.rs,src/bin/conformance.rs}`、`docs/architecture/extension-points.md`
+  - 描述：五契约 schema + 12 例（6 正 6 负）+ 归属表脚本生成（禁止手写副本）。
+  - 验收：`conformance --strict` Exit 0；归属表生成物 drift = 0。
+  - 结果：四件同批交付。lib 1295 passed / 0 failed；验收 70 例全绿（tool_surface 19 / plugin_host 11 / mcp_channel 12 / conformance 28）；`cargo check -p pony-agent-core` / `src-tauri cargo check` Exit 0；`npm run ext:check` PASS；observability `check-declaration.sh` / `audit-diff.sh` Exit 0。
+  - 顺带修复的真实缺陷：只读模式下外部写工具按名嗅探被放行（现按 descriptor 权限事实判定）；`swap_tool_surface` 曾出现「descriptor 可见但不可执行」；追加外部工具会使内建 45 工具落入 fallback（重复+变序，破 KV-cache 前缀）。
+  - 未做（明确非目标）：workflow 编排；T5 可见性与信任面（B023）；远程 streamable-http MCP；hooks 迁移到插件协议。
+
+- [ ] `B023` - P2: T5 外部能力的可见性与信任面（本批不做，ADR 0064 明确后续）
+  - 路径：`src/components/settings/`、`src/components/chat/WorkspaceTurnItem.vue`、`src/lib/runtime/`
+  - 描述：MCP 服务器管理（增删/启停/健康/最近错误）、授权记录与撤销、通用工具渲染 fallback（`toolIconByCanonicalName` 硬编码 13 条）、错误码用户可读文案，三端一致。
+  - 登记来源：ADR 0064 Non-Goals 第 8 条（缺它则 T2 上线即「装了但不知道装了什么」）。
+
+- [ ] `B024` - P2: `canonical_tool_name` 别名归一化收敛到 registry alias index
+  - 路径：`crates/pony-agent-core/src/agent/tools.rs:7352`
+  - 描述：T1 交付时明确留待后续：名称归一化仍是手写 match，与 registry alias index 并行存在，属潜在第二真值源。
+  - 登记来源：ADR 0065 决策 1（单源收尾项）
+
+- [ ] `B025` - P3: `ToolDescriptorSource` 增 `Plugin` 变体并把插件 descriptor 从 `dynamic` 切过去
+  - 路径：`crates/pony-agent-core/src/agent/tools.rs:404`、`crates/pony-agent-core/src/agent/plugin_host/mod.rs`
+  - 描述：当前插件工具挂 `Dynamic` + `descriptor_id=dynamic:plugin:<name>:<tool>`，来源枚举实为 4 值；新增 `Plugin` 为 additive，落地后契约 schema 枚举与归属表需重生（`--write`）。
+  - 登记来源：ADR 0067 偏差 1 / T4 复核
+
 - [ ] `B001` - P2: `TokenUsage` 序列化字段计数与实际字段对齐
   - 路径：`crates/pony-agent-core/src/agent/provider/mod.rs:348`
   - 描述：`serializer.serialize_struct("TokenUsage", 9)?` 声明容量 9 与实际序列化的 8 个字段不符（serde hint，无功能危害，但有微量序列化容量预分配漂移）。

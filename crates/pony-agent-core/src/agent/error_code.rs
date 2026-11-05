@@ -17,6 +17,11 @@ pub enum ErrorCategory {
     Skill,
     Hook,
     Turn,
+    /// 外部能力来源（ADR 0065 decision 9）：`mcp_*` 表示 MCP server 侧失败，
+    /// 与「名字确实未知」的 `unsupported_tool` 区分。
+    Mcp,
+    /// 进程外插件宿主侧失败（ADR 0067）：`plugin_unavailable`。
+    Plugin,
     Unknown,
 }
 
@@ -30,6 +35,8 @@ impl ErrorCategory {
             Self::Skill => "skill_",
             Self::Hook => "hook_",
             Self::Turn => "turn_",
+            Self::Mcp => "mcp_",
+            Self::Plugin => "plugin_",
             Self::Unknown => "unknown:",
         }
     }
@@ -98,6 +105,48 @@ pub enum ErrorCode {
     TurnFollowupLimit,
     TurnRepeatedFailure,
     TurnRecoveryLocalFallback,
+    // ── mcp_* / plugin_*（ADR 0065 decision 9：外部能力失败必须能区分来源） ──
+    /// MCP server 不可达（握手/传输失败）。语义上不等于「工具名未知」。
+    McpServerUnavailable,
+    /// MCP server 可达，但没有该工具。
+    McpToolNotFound,
+    /// MCP 工具调用超时。
+    McpTimeout,
+    /// MCP server 可达，但该次工具调用被 server 拒绝（JSON-RPC error）。ADR 0066 未枚举，
+    /// 用于把「服务端拒绝执行」与「服务器不可用 / 工具不存在」区分开。
+    McpToolError,
+    /// MCP 资源面在 v1 未接线（结构性 fail-closed，不是「来源临时不可用」）。
+    McpResourcesNotWired,
+    /// 进程外插件宿主不可用（未启动/退出/协议不符）。
+    PluginUnavailable,
+    /// 插件调用超时。
+    PluginTimeout,
+    /// 插件工具调用失败（插件侧返回错误）。
+    PluginToolError,
+    /// 插件能力被拒绝（授权/权限不足）。
+    PluginCapabilityDenied,
+    /// 插件声明了不支持的能力。
+    PluginCapabilityUnsupported,
+    /// 插件没有该工具。
+    PluginUnknownTool,
+    /// 插件子进程启动失败。
+    PluginSpawnFailed,
+    /// 插件 manifest 非法/不完整。
+    PluginManifestInvalid,
+    /// 插件 initialize 握手失败。
+    PluginInitializeFailed,
+    /// 插件协议错误（非法 JSON-RPC / 版本不符）。
+    PluginProtocolError,
+    /// 插件 API 版本不匹配。
+    PluginApiVersionMismatch,
+    /// 插件进程崩溃。
+    PluginCrash,
+    /// 插件调用未成功完成（非超时/崩溃的通用失败）。
+    PluginCallFailed,
+    /// 插件未获信任（未确认的插件来源）。
+    PluginUntrusted,
+    /// 插件 shutdown 未被确认（进程可能残留）。
+    PluginShutdownUnacknowledged,
     // ── unknown:*（C7.3 Fail-Closed 包装，原样保留） ──
     Unknown(String),
 }
@@ -169,6 +218,26 @@ impl ErrorCode {
             Self::TurnFollowupLimit => "turn_followup_limit".to_string(),
             Self::TurnRepeatedFailure => "turn_repeated_failure".to_string(),
             Self::TurnRecoveryLocalFallback => "turn_recovery_local_fallback".to_string(),
+            Self::McpServerUnavailable => "mcp_server_unavailable".to_string(),
+            Self::McpToolNotFound => "mcp_tool_not_found".to_string(),
+            Self::McpTimeout => "mcp_timeout".to_string(),
+            Self::PluginUnavailable => "plugin_unavailable".to_string(),
+            Self::McpToolError => "mcp_tool_error".to_string(),
+            Self::McpResourcesNotWired => "mcp_resources_not_wired".to_string(),
+            Self::PluginTimeout => "plugin_timeout".to_string(),
+            Self::PluginToolError => "plugin_tool_error".to_string(),
+            Self::PluginCapabilityDenied => "plugin_capability_denied".to_string(),
+            Self::PluginCapabilityUnsupported => "plugin_capability_unsupported".to_string(),
+            Self::PluginUnknownTool => "plugin_unknown_tool".to_string(),
+            Self::PluginSpawnFailed => "plugin_spawn_failed".to_string(),
+            Self::PluginManifestInvalid => "plugin_manifest_invalid".to_string(),
+            Self::PluginInitializeFailed => "plugin_initialize_failed".to_string(),
+            Self::PluginProtocolError => "plugin_protocol_error".to_string(),
+            Self::PluginApiVersionMismatch => "plugin_api_version_mismatch".to_string(),
+            Self::PluginCrash => "plugin_crash".to_string(),
+            Self::PluginCallFailed => "plugin_call_failed".to_string(),
+            Self::PluginUntrusted => "plugin_untrusted".to_string(),
+            Self::PluginShutdownUnacknowledged => "plugin_shutdown_unacknowledged".to_string(),
             Self::Unknown(raw) => raw.clone(),
         }
     }
@@ -258,6 +327,26 @@ impl ErrorCode {
             "turn_followup_limit" => Some(Self::TurnFollowupLimit),
             "turn_repeated_failure" => Some(Self::TurnRepeatedFailure),
             "turn_recovery_local_fallback" => Some(Self::TurnRecoveryLocalFallback),
+            "mcp_server_unavailable" => Some(Self::McpServerUnavailable),
+            "mcp_tool_not_found" => Some(Self::McpToolNotFound),
+            "mcp_timeout" => Some(Self::McpTimeout),
+            "plugin_unavailable" => Some(Self::PluginUnavailable),
+            "mcp_tool_error" => Some(Self::McpToolError),
+            "mcp_resources_not_wired" => Some(Self::McpResourcesNotWired),
+            "plugin_timeout" => Some(Self::PluginTimeout),
+            "plugin_tool_error" => Some(Self::PluginToolError),
+            "plugin_capability_denied" => Some(Self::PluginCapabilityDenied),
+            "plugin_capability_unsupported" => Some(Self::PluginCapabilityUnsupported),
+            "plugin_unknown_tool" => Some(Self::PluginUnknownTool),
+            "plugin_spawn_failed" => Some(Self::PluginSpawnFailed),
+            "plugin_manifest_invalid" => Some(Self::PluginManifestInvalid),
+            "plugin_initialize_failed" => Some(Self::PluginInitializeFailed),
+            "plugin_protocol_error" => Some(Self::PluginProtocolError),
+            "plugin_api_version_mismatch" => Some(Self::PluginApiVersionMismatch),
+            "plugin_crash" => Some(Self::PluginCrash),
+            "plugin_call_failed" => Some(Self::PluginCallFailed),
+            "plugin_untrusted" => Some(Self::PluginUntrusted),
+            "plugin_shutdown_unacknowledged" => Some(Self::PluginShutdownUnacknowledged),
             _ => None,
         };
         match mapped {
@@ -316,6 +405,26 @@ impl ErrorCode {
             | Self::TurnFollowupLimit
             | Self::TurnRepeatedFailure
             | Self::TurnRecoveryLocalFallback => ErrorCategory::Turn,
+            Self::McpServerUnavailable
+            | Self::McpToolNotFound
+            | Self::McpTimeout
+            | Self::McpToolError
+            | Self::McpResourcesNotWired => ErrorCategory::Mcp,
+            Self::PluginUnavailable
+            | Self::PluginTimeout
+            | Self::PluginToolError
+            | Self::PluginCapabilityDenied
+            | Self::PluginCapabilityUnsupported
+            | Self::PluginUnknownTool
+            | Self::PluginSpawnFailed
+            | Self::PluginManifestInvalid
+            | Self::PluginInitializeFailed
+            | Self::PluginProtocolError
+            | Self::PluginApiVersionMismatch
+            | Self::PluginCrash
+            | Self::PluginCallFailed
+            | Self::PluginUntrusted
+            | Self::PluginShutdownUnacknowledged => ErrorCategory::Plugin,
             Self::Unknown(_) => ErrorCategory::Unknown,
         }
     }
@@ -327,6 +436,14 @@ impl ErrorCode {
             Self::UpstreamTimeout | Self::UpstreamRateLimited | Self::UpstreamServerError | Self::UpstreamNetwork => {
                 Some(true)
             }
+            Self::McpTimeout => Some(true),
+            Self::McpToolNotFound => Some(false),
+            Self::PluginTimeout | Self::PluginCrash | Self::PluginSpawnFailed => Some(true),
+            Self::PluginCapabilityDenied
+            | Self::PluginCapabilityUnsupported
+            | Self::PluginManifestInvalid
+            | Self::PluginApiVersionMismatch
+            | Self::PluginUnknownTool => Some(false),
             Self::UpstreamAuth
             | Self::UpstreamQuota
             | Self::UpstreamContextOverflow
@@ -397,6 +514,99 @@ mod tests {
         assert_eq!(
             ErrorCode::from(SkillFailureLayer::UnsupportedComposition),
             ErrorCode::SkillUnsupportedComposition
+        );
+    }
+
+    /// ADR 0065 decision 9（收口复审 ADVISORY）：**实际抛出的** MCP/插件 wire code 必须全部
+    /// 注册进 `ErrorCode`，归入 `Mcp`/`Plugin` 分类，且不再落到 `unknown:<code>`。
+    #[test]
+    fn every_external_wire_code_is_registered_and_typed_by_source() {
+        let mcp_codes = [
+            "mcp_server_unavailable",
+            "mcp_tool_not_found",
+            "mcp_timeout",
+            "mcp_tool_error",
+            "mcp_resources_not_wired",
+        ];
+        let plugin_codes = [
+            "plugin_unavailable",
+            "plugin_timeout",
+            "plugin_tool_error",
+            "plugin_capability_denied",
+            "plugin_capability_unsupported",
+            "plugin_unknown_tool",
+            "plugin_spawn_failed",
+            "plugin_manifest_invalid",
+            "plugin_initialize_failed",
+            "plugin_protocol_error",
+            "plugin_api_version_mismatch",
+            "plugin_crash",
+            "plugin_call_failed",
+            "plugin_untrusted",
+            "plugin_shutdown_unacknowledged",
+        ];
+
+        for (codes, category) in [
+            (mcp_codes.as_slice(), ErrorCategory::Mcp),
+            (plugin_codes.as_slice(), ErrorCategory::Plugin),
+        ] {
+            for code in codes {
+                let parsed = ErrorCode::from_str(code);
+                assert_eq!(
+                    parsed.as_str(),
+                    *code,
+                    "wire code `{code}` 必须原样回显（append-only，不得改名既有码）"
+                );
+                assert_eq!(
+                    parsed.category(),
+                    category,
+                    "wire code `{code}` 必须归入其来源分类"
+                );
+                assert!(
+                    !parsed.as_str().starts_with("unknown:"),
+                    "wire code `{code}` 不得落到 unknown:*（ADR 0065 决策 9）"
+                );
+                assert_eq!(
+                    ErrorCode::from_str(code),
+                    parsed,
+                    "wire code `{code}` 的 from_str 必须稳定（幂等映射）"
+                );
+            }
+        }
+    }
+
+    /// ADR 0065 decision 9：外部能力失败必须能按来源区分，且 `unsupported_tool` 不再承担
+    /// 「外部能力未接线」的语义（名字未知才用它）。
+    #[test]
+    fn external_source_codes_are_distinguishable_per_source() {
+        for (code, expected, category) in [
+            (
+                "mcp_server_unavailable",
+                ErrorCode::McpServerUnavailable,
+                ErrorCategory::Mcp,
+            ),
+            (
+                "mcp_tool_not_found",
+                ErrorCode::McpToolNotFound,
+                ErrorCategory::Mcp,
+            ),
+            ("mcp_timeout", ErrorCode::McpTimeout, ErrorCategory::Mcp),
+            (
+                "plugin_unavailable",
+                ErrorCode::PluginUnavailable,
+                ErrorCategory::Plugin,
+            ),
+        ] {
+            let parsed = ErrorCode::from_str(code);
+            assert_eq!(parsed, expected, "wire code `{code}` must round-trip");
+            assert_eq!(parsed.as_str(), code, "wire code `{code}` must stay verbatim");
+            assert_eq!(parsed.category(), category);
+            assert!(parsed.as_str().starts_with(category.prefix()));
+        }
+        assert_ne!(
+            ErrorCode::from_str("unsupported_tool"),
+            ErrorCode::McpToolNotFound,
+            "`unsupported_tool` 只表示名字确实未知"
         );
     }
 }

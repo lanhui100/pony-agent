@@ -66,6 +66,11 @@
           "type": "string",
           "minLength": 1,
           "description": "wave-1 新增（additive-only）：承载 trace id 的 JSON 字段名（当前全仓库无结构化日志面，仍属 PA-119 债务，不主张已满足）。"
+        },
+        "trace_id": {
+          "type": "boolean",
+          "const": true,
+          "description": "wave-65 增量声明（additive-only；此前未在 schema 声明属既有漂移，按 wave-61 先例声明而非剪除）：logging 必含 trace_id 的简写承诺。不进入 required，强制口径仍由 dev-nfr-lint.py 与 .dev-team/nfr-lint.py 的 trace_id_required 分支承担。"
         }
       },
       "required": ["format", "trace_id_required"],
@@ -104,6 +109,68 @@
     "resource_release": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "observability": {
+      "type": "object",
+      "description": "wave-5 起在基线上扩展的观测面事实。wave-65 增量声明（此前未在 schema 声明属既有漂移，按 wave-61 先例声明而非剪除）。",
+      "properties": {
+        "exporter_flush_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3000,
+          "description": "导出器 flush 预算；网络类出口同样以 external_call_timeout_ms(<=3000) 为上限。"
+        },
+        "log_file_max_bytes": { "type": "integer", "minimum": 1 },
+        "setting_precedence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["settings", "env", "default"] }
+        },
+        "cost_precision_decimals": { "type": "integer", "minimum": 0 },
+        "cost_budget_semantics": { "type": "string", "minLength": 1 }
+      },
+      "required": [
+        "exporter_flush_timeout_ms",
+        "log_file_max_bytes",
+        "setting_precedence",
+        "cost_precision_decimals",
+        "cost_budget_semantics"
+      ],
+      "additionalProperties": false
+    },
+    "external_call_timeout_exceptions": {
+      "type": "array",
+      "description": "external_call_timeout_ms（=3000，请求级外部往返预算）的显式例外登记。wave-61 起形成，wave-65 增量声明进入 schema。纪律：①每条必须说明为何不套基线上限并给出替代保证；②网络类出网一律仍受 3000ms 上限；③wave-55/56/61 的既有豁免不得剪除。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "surface",
+          "code",
+          "semantics",
+          "why_not_base",
+          "guarantee",
+          "registered_at",
+          "updated_at"
+        ],
+        "properties": {
+          "surface": { "type": "string", "minLength": 1 },
+          "code": { "type": "string", "minLength": 1 },
+          "semantics": { "type": "string", "minLength": 1 },
+          "why_not_base": { "type": "string", "minLength": 1 },
+          "guarantee": { "type": "string", "minLength": 1 },
+          "known_gap_ref": { "type": "string", "minLength": 1 },
+          "l3p_blocking_resolution": { "type": "string", "minLength": 1 },
+          "registered_at": { "type": "string", "minLength": 1 },
+          "updated_at": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "logging_eprintln_exempt_note": {
+      "type": "string",
+      "minLength": 1,
+      "description": "wave-55 起追加的豁免说明（豁免覆盖的新增 eprintln 处数与「不含密文」事实）。wave-65 增量声明（此前未在 schema 声明属既有漂移）。"
     },
     "auto_continue_max": {
       "type": "integer",

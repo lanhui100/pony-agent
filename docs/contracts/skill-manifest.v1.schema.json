@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pony-agent.local/contracts/skill-manifest.v1.schema.json",
+  "version": "pony-skill-manifest-v1",
+  "title": "Pony Agent Skill Manifest v1",
+  "description": "ADR 0068 决策 1 的 skill manifest 契约：载体为 SKILL.md 的 YAML frontmatter（由 workspace_hotloader.rs 有界解析后归一为 JSON object），消费方是技能热加载与 D3 同名去重（键 = frontmatter name，缺省回落目录名）。键名沿用 frontmatter 字面写法（kebab-case），未知键容忍（解析器忽略未登记键）。",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": true,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "技能名，同时是 D3 去重键；缺省时回落目录名。"
+    },
+    "description": {
+      "type": "string",
+      "description": "触发描述；块列表写法在解析期以 ', ' 连接。"
+    },
+    "user-invocable": {
+      "type": "boolean",
+      "description": "是否允许用户直接调用；缺省按解析器语义为 true。"
+    },
+    "allowed-tools": {
+      "anyOf": [
+        { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        { "type": "string", "minLength": 1 }
+      ],
+      "description": "技能可用的工具名单；标量写法按逗号切分（解析器 normalize 后等价于数组）。空数组表示不额外授予任何工具。"
+    }
+  }
+}

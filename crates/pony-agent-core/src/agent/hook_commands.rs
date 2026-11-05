@@ -12,17 +12,35 @@
 //! - 超时：到点 kill 并返回错误（绝不悬挂回合）；
 //! - 未配置的 hook 名：退化为 Noop 语义（与既有行为一致）。
 //!
+//! # v1 沙箱加固（ADR 0067 决策 5，最小破坏）
+//!
+//! - **双形态**：新增 argv 形态
+//!   `{"argv": ["cmd","arg"], "timeoutMs": N, "cwd": "相对或绝对路径"}`——用 `Command::new(argv[0])`
+//!   直接 exec，不经 shell（无 `$VAR` / `;` / 管道解释面）。`command` 字符串形态保留为
+//!   **legacy**，旧配置零改动继续可用（本批不得拒绝旧配置）。
+//! - **环境白名单**：两形态都 `env_clear()` 后按 F8a 白名单透传
+//!   （[`crate::agent::plugin_host::capability::ENV_ALLOWLIST`]，与 MCP/插件同一份名单），
+//!   不再全量继承宿主环境（provider key / 内部 token 因此不再进入 hook 脚本）。
+//! - **cwd 限定**：`cwd` 必须落在会话工作区（`PONY_WORKSPACE_ROOT`，未设则进程 cwd）内，
+//!   `..` 逃逸与越界绝对路径一律拒绝；未声明 `cwd` 时沿用"工作区根"语义。
+//! - **默认仍关闭**：只有 `PONY_HOOKS_ENABLE=1`（或显式 `PONY_HOOKS_FILE`）才加载工作区配置。
+//! - **legacy 审计**：shell 形态每次执行记 `hook_deprecated_shell` 审计事件
+//!   （[`hook_audit_events`]），供后续 minor 周期评估弃用；本批**不**拒绝旧配置。
+//!
 //! 接线：`build_default_hook_executor()` 在 `PONY_HOOKS_FILE` 或 `<cwd>/.pony/hooks.json`
 //! 存在时加载配置，否则返回空执行器（Noop 等价）。
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+use crate::agent::plugin_host::capability::{apply_child_env, confine_dir};
 
 use crate::agent::hooks::{
     AgentHookDescriptor, AgentHookExecutor, HookClass,
@@ -40,6 +58,236 @@ pub const DEFAULT_HOOK_TIMEOUT_MS: u64 = 5_000;
 /// "进程已死、管道即将 EOF" 的正常情况（毫秒级）。注意 stdout/stderr 两条流共用同一截止
 /// 时间，因此总增量不超过本预算（而非每流各算一次）。
 const KILLED_READER_DRAIN_BUDGET: Duration = Duration::from_secs(1);
+
+/// 审计事件环形缓冲上限（进程内可观测面；持久化审计总线不在本批范围）。
+const HOOK_AUDIT_BUFFER_LIMIT: usize = 256;
+
+/// hook 执行审计事件。
+///
+/// 只承载**元数据**（事件名 / hook 名 / 结构性细节），绝不含 stdin payload 或命令输出内容
+/// ——payload 可能带工具入参，输出可能带用户数据。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookAuditEvent {
+    /// 事件名。当前：`hook_deprecated_shell`（legacy shell 形态被执行）、
+    /// `hook_timeout`（超时被杀）、`hook_cwd_denied`（cwd 越界被拒绝）。
+    pub event: String,
+    /// hook 名（配置键）。
+    pub hook_name: String,
+    /// 结构性细节。
+    pub detail: String,
+}
+
+// 全局审计缓冲是**进程级诊断面**（不是按 hook 隔离的）：并发的用例/轮次共享同一缓冲，
+// 因此用例断言必须按 hook 名过滤，否则会互相污染（曾踩坑：argv 用例误判"记了 legacy 事件"）。
+static HOOK_AUDIT_BUFFER: Mutex<Vec<HookAuditEvent>> = Mutex::new(Vec::new());
+
+/// 读取进程内审计事件快照（诊断/验收用）。
+pub fn hook_audit_events() -> Vec<HookAuditEvent> {
+    HOOK_AUDIT_BUFFER
+        .lock()
+        .map(|buffer| buffer.clone())
+        .unwrap_or_default()
+}
+
+/// 清空进程内审计事件（测试隔离用）。
+pub fn clear_hook_audit_events() {
+    if let Ok(mut buffer) = HOOK_AUDIT_BUFFER.lock() {
+        buffer.clear();
+    }
+}
+
+fn record_hook_audit(event: &str, hook_name: &str, detail: impl Into<String>) {
+    let record = HookAuditEvent {
+        event: event.to_string(),
+        hook_name: hook_name.to_string(),
+        detail: detail.into(),
+    };
+    if let Ok(mut buffer) = HOOK_AUDIT_BUFFER.lock() {
+        buffer.push(record.clone());
+        if buffer.len() > HOOK_AUDIT_BUFFER_LIMIT {
+            buffer.remove(0);
+        }
+    }
+    if let Ok(line) = serde_json::to_string(&json!({
+        "event": record.event,
+        "hookName": record.hook_name,
+        "detail": record.detail,
+    })) {
+        eprintln!("[pony-agent][hooks][audit] {line}");
+    }
+}
+
+/// hook 的调用形态（ADR 0067 决策 5 的双形态之一）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HookInvocation {
+    /// legacy：shell 命令串（Unix `sh -c` / Windows `cmd /C`）。
+    Shell { command: String },
+    /// v1：argv 直接 exec（不经 shell，无元字符解释面）。
+    Argv { argv: Vec<String> },
+}
+
+/// 已归一化的 hook 配置（legacy [`CommandHookSpec`] 是它的 shell 特例）。
+///
+/// 为什么不让 `CommandHookSpec` 直接长出 argv 字段：该结构体是两个字段的**冻结公开契约**
+/// （存量验收测试以 struct literal 构造 `CommandHookSpec { command, timeout_ms }`），
+/// 加字段会破坏旧配置与旧调用方。因此 v1 形态放在本结构体，legacy 形态经
+/// `From<&CommandHookSpec>` 无损转换。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookSpec {
+    /// 调用形态。
+    pub invocation: HookInvocation,
+    /// 超时毫秒（0/缺省 → [`DEFAULT_HOOK_TIMEOUT_MS`]）。
+    pub timeout_ms: u64,
+    /// 工作目录（相对/绝对；必须落在会话工作区内；缺省 = 工作区根）。
+    pub cwd: Option<PathBuf>,
+}
+
+impl HookSpec {
+    /// legacy shell 形态。
+    pub fn shell(command: impl Into<String>) -> Self {
+        Self {
+            invocation: HookInvocation::Shell {
+                command: command.into(),
+            },
+            timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
+            cwd: None,
+        }
+    }
+
+    /// v1 argv 形态。
+    pub fn argv(argv: Vec<String>) -> Self {
+        Self {
+            invocation: HookInvocation::Argv { argv },
+            timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
+            cwd: None,
+        }
+    }
+
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// 是否为 legacy shell 形态（决定是否记 `hook_deprecated_shell` 审计事件）。
+    pub fn is_legacy_shell(&self) -> bool {
+        matches!(self.invocation, HookInvocation::Shell { .. })
+    }
+
+    fn effective_timeout(&self) -> Duration {
+        let ms = if self.timeout_ms == 0 {
+            DEFAULT_HOOK_TIMEOUT_MS
+        } else {
+            self.timeout_ms
+        };
+        Duration::from_millis(ms)
+    }
+}
+
+impl From<&CommandHookSpec> for HookSpec {
+    fn from(spec: &CommandHookSpec) -> Self {
+        Self {
+            invocation: HookInvocation::Shell {
+                command: spec.command.clone(),
+            },
+            timeout_ms: spec.timeout_ms,
+            cwd: None,
+        }
+    }
+}
+
+/// hooks 配置文件里单个 hook 的原始声明（`command` 与 `argv` 互斥）。
+#[derive(Deserialize)]
+struct RawHookSpec {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    argv: Option<Vec<String>>,
+    #[serde(default, rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    cwd: Option<String>,
+    /// 注册用（`build_hooks_from_json_str` 消费）：缺省 = ToolCallStart + ToolCallEnd。
+    #[serde(default, rename = "hookPoints")]
+    hook_points: Vec<String>,
+    /// 注册用：失败策略。
+    #[serde(default, rename = "onFailure")]
+    on_failure: Option<String>,
+}
+
+/// hooks 配置根。
+///
+/// 不启用 `deny_unknown_fields`：存量配置里的未知键可能是共享配置文件的其它节，直接拒绝
+/// 会让旧配置"配了就不生效"（ADR 0067 明确要求不得让旧配置失效）；安全面靠
+/// env 白名单 + cwd 限定 + 默认关闭收口，而不是靠 schema 严格性。
+#[derive(Deserialize)]
+struct RawHooksConfig {
+    #[serde(default)]
+    hooks: BTreeMap<String, RawHookSpec>,
+}
+
+impl RawHookSpec {
+    /// 归一化为 [`HookSpec`]（两种形态都校验，失败闭合）。
+    fn into_spec(self, name: &str) -> Result<HookSpec, String> {
+        let timeout_ms = self.timeout_ms.unwrap_or(DEFAULT_HOOK_TIMEOUT_MS);
+        let cwd = self.cwd.map(PathBuf::from);
+        match (self.command, self.argv) {
+            (Some(_), Some(_)) => Err(format!(
+                "hook `{name}` 不得同时声明 `command`（legacy shell）与 `argv`（v1 直接 exec）。"
+            )),
+            (None, None) => Err(format!("hook `{name}` 的 command 不能为空。")),
+            (Some(command), None) => {
+                if command.trim().is_empty() {
+                    return Err(format!("hook `{name}` 的 command 不能为空。"));
+                }
+                Ok(HookSpec {
+                    invocation: HookInvocation::Shell { command },
+                    timeout_ms,
+                    cwd,
+                })
+            }
+            (None, Some(argv)) => {
+                if argv.is_empty() {
+                    return Err(format!("hook `{name}` 的 argv 不能是空数组。"));
+                }
+                if argv.iter().any(|arg| arg.is_empty()) {
+                    return Err(format!(
+                        "hook `{name}` 的 argv 不允许空字符串元素（argv[0] 是可执行文件路径）。"
+                    ));
+                }
+                Ok(HookSpec {
+                    invocation: HookInvocation::Argv { argv },
+                    timeout_ms,
+                    cwd,
+                })
+            }
+        }
+    }
+}
+
+/// 会话工作区根（`PONY_WORKSPACE_ROOT`；未设则进程 cwd）。
+fn hook_workspace_root() -> PathBuf {
+    std::env::var_os("PONY_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// 解析 hook 的工作目录：显式 `cwd` 必须落在工作区内；缺省 = 工作区根。
+fn resolve_hook_cwd(hook_name: &str, cwd: Option<&Path>) -> Result<PathBuf, String> {
+    let root = hook_workspace_root();
+    match cwd {
+        Some(cwd) => confine_dir(&root, cwd).map_err(|err| {
+            record_hook_audit("hook_cwd_denied", hook_name, err.clone());
+            format!("hook `{hook_name}` 的工作目录被拒绝：{err}")
+        }),
+        None => Ok(root),
+    }
+}
 
 /// 单个命令钩子的配置。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,25 +310,24 @@ impl CommandHookSpec {
         self.timeout_ms = timeout_ms;
         self
     }
-
-    fn effective_timeout(&self) -> Duration {
-        let ms = if self.timeout_ms == 0 {
-            DEFAULT_HOOK_TIMEOUT_MS
-        } else {
-            self.timeout_ms
-        };
-        Duration::from_millis(ms)
-    }
+    // 注：超时归一化统一由 `HookSpec::effective_timeout` 承担（legacy spec 经
+    // `From<&CommandHookSpec>` 无损转换），避免第二处 0ms 兜底逻辑漂移。
 }
 
 /// 按 hook 名索引的命令钩子执行器。
 pub struct CommandHookExecutor {
-    specs: BTreeMap<String, CommandHookSpec>,
+    specs: BTreeMap<String, HookSpec>,
     fallback: NoopHookExecutor,
 }
 
 impl CommandHookExecutor {
+    /// 从 legacy shell spec 表构造（存量调用方零改动）。
     pub fn new(specs: BTreeMap<String, CommandHookSpec>) -> Self {
+        Self::from_specs(specs.iter().map(|(name, spec)| (name.clone(), spec.into())).collect())
+    }
+
+    /// 从归一化 spec 表构造（支持 argv 形态与 cwd 限定）。
+    pub fn from_specs(specs: BTreeMap<String, HookSpec>) -> Self {
         Self {
             specs,
             fallback: NoopHookExecutor,
@@ -88,20 +335,10 @@ impl CommandHookExecutor {
     }
 
     /// 从 JSON 文本加载：`{"hooks":{"<name>":{"command":"...","timeoutMs":2000}}}`。
+    ///
+    /// v1 追加可选 argv 形态与 cwd 限定；`command` 与 `argv` 互斥。
     pub fn from_json_str(json_text: &str) -> Result<Self, String> {
-        #[derive(Deserialize)]
-        struct RawSpec {
-            command: String,
-            #[serde(default, rename = "timeoutMs")]
-            timeout_ms: Option<u64>,
-        }
-        #[derive(Deserialize)]
-        struct RawConfig {
-            #[serde(default)]
-            hooks: BTreeMap<String, RawSpec>,
-        }
-
-        let config: RawConfig = serde_json::from_str(json_text)
+        let config: RawHooksConfig = serde_json::from_str(json_text)
             .map_err(|err| format!("hooks 配置不是合法 JSON：{err}"))?;
 
         let mut specs = BTreeMap::new();
@@ -109,18 +346,9 @@ impl CommandHookExecutor {
             if name.trim().is_empty() {
                 return Err("hooks 配置中存在空 hook 名。".to_string());
             }
-            if raw.command.trim().is_empty() {
-                return Err(format!("hook `{name}` 的 command 不能为空。"));
-            }
-            specs.insert(
-                name,
-                CommandHookSpec {
-                    command: raw.command,
-                    timeout_ms: raw.timeout_ms.unwrap_or(DEFAULT_HOOK_TIMEOUT_MS),
-                },
-            );
+            specs.insert(name.clone(), raw.into_spec(&name)?);
         }
-        Ok(Self::new(specs))
+        Ok(Self::from_specs(specs))
     }
 
     /// 从文件加载配置。
@@ -139,11 +367,11 @@ impl CommandHookExecutor {
         self.specs.keys().map(String::as_str).collect()
     }
 
-    fn run_command(
+    fn run_hook(
         &self,
         descriptor: &AgentHookDescriptor,
         hook_point: TurnHookPoint,
-        spec: &CommandHookSpec,
+        spec: &HookSpec,
     ) -> Result<HookExecutionResult, String> {
         let started = Instant::now();
         let payload = json!({
@@ -154,29 +382,48 @@ impl CommandHookExecutor {
         })
         .to_string();
 
-        #[cfg(windows)]
-        let mut command = {
-            let mut cmd = Command::new("cmd");
-            cmd.arg("/C").arg(&spec.command);
-            cmd
-        };
-        #[cfg(not(windows))]
-        let mut command = {
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c").arg(&spec.command);
-            cmd
+        let mut command = match &spec.invocation {
+            HookInvocation::Shell { command: shell_command } => {
+                // legacy 形态：记审计事件，供后续 minor 周期评估弃用（本批不拒绝旧配置）。
+                record_hook_audit(
+                    "hook_deprecated_shell",
+                    &descriptor.name,
+                    "legacy `command`（sh -c / cmd /C）形态；建议迁移到 argv 形态",
+                );
+                #[cfg(windows)]
+                {
+                    let mut cmd = Command::new("cmd");
+                    cmd.arg("/C").arg(shell_command);
+                    cmd
+                }
+                #[cfg(not(windows))]
+                {
+                    let mut cmd = Command::new("sh");
+                    cmd.arg("-c").arg(shell_command);
+                    cmd
+                }
+            }
+            HookInvocation::Argv { argv } => {
+                // v1 形态：直接 exec，不经 shell。argv[0] 缺失已在校验阶段拒绝。
+                let mut cmd = Command::new(&argv[0]);
+                cmd.args(&argv[1..]);
+                cmd
+            }
         };
 
-        // Unix：独立进程组，超时时可连同 shell 派生的孙进程一起回收（对齐 MCP 客户端做法）。
+        // Unix：独立进程组，超时时可连同 shell/子命令派生的孙进程一起回收（对齐 MCP 客户端做法）。
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
 
-        if let Some(root) = std::env::var_os("PONY_WORKSPACE_ROOT") {
-            command.current_dir(root);
-        }
+        // 沙箱 1/2：cwd 限定在会话工作区内（显式 cwd 越界即失败闭合）。
+        let hook_cwd = resolve_hook_cwd(&descriptor.name, spec.cwd.as_deref())?;
+        command.current_dir(hook_cwd);
+
+        // 沙箱 2/2：env_clear + F8a 白名单（不再全量继承宿主环境）。
+        apply_child_env(&mut command, &[]);
 
         let mut child = command
             .stdin(Stdio::piped())
@@ -213,6 +460,11 @@ impl CommandHookExecutor {
                         let drain_deadline = Instant::now() + KILLED_READER_DRAIN_BUDGET;
                         let _ = join_reader_until(stdout_reader, drain_deadline);
                         let _ = join_reader_until(stderr_reader, drain_deadline);
+                        record_hook_audit(
+                            "hook_timeout",
+                            &descriptor.name,
+                            format!("{}ms 超时，已终止进程组", timeout.as_millis()),
+                        );
                         return Err(format!(
                             "hook `{}` 执行超时（{timeout:?}），已终止子进程（含子进程组）。",
                             descriptor.name
@@ -355,7 +607,7 @@ impl AgentHookExecutor for CommandHookExecutor {
         hook_point: TurnHookPoint,
     ) -> Result<HookExecutionResult, String> {
         match self.specs.get(&descriptor.name) {
-            Some(spec) => self.run_command(descriptor, hook_point, spec),
+            Some(spec) => self.run_hook(descriptor, hook_point, spec),
             // 未配置的 hook：保持既有 Noop 语义（含 hook_point / result kind 校验）。
             None => self.fallback.execute(descriptor, hook_point),
         }
@@ -499,23 +751,7 @@ fn parse_hook_point(value: &str) -> Result<TurnHookPoint, String> {
 pub fn build_hooks_from_json_str(
     json_text: &str,
 ) -> Result<(crate::agent::hooks::AgentHookRegistry, CommandHookExecutor), String> {
-    #[derive(Deserialize)]
-    struct RawSpec {
-        command: String,
-        #[serde(default, rename = "timeoutMs")]
-        timeout_ms: Option<u64>,
-        #[serde(default, rename = "hookPoints")]
-        hook_points: Vec<String>,
-        #[serde(default, rename = "onFailure")]
-        on_failure: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct RawConfig {
-        #[serde(default)]
-        hooks: BTreeMap<String, RawSpec>,
-    }
-
-    let config: RawConfig = serde_json::from_str(json_text)
+    let config: RawHooksConfig = serde_json::from_str(json_text)
         .map_err(|err| format!("hooks 配置不是合法 JSON：{err}"))?;
 
     let mut registry = crate::agent::hooks::AgentHookRegistry::new();
@@ -525,10 +761,6 @@ pub fn build_hooks_from_json_str(
         if name.trim().is_empty() {
             return Err("hooks 配置中存在空 hook 名。".to_string());
         }
-        if raw.command.trim().is_empty() {
-            return Err(format!("hook `{name}` 的 command 不能为空。"));
-        }
-
         let mut hook_points = Vec::new();
         for label in &raw.hook_points {
             let point = parse_hook_point(label)?;
@@ -554,6 +786,7 @@ pub fn build_hooks_from_json_str(
             class: HookClass::Guard,
             priority: 0,
             timeout_ms: raw.timeout_ms.unwrap_or(DEFAULT_HOOK_TIMEOUT_MS),
+            // 注：`raw` 在下方 `into_spec` 时被消费，因此上面的注册字段必须先取值。
             allowed_hook_points: hook_points,
             allowed_result_kinds: vec![HookResultKind::Allow, HookResultKind::Deny],
             can_block: true,
@@ -578,16 +811,12 @@ pub fn build_hooks_from_json_str(
         registry
             .register(descriptor)
             .map_err(|err| format!("注册 hook `{name}` 失败：{err}"))?;
-        specs.insert(
-            name,
-            CommandHookSpec {
-                command: raw.command,
-                timeout_ms: raw.timeout_ms.unwrap_or(DEFAULT_HOOK_TIMEOUT_MS),
-            },
-        );
+        // 形态归一化（`command` 与 `argv` 互斥、空值拒绝）：与 `from_json_str` 共用同一份校验。
+        let spec = raw.into_spec(&name)?;
+        specs.insert(name, spec);
     }
 
-    Ok((registry, CommandHookExecutor::new(specs)))
+    Ok((registry, CommandHookExecutor::from_specs(specs)))
 }
 
 /// 默认（注册表 + 执行器）：配置存在且被允许加载时启用命令钩子，否则空注册表 + Noop。
@@ -875,6 +1104,130 @@ mod tests {
         let value: Value = serde_json::from_str(&payload).expect("payload json");
         assert_eq!(value.get("hookName").and_then(Value::as_str), Some("guard"));
         assert!(value.get("hookPoint").and_then(Value::as_str).is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── v1 沙箱加固（ADR 0067 决策 5）：argv 形态 / cwd 限定 / legacy 审计 ──
+
+    #[test]
+    fn argv_form_runs_without_shell_and_keeps_legacy_audit_quiet() {
+        #[cfg(unix)]
+        {
+            // 审计缓冲是**进程全局**的（诊断用途），并行跑测试时其它用例的 legacy 事件会
+            // 落进同一缓冲。因此这里用本用例独占的 hook 名，并把断言限定到该名字上
+            // （属性不变：argv 形态不得被记成 legacy shell；只是不受其它用例干扰）。
+            let hook_name = format!("argv-guard-{}", uuid::Uuid::new_v4());
+            // argv 直接 exec：`/bin/echo` + 一个决策 JSON 字面量，完全不经 shell。
+            let mut specs = BTreeMap::new();
+            specs.insert(
+                hook_name.clone(),
+                HookSpec::argv(vec![
+                    "/bin/echo".to_string(),
+                    r#"{"decision":"allow","summary":"argv"}"#.to_string(),
+                ])
+                .with_timeout_ms(5_000),
+            );
+            let executor = CommandHookExecutor::from_specs(specs);
+            clear_hook_audit_events();
+            let result = executor
+                .execute(
+                    &descriptor(&hook_name, TurnHookPoint::ToolCallStart),
+                    TurnHookPoint::ToolCallStart,
+                )
+                .expect("argv hook must execute");
+            assert_eq!(result.result_kind, HookResultKind::Allow);
+            let leaked: Vec<HookAuditEvent> = hook_audit_events()
+                .into_iter()
+                .filter(|event| {
+                    event.event == "hook_deprecated_shell" && event.hook_name == hook_name
+                })
+                .collect();
+            assert!(
+                leaked.is_empty(),
+                "argv 形态不得被记成 legacy shell 弃用事件，实际 {leaked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_shell_form_records_deprecated_shell_audit_event() {
+        let dir = temp_dir("audit-legacy");
+        let script = write_hook_script(
+            &dir,
+            "legacy",
+            "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"allow\"}'\n",
+            "echo {\"decision\":\"allow\"}\r\n",
+        );
+        // 独占 hook 名：避免并行用例的 legacy 事件让本断言"白捡"通过。
+        let hook_name = format!("legacy-guard-{}", uuid::Uuid::new_v4());
+        let mut specs = BTreeMap::new();
+        specs.insert(
+            hook_name.clone(),
+            CommandHookSpec::new(script.to_string_lossy().to_string()),
+        );
+        let executor = CommandHookExecutor::new(specs);
+        clear_hook_audit_events();
+        executor
+            .execute(
+                &descriptor(&hook_name, TurnHookPoint::ToolCallStart),
+                TurnHookPoint::ToolCallStart,
+            )
+            .expect("legacy hook must keep working");
+        let events = hook_audit_events();
+        assert!(
+            events.iter().any(|event| event.event == "hook_deprecated_shell"
+                && event.hook_name == hook_name),
+            "legacy shell 形态必须记 hook_deprecated_shell 审计事件，实际 {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn argv_and_cwd_variants_are_parsed_and_conflicting_forms_rejected() {
+        let executor = CommandHookExecutor::from_json_str(
+            r#"{"hooks":{"guard":{"argv":["/bin/true"],"timeoutMs":120,"cwd":"."}}}"#,
+        );
+        // `.` 的工作目录在解析期不校验（执行期才限定），这里只验证两形态可解析。
+        let executor = executor.expect("argv 形态必须可解析");
+        assert_eq!(executor.hook_names(), vec!["guard"]);
+
+        let both = CommandHookExecutor::from_json_str(
+            r#"{"hooks":{"guard":{"command":"echo hi","argv":["/bin/true"]}}}"#,
+        )
+        .err()
+        .expect("command 与 argv 同时出现必须拒绝");
+        assert!(both.contains("互斥") || both.contains("不得同时"), "{both}");
+
+        let empty_argv = CommandHookExecutor::from_json_str(r#"{"hooks":{"guard":{"argv":[]}}}"#)
+            .err()
+            .expect("空 argv 必须拒绝");
+        assert!(empty_argv.contains("argv"), "{empty_argv}");
+    }
+
+    #[test]
+    fn execution_rejects_cwd_outside_the_workspace() {
+        let dir = temp_dir("cwd-escape");
+        let script = write_hook_script(
+            &dir,
+            "escape",
+            "#!/bin/sh\ncat >/dev/null\necho '{\"decision\":\"allow\"}'\n",
+            "echo {\"decision\":\"allow\"}\r\n",
+        );
+        let mut specs = BTreeMap::new();
+        specs.insert(
+            "guard".to_string(),
+            HookSpec::shell(script.to_string_lossy().to_string())
+                .with_timeout_ms(5_000)
+                .with_cwd("../../../../../../.."),
+        );
+        let executor = CommandHookExecutor::from_specs(specs);
+        let err = executor
+            .execute(
+                &descriptor("guard", TurnHookPoint::ToolCallStart),
+                TurnHookPoint::ToolCallStart,
+            )
+            .expect_err("cwd 越出工作区必须失败闭合");
+        assert!(err.contains("工作目录被拒绝"), "{err}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

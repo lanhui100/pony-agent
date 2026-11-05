@@ -1,0 +1,32 @@
+{
+  "apiVersion": "pony-plugin-v1",
+  "name": "echo-fixture",
+  "version": "0.1.0",
+  "capabilities": ["tools"],
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echo back the arguments.",
+      "inputSchema": { "type": "object" }
+    },
+    {
+      "name": "env",
+      "description": "Return the child process environment.",
+      "inputSchema": { "type": "object" }
+    },
+    {
+      "name": "sleep",
+      "description": "Sleep for arguments.ms milliseconds.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "ms": { "type": "integer" } }
+      }
+    },
+    {
+      "name": "crash",
+      "description": "Terminate the plugin process immediately.",
+      "inputSchema": { "type": "object" }
+    }
+  ],
+  "hookPoints": []
+}

@@ -35,7 +35,13 @@
     "worker_thread_shutdown",
     "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
     "wave9_job_handle_close_on_terminate_success",
-    "wave9_suspended_process_resume_fail_closed_cleanup"
+    "wave9_suspended_process_resume_fail_closed_cleanup",
+    "adr0065_swap_tool_surface_atomic_never_descriptor_visible_without_handler",
+    "adr0066_mcp_child_process_reaped_on_drop_source_replace_and_timeout",
+    "adr0067_plugin_call_deadline_comes_from_budget_ledger_then_kill_process_group",
+    "adr0067_plugin_host_drop_reaps_child_process_group_and_orphans",
+    "adr0067_hooks_child_env_whitelist_cwd_bounded_and_process_group_kill",
+    "adr0068_contract_schema_files_declare_version_and_breaking_additive_change"
   ],
   "auto_continue_max": 8,
   "goal_store_atomic_write": true,
@@ -72,6 +78,17 @@
       "l3p_blocking_resolution": "wave-61 v1.3 按 Lead 裁决：登记 NFR 豁免 + 基线复登；不修改 external_call_timeout_ms=3000，不放宽既有 streaming 例外",
       "registered_at": "2026-11-03",
       "updated_at": "2026-11-03 wave-61 v1.4"
+    },
+    {
+      "surface": "hooks 子进程（hooks.command legacy shell 形态 / hooks.argv 形态；载体 <workspace>/.pony/hooks.json，ADR 0067 决策 5）",
+      "code": "crates/pony-agent-core/src/agent/hook_commands.rs:35 DEFAULT_HOOK_TIMEOUT_MS = 5_000（生效点 CommandHookSpec::effective_timeout，配置键 timeoutMs；契约 docs/contracts/hooks.v1.schema.json）",
+      "semantics": "单次**本地子进程**执行预算（timeoutMs <= 5000，缺省 5000），非外部网络往返预算",
+      "why_not_base": "external_call_timeout_ms=3000 描述请求级外部（网络）往返预算；hooks 是本地子进程的启动+执行+回收，套 3000 既会截断合法钩子，也会改变既有配置行为（ADR 0067 决策 5 明确保留 legacy command 形态、不得拒绝存量配置）",
+      "guarantee": "超时到达即以子进程/进程组终止回收（Unix 独立进程组 + SIGKILL 树；Windows 无进程组属已知平台局限，尽力回收）；legacy shell 形态记 hook_deprecated_shell 审计事件；两形态均受 env 白名单、cwd 限定、默认关闭（PONY_HOOKS_ENABLE=1 才启用）约束。网络类出网仍以 external_call_timeout_ms（<=3000）为上限",
+      "known_gap_ref": "已知局限：Windows 无进程组，cmd /C 派生孙进程只能尽力回收（ADR 0067 决策 3 与后果节）",
+      "l3p_blocking_resolution": "Lead 裁决 C（2026-11-05）：为对齐 3000 而砍 hooks 默认超时会破坏既有配置行为，故登记例外；网络类出网仍受 external_call_timeout_ms 约束",
+      "registered_at": "2026-11-05",
+      "updated_at": "2026-11-05 wave-65 裁决 C"
     }
   ],
   "logging_eprintln_exempt_note": "wave-55 新增 5 处生产 eprintln（MCP 环境禁用键丢弃 1、secret store 明文回退 2、save_store/save_session_state 失败 2），均带错误上下文、不含密文；按 L3-P 复审 ADV-1 修正此前高报的 6。JSON+trace_id 结构化收敛仍属 PA-119 债务",

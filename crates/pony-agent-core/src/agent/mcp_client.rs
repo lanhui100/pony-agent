@@ -121,7 +121,7 @@ const MCP_SPEC_ENV_DENYLIST: &[&str] = &[
 /// 前缀拒绝：动态加载器与云厂商凭据族（`LD_*` / `DYLD_*` / `AWS_*`）。
 const MCP_SPEC_ENV_DENY_PREFIXES: &[&str] = &["LD_", "DYLD_", "AWS_"];
 
-fn is_denied_spec_env_key(key: &str) -> bool {
+pub(crate) fn is_denied_spec_env_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
     MCP_SPEC_ENV_DENYLIST.iter().any(|denied| upper == *denied)
         || MCP_SPEC_ENV_DENY_PREFIXES
@@ -129,26 +129,50 @@ fn is_denied_spec_env_key(key: &str) -> bool {
             .any(|prefix| upper.starts_with(prefix))
 }
 
-/// 代理变量脱敏：`http://user:pass@proxy:8080` → `http://proxy:8080`。
+/// 代理变量脱敏：剥掉 userinfo 后返回可透传值；`None` = **整体丢弃该变量**。
 ///
 /// 代理 URL 内嵌的 userinfo 是宿主凭据；第三方 MCP server 只需要知道"走哪个代理"，
-/// 不需要拿到宿主的代理账号口令。解析失败时按原样返回（不做猜测式改写）。
-fn redact_proxy_userinfo(value: &std::ffi::OsStr) -> std::ffi::OsString {
+/// 不需要拿到宿主的代理账号口令。
+///
+/// 处理顺序与 `plugin_host/capability.rs` 的 `redact_proxy_userinfo` **同口径**（安全 > 便利）：
+/// 1. **无 scheme 形态**（`user:pass@10.0.0.1:8080`）必须在 `Url::parse` **之前**处理——
+///    `url` 会把它解析成 scheme=`user`、path=`pass@10.0.0.1:8080` 的"合法 URL"，username
+///    为空，于是旧逻辑会把 userinfo 原样交给子进程（这正是要堵的凭据泄漏路径）；
+///    这里按 `userinfo@host[:port]` 形状剥掉 `@` 之前的部分。
+/// 2. 标准 URL：解析后清空 username/password，保留 scheme/host/port。
+/// 3. 含 `@` 但形状无法安全解析 ⇒ **整条丢弃**（调用方只把变量名打到 stderr，绝不打值）；
+///    不含 `@` 且无 `://` 的值没有 userinfo 可泄漏，原样保留（不做无谓改写）。
+fn redact_proxy_userinfo(value: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
     let Some(text) = value.to_str() else {
-        return value.to_os_string();
+        return None;
     };
+
+    if !text.contains("://") {
+        return match text.rsplit_once('@') {
+            Some((userinfo, remainder)) if !userinfo.is_empty() && !remainder.is_empty() => {
+                Some(std::ffi::OsString::from(remainder))
+            }
+            None => Some(value.to_os_string()),
+            Some(_) => None,
+        };
+    }
+
     let Ok(mut parsed) = url::Url::parse(text) else {
-        return value.to_os_string();
+        return None;
     };
-    let has_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
-    if !has_userinfo {
-        return value.to_os_string();
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return Some(value.to_os_string());
     }
     if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
-        return value.to_os_string();
+        return None;
     }
-    // `set_username("")` 会留下 `http://@host`，剥掉悬空的 `@`。
-    std::ffi::OsString::from(parsed.as_str().replace("://@", "://"))
+    let redacted = parsed.as_str().replace("://@", "://");
+    let redacted = if !text.ends_with('/') && redacted.ends_with('/') {
+        redacted.trim_end_matches('/').to_string()
+    } else {
+        redacted
+    };
+    Some(std::ffi::OsString::from(redacted))
 }
 
 fn is_proxy_env_name(name: &str) -> bool {
@@ -165,7 +189,16 @@ fn mcp_child_env(spec_env: &[(String, String)]) -> Vec<(std::ffi::OsString, std:
         // `std::env::var_os` 走 `GetEnvironmentVariableW`，大小写不敏感。
         if let Some(value) = std::env::var_os(name) {
             let value = if is_proxy_env_name(name) {
-                redact_proxy_userinfo(&value)
+                match redact_proxy_userinfo(&value) {
+                    Some(redacted) => redacted,
+                    None => {
+                        // 只打变量名，绝不打值（值里可能带代理账号口令）。
+                        eprintln!(
+                            "[pony-agent] 丢弃代理环境变量 `{name}`（无法安全剥离 userinfo）。"
+                        );
+                        continue;
+                    }
+                }
             } else {
                 value
             };
@@ -181,7 +214,15 @@ fn mcp_child_env(spec_env: &[(String, String)]) -> Vec<(std::ffi::OsString, std:
             continue;
         }
         let value = if is_proxy_env_name(key) {
-            redact_proxy_userinfo(std::ffi::OsStr::new(value))
+            match redact_proxy_userinfo(std::ffi::OsStr::new(value)) {
+                Some(redacted) => redacted,
+                None => {
+                    eprintln!(
+                        "[pony-agent] 丢弃显式声明的代理环境变量 `{key}`（无法安全剥离 userinfo）。"
+                    );
+                    continue;
+                }
+            }
         } else {
             std::ffi::OsString::from(value)
         };
@@ -239,6 +280,16 @@ pub struct McpToolSpec {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: Value,
+    /// MCP `annotations.readOnlyHint`（2024-11-05）。`None` = server 未声明；
+    /// 未声明一律按**可写**处理（fail-closed：读/写事实不猜测）。
+    pub read_only_hint: Option<bool>,
+}
+
+impl McpToolSpec {
+    /// 该工具声明的权限事实是否只读。缺失声明 ⇒ `false`（保守）。
+    pub fn is_read_only(&self) -> bool {
+        self.read_only_hint == Some(true)
+    }
 }
 
 /// MCP 客户端错误（结构化，调用方按 [`McpClientError::code`] 分支）。
@@ -268,6 +319,24 @@ impl McpClientError {
             Self::Protocol(_) => "protocol_error",
             Self::Server(_) => "server_error",
             Self::NotConnected => "not_connected",
+        }
+    }
+
+    /// 分源（外部能力）错误码（ADR 0065 decision 9 / ADR 0066 decision 4）。
+    ///
+    /// 与 [`Self::code`] 的分工：`code()` 是 MCP 客户端内部的传输/协议分类（既有冻结契约，
+    /// 不改值）；`wire_code()` 是暴露给模型与宿主的**分源**错误码，让调用方无需知道 MCP
+    /// 客户端内部实现就能区分「server 挂了 / 超时 / 工具不存在」。
+    pub fn wire_code(&self) -> &'static str {
+        match self {
+            Self::Spawn(_) | Self::Initialize(_) | Self::NotConnected | Self::Protocol(_) => {
+                "mcp_server_unavailable"
+            }
+            Self::Timeout(_) => "mcp_timeout",
+            // server 可达但这次工具调用被 server 拒绝（JSON-RPC error）：既不是「服务器不可用」，
+            // 也不是「工具不存在」。ADR 0066 未枚举该情形，这里用分源码 `mcp_tool_error`
+            // （不使用含糊的 `unsupported_tool`）。
+            Self::Server(_) => "mcp_tool_error",
         }
     }
 
@@ -516,9 +585,21 @@ impl McpClient {
                         .get("inputSchema")
                         .cloned()
                         .unwrap_or_else(|| json!({"type": "object"})),
+                    read_only_hint: tool
+                        .get("annotations")
+                        .and_then(|annotations| annotations.get("readOnlyHint"))
+                        .and_then(Value::as_bool),
                 })
             })
             .collect())
+    }
+
+    /// 非阻塞探测子进程是否已退出（崩溃/自行退出诊断用）。
+    ///
+    /// `Ok(None)` = 仍在运行；`Ok(Some(status))` = 已退出。调用方据此把「会话已死」翻译成
+    /// 分源错误码（`mcp_server_unavailable`），而不是等到下一次请求超时。
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
     }
 
     /// `tools/call`：调用工具并返回 `result` 对象。
@@ -807,6 +888,7 @@ mod tests {
             name: "echo".to_string(),
             description: None,
             input_schema: json!({"type": "object"}),
+            read_only_hint: None,
         }];
         let map = namespaced_tools("demo", &tools);
         assert!(map.contains_key("mcp__demo__echo"));
@@ -989,7 +1071,8 @@ for raw in sys.stdin:
     fn proxy_userinfo_is_redacted_before_reaching_the_child() {
         let redacted = redact_proxy_userinfo(std::ffi::OsStr::new(
             "http://proxy-user:s3cr3t@proxy.local:8080",
-        ));
+        ))
+        .expect("standard URL with userinfo must stay usable after redaction");
         let text = redacted.to_string_lossy().to_string();
         assert!(
             !text.contains("s3cr3t") && !text.contains("proxy-user"),
@@ -1001,8 +1084,42 @@ for raw in sys.stdin:
         );
 
         // 无 userinfo 时原样返回（不做猜测式改写）。
-        let untouched = redact_proxy_userinfo(std::ffi::OsStr::new("http://proxy.local:8080"));
+        let untouched = redact_proxy_userinfo(std::ffi::OsStr::new("http://proxy.local:8080"))
+            .expect("no userinfo => pass through");
         assert_eq!(untouched.to_string_lossy(), "http://proxy.local:8080");
+    }
+
+    /// L3-B-D：代理 userinfo 脱敏的 7 种形态矩阵（与 `plugin_host/capability.rs` 同口径）。
+    ///
+    /// 关键回归：**无 scheme** 的 `user:pass@10.0.0.1:8080` 会被 `Url::parse` 当成
+    /// scheme=`user` 的合法 URL（username 为空），旧逻辑因此把凭据原样交给子进程。
+    #[test]
+    fn proxy_userinfo_redaction_covers_seven_shapes() {
+        fn redact(input: &str) -> Option<String> {
+            redact_proxy_userinfo(std::ffi::OsStr::new(input))
+                .map(|value| value.to_string_lossy().to_string())
+        }
+
+        // 1. 带 scheme + 凭据 → 剥凭据保留 host:port
+        assert_eq!(
+            redact("http://user:pass@10.0.0.1:8080").as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
+        // 2. 无 scheme + 凭据（真实存在的写法）→ `@` 前段整体剥掉
+        assert_eq!(redact("user:pass@10.0.0.1:8080").as_deref(), Some("10.0.0.1:8080"));
+        // 3. 带 scheme 无凭据 → 原样
+        assert_eq!(
+            redact("https://proxy.local:3128").as_deref(),
+            Some("https://proxy.local:3128")
+        );
+        // 4. 无 scheme 无凭据 → 原样（`10.0.0.1:8080` 形状不能被误改）
+        assert_eq!(redact("10.0.0.1:8080").as_deref(), Some("10.0.0.1:8080"));
+        // 5. 畸形：`@` 后为空 → 整条丢弃，绝不原样透传
+        assert_eq!(redact("user:pass@"), None);
+        // 6. 畸形：`@` 前为空 → 丢弃
+        assert_eq!(redact("@10.0.0.1:8080"), None);
+        // 7. 非 UTF-8 不可得，用"含凭据但 host 缺失"的畸形 URL 代表不可安全解析 → 丢弃
+        assert_eq!(redact("http://user:pass@"), None);
     }
 
     /// F8a 真实验证：真实启动一个子进程（走 `/usr/bin/env python3` 这条需要 PATH

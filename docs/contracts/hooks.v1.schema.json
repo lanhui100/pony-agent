@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pony-agent.local/contracts/hooks.v1.schema.json",
+  "version": "agent-hooks-v1",
+  "title": "Pony Agent Hooks Configuration v1",
+  "description": "ADR 0067 决策 5 的 hooks 配置契约（载体 <workspace>/.pony/hooks.json，可用 PONY_HOOKS_FILE 覆盖；默认关闭，仅 PONY_HOOKS_ENABLE=1 时加载）。两种形态二选一：legacy shell 形态 {command}（Unix sh -c / Windows cmd /C，记 hook_deprecated_shell 审计）与 argv 形态 {argv,cwd}。两形态都受 env 白名单、cwd 限定与进程组回收约束。hookPoints 取值为 hooks.rs TurnHookPoint 的 snake_case 序列化名；缺省 = [tool_call_start, tool_call_end]。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hooks"],
+  "properties": {
+    "hooks": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/definitions/hookSpec" },
+      "description": "键为 hook 名（非空、同文件内唯一）；值必须恰为一种执行形态。"
+    }
+  },
+  "definitions": {
+    "hookSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "legacy shell 形态。仅保留兼容，不得直接拒绝存量配置；审计事件 hook_deprecated_shell。"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "argv 形态：不经 shell 拼接，argv[0] 为可执行体。"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000,
+          "description": "单次 hook 超时；缺省 5000ms（DEFAULT_HOOK_TIMEOUT_MS，hook_commands.rs:35）。本地子进程预算，不属于 NFR external_call_timeout_ms 的请求级外部往返预算；该例外已登记于 .dev-team/nfr-baseline.json 的 external_call_timeout_exceptions（2026-11-05 裁决 C），网络类出网仍以 3000ms 为上限。"
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "工作目录；必须落在 session workspace 内，越界 fail-closed。"
+        },
+        "hookPoints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/hookPoint" },
+          "description": "允许触发的钩子点；缺省 [tool_call_start, tool_call_end]。"
+        },
+        "onFailure": {
+          "enum": ["fail_turn", "failTurn", "ignore", "degrade"],
+          "description": "失败策略；未声明即 fail_turn，与 hook_commands.rs 解析口径一致。"
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["command"],
+          "not": { "required": ["argv"] }
+        },
+        {
+          "required": ["argv"],
+          "not": { "required": ["command"] }
+        }
+      ]
+    },
+    "hookPoint": {
+      "enum": [
+        "turn_prepare_start",
+        "turn_prepare_end",
+        "context_build_start",
+        "context_build_end",
+        "model_call_start",
+        "model_response_end",
+        "tool_call_start",
+        "tool_call_end",
+        "checkpoint_persist_start",
+        "checkpoint_persist_end",
+        "turn_finalize_start",
+        "turn_finalize_end",
+        "planner_turn_preflight",
+        "planner_tool_selection",
+        "planner_graph_decision",
+        "capability_resolve",
+        "skill_tool_actions_resolve",
+        "capability_source_ingress",
+        "skill_source_ingress"
+      ],
+      "description": "19 个 TurnHookPoint（hooks.rs，serde snake_case）。"
+    }
+  }
+}

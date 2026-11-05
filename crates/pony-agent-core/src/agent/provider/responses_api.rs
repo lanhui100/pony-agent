@@ -798,15 +798,9 @@ fn build_input_from_provider_messages(request: &ProviderRequest) -> Vec<Value> {
 
 /// Responses 工具定义：function 形态、name 平铺在 tool 对象上。
 fn responses_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
-    let contract_views = if is_builtin_tool_definition_set(tools) {
-        builtin_provider_contract_views()
-    } else {
-        tools
-            .iter()
-            .filter(|tool| !super::is_internal_builtin_tool_name(&tool.name))
-            .map(|tool| tool.contract_view())
-            .collect()
-    };
+    // ADR 0065 decision 4 / T2：统一走分层合并（内建 registry 投影 + 外部条目追加），
+    // 不再按「数组是不是内建集合」二选一，避免外部工具进入时整组内建工具掉进 fallback。
+    let contract_views = super::surface_contract_views(tools);
 
     contract_views
         .iter()

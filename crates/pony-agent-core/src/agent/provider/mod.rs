@@ -3460,16 +3460,93 @@ fn to_chat_role(role: &ProviderRole) -> &'static str {
     }
 }
 
-fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
-    let contract_views = if is_builtin_tool_definition_set(tools) {
-        builtin_provider_contract_views()
-    } else {
-        tools
-            .iter()
-            .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
-            .map(|tool| tool.contract_view())
-            .collect()
+/// 工具数组 → provider 契约视图（**唯一**构建入口，5 处 payload 共用）。
+///
+/// ADR 0065 decision 4 / ADR 0066（T2 交界修复）：此前是二选一分支 ——
+/// `is_builtin_tool_definition_set(tools)` 为真走 registry 投影，为假整组掉进逐条 fallback。
+/// 一旦外部 descriptor（MCP / 插件 / 动态工具）进入数组，判定为假 ⇒ 45 个内建工具同时丢掉
+/// registry 投影的去重与顺序（`Run`/`Read` 等产品名重复出现），模型工具面前缀被破坏。
+///
+/// 现在的规则是**分层合并**，而不是二选一：
+/// 1. 名字被内建快照承认的条目 ⇒ 整体替换为 registry 投影（去重、registry 序）。
+///    纯内建数组的输出与旧「is_builtin_tool_definition_set == true」分支**逐字节相同**。
+/// 2. 快照不认识的条目（`mcp__*` / `plugin__*` / 动态名）⇒ 按数组顺序追加在投影之后，
+///    逐条走 legacy `contract_view()`（名字原样透传，绝不伪造内建产品名）。
+/// 3. 两者都没有（旧 fallback 场景：调用方给了全是未知名字且无内建条目的数组）⇒ 保持旧行为。
+/// 工具数组 → provider 契约视图（**唯一**构建入口，5 处 payload 共用）。
+///
+/// **可见性说明**：`pub` 仅为满足契约验收（KV-cache 前缀不变量：追加外部工具后内建 38 项
+/// 视图逐字节不变、顺序不变）——它**不是**对外公共 API 承诺，crate 外消费者不要依赖；
+/// 语义演进以 `docs/decisions/proposed/0065-tool-surface-single-truth.md` 为准。
+pub fn surface_contract_views(
+    tools: &[ToolDefinition],
+) -> Vec<crate::agent::tools::ToolDefinitionContractView> {
+    if tools.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(registry) = crate::agent::tools::ToolRegistrySnapshot::builtin() else {
+        // 内建快照本身不可用属于装配期错误：退回旧 fallback，绝不 panic。
+        return legacy_fallback_contract_views(tools);
     };
+
+    let mut owned_primitives: Vec<&str> = Vec::new();
+    let mut external_views = Vec::new();
+    for tool in tools {
+        match registry.resolve(tool.name) {
+            Some(descriptor) => owned_primitives.push(descriptor.identity.primitive_name.as_str()),
+            None => {
+                if !is_internal_builtin_tool_name(&tool.name) {
+                    // 外部/动态工具：按数组顺序追加，身份仍是调用方给的名字
+                    // （绝不映射成内建产品名）。
+                    external_views.push(tool.contract_view());
+                }
+            }
+        }
+    }
+
+    if owned_primitives.is_empty() {
+        // 全是外部/动态名 ⇒ 旧 fallback 语义（含 internal 过滤），不虚构内建面。
+        return legacy_fallback_contract_views(tools);
+    }
+
+    // 数组是否覆盖了完整的模型可见内建面：只有此时才用 registry 投影（去重 + registry 序）。
+    // 子集调用方（例如给定 [workflow, subagent]）保持旧 fallback 行为——不得把部分工具视图
+    // 静默扩张成完整工具面（frozen 用例 `fallback_tool_payload_...` 锁定这一点）。
+    let full_builtin_surface = {
+        let Ok(views) = builtin_tool_surface().provider_contract_views() else {
+            return legacy_fallback_contract_views(tools);
+        };
+        views.iter().all(|view| {
+            owned_primitives
+                .iter()
+                .any(|primitive| *primitive == view.execution_primitive.as_str())
+        })
+    };
+    if !full_builtin_surface {
+        return legacy_fallback_contract_views(tools);
+    }
+
+    // 内建面 = registry 投影（去重 + registry 序），外部面追加其后（顺序稳定，见
+    // `mcp_config::surface_tool_definitions` 的 (source_id, model_name) 排序）。
+    let mut views = builtin_provider_contract_views();
+    views.extend(external_views);
+    views
+}
+
+/// 旧 fallback：逐条 legacy `contract_view()`，并挡掉已知 internal 的内建名。
+fn legacy_fallback_contract_views(
+    tools: &[ToolDefinition],
+) -> Vec<crate::agent::tools::ToolDefinitionContractView> {
+    tools
+        .iter()
+        .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
+        .map(|tool| tool.contract_view())
+        .collect()
+}
+
+fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
+    let contract_views = surface_contract_views(tools);
 
     contract_views
         .iter()
@@ -3487,15 +3564,7 @@ fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
 }
 
 fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
-    let contract_views = if is_builtin_tool_definition_set(tools) {
-        builtin_provider_contract_views()
-    } else {
-        tools
-            .iter()
-            .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
-            .map(|tool| tool.contract_view())
-            .collect()
-    };
+    let contract_views = surface_contract_views(tools);
 
     contract_views
         .iter()
@@ -3512,15 +3581,7 @@ fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
 fn provider_tool_contract_views(
     tools: &[ToolDefinition],
 ) -> Vec<crate::agent::tools::ToolDefinitionContractView> {
-    if is_builtin_tool_definition_set(tools) {
-        builtin_provider_contract_views()
-    } else {
-        tools
-            .iter()
-            .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
-            .map(|tool| tool.contract_view())
-            .collect()
-    }
+    surface_contract_views(tools)
 }
 
 fn builtin_provider_contract_views() -> Vec<crate::agent::tools::ToolDefinitionContractView> {
@@ -3538,14 +3599,42 @@ pub(crate) fn is_internal_builtin_tool_name(name: &str) -> bool {
         && matches!(tool_exposure_for_name(name), ToolExposure::Internal)
 }
 
+/// 工具集合身份判定（ADR 0065 decision 4）：**按 registry 快照事实**判断调用方交来的数组是不是
+/// 内建工具面，不再按数组长度 + 逐字节内容比对。
+///
+/// 旧判据的坑（T1/T2 共有地雷）：一旦外部 descriptor（MCP / 插件）进入数组，长度或内容比对
+/// 立刻失配 ⇒ 静默翻转到 fallback，45 个内建工具同时丢掉 descriptor 事实与 registry 排序，
+/// 而排序是 KV-cache 稳定前缀的一部分 ⇒ 前缀抖动。
+///
+/// 新判据：
+/// 1. 数组非空，且每个条目的名字都被内建快照按名字承认（任一 exposure）——名字是快照事实，
+///    描述/schema 由快照提供，所以数组里手写的描述内容不参与身份判定；
+/// 2. 数组覆盖快照投影的全部模型可见 primitive——子集调用方（planner 只给几个工具）仍走
+///    fallback，不会被静默扩张成完整工具面。
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_builtin_tool_definition_set(tools: &[ToolDefinition]) -> bool {
-    let expected = crate::agent::tools::builtin_tools();
-    tools.len() == expected.len()
-        && tools.iter().zip(expected.iter()).all(|(actual, builtin)| {
-            actual.name == builtin.name
-                && actual.description == builtin.description
-                && actual.input_schema == builtin.input_schema
+    use crate::agent::tools::{canonical_tool_name, ToolSurface};
+
+    if tools.is_empty() {
+        return false;
+    }
+    let Ok(surface) = ToolSurface::builtin() else {
+        return false;
+    };
+    if !tools
+        .iter()
+        .all(|tool| surface.registry.resolve(tool.name).is_some())
+    {
+        return false;
+    }
+    let Ok(views) = surface.provider_contract_views() else {
+        return false;
+    };
+    views.iter().all(|view| {
+        tools.iter().any(|tool| {
+            canonical_tool_name(tool.name) == Some(view.execution_primitive.as_str())
         })
+    })
 }
 
 fn first_openai_message<'a>(payload: &'a Value) -> Result<&'a Value, String> {
@@ -5448,15 +5537,7 @@ fn render_tool_definitions(tools: &[ToolDefinition]) -> String {
         return "none".to_string();
     }
 
-    let contract_views = if is_builtin_tool_definition_set(tools) {
-        builtin_provider_contract_views()
-    } else {
-        tools
-            .iter()
-            .filter(|tool| !is_internal_builtin_tool_name(&tool.name))
-            .map(|tool| tool.contract_view())
-            .collect()
-    };
+    let contract_views = surface_contract_views(tools);
 
     contract_views
         .iter()
@@ -6492,6 +6573,68 @@ mod tests {
         }
     }
 
+    /// ADR 0065 decision 4 / T2 交界不变量一：**纯内建数组**的输出必须与旧
+    /// `is_builtin_tool_definition_set == true` 分支逐字节相同（38 项产品面、去重、registry 序）。
+    #[test]
+    fn surface_contract_views_is_byte_identical_for_the_pure_builtin_array() {
+        let builtin = crate::agent::tools::builtin_tools();
+        assert_eq!(
+            surface_contract_views(&builtin),
+            builtin_provider_contract_views(),
+            "内建数组必须原样走 registry 投影（不得因重构丢去重/顺序/字段）"
+        );
+        assert_eq!(
+            surface_contract_views(&builtin).len(),
+            38,
+            "模型可见产品面仍是 38 项"
+        );
+    }
+
+    /// 交界不变量二：外部工具**只追加、不改序**。追加一个 `mcp__*` 条目后，内建 38 项必须
+    /// 逐字节不变且保持前缀，外部条目按数组顺序排在最后（KV-cache 前缀稳定）。
+    #[test]
+    fn surface_contract_views_appends_external_tools_after_an_unchanged_builtin_prefix() {
+        let mut tools = crate::agent::tools::builtin_tools();
+        tools.push(ToolDefinition {
+            name: "mcp__demo__echo",
+            description: "external echo",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        });
+        tools.push(ToolDefinition {
+            name: "mcp__demo__zebra",
+            description: "external zebra",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        });
+
+        let views = surface_contract_views(&tools);
+        let builtin_views = builtin_provider_contract_views();
+        assert_eq!(
+            views.len(),
+            builtin_views.len() + 2,
+            "外部条目只能追加"
+        );
+        assert_eq!(
+            &views[..builtin_views.len()],
+            &builtin_views[..],
+            "内建前缀必须逐字节不变（顺序/去重/字段）"
+        );
+        assert_eq!(
+            views[builtin_views.len()..]
+                .iter()
+                .map(|view| view.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mcp__demo__echo", "mcp__demo__zebra"],
+            "外部工具按数组顺序追加，且名字原样透传（不得被映射成内建产品名）"
+        );
+
+        // 单个外部工具也不得把内建面拖进 fallback（旧的二选一分支会产出 44 条重复视图）。
+        assert_ne!(
+            views.len(),
+            crate::agent::tools::builtin_tools().len(),
+            "绝不能退化成逐条 legacy fallback（那会重复 Run/Read 等产品名）"
+        );
+    }
+
     #[test]
     fn provider_does_not_infer_builtin_surface_from_tool_count() {
         let decoys = (0..crate::agent::tools::builtin_tools().len())
@@ -6514,6 +6657,45 @@ mod tests {
                 .and_then(Value::as_str)
                 == Some("decoy")
         }));
+    }
+
+    /// ADR 0065 decision 4：集合身份来自 registry 快照事实，不再来自数组长度/内容比对。
+    #[test]
+    fn builtin_tool_set_identity_comes_from_registry_facts_not_array_shape() {
+        let builtin = crate::agent::tools::builtin_tools();
+        assert!(
+            is_builtin_tool_definition_set(&builtin),
+            "the registry's own definition list must be recognized as the builtin surface"
+        );
+
+        // 内容（description / schema）不参与身份判定：名字由快照承认即可。
+        let rewritten = builtin
+            .iter()
+            .map(|definition| ToolDefinition {
+                name: definition.name,
+                description: "rewritten by a caller",
+                input_schema: json!({ "type": "object", "properties": {} }),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            is_builtin_tool_definition_set(&rewritten),
+            "identity is a snapshot fact, so caller-rewritten descriptions/schemas must not flip the branch"
+        );
+
+        // 子集不算内建面：否则会把 planner 的部分工具视图静默扩张成完整工具面。
+        let subset = builtin.iter().take(5).cloned().collect::<Vec<_>>();
+        assert!(!is_builtin_tool_definition_set(&subset));
+
+        // 快照不认识的动态名字一律不属于内建面。
+        let mut with_dynamic = builtin.clone();
+        with_dynamic.push(ToolDefinition {
+            name: "mcp__demo__echo",
+            description: "dynamic tool",
+            input_schema: json!({ "type": "object" }),
+        });
+        assert!(!is_builtin_tool_definition_set(&with_dynamic));
+
+        assert!(!is_builtin_tool_definition_set(&[]));
     }
 
     #[test]
