@@ -1,7 +1,7 @@
 {
   "ticket": "l2at-tui-overlay-cancel",
   "owner": "tui-test2 (independent Test Agent)",
-  "status": "red-frozen",
+  "status": "green-verified (impl by Executor; acceptance by Test Agent)",
   "frozen_at": "2026-11-05T20:48:37+08:00",
   "contract": ".dev-team/contract-matrix-tui-overlay-cancel.md",
   "adr": "docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md",
@@ -22,8 +22,20 @@
       "result": "9 passed / 4 failed",
       "receipt": "tests/acceptance/receipts/l2at-tui-overlay-cancel/red.log",
       "meta": "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-meta.txt",
-      "expected_failures": ["O1", "O2", "J1", "C9"],
-      "compat_passed_not_faked": ["O3", "O4", "O5", "O6", "O7", "O8"]
+      "expected_failures": [
+        "O1",
+        "O2",
+        "J1",
+        "C9"
+      ],
+      "compat_passed_not_faked": [
+        "O3",
+        "O4",
+        "O5",
+        "O6",
+        "O7",
+        "O8"
+      ]
     },
     "pty_real_link": {
       "command": "bash tests/acceptance/l2at-tui-overlay-cancel.sh",
@@ -31,7 +43,10 @@
       "result": "PASS=11 / FAIL=2",
       "receipt": "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-pty.log",
       "meta": "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-pty-meta.txt",
-      "expected_failures": ["C9", "J1"],
+      "expected_failures": [
+        "C9",
+        "J1"
+      ],
       "frames": [
         "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.png",
         "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.png",
@@ -77,8 +92,8 @@
     }
   ],
   "acceptance_for_implementation_green": {
-    "rust": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2   (exit 0；13 用例含 O1-O8/J1/C9)",
-    "pty": "bash tests/acceptance/l2at-tui-overlay-cancel.sh   (exit 0；PASS=16 FAIL=0)",
+    "rust": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2   (exit 0；14 用例含 O1-O8/J1/C9 + O1 夹具守卫)",
+    "pty": "bash tests/acceptance/l2at-tui-overlay-cancel.sh   (exit 0；PASS=15 FAIL=0)",
     "lead_gate": [
       "cargo check --manifest-path crates/pony-agent-core/Cargo.toml --all-targets  (Lead 统一跑，逐项保留原生 Exit Code)",
       "既有 TUI 回归（tui_render_layout / tui_stop_wave60 / tui_stop_key_feedback / tui_dialog_wave39 等）",
@@ -95,5 +110,41 @@
     "red_not_faked": "O3-O8 在红相全部通过，未修改断言强度制造失败",
     "compile_path_sane": "红相此前先跑通 --no-run，4 条失败均为运行期断言，不是编译/harness 错误；harness 失败在 Rust 侧显式 panic『HARNESS ERROR』与断言失败区分",
     "no_business_code_changed": "crates/pony-agent-core/src 下 0 处改动（red-meta.txt 记录）"
-  }
+  },
+  "test_revision": {
+    "reason": "O1 指标夹具缺陷（未设置 context_window_tokens ⇒ 正常帧指标行也无「上下文」段）+ CJK 宽字符空格口径缺陷",
+    "changed_paths": [
+      "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs"
+    ],
+    "contract_impact": "未放宽契约：O1 遮挡判据升级为「与关闭 Ask 的基线帧逐字一致」，并新增夹具前置条件守卫用例",
+    "test_file_sha256": "d465bfcfca6aa5bf38fc3a8eb32ef94e9407ea1971c6022d8b7a7060f5514f11",
+    "defect_evidence": "tests/acceptance/receipts/l2at-tui-overlay-cancel/o1-fixture-defect-evidence.txt"
+  },
+  "green_phase": {
+    "verified_at": "2026-11-05T21:05:00+08:00",
+    "rust_native": {
+      "command": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2",
+      "exit_code": 0,
+      "result": "14 passed / 0 failed",
+      "receipt": "tests/acceptance/receipts/l2at-tui-overlay-cancel/green.log"
+    },
+    "pty_real_link": {
+      "command": "bash tests/acceptance/l2at-tui-overlay-cancel.sh",
+      "exit_code": 0,
+      "result": "PASS=15 / FAIL=0",
+      "receipt": "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+      "summary": "tests/acceptance/receipts/l2at-tui-overlay-cancel/summary.json"
+    },
+    "frames_regenerated": true
+  },
+  "test_revisions": [
+    {
+      "sha": "4b9e241af205aee2e3ccbc85034c173ac96391ca",
+      "message": "test(tui): assert PTY screen has no structured log JSON leak",
+      "what": "S1 新增 O8 判据：终态帧与累计原始 pane 流不得含 \"level\":\"warn\" / \"provider_stream_cancelled\" / \"trace_id\":\"，并保留「已停止（用户中断）」断言；附判别力自检（同一判据必须命中红相归档屏幕）",
+      "defect": "otel::log 的 JSON 缺省写 stdout，TUI 只 dup2 stderr ⇒ 结构化日志混入全屏界面（修复：set_stderr_output(true)）",
+      "evidence": "tests/acceptance/receipts/l2at-tui-overlay-cancel/o8-structured-log-leak-evidence.txt",
+      "not_weakened": "既有 O1-O8/J1/C9 断言未改动，仅新增"
+    }
+  ]
 }

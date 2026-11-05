@@ -2693,6 +2693,63 @@ pub fn format_tool_display(
     title
 }
 
+/// 历史恢复时的工具摘要选择：优先面向用户的 `description`，并识别「描述只是工具名」
+/// 的占位形态；交互 Ask 的结构化参数/结果不得作为摘要反显。
+fn is_interactive_ask_tool(name: &str, canonical_name: Option<&str>) -> bool {
+    let key = canonical_name
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "ask_user" | "ask" | "builtin:ask" | "builtin:ask_user"
+    )
+}
+
+fn history_tool_detail(
+    name: &str,
+    display_zh: Option<&str>,
+    canonical_name: Option<&str>,
+    description: &str,
+    arguments_text: Option<&str>,
+    result_text: Option<&str>,
+) -> Option<String> {
+    let description = description.trim();
+    let description_is_placeholder = description.is_empty()
+        || description.eq_ignore_ascii_case(name)
+        || display_zh
+            .map(|display| description.eq_ignore_ascii_case(display.trim()))
+            .unwrap_or(false);
+    if !description_is_placeholder {
+        return Some(description.to_string());
+    }
+    if is_interactive_ask_tool(name, canonical_name) {
+        return None;
+    }
+    // 结构化参数内置的人类摘要字段；只提取该字段，绝不把整段 JSON 反显。
+    if let Some(summary) = arguments_text
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|summary| !summary.is_empty())
+                .map(str::to_string)
+        })
+    {
+        return Some(summary);
+    }
+    if !description.is_empty() {
+        return Some(description.to_string());
+    }
+    arguments_text
+        .or(result_text)
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .map(str::to_string)
+}
+
 pub fn render_markdown_line(line: &str) -> Vec<Span<'static>> {
     let trimmed = line.trim_start();
     let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
@@ -2990,6 +3047,32 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
 
 struct TuiTurnSink {
     tx: Sender<UiEvent>,
+}
+
+/// 每轮 sink/emitter 的成对生命周期；注册发生在 turn id 对事件循环发布之前。
+struct TuiTurnSinkGuard {
+    control_plane: Arc<HostControlPlane>,
+    turn_id: String,
+}
+
+impl TuiTurnSinkGuard {
+    fn new(
+        control_plane: &Arc<HostControlPlane>,
+        turn_id: &str,
+        sink: Arc<TuiTurnSink>,
+    ) -> Self {
+        control_plane.register_turn_event_sink(turn_id, sink);
+        Self {
+            control_plane: Arc::clone(control_plane),
+            turn_id: turn_id.to_string(),
+        }
+    }
+}
+
+impl Drop for TuiTurnSinkGuard {
+    fn drop(&mut self) {
+        self.control_plane.unregister_turn_event_sink(&self.turn_id);
+    }
 }
 
 impl TurnEventSink for TuiTurnSink {
@@ -4823,15 +4906,27 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let bottom_h = input_h + 2;
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
     let ask_inline_h = inline_ask_height(state, content.width as usize);
-    let ask_top = bottom_top.saturating_sub(ask_inline_h);
 
     let chat_top = content.y + 3; // header + rule + 1 行呼吸
-    let chat_h = ask_top.saturating_sub(chat_top);
+    let chat_h = bottom_top.saturating_sub(chat_top);
     let chat_rect = Rect {
         x: content.x,
         y: chat_top,
         width: content.width,
         height: chat_h.max(1),
+    };
+    // Ask 是正文下部的覆盖层，不参与消息区几何；极小终端也不能越过 header 或 Composer。
+    let ask_rect = if ask_inline_h > 0 {
+        let ask_y = chat_rect.y.max(bottom_top.saturating_sub(ask_inline_h));
+        let ask_bottom = chat_rect.y.saturating_add(chat_rect.height).min(bottom_top);
+        Rect {
+            x: content.x,
+            y: ask_y,
+            width: content.width,
+            height: ask_bottom.saturating_sub(ask_y).min(ask_inline_h),
+        }
+    } else {
+        Rect::default()
     };
     state.last_chat_rect = Some(chat_rect);
 
@@ -4996,8 +5091,8 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         chat_rect,
     );
 
-    // 浮层态先清场：不让边框从底层字形中间切过去，也不留下压暗后的花屏徽标。
-    if state.mode != InteractionMode::Normal {
+    // 其他浮层仍先清场；Ask 仅覆盖自身矩形，未遮挡的历史消息保持原样。
+    if state.mode != InteractionMode::Normal && state.mode != InteractionMode::AskUserQuestion {
         f.render_widget(ratatui::widgets::Clear, chat_rect);
         f.render_widget(
             Block::default().style(Style::default().bg(theme::CANVAS)),
@@ -5005,14 +5100,10 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         );
     }
 
-    // ── 内联 Ask：贴在信息流底部（色带之上），不遮挡正文、不抢整屏 ──────────
-    if ask_inline_h > 0 {
-        let ask_rect = Rect {
-            x: content.x,
-            y: ask_top,
-            width: content.width,
-            height: ask_inline_h,
-        };
+    // ── Ask 覆盖层：下缘贴 Composer 上缘，消息几何不随面板开关变化 ──────────
+    if ask_rect.height > 0 {
+        // 仅清自己的覆盖矩形：既抹掉底层字形/宽字符占位，又不影响未遮挡历史。
+        f.render_widget(ratatui::widgets::Clear, ask_rect);
         render_ask_inline(f, ask_rect, state);
     }
 
@@ -5787,10 +5878,12 @@ fn render_ask_band_hint(f: &mut Frame, area: Rect, state: &TuiState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
+        Span::styled("›", Style::default().fg(theme::ACCENT)),
+        Span::raw(" "),
         Span::styled("等待你的选择…", Style::default().fg(theme::MUTED)),
     ]);
     f.render_widget(
-        Paragraph::new(vec![blank(), line]).style(Style::default().bg(theme::SURFACE)),
+        Paragraph::new(vec![line, blank()]).style(Style::default().bg(theme::SURFACE)),
         area,
     );
 }
@@ -6325,6 +6418,9 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
             }
         }
     }
+    // 结构化 JSON 日志缺省写 stdout；全屏 TUI 下会把内部协议日志直接盖到消息区。
+    // stderr 已重定向到运行日志，故统一改道 stderr，保留取证能力且不污染界面。
+    pony_agent_core::agent::otel::log::set_stderr_output(true);
 
     // 契约 F-D 加固：还原通道（termios 快照 + /dev/tty 写句柄）必须在 raw mode 生效前就绪；
     // 信号接管也要提前——启动期（加载 SQLite / 构建控制面，数百毫秒级）收到 SIGHUP 时，
@@ -6459,6 +6555,8 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // 与 run_tui 同一收口：JSON 日志改道已重定向的 stderr，严禁污染备用屏。
+    pony_agent_core::agent::otel::log::set_stderr_output(true);
 
     // 契约 F-D 加固（与 run_tui 同一闭合）：还原通道先于 raw mode 就绪 + panic 也还原。
     // 演示入口不接管信号（其循环不查 SHUTDOWN_REQUESTED，接管会把 Ctrl-C 吞掉）。
@@ -6889,11 +6987,18 @@ fn hydrate_state_from_session(
                     if let Some(trace) = trace_map.get(turn_id) {
                         for tool in &trace.tool_activities {
                             if tool.status != "planned" {
-                                let detail_preview = tool.arguments_text.as_deref().or(tool.result_text.as_deref());
+                                let detail_preview = history_tool_detail(
+                                    &tool.name,
+                                    tool.display_name_zh.as_deref(),
+                                    tool.canonical_tool_name.as_deref(),
+                                    &tool.description,
+                                    tool.arguments_text.as_deref(),
+                                    tool.result_text.as_deref(),
+                                );
                                 let formatted = format_tool_display(
                                     &tool.name,
                                     tool.display_name_zh.as_deref(),
-                                    detail_preview,
+                                    detail_preview.as_deref(),
                                     Some(&tool.status),
                                 );
                                 state.messages.push(ChatMessage {
@@ -8206,6 +8311,11 @@ fn tui_event_loop(
                                 state.turn_started_at = Some(std::time::Instant::now());
 
                                 let turn_id_str = format!("turn-{}", uuid::Uuid::new_v4());
+                                let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
+                                let _turn_sink_guard =
+                                    TuiTurnSinkGuard::new(&control_plane, &turn_id_str, Arc::clone(&sink));
+                                let turn_control_plane = Arc::clone(&control_plane);
+                                // 先注册 sink，再向事件循环发布当前 turn id，闭合停止请求的时序窗口。
                                 *current_turn_id.lock().unwrap() = Some(turn_id_str.clone());
                                 // wave-60 §C9：新一轮开始必须**清掉上一轮遗留的 stopping 态**，
                                 // 否则新轮会误显「正在停止…」并拦掉 Esc/Ctrl+C（旧轮终态早已收口）。
@@ -8214,10 +8324,7 @@ fn tui_event_loop(
                                 // 契约 F-G④：新一轮用户消息 = 新的取消周期，重置 Esc 令牌。
                                 goal_round_cancel.reset();
 
-                                let cp = control_plane.clone();
-
                                 let mdl_id = state.model.clone();
-                                let tx_stream = tx.clone();
                                 // wave-38 R1.4：唯一发送点改用 build_turn_input（携带
                                 // workspace_id / reasoning_effort / session_id）。
                                 // 在 spawn 前组装，避免把整个 TuiState move 进线程。
@@ -8229,7 +8336,8 @@ fn tui_event_loop(
 
                                 std::thread::spawn(move || {
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
-                                    let sink = TuiTurnSink { tx: tx_stream };
+                                    // 首轮 guard 在主事件分支创建并 move 到这里；goal 续轮各自成对注册。
+                                    let _initial_turn_sink_guard = _turn_sink_guard;
                                     let session_id = turn_input
                                         .session_id
                                         .clone()
@@ -8238,7 +8346,7 @@ fn tui_event_loop(
                                         turn_id: turn_id_str,
                                         input: turn_input.clone(),
                                     };
-                                    cp.start_turn_stream(&sink, cmd);
+                                    turn_control_plane.start_turn_stream(sink.as_ref(), cmd);
 
                                     let mut consecutive: u32 = 0;
                                     // 契约 F-G①：每轮开始前检查取消令牌（Esc）与预算，二者任一即停。
@@ -8266,8 +8374,12 @@ fn tui_event_loop(
                                             updated_goal.max_goal_rounds,
                                         );
                                         let next_turn_id = format!("turn-goal-{round}-{}", uuid::Uuid::new_v4());
-                                        // 契约 F-G②：回写本轮 turn_id —— 否则 Esc 的 stop_turn 只会打到
-                                        // 已经结束的初始 turn，续轮在后台一路跑到预算耗尽。
+                                        let _next_turn_sink_guard = TuiTurnSinkGuard::new(
+                                            &turn_control_plane,
+                                            &next_turn_id,
+                                            Arc::clone(&sink),
+                                        );
+                                        // 契约 F-G②：先注册 sink，再回写本轮 turn_id；续轮与首轮同一停止生命周期。
                                         *current_turn_for_rounds
                                             .lock()
                                             .unwrap_or_else(|e| e.into_inner()) = Some(next_turn_id.clone());
@@ -8278,7 +8390,7 @@ fn tui_event_loop(
                                             turn_id: next_turn_id,
                                             input: next_input,
                                         };
-                                        cp.start_turn_stream(&sink, next_cmd);
+                                        turn_control_plane.start_turn_stream(sink.as_ref(), next_cmd);
                                     }
                                 });
                             }

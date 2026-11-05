@@ -265,3 +265,13 @@ note: >-
   (3) 非遥测变更（仅登记，不新增观测面）：`stop_graph_run` 与 `stop_turn` 停止语义对齐
       （C2 即时事件 + C5 宽限监督）；前端终态状态消息承担「已停止 / 生成失败」呈现，
       移除消息区「错误详情」面板（错误明细仍在 store `errorDetail` 与右侧 Trace）。
+
+  【ADR 0063 归属登记｜TUI Ask 覆盖层与停止 sink 生命周期】
+  (1) 四维归属不变：无新增网络/外部 IO、日志出口、异常码、指标、trace 字段或依赖；
+      issues/metrics/logs 维持既有适用性，tracing 唯一落点仍为 `agent/otel/mod.rs`。
+  (2) 非遥测变更（仅登记，不新增观测面）：Ask 仅覆盖正文下部且不清除历史；恢复工具摘要
+      优先面向用户的 description；初始/goal 续轮注册既有 `TuiTurnSink` 并在调用返回后成对
+      注销 sink/emitter。只改变 UI 呈现与既有事件接线，不新增跨模块接口或持久化格式。
+  (3) logs 归属不变（仍为结构性 N-A）：TUI 内的既有结构化 JSON 日志出口从 stdout 改道
+      已重定向的 stderr/本地运行日志，修复其覆盖全屏消息区的用户可见缺陷；不新增日志格式、
+      字段、出口或 Loki 上送，本地取证面与敏感信息边界保持不变。

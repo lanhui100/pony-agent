@@ -28,9 +28,10 @@
 | O5 | 上述 turn 收到 `turn:cancelled`，`stopReason="user"` | 既有状态通道显示「已停止（用户中断）」（即用户可读的已终止语义），`is_streaming=false`、stopping 清理；已有正文保留；不得新增 `ChatMessage`。 |
 | O6 | stopping 中重复 Esc；同一终态事件重复/陈旧 turn 终态 | 不重复派发停止请求，不重复追加状态/用户/系统消息；陈旧 turn 不得终止当前 turn。 |
 | C9 | 普通初始 turn 与每个 goal 续轮；含 start_turn_stream 早退/返回 | 每轮调用前用现有 `register_turn_event_sink(turn_id, Arc<TuiTurnSink>)` 注册同一 UI 通道，使 stop_requested/cancelled 可达；该次调用结束后以 `unregister_turn_event_sink(turn_id)` 成对回收 sink 与 emitter。不得新增事件、线程、emitter 类型或 core 改动；注册项不得跨 turn 泄漏。 |
+| C10 | 流式双击 Esc 后检查真实屏幕与原始 pane 流 | 结构化 JSON 日志不得覆盖消息区或成为聊天消息；TUI 启动后将既有 JSON 日志缺省 stdout 改道已重定向 stderr，终态仍显示「已停止（用户中断）」；不新增日志字段/出口。 |
 | O7 | Ask 面板 Esc 成功取消 | 沿用既有 `cancel_ask(request_id, version)` 一次并关闭面板；不新增用户/系统消息，不调用 `answer_ask` 或 `stop_turn`，不注入取消答案 JSON。CAS 失败不得谎报成功。Ask 内 Esc 不继承普通流式双击停止语义。 |
 | O8 | 取消事件携带内部 `text`/`error`/JSON/Debug 形态哨兵 | 用户状态只来自受控停止原因投影；原始事件、工具参数、协议 JSON、Rust Debug 不得进入用户消息或取消状态提示。正常模型正文中合法出现的 `{`/`}` 不在禁用范围。 |
-| J1 | resume 的 trace 同时含 `description`、`arguments_text`、`result_text`，注入唯一 JSON 哨兵 | 非空 `description` 优先于 arguments/result；交互 Ask（复用现有名称分类：`ask_user`/`ask`/`builtin:ask`/`builtin:ask_user`，大小写不敏感）的结构化 arguments/result 不得成为消息摘要。普通工具 description 为空时保留既有 arguments→result 回退，不引入通用 sanitizer。 |
+| J1 | resume 的 trace 同时含 `description`、`arguments_text`、`result_text`，注入唯一 JSON 哨兵 | 非空 `description` 优先于 arguments/result；若 `description` 只是工具名占位，只提取结构化参数中的已知人类可读 `description` 字段，不得反显整段 JSON；交互 Ask（复用现有名称分类：`ask_user`/`ask`/`builtin:ask`/`builtin:ask_user`，大小写不敏感）的结构化 arguments/result 不得成为消息摘要。普通工具 description 为空时保留既有 arguments→result 回退，不引入通用 sanitizer。 |
 
 ## 3. 候选方案裁决依据
 

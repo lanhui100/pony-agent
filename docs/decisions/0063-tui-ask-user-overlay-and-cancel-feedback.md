@@ -29,9 +29,10 @@ Ask 不再参与消息区高度计算，只在消息区下部覆盖绘制且下�
 3. 流式双击 Esc 仍只在第二次命中时发一次停止请求；「正在停止…」只在受理后出现，终态只由取消/完成/失败事件驱动。
 4. 每个初始 turn 与 goal 续轮复用现有 `register_turn_event_sink` 注册 `Arc<TuiTurnSink>`，该次 `start_turn_stream` 返回后调用 `unregister_turn_event_sink`；sink 与监督 emitter 成对回收。不得增加事件、线程或 core 接口。
 5. 用户主动停止的终态沿用「已停止（用户中断）」状态提示，不新增取消聊天消息；已有正文与持久化历史保持原义。原始 `text`/`error`、工具参数、协议 JSON 与 Rust Debug 不作为取消提示或用户消息显示。
-6. 恢复视图的工具摘要以非空 `description` 优先；交互 Ask 的结构化 arguments/result 不作为消息摘要，复用现有交互工具名称分类，不增加通用 sanitizer。普通工具无 description 时维持既有 arguments→result 兼容回退。
+6. 恢复视图的工具摘要以非空 `description` 优先；若该字段只是工具名占位，则从结构化参数中只提取已知的人类可读 `description` 字段，绝不反显整段 JSON。交互 Ask 的结构化 arguments/result 不作为消息摘要，复用现有交互工具名称分类，不增加通用 sanitizer。普通工具无 description 时维持既有 arguments→result 兼容回退。
 7. Ask 自身 Esc 成功取消仍调用既有 `cancel_ask(request_id, version)` 并关闭面板，不构造答案、不新增系统消息、不调用 `stop_turn`；CAS 失败不得伪装成功。Ask 已 suspended，其 Esc 与普通流式双击停止保持不同产品语义。
 8. 不新增接口空桩、事件字段、持久化格式、配置、依赖、网络调用或锁；新增资源义务仅为上述既有 sink/emitter 的成对回收；可观测性四维归属不变。
+9. TUI 启动后把既有结构化 JSON 日志的缺省输出从 stdout 改道已重定向的 stderr（`otel::log::set_stderr_output(true)`）；全屏界面不得被内部协议 JSON 覆盖。日志格式、字段与落盘取证面不变，仅修正错误输出目标。
 
 ## 影响
 
