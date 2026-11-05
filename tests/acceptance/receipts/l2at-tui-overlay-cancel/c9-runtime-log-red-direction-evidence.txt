@@ -1,0 +1,24 @@
+# C9 判据红向（sink 缺失）实证：运行日志第二观测面
+# 背景：818cf22e 起 otel::log 的结构化 JSON 改道 stderr（已 dup2 到 PONY_TUI_RUNTIME_LOG），
+#       未注册 sink 的 core 告警只在运行日志可见；旧判据只扫屏幕/pane ⇒ 删注册也绿（假绿）。
+# 本次测试修订把 C9 判据扩为双观测面：pane/stream.raw + 运行日志 + 判别力自检。
+
+## 1) 突变探针（在 /tmp 副本，不改被审工作区）：删除 register_turn_event_sink 后跑 C9
+命令：git archive 818cf22e | tar -x -C /tmp/review-mut && cd /tmp/review-mut && python3 - <<...  删除 "control_plane.register_turn_event_sink(turn_id, sink);" ...
+        cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance c9_ -- --nocapture
+Rust 新判据结果：FAILED（命中行如下）
+{"level":"warn","message":"stop accepted but no turn event sink registered; turn:stop_requested not dispatched","session_id":"session-715994cc","stop_reason":"user","trace_id":null,"ts":"2026-11-05T13:28:31.673Z","turn_id":"turn-0a3e77ab-7e8e-4b16-a618-c196e40ecb69"}
+
+## 2) shell 新判据对同一运行日志的判定
+grep -c "no turn event sink registered" /tmp/l2at-overlay-dp0fy8kt/tui-runtime.log
+  => 1（>0 ⇒ c9-problems=warning-in-runtime-log，C9 判 FAIL）
+
+## 3) 绿相（当前实现 818cf22e）对照
+  运行日志命中数：0
+  pane 原始流命中数：0
+  ⇒ C9 PASS：pane 流与运行日志双面无未注册告警
+
+## 4) 判别力自检
+  - Rust：contains_sink_unregistered_warning(KNOWN_SINK_WARNING_SAMPLE) 必须为 true（同一函数判定运行日志）
+  - shell：sink-warning-sample.txt（与 core 实际产出同形的已知告警）必须被同一 grep 命中；
+          且运行日志非空（-s $CURRENT_RUNTIME_LOG），否则判定第二观测面失效。

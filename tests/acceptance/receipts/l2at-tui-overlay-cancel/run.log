@@ -1,28 +1,29 @@
 == using fresh bin: /home/dm/pony-agent/target/debug/pony
 bin=/home/dm/pony-agent/target/debug/pony
-bin_mtime=2026-11-05T21:08:45+08:00
-bin_sha256=c1327acc256e5aaea46c1bcfddc71473933643c4f3883a8d77eee6e37e1c30a9
-tui_src_sha256=3ab1c638a5644bcdd0abdee93d7e57c4b2bc0d469807859a25da217c2da2abb9
-generated_at=2026-11-05T21:10:47+08:00
-git_commit=4b9e241af205aee2e3ccbc85034c173ac96391ca
-== scenario s1-stop-esc (mock port 50575)
-PASS: O4 受理后状态行显示「正在停止…」
-PASS: O4 未收到终态事件前未显示已停止/已终止
+bin_mtime=2026-11-05T21:30:50+08:00
+bin_sha256=dd85fd41d9f9e6ee83904e04e810cccaf48567d4f250ac34202efe5dc2ce08ad
+tui_src_sha256=7b4ed6410e28ce4814d4191682ba15ceb85760a0f2f8d199d6f6c98056eee77d
+generated_at=2026-11-05T21:31:25+08:00
+git_commit=818cf22e3e8bb5cc5fc52f78842ad06846c0c43d
+== scenario s1-stop-esc (mock port 42549)
+  s1-stream-ordering=stopping=515|stopped=556|ok=1 terminal_seen=1
+PASS: O4 受理后状态行显示「正在停止…」（原始流字节序命中：stopping=515|stopped=556|ok=1）
+PASS: O4 未收到终态事件前未显示已停止/已终止（停止行先于终态出现：stopping=515|stopped=556|ok=1）
 PASS: O4 无本地伪造终态文案
 PASS: O5 终态显示「已停止（用户中断）」
 PASS: O5 取消终态保留用户消息与已渲染正文
 PASS: O8 真实屏幕与原始 pane 流无结构化日志 JSON 泄漏，且「已停止（用户中断）」可见
 PASS: O8 判据判别力自检：红相归档屏幕可被同一判据命中（修复前必红）
-PASS: C9 控制面 stop_turn 命中已注册 sink（原始 pane 流无未注册告警）
+PASS: C9 控制面 stop_turn 命中已注册 sink（pane 流与运行日志双面无未注册告警）
 PASS: S1 真实 TUI 无 panic
-== scenario s2-ask-overlay (mock port 36845)
+== scenario s2-ask-overlay (mock port 51133)
 PASS: O1 Ask 问题在真实终端可见
 NOTE: O1 历史/问题同帧由 Rust TestBackend 用例判定；本帧只证明面板、header、Composer 不互相遮挡
 PASS: O1 Ask 未遮挡 header / Composer / 指标行
 PASS: O7 Ask 内 Esc 关闭面板
 PASS: O7 Ask 内 Esc 未继承流式双击停止语义
 PASS: O7 Ask 取消无 CAS 失败可见文案
-== scenario s3-resume-summary (mock port 37889)
+== scenario s3-resume-summary (mock port 33319)
 PASS: J1 恢复视图优先显示 description 且无结构化 JSON
 
 ==== l2at-tui-overlay-cancel summary: PASS=15 FAIL=0 ====

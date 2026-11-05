@@ -1,6 +1,6 @@
 bin=/home/dm/pony-agent/target/debug/pony
-bin_mtime=2026-11-05T21:08:45+08:00
-bin_sha256=c1327acc256e5aaea46c1bcfddc71473933643c4f3883a8d77eee6e37e1c30a9
-tui_src_sha256=3ab1c638a5644bcdd0abdee93d7e57c4b2bc0d469807859a25da217c2da2abb9
-generated_at=2026-11-05T21:10:47+08:00
-git_commit=4b9e241af205aee2e3ccbc85034c173ac96391ca
+bin_mtime=2026-11-05T21:30:50+08:00
+bin_sha256=dd85fd41d9f9e6ee83904e04e810cccaf48567d4f250ac34202efe5dc2ce08ad
+tui_src_sha256=7b4ed6410e28ce4814d4191682ba15ceb85760a0f2f8d199d6f6c98056eee77d
+generated_at=2026-11-05T21:31:25+08:00
+git_commit=818cf22e3e8bb5cc5fc52f78842ad06846c0c43d

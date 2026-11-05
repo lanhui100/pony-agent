@@ -284,6 +284,28 @@ capture() { # $1 name
   squeeze < "$SCEN_DIR/$name.txt" > "$SCEN_DIR/$name.squeezed.txt"
 }
 
+# 把累计原始流（pipe-pane 输出）去 ANSI / 去空白后落盘，并计算「正在停止…」与终态
+# 「已停止」在真实输出字节序中的先后。全屏 diff 渲染下按帧抓屏存在 ~200ms 采样竞态
+# （终态会替换停止行），字节序判定是**无竞态**的等价且更强判据。
+stream_ordering() { # $1 stream.raw 路径, $2 去空白流输出路径 -> 打印 stopping=<i>|stopped=<i>|ok=<0/1>
+  python3 - "$1" "$2" <<'PYSTREAM'
+import re
+import sys
+
+raw = open(sys.argv[1], "rb").read()
+text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b" ", raw)
+text = re.sub(rb"\x1b\][^\x07]*\x07", b" ", text)
+text = re.sub(rb"\x1b[()][A-Za-z0-9]", b" ", text)
+squeezed = re.sub(r"[\s\u2800-\u28ff]", "", text.decode("utf-8", "replace"))
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    fh.write(squeezed)
+i_stop = squeezed.find("正在停止")
+i_term = squeezed.find("已停止")
+ok = 1 if (i_stop >= 0 and (i_term < 0 or i_stop < i_term)) else 0
+print("stopping=%d|stopped=%d|ok=%d" % (i_stop, i_term, ok))
+PYSTREAM
+}
+
 pane_has() { # $1 needle (会被同样去空白后做定宽匹配), $2 capture 名
   local needle
   needle="$(printf '%s' "$1" | squeeze)"
@@ -328,27 +350,45 @@ scenario_stop_esc() {
   send_esc
   sleep 0.12
   send_esc
-  if capture_when "正在停止" "s1-1-stopping" 4; then
-    ok "O4 受理后状态行显示「正在停止…」"
+  # 停止行可能在 ~200ms 内被终态替换；抓帧只作为**截图证据**（best effort），
+  # 判定改由下方无竞态的字节序完成。
+  capture_when "正在停止" "s1-1-stopping" 4 || capture "s1-1-stopping"
+
+  # 等终态（O5 的前置），同时保留终态帧。
+  local terminal_seen=0
+  if wait_for "已停止" 25; then
+    terminal_seen=1
+    sleep 0.4
+    capture "s1-2-stopped"
   else
-    capture "s1-1-stopping"
-    bad "O4 双击 Esc 受理后未显示「正在停止…」"
+    capture "s1-2-stopped"
   fi
-  if pane_has "已停止" "s1-1-stopping" || pane_has "已终止" "s1-1-stopping"; then
-    bad "O4 未收到终态事件前不得显示已停止/已终止"
+
+  # O4 判定（无竞态）：累计原始流里「正在停止…」必须出现，且必须早于终态「已停止」。
+  # 终态若根本没出现，则 O4 的「未收到终态前不得显示已停止」在本轮不适用（由 O5 判失败）。
+  local ordering squeezing_stream="$SCEN_DIR/s1-stream.squeezed.txt"
+  ordering="$(stream_ordering "$SCEN_DIR/stream.raw" "$squeezing_stream")"
+  log "  s1-stream-ordering=$ordering terminal_seen=$terminal_seen"
+  if grep -qE "stopping=[0-9]+" <<<"$ordering" && ! grep -q "stopping=-1" <<<"$ordering"; then
+    ok "O4 受理后状态行显示「正在停止…」（原始流字节序命中：$ordering）"
   else
-    ok "O4 未收到终态事件前未显示已停止/已终止"
+    bad "O4 双击 Esc 受理后未显示「正在停止…」（原始流字节序 = $ordering）"
   fi
-  if pane_has "已中断本轮生成。" "s1-1-stopping"; then
+  if [ "$terminal_seen" -eq 1 ] && grep -q "ok=1" <<<"$ordering"; then
+    ok "O4 未收到终态事件前未显示已停止/已终止（停止行先于终态出现：$ordering）"
+  elif [ "$terminal_seen" -eq 0 ]; then
+    bad "O4 未观察到终态「已停止」，无法证明「先停止后终态」的时序（$ordering）"
+  else
+    bad "O4 未收到终态事件前不得显示已停止/已终止（原始流字节序 = $ordering）"
+  fi
+  if grep -qF "已中断本轮生成。" "$squeezing_stream" 2>/dev/null; then
     bad "O4 出现被禁止的本地伪造终态文案「已中断本轮生成。」"
   else
     ok "O4 无本地伪造终态文案"
   fi
 
   # O5：终态事件驱动「已停止（用户中断）」，且不新增取消消息。
-  if wait_for "已停止" 25; then
-    sleep 0.4
-    capture "s1-2-stopped"
+  if [ "$terminal_seen" -eq 1 ]; then
     if pane_has "已停止（用户中断）" "s1-2-stopped"; then
       ok "O5 终态显示「已停止（用户中断）」"
     else
@@ -361,17 +401,21 @@ scenario_stop_esc() {
     fi
   else
     bad "O5 25s 内未观察到取消终态「已停止」"
-    capture "s1-2-stopped"
+    bad "O5 20s 内未观察到取消终态，正文保留无法判定"
   fi
 
   # O8（用户所述第二缺陷）：`otel::log` 的 JSON 缺省写 **stdout**，而 TUI 只 dup2 stderr ⇒
   # warn 级结构化日志（含 provider_stream_cancelled / trace_id / level）会直接混进真实屏幕与
   # 原始 pane 流。这里对**终态帧 + 累计原始流**同时取证：任何一条出现即判失败。
   local leak=0 marker red_frame="$RECEIPTS/s1-prefix-structured-log-screen-red-phase.txt"
-  for marker in '"level":"warn"' '"provider_stream_cancelled"' '"trace_id":"'; do
+  for marker in '"level":"' '"provider_stream_cancelled"' '"trace_id":"'; do
     if grep -qF -- "$marker" "$SCEN_DIR/s1-2-stopped.txt" 2>/dev/null; then
       leak=1
       log "  leak-marker=$marker file=s1-2-stopped.txt"
+    fi
+    if grep -qF -- "$marker" "$SCEN_DIR/s1-1-stopping.txt" 2>/dev/null; then
+      leak=1
+      log "  leak-marker=$marker file=s1-1-stopping.txt"
     fi
     if grep -qF -- "$marker" "$SCEN_DIR/stream.raw" 2>/dev/null; then
       leak=1
@@ -384,20 +428,40 @@ scenario_stop_esc() {
     ok "O8 真实屏幕与原始 pane 流无结构化日志 JSON 泄漏，且「已停止（用户中断）」可见"
   fi
   # 判别力自检：同一组判据必须能命中**红相归档帧**，否则说明该断言在红绿两相都成立（空断言）。
-  if [ -f "$red_frame" ] && grep -qF -- '"level":"warn"' "$red_frame"; then
+  if [ -f "$red_frame" ] && grep -qF -- '"level":"' "$red_frame"; then
     ok "O8 判据判别力自检：红相归档屏幕可被同一判据命中（修复前必红）"
   else
     bad "O8 判据判别力自检失败：红相归档屏幕未被命中（断言可能形同虚设，证据文件缺失或被改写）"
   fi
 
-  # C9：真实终端里停止链路必须「请求可见 → 终态可见」（sink 未注册时 core 会向 stdout 打印
-  # `stop accepted but no turn event sink registered; turn:stop_requested not dispatched`，
-  # 一旦出现在任何抓帧里即判失败）。强判据（累计原始 stdout 中该告警必须缺席）由
-  # `cargo test --test tui_overlay_cancel_acceptance c9_...` 承担，本脚本只给物理帧。
-  if grep -q "no turn event sink registered" "$SCEN_DIR/stream.raw" 2>/dev/null; then
-    bad "C9 控制面 stop_turn 未命中已注册 sink（原始输出出现：stop accepted but no turn event sink registered）"
+  # C9：控制面 stop_turn 必须命中本轮已注册的 sink。**双观测面**：
+  #   面 1 = 累计原始 pane/stdout 流（stream.raw，历史红相泄漏面）；
+  #   面 2 = 运行日志（$CURRENT_RUNTIME_LOG = PONY_TUI_RUNTIME_LOG）——`set_stderr_output(true)`
+  #          之后 core 的结构化告警只写 stderr→该文件，只扫屏幕会漏（评审突变探针已实证：
+  #          删掉 register_turn_event_sink 后仅扫屏幕仍全绿 = 假绿）。
+  # 判别力自检：同一判据必须命中与 core 实际产出同形的已知告警样本，避免判据被改空后恒真。
+  local c9_problems=0 sink_sample="$SCEN_DIR/sink-warning-sample.txt"
+  if grep -qF "no turn event sink registered" "$SCEN_DIR/stream.raw" 2>/dev/null; then
+    c9_problems=1
+    log "  c9-problem=warning-in-pane-stream"
+  fi
+  if [ ! -s "$CURRENT_RUNTIME_LOG" ]; then
+    c9_problems=1
+    log "  c9-problem=runtime-log-empty（运行日志未捕获，第二观测面失效）"
+  elif grep -qF "no turn event sink registered" "$CURRENT_RUNTIME_LOG" 2>/dev/null; then
+    c9_problems=1
+    log "  c9-problem=warning-in-runtime-log"
+    grep -m1 -F "no turn event sink registered" "$CURRENT_RUNTIME_LOG" > "$SCEN_DIR/sink-warning-offending-line.txt" 2>/dev/null || true
+  fi
+  printf '%s\n' '{"level":"warn","message":"stop accepted but no turn event sink registered; turn:stop_requested not dispatched","session_id":"session-sample","stop_reason":"user","trace_id":null}' > "$sink_sample"
+  if ! grep -qF "no turn event sink registered" "$sink_sample"; then
+    c9_problems=1
+    log "  c9-problem=discrimination-sample-not-matched"
+  fi
+  if [ "$c9_problems" -eq 1 ]; then
+    bad "C9 控制面 stop_turn 未命中已注册 sink（pane 流 / 运行日志 / 判别力自检之一失败，见 run.log 的 c9-problem 行）"
   else
-    ok "C9 控制面 stop_turn 命中已注册 sink（原始 pane 流无未注册告警）"
+    ok "C9 控制面 stop_turn 命中已注册 sink（pane 流与运行日志双面无未注册告警）"
   fi
 
   local pane_text

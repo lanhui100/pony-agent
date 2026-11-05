@@ -766,6 +766,15 @@ def main():
         result["stopped_with_reason"] = "已停止（用户中断）" in stream_text
         result["panicked"] = "panickedat" in stream_text or tui.proc.poll() == 101
         tui.close()
+        # C9 的第二观测面：run_tui 把结构化 JSON 日志改道 stderr（已 dup2 到本文件），
+        # 因此 core 的「未注册 sink」告警只在运行日志里可见，必须回传原文供断言。
+        result["runtime_log_exists"] = os.path.exists(runtime_log)
+        try:
+            with open(runtime_log, "r", encoding="utf-8", errors="replace") as fh:
+                result["runtime_log_text"] = fh.read()[-40000:]
+        except OSError as error:
+            result["runtime_log_text"] = ""
+            result["runtime_log_error"] = str(error)
     elif args.flow == "resume":
         seed = Pty(args.bin, [], env, args.root)
         result["seed_ready"] = seed.wait_for("›", 40)
@@ -795,6 +804,20 @@ def main():
 
 main()
 "#;
+
+/// C9 的核心判据（唯一真值文案，来自 `HostControlPlane::stop_turn` 的告警分支）：
+/// 未注册 sink 时 core 会写下这条 warn；它是「TUI 本轮没接 sink」的唯一原生证据。
+const SINK_UNREGISTERED_WARNING: &str = "no turn event sink registered";
+
+/// 判定「给定的日志文本里是否出现未注册 sink 告警」。
+///
+/// 抽成函数是为了让**判别力自检**与**实际断言**共用同一实现：任何一侧改宽/改窄都会同时反映。
+fn contains_sink_unregistered_warning(text: &str) -> bool {
+    text.contains(SINK_UNREGISTERED_WARNING)
+}
+
+/// 已知告警样本（与 core 实际产出的 JSON 行同形；用于证明判据不是空断言）。
+const KNOWN_SINK_WARNING_SAMPLE: &str = r#"{"level":"warn","message":"stop accepted but no turn event sink registered; turn:stop_requested not dispatched","session_id":"session-sample","stop_reason":"user","trace_id":null}"#;
 
 struct PtyFlow {
     json: serde_json::Value,
@@ -915,6 +938,31 @@ fn c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable() {
 
     // Assert 4：真实链路不得 panic
     assert!(!flow.flag("panicked"), "C9：真实 TUI 进程不得 panic");
+
+    // Assert 5（第二观测面）：`set_stderr_output(true)` 之后，core 的未注册 sink 告警只写
+    //   PONY_TUI_RUNTIME_LOG，不再出现在屏幕/pane。因此必须回读运行日志并断言告警缺席，
+    //   否则「删掉 register_turn_event_sink 也会绿」（假绿，已在评审突变探针中复现）。
+    let runtime_log = flow.text("runtime_log_text");
+    assert!(
+        flow.flag("runtime_log_exists") && !runtime_log.is_empty(),
+        "C9 判别力自检失败：运行日志未被捕获/为空（{:?}），第二观测面失效，C9 将无法判别 sink 注册回归",
+        flow.json.get("runtime_log_error")
+    );
+    // 判别力自检：同一判据必须命中**已知告警样本**（防止函数被改宽/改空后恒真/恒假）。
+    assert!(
+        contains_sink_unregistered_warning(KNOWN_SINK_WARNING_SAMPLE),
+        "C9 判别力自检失败：已知告警样本未被判据命中，断言形同虚设"
+    );
+    let offending_log_lines: Vec<&str> = runtime_log
+        .lines()
+        .filter(|line| contains_sink_unregistered_warning(line))
+        .collect();
+    assert!(
+        offending_log_lines.is_empty(),
+        "C9：运行日志出现 core 告警「stop accepted but no turn event sink registered」\
+         （TUI 本轮未注册既有 turn event sink；屏幕/pane 已看不到该告警，只能在此观测）。\
+         命中行 = {offending_log_lines:?}"
+    );
 }
 
 #[test]
