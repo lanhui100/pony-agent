@@ -1035,6 +1035,71 @@
         "advisories": 13,
         "red_reruns": 3
       }
+    },
+    {
+      "wave": "tui-session-resilience",
+      "theme": "TUI 会话韧性：DSML 折叠 / 错误摘要 / 中断检查点 / 退出回收",
+      "tier": "B",
+      "tier_triggers": [
+        "UI 交互 + 外部/网络 IO",
+        "blast-keywords: thread/Mutex/process::exit/terminal restore",
+        "跨 7 源文件 + 会话持久化"
+      ],
+      "baseline_commit": "7a5269ed",
+      "contract": ".dev-team/contract-matrix-tui-session-resilience.md",
+      "nfr_baseline": ".dev-team/nfr-baseline-tui-session-resilience.json",
+      "branches": {
+        "protocol": {
+          "status": "completed",
+          "commit": "66fb8555",
+          "write_scopes": [
+            ".dev-team/contract-matrix-tui-session-resilience.md",
+            ".dev-team/nfr-baseline-tui-session-resilience.json",
+            "crates/pony-agent-core/src/bin/tui.rs (stubs)"
+          ]
+        },
+        "test-agent": {
+          "status": "completed",
+          "commit": "4f98062e",
+          "red_commit": "4f98062e",
+          "write_scopes": [
+            "crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs",
+            ".dev-team/red-phase-tui-session-resilience.json",
+            ".dev-team/l2at-done-tui-session-resilience.json"
+          ]
+        },
+        "executor": {
+          "status": "completed",
+          "green_commit": "89bce8c2",
+          "write_scopes": [
+            "crates/pony-agent-core/src/bin/tui.rs",
+            "crates/pony-agent-core/src/agent/provider/",
+            "crates/pony-agent-core/src/agent/runtime/",
+            "crates/pony-agent-core/src/agent/session/",
+            "docs/observability.yaml",
+            "docs/decisions/"
+          ]
+        }
+      },
+      "gates": {
+        "red_phase": "EXIT 101, 12/12 unimplemented!() native panic, dev-red-purity pure_red=true",
+        "green_phase": "cargo check --all-targets 0; acceptance 15/15; regressions 52/52; RUSTFLAGS=-D warnings 0",
+        "observability": "audit-diff 0; check-declaration 0",
+        "review": "review-lint 5/5 EXIT 0 (DEGRADED Lead double-review; 3 L3 subagents stalled)",
+        "meta": "dev-meta-lint EXIT 0",
+        "pty": "DEGRADED_HARNESS_FALSE_NEGATIVE; process exit + ESC[?1049l + resume hint verified on raw bytes; termios readback impossible (pts destroyed)"
+      },
+      "tags": [
+        "wave-1-tui-session-resilience",
+        "wave-1-tui-session-resilience-red",
+        "wave-1-tui-session-resilience-green"
+      ],
+      "status": "completed",
+      "quarantine": null,
+      "derivative_exemptions": [
+        "crates/pony-agent-core/tests/wave58_context_skills.rs:567 shared_sessions: None (1-line compile sync)",
+        "crates/pony-agent-core/src/agent/session/mod.rs:17-20 pure re-export (lead-assembly)"
+      ]
     }
   ],
   "counters": {
