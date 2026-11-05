@@ -845,10 +845,17 @@ impl AgentRuntime {
                 &executed_calls,
                 &executed_results,
                 move |delta| {
-                    // ADR 0055 P0-2：首包时点信号（StreamStart）不承载内容，也**不参与** UI 首字延迟口径——
-                    // 此处提前返回，UI 的 `first_token_latency` 语义仍是「首个内容增量」；trace span 侧
-                    // 的 `llm.call.ttft_ms` 由 `turn_flow` 的独立 `on_delta` 采集，不受本处影响。
+                    // ADR 0055 P0-2 / Task-2 修复：首包时点信号（StreamStart）不承载内容，
+                    // 也**不参与** UI 首字延迟口径，但对于 provider call 本身，StreamStart 标志着首包
+                    // 已经到达。即使本次 call 是纯工具调用（无 Text/Reasoning 增量），也必须在提前返回前
+                    // 记录 provider_call_first_token_latency，避免 TTFT 丢失。
                     if matches!(delta, ProviderStreamChunk::StreamStart) {
+                        if supports_true_streaming_followup
+                            && provider_call_first_token_latency_for_emit.get().is_none()
+                        {
+                            let value = provider_call_started_at.elapsed().as_millis() as u64;
+                            provider_call_first_token_latency_for_emit.set(Some(value));
+                        }
                         return;
                     }
                     let flush_delta = |text: Option<String>,
@@ -2090,7 +2097,12 @@ impl AgentRuntime {
                         );
                     };
                     // ADR 0055 P0-2：首包时点信号无内容，不参与 UI 首字延迟口径（同上）。
+                    // 但对于首轮初始请求若是纯工具调用，StreamStart 标志着首包到达，需记录 initial_call_first_token_latency。
                     if matches!(delta, ProviderStreamChunk::StreamStart) {
+                        if initial_call_first_token_latency_for_emit.get().is_none() {
+                            let value = initial_decision_started_at.elapsed().as_millis() as u64;
+                            initial_call_first_token_latency_for_emit.set(Some(value));
+                        }
                         return;
                     }
                     if initial_call_first_token_latency_for_emit.get().is_none() {
