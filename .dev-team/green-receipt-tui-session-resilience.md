@@ -17,6 +17,7 @@
 | `cargo test -p pony-agent-core --test tui_terminal_restore --message-format short` | 0 | `test result: ok. 8 passed; 0 failed; ... finished in 0.00s` (`/tmp/executor-final-tui_terminal_restore.log`) |
 | `cargo test -p pony-agent-core --test pa104_terminal_acceptance --message-format short` | 0 | `test result: ok. 5 passed; 0 failed; ... finished in 0.19s` (`/tmp/executor-final-pa104_terminal_acceptance.log`) |
 | `bash ~/.agents/skills/observability-onboarding/scripts/check-declaration.sh .` | 0 | `[PASS] metrics / tracing / logs / issues`; `结论: PASS (exit=0)` (`/tmp/executor-observability-declaration.log`) |
+| `bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base 7a5269ed --repo . --decl-approved` | 0 | `[OK] audit-diff: 无越界实现、收口点完整`；D1 声明改动在 89bce8c2，显式批准，非削弱（四维归属不变，仅追加归属登记） |
 | ADR status 机械检查 | 0 | `grep -L '^Status:' ...` 与 `grep -L '^Status: implemented' docs/decisions/[0-9]*.md` 输出均为空 |
 
 ## 实现与契约映射
