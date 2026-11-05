@@ -4409,6 +4409,90 @@ fn extract_provider_error_detail(err: &str) -> String {
     preview_text(err, 240)
 }
 
+/// wave-tui-session-resilience C1：DSML 工具调用协议原文的**唯一**清洗入口。
+/// 二元隔离在 SSE 解析层完成，流式增量、最终累计文本与历史回放共用同一语义；
+/// 纯函数、不新增依赖、不误伤 markdown 代码块 / 普通含尖括号正文。
+const DSML_PLACEHOLDER: &str = "［工具调用］";
+
+/// DSML 标记的规范写法的「归一化签名」：大小写不敏感 + 全角/半角竖线统一。
+/// 只用于判定，绝不改写用户正文（输出仍逐字保真原字符）。
+fn dsml_signature(text: &str) -> String {
+    text.to_ascii_lowercase().replace('｜', "|")
+}
+
+/// 尾部「已识别 DSML 协议前缀」的半截形态：只认已知标签的合法前缀，
+/// 普通正文以单个 `<` 结尾 / markdown 代码块 / `<tag>` 一律不判命中。
+fn dsml_partial_tail_len(text: &str) -> Option<usize> {
+    let trimmed = text.trim_end_matches(['\r', '\n', ' ', '\t']);
+    let known_tags = [
+        "<||dsml|| calls>",
+        "</||dsml|| calls>",
+        "<||dsml|| invoke",
+        "</||dsml|| invoke>",
+        "<||dsml|| parameter",
+        "</||dsml|| parameter>",
+        "<||dsml||",
+        "|dsml||",
+        "||ds",
+        "<|",
+    ];
+    // 只检查尾部有限窗口内、合法 UTF-8 字符边界上的候选，
+    // 绝不按裸 byte offset 切片；单个 `<` 属普通正文，不判命中。
+    let max_tag_len = known_tags.iter().map(|tag| tag.len()).max().unwrap_or(0) * 3 + 4;
+    for (start, _) in trimmed.char_indices().rev() {
+        if trimmed.len() - start > max_tag_len {
+            break;
+        }
+        let tail = &trimmed[start..];
+        if tail.contains('>') || tail.len() <= "<".len() {
+            continue;
+        }
+        // `<|` / `<｜` 这类最短前缀只在行首或换行后判为协议碎片；
+        // 行中普通正文（如 `a <| 半角竖线`）逐字保真。
+        if start > 0 && !trimmed[..start].ends_with('\n') && !tail.starts_with("<｜") {
+            continue;
+        }
+        let signature = dsml_signature(tail);
+        if known_tags.iter().any(|tag| tag.starts_with(&signature)) {
+            return Some(text.len() - start);
+        }
+    }
+    None
+}
+
+/// 协议行判定：归一化后必须含 `|dsml|`（覆盖大小写 / 半角 / 全角 / 混合变体），
+/// 普通 `<tag>`、markdown 代码块、含 `<｜不是 DSML` 之类正文不命中。
+fn is_dsml_protocol_line(line: &str) -> bool {
+    dsml_signature(line).contains("|dsml|")
+}
+
+pub fn sanitize_dsml_protocol_text(text: &str) -> String {
+    // 跨 chunk 被切断的半截标记先截掉：分片累加时不得残留 `<｜` / `｜DSML` 等前缀。
+    let body = match dsml_partial_tail_len(text) {
+        Some(len) => &text[..text.len() - len],
+        None => text,
+    };
+    // 整行折叠：DSML 协议块（含大小写/半角/混合变体）按行剔除，
+    // 块外正文逐字保真；至少折叠一次时给一个面向用户的占位。
+    let mut cleaned = String::with_capacity(body.len());
+    let mut removed_protocol = false;
+    for line in body.split_inclusive('\n') {
+        if is_dsml_protocol_line(line) {
+            removed_protocol = true;
+            continue;
+        }
+        cleaned.push_str(line);
+    }
+    if removed_protocol && !cleaned.contains(DSML_PLACEHOLDER) {
+        cleaned.push_str(DSML_PLACEHOLDER);
+    }
+    // 收尾：孤立半截尾巴（如 `｜DSML`）再截一次。
+    if let Some(len) = dsml_partial_tail_len(&cleaned) {
+        cleaned.truncate(cleaned.len() - len);
+    }
+    cleaned
+}
+
 /// PA-100：重试作用域。rate-limit 长退避只对 followup 生效——对话首跳
 /// （decision/decision_stream）保持短退避快败进既有 fallback，避免用户在看到
 /// 任何输出前先白等一分钟。

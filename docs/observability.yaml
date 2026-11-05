@@ -305,3 +305,12 @@ note: >-
   (5) 本波不新增依赖、托管端点或环境变量；新增的唯一环境变量是 `PONY_AGENT_HOME`（配置目录定位，
       默认 `config_dir/pony-agent`），属本地配置面而非遥测出口。
   四维归属结论：tracing / issues 适用且落点不变，metrics / logs 仍为结构性 N/A（机制与理由同上）。
+  【wave-tui-session-resilience 归属登记｜TUI 会话韧性】
+  (1) 四维归属不变：tracing/issues 仍 applicable（唯一落点不变 `agent/otel/mod.rs`
+      与 `agent/ponysentry/client.rs`），metrics/logs 维持结构性 N-A；无新增网络端点、
+      环境变量、依赖、异常码、指标、trace 字段、Loki 上送或日志出口。
+  (2) 非遥测变更（仅登记）：SSE delta / TUI 历史回放共用同一 DSML 折叠纯函数；
+      StreamFailed 的用户可见面收敛为一句话摘要，原始详情仍走既有 `capture_turn_failure`
+      issue 上报并仅追加一条既有运行日志；中断轮次检查点以 additive 文本进入既有
+      会话历史；退出路径经既有 `stop_turn` 与 `restore_terminal_modes` 收口。
+      不改变对外接口、持久化 schema 与观测面。

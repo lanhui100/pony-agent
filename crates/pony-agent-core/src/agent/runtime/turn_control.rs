@@ -169,12 +169,25 @@ impl AgentRuntime {
         let attachments = self
             .save_input_attachments_for_session(session_id, input_images)
             .unwrap_or_default();
+        // wave-tui-session-resilience C5：把本轮已产生的工具活动投影为检查点步骤。
+        let checkpoint_tools: Vec<String> = tool_activities
+            .iter()
+            .map(|activity| {
+                if activity.description.trim().is_empty() {
+                    activity.name.clone()
+                } else {
+                    format!("{} {}", activity.name, activity.description.trim())
+                }
+            })
+            .collect();
         let persisted = self.persist_cancelled_turn_outcome(
             session_id,
             user_message,
             provider_meta,
             attachments,
             None,
+            "",
+            checkpoint_tools,
         );
         self.update_execution_checkpoint(
             control,

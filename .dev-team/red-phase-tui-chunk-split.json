@@ -1,0 +1,67 @@
+{
+  "wave": "tui-session-resilience",
+  "ticket": "B-tui-session-resilience / C1 chunk-split patch red-phase",
+  "owner": "test-agent (independent Test Agent)",
+  "worktree": "/home/dm/pony-agent-worktrees/tui-session-resilience",
+  "branch": "fix/tui-session-resilience",
+  "frozen_at": "2026-11-06T02:35:00+08:00",
+  "test_file": "crates/pony-agent-core/tests/tui_session_resilience_chunk_split.rs",
+  "test_file_absolute": "/home/dm/pony-agent-worktrees/tui-session-resilience/crates/pony-agent-core/tests/tui_session_resilience_chunk_split.rs",
+  "frozen_acceptance_file_untouched": "crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs",
+  "production_code_modified_by_test_agent": false,
+  "no_git_commit": true,
+  "defect_evidence": "Lead /tmp/l3a-repro/repro exit 0: two-chunk ['<｜', '｜DSML｜｜ calls>…'] accumulation yields '<｜［工具调用］' via provider::sanitize_dsml_protocol_text; half-open '<｜' leaks into OpenAiSseAccumulator.output_text and is replayed into session history.",
+  "command_original": "cargo test -p pony-agent-core --test tui_session_resilience_chunk_split",
+  "command_per_case": "cargo test -p pony-agent-core --test tui_session_resilience_chunk_split -- --exact <case_name>",
+  "overall_exit_code": 101,
+  "result_summary": "2 tests: 1 FAILED (Rust native assert! failure), 1 PASSED (plain-text preservation guard); 0 ignored; 0 filtered",
+  "log_receipt": "/tmp/l2t-chunk-red.log",
+  "rust_native_failure_primitive": "assert! failure at crates/pony-agent-core/tests/tui_session_resilience_chunk_split.rs:51; no E0425, no compile error, no char-boundary harness panic, no swallowed exception",
+  "test_cases": [
+    {
+      "id": "C1/CHUNK-A01",
+      "name": "c1_chunk_split_dsml_prefix_is_not_persisted",
+      "mode": "L3 adversarial patch red-phase",
+      "command": "cargo test -p pony-agent-core --test tui_session_resilience_chunk_split -- --exact c1_chunk_split_dsml_prefix_is_not_persisted",
+      "exit_code": 101,
+      "failure_classification": "rust_native_assert_failure",
+      "failure_reason": "acc == \"<｜［工具调用］\" contains forbidden half-open '<｜' prefix after two-chunk accumulation",
+      "observed": "<｜［工具调用］",
+      "assertion_count": 9,
+      "assertions": [
+        "split point is legal UTF-8 char boundary",
+        "full DSML starts with '<｜'",
+        "first chunk == '<｜'",
+        "second chunk starts with '｜DSML｜｜ calls>'",
+        "chunks rejoin to FULL_DSML",
+        "!acc.contains(\"<｜\") [FAILING]",
+        "!acc.contains(\"｜DSML｜｜\")",
+        "!acc.contains(\"invoke name=\") && !acc.contains(\"parameter name=\")",
+        "acc.contains(\"工具调用\")"
+      ],
+      "log_receipt": "/tmp/l2t-chunk-case1.log"
+    },
+    {
+      "id": "C1/CHUNK-A02",
+      "name": "c1_plain_angle_bracket_text_is_verbatim",
+      "mode": "L3 regression guard (must stay green)",
+      "command": "cargo test -p pony-agent-core --test tui_session_resilience_chunk_split -- --exact c1_plain_angle_bracket_text_is_verbatim",
+      "exit_code": 0,
+      "failure_classification": "none_expected_green_guard",
+      "failure_reason": "plain text ending in '<' and markdown code block with angle brackets are verbatim; prevents over-broad fix",
+      "assertion_count": 2,
+      "assertions": [
+        "sanitize_dsml_protocol_text(\"以尖括号结尾 <\") == input",
+        "sanitize_dsml_protocol_text(markdown_with_angle_brackets) == input"
+      ],
+      "log_receipt": "/tmp/l2t-chunk-case2.log"
+    }
+  ],
+  "no_fake_policy": {
+    "no_empty_assertions": true,
+    "no_swallowed_exceptions": true,
+    "no_ignored_tests": true,
+    "no_production_code_changes": true,
+    "no_git_write": true
+  }
+}

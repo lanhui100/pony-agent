@@ -59,6 +59,36 @@ fn reject_stale_cursor_version(
     ))
 }
 
+/// wave-tui-session-resilience C5：中断轮次检查点的唯一持久化投影纯函数。
+/// 旧会话无检查点内容（空正文/空工具活动）⇒ `None`，读取方逐字回放既有历史。
+pub fn interrupted_turn_checkpoint_text(
+    prior_assistant_text: &str,
+    tool_activities: &[String],
+) -> Option<String> {
+    let text = prior_assistant_text.trim();
+    let tools: Vec<&str> = tool_activities
+        .iter()
+        .map(|activity| activity.trim())
+        .filter(|activity| !activity.is_empty())
+        .collect();
+    if text.is_empty() && tools.is_empty() {
+        return None;
+    }
+    let mut checkpoint = String::from("[中断轮次检查点]");
+    if !text.is_empty() {
+        checkpoint.push('\n');
+        checkpoint.push_str(text);
+    }
+    if !tools.is_empty() {
+        checkpoint.push_str("\n已执行的工具步骤：");
+        for tool in tools {
+            checkpoint.push_str("\n- ");
+            checkpoint.push_str(tool);
+        }
+    }
+    Some(checkpoint)
+}
+
 pub struct SessionStore {
     pub(super) sessions: SessionMap,
     pub(super) attachment_assets: AttachmentAssetMap,
@@ -3974,7 +4004,12 @@ fn replay_long_term_memory(history: &[TurnHistoryMessage]) -> Vec<LongTermMemory
 }
 
 fn classify_turn_node_kind(assistant_message: &str) -> HistoryNodeKind {
-    if assistant_message.trim() == "用户终止，发送消息可继续。" {
+    let trimmed = assistant_message.trim();
+    // wave-3 L3-B：中断轮次检查点文本属于 cancelled 终态的 additive 投影，
+    // 不得因不再是精确占位文案而把失败轮改判为正常完成轮。
+    if trimmed == "用户终止，发送消息可继续。"
+        || trimmed.contains("[中断轮次检查点]")
+    {
         HistoryNodeKind::TurnCancelled
     } else {
         HistoryNodeKind::TurnCommitted

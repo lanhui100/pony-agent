@@ -1,0 +1,67 @@
+{
+  "ticket": "tui-session-resilience C7/C8 PTY dynamic smoke",
+  "original_verdict": "PASS",
+  "lead_adjudication": "PASS_SUPERSEDES_DEGRADED",
+  "binary_sha256": "31f74be5b86c1d92b4462011d9c32471e2df92da1e84c63a89c28311d1b4ba80",
+  "true_assertions": [
+    "quit: 已进入真实 TUI（capture-pane 含 Composer ›）",
+    "quit: 退出前真实 pony 进程存活且持有 pts",
+    "quit: 退出前 TUI 确实处于 raw mode（判据判别力自检）",
+    "quit: 退出后 pony 进程不存在（C8）",
+    "quit: pony 自身 exit code = 0（正常/信号接管均优雅退出）",
+    "quit: 原始字节含 ESC[?1049l（退出备用屏，C7）",
+    "quit: 屏幕/原始字节含 `pony resume <session_id>` 提示（C7）",
+    "quit: resume 提示出现在退出备用屏之后（C7 时序）",
+    "quit: 退出后同一 pts 可 stty -F 测量（pty 未随 pony 消失）",
+    "quit: 退出后 -isig/-icanon/-echo/-opost 未同时残留（C7 termios）",
+    "quit: 退出后 echo/icanon/isig 复原（C7 termios）",
+    "quit: 退出后无活线程持有 /dev/tty（C8）",
+    "quit: 隔离——会话库只落在收据目录，真实用户库未被写入",
+    "quit: 运行日志捕获到统一终端还原（T2c）",
+    "sigterm: 已进入真实 TUI（capture-pane 含 Composer ›）",
+    "sigterm: 退出前真实 pony 进程存活且持有 pts",
+    "sigterm: 退出前 TUI 确实处于 raw mode（判据判别力自检）",
+    "sigterm: 退出后 pony 进程不存在（C8）",
+    "sigterm: pony 自身 exit code = 0（正常/信号接管均优雅退出）",
+    "sigterm: 原始字节含 ESC[?1049l（退出备用屏，C7）",
+    "sigterm: 屏幕/原始字节含 `pony resume <session_id>` 提示（C7）",
+    "sigterm: resume 提示出现在退出备用屏之后（C7 时序）",
+    "sigterm: 退出后同一 pts 可 stty -F 测量（pty 未随 pony 消失）",
+    "sigterm: 退出后 -isig/-icanon/-echo/-opost 未同时残留（C7 termios）",
+    "sigterm: 退出后 echo/icanon/isig 复原（C7 termios）",
+    "sigterm: 退出后无活线程持有 /dev/tty（C8）",
+    "sigterm: 隔离——会话库只落在收据目录，真实用户库未被写入",
+    "sigterm: 运行日志捕获到统一终端还原（T2c）",
+    "sigterm: 运行日志捕获到 SIGTERM 信号接管"
+  ],
+  "false_negative_assertions": [
+    {
+      "name": "屏幕含 pony resume <session_id> 提示",
+      "why": "tmux pane destroyed at process exit => capture-pane empty; raw pipe-pane stream contains `pony resume session-…` exactly once, after last ESC[?1049l",
+      "evidence": "quit/stream.raw hint_pos=17174 > last_leave=17131; sigterm/stream.raw hint_pos=9179 > last_leave=9136; lead remain-on-exit raw hint_pos=8142 > leave=8099"
+    },
+    {
+      "name": "退出后 termios 读回",
+      "why": "stty -F /dev/pts/0 returns `No such file or directory` (rc=1) because tmux destroyed the pts when pony exited; not a raw-mode leak. Pre-exit discriminant proved raw flags present; raw stream contains full TERMINAL_INPUT_MODES_RESET + tcsetattr path",
+      "evidence": "quit/post-exit-stty.txt rc=1; /tmp/dsh-tui-lead-remain/stty-after.txt; raw stream bytes at hint ctx"
+    }
+  ],
+  "dynamic_pass": [
+    "process gone after /quit and SIGTERM",
+    "ESC[?1049l + ESC[?25h emitted",
+    "resume hint emitted after leave-alternate-screen",
+    "no live tty holder",
+    "SIGTERM handler logged",
+    "real sessions.db untouched"
+  ],
+  "degraded_scope": "无；C8 由 [RED DEGRADED: STATIC-ONLY] 测试级断言 + Tier-1 真实 PTY 动态冒烟 PASS 共同闭合",
+  "superseded_by": "pty-smoke-receipt.json (wrapper-held pts, 2026-11-06T02:22:12+08:00)",
+  "reversal_reason": "原 FAIL 源于 tmux 在 pony 退出时销毁 pts：capture-pane 为空且 stty -F 返回 No such file。PTY 冒烟执行者改用 pty-holding wrapper（wrapper 记录 pony exit code 后 exec sleep 保持 pts 存活，自身不写 termios），使退出后同一 pts 的 termios 可读。",
+  "dynamic_evidence": {
+    "quit": "PRE -isig/-icanon/-echo/-opost → POST isig icanon echo opost (stty rc=0); pony exit=0; pane 显示「继续该会话请运行：pony resume session-aaa7a995」; raw hint_pos=17174 > last_leave=17131",
+    "sigterm": "PRE raw → POST isig icanon echo opost (stty rc=0); pony exit=0; SIGTERM handler logged; pane 显示 pony resume session-66a6bf52; raw hint_pos=9179 > last_leave=9136",
+    "negative_control": "python tty.setraw 不还原 + 同一 wrapper ⇒ POST 仍为 -isig/-icanon/-echo/-opost，raw_leak_persists=true，证明 wrapper/harness 不会自行修复 termios",
+    "isolation": "真实 ~/.local/share/PonyAgent/sessions.db mtime 前后不变；无外部 OTel/Sentry 端点痕迹"
+  },
+  "final_verdict": "PASS (0 failed, 0 degraded)"
+}

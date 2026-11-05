@@ -1,0 +1,580 @@
+{
+  "verdict": "PASS",
+  "ticket": "tui-session-resilience C7/C8 PTY dynamic smoke",
+  "binary": "/home/dm/pony-agent-worktrees/tui-session-resilience/target/debug/pony",
+  "binary_sha256": "e481baeacc4816185197e3a2aa8f3b5dfadda82d6aa9f0435d5e8f22ca587d30",
+  "generated_at": "2026-11-06T02:22:12+0800",
+  "measurement_note": "tmux destroys the pty slave when the pane process exits; a bash wrapper records pony's exit code then execs `sleep` to hold the pts open (no termios writes), so post-exit stty/capture-pane are measurable.  SIGTERM is sent only to the real pony child PID.",
+  "degraded_reasons": [],
+  "failed_required_assertions": [],
+  "isolation": {
+    "real_db_mtime_ns_before": 1793895519417974320,
+    "real_db_mtime_ns_after": 1793895519417974320,
+    "telemetry": "PONY_OTEL_*/PONYSENTRY_*/OTEL_* overridden to empty or dead loopback port; OTEL_TRACES_SAMPLER=always_off; OTEL_SDK_DISABLED=true; gateway/provider/proxy all pointed at a closed 127.0.0.1 port"
+  },
+  "cases": [
+    {
+      "name": "quit",
+      "cmd": "tmux send-keys -l '/quit'; tmux send-keys Enter",
+      "launch_cmd": "tmux -L dsh-tui-smoke-quit-1158349 new-session -d -s smoke-quit -x 120 -y 34 -c /home/dm/pony-agent-worktrees/tui-session-resilience /bin/bash /tmp/dsh-tui-session-resilience-smoke/quit/wrapper.sh",
+      "wrapper": "/tmp/dsh-tui-session-resilience-smoke/quit/wrapper.sh",
+      "exit_code": "0",
+      "stdout_tail": "继续该会话请运行：ponyresumesession-aaa7a995",
+      "wrapper_pid": 1158362,
+      "pony_pid": 1158364,
+      "tty": "/dev/pts/0",
+      "assertions": [
+        {
+          "name": "quit: 已进入真实 TUI（capture-pane 含 Composer ›）",
+          "ok": true,
+          "actual": "ready=True ›=True pane_bytes=4019 pane_tail=\u001b[48;2;18;16;14m\u001b[38;2;104;98;90m/home/dm/pony-agent-worktrees/tui-session-resilience\u001b[39m",
+          "expected": "ready=True 且 pane 含 ›",
+          "required": true
+        },
+        {
+          "name": "quit: 退出前真实 pony 进程存活且持有 pts",
+          "ok": true,
+          "actual": "wrapper_pid=1158362 pony_pid=1158364 tty=/dev/pts/0 cmd=1158364 Sl+  /home/dm/pony-agent-worktrees/tui-session-resilience/target/debug/pony",
+          "expected": "pony 子进程存活且 tmux pane_tty=/dev/pts/N",
+          "required": true
+        },
+        {
+          "name": "quit: 退出前 TUI 确实处于 raw mode（判据判别力自检）",
+          "ok": true,
+          "actual": "rc=0 raw_flags=['-isig', '-icanon', '-echo', '-opost']",
+          "expected": "stty -a 中 -isig/-icanon/-echo/-opost 至少 3 项",
+          "required": true
+        },
+        {
+          "name": "quit: 退出后 pony 进程不存在（C8）",
+          "ok": true,
+          "actual": "pony_pid=1158364 gone=True alive=False ps=<gone> wrapper_alive=True (wrapper=sleep, 非 pony)",
+          "expected": "ps 无该 pony PID，且 wrapper 下无 pony 子进程",
+          "required": true
+        },
+        {
+          "name": "quit: pony 自身 exit code = 0（正常/信号接管均优雅退出）",
+          "ok": true,
+          "actual": "pony-exit-code.txt=0",
+          "expected": "exit code 0",
+          "required": true
+        },
+        {
+          "name": "quit: 原始字节含 ESC[?1049l（退出备用屏，C7）",
+          "ok": true,
+          "actual": "stream_raw_positions=[17131] pane_ansi_has=False raw_len=17204",
+          "expected": "stream.raw 命中 \\x1b[?1049l",
+          "required": true
+        },
+        {
+          "name": "quit: 屏幕/原始字节含 `pony resume <session_id>` 提示（C7）",
+          "ok": true,
+          "actual": "pane_match=pony resume session-aaa7a995 raw_match=b'pony resume session-aaa7a995' pane_tail=继续该会话请运行：ponyresumesession-aaa7a995",
+          "expected": "capture-pane 或 stream.raw 含 `pony resume session-<id>`",
+          "required": true
+        },
+        {
+          "name": "quit: resume 提示出现在退出备用屏之后（C7 时序）",
+          "ok": true,
+          "actual": "raw_last_leave=17131 raw_hint=17174 raw_ordering=True pane_ordering=False",
+          "expected": "hint 字节序晚于最后一次 ESC[?1049l",
+          "required": true
+        },
+        {
+          "name": "quit: 退出后同一 pts 可 stty -F 测量（pty 未随 pony 消失）",
+          "ok": true,
+          "actual": "tty=/dev/pts/0 rc=0 out=speed 38400 baud; rows 34; columns 120; line = 0;\nintr = ^C; quit = ^\\; erase = ^?; kill = ^U; eof = ^D; eol = <undef>;\n",
+          "expected": "stty -F /dev/pts/N -a rc=0",
+          "required": true
+        },
+        {
+          "name": "quit: 退出后 -isig/-icanon/-echo/-opost 未同时残留（C7 termios）",
+          "ok": true,
+          "actual": "rc=0 remaining_negative=[]",
+          "expected": "四项不得同时为 '-' 关闭态",
+          "required": true
+        },
+        {
+          "name": "quit: 退出后 echo/icanon/isig 复原（C7 termios）",
+          "ok": true,
+          "actual": "rc=0 positive=['isig', 'icanon', 'echo', 'opost'] full=b cread -clocal -crtscts\n-ignbrk -brkint -ignpar -parmrk -inpck -istrip -inlcr -igncr icrnl ixon -ixoff\n-iuclc -ixany -imaxbel iutf8\nopost -olcuc -ocrnl onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0\nisig icanon iexten echo echoe echok -echonl -noflsh -xcase -tostop -echoprt\nechoctl echoke -flusho -extproc",
+          "expected": "stty -a 中 echo/icanon/isig 三项均为正向开启",
+          "required": true
+        },
+        {
+          "name": "quit: termios 判据判别力自检（退出前 raw / 退出后复原，同一 pts）",
+          "ok": true,
+          "actual": "tty=/dev/pts/0 PRE_negative=['-isig', '-icanon', '-echo', '-opost'] POST_negative=[] POST_positive=['isig', 'icanon', 'echo', 'opost']",
+          "expected": "PRE 至少 3 项 '-' 关闭，POST 四项全部转为正向开启",
+          "required": true
+        },
+        {
+          "name": "quit: 退出后无活线程持有 /dev/tty（C8）",
+          "ok": true,
+          "actual": "pony_pid=1158364 alive=False lsof=[] fd_links=[] /proc/1158364 exists=False",
+          "expected": "进程退出，/proc/<pid>/fd 不存在，无 /dev/tty 持有者",
+          "required": true
+        },
+        {
+          "name": "quit: 隔离——会话库只落在收据目录，真实用户库未被写入",
+          "ok": true,
+          "actual": "real_db=mtime_ns=1793895519417974320 iso_dbs=['/tmp/dsh-tui-session-resilience-smoke/iso-quit/xdg/PonyAgent/sessions.db']",
+          "expected": "所有 sessions.db 位于 /tmp/dsh-tui-session-resilience-smoke/ 下",
+          "required": true
+        },
+        {
+          "name": "quit: 运行日志捕获到统一终端还原（T2c）",
+          "ok": true,
+          "actual": "log_bytes=166 has_restore=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-quit/xdg/PonyAgent/sessions.db|[pony-tui] running terminal restore (T2c)|",
+          "expected": "日志含 `[pony-tui] running terminal restore (T2c)`",
+          "required": true
+        },
+        {
+          "name": "quit: fail-closed——运行日志无外部 OTel/Sentry 端点痕迹",
+          "ok": true,
+          "actual": "external_endpoint_hits=[] log_bytes=166",
+          "expected": "日志中无外部 http(s) 端点 / otel.ponyjob.top / sentry 字样",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "sigterm",
+      "cmd": "kill -TERM 1158487  # only the real pony PID, not the wrapper",
+      "launch_cmd": "tmux -L dsh-tui-smoke-sigterm-1158349 new-session -d -s smoke-sigterm -x 120 -y 34 -c /home/dm/pony-agent-worktrees/tui-session-resilience /bin/bash /tmp/dsh-tui-session-resilience-smoke/sigterm/wrapper.sh",
+      "wrapper": "/tmp/dsh-tui-session-resilience-smoke/sigterm/wrapper.sh",
+      "exit_code": "0",
+      "stdout_tail": "继续该会话请运行：ponyresumesession-66a6bf52",
+      "wrapper_pid": 1158485,
+      "pony_pid": 1158487,
+      "tty": "/dev/pts/0",
+      "assertions": [
+        {
+          "name": "sigterm: 已进入真实 TUI（capture-pane 含 Composer ›）",
+          "ok": true,
+          "actual": "ready=True ›=True pane_bytes=4019 pane_tail=\u001b[48;2;18;16;14m\u001b[38;2;104;98;90m/home/dm/pony-agent-worktrees/tui-session-resilience\u001b[39m",
+          "expected": "ready=True 且 pane 含 ›",
+          "required": true
+        },
+        {
+          "name": "sigterm: 退出前真实 pony 进程存活且持有 pts",
+          "ok": true,
+          "actual": "wrapper_pid=1158485 pony_pid=1158487 tty=/dev/pts/0 cmd=1158487 Sl+  /home/dm/pony-agent-worktrees/tui-session-resilience/target/debug/pony",
+          "expected": "pony 子进程存活且 tmux pane_tty=/dev/pts/N",
+          "required": true
+        },
+        {
+          "name": "sigterm: 退出前 TUI 确实处于 raw mode（判据判别力自检）",
+          "ok": true,
+          "actual": "rc=0 raw_flags=['-isig', '-icanon', '-echo', '-opost']",
+          "expected": "stty -a 中 -isig/-icanon/-echo/-opost 至少 3 项",
+          "required": true
+        },
+        {
+          "name": "sigterm: 退出后 pony 进程不存在（C8）",
+          "ok": true,
+          "actual": "pony_pid=1158487 gone=True alive=False ps=<gone> wrapper_alive=True (wrapper=sleep, 非 pony)",
+          "expected": "ps 无该 pony PID，且 wrapper 下无 pony 子进程",
+          "required": true
+        },
+        {
+          "name": "sigterm: pony 自身 exit code = 0（正常/信号接管均优雅退出）",
+          "ok": true,
+          "actual": "pony-exit-code.txt=0",
+          "expected": "exit code 0",
+          "required": true
+        },
+        {
+          "name": "sigterm: 原始字节含 ESC[?1049l（退出备用屏，C7）",
+          "ok": true,
+          "actual": "stream_raw_positions=[9058, 9136] pane_ansi_has=False raw_len=9209",
+          "expected": "stream.raw 命中 \\x1b[?1049l",
+          "required": true
+        },
+        {
+          "name": "sigterm: 屏幕/原始字节含 `pony resume <session_id>` 提示（C7）",
+          "ok": true,
+          "actual": "pane_match=pony resume session-66a6bf52 raw_match=b'pony resume session-66a6bf52' pane_tail=继续该会话请运行：ponyresumesession-66a6bf52",
+          "expected": "capture-pane 或 stream.raw 含 `pony resume session-<id>`",
+          "required": true
+        },
+        {
+          "name": "sigterm: resume 提示出现在退出备用屏之后（C7 时序）",
+          "ok": true,
+          "actual": "raw_last_leave=9136 raw_hint=9179 raw_ordering=True pane_ordering=False",
+          "expected": "hint 字节序晚于最后一次 ESC[?1049l",
+          "required": true
+        },
+        {
+          "name": "sigterm: 退出后同一 pts 可 stty -F 测量（pty 未随 pony 消失）",
+          "ok": true,
+          "actual": "tty=/dev/pts/0 rc=0 out=speed 38400 baud; rows 34; columns 120; line = 0;\nintr = ^C; quit = ^\\; erase = ^?; kill = ^U; eof = ^D; eol = <undef>;\n",
+          "expected": "stty -F /dev/pts/N -a rc=0",
+          "required": true
+        },
+        {
+          "name": "sigterm: 退出后 -isig/-icanon/-echo/-opost 未同时残留（C7 termios）",
+          "ok": true,
+          "actual": "rc=0 remaining_negative=[]",
+          "expected": "四项不得同时为 '-' 关闭态",
+          "required": true
+        },
+        {
+          "name": "sigterm: 退出后 echo/icanon/isig 复原（C7 termios）",
+          "ok": true,
+          "actual": "rc=0 positive=['isig', 'icanon', 'echo', 'opost'] full=b cread -clocal -crtscts\n-ignbrk -brkint -ignpar -parmrk -inpck -istrip -inlcr -igncr icrnl ixon -ixoff\n-iuclc -ixany -imaxbel iutf8\nopost -olcuc -ocrnl onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0\nisig icanon iexten echo echoe echok -echonl -noflsh -xcase -tostop -echoprt\nechoctl echoke -flusho -extproc",
+          "expected": "stty -a 中 echo/icanon/isig 三项均为正向开启",
+          "required": true
+        },
+        {
+          "name": "sigterm: termios 判据判别力自检（退出前 raw / 退出后复原，同一 pts）",
+          "ok": true,
+          "actual": "tty=/dev/pts/0 PRE_negative=['-isig', '-icanon', '-echo', '-opost'] POST_negative=[] POST_positive=['isig', 'icanon', 'echo', 'opost']",
+          "expected": "PRE 至少 3 项 '-' 关闭，POST 四项全部转为正向开启",
+          "required": true
+        },
+        {
+          "name": "sigterm: 退出后无活线程持有 /dev/tty（C8）",
+          "ok": true,
+          "actual": "pony_pid=1158487 alive=False lsof=[] fd_links=[] /proc/1158487 exists=False",
+          "expected": "进程退出，/proc/<pid>/fd 不存在，无 /dev/tty 持有者",
+          "required": true
+        },
+        {
+          "name": "sigterm: 隔离——会话库只落在收据目录，真实用户库未被写入",
+          "ok": true,
+          "actual": "real_db=mtime_ns=1793895519417974320 iso_dbs=['/tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db']",
+          "expected": "所有 sessions.db 位于 /tmp/dsh-tui-session-resilience-smoke/ 下",
+          "required": true
+        },
+        {
+          "name": "sigterm: 运行日志捕获到统一终端还原（T2c）",
+          "ok": true,
+          "actual": "log_bytes=208 has_restore=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db|[pony-tui] shutdown signal 15 received|[pony-tui] running terminal restore (T2c)|",
+          "expected": "日志含 `[pony-tui] running terminal restore (T2c)`",
+          "required": true
+        },
+        {
+          "name": "sigterm: fail-closed——运行日志无外部 OTel/Sentry 端点痕迹",
+          "ok": true,
+          "actual": "external_endpoint_hits=[] log_bytes=208",
+          "expected": "日志中无外部 http(s) 端点 / otel.ponyjob.top / sentry 字样",
+          "required": true
+        },
+        {
+          "name": "sigterm: 运行日志捕获到 SIGTERM 信号接管",
+          "ok": true,
+          "actual": "has_signal_notice=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db|[pony-tui] shutdown signal 15 received|[pony-tui] running terminal restore (T2c)|",
+          "expected": "日志含 `[pony-tui] shutdown signal 15 received`",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "assertions": [
+    {
+      "name": "quit: 已进入真实 TUI（capture-pane 含 Composer ›）",
+      "ok": true,
+      "actual": "ready=True ›=True pane_bytes=4019 pane_tail=\u001b[48;2;18;16;14m\u001b[38;2;104;98;90m/home/dm/pony-agent-worktrees/tui-session-resilience\u001b[39m",
+      "expected": "ready=True 且 pane 含 ›",
+      "required": true
+    },
+    {
+      "name": "quit: 退出前真实 pony 进程存活且持有 pts",
+      "ok": true,
+      "actual": "wrapper_pid=1158362 pony_pid=1158364 tty=/dev/pts/0 cmd=1158364 Sl+  /home/dm/pony-agent-worktrees/tui-session-resilience/target/debug/pony",
+      "expected": "pony 子进程存活且 tmux pane_tty=/dev/pts/N",
+      "required": true
+    },
+    {
+      "name": "quit: 退出前 TUI 确实处于 raw mode（判据判别力自检）",
+      "ok": true,
+      "actual": "rc=0 raw_flags=['-isig', '-icanon', '-echo', '-opost']",
+      "expected": "stty -a 中 -isig/-icanon/-echo/-opost 至少 3 项",
+      "required": true
+    },
+    {
+      "name": "quit: 退出后 pony 进程不存在（C8）",
+      "ok": true,
+      "actual": "pony_pid=1158364 gone=True alive=False ps=<gone> wrapper_alive=True (wrapper=sleep, 非 pony)",
+      "expected": "ps 无该 pony PID，且 wrapper 下无 pony 子进程",
+      "required": true
+    },
+    {
+      "name": "quit: pony 自身 exit code = 0（正常/信号接管均优雅退出）",
+      "ok": true,
+      "actual": "pony-exit-code.txt=0",
+      "expected": "exit code 0",
+      "required": true
+    },
+    {
+      "name": "quit: 原始字节含 ESC[?1049l（退出备用屏，C7）",
+      "ok": true,
+      "actual": "stream_raw_positions=[17131] pane_ansi_has=False raw_len=17204",
+      "expected": "stream.raw 命中 \\x1b[?1049l",
+      "required": true
+    },
+    {
+      "name": "quit: 屏幕/原始字节含 `pony resume <session_id>` 提示（C7）",
+      "ok": true,
+      "actual": "pane_match=pony resume session-aaa7a995 raw_match=b'pony resume session-aaa7a995' pane_tail=继续该会话请运行：ponyresumesession-aaa7a995",
+      "expected": "capture-pane 或 stream.raw 含 `pony resume session-<id>`",
+      "required": true
+    },
+    {
+      "name": "quit: resume 提示出现在退出备用屏之后（C7 时序）",
+      "ok": true,
+      "actual": "raw_last_leave=17131 raw_hint=17174 raw_ordering=True pane_ordering=False",
+      "expected": "hint 字节序晚于最后一次 ESC[?1049l",
+      "required": true
+    },
+    {
+      "name": "quit: 退出后同一 pts 可 stty -F 测量（pty 未随 pony 消失）",
+      "ok": true,
+      "actual": "tty=/dev/pts/0 rc=0 out=speed 38400 baud; rows 34; columns 120; line = 0;\nintr = ^C; quit = ^\\; erase = ^?; kill = ^U; eof = ^D; eol = <undef>;\n",
+      "expected": "stty -F /dev/pts/N -a rc=0",
+      "required": true
+    },
+    {
+      "name": "quit: 退出后 -isig/-icanon/-echo/-opost 未同时残留（C7 termios）",
+      "ok": true,
+      "actual": "rc=0 remaining_negative=[]",
+      "expected": "四项不得同时为 '-' 关闭态",
+      "required": true
+    },
+    {
+      "name": "quit: 退出后 echo/icanon/isig 复原（C7 termios）",
+      "ok": true,
+      "actual": "rc=0 positive=['isig', 'icanon', 'echo', 'opost'] full=b cread -clocal -crtscts\n-ignbrk -brkint -ignpar -parmrk -inpck -istrip -inlcr -igncr icrnl ixon -ixoff\n-iuclc -ixany -imaxbel iutf8\nopost -olcuc -ocrnl onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0\nisig icanon iexten echo echoe echok -echonl -noflsh -xcase -tostop -echoprt\nechoctl echoke -flusho -extproc",
+      "expected": "stty -a 中 echo/icanon/isig 三项均为正向开启",
+      "required": true
+    },
+    {
+      "name": "quit: termios 判据判别力自检（退出前 raw / 退出后复原，同一 pts）",
+      "ok": true,
+      "actual": "tty=/dev/pts/0 PRE_negative=['-isig', '-icanon', '-echo', '-opost'] POST_negative=[] POST_positive=['isig', 'icanon', 'echo', 'opost']",
+      "expected": "PRE 至少 3 项 '-' 关闭，POST 四项全部转为正向开启",
+      "required": true
+    },
+    {
+      "name": "quit: 退出后无活线程持有 /dev/tty（C8）",
+      "ok": true,
+      "actual": "pony_pid=1158364 alive=False lsof=[] fd_links=[] /proc/1158364 exists=False",
+      "expected": "进程退出，/proc/<pid>/fd 不存在，无 /dev/tty 持有者",
+      "required": true
+    },
+    {
+      "name": "quit: 隔离——会话库只落在收据目录，真实用户库未被写入",
+      "ok": true,
+      "actual": "real_db=mtime_ns=1793895519417974320 iso_dbs=['/tmp/dsh-tui-session-resilience-smoke/iso-quit/xdg/PonyAgent/sessions.db']",
+      "expected": "所有 sessions.db 位于 /tmp/dsh-tui-session-resilience-smoke/ 下",
+      "required": true
+    },
+    {
+      "name": "quit: 运行日志捕获到统一终端还原（T2c）",
+      "ok": true,
+      "actual": "log_bytes=166 has_restore=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-quit/xdg/PonyAgent/sessions.db|[pony-tui] running terminal restore (T2c)|",
+      "expected": "日志含 `[pony-tui] running terminal restore (T2c)`",
+      "required": true
+    },
+    {
+      "name": "quit: fail-closed——运行日志无外部 OTel/Sentry 端点痕迹",
+      "ok": true,
+      "actual": "external_endpoint_hits=[] log_bytes=166",
+      "expected": "日志中无外部 http(s) 端点 / otel.ponyjob.top / sentry 字样",
+      "required": true
+    },
+    {
+      "name": "sigterm: 已进入真实 TUI（capture-pane 含 Composer ›）",
+      "ok": true,
+      "actual": "ready=True ›=True pane_bytes=4019 pane_tail=\u001b[48;2;18;16;14m\u001b[38;2;104;98;90m/home/dm/pony-agent-worktrees/tui-session-resilience\u001b[39m",
+      "expected": "ready=True 且 pane 含 ›",
+      "required": true
+    },
+    {
+      "name": "sigterm: 退出前真实 pony 进程存活且持有 pts",
+      "ok": true,
+      "actual": "wrapper_pid=1158485 pony_pid=1158487 tty=/dev/pts/0 cmd=1158487 Sl+  /home/dm/pony-agent-worktrees/tui-session-resilience/target/debug/pony",
+      "expected": "pony 子进程存活且 tmux pane_tty=/dev/pts/N",
+      "required": true
+    },
+    {
+      "name": "sigterm: 退出前 TUI 确实处于 raw mode（判据判别力自检）",
+      "ok": true,
+      "actual": "rc=0 raw_flags=['-isig', '-icanon', '-echo', '-opost']",
+      "expected": "stty -a 中 -isig/-icanon/-echo/-opost 至少 3 项",
+      "required": true
+    },
+    {
+      "name": "sigterm: 退出后 pony 进程不存在（C8）",
+      "ok": true,
+      "actual": "pony_pid=1158487 gone=True alive=False ps=<gone> wrapper_alive=True (wrapper=sleep, 非 pony)",
+      "expected": "ps 无该 pony PID，且 wrapper 下无 pony 子进程",
+      "required": true
+    },
+    {
+      "name": "sigterm: pony 自身 exit code = 0（正常/信号接管均优雅退出）",
+      "ok": true,
+      "actual": "pony-exit-code.txt=0",
+      "expected": "exit code 0",
+      "required": true
+    },
+    {
+      "name": "sigterm: 原始字节含 ESC[?1049l（退出备用屏，C7）",
+      "ok": true,
+      "actual": "stream_raw_positions=[9058, 9136] pane_ansi_has=False raw_len=9209",
+      "expected": "stream.raw 命中 \\x1b[?1049l",
+      "required": true
+    },
+    {
+      "name": "sigterm: 屏幕/原始字节含 `pony resume <session_id>` 提示（C7）",
+      "ok": true,
+      "actual": "pane_match=pony resume session-66a6bf52 raw_match=b'pony resume session-66a6bf52' pane_tail=继续该会话请运行：ponyresumesession-66a6bf52",
+      "expected": "capture-pane 或 stream.raw 含 `pony resume session-<id>`",
+      "required": true
+    },
+    {
+      "name": "sigterm: resume 提示出现在退出备用屏之后（C7 时序）",
+      "ok": true,
+      "actual": "raw_last_leave=9136 raw_hint=9179 raw_ordering=True pane_ordering=False",
+      "expected": "hint 字节序晚于最后一次 ESC[?1049l",
+      "required": true
+    },
+    {
+      "name": "sigterm: 退出后同一 pts 可 stty -F 测量（pty 未随 pony 消失）",
+      "ok": true,
+      "actual": "tty=/dev/pts/0 rc=0 out=speed 38400 baud; rows 34; columns 120; line = 0;\nintr = ^C; quit = ^\\; erase = ^?; kill = ^U; eof = ^D; eol = <undef>;\n",
+      "expected": "stty -F /dev/pts/N -a rc=0",
+      "required": true
+    },
+    {
+      "name": "sigterm: 退出后 -isig/-icanon/-echo/-opost 未同时残留（C7 termios）",
+      "ok": true,
+      "actual": "rc=0 remaining_negative=[]",
+      "expected": "四项不得同时为 '-' 关闭态",
+      "required": true
+    },
+    {
+      "name": "sigterm: 退出后 echo/icanon/isig 复原（C7 termios）",
+      "ok": true,
+      "actual": "rc=0 positive=['isig', 'icanon', 'echo', 'opost'] full=b cread -clocal -crtscts\n-ignbrk -brkint -ignpar -parmrk -inpck -istrip -inlcr -igncr icrnl ixon -ixoff\n-iuclc -ixany -imaxbel iutf8\nopost -olcuc -ocrnl onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0\nisig icanon iexten echo echoe echok -echonl -noflsh -xcase -tostop -echoprt\nechoctl echoke -flusho -extproc",
+      "expected": "stty -a 中 echo/icanon/isig 三项均为正向开启",
+      "required": true
+    },
+    {
+      "name": "sigterm: termios 判据判别力自检（退出前 raw / 退出后复原，同一 pts）",
+      "ok": true,
+      "actual": "tty=/dev/pts/0 PRE_negative=['-isig', '-icanon', '-echo', '-opost'] POST_negative=[] POST_positive=['isig', 'icanon', 'echo', 'opost']",
+      "expected": "PRE 至少 3 项 '-' 关闭，POST 四项全部转为正向开启",
+      "required": true
+    },
+    {
+      "name": "sigterm: 退出后无活线程持有 /dev/tty（C8）",
+      "ok": true,
+      "actual": "pony_pid=1158487 alive=False lsof=[] fd_links=[] /proc/1158487 exists=False",
+      "expected": "进程退出，/proc/<pid>/fd 不存在，无 /dev/tty 持有者",
+      "required": true
+    },
+    {
+      "name": "sigterm: 隔离——会话库只落在收据目录，真实用户库未被写入",
+      "ok": true,
+      "actual": "real_db=mtime_ns=1793895519417974320 iso_dbs=['/tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db']",
+      "expected": "所有 sessions.db 位于 /tmp/dsh-tui-session-resilience-smoke/ 下",
+      "required": true
+    },
+    {
+      "name": "sigterm: 运行日志捕获到统一终端还原（T2c）",
+      "ok": true,
+      "actual": "log_bytes=208 has_restore=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db|[pony-tui] shutdown signal 15 received|[pony-tui] running terminal restore (T2c)|",
+      "expected": "日志含 `[pony-tui] running terminal restore (T2c)`",
+      "required": true
+    },
+    {
+      "name": "sigterm: fail-closed——运行日志无外部 OTel/Sentry 端点痕迹",
+      "ok": true,
+      "actual": "external_endpoint_hits=[] log_bytes=208",
+      "expected": "日志中无外部 http(s) 端点 / otel.ponyjob.top / sentry 字样",
+      "required": true
+    },
+    {
+      "name": "sigterm: 运行日志捕获到 SIGTERM 信号接管",
+      "ok": true,
+      "actual": "has_signal_notice=True tail=[pony-agent][session] loading sessions from SQLite /tmp/dsh-tui-session-resilience-smoke/iso-sigterm/xdg/PonyAgent/sessions.db|[pony-tui] shutdown signal 15 received|[pony-tui] running terminal restore (T2c)|",
+      "expected": "日志含 `[pony-tui] shutdown signal 15 received`",
+      "required": true
+    },
+    {
+      "name": "全局: 真实用户会话库 mtime 全程未变（隔离）",
+      "ok": true,
+      "actual": "before=1793895519417974320 after=1793895519417974320",
+      "expected": "before == after",
+      "required": true
+    },
+    {
+      "name": "全局: 负向控制——wrapper/harness 自身不会复原 termios（判据判别力）",
+      "ok": true,
+      "actual": "child=tty.setraw 无还原, 退出后 stty -F /dev/pts/0 rc=0 negative=['-isig', '-icanon', '-echo', '-opost'] positive=[] pane='RAW-CONTROL-READY'",
+      "expected": "raw flags 持续残留（证明 smoke 的 POST 复原来自 pony 自身而非 harness）",
+      "required": true
+    }
+  ],
+  "evidence_paths": [
+    "/tmp/dsh-tui-session-resilience-smoke/bin.log",
+    "/tmp/dsh-tui-session-resilience-smoke/control-negative/control-receipt.json",
+    "/tmp/dsh-tui-session-resilience-smoke/control-negative/post-stty.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/control-negative/pre-stty.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/control.py",
+    "/tmp/dsh-tui-session-resilience-smoke/final-run.stdout",
+    "/tmp/dsh-tui-session-resilience-smoke/isolation.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/byte-ordering.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/exit-code.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/launch.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/post-exit-pane.squeezed.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/post-exit-pane.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/post-exit-proc.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/post-exit-stty.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/post-exit-tty-holders.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/pre-exit-pane.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/pre-exit-proc.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/pre-exit-stty.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/pre-exit-tty-holders.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/stream.raw",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/trigger.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/tui-runtime.log",
+    "/tmp/dsh-tui-session-resilience-smoke/quit/wrapper.sh",
+    "/tmp/dsh-tui-session-resilience-smoke/run.log",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/byte-ordering.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/exit-code.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/launch.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/post-exit-pane.squeezed.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/post-exit-pane.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/post-exit-proc.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/post-exit-stty.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/post-exit-tty-holders.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/pre-exit-pane.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/pre-exit-proc.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/pre-exit-stty.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/pre-exit-tty-holders.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/stream.raw",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/trigger.txt",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/tui-runtime.log",
+    "/tmp/dsh-tui-session-resilience-smoke/sigterm/wrapper.sh",
+    "/tmp/dsh-tui-session-resilience-smoke/smoke-receipt.json",
+    "/tmp/dsh-tui-session-resilience-smoke/smoke.py"
+  ],
+  "negative_control": {
+    "purpose": "negative control: wrapper/harness must NOT restore termios by itself",
+    "receipt": "/tmp/dsh-tui-session-resilience-smoke/control-negative/control-receipt.json",
+    "post_stty_file": "/tmp/dsh-tui-session-resilience-smoke/control-negative/post-stty.txt",
+    "raw_leak_persists": true,
+    "post_negative_flags": [
+      "-isig",
+      "-icanon",
+      "-echo",
+      "-opost"
+    ],
+    "post_positive_flags": [],
+    "conclusion": "同一 wrapper 下把 pony 换成 tty.setraw 且不还原的子进程，退出后 -isig/-icanon/-echo/-opost 四项全部持续残留；因此 smoke 两条路径 POST 全正向复原只能由 pony 的 restore_terminal_modes/tcsetattr 贡献。"
+  },
+  "assertion_count": 35
+}

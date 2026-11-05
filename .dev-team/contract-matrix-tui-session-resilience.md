@@ -1,0 +1,87 @@
+# TUI 会话韧性修复冻结契约矩阵（C1–C8 / 2026-11-06）
+
+> 基线：独立 worktree `/home/dm/pony-agent-worktrees/tui-session-resilience`，分支 `fix/tui-session-resilience`，基线 HEAD `7a5269ed`。冻结次序：Lead 在 Protocol 超时窗口代落最小可用契约/7 个空桩/NFR 并由 `66fb8555` 物理冻结；Test Agent 由 `4f98062e` 冻结红相；Protocol 随后原地复核并补齐事实/[UNVERIFIED] 区分、精确行号与门禁收据。业务实现仍归 Executor，验收测试只读。
+> 所有 `path:line` 默认以 **基线 HEAD `7a5269ed`** 为准；`66fb8555:` 前缀表示冻结版空桩行号；`HEAD:` 前缀表示复核时当前工作树行号。标注「事实」= 源码/本机只读命令/物理状态直接取证；`[UNVERIFIED]` = 用户报告或推断，不得当已验结论。
+
+## 0. 事实、假设与最小闭包
+
+| 编号 | 结论 | 证据 / 反证状态 |
+|---|---|---|
+| F0 | worktree 分支与基线正确；主工作树并发改动不纳入契约。 | 事实：`git -C /home/dm/pony-agent-worktrees/tui-session-resilience rev-parse --abbrev-ref HEAD` → `fix/tui-session-resilience`；`rev-parse --short HEAD` → `7a5269ed`；后续冻结 commit `66fb8555`、`4f98062e`。 |
+| F1 | 本机 `normalized_messages` 确有 DSML 原文，且当前仅 2 行。 | 事实：默认库路径 `crates/pony-agent-core/src/agent/sqlite_session.rs:3450-3465` → `/home/dm/.local/share/PonyAgent/sessions.db`；只读 Python `sqlite3.connect('file:...?mode=ro', uri=True)`：`SELECT COUNT(*) FROM normalized_messages WHERE content LIKE '%DSML%'` → `2`；rowid 166（442 字符）、184（697 字符）完整内容见 §0.1。 |
+| F2 | DSML 精确语法（全角竖线 `｜` U+FF5C，非 ASCII `|`）：块开始 `<｜｜DSML｜｜ calls>`，内部 `<｜｜DSML｜｜ invoke name="…">` 与 `<｜｜DSML｜｜ parameter name="…" string="true">…</｜｜DSML｜｜ parameter>`，闭合 `</｜｜DSML｜｜ invoke>`、`</｜｜DSML｜｜ calls>`。 | 事实：F1 两行原文。过滤边界：仅在**完整块**或已被识别的**协议前缀半截形态**上折叠/缓冲；普通 Markdown 代码块、正文、内联反引号内容、孤立尖括号逐字保真。 |
+| F3 | 流式 `delta.content` 经 SSE 累加器原样取出并 `on_delta(Text)` 发出；结构化 `tool_calls` 走另一通道。 | 事实：`crates/pony-agent-core/src/agent/provider/openai_sse.rs:62-77`、`:300-310`、`:457-481`、`:366-455`。 |
+| F4 | TUI 把 `turn:delta` 原样追加到消息区；历史回放原样 clone `hist.content` / `entry.content`。 | 事实：`crates/pony-agent-core/src/bin/tui.rs:3091-3095`、`:8500-8504`、`:2619-2631`、`:6962-7089`（其中 `:7005`、`:7041` 为 clone）。 |
+| F5 | provider 层已有重试预算与「已发 delta 禁止自动重试」闸门。 | 事实：`crates/pony-agent-core/src/agent/provider/mod.rs:4312`、`:4332-4340`、`:4349-4357`、`:811-833`、`:1037-1080`、`:4428-4561`；`crates/pony-agent-core/src/agent/retry.rs:138-141`、`:601-...`、`:634-675`。 |
+| F6 | 错误原文经 `turn:failed` 直接进 `status_text` 与 System 消息；provider 错误详情含 400/240 字符预览。 | 事实：`crates/pony-agent-core/src/bin/tui.rs:3206-3209`、`:8559-8572`；`crates/pony-agent-core/src/agent/provider/mod.rs:4314-4321`。 |
+| F7 | 失败 issue 上报既有链路仍在。 | 事实：`crates/pony-agent-core/src/agent/turn_flow.rs:525-552`（`emit_stream_failed` → `capture_turn_failure`）。 |
+| F8 | 中断 turn 当前落库为固定占位「用户终止，发送消息可继续。」；store 把它分类为 `TurnCancelled`；`append_turn_fallible` 在无事件/flush 失败时回退 caller text。 | 事实：`crates/pony-agent-core/src/agent/runtime/types.rs:202`、`crates/pony-agent-core/src/agent/runtime/turn_persist.rs:543-564`、`crates/pony-agent-core/src/agent/session/store.rs:3976-3981`、`:390-436`（其中 `:417`、`:429` 为回退日志）。 |
+| F9 | cancel/fail 已把 `trace_steps` / `tool_activities` 写入 checkpoint/trace，但 resume 视图只回放 `session_snapshot.history` / `message_state`，不消费这些可见步骤。 | 事实：`crates/pony-agent-core/src/agent/runtime/turn_control.rs:140-249`、`crates/pony-agent-core/src/agent/runtime/turn_persist.rs:437-517`、`:865-900`；`crates/pony-agent-core/src/bin/tui.rs:6962-7089`。 |
+| F10 | 既有终端还原设施存在，但退出主循环 ≠ 进程退出；turn 线程由 `std::thread::spawn` 启动且退出路径无 join/取消回收。 | 事实：`crates/pony-agent-core/src/bin/tui.rs:112-178`、`:234-247`、`:256-285`、`:291-296`、`:990-1027`、`:6401-6546`、`:7215`/`:7246`、`:8368`/`:8381`/`:8426`、`:9004-9057`、`:8993-9001`；`crates/pony-agent-core/src/agent/control_plane/mod.rs:2089`（`stop_turn` 既有接缝）。 |
+| F11 | 残留进程物理收据：PID `3648409` 在 `pts/0` 持续 >2h，`/proc/3648409/task` 22 线程，fd 0/1→`/dev/pts/0`、fd13→`/dev/tty`，tpgid 仍为该 PID；`stty -F /dev/pts/0 -a` 采样为 `-isig -icanon -echo -opost`（raw 未复原）。 | 事实：Lead 提供采样 + 本 Agent 复核 `ps -o pid,tty,etime,stat,tpgid,cmd -p 3648409` → `Sl+ / TPGID=3648409 / pony`；`ls /proc/3648409/task \| wc -l` → `22`；`ls -l /proc/3648409/fd/{0,1,13}`。复核时该 pts 已消失，属事后状态，不否定采样时刻事实。 |
+| F12 | 运行日志出现 743 次 `[pony-tui] running terminal restore (T2c)`；第 327258 行后紧接 provider usage，证明后台 LLM 请求在「还原」之后仍继续。 | 事实：只读统计 `/home/dm/.pony-agent/tui-logs/tui-runtime.log`：总行 329054、`restore_count=743`；第 327259 行 `[pony-provider] usage:openai raw={"completion_tokens":902,...}`。日志源 `crates/pony-agent-core/src/bin/tui.rs:6531`。Lead 采样记作 742 次，差异为复核时刻增量，不改变结论。 |
+| U1 | `[UNVERIFIED]`「上游把 DSML 原始工具调用标记放进 `delta.content`」。 | F1 证明持久化正文含 DSML，F3/F4 证明 `delta.content`→消息区→历史之间无过滤；但未抓取原始 SSE wire，不能排除其它注入点。修复按「进入消息区 + 历史回放」双路径收口即可，不依赖该假设成立。 |
+| U2 | `[UNVERIFIED]`「中断 turn 被撤销、从上一轮结束处重来」。 | F8/F9 证明只有已完成/占位 history 被回放；用户报告为间接证据，须由 Test Agent 用旧会话 + cancel/fail + resume 真实路径复现红相。 |
+| U3 | `[UNVERIFIED]`「持续错误重试」的具体用户可见时序。 | F5 证明已有预算与禁重试闸门，F6 证明原文裸显；PonySentry/日志四维取证由 Lead 代落矩阵 §0 提供（Issues `TurnExecutionFailed` 5 条、trace `agent.turn` ERROR、本地日志 `decision:attempt=1/5 … 401 NonRetryable`），本 Protocol 未独立重放外部服务，按 Lead 证据登记为未独立复核。 |
+
+### 0.1 DSML 物理样本（只读输出摘要）
+
+- `/home/dm/.local/share/PonyAgent/sessions.db` `normalized_messages` rowid 166：`'\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="Run">\n<｜｜DSML｜｜ parameter name="command" string="true">cd /home/dm/pony-agent && ls …</｜｜DSML｜｜ parameter>\n…\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'`。
+- rowid 184：同形态，含内嵌 Python heredoc 与 `grep -n "pub fn str_width" ...`，仍以 `</｜｜DSML｜｜ calls>` 收尾。两行证明协议正文已进入持久化 assistant content，且内部可含普通代码/尖括号，过滤不得误伤其内容以外的正文。
+
+## 1. 冻结的纯函数签名（红相唯一可编译接缝）
+
+全部位于 `crates/pony-agent-core/src/bin/tui.rs` 顶层 `pub`；冻结版 `66fb8555:crates/pony-agent-core/src/bin/tui.rs:263-298`，当前工作树 `HEAD:crates/pony-agent-core/src/bin/tui.rs:264-304`（因 `#[allow(unused_variables)]` 行号 +1）。测试经 `#[path = "../src/bin/tui.rs"] mod tui;` 可达。Executor **只允许替换函数体，不得改名/改签名/删除/新增依赖**；签名与返回类型逐字冻结：
+
+| C | 完整签名 | 返回类型 | 冻结语义 |
+|---|---|---|---|
+| C1/C2 | `pub fn sanitize_model_protocol_text(text: &str) -> (String, bool)` | `(String, bool)` | 完整 DSML 块折叠为含「工具调用」四字的占位（不固定整句，允许 `［工具调用］`）；`bool`=`incomplete`，仅当尾部为已识别 DSML 协议前缀半截形态（`<｜` / `｜DSML` / `<｜｜DSML｜｜ inv` 等）为 `true`，且不得把半截标记交给用户。普通 Markdown 代码块、正文、尖括号逐字保真。流式与历史回放共用本函数。 |
+| C3 | `pub fn is_transient_provider_error(error: &str) -> bool` | `bool` | timeout / 429 / 5xx / network / DNS / connection 类为 `true`；401/403/400/missing key/auth/quota/context overflow/bad request/`NonRetryable`/已发 delta 哨兵/unknown 为 `false`。只分类，不发起重试。 |
+| C4 | `pub fn user_facing_error_summary(error: &str) -> String` | `String` | 一句话摘要（Test 冻结上限 ≤200 字符）；不得包含 `error sending request for url`、URL、JSON 响应体、`stacktrace`、`missing API key`、400/240 字符响应预览。原始详情仅留运行日志、issue 上报与用户显式展开的折叠区。 |
+| C4 | `pub fn should_fold_error_detail(error: &str) -> bool` | `bool` | 终态原始错误详情默认 `true`；面向用户摘要本身（或任何不含内部 URL/JSON/堆栈且长度有界的摘要）为 `false`，防止把摘要再当详情折叠。 |
+| C5/C6 | `pub fn interrupted_turn_checkpoint(prior_assistant_text: &str, tool_activities: &[String]) -> Option<String>` | `Option<String>` | 把已产生的可见正文/工具活动编码为向后兼容检查点字符串；空输入返回 `None`。载荷必须放在既有 optional 文本字段（推荐 `normalized_messages.attachments_json` 内 additive envelope 或 `TurnTraceRecord.fallback_reason`），旧会话字段缺失/解析失败等价于 `None`。 |
+| C6 | `pub fn resume_from_checkpoint(completed_history: &str, checkpoint: Option<&str>) -> String` | `String` | 返回**拼接后的全文**：`None`/空/旧格式/非法载荷 ⇒ 逐字返回 `completed_history`；合法检查点 ⇒ 在已完成历史之后追加可见步骤，且不得重复 `completed_history` 中已有段落/已完成 turn。 |
+| C7/C8 | `pub fn exit_cleanup_plan(inflight_turn: bool, timeout_ms: u64) -> Vec<&'static str>` | `Vec<&'static str>` | 在飞时严格 `["cancel","wait","restore","hint","exit"]`；空闲时 `["wait","restore","hint","exit"]`；`timeout_ms` 钳到 NFR 上限 `3000`，不得返回 `detach`。所有退出路径收敛到该计划。 |
+
+> 空桩纯度（冻结时刻）：7 个函数体各 1 行 `unimplemented!("Cx")`，无 `let`/`return`/分支/默认实参计算；Protocol 后续为消除 `RUSTFLAGS=-D warnings` 的 unused-variable 告警，仅加 `#[allow(unused_variables)]` 属性并改 `unimplemented!("Cx")` 文案，签名保持逐字不变，未写业务逻辑。Executor 当前工作树已替换函数体为业务实现，属 task-3 写域，Protocol 不改写、不裁决其实现。
+
+## 2. C1–C8 冻结验收断言
+
+| ID | 现象 / 根因证据（path:line） | 验收断言 | 写域 | 不变量 |
+|---|---|---|---|---|
+| C1 | 流式 DSML 原样进消息区：F3 `openai_sse.rs:62-77`、`:457-481`；F4 `tui.rs:3091-3095`、`:8500-8504`、`:2619-2631`；F1/F2 + U1。 | `sanitize_model_protocol_text` 对 F2 完整块返回不含 `｜DSML｜｜` / `invoke name=` / `parameter name=` 的文本且含「工具调用」占位，`incomplete=false`；对合法 UTF-8 边界切开的协议前缀返回 `incomplete=true` 且输出无 `<｜` / `｜>` 半截标记；`StreamDelta` 事件臂必须经该函数后才调用 `append_assistant_chunk`；渲染帧与新增持久化 assistant 行均不得出现 F2 原始标记。普通 ```` ``` ```` 代码块内逐字包含 F2 文本时输出不变。 | `crates/pony-agent-core/src/bin/tui.rs`（`append_assistant_chunk` / `StreamDelta` 臂 / S1 实现）；`crates/pony-agent-core/src/agent/provider/openai_sse.rs`（若统一在 `extract_openai_delta_content_text` 前收口，仅复用同一纯函数语义）。 | 不改 `UiEvent::StreamDelta(String)`、`ChatMessage`、`MessageRole`、`TurnStreamEvent`、`ProviderStreamChunk`、SSE `[DONE]` / `tool_calls` 解析；reasoning、普通正文、结构化 tool_calls 逐字兼容；不新增网络/线程。 |
+| C2 | 历史回放 DSML 原样：F1 + F4 `tui.rs:6962-7089`、`:7005`、`:7041`。 | `hydrate_state_from_session` 对 `history` 与 `message_state` 两条 assistant 分支统一调用 S1；resume 后屏幕与 `state.messages` 不含 F2 标记；旧库 rowid 166/184 回放后显示「工具调用」占位；普通正文/代码块不变；旧会话无检查点字段可正常加载。 | `crates/pony-agent-core/src/bin/tui.rs`（`hydrate_state_from_session`）。 | 不迁移/删除/重编号 `normalized_messages`；`session.history` / `message_state` 字段语义不变；`load_session_runtime_view` 公共签名不变。 |
+| C3 | 持续错误重试：F5 + F6 + U3；`provider/mod.rs:4314-4321` 400/240 字符原文。 | S2 对瞬态集合返回 `true`、对 400/401/…/`stream already emitted delta` 返回 `false`；provider 重试仍走 `retry_provider_timeout` / `retry_provider_followup_*` 既有预算：decision_stream `max_attempts=5`（1 初始 + 4 重试）、`backoff_cap_ms=8000`、总预算 30000ms；followup 限流 2 次 / 20s→40s / 90000ms；已发 delta 后 `decide` 必须为 `Abort`；TUI 层不得新增重试循环/定时器/请求；注入 400 错误时总 provider 调用次数 = 1；重试期状态栏显示「重试中（n/N）」而非裸详情。 | `crates/pony-agent-core/src/agent/provider/mod.rs`（仅在既有分类/预算接缝挂接，禁新增重试层）；`crates/pony-agent-core/src/bin/tui.rs`（S2 实现 + 状态呈现）。 | `retry.rs::ProviderRetryPolicy::decide` / `StreamState` / `RetryBudget` 公共语义不变；`PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS` 不提高；`no_more_retries_hint` 仍禁止已发 delta 后重试；不得新增外部 IO。 |
+| C4 | 错误详情裸奔：F6 + F7。 | `StreamFailed` 臂的 `status_text` 必须等于 `user_facing_error_summary(err)`；System 消息默认只显示摘要 + 折叠提示，`should_fold_error_detail(err)==true`；原始 `err` 不进入默认可见帧；用户显式展开后才显示原始详情；注入含 400 字符 `响应正文：` 与唯一哨兵的原始错误，默认屏幕/状态栏不含哨兵；`emit_stream_failed` → `capture_turn_failure`（`turn_flow.rs:525-552`）不得删除。 | `crates/pony-agent-core/src/bin/tui.rs`（`StreamFailed` 臂 + 摘要/折叠状态）；`crates/pony-agent-core/src/agent/turn_flow.rs:525-552` 只读不改。 | `turn:failed` 事件字段、`UiEvent::StreamFailed(String)`、PonySentry issue 上报、JSON 日志 `trace_id` 不变；不新增错误码/端点/依赖。 |
+| C5 | cancel/fail 落占位正文导致中断步骤不可续传：F8 + F9 + U2。 | S5 对非空 `prior_assistant_text` 或非空 `tool_activities` 返回 `Some` 且保留正文/每条工具活动；空输入返回 `None`；cancel/fail 收口时把已发生工具活动/已流式正文写入既有 optional 持久化字段（additive-only，禁止新增列/迁移）；`classify_turn_node_kind` 仍识别旧占位以兼容旧会话；持久化格式缺失/解析失败按 `None` 处理。 | `crates/pony-agent-core/src/agent/runtime/turn_persist.rs`、`turn_control.rs`、`crates/pony-agent-core/src/agent/session/store.rs`、`crates/pony-agent-core/src/agent/sqlite_session.rs`（正确路径，非 `session/sqlite_session.rs`）、`crates/pony-agent-core/src/bin/tui.rs`（S5 实现）。 | `TurnHistoryMessage`（`session/types.rs:192-203`）/ `TurnTraceRecord`（`:681-727`）字段编号、serde `default` / `skip_serializing_if`、`normalized_messages.attachments_json`（`sqlite_session.rs:352-363`）、`fallback_reason: Option<String>` 不删除/重编号；`append_turn_fallible` caller text 回退仍存在。 |
+| C6 | resume 只回放已完成/已落盘 turn：F9 + U2（`tui.rs:6962-7089`）。 | S6 `None`/非法/旧格式逐字返回 `completed_history`；合法检查点追加可见步骤且不重复已完成 turn；`hydrate_state_from_session` 必须调用 S6；旧会话（无检查点）与现有 `tui_resume_cli.rs` 回归一致；中断 turn 的工具活动/文本在 resume 后可见，用户可从该检查点继续发消息而非整轮撤销。 | `crates/pony-agent-core/src/bin/tui.rs`（`hydrate_state_from_session` + S6 实现）。 | 不重复 `ChatMessage`；不改 `SessionRuntimeViewQuery` / `SessionSnapshot` 公共类型；不新增第二套会话恢复协议；`pony resume <id>` 命令形状不变。 |
+| C7 | 退出后进程/后台 turn 仍在、tty 被持有：F10 + F11 + F12。 | `main` / `run_tui` 退出前按 S7 执行：若有在飞 turn 先 `control_plane.stop_turn(StopTurnCommand { turn_id, stop_reason: Some(StopReason::User) })`（既有接缝 `control_plane/mod.rs:2089`），再对 `std::thread::spawn`（`tui.rs:8368` / `:8426`）的 JoinHandle 做 `<=3000ms` 有界 join/drop，回收 `TuiTurnSinkGuard` 与 supervision emitter；`inflight_turn=false` 时省略 cancel 但仍 wait/restore/hint/exit；`timeout_ms>3000` 钳到 3000；真实 PTY 冒烟后 `ps` 无 `pony` 残留、`/proc/<pid>` 不存在、无 fd 0/1 指向该 pts、tpgid 不指向已退进程。 | `crates/pony-agent-core/src/bin/tui.rs`（`tui_event_loop` 返回出口、`run_tui` 收口、`main` 正常/错误退出）、`crates/pony-agent-core/src/agent/control_plane/mod.rs` 只读复用 `stop_turn`。 | 不改 `StartTurnStreamCommand` / `StopTurnCommand` / `StopReason`；不得 `detach` 线程；`ObservabilityBootstrap::drop`（`tui.rs:8993-9001`）的 1500ms flush + 1000ms shutdown 仍保留；不新增线程/网络。 |
+| C8 | 终端残留 / resume 提示时序：F10 + F11；`stty -isig -icanon -echo -opost` 为 raw 残留。 | S7 顺序 `cancel→wait→restore→hint→exit`（空闲 `wait→restore→hint→exit`）不可调换；`restore_terminal_modes`（`tui.rs:256-285`）在 normal / SIGINT/SIGTERM/SIGHUP（`tui.rs:172-178`）/ panic hook（`:291-296`）/ `process::exit` 前所有路径执行；`TERMINAL_SCREEN_RESET`（`:73`）含 `ESC[?1049l` + `ESC[?25h`；`print_resume_hint`（`:241-247`）必须在备用屏退出后；`verify_termios` 读回 `stty -F <tty> -a`，若仍含 `-isig/-icanon/-echo/-opost` 则二次 `tcsetattr` + 还原串；PTY 冒烟断言退出后 `isig icanon echo opost` 恢复、提示留在主屏、无持有 tty 的活线程。 | `crates/pony-agent-core/src/bin/tui.rs`（信号/panic/主循环/`main` 收口）、`crates/pony-agent-core/src/agent/otel/mod.rs` 与 `ponysentry/mod.rs` 只读复用有界 shutdown。 | `TerminalGuard`（`:990-1027`）/ `restore_terminal_modes` 幂等不变；`resume_hint_line`（`:234-236`）文案不变；`PONY_TUI_RUNTIME_LOG` 重定向与 `set_stderr_output` 门控不变；`docs/observability.yaml` 四维归属不变。 |
+
+## 3. NFR 基准（严格 5 键 Schema，已冻结）
+
+文件：`.dev-team/nfr-baseline-tui-session-resilience.json`（`66fb8555` 已提交，内容未改）。未知字段拒绝：
+
+| 字段 | 数值 / 声明 | 证据 |
+|---|---|---|
+| `external_call_timeout_ms` | `3000`（≤3000，亦为退出有界 join 上限） | `node .dev-team/tools/validate-nfr-baseline.mjs ...` Exit 0；`python3 ~/.agents/skills/dev-team/scripts/dev-nfr-lint.py ...` Exit 0。 |
+| `retry` | `max_attempts=5`、`backoff_cap_ms=8000`、`applicable=true`；followup 限流沿用既有 2 次 / 20s→40s / 90000ms；已发 delta 后禁止自动重试；TUI 不叠加重试 | F5 `provider/mod.rs:4312`、`:4332-4340`、`:4349-4357`。 |
+| `concurrency_lock` | `SHUTDOWN_REQUESTED AtomicBool + control_plane.stop_turn`，单一 TUI 退出写主，有界 join | F10 `tui.rs:59`、`:172-178`；`control_plane/mod.rs:2089`。 |
+| `logging` | `format="json"`、`trace_id=true`、`applicable=true` | `docs/observability.yaml:24-30`、`:269-278`；沿用 `PONY_TUI_RUNTIME_LOG` / `set_stderr_output(true)` 门控，无新增日志出口。 |
+| `resource_release` | 3 项：in-flight turn/sink/emitter；terminal raw+备用屏+`/dev/tty`；OTel/PonySentry 后台 worker，全部在真正退出前回收 | F10/F11/F12；`.dev-team/nfr-baseline-tui-overlay-cancel.json:17-23` 先例。 |
+
+## 4. 既有契约 / 文档锚点（只读）
+
+- `.dev-team/contract-matrix-tui-overlay-cancel.md:10`（取消事件/日志边界）、`:15-18`（公共契约不变量）、`:22-35`（停止/Ask/JSON 日志断言）、`:50-55`（Test 写域与 NFR 门禁）。
+- `.dev-team/nfr-baseline-tui-overlay-cancel.json:2-23`（5 键 Schema 先例）。
+- `docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md:29-35`（停止终态、sink 成对回收、不新增接口/持久化格式、日志改道门控）、`:39-41`（影响与验收边界）。
+- `docs/observability.yaml:9-30`（tracing/issues 适用、metrics/logs 结构性 N-A）、`:258-278`（wave-64 / ADR 0063 归属不变；`PONY_TUI_RUNTIME_LOG` 仅重定向成功时改道）。本波触及 UI/后台任务/退出路径：Executor 仅追加「四维归属不变 + 无新增出口/字段」说明，Lead 跑 `audit-diff.sh` / `check-declaration.sh`，WARN 不得静默当 PASS。
+
+## 5. 物理收据、测试分权与最小闭包写域
+
+- 冻结提交：`66fb8555 chore(protocol): freeze tui-session-resilience stubs & NFR baseline`；`4f98062e test(wave-1-tui-session-resilience): freeze functional & adversarial red-phase acceptance tests`。Protocol 未执行 `git commit`。
+- 红相可达性：`crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs:13-23` 经 `#[path] mod tui;` 导入 S1–S7；`:47-270` 为 10 个 L2-T 真断言，`:272-439` 为 AT1/AT2/AT3 确定性破坏注入；C8 显式 `[RED DEGRADED: STATIC-ONLY]`（`:238-270`），不谎称动态 PTY 通过。
+- 门禁收据（Protocol 复核，worktree 内执行）：`node .dev-team/tools/validate-nfr-baseline.mjs .dev-team/nfr-baseline-tui-session-resilience.json` Exit 0；`python3 ~/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline-tui-session-resilience.json` Exit 0；`python3 ~/.agents/skills/dev-team/scripts/dev-stub-lint.py crates/pony-agent-core/src/bin/tui.rs` Exit 0；`python3 .dev-team/tools/wave43-rust-stub-purity.py <仅空桩段临时文件>` Exit 0；`RUSTFLAGS="-D warnings" cargo check -p pony-agent-core --all-targets` Exit 0；`cargo check -p pony-agent-core` Exit 0；`cargo check -p pony-agent-core --all-targets` Exit 0；`cargo test -p pony-agent-core --no-run` Exit 0；`git diff --check` Exit 0。临时空桩段文件落在 `${TMPDIR:-/tmp}/dsh-protocol-stubs-*` 并按前缀清理，未入仓。
+- Test Agent 写域（冻结只读）：`crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs`、`tests/acceptance/adversarial/tui_session_resilience/`、`.dev-team/red-phase-tui-session-resilience.json`、`.dev-team/l2at-done-tui-session-resilience.json`；Executor 禁改验收测试。
+- Executor 最小闭包写域（按路径段，供 Join Barrier 审计）：`crates/pony-agent-core/src/bin/tui.rs`（S1–S7 实现 + 流式/回放/失败/退出收口）；`crates/pony-agent-core/src/agent/provider/openai_sse.rs`、`crates/pony-agent-core/src/agent/provider/mod.rs`（仅 DSML/错误分类接缝，禁新增重试）；`crates/pony-agent-core/src/agent/session/store.rs`、`crates/pony-agent-core/src/agent/session/backend.rs`、`crates/pony-agent-core/src/agent/sqlite_session.rs`（正确路径）、`crates/pony-agent-core/src/agent/session/types.rs`（仅 additive optional 字段使用，禁重编号）；`crates/pony-agent-core/src/agent/runtime/turn_persist.rs`、`turn_control.rs`、`turn_stream.rs`、`turn_sync.rs`（中断检查点持久化）；`docs/observability.yaml`（归属说明）；`.dev-team/green-receipt-tui-session-resilience.md`。不得写主工作树、不得写测试、不得新增公共类型/事件/错误码/列/迁移/依赖。
+- 公共契约不变量：不新增网络端点/环境变量/依赖/异常码；不新增 Loki/metrics 出口；issue 上报仍走 `capture_turn_failure`；`pony resume <id>` 命令形状不变；持久化 additive-only；`docs/observability.yaml` 四维归属不变。

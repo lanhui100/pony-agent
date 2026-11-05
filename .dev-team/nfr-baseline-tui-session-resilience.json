@@ -1,0 +1,35 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 5,
+    "backoff_cap_ms": 8000,
+    "applicable": true
+  },
+  "concurrency_lock": {
+    "primitive": "SHUTDOWN_REQUESTED AtomicBool + control_plane.stop_turn",
+    "scope": "single TUI exit writer; bounded join of in-flight turn/background tasks",
+    "applicable": true
+  },
+  "logging": {
+    "applicable": true,
+    "format": "json",
+    "trace_id": true
+  },
+  "resource_release": [
+    {
+      "applicable": true,
+      "handle": "in-flight turn thread / TuiTurnSink / supervision emitter",
+      "release": "cancel via stop_turn, unregister sink pairwise, join/drop thread within 3000ms"
+    },
+    {
+      "applicable": true,
+      "handle": "terminal raw mode + alternate screen + /dev/tty fd",
+      "release": "restore_terminal_modes on normal, signal, panic and process::exit paths; verify termios flags; print resume hint only after alternate-screen exit"
+    },
+    {
+      "applicable": true,
+      "handle": "OTel / PonySentry background workers",
+      "release": "bounded flush/shutdown before true process exit; no live thread holding tty"
+    }
+  ]
+}

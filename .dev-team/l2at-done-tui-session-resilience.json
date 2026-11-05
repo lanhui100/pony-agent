@@ -1,0 +1,61 @@
+{
+  "wave": "tui-session-resilience",
+  "ticket": "B-tui-session-resilience",
+  "owner": "test-agent (independent L2-T / L2-AT author)",
+  "status": "red-phase-frozen",
+  "frozen_at": "2026-11-06T01:20:23+08:00",
+  "revision_note": "AT1 harness fix: legal UTF-8 char-boundary prefix splits via char_indices(); all 12 cases re-verified EXIT=101 with unimplemented!() panics only, 0 char-boundary harness panics.",
+  "contract": ".dev-team/contract-matrix-tui-session-resilience.md",
+  "nfr_baseline": ".dev-team/nfr-baseline-tui-session-resilience.json",
+  "red_phase_receipt": ".dev-team/red-phase-tui-session-resilience.json",
+  "test_files": [
+    "/home/dm/pony-agent-worktrees/tui-session-resilience/crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs"
+  ],
+  "red_command": "cargo test -p pony-agent-core --test tui_session_resilience_acceptance",
+  "red_exit_code": 101,
+  "red_failure_primitive": "Rust native unimplemented!() panic (S1-S7); no E0425 / no compile error / no swallowed exception / 0 char-boundary harness panic",
+  "case_count": {
+    "frozen_acceptance_cases": 12,
+    "l2t_functional": 9,
+    "l2at_adversarial": 3,
+    "preexisting_tui_unit_tests_passed": 3
+  },
+  "assertion_ids_and_contracts": [
+    { "id": "C1/S1-A01", "case": "c1_dsml_stream_is_filtered", "mode": "L2-T", "contract": "C1" },
+    { "id": "C1/S1-A02", "case": "c1b_plain_markdown_and_angle_brackets_are_untouched", "mode": "L2-T", "contract": "C1" },
+    { "id": "C2/S1-A03", "case": "c2_dsml_history_replay_is_filtered_and_legacy_history_is_preserved", "mode": "L2-T", "contract": "C2/C6" },
+    { "id": "C3/S2-A04", "case": "c3_transient_errors_are_retryable_within_budget_and_permanent_errors_are_not", "mode": "L2-T", "contract": "C3" },
+    { "id": "C4/S3-A05", "case": "c4_error_detail_is_folded_and_summary_is_user_facing", "mode": "L2-T", "contract": "C4" },
+    { "id": "C4/S4-A06", "case": "c4_error_detail_is_folded_and_summary_is_user_facing", "mode": "L2-T", "contract": "C4" },
+    { "id": "C5/S5-A07", "case": "c5_interrupt_checkpoint_keeps_persisted_steps_and_empty_input_is_none", "mode": "L2-T", "contract": "C5" },
+    { "id": "C6/S6-A08", "case": "c6_resume_continues_from_checkpoint_without_replaying_completed_turn", "mode": "L2-T", "contract": "C6" },
+    { "id": "C7/S7-A09", "case": "c7_exit_cancels_inflight_turn_restores_terminal_then_prints_resume_hint", "mode": "L2-T", "contract": "C7/C8" },
+    { "id": "C8/S7-A10", "case": "c8_terminal_restore_bytes_and_resume_hint_order_are_statically_enforced", "mode": "L2-T static PTY", "contract": "C8" },
+    { "id": "AT1/S1-A11", "case": "at1_malformed_oversized_and_chunk_split_dsml_never_leaks_partial_markers", "mode": "L2-AT", "contract": "C1/C2" },
+    { "id": "AT2/S5+S6-A12", "case": "at2_interrupt_and_resume_interleaving_is_deterministic_and_idempotent", "mode": "L2-AT", "contract": "C5/C6" },
+    { "id": "AT3/S7-A13", "case": "at3_concurrent_exit_signals_and_inflight_turn_race_have_one_bounded_plan", "mode": "L2-AT", "contract": "C7/C8" }
+  ],
+  "adversarial_injections": [
+    "malformed/oversized DSML payload + fixed <=64 legal UTF-8 char-boundary stream splits via char_indices() (no sleep, no byte-boundary harness panic)",
+    "interrupt/resume interleaving: fixed 8 iterations, 2-stage Barrier + mpsc channel (no sleep)",
+    "concurrent exit signal vs in-flight turn: fixed 4 rounds x 2 threads + Barrier (no sleep)"
+  ],
+  "pty": {
+    "dynamic": false,
+    "degraded_reason": "[RED DEGRADED: STATIC-ONLY] real pony/PTY process not launched in this red-phase run; TERMINAL_SCREEN_RESET bytes, resume_hint_line, and exit_cleanup_plan restore<hint<exit state machine are asserted with real Rust asserts; no dynamic pass claimed",
+    "static_assertions": [
+      "screen bytes contain LeaveAlternateScreen ESC[?1049l",
+      "screen bytes contain ShowCursor ESC[?25h",
+      "single-line resume hint contains pony resume <id>",
+      "restore precedes hint precedes exit in cleanup plan",
+      "no detach step that would leave a tty-holding background thread"
+    ]
+  },
+  "executor_read_only_files": [
+    "crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs",
+    ".dev-team/red-phase-tui-session-resilience.json",
+    ".dev-team/l2at-done-tui-session-resilience.json"
+  ],
+  "no_git_commit": true,
+  "production_code_modified_by_test_agent": false
+}

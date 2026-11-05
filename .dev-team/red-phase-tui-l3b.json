@@ -1,0 +1,99 @@
+{
+  "wave": "tui-session-resilience / Wave-3 L3-B patch red-phase",
+  "ticket": "B-tui-session-resilience",
+  "owner": "test-agent (independent Test Agent)",
+  "worktree": "/home/dm/pony-agent-worktrees/tui-session-resilience",
+  "branch": "fix/tui-session-resilience",
+  "frozen_at": "2026-11-06T03:59:00+08:00",
+  "test_file": "crates/pony-agent-core/tests/tui_session_resilience_l3b.rs",
+  "test_file_absolute": "/home/dm/pony-agent-worktrees/tui-session-resilience/crates/pony-agent-core/tests/tui_session_resilience_l3b.rs",
+  "defect_evidence": "/tmp/l3b_cmds.sh (L3-B reviewer real reproduction) + local sessions.db DSML rows 166/184",
+  "command_original": "cargo test -p pony-agent-core --test tui_session_resilience_l3b",
+  "command_per_case": "cargo test -p pony-agent-core --test tui_session_resilience_l3b -- --exact <case_name>",
+  "overall_exit_code": 101,
+  "result_summary": "4 tests: 4 FAILED (Rust native assert!/assert_eq! failures), 0 passed; 0 ignored; 0 filtered",
+  "rust_native_failure_primitive": "Rust assert! / assert_eq! failures; no E0425/E0603 compile error in final run, no swallowed exception, no harness panic",
+  "log_receipt": "/tmp/l2t-l3b-red.log",
+  "purity": {
+    "native_assert_failures": 4,
+    "compile_errors": 0,
+    "harness_panics": 0,
+    "ignored_tests": 0,
+    "filtered_tests": 0,
+    "temporary_session_dirs_cleaned_by_drop": true,
+    "note": "Initial import-only E0603 (ProviderAuthType/ProviderProtocol) was a test-side compile issue, fixed by importing from agent::provider before final red run; final command compiles and all 4 cases fail by native assertions only."
+  },
+  "test_cases": [
+    {
+      "id": "L3B-A01",
+      "name": "a1_dsml_case_and_width_variants_do_not_bypass_sanitizer",
+      "mode": "L3-B adversarial",
+      "command": "cargo test -p pony-agent-core --test tui_session_resilience_l3b -- --exact a1_dsml_case_and_width_variants_do_not_bypass_sanitizer",
+      "exit_code": 101,
+      "failure_classification": "rust_native_assert_failure",
+      "failure_reason": "lower-case DSML variant leaks invoke name=/parameter name= via provider::sanitize_dsml_protocol_text; halfwidth/mixed variants covered by same case",
+      "observed": "<｜｜dsml｜｜ invoke name=\"Run\"> ... </｜｜dsml｜｜ invoke>",
+      "assertion_count": 11,
+      "contract": "C1",
+      "log_receipt": "/tmp/l2t-l3b-a1_dsml_case_and_width_variants_do_not_bypass_sanitizer.log"
+    },
+    {
+      "id": "L3B-A02",
+      "name": "a2_persisted_dsml_history_is_sanitized_before_provider_replay",
+      "mode": "L3-B integration (public context seam)",
+      "command": "cargo test -p pony-agent-core --test tui_session_resilience_l3b -- --exact a2_persisted_dsml_history_is_sanitized_before_provider_replay",
+      "exit_code": 101,
+      "failure_classification": "rust_native_assert_failure",
+      "failure_reason": "DefaultContextStateRetriever -> history_to_native_messages includes raw DSML assistant row in provider-native transcript; to_provider_history_message / native_conversation_carry assertions unreached on red phase but remain frozen for green",
+      "observed": "[{\"content\":\"请运行测试\",...},{\"content\":\"<｜｜DSML｜｜ invoke name=\\\"Run\\\">...\",\"role\":\"assistant\"}]",
+      "assertion_count": 7,
+      "contract": "C2",
+      "public_seams": [
+        "SessionStore::replace_session_history / snapshot (isolated temp FileSessionBackend)",
+        "DefaultContextStateRetriever::retrieve(ContextStateQuery)",
+        "DefaultTurnContextBuilder::build_request(ProviderRequest)"
+      ],
+      "log_receipt": "/tmp/l2t-l3b-a2_persisted_dsml_history_is_sanitized_before_provider_replay.log"
+    },
+    {
+      "id": "L3B-A03",
+      "name": "a3_message_state_fallback_sanitizes_entry_content",
+      "mode": "L3-B static [RED DEGRADED: STATIC-ONLY]",
+      "command": "cargo test -p pony-agent-core --test tui_session_resilience_l3b -- --exact a3_message_state_fallback_sanitizes_entry_content",
+      "exit_code": 101,
+      "failure_classification": "rust_native_assert_failure_static_source",
+      "failure_reason": "hydrate_state_from_session message_state fallback block assigns content: entry.content with no sanitize_dsml_protocol_text / sanitize_model_protocol_text call; known-good/known-bad discrimination samples prove judge is non-vacuous",
+      "observed": "content: entry.content (both user and assistant arms)",
+      "assertion_count": 5,
+      "contract": "C2",
+      "degraded": "[RED DEGRADED: STATIC-ONLY] private fn + no public message_state fixture; real assert on production source block, dynamic pass NOT claimed",
+      "log_receipt": "/tmp/l2t-l3b-a3_message_state_fallback_sanitizes_entry_content.log"
+    },
+    {
+      "id": "L3B-A04",
+      "name": "a4_interrupted_checkpoint_turn_stays_cancelled_not_committed",
+      "mode": "L3-B real store behavior",
+      "command": "cargo test -p pony-agent-core --test tui_session_resilience_l3b -- --exact a4_interrupted_checkpoint_turn_stays_cancelled_not_committed",
+      "exit_code": 101,
+      "failure_classification": "rust_native_assert_eq_failure",
+      "failure_reason": "append_failed_turn_fallible -> classify_turn_node_kind classifies [中断轮次检查点] failed turn as TurnCommitted instead of TurnCancelled; control turn with exact cancel phrase stays TurnCancelled (discrimination guard)",
+      "observed": "left: TurnCommitted right: TurnCancelled",
+      "assertion_count": 4,
+      "contract": "C5",
+      "public_seams": [
+        "SessionStore::append_failed_turn_fallible",
+        "SessionStore::load_history_graph -> HistoryNode.kind"
+      ],
+      "no_fabricated_requirement": "Contract does NOT require appending a System message; this case does not assert it (per Lead adjudication).",
+      "log_receipt": "/tmp/l2t-l3b-a4_interrupted_checkpoint_turn_stays_cancelled_not_committed.log"
+    }
+  ],
+  "no_fake_policy": {
+    "no_empty_assertions": true,
+    "no_swallowed_exceptions": true,
+    "no_ignored_tests": true,
+    "production_code_modified_by_test_agent": false,
+    "frozen_acceptance_files_untouched": true,
+    "no_git_write": true
+  }
+}

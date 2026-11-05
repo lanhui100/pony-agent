@@ -14,7 +14,10 @@ pub use backend::{
     SessionTraceMutation, TraceMigrationState, TraceTerminalPatch, TurnStateRecord,
 };
 pub use file_backend::FileSessionBackend;
-pub use store::{build_missing_run_control_audit_summary, PersistedStore, SessionStore};
+pub use store::{
+    build_missing_run_control_audit_summary, interrupted_turn_checkpoint_text, PersistedStore,
+    SessionStore,
+};
 pub use types::{
     collect_env_info, AttachmentAsset, AttachmentAssetQuery, AttachmentCleanupRequest,
     AttachmentCleanupResult, AttachmentLifecycleStatus, AttachmentReference, EnvironmentInfo,

@@ -1,0 +1,205 @@
+{
+  "wave": "tui-session-resilience",
+  "ticket": "B-tui-session-resilience",
+  "phase": "red",
+  "owner": "test-agent (independent L2-T / L2-AT author)",
+  "worktree": "/home/dm/pony-agent-worktrees/tui-session-resilience",
+  "branch": "fix/tui-session-resilience",
+  "contract": ".dev-team/contract-matrix-tui-session-resilience.md",
+  "nfr_baseline": ".dev-team/nfr-baseline-tui-session-resilience.json",
+  "test_file": "crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs",
+  "test_file_absolute": "/home/dm/pony-agent-worktrees/tui-session-resilience/crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs",
+  "frozen_at": "2026-11-06T01:20:23+08:00",
+  "revision_note": "AT1 harness fix: fixed-byte slicing replaced by DSML_BLOCK.char_indices().skip(1).take(64) legal UTF-8 boundaries; assertions unchanged, no case removed, no production code touched.",
+  "command_original": "cargo test -p pony-agent-core --test tui_session_resilience_acceptance",
+  "command_per_case": "cargo test -p pony-agent-core --test tui_session_resilience_acceptance -- --exact <case_name>",
+  "command_red_rerun": "cargo test -p pony-agent-core --test tui_session_resilience_acceptance",
+  "overall_exit_code": 101,
+  "rust_native_failure_primitive": "unimplemented!(\"Cx\") panic at crates/pony-agent-core/src/bin/tui.rs lines 265/271/277/283/292/298/305 (Lead 空桩 lint 收敛后的当前行号); no E0425, no compile error, no swallowed exception",
+  "purity": {
+    "not_implemented_panics": 12,
+    "char_boundary_harness_panics": 0,
+    "compile_errors": 0,
+    "ignored_tests": 0,
+    "filtered_tests": 0,
+    "test_harness_warnings": 0,
+    "note": "All 12 acceptance cases fail by SUT unimplemented! panic; the 3 passing cases are pre-existing tui::wave43_unit_tests."
+  },
+  "log_receipt": "/tmp/l2t-red-exact.log",
+  "per_case_receipt_pattern": "/tmp/l2t-case-<case_name>.log",
+  "result_summary": "15 tests total: 12 frozen acceptance cases FAILED (Rust native unimplemented! panic), 3 pre-existing tui::wave43_unit_tests PASSED; 0 ignored; 0 filtered. EXIT=101.",
+  "test_cases": [
+    {
+      "id": "C1/S1-A01",
+      "name": "c1_dsml_stream_is_filtered",
+      "mode": "L2-T",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S1 sanitize_model_protocol_text unimplemented!(\"C1/C2\") at tui.rs:265",
+      "assertion_count": 3,
+      "contract": [
+        "C1"
+      ]
+    },
+    {
+      "id": "C1/S1-A02",
+      "name": "c1b_plain_markdown_and_angle_brackets_are_untouched",
+      "mode": "L2-T",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S1 unimplemented!(\"C1/C2\") at tui.rs:265",
+      "assertion_count": 6,
+      "contract": [
+        "C1"
+      ]
+    },
+    {
+      "id": "C2/S1-A03",
+      "name": "c2_dsml_history_replay_is_filtered_and_legacy_history_is_preserved",
+      "mode": "L2-T",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S1/S6 unimplemented! at tui.rs:265/298",
+      "assertion_count": 4,
+      "contract": [
+        "C2",
+        "C6"
+      ]
+    },
+    {
+      "id": "C3/S2-A04",
+      "name": "c3_transient_errors_are_retryable_within_budget_and_permanent_errors_are_not",
+      "mode": "L2-T",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S2 unimplemented!(\"C3\") at tui.rs:271",
+      "assertion_count": 9,
+      "contract": [
+        "C3"
+      ]
+    },
+    {
+      "id": "C4/S3-A05+C4/S4-A06",
+      "name": "c4_error_detail_is_folded_and_summary_is_user_facing",
+      "mode": "L2-T",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S3/S4 unimplemented!(\"C4\") at tui.rs:277/283",
+      "assertion_count": 9,
+      "contract": [
+        "C4"
+      ]
+    },
+    {
+      "id": "C5/S5-A07",
+      "name": "c5_interrupt_checkpoint_keeps_persisted_steps_and_empty_input_is_none",
+      "mode": "L2-T",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S5 unimplemented!(\"C5/C6\") at tui.rs:292",
+      "assertion_count": 4,
+      "contract": [
+        "C5"
+      ]
+    },
+    {
+      "id": "C6/S6-A08",
+      "name": "c6_resume_continues_from_checkpoint_without_replaying_completed_turn",
+      "mode": "L2-T",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S6 unimplemented!(\"C6\") at tui.rs:298",
+      "assertion_count": 4,
+      "contract": [
+        "C6"
+      ]
+    },
+    {
+      "id": "C7/S7-A09",
+      "name": "c7_exit_cancels_inflight_turn_restores_terminal_then_prints_resume_hint",
+      "mode": "L2-T",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S7 unimplemented!(\"C7/C8\") at tui.rs:305",
+      "assertion_count": 7,
+      "contract": [
+        "C7",
+        "C8"
+      ]
+    },
+    {
+      "id": "C8/S7-A10",
+      "name": "c8_terminal_restore_bytes_and_resume_hint_order_are_statically_enforced",
+      "mode": "L2-T + PTY static",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S7 unimplemented!(\"C7/C8\") at tui.rs:305",
+      "assertion_count": 8,
+      "contract": [
+        "C8"
+      ],
+      "pty": "[RED DEGRADED: STATIC-ONLY] real pony process/PTY not launched; TERMINAL_SCREEN_RESET bytes + resume_hint_line + cleanup-plan state machine asserted; no claim of dynamic pass"
+    },
+    {
+      "id": "AT1/S1-A11",
+      "name": "at1_malformed_oversized_and_chunk_split_dsml_never_leaks_partial_markers",
+      "mode": "L2-AT",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S1 unimplemented!(\"C1/C2\") at tui.rs:265",
+      "assertion_count": 20,
+      "contract": [
+        "C1",
+        "C2"
+      ],
+      "injection": "malformed DSML, 2048-byte oversized tail (<= NFR 3000 upper bound), fixed <=64 UTF-8 char-boundary prefix stream splits via char_indices(); no sleep; no byte-boundary harness panic"
+    },
+    {
+      "id": "AT2/S5+S6-A12",
+      "name": "at2_interrupt_and_resume_interleaving_is_deterministic_and_idempotent",
+      "mode": "L2-AT",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S5 unimplemented!(\"C5/C6\") in writer thread at tui.rs:292; propagated as Rust native join Err",
+      "assertion_count": 22,
+      "contract": [
+        "C5",
+        "C6"
+      ],
+      "injection": "fixed 8 iterations, 2-stage Barrier + mpsc channel, no sleep/probabilistic wait"
+    },
+    {
+      "id": "AT3/S7-A13",
+      "name": "at3_concurrent_exit_signals_and_inflight_turn_race_have_one_bounded_plan",
+      "mode": "L2-AT",
+      "exit_code": 101,
+      "failure_classification": "unimplemented_panic",
+      "failure_reason": "S7 unimplemented!(\"C7/C8\") in signaler thread at tui.rs:305; propagated as Rust native join Err",
+      "assertion_count": 11,
+      "contract": [
+        "C7",
+        "C8"
+      ],
+      "injection": "fixed 4 rounds x 2 threads + Barrier; timeout 3000/9000 <= NFR clamp semantics; no sleep"
+    }
+  ],
+  "nfr_compliance": {
+    "external_call_timeout_ms": 3000,
+    "max_retry_attempts": 5,
+    "injected_payload_max_bytes": 2048,
+    "injected_timeout_max_ms": 9000,
+    "note": "payload/iterations/timeouts do not exceed NFR declared upper bounds; timeout >3000 is a clamp-input probe, not an external call"
+  },
+  "no_fake_policy": {
+    "no_empty_assertions": true,
+    "no_swallowed_exceptions": true,
+    "no_ignored_tests": true,
+    "production_code_modified": false,
+    "no_git_commit": true,
+    "executor_must_not_modify": [
+      "crates/pony-agent-core/tests/tui_session_resilience_acceptance.rs",
+      ".dev-team/red-phase-tui-session-resilience.json",
+      ".dev-team/l2at-done-tui-session-resilience.json"
+    ]
+  }
+}
