@@ -189,6 +189,9 @@ impl AgentRuntime {
         session_id: Option<&str>,
         governed_context: Option<&DispatchContext>,
         tool_call: &ToolCall,
+        // W2：本 turn 宿主当前生效的 provider 选择（子代理/队友 provider 继承源）。
+        // 由 `turn_sync` / `turn_stream` 从 `ProviderManager::selection()` 借用传入。
+        provider_selection: Option<&crate::agent::config::ResolvedProviderSelection>,
     ) -> ToolCallOutcome {
         let execution_context = ToolExecutionContext {
             workspace_root: self.resolve_session_workspace_root(session_id),
@@ -198,6 +201,8 @@ impl AgentRuntime {
             dispatch_context: governed_context.cloned(),
             // wave-62 C3：治理事实里若带本轮令牌（stream 路径注入），工具层据此可被取消。
             cancellation: governed_context.and_then(|context| context.turn_cancellation.clone()),
+            // W2：快照化传入 —— `ToolExecutionContext` 自有该字段（工具调用跨 hop 存活）。
+            provider_selection: provider_selection.cloned(),
             ..Default::default()
         };
         let (result, invocation_record, capability_hook_trace_records) =

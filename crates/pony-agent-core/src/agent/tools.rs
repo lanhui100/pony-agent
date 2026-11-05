@@ -56,8 +56,9 @@ pub use crate::agent::goal::{
 };
 pub use crate::agent::orchestration::{
     drain_inbox, interrupt_agent, list_agents, send_message, send_message_in_workspace,
-    spawn_teammate, spawn_teammate_in_workspace, subagent, subagent_in_workspace,
-    team_task_create, team_task_get, team_task_list, team_task_update, wait_agent, workflow,
+    spawn_teammate, spawn_teammate_in_workspace, spawn_teammate_in_workspace_with_provider,
+    subagent, subagent_in_workspace, subagent_in_workspace_with_provider, team_task_create,
+    team_task_get, team_task_list, team_task_update, wait_agent, workflow,
     InterruptAgentArgs, InterruptAgentResult, ListAgentsResult, MessageDeliveryMode, QueuedMessage,
     ReadInboxArgs, ReadInboxResult, SendMessageArgs, SendMessageResult, SpawnTeammateArgs,
     SpawnTeammateResult, SubagentArgs, SubagentResult, TeamTaskAction, TeamTaskCreateArgs,
@@ -1610,8 +1611,13 @@ impl ToolRouter {
 
         let args: Result<SubagentArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            // Wave-61 C8.4：把宿主真实工作区根传给子代理（父会话项目指令/技能随之继承）。
-            Ok(args) => match subagent_in_workspace(args, Some(workspace_root.as_path())) {
+            // Wave-61 C8.4 + W2：把宿主真实工作区根与**宿主当前 provider 选择**传给子代理
+            // （父会话项目指令/技能 + provider/model 继承随之生效；`args` 显式覆盖优先）。
+            Ok(args) => match subagent_in_workspace_with_provider(
+                args,
+                Some(workspace_root.as_path()),
+                context.provider_selection.as_ref(),
+            ) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SUBAGENT.to_string(),
                     status: "ok".to_string(),
@@ -1678,9 +1684,14 @@ impl ToolRouter {
 
         let args: Result<SpawnTeammateArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            // Wave-61 C7 + C8.4：派生队友后把它的初始 prompt 真正投递并驱动（引擎在位时），
-            // 不再"只登记成员、模型却收到 ok"。
-            Ok(args) => match spawn_teammate_in_workspace(args, Some(workspace_root.as_path())) {
+            // Wave-61 C7 + C8.4 + W2：派生队友后把它的初始 prompt 真正投递并驱动（引擎在位时），
+            // 并把**宿主当前 provider 选择**作为继承源（`args` 的 provider/model 覆盖优先；
+            // 解析失败在此前置返回 `spawn_failed`，绝不先返回 ok 再异步失败）。
+            Ok(args) => match spawn_teammate_in_workspace_with_provider(
+                args,
+                Some(workspace_root.as_path()),
+                context.provider_selection.as_ref(),
+            ) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SPAWN_TEAMMATE.to_string(),
                     status: "ok".to_string(),

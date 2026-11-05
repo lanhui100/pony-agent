@@ -3,6 +3,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use uuid::Uuid;
 
+use crate::agent::config::{ProviderRegistryStore, ResolvedProviderSelection};
+
 // ==========================================
 // 1. Subagent (子智能体) 契约
 // ==========================================
@@ -349,6 +351,29 @@ const LEAD_TARGET: &str = "lead";
 static TEAMMATES: Mutex<Option<HashMap<String, TeammateMember>>> = Mutex::new(None);
 /// 每个 Teammate 对应的优先级双端信箱 (双端队列支持普通排队 push_back 与插队 push_front)
 static TEAMMATE_INBOXES: Mutex<Option<HashMap<String, VecDeque<QueuedMessage>>>> = Mutex::new(None);
+/// W2：每个 teammate target 派生时解析出的 provider 选择（驱动其 turn 时消费）。
+///
+/// 与名册/信箱同源：派生即登记，重生（同名 target 再次派生）即覆盖；无条目 ⇒ 旧行为
+/// （`run_turn_in`，由引擎自行解析 provider）。
+static TEAMMATE_PROVIDERS: Mutex<Option<HashMap<String, ResolvedProviderSelection>>> =
+    Mutex::new(None);
+
+/// W2：登记某 teammate 实际生效的 provider 选择（派生阶段调用）。
+fn set_teammate_provider(target: &str, selection: ResolvedProviderSelection) {
+    let mut lock = TEAMMATE_PROVIDERS.lock().unwrap();
+    if lock.is_none() {
+        *lock = Some(HashMap::new());
+    }
+    lock.as_mut()
+        .unwrap()
+        .insert(target.to_string(), selection);
+}
+
+/// W2：读取某 teammate 的 provider 选择（驱动阶段调用）；无登记 ⇒ `None`（旧行为）。
+pub(crate) fn teammate_provider_selection(target: &str) -> Option<ResolvedProviderSelection> {
+    let lock = TEAMMATE_PROVIDERS.lock().unwrap();
+    lock.as_ref()?.get(target).cloned()
+}
 
 /// wave-37 C3：真实子代理执行入口。
 ///
@@ -372,6 +397,27 @@ pub fn subagent_in_workspace(
     args: SubagentArgs,
     workspace_root: Option<&std::path::Path>,
 ) -> Result<SubagentResult, String> {
+    subagent_in_workspace_with_provider(args, workspace_root, None)
+}
+
+/// W2：带宿主 provider 继承/显式覆盖的子代理入口（实现体）。
+///
+/// 复刻 [`subagent_in_workspace`] 的许可门 / 前后台语义，只把引擎调用换成
+/// [`SubagentTurnEngine::run_turn_with_selection`]：
+/// - `host_selection=Some` ⇒ 子代理继承宿主 provider（再按 `args` 覆盖 provider/model）；
+/// - `host_selection=None` 且 `args` 无覆盖 ⇒ 保持 legacy（`selection=None` ⇒ 引擎走 `run_turn_in`）。
+pub fn subagent_in_workspace_with_provider(
+    args: SubagentArgs,
+    workspace_root: Option<&std::path::Path>,
+    host_selection: Option<&ResolvedProviderSelection>,
+) -> Result<SubagentResult, String> {
+    // W2 失败前置：**先解析**，解析失败立即返回 —— 绝不先起后台线程再异步失败。
+    let selection = resolve_optional_teammate_provider_selection(
+        host_selection,
+        args.provider_id.as_deref(),
+        args.model_id.as_deref(),
+    )?;
+
     let engine = crate::agent::subagent_runtime::subagent_engine().ok_or_else(|| {
         "capability_unavailable: subagent engine not wired (HostTurnEngine missing)".to_string()
     })?;
@@ -396,9 +442,12 @@ pub fn subagent_in_workspace(
         std::thread::spawn(move || {
             // 后台 turn 全程占许可（仅非自持引擎会携带 Some）。
             let _gate = gate;
-            if let Err(err) =
-                engine.run_turn_in(&args.prompt, SUBAGENT_TURN_TIMEOUT_MS, bg_root.as_deref())
-            {
+            if let Err(err) = engine.run_turn_with_selection(
+                &args.prompt,
+                SUBAGENT_TURN_TIMEOUT_MS,
+                bg_root.as_deref(),
+                selection.as_ref(),
+            ) {
                 eprintln!("[subagent] background turn failed ({}): {}", bg_id, err);
             }
         });
@@ -411,7 +460,12 @@ pub fn subagent_in_workspace(
 
     // 同步路径：许可 guard 活到本次调用结束（仅非自持引擎会携带 Some）。
     let _gate = gate;
-    match engine.run_turn_in(&args.prompt, SUBAGENT_TURN_TIMEOUT_MS, workspace_root) {
+    match engine.run_turn_with_selection(
+        &args.prompt,
+        SUBAGENT_TURN_TIMEOUT_MS,
+        workspace_root,
+        selection.as_ref(),
+    ) {
         Ok(outcome) => Ok(SubagentResult {
             subagent_id,
             status: "completed".to_string(),
@@ -421,43 +475,70 @@ pub fn subagent_in_workspace(
     }
 }
 
-/// W2（接口桩，未实现）：带 provider 选择的子代理入口。
+/// W2：按宿主继承 + 显式覆盖解析子代理/队友实际使用的 provider 选择。
 ///
-/// 语义对齐 [`subagent_in_workspace`]，额外接受 `host_selection`（宿主当前选择）与
-/// `args.provider_id`/`args.model_id`（显式覆盖）。当前返回 `not_implemented`。
-pub fn subagent_in_workspace_with_provider(
-    args: SubagentArgs,
-    workspace_root: Option<&std::path::Path>,
-    host_selection: Option<&crate::agent::config::ResolvedProviderSelection>,
-) -> Result<SubagentResult, String> {
-    let _ = (args, workspace_root, host_selection);
-    Err("not_implemented".to_string())
-}
-
-/// W2（接口桩，未实现）：按 host 继承 + 显式覆盖解析子代理/队友实际使用的 provider 选择。
-///
-/// 契约：`provider_id`/`model_id` 同时为 `None` ⇒ 继承 `host`；给出任一者 ⇒ 覆盖对应维度。
-/// 当前阶段只落接口面，实现由 W2 GREEN 补齐（绝不在桩里伪造解析结果）。
+/// 语义（task-8 冻结契约）：
+/// 1. 无显式 `provider_id`：`host` 必须存在，否则 `Err("missing_host_provider_selection")`；
+///    存在则 clone 宿主（`model_id` 若给出再覆盖 model）。
+/// 2. 显式 `provider_id` 且等于 `host.requested_name` / `host.provider_name`：用宿主 base
+///    （同样只按 `model_id` 覆盖 model）。
+/// 3. 显式 `provider_id` 指向其它 provider：在本机 provider 注册表
+///    （[`ProviderRegistryStore::new`] 的 `load_view().providers`）里按 id 或 name 查找；
+///    找不到 ⇒ `Err("unknown_provider")`；找到 ⇒ 用该 provider 的 id 走
+///    [`ProviderRegistryStore::resolve_selection`]（`model_id` 一并作为入参）。
+/// 4. 最后统一应用 `model_id` 覆盖（含宿主分支），保证“只换模型不换 provider”。
 pub fn resolve_teammate_provider_selection(
-    host: Option<&crate::agent::config::ResolvedProviderSelection>,
+    host: Option<&ResolvedProviderSelection>,
     provider_id: Option<&str>,
     model_id: Option<&str>,
-) -> Result<crate::agent::config::ResolvedProviderSelection, String> {
-    let _ = (host, provider_id, model_id);
-    Err("not_implemented".to_string())
+) -> Result<ResolvedProviderSelection, String> {
+    let requested_provider = provider_id.map(str::trim).filter(|value| !value.is_empty());
+    let requested_model = model_id.map(str::trim).filter(|value| !value.is_empty());
+
+    let mut selection = match (host, requested_provider) {
+        (_, None) => host.cloned().ok_or_else(|| {
+            "missing_host_provider_selection: 未注入宿主 provider 选择，且未显式指定 provider"
+                .to_string()
+        })?,
+        (Some(host), Some(requested))
+            if host.requested_name == requested || host.provider_name == requested =>
+        {
+            host.clone()
+        }
+        (_, Some(requested)) => {
+            let store = ProviderRegistryStore::new();
+            let view = store.load_view();
+            let provider_id = view
+                .providers
+                .iter()
+                .find(|provider| provider.id == requested || provider.name == requested)
+                .map(|provider| provider.id.clone())
+                .ok_or_else(|| {
+                    format!("unknown_provider: provider `{requested}` 不在本机 provider 注册表中")
+                })?;
+            store.resolve_selection(Some(provider_id.as_str()), requested_model)
+        }
+    };
+
+    if let Some(model) = requested_model {
+        selection.model = model.to_string();
+    }
+    Ok(selection)
 }
 
-/// W2（接口桩，未实现）：带 provider 选择的队友生成入口。
-///
-/// 语义对齐 [`spawn_teammate_in_workspace`]，额外接受 `host_selection`（宿主当前选择）与
-/// `args.provider_id`/`args.model_id`（显式覆盖）。当前返回 `not_implemented`。
-pub fn spawn_teammate_in_workspace_with_provider(
-    args: SpawnTeammateArgs,
-    workspace_root: Option<&std::path::Path>,
-    host_selection: Option<&crate::agent::config::ResolvedProviderSelection>,
-) -> Result<SpawnTeammateResult, String> {
-    let _ = (args, workspace_root, host_selection);
-    Err("not_implemented".to_string())
+/// W2：`host_selection=None` 且无显式覆盖 ⇒ legacy（`None`，引擎自行解析）；
+/// 其余情况必须解析成功（失败即 `Err`，调用方据此**前置失败**）。
+fn resolve_optional_teammate_provider_selection(
+    host_selection: Option<&ResolvedProviderSelection>,
+    provider_id: Option<&str>,
+    model_id: Option<&str>,
+) -> Result<Option<ResolvedProviderSelection>, String> {
+    let provider_id = provider_id.map(str::trim).filter(|value| !value.is_empty());
+    let model_id = model_id.map(str::trim).filter(|value| !value.is_empty());
+    if host_selection.is_none() && provider_id.is_none() && model_id.is_none() {
+        return Ok(None);
+    }
+    resolve_teammate_provider_selection(host_selection, provider_id, model_id).map(Some)
 }
 
 pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {
@@ -493,8 +574,35 @@ pub fn spawn_teammate_in_workspace(
     args: SpawnTeammateArgs,
     workspace_root: Option<&std::path::Path>,
 ) -> Result<SpawnTeammateResult, String> {
+    spawn_teammate_in_workspace_with_provider(args, workspace_root, None)
+}
+
+/// W2：带宿主 provider 继承/显式覆盖的队友生成入口（实现体）。
+///
+/// 与 [`spawn_teammate_in_workspace`] 的唯一差别是**先解析 provider 选择**：
+/// - 解析失败 ⇒ 直接 `Err`，**不登记成员、不投递、不起后台驱动**（失败前置）；
+/// - 解析成功 ⇒ 登记成员后把选择写入 [`TEAMMATE_PROVIDERS`]，后续
+///   [`drive_teammate_turn_in`] 驱动该队友时按同一选择建栈；
+/// - `host_selection=None` 且 `args` 无覆盖 ⇒ legacy（不写选择，引擎自行解析）。
+pub fn spawn_teammate_in_workspace_with_provider(
+    args: SpawnTeammateArgs,
+    workspace_root: Option<&std::path::Path>,
+    host_selection: Option<&ResolvedProviderSelection>,
+) -> Result<SpawnTeammateResult, String> {
+    // 1) 失败前置：先解析（无 host 且无显式覆盖时允许 None，保持 legacy 语义）。
+    let selection = resolve_optional_teammate_provider_selection(
+        host_selection,
+        args.provider_id.as_deref(),
+        args.model_id.as_deref(),
+    )?;
+
     let auto_drive = crate::agent::subagent_runtime::subagent_engine().is_some();
     let (result, target, initial_prompt) = register_teammate(args)?;
+
+    // 2) 登记成功后持久化该 target 的 provider 选择（驱动阶段唯一真值源）。
+    if let Some(selection) = selection {
+        set_teammate_provider(&target, selection);
+    }
 
     // Wave-61 C7：引擎在位时把初始 prompt 投递并驱动（复用 send_message 的入队 + 后台
     // drive 通路，不新造存储；无引擎时保持纯登记，行为与既有 `spawn_teammate` 一致）。
@@ -986,9 +1094,16 @@ pub fn drive_teammate_turn_in(
     // 如果挂载了真实模型引擎，则执行真实 Turn（C8：以父会话工作区根建栈）。
     let engine = crate::agent::subagent_runtime::subagent_engine();
     let engine_was_wired = engine.is_some();
+    // W2：派生阶段登记的 provider 选择在此消费；无登记 ⇒ `None`（引擎走 `run_turn_in` 旧链）。
+    let selection = teammate_provider_selection(target);
     let final_reply = match engine {
         Some(engine) => {
-            match engine.run_turn_in(&combined_prompt, SUBAGENT_TURN_TIMEOUT_MS, workspace_root) {
+            match engine.run_turn_with_selection(
+                &combined_prompt,
+                SUBAGENT_TURN_TIMEOUT_MS,
+                workspace_root,
+                selection.as_ref(),
+            ) {
                 Ok(outcome) => outcome.final_text,
                 Err(err) => {
                     // Wave-61 C10.2 失败补偿：把本轮 drain 的整批消息**按原顺序放回队首**

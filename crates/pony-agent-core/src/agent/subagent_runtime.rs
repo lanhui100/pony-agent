@@ -18,7 +18,33 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+use crate::agent::config::{ProviderSelectionResolver, ResolvedProviderSelection};
 use crate::agent::runtime::{AgentRuntimeBuilder, TurnInput};
+
+/// W2：把**已解析**的 provider 选择原样喂给本次子代理栈的解析器。
+///
+/// 子代理不再走 `ProviderRegistryStore` 的默认解析链（那会丢掉宿主的 model/密钥/推理档位），
+/// 而是固定返回宿主继承（或显式覆盖）后的快照 —— `resolve_provider_selection` 的
+/// `provider_id`/`model_id` 入参因此被忽略（快照即最终选择，`TurnInput` 也不再传覆盖）。
+struct FixedSelectionResolver {
+    selection: ResolvedProviderSelection,
+}
+
+impl FixedSelectionResolver {
+    fn new(selection: ResolvedProviderSelection) -> Self {
+        Self { selection }
+    }
+}
+
+impl ProviderSelectionResolver for FixedSelectionResolver {
+    fn resolve_provider_selection(
+        &self,
+        _provider_id: Option<&str>,
+        _model_id: Option<&str>,
+    ) -> ResolvedProviderSelection {
+        self.selection.clone()
+    }
+}
 
 /// 单个字代理 turn 的执行结果。
 pub struct SubagentRunOutcome {
@@ -201,6 +227,20 @@ impl HostTurnEngine {
         timeout_ms: u64,
         workspace_root: PathBuf,
     ) -> Result<SubagentRunOutcome, String> {
+        self.run_turn_with_root_and_selection(prompt, timeout_ms, workspace_root, None)
+    }
+
+    /// W2：带显式 provider 选择的建栈实现。
+    ///
+    /// `selection = Some` ⇒ 用 [`FixedSelectionResolver`] 固定本次栈的 provider 选择；
+    /// `None` ⇒ 既有默认解析链（`ProviderRegistryStore`），行为逐字不变。
+    fn run_turn_with_root_and_selection(
+        &self,
+        prompt: &str,
+        timeout_ms: u64,
+        workspace_root: PathBuf,
+        selection: Option<ResolvedProviderSelection>,
+    ) -> Result<SubagentRunOutcome, String> {
         // 1) prompt 体积门 + 2) 并发门：引擎是许可的唯一真源（Guard Drop 归还许可，
         //    panic 展开路径同样安全）。
         let inflight = subagent_gate_enter(prompt)?;
@@ -229,9 +269,14 @@ impl HostTurnEngine {
                 // Runtime）。因此这里**不需要**再 `rt.enter()`，保持裸线程即可。
 
                 // 独立建栈：不共享宿主 SessionStore / ProviderRegistryStore。
-                let runtime = AgentRuntimeBuilder::new()
-                    .workspace_root(workspace_root)
-                    .build();
+                // W2：有显式选择时用 FixedSelectionResolver 固定本栈 provider（宿主继承/覆盖）。
+                let mut builder = AgentRuntimeBuilder::new().workspace_root(workspace_root);
+                if let Some(selection) = selection {
+                    builder = builder.provider_resolver(Box::new(
+                        FixedSelectionResolver::new(selection),
+                    ));
+                }
+                let runtime = builder.build();
                 let input = TurnInput {
                     message: prompt_owned,
                     display_message: None,
@@ -324,5 +369,26 @@ impl SubagentTurnEngine for HostTurnEngine {
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| self.resolved_workspace_root());
         self.run_turn_with_root(prompt, timeout_ms, root)
+    }
+
+    /// W2：显式 provider 选择优先。
+    ///
+    /// - `Some(selection)` ⇒ 以 [`FixedSelectionResolver`] 固定该栈的 provider 选择
+    ///   （宿主继承或显式覆盖后的快照；`TurnInput.provider_id/model_id` 保持 `None`）；
+    /// - `None` ⇒ 逐字回落既有 [`SubagentTurnEngine::run_turn_in`]（旧行为不变）。
+    fn run_turn_with_selection(
+        &self,
+        prompt: &str,
+        timeout_ms: u64,
+        workspace_root: Option<&std::path::Path>,
+        selection: Option<&ResolvedProviderSelection>,
+    ) -> Result<SubagentRunOutcome, String> {
+        let Some(selection) = selection else {
+            return self.run_turn_in(prompt, timeout_ms, workspace_root);
+        };
+        let root = workspace_root
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| self.resolved_workspace_root());
+        self.run_turn_with_root_and_selection(prompt, timeout_ms, root, Some(selection.clone()))
     }
 }

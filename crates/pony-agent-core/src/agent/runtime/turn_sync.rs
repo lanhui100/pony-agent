@@ -319,8 +319,15 @@ impl AgentRuntime {
                 let outcomes: Vec<ToolCallOutcome> = if segment.parallel {
                     let segment_calls: Vec<ToolCall> =
                         current_tool_calls[segment.calls.clone()].to_vec();
+                    // W2：宿主当前 provider 选择随每次调用下传（子代理/队友继承源）。
+                    let host_selection = Some(provider.selection());
                     match execute_segment_in_parallel(&segment_calls, |call| {
-                        self.execute_tool_call_with_turn_context(session_id, governed_context, call)
+                        self.execute_tool_call_with_turn_context(
+                            session_id,
+                            governed_context,
+                            call,
+                            host_selection,
+                        )
                     }) {
                         Ok(outcomes) => outcomes,
                         Err(error) => {
@@ -333,6 +340,7 @@ impl AgentRuntime {
                                         session_id,
                                         governed_context,
                                         call,
+                                        host_selection,
                                     )
                                 })
                                 .collect()
@@ -343,6 +351,7 @@ impl AgentRuntime {
                         session_id,
                         governed_context,
                         &current_tool_calls[segment.calls.start],
+                        Some(provider.selection()),
                     )]
                 };
                 // 1c) 后阶段：逐调用（保序）回填；交互类工具命中即停批（后续段不执行）。
