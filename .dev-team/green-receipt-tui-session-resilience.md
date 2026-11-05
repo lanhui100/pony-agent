@@ -48,3 +48,31 @@
 | `cargo test -p pony-agent-core --test tui_session_resilience_chunk_split --message-format short` | 0 | `test c1_chunk_split_dsml_prefix_is_not_persisted ... ok`; `test c1_plain_angle_bracket_text_is_verbatim ... ok`; `test result: ok. 2 passed; 0 failed` (`/tmp/executor-patch-final-tui_session_resilience_chunk_split.log`) |
 | `cargo test -p pony-agent-core --test tui_session_resilience_acceptance --message-format short` | 0 | `test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s` (`/tmp/executor-patch-final-tui_session_resilience_acceptance.log`) |
 | `cargo check -p pony-agent-core --all-targets --message-format short` | 0 | `Checking pony-agent-core v0.1.154`; `Finished \`dev\` profile [unoptimized] target(s) in 57.50s` (`/tmp/executor-patch-final-check.log`) |
+
+## Wave-3 绿相（L3-B 遗留反例）
+
+- 红相：`crates/pony-agent-core/tests/tui_session_resilience_l3b.rs` 4/4 原生 assert 失败（tag `wave-3-tui-session-resilience-red`）。
+- 改动（4 文件、最小闭包；未改测试/签名/git 写）：
+  - `crates/pony-agent-core/src/agent/provider/mod.rs:4323-4405`：`sanitize_dsml_protocol_text` 新增 `dsml_signature`（小写归一 + 全角/半角竖线统一）、`is_dsml_protocol_line` 与变体感知的 `dsml_partial_tail_len`；协议行整行折叠为「工具调用」占位，合法 UTF-8 边界、行首/换行约束保证普通 `<` / 半角文本 / markdown 代码块逐字保真。
+  - `crates/pony-agent-core/src/agent/context.rs:5-8,1855-1890`（追加授权写域）：`to_provider_history_message` 与 `history_to_native_messages` 复用同一清洗纯函数，阻断本机存量 DSML 历史回灌 provider 的两路投影。
+  - `crates/pony-agent-core/src/bin/tui.rs:7263-7284`：message_state fallback 的 user/assistant `entry.content` 经 `sanitize_model_protocol_text`。
+  - `crates/pony-agent-core/src/agent/session/store.rs:4006-4018`：`classify_turn_node_kind` 对含 `[中断轮次检查点]` 的失败轮保持 `TurnCancelled`，精确取消文案控制组语义不变。
+
+| 命令 | Exit | 原始 stdout 摘要 |
+| :-- | --: | :-- |
+| `cargo test -p pony-agent-core --test tui_session_resilience_l3b --message-format short` | 0 | `running 4 tests`; 4 条 L3B-A01..A04 全 `ok`; `test result: ok. 4 passed; 0 failed` (`/tmp/executor-w3-final2-tui_session_resilience_l3b.log`) |
+| `cargo test -p pony-agent-core --test tui_session_resilience_acceptance --message-format short` | 0 | `test result: ok. 15 passed; 0 failed` (`/tmp/executor-w3-final2-tui_session_resilience_acceptance.log`) |
+| `cargo test -p pony-agent-core --test tui_session_resilience_chunk_split --message-format short` | 0 | `test result: ok. 2 passed; 0 failed` (`/tmp/executor-w3-final2-tui_session_resilience_chunk_split.log`) |
+| `cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance --message-format short` | 0 | `test result: ok. 19 passed; 0 failed` (`/tmp/executor-w3-final2-tui_overlay_cancel_acceptance.log`) |
+| `cargo test -p pony-agent-core --test tui_render_layout --message-format short` | 0 | `test result: ok. 12 passed; 0 failed` (`/tmp/executor-w3-final2-tui_render_layout.log`) |
+| `cargo test -p pony-agent-core --test tui_resume_cli --message-format short` | 0 | `test result: ok. 8 passed; 0 failed` (`/tmp/executor-w3-final2-tui_resume_cli.log`) |
+| `cargo test -p pony-agent-core --test tui_terminal_restore --message-format short` | 0 | `test result: ok. 8 passed; 0 failed` (`/tmp/executor-w3-final2-tui_terminal_restore.log`) |
+| `cargo test -p pony-agent-core --test pa104_terminal_acceptance --message-format short` | 0 | `test result: ok. 5 passed; 0 failed` (`/tmp/executor-w3-final2-pa104_terminal_acceptance.log`) |
+| `cargo check -p pony-agent-core --all-targets --message-format short` | 0 | `Finished \`dev\` profile [unoptimized] target(s) in 0.29s` (`/tmp/executor-w3-final2-check.log`) |
+
+## Wave-3 绿相（L3-B 对抗反例闭合）
+
+红相：`tui_session_resilience_l3b` EXIT 101，4/4 原生 assert 失败（A1 变体 / A2 历史回灌 / A3 fallback / A4 TurnCommitted 漂移）；dev-red-purity PASS。
+实现：`provider/mod.rs` 归一化变体感知清洗；`context.rs` 两路历史入 provider 前清洗；`tui.rs` message_state fallback 清洗；`session/store.rs` 检查点失败轮保持 TurnCancelled。
+Lead 独立全量门禁：`cargo check --all-targets` 0、`-D warnings` 0、l3b 4/4、chunk_split 2/2、主验收 15/15、回归 19+12+8+8+5=52/52、audit-diff --decl-approved 0、check-declaration 0。
+真实 crate 探针：代码块内 DSML 标记被剔除且正文保留；嵌套/未闭合/凭据串不外泄；临时探针 `tests/tmp_w3_probe.rs` 已删除。

@@ -4004,7 +4004,12 @@ fn replay_long_term_memory(history: &[TurnHistoryMessage]) -> Vec<LongTermMemory
 }
 
 fn classify_turn_node_kind(assistant_message: &str) -> HistoryNodeKind {
-    if assistant_message.trim() == "用户终止，发送消息可继续。" {
+    let trimmed = assistant_message.trim();
+    // wave-3 L3-B：中断轮次检查点文本属于 cancelled 终态的 additive 投影，
+    // 不得因不再是精确占位文案而把失败轮改判为正常完成轮。
+    if trimmed == "用户终止，发送消息可继续。"
+        || trimmed.contains("[中断轮次检查点]")
+    {
         HistoryNodeKind::TurnCancelled
     } else {
         HistoryNodeKind::TurnCommitted

@@ -3,8 +3,9 @@ use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::graph::GraphRun;
 use crate::agent::input::TurnInputImage;
 use crate::agent::provider::{
-    ContextRefreshReason, ConversationCarryMode, PrefixMutationReason, ProviderManager,
-    ProviderMessage, ProviderRequest, ProviderRequestObservation, ProviderRole,
+    sanitize_dsml_protocol_text, ContextRefreshReason, ConversationCarryMode,
+    PrefixMutationReason, ProviderManager, ProviderMessage, ProviderRequest,
+    ProviderRequestObservation, ProviderRole,
 };
 use crate::agent::session::{
     AttachmentAsset, EnvironmentInfo, LongTermMemoryRecord, SessionSnapshot, TurnHistoryMessage,
@@ -1853,7 +1854,10 @@ fn estimate_text_tokens(text: &str) -> usize {
 }
 
 fn to_provider_history_message(message: &TurnHistoryMessage) -> Option<ProviderMessage> {
-    let content = message.content.trim();
+    // wave-3 L3-B：本机 sessions.db 已存 DSML 原文，历史进入 provider 前必须
+    // 与 SSE / TUI 回放共用同一纯函数清洗，杜绝「Previous assistant reply」回灌。
+    let content = sanitize_dsml_protocol_text(message.content.trim());
+    let content = content.trim();
     if content.is_empty() {
         return None;
     }
@@ -1875,7 +1879,8 @@ fn history_to_native_messages(history: &[TurnHistoryMessage]) -> Vec<Value> {
     history
         .iter()
         .map(|msg| {
-            let content = msg.content.trim().to_string();
+            // wave-3 L3-B：native transcript 同样不得携带已落盘的 DSML 协议原文。
+            let content = sanitize_dsml_protocol_text(msg.content.trim());
             json!({
                 "role": msg.role,
                 "content": content,

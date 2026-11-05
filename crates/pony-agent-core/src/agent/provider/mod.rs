@@ -4323,28 +4323,33 @@ fn extract_provider_error_detail(err: &str) -> String {
 /// wave-tui-session-resilience C1：DSML 工具调用协议原文的**唯一**清洗入口。
 /// 二元隔离在 SSE 解析层完成，流式增量、最终累计文本与历史回放共用同一语义；
 /// 纯函数、不新增依赖、不误伤 markdown 代码块 / 普通含尖括号正文。
-const DSML_CALLS_OPEN: &str = "<｜｜DSML｜｜ calls>";
-const DSML_CALLS_CLOSE: &str = "</｜｜DSML｜｜ calls>";
 const DSML_PLACEHOLDER: &str = "［工具调用］";
+
+/// DSML 标记的规范写法的「归一化签名」：大小写不敏感 + 全角/半角竖线统一。
+/// 只用于判定，绝不改写用户正文（输出仍逐字保真原字符）。
+fn dsml_signature(text: &str) -> String {
+    text.to_ascii_lowercase().replace('｜', "|")
+}
 
 /// 尾部「已识别 DSML 协议前缀」的半截形态：只认已知标签的合法前缀，
 /// 普通正文以单个 `<` 结尾 / markdown 代码块 / `<tag>` 一律不判命中。
 fn dsml_partial_tail_len(text: &str) -> Option<usize> {
     let trimmed = text.trim_end_matches(['\r', '\n', ' ', '\t']);
     let known_tags = [
-        DSML_CALLS_OPEN,
-        DSML_CALLS_CLOSE,
-        "<｜｜DSML｜｜ invoke",
-        "</｜｜DSML｜｜ invoke>",
-        "<｜｜DSML｜｜ parameter",
-        "</｜｜DSML｜｜ parameter>",
-        "<｜｜DSML｜｜",
-        "｜DSML｜｜",
-        "｜｜DS",
+        "<||dsml|| calls>",
+        "</||dsml|| calls>",
+        "<||dsml|| invoke",
+        "</||dsml|| invoke>",
+        "<||dsml|| parameter",
+        "</||dsml|| parameter>",
+        "<||dsml||",
+        "|dsml||",
+        "||ds",
+        "<|",
     ];
     // 只检查尾部有限窗口内、合法 UTF-8 字符边界上的候选，
     // 绝不按裸 byte offset 切片；单个 `<` 属普通正文，不判命中。
-    let max_tag_len = known_tags.iter().map(|tag| tag.len()).max().unwrap_or(0);
+    let max_tag_len = known_tags.iter().map(|tag| tag.len()).max().unwrap_or(0) * 3 + 4;
     for (start, _) in trimmed.char_indices().rev() {
         if trimmed.len() - start > max_tag_len {
             break;
@@ -4353,11 +4358,23 @@ fn dsml_partial_tail_len(text: &str) -> Option<usize> {
         if tail.contains('>') || tail.len() <= "<".len() {
             continue;
         }
-        if known_tags.iter().any(|tag| tag.starts_with(tail)) {
+        // `<|` / `<｜` 这类最短前缀只在行首或换行后判为协议碎片；
+        // 行中普通正文（如 `a <| 半角竖线`）逐字保真。
+        if start > 0 && !trimmed[..start].ends_with('\n') && !tail.starts_with("<｜") {
+            continue;
+        }
+        let signature = dsml_signature(tail);
+        if known_tags.iter().any(|tag| tag.starts_with(&signature)) {
             return Some(text.len() - start);
         }
     }
     None
+}
+
+/// 协议行判定：归一化后必须含 `|dsml|`（覆盖大小写 / 半角 / 全角 / 混合变体），
+/// 普通 `<tag>`、markdown 代码块、含 `<｜不是 DSML` 之类正文不命中。
+fn is_dsml_protocol_line(line: &str) -> bool {
+    dsml_signature(line).contains("|dsml|")
 }
 
 pub fn sanitize_dsml_protocol_text(text: &str) -> String {
@@ -4366,38 +4383,21 @@ pub fn sanitize_dsml_protocol_text(text: &str) -> String {
         Some(len) => &text[..text.len() - len],
         None => text,
     };
+    // 整行折叠：DSML 协议块（含大小写/半角/混合变体）按行剔除，
+    // 块外正文逐字保真；至少折叠一次时给一个面向用户的占位。
     let mut cleaned = String::with_capacity(body.len());
-    let mut cursor = 0usize;
-    let mut folded = false;
-    while let Some(relative) = body[cursor..].find(DSML_CALLS_OPEN) {
-        let open = cursor + relative;
-        cleaned.push_str(&body[cursor..open]);
-        let after_open = open + DSML_CALLS_OPEN.len();
-        cursor = match body[after_open..].find(DSML_CALLS_CLOSE) {
-            Some(relative_close) => after_open + relative_close + DSML_CALLS_CLOSE.len(),
-            None => body.len(),
-        };
-        if !folded {
-            cleaned.push_str(DSML_PLACEHOLDER);
-            folded = true;
+    let mut removed_protocol = false;
+    for line in body.split_inclusive('\n') {
+        if is_dsml_protocol_line(line) {
+            removed_protocol = true;
+            continue;
         }
+        cleaned.push_str(line);
     }
-    cleaned.push_str(&body[cursor..]);
-    // 孤立 `｜DSML｜｜` 行 / 以 `｜DSML` 开头的半截尾巴也属协议残留，整行剔除；
-    // 普通含尖括号正文不受影响。
-    if cleaned.contains("｜DSML｜｜") {
-        let mut filtered = String::with_capacity(cleaned.len());
-        for line in cleaned.split_inclusive('\n') {
-            if line.contains("｜DSML｜｜") {
-                continue;
-            }
-            filtered.push_str(line);
-        }
-        cleaned = filtered;
-        if !cleaned.contains(DSML_PLACEHOLDER) {
-            cleaned.push_str(DSML_PLACEHOLDER);
-        }
+    if removed_protocol && !cleaned.contains(DSML_PLACEHOLDER) {
+        cleaned.push_str(DSML_PLACEHOLDER);
     }
+    // 收尾：孤立半截尾巴（如 `｜DSML`）再截一次。
     if let Some(len) = dsml_partial_tail_len(&cleaned) {
         cleaned.truncate(cleaned.len() - len);
     }

@@ -7265,16 +7265,21 @@ fn hydrate_state_from_session(
         for entry in runtime_view.message_state.messages {
             match entry.role.as_str() {
                 "user" => {
+                    // wave-3 L3-B：message_state fallback 与 session.history 回放同口径清洗。
+                    let (content, _) =
+                        sanitize_model_protocol_text(&entry.content);
                     state.messages.push(ChatMessage {
                         role: MessageRole::User,
-                        content: entry.content,
+                        content,
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
                 }
                 "assistant" => {
+                    let (content, _) =
+                        sanitize_model_protocol_text(&entry.content);
                     state.messages.push(ChatMessage {
                         role: MessageRole::Assistant,
-                        content: entry.content,
+                        content,
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
                 }
