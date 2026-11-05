@@ -9,11 +9,11 @@
      [38;2;203;200;195m我先把问题拆成几个部分：[39m
 
      [38;2;124;118;110m  · [38;2;203;200;195m第一部分：读取上下文[39m
-     [38;2;124;118;110m  · [38;2;203;200;195m第二部分：整理结论[39m[49me":"stop accepted but no turn event sink registered; turn:stop_requested not dispatched","ses
-sio[48;2;18;16;14m  [38;2;124;118;110m  · [38;2;203;200;195m第三部分：输出建议[39m[49mam_cancelled: SSE 流已按请求中止 (stop_requested); elapsed=2601ms; parsed_bytes=1490; endpoin
-t=h[48;2;18;16;14m                [49m40487/v1/chat/completions","level":"warn","message":"turn stop requested while streaming decision fai
-led; classified cancelled instead of fallback/failed","scope":"no_preflight_decision","trace_id":"f648f68b432241e1940d4f
-0386b4889f","ts":"2026-11-05T12:49:02.864Z","turn_id":"turn-b3b2d644-b578-4a2e-a1c9-0fd37ba9e994"}[48;2;18;16;14m
+                   [49m{"error":"provider_stream_cancelled: SSE 流已按请求中止 (stop_requested); elapsed=2160ms; parsed_byte
+s=1052; endpoint=http://127.0.0.1:34977/v1/chat/completions","level":"warn","message":"turn stop requested while streami
+ng decision failed; classified cancelled instead of fallback/failed","scope":"no_preflight_decision","trace_id":"1432188
+9d679442dbbfad87d20eb3b2e","ts":"2026-11-05T13:04:11.090Z","turn_id":"turn-60fa187f-4b22-4506-bd80-a8fa35caad18"}[48;2;18;16;14m
+
 
 
 

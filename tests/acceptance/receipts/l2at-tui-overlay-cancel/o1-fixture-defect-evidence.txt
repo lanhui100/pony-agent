@@ -1,0 +1,33 @@
+# O1 夹具缺陷（测试自身缺陷）证据与修订
+# ticket: l2at-tui-overlay-cancel | 修订人: Test Agent (tui-test2) | 修订类型: 测试修订（未放宽契约）
+
+## 1. 缺陷现象（先在**正常帧**上取证，排除实现回归）
+命令：cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance o1_ -- --nocapture
+（修订前的 history_state() 未设置 context_window_tokens / last_context_tokens / total_*）
+
+实际输出（无 Ask 的基线帧 row33）：
+  O1 夹具前置条件：正常（无 Ask）帧的指标行必须含「上下文」数值段，
+  实际 row33 = "     ~/pony-agent/crates/pony-agent-core                                                                                "
+
+结论：`metrics_line`（crates/pony-agent-core/src/bin/tui.rs:4042-4060）只有在
+`context_window_tokens > 0` 时才渲染「上下文 N%」段；夹具缺该字段时指标行只剩工作区标签。
+=> 修订前 O1 的 row33 断言在**正常帧**上同样不成立，属于夹具（测试）缺陷，不是 Ask 遮挡回归。
+
+## 2. 修订（加强而非放宽）
+(a) history_state() 显式设定已知上下文窗口与用量：context_window_tokens=256000、
+    last_context_tokens=1024、total_input_tokens=1024、total_output_tokens=512，
+    使指标行成为有内容的行（↑1k ↓512 · 缓存 0% · 上下文 0%）。
+(b) O1 的遮挡判据从「指标行含某个词」升级为「与**关闭 Ask 的基线帧**逐字一致」：
+    - header row0   == 基线 row0
+    - 指标行 row33  == 基线 row33
+    - Composer 色带区 rows bottom_top..33 内必须出现既有 Ask 态替身「等待你的选择…」
+    - 并新增 o1_metrics_fixture_precondition_closed_frame_has_token_metrics 守卫夹具前置条件，
+      保证「夹具缺陷」与「实现遮挡回归」永远可区分。
+(c) Buffer 里 CJK 宽字符占 2 cell（第二格为空白），内容包含判断统一经 squeeze_text()
+    去空白后比较；逐格相等断言仍用原始字节（不归一）。
+
+## 3. 修订后原生命令结果
+- cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2
+  → exit 0，14 passed / 0 failed（green.log）
+- bash tests/acceptance/l2at-tui-overlay-cancel.sh
+  → exit 0，PASS=13 FAIL=0（run.log / summary.json）

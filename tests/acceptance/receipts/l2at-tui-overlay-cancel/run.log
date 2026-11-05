@@ -1,26 +1,26 @@
 == using fresh bin: /home/dm/pony-agent/target/debug/pony
 bin=/home/dm/pony-agent/target/debug/pony
-bin_mtime=2026-11-05T20:14:54+08:00
-bin_sha256=e2faae5e0e6b0c30aa4615ba2d19aa135c236812c27dab221e4edd6fde2bcd58
-tui_src_sha256=6858d4e202cf7fa18fb24fe677f22585585364c4378ab659c177d12090885e42
-generated_at=2026-11-05T20:48:59+08:00
-git_commit=d710bb3423a22eda4818e9878f3a5d1687351aca
-== scenario s1-stop-esc (mock port 40487)
+bin_mtime=2026-11-05T21:04:07+08:00
+bin_sha256=73fb51a577a73cf6cfe6b14371fb2304c06aa4369e8b2bd15ada71570475c7bf
+tui_src_sha256=3fc2b4617f8e26f3b89df8735af2c40a5aa848c82fa8d51ef118a6519626779c
+generated_at=2026-11-05T21:04:08+08:00
+git_commit=dd81592008725bd722b187e94e5207202cd2ba23
+== scenario s1-stop-esc (mock port 34977)
 PASS: O4 受理后状态行显示「正在停止…」
 PASS: O4 未收到终态事件前未显示已停止/已终止
 PASS: O4 无本地伪造终态文案
 PASS: O5 终态显示「已停止（用户中断）」
 PASS: O5 取消终态保留用户消息与已渲染正文
-FAIL: C9 控制面 stop_turn 未命中已注册 sink（原始输出出现：stop accepted but no turn event sink registered）
+PASS: C9 控制面 stop_turn 命中已注册 sink（原始 pane 流无未注册告警）
 PASS: S1 真实 TUI 无 panic
-== scenario s2-ask-overlay (mock port 37029)
+== scenario s2-ask-overlay (mock port 48531)
 PASS: O1 Ask 问题在真实终端可见
 NOTE: O1 历史/问题同帧由 Rust TestBackend 用例判定；本帧只证明面板、header、Composer 不互相遮挡
 PASS: O1 Ask 未遮挡 header / Composer / 指标行
 PASS: O7 Ask 内 Esc 关闭面板
 PASS: O7 Ask 内 Esc 未继承流式双击停止语义
 PASS: O7 Ask 取消无 CAS 失败可见文案
-== scenario s3-resume-summary (mock port 47471)
-FAIL: J1 恢复视图把结构化 arguments JSON 反显为消息摘要（description 优先未生效）
+== scenario s3-resume-summary (mock port 54061)
+PASS: J1 恢复视图优先显示 description 且无结构化 JSON
 
-==== l2at-tui-overlay-cancel summary: PASS=11 FAIL=2 ====
+==== l2at-tui-overlay-cancel summary: PASS=13 FAIL=0 ====

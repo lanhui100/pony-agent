@@ -58,6 +58,12 @@ fn row_text(buf: &Buffer, y: u16) -> String {
     out
 }
 
+/// CJK 等宽字符在 `Buffer` 里占 2 个 cell（第二格是空白占位），逐字取符号会得到
+/// 「上 下 文」；对**内容**做包含判断前先去掉空白。逐格相等断言仍用原始字节（不做归一）。
+fn squeeze_text(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 fn all_text(buf: &Buffer) -> String {
     (0..buf.area.height)
         .map(|y| row_text(buf, y))
@@ -85,10 +91,18 @@ fn ask_question(question: &str) -> AskUserQuestion {
 }
 
 /// 至少一条短历史（用户 + 助手），保证消息区非空且正文可滚动。
+///
+/// 同时给出**已知上下文窗口 + 已知用量**：指标行（`metrics_line`）只有在
+/// `context_window_tokens > 0` 时才渲染「上下文 N%」段，否则该行只剩工作区标签。
+/// 夹具缺这两项会让「Ask 遮挡指标行」的判据退化成对空行的断言（测试缺陷，不是实现回归）。
 fn history_state() -> TuiState {
     let mut state = TuiState::default();
     state.add_user_message(&format!("上一条问题 {HISTORY_SENTINEL}"));
     state.append_assistant_chunk("历史回答正文：这里是提问前已经被看到的上下文。");
+    state.context_window_tokens = 256_000;
+    state.last_context_tokens = 1_024;
+    state.total_input_tokens = 1_024;
+    state.total_output_tokens = 512;
     state
 }
 
@@ -127,9 +141,39 @@ fn last_assistant(state: &TuiState) -> &str {
 // O1：历史与问题同帧可见，Ask 不覆盖 header / Composer / 指标行
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// O1 夹具前置条件（缺陷证据入口）：**没有 Ask** 的正常帧，指标行也必须已经渲染出
+/// 数值指标（`上下文` 段）。若这里失败，说明是夹具没有设置 `context_window_tokens`，
+/// 而不是「Ask 遮挡指标行」——两种失败必须可区分，否则 O1 的判据会把夹具缺陷误报成实现回归。
+#[test]
+fn o1_metrics_fixture_precondition_closed_frame_has_token_metrics() {
+    // Arrange
+    let mut state = history_state();
+
+    // Act：与 O1 同尺寸、同状态，只是不打开 Ask
+    let buf = render(&mut state, 120, 34);
+    let metrics_row = row_text(&buf, 33);
+
+    // Assert
+    assert!(
+        squeeze_text(&metrics_row).contains("上下文"),
+        "O1 夹具前置条件：正常（无 Ask）帧的指标行必须含「上下文」数值段，\
+         实际 row33 = {metrics_row:?}。若此处失败 = 夹具未设置 context_window_tokens（测试缺陷），\
+         不是被测实现的遮挡回归。"
+    );
+}
+
 #[test]
 fn o1_history_and_question_share_one_frame_without_wiping_scrollback() {
-    // Arrange
+    // Arrange：同一夹具的「关闭 Ask」基线帧，作为未被遮挡的逐格真值（不是放宽断言，
+    // 而是把判据从『指标行含某个词』提升为『固定基座逐字不变』）。
+    let mut baseline_state = history_state();
+    let baseline = render(&mut baseline_state, 120, 34);
+    assert!(
+        squeeze_text(&row_text(&baseline, 33)).contains("上下文"),
+        "O1 夹具前置条件：基线帧指标行必须含数值指标，实际 row33 = {:?}",
+        row_text(&baseline, 33)
+    );
+
     let mut state = ask_state(QUESTION_SENTINEL);
 
     // Act
@@ -146,22 +190,35 @@ fn o1_history_and_question_share_one_frame_without_wiping_scrollback() {
         "O1：Ask 的问题必须在同一帧可见。首帧屏幕 =\n{screen}"
     );
 
-    // Assert 2：Ask 不得覆盖 header / Composer / 指标行
-    assert!(
-        row_text(&buf, 0).contains("pony"),
-        "O1：Ask 不得遮挡 header 行，实际 row0 = {:?}",
-        row_text(&buf, 0)
+    // Assert 2：header 行必须与基线逐字一致（Ask 不得遮挡）
+    assert_eq!(
+        row_text(&buf, 0),
+        row_text(&baseline, 0),
+        "O1：Ask 打开后 header 行与基线帧必须逐字一致"
     );
-    let input_row = composer_top(34) + 1;
+
+    // Assert 3：Composer 基座仍在（Ask 态色带按既有约定显示「等待你的选择…」替身，
+    // 但色带本身不得被面板覆盖成空白/被清除）。
+    let band_rows: Vec<String> = (composer_top(34)..33)
+        .map(|y| (y, squeeze_text(&row_text(&buf, y))))
+        .filter(|(_, text)| text.contains("等待你的选择"))
+        .map(|(y, _)| y.to_string())
+        .collect();
     assert!(
-        row_text(&buf, input_row).contains('›'),
-        "O1：Ask 不得遮挡 Composer 输入区，实际 row{input_row} = {:?}",
-        row_text(&buf, input_row)
+        !band_rows.is_empty(),
+        "O1：Ask 态 Composer 色带必须仍在渲染（既有「等待你的选择…」替身），\
+         实际色带区 rows {}..33 = {:?}",
+        composer_top(34),
+        (composer_top(34)..33).map(|y| row_text(&buf, y)).collect::<Vec<_>>()
     );
-    assert!(
-        row_text(&buf, 33).contains("上下文"),
-        "O1：Ask 不得遮挡指标行，实际 row33 = {:?}",
-        row_text(&buf, 33)
+
+    // Assert 4：指标行必须与基线逐字一致（Ask 不得遮挡、不得改写）
+    assert_eq!(
+        row_text(&buf, 33),
+        row_text(&baseline, 33),
+        "O1：Ask 打开后指标行与基线帧必须逐字一致（实际 = {:?}，基线 = {:?}）",
+        row_text(&buf, 33),
+        row_text(&baseline, 33)
     );
 }
 

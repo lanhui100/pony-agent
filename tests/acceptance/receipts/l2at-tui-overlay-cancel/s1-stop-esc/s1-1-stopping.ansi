@@ -9,9 +9,9 @@
      [38;2;203;200;195m我先把问题拆成几个部分：[39m
 
      [38;2;124;118;110m  · [38;2;203;200;195m第一部分：读取上下文[39m
-   [38;2;180;92;62m⠴[39m[49m{[38;2;199;176;126m[48;2;18;16;14m正在停止…  2秒[39m[49m,"message":"stop accepted but no turn event sink registered; turn:stop_requested not dispatched","ses
-sion_id":"session-f3076d1b","stop_reason":"user","trace_id":null,"ts":"2026-11-05T12:49:02.538Z","turn_id":"turn-b3b2d64
-4-b578-4a2e-a1c9-0fd37ba9e994"}[48;2;18;16;14m
+   [38;2;180;92;62m⠼ [38;2;199;176;126m正在停止…  2秒[39m
+
+
 
 
 

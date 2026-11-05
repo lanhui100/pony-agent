@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized] target(s) in 0.26s
+     Running tests/tui_overlay_cancel_acceptance.rs (target/debug/deps/tui_overlay_cancel_acceptance-88546c09fe4903a3)
+
+running 14 tests
+test c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable ... ok
+test o1_history_and_question_share_one_frame_without_wiping_scrollback ... ok
+test o1_metrics_fixture_precondition_closed_frame_has_token_metrics ... ok
+test o2_toggling_ask_keeps_message_geometry_and_uncovered_rows_stable ... ok
+test o3_ask_panel_survives_wide_narrow_and_tiny_terminals ... ok
+test o4_double_escape_arms_then_fires_exactly_once_and_only_shows_stopping ... ok
+test o5_user_cancel_terminal_shows_user_readable_stop_without_new_message ... ok
+test o6_repeated_escape_and_duplicate_or_stale_terminal_are_idempotent ... ok
+test o7_ask_escape_closes_panel_without_fabricating_answers_or_stop ... ok
+test o8_cancel_status_never_leaks_internal_payload ... ok
+test tui::wave43_unit_tests::test_ask_question_from_pending_mapping ... ok
+test tui::wave43_unit_tests::test_pending_ui_request_from_value ... ok
+test tui::wave43_unit_tests::test_permission_request_from_pending_mapping ... ok
+test j1_resume_summary_prefers_description_and_hides_structured_json ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.39s
+
