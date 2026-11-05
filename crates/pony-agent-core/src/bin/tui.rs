@@ -7,13 +7,13 @@
 
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyboardEnhancementFlags, KeyCode, KeyModifiers, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        self, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+        KeyboardEnhancementFlags, KeyCode, KeyModifiers, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen},
 };
+use std::io::Write;
 use pony_agent_core::agent::config::{
     ProviderCapabilityPreset, ProviderModelCapabilities, ProviderModelConfig, ProviderReasoningEffort,
     ProviderRegistryStore, ProviderRegistryView, ProviderSelectionResolver, ResolvedProviderSelection,
@@ -53,10 +53,123 @@ use std::sync::Arc;
 // 主循环每个 tick（≤16ms）检测后正常 break，走统一的终端恢复保证器。
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// 终端**输入侧**协议还原串（收到后终端不再把按键编码成转义序列）。
+///
+/// 残留这些模式时的现象：退出 TUI 后敲任何键都变成 `ESC[117u` / `ESC[9;5u` 这类
+/// kitty 键盘协议编码，被 shell 当正文回显，终端看起来"输入全是乱码"。
+/// - `<1u` / `<u`：弹掉 kitty 键盘增强协议栈（crossterm 的弹栈写作 `<1u`，部分终端只认 `<u`）
+/// - `>4;0m`：关 xterm modifyOtherKeys
+/// - `?1000l` `?1002l` `?1003l` `?1006l` `?1015l`：关各级鼠标追踪（含 any-motion 与 SGR）
+/// - `?2004l`：关 bracketed paste
+pub const TERMINAL_INPUT_MODES_RESET: &[u8] =
+    b"\x1b[<1u\x1b[<u\x1b[>4;0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l";
+
+/// 终端**输出侧**还原串：退出备用屏 + 显示光标。
+pub const TERMINAL_SCREEN_RESET: &[u8] = b"\x1b[?1049l\x1b[?25h";
+
+/// raw mode 之前的 termios 快照指针（信号处理器内直接 `tcsetattr`，不分配内存）。
+#[cfg(unix)]
+static ORIGINAL_TERMIOS_PTR: std::sync::atomic::AtomicPtr<libc::termios> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// 预打开的还原写通道（`/dev/tty` 的 fd；-1 ⇒ 不可用）。
+///
+/// 为什么预打开：信号处理器里只能调用 async-signal-safe 的 `write(2)`（不能 open/分配内存）；
+/// 且 `io::stdout()` 被重定向或已返回 EIO 时，只有直写 `/dev/tty` 还能把还原串送达终端。
+#[cfg(unix)]
+static RESTORE_TTY_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// 进入 raw mode 之前快照 termios 并预打开 `/dev/tty`。
+///
+/// 还原通道必须在"终端可能已经坏掉"之前就绪，否则信号/panic 路径无通道可用。
+#[cfg(unix)]
+fn capture_terminal_state() {
+    unsafe {
+        let mut original: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut original) == 0 {
+            ORIGINAL_TERMIOS_PTR.store(Box::into_raw(Box::new(original)), Ordering::SeqCst);
+        }
+    }
+    if let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        use std::os::unix::io::AsRawFd;
+        RESTORE_TTY_FD.store(tty.as_raw_fd(), Ordering::SeqCst);
+        // 进程级写通道：生命周期与进程一致，提前 forget 以免 fd 在 handler 中被关闭。
+        std::mem::forget(tty);
+    }
+}
+
+/// 非 unix（Windows）无 `/dev/tty` 文件语义，还原统一走 stdout + crossterm 命令。
+#[cfg(not(unix))]
+fn capture_terminal_state() {}
+
+/// 信号上下文里的最佳努力还原：只调用 async-signal-safe 的 `write(2)` / `tcsetattr(3)`。
+#[cfg(unix)]
+fn restore_terminal_for_signal() {
+    unsafe {
+        let tty_fd = RESTORE_TTY_FD.load(Ordering::SeqCst);
+        if tty_fd >= 0 {
+            libc::write(
+                tty_fd,
+                TERMINAL_INPUT_MODES_RESET.as_ptr() as *const libc::c_void,
+                TERMINAL_INPUT_MODES_RESET.len(),
+            );
+        }
+        let original = ORIGINAL_TERMIOS_PTR.load(Ordering::SeqCst);
+        if !original.is_null() {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, original);
+        }
+        if tty_fd >= 0 {
+            libc::write(
+                tty_fd,
+                TERMINAL_SCREEN_RESET.as_ptr() as *const libc::c_void,
+                TERMINAL_SCREEN_RESET.len(),
+            );
+        }
+    }
+}
+
+/// 信号到达的诊断行：用固定栈缓冲 + `write` 输出，避免在信号上下文里分配内存。
+#[cfg(unix)]
+fn write_signal_notice(sig: libc::c_int) {
+    const PREFIX: &[u8] = b"[pony-tui] shutdown signal ";
+    const SUFFIX: &[u8] = b" received\n";
+    let mut buf = [0u8; PREFIX.len() + 3 + SUFFIX.len()];
+    let mut len = 0usize;
+    buf[..PREFIX.len()].copy_from_slice(PREFIX);
+    len += PREFIX.len();
+    let mut digits = [0u8; 3];
+    let mut remaining = sig.max(0) as u32;
+    let mut count = 0usize;
+    loop {
+        digits[count] = b'0' + (remaining % 10) as u8;
+        count += 1;
+        remaining /= 10;
+        if remaining == 0 || count == digits.len() {
+            break;
+        }
+    }
+    for index in (0..count).rev() {
+        buf[len] = digits[index];
+        len += 1;
+    }
+    buf[len..len + SUFFIX.len()].copy_from_slice(SUFFIX);
+    len += SUFFIX.len();
+    unsafe {
+        libc::write(
+            libc::STDERR_FILENO,
+            buf.as_ptr() as *const libc::c_void,
+            len,
+        );
+    }
+}
+
 #[cfg(unix)]
 extern "C" fn handle_shutdown_signal(sig: libc::c_int) {
+    // 先做一次 async-signal-safe 的还原：主循环此刻可能正卡在长耗时调用里，
+    // 只等下一次 tick 的话，用户的终端会继续停在 raw + kitty 键盘协议态。
+    restore_terminal_for_signal();
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
-    eprintln!("[pony-tui] shutdown signal {} received", sig);
+    write_signal_notice(sig);
 }
 
 /// `libc` 是 `[target.'cfg(unix)'.dependencies]` 依赖，Windows 目标不存在该 crate，
@@ -78,6 +191,105 @@ fn install_shutdown_signal_handlers() {
 /// 非 unix（Windows）无 POSIX 信号语义：不接管信号，保持控制台默认行为。
 #[cfg(not(unix))]
 fn install_shutdown_signal_handlers() {}
+
+/// 把还原串写到终端：unix 优先直写 `/dev/tty`（stdout 被重定向 / 返回 EIO 时仍有效），
+/// 失败再退回 stdout。
+#[cfg(unix)]
+fn write_restore_bytes(bytes: &[u8]) -> io::Result<()> {
+    let tty_fd = RESTORE_TTY_FD.load(Ordering::SeqCst);
+    if tty_fd >= 0 {
+        let written = unsafe {
+            libc::write(
+                tty_fd,
+                bytes.as_ptr() as *const libc::c_void,
+                bytes.len(),
+            )
+        };
+        if written == bytes.len() as isize {
+            return Ok(());
+        }
+    }
+    let mut out = io::stdout();
+    out.write_all(bytes)?;
+    out.flush()
+}
+
+/// 非 unix：无 `/dev/tty` 语义，普通文本（如退出提示）直接写 stdout。
+#[cfg(not(unix))]
+fn write_restore_bytes(bytes: &[u8]) -> io::Result<()> {
+    let mut out = io::stdout();
+    out.write_all(bytes)?;
+    out.flush()
+}
+
+/// 退出后打印的会话续接提示（必须能整行复制执行）。
+///
+/// 只负责**文案**，写入通道由 [`print_resume_hint`] 负责：两者分离后，文案可被单测
+/// 直接断言，不必在无 TTY 环境里伪造终端。
+pub fn resume_hint_line(session_id: &str) -> String {
+    format!("继续该会话请运行：pony resume {session_id}")
+}
+
+/// 把续接提示写到真实终端（stdout 被重定向时仍能送达）。
+///
+/// 调用时机：**终端还原之后**。提前写会落进备用屏，用户退出后根本看不到。
+fn print_resume_hint(session_id: &str) {
+    let line = format!("\n{}\n", resume_hint_line(session_id));
+    let _ = io::stdout().flush();
+    if let Err(error) = write_restore_bytes(line.as_bytes()) {
+        eprintln!("[pony-tui] 退出提示写入失败：{error}");
+    }
+}
+
+/// 契约 F-D 加固：把终端从 TUI 模式彻底还原（幂等，可重复调用）。
+///
+/// 与旧实现的差异（对应"退出 TUI 后终端输入变乱码"缺陷的因果闭包）：
+/// 1) 写通道优先 `/dev/tty`：旧实现只写 `io::stdout()`，stdout 重定向 / EIO 时整串还原丢失；
+/// 2) 还原串无条件写全，不再依赖"push 是否成功"的共享标志——宁可多发一次弹栈；
+/// 3) 失败向 stderr 记一条，不再 `let _ =` 静默吞掉（旧实现失败后用户零线索）。
+#[cfg(unix)]
+pub fn restore_terminal_modes() {
+    // stdout 可能仍有未刷出的帧：先刷干净，避免还原串被后续帧覆盖。
+    let _ = io::stdout().flush();
+    if let Err(error) = write_restore_bytes(TERMINAL_INPUT_MODES_RESET) {
+        eprintln!("[pony-tui] 终端还原（输入模式）失败：{error}");
+    }
+    if let Err(error) = disable_raw_mode() {
+        eprintln!("[pony-tui] disable_raw_mode 失败：{error}");
+    }
+    if let Err(error) = write_restore_bytes(TERMINAL_SCREEN_RESET) {
+        eprintln!("[pony-tui] 终端还原（备用屏/光标）失败：{error}");
+    }
+}
+
+/// Windows 走 crossterm 命令（老 conhost 下 ANSI 直写不可靠，需走其 WinAPI 分支）。
+#[cfg(not(unix))]
+pub fn restore_terminal_modes() {
+    let mut out = io::stdout();
+    let _ = execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
+    let _ = execute!(out, crossterm::event::DisableBracketedPaste);
+    if let Err(error) = disable_raw_mode() {
+        eprintln!("[pony-tui] 终端还原（raw mode）失败：{error}");
+    }
+    let _ = execute!(
+        out,
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture,
+        crossterm::cursor::Show
+    );
+}
+
+/// 契约 F-D 加固：panic 也先还原终端。
+///
+/// `TerminalGuard` 的 Drop 覆盖不到 abort / hook 侧 abort 的路径；panic hook 在 unwind 最外层
+/// 之前运行，是"进程要死了也要把终端交还"的最后一道闸。与 guard 的还原互为幂等。
+fn install_panic_restore_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal_modes();
+        previous(info);
+    }));
+}
 
 use std::time::Duration;
 
@@ -5824,7 +6036,7 @@ fn tui_runtime_log_path() -> Option<PathBuf> {
     )
 }
 
-fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
+fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         std::env::remove_var("NO_COLOR");
         if std::env::var("COLORTERM").is_err() {
@@ -5862,40 +6074,28 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 契约 F-D 加固：还原通道（termios 快照 + /dev/tty 写句柄）必须在 raw mode 生效前就绪；
+    // 信号接管也要提前——启动期（加载 SQLite / 构建控制面，数百毫秒级）收到 SIGHUP 时，
+    // 旧实现尚未安装处理器，进程被默认终止，终端就留在 raw + 备用屏 + kitty 键盘协议态。
+    capture_terminal_state();
+    install_shutdown_signal_handlers();
     enable_raw_mode()?;
     // 契约 F-D：raw mode 生效后**立刻**建立 RAII 守卫（早于 Terminal::new / build_control_plane）。
     // 之后任何 `?` 提前返回或 panic 都会经 Drop 恢复终端，不会把用户终端留在 raw + 备用屏。
-    // 键盘增强协议是否已 push 由共享标志在 restore 时读取（此时还未知）。
-    let keyboard_enhancement_for_restore = Arc::new(AtomicBool::new(false));
-    let flag_for_restore = Arc::clone(&keyboard_enhancement_for_restore);
-    let mut terminal_guard = TerminalGuard::new(Box::new(move || {
-        // 与旧 T2c 显式恢复同序：撤销键盘增强 → 关 bracketed paste → 退出 raw → 退出备屏
-        // → 关鼠标捕获 → 恢复光标。全部 `let _ =`：恢复路径不得再失败或 panic。
-        let mut out = io::stdout();
-        if flag_for_restore.load(Ordering::Relaxed) {
-            let _ = execute!(out, PopKeyboardEnhancementFlags);
-        }
-        let _ = execute!(out, DisableBracketedPaste);
-        let _ = disable_raw_mode();
-        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
-        let _ = execute!(out, crossterm::cursor::Show);
-    }));
+    // 还原闭包无条件写全还原串（含键盘增强弹栈），不再依赖"push 是否成功"的共享标志。
+    install_panic_restore_hook();
+    let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
     let mut stdout = io::stdout();
-    let keyboard_enhancement_pushed =
-        if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
-            execute!(
-                stdout,
-                PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                )
+    if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        if let Err(error) = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
-            .is_ok()
-        } else {
-            false
-        };
-    if keyboard_enhancement_pushed {
-        keyboard_enhancement_for_restore.store(true, Ordering::Relaxed);
+        ) {
+            eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
+        }
     }
 
     // 契约 F-C：启用 bracketed paste —— 大段粘贴作为单个 `Event::Paste` 送达，
@@ -5931,6 +6131,26 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     // wave-38 D1：记住启动目录绑定，作为恢复「无归属/死归属」会话时的回退基准。
     state.startup_workspace_id = state.active_workspace_id.clone();
 
+    // `pony resume <id>`：workspace 归属登记完成后再装载快照（hydrate 依赖 startup_workspace_id）。
+    if let Some(resume) = resume_session.as_ref() {
+        state.session_id = resume.session_id.clone();
+        state.reset_session_scope();
+        if resume.existed {
+            hydrate_state_from_session(&mut state, &control_plane, &resume.session_id);
+        } else {
+            // 显式 id 尚无落库记录：沿用该 id 开新会话，并在界面上如实说明。
+            state.status_text = format!("新会话（沿用 id）{}", resume.session_id);
+            state.messages.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!(
+                    "会话 {} 尚无历史记录，已沿用该 id 开始新会话。",
+                    resume.session_id
+                ),
+                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            });
+        }
+    }
+
     let (tx, rx): (Sender<UiEvent>, Receiver<UiEvent>) = channel();
 
     // T2c：无论主循环以何种方式退出（Ctrl-C、/quit、错误 `?` 传播、panic），
@@ -5945,7 +6165,14 @@ fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     terminal_guard.restore();
 
     match result {
-        Ok(inner) => inner,
+        Ok(inner) => {
+            // 还原之后再把续接提示交给真实终端：此时备用屏已退出，提示才留在用户屏幕上。
+            // 会话未落库也照常打印——`pony resume <id>` 会以同一 id 继续（不存在的 id 不是错误）。
+            if let Ok(session_id) = &inner {
+                print_resume_hint(session_id);
+            }
+            inner.map(|_| ())
+        }
         Err(payload) => std::panic::resume_unwind(payload),
     }
 }
@@ -5981,40 +6208,23 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 契约 F-D 加固（与 run_tui 同一闭合）：还原通道先于 raw mode 就绪 + panic 也还原。
+    // 演示入口不接管信号（其循环不查 SHUTDOWN_REQUESTED，接管会把 Ctrl-C 吞掉）。
+    capture_terminal_state();
     enable_raw_mode()?;
-    // 契约 F-D：raw mode 生效后**立刻**建立 RAII 守卫（早于 Terminal::new / build_control_plane）。
-    // 之后任何 `?` 提前返回或 panic 都会经 Drop 恢复终端，不会把用户终端留在 raw + 备用屏。
-    // 键盘增强协议是否已 push 由共享标志在 restore 时读取（此时还未知）。
-    let keyboard_enhancement_for_restore = Arc::new(AtomicBool::new(false));
-    let flag_for_restore = Arc::clone(&keyboard_enhancement_for_restore);
-    let mut terminal_guard = TerminalGuard::new(Box::new(move || {
-        // 与旧 T2c 显式恢复同序：撤销键盘增强 → 关 bracketed paste → 退出 raw → 退出备屏
-        // → 关鼠标捕获 → 恢复光标。全部 `let _ =`：恢复路径不得再失败或 panic。
-        let mut out = io::stdout();
-        if flag_for_restore.load(Ordering::Relaxed) {
-            let _ = execute!(out, PopKeyboardEnhancementFlags);
-        }
-        let _ = execute!(out, DisableBracketedPaste);
-        let _ = disable_raw_mode();
-        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
-        let _ = execute!(out, crossterm::cursor::Show);
-    }));
+    install_panic_restore_hook();
+    let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
     let mut stdout = io::stdout();
-    let keyboard_enhancement_pushed =
-        if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
-            execute!(
-                stdout,
-                PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                )
+    if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        if let Err(error) = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
-            .is_ok()
-        } else {
-            false
-        };
-    if keyboard_enhancement_pushed {
-        keyboard_enhancement_for_restore.store(true, Ordering::Relaxed);
+        ) {
+            eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
+        }
     }
 
     // 契约 F-C：启用 bracketed paste —— 大段粘贴作为单个 `Event::Paste` 送达，
@@ -6064,7 +6274,7 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
     terminal_guard.restore();
 
     match result {
-        Ok(inner) => inner,
+        Ok(inner) => inner.map(|_| ()),
         Err(payload) => std::panic::resume_unwind(payload),
     }
 }
@@ -6285,13 +6495,140 @@ fn submit_ask_answers(
     });
 }
 
+/// 把目标会话的权威快照装载进 UI 状态（`/resume` 弹窗与启动期 `pony resume <id>` 共用）。
+///
+/// **不改 `session_id`**：目标 id 由调用方在调用前写入 `state.session_id`。
+/// 职责：还原 workspace 归属 → 回放 history（工具结果先于 assistant 行）→ 空 history 时
+/// 回退 `message_state` → 贴底滚动态。会话作用域复位仍由调用方执行（`reset_session_scope`）。
+fn hydrate_state_from_session(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    session_id: &str,
+) {
+    // 彻底重构历史会话恢复：优先使用权威会话快照 session.history 与 turn_trace_history，确保 1:1 准确恢复
+    let runtime_view = control_plane.load_session_runtime_view(pony_agent_core::agent::control_plane::SessionRuntimeViewQuery {
+        session_id: Some(session_id.to_string()),
+        turn_id: None,
+        node_id: None,
+        run_id: None,
+    });
+    let session_snapshot = runtime_view.session;
+    // wave-38 D1：恢复会话的 workspace 绑定——
+    // 已注册归属保持该归属（header = 会话 env cwd），否则回退启动目录绑定。
+    // 只读决议，不触发任何 owner 改写/静默迁移。
+    let registered_ids = control_plane
+        .list_workspaces()
+        .iter()
+        .map(|workspace| workspace.id.clone())
+        .collect::<Vec<_>>();
+    let (resumed_id, resumed_path) = resolve_resumed_workspace_binding(
+        session_snapshot.workspace_id.as_deref(),
+        session_snapshot
+            .env_info
+            .as_ref()
+            .map(|env| env.cwd.as_str()),
+        &registered_ids,
+        state.startup_workspace_id.as_deref(),
+        &state.startup_workspace_path,
+    );
+    state.active_workspace_id = resumed_id;
+    state.workspace = resumed_path;
+    let mut trace_map: std::collections::HashMap<String, &pony_agent_core::agent::session::TurnTraceRecord> = std::collections::HashMap::new();
+    for trace in &session_snapshot.turn_trace_history {
+        trace_map.insert(trace.turn_id.clone(), trace);
+    }
+
+    for hist in &session_snapshot.history {
+        match hist.role.as_str() {
+            "user" => {
+                state.messages.push(ChatMessage {
+                    role: MessageRole::User,
+                    content: hist.content.clone(),
+                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                });
+            }
+            "assistant" => {
+                // 如果该轮包含工具调用，先将该轮的工具执行结果反显在 Assistant 之前
+                if let Some(turn_id) = &hist.turn_id {
+                    if let Some(trace) = trace_map.get(turn_id) {
+                        for tool in &trace.tool_activities {
+                            if tool.status != "planned" {
+                                let detail_preview = tool.arguments_text.as_deref().or(tool.result_text.as_deref());
+                                let formatted = format_tool_display(
+                                    &tool.name,
+                                    tool.display_name_zh.as_deref(),
+                                    detail_preview,
+                                    Some(&tool.status),
+                                );
+                                state.messages.push(ChatMessage {
+                                    role: MessageRole::ToolResult,
+                                    content: formatted,
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                state.messages.push(ChatMessage {
+                    role: MessageRole::Assistant,
+                    content: hist.content.clone(),
+                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // 若 history 为空，再尝试 fallback 到 message_state
+    if state.messages.is_empty() {
+        for entry in runtime_view.message_state.messages {
+            match entry.role.as_str() {
+                "user" => {
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::User,
+                        content: entry.content,
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                }
+                "assistant" => {
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::Assistant,
+                        content: entry.content,
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                }
+                "tool" | "tool_call" | "tool_result" => {
+                    let display = format_tool_display(
+                        entry.tool_name.as_deref().unwrap_or("tool"),
+                        entry.display_name_zh.as_deref(),
+                        entry.detail.as_deref(),
+                        entry.status.as_deref(),
+                    );
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::ToolResult,
+                        content: display,
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    state.scroll_offset = u32::MAX;
+    state.auto_scroll = true; // 确保加载完毕后消息贴底显示
+    state.mode = InteractionMode::Normal;
+    state.status_text = format!("Resumed {}", session_id);
+}
+
 fn tui_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut state: TuiState,
     control_plane: Arc<pony_agent_core::agent::control_plane::HostControlPlane>,
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error>> {
     let current_turn_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     // 契约 F-G：goal 自动续轮的取消令牌（Esc 置位；新一轮用户消息提交时重置）。
     let goal_round_cancel = GoalRoundCancelToken::new();
@@ -6366,7 +6703,7 @@ fn tui_event_loop(
     let mut last_poll_instant = std::time::Instant::now();
     let mut last_goal_phase: Option<bool> = None;
     let mut cap_poll_ms: Option<u64> = None;
-    install_shutdown_signal_handlers();
+    // 信号处理器已在 run_tui 进入 raw mode 之前安装（启动期 SIGHUP 也要能还原终端）。
 
     // 辅助闭包：检查并同步当前 session 的待决宿主控制请求（Ask / Approval）
     let check_pending_asks = |st: &mut TuiState, cp: &HostControlPlane| -> bool {
@@ -6439,6 +6776,10 @@ fn tui_event_loop(
             dirty = true;
         }
 
+        // 信号处理器已就地还原终端：此刻绝不能再画帧，否则会把画面涂到用户 shell 上。
+        if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            break;
+        }
         if dirty {
             terminal.draw(|f| ui(f, &mut state))?;
             dirty = false;
@@ -6658,121 +6999,9 @@ fn tui_event_loop(
                                     // （否则上一个会话的用量/计划/目标/待决请求会串到新会话）。
                                     state.reset_session_scope();
 
-                                    // 彻底重构历史会话恢复：优先使用权威会话快照 session.history 与 turn_trace_history，确保 1:1 准确恢复
-                                    let runtime_view = control_plane.load_session_runtime_view(pony_agent_core::agent::control_plane::SessionRuntimeViewQuery {
-                                        session_id: Some(chosen.id.clone()),
-                                        turn_id: None,
-                                        node_id: None,
-                                        run_id: None,
-                                    });
-                                    let session_snapshot = runtime_view.session;
-                                    // wave-38 D1：恢复会话的 workspace 绑定——
-                                    // 已注册归属保持该归属（header = 会话 env cwd），否则回退启动目录绑定。
-                                    // 只读决议，不触发任何 owner 改写/静默迁移。
-                                    let registered_ids = control_plane
-                                        .list_workspaces()
-                                        .iter()
-                                        .map(|workspace| workspace.id.clone())
-                                        .collect::<Vec<_>>();
-                                    let (resumed_id, resumed_path) = resolve_resumed_workspace_binding(
-                                        session_snapshot.workspace_id.as_deref(),
-                                        session_snapshot
-                                            .env_info
-                                            .as_ref()
-                                            .map(|env| env.cwd.as_str()),
-                                        &registered_ids,
-                                        state.startup_workspace_id.as_deref(),
-                                        &state.startup_workspace_path,
-                                    );
-                                    state.active_workspace_id = resumed_id;
-                                    state.workspace = resumed_path;
-                                    let mut trace_map: std::collections::HashMap<String, &pony_agent_core::agent::session::TurnTraceRecord> = std::collections::HashMap::new();
-                                    for trace in &session_snapshot.turn_trace_history {
-                                        trace_map.insert(trace.turn_id.clone(), trace);
-                                    }
-
-                                    for hist in &session_snapshot.history {
-                                        match hist.role.as_str() {
-                                            "user" => {
-                                                state.messages.push(ChatMessage {
-                                                    role: MessageRole::User,
-                                                    content: hist.content.clone(),
-                                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                });
-                                            }
-                                            "assistant" => {
-                                                // 如果该轮包含工具调用，先将该轮的工具执行结果反显在 Assistant 之前
-                                                if let Some(turn_id) = &hist.turn_id {
-                                                    if let Some(trace) = trace_map.get(turn_id) {
-                                                        for tool in &trace.tool_activities {
-                                                            if tool.status != "planned" {
-                                                                let detail_preview = tool.arguments_text.as_deref().or(tool.result_text.as_deref());
-                                                                let formatted = format_tool_display(
-                                                                    &tool.name,
-                                                                    tool.display_name_zh.as_deref(),
-                                                                    detail_preview,
-                                                                    Some(&tool.status),
-                                                                );
-                                                                state.messages.push(ChatMessage {
-                                                                    role: MessageRole::ToolResult,
-                                                                    content: formatted,
-                                                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                                });
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                                state.messages.push(ChatMessage {
-                                                    role: MessageRole::Assistant,
-                                                    content: hist.content.clone(),
-                                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                });
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-
-                                    // 若 history 为空，再尝试 fallback 到 message_state
-                                    if state.messages.is_empty() {
-                                        for entry in runtime_view.message_state.messages {
-                                            match entry.role.as_str() {
-                                                "user" => {
-                                                    state.messages.push(ChatMessage {
-                                                        role: MessageRole::User,
-                                                        content: entry.content,
-                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                    });
-                                                }
-                                                "assistant" => {
-                                                    state.messages.push(ChatMessage {
-                                                        role: MessageRole::Assistant,
-                                                        content: entry.content,
-                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                    });
-                                                }
-                                                "tool" | "tool_call" | "tool_result" => {
-                                                    let display = format_tool_display(
-                                                        entry.tool_name.as_deref().unwrap_or("tool"),
-                                                        entry.display_name_zh.as_deref(),
-                                                        entry.detail.as_deref(),
-                                                        entry.status.as_deref(),
-                                                    );
-                                                    state.messages.push(ChatMessage {
-                                                        role: MessageRole::ToolResult,
-                                                        content: display,
-                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                    });
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-
-                                    state.scroll_offset = u32::MAX;
-                                    state.auto_scroll = true; // 确保加载完毕后消息贴底显示
+                                    state.reset_session_scope();
+                                    hydrate_state_from_session(&mut state, &control_plane, &chosen.id);
                                     state.mode = InteractionMode::Normal;
-                                    state.status_text = format!("Resumed {}", chosen.id);
                                 } else {
                                     state.cancel_session_selector();
                                 }
@@ -7942,7 +8171,8 @@ fn tui_event_loop(
     }
 
     // 终端恢复已统一由 run_tui 的 T2c 保证器执行（catch_unwind 外层）。
-    Ok(())
+    // 返回最终 session id：退出提示 `pony resume <id>` 必须指向**这一轮真实会话**。
+    Ok(state.session_id)
 }
 
 // wave-34：非交互 CLI 入口。`pony --version / --help / --doctor` 在不初始化终端
@@ -7950,6 +8180,8 @@ fn tui_event_loop(
 #[derive(Debug)]
 pub enum CliAction {
     RunTui,
+    /// `pony resume [<session-id>]`：恢复指定会话；`None` = 恢复最近一次会话。
+    ResumeTui(Option<String>),
     Version,
     Help,
     Doctor,
@@ -7960,6 +8192,13 @@ pub enum CliAction {
 pub fn parse_cli_action(args: &[String]) -> CliAction {
     match args.iter().next() {
         None => CliAction::RunTui,
+        Some(a) if a == "resume" => match args.get(1) {
+            None => CliAction::ResumeTui(None),
+            // 第二个位置参数必须是会话 id；`-` 开头说明用户把别的选项拼错了，直接报错，
+            // 避免把 `pony resume --foo` 当成「恢复名为 --foo 的会话」。
+            Some(id) if id.starts_with('-') => CliAction::Invalid(id.clone()),
+            Some(id) => CliAction::ResumeTui(Some(id.clone())),
+        },
         Some(a) if a == "--version" || a == "-V" => CliAction::Version,
         Some(a) if a == "--help" || a == "-h" => CliAction::Help,
         Some(a) if a == "--doctor" => CliAction::Doctor,
@@ -7968,6 +8207,39 @@ pub fn parse_cli_action(args: &[String]) -> CliAction {
         Some(_) => CliAction::RunTui,
     }
 }
+
+/// `pony resume [<id>]` 的解析结果。
+pub struct ResumeTarget {
+    pub session_id: String,
+    /// 该会话是否已有持久化记录（否则只是「沿用这个 id 开新会话」）。
+    pub existed: bool,
+}
+
+/// `pony resume [<id>]` 的目标解析：`None` 取最近会话；显式 id 一律接受。
+///
+/// 为什么显式 id 不做「必须存在」校验：退出提示里的 id 是复制粘贴来的，若用户当前会话
+/// 还没产生任何轮次（未落库），严格校验会让提示变成假承诺。这里改为「存在就恢复历史、
+/// 不存在就以该 id 开新会话」，并在 TUI 内给出可见说明。
+fn resolve_resume_target(requested: Option<&str>) -> Result<ResumeTarget, String> {
+    let sessions = SessionStore::new().list_sessions();
+    match requested {
+        Some(id) => Ok(ResumeTarget {
+            session_id: id.to_string(),
+            existed: sessions
+                .iter()
+                .any(|session| session.conversation_id == id),
+        }),
+        None => sessions
+            .first()
+            .map(|session| ResumeTarget {
+                session_id: session.conversation_id.clone(),
+                existed: true,
+            })
+            .ok_or_else(|| "当前没有可恢复的会话。请先运行 `pony` 开始一个新会话。".to_string()),
+    }
+}
+
+
 
 fn cli_version_string() -> String {
     let exe = std::env::current_exe()
@@ -7985,8 +8257,9 @@ fn cli_version_string() -> String {
 fn cli_help_string() -> String {
     format!(
         "pony {} — 交互式 TUI Agent\n\n\
-用法: pony [选项]\n\n\
+用法: pony [选项]\n       pony resume [<session-id>]   恢复会话（缺省 = 最近一次）\n\n\
 选项:\n  --version, -V   显示版本与二进制路径后退出\n  --help, -h      显示本帮助后退出\n  --doctor        终端环境自检（TTY/颜色/尺寸/locale/日志目录/PATH 冲突）\n\n\
+退出 TUI 后会打印 `pony resume <session-id>`，复制即可以同一会话继续。\n\n\
 交互键位:\n  Enter           发送输入\n  Alt+Enter       输入内换行\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  F2              切换鼠标捕获（默认开；关闭后可用鼠标选择文本）\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
         env!("CARGO_PKG_VERSION")
     )
@@ -8211,13 +8484,29 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        CliAction::ResumeTui(requested) => {
+            // 目标解析必须在进入 raw mode 之前完成：空库/无参场景的错误要可见，而不是空屏。
+            let resume_target = match resolve_resume_target(requested.as_deref()) {
+                Ok(target) => target,
+                Err(message) => {
+                    eprintln!("pony resume: {message}");
+                    std::process::exit(2);
+                }
+            };
+            let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+            if let Err(e) = run_tui(Some(resume_target)) {
+                eprintln!("TUI Error: {e}");
+                pony_agent_core::agent::otel::shutdown();
+                std::process::exit(1);
+            }
+        }
         CliAction::Invalid(arg) => {
-            eprintln!("pony: 未知参数 {arg}\n用法: pony [--version | --help | --doctor]");
+            eprintln!("pony: 未知参数 {arg}\n用法: pony [--version | --help | --doctor | resume [<session-id>]]");
             std::process::exit(2);
         }
         CliAction::RunTui => {
             let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
-            if let Err(e) = run_tui() {
+            if let Err(e) = run_tui(None) {
                 eprintln!("TUI Error: {e}");
                 // `process::exit` 不跑 Drop ⇒ 显式有界 shutdown，保证末批 span 不丢。
                 pony_agent_core::agent::otel::shutdown();
