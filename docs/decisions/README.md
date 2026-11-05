@@ -81,6 +81,7 @@
 - [0061 工具 span 采集脱敏截断的入参/结果预览](0061-tool-span-payload-previews.md)
 - [0062 TUI 退出还原与 `pony resume <session-id>` 续接入口](0062-tui-exit-restore-and-resume-entry.md)
 - [0063 TUI Ask 覆盖层与取消反馈的用户可见边界](0063-tui-ask-user-overlay-and-cancel-feedback.md)
+- [0064 TUI 会话韧性：DSML 折叠、错误摘要、中断检查点与退出回收](0064-tui-session-resilience.md)
 
 ### 已接替
 

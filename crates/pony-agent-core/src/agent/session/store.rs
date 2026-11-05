@@ -59,6 +59,36 @@ fn reject_stale_cursor_version(
     ))
 }
 
+/// wave-tui-session-resilience C5：中断轮次检查点的唯一持久化投影纯函数。
+/// 旧会话无检查点内容（空正文/空工具活动）⇒ `None`，读取方逐字回放既有历史。
+pub fn interrupted_turn_checkpoint_text(
+    prior_assistant_text: &str,
+    tool_activities: &[String],
+) -> Option<String> {
+    let text = prior_assistant_text.trim();
+    let tools: Vec<&str> = tool_activities
+        .iter()
+        .map(|activity| activity.trim())
+        .filter(|activity| !activity.is_empty())
+        .collect();
+    if text.is_empty() && tools.is_empty() {
+        return None;
+    }
+    let mut checkpoint = String::from("[中断轮次检查点]");
+    if !text.is_empty() {
+        checkpoint.push('\n');
+        checkpoint.push_str(text);
+    }
+    if !tools.is_empty() {
+        checkpoint.push_str("\n已执行的工具步骤：");
+        for tool in tools {
+            checkpoint.push_str("\n- ");
+            checkpoint.push_str(tool);
+        }
+    }
+    Some(checkpoint)
+}
+
 pub struct SessionStore {
     pub(super) sessions: SessionMap,
     pub(super) attachment_assets: AttachmentAssetMap,

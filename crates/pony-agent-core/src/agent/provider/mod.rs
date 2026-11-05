@@ -4320,6 +4320,47 @@ fn extract_provider_error_detail(err: &str) -> String {
     preview_text(err, 240)
 }
 
+/// wave-tui-session-resilience C1：DSML 工具调用协议原文的**唯一**清洗入口。
+/// 二元隔离在 SSE 解析层完成，流式增量、最终累计文本与历史回放共用同一语义；
+/// 纯函数、不新增依赖、不误伤 markdown 代码块 / 普通含尖括号正文。
+const DSML_CALLS_OPEN: &str = "<｜｜DSML｜｜ calls>";
+const DSML_CALLS_CLOSE: &str = "</｜｜DSML｜｜ calls>";
+const DSML_PLACEHOLDER: &str = "［工具调用］";
+
+pub fn sanitize_dsml_protocol_text(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    let mut folded = false;
+    while let Some(relative) = text[cursor..].find(DSML_CALLS_OPEN) {
+        let open = cursor + relative;
+        cleaned.push_str(&text[cursor..open]);
+        let after_open = open + DSML_CALLS_OPEN.len();
+        cursor = match text[after_open..].find(DSML_CALLS_CLOSE) {
+            Some(relative_close) => after_open + relative_close + DSML_CALLS_CLOSE.len(),
+            None => text.len(),
+        };
+        if !folded {
+            cleaned.push_str(DSML_PLACEHOLDER);
+            folded = true;
+        }
+    }
+    cleaned.push_str(&text[cursor..]);
+    if cleaned.contains("｜DSML｜｜") {
+        let mut filtered = String::with_capacity(cleaned.len());
+        for line in cleaned.split_inclusive('\n') {
+            if line.contains("｜DSML｜｜") {
+                continue;
+            }
+            filtered.push_str(line);
+        }
+        cleaned = filtered;
+        if !cleaned.contains(DSML_PLACEHOLDER) {
+            cleaned.push_str(DSML_PLACEHOLDER);
+        }
+    }
+    cleaned
+}
+
 /// PA-100：重试作用域。rate-limit 长退避只对 followup 生效——对话首跳
 /// （decision/decision_stream）保持短退避快败进既有 fallback，避免用户在看到
 /// 任何输出前先白等一分钟。

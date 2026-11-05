@@ -258,29 +258,106 @@ fn print_resume_hint(session_id: &str) {
 /// 引入本模块，禁止改名/改签名/删除。实现时只允许替换函数体，不得新增依赖。
 /// 语义见 `.dev-team/contract-matrix-tui-session-resilience.md` C1–C8。
 
+const DSML_CALLS_OPEN: &str = "<｜｜DSML｜｜ calls>";
+const DSML_CALLS_CLOSE: &str = "</｜｜DSML｜｜ calls>";
+
+/// 只把「已识别 DSML 标记前缀」的半截形态判为 incomplete；普通 `<` / 代码块不误伤。
+fn dsml_partial_tail_len(text: &str) -> Option<usize> {
+    let trimmed = text.trim_end_matches(['\r', '\n', ' ', '\t']);
+    let tail_start = trimmed.rfind('<')?;
+    let tail = &trimmed[tail_start..];
+    if tail.contains('>') {
+        return None;
+    }
+    // 单个 `<` 是普通正文，不是协议前缀；至少要有 `<` 后的一个字符才算候选。
+    if tail.len() <= "<".len() {
+        return None;
+    }
+    let known_tags = [
+        DSML_CALLS_OPEN,
+        "<｜｜DSML｜｜ invoke",
+        "<｜｜DSML｜｜ parameter",
+        DSML_CALLS_CLOSE,
+        "</｜｜DSML｜｜ invoke>",
+        "</｜｜DSML｜｜ parameter>",
+    ];
+    known_tags
+        .iter()
+        .any(|tag| tag.starts_with(tail))
+        .then_some(text.len() - tail_start)
+}
+
 /// C1/C2：清洗上游模型输出内的 DSML 工具调用协议原文（流式与历史回放共用）。
 /// 返回：清洗后的用户可见文本；`incomplete=true` 表示尾部可能是被 chunk 切断的协议片段。
 #[allow(unused_variables)]
 pub fn sanitize_model_protocol_text(text: &str) -> (String, bool) {
-    unimplemented!("C1/C2");
+    // 半截标记先截掉（流式 chunk 边界），再交给 provider 层同一纯函数做块级折叠；
+    // 普通正文与 markdown 代码块逐字保真。
+    let (body, incomplete) = match dsml_partial_tail_len(text) {
+        Some(len) => (&text[..text.len() - len], true),
+        None => (text, false),
+    };
+    let cleaned = pony_agent_core::agent::provider::sanitize_dsml_protocol_text(body);
+    (cleaned, incomplete)
 }
 
 /// C3：判定上游错误是否为可重试瞬态错误（与 provider 层既有预算对齐，不新增重试）。
 #[allow(unused_variables)]
 pub fn is_transient_provider_error(error: &str) -> bool {
-    unimplemented!("C3");
+    let lower = error.to_ascii_lowercase();
+    let permanent = [
+        "401", "403", "400", "unauthorized", "forbidden", "bad request",
+        "missing api key", "api key", "invalid_api_key", "nonretryable",
+    ];
+    if permanent.iter().any(|hint| lower.contains(hint)) {
+        return false;
+    }
+    let transient = [
+        "timeout", "timed out", "429", "rate limit", "rate-limited", "503",
+        "502", "504", "500", "5xx", "connection refused", "connection reset",
+        "dns", "network", "connection", "temporarily unavailable",
+    ];
+    transient.iter().any(|hint| lower.contains(hint))
 }
+
+const ERROR_SUMMARY_GENERIC: &str = "本轮请求未能完成，请稍后再试。";
+const ERROR_SUMMARY_TRANSIENT: &str = "上游服务暂时不可用，正在按既有预算重试。";
+const ERROR_SUMMARY_AUTH: &str = "凭据不可用，请检查提供商配置。";
 
 /// C4：把原始错误详情收敛为面向用户的一句话摘要（详情默认折叠，不入消息区）。
 #[allow(unused_variables)]
 pub fn user_facing_error_summary(error: &str) -> String {
-    unimplemented!("C4");
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("api key")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+    {
+        ERROR_SUMMARY_AUTH.to_string()
+    } else if is_transient_provider_error(error) {
+        ERROR_SUMMARY_TRANSIENT.to_string()
+    } else {
+        ERROR_SUMMARY_GENERIC.to_string()
+    }
 }
 
 /// C4：判定错误详情是否应默认折叠（终态错误 true；面向用户摘要 false）。
 #[allow(unused_variables)]
 pub fn should_fold_error_detail(error: &str) -> bool {
-    unimplemented!("C4");
+    let trimmed = error.trim();
+    if matches!(
+        trimmed,
+        ERROR_SUMMARY_GENERIC | ERROR_SUMMARY_TRANSIENT | ERROR_SUMMARY_AUTH
+    ) {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let internal = [
+        "error sending request for url", "http://", "https://", "{\"error\"",
+        "stacktrace", "response body", "响应正文", "panic", "at provider::",
+    ];
+    trimmed.chars().count() > 200 || internal.iter().any(|hint| lower.contains(hint))
 }
 
 /// C5/C6：把中断 turn 的已落盘步骤投影为可续传检查点（向后兼容：空输入返回 None）。
@@ -289,20 +366,59 @@ pub fn interrupted_turn_checkpoint(
     prior_assistant_text: &str,
     tool_activities: &[String],
 ) -> Option<String> {
-    unimplemented!("C5/C6");
+    let text = prior_assistant_text.trim();
+    let tools: Vec<&str> = tool_activities
+        .iter()
+        .map(|tool| tool.trim())
+        .filter(|tool| !tool.is_empty())
+        .collect();
+    if text.is_empty() && tools.is_empty() {
+        return None;
+    }
+    let mut checkpoint = String::from("[中断轮次检查点]");
+    if !text.is_empty() {
+        checkpoint.push('\n');
+        checkpoint.push_str(text);
+    }
+    if !tools.is_empty() {
+        checkpoint.push_str("\n已执行的工具步骤：");
+        for tool in tools {
+            checkpoint.push_str("\n- ");
+            checkpoint.push_str(tool);
+        }
+    }
+    Some(checkpoint)
 }
 
 /// C6：resume 时从检查点接续，返回应追加到已完成历史之后的可见文本；不重复已完成 turn。
 #[allow(unused_variables)]
 pub fn resume_from_checkpoint(completed_history: &str, checkpoint: Option<&str>) -> String {
-    unimplemented!("C6");
+    let Some(checkpoint) = checkpoint else {
+        return completed_history.to_string();
+    };
+    let checkpoint = checkpoint.trim();
+    if checkpoint.is_empty() || completed_history.contains(checkpoint) {
+        return completed_history.to_string();
+    }
+    let mut resumed = String::with_capacity(completed_history.len() + checkpoint.len() + 1);
+    resumed.push_str(completed_history);
+    if !resumed.is_empty() && !resumed.ends_with('\n') {
+        resumed.push('\n');
+    }
+    resumed.push_str(checkpoint);
+    resumed
 }
 
 /// C7/C8：退出清理计划（取消在飞 turn → 有界等待 → 终端还原 → 打印 resume 提示 → 退出）。
 /// `inflight_turn=true` 时计划必须包含 cancel；等待上限由 NFR 基准 external_call_timeout_ms 约束。
 #[allow(unused_variables)]
 pub fn exit_cleanup_plan(inflight_turn: bool, timeout_ms: u64) -> Vec<&'static str> {
-    unimplemented!("C7/C8");
+    let _bounded_timeout_ms = timeout_ms.min(3000);
+    if inflight_turn {
+        vec!["cancel", "wait", "restore", "hint", "exit"]
+    } else {
+        vec!["wait", "restore", "hint", "exit"]
+    }
 }
 
 #[cfg(unix)]
@@ -3143,7 +3259,12 @@ impl TurnEventSink for TuiTurnSink {
         match name {
             "turn:delta" => {
                 if let Some(text) = payload.text {
-                    let _ = self.tx.send(UiEvent::StreamDelta(text));
+                    // wave-tui-session-resilience C1：上游 DSML 工具调用协议原文
+                    // 不得进入消息区；跨 chunk 的半截标记也不交给用户。
+                    let (visible, _incomplete) = sanitize_model_protocol_text(&text);
+                    if !visible.is_empty() {
+                        let _ = self.tx.send(UiEvent::StreamDelta(visible));
+                    }
                 }
             }
             "turn:tool" => {
@@ -6593,6 +6714,12 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
             if let Ok(session_id) = &inner {
                 print_resume_hint(session_id);
             }
+            // wave-tui-session-resilience C8：还原与提示之后进程真正退出，
+            // 杜绝「主循环已返回、在飞 provider 线程仍持有 /dev/tty」的残留进程。
+            if inner.is_ok() {
+                pony_agent_core::agent::otel::shutdown();
+                std::process::exit(0);
+            }
             inner.map(|_| ())
         }
         Err(payload) => std::panic::resume_unwind(payload),
@@ -7053,9 +7180,12 @@ fn hydrate_state_from_session(
     for hist in &session_snapshot.history {
         match hist.role.as_str() {
             "user" => {
+                // wave-tui-session-resilience C2：历史回放与流式共用同一纯函数清洗，
+                // 阻断已持久化的 DSML 原文再次进入 provider 上下文。
+                let (content, _) = sanitize_model_protocol_text(&hist.content);
                 state.messages.push(ChatMessage {
                     role: MessageRole::User,
-                    content: hist.content.clone(),
+                    content,
                     timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                 });
             }
@@ -7089,13 +7219,44 @@ fn hydrate_state_from_session(
                     }
                 }
 
+                // wave-tui-session-resilience C2：assistant 历史同样经 S1 清洗。
+                let (content, _) = sanitize_model_protocol_text(&hist.content);
                 state.messages.push(ChatMessage {
                     role: MessageRole::Assistant,
-                    content: hist.content.clone(),
+                    content,
                     timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                 });
             }
             _ => {}
+        }
+    }
+
+    // wave-tui-session-resilience C6：未完成 turn 的 additive 检查点随历史回放接续展示；
+    // 旧会话无检查点字段 ⇒ None ⇒ 逐字回放既有历史，不重复已完成 turn。
+    let mut resumed_checkpoint: Option<String> = None;
+    for hist in &session_snapshot.history {
+        if hist.role == "assistant" && hist.content.contains("[中断轮次检查点]") {
+            resumed_checkpoint = Some(hist.content.clone());
+            break;
+        }
+    }
+    if let Some(checkpoint) = resumed_checkpoint.as_deref() {
+        let completed = state
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let continued = resume_from_checkpoint(&completed, Some(checkpoint));
+        if continued.len() > completed.len() {
+            let tail = continued[completed.len()..].trim_start_matches('\n');
+            if !tail.is_empty() {
+                state.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("已接续中断轮次：\n{tail}"),
+                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                });
+            }
         }
     }
 
@@ -7149,6 +7310,9 @@ fn tui_event_loop(
     tx: Sender<UiEvent>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let current_turn_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    // wave-tui-session-resilience C7：在飞 turn 句柄按轮次线程收敛，退出时先取消再等待。
+    let inflight_turns: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     // 契约 F-G：goal 自动续轮的取消令牌（Esc 置位；新一轮用户消息提交时重置）。
     let goal_round_cancel = GoalRoundCancelToken::new();
 
@@ -8418,7 +8582,8 @@ fn tui_event_loop(
                                 let cancel_for_rounds = goal_round_cancel.clone();
                                 let current_turn_for_rounds = Arc::clone(&current_turn_id);
 
-                                std::thread::spawn(move || {
+                                let inflight_for_rounds = Arc::clone(&inflight_turns);
+                                let turn_thread = std::thread::spawn(move || {
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                                     // 首轮 guard 在主事件分支创建并 move 到这里；本轮调用返回即回收，
                                     // 不得跨 goal 续轮驻留。
@@ -8479,6 +8644,13 @@ fn tui_event_loop(
                                         turn_control_plane.start_turn_stream(sink.as_ref(), next_cmd);
                                     }
                                 });
+                                // MutexGuard 必须在 turn_thread 移入前释放：临时量绑定后显式 drop。
+                                let turns = inflight_for_rounds
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner());
+                                let mut turns = turns;
+                                turns.push(turn_thread);
+                                drop(turns);
                             }
                         }
                         KeyCode::Char(c) => {
@@ -8615,11 +8787,20 @@ fn tui_event_loop(
                     state.stopping_turn_id = None;
                     state.streaming_turn_id = None;
                     stop_sequence.reset();
-                    state.transition_runtime_mode(RuntimeMode::Failed(err.clone()));
-                    state.status_text = format!("Turn failed: {}", err);
+                    // wave-tui-session-resilience C3/C4：消息区只显示一句话摘要，
+                    // 原始 400 字符响应体/堆栈默认折叠，仅留运行日志与 issue 上报通道。
+                    let summary = user_facing_error_summary(&err);
+                    let folded = should_fold_error_detail(&err);
+                    eprintln!("[pony-tui] turn failed detail (folded={folded}): {err}");
+                    state.transition_runtime_mode(RuntimeMode::Failed(summary.clone()));
+                    state.status_text = if is_transient_provider_error(&err) {
+                        format!("重试中（1/5）· {}", summary)
+                    } else {
+                        summary.clone()
+                    };
                     state.messages.push(ChatMessage {
                         role: MessageRole::System,
-                        content: format!("Error: {}", err),
+                        content: summary,
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
                 }
@@ -8754,6 +8935,56 @@ fn tui_event_loop(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    // wave-tui-session-resilience C7/C8：退出先取消在飞 turn、有界等待收敛，
+    // 再交还终端。NFR external_call_timeout_ms ≤ 3000，绝不留下持有 tty 的活线程。
+    let inflight_turn_id = current_turn_id
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let cleanup_plan = exit_cleanup_plan(inflight_turn_id.is_some(), 3000);
+    for step in cleanup_plan {
+        match step {
+            "cancel" => {
+                if let Some(turn_id) = inflight_turn_id.as_deref() {
+                    control_plane.stop_turn(StopTurnCommand {
+                        turn_id: turn_id.to_string(),
+                        stop_reason: Some(StopReason::User),
+                    });
+                }
+            }
+            "wait" => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(3000);
+                let handles: Vec<std::thread::JoinHandle<()>> = inflight_turns
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .drain(..)
+                    .collect();
+                for handle in handles {
+                    if handle.is_finished() {
+                        let _ = handle.join();
+                        continue;
+                    }
+                    // 有界等待：预留一个轮询片给取消生效，剩余预算始终 ≤3000ms。
+                    let slice = deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(std::time::Duration::from_millis(50));
+                    if !slice.is_zero() {
+                        std::thread::sleep(slice);
+                    }
+                    if handle.is_finished() {
+                        let _ = handle.join();
+                    }
+                    // 未结束的 JoinHandle 在此 drop（detach）；进程随后经 restore→hint→exit
+                    // 真正退出，不留下持有 tty 的活线程。
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

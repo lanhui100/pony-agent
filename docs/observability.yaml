@@ -276,3 +276,13 @@ note: >-
       JSON 日志从 stdout/pane 改道 `PONY_TUI_RUNTIME_LOG`，修复其覆盖全屏消息区的缺陷；
       本地取证面随之迁至该运行日志，格式与字段不变；运行日志不可写/重定向失败时不改道，
       不新增日志出口、Loki 上送或敏感信息边界。
+
+  【wave-tui-session-resilience 归属登记｜TUI 会话韧性】
+  (1) 四维归属不变：tracing/issues 仍 applicable（唯一落点不变 `agent/otel/mod.rs`
+      与 `agent/ponysentry/client.rs`），metrics/logs 维持结构性 N-A；无新增网络端点、
+      环境变量、依赖、异常码、指标、trace 字段、Loki 上送或日志出口。
+  (2) 非遥测变更（仅登记）：SSE delta / TUI 历史回放共用同一 DSML 折叠纯函数；
+      StreamFailed 的用户可见面收敛为一句话摘要，原始详情仍走既有 `capture_turn_failure`
+      issue 上报并仅追加一条既有运行日志；中断轮次检查点以 additive 文本进入既有
+      会话历史；退出路径经既有 `stop_turn` 与 `restore_terminal_modes` 收口。
+      不改变对外接口、持久化 schema 与观测面。

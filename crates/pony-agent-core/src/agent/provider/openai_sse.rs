@@ -62,6 +62,10 @@ impl OpenAiSseAccumulator {
         let delta_text = delta
             .and_then(extract_openai_delta_content_text)
             .unwrap_or_default();
+
+        // wave-tui-session-resilience C1：DSML 协议原文在解析层即被折叠，
+        // 流式增量与最终累计文本都不再携带原始工具调用协议字面量。
+        let delta_text = super::sanitize_dsml_protocol_text(&delta_text);
         let delta_reasoning_value = delta.and_then(extract_openai_delta_reasoning_value);
         let delta_reasoning = delta
             .and_then(extract_openai_delta_reasoning_content)
@@ -151,7 +155,7 @@ impl OpenAiSseAccumulator {
         };
 
         Ok(OpenAiStreamMessage {
-            output_text,
+            output_text: super::sanitize_dsml_protocol_text(&output_text),
             tool_calls,
             tool_call,
             reasoning_content: if reasoning_content.trim().is_empty() {
@@ -300,6 +304,10 @@ where
         let delta_text = delta
             .and_then(extract_openai_delta_content_text)
             .unwrap_or_default();
+
+        // wave-tui-session-resilience C1：DSML 协议原文在解析层即被折叠，
+        // 流式增量与最终累计文本都不再携带原始工具调用协议字面量。
+        let delta_text = super::sanitize_dsml_protocol_text(&delta_text);
         let delta_reasoning_value = delta.and_then(extract_openai_delta_reasoning_value);
         let delta_reasoning = delta
             .and_then(extract_openai_delta_reasoning_content)
@@ -349,7 +357,7 @@ where
     };
 
     Ok(OpenAiStreamMessage {
-        output_text: combined,
+        output_text: super::sanitize_dsml_protocol_text(&combined),
         // 纯文本收集器（仅测试用）：不解析 tool_calls，故整批恒为空。
         tool_calls: Vec::new(),
         tool_call: None,

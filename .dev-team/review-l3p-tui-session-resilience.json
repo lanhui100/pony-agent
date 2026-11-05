@@ -1,0 +1,86 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "lead",
+    "session_id": "session-60e8e1c0-ca76-439e-b345-582e326c6d7f",
+    "fresh_context": true
+  },
+  "executed_by": "lead",
+  "reviewed_commit": "4f98062eb4490e5314c5c13b0dffa48efd006e0b",
+  "attestation": {
+    "self_signed": true,
+    "degraded": true,
+    "reason": "3 L3 subagents stalled; Lead double-review on machine facts; no independent PASS claimed"
+  },
+  "audited_scopes": [
+    ".dev-team/contract-matrix-tui-session-resilience.md",
+    ".dev-team/green-receipt-tui-session-resilience.md",
+    ".dev-team/review-join-tui-session-resilience.json",
+    ".dev-team/review-l3a-tui-session-resilience.json",
+    ".dev-team/review-l3b-tui-session-resilience.json",
+    ".dev-team/review-l3p-tui-session-resilience.json",
+    ".dev-team/review-plan-tui-session-resilience.json",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/session/mod.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "docs/decisions/0064-tui-session-resilience.md",
+    "docs/decisions/README.md",
+    "docs/observability.yaml",
+    "docs/release/evidence/wave-tui-session-resilience/",
+    "docs/release/evidence/wave-tui-session-resilience/pty-smoke-lead-adjudication.json",
+    "docs/release/evidence/wave-tui-session-resilience/pty-smoke-receipt.json"
+  ],
+  "findings": [],
+  "verdict": "DEGRADED",
+  "six_questions": [
+    {
+      "q": "外部调用超时",
+      "baseline_key": "external_call_timeout_ms<=3000",
+      "code_evidence": "bin/tui.rs exit_cleanup_plan(...,3000) + wait deadline 3000ms; provider retry budget unchanged (5/30000ms)",
+      "verdict": "PASS",
+      "machine_receipt": "cargo test tui_session_resilience_acceptance AT3 timeout 9000 clamped"
+    },
+    {
+      "q": "日志规范与防吞",
+      "baseline_key": "logging.format=json,trace_id",
+      "code_evidence": "StreamFailed raw err only eprintln to existing PONY_TUI_RUNTIME_LOG; capture_turn_failure unchanged",
+      "verdict": "PASS",
+      "machine_receipt": "audit-diff --base 7a5269ed EXIT 0; check-declaration EXIT 0"
+    },
+    {
+      "q": "资源泄漏防御",
+      "baseline_key": "resource_release[3]",
+      "code_evidence": "stop_turn + bounded join + TerminalGuard.restore + otel::shutdown + process::exit(0); signal/panic hooks unchanged",
+      "verdict": "PASS",
+      "machine_receipt": "PTY smoke quit+sigterm: process gone, ESC[?1049l emitted, T2c logged"
+    },
+    {
+      "q": "并发与幂等",
+      "baseline_key": "concurrency_lock",
+      "code_evidence": "SHUTDOWN_REQUESTED AtomicBool single exit writer; MutexGuard released before JoinHandle move; resume_from_checkpoint dedups",
+      "verdict": "PASS",
+      "machine_receipt": "AT2 8-round Barrier deterministic; AT3 4-round race; RUSTFLAGS=-D warnings cargo check EXIT 0"
+    },
+    {
+      "q": "配置与自检",
+      "baseline_key": "config/self-check",
+      "code_evidence": "no new env var/config/dependency; pony --doctor unchanged; ADR 0064 + observability registration",
+      "verdict": "PASS",
+      "machine_receipt": "cargo build --bin pony EXIT 0; ADR status grep -L empty"
+    },
+    {
+      "q": "契约兼容性",
+      "baseline_key": "contract change registry",
+      "code_evidence": "additive checkpoint text into existing history; no schema field/column/migration; 7 new pub pure functions are additive; pony resume shape unchanged",
+      "verdict": "PASS",
+      "machine_receipt": "tui_resume_cli 8/8; tui_overlay_cancel_acceptance 19/19; tui_terminal_restore 8/8"
+    }
+  ],
+  "non_machine_items": [
+    "PTY termios readback after exit: pts destroyed by tmux, cannot read stty -F; raw byte stream proves restore sequence, marked DEGRADED not PASS"
+  ]
+}

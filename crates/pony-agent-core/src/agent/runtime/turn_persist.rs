@@ -547,11 +547,20 @@ impl AgentRuntime {
         provider_meta: Option<&ProviderEventMeta>,
         attachments: Vec<SessionAttachment>,
         workspace_mode: Option<&str>,
+        prior_assistant_text: &str,
+        tool_activities: Vec<String>,
     ) -> PersistedTurnOutcome {
+        // wave-tui-session-resilience C5：中断轮次把已落盘正文 + 工具步骤一并投影为
+        // additive 检查点；旧会话无步骤时回落既有占位文案，读取方按历史文本回放。
+        let assistant_message = crate::agent::session::interrupted_turn_checkpoint_text(
+            prior_assistant_text,
+            &tool_activities,
+        )
+        .unwrap_or_else(|| CANCELLED_TURN_MESSAGE.to_string());
         self.persist_turn_outcome(
             session_id,
             user_message,
-            CANCELLED_TURN_MESSAGE,
+            &assistant_message,
             provider_meta
                 .map(|meta| meta.provider_name.as_str())
                 .unwrap_or("runtime"),
