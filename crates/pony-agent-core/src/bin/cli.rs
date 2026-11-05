@@ -1009,8 +1009,8 @@ fn print_usage(format: OutputFormat) {
 /// CLI/TUI 的运行日志落盘路径（与 Tauri 的 `<app_data_dir>/logs/pony-agent.log` 同口径）。
 ///
 /// wave-59（契约 C1）：`jsonl`/`sse` 模式下 stdout 只承载事件，故本装配点先把 JSON
-/// 日志的缺省输出目标改道 stderr（`otel::log::set_stderr_output`）——text 模式与其它宿主
-/// （TUI/Tauri）行为逐字节不变。
+/// 日志的缺省输出目标改道 stderr（`otel::log::set_stderr_output`）——text 模式行为不变；
+/// TUI 在自己的 stderr 成功重定向到运行日志后也调用同一开关（ADR 0063），Tauri 不调用。
 ///
 /// 取舍：**统一**落到 `logs/pony-agent.log`，不复用 TUI 既有的 `~/.pony-agent/tui-logs/` ——
 /// 后者是会话调试产物（整屏 dump），把结构化 JSON 运行日志混进去会让取证面变脏。

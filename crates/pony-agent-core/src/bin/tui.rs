@@ -2693,6 +2693,19 @@ pub fn format_tool_display(
     title
 }
 
+/// 工具详情兜底：只接受人类可读纯文本；结构化 JSON（对象/数组）一律不回显。
+fn plain_text_detail(arguments_text: Option<&str>, result_text: Option<&str>) -> Option<String> {
+    let detail = arguments_text.or(result_text)?.trim();
+    if detail.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(detail) {
+        Ok(serde_json::Value::Object(_)) | Ok(serde_json::Value::Array(_)) => None,
+        Ok(serde_json::Value::String(text)) => Some(text),
+        _ => Some(detail.to_string()),
+    }
+}
+
 /// 历史恢复时的工具摘要选择：优先面向用户的 `description`，并识别「描述只是工具名」
 /// 的占位形态；交互 Ask 的结构化参数/结果不得作为摘要反显。
 fn is_interactive_ask_tool(name: &str, canonical_name: Option<&str>) -> bool {
@@ -2706,7 +2719,7 @@ fn is_interactive_ask_tool(name: &str, canonical_name: Option<&str>) -> bool {
     )
 }
 
-fn history_tool_detail(
+pub fn history_tool_detail(
     name: &str,
     display_zh: Option<&str>,
     canonical_name: Option<&str>,
@@ -2741,13 +2754,10 @@ fn history_tool_detail(
         return Some(summary);
     }
     if !description.is_empty() {
-        return Some(description.to_string());
+        // 占位描述只是工具名：宁可不重复展示，也不把结构化参数反显为摘要。
+        return None;
     }
-    arguments_text
-        .or(result_text)
-        .map(str::trim)
-        .filter(|detail| !detail.is_empty())
-        .map(str::to_string)
+    plain_text_detail(arguments_text, result_text)
 }
 
 pub fn render_markdown_line(line: &str) -> Vec<Span<'static>> {
@@ -3088,9 +3098,12 @@ impl TurnEventSink for TuiTurnSink {
                     if let Some(act) = activities.last() {
                         let is_running = act.status == "running" || act.status == "planned";
                         let desc_text = if !act.description.trim().is_empty() {
-                            Some(act.description.trim())
+                            Some(act.description.trim().to_string())
                         } else {
-                            act.arguments_text.as_deref().or(act.result_text.as_deref())
+                            plain_text_detail(
+                                act.arguments_text.as_deref(),
+                                act.result_text.as_deref(),
+                            )
                         };
                         let short_desc = desc_text.and_then(|d| {
                             let t = d.trim();
@@ -3146,7 +3159,11 @@ impl TurnEventSink for TuiTurnSink {
                         let desc = if !act.description.trim().is_empty() {
                             act.description.clone()
                         } else {
-                            act.result_text.clone().unwrap_or_default()
+                            plain_text_detail(
+                                act.arguments_text.as_deref(),
+                                act.result_text.as_deref(),
+                            )
+                            .unwrap_or_default()
                         };
                         (
                             act.name.clone(),
@@ -6408,6 +6425,7 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    let mut stderr_redirected = false;
     #[cfg(unix)]
     if let Some(path) = runtime_log_path.as_ref() {
         if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -6416,11 +6434,14 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
             unsafe {
                 libc::dup2(fd, libc::STDERR_FILENO);
             }
+            stderr_redirected = true;
         }
     }
     // 结构化 JSON 日志缺省写 stdout；全屏 TUI 下会把内部协议日志直接盖到消息区。
-    // stderr 已重定向到运行日志，故统一改道 stderr，保留取证能力且不污染界面。
-    pony_agent_core::agent::otel::log::set_stderr_output(true);
+    // 仅在 stderr 已成功重定向到运行日志后才改道，避免无落点时把日志赶向可见终端。
+    if stderr_redirected {
+        pony_agent_core::agent::otel::log::set_stderr_output(true);
+    }
 
     // 契约 F-D 加固：还原通道（termios 快照 + /dev/tty 写句柄）必须在 raw mode 生效前就绪；
     // 信号接管也要提前——启动期（加载 SQLite / 构建控制面，数百毫秒级）收到 SIGHUP 时，
@@ -6545,6 +6566,7 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    let mut stderr_redirected = false;
     #[cfg(unix)]
     if let Some(path) = runtime_log_path.as_ref() {
         if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -6553,10 +6575,13 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
             unsafe {
                 libc::dup2(fd, libc::STDERR_FILENO);
             }
+            stderr_redirected = true;
         }
     }
-    // 与 run_tui 同一收口：JSON 日志改道已重定向的 stderr，严禁污染备用屏。
-    pony_agent_core::agent::otel::log::set_stderr_output(true);
+    // 与 run_tui 同一收口：仅在 stderr 已落盘时改道 JSON 日志，严禁污染备用屏。
+    if stderr_redirected {
+        pony_agent_core::agent::otel::log::set_stderr_output(true);
+    }
 
     // 契约 F-D 加固（与 run_tui 同一闭合）：还原通道先于 raw mode 就绪 + panic 也还原。
     // 演示入口不接管信号（其循环不查 SHUTDOWN_REQUESTED，接管会把 Ctrl-C 吞掉）。
@@ -7293,7 +7318,13 @@ fn tui_event_loop(
                 }
                 UiEvent::InputMouse(mouse) => {
                     use crossterm::event::{MouseButton, MouseEventKind};
-                    if let Some(chat_rect) = state.last_chat_rect {
+                    if state.mode == InteractionMode::AskUserQuestion {
+                        // Ask 覆盖正文下部；禁止选中被面板遮住的隐藏历史行。
+                        if state.mouse_selection.active || state.mouse_selection.anchor.is_some() {
+                            state.mouse_selection.clear();
+                            dirty = true;
+                        }
+                    } else if let Some(chat_rect) = state.last_chat_rect {
                         let x = mouse.column;
                         let y = mouse.row;
                         let in_chat = x >= chat_rect.x
@@ -8336,8 +8367,9 @@ fn tui_event_loop(
 
                                 std::thread::spawn(move || {
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
-                                    // 首轮 guard 在主事件分支创建并 move 到这里；goal 续轮各自成对注册。
-                                    let _initial_turn_sink_guard = _turn_sink_guard;
+                                    // 首轮 guard 在主事件分支创建并 move 到这里；本轮调用返回即回收，
+                                    // 不得跨 goal 续轮驻留。
+                                    let initial_turn_sink_guard = _turn_sink_guard;
                                     let session_id = turn_input
                                         .session_id
                                         .clone()
@@ -8347,6 +8379,7 @@ fn tui_event_loop(
                                         input: turn_input.clone(),
                                     };
                                     turn_control_plane.start_turn_stream(sink.as_ref(), cmd);
+                                    drop(initial_turn_sink_guard);
 
                                     let mut consecutive: u32 = 0;
                                     // 契约 F-G①：每轮开始前检查取消令牌（Esc）与预算，二者任一即停。

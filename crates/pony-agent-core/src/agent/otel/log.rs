@@ -143,7 +143,8 @@ static LOG_TO_STDERR: AtomicBool = AtomicBool::new(false);
 
 /// 把 JSON 日志行的缺省输出目标从 stdout 改道 stderr（幂等）。调用方：无头 CLI 在
 /// `--output-format jsonl|sse` 下必须让 stdout 只承载结构化事件（wave-59 契约 C1）；
-/// 落盘 sink 不受影响，TUI/Tauri/测试不调用 ⇒ 默认行为不变。
+/// TUI 在 stderr 已成功重定向到运行日志后调用，避免内部 JSON 覆盖全屏消息区；
+/// 落盘 sink 不受影响，默认值仍为 stdout。
 pub fn set_stderr_output(enabled: bool) {
     LOG_TO_STDERR.store(enabled, Ordering::SeqCst);
 }
