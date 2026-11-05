@@ -1,0 +1,29 @@
+{
+  "status": "FAILED",
+  "command": "cargo test -p pony-agent-core --test tui_session_resilience_l3b",
+  "overall_exit_code": 101,
+  "failures": [
+    {
+      "case": "L3B-A01",
+      "exit_code": 101,
+      "failure_class": null
+    },
+    {
+      "case": "L3B-A02",
+      "exit_code": 101,
+      "failure_class": null
+    },
+    {
+      "case": "L3B-A03",
+      "exit_code": 101,
+      "failure_class": null
+    },
+    {
+      "case": "L3B-A04",
+      "exit_code": 101,
+      "failure_class": null
+    }
+  ],
+  "error": "4 native assert!/assert_eq! failures; 0 compile errors; 0 harness panics",
+  "source": ".dev-team/red-phase-tui-l3b.json"
+}
