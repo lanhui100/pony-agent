@@ -653,7 +653,12 @@ pub(super) struct ConsecutiveFailureTracker {
 /// Match the dispatcher's persisted `PendingControlRequest` to the originating tool call. The
 /// request's `call_id` is the dispatch call id the executor persisted, which equals the original
 /// assistant tool-call id when one was supplied; a missing call id falls back to the most recent
-/// `Interaction` request (the Ask path).
+/// pending request, **Approval and Interaction alike**.
+///
+/// 契约 C6（W1）：旧实现无 `call_id` 时只回退匹配 `Interaction`（Ask 路径），需要审批的工具调用
+/// 在恢复回合时永远拿不到待审批请求（`pending_request=None` ⇒ 用户看到一条无法恢复的挂起）。
+/// 现在回退集合 = 所有 `Pending` 状态的 `Approval` / `Interaction`，多条时取“最新”一条：
+/// `expires_at_ms` 最大者（= 最晚登记/最晚过期），仍并列则取数组中靠后的一条。
 pub(super) fn match_pending_control_request<'a>(
     requests: &'a [PendingControlRequest],
     tool_call: &ToolCall,
@@ -669,9 +674,13 @@ pub(super) fn match_pending_control_request<'a>(
         .iter()
         .filter(|request| {
             request.state == PendingControlRequestState::Pending
-                && request.request_kind == PendingControlRequestKind::Interaction
+                && matches!(
+                    request.request_kind,
+                    PendingControlRequestKind::Approval | PendingControlRequestKind::Interaction
+                )
         })
-        .last()
+        // `max_by_key` 在并列时返回**最后**一个最大值 ⇒ 同 `expires_at_ms` 时按数组顺序取最新一条。
+        .max_by_key(|request| request.expires_at_ms)
 }
 
 impl StreamReasoningBatcher {

@@ -185,6 +185,25 @@ impl AgentRuntime {
                             suspension.bound_run_id
                         ));
                     }
+                    // W1b：治理路径已产出挂起标记，却匹配不到可恢复的待处理请求 ⇒
+                    // 不得只发一条裸 `suspended`（用户永远等不到恢复），以可读失败终态收口。
+                    if self.suspension_without_recoverable_request(&suspension) {
+                        runtime_log(format!(
+                            "turn:control-suspend-unrecoverable hop={} name={} code={}",
+                            completed_hops,
+                            tool_call.name,
+                            super::turn_control::CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE
+                        ));
+                        return Err(self.fail_sync_turn_result(
+                            Some(provider_meta),
+                            display_message,
+                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                            tool_activities,
+                            hook_trace_records,
+                            super::turn_control::build_control_outcome_pending_without_request_error(
+                            ),
+                        ));
+                    }
                     return Err(self.build_suspended_turn_result(
                         Some(provider_meta),
                         display_message,

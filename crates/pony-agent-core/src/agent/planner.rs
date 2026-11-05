@@ -233,7 +233,16 @@ impl LocalTurnPlanner {
         let lowered = user_message.to_lowercase();
         let explicit_paths = Self::extract_explicit_paths(user_message);
         let explicit_path = explicit_paths.first().cloned();
-        let referenced_path = explicit_path.or_else(|| Self::infer_last_referenced_path(history));
+        // 契约 C3/C5（W1）：历史路径只在**指代意图**下使用 —— 用户说“这个文件/它/上述…”时才把
+        // 上一轮提到的路径当作焦点；普通续写/追问（“继续”“检查进展”）不再被历史路径劫持。
+        // 当前消息里的显式路径不受此闸门影响（`explicit_path` 优先）。
+        let referenced_path = explicit_path.or_else(|| {
+            if Self::has_referential_intent(user_message) {
+                Self::infer_last_referenced_path(history)
+            } else {
+                None
+            }
+        });
 
         if let Some(batch_call) =
             Self::infer_multi_path_tool_call(user_message, &lowered, &explicit_paths)
@@ -498,10 +507,88 @@ impl LocalTurnPlanner {
         })
     }
 
+    /// 契约 C3（W1）：指代意图识别 —— 只有用户明确在“指代上文某个东西”时，
+    /// 历史消息里的路径才有资格作为本地工具调用的焦点路径。
+    ///
+    /// 覆盖中文（这个文件 / 这个目录 / 该文件 / 该目录 / 它 / 上面 / 刚才 / 上述 等）与英文
+    ///（this file / that file / the file / this directory / it 等）。英文按**独立词**匹配，
+    /// 避免 `git`、`edit`、`item` 这类包含 `it` 的单词造成误判。
+    fn has_referential_intent(user_message: &str) -> bool {
+        let lowered = user_message.to_lowercase();
+
+        const CJK_NEEDLES: &[&str] = &[
+            "这个文件",
+            "这个目录",
+            "这个路径",
+            "该文件",
+            "该目录",
+            "该路径",
+            "它",
+            "上面",
+            "刚才",
+            "上述",
+        ];
+        const ASCII_NEEDLES: &[&str] = &[
+            "this file",
+            "that file",
+            "the file",
+            "this directory",
+            "that directory",
+            "the directory",
+            "this path",
+            "that path",
+            "the path",
+            "it",
+        ];
+
+        CJK_NEEDLES.iter().any(|needle| lowered.contains(needle))
+            || ASCII_NEEDLES
+                .iter()
+                .any(|needle| contains_word_token(&lowered, needle))
+    }
+
+    /// 契约 C1/C2（W1）：纯续写/追问且**没有新的显式路径**时，本地 planner 必须让位给模型。
+    ///
+    /// 这类消息本身不含任何新的操作对象（“继续”“然后”“检查进展”“进展如何”），若本地
+    /// 启发式在历史里捞到路径就会抢跳成一次读文件工具调用，把模型挡在门外。
+    fn is_continuation_without_explicit_path(user_message: &str) -> bool {
+        let lowered = user_message.trim().to_lowercase();
+        if lowered.is_empty() {
+            return false;
+        }
+        // 用户给了新的显式路径 ⇒ 这是一次明确的工具意图，不视为纯续写。
+        if !Self::extract_explicit_paths(user_message).is_empty() {
+            return false;
+        }
+
+        const CONTINUATION_NEEDLES: &[&str] = &[
+            "继续",
+            "接着",
+            "然后",
+            "检查进展",
+            "进展如何",
+            "进展情况",
+            "怎么样了",
+            "进展",
+            "continue",
+            "go on",
+            "go ahead",
+        ];
+
+        CONTINUATION_NEEDLES
+            .iter()
+            .any(|needle| lowered.contains(needle))
+    }
+
     fn preflight_tool_decision(
         user_message: &str,
         history: &[TurnHistoryMessage],
     ) -> Option<ProviderDecision> {
+        // 契约 C1/C2（W1）：续写/追问不得被本地 planner 抢跳，交还给模型。
+        if Self::is_continuation_without_explicit_path(user_message) {
+            return None;
+        }
+
         let tool_call = Self::infer_local_tool_call(user_message, history)?;
 
         Some(ProviderDecision {
@@ -793,6 +880,13 @@ fn looks_like_path(segment: &str) -> bool {
         return false;
     }
 
+    // 契约 C5（W1）：退化段不是路径。历史正文里的 "tester / reviewer" 会被
+    // `extract_path_candidates` 切成候选段 "/"，若把 "/" 当路径，一句“继续”就会被
+    // 本地 planner 劫持成 workspace_gather_context(path="/")。
+    if is_degenerate_path_segment(segment) {
+        return false;
+    }
+
     // 纯版本号（1.0 / 1.3 / v2.1.0 等）不是路径，避免把
     // "自1.0版本以来到目前最新的1.3+" 这类文本中的版本号误判为文件路径。
     if looks_like_version_number(segment) {
@@ -810,6 +904,27 @@ fn looks_like_path(segment: &str) -> bool {
                     && segment.contains('.')
             })
             .unwrap_or(false)
+}
+
+/// 契约 C5（W1）：根目录 / 双斜杠 / 当前目录 / 上级目录都是**退化段**，不携带任何定位信息，
+/// 不得当作文件路径（否则路径收集工具会把整轮读盘浪费在根目录上）。
+fn is_degenerate_path_segment(segment: &str) -> bool {
+    matches!(segment.trim(), "" | "/" | "//" | "." | "..")
+}
+
+/// 按**独立词**匹配（允许前后是标点/空白，不允许嵌在更长的 ASCII 词里）。
+/// 用于 `it` / `the file` 这类短英文指代词，避免 `git` / `edit` / `item` 误命中。
+fn contains_word_token(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + word.len()..].chars().next();
+        is_token_boundary(before) && is_token_boundary(after)
+    })
+}
+
+fn is_token_boundary(ch: Option<char>) -> bool {
+    ch.map(|value| !value.is_ascii_alphanumeric() && value != '_')
+        .unwrap_or(true)
 }
 
 fn looks_like_version_number(segment: &str) -> bool {

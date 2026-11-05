@@ -557,6 +557,37 @@ impl AgentRuntime {
                             suspension.bound_run_id
                         ));
                     }
+                    // W1b：治理路径已产出挂起标记，却匹配不到可恢复的待处理请求 ⇒
+                    // 不得只发一条裸 `turn:suspended`（用户永远等不到恢复），派发可读失败终态。
+                    if self.suspension_without_recoverable_request(&suspension) {
+                        runtime_log(format!(
+                            "turn:control-suspend-unrecoverable-stream hop={} name={} code={}",
+                            completed_hops,
+                            current_tool_call.name,
+                            super::turn_control::CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE
+                        ));
+                        self.fail_stream_turn_gated_dispatch(
+                            sink,
+                            control,
+                            input.session_id.as_deref(),
+                            turn_id,
+                            display_message,
+                            Some(provider_meta),
+                            Some(context_observation.clone()),
+                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                            tool_activities.clone(),
+                            provider_call_records.clone(),
+                            hook_trace_records.clone(),
+                            first_token_latency.get(),
+                            Some(turn_started_at.elapsed().as_millis() as u64),
+                            completed_hops,
+                            super::turn_control::build_control_outcome_pending_without_request_error(
+                            ),
+                            // B017：本轮失败前已产出的正文必须保留。
+                            Some(accumulated_turn_text.clone()),
+                        );
+                        return;
+                    }
                     let assistant_message = suspension
                         .pending_request
                         .as_ref()

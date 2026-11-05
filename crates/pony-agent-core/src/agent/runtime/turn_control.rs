@@ -26,6 +26,22 @@ pub(crate) fn classify_stream_error(cancel_requested: bool, error: &str) -> Stre
     }
 }
 
+/// W1b：控制结果已挂起、但找不到可恢复的待处理请求（`call_id` / 审批记录丢失）时的错误码。
+///
+/// 语义：这不是“等待用户”的可恢复暂停，而是一次必须让用户看见的失败终态。
+pub(super) const CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE: &str =
+    "control_outcome_pending_without_request";
+
+/// W1b：构造“挂起但无待处理请求”的失败终态文案。
+///
+/// 形态与既有 provider 错误码一致（`<code>: <message>`），既保住机器可判的错误码，
+/// 又给用户一条能读懂的中文说明（而不是一条永远不会恢复的 `turn:suspended`）。
+pub(super) fn build_control_outcome_pending_without_request_error() -> String {
+    format!(
+        "{CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE}: 工具调用已挂起但未找到可恢复的待处理请求（call_id/审批丢失），本轮已按失败收口；请重试或重新发起该工具调用。"
+    )
+}
+
 /// wave-64 R1（BLOCKING，terminal-once 闸门）：尝试占有该轮的**终态派发权**。
 ///
 /// 唯一真值源是 checkpoint `status`（与 C5 宽限监督者共用同一登记表，绝不新建第二套状态）：
@@ -244,6 +260,22 @@ impl AgentRuntime {
             pending_request: Some(pending_request),
             bound_run_id,
         }
+    }
+
+    /// W1b：`control_outcome_pending` 已产出，但**治理路径上拿不到可恢复的待处理请求**。
+    ///
+    /// 判据：本 runtime 挂着治理 dispatcher（执行器就是治理适配器，`control_outcome_pending`
+    /// 是它写出的真实挂起标记），却匹配不到任何 `Pending` 的 Approval / Interaction ——
+    /// 即 `call_id` 丢失或审批记录已被消费。此时下发裸 `turn:suspended` 会让宿主永远等不到
+    /// 恢复信号，必须以可读失败终态收口（`control_outcome_pending_without_request`）。
+    ///
+    /// 非治理执行器（无 dispatcher，如自定义 `ToolExecutor` 桩）保持既有 suspended 语义：
+    /// 这类执行器本来就没有“待处理请求”通道，`pending_request=None` 是唯一可能形态。
+    pub(super) fn suspension_without_recoverable_request(
+        &self,
+        suspension: &ToolTurnSuspension,
+    ) -> bool {
+        suspension.pending_request.is_none() && self.governed_dispatcher().is_some()
     }
 
 
