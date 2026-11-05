@@ -1,0 +1,27 @@
+{
+  "wave": "tui-session-resilience",
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 5,
+    "backoff_base_ms": 500,
+    "backoff_max_ms": 8000,
+    "total_budget_ms": 30000,
+    "policy": "沿用 provider/mod.rs::retry_provider_timeout 既有预算；已发 delta 后禁止自动重试；TUI 层不叠加重试"
+  },
+  "concurrency_lock": {
+    "mechanism": "SHUTDOWN_REQUESTED AtomicBool + control_plane.stop_turn 既有接缝",
+    "guarantee": "退出路径单一写主；在飞 turn 取消后最多等待 external_call_timeout_ms 即强制收敛，不留持有 tty 的活线程"
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "sink": "PONY_TUI_RUNTIME_LOG（stderr 重定向成功后改道），无新增日志出口"
+  },
+  "resource_release": [
+    "cancel in-flight turn via control_plane.stop_turn",
+    "join/drop turn thread with bounded timeout",
+    "unregister TuiTurnSink / supervision emitter pairwise",
+    "restore_terminal_modes (raw mode + alternate screen + input protocols)",
+    "otel::shutdown() bounded before process::exit"
+  ]
+}

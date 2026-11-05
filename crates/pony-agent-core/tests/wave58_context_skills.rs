@@ -566,6 +566,7 @@ fn f1_5_host_engine_carries_parent_workspace_root() {
     // Act：注入父根
     let engine = HostTurnEngine {
         workspace_root: None,
+        shared_sessions: None,
     }
     .with_workspace_root(Some(parent_workspace.path().to_path_buf()));
 
