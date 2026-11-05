@@ -13221,3 +13221,78 @@ fn start_turn_stream_parallel_tools_keeps_ask_out_of_parallel_segment_and_still_
         request_bodies.len()
     );
 }
+
+// ── W3b：共享 SessionStore（宿主 ↔ 队友引擎同一 Arc）──────────────────────────────
+
+/// 契约 W3b：`AgentRuntimeBuilder::shared_session_store` 注入的 Arc 必须**原样**成为
+/// runtime 的会话句柄（`Arc::ptr_eq` 同一实例，不是复制/重新包一层）。
+///
+/// 这是「队友会话能被宿主 `list_sessions()` 看到」的机制前提：宿主 control plane 通过
+/// `runtime.sessions_handle()` 持有同一把锁；`HostTurnEngine` 建栈时复用同一 Arc，队友 turn
+/// 的落库才写进宿主读取的那张表（此前的独立 store 永远不可加载，`/agents` Enter 只能提示）。
+#[test]
+fn builder_shared_session_store_is_the_runtime_sessions_handle() {
+    crate::agent::runtime_helper::TestRuntimeGuard::leak();
+    let shared = Arc::new(std::sync::RwLock::new(SessionStore::memory_only()));
+
+    let runtime = AgentRuntimeBuilder::new()
+        .shared_session_store(Arc::clone(&shared))
+        .build();
+
+    assert!(
+        Arc::ptr_eq(&runtime.sessions_handle(), &shared),
+        "W3b：builder 注入的共享 SessionStore 必须原样成为 runtime 会话句柄（ptr_eq 同一 Arc）"
+    );
+}
+
+/// 契约 W3b 端到端：`HostTurnEngine` 复用宿主共享 `SessionStore` 后，队友 turn 落库的会话必须
+/// 出现在**宿主 control plane** 的 `list_sessions()` 里 —— 即 `/agents` 的 Enter 从
+/// “提示不可加载”变为真正可 `hydrate` 的机制证据。
+///
+/// 验证边界：provider 走本地 mock（不联网）；engine 直接实例化（不经全局槽位，避免与本进程
+/// 其它用例对 `OnceLock` 首写者的顺序耦合）。
+#[test]
+fn w3b_shared_store_makes_teammate_session_visible_to_host_control_plane() {
+    crate::agent::runtime_helper::TestRuntimeGuard::leak();
+    let server = MockHttpServer::start(vec![json_completion("teammate ready")]);
+    let shared = Arc::new(std::sync::RwLock::new(SessionStore::memory_only()));
+
+    // 1) 宿主栈注入共享 store ⇒ control plane 与 runtime 共用同一 `Arc`（`sessions_handle`）。
+    let host_runtime = AgentRuntimeBuilder::new()
+        .shared_session_store(Arc::clone(&shared))
+        .build();
+    let control_plane = HostControlPlaneBuilder::new().runtime(host_runtime).build();
+
+    // 2) 队友引擎复用同一 store 跑一次真实 turn（本地 mock provider）。
+    let workspace = temp_workspace_dir("w3b-shared-session-visibility");
+    let engine = crate::agent::subagent_runtime::HostTurnEngine::new()
+        .with_workspace_root(Some(workspace.clone()))
+        .with_shared_sessions(Some(Arc::clone(&shared)));
+    let selection = test_chat_provider_selection(server.base_url.clone());
+    let outcome = crate::agent::subagent_runtime::SubagentTurnEngine::run_turn_with_selection(
+        &engine,
+        "reply with ok",
+        10_000,
+        Some(workspace.as_path()),
+        Some(&selection),
+    )
+    .expect("W3b：共享 store 下队友 turn 必须成功");
+    assert!(
+        !outcome.session_id.trim().is_empty(),
+        "W3b：队友 turn 必须返回非空 session_id"
+    );
+
+    // 3) 宿主 control plane 能看到该队友会话（同一 Arc ⇒ 同一张会话表）。
+    let session_ids: Vec<String> = control_plane
+        .list_sessions()
+        .into_iter()
+        .map(|session| session.conversation_id)
+        .collect();
+    assert!(
+        session_ids.iter().any(|id| id == &outcome.session_id),
+        "W3b：宿主 control plane 必须能看到队友会话 {}，实际 = {session_ids:?}",
+        outcome.session_id
+    );
+
+    server.finish();
+}

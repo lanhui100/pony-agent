@@ -8023,6 +8023,9 @@ fn tui_event_loop(
                                     let raw_sessions = control_plane.list_sessions();
                                     let items: Vec<SessionItem> = raw_sessions
                                         .into_iter()
+                                        // W3b：队友子会话只经 `/agents` 进入；主会话列表不混入
+                                        // `subagent-*`，否则用户会在 /resume 里看到一堆无名会话。
+                                        .filter(|s| is_main_session_id(&s.conversation_id))
                                         .map(|s| SessionItem {
                                             id: s.conversation_id,
                                             title: s.title,
@@ -8607,22 +8610,30 @@ pub struct ResumeTarget {
 /// 还没产生任何轮次（未落库），严格校验会让提示变成假承诺。这里改为「存在就恢复历史、
 /// 不存在就以该 id 开新会话」，并在 TUI 内给出可见说明。
 fn resolve_resume_target(requested: Option<&str>) -> Result<ResumeTarget, String> {
-    let sessions = SessionStore::new().list_sessions();
+    let all_sessions = SessionStore::new().list_sessions();
     match requested {
+        // 显式 id 一律接受（可能来自 `.dev-team` 诊断/队友会话）；存在性按全量库判定。
         Some(id) => Ok(ResumeTarget {
             session_id: id.to_string(),
-            existed: sessions
+            existed: all_sessions
                 .iter()
                 .any(|session| session.conversation_id == id),
         }),
-        None => sessions
-            .first()
+        // 缺省「最近会话」只取主会话：队友子会话有独立入口 `/agents`，不抢默认续接。
+        None => all_sessions
+            .iter()
+            .find(|session| is_main_session_id(&session.conversation_id))
             .map(|session| ResumeTarget {
                 session_id: session.conversation_id.clone(),
                 existed: true,
             })
             .ok_or_else(|| "当前没有可恢复的会话。请先运行 `pony` 开始一个新会话。".to_string()),
     }
+}
+
+/// W3b：主会话 id 判定（队友/子代理会话只经 `/agents` 进入，不混入 `/resume` 默认列表）。
+pub fn is_main_session_id(session_id: &str) -> bool {
+    !session_id.starts_with("subagent-") && !session_id.starts_with("teammate-")
 }
 
 

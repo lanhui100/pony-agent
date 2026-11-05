@@ -2,6 +2,9 @@ use super::*;
 
 pub struct AgentRuntimeBuilder {
     sessions: Option<SessionStore>,
+    /// W3b：外部注入的**共享**会话存储（优先于自建 `sessions`）。宿主注入后，由本 builder
+    /// 注册的 [`HostTurnEngine`] 跑队友 turn 时复用同一份 store ⇒ 队友会话对宿主可见。
+    sessions_shared: Option<Arc<RwLock<SessionStore>>>,
     provider_resolver: Option<Box<dyn ProviderSelectionResolver>>,
     tool_executor: Option<Box<dyn ToolExecutor>>,
     workspace_root: Option<std::path::PathBuf>,
@@ -16,6 +19,7 @@ impl AgentRuntimeBuilder {
     pub fn new() -> Self {
         Self {
             sessions: None,
+            sessions_shared: None,
             provider_resolver: None,
             tool_executor: None,
             workspace_root: None,
@@ -32,6 +36,19 @@ impl AgentRuntimeBuilder {
 
     pub fn session_store(mut self, sessions: SessionStore) -> Self {
         self.sessions = Some(sessions);
+        self
+    }
+
+    /// W3b：注入**共享**会话存储（与宿主 control plane 同一 `Arc`）。
+    ///
+    /// 优先级：本方法注入的 Arc > [`AgentRuntimeBuilder::session_store`] 传入的自有 store >
+    /// 默认 `SessionStore::new()`。注入后 `build()` 会把**同一个** Arc 交给注册的
+    /// [`HostTurnEngine`]，队友 turn 的会话落库因此直接可见于宿主 `list_sessions()`。
+    pub fn shared_session_store(
+        mut self,
+        sessions: Arc<RwLock<SessionStore>>,
+    ) -> Self {
+        self.sessions_shared = Some(sessions);
         self
     }
 
@@ -84,12 +101,28 @@ impl AgentRuntimeBuilder {
         // `Err("subagent engine already set")`；`build()` 返回 `AgentRuntime` 而非 `Result`，
         // 故注册失败（含已注册、含 HostTurnEngine 自建栈的嵌套 build）一律忽略，**不** panic、
         // **不**改变返回值。公共 API `set_subagent_engine` / `subagent_engine` 语义不变。
-        ensure_host_subagent_engine(self.workspace_root.clone());
-        let sessions = self.sessions.unwrap_or_else(SessionStore::new);
-        let shared_authorizations = sessions.path_authorizations();
+        // W3b：统一得到一个 Arc —— 注入的共享 store 优先，否则把自有 `sessions` 包成 Arc。
+        // 该 Arc 同时用于：① 本 runtime 的会话句柄（宿主 control plane 经 `sessions_handle()`
+        // 读取）；② 注册给 `HostTurnEngine`（队友 turn 复用同一份 store）。
+        let sessions_arc = match (self.sessions_shared, self.sessions) {
+            (Some(shared), _) => shared,
+            (None, Some(sessions)) => Arc::new(RwLock::new(sessions)),
+            (None, None) => Arc::new(RwLock::new(SessionStore::new())),
+        };
+        ensure_host_subagent_engine(
+            self.workspace_root.clone(),
+            Some(Arc::clone(&sessions_arc)),
+        );
+        let shared_authorizations = sessions_arc
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .path_authorizations();
         let plan_store = self.plan_store;
-        let mut runtime = AgentRuntime::with_dependencies(
-            sessions,
+        let mut runtime = AgentRuntime::with_shared_sessions(
+            sessions_arc,
             self.provider_resolver
                 .unwrap_or_else(|| Box::new(ProviderRegistryStore::new())),
             self.tool_executor.unwrap_or_else(|| {
@@ -142,13 +175,21 @@ impl DesktopRuntimePreset {
 ///   首写者胜是该 `OnceLock` 的既定语义。
 /// - 注册失败（`Err("subagent engine already set")` 等）一律忽略：`build()` 不返回 `Result`，
 ///   不得 panic、不得改变返回值、不得阻断宿主启动。
-fn ensure_host_subagent_engine(workspace_root: Option<std::path::PathBuf>) {
+/// - W3b：`shared_sessions` = 本 builder 最终使用的会话存储 Arc。首写者胜意味着「先建栈的 runtime」
+///   决定队友引擎的共享 store —— 宿主（TUI/tauri/harness/cli）都是首个 builder，因此队友会话
+///   落在宿主 store 里；后续嵌套 build（含队友自身建栈）不会覆盖既有引擎。
+fn ensure_host_subagent_engine(
+    workspace_root: Option<std::path::PathBuf>,
+    shared_sessions: Option<Arc<RwLock<SessionStore>>>,
+) {
     use crate::agent::subagent_runtime::{
         set_subagent_engine, subagent_engine, HostTurnEngine,
     };
     if subagent_engine().is_some() {
         return;
     }
-    let engine = HostTurnEngine::new().with_workspace_root(workspace_root);
+    let engine = HostTurnEngine::new()
+        .with_workspace_root(workspace_root)
+        .with_shared_sessions(shared_sessions);
     let _ = set_subagent_engine(std::sync::Arc::new(engine));
 }

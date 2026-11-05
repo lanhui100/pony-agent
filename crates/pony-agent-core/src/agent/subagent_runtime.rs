@@ -168,13 +168,18 @@ pub fn subagent_gate_enter(prompt: &str) -> Result<SubagentInflightGuard, String
     Ok(SubagentInflightGuard(InflightGuard::acquire()?))
 }
 
-/// 宿主默认引擎：独立 AgentRuntimeBuilder 建栈运行子代理 turn。
+/// 宿主默认引擎：独立 `AgentRuntimeBuilder` 建栈运行子代理 turn。
 pub struct HostTurnEngine {
     /// 父会话工作区根（wave-58 契约 F1-5）。
     ///
     /// 子代理必须以**父会话工作区根**构建 runtime（继承项目指令与项目技能），
     /// 不得再固定 `compute_default_workspace_root()`；`None` 时才回落默认根。
     pub workspace_root: Option<PathBuf>,
+    /// W3b：宿主共享的会话存储（与宿主 control plane 同一 `Arc`）。
+    ///
+    /// `Some` ⇒ 子代理建栈时 `.shared_session_store(...)`，于是队友 turn 的会话直接落进宿主
+    /// `SessionStore`（`/agents` 的 Enter 才可 `hydrate`）；`None` ⇒ 维持旧行为（独立 store）。
+    pub shared_sessions: Option<Arc<std::sync::RwLock<crate::agent::session::SessionStore>>>,
 }
 
 impl Default for HostTurnEngine {
@@ -188,12 +193,22 @@ impl HostTurnEngine {
     pub fn new() -> Self {
         Self {
             workspace_root: None,
+            shared_sessions: None,
         }
     }
 
     /// 注入父会话工作区根，返回自身（契约 F1-5）。
     pub fn with_workspace_root(mut self, root: Option<PathBuf>) -> Self {
         self.workspace_root = root;
+        self
+    }
+
+    /// W3b：注入宿主共享的会话存储（`None` = 保持独立 store 旧行为）。
+    pub fn with_shared_sessions(
+        mut self,
+        shared_sessions: Option<Arc<std::sync::RwLock<crate::agent::session::SessionStore>>>,
+    ) -> Self {
+        self.shared_sessions = shared_sessions;
         self
     }
 
@@ -249,6 +264,8 @@ impl HostTurnEngine {
         let session_id = format!("subagent-{}", Uuid::new_v4());
         let thread_session_id = session_id.clone();
         let prompt_owned = prompt.to_string();
+        // W3b：共享会话存储句柄在父线程克隆后 move 进 worker（`self` 不跨线程）。
+        let shared_sessions = self.shared_sessions.clone();
         // Wave-58 F1-5：建栈根已在调用方解析好并作为参数传入，此处直接 move 进线程
         //（`self` 不跨线程）。
 
@@ -268,9 +285,13 @@ impl HostTurnEngine {
                 // 实际轮询统一走 `runtime_helper::block_on`（无 handle 时回落到进程级静态
                 // Runtime）。因此这里**不需要**再 `rt.enter()`，保持裸线程即可。
 
-                // 独立建栈：不共享宿主 SessionStore / ProviderRegistryStore。
-                // W2：有显式选择时用 FixedSelectionResolver 固定本栈 provider（宿主继承/覆盖）。
+                // 独立建栈：默认不共享宿主 SessionStore / ProviderRegistryStore。
+                // W3b：宿主注入了共享会话存储时复用它 —— 队友会话由此进入宿主 `list_sessions()`。
                 let mut builder = AgentRuntimeBuilder::new().workspace_root(workspace_root);
+                if let Some(shared_sessions) = shared_sessions {
+                    builder = builder.shared_session_store(shared_sessions);
+                }
+                // W2：有显式选择时用 FixedSelectionResolver 固定本栈 provider（宿主继承/覆盖）。
                 if let Some(selection) = selection {
                     builder = builder.provider_resolver(Box::new(
                         FixedSelectionResolver::new(selection),

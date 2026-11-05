@@ -160,6 +160,8 @@ impl AgentRuntime {
         self.workspace_root.as_deref()
     }
 
+    /// 以自有会话存储建 runtime（行为与既有调用方完全一致）：内部包成 `Arc<RwLock<_>>` 后
+    /// 委托 [`AgentRuntime::with_shared_sessions`]。
     pub fn with_dependencies(
         sessions: SessionStore,
         provider_resolver: Box<dyn ProviderSelectionResolver>,
@@ -168,8 +170,39 @@ impl AgentRuntime {
         context_builder: Box<dyn TurnContextBuilder>,
         telemetry_builder: Box<dyn TurnTelemetryBuilder>,
     ) -> Self {
-        let persisted_mcp_snapshots = sessions.list_persisted_mcp_source_snapshots();
-        let persisted_skill_snapshots = sessions.list_persisted_skill_source_snapshots();
+        Self::with_shared_sessions(
+            Arc::new(RwLock::new(sessions)),
+            provider_resolver,
+            tool_executor,
+            planner,
+            context_builder,
+            telemetry_builder,
+        )
+    }
+
+    /// W3b：以**共享**会话存储建 runtime。
+    ///
+    /// 宿主与队友引擎传入同一个 `Arc<RwLock<SessionStore>>` 时，队友 turn 的落库直接写进宿主
+    /// control plane 读取的同一份表 ⇒ 队友会话立刻出现在 `list_sessions()`，`/agents` 的
+    /// Enter 才具备 `hydrate` 前置条件（此前的独立 store 永远不可加载）。
+    pub fn with_shared_sessions(
+        sessions: Arc<RwLock<SessionStore>>,
+        provider_resolver: Box<dyn ProviderSelectionResolver>,
+        tool_executor: Box<dyn ToolExecutor>,
+        planner: Box<dyn TurnPlanner>,
+        context_builder: Box<dyn TurnContextBuilder>,
+        telemetry_builder: Box<dyn TurnTelemetryBuilder>,
+    ) -> Self {
+        let (persisted_mcp_snapshots, persisted_skill_snapshots) = {
+            let store = sessions.read().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            });
+            (
+                store.list_persisted_mcp_source_snapshots(),
+                store.list_persisted_skill_source_snapshots(),
+            )
+        };
         let mut capability_registry = CapabilityRegistry::new();
         for snapshot in persisted_mcp_snapshots {
             capability_registry.replace_mcp_source_snapshot(snapshot);
@@ -180,11 +213,10 @@ impl AgentRuntime {
         // W30a：钩子注册表与执行器必须同时构建——只给执行器不给描述符会导致钩子点永远不触发。
         let (hook_registry, hook_executor) =
             crate::agent::hook_commands::build_default_hooks();
-        let sessions_arc = Arc::new(RwLock::new(sessions));
-        let trace_persistence = Some(spawn_trace_persistence_worker(Arc::clone(&sessions_arc)));
+        let trace_persistence = Some(spawn_trace_persistence_worker(Arc::clone(&sessions)));
         Self {
             graph: GraphEngine::new("state-machine-v1"),
-            sessions: sessions_arc,
+            sessions,
             provider_resolver,
             capability_registry: Arc::new(RwLock::new(capability_registry)),
             hook_registry,
