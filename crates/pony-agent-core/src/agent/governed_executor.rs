@@ -366,6 +366,9 @@ impl PrimitiveToolHandler for RouterPrimitiveHandler {
             // wave-62 A1（C5）：**必须**透传取消令牌——此前 `Default::default()` 在这里把
             // turn 令牌丢掉，真实 app 的 `Run` 因此永不观测 stop（双路 L3 复现的 BLOCKING）。
             cancellation: request.cancellation.clone(),
+            // W2：桥接层重建上下文时必须恢复宿主 provider 选择（线程局部作用域由
+            // `GovernedToolExecutor::execute_with_context` 建立）。
+            provider_selection: crate::agent::dispatcher_composites::current_provider_selection(),
             ..Default::default()
         };
         let result = self.router.execute_with_context(

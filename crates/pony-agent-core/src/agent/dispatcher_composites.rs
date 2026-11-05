@@ -70,6 +70,40 @@ pub struct GovernedToolExecutor {
     dispatcher: GovernedDispatcher,
 }
 
+// W2 修复：`GovernedToolExecutor` 会用 `DispatchContext` 重建 `ToolExecutionContext`，桥接层
+// `RouterPrimitiveHandler` 原先只透传 session/workspace/cancel，**丢失**了宿主 provider 选择，
+// 导致 `spawn_teammate`/`subagent` 在真实 TUI 里拿不到继承源（回落到 openai 默认）。
+// 选择本身就是“本 turn 的一次工具调用”事实，用线程局部作用域传递：同步 dispatch 内生效，
+// 并行段各线程独立；作用域退出即恢复，不跨 turn 泄漏。
+thread_local! {
+    static CURRENT_PROVIDER_SELECTION: std::cell::RefCell<Option<crate::agent::config::ResolvedProviderSelection>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub struct ProviderSelectionScope {
+    previous: Option<crate::agent::config::ResolvedProviderSelection>,
+}
+
+impl ProviderSelectionScope {
+    pub fn enter(selection: Option<&crate::agent::config::ResolvedProviderSelection>) -> Self {
+        let previous = CURRENT_PROVIDER_SELECTION.with(|slot| slot.replace(selection.cloned()));
+        Self { previous }
+    }
+}
+
+impl Drop for ProviderSelectionScope {
+    fn drop(&mut self) {
+        CURRENT_PROVIDER_SELECTION.with(|slot| {
+            *slot.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+/// 当前同步工具调用作用域内的宿主 provider 选择（供桥接层重建 `ToolExecutionContext`）。
+pub fn current_provider_selection() -> Option<crate::agent::config::ResolvedProviderSelection> {
+    CURRENT_PROVIDER_SELECTION.with(|slot| slot.borrow().clone())
+}
+
 impl GovernedToolExecutor {
     pub fn new(dispatcher: GovernedDispatcher) -> Self {
         Self { dispatcher }
@@ -99,18 +133,22 @@ impl ToolExecutor for GovernedToolExecutor {
         if let Some(workspace_root) = &exec_context.workspace_root {
             context.workspace_root = Some(workspace_root.display().to_string());
         }
-        let outcome = self.dispatcher.dispatch_governed(
-            ToolDispatchRequest {
-                origin: InvocationOrigin::Model,
-                descriptor_id: call.name.clone(),
-                call_id: call
-                    .call_id
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                arguments: call.arguments.clone(),
-            },
-            &context,
-        );
+        let outcome = {
+            // W2：把宿主 provider 选择带进 dispatch 的同步作用域，桥接层据此重建工具上下文。
+            let _selection_scope = ProviderSelectionScope::enter(exec_context.provider_selection.as_ref());
+            self.dispatcher.dispatch_governed(
+                ToolDispatchRequest {
+                    origin: InvocationOrigin::Model,
+                    descriptor_id: call.name.clone(),
+                    call_id: call
+                        .call_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    arguments: call.arguments.clone(),
+                },
+                &context,
+            )
+        };
         let mut result = outcome.into_legacy_result(&call.name);
         if result.duration_ms == 0 {
             result.duration_ms = started_at.elapsed().as_millis() as u64;
@@ -2813,5 +2851,43 @@ mod tests {
             assert_eq!(entry["arguments"]["startLine"].as_u64(), Some(1));
             assert_eq!(entry["arguments"]["requestedStartLine"], json!(-5));
         }
+    }
+
+    /// W2 修复回归：宿主 provider 选择必须在同步 dispatch 作用域内可见，作用域退出后清空
+    /// （否则桥接层重建 `ToolExecutionContext` 时会丢继承源，队友回落到 openai 默认）。
+    #[test]
+    fn provider_selection_scope_is_visible_and_cleared_after_dispatch() {
+        use crate::agent::config::{
+            ProviderModelCapabilities, ResolvedProviderSelection, ThinkingParamPattern,
+        };
+        use crate::agent::provider::{ProviderAuthType, ProviderProtocol};
+
+        let selection = ResolvedProviderSelection {
+            requested_name: "ponyllm".to_string(),
+            provider_name: "ponyllm".to_string(),
+            protocol: ProviderProtocol::OpenAiCompletions,
+            base_url: "https://tokens.ponyjob.top/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "PONYLLM_API_KEY".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: "deepseek/deepseek-v4.1-flash".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 4096,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities::default(),
+            thinking_param_pattern: ThinkingParamPattern::None,
+        };
+
+        {
+            let _scope = ProviderSelectionScope::enter(Some(&selection));
+            let observed = current_provider_selection().expect("作用域内必须可见");
+            assert_eq!(observed.provider_name, "ponyllm");
+            assert_eq!(observed.model, "deepseek/deepseek-v4.1-flash");
+        }
+        assert!(
+            current_provider_selection().is_none(),
+            "作用域退出后必须清空，避免跨 turn 泄漏宿主 provider"
+        );
     }
 }
