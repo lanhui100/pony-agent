@@ -28,12 +28,12 @@ G1 交叉：Issues(错误有上报) × Logs(错误详情直显/退出后请求�
 
 | 编号 | 签名 | 语义 |
 | :-- | :-- | :-- |
-| S1 | `pub fn sanitize_model_protocol_text(text: &str) -> (String, bool)` | C1/C2；流式与历史回放共用；返回清洗后文本 + 尾部是否疑似被 chunk 切断的协议片段 |
+| S1 | `pub fn sanitize_model_protocol_text(text: &str) -> (String, bool)` | C1/C2；流式与历史回放共用；返回清洗后文本 + 尾部是否疑似被 chunk 切断的协议片段。占位只需包含「工具调用」四字（不固定整句）；`incomplete=true` 仅当尾部为已识别 DSML 协议前缀的半截形态（`<｜`/`｜DSML`/`｜｜DS`/`<｜｜DSML｜｜ inv` 等），普通以 `<` 结尾的正文或代码块尖括号必须 false 且逐字保真 |
 | S2 | `pub fn is_transient_provider_error(error: &str) -> bool` | C3；仅 timeout/rate-limit/5xx/network 类为 true；401/403/400/missing key 为 false |
 | S3 | `pub fn user_facing_error_summary(error: &str) -> String` | C4；一句话摘要，不含 400 字符响应体/堆栈 |
 | S4 | `pub fn should_fold_error_detail(error: &str) -> bool` | C4；终态错误默认折叠详情 |
 | S5 | `pub fn interrupted_turn_checkpoint(prior_assistant_text: &str, tool_activities: &[String]) -> Option<String>` | C5/C6；空输入返回 None（旧会话向后兼容） |
-| S6 | `pub fn resume_from_checkpoint(completed_history: &str, checkpoint: Option<&str>) -> String` | C6；不重复已完成 turn；无检查点时原样返回 |
+| S6 | `pub fn resume_from_checkpoint(completed_history: &str, checkpoint: Option<&str>) -> String` | C6；`completed_history` 为已完成历史全文；返回**拼接后的全文**（历史 + 检查点可见文本），无检查点时逐字返回历史；检查点文本不得重复已有段落 |
 | S7 | `pub fn exit_cleanup_plan(inflight_turn: bool, timeout_ms: u64) -> Vec<&'static str>` | C7/C8；顺序 `cancel → wait → restore → hint → exit`；timeout_ms ≤ NFR 3000 |
 
 ## 3. 契约断言（原地冻结，禁追加新章节）

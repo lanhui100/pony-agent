@@ -260,42 +260,49 @@ fn print_resume_hint(session_id: &str) {
 
 /// C1/C2：清洗上游模型输出内的 DSML 工具调用协议原文（流式与历史回放共用）。
 /// 返回：清洗后的用户可见文本；`incomplete=true` 表示尾部可能是被 chunk 切断的协议片段。
+#[allow(unused_variables)]
 pub fn sanitize_model_protocol_text(text: &str) -> (String, bool) {
-    unimplemented!()
+    unimplemented!("C1/C2");
 }
 
 /// C3：判定上游错误是否为可重试瞬态错误（与 provider 层既有预算对齐，不新增重试）。
+#[allow(unused_variables)]
 pub fn is_transient_provider_error(error: &str) -> bool {
-    unimplemented!()
+    unimplemented!("C3");
 }
 
 /// C4：把原始错误详情收敛为面向用户的一句话摘要（详情默认折叠，不入消息区）。
+#[allow(unused_variables)]
 pub fn user_facing_error_summary(error: &str) -> String {
-    unimplemented!()
+    unimplemented!("C4");
 }
 
 /// C4：判定错误详情是否应默认折叠（终态错误 true；面向用户摘要 false）。
+#[allow(unused_variables)]
 pub fn should_fold_error_detail(error: &str) -> bool {
-    unimplemented!()
+    unimplemented!("C4");
 }
 
 /// C5/C6：把中断 turn 的已落盘步骤投影为可续传检查点（向后兼容：空输入返回 None）。
+#[allow(unused_variables)]
 pub fn interrupted_turn_checkpoint(
     prior_assistant_text: &str,
     tool_activities: &[String],
 ) -> Option<String> {
-    unimplemented!()
+    unimplemented!("C5/C6");
 }
 
 /// C6：resume 时从检查点接续，返回应追加到已完成历史之后的可见文本；不重复已完成 turn。
+#[allow(unused_variables)]
 pub fn resume_from_checkpoint(completed_history: &str, checkpoint: Option<&str>) -> String {
-    unimplemented!()
+    unimplemented!("C6");
 }
 
 /// C7/C8：退出清理计划（取消在飞 turn → 有界等待 → 终端还原 → 打印 resume 提示 → 退出）。
 /// `inflight_turn=true` 时计划必须包含 cancel；等待上限由 NFR 基准 external_call_timeout_ms 约束。
+#[allow(unused_variables)]
 pub fn exit_cleanup_plan(inflight_turn: bool, timeout_ms: u64) -> Vec<&'static str> {
-    unimplemented!()
+    unimplemented!("C7/C8");
 }
 
 #[cfg(unix)]

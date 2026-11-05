@@ -1,0 +1,91 @@
+{
+  "status": "FAILED",
+  "wave": "tui-session-resilience",
+  "command": "cargo test -p pony-agent-core --test tui_session_resilience_acceptance",
+  "overall_exit_code": 101,
+  "primitive": "unimplemented!(\"Cx\") panic at crates/pony-agent-core/src/bin/tui.rs lines 265/271/277/283/292/298/305 (Lead 空桩 lint 收敛后的当前行号); no E0425, no compile error, no swallowed exception",
+  "purity": {
+    "not_implemented_panics": 12,
+    "char_boundary_harness_panics": 0,
+    "compile_errors": 0,
+    "ignored_tests": 0,
+    "filtered_tests": 0,
+    "test_harness_warnings": 0,
+    "note": "All 12 acceptance cases fail by SUT unimplemented! panic; the 3 passing cases are pre-existing tui::wave43_unit_tests."
+  },
+  "failures": [
+    {
+      "case": "C1/S1-A01",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "C1/S1-A02",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "C2/S1-A03",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "C3/S2-A04",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "C4/S3-A05+C4/S4-A06",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "C5/S5-A07",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "C6/S6-A08",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "C7/S7-A09",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "C8/S7-A10",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "AT1/S1-A11",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "AT2/S5+S6-A12",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    },
+    {
+      "case": "AT3/S7-A13",
+      "exit_code": 101,
+      "failure_class": null,
+      "stack": null
+    }
+  ],
+  "source": ".dev-team/red-phase-tui-session-resilience.json"
+}
