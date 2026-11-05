@@ -89,7 +89,7 @@ fn llm_chat_span_payload_preview_sanitized_and_truncated() {
 
     // Arrange: 准备包含敏感凭据、系统路径以及长文本的请求与响应
     const SENSITIVE_TOKEN: &str = "sk-test-TOPSECRET-9876543210";
-    const BARE_TOKEN: &str = "sk-ant-api03-test-token-1234567890abcdef";
+    const BARE_TOKEN: &str = "sk-mock-ant-api03-token-1234567890abcdef";
     let sensitive_prompt = format!(
         "User asked: please check file /home/dm/pony-agent/config.json with Authorization: Bearer {SENSITIVE_TOKEN} and secret {BARE_TOKEN}"
     );
