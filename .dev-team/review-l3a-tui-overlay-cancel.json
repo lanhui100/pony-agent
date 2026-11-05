@@ -1,0 +1,146 @@
+{
+  "schema_version": 2,
+  "ticket": "l2at-tui-overlay-cancel",
+  "review_id": "l3a-tui-overlay-cancel-8d18d157",
+  "reviewed_commit": "8d18d157",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "tui-test2-review-8d18d157",
+    "fresh_context": true
+  },
+  "executed_by": "tui-test2-review-8d18d157",
+  "attestation": {
+    "self_signed": false,
+    "src_or_tests_modified_in_review": false,
+    "probe_copies": [
+      "/tmp/review-mut2（8d18d157 突变副本：禁用 register_turn_event_sink）"
+    ]
+  },
+  "verdict": "PASS",
+  "verdict_reason": "全部要求项复核通过且无 BLOCKING：C9 运行日志判据在突变下必红（实测 FAILED）、初始 guard 已在 start_turn_stream 返回后 drop、plain_text_detail 落地且 5 条确定性单测覆盖、Ask 态鼠标选择已禁用、契约 rev2 由 Protocol 独立提交批准（b477c090）、O8/C10 标签已拆分。残留 4 条 ADVISORY 不阻塞交付。",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "crates/pony-agent-core/tests/tui_mouse_selection_acceptance.rs",
+    "tests/acceptance/l2at-tui-overlay-cancel.sh",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/",
+    ".dev-team/contract-matrix-tui-overlay-cancel.md",
+    "docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md",
+    "docs/observability.yaml"
+  ],
+  "verified_items": [
+    {
+      "item": "C9 新 runtime-log 判据在 sink 注册缺失时必红",
+      "status": "PASS",
+      "evidence": "在 8d18d157 副本 /tmp/review-mut2 删除 register_turn_event_sink 后：c9 用例 FAILED，命中行 `{\"level\":\"warn\",\"message\":\"stop accepted but no turn event sink registered; ...\"}`；同一运行日志 grep 计数 1。",
+      "command": "rm -rf /tmp/review-mut2 && mkdir -p /tmp/review-mut2 && git archive 8d18d157 | tar -x -C /tmp/review-mut2 && cd /tmp/review-mut2 && python3 -c \"p='crates/pony-agent-core/src/bin/tui.rs';s=open(p).read();s=s.replace('        control_plane.register_turn_event_sink(turn_id, sink);','        // MUTATION',1);open(p,'w').write(s)\" && cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance c9_ -- --nocapture"
+    },
+    {
+      "item": "初始 turn 的 sink guard 在本次 start_turn_stream 返回后立即回收",
+      "status": "PASS",
+      "evidence": "crates/pony-agent-core/src/bin/tui.rs:8382 `drop(initial_turn_sink_guard);` 紧随 :8381 的 start_turn_stream 返回；goal 续轮 guard 仍在 while 体内逐轮 Drop。",
+      "command": "grep -n \"start_turn_stream(sink.as_ref(), cmd);\" -A2 crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "item": "plain_text_detail 落地（结构化 JSON 不回显、纯文本保留）",
+      "status": "PASS",
+      "evidence": "tui.rs:2697-2707 新增 plain_text_detail；history_tool_detail 占位分支改为 None；5 条确定性单测（j1_detail_*）19/19 全绿。",
+      "command": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance j1_detail -- --nocapture"
+    },
+    {
+      "item": "Ask 态鼠标选择已禁用（不选中被面板遮住的历史行）",
+      "status": "PASS",
+      "evidence": "tui.rs:7321-7327：AskUserQuestion 分支清除已激活选区并跳过 chat 选区处理，不再进入 Down/Drag 选中逻辑。",
+      "command": "sed -n '7318,7332p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "item": "契约 rev2 由 Protocol 独立批准（非实现者自改）",
+      "status": "PASS",
+      "evidence": "b477c090 `docs(tui): ratify ask overlay contract revision 2 [decl-change-approved]`；契约文件 :38-40 含「程序结论 / 批准 C10 / 批准 J1 细化」，并明确不追溯认可实现者自改契约。",
+      "command": "git show --stat --oneline b477c090 && grep -n \"程序结论\\|批准 C10\\|批准 J1\" .dev-team/contract-matrix-tui-overlay-cancel.md"
+    },
+    {
+      "item": "O8 / C10 标签拆分（日志泄漏归 C10，取消状态归 O8）",
+      "status": "PASS",
+      "evidence": "shell :407-435 全部改为 C10 标签；Rust :563 `o8_cancel_status_never_leaks_internal_payload` 保持 O8；历史证据文件仅加 LABEL-MAPPING 头。",
+      "command": "grep -n \"C10\" tests/acceptance/l2at-tui-overlay-cancel.sh && grep -n \"fn o8_cancel_status\" crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs"
+    },
+    {
+      "item": "Rust 19 用例 + PTY 15 断言全绿",
+      "status": "PASS",
+      "evidence": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2 → 19 passed / 0 failed（exit 0）；bash tests/acceptance/l2at-tui-overlay-cancel.sh → PASS=15 / FAIL=0（exit 0）。",
+      "command": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2 && bash tests/acceptance/l2at-tui-overlay-cancel.sh"
+    }
+  ],
+  "findings": [
+    {
+      "id": "ADV-1",
+      "severity": "ADVISORY",
+      "rule": "CORRECTNESS",
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2711,
+      "title": "交互 Ask 名称分类未 trim：带空白/混合大小写的 canonical 名称会漏判",
+      "detail": "is_interactive_ask_tool 对 canonical_name 只做 filter(!trim().is_empty()) + to_ascii_lowercase，未对取值本身 trim；`\" ask_user \"` 这类带空白的 canonical 不落入白名单，随后可能走到非 Ask 分支（结构化 JSON 仍被 plain_text_detail 挡住，但纯文本 detail 会回显）。",
+      "counterexample_cmd": "python3 -c \"key=' ask_user '.lower(); print('matched', key in {'ask_user','ask','builtin:ask','builtin:ask_user'})\"  # 输出 matched False ⇒ 与实现同判据，暴露漏判"
+    },
+    {
+      "id": "ADV-2",
+      "severity": "ADVISORY",
+      "rule": "CORRECTNESS",
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 3098,
+      "title": "实时工具行也改走 plain_text_detail：结构化 result 的普通工具在 live 行失去全部 detail",
+      "detail": "turn:tool / turn:tool_result 的 detail 由原始 arguments/result 改为 plain_text_detail；结构化 result（JSON 对象）⇒ 空 detail。符合 C10「结构化 JSON 不进 UI」的取向，但属信息密度取舍，ADR 0063 未显式登记，reviewer 提示后续如需保留人类信息应提取已有 summary 字段。",
+      "counterexample_cmd": "sed -n '3095,3172p' crates/pony-agent-core/src/bin/tui.rs | grep -n \"plain_text_detail\""
+    },
+    {
+      "id": "ADV-3",
+      "severity": "ADVISORY",
+      "rule": "CORRECTNESS",
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2760,
+      "title": "结构化 arguments + 纯文本 result 时省略 detail（不回退 result），与「纯文本兼容回退」条款存在措辞张力",
+      "detail": "history_tool_detail 末段调用 plain_text_detail(arguments, result)：plain_text_detail 只尝试 arguments（.or(result)），当 arguments 是 JSON 对象时直接 None，不再尝试纯文本 result。rev2 文字「空/占位且无该人类字段时省略 detail」允许该行为，但「普通工具仅保留非结构化纯文本 detail 的兼容回退」可被读成应回退到 result；建议下一版契约明确 result 是否参与回退。",
+      "counterexample_cmd": "rm -rf /tmp/probe-detail && mkdir -p /tmp/probe-detail && git archive 8d18d157 | tar -x -C /tmp/probe-detail && cd /tmp/probe-detail && printf '\\n#[test]\\nfn probe_detail() { let d = tui::history_tool_detail(\"Read\", None, None, \"\", Some(r#\"{\\\"path\\\":\\\"x\\\"}\"#), Some(\"文件内容：hello\")); println!(\"probe_detail = {d:?}\"); assert!(d.is_some()); }\\n' >> crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs && cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance probe_detail -- --nocapture  # 实测 probe_detail = None"
+    },
+    {
+      "id": "ADV-4",
+      "severity": "ADVISORY",
+      "rule": "CORRECTNESS",
+      "file": "crates/pony-agent-core/tests/tui_mouse_selection_acceptance.rs",
+      "line": 1,
+      "title": "Ask 态鼠标抑制无自动化用例（新行为仅代码级复核）",
+      "detail": "8d18d157 在 tui.rs:7321 新增「Ask 模式禁用鼠标选区」，但既有 mouse 套件全部在 Normal 态运行；冻结验收套件也未覆盖该分支，故该行为只有静态复核，没有回归护栏。",
+      "counterexample_cmd": "grep -rn \"AskUserQuestion\" crates/pony-agent-core/tests/tui_mouse_selection_acceptance.rs crates/pony-agent-core/tests/tui_mouse_selection_adversarial.rs || echo 'no Ask-mode mouse coverage'"
+    }
+  ],
+  "executed_checks": [
+    {
+      "command": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2",
+      "exit_code": 0,
+      "result": "19 passed / 0 failed"
+    },
+    {
+      "command": "bash tests/acceptance/l2at-tui-overlay-cancel.sh",
+      "exit_code": 0,
+      "result": "PASS=15 / FAIL=0"
+    },
+    {
+      "command": "突变探针（8d18d157 副本删除 register_turn_event_sink 后跑 c9_）",
+      "exit_code": 1,
+      "result": "c9 FAILED（运行日志命中 core 未注册告警）"
+    },
+    {
+      "command": "detail 回退探针（副本追加 probe_plain_result_fallback_with_structured_arguments）",
+      "exit_code": 1,
+      "result": "probe_detail = None（见 ADV-3）"
+    }
+  ],
+  "coverage_notes": [
+    "O1「历史+问题同帧」仍由 TestBackend 判定；PTY 仅证面板与固定基座不互相遮挡。",
+    "J1 交互 Ask 抑制由 5 条确定性单测覆盖（3c682310），PTY 继续覆盖非占位 description 优先与整段 JSON 负向。",
+    "C9 双观测面（pane + 运行日志）已在 3c682310 落地并经本轮突变复核。"
+  ]
+}

@@ -92,7 +92,7 @@
     }
   ],
   "acceptance_for_implementation_green": {
-    "rust": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2   (exit 0；14 用例含 O1-O8/J1/C9 + O1 夹具守卫)",
+    "rust": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2   (exit 0；19 用例含 O1-O8/J1/C9/C10/J1 边界单测)",
     "pty": "bash tests/acceptance/l2at-tui-overlay-cancel.sh   (exit 0；PASS=15 FAIL=0)",
     "lead_gate": [
       "cargo check --manifest-path crates/pony-agent-core/Cargo.toml --all-targets  (Lead 统一跑，逐项保留原生 Exit Code)",
@@ -103,7 +103,7 @@
   },
   "known_coverage_limits": [
     "O1「历史与问题同帧」只能在渲染层判定：PONY_AUDIT_ASK_BOOTSTRAP 的 pending Ask 归属启动期临时 session id，未能与 resume 历史在同一进程复现，故 PTY 帧只证明「面板与 header/Composer/指标行不互相遮挡」。",
-    "J1「交互 Ask 的结构化 arguments/result 不得成为摘要」这一分支尚无公共接缝：hydrate_state_from_session 私有；tools/tui-audit/mock_llm.py 的 ask 场景缺 schema 必填 description，被工具参数校验拒绝（该文件不在本票写域，未修改）。实现者需在 description 优先这一决策点同时按既有 ask_user/ask/builtin:ask/builtin:ask_user 分类抑制结构化摘要。",
+    "J1「交互 Ask 的结构化 arguments/result 不得成为摘要」：真实 resume 链路覆盖占位 description + arguments 人类字段；另由 5 条确定性单测覆盖空 description 结构化 JSON、纯文本回退、Ask 五类名称抑制与非占位优先。",
     "C9「注册项不得跨 turn 泄漏」不可由黑盒观察（控制面 sink 表私有，且契约禁止新增接口）：黑盒只证明（a）每轮有已注册 sink、（b）停止链路可达；成对 unregister 由代码评审 + core 成对 API 语义约束。"
   ],
   "no_fake_policy": {
@@ -121,11 +121,12 @@
     "defect_evidence": "tests/acceptance/receipts/l2at-tui-overlay-cancel/o1-fixture-defect-evidence.txt"
   },
   "green_phase": {
-    "verified_at": "2026-11-05T21:05:00+08:00",
+    "verified_at": "2026-11-05T21:45:02+08:00",
+    "implementation_commit": "8d18d157",
     "rust_native": {
       "command": "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2",
       "exit_code": 0,
-      "result": "14 passed / 0 failed",
+      "result": "19 passed / 0 failed",
       "receipt": "tests/acceptance/receipts/l2at-tui-overlay-cancel/green.log"
     },
     "pty_real_link": {
@@ -145,6 +146,20 @@
       "defect": "otel::log 的 JSON 缺省写 stdout，TUI 只 dup2 stderr ⇒ 结构化日志混入全屏界面（修复：set_stderr_output(true)）",
       "evidence": "tests/acceptance/receipts/l2at-tui-overlay-cancel/o8-structured-log-leak-evidence.txt",
       "not_weakened": "既有 O1-O8/J1/C9 断言未改动，仅新增"
+    },
+    {
+      "sha": "9ba49b4ce3f48aa4ad05382609bac695afc66111",
+      "message": "test(tui): judge C9 sink registration on the runtime log surface",
+      "what": "C9 双观测面：PTY 驱动回读 PONY_TUI_RUNTIME_LOG，Rust/shell 均断言不含未注册 sink 告警；附判别力样本测试。O4 改为无竞态字节序判定。",
+      "defect": "set_stderr_output 后告警只进运行日志，旧 C9 只扫 pane ⇒ 假绿；突变实测删除 register 后旧判据仍绿",
+      "evidence": "tests/acceptance/receipts/l2at-tui-overlay-cancel/c9-runtime-log-red-direction-evidence.txt",
+      "not_weakened": "旧 pane 判据保留，新增第二观测面"
+    },
+    {
+      "sha": "3c6823100d790b2f6bd3275c49523cb6b8cc5631",
+      "message": "test(tui): cover history_tool_detail contract and relabel log-leak judge as C10",
+      "what": "新增 5 条 history_tool_detail 确定性单测（占位 description、空 description JSON、纯文本回退、Ask 抑制、非占位优先）；PTY 日志泄漏标签 O8→C10。",
+      "contract_impact": "覆盖 Protocol Revision 2 批准的 J1 细化分支；未放宽断言"
     }
   ]
 }

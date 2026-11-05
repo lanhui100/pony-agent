@@ -1,0 +1,47 @@
+{
+  "verdict": "PASS",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "tui-protocol-review-8d18d157",
+    "fresh_context": true
+  },
+  "executed_by": "tui-protocol-review-8d18d157",
+  "reviewed_commit": "8d18d157",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/stop_escalation.rs",
+    "crates/pony-agent-core/src/agent/execution_control.rs",
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "tests/acceptance/l2at-tui-overlay-cancel.sh",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/",
+    ".dev-team/contract-matrix-tui-overlay-cancel.md",
+    ".dev-team/nfr-baseline-tui-overlay-cancel.json",
+    "docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md",
+    "docs/observability.yaml"
+  ],
+  "findings": [],
+  "evidence": {
+    "six_questions": [
+      "外部超时：无新增网络/外部 IO；3000ms 既有上限未改变。",
+      "日志：stderr_redirected 成功后才改道（tui.rs:6428-6444,6569-6584）；JSON 格式/trace_id 不变；实测 PONY_TUI_RUNTIME_LOG 第18行保留取消告警而屏幕无泄漏；NFR 理由已同步。",
+      "资源：初始 turn 在 start_turn_stream 返回后立即 drop guard（tui.rs:8368-8382），goal 续轮由局部 guard 在每次调用后回收（:8409-8427）；既有 unregister 同时清 sink/emitter（control_plane/mod.rs:2066-2080）。",
+      "并发/幂等：注册先于 current_turn_id 发布（tui.rs:8344-8350,8409-8418）；双击幂等；Ask 鼠标选区清理（:7319-7327）避免覆盖层下隐藏历史被选取。",
+      "配置/自检：无新配置/依赖；NFR validator Exit 0，audit-diff --decl-approved Exit 0，check-declaration Exit 0。",
+      "契约：Revision 2 已独立裁定 C10/J1；Rust 新增5项 J1 分支断言覆盖占位、无人类字段、纯文本回退、Ask 抑制；O8/C10 标签已分离，无事件/字段删改。"
+    ],
+    "commands": [
+      "cargo test -p pony-agent-core --test tui_overlay_cancel_acceptance -- --test-threads=2 → 19 passed / 0 failed，Exit 0",
+      "bash tests/acceptance/l2at-tui-overlay-cancel.sh → PASS=15 FAIL=0，Exit 0（含 C9 pane+运行日志双观测面与判别力自检）",
+      "node .dev-team/tools/validate-nfr-baseline.mjs .dev-team/nfr-baseline-tui-overlay-cancel.json → Exit 0",
+      "bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base 4b9e241a --decl-approved → Exit 0",
+      "bash ~/.agents/skills/observability-onboarding/scripts/check-declaration.sh /home/dm/pony-agent → Exit 0"
+    ]
+  }
+}
