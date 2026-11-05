@@ -10,6 +10,7 @@
 用户选择独立 worktree 后，本波与主工作树并发会话物理隔离，未发生脏写；红相冻结、绿相实现、Join Barrier 三段式 Git 检查点（66fb8555 / 4f98062e / 待合并）保证断点可续。测试分权有效：Executor 全程未改测试，Lead 独立复跑门禁，避免自证。但并行 ROI 为负：Protocol/Test/Executor 三常驻在共享 worktree 上串行等待，两轮 max-tokens 中断说明「上下文膨胀」比「墙钟等待」更贵；爆炸半径 451 行新增 / 85 行删除，触发 ≥2 路互补审查是正确判据，但审查子代理产出率不足，导致 Join Barrier 由 Lead 兜底。
 
 ## 4. 元协议迭代建议
+0. 追加事实：方案审查子代理虽因 max-tokens 未交 JSON，却留下 `/tmp/l3a-repro/repro` 物理反例，Lead 实跑发现 C1 跨 chunk 分片残留 `<｜` 的真实闭合缺口，随即补 wave-2 红绿补丁（2/2 + 15/15 + 52/52 全绿）。这证明「停滞代理的半成品产物也必须复核」，不能只按是否交收据计价。
 1. 给 Subagent 计算池加「产出优先」硬约束：侦察/审查类任务在 N 步内必须落盘目标 JSON，否则由 Lead 中断并代跑，禁止无限展开验证；本波 4 个子代理均因该缺口停滞。
 2. 红相空桩应在 Protocol 冻结阶段由机械模板生成（签名 → `unimplemented!("Cx")` → cargo check），避免 Test Agent 因等待签名耗尽上下文。
 3. PTY 冒烟 harness 必须区分「pane 销毁导致 capture 为空」与「提示未输出」：本波首次因 tmux 随进程退出销毁 pts 误判 FAIL，后由 pty-holding wrapper（exec sleep 保持 pts、自身不写 termios + 负控制实验）把 termios 读回打通并反转裁决为动态 PASS。该「先隔离 harness 伪失败、再补负控制」应成为标准动作。

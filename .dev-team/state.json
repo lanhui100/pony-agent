@@ -1101,6 +1101,41 @@
         "crates/pony-agent-core/src/agent/session/mod.rs:17-20 pure re-export (lead-assembly)"
       ],
       "decl_change_approval": "--decl-approved (explicit); no weakening: four-dimension applicability unchanged, only note appended"
+    },
+    {
+      "wave": "tui-session-resilience-wave2-chunk-split",
+      "theme": "补丁：跨 chunk DSML 半截前缀不得进入 provider 累计文本",
+      "tier": "S",
+      "tier_triggers": [
+        "单函数最小闭包",
+        "L3 对抗审查遗留物理反例"
+      ],
+      "baseline_commit": "c6d7c646",
+      "contract": ".dev-team/contract-matrix-tui-session-resilience.md (C1 additive)",
+      "branches": {
+        "test-agent": {
+          "status": "completed",
+          "red_commit": "(pending anchor)",
+          "write_scopes": [
+            "crates/pony-agent-core/tests/tui_session_resilience_chunk_split.rs",
+            ".dev-team/red-phase-tui-chunk-split.json"
+          ]
+        },
+        "executor": {
+          "status": "completed",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/provider/mod.rs"
+          ]
+        }
+      },
+      "gates": {
+        "red_phase": "EXIT 101; 1 native assert failure (\"<｜［工具调用］\"); dev-red-purity pure_red=true",
+        "green_phase": "chunk_split 2/2; acceptance 15/15; regressions 52/52; cargo check --all-targets 0; RUSTFLAGS=-D warnings 0",
+        "observability": "audit-diff --decl-approved 0; check-declaration 0",
+        "review": "L3-A stalled subagent left /tmp/l3a-repro/repro physical counterexample; Lead re-ran and closed via red/green patch"
+      },
+      "status": "completed",
+      "quarantine": null
     }
   ],
   "counters": {

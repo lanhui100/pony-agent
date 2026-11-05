@@ -36,3 +36,15 @@
 - PTY 动态验证：Join Barrier 已由 Lead + PTY 冒烟执行者用 pty-holding wrapper 完成（`docs/release/evidence/wave-tui-session-resilience/pty-smoke-receipt.json`）：/quit 与 SIGTERM 双路径进程退出、termios 由 raw 复原（stty rc=0）、`pony resume <id>` 提示可见、负控制证明 wrapper 不自行修复；VERDICT=PASS，0 failed / 0 degraded。冻结验收用例 C8 的静态标注保留为测试层事实，不冒充动态；动态证据另计。
 - `session/mod.rs` 的 3 行纯 re-export 由 Lead 裁决为 `lead-assembly` 白名单例外（无业务逻辑，避免检查点纯函数双真值源）。
 - 未新增重试预算、网络端点、环境变量、依赖、持久化 schema 字段或外部异常码。
+
+## 补丁绿相（wave-2 分片闭合）
+
+- 触发：L3 反例 `/tmp/l3a-repro/repro`：完整 DSML 块切成 `["<｜","｜DSML｜｜ calls>…"]` 逐片清洗累加得 `"<｜［工具调用］"`，provider `output_text` 残留半截协议前缀。
+- 改动（唯一）：`crates/pony-agent-core/src/agent/provider/mod.rs:4330-4405`，`sanitize_dsml_protocol_text` 新增 `dsml_partial_tail_len` 尾部半截前缀识别（合法 UTF-8 边界、已知标签前缀、尾部有限窗口），函数体改对 `body` 扫描并在收尾二次截断；孤立 `｜DSML｜｜` 行仍整行剔除。未改签名、未改测试、未改其他文件、未 git 写。
+- 防误伤：单个 `<` 结尾正文与 markdown 代码块逐字保真（CHUNK-A02 绿）。
+
+| 命令 | Exit | 原始 stdout 摘要 |
+| :-- | --: | :-- |
+| `cargo test -p pony-agent-core --test tui_session_resilience_chunk_split --message-format short` | 0 | `test c1_chunk_split_dsml_prefix_is_not_persisted ... ok`; `test c1_plain_angle_bracket_text_is_verbatim ... ok`; `test result: ok. 2 passed; 0 failed` (`/tmp/executor-patch-final-tui_session_resilience_chunk_split.log`) |
+| `cargo test -p pony-agent-core --test tui_session_resilience_acceptance --message-format short` | 0 | `test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s` (`/tmp/executor-patch-final-tui_session_resilience_acceptance.log`) |
+| `cargo check -p pony-agent-core --all-targets --message-format short` | 0 | `Checking pony-agent-core v0.1.154`; `Finished \`dev\` profile [unoptimized] target(s) in 57.50s` (`/tmp/executor-patch-final-check.log`) |

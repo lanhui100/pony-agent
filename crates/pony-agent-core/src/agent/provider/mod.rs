@@ -4327,24 +4327,64 @@ const DSML_CALLS_OPEN: &str = "<｜｜DSML｜｜ calls>";
 const DSML_CALLS_CLOSE: &str = "</｜｜DSML｜｜ calls>";
 const DSML_PLACEHOLDER: &str = "［工具调用］";
 
+/// 尾部「已识别 DSML 协议前缀」的半截形态：只认已知标签的合法前缀，
+/// 普通正文以单个 `<` 结尾 / markdown 代码块 / `<tag>` 一律不判命中。
+fn dsml_partial_tail_len(text: &str) -> Option<usize> {
+    let trimmed = text.trim_end_matches(['\r', '\n', ' ', '\t']);
+    let known_tags = [
+        DSML_CALLS_OPEN,
+        DSML_CALLS_CLOSE,
+        "<｜｜DSML｜｜ invoke",
+        "</｜｜DSML｜｜ invoke>",
+        "<｜｜DSML｜｜ parameter",
+        "</｜｜DSML｜｜ parameter>",
+        "<｜｜DSML｜｜",
+        "｜DSML｜｜",
+        "｜｜DS",
+    ];
+    // 只检查尾部有限窗口内、合法 UTF-8 字符边界上的候选，
+    // 绝不按裸 byte offset 切片；单个 `<` 属普通正文，不判命中。
+    let max_tag_len = known_tags.iter().map(|tag| tag.len()).max().unwrap_or(0);
+    for (start, _) in trimmed.char_indices().rev() {
+        if trimmed.len() - start > max_tag_len {
+            break;
+        }
+        let tail = &trimmed[start..];
+        if tail.contains('>') || tail.len() <= "<".len() {
+            continue;
+        }
+        if known_tags.iter().any(|tag| tag.starts_with(tail)) {
+            return Some(text.len() - start);
+        }
+    }
+    None
+}
+
 pub fn sanitize_dsml_protocol_text(text: &str) -> String {
-    let mut cleaned = String::with_capacity(text.len());
+    // 跨 chunk 被切断的半截标记先截掉：分片累加时不得残留 `<｜` / `｜DSML` 等前缀。
+    let body = match dsml_partial_tail_len(text) {
+        Some(len) => &text[..text.len() - len],
+        None => text,
+    };
+    let mut cleaned = String::with_capacity(body.len());
     let mut cursor = 0usize;
     let mut folded = false;
-    while let Some(relative) = text[cursor..].find(DSML_CALLS_OPEN) {
+    while let Some(relative) = body[cursor..].find(DSML_CALLS_OPEN) {
         let open = cursor + relative;
-        cleaned.push_str(&text[cursor..open]);
+        cleaned.push_str(&body[cursor..open]);
         let after_open = open + DSML_CALLS_OPEN.len();
-        cursor = match text[after_open..].find(DSML_CALLS_CLOSE) {
+        cursor = match body[after_open..].find(DSML_CALLS_CLOSE) {
             Some(relative_close) => after_open + relative_close + DSML_CALLS_CLOSE.len(),
-            None => text.len(),
+            None => body.len(),
         };
         if !folded {
             cleaned.push_str(DSML_PLACEHOLDER);
             folded = true;
         }
     }
-    cleaned.push_str(&text[cursor..]);
+    cleaned.push_str(&body[cursor..]);
+    // 孤立 `｜DSML｜｜` 行 / 以 `｜DSML` 开头的半截尾巴也属协议残留，整行剔除；
+    // 普通含尖括号正文不受影响。
     if cleaned.contains("｜DSML｜｜") {
         let mut filtered = String::with_capacity(cleaned.len());
         for line in cleaned.split_inclusive('\n') {
@@ -4357,6 +4397,9 @@ pub fn sanitize_dsml_protocol_text(text: &str) -> String {
         if !cleaned.contains(DSML_PLACEHOLDER) {
             cleaned.push_str(DSML_PLACEHOLDER);
         }
+    }
+    if let Some(len) = dsml_partial_tail_len(&cleaned) {
+        cleaned.truncate(cleaned.len() - len);
     }
     cleaned
 }
