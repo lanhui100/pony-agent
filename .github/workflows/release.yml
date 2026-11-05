@@ -252,3 +252,13 @@ jobs:
           }
           if (-not $ok) { throw "published release verification failed: releases/tags/$tag not resolvable or latest.json missing" }
           Write-Host "release published and verified: $tag"
+
+      - name: 发送企业微信发版通知
+        if: success()
+        env:
+          WX_WORK_EXTERNAL_API_URL: ${{ secrets.WX_WORK_EXTERNAL_API_URL }}
+          WX_WORK_EXTERNAL_API_KEY: ${{ secrets.WX_WORK_EXTERNAL_API_KEY }}
+          WX_WORK_TO_USER: ${{ vars.WX_WORK_TO_USER || 'MaHui' }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/send-wecom-notification.mjs "${{ github.ref_name }}"
+

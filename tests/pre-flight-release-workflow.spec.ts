@@ -71,4 +71,10 @@ describe("[RED DEGRADED: STATIC-ONLY] release.yml 发布流程接线（契约矩
     const withBlock = lines.slice(checkoutIdx, checkoutIdx + 15);
     expect(withBlock.some((l) => /^\s*fetch-depth:\s*0\s*$/.test(l))).toBe(true);
   });
+
+  it("包含企业微信发版通知步骤且挂载 node scripts/send-wecom-notification.mjs", () => {
+    expect(workflow).toMatch(/node scripts\/send-wecom-notification\.mjs/);
+    expect(workflow).toMatch(/WX_WORK_EXTERNAL_API_URL/);
+    expect(workflow).toMatch(/WX_WORK_EXTERNAL_API_KEY/);
+  });
 });

@@ -1,0 +1,384 @@
+{
+ "applicability": {
+  "acceptance_tests_present": true,
+  "note": "无验收测试时 red/drift 规则判 not-applicable，绝不静默通过"
+ },
+ "repo_profile": {
+  "acceptance_dirs": [
+   "tests/acceptance"
+  ],
+  "has_acceptance": true,
+  "top_exts": [
+   [
+    "md",
+    1091
+   ],
+   [
+    "json",
+    444
+   ],
+   [
+    "png",
+    281
+   ],
+   [
+    "rs",
+    278
+   ],
+   [
+    "ts",
+    233
+   ],
+   [
+    "txt",
+    182
+   ]
+  ],
+  "test_scripts": {
+   "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
+   "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+   "cargo:test:regression": "cargo test --manifest-path src-tauri/Cargo.toml --test session_regression --test provider_registry_regression --test tool_router_regression --target-dir target-test",
+   "cargo:test:shared": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 test test",
+   "cargo:test:exact": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-a test",
+   "cargo:test:exact:b": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-b test",
+   "cargo:test:exact:c": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-c test",
+   "test": "npm run test:unit",
+   "test:unit": "vitest run",
+   "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
+   "test:e2e": "npm run build && playwright test",
+   "test:tauri:smoke": "node scripts/tauri-smoke.js",
+   "preview:e2e": "vite preview --host 127.0.0.1 --port 4175"
+  }
+ },
+ "run_id": "session-ad203415-47ce-458e-afd3-2c0ed4ca2ce7",
+ "task": "wave-64 停止即时生效 + 终态由最后一条状态消息唯一承载",
+ "tier": "B",
+ "base": "06472465",
+ "head": "043c26e1",
+ "work": {
+  "L": 908,
+  "files": 12,
+  "board_tasks": [
+   "[wave-64/T1] 红相：停止即时生效 + 终态状态消息 验收测试冻结",
+   "[wave-64/T2] executor-fe：终态状态消息唯一承载（stopped/error）+ 移除额外消息",
+   "[wave-64/T3] executor-rs：桌面停止路径享有 C2/C5 + 取消不得误判为失败"
+  ],
+  "gates_seen_in_session": {
+   "unit": 3,
+   "accept": 7,
+   "browser": 13,
+   "type": 2
+  }
+ },
+ "commits": [
+  {
+   "sha": "af599ef497c6",
+   "full": "af599ef497c61713f9b47fbb90b9d99d82ba20c4",
+   "subject": "test(wave-64): freeze red-phase acceptance tests (F1 stopped/error status, F2 no extra message, R1/R2 stop semantics)",
+   "files": [
+    ".dev-team/contracts/wave-64-stop-terminal-status.md",
+    ".dev-team/l2at-done-wave64-tests.json",
+    ".dev-team/regression-baseline-wave64.json",
+    ".dev-team/state.json",
+    ".dev-team/wave64-red-receipts.md",
+    "crates/pony-agent-core/tests/stop_graph_run_wave64.rs",
+    "tests/HomeWorkspace.spec.ts",
+    "tests/acceptance/wave64/f1-f2-workspace-terminal-status.spec.ts",
+    "tests/acceptance/wave64/f1-stopped-terminal-status.spec.ts",
+    "tests/acceptance/wave64/f2-no-placeholder-message.spec.ts",
+    "tests/runtime-store.spec.ts",
+    "tests/stop-stop-turn.spec.ts"
+   ],
+   "stat": "12 files changed, 2009 insertions(+), 23 deletions(-)"
+  },
+  {
+   "sha": "778717ecfda2",
+   "full": "778717ecfda24c7b1b04d060119789c041effcd4",
+   "subject": "feat(ui): 工具退出码分类解析与中文标签（P1-2 数据层）+ 清理假 token 字面量",
+   "files": [
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/ponysentry/sanitizer.rs",
+    "crates/pony-agent-core/tests/otel_tool_payload_test.rs",
+    "crates/pony-agent-core/tests/otel_turn_failure_reason_test.rs",
+    "src/lib/runtime/tool-result-meta.ts",
+    "tests/tool-exit-code-meta.spec.ts"
+   ],
+   "stat": "6 files changed, 280 insertions(+), 25 deletions(-)"
+  },
+  {
+   "sha": "801cafe05e1d",
+   "full": "801cafe05e1d43f79a3bce3eff403bbbfd140f9a",
+   "subject": "feat(wave-64): 停止即时生效 + 终态由最后一条状态消息唯一承载",
+   "files": [
+    ".dev-team/contracts/wave-64-stop-terminal-status.md",
+    ".dev-team/l2at-done-wave64-tests.json",
+    ".dev-team/review-wave64-a.json",
+    ".dev-team/review-wave64-b.json",
+    ".dev-team/review-wave64-l3p.json",
+    ".dev-team/wave64-browser-gate.md",
+    ".dev-team/wave64-green-fe.md",
+    ".dev-team/wave64-green-rs.md",
+    ".dev-team/wave64-red-receipts.md",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/tests/stop_graph_run_wave64.rs",
+    "docs/release/evidence/wave-64/stopped-terminal-status.png",
+    "src/components/HomeWorkspace.vue",
+    "src/components/chat/AgentRuntimeStatusBar.vue",
+    "src/components/chat/WorkspaceTurnItem.vue",
+    "src/lib/runtime/constants.ts",
+    "src/lib/runtime/status.ts",
+    "src/stores/runtime.ts",
+    "tests/acceptance/wave64/f1-f2-workspace-terminal-status.spec.ts",
+    "tests/acceptance/wave64/f2-no-placeholder-message.spec.ts",
+    "tests/e2e/wave64-terminal-status.spec.ts"
+   ],
+   "stat": "23 files changed, 1719 insertions(+), 162 deletions(-)"
+  },
+  {
+   "sha": "5f2950605630",
+   "full": "5f295060563008263e0e0730080a65da9b43c44d",
+   "subject": "fix(wave-64): prepare_turn 失败派发补 terminal-once 闸门 + 交付归档与可观测性归属登记",
+   "files": [
+    ".dev-team/review-wave64-recheck.json",
+    ".dev-team/state.json",
+    ".dev-team/wave64-delivery.md",
+    ".dev-team/wave64-green-rs.md",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "docs/observability.yaml"
+   ],
+   "stat": "6 files changed, 211 insertions(+)"
+  },
+  {
+   "sha": "043c26e1f167",
+   "full": "043c26e1f1674bd45fb2d135450e3e203ec86911",
+   "subject": "chore(release): wave-64 元复盘与收口（审查收据/浏览器证据/元复盘）",
+   "files": [
+    ".dev-team/meta-retrospective.md"
+   ],
+   "stat": "1 file changed, 27 insertions(+), 120 deletions(-)"
+  }
+ ],
+ "post_run_commits": [
+  {
+   "sha": "16b691293b8e",
+   "full": "16b691293b8e37673fdb6485da09a59cf9eb0026",
+   "subject": "feat(runtime): parallel_tools 接入批执行（开关默认关，P1-1 / B018 的 D4）",
+   "files": [
+    ".dev-team/designs/multi-tool-call-execution.md",
+    "backlog/backlog.md",
+    "crates/pony-agent-core/src/agent/runtime/batch_plan.rs",
+    "crates/pony-agent-core/src/agent/runtime/limits.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs"
+   ]
+  },
+  {
+   "sha": "efbb9195c609",
+   "full": "efbb9195c60951ceb1294887b372fd064f4d46f5",
+   "subject": "feat(runtime): turn_stream 批执行多工具调用（P1-1 / B018 的 D3b）",
+   "files": [
+    ".dev-team/designs/multi-tool-call-execution.md",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs"
+   ]
+  },
+  {
+   "sha": "6d743b821272",
+   "full": "6d743b821272b4df0ba7b0cef58da3feb2da0ece",
+   "subject": "feat(provider): ProviderDecision/Response 增 tool_calls 复数位（P1-1 / B018 的 D1a）",
+   "files": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/planner.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/planner_patches.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_recovery.rs",
+    "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+    "crates/pony-agent-core/tests/otel_trace_migration_test.rs"
+   ]
+  },
+  {
+   "sha": "33b416ef2c10",
+   "full": "33b416ef2c1030d898faea7c05fca1944138526e",
+   "subject": "feat(session): turn 级 degraded/tool_failures 落本地记录并在 trace 面板呈现（P1-2 收尾）",
+   "files": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/session/tests.rs",
+    "crates/pony-agent-core/src/agent/session/types.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/tests/turn_trace_degraded_fields_test.rs",
+    "src/components/HomeTracePanel.vue",
+    "src/lib/runtime/turn-health.ts",
+    "src/types/runtime.ts",
+    "tests/TelemetryPage.spec.ts",
+    "tests/turn-degraded-badge.spec.ts"
+   ]
+  },
+  {
+   "sha": "ed089e793383",
+   "full": "ed089e793383700533345926393043b5375bcde8",
+   "subject": "fix(runtime): 主失败路径保留已产出正文（B017）+ 修 wave-64 遗留 stop_turn 用例",
+   "files": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs"
+   ]
+  },
+  {
+   "sha": "85252be7305a",
+   "full": "85252be7305adffc6bb28460cc8fa134802a4249",
+   "subject": "feat(telemetry): 上传回执结构化 + 部分成功语义（P1-3）",
+   "files": [
+    "crates/pony-agent-core/src/agent/control_plane/query_commands.rs",
+    "crates/pony-agent-core/src/agent/otel/mod.rs",
+    "crates/pony-agent-core/tests/otel_trace_migration_test.rs",
+    "crates/pony-agent-core/tests/ponysentry_manual_upload_test.rs",
+    "crates/pony-agent-core/tests/upload_trace_receipt_test.rs",
+    "src-tauri/src/lib.rs",
+    "src/components/telemetry/TelemetryPage.vue",
+    "src/lib/runtime/upload-receipt.ts",
+    "tests/upload-receipt.spec.ts"
+   ]
+  },
+  {
+   "sha": "2a2b02ddd56b",
+   "full": "2a2b02ddd56b3f8b5c635efeb60b1bca304ce64f",
+   "subject": "feat(ui): 工具行显示退出码分类徽标（P1-2 接线）",
+   "files": [
+    "src/components/chat/WorkspaceTurnItem.vue"
+   ]
+  }
+ ],
+ "foreign_commits": [],
+ "frozen_test_drift": [
+  {
+   "path": "crates/pony-agent-core/tests/stop_graph_run_wave64.rs",
+   "anchor": "af599ef497c6",
+   "modified_by": "801cafe05e1d",
+   "subject": "feat(wave-64): 停止即时生效 + 终态由最后一条状态消息唯一承载"
+  },
+  {
+   "path": "tests/acceptance/wave64/f1-f2-workspace-terminal-status.spec.ts",
+   "anchor": "af599ef497c6",
+   "modified_by": "801cafe05e1d",
+   "subject": "feat(wave-64): 停止即时生效 + 终态由最后一条状态消息唯一承载"
+  },
+  {
+   "path": "tests/acceptance/wave64/f2-no-placeholder-message.spec.ts",
+   "anchor": "af599ef497c6",
+   "modified_by": "801cafe05e1d",
+   "subject": "feat(wave-64): 停止即时生效 + 终态由最后一条状态消息唯一承载"
+  }
+ ],
+ "review_receipts": [
+  {
+   "file": ".dev-team/review-wave64-a.json",
+   "schema_version": 2,
+   "executed_by": "session-bfd2044a-b5f4-4892-9b84-b17b03ff34bb:wave64-l3a",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "session-bfd2044a-b5f4-4892-9b84-b17b03ff34bb:wave64-l3a",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "778717ec",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-wave64-b.json",
+   "schema_version": 2,
+   "executed_by": "0dd70e55-9750-4c70-a55c-498a38bf1eb9",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "0dd70e55-9750-4c70-a55c-498a38bf1eb9",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "778717ecfda24c7b1b04d060119789c041effcd4",
+   "verdict": "FAIL",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-wave64-l3p.json",
+   "schema_version": 2,
+   "executed_by": "66e7421b-3e59-4350-a2de-0ee336d59fa3",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "66e7421b-3e59-4350-a2de-0ee336d59fa3",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "778717ec",
+   "verdict": "PASS",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-wave64-recheck.json",
+   "schema_version": 2,
+   "executed_by": "session-ad203415-47ce-458e-afd3-2c0ed4ca2ce7/l3-recheck-w64",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "session-ad203415-47ce-458e-afd3-2c0ed4ca2ce7/l3-recheck-w64",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "801cafe05e1d43f79a3bce3eff403bbbfd140f9a",
+   "verdict": "PASS",
+   "independent": true
+  }
+ ],
+ "mechanical_red_flags": [
+  "frozen_test_drift:crates/pony-agent-core/tests/stop_graph_run_wave64.rs,tests/acceptance/wave64/f1-f2-workspace-terminal-status.spec.ts,tests/acceptance/wave64/f2-no-placeholder-message.spec.ts",
+  "impl_commit_modified_frozen_test:778717ecfda2",
+  "self_signed_review:review-join-a.json",
+  "self_signed_review:review-join-a2.json",
+  "self_signed_review:review-join-b.json",
+  "self_signed_review:review-join-b2.json",
+  "self_signed_review:review-join-pds3.json",
+  "self_signed_review:review-join-wave59-r2.json",
+  "self_signed_review:review-join-wave59.json",
+  "self_signed_review:review-join-wave61-a.json",
+  "self_signed_review:review-join-wave61-b.json",
+  "self_signed_review:review-join.json",
+  "self_signed_review:review-l3-concurrency.json",
+  "self_signed_review:review-l3-security.json",
+  "self_signed_review:review-l3p-wave60.json",
+  "self_signed_review:review-l3p.json",
+  "self_signed_review:review-plan-pds3.json",
+  "self_signed_review:review-plan-wave58.json",
+  "self_signed_review:review-plan-wave59.json",
+  "self_signed_review:review-plan-wave61-a.json",
+  "self_signed_review:review-plan-wave61-b.json",
+  "self_signed_review:review-plan-wave61-team.json",
+  "self_signed_review:review-plan.json",
+  "self_signed_review:review-promote-A.json",
+  "self_signed_review:review-promote-B.json",
+  "self_signed_review:review-tool-timeout.json",
+  "self_signed_review:review-wave60-a.json",
+  "self_signed_review:review-wave60-b.json",
+  "self_signed_review:review-wave60-recheck.json",
+  "self_signed_review:review-wave61-a.json",
+  "self_signed_review:review-wave61-fa.json",
+  "self_signed_review:review-wave61-fp.json",
+  "self_signed_review:review-wave61-fr.json",
+  "self_signed_review:review-wave61-fv.json",
+  "self_signed_review:review-wave61-l3p.json",
+  "self_signed_review:review-wave61-recheck.json",
+  "self_signed_review:review-wave62-concurrency.json",
+  "self_signed_review:review-wave62-contract.json",
+  "self_signed_review:review-wave62-recheck.json",
+  "self_signed_review:review-wave64-a.json",
+  "self_signed_review:review-wave64-b.json",
+  "self_signed_review:review-wave64-l3p.json",
+  "self_signed_review:review-wave64-recheck.json"
+ ],
+ "unknowns": [
+  "每个门禁实际抓到多少缺陷（gate_caught）需从 review JSON/测试日志判定",
+  "用户是否口头授权了自扩范围（scope）需读会话原文"
+ ],
+ "pack_hash": "f1b7072ee43e723b"
+}
