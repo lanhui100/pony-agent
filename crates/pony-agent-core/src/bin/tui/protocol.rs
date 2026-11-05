@@ -380,6 +380,62 @@ pub struct TuiGoal {
     pub revision: u64,
 }
 
+// -----------------------------------------------------------------------------
+// 6. Team 角色花名册 (Agent Roster / W3 可见性)
+// -----------------------------------------------------------------------------
+
+/// `/agents` 花名册的一行：全部字段来自**真实运行时**，不造数据。
+///
+/// - `target`/`name`/`role`/`status`：`orchestration::list_agents()` 的名册快照；
+/// - `pending_inbox`：该 target 收件箱里尚未驱动的消息数（`inbox_pending_len`）；
+/// - `driving`：是否有后台驱动线程正在跑该 target（`is_driving`）；
+/// - `session_id`：该 teammate 最近一次**成功** turn 的子会话 id
+///   （`teammate_session_id`；`None` = 尚未成功运行过，Enter 时给出提示）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRosterEntry {
+    pub target: String,
+    pub name: String,
+    pub role: String,
+    pub status: String,
+    pub pending_inbox: usize,
+    pub driving: bool,
+    pub session_id: Option<String>,
+}
+
+/// `/agents` 面板状态：条目快照 + 当前选择（`selected` 恒落在 `0..len`，空表时为 0）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRosterState {
+    pub entries: Vec<AgentRosterEntry>,
+    pub selected: usize,
+}
+
+impl AgentRosterState {
+    pub fn new(entries: Vec<AgentRosterEntry>) -> Self {
+        Self {
+            entries,
+            selected: 0,
+        }
+    }
+
+    pub fn selected_entry(&self) -> Option<&AgentRosterEntry> {
+        self.entries.get(self.selected)
+    }
+
+    /// 下移选择（空表/单条时不动，不 wrap 到另一端，避免误按触发跳转）。
+    pub fn next(&mut self) {
+        if self.selected + 1 < self.entries.len() {
+            self.selected += 1;
+        }
+    }
+
+    /// 上移选择（同 `next` 的边界口径）。
+    pub fn prev(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+}
+
 impl TuiGoal {
     pub fn new(id: String, objective: String, max_rounds: Option<u32>) -> Self {
         Self {

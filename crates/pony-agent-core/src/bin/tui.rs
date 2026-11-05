@@ -23,6 +23,11 @@ use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand, StopTurnCommand,
 };
 use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalData};
+// W3：Team 可见性数据源（全部来自真实运行时，不造数据）。
+use pony_agent_core::agent::orchestration::{
+    inbox_pending_len, is_driving, list_agents, team_task_list, teammate_session_id, TeamTaskItem,
+    TeammateStatus,
+};
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::todo::{TodoItem, TodoStatus as StoreTodoStatus};
 use pony_agent_core::agent::runtime::{
@@ -459,6 +464,11 @@ pub struct PendingUiRequest {
 }
 
 /// 真实 todo 存储 → 任务看板投影。`id` 按存储顺序稳定生成，避免每帧抖动。
+/// W3：`/tasks` 已切到**真实 Team 任务看板**（`orchestration::team_task_list`）。
+///
+/// 本函数保留为 todo 投影能力（todo 模块与 `todo_write`/`todo_list` 工具均未删除，
+/// 供需要按会话查看 todo 的调用方复用），因此在此显式标注 dead_code 而非删除。
+#[allow(dead_code)]
 pub fn tui_tasks_from_todos(todos: Vec<TodoItem>) -> Vec<TuiTask> {
     todos
         .into_iter()
@@ -482,16 +492,46 @@ pub fn tui_tasks_from_todos(todos: Vec<TodoItem>) -> Vec<TuiTask> {
         .collect()
 }
 
-/// 真实 todo 存储 → 任务看板（模型调用 todo 工具后由这里同步，不造假数据）。
+/// Team 状态字符串 → TUI 状态枚举（前后端兼容口径）。
+///
+/// 团队看板的 `status` 是 wire 字符串（`pending/in_progress/completed/blocked`），并兼容
+/// 历史/别名写法（`open`/`todo`/`done`/`running`/`failed`…）。**未知值一律降级 `Pending`**，
+/// 绝不把状态吞成成功。
+fn tui_task_status_from_team_status(status: &str) -> TuiTaskStatus {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "completed" | "complete" | "done" | "closed" | "resolved" => TuiTaskStatus::Completed,
+        "in_progress" | "in-progress" | "inprogress" | "running" | "active" | "started" => {
+            TuiTaskStatus::InProgress
+        }
+        "blocked" | "failed" | "cancelled" | "canceled" | "rejected" => TuiTaskStatus::Blocked,
+        _ => TuiTaskStatus::Pending,
+    }
+}
+
+/// 真实 Team 任务存储 → TUI 任务看板投影（owner / blocked_by / write_scopes 原样透传）。
+pub fn tui_tasks_from_team_tasks(tasks: Vec<TeamTaskItem>) -> Vec<TuiTask> {
+    tasks
+        .into_iter()
+        .map(|task| TuiTask {
+            id: task.task_id,
+            subject: task.subject,
+            status: tui_task_status_from_team_status(&task.status),
+            owner: task.owner,
+            blocked_by: task.blocked_by,
+            write_scopes: task.write_scopes,
+        })
+        .collect()
+}
+
+/// 真实 **Team 任务**存储 → 任务看板（模型/Agent 调用 `team_task_*` 后由这里同步）。
+///
+/// W3：数据源从会话级 todo 切换为**团队共享看板**（`team_task_list()`）；空列表保留 `None`，
+/// 让面板走「当前没有任务」空状态而不是 0/0 看板（与既有行为一致）。
 pub fn sync_tasks_from_store(state: &mut TuiState) {
-    let args = pony_agent_core::agent::todo::TodoListArgs {
-        session_id: Some(state.session_id.clone()),
-    };
-    match pony_agent_core::agent::todo::todo_list(args) {
+    match team_task_list() {
         Ok(list) => {
-            let tasks = tui_tasks_from_todos(list.todos);
+            let tasks = tui_tasks_from_team_tasks(list.tasks);
             if tasks.is_empty() {
-                // 空列表保留 `None`，让面板走「当前没有任务」空状态而不是 0/0 看板。
                 state.task_board_state = None;
             } else {
                 state.update_task_board(tasks);
@@ -501,6 +541,57 @@ pub fn sync_tasks_from_store(state: &mut TuiState) {
             state.status_text = format!("任务同步失败: {error}");
         }
     }
+}
+
+/// W3：名册状态 → 面板展示文案（wire 小写，与 `TeammateStatus` 的 serde 口径一致）。
+fn teammate_status_label(status: &TeammateStatus) -> String {
+    match status {
+        TeammateStatus::Provisioning => "provisioning",
+        TeammateStatus::Active => "active",
+        TeammateStatus::Running => "running",
+        TeammateStatus::Inactive => "inactive",
+        TeammateStatus::Failed => "failed",
+    }
+    .to_string()
+}
+
+/// W3：会话 id 的展示尾号（面板宽度有限，只显示末 4 位便于对照日志）。
+fn session_tail(session_id: &str) -> String {
+    let chars: Vec<char> = session_id.chars().collect();
+    let start = chars.len().saturating_sub(4);
+    chars[start..].iter().collect()
+}
+
+/// W3：真实运行时 → `/agents` 花名册快照。
+///
+/// 数据源全部是真实存储（`list_agents` 名册 / 收件箱 / 驱动态 / 最近成功会话），
+/// 不构造任何假成员；`lead` 固定排首位（其余按 target 字典序，保证面板顺序稳定）。
+pub fn agent_roster_state_from_runtime() -> AgentRosterState {
+    let mut entries: Vec<AgentRosterEntry> = match list_agents() {
+        Ok(roster) => roster
+            .agents
+            .into_iter()
+            .map(|member| AgentRosterEntry {
+                pending_inbox: inbox_pending_len(&member.target),
+                driving: is_driving(&member.target),
+                session_id: teammate_session_id(&member.target),
+                target: member.target,
+                name: member.name,
+                role: member.role,
+                status: teammate_status_label(&member.status),
+            })
+            .collect(),
+        Err(error) => {
+            eprintln!("[tui] /agents 名册读取失败: {error}");
+            Vec::new()
+        }
+    };
+    entries.sort_by(|left, right| {
+        (left.target != "lead")
+            .cmp(&(right.target != "lead"))
+            .then_with(|| left.target.cmp(&right.target))
+    });
+    AgentRosterState::new(entries)
 }
 
 /// 真实 goal 存储 → TUI goal 投影。phase 用现有字符串契约，未知值降级为 `Active`。
@@ -710,6 +801,8 @@ pub enum InteractionMode {
     AskUserQuestion,
     PlanMode,
     TaskBoard,
+    /// W3：`/agents` Team 角色与状态花名册（↑↓ 选择 · Enter 进入队友子会话 · r 返回主会话 · Esc 关闭）。
+    AgentRoster,
 }
 
 pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
@@ -719,6 +812,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
     ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
     ("/tasks", "切换/查看 Team 任务看板（Ctrl+T）"),
+    ("/agents", "查看 Team 角色与状态"),
     ("/clear", "清空当前消息上下文"),
     ("/compact", "压缩当前会话上下文"),
     ("/help", "查看所有支持的快捷指令"),
@@ -1496,6 +1590,10 @@ pub struct TuiState {
     /// wave-60 §C9：当前流式轮的 turn_id（新一轮开始时覆盖）。
     /// 用于 `apply_stop_terminal` 在**无在飞停止请求**时拒绝旧轮迟到的终态。
     pub streaming_turn_id: Option<String>,
+    /// W3：Team 角色花名册面板（`None` = 未打开/已关闭）。
+    pub agent_roster_state: Option<AgentRosterState>,
+    /// W3：进入 teammate 子会话前保存的主会话 id（`r` 返回用；`None` = 当前不在队友会话）。
+    pub return_session_id: Option<String>,
     /// 契约（修订11 步骤2）：按消息粒度的布局缓存（宽度/条数变化或显式失效时重建）。
     render_cache: RenderCache,
 }
@@ -1565,6 +1663,8 @@ impl Default for TuiState {
             provider_registry_path: None,
             stopping_turn_id: None,
             streaming_turn_id: None,
+            agent_roster_state: None,
+            return_session_id: None,
             render_cache: RenderCache::default(),
         }
     }
@@ -1694,6 +1794,10 @@ impl TuiState {
         // wave-60 §C8/C9：会话作用域复位 ⇒ 停止请求态、当前流式轮与双击上膛一并失效。
         self.stopping_turn_id = None;
         self.streaming_turn_id = None;
+        // W3：花名册面板与"返回主会话"目标都绑定会话作用域，复位时一并清空
+        //（调用方若需要保留 return_session_id，必须在 reset 之后再写入）。
+        self.agent_roster_state = None;
+        self.return_session_id = None;
         // 会话作用域复位 ⇒ 布局缓存必须失效（/clear 与 /resume 共用本方法）。
         self.invalidate_render_cache();
     }
@@ -2203,6 +2307,37 @@ impl TuiState {
         } else {
             self.mode = InteractionMode::TaskBoard;
         }
+    }
+
+    /// W3：刷新 `/agents` 花名册快照（每次打开/按 R 重读真实运行时）。
+    pub fn refresh_agent_roster(&mut self) {
+        self.agent_roster_state = Some(agent_roster_state_from_runtime());
+    }
+
+    /// W3：`/agents` 切换（面板内再按 `/agents` 等价于关闭）。
+    pub fn toggle_agent_roster(&mut self) {
+        if self.mode == InteractionMode::AgentRoster {
+            self.close_agent_roster();
+        } else {
+            self.refresh_agent_roster();
+            self.mode = InteractionMode::AgentRoster;
+        }
+    }
+
+    /// W3：关闭花名册（Esc / 再次切换）；**不清** `return_session_id`（返回目标与会话绑定）。
+    pub fn close_agent_roster(&mut self) {
+        self.agent_roster_state = None;
+        if self.mode == InteractionMode::AgentRoster {
+            self.mode = InteractionMode::Normal;
+        }
+    }
+
+    /// W3：当前花名册选中项的 target（无面板/空表 ⇒ `None`）。
+    pub fn selected_agent_target(&self) -> Option<String> {
+        self.agent_roster_state
+            .as_ref()
+            .and_then(|roster| roster.selected_entry())
+            .map(|entry| entry.target.clone())
     }
 
     pub fn update_plan(&mut self, plan: PlanState) {
@@ -5274,6 +5409,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     if state.mode == InteractionMode::TaskBoard {
         render_task_board_stub(f, state);
     }
+    if state.mode == InteractionMode::AgentRoster {
+        render_agent_roster_panel(f, state);
+    }
 }
 
 /// 面板在无数据时的统一空状态：不允许整屏空白（那会让用户误判 TUI 挂了）。
@@ -5832,7 +5970,7 @@ pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
             render_pending_empty_state(
                 f,
                 "Team 共享任务看板",
-                "当前没有任务；模型调用 todo 工具后会实时汇总到这里",
+                "当前没有任务；Agent 调用 team_task_create 后会实时汇总到这里",
                 "Tab 折叠/展开 · Esc 退出",
             );
             return;
@@ -5895,7 +6033,22 @@ pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
             };
 
             let owner_str = task.owner.as_deref().unwrap_or("unassigned");
-            let left = format!("  {} {} · {}", status_mark, task.id, task.subject);
+            // W3：TeamTaskItem 的 blocked_by / write_scopes 也进面板（阻塞数 + 写域数），
+            // 让"团队看板"不再只显示 owner。
+            let blocked_suffix = if task.blocked_by.is_empty() {
+                String::new()
+            } else {
+                format!(" · ⛔{}", task.blocked_by.len())
+            };
+            let scopes_suffix = if task.write_scopes.is_empty() {
+                String::new()
+            } else {
+                format!(" · 写域{}", task.write_scopes.len())
+            };
+            let left = format!(
+                "  {} {} · {}{}{}",
+                status_mark, task.id, task.subject, blocked_suffix, scopes_suffix
+            );
             let right = format!("@{}", owner_str);
             lines.push(list_row(is_focused, &left, &right, inner_w));
         }
@@ -5903,6 +6056,105 @@ pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
         if total > end {
             lines.push(Line::from(Span::styled(
                 format!("  ... 另有 {} 个任务项未展开", total - end),
+                faint(),
+            )));
+        }
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        body,
+    );
+}
+
+/// W3：`/agents` Team 角色与状态面板。
+///
+/// 每行：`NAME · ROLE · STATUS · 待处理 N · 会话 xxxx`；`driving` 用 `●` 标记后台驱动中。
+/// 空表（无 teammate）→ 明确的「当前没有 teammate」空状态，绝不整屏空白。
+pub fn render_agent_roster_panel(f: &mut Frame, state: &TuiState) {
+    let roster = match &state.agent_roster_state {
+        Some(roster) => roster,
+        None => {
+            render_pending_empty_state(
+                f,
+                "Team 角色与状态 (/agents)",
+                "当前没有 teammate",
+                "使用 spawn_teammate 派生队友后，此处显示真实名册 · Esc 关闭",
+            );
+            return;
+        }
+    };
+    let area = f.area();
+    let pw = 84u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = 20u16.min(area.height.saturating_sub(2)).max(6);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(pw)) / 2,
+        y: area.y + (area.height.saturating_sub(ph)) / 2,
+        width: pw,
+        height: ph,
+    };
+    let body = draw_panel(
+        f,
+        rect,
+        "Team 角色与状态 (/agents)",
+        "↑↓ 选择 · Enter 进入队友会话 · r 返回主会话 · Esc 关闭",
+    );
+    let inner_w = body.width as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let total = roster.entries.len();
+    let driving_count = roster.entries.iter().filter(|entry| entry.driving).count();
+    let pending_total: usize = roster.entries.iter().map(|entry| entry.pending_inbox).sum();
+    lines.push(Line::from(vec![Span::styled(
+        format!(
+            "  队友 {} · 驱动中 {} · 待处理消息 {}",
+            total, driving_count, pending_total
+        ),
+        Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(blank());
+
+    if total == 0 {
+        lines.push(Line::from(Span::styled("  当前没有 teammate", faint())));
+    } else {
+        let max_visible_items = ph.saturating_sub(6) as usize;
+        let selected = roster.selected.min(total.saturating_sub(1));
+        let (start, end) = panel_window(total, selected, max_visible_items.max(1));
+
+        for (idx, entry) in roster.entries.iter().enumerate().take(end).skip(start) {
+            let is_focused = idx == selected;
+            let drive_mark = if entry.driving { "●" } else { "○" };
+            let left = format!(
+                "  {} {} · {} · {} · 待处理 {}",
+                drive_mark, entry.name, entry.role, entry.status, entry.pending_inbox
+            );
+            let right = match entry.session_id.as_deref() {
+                Some(session_id) => format!("会话 {}", session_tail(session_id)),
+                None => "无会话".to_string(),
+            };
+            lines.push(list_row(is_focused, &left, &right, inner_w));
+        }
+
+        if total > end {
+            lines.push(Line::from(Span::styled(
+                format!("  ... 另有 {} 个队友未展开", total - end),
+                faint(),
+            )));
+        }
+
+        // 选中项详情：target + 完整会话 id（尾号之外的定位信息）。
+        if let Some(entry) = roster.entries.get(selected) {
+            lines.push(blank());
+            let session_detail = entry
+                .session_id
+                .as_deref()
+                .map(|session_id| format!("会话 {session_id}"))
+                .unwrap_or_else(|| "尚无独立会话（未成功运行）".to_string());
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  target={} · 待处理消息 {} · {}",
+                    entry.target, entry.pending_inbox, session_detail
+                ),
                 faint(),
             )));
         }
@@ -6493,6 +6745,90 @@ fn submit_ask_answers(
         request_id,
         answers,
     });
+}
+
+/// W3：目标会话能否从 SessionStore 加载（`/agents` Enter 的硬前置）。
+///
+/// 只有出现在 `list_sessions()` 里的会话才可 hydrate：teammate 引擎运行在**独立建栈**里，
+/// 其会话不保证落到宿主的 SessionStore；不先判定就 hydrate 会得到一个空会话，
+/// 用户会误以为是「队友没有产出」。
+fn session_is_loadable(
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    session_id: &str,
+) -> bool {
+    control_plane
+        .list_sessions()
+        .iter()
+        .any(|session| session.conversation_id == session_id)
+}
+
+/// W3：`/agents` Enter —— 进入选中 teammate 的子会话。
+///
+/// 流程（契约）：保存返回目标 → 切 `session_id` → 作用域复位 → hydrate → `mode=Normal`。
+/// 无会话 / 会话不可加载时给出可读提示并**留在花名册**（不静默失败、不进入空会话）。
+fn enter_teammate_session(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    target: &str,
+) {
+    let Some(session_id) = teammate_session_id(target) else {
+        let message = "该 teammate 尚无独立会话（未成功运行）".to_string();
+        state.status_text = message.clone();
+        state.status_notice = Some((message, std::time::Instant::now()));
+        return;
+    };
+    if !session_is_loadable(control_plane, &session_id) {
+        // 说明：队友引擎跑在**独立建栈**里（独立 SessionStore 实例），其会话不会自动出现在
+        // 宿主 control plane 的内存会话表里 —— 这里如实提示"宿主暂不可加载"，绝不 hydrate 空会话。
+        let message = format!("该 teammate 会话暂不可由宿主会话存储加载（{session_id}），无法进入");
+        state.status_text = message.clone();
+        state.status_notice = Some((message, std::time::Instant::now()));
+        return;
+    }
+
+    // 先保存返回目标（reset_session_scope 会清空 return_session_id，故在其后写回）。
+    let main_session_id = state.session_id.clone();
+    state.mode = InteractionMode::Normal;
+    state.agent_roster_state = None;
+    state.session_id = session_id.clone();
+    state.reset_session_scope();
+    state.return_session_id = Some(main_session_id);
+    hydrate_state_from_session(state, control_plane, &session_id);
+    let notice = format!("已进入队友 {target} 的会话（r 返回主会话）");
+    state.status_text = format!("队友 {target} · {session_id}");
+    state.status_notice = Some((notice, std::time::Instant::now()));
+}
+
+/// W3：`/agents` r —— 返回进入队友会话前保存的主会话。
+///
+/// 无保存目标 / 主会话不可加载时给可读提示；成功则清空返回目标（避免二次 `r` 回到自身）。
+fn return_to_main_session(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+) {
+    let Some(main_session_id) = state.return_session_id.clone() else {
+        let message = "没有可返回的主会话（当前不在队友会话）".to_string();
+        state.status_text = message.clone();
+        state.status_notice = Some((message, std::time::Instant::now()));
+        return;
+    };
+    if !session_is_loadable(control_plane, &main_session_id) {
+        let message = format!("主会话 {main_session_id} 已不可加载");
+        state.status_text = message.clone();
+        state.status_notice = Some((message, std::time::Instant::now()));
+        return;
+    }
+
+    state.mode = InteractionMode::Normal;
+    state.agent_roster_state = None;
+    state.session_id = main_session_id.clone();
+    state.reset_session_scope();
+    hydrate_state_from_session(state, control_plane, &main_session_id);
+    state.status_text = format!("已返回主会话 {main_session_id}");
+    state.status_notice = Some((
+        "已返回主会话".to_string(),
+        std::time::Instant::now(),
+    ));
 }
 
 /// 把目标会话的权威快照装载进 UI 状态（`/resume` 弹窗与启动期 `pony resume <id>` 共用）。
@@ -7462,7 +7798,51 @@ fn tui_event_loop(
                         continue;
                     }
 
-                    // 1h. TaskBoard 任务看板按键处理
+                    // 1h. W3：AgentRoster 花名册按键处理
+                    //   ↑↓ 选择 · Enter 进入该 teammate 子会话 · r 返回保存的主会话 · Esc 关闭。
+                    if state.mode == InteractionMode::AgentRoster {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.close_agent_roster();
+                            }
+                            KeyCode::Up => {
+                                if let Some(ref mut roster) = state.agent_roster_state {
+                                    roster.prev();
+                                }
+                            }
+                            KeyCode::Down => {
+                                if let Some(ref mut roster) = state.agent_roster_state {
+                                    roster.next();
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(target) = state.selected_agent_target() {
+                                    if target == "lead" {
+                                        state.status_notice = Some((
+                                            "Lead 即宿主主会话，无需进入".to_string(),
+                                            std::time::Instant::now(),
+                                        ));
+                                    } else {
+                                        enter_teammate_session(
+                                            &mut state,
+                                            &control_plane,
+                                            &target,
+                                        );
+                                    }
+                                }
+                            }
+                            KeyCode::Char('r')
+                                if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                return_to_main_session(&mut state, &control_plane);
+                            }
+                            _ => {}
+                        }
+                        dirty = true;
+                        continue;
+                    }
+
+                    // 1i. TaskBoard 任务看板按键处理
                     if state.mode == InteractionMode::TaskBoard {
                         match key.code {
                             KeyCode::Esc => {
@@ -7718,8 +8098,14 @@ fn tui_event_loop(
                                     continue;
                                 }
                                 if known_command == Some("/tasks") {
+                                    // W3：真实 Team 共享看板（team_task_list）。
                                     sync_tasks_from_store(&mut state);
                                     state.toggle_task_board();
+                                    continue;
+                                }
+                                if known_command == Some("/agents") {
+                                    // W3：真实名册快照（list_agents / 收件箱 / 驱动态 / 会话）。
+                                    state.toggle_agent_roster();
                                     continue;
                                 }
                                 if known_command == Some("/clear") {

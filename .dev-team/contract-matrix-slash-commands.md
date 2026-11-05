@@ -87,7 +87,7 @@ fn compact_session(
 `crates/pony-agent-core/src/bin/tui.rs::AVAILABLE_COMMANDS` 变更后**必须**为（顺序固定，共 10 条）：
 
 ```
-/resume  /provider  /models  /thinking  /plan  /tasks  /clear  /compact  /help  /quit
+/resume  /provider  /models  /thinking  /plan  /tasks  /agents  /clear  /compact  /help  /quit
 ```
 - `/cost` 从命令表与分发分支**移除**。
 - `/cost` 从 `bin/cli.rs` 移除（CLI 与 TUI 口径统一，`SlashCommand::Cost` 枚举、`parse` 分支、help 文案、`cli_acceptance.rs` 同步一并处理）。

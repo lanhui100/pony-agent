@@ -48,10 +48,13 @@ use pony_agent_core::agent::runtime_helper::TestRuntimeGuard;
 use pony_agent_core::agent::session::{FileSessionBackend, SessionStore, TurnHistoryMessage};
 use pony_agent_core::agent::tools::{ToolCall, ToolExecutor, ToolResult};
 
-/// 契约 C-4 冻结的完整命令表（顺序固定，共 11 条）。
-const CONTRACT_COMMANDS: [&str; 11] = [
-    "/resume", "/provider", "/models", "/thinking", "/plan", "/tasks", "/clear", "/compact", "/help",
-    "/update", "/quit",
+/// 契约 C-4 冻结的完整命令表（顺序固定；W3 演进：`/tasks` 之后新增 `/agents`，共 12 条）。
+///
+/// 演进记录：W3 可见性波次（task-9）为 TUI 增加 agent team 花名册入口；
+/// 该变更经 Lead 批准，契约矩阵 `.dev-team/contract-matrix-slash-commands.md` C-4 同步更新。
+const CONTRACT_COMMANDS: [&str; 12] = [
+    "/resume", "/provider", "/models", "/thinking", "/plan", "/tasks", "/agents", "/clear", "/compact",
+    "/help", "/update", "/quit",
 ];
 
 // ── 沙箱与测试脚手架 ───────────────────────────────────────────────────────────────────

@@ -375,6 +375,41 @@ pub(crate) fn teammate_provider_selection(target: &str) -> Option<ResolvedProvid
     lock.as_ref()?.get(target).cloned()
 }
 
+/// W3：每个 teammate target **最近一次成功 turn** 产生的子会话 id。
+///
+/// 纯进程内可见性缓存（不改 session schema、不新建子会话）：`drive_teammate_turn_in` 在队友
+/// turn 成功返回后写入；TUI `/agents` 面板据此展示会话尾号，并允许进入该队友子会话。
+static TEAMMATE_SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// W3：登记 teammate 最近成功 turn 的子会话 id（`lead` 与空 id 一律忽略）。
+///
+/// 为什么忽略空 id：`SubagentRunOutcome.session_id` 由引擎给出，空串不构成可恢复会话，
+/// 写进去只会让 UI 打开一个"存在但空白"的会话。
+fn set_teammate_session(target: &str, session_id: &str) {
+    let session_id = session_id.trim();
+    if target == LEAD_TARGET || session_id.is_empty() {
+        return;
+    }
+    let mut lock = TEAMMATE_SESSIONS.lock().unwrap();
+    if lock.is_none() {
+        *lock = Some(HashMap::new());
+    }
+    lock.as_mut()
+        .unwrap()
+        .insert(target.to_string(), session_id.to_string());
+}
+
+/// W3：读取 teammate 最近成功 turn 的子会话 id；未成功运行过 ⇒ `None`。
+///
+/// `lead` 永无独立会话（`None`）—— 它本身就是宿主主会话。
+pub fn teammate_session_id(target: &str) -> Option<String> {
+    if target == LEAD_TARGET {
+        return None;
+    }
+    let lock = TEAMMATE_SESSIONS.lock().unwrap();
+    lock.as_ref()?.get(target).cloned()
+}
+
 /// wave-37 C3：真实子代理执行入口。
 ///
 /// - 引擎槽为空 → 结构化错误（含 `capability_unavailable`），不再返回伪字符串；
@@ -1104,7 +1139,12 @@ pub fn drive_teammate_turn_in(
                 workspace_root,
                 selection.as_ref(),
             ) {
-                Ok(outcome) => outcome.final_text,
+                Ok(outcome) => {
+                    // W3：成功 turn 的会话 id 登记进进程内可见性缓存（失败路径不写：避免
+                    // `/agents` 把一次失败的孤儿会话当成可进入的子会话）。
+                    set_teammate_session(target, &outcome.session_id);
+                    outcome.final_text
+                }
                 Err(err) => {
                     // Wave-61 C10.2 失败补偿：把本轮 drain 的整批消息**按原顺序放回队首**
                     // （消息绝不丢失：引擎侧 busy/timeout/prompt_too_large/任意 Err 都不吞消息），
