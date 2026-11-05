@@ -1,3 +1,7 @@
+# LABEL-MAPPING: Protocol Revision 2（b477c090）批准 C10 后，本文件所述「屏幕/pane 结构化日志泄漏」
+# 判据在脚本与契约中统一记为 **C10**；文件名保留 o8-* 仅为历史链接稳定（内容不改写历史）。
+# Rust 侧 `o8_cancel_status_never_leaks_internal_payload` 仍是 O8（取消状态不含内部 payload），语义独立。
+
 # O8 真实屏幕结构化日志泄漏（用户所述第二缺陷）证据与判据
 # ticket: l2at-tui-overlay-cancel | 补断言人: Test Agent (tui-test2)
 

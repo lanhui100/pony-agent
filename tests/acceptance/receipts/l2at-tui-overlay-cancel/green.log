@@ -1,7 +1,12 @@
-    Finished `test` profile [unoptimized] target(s) in 0.32s
+    Finished `test` profile [unoptimized] target(s) in 0.28s
      Running tests/tui_overlay_cancel_acceptance.rs (target/debug/deps/tui_overlay_cancel_acceptance-88546c09fe4903a3)
 
-running 14 tests
+running 19 tests
+test j1_detail_empty_description_with_plain_text_keeps_text_fallback ... ok
+test j1_detail_empty_description_with_structured_arguments_yields_none ... ok
+test j1_detail_interactive_ask_never_summarizes_structured_payload ... ok
+test j1_detail_non_placeholder_description_is_returned_verbatim ... ok
+test j1_detail_placeholder_description_takes_human_field_from_arguments ... ok
 test c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable ... ok
 test o1_history_and_question_share_one_frame_without_wiping_scrollback ... ok
 test o1_metrics_fixture_precondition_closed_frame_has_token_metrics ... ok
@@ -17,5 +22,5 @@ test tui::wave43_unit_tests::test_pending_ui_request_from_value ... ok
 test tui::wave43_unit_tests::test_permission_request_from_pending_mapping ... ok
 test j1_resume_summary_prefers_description_and_hides_structured_json ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.50s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.87s
 

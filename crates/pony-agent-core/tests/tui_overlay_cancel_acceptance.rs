@@ -614,6 +614,142 @@ fn o8_cancel_status_never_leaks_internal_payload() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// J1 细化（Protocol Revision 2）：`history_tool_detail` 的确定性单测
+//
+// 契约（rev2）：非空且非「工具名/显示名占位」的 `description` 优先；占位时只提取结构化
+// arguments 中已知的人类可读 `description` 字段；空/占位且无该字段时**省略 detail**，
+// 绝不反显整段 JSON；交互 Ask 的结构化 arguments/result 任何时候不得成为摘要；
+// 普通工具仅保留**非结构化纯文本** detail 的兼容回退。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// ① description = 工具名占位 + arguments 内含人类可读 `description` ⇒ 取人类文案。
+#[test]
+fn j1_detail_placeholder_description_takes_human_field_from_arguments() {
+    // Arrange：工具名占位（description == name），arguments 是结构化 JSON 且带人类字段
+    let arguments = r#"{"path":"package.json","description":"读取项目配置确认版本号"}"#;
+
+    // Act
+    let detail = tui::history_tool_detail(
+        "Read",
+        None,
+        None,
+        "Read", // 占位：等于工具名，不是用户可读摘要
+        Some(arguments),
+        Some("{\"name\":\"pony-agent\"}"),
+    );
+
+    // Assert
+    assert_eq!(
+        detail.as_deref(),
+        Some("读取项目配置确认版本号"),
+        "J1①：占位 description 必须只提取 arguments 中已知的人类可读 description 字段，\
+         不得反显整段 JSON 或空手而归，实际 = {detail:?}"
+    );
+    assert!(
+        !detail.as_deref().unwrap_or_default().contains('{'),
+        "J1①：提取结果不得是 JSON 片段，实际 = {detail:?}"
+    );
+}
+
+/// ② description 空 + arguments 为**无 description 字段的 JSON** ⇒ 省略 detail（None）。
+#[test]
+fn j1_detail_empty_description_with_structured_arguments_yields_none() {
+    // Arrange
+    let arguments = r#"{"path":"package.json","limit":40}"#;
+    let result = r#"{"status":"ok","lines":12}"#;
+
+    // Act
+    let detail = tui::history_tool_detail("Read", None, None, "   ", Some(arguments), Some(result));
+
+    // Assert
+    assert_eq!(
+        detail, None,
+        "J1②：description 为空且 arguments 是结构化 JSON（无人类字段）时必须省略 detail，\
+         不得把整段 JSON 反显为摘要，实际 = {detail:?}"
+    );
+}
+
+/// ③ description 空 + arguments 为**纯文本** ⇒ 原样保留（非结构化兼容回退）。
+#[test]
+fn j1_detail_empty_description_with_plain_text_keeps_text_fallback() {
+    // Arrange
+    let plain = "命令已执行完成：3 个文件被格式化";
+
+    // Act：arguments 纯文本
+    let from_arguments = tui::history_tool_detail("Bash", None, None, "", Some(plain), None);
+    // Act：arguments 缺省、result 纯文本（同一回退的另一入口）
+    let from_result = tui::history_tool_detail("Bash", None, None, "", None, Some(plain));
+
+    // Assert
+    assert_eq!(
+        from_arguments.as_deref(),
+        Some(plain),
+        "J1③：纯文本 arguments 必须原样作为 detail，实际 = {from_arguments:?}"
+    );
+    assert_eq!(
+        from_result.as_deref(),
+        Some(plain),
+        "J1③：arguments 缺省时纯文本 result 必须原样作为 detail，实际 = {from_result:?}"
+    );
+}
+
+/// ④ 交互 Ask（复用既有名称分类，大小写不敏感）任意结构化 JSON ⇒ 一律 None。
+#[test]
+fn j1_detail_interactive_ask_never_summarizes_structured_payload() {
+    // Arrange：结构化参数**带**人类 description 字段（最容易被误提取的形态）
+    let arguments = r#"{"question":"请选择分支","options":["A","B"],"description":"这里的人类字段也不得显示"}"#;
+
+    // Act + Assert：四个既有类别 + 大小写不敏感 + 结构化 result
+    for (name, canonical) in [
+        ("Ask", None),
+        ("ask_user", None),
+        ("builtin:ask", None),
+        ("ask", Some("builtin:ask_user")),
+        ("Ask", Some("ASK_USER")),
+    ] {
+        let detail = tui::history_tool_detail(name, None, canonical, "", Some(arguments), Some(arguments));
+        assert_eq!(
+            detail, None,
+            "J1④：交互 Ask（name={name:?}, canonical={canonical:?}）的结构化 arguments/result \
+             不得成为消息摘要，实际 = {detail:?}"
+        );
+    }
+    // 占位形态（description == 工具名）+ 结构化 result 同样必须 None
+    let placeholder = tui::history_tool_detail("Ask", None, None, "Ask", None, Some(arguments));
+    assert_eq!(
+        placeholder, None,
+        "J1④：占位 description 的交互 Ask 也不得回退到结构化 result，实际 = {placeholder:?}"
+    );
+    // 契约边界：rev2 的「非结构化纯文本回退」只授予**普通工具**；Ask 在占位/空 description 时
+    // 一律省略 detail（更保守），此处不额外放宽为「Ask 纯文本必须可见」。
+}
+
+/// ⑤ 非占位 description ⇒ 原样返回（优先于 arguments/result）。
+#[test]
+fn j1_detail_non_placeholder_description_is_returned_verbatim() {
+    // Arrange
+    let human = "读取工作区配置并汇总版本信息";
+    let arguments = r#"{"path":"package.json","description":"arguments 里的人类字段应被忽略"}"#;
+
+    // Act
+    let detail = tui::history_tool_detail(
+        "Read",
+        Some("读取文件"),
+        Some("read_file"),
+        human,
+        Some(arguments),
+        Some("结果文本"),
+    );
+
+    // Assert
+    assert_eq!(
+        detail.as_deref(),
+        Some(human),
+        "J1⑤：非占位 description 必须原样优先，实际 = {detail:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // C9：TUI 启动轮必须用既有 register/unregister_turn_event_sink 成对接通停止链路
 //     （真实可达行为：当前构建的二进制 + 真实伪终端）
 // ─────────────────────────────────────────────────────────────────────────────
