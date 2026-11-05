@@ -364,6 +364,32 @@ scenario_stop_esc() {
     capture "s1-2-stopped"
   fi
 
+  # O8（用户所述第二缺陷）：`otel::log` 的 JSON 缺省写 **stdout**，而 TUI 只 dup2 stderr ⇒
+  # warn 级结构化日志（含 provider_stream_cancelled / trace_id / level）会直接混进真实屏幕与
+  # 原始 pane 流。这里对**终态帧 + 累计原始流**同时取证：任何一条出现即判失败。
+  local leak=0 marker red_frame="$RECEIPTS/s1-prefix-structured-log-screen-red-phase.txt"
+  for marker in '"level":"warn"' '"provider_stream_cancelled"' '"trace_id":"'; do
+    if grep -qF -- "$marker" "$SCEN_DIR/s1-2-stopped.txt" 2>/dev/null; then
+      leak=1
+      log "  leak-marker=$marker file=s1-2-stopped.txt"
+    fi
+    if grep -qF -- "$marker" "$SCEN_DIR/stream.raw" 2>/dev/null; then
+      leak=1
+      log "  leak-marker=$marker file=stream.raw"
+    fi
+  done
+  if [ "$leak" -eq 1 ]; then
+    bad "O8 真实屏幕/原始 pane 流出现结构化日志 JSON（level / provider_stream_cancelled / trace_id）"
+  else
+    ok "O8 真实屏幕与原始 pane 流无结构化日志 JSON 泄漏，且「已停止（用户中断）」可见"
+  fi
+  # 判别力自检：同一组判据必须能命中**红相归档帧**，否则说明该断言在红绿两相都成立（空断言）。
+  if [ -f "$red_frame" ] && grep -qF -- '"level":"warn"' "$red_frame"; then
+    ok "O8 判据判别力自检：红相归档屏幕可被同一判据命中（修复前必红）"
+  else
+    bad "O8 判据判别力自检失败：红相归档屏幕未被命中（断言可能形同虚设，证据文件缺失或被改写）"
+  fi
+
   # C9：真实终端里停止链路必须「请求可见 → 终态可见」（sink 未注册时 core 会向 stdout 打印
   # `stop accepted but no turn event sink registered; turn:stop_requested not dispatched`，
   # 一旦出现在任何抓帧里即判失败）。强判据（累计原始 stdout 中该告警必须缺席）由

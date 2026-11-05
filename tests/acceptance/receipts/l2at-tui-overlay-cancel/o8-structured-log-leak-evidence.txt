@@ -1,0 +1,33 @@
+# O8 真实屏幕结构化日志泄漏（用户所述第二缺陷）证据与判据
+# ticket: l2at-tui-overlay-cancel | 补断言人: Test Agent (tui-test2)
+
+## 1. 缺陷现象（修复前的真实 PTY 帧）
+旧帧（红相构建 tui.rs sha256 6858d4e2…）的 s1 stopped 屏幕里出现两行 warn 级 JSON：
+  {"level":"warn","message":"stop accepted but no turn event sink registered; ...","trace_id":null,...}
+  {"error":"provider_stream_cancelled: SSE 流已按请求中止 (stop_requested); ...","level":"warn",
+   "message":"turn stop requested while streaming decision failed; ...","trace_id":"…","ts":"…"}
+根因：`otel::log::emit_stdout_and_file`（crates/pony-agent-core/src/agent/otel/log.rs:152-158）
+缺省写 **stdout**，而 TUI 启动只 dup2 了 **stderr** → 结构化日志直接进入全屏界面。
+修复（Executor）：run_tui / run_tui_demo_ask 启动后 `set_stderr_output(true)`，JSON 改走 stderr
+（已被 dup2 进 PONY_TUI_RUNTIME_LOG），新帧屏幕上不再出现。
+
+## 2. 新增判据（未放宽既有断言，只是新增）
+在 S1（真实 slow 流式 + 双击 Esc）终态帧与累计原始 pane 流上同时断言：
+  - s1-2-stopped.txt（终态屏幕）不得含：`"level":"warn"` / `"provider_stream_cancelled"` / `"trace_id":"`
+  - stream.raw（tmux pipe-pane 累计原始输出）不得含上述任一 marker
+  - 「已停止（用户中断）」必须在终态帧可见（既有 O5 断言，未改动）
+  - 判别力自检：同一组 marker 必须能命中红相归档屏幕（本目录
+    s1-prefix-structured-log-screen-red-phase.txt），否则说明断言形同虚设。
+
+## 3. 判别力实证（红相归档帧命中情况）
+  "level":"warn"              -> 命中（True）
+  "trace_id":"                -> 命中（True）
+  已停止（用户中断）            -> 命中（用户可读终态仍可见）
+  "provider_stream_cancelled" -> 该帧未出现（C9 断言先一步失败，快照早于第二行 warn 落屏）
+=> 该判据在修复前必红（至少 level/trace_id 两个 marker 命中）。
+
+## 4. 修复后（当前提交内容）结果
+  bash tests/acceptance/l2at-tui-overlay-cancel.sh
+  → exit 0，PASS=15 FAIL=0，其中：
+    PASS: O8 真实屏幕与原始 pane 流无结构化日志 JSON 泄漏，且「已停止（用户中断）」可见
+    PASS: O8 判据判别力自检：红相归档屏幕可被同一判据命中（修复前必红）
