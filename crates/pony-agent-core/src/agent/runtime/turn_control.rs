@@ -42,6 +42,33 @@ pub(super) fn build_control_outcome_pending_without_request_error() -> String {
     )
 }
 
+/// W1b 补充：`Approval` 类挂起当前**没有**“批准后自动重放工具”的实现。
+///
+/// 若仍下发 `turn:suspended`，TUI 会弹出审批框；用户批准后控制面只消费请求，并不会恢复
+/// 原工具调用，最终仍是“批准了但没后续”。因此这里显式失败收口，给出可读错误码，避免
+/// 把“未实现”伪装成“等待用户”。
+pub(super) const APPROVAL_RESUME_UNAVAILABLE_CODE: &str = "approval_resume_unavailable";
+
+pub(super) fn build_approval_resume_unavailable_error() -> String {
+    format!(
+        "{APPROVAL_RESUME_UNAVAILABLE_CODE}: 该工具需要审批，但当前 TUI/运行时尚不支持“批准后自动重放该工具调用”；本轮已按失败收口。请调整权限/工具参数后重试。"
+    )
+}
+
+/// W1b：挂起结果是否**没有可恢复通道**。
+///
+/// - `None`：治理路径已产出 `control_outcome_pending`，但匹配不到待处理请求（call_id 丢失/被消费）；
+/// - `Some(Approval)`：审批请求存在，但当前没有重放实现（见 [`APPROVAL_RESUME_UNAVAILABLE_CODE`]）；
+/// - `Some(Interaction)`：Ask 可经宿主应答恢复，保持 suspended。
+pub(super) fn suspension_is_unrecoverable(
+    suspension: &ToolTurnSuspension,
+) -> bool {
+    match &suspension.pending_request {
+        None => true,
+        Some(request) => request.request_kind == PendingControlRequestKind::Approval,
+    }
+}
+
 /// wave-64 R1（BLOCKING，terminal-once 闸门）：尝试占有该轮的**终态派发权**。
 ///
 /// 唯一真值源是 checkpoint `status`（与 C5 宽限监督者共用同一登记表，绝不新建第二套状态）：
@@ -275,7 +302,7 @@ impl AgentRuntime {
         &self,
         suspension: &ToolTurnSuspension,
     ) -> bool {
-        suspension.pending_request.is_none() && self.governed_dispatcher().is_some()
+        self.governed_dispatcher().is_some() && suspension_is_unrecoverable(suspension)
     }
 
 
@@ -443,5 +470,59 @@ mod wave64_classify_tests {
             StreamErrorClass::Failed,
             "R2：超时错误码不得被误判为取消"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod w1_approval_unrecoverable_tests {
+    use super::*;
+    use crate::agent::tool_runtime::{
+        PendingControlRequest, PendingControlRequestKind, PendingControlRequestState,
+    };
+
+    fn request(kind: PendingControlRequestKind) -> PendingControlRequest {
+        PendingControlRequest {
+            request_id: "req-w1".to_string(),
+            request_kind: kind,
+            session_id: Some("sess-w1".to_string()),
+            run_id: Some("run-w1".to_string()),
+            turn_id: "turn-w1".to_string(),
+            call_id: "call-w1".to_string(),
+            descriptor_snapshot_id: "snap".to_string(),
+            descriptor_id: "desc".to_string(),
+            final_args_digest: "digest".to_string(),
+            policy_digest: "policy".to_string(),
+            nonce: "nonce".to_string(),
+            version: 1,
+            expires_at_ms: u64::MAX,
+            state: PendingControlRequestState::Pending,
+            prompt: Some("approve?".to_string()),
+            options: None,
+        }
+    }
+
+    #[test]
+    fn suspension_without_request_is_unrecoverable() {
+        assert!(suspension_is_unrecoverable(&ToolTurnSuspension {
+            pending_request: None,
+            bound_run_id: None,
+        }));
+    }
+
+    #[test]
+    fn approval_suspension_is_unrecoverable_until_replay_exists() {
+        assert!(suspension_is_unrecoverable(&ToolTurnSuspension {
+            pending_request: Some(request(PendingControlRequestKind::Approval)),
+            bound_run_id: None,
+        }));
+    }
+
+    #[test]
+    fn interaction_suspension_stays_recoverable() {
+        assert!(!suspension_is_unrecoverable(&ToolTurnSuspension {
+            pending_request: Some(request(PendingControlRequestKind::Interaction)),
+            bound_run_id: None,
+        }));
     }
 }

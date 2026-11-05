@@ -194,14 +194,22 @@ impl AgentRuntime {
                             tool_call.name,
                             super::turn_control::CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE
                         ));
+                        let unrecoverable_error =
+                            if suspension.pending_request.as_ref().is_some_and(|request| {
+                                request.request_kind
+                                    == crate::agent::tool_runtime::PendingControlRequestKind::Approval
+                            }) {
+                                super::turn_control::build_approval_resume_unavailable_error()
+                            } else {
+                                super::turn_control::build_control_outcome_pending_without_request_error()
+                            };
                         return Err(self.fail_sync_turn_result(
                             Some(provider_meta),
                             display_message,
                             self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                             tool_activities,
                             hook_trace_records,
-                            super::turn_control::build_control_outcome_pending_without_request_error(
-                            ),
+                            unrecoverable_error,
                         ));
                     }
                     return Err(self.build_suspended_turn_result(

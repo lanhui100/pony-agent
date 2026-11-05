@@ -566,6 +566,15 @@ impl AgentRuntime {
                             current_tool_call.name,
                             super::turn_control::CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE
                         ));
+                        let unrecoverable_error =
+                            if suspension.pending_request.as_ref().is_some_and(|request| {
+                                request.request_kind
+                                    == crate::agent::tool_runtime::PendingControlRequestKind::Approval
+                            }) {
+                                super::turn_control::build_approval_resume_unavailable_error()
+                            } else {
+                                super::turn_control::build_control_outcome_pending_without_request_error()
+                            };
                         self.fail_stream_turn_gated_dispatch(
                             sink,
                             control,
@@ -581,8 +590,7 @@ impl AgentRuntime {
                             first_token_latency.get(),
                             Some(turn_started_at.elapsed().as_millis() as u64),
                             completed_hops,
-                            super::turn_control::build_control_outcome_pending_without_request_error(
-                            ),
+                            unrecoverable_error,
                             // B017：本轮失败前已产出的正文必须保留。
                             Some(accumulated_turn_text.clone()),
                         );
