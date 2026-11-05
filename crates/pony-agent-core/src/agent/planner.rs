@@ -1477,4 +1477,120 @@ mod tests {
             "无目标且 run.goal 无续行关键词时必须 WaitUser"
         );
     }
+
+    // ── W1 RED（task-4）：preflight 不得被“历史正文里的斜杠”劫持 ──
+    //
+    // 根因：历史 assistant 正文中的 "tester / reviewer" 被 `extract_path_candidates`
+    // 切成候选段 "/"，`looks_like_path("/")` 因 `contains('/')` 为真，于是用户一句
+    // “继续”被本地 planner 的兜底分支劫持成 workspace_gather_context(path="/")。
+
+    /// 契约 C1：`继续` + 历史正文含 "tester / reviewer" 时必须返回 None。
+    #[test]
+    fn w1_preflight_continue_message_must_not_be_hijacked_by_slash_in_history() {
+        let history = [history(
+            "assistant",
+            "## 修复已完成（tester / reviewer 仍在异步收敛）",
+        )];
+
+        let decision = LocalTurnPlanner.preflight_decision("继续", &history, &[]);
+
+        let observed = decision
+            .as_ref()
+            .and_then(|decision| decision.tool_call.as_ref())
+            .map(|call| (call.name.clone(), call.arguments.to_string()));
+        assert!(
+            decision.is_none(),
+            "契约 C1：`继续` 必须返回 None（不得被历史里的 `/` 劫持成根路径收集），实际 tool_call = {observed:?}"
+        );
+    }
+
+    /// 契约 C2：`检查tester和reviewer的进展` 同样不得被同一段历史劫持。
+    #[test]
+    fn w1_preflight_progress_check_must_not_be_hijacked_by_slash_in_history() {
+        let history = [history(
+            "assistant",
+            "## 修复已完成（tester / reviewer 仍在异步收敛）",
+        )];
+
+        let decision =
+            LocalTurnPlanner.preflight_decision("检查tester和reviewer的进展", &history, &[]);
+
+        let observed = decision
+            .as_ref()
+            .and_then(|decision| decision.tool_call.as_ref())
+            .map(|call| (call.name.clone(), call.arguments.to_string()));
+        assert!(
+            decision.is_none(),
+            "契约 C2：`检查tester和reviewer的进展` 必须返回 None，实际 tool_call = {observed:?}"
+        );
+    }
+
+    /// 契约 C3：指代 + 历史路径能力必须保留（不得用“砍掉历史路径”来修 C1/C2）。
+    #[test]
+    fn w1_preflight_keeps_referential_gather_context_for_history_path() {
+        use crate::agent::tools::canonical_tool_name;
+
+        let decision = LocalTurnPlanner.preflight_decision(
+            "这个文件是什么？",
+            &[history("user", "先看看 src/foo.rs")],
+            &[],
+        )
+        .expect("契约 C3：`这个文件` + 历史显式路径必须仍返回 Some");
+
+        let call = decision.tool_call.expect("契约 C3：必须携带 tool_call");
+        assert_eq!(
+            canonical_tool_name(&call.name),
+            Some("workspace_gather_context"),
+            "契约 C3：name `{}` 必须解析为 workspace_gather_context",
+            call.name
+        );
+        assert_eq!(
+            call.arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            Some("src/foo.rs"),
+            "契约 C3：必须沿用历史中的显式路径"
+        );
+    }
+
+    /// 契约 C4：显式路径能力必须保留。
+    #[test]
+    fn w1_preflight_keeps_explicit_path_gather_context() {
+        use crate::agent::tools::canonical_tool_name;
+
+        let decision = LocalTurnPlanner.preflight_decision("看看 src/foo.rs", &[], &[])
+            .expect("契约 C4：显式路径必须仍返回 Some");
+
+        let call = decision.tool_call.expect("契约 C4：必须携带 tool_call");
+        assert_eq!(
+            canonical_tool_name(&call.name),
+            Some("workspace_gather_context"),
+            "契约 C4：name `{}` 必须解析为 workspace_gather_context",
+            call.name
+        );
+        assert_eq!(
+            call.arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            Some("src/foo.rs"),
+            "契约 C4：必须使用显式路径"
+        );
+    }
+
+    /// 契约 C5：`/`、`//`、`.`、`..` 都不是路径；`/home/a`、`a/b` 仍是路径。
+    #[test]
+    fn w1_looks_like_path_rejects_root_and_dot_segments() {
+        for segment in ["/", "//", ".", ".."] {
+            assert!(
+                !looks_like_path(segment),
+                "契约 C5：{segment:?} 不得判定为路径"
+            );
+        }
+        for segment in ["/home/a", "a/b"] {
+            assert!(
+                looks_like_path(segment),
+                "契约 C5：{segment:?} 必须判定为路径"
+            );
+        }
+    }
 }

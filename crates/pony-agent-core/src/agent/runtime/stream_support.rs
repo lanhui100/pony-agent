@@ -895,3 +895,178 @@ mod b010_timeout_signal_tests {
         );
     }
 }
+
+/// W1 RED（task-4）：`match_pending_control_request` 的证据。
+///
+/// 现状缺陷：当 `tool_call.call_id` 为 `None` 时，函数只回退匹配 `Interaction`（Ask 路径），
+/// 永远不命中 `Approval`，导致需要审批的工具调用在恢复流式回合时拿不到待审批请求。
+/// 契约 C6 要求：无 call_id 时必须能命中 Pending Approval，同时保留 Interaction 兜底。
+#[cfg(test)]
+mod w1_pending_control_match_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn pending_request(
+        request_id: &str,
+        request_kind: PendingControlRequestKind,
+        call_id: &str,
+        state: PendingControlRequestState,
+    ) -> PendingControlRequest {
+        PendingControlRequest {
+            request_id: request_id.to_string(),
+            request_kind,
+            session_id: Some("session-w1".to_string()),
+            run_id: Some("run-w1".to_string()),
+            turn_id: "turn-w1".to_string(),
+            call_id: call_id.to_string(),
+            descriptor_snapshot_id: "snapshot-w1".to_string(),
+            descriptor_id: "descriptor-w1".to_string(),
+            final_args_digest: "digest-w1".to_string(),
+            policy_digest: "policy-w1".to_string(),
+            nonce: "nonce-w1".to_string(),
+            version: 1,
+            expires_at_ms: u64::MAX,
+            state,
+            prompt: Some("需要确认".to_string()),
+            options: None,
+        }
+    }
+
+    fn approval(request_id: &str, call_id: &str) -> PendingControlRequest {
+        pending_request(
+            request_id,
+            PendingControlRequestKind::Approval,
+            call_id,
+            PendingControlRequestState::Pending,
+        )
+    }
+
+    fn interaction(request_id: &str, call_id: &str) -> PendingControlRequest {
+        pending_request(
+            request_id,
+            PendingControlRequestKind::Interaction,
+            call_id,
+            PendingControlRequestState::Pending,
+        )
+    }
+
+    fn tool_call(call_id: Option<&str>) -> ToolCall {
+        ToolCall {
+            call_id: call_id.map(str::to_string),
+            name: "workspace_run_command".to_string(),
+            arguments: json!({ "command": "pnpm test", "description": "w1" }),
+            plan: None,
+        }
+    }
+
+    fn observed(request: Option<&PendingControlRequest>) -> Option<(String, PendingControlRequestKind)> {
+        request.map(|request| (request.request_id.clone(), request.request_kind.clone()))
+    }
+
+    /// 契约 C6 主断言：call_id=None 且存在 Pending Approval ⇒ 必须命中该 Approval。
+    #[test]
+    fn w1_missing_call_id_matches_pending_approval() {
+        let requests = vec![approval("req-approval", "dispatch-call-1")];
+
+        let matched = match_pending_control_request(&requests, &tool_call(None));
+
+        assert!(
+            matched.is_some(),
+            "契约 C6：tool_call.call_id=None 且存在 Pending Approval 时必须返回 Some(该 Approval)，实际 = {:?}",
+            observed(matched)
+        );
+        assert_eq!(
+            matched.map(|request| request.request_id.as_str()),
+            Some("req-approval"),
+            "契约 C6：必须命中唯一的 Pending Approval"
+        );
+        assert_eq!(
+            matched.map(|request| request.request_kind.clone()),
+            Some(PendingControlRequestKind::Approval),
+            "契约 C6：命中的请求类型必须是 Approval"
+        );
+    }
+
+    /// 契约 C6 回归保护：Ask/Interaction 兜底不得被削弱。
+    #[test]
+    fn w1_missing_call_id_still_falls_back_to_pending_interaction() {
+        let requests = vec![interaction("req-ask", "dispatch-call-2")];
+
+        let matched = match_pending_control_request(&requests, &tool_call(None));
+
+        assert_eq!(
+            matched.map(|request| request.request_id.as_str()),
+            Some("req-ask"),
+            "契约 C6：无 Approval 时 Ask/Interaction 兜底必须保留，实际 = {:?}",
+            observed(matched)
+        );
+    }
+
+    /// 契约 C6 回归保护：有 call_id 时按 call_id 精确命中 Approval。
+    #[test]
+    fn w1_call_id_still_matches_approval_by_id() {
+        let requests = vec![
+            approval("req-other", "call-zzz"),
+            approval("req-target", "call-abc"),
+        ];
+
+        let matched = match_pending_control_request(&requests, &tool_call(Some("call-abc")));
+
+        assert_eq!(
+            matched.map(|request| request.request_id.as_str()),
+            Some("req-target"),
+            "契约 C6：call_id 精确匹配必须优先，实际 = {:?}",
+            observed(matched)
+        );
+    }
+
+    /// 契约 C6 边界：非 Pending 的 Approval 不得被“无 call_id 回退”命中。
+    #[test]
+    fn w1_non_pending_approval_is_never_matched() {
+        let requests = vec![pending_request(
+            "req-consumed",
+            PendingControlRequestKind::Approval,
+            "dispatch-call-3",
+            PendingControlRequestState::Consumed,
+        )];
+
+        let matched = match_pending_control_request(&requests, &tool_call(None));
+
+        assert!(
+            matched.is_none(),
+            "契约 C6：state != Pending 的 Approval 不得命中，实际 = {:?}",
+            observed(matched)
+        );
+    }
+
+    /// 契约 C6 边界：Approval 与 Interaction 同时待定 ⇒ 必须命中其中之一（不得 None）。
+    #[test]
+    fn w1_mixed_pending_requests_hit_a_pending_one() {
+        let requests = vec![
+            approval("req-approval", "dispatch-call-4"),
+            interaction("req-ask", "dispatch-call-5"),
+        ];
+
+        let matched = match_pending_control_request(&requests, &tool_call(None));
+
+        let matched_id = matched.map(|request| request.request_id.as_str());
+        assert!(
+            matched_id == Some("req-approval") || matched_id == Some("req-ask"),
+            "契约 C6：同时存在 Pending Approval / Interaction 时必须命中其中一个，实际 = {matched_id:?}"
+        );
+        assert_eq!(
+            matched.map(|request| request.state.clone()),
+            Some(PendingControlRequestState::Pending),
+            "契约 C6：命中的请求必须是 Pending 状态"
+        );
+    }
+
+    /// 契约 C6 边界：空列表始终返回 None。
+    #[test]
+    fn w1_empty_requests_yield_none() {
+        assert!(
+            match_pending_control_request(&[], &tool_call(None)).is_none(),
+            "契约 C6：无待定请求时必须返回 None"
+        );
+    }
+}
