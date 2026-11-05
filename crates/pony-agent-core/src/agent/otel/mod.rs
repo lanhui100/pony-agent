@@ -1953,6 +1953,70 @@ fn local_span_context() -> opentelemetry::trace::SpanContext {
     )
 }
 
+/// W3 trace：以宿主父上下文派生**本地**子上下文（同 trace_id、新随机 span_id、已采样、不导出）。
+///
+/// 用途：导出关闭/门禁拒绝时的降级通路 —— 让队友 turn 的日志 `trace_id` 与出网
+/// `traceparent` 与宿主保持同一 trace，同时保持「本地上下文永不作真实导出父」的既定契约。
+fn local_child_span_context(
+    parent: opentelemetry::trace::SpanContext,
+) -> opentelemetry::trace::SpanContext {
+    let span_bytes = uuid::Uuid::new_v4().into_bytes();
+    let mut span_id_bytes = [0u8; 8];
+    span_id_bytes.copy_from_slice(&span_bytes[..8]);
+    if span_id_bytes.iter().all(|byte| *byte == 0) {
+        span_id_bytes[7] = 1;
+    }
+    opentelemetry::trace::SpanContext::new(
+        parent.trace_id(),
+        opentelemetry::trace::SpanId::from_bytes(span_id_bytes),
+        opentelemetry::trace::TraceFlags::SAMPLED,
+        // 本地派生上下文不是 remote parent 本身（`is_remote=false`），仍不可作导出父。
+        false,
+        opentelemetry::trace::TraceState::default(),
+    )
+}
+
+/// W3 trace：把 W3C `traceparent`（`00-<32hex>-<16hex>-<2hex>`）解析为远端 `SpanContext`。
+///
+/// 合规口径（W3C Trace Context §3.2.2）：
+/// - 版本号 2 位小写十六进制，且**不得**为 `ff`（保留值）；
+/// - trace-id 32 位小写十六进制且非全 0；span-id 16 位小写十六进制且非全 0；
+/// - flags 2 位小写十六进制（保留原值，仅由调用方按需使用 sampled 位）。
+///
+/// 任何不合规输入 ⇒ `None`：调用方 fail-closed 回落 root（宁可不注入脏父上下文）。
+fn traceparent_to_span_context(traceparent: &str) -> Option<opentelemetry::trace::SpanContext> {
+    let mut parts = traceparent.trim().split('-');
+    let version = parts.next()?;
+    let trace_id = parts.next()?;
+    let span_id = parts.next()?;
+    let flags = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if !is_lower_hex(version, 2) || version == "ff" {
+        return None;
+    }
+    if !is_lower_hex(trace_id, 32)
+        || !is_lower_hex(span_id, 16)
+        || !is_lower_hex(flags, 2)
+    {
+        return None;
+    }
+    if trace_id.bytes().all(|byte| byte == b'0') || span_id.bytes().all(|byte| byte == b'0') {
+        return None;
+    }
+    let trace_id = u128::from_str_radix(trace_id, 16).ok()?;
+    let span_id = u64::from_str_radix(span_id, 16).ok()?;
+    let flags = u8::from_str_radix(flags, 16).ok()?;
+    Some(opentelemetry::trace::SpanContext::new(
+        opentelemetry::trace::TraceId::from(trace_id),
+        opentelemetry::trace::SpanId::from(span_id),
+        opentelemetry::trace::TraceFlags::new(flags),
+        true,
+        opentelemetry::trace::TraceState::default(),
+    ))
+}
+
 // ------------------------------------------------- turn / LLM / 工具 span 装配面（挂载切片）
 //
 // 运行时装配点（runtime/turn_*.rs、turn_flow.rs 的 provider 调用缝、工具活动记录点）
@@ -1970,6 +2034,26 @@ fn local_span_context() -> opentelemetry::trace::SpanContext {
 /// W3C 上下文（随机 trace_id/span_id、已采样、零导出零网络），使 [`current_trace_id`] /
 /// [`current_traceparent`] 在活跃 turn 内可用（日志 trace_id 绑定与出网级联不因「不导出」失效）。
 pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnTraceGuard {
+    begin_turn_trace_with_parent(session_id, turn_id, sequence, None)
+}
+
+/// W3 trace：让本 turn 的 `agent.turn` root span **继承宿主 turn 的 traceparent**。
+///
+/// 语义：
+/// - 合法 `00-<32hex>-<16hex>-<2hex>` ⇒ 解析为远端 `SpanContext`，并以
+///   `Context::new().with_remote_span_context(...)` 作为 `build_with_context` 的 parent ⇒
+///   teammate/subagent turn 与宿主**同一 trace id**（父 span = 宿主当前 turn span）；
+/// - `None` / 非法 ⇒ 空 `Context`（行为与 [`begin_turn_trace`] 完全一致：root trace）；
+/// - 导出关闭/门禁拒绝的降级通路：仍沿用父 trace id 生成本地子上下文，使日志 `trace_id` 与
+///   出网 `traceparent` 与宿主同 trace（该上下文 `exported = false`，永不作真实导出的父）。
+///
+/// 任何情况下不 panic；非法父头 fail-closed 回落 root，绝不注入脏父上下文。
+pub fn begin_turn_trace_with_parent(
+    session_id: &str,
+    turn_id: &str,
+    sequence: u64,
+    parent_traceparent: Option<&str>,
+) -> TurnTraceGuard {
     let empty = TurnTraceGuard {
         span: None,
         slot: None,
@@ -1989,6 +2073,12 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
     if session_id.trim().is_empty() || turn_id.trim().is_empty() {
         return empty;
     }
+    // W3 trace：合法父 traceparent ⇒ 该 turn 的 root span 挂到宿主 turn span 之下（同一 trace）；
+    // 非法/缺失 ⇒ 空 Context（root trace，行为逐字不变）。
+    let parent_span_context = parent_traceparent.and_then(traceparent_to_span_context);
+    let parent_context = parent_span_context
+        .as_ref()
+        .map(|span_context| Context::new().with_remote_span_context(span_context.clone()));
     if spans_allowed() {
         if let Some(state) = current_state() {
             let user_id = env_non_empty(ENV_PONY_OTEL_USER_ID);
@@ -2008,11 +2098,12 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
                 ATTR_LANGFUSE_RELEASE,
                 current_release_version(),
             ));
+            let parent = parent_context.clone().unwrap_or_else(Context::new);
             let mut span = state.tracer.build_with_context(
                 opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
                     .with_kind(opentelemetry::trace::SpanKind::Internal)
                     .with_attributes(attributes),
-                &opentelemetry::Context::new(),
+                &parent,
             );
             let span_context = span.span_context().clone();
             let trace_id = sampled_trace_id(&mut span);
@@ -2044,7 +2135,12 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
 
     // 降级通路：本地关联上下文（不导出、不联网），仅承担本轮内的 trace 关联标识。
     // 契约：`exported = false` ⇒ 永不作子 span 的 parent、永不作 issue/前端跳转的 trace_id。
-    let span_context = local_span_context();
+    // W3 trace：有合法父头时沿用其 trace_id（新本地 span_id），保证无导出后端时
+    // teammate turn 的日志 trace_id / 出网 traceparent 仍与宿主同一 trace。
+    let span_context = match parent_span_context {
+        Some(parent) => local_child_span_context(parent),
+        None => local_span_context(),
+    };
     let trace_id = span_context.trace_id().to_string();
     let slot = register_active_turn(turn_id, session_id, span_context, false);
     TurnTraceGuard {
@@ -5102,6 +5198,99 @@ mod tests {
             std::time::Duration::from_secs(1)
         );
     }
+
+    // ------------------------------------------------ W3 trace：teammate 继承宿主 traceparent
+
+    /// W3 trace：`traceparent_to_span_context` 必须按 W3C 口径解析 trace/span/flags，
+    /// 并把远端标记置位；任何不合规输入一律 `None`（fail-closed 回落 root）。
+    #[test]
+    fn traceparent_parsing_yields_remote_parent_context() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let context =
+            traceparent_to_span_context(traceparent).expect("合法 traceparent 必须解析成功");
+        assert_eq!(
+            context.trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "W3 trace：trace id 必须原样继承"
+        );
+        assert_eq!(
+            context.span_id().to_string(),
+            "00f067aa0ba902b7",
+            "W3 trace：parent span id 必须原样继承"
+        );
+        assert!(
+            context.is_sampled(),
+            "W3 trace：flags=01 ⇒ 解析出的父上下文必须 sampled"
+        );
+        assert!(
+            context.is_remote(),
+            "W3 trace：从 wire 头解析的父上下文必须是 remote（不是本地派生 span）"
+        );
+
+        // 不合规输入：fail-closed 一律 None（不得注入脏父上下文）。
+        for invalid in [
+            "",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7",
+            "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
+        ] {
+            assert!(
+                traceparent_to_span_context(invalid).is_none(),
+                "W3 trace：非法 traceparent {invalid:?} 必须解析为 None"
+            );
+        }
+    }
+
+    /// W3 trace：`begin_turn_trace_with_parent` 必须沿用父 trace id（无论导出通路还是
+    /// 降级本地通路）：teammate turn 的日志 `trace_id` / 出网 `traceparent` 与宿主同一 trace，
+    /// 但 span id 必须是本 turn 自己的新 id（父子关系，不是冒用父 span）。
+    ///
+    /// 本用例**不**改进程级门禁/provider：两条通路（真实 span / 本地派生上下文）都必须满足
+    /// 同一断言，因此天然对其它单测的门禁残留免疫。
+    #[test]
+    fn begin_turn_trace_with_parent_inherits_trace_id_locally() {
+        let parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        let scope = begin_turn_trace_with_parent("sess-w3-parent", "turn-w3-parent", 0, Some(parent));
+        eprintln!(
+            "[w3-trace] parent_trace={} scope_trace={:?} current_traceparent={:?}",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            scope.trace_id(),
+            current_traceparent()
+        );
+
+        assert_eq!(
+            scope.trace_id().as_deref(),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736"),
+            "W3 trace：队友 turn 的 trace id 必须与宿主父 trace 相同"
+        );
+        assert_eq!(
+            current_trace_id().as_deref(),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736"),
+            "W3 trace：活动 turn 的 trace id 必须继承父上下文"
+        );
+        assert_ne!(
+            current_span_id().as_deref(),
+            Some("00f067aa0ba902b7"),
+            "W3 trace：本 turn 必须是新的 span id（不得冒用父 span）"
+        );
+        let child_traceparent = current_traceparent().expect("本地路径仍必须组装 traceparent");
+        assert!(
+            child_traceparent.starts_with("00-4bf92f3577b34da6a3ce929d0e0e4736-"),
+            "W3 trace：子 turn 的 traceparent 必须携带父 trace id，实际 = {child_traceparent}"
+        );
+
+        // 非法父头：回落 root（与既有 begin_turn_trace 行为一致，不得因脏头崩溃）。
+        let root_scope = begin_turn_trace_with_parent("sess-w3-root", "turn-w3-root", 1, Some("bad"));
+        assert_ne!(
+            root_scope.trace_id().as_deref(),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736"),
+            "W3 trace：非法父头必须回落 root trace（不得继承脏 trace id）"
+        );
+    }
 }
 #[cfg(test)]
 mod adr0055_tests {
@@ -5269,5 +5458,4 @@ https://api.example.com\",\"stdout\":\"{}\"}}",
         assert!(!prompt_ot.contains("sk-test-TOPSECRET-9876543210"));
         assert!(!prompt_ot.contains("/home/dm"));
     }
-
 }

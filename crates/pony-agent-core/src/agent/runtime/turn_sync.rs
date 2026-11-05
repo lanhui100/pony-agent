@@ -693,10 +693,12 @@ impl AgentRuntime {
         // 自动结束 span，覆盖同步轮全部终态出口。
         // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
         let sync_turn_sequence = self.session_turn_sequence(input.session_id.as_deref());
-        let mut otel_turn_scope = crate::agent::otel::begin_turn_trace(
+        // W3 trace：队友/子代理 runtime 继承宿主 traceparent（宿主 runtime 为 `None` ⇒ root）。
+        let mut otel_turn_scope = crate::agent::otel::begin_turn_trace_with_parent(
             input.session_id.as_deref().unwrap_or(""),
             &sync_turn_id,
             sync_turn_sequence,
+            self.parent_traceparent.as_deref(),
         );
         // Wave-7 B003（同步入口同构）：**turn 启动前**的用量治理判定（一次性、fail-open）。
         // 与流式入口同一策略与同一决策入口，避免「只挡流式 ⇒ 可绕过」。

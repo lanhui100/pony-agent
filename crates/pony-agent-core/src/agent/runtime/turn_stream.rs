@@ -1707,10 +1707,12 @@ impl AgentRuntime {
         // 函数返回时 Drop 自动结束 span，覆盖整轮生命周期（含同步执行的工具子轮）。
         // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
         let turn_sequence = self.session_turn_sequence(input.session_id.as_deref());
-        let mut otel_turn_scope = crate::agent::otel::begin_turn_trace(
+        // W3 trace：队友/子代理 runtime 继承宿主 traceparent（宿主 runtime 为 `None` ⇒ root）。
+        let mut otel_turn_scope = crate::agent::otel::begin_turn_trace_with_parent(
             input.session_id.as_deref().unwrap_or(""),
             &turn_id,
             turn_sequence,
+            self.parent_traceparent.as_deref(),
         );
         // T2-1：流式 turn 的 session/run/turn 事实在本 turn 内部解析，并随每次工具调用
         // 显式下传（Ask 控制请求因此仍绑定真实调用；并发 turn 之间不再共享任何槽位）。

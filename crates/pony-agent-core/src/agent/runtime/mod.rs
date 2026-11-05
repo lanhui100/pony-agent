@@ -143,6 +143,11 @@ pub struct AgentRuntime {
     graph_runs: Option<Arc<Mutex<GraphRunStore>>>,
     /// Workspace root facts seeded into the governed `DispatchContext` per turn.
     workspace_root: Option<String>,
+    /// W3 trace：本 runtime 的 turn 要继承的宿主 `traceparent`（`None` = 自起 root trace）。
+    ///
+    /// 由 `HostTurnEngine` 建栈后按派发时的宿主 traceparent 注入：teammate/subagent turn 的
+    /// `agent.turn` span 因此挂在宿主当前 turn span 之下（同一 trace id）。
+    parent_traceparent: Option<String>,
     /// The governed dispatcher the default tool executor executes through, cached once so the
     /// runtime and the host control plane share the exact same `Arc` (design.md Decision 5,
     /// P1-1). Computed from the tool executor at first use; `None` when the executor is not the
@@ -228,12 +233,21 @@ impl AgentRuntime {
             trace_persistence,
             graph_runs: None,
             workspace_root: None,
+            parent_traceparent: None,
             governed_dispatcher: OnceLock::new(),
         }
     }
 
     pub fn sessions_handle(&self) -> Arc<RwLock<SessionStore>> {
         Arc::clone(&self.sessions)
+    }
+
+    /// W3 trace：注入本 runtime 各 turn 要继承的宿主 `traceparent`（`None` = 保持 root trace）。
+    ///
+    /// 语义：写入后**每一次** turn 的 `agent.turn` span 都以该父上下文起建（同一 trace id）。
+    /// 仅在队友/子代理引擎的独立 runtime 上调用；宿主 runtime 保持 `None`（原有行为不变）。
+    pub fn set_parent_traceparent(&mut self, parent_traceparent: Option<String>) {
+        self.parent_traceparent = parent_traceparent;
     }
 
     /// Share the graph run store used for Ask-wait suspension binding (design.md Decision 5).

@@ -410,6 +410,38 @@ pub fn teammate_session_id(target: &str) -> Option<String> {
     lock.as_ref()?.get(target).cloned()
 }
 
+/// W3 trace：每个 teammate target 派发时捕获的**宿主 turn traceparent**。
+///
+/// 用途：`drive_teammate_turn_in`（在后台线程/另一 turn 上执行）已经离开宿主 turn 的
+/// 活动上下文，必须靠这份快照把宿主 trace 延续到队友 turn（否则队友 trace 会另起 root）。
+static TEAMMATE_TRACEPARENTS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// W3 trace：登记 target 的宿主 traceparent（`lead`/空值/非法值忽略 —— fail-closed 保持 root）。
+fn set_teammate_traceparent(target: &str, traceparent: Option<&str>) {
+    let Some(traceparent) = traceparent.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if target == LEAD_TARGET {
+        return;
+    }
+    let mut lock = TEAMMATE_TRACEPARENTS.lock().unwrap();
+    if lock.is_none() {
+        *lock = Some(HashMap::new());
+    }
+    lock.as_mut()
+        .unwrap()
+        .insert(target.to_string(), traceparent.to_string());
+}
+
+/// W3 trace：读取 target 的宿主 traceparent 快照；无登记 ⇒ `None`（队友 turn 自起 root）。
+pub(crate) fn teammate_traceparent(target: &str) -> Option<String> {
+    if target == LEAD_TARGET {
+        return None;
+    }
+    let lock = TEAMMATE_TRACEPARENTS.lock().unwrap();
+    lock.as_ref()?.get(target).cloned()
+}
+
 /// wave-37 C3：真实子代理执行入口。
 ///
 /// - 引擎槽为空 → 结构化错误（含 `capability_unavailable`），不再返回伪字符串；
@@ -453,6 +485,9 @@ pub fn subagent_in_workspace_with_provider(
         args.model_id.as_deref(),
     )?;
 
+    // W3 trace：**派发时**捕获宿主当前 turn 的 traceparent（同步与后台两条路径都继承同一 trace）。
+    let parent_traceparent = crate::agent::otel::current_traceparent();
+
     let engine = crate::agent::subagent_runtime::subagent_engine().ok_or_else(|| {
         "capability_unavailable: subagent engine not wired (HostTurnEngine missing)".to_string()
     })?;
@@ -477,11 +512,12 @@ pub fn subagent_in_workspace_with_provider(
         std::thread::spawn(move || {
             // 后台 turn 全程占许可（仅非自持引擎会携带 Some）。
             let _gate = gate;
-            if let Err(err) = engine.run_turn_with_selection(
+            if let Err(err) = engine.run_turn_with_selection_and_parent(
                 &args.prompt,
                 SUBAGENT_TURN_TIMEOUT_MS,
                 bg_root.as_deref(),
                 selection.as_ref(),
+                parent_traceparent.as_deref(),
             ) {
                 eprintln!("[subagent] background turn failed ({}): {}", bg_id, err);
             }
@@ -495,11 +531,12 @@ pub fn subagent_in_workspace_with_provider(
 
     // 同步路径：许可 guard 活到本次调用结束（仅非自持引擎会携带 Some）。
     let _gate = gate;
-    match engine.run_turn_with_selection(
+    match engine.run_turn_with_selection_and_parent(
         &args.prompt,
         SUBAGENT_TURN_TIMEOUT_MS,
         workspace_root,
         selection.as_ref(),
+        parent_traceparent.as_deref(),
     ) {
         Ok(outcome) => Ok(SubagentResult {
             subagent_id,
@@ -630,6 +667,8 @@ pub fn spawn_teammate_in_workspace_with_provider(
         args.provider_id.as_deref(),
         args.model_id.as_deref(),
     )?;
+    // W3 trace：**派发时**捕获宿主当前 turn 的 traceparent（此刻仍在宿主 turn 的活动上下文内）。
+    let parent_traceparent = crate::agent::otel::current_traceparent();
 
     let auto_drive = crate::agent::subagent_runtime::subagent_engine().is_some();
     let (result, target, initial_prompt) = register_teammate(args)?;
@@ -637,6 +676,10 @@ pub fn spawn_teammate_in_workspace_with_provider(
     // 2) 登记成功后持久化该 target 的 provider 选择（驱动阶段唯一真值源）。
     if let Some(selection) = selection {
         set_teammate_provider(&target, selection);
+    }
+    // W3 trace：同名 target 再派生时覆盖（与 provider/会话登记同源语义）。
+    if let Some(parent_traceparent) = parent_traceparent {
+        set_teammate_traceparent(&target, Some(parent_traceparent.as_str()));
     }
 
     // Wave-61 C7：引擎在位时把初始 prompt 投递并驱动（复用 send_message 的入队 + 后台
@@ -1131,13 +1174,16 @@ pub fn drive_teammate_turn_in(
     let engine_was_wired = engine.is_some();
     // W2：派生阶段登记的 provider 选择在此消费；无登记 ⇒ `None`（引擎走 `run_turn_in` 旧链）。
     let selection = teammate_provider_selection(target);
+    // W3 trace：派发时捕获的宿主 traceparent 在此消费；无登记 ⇒ `None`（队友 turn 自起 root）。
+    let parent_traceparent = teammate_traceparent(target);
     let final_reply = match engine {
         Some(engine) => {
-            match engine.run_turn_with_selection(
+            match engine.run_turn_with_selection_and_parent(
                 &combined_prompt,
                 SUBAGENT_TURN_TIMEOUT_MS,
                 workspace_root,
                 selection.as_ref(),
+                parent_traceparent.as_deref(),
             ) {
                 Ok(outcome) => {
                     // W3：成功 turn 的会话 id 登记进进程内可见性缓存（失败路径不写：避免

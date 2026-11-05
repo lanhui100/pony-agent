@@ -101,6 +101,24 @@ pub trait SubagentTurnEngine: Send + Sync {
         let _ = selection;
         self.run_turn_in(prompt, timeout_ms, workspace_root)
     }
+
+    /// W3 trace：在显式 provider 选择之外，再继承**宿主 turn 的 traceparent**。
+    ///
+    /// 默认实现忽略 `parent_traceparent` 并原样委托
+    /// [`SubagentTurnEngine::run_turn_with_selection`]（既有 Stub/宿主引擎零改动）；
+    /// [`HostTurnEngine`] 覆写它：建栈后把父 traceparent 注入 runtime，使本队友 turn 的
+    /// `agent.turn` span 挂在宿主 turn span 之下（同一 trace id，而非另起 root trace）。
+    fn run_turn_with_selection_and_parent(
+        &self,
+        prompt: &str,
+        timeout_ms: u64,
+        workspace_root: Option<&std::path::Path>,
+        selection: Option<&crate::agent::config::ResolvedProviderSelection>,
+        parent_traceparent: Option<&str>,
+    ) -> Result<SubagentRunOutcome, String> {
+        let _ = parent_traceparent;
+        self.run_turn_with_selection(prompt, timeout_ms, workspace_root, selection)
+    }
 }
 
 static SUBAGENT_ENGINE: OnceLock<Arc<dyn SubagentTurnEngine>> = OnceLock::new();
@@ -242,19 +260,22 @@ impl HostTurnEngine {
         timeout_ms: u64,
         workspace_root: PathBuf,
     ) -> Result<SubagentRunOutcome, String> {
-        self.run_turn_with_root_and_selection(prompt, timeout_ms, workspace_root, None)
+        self.run_turn_with_root_and_selection(prompt, timeout_ms, workspace_root, None, None)
     }
 
-    /// W2：带显式 provider 选择的建栈实现。
+    /// W2/W3：带显式 provider 选择 + 可选父 traceparent 的建栈实现。
     ///
     /// `selection = Some` ⇒ 用 [`FixedSelectionResolver`] 固定本次栈的 provider 选择；
     /// `None` ⇒ 既有默认解析链（`ProviderRegistryStore`），行为逐字不变。
+    /// `parent_traceparent = Some` ⇒ 建栈后注入 runtime，本 turn 的 `agent.turn` span
+    /// 挂到宿主 turn span 之下（同一 trace id）。
     fn run_turn_with_root_and_selection(
         &self,
         prompt: &str,
         timeout_ms: u64,
         workspace_root: PathBuf,
         selection: Option<ResolvedProviderSelection>,
+        parent_traceparent: Option<String>,
     ) -> Result<SubagentRunOutcome, String> {
         // 1) prompt 体积门 + 2) 并发门：引擎是许可的唯一真源（Guard Drop 归还许可，
         //    panic 展开路径同样安全）。
@@ -297,7 +318,11 @@ impl HostTurnEngine {
                         FixedSelectionResolver::new(selection),
                     ));
                 }
-                let runtime = builder.build();
+                let mut runtime = builder.build();
+                // W3 trace：父 traceparent 在建栈后、跑 turn 前注入（本栈后续 turn 一律继承）。
+                if let Some(parent_traceparent) = parent_traceparent {
+                    runtime.set_parent_traceparent(Some(parent_traceparent));
+                }
                 let input = TurnInput {
                     message: prompt_owned,
                     display_message: None,
@@ -410,6 +435,43 @@ impl SubagentTurnEngine for HostTurnEngine {
         let root = workspace_root
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| self.resolved_workspace_root());
-        self.run_turn_with_root_and_selection(prompt, timeout_ms, root, Some(selection.clone()))
+        self.run_turn_with_root_and_selection(
+            prompt,
+            timeout_ms,
+            root,
+            Some(selection.clone()),
+            None,
+        )
+    }
+
+    /// W3 trace：继承宿主 turn 的 traceparent。
+    ///
+    /// - `selection=None` 且 `parent_traceparent=None` ⇒ 逐字回落 `run_turn_in`（旧行为不变）；
+    /// - 其余情况 ⇒ 建栈（可带固定 provider 选择）后注入父 traceparent，再跑 turn。
+    fn run_turn_with_selection_and_parent(
+        &self,
+        prompt: &str,
+        timeout_ms: u64,
+        workspace_root: Option<&std::path::Path>,
+        selection: Option<&ResolvedProviderSelection>,
+        parent_traceparent: Option<&str>,
+    ) -> Result<SubagentRunOutcome, String> {
+        let parent_traceparent = parent_traceparent
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if selection.is_none() && parent_traceparent.is_none() {
+            return self.run_turn_in(prompt, timeout_ms, workspace_root);
+        }
+        let root = workspace_root
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| self.resolved_workspace_root());
+        self.run_turn_with_root_and_selection(
+            prompt,
+            timeout_ms,
+            root,
+            selection.cloned(),
+            parent_traceparent,
+        )
     }
 }
