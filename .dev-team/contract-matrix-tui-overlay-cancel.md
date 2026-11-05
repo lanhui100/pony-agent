@@ -1,6 +1,6 @@
 # TUI Ask 覆盖层与取消反馈最小验收契约（已冻结 2026-11-05）
 
-> Protocol Agent 提案；Test Agent 仅据此编写验收，Executor 只读。公共事件、工具、CAS 与持久化契约不变。
+> Protocol Agent 独立裁定并冻结；Test Agent 仅据此编写验收，Executor 只读。公共事件、工具、CAS 与持久化契约不变。
 
 ## 0. 事实与最小闭包
 
@@ -28,10 +28,18 @@
 | O5 | 上述 turn 收到 `turn:cancelled`，`stopReason="user"` | 既有状态通道显示「已停止（用户中断）」（即用户可读的已终止语义），`is_streaming=false`、stopping 清理；已有正文保留；不得新增 `ChatMessage`。 |
 | O6 | stopping 中重复 Esc；同一终态事件重复/陈旧 turn 终态 | 不重复派发停止请求，不重复追加状态/用户/系统消息；陈旧 turn 不得终止当前 turn。 |
 | C9 | 普通初始 turn 与每个 goal 续轮；含 start_turn_stream 早退/返回 | 每轮调用前用现有 `register_turn_event_sink(turn_id, Arc<TuiTurnSink>)` 注册同一 UI 通道，使 stop_requested/cancelled 可达；该次调用结束后以 `unregister_turn_event_sink(turn_id)` 成对回收 sink 与 emitter。不得新增事件、线程、emitter 类型或 core 改动；注册项不得跨 turn 泄漏。 |
-| C10 | 流式双击 Esc 后检查真实屏幕与原始 pane 流 | 结构化 JSON 日志不得覆盖消息区或成为聊天消息；TUI 启动后将既有 JSON 日志缺省 stdout 改道已重定向 stderr，终态仍显示「已停止（用户中断）」；不新增日志字段/出口。 |
+| C10 | 流式双击 Esc 后检查真实屏幕、原始 pane 流及运行日志 | 结构化 JSON 日志不得覆盖消息区或成为聊天消息；仅当 stderr 已成功重定向到 `PONY_TUI_RUNTIME_LOG` 时才将既有 JSON 日志改道该文件，格式/字段不变，终态仍显示「已停止（用户中断）」。运行日志不可写/重定向失败时不改道；不新增日志出口。 |
 | O7 | Ask 面板 Esc 成功取消 | 沿用既有 `cancel_ask(request_id, version)` 一次并关闭面板；不新增用户/系统消息，不调用 `answer_ask` 或 `stop_turn`，不注入取消答案 JSON。CAS 失败不得谎报成功。Ask 内 Esc 不继承普通流式双击停止语义。 |
 | O8 | 取消事件携带内部 `text`/`error`/JSON/Debug 形态哨兵 | 用户状态只来自受控停止原因投影；原始事件、工具参数、协议 JSON、Rust Debug 不得进入用户消息或取消状态提示。正常模型正文中合法出现的 `{`/`}` 不在禁用范围。 |
-| J1 | resume 的 trace 同时含 `description`、`arguments_text`、`result_text`，注入唯一 JSON 哨兵 | 非空 `description` 优先于 arguments/result；若 `description` 只是工具名占位，只提取结构化参数中的已知人类可读 `description` 字段，不得反显整段 JSON；交互 Ask（复用现有名称分类：`ask_user`/`ask`/`builtin:ask`/`builtin:ask_user`，大小写不敏感）的结构化 arguments/result 不得成为消息摘要。普通工具 description 为空时保留既有 arguments→result 回退，不引入通用 sanitizer。 |
+| J1 | resume 的 trace 同时含 `description`、`arguments_text`、`result_text`，注入唯一 JSON 哨兵 | 非空且非工具名/显示名占位的 `description` 优先；占位时只提取结构化 arguments 中已知的人类可读 `description` 字段，空/占位且无该人类字段时省略 detail，绝不反显整段 JSON。交互 Ask（复用现有名称分类：`ask_user`/`ask`/`builtin:ask`/`builtin:ask_user`，大小写不敏感）的结构化 arguments/result 不得成为摘要；普通工具仅保留非结构化纯文本 detail 的兼容回退，不引入通用 sanitizer。 |
+
+## 2.1 Revision 2（Protocol Agent 独立复核，2026-11-05）
+
+- **程序结论**：实现提交 `818cf22e` 对冻结 J1 的改写与 C10 新增未经 Protocol 事先裁定，属流程偏离；本条是独立事后复核，不追溯认可实现者自改契约的行为。现按最小兼容闭包批准语义，源码与冻结测试均未因本条修改。
+- **批准 C10**：结构化 JSON 不得进入 TUI 画面。`set_stderr_output` 的 stdout/stderr 分流见 `crates/pony-agent-core/src/agent/otel/log.rs:141-162`；成功重定向门控见 `crates/pony-agent-core/src/bin/tui.rs:6428-6444`、`:6569-6584`。测试映射：`tests/acceptance/l2at-tui-overlay-cancel.sh:407-435` 的屏幕/pane 负向断言与红相判别力自检（脚本暂沿用 O8 标签，语义归 C10）；`:437-462` 与 `crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs:938-965` 同时核验运行日志未出现 sink 告警。
+- **批准 J1 细化**：占位识别、只取 arguments 的人类字段及占位省略见 `crates/pony-agent-core/src/bin/tui.rs:2709-2760`。现有真实 resume 用例 `crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs:968-1007` 与 PTY `tests/acceptance/l2at-tui-overlay-cancel.sh:549-587` 只覆盖非占位 description 优先和整段 JSON 负向断言。
+- **覆盖边界（不得冒充已验）**：当前没有针对「占位 description + arguments.description」「空/占位且无人类字段 ⇒ detail 省略」「Ask 名称分类抑制」的独立动态用例；这些分支仅经本 Protocol 静态复核，须由 Test Agent 另行补测，Executor 不得借本条自证。普通工具空 description 的纯文本 detail 回退是兼容性保留，不是对原始 JSON 的许可。
+- **MINOR-3 同步**：`docs/observability.yaml` 明确本地取证面由 stdout/pane 迁至 `PONY_TUI_RUNTIME_LOG`，格式/字段不变，且仅在重定向成功时改道。
 
 ## 3. 候选方案裁决依据
 

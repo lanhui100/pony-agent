@@ -16,7 +16,7 @@ TUI 的 Ask 面板虽位于正文底部，但布局先从消息区扣除面板�
 
 ### 方案 B：Ask 覆盖绘制，取消复用既有事件投影（采纳）
 
-Ask 不再参与消息区高度计算，只在消息区下部覆盖绘制且下缘贴 Composer 上缘；面板与消息区允许相交，未被面板遮挡的历史保持原布局。工具摘要采用 `description` 非空优先，交互 Ask 不把结构化 arguments/result 反显为摘要，普通工具维持兼容。取消继续走 `StopSequenceState → stop_turn → turn:cancelled → apply_stop_terminal`，但 TUI 必须为每轮注册既有 `TuiTurnSink` 才能收到该链事件，并在调用结束后成对注销 sink/emitter；用户原因呈现既有「已停止（用户中断）」，不把协议 payload 变成聊天消息。改动闭包最小，事件与 CAS 公共契约不变。
+Ask 不再参与消息区高度计算，只在消息区下部覆盖绘制且下缘贴 Composer 上缘；面板与消息区允许相交，未被面板遮挡的历史保持原布局。工具摘要以非占位 `description` 优先；占位时只提取 arguments 中已知的人类可读 `description` 字段，无人类字段则省略 detail，绝不反显整段 JSON。交互 Ask 的结构化 arguments/result 不作为摘要，普通文本 detail 保持兼容。取消继续走 `StopSequenceState → stop_turn → turn:cancelled → apply_stop_terminal`，但 TUI 必须为每轮注册既有 `TuiTurnSink` 才能收到该链事件，并在调用结束后成对注销 sink/emitter；用户原因呈现既有「已停止（用户中断）」，不把协议 payload 变成聊天消息。改动闭包最小，事件与 CAS 公共契约不变。
 
 ### 方案 C：新增取消消息/事件并统一清洗所有内部 payload
 
@@ -29,10 +29,10 @@ Ask 不再参与消息区高度计算，只在消息区下部覆盖绘制且下�
 3. 流式双击 Esc 仍只在第二次命中时发一次停止请求；「正在停止…」只在受理后出现，终态只由取消/完成/失败事件驱动。
 4. 每个初始 turn 与 goal 续轮复用现有 `register_turn_event_sink` 注册 `Arc<TuiTurnSink>`，该次 `start_turn_stream` 返回后调用 `unregister_turn_event_sink`；sink 与监督 emitter 成对回收。不得增加事件、线程或 core 接口。
 5. 用户主动停止的终态沿用「已停止（用户中断）」状态提示，不新增取消聊天消息；已有正文与持久化历史保持原义。原始 `text`/`error`、工具参数、协议 JSON 与 Rust Debug 不作为取消提示或用户消息显示。
-6. 恢复视图的工具摘要以非空 `description` 优先；若该字段只是工具名占位，则从结构化参数中只提取已知的人类可读 `description` 字段，绝不反显整段 JSON。交互 Ask 的结构化 arguments/result 不作为消息摘要，复用现有交互工具名称分类，不增加通用 sanitizer。普通工具无 description 时维持既有 arguments→result 兼容回退。
+6. 恢复视图的工具摘要以非空且非工具名/显示名占位的 `description` 优先；占位时只提取结构化 arguments 中已知的人类可读 `description` 字段，空/占位且无该人类字段时省略 detail，绝不反显整段 JSON。交互 Ask 的结构化 arguments/result 不作为消息摘要，复用现有交互工具名称分类，不增加通用 sanitizer；普通工具仅保留非结构化纯文本 detail 的兼容回退。
 7. Ask 自身 Esc 成功取消仍调用既有 `cancel_ask(request_id, version)` 并关闭面板，不构造答案、不新增系统消息、不调用 `stop_turn`；CAS 失败不得伪装成功。Ask 已 suspended，其 Esc 与普通流式双击停止保持不同产品语义。
 8. 不新增接口空桩、事件字段、持久化格式、配置、依赖、网络调用或锁；新增资源义务仅为上述既有 sink/emitter 的成对回收；可观测性四维归属不变。
-9. TUI 启动后把既有结构化 JSON 日志的缺省输出从 stdout 改道已重定向的 stderr（`otel::log::set_stderr_output(true)`）；全屏界面不得被内部协议 JSON 覆盖。日志格式、字段与落盘取证面不变，仅修正错误输出目标。
+9. 仅当 stderr 已成功重定向到 `PONY_TUI_RUNTIME_LOG` 后，TUI 才把既有结构化 JSON 日志从 stdout/pane 改道该运行日志（`otel::log::set_stderr_output(true)`）；全屏界面不得被内部协议 JSON 覆盖。本地取证面由 stdout/pane 迁至运行日志，格式与字段不变；运行日志不可写/重定向失败时不改道，不新增日志出口。
 
 ## 影响
 

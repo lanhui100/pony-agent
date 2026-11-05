@@ -10,7 +10,7 @@
   },
   "logging": {
     "applicable": false,
-    "reason": "不新增日志出口、异常上报或遥测字段；仅复用现有 TUI 状态提示，四维可观测性归属不变。",
+    "reason": "不新增日志出口、异常上报或遥测字段；仅将 TUI 内既有结构化 JSON 日志的输出目标在 stderr 成功重定向后由 stdout 改为 stderr/本地运行日志，格式与字段不变，四维归属不变。",
     "format": "json",
     "trace_id": true
   },
