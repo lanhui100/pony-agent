@@ -1453,3 +1453,232 @@ fn export_captured_with_explicit_version(explicit: Option<&str>) -> Vec<Captured
     );
     captured
 }
+
+// ---------------------------------------------------------------------------
+// Followup stream 纯工具调用首包（StreamStart 且无文本/思考增量）TTFT 记录验收测试
+// ---------------------------------------------------------------------------
+
+use pony_agent_core::agent::config::{
+    ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
+    ThinkingParamPattern,
+};
+use pony_agent_core::agent::context::DefaultTurnContextBuilder;
+use pony_agent_core::agent::planner::LocalTurnPlanner;
+use pony_agent_core::agent::provider::ProviderAuthType;
+use pony_agent_core::agent::runtime::{AgentRuntime, TurnInput, TurnStreamEvent};
+use pony_agent_core::agent::session::{FileSessionBackend, SessionStore};
+use pony_agent_core::agent::telemetry::{
+    DefaultTurnTelemetryBuilder, ProviderLatencyKind,
+};
+use pony_agent_core::agent::tools::ToolExecutor;
+use pony_agent_core::agent::turn_flow::TurnEventSink;
+use std::sync::atomic::AtomicBool;
+
+#[derive(Default)]
+struct TestRecordingSink {
+    events: Mutex<Vec<(String, TurnStreamEvent)>>,
+}
+
+impl TurnEventSink for TestRecordingSink {
+    fn emit(&self, name: &str, payload: TurnStreamEvent) {
+        self.events
+            .lock()
+            .expect("recording sink mutex poisoned")
+            .push((name.to_string(), payload));
+    }
+}
+
+struct TestStaticResolver {
+    selection: ResolvedProviderSelection,
+}
+
+impl ProviderSelectionResolver for TestStaticResolver {
+    fn resolve_provider_selection(
+        &self,
+        _provider_id: Option<&str>,
+        _model_id: Option<&str>,
+    ) -> ResolvedProviderSelection {
+        self.selection.clone()
+    }
+}
+
+struct TestNoopExecutor;
+
+impl ToolExecutor for TestNoopExecutor {
+    fn execute(&self, call: &ToolCall) -> ToolResult {
+        ToolResult {
+            tool_name: call.name.clone(),
+            status: "ok".to_string(),
+            output: "{\"entries\":[\"file1.txt\"]}".to_string(),
+            duration_ms: 1,
+        }
+    }
+}
+
+/// 启动一个按顺序返回预设响应的 HTTP 回环服务
+fn spawn_sequential_http_server(responses: Vec<String>) -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>, JoinHandle<()>) {
+    use std::sync::atomic::AtomicBool;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+    let port = listener.local_addr().expect("local addr").port();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let requests_clone = Arc::clone(&requests);
+    let shutdown_clone = Arc::clone(&shutdown);
+
+    let handle = std::thread::spawn(move || {
+        let mut resp_iter = responses.into_iter();
+        while !shutdown_clone.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = listener.set_nonblocking(false);
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut req_buffer = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        req_buffer.extend_from_slice(&chunk[..n]);
+                        if req_buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            requests_clone
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&req_buffer).to_string());
+
+            if let Some(resp) = resp_iter.next() {
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        }
+    });
+
+    (port, requests, shutdown, handle)
+}
+
+#[test]
+fn followup_stream_pure_tool_call_records_first_token_latency() {
+    let _guard = gate_lock();
+
+    // 1. Initial 决策轮返回工具调用（流式 SSE，纯工具调用首包：无 text/reasoning，触发 StreamStart）
+    let initial_sse = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        .to_string()
+        + "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"workspace_list_files\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n"
+        + "data: [DONE]\n\n";
+
+    // 2. Followup 轮也返回工具调用（流式 SSE，纯工具调用首包：无 text/reasoning，触发 StreamStart）
+    // 此时 followup 流式闭包会收到 ProviderStreamChunk::StreamStart。
+    // 当前缺陷：`if matches!(delta, ProviderStreamChunk::StreamStart) { return; }`
+    // 导致没有机会执行 `provider_call_first_token_latency_for_emit.set(Some(value))`。
+    let followup_sse = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        .to_string()
+        + "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"workspace_list_files\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5,\"total_tokens\":25}}\n\n"
+        + "data: [DONE]\n\n";
+
+    // 3. 第 2 次 Followup 轮最终返回正常回答
+    let final_sse = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        .to_string()
+        + "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
+        + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":5,\"total_tokens\":35}}\n\n"
+        + "data: [DONE]\n\n";
+
+    let (port, _reqs, shutdown, handle) = spawn_sequential_http_server(vec![initial_sse, followup_sse, final_sse]);
+
+    let selection = ResolvedProviderSelection {
+        requested_name: "test-openai".to_string(),
+        provider_name: "test-openai".to_string(),
+        protocol: ProviderProtocol::OpenAiCompletions,
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        auth_type: ProviderAuthType::Auto,
+        api_key_env_var: "TEST_API_KEY".to_string(),
+        api_key: Some("test-key".to_string()),
+        model: "gpt-4o".to_string(),
+        temperature: 0.0,
+        max_output_tokens: 1024,
+        reasoning_effort: None,
+        reasoning_budget_tokens: None,
+        capabilities: ProviderModelCapabilities {
+            context_window_tokens: Some(128_000),
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: false,
+            supports_reasoning: false,
+            ..Default::default()
+        },
+        thinking_param_pattern: ThinkingParamPattern::EffortWithNone,
+    };
+
+    let temp_file = std::env::temp_dir().join(format!("test-sessions-{}.db", port));
+    let session_store = SessionStore::with_backend(Box::new(FileSessionBackend::new(temp_file.clone())));
+
+    let mut runtime = AgentRuntime::with_dependencies(
+        session_store,
+        Box::new(TestStaticResolver { selection }),
+        Box::new(TestNoopExecutor),
+        Box::new(LocalTurnPlanner),
+        Box::new(DefaultTurnContextBuilder),
+        Box::new(DefaultTurnTelemetryBuilder),
+    );
+
+    let sink = TestRecordingSink::default();
+    runtime.start_turn_stream(
+        &sink,
+        "turn-followup-streamstart-ttft".to_string(),
+        TurnInput {
+            message: "test prompt".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            tool_authorization_mode: None,
+            session_id: Some("session-ttft".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+            plan_execution_approval: None,
+        },
+    );
+
+    shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = TcpStream::connect(format!("127.0.0.1:{port}"));
+    let _ = handle.join();
+
+    let _ = std::fs::remove_file(&temp_file);
+
+    let events = sink.events.lock().unwrap();
+    let completed = events
+        .iter()
+        .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+        .expect("turn:completed event must be emitted");
+
+    let provider_calls = completed
+        .provider_call_records
+        .as_ref()
+        .expect("provider_call_records must exist");
+
+    // 应该有 3 次 provider call：initial 决策 + 第 1 次 followup(纯工具) + 第 2 次 followup(最终回答)
+    assert_eq!(provider_calls.len(), 3, "expected 3 provider call records");
+
+    let followup_tool_call_record = &provider_calls[1];
+    assert_eq!(
+        followup_tool_call_record.latency_kind,
+        ProviderLatencyKind::ProviderStream,
+        "followup call should use ProviderStream latency kind"
+    );
+
+    // 核心断言：纯工具调用的 followup 流首包到达时，必须记录 first_token_latency_ms（TTFT），不得为 None！
+    assert!(
+        followup_tool_call_record.first_token_latency_ms.is_some(),
+        "followup stream with pure tool call (StreamStart chunk) must record provider_call_first_token_latency, but was None"
+    );
+}
