@@ -127,31 +127,37 @@ async function handleComplete() {
 </script>
 
 <template>
-  <div
+  <section
     v-if="currentGoal"
-    class="flex flex-col gap-1.5 border-b border-stone-200/80 bg-stone-50/90 px-4 py-2.5 backdrop-blur dark:border-stone-800 dark:bg-stone-900/90"
+    class="border-b border-stone-200/60 pb-3"
     data-testid="goal-bar"
   >
-    <div class="flex items-center justify-between gap-3">
+    <div class="mb-2 flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
+        <Target class="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" />
+        <span>目标</span>
+      </div>
+      <Badge :variant="phaseVariant" class="shrink-0 text-[10px] px-1.5 py-0.5">
+        {{ phaseLabel }}
+      </Badge>
+    </div>
+
+    <div class="rounded-[0.55rem] border border-stone-200/80 bg-[#fbf8f3] px-3 py-2 space-y-2 dark:border-stone-800 dark:bg-stone-900/60">
       <!-- 目标主体信息 -->
-      <div class="flex min-w-0 flex-1 items-center gap-2">
-        <Target class="h-4 w-4 shrink-0 text-amber-500 dark:text-amber-400" />
-        <span
-          class="truncate text-xs font-semibold text-stone-800 dark:text-stone-200"
+      <div class="space-y-1">
+        <div
+          class="line-clamp-2 text-xs font-semibold leading-snug text-stone-800 dark:text-stone-200"
           :title="currentGoal.objective"
         >
           {{ currentGoal.objective }}
-        </span>
-        <Badge :variant="phaseVariant" class="shrink-0 text-[10px] px-1.5 py-0.5">
-          {{ phaseLabel }}
-        </Badge>
-        <span class="shrink-0 text-[11px] text-stone-500 dark:text-stone-400">
+        </div>
+        <div class="text-[10px] text-stone-400">
           轮次: {{ currentGoal.roundsStarted }} / {{ currentGoal.maxGoalRounds }}
-        </span>
+        </div>
       </div>
 
       <!-- 控制动作按钮组 -->
-      <div class="flex shrink-0 items-center gap-1.5">
+      <div class="flex items-center gap-1.5 pt-0.5 border-t border-stone-200/40 dark:border-stone-800/40">
         <Button
           v-if="isActive"
           size="sm"
@@ -190,16 +196,16 @@ async function handleComplete() {
           达成
         </Button>
       </div>
-    </div>
 
-    <!-- 阻断信息提示条 -->
-    <div
-      v-if="isBlocked && currentGoal.blocked_reason"
-      class="flex items-center gap-1.5 rounded bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300"
-      data-testid="goal-blocked-banner"
-    >
-      <AlertCircle class="h-3.5 w-3.5 shrink-0 text-red-500" />
-      <span class="truncate">阻断原因：{{ currentGoal.blocked_reason }}</span>
+      <!-- 阻断信息提示条 -->
+      <div
+        v-if="isBlocked && currentGoal.blocked_reason"
+        class="flex items-center gap-1.5 rounded bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300"
+        data-testid="goal-blocked-banner"
+      >
+        <AlertCircle class="h-3.5 w-3.5 shrink-0 text-red-500" />
+        <span class="truncate">阻断原因：{{ currentGoal.blocked_reason }}</span>
+      </div>
     </div>
-  </div>
+  </section>
 </template>

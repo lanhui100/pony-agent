@@ -7,6 +7,7 @@ import { useGoalStore } from "@/stores/goal";
 import { useTeamStore } from "@/stores/team";
 import { useWorkspacePanelsStore } from "@/stores/workspace-panels";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
+import GoalBar from "@/components/GoalBar.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
 import TeamRosterPanel from "@/components/team/TeamRosterPanel.vue";
 import TeamTaskBoardPanel from "@/components/team/TeamTaskBoardPanel.vue";
@@ -26,9 +27,9 @@ const planStore = usePlanStore();
 const goalStore = useGoalStore();
 const teamStore = useTeamStore();
 
-// 计划与任务在有值时显示（有 plan、todo 或 goal）
+// 计划与任务在有值时显示（有 plan 或 todo）
 const hasPlanOrTasks = computed(
-  () => planStore.plans.length > 0 || planStore.todos.length > 0 || goalStore.hasGoal
+  () => planStore.plans.length > 0 || planStore.todos.length > 0
 );
 
 // 团队在有子智能体时才显示（成员数 > 1，或排除 lead 后的子代理数 > 0）
@@ -40,7 +41,7 @@ const hasSubagents = computed(() => {
 const hasTeamTasks = computed(() => teamStore.tasks.length > 0);
 
 const hasVisiblePanelsBelowStatus = computed(
-  () => hasPlanOrTasks.value || hasSubagents.value || hasTeamTasks.value
+  () => goalStore.hasGoal || hasPlanOrTasks.value || hasSubagents.value || hasTeamTasks.value
 );
 
 const {
@@ -80,12 +81,30 @@ function toggleTasks() {
   workspacePanelsStore.toggleTasks();
 }
 
+async function refreshSidebarPanels(sid: string) {
+  const normalized = sid?.trim();
+  if (!normalized) return;
+  await Promise.allSettled([
+    planStore.list(normalized),
+    planStore.listTodos(normalized),
+    goalStore.fetchGoal(normalized),
+    teamStore.fetchTeamOverview()
+  ]);
+  if ((planStore.plans.length > 0 || planStore.todos.length > 0) && !workspacePanelsStore.activePanel) {
+    workspacePanelsStore.activePanel = "plan";
+  }
+}
+
 watch(
   sessionId,
-  () => {
+  (newSessionId) => {
     resetCopy();
     clearTraceProjectionMemo();
-  }
+    if (newSessionId) {
+      void refreshSidebarPanels(newSessionId);
+    }
+  },
+  { immediate: true }
 );
 
 onBeforeUnmount(() => {
@@ -117,6 +136,12 @@ onBeforeUnmount(() => {
           :context-window-tokens="currentContextWindowTokens"
           :class="hasVisiblePanelsBelowStatus ? 'border-b border-stone-200/70 pb-4' : ''"
           @copy-session-id="copyText('session-id', sessionId)"
+        />
+
+        <!-- 目标：位于状态栏下方、计划和任务上方 -->
+        <GoalBar
+          v-if="goalStore.hasGoal"
+          :session-id="sessionId"
         />
 
         <!-- 计划与任务：在有值时显示 -->

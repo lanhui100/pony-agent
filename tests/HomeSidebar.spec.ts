@@ -724,6 +724,47 @@ describe("HomeSidebar", () => {
     expect(wrapper.find('[data-testid="trace-step-button-context-2"]').exists()).toBe(false);
   });
 
+  it("当会话有目标时，在右侧边栏中渲染 GoalBar 并位于计划与任务上方", async () => {
+    const { useGoalStore } = await import("@/stores/goal");
+    const { usePlanStore } = await import("@/stores/plan");
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "goal_get") {
+        return {
+          id: "goal-test-1",
+          session_id: "graph-session",
+          objective: "重构右侧栏与目标展示架构",
+          phase: "active",
+          activation: "armed",
+          revision: 1,
+          roundsStarted: 2,
+          maxGoalRounds: 10
+        };
+      }
+      if (cmd === "plan_list") {
+        return [
+          {
+            planId: "p1",
+            revision: 1,
+            lifecycle: "executing",
+            steps: []
+          }
+        ];
+      }
+      return null;
+    });
+
+    const wrapper = await mountSidebar();
+    await flushAll();
+
+    const goalBar = wrapper.find('[data-testid="goal-bar"]');
+    expect(goalBar.exists()).toBe(true);
+    expect(goalBar.text()).toContain("重构右侧栏与目标展示架构");
+
+    const planPanel = wrapper.find('[data-testid="plan-panel-toggle"]');
+    expect(planPanel.exists()).toBe(true);
+  });
+
   it.skip("显示 recorder 摘要并支持导出前端 trace", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({

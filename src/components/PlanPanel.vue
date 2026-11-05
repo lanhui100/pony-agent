@@ -13,6 +13,7 @@ import {
 } from "lucide-vue-next";
 import { usePlanStore } from "@/stores/plan";
 import { useGoalStore } from "@/stores/goal";
+import { useWorkspacePanelsStore } from "@/stores/workspace-panels";
 import type { Plan, PlanStep, TodoItem } from "@/types/ask-plan";
 import Button from "@/components/ui/Button.vue";
 import Badge from "@/components/ui/Badge.vue";
@@ -114,6 +115,12 @@ async function refreshPlans() {
       planStore.listTodos(props.sessionId),
       goalStore.fetchGoal(props.sessionId),
     ]);
+    if (planStore.plans.length > 0 || planStore.todos.length > 0) {
+      const workspacePanelsStore = useWorkspacePanelsStore();
+      if (!workspacePanelsStore.activePanel) {
+        workspacePanelsStore.activePanel = "plan";
+      }
+    }
   }
 }
 
