@@ -17,6 +17,7 @@
 //! `to_value` 取真实键名，故不在本快照内；如未来需要覆盖它，请先给它加 `Serialize`
 //! 或在实现侧导出键名真源。
 
+use pony_agent_core::agent::metrics_snapshot::TurnMetricsSnapshot;
 use pony_agent_core::agent::runtime::{TurnInput, TurnResult, TurnStreamEvent};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -82,9 +83,48 @@ fn turn_stream_event_sample() -> Value {
         // wave-60：追加 wire 字段（`#[serde(default)]`，非 skip_serializing_if，
         // 但按本夹具「必须给值，否则快照漏键」的约定填 Some，覆盖线缆键 stopReason）。
         stop_reason: Some("user".to_string()),
-        metrics: None,
+        // P0 metrics-snapshot：`#[serde(default, skip_serializing_if = "Option::is_none")]`，
+        // 必须填 Some 才真正上线缆 —— 否则 `metrics` 及其 22 个子键完全落在契约门禁之外。
+        metrics: Some(turn_metrics_snapshot_sample()),
     };
     serde_json::to_value(&event).expect("TurnStreamEvent must serialize")
+}
+
+/// `TurnMetricsSnapshot` 的代表性样本：22 个字段全部给固定字面量。
+///
+/// 禁止 `Default::default()`：那会让全部 `Option` 退化为 `None`，与真实线缆形状不符
+/// （本类型的字段均无 `skip_serializing_if`，键不会缺席，但值必须真实可断言）。
+fn turn_metrics_snapshot_sample() -> TurnMetricsSnapshot {
+    TurnMetricsSnapshot {
+        step: 1,
+        context_input_tokens: Some(42_000),
+        input_tokens: Some(41_000),
+        cache_hit_input_tokens: Some(9_000),
+        cache_miss_input_tokens: Some(32_000),
+        output_tokens: Some(1_500),
+        reasoning_tokens: Some(256),
+        total_tokens: Some(42_500),
+        first_token_latency_ms: Some(320),
+        duration_ms: Some(2_400),
+        call_speed_tokens_per_second: Some(721.15),
+        turn_speed_tokens_per_second: Some(689.32),
+        turn_output_tokens: 1_500,
+        turn_generation_ms: 2_176,
+        turn_calls: 1,
+        cache_hit_ratio: Some(0.214),
+        context_window_tokens: Some(200_000),
+        context_ratio: Some(0.21),
+        origin: Some("provider".to_string()),
+        provider: "OpenAI".to_string(),
+        model: "gpt-contract".to_string(),
+        cost_usd: Some(0.0123),
+    }
+}
+
+/// `TurnMetricsSnapshot` 的真实 serde 线缆键（22 个 camelCase 子键由此进入门禁）。
+fn turn_metrics_snapshot_wire_sample() -> Value {
+    serde_json::to_value(turn_metrics_snapshot_sample())
+        .expect("TurnMetricsSnapshot must serialize")
 }
 
 fn turn_result_sample() -> Value {
@@ -148,6 +188,8 @@ fn build_snapshot() -> Value {
         ("TurnStreamEvent", turn_stream_event_sample()),
         ("TurnResult", turn_result_sample()),
         ("TurnInput", turn_input_sample()),
+        // P0 metrics-snapshot：22 个子键必须逐个进入门禁（顶层 `metrics` 键只覆盖附着关系）。
+        ("TurnMetricsSnapshot", turn_metrics_snapshot_wire_sample()),
     ] {
         types.insert(
             type_name.to_string(),
@@ -168,7 +210,8 @@ fn build_snapshot() -> Value {
         "tsDeclarations": {
             "TurnStreamEvent": "src/types/runtime.ts",
             "TurnResult": "src/types/runtime.ts",
-            "TurnInput": "src/types/runtime.ts"
+            "TurnInput": "src/types/runtime.ts",
+            "TurnMetricsSnapshot": "src/types/runtime.ts"
         },
         "types": Value::Object(types)
     })
@@ -179,6 +222,9 @@ fn rust_source_of(type_name: &str) -> &'static str {
         "TurnStreamEvent" => "crates/pony-agent-core/src/agent/runtime/types.rs:TurnStreamEvent",
         "TurnResult" => "crates/pony-agent-core/src/agent/runtime/types.rs:TurnResult",
         "TurnInput" => "crates/pony-agent-core/src/agent/runtime/types.rs:TurnInput",
+        "TurnMetricsSnapshot" => {
+            "crates/pony-agent-core/src/agent/metrics_snapshot.rs:TurnMetricsSnapshot"
+        }
         _ => "unknown",
     }
 }

@@ -11,6 +11,7 @@
 //! 本文件由 Test Agent（task-2）独占写域。
 
 use pony_agent_core::agent::metrics_snapshot::{build_turn_metrics_snapshot, TurnMetricsSnapshot};
+use pony_agent_core::agent::runtime::TurnStreamEvent;
 use pony_agent_core::agent::telemetry::{
     ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
 };
@@ -42,28 +43,6 @@ fn record(input: u64, cache_hit: u64, output: u64, duration: u64) -> ProviderCal
         usage_origin: Some("provider".to_string()),
         context_input_tokens: Some(input),
         latency_kind: ProviderLatencyKind::ProviderStream,
-        prefix_mutation_reasons: Vec::new(),
-    }
-}
-
-/// 一条「全字段 None」的 planner-only / 伪记录（真实路径上确实会出现）。
-fn all_none_record() -> ProviderCallCacheRecord {
-    ProviderCallCacheRecord {
-        request_kind: ProviderRequestKind::ToolFollowup,
-        provider_source: None,
-        provider_mode: None,
-        input_tokens: None,
-        cache_hit_input_tokens: None,
-        cache_hit_source: None,
-        cache_miss_input_tokens: None,
-        reasoning_tokens: None,
-        output_tokens: None,
-        total_tokens: None,
-        first_token_latency_ms: None,
-        turn_duration_ms: None,
-        usage_origin: None,
-        context_input_tokens: None,
-        latency_kind: ProviderLatencyKind::Unknown,
         prefix_mutation_reasons: Vec::new(),
     }
 }
@@ -454,4 +433,57 @@ fn wire_keys_are_camel_case_and_roundtrip() {
     let roundtrip: TurnMetricsSnapshot =
         serde_json::from_value(value).expect("wire 结构必须可反序列化");
     assert_eq!(roundtrip, snapshot, "wire 往返必须无损");
+}
+
+// ---------------------------------------------------------------------------
+// I7 wire 向后兼容：`metrics == None` ⇒ 线缆**不出现** metrics 键（不是 null）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i7_absent_metrics_leaves_no_wire_key() {
+    // Arrange：最小反序列化构造（TurnStreamEvent 缺省的 Option 字段一律 None），
+    // 不手写 38 个字段，也不改任何实现/属性。
+    let mut event: TurnStreamEvent = serde_json::from_value(serde_json::json!({
+        "turnId": "contract-i7-turn",
+        "kind": "delta",
+    }))
+    .expect("最小 TurnStreamEvent 必须可反序列化");
+    event.metrics = None;
+
+    // Act
+    let wire = serde_json::to_value(&event).expect("TurnStreamEvent 必须可序列化");
+
+    // Assert 1：键**缺席**（而非 `"metrics": null`）——旧事件线缆字节零变化
+    assert!(
+        wire.get("metrics").is_none(),
+        "I7：metrics == None 时线缆不得出现 metrics 键（出现 null 会让旧消费者/旧快照漂移），\
+         实际：{:?}",
+        wire.get("metrics")
+    );
+
+    // Assert 2：同一 JSON 反序列化回来仍是 None（消费者视角的等价性）
+    let roundtrip: TurnStreamEvent =
+        serde_json::from_value(wire).expect("旧事件线缆必须可反序列化回 TurnStreamEvent");
+    assert_eq!(
+        roundtrip.metrics, None,
+        "I7：缺 metrics 键的旧线缆必须反序列化为 metrics == None"
+    );
+
+    // Assert 3（对照）：Some(空快照) 时键必须出现 —— 证明开关仍在、不是恒缺席，
+    // 否则 Assert 1 会因「永久无键」而假绿。
+    let mut with_metrics = event;
+    with_metrics.metrics = Some(TurnMetricsSnapshot::default());
+    let wire_with = serde_json::to_value(&with_metrics).expect("TurnStreamEvent 必须可序列化");
+    assert!(
+        wire_with.get("metrics").is_some(),
+        "I7：metrics == Some(..) 时线缆必须出现 metrics 键（skip_serializing_if 只跳过 None），\
+         实际：{wire_with:?}"
+    );
+    let roundtrip_with: TurnStreamEvent =
+        serde_json::from_value(wire_with).expect("新事件线缆必须可反序列化回 TurnStreamEvent");
+    assert_eq!(
+        roundtrip_with.metrics,
+        Some(TurnMetricsSnapshot::default()),
+        "I7：带 metrics 的新线缆往返必须无损"
+    );
 }

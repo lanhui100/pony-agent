@@ -1,0 +1,83 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3b-wave-metrics-protocol-consistency",
+    "fresh_context": true
+  },
+  "executed_by": "l3b-wave-metrics-protocol-consistency",
+  "attestation": {
+    "self_signed": false,
+    "note": "L3-B（安全/协议一致性）审查 wave-metrics 未提交工作树；reviewed_commit 为红相锚点基线 5bb99639。原落盘路径误写为 wave-54 归档名 review-l3b.json，已由 Lead 迁至本文件并还原历史档。"
+  },
+  "reviewed_commit": "5bb99639",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src/stores/runtime.ts",
+    "src/lib/runtime/useTraceProjection.ts",
+    "src/lib/runtime/token-metrics.ts",
+    "src/types/runtime.ts",
+    "src/components/HomeStatusPanel.vue"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 5408,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n 5402,5420p crates/pony-agent-core/src/bin/tui.rs; sed -n 2883,2894p crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY",
+      "note": "快照分支渲染 `↓{metrics.output_tokens}`（末次调用输出），而 legacy 列（:5431）用的是 `total_output_tokens`（`apply_turn_usage` 累加，:2889 会话累计）。多跳轮次下同一 UI 位点的「↓」口径由累计变为单次，数字可在轮内回落；快照本有 `turn_output_tokens` 可对齐。冻结用例 c1 的夹具 output_tokens==turn_output_tokens==5000，无法区分口径，故无机器反例，降为 ADVISORY。"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4162,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "grep -n -B6 'this.applyMetricsSnapshot(payload.metrics)' src/stores/runtime.ts",
+      "severity": "ADVISORY",
+      "note": "9 处落库（:4162 :4206 :4308 :4358 :4392 :4805 :5059 :5263）均置于 `activeTurnId` 门禁与 `shouldProcessTurnEvent` 水位去重**之前**（仅保留 `isEventForCurrentSession`）。其它会话状态都受 eventCursorByTurnId 水位保护，唯独 liveMetrics 可被同会话的延迟/重放事件（旧 sequence 或上一 turnId）用过期快照覆盖。属注释显式说明的设计取舍（防被早退吞掉），但缺「不旧于当前游标才接受」的守卫。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+      "line": 75,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test metrics_snapshot_adversarial a4_all_none_record_never_panics",
+      "severity": "ADVISORY",
+      "note": "`last_record` 无可计数记录时回退 `records.last()`，因此「单条全 None 伪记录（planner-only，冻结测试确认真实存在）」仍产出 `Some(字段全 None)` 的快照——满足 I1（非空记录）但让消费端由 legacy 回退切到快照分支后**整段空白**：TUI 指标行丢失 ↑↓/缓存/上下文三段（:5402-5424 每段都要求字段 Some），投影层 `contextTokens`/`speed` 变 null、`cacheRatioPercent` 变空串，而 `contextWindow` 仍保留 trace 回退（:240）——同一快照内回退口径不一致。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+      "line": 86,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n -A10 'fn resolve_cost_usd' crates/pony-agent-core/src/agent/metrics_snapshot.rs; grep -n -A12 'fn estimate_trace_cost' crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+      "severity": "ADVISORY",
+      "note": "契约 §4 定义 `cost_usd` 为「**该轮**成本」，实现取 `last.input_tokens/output_tokens`（末次调用）计价；同仓 `turn_persist::estimate_trace_cost` 对同一概念用轮级 totals。多跳轮次下两者必然不等，快照成本系统性偏低。当前 `costUsd` 在桌面端/TUI 均无消费者（grep 仅命中 TurnTraceRecord.costUsd），属潜在缺陷；且计价直连 `estimate_cost_with_protocol` 而非复用 `estimate_trace_cost`，构成第二处计价入口。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/ts_contract_snapshot.rs",
+      "line": 85,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "npm run contract:check; grep -n metrics docs/contracts/ts-contract.snapshot.json || echo 'metrics key ABSENT from committed snapshot'",
+      "severity": "ADVISORY",
+      "note": "夹具仍为 `metrics: None`（skip_serializing_if ⇒ 键缺席），已提交快照仍 37 键、**不含** `metrics` 及其 22 个子键；`npm run contract:check` 与 `cargo test --test ts_contract_snapshot` 虽绿（实跑 exit 0），但门禁对新增 wire 键零覆盖。契约 §6.2 要求「快照真正上 wire（Some）时按 UPDATE_CONTRACT_SNAPSHOT=1 重生成」——本轮 task-3 已真正附着快照，该动作未执行。我以脚本逐键比对 Rust serde camelCase 与 TS 接口：22/22 键名一致、Option↔`number|null`/`string|null` 全对齐、6 个非可空字段（step/turnOutputTokens/turnGenerationMs/turnCalls/provider/model）类型一致 ⇒ 当前无实漂移，仅门禁缺口。"
+    },
+    {
+      "file": "src/lib/runtime/useTraceProjection.ts",
+      "line": 392,
+      "rule": "SECURITY",
+      "counterexample_cmd": "sed -n 377,400p src/lib/runtime/useTraceProjection.ts",
+      "severity": "ADVISORY",
+      "note": "信任边界纪律要求「快照展示只经 `resolveMetricsSnapshotDisplay` 单一出口」，但 `tokenSpeedDebugInfo` 快照分支直接读 payload 的 `turnCalls/turnOutputTokens/turnGenerationMs/durationMs`（:389 :392 :394），绕过 fail-safe 映射器；`contextRatio` 单独做了 `Number.isFinite` 守卫（:379-383）说明作者已意识到风险却只覆盖一个字段。实测不抛错、不注入（HomeStatusPanel 全程 `?? \"-\"` / `?? 0` 兜底、属性由 Vue 转义，无 v-html/eval/JSON.parse），但畸形类型被静默渲染成 0/`-` 而非「未知」。"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 330,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "npx vitest run tests/acceptance/wave47-ob2-enforcement.spec.ts",
+      "severity": "ADVISORY",
+      "note": "本波改动声明文件后 `ponygo observe audit --level ob2` 实跑 exit=1（`[FAIL][D1] 声明在本次变更中被修改，需要显式批准`），连带 `tests/acceptance/wave47-ob2-enforcement.spec.ts` T7 与 `tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts` V10-3（全量单测 exit 0）转红。修复在提交面：commit message 带 `[decl-change-approved]` 或跑 `--decl-approved`，非代码缺陷，故不计 BLOCKING。声明内容经核与实现一致（无新增 /metrics、无新日志面、无新 egress）。附注：`tests/check-secrets.spec.ts` 的红是既有噪声（命中 `tests/mcp_channel_closure.rs:482`、`tests/plugin_host_contract.rs:310` 两个**未修改**文件），与本 diff 无关。"
+    }
+  ]
+}

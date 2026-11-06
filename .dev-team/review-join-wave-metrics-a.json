@@ -1,0 +1,75 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a-wave-metrics-concurrency-stateflow",
+    "fresh_context": true
+  },
+  "executed_by": "l3a-wave-metrics-concurrency-stateflow",
+  "attestation": {
+    "self_signed": false,
+    "note": "第 1 轮 L3-A（并发/调度/状态流转）审查 wave-metrics 未提交工作树；reviewed_commit 为红相锚点基线 5bb99639（实现尚未提交）。1 条 BLOCKING 已由 exec-rust 按采用方案 A（事件流承担复位）修复，并由 Lead 用原始 counterexample_cmd 复验 exit 0（见 review-join-wave-metrics-a2.json 复审）。"
+  },
+  "reviewed_commit": "5bb99639",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src/stores/runtime.ts",
+    "src/lib/runtime/useTraceProjection.ts",
+    "src/lib/runtime/token-metrics.ts",
+    "src/types/runtime.ts",
+    "src/components/HomeStatusPanel.vue"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 10273,
+      "rule": "LEAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 - <<'EOF'\nimport sys\np='crates/pony-agent-core/src/bin/tui.rs'\nsrc=open(p,encoding='utf-8').read().split('\\n')\nsites=[i for i,l in enumerate(src,1) if 'start_turn_stream(sink.as_ref()' in l]\nbad=[s for s in sites if not any('begin_turn_usage()' in l for l in src[max(0,s-80):s])]\nprint('start_turn_stream 调用点:',sites,'| 缺 live_metrics 复位的调用点:',bad)\nprint('TuiTurnSink::emit 是否处理 turn:started:',any('\"turn:started\"' in l for l in src[4330:4470]))\nsys.exit(1 if bad else 0)\nEOF\n# 预期输出（当前实现，exit 1）：\n# start_turn_stream 调用点: [10228, 10273] | 缺 live_metrics 复位的调用点: [10273]\n# TuiTurnSink::emit 是否处理 turn:started: False\n# 修复后（续轮前复位 live_metrics，或让 emit 处理 turn:started）应 exit 0",
+      "detail": "goal 自动续轮（10233-10273，`while !should_abort_goal_rounds` 循环内）用 `start_turn_stream(sink, next_cmd)` 直接开新轮（新 turn_id = turn-goal-{round}），完全绕过主循环提交路径的唯一复位点 `begin_turn_usage()`（tui.rs:10164 → 2862 置 live_metrics=None）。TuiTurnSink::emit 的 match 只处理 turn:delta/tool/.../cancelled，`turn:started` 落到 `_ => {}`（tui.rs:4466），因此续轮开始时没有任何 live_metrics 清零点。后果：第 N 轮快照（缓存%、上下文%、t/s、首token）会在第 N+1 轮的首个模型调用全程被当作当前轮指标渲染（metrics_line 5389/5391 一旦 Some 就完全接管指标行，legacy 字段一并被遮蔽），直到该轮首个携带 metrics 的事件（turn:hop_complete/phase_changed）到达——这正是「上一轮快照泄漏到下一轮」，且与 2394-2395 的文档承诺「新轮开始与会话复位时清空」不符。同源陈旧（turn_usage/turn_cache_hit_tokens）为既有缺陷，本轮新增字段继承了同一缺口，但影响面从「比值分子」扩大到「整条指标行」。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 3590,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '3586,3599p' crates/pony-agent-core/src/bin/tui.rs | grep -c live_metrics ; echo 'expected: 0（clear_messages 未清 live_metrics）'",
+      "detail": "`clear_messages()` 是「换 session 的另一个入口」（3592 直接换新 session_id），只清 messages/queued_user_messages/queue_notice，不清 live_metrics（对照 reset_session_scope:2670 会清）。当前生产链路未调用该方法（仅 tests/tui_streaming_input_acceptance.rs 与 tui_acceptance.rs 使用），故不构成可达泄漏；但它是文档承认的 session 切换入口，后续若被主循环启用即成为跨会话陈旧快照通道。同理 legacy total_* 也未清，属同批取舍。"
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 4308,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'applyMetricsSnapshot(payload.metrics)' src/stores/runtime.ts && sed -n '4300,4312p' src/stores/runtime.ts",
+      "detail": "8 处落库点中有 6 处（4308 output_end、4392 completed、4358 hop_complete、4805 failed、5059 cancelled、5263 suspended）把 `applyMetricsSnapshot` 放在「会话归属判定之后、turnId 门禁与 `shouldProcessTurnEvent` 事件游标去重之前」；applyMetricsSnapshot 本身是纯 last-write-wins，无 step/sequence 单调守卫。因此同会话内的迟到/乱序/重放事件（store 专门用 eventCursorByTurnId 去重，说明乱序是预期输入）可以：a) 用旧轮快照覆盖已清空的新轮（跨轮串味），b) 用 step 更小的旧快照回退当前显示。两处均为自愈型（下一条带 metrics 的事件即纠正），无崩溃/无持久化污染，故列 ADVISORY；建议在 applyMetricsSnapshot 内加「同 turnId 下 step 不回退」或把落库点移到 turnId 门禁之后并保留 output_end/completed 的例外白名单。"
+    },
+    {
+      "file": "src/lib/runtime/useTraceProjection.ts",
+      "line": 231,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '219,233p' src/lib/runtime/useTraceProjection.ts",
+      "detail": "快照存在但 `contextWindowTokens` 缺失时，`currentContextWindowTokens` 回退 trace 窗口（provider capabilities / retrievedSessionContext），而 `contextDisplayTokens`（219-222）取快照分子，`contextRatio`/`contextPercent` 仍为 null：于是同一面板里 ring（HomeStatusPanel:137 用 tokens/window 自算）显示一个百分比，而快照明确拒绝产出的比值（I3「窗口未知 ⇒ None，不得回退」）被 trace 窗口补出来。这是快照与 trace 两套口径在同一 props 上混排的中间态，数值上与 legacy 口径不冲突（窗口来源合法），故 ADVISORY；若要求「快照为准」，窗口缺失位应整体不渲染而非混源。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 137,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '130,152p' src/components/HomeStatusPanel.vue && grep -rn 'contextPercent' --include=*.vue --include=*.ts src/ | wc -l",
+      "detail": "上下文百分比在组件内重算（`Math.min(100, Math.max(0, ratio<1?1:Math.round(tokens/window*100)))`），与快照 `contextRatio` 形成两条公式并行：`resolveMetricsSnapshotDisplay().contextPercent` 在整个 src/ 中零消费方（仅 tests/metrics-snapshot-live.spec.ts D1-2/D1-3 断言），即冻结 API 里的 contextPercent 成为死值，真正上屏的是组件自算值。数值在 clamp 边界（<1% 收敛到 1%）与快照口径不同，属 §0「禁止各自重算」的记录性偏离，但 wave-61 §1 L-2 的 clamp 规则本身已冻结，不判 BLOCKING。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 73,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '71,74p;392,422p' src/components/HomeStatusPanel.vue",
+      "detail": "`isEstimatedUsage` 改由 `speedDebugInfo.origin` 驱动，而快照存在时该 origin 来自快照（useTraceProjection:385）；但它同时给 `formatTokenValue(inputTokensTotal/outputTokensTotal/cacheHitTokensTotal)` 加 `≈` 前缀（模板 396/405/420），其中 output/cache 两位是 trace 会话累计（HomeSidebar:128 `sessionOutputTokensTotal`、:129 `sessionCacheHitTokensTotal`）。结果：估算标记（快照口径）标注在累计值（trace 口径）上，两套口径在同一数值上串用——旧实现下 origin 与累计值同源，本轮新引入该耦合。仅影响 `≈` 前缀文案，故 ADVISORY。"
+    }
+  ]
+}

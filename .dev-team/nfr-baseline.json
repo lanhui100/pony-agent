@@ -124,6 +124,13 @@
     "external_call_timeout_ms_for_builder": "n/a (no external call)",
     "resource_release": "n/a: 纯值对象，无持有资源（无句柄/无锁/无后台任务）",
     "logging": "沿用上方全局 logging 约定（format=json + trace_id）；本轮不新增日志面",
+    "event_payload_budget_bytes_per_frame": 800,
+    "event_payload_baseline_bytes_per_frame": 517,
+    "event_payload_measured_growth_pct": 36.5,
+    "event_payload_budget_derivation": "517 * 1.365 = 705.71 B（3-record 帧上界）→ 预算取 800 B 留 ~12% 余量；预算尚未接 CI 门禁（B032），当前为人工评审基线",
+    "event_payload_measurement_provenance": "方案级对抗审查实测（serde_json separators=(\",\",\":\") 默认紧凑序列化），测量脚本未入库",
+    "float_wire_hygiene": "non-finite (NaN/Inf) ⇒ null；不进线缆、不丢事件",
+    "ratio_out_of_range_policy": "numerator > denominator ⇒ None（fail-closed），禁止 clamp 成 1.0",
     "frozen_by": "task-1 / protocol agent"
   }
 }

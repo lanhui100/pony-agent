@@ -1,0 +1,92 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3p-wave-metrics-production-ready",
+    "fresh_context": true
+  },
+  "executed_by": "l3p-wave-metrics-production-ready",
+  "attestation": {
+    "self_signed": false,
+    "note": "L3-P 六问逐项绑定 .dev-team/nfr-baseline.json 字段与 git diff 行证据；审查对象为未提交工作树，reviewed_commit 填基线 5bb99639。审查期间工作树从 10 路径增长为 17 路径（新增 nfr-baseline / 契约矩阵 §7 增补 / wave-metrics-adjudication / backlog / ts_contract_snapshot.rs / ts-contract.snapshot.json / meta-retrospective），已在增长后重取 sha256 快照（14 文件全 OK）并重跑全部门禁，结论仅对应该快照。实测门禁：contract:check Exit 0（TurnMetricsSnapshot 22/22、TurnStreamEvent 38/38）、cargo test -p pony-agent-core --test metrics_snapshot_contract 9 passed、--test ts_contract_snapshot 1 passed、cargo check --all-targets Exit 0（仅既有 2 条 mcp_channel_closure.rs warning）、vue-tsc --noEmit Exit 0、vitest tests/metrics-snapshot-live.spec.ts + tests/acceptance/adversarial/metrics 14 passed、dev-nfr-lint Exit 0、dev-stub-lint Exit 0、audit-diff --decl-approved Exit 0、check-declaration PASS Exit 0。冻结测试 delta 已核：metrics_snapshot_contract.rs 删除的 all_none_record() 在 5bb99639 中仅 1 处定义、0 处调用（grep -c = 1），冻结/当前 #[test] 均为 9 ⇒ 零断言损失，且 meta-retrospective 自述为 Test Agent 机械清除 dead_code（不由 Executor 改测试）。六问：Q1 PASS / Q2 PASS / Q3 PASS / Q4 PASS / Q5 PASS / Q6 PASS，BLOCKING 0 条、ADVISORY 7 条，故判 PASS；下列 ADVISORY 建议在收口提交前处置（F1 基准数字、F6 提交标记为提交期必办）。"
+  },
+  "reviewed_commit": "5bb99639",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/tests/metrics_snapshot_contract.rs",
+    "crates/pony-agent-core/tests/ts_contract_snapshot.rs",
+    "src/stores/runtime.ts",
+    "src/lib/runtime/useTraceProjection.ts",
+    "src/lib/runtime/token-metrics.ts",
+    "src/types/runtime.ts",
+    "src/components/HomeStatusPanel.vue",
+    "docs/observability.yaml",
+    "docs/contracts/ts-contract.snapshot.json",
+    ".dev-team/nfr-baseline.json",
+    ".dev-team/contract-matrix-metrics-snapshot.md",
+    ".dev-team/wave-metrics-adjudication.md",
+    "backlog/backlog.md",
+    ".dev-team/meta-retrospective.md"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/nfr-baseline.json",
+      "line": 127,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"print(round(517*1.365,2))\"  # 705.71 > 700；ls scripts/ | grep -i payload  # 无测量脚本",
+      "detail": "六问第 5 问：基准字段 metrics_snapshot.event_payload_budget_bytes_per_frame=700 vs .dev-team/nfr-baseline.json:127-129（baseline=517 / growth=36.5）。基准自身唯一给出的分母下三数互斥：517×1.365=705.71 B > 700 B 预算；全仓无该数字的测量脚本或证据产物（scripts/ 无 payload 度量，backlog B032 自述「无机器门禁」）。加严登记（仅追加、未改动任何既有字段，diff 为纯 +5 行）本身合规，但定量项缺物理凭证，建议登记绝对字节+测量命令，或把预算改为实测值后再入库。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 4346,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "git diff | grep -nE \"^\\+.*let _ =\"  # 493/499 行（= tui.rs:4346 / 4352）；git show 5bb99639:crates/pony-agent-core/src/bin/tui.rs | grep -c 'let _ = self.tx.send'  # 13（当前 15）",
+      "detail": "六问第 2 问：logging.format=json + trace_id（本轮零新增日志面，`git diff | grep -nE \"^\\+.*(tracing::|log::|info!|warn!|debug!|error!|println!|eprintln!)\"` 无命中）vs tui.rs:4346 / 4352 两处裸 `let _ = self.tx.send(...)`。逐条判定：丢弃对象仅为 mpsc SendError（rx 存活到进程结束，无可补救动作，失败时也无处可报），且 HEAD 已有 13 处同型写法 ⇒ 判为非吞异常，不阻断。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/ts_contract_snapshot.rs",
+      "line": 88,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n \"metrics\" crates/pony-agent-core/tests/ts_contract_snapshot.rs  # 88: metrics: Some(...)；grep -n 'skip_serializing_if' crates/pony-agent-core/src/agent/runtime/types.rs  # 201",
+      "detail": "六问第 6 问：additive 的「旧路径线缆零变化」机械证据目前只剩 serde 属性 runtime/types.rs:201-202（`Option::is_none` ⇒ 键缺席）。契约快照夹具本轮由 `metrics: None` 改填 `Some`（ts_contract_snapshot.rs:88，为把 22 个子键纳入门禁，属契约矩阵 §6.2 预先登记的动作），于是 Rust 生产者侧「None ⇒ 无 metrics 键」不再有测试锁定（前端侧仅 tests/acceptance/adversarial/metrics/malformed-payload.spec.ts:81 断言夹具无该键）。建议补 1 条 TurnStreamEvent 序列化断言（None ⇒ 无 `metrics` 键）把 I7 钉死。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+      "line": 182,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '79,85p;180,183p' crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+      "detail": "六问第 6 问：契约 §3「step 由调用方决定」vs :182 `step = records.len().saturating_sub(1)`。当末条记录为不可计数伪记录（planner-only，dur/out 为 None）时，`last_record()`（:79-85）会回退到更早的可计数记录取值，而 step 仍指向伪记录索引 ⇒ step 与字段来源不是同一条调用。当前 step 无消费方（src/lib/runtime/token-metrics.ts 只透传、未用于渲染），故不阻断；若未来按 step 关联 hop，应先改成「取 last_record 的索引」。"
+    },
+    {
+      "file": "src/components/HomeStatusPanel.vue",
+      "line": 144,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -rn \"contextPercent\" src/ | wc -l  # 1（仅定义，0 消费）；sed -n '138,146p' src/components/HomeStatusPanel.vue",
+      "detail": "六问第 6 问：契约 §0「快照存在 ⇒ 快照为唯一来源，禁止各自重算」vs HomeStatusPanel.vue:144 圆环仍在组件内重算 `Math.min(100, Math.max(0, round(tokens/window*100)))`，快照的 contextRatio 不进入该路径；`resolveMetricsSnapshotDisplay().contextPercent`（token-metrics.ts:640）在 src/ 零消费方（仅测试断言）。因分子分母同出快照，数值等价，故不阻断；但第二公式仍存在，属 §0 未机械闭环。"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 330,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh; echo $?  # 2（[FAIL][D1]）；ponygo observe audit --level ob2; echo $?  # 1",
+      "detail": "六问第 5 问：自检门禁（基准表 observability 条目）vs 声明变更需显式批准。裸跑 audit-diff Exit 2（D1：声明在本次变更中被修改）、ob2 Exit 1，并使冻结验收 tests/acceptance/wave47-ob2-enforcement.spec.ts T7 在工作树上红；以 `--decl-approved` 复跑 Exit 0、check-declaration PASS exit 0（四维全 PASS）。收口提交信息必须带 `[decl-change-approved]`，否则该冻结用例持续红（与 wave-59 / wave-pds-3 登记的同因条件一致）。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/mcp_channel_closure.rs",
+      "line": 482,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "node scripts/check-secrets.mjs --all; echo $?  # 1，5 条违规；npx vitest run  # 10:07 全量跑：3 failed files / 3 failed tests",
+      "detail": "六问第 6 问附带（全量绿相受阻，非本波缺陷）：check-secrets 5 条既有违规（.dev-team/l2at-done-tui-streaming-input.json:260-262、tests/mcp_channel_closure.rs:482、tests/plugin_host_contract.rs:310）均不在本波 17 个变更路径内；全量 vitest 的 update-signed-store / plan-goal-refresh 两例单跑全绿（并行 flaky），V10-3 因其嵌套跑全量而红。本波自有验收（Rust 冻结 9 例 + TS 14 例）全绿。"
+    }
+  ]
+}

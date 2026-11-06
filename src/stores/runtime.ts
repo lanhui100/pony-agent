@@ -46,6 +46,7 @@ import type {
   TraceTimelineEntry,
   TurnInput,
   TurnInputImage,
+  TurnMetricsSnapshot,
   TurnStreamEvent,
   TurnTraceRecord
 } from "../types/runtime";
@@ -339,8 +340,15 @@ export type ActiveStreamKind = "reasoning" | "content" | null;
  * Wave-59 F4：本波新增 `activeStreamKind` 属于 store 内部流转字段。
  * 局部扩展 `RuntimeState` 而不改 `src/lib/runtime/types.ts`（该文件与本波并发写域重叠），
  * 语义与位置等价于在 RuntimeState 中声明。
+ *
+ * wave-metrics（task-4）：`liveMetrics` 同法局部扩展 —— 属会话内瞬时态（不持久化），
+ * 承载最近一条 `turn` 事件携带的 `TurnMetricsSnapshot`（Rust 单一结算产物）。
+ * `null` ⇒ 无快照（新轮起点 / 旧事件）⇒ 消费侧回退既有 trace 反推路径（I7）。
  */
-type RuntimeStateW59 = RuntimeState & { activeStreamKind?: ActiveStreamKind };
+type RuntimeStateW59 = RuntimeState & {
+  activeStreamKind?: ActiveStreamKind;
+  liveMetrics: TurnMetricsSnapshot | null;
+};
 
 /**
  * wave-64 §2 F1：失败终态的**真实错误文案**解析（用于刷新/恢复后 `state.error` 未持久化的场景）。
@@ -443,6 +451,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       outputTokens: persisted?.outputTokens ?? null,
       totalTokens: persisted?.totalTokens ?? null,
       firstTokenLatencyMs: persisted?.firstTokenLatencyMs ?? null,
+      /**
+       * wave-metrics（task-4）：不持久化的会话内瞬时态 —— 启动即无快照，
+       * 由 `turn` 事件（hop_complete / output_end / completed / phase_changed /
+       * checkpoint_persisted）经 `applyMetricsSnapshot` 落库。
+       */
+      liveMetrics: null as TurnMetricsSnapshot | null,
       /** R4/Wave-15：活跃轮 per-call 记录（最近一次模型调用的物理指标来源，非累加）。 */
       activeProviderCallRecords: [] as ProviderCallCacheRecord[],
       isSubmitting: false,
@@ -861,6 +875,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = blankFields.outputTokens;
       this.totalTokens = blankFields.totalTokens;
       this.firstTokenLatencyMs = blankFields.firstTokenLatencyMs;
+      // wave-metrics（task-4）：结算快照属会话内瞬时态 —— 会话切换/重置一律清空，
+      // 使投影层回退既有 trace 反推路径（I7），杜绝跨会话串味。
+      this.liveMetrics = null;
       // Wave-59 A-59-5：hop 级流式类型属会话内瞬时态，不得跨会话继承（B-59-1 同类缺口）。
       this.activeStreamKind = blankFields.activeStreamKind;
       this.activeProviderCallRecords = [];
@@ -1794,6 +1811,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = restoredState?.outputTokens ?? blankFields.outputTokens;
       this.totalTokens = restoredState?.totalTokens ?? blankFields.totalTokens;
       this.firstTokenLatencyMs = restoredState?.firstTokenLatencyMs ?? blankFields.firstTokenLatencyMs;
+      // wave-metrics（task-4）：快照不持久化（会话快照无该字段）⇒ 恢复目标会话时必须清空，
+      // 消费侧回退既有 trace 反推路径（I7：历史会话/回放零差异）。
+      this.liveMetrics = null;
       // Wave-59 A-59-5：会话快照不携带 hop 级瞬时态；恢复目标会话时一律清空，
       // 由随后的「后台运行轮恢复」分支按该轮缓冲重新推导。
       this.activeStreamKind = blankFields.activeStreamKind;
@@ -1886,6 +1906,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
+      // wave-metrics（task-4）：新轮起点清空上一轮结算快照（与 firstTokenLatencyMs 同一清理点），
+      // 待本轮事件携带 metrics 再落库；无快照期间消费侧回退既有 trace 反推路径（I7）。
+      this.liveMetrics = null;
       this.activeProviderCallRecords = [];
       this.clearSubmissionWatchdog();
       this.isSubmitting = false;
@@ -3318,6 +3341,21 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.outputTokens = lastRecord.outputTokens;
       }
     },
+    /**
+     * wave-metrics（task-4）：落库 `turn` 事件携带的结算快照（契约 §0 单一消费位）。
+     *
+     * **冻结语义**（`tests/metrics-snapshot-live.spec.ts` D3/D4 + 对抗用例 ADV-2-3）：
+     * - `metrics == null`（`null` / `undefined`，即旧事件线缆键缺席）⇒ **保持既有快照不变**，
+     *   绝不把「本轮无快照」当成「清空」指令（I7）。清空只发生在显式的新轮/会话切换点。
+     * - `metrics` 为对象 ⇒ 整体覆盖（同一轮 step 前进、或下一轮的新快照都以最新为准）。
+     * 不在此处做字段校验/归一：畸形线缆同样是「有值输入」，消费侧解析按无值处理且不得抛错。
+     */
+    applyMetricsSnapshot(metrics?: TurnMetricsSnapshot | null): void {
+      if (metrics == null) {
+        return;
+      }
+      this.liveMetrics = metrics;
+    },
     applyOutputEnd(payload: TurnStreamEvent) {
       this.flushBufferedStreamText(payload.turnId);
 
@@ -3954,6 +3992,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         // Wave-15 R4：新轮开始 → 复位上一轮残留的 per-call 记录（事件携带记录时以事件为准）。
         this.applyActiveProviderCallRecords(payload.providerCallRecords, true);
+        // wave-metrics（task-4）：新轮/新 hop 起点 → 清空上一轮残留快照（与 per-call 记录同一复位点），
+        // 本轮快照随 hop_complete / output_end / phase_changed 等事件重新落库。
+        // 若本条事件自带 metrics（协议上不会，但防御 wire 演变）则先清后写，不做静默丢弃。
+        this.liveMetrics = null;
+        this.applyMetricsSnapshot(payload.metrics);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
         this.publishTraceTimeline(resolveEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
@@ -4114,6 +4157,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (!isEventForCurrentSession(payload)) {
           return;
         }
+        // wave-metrics（task-4）：快照必须早于任何 turnId/去重门禁落库 ——
+        // 该轮指标不能因后续早退分支被吞掉（`null`/缺键 ⇒ 保持不变，I7）。
+        this.applyMetricsSnapshot(payload.metrics);
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -4156,6 +4202,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (!isEventForCurrentSession(payload)) {
           return;
         }
+        // wave-metrics（task-4）：同 phase_changed —— 会话归属判定后立即落库，早于 turnId 门禁。
+        this.applyMetricsSnapshot(payload.metrics);
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -4255,6 +4303,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
         if (isEventForCurrentSession(payload)) {
           this.clearTimeoutRetryPlaceholder();
+          // wave-metrics（task-4）：会话归属判定后立即落库 —— 后续 background / turnId /
+          // 去重门禁都会提前 return，快照不得被这些分支吞掉（`null`/缺键 ⇒ 保持不变，I7）。
+          this.applyMetricsSnapshot(payload.metrics);
         }
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
@@ -4301,6 +4352,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       });
 
       await listen("turn:hop_complete", (payload) => {
+        // wave-metrics（task-4）：快照先落库，早于 turnId / 去重门禁（该轮指标不得被早退吞掉）。
+        // 会话归属仍严格 fail-closed（缺 sessionId 的事件不得写本会话状态）。
+        if (isEventForCurrentSession(payload)) {
+          this.applyMetricsSnapshot(payload.metrics);
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -4331,6 +4387,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
         if (isEventForCurrentSession(payload)) {
           this.clearTimeoutRetryPlaceholder();
+          // wave-metrics（task-4）：终态快照必须落库 —— 后续 background / 历史模式 /
+          // turnId / 去重门禁都会提前 return（`null`/缺键 ⇒ 保持不变，I7）。
+          this.applyMetricsSnapshot(payload.metrics);
         }
         // Wave-1 C6：turn 结束（含后台会话 turn）即刷新计划/目标面板；
         // 同一 turnId 只刷新一次，失败不影响主流程。
@@ -4742,6 +4801,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
         if (isEventForCurrentSession(payload)) {
           this.clearTimeoutRetryPlaceholder();
+          // wave-metrics（task-4）：失败终态若携带结算快照同样落库（`null`/缺键 ⇒ 保持不变，I7）。
+          this.applyMetricsSnapshot(payload.metrics);
         }
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
@@ -4994,6 +5055,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
         if (isEventForCurrentSession(payload)) {
           this.clearTimeoutRetryPlaceholder();
+          // wave-metrics（task-4）：取消终态若携带结算快照同样落库（`null`/缺键 ⇒ 保持不变，I7）。
+          this.applyMetricsSnapshot(payload.metrics);
         }
         // Detect terminal event for a background session's turn
         if (payload.sessionId) {
@@ -5196,6 +5259,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         // 该轮永远无法退出「正在重试」。这里只做会话归属判定（不同会话的事件不得动本会话状态）。
         if (isEventForCurrentSession(payload)) {
           this.clearTimeoutRetryPlaceholder();
+          // wave-metrics（task-4）：挂起终态若携带结算快照同样落库（`null`/缺键 ⇒ 保持不变，I7）。
+          this.applyMetricsSnapshot(payload.metrics);
         }
         // Detect terminal event for a background session's turn
         if (payload.sessionId) {
@@ -5392,6 +5457,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
+      // wave-metrics（task-4）：新轮起点清空上一轮结算快照（与 firstTokenLatencyMs 同一清理点），
+      // 待本轮事件携带 metrics 再落库；无快照期间消费侧回退既有 trace 反推路径（I7）。
+      this.liveMetrics = null;
       this.activeProviderCallRecords = [];
       this.fallbackReason = BROWSER_PREVIEW_FALLBACK_REASON;
 
@@ -5652,6 +5720,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
+      // wave-metrics（task-4）：新轮起点清空上一轮结算快照（与 firstTokenLatencyMs 同一清理点），
+      // 待本轮事件携带 metrics 再落库；无快照期间消费侧回退既有 trace 反推路径（I7）。
+      this.liveMetrics = null;
       this.activeProviderCallRecords = [];
       this.traceSteps = createSubmitTraceSteps();
       this.publishTraceTimeline(applyProviderPatchToTraceTimeline(

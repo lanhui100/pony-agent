@@ -16,7 +16,12 @@
  * （`resolveCallGenerationSpeed` 即 C2 的 per-call 分量公式 out_i/gen_i）。
  */
 import { canonicalTraceTimelineKind } from "@/lib/runtime/trace-projection";
-import type { ProviderCallCacheRecord, TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
+import type {
+  ProviderCallCacheRecord,
+  TraceTimelineEntry,
+  TurnMetricsSnapshot,
+  TurnTraceRecord
+} from "@/types/runtime";
 
 /** C4/§7.6 判定用：轮内 provider call 数 = max(providerCallRecords.length, canonical call_model 条目数)。 */
 export function countTurnProviderCalls(
@@ -582,4 +587,57 @@ export function formatTokenSpeed(value?: number | null): string {
     return "—";
   }
   return `${Math.round(value)} t/s`;
+}
+
+// ── 结算快照 → 展示映射（wave-metrics / task-4）─────────────────────────────────
+
+/**
+ * 快照展示字段（冻结 API 面，`tests/metrics-snapshot-live.spec.ts` D1 断言逐字段相等）。
+ */
+export interface MetricsSnapshotDisplay {
+  contextTokens: number | null;
+  contextWindow: number | null;
+  speed: number | null;
+  ttftMs: number | null;
+  cacheRatioPercent: string;
+  contextPercent: number | null;
+  origin: string | null;
+}
+
+function finiteNumberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * `TurnMetricsSnapshot` → 展示值的**唯一**映射（契约 §0「快照存在 ⇒ 快照为唯一来源，禁止各自重算」）。
+ *
+ * 冻结语义：
+ * - `contextTokens` ← `contextInputTokens`（协议归一值，I4）；
+ * - `contextWindow` ← `contextWindowTokens`（缺失 ⇒ null，不得兜底常量，I3）；
+ * - `speed` ← `turnSpeedTokensPerSecond`（与 Rust `weighted_turn_speed` 同源，I5）；
+ * - `ttftMs` ← `firstTokenLatencyMs`；
+ * - `cacheRatioPercent` ← `round(cacheHitRatio * 100)%`，`cacheHitRatio` 为 `0..=1` 单位分数；
+ *   缺失 ⇒ `""`（I2/I6：禁止伪造成 `0%`，也禁止 clamp 掩盖越界）；
+ * - `contextPercent` ← `round(contextRatio * 100)`，缺失 ⇒ null（I3）；
+ * - `origin` ← `origin`。
+ *
+ * 防御：入参可为 `null` / `undefined` / 缺键的畸形线缆 —— 一律按「无值」处理，不抛错（I7）。
+ */
+export function resolveMetricsSnapshotDisplay(
+  snapshot: TurnMetricsSnapshot | null | undefined
+): MetricsSnapshotDisplay {
+  const source = (snapshot ?? {}) as Partial<TurnMetricsSnapshot> | null;
+  const cacheHitRatio = finiteNumberOrNull(source?.cacheHitRatio);
+  const contextRatio = finiteNumberOrNull(source?.contextRatio);
+  const origin = typeof source?.origin === "string" ? source.origin : null;
+
+  return {
+    contextTokens: finiteNumberOrNull(source?.contextInputTokens),
+    contextWindow: finiteNumberOrNull(source?.contextWindowTokens),
+    speed: finiteNumberOrNull(source?.turnSpeedTokensPerSecond),
+    ttftMs: finiteNumberOrNull(source?.firstTokenLatencyMs),
+    cacheRatioPercent: cacheHitRatio == null ? "" : `${Math.round(cacheHitRatio * 100)}%`,
+    contextPercent: contextRatio == null ? null : Math.round(contextRatio * 100),
+    origin,
+  };
 }

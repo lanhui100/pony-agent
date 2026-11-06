@@ -1112,6 +1112,52 @@ export type TurnResult = {
   sessionSummary: string;
 };
 
+/**
+ * wave-metrics（task-4）：per-call 指标结算快照（wire 对齐 Rust
+ * `crates/pony-agent-core/src/agent/metrics_snapshot.rs::TurnMetricsSnapshot`；
+ * 契约源 `.dev-team/contract-matrix-metrics-snapshot.md` §4 字段表，camelCase 逐字段一致）。
+ *
+ * 纪律（契约 §0）：
+ * - 快照存在 ⇒ **快照是唯一真值来源**，消费端禁止各自重算（I5/I6）；
+ * - `cacheHitRatio` / `contextRatio` 是 **`0..=1` 单位分数**（非百分数），缺失 ⇒ `null`（I2/I3）；
+ * - 旧事件缺 `metrics` ⇒ 消费端回退既有 trace 反推路径（I7）。
+ */
+export interface TurnMetricsSnapshot {
+  /** 逻辑 hop 索引（调用方给定）。 */
+  step: number;
+  /** 协议归一后的上下文输入（I4）。 */
+  contextInputTokens: number | null;
+  /** 末次调用裸 input。 */
+  inputTokens: number | null;
+  cacheHitInputTokens: number | null;
+  cacheMissInputTokens: number | null;
+  outputTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  firstTokenLatencyMs: number | null;
+  durationMs: number | null;
+  callSpeedTokensPerSecond: number | null;
+  /** 与 `weighted_turn_speed` 同源（I5）。 */
+  turnSpeedTokensPerSecond: number | null;
+  /** 轮累计输出（有效调用 Σ）。 */
+  turnOutputTokens: number;
+  /** 轮累计生成时长（毫秒）。 */
+  turnGenerationMs: number;
+  /** 有效调用数。 */
+  turnCalls: number;
+  /** `0..=1` 单位分数（I2）。 */
+  cacheHitRatio: number | null;
+  contextWindowTokens: number | null;
+  /** `0..=1` 单位分数（I3）。 */
+  contextRatio: number | null;
+  /** usage 来源：`provider` / `estimated_chars`。 */
+  origin: string | null;
+  provider: string;
+  model: string;
+  /** 该轮成本（未知 ⇒ `null`，禁止以 0 伪造）。 */
+  costUsd: number | null;
+}
+
 export type TurnStreamEvent = {
   eventId?: string | null;
   sessionId?: string | null;
@@ -1152,6 +1198,14 @@ export type TurnStreamEvent = {
   sessionSummary?: string | null;
   traceId?: string | null;
   costUsd?: number | null;
+  /**
+   * wave-metrics（task-4）：per-call 指标结算快照（wire 对齐 Rust
+   * `TurnStreamEvent.metrics`，`#[serde(default, skip_serializing_if = "Option::is_none")]`）。
+   *
+   * - `undefined`（键缺席）/ `null` ⇒ 旧事件线缆，消费端回退既有 trace 反推路径（I7）；
+   * - 非空 ⇒ 桌面端以快照为唯一展示来源（契约 §0，禁止各自重算）。
+   */
+  metrics?: TurnMetricsSnapshot | null;
   /**
    * F9：逻辑 hop 索引（0-based，wire 对齐 Rust `TurnStreamEvent.step`：
    * crates/pony-agent-core/src/agent/runtime/types.rs:190）。

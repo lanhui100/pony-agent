@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a2-wave-metrics-blocking-recheck",
+    "fresh_context": true
+  },
+  "executed_by": "l3a2-wave-metrics-blocking-recheck",
+  "attestation": {
+    "self_signed": false,
+    "note": "第 2 轮复审：独立验证 BLOCKING 修复，不采信第 1 轮结论；审查对象为未提交工作树，reviewed_commit 填基线 5bb99639。"
+  },
+  "reviewed_commit": "5bb99639",
+  "audited_scopes": ["crates/pony-agent-core/src/bin/tui.rs"],
+  "findings": []
+}

@@ -110,3 +110,36 @@ I7 wire 向后兼容：旧事件缺 metrics 时，TUI 与桌面端回退既有�
 2. **契约快照后续动作**：当 task-3/task-2 让快照真正出现在 wire（`Some`）时，需由前端写域补 `metrics?: TurnMetricsSnapshot | null` 到 `src/types/runtime.ts`，并按 `UPDATE_CONTRACT_SNAPSHOT=1 cargo test -p pony-agent-core --test ts_contract_snapshot` 重生成快照。当前夹具（`tests/ts_contract_snapshot.rs`）填 `metrics: None`，快照键集合不变，故本轮 `npm run contract:check` 无漂移。
 3. **可观测性归属**：`docs/observability.yaml` 的更新归 task-5（Lead），本轮不改该文件。
 4. **`context_window_tokens` 取值**：`provider_event_meta()` 处本轮固定 `None`，真实取值由 task-3 从 provider capabilities 接入；其余 6 处构造点为纯补 `None`，零语义变更。
+
+## 7. Lead 裁决增补（方案对抗审查后，2026-11-06）
+
+> 本节**只追加**登记与裁决，**不修改** §1 的 I1–I7 原文（冻结不变量）。来源：`.dev-team/review-plan-wave-metrics.json`（Phase-1 方案级对抗审查，**补做**，见 §7.3）。
+
+### A7（修正 A5 的「clamp = 值域归一」表述）— 比值越界 fail-closed
+- **裁决**：`cache_hit_ratio` / `context_ratio` 在 `numerator > denominator` 时返回 **`None`**（不展示），**禁止 clamp 成 1.0 / 100%**。
+- **理由**：`cache_hit > input` 或 `context_input > window` 只可能来自「分子分母不同量纲」或「上游数据自相矛盾」；clamp 会把本波要消灭的「恒 100%」合法化，与 I6 精神直接冲突。
+- **落地**：`metrics_snapshot.rs::unit_ratio` → `denominator == 0 || !is_finite || > 1.0 ⇒ None`；两处调用点注释同步登记。
+
+### A8 — `costUsd` 作用域 = 该轮成本（Σ 逐调用），非末次调用
+- **裁决**：`costUsd` = 对本轮**可计数调用**（`dur > 0 && out > 0`）逐条 `estimate_cost_with_protocol` 后**求和**；不可计价条目跳过（不补 0）；全部不可计价 ⇒ `None`。
+- **已知取舍**：部分调用不可计价时总成本可能低估——宁可少报也不伪造单价，逐调用真值由 `llm.chat` span 独立可回溯。
+- **落地**：`metrics_snapshot.rs::resolve_cost_usd(records, provider_meta)`。
+- **副产品**：同一帧顶层 `TurnStreamEvent.cost_usd`（轮聚合、协议感知）与本字段量级一致，消除「同帧两个轮成本」。
+
+### 7.1 已登记残余（本波**不做**，已入 `backlog/backlog.md`）
+
+| 编号 | 残余 | 影响面 | 去向 |
+|---|---|---|---|
+| R1 | **首跳流式期无快照**：`provider_call_records` 仅在调用完成后 push ⇒ 每轮首个调用在整个流式期回退 legacy 渲染（含 `clamp(0,100)`），轮末一次性跳变 | 每轮首个调用的流式时长 | B030 |
+| R2 | **快照不持久化**：`TurnTraceRecord` 无 metrics 字段 ⇒ 重启/resume/重放由 trace 反推第二公式，同轮 live 与重放可能不同值 | 历史会话、重放视图、未来服务端历史 | B030 |
+| R3 | **compaction 无 basis**：`/compact` 后分母不变、分子骤降，UI 不标注「已压缩」 | 用户误读「上下文无故变小」 | B028（既有） |
+| R4 | **缺席歧义**：`skip_serializing_if` 使「旧核无此能力」与「新核本帧无快照」在线缆上同形 | 未来新端的能力探测 | B031 |
+| R5 | **单位自描述缺失**：`cacheHitRatio` 为 0..1 分数，而同仓 `HomeStatusPanel` 同名 prop 装的是百分数字符串 | 新端（HTTP/WS / SSE）消费者 | B031 |
+| R6 | **第三计算面**：`control_plane::aggregate_session_metrics`（ModelMonitor）与 `trace.ts` 各自 Σ records，未纳入本契约 | 监控页 vs 状态栏可能分叉 | B027 |
+| R7 | **事件体积**：实测 517 B/帧基线、3-record 帧 +36.5%；已入 NFR 预算（700 B/帧） | IPC/SSE 带宽 | B032 |
+
+### 7.2 NFR 增补（`.dev-team/nfr-baseline.json` → `metrics_snapshot`）
+新增 5 项：`event_payload_budget_bytes_per_frame = 700`、`event_payload_baseline_bytes_per_frame = 517`、`event_payload_measured_growth_pct = 36.5`、`float_wire_hygiene`（非有限 ⇒ null，不丢事件）、`ratio_out_of_range_policy`（越界 ⇒ None，禁止 clamp）。
+
+### 7.3 流程登记（自我披露）
+本波 Phase-1「方案逆向对抗审查」在开工前**被 Lead 跳过**（违反 dev-team 硬门禁），已在 Phase 5 元复盘登记为门禁穿透；本 §7 的 4 条 BLOCKING 均来自**补做**的该审查，其中 A7/A8 已修复落地，R1–R7 已登记 backlog。

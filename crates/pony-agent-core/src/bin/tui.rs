@@ -24,6 +24,7 @@ use pony_agent_core::agent::control_plane::{
 };
 use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalData};
 // W3：Team 可见性数据源（全部来自真实运行时，不造数据）。
+use pony_agent_core::agent::metrics_snapshot::TurnMetricsSnapshot;
 use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
 use pony_agent_core::agent::orchestration::{
     inbox_pending_len, is_driving, list_agents, team_task_list, teammate_session_id, TeamTaskItem,
@@ -522,6 +523,17 @@ pub enum UiEvent {
         cache_hit_input_tokens: u64,
         total_tokens: u64,
     },
+    /// P0：per-call 指标结算快照（单一真值）。凡事件载荷携带 `metrics` 即投递本变体，
+    /// 主循环写入 `TuiState::live_metrics`，指标行以快照为唯一来源（I6）。
+    /// 旧事件（无 `metrics`）不产生本变体 ⇒ 走既有 legacy 路径（I7）。
+    StreamMetrics(TurnMetricsSnapshot),
+    /// P0：轮次起点（`turn:started`）—— 事件驱动的轮次复位信号。
+    ///
+    /// 存在的理由：并非所有开轮入口都经过主循环派发点（那里才调 `begin_turn_usage()`）。
+    /// goal 自动续轮在**轮次线程内**直接 `start_turn_stream(...)` 开新 turn，绕过派发点；
+    /// 若不复位，上一轮快照会整轮泄漏到下一轮。由事件流承担复位 ⇒ 所有入口自动覆盖
+    /// （goal 续轮、stop→resume 等），不依赖调用点自觉。
+    TurnStarted,
     /// /models 触发的远程模型目录拉取成功：ids 已由后台线程取得，由主循环持久化并打开面板。
     ModelsDiscovered { provider_id: String, ids: Vec<String> },
     /// /models 远程拉取失败：仅上报错误，由主循环以 System 消息呈现，不 panic、不退出。
@@ -2385,6 +2397,10 @@ pub struct TuiState {
     pub total_cache_hit_tokens: u64,
     /// 单轮缓存命中输入 token（仅对应当前轮单次调用，用于单轮缓存命中率计算，避免跨轮累计除以单轮输入导致>100%）。
     pub turn_cache_hit_tokens: u64,
+    /// P0：本轮最新指标结算快照（`TurnStreamEvent.metrics` 的 TUI 侧唯一副本）。
+    /// `Some` ⇒ 指标行完全以快照字段渲染（I6，不再读 legacy 计量字段）；
+    /// `None` ⇒ 旧事件 / 历史回放路径，回退既有渲染（I7）。新轮开始与会话复位时清空。
+    pub live_metrics: Option<TurnMetricsSnapshot>,
     /// wave-39 R2 / wave-41 S1：最近一次调用的上下文占用 token，用于上下文百分比分子（对齐 ADR 0035 S1）。
     pub last_context_tokens: u64,
     /// wave-39 R2：当前模型上下文窗口；`0` = 未知（指标行渲染 `—`）。
@@ -2499,6 +2515,7 @@ impl Default for TuiState {
             // wave-39 R2：指标字段默认归零 / 未知。
             total_cache_hit_tokens: 0,
             turn_cache_hit_tokens: 0,
+            live_metrics: None,
             last_context_tokens: 0,
             context_window_tokens: 0,
             turn_usage: None,
@@ -2656,6 +2673,8 @@ impl TuiState {
         self.total_output_tokens = 0;
         self.total_cache_hit_tokens = 0;
         self.turn_cache_hit_tokens = 0;
+        // P0：会话作用域复位 ⇒ 指标快照同属会话瞬时态，必须清空（否则跨会话残留旧轮数字）。
+        self.live_metrics = None;
         self.last_context_tokens = 0;
         self.context_window_tokens = 0;
         self.plan_state = None;
@@ -2846,6 +2865,15 @@ impl TuiState {
     pub fn begin_turn_usage(&mut self) {
         self.turn_usage = None;
         self.turn_cache_hit_tokens = 0;
+        // P0：新轮开始 ⇒ 上一轮快照必须失效，否则指标行会继续显示旧轮数字。
+        self.live_metrics = None;
+    }
+
+    /// P0：应用一条指标结算快照（`TurnStreamEvent.metrics` → `UiEvent::StreamMetrics`）。
+    ///
+    /// 快照是唯一来源：本方法**不**做任何二次换算（I6），只保存；渲染期按字段直出。
+    pub fn apply_live_metrics(&mut self, metrics: TurnMetricsSnapshot) {
+        self.live_metrics = Some(metrics);
     }
 
     /// wave-39 R3 / wave-41 S1：输入 token 与上下文按单次调用口径（ADR 0035 S1），
@@ -4311,7 +4339,18 @@ impl Drop for TurnLoopInFlightGuard {
 
 impl TurnEventSink for TuiTurnSink {
     fn emit(&self, name: &str, payload: TurnStreamEvent) {
+        // P0（单一附着点消费）：凡载荷携带快照的事件（hop_complete / output_end / completed /
+        // phase_changed …）都先投递快照，驱动指标行实时更新；`metrics` 为 `None` 时不投递，
+        // 旧事件路径（I7）行为逐字不变。此处必须在 `match name` **之前**，否则会漏掉非 usage 事件。
+        if let Some(metrics) = payload.metrics.as_ref() {
+            let _ = self.tx.send(UiEvent::StreamMetrics(metrics.clone()));
+        }
         match name {
+            // P0：轮次起点 ⇒ 事件驱动的复位（详见 `UiEvent::TurnStarted`）。
+            // 必须在轮内任何 `metrics` 事件之前投递：`turn:started` 是该轮首个事件。
+            "turn:started" => {
+                let _ = self.tx.send(UiEvent::TurnStarted);
+            }
             "turn:delta" => {
                 if let Some(text) = payload.text {
                     // wave-tui-session-resilience C1：上游 DSML 工具调用协议原文
@@ -5359,37 +5398,64 @@ fn goal_banner_parts(goal: &TuiGoal) -> (String, String) {
 fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
     let ghost = || Style::default().fg(theme::GHOST);
     let mut segments: Vec<String> = Vec::new();
-    if state.total_input_tokens > 0 || state.total_output_tokens > 0 {
-        segments.push(format!(
-            "↑{} ↓{}",
-            fmt_token_count(state.total_input_tokens),
-            fmt_token_count(state.total_output_tokens)
-        ));
-    }
-    // 缓存比只在输入已知时可算（0% 也是有效值，故键控于 in>0 而非 cache>0）。
-    // 单轮次计算缓存命中率：turn_cache_hit_tokens / total_input_tokens，并限制在 0.0..=100.0% 避免跨轮或数据异常导致越界。
-    if state.total_input_tokens > 0 {
-        let cache_hits = if state.turn_cache_hit_tokens > 0 {
-            state.turn_cache_hit_tokens
-        } else {
-            state.total_cache_hit_tokens
-        };
-        let pct = (cache_hits as f64 / state.total_input_tokens as f64 * 100.0)
-            .round()
-            .clamp(0.0, 100.0);
-        segments.push(format!("缓存 {pct:.0}%"));
-    }
-    if state.context_window_tokens > 0 {
-        // ADR 0035 S1：若显式设置了 last_context_tokens（或单次调用的输入 token），以此为分子计算上下文占用
-        let context_tokens = if state.last_context_tokens > 0 {
-            state.last_context_tokens
-        } else {
-            state.total_input_tokens
-        };
-        let pct = (context_tokens as f64 / state.context_window_tokens as f64 * 100.0)
-            .round()
-            .clamp(0.0, 100.0);
-        segments.push(format!("上下文 {pct:.0}%"));
+    // P0：快照为唯一来源。`live_metrics` 为 `Some` ⇒ **只**渲染快照段，与 legacy 计量字段
+    // 完全隔离（两者不得混排）；比率一律直取快照字段，此处**禁止**任何 clamp（I6）。
+    if let Some(metrics) = state.live_metrics.as_ref() {
+        let mut token_parts: Vec<String> = Vec::new();
+        if let Some(context_input) = metrics.context_input_tokens {
+            token_parts.push(format!("↑{}", fmt_token_count(context_input)));
+        }
+        if let Some(output) = metrics.output_tokens {
+            token_parts.push(format!("↓{}", fmt_token_count(output)));
+        }
+        if !token_parts.is_empty() {
+            segments.push(token_parts.join(" "));
+        }
+        if let Some(ratio) = metrics.cache_hit_ratio {
+            segments.push(format!("缓存 {:.0}%", (ratio * 100.0).round()));
+        }
+        if let Some(ratio) = metrics.context_ratio {
+            segments.push(format!("上下文 {:.0}%", (ratio * 100.0).round()));
+        }
+        if let Some(speed) = metrics.turn_speed_tokens_per_second {
+            segments.push(format!("{:.0} t/s", speed.round()));
+        }
+        if let Some(ttft_ms) = metrics.first_token_latency_ms {
+            segments.push(format!("首token {ttft_ms}ms"));
+        }
+    } else {
+        if state.total_input_tokens > 0 || state.total_output_tokens > 0 {
+            segments.push(format!(
+                "↑{} ↓{}",
+                fmt_token_count(state.total_input_tokens),
+                fmt_token_count(state.total_output_tokens)
+            ));
+        }
+        // 缓存比只在输入已知时可算（0% 也是有效值，故键控于 in>0 而非 cache>0）。
+        // 单轮次计算缓存命中率：turn_cache_hit_tokens / total_input_tokens，并限制在 0.0..=100.0% 避免跨轮或数据异常导致越界。
+        if state.total_input_tokens > 0 {
+            let cache_hits = if state.turn_cache_hit_tokens > 0 {
+                state.turn_cache_hit_tokens
+            } else {
+                state.total_cache_hit_tokens
+            };
+            let pct = (cache_hits as f64 / state.total_input_tokens as f64 * 100.0)
+                .round()
+                .clamp(0.0, 100.0);
+            segments.push(format!("缓存 {pct:.0}%"));
+        }
+        if state.context_window_tokens > 0 {
+            // ADR 0035 S1：若显式设置了 last_context_tokens（或单次调用的输入 token），以此为分子计算上下文占用
+            let context_tokens = if state.last_context_tokens > 0 {
+                state.last_context_tokens
+            } else {
+                state.total_input_tokens
+            };
+            let pct = (context_tokens as f64 / state.context_window_tokens as f64 * 100.0)
+                .round()
+                .clamp(0.0, 100.0);
+            segments.push(format!("上下文 {pct:.0}%"));
+        }
     }
     // C7/C18③/C23：排队指示器**唯一渲染点**就是本指标行（每帧都渲染，与 `mode`/`runtime_mode`
     // 无关），故 `status_word` 不再重复输出。`queue_indicator_line` 保证流式期 / 工具执行期
@@ -10171,6 +10237,12 @@ fn tui_event_loop(
                                         turn_id: turn_id_str,
                                         input: turn_input.clone(),
                                     };
+                                    // P0 状态边界：本入口（及下方 goal 自动续轮）都在**轮次线程内**直接
+                                    // 开新 turn，绕过主循环派发点的 `begin_turn_usage()`。轮次状态复位
+                                    // 因此由事件流承担——新 turn 的首个事件 `turn:started`（见
+                                    // `TuiTurnSink::emit` → `UiEvent::TurnStarted`）在主循环复位
+                                    // `live_metrics` 与 legacy `turn_usage`/`turn_cache_hit_tokens`，
+                                    // 故上一轮快照不会泄漏到本轮，无需在此手工复位。
                                     turn_control_plane.start_turn_stream(sink.as_ref(), cmd);
                                     drop(initial_turn_sink_guard);
 
@@ -10416,6 +10488,16 @@ fn tui_event_loop(
                     state.apply_stop_terminal(&turn_id, stop_reason.as_deref());
                     // wave-60 §C8：turn 结束 ⇒ 双击 Esc 的上膛失效。
                     stop_sequence.reset();
+                }
+                // P0：轮次起点事件 ⇒ 与派发点**同一复位点** `begin_turn_usage()`
+                //（legacy `turn_usage` / `turn_cache_hit_tokens` 与快照 `live_metrics` 同点清空）。
+                // 该闸门覆盖 goal 自动续轮等在轮次线程内直接开轮的入口。
+                UiEvent::TurnStarted => {
+                    state.begin_turn_usage();
+                }
+                // P0：本轮指标快照 → 指标行唯一来源（快照存在时不再读 legacy 计量字段）。
+                UiEvent::StreamMetrics(metrics) => {
+                    state.apply_live_metrics(metrics);
                 }
                 // wave-39 R8：本轮 token 回执 → 幂等覆盖计入累计指标。
                 UiEvent::StreamUsage {

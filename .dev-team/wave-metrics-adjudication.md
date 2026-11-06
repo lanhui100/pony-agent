@@ -35,3 +35,19 @@
 ## A6 — 语义边界（事件附着）
 
 `TurnStreamEvent.metrics` 仅在 `provider_call_records` 为 `Some` 且非空时写入；`is_delta_event`（`turn:delta`）路径一律 `None`。唯一附着点：`turn_flow::emit_stream_event_with_step` 内的 payload 构造前计算。
+
+## A7（2026-11-06 增补，修正 A5）— 比值越界 fail-closed，取消 clamp
+
+`unit_ratio` 对 `numerator > denominator` 一律返回 `None`（不展示），**禁止** `clamp(0.0, 1.0)`。
+原因：clamp 会把「分子分母不同量纲 / 上游自相矛盾」静默变成 100%，与本波要消灭的「缓存命中恒 100%」同构。
+A5 中「clamp 是值域归一」的表述**作废**，由本条取代。
+
+## A8（增补）— `costUsd` 为轮级 Σ 逐调用成本
+
+对本轮可计数调用逐条计价求和；不可计价条目跳过、全部不可计价 ⇒ `None`。
+部分不可计价时总成本可能低估（已知取舍，逐调用真值由 `llm.chat` span 承担）。
+
+## A9（增补）— 附着边界与残余窗口如实登记
+
+`metrics` 仅在 `provider_call_records` 非空时附着；每轮**首个调用**完成前该轮无快照，此窗口回退 legacy 渲染。
+该残余已登记契约矩阵 §7.1 R1，不属缺陷而是本波明确取舍。

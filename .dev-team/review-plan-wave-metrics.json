@@ -1,0 +1,118 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "plan-wave-metrics-adversarial-poch",
+    "fresh_context": true
+  },
+  "executed_by": "plan-wave-metrics-adversarial-poch",
+  "attestation": {
+    "self_signed": false,
+    "note": "补做的方案级对抗审查：本波 Phase-1 计划审查被 Lead 跳过（流程违规已在 meta-retrospective 登记）；审查对象为设计文档，reviewed_commit 填基线 5bb99639。"
+  },
+  "reviewed_commit": "5bb99639",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-metrics-snapshot.md",
+    ".dev-team/wave-metrics-adjudication.md",
+    ".dev-team/nfr-baseline.json"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 21,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "sed -n '20,28p' .dev-team/contract-matrix-metrics-snapshot.md; grep -n 'provider_call_records.push' crates/pony-agent-core/src/agent/runtime/turn_stream.rs; sed -n '5435,5457p' crates/pony-agent-core/src/bin/tui.rs",
+      "detail": "Q2（I1 附着边界）——设计只冻结「事件携带非空 records 才附着」，而 records 在真实链路里是「调用完成后才 push」再被后续事件 clone 出去的：首个 provider 调用（尤其是无工具的单词轮）在整个流式期（TTFT + 全量生成，实测可达数十秒）没有任何携带 records 的事件，因此 metrics 恒为 None。于是 I7 要求「回退既有路径」，而既有路径正是本波要消灭的口径（TUI 回退分支仍 round().clamp(0.0,100.0)，见 tui.rs:5442-5444/5454-5456）。具体误判场景：用户发一条不需要工具的消息，全程指标行显示旧路径的「缓存 100%」或干脆空白，直到 turn:completed 才瞬间跳到快照的「缓存 93%」——本波宣称的「按每次调用更新」只在轮末生效，且这次跳变会被用户读成「指标在抖动/算法又变了」。残余延迟既未在 §1 冻结、也未在 §6 的四条偏离里登记，更没有任何「用户可知会」的条目。改什么：①契约加一条 I8（或 I1 修订）明确「首跳/增量事件的快照可用性」三态，并要求 delta 路径携带同 turn 最近一次快照（sticky），而不是回退重算；②§6 增列「首跳窗口」残余延迟与 UI 行为，作为用户可感知的已知限制。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 16,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "grep -n 'metrics' crates/pony-agent-core/src/agent/session/types.rs || echo NO_METRICS_IN_TURNTRACE_RECORD; sed -n '318,332p' src/lib/runtime/useTraceProjection.ts; sed -n '1812,1816p' src/stores/runtime.ts",
+      "detail": "Q3（单一真值边界）——§0 写「快照存在 ⇒ 两端都以快照为唯一来源」，但快照只存在于 live 事件帧，`TurnTraceRecord`（session/types.rs:681-726）没有 metrics 字段，桌面端也明确「快照不持久化，会话恢复时必须清空」。后果：同一个 turn 在两种视图下有两个数字——live 显示快照 92%，重启/`/resume` 后前端按 trace 反推（useTraceProjection.ts:318-331，`resolveLastCallCacheInputTokens / contextDisplayTokens`）得到另一值（anthropic 分母含 cache_creation，通常更低）。这不只是桌面端问题：任何未来 HTTP/WS 端若「只转发事件帧」则 live 闭合，但一旦要服务历史会话就必须在 host 侧再算一遍，复制面并未消除，只是从 live 挪到 replay。即「本波交付即固化」为一个 live-only 的单一真值，重放路径永久第二口径。改什么（二选一，必须落其一）：A) 把 `TurnMetricsSnapshot` 持久化进 `TurnTraceRecord`（一个可选字段，wire 用 skip_serializing_if），恢复时直接复用；B) 在契约里把历史反推公式也纳入 I2/I4/I5 的冻结范围，并显式登记「重放路径与 live 快照允许的差异 ≤ X」，否则「单一真值」是假的。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 97,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "sed -n '97p' .dev-team/contract-matrix-metrics-snapshot.md; grep -n 'cost_usd: turn_event_cost_usd' crates/pony-agent-core/src/agent/turn_flow.rs; sed -n '79,95p' crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+      "detail": "Q7（同轮成本不一致）——字段表把 `costUsd` 语义冻结为「该轮成本」，但同一帧的顶层 `TurnStreamEvent.cost_usd`（turn_flow.rs:938，由事件级 input/output 计算）也叫「本轮成本」，而快照内的 costUsd 取的是**末次调用**的 input/output（metrics_snapshot.rs 的 resolve_cost_usd(meta, last)）。三跳轮的具体反例：顶层 costUsd=$0.041（事件级聚合）、metrics.costUsd=$0.014（末次调用）、落库 TurnTraceRecord.costUsd=$0.039（OpenAI 口径，B027 已登记）——同一个 turn 三个数，任一端选一个渲染都能自证「与契约一致」。B027 只登记了**协议口径**统一，没覆盖**作用域**（末次调用 vs 轮聚合），所以本波会把「末次调用的钱」标成「该轮的钱」并固化进契约，系统性少报多跳轮成本。改什么：本波必须二选一——(a) 删掉快照内 costUsd，轮成本继续只由事件级 costUsd 承担，统一口径留给 B027；(b) 保留但改名 `lastCallCostUsd` 并在 §0/§4 写明「轮成本语义不在本快照，见 B027」。禁止继续用 `costUsd = 该轮成本` 这个名不副实的冻结。"
+    },
+    {
+      "file": ".dev-team/wave-metrics-adjudication.md",
+      "line": 33,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "sed -n '31,34p' .dev-team/wave-metrics-adjudication.md; sed -n '22,27p' .dev-team/contract-matrix-metrics-snapshot.md",
+      "detail": "Q4（比例/单位与 clamp 自相矛盾）——A5 要求 `cache_hit_ratio`/`context_ratio` 写入前 `clamp(0.0,1.0)` 并称之为「值域归一，不是 I6 禁止的 clamp」，但 I6 的冻结理由恰恰是「clamp 只是把越界藏起来，用户看不到算法错了」。具体失效：某 OpenAI 兼容代理把 cached tokens 单列、prompt_tokens 不含 cache（OpenRouter 类网关常见），于是 record 里 cache_hit=1200、input=1000 ⇒ builder 算出 1.2 再 clamp 成 1.0 ⇒ TUI/桌面「缓存 100%」，无任何异常信号、无日志、无计数——本波的头号症状被 A5 在数据层合法化，且比渲染层 clamp 更难发现（渲染层至少还能被 I6 的断言抓到）。改什么：A5 修订为「分子 > 分母 ⇒ None + 记一次 metrics_anomaly（可观测性计数/日志），禁止 clamp」；I2 的「取值恒 ∈[0,1]」改写为「构造保证；越界即视为上游数据异常，必须暴露为缺值而非 100%」。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 83,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '72,97p' .dev-team/contract-matrix-metrics-snapshot.md; sed -n '5403,5432p' crates/pony-agent-core/src/bin/tui.rs",
+      "detail": "Q1a（语义粒度与 UI 文案）——同一个扁平对象里混装三种作用域：末次调用（inputTokens/cacheHitInputTokens/totalTokens/firstTokenLatencyMs/callSpeed…）、轮累计（turnOutputTokens/turnGenerationMs/turnCalls/turnSpeed）、轮成本（costUsd，且实际是末次调用）。命名只对 `turn*` 前缀给了提示，`totalTokens` 没有任何限定词却是**末次调用**的总量：一个 3 跳轮各 8k output 的用户，新端把 `totalTokens` 当「本轮总计」渲染成 8k，实际轮消耗 24k（`turnOutputTokens`）——对象名就叫 TurnMetricsSnapshot，字段名就叫 total，这是设计里最容易踩的一脚。UI 侧同理：TUI 只印「缓存 93% / 上下文 24% / 120 t/s」，没有任何「本次调用 / 本轮」限定词（tui.rs:5415-5430），用户无法从界面反推 `contextInputTokens` 是「当前调用的提示词规模」而不是「会话累计」，压缩/多跳时会看到数字反复横跳并误判为泄漏或重复计费。改什么：字段表加「作用域」列（per_call / per_turn），per-call 字段统一前缀（lastCall* 或 call*）；并在契约里冻结三处 UI 文案的限定词（如「本次调用缓存」「本轮生成速度」），否则「语义冻结」只停在 Rust 侧。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 25,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '25p' .dev-team/contract-matrix-metrics-snapshot.md; grep -n 'pub fn weighted_turn_speed' -A 30 crates/pony-agent-core/src/agent/turn_flow.rs",
+      "detail": "Q1b（turnSpeed 的「加权」没有定义权重）——I5 只说「与 weighted_turn_speed 同源」，但该函数实际是 `Σoutput / Σgen`（**生成时长加权聚合**，不是调用速度的加权平均），且 gen 已扣 TTFT、也不含工具等待。反例：3 次调用各 gen=10s、ttft=5s、output=3000，UI 显示 `Σout/Σgen = 300 t/s`，而用户墙上体感是 9000 tokens / 45s ≈ 67 t/s，差 4.5 倍；用户拿「300 t/s」估 ETA 会认为还要 10s，实际还要 45s。契约把「加权」当作已定义术语，但既没写权重是 gen 时长、也没写「不含 TTFT/工具等待」，新消费端（尤其要展示 ETA 或成本速率的端）必然误用。改什么：I5 补一句口径定义（`weighted = Σout / Σ(dur-ttft)`，明确排除 TTFT 与工具等待），并把 UI 文案冻结为「生成速度（不含首字等待）」。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 91,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '91,93p' .dev-team/contract-matrix-metrics-snapshot.md; sed -n '28,32p' src/components/HomeStatusPanel.vue; sed -n '635,641p' src/lib/runtime/token-metrics.ts",
+      "detail": "Q4b（分数 vs 百分数）——wire 键 `cacheHitRatio`/`contextRatio` 本身不带单位，唯一防线是文档与 TS 注释。失效场景：新端（SSE/HTTP 消费者）只读 JSON，`\"cacheHitRatio\": 0.92` 直接拼 `%` 渲染成「缓存 0.92%」，与 TUI 的「93%」相差 100 倍，正好复制本波要消灭的两端不一致。这不是假想：同仓库已存在同名不同型的活证据——`HomeStatusPanel.vue:30` 的 prop `cacheHitRatio: string` 装的就是「92%」字符串（prop 名与 wire 字段同名，类型却是百分数字符串），说明「同名跨表示」的陷阱在本仓库已经发生。而 `cost_usd`/`firstTokenLatencyMs`/`turnDurationMs` 都是整数或 USD 浮点，生态里没有「ratio 必须是分数」的肌肉记忆可依赖。改什么：让线缆自描述——快照加常量字段 `ratioUnit: \"fraction\"`（约 22 B），或把键改名为 `cacheHitFraction`/`contextFraction`；仅靠 §4 表格注释不足以防住新端。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 13,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '12,16p' .dev-team/contract-matrix-metrics-snapshot.md; grep -n 'skip_serializing_if' crates/pony-agent-core/src/agent/runtime/types.rs",
+      "detail": "Q5（缺席歧义）——`skip_serializing_if = Option::is_none` 让「旧核事件（无此能力）」与「新核事件但本帧无快照（首跳/delta/无 usage）」在线缆上完全同形，而 I7 又规定缺键 ⇒ 回退重算。二者叠加的直接后果：本波上线后，新核的每一次首跳事件都会让消费者走回旧公式（见第 1 条 BLOCKING），且从帧本身无法自证这是「不适用」还是「对端太旧」，排障时只能靠猜。最小补救：新核事件抬 `eventVersion`（或加一个 `metricsCapable: true` 事件级常量），并加一条不变量——「eventVersion ≥ N 且无 metrics 键 ⇒ 本帧不适用，禁止回退重算，UI 呈现为『待结算』」。这样也顺带把第 1 条的首跳窗口从「旧错误数字」变成「明确的待结算态」。若选择「总是下发 metrics: null」，需承认一次性契约快照漂移（+24 B/帧）并同步 `src/types/runtime.ts`。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 23,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '22,24p' .dev-team/contract-matrix-metrics-snapshot.md; grep -n 'contextInputTokens' -A 3 crates/pony-agent-core/src/agent/metrics_snapshot.rs | head -20",
+      "detail": "Q7b（compaction 裁剪）——I3 把 contextRatio 定义成「当前调用上下文/窗口」，但没定义「上下文因压缩而重置」时该比值的 basis。`/compact` 把历史换成摘要后，下一轮快照的 contextInputTokens 会从 180k 掉到 30k ⇒ 用户看到「上下文 96% → 15%」却没有任何「已压缩」标记，第一反应是上下文被丢弃或统计坏了；而 turnOutputTokens/turnSpeed 仍在累加，同一帧里「上下文在减、输出在涨」更像 bug。B028 登记了，但只登记了「加标记」的需求，没冻结「压缩后快照应如何自解释」这条语义；本波交付即固化 `contextRatio` 的无 basis 语义。改什么：本波至少在 §6 增一条「压缩后快照无 basis ⇒ 已知用户可见误判，B028 覆盖」的显式登记；低成本正解是给快照加 `basis: \"current_context\" | \"peak\"`（约 30 B）并在压缩事件上切到 peak。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-metrics-snapshot.md",
+      "line": 111,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '109,112p' .dev-team/contract-matrix-metrics-snapshot.md; grep -n 'fn aggregate_session_metrics' -A 12 crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "detail": "Q3b（边界清单不完整）——§0 说「两端都以快照为唯一来源」，但桌面端自己还有一条独立聚合面：`control_plane::aggregate_session_metrics` → `ModelMonitorSessionRow`（request/input/cache/total 汇总）不读快照，§6 的后续事项只列了契约快照、可观测性、context_window 三项，没把这条路径列进「范围外/待统一」。具体反例：同一会话里 monitor 面板按会话累计显示「缓存命中 81%」，指标行按 per-call 显示「93%」，用户会当成两个 bug。改什么：§6 增列两条登记——(1) control_plane monitor/drilldown 为「会话累计/账单口径」，本波不纳入单一真值，B026 之后统一；(2) 桌面 monitor 与指标行不得在同屏并列呈现同一名字的百分比，或必须显式标注「会话累计」。"
+    },
+    {
+      "file": ".dev-team/nfr-baseline.json",
+      "line": 105,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '105,128p' .dev-team/nfr-baseline.json; python3 -c \"import json;print(len(json.dumps({'step':2,'contextInputTokens':48213,'inputTokens':3120,'cacheHitInputTokens':45093,'cacheMissInputTokens':3120,'outputTokens':812,'reasoningTokens':120,'totalTokens':49145,'firstTokenLatencyMs':842,'durationMs':9310,'callSpeedTokensPerSecond':95.427,'turnSpeedTokensPerSecond':78.913,'turnOutputTokens':2410,'turnGenerationMs':30540,'turnCalls':3,'cacheHitRatio':0.935276,'contextWindowTokens':200000,'contextRatio':0.241065,'origin':'provider','provider':'anthropic','model':'claude-sonnet-4-5','costUsd':0.0142738},separators=(',',':'))))\"",
+      "detail": "Q6（NFR 覆盖面）——`metrics_snapshot` 段只声明「无外部调用/纯值对象/无资源」，遗漏了本设计唯一新增的物理成本：**事件体积**与**浮点线缆卫生**。量化（本机实测，`separators=(',',':')`）：22 键全量的快照 JSON = 517 B，全 null 也有 475 B（内层 Option 无 skip_serializing_if）；一条含 3 条 `provider_call_records` 的 turn:completed 帧下限约 1.42 KB ⇒ 单帧 +36.5%；一次 10 事件的多跳轮约 +5 KB。对 SSE/Tauri IPC 不构成超时风险（单帧仍 <2.5 KB），但「无上限、无断言」意味着 records 增长或字段继续加时没人会发现。浮点侧：serde_json 对 **value** 级 f64 的 NaN/Inf 是写 `null`（ser.rs:158-181，仅 map key 才 Err），所以「序列化失败导致整条事件丢失」不会发生；真实失效是 `Some(NaN)` 静默降级为 null（与「未知」不可区分），A5 的 `is_finite()` 是唯一防线——NFR 应把它写成「唯一防线」，而不是当作已消除的风险。改什么：NFR 增 `max_added_bytes_per_event: 1024` + 一条断言测试（序列化后长度 ≤ 上限），并把「浮点非有限 ⇒ null 的静默降级依赖 A5 唯一防线」写入 NFR 备注。"
+    },
+    {
+      "file": ".dev-team/wave-metrics-adjudication.md",
+      "line": 3,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '1,4p' .dev-team/wave-metrics-adjudication.md; sed -n '31,34p' .dev-team/wave-metrics-adjudication.md; sed -n '26p' .dev-team/contract-matrix-metrics-snapshot.md",
+      "detail": "流程类（仅此一条，不重复指责）——A1–A6 自称「优先于空桩注释中的歧义表述」，即具备规范效力，但本波 Phase-1 计划审查被跳过，等于这 6 条裁决在未经过对抗审查的情况下就获得了高于实现注释的优先权；本次补审已经证明这不是形式问题：A5（clamp 值域归一）与 I6（禁止 clamp 掩盖越界）实质冲突，而两文档冲突时没有裁定规则——契约说「不变量原文不得修改」，裁决说「本文件优先」，二者对同一行为给出相反结论。改什么：①在 §6 追加第 5 条，登记「本波 Phase-1 计划审查被跳过 + 本次补审结论（4 BLOCKING）作为 A1–A6 修订依据」；②把有效规范收敛为单文件——A1–A6 中带规范效力的条款（尤其 A2 分母、A5 浮点/clamp）以 I8/I9 编号并入契约矩阵，裁决文件退回「决策记录」而非第二法典，否则下次冲突仍无法机械裁定。"
+    }
+  ]
+}

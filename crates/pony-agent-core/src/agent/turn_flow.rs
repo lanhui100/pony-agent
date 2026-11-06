@@ -479,7 +479,8 @@ pub fn provider_event_meta(provider: &ProviderManager) -> ProviderEventMeta {
         provider_name: provider.name().to_string(),
         protocol: provider.protocol_label().to_string(),
         model: provider.model().to_string(),
-        context_window_tokens: None,
+        // task-3：窗口容量取自 provider capabilities；`None` ⇒ 未知，消费者回退既有路径（I3）。
+        context_window_tokens: provider.context_window_tokens().map(u64::from),
     }
 }
 
@@ -881,6 +882,22 @@ pub fn emit_stream_event_with_step(
     step: Option<u32>,
 ) -> TurnEventEnvelope {
     let is_delta_event = name == "turn:delta";
+    // P0 指标快照的唯一附着点（裁决 A6）：仅当事件携带非空 `provider_call_records` 时写入，
+    // `turn:delta` 路径一律 `None`。25+ 调用点签名保持不变，快照在此处按需从 records 成型。
+    let metrics = if is_delta_event {
+        None
+    } else {
+        provider_call_records
+            .as_deref()
+            .filter(|records| !records.is_empty())
+            .and_then(|records| {
+                crate::agent::metrics_snapshot::build_turn_metrics_snapshot(
+                    records,
+                    provider_meta.and_then(|meta| meta.context_window_tokens),
+                    provider_meta,
+                )
+            })
+    };
     // Wave-5 K3：单轮成本超预算 ⇒ 一条 warn 日志（软告警，**绝不**阻断请求；
     // 会话级累计与 UI 告警由前端 store 负责，core 不建第二份会话状态）。
     // 只在终态事件上判定，避免同一轮多事件重复告警。
@@ -972,7 +989,7 @@ pub fn emit_stream_event_with_step(
             session_summary,
             step,
             stop_reason: None,
-            metrics: None,
+            metrics,
         },
     )
 }

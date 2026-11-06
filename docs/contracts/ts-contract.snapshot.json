@@ -7,6 +7,7 @@
   "schemaVersion": 1,
   "tsDeclarations": {
     "TurnInput": "src/types/runtime.ts",
+    "TurnMetricsSnapshot": "src/types/runtime.ts",
     "TurnResult": "src/types/runtime.ts",
     "TurnStreamEvent": "src/types/runtime.ts"
   },
@@ -27,6 +28,33 @@
         "toolAuthorizationMode",
         "workspaceId",
         "workspaceMode"
+      ]
+    },
+    "TurnMetricsSnapshot": {
+      "rustSource": "crates/pony-agent-core/src/agent/metrics_snapshot.rs:TurnMetricsSnapshot",
+      "serdeKeys": [
+        "cacheHitInputTokens",
+        "cacheHitRatio",
+        "cacheMissInputTokens",
+        "callSpeedTokensPerSecond",
+        "contextInputTokens",
+        "contextRatio",
+        "contextWindowTokens",
+        "costUsd",
+        "durationMs",
+        "firstTokenLatencyMs",
+        "inputTokens",
+        "model",
+        "origin",
+        "outputTokens",
+        "provider",
+        "reasoningTokens",
+        "step",
+        "totalTokens",
+        "turnCalls",
+        "turnGenerationMs",
+        "turnOutputTokens",
+        "turnSpeedTokensPerSecond"
       ]
     },
     "TurnResult": {
@@ -79,6 +107,7 @@
         "hookTraceRecords",
         "inputTokens",
         "kind",
+        "metrics",
         "outputTokens",
         "phase",
         "providerCallRecords",

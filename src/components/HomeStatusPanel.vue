@@ -83,7 +83,13 @@ const speedTooltip = computed(() => {
   return "生成速度（加权，暂无已完成调用）";
 });
 
-/** C6 `data-speed-debug`：`basis=…;calls=…;in=…;out=…;dur=…;ttft=…;gen=…;win=…;ratio=…;origin=…`。 */
+/**
+ * C6 `data-speed-debug`：`basis=…;calls=…;in=…;out=…;dur=…;ttft=…;gen=…;win=…;ratio=…;origin=…`。
+ *
+ * wave-metrics（task-4）：`ratio` 不在本组件内重算 —— 投影层（快照 `contextRatio` 或 trace 反推）
+ * 已是唯一来源（契约 §0「禁止各自重算」）；本组件只做字面量拼装，位点缺值一律 `-`。
+ * 字面量格式/键序/分隔符逐字冻结（wave-61 §1 L-2 与 e2e 断言依赖）。
+ */
 const speedDebugString = computed(() => {
   const info = props.speedDebugInfo;
   const inVal = info?.inputTokens ?? props.inputTokensTotal ?? "-";
@@ -92,10 +98,7 @@ const speedDebugString = computed(() => {
   const ttftVal = info?.ttftMs ?? "-";
   const genVal = info?.genMs ?? "-";
   const winVal = info?.contextWindow ?? props.contextWindowTokens ?? "-";
-  let ratioVal = info?.ratio ?? "-";
-  if (ratioVal === "-" && props.contextWindowTokens && props.contextWindowTokens > 0 && inVal !== "-") {
-    ratioVal = (Number(inVal) / props.contextWindowTokens).toFixed(3);
-  }
+  const ratioVal = info?.ratio ?? "-";
   return [
     `basis=${speedBasis.value}`,
     `calls=${info?.calls ?? 0}`,

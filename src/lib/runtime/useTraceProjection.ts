@@ -12,6 +12,7 @@ import {
   resolveContextInputTokens,
   resolveCurrentContextInputTokens,
   resolveLastCallCacheInputTokens,
+  resolveMetricsSnapshotDisplay,
   resolveTurnWeightedSpeedDetail,
   type TokenSpeedCalculationMode,
   type TurnWeightedSpeedDetail,
@@ -118,6 +119,7 @@ export function useTraceProjection(options: {
     firstTokenLatencyMs,
     inputTokens,
     isSubmitting,
+    liveMetrics,
     messages,
     outputTokens,
     phase,
@@ -197,18 +199,48 @@ export function useTraceProjection(options: {
 
   const retrievedSessionContext = computed(() => retrievedContext.value?.sessionContext ?? null);
 
+  /**
+   * wave-metrics（task-4）：结算快照是**唯一优先来源**（契约 §0「快照存在 ⇒ 以快照为唯一来源，
+   * 禁止各自重算」）。展示映射只经 `resolveMetricsSnapshotDisplay` 一个出口；
+   * 快照为空（新轮起点 / 旧事件 / 历史会话回放）⇒ **完全**走既有 trace 反推路径（I7）。
+   */
+  const liveMetricsSnapshot = computed(() => liveMetrics.value ?? null);
+  const liveMetricsDisplay = computed(() => {
+    const snapshot = liveMetricsSnapshot.value;
+    return snapshot ? resolveMetricsSnapshotDisplay(snapshot) : null;
+  });
+
   // C4 取值序（wave-54 §1 C4）：「输入」= 末次调用的 contextInputTokens（协议归一值）
   // → 回退 S1（wave-15 §7.6 冻结解析序）→ 无数据时 null（UI 渲染 `—`）。
-  const contextDisplayTokens = computed(
+  const traceContextDisplayTokens = computed(
     () => resolveContextInputTokens(latestTurn.value) ?? resolveCurrentContextInputTokens(latestTurn.value)
   );
+  /** 快照存在 ⇒ `contextInputTokens` 直取（I4 协议归一值）；无快照 ⇒ 既有 trace 反推路径。 */
+  const contextDisplayTokens = computed(() => {
+    const display = liveMetricsDisplay.value;
+    return display ? display.contextTokens : traceContextDisplayTokens.value;
+  });
 
-  const currentContextWindowTokens = computed(
+  const traceContextWindowTokens = computed(
     () =>
       retrievedSessionContext.value?.contextWindowTokens ??
       providerStore.currentModel?.capabilities?.contextWindowTokens ??
       null
   );
+  /**
+   * 上下文窗口（L3-A ADVISORY 修正，I3 语义）：
+   * - 快照存在 ⇒ **只取** `snapshot.contextWindowTokens`；缺失 ⇒ `null`，**不得**回退 trace/provider 窗口。
+   *   理由：分子（contextInputTokens）来自快照、分母来自 trace 会造出快照自己因 I3 拒绝产出的
+   *   `contextRatio`（窗口未知 ⇒ None），等同于第二口径；I3 要求「窗口未知时占比无定义」。
+   * - 快照为空（旧事件 / 历史会话 / 新轮起点）⇒ 才回退既有 trace/provider 窗口来源（I7）。
+   */
+  const currentContextWindowTokens = computed(() => {
+    const snapshot = liveMetricsSnapshot.value;
+    if (snapshot) {
+      return liveMetricsDisplay.value?.contextWindow ?? null;
+    }
+    return traceContextWindowTokens.value;
+  });
   const sessionTurnCount = computed(() => orderedTurnTraces.value.length);
 
   // Cached timeline per turn — computed once per orderedTurnTraces change，
@@ -284,6 +316,12 @@ export function useTraceProjection(options: {
   // C6：缓存比 = 末次调用 cache / 可见「输入」（同源分母），整数百分比。
   // 会话累计口径 sessionInputTokensTotal / sessionCacheHitTokensTotal 保持不变（账单语义）。
   const sessionCacheHitRatio = computed(() => {
+    // 快照存在 ⇒ `round(cacheHitRatio * 100)%` 直取（I2/I6：缺失 ⇒ 空串，禁止伪造成 0%）。
+    const display = liveMetricsDisplay.value;
+    if (display) {
+      return display.cacheRatioPercent;
+    }
+
     const denominator = contextDisplayTokens.value;
     const cache = sessionLastCallCacheHitTokens.value;
     if (denominator == null || !(denominator > 0) || cache == null) {
@@ -314,16 +352,55 @@ export function useTraceProjection(options: {
     return latestDetail ?? EMPTY_SPEED_DETAIL;
   });
 
-  const sessionTokenGenerationSpeed = computed<number | null>(() => sessionTokenSpeedState.value.speed);
-  const tokenSpeedCalculationMode = computed<TokenSpeedCalculationMode>(() => sessionTokenSpeedState.value.mode);
+  const traceSessionTokenGenerationSpeed = computed<number | null>(() => sessionTokenSpeedState.value.speed);
+  /**
+   * 速度位（契约 §0 / I5）：快照存在 ⇒ `turnSpeedTokensPerSecond` 直取（与 Rust
+   * `weighted_turn_speed` 同源，口径恒为 `turn_weighted`）；无快照 ⇒ 既有 trace 反推路径（I7）。
+   */
+  const sessionTokenGenerationSpeed = computed<number | null>(() => {
+    const display = liveMetricsDisplay.value;
+    return display ? display.speed : traceSessionTokenGenerationSpeed.value;
+  });
+  const tokenSpeedCalculationMode = computed<TokenSpeedCalculationMode>(() =>
+    liveMetricsSnapshot.value ? "turn_weighted" : sessionTokenSpeedState.value.mode
+  );
 
   /**
    * C6 调试/`≈` 通道（§5 裁决 4：由 `origin` 子字段驱动，不新增 prop）：
    * `data-speed-debug` = `basis=…;calls=…;in=…;out=…;dur=…;ttft=…;gen=…;win=…;ratio=…;origin=…`。
+   *
+   * 快照分支：`calls`/`outputTokens`/`genMs`/`ttftMs`/`origin`/`ratio`/`win` 全部快照直取（禁止重算）；
+   * 其中 `win` 只认 `snapshot.contextWindowTokens`（L3-A ADVISORY：不得用 trace 回退窗口当分母），
+   * 窗口缺失 ⇒ `win=null`、`ratio=null`（面板渲染既有 `-` 占位，字面量格式不变）。
    */
   const tokenSpeedDebugInfo = computed(() => {
-    const state = sessionTokenSpeedState.value;
+    const snapshot = liveMetricsSnapshot.value;
+    const display = liveMetricsDisplay.value;
     const windowTokens = currentContextWindowTokens.value ?? null;
+
+    if (snapshot && display) {
+      const contextRatio =
+        typeof snapshot.contextRatio === "number" && Number.isFinite(snapshot.contextRatio)
+          ? snapshot.contextRatio
+          : null;
+      return {
+        mode: "turn_weighted",
+        basis: "turn_weighted",
+        calls: snapshot.turnCalls,
+        speed: display.speed,
+        inputTokens: display.contextTokens,
+        outputTokens: snapshot.turnOutputTokens,
+        durationMs: snapshot.durationMs,
+        genMs: snapshot.turnGenerationMs,
+        ttftMs: display.ttftMs,
+        // 快照窗口（= display.contextWindow，已无回退）；缺失 ⇒ null。
+        contextWindow: display.contextWindow ?? null,
+        ratio: contextRatio == null ? null : contextRatio.toFixed(3),
+        origin: display.origin,
+      };
+    }
+
+    const state = sessionTokenSpeedState.value;
     const inTokens = state.inputTokens ?? contextDisplayTokens.value ?? null;
     let ratio: string | null = null;
     if (windowTokens && windowTokens > 0 && inTokens != null) {

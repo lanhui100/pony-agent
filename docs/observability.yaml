@@ -327,3 +327,18 @@ note: >-
   (3) 非遥测变更（仅登记）：流式期按键裁决由 `streaming_key_disposition` 单点裁定，
       Enter 语义由「丢弃」改为「入队 → 终态后单飞派发」；派发经独立 `UiEvent::QueuedAutoSubmit`
       二次校验后复用既有提交路径。不改变对外接口、会话持久化 schema 与既有观测面。
+  【wave-metrics 归属登记｜per-call 单一真值指标快照（TurnMetricsSnapshot）】
+  (1) 四维归属不变：tracing/issues 仍 applicable（唯一落点不变 `agent/otel/mod.rs`、
+      `agent/ponysentry/client.rs`）；metrics / logs 维持结构性 N-A（理由同本文档维度声明）。
+      本次不新增 /metrics 端点、不新增 Loki 上送路径、不新增依赖、环境变量或异常码族。
+  (2) 变更性质：新增**进程内派生指标单一真值** `TurnMetricsSnapshot`
+      （`crates/pony-agent-core/src/agent/metrics_snapshot.rs`），随既有 turn 事件流
+      `TurnStreamEvent.metrics` 下发（additive + `skip_serializing_if = "Option::is_none"`
+      ⇒ 无快照时线缆字节零变化）；TUI 与桌面端由「各自反推速度/上下文占用/缓存命中率」
+      改为「只消费该快照」。属**展示正确性收敛**，不是新增遥测出口：
+      无新增网络 IO、无新增后台任务、无新增端点/标签/日志面。
+  (3) 与 tracing 的关系：速度/上下文/用量的结构化真值仍以既有 OTel span 属性为准
+      （`agent.turn.speed.tokens_per_second`、`gen_ai.usage.*`，见 ADR 0053 / ADR 0049）；
+      快照与 span 属性**同源同函数**（`turn_flow::weighted_turn_speed`），不构成第二真值源。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；
+      既有 `error_boundary` / `http_client` 两个收口点本次未改动。

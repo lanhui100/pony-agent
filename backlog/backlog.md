@@ -158,3 +158,45 @@
   - 路径：`src/lib/runtime/utils.ts` 与 `src/stores/runtime.ts`
   - 描述：通过环境销毁检测中断延迟宏任务回调，收口 scheduleDeferredPersist/cancelDeferredPersist 对 window 的裸解引用。
   - 验收：10 次全量连跑 exit=0 且 Errors 0。
+
+- [ ] `B026` - P1: 抽 `HostControlPlane` 门面 + transport 抽象（HTTP/WS 服务化前置）
+  - 路径：`crates/pony-agent-core/src/agent/control_plane/`、`src-tauri/src/lib.rs`、`src-tauri/src/tauri_adapter.rs`
+  - 描述：`HostControlPlane` 现为 struct 而非 trait，94 个 `#[tauri::command]` 与 `generate_handler!` 宏绑死，`TurnEventSink` 是唯一宿主注入点但无 transport 层（SSE 只有内存 formatter，`headless.rs` 的 sink 无 writer 抽象）。新增 HTTP 端需复制 94 个命令签名 + 16 个前端 listen + 整套指标派生层。
+  - 验收：非 Tauri 宿主（HTTP/WS）可在不复制命令壳的前提下复用同一 core 命令面与事件流；`non_tauri_harness` 扩展为正例；Tauri 侧行为零变更。
+  - 登记来源：wave-metrics 架构审计（`arch-audit` 2026-11-06）；本轮明确不做（用户交付边界：P2 独立立项，不夹带重构）。
+
+- [ ] `B027` - P1: 成本协议口径统一（同一 turn 两个 costUsd）
+  - 路径：`crates/pony-agent-core/src/agent/turn_flow.rs:2672`、`crates/pony-agent-core/src/agent/runtime/turn_persist.rs:67`、`crates/pony-agent-core/src/agent/budget.rs:306`
+  - 描述：wire `costUsd` 走协议感知 `estimate_cost_with_protocol`，落库 `TurnTraceRecord` 用固定 OpenAI 口径的 `estimate_cost`；`budget.rs` 本地算 `uncached=input-cached` 却调固定 OpenAI 的 `calculate_cost_with_pricing`（anthropic 用错协议），且 `total_input_tokens += uncached` 与 `total_tokens += input+output` 分项和≠total。
+  - 验收：同一 turn 的 wire/落库/budget 三处成本逐位一致；anthropic 协议回归用例（uncached 不减 cache_read）。
+  - 登记来源：wave-metrics 指标链路审计（`metrics-audit` 2026-11-06）。
+
+- [ ] `B028` - P2: compaction 的指标语义标记（`context_reset` / basis）
+  - 路径：`crates/pony-agent-core/src/agent/runtime/compaction_ops.rs:179`、`crates/pony-agent-core/src/bin/tui.rs`、`src/stores/runtime.ts`
+  - 描述：`/compact` 用 `replace_session_history` 把历史换成摘要，下一轮 prompt 真实变小，但 UI 只追加一条 System 消息、不标注也不重置指标 ⇒ 用户看到「上下文无故变小」。需在压缩事件上携带标记并让快照带 `basis=current_context|peak`。
+  - 验收：压缩后指标区显式标注「已压缩」，且上下文语义可自解释。
+  - 登记来源：wave-metrics 指标链路审计；本轮快照已声明 `contextRatio` 语义（当前调用上下文/窗口），但未做压缩标记。
+
+- [ ] `B029` - P2: wave-metrics L3-A 剩余 ADVISORY 债务
+  - 路径：`crates/pony-agent-core/src/bin/tui.rs:3590`、`src/stores/runtime.ts:4308`、`src/components/HomeStatusPanel.vue:137`、`:73`
+  - 描述：① `clear_messages()`（换 session 的另一入口，生产链路未调用）不清 `live_metrics`；② 桌面 store 6 处快照落库点位于 turnId 门禁与事件游标去重之前，且无 step 单调守卫（迟到/乱序事件可自愈型回写）；③ `HomeStatusPanel.vue` 圆环仍自算百分比，与快照 `contextRatio` 双公式并存且 `contextPercent` 无生产消费方；④ `≈` 估算标记改由快照 origin 驱动，却标注在 trace 会话累计（Σ output/cache）上。
+  - 验收：四项任一收敛后，TUI/桌面均只保留单一口径；②需补乱序事件回归用例。
+  - 登记来源：`.dev-team/review-join-wave-metrics-a.json`（L3-A 第 1 轮，ADVISORY 2/3/5/6）
+
+- [ ] `B030` - P1: 指标快照的首跳窗口与持久化（消除「live 与重放两套口径」）
+  - 路径：`crates/pony-agent-core/src/agent/runtime/turn_stream.rs`、`crates/pony-agent-core/src/agent/session/types.rs`（`TurnTraceRecord`）、`src/lib/runtime/useTraceProjection.ts`
+  - 描述：① `provider_call_records` 仅在调用完成后 push ⇒ 每轮**首个调用**的整个流式期无快照，回退 legacy 渲染（含 `clamp(0,100)`），轮末一次性跳变；② 快照不落 `TurnTraceRecord` ⇒ 重启/resume/重放由 trace 反推第二公式，同一轮 live 与重放可能给出不同值（实测口径差 92% vs 78%）。
+  - 验收：首跳流式期可产出「进行中」口径（或显式声明未知）；重启后同一轮指标与 live 逐字段一致。
+  - 登记来源：`.dev-team/review-plan-wave-metrics.json` BLOCKING-1/2（契约 §7.1 R1/R2）
+
+- [ ] `B031` - P2: 指标线缆的自描述与能力标记
+  - 路径：`crates/pony-agent-core/src/agent/runtime/types.rs`、`crates/pony-agent-core/src/agent/metrics_snapshot.rs`、`src/types/runtime.ts`
+  - 描述：① `skip_serializing_if` 使「旧核无此能力」与「新核本帧无快照」在线缆上同形，新端无法做能力探测；② `cacheHitRatio`/`contextRatio` 为 0..1 分数但键名不自描述，而同仓 `HomeStatusPanel` 同名 prop 装的是百分数字符串，新端易误读；③ `totalTokens` 名为 total 实为末次调用值（作用域混装，UI 无「本次/本轮」限定词）。
+  - 建议：`metrics` 增 `schemaVersion` 或复用 `eventVersion` 做能力标记；比率键名或注释固化单位；UI 文案补作用域限定。
+  - 登记来源：契约 §7.1 R4/R5；方案对抗审查 ADVISORY Q1a/Q4b/Q5
+
+- [ ] `B032` - P2: 事件帧体积预算纳入 CI
+  - 路径：`crates/pony-agent-core/tests/ts_contract_snapshot.rs` 或新增体积断言、`.dev-team/nfr-baseline.json`
+  - 描述：本波实测 `TurnStreamEvent` 517 B/帧基线，3-record 帧 +36.5%（快照 22 字段）。已入 NFR 预算 700 B/帧但**无机器门禁**，后续再加字段会静默膨胀（IPC/SSE 带宽与前端解析成本）。
+  - 验收：CI 对代表性事件帧做体积断言，超预算即红。
+  - 登记来源：契约 §7.2；方案对抗审查 ADVISORY Q6
