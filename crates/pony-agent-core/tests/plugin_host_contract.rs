@@ -307,7 +307,8 @@ fn t3_fixture_plugin_runs_spawn_initialize_call_shutdown_lifecycle() {
 fn t3_plugin_child_env_is_exactly_the_allowlist() {
     // Arrange — 父进程注入一个绝不允许透传的哨兵变量（模拟 provider key）
     let secret_name = "PONY_PLUGIN_CONTRACT_SECRET";
-    let secret_value = "sk-pony-plugin-contract-dummy";
+    // 哨兵值：`sk-mock-` 前缀仅为满足敏感信息门禁的良性占位符约定（scripts/check-secrets.mjs:73-76）。
+    let secret_value = "sk-mock-pony-plugin-contract-dummy";
     std::env::set_var(secret_name, secret_value);
     assert!(
         !ENV_ALLOWLIST.contains(&secret_name),

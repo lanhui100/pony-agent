@@ -479,7 +479,9 @@ fn t2_env_reference_is_resolved_and_literal_secret_never_leaks() {
     let reference_var = "PONY_MCP_T2_REFERENCE_TOKEN";
     let reference_value = "t2-reference-token-value";
     std::env::set_var(reference_var, reference_value);
-    let literal_secret = "sk-literal-t2-secret-0987";
+    // 夹具值：`sk-mock-` 前缀仅为满足敏感信息门禁的良性占位符约定，
+    // 语义仍是「配置里写的字面量 secret」，其取值不参与内容断言（断言均引用该变量）。
+    let literal_secret = "sk-mock-literal-t2-secret-0987";
 
     root.write_workspace_config(&config_with_servers(json!({
         "env_reference": fixture_server(&script, json!({

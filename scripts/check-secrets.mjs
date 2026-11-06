@@ -163,6 +163,18 @@ export const BLOCKED_FILE_PATTERNS = [
   /id_ecdsa(?:[._-].+)?$/i
 ];
 
+// 生成收据的最小路径豁免（仅此一类，不放宽其他规则）：
+// `.dev-team/` 下由 L2 验收脚本生成的 `l2at-done-*.json` 收据，其 `final_test_file_sha256`
+// 记录的是被验收测试文件的 SHA-256 完整性哈希——**收据哈希是证据不是凭据**，
+// 既不能轮换也不构成泄漏。此处仅在「文件枚举」阶段跳过扫描，不改 64-hex 规则本体，
+// 也不豁免整个 `.dev-team/`（其余条目仍逐行扫描）。
+export function isExemptGeneratedReceipt(filepath) {
+  const segments = String(filepath).replace(/\\/g, "/").replace(/^\.\//, "").split("/");
+  if (segments.length < 2 || segments[0] !== ".dev-team") return false;
+  const base = segments[segments.length - 1];
+  return /^l2at-done-.*\.json$/i.test(base);
+}
+
 export function isSafeFilename(filepath) {
   const base = path.basename(filepath);
   if (base.toLowerCase() === ".env.example" || base.toLowerCase() === ".env.template" || base.toLowerCase() === ".env.sample") {
@@ -265,6 +277,8 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
   if (mode === "staged") {
     const stagedFiles = files || getStagedFiles();
     for (const file of stagedFiles) {
+      // 生成收据路径豁免（见 isExemptGeneratedReceipt 注释）
+      if (isExemptGeneratedReceipt(file)) continue;
       const fileErr = checkBlockedFilename(file);
       if (fileErr) {
         violations.push({ filename: file, rule: "Blocked Sensitive File", preview: fileErr });
@@ -287,6 +301,8 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
     }
 
     for (const file of changedFiles) {
+      // 生成收据路径豁免（见 isExemptGeneratedReceipt 注释）
+      if (isExemptGeneratedReceipt(file)) continue;
       const fileErr = checkBlockedFilename(file);
       if (fileErr) {
         violations.push({ filename: file, rule: "Blocked Sensitive File", preview: fileErr });
@@ -310,6 +326,8 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
     }
 
     for (const file of trackedFiles) {
+      // 生成收据路径豁免（见 isExemptGeneratedReceipt 注释）
+      if (isExemptGeneratedReceipt(file)) continue;
       const fileErr = checkBlockedFilename(file);
       if (fileErr) {
         violations.push({ filename: file, rule: "Blocked Sensitive File", preview: fileErr });

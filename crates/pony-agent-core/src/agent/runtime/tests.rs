@@ -6181,12 +6181,27 @@ fn start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_reque
     assert_eq!(request_bodies.len(), 1);
 
     let snapshot = runtime.load_session_snapshot(Some("stream-cancel-during-tool"));
-    assert_eq!(
-        snapshot
-            .history
-            .last()
-            .map(|message| message.content.as_str()),
-        Some(CANCELLED_TURN_MESSAGE)
+    // wave-tui-session-resilience C5：工具执行中被中断的轮次不再落占位文案
+    // `CANCELLED_TURN_MESSAGE`，而是持久化「中断轮次检查点」投影
+    // （纯函数 `session::interrupted_turn_checkpoint_text`，见 `session/store.rs:62-77`；
+    // `bin/tui.rs` 依赖该 `[中断轮次检查点]` 标记做逐字回放）。因此这里断言投影结构：
+    // 以标记开头 + 含已执行工具步骤段 + 含本用例唯一那条工具活动。
+    let cancelled_history_text = snapshot
+        .history
+        .last()
+        .map(|message| message.content.as_str())
+        .expect("cancelled turn must persist a final history message");
+    assert!(
+        cancelled_history_text.starts_with("[中断轮次检查点]"),
+        "中断轮次必须以检查点标记开头，实际：{cancelled_history_text:?}"
+    );
+    assert!(
+        cancelled_history_text.contains("已执行的工具步骤："),
+        "中断轮次检查点必须列出已执行工具步骤，实际：{cancelled_history_text:?}"
+    );
+    assert!(
+        cancelled_history_text.contains("List Tool call finished with status: ok."),
+        "检查点必须记录被中断前已完成的工具活动，实际：{cancelled_history_text:?}"
     );
     let persisted_trace = snapshot
         .turn_trace_history
