@@ -1,0 +1,52 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "8c64c2b3-e694-41b2-a2de-01e3c8a570d8",
+    "fresh_context": true
+  },
+  "executed_by": "8c64c2b3-e694-41b2-a2de-01e3c8a570d8",
+  "reviewed_commit": "25a98482",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/control_plane",
+    "crates/pony-agent-core/src/agent/control_plane/",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/runtime",
+    "crates/pony-agent-core/src/agent/runtime/",
+    "crates/pony-agent-core/src/bin/tui.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8786,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && cargo test -p pony-agent-core --bin pony test_permission_request_from_pending_mapping 2>&1 | tail -2 && python3 - <<'PY'\nimport pathlib\nr = pathlib.Path('crates/pony-agent-core/src')\ntui = (r / 'bin/tui.rs').read_text()\ngov = (r / 'agent/governed_executor.rs').read_text()\ndisp = (r / 'agent/dispatcher.rs').read_text()\npth = (r / 'agent/control_plane/path_authorization_commands.rs').read_text()\ndef body(src, sig):\n    i = src.index(sig)\n    return src[i:src.index('\\n}\\n', i)]\nfn = body(tui, 'pub fn apply_approval_decision(')\nproj = body(tui, 'pub fn permission_request_from_pending(')\nassert '\"approvalKind\": \"approval\"' in disp                 # C2 明确定义的「无 path」审批形态\nassert 'tool_rule_ask' in gov and 'external_requires_approval' in gov  # 两条无 path 的 ApprovalRequired 产出面\nassert 'get(\"callId\")' in proj and 'command_or_path: target_path' in proj  # 缺 path ⇒ 落回 callId\ni_auth = fn.index('authorize_path(&path, \"read\")')\ni_appr = fn.index('approve_control_request(&request_id, version)')\nassert i_auth < i_appr\nassert 'return None;' in fn[fn.index('审批授权失败'):i_appr]  # 授权失败即早退，approve 永不执行\nassert 'std::fs::canonicalize' in pth                        # 非存在路径必 Err(ENOENT)\nprint('CONFIRMED: pathless Approval -> command_or_path=callId -> authorize_path(callId,\"read\") Err -> return None before approve_control_request')\nPY",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8683,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && rg -n 'merged.extend\\(approvals|let Some\\(first\\) = items.first\\(\\)|审批优先' crates/pony-agent-core/src/bin/tui.rs .dev-team/contract-matrix-approval-resume.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 7388,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && d=$(mktemp -d) && mkdir -p \"$d/ws\" \"$d/secret\" && ln -s \"$d/secret\" \"$d/ws/link\" && python3 -c \"import os,sys;print('displayed=',sys.argv[1]);print('granted=',os.path.realpath(sys.argv[1]))\" \"$d/ws/link\" && rg -n 'std::fs::canonicalize\\(trimmed\\)' crates/pony-agent-core/src/agent/control_plane/path_authorization_commands.rs && rm -rf \"$d\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 993,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 955,968p crates/pony-agent-core/src/agent/dispatcher.rs && sed -n 984,996p crates/pony-agent-core/src/agent/dispatcher.rs && sed -n 1422,1436p crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}

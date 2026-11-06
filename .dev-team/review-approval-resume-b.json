@@ -1,0 +1,73 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/control_plane",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/runtime",
+    "crates/pony-agent-core/src/bin/tui.rs"
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "a1c5e595-f3e8-454a-ab81-887c8cc55e52",
+    "fresh_context": true
+  },
+  "executed_by": "a1c5e595-f3e8-454a-ab81-887c8cc55e52",
+  "reviewed_commit": "25a98482",
+  "attestation": {
+    "self_signed": true,
+    "degraded": false,
+    "note": "L3-B adversarial review (state-flow + concurrency), union diff vs ebf50d64; working tree also holds uncommitted parallel-session edits in bin/tui.rs"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 11829,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"import re;b=open('crates/pony-agent-core/src/agent/budget.rs').read();ttl=int(re.search(r'control_request_expiry_ms:\\s*([0-9_]+)',b).group(1).replace('_',''));cp=open('crates/pony-agent-core/src/agent/control_plane/mod.rs').read();s=cp[cp.index('pub fn list_pending_approvals'):];s=s[:s.index('pub fn cancel_approval_request')];tr=open('crates/pony-agent-core/src/agent/tool_runtime.rs').read();tui=open('crates/pony-agent-core/src/bin/tui.rs').read();assert ttl==60000,ttl;assert 'PendingControlRequestState::Pending' in s and 'expires_at_ms' not in s;assert 'PendingControlRequestKind::Approval => now_ms <= self.expires_at_ms' in tr;assert 'expire_control_requests' not in tui;print('DEFECT: TTL=%dms; approve/cancel reject after TTL; list still Pending; TUI never expires'%ttl);raise SystemExit(1)\"",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8786,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"import os;t=open('crates/pony-agent-core/src/bin/tui.rs').read();seg=t[t.index('pub fn permission_request_from_pending'):][:1400];assert 'callId' in seg;p={'requestKind':'approval','callId':'call-abc','options':{'approvalKind':'approval','tool':'Run'}};o=p['options'];tgt=o.get('path') or o.get('file_path') or p.get('callId');print('DEFECT: path-less approval -> command_or_path=%r -> authorize_path canonicalize ok=%s'%(tgt,os.path.exists(tgt)));raise SystemExit(0 if os.path.exists(tgt) else 1)\"",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8791,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"t=open('crates/pony-agent-core/src/bin/tui.rs').read();s=t[t.index('pub fn apply_approval_decision'):][:1500];assert 'authorize_path(' in s and 'approve_control_request(' in s;a=s.index('authorize_path(');b=s.index('approve_control_request(');assert a<b;assert 'revoke_authorization' not in s;print('DEFECT: authorize_path (persistent read grant) precedes CAS consume and is never rolled back on consume failure');raise SystemExit(1)\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8662,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"t=open('crates/pony-agent-core/src/bin/tui.rs').read();s=t[t.index('fn sync_pending_control_request'):][:1800];i=s.index('merged.extend(snapshot');j=s.index('merged.extend(approvals');k=s.index('items.first()');assert i<j<k;print('DEFECT: merged order Ask-then-Approval => items.first() always Ask; contract 2-C4 requires approval priority');raise SystemExit(1)\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 11205,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"t=open('crates/pony-agent-core/src/bin/tui.rs').read();s=t[t.index('UiEvent::ApprovalResumeTurn { prompt } => {'):][:2400];assert 'state.is_streaming = true' in s and 'turn_loop_in_flight' in s;g=t[t.index('impl Drop for TurnLoopInFlightGuard'):][:220];assert 'store(false' in g;print('DEFECT: resume turn has no re-entrance gate; turn_loop_in_flight is a shared AtomicBool signal whose Drop clears it while another turn thread may still run');raise SystemExit(1)\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 1808,
+      "rule": "LEAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"d=open('crates/pony-agent-core/src/agent/dispatcher.rs').read();s=d[d.index('fn consume_control_request'):][:2600];assert 'request.state = target_state' in s;assert '.remove(' not in s;tui=open('crates/pony-agent-core/src/bin/tui.rs').read();assert 'expire_control_requests' not in tui;print('DEFECT: terminal transitions mutate state only, never remove; no expiry sweep in TUI; restart drops approvals silently');raise SystemExit(1)\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 940,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"d=open('crates/pony-agent-core/src/agent/dispatcher.rs').read();s=d[d.index('pub fn pending_requests(&self)'):][:300];assert 'poisoned' in s and 'expect(' in s;tui=open('crates/pony-agent-core/src/bin/tui.rs').read();assert 'list_pending_approvals' in tui;print('DEFECT: list_pending_approvals -> pending_requests() expect() panics the UI thread on a poisoned mutex (called every 500ms poll)');raise SystemExit(1)\"",
+      "severity": "ADVISORY"
+    }
+  ]
+}

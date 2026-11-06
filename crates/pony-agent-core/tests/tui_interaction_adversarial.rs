@@ -34,6 +34,7 @@ fn test_adversarial_super_long_payload_rendering() {
         tool_name: "bash".to_string(),
         description: huge_desc,
         command_or_path: Some(huge_cmd),
+        approval_path: None,
         timestamp_ms: 12345678,
     };
 

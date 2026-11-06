@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "157d32f1-865d-4fa7-b753-0987c8c44634",
+    "fresh_context": true
+  },
+  "executed_by": "157d32f1-865d-4fa7-b753-0987c8c44634",
+  "reviewed_commit": "25a98482",
+  "review_scope_note": "视角 A（安全 + 契约）R2 复审：对象 = git diff --cached（R2 修复，未提交）。工作树上 tui.rs 另有并行会话（thinking-bottom-gap）的未暂存编辑，仅造成行号位移（已核对其 hunk 不触及审批代码），行号锚点为 2026-11-06T23:31 工作树。",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/protocol.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs"
+  ],
+  "resolutions": [
+    {
+      "id": "B-A1",
+      "claim": "无 options.path 的审批把 callId 当路径 authorize_path ⇒ 必败 ⇒ approve 永不执行",
+      "result": "RESOLVED",
+      "evidence_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib, re\nr = pathlib.Path('crates/pony-agent-core/src')\ntui = (r/'bin/tui.rs').read_text()\ndisp = (r/'agent/dispatcher.rs').read_text()\nassert len(re.findall(r'control_plane\\.authorize_path\\(', tui)) == 1\nfn = tui[tui.index('pub fn apply_approval_decision'):]\nfn = fn[:fn.index('/// 契约 F-M')]\ni_guard = fn.index('if let Some(path) = plan.authorize.as_deref()')\ni_auth = fn.index('control_plane.authorize_path(')\ni_appr = fn.index('approve_control_request(')\nassert i_guard < i_auth < i_appr\nproj = tui[tui.index('pub fn permission_request_from_pending'):]\nproj = proj[:proj.index('timestamp_ms: value')]\nseg = proj[proj.index('approval_path: value'):]\nassert 'callId' not in seg and '.get(\"path\")' in seg\nplan = tui[tui.index('pub fn approval_plan'):]\nplan = plan[:plan.index('fn approval_snapshot_hint')]\ndeny = plan[plan.index('PermissionChoice::Deny =>'):]\nassert 'authorize: None' in deny\nassert '\"approvalKind\": \"approval\"' in disp[disp.index('fn approval_options_from_arguments'):][:700]\nprint('B-A1 RESOLVED: pathless Approval ⇒ approval_path=None ⇒ approval_plan.authorize=None ⇒ 跳过 authorize_path 直接 CAS')\nprint('  唯一 authorize_path 调用点受 Some 守卫，scope 字面量 \"read\"，Deny 恒不授权')\nPY",
+      "gate_evidence": [
+        "cargo test -p pony-agent-core --bin pony wave65 -> 5 passed; 0 failed (BIN_EXIT=0)",
+        "cargo test -p pony-agent-core --test approval_resume_e2e -> 4 passed; 0 failed (E2E_EXIT=0，冻结未改)",
+        "cargo test -p pony-agent-core --lib -> 1319 passed; 0 failed (LIB_EXIT=0，基线 1316+3)",
+        "cargo check -p pony-agent-core --bins -> CHECK_EXIT=0"
+      ]
+    },
+    {
+      "id": "ADVISORY-1-merge-order",
+      "claim": "合并顺序 Ask 优先（契约要求审批优先）",
+      "result": "RESOLVED：merged = approvals ++ asks；Ask 项仍并入同一快照，pending_panel_should_close 不会误关 Ask 面板；ask_resume_e2e 8 passed（含 1 ignored）。",
+      "evidence_cmd": "cd /home/dm/pony-agent && python3 -c \"t=open('crates/pony-agent-core/src/bin/tui.rs').read();s=t[t.index('fn sync_pending_control_request'):][:1400];assert s.index('merged.extend(approvals')<s.index('merged.extend(snapshot');assert 'list_pending_asks' in s;print('approval-first OK')\""
+    },
+    {
+      "id": "ADVISORY-3-cancel-kind-gate",
+      "claim": "cancel_approval_request 缺 kind 闸门（可经审批面取消 Ask）",
+      "result": "RESOLVED：先 request_kind==Approval（approval_kind_mismatch，不消费、版本不变），单测 cancel_approval_request_rejects_interaction_request 断言仍 Pending 且 version 未变。",
+      "evidence_cmd": "cd /home/dm/pony-agent && cargo test -p pony-agent-core --lib wave65_r2_approval_tests 2>&1 | tail -3",
+      "gate_evidence": [
+        "cargo test -p pony-agent-core --lib wave65_r2_approval_tests -> 2 passed; 0 failed (LIB1=0)"
+      ]
+    },
+    {
+      "id": "ADVISORY-2-display-vs-canonical",
+      "claim": "展示路径（原始 options.path）vs canonicalize 后授权路径不一致（符号链接/..）",
+      "result": "STILL_OPEN（不升级为 BLOCKING）：面板仍回显原始串，authorize_path 仍 canonicalize；已登记 backlog F-8。本轮不重复计为 BLOCKING。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 2158,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib\nr = pathlib.Path('crates/pony-agent-core/src')\nd = (r/'agent/dispatcher.rs').read_text()\nseg = d[d.index('fn approval_options_from_arguments'):]\nseg = seg[:seg.index('fn approval_prompt_from_arguments')]\nprompt = d[d.index('fn approval_prompt_from_arguments'):][:800]\nassert '\"path_authorization\"' in seg and '\"scope\": \"read\"' in seg\nassert 'decision_source' not in seg\nassert '需要读取工作区外路径' in prompt\ng = (r/'agent/governed_executor.rs').read_text()\nrule = g[g.index('RuleAction::Ask =>'):][:420]\nassert 'ApprovalRequired' in rule and 'json_arguments' not in rule\nargs = {'path': '/home/u/.ssh/id_rsa'}\nkind = 'path_authorization' if any(k in args for k in ('path','filePath','file_path')) else 'approval'\nassert kind == 'path_authorization'\nprint('CONFIRMED: approvalKind 只由模型 args 是否带 path 决定（不看 decision_source）')\nprint('  tool_rule_ask(Edit/Write) + path 参数 ⇒ approvalKind=path_authorization ⇒ 可恢复 ⇒ 面板谎称「读取工作区外路径」')\nprint('  ⇒ 批准落一条持久 read 授权，续轮被同一规则再拦 ⇒ F1 想防的「批准→续轮→再审批」仍可达（每次需用户点击）')\nPY",
+      "note": "R2 的 F1 判据（approvalKind）由「args 是否带 path」推导，而非 decision_source；C2 冻结形状即如此，属契约层缺口。影响：tool_rule_ask / external_requires_approval 且工具参数带 path 时被误标为 path_authorization ⇒ 面板文案谎称「需要读取工作区外路径」、批准落一条持久 read 授权、续轮必再审批（F1 声称防住的循环仍需用户点击即复现）。不构成越权（授权恒 read；approve 仅 CAS 消费，不产生写豁免），故 ADVISORY。建议 C2 增补 approvalKind 由 decision_source 决定，或面板如实展示 decision_source。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 1381,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib\nr = pathlib.Path('crates/pony-agent-core/src')\ncp = (r/'agent/control_plane/mod.rs').read_text()\nseg = cp[cp.index('pub(crate) fn approval_is_listable'):][:600]\nassert 'approvalKind' not in seg\nassert 'PendingControlRequestKind::Approval' in seg and 'expires_at_ms' in seg\ntc = (r/'agent/runtime/turn_control.rs').read_text()\ngate = tc[tc.index('pub(super) fn approval_is_path_authorization'):][:420]\nassert 'path_authorization' in gate\ntui = (r/'bin/tui.rs').read_text()\ns = tui[tui.index('fn sync_pending_control_request'):][:3000]\nassert 'list_pending_approvals' in s and 'items.first()' in s and 'approvalKind' not in s\nt = tui[tui.index('pub fn apply_approval_decision'):][:2000]\nassert 'approve_control_request' in t and 'cancel_approval_request' in t\nprint('CONFIRMED: 非路径审批被 turn_control 判 fail-fast，但 approval_is_listable 不按 kind 过滤')\nprint('  ⇒ 请求仍 Pending+未过期(TTL 60s) ⇒ TUI 每 500ms 轮询为重开审批面板 ⇒ 用户 y 消费请求并触发必然再审批的续轮')\nPY",
+      "note": "F1 收紧后两处判据不一致：suspension_is_unrecoverable 只放行 approvalKind==path_authorization，而 approval_is_listable 不按 kind 过滤。非路径审批被 fail-fast 后仍 Pending 且未过期（TTL 60s），TUI 500ms 轮询会为其重开面板；用户点 y 会消费请求并启动必然再审批的续轮 ⇒ 对已失败轮次呈现可操作面板，F1 的「防循环」只挡住自动路径。建议 C3 增补 approvalKind 过滤（或投影 isResumable 标志，TUI 对不可恢复项只提示不可操作）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8865,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib\ntui = pathlib.Path('crates/pony-agent-core/src/bin/tui.rs').read_text()\ns = tui[tui.index('pub fn apply_approval_decision'):][:2000]\ni = s.index('审批授权失败')\nassert 'return None;' in s[i:i+140]\nb = tui[tui.index(\"KeyCode::Char('y') | KeyCode::Char('Y') =>\"):][:1600]\nassert 'state.pending_request = None' in b and 'cancel_permission_approval' in b\ncp = pathlib.Path('crates/pony-agent-core/src/agent/control_plane/mod.rs').read_text()\nassert 'approval_is_listable' in cp\nprint('CONFIRMED: authorize_path 失败 ⇒ 面板关闭但请求仍 Pending/listable')\nprint('  ⇒ 下一次 500ms 轮询原样重开面板，直到 60s TTL（路径不存在/符号链接失效即可触发，路径由模型给）')\nPY",
+      "note": "authorize_path 失败（模型给不存在路径/符号链接失效 ⇒ canonicalize 必败）⇒ 面板关闭但请求仍 Pending/listable ⇒ 500ms 后原样重开，直到 60s TTL：这正是 F2 记的「用户永远点不掉（活锁）」在「不可授权」子类上的残留。F2 只过滤已过期请求。建议授权失败时显式 cancel 该请求（或本地抑制重开）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8851,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib\ntui = pathlib.Path('crates/pony-agent-core/src/bin/tui.rs').read_text()\na = tui.index('mod wave65_approval_unit_tests')\nb = tui.index('mod wave65_r2_approval_plan_tests')\ntests = tui[a:b]\nplan = tui[b:]\nassert tests.count('apply_approval_decision(') == 2\nassert 'pending_request = Some' not in tests\nassert 'approve_control_request(' not in tests and 'authorize_path(' not in tests\nassert plan.count('apply_approval_decision') == 0\nprint('CONFIRMED: 唯一 apply_approval_decision 测试只走「无句柄 ⇒ None」；authorize/approve 副作用零断言')\nprint('  ⇒ 删除 apply_approval_decision 的 authorize_path+approve_control_request 仍全绿（假绿残留 = backlog F-2）')\nPY",
+      "note": "假绿残留仍在（契约 C5 已如实登记为 F-2）：apply_approval_decision 的唯一单测只覆盖「无句柄 ⇒ None」，authorize=Some/None 与 prompt 由 approval_plan 纯函数覆盖，但接线副作用（authorize_path + approve_control_request 的实际调用）零断言 ⇒ 删除接线的两个副作用全部套件仍绿。B-A1 的修复本身未被回归测试保护（bin 内函数不可被集成测试导入，bin 单测无法构造 Pending Approval）。不阻断本波（Lead 已裁决登记），建议 F-2 前不删该接缝单测。"
+    }
+  ]
+}

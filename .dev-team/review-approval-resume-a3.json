@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "d6dc6e21-dee0-41ad-8bb4-bff53257f4e9",
+    "fresh_context": true
+  },
+  "executed_by": "d6dc6e21-dee0-41ad-8bb4-bff53257f4e9",
+  "reviewed_commit": "25a98482",
+  "review_scope_note": "wave-65 R3 终审（视角 A：安全 + 契约）。对象 = git diff --cached @ HEAD 25a98482（工作树未提交）。bin/tui.rs 仍混有并行会话 thinking-bottom-gap 的未暂存改动（不在审查范围），行号以工作树为准（2026-11-06T23:5x，HEAD 25a98482）。已核实该并行 hunk 未触及审批代码。",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/agent/governed_executor.rs",
+    ".dev-team/contract-matrix-approval-resume.md",
+    "docs/decisions/0077-approval-resume-host-panel-and-continuation.md"
+  ],
+  "resolutions": [
+    {
+      "id": "R3-F1-approvalKind-by-cause",
+      "claim": "上一轮 BLOCKING：approvalKind 由「实参是否带 path」派生，与审批成因脱钩 ⇒ tool_rule_ask / external_requires_approval 带 path 实参时被误标 path_authorization（可恢复 + 面板谎报 + authorize_path 必败）",
+      "result": "RESOLVED：approvalKind 与 prompt 的唯一派生点是 approval_kind_from_decision_source(decision_source)（dispatcher.rs:2165-2190、2205-2225）；唯一 literal 生产端 governed_executor.rs:282（路径门禁分支）；persist 处原样透传 ready.decision.decision_source（dispatcher.rs:1644/1708，评估在 hook 之后 dispatcher.rs:1370 ⇒ 成因与 final_arguments 同源）。非路径成因一律 approval 且不带 path 键；成因声称路径门禁却取不到 path ⇒ 降级 approval（fail-closed）。全仓 grep：无第二处按 args.path 派生 kind。",
+      "evidence_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib, re\nr = pathlib.Path('crates/pony-agent-core/src')\nd = (r/'agent/dispatcher.rs').read_text()\ng = (r/'agent/governed_executor.rs').read_text()\ntc = (r/'agent/runtime/turn_control.rs').read_text()\ncp = (r/'agent/control_plane/mod.rs').read_text()\ntr = (r/'agent/tool_runtime.rs').read_text()\nseg = d[d.index('fn approval_kind_from_decision_source'):]\nk = seg[:seg.index('fn approval_options_from_arguments')]\nassert 'PATH_PERMISSION_DECISION_SOURCE' in k and '\"path_authorization\"' in k\nostart = d.index('fn approval_options_from_arguments(')\noend = d.index('fn approval_prompt_from_arguments')\no = d[ostart:oend]\nassert 'decision_source: &str' in o[:200]\nassert 'approval_kind_from_decision_source(decision_source)' in o\nassert '\"path_authorization\", Some(path)' in o and '_ => json!' in o\nvals = [m.start() for m in re.finditer(r'\"approvalKind\": \"', d)]\nassert len(vals) == 2 and all(ostart < v < oend for v in vals), vals\nassert g.count('\"path_permission_requires_authorization\"') == 1\nassert '&ready.decision.decision_source' in d\nassert re.search(r'decision_source\\s*=(?!=)', d) is None\nassert tr.count('pub fn is_path_authorization_approval') == 1\nassert '&& request.is_path_authorization_approval()' in tc\nassert '&& request.is_path_authorization_approval()' in cp\nprint('PASS: approvalKind/approval_prompt 唯一派生点 = decision_source（唯一 literal 生产端 = governed_executor 路径门禁分支）；')\nprint('      persist_pending_request 原样透传 ready.decision.decision_source（dispatcher 内无写改）；两处消费方共用同一判据')\nPY",
+      "gate_evidence": [
+        "cargo check -p pony-agent-core --bins -> 0 (CHECK_EXIT=0)",
+        "cargo test -p pony-agent-core --lib -> 1323 passed; 0 failed (FULL_LIB_EXIT=0)",
+        "cargo test -p pony-agent-core --test approval_resume_e2e -> 4 passed; 0 failed (E2E_EXIT=0；冻结文件 git status 无改动 = sha256 未变)",
+        "cargo test -p pony-agent-core --bin pony wave65 -> 7 passed; 0 failed (BIN_EXIT=0)",
+        "cargo test -p pony-agent-core --lib wave65 -> 6 passed; 0 failed (LIB_EXIT=0)"
+      ]
+    },
+    {
+      "id": "R3-F2-same-predicate",
+      "claim": "runtime 判可恢复与 control_plane 判可列出必须同源，否则「面板显示但批不掉」/「可恢复但列表空」再次错配",
+      "result": "RESOLVED：新增 PendingControlRequest::is_path_authorization_approval()（tool_runtime.rs:238-248），turn_control.rs:102-104 与 control_plane/mod.rs:1385-1392 同源复用；approval_is_listable = Pending && now<=expires && path_authorization，TTL 边界与 can_consume 同号（now<=expires_at_ms）。",
+      "evidence_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib\ncp = pathlib.Path('crates/pony-agent-core/src/agent/control_plane/mod.rs').read_text()\ntc = pathlib.Path('crates/pony-agent-core/src/agent/runtime/turn_control.rs').read_text()\ntr = pathlib.Path('crates/pony-agent-core/src/agent/tool_runtime.rs').read_text()\nassert tr.count('pub fn is_path_authorization_approval') == 1\nfn = cp[cp.index('pub(crate) fn approval_is_listable'):][:400]\nassert 'is_path_authorization_approval()' in fn\nassert '&& request.is_path_authorization_approval()' in tc\nassert 'now_ms <= request.expires_at_ms' in fn\ncan = tr[tr.index('pub fn can_consume'):][:700]\nassert 'now_ms <= self.expires_at_ms' in can\nprint('PASS: 可恢复（turn_control）与可列出（approval_is_listable）共用 is_path_authorization_approval；TTL 判据与 can_consume 同号')\nPY\ncargo test -p pony-agent-core --lib wave65\ncargo test -p pony-agent-core --lib w1_approval_unrecoverable_tests",
+      "gate_evidence": [
+        "cargo test -p pony-agent-core --lib wave65 -> 6 passed; 0 failed (LIB_EXIT=0)",
+        "cargo test -p pony-agent-core --lib w1_approval_unrecoverable_tests -> 6 passed; 0 failed (TC_EXIT=0)",
+        "cargo test -p pony-agent-core --test approval_resume_e2e -> 4 passed; 0 failed (E2E_EXIT=0；冻结文件 git status 无改动 = sha256 未变)"
+      ]
+    },
+    {
+      "id": "SAFE-2-no-silent-failure",
+      "claim": "非路径审批不再可恢复/不可列 ⇒ 是否让本应可审批的操作变成静默失败",
+      "result": "RESOLVED（不静默）：非路径审批仍走既有 fail-fast 终态 build_approval_resume_unavailable_error()（错误码 approval_resume_unavailable + 原中文文案逐字未变，turn_control.rs:50-56/116-129），TUI 以 turn:failed 上屏并提示「调整权限/工具参数后重试」；行为等于 wave-65 之前基线（能力位默认 false 时同样 fail-fast），未新增静默面。审批面板只对路径授权类开启，因此不存在「面板可点但批不掉」。",
+      "evidence_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib\ntc = pathlib.Path('crates/pony-agent-core/src/agent/runtime/turn_control.rs').read_text()\nseg = tc[tc.index('pub(super) fn build_unrecoverable_suspension_error'):][:520]\nassert 'PendingControlRequestKind::Approval => build_approval_resume_unavailable_error()' in seg\nassert '该工具需要审批，但当前 TUI/运行时尚不支持' in tc\nassert 'suspension_is_unrecoverable(suspension, self.host_approval_resume)' in tc\nprint('PASS: 非路径审批（不可恢复且已从面板移除）仍走既有 approval_resume_unavailable 失败终态 —— 文案与错误码逐字未变，非静默')\nPY\ncargo test -p pony-agent-core --lib w1_approval_unrecoverable_tests",
+      "gate_evidence": [
+        "cargo test -p pony-agent-core --lib w1_approval_unrecoverable_tests -> 6 passed; 0 failed (TC_EXIT=0)",
+        "cargo test -p pony-agent-core --test approval_resume_e2e -> 4 passed; 0 failed (E2E_EXIT=0；冻结文件 git status 无改动 = sha256 未变)",
+        "cargo test -p pony-agent-core --test permission_fail_closed_contract -> 3 passed (PFC_EXIT=0)"
+      ]
+    },
+    {
+      "id": "R3-C3-contract-drift",
+      "claim": "契约 C3/C5/§4 与 ADR 0077 是否逐条对齐实现",
+      "result": "STILL_OPEN（ADVISORY，不阻断）：见 findings[0]。C1/C2 已按 R3 原地改写并与实现一致；C3 过滤清单、C5 单元判据、§4 变更流水缺 R3 条目，ADR 0077 缺「非路径审批不进入宿主列表」。",
+      "evidence_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib\ncm = pathlib.Path('.dev-team/contract-matrix-approval-resume.md').read_text()\nc3 = cm[cm.index('**C3'):cm.index('**C4')]\nc5 = cm[cm.index('**C5'):cm.index('## 3.')]\nchg = cm[cm.index('## 4.'):]\ncp = pathlib.Path('crates/pony-agent-core/src/agent/control_plane/mod.rs').read_text()\nfn = cp[cp.index('pub(crate) fn approval_is_listable'):][:400]\nassert 'is_path_authorization_approval()' in fn\nassert 'path_authorization' not in c3 and '路径授权类' not in c3\nassert 'path_authorization' not in c5 and '非路径' not in c5\nassert 'R3' not in chg\nadr = pathlib.Path('docs/decisions/0077-approval-resume-host-panel-and-continuation.md').read_text()\nassert 'list_pending_approvals' in adr and '非路径' in adr and '不进入宿主列表' not in adr\nprint('CONFIRMED: 实现 approval_is_listable 含 is_path_authorization_approval() 过滤，')\nprint('  但契约 C3 过滤清单 / C5 单元判据均未登记该条，§4 变更流水无 R3 行；ADR 0077 只写「非路径审批不进入可恢复挂起」')\nprint('  ⇒ 照冻结契约实现的宿主仍会为不可恢复请求开面板（R3 修掉的 F2 在契约层仍成立）')\nPY"
+    },
+    {
+      "id": "R3-no-regression-toolruntime",
+      "claim": "tool_runtime 新增方法对既有 PermissionVerdict / Ask 路径是否有影响",
+      "result": "RESOLVED：纯增量 inherent 方法，无新状态、不改序列化（PendingControlRequest 字段不变）；Interaction 分支只读 run_id，不调用新判据；list_pending_asks / ask_resume_e2e / permission_fail_closed_contract 全绿。",
+      "evidence_cmd": "cd /home/dm/pony-agent && python3 -c \"t=open('crates/pony-agent-core/src/agent/tool_runtime.rs').read();s=t[t.index('pub fn is_path_authorization_approval'):][:520];assert 'self.request_kind == PendingControlRequestKind::Approval' in s and '.options' in s and 'approvalKind' in s;g=open('crates/pony-agent-core/src/agent/runtime/turn_control.rs').read();assert 'PendingControlRequestKind::Interaction => request.run_id.is_none()' in g;print('PASS: 新判据仅 Approval 分支生效；Ask 分支仍按 run_id 判定（逐字不变）')\"",
+      "gate_evidence": [
+        "cargo test -p pony-agent-core --test ask_resume_e2e -> 8 passed; 1 ignored (ASK_E2E_EXIT=0)",
+        "cargo test -p pony-agent-core --test permission_fail_closed_contract -> 3 passed (PFC_EXIT=0)"
+      ]
+    },
+    {
+      "id": "R3-adr-numbering",
+      "claim": "ADR 编号是否避开并行会话（0076）并进入索引",
+      "result": "RESOLVED：新增 docs/decisions/0077-approval-resume-host-panel-and-continuation.md 已暂存，docs/decisions/README.md 索引行（0077）已暂存；0075/0076 属并行会话未暂存，未触碰。",
+      "evidence_cmd": "cd /home/dm/pony-agent && git diff --cached --stat -- docs/decisions/ && grep -n '0077' docs/decisions/README.md"
+    }
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-approval-resume.md",
+      "line": 58,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 - <<'PY'\nimport pathlib\ncm = pathlib.Path('.dev-team/contract-matrix-approval-resume.md').read_text()\nc3 = cm[cm.index('**C3'):cm.index('**C4')]\nc5 = cm[cm.index('**C5'):cm.index('## 3.')]\nchg = cm[cm.index('## 4.'):]\ncp = pathlib.Path('crates/pony-agent-core/src/agent/control_plane/mod.rs').read_text()\nfn = cp[cp.index('pub(crate) fn approval_is_listable'):][:400]\nassert 'is_path_authorization_approval()' in fn\nassert 'path_authorization' not in c3 and '路径授权类' not in c3\nassert 'path_authorization' not in c5 and '非路径' not in c5\nassert 'R3' not in chg\nadr = pathlib.Path('docs/decisions/0077-approval-resume-host-panel-and-continuation.md').read_text()\nassert 'list_pending_approvals' in adr and '非路径' in adr and '不进入宿主列表' not in adr\nprint('CONFIRMED: 实现 approval_is_listable 含 is_path_authorization_approval() 过滤，')\nprint('  但契约 C3 过滤清单 / C5 单元判据均未登记该条，§4 变更流水无 R3 行；ADR 0077 只写「非路径审批不进入可恢复挂起」')\nprint('  ⇒ 照冻结契约实现的宿主仍会为不可恢复请求开面板（R3 修掉的 F2 在契约层仍成立）')\nPY",
+      "note": "实现比冻结契约更严（fail-closed），无运行期风险，故不阻断本波；但契约是本波验收真值，缺口会让后续宿主照 C3 实现时重现 F2（为不可恢复审批开面板）。建议 Lead 原地补三处（一处一句，不需改代码）：①C3 过滤清单加「**且为路径授权类**（PendingControlRequest::is_path_authorization_approval，与 runtime 同源；非路径审批 fail-fast 后不进入面板）」；②C5 单测判据加「非路径授权类 approval ⇒ false（含 options 缺失/approvalKind 非字符串）」；③§4 追加一行「Lead R3：approvalKind 改由 decision_source 派生；runtime/control_plane 共用 is_path_authorization_approval；新增 APPROVAL_STALE_NOTICE 审批专属失效文案」；ADR 0077「决策」段同步一句「非路径审批不进入宿主待决列表」。另：dispatcher.rs:2222 普通审批 prompt 的「请确认后重试」在非路径成因上无对应确认面（该 prompt 目前不会上屏），建议随 C3 补齐时改述为「当前运行时不支持在面板内批准该类审批」以免日后误用。"
+    }
+  ]
+}

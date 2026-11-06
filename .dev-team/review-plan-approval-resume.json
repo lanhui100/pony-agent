@@ -1,0 +1,81 @@
+{
+  "verdict": "FAIL",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "de40f06d-c5d8-4dc9-bac3-689c8d2d6cbb",
+    "fresh_context": true
+  },
+  "executed_by": "de40f06d-c5d8-4dc9-bac3-689c8d2d6cbb",
+  "reviewed_commit": "25a98482ce1d",
+  "reviewed_tree_note": "HEAD 25a98482 + 工作树未提交的 wave-65 实现（control_plane/mod.rs、dispatcher.rs、bin/tui.rs 已 staged/修改）；契约矩阵 frozen 于 ebf50d64；并行会话 thinking-bottom-gap 区域不计入本波判定",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    ".dev-team/contract-matrix-approval-resume.md",
+    "docs/decisions/0076-approval-resume-host-panel-and-continuation.md",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8786,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1461,1476p;8779,8792p' crates/pony-agent-core/src/bin/tui.rs   # permission_request_from_pending 在 options.path 缺失时把 command_or_path 回退成 callId（tui.rs:1470-1475）；apply_approval_decision 却对 command_or_path **无条件** authorize_path(path,\"read\")（tui.rs:8786），authorize_path 内部 canonicalize 对 \"call-…\"/\"control-…\" 必失败（control_plane/path_authorization_commands.rs:20-24）⇒ 报错 return None（tui.rs:8787-8789），approve_control_request（tui.rs:8791）永不执行。C4 原文是「options.path 存在时才 authorize_path」；无 path 的审批有 governed_executor.rs:141（tool_rule_ask）、:302（external_requires_approval）、dispatcher.rs:198（写/执行保守抬升）三个来源，全部永远批不掉，只能拒绝。请求留在 Pending（版本不变）⇒ 500ms 轮询（tui.rs:8660）把面板重新弹出 ⇒ 批准-报错-重弹活锁。T1/T2 在测试里直接调 control_plane（approval_resume_e2e.rs:713-724），绕过该接缝，4/4 绿不能证伪。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 1409,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '85p' crates/pony-agent-core/src/agent/budget.rs && sed -n '1698p' crates/pony-agent-core/src/agent/dispatcher.rs && sed -n '219,222p' crates/pony-agent-core/src/agent/tool_runtime.rs && sed -n '1407,1412p' crates/pony-agent-core/src/agent/control_plane/mod.rs && grep -nE 'expire_asks[[:space:]]*[(]' crates/pony-agent-core/src/bin/tui.rs ; echo \"call_sites_exit=$?\"   # TTL=60_000ms（budget.rs:85 → dispatcher.rs:1698 expires_at_ms）；can_consume 对 Approval 做 now_ms<=expires_at_ms（tool_runtime.rs:219-221）；list_pending_approvals 只过滤 state==Pending、不看过期（control_plane/mod.rs:1409），而 TUI 已不再做过期对账（tui.rs:8615/8648 两处注释明写 expire_asks 退化为 GC，全文件 **无任何调用点**，call_sites_exit=1）。60s 后：y/Enter ⇒ approve Err（dispatcher.rs:1769-1781 \"cannot be consumed\"），n/Esc ⇒ cancel 同样 Err；两条分支都 report_control_request_error → pending_request=None（tui.rs:9819/9850/9869）+ cancel_permission_approval，下一轮 500ms 同步又用仍在 Pending 的同一请求重开面板（tui.rs:8660-8697）。PermissionApproval 分支吞掉除 y/n/Esc/Enter/Tab 外的所有按键（tui.rs:9801-9875）⇒ 该会话输入被锁死，挂起轮既无 turn:failed 也无续轮，永不收口。契约 C3/C4 与 ADR 0076 对 expires_at_ms 无任何结论（C3 甚至把它投影给宿主），T1~T4 全不覆盖；「整轮不再判死」在这里退化成「整轮静默卡死」。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-approval-resume.md",
+      "line": 57,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '54,61p' .dev-team/contract-matrix-approval-resume.md && sed -n '2156,2179p' crates/pony-agent-core/src/agent/dispatcher.rs   # C4 只规定「options.path 存在时 authorize_path → approve」，没有 else 分支结论。无 path 的审批只写 {\"approvalKind\":\"approval\",\"tool\":…}（dispatcher.rs:2166-2169），来源包括 tool_rule_ask（governed_executor.rs:141）、external_requires_approval（governed_executor.rs:302）、写/执行内建工具的保守抬升（dispatcher.rs:198）——即最常见的审批来源。即使修掉 F1 的无条件 authorize，批准也只是消费请求、不写任何授权；宿主续轮让模型重试同一工具 ⇒ 再次 ApprovalRequired ⇒ 批准→续轮→再审批无限循环（每轮烧一次 provider 调用、每轮新增一条 CAS 请求）。与 INV-1「批准后授权 read」的闭环承诺不符，C4 必须明确无 path 审批的收口（拒绝 / 工具级授权 / 明确告知不可批准），否则契约只覆盖了 Read 一种输入。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 12040,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && cargo test -p pony-agent-core --bin pony -- approval --list 2>&1 | tail -4   # 实测仅 2 例：wave65_approval_unit_tests::apply_approval_decision_without_pending_handle_returns_none（tui.rs:12040，只覆盖无句柄返回 None 的负分支）与 approval_continuation_prompt_is_non_empty_and_distinct（tui.rs:12013，纯常量断言）。C4 要求「决策逻辑抽成可测纯接缝…由 tui.rs 单测覆盖（真实 control plane + 内存 store）」，正向分支（authorize_path → approve_control_request → 返回续轮文案）零测试；把 tui.rs:8783-8795 整段删成恒 return None，T1~T4 与这两个单测仍全绿 ⇒ 主用户路径不可证伪（F1 正是靠这个缺口躲过 4/4 绿）。假绿点：T1/T2/T3 直接驱动 control_plane 的宿主命令面，T4 只验能力位关闭，没有一条经过 apply_approval_decision / UiEvent::ApprovalResumeTurn。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8662,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '8656,8665p;8691,8697p' crates/pony-agent-core/src/bin/tui.rs   # merged 先 extend Ask 快照（8660-8661）、再 extend approvals（8662），随后取 first()（8696）⇒ Ask 优先。C4 冻结原文要求「Ask 快照与 list_pending_approvals 合并（审批优先展示）」，实现与契约字面相反。后果：上一轮遗留 Pending Ask 与本轮审批并存时，审批面板被压到 Ask 之后，而 Approval 受 60s TTL（见上方 BLOCKING 证据）⇒ 审批可能在展示前就过期，随后落入同一「面板重弹」循环。既有测试（tui.rs:11869/11888 系列）只覆盖单条请求，无法发现顺序问题。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+      "line": 99,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '666,684p' crates/pony-agent-core/src/agent/runtime/stream_support.rs && sed -n '96,101p' crates/pony-agent-core/src/agent/runtime/turn_control.rs && sed -n '1407,1412p' crates/pony-agent-core/src/agent/control_plane/mod.rs   # 可恢复判定只看 host_approval_resume + session_id.is_some()（turn_control.rs:99），而挂起请求由 match_pending_control_request 的兜底从**全局** store 取「最新 Pending Approval/Interaction」（stream_support.rs:673-683），不校验 session/turn；面板却按当前 session 过滤（control_plane/mod.rs:1409）。多会话或跨轮遗留审批会让 B 会话的轮次被判为可恢复，但 list_pending_approvals(B) 一条也列不出 ⇒ turn:suspended 之后静默死等（不 fail-fast、无面板、无终态）。契约对「无 session 身份」有结论（C1 保持不可恢复），但对「跨 session/跨 turn 误配」和「同一 turn 多条审批」无结论：C4 只有单句柄并取首项（tui.rs:8696），第二个请求跨续轮残留、顺序与去重未定义。建议 C1/C3 增加 session+turn 严格匹配与多请求队列/去重的明确裁决。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8779,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '8779,8792p' crates/pony-agent-core/src/bin/tui.rs && sed -n '2145,2158p' crates/pony-agent-core/src/agent/session/store.rs   # AllowOnce 与 AllowSession 走同一分支、同一 authorize_path（tui.rs:8779-8791，无任何区分），授权立即 save_to_backend 持久化（store.rs:2147-2158）⇒「单次」批准实际是**跨会话、跨重启**的永久 read 授权，批准后无 revoke、无本轮结束回滚。INV-1/C4 明确点名 store_metadata.path_authorizations.v1（属既定 ADR 0029 设计，故判 ADVISORY），但契约未写「永久/全局」语义，与三档 UI（单次/会话）自相矛盾；应在 C4 补一句「批准=持久 read 授权（重启仍有效）」或把 AllowOnce 改成只对本轮生效。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 1717,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1717,1745p' crates/pony-agent-core/src/agent/dispatcher.rs && sed -n '11236,11240p' crates/pony-agent-core/src/bin/tui.rs   # Approval 不持久化：dispatcher.rs:1717-1745 只为 Interaction 写 ask_store（ADR 0074 原文 \"Approvals are untouched by this seam\"），turn:suspended 也不落 TurnEvent（既定事实）。TUI 重启后无待决请求可列、无面板、无 turn:failed，挂起轮的 graph run 永久悬挂；审批续轮是全新 turn id（tui.rs:11236），只有 Ask 有 graph_resume_ask。这是既有「Approval 无持久化」局限的自然延伸（旧行为 fail-fast 至少留下可见失败，新行为留下静默孤儿），契约/ADR 均未给结论 ⇒ ADVISORY：需补「重启即失效，请重发」的结论或把 Approval 也接入 ask_store；否则 C1「请求保持 Pending」在进程内为真、跨进程为假。"
+    }
+  ]
+}

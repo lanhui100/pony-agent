@@ -845,7 +845,7 @@ impl HostControlPlane {
 /// Fail-closed stale-version gate used by every Ask mutation. The pending request's version is
 /// the CAS truth; a caller presenting any other version cannot be the version the binding was
 /// created with.
-fn require_current_version(pending: &crate::agent::tool_runtime::PendingControlRequest, expected_version: u64) -> Result<(), String> {
+pub(super) fn require_current_version(pending: &crate::agent::tool_runtime::PendingControlRequest, expected_version: u64) -> Result<(), String> {
     if pending.version != expected_version {
         return Err(format!(
             "Ask `{}` expected version {expected_version} but current version is {}; stale mutation rejected.",

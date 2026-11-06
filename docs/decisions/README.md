@@ -92,6 +92,7 @@
 - [0067 进程外插件宿主协议 v1 与 hooks 沙箱加固（T3）](0067-plugin-host-protocol-and-hooks-sandbox.md)
 - [0068 五份契约版本化、conformance kit 与扩展点归属表（T4）](0068-contract-versioning-and-conformance-kit.md)
 - [0069 初始化页品牌标走终端图形协议（sixel/kitty/iTerm2），字符画降级为回退](proposed/0069-tui-splash-image-protocol.md)
+- [0077 审批类控制请求可恢复：宿主面板 + 批准后授权并续轮](0077-approval-resume-host-panel-and-continuation.md)
 
 ### 已接替
 

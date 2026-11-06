@@ -83,9 +83,12 @@ pub(super) fn suspension_error_code(message: &str) -> &str {
 ///
 /// - `None`：治理路径已产出 `control_outcome_pending`，但匹配不到待处理请求（call_id 丢失/被消费）；
 /// - `Some(Approval)`：**wave-65 C1** 起按运行时能力位判定 —— 宿主具备「审批挂起可恢复」
-///   （`host_approval_resume == true`）**且**该请求带会话身份（`session_id.is_some()`）时为
-///   **可恢复**（宿主可列出审批 → 批准/拒绝 → 续轮）；否则保持既有不可恢复语义
-///   （见 [`APPROVAL_RESUME_UNAVAILABLE_CODE`]）；
+///   （`host_approval_resume == true`）**且**该请求带会话身份（`session_id.is_some()`）**且**
+///   属于**路径授权类**（`PendingControlRequest::is_path_authorization_approval`，R2 收紧、
+///   R3 与 control plane 同源复用）时为**可恢复**（宿主可列出审批 → 批准/拒绝 → 续轮）；
+///   其余审批形态（`tool_rule_ask` / `external_requires_approval` / 保守抬升）保持既有不可恢复语义
+///   （见 [`APPROVAL_RESUME_UNAVAILABLE_CODE`]）—— 它们被消费后不产生任何豁免，续轮必再审批，
+///   放开只会制造「批准 → 续轮 → 再审批」死循环；真正的恢复需要 dispatcher 级豁免（backlog F-1）。
 /// - `Some(Interaction)`：Ask 可经宿主应答恢复，保持 suspended —— **除非**该请求没有 run 身份
 ///   （见 [`ASK_RESUME_UNAVAILABLE_CODE`]）：没有 run 就没有 ask-wait 可绑定，作答后必然死等。
 pub(super) fn suspension_is_unrecoverable(
@@ -96,7 +99,9 @@ pub(super) fn suspension_is_unrecoverable(
         None => true,
         Some(request) => match request.request_kind {
             PendingControlRequestKind::Approval => {
-                !(host_approval_resume && request.session_id.is_some())
+                !(host_approval_resume
+                    && request.session_id.is_some()
+                    && request.is_path_authorization_approval())
             }
             PendingControlRequestKind::Interaction => request.run_id.is_none(),
         },
@@ -553,9 +558,27 @@ mod w1_approval_unrecoverable_tests {
         request_with_session(kind, Some("sess-w1"))
     }
 
+    /// wave-65 R2（F1）：默认夹具 = **路径授权类**审批（唯一可恢复形态）。
     fn request_with_session(
         kind: PendingControlRequestKind,
         session_id: Option<&str>,
+    ) -> PendingControlRequest {
+        request_with_options(kind, session_id, Some(path_authorization_options()))
+    }
+
+    fn path_authorization_options() -> serde_json::Value {
+        serde_json::json!({
+            "approvalKind": "path_authorization",
+            "tool": "Read",
+            "path": "/tmp/outside/probe.txt",
+            "scope": "read",
+        })
+    }
+
+    fn request_with_options(
+        kind: PendingControlRequestKind,
+        session_id: Option<&str>,
+        options: Option<serde_json::Value>,
     ) -> PendingControlRequest {
         PendingControlRequest {
             request_id: "req-w1".to_string(),
@@ -573,7 +596,7 @@ mod w1_approval_unrecoverable_tests {
             expires_at_ms: u64::MAX,
             state: PendingControlRequestState::Pending,
             prompt: Some("approve?".to_string()),
-            options: None,
+            options,
         }
     }
 
@@ -603,8 +626,8 @@ mod w1_approval_unrecoverable_tests {
         ));
     }
 
-    /// wave-65 C1：能力位开启 **且** 请求带会话身份 ⇒ 可恢复（宿主可列出/批准/拒绝后由
-    /// 续轮重放该工具调用）。
+    /// wave-65 C1 + R2（F1）：能力位开启 **且** 请求带会话身份 **且** 是路径授权类审批 ⇒ 可恢复
+    /// （宿主可列出/批准/拒绝后由续轮重放该工具调用）。
     #[test]
     fn approval_suspension_recoverable_when_capability_enabled_with_session_identity() {
         assert!(!suspension_is_unrecoverable(
@@ -614,6 +637,38 @@ mod w1_approval_unrecoverable_tests {
             },
             true
         ));
+    }
+
+    /// wave-65 R2（F1，BLOCKING）：能力位开启但审批**不是路径授权类** ⇒ 仍必须 fail-fast。
+    ///
+    /// 这类审批（`tool_rule_ask` / `external_requires_approval` / 写执行抬升）被消费后不产生任何
+    /// 豁免，续轮必再审批；若放进可恢复分支就成了「批准 → 续轮 → 再审批」死循环。
+    #[test]
+    fn approval_suspension_unrecoverable_for_non_path_authorization_when_capability_enabled() {
+        let non_path_forms = [
+            // 非路径审批（dispatcher 在无 path 时写 `approvalKind:"approval"`）。
+            Some(serde_json::json!({"approvalKind": "approval", "tool": "Bash"})),
+            // 旧宿主/历史请求没有 options ⇒ 不能假定它是路径授权类（fail-closed）。
+            None,
+            // 形状不对（approvalKind 不是字符串）同样不能放过。
+            Some(serde_json::json!({"approvalKind": 42})),
+        ];
+        for options in non_path_forms {
+            assert!(
+                suspension_is_unrecoverable(
+                    &ToolTurnSuspension {
+                        pending_request: Some(request_with_options(
+                            PendingControlRequestKind::Approval,
+                            Some("sess-w1"),
+                            options.clone(),
+                        )),
+                        bound_run_id: None,
+                    },
+                    true
+                ),
+                "非路径授权类审批（options = {options:?}）不得进入可恢复挂起"
+            );
+        }
     }
 
     /// wave-65 C1：能力位开启但**无会话身份** ⇒ 无法作用域化列出/CAS，仍判不可恢复（fail-closed）。

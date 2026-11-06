@@ -1,0 +1,110 @@
+{
+  "verdict": "FAIL",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "b28ffed3-ea26-4897-9692-4a2ef847cf0b",
+    "fresh_context": true
+  },
+  "executed_by": "b28ffed3-ea26-4897-9692-4a2ef847cf0b",
+  "reviewed_commit": "25a98482",
+  "reviewed_tree_note": "Gate-1 复核：契约矩阵 frozen（含 R2 段落）+ ADR 0076 + staged 的 R2 实现（tui.rs / control_plane/mod.rs / turn_control.rs / dispatcher.rs）；并行会话 thinking-bottom-gap 的 unstaged 区域不计入",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    ".dev-team/contract-matrix-approval-resume.md",
+    "docs/decisions/0076-approval-resume-host-panel-and-continuation.md",
+    "docs/decisions/README.md",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/protocol.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    ".dev-team/backlog-approval-resume-followups.md"
+  ],
+  "r2_blocking_recheck": [
+    {
+      "round1_blocking": "同一 authorize_path 无条件调用（方案层）",
+      "status": "已消解",
+      "evidence": "契约 C4 第 52-60 行改写为「approval_path 为 Some 才 authorize_path，None 跳过授权直接 CAS」，与 tui.rs:8783-8799/8837-8842 逐条对应；protocol.rs:1502-1508 只取 options.path。"
+    },
+    {
+      "round1_blocking": "control_plane 列表不过滤 TTL（面板 500ms 重弹/输入锁死）",
+      "status": "已消解",
+      "evidence": "契约 C3 第 39-44 行写入 now_ms<=expires_at_ms 并抽成 approval_is_listable 纯函数；control_plane/mod.rs:1381-1391 实现与 tool_runtime.rs:219-222 判据同源；单测 :10469-10537。"
+    },
+    {
+      "round1_blocking": "契约 C4 对无 path 审批缺 else 结论",
+      "status": "已消解（但 else 的判据选错 → findings[0]）",
+      "evidence": "C4 第 57-60 行已补 else；C1 第 37-44 行补 R2 裁决。else 分支本身正确，问题在上游如何判定「是否路径授权类」。"
+    },
+    {
+      "round1_blocking": "bin/tui.rs:12040 验收假绿",
+      "status": "指定反例已关闭，覆盖缺口仍在",
+      "evidence": "bin 单测现直接调用 apply_approval_decision（tui.rs:12094-12110），删函数即编译失败；但调用点 tui.rs:9861/9892/9915 无测试经过 ⇒ 覆盖缺口而非假绿，见 findings[1] 与 F-2。"
+    }
+  ],
+  "plan_consistency_check": [
+    {
+      "contract_item": "C1 能力位 + 单字面构造点 + 默认 false + TUI 唯一消费点",
+      "status": "CONSISTENT",
+      "evidence": "tui.rs:4750-4756 唯一 host_approval_resume(true)；AgentRuntime 默认 false 未改；src-tauri/** 未改（INV-2）。"
+    },
+    {
+      "contract_item": "C2 ApprovalRequired 写结构化 options/prompt（Ask 路径不变）",
+      "status": "CONSISTENT（但派生口径错，见 findings[0]）",
+      "evidence": "dispatcher.rs:1698-1712 options 按 verdict 分派；:2152-2178 三个 helper；ask_options_from_arguments 未改。"
+    },
+    {
+      "contract_item": "C3 列表投影 11 字段 + 无 nonce + 空白 scope fail-closed + cancel kind 闸门",
+      "status": "CONSISTENT",
+      "evidence": "control_plane/mod.rs:1357-1374 投影无 nonce；:1411-1434；:1451-1457。"
+    },
+    {
+      "contract_item": "C4 审批优先展示 / 唯一决策接缝 / 拒绝不授权 / 续轮常量文案不产生用户气泡",
+      "status": "CONSISTENT",
+      "evidence": "tui.rs:8666-8674 审批先 extend；:8824-8858 唯一接缝；:9896/9927/9946 统一投递事件；:11279-11362 续轮线程不调 add_user_message。"
+    },
+    {
+      "contract_item": "C5 R2 增补 4 项单元判据",
+      "status": "CONSISTENT",
+      "evidence": "tui.rs:12114-12186（approval_plan 四分支）、:12094（无句柄 None）、control_plane/mod.rs:10469-10537（approval_is_listable 五态）、:10540-10576（Interaction kind 闸门）；实测 --bin pony 19 passed、--lib 1319 passed、approval_resume_e2e 4 passed。"
+    },
+    {
+      "contract_item": "§3 可观测性收口（audit-diff --base ebf50d64，WARN 逐条解释）",
+      "status": "SATISFIED",
+      "evidence": "实测 bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base ebf50d64 → [OK] 无越界实现、收口点完整（扫描 24 文件/3219 行新增），Exit 0。"
+    }
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-approval-resume.md",
+      "line": 48,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 - <<'EOF'\nimport pathlib,sys\nd=pathlib.Path('crates/pony-agent-core/src/agent/dispatcher.rs').read_text()\ng=pathlib.Path('crates/pony-agent-core/src/agent/governed_executor.rs').read_text()\nt=pathlib.Path('crates/pony-agent-core/src/agent/runtime/turn_control.rs').read_text()\nc={'A options 只按 verdict 分派(不看 decision_source)':'PermissionVerdict::ApprovalRequired => approval_options_from_arguments(' in d,\n   'B approvalKind 由实参里有无 path/filePath/file_path 决定':'for key in [\"path\", \"filePath\", \"file_path\"]' in d and '\"approvalKind\": \"path_authorization\"' in d,\n   'C 用户规则 Ask 同源产出 ApprovalRequired':'decision_source: \"tool_rule_ask\"' in g,\n   'D 外部工具 requires_approval 同源':'decision_source: \"external_requires_approval\"' in g,\n   'E C1 只认 approvalKind 字符串 => 上述两类被判可恢复':'kind.trim() == \"path_authorization\"' in t}\n[print(('OK  ' if v else 'MISS'),k) for k,v in c.items()]\nsys.exit(0 if all(c.values()) else 1)\nEOF\n# 方案层结论：契约 C2（第 46-49 行）只冻结了 options 形状，没有规定 approvalKind 必须由审批**成因**派生；\n# 实现按「PermissionVerdict 是否 ApprovalRequired + 实参里有没有 path 键」派生（dispatcher.rs:1705/2152-2166），\n# 于是 tool_rule_ask（governed_executor.rs:141-143）与 external_requires_approval（governed_executor.rs:298-304）\n# 只要实参带 path 就被标成 path_authorization ⇒ C1（第 33-44 行）宣称的「非路径审批保持 fail-fast、消除批准→续轮→再审批循环」\n# 在这两类输入上不成立；且宿主投影不含 decisionSource（control_plane/mod.rs:1357-1374），宿主侧无法自纠。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-approval-resume.md",
+      "line": 92,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rl 'path = \"../src/bin/tui.rs\"' crates/pony-agent-core/tests/ | wc -l ; grep -n 'run_turn_until_approval_suspension\\|fn pending_approvals\\|list_authorizations' crates/pony-agent-core/tests/approval_resume_e2e.rs | head -5   # 32 个集成测试文件用 bin-as-module（#[path]）把 src/bin/tui.rs 编进测试进程，`apply_approval_decision`/`permission_request_from_pending` 均可被集成测试导入 ⇒ C5:92-95 与 backlog F-2 的登记前提「bin 内函数无法被集成测试导入」不成立。可行的正向 e2e：复用 approval_resume_e2e.rs 的 run_turn_until_approval_suspension(:540)+pending_approvals(:475) 造出真实 Pending Approval ⇒ 构造 TuiState(pending_request+permission_state) ⇒ 调 apply_approval_decision(AllowOnce) ⇒ 断言 list_authorizations() 含 canonical path、list_pending_approvals 变空、返回值为批准常量文案（现有公共 API 即可，无需新框架）。"
+    },
+    {
+      "file": "docs/decisions/0076-approval-resume-host-panel-and-continuation.md",
+      "line": 3,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && ls docs/decisions/0076* ; grep -n '0076' docs/decisions/README.md   # 编号冲突：本 ADR 与并行会话的 docs/decisions/0076-tui-thinking-message-and-chat-bottom-gap.md 同为 0076；且 docs/decisions/README.md 只登记了 thinking 那篇（第 89 行），本篇未入索引 ⇒ 合入前须重编号（0077）并同步 README 索引，否则 ADR 唯一编号契约破裂。"
+    },
+    {
+      "file": "docs/decisions/0076-approval-resume-host-panel-and-continuation.md",
+      "line": 35,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '33,37p' docs/decisions/0076-approval-resume-host-panel-and-continuation.md && sed -n '2152,2166p' crates/pony-agent-core/src/agent/dispatcher.rs   # ADR 决策段断言「非路径审批（用户规则 Ask、外部工具需审批、写执行抬升）不进入可恢复挂起」，但 dispatcher 的 approvalKind 只看实参有无 path 键 ⇒ 这三类里的前两类在实参带 path 时会被标成 path_authorization 并进入可恢复挂起，ADR 的结论与实现不符（与 findings[0] 同根因，修 C1/C2 时须同步改写该段）。"
+    }
+  ]
+}

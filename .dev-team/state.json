@@ -1528,6 +1528,51 @@
         "67a967d5",
         "e0f699fa"
       ]
+    },
+    {
+      "wave": 65,
+      "name": "approval-resume",
+      "theme": "审批类控制请求可恢复（TUI 宿主面板 + 批准后授权续轮）",
+      "tier": "B",
+      "tier_basis": "跨 runtime/dispatcher/control_plane/tui 四模块；安全相邻但权限判定逐字未改；无 schema 迁移/序列化编号变化",
+      "baseline_commit": "ebf50d64",
+      "protocol_commit": "6271960d",
+      "red_commit": "25a98482",
+      "status": "green-r3",
+      "note": "wave 65 号已被并行会话 ask-persistence 占用，本条目以 name=approval-resume 区分",
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4",
+        "task-5",
+        "task-6"
+      ],
+      "branches": {
+        "approval-resume": {
+          "owner": "lead",
+          "status": "in_progress",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/runtime",
+            "crates/pony-agent-core/src/agent/control_plane",
+            "crates/pony-agent-core/src/agent/dispatcher.rs",
+            "crates/pony-agent-core/src/agent/tool_runtime.rs",
+            "crates/pony-agent-core/src/bin/tui.rs",
+            "crates/pony-agent-core/src/bin/tui/protocol.rs",
+            "crates/pony-agent-core/tests/approval_resume_e2e.rs"
+          ]
+        }
+      },
+      "gates": {
+        "red_phase": "1 passed(T4) / 3 failed(T1~T3 停空桩) Exit 101",
+        "nfr_schema": "dev-nfr-lint.py EXIT 0",
+        "audit_diff": "audit-diff.sh --base ebf50d64 EXIT 0",
+        "observability": "check-declaration.sh 基线即 FAIL(tracing T4 预存)，本波无退化",
+        "round1_reviews": "4 路全 FAIL（含 3 类真实缺陷）",
+        "round2_reviews": "A/B PASS；L3-P+plan FAIL(1 新 BLOCKING: approvalKind 成因脱钩)",
+        "round3_fix": "R3 已修 approvalKind→decision_source、列表只列路径授权类、审批专属失效文案"
+      },
+      "parallel_session_note": "同仓库并行会话（thinking-bottom-gap / tui-terminal-restore / ask-persistence）持有 bin/tui.rs、docs/decisions/README.md、tests/tui_terminal_restore.rs 等未提交改动；本波以 hunk 定向暂存，未触碰其写域"
     }
   ],
   "counters": {

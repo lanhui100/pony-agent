@@ -559,6 +559,13 @@ pub enum UiEvent {
     /// `run_id` = 刚被 `graph_resume_ask` 恢复为可续的 graph run。续轮只能由**事件循环**
     /// 用既有轮次线程基建发起；按键分支只负责投递本事件（绝不在按键分支里同步跑 turn）。
     AskResumeTurn { run_id: String },
+    /// wave-65 C4：审批（`Approval`）决策成功 ⇒ **需要续轮**。
+    ///
+    /// `prompt` = 宿主固定续轮文案（批准/拒绝两种常量，见 [`approval_continuation_prompt`]）。
+    /// 与 [`UiEvent::AskResumeTurn`] 不同：审批续轮没有 run 绑定，走普通宿主流式入口
+    /// （`start_ask_aware_turn_stream`），因此事件只带文案、不带 `run_id`。
+    /// 同样**不得** `add_user_message`：这不是用户发言，不能产生用户气泡。
+    ApprovalResumeTurn { prompt: String },
     /// Plan 计划更新通知
     PlanUpdated(PlanState),
     /// 任务看板更新通知
@@ -1483,6 +1490,15 @@ pub fn permission_request_from_pending(
             .unwrap_or("（宿主请求缺少说明）")
             .to_string(),
         command_or_path: target_path,
+        // wave-65 R2（F3）：**授权**用的路径只认结构化 `options.path`（契约 C4 原文「只能取
+        // `options.path`」）。刻意不接受的两种来源：`file_path`/`filePath` 是历史别名（C2 只写
+        // `path`，别名会把两条真值源并成双份维护），`callId` 更不是路径（canonicalize 必败 ⇒
+        // 无 path 审批会变成永远批不掉）。缺省即 `None` ⇒ 决策时跳过授权直接 CAS。
+        approval_path: value
+            .get("options")
+            .and_then(|options| options.get("path"))
+            .and_then(|path| path.as_str())
+            .map(str::to_string),
         timestamp_ms: value
             .get("expiresAtMs")
             .and_then(|ms| ms.as_u64())
@@ -1927,6 +1943,21 @@ pub fn ask_submit_verdict(
 /// 用户可见文案统一走中文，宿主的英文内部串（含历史上的 `cannot be consumed …`）只进
 /// 运行时日志（stderr → `tui-runtime.log`），**绝不上屏**。
 pub const ASK_STALE_NOTICE: &str = "该提问已失效，已同步最新待处理请求";
+
+/// wave-65 R3（F3）：**审批**失效（过期 / 被宿主收口 / 已不可 CAS）的专属文案。
+///
+/// 为什么不能复用 [`ASK_STALE_NOTICE`]：审批不是「提问已失效」—— 它意味着**本轮不会自动继续**，
+/// 用户必须重新发起该操作。复用 Ask 文案会让用户以为「还有后续、等着就行」，于是干等一个
+/// 永远不会到来的续轮。
+pub const APPROVAL_STALE_NOTICE: &str = "该审批已过期，本轮不会自动继续；请重新发起该操作";
+
+/// 控制请求失效时按**句柄种类**选择文案（审批 / 提问各自一句，R3 之后不再互相顶替）。
+pub fn stale_pending_notice(handle: Option<&PendingUiRequest>) -> &'static str {
+    match handle {
+        Some(handle) if handle.is_approval => APPROVAL_STALE_NOTICE,
+        _ => ASK_STALE_NOTICE,
+    }
+}
 
 /// 未决快照里是否仍包含该 `request_id`。
 ///
@@ -4734,6 +4765,9 @@ fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &s
     };
 
     let runtime_builder = AgentRuntimeBuilder::desktop()
+        // wave-65 C1：TUI 是**唯一**打开「审批挂起可恢复」的宿主 —— 桌面（src-tauri）与 CLI
+        // 仍是默认 `false`（fail-fast `approval_resume_unavailable`，INV-2 零回归）。
+        .host_approval_resume(true)
         .session_store(SessionStore::new())
         .provider_resolver(Box::new(resolver))
         .workspace_root(workspace.to_path_buf());
@@ -8458,11 +8492,13 @@ fn ask_answer_json(answers: &[(String, Vec<String>)]) -> serde_json::Value {
 /// **不收面板**：收口统一由调用点做一次，避免 `end_overlay()` 被重复调用把覆盖层栈多弹一层
 /// （会静默丢掉进入面板前的模式，例如 Plan）。
 fn close_stale_pending_request(state: &mut TuiState) {
+    // R3（F3）：文案按句柄种类选（审批说「本轮不会自动继续」，提问说「已同步最新待处理请求」）。
+    let notice = stale_pending_notice(state.pending_request.as_ref());
     state.pending_request = None;
-    state.set_status_notice(ASK_STALE_NOTICE.to_string());
+    state.set_status_notice(notice.to_string());
     state.messages.push(ChatMessage {
         role: MessageRole::System,
-        content: ASK_STALE_NOTICE.to_string(),
+        content: notice.to_string(),
         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
     });
 }
@@ -8494,7 +8530,15 @@ fn sync_pending_control_request(
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
 ) -> bool {
     let snapshot = control_plane.list_pending_asks(Some(state.session_id.as_str()));
-    let items: &[serde_json::Value] = snapshot.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    // wave-65 C4 + R2（F4）：把审批（`Approval`）项并入同一份待决快照，**审批优先、Ask 在后**
+    // （契约 C4 原文；审批是用户刚触发的一次阻塞决策，Ask 可以等）。
+    // 为什么必须合并：`pending_panel_should_close` 只按 `request_id` 判定「是否仍在待决」，
+    // 审批项若不在快照里，刚开出来的审批面板会在下一次同步时被判成「已收口」而误关。
+    let approvals = control_plane.list_pending_approvals(state.session_id.as_str());
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+    merged.extend(approvals.as_array().cloned().unwrap_or_default());
+    merged.extend(snapshot.as_array().cloned().unwrap_or_default());
+    let items: &[serde_json::Value] = merged.as_slice();
 
     // 1) 已有面板：请求仍在待决集合里 ⇒ 保持；已被宿主收口 ⇒ 收面板 + 中文提示。
     if pending_panel_should_close(items, state.pending_request.as_ref()) {
@@ -8544,8 +8588,10 @@ fn report_control_request_error(
     // 其余（序列化/IO 等）也只给中文结论，原始串仅进运行时日志。
     let content = if is_stale_control_request_error(error) {
         // 同一族错误都源于「请求已不在 Pending」：客户端不再自行 expire，只清句柄。
+        // R3（F3）：与 `close_stale_pending_request` 同源选文案 —— 审批失效不得复用 Ask 文案。
+        let notice = stale_pending_notice(state.pending_request.as_ref());
         state.pending_request = None;
-        ASK_STALE_NOTICE.to_string()
+        notice.to_string()
     } else {
         format!("{action}，请重试（详情见 tui-runtime.log）")
     };
@@ -8568,6 +8614,117 @@ const ASK_RESUME_CONTINUATION_PROMPT: &str = "（已作答，继续上一轮未�
 /// 绝不允许出现「作答了但界面上什么都不发生」的静默态）。
 const ASK_RESUME_UNAVAILABLE_NOTICE: &str =
     "该提问缺少可恢复的执行上下文，本轮无法自动继续；请重新发起该操作（详情见 tui-runtime.log）。";
+
+/// wave-65 C4：审批**批准**后的固定宿主续轮文案（常量，非用户输入）。
+///
+/// 为什么必须非空：`runtime.prepare_turn` 的 `reject_empty` 会拒绝空 message。
+/// 为什么是常量：续轮不是新的用户发言，**不得** `add_user_message`（否则凭空多一个用户气泡）。
+const APPROVAL_APPROVED_CONTINUATION_PROMPT: &str = "（已批准该工具调用，请重试刚才的操作并继续任务）";
+
+/// wave-65 C4：审批**拒绝**后的固定宿主续轮文案（让模型换条路，而不是静默停住）。
+const APPROVAL_DENIED_CONTINUATION_PROMPT: &str = "（用户拒绝了该工具调用，请改用其它方式或先询问用户）";
+
+/// wave-65 C4：`PermissionChoice` → 续轮文案（纯函数，可单测：两文案非空且互不相同）。
+pub fn approval_continuation_prompt(choice: PermissionChoice) -> &'static str {
+    match choice {
+        PermissionChoice::AllowOnce | PermissionChoice::AllowSession => {
+            APPROVAL_APPROVED_CONTINUATION_PROMPT
+        }
+        PermissionChoice::Deny => APPROVAL_DENIED_CONTINUATION_PROMPT,
+    }
+}
+
+/// wave-65 R2（F3）：一次审批决策的**结构化计划**（纯数据，生产与单测共用同一口径）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalPlan {
+    /// `Some(path)` = 批准前必须先写 `read` 作用域路径授权；`None` = 该审批没有路径，
+    /// 跳过授权直接 CAS（否则「无 path 审批」会因 `authorize_path` 必败而被永久拒批）。
+    pub authorize: Option<String>,
+    /// 决策成功后的固定宿主续轮文案。
+    pub prompt: &'static str,
+}
+
+/// wave-65 R2（F3）：从**待决快照项**推导审批计划（唯一决策口径，纯函数、可单测）。
+///
+/// - 授权路径**只**取结构化 `options.path`（**不回退** `callId` —— 它不是路径，
+///   `authorize_path` 会 canonicalize 失败，把「无 path 审批」变成永远批不掉）；
+/// - 拒绝（`Deny`）恒 `authorize == None`：被拒绝的路径绝不能被顺手授权放行。
+pub fn approval_plan(snapshot: &serde_json::Value, choice: PermissionChoice) -> ApprovalPlan {
+    let prompt = approval_continuation_prompt(choice);
+    match choice {
+        PermissionChoice::AllowOnce | PermissionChoice::AllowSession => ApprovalPlan {
+            authorize: snapshot
+                .get("options")
+                .and_then(|options| options.get("path"))
+                .and_then(|path| path.as_str())
+                .map(str::to_string),
+            prompt,
+        },
+        PermissionChoice::Deny => ApprovalPlan {
+            authorize: None,
+            prompt,
+        },
+    }
+}
+
+/// 把已解析出的结构化授权路径（`PermissionRequest::approval_path`）重新投影成快照形状，
+/// 让 [`approval_plan`] 成为**唯一**决策口径（生产与单测走同一条路径，避免两套语义）。
+fn approval_snapshot_hint(state: &TuiState) -> serde_json::Value {
+    match state
+        .permission_state
+        .as_ref()
+        .and_then(|perm| perm.request.approval_path.clone())
+    {
+        Some(path) => serde_json::json!({ "options": { "path": path } }),
+        None => serde_json::json!({ "options": {} }),
+    }
+}
+
+/// wave-65 C4：**审批决策纯接缝**（按键分支与单测共用这一条路径）。
+///
+/// 契约 `.dev-team/contract-matrix-approval-resume.md` §2 C4（含 R2 修正）：决策逻辑抽成可测纯函数
+/// （真实 control plane 驱动），返回**续轮文案**。
+/// - `Some(prompt)` = 需要续轮（批准：`authorize_path(path,"read")` → `approve_control_request`；
+///   拒绝：`cancel_approval_request`），由调用方投递 `UiEvent::ApprovalResumeTurn { prompt }`；
+/// - `None` = 不需要/不能续轮（无审批句柄，或失败已上屏中文提示，绝不静默）。
+///
+/// INV-1：批准**只**写 `read` 作用域路径授权（`store_metadata.path_authorizations.v1`），
+/// 绝不扩大写权限；INV-4：拒绝与批准共用同一 CAS 闸门，先到者终结请求。
+pub fn apply_approval_decision(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    choice: PermissionChoice,
+) -> Option<String> {
+    let (request_id, version) = state
+        .pending_request
+        .as_ref()
+        .filter(|handle| handle.is_approval)
+        .map(|handle| (handle.request_id.clone(), handle.version))?;
+    let plan = approval_plan(&approval_snapshot_hint(state), choice);
+    // 先写 read 作用域授权，再消费审批请求：顺序反了会让「已批准但工具仍被拒绝」。
+    // `authorize == None`（无结构化路径）⇒ 跳过授权直接 CAS，否则该审批永远批不掉（R2 F3）。
+    if let Some(path) = plan.authorize.as_deref() {
+        if let Err(error) = control_plane.authorize_path(path, "read") {
+            report_control_request_error(state, "审批授权失败", &error);
+            return None;
+        }
+    }
+    match choice {
+        PermissionChoice::AllowOnce | PermissionChoice::AllowSession => {
+            if let Err(error) = control_plane.approve_control_request(&request_id, version) {
+                report_control_request_error(state, "审批同意失败", &error);
+                return None;
+            }
+        }
+        PermissionChoice::Deny => {
+            if let Err(error) = control_plane.cancel_approval_request(&request_id, version) {
+                report_control_request_error(state, "审批拒绝失败", &error);
+                return None;
+            }
+        }
+    }
+    Some(plan.prompt.to_string())
+}
 
 /// 契约 F-M：**全部问题答完后**一次性提交答案并恢复任务流。
 ///
@@ -9567,22 +9724,14 @@ fn tui_event_loop(
                     if state.mode == InteractionMode::PermissionApproval {
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                                if let Some(ref handle) = state.pending_request {
-                                    if handle.is_approval {
-                                        if let Err(e) = control_plane.cancel_ask_in_session(
-                                            &state.session_id,
-                                            &handle.request_id,
-                                            handle.version,
-                                        ) {
-                                            state.set_status_notice(format!("取消审批失败: {e}"));
-                                            state.messages.push(ChatMessage {
-                                                role: MessageRole::System,
-                                                content: format!("取消审批失败: {e}"),
-                                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                            });
-                                        }
-                                    }
-                                }
+                                // wave-65 C4：拒绝统一走 `apply_approval_decision`
+                                // （`cancel_approval_request` → `Cancelled`）；成功后投递续轮事件 ——
+                                // 拒绝也是一次「继续」，让模型换条路而不是静默停住。
+                                let approval_prompt = apply_approval_decision(
+                                    &mut state,
+                                    &control_plane,
+                                    PermissionChoice::Deny,
+                                );
                                 if let Some(ref perm) = state.permission_state {
                                     let req_id = perm.request.request_id.clone();
                                     let _ = tx.send(UiEvent::PermissionDecided {
@@ -9592,6 +9741,9 @@ fn tui_event_loop(
                                 }
                                 state.pending_request = None;
                                 state.cancel_permission_approval();
+                                if let Some(prompt) = approval_prompt {
+                                    let _ = tx.send(UiEvent::ApprovalResumeTurn { prompt });
+                                }
                             }
                             KeyCode::Tab | KeyCode::Down => {
                                 if let Some(ref mut perm) = state.permission_state {
@@ -9604,18 +9756,13 @@ fn tui_event_loop(
                                 }
                             }
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                if let Some(ref handle) = state.pending_request {
-                                    if handle.is_approval {
-                                        if let Err(e) = control_plane.approve_control_request(&handle.request_id, handle.version) {
-                                            state.set_status_notice(format!("审批同意失败: {e}"));
-                                            state.messages.push(ChatMessage {
-                                                role: MessageRole::System,
-                                                content: format!("审批同意失败: {e}"),
-                                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                            });
-                                        }
-                                    }
-                                }
+                                // wave-65 C4：批准统一走 `apply_approval_decision`
+                                // （`authorize_path(path,"read")` → `approve_control_request`）。
+                                let approval_prompt = apply_approval_decision(
+                                    &mut state,
+                                    &control_plane,
+                                    PermissionChoice::AllowOnce,
+                                );
                                 if let Some(ref perm) = state.permission_state {
                                     let req_id = perm.request.request_id.clone();
                                     let _ = tx.send(UiEvent::PermissionDecided {
@@ -9625,46 +9772,16 @@ fn tui_event_loop(
                                 }
                                 state.pending_request = None;
                                 state.cancel_permission_approval();
+                                if let Some(prompt) = approval_prompt {
+                                    let _ = tx.send(UiEvent::ApprovalResumeTurn { prompt });
+                                }
                             }
                             KeyCode::Enter => {
                                 let choice = state.permission_state.as_ref().map(|p| p.selected_choice()).unwrap_or(PermissionChoice::Deny);
-                                if let Some(ref handle) = state.pending_request {
-                                    if handle.is_approval {
-                                        match choice {
-                                            PermissionChoice::AllowOnce | PermissionChoice::AllowSession => {
-                                                if choice == PermissionChoice::AllowSession {
-                                                    if let Some(ref perm) = state.permission_state {
-                                                        if let Some(ref target) = perm.request.command_or_path {
-                                                            let _ = control_plane.authorize_path(target, "read");
-                                                        }
-                                                    }
-                                                }
-                                                if let Err(e) = control_plane.approve_control_request(&handle.request_id, handle.version) {
-                                                    state.set_status_notice(format!("审批执行失败: {e}"));
-                                                    state.messages.push(ChatMessage {
-                                                        role: MessageRole::System,
-                                                        content: format!("审批执行失败: {e}"),
-                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                    });
-                                                }
-                                            }
-                                            PermissionChoice::Deny => {
-                                                if let Err(e) = control_plane.cancel_ask_in_session(
-                                            &state.session_id,
-                                            &handle.request_id,
-                                            handle.version,
-                                        ) {
-                                                    state.set_status_notice(format!("审批拒绝失败: {e}"));
-                                                    state.messages.push(ChatMessage {
-                                                        role: MessageRole::System,
-                                                        content: format!("审批拒绝失败: {e}"),
-                                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                // wave-65 C4：批准/拒绝共用同一条纯接缝（`authorize_path` + CAS 的
+                                // 契约只在 `apply_approval_decision` 里维护一份，绝不在此复制）。
+                                let approval_prompt =
+                                    apply_approval_decision(&mut state, &control_plane, choice);
                                 if let Some(ref perm) = state.permission_state {
                                     let req_id = perm.request.request_id.clone();
                                     let _ = tx.send(UiEvent::PermissionDecided {
@@ -9674,6 +9791,9 @@ fn tui_event_loop(
                                 }
                                 state.pending_request = None;
                                 state.cancel_permission_approval();
+                                if let Some(prompt) = approval_prompt {
+                                    let _ = tx.send(UiEvent::ApprovalResumeTurn { prompt });
+                                }
                             }
                             _ => {}
                         }
@@ -11001,6 +11121,94 @@ fn tui_event_loop(
                     );
                     dirty = true;
                 }
+                UiEvent::ApprovalResumeTurn { prompt } => {
+                    // wave-65 C4：审批决策成功后的续轮同样由**事件循环**发起（按键分支只投递
+                    // 事件）。整套轮次线程基建与 `UiEvent::AskResumeTurn` 逐项对齐：
+                    // begin_turn_usage / TuiTurnSink / TuiTurnSinkGuard / current_turn_id /
+                    // turn_loop_in_flight / inflight_turns。
+                    // 与 Ask 续轮的两点**刻意的**差异（契约 §2 C4）：
+                    // ① `message` 与 `display_message` 用事件携带的固定宿主文案（批准/拒绝各一条）；
+                    // ② 审批续轮没有 run 绑定 ⇒ 走普通宿主流式入口 `start_ask_aware_turn_stream`。
+                    // **不** add_user_message：续轮提示不是用户发言，不得新增用户气泡。
+                    state.begin_turn_usage();
+                    state.status_notice = None;
+                    state.context_window_tokens = resolve_context_window_tokens(&state);
+                    state.is_streaming = true;
+                    state.status_text = "Thinking...".to_string();
+                    state.auto_scroll = true;
+                    state.transition_runtime_mode(RuntimeMode::Connecting);
+                    state.turn_started_at = Some(std::time::Instant::now());
+
+                    let resume_provider_id = resolve_active_provider_id(&state)
+                        .unwrap_or_else(|| state.current_provider_id.clone());
+                    let resume_model_id = state.model.clone();
+                    let mut turn_input = build_turn_input(
+                        &state,
+                        prompt.clone(),
+                        resume_provider_id,
+                        resume_model_id,
+                    );
+                    // 固定宿主续轮文案：非空（`prepare_turn` 的 reject_empty）+ 与展示一致。
+                    turn_input.message = prompt.clone();
+                    turn_input.display_message = Some(prompt.clone());
+
+                    let turn_id_str = format!("turn-approval-resume-{}", uuid::Uuid::new_v4());
+                    let turn_id_for_log = turn_id_str.clone();
+                    let turn_id_for_failure = turn_id_str.clone();
+                    let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
+                    let resume_sink_guard =
+                        TuiTurnSinkGuard::new(&control_plane, &turn_id_str, Arc::clone(&sink));
+                    let turn_control_plane = Arc::clone(&control_plane);
+                    // 先注册 sink，再向事件循环发布当前 turn id（与 composer 提交同序）。
+                    *current_turn_id.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(turn_id_str.clone());
+                    state.stopping_turn_id = None;
+                    state.streaming_turn_id = Some(turn_id_str.clone());
+
+                    let inflight_for_turn = Arc::clone(&inflight_turns);
+                    let turn_loop_in_flight_for_thread = Arc::clone(&turn_loop_in_flight);
+                    let tx_turn = tx.clone();
+                    let turn_thread = std::thread::spawn(move || {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            let _in_flight_guard =
+                                TurnLoopInFlightGuard::enter(turn_loop_in_flight_for_thread);
+                            let _guard =
+                                pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+                            let _turn_sink_guard = resume_sink_guard;
+                            let cmd = StartTurnStreamCommand {
+                                turn_id: turn_id_str,
+                                input: turn_input,
+                            };
+                            turn_control_plane.start_ask_aware_turn_stream(sink.as_ref(), cmd)
+                        }));
+                        // 与 Ask 续轮同纪律：panic 或「无终态」的 Err 都必须补发终态，否则
+                        // `is_streaming` 永久为真，输入与排队派发彻底卡死。
+                        let failure = match outcome {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(format!("审批续轮未产出终态: {error}")),
+                            Err(payload) => Some(format!(
+                                "审批续轮线程 panic: {}",
+                                panic_payload_message(payload.as_ref())
+                            )),
+                        };
+                        if let Some(reason) = failure {
+                            eprintln!(
+                                "[pony-tui] approval_resume_turn_failed: turn={} reason={reason}",
+                                turn_id_for_failure
+                            );
+                            let _ = tx_turn.send(UiEvent::StreamFailed(reason));
+                        }
+                    });
+                    let mut turns = inflight_for_turn.lock().unwrap_or_else(|e| e.into_inner());
+                    turns.push(turn_thread);
+                    drop(turns);
+
+                    eprintln!(
+                        "[pony-tui] approval_resume_turn_started: turn={} session={}",
+                        turn_id_for_log, state.session_id
+                    );
+                    dirty = true;
+                }
                 UiEvent::PlanUpdated(plan) => {
                     state.update_plan(plan);
                 }
@@ -11684,5 +11892,254 @@ mod wave43_unit_tests {
         assert_eq!(req.description, "执行危险删除命令");
         assert_eq!(req.command_or_path, Some("rm -rf /".to_string()));
         assert_eq!(req.timestamp_ms, 55555);
+    }
+}
+
+/// wave-65 C4 单测：审批续轮文案与决策接缝（契约 §2 C4）。
+///
+/// 纪律：真实断言（非空 / 不等 / 具体返回）、不吞异常；「无待决句柄 ⇒ 不续轮」用**真实**
+/// control plane 驱动（绝不 mock 出假的成功），且先把 HOME/XDG 重定向到临时沙箱，
+/// 保证单测绝不读写用户的 `sessions.db` 与 `~/pony_agent`。
+#[cfg(test)]
+mod wave65_approval_unit_tests {
+    use super::*;
+
+    /// 隔离进程级数据目录（`Once` 保证只做一次，且早于任何 control plane 构造）。
+    fn isolate_process_data_dir() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let sandbox = std::env::temp_dir().join(format!(
+                "pony-agent-tui-approval-unit-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&sandbox).expect("create isolated data dir");
+            std::env::set_var("XDG_DATA_HOME", &sandbox);
+            std::env::set_var("HOME", &sandbox);
+            std::env::set_var("LOCALAPPDATA", &sandbox);
+        });
+    }
+
+    fn isolated_control_plane() -> HostControlPlane {
+        isolate_process_data_dir();
+        HostControlPlane::new()
+    }
+
+    #[test]
+    fn approval_continuation_prompt_is_non_empty_and_distinct() {
+        let approved = approval_continuation_prompt(PermissionChoice::AllowOnce);
+        let approved_session = approval_continuation_prompt(PermissionChoice::AllowSession);
+        let denied = approval_continuation_prompt(PermissionChoice::Deny);
+
+        // 非空：`prepare_turn` 的 reject_empty 会拒绝空 message ⇒ 空文案等于续轮永远失败。
+        assert!(
+            !approved.trim().is_empty(),
+            "批准续轮文案不得为空串/空白，实际 = {approved:?}"
+        );
+        assert!(
+            !denied.trim().is_empty(),
+            "拒绝续轮文案不得为空串/空白，实际 = {denied:?}"
+        );
+        // 不同：批准与拒绝必须是两句话（否则模型无法区分「已放行」与「被拒绝」）。
+        assert_ne!(
+            approved, denied,
+            "批准与拒绝的续轮文案必须不同，实际两者都是 {approved:?}"
+        );
+        // 两种批准档位（单次 / 会话）共用同一条「已批准」文案。
+        assert_eq!(
+            approved, approved_session,
+            "AllowOnce 与 AllowSession 必须共用同一条批准续轮文案"
+        );
+    }
+
+    #[test]
+    fn apply_approval_decision_without_pending_handle_returns_none() {
+        let mut state = TuiState::default();
+        assert!(
+            state.pending_request.is_none(),
+            "前置条件：默认 TuiState 不得带任何待决句柄"
+        );
+        let control_plane = isolated_control_plane();
+
+        // 无待决审批句柄 ⇒ 不产生续轮（既不假装批准成功，也不伪造文案）。
+        assert_eq!(
+            apply_approval_decision(&mut state, &control_plane, PermissionChoice::AllowOnce),
+            None,
+            "无待决审批句柄时批准必须返回 None"
+        );
+        assert_eq!(
+            apply_approval_decision(&mut state, &control_plane, PermissionChoice::Deny),
+            None,
+            "无待决审批句柄时拒绝必须返回 None"
+        );
+        assert!(
+            state.pending_request.is_none(),
+            "无句柄路径不得凭空造出一个待决句柄"
+        );
+    }
+}
+
+/// wave-65 R2（F3）单测：审批计划纯函数 + 授权路径来源的严格性。
+///
+/// 覆盖契约 §2 C5「R2 增补」的两个单元判据：`approval_plan` 四分支（有 path/无 path × 批准/拒绝），
+/// 以及「授权路径只取结构化 `options.path`、绝不回退 `callId`」这条假绿回归防线。
+#[cfg(test)]
+mod wave65_r2_approval_plan_tests {
+    use super::*;
+
+    fn snapshot_with_path() -> serde_json::Value {
+        serde_json::json!({
+            "requestId": "control-r2-1",
+            "options": {
+                "approvalKind": "path_authorization",
+                "tool": "Read",
+                "path": "/tmp/outside/probe.txt",
+                "scope": "read",
+            },
+        })
+    }
+
+    fn snapshot_without_path() -> serde_json::Value {
+        serde_json::json!({
+            "requestId": "control-r2-2",
+            "options": { "approvalKind": "approval", "tool": "Bash" },
+        })
+    }
+
+    #[test]
+    fn approval_plan_authorizes_only_path_approvals_on_approval() {
+        // ① 有 path + 批准 ⇒ 必须先授权该路径。
+        for choice in [PermissionChoice::AllowOnce, PermissionChoice::AllowSession] {
+            let plan = approval_plan(&snapshot_with_path(), choice);
+            assert_eq!(
+                plan.authorize.as_deref(),
+                Some("/tmp/outside/probe.txt"),
+                "路径授权类审批在批准时必须带上待授权路径（choice = {choice:?}）"
+            );
+            assert_eq!(plan.prompt, APPROVAL_APPROVED_CONTINUATION_PROMPT);
+        }
+
+        // ② 无 path + 批准 ⇒ 跳过授权直接 CAS（R2 F3：否则该审批永久批不掉）。
+        let plan = approval_plan(&snapshot_without_path(), PermissionChoice::AllowOnce);
+        assert_eq!(
+            plan.authorize, None,
+            "无结构化 path 的审批不得给出授权目标（更不得回退 callId）"
+        );
+        assert_eq!(plan.prompt, APPROVAL_APPROVED_CONTINUATION_PROMPT);
+    }
+
+    #[test]
+    fn approval_plan_never_authorizes_on_deny() {
+        // ③ 有 path + 拒绝 ⇒ 绝不授权（被拒绝的路径不能被顺手放行）。
+        let denied = approval_plan(&snapshot_with_path(), PermissionChoice::Deny);
+        assert_eq!(denied.authorize, None, "拒绝时不得写入任何路径授权");
+        assert_eq!(denied.prompt, APPROVAL_DENIED_CONTINUATION_PROMPT);
+
+        // ④ 无 path + 拒绝 ⇒ 同样无授权，文案是拒绝文案。
+        let denied_without = approval_plan(&snapshot_without_path(), PermissionChoice::Deny);
+        assert_eq!(denied_without.authorize, None);
+        assert_eq!(denied_without.prompt, APPROVAL_DENIED_CONTINUATION_PROMPT);
+
+        // 批准与拒绝文案必须不同（否则模型分不清「已放行」与「被拒绝」）。
+        assert_ne!(denied.prompt, APPROVAL_APPROVED_CONTINUATION_PROMPT);
+    }
+
+    #[test]
+    fn permission_request_takes_approval_path_only_from_structured_options() {
+        // 有 `options.path` ⇒ 授权路径就是它。
+        let with_path = permission_request_from_pending(&snapshot_with_path(), "sess-r2");
+        assert_eq!(
+            with_path.approval_path.as_deref(),
+            Some("/tmp/outside/probe.txt")
+        );
+
+        // 无 `options.path` 但**有** `callId` ⇒ 授权路径必须为 None（callId 不是路径）。
+        let call_id_only = serde_json::json!({
+            "requestId": "control-r2-3",
+            "callId": "call-approval-e2e-1",
+            "options": { "approvalKind": "approval", "tool": "Bash" },
+        });
+        let request = permission_request_from_pending(&call_id_only, "sess-r2");
+        assert_eq!(
+            request.approval_path, None,
+            "授权路径绝不回退 callId（否则 canonicalize 必败 ⇒ 审批永久批不掉）"
+        );
+        // 展示用的 `command_or_path` 保持既有回退语义（逐字不变）。
+        assert_eq!(
+            request.command_or_path.as_deref(),
+            Some("call-approval-e2e-1"),
+            "展示路径的既有回退语义不得被本次收紧改变"
+        );
+    }
+}
+
+
+/// wave-65 R3（F3）单测：审批失效**不复用** Ask 文案。
+#[cfg(test)]
+mod wave65_r3_approval_stale_notice_tests {
+    use super::*;
+
+    fn handle(is_approval: bool) -> PendingUiRequest {
+        PendingUiRequest {
+            request_id: "control-r3-000000000001".to_string(),
+            version: 1,
+            run_id: Some("run-r3".to_string()),
+            // 刻意给一个早已过去的期限：文案判定只看句柄种类，不看墙钟（ADR 0074）。
+            expires_at_ms: Some(1),
+            is_approval,
+        }
+    }
+
+    #[test]
+    fn stale_notice_is_kind_specific() {
+        assert_eq!(
+            stale_pending_notice(Some(&handle(true))),
+            APPROVAL_STALE_NOTICE,
+            "审批句柄必须用审批专属失效文案"
+        );
+        assert_eq!(
+            stale_pending_notice(Some(&handle(false))),
+            ASK_STALE_NOTICE,
+            "提问句柄保持既有 Ask 文案（逐字不变）"
+        );
+        // 无句柄（如 `--demo-ask-user` 演示面板、无宿主句柄的问答面板）沿用既有 Ask 文案。
+        assert_eq!(stale_pending_notice(None), ASK_STALE_NOTICE);
+
+        // 两条文案必须不同，且审批文案要说明「本轮不会自动继续 + 请重新发起」。
+        assert_ne!(APPROVAL_STALE_NOTICE, ASK_STALE_NOTICE);
+        assert!(
+            APPROVAL_STALE_NOTICE.contains("不会自动继续"),
+            "审批失效文案必须说明本轮不会自动继续，实际 = {APPROVAL_STALE_NOTICE:?}"
+        );
+        assert!(
+            APPROVAL_STALE_NOTICE.contains("重新发起"),
+            "审批失效文案必须给出下一步动作，实际 = {APPROVAL_STALE_NOTICE:?}"
+        );
+    }
+
+    #[test]
+    fn close_stale_pending_request_uses_approval_notice_for_approval_handle() {
+        let mut state = TuiState::default();
+        state.pending_request = Some(handle(true));
+
+        close_stale_pending_request(&mut state);
+
+        assert!(
+            state.pending_request.is_none(),
+            "失效收口必须清掉句柄"
+        );
+        let last = state
+            .messages
+            .last()
+            .expect("失效收口必须在消息区留下一条系统消息");
+        assert_eq!(last.role, MessageRole::System);
+        assert_eq!(last.content, APPROVAL_STALE_NOTICE);
+        assert_eq!(
+            state.status_notice.as_ref().map(|(text, _)| text.as_str()),
+            Some(APPROVAL_STALE_NOTICE)
+        );
     }
 }

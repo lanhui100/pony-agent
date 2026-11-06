@@ -4,7 +4,7 @@ use crate::agent::capability_bridge::{
     SkillSourceView,
 };
 use crate::agent::context::RetrievedContextState;
-use crate::agent::dispatcher::GovernedDispatcher;
+use crate::agent::dispatcher::{ControlRequestAuthorization, GovernedDispatcher};
 use crate::agent::execution_control::{
     execution_checkpoint_contract_version, refresh_execution_checkpoint_projection,
     ExecutionCheckpoint, ExecutionControlRegistry, StopTurnResponse,
@@ -37,7 +37,10 @@ use crate::agent::session::{
     RunControlAuditSummary, SessionOverview, SessionSnapshot, SessionStore, TurnTraceRecord,
     WorkspaceRef,
 };
-use crate::agent::tool_runtime::{RuntimeClock, SystemClock};
+use crate::agent::tool_runtime::{
+    PendingControlRequest, PendingControlRequestKind, PendingControlRequestState, RuntimeClock,
+    SystemClock,
+};
 use crate::agent::tools::ToolRegistrySnapshot;
 use crate::agent::turn_flow::{ProviderEventMeta, TurnEventSink};
 use serde::{Deserialize, Serialize};
@@ -1347,6 +1350,47 @@ impl DesktopHostPreset {
     }
 }
 
+/// wave-65 C3：宿主侧待决审批的 wire 投影（字段集合冻结于契约 §2 C3）。
+///
+/// **绝不**包含 `nonce` / `finalArgsDigest` / `policyDigest`：前两者是 CAS 凭据，第三个是策略
+/// 内部摘要 —— 宿主面板只需要「能不能批准、批准的是什么」，不需要这些内部事实（INV-3）。
+fn approval_pending_projection(
+    request: &crate::agent::tool_runtime::PendingControlRequest,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requestId": request.request_id,
+        "version": request.version,
+        "requestKind": "approval",
+        "sessionId": request.session_id,
+        "runId": request.run_id,
+        "turnId": request.turn_id,
+        "callId": request.call_id,
+        "descriptorId": request.descriptor_id,
+        "prompt": request.prompt,
+        "options": request.options,
+        "expiresAtMs": request.expires_at_ms,
+    })
+}
+
+/// wave-65 R2（F2）+ R3（F2）：待决审批是否**仍可列出**（唯一判据，纯函数便于单测）。
+///
+/// 四个条件缺一不可：仍是 `Pending`、**是路径授权类审批**
+/// （[`PendingControlRequest::is_path_authorization_approval`]，与 runtime 同源）、**且未过期**
+/// （`now_ms <= expires_at_ms`）。
+/// 为什么必须带 TTL：审批的 CAS（`can_consume`）对 `now_ms > expires_at_ms` 一律拒绝，过期请求
+/// 既不能批准也不能取消；若仍被列进快照，TUI 的 500ms 轮询会把它反复「重建成面板」⇒ 面板每 500ms
+/// 弹一次、用户永远点不掉（活锁）。
+/// 为什么必须是路径授权类：非路径审批（`tool_rule_ask` / `external_requires_approval` / 保守抬升）
+/// 在 runtime 侧本就 fail-fast 收口；若仍列进面板，用户批准后只会得到「续轮 → 再审批」的人工循环。
+pub(crate) fn approval_is_listable(
+    request: &PendingControlRequest,
+    now_ms: u64,
+) -> bool {
+    request.state == PendingControlRequestState::Pending
+        && now_ms <= request.expires_at_ms
+        && request.is_path_authorization_approval()
+}
+
 impl HostControlPlane {
     pub fn new() -> Self {
         DesktopHostPreset::build()
@@ -1356,31 +1400,71 @@ impl HostControlPlane {
         HostControlPlaneBuilder::new().runtime(runtime).build()
     }
 
-    // ── wave-65 C3：审批（`Approval`）宿主面（本次仅落空桩，业务逻辑由执行波次补齐）───────
+    // ── wave-65 C3：审批（`Approval`）宿主面 ───────────────────────────────────────────────
     //
-    // 契约：.dev-team/contract-matrix-approval-resume.md §2 C3。空桩纯度约束：函数体只允许
-    // `Value::Array(Vec::new())` / `Err("not_implemented")`，禁止业务分支。
+    // 契约：.dev-team/contract-matrix-approval-resume.md §2 C3。审批请求**只存在于** dispatcher
+    // 的进程内 CAS store（`ask_dispatcher.pending_requests()`）；宿主投影刻意**不含** `nonce`
+    // （INV-3：CAS 四元组由宿主内部持有，绝不下发）。
 
     /// 列出某会话内**待决**的审批请求（投影 `{requestId,version,requestKind:"approval",
     /// sessionId,runId,turnId,callId,descriptorId,prompt,options,expiresAtMs}`，**不含 nonce**）。
     ///
-    /// 空桩：当前恒返回空数组（审批面板接线前的占位；空/空白 scope 亦 fail-closed 返回空数组）。
-    pub fn list_pending_approvals(&self, _session_id: &str) -> serde_json::Value {
-        // TODO(approval-resume): 过滤 Approval + Pending + 同 session_id 后投影（无 nonce）。
-        serde_json::Value::Array(Vec::new())
+    /// 作用域强制（fail-closed）：空/空白 `session_id` 一律返回空数组并打一条日志 —— 无作用域的
+    /// 列举会把别的会话的 `requestId`/`version` 泄漏给当前面板。
+    /// 过期过滤：见 [`approval_is_listable`]（TTL 到期后不可 CAS，不能再列出，否则面板活锁）。
+    pub fn list_pending_approvals(&self, session_id: &str) -> serde_json::Value {
+        let scope = session_id.trim();
+        if scope.is_empty() {
+            eprintln!(
+                "[pony-agent] approval_list_pending: approval_scope_required (unscoped listing is \
+                 fail-closed)"
+            );
+            return serde_json::Value::Array(Vec::new());
+        }
+        // 时钟走 dispatcher 注入的 `RuntimeClock`（与 TTL 判定同源，便于测试注入）。
+        let now_ms = self.ask_dispatcher.clock().now_ms();
+        serde_json::Value::Array(
+            self.ask_dispatcher
+                .pending_requests()
+                .into_iter()
+                .filter(|request| {
+                    request.session_id.as_deref() == Some(scope)
+                        && approval_is_listable(request, now_ms)
+                })
+                .map(|request| approval_pending_projection(&request))
+                .collect(),
+        )
     }
 
     /// 拒绝（取消）一条审批请求：`ControlRequestAuthorization::for_request` +
     /// `dispatcher.cancel_control_request` ⇒ 状态转 `Cancelled`。
     ///
-    /// 空桩：尚未实现，恒返回 `Err("not_implemented")`。
+    /// **kind 闸门（R2，fail-closed）**：只允许取消 `Approval`。Ask 有自己的作用域取消面
+    /// （`cancel_ask_in_session`，带持久化 store 的 CAS 与落地语义），经审批面取消会绕开那些约束。
+    /// 与 [`Self::approve_control_request`] 同构（同一 CAS 闸门），区别只在目标终态：
+    /// 取消后同一 `(request_id, version)` 既不能再批准也不能再取消（INV-4）。
     pub fn cancel_approval_request(
         &self,
-        _request_id: &str,
-        _expected_version: u64,
+        request_id: &str,
+        expected_version: u64,
     ) -> Result<serde_json::Value, String> {
-        // TODO(approval-resume)
-        Err("not_implemented".to_string())
+        let pending = self
+            .ask_dispatcher
+            .pending_request(request_id)
+            .ok_or_else(|| format!("unknown control request `{request_id}`"))?;
+        if pending.request_kind != PendingControlRequestKind::Approval {
+            return Err(format!(
+                "approval_kind_mismatch: control request `{request_id}` is not an approval; \
+                 refusing to cancel it through the approval surface"
+            ));
+        }
+        self::ask_plan_commands::require_current_version(&pending, expected_version)?;
+        let authorization = ControlRequestAuthorization::for_request(&pending, None);
+        let cancelled = self
+            .ask_dispatcher
+            .cancel_control_request(request_id, &authorization)?;
+        serde_json::to_value(&cancelled)
+            .map_err(|error| format!("failed to serialize cancel result: {error}"))
     }
 
     /// 当前 workspace root（PA-078 附件导入/前端获取根路径；PA-079 注册表落地后改由
@@ -10343,5 +10427,189 @@ mod tests {
         assert!(active_at_limit.rounds_started >= active_at_limit.max_goal_rounds);
 
         drop(rt_guard);
+    }
+}
+
+/// wave-65 R2（F2）单测：审批列表的 TTL 判据与取消面的 kind 闸门。
+///
+/// 纪律：真实断言（四态逐条 true/false、错误码可判别、失败不得静默消费）；不 mock 出「假成功」。
+#[cfg(test)]
+mod wave65_r2_approval_tests {
+    use super::*;
+    use crate::agent::ask_persistence::{AskLifecycleState, PersistedAsk};
+
+    fn pending_request(
+        request_kind: PendingControlRequestKind,
+        state: PendingControlRequestState,
+        expires_at_ms: u64,
+    ) -> PendingControlRequest {
+        PendingControlRequest {
+            request_id: "control-r2-000000000001".to_string(),
+            request_kind,
+            session_id: Some("sess-r2".to_string()),
+            run_id: Some("run-r2".to_string()),
+            turn_id: "turn-r2".to_string(),
+            call_id: "call-r2".to_string(),
+            descriptor_snapshot_id: "snap-r2".to_string(),
+            descriptor_id: "desc-r2".to_string(),
+            final_args_digest: "digest-r2".to_string(),
+            policy_digest: "policy-r2".to_string(),
+            nonce: "nonce-r2".to_string(),
+            version: 1,
+            expires_at_ms,
+            state,
+            prompt: Some("审批？".to_string()),
+            options: Some(serde_json::json!({
+                "approvalKind": "path_authorization",
+                "tool": "Read",
+                "path": "/tmp/outside/probe.txt",
+                "scope": "read",
+            })),
+        }
+    }
+
+    /// R2（F2）：TTL 是**列表**判据 —— 过期请求仍 Pending 也不能列出（否则面板每 500ms 重弹）。
+    #[test]
+    fn approval_is_listable_covers_valid_expired_interaction_and_terminal_states() {
+        // ① 有效：未过期 + Pending + Approval ⇒ true。
+        assert!(
+            approval_is_listable(
+                &pending_request(
+                    PendingControlRequestKind::Approval,
+                    PendingControlRequestState::Pending,
+                    1_000,
+                ),
+                999,
+            ),
+            "未过期的 Pending 审批必须可列出"
+        );
+        // 边界：now == expiresAtMs 仍可消费（`can_consume` 用 `now <= expires_at_ms`）⇒ 仍可列出。
+        assert!(
+            approval_is_listable(
+                &pending_request(
+                    PendingControlRequestKind::Approval,
+                    PendingControlRequestState::Pending,
+                    1_000,
+                ),
+                1_000,
+            ),
+            "到期当刻仍可 CAS 消费，必须仍可列出"
+        );
+        // ② 过期：now > expiresAtMs ⇒ false（CAS 必拒，列出等于制造活锁）。
+        assert!(
+            !approval_is_listable(
+                &pending_request(
+                    PendingControlRequestKind::Approval,
+                    PendingControlRequestState::Pending,
+                    1_000,
+                ),
+                1_001,
+            ),
+            "已过期审批不得列入待决列表"
+        );
+        // ③ Interaction（Ask）不是审批 ⇒ false。
+        assert!(
+            !approval_is_listable(
+                &pending_request(
+                    PendingControlRequestKind::Interaction,
+                    PendingControlRequestState::Pending,
+                    u64::MAX,
+                ),
+                1,
+            ),
+            "Ask 请求不得出现在审批列表"
+        );
+        // ④ 非 Pending（已消费/已取消/已过期）⇒ false。
+        for state in [
+            PendingControlRequestState::Consumed,
+            PendingControlRequestState::Cancelled,
+            PendingControlRequestState::Expired,
+        ] {
+            assert!(
+                !approval_is_listable(
+                    &pending_request(
+                        PendingControlRequestKind::Approval,
+                        state.clone(),
+                        u64::MAX,
+                    ),
+                    1,
+                ),
+                "非 Pending 审批（{state:?}）不得列入待决列表"
+            );
+        }
+    }
+
+    /// R3（F2）：**非路径授权类**审批一律不得列出 —— 它们在 runtime 侧 fail-fast，
+    /// 若仍进面板，用户批准后只会得到「续轮 → 再审批」的人工循环。
+    #[test]
+    fn approval_is_listable_rejects_non_path_authorization_approval() {
+        let mut request = pending_request(
+            PendingControlRequestKind::Approval,
+            PendingControlRequestState::Pending,
+            u64::MAX,
+        );
+        // 规则类 / 外部来源 / 保守抬升：即使实参里带 path，也**不是**路径授权类。
+        for options in [
+            serde_json::json!({"approvalKind": "approval", "tool": "Bash", "path": "/tmp/x"}),
+            serde_json::json!({"approvalKind": "approval", "tool": "Bash"}),
+        ] {
+            request.options = Some(options.clone());
+            assert!(
+                !approval_is_listable(&request, 1),
+                "非路径授权类审批（options = {options}）不得列入待决列表"
+            );
+        }
+        // 反向对照：同一请求标成路径授权类即可列出（证明判据不是「一律拒绝」的假绿）。
+        request.options = Some(serde_json::json!({
+            "approvalKind": "path_authorization",
+            "tool": "Read",
+            "path": "/tmp/x",
+            "scope": "read",
+        }));
+        assert!(
+            approval_is_listable(&request, 1),
+            "路径授权类审批仍必须可列出"
+        );
+    }
+
+    /// R2（F2）：审批取消面必须拒绝 Ask 请求（fail-closed，且不得消费该请求）。
+    #[test]
+    fn cancel_approval_request_rejects_interaction_request() {
+        let control_plane = HostControlPlane::new();
+        let now_ms = control_plane.ask_dispatcher.clock().now_ms();
+        let record = PersistedAsk {
+            request_id: "ask-r2-000000000001".to_string(),
+            version: 1,
+            nonce: "nonce-ask-r2".to_string(),
+            session_id: "sess-r2".to_string(),
+            run_id: Some("run-r2".to_string()),
+            turn_id: "turn-r2".to_string(),
+            call_id: "call-ask-r2".to_string(),
+            kind: PendingControlRequestKind::Interaction,
+            prompt: "继续吗？".to_string(),
+            options: Vec::new(),
+            state: AskLifecycleState::Pending,
+            created_at_ms: now_ms,
+            answered_at_ms: None,
+        };
+        let hydrated = control_plane
+            .ask_dispatcher
+            .hydrate_persisted_ask(&record, PendingControlRequestState::Pending);
+
+        let error = control_plane
+            .cancel_approval_request(&hydrated.request_id, hydrated.version)
+            .expect_err("经审批取消面取消 Ask 必须 fail-closed 返回 Err");
+        assert!(
+            error.starts_with("approval_kind_mismatch"),
+            "kind 闸门错误必须带稳定错误码 approval_kind_mismatch，实际 = {error:?}"
+        );
+
+        // fail-closed 的另一半：被拒绝后请求**仍在**待决集合里（既没被取消，也没被静默吞掉）。
+        let still_pending = control_plane
+            .ask_dispatcher
+            .pending_request(&hydrated.request_id)
+            .expect("被 kind 闸门拒绝的 Ask 必须仍然存在");
+        assert_eq!(still_pending.state, PendingControlRequestState::Pending);
+        assert_eq!(still_pending.version, hydrated.version, "拒绝不得改动版本");
     }
 }

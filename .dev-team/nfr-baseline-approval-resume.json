@@ -45,8 +45,8 @@
   ],
   "wave65_approval_resume": {
     "applicable": true,
-    "phase": "protocol_stub_unimplemented_bodies",
-    "stub_purity_rule": "函数体 <=3 行；只允许 `Value::Array(Vec::new())` / `Err(\"not_implemented\".to_string())` / `None`；禁止业务分支与 IO",
+    "phase": "implemented_wave65_r3",
+    "stub_purity_rule": "（历史：空桩阶段）当前已实现；本字段保留说明空桩纯度判据曾用于红相前冻结",
     "stub_purity_self_check": {
       "list_pending_approvals_body_lines": 2,
       "cancel_approval_request_body_lines": 2,
@@ -89,12 +89,14 @@
         ],
         "nonce_excluded": true,
         "fail_closed_on_blank_scope": true,
-        "implemented": false
+        "implemented": true,
+        "implemented_evidence": "crates/pony-agent-core/src/agent/control_plane/mod.rs（list_pending_approvals/cancel_approval_request）+ src/bin/tui.rs（approval_plan/apply_approval_decision）+ 迁移单测；门禁见 .dev-team/green-receipts-approval-resume.md"
       },
       {
         "symbol": "HostControlPlane::cancel_approval_request(request_id: &str, expected_version: u64) -> Result<serde_json::Value, String>",
         "stub_returns": "Err(\"not_implemented\")",
-        "implemented": false
+        "implemented": true,
+        "implemented_evidence": "crates/pony-agent-core/src/agent/control_plane/mod.rs（list_pending_approvals/cancel_approval_request）+ src/bin/tui.rs（approval_plan/apply_approval_decision）+ 迁移单测；门禁见 .dev-team/green-receipts-approval-resume.md"
       }
     ],
     "existing_semantics_untouched": [
@@ -115,8 +117,9 @@
       "fn": "crates/pony-agent-core/src/bin/tui.rs::apply_approval_decision",
       "signature": "pub fn apply_approval_decision(state: &mut TuiState, control_plane: &HostControlPlane, choice: PermissionChoice) -> Option<String>",
       "stub_returns": "None",
-      "wired": false,
-      "dead_code_exemption": "本波显式 #[allow(dead_code)]（消费点在下一波接线），执行波次移除"
+      "wired": true,
+      "dead_code_exemption": "本波显式 #[allow(dead_code)]（消费点在下一波接线），执行波次移除",
+      "wired_evidence": "bin/tui.rs build_control_plane 内 AgentRuntimeBuilder::desktop().host_approval_resume(true)；sync_pending_control_request 合并审批快照；UiEvent::ApprovalResumeTurn 续轮"
     },
     "security_invariants": {
       "inv1_no_execution_before_approval": "本波不新增任何执行路径；批准只写 read 作用域 path 授权（执行波次实现）",
@@ -169,5 +172,11 @@
       "expiry": "wave-65 验收波次",
       "evidence": ".dev-team/contract-matrix-approval-resume.md §2 C5"
     }
-  ]
+  ],
+  "r3_amendments": {
+    "approvalKind_derivation": "由 dispatcher 的 decision_source==\"path_permission_requires_authorization\" 派生（不再以实参是否带 path 判定）",
+    "listing_filter": "list_pending_approvals 仅列路径授权类审批（非路径审批 fail-fast 后不弹面板）",
+    "known_advisories": "见 .dev-team/backlog-approval-resume-followups.md F-1..F-10",
+    "receipts": ".dev-team/green-receipts-approval-resume.md（R2/R3 节）+ .dev-team/review-*-a2/b2/r2.json"
+  }
 }

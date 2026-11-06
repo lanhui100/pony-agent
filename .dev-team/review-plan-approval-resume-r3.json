@@ -1,0 +1,123 @@
+{
+  "verdict": "PASS",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "0086f891-ab0f-4d73-ac34-7408680ebada",
+    "fresh_context": true
+  },
+  "executed_by": "0086f891-ab0f-4d73-ac34-7408680ebada",
+  "reviewed_commit": "25a98482",
+  "reviewed_tree_note": "Gate-2 方案复审：契约矩阵（含 R2 增补，R3 未增行）+ ADR 0077（自 0076 重编号，README 索引已入 index）+ index 中 R3 实现（dispatcher/tool_runtime/turn_control/control_plane/tui）。并行会话 thinking-bottom-gap 的 unstaged 区域（含 docs/decisions/README.md 的 0075/0076 索引行）不计入。",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    ".dev-team/contract-matrix-approval-resume.md",
+    "docs/decisions/0077-approval-resume-host-panel-and-continuation.md",
+    "docs/decisions/README.md",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    ".dev-team/backlog-approval-resume-followups.md"
+  ],
+  "r2_plan_blocking_recheck": [
+    {
+      "round2_plan_blocking": "契约 C2 只冻结 options 形状，未规定 approvalKind 必须由审批成因派生 ⇒ C1 宣称的「非路径审批 fail-fast」在带 path 实参时失效",
+      "status": "已消解",
+      "evidence": "契约 C2 第 48-53 行新增 R3 条款：「approvalKind 必须由审批成因派生（decision_source == path_permission_requires_authorization ⇒ path_authorization，其余一律 approval），禁止以实参是否带 path 键判定」并点明两类误标后果；实现 dispatcher.rs:2157/2165-2172/2179-2201 与之一一对应（成因码取自 governed_executor.rs:282）。C1 第 36-44 行的可恢复面（仅路径授权类）与 turn_control.rs:99-108 + tool_runtime.rs:238-249 一致。"
+    },
+    {
+      "round2_plan_advisory": "ADR 0076:35 断言「非路径审批不进入可恢复挂起」，与当时实现不符",
+      "status": "已消解",
+      "evidence": "ADR 0077:35-37 保留该断言，且实现已改为成因派生（dispatcher 只对路径门禁成因写 path_authorization）⇒ 断言成立；F-1 的一次性豁免需求仍如实在 ADR 中登记。"
+    },
+    {
+      "round2_plan_advisory": "ADR 与并行会话编号冲突（同为 0076）且未入 README 索引",
+      "status": "已消解",
+      "evidence": "docs/decisions/0077-approval-resume-host-panel-and-continuation.md 已重编号；index 中 docs/decisions/README.md:95 已加 0077 行（git show :docs/decisions/README.md 可见），0076 一行属并行会话，未与本次冲突。"
+    }
+  ],
+  "plan_consistency_check": [
+    {
+      "contract_item": "C1 能力位 + 唯一消费点 + 默认 false + 可恢复面仅路径授权类",
+      "status": "CONSISTENT",
+      "evidence": "tui.rs:4851 唯一 `.host_approval_resume(true)`；runtime/mod.rs:181/264 默认 false 未改；src-tauri/** 未改；turn_control.rs:99-108 追加 `is_path_authorization_approval()`。"
+    },
+    {
+      "contract_item": "C2 结构化 options/prompt 且 approvalKind 由成因派生（禁止实参形状判定）",
+      "status": "CONSISTENT",
+      "evidence": "dispatcher.rs:1706-1714（options 按 verdict 分派后传 decision_source）、:1643-1647（prompt 同源）、:2157 成因码常量、:2165-2172 派生、:2179-2201 组装（path 仅路径成因携带）、:2207-2226 文案；Ask 侧 ask_options_from_arguments 未改。单测 3 例覆盖正反与降级。"
+    },
+    {
+      "contract_item": "C3 列表投影 11 字段 + 无 nonce + 空白 scope fail-closed + TTL 过滤 + cancel kind 闸门",
+      "status": "PARTIAL",
+      "evidence": "实现 control_plane/mod.rs:1357-1374（投影 11 字段、无 nonce）、:1385-1393（Pending + 未过期 + 路径授权类）、:1415-1444（空白 scope 返回空数组）、:1446-1470（kind 闸门 + CAS）。契约 C3 第 57-62 行只登记「Approval + Pending + 同 session + 未过期」，缺 R3 新增的「路径授权类」必要条件 ⇒ 见 findings[0]（登记不全，ADVISORY，实现更严且 fail-closed）。"
+    },
+    {
+      "contract_item": "C4 审批优先展示 / 唯一决策接缝 / 拒绝走 cancel / 续轮常量文案不产生用户气泡",
+      "status": "CONSISTENT",
+      "evidence": "tui.rs:8705-8775 合并顺序审批在前；:8873-8905 apply_approval_decision 唯一接缝（9910/9941/9964 三处按键分支共用）；:1957-1965 失效文案按句柄种类分流；:11308-11399 续轮不调 add_user_message。"
+    },
+    {
+      "contract_item": "C5 红相 T1-T4 冻结 + R2 单元级判据",
+      "status": "PARTIAL",
+      "evidence": "T1-T4 未改动且 4 passed（sha256 b5571f73…94cb5）；R2 判据单测均在场（tui.rs:12194/12216、control_plane/mod.rs:10473/10577）。但 R3 新增的 5 例（dispatcher 3 + stale notice 2）与「非路径 Approval 不可列」判据未写入 C5，且 §4 变更流水无 R3 行 ⇒ 见 findings[1]（ADVISORY）。"
+    },
+    {
+      "contract_item": "§3 可观测性收口（audit-diff --base ebf50d64）",
+      "status": "SATISFIED",
+      "evidence": "实测 bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base ebf50d64 → [OK] 无越界实现、收口点完整（扫描 27 文件 / 3858 行新增），Exit 0。"
+    },
+    {
+      "contract_item": "ADR 唯一编号 + README 索引 + F-1/F-2 归属",
+      "status": "SATISFIED",
+      "evidence": "0077 无同号文件（docs/decisions/ 下 0075/0076 属并行会话）；README:95 已登记；ADR:37 与 backlog F-1 互指；F-2 已改写为「可测未测」并给出配方（backlog 第 6 行），与 review-l3p 的 f2_judgment 一致。"
+    }
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-approval-resume.md",
+      "line": 57,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "backlog_ref": "建议新增 F-11（契约文本随 R3 实现同步）；行为无缺陷",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 56,62p .dev-team/contract-matrix-approval-resume.md ; sed -n 1385,1393p crates/pony-agent-core/src/agent/control_plane/mod.rs ; sed -n 105,114p .dev-team/contract-matrix-approval-resume.md   # C3（:57-58）只写「Approval + Pending + 同 session + 未过期」，而 approval_is_listable 还要求 is_path_authorization_approval（control_plane/mod.rs:1392）；§4 变更流水（:111-113）只有 R2 行、无 R3 行。契约是下一宿主实现者的唯一真值源：照 C3 实现会列出非路径审批，正是 R3 要消除的「面板可批、续轮再审批」错配。实现侧比契约更严且 fail-closed，故列 ADVISORY 而非 BLOCKING。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-approval-resume.md",
+      "line": 94,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "backlog_ref": "建议并入 F-11（C5 判据清单补行）",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 92,96p .dev-team/contract-matrix-approval-resume.md ; grep -n 'fn approval_is_listable_rejects_non_path_authorization_approval\\|fn path_permission_cause_with_path_argument_is_path_authorization\\|fn non_path_causes_stay_plain_approval_even_with_path_argument\\|fn stale_notice_is_kind_specific' crates/pony-agent-core/src/agent/control_plane/mod.rs crates/pony-agent-core/src/agent/dispatcher.rs crates/pony-agent-core/src/bin/tui.rs   # C5 的 R2 增补只列 approval_plan / approval_is_listable 四态 / cancel kind 三组；R3 新增的 3 例成因派生单测与 2 例失效文案单测未登记，且「非路径 Approval ⇒ 不可列」这一新判据在 C5 无对应条目 ⇒ 验收清单落后于实际落点。"
+    },
+    {
+      "file": "docs/decisions/0077-approval-resume-host-panel-and-continuation.md",
+      "line": 38,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "backlog_ref": "建议并入 F-11（ADR 与契约同批修订）",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n 38,41p docs/decisions/0077-approval-resume-host-panel-and-continuation.md ; sed -n 2179,2201p crates/pony-agent-core/src/agent/dispatcher.rs   # ADR 称 options 形状恒为 approvalKind/tool/path/scope，且 list_pending_approvals 只提「过滤已过期」；实现里非路径审批**不带 path 键**（dispatcher.rs:2194-2199），列表另加路径授权类过滤（control_plane/mod.rs:1392）⇒ ADR 与实现两处细节不一致。仅文档表述，无行为影响。"
+    }
+  ],
+  "advisory_register": [
+    {
+      "id": "F-2",
+      "decision": "ADVISORY·可测未测",
+      "evidence": "31 个集成测试已用 #[path=\"../src/bin/tui.rs\"] 导入 bin（配方可行）；apply_approval_decision 的 3 个生产调用点 tui.rs:9910/9941/9964 无测试经过；删实现则 bin 单测编译失败（假绿已消除）。详见 review-l3p-approval-resume-r3.json 的 f2_judgment。"
+    },
+    {
+      "id": "F-10",
+      "decision": "已闭环",
+      "evidence": "ADR 已重编号 0077，README:95 已登记索引。"
+    },
+    {
+      "id": "F-1..F-9",
+      "decision": "维持 ADVISORY（本波不扩大闭包）",
+      "evidence": "逐条与 backlog 表一致，未被本轮升格。"
+    }
+  ]
+}

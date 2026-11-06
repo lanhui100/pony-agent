@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/protocol.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs"
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "7ce333c3-1658-47bd-a9c4-ca3b29c71a7a",
+    "fresh_context": true
+  },
+  "executed_by": "7ce333c3-1658-47bd-a9c4-ca3b29c71a7a",
+  "reviewed_commit": "25a98482",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "wave-65 R2 复审（视角 B：状态流转 + 并发/死锁），审查对象 = 暂存区 `git diff --cached`（工作树另有并行会话 thinking-bottom-gap 的未提交改动，与本单无关且未触碰）。B-B1/B-B2 判定见 review_summary；未修 F-3/F-4/F-5/F-6 仍按既有登记保持 ADVISORY，本单不升级。R2 单测物理收据：`cargo test -p pony-agent-core --lib -- wave65_r2_approval w1_approval_unrecoverable_tests` 8 passed / 0 failed（lib 1319 总数一致）；`cargo test -p pony-agent-core --bin pony -- wave65_approval_unit_tests wave65_r2_approval_plan_tests` 5 passed / 0 failed；`cargo test -p pony-agent-core --test approval_resume_e2e` 4 passed / 0 failed。可证伪点（静态判定，未做变异以免违反只读）：删掉 `approval_is_listable` 的 `now_ms <= request.expires_at_ms` ⇒ control_plane/mod.rs:10495 附近 `assert!( !approval_is_listable(..1_001) )` 红；把 `approval_path` 恢复成 `command_or_path` 回退 ⇒ tui.rs:12202 `assert_eq!(request.approval_path, None)` 红；去掉 `&& approval_is_path_authorization(request)` ⇒ turn_control.rs:674 非路径审批断言红。已知盲区（如实登记，不构成缺陷）：`approval_plan` 的 no-path 夹具不含 `callId`，因此 approval_plan 内部若新增 callId 回退不会被该用例抓住（生产入口 `approval_snapshot_hint` 只产 `options.path`，故实际不可达）；TTL 只有纯函数单测，`list_pending_approvals` 的时钟/过滤接线无集成用例（e2e T1~T4 未覆盖过期）。"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8695,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "note": "R2 收紧后运行时与宿主面对「非路径审批」口径不一致：turn_control 只允许 `approvalKind==\"path_authorization\"` 可恢复（其余 fail-fast `approval_resume_unavailable`），而 `list_pending_approvals`/`approval_is_listable` 只按 kind=Approval+Pending+TTL 过滤，不看 approvalKind。于是 `tool_rule_ask` / `external_requires_approval` 这类审批：本轮已失败收口，但请求仍 Pending，500ms 轮询仍会弹出审批面板；用户按 y ⇒ `apply_approval_decision` 跳过授权直接 CAS 成功 ⇒ 投递 `ApprovalResumeTurn` 起新一轮 ⇒ 模型重试同一工具 ⇒ 策略再次要求审批 ⇒ 再来一轮。这是 C1 注释里点名要避免的「批准→续轮→再审批」，只是从自动改成了每次需一次点击（拒绝或 60s TTL 可逃逸，故非死锁）。建议二选一：`approval_is_listable` 增补 `options.approvalKind==\"path_authorization\"`（面板只列可恢复审批），或运行时 fail-fast 时对同 request_id 执行 `cancel_control_request` 收口。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"t=open('crates/pony-agent-core/src/bin/tui.rs').read();cp=open('crates/pony-agent-core/src/agent/control_plane/mod.rs').read();s=cp[cp.index('pub fn list_pending_approvals'):];s=s[:s.index('pub fn cancel_approval_request')];assert 'approval_is_listable' in s;a=cp[cp.index('pub(crate) fn approval_is_listable'):];a=a[:a.index('impl HostControlPlane')];assert 'approvalKind' not in a and 'path_authorization' not in a;tc=open('crates/pony-agent-core/src/agent/runtime/turn_control.rs').read();assert '&& approval_is_path_authorization(request)' in tc;assert 'ApprovalResumeTurn { prompt }' in t;print('DEFECT: 非路径审批运行时 fail-fast，但审批列表不按可恢复性过滤且批准后仍投递续轮 ⇒ 批准→续轮→再审批无收敛路径');raise SystemExit(1)\""
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8654,
+      "rule": "TIMEOUT",
+      "severity": "ADVISORY",
+      "note": "B-B1 的 TTL 收口复用 Ask 文案：审批到期后 `list_pending_approvals` 变空 ⇒ `pending_panel_should_close` 关面板（活锁已消解），但 `close_stale_pending_request` 统一上屏「该提问已失效，已同步最新待处理请求」——①把审批说成「提问」；②「已同步最新待处理请求」在审批过期时通常并无新请求；③不告知用户该挂起轮已不会被续跑（运行时侧无过期驱动、也不会再发 turn 终态），用户只看到面板消失、任务停滞。属可读性/状态告知缺口，非阻塞。建议为 Approval 过期单独给中文文案（如「该审批已超时失效，本轮不会自动继续，请重新发起该操作」）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"t=open('crates/pony-agent-core/src/bin/tui.rs').read();s=t[t.index('fn close_stale_pending_request'):][:400];assert 'ASK_STALE_NOTICE' in s and '审批' not in s;print('DEFECT: 审批 TTL 到期与 Ask 失效共用 Ask 文案，未说明审批已过期且挂起轮不会续跑');raise SystemExit(1)\""
+    }
+  ],
+  "review_summary": {
+    "B-B1_TIMEOUT": "RESOLVED。`list_pending_approvals` 用 `self.ask_dispatcher.clock().now_ms()`；`HostControlPlane.ask_dispatcher` 就是运行时执行用的那个 dispatcher（builder 取 `runtime.governed_dispatcher()`，`GovernedDispatcher` 为 `Arc<Inner>` clone 共享同一 inner），`consume_control_request` 用的 `self.clock.now_ms()` 与 `can_consume` 的 `now_ms <= expires_at_ms` 同源同界（now==expires 仍可列/可 CAS，单测已钉）。过期后列表为空 ⇒ `pending_panel_should_close` 关面板且不再重弹；未过期审批在列表里 ⇒ 不会误关。",
+    "B-B2_CORRECTNESS": "RESOLVED。决策链只剩一个 `authorize_path` 调用点（tui.rs:8838），来源 `approval_snapshot_hint` → `PermissionRequest.approval_path` → 仅 `options.path`（tui.rs:1502）；`command_or_path` 仅用于展示（含 callId 回退），不再进入授权。approve/cancel 均由同一 `apply_approval_decision` 收口。",
+    "R2_NEW_RISKS": "kind 闸门拒绝不消费、版本不变（单测断言 state==Pending && version 不变）；面板不记忆失败：失败即 `pending_request=None` + 关面板，下一轮 sync 依快照重建（可重试，不双终态）。合并顺序只影响 `items.first()` 开panel，`pending_panel_should_close` 仅按 request_id 判成员，顺序无关。`UiEvent::PermissionDecided` 处理器为空，不会与 `ApprovalResumeTurn` 形成双终态；续轮重入闸门缺失仍属已登记 F-6（ADVISORY，不升级）。新增 ADVISORY 见 findings（非路径审批可列可批、过期文案）。"
+  }
+}

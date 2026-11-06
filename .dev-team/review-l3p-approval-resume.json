@@ -1,0 +1,44 @@
+{
+  "verdict": "FAIL",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "67ae91c2-55d5-4851-8386-5d7396533e8e",
+    "fresh_context": true
+  },
+  "executed_by": "67ae91c2-55d5-4851-8386-5d7396533e8e",
+  "reviewed_commit": "25a98482",
+  "reviewed_tree_note": "HEAD 25a98482 + 工作树未提交的 wave-65 实现（src/ 6 文件）；并行会话 thinking-bottom-gap 区域不计入本波判定",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src",
+    "crates/pony-agent-core/tests/approval_resume_e2e.rs",
+    ".dev-team/nfr-baseline-approval-resume.json",
+    ".dev-team/green-receipts-approval-resume.md"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8786,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "sed -n '1466,1476p;8780,8791p' crates/pony-agent-core/src/bin/tui.rs   # 批准分支无条件走 authorize_path(command_or_path,\"read\")：1470-1475 在 options.path 缺失时把 command_or_path 回退成 callId；authorize_path 内部 std::fs::canonicalize(\"call_…\") 必失败 ⇒ report_control_request_error(\"审批授权失败\") 后 return None ⇒ approve_control_request 永不执行。契约 §2 C4 写的是「options.path 存在时 authorize_path(path,\"read\") → approve_control_request」，即无 path 的审批必须可批准。后果：ADR 0076 明列的两类 ApprovalRequired（用户规则 tool_rule_ask、外部工具 external_requires_approval，options={approvalKind:\"approval\",tool}）在 TUI 上永远批不掉；请求留在 Pending，500ms 轮询把面板重新弹出（pending_request 已清、mode 已回 Normal）⇒ 批准-报错-重弹的活锁，用户只能拒绝；同一路径对「Read 目标文件不存在（canonicalize 失败）」也成立。红相 T1/T2 直接调 control_plane.authorize_path + approve_control_request，绕过 apply_approval_decision，故 4/4 绿无法发现该缺陷。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8662,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '8660,8664p;8683p' crates/pony-agent-core/src/bin/tui.rs   # merged 先 extend Ask 快照、后 extend 审批，再取 items.first() ⇒ Ask 优先；契约 §2 C4 要求「Ask 快照与 list_pending_approvals 合并（审批优先展示）」。当上一轮遗留 Pending Ask 与本轮审批并存时，审批面板要到 Ask 被作答后才出现，而 Approval 仍按 expires_at_ms 过期，可能未展示即 Expired。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 1397,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'eprintln!' crates/pony-agent-core/src/agent/control_plane/mod.rs | sed -n '1,5p'; grep -n 'approval_resume_turn_' crates/pony-agent-core/src/bin/tui.rs   # 本波新增 3 行非 JSON、无 trace_id 的 eprintln（core 1 行 fail-closed 诊断 + tui 2 行续轮 started/failed）；NFR 基准 logging{format=json,trace_id_required} 且 exempt_covers_new_lines=0（豁免仅覆盖锁中毒恢复诊断，PA-119 未清）。行为本身 fail-closed 且可关键字定位，故不阻断，登记为 PA-119 债务增量。"
+    }
+  ]
+}

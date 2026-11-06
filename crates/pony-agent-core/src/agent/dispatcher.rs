@@ -1637,18 +1637,13 @@ impl Inner {
         let (kind, prompt) = match ready.decision.verdict {
             PermissionVerdict::ApprovalRequired => (
                 ToolControlKind::ApprovalRequired,
-                // TODO(approval-resume) C2 接缝：审批请求的**结构化上下文**在此产出。
-                // 本波（协议空桩）保持既有 prompt 逐字不变（digest 文案）；执行波次在此改为
-                // 中文可读文案（含工具名与路径），并在下方 `options:` 处改为
-                // `{"approvalKind":"path_authorization","tool":<model 名>,"path":<原始 path>,
-                //  "scope":"read"}`（无 path ⇒ `"approvalKind":"approval"`）。
-                // 不改变现有行为 = 本次不实现，只留接缝；Interaction(Ask) 的
-                // `ask_options_from_arguments` 语义不受影响。
-                format!(
-                    "Tool `{}` ({}) requires approval. Final arguments digest: {}.",
-                    ready.descriptor.identity.descriptor_id,
-                    ready.descriptor.identity.model_name,
-                    ready.final_args_digest
+                // wave-65 C2：审批请求的**中文可读**文案（含工具名；路径授权类才提路径），
+                // 替代原 digest 文案 —— 宿主面板要给人看，digest 对用户无意义。
+                // R3（F1）：文案与 `approvalKind` 一样按**成因**（`decision_source`）区分。
+                approval_prompt_from_arguments(
+                    &ready.decision.decision_source,
+                    &ready.descriptor.identity.model_name,
+                    &ready.final_arguments,
                 ),
             ),
             PermissionVerdict::WaitingHost => (
@@ -1705,9 +1700,17 @@ impl Inner {
             expires_at_ms: now.saturating_add(config.control_request_expiry_ms),
             state: PendingControlRequestState::Pending,
             prompt: Some(prompt),
-            // TODO(approval-resume) C2 接缝：`Approval` 时 options 应写入结构化审批上下文
-            // （见上方 ApprovalRequired 分支注释）；本波保持既有 Ask options 解析不变。
-            options: ask_options_from_arguments(&ready.final_arguments),
+            // wave-65 C2：`Approval` 写结构化审批上下文（`approvalKind`/`tool`/`path`/`scope`），
+            // 宿主面板据此还原越界路径；`Interaction`(Ask) 仍走 `ask_options_from_arguments`
+            // （语义逐字不变）。R3（F1）：`approvalKind` 由**审批成因**派生，不再看实参形状。
+            options: match ready.decision.verdict {
+                PermissionVerdict::ApprovalRequired => approval_options_from_arguments(
+                    &ready.decision.decision_source,
+                    &ready.descriptor.identity.model_name,
+                    &ready.final_arguments,
+                ),
+                _ => ask_options_from_arguments(&ready.final_arguments),
+            },
         };
         // ADR 0074: an Ask is persisted state, not process memory. Persist the full CAS facts
         // (`version`, `nonce`) so `list_pending` works after a restart and a second instance can
@@ -2132,6 +2135,91 @@ fn ask_options_from_arguments(arguments: &Value) -> Option<Value> {
     match arguments.get("options") {
         Some(Value::Array(items)) if !items.is_empty() => Some(Value::Array(items.clone())),
         _ => None,
+    }
+}
+
+/// wave-65 C2：审批请求的**原始**目标路径（模型给的 `path` / `filePath` / `file_path`）。
+///
+/// 返回的是**未经归一化**的原始字符串：审批面板要展示、批准时 `authorize_path` 要按同一个
+/// 路径写 read 作用域授权，任何改写都会让「展示的路径」与「被授权的路径」不一致。
+fn approval_path_from_arguments(arguments: &Value) -> Option<&str> {
+    for key in ["path", "filePath", "file_path"] {
+        if let Some(value) = arguments.get(key).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// wave-65 R3（F1）：**路径授权门禁**的成因码（`GovernedPolicyEvaluator` 唯一产生它的分支）。
+const PATH_PERMISSION_DECISION_SOURCE: &str = "path_permission_requires_authorization";
+
+/// wave-65 R3（F1）：`approvalKind` **只由审批成因派生**（其余成因一律 `"approval"`）。
+///
+/// 为什么**禁止**再按「实参里有没有 `path` 键」派生：审批成因与实参形状是两件事 ——
+/// `tool_rule_ask` / `external_requires_approval` 的工具同样可能带 `path` 实参，一旦被误标成
+/// `path_authorization`：① runtime 会把这类挂起判为**可恢复** ⇒ 「批准 → 续轮 → 再审批」死循环；
+/// ② 该 path 若不是可读的真实路径，`authorize_path` 的 canonicalize 必败 ⇒ `approve` 永不执行。
+fn approval_kind_from_decision_source(decision_source: &str) -> &'static str {
+    if decision_source.trim() == PATH_PERMISSION_DECISION_SOURCE {
+        "path_authorization"
+    } else {
+        "approval"
+    }
+}
+
+/// wave-65 C2：审批请求的**结构化上下文**（宿主面板/审批链路据此还原工具与越界路径）。
+///
+/// 形状冻结于契约 §2 C2（R3 修订）：
+/// `{"approvalKind":<成因>,"tool":<model 名>,"path":<原始 path>,"scope":"read"}`；
+/// 非路径授权类成因（`approvalKind == "approval"`）**不带 `path` 键**（R3：避免 TUI 把规则类
+/// 审批的 path 实参当成待授权路径），故为 `{"approvalKind":"approval","tool":<model 名>}`。
+fn approval_options_from_arguments(
+    decision_source: &str,
+    tool_name: &str,
+    arguments: &Value,
+) -> Option<Value> {
+    let kind = approval_kind_from_decision_source(decision_source);
+    Some(match (kind, approval_path_from_arguments(arguments)) {
+        ("path_authorization", Some(path)) => json!({
+            "approvalKind": "path_authorization",
+            "tool": tool_name,
+            "path": path,
+            "scope": "read",
+        }),
+        // 成因声称路径门禁却取不到 path 实参：生产不可达（该成因只在有 path 时产生），
+        // 但这里**降级为普通审批**（fail-closed）—— 绝不让一条「无 path 的 path_authorization」
+        // 进入可恢复分支，否则续轮必再审批。
+        _ => json!({
+            "approvalKind": "approval",
+            "tool": tool_name,
+        }),
+    })
+}
+
+/// wave-65 C2：审批请求的**中文可读**文案（含工具名；仅路径授权类才提“工作区外路径”）。
+///
+/// 为什么不用 digest 文案：审批面板是给人看的，`final_args_digest` 对用户毫无信息量；
+/// digest 仍保留在 `PendingControlRequest::final_args_digest`（CAS 真值），只是不再上屏。
+/// R3：文案同样按**成因**区分 —— 规则/外部审批说「需要审批」，不能谎报成「工作区外路径」。
+fn approval_prompt_from_arguments(
+    decision_source: &str,
+    tool_name: &str,
+    arguments: &Value,
+) -> String {
+    match (
+        approval_kind_from_decision_source(decision_source),
+        approval_path_from_arguments(arguments),
+    ) {
+        ("path_authorization", Some(path)) => {
+            format!("工具 {tool_name} 需要读取工作区外路径 {path}，请授权后重试。")
+        }
+        // 成因声称路径门禁却取不到 path 实参：与 `approval_options_from_arguments` 的降级
+        // 保持同步（那条也会降级为 `approvalKind:"approval"`），文案因此**不再**声称
+        // 「工作区外路径」—— 否则文案与 `approvalKind` 互相矛盾，用户会按错误的信息去排障。
+        _ => format!("工具 {tool_name} 需要审批后才能执行（策略或外部来源要求），请确认后重试。"),
     }
 }
 
@@ -4017,4 +4105,119 @@ fn next_control_request_seq() -> u64 {
         (nanos ^ ((std::process::id() as u64).rotate_left(32))) % MODULUS
     });
     (seed + GLOBAL_SEQ.fetch_add(1, Ordering::Relaxed)) % MODULUS
+}
+
+/// wave-65 R3（F1）单测：`approvalKind` **只由审批成因派生**，与实参形状脱钩。
+///
+/// 复现的缺陷：旧实现按「实参里有没有 path 键」判定 ⇒ `tool_rule_ask` /
+/// `external_requires_approval` 只要实参带 path 就被误标成 `path_authorization`，
+/// 于是被 runtime 判为可恢复（批准→续轮→再审批死循环），或 `authorize_path` 必败使 approve 永不执行。
+#[cfg(test)]
+mod wave65_r3_approval_kind_tests {
+    use super::*;
+
+    fn args_with_path() -> Value {
+        json!({
+            "path": "/tmp/outside/probe.txt",
+            "description": "读取工作区外的探针文件",
+        })
+    }
+
+    #[test]
+    fn path_permission_cause_with_path_argument_is_path_authorization() {
+        let options = approval_options_from_arguments(
+            "path_permission_requires_authorization",
+            "Read",
+            &args_with_path(),
+        )
+        .expect("路径授权类审批必须带结构化 options");
+        assert_eq!(
+            options.get("approvalKind").and_then(Value::as_str),
+            Some("path_authorization"),
+            "路径门禁成因必须派生 path_authorization，实际 = {options}"
+        );
+        assert_eq!(
+            options.get("path").and_then(Value::as_str),
+            Some("/tmp/outside/probe.txt"),
+            "路径授权类审批必须携带**原始**路径，实际 = {options}"
+        );
+        assert_eq!(options.get("scope").and_then(Value::as_str), Some("read"));
+
+        // 文案按成因：路径授权类才提「工作区外路径」。
+        let prompt = approval_prompt_from_arguments(
+            "path_permission_requires_authorization",
+            "Read",
+            &args_with_path(),
+        );
+        assert!(
+            prompt.contains("工作区外路径") && prompt.contains("/tmp/outside/probe.txt"),
+            "路径授权类文案必须含工具名与路径，实际 = {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn non_path_causes_stay_plain_approval_even_with_path_argument() {
+        // 规则类 / 外部来源 / 保守抬升（以及任何未知成因）一律只是普通审批。
+        for decision_source in [
+            "tool_rule_ask",
+            "external_requires_approval",
+            "plan_execution_approval_gate",
+            "governed_default",
+            "",
+        ] {
+            let options =
+                approval_options_from_arguments(decision_source, "Bash", &args_with_path())
+                    .expect("普通审批也要带结构化 options");
+            assert_eq!(
+                options.get("approvalKind").and_then(Value::as_str),
+                Some("approval"),
+                "成因 `{decision_source}` 即使实参带 path 也不得标成路径授权类，实际 = {options}"
+            );
+            assert!(
+                options.get("path").is_none(),
+                "普通审批不得携带 path 键（否则 TUI 会误以为需要路径授权），实际 = {options}"
+            );
+
+            // 文案同样不得谎报「工作区外路径」。
+            let prompt =
+                approval_prompt_from_arguments(decision_source, "Bash", &args_with_path());
+            assert!(
+                !prompt.contains("工作区外路径"),
+                "非路径成因的文案不得谎报工作区外路径，实际 = {prompt:?}"
+            );
+            assert!(
+                prompt.contains("Bash") && prompt.contains("审批"),
+                "普通审批文案必须含工具名并说明需要审批，实际 = {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_permission_cause_without_path_argument_degrades_to_plain_approval() {
+        // 生产不可达（该成因只在有 path 实参时产生）：仍必须 fail-closed 降级成普通审批，
+        // 否则一条「无 path 的 path_authorization」会进入可恢复分支并在续轮里再次审批。
+        let options = approval_options_from_arguments(
+            "path_permission_requires_authorization",
+            "Read",
+            &json!({ "description": "no path" }),
+        )
+        .expect("仍要给出结构化 options");
+        assert_eq!(
+            options.get("approvalKind").and_then(Value::as_str),
+            Some("approval"),
+            "成因是路径门禁但取不到 path 时必须降级为普通审批，实际 = {options}"
+        );
+        assert!(options.get("path").is_none());
+
+        // 文案同样降级：不得再声称「工作区外路径」（否则与 approvalKind 矛盾）。
+        let prompt = approval_prompt_from_arguments(
+            "path_permission_requires_authorization",
+            "Read",
+            &json!({ "description": "no path" }),
+        );
+        assert!(
+            !prompt.contains("工作区外路径"),
+            "降级为普通审批时文案不得再声称工作区外路径，实际 = {prompt:?}"
+        );
+    }
 }

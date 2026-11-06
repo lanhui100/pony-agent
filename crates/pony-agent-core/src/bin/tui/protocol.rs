@@ -22,6 +22,13 @@ pub struct PermissionRequest {
     pub tool_name: String,
     pub description: String,
     pub command_or_path: Option<String>,
+    /// wave-65 R2（F3）：审批请求的**结构化**授权路径（宿主快照的 `options.path`）。
+    ///
+    /// 只承载「批准时要写 read 作用域授权的那个路径」；**绝不**回退 `callId`
+    /// （`callId` 不是文件路径，拿它去 `authorize_path` 做 canonicalize 必败 ⇒ 无 path 审批被永久拒批）。
+    /// `command_or_path` 仍保留为**展示**用（它允许回退 `callId`），两者语义不混用。
+    #[serde(default)]
+    pub approval_path: Option<String>,
     pub timestamp_ms: u64,
 }
 

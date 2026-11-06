@@ -225,6 +225,25 @@ impl PendingControlRequest {
             && self.nonce == nonce
             && time_bound
     }
+
+    /// wave-65 R3（F2）：该请求是否为**路径授权类**审批
+    /// （`request_kind == Approval` **且** `options.approvalKind == "path_authorization"`）。
+    ///
+    /// 这是「审批可恢复」与「审批可列出」的**唯一共享判据**：runtime
+    /// （`suspension_is_unrecoverable`）与 control plane（`approval_is_listable` →
+    /// `list_pending_approvals`）必须同源，否则会再次出现「runtime 判可恢复、宿主列表却不显示」
+    /// （或反过来的「列表显示、批准后续轮再审批」）这种错配。
+    /// 非路径审批（`tool_rule_ask` / `external_requires_approval` / 保守抬升）**不是**一类：
+    /// 它们被消费后不产生任何豁免，续轮必再审批 ⇒ 既不可恢复、也不该进入宿主面板。
+    pub fn is_path_authorization_approval(&self) -> bool {
+        self.request_kind == PendingControlRequestKind::Approval
+            && self
+                .options
+                .as_ref()
+                .and_then(|options| options.get("approvalKind"))
+                .and_then(|kind| kind.as_str())
+                .is_some_and(|kind| kind.trim() == "path_authorization")
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

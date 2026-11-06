@@ -1,0 +1,130 @@
+{
+  "verdict": "PASS",
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "0086f891-ab0f-4d73-ac34-7408680ebada",
+    "fresh_context": true
+  },
+  "executed_by": "0086f891-ab0f-4d73-ac34-7408680ebada",
+  "reviewed_commit": "25a98482",
+  "reviewed_tree_note": "HEAD 25a98482（冻结红相）+ index 中的 wave-65 R3 实现（dispatcher.rs / tool_runtime.rs / turn_control.rs / control_plane/mod.rs / bin/tui.rs / 契约 / ADR 0077 / NFR 基准 / 收据 / backlog）。并行会话 thinking-bottom-gap 的 unstaged hunk（MessageRole::Thinking、docs/decisions/README.md 的 0075/0076 索引行等）不计入本波判定。",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src",
+    ".dev-team/nfr-baseline-approval-resume.json",
+    ".dev-team/green-receipts-approval-resume.md",
+    ".dev-team/backlog-approval-resume-followups.md",
+    "crates/pony-agent-core/tests/approval_resume_e2e.rs"
+  ],
+  "r3_blocking_recheck": [
+    {
+      "round2_blocking": "L3-P R2#1 dispatcher.rs:2161 approvalKind 由「实参是否带 path」派生，与审批成因脱钩 ⇒ tool_rule_ask / external_requires_approval 带 path 实参时被误标 path_authorization（批准→续轮→再审批循环；或 authorize_path canonicalize 必败使 approve 永不执行）",
+      "status": "已消解",
+      "evidence": "① 成因成为唯一判据：dispatcher.rs:2157 冻结成因码 `path_permission_requires_authorization`（与 governed_executor.rs:282 逐字一致），:2165-2172 `approval_kind_from_decision_source` 只做 `decision_source.trim() == PATH_PERMISSION_DECISION_SOURCE` 比较，实参形状不再参与；② 两个消费点同源传成因：:1643-1647（prompt）与 :1706-1714（options）均传 `&ready.decision.decision_source`；③ 非路径成因**不带 path 键**：:2179-2201（path_authorization 才写 path/scope，其余 `{approvalKind:\"approval\",tool}`）；④ 路径成因但无 path ⇒ :2189-2199 fail-closed 降级为 approval，文案同步降级不再谎报「工作区外路径」（:2207-2226）；⑤ 生产侧该成因必然带 path（governed_executor.rs:270-289 先取 path 实参再 classify），故降级分支不可达但方向安全；⑥ Approval 请求仍只有 dispatcher 一个生产构造点（dispatcher.rs:1678 + 1690-1720），无第二处绕过。",
+      "test_evidence": "cargo test -p pony-agent-core --lib wave65 → 6 passed / 0 failed（含 wave65_r3_approval_kind_tests 3 例：路径成因+path ⇒ path_authorization；tool_rule_ask / external_requires_approval / plan_execution_approval_gate / governed_default / 空串 + path ⇒ approval 且无 path 键；路径成因无 path ⇒ 降级 approval）。"
+    },
+    {
+      "round2_followup": "R2#1 的同源判据在 runtime 与 control plane 双份解析（漂移面）",
+      "status": "已消解",
+      "evidence": "tool_runtime.rs:238-249 `PendingControlRequest::is_path_authorization_approval()` 为唯一判据；turn_control.rs:99-108（可恢复性）与 control_plane/mod.rs:1385-1393 `approval_is_listable`（可列性）同时复用 ⇒ runtime 判可恢复 / 宿主不列、或宿主列 / 批准后再审批，两种错配的同源根因消除。",
+      "test_evidence": "cargo test -p pony-agent-core --lib w1_approval_unrecoverable → 6 passed（含 approval_suspension_unrecoverable_for_non_path_authorization_when_capability_enabled：approval / 无 options / approvalKind 非字符串三形态均不可恢复）；control_plane/mod.rs:10545 approval_is_listable_rejects_non_path_authorization_approval 通过。"
+    }
+  ],
+  "r2_advisory_recheck": [
+    {
+      "id": "F-9（PA-119 日志债务）",
+      "status": "未变（R3 增量 0 处 eprintln，遗留 3 处属 R2）",
+      "evidence": "git diff --cached -U0 -- crates/pony-agent-core/src | grep -c '^+.*eprintln!' = 3，全部来自 R2（control_plane/mod.rs:1418、tui.rs:11292/11391 续轮 started/failed）；R3 的失效路径改走 set_status_notice + ChatMessage（tui.rs:1960-1965、8643-8657），无新增 stderr。"
+    },
+    {
+      "id": "NFR 基准锚点陈旧",
+      "status": "部分改善（phase/implemented/wired 已更新），锚点仍陈旧 ⇒ 仍为 ADVISORY（findings[0]）",
+      "evidence": "nfr-baseline-approval-resume.json:48 phase=implemented_wave65_r3、:92/:97 implemented=true、:118 wired=true；但 :62 inert_this_wave=true（理由仍称「TUI 未接线」）与 tui.rs:4851 host_approval_resume(true) 直接矛盾，:67 approval_branch 仍是 R1 判据。"
+    },
+    {
+      "id": "审批 TTL 到期的终态语义",
+      "status": "用户可见面已收口（R3 F3），轮次级终态仍未定义 ⇒ 残余 ADVISORY（并入 F-4）",
+      "evidence": "过期后 approval_is_listable=false ⇒ 面板关闭并上屏 APPROVAL_STALE_NOTICE（tui.rs:1957、8643-8657），文案明确「本轮不会自动继续；请重新发起」；但被挂起的轮次仍无 turn:failed / 续轮路径，属既有语义（F-4 durable store 重建时一并处理）。"
+    },
+    {
+      "id": "F-6 续轮重入",
+      "status": "未变（ADVISORY，本波不阻断）",
+      "evidence": "ApprovalResumeTurn 分支（tui.rs:11308-11405）与 AskResumeTurn 同构，仍只靠 turn_loop_in_flight + inflight_turns，未校验 is_streaming。"
+    }
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/nfr-baseline-approval-resume.json",
+      "line": 62,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "backlog_ref": "当前 F-1..F-10 未覆盖 ⇒ 建议新增 F-11（NFR 基准锚点随实现同步）",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"import json;d=json.load(open('.dev-team/nfr-baseline-approval-resume.json'))['wave65_approval_resume'];print('inert_this_wave=',d['capability_bit']['inert_this_wave']);print('approval_branch=',d['unrecoverable_predicate']['approval_branch'])\" ; grep -n 'host_approval_resume(true)' crates/pony-agent-core/src/bin/tui.rs ; sed -n 99,108p crates/pony-agent-core/src/agent/runtime/turn_control.rs   # 基准仍自称「TUI 未接线」（:62-63 inert_this_wave=true）而 tui.rs:4851 已接线；:67 approval_branch 逐字停留在 R1 判据 `!(host_approval_resume && session_id.is_some())`，实际已追加 `is_path_authorization_approval()` ⇒ 六问的量化锚点与代码不符。行为无缺陷（判定以代码为准），故维持 ADVISORY 并要求随实现刷新该三处锚点。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 9910,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "backlog_ref": "F-2（已按 R2 意见改写为「可测未测」并给出配方）",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rln 'path = \"../src/bin/tui.rs\"' crates/pony-agent-core/tests/ | wc -l ; grep -n 'fn run_turn_until_approval_suspension\\|fn pending_approvals' crates/pony-agent-core/tests/approval_resume_e2e.rs ; grep -n 'apply_approval_decision(' crates/pony-agent-core/src/bin/tui.rs   # 31 个集成测试已用 bin-as-module 导入 tui.rs（配方可行），apply_approval_decision 有 3 个生产调用点（9910/9941/9964）与 2 个 bin 单测（12153/12158）；生产调用点位于 tui_event_loop，无任何测试经过 ⇒ 覆盖缺口而非假绿（删函数 bin 单测即编译失败）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 1418,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "backlog_ref": "F-9（PA-119 日志债务；R3 未新增，属 R2 遗留）",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git diff --cached -U0 -- crates/pony-agent-core/src | grep -c '^+.*eprintln!' ; sed -n 1415,1421p crates/pony-agent-core/src/agent/control_plane/mod.rs ; grep -n 'logging_eprintln_exempt_covers_new_lines' .dev-team/nfr-baseline-approval-resume.json   # 全波 3 处新增 eprintln 均为非 JSON、无 trace_id；基准 :41 声明 covers_new_lines=0 不豁免 ⇒ 严格口径违规。行为 fail-closed 且可用关键字定位，R3 未扩大该债务。"
+    }
+  ],
+  "six_question_benchmark": [
+    {
+      "question": "1 外部调用超时 ↔ external_call_timeout_ms(<=3000)",
+      "verdict": "PASS",
+      "evidence": "R3 新增面全为纯函数/内存读：dispatcher.rs:2145-2226（字符串与 JSON 组装）、tool_runtime.rs:238-249（&self 读 options）、turn_control.rs:99-108（布尔组合）、control_plane/mod.rs:1385-1394（纯谓词）；list_pending_approvals 只读进程内 CAS store（control_plane/mod.rs:1415-1444，时钟取 dispatcher 注入 RuntimeClock，非墙钟超时）。git diff --cached 新增行内无 reqwest/TcpStream/Client::new/socket/Duration 超时新增；审批续轮仍复用既有 start_ask_aware_turn_stream 的 provider 预算。零新增外部往返 ⇒ 3000ms 预算不受影响。"
+    },
+    {
+      "question": "2 日志规范与防吞 ↔ logging{format=json,trace_id_required}",
+      "verdict": "PASS（R3 增量 0 处；遗留 F-9 ADVISORY）",
+      "evidence": "R3 新增代码零 eprintln（全波 3 处均来自 R2，见 findings[2]）；审批失效改走 set_status_notice + System 消息（tui.rs:8643-8657），错误统一经 report_control_request_error 上屏中文并留 stderr（:8600-8640），无裸 pass / 无吞异常、无 println 上屏宿主英文串。基准 :41 covers_new_lines=0 不豁免既有 3 行 ⇒ 整体仍挂 PA-119/F-9，不作为本轮阻断项。"
+    },
+    {
+      "question": "3 资源泄漏防御 ↔ resource_release",
+      "verdict": "PASS",
+      "evidence": "R3 未新增线程/通道/文件/网络句柄/锁：新增符号为自由函数与 &self 方法（dispatcher.rs:2145-2226、tool_runtime.rs:238、control_plane/mod.rs:1385），tui 侧只增常量与纯函数（tui.rs:1957-1965）。审批续轮队列沿用 R2 基建：inflight_turns 登记（tui.rs:11384-11387）、TurnLoopInFlightGuard + TuiTurnSinkGuard 随线程体 Drop（:11350-11356）、3s 有界 join（exit_cleanup_plan）、catch_unwind 补发终态（:11382-11400）；锁取用一律 unwrap_or_else(into_inner)。"
+    },
+    {
+      "question": "4 并发与幂等 ↔ concurrency_lock / CAS",
+      "verdict": "PASS（残余 F-6 ADVISORY）",
+      "evidence": "CAS 四元组未改（tool_runtime.rs:210-227 can_consume：Pending + session + version + nonce + TTL）；R3 把「是否路径授权类」收敛为唯一判据（tool_runtime.rs:238）并被 runtime 与 control plane 同时复用，消除了双份解析的并发漂移面。拒绝与批准共用同一 CAS 闸门，先到者终结；重复批准第二次无句柄直接 None（tui.rs:8873-8890）。续轮重入窗口与 Ask 同构，登记 F-6，本波不阻断。"
+    },
+    {
+      "question": "5 配置与自检 ↔ config / self-check",
+      "verdict": "PASS",
+      "evidence": "R3 零新增配置项与环境变量（新增行内无 env::var；单测亦未 set_var）；能力位仍是代码级 AgentRuntimeBuilder::host_approval_resume(bool) 且 AgentRuntime 默认 false 未改（src-tauri/**、runtime/mod.rs 不在本波 diff）；.env.example 本波未改。基准自检：python3 ~/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline-approval-resume.json → [PASS] Exit 0。"
+    },
+    {
+      "question": "6 契约兼容性 ↔ 契约矩阵变更登记",
+      "verdict": "PASS（附 ADVISORY：C3/C5 登记不全，见 review-plan-approval-resume-r3.json）",
+      "evidence": "线格式纯增量：PendingControlRequest 结构未变（tool_runtime.rs 仅新增方法，无字段增删）；审批 options 是既有 Value 字段内的新增键，approvalKind 取值仅两种、非路径不带 path 键；投影仍 11 字段且不含 nonce（control_plane/mod.rs:1357-1374）；冻结红相 tests/approval_resume_e2e.rs 与 HEAD 逐字一致（sha256 b5571f73dc35…94cb5，git diff HEAD 空）且 4 passed。文档侧遗留：契约 C3 未登记「只列路径授权类」这一必要条件（详见方案复审 findings[0]），属登记不全、不改行为。"
+    }
+  ],
+  "gate_replay": [
+    "cargo test -p pony-agent-core --lib wave65 → 6 passed / 0 failed（dispatcher R3 3 例 + control_plane R2 3 例）",
+    "cargo test -p pony-agent-core --lib w1_approval_unrecoverable → 6 passed / 0 failed（含非路径审批 fail-fast）",
+    "cargo test -p pony-agent-core --bin pony → 21 passed / 0 failed（含 wave65_r3_approval_stale_notice_tests 2 例）",
+    "cargo test -p pony-agent-core --test approval_resume_e2e → 4 passed / 0 failed（冻结测试未改动，sha256 b5571f73dc35…94cb5）",
+    "cargo test -p pony-agent-core --lib → 1323 passed / 0 failed",
+    "python3 ~/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline-approval-resume.json → [PASS] Exit 0",
+    "bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base ebf50d64 → [OK] 无越界实现、收口点完整（27 文件 / 3858 行新增）Exit 0"
+  ],
+  "f2_judgment": {
+    "question": "「TUI 正向接线无 e2e」应属 ADVISORY 还是 BLOCKING",
+    "verdict": "ADVISORY（F-2，可测未测）",
+    "reasoning": "① 假绿已消除：bin 单测直接调用 apply_approval_decision（tui.rs:12140-12162），删实现即编译失败，R2#4 的指定反例不再成立；② 核心语义有物理收据：runtime + control plane 的批准/续轮/拒绝/CAS 由冻结 e2e T1-T4 覆盖（4 passed），决策纯函数 approval_plan 四分支有单测；③ 缺口只在上层接线：3 个生产调用点（tui.rs:9910/9941/9964）位于 tui_event_loop，无测试经过 —— 这是覆盖缺口，不是伪造收据；④ 配方可验证：31 个集成测试已用 #[path=\"../src/bin/tui.rs\"] bin-as-module 导入，approval_resume_e2e.rs 的 run_turn_until_approval_suspension:540 / pending_approvals:475 可直接复用 ⇒「可测未测」定性成立。故按 ADVISORY 收口并要求按 F-2 配方补 tests/approval_seam_e2e.rs（删接缝必变红）。"
+  }
+}
