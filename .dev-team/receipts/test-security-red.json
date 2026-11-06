@@ -1,0 +1,125 @@
+{
+  "wave": "T10",
+  "task": "task-9",
+  "owner": "test-agent",
+  "generated_at": "2026-11-06T18:19:25+08:00",
+  "status": "RED",
+  "scope": "L3-B 两条 BLOCKING（会话隔离主键 / 作答作用域+清单泄露）+ fail-closed + 桌面错误族文案",
+  "contract": "`.dev-team/contract-matrix-ask-persistence.md` §2/§4/§5/§7（Lead 2026-11-06 原地改写：客户端不传 nonce；answer/cancel 校验 (request_id, version, session_id)；ask_list_pending 无作用域⇒空数组+ask_scope_required，投影不含 nonce；持久化不可用必须 fail-closed）",
+  "test_files": [
+    {
+      "file": "crates/pony-agent-core/tests/ask_persistence_acceptance.rs",
+      "sha256": "cf6069e13802233f10acd5134c144e346546ad7a14deb3f8a816da3cbcca3322",
+      "new_tests": [
+        "security_cross_session_upsert_must_not_overwrite_another_sessions_pending_ask",
+        "security_unscoped_list_pending_must_not_leak_other_sessions_credentials",
+        "security_ask_projection_must_not_expose_nonce",
+        "security_answer_without_session_scope_must_fail_closed",
+        "security_missing_durable_record_must_not_fall_back_to_memory_mirror"
+      ],
+      "note": "只加不删：既有 11 条 P1/P2/P3/P4/P6/A1–A4 断言逐字保留且仍绿"
+    },
+    {
+      "file": "tests/ask-store.spec.ts",
+      "new_tests": [
+        "tests/ask-store.spec.ts > detects the persisted-CAS error family (ask_state_conflict / ask_version_mismatch / ask_not_found / ask_nonce_mismatch / ask_scope_required)",
+        "tests/ask-store.spec.ts > reconciles the snapshot when a stale-version answer is rejected (new error family)"
+      ],
+      "note": "追加新错误族断言；陈旧 CAS 对账用例改用新错误族（消除骨架期文案造成的假绿）；既有断言未删"
+    }
+  ],
+  "red_commands": [
+    {
+      "command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit": 101,
+      "summary": "test result: FAILED. 11 passed; 5 failed（既有 11 条绿，新增 5 条按断言失败）"
+    },
+    {
+      "command": "npx vitest run tests/ask-store.spec.ts",
+      "exit": 1,
+      "summary": "Tests 2 failed | 16 passed（18）"
+    }
+  ],
+  "red_exit": 101,
+  "failures": [
+    {
+      "test": "security_cross_session_upsert_must_not_overwrite_another_sessions_pending_ask",
+      "assertion": "SEC-PK：session-B 写入同名 request_id 不得覆盖 session-A 的未决 Ask（契约 §2 复合主键 (session_id, request_id)）",
+      "observed": "upsert 后 load_pending(session-A) 为空、记录被改挂到 session-B、version 重置 1（request_id 单列主键）",
+      "counterexample": "review-l3-b.json findings[0]"
+    },
+    {
+      "test": "security_unscoped_list_pending_must_not_leak_other_sessions_credentials",
+      "assertion": "SEC-LIST：无会话作用域的 ask_list_pending 必须返回空数组（+ ask_scope_required）",
+      "observed": "实际返回 4 条跨会话记录（session-A/B 的 requestId/version/nonce）",
+      "counterexample": "review-l3-b.json findings[1]"
+    },
+    {
+      "test": "security_ask_projection_must_not_expose_nonce",
+      "assertion": "SEC-NONCE：ask 投影不得暴露 nonce（服务端自持、客户端不传）",
+      "observed": "投影包含 nonce 字段（persisted_ask_projection）",
+      "counterexample": "review-l3-b.json findings[1]"
+    },
+    {
+      "test": "security_answer_without_session_scope_must_fail_closed",
+      "assertion": "SEC-SCOPE：无会话作用域的作答必须 fail-closed（ask_scope_required / ask_state_conflict）",
+      "observed": "按 request_id 全库 CAS 成功并返回 Ok（lifecycleState=answered），记录被消费",
+      "counterexample": "review-l3-b.json findings[1]"
+    },
+    {
+      "test": "security_missing_durable_record_must_not_fall_back_to_memory_mirror",
+      "assertion": "SEC-FAILCLOSED：持久化层查不到该 Ask 时必须 fail-closed（ask_not_found），不得回落内存 CAS 返回 Ok",
+      "observed": "返回 Ok（state=consumed），内存镜像被消费 ⇒ 答案永不落盘",
+      "counterexample": "review-l3-b.json findings[2]"
+    },
+    {
+      "test": "tests/ask-store.spec.ts > detects the persisted-CAS error family (ask_state_conflict / ask_version_mismatch / ask_not_found / ask_nonce_mismatch / ask_scope_required)",
+      "assertion": "isStaleAskError 必须识别新错误族（当前只认 dispatcher 时代英文文案）",
+      "observed": "5 个新错误码全部返回 false ⇒ 前端走“请重试”分支（假绿）",
+      "counterexample": "review-l3-b.json findings[3]"
+    },
+    {
+      "test": "tests/ask-store.spec.ts > reconciles the snapshot when a stale-version answer is rejected (new error family)",
+      "assertion": "新错误族拒绝 ⇒ 重新 list + 统一中文 ASK_STALE_MESSAGE，不得“请重试”，不得把卡片塞回列表",
+      "observed": "落到“应答失败，请重试”并把已终结卡片 push 回 pendingAsks",
+      "counterexample": "review-l3-b.json findings[3]"
+    }
+  ],
+  "failed_assertions": [
+    {
+      "test": "security_cross_session_upsert_must_not_overwrite_another_sessions_pending_ask",
+      "assertion": "SEC-PK：session-B 写入同名 request_id 不得覆盖 session-A 的未决 Ask（契约 §2 复合主键 (session_id, request_id)）"
+    },
+    {
+      "test": "security_unscoped_list_pending_must_not_leak_other_sessions_credentials",
+      "assertion": "SEC-LIST：无会话作用域的 ask_list_pending 必须返回空数组（+ ask_scope_required）"
+    },
+    {
+      "test": "security_ask_projection_must_not_expose_nonce",
+      "assertion": "SEC-NONCE：ask 投影不得暴露 nonce（服务端自持、客户端不传）"
+    },
+    {
+      "test": "security_answer_without_session_scope_must_fail_closed",
+      "assertion": "SEC-SCOPE：无会话作用域的作答必须 fail-closed（ask_scope_required / ask_state_conflict）"
+    },
+    {
+      "test": "security_missing_durable_record_must_not_fall_back_to_memory_mirror",
+      "assertion": "SEC-FAILCLOSED：持久化层查不到该 Ask 时必须 fail-closed（ask_not_found），不得回落内存 CAS 返回 Ok"
+    },
+    {
+      "test": "tests/ask-store.spec.ts > detects the persisted-CAS error family (ask_state_conflict / ask_version_mismatch / ask_not_found / ask_nonce_mismatch / ask_scope_required)",
+      "assertion": "isStaleAskError 必须识别新错误族（当前只认 dispatcher 时代英文文案）"
+    },
+    {
+      "test": "tests/ask-store.spec.ts > reconciles the snapshot when a stale-version answer is rejected (new error family)",
+      "assertion": "新错误族拒绝 ⇒ 重新 list + 统一中文 ASK_STALE_MESSAGE，不得“请重试”，不得把卡片塞回列表"
+    }
+  ],
+  "freeze_note": "作用域口径：调用方必须显式提供会话作用域（形参或等价的宿主会话作用域入口）；‘不提供作用域 ⇒ 必须 Err’ 是最小冻结锚点。若实现选择新增形参，需保留可运行的等价入口，否则本组红相锚点失效（须先报 Lead 再改测试）。",
+  "not_changed": [
+    "crates/pony-agent-core/src/**",
+    "src/**",
+    "src-tauri/**"
+  ],
+  "git_write_operations": false
+}

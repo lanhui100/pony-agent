@@ -1310,7 +1310,7 @@
       "tier": "C",
       "tier_basis": "跨模块（会话存储 schema/迁移 + 控制面 CAS + TUI + 桌面 + 契约重冻）；命中 blast keywords: session-store/schema-migration/persistence",
       "baseline_commit": "4e4fedc",
-      "status": "in_progress",
+      "status": "rework-required",
       "observed_at": "2026-11-06T17:20:00+08:00",
       "red_phase": {
         "status": "satisfied-by-equivalent",
@@ -1360,7 +1360,75 @@
           "reason": "test-agent 为 ask-resume 场景化取证改造审计 harness；executor-client 明确否认作者身份，已核实归属并改挂",
           "corrected_at": "2026-11-06T18:12:00+08:00"
         }
-      ]
+      ],
+      "incidents": [
+        {
+          "id": "INC-concurrent-writer",
+          "at": "2026-11-06T18:05:00+08:00",
+          "finding": "第五作者（非本团队 4 名 teammate）在同一工作区写入本波文件；team 四人全部否认",
+          "evidence": [
+            ".dev-team/plan-ask-resume.md 17:45",
+            "control_plane/ask_resume_commands.rs 17:52:17",
+            "runtime/turn_control.rs 17:51:22",
+            "tools/tui-audit/{run_audit.sh,mock_llm.py,checks.py} 17:47-17:55",
+            "bin/tui.rs 18:03:39（晚于 Lead 18:02 冻结令）",
+            "cargo check -p pony-agent-core --bin pony = E0382 borrow of moved value `turn_id_str` at bin/tui.rs:10927"
+          ],
+          "impact": "当前树不可编译；T5 冒烟与 Join Barrier 无法执行；本团队已全线停写",
+          "action": "上报用户确认并行会话归属并暂停；本团队冻结 control_plane/ runtime/ bin/tui.rs tools/tui-audit/",
+          "status": "awaiting-user",
+          "core_readonly_review": {
+            "receipt": ".dev-team/receipts/core-review-ask-resume.json",
+            "findings": [
+              "BLOCKING: control_plane/mod.rs:2028 start_turn_stream 委派 start_ask_aware_turn_stream，违反 C1「逐字不变」；cli.rs:664 / non_tauri_harness.rs:116 被切到 graph-run 路径（INV-2/最小闭包冲突）",
+              "C1 其余（run 复用规则/失败回落 legacy/结构化日志）符合；缺 run 复用/新建两分支单测",
+              "C3 未实现（按裁决暂缓），ask_resume_e2e 红相属预期",
+              "当前树红：bin/tui.rs:10927 E0382（第五作者在飞）"
+            ]
+          }
+        }
+      ],
+      "lead_gate_evidence": {
+        "full_crate_test": "cargo test -p pony-agent-core：本波验收面全绿（ask_persistence_acceptance 11 / ask_pending_contract 6 / ask_pending_adversarial 4 / tui_batch3 26）；唯一红=`ask_resume_e2e::t1_ask_answer_resumes_the_same_run_and_produces_next_assistant_output`（第五作者自建测试 vs 其自身实现，报 ask_state_conflict: Answered not Pending），非本团队范围",
+        "vitest": "1378 passed / 2 failed（ob2 + 级联 v10-3，均已登记豁免）",
+        "checked_at": "2026-11-06T18:12:00+08:00"
+      },
+      "reviews": {
+        "l3_b": {
+          "verdict": "FAIL",
+          "file": ".dev-team/review-l3-b.json",
+          "blocking": 2,
+          "advisory": 7,
+          "blocking_items": [
+            "pending_asks 主键单列 request_id → 跨会话覆盖/version 重置",
+            "answer/cancel 缺 session_id+nonce 四元组校验 → 跨会话作答"
+          ],
+          "followups": {
+            "task-8": "核心安全修复(blocked_by task-9)",
+            "task-9": "红相扩展",
+            "task-10": "客户端错误族/渲染隔离"
+          }
+        },
+        "l3_a": {
+          "verdict": "FAIL",
+          "file": ".dev-team/review-l3-a.json",
+          "blocking": 1,
+          "advisory": 7,
+          "blocking_items": [
+            "durable CAS 只校验 (request_id, version, state)；nonce 无持久化真值（ASK_ERR_NONCE_MISMATCH 零引用）→ 重放/跨会话可结算"
+          ],
+          "confirmed_by_two_reviews": "nonce/session 维度缺失同时被 L3-A 与 L3-B 独立判定为 BLOCKING",
+          "advisories_to_wave": [
+            "upsert 可将终态改回 Pending（需状态机硬校验）",
+            "session 注入单槽覆盖（需队列化）",
+            "durable CAS 后镜像失败 → run 永久悬挂（需补偿/可重试）",
+            "session 缺省 'default' vs 'local-dev-session' 注入永不消费",
+            "ask_store=None 静默回落内存态",
+            "graph_resume_ask 以槽位非空判 landed（假成功）",
+            "注入在用量治理/prepare 闸门之前被消费，blocked 轮丢答案"
+          ]
+        }
+      }
     }
   ],
   "counters": {

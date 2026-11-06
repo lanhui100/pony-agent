@@ -1,0 +1,73 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs (新增，全文 489 行)",
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs (未提交 diff)",
+    "crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs (新增，全文 267 行)",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs (未提交 diff)",
+    "crates/pony-agent-core/src/agent/session/store.rs (未提交 diff)",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs (无未提交 diff，仅核对 ask store 未与该连接共享)",
+    "crates/pony-agent-core/src/agent/dispatcher.rs (未提交 diff，快照 18:09:59)",
+    "crates/pony-agent-core/src/agent/graph.rs (未提交 diff)",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs (未提交 diff)",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs, turn_control.rs, turn_stream.rs, turn_sync.rs (未提交 diff)"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/ask_persistence.rs",
+      "line": 415,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cargo run --manifest-path /tmp/askprobe/Cargo.toml --quiet   # 探针由本次评审在仓库外创建，用 open_in_memory_ask_store() 复现；期望输出含 'B1 foreign answer settled session=s2 nonce=nonce-B state=Answered'。最小反例：upsert(s1/nonce-A/version=1) → 同一 request_id 换 session 再 upsert(s2/nonce-B/version=1) → transition(request_id, Pending, Answered, 1) 成功结算 s2。原因：持久化 CAS 只校验 state+version（本文件 409/415 两行），nonce 与 session_id 从不参与比较——transition 的签名（135-141 行）根本没有 nonce/session 参数，ASK_ERR_NONCE_MISMATCH（47 行）在 crates/ 内零引用（grep -rn 'ASK_ERR_NONCE' crates/ 只命中定义）。这直接违反 .dev-team/contract-matrix-ask-persistence.md §4『answer/cancel 必须校验 (request_id, version, nonce, session_id) 四元组，任一项不符 ⇒ 拒绝』，也与本文件 15-17 行『nonce 随记录持久化，nonce-stale 的重放会被拒绝』的自述相反：版本 CAS 有持久化真值，nonce CAS 没有任何真值。",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ask_persistence.rs",
+      "line": 347,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cargo run --manifest-path /tmp/askprobe/Cargo.toml --quiet   # A1-A3：同一 request_id 先 Pending→Answered（s1/version=2），再 upsert 一条 session=s2 的新记录 ⇒ 已终态的行被 'INSERT .. ON CONFLICT(request_id) DO UPDATE SET state=excluded.state, version=excluded.version' 原地改回 state='pending'、version 回落到 1，s1 的审计行凭空消失（load_pending(s1)=0）；期望输出 'A3 load_pending(s2) = [(\"s2\", Pending, 1, \"question of s2\")]'。『终态不可回退』只由 transition 守卫（409 行），upsert 毫无守卫，而终态行又被刻意保留（125-126 行），因此只要 request_id 重复就必然覆盖。同时表主键为 request_id 单列（218 行），与契约 §2 冻结的 (session_id, request_id) 不一致，跨会话同名 id 会互相顶替。触发前提：request_id 非持久唯一——dispatcher.rs:3988 next_control_request_seq 是进程内 (nanos^pid) seed + 自增计数器，重启/多进程可复现；并发 TUI+桌面共库时风险最高。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/graph.rs",
+      "line": 563,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cargo run --manifest-path /tmp/askprobe/Cargo.toml --quiet   # C1：对同一 session 连续 queue_ask_injection_for_session(X) 与 (Y)，BTreeMap::insert 覆盖 ⇒ take 一次得到 Y，X 永不可消费；期望输出 'C1 take#1 = Some(\"control-000000000002\"), take#2 = None'。已作答记录的 durable 状态是 Answered（终态），没有重投递通道，所以被覆盖的那条答案就是永久丢失（注入丢弃）。另：persist_runs 整份覆写 graph_runs 存储文件（604-610 行），两个进程各自写同一个文件时同样互相覆盖。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 3948,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'unwrap_or_else(|| \"default\"' crates/pony-agent-core/src/agent/dispatcher.rs; grep -rn 'DEFAULT_SESSION_ID: &str' crates/pony-agent-core/src/agent/session/types.rs   # 生产者把缺失 session 落成字面量 \"default\"，而 DEFAULT_SESSION_ID=\"local-dev-session\"。消费端 take_pending_ask_injection(facts.run_id, input.session_id)（runtime/turn_stream.rs:1729 / turn_sync.rs:679）在 session_id=None 时直接 return None；note_user_message_entry（ask_plan_commands.rs:334-338）又映射成 \"local-dev-session\"。最小反例：TurnInput{session_id: None} 的轮次发起 Ask → 落库 session_id=\"default\" → 作答时 land_answered_ask 以 durable session_id（ask_plan_commands.rs:230）入队 → 下一轮 session_id 仍为 None ⇒ 注入永不被消费；该行的 supersede 与 gc_orphans 也永不匹配（supersede 用 \"local-dev-session\"，GC 用 archived 会话 id），成为既不可见也不可回收的幽灵 Pending。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 106,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "static read: ask_plan_commands.rs:106 先提交 durable CAS（磁盘已 Pending→Answered），:124 才消费 dispatcher 镜像，两者之间无锁、无事务、无补偿。确定性交织（无需 sleep）：T1 answer_ask(A, v1) 通过 require_current_version 并完成 durable CAS → T2 note_user_message_entry/supersede_pending_asks_for_session 调 close_pending_asks_of_session 把镜像 state 改 Cancelled 且 version+1 → T1 执行 :124，consume_control_request 的 can_consume 失败 ⇒ 在 durable 已是 Answered 之后返回 Err：不排队注入、不 resume、不回滚。后果：用户看到失败，重试命中 ask_state_conflict（answer_ask 的 durable 分支立即 return Err），绑定的 ask-wait 永久悬挂，本轮永久停在等待态——即『Answered 已被持久化但答案被丢弃』。两个权威（SQLite 行 / 进程内 BTreeMap）之间没有原子性是该函数的固有缺口。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 587,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "static read: graph_resume_ask 的 unbound 分支用 peek_ask_injection_for_session(session_id).is_some() 断言『本 request 的答案已落地』，但 session 槽位是 per-session 单槽（见 graph.rs:563 条目），可能装着另一个 request 的注入。最小反例：同会话先 answer X（未绑定 ⇒ 注入 X），再 graph_resume_ask(run, Y)（Y 从未落地）⇒ 仍返回 {resumed:false, landed:\"session_injection\"}；宿主（TUI submit_ask_answers 把 Ok 当续轮成功、桌面 resumeGraphAsk 视为已完成）据此判定成功，Y 的答案实际被丢弃且无告警。也应比对 injection.request_id == request_id。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 29,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "static read: ask_store=None（SessionStore::new() 打开 pending_asks 失败只 eprintln 后降级、或文件/内存後端）时，list_pending_asks 跳过 :29 的 store 分支，直接由 :46-58 把 dispatcher 镜像当作完整结果返回 200 风格 JSON 数组，没有 fail-closed、也没有 persisted=false 标注：契约 §7『持久化层不可用必须 fail-closed 并给出结构化错误，不得静默回退内存态』。第二种形态：跨进程时 B 进程镜像仍为 Pending 的记录，在 A 进程已 CAS 成 Answered 后依旧被 :46-52 合并列出（只按 request_id 去重，无 durable 终态校验），面板出现永不消失的僵尸 Ask——作答必然 conflict，刷新后仍回来，违反 ask_persistence.rs:113『must never expose non-Pending records』。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 1729,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "static read: turn_stream.rs:1729（turn_sync.rs:679 同形）在用量治理闸门（:1733-1774 的 Block 分支会提前 return）与 prepare_turn 失败分支之前就 take（remove+persist）了注入。最小反例：把 usage governance 限额设为已超出并保留一条待消费的 session 注入 → 起一轮 ⇒ governance Block 直接 return，注入已被删除且无重排队；durable 记录是 Answered，用户既拿不到答案也无法重试。session 版注入是新加路径，等于把原来 run 版注入的 at-most-once 丢包窗口扩到了『无 run 事实』的普通轮。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

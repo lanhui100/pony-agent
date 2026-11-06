@@ -1,0 +1,76 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs (新增：PersistedAsk / AskLifecycleState / trait / SqliteAskStore)",
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs (list/answer/cancel/expire 改为持久化 CAS)",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs (工作树无未提交 diff；pending_asks 建表实际落在 ask_persistence.rs，非会话库迁移面)",
+    "crates/pony-agent-core/src/bin/tui.rs (Ask 面板重建 / Esc 忽略 / AskResumeTurn 续轮)",
+    "src/stores/ask.ts、src/components/chat/WorkspaceComposer.vue、src/components/AskPanel.vue (去 TTL 后客户端语义)",
+    ".dev-team/contract-matrix-ask-persistence.md §2/§3/§4/§5/§6/§7（冻结真值源）"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/ask_persistence.rs",
+      "line": 218,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /tmp && rm -rf askrepro && mkdir askrepro && cd askrepro && python3 - <<'PY'\nimport re,sqlite3,pathlib\nsch=re.search(r'const ASK_STORE_SCHEMA: &str = \"(.*?)\";',pathlib.Path('/home/dm/pony-agent/crates/pony-agent-core/src/agent/ask_persistence.rs').read_text(),re.S).group(1)\ndb=sqlite3.connect('sessions.db'); db.executescript(sch)\nsql=(\"INSERT INTO pending_asks (request_id,session_id,version,nonce,run_id,turn_id,call_id,kind,prompt,options_json,state,created_at_ms,answered_at_ms) VALUES (?,?,1,?,NULL,?,?,'interaction',?,'[]','pending',?,NULL) ON CONFLICT(request_id) DO UPDATE SET session_id=excluded.session_id,version=excluded.version,nonce=excluded.nonce,run_id=excluded.run_id,turn_id=excluded.turn_id,call_id=excluded.call_id,kind=excluded.kind,prompt=excluded.prompt,options_json=excluded.options_json,state=excluded.state,created_at_ms=excluded.created_at_ms,answered_at_ms=excluded.answered_at_ms\")\nfor i,(s,c) in enumerate([('session-A','call-A'),('session-B','call-B')]):\n    db.execute(sql,('control-000000000000',s,'nonce-%03d'%i,'turn-'+s,c,'q-'+s,1000+i)); db.commit()\nprint('rows:',list(db.execute('select request_id,session_id,version,state from pending_asks')))\nprint('load_pending(session-A):',list(db.execute(\"select request_id from pending_asks where session_id='session-A' and state='pending'\")))\nPY\n# 期望输出：rows: [('control-000000000000','session-B',1,'pending')] / load_pending(session-A): []\n# request_id 生成器是进程内计数器（dispatcher.rs:1672 `control-{:012}` + `AtomicU64::new(0)`），\n# 每个进程/每次重启的首个 Ask 恒为 control-000000000000；而表主键只有 request_id（契约 §2 冻结的是 (session_id, request_id)），\n# 于是 session-A 的未决 Ask 被 session-B 同名 upsert 覆盖/改挂，且 version 被重置为 1（旧的 (request_id,1) 作答凭据重新生效）。",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 91,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '91,96p' crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs && sed -n '135,141p' crates/pony-agent-core/src/agent/ask_persistence.rs && grep -rn 'ASK_ERR_NONCE_MISMATCH' crates/pony-agent-core/src --include=*.rs && sed -n '240,252p' src-tauri/src/lib.rs\n# 事实：answer_ask(request_id, expected_version, answer) 没有 session_id、也不接收 nonce；\n# transition(request_id, from, to, expected_version) 同样没有 session_id/nonce 形参；\n# ASK_ERR_NONCE_MISMATCH 只有定义、全仓 0 处使用；Tauri ask_answer 只透传 request_id/version/answer。\n# 契约 §4 要求校验 (request_id, version, nonce, session_id) 四元组，实现只校验 request_id+version(+state)。\n# 运行时反例（渲染进程 IPC，任意会话作用域）：invoke('ask_answer',{requestId:'control-000000000000',version:1,answer:{value:'yes'}})\n#   -> 宿主按 request_id 全库定位并 CAS 成功，land_answered_ask 把答案注入该记录所属会话（可能是另一个会话）。\n# 暴露面：ask_list_pending(null)（src-tauri/src/lib.rs:230-238 + ask_plan_commands.rs:27-60）返回所有会话的\n# requestId+version（projection 还带 nonce），因此跨会话请求 (request_id, version) 是可直接取到的。",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 145,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '145,167p' crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs && sed -n '197,209p' crates/pony-agent-core/src/agent/session/store.rs && sed -n '1712,1724p' crates/pony-agent-core/src/agent/dispatcher.rs\n# 契约 §7：持久化层不可用时必须 fail-closed + 结构化错误，禁止静默回退内存态。实现四处 fail-open：\n# (1) store.transition 返回 ask_not_found 且内存镜像有记录 -> 继续走内存 CAS 并返回 Ok（答案永不落盘）；\n# (2) SessionStore::new 中 open_ask_store 失败只 eprintln 后 ask_store=None，整个进程退化为内存态；\n# (3) dispatcher 落盘 upsert 失败只打日志，Ask 仍以内存态上台；\n# (4) list_pending_asks 在持久化读失败时把内存镜像合并进快照（投影无 persisted 标记，UI 无法区分）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 1956,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "python3 -c 'p=[\"cannot be consumed\",\"stale mutation rejected\",\"unknown control request\",\"cannot resume\"];msgs=[\"ask_version_mismatch: Ask `control-000000000000` is at version 2 but expected 1\",\"ask_state_conflict: Ask `control-000000000000` is cancelled, not Pending (terminal states are final)\",\"ask_not_found: no persisted Ask `control-000000000000`\",\"ask_nonce_mismatch: nope\"];print([any(x in m.lower() for x in p) for m in msgs])'\n# 输出 [False, False, False, False]：TUI 的 is_stale_control_request_error 与 src/stores/ask.ts:60 的 isStaleAskError\n# 都只认旧 dispatcher 文案，新增持久化 CAS 错误码 ask_state_conflict / ask_version_mismatch / ask_nonce_mismatch / ask_not_found 全部漏判。\n# 后果：TUI 走 else 分支给「…，请重试（详情见 tui-runtime.log）」且不清 pending_request（契约 §6.5 要求统一中文「该提问已失效，已同步最新待处理请求」）；\n# Esc 分支随后无条件 pending_request=None + cancel_ask_user()，请求仍是 Pending，500ms 轮询又把面板重新拉起（忽略动作在失败时复活）；\n# 桌面端走 else 分支把已终结的卡片 push 回 pendingAsks 并提示「应答失败，请重试」。\n# 既有单测 tests/ask-store.spec.ts:399 断言的是骨架期文案 stale mutation rejected.，对新错误串零覆盖（假绿）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 123,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '101,136p' crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs\n# 非原子「先判后改」：先读 in_memory（第 97 行）并在第 106 行提交持久化 CAS，之后才在第 123 行做内存消费，两步不在同一临界区。\n# 反例时序（两线程，1ms 级窗口，busy_timeout=10000 会放大窗口）：\n#   T1 answer_ask: 读到镜像 v1 -> store.transition 提交 Answered（磁盘终态已定）\n#   T2 supersede_pending_asks_for_session(sid): close_pending_asks_of_session 把镜像改成 Cancelled v2\n#   T1 ask_control::answer_ask -> can_consume(v1) 失败 -> `?` 直接返回 Err\n# 结果：pending_asks 已经 Answered（终态不可迁移，无法重试），land_answered_ask 未执行（无 resume 也无 session injection），\n# 模型永远收不到答案，用户看到的是旧文案「cannot be consumed…」。契约 §3/§5 要求 Pending->Answered 必须伴随回答落点。\n# 复现脚本（现有验收套件不覆盖）：在 tests/ask_resume_e2e.rs 同构夹具上，answer_ask 前后插入 supersede 调用即可稳定命中。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 583,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '583,599p' crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs && sed -n '552,568p' crates/pony-agent-core/src/agent/graph.rs\n# landed 判据是「该会话里存在任意 session injection」，不是「本 request 的 injection」：\n# 同会话先答 ask-1（无绑定 -> queue_ask_injection_for_session(sid, ask1)），再对 ask-2 调 graph_resume_ask（无绑定）\n# 会返回 Ok{resumed:false, landed:\"session_injection\"}，而 ask-2 的答案其实没落点（假成功）。\n# 另外 session_ask_injections 是 BTreeMap<session_id, injection> 单槽：下一次 insert 覆盖上一次，契约 §5「禁止静默丢弃」被违反。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/stores/ask.ts",
+      "line": 335,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'ask_expire\\|\\.expire()' src --include=*.ts --include=*.vue | grep -v node_modules\n# 只剩 stores/ask.ts 里的定义，0 个调用点（基线由 refresh()->reconcileExpiredAsks 触发，本波删除后无人调用）；TUI 也从不调 expire_asks。\n# 于是 gc_orphans 在生产路径永不执行：answered/cancelled/superseded 记录永久保留，pending_asks 无界增长；\n# 且 archived_session_ids 只取 list_sessions() 里 archived=true 的会话，已删除会话的行永远是 pending（不可见但可被 CAS 命中）。\n# 验证：sqlite3 \"$LOCALAPPDATA/PonyAgent/sessions.db\" 'select state,count(*) from pending_asks group by state;' 运行多日后 pending 只增不减。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/components/chat/WorkspaceComposer.vue",
+      "line": 541,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '541,569p' src/components/chat/WorkspaceComposer.vue\n# activeAsk 在「当前会话没有匹配项」时回退到 askStore.pendingAsks[0]（第 547 与 553 行），而新的 watch 在 runtimeStore.sessionId 为空时\n# 调 openSession(null) -> refresh() 不带 sessionId -> 宿主返回全库所有会话的未决 Ask（ask_plan_commands.rs:27-60）。\n# 复现：会话 A 留一条未决 Ask 后重启（持久化恢复），打开会话 B（或 sessionId 尚未就绪的启动瞬间）=>\n# 面板把 A 的问题渲染进 B 的输入区；提交即触发上面第 2 条 finding 的跨会话作答。契约 §6.2「同一 request_id 只允许一个面板 / 按会话重建」。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ask_persistence.rs",
+      "line": 190,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp && rm -f lock.db && python3 - <<'PY'\nimport sqlite3\na=sqlite3.connect('lock.db',isolation_level=None); a.execute('PRAGMA journal_mode=DELETE'); a.execute('CREATE TABLE t(x)'); a.execute('BEGIN IMMEDIATE'); a.execute('INSERT INTO t VALUES(1)')\nb=sqlite3.connect('lock.db',isolation_level=None)\ntry: print(b.execute('PRAGMA journal_mode=WAL').fetchone())\nexcept sqlite3.OperationalError as e: print('open_ask_store would fail ->',e)\nPY\n# 输出 'open_ask_store would fail -> database is locked'\n# 批量语句把 journal_mode=WAL 放在 busy_timeout 之前（第 190-194 行），另一宿主（TUI+desktop 共用 sessions.db）持写事务时\n# 首次 WAL 升级立即 SQLITE_BUSY -> open_ask_store Err -> SessionStore 只打日志置 None -> 整个进程内存态（见第 3 条 finding 的 fail-open）。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

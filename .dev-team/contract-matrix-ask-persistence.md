@@ -78,7 +78,11 @@ Pending ──answer──▶ Answered
 
 ## 4. CAS 语义（P3，跨进程仍成立）
 
-- `answer/cancel` 必须校验 `(request_id, version, nonce, session_id)` 四元组；任一项不符 ⇒ 拒绝。
+- **`transition` 签名必须携带 `(request_id, session_id, expected_version, expected_nonce)`**，并在同一事务内与存储中的 `version`/`nonce`/`state` 逐项比对；nonce 不符 ⇒ `ask_nonce_mismatch`（该错误码必须被真实引用，禁止只定义不使用）。L3-A/L3-B 双审均以可跑反例判定「nonce 无持久化真值」为 BLOCKING，本行即修复判据。
+- `answer/cancel` 必须校验 `(request_id, version, session_id)` 三元组 **+ 服务端自持 nonce**：
+  - 客户端**不传** nonce（nonce 只存在于存储，服务端从记录派生，客户端无法伪造）；
+  - 宿主调用必须带 `session_id` 作用域；记录的 `session_id` 与调用作用域不一致 ⇒ 拒绝（跨会话作答非法）；
+  - 任一项不符 ⇒ 拒绝，错误码沿用 §4 稳定码；缺 `session_id` 作用域 ⇒ `ask_scope_required`。
 - 校验读取来源是**持久化记录**，不是进程内存；因此在 A 进程创建、B 进程（重启后）作答也必须成立。
 - 拒绝错误码稳定：`ask_state_conflict` / `ask_version_mismatch` / `ask_nonce_mismatch` / `ask_not_found`；
   客户端只允许展示 §6 的中文文案，原始串只进运行时日志。
@@ -90,13 +94,18 @@ Pending ──answer──▶ Answered
 
 | 命令 | 新语义 |
 | :-- | :-- |
-| `ask_list_pending(session_id?)` | 从持久化 `load_pending` 读；空结果 = 无未决 |
+| `ask_list_pending(session_id)` | 从持久化 `load_pending(session_id)` 读；**投影不带 nonce**；`session_id` 缺省/空 ⇒ 返回空数组（fail-closed，禁止跨会话泄露 requestId+version，错误码 `ask_scope_required`） |
 | `ask_answer(request_id, version, answer)` | CAS + 写终态 + 回答落点 |
 | `ask_cancel(request_id, version)` | CAS + `Cancelled`（= 显式忽略） |
 | `ask_expire(now_ms?)` | **退化为 GC**：`Orphaned` 清理与保留期回收，不得把 Pending 变 Expired |
 
 回答落点（`Pending → Answered` 之后）：存在 graph ask wait 绑定 ⇒ resume；否则把答案作为 tool result
 注入该会话下一轮（复用 `take_pending_ask_injection`），**禁止**静默丢弃。
+
+宿主轮次入口（L3 复核后追认）：`HostControlPlane::start_turn_stream` 委派
+`start_ask_aware_turn_stream`（TUI/CLI/harness 共用），使每轮都在真实 graph run 内执行；
+`start_turn_stream_legacy` 保留为回落路径。该委派改变 CLI/harness 的 run 身份行为，
+属**已追认的契约修订**（原 C1「逐字不变」作废），后续以 `ask_resume_e2e` 作为回归锚点。
 
 ## 6. 客户端行为（P5）
 

@@ -1049,3 +1049,334 @@ fn adversarial_orphaned_ask_cannot_be_answered_after_restart() {
         "A4：`Orphaned` 记录不得再被列出"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// T10 / L3-B BLOCKING 回归（红相）：会话隔离主键 + 作答作用域 + fail-closed
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// 契约依据（Lead 2026-11-06 原地改写）：`.dev-team/contract-matrix-ask-persistence.md` §2（复合主键
+// `(session_id, request_id)`）、§4（`answer/cancel` 校验 `(request_id, version, session_id)`，
+// nonce 由服务端自持、客户端不传；缺作用域 ⇒ `ask_scope_required`）、§5（`ask_list_pending` 无作用域 ⇒
+// 空数组 + `ask_scope_required`；投影不含 nonce）、§7（持久化不可用必须 fail-closed，禁止回落内存态）。
+//
+// 红相意图：以下 5 条用例在**当前实现**下必须按断言失败（不是编译错误），它们是 executor-core 修复
+// `crates/pony-agent-core/src/agent/ask_persistence.rs` / `control_plane/ask_plan_commands.rs` 的冻结门禁。
+// 冻结口径（不做二次改签）：作用域必须由调用方显式提供——「不提供作用域 ⇒ 必须 Err」是本组用例的最小锚点。
+
+/// 真实 guided dispatcher（内置注册表 + FakeClock + LegacyCompatiblePolicyEvaluator）。
+fn t10_dispatcher() -> Arc<pony_agent_core::agent::dispatcher::GovernedDispatcher> {
+    use pony_agent_core::agent::dispatcher::GovernedDispatcher;
+    use pony_agent_core::agent::governed_executor::LegacyCompatiblePolicyEvaluator;
+    use pony_agent_core::agent::tool_runtime::{FakeClock, RuntimeClock};
+    use pony_agent_core::agent::tools::ToolRegistrySnapshot;
+
+    let registry = Arc::new(
+        ToolRegistrySnapshot::builtin().expect("builtin tool registry must construct cleanly"),
+    );
+    let clock: Arc<dyn RuntimeClock> = Arc::new(FakeClock::new(1_000));
+    let dispatcher = GovernedDispatcher::new(registry, clock);
+    dispatcher.register_policy_evaluator(Arc::new(LegacyCompatiblePolicyEvaluator));
+    Arc::new(dispatcher)
+}
+
+/// 通过真实受管派发路径抛出一个 Interaction（Ask）pending 控制请求，返回 (request_id, 快照)。
+fn t10_dispatch_ask(
+    dispatcher: &pony_agent_core::agent::dispatcher::GovernedDispatcher,
+    session_id: &str,
+    call_id: &str,
+) -> (String, pony_agent_core::agent::tool_runtime::PendingControlRequest) {
+    use pony_agent_core::agent::dispatcher::DispatchContext;
+    use pony_agent_core::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
+
+    let outcome = dispatcher.dispatch_governed(
+        ToolDispatchRequest {
+            origin: InvocationOrigin::Model,
+            descriptor_id: "builtin:ask_user".to_string(),
+            call_id: call_id.to_string(),
+            arguments: serde_json::json!({
+                "question": "继续？",
+                "options": ["是", "否"],
+                "description": "T10 安全红相"
+            }),
+        },
+        &DispatchContext {
+            session_id: Some(session_id.to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            host_control_available: true,
+            ..Default::default()
+        },
+    );
+    let request_id = outcome
+        .control_outcome
+        .expect("host-mediated ask must surface a WaitingHost control outcome")
+        .request_id;
+    let pending = dispatcher
+        .pending_request(&request_id)
+        .expect("dispatched ask must be persisted in the dispatcher mirror");
+    (request_id, pending)
+}
+
+/// 宿主控制面（注入显式 dispatcher + 显式持久化 store，避免依赖默认会话库）。
+fn t10_plane(
+    dispatcher: Arc<pony_agent_core::agent::dispatcher::GovernedDispatcher>,
+    store: Arc<dyn AskPersistenceStore>,
+) -> pony_agent_core::agent::control_plane::HostControlPlane {
+    use pony_agent_core::agent::control_plane::HostControlPlaneBuilder;
+
+    HostControlPlaneBuilder::new()
+        .ask_dispatcher(dispatcher)
+        .ask_store(store)
+        .build()
+}
+
+/// 把 `ask_list_pending` 的 JSON 返回摊平成条目列表（兼容数组形状与 `{asks:[...]}` 形状）。
+fn t10_entries(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    if let Some(items) = value.as_array() {
+        return items.clone();
+    }
+    for key in ["asks", "pendingAsks", "items"] {
+        if let Some(items) = value.get(key).and_then(|inner| inner.as_array()) {
+            return items.clone();
+        }
+    }
+    Vec::new()
+}
+
+/// L3-B ①：`pending_asks` 必须是**复合主键 `(session_id, request_id)`**。
+///
+/// request_id 是进程内计数器（每个进程首个 Ask 恒为 `control-000000000000`），单列主键会让
+/// session-B 的首个 Ask 覆盖 session-A 的未决 Ask（并把它改挂到 B、version 重置为 1，
+/// 旧凭据重新生效）。本用例断言两个会话各自的未决 Ask 互不覆盖。
+#[test]
+fn security_cross_session_upsert_must_not_overwrite_another_sessions_pending_ask() {
+    let dir = TempDir::new("sec-composite-pk");
+    let db = dir.db();
+    let store = expect_ok("SEC-PK：必须能打开持久化 store", open_store(&db));
+
+    let mut ask_a = pending_ask("control-000000000000", "session-A", 1_000);
+    ask_a.nonce = "nonce-A".to_string();
+    ask_a.prompt = "A 的问题".to_string();
+    let mut ask_b = pending_ask("control-000000000000", "session-B", 2_000);
+    ask_b.nonce = "nonce-B".to_string();
+    ask_b.prompt = "B 的问题".to_string();
+
+    expect_ok(
+        "SEC-PK：session-A 的 upsert 必须成功",
+        store.upsert(&ask_a),
+    );
+    expect_ok(
+        "SEC-PK：session-B 用同一 request_id upsert 必须成功（复合主键下两行共存）",
+        store.upsert(&ask_b),
+    );
+
+    let pending_a = expect_ok(
+        "SEC-PK：load_pending(session-A) 必须可读",
+        store.load_pending("session-A"),
+    );
+    assert_eq!(
+        pending_a.len(),
+        1,
+        "SEC-PK：session-B 写入同名 request_id 不得覆盖 session-A 的未决 Ask（契约 §2 复合主键 \
+         `(session_id, request_id)`）；当前实现按 request_id 单列主键覆盖，A 的未决 Ask 已被改挂到 B"
+    );
+    assert_eq!(pending_a[0].session_id, "session-A", "SEC-PK：A 的记录必须仍属于 A");
+    assert_eq!(
+        pending_a[0].nonce, "nonce-A",
+        "SEC-PK：A 的 CAS 凭据（nonce）不得被 B 的记录覆盖"
+    );
+    assert_eq!(pending_a[0].prompt, "A 的问题", "SEC-PK：A 的问题文本不得被覆盖");
+    assert_eq!(pending_a[0].version, 1, "SEC-PK：A 的 version 不得被重置");
+
+    let pending_b = expect_ok(
+        "SEC-PK：load_pending(session-B) 必须可读",
+        store.load_pending("session-B"),
+    );
+    assert_eq!(pending_b.len(), 1, "SEC-PK：B 自己的未决 Ask 必须可读");
+    assert_eq!(pending_b[0].session_id, "session-B");
+    assert_eq!(pending_b[0].nonce, "nonce-B");
+
+    // 重启（新实例、同库）后仍然各自独立——复合主键必须是磁盘事实，不是内存态。
+    drop(store);
+    let reopened = expect_ok("SEC-PK：重启后必须能打开同一库", open_store(&db));
+    assert_eq!(
+        expect_ok(
+            "SEC-PK：重启后 load_pending(session-A) 必须可读",
+            reopened.load_pending("session-A")
+        )
+        .iter()
+        .map(|ask| ask.nonce.as_str())
+        .collect::<Vec<_>>(),
+        vec!["nonce-A"],
+        "SEC-PK：重启后 A 的未决 Ask（含凭据）不得被 B 的同名记录顶替"
+    );
+}
+
+/// L3-B ②a：`ask_list_pending` **无会话作用域必须返回空数组**（契约 §5），不得把全库
+/// requestId/version 泄露给无作用域宿主调用。
+#[test]
+fn security_unscoped_list_pending_must_not_leak_other_sessions_credentials() {
+    use pony_agent_core::agent::ask_persistence::AskPersistenceStore as _;
+
+    let dir = TempDir::new("sec-list-leak");
+    let db = dir.db();
+    let store: Arc<dyn AskPersistenceStore> =
+        Arc::from(expect_ok("SEC-LIST：必须能打开持久化 store", open_store(&db)));
+    expect_ok(
+        "SEC-LIST：session-A 的 upsert 必须成功",
+        store.upsert(&pending_ask("control-000000000000", "session-A", 1_000)),
+    );
+    expect_ok(
+        "SEC-LIST：session-B 的 upsert 必须成功",
+        store.upsert(&pending_ask("control-000000000001", "session-B", 2_000)),
+    );
+    // 让平面同时“认识”两个会话：会话候选来自 dispatcher 内存镜像 + 会话库。
+    // （若只写持久化层，宿主根本不知道这两个会话存在，断言会因“候选为空”而假绿。）
+    let dispatcher = t10_dispatcher();
+    let _ = t10_dispatch_ask(&dispatcher, "session-A", "call-sec-list-a");
+    let _ = t10_dispatch_ask(&dispatcher, "session-B", "call-sec-list-b");
+    let plane = t10_plane(Arc::clone(&dispatcher), Arc::clone(&store));
+
+    // 无作用域：不得泄露任何会话的 (requestId, version, nonce)。
+    let unscoped = plane.list_pending_asks(None);
+    let leaked = t10_entries(&unscoped);
+    assert!(
+        leaked.is_empty(),
+        "SEC-LIST：无会话作用域的 ask_list_pending 必须返回空数组（并携带 ask_scope_required），\
+         实际返回了 {} 条跨会话记录：{unscoped}",
+        leaked.len()
+    );
+
+    // 有作用域：只返回该会话的 Pending（也不得掺入其它会话）。
+    let scoped_a = t10_entries(&plane.list_pending_asks(Some("session-A")));
+    assert_eq!(
+        scoped_a.len(),
+        1,
+        "SEC-LIST：作用域 session-A 必须恰好返回 1 条，实际：{scoped_a:?}"
+    );
+    assert_eq!(
+        scoped_a[0].get("sessionId").and_then(serde_json::Value::as_str),
+        Some("session-A"),
+        "SEC-LIST：作用域查询不得返回其它会话的记录：{:?}",
+        scoped_a[0]
+    );
+}
+
+/// L3-B ②b：`ask_list_pending` 的投影**不得包含 `nonce`**（服务端自持 CAS 凭据，客户端不传）。
+#[test]
+fn security_ask_projection_must_not_expose_nonce() {
+    let dir = TempDir::new("sec-nonce-projection");
+    let db = dir.db();
+    let store: Arc<dyn AskPersistenceStore> =
+        Arc::from(expect_ok("SEC-NONCE：必须能打开持久化 store", open_store(&db)));
+    expect_ok(
+        "SEC-NONCE：upsert 必须成功",
+        store.upsert(&pending_ask("control-000000000000", "session-A", 1_000)),
+    );
+    let plane = t10_plane(t10_dispatcher(), Arc::clone(&store));
+
+    let entries = t10_entries(&plane.list_pending_asks(Some("session-A")));
+    assert_eq!(entries.len(), 1, "SEC-NONCE：作用域查询必须返回该条未决 Ask");
+    let entry = &entries[0];
+    assert!(
+        entry.get("nonce").is_none(),
+        "SEC-NONCE：ask 投影不得暴露 nonce（服务端自持、客户端不传）；实际投影：{entry}"
+    );
+    assert!(
+        entry.get("requestId").is_some() && entry.get("version").is_some(),
+        "SEC-NONCE：投影仍必须携带 requestId/version（CAS 版本由客户端回传）：{entry}"
+    );
+}
+
+/// L3-B ②c：**无会话作用域的作答必须 fail-closed**（`ask_scope_required` / `ask_state_conflict`），
+/// 且被拒绝后记录仍为 `Pending`。
+#[test]
+fn security_answer_without_session_scope_must_fail_closed() {
+    let dir = TempDir::new("sec-scope-answer");
+    let db = dir.db();
+    let store: Arc<dyn AskPersistenceStore> =
+        Arc::from(expect_ok("SEC-SCOPE：必须能打开持久化 store", open_store(&db)));
+    expect_ok(
+        "SEC-SCOPE：upsert 必须成功",
+        store.upsert(&pending_ask("control-000000000000", "session-A", 1_000)),
+    );
+    let plane = t10_plane(t10_dispatcher(), Arc::clone(&store));
+
+    // 调用方没有提供会话作用域：必须拒绝，而不是按 request_id 全库定位后 CAS 成功。
+    let outcome = plane.answer_ask("control-000000000000", 1, serde_json::json!("是"));
+    let error = match outcome {
+        Ok(value) => {
+            assert!(
+                false,
+                "SEC-SCOPE：无会话作用域的作答必须 fail-closed（ask_scope_required），\
+                 当前实现直接按 request_id 全库 CAS 成功并返回 {value} ⇒ 任意会话可跨会话作答"
+            );
+            unreachable!("assert above always fails on Ok")
+        }
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("ask_scope_required") || error.contains("ask_state_conflict"),
+        "SEC-SCOPE：拒绝必须携带稳定错误码（ask_scope_required / ask_state_conflict），实际：{error}"
+    );
+
+    let after = expect_ok(
+        "SEC-SCOPE：被拒绝后仍必须能读回记录",
+        store.load_pending("session-A"),
+    );
+    assert_eq!(after.len(), 1, "SEC-SCOPE：被拒绝的作答不得移除记录");
+    assert_eq!(
+        after[0].state,
+        AskLifecycleState::Pending,
+        "SEC-SCOPE：被拒绝的作答不得改变记录状态"
+    );
+    assert_eq!(after[0].version, 1, "SEC-SCOPE：被拒绝的作答不得自增版本");
+}
+
+/// L3-B ③：**持久化记录缺失时必须 fail-closed**，禁止回落内存镜像并返回 `Ok`（否则答案永不落盘）。
+#[test]
+fn security_missing_durable_record_must_not_fall_back_to_memory_mirror() {
+    use pony_agent_core::agent::ask_persistence::AskPersistenceStore as _;
+    use pony_agent_core::agent::tool_runtime::PendingControlRequestState;
+
+    let store: Arc<dyn AskPersistenceStore> = Arc::from(expect_ok(
+        "SEC-FAILCLOSED：必须能打开进程内 store",
+        open_in_memory_ask_store(),
+    ));
+    let dispatcher = t10_dispatcher();
+    // 只存在于 dispatcher 内存镜像（未 upsert 到持久化层）的 Ask。
+    let (request_id, pending) = t10_dispatch_ask(&dispatcher, "session-A", "call-sec-failclosed");
+    let plane = t10_plane(Arc::clone(&dispatcher), Arc::clone(&store));
+
+    let outcome = plane.answer_ask(&request_id, pending.version, serde_json::json!("是"));
+    let error = match outcome {
+        Ok(value) => {
+            assert!(
+                false,
+                "SEC-FAILCLOSED：持久化层查不到该 Ask 时必须 fail-closed（ask_not_found），\
+                 当前实现回落内存 CAS 并返回 Ok({value}) ⇒ 答案永不落盘、重启即丢"
+            );
+            unreachable!("assert above always fails on Ok")
+        }
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("ask_not_found") || error.contains("ask_state_conflict"),
+        "SEC-FAILCLOSED：拒绝必须携带稳定错误码（ask_not_found / ask_state_conflict），实际：{error}"
+    );
+    // 内存镜像不得被“成功”消费（否则宿主会误以为作答已生效）。
+    assert_eq!(
+        dispatcher
+            .pending_request(&request_id)
+            .expect("mirror record must stay readable")
+            .state,
+        PendingControlRequestState::Pending,
+        "SEC-FAILCLOSED：fail-closed 时内存镜像不得被消费"
+    );
+    // 列表同样不得回落内存镜像（契约 §7：持久化不可用必须 fail-closed，不得静默回退）。
+    let listed = t10_entries(&plane.list_pending_asks(Some("session-A")));
+    assert!(
+        listed.is_empty(),
+        "SEC-FAILCLOSED：持久化层无记录时 ask_list_pending 不得回落内存镜像，实际返回：{listed:?}"
+    );
+}

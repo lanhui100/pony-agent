@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { isStaleAskError, useAskStore } from "@/stores/ask";
+import { ASK_STALE_MESSAGE, isStaleAskError, useAskStore } from "@/stores/ask";
 import type { PendingAsk } from "@/types/ask-plan";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -284,14 +284,17 @@ describe("ask store", () => {
     expect(store.answeringRequestId).toBeNull();
   });
 
-  it("reconciles the snapshot when a stale-version answer is rejected", async () => {
-    const ask = createPendingAsk({ requestId: "ask-1", version: 1 });
+  it("reconciles the snapshot when a stale-version answer is rejected (new error family)", async () => {
+    // L3-B 重冻：宿主真实拒绝文案是持久化 CAS 错误族，不再是 dispatcher 时代的 skeleton 文案。
+    const ask = createPendingAsk({ requestId: "control-000000000000", version: 1 });
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
       if (command === "ask_list_pending") {
         return Promise.resolve([]);
       }
       if (command === "ask_answer") {
-        return Promise.reject(new Error("stale mutation rejected: version mismatch"));
+        return Promise.reject(
+          new Error("ask_version_mismatch: Ask `control-000000000000` is at version 2 but expected 1")
+        );
       }
       return Promise.resolve(null);
     });
@@ -302,10 +305,18 @@ describe("ask store", () => {
     const result = await store.answer(ask, "yes");
 
     expect(result).toBeNull();
-    expect(store.error).toContain("应答失败");
+    // 重新拉取宿主真相（列表已为空），再给**统一中文失效文案**（契约 §6.5）。
     await vi.waitFor(() => {
-      expect(tauriMocks.mockSafeInvoke.mock.calls.filter(([command]) => command === "ask_list_pending").length).toBeGreaterThanOrEqual(1);
+      expect(
+        tauriMocks.mockSafeInvoke.mock.calls.filter(([command]) => command === "ask_list_pending").length
+      ).toBeGreaterThanOrEqual(1);
     });
+    expect(store.error).toContain(ASK_STALE_MESSAGE);
+    // 不得落到"请重试"分支：新错误族是终态冲突，重试永远不会成功。
+    expect(String(store.error)).not.toContain("请重试");
+    expect(String(store.error)).not.toContain("ask_version_mismatch");
+    // 也不得把已终结的卡片塞回待处理列表。
+    expect(store.pendingAsks).toEqual([]);
   });
 
   it("cancels a pending ask with the listed version and removes it locally", async () => {
@@ -399,6 +410,26 @@ describe("ask store", () => {
     expect(isStaleAskError("Ask `ask-1` expected version 1 but current version is 2; stale mutation rejected.")).toBe(true);
     expect(isStaleAskError("unknown control request `ask-1`")).toBe(true);
     expect(isStaleAskError("control request `ask-1` kind mismatch")).toBe(true);
+    expect(isStaleAskError("network down")).toBe(false);
+  });
+
+  // L3-B 重冻（ADR 0074 §4 / 契约 §4）：持久化 CAS 的**新错误族**才是现在的真值面。
+  // 旧实现只认 dispatcher 时代的英文文案，对新错误串全部漏判 ⇒ 走"请重试"分支（假绿）。
+  it("detects the persisted-CAS error family (ask_state_conflict / ask_version_mismatch / ask_not_found / ask_nonce_mismatch / ask_scope_required)", () => {
+    expect(
+      isStaleAskError(
+        "ask_state_conflict: Ask `control-000000000000` is cancelled, not pending (terminal states are final)"
+      )
+    ).toBe(true);
+    expect(
+      isStaleAskError(
+        "ask_version_mismatch: Ask `control-000000000000` is at version 2 but expected 1"
+      )
+    ).toBe(true);
+    expect(isStaleAskError("ask_not_found: no persisted Ask `control-000000000000`")).toBe(true);
+    expect(isStaleAskError("ask_nonce_mismatch: nonce does not match the persisted request")).toBe(true);
+    expect(isStaleAskError("ask_scope_required: session scope is required for this call")).toBe(true);
+    // 契约 §4 稳定错误码是**唯一**可归因面；不带错误码的普通网络故障不得被误判为失效。
     expect(isStaleAskError("network down")).toBe(false);
   });
 });
