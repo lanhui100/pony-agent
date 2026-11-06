@@ -85,6 +85,7 @@
 - [0071 TUI 流式期可输入、面板可开、用户消息排队](0071-tui-streaming-input-queue-and-panels.md)
 - [0072 会话 id 生成规范统一为 `pa_<uuidv7>`](0072-session-id-unification.md)
 - [0073 token 速度口径 v2：解码窗口分母 + 物理下限 + basis 自描述](0073-token-speed-decode-basis.md)
+- [0076 TUI 思考（reasoning）消息可见与消息区底部呼吸间距](0076-tui-thinking-message-and-chat-bottom-gap.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

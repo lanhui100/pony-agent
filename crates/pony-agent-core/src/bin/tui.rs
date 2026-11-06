@@ -491,6 +491,8 @@ pub enum MessageRole {
     ToolCall,
     ToolResult,
     System,
+    /// 模型思考（reasoning）增量块：与正文分列，视觉从属于正文。
+    Thinking,
 }
 
 #[derive(Debug, Clone)]
@@ -519,6 +521,9 @@ pub enum UiEvent {
     InputPumpFailed { error: String },
     ScrollWheel(bool), // true = ScrollUp, false = ScrollDown
     StreamDelta(String),
+    /// 思考（reasoning）增量：`turn:delta` 的 `reasoningContent` 通道，进入消息列表的
+    /// `MessageRole::Thinking` 块（与正文分列渲染）。
+    StreamReasoning(String),
     StreamToolCall(String),
     StreamToolResult(String),
     StreamCompleted,
@@ -2522,6 +2527,11 @@ pub struct TuiState {
     pub context_window_tokens: u32,
     /// wave-39 R2：本轮去重回执 `(input, output, cache_hit, total)`；`None` = 本轮尚无回执。
     turn_usage: Option<(u64, u64, u64, u64)>,
+    /// 契约 C4a（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：本轮思考块是否已封口。
+    /// `begin_turn_usage`（`turn:started` 的公共复位点）置 `true` ⇒ 其后的思考增量**新起**一块，
+    /// 不再续写上一轮的思考块（宿主续轮不得把两轮思考糊成一条）；`apply_stream_reasoning`
+    /// 消费一次后复位为 `false`。
+    reasoning_turn_closed: bool,
     pub status_text: String,
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
@@ -2634,6 +2644,7 @@ impl Default for TuiState {
             last_context_tokens: 0,
             context_window_tokens: 0,
             turn_usage: None,
+            reasoning_turn_closed: false,
             status_text: "Ready".to_string(),
             mouse_capture: true,
             mouse_selection: MouseSelectionState::default(),
@@ -2982,6 +2993,9 @@ impl TuiState {
         self.turn_cache_hit_tokens = 0;
         // P0：新轮开始 ⇒ 上一轮快照必须失效，否则指标行会继续显示旧轮数字。
         self.live_metrics = None;
+        // 契约 C4a：`turn:started` 是本轮起点（用户提交 / Ask 回填 / 审批恢复 / goal 续轮都经此），
+        // 上一轮的思考块在此封口，本轮思考增量必须新起一块，不得续写进去。
+        self.reasoning_turn_closed = true;
     }
 
     /// P0：应用一条指标结算快照（`TurnStreamEvent.metrics` → `UiEvent::StreamMetrics`）。
@@ -3685,6 +3699,42 @@ impl TuiState {
             content: chunk.to_string(),
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         });
+    }
+
+    /// 契约 C4/C5（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：思考增量入库。
+    ///
+    /// - 末条消息 role == `Thinking` ⇒ 原地续写；否则**新开**一条 `Thinking` 消息；
+    /// - `chunk.trim()` 为空 ⇒ 不改动 `messages`；
+    /// - 运行态：非 `RuntimeMode::ExecutingTool(_)` ⇒ `runtime_mode = Thinking`
+    ///   （工具执行中不抢状态）；`is_streaming` / `scroll_offset` / `auto_scroll` 不改写。
+    pub fn apply_stream_reasoning(&mut self, chunk: &str) {
+        // C4：空白 chunk 不改变 messages，也不推进运行态（无内容就不该有状态副作用）。
+        if chunk.trim().is_empty() {
+            return;
+        }
+        // 契约 C4a：上一轮已在 `begin_turn_usage` 封口 ⇒ 本轮思考必须新起一块。
+        // 先读进局部变量，避免与随后的 `messages.last_mut()` 借用冲突。
+        let turn_closed = self.reasoning_turn_closed;
+        let continued = match self.messages.last_mut() {
+            Some(last) if last.role == MessageRole::Thinking && !turn_closed => {
+                last.content.push_str(chunk);
+                true
+            }
+            _ => false,
+        };
+        if !continued {
+            self.messages.push(ChatMessage {
+                role: MessageRole::Thinking,
+                content: chunk.to_string(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            });
+        }
+        // C4a：封口标志是一次性的，消费后复位，同一轮内的后续增量继续续写同一块。
+        self.reasoning_turn_closed = false;
+        // C5：工具执行中不抢状态；is_streaming / scroll_offset / auto_scroll 一律不动。
+        if !matches!(self.runtime_mode, RuntimeMode::ExecutingTool(_)) {
+            self.transition_runtime_mode(RuntimeMode::Thinking);
+        }
     }
 
     pub fn add_or_update_tool_event(&mut self, desc: &str, is_done: bool) {
@@ -4467,13 +4517,14 @@ impl TurnEventSink for TuiTurnSink {
                 let _ = self.tx.send(UiEvent::TurnStarted);
             }
             "turn:delta" => {
-                if let Some(text) = payload.text {
-                    // wave-tui-session-resilience C1：上游 DSML 工具调用协议原文
-                    // 不得进入消息区；跨 chunk 的半截标记也不交给用户。
-                    let (visible, _incomplete) = sanitize_model_protocol_text(&text);
-                    if !visible.is_empty() {
-                        let _ = self.tx.send(UiEvent::StreamDelta(visible));
-                    }
+                // 契约 C1（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：取载口径唯一化到
+                // `stream_delta_ui_payload`，正文与思考两条通道都不许丢（thinking 先于正文投递）。
+                let ui = stream_delta_ui_payload(&payload);
+                if let Some(reasoning) = ui.reasoning {
+                    let _ = self.tx.send(UiEvent::StreamReasoning(reasoning));
+                }
+                if let Some(text) = ui.text {
+                    let _ = self.tx.send(UiEvent::StreamDelta(text));
                 }
             }
             "turn:tool" => {
@@ -4593,6 +4644,36 @@ impl TurnEventSink for TuiTurnSink {
             _ => {}
         }
     }
+}
+
+/// 契约 C1/C2/C3（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：`turn:delta` 载荷的
+/// 「正文 / 思考」双通道取载结果。两条通道各自独立，任一为空即为 `None`。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeltaUiPayload {
+    pub text: Option<String>,
+    pub reasoning: Option<String>,
+}
+
+/// 契约 C1：`turn:delta` 取载唯一面（`TuiTurnSink` 只允许经它取载）。
+///
+/// 规则（契约 C2/C3）：
+/// - `text` 沿用 DSML 净化 `sanitize_model_protocol_text`，净化后为空 ⇒ `None`；
+/// - `reasoning` 原样透传（不是工具协议通道，不做 DSML 净化），`trim()` 为空 ⇒ `None`。
+pub fn stream_delta_ui_payload(payload: &TurnStreamEvent) -> DeltaUiPayload {
+    // C3（L3-A F6 修订）：正文通道沿用 DSML 净化；判空口径与 HEAD 一致 = **净化后空串**才丢。
+    // 不得加 `trim()`：纯空白正文增量（"\n\n"）是合法的段落/换行，吞掉会丢排版。
+    // DSML 分片净化结果仍是空串，故 "净化后为空 ⇒ None" 的语义不变。
+    let text = payload.text.as_deref().and_then(|raw| {
+        let (cleaned, _incomplete) = sanitize_model_protocol_text(raw);
+        (!cleaned.is_empty()).then_some(cleaned)
+    });
+    // C3：思考通道原样透传（不是工具协议通道，不做 DSML 净化），仅纯空白丢弃。
+    let reasoning = payload
+        .reasoning_content
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+        .map(str::to_string);
+    DeltaUiPayload { text, reasoning }
 }
 
 /// wave-39 R8' / wave-41 S1：仅 `turn:output_end` 是 usage 权威事件；
@@ -4828,6 +4909,13 @@ const GUTTER: u16 = 3;
 /// 消息轨道：左侧 2 列承载角色/工具字形，所有正文从轨道之后起排。
 /// 这样用户正文、助手正文、工具文本共享同一条文本基线。
 const RAIL: usize = 2;
+
+/// 契约 C8（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：消息区下缘与 Composer 色带
+/// 之间**恒定保留**的空白行数（阅读呼吸，防止最后一行正文/状态行贴住输入框）。
+///
+/// 修订 R5（2026-11-06 用户实测）：1 行偏挤 ⇒ 2 行。所有几何推导（`chat_h` 的扣除、Ask 覆盖层
+/// 的下缘补偿、`show_banner` 的阈值补偿）都必须继续引用本常量，禁止在别处写死 1/2。
+pub const CHAT_BOTTOM_GAP: u16 = 2;
 
 /// 极简字形集：只用三种标记，避免图标噪音。
 const GLYPH_RUNNING: &str = "◦";
@@ -6104,6 +6192,10 @@ fn message_lines_with_ctx(
                     // 工具执行后恢复正文只用一行留白表示节奏。
                     if prev_is_tool {
                         push_blank(&mut lines);
+                    } else if matches!(ctx.prev_role, Some(MessageRole::Thinking)) {
+                        // 契约 C7：思考块与随后正文之间恰好 1 行呼吸，这一行由 Thinking 块尾部
+                        // 承担（每块是独立 Vec，块首插行在本实现里不生效）；此处不得再叠加，
+                        // 否则会变成 2 行轮间距。
                     } else if ctx.prev_role.is_some() {
                         push_gap(&mut lines, 2);
                     }
@@ -6196,6 +6288,51 @@ fn message_lines_with_ctx(
                         Line::from(body),
                         width.saturating_sub(RAIL),
                     );
+                }
+                MessageRole::Thinking => {
+                    // 契约 C6（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：
+                    // 思考块从属于正文（`✻` 前缀 + FAINT/ITALIC 正文 + RAIL 续行），
+                    // 与前后消息之间只留 1 行呼吸（禁止 2 行轮间距）。
+                    // C6 修订（L3-B F1）：前驱侧呼吸。`push_blank` 在本函数里是空操作——
+                    // 每条消息各自返回一个**新的空 Vec**，`lines.last() == None` 时它直接 return，
+                    // 所以这里必须直接落一行。User 前驱不再加行：用户块自带 1 行 SURFACE 下内边距，
+                    // 再加会变成 2 行轮间距。
+                    if ctx.prev_role.is_some()
+                        && !matches!(
+                            ctx.prev_role,
+                            Some(MessageRole::Thinking) | Some(MessageRole::User)
+                        )
+                    {
+                        lines.push(blank());
+                    }
+                    let head = vec![Span::styled(
+                        "✻ ",
+                        Style::default().fg(theme::ACCENT_DIM),
+                    )];
+                    let body_style = Style::default()
+                        .fg(theme::FAINT)
+                        .add_modifier(Modifier::ITALIC);
+                    let body_w = width.saturating_sub(RAIL);
+                    for (i, raw) in message.content.lines().enumerate() {
+                        let (first, cont) = if i == 0 {
+                            (head.clone(), rail_blank())
+                        } else {
+                            (rail_blank(), rail_blank())
+                        };
+                        push_prefixed(
+                            &mut lines,
+                            first,
+                            cont,
+                            Line::from(Span::styled(raw.to_string(), body_style)),
+                            body_w,
+                        );
+                    }
+                    if message.content.is_empty() {
+                        push_prefixed(&mut lines, head, rail_blank(), Line::from(""), body_w);
+                    }
+                    // C6/C7：思考块与随后消息之间恰好 1 行呼吸。后续块自身是独立 Vec，
+                    // 其块首的 `push_blank` 在空块上不生效，故这一行必须由本块尾部承担。
+                    lines.push(blank());
                 }
                 MessageRole::System => {
                     let is_error = message.content.contains("Error")
@@ -6516,7 +6653,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let ask_inline_h = inline_ask_height(state, content.width as usize);
 
     let chat_top = content.y + 3; // header + rule + 1 行呼吸
-    let chat_h = bottom_top.saturating_sub(chat_top);
+    // 契约 C8（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：消息区下缘与 Composer 色带
+    // 之间恒定保留 `CHAT_BOTTOM_GAP` 行空白（CANVAS 底色，无任何字形）；自动贴底与手动滚到底
+    // 两种情形都成立。间距行不参与消息区几何，故在高度上扣除而不是塞进 Composer 侧。
+    let chat_h = bottom_top
+        .saturating_sub(chat_top)
+        .saturating_sub(CHAT_BOTTOM_GAP);
     let chat_rect = Rect {
         x: content.x,
         y: chat_top,
@@ -6526,7 +6668,13 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     // Ask 是正文下部的覆盖层，不参与消息区几何；极小终端也不能越过 header 或 Composer。
     let ask_rect = if ask_inline_h > 0 {
         let ask_y = chat_rect.y.max(bottom_top.saturating_sub(ask_inline_h));
-        let ask_bottom = chat_rect.y.saturating_add(chat_rect.height).min(bottom_top);
+        // Ask 是覆盖层而非布局项：下缘仍贴 Composer 色带上缘，允许占用消息区之下的
+        // `CHAT_BOTTOM_GAP` 呼吸行（契约 C8 只约束消息区几何；既有 O2 用例断言面板贴色带）。
+        let ask_bottom = chat_rect
+            .y
+            .saturating_add(chat_rect.height)
+            .saturating_add(CHAT_BOTTOM_GAP)
+            .min(bottom_top);
         Rect {
             x: content.x,
             y: ask_y,
@@ -6557,7 +6705,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         // 短终端不硬塞品牌画：优先保证「一句话 + 命令入口」完整可见，且底部至少留 1 行呼吸。
         // 当前构图 = 1 空行 + 折角标 11 行 + 1 空行 + 一句定位语 + 1 空行 + 引导块 8 行 = 23 行，
         // 故正文区高度必须 ≥ 24 才放品牌画（=23 时引导块会顶到正文区最后一行，紧贴输入带）。
-        let show_banner = chat_h as usize >= 24;
+        // C8 修订（L3-B F4）：`chat_h` 已扣除底部呼吸行，阈值判定要把它加回来，
+        // 否则空态可用高度凭空少 1 行，height=31/35 时品牌画会比改动前消失一格。
+        let show_banner = (chat_h as usize + CHAT_BOTTOM_GAP as usize) >= 24;
         let mut banner_draw_logo = true;
         if show_banner {
             // 图形协议路径要求横幅行不因换行而错位；行宽与是否绘制像素无关
@@ -6653,9 +6803,39 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     } else {
         cache_total + trailing_status_lines.len()
     };
-    let max_offset = total.saturating_sub(visible);
+    // 契约 C8/C9（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：间距行必须是
+    // 「最后一条内容行之后的第一行」。各消息块自带的尾部空行（如用户块的 SURFACE 下内边距）
+    // 不参与滚动锚定，否则贴底时视口末行落在空白内边距上，内容与间距行之间会凭空多出 1 行空白。
+    let trailing_blanks = {
+        let is_blank_line =
+            |line: &Line<'static>| line.spans.iter().all(|span| span.content.trim().is_empty());
+        let mut count = 0usize;
+        let mut tail_has_content = false;
+        for line in trailing_status_lines.iter().rev() {
+            if is_blank_line(line) {
+                count += 1;
+            } else {
+                tail_has_content = true;
+                break;
+            }
+        }
+        if !tail_has_content {
+            'blocks: for block in state.render_cache.cache_lines.iter().rev() {
+                for line in block.iter().rev() {
+                    if is_blank_line(line) {
+                        count += 1;
+                    } else {
+                        break 'blocks;
+                    }
+                }
+            }
+        }
+        count
+    };
+    let scroll_total = total.saturating_sub(trailing_blanks);
+    let max_offset = scroll_total.saturating_sub(visible);
     // 契约 F-H：max_scroll_offset 以 u32 承载（>65535 视觉行不再回绕跳顶）。
-    state.max_scroll_offset = calculate_scroll_offset(total, visible);
+    state.max_scroll_offset = calculate_scroll_offset(scroll_total, visible);
     // usize → u32 的统一饱和口径（仅在 >4G 视觉行的不可能场景触发）。
     let to_u32 = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
 
@@ -6696,7 +6876,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             0usize,
         )
     } else {
-        let window_end = (window_start + visible).min(total);
+        let window_end = (window_start + visible).min(scroll_total);
         let mut window = collect_window_lines(&state.render_cache.cache_lines, window_start, window_end);
         // 末尾流式状态行（逻辑行号从 `cache_total` 起）。
         if window_end > cache_total {
@@ -10827,6 +11007,10 @@ fn tui_event_loop(
                     if !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
                         state.transition_runtime_mode(RuntimeMode::Responding);
                     }
+                }
+                UiEvent::StreamReasoning(delta) => {
+                    // 契约 C1/C5：思考增量走独立入库面（末条 Thinking 续写 + 运行态推进）。
+                    state.apply_stream_reasoning(&delta);
                 }
                 UiEvent::StreamToolCall(call) => {
                     let tool_name = clean_tool_name_display(&call);

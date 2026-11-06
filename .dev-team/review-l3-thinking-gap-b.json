@@ -1,0 +1,56 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "3a0d0a56-665d-46d2-bab9-3b8a75faaee5",
+    "fresh_context": true
+  },
+  "executed_by": "3a0d0a56-665d-46d2-bab9-3b8a75faaee5",
+  "reviewed_commit": "25a98482ce1d01481b52f91dd9cff8d37faa6400",
+  "reviewed_worktree_dirty": true,
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6262,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "粘进 tests/tui_thinking_bottom_gap.rs 的 harness（只读验证，勿提交）：块首 push_blank 永为空操作（tui.rs:6144 每块新建 Vec + tui.rs:5065-5072 lines.last()==None 直接返回，cache 分块见 tui.rs:2880-2893），故 Assistant→Thinking 空行数 == 0（两块粘连），Thinking→User == 2 行（Thinking 尾行 6292 + User 首行内边距 5306），C6「与前后消息之间只留 1 行呼吸」双向违约：\nlet mut s = tui::TuiState::default();\ns.messages.push(msg(tui::MessageRole::User, \"问\"));\ns.messages.push(msg(tui::MessageRole::Assistant, \"答\"));\ns.messages.push(msg(tui::MessageRole::Thinking, \"想\"));\ns.messages.push(msg(tui::MessageRole::User, \"再问\"));\nlet buf = screen(&mut s, 110, 30);\nassert_eq!(find_row(&buf, \"想\").unwrap(), find_row(&buf, \"答\").unwrap() + 1);   // 违反 C6：应为 +2（1 行呼吸）\nassert_eq!(find_row(&buf, \"再问\").unwrap(), find_row(&buf, \"想\").unwrap() + 3); // 违反 C6：应为 +2（禁止 2 行轮间距）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6790,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "末条消息带尾随内边距（User 结尾 = 刚提交提问的最常见态）时 max_scroll_offset 不再等于 total_lines - visible，与冻结的同侪契约 crates/pony-agent-core/tests/tui_batch6_virtualization.rs:359-364「语义零变更」冲突（该用例因夹具以 Assistant 结尾而侥幸仍绿）：\nlet mut s = tui::TuiState::default(); s.auto_scroll = false;\nfor i in 0..200 { s.add_user_message(&format!(\"滚动边界消息 #{i}：用于验证 offset 窗口推导。\")); }\nlet _ = screen(&mut s, 100, 30);\nlet st = s.render_cache_stats(); let vis = s.last_chat_rect.unwrap().height as usize;\nassert_eq!(s.max_scroll_offset, (st.total_lines - vis) as u32); // 实际 = total_lines - 1 - vis"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6616,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "24×10 + 多行输入：chat_h = bottom_top - chat_top - 1 = 4-3-1 = 0 → .max(1)（tui.rs:6623）使 chat_rect 正好占掉间距行 y=3 且下缘 4 == Composer 色带上缘 bottom_top=4，C8/C11「不得把间距行挤进 Composer」在该组合下失效（A10 只测空输入 input_h=2 故未暴露）：\nlet mut s = overflow_state(); s.set_input(\"a\\nb\\nc\"); // visual_lines=3 ⇒ input_h=4\nlet buf = screen_until_settled(&mut s, 24, 10);\nlet prompt = prompt_row(&buf); let r = s.last_chat_rect.unwrap();\nassert!(r.y + r.height <= prompt.saturating_sub(2), \"chat_rect 占掉间距行: {:?}\", r); // 3+1=4 > 5-2=3 ⇒ 失败"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6665,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "chat_h 扣掉 CHAT_BOTTOM_GAP 后 show_banner 的硬阈值未同步：空态品牌画在 height=31（input_h=2）/height=35（input_h=4）消失一格（改动前 chat_h=H-input_h-5，改动后 H-input_h-6）：\nlet mut s = tui::TuiState::default();\nlet t = all_text(&screen(&mut s, 110, 31));\nassert!(t.contains(\"Pony Agent\"), \"31 行：改动前 chat_h=24 放品牌画(tui.rs:4262-4280)，改动后 23 ⇒ 品牌画消失\");"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 3714,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "MessageRole::Thinking 入库后 add_or_update_tool_event 的原位更新判据只看末条 role（契约 C5 明确承认「工具执行中仍可能收到思考增量」），一旦思考增量落在 ToolCall 与 ToolResult 之间，工具行永久停在 running 并多出一条重复 ToolResult：\nlet mut s = tui::TuiState::default();\ns.add_tool_event(true, \"bash · cargo test\");    // ToolCall(running)\ns.apply_stream_reasoning(\"工具执行中仍收到思考\"); // 尾条变为 Thinking\ns.add_tool_event(false, \"bash · cargo test\");   // 末条非 ToolCall ⇒ 新 push 一条 ToolResult\nassert_eq!(s.messages.len(), 2, \"实得 3：ToolCall 永久 running + 重复 ToolResult\");"
+    }
+  ]
+}
