@@ -79,3 +79,4 @@ tsconfig.tsbuildinfo
 # tools/tui-audit 本地基线可执行文件及临时二进制产物
 tools/tui-audit/bin/
 
+.pony-agent/
