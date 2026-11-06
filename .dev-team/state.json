@@ -1310,7 +1310,7 @@
       "tier": "C",
       "tier_basis": "跨模块（会话存储 schema/迁移 + 控制面 CAS + TUI + 桌面 + 契约重冻）；命中 blast keywords: session-store/schema-migration/persistence",
       "baseline_commit": "4e4fedc",
-      "status": "rework-required-3",
+      "status": "closed-green",
       "observed_at": "2026-11-06T17:20:00+08:00",
       "red_phase": {
         "status": "satisfied-by-equivalent",
@@ -1475,6 +1475,12 @@
             "T15 红相",
             "T16 核心修复"
           ]
+        },
+        "l3_final_round4": {
+          "verdict": "PASS",
+          "file": ".dev-team/review-l3-final-round4.json",
+          "claims_closed": "4/4",
+          "counterexamples": 0
         }
       },
       "lead_gate_evidence_update": {
@@ -1505,7 +1511,23 @@
           },
           "verdict": "PASS（未发现语义漂移）"
         }
-      }
+      },
+      "closed_at": "2026-11-06T20:05:00+08:00",
+      "residual_advisories": [
+        "graph_resume_ask 幂等判定是进程内（新进程重放已 landed 仍 Err unknown control request，无数据丢失）",
+        "sweep 重建注入 version=2 与实时路径 version=1 不一致",
+        "json!(null) 答案实时可送达但 sweep 跳过",
+        "graph-runs.json 双进程整文件写 lost update（t8 #[ignore]，独立 backlog）",
+        "AskPanel.vue 为死代码（未挂载），本波仅做去 TTL 编译适配，删除留给 code-hygiene"
+      ],
+      "commits": [
+        "fc014625",
+        "56265df2",
+        "69d9a137",
+        "38db0ffd",
+        "67a967d5",
+        "e0f699fa"
+      ]
     }
   ],
   "counters": {
