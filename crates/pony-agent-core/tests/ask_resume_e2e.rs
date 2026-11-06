@@ -5,16 +5,16 @@
 //!
 //! 覆盖与判据：
 //! - **T1**（C1+C2）：TUI 真实入口 `HostControlPlane::start_turn_stream` 跑一轮 ⇒ mock provider
-//!   返回 `Ask` 工具调用 ⇒ `turn:suspended`；`answer_ask` + `graph_resume_ask` 后经
+//!   返回 `Ask` 工具调用 ⇒ `turn:suspended`；`answer_ask_in_session` + `graph_resume_ask` 后经
 //!   `start_turn_stream` 跑续轮 ⇒ **恰好一条** `turn:completed`，正文 == mock 第二段 assistant 文本，
 //!   且该轮仍落在**同一个** graph run 上（run 总数仍为 1，id 不变）。
-//! - **T2**（C1）：挂起请求持有真实 run 身份（`list_pending_asks()[0].runId` 为 Some）、run phase ==
+//! - **T2**（C1）：挂起请求持有真实 run 身份（`list_pending_asks(Some(session))[0].runId` 为 Some）、run phase ==
 //!   `WaitingUser`、`graph_list_ask_waits(run_id)` 恰一条且 `requestId`/`expectedVersion` 与 pending 对齐、
 //!   事件里 `turn:suspended` 恰 1 条且 `turn:failed` 恰 0 条。
 //! - **T3**（C3，红线）：无 run 身份的旧入口 `AgentRuntime::start_turn_stream_with_control` +
 //!   governed executor 返回 `Ask` ⇒ 终态必须是 `turn:failed` 且 error 以 `ask_resume_unavailable`
 //!   开头，`turn:suspended` **恰 0 条**（不可恢复时不得出现无终态挂起）。
-//! - **T4**（INV-1）：未 `answer_ask` 直接 `graph_resume_ask` 必须 Err；`answer_ask` 用过期
+//! - **T4**（INV-1）：未作答直接 `graph_resume_ask` 必须 Err；`answer_ask_in_session` 用过期
 //!   `expected_version` 必须 Err；两次 Err 之后仍可用正确版本消费（CAS 未被破坏）。
 //! - **T5**（INV-3+INV-4）：挂起时 provider 只被请求 1 次（不回灌）；续轮的第 2 次请求体必须包含
 //!   原 Ask `call_id`（`call-ask-e2e-1`）对应的终结 tool 结果，且**不得**包含字面串
@@ -24,6 +24,11 @@
 //! C3（`ask_resume_unavailable` fail-closed）尚未实现，故 **T1/T2/T4/T5 现在必然失败**
 //! （最先失败在「挂起请求没有 run 身份」这一事实），**T3 也失败**（当前实现对「Interaction 且无
 //! run 身份」仍下发裸 `turn:suspended`）。实施完成后本文件转绿且此后只读。
+//!
+//! R3 契约迁移（2026-11-06，Lead 裁决 / ADR 0074）：未决 Ask 的读取与作答入口改为**会话作用域**
+//! 强绑定 —— `list_pending_asks(Some(session_id))`、`answer_ask_in_session(session_id, …)`；
+//! 旧的无作用域 `list_pending_asks(None)` / `answer_ask(…)` 现为 fail-closed（`ask_scope_required`）。
+//! 本次迁移**只换入口**，T1~T5 的断言与事件语义逐条保持原样（未放松任何一条）。
 //!
 //! 纪律（test-expert L2）：真实断言、AAA、命名带判据号；禁止 `#[ignore]` / catch 吞异常 / 空断言；
 //! 跨线程/异步等待一律显式条件轮询（`wait_until`）+ 硬上界，绝不裸 sleep 盲等。
@@ -143,6 +148,19 @@ impl TurnEventSink for RecordingSink {
             .expect("recording sink lock poisoned")
             .push((name.to_string(), payload));
     }
+}
+
+/// 用例串行闸门（防 Flaky，非断言）。
+///
+/// R3 起未决 Ask 的唯一真值源是持久化 store（`sessions.db`，ADR 0074）；同进程的用例共享同一
+/// 沙箱库，并行跑时会互相触发 `database is locked` ⇒ 挂起记录可能未落盘 ⇒ 断言随机变红。
+/// 这里只串行**夹具**（不含任何判定），断言强度不变。
+static SERIAL_TEST_GUARD: Mutex<()> = Mutex::new(());
+
+fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL_TEST_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 显式条件轮询（禁止裸 sleep 盲等）：谓词为真即返回 true，超时返回 false。
@@ -432,8 +450,9 @@ fn runtime_with_mock_provider(base_url: String, workspace: &Path) -> AgentRuntim
 // 断言辅助（JSON 投影读取 + 带判据号的消息）
 // ---------------------------------------------------------------------------
 
-fn pending_asks(control_plane: &HostControlPlane) -> Vec<Value> {
-    match control_plane.list_pending_asks(None) {
+/// 该会话作用域下的未决 Ask 快照（R3：作用域强绑定，无作用域调用是 fail-closed 空数组）。
+fn pending_asks(control_plane: &HostControlPlane, session_id: &str) -> Vec<Value> {
+    match control_plane.list_pending_asks(Some(session_id)) {
         Value::Array(items) => items,
         other => panic!("list_pending_asks 必须返回 JSON 数组，实际 = {other}"),
     }
@@ -510,7 +529,7 @@ fn run_turn_until_ask_suspension(
         "{case}：Ask 工具调用必须让本轮以 turn:suspended 收口（可恢复挂起），实际事件序列 = {names:?}"
     );
 
-    let asks = pending_asks(control_plane);
+    let asks = pending_asks(control_plane, session_id);
     assert_eq!(
         asks.len(),
         1,
@@ -547,6 +566,8 @@ fn run_continuation_turn(
 
 #[test]
 fn t1_ask_answer_resumes_the_same_run_and_produces_next_assistant_output() {
+    let _serial = serial_guard();
+
     // Arrange：mock provider 第 1 次回 Ask 工具调用，第 2 次回纯文本续轮产出。
     let server = MockProviderServer::start(vec![
         MockReply::AskToolCall,
@@ -571,7 +592,7 @@ fn t1_ask_answer_resumes_the_same_run_and_produces_next_assistant_output() {
 
     // Act ②：宿主作答（CAS 消费）→ 恢复 graph ask-wait（一次性注入终结 tool 结果）。
     expect_ok(
-        control_plane.answer_ask(&request_id, expected_version, json!("继续")),
+        control_plane.answer_ask_in_session(session_id, &request_id, expected_version, json!("继续")),
         "T1：answer_ask 必须以当前版本 CAS 消费挂起请求",
     );
     let resumed = expect_ok(
@@ -628,6 +649,8 @@ fn t1_ask_answer_resumes_the_same_run_and_produces_next_assistant_output() {
 
 #[test]
 fn t2_ask_suspension_binds_graph_run_and_persists_run_id_on_pending_request() {
+    let _serial = serial_guard();
+
     // Arrange
     let server = MockProviderServer::start(vec![MockReply::AskToolCall]);
     let workspace = isolated_workspace("t2");
@@ -722,6 +745,8 @@ fn t2_ask_suspension_binds_graph_run_and_persists_run_id_on_pending_request() {
 
 #[test]
 fn t3_ask_without_run_identity_fails_closed_instead_of_silent_suspend() {
+    let _serial = serial_guard();
+
     // Arrange：旧入口（无 run 事实）+ governed executor + mock provider 返回 Ask 工具调用。
     let server = MockProviderServer::start(vec![MockReply::AskToolCall]);
     let workspace = isolated_workspace("t3");
@@ -771,6 +796,8 @@ fn t3_ask_without_run_identity_fails_closed_instead_of_silent_suspend() {
 
 #[test]
 fn t4_resume_requires_cas_consumed_request() {
+    let _serial = serial_guard();
+
     // Arrange：先真实挂起一条 Ask。
     let server = MockProviderServer::start(vec![MockReply::AskToolCall]);
     let workspace = isolated_workspace("t4");
@@ -800,7 +827,7 @@ fn t4_resume_requires_cas_consumed_request() {
     );
 
     // Assert ①：提前 resume 失败后，pending 仍未被破坏（state/version 不变 ⇒ 仍可消费）。
-    let after_premature = pending_asks(&control_plane);
+    let after_premature = pending_asks(&control_plane, session_id);
     assert_eq!(
         after_premature.len(),
         1,
@@ -819,14 +846,14 @@ fn t4_resume_requires_cas_consumed_request() {
     );
 
     // Act ②：用过期的 expected_version 作答 ⇒ 必须 Err。
-    let stale = control_plane.answer_ask(&request_id, version + 1, json!("继续"));
+    let stale = control_plane.answer_ask_in_session(session_id, &request_id, version + 1, json!("继续"));
     expect_err(
         stale,
         "T4：answer_ask 必须以当前版本为 CAS 真值，过期版本必须 fail-closed 拒绝",
     );
 
     // Assert ②：过期作答失败后 pending 仍原样可消费。
-    let after_stale = pending_asks(&control_plane);
+    let after_stale = pending_asks(&control_plane, session_id);
     assert_eq!(
         after_stale.len(),
         1,
@@ -841,7 +868,7 @@ fn t4_resume_requires_cas_consumed_request() {
 
     // Act ③：用正确版本作答 ⇒ 必须成功（证明前两次 Err 未损伤 CAS）。
     let consumed = expect_ok(
-        control_plane.answer_ask(&request_id, version, json!("继续")),
+        control_plane.answer_ask_in_session(session_id, &request_id, version, json!("继续")),
         "T4：两次 fail-closed 之后，正确的 answer_ask 仍必须成功（CAS 未被破坏）",
     );
 
@@ -859,6 +886,8 @@ fn t4_resume_requires_cas_consumed_request() {
 
 #[test]
 fn t5_control_outcome_pending_never_reaches_provider() {
+    let _serial = serial_guard();
+
     // Arrange
     let server = MockProviderServer::start(vec![
         MockReply::AskToolCall,
@@ -898,7 +927,7 @@ fn t5_control_outcome_pending_never_reaches_provider() {
 
     // Act ②：作答 + 恢复 ask-wait，再跑续轮。
     expect_ok(
-        control_plane.answer_ask(&request_id, version, json!("继续")),
+        control_plane.answer_ask_in_session(session_id, &request_id, version, json!("继续")),
         "T5：answer_ask 必须以当前版本 CAS 消费挂起请求",
     );
     expect_ok(
