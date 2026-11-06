@@ -82,3 +82,28 @@ decode_eligible(r):= valid(r) && ttft 存在 && dur > ttft && out >= 2 && gen >=
   与 `src/types/runtime.ts` 必须同提交更新。
 - 不改变 `first_token_latency_ms` 的取值语义（快照里仍是末次 hop 的 TTFT）。「首 token 展示应为
   本轮首包」是相邻但独立的缺陷，登记 backlog，不在本 ADR 处理。
+
+## 验收收据（2026-11-06 终审）
+
+口径 v2 已在单一真值点落地，并由契约测试冻结。逐项收据：
+
+| 门禁 | 命令 | 结果 |
+| --- | --- | --- |
+| Rust 编译（全 target） | `cargo check -p pony-agent-core --all-targets` | exit 0 |
+| 速度口径 5 个 target | `cargo test -p pony-agent-core --test metrics_snapshot_contract --test metrics_snapshot_adversarial --test tui_metrics_snapshot --test wave54_metric_truth --test ts_contract_snapshot` | exit 0，**42 passed / 0 failed**（5+10+1+18+8） |
+| Rust 全量 lib | `cargo test -p pony-agent-core --lib` | exit 0，**1314 passed / 0 failed** |
+| 前端速度定向 | `npx vitest run tests/unit/token-speed-metrics.spec.ts tests/acceptance/wave54 tests/acceptance/wave15 tests/metrics-snapshot-live.spec.ts` | exit 0，**57 passed / 0 failed** |
+| 前端类型检查 | `npx vue-tsc --noEmit` | exit 0 |
+| 线缆契约漂移 | `npm run contract:check` | exit 0（`TurnMetricsSnapshot` Rust 24 键 / TS 24 键） |
+| 全量前端单测 | `npx vitest run` | 147/149 文件、1378 passed / 2 failed / 12 skipped |
+
+全量前端仅余 2 条红项，均为本 ADR 之外：
+
+- `wave47-ob2-enforcement > T7-PONYGO-OB2-GATE`：干净 HEAD 上复跑 `ponygo observe audit --level ob2` 同样
+  exit 2，tracing 维度 `dynamic=gap`（接入但从未到过数据）。本波未新增追踪点，只改写既有 `agent.turn.speed.basis`
+  的取值域，故不构成回归。
+- `v10-baseline-freeze > V10-3`：「全量单测必须 exit 0」的聚合守卫，被上一条连坐。
+
+契约不变量 I1–I10 的落地映射与 10 个判别范例见 `.dev-team/contract-matrix-token-speed-v2.md`（§8 含交付状态）。
+相邻缺陷（不改本 ADR 的决定）：`B039` `first_token_latency_ms` 取末次 hop TTFT；`B040` `capability.rs`
+把 env 白名单键名 `to_ascii_uppercase()` 归一，导致小写代理键语义失效。

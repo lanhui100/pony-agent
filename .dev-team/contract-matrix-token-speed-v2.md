@@ -186,5 +186,44 @@ pub fn call_speed(record) -> (Option<f64>, Option<TurnSpeedBasis>)   // 快照 p
 ## 7. 明确不做（Non-Goals）
 
 - 不改 `first_token_latency_ms` 的「末次 hop 取值」语义（首 token 展示口径属另一议题，登记 backlog）。
-- 不新增 `/metrics` 或任何导出面；不改 `docs/observability.yaml` 的归属判定（本轮无新增对外接口/网络 IO）。
+- 不新增 `/metrics` 或任何导出面；`docs/observability.yaml` 仅追加「wave-token-speed-v2 归属登记」
+  （归属判定不变：无新增对外接口/网络 IO/后台任务，metrics/logs 维持结构性 N-A）。
 - 不引入流式 delta 级 TPOT 采样（需要 provider 层时间戳采集，属独立议题）。
+
+## 8. 交付状态（Lead 终审，2026-11-06）
+
+**Status: 已交付（DONE）**。I1–I10 全部落盘，「单一真值」为 `turn_flow::resolve_turn_speed`（Rust）
+与 `token-metrics.ts::resolveTurnWeightedSpeedDetail`（TS 同式镜像）。
+
+### 8.1 落地文件（16 个）
+
+| 层 | 文件 |
+| --- | --- |
+| Rust 真值 | `agent/turn_flow.rs`（`TurnSpeedBasis`/`decode_floor_ms`/`decode_eligible`/`resolve_turn_speed`/`call_speed`） |
+| Rust 结算与出口 | `agent/metrics_snapshot.rs`、`agent/otel/mod.rs` |
+| TUI | `bin/tui.rs`（按 basis 渲染 `≈` / 裸值 / 不渲染） |
+| 前端纯函数 | `src/lib/runtime/token-metrics.ts`、`src/types/runtime.ts` |
+| 前端展示 | `src/lib/runtime/useTraceProjection.ts`、`src/components/HomeStatusPanel.vue`、`src/components/HomeTracePanel.vue` |
+| Rust 测试 | `tests/metrics_snapshot_contract.rs`、`metrics_snapshot_adversarial.rs`、`tui_metrics_snapshot.rs`、`wave54_metric_truth.rs`、`ts_contract_snapshot.rs` |
+| TS 测试 | `tests/acceptance/wave54/{token-speed-truth,adversarial}.spec.ts`、`tests/metrics-snapshot-live.spec.ts` |
+| 契约 | `docs/contracts/ts-contract.snapshot.json`、`docs/decisions/0073-token-speed-decode-basis.md`、`docs/observability.yaml` |
+
+### 8.2 门禁收据（exit code 实测）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `cargo check -p pony-agent-core --all-targets` | **exit 0** |
+| 速度 5 target（contract/adversarial/tui_metrics/wave54/ts_contract） | **exit 0**，5+10+1+18+8 = **42 passed / 0 failed** |
+| `cargo test -p pony-agent-core --lib` | **exit 0**，1309 passed / 0 failed |
+| `npx vue-tsc --noEmit` | **exit 0** |
+| `npm run contract:check` | **exit 0**（`TurnMetricsSnapshot` 24 键对齐） |
+| `npx vitest run`（全量） | 147/149 文件、**1378 passed** / 2 failed / 12 skipped |
+
+### 8.3 唯二红项及其归属（均可证伪为本波之外）
+
+| 失败用例 | 根因 | 与本波关系 |
+| --- | --- | --- |
+| `wave47-ob2-enforcement.spec.ts > T7-PONYGO-OB2-GATE` | 干净 HEAD 上复跑 `ponygo observe audit --level ob2` 同样 exit 2：tracing 维度 `dynamic=gap`（接入却从未到过数据） | 无。本波未新增追踪点，仅改写既有 `agent.turn.speed.basis` 取值域 |
+| `v10-baseline-freeze.spec.ts > V10-3` | 「全量单测必须 exit 0」的聚合守卫，被上一行连坐 | 无，传输性 |
+
+相邻缺陷另册登记：`B039`（`first_token_latency_ms` 取末次 hop TTFT）、`B040`（`capability.rs` 大小写归一致小写代理键白名单失效）。
