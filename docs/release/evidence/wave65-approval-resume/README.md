@@ -14,3 +14,6 @@
 - 授权落盘：`store_metadata.path_authorizations.v1 = [{"path":"/home/dm/pony-agent/Cargo.toml","grantedAtMs":1793980454052,"scope":"read"}]`
 - 续轮终态：`~/.pony-agent/tui-logs/tui-runtime.log` 中 `turn-approval-resume-e946f53d…` → `turn.completed`（seq 114, text_len=195），`decision:Continue run_phase=Ready`
 - 修复前同场景：整轮 `turn:failed` + `approval_resume_unavailable`（会话 pa_01a1b122 的 turn-2e0eb0fe）
+
+> PNG 说明：`01/02/04-*.png` 由对应的 `tmux capture-pane` 原文（同目录 `.txt`）按终端网格渲染而成，**内容未改写**，
+> 仅用于便于阅读的截图展示；`.txt` 与 `.ansi.txt` 为原始捕获（物理证据）。
