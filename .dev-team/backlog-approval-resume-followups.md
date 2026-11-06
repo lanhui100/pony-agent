@@ -15,3 +15,5 @@
 | F-8 | 审批面板展示的 `options.path` 原始串与落盘授权的 canonical 路径可能不同（符号链接/`..`） | `review-a` ADVISORY SECURITY（tui.rs:7388） | 面板回显 canonical 路径（与 `authorize_path` 同源归一化），或展示双路径 |
 | F-10 | ADR 编号冲突：本波与并行会话同时占用 0076（已把本波重编号为 0077）；`docs/decisions/README.md` 索引行随并行会话提交后再补 | `review-l3p-r2` ADVISORY | README 索引补齐 0077 行 |
 | F-9 | 新增 3 处 `eprintln!` 非 JSON/无 trace_id（PA-119 日志债务增量） | `review-l3p` ADVISORY（control_plane/mod.rs:1397） | 随 PA-119 统一日志面迁移，或本模块单独接 `tracing` |
+| F-11 | 契约/ADR 登记滞后（C3 过滤条件、C5 R3 用例、§4 流水、ADR 0077 options 表述、NFR 锚点） | `review-a3`/`review-l3p-r3` ADVISORY | 本提交已原地补齐（契约 C3/C5/§4、ADR 0077、NFR inert_this_wave/approval_branch）——关闭 |
+| F-12 | 挂起轮的会话上下文未落盘：批准后的续轮里模型看不到上一轮用户原始请求（tmux 实测出现「no prior context visible」），只能靠翻工作区文件重建 | tmux 复验 `docs/release/evidence/wave65-approval-resume/02-approved-continuation.txt` | 挂起时把本轮 user 消息与已产出的 assistant/工具摘要落会话历史（或在 `turn:suspended` 载荷里携带 resume_context，续轮作为 host 上下文注入），并补 e2e |

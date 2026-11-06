@@ -55,7 +55,7 @@ store（`control_plane/ask_plan_commands.rs:27-62`），Approval 永远进不了
 
 **C3 — 控制面审批读取与拒绝**
 - `HostControlPlane::list_pending_approvals(session_id: &str) -> Value`：从 `ask_dispatcher.pending_requests()`
-  过滤 `Approval` + `Pending` + 同 `session_id` **且未过期**（`now_ms <= expires_at_ms`，R2：过期请求
+  过滤 `Approval` + `Pending` + 同 `session_id` + **属于路径授权类**（`is_path_authorization_approval()`，R3）+ **且未过期**（`now_ms <= expires_at_ms`，R2：过期请求
   已不可 CAS 消费，若继续列出会让面板每 500ms 重弹成活锁），投影
   `{requestId,version,requestKind:"approval",sessionId,runId,turnId,callId,descriptorId,prompt,options,expiresAtMs}`
   （**无 nonce**）；空/空白 scope 返回空数组（fail-closed）。判据抽成纯函数
@@ -88,6 +88,7 @@ store（`control_plane/ask_plan_commands.rs:27-62`），Approval 永远进不了
 - **T3**：`cancel_approval_request` 后 `approve_control_request` 必 Err（CAS 未破）；拒绝后请求不在待决列表。
 - **T4**（INV-2）：能力关（默认）⇒ 终态 `turn:failed` 且 error 以 `approval_resume_unavailable` 开头，
   `turn:suspended` 恰 0。
+- **R3 增补**：`approvalKind` 由 `decision_source` 派生（dispatcher）、`is_path_authorization_approval` 共享判据、列表只列路径授权类、`APPROVAL_STALE_NOTICE`；对应单测 6 例（dispatcher 3 + tool_runtime/control_plane 2 + tui 2 中新增项）。
 - **R2 增补（单元级判据，不修改已冻结的 T1~T4）**：
   - `approval_plan`（TUI 纯函数）单测：投影含 `options.path` ⇒ `authorize == Some(path)`；缺失 ⇒ `None`；
     批准/拒绝文案非空且不同；`apply_approval_decision` 无句柄 ⇒ `None`。
@@ -111,3 +112,4 @@ store（`control_plane/ask_plan_commands.rs:27-62`），Approval 永远进不了
 - 2026-11-06 Lead R2（审查后裁决）：范围收紧为**仅路径授权类**审批可恢复（C1）；补 TTL 列表过滤 + 取消 kind 闸门（C3）；
   C4 改用结构化 `options.path`（新增 `PermissionRequest.approval_path`）并恢复「审批优先展示」；C5 增补单元级判据与
   验收盲区登记；ADVISORY 全部转 `.dev-team/backlog-approval-resume-followups.md`。
+- 2026-11-06 Lead R3（第二轮审查后裁决）：审批成因派生改为 `decision_source`（禁止按实参 path 派生）；审批列表只列路径授权类；审批专属失效文案。同轮以 tmux 真机复验（工作区外 Read → 面板 → Enter 批准 → 授权落盘 → 续轮读成功；Esc 拒绝 → 续轮改道）。

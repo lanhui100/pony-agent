@@ -1,0 +1,45 @@
+          pony  ·  pa-approval-demo                                                                  workbuddy/deepseek-v4.1-flash
+          ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+
+
+          ✻ The original task: "请用 Read 工具读取绝对路径 /home/dm/pony-agent/Cargo.toml 的前 3 行（不要用 Run 工具）" — read abs
+            olute path /home/dm/pony-agent/Cargo.toml first 3 lines using Read tool, not Run tool.
+
+            But the workspace tools are restricted to cwd. The Read tool path may need to be within workspace... Let me try Read w
+            ith absolute path. Note the environment says: "工作区工具（搜索/读取/写入）仅限 cwd 目录内，依赖源码（如 ../crates）不
+            在搜索范围内，需通过 path 参数或明确路径访问。"
+
+            So I should try Read with the absolute path: /home/dm/pony-agent/Cargo.toml, startLine 1, lineCount 3.
+
+            The user said they approved the tool call and want me to retry. So retry the Read.
+
+          ✓ 读取 (Read) · 读取 /home/dm/pony-agent/Cargo.toml 前 3 行
+            读取成功，文件 /home/dm/pony-agent/Cargo.toml 共 12 行，前 3 行为：
+
+
+               [workspace]
+               members = [
+                   "crates/pony-agent-core",
+
+
+            未使用 Run 工具，仅通过 Read 读取。
+
+            再读取绝对路径 /home/dm/pony-agent/package.json 的前 2 行，用 Read 工具
+
+          ✓ 读取 (Read) · 读取路径 /home/dm/pony-agent/package.json 的上下文。
+          ✓ 搜索 (Search) · 在工作区中搜索文本 （用户拒绝了该工具 ，请改用其它方式或先询问用户）。
+
+          ✻ The situation is confusing. The user rejected the tool call. I should ask the user what they'd like. Actually the last
+             message says user rejected the tool call — please use another method or ask first.
+
+          ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+            ◆ 提问 上一次工具调用已被拒绝，请问你希望我如何继续？（我原本的意图是读取 /home/dm/pony-agent/Cargo.toml 以确认 work…
+           ▌ ● 只是误触，继续原任务（读取 Cargo.toml）
+             ○ 换个方式：只读不执行命令
+             ○ 暂停，先说明你要做什么
+             > 自定义输入…
+             ↑↓ 移动 · ↵ 确认 · esc 忽略此提问
+
+            ◆ › 等待你的选择…
+
+            /tmp/pa-approval-demo                                    ↑13.7k ↓215 · 缓存 36% · 上下文 1% · 153 t/s · 首token 2074ms

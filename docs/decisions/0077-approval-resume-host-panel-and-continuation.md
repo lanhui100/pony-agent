@@ -35,7 +35,7 @@ Status: implemented
 CLI 行为逐字不变，仍 fail-fast。非路径审批（用户规则 Ask、外部工具声明需审批、写执行保守抬升）**不**
 进入可恢复挂起——批准被消费后不产生豁免，续轮重试必再审批，放开只会得到「批准→续轮→再审批」循环；
 其恢复需要 dispatcher 级一次性豁免，登记为后续工单（`.dev-team/backlog-approval-resume-followups.md` F-1）。
-审批请求带结构化 `options`（`approvalKind`/`tool`/`path`/`scope`），宿主经 `list_pending_approvals`
+审批请求带结构化 `options`（`approvalKind`/`tool`/`scope`；**仅路径授权类**额外带 `path`，非路径审批不带 path 键），宿主经 `list_pending_approvals`
 取出（**过滤已过期请求**，否则面板会在 CAS 必然失败后每 500ms 重弹）、经 `approve_control_request`
 （批准，CAS→Consumed）或 `cancel_approval_request`（拒绝，CAS→Cancelled，带 kind 闸门）收口；
 批准侧只写 read 作用域路径授权。

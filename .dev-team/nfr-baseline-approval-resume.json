@@ -59,16 +59,18 @@
       "builder_seam": "AgentRuntimeBuilder::host_approval_resume(bool)",
       "literal_construction_sites": 1,
       "literal_construction_site_ref": "crates/pony-agent-core/src/agent/runtime/mod.rs::with_shared_sessions",
-      "inert_this_wave": true,
-      "inert_this_wave_reason": "TUI 未接线（不存在续轮实现）。若提前置 true，审批挂起将停在 `turn:suspended` 且无人恢复 = 比现状更糟的死等；故契约 C1 的唯一消费点在执行波次启用"
+      "inert_this_wave": false,
+      "inert_this_wave_reason": "TUI 未接线（不存在续轮实现）。若提前置 true，审批挂起将停在 `turn:suspended` 且无人恢复 = 比现状更糟的死等；故契约 C1 的唯一消费点在执行波次启用",
+      "wired_evidence": "src/bin/tui.rs build_control_plane：AgentRuntimeBuilder::desktop().host_approval_resume(true)；src-tauri/cli 默认 false（INV-2）"
     },
     "unrecoverable_predicate": {
       "fn": "crates/pony-agent-core/src/agent/runtime/turn_control.rs::suspension_is_unrecoverable",
-      "approval_branch": "!(host_approval_resume && request.session_id.is_some())",
+      "approval_branch": "!(host_approval_resume && request.session_id.is_some() && request.is_path_authorization_approval())",
       "interaction_branch_unchanged": true,
       "none_branch_unchanged": true,
       "single_call_site": "AgentRuntime::suspension_without_recoverable_request",
-      "default_off_behaviour_unchanged": true
+      "default_off_behaviour_unchanged": true,
+      "approval_kind_derivation": "dispatcher 按 decision_source==\"path_permission_requires_authorization\" 派生（R3）"
     },
     "host_surface_stubs": [
       {
@@ -174,9 +176,10 @@
     }
   ],
   "r3_amendments": {
-    "approvalKind_derivation": "由 dispatcher 的 decision_source==\"path_permission_requires_authorization\" 派生（不再以实参是否带 path 判定）",
-    "listing_filter": "list_pending_approvals 仅列路径授权类审批（非路径审批 fail-fast 后不弹面板）",
-    "known_advisories": "见 .dev-team/backlog-approval-resume-followups.md F-1..F-10",
-    "receipts": ".dev-team/green-receipts-approval-resume.md（R2/R3 节）+ .dev-team/review-*-a2/b2/r2.json"
+    "approvalKind_derivation": "decision_source 派生（R3）",
+    "listing_filter": "list_pending_approvals 只列路径授权类 + 未过期",
+    "stale_notice": "APPROVAL_STALE_NOTICE（不复用 Ask 文案）",
+    "tmux_e2e": "2026-11-06 23:54–23:59 tmux 真机复验：工作区外 Read 唤起面板→Enter 批准→授权落盘→续轮成功；Esc 拒绝→续轮改道；证据 docs/release/evidence/wave65-approval-resume/",
+    "known_advisories": "backlog F-1..F-12；F-2 属“可测未测”（31 个 bin-as-module 集成测试已证明配方可行）"
   }
 }

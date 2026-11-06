@@ -1,0 +1,45 @@
+          pony  ·  pa-approval-demo                                                                  workbuddy/deepseek-v4.1-flash
+          ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+
+
+          ✓ 列表 (List) · 查看工作区内容，确认待续任务
+          ✓ 运行 (Run) · 列出目录详情
+
+          ✻ Let me read README.md and check .pony-agent for session/history info.
+
+          ✓ 读取 (Read) · 读取 README.md
+          ✓ 运行 (Run) · 查看 .pony-agent 目录结构
+
+          ✻ The workspace is a demo for "approval-resume e2e". The user message says the tool call was approved, retry. But I have
+             no context of the prior tool call since this is a resumed session (approval flow e2e test). Let me check graph-runs.j
+            son to understand the pending state.
+
+          ✓ 运行 (Run) · 查看 graph 运行记录
+
+          ✻ The original task: "请用 Read 工具读取绝对路径 /home/dm/pony-agent/Cargo.toml 的前 3 行（不要用 Run 工具）" — read abs
+            olute path /home/dm/pony-agent/Cargo.toml first 3 lines using Read tool, not Run tool.
+
+            But the workspace tools are restricted to cwd. The Read tool path may need to be within workspace... Let me try Read w
+            ith absolute path. Note the environment says: "工作区工具（搜索/读取/写入）仅限 cwd 目录内，依赖源码（如 ../crates）不
+            在搜索范围内，需通过 path 参数或明确路径访问。"
+
+            So I should try Read with the absolute path: /home/dm/pony-agent/Cargo.toml, startLine 1, lineCount 3.
+
+            The user said they approved the tool call and want me to retry. So retry the Read.
+
+          ✓ 读取 (Read) · 读取 /home/dm/pony-agent/Cargo.toml 前 3 行
+            读取成功，文件 /home/dm/pony-agent/Cargo.toml 共 12 行，前 3 行为：
+
+
+               [workspace]
+               members = [
+                   "crates/pony-agent-core",
+
+
+            未使用 Run 工具，仅通过 Read 读取。
+
+
+
+          › 写下任务，或输入 / 查看命令
+
+            /tmp/pa-approval-demo                                     ↑17.2k ↓62 · 缓存 93% · 上下文 2% · 176 t/s · 首token 2029ms
