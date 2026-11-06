@@ -1,0 +1,74 @@
+{
+  "wave": "tui-streaming-input",
+  "subject": "TUI 流式期输入协议：字符输入 / Enter 排队提交 / 面板命令放行，且不破坏在飞轮次",
+  "baseline_commit": "adad39ad",
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 0,
+    "backoff_cap_ms": 0,
+    "applicable": false,
+    "note": "流式期按键裁决与排队派发是纯内存状态迁移，无外部调用、无 IO、无网络往返；故不设重试。若实现方引入任何外部调用（如派发前 reload 会话/模型列表），必须回到 max_attempts>=1 且受 external_call_timeout_ms 3000ms 上限约束。"
+  },
+  "concurrency_lock": {
+    "primitive": "TuiState 单写者（事件循环线程独占 &mut TuiState）",
+    "scope": "按键裁决 / 输入缓冲改写 / queued_user_messages 入队与出队",
+    "applicable": true,
+    "note": "队列读写只发生在事件循环线程内；禁止为队列引入跨线程 Mutex，也禁止在持锁状态下调用 control_plane（见 lock_scope_bounded）。"
+  },
+  "lock_scope_bounded": true,
+  "lock_forbidden_calls": [
+    "control_plane.stop_turn",
+    "control_plane.list_sessions",
+    "control_plane.plan_list",
+    "control_plane.list_pending_asks",
+    "control_plane.team_task_list"
+  ],
+  "lock_scope_bounded_note": "任何锁/借用驱动的临界区不得包裹 control_plane 调用：必须先在临界区内取快照（clone/拷贝）并释放，再在临界区外发起 control_plane 往返；同理，排队消息派发（start_turn_stream）必须在队列状态更新完成、借用结束后发起。",
+  "queue_drain_single_flight": {
+    "applicable": true,
+    "max_in_flight": 1,
+    "order": "fifo",
+    "trigger": "本轮终态事件（turn:completed | turn:cancelled | turn:failed）之后，禁止在流式期同步派发",
+    "drain_semantics": "一次 drain 最多取走并派发 1 条；剩余排队消息必须等下一次终态事件再取，不得 while-let 连排（否则会与新一轮流式守卫互相踩踏）",
+    "empty_queue_is_noop": true,
+    "forbid_dispatch_while_streaming": true
+  },
+  "no_busy_wait_ms": 250,
+  "no_busy_wait_note": "事件循环保持既有 crossterm 阻塞式 event::poll 节拍（<=250ms tick），禁止为等待轮次收口而新增自旋/短睡轮询；排队派发必须由终态事件驱动（事件驱动，非轮询驱动）。",
+  "logging": {
+    "applicable": true,
+    "format": "json",
+    "trace_id": true,
+    "trace_id_field": "trace_id",
+    "surfaces": [
+      "streaming_key_disposition: 裁决结果 = Reject/QueueSubmit 时记录 key 类别 + composer_has_text + trace_id（不记录输入正文，避免泄露用户内容）",
+      "drain_next_queued: 派发时记录 queue_depth_before / queue_depth_after + trace_id"
+    ]
+  },
+  "resource_release": [
+    {
+      "applicable": true,
+      "handle": "queued_user_messages 队列",
+      "release": "会话作用域复位的所有路径（/clear、/resume、退出）必须清空队列，禁止跨会话残留导致新会话被旧消息污染"
+    },
+    {
+      "applicable": true,
+      "handle": "在飞轮次与排队消息的所有权",
+      "release": "本轮终态后队列项要么被派发、要么在会话复位时丢弃；不得让排队 message 持有已失效的 turn_id 引用（只存 String 快照）"
+    },
+    {
+      "applicable": true,
+      "handle": "输入缓冲快照",
+      "release": "QueueSubmit 入队后必须清空 composer 正文（与既有提交路径一致），避免同一正文重复入队"
+    }
+  ],
+  "acceptance": {
+    "streaming_char_input_works": true,
+    "streaming_enter_enqueues_exactly_once": true,
+    "panel_commands_allowed_while_streaming": ["/agents", "/models", "/thinking", "/plan", "/tasks"],
+    "session_mutating_commands_deferred_not_dropped": ["/clear", "/compact", "/resume", "/quit"],
+    "paste_during_streaming_inserts_not_submits": true,
+    "no_regression_on_streaming_guard_equivalence": true
+  }
+}

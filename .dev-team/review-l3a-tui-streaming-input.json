@@ -1,0 +1,112 @@
+{
+  "schema_version": 2,
+  "round": 6,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-ac1c0283-c423-4aab-a606-90249cea3506",
+    "fresh_context": true,
+    "lens": "L3-A 最终确认 round6 · 单点复审 trace-C（payload 与闩生命周期不同步 ⇒ 闩过期后闸门覆盖 payload ⇒ 静默丢正文）在 C27『闸门取件前收割孤儿』落地后是否闭合；范围严格限于 trace-C 及其新引入的等价缺陷"
+  },
+  "executed_by": "session-ac1c0283-c423-4aab-a606-90249cea3506",
+  "reviewed_commit": "a1127aaefe95c7b497c7c6e4a97669072b02916d",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "独立终审者非实现者（round5 同一审者续任，非实现方）。审查对象 = 工作区 crates/pony-agent-core/src/bin/tui.rs（md5 8db8e33fd93724ca1deb9125f1a36717，11142 行；基线 HEAD a1127aae，工作区未提交，diff +1902/-183）。全程只读，唯一写入为本 JSON。物理收据：①python3 /tmp/l3a_round6_trace_c.py => EXIT=0，32/32 锚点命中，TRACE-C：LOST=[] / dispatches=2 / delivered=1；②findings[0].counterexample_cmd => EXIT=0（TRACE-D：wiped=['m1 h'] / submitted=['i']）；③本轮只判 trace-C 与其新副作用，F2–F7/R2-5 沿用 round5 状态，不重判。"
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/tests/tui_streaming_input_acceptance.rs",
+    "crates/pony-agent-core/tests/tui_streaming_input_adversarial.rs",
+    ".dev-team/contract-matrix-tui-streaming-input.md",
+    ".dev-team/review-l3a-tui-streaming-input.json"
+  ],
+  "audited_anchors": [
+    "orphan_dispatch_payload 922-931（latch_active ⇒ None；payload None/纯空白 ⇒ None；否则 trim 后 Some）",
+    "闸门收割块 10610-10627，位于 take_next_queued_for_dispatch（10630）之前：10611 收割入口 / 10613 requeue_front / 10614 clear_input / 10615 payload=None / 10616-10624 日志 / 10626 continue",
+    "queue_dispatch_payload 唯一写点 10638；清点 10103·10119（提交）、10313（分歧回队）、10347（放弃回灌）、10615（收割）",
+    "queue_dispatch_deadline：8769 声明 / 10606 唯一读点（queue_dispatch_latch_active 886，2s 窗口 883）/ 10644 置闩 / 9659·9816·10100·10117·10316·10352 清闩",
+    "take_next_queued_for_dispatch 723-743（前哨「输入框非空即 None」730；should_drain_queued 五谓词 992）",
+    "QAS 消费点 10303-10366：10307 分歧判定 → 10313/10314 回队（10311 明示『保留用户当前输入不动』）→ 10329 continue；10338-10341 回灌 Enter → 10365 continue",
+    "静态 Backspace 10236-10241（无 continue）与空输入 Enter 9893-9894（无 continue）—— 二者是能把控制流送回闸门的两个按键面",
+    "队列原语：push_queued_message 682-700（697 上限 20，仅 is_streaming=true 时可达 9712/10060）；requeue_front 895-901（无上限检查，注释 894 声称『调用点总是刚取走 1 条』）",
+    "循环头 8817 poll(500ms) / 8764 list_pending_asks / 8834 draw 均在 recv 之前，NFR external_call_timeout_ms ≤3000ms 自身允许 >2s 停顿"
+  ],
+  "previous_findings_closure": [
+    {
+      "id": "L3A-R5-C (trace-C, BLOCKING)",
+      "finding": "闩（2s 墙钟窗）与 payload（单槽、无生命周期）不同步：闩过期后闸门把『仍有 QAS 在飞』当空闲，10638 覆盖 payload ⇒ 前一条在 10630 remove(0) 后既未提交也未回队（静默丢正文）。",
+      "status": "closed",
+      "trace_c_rerun": {
+        "scenario": "[StreamCompleted, Backspace×3, QAS#1] + 循环头停顿 2100ms（round5 原样，另补重派发产生的 QAS#2）",
+        "LOST": [],
+        "dispatches": 2,
+        "delivered": 1,
+        "trace": "0ms StreamCompleted → GATE#1 m1（payload=m1, composer='m1 '）→ +2100ms 停顿 → Backspace（composer='m1'，闩已过期）→ 10611 ORPHAN-HARVEST requeue='m1'、清框、payload=None、continue（本轮不派发）→ Backspace（composer='') → GATE#2 m1 → Backspace → QAS#1（payload=m1 vs 'm1' 未分歧）→ 回灌 Enter → QAS#2 同 → SUBMIT 'm1' → 余下 Enter 空输入 no-op ⇒ 队列剩 [m2]，m1 恰好交付 1 次",
+        "note": "丢正文不再发生：孤儿载荷先回队再重派发。派发次数 2 属已登记的 C5↔C24 已知语义（同一终态可能 2 次派发尝试、仅 1 次交付），本轮不重开。"
+      },
+      "structural_proof": "10638 是 payload 唯一写点，且只有在本轮收割返回 None 后才可达：收割返回 None ⇔ latch_active=true ∨ payload=None；latch_active=true ⇒ 传给 take_next 的 dispatch_pending=true ⇒ should_drain_queued(992) 五谓词不过 ⇒ take_next=None ⇒ 10638 不执行。故『payload 非空 ∧ 闩已过期』这一组合永远到不了覆盖写 —— round5 的致盲路径被结构性消除，而非靠时序收窄。",
+      "residual": "收割后 payload 立即被下一轮闸门重新派发（等效『回队 → 立即重取』），因此 trace-C 的派发计数仍为 2；但 FIFO、条数守恒、单次交付均成立。"
+    },
+    {
+      "id": "F2/F3/F4/F5/F6/F7/R2-5",
+      "status": "carried_over_from_round5",
+      "evidence": "按本轮指令不翻旧账：F2/F4/F6/F7=fixed、F3/F5=open（渲染优先级/死分支）、R2-5=open（契约未覆盖）沿用 round5 判定，未复核、未新增争议。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 10614,
+      "rule": "CORRECTNESS",
+      "symbol": "收割块无条件 `state.clear_input()`：收割的对象是 payload（孤儿载荷），但清空的是整个 composer 所有者。只要收割时输入框内容已偏离 payload（用户在被停顿放大的窗口里键入），用户键入会被静默吞掉；随后通道里仍然排队的过期 Enter（10338 回灌、时序早于这些按键）会把清空后仅剩的残片当成新消息提交。语义上与 10311 分歧分支的『保留用户当前输入不动』直接冲突，也与 730 前哨『绝不覆盖用户草稿』的原则冲突。",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 - <<'PY'\nL=open('crates/pony-agent-core/src/bin/tui.rs',encoding='utf-8').read().splitlines()\ng=lambda n:L[n-1]\nassert 'orphan_dispatch_payload(queue_dispatch_payload.as_deref(), dispatch_pending)' in g(10611)\nassert 'state.clear_input();' in g(10614)\nassert '保留用户当前输入不动' in g(10311)\nprint('[anchors] 10611 收割入口 | 10614 无条件清框 | 10311 分歧分支「保留用户当前输入不动」')\nclass S:\n    def __init__(s): s.q=['m1','m2'];s.c='';s.p=None;s.d=None;s.n=0;s.sent=[];s.wiped=[];s.t=[];s.st=False\n    lat=lambda s:(s.d is not None and s.n<s.d)\n    def gate(s):\n        if not s.lat() and s.p and s.p.strip():                 # 10611-10626 孤儿收割\n            if s.c.strip() and s.c.strip()!=s.p.strip(): s.wiped.append(s.c)\n            s.q.insert(0,s.p.strip()); s.c=''; s.p=None\n            print(f'  {s.n}ms ORPHAN-HARVEST requeue=1 清框(丢 {s.wiped[-1]!r}) continue'); return\n        if s.c.strip() or s.st or not(s.q and not s.lat()): return\n        s.p=s.q.pop(0); s.c=s.p+' '; s.d=s.n+2000; print(f'  {s.n}ms GATE dispatch {s.p!r}')\n    def run(s,ev,stall=None):\n        s.t=list(ev); done=False\n        while s.t:\n            k=s.t.pop(0)\n            if stall and not done and k==stall: done=True; s.n+=2100; print(f'  {s.n}ms 循环头停顿 +2100ms(NFR<=3000)')\n            if k=='SC': print(f'  {s.n}ms StreamCompleted'); s.st=False; s.gate()\n            elif k=='QAS': print(f'  {s.n}ms QAS reinject Enter(payload={s.p!r})'); s.t.append('ENTER')\n            elif k.startswith('C:'): s.c+=k[2:]; print(f'  {s.n}ms Char {k[2:]!r} composer={s.c!r}'); s.gate()\n            elif k=='ENTER':\n                v=s.c.strip()\n                if v: s.c='';s.p=None;s.d=None;s.st=True;s.sent.append(v); print(f'  {s.n}ms SUBMIT {v!r}')\n                else: print(f'  {s.n}ms Enter empty = no-op')\n                s.gate()\n            s.n+=1\ns=S(); s.run(['SC','QAS','C:h','C:i'],stall='QAS')\nprint('  => wiped=',s.wiped,' submitted=',s.sent,' queue=',s.q)\nassert s.wiped==['m1 h'] and s.sent==['i'] and s.q==['m1','m2']\nprint('[ADVISORY] 收割块无条件 clear_input 吞掉用户键入，且过期 Enter 把残片当新消息提交')\n\nPY",
+      "evidence_path": "10611-10626（收割：requeue → 10614 clear_input → payload=None → continue）对比 10307-10329（分歧分支：回队 payload 但**保留**用户输入）。触发前提是一个 ≥2s 的循环头停顿（8764 list_pending_asks / 8834 draw，NFR 允许 ≤3000ms），它把『派发 → QAS 消费』的窗口从 ~1ms 拉到 >2s，并让用户在 QAS 消费前键入的按键排在通道里。",
+      "repro_sequence": "队列 [m1,m2]；StreamCompleted ⇒ 闸门派发 m1（payload=m1，composer='m1 '，闩 +2s，QAS#1 入通道）；循环头停顿 2100ms ⇒ QAS#1 在 2101ms 才被消费（此时输入框仍等于 payload，未分歧 ⇒ 回灌 Enter，入通道尾）；用户停顿期间按下的 'h' 在 2102ms 被消费 ⇒ composer='m1 h'；迭代尾闸门：闩已过期 + payload 非空 ⇒ 收割（10611-10626）：requeue 'm1'、10614 clear_input 丢掉 'm1 h'、payload=None、continue；随后 'i' 落进空输入框 ⇒ composer='i'；排队的过期 Enter 在 2104ms 提交 'i'（发出一条一字正文），m1 回到队列等下一轮。用户视角：m1 没丢，但自己刚敲的字被吞掉，且一条残缺正文被自动发出。",
+      "note": "最小修复（2 行，不动 C27 载体）：把 10614 换成条件清空 —— `if !queued_dispatch_diverged(Some(&orphan), &state.input_buffer) { state.clear_input(); }`（即仅在输入框仍等于派发快照 copy 时才清；已分歧则保留用户草稿，让 730 前哨自然拦住下一次派发）。同时建议在收割日志补 `payload_chars`（C25 精神），并补 A28 集成用例：`派发 → 闩过期 → 用户键入 → QAS` ⇒ 断言用户键入仍在 composer 且未被自动提交。若 Lead 认定『≥2s 循环头停顿 + 停顿期键入』超出口径，可按 ADVISORY 记账并在契约 C27 里显式写明『闩过期收割会清空输入框』。",
+      "scope_note": "本项**不**构成 trace-C 的正文丢失（payload 仍被回队并恰好交付 1 次），故按本轮口径只记 ADVISORY，不改变 verdict。"
+    }
+  ],
+  "round6_adjudication": {
+    "Q1_trace_C": "已闭合（NO-LOSS）。当前代码重跑 round5 原始 counterexample（32/32 锚点命中）：LOST=[]、dispatches=2、delivered=1，EXIT=0。",
+    "Q1_why_closed": "收割块位于 take_next（10630）之前，且以『闩过期 ∧ payload 非空』为唯一触发条件；而 10638 的覆盖写只有在 dispatch_pending=false（闩已过期）时才可能发生 —— 两条件互斥，收割必然先于覆盖。收割把 payload 回队首（requeue_front 拒绝空串，而 orphan 已 trim 非空）⇒ 队列条数守恒、FIFO 复原。",
+    "Q2_new_equivalent_defects": {
+      "收割清框越界（新）": "findings[0]，ADVISORY：清空的是 composer 而非 payload，会吞掉用户在停顿放大窗口内的键入，并让过期 Enter 提交残片。",
+      "requeue_front 越界到 21": "**不可达**（实测 qmax=20，等于上限）。理由：payload 非空 ∧ 闩过期的窗口内 is_streaming=false（提交即清 payload，10103/10119），而入队两条路径都要求 is_streaming=true（9712 / 10059 闸）⇒ 该窗口内队列只减不增；派发时 take 掉 1 条（20→19），收割再回 1 条 ⇒ 至多回到 20。**但** 注释 894 的不变量表述（『调用点总是刚取走 1 条』）对 10613 这个新调用点已不成立（收割前并未取件），属文档级失真，建议改写为『长度上界由入队闸（697）与该窗口内非流式共同保证』。",
+      "C27『清闩』与代码不一致": "契约 C27 写『回队 + 清输入框 + 清 payload + **清闩** + continue』，代码 10610-10627 未置 `queue_dispatch_deadline = None`。因 latch_active 是 deadline 的唯一读点（10606）且此刻必然已过期，功能无差异；建议契约措辞改为『闩已过期（无需再清）』以免后续维护者据此假设 deadline 已 None。",
+      "收割不检查空闲/模态（无伤害）": "收割不看 ui_idle / is_streaming / pending_request / ask_user_state，会在任意时刻把 payload 回队并清框。无伤害面：payload 回队即 FIFO 复原，下一轮取件仍受 992 五谓词约束；ask_user 的作答走 AskUserState.custom_input（protocol.rs:126）而非 input_buffer，故不会破坏作答草稿；唯一实质影响即 findings[0] 的 composer 内容。"
+    },
+    "regression_checks": {
+      "no_lost_payload": "trace-C 与 trace-C-对照（无停顿）均 LOST=[]；对照走 10307 分歧分支，收割块不介入（latch_active=true），行为与 round5 一致。",
+      "no_duplicate_delivery": "trace-C：2 次派发 / 1 次交付；第二次 QAS 命中的是同一条 payload 且提交前 payload 被 10103 清空，未出现重复投递。",
+      "fifo_and_count": "回队恒在队首（895-901），收割前后队列长度守恒（模型与静态双重核对）。",
+      "single_writer": "payload 唯一写点 10638 未变；收割只 take/置 None，不新增写点。",
+      "continue_hygiene": "10626 的 continue 位于循环体末块内，只跳过闸门剩余部分；dirty=true 已置 ⇒ 渲染不丢（8834 在循环头）。",
+      "locks": "deadline/payload 仍是事件循环线程局部变量；收割块日志不在持锁上下文 —— 无新临界区。",
+      "test_coverage": "A27（acceptance:1220-1266）只锁 orphan_dispatch_payload 纯函数真值矩阵，且其『回队』断言走 push_queued_message（697 有上限闸）而生产走 requeue_front（无闸）——原语不一致；另无任何用例覆盖『派发 → 闩过期 → 收割 → QAS』的闸门集成路径（trace-C），属覆盖缺口（不阻断，建议补 A28）。"
+    },
+    "verdict_rationale": "按本轮口径：verdict 只由『trace-C 是否仍静默丢正文』裁定。当前代码上 trace-C 三个数字为 LOST=[] / dispatches=2 / delivered=1，且该闭合有结构性证明（10638 覆盖写与收割触发条件互斥），故判 PASS；新增的等价缺陷（收割清框越界）不造成 payload 丢失，按 ADVISORY 记账。"
+  },
+  "physical_receipts": [
+    {
+      "command": "CARGO_TARGET_DIR=target-impl cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial",
+      "exit_code": 0,
+      "result": "tui_streaming_input_acceptance: 32 passed / 0 failed（含新增 A27 orphan_dispatch_payload 真值矩阵）；tui_streaming_input_adversarial: 16 passed / 0 failed（CARGO_EXIT=0）",
+      "note": "全绿与 findings[0].severity=ADVISORY 共存的原因：A27 只断言纯函数真值矩阵，无任何用例覆盖『派发 → 闩过期 → 收割 → QAS』的闸门集成路径。"
+    },
+    {
+      "command": "python3 /tmp/l3a_round6_trace_c.py（32 处逐行锚点 + 与源码同构的控制流模型；真实事件循环需 tty，无法无头外驱动）",
+      "exit_code": 0,
+      "result": "TRACE-C：LOST=[] / dispatches=2 / delivered=1（NO-LOSS）；TRACE-C-对照（无停顿）：LOST=[] / dispatches=1；TRACE-D（收割副作用）：wiped=['m1 h'] / submitted=['i']；TRACE-E（越界试探）：qmax=20（上限 20）",
+      "note": "EXIT=0 即『反例未复现』（round5 同一脚本为 EXIT=1 且打印 LOST=['m1']）。锚点漂移会先报 ANCHOR-MISS 并 EXIT=2。"
+    },
+    {
+      "command": "python3 - <<'PY' ...（findings[0].counterexample_cmd：TRACE-D 自包含子集）",
+      "exit_code": 0,
+      "result": "打印 wiped=['m1 h'] submitted=['i'] queue=['m1','m2']，断言通过",
+      "note": "ADVISORY 的物理反例：收割清框吞掉用户键入 'h'，过期 Enter 提交残片 'i'。"
+    }
+  ]
+}

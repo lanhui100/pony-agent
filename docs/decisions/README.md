@@ -82,6 +82,7 @@
 - [0062 TUI 退出还原与 `pony resume <session-id>` 续接入口](0062-tui-exit-restore-and-resume-entry.md)
 - [0063 TUI Ask 覆盖层与取消反馈的用户可见边界](0063-tui-ask-user-overlay-and-cancel-feedback.md)
 - [0070 TUI 会话韧性：DSML 折叠、错误摘要、中断检查点与退出回收](0070-tui-session-resilience.md)
+- [0071 TUI 流式期可输入、面板可开、用户消息排队](0071-tui-streaming-input-queue-and-panels.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

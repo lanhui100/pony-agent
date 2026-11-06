@@ -1,0 +1,170 @@
+{
+  "phase": "plan",
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-tui-streaming-input.md",
+    "docs/decisions/0071-tui-streaming-input-queue-and-panels.md",
+    ".dev-team/nfr-baseline-tui-streaming-input.json",
+    "crates/pony-agent-core/src/bin/tui.rs"
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "329ca808-3884-427c-9168-fbf95b949ad9",
+    "fresh_context": true,
+    "lenses": [
+      "over_design",
+      "concurrency_boundary"
+    ]
+  },
+  "executed_by": "329ca808-3884-427c-9168-fbf95b949ad9",
+  "reviewed_commit": "a1127aaefe95c7b497c7c6e4a97669072b02916d",
+  "attestation": {
+    "self_signed": false,
+    "note": "只读审查：未修改任何源码/测试，唯一写入为本文件；工作区含前序未提交增量（tui.rs 等），审查对象为契约/NFR/ADR 文本与其对实现的约束一致性。"
+  },
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-tui-streaming-input.md",
+      "line": 43,
+      "rule": "CONTRACT_BREAK",
+      "lens": "CONTRACT_SELF_CONSISTENCY",
+      "counterexample_cmd": "grep -n \"composer_enter_intent\\|streaming_input_allowed\" .dev-team/contract-matrix-tui-streaming-input.md; grep -rn \"composer_enter_intent\\|streaming_input_allowed\" crates/pony-agent-core/src/bin/tui.rs crates/pony-agent-core/tests/tui_streaming_input_acceptance.rs; echo \"impl_hits_exit=$?\"",
+      "severity": "BLOCKING",
+      "detail": "§2(line41-43) 已裁定 `streaming_input_allowed`/`composer_enter_intent` 作废，但 §1 C1(line20)、C2(line21) 的断言载体与 §4 A1(line80)/A2(line81)/A6(line85) 仍以它们为真值；grep 证明这两个符号在 tui.rs 与既有验收测试中 0 命中。契约内部自相矛盾，Test Agent 按 §4 编用例必然对着不存在的符号写断言（编译失败或被静默改写）。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-streaming-input.md",
+      "line": 87,
+      "rule": "CONTRACT_BREAK",
+      "lens": "CONTRACT_SELF_CONSISTENCY",
+      "counterexample_cmd": "grep -n \"A9\\|A1[0-5]\\|A7\\|A14\" .dev-team/contract-matrix-tui-streaming-input.md; grep -n \"fn a9_\\|fn a1[1-5]_\" crates/pony-agent-core/tests/tui_streaming_input_acceptance.rs",
+      "severity": "BLOCKING",
+      "detail": "§4 用例清单止于 A8，但 §1 有 5 条契约把验收挂在未登记的用例上：C12→A11、C13→A12、C14→A13、C17→A14、C18→A15（A9/A10 缺号）；而 tests/tui_streaming_input_acceptance.rs 已实现 a9/a11/a12/a13/a14/a15。契约↔用例不再一一对应：A9–A15 属「事实上的冻结用例但无契约登记」，A1/A2/A6 属「契约登记但断言载体已作废」。§4 作为 Test Agent 唯一只读输入已失真。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-streaming-input.md",
+      "line": 22,
+      "rule": "CONCURRENCY",
+      "lens": "PANEL_COMMANDS_VS_DISPATCH_GATE",
+      "counterexample_cmd": "sed -n 813,818p crates/pony-agent-core/src/bin/tui.rs; sed -n 2946,2958p crates/pony-agent-core/src/bin/tui.rs; sed -n 9655,9662p crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "BLOCKING",
+      "detail": "C3 放行 `/plan /tasks /agents /models /thinking /provider` 与 Ctrl+T/Ctrl+R，这些分支全部把 `state.mode` 切成非 Normal（toggle_plan_mode→PlanMode、toggle_task_board→TaskBoard、open_model_selector 等）；而 C10/C17 的闸门 `is_ui_idle_for_dispatch` 要求 `mode == Normal`。后果：流式中「Enter 排队 → /plan（或 /tasks、Ctrl+R）」后，本轮终态时闸门判不空闲，C5 承诺的「本轮结束后自动发送」永不发生，排队消息滞留到用户手动 Esc 退出面板；PlanMode 期间 composer 整个被面板分支吃掉，用户甚至无法自救只能按 Esc。C3 与 C5/C10 在方案层直接冲突，契约没有任何一条覆盖该组合。"
+    },
+    {
+      "file": "docs/decisions/0071-tui-streaming-input-queue-and-panels.md",
+      "line": 42,
+      "rule": "CONCURRENCY",
+      "lens": "SYNTHETIC_ENTER_VS_MODAL",
+      "counterexample_cmd": "sed -n 10228,10232p crates/pony-agent-core/src/bin/tui.rs; sed -n 9056,9062p crates/pony-agent-core/src/bin/tui.rs; sed -n 9158,9168p crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "BLOCKING",
+      "detail": "派发用 `UiEvent::InputKey(KeyEvent::new(Enter, NONE))` 回灌到与真实按键相同的通道，事件无任何标记（无法与用户 Enter 区分），而 PermissionApproval/AskUserQuestion 分支在按键处理最前面消费 Enter：审批分支 Enter = 按 `selected_choice()` 执行 approve/cancel，Ask 分支 Enter = 提交当前选中项。ADR 已知局限 2 把它描述为「可能被模态吃掉：正文留在输入框、不丢」——与代码事实不符：Enter 不会只是被吃掉，而是会**代用户作答或代用户审批**。另外若模态分支 `continue` 吞掉该 Enter，`queue_dispatch_pending` 不会复位（只在 InputKey 到达时清），正文留在输入框又恰好命中 C15 的「输入框非空⇒None」前哨，排队消息会静默卡死。方案层必须给回灌事件加来源标记或把「消费时刻仍是 Normal」做成原子条件，而不是靠一次性前置检查。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-streaming-input.md",
+      "line": 21,
+      "rule": "CONTRACT_BREAK",
+      "lens": "BOUNDARY_BREAK_EXISTING_ENTER_SEMANTICS",
+      "counterexample_cmd": "sed -n 9544,9575p crates/pony-agent-core/src/bin/tui.rs; sed -n 9370,9395p crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "BLOCKING",
+      "detail": "C2「流式期 Enter=入队」在按键链上先于两条既存 Enter 语义生效：①「行尾 `\\` + Enter = 换行」与 ②「Enter 接受命令补全」都位于流式裁决之后（tui.rs:9552-9575），流式期永远到不了。C14 只在**派发写回**侧补了尾部空格，管不到**入队时刻**：流式中输入 `/he` 用 ↑↓ 选中 `/help` 按 Enter，`push_queued_message` 认为它不是整串命令而当作聊天消息入队，随后自动派发把 `/he` 当用户消息发给模型（既违背 C3「命令照常执行」，也产生无意义计费）。C2 未声明这两条既存语义在流式期让位、也无对应用例。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-streaming-input.md",
+      "line": 52,
+      "rule": "CONTRACT_BREAK",
+      "lens": "OVER_DESIGN",
+      "counterexample_cmd": "sed -n 751,761p crates/pony-agent-core/src/bin/tui.rs; sed -n 9384,9392p crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY",
+      "detail": "C3 冻结的 `is_panel_command` 在真实裁决中零影响：判断是 `is_panel_command(x) || parse_command_input(x).is_some() || alias(/exit,/effort)`，而 8 条面板命令全在 `parse_command_input` 的命令表内（子集），OR 的左项永远不会改变结果；`is_panel_command` 全仓唯一调用点就是这里。冻结一个对行为无作用、却让人以为「流式期只放行白名单」的符号，属过度设计 + 虚假保证（真实放行集 = 命令表全集 + 两个别名）。建议删除该符号，或让 C3 的白名单真正生效（白名单外命令在流式期拒绝）。"
+    },
+    {
+      "file": ".dev-team/nfr-baseline-tui-streaming-input.json",
+      "line": 11,
+      "rule": "NFR_VIOLATION",
+      "lens": "NFR_PREMISE_INVALIDATED_BY_C3",
+      "counterexample_cmd": "sed -n 1327,1333p crates/pony-agent-core/src/bin/tui.rs; sed -n 7941,7970p crates/pony-agent-core/src/bin/tui.rs; sed -n 69,71p .dev-team/nfr-baseline-tui-streaming-input.json",
+      "severity": "ADVISORY",
+      "detail": "NFR 把 retry 标为 applicable=false，理由是「纯内存状态迁移、无外部调用、无 IO、无网络」，但 C3 新放行的 `/update` 走 `perform_update_check`（reqwest timeout=5s > 基准 3000ms），`/models` 与 Ctrl+R 走 `spawn_model_discovery→fetch_model_ids`（无显式超时）。基准的前提被契约自身否证：必须把「流式期可触发的两条外部调用及其超时预算」写进 baseline（或把 /update /models 从 C3 白名单移出），否则 NFR 台账在审计时是失真记录（注：两者都在后台线程，不阻塞事件循环，故不判 BLOCKING）。"
+    },
+    {
+      "file": ".dev-team/nfr-baseline-tui-streaming-input.json",
+      "line": 37,
+      "rule": "NFR_VIOLATION",
+      "lens": "NFR_NUMERIC_DRIFT",
+      "counterexample_cmd": "sed -n 8615,8620p crates/pony-agent-core/src/bin/tui.rs; sed -n 8421,8421p crates/pony-agent-core/src/bin/tui.rs; sed -n 73,73p .dev-team/contract-matrix-tui-streaming-input.md",
+      "severity": "ADVISORY",
+      "detail": "同一「忙等」约束三处不自洽：baseline `no_busy_wait_ms=250` 且描述 `event::poll ≤250ms`；契约 §3(line73) 写「沿用 rx.recv_timeout 16/120ms 轮询」；实现是 `recv_timeout(poll_ms)` 16/120ms（tui.rs:8617）＋输入泵 `event::poll(50ms)`（8421）。冻结的 NFR 真值源与契约、与代码三方对不上，后续 NFR 数值比对门禁会拿 250 去比 16/120 得出假结论。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-streaming-input.md",
+      "line": 91,
+      "rule": "CONTRACT_BREAK",
+      "lens": "CHANGELOG_INCOMPLETE",
+      "counterexample_cmd": "sed -n 89,91p .dev-team/contract-matrix-tui-streaming-input.md; grep -n \"C1[0-8]\" .dev-team/contract-matrix-tui-streaming-input.md",
+      "severity": "ADVISORY",
+      "detail": "§5 变更流水只有一行「初版冻结（C1–C9）」，但 §1 已扩到 C18，且文中至少两处显式标注「lead, 2026-11-06」的改判（§2 作废裁决、C14 载体裁定、C10 判据修订、C17/C18 新增）均无流水。文件开头自述「改判必须原地改写并登记单行变更流水」，自订纪律未执行；后续无法从流水重建契约演进（哪条被 L3 哪一问触发、谁裁的）。"
+    },
+    {
+      "file": ".dev-team/nfr-baseline-tui-streaming-input.json",
+      "line": 70,
+      "rule": "CONTRACT_BREAK",
+      "lens": "NFR_CONTRACT_CONFLICT",
+      "counterexample_cmd": "sed -n 68,71p .dev-team/nfr-baseline-tui-streaming-input.json; sed -n 23,23p .dev-team/contract-matrix-tui-streaming-input.md",
+      "severity": "ADVISORY",
+      "detail": "baseline 的 `acceptance.session_mutating_commands_deferred_not_dropped` 把 `/quit` 列进「延后（不丢弃）」集合，而 C4 明确「`/quit` `/exit` 仍允许退出」。两份冻结真值源对同一行为给出相反口径，验收时必有一方被判失败。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-streaming-input.md",
+      "line": 36,
+      "rule": "CONTRACT_BREAK",
+      "lens": "OVERCLAIM_UNFROZEN_PREDICATE",
+      "counterexample_cmd": "sed -n 813,818p crates/pony-agent-core/src/bin/tui.rs; sed -n 39,42p docs/decisions/0071-tui-streaming-input-queue-and-panels.md; grep -n \"is_ui_idle_for_dispatch\" .dev-team/contract-matrix-tui-streaming-input.md",
+      "severity": "ADVISORY",
+      "detail": "C17 标题宣称「挂起期禁止派发」，实际判据只查 mode/pending_request/ask_user_state/permission_state 四项，ADR 已知局限 1 自己承认 `TurnSuspended` 在无 pending ask 时仍会被判空闲并派发——契约的措辞强于其判据能保证的事实。同时 `is_ui_idle_for_dispatch` 既未进 §2 冻结符号表、也无 A14 登记（见另一条），C17 是「有契约、无载体、无用例」的不可机械断言条款。建议：把 C17 改写为「无待作答/待审批」这一可验证子集，并把 TurnSuspended 残差登记为独立 backlog 事项（带主责+截止），避免契约被当成已闭合。"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-streaming-input.md",
+      "line": 35,
+      "rule": "CONTRACT_BREAK",
+      "lens": "OVER_DESIGN",
+      "counterexample_cmd": "sed -n 39,48p .dev-team/nfr-baseline-tui-streaming-input.json; grep -n \"composer_queue_submit\\|composer_queue_rejected\\|composer_queue_dispatch\" crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY",
+      "detail": "C16 与 NFR baseline `logging.surfaces`（已逐条要求 streaming_key_disposition 的 Reject/QueueSubmit 与派发深度日志、json+trace_id）重复登记同一事实，且自述「ADVISORY 转 PASS」——它的作用是把 L3-P Q2 的问号擦掉，而非新增用户价值；结构化日志的验收已在 NFR 维度存在。建议降级为 ADVISORY 并合并进 NFR §logging，契约矩阵不再单列（同类：C18③ 双渲染去重成本近零但价值仅限于一行文案，保留即可，不应单列成契约条目）。"
+    }
+  ],
+  "known_limitations_adjudication": [
+    {
+      "id": "ADR-0071-L1",
+      "verdict": "ADVISORY_ACCEPT_WITH_BACKLOG",
+      "reason": "TurnSuspended 无全域标记导致极小窗内可派发；需新增状态标记，属本轮范围外的结构改动，但必须登记 backlog + 收紧 C17 措辞（见 findings）。"
+    },
+    {
+      "id": "ADR-0071-L2",
+      "verdict": "MUST_CLOSE_THIS_ROUND",
+      "reason": "并非「被吃掉」：合成 Enter 无标记，模态分支会据此代用户审批/作答，属正确性与越权风险；且吞掉后 dispatch_pending 不复位会静默卡队列。"
+    },
+    {
+      "id": "ADR-0071-L3",
+      "verdict": "ACCEPT",
+      "reason": "仅回执文案在活跃流式行不逐字出现，C7 指示器已承载可见性，纯观感取舍。"
+    }
+  ],
+  "lead_closure": {
+    "closed_at": "2026-11-06T09:02:30+08:00",
+    "verdict_after_closure": "PASS",
+    "items": {
+      "B1(§2 作废符号 vs §1/§4 载体)": "已修：契约 §1 C1/C2 载体改为 streaming_key_disposition，§2 移除作废符号",
+      "B2(§4 用例表止于 A8)": "已修：§4 补齐 A9–A27",
+      "B3(/plan 等面板把 mode 切非 Normal ⇒ 队列永不自动发送)": "已修：C19 PlanMode 不再吞键 + 闸门空闲判据允许 PlanMode；C23 增运行态无关指示行",
+      "B4(合成 Enter 无标记，可被 Ask/审批当作答/放行)": "已修：C21 改独立 UiEvent::QueuedAutoSubmit + 消费点四条件二次校验；残余窗口收窄并写入 ADR 已知局限 2",
+      "B5(流式 Enter 抢在换行/补全之前)": "已修：C20 streaming_enter_pre_action 前置仲裁",
+      "A1(is_panel_command 冗余)": "保留（作为显式白名单语义，无行为副作用）",
+      "A2(/update 5s > 3000ms 基准)": "登记 ADVISORY：既有调用、非本波新增网络面",
+      "A3(no_busy_wait 三方漂移)": "登记 ADVISORY：实际轮询 16/120ms + 50ms 输入泵，未新增忙等",
+      "A5(baseline 把 /quit 列为延后)": "已按 C4 口径：/quit 允许立即退出；baseline 文本随契约修订",
+      "A6(C17 措辞强于判据)": "已收窄：C17 以 is_ui_idle_for_dispatch 为判据并在 ADR 登记残余(无全域挂起标记)",
+      "A7(C16 与 NFR logging.surfaces 重复)": "已并：C25 补齐 queue_depth_*/key_class/composer_has_text 字段"
+    }
+  }
+}

@@ -1,0 +1,465 @@
+{
+  "wave": "tui-streaming-input",
+  "ticket": "B-tui-streaming-input",
+  "owner": "test-agent (independent L2-T / L2-AT author)",
+  "status": "DELIVERED · final round-9 independent green verification PASSED (EXIT=0, A1–A27)",
+  "frozen_at": "2026-11-06T08:48:00+08:00",
+  "contract": ".dev-team/contract-matrix-tui-streaming-input.md",
+  "nfr_baseline": ".dev-team/nfr-baseline-tui-streaming-input.json",
+  "red_phase_receipt": ".dev-team/red-phase-tui-streaming-input.json",
+  "evidence_log": ".dev-team/evidence/red-phase-tui-streaming-input.log",
+  "grading": {
+    "tier": "L2（契约 + 对抗；命中 blast 关键词 thread/spawn ⇒ 按 B 级 L2-AT 执行）",
+    "aaa": "每个用例 Arrangement / Act / Assert 分块，断言全部校验具体返回值或状态突变",
+    "zero_fake_test": "0 个无断言用例；0 个「跑通即过」用例；0 处吞异常；无 ignore/skip"
+  },
+  "test_files": [
+    {
+      "path": "crates/pony-agent-core/tests/tui_streaming_input_acceptance.rs",
+      "sha256": "d7295e71781d9eb0a13f5ef33706d25037f645148f37f73c0373f61e99ed52a2",
+      "cases": [
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A9",
+        "A11",
+        "A12",
+        "A13",
+        "A14",
+        "A15"
+      ],
+      "post_freeze_edit": "A13 载体改判（C14 → composer_buffer_for_dispatch）；A9 形参 goal_active→turn_in_flight（C10 修订）。两次修订后整套 EXIT=0"
+    },
+    {
+      "path": "crates/pony-agent-core/tests/tui_streaming_input_adversarial.rs",
+      "sha256": "6883c4bbd4bc68783159e174de61b532613cb29a032160e5b9a7112dbe7e445b",
+      "cases": [
+        "A7",
+        "A7-consecutive",
+        "A7-empty-backlog",
+        "A7-bulk(补充)",
+        "A8",
+        "A10"
+      ]
+    },
+    {
+      "path": "crates/pony-agent-core/tests/tui_six_fixes_acceptance.rs",
+      "sha256_after_migration": "e6ac22f740f09f8ddd5dfbe2350006f23adc200d463108fbea84c2e85f6f7639",
+      "scope": "仅 :119-122 旧契约断言迁移为 C1 新口径（streaming_key_disposition(Char('x'))==Forward），其余用例零改动"
+    }
+  ],
+  "migration_verification": {
+    "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_six_fixes_acceptance --target-dir target-test-red",
+    "exit_code": 0,
+    "result": "18 passed / 0 failed（含迁移后的 ctrl_u_clears_whole_composer_even_mid_stream；其余 8 个旧用例零回归）",
+    "executed_at": "2026-11-06T07:43+08:00"
+  },
+  "red_command": "cd /tmp/red-hybrid && cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --target-dir /tmp/red-baseline-target",
+  "red_command_note": "红相在只读基线副本上捕获（当前 crate + `git show adad39ad:...tui.rs`，sha256 89636fae…）；任务书原命令在当前工作区实测 EXIT=0，原因见 phase_skew。",
+  "red_exit_code": 101,
+  "red_failure_primitive": "rustc E0425 cannot find function/value + E0432 unresolved import + E0433 + E0599/E0609（queued_count / queued_user_messages 缺失）；acceptance 80 errors / adversarial 59 errors；0 ignored / 0 filtered / 0 harness panic",
+  "case_count": {
+    "contract_cases": "A1–A27（契约 §4 表）",
+    "test_functions": {
+      "tui_streaming_input_acceptance.rs": 23,
+      "tui_streaming_input_adversarial.rs": 7
+    },
+    "note": "A7 由 4 个函数承载（生产闸门五阻断面 / 连终态 / 空积压 / 批量反例补充），其余 A 编号各 1 个函数"
+  },
+  "assertion_ids_and_contracts": [
+    {
+      "id": "A1",
+      "case": "a1_streaming_edit_keys_are_forwarded",
+      "mode": "L2-T",
+      "contract": "C1",
+      "assertions": 6
+    },
+    {
+      "id": "A2",
+      "case": "a2_enter_intent_queues_while_streaming",
+      "mode": "L2-T",
+      "contract": "C2/C6",
+      "assertions": 6
+    },
+    {
+      "id": "A3",
+      "case": "a3_panel_and_session_mutating_command_classification",
+      "mode": "L2-T",
+      "contract": "C3/C4",
+      "assertions": 9
+    },
+    {
+      "id": "A4",
+      "case": "a4_queue_push_rejects_and_drains_fifo_once",
+      "mode": "L2-T",
+      "contract": "C5/C6",
+      "assertions": 22
+    },
+    {
+      "id": "A5",
+      "case": "a5_queued_status_label_visible_only_when_nonzero",
+      "mode": "L2-T",
+      "contract": "C7",
+      "assertions": 9
+    },
+    {
+      "id": "A6",
+      "case": "a6_static_path_unchanged_and_legacy_predicate_migrated",
+      "mode": "L2-T",
+      "contract": "C8/C1-migration",
+      "assertions": 8
+    },
+    {
+      "id": "A9",
+      "case": "a9_should_drain_queued_truth_matrix",
+      "mode": "L2-T",
+      "contract": "C10",
+      "assertions": 3
+    },
+    {
+      "id": "A7",
+      "case": "a7_consecutive_terminal_states_never_double_dispatch",
+      "mode": "L2-AT",
+      "contract": "C5 / NFR single-flight",
+      "assertions": 10
+    },
+    {
+      "id": "A7b",
+      "case": "a7_terminal_states_without_backlog_dispatch_nothing",
+      "mode": "L2-AT",
+      "contract": "C5",
+      "assertions": 4
+    },
+    {
+      "id": "A7c",
+      "case": "a7_bulk_drain_loop_is_the_antipattern_single_flight_must_prevent",
+      "mode": "L2-AT",
+      "contract": "C5 / NFR",
+      "assertions": 2
+    },
+    {
+      "id": "A8",
+      "case": "a8_capped_queue_survives_concurrent_push_and_drain",
+      "mode": "L2-AT",
+      "contract": "C5/C6",
+      "assertions": 17
+    },
+    {
+      "id": "A10",
+      "case": "a10_queue_cap_boundary_never_grows_and_rejects_bad_payloads",
+      "mode": "L2-AT",
+      "contract": "C6 boundary",
+      "assertions": 12
+    }
+  ],
+  "determinism": {
+    "sleep_calls": 0,
+    "probability_waits": 0,
+    "timeout_polling": 0,
+    "concurrency_model": "std::thread::scope + Mutex，固定迭代（8 threads × 64 push；6 threads × 50 interleaved ops）",
+    "invariants_asserted": [
+      "长度恒 ≤ MAX",
+      "每步 drain 恰 −1 且严格单调",
+      "长度守恒 accepted − popped",
+      "预算守恒 accepted+popped+empty_drains == 迭代总数"
+    ]
+  },
+  "current_workspace_observation": {
+    "command": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --target-dir target-test-red",
+    "exit_code": 0,
+    "result": "acceptance 16 passed / adversarial 14 passed（含 tui.rs 内部 9 个 #[cfg(test)] 固有单测被自动收集；我方 11 个用例全绿）",
+    "observed_at": "2026-11-06T07:34+08:00",
+    "meaning": "实现已落地且满足当前契约；因 PHASE-SKEW 该轮不能代替红相"
+  },
+  "phase_skew": "PHASE-SKEW 已登记（实现 07:31:37 先于红相落地；Lead 记账，不追责）。详见 red-phase-tui-streaming-input.json §phase_skew。",
+  "next_step": {
+    "green_gate": "绿相全量门禁由 Lead/Executor 触发；本 Agent 不自行放行",
+    "note": "mutation-sensitivity 已完成并回填 red-phase §mutation_sensitivity"
+  },
+  "hygiene": {
+    "src_modifications": 0,
+    "git_write_operations": 0,
+    "process_artifacts_outside_repo": [
+      "/tmp/red-hybrid",
+      "/tmp/red-baseline",
+      "/tmp/red-baseline-target"
+    ],
+    "evidence_artifacts_in_repo": [
+      ".dev-team/evidence/red-phase-tui-streaming-input.log"
+    ]
+  },
+  "mutation_sensitivity": {
+    "status": "completed",
+    "evidence_log": ".dev-team/evidence/mutation-sensitivity.log",
+    "rounds": 8,
+    "red_rounds": 6,
+    "restore_verification": "6/6 轮 sha256 == pristine；RESTORE-SAMPLING EXIT=0（16+14 passed）",
+    "coverage": "11 个首轮用例 + A7 重写 4 例 + A11–A15 全部至少被 1 个变异杀死；新增 M6→A13、M7→A7 家族",
+    "workspace_src_writes": 0
+  },
+  "round2": {
+    "status": "completed：A13 载体改判后全绿（EXIT=0：18/21/15 passed）；变异 M6/M7 证明 A7/A13 非空转",
+    "evidence_logs": [
+      ".dev-team/evidence/round2-red-tui-streaming-input.log（载体改判前，A13 假红，已作废）",
+      ".dev-team/evidence/round2-green-after-a13-carrier.log",
+      ".dev-team/evidence/mutation-sensitivity.log（尾部第二轮增量）"
+    ],
+    "exit_code_after_adjudication": 0,
+    "superseded_false_red": "A13 旧载体下的红属假红（C14 载体已改判），见 red-phase §round2.a13_carrier_adjudication"
+  },
+  "lead_verified_adjacent_facts": [
+    {
+      "fact": "tests/acceptance/l2at-tui-runtime.sh 本构建 FAIL=10 属既存陈旧断言",
+      "detail": "脚本断言的 `› ▏` 在 git show HEAD:...tui.rs 里也不存在 ⇒ 与本次改动无关，不得记成本次回归",
+      "verified_by": "lead"
+    },
+    {
+      "fact": "PTY 实机冒烟 PASS",
+      "detail": "流式中输入 hello 与「生成中 2秒」同帧并存；流式中 Ctrl+T 打开 Team 共享任务看板",
+      "verified_by": "lead"
+    }
+  ],
+  "green_phase": {
+    "verified_by": "test-agent（独立复核，未引用 executor 自述数字）",
+    "timestamp": "2026-11-06T07:54:10+08:00",
+    "source_sha256": "39eba2a2b6909b461a6f04943f37b662cd660907d8a0fd1670872aa7fdf02931",
+    "source_mtime": "07:52:05（executor 已收手）",
+    "runs": [
+      {
+        "name": "主目标",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_six_fixes_acceptance": 18,
+          "tui_streaming_input_acceptance": 21,
+          "tui_streaming_input_adversarial": 15
+        },
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "回归抽样",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_batch1_regression --test tui_render_layout --test tui_stop_wave60 --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_batch1_regression": 18,
+          "tui_render_layout": 18,
+          "tui_stop_wave60": 12
+        },
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "consistency_with_executor": "完全一致（acceptance 21 / adversarial 15 / six_fixes 18；回归 18·18·12，属 executor 自述 18·18·18·18·12 中本次抽取的三套）",
+    "evidence_log": ".dev-team/evidence/round2-green-tui-streaming-input.log"
+  },
+  "final_test_file_sha256": {
+    "crates/pony-agent-core/tests/tui_streaming_input_acceptance.rs": "8d048bc3b57246a5b382e319e40679ce664c8a5fd02d5cca5559d66231da3273",
+    "crates/pony-agent-core/tests/tui_streaming_input_adversarial.rs": "9932f9e8faba54cd8858eff2fc3717be150b6b94bc804c9fb268bc604137872a",
+    "crates/pony-agent-core/tests/tui_six_fixes_acceptance.rs": "e6ac22f740f09f8ddd5dfbe2350006f23adc200d463108fbea84c2e85f6f7639"
+  },
+  "a13_carrier_selfcheck": {
+    "carrier": "composer_buffer_for_dispatch(&str) -> String",
+    "assertions_1_2": "仅依赖 composer_buffer_for_dispatch（行尾 `\\` 断开 + `/hel` 不被补全劫持 + trim 后正文不变）",
+    "assertion_3": "用 take_next_queued_for_dispatch 断言「取件不写回 + 返回原始正文」，对 take 仅有取件语义依赖，**不依赖其写回**",
+    "mutation_proof": "M6（净化函数退化）⇒ A13 红；M7（take 恒 None）⇒ A13 连带红（③ 需真实取件路径），依赖关系已登记"
+  },
+  "green_phase_round3": {
+    "verified_by": "test-agent（独立复核，未引用 executor 自述数字）",
+    "timestamp": "2026-11-06T08:09:48+08:00",
+    "source_sha256": "d21c801a5687ddc97f9c8f3f555d1ad7406842dd260d0584a5a397aaeb231c99",
+    "source_mtime": "08:07:41（executor 已收手）",
+    "runs": [
+      {
+        "name": "主目标 A1–A21",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_six_fixes_acceptance": 18,
+          "tui_streaming_input_acceptance": 27,
+          "tui_streaming_input_adversarial": 15
+        },
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "回归抽样",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_batch1_regression --test tui_render_layout --test tui_stop_wave60 --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_batch1_regression": 18,
+          "tui_render_layout": 18,
+          "tui_stop_wave60": 12
+        },
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "consistency_with_executor": "完全一致（acceptance 27 / adversarial 15 / six_fixes 18；回归 18·18·12 属其自述 18·18·18·18·12 中本次抽取的三套）",
+    "evidence_log": ".dev-team/evidence/round3-green-tui-streaming-input.log"
+  },
+  "final_green": {
+    "verified_by": "test-agent（独立复核，未引用 executor 自述数字）",
+    "timestamp": "2026-11-06T08:23:43+08:00",
+    "tui_rs_sha256": "a024ee721f52433f352a21942fc30bdabe9b10f56c6f3081e82926f5e15970ed",
+    "tui_rs_mtime": "08:22:31（executor ROUND 7 已收手）",
+    "runs": [
+      {
+        "name": "主目标 A1–A24",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_six_fixes_acceptance": 18,
+          "tui_streaming_input_acceptance": 30,
+          "tui_streaming_input_adversarial": 15
+        },
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "回归抽样",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_batch1_regression --test tui_render_layout --test tui_stop_wave60 --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_batch1_regression": 18,
+          "tui_render_layout": 18,
+          "tui_stop_wave60": 12
+        },
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "consistency_with_executor": "完全一致（acceptance 30 / adversarial 15 / six_fixes 18；回归 18·18·12 属其自述 18·18·18·18·12 中本次抽取的三套）",
+    "evidence_log": ".dev-team/evidence/final-green-tui-streaming-input.log"
+  },
+  "known_fragility": "A23 的 include_str! 源码窗口断言（700B）对日志字段名/顺序与调用点窗口长度敏感——字段改名或窗口内重构会使其失效（属结构契约，非行为回归），重构时需同步维护。",
+  "round6_increment": {
+    "status": "A25/A26 已交付；首跑全绿但源码仍在漂移，正式绿相待 Lead 终局指令",
+    "new_cases": [
+      "A25(C26)",
+      "A26(C26, L2-AT)"
+    ],
+    "a22_supplement": "C26 等价性断言（分歧判定 + 回队后 count 不变）",
+    "mutation_proof": "M8（queued_dispatch_diverged→false）⇒ A25/A22/A26 三例全红 ⇒ 非空转",
+    "observed_at": "2026-11-06T08:33:00+08:00",
+    "observed_passed": {
+      "tui_six_fixes_acceptance": 18,
+      "tui_streaming_input_acceptance": 31,
+      "tui_streaming_input_adversarial": 16
+    }
+  },
+  "final_green_round8": {
+    "verified_by": "test-agent（独立复核，未引用 executor 自述数字）",
+    "timestamp": "2026-11-06T08:35:07+08:00",
+    "tui_rs_sha256": "04af7989f78e9697bb97146c49cbbd098045d7950063c5923365c339fcddc39c",
+    "tui_rs_mtime": "2026-11-06T08:33:11",
+    "tui_rs_size": 504298,
+    "source_unchanged_during_verification": true,
+    "runs": [
+      {
+        "name": "主目标 A1–A26",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_six_fixes_acceptance": 18,
+          "tui_streaming_input_acceptance": 31,
+          "tui_streaming_input_adversarial": 16
+        },
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "回归抽样",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_batch1_regression --test tui_render_layout --test tui_stop_wave60 --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_batch1_regression": 18,
+          "tui_render_layout": 18,
+          "tui_stop_wave60": 12
+        },
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "consistency": "本轮指令未给 executor 自述数字；与上一轮（ROUND 7：30/15/18）相比 acceptance +1、adversarial +1，恰为新增 A25/A26 两例 ⇒ 内部自洽；回归抽样 18·18·12 与前轮一致",
+    "evidence_log": ".dev-team/evidence/final2-green-tui-streaming-input.log"
+  },
+  "delivery_summary": {
+    "rounds": 8,
+    "red_receipts": [
+      "red-phase-tui-streaming-input.json（round1 基线红相 / round2 / round3_round4 / round5 / round6）"
+    ],
+    "mutation_rounds": [
+      "M1–M5 + M1-alt",
+      "M6–M7",
+      "M8",
+      "M9"
+    ],
+    "evidence_logs": [
+      ".dev-team/evidence/red-phase-tui-streaming-input.log",
+      ".dev-team/evidence/mutation-sensitivity.log",
+      ".dev-team/evidence/round2-red-tui-streaming-input.log",
+      ".dev-team/evidence/round2-green-tui-streaming-input.log",
+      ".dev-team/evidence/round3-green-tui-streaming-input.log",
+      ".dev-team/evidence/round3-4-intermediate-red-attempt.log",
+      ".dev-team/evidence/round3-4-intermediate-red-attempt-2.log",
+      ".dev-team/evidence/round5-red-tui-streaming-input.log",
+      ".dev-team/evidence/round6-green-tui-streaming-input.log",
+      ".dev-team/evidence/final-green-tui-streaming-input.log",
+      ".dev-team/evidence/final2-green-tui-streaming-input.log",
+      ".dev-team/evidence/round7-green-tui-streaming-input.log",
+      ".dev-team/evidence/final3-green-tui-streaming-input.log"
+    ],
+    "hygiene": {
+      "src_writes": 0,
+      "git_writes": 0,
+      "test_files_owned": 3
+    }
+  },
+  "final_green_round9": {
+    "verified_by": "test-agent（独立复核，未引用 executor 自述数字）",
+    "timestamp": "2026-11-06T08:46:41+08:00",
+    "tui_rs_sha256": "56d58e81a213275998242bc65b1125b4e2add7f86d00db3b70a931146ad67834",
+    "tui_rs_sha256_before": "56d58e81a213275998242bc65b1125b4e2add7f86d00db3b70a931146ad67834",
+    "tui_rs_sha256_after": "56d58e81a213275998242bc65b1125b4e2add7f86d00db3b70a931146ad67834",
+    "tui_rs_mtime": "2026-11-06T08:46:26",
+    "tui_rs_size": 506196,
+    "source_unchanged_during_verification": true,
+    "runs": [
+      {
+        "name": "主目标 A1–A27",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_six_fixes_acceptance": 18,
+          "tui_streaming_input_acceptance": 32,
+          "tui_streaming_input_adversarial": 16
+        },
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "回归抽样",
+        "cmd": "cargo test --manifest-path crates/pony-agent-core/Cargo.toml --test tui_batch1_regression --test tui_render_layout --test tui_stop_wave60 --no-fail-fast --target-dir target-test-red",
+        "exit": 0,
+        "passed": {
+          "tui_batch1_regression": 18,
+          "tui_render_layout": 18,
+          "tui_stop_wave60": 12
+        },
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "consistency": "本轮指令未给 executor 自述数字；相对 ROUND 8（31/16/18）acceptance +1，恰为新增 A27；回归抽样不变 ⇒ 内部自洽",
+    "evidence_log": ".dev-team/evidence/final3-green-tui-streaming-input.log"
+  },
+  "round7_increment": {
+    "new_case": "A27（C27 孤儿派发载荷回队，L2-T）",
+    "mutation_proof": "M9（orphan_dispatch_payload→None）⇒ EXIT=101，仅 A27 红 ⇒ 非空转",
+    "red_status": "RED_NOT_CAPTURED：符号在用例写毕当刻（08:46:26）已落地，编译在其后 ⇒ 无 E0425 窗口（如实记录）"
+  }
+}

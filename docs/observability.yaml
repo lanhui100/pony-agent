@@ -314,3 +314,16 @@ note: >-
       issue 上报并仅追加一条既有运行日志；中断轮次检查点以 additive 文本进入既有
       会话历史；退出路径经既有 `stop_turn` 与 `restore_terminal_modes` 收口。
       不改变对外接口、持久化 schema 与观测面。
+  【wave-tui-streaming-input 归属登记｜TUI 流式期输入/面板/排队】
+  (1) 四维归属不变：tracing/issues 仍 applicable（落点 `agent/otel/mod.rs`、
+      `agent/ponysentry/client.rs`），metrics/logs 维持结构性 N-A（理由同本文档维度声明）。
+      本波无新增网络端点、依赖、环境变量、指标或 Loki 上送路径。
+  (2) 新增**本地面**结构化日志（不属遥测出口，走既有 `otel::log` JSON 通道 + 512KiB 轮转，
+      TUI 已 `set_stderr_output(true)` 并把 stderr 重定向到运行日志文件）：
+      事件 `composer_queue_submit` / `composer_queue_rejected` / `composer_key_rejected` /
+      `composer_queue_dispatch`，字段含 `event` / `session_id` / `turn_id` / `streaming`，
+      不含消息正文与凭据；`trace_id` 在事件循环线程回落到 null（turn 登记在轮次线程），
+      关联以 `turn_id` 为准。收口点：`crates/pony-agent-core/src/bin/tui.rs` 的 `tui_queue_log`。
+  (3) 非遥测变更（仅登记）：流式期按键裁决由 `streaming_key_disposition` 单点裁定，
+      Enter 语义由「丢弃」改为「入队 → 终态后单飞派发」；派发经独立 `UiEvent::QueuedAutoSubmit`
+      二次校验后复用既有提交路径。不改变对外接口、会话持久化 schema 与既有观测面。

@@ -1,0 +1,180 @@
+{
+  "schema_version": 2,
+  "round": 4,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3b-tui-streaming-input",
+    "fresh_context": true
+  },
+  "executed_by": "l3b-tui-streaming-input",
+  "reviewed_commit": "a1127aae",
+  "attestation": {
+    "self_signed": false,
+    "working_tree": true,
+    "note": "round4 增量终签（C24–C27）。审计对象 = a1127aae 之上的未提交工作区增量（tui.rs 现为 sha 8db8e33f，mtime 08:46:26 早于本会话启动）。工作区零写入：唯一写入为本文件；所有变异均在 /tmp/l3b4/repo 整 tree 副本 + /tmp/l3b4/target 上执行，每次变异后以 diff -q 校验副本 tui.rs 与工作区逐字节一致（日志中 'restored: identical'）。"
+  },
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/tests/tui_streaming_input_acceptance.rs",
+    "crates/pony-agent-core/tests/tui_streaming_input_adversarial.rs",
+    "crates/pony-agent-core/tests/tui_six_fixes_acceptance.rs",
+    ".dev-team/contract-matrix-tui-streaming-input.md"
+  ],
+  "incremental_scope": "本轮只签 C24–C27 的增量（新增 4 契约条 + A22/A23/A25/A26/A27 用例），C1–C23 沿用 round3 结论并只做行号重定位与抽样复核；C8 静态口径 15 套回归本轮整体重跑。",
+  "c_coverage": [
+    {"id": "C1", "assert": "流式期编辑/光标/补全类按键全部 Forward", "impl": "tui.rs:656-680 streaming_key_disposition（仅 Enter 参与裁决）；接线 tui.rs:9672-9709", "test": "acceptance.rs:41-102 (A1)", "verdict": "PASS"},
+    {"id": "C2", "assert": "流式 Enter（有正文、非命令）= 入队并清空输入，绝不并发 spawn", "impl": "tui.rs:9710-9758（push_queued_message → clear_input → apply_queue_feedback）+ 682-702", "test": "acceptance.rs:107-148 (A2)", "verdict": "PASS", "note": "文案「已排队 · 本轮结束后自动发送（N 条）」与契约字面顺序不同，round3 findings[3] 已登记，未变"},
+    {"id": "C3", "assert": "面板/只读命令与 Ctrl+T/Ctrl+R 流式期照常生效", "impl": "tui.rs:954-962 is_panel_command + 9697-9702（Forward）+ 9827/9834（Ctrl+T/Ctrl+R 在裁决之后仍可达）", "test": "acceptance.rs:153-225 (A3)", "verdict": "PASS"},
+    {"id": "C4", "assert": "/clear /compact /resume 流式期拒绝并给可见反馈；/quit /exit 仍退出", "impl": "tui.rs:966-972 is_session_mutating_command；拒绝路径 9695-9696 → 9760-9801；/quit 退出 9966", "test": "acceptance.rs:177-196 (A3)", "verdict": "PASS"},
+    {"id": "C5", "assert": "终态后自动派发队首 1 条（完整提交路径 + 单飞 + 事件回灌）", "impl": "tui.rs:10590-10661（单点闸门 → set_input → 10658 tx.send(QueuedAutoSubmit)；提交仍走 9872 静态 Enter 链）", "test": "adversarial.rs:56-202 (A7)", "verdict": "PASS", "note": "C5↔C24 张力（同终态可能 2 次尝试、1 次交付）为 contract §5 已登记语义"},
+    {"id": "C6", "assert": "上限 20 / 空串空白命令串拒绝 / 满则提示不静默丢弃", "impl": "tui.rs:682-702 push_queued_message；满 9740-9756（保留输入正文）；C24 回队路径见 findings[3] 的 21 条边界", "test": "adversarial.rs:385-458 (A10)", "verdict": "PASS"},
+    {"id": "C7", "assert": "排队数量用户可见", "impl": "tui.rs:978-990 queued_status_label + 5397-5401 metrics_line 每帧追加", "test": "acceptance.rs:344-388 (A5) + A20", "verdict": "PASS"},
+    {"id": "C8", "assert": "静态行为完全不变", "impl": "静态 Enter 链 tui.rs:9872-9966；Esc 9588；Ctrl+T/R 9827/9834；命令整串分发 9901；goal 续轮 10137（本增量未改这些行）", "test": "15 套 258 用例整体重跑 exit=0（/tmp/l3b4/regression15.log）", "verdict": "PASS"},
+    {"id": "C9", "assert": "流式期 InputPaste 插入缓冲（无早退）", "impl": "tui.rs:10370-10372", "test": "—（静态核对）", "verdict": "PASS"},
+    {"id": "C10", "assert": "五谓词派发闸门 + 单飞", "impl": "tui.rs:992-1006 should_drain_queued；10603-10635 取值（turn_in_flight 由 TurnLoopInFlightGuard 维护）；单飞改由 C24 时间窗闩承载（10606）", "test": "acceptance.rs:450-480 (A9) + adversarial A7", "verdict": "PASS"},
+    {"id": "C11", "assert": "轮次线程 panic 兜底补发 StreamFailed", "impl": "tui.rs:10158 catch_unwind + 4273 panic payload 解析", "test": "—（代码级核对）", "verdict": "PASS"},
+    {"id": "C12", "assert": "流式期 C4/C6 反馈可见", "impl": "tui.rs:8629-8648 apply_queue_feedback（流式期不 push System，改 queue_notice）+ 9725/9745/9779", "test": "acceptance.rs:485-544 (A11) + A20", "verdict": "PASS"},
+    {"id": "C13", "assert": "reset_session_scope / clear_messages 清空排队", "impl": "tui.rs:2648/2680-2682 与 3569/3575-3576（队列 + queue_notice 同口径）", "test": "acceptance.rs:531-562 (A12) + 940-966 (A21)", "verdict": "PASS"},
+    {"id": "C14", "assert": "派发写回净化（行尾 \\ 与命令前缀两条自救路径）", "impl": "tui.rs:751-753 composer_buffer_for_dispatch + 10641 主循环写回", "test": "acceptance.rs:567-642 (A13)", "verdict": "PASS"},
+    {"id": "C15", "assert": "生产唯一取件点；A7 直接断言该符号", "impl": "tui.rs:723-743 take_next_queued_for_dispatch + 10630 单点调用（全文件仅此一处派发取件）", "test": "adversarial.rs:56-202 (A7)", "verdict": "PASS"},
+    {"id": "C16", "assert": "按键裁决/派发结构化日志（含 session/turn）", "impl": "tui.rs:8650 tui_queue_log；调用点 9727/9747/9781/10317/10342/10353/10616/10655", "test": "—（代码级核对）", "verdict": "PASS"},
+    {"id": "C17", "assert": "挂起期禁止派发（ui_idle 含待作答/待审批）", "impl": "tui.rs:1017-1026 is_ui_idle_for_dispatch + 10599 取值", "test": "acceptance.rs:647-666 (A14，仅透传)", "verdict": "PASS"},
+    {"id": "C18", "assert": "别名拒绝 / help 流式文案 / 排队不双渲染", "impl": "tui.rs:682-702（/exit /effort 拒绝）、10010（/help 流式说明）、5831-5836 status_word 无排队标签 + A24 源码断言 1177-1181", "test": "acceptance.rs:671-704 (A15) + A24", "verdict": "PASS"},
+    {"id": "C19", "assert": "PlanMode 只吞 Esc/Up/Down；闸门把 PlanMode 视为空闲", "impl": "tui.rs:761-781 plan_mode_consumes_key + 9513 接线（仅该分支内 continue）+ 闸门 992-1006", "test": "acceptance.rs:723-748 (A16)", "verdict": "PASS", "note": "PlanMode 面板期无指标行属 Lead 已接受缺口外延（round3 findings[2]），本轮不重复判"},
+    {"id": "C20", "assert": "Forward 前置优先于 QueueSubmit", "impl": "tui.rs:783-794 streaming_enter_pre_action + 9685 接线（先算 pre_action，再判会话变更/面板/完整命令）", "test": "acceptance.rs:751-796 (A17)", "verdict": "PASS"},
+    {"id": "C21", "assert": "派发唯一出口 = UiEvent::QueuedAutoSubmit；消费点四条件复核后才回灌 Enter", "impl": "tui.rs:844-851 should_reinject_auto_submit + 10303-10366 消费（两分支均 continue）+ 10658 唯一构造点", "test": "acceptance.rs:800-825 (A18)", "verdict": "PASS"},
+    {"id": "C22", "assert": "queue_feedback 三类 kind→channel 映射被主循环使用", "impl": "tui.rs:820-837 定义 + 9725(Enqueued)/9745(QueueFull)/9779(SessionMutating) → 8629 apply_queue_feedback 分流", "test": "acceptance.rs:485-544 (A11) + 829-866 (A19)", "verdict": "PASS"},
+    {"id": "C23", "assert": "queued>0 或 notice ⇒ 任何运行态都有可渲染行；notice 随会话复位清空；流式期不 push System", "impl": "tui.rs:860-877 queue_indicator_line（两运行态 bool 不参与分支）+ 5397 metrics_line 每帧调用 + 2682/3576 清空 + 8632-8640 流式期不 push", "test": "acceptance.rs:873-938 (A20) + 940-966 (A21) + 1159-1182 (A24 源码结构断言，删渲染块即红)", "verdict": "PASS"},
+    {"id": "C24", "assert": "单飞闩 = 时间窗 + 提交成功即清 + 放弃回队；任何 InputKey 不再无条件清闩", "impl": "tui.rs:883 QUEUE_DISPATCH_LATCH_MS=2000 / 886-888 queue_dispatch_latch_active / 895-900 requeue_front；闸门读 10606 + 置 10644-10646；撤销路径 9654-9660（Esc）、9810-9817（Ctrl+U，仅 ClearInput）；提交成功清 10117 / key 缺失清 10100；放弃回队 10344-10352", "test": "acceptance.rs:993-1072 (A22)", "verdict": "PASS", "note": "全文件 queue_dispatch_deadline 赋值点仅 8769 初始化 / 10644 置位 / 上述 6 处清除，无『任意 InputKey 清闩』残留；旧 bool queue_dispatch_pending 已 grep 零命中"},
+    {"id": "C25", "assert": "派发日志补 queue_depth_before/after；拒绝日志补 key_class；入队补 composer_has_text", "impl": "tui.rs:934-942 queue_dispatch_fields 定义 → 10651-10655 派发点实写并随 tui_queue_log 落盘；945-950 key_class_label → 9787 拒绝点使用（只记类别不记正文）；9733 composer_has_text", "test": "acceptance.rs:1102-1154 (A23：纯函数矩阵 + include_str! 源码结构断言)", "verdict": "PASS", "note": "A23 锁的是字段名/顺序与源码文本，字段值语义无护栏，见 findings[2]"},
+    {"id": "C26", "assert": "派发载荷与令牌绑定：消费点先比对、分歧回队原 payload、末尾必须 continue；撤销回队权威 payload", "impl": "tui.rs:909-914 queued_dispatch_diverged；10638 派发点写 queue_dispatch_payload；10307-10330 消费点比对→take 回队→清闩→continue；10364-10365 两分支末尾 continue；9655-9658 / 9812-9815 撤销回队优先 payload（input_buffer 仅兜底）", "test": "acceptance.rs:1187-1215 (A25) + adversarial.rs:463-522 (A26) + A22 增补断言 1035-1043", "verdict": "PASS", "note": "消费点接线本身无测试护栏（W2 全绿），见 findings[1]"},
+    {"id": "C27", "assert": "孤儿载荷在取件前收割 + 四类清点对称", "impl": "tui.rs:922-931 orphan_dispatch_payload；10610-10627 闸门内在 take_next_queued_for_dispatch（10630）之前收割 → requeue_front + clear_input + payload=None + continue；清点对称：提交成功 10119 / 提交失败 10103 / 分歧 10313 / 放弃 10347 / 撤销 9655·9812 / 孤儿 10615", "test": "acceptance.rs:1220-1268 (A27：纯函数矩阵 + 队列原语联动；不含源码接线断言)", "verdict": "PASS", "note": "纯净语义已锁；接线已在源码真调用（10611），但无测试护栏（W1 全绿），见 findings[0]"}
+  ],
+  "previous_findings_closure": [
+    {"id": "L3B-R3#1（ADVISORY）", "title": "C19–C23 纯函数接线无测试护栏（M3 全绿）", "status": "部分闭合", "evidence": "C23 接线已由新增 A24（acceptance.rs:1159-1182）用 include_str! 结构断言锁住（删 metrics_line 内渲染块即红）；C19 的 9513 接线仍无断言。C24–C27 的接线同样无护栏，见 findings[0][1]。"},
+    {"id": "L3B-R3#2（ADVISORY）", "title": "A20「并存」断言恒真（装饰性）", "status": "未处理", "evidence": "acceptance.rs:925-937 仍保留 `|| !both_line.trim().is_empty()` 恒真分支；本轮未改测试，仍登记但已由 Lead 归入已知项，不重复判。", "severity": "ADVISORY"},
+    {"id": "L3B-R3#3（ADVISORY）", "title": "PlanMode 面板期无指标行", "status": "已知接受", "evidence": "6504 附近渲染分支仍未含 PlanMode；Lead 已接受，本轮不重复判 BLOCKING。"},
+    {"id": "L3B-R3#4（ADVISORY）", "title": "C2 提示文案字面差", "status": "已知接受", "evidence": "queue_feedback(Enqueued) 基串 832-835 + 主循环 9723 拼「（N 条）」，语义等价。"}
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 10610,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cp crates/pony-agent-core/src/bin/tui.rs /tmp/l3b4/repo/crates/pony-agent-core/src/bin/tui.rs && python3 -c \"import sys;p='/tmp/l3b4/repo/crates/pony-agent-core/src/bin/tui.rs';s=open(p).read();i=s.index('            if let Some(orphan) =');j=s.index('            // C25：派发前后队列深度');open(p,'w').write(s[:i]+s[j:])\" && cd /tmp/l3b4/repo && CARGO_TARGET_DIR=/tmp/l3b4/target cargo test -p pony-agent-core --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast",
+      "detail": "C27 的**接线**无测试护栏：把闸门里的孤儿收割整块（tui.rs:10610-10627）删掉、纯函数 orphan_dispatch_payload 原样保留，三套 66 用例全绿、exit=0（变异 W1，/tmp/l3b4/wiring.log）。A27（acceptance.rs:1220-1268）只断言纯函数真值矩阵 + 队列原语联动，未做 include_str! 源码结构断言（与 A23/A24 的口径不一致）。代码当前**真接线**（10611 调用，且位于取件 10630 之前）⇒ 按 Lead 口径只判 ADVISORY；建议给 A27 补一条与 A24 同型的结构断言（窗口内必须出现 `orphan_dispatch_payload(` 且出现在 `take_next_queued_for_dispatch(` 之前）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 10307,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cp crates/pony-agent-core/src/bin/tui.rs /tmp/l3b4/repo/crates/pony-agent-core/src/bin/tui.rs && python3 -c \"p='/tmp/l3b4/repo/crates/pony-agent-core/src/bin/tui.rs';s=open(p).read();old='''                    if queued_dispatch_diverged(\\n                        queue_dispatch_payload.as_deref(),\\n                        &state.input_buffer,\\n                    ) {''';assert s.count(old)==1;open(p,'w').write(s.replace(old,'                    if false {'))\" && cd /tmp/l3b4/repo && CARGO_TARGET_DIR=/tmp/l3b4/target cargo test -p pony-agent-core --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast",
+      "detail": "C26 的**消费点接线**同样无护栏：把 QAS 分支里的分歧判定改成 `if false`（其余回队逻辑保留、纯函数不动），三套 66 用例仍全绿、exit=0（变异 W2，/tmp/l3b4/w2.log）。A25/A26 断言的是 `queued_dispatch_diverged` 真值矩阵与 `requeue_front` 语义，未断言消费点真的**调用**它；A22 的增补断言（acceptance.rs:1035）也只是再算一次纯函数。强制变异 M1（函数恒 false）能红，是因为它污染了纯函数本身，不代表接线被动过会被发现。代码当前正确 ⇒ 不判 BLOCKING；建议 A26 增加结构断言（QAS 分支窗口内出现 `queued_dispatch_diverged(` 且 `continue` 在分支末尾）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 945,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"p='/tmp/l3b4/repo/crates/pony-agent-core/src/bin/tui.rs';s=open(p).read();old='''    match key.code {\\n        KeyCode::Char(_) => \\\"Char\\\".to_string(),\\n        other => format!(\\\"{other:?}\\\"),\\n    }''';open(p,'w').write(s.replace(old,'    let _ = key;\\n    \\\"Char\\\".to_string()'))\" && cd /tmp/l3b4/repo && CARGO_TARGET_DIR=/tmp/l3b4/target cargo test -p pony-agent-core --test tui_streaming_input_acceptance --no-fail-fast",
+      "detail": "C25 的字段**值**语义无护栏：把 key_class_label 改成恒 `\"Char\"`（所有非字符键的分类都错），A23 仍全绿、exit=0（变异 M3，/tmp/l3b4/m3b.log）——A23 ③ 只查 700 字节窗口内出现字符串 `key_class`，④ 只查函数体里出现字面量 `\"Char\"`。字段名/顺序/深度值（queue_depth_before/after）是真断言，key_class 的取值不是。代码当前实现正确（Enter⇒`Enter`、Char⇒`Char`，9787 使用）⇒ ADVISORY；建议 A23 把分类器改成可测的 `pub fn key_class_label`，断言 `Esc/Enter/Char('a')` 三类取值。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 895,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n -A6 'pub fn requeue_front' crates/pony-agent-core/src/bin/tui.rs && grep -n 'MAX_QUEUED_MESSAGES' crates/pony-agent-core/src/bin/tui.rs | head",
+      "detail": "`requeue_front` 用裸 `insert(0, ..)`，不复用 `push_queued_message` 的容量判据，故理论上可让队列达到 `MAX_QUEUED_MESSAGES + 1`：队列满 20 → 闸门取走 1（19）→ 闩仍生效的 2s 窗口内用户再入队 1（20）→ 闩过期、孤儿收割把 payload 回队（21）。后果温和（不 panic、不丢正文、后续 push 仍返回 false、派发继续工作），且「宁可多 1 条也不丢正文」是安全侧取舍 ⇒ 不判 BLOCKING、不建议改行为；建议在契约 §1 C24 或 C6 里登记这条「回队可临时越界 1 条」的已知语义，并给 A22 补一条 `requeue_front` 满队列断言（当前 20 条时回队应为 21 而非丢弃）。"
+    }
+  ],
+  "mutation_recheck": {
+    "setup": "rsync -a --delete --exclude 'target*' --exclude node_modules --exclude .git /home/dm/pony-agent/ /tmp/l3b4/repo/（工作区零写入）；CARGO_TARGET_DIR=/tmp/l3b4/target（复用 round3 依赖缓存）。每个变异后 `cp 工作区 tui.rs 副本` 并 diff -q 校验逐字节一致，日志分别见 /tmp/l3b4/{baseline,m1,m2,w1,w2,m3b}.log。",
+    "baseline_cmd": "cd /tmp/l3b4/repo && CARGO_TARGET_DIR=/tmp/l3b4/target cargo test -p pony-agent-core --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast",
+    "baseline_exit": 0,
+    "baseline_result": "66 passed; 0 failed（six_fixes 18 / acceptance 32 / adversarial 16）",
+    "mutations": [
+      {
+        "id": "M1（强制）",
+        "target": "C26 / A25（关联 A22/A26）",
+        "what": "queued_dispatch_diverged 函数体改为恒 false（保留签名与全部调用点）",
+        "cmd": "cd /tmp/l3b4/repo && CARGO_TARGET_DIR=/tmp/l3b4/target cargo test -p pony-agent-core --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast",
+        "exit": 101,
+        "result": "FAILED. acceptance 30/32 + adversarial 15/16; six_fixes 18/18",
+        "red_tests": [
+          "a25_queued_dispatch_diverged_matrix（acceptance.rs:1198：抹空必须判分歧）",
+          "a22_requeue_front_restores_fifo_and_never_stalls（acceptance.rs:1035：撤销路径必须判分歧）",
+          "a26_trace_b_sequence_restores_payload_without_loss_or_duplication（adversarial.rs:482：第 0 轮正文被抹空必须判分歧）"
+        ]
+      },
+      {
+        "id": "M2（强制）",
+        "target": "C27 / A27",
+        "what": "orphan_dispatch_payload 恒返回 None（保留签名与闸门调用点）",
+        "cmd": "cd /tmp/l3b4/repo && CARGO_TARGET_DIR=/tmp/l3b4/target cargo test -p pony-agent-core --test tui_streaming_input_acceptance --test tui_streaming_input_adversarial --test tui_six_fixes_acceptance --no-fail-fast",
+        "exit": 101,
+        "result": "FAILED. acceptance 31/32; adversarial 16/16; six_fixes 18/18",
+        "red_tests": [
+          "a27_orphan_dispatch_payload_matrix（acceptance.rs:1227：闩已过期 ⇒ 孤儿 payload 必须回队）"
+        ]
+      },
+      {
+        "id": "W1（附加·接线）",
+        "target": "C27 接线",
+        "what": "删除闸门内孤儿收割整块 10610-10627（纯函数保留）",
+        "cmd": "同上（/tmp/l3b4/wiring.log）",
+        "exit": 0,
+        "result": "ALL GREEN（66/66）⇒ 接线无测试护栏，登记 findings[0]",
+        "red_tests": []
+      },
+      {
+        "id": "W2（附加·接线）",
+        "target": "C26 消费点接线",
+        "what": "把 QAS 分支的分歧判定条件改为 `if false`（回队逻辑与纯函数保留）",
+        "cmd": "同上（/tmp/l3b4/w2.log）",
+        "exit": 0,
+        "result": "ALL GREEN（66/66）⇒ 消费点接线无测试护栏，登记 findings[1]",
+        "red_tests": []
+      },
+      {
+        "id": "M3（附加·字段值）",
+        "target": "C25 key_class 取值",
+        "what": "key_class_label 恒返回 \"Char\"",
+        "cmd": "同上（/tmp/l3b4/m3b.log）",
+        "exit": 0,
+        "result": "ALL GREEN（66/66）⇒ C25 只锁字段名不锁取值，登记 findings[2]",
+        "red_tests": []
+      }
+    ],
+    "conclusion": "两个强制变异均按预期打红且 exit=101：M1 红 A25/A22/A26（三处），M2 红 A27 ⇒ 用例非空转、C26/C27 核心语义有真实回归检测力，**不判 BLOCKING**。W1/W2/M3 三项附加变异全绿，暴露的是「接线/取值无护栏」，按 round3 同口径登记 ADVISORY。"
+  },
+  "wiring_guardrail": {
+    "c27_source_call": "grep -n 'orphan_dispatch_payload' crates/pony-agent-core/src/bin/tui.rs ⇒ 922（定义）、10611（闸门调用）；调用点位于 10630 `take_next_queued_for_dispatch(` 之前，满足「取件前收割」。非纯函数孤岛 ⇒ 按 Lead 口径为 ADVISORY（非 BLOCKING）。",
+    "c24_source_calls": "queue_dispatch_latch_active ⇒ 886（定义）/9654（Esc 撤销）/9810（Ctrl+U 撤销）/10606（闸门）；requeue_front ⇒ 895（定义）/9658/9815/10314/10350/10613；QUEUE_DISPATCH_LATCH_MS ⇒ 883（定义）/10645（置闩）。均在主循环真路径上。",
+    "c25_source_calls": "queue_dispatch_fields ⇒ 934（定义）/10653（composer_queue_dispatch 日志前）；key_class_label ⇒ 945（定义）/9787（composer_key_rejected）；composer_has_text ⇒ 9733（composer_queue_submit）。",
+    "c26_source_calls": "queued_dispatch_diverged ⇒ 909（定义）/10307（QAS 消费点）；queue_dispatch_payload ⇒ 8772（初始化）/10638（写）/10308·10313·10347（读/取）/9655·9812（撤销回队权威 payload）。",
+    "residual": "A27 只锁纯函数（无 include_str! 结构断言）；A25/A26 只锁纯函数 + 状态语义；C25 只锁字段名。见 findings[0][1][2]。"
+  },
+  "regression_recheck_c8": {
+    "cmd": "cd /tmp/l3b4/repo && CARGO_TARGET_DIR=/tmp/l3b4/target cargo test -p pony-agent-core --test tui_acceptance --test tui_batch1_regression --test tui_batch2_regression --test tui_batch3_regression --test tui_batch4_regression --test tui_batch5_regression --test tui_batch6_virtualization --test tui_enter_key_wave40 --test tui_stop_wave60 --test tui_stop_static_wave60 --test tui_stop_key_feedback --test tui_interaction_acceptance --test tui_token_context_wave41 --test tui_render_layout --test tui_resume_cli --no-fail-fast",
+    "exit": 0,
+    "suites": 15,
+    "tests": 258,
+    "result": "258 passed; 0 failed（与 round3 计数一致，C24–C27 增量未回归静态口径）"
+  },
+  "fake_green_scan": {
+    "placeholder_assertions": "三套 grep `assert!(true` / `todo!` / `unimplemented!` / `#[ignore]`：0 命中；本轮 66 用例（含 tui.rs 内嵌单测）全部真跑。",
+    "test_local_replicas": "A22/A25/A26/A27 均直接调用生产符号（take_next_queued_for_dispatch / requeue_front / queued_dispatch_diverged / orphan_dispatch_payload / queue_dispatch_latch_active），无测试内自建闩或复刻实现；A23/A24 用 include_str! 做源码结构断言。",
+    "residual": "断言面与接线面之间存在缝：W1/W2/M3 全绿（findings[0][1][2]）。"
+  },
+  "known_accepted_not_reblocked": [
+    "TurnSuspended 无全域标记（Lead 已接受）：本轮未重复判 BLOCKING，C17 仅经 A14 透传。",
+    "模态面板期无指标行（Lead 已接受）：C19 PlanMode 面板期同理，只作外延登记。",
+    "C5↔C24 张力（同一终态可能 2 次派发尝试但仅 1 次交付）：contract §5 已登记，本轮不重复判。",
+    "孤儿收割窗口内草稿会丢（state.clear_input，tui.rs:10614）：Lead 已接受；且收割仅在闩过期（≥2s）后触发。"
+  ],
+  "verdict_basis": "C24–C27 逐条有生产落点且全部真接线：C24 883/886/895 + 闸门 10606/10644 + 撤销 9654/9810 + 放弃 10344-10352（全文件无『任意 InputKey 清闩』残留）；C25 10653（深度字段）/9787（key_class）/9733（composer_has_text）；C26 10638（写）+ 10307-10365（比对→回队→清闩→continue，两分支都 continue）；C27 10611 在 10630 取件前收割，六处 payload/deadline 清点对称。两个强制变异 M1/M2 分别令 A25(+A22/A26)、A27 变红，exit 均为 101 ⇒ 无空转。C8 静态口径 15 套 258 用例 exit=0 无回归。本轮无 BLOCKING，4 项 ADVISORY（C27 接线无护栏 / C26 消费点接线无护栏 / C25 key_class 取值无护栏 / requeue_front 可临时越界 1 条）。"
+}

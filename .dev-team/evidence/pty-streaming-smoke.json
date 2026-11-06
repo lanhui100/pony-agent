@@ -1,0 +1,56 @@
+{
+  "ticket": "tui-streaming-input / pty physical evidence",
+  "generated_at": "2026-11-06T07:55+08:00",
+  "method": {
+    "pty": "tmux -L psmoke (dedicated socket) 110x32, pipe-pane -> raw.bin (21412 bytes)",
+    "fake_backend": "python3 ThreadingHTTPServer on 127.0.0.1:18099, POST /v1/chat/completions -> SSE, 14 deltas x 0.6s, total 9.0s",
+    "isolated_home": "/tmp/pty-smoke/home  (config at $HOME/.config/pony-agent/providers.json; NOT .pony-agent/)",
+    "provider_wiring": "providers.json provider id=\"ponyllm\" (TUI default current_provider_id) -> base_url http://127.0.0.1:18099/v1, api_key_value inline",
+    "timing": {
+      "enter_pressed": "07:47:37.977",
+      "first 生成中 detected": "07:47:38.810",
+      "typed hello": "07:47:40.529",
+      "Ctrl+T": "07:47:41.542",
+      "Esc": "07:47:42.255",
+      "server stream start->done": "9.0s (STREAM_START/STREAM_DONE in server stderr)"
+    }
+  },
+  "streaming_state_entered": true,
+  "streaming_state_evidence": "frame 11-streaming contains '⠹ 生成中  1秒' and assistant text '你好，这是' partially rendered; server stderr shows a real POST /v1/chat/completions (body 45700 bytes) whose SSE lasted 9.0s",
+  "checks": {
+    "a_typing_during_streaming": {
+      "verdict": "PASS",
+      "assertion": "input box shows 'hello' while TUI is still in 生成中 state",
+      "evidence": "frame 12-typing: line '› hello' AND line '⠦ 生成中  2秒' co-exist in the SAME captured frame; raw PTY stream contains '› hello' (1 occurrence)",
+      "raw_snippet": "     ping\n\n     你好，这是慢速流式\n   ⠦ 生成中  2秒\n...\n   › hello"
+    },
+    "b_panel_opens_during_streaming": {
+      "verdict": "PASS",
+      "assertion": "Ctrl+T opens Team task board while streaming is in progress",
+      "evidence": "frame 13-board contains 'Team 共享任务看板' box; Ctrl+T at 07:47:41.5 is inside the 9.0s stream window (07:47:38.? - 07:47:47.1); frame 14-after-esc (after closing board) STILL shows '⠦ 生成中  4秒' and keeps '› hello', proving the turn survived and was still streaming around the board",
+      "raw_snippet": "│  Team 共享任务看板                        Tab 折叠/展开 · Esc 退出   │\n│  当前没有任务；Agent 调用 team_task_create 后会实时汇总到这里        │"
+    },
+    "c_queue_semantics": {
+      "verdict": "NOT TESTED",
+      "reason": "out of scope of the 15-minute budget; typing + Ctrl+T only"
+    }
+  },
+  "failures": [],
+  "caveats": [
+    "TUI splash screen is shown at boot; the 就绪 status word did not appear in Ready mode on this build, so the driver sent the first message without a ready-gate and it worked.",
+    "workspace shown in the TUI was /home/dm/pony-agent (cwd), HOME was isolated to /tmp/pty-smoke/home.",
+    "Verdicts are based on captured frames + raw PTY bytes; no human visual inspection was used."
+  ],
+  "evidence_files": [
+    ".dev-team/evidence/pty-streaming-smoke.log",
+    "/tmp/pty-smoke/raw.bin (raw PTY bytes)",
+    "/tmp/pty-smoke/{11-streaming,12-typing,13-board,14-after-esc,15-final}.txt",
+    "/tmp/pty-smoke/fake-server.err",
+    "/tmp/pty-smoke/requests.log",
+    "/tmp/pty-smoke/timeline.txt"
+  ],
+  "verdict": "PASS",
+  "modified_files": [
+    "only .dev-team/evidence/* and /tmp/pty-smoke/*; no source/test files touched"
+  ]
+}

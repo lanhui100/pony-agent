@@ -535,27 +535,41 @@ fn conversation_hierarchy_and_streaming_render() {
     let text = all_text(&buf);
     assert!(text.contains("exactly-once"), "正文粗体渲染丢失");
     assert!(text.contains("fn commit(batch: Batch)"), "代码块渲染丢失");
-    // 原断言为什么错：`你` 角色文本标签已被删除（ADR 0043 §决策 6「角色改由『用户块材质 +
-    // 轨道 + 留白』承担」，并点名 `你` 与 `pony` 字标同类；ADR 0042 亦确立「用材质而非文字
-    // 标签表达角色」）。改为断言用户轮的**块材质**：行首轨道块 `▌` + 整块 SURFACE 底色 ≠ 画布。
+    // 本轮改动（交互修复 #4）：用户轮**不再画行首竖线 `▌`** —— 终端拖选会把竖线带进剪贴板，
+    // 复制出来的正文被脏字符污染。角色改由「RAIL 列留白 + 整块 SURFACE 底色」承担，
+    // 因此断言同步改为：①行内不得出现 `▌`；②正文与其左侧留白同底色且 ≠ 画布（材质连续）。
     let canvas_bg = buf[(0, 2)].bg;
     // 用视口内可见的第二条用户轮做材质断言（首条已被自动贴底滚出视口）。
     let user_row = (0..buf.area.height)
         .find(|y| row_text(&buf, *y).contains("Show me how the retry budget"))
         .expect("用户轮正文未渲染");
     let user_row_text = row_text(&buf, user_row);
-    let bar_col = user_row_text
-        .chars()
-        .position(|c| c == '▌')
-        .expect("用户轮必须以轨道块 ▌ 起头（ADR 0043 角色材质）");
-    let bar_bg = buf[(bar_col as u16, user_row)].bg;
+    assert!(
+        !user_row_text.contains('▌'),
+        "用户轮不得再有行首竖线（复制会带脏字符）: {user_row_text:?}"
+    );
+    let body_col = user_row_text
+        .match_indices("Show me how the retry budget")
+        .next()
+        .map(|(byte_idx, _)| user_row_text[..byte_idx].chars().count())
+        .expect("用户轮正文未渲染");
+    assert!(
+        body_col >= 1,
+        "用户轮正文左侧必须留出轨道列（无竖线也保留留白）: {user_row_text:?}"
+    );
+    let body_bg = buf[(body_col as u16, user_row)].bg;
     assert_ne!(
-        bar_bg, canvas_bg,
+        body_bg, canvas_bg,
         "用户轮必须有区别于画布的块材质（SURFACE 底），实际与画布同底: {user_row_text:?}"
     );
     assert_eq!(
-        buf[(bar_col as u16 + 2, user_row)].bg,
-        bar_bg,
+        buf[(body_col as u16 - 1, user_row)].bg,
+        body_bg,
+        "正文左侧留白必须与正文同块材质（去掉竖线后仍连续），实际 {user_row_text:?}"
+    );
+    assert_eq!(
+        buf[(body_col as u16 + 2, user_row)].bg,
+        body_bg,
         "用户轮正文必须与轨道同一块材质（整块底色连续），实际 {user_row_text:?}"
     );
 

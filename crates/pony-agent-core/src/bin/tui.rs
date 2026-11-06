@@ -24,6 +24,7 @@ use pony_agent_core::agent::control_plane::{
 };
 use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalData};
 // W3：Team 可见性数据源（全部来自真实运行时，不造数据）。
+use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
 use pony_agent_core::agent::orchestration::{
     inbox_pending_len, is_driving, list_agents, team_task_list, teammate_session_id, TeamTaskItem,
     TeammateStatus,
@@ -46,6 +47,13 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame, Terminal,
+};
+// 初始化页品牌标：终端图形协议（sixel / kitty / iTerm2）渲染真实位图；
+// 仅支持 halfblocks 的终端仍走自绘字符画（更清晰，配色与 Canvas 一致）。
+use ratatui_image::{
+    picker::{Picker, ProtocolType},
+    protocol::StatefulProtocol,
+    FilterType, Resize as ImageResize, StatefulImage,
 };
 use std::io::IsTerminal;
 use std::io;
@@ -485,6 +493,12 @@ pub struct ChatMessage {
 
 pub enum UiEvent {
     InputKey(crossterm::event::KeyEvent),
+    /// C21：**合成自动提交**（派发闸门唯一构造点）。
+    ///
+    /// 不用裸 `InputKey(Enter)`：本变体在事件循环里会重新校验「界面此刻是否仍是空闲态」，
+    /// 只有空闲才回灌真正的 Enter；否则放弃本次回灌并保留输入框正文（用户可见、可再按 Enter），
+    /// 杜绝合成 Enter 被中途弹出的模态吃掉（甚至误触发审批同意）。
+    QueuedAutoSubmit,
     InputMouse(crossterm::event::MouseEvent),
     /// 终端尺寸变化（SSH 初次上报晚到 / 用户拉伸窗口）：必须立即整屏重绘，否则保留旧尺寸画面。
     Resized,
@@ -565,6 +579,470 @@ pub fn composer_enter_action(key: &crossterm::event::KeyEvent) -> ComposerEnterA
     }
 }
 
+/// Composer 编辑类快捷键的语义（Ctrl+U / Ctrl+J / Ctrl+W / Ctrl+A / Ctrl+E）。
+///
+/// 这些按键改的是**输入框内容**，不是会话控制，因此在流式期间也必须生效。
+/// 旧实现把整段编辑快捷键放在 `if state.is_streaming { continue; }` 之后，
+/// 于是流式中 Ctrl+U（清空输入框）被静默吞掉。真值源落在这里，主循环与测试共用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerControlAction {
+    /// Ctrl+U：清空整个输入框（无论光标在哪、是否流式中）。
+    ClearInput,
+    /// Ctrl+J：插入换行（与 Shift+Enter 同语义）。
+    InsertNewline,
+    /// Ctrl+W：删除光标前一个词。
+    DeleteWordBackward,
+    /// Ctrl+A：跳到行首。
+    LineHome,
+    /// Ctrl+E：跳到行尾。
+    LineEnd,
+}
+
+pub fn composer_control_action(key: &crossterm::event::KeyEvent) -> Option<ComposerControlAction> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('u') => Some(ComposerControlAction::ClearInput),
+        KeyCode::Char('j') => Some(ComposerControlAction::InsertNewline),
+        KeyCode::Char('w') => Some(ComposerControlAction::DeleteWordBackward),
+        KeyCode::Char('a') => Some(ComposerControlAction::LineHome),
+        KeyCode::Char('e') => Some(ComposerControlAction::LineEnd),
+        _ => None,
+    }
+}
+
+/// 流式期该按键是否应被丢弃：只有**会话控制**类按键要等本轮结束，
+/// 输入框编辑类快捷键不等（回归护栏见 `tests/tui_six_fixes_acceptance.rs`）。
+///
+/// 契约变更（`tui-streaming-input` C1，2026-11-06）：主循环已改由
+/// [`streaming_key_disposition`] 裁决，本函数**保留为公共符号**（契约 §2 要求不删），
+/// 既是既有测试的回归护栏，也是「编辑类快捷键不受流式影响」这一不变量的可测入口。
+#[allow(dead_code)]
+pub fn should_skip_while_streaming(key: &crossterm::event::KeyEvent) -> bool {
+    composer_control_action(key).is_none()
+}
+
+// ── 契约区：流式期输入与排队派发（签名由协议冻结；本区只提供真值实现）──
+//
+// 真值源：`.dev-team/contract-matrix-tui-streaming-input.md` §1 C1–C10 / §2 权威符号表。
+// 口径：`streaming_key_disposition` 是 C1–C4 的唯一按键裁决面；命令串的分类
+// （`is_panel_command` / `is_session_mutating_command`）在主循环里叠加在裁决之上 ——
+// 因为裁决面只拿得到「输入框是否有正文」，拿不到正文本身（冻结签名约束）。
+
+/// C6：排队容量上限（满则拒绝入队并提示，绝不静默丢弃）。
+pub const MAX_QUEUED_MESSAGES: usize = 20;
+
+/// 流式期单键处置裁决（三态互斥）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamingKeyDisposition {
+    /// 照旧走既有按键处理链（输入框编辑、Esc、面板快捷键等）。
+    Forward,
+    /// 不在本轮内派发：把输入正文快照入队，等本轮终态事件后按 FIFO 派发。
+    QueueSubmit,
+    /// 拒绝该键并保持输入框原样（不吞字、不排队）。
+    Reject,
+}
+
+/// C1–C4 纯函数裁决：按键 + 「输入框是否有正文」⇒ 处置。
+///
+/// 口径（与契约 §1 逐条对齐）：
+/// - **Enter**（裸键 / 非 Shift/Alt）＝唯一可能「提交」的键：有正文 ⇒ `QueueSubmit`
+///   （流式中排队，绝不并发 spawn 第二个 turn）；无正文 ⇒ `Reject`（不入队空气泡）。
+/// - **Shift/Alt+Enter** ＝ 换行（编辑动作）⇒ `Forward`。
+/// - 其余按键（可打印字符、Backspace/Delete、方向键、Home/End、Tab 补全、
+///   Ctrl+U/J/W/A/E 编辑快捷键、Ctrl+T/Ctrl+R 面板快捷键、F2/F3、Esc）一律 `Forward`
+///   —— 流式守卫不再吞键（C1/C3）。Esc / Ctrl+C / 面板模态分支在调用点**先于**本裁决生效。
+pub fn streaming_key_disposition(
+    key: &crossterm::event::KeyEvent,
+    composer_has_text: bool,
+) -> StreamingKeyDisposition {
+    if key.code != KeyCode::Enter {
+        return StreamingKeyDisposition::Forward;
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT) {
+        // Shift+Enter / Alt+Enter = 换行（编辑语义，不是提交）。
+        return StreamingKeyDisposition::Forward;
+    }
+    if composer_has_text {
+        StreamingKeyDisposition::QueueSubmit
+    } else {
+        StreamingKeyDisposition::Reject
+    }
+}
+
+/// 排队消息载荷口径（冻结）：**直接复用 `String`**，不另立结构体 ——
+/// 内容即提交时刻的输入正文快照，与 `TuiState::queued_user_messages` 同源。
+pub type QueuedUserMessage = String;
+
+/// C6：入队原语。返回 `false` 表示**拒绝入队**（调用方必须给出提示，不得静默丢弃）。
+///
+/// 拒绝口径：空串/纯空白；斜杠命令串（走 C3/C4 分发，不当作聊天消息排队）；
+/// 已达 `MAX_QUEUED_MESSAGES` 上限（绝不扩容、绝不覆盖既有条目）。
+pub fn push_queued_message(queue: &mut Vec<String>, text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // 命令串不入队：整串命中命令表（`/clear 这个需求怎么拆` 这类带正文的串不算命令，
+    // 与主循环的分发口径 `parse_command_input` 同源，静态下它本来也是当普通消息发出去的）。
+    if parse_command_input(trimmed).is_some() {
+        return false;
+    }
+    // C18①：命令表之外的**历史别名**同样是命令语义，不得当成聊天消息排队
+    //（`/exit` 走退出分支、`/effort` 走 /thinking 面板分支）。
+    if input_is_alias(trimmed, "/exit") || input_is_alias(trimmed, "/effort") {
+        return false;
+    }
+    if queue.len() >= MAX_QUEUED_MESSAGES {
+        return false;
+    }
+    queue.push(trimmed.to_string());
+    true
+}
+
+/// 取走队首一条待派发消息（FIFO）。空队列立即 `None`，不阻塞。
+/// 单飞不变量：同一时刻最多 1 条排队消息在飞（NFR `queue_drain_single_flight`）。
+pub fn drain_next_queued(state: &mut TuiState) -> Option<QueuedUserMessage> {
+    if state.queued_user_messages.is_empty() {
+        return None;
+    }
+    Some(state.queued_user_messages.remove(0))
+}
+
+/// C15：**唯一派发取件点** —— 闸门判定 + 取件收成一个生产符号
+/// （主循环只能经它取件；A7 直接断言本符号，而不是测试内自建的复刻品）。
+///
+/// 三道前哨，任一不过即 `None`（且**不**动队列）：
+/// 1. 输入框非空 ⇒ `None`：绝不覆盖用户草稿，也不覆盖「已回灌但尚未被消费」的上一条派发正文；
+/// 2. [`should_drain_queued`] 五判据不过 ⇒ `None`（单飞 / 空闲 / 非流式 / 无在飞轮次线程）；
+/// 3. 否则 `drain_next_queued`（FIFO、一次 1 条、空队列 `None`）。
+///
+/// 本符号**只取件、不写回**：写回输入框由调用点负责，且必须经
+/// [`composer_buffer_for_dispatch`] 净化（C14 修订裁定：净化口径独立成纯函数，便于机械断言）。
+pub fn take_next_queued_for_dispatch(
+    state: &mut TuiState,
+    is_streaming: bool,
+    ui_idle: bool,
+    turn_in_flight: bool,
+    dispatch_pending: bool,
+) -> Option<QueuedUserMessage> {
+    if !state.input_buffer.trim().is_empty() {
+        return None;
+    }
+    if !should_drain_queued(
+        is_streaming,
+        ui_idle,
+        state.queued_count(),
+        turn_in_flight,
+        dispatch_pending,
+    ) {
+        return None;
+    }
+    drain_next_queued(state)
+}
+
+/// C14：派发正文写回输入框前的**净化缓冲区**（纯函数，契约裁定 2026-11-06）。
+///
+/// 返回「正文 + 一个尾部空格」，**不改正文内容**（不 trim、不转义）——提交路径自己 `trim()`，
+/// 所以发给模型的正文与入队快照逐字一致。尾部空格消除两条「正文永远发不出去」的自救路径：
+/// ① 正文以 `\` 结尾 ⇒ 主循环的「行尾反斜杠 + Enter = 换行」分支会吞掉提交；
+/// ② 正文是 `/hel` 这类命令前缀 ⇒ `matching_commands()` 补全会把 Enter 劫持成另一条命令。
+pub fn composer_buffer_for_dispatch(message: &str) -> String {
+    format!("{message} ")
+}
+
+// ── C19–C23：第三/四轮契约新增纯函数面（全部不依赖运行态，便于机械断言）──
+
+/// C19：PlanMode 面板真正要「吞掉」的按键（Esc / Up / Down）。
+///
+/// 其余按键**不得**被面板分支吞掉：计划面板只是界面提示（不限制工具执行），
+/// 打开时输入框仍应完整可用（旧实现 `_ => {}` + `continue` 让整段输入失效）。
+pub fn plan_mode_consumes_key(key: &crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Esc | KeyCode::Up | KeyCode::Down)
+}
+
+/// C20：流式期 Enter 的**前置动作**（在入队裁决之前判定）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamingEnterPre {
+    /// 行尾 `\` ⇒ 换行（用户显式要换行，不是提交）。
+    Newline,
+    /// 只是命令前缀（如 `/he`）且补全可见 ⇒ 接受补全，不是提交。
+    Complete,
+    /// 其余 ⇒ 交给入队/分发判定。
+    Submit,
+}
+
+/// C20：流式期 Enter 优先级（纯函数）。
+///
+/// 顺序即优先级：
+/// 1. `input` 以 `\` 结尾 ⇒ [`StreamingEnterPre::Newline`]（走原「反斜杠 + Enter = 换行」分支）；
+/// 2. 补全可见 + `/` 开头 + 不是完整命令 ⇒ [`StreamingEnterPre::Complete`]
+///    （否则 `/he`+Enter 会把命令前缀当聊天消息排进队列）；
+/// 3. 其余 ⇒ [`StreamingEnterPre::Submit`]（交给 C2/C3/C4 裁决）。
+pub fn streaming_enter_pre_action(input: &str, completion_visible: bool) -> StreamingEnterPre {
+    if input.ends_with('\\') {
+        return StreamingEnterPre::Newline;
+    }
+    if completion_visible
+        && input.trim_start().starts_with('/')
+        && parse_command_input(input).is_none()
+    {
+        return StreamingEnterPre::Complete;
+    }
+    StreamingEnterPre::Submit
+}
+
+/// C22：队列反馈的语义分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueFeedbackKind {
+    /// C4：会话变更类命令流式期被拒绝。
+    SessionMutating,
+    /// C6：队列已满，本条未排队。
+    QueueFull,
+    /// C2：入队成功。
+    Enqueued,
+}
+
+/// C22：反馈主通道。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueFeedbackChannel {
+    /// 消息区（历史留痕）：静态期经 `messages.push(System)`；流式期改由 `queue_notice` 常驻渲染。
+    SystemMessage,
+    /// 状态行（`status_text`）。
+    StatusText,
+}
+
+/// C22：反馈文案与通道的唯一真值（主循环不再手写文案）。
+///
+/// 通道口径：C4/C6 是「用户操作被拒绝」，必须走消息区（`SystemMessage`）；
+/// C2 是「已受理」的短回执，走状态行（`StatusText`）。
+pub fn queue_feedback(kind: QueueFeedbackKind) -> (QueueFeedbackChannel, String) {
+    match kind {
+        QueueFeedbackKind::SessionMutating => (
+            QueueFeedbackChannel::SystemMessage,
+            "本轮结束后可用 · 流式生成中不切换会话".to_string(),
+        ),
+        QueueFeedbackKind::QueueFull => (
+            QueueFeedbackChannel::SystemMessage,
+            format!(
+                "排队已满（上限 {MAX_QUEUED_MESSAGES} 条）· 本条未排队，请本轮结束后再发送"
+            ),
+        ),
+        QueueFeedbackKind::Enqueued => (
+            QueueFeedbackChannel::StatusText,
+            "已排队 · 本轮结束后自动发送".to_string(),
+        ),
+    }
+}
+
+/// C21：合成自动提交是否可以安全回灌（纯函数）。
+///
+/// 派发闸门用 `UiEvent::QueuedAutoSubmit` 而不是直接注入 `InputKey(Enter)`：
+/// 收到该事件时若界面已进入模态/待作答态，回灌的 Enter 会被面板吃掉
+/// （甚至误触发「同意审批」），故必须重新校验一次。
+pub fn should_reinject_auto_submit(
+    mode_is_modal: bool,
+    has_pending_request: bool,
+    has_ask: bool,
+    has_permission: bool,
+) -> bool {
+    !mode_is_modal && !has_pending_request && !has_ask && !has_permission
+}
+
+/// C23：与 mode / `runtime_mode` **无关**的排队指示行（唯一渲染点真值）。
+///
+/// 为什么必须与运行态无关：`status_word` 在 `RuntimeMode::ExecutingTool(_)` 期整行不渲染，
+/// 若指示器只挂在它上面，「流式 + 工具执行期」就一个渲染点都没有（L3-A 新 BLOCKING）。
+/// 语义：`queued > 0` 或 `notice` 非空 ⇒ **必** `Some`（两个 bool 不参与判定）；
+/// notice 与计数**同时存在时拼接**（notice 在前、计数在后，两者都是用户需要的信息）；
+/// 两者都无 ⇒ `None`。
+pub fn queue_indicator_line(
+    queued: usize,
+    notice: Option<&str>,
+    is_streaming: bool,
+    executing_tool: bool,
+) -> Option<String> {
+    // 两个运行态布尔只用于「语义自证」：本函数对它们**不做任何分支**，
+    // 这正是契约要求的「任何运行态都必须有渲染点」。
+    let _runtime_state = (is_streaming, executing_tool);
+    let notice = notice.map(str::trim).filter(|text| !text.is_empty());
+    let count_label = queued_status_label(queued);
+    match (notice, count_label) {
+        (Some(text), Some(label)) => Some(format!("{text} · {label}")),
+        (Some(text), None) => Some(text.to_string()),
+        (None, Some(label)) => Some(format!("{label} · 本轮结束后自动发送")),
+        (None, None) => None,
+    }
+}
+
+/// C24：单飞闩时间窗（毫秒）——「派发 → 合成 Enter 被消费」的最大允许时延。
+///
+/// 用时间窗而不是「任意 InputKey 清闩」：后者会给「已派发但 Enter 尚未被消费」开单飞缺口
+/// （用户此刻按 Esc/Ctrl+U 会清掉闩与输入框 ⇒ 闸门再派发第二条 ⇒ 两条消息同时进提交路径）。
+pub const QUEUE_DISPATCH_LATCH_MS: u64 = 2_000;
+
+/// C24：单飞闩是否仍「在飞」（活性 = `Some(deadline) && now < deadline`）。
+pub fn queue_dispatch_latch_active(deadline: Option<std::time::Instant>) -> bool {
+    matches!(deadline, Some(deadline) if std::time::Instant::now() < deadline)
+}
+
+/// C24：把一条已取出/已写回的排队消息**回队到队首**（FIFO 复原），杜绝静默丢正文。
+///
+/// 使用场景：① `QueuedAutoSubmit` 校验不通过（界面已进入模态/待作答态）；
+/// ② 闩窗口内用户按静态 Esc / Ctrl+U 显式撤销本次派发。
+/// 长度不变量：调用点总是「刚取走 1 条」或「输入框里那 1 条」，故回队后必然 ≤ `MAX_QUEUED_MESSAGES`。
+pub fn requeue_front(state: &mut TuiState, message: QueuedUserMessage) {
+    if message.trim().is_empty() {
+        return;
+    }
+    state.queued_user_messages.insert(0, message);
+}
+
+/// C26：派发快照与当前输入框是否**已分歧**（纯函数，A25 真值矩阵）。
+///
+/// 语义：`dispatched` 为 `None`（没有在飞派发）⇒ `false`；
+/// 否则 `dispatched.trim() != composer.trim()` ⇒ `true`。
+/// 用途：`QueuedAutoSubmit` 消费点据此判断「用户是否在窗口内改过输入框」——
+/// 分歧时回队**原快照**（而不是此刻的输入框字节），否则 Ctrl+W/Backspace/Delete
+/// 会把已派发正文擦掉且不回队 ⇒ 静默丢正文。
+pub fn queued_dispatch_diverged(dispatched: Option<&str>, composer: &str) -> bool {
+    match dispatched {
+        None => false,
+        Some(payload) => payload.trim() != composer.trim(),
+    }
+}
+
+/// C27：**孤儿载荷收割**（纯函数，A27 真值矩阵）。
+///
+/// 场景：时间窗闩 2s 过期后闸门把「仍有 QAS 在飞」当成空闲，若此刻再派发就会覆盖单槽
+/// `queue_dispatch_payload` ⇒ 前一条在 `remove(0)` 后既未提交也未回队（静默丢正文）。
+/// 语义：闩**已过期**（`!latch_active`）但 payload 仍非空 ⇒ 它是孤儿，返回它（trim 后非空才返回；
+/// 纯空白 ⇒ `None`）；闩仍活跃（QAS 真在飞）或没有 payload ⇒ `None`。
+pub fn orphan_dispatch_payload(payload: Option<&str>, latch_active: bool) -> Option<String> {
+    if latch_active {
+        return None;
+    }
+    let payload = payload?.trim();
+    if payload.is_empty() {
+        return None;
+    }
+    Some(payload.to_string())
+}
+
+/// C25：派发日志的结构化字段（纯函数，A23 直接断言字段名与顺序）。
+pub fn queue_dispatch_fields(
+    before: usize,
+    after: usize,
+) -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("queue_depth_before", serde_json::json!(before)),
+        ("queue_depth_after", serde_json::json!(after)),
+    ]
+}
+
+/// C25：按键的**简化分类**（绝不把用户输入的正文字符写进日志）。
+fn key_class_label(key: &crossterm::event::KeyEvent) -> String {
+    match key.code {
+        KeyCode::Char(_) => "Char".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// 面板类斜杠命令（只读快照类；流式期允许打开，不排队、不拒绝）：
+/// `/agents` `/tasks` `/plan` `/models` `/thinking` `/provider` `/help` `/update`。
+pub fn is_panel_command(command: &str) -> bool {
+    const PANEL_COMMANDS: &[&str] = &[
+        "/agents", "/tasks", "/plan", "/models", "/thinking", "/provider", "/help", "/update",
+    ];
+    let trimmed = command.trim();
+    PANEL_COMMANDS
+        .iter()
+        .any(|cmd| cmd.eq_ignore_ascii_case(trimmed))
+}
+
+/// 会话变更类斜杠命令（会拆掉在飞轮次；流式期拒绝，不得就地执行也不入队）：
+/// `/clear` `/compact` `/resume`。`/quit` `/exit` 不属本类（走原退出分支）。
+pub fn is_session_mutating_command(command: &str) -> bool {
+    const MUTATING_COMMANDS: &[&str] = &["/clear", "/compact", "/resume"];
+    let trimmed = command.trim();
+    MUTATING_COMMANDS
+        .iter()
+        .any(|cmd| cmd.eq_ignore_ascii_case(trimmed))
+}
+
+/// C7：排队数量的可见文案（`count == 0` ⇒ `None`，不渲染）。
+///
+/// 渲染点：`status_word` 把它追加到流式活动行（流式期 `status_notice` 按契约 P-5 让位，
+/// 故排队信息必须走这一条**流式期也可见**的通道）。
+pub fn queued_status_label(count: usize) -> Option<String> {
+    if count == 0 {
+        None
+    } else {
+        Some(format!("排队 {count} 条"))
+    }
+}
+
+/// C10：终态后是否该派发队首（单飞判据，五谓词全部显式入参以便机械断言）。
+///
+/// `turn_in_flight` = **轮次线程存活标志**（`TurnLoopInFlightGuard` 维护），不是「有没有
+/// armed goal」：goal 自动续轮期间 `is_streaming` 不为真，只看 goal 是否存在会让
+/// 「armed 但续轮没在跑」的会话排队永不自动派发（契约 C10 修订，2026-11-06）。
+/// 只有「静态 + 界面空闲 + 队列非空 + 无在飞轮次线程 + 无在飞派发」才放行。
+pub fn should_drain_queued(is_streaming: bool, ui_idle: bool, queued: usize, turn_in_flight: bool, dispatch_pending: bool) -> bool {
+    !is_streaming && ui_idle && queued > 0 && !turn_in_flight && !dispatch_pending
+}
+
+impl TuiState {
+    /// 只读访问器：当前排队消息条数（状态行渲染与测试断言共用）。
+    pub fn queued_count(&self) -> usize {
+        self.queued_user_messages.len()
+    }
+}
+
+/// C17：界面是否真的「空闲」到可以派发排队消息（派发闸门的第 2 判据真值）。
+///
+/// 取景范围（诚实登记，本仓没有单一 `awaiting_answer` 布尔字段，故按现有状态组合）：
+/// 1. `mode ∈ {Normal, PlanMode}`：PlanMode 是非阻塞执行模式开关（第三轮裁定，允许派发）；
+///    其余模态面板（Selecting* / Ask / Permission / TaskBoard / AgentRoster / AddingProvider）
+///    占用时一律不派发；
+/// 2. `pending_request.is_none()`：没有待作答/待审批的宿主请求；
+/// 3. `ask_user_state.is_none()`：Ask 面板没有未答完的问题；
+/// 4. `permission_state.is_none()`：审批面板没有未决选项。
+///
+/// 为什么必须排除「挂起期」：`UiEvent::TurnSuspended` 会把 `is_streaming` 置 false，但该 run
+/// **并未收口**（等用户回答）。此时派发会让新 turn 与挂起的 run 交叠写同一会话历史。
+/// 上述 1–4 覆盖了 TUI 侧全部「等用户输入」的可达状态；若将来引入新的挂起通道，
+/// 必须同步扩展本判据（这是本函数唯一的真实约束）。
+fn is_ui_idle_for_dispatch(state: &TuiState) -> bool {
+    // 第三轮裁定：`PlanMode` 是**非阻塞执行模式开关**（不限制工具执行、不占输入框），
+    // 不是模态对话框 ⇒ 允许派发；其余非 Normal 模式一律排除。
+    matches!(state.mode, InteractionMode::Normal | InteractionMode::PlanMode)
+        && state.pending_request.is_none()
+        && state.ask_user_state.is_none()
+        && state.permission_state.is_none()
+}
+
+/// C21：该模式是否属于**模态对话框**（占用输入框、Enter 语义被面板改写）。
+///
+/// 与 [`is_ui_idle_for_dispatch`] 同源但用途不同：后者判「能否开始派发」，
+/// 本函数判「已发出的合成 Enter 会不会被面板吃掉」。`AddingProvider` 虽然不在派发闸门的
+/// 允许集合里，这里仍算模态（防御「派发途中弹面板」的窗口）。
+fn is_modal_mode(mode: &InteractionMode) -> bool {
+    matches!(
+        mode,
+        InteractionMode::SelectingSession
+            | InteractionMode::SelectingProvider
+            | InteractionMode::SelectingModel
+            | InteractionMode::SelectingReasoningEffort
+            | InteractionMode::AddingProvider
+            | InteractionMode::PermissionApproval
+            | InteractionMode::AskUserQuestion
+            | InteractionMode::TaskBoard
+            | InteractionMode::AgentRoster
+    )
+}
+
 /// wave-40 R2（契约冻结空桩）：终端支持键盘增强时返回要 push 的标志。
 pub fn keyboard_enhancement_flags(supported: bool) -> Option<KeyboardEnhancementFlags> {
     // kitty 协议的 DISAMBIGUATE_ESCAPE_CODES：把 Shift+Enter 与裸 Enter 区分开。
@@ -573,6 +1051,25 @@ pub fn keyboard_enhancement_flags(supported: bool) -> Option<KeyboardEnhancement
     } else {
         None
     }
+}
+
+/// Shift+Enter 换行依赖 kitty 键盘协议的 DISAMBIGUATE 标志。
+///
+/// 旧实现用 `supports_keyboard_enhancement()` 做阻塞式探测（发 `CSI ? u` 等最多 2s 回执）：
+/// 在 tmux、VS Code 内置终端与部分 VTE 上会被误判为 `false`，标志从未 push，于是 Shift+Enter
+/// 被终端降级成裸 Enter（＝发送）。新口径：只要不是 `TERM=dumb` 就无条件 push
+/// （未知 CSI 会被终端静默忽略；push 失败只降级告警，不改变其他行为）。
+pub fn keyboard_enhancement_should_push() -> bool {
+    keyboard_enhancement_should_push_for(std::env::var("TERM").ok().as_deref())
+}
+
+/// [`keyboard_enhancement_should_push`] 的纯函数内核：只有 `TERM` 缺失或为 `dumb` 才放弃 push
+/// （纯函数便于断言，避免测试里改全局环境变量）。
+pub fn keyboard_enhancement_should_push_for(term: Option<&str>) -> bool {
+    !matches!(
+        term.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        "" | "dumb"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1300,6 +1797,11 @@ pub fn ctrl_c_action(is_streaming: bool, has_draft: bool) -> CtrlCAction {
 /// 契约 P-5：一次性状态提示的存活时长（毫秒）。
 pub const STATUS_NOTICE_TTL_MS: u64 = 4_000;
 
+/// C23：队列反馈（`queue_notice`）在指标行的存活时长（毫秒）。
+///
+/// 到期后指示行回落到「排队 N 条 · 本轮结束后自动发送」，避免短时反馈长期顶替队列计数。
+pub const QUEUE_NOTICE_TTL_MS: u64 = 5_000;
+
 /// wave-63 §T3：stopping 期间按键的状态提示文案。
 ///
 /// 必须走 `status_text` / `status_word` 通道（流式期唯一可见的状态位），
@@ -1555,6 +2057,110 @@ impl MouseSelectionState {
     }
 }
 
+/// 鼠标命中 → 选区坐标（`None` = 不在任何可选择区域内）。
+///
+/// 坐标空间统一：正文用 0 起始的绝对渲染行号；输入框用 `INPUT_LINE_BASE + 逻辑行号`。
+pub fn selection_point_at(state: &TuiState, x: u16, y: u16) -> Option<TextCoord> {
+    if let Some(rect) = state.last_input_rect {
+        if x >= rect.x
+            && x < rect.x.saturating_add(rect.width)
+            && y >= rect.y
+            && y < rect.y.saturating_add(rect.height)
+        {
+            let line = INPUT_LINE_BASE + state.last_input_view_start + (y - rect.y) as usize;
+            return Some(TextCoord {
+                line,
+                col: snap_hit_col(state, line, (x - rect.x) as usize),
+            });
+        }
+    }
+    let chat_rect = state.last_chat_rect?;
+    if x >= chat_rect.x
+        && x < chat_rect.x.saturating_add(chat_rect.width)
+        && y >= chat_rect.y
+        && y < chat_rect.y.saturating_add(chat_rect.height)
+    {
+        let line = (y - chat_rect.y) as usize + state.effective_scroll_offset as usize;
+        return Some(TextCoord {
+            line,
+            col: snap_hit_col(state, line, (x - chat_rect.x) as usize),
+        });
+    }
+    None
+}
+
+/// 拖拽时的命中：越出正文矩形后吸附到可视区首/末行与左右边界，保证连续扩选不中断。
+pub fn selection_drag_point(state: &TuiState, x: u16, y: u16) -> Option<TextCoord> {
+    if let Some(coord) = selection_point_at(state, x, y) {
+        return Some(coord);
+    }
+    let chat_rect = state.last_chat_rect?;
+    if chat_rect.width == 0 || chat_rect.height == 0 {
+        return None;
+    }
+    let x_clamped = x
+        .max(chat_rect.x)
+        .min(chat_rect.x.saturating_add(chat_rect.width).saturating_sub(1));
+    let last_row = chat_rect.height.saturating_sub(1) as usize;
+    let row = (y as usize)
+        .saturating_sub(chat_rect.y as usize)
+        .min(last_row);
+    let line = row + state.effective_scroll_offset as usize;
+    Some(TextCoord {
+        line,
+        col: snap_hit_col(state, line, (x_clamped - chat_rect.x) as usize),
+    })
+}
+
+/// 跨区域（正文 ↔ 输入框）选区提取：按坐标行号拆分两段，避免构造百万级空行占位。
+pub fn extract_selection_across(
+    chat_lines: &[String],
+    input_lines: &[String],
+    anchor: TextCoord,
+    head: TextCoord,
+) -> String {
+    let (start, end) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    if start.line >= INPUT_LINE_BASE {
+        let from = TextCoord {
+            line: start.line - INPUT_LINE_BASE,
+            col: start.col,
+        };
+        let to = TextCoord {
+            line: end.line - INPUT_LINE_BASE,
+            col: end.col,
+        };
+        return extract_selected_by_display_cols(input_lines, from, to);
+    }
+    if end.line < INPUT_LINE_BASE {
+        return extract_selected_by_display_cols(chat_lines, start, end);
+    }
+    let chat_tail = extract_selected_by_display_cols(
+        chat_lines,
+        start,
+        TextCoord {
+            line: chat_lines.len().saturating_sub(1),
+            col: usize::MAX,
+        },
+    );
+    let input_part = extract_selected_by_display_cols(
+        input_lines,
+        TextCoord { line: 0, col: 0 },
+        TextCoord {
+            line: end.line - INPUT_LINE_BASE,
+            col: end.col,
+        },
+    );
+    match (chat_tail.is_empty(), input_part.is_empty()) {
+        (true, _) => input_part,
+        (false, true) => chat_tail,
+        (false, false) => format!("{chat_tail}\n{input_part}"),
+    }
+}
+
 /// 将文本编码为 OSC 52 终端剪贴板序列
 pub fn encode_osc52_copy(text: &str) -> String {
     use base64::Engine;
@@ -1631,6 +2237,52 @@ pub fn extract_selected_text(lines: &[String], anchor: TextCoord, head: TextCoor
     }
 }
 
+/// 显示列语义的精确选区提取（鼠标选区的真实路径）。
+///
+/// - `anchor` / `head` 的 `col` 是**终端显示列**（宽字符占 2 列），不是 char 索引；
+/// - 端点语义为「包含该列所在的字符」，拖到宽字符右半格也整字选中；
+/// - 每行右侧的底色填充空格是渲染产物，复制时裁掉，避免粘贴出尾随空白。
+pub fn extract_selected_by_display_cols(
+    lines: &[String],
+    anchor: TextCoord,
+    head: TextCoord,
+) -> String {
+    let (start, end) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    if lines.is_empty() || start.line >= lines.len() {
+        return String::new();
+    }
+    let end_line = end.line.min(lines.len() - 1);
+    let mut out: Vec<String> = Vec::new();
+    for line_idx in start.line..=end_line {
+        let line = &lines[line_idx];
+        let col_from = if line_idx == start.line { start.col } else { 0 };
+        let col_to = if line_idx == end.line {
+            end.col
+        } else {
+            usize::MAX
+        };
+        let mut buf = String::new();
+        let mut display_col = 0usize;
+        for ch in line.chars() {
+            let width = char_width(ch);
+            let ch_start = display_col;
+            let ch_end = display_col + width - 1;
+            display_col += width;
+            if ch_end >= col_from && ch_start <= col_to {
+                buf.push(ch);
+            } else if !buf.is_empty() {
+                break;
+            }
+        }
+        out.push(buf.trim_end().to_string());
+    }
+    out.join("\n")
+}
+
 /// 契约（修订11 步骤2）：布局缓存的逐帧统计。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderCacheStats {
@@ -1664,6 +2316,41 @@ impl Default for RenderCache {
             cache_msg_count: usize::MAX,
             cache_lines: Vec::new(),
             stats: RenderCacheStats::default(),
+        }
+    }
+}
+
+/// 初始化页品牌标（终端图形协议路径）：仅当终端支持 sixel / kitty / iTerm2 时启用。
+/// `protocol` 由 ratatui-image 维护编码状态，窗口尺寸变化时按目标矩形重编码。
+pub struct SplashImage {
+    picker: Picker,
+    protocol: StatefulProtocol,
+    cols: u16,
+    rows: u16,
+}
+
+impl std::fmt::Debug for SplashImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SplashImage")
+            .field("picker", &self.picker)
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for SplashImage {
+    fn clone(&self) -> Self {
+        // 位图与终端参数可重建；StatefulProtocol 的编码缓存不参与克隆（不会写终端）。
+        let picker = self.picker.clone();
+        let protocol = picker.new_resize_protocol(
+            image::load_from_memory(SPLASH_LOGO_PNG).expect("embedded splash logo png"),
+        );
+        Self {
+            picker,
+            protocol,
+            cols: self.cols,
+            rows: self.rows,
         }
     }
 }
@@ -1720,6 +2407,8 @@ pub struct TuiState {
     pub selected_provider_index: usize,
     pub model_list: Vec<ModelItem>,
     pub selected_model_index: usize,
+    /// Ctrl+D 默认模型 / Ctrl+F 优选列表（磁盘持久化，独立于 providers.json 契约）。
+    pub model_preferences: ModelPreferences,
     pub reasoning_effort: Option<ProviderReasoningEffort>,
     pub selected_reasoning_effort_index: usize,
     pub selected_command_index: usize,
@@ -1731,6 +2420,12 @@ pub struct TuiState {
     pub anim_composer_h: Option<u16>,
     /// 最近一次计算的正文渲染区域 chat_rect
     pub last_chat_rect: Option<Rect>,
+    /// 输入框文本区矩形（不含提示符与右侧留白）；鼠标选区据此判断是否落在 Composer 上。
+    pub last_input_rect: Option<Rect>,
+    /// 输入框本帧可视窗口的逻辑起始行（超过可视高度时窗口跟随光标）。
+    pub last_input_view_start: usize,
+    /// 输入框本帧可见行的纯文本快照（行 0 对应 `last_input_view_start`），供选区复制。
+    pub last_input_lines: Vec<String>,
     /// 最近一次实际生效的滚动 offset（用于鼠标点击映射）
     pub effective_scroll_offset: u32,
     /// 最近一次实际渲染的纯文本行列表（与渲染视觉行严格 1:1 对齐）
@@ -1763,6 +2458,17 @@ pub struct TuiState {
     pub agent_roster_state: Option<AgentRosterState>,
     /// W3：进入 teammate 子会话前保存的主会话 id（`r` 返回用；`None` = 当前不在队友会话）。
     pub return_session_id: Option<String>,
+    /// 初始化页品牌标：图形协议可用时以真实位图替换字符画（`None` = 字符画路径）。
+    pub splash_image: Option<SplashImage>,
+    /// 契约（流式期输入）：流式期间提交的消息排队快照（FIFO）；`Vec::new()` = 空队列。
+    /// 元素为提交时刻的输入正文，调度口径见 `drain_next_queued`。
+    pub queued_user_messages: Vec<String>,
+    /// C23：队列反馈的**短时常驻**文案（C2 已入队 / C4 被拒 / C6 队列满）。
+    ///
+    /// 与 `status_notice` 的区别：后者在流式期按契约 P-5 被抑制；本字段由
+    /// [`queue_indicator_line`] 在**每帧都渲染**的指标行输出，故流式期 / 工具执行期同样可见。
+    /// `reset_session_scope` 与 `clear_messages` 必须清空（跨会话不得残留）。
+    pub queue_notice: Option<(String, std::time::Instant)>,
     /// 契约（修订11 步骤2）：按消息粒度的布局缓存（宽度/条数变化或显式失效时重建）。
     render_cache: RenderCache,
 }
@@ -1809,6 +2515,8 @@ impl Default for TuiState {
             selected_provider_index: 0,
             model_list: Vec::new(),
             selected_model_index: 0,
+            // 磁盘偏好由 run_tui 启动时加载并覆盖（Default 不做 IO，保证测试与快照可复现）。
+            model_preferences: ModelPreferences::default(),
             reasoning_effort: None,
             selected_reasoning_effort_index: 0,
             selected_command_index: 0,
@@ -1818,6 +2526,9 @@ impl Default for TuiState {
             turn_started_at: None,
             anim_composer_h: None,
             last_chat_rect: None,
+            last_input_rect: None,
+            last_input_view_start: 0,
+            last_input_lines: Vec::new(),
             effective_scroll_offset: 0,
             rendered_lines_text: Vec::new(),
             permission_state: None,
@@ -1834,6 +2545,9 @@ impl Default for TuiState {
             streaming_turn_id: None,
             agent_roster_state: None,
             return_session_id: None,
+            splash_image: None,
+            queued_user_messages: Vec::new(),
+            queue_notice: None,
             render_cache: RenderCache::default(),
         }
     }
@@ -1960,6 +2674,12 @@ impl TuiState {
         self.selected_model_index = 0;
         self.selected_reasoning_effort_index = 0;
         self.status_notice = None;
+        // C13：会话作用域复位 ⇒ 旧会话的排队消息必须一并清空。
+        // 否则 `/clear` / `/resume` / 队友会话切换（均经本方法 + hydrate）后，上一条会话排的队
+        // 会被自动派发进新会话（跨会话正文污染 + 与新会话 turn 交叠）。
+        self.queued_user_messages.clear();
+        // C23：队列反馈文案同属会话作用域，复位时一并清空（否则「排队已满」会跨会话残留）。
+        self.queue_notice = None;
         // wave-60 §C8/C9：会话作用域复位 ⇒ 停止请求态、当前流式轮与双击上膛一并失效。
         self.stopping_turn_id = None;
         self.streaming_turn_id = None;
@@ -2324,12 +3044,20 @@ impl TuiState {
 
     pub fn open_model_selector(&mut self, list: Vec<ModelItem>) {
         self.model_list = list;
-        self.selected_model_index = 0;
-        self.mode = InteractionMode::SelectingModel;
+        // 每次打开都与磁盘对齐：Ctrl+D / Ctrl+F 之外的外部改动（手改文件、其他实例）也能看到。
+        self.model_preferences = ModelPreferencesStore::new().load();
+        self.selected_model_index = self
+            .model_preferences
+            .default_model
+            .as_ref()
+            .and_then(|id| self.model_list.iter().position(|item| &item.id == id))
+            .unwrap_or(0);
+        // 覆盖层：进入前模式入栈，关闭时按栈恢复（PlanMode 等非 Normal 模式不被静默丢弃）。
+        self.begin_overlay(InteractionMode::SelectingModel);
     }
 
     pub fn cancel_model_selector(&mut self) {
-        self.mode = InteractionMode::Normal;
+        self.end_overlay();
         self.model_list.clear();
     }
 
@@ -2351,7 +3079,8 @@ impl TuiState {
             self.model = m.id.clone();
             self.status_text = format!("Switched model to {}", m.name);
         }
-        self.mode = InteractionMode::Normal;
+        // 覆盖层退出必须按栈恢复（不能硬写 Normal，否则会丢掉 PlanMode）。
+        self.end_overlay();
     }
 
     pub fn reasoning_effort_label(&self) -> &'static str {
@@ -2471,10 +3200,13 @@ impl TuiState {
     }
 
     pub fn toggle_task_board(&mut self) {
+        // 面板是**覆盖层**，不是模式替换：走 `begin_overlay`/`end_overlay` 记录并恢复进入前的模式。
+        // 旧实现直接写 `mode = TaskBoard|Normal` ⇒ 从 PlanMode 打开看板再关闭会静默丢失 PlanMode
+        //（plan_state 残留、界面回 Normal）。
         if self.mode == InteractionMode::TaskBoard {
-            self.mode = InteractionMode::Normal;
+            self.end_overlay();
         } else {
-            self.mode = InteractionMode::TaskBoard;
+            self.begin_overlay(InteractionMode::TaskBoard);
         }
     }
 
@@ -2777,6 +3509,19 @@ impl TuiState {
         self.input_cursor = 0;
     }
 
+    /// 应用 Composer 编辑类快捷键（真值源：[`composer_control_action`]）。
+    ///
+    /// 主循环在**流式守卫之前**调用它，所以这些编辑动作在生成过程中同样生效。
+    pub fn apply_composer_control(&mut self, action: ComposerControlAction) {
+        match action {
+            ComposerControlAction::ClearInput => self.clear_input(),
+            ComposerControlAction::InsertNewline => self.insert_newline(),
+            ComposerControlAction::DeleteWordBackward => self.delete_word_backward(),
+            ComposerControlAction::LineHome => self.cursor_line_home(),
+            ComposerControlAction::LineEnd => self.cursor_line_end(),
+        }
+    }
+
     pub fn add_user_message(&mut self, text: &str) {
         self.messages.push(ChatMessage {
             role: MessageRole::User,
@@ -2825,6 +3570,10 @@ impl TuiState {
         self.messages.clear();
         self.session_id = format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         self.status_text = "Context cleared".to_string();
+        // C13/C23（换 session 的另一个入口）：排队消息与队列反馈同属会话作用域，必须一并清空。
+        // 否则旧会话排的队会被派发进新 session（正文污染 + 与新会话 turn 交叠）。
+        self.queued_user_messages.clear();
+        self.queue_notice = None;
     }
 }
 
@@ -3029,60 +3778,321 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
-/// 彩色 init 头部（严格忠实还原 PonyFun / PonyGo 官方标志性折线双人字形图案）：
-/// 采用 PonyFun 标志性的纯直线几何镜像折角结构（无内旋，干练通透），
-/// 配色方案采用原版主对角线流光渐变（暖橙 → 鲜红 → 洋红紫 → 深靛紫），
-/// 采用「▀」「▄」高精半块字符逐格双色渲染，右侧对齐品牌控制台信息列。
-fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
-    // PonyFun 官方折角结构掩码（20×16）
-    const SHAPE: [&str; 16] = [
-        ".....####...........",
-        "....######..........",
-        "...########.........",
-        "..###..#####........",
-        "..##....####........",
-        ".###.....###........",
-        ".##.......###.......",
-        "###.......####......",
-        "......####.......###",
-        ".......###.......##.",
-        "........###.....###.",
-        "........####....##..",
-        "........#####..###..",
-        ".........########...",
-        "..........######....",
-        "...........####.....",
-    ];
-    // 经典四级主对角线渐变色标：暖橙 → 鲜红 → 洋红紫 → 深靛紫
-    const STOPS: [(f32, u8, u8, u8); 4] = [
-        (0.00, 249, 115, 22),   // Orange 500 (#f97316)
-        (0.33, 239, 68, 68),    // Red 500 (#ef4444)
-        (0.66, 168, 85, 247),   // Purple 500 (#a855f7)
-        (1.00, 79, 70, 229),    // Indigo 600 (#4f46e5)
-    ];
-    const COLS: usize = 20;
-    const ROWS: usize = 16;
+/// sRGB 8bit 分量 → 线性光分量（IEC 61966-2-1 传输函数）。
+fn srgb_channel_to_linear(channel: u8) -> f32 {
+    let v = channel as f32 / 255.0;
+    if v <= 0.040_45 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
 
-    let pixel_color = |x: usize, y: usize| -> ratatui::style::Color {
-        let t = (x as f32 / (COLS - 1).max(1) as f32) * 0.4
-            + (y as f32 / (ROWS - 1).max(1) as f32) * 0.6;
-        let mut lo = STOPS[0];
-        let mut hi = STOPS[STOPS.len() - 1];
-        for pair in STOPS.windows(2) {
-            if t >= pair[0].0 && t <= pair[1].0 {
-                lo = pair[0];
-                hi = pair[1];
-                break;
+/// 线性光分量 → sRGB 8bit 分量（夹取到 [0,255]，越界插值不会写坏终端色）。
+fn linear_channel_to_srgb(value: f32) -> u8 {
+    let v = value.clamp(0.0, 1.0);
+    let encoded = if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// sRGB → OKLab（Björn Ottosson, 2020）：感知均匀空间，插值不经过发灰的暗带。
+fn srgb_to_oklab(rgb: [u8; 3]) -> [f32; 3] {
+    let r = srgb_channel_to_linear(rgb[0]);
+    let g = srgb_channel_to_linear(rgb[1]);
+    let b = srgb_channel_to_linear(rgb[2]);
+    let l = 0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_99 * b;
+    let m = 0.211_903_5 * r + 0.680_699_54 * g + 0.107_396_96 * b;
+    let s = 0.088_302_46 * r + 0.281_718_84 * g + 0.629_978_7 * b;
+    let (l_, m_, s_) = (l.cbrt(), m.cbrt(), s.cbrt());
+    [
+        0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_,
+        1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_,
+        0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_8 * s_,
+    ]
+}
+
+/// OKLab → sRGB（越界分量由 [`linear_channel_to_srgb`] 夹取）。
+fn oklab_to_srgb(lab: [f32; 3]) -> [u8; 3] {
+    let [l, a, b] = lab;
+    let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
+    let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
+    let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
+    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    [
+        linear_channel_to_srgb(4.076_741_7 * l3 - 3.307_711_6 * m3 + 0.230_969_93 * s3),
+        linear_channel_to_srgb(-1.268_438 * l3 + 2.609_757_4 * m3 - 0.341_319_4 * s3),
+        linear_channel_to_srgb(-0.004_196_086_3 * l3 - 0.703_418_6 * m3 + 1.707_614_7 * s3),
+    ]
+}
+
+/// 初始化横幅品牌渐变色标（PonyFun 折角标的流光走向，整体提亮并补入高亮色标）：
+/// 暖金高光 → 亮橙 → 珊瑚红 → 亮玫红 → 亮洋红紫 → 亮紫 → 亮蓝紫 → 靛蓝收尾。
+/// 旧版四级色标（橙 500 → 红 500 → 紫 500 → 靛蓝 600）中段红→紫直插会发灰、发闷；
+/// 这里新增暖金 / 亮玫红 / 亮蓝紫三处亮部，收尾也由 `#4f46e5` 提亮到 `#5b5bf0`。
+const SPLASH_GRADIENT_STOPS: [(f32, [u8; 3]); 8] = [
+    (0.00, [255, 214, 103]), // #ffd667 暖金高光（亮部）
+    (0.12, [255, 165, 65]),  // #ffa541 亮橙
+    (0.28, [255, 104, 83]),  // #ff6853 珊瑚橙红
+    (0.44, [242, 62, 161]),  // #f23ea1 亮玫红（亮部）
+    (0.60, [223, 59, 209]),  // #df3bd1 亮洋红紫
+    (0.76, [182, 103, 255]), // #b667ff 亮紫
+    (0.90, [132, 114, 254]), // #8472fe 亮蓝紫（亮部）
+    (1.00, [91, 91, 240]),   // #5b5bf0 靛蓝收尾（提亮）
+];
+
+/// 主对角线渐变采样：`t` 已归一化到掩码实际覆盖的 [0,1]。
+/// 段内用 smoothstep 缓动 + OKLab 线性插值，色标接缝处一阶连续，不会出现硬色带。
+fn splash_gradient_rgb(t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    let mut idx = 0usize;
+    while idx + 2 < SPLASH_GRADIENT_STOPS.len() && t > SPLASH_GRADIENT_STOPS[idx + 1].0 {
+        idx += 1;
+    }
+    let (t0, c0) = SPLASH_GRADIENT_STOPS[idx];
+    let (t1, c1) = SPLASH_GRADIENT_STOPS[idx + 1];
+    let k = ((t - t0) / (t1 - t0).max(1e-6)).clamp(0.0, 1.0);
+    let k = k * k * (3.0 - 2.0 * k);
+    let a = srgb_to_oklab(c0);
+    let b = srgb_to_oklab(c1);
+    oklab_to_srgb([
+        a[0] + (b[0] - a[0]) * k,
+        a[1] + (b[1] - a[1]) * k,
+        a[2] + (b[2] - a[2]) * k,
+    ])
+}
+
+/// PonyFun 折角标结构掩码（28×22 方形像素）：'#' 为实心像素。
+/// 由原 20×16 掩码双线性上采样到 28×22 后按 0.5 阈值重新取整 —— 分辨率提高 1.4×，
+/// 折角处的 90° 台阶被压成更细的对角线，边缘看起来更顺滑（终端半块字符的物理上限内）。
+const SPLASH_LOGO_SHAPE: [&str; 22] = [
+    ".......######...............",
+    "......#######...............",
+    ".....#########..............",
+    "....###########.............",
+    "...####...######............",
+    "...###.....######...........",
+    "...###......#####...........",
+    "..####.......####...........",
+    ".###..........####..........",
+    ".###..........#####.........",
+    "####..........#####.........",
+    ".........#####..........####",
+    ".........#####..........###.",
+    "..........####..........###.",
+    "...........####.......####..",
+    "...........#####......###...",
+    "...........######.....###...",
+    "............######...####...",
+    ".............###########....",
+    "..............#########.....",
+    "...............#######......",
+    "...............######.......",
+];
+const SPLASH_LOGO_ROWS: usize = SPLASH_LOGO_SHAPE.len();
+const SPLASH_LOGO_COLS: usize = SPLASH_LOGO_SHAPE[0].len();
+// 折角标覆盖的原始对角区间是 [2/19, 17/19]（分母为 20×16 母版四角）：
+// 直接按 0.4x+0.6y 采样会浪费首尾各约 10% 色标，亮部被压在最边缘。
+// 归一化后暖金高光与靛蓝收尾都真实落在图形上。
+const SPLASH_T_MIN: f32 = 2.0 / 19.0;
+const SPLASH_T_SPAN: f32 = 15.0 / 19.0;
+
+/// 折角标坐标 → 归一化对角位置（0 = 暖金高光端，1 = 靛蓝收尾端）。
+fn splash_diagonal_t(x: usize, y: usize) -> f32 {
+    let raw = (x as f32 / (SPLASH_LOGO_COLS - 1).max(1) as f32) * 0.4
+        + (y as f32 / (SPLASH_LOGO_ROWS - 1).max(1) as f32) * 0.6;
+    ((raw - SPLASH_T_MIN) / SPLASH_T_SPAN).clamp(0.0, 1.0)
+}
+
+/// 图形协议品牌标的字符占位（与字符画横幅同尺寸：28 列 × 11 行）。
+const SPLASH_IMAGE_COLS: u16 = SPLASH_LOGO_COLS as u16;
+const SPLASH_IMAGE_ROWS: u16 = (SPLASH_LOGO_ROWS / 2) as u16;
+/// 品牌标位图（由 `scripts/generate-splash-logo.py` 生成，画布底色不透明，
+/// 用以完整覆盖其下方的字符画占位）。
+const SPLASH_LOGO_PNG: &[u8] = include_bytes!("../../assets/splash-logo.png");
+
+/// 初始化页品牌标的图形协议路径：仅在终端支持 sixel / kitty / iTerm2 时构建。
+fn init_splash_image() -> Option<SplashImage> {
+    let mut picker = splash_picker()?;
+    if picker.protocol_type() == ProtocolType::Halfblocks {
+        // halfblocks 即自绘半块字符，字符画版本的边缘与配色更可控，保留现路径。
+        return None;
+    }
+    // 透明像素按画布底色合成，位图矩形与周围 Canvas 无缝衔接。
+    picker.set_background_color(image::Rgba([18, 16, 14, 255]));
+    let image = image::load_from_memory(SPLASH_LOGO_PNG).ok()?;
+    Some(SplashImage {
+        protocol: picker.new_resize_protocol(image),
+        picker,
+        cols: SPLASH_IMAGE_COLS,
+        rows: SPLASH_IMAGE_ROWS,
+    })
+}
+
+fn splash_picker() -> Option<Picker> {
+    // PONY_TUI_SPLASH_IMAGE_PROTOCOL 为测试/手动覆盖入口：
+    // auto（默认）走终端能力探测；kitty/sixel/iterm2 强制协议；off 禁用图形路径。
+    match std::env::var("PONY_TUI_SPLASH_IMAGE_PROTOCOL").as_deref() {
+        Ok("off") | Ok("halfblocks") => None,
+        Ok("kitty") => Some(forced_splash_picker(ProtocolType::Kitty)),
+        Ok("sixel") => Some(forced_splash_picker(ProtocolType::Sixel)),
+        Ok("iterm2") => Some(forced_splash_picker(ProtocolType::Iterm2)),
+        _ => {
+            // 终端复用器内的图形协议直通依赖额外开关（tmux 的 allow-passthrough 等），
+            // 且能力探测会经复用器转发而误判（实测 DA 回包让 picker 选了协议，但图片
+            // 实际不显示 → 品牌标消失）。未显式指定协议时不冒险：回退字符画。
+            // 复用器用户可用 env 强制开启：PONY_TUI_SPLASH_IMAGE_PROTOCOL=kitty|sixel|iterm2
+            if ["TMUX", "STY", "ZELLIJ"]
+                .iter()
+                .any(|key| std::env::var_os(key).is_some())
+            {
+                return None;
+            }
+            let picker = Picker::from_query_stdio().ok()?;
+            if picker.protocol_type() == ProtocolType::Halfblocks {
+                return None;
+            }
+            Some(picker)
+        }
+    }
+}
+
+fn forced_splash_picker(protocol: ProtocolType) -> Picker {
+    // 强制路径没有终端查询结果，用环境变量给出字符格像素尺寸（默认 8×16）。
+    let font_size = std::env::var("PONY_TUI_SPLASH_FONT_PX")
+        .ok()
+        .and_then(|raw| {
+            let (width, height) = raw.split_once('x')?;
+            Some((width.parse().ok()?, height.parse().ok()?))
+        })
+        .unwrap_or((8, 16));
+    let mut picker = Picker::from_fontsize(font_size);
+    picker.set_protocol_type(protocol);
+    picker
+}
+
+#[cfg(test)]
+mod splash_gradient_tests {
+    use super::*;
+
+    fn rgb_at(t: f32) -> [u8; 3] {
+        splash_gradient_rgb(t)
+    }
+
+    #[test]
+    fn splash_logo_mask_shapes_up() {
+        assert_eq!(SPLASH_LOGO_ROWS, 22, "折角标像素网格行数");
+        assert_eq!(SPLASH_LOGO_COLS, 28, "折角标像素网格列数");
+        for (r, row) in SPLASH_LOGO_SHAPE.iter().enumerate() {
+            assert_eq!(row.len(), SPLASH_LOGO_COLS, "第 {r} 行掩码长度不符");
+            assert!(
+                row.bytes().all(|b| b == b'#' || b == b'.'),
+                "第 {r} 行掩码只允许 '#' / '.'"
+            );
+        }
+    }
+
+    #[test]
+    fn splash_logo_asset_decodes_for_image_protocol() {
+        let img = image::load_from_memory(SPLASH_LOGO_PNG).expect("内嵌品牌标必须可解码");
+        assert_eq!((img.width(), img.height()), (616, 484));
+    }
+
+    #[test]
+    fn splash_image_placeholder_matches_banner_grid() {
+        assert_eq!(SPLASH_IMAGE_COLS, SPLASH_LOGO_COLS as u16);
+        assert_eq!(SPLASH_IMAGE_ROWS, (SPLASH_LOGO_ROWS / 2) as u16);
+    }
+
+    #[test]
+    fn splash_gradient_covers_full_logo_diagonal() {
+        // 归一化必须让折角标真实的两个对角极值恰好落在 t=0 / t=1；
+        // 否则首尾亮部色标被裁掉（旧实现浪费约 10%）。
+        let (mut min_t, mut max_t) = (f32::MAX, f32::MIN);
+        for (y, row) in SPLASH_LOGO_SHAPE.iter().enumerate() {
+            for (x, cell) in row.bytes().enumerate() {
+                if cell != b'#' {
+                    continue;
+                }
+                let t = splash_diagonal_t(x, y);
+                min_t = min_t.min(t);
+                max_t = max_t.max(t);
             }
         }
-        let span = (hi.0 - lo.0).max(1e-6);
-        let k = ((t - lo.0) / span).clamp(0.0, 1.0);
-        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * k).round() as u8;
-        ratatui::style::Color::Rgb(mix(lo.1, hi.1), mix(lo.2, hi.2), mix(lo.3, hi.3))
+        assert!(
+            min_t <= 0.01,
+            "折角标最小对角位置应归一化到 0，实际 {min_t}"
+        );
+        assert!(
+            max_t >= 0.99,
+            "折角标最大对角位置应归一化到 1，实际 {max_t}"
+        );
+    }
+
+    #[test]
+    fn splash_gradient_keeps_bright_highlights() {
+        // 「加入亮色」的可验证判据（OKLab 亮度）：起点暖金高光 ≥ 0.85
+        // （旧版橙 #f97316 约 0.70），收尾靛蓝亮度高于旧版 #4f46e5（约 0.51）。
+        assert_eq!(rgb_at(0.0), [255, 214, 103], "起点必须是暖金高光色标");
+        assert_eq!(rgb_at(1.0), [91, 91, 240], "终点必须是提亮后的靛蓝收尾");
+        let start = srgb_to_oklab(rgb_at(0.0));
+        assert!(start[0] >= 0.85, "暖金高光亮度不足: {start:?}");
+        let end = srgb_to_oklab(rgb_at(1.0));
+        assert!(end[0] > 0.53, "靛蓝收尾未提亮: {end:?}");
+        // 全程保持彩度，红→紫中段不塌成发灰暗带。
+        let mut min_chroma = f32::MAX;
+        for step in 0..=128 {
+            let lab = srgb_to_oklab(rgb_at(step as f32 / 128.0));
+            min_chroma = min_chroma.min((lab[1] * lab[1] + lab[2] * lab[2]).sqrt());
+        }
+        assert!(
+            min_chroma >= 0.12,
+            "渐变出现低彩度灰带: min_chroma={min_chroma:.3}"
+        );
+    }
+
+    #[test]
+    fn splash_gradient_steps_are_smooth() {
+        // 1/256 采样下每通道跳变 ≤ 6/255：16 行画布逐行过渡，不出现硬色带。
+        let mut prev = rgb_at(0.0);
+        for step in 1..=256 {
+            let t = step as f32 / 256.0;
+            let cur = rgb_at(t);
+            for (channel, (a, b)) in prev.iter().zip(cur.iter()).enumerate() {
+                let delta = (*a as i32 - *b as i32).abs();
+                assert!(
+                    delta <= 6,
+                    "t={t:.4} 通道 {channel} 跳变 {delta}: {prev:?} -> {cur:?}"
+                );
+            }
+            prev = cur;
+        }
+    }
+}
+
+/// 彩色 init 头部（严格忠实还原 PonyFun / PonyGo 官方标志性折线双人字形图案）：
+/// 采用 PonyFun 标志性的纯直线几何镜像折角结构（无内旋，干练通透），
+/// 配色沿用原版主对角线流光走向（暖金 → 亮橙 → 珊瑚红 → 亮玫红 → 亮洋红紫
+/// → 亮紫 → 亮蓝紫 → 靛蓝），并在 OKLab 空间插值保证过渡平滑；
+/// 折角标以 28×22 方形像素网格渲染（分辨率较原 20×16 提高 1.4×），
+/// 再用「▀」「▄」半块字符逐格双色落到字符网格上，右侧对齐品牌控制台信息列。
+/// `draw_logo = false` 时只保留占位空白（由图形协议位图覆盖该矩形）。
+fn pony_banner_lines(state: &TuiState, draw_logo: bool) -> Vec<Line<'static>> {
+    // 渐变按折角标的归一化主对角线取样（见 `splash_diagonal_t` / `SPLASH_GRADIENT_STOPS`）。
+    let pixel_color = |x: usize, y: usize| -> ratatui::style::Color {
+        let rgb = splash_gradient_rgb(splash_diagonal_t(x, y));
+        ratatui::style::Color::Rgb(rgb[0], rgb[1], rgb[2])
     };
 
     let filled = |row: usize, col: usize| -> bool {
-        SHAPE[row].as_bytes().get(col).map(|c| *c == b'#').unwrap_or(false)
+        SPLASH_LOGO_SHAPE[row]
+            .as_bytes()
+            .get(col)
+            .map(|c| *c == b'#')
+            .unwrap_or(false)
     };
 
     let info = [
@@ -3116,29 +4126,35 @@ fn pony_banner_lines(state: &TuiState) -> Vec<Line<'static>> {
     ];
 
     let mut out: Vec<Line<'static>> = Vec::new();
-    for line in 0..(ROWS / 2) {
+    // 信息列垂直居中于折角标的字符行（3 行信息）。
+    let info_top = (SPLASH_LOGO_ROWS / 2).saturating_sub(info.len()) / 2;
+    for line in 0..(SPLASH_LOGO_ROWS / 2) {
         let (top, bottom) = (line * 2, line * 2 + 1);
         let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
-        for x in 0..COLS {
-            match (filled(top, x), filled(bottom, x)) {
-                (true, true) => {
-                    let up = pixel_color(x, top);
-                    let down = pixel_color(x, bottom);
-                    spans.push(Span::styled("▀", Style::default().fg(up).bg(down)));
+        if draw_logo {
+            for x in 0..SPLASH_LOGO_COLS {
+                match (filled(top, x), filled(bottom, x)) {
+                    (true, true) => {
+                        let up = pixel_color(x, top);
+                        let down = pixel_color(x, bottom);
+                        spans.push(Span::styled("▀", Style::default().fg(up).bg(down)));
+                    }
+                    (true, false) => spans.push(Span::styled(
+                        "▀",
+                        Style::default().fg(pixel_color(x, top)),
+                    )),
+                    (false, true) => spans.push(Span::styled(
+                        "▄",
+                        Style::default().fg(pixel_color(x, bottom)),
+                    )),
+                    (false, false) => spans.push(Span::raw(" ")),
                 }
-                (true, false) => spans.push(Span::styled(
-                    "▀",
-                    Style::default().fg(pixel_color(x, top)),
-                )),
-                (false, true) => spans.push(Span::styled(
-                    "▄",
-                    Style::default().fg(pixel_color(x, bottom)),
-                )),
-                (false, false) => spans.push(Span::raw(" ")),
             }
+        } else {
+            // 图形协议路径：品牌标矩形由位图覆盖，这里只铺占位空白保持信息列对齐。
+            spans.push(Span::raw(" ".repeat(SPLASH_LOGO_COLS)));
         }
-        // 信息列垂直居中于 8 行标识（占第 3~5 行）。
-        if let Some(info_line) = line.checked_sub(2).and_then(|i| info.get(i)) {
+        if let Some(info_line) = line.checked_sub(info_top).and_then(|i| info.get(i)) {
             spans.push(Span::raw("    "));
             spans.extend(info_line.spans.clone());
         }
@@ -3251,6 +4267,45 @@ impl TuiTurnSinkGuard {
 impl Drop for TuiTurnSinkGuard {
     fn drop(&mut self) {
         self.control_plane.unregister_turn_event_sink(&self.turn_id);
+    }
+}
+
+/// C11：从 `catch_unwind` 的负载里取出可读原因（`&str` / `String` / 未知名）。
+///
+/// panic 是终态的一种：文案只给一句摘要，原始 panic 栈仍走 stderr → 运行日志。
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "未知 panic 负载".to_string()
+    }
+}
+
+/// C10：轮次线程存活标志的 RAII 守卫（派发闸门的第 4 判据的真值）。
+///
+/// 契约修订（2026-11-06 Lead）：判据是「**本会话是否真有一个轮次线程活着**」，
+/// 不是「有没有 armed goal」——goal armed 但续轮没在跑时，只看 goal 存在会让排队消息
+/// 永不自动派发（用户感知为卡住）。
+///
+/// 不变量：`Drop` 在**正常返回与 panic 展开**两条路径上都会执行 ⇒ 标志绝不会永真
+/// （与 C11 的轮次线程 panic 兜底同一条不变量）。
+struct TurnLoopInFlightGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl TurnLoopInFlightGuard {
+    /// 进入轮次线程即刻置位；返回的 guard 生命周期 = 线程体（含 goal 续轮循环）生命周期。
+    fn enter(flag: Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self { flag }
+    }
+}
+
+impl Drop for TurnLoopInFlightGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
     }
 }
 
@@ -3622,7 +4677,6 @@ const GLYPH_RUNNING: &str = "◦";
 const GLYPH_DONE: &str = "✓";
 const GLYPH_FAIL: &str = "✕";
 const CARET: &str = "▏";
-const USER_BAR: &str = "▌";
 
 fn ink() -> Style {
     Style::default().fg(theme::INK)
@@ -3667,7 +4721,7 @@ fn char_width(c: char) -> usize {
     }
 }
 
-fn str_width(text: &str) -> usize {
+pub fn str_width(text: &str) -> usize {
     text.chars().map(char_width).sum()
 }
 
@@ -4027,20 +5081,15 @@ fn push_code_band_line(lines: &mut Vec<Line<'static>>, body: Line<'static>, widt
 /// 用户消息：低对比表面块 + 左侧骨色竖条。用「材质」而不是文字标签区分角色。
 /// 块内含 1 行上/下呼吸留白，正文回到与助手/工具相同的文本列。
 fn push_user_block(lines: &mut Vec<Line<'static>>, content: &str, width: usize) {
+    // 用户轮**不再画左侧竖线**：竖线会被终端选中复制带走，粘到剪贴板里污染正文。
+    // 仍然用 `RAIL` 列缩进 + SURFACE 底色区分角色，复制出来的就是纯正文。
     let bg = theme::SURFACE;
-    let bar_style = Style::default().fg(theme::ACCENT_DIM).bg(bg);
     let fill_style = Style::default().bg(bg);
+    let gutter = || Span::styled(" ".repeat(RAIL), fill_style);
     let body_w = width.saturating_sub(RAIL + 1).max(1);
 
     let block_pad = |lines: &mut Vec<Line<'static>>| {
-        lines.push(pad_line_with_bg(
-            Line::from(vec![
-                Span::styled(USER_BAR, bar_style),
-                Span::styled(" ", fill_style),
-            ]),
-            width,
-            bg,
-        ));
+        lines.push(pad_line_with_bg(Line::from(vec![gutter()]), width, bg));
     };
 
     block_pad(lines);
@@ -4051,10 +5100,7 @@ fn push_user_block(lines: &mut Vec<Line<'static>>, content: &str, width: usize) 
             Style::default().fg(theme::INK_SOFT).bg(bg),
         ));
         for wrapped in wrap_line(&body, body_w) {
-            let mut spans = vec![
-                Span::styled(USER_BAR, bar_style),
-                Span::styled(" ", fill_style),
-            ];
+            let mut spans = vec![gutter()];
             spans.extend(
                 wrapped
                     .spans
@@ -4066,10 +5112,7 @@ fn push_user_block(lines: &mut Vec<Line<'static>>, content: &str, width: usize) 
         }
     }
     if !wrote_body {
-        let mut spans = vec![
-            Span::styled(USER_BAR, bar_style),
-            Span::styled(" ", fill_style),
-        ];
+        let mut spans = vec![gutter()];
         spans.push(Span::styled(String::new(), Style::default().bg(bg)));
         lines.push(pad_line_with_bg(Line::from(spans), width, bg));
     }
@@ -4348,6 +5391,21 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             .clamp(0.0, 100.0);
         segments.push(format!("上下文 {pct:.0}%"));
     }
+    // C7/C18③/C23：排队指示器**唯一渲染点**就是本指标行（每帧都渲染，与 `mode`/`runtime_mode`
+    // 无关），故 `status_word` 不再重复输出。`queue_indicator_line` 保证流式期 / 工具执行期
+    // 都有输出；宽度受限时按 34 列截断，避免挤掉左侧 workspace 标签。
+    if let Some(indicator) = queue_indicator_line(
+        state.queued_count(),
+        state
+            .queue_notice
+            .as_ref()
+            .filter(|(_, at)| at.elapsed().as_millis() as u64 <= QUEUE_NOTICE_TTL_MS)
+            .map(|(text, _)| text.as_str()),
+        state.is_streaming,
+        matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)),
+    ) {
+        segments.push(truncate_width(&indicator, 34));
+    }
     // 契约 P-5 / F-N：一次性提示（非流式 + TTL 内）与非流式的计划模式横幅占左侧，
     // 数值指标仍在右侧；两者都没有时走既有布局（workspace 左 + 指标右）。
     let transient_left: Option<(String, Style)> = state
@@ -4478,6 +5536,86 @@ fn pad_display(text: &str, width: usize) -> String {
 }
 
 /// 列表行：左侧 emphasis 竖条 + 主文本 + 右侧次要信息；选中行用极淡底色铺满整行。
+/// 模型显示名：名称缺失或与 id 相同则回落到 id。
+fn model_display_name(item: &ModelItem) -> String {
+    if item.name.trim().is_empty() || item.name == item.id {
+        item.id.clone()
+    } else {
+        item.name.clone()
+    }
+}
+
+/// 行右侧徽标：默认（Ctrl+D）/ 优选（Ctrl+F）/ 当前（正在使用），可叠加。
+fn model_badges(state: &TuiState, item: &ModelItem) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if state.model_preferences.default_model.as_deref() == Some(item.id.as_str()) {
+        parts.push("默认");
+    }
+    if state.model_preferences.is_preferred(&item.id) {
+        parts.push("优选");
+    }
+    if item.id == state.model {
+        parts.push("当前");
+    }
+    parts.join(" · ")
+}
+
+/// 「优选」栏条目：按当前 provider 的模型顺序过滤已优选 id（保持稳定顺序便于对位）。
+fn model_preferred_items(state: &TuiState) -> Vec<ModelItem> {
+    state
+        .model_list
+        .iter()
+        .filter(|item| state.model_preferences.is_preferred(&item.id))
+        .cloned()
+        .collect()
+}
+
+/// 模型面板的 Ctrl+D（设默认）/ Ctrl+F（切换优选）：写盘 + 同步到 `state`。
+///
+/// 抽成函数（store 由调用方注入）是为了让「快捷键 → 持久化 → 面板状态」这条链路
+/// 能被测试直接驱动，而不是只能靠手敲终端验证。
+pub fn apply_model_panel_shortcut(
+    state: &mut TuiState,
+    key: &crossterm::event::KeyEvent,
+    store: &ModelPreferencesStore,
+) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    let is_set_default = key.code == KeyCode::Char('d');
+    let is_toggle_preferred = key.code == KeyCode::Char('f');
+    if !is_set_default && !is_toggle_preferred {
+        return false;
+    }
+    // 列表为空时仍然消费该按键，避免掉进通用分支产生意外输入。
+    let Some(item) = state.model_list.get(state.selected_model_index).cloned() else {
+        return true;
+    };
+    if is_set_default {
+        match store.set_default_model(&item.id) {
+            Ok(prefs) => {
+                state.model_preferences = prefs;
+                state.model = item.id.clone();
+                state.status_text = format!("默认模型已设为 {}", model_display_name(&item));
+            }
+            Err(error) => state.status_text = format!("保存默认模型失败：{error}"),
+        }
+        return true;
+    }
+    match store.toggle_preferred(&item.id) {
+        Ok((prefs, now_preferred)) => {
+            state.model_preferences = prefs;
+            state.status_text = if now_preferred {
+                format!("已加入优选：{}", model_display_name(&item))
+            } else {
+                format!("已移出优选：{}", model_display_name(&item))
+            };
+        }
+        Err(error) => state.status_text = format!("保存优选出错：{error}"),
+    }
+    true
+}
+
 fn list_row(selected: bool, left: &str, right: &str, width: usize) -> Line<'static> {
     let bg = if selected {
         theme::SURFACE_SEL
@@ -4532,8 +5670,14 @@ fn fill(f: &mut Frame, area: Rect, color: ratatui::style::Color) {
     f.render_widget(Block::default().style(Style::default().bg(color)), area);
 }
 
+/// 输入框行在鼠标选区坐标空间中的行号基址。
+///
+/// 正文（chat）用 0 起始的绝对渲染行号；输入框行用 `INPUT_LINE_BASE + 逻辑行号`，
+/// 二者共享同一个 `TextCoord` 空间，复制时按基址拆分，避免拼接出百万级空行。
+pub const INPUT_LINE_BASE: usize = 1_000_000;
+
 /// 渲染带光标的多行输入区（⌘ 提示符 + 软折行 + 细竖线光标）。
-fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
+fn render_input(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let chars: Vec<char> = state.input_buffer.chars().collect();
     let cursor = state.input_cursor.min(chars.len());
     // 提示符 2 列 + 右侧 1 列呼吸留白：正文永不贴边。
@@ -4553,6 +5697,19 @@ fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
     } else {
         0
     };
+
+    // 鼠标选区快照：文本区矩形（提示符 2 列 + 右侧 1 列留白之外）、可视首行、全部逻辑行文本。
+    state.last_input_rect = Some(Rect {
+        x: area.x.saturating_add(2),
+        y: area.y,
+        width: area.width.saturating_sub(3).max(1),
+        height: (visible.min(ranges.len()).max(1)) as u16,
+    });
+    state.last_input_view_start = start_line;
+    state.last_input_lines = ranges
+        .iter()
+        .map(|(s, e)| chars[*s..*e].iter().collect::<String>())
+        .collect();
     let end_line = (start_line + visible).min(ranges.len());
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -4622,6 +5779,11 @@ fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
         lines.push(Line::from(spans));
     }
 
+    // 输入框文本同样支持鼠标选区高亮：行号映射到 `INPUT_LINE_BASE + 逻辑行号`。
+    let selection_range = state.mouse_selection.normalized_range();
+    let input_first_line = INPUT_LINE_BASE + start_line;
+    apply_selection_highlight(&mut lines, input_first_line, selection_range);
+
     let widget = Paragraph::new(lines).style(Style::default().bg(theme::SURFACE));
     f.render_widget(widget, area);
 }
@@ -4663,7 +5825,16 @@ fn compact_status(st: &str) -> String {
 }
 
 /// 底部状态词：克制到只有一个短语（耗时与动画只在正文活动行出现一次）。
+///
+/// C7（`tui-streaming-input`）：队列非空时把「排队 N 条」追加在同一行 —— 流式期的
+/// `status_notice` 按契约 P-5 让位给进度短语，故排队可见性必须走这条**流式期也渲染**的通道。
 fn status_word(state: &TuiState) -> (String, Style) {
+    // C23：排队/反馈指示器统一由 `metrics_line` 经 `queue_indicator_line` 渲染
+    //（流式 + 工具执行期 `status_word` 整行不渲染，挂在这里会出现「零渲染点」）。
+    status_word_base(state)
+}
+
+fn status_word_base(state: &TuiState) -> (String, Style) {
     // wave-60 §C9：停止请求受理后，**流式行**优先呈现「正在停止…」（终态未到前不得伪造）。
     // 走本通道而非 `status_notice`：后者被 `should_render_status_notice` 在流式期抑制（P-5 契约）。
     if state.stopping_turn_id.is_some() {
@@ -4929,7 +6100,7 @@ fn collect_window_lines(
     out
 }
 
-/// 鼠标选区高亮：选区用**绝对行号**表达，窗口可能只是全量行的一段，故需要 `first_line` 偏移。
+/// 鼠标选区高亮：选区用**绝对行号 + 显示列**表达，窗口可能只是全量行的一段，故需要 `first_line` 偏移。
 fn apply_selection_highlight(
     lines: &mut [Line<'static>],
     first_line: usize,
@@ -4947,21 +6118,26 @@ fn apply_selection_highlight(
         let Some(old_line) = lines.get(local_idx) else {
             continue;
         };
+        // 本行参与的显示列窗口（起行取 start.col，止行取 end.col，中间行全选）。
+        let col_from = if line_idx == start.line { start.col } else { 0 };
+        let col_to = if line_idx == end.line {
+            end.col
+        } else {
+            usize::MAX
+        };
         let mut new_spans: Vec<Span<'static>> = Vec::new();
-        let mut current_col = 0usize;
+        let mut display_col = 0usize;
         for span in &old_line.spans {
             let base_style = span.style;
             let mut segment = String::new();
             let mut in_sel = false;
             for ch in span.content.chars() {
-                let is_sel = is_coord_selected(
-                    TextCoord {
-                        line: line_idx,
-                        col: current_col,
-                    },
-                    start,
-                    end,
-                );
+                // 宽字符占 2 列：旧实现每 char 只 +1 列，导致中文/emoji 行选区整体左漂。
+                let width = char_width(ch);
+                let ch_start = display_col;
+                let ch_end = display_col + width - 1;
+                display_col += width;
+                let is_sel = ch_end >= col_from && ch_start <= col_to;
                 if segment.is_empty() {
                     in_sel = is_sel;
                     segment.push(ch);
@@ -4977,7 +6153,6 @@ fn apply_selection_highlight(
                     in_sel = is_sel;
                     segment.push(ch);
                 }
-                current_col += 1;
             }
             if !segment.is_empty() {
                 let style = if in_sel {
@@ -4989,6 +6164,58 @@ fn apply_selection_highlight(
             }
         }
         lines[local_idx] = Line::from(new_spans);
+    }
+}
+
+/// 把「鼠标命中的显示列」吸附到所在字形的起始列。
+///
+/// 宽字符（CJK / emoji）占 2 个显示列，点在右半格时命中的列落在字形中间：
+/// 若直接用该列做选区端点，`起 < 字形起点`、`止 > 字形起点`，高亮与复制的边界
+/// 就会各说各话（复制会带上半个字的判定、续选会从字中间开始）。吸附后：
+/// 同一个字形内的任意列都归约到该字起点，行尾之后归约到行宽（允许延伸选到行尾）。
+pub fn snap_col_to_glyph_start(text: &str, col: usize) -> usize {
+    let mut display = 0usize;
+    for ch in text.chars() {
+        let width = char_width(ch).max(1);
+        if col < display + width {
+            return display;
+        }
+        display += width;
+    }
+    display
+}
+
+/// 正文绝对渲染行的纯文本（与 `rendered_lines_text` 同源，但按需只拼一行，
+/// 避免为一次点击重建全量文本）。缓存未就绪时返回 `None`，调用方回退到原始列。
+fn chat_line_plain_text(state: &TuiState, abs_line: usize) -> Option<String> {
+    let mut offset = 0usize;
+    for block in &state.render_cache.cache_lines {
+        if abs_line < offset + block.len() {
+            let line = block.get(abs_line - offset)?;
+            return Some(
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>(),
+            );
+        }
+        offset += block.len();
+    }
+    None
+}
+
+/// 命中列 → 选区列：正文行与输入框行都按「字形起点」归约（宽字符整字语义）。
+fn snap_hit_col(state: &TuiState, line: usize, raw_col: usize) -> usize {
+    if line >= INPUT_LINE_BASE {
+        state
+            .last_input_lines
+            .get(line - INPUT_LINE_BASE)
+            .map(|text| snap_col_to_glyph_start(text, raw_col))
+            .unwrap_or(raw_col)
+    } else {
+        chat_line_plain_text(state, line)
+            .map(|text| snap_col_to_glyph_start(&text, raw_col))
+            .unwrap_or(raw_col)
     }
 }
 
@@ -5133,12 +6360,29 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     // 契约 F-I：命令匹配每帧只算一次（空态引导 / 斜杠菜单 / 补全共用同一结果）。
     let frame_matching_commands = state.matching_commands();
 
+    // 图形协议品牌标在正文中的起始行（渲染位图用；`None` = 字符画路径）。
+    let mut splash_banner_line: Option<usize> = None;
     if state.messages.is_empty() {
         let mut splash: Vec<Line<'static>> = Vec::new();
-        // 短终端不硬塞品牌画：优先保证「一句话 + 命令入口」完整可见。
-        if chat_h as usize >= 20 {
+        // 短终端不硬塞品牌画：优先保证「一句话 + 命令入口」完整可见，且底部至少留 1 行呼吸。
+        // 当前构图 = 1 空行 + 折角标 11 行 + 1 空行 + 一句定位语 + 1 空行 + 引导块 8 行 = 23 行，
+        // 故正文区高度必须 ≥ 24 才放品牌画（=23 时引导块会顶到正文区最后一行，紧贴输入带）。
+        let show_banner = chat_h as usize >= 24;
+        let mut banner_draw_logo = true;
+        if show_banner {
+            // 图形协议路径要求横幅行不因换行而错位；行宽与是否绘制像素无关
+            // （两者都是 28 列占位），先按占位版量宽，再决定最终用位图还是字符画。
+            let placeholder = pony_banner_lines(state, false);
+            let banner_fits = placeholder.iter().all(|line| line.width() <= width);
+            let use_image = state.splash_image.is_some() && banner_fits;
+            banner_draw_logo = !use_image;
+            let banner_lines = if use_image {
+                placeholder
+            } else {
+                pony_banner_lines(state, true)
+            };
             splash.push(blank());
-            splash.extend(pony_banner_lines(state));
+            splash.extend(banner_lines);
             splash.push(blank());
         }
         splash.push(Line::from(Span::styled(
@@ -5153,6 +6397,10 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         let top_pad = (chat_h as usize).saturating_sub(splash.len()) / 3;
         for _ in 0..top_pad {
             body_lines.push(blank());
+        }
+        // splash[0] 是品牌画上方的留白行，位图从下一行开始铺。
+        if show_banner && !banner_draw_logo {
+            splash_banner_line = Some(top_pad + 1);
         }
         for line in splash {
             push_wrapped(&mut body_lines, line, width);
@@ -5270,17 +6518,39 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         (window, 0u16, window_start)
     };
     // 鼠标选区高亮：绝对行号 → 当前窗口行号（窗口只是全量行的一段）。
-    apply_selection_highlight(
-        &mut render_lines,
-        first_line_index,
-        state.mouse_selection.normalized_range(),
-    );
+    let selection_range = state.mouse_selection.normalized_range();
+    apply_selection_highlight(&mut render_lines, first_line_index, selection_range);
     f.render_widget(
         Paragraph::new(render_lines)
             .style(Style::default().bg(theme::CANVAS))
             .scroll((render_scroll, 0)),
         chat_rect,
     );
+
+    // 图形协议品牌标：铺在字符画占位矩形上（位图画布底色不透明，可完整覆盖占位）。
+    if let Some(banner_line) = splash_banner_line {
+        let scroll = state.effective_scroll_offset as i32;
+        let chat_top = chat_rect.y as i32;
+        let chat_bottom = chat_top + chat_rect.height as i32;
+        let top = chat_top + banner_line as i32 - scroll;
+        if let Some(image) = state.splash_image.as_mut() {
+            if top >= chat_top && top < chat_bottom {
+                let height = image.rows.min((chat_bottom - top) as u16);
+                let width = image.cols.min(chat_rect.width.saturating_sub(1));
+                if width > 0 && height > 0 {
+                    let image_rect = Rect {
+                        x: chat_rect.x + 1,
+                        y: top as u16,
+                        width,
+                        height,
+                    };
+                    let widget = StatefulImage::new()
+                        .resize(ImageResize::Fit(Some(FilterType::Lanczos3)));
+                    f.render_stateful_widget(widget, image_rect, &mut image.protocol);
+                }
+            }
+        }
+    }
 
     // 其他浮层仍先清场；Ask 仅覆盖自身矩形，未遮挡的历史消息保持原样。
     if state.mode != InteractionMode::Normal && state.mode != InteractionMode::AskUserQuestion {
@@ -5560,14 +6830,44 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             .min(total.saturating_sub(1));
         let (start, end) = panel_window(total, selected, shown);
         let title = if total > shown {
-            format!("模型 · {}/{}", selected + 1, total)
+            format!(
+                "模型 · {}/{} · 优选 {}",
+                selected + 1,
+                total,
+                state.model_preferences.preferred.len()
+            )
         } else {
-            "模型".to_string()
+            format!("模型 · 优选 {}", state.model_preferences.preferred.len())
         };
-        let rect = panel_rect(84, shown as u16 + 4);
-        let body = draw_panel(f, rect, &title, "↑↓ 选择 · ↵ 确认 · r 刷新 · esc 取消");
+        // Ctrl+F 优选项整体前置于列表之上：跨 provider 的快捷集合，且不改变键盘导航索引空间
+        //（↑↓ 仍遍历完整列表，避免同一模型在两个栏位重复出现导致选中映射错乱）。
+        let preferred_items = model_preferred_items(&state);
+        let pref_rows = if preferred_items.is_empty() {
+            0
+        } else {
+            preferred_items.len() + 2
+        };
+        let rect = panel_rect(84, (shown + pref_rows) as u16 + 4);
+        let body = draw_panel(
+            f,
+            rect,
+            &title,
+            "↑↓ 选择 · ↵ 确认 · ⌃D 设默认 · ⌃F 优选 · r 刷新 · esc 取消",
+        );
         let inner_w = body.width as usize;
         let mut lines_out: Vec<Line<'static>> = Vec::new();
+        if !preferred_items.is_empty() {
+            lines_out.push(Line::from(Span::styled(" 优选", faint())));
+            for item in &preferred_items {
+                lines_out.push(list_row(
+                    false,
+                    &model_display_name(item),
+                    &model_badges(&state, item),
+                    inner_w,
+                ));
+            }
+            lines_out.push(Line::from(Span::styled(" 全部模型", faint())));
+        }
         if state.model_list.is_empty() {
             lines_out.push(Line::from(Span::styled(
                 "  当前提供商没有可用模型",
@@ -5576,14 +6876,13 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         } else {
             for (idx, item) in state.model_list.iter().enumerate().take(end).skip(start) {
                 let selected_row = idx == selected;
-                let active = item.id == state.model;
-                let display = if item.name.trim().is_empty() || item.name == item.id {
-                    item.id.clone()
-                } else {
-                    item.name.clone()
-                };
-                let right = if active { "当前".to_string() } else { String::new() };
-                lines_out.push(list_row(selected_row, &display, &right, inner_w));
+                let right = model_badges(&state, item);
+                lines_out.push(list_row(
+                    selected_row,
+                    &model_display_name(item),
+                    &right,
+                    inner_w,
+                ));
             }
         }
         f.render_widget(
@@ -6629,7 +7928,7 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     install_panic_restore_hook();
     let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
     let mut stdout = io::stdout();
-    if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+    if keyboard_enhancement_should_push() {
         if let Err(error) = execute!(
             stdout,
             PushKeyboardEnhancementFlags(
@@ -6653,9 +7952,17 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = TuiState::default();
+    // 初始化页品牌标：终端支持 sixel / kitty / iTerm2 时用真实位图，否则回退字符画。
+    // 必须在进入 alternate screen 之后、读取键盘事件之前调用（picker 会瞬时读写 stdio）。
+    state.splash_image = init_splash_image();
     // 启动即与注册表对齐：`selected_provider_id` / `selected_model_id` 必须真正生效，
     // 否则 header 显示的模型与实际发送口径分叉（wave-35c 遗留：sync 函数此前无调用点）。
     sync_state_with_registry(&mut state);
+    // Ctrl+D 的默认模型优先于注册表默认：偏好文件缺失时保持注册表口径不变。
+    state.model_preferences = ModelPreferencesStore::new().load();
+    if let Some(default_model) = state.model_preferences.default_model.clone() {
+        state.model = default_model;
+    }
     let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
 
     // 契约（修订13）：审计专用 Ask 引导（仅 debug 构建 + 显式 env，fail-closed）。
@@ -6770,7 +8077,7 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
     install_panic_restore_hook();
     let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
     let mut stdout = io::stdout();
-    if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+    if keyboard_enhancement_should_push() {
         if let Err(error) = execute!(
             stdout,
             PushKeyboardEnhancementFlags(
@@ -7307,6 +8614,66 @@ fn hydrate_state_from_session(
     state.status_text = format!("Resumed {}", session_id);
 }
 
+/// C16：队列/派发路径的结构化运行日志（复用 `otel::log` 既有 JSON 通道，不另造轮子）。
+///
+/// 通道语义（照抄既有实现，勿在调用点重写）：单行 JSON → stdout + 注入的落盘文件
+/// （512KiB 轮转 / 写入失败降级 / 输出前统一脱敏）；`trace_id` 传 `None` 时由
+/// `otel::log` 回落到当前活跃 turn 的真实 trace_id。
+/// 结构化字段：`event`（事件名）、`session_id`、`turn_id`，外加调用方给定的 `extras`。
+/// C22+C23：把一条队列反馈落到其主通道，并统一写一份 `queue_notice`。
+///
+/// - `SystemMessage`（C4/C6）：**流式期不 push System 消息** —— 那会打断流式 assistant 气泡的
+///   `messages.last()` 不变量（把正文拆行）；改由 `queue_notice` 经常驻指标行渲染。非流式期
+///   额外 push 一条 System 消息保留历史留痕。
+/// - `StatusText`（C2）：写 `status_text`（stopping 期间不覆盖「正在安全收口」提示）。
+fn apply_queue_feedback(state: &mut TuiState, channel: QueueFeedbackChannel, receipt: String) {
+    state.queue_notice = Some((receipt.clone(), std::time::Instant::now()));
+    match channel {
+        QueueFeedbackChannel::SystemMessage => {
+            if !state.is_streaming {
+                state.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: receipt.clone(),
+                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                });
+            }
+        }
+        QueueFeedbackChannel::StatusText => {
+            if state.stopping_turn_id.is_none() {
+                state.status_text = receipt.clone();
+            }
+        }
+    }
+    state.set_status_notice(receipt);
+}
+
+fn tui_queue_log(
+    level: &str,
+    event: &str,
+    state: &TuiState,
+    extras: &[(&str, serde_json::Value)],
+) {
+    let turn_id = state
+        .streaming_turn_id
+        .clone()
+        .or_else(|| state.stopping_turn_id.clone());
+    let mut fields: Vec<(&str, serde_json::Value)> = vec![
+        ("event", serde_json::json!(event)),
+        ("session_id", serde_json::json!(state.session_id.as_str())),
+        ("turn_id", serde_json::json!(turn_id)),
+        ("streaming", serde_json::json!(state.is_streaming)),
+    ];
+    fields.extend(extras.iter().cloned());
+    let mut sink: Vec<u8> = Vec::new();
+    pony_agent_core::agent::otel::log::log_json_with_extras(
+        level,
+        event,
+        None,
+        &fields,
+        &mut sink,
+    );
+}
+
 fn tui_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut state: TuiState,
@@ -7320,6 +8687,10 @@ fn tui_event_loop(
         Arc::new(std::sync::Mutex::new(Vec::new()));
     // 契约 F-G：goal 自动续轮的取消令牌（Esc 置位；新一轮用户消息提交时重置）。
     let goal_round_cancel = GoalRoundCancelToken::new();
+    // C10：轮次线程存活标志（派发闸门第 4 判据）。轮次线程进入时置位、线程体结束（含 panic
+    // 展开）时由 `TurnLoopInFlightGuard::drop` 复位；判据是「有没有在飞轮次线程」而非
+    // 「有没有 armed goal」，避免 armed-but-idle 的会话把排队消息永久卡住。
+    let turn_loop_in_flight: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // 键盘与鼠标事件轮询线程。
     // 契约 F-F：`NO_COLOR` 的进程级环境变量**只在单线程启动期改一次**（run_tui / demo 入口开头）。
@@ -7391,6 +8762,14 @@ fn tui_event_loop(
     let mut last_poll_instant = std::time::Instant::now();
     let mut last_goal_phase: Option<bool> = None;
     let mut cap_poll_ms: Option<u64> = None;
+    // C24 单飞闩（时间窗）：队首派发后置 `now + QUEUE_DISPATCH_LATCH_MS`，窗口内不再派发。
+    // 不再「收到任何 InputKey 就清闩」—— 那会在「派发后、合成 Enter 被消费前」开单飞缺口
+    // （用户按 Esc/Ctrl+U 会同时清掉闩与输入框 ⇒ 闸门立刻再派发第二条 ⇒ 并发 turn）。
+    // 清除点只有三个：提交成功（is_streaming 置真）、合成提交放弃回灌、显式撤销（Esc/Ctrl+U）。
+    let mut queue_dispatch_deadline: Option<std::time::Instant> = None;
+    // C26 权威载荷：派发时刻的正文快照。窗口内的撤销/回队**一律**用它（而不是此刻的
+    // `input_buffer`）—— 用户可能在窗口内改过输入框，读字节会把已派发正文静默丢掉。
+    let mut queue_dispatch_payload: Option<QueuedUserMessage> = None;
     // 信号处理器已在 run_tui 进入 raw mode 之前安装（启动期 SIGHUP 也要能还原终端）。
 
     // 辅助闭包：检查并同步当前 session 的待决宿主控制请求（Ask / Approval）
@@ -7486,7 +8865,12 @@ fn tui_event_loop(
                         } else {
                             extract_current_rendered_lines(&state)
                         };
-                        let selected_text = extract_selected_text(&lines, normalized.0, normalized.1);
+                        let selected_text = extract_selection_across(
+                            &lines,
+                            &state.last_input_lines,
+                            normalized.0,
+                            normalized.1,
+                        );
                         if !selected_text.is_empty() && selected_text.len() <= 1_000_000 {
                             let osc_seq = encode_osc52_copy(&selected_text);
                             let mut stdout = std::io::stdout();
@@ -7546,52 +8930,37 @@ fn tui_event_loop(
                             state.mouse_selection.clear();
                             dirty = true;
                         }
-                    } else if let Some(chat_rect) = state.last_chat_rect {
+                    } else {
                         let x = mouse.column;
                         let y = mouse.row;
-                        let in_chat = x >= chat_rect.x
-                            && x < chat_rect.x + chat_rect.width
-                            && y >= chat_rect.y
-                            && y < chat_rect.y + chat_rect.height;
-
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if in_chat {
-                                    let rel_line = (y.saturating_sub(chat_rect.y)) as usize
-                                        + state.effective_scroll_offset as usize;
-                                    let rel_col = (x.saturating_sub(chat_rect.x)) as usize;
-                                    let coord = TextCoord {
-                                        line: rel_line,
-                                        col: rel_col,
-                                    };
+                                if let Some(coord) = selection_point_at(&state, x, y) {
                                     state.mouse_selection.active = true;
                                     state.mouse_selection.anchor = Some(coord);
                                     state.mouse_selection.head = Some(coord);
                                     state.mouse_selection.copied_range = None;
                                     state.mouse_selection.debounce_until = None;
                                     dirty = true;
-                                } else {
-                                    if state.mouse_selection.active || state.mouse_selection.anchor.is_some() {
-                                        state.mouse_selection.clear();
-                                        dirty = true;
-                                    }
+                                } else if state.mouse_selection.active
+                                    || state.mouse_selection.anchor.is_some()
+                                {
+                                    state.mouse_selection.clear();
+                                    dirty = true;
                                 }
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
                                 if state.mouse_selection.active {
-                                    let rel_line = (y.saturating_sub(chat_rect.y)) as usize
-                                        + state.effective_scroll_offset as usize;
-                                    let rel_col = (x.saturating_sub(chat_rect.x)) as usize;
-                                    let coord = TextCoord {
-                                        line: rel_line,
-                                        col: rel_col,
-                                    };
-                                    state.mouse_selection.head = Some(coord);
-                                    if state.mouse_selection.anchor != state.mouse_selection.head {
-                                        state.mouse_selection.debounce_until =
-                                            Some(std::time::Instant::now() + Duration::from_millis(200));
+                                    // 拖出正文矩形时吸附到边缘行列：继续拖仍能连续扩选，而不是断在半路。
+                                    if let Some(coord) = selection_drag_point(&state, x, y) {
+                                        state.mouse_selection.head = Some(coord);
+                                        if state.mouse_selection.anchor != state.mouse_selection.head {
+                                            state.mouse_selection.debounce_until = Some(
+                                                std::time::Instant::now() + Duration::from_millis(200),
+                                            );
+                                        }
+                                        dirty = true;
                                     }
-                                    dirty = true;
                                 }
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
@@ -7611,6 +8980,8 @@ fn tui_event_loop(
                     }
                 }
                 UiEvent::InputKey(key) => {
+                    // C24：**不再**在这里清单飞闩 —— 闩按时间窗自然过期，
+                    // 由「提交成功 / 放弃回灌 / 显式撤销」三个语义点显式清除。
                     // wave-36b：F2 顶层处理（任意模式可用）：裸键切换鼠标捕获，
                     // 默认关（终端原生拖选/复制可用）；与退出恢复路径统一 DisableMouseCapture 不冲突。
                     if key.code == KeyCode::F(2) {
@@ -7769,6 +9140,14 @@ fn tui_event_loop(
 
                     // 1c. Model 选择弹窗模式下的按键处理
                     if state.mode == InteractionMode::SelectingModel {
+                        // Ctrl+D（设默认）/ Ctrl+F（切换优选）是「写盘」动作，走独立可测函数。
+                        if apply_model_panel_shortcut(
+                            &mut state,
+                            &key,
+                            &ModelPreferencesStore::new(),
+                        ) {
+                            continue;
+                        }
                         match key.code {
                             KeyCode::Esc => {
                                 state.cancel_model_selector();
@@ -8128,7 +9507,10 @@ fn tui_event_loop(
                     }
 
                     // 1g. PlanMode 计划模式按键处理
-                    if state.mode == InteractionMode::PlanMode {
+                    // C19（BLOCKING 修复）：计划面板只吞 Esc/Up/Down（`plan_mode_consumes_key`），
+                    // **其余按键必须继续落到通用处理链**（流式裁决 / 普通输入 / Enter 提交）。
+                    // 旧实现 `_ => {}` 之后无脑 `continue` ⇒ 计划面板打开时输入框整段失效。
+                    if state.mode == InteractionMode::PlanMode && plan_mode_consumes_key(&key) {
                         match key.code {
                             KeyCode::Esc => {
                                 state.toggle_plan_mode();
@@ -8266,39 +9648,180 @@ fn tui_event_loop(
                                 }
                             }
                         } else {
+                            // C24：闩窗口内 Esc = 显式撤销本次派发 ⇒ 已写回的正文**回队队首**
+                            // 再清空输入框，否则「remove(0) 已发生 + 输入框被清」会静默丢正文。
+                            // C26⑥：回队**权威 payload**（窗口内输入框可能已被改，读字节会丢正文）。
+                            if queue_dispatch_latch_active(queue_dispatch_deadline) {
+                                let pending = queue_dispatch_payload
+                                    .take()
+                                    .unwrap_or_else(|| state.input_buffer.trim().to_string());
+                                requeue_front(&mut state, pending);
+                                queue_dispatch_deadline = None;
+                            }
                             // 静态时不退出，只清空输入框
                             state.clear_input();
                         }
                         continue;
                     }
 
+                    // ── C1–C4 裁决面：流式期按键不再被吞 ─────────────────────────────
+                    // 优先级不变：面板/模态分支、双击 Esc 停止、Ctrl+C 三态、F2/F3 都在**本裁决之前**
+                    // 已经生效（上面的分支各自 `continue`），故面板内按键不会被吞。
+                    // 旧实现是 `if state.is_streaming && should_skip_while_streaming(&key) { continue; }`
+                    // ⇒ 流式中除 Ctrl+U/J/W/A/E 外全部按键被静默丢弃。
                     if state.is_streaming {
+                        let composer_text = state.input_buffer.trim().to_string();
+                        let mut disposition =
+                            streaming_key_disposition(&key, !composer_text.is_empty());
+                        // C3/C4：命令串走命令分发，绝不排成聊天消息（C6 同口径）。
+                        //  - 会话变更类（/clear /compact /resume）⇒ Reject：清空 + 「本轮结束后可用」
+                        //  - 面板/只读类（/agents /tasks /plan /models /thinking /provider /help /update）
+                        //    ⇒ Forward：落到原 Enter 分发分支照常执行
+                        //  - /quit /exit 等其余已登记命令 ⇒ Forward：走原退出/分发分支
+                        if disposition == StreamingKeyDisposition::QueueSubmit {
+                            // C20 前置优先级（BLOCKING）：入队判定**之前**先让两条自救路径优先，
+                            // 否则「行尾 `\` + Enter」会被排成聊天消息、`/he`+Enter 会把命令前缀排进队列。
+                            let completion_visible = !state.matching_commands().is_empty();
+                            let pre_action = streaming_enter_pre_action(
+                                &state.input_buffer,
+                                completion_visible,
+                            );
+                            match pre_action {
+                                StreamingEnterPre::Newline | StreamingEnterPre::Complete => {
+                                    // 交给下面的原换行分支 / 原补全分支。
+                                    disposition = StreamingKeyDisposition::Forward;
+                                }
+                                StreamingEnterPre::Submit => {
+                                    if is_session_mutating_command(&composer_text) {
+                                        disposition = StreamingKeyDisposition::Reject;
+                                    } else if is_panel_command(&composer_text)
+                                        || parse_command_input(&composer_text).is_some()
+                                        || input_is_alias(&composer_text, "/exit")
+                                        || input_is_alias(&composer_text, "/effort")
+                                    {
+                                        disposition = StreamingKeyDisposition::Forward;
+                                    }
+                                }
+                            }
+                        }
+                        match disposition {
+                            // 编辑/光标/面板快捷键等：继续走既有按键处理链。
+                            StreamingKeyDisposition::Forward => {}
+                            StreamingKeyDisposition::QueueSubmit => {
+                                // C2：流式中 Enter = 入队（绝不 spawn 第二个并发 turn）。
+                                let accepted = push_queued_message(
+                                    &mut state.queued_user_messages,
+                                    &composer_text,
+                                );
+                                if accepted {
+                                    state.clear_input();
+                                    state.selected_command_index = 0;
+                                    let count = state.queued_count();
+                                    // C22：通道 + 文案由 `queue_feedback` 唯一裁定（C2 ⇒ StatusText）。
+                                    let (channel, base) =
+                                        queue_feedback(QueueFeedbackKind::Enqueued);
+                                    let receipt = format!("{base}（{count} 条）");
+                                    // C23：`queue_notice` 保证「与运行态无关」的渲染点。
+                                    apply_queue_feedback(&mut state, channel, receipt);
+                                    // C16：结构化日志（按键裁决 = 入队）。
+                                    tui_queue_log(
+                                        "info",
+                                        "composer_queue_submit",
+                                        &state,
+                                        &[
+                                            ("queued", serde_json::json!(count)),
+                                            ("composer_has_text", serde_json::json!(!composer_text.is_empty())),
+                                            (
+                                                "chars",
+                                                serde_json::json!(composer_text.chars().count()),
+                                            ),
+                                        ],
+                                    );
+                                } else {
+                                    // C6：队列已满 ⇒ 拒绝入队，**保留输入正文**（不静默丢弃）。
+                                    // C22：通道 + 文案由 `queue_feedback` 裁定（SystemMessage）。
+                                    let (channel, receipt) =
+                                        queue_feedback(QueueFeedbackKind::QueueFull);
+                                    apply_queue_feedback(&mut state, channel, receipt);
+                                    // C16：结构化日志（按键裁决 = 拒绝，原因 = 队列满）。
+                                    tui_queue_log(
+                                        "warn",
+                                        "composer_queue_rejected",
+                                        &state,
+                                        &[
+                                            ("reason", serde_json::json!("queue_full")),
+                                            ("queued", serde_json::json!(state.queued_count())),
+                                        ],
+                                    );
+                                }
+                                dirty = true;
+                                continue;
+                            }
+                            StreamingKeyDisposition::Reject => {
+                                // C2/C4：无正文可提交、或会撕裂在飞轮次的会话变更命令 ⇒
+                                // 清空输入 + 提示「本轮结束后可用」。空输入不产生噪声提示。
+                                if !composer_text.is_empty() {
+                                    let session_mutating =
+                                        is_session_mutating_command(&composer_text);
+                                    // C22：C4 拒绝 ⇒ SystemMessage 通道（文案来自 `queue_feedback`）。
+                                    let (channel, base) = if session_mutating {
+                                        queue_feedback(QueueFeedbackKind::SessionMutating)
+                                    } else {
+                                        queue_feedback(QueueFeedbackKind::QueueFull)
+                                    };
+                                    let receipt = if session_mutating {
+                                        format!("「{composer_text}」{base}")
+                                    } else {
+                                        base
+                                    };
+                                    state.clear_input();
+                                    state.selected_command_index = 0;
+                                    apply_queue_feedback(&mut state, channel, receipt);
+                                    // C16：结构化日志（按键裁决 = 拒绝）。
+                                    tui_queue_log(
+                                        "warn",
+                                        "composer_key_rejected",
+                                        &state,
+                                        &[
+                                            // C25：按键的简化分类（绝不记录用户输入的正文字符）。
+                                            ("key_class", serde_json::json!(key_class_label(&key))),
+                                            (
+                                                "reason",
+                                                serde_json::json!(if session_mutating {
+                                                    "session_mutating_command"
+                                                } else {
+                                                    "unqueueable_text"
+                                                }),
+                                            ),
+                                        ],
+                                    );
+                                }
+                                dirty = true;
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Some(action) = composer_control_action(&key) {
+                        // C24：闩窗口内 Ctrl+U（清空输入）同样是「显式撤销派发」——
+                        // 必须先把已写回的正文回队队首，再清空；否则正文被静默丢弃。
+                        // C26⑥：回队**权威 payload**（窗口内输入框可能已被改，读字节会丢正文）。
+                        if action == ComposerControlAction::ClearInput
+                            && queue_dispatch_latch_active(queue_dispatch_deadline)
+                        {
+                            let pending = queue_dispatch_payload
+                                .take()
+                                .unwrap_or_else(|| state.input_buffer.trim().to_string());
+                            requeue_front(&mut state, pending);
+                            queue_dispatch_deadline = None;
+                        }
+                        state.apply_composer_control(action);
                         continue;
                     }
 
-                    // 编辑快捷键（优先于字符插入，避免 Ctrl 组合键被当作普通字符）
+                    // 面板类快捷键（Ctrl+T 任务看板 / Ctrl+R 模型面板）在流式期同样可用（C3）。
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         match key.code {
-                            KeyCode::Char('j') => {
-                                state.insert_newline();
-                                continue;
-                            }
-                            KeyCode::Char('u') => {
-                                state.clear_input();
-                                continue;
-                            }
-                            KeyCode::Char('w') => {
-                                state.delete_word_backward();
-                                continue;
-                            }
-                            KeyCode::Char('a') => {
-                                state.cursor_line_home();
-                                continue;
-                            }
-                            KeyCode::Char('e') => {
-                                state.cursor_line_end();
-                                continue;
-                            }
                             // 波次 44：Ctrl+T 呼出任务看板（与 /tasks 同路径：先同步真实 todo 存储）。
                             // 不占用裸 `t`，避免无法输入以 t 开头的消息。
                             KeyCode::Char('t') => {
@@ -8482,6 +10005,10 @@ fn tui_event_loop(
                                     for (cmd, desc) in AVAILABLE_COMMANDS.iter() {
                                         help.push_str(&format!("\n{:<11}{}", cmd, desc));
                                     }
+                                    // C18②：流式期可用性说明（旧文案让人以为生成中键盘全失效）。
+                                    help.push_str(
+                                        "\n流式期仍可输入 · Enter 排队（本轮结束后自动发送） · Ctrl+T/Ctrl+R 可用",
+                                    );
                                     // 契约 F-L：/cost 移除后网关需要可见入口；只展示剥离凭据后的
                                     // scheme://host[:port]/path（userinfo/query/fragment 全丢弃）。
                                     let gateway = gateway_display(&state.gateway_url);
@@ -8525,6 +10052,28 @@ fn tui_event_loop(
                                     continue;
                                 }
 
+                                // C2 最后一道闸：流式期**绝不**并发 spawn 第二个 turn。
+                                // 正常路径已在上面的裁决面把流式期 Enter 分流（Forward 只可能是
+                                // 面板/只读命令，它们在下方分支各自 continue），这里兜住任何漏网路径：
+                                // 退回「排队」而不是撕裂会话历史。
+                                if state.is_streaming {
+                                    if push_queued_message(
+                                        &mut state.queued_user_messages,
+                                        &input,
+                                    ) {
+                                        state.set_status_notice(format!(
+                                            "已排队 {} 条 · 本轮结束后自动发送",
+                                            state.queued_count()
+                                        ));
+                                    } else {
+                                        state.set_status_notice(
+                                            "本轮仍在进行中 · 该消息未排队，请稍后重试",
+                                        );
+                                    }
+                                    dirty = true;
+                                    continue;
+                                }
+
                                 // 预先检查当前 provider 是否有 API key
                                 let prov_id = resolve_active_provider_id(&state)
                                     .unwrap_or_else(|| state.current_provider_id.clone());
@@ -8546,6 +10095,12 @@ fn tui_event_loop(
                                             content: err_msg,
                                             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                                         });
+                                        // C24⑤：提交失败但非模态（未进入流式态）⇒ 必须清闩，
+                                        // 否则时间窗内排队消息会被闩挡住、窗口过期前无人推进队列。
+                                        queue_dispatch_deadline = None;
+                                        // C26⑦：正文已被 add_user_message 消费/已落消息区，载荷清零，
+                                        // 避免遗留快照在下一个派发周期被误判为「在飞」。
+                                        queue_dispatch_payload = None;
                                         continue;
                                     }
                                 }
@@ -8558,6 +10113,10 @@ fn tui_event_loop(
                                 state.context_window_tokens = resolve_context_window_tokens(&state);
                                 state.add_user_message(&input);
                                 state.is_streaming = true;
+                                // C24②：提交成功 ⇒ 立即清单飞闩（此后由 is_streaming 兜住并发）。
+                                queue_dispatch_deadline = None;
+                                // C26⑦：正文已进入本轮，权威载荷使命结束。
+                                queue_dispatch_payload = None;
                                 state.auto_scroll = true; // 发送新消息时立即恢复自动贴底滚动
                                 state.status_text = "Thinking...".to_string();
                                 state.transition_runtime_mode(RuntimeMode::Connecting);
@@ -8588,7 +10147,18 @@ fn tui_event_loop(
                                 let current_turn_for_rounds = Arc::clone(&current_turn_id);
 
                                 let inflight_for_rounds = Arc::clone(&inflight_turns);
+                                // C10：把「轮次线程存活标志」带进线程，进入即置位、线程体（首轮 +
+                                // goal 续轮循环）结束时复位；panic 展开同样会复位（RAII）。
+                                let turn_loop_in_flight_for_thread = Arc::clone(&turn_loop_in_flight);
+                                // C11：轮次线程 panic 兜底 —— 轮次体（首轮 + goal 续轮循环）整体在
+                                // `catch_unwind` 内执行，panic 时补发 `StreamFailed` 终态，
+                                // 杜绝 `is_streaming` 永真导致输入/排队派发永久失效。
+                                let tx_turn = tx.clone();
                                 let turn_thread = std::thread::spawn(move || {
+                                  let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                                    let _in_flight_guard = TurnLoopInFlightGuard::enter(
+                                        turn_loop_in_flight_for_thread,
+                                    );
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                                     // 首轮 guard 在主事件分支创建并 move 到这里；本轮调用返回即回收，
                                     // 不得跨 goal 续轮驻留。
@@ -8648,6 +10218,14 @@ fn tui_event_loop(
                                         };
                                         turn_control_plane.start_turn_stream(sink.as_ref(), next_cmd);
                                     }
+                                  }));
+                                  if let Err(payload) = outcome {
+                                      // panic 也是「终态」：必须让事件循环退出流式态（C11）。
+                                      let _ = tx_turn.send(UiEvent::StreamFailed(format!(
+                                          "轮次线程 panic: {}",
+                                          panic_payload_message(payload.as_ref())
+                                      )));
+                                  }
                                 });
                                 // MutexGuard 必须在 turn_thread 移入前释放：临时量绑定后显式 drop。
                                 let turns = inflight_for_rounds
@@ -8717,12 +10295,79 @@ fn tui_event_loop(
                         _ => {}
                     }
                 }
-                // 契约 F-C：粘贴只插入输入缓冲，**绝不提交**；流式生成中与键盘编辑同样忽略。
-                // 守卫口径与 InputKey 分支一致（`if state.is_streaming { continue; }`）。
-                UiEvent::InputPaste(text) => {
-                    if state.is_streaming {
+                // C21：合成自动提交（派发闸门的唯一构造点）。
+                // 与裸 `InputKey(Enter)` 的区别：这里**重新校验**界面此刻是否仍空闲 ——
+                // 派发与消费之间若弹出模态/待作答请求，回灌的 Enter 会被面板吃掉
+                //（极端情况甚至误触发「同意审批」）。被挡下时：释放单飞闩、正文留在输入框，
+                // 用户可见并可自行按 Enter，不会丢消息、也不会与新 run 交叠。
+                UiEvent::QueuedAutoSubmit => {
+                    // C26④：**权威载荷比对**。回队/提交都必须用派发时刻的快照，而不是「此刻
+                    // 输入框里的字节」——用户可能在窗口内用 Ctrl+W / Backspace / Delete 改（甚至
+                    // 擦光）输入框，那时回队 `input_buffer` 会把已派发的正文静默丢掉。
+                    if queued_dispatch_diverged(
+                        queue_dispatch_payload.as_deref(),
+                        &state.input_buffer,
+                    ) {
+                        // 输入框已偏离派发快照：把**原 payload** 回队队首，保留用户当前输入不动，
+                        // 清闩 + 清 payload，等下一次空闲再重试（不得停摆）。
+                        if let Some(payload) = queue_dispatch_payload.take() {
+                            requeue_front(&mut state, payload);
+                        }
+                        queue_dispatch_deadline = None;
+                        tui_queue_log(
+                            "warn",
+                            "composer_queue_dispatch_blocked",
+                            &state,
+                            &[
+                                ("reason", serde_json::json!("composer_diverged")),
+                                ("requeued", serde_json::json!(state.queued_count())),
+                            ],
+                        );
+                        dirty = true;
+                        // C26⑤：消费点必须 `continue`，否则同一轮会继续落到派发闸门，
+                        // 在「composer 已空 + 闩已清」时二次派发（1 终态 2 派发）。
                         continue;
                     }
+                    let mode_is_modal = is_modal_mode(&state.mode);
+                    if should_reinject_auto_submit(
+                        mode_is_modal,
+                        state.pending_request.is_some(),
+                        state.ask_user_state.is_some(),
+                        state.permission_state.is_some(),
+                    ) {
+                        let _ = tx.send(UiEvent::InputKey(crossterm::event::KeyEvent::new(
+                            KeyCode::Enter,
+                            KeyModifiers::NONE,
+                        )));
+                        tui_queue_log("info", "composer_queue_autosubmit", &state, &[]);
+                    } else {
+                        // C24③：放弃本次回灌时**把消息回队队首**并清空输入框 + 清闩，
+                        // 待下一次空闲重试 —— 只留稿会让整个队列永久停摆（L3-A F6）。
+                        // C26⑦：优先回队权威 payload（无 payload 才回落到输入框内容）。
+                        let pending = queue_dispatch_payload
+                            .take()
+                            .unwrap_or_else(|| state.input_buffer.trim().to_string());
+                        requeue_front(&mut state, pending);
+                        state.clear_input();
+                        queue_dispatch_deadline = None;
+                        tui_queue_log(
+                            "warn",
+                            "composer_queue_autosubmit_blocked",
+                            &state,
+                            &[
+                                ("mode", serde_json::json!(format!("{:?}", state.mode))),
+                                ("requeued", serde_json::json!(state.queued_count())),
+                            ],
+                        );
+                    }
+                    dirty = true;
+                    // C26⑤：无论是否回灌，消费点都必须 `continue`（阻止同轮二次派发）。
+                    continue;
+                }
+                // 契约 F-C：粘贴只插入输入缓冲，**绝不提交**（提交仍由用户按 Enter 决定）。
+                // C9（`tui-streaming-input`）：流式期粘贴与键盘编辑同口径 —— 照样插入缓冲，
+                // 不再早退（旧实现 `if state.is_streaming { continue; }` 让流式中粘贴被静默丢弃）。
+                UiEvent::InputPaste(text) => {
                     state.insert_paste(&text);
                     dirty = true;
                 }
@@ -8940,6 +10585,80 @@ fn tui_event_loop(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        // ── C5/C10/C15/C17：排队消息自动派发闸门（单点、单飞、事件回灌）─────────────
+        // 位置契约：**处理完一个事件之后、下一轮计算 `poll_ms` 之前**只在这里判定一次。
+        // 派发不内联复用提交逻辑，而是把正文写回输入框 + 向同一 `tx` 回灌一条合成 Enter，
+        // 让提交继续走唯一那条路径（API key 校验 → begin_turn_usage → add_user_message → spawn）。
+        // C15：取件**只能**经 `take_next_queued_for_dispatch`（闸门 + 「输入框为空」前哨 + FIFO
+        // 取件收成一个生产符号，A7 直接断言它，而不是测试内自建的复刻品）。
+        {
+            // C17：`ui_idle` 包含「无待作答/待审批」——挂起期（TurnSuspended 已把
+            // `is_streaming` 置 false 但 run 未收口）派发会让新 turn 与挂起 run 交叠。
+            let ui_idle = is_ui_idle_for_dispatch(&state);
+            // C10（契约修订 2026-11-06）：判据是「有没有**在飞轮次线程**」，不是「有没有 armed goal」
+            // —— goal armed 但续轮没在跑时，只看 goal 存在会让排队消息永不自动派发（用户感知卡住）。
+            // 标志由轮次线程内的 `TurnLoopInFlightGuard` 维护（正常结束与 panic 展开都会复位）。
+            let turn_in_flight = turn_loop_in_flight.load(Ordering::SeqCst);
+            let is_streaming = state.is_streaming;
+            // C24：闩活性 = 时间窗未过期（`now < deadline`），不再依赖「收到 InputKey 就清」。
+            let dispatch_pending = queue_dispatch_latch_active(queue_dispatch_deadline);
+            // C27：**孤儿载荷收割** —— 闩已过期但 payload 仍非空，说明上一条派发的 QAS 还在飞
+            // （或已被 composer 变更吃掉）。此刻若继续取件会在下面覆盖单槽 payload ⇒ 上一条既未
+            // 提交也未回队（静默丢正文）。故先回队该 payload、清输入框、清 payload，本轮不再派发。
+            if let Some(orphan) =
+                orphan_dispatch_payload(queue_dispatch_payload.as_deref(), dispatch_pending)
+            {
+                requeue_front(&mut state, orphan);
+                state.clear_input();
+                queue_dispatch_payload = None;
+                tui_queue_log(
+                    "warn",
+                    "composer_queue_dispatch_blocked",
+                    &state,
+                    &[
+                        ("reason", serde_json::json!("orphan_payload_requeued")),
+                        ("requeued", serde_json::json!(state.queued_count())),
+                    ],
+                );
+                dirty = true;
+                continue;
+            }
+            // C25：派发前后队列深度（纯函数 `queue_dispatch_fields` 承载字段名）。
+            let queue_depth_before = state.queued_count();
+            if let Some(next_message) = take_next_queued_for_dispatch(
+                &mut state,
+                is_streaming,
+                ui_idle,
+                turn_in_flight,
+                dispatch_pending,
+            ) {
+                // C26②：先留**权威载荷快照**（撤销/回队/分歧比对一律用它，不读输入框字节）。
+                queue_dispatch_payload = Some(next_message.clone());
+                // C14：写回经纯函数净化（正文 + 一个尾部空格）：既不覆盖正文，也不让
+                // `ends_with('\\')` 或 `/hel` 前缀劫持这次提交。
+                state.set_input(&composer_buffer_for_dispatch(&next_message));
+                state.selected_command_index = 0;
+                // C24：置时间窗闩（窗口内闸门一律不派发）。
+                queue_dispatch_deadline = Some(
+                    std::time::Instant::now() + std::time::Duration::from_millis(QUEUE_DISPATCH_LATCH_MS),
+                );
+                // 派发后队列已消费该条：清掉「已排队…」短时反馈残影，指示行回落到真实计数。
+                state.queue_notice = None;
+                // C16/C25：结构化日志（派发）。事件名与字段先绑定再一次性写入 ——
+                // 深度字段由纯函数 `queue_dispatch_fields` 承载（避免调用点手写字段名漂移）。
+                let dispatch_event = "composer_queue_dispatch";
+                let mut dispatch_fields =
+                    queue_dispatch_fields(queue_depth_before, state.queued_count());
+                dispatch_fields.push(("chars", serde_json::json!(next_message.chars().count())));
+                tui_queue_log("info", dispatch_event, &state, &dispatch_fields);
+                // C21：不直接注入 `InputKey(Enter)`，而是发**带标记的** `QueuedAutoSubmit`；
+                // 由事件循环在校验「此刻仍是空闲态」后才回灌真正的 Enter（见该变体分支）。
+                let _ = tx.send(UiEvent::QueuedAutoSubmit);
+                dirty = true;
+                continue;
+            }
         }
     }
 

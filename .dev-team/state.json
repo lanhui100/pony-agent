@@ -1174,6 +1174,128 @@
       },
       "status": "completed",
       "quarantine": null
+    },
+    {
+      "wave": "tui-streaming-input",
+      "theme": "TUI 流式期可输入/可开面板/可排队派发（C1-C18）",
+      "tier": "B",
+      "baseline_commit": "adad39ad",
+      "baseline_worktree_dirty": true,
+      "git_policy": "no-git-write（工作区含前序未提交改动，本轮不做任何 git 写操作；物理收据以 cargo 原生命令退出码 + evidence 日志为准）",
+      "tasks": [
+        {
+          "id": "task-1",
+          "owner": "protocol-agent",
+          "status": "completed",
+          "write_scopes": [
+            "crates/pony-agent-core/src/bin/tui.rs",
+            ".dev-team/"
+          ]
+        },
+        {
+          "id": "task-2",
+          "owner": "test-agent",
+          "status": "completed",
+          "write_scopes": [
+            "crates/pony-agent-core/tests/",
+            ".dev-team/"
+          ]
+        },
+        {
+          "id": "task-3",
+          "owner": "executor",
+          "status": "completed",
+          "write_scopes": [
+            "crates/pony-agent-core/src/bin/tui.rs"
+          ]
+        }
+      ],
+      "gates": {
+        "protocol_stub_check_exit": 0,
+        "red_phase": "PHASE-SKEW（实现先于红相落地，已用基线副本红相 EXIT=101 补证；见 red-phase-tui-streaming-input.json）",
+        "mutation_sensitivity": "6/6 轮全红，11 用例全部被杀死",
+        "pty_streaming_smoke": "PASS（流式中输入 hello + Ctrl+T 开看板，均在 9s 流窗口内）",
+        "l2at_tui_runtime_regression": "FAIL=10 属既存陈旧断言（脚本断言的 '› ▏' 在 HEAD 基线亦不存在），非本轮回归",
+        "observability_audit_diff_exit": 0
+      },
+      "events": [
+        {
+          "type": "PHASE-SKEW",
+          "detail": "protocol 空桩落盘后由 executor 提前实现，红相窗口失效",
+          "at": "2026-11-06T07:31:37+08:00"
+        }
+      ],
+      "updated_at": "2026-11-06T09:02:43+08:00",
+      "rounds": {
+        "executor": 9,
+        "l3a": 5,
+        "l3b": 4,
+        "l3p": 2,
+        "plan_gate": 1,
+        "pty": 2,
+        "explorer": 1
+      },
+      "contracts": "C1–C27",
+      "cases": "A1–A27",
+      "final_green": {
+        "acceptance": 32,
+        "adversarial": 16,
+        "six_fixes": 18,
+        "regressions": "18/18/18/18/12",
+        "tui_rs_sha256": "56d58e81a213275998242bc65b1125b4e2add7f86d00db3b70a931146ad67834"
+      },
+      "hygiene": "已删除临时 target-{recon,protocol,impl,test-red}；已 revert 本波 l2at-tui-runtime 脚本重写的 receipts（脚本断言陈旧，与本波无关）",
+      "known_residual": [
+        "C17 TurnSuspended 无全域挂起标记",
+        "模态面板打开期无指标行",
+        "C5↔C24 张力（同终态可能 2 次派发尝试、1 次交付）",
+        "孤儿收割窗口内用户草稿会被清空",
+        "A23 源码窗口式断言对字段顺序敏感"
+      ],
+      "backlog": [
+        {
+          "id": "B-TUIQ-1",
+          "desc": "孤儿收割窗口内清空输入框会吞用户草稿（需草稿/派发快照双槽字段）",
+          "severity": "ADVISORY",
+          "source": "L3-A round6"
+        },
+        {
+          "id": "B-TUIQ-2",
+          "desc": "C17 全域挂起标记（TurnSuspended 无状态字段）",
+          "severity": "ADVISORY",
+          "source": "L3-A round2/round3"
+        },
+        {
+          "id": "B-TUIQ-3",
+          "desc": "Provider 选择器 / AgentRoster 面板未走 mode_stack，PlanMode 下打开再关会丢失 PlanMode",
+          "severity": "ADVISORY",
+          "source": "executor ROUND 7"
+        },
+        {
+          "id": "B-TUIQ-4",
+          "desc": "模态面板打开期无指标行渲染点（排队指示不可见）",
+          "severity": "ADVISORY",
+          "source": "executor ROUND 6"
+        },
+        {
+          "id": "B-TUIQ-5",
+          "desc": "tests/acceptance/l2at-tui-runtime.sh 断言陈旧（'› ▏'/颜色/最小尺寸），需按当前 UI 重写",
+          "severity": "ADVISORY",
+          "source": "pty 冒烟"
+        },
+        {
+          "id": "B-TUIQ-6",
+          "desc": "A23 源码窗口式断言对字段顺序/窗口长度敏感，重构时需同步维护",
+          "severity": "ADVISORY",
+          "source": "L3-B round3"
+        }
+      ],
+      "final_reviews": {
+        "l3a": "round6 PASS",
+        "l3b": "round4 PASS",
+        "l3p": "round2 PASS",
+        "plan_gate": "FAIL→Lead closure PASS"
+      }
     }
   ],
   "counters": {
