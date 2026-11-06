@@ -15,9 +15,21 @@ Behaviour is selected per request (no state needed):
                                                     tool_call (Read package.json)
                                                     finish_reason=tool_calls
 
+Ask tool (ask-resume scenario):
+  * env MOCK_TOOL=ask, or last user text containing "提问"/"ask me"
+                                                 -> the first-turn tool_call is
+                                                    `Ask` (builtin ask_user) with
+                                                    {"question":"继续吗？",
+                                                     "options":["继续","停止"],
+                                                     "description":"audit ask-resume"}
+  * the Ask variant only applies while the request has **no** role=tool message:
+    once the host feeds the answer back as a tool result the mock returns the
+    normal FINAL_TEXT, which is exactly the "assistant continues after answer"
+    observation point (no self-answering Ask loop).
+
 Overrides:
-  * env MOCK_SCENARIO=ok|401|slow|long forces behaviour for every request
-  * query parameter ?scenario=ok|401|slow|long on /v1/chat/completions
+  * env MOCK_SCENARIO=ok|401|slow|long|ask forces behaviour for every request
+  * query parameter ?scenario=ok|401|slow|long|ask on /v1/chat/completions
 
 Streaming format follows the real provider parser
 (crates/pony-agent-core/src/agent/provider/openai_sse.rs):
@@ -138,18 +150,26 @@ def message_text(message: dict) -> str:
     return ""
 
 
-# 批7 S-ASK：ask_user 工具调用的模型侧载荷。工具名用模型可见名 `Ask`，
+# ask_user 工具调用的模型侧载荷。工具名用模型可见名 `Ask`，
 # 参数遵循 `tools.rs` 的 ask_user input_schema（question 必填、options 可选）。
+# audit ask-resume：问题/选项必须足够独特，才能让 PTY 断言区分「面板」与「作答后的续写」。
 ASK_TOOL_ARGS = {
-    "question": "请选择本次审计要走的分支：",
-    "options": ["分支 A · 冒烟", "分支 B · 全量"],
+    "question": "继续吗？",
+    "options": ["继续", "停止"],
+    "description": "audit ask-resume",
 }
 
 
-def scenario_for(messages: list[dict], forced: str | None) -> str:
+def scenario_for(
+    messages: list[dict], forced: str | None, tool_override: str | None = None
+) -> str:
+    has_tool = any(str(m.get("role")) == "tool" for m in messages)
+    if forced == "ask":
+        # Ask 只对「还没有工具结果回流」的请求生效；一旦角色里出现 tool，
+        # 说明宿主已把答案回灌给模型 ⇒ 必须走续写分支，否则会自问自答成死循环。
+        return "final" if has_tool else "ask"
     if forced:
         return forced
-    has_tool = any(str(m.get("role")) == "tool" for m in messages)
     last_user = ""
     for m in reversed(messages):
         if str(m.get("role")) == "user":
@@ -160,8 +180,10 @@ def scenario_for(messages: list[dict], forced: str | None) -> str:
         return "401"
     if "慢速" in last_user:
         return "slow"
-    # 批7 S-ASK：驱动一次真实的 ask_user 工具调用（模型侧工具名 `Ask`）。
-    if "提问" in last_user or "ask me" in low:
+    # 驱动一次真实的 ask_user 工具调用（模型侧工具名 `Ask`）：
+    # 显式 MOCK_TOOL=ask（场景级）或既有用户文本关键字。同样只作用于首轮请求。
+    ask_requested = tool_override == "ask" or "提问" in last_user or "ask me" in low
+    if ask_requested and not has_tool:
         return "ask"
     if "长文" in last_user:
         return "long"
@@ -237,7 +259,12 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model") or "mock-alpha"
         stream = bool(body.get("stream"))
         forced = os.environ.get("MOCK_SCENARIO") or (query.get("scenario", [None])[0])
-        scenario = scenario_for(messages, forced if forced in ("ok", "401", "slow", "long", "ask") else None)
+        tool_override = os.environ.get("MOCK_TOOL")
+        scenario = scenario_for(
+            messages,
+            forced if forced in ("ok", "401", "slow", "long", "ask") else None,
+            tool_override,
+        )
         if forced == "ok":
             scenario = "tool"
 
@@ -253,6 +280,13 @@ class Handler(BaseHTTPRequestHandler):
                     (message_text(m) for m in reversed(messages) if m.get("role") == "user"), ""
                 )[:200],
                 "n_tool_messages": sum(1 for m in messages if m.get("role") == "tool"),
+                # ask-resume：物证 —— 宿主把 Ask 答案回灌成工具结果后，第 2 次请求里
+                # role=tool 的正文必须带用户作答，且**不得**是挂起标记 control_outcome_pending。
+                "tool_message_texts": [
+                    message_text(m)[:400]
+                    for m in messages
+                    if str(m.get("role")) == "tool"
+                ],
                 "n_tools_declared": len(body.get("tools") or []),
                 "scenario": scenario,
             }

@@ -27,6 +27,10 @@
 # Isolation: every scenario gets its own HOME + XDG dirs and its own mock LLM on
 # a free port.  The tmux server is `tmux -L tui-audit-<pid>` and only that server
 # is ever killed.
+#
+# Evidence root override (optional, for rehearsal runs that must not touch the
+# committed evidence tree): PONY_AUDIT_EVIDENCE_ROOT=/tmp/... ; the layout below
+# `<root>/<phase>/` is identical to the default.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -68,7 +72,7 @@ TOOLS="$ROOT/tools/tui-audit"
 case "$BIN" in /*) ;; *) BIN="$ROOT/$BIN" ;; esac
 [ -x "$BIN" ] || die "binary not executable: $BIN"
 
-EVID="$ROOT/.dev-team/evidence/tui-polish/$PHASE"
+EVID="${PONY_AUDIT_EVIDENCE_ROOT:-$ROOT/.dev-team/evidence/tui-polish}/$PHASE"
 # 契约（修订14）：本次 phase 目录必须从零开始。陈旧场景目录（例如已删除场景的旧证据）
 # 若被 aggregate 读进 report，就会把上一轮的 assertions.json 当成本次结果 —— 数字虚高即假绿。
 # `baseline` 与 `after` 是不同 phase 目录，互不影响；baseline 比较读的是 `$EVID/../baseline`。
@@ -78,6 +82,9 @@ mkdir -p "$EVID"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tui-audit.XXXXXX")"
 SOCK="tui-audit-$$"
 MOCK_PID=""
+# 场景级 mock 环境（例如 `MOCK_TOOL=ask`）：只在 begin_scenario 之后的 start_mock 生效，
+# 每个场景默认清空 ⇒ 其它场景的 mock 行为逐字不变。
+MOCK_ENV_ARGS=()
 SCEN_INDEX=0
 SCEN_FAILED=0
 SESS=""
@@ -193,12 +200,21 @@ start_mock() { # $1 scenario dir
   PORT="$(free_port)"
   MOCK_LOG="$dir/mock-requests.jsonl"
   : > "$MOCK_LOG"
-  python3 "$TOOLS/mock_llm.py" \
-    --port "$PORT" \
-    --log "$MOCK_LOG" \
-    --models-count 20 \
-    --chunk-delay-ms 15 \
-    > "$dir/mock.out" 2>&1 &
+  if [ "${#MOCK_ENV_ARGS[@]}" -gt 0 ]; then
+    env "${MOCK_ENV_ARGS[@]}" python3 "$TOOLS/mock_llm.py" \
+      --port "$PORT" \
+      --log "$MOCK_LOG" \
+      --models-count 20 \
+      --chunk-delay-ms 15 \
+      > "$dir/mock.out" 2>&1 &
+  else
+    python3 "$TOOLS/mock_llm.py" \
+      --port "$PORT" \
+      --log "$MOCK_LOG" \
+      --models-count 20 \
+      --chunk-delay-ms 15 \
+      > "$dir/mock.out" 2>&1 &
+  fi
   MOCK_PID=$!
   local i
   for i in $(seq 1 100); do
@@ -236,6 +252,8 @@ env_prefix() { # writes env flags into ENV_ARGS array
 
 begin_scenario() { # $1 name, $2 cols, $3 rows
   SCEN_NAME="$1"; COLS="$2"; ROWS="$3"
+  # 每个场景从「mock 默认行为」开始；场景可在 start_mock 之前覆盖。
+  MOCK_ENV_ARGS=()
   SCEN_INDEX=$((SCEN_INDEX + 1))
   SCEN_DIR="$EVID/$SCEN_NAME"
   rm -rf "$SCEN_DIR"
@@ -630,6 +648,83 @@ scn_ask_loop() {
   end_scenario
 }
 
+scn_ask_resume() {
+  # 工单 ask-resume（冻结契约 §3「PTY 端到端」）：**模型发起**的真实 Ask 闭环续轮。
+  #   发普通消息 → 首轮 mock 返回 tool_call=Ask → 治理管道落真实 pending request →
+  #   面板出现 → 用户按 ↵ 作答 → **本轮必须继续**产出下一段 assistant 文本（FINAL_TEXT）。
+  # 红相（C1/C2 未落地）：作答后宿主不再发 provider 请求，屏幕停在原处 ⇒ 本场景 FAIL。
+  # 只有本场景 mock 带 MOCK_TOOL=ask；其它场景的 mock 行为不受影响。
+  begin_scenario ask-resume 120 34
+  prepare_iso
+  MOCK_ENV_ARGS=(MOCK_TOOL=ask)
+  start_mock "$SCEN_DIR"
+  make_fixture "$ISO" "$PORT"
+  env_prefix
+  SCEN_RUNTIME_LOG="$SCEN_DIR/tui-runtime.log"
+  : > "$SCEN_RUNTIME_LOG"
+  SCEN_RUNTIME_LOG_OFFSET="$(stat -c%s "$SCEN_RUNTIME_LOG" 2>/dev/null || echo 0)"
+  ENV_ARGS+=("PONY_TUI_RUNTIME_LOG=$SCEN_RUNTIME_LOG")
+  # 经 bash 启动，才能拿到**真实进程退出码**（AUDIT_EXIT=），而不是只看 pane 内容。
+  tmux -L "$SOCK" new-session -d -s "$SESS" -x "$COLS" -y "$ROWS" -c "$ROOT" \
+    /bin/bash --noprofile --norc -i >/dev/null 2>&1 || die "tmux new-session failed ($SESS)"
+  sleep 0.8
+  local cmd
+  cmd="$(printf '%q ' "${ENV_ARGS[@]}")$BIN"
+  read_pane_size
+  tmux -L "$SOCK" send-keys -t "$SESS" "$cmd; echo AUDIT_EXIT=\$?" Enter
+  wait_ready || warn "ask-resume: TUI did not show composer prompt"
+  sleep 0.4
+
+  # 1) 普通消息触发一轮真实 turn（不是 --demo 注入，也不是 PONY_AUDIT_ASK_BOOTSTRAP）。
+  #    文案刻意不含文件路径/检索意图：本地 planner preflight 若命中路径会自己先跑
+  #    workspace_gather_context，模型就没机会发起 Ask（实测 0 次 provider 请求）。
+  send_line "帮我确认一下下一步的方向"
+  wait_for "$SESS" "继续吗？" 25 || warn "ask-resume: model-initiated ask panel not seen"
+  sleep 0.6
+  capture "$SESS" "$SCEN_DIR" panel
+
+  # 2) 作答：默认焦点即第一个选项「继续」，↵ 走真实 answer_ask + graph_resume_ask。
+  send_key Enter
+  # 等面板真的收口（DOM 级固定 sleep 在续轮较快的机器上会截到半态帧）。
+  local j
+  for j in $(seq 1 50); do
+    if ! tmux -L "$SOCK" capture-pane -t "$SESS" -p 2>/dev/null | grep -q "继续吗？"; then
+      break
+    fi
+    sleep 0.2
+  done
+  capture "$SESS" "$SCEN_DIR" answered
+
+  # 3) 关键观测点：作答后本轮必须继续（模型第二段 assistant 文本落到屏幕）。
+  wait_for "$SESS" "0\.1\.125" 20 || warn "ask-resume: continuation assistant text not seen after answering"
+  wait_for "$SESS" "$TURN_SETTLED_RE" 15 || warn "ask-resume: resumed turn metrics not seen"
+  sleep 0.5
+  capture "$SESS" "$SCEN_DIR" resumed
+
+  # 4) 真实退出码收口：Esc 先取消可能残留的流式态；空草稿时 Ctrl+C 直接退出
+  #    （流式中单按只中断本轮，故最多重试 3 次）；仍不退则退回 /quit。
+  #    红相下本轮卡在流式态、连退都退不掉 —— 这一步就如实报「拿不到真实退出码」。
+  send_key Escape
+  sleep 0.5
+  local i
+  for i in 1 2 3; do
+    if tmux -L "$SOCK" capture-pane -t "$SESS" -p 2>/dev/null | grep -q "AUDIT_EXIT="; then
+      break
+    fi
+    send_key C-c
+    sleep 0.9
+  done
+  if ! tmux -L "$SOCK" capture-pane -t "$SESS" -p 2>/dev/null | grep -q "AUDIT_EXIT="; then
+    send_line "/quit"
+    sleep 1.0
+  fi
+  wait_for "$SESS" "AUDIT_EXIT=" 20 || warn "ask-resume: process exit marker not seen"
+  sleep 0.3
+  capture "$SESS" "$SCEN_DIR" exit
+  write_extra "{\"mock_log\": \"$MOCK_LOG\"}"
+  end_scenario
+}
+
 scn_contrast() {
   begin_tui_scenario contrast 120 34
   sleep 0.4
@@ -780,8 +875,8 @@ scn_cli_modes() {
 # ---------------------------------------------------------------------------
 for scenario in empty conversation slash-menu models-panel provider-panel \
                 sessions-panel add-provider streaming error narrow wide \
-                scrolled help paste-multiline resize-invalidate ask-panel ask-loop contrast \
-                ctrl-c input-edit non-tty cli-modes; do
+                scrolled help paste-multiline resize-invalidate ask-panel ask-loop \
+                ask-resume contrast ctrl-c input-edit non-tty cli-modes; do
   if ! should_run "$scenario"; then
     continue
   fi
@@ -803,6 +898,7 @@ for scenario in empty conversation slash-menu models-panel provider-panel \
     resize-invalidate) scn_resize_invalidate ;;
     ask-panel) scn_ask_panel ;;
     ask-loop) scn_ask_loop ;;
+    ask-resume) scn_ask_resume ;;
     contrast) scn_contrast ;;
     ctrl-c) scn_ctrl_c ;;
     input-edit) scn_input_edit ;;
