@@ -100,7 +100,7 @@ describe("AskPanel", () => {
     expect(wrapper.get('[data-testid="ask-options"]').text()).toContain("继续");
     expect(wrapper.get('[data-testid="ask-options"]').text()).toContain("暂停");
     expect(wrapper.get('[data-testid="ask-answer-submit"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="ask-cancel-submit"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="ask-ignore-submit"]').exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -161,7 +161,7 @@ describe("AskPanel", () => {
     await wrapper.vm.$nextTick();
 
     expect(wrapper.get('[data-testid="ask-answer-submit"]').attributes("disabled")).toBeDefined();
-    expect(wrapper.get('[data-testid="ask-cancel-submit"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="ask-ignore-submit"]').attributes("disabled")).toBeDefined();
     wrapper.unmount();
   });
 });

@@ -274,81 +274,114 @@ fn test_c4_2_replay_after_consumption_must_fail_and_must_not_resurrect() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// C4-3 时钟超期注入
+// C4-3（ADR 0074 重冻）：重放 / 版本不符 / nonce 不符 → fail-closed；时钟**不参与**判定
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// 旧语义（已废止）：`FakeClock` 越过 `expires_at_ms` ⇒ 作答/取消 fail-closed ⇒ 显式 expire 对账。
+// 新语义（ADR 0074 §4/§5）：TTL 退出产品语义，时间既不拒绝作答也不清空列表；破坏注入改为
+// **版本/nonce 重放**，只有 CAS 事实不符才 fail-closed。
 
-/// C4-3：`FakeClock` 推进到 `expires_at_ms + 1` 后，`answer_ask` / `cancel_ask`
-/// 必须 fail-closed（Err）且 `pending_request(id).state` 仍为 `Pending`；
-/// 随后 `dispatcher.expire_control_requests(now)` → `list_pending_asks` 必须为空。
-///
-/// 红相预期：超期 fail-closed 与「不经对账不改状态」成立；`expire_control_requests`
-/// 后列表清空**不成立**（该函数把 state 置为 Expired，但列表未按 state 过滤 → 仍列出）。
 #[test]
-fn test_c4_3_expired_ask_fails_closed_then_expiry_reconciles_the_list() {
+fn test_c4_3_replay_and_stale_version_fail_closed_without_clock_gating() {
     use pony_agent_core::agent::tool_runtime::RuntimeClock;
 
     let (dispatcher, clock) = ask_dispatcher();
     let (request_id, pending) = persist_ask(&dispatcher, "call-c4-3", "session-c4-3");
 
-    // 基线：未超期时列表可见该请求（证明后续失败不是「本来就列不出来」）。
-    let visible = list_pending_asks(&dispatcher);
+    // 基线：新 Ask 必须可列出（证明后续失败不是「本来就列不出来」）。
     assert!(
-        visible.iter().any(|ask| ask.request_id == request_id),
-        "baseline: the fresh ask must be visible before expiry injection"
+        list_pending_asks(&dispatcher)
+            .iter()
+            .any(|ask| ask.request_id == request_id),
+        "baseline: the fresh ask must be visible before the adversarial injections"
     );
 
-    // 注入：推进到 expires_at_ms + 1。
-    let expired_now = pending.expires_at_ms + 1;
-    clock.set_now_ms(expired_now);
-    assert_eq!(clock.now_ms(), expired_now);
+    // 注入 1（时钟）：越过旧 TTL 一整天 —— 不得改变可作答性，也不得被 expire 收走。
+    let long_after_ttl = pending.expires_at_ms + 24 * 60 * 60 * 1_000;
+    clock.set_now_ms(long_after_ttl);
+    assert_eq!(clock.now_ms(), long_after_ttl);
     assert!(
-        expired_now > pending.expires_at_ms,
-        "clock injection must strictly exceed the request TTL"
+        long_after_ttl > pending.expires_at_ms,
+        "clock injection must strictly exceed the legacy TTL"
+    );
+    assert_eq!(
+        dispatcher.expire_control_requests(long_after_ttl),
+        0,
+        "ADR 0074：expire_control_requests 只作用于 Approval，不得把 Ask 置为 Expired"
+    );
+    assert_eq!(
+        list_pending_asks(&dispatcher).len(),
+        1,
+        "时间不得把未决 Ask 从待决列表抹掉"
     );
 
+    // 注入 2（版本重放）：篡改 expected_version 必须 fail-closed，且不得改动记录。
+    let mut stale_version =
+        ControlRequestAuthorization::for_request(&pending, Some(serde_json::json!("是")));
+    stale_version.expected_version = pending.version + 1;
+    assert!(
+        answer_ask(&dispatcher, &request_id, &stale_version).is_err(),
+        "版本不符的作答必须 fail-closed"
+    );
+    assert!(
+        cancel_ask(&dispatcher, &request_id, &stale_version).is_err(),
+        "版本不符的取消必须 fail-closed"
+    );
+    let after_reject = dispatcher
+        .pending_request(&request_id)
+        .expect("rejected submissions must leave the record readable");
+    assert_eq!(
+        after_reject.state,
+        PendingControlRequestState::Pending,
+        "被拒绝的提交不得改变状态"
+    );
+    assert_eq!(
+        after_reject.version, pending.version,
+        "被拒绝的提交不得自增版本"
+    );
+
+    // 注入 3（nonce 伪造）：跨实例重放的等价注入，必须 fail-closed。
+    let mut stale_nonce =
+        ControlRequestAuthorization::for_request(&pending, Some(serde_json::json!("是")));
+    stale_nonce.nonce = "nonce-forged-by-adversary".to_string();
+    assert!(
+        answer_ask(&dispatcher, &request_id, &stale_nonce).is_err(),
+        "nonce 不符的作答必须 fail-closed"
+    );
+
+    // 正向对照：时钟早已越过旧 TTL，正确的 version/nonce 仍必须作答成功。
     let authorization =
         ControlRequestAuthorization::for_request(&pending, Some(serde_json::json!("是")));
+    let consumed = answer_ask(&dispatcher, &request_id, &authorization)
+        .expect("ADR 0074：时钟不得拒绝作答（TTL 已退出产品语义）");
+    assert_eq!(
+        consumed.request.state,
+        PendingControlRequestState::Consumed,
+        "作答必须把状态推进到 Consumed"
+    );
+    assert_eq!(
+        consumed.request.version,
+        pending.version + 1,
+        "成功作答必须恰好自增一次版本"
+    );
+    assert_eq!(
+        consumed.answer,
+        Some(serde_json::json!("是")),
+        "作答载荷必须原样回传"
+    );
+
+    // 重放已消费的授权：作答/取消都必须 fail-closed。
     assert!(
         answer_ask(&dispatcher, &request_id, &authorization).is_err(),
-        "answering an expired ask must fail closed"
+        "重放同一授权必须 fail-closed"
     );
     assert!(
         cancel_ask(&dispatcher, &request_id, &authorization).is_err(),
-        "cancelling an expired ask must fail closed"
+        "对已消费请求的取消必须 fail-closed"
     );
-
-    // 失败的提交不得改变状态（仅 `expire_control_requests` 可迁移到 Expired）。
-    let after_failed = dispatcher
-        .pending_request(&request_id)
-        .expect("expired-but-unreconciled ask must remain readable");
-    assert_eq!(
-        after_failed.state,
-        PendingControlRequestState::Pending,
-        "failed expired submissions must leave state == Pending until explicit reconciliation"
-    );
-    assert_eq!(
-        after_failed.version, 1,
-        "failed expired submissions must not bump the version"
-    );
-
-    // 宿主对账：显式过期迁移。
-    let expired_count = dispatcher.expire_control_requests(expired_now);
-    assert_eq!(
-        expired_count, 1,
-        "exactly the single stale ask must transition to Expired"
-    );
-    let reconciled = dispatcher
-        .pending_request(&request_id)
-        .expect("reconciled ask must remain readable");
-    assert_eq!(reconciled.state, PendingControlRequestState::Expired);
-
-    // SUT 列表投影：对账后必须清空。
-    let asks = list_pending_asks(&dispatcher);
     assert!(
-        asks.is_empty(),
-        "after expire_control_requests, list_pending_asks must be empty, \
-         but it still lists {:?}",
-        asks.iter().map(|ask| &ask.request_id).collect::<Vec<_>>()
+        list_pending_asks(&dispatcher).is_empty(),
+        "已作答的 Ask 不得再出现在待决列表"
     );
 }
 

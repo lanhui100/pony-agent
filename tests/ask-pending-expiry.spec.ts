@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { isAskExpired, useAskStore, ASK_POLL_INTERVAL_MS } from "@/stores/ask";
+import * as askStoreModule from "@/stores/ask";
+import { ASK_POLL_INTERVAL_MS, ASK_STALE_MESSAGE, useAskStore } from "@/stores/ask";
 import type { PendingAsk } from "@/types/ask-plan";
 
-// Wave-15 red-phase acceptance (frozen contract `.dev-team/contracts/wave-15-ask-cas.md`):
-// C2-1 ~ C2-3 — a locally expired Ask must never be submitted to the host CAS path; it must be
-// reconciled through `ask_expire` + `ask_list_pending` with an explicit 「过期」 message, while a
-// still-live Ask keeps submitting with the version observed at listing time.
+// 波次 T3 / ADR 0074 重冻（取代 Wave-15 C2-1 ~ C2-9 的「本地过期判定」语义）：
+//
+// 旧契约（已废止）：本地时钟越过 `expiresAtMs` ⇒ 不提交 CAS、改走 `ask_expire` 对账、显示「过期」。
+// 新契约（`.dev-team/contract-matrix-ask-persistence.md` §4/§5/§6、ADR 0074）：
+//   1. 墙钟 TTL **退出产品语义**：客户端不得用本地时钟预判可否提交，也不得导出本地过期判定面；
+//   2. 是否可作答只由宿主生命周期决定（宿主只列出 `Pending`）；陈旧 CAS 被拒 ⇒ 重新 list +
+//      统一中文提示 `ASK_STALE_MESSAGE`，禁止上屏宿主英文内部串；
+//   3. `ask_expire` 退化为 **GC 房管**（归档会话 `Orphaned` / 保留期），绝不再把 `Pending` 变死；
+//   4. 显式忽略走 `ask_cancel`（生命周期 `Cancelled`），与「新用户消息 Superseded」区分。
+//
+// 断言纪律：全部落在 SUT 可观察面（IPC 调用序列、store 快照、用户可见文案）上。
 
 const tauriMocks = vi.hoisted(() => ({
   mockSafeInvoke: vi.fn(),
@@ -45,37 +53,13 @@ function commands(): string[] {
   return tauriMocks.mockSafeInvoke.mock.calls.map(([command]) => String(command));
 }
 
-/**
- * The IPC names that make up the refresh/expiry conversation, in call order. Filtering out
- * unrelated commands (graph/answer/cancel) keeps the C2-6 sequence assertion exact without
- * coupling it to incidental traffic.
- */
-function reconcileCommands(): string[] {
+function gatedCommands(): string[] {
   return commands().filter((command) =>
-    ["ask_list_pending", "ask_expire"].includes(command)
+    ["ask_list_pending", "ask_expire", "ask_answer", "ask_cancel"].includes(command)
   );
 }
 
-/**
- * Host mock for the expired-Ask path: the first `ask_list_pending` still returns the stale
- * (terminal, re-listed) request — exactly the symptom the user hit — and every later list returns
- * the reconciled, empty truth after `ask_expire`.
- */
-function mockExpiredAskHost(expired: PendingAsk) {
-  let listCalls = 0;
-  tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-    if (command === "ask_list_pending") {
-      listCalls += 1;
-      return Promise.resolve(listCalls === 1 ? [expired] : []);
-    }
-    if (command === "ask_expire") {
-      return Promise.resolve({ expired: 1, nowMs: Date.now() });
-    }
-    return Promise.resolve(null);
-  });
-}
-
-describe("ask store — local expiry guard", () => {
+describe("ask store — 无墙钟过期判定（ADR 0074 重冻）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setActivePinia(createPinia());
@@ -87,92 +71,81 @@ describe("ask store — local expiry guard", () => {
     vi.useRealTimers();
   });
 
-  it("C2-1/C2-2: cancel never submits an already-expired ask and reconciles via ask_expire", async () => {
-    // Arrange: model the ≤2.5s window in which a stale card is still on screen. The snapshot is
-    // injected directly — going through `refresh()` would let the C2-6 auto-reconcile clear the
-    // card before the click even happens (fixture conflict, Lead ruling §9 ①).
-    const expired = createPendingAsk({
+  it("C2-1（重冻）：expiresAtMs 早已过去也必须提交 ask_cancel（时间不参与判定）", async () => {
+    // Arrange: 旧语义下这张卡是「本地已过期」——必须不提交 CAS 并改走 ask_expire。
+    const stale = createPendingAsk({
       requestId: "ask-1",
       version: 2,
-      expiresAtMs: Date.now() - 1_000
-    });
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      // After the click the host has already transitioned the request: the re-list is empty.
-      if (command === "ask_list_pending") {
-        return Promise.resolve([]);
-      }
-      if (command === "ask_expire") {
-        return Promise.resolve({ expired: 1, nowMs: Date.now() });
-      }
-      return Promise.resolve(null);
-    });
-    const store = useAskStore();
-    store.pendingAsks = [expired];
-    store.lastRefreshMs = Date.now();
-    expect(store.pendingAsks.map((ask) => ask.requestId)).toEqual(["ask-1"]);
-
-    // Act
-    await store.cancel(expired);
-
-    // Assert (C2-1): the doomed CAS call must never leave the frontend.
-    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("ask_cancel", expect.anything());
-
-    // Assert (C2-2): reconciliation is `ask_expire` followed by an `ask_list_pending` refresh.
-    const sent = commands();
-    const expireIndex = sent.indexOf("ask_expire");
-    const lastListIndex = sent.lastIndexOf("ask_list_pending");
-    expect(expireIndex).toBeGreaterThan(-1);
-    expect(lastListIndex).toBeGreaterThan(expireIndex);
-    expect(store.pendingAsks).toEqual([]);
-
-    // Assert (C2-2): the user gets a Chinese message naming the expiry, not the bare CAS text.
-    expect(store.error).toContain("过期");
-    expect(String(store.error)).not.toContain("cannot be consumed");
-  });
-
-  it("C2-1/C2-2: answer never submits an already-expired ask and reconciles via ask_expire", async () => {
-    // Arrange: same stale-card window as the cancel leg, injected directly (Lead ruling §9 ④).
-    const expired = createPendingAsk({
-      requestId: "ask-1",
-      version: 2,
-      expiresAtMs: Date.now() - 1_000
+      expiresAtMs: Date.now() - 60_000
     });
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
       if (command === "ask_list_pending") {
         return Promise.resolve([]);
       }
-      if (command === "ask_expire") {
-        return Promise.resolve({ expired: 1, nowMs: Date.now() });
+      if (command === "ask_cancel") {
+        return Promise.resolve({ requestId: "ask-1" });
       }
       return Promise.resolve(null);
     });
     const store = useAskStore();
-    store.pendingAsks = [expired];
-    store.lastRefreshMs = Date.now();
+    store.pendingAsks = [stale];
 
     // Act
-    await store.answer(expired, "x");
+    await store.cancel(stale);
 
-    // Assert (C2-1)
-    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("ask_answer", expect.anything());
-    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("ask_cancel", expect.anything());
+    // Assert: 正常 CAS 提交（用列表 version）。
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_cancel", {
+      requestId: "ask-1",
+      expectedVersion: 2,
+      version: 2
+    });
 
-    // Assert (C2-2)
-    const sent = commands();
-    const expireIndex = sent.indexOf("ask_expire");
-    const lastListIndex = sent.lastIndexOf("ask_list_pending");
-    expect(expireIndex).toBeGreaterThan(-1);
-    expect(lastListIndex).toBeGreaterThan(expireIndex);
-    expect(store.pendingAsks).toEqual([]);
-    expect(store.error).toContain("过期");
+    // Assert: 不得出现任何「过期对账」调用，也不得出现「过期」文案。
+    expect(commands()).not.toContain("ask_expire");
+    expect(String(store.error ?? "")).not.toContain("过期");
   });
 
-  it("C2-1: a zero/absent TTL is treated as non-expiring, not as expired", async () => {
-    // Arrange: `expiresAtMs <= 0` means "no TTL" in the host projection.
+  it("C2-1（重冻）：expiresAtMs 早已过去也必须提交 ask_answer", async () => {
+    // Arrange
+    const stale = createPendingAsk({
+      requestId: "ask-1",
+      version: 4,
+      expiresAtMs: 1_000
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_list_pending") {
+        return Promise.resolve([]);
+      }
+      if (command === "ask_answer") {
+        return Promise.resolve({ requestId: "ask-1" });
+      }
+      return Promise.resolve(null);
+    });
+    const store = useAskStore();
+    store.pendingAsks = [stale];
+
+    // Act
+    await store.answer(stale, "是");
+
+    // Assert
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_answer", {
+      requestId: "ask-1",
+      expectedVersion: 4,
+      version: 4,
+      answer: "是"
+    });
+    expect(commands()).not.toContain("ask_expire");
+    expect(String(store.error ?? "")).not.toContain("过期");
+  });
+
+  it("C2-1（重冻）：expiresAtMs = 0 / 缺失同样走正常提交路径（无 TTL 分支）", async () => {
+    // Arrange: 旧语义下 `<= 0` 是「无 TTL」特例；新语义下**所有**取值都是同一分支。
     const noTtl = createPendingAsk({ requestId: "ask-1", version: 4, expiresAtMs: 0 });
+    const missing = createPendingAsk({ requestId: "ask-2", version: 5 });
+    delete (missing as { expiresAtMs?: number }).expiresAtMs;
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
       if (command === "ask_list_pending") {
-        return Promise.resolve([noTtl]);
+        return Promise.resolve([noTtl, missing]);
       }
       if (command === "ask_cancel") {
         return Promise.resolve({ requestId: "ask-1" });
@@ -184,189 +157,29 @@ describe("ask store — local expiry guard", () => {
 
     // Act
     await store.cancel(noTtl);
+    await store.cancel(missing);
 
-    // Assert: no-TTL requests keep the normal CAS submission path.
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_cancel", {
-      requestId: "ask-1",
-      expectedVersion: 4,
-      version: 4
-    });
+    // Assert: 两次都是 CAS 提交，版本取列表快照。
+    const cancelCalls = tauriMocks.mockSafeInvoke.mock.calls.filter(
+      ([command]) => String(command) === "ask_cancel"
+    );
+    expect(cancelCalls.map(([, payload]) => payload)).toEqual([
+      { requestId: "ask-1", expectedVersion: 4, version: 4 },
+      { requestId: "ask-2", expectedVersion: 5, version: 5 }
+    ]);
     expect(commands()).not.toContain("ask_expire");
   });
 
-  it("C2-3: a live ask still cancels and answers with the version observed at listing time", async () => {
-    // Arrange
-    const live = createPendingAsk({
-      requestId: "ask-1",
-      version: 3,
-      expiresAtMs: Date.now() + 60_000
-    });
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "ask_list_pending") {
-        return Promise.resolve([live]);
-      }
-      if (command === "ask_cancel") {
-        return Promise.resolve({ requestId: "ask-1" });
-      }
-      if (command === "ask_answer") {
-        return Promise.resolve({ requestId: "ask-1", answer: "x" });
-      }
-      return Promise.resolve(null);
-    });
-    const store = useAskStore();
-    await store.refresh();
-
-    // Act
-    await store.cancel(live);
-
-    // Assert
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_cancel", {
-      requestId: "ask-1",
-      expectedVersion: 3,
-      version: 3
-    });
-    expect(commands()).not.toContain("ask_expire");
-
-    // Act 2: a second live ask goes through `ask_answer` with the same CAS shape.
-    const liveAnswer = createPendingAsk({
-      requestId: "ask-2",
-      version: 5,
-      expiresAtMs: Date.now() + 60_000
-    });
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "ask_list_pending") {
-        return Promise.resolve([liveAnswer]);
-      }
-      if (command === "ask_answer") {
-        return Promise.resolve({ requestId: "ask-2", answer: "x" });
-      }
-      return Promise.resolve(null);
-    });
-    await store.refresh();
-
-    // Act
-    await store.answer(liveAnswer, "x");
-
-    // Assert
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_answer", {
-      requestId: "ask-2",
-      expectedVersion: 5,
-      version: 5,
-      answer: "x"
-    });
-    expect(commands()).not.toContain("ask_expire");
+  it("C2-5（重冻）：store 不得再导出本地过期判定面 isAskExpired", () => {
+    // 契约 §4：TTL 不再是拒绝理由，客户端也不允许保留本地墙钟判死面（否则会再次产生
+    // 「本地判定 vs 宿主真相」两套语义）。
+    expect(Object.keys(askStoreModule)).not.toContain("isAskExpired");
+    expect(typeof (askStoreModule as Record<string, unknown>).isAskExpired).toBe("undefined");
   });
 
-  it("C2-3: an ask expiring only later is not treated as expired at submit time", async () => {
-    // Arrange: a comfortable margin so a busy CI/desktop load cannot cross the TTL mid-test
-    // (the previous `Date.now() + 1` fixture was flaky by construction; wave-16 修订 2).
-    const almost = createPendingAsk({
-      requestId: "ask-1",
-      version: 7,
-      expiresAtMs: Date.now() + 60_000
-    });
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "ask_list_pending") {
-        return Promise.resolve([almost]);
-      }
-      if (command === "ask_answer") {
-        return Promise.resolve({ requestId: "ask-1", answer: "是" });
-      }
-      return Promise.resolve(null);
-    });
-    const store = useAskStore();
-    await store.refresh();
-
-    // Act
-    await store.answer(almost, "是");
-
-    // Assert
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_answer", {
-      requestId: "ask-1",
-      expectedVersion: 7,
-      version: 7,
-      answer: "是"
-    });
-  });
-
-  it("C2-5: isAskExpired mirrors the host boundary `expiresAtMs < now` exactly", () => {
-    // Arrange: a fixed clock keeps the boundary assertions deterministic (no load flakiness).
-    const now = 1_700_000_000_000;
-
-    // Act + Assert: `expiresAtMs === now` is still host-consumable
-    // (`can_consume`: `now_ms <= expires_at_ms`), so it must NOT be reported as expired.
-    expect(isAskExpired({ expiresAtMs: now }, now)).toBe(false);
-
-    // One millisecond past the boundary is genuinely expired.
-    expect(isAskExpired({ expiresAtMs: now - 1 }, now)).toBe(true);
-    expect(isAskExpired({ expiresAtMs: now }, now + 1)).toBe(true);
-
-    // A long-lived / just-listed request is live.
-    expect(isAskExpired({ expiresAtMs: now + 1 }, now)).toBe(false);
-
-    // `expiresAtMs <= 0` means "no TTL", never "expired".
-    expect(isAskExpired({ expiresAtMs: 0 }, now)).toBe(false);
-    expect(isAskExpired({ expiresAtMs: -1 }, now)).toBe(false);
-    expect(isAskExpired({ expiresAtMs: 0 }, Date.now())).toBe(false);
-
-    // Degenerate inputs must not throw and must not be treated as expired.
-    expect(isAskExpired(null, now)).toBe(false);
-    expect(isAskExpired(undefined, now)).toBe(false);
-  });
-
-  it("C2-6: refresh auto-reconciles a locally expired ask (list → expire → list)", async () => {
-    // Arrange: the panel disables every control of an expired card, so `answer`/`cancel` — the
-    // only other `ask_expire` callers — are unreachable from the UI. `refresh` itself must
-    // reconcile, otherwise the card and its `WaitingUser` run are stuck forever.
-    const expired = createPendingAsk({
-      requestId: "ask-1",
-      version: 2,
-      expiresAtMs: Date.now() - 1_000
-    });
-    mockExpiredAskHost(expired);
-    const store = useAskStore();
-
-    // Act
-    await store.refresh();
-
-    // Assert (C2-6.1): exactly one expire + one re-list, in order, no recursion / no storm.
-    expect(reconcileCommands()).toEqual(["ask_list_pending", "ask_expire", "ask_list_pending"]);
-
-    // Assert (C2-6.2): the reconciled snapshot no longer carries the expired request.
-    expect(store.pendingAsks).toEqual([]);
-
-    // Assert (C2-6.1b, §7.1): a refresh-driven *successful* reconcile is silent — a residual
-    // message would outlive the emptied list (polling self-terminates) and stick to the card.
-    expect(store.error).toBeFalsy();
-  });
-
-  it("C2-6: a live snapshot produces no extra ask_expire IPC (zero side effects)", async () => {
-    // Arrange: every poll tick lists a live ask; an unconditional expire would be a write storm.
-    const live = createPendingAsk({
-      requestId: "ask-1",
-      version: 3,
-      expiresAtMs: Date.now() + 60_000
-    });
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "ask_list_pending") {
-        return Promise.resolve([live]);
-      }
-      return Promise.resolve(null);
-    });
-    const store = useAskStore();
-
-    // Act
-    await store.refresh();
-
-    // Assert
-    expect(reconcileCommands()).toEqual(["ask_list_pending"]);
-    expect(store.pendingAsks.map((ask) => ask.requestId)).toEqual(["ask-1"]);
-  });
-
-  it("C2-6: a failing ask_expire is surfaced and still re-lists the snapshot", async () => {
-    // Arrange: the expire write fails (host unreachable); the failure must not be swallowed and
-    // must not stop the re-list that is the whole point of the reconcile.
-    const expired = createPendingAsk({
+  it("C2-6（重冻）：refresh 不得自动 ask_expire 对账（列表即宿主真相）", async () => {
+    // Arrange: 宿主已经不再返回该请求（已被忽略/取代/作答）。
+    const stale = createPendingAsk({
       requestId: "ask-1",
       version: 2,
       expiresAtMs: Date.now() - 1_000
@@ -375,7 +188,28 @@ describe("ask store — local expiry guard", () => {
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
       if (command === "ask_list_pending") {
         listCalls += 1;
-        return Promise.resolve(listCalls === 1 ? [expired] : []);
+        return Promise.resolve(listCalls === 1 ? [stale] : []);
+      }
+      return Promise.resolve(null);
+    });
+    const store = useAskStore();
+
+    // Act
+    await store.refresh();
+    expect(store.pendingAsks.map((ask) => ask.requestId)).toEqual(["ask-1"]);
+    await store.refresh();
+
+    // Assert: 只有 list，没有 expire；卡片随宿主列表消失。
+    expect(gatedCommands()).toEqual(["ask_list_pending", "ask_list_pending"]);
+    expect(store.pendingAsks).toEqual([]);
+    expect(store.error).toBeFalsy();
+  });
+
+  it("C2-6（重冻）：显式 expire() 是 GC 房管——失败要可见且仍重新 list", async () => {
+    // Arrange: 归档会话 GC 失败（宿主不可达）。
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_list_pending") {
+        return Promise.resolve([]);
       }
       if (command === "ask_expire") {
         return Promise.reject(new Error("host unreachable"));
@@ -385,24 +219,18 @@ describe("ask store — local expiry guard", () => {
     const store = useAskStore();
 
     // Act
-    await store.refresh();
+    const result = await store.expire();
 
-    // Assert (C2-6.3): the failure is visible to the user…
+    // Assert: 失败可见、返回 null，且不得伪造一次「成功对账」的本地状态。
+    expect(result).toBeNull();
     expect(store.error).toBeTruthy();
-
-    // …and the re-list still ran, so the snapshot reflects host truth.
-    expect(reconcileCommands()).toEqual(["ask_list_pending", "ask_expire", "ask_list_pending"]);
+    expect(gatedCommands()).toEqual(["ask_expire"]);
     expect(store.pendingAsks).toEqual([]);
+    // 「清理」语义而不是「过期」语义：文案不得把 Pending 说成过期。
+    expect(String(store.error)).not.toContain("过期");
   });
 
-  // ── C2-7: the submit instant decides expiry, never the frozen listing snapshot ──────────────
-  //
-  // Scenario from review A finding 1: polling self-terminates on an empty list, so a later Ask is
-  // listed exclusively by a `turn:suspended` refresh. `lastRefreshMs` freezes at that instant T;
-  // a user who then waits past the TTL submits a request that is expired by the wall clock while
-  // `expiresAtMs < T` is still false. Judging by the snapshot therefore leaks a doomed CAS.
-
-  it("C2-7: cancel after the TTL must use the submit-time clock, not the listing snapshot", async () => {
+  it("C2-7（重冻）：墙钟越过旧 TTL 后 cancel 仍必须提交 CAS（提交时刻不判死）", async () => {
     // Arrange
     vi.useFakeTimers();
     const ask = createPendingAsk({
@@ -414,8 +242,8 @@ describe("ask store — local expiry guard", () => {
       if (command === "ask_list_pending") {
         return Promise.resolve([ask]);
       }
-      if (command === "ask_expire") {
-        return Promise.resolve({ expired: 1, nowMs: Date.now() });
+      if (command === "ask_cancel") {
+        return Promise.resolve({ requestId: "ask-1" });
       }
       return Promise.resolve(null);
     });
@@ -423,54 +251,83 @@ describe("ask store — local expiry guard", () => {
     await store.refresh();
     expect(store.lastRefreshMs).toBe(Date.now());
 
-    // Act: the wall clock crosses the TTL without any new list snapshot.
+    // Act: 墙钟越过旧 TTL（不产生新的列表快照）。
     vi.advanceTimersByTime(6_000);
     expect(Date.now()).toBeGreaterThan(ask.expiresAtMs);
     await store.cancel(ask);
 
-    // Assert: no doomed CAS, an expire reconcile instead, and an explicit expiry hint.
-    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("ask_cancel", expect.anything());
-    expect(commands()).toContain("ask_expire");
-    expect(store.error).toContain("过期");
+    // Assert: 仍然提交 ask_cancel（旧语义此处必须“不提交 + expire 对账”）。
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_cancel", {
+      requestId: "ask-1",
+      expectedVersion: 2,
+      version: 2
+    });
+    expect(commands()).not.toContain("ask_expire");
+    expect(String(store.error ?? "")).not.toContain("过期");
 
     store.stopPolling();
   });
 
-  it("C2-7: answer after the TTL must use the submit-time clock, not the listing snapshot", async () => {
+  it("C2-9（重冻）：双击忽略只发一次 ask_cancel（单飞），不得双提交", async () => {
     // Arrange
-    vi.useFakeTimers();
-    const ask = createPendingAsk({
-      requestId: "ask-1",
-      version: 2,
-      expiresAtMs: Date.now() + 5_000
+    const ask = createPendingAsk({ requestId: "ask-1", version: 2 });
+    let resolveCancel: (value: unknown) => void = () => {};
+    const cancelPromise = new Promise((resolve) => {
+      resolveCancel = resolve;
     });
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
       if (command === "ask_list_pending") {
         return Promise.resolve([ask]);
       }
-      if (command === "ask_expire") {
-        return Promise.resolve({ expired: 1, nowMs: Date.now() });
+      if (command === "ask_cancel") {
+        return cancelPromise;
       }
       return Promise.resolve(null);
     });
     const store = useAskStore();
-    await store.refresh();
+    store.pendingAsks = [ask];
 
-    // Act
-    vi.advanceTimersByTime(6_000);
-    await store.answer(ask, "x");
+    // Act: 双击——两次调用都在第一次完成前发起。
+    const first = store.ignore(ask);
+    const second = store.ignore(ask);
+    resolveCancel({ requestId: "ask-1" });
+    const results = await Promise.all([first, second]);
 
-    // Assert
-    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("ask_answer", expect.anything());
-    expect(commands()).toContain("ask_expire");
-    expect(store.error).toContain("过期");
+    // Assert: 只有一次真实 CAS 提交，第二次被单飞挡下（返回 null）。
+    const cancelCalls = commands().filter((command) => command === "ask_cancel");
+    expect(cancelCalls).toHaveLength(1);
+    expect(results.filter((value) => value != null)).toHaveLength(1);
+    expect(store.pendingAsks).toEqual([]);
   });
 
-  // ── C2-8: a non-empty refresh must restart the self-terminated poll ─────────────────────────
+  it("C2-9b（重冻）：陈旧 CAS 被拒 ⇒ 重新 list + 统一中文失效提示（不上屏宿主英文）", async () => {
+    // Arrange: 宿主已把该请求交出（作答/取代/忽略），CAS 返回典型陈旧错误。
+    const ask = createPendingAsk({ requestId: "ask-1", version: 2 });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_list_pending") {
+        return Promise.resolve([]);
+      }
+      if (command === "ask_cancel") {
+        return Promise.reject(new Error("control request `ask-1` cannot be consumed: replay"));
+      }
+      return Promise.resolve(null);
+    });
+    const store = useAskStore();
+    store.pendingAsks = [ask];
 
-  it("C2-8: refresh restarts polling when the snapshot becomes non-empty again", async () => {
-    // Arrange: the first poll tick lists nothing (the run is idle), so polling self-terminates;
-    // a `turn:suspended`-driven refresh then lists a live Ask.
+    // Act
+    await store.ignore(ask);
+
+    // Assert: 先重新 list（宿主真相），再给统一中文提示。
+    expect(gatedCommands()).toEqual(["ask_cancel", "ask_list_pending"]);
+    expect(store.pendingAsks).toEqual([]);
+    expect(store.error).toContain(ASK_STALE_MESSAGE);
+    expect(String(store.error)).not.toContain("cannot be consumed");
+    expect(String(store.error)).not.toContain("过期");
+  });
+
+  it("C2-8：refresh 在快照重新非空时必须重启自停的轮询（与 TTL 无关，保留）", async () => {
+    // Arrange
     vi.useFakeTimers();
     const live = createPendingAsk({ requestId: "ask-1", expiresAtMs: Date.now() + 60_000 });
     let listCalls = 0;
@@ -491,7 +348,7 @@ describe("ask store — local expiry guard", () => {
     await store.refresh();
     expect(store.pendingAsks.map((ask) => ask.requestId)).toEqual(["ask-1"]);
 
-    // Assert (C2-8): the poll must have been re-armed and must actually tick a new list call.
+    // Assert
     expect(store.polling).toBe(true);
     const listsBefore = commands().filter((command) => command === "ask_list_pending").length;
     await vi.advanceTimersByTimeAsync(ASK_POLL_INTERVAL_MS);
@@ -499,96 +356,5 @@ describe("ask store — local expiry guard", () => {
     expect(listsAfter).toBeGreaterThan(listsBefore);
 
     store.stopPolling();
-  });
-
-  // ── C2-9: single flight + optimistic-state protection ──────────────────────────────────────
-
-  it("C2-9: two overlapping cancels of one expired ask issue exactly one ask_expire", async () => {
-    // Arrange
-    const expired = createPendingAsk({
-      requestId: "ask-1",
-      version: 2,
-      expiresAtMs: Date.now() - 1_000
-    });
-    mockExpiredAskHost(expired);
-    const store = useAskStore();
-    store.pendingAsks = [expired];
-    store.lastRefreshMs = Date.now();
-    tauriMocks.mockSafeInvoke.mockClear();
-
-    // Act: double click — both calls start before either completes.
-    const first = store.cancel(expired);
-    const second = store.cancel(expired);
-    await Promise.all([first, second]);
-
-    // Assert (C2-9): one reconcile, never two; and never a doomed CAS.
-    const expireCalls = commands().filter((command) => command === "ask_expire").length;
-    expect(expireCalls).toBe(1);
-    expect(commands()).not.toContain("ask_cancel");
-    expect(store.error).toContain("过期");
-  });
-
-  it("C2-9b: a reconcile re-list must not re-populate an optimistically removed ask", async () => {
-    // Arrange: A is live and being answered (optimistically removed); B is expired and drives the
-    // reconcile. The snapshot is injected directly — `await refresh()` would block on the deferred
-    // `ask_expire` (Lead ruling §9 ③); the deferreds keep the interleaving fully deterministic.
-    const askA = createPendingAsk({
-      requestId: "A",
-      version: 1,
-      expiresAtMs: Date.now() + 60_000
-    });
-    const askB = createPendingAsk({
-      requestId: "B",
-      version: 1,
-      expiresAtMs: Date.now() - 1_000
-    });
-
-    let resolveExpire: (value: unknown) => void = () => {};
-    const expirePromise = new Promise((resolve) => {
-      resolveExpire = resolve;
-    });
-    let resolveAnswer: (value: unknown) => void = () => {};
-    const answerPromise = new Promise((resolve) => {
-      resolveAnswer = resolve;
-    });
-
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "ask_list_pending") {
-        // The reconcile re-list still reports the (host-side) live A.
-        return Promise.resolve([askA]);
-      }
-      if (command === "ask_expire") {
-        return expirePromise;
-      }
-      if (command === "ask_answer") {
-        return answerPromise;
-      }
-      return Promise.resolve(null);
-    });
-
-    const store = useAskStore();
-    store.pendingAsks = [askA, askB];
-    store.lastRefreshMs = Date.now();
-    expect(store.pendingAsks.map((ask) => ask.requestId)).toEqual(["A", "B"]);
-
-    // Act: answer(A) optimistically removes A and marks it busy while `ask_answer` is in flight;
-    // cancel(B) drives the reconcile and blocks on the deferred `ask_expire`.
-    const answerA = store.answer(askA, "x");
-    expect(store.answeringRequestId).toBe("A");
-    expect(store.pendingAsks.map((ask) => ask.requestId)).toEqual(["B"]);
-    const cancelB = store.cancel(askB);
-    expect(commands()).toContain("ask_expire");
-
-    // The host finishes expiring; the reconcile re-lists [A].
-    resolveExpire({ expired: 1, nowMs: Date.now() });
-    await cancelB;
-
-    // Assert: the in-flight answer's optimistic removal must survive the re-list.
-    expect(store.pendingAsks.map((ask) => ask.requestId)).not.toContain("A");
-    expect(store.pendingAsks).toEqual([]);
-
-    // Teardown: let the suspended answer settle so no promise is left dangling.
-    resolveAnswer({ requestId: "A", answer: "x" });
-    await answerA;
   });
 });

@@ -1619,7 +1619,7 @@ def check_ask_panel(c: Checks, ctx: Ctx) -> None:
         "ask panel shows the question, at least one option and the key hint",
         "请选择本次交付的执行架构" in ptext
         and "单体轻量架构" in ptext
-        and "esc 取消" in ptext,
+        and "esc 忽略此提问" in ptext,
         next((clip(ln) for ln in panel.lines if "请选择本次交付" in ln), "question row missing"),
     )
     c.add(
@@ -1680,7 +1680,7 @@ def check_ask_loop(c: Checks, ctx: Ctx) -> None:
         "bootstrap ask raised a real panel (prompt + option + esc hint)",
         "请选择本次审计的 Ask 闭环分支" in ptext
         and "分支 A · 冒烟" in ptext
-        and "esc 取消" in ptext,
+        and "esc 忽略此提问" in ptext,
         next((clip(ln) for ln in panel.lines if "请选择本次审计" in ln), "prompt row missing"),
     )
 
@@ -1740,6 +1740,148 @@ def check_ask_loop(c: Checks, ctx: Ctx) -> None:
         not hits,
         f"hits={hits}" if hits else "no failure tokens on the settled screen",
     )
+
+
+def check_ask_resume(c: Checks, ctx: Ctx) -> None:
+    """ask-resume（冻结契约 §3 PTY 端到端）：模型发起 Ask → 真实 pending → 作答 → **本轮续写**。
+
+    观测点：作答后同一轮必须继续产出第二段 assistant 文本（mock 的 `FINAL_TEXT`）。
+    红相（C1/C2 未落地）：作答后宿主不再发 provider 请求，屏幕停在原处 —— 下列
+    `askresume.continuation_assistant_text` / `askresume.answer_reaches_provider`
+    必然 FAIL，这正是本工单要证明的缺陷。
+    """
+    panel = capture_or_fail(c, ctx, "panel")
+    answered = capture_or_fail(c, ctx, "answered")
+    resumed = capture_or_fail(c, ctx, "resumed")
+    exit_cap = capture_or_fail(c, ctx, "exit")
+    if panel is None or answered is None or resumed is None or exit_cap is None:
+        return
+    for cap in (panel, answered, resumed):
+        common_checks(c, cap)
+
+    ASK_QUESTION = "继续吗？"
+    OPTION_ACCEPT = "继续"
+    OPTION_DECLINE = "停止"
+    # mock `FINAL_TEXT` 的指纹：footer 里的工作区路径本身就含 "pony-agent"，不能用它判分；
+    # 版本号与「包管理器」行只可能来自第二段 assistant 正文。
+    FINAL_MARKERS = ("0.1.125", "包管理器：npm")
+    STREAMING_RESIDUE = ("Thinking...", "思考中", "生成中", "streaming")
+
+    # ① 作答前：真实面板在场（问题 + 两个选项 + esc 键位提示）。
+    ptext = panel.text()
+    c.add(
+        "askresume.panel_visible",
+        "the model-initiated Ask raised a real panel (question + both options + esc hint)",
+        ASK_QUESTION in ptext
+        and OPTION_ACCEPT in ptext
+        and OPTION_DECLINE in ptext
+        and "esc" in ptext,
+        next((clip(ln) for ln in panel.lines if ASK_QUESTION in ln), "question row missing"),
+    )
+
+    # 面板来自**模型工具调用**而非宿主 bootstrap/演示注入：首轮 provider 请求声明了 tools
+    # 且没有任何 role=tool 回流，且 mock 判定为 ask 分支。
+    chat = mock_chat_requests(ctx.extra.get("mock_log"))
+    first = chat[0] if chat else {}
+    c.add(
+        "askresume.ask_originated_from_model",
+        "the first provider round declared tools and carried zero tool results "
+        "(the Ask came from the model, not from a bootstrap injection)",
+        len(chat) >= 1
+        and int(first.get("n_tools_declared") or 0) >= 1
+        and int(first.get("n_tool_messages") or 0) == 0
+        and first.get("scenario") == "ask",
+        f"chat_requests={len(chat)} first_tools={first.get('n_tools_declared')} "
+        f"first_tool_msgs={first.get('n_tool_messages')} first_scenario={first.get('scenario')!r}",
+    )
+
+    # ② 作答：面板关闭（问题与 esc 提示消失）。
+    atext = answered.text()
+    c.add(
+        "askresume.answer_closes_panel",
+        "Enter submits the answer and the panel closes (question + esc hint gone)",
+        # 非空洞：面板**必须真的出现过**，才能谈「Enter 把它关掉」。
+        ASK_QUESTION in ptext and ASK_QUESTION not in atext and "esc" not in atext,
+        next((clip(ln) for ln in answered.lines if ASK_QUESTION in ln), "panel closed"),
+    )
+
+    # ③ 作答后：第二段 assistant 文本出现（且作答前屏幕上没有）。
+    rtext = resumed.text()
+    appeared = [m for m in FINAL_MARKERS if m in rtext]
+    # 「作答前」的基线取**面板帧**（作答前必然存在），而不是 `answered`：
+    # 修复落地后续轮可能在 answered 抓帧时已经开始流式输出，用 answered 做基线会误杀绿相。
+    before = [m for m in FINAL_MARKERS if m in ptext]
+    c.add(
+        "askresume.continuation_assistant_text",
+        "after answering, the same turn continues and renders the second assistant text "
+        "(mock FINAL_TEXT fingerprint becomes visible)",
+        len(appeared) == len(FINAL_MARKERS) and not before,
+        f"markers_resumed={appeared} markers_before_answer={before} "
+        f"tail={[clip(ln) for ln in resumed.lines if ln.strip()][-3:]}",
+    )
+
+    # ④ 流式态收口：不残留 Thinking.../思考中/生成中，且本轮用量已落 footer（↑N）。
+    residue = [token for token in STREAMING_RESIDUE if token in rtext]
+    settled = re.search(r"↑[1-9]", rtext) is not None
+    c.add(
+        "askresume.streaming_settled",
+        "the resumed turn settles: no Thinking.../思考中/生成中 residue and the footer "
+        "shows non-zero turn usage",
+        not residue and settled,
+        f"residue={residue} footer={clip(footer_text(resumed))}",
+    )
+
+    # ⑤ 物理回执：宿主确实把答案作为 role=tool 结果回灌给了 provider（INV-4：
+    # 挂起标记 control_outcome_pending 绝不能出现在下一轮请求里）。
+    followups = [r for r in chat if int(r.get("n_tool_messages") or 0) >= 1]
+    tool_texts = [
+        text for record in followups for text in (record.get("tool_message_texts") or [])
+    ]
+    answer_flowed = any(OPTION_ACCEPT in text for text in tool_texts)
+    pending_marker = [text for text in tool_texts if "control_outcome_pending" in text]
+    c.add(
+        "askresume.answer_reaches_provider",
+        "a follow-up provider round carries the user's answer as a tool result and never "
+        "the suspended control_outcome_pending marker",
+        len(followups) >= 1 and answer_flowed and not pending_marker,
+        f"followup_rounds={len(followups)} tool_msgs={[clip(t, 90) for t in tool_texts][:3]} "
+        f"answer_present={answer_flowed} pending_marker_hits={len(pending_marker)}",
+    )
+
+    # ⑥ 负向文案：失效/过期/不可恢复/提交失败一律不得上屏。
+    error_tokens = (
+        "该提问已失效",  # tui.rs::ASK_STALE_NOTICE（ADR 0074 唯一失效文案）
+        "ask_resume_unavailable",
+        "control_outcome_pending_without_request",
+        "本轮请求未能完成",  # turn:failed 的折叠文案：续轮本应发生，不该出现失败终态
+        "本轮已按失败收口",
+        "无法恢复",
+        "续轮失败",
+        "提交回答失败",
+        "取消提问失败",
+        "expired",
+        "Error:",
+    )
+    hits = [token for token in error_tokens if token in atext or token in rtext]
+    c.add(
+        "askresume.no_error_copy",
+        "no stale/expired/resume-unavailable/submit-failure copy after answering",
+        not hits,
+        f"hits={hits}" if hits else "no error/stale copy on the answered/resumed frames",
+    )
+
+    # ⑦ 场景以真实退出码收口（经 bash 启动 + AUDIT_EXIT= 回执），不是「跑完就算过」。
+    exit_text = exit_cap.text()
+    match = re.search(r"AUDIT_EXIT=(\d+)", exit_text)
+    code = int(match.group(1)) if match else None
+    c.add(
+        "askresume.exit_code_reported",
+        "the scenario ends with the TUI's real process exit status (AUDIT_EXIT=…)",
+        code is not None and code in (0, 130, 143),
+        f"code={code} row :: "
+        f"{clip(next((ln for ln in exit_cap.lines if 'AUDIT_EXIT=' in ln), 'no AUDIT_EXIT line'))}",
+    )
+    common_checks(c, exit_cap, allow_ni=True)
 
 
 def check_contrast(c: Checks, ctx: Ctx) -> None:
@@ -2046,6 +2188,7 @@ SCENARIOS = {
     "resize-invalidate": check_resize_invalidate,
     "ask-panel": check_ask_panel,
     "ask-loop": check_ask_loop,
+    "ask-resume": check_ask_resume,
     "contrast": check_contrast,
     "ctrl-c": check_ctrl_c,
     "input-edit": check_input_edit,

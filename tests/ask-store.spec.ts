@@ -335,23 +335,32 @@ describe("ask store", () => {
     expect(store.cancellingRequestId).toBeNull();
   });
 
-  it("calls ask_expire and reconciles the list", async () => {
+  // ADR 0074 重冻：`ask_expire` 不再是「让 Pending 失效」的对账动作，而是 **GC 房管**
+  // （归档会话 → `Orphaned`、保留期回收）。因此它既不接受「过期」计数语义，也不得让客户端
+  // 把仍然 Pending 的卡片本地抹掉——列表真相永远来自 `ask_list_pending`。
+  it("calls ask_expire as GC housekeeping and keeps the pending snapshot", async () => {
+    const stillPending = createPendingAsk({ requestId: "ask-1", version: 7 });
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
       if (command === "ask_expire") {
-        return Promise.resolve({ expired: 2, nowMs: 1_000 });
+        return Promise.resolve({ expired: 0, orphaned: 2, nowMs: 1_000 });
       }
       if (command === "ask_list_pending") {
-        return Promise.resolve([]);
+        return Promise.resolve([stillPending]);
       }
       return Promise.resolve(null);
     });
 
     const store = useAskStore();
-    const expired = await store.expire();
+    await store.refresh();
+    expect(store.pendingAsks.map((ask) => ask.requestId)).toEqual(["ask-1"]);
 
-    expect(expired).toBe(2);
+    const housekeeping = await store.expire();
+
+    // GC 没有「失效」任何 Pending 请求（0），归档回收了 2 条终态/归档记录。
+    expect(housekeeping).toBe(0);
     expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_expire");
-    expect(store.pendingAsks).toEqual([]);
+    // 关键的语义反转：GC 之后仍然 Pending 的卡片必须还在，不得被本地清空。
+    expect(store.pendingAsks.map((ask) => ask.requestId)).toEqual(["ask-1"]);
   });
 
   it("polls while pending asks remain and self-terminates when empty", async () => {

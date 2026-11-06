@@ -99,6 +99,44 @@ fn dispatch_ask(
         .expect("dispatched ask must be persisted in the control-request store")
 }
 
+/// Dispatch a real Ask into an explicit session (supersede tests need two sessions).
+fn dispatch_ask_in(
+    dispatcher: &GovernedDispatcher,
+    session_id: &str,
+    call_id: &str,
+    question: &str,
+) -> PendingControlRequest {
+    let outcome = dispatcher.dispatch_governed(
+        ToolDispatchRequest {
+            origin: InvocationOrigin::Model,
+            descriptor_id: ASK_DESCRIPTOR_ID.to_string(),
+            call_id: call_id.to_string(),
+            arguments: json!({
+                "question": question,
+                "options": ["是", "否"],
+                "description": "wave-15 契约测试"
+            }),
+        },
+        &DispatchContext {
+            session_id: Some(session_id.to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            host_control_available: true,
+            ..Default::default()
+        },
+    );
+    let outcome_debug = format!("{outcome:?}");
+    let request_id = outcome
+        .control_outcome
+        .unwrap_or_else(|| {
+            panic!("host-mediated ask must surface a control outcome (call_id={call_id}, outcome={outcome_debug})")
+        })
+        .request_id;
+    dispatcher
+        .pending_request(&request_id)
+        .expect("dispatched ask must be persisted in the control-request store")
+}
+
 fn ids(requests: &[PendingControlRequest]) -> BTreeSet<String> {
     requests.iter().map(|r| r.request_id.clone()).collect()
 }
@@ -236,47 +274,68 @@ fn c1_3_cancelled_ask_is_no_longer_listed() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// C1-4: expiry removes the request from the Ask list
+// C1-4（ADR 0074 重冻）：**新用户消息**使旧 Ask 转 Superseded 后不再列出；墙钟不再是判据
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// 旧语义（已废止）：`expires_at_ms` 到期 ⇒ `Expired` ⇒ 不再列出。
+// 新语义（ADR 0074 §3/§4）：只有「会话内出现新用户消息」才让旧 Ask 失格；时间既不拒绝作答、
+// 也不清空列表。宿主的 `ask_expire` 退化为 GC（只回收终态/归档会话）。
 
 #[test]
-fn c1_4_expired_ask_is_no_longer_listed() {
+fn c1_4_superseded_ask_is_no_longer_listed() {
     // Arrange
     let h = harness();
     let pending = dispatch_ask(&h.dispatcher, "call-1", "继续？");
     assert_eq!(list_pending_asks(&h.dispatcher).len(), 1);
 
-    // Act: advance past the request TTL and expire it.
-    let expired = h
-        .dispatcher
-        .expire_control_requests(pending.expires_at_ms + 1);
-
-    // Assert
-    assert_eq!(expired, 1, "exactly one request crossed its TTL");
+    // Act 1（时间不再是判据）：时钟越过旧 TTL 很久以后，Ask 仍然可列出。
+    let long_after_ttl = pending.expires_at_ms + 24 * 60 * 60 * 1_000;
+    h.clock.set_now_ms(long_after_ttl);
     assert_eq!(
+        h.dispatcher.expire_control_requests(long_after_ttl),
+        0,
+        "ADR 0074：墙钟过期不再作用于 Ask（Interaction）——expire 只对 Approval 生效"
+    );
+    assert_eq!(
+        list_pending_asks(&h.dispatcher).len(),
+        1,
+        "时间不得把未决 Ask 从列表里抹掉"
+    );
+    let authorization = ControlRequestAuthorization::for_request(&pending, Some(json!("是")));
+    assert!(
         h.dispatcher
             .pending_request(&pending.request_id)
             .expect("stored")
-            .state,
-        PendingControlRequestState::Expired
+            .state
+            == PendingControlRequestState::Pending,
+        "时间越过旧 TTL 后 Ask 必须仍为 Pending"
     );
+
+    // Act 2：新用户消息进入会话 ⇒ 旧 Ask 被取代（宿主对内存镜像的关闭动作）
+    let superseded = h.dispatcher.close_pending_asks_of_session("session-1");
+    assert_eq!(superseded, 1, "新用户消息必须关闭该会话的 1 条未决 Ask");
+
+    // Assert：不再列出，且不能再作答。
     assert!(
         list_pending_asks(&h.dispatcher).is_empty(),
-        "an expired Ask must not be re-listed as pending"
+        "被新用户消息取代的 Ask 不得再被列为待决"
+    );
+    assert!(
+        answer_ask(&h.dispatcher, &pending.request_id, &authorization).is_err(),
+        "被取代的 Ask 不得再被作答（终态不可迁移）"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// C1-5: mixed terminal states → the list is exactly the still-pending set
+// C1-5（ADR 0074 重冻）：混合终态 → 列表恰好是仍为 Pending 的集合
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn c1_5_mixed_terminal_states_list_exactly_the_pending_set() {
-    // Arrange: the first ask is dispatched on the early clock so its TTL has already passed when
-    // the later three (dispatched on the advanced clock) are still live.
+    // Arrange：一条走「新用户消息取代」（放在 session-2，避免关掉 session-1 的等待项），
+    // 其余三条在 session-1 分别走作答 / 取消 / 继续等待。
     let h = harness();
-    let will_expire = dispatch_ask(&h.dispatcher, "call-expire", "会过期？");
-    h.clock.set_now_ms(100_000);
+    let will_supersede = dispatch_ask_in(&h.dispatcher, "session-2", "call-supersede", "会被取代？");
     let will_consume = dispatch_ask(&h.dispatcher, "call-consume", "会消费？");
     let will_cancel = dispatch_ask(&h.dispatcher, "call-cancel", "会取消？");
     let will_wait = dispatch_ask(&h.dispatcher, "call-wait", "仍等待？");
@@ -286,34 +345,29 @@ fn c1_5_mixed_terminal_states_list_exactly_the_pending_set() {
         4,
         "the raw store holds every request regardless of state"
     );
-    assert!(
-        will_expire.expires_at_ms < will_wait.expires_at_ms,
-        "harness precondition: the first ask must carry an earlier TTL"
-    );
 
-    // Act: drive one request into each terminal state.
-    let authorization =
-        ControlRequestAuthorization::for_request(&will_consume, Some(json!("是")));
+    // Act：把三条推进到不同终态/等待态。
+    let authorization = ControlRequestAuthorization::for_request(&will_consume, Some(json!("是")));
     answer_ask(&h.dispatcher, &will_consume.request_id, &authorization).expect("consume");
     let authorization = ControlRequestAuthorization::for_request(&will_cancel, None);
     cancel_ask(&h.dispatcher, &will_cancel.request_id, &authorization).expect("cancel");
     assert_eq!(
-        h.dispatcher
-            .expire_control_requests(will_expire.expires_at_ms + 1),
+        h.dispatcher.close_pending_asks_of_session("session-2"),
         1,
-        "only the early ask is past its TTL"
+        "只有 session-2 的那条 Ask 会被新用户消息取代"
     );
 
-    // Assert: each terminal state really landed, then the list is exactly the pending set.
+    // Assert：各终态落地，列表恰好等于仍为 Pending 的集合。
     let state_of = |request_id: &str| {
         h.dispatcher
             .pending_request(request_id)
             .expect("stored")
             .state
     };
-    assert_eq!(
-        state_of(&will_expire.request_id),
-        PendingControlRequestState::Expired
+    assert_ne!(
+        state_of(&will_supersede.request_id),
+        PendingControlRequestState::Pending,
+        "被取代的 Ask 不得仍为 Pending"
     );
     assert_eq!(
         state_of(&will_consume.request_id),

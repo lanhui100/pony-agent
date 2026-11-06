@@ -374,54 +374,46 @@ describe("wave-17 C2-4：AskPanel 过期倒计时位 tabular-nums class 契约",
     vi.restoreAllMocks();
   });
 
-  it("C2-4: formatExpiry 倒计时 span 必须含 tabular-nums（30s 档，逐秒原地变化）", async () => {
-    // Arrange：30s 内过期 → 每秒重渲染一次，是抖动最剧烈的档位。
+  // ── ADR 0074 重冻 ────────────────────────────────────────────────────────────────────────
+  // 旧契约：`formatExpiry` 倒计时 span（「30s 后过期」/「已过期」）必须含 tabular-nums。
+  // 新契约（`.dev-team/contract-matrix-ask-persistence.md` §6.1）：**无倒计时、无已过期态**。
+  // 等宽数字契约因此迁移到「提问时间」位（`ask-created-at`，展示用），倒计时位必须消失。
+
+  it("C2-4（重冻）：ask-card 内不得渲染任何倒计时 span / 已过期提示", async () => {
+    // Arrange：旧语义下 30s 档是最剧烈的逐秒抖动位——新语义下根本不应存在该位点。
     const ask = createPendingAsk({ requestId: "ask-c2-4", expiresAtMs: Date.now() + 30_000 });
 
     // Act
     const wrapper = await mountAskPanel(ask);
 
-    // Assert（结构锚点先自检）
-    const carriers = wrapper
-      .get('[data-testid="ask-card"]')
-      .findAll("span.inline-flex");
-    expect(
-      carriers,
-      "ask-card 内必须恰好存在 1 个 inline-flex 承载 span（即 formatExpiry 倒计时位）"
-    ).toHaveLength(1);
-
-    // Assert（数值语义自检：确认该位点就是倒计时，而不是别的 span）
-    expect(carriers[0]!.text()).toMatch(/\d+\s*(s|m)\s*后过期/);
-
-    // Assert（class 契约）
-    expect(
-      hasTabularNumsAtOrAbove(carriers[0]!.element),
-      `formatExpiry 倒计时位必须由自身或 ≤2 层祖先承载 tabular-nums；实际链路：${tabularNumsFailureDetail(carriers[0]!.element)}`
-    ).toBe(true);
+    // Assert：不得出现倒计时结构、不得出现任何倒计时/过期文案。
+    expect(wrapper.find('[data-testid="ask-card"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="ask-expiry-countdown"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-expired-hint"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toMatch(/\d+\s*(s|m)\s*后过期/);
+    expect(wrapper.text()).not.toContain("已过期");
 
     wrapper.unmount();
   });
 
-  it("C2-4: 过期态（已过期文案）同一倒计时 span 仍必须含 tabular-nums", async () => {
-    // Arrange：已过期档 → 文案切换为「已过期」，但同一 span 仍需等宽数字契约。
-    const ask = createPendingAsk({ requestId: "ask-c2-4b", expiresAtMs: Date.now() - 1_000 });
+  it("C2-4（重冻）：提问时间位（ask-created-at）必须由自身或 ≤2 层祖先承载 tabular-nums", async () => {
+    // Arrange：时间位是替代倒计时的展示位（contract §6：展示提问时间，不展示截止时间）。
+    const createdAtMs = new Date(2026, 10, 6, 9, 30).getTime();
+    const ask = createPendingAsk({ requestId: "ask-c2-4b" });
+    (ask as { createdAtMs?: number }).createdAtMs = createdAtMs;
 
     // Act
     const wrapper = await mountAskPanel(ask);
 
     // Assert（结构锚点 + 语义）
-    const carriers = wrapper.get('[data-testid="ask-card"]').findAll("span.inline-flex");
-    expect(carriers).toHaveLength(1);
-    expect(carriers[0]!.text()).toContain("已过期");
-    expect(
-      wrapper.find('[data-testid="ask-expired-hint"]').exists(),
-      "过期态必须渲染 ask-expired-hint 行"
-    ).toBe(true);
+    const createdAt = wrapper.get('[data-testid="ask-created-at"]');
+    expect(createdAt.text()).toContain("提问于");
+    expect(wrapper.find('[data-testid="ask-expiry-countdown"]').exists()).toBe(false);
 
-    // Assert（class 契约）
+    // Assert（class 契约，等价迁移自旧倒计时位）
     expect(
-      hasTabularNumsAtOrAbove(carriers[0]!.element),
-      `过期倒计时位必须由自身或 ≤2 层祖先承载 tabular-nums；实际链路：${tabularNumsFailureDetail(carriers[0]!.element)}`
+      hasTabularNumsAtOrAbove(createdAt.element),
+      `提问时间位必须由自身或 ≤2 层祖先承载 tabular-nums；实际链路：${tabularNumsFailureDetail(createdAt.element)}`
     ).toBe(true);
 
     wrapper.unmount();
