@@ -1,0 +1,75 @@
+{
+  "task": "task-6 (read-only review, owner undecided)",
+  "role": "executor-core",
+  "kind": "read-only analysis — no source edits, no merge, no revert",
+  "generated_at": "2026-11-06T18:12:00+08:00",
+  "subject": "第五作者实现的 control_plane/ask_resume_commands.rs 与 plan-ask-resume.md §2 C1 契约的差异",
+  "frozen_contract": {
+    "plan": ".dev-team/plan-ask-resume.md §2 C1（mod.rs 只允许加一行 `mod ask_resume_commands;`，start_turn_stream 逐字不变）",
+    "test": "crates/pony-agent-core/tests/ask_resume_e2e.rs",
+    "test_sha256": "760e0e3d87aa459dbff3d3f56e6ab70447fc78f175947a9571c33998823b2c80",
+    "test_sha256_matches_plan": true,
+    "test_lines": 942
+  },
+  "observed_files_not_authored_by_me": [
+    "crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs (17:52:17)",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs (17:51:22)",
+    "tools/tui-audit/{run_audit.sh,mock_llm.py,checks.py} (17:47-17:55)",
+    ".dev-team/plan-ask-resume.md (17:45)",
+    ".dev-team/evidence/tui-polish/after/ask-resume/ (17:51)",
+    "crates/pony-agent-core/src/bin/tui.rs (18:03:06)",
+    "control_plane/mod.rs 的 start_turn_stream 委派改写 (17:52:35；我此文件最后一次写入为 17:49 的 supersede 钩子与 expire 单测)"
+  ],
+  "c1_conformance": [
+    {
+      "item": "新文件落点 + impl HostControlPlane 跨文件",
+      "verdict": "符合",
+      "evidence": "ask_resume_commands.rs 存在且 mod.rs:52 `mod ask_resume_commands;`"
+    },
+    {
+      "item": "mod.rs 只允许加一行；start_turn_stream 保持逐字不变",
+      "verdict": "**不符合（BLOCKING）**",
+      "evidence": "mod.rs:2028-2033 的 start_turn_stream 已被改为 `self.start_ask_aware_turn_stream(sink, command);`。契约该条的目的是缩小爆炸半径：cli.rs:664 与 bin/non_tauri_harness.rs:116 也调用 start_turn_stream，现在它们同样被切到 graph-run 路径（每轮创建/复用持久化 graph run），与 INV-2/最小闭包相悖。TUI 调用点 tui.rs:10445/10490 才是 task-7 要显式切换的入口。"
+    },
+    {
+      "item": "本轮必须在真实 graph run 内执行（prepare_* + execute_graph_run_stream_step + RunTurnFacts{run_id,turn_id,workspace_root}）",
+      "verdict": "符合（结构性）",
+      "evidence": "prepare_ask_aware_graph_run_stream → prepare_continue_graph_run_stream / prepare_start_graph_run_stream；execute_graph_run_stream_step 单步执行，未用 execute_graph_run_stream（避免 goal 自动续轮叠加）"
+    },
+    {
+      "item": "run 复用规则（同 session 最近更新、非终态、active_turn_id 为空、无未决 ask wait；session None 一律新建）",
+      "verdict": "符合",
+      "evidence": "resolve_reusable_ask_resume_run_id：list_runs()（updated_at_ms 倒序）+ phase 非终态 + active_turn_id.is_none() + list_ask_waits 为空；session_id? 直接 None ⇒ 新建"
+    },
+    {
+      "item": "既有副作用保留（RecordingTurnEventSink 终态 trace 注解 + flush_session_buffered_events）",
+      "verdict": "部分符合",
+      "evidence": "legacy 回退路径保留 RecordingTurnEventSink；ask-aware 主路径直接调 execute_graph_run_stream_step 并 flush（其内部已有注解），无独立 RecordingTurnEventSink。需在验收时用 T1/T2 的 trace 断言确认终态注解不丢。"
+    },
+    {
+      "item": "失败兜底：run 解析/准备失败 ⇒ 结构化日志 + 回落旧路径（不静默 return）",
+      "verdict": "符合",
+      "evidence": "prepare_ask_aware_graph_run_stream 返回 None 时 log_json_with_fields(warn, ...) 后调 start_turn_stream_legacy；单步执行失败只记 error 不重跑（turn 已执行）"
+    },
+    {
+      "item": "run 复用/新建两分支 #[cfg(test)] 单测",
+      "verdict": "**缺失**",
+      "evidence": "ask_resume_commands.rs 内无 #[cfg(test)] mod tests；契约要求的两分支单测尚未落"
+    },
+    {
+      "item": "C3（ask_resume_unavailable fail-closed）",
+      "verdict": "未实现（按 Lead 裁决暂缓）",
+      "evidence": "runtime/turn_control.rs 无 ASK_RESUME_UNAVAILABLE_CODE；ask_resume_commands.rs 注释引用了 C3 但代码未落。T3 用例当前按契约应为红。"
+    }
+  ],
+  "current_tree_state": {
+    "bin_build": "RED（非我引入，client 进行中）：cargo test/build 因 `bin/pony` E0382 失败 —— bin/tui.rs:10927 `turn_id_str` moved into closure then borrowed (tui.rs mtime 18:03:06)",
+    "note": "该错误在我 17:59 的三门禁（exit 0）之后由他人改动引入；我在冻结指令后未再写任何源码。"
+  },
+  "recommendation": [
+    "若判定作者为第五并行会话：按契约 C1 回滚“mod.rs 委派改写”为 `mod ask_resume_commands;` 一行 + `start_turn_stream` 逐字原样；TUI 显式改调 start_ask_aware_turn_stream（属 task-7）。",
+    "补齐 run 复用/新建两分支 #[cfg(test)] 单测（不触碰 tests/** 冻结文件）。",
+    "C3 按 Lead 裁决暂缓；ask_resume_e2e T3 维持红相属预期。",
+    "在任何 gate 复跑前需先等 client 修好 bin/tui.rs 的 E0382，否则 accept/tui_batch3/all-targets 全被 bin 编译失败阻断。"
+  ]
+}

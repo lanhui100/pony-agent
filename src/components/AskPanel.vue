@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive } from "vue";
 import { storeToRefs } from "pinia";
-import { AlertTriangle, Clock3, LoaderCircle, MessageSquareWarning } from "lucide-vue-next";
+import { AlertTriangle, LoaderCircle, MessageSquareWarning } from "lucide-vue-next";
 import { useAskStore } from "@/stores/ask";
 import type { PendingAsk } from "@/types/ask-plan";
 import Button from "@/components/ui/Button.vue";
@@ -15,28 +15,20 @@ const drafts = reactive<Record<string, string>>({});
 const visibleAsks = computed(() => pendingAsks.value);
 
 /**
- * Render clock for TTL state: real wall-clock time, re-read on every render/refresh tick. The
- * listing snapshot clock (`lastRefreshMs`) is deliberately NOT used — polling self-terminates on an
- * empty list, so a frozen snapshot would keep an already-expired card's controls live (C2-10).
+ * ADR 0074: there is no countdown and no "expired" state. Whether a card may be answered is
+ * decided by the host lifecycle alone (it only lists `Pending` requests), so the card never
+ * pre-judges a submission against the local wall clock — a rejected CAS turns into the shared
+ * Chinese notice and the card disappears on the next list refresh.
  */
-function renderNowMs(): number {
-  return Date.now();
-}
-
-function askIsExpired(ask: PendingAsk): boolean {
-  // Same boundary as the store guard / host `can_consume`: expired only once strictly past the TTL.
-  return typeof ask.expiresAtMs === "number" && ask.expiresAtMs > 0 && ask.expiresAtMs < renderNowMs();
-}
-
 function askIsBusy(requestId: string) {
   return (
     answeringRequestId.value === requestId || cancellingRequestId.value === requestId
   );
 }
 
-/** An expired Ask can never be submitted (the host CAS would fail), so lock its controls. */
+/** Only an in-flight IPC locks the controls; a card is never locked by elapsed time. */
 function askIsLocked(ask: PendingAsk) {
-  return askIsBusy(ask.requestId) || askIsExpired(ask);
+  return askIsBusy(ask.requestId);
 }
 
 function answerOptions(ask: PendingAsk): string[] {
@@ -67,22 +59,24 @@ async function answerTyped(ask: PendingAsk) {
   await askStore.answer(ask, value || null);
 }
 
-async function cancelAsk(ask: PendingAsk) {
-  await askStore.cancel(ask);
+async function ignoreAsk(ask: PendingAsk) {
+  await askStore.ignore(ask);
 }
 
-function formatExpiry(ask: PendingAsk) {
-  if (!ask.expiresAtMs || ask.expiresAtMs <= 0) {
+/**
+ * When the question was raised (contract §6: the card shows creation time instead of a deadline).
+ *
+ * `createdAtMs` is added to the frozen `PendingAsk` type by the protocol freeze task; read it
+ * defensively so this component never blocks that change and simply renders nothing when absent.
+ */
+function askCreatedAtLabel(ask: PendingAsk): string {
+  const createdAtMs = (ask as { createdAtMs?: number | null }).createdAtMs;
+  if (typeof createdAtMs !== "number" || createdAtMs <= 0) {
     return "";
   }
-  const remainingMs = ask.expiresAtMs - renderNowMs();
-  if (remainingMs <= 0) {
-    return "已过期";
-  }
-  if (remainingMs < 60_000) {
-    return `${Math.ceil(remainingMs / 1000)}s 后过期`;
-  }
-  return `${Math.ceil(remainingMs / 60_000)}m 后过期`;
+  const date = new Date(createdAtMs);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `提问于 ${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function askContextLabel(ask: PendingAsk) {
@@ -127,24 +121,14 @@ onBeforeUnmount(() => {
           </div>
           <div class="flex items-center gap-2 text-[10px] leading-4 text-stone-500">
             <span v-if="askContextLabel(ask)" class="truncate">{{ askContextLabel(ask) }}</span>
-            <span v-if="formatExpiry(ask)" class="inline-flex min-w-[5.5rem] shrink-0 items-center justify-end gap-1 tabular-nums">
-              <Clock3 class="h-3 w-3" />
-              {{ formatExpiry(ask) }}
+            <span v-if="askCreatedAtLabel(ask)" class="shrink-0 tabular-nums" data-testid="ask-created-at">
+              {{ askCreatedAtLabel(ask) }}
             </span>
           </div>
         </div>
 
         <p class="mt-2 text-[13px] leading-[1.6] text-stone-800" data-testid="ask-prompt">
           {{ ask.prompt || "请回答以下问题。" }}
-        </p>
-
-        <p
-          v-if="askIsExpired(ask)"
-          class="mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-amber-900"
-          data-testid="ask-expired-hint"
-        >
-          <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
-          <span>该请求已过期，无法再提交；正在同步最新待处理列表。</span>
         </p>
 
         <div v-if="answerOptions(ask).length > 0" class="mt-2 flex flex-wrap gap-1.5" data-testid="ask-options">
@@ -181,11 +165,11 @@ onBeforeUnmount(() => {
             size="sm"
             variant="ghost"
             :disabled="askIsLocked(ask)"
-            data-testid="ask-cancel-submit"
-            @click="cancelAsk(ask)"
+            data-testid="ask-ignore-submit"
+            @click="ignoreAsk(ask)"
           >
             <LoaderCircle v-if="cancellingRequestId === ask.requestId" class="mr-1 h-3 w-3 animate-spin" />
-            取消
+            忽略此提问
           </Button>
         </div>
       </div>

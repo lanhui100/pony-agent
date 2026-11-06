@@ -1,0 +1,34 @@
+bash-5.2$ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy -u NODE_USE_ENV_PROXY
+-u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.jYM7NP/iso-ask-resume/xdg-config XDG_DATA_HOME=/tmp/tui-audit.jYM7NP/iso-ask-
+resume/xdg-data XDG_CACHE_HOME=/tmp/tui-audit.jYM7NP/iso-ask-resume/xdg-cache HOME=/tmp/tui-audit.jYM7NP/iso-ask-resume/
+home LANG=en_US.UTF-8 PONY_TUI_RUNTIME_LOG=/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/tui-runtim
+e.log /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$?
+{"level":"warn","message":"otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），本进程 trace 不会出现在 T
+empo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：https://otel.ponyjob.top）","trace_id":null,"ts":
+"2026-11-06T10:47:24.610Z"}
+
+继续该会话请运行：pony resume pa_01a1b078-6cd3-71d2-84bd-4a8182f1637b
+AUDIT_EXIT=0
+bash-5.2$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

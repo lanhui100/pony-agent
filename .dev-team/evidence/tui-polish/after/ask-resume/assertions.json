@@ -1,0 +1,225 @@
+{
+  "scenario": "ask-resume",
+  "pass": 31,
+  "fail": 0,
+  "skipped": 0,
+  "checks": [
+    {
+      "id": "panel.no_panic",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
+    },
+    {
+      "id": "panel.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "panel.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "status": "pass",
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "panel.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "panel.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/panel.ansi size=3343"
+    },
+    {
+      "id": "panel.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/panel.png size=134562"
+    },
+    {
+      "id": "answered.no_panic",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
+    },
+    {
+      "id": "answered.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "answered.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "status": "pass",
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "answered.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "answered.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/answered.ansi size=3064"
+    },
+    {
+      "id": "answered.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/answered.png size=129589"
+    },
+    {
+      "id": "resumed.no_panic",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
+    },
+    {
+      "id": "resumed.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "resumed.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "status": "pass",
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "resumed.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "resumed.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/resumed.ansi size=4223"
+    },
+    {
+      "id": "resumed.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/resumed.png size=176094"
+    },
+    {
+      "id": "askresume.panel_visible",
+      "desc": "the model-initiated Ask raised a real panel (question + both options + esc hint)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "◇ 提问 继续吗？"
+    },
+    {
+      "id": "askresume.ask_originated_from_model",
+      "desc": "the first provider round declared tools and carried zero tool results (the Ask came from the model, not from a bootstrap injection)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "chat_requests=2 first_tools=38 first_tool_msgs=0 first_scenario='ask'"
+    },
+    {
+      "id": "askresume.answer_closes_panel",
+      "desc": "Enter submits the answer and the panel closes (question + esc hint gone)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "panel closed"
+    },
+    {
+      "id": "askresume.continuation_assistant_text",
+      "desc": "after answering, the same turn continues and renders the second assistant text (mock FINAL_TEXT fingerprint becomes visible)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "markers_resumed=['0.1.125', '包管理器：npm'] markers_before_answer=[] tail=['如果需要，我可以继续列出依赖清单。', '› 写下任务，或输入 / 查看命令', '/home/dm/pony-agent ↑32 ↓64 · 上下文 0% · 188 t/s · 首token 64ms']"
+    },
+    {
+      "id": "askresume.streaming_settled",
+      "desc": "the resumed turn settles: no Thinking.../思考中/生成中 residue and the footer shows non-zero turn usage",
+      "ok": true,
+      "status": "pass",
+      "evidence": "residue=[] footer=/home/dm/pony-agent ↑32 ↓64 · 上下文 0% · 188 t/s · 首token 64ms"
+    },
+    {
+      "id": "askresume.answer_reaches_provider",
+      "desc": "a follow-up provider round carries the user's answer as a tool result and never the suspended control_outcome_pending marker",
+      "ok": true,
+      "status": "pass",
+      "evidence": "followup_rounds=1 tool_msgs=['{\"output\":{\"answer\":{\"answer\":\"继续\"},\"kind\":\"waiting_user\",\"ok\":true,\"requestId\":\"control-…'] answer_present=True pending_marker_hits=0"
+    },
+    {
+      "id": "askresume.no_error_copy",
+      "desc": "no stale/expired/resume-unavailable/submit-failure copy after answering",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no error/stale copy on the answered/resumed frames"
+    },
+    {
+      "id": "askresume.exit_code_reported",
+      "desc": "the scenario ends with the TUI's real process exit status (AUDIT_EXIT=…)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "code=0 row :: e.log /home/dm/pony-agent/target/debug/pony; echo AUDIT_EXIT=$?"
+    },
+    {
+      "id": "exit.no_panic",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
+    },
+    {
+      "id": "exit.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "status": "pass",
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.jYM7NP/iso-ask-resume/xdg-config XDG_DATA_HOME=/tmp/tui-audit.jYM7NP/iso-ask-"
+    },
+    {
+      "id": "exit.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "exit.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/exit.ansi size=983"
+    },
+    {
+      "id": "exit.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/exit.png size=166738"
+    }
+  ]
+}

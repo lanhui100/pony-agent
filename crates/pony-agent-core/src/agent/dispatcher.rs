@@ -22,6 +22,7 @@
 //! Everything fails closed: unknown descriptors, unauthorized origins, denied permissions,
 //! exhausted budgets, and missing handlers produce structured error outcomes rather than panics.
 
+use crate::agent::ask_persistence::{AskPersistenceStore, PersistedAsk};
 use crate::agent::budget::{BudgetLedger, CancellationToken, DispatchBudgetConfig};
 use crate::agent::child_dispatch::{
     check_budget_gates, ChildDispatch, ChildDispatchContext, ChildDispatchRequest,
@@ -490,9 +491,12 @@ pub(crate) struct Inner {
     sandbox_backend: RwLock<Option<Arc<dyn SandboxBackend>>>,
     lifecycle_observers: Mutex<Vec<Arc<dyn DispatchLifecycleObserver>>>,
     pending_requests: Mutex<BTreeMap<String, PendingControlRequest>>,
+    /// Durable Ask (Interaction) store (ADR 0074). `None` keeps the dispatcher memory-only
+    /// (approval-only dispatchers and unit tests); the host installs the session-backed store
+    /// through [`GovernedDispatcher::set_ask_store`] so pending Asks survive a restart.
+    ask_store: RwLock<Option<Arc<dyn AskPersistenceStore>>>,
     default_context: RwLock<DispatchContext>,
     config: Mutex<DispatchBudgetConfig>,
-    request_seq: AtomicU64,
     nonce_seq: AtomicU64,
 }
 
@@ -540,9 +544,9 @@ impl GovernedDispatcher {
             sandbox_backend: RwLock::new(None),
             lifecycle_observers: Mutex::new(Vec::new()),
             pending_requests: Mutex::new(BTreeMap::new()),
+            ask_store: RwLock::new(None),
             default_context: RwLock::new(DispatchContext::default()),
             config: Mutex::new(DispatchBudgetConfig::default()),
-            request_seq: AtomicU64::new(0),
             nonce_seq: AtomicU64::new(1),
         });
         Self { inner }
@@ -991,7 +995,11 @@ impl GovernedDispatcher {
         )
     }
 
-    /// Transition every expired pending request to `Expired`. Returns the number expired.
+    /// Transition every expired **Approval** request to `Expired`. Returns the number expired.
+    ///
+    /// ADR 0074: Ask (`Interaction`) requests are no longer expired by wall clock — an unanswered
+    /// Ask is session state, reclaimed only by an explicit ignore (user), supersede (new user
+    /// message) or session archive (GC). Approvals keep their TTL until their own wave.
     pub fn expire_control_requests(&self, now_ms: u64) -> usize {
         let mut store = self
             .inner
@@ -1000,6 +1008,9 @@ impl GovernedDispatcher {
             .expect("dispatcher pending requests poisoned");
         let mut expired = 0;
         for request in store.values_mut() {
+            if request.request_kind != PendingControlRequestKind::Approval {
+                continue;
+            }
             if request.state == PendingControlRequestState::Pending && now_ms > request.expires_at_ms
             {
                 request.state = PendingControlRequestState::Expired;
@@ -1008,6 +1019,98 @@ impl GovernedDispatcher {
             }
         }
         expired
+    }
+
+    // ── durable Ask store (ADR 0074) ───────────────────────────────────────────────────────
+
+    /// Install the durable Ask store shared with the host control plane. From this point on every
+    /// `Interaction` (Ask) control request is persisted on creation, and the host can list/recover
+    /// it after a process restart. Approvals are untouched by this seam.
+    pub fn set_ask_store(&self, store: Arc<dyn AskPersistenceStore>) {
+        *self
+            .inner
+            .ask_store
+            .write()
+            .expect("dispatcher ask store poisoned") = Some(store);
+    }
+
+    /// The installed durable Ask store, when the host wired one.
+    pub fn ask_store(&self) -> Option<Arc<dyn AskPersistenceStore>> {
+        self.inner
+            .ask_store
+            .read()
+            .expect("dispatcher ask store poisoned")
+            .clone()
+    }
+
+    /// Mirror a persisted Ask record into the in-memory control-request store, so a record created
+    /// by another instance (or before a restart) can flow through the same consume/resume paths.
+    ///
+    /// The descriptor/digest facts are not part of the durable record: the store is the CAS
+    /// authority for a persisted Ask, and the mirror only exists so `graph_resume_ask` and the
+    /// answer-landing paths can see a `Consumed`/`Cancelled` state. `state` therefore is the
+    /// post-transition state the caller already committed to disk.
+    pub fn hydrate_persisted_ask(
+        &self,
+        record: &PersistedAsk,
+        state: PendingControlRequestState,
+    ) -> PendingControlRequest {
+        let hydration_marker = format!("persisted:{}", record.request_id);
+        let hydrated = PendingControlRequest {
+            request_id: record.request_id.clone(),
+            request_kind: record.kind.clone(),
+            session_id: Some(record.session_id.clone()),
+            run_id: record.run_id.clone(),
+            turn_id: record.turn_id.clone(),
+            call_id: record.call_id.clone(),
+            descriptor_snapshot_id: hydration_marker.clone(),
+            descriptor_id: hydration_marker.clone(),
+            final_args_digest: hydration_marker.clone(),
+            policy_digest: hydration_marker,
+            nonce: record.nonce.clone(),
+            version: record.version,
+            // No TTL for Ask: the deadline is never a product verdict (ADR 0074).
+            expires_at_ms: u64::MAX,
+            state,
+            prompt: Some(record.prompt.clone()),
+            options: Some(json!(record.options)),
+        };
+        self.inner
+            .pending_requests
+            .lock()
+            .expect("dispatcher pending requests poisoned")
+            .insert(record.request_id.clone(), hydrated.clone());
+        hydrated
+    }
+
+    /// Collapse every still-pending Ask of a session into `Cancelled`.
+    ///
+    /// The in-memory mirror only carries the dispatcher's coarse state set, so a lifecycle
+    /// disposition decided elsewhere (e.g. `Superseded` for a new user message, `Orphaned` for an
+    /// archived session) is mirrored as the terminal `Cancelled` state — the persisted record keeps
+    /// the precise disposition. Returns how many mirrors were closed.
+    pub fn close_pending_asks_of_session(&self, session_id: &str) -> usize {
+        let mut store = self
+            .inner
+            .pending_requests
+            .lock()
+            .expect("dispatcher pending requests poisoned");
+        let mut closed = 0;
+        for request in store.values_mut() {
+            if request.request_kind != PendingControlRequestKind::Interaction {
+                continue;
+            }
+            if request.session_id.as_deref() != Some(session_id) {
+                continue;
+            }
+            if request.state != PendingControlRequestState::Pending {
+                continue;
+            }
+            request.state = PendingControlRequestState::Cancelled;
+            request.version = request.version.saturating_add(1);
+            closed += 1;
+        }
+        closed
     }
 }
 
@@ -1564,7 +1667,7 @@ impl Inner {
 
         let now = self.clock.now_ms();
         let config = self.config.lock().expect("dispatcher config poisoned").clone();
-        let request_id = format!("control-{:012}", self.request_seq.fetch_add(1, Ordering::Relaxed));
+        let request_id = format!("control-{:012}", next_control_request_seq());
         let nonce = format!("nonce-{:012}", self.nonce_seq.fetch_add(1, Ordering::Relaxed));
         // Design Decision 5: an Ask (`waiting_host`) roundtrip persists as an `Interaction` request
         // (answered via `answer_control_request`); an approval persists as `Approval`. The kind is
@@ -1597,6 +1700,27 @@ impl Inner {
             prompt: Some(prompt),
             options: ask_options_from_arguments(&ready.final_arguments),
         };
+        // ADR 0074: an Ask is persisted state, not process memory. Persist the full CAS facts
+        // (`version`, `nonce`) so `list_pending` works after a restart and a second instance can
+        // reject replays. A persistence failure is logged but does not fail the dispatch: the
+        // Ask still reaches the host through the in-memory mirror, and the host read path
+        // (`list_pending_asks`) reports the degraded store instead of pretending success.
+        if pending.request_kind == PendingControlRequestKind::Interaction {
+            let store = self
+                .ask_store
+                .read()
+                .expect("dispatcher ask store poisoned")
+                .clone();
+            if let Some(store) = store {
+                let record = persisted_ask_from_pending(&pending, now);
+                if let Err(error) = store.upsert(&record) {
+                    eprintln!(
+                        "[pony-agent] ask persistence: upsert of `{}` failed: {error}",
+                        pending.request_id
+                    );
+                }
+            }
+        }
         self.pending_requests
             .lock()
             .expect("dispatcher pending requests poisoned")
@@ -3804,4 +3928,73 @@ mod tests {
             "external providers must not register builtin descriptors"
         );
     }
+}
+
+/// Project a live `PendingControlRequest` onto the durable Ask record (ADR 0074).
+///
+/// `created_at_ms` is the dispatch clock's wall clock, used for display/ordering only — the record
+/// deliberately carries no deadline.
+fn persisted_ask_from_pending(
+    pending: &PendingControlRequest,
+    created_at_ms: u64,
+) -> PersistedAsk {
+    PersistedAsk {
+        request_id: pending.request_id.clone(),
+        version: pending.version,
+        nonce: pending.nonce.clone(),
+        session_id: pending
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string()),
+        run_id: pending.run_id.clone(),
+        turn_id: pending.turn_id.clone(),
+        call_id: pending.call_id.clone(),
+        kind: pending.request_kind.clone(),
+        prompt: pending.prompt.clone().unwrap_or_default(),
+        options: persisted_ask_options(pending.options.as_ref()),
+        state: crate::agent::ask_persistence::AskLifecycleState::Pending,
+        created_at_ms,
+        answered_at_ms: None,
+    }
+}
+
+/// Persisted Ask options are the production `string[]` schema; a `{label, description}` array is
+/// flattened to its labels so the durable record keeps one shape.
+fn persisted_ask_options(options: Option<&Value>) -> Vec<String> {
+    match options {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(text) => Some(text.clone()),
+                Value::Object(map) => map
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Process-unique, collision-resistant control-request sequence.
+///
+/// The request id is the **persisted** Ask identity (`pending_asks.request_id` is the CAS key, ADR
+/// 0074), so it must be unique across processes and across dispatcher instances in one process. A
+/// plain per-dispatcher counter restarts at 0 (TUI + desktop, parent/child dispatchers, or parallel
+/// tests sharing one `sessions.db`), which would let one session's answer CAS land on another
+/// session's Ask. The seed mixes the wall clock with the pid; the global counter keeps ids unique
+/// within the process. Shape stays `control-<digits>` (opaque to hosts).
+fn next_control_request_seq() -> u64 {
+    static GLOBAL_SEQ: AtomicU64 = AtomicU64::new(0);
+    static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    const MODULUS: u64 = 1_000_000_000_000;
+    let seed = *SEED.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0);
+        (nanos ^ ((std::process::id() as u64).rotate_left(32))) % MODULUS
+    });
+    (seed + GLOBAL_SEQ.fetch_add(1, Ordering::Relaxed)) % MODULUS
 }

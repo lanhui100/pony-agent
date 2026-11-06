@@ -1,0 +1,43 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "executed_by": "ac181e6b-6c85-406f-b6f8-1eb99b6f0844",
+  "reviewed_commit": "3548c692",
+  "reviewer": { "kind": "subagent", "session_id": "ac181e6b-6c85-406f-b6f8-1eb99b6f0844", "fresh_context": true },
+  "attestation": { "self_signed": false },
+  "audited_scopes": [
+    ".dev-team/plan-ask-resume.md",
+    "crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "docs/observability.yaml",
+    "crates/pony-agent-core/tests/ask_resume_e2e.rs",
+    "tools/tui-audit/run_audit.sh"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs",
+      "line": 123,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn 'continue_ask_resume_turn_stream' crates/pony-agent-core/src .dev-team/plan-ask-resume.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 1866,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '1858,1872p' crates/pony-agent-core/src/agent/control_plane/mod.rs; sed -n '10984,11000p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 408,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -nE 'tui-logs|PONY_TUI_RUNTIME_LOG' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}

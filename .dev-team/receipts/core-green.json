@@ -1,0 +1,124 @@
+{
+  "task": "task-4",
+  "role": "executor-core",
+  "phase": "green",
+  "generated_at": "2026-11-06T18:20:00+08:00",
+  "contract": [
+    ".dev-team/contract-matrix-ask-persistence.md (§2 data model / §3 state machine / §4 cross-process CAS / §5 control API + answer landing / §7 migration)",
+    "docs/decisions/proposed/0074-ask-persistence-lifecycle.md",
+    "crates/pony-agent-core/tests/ask_persistence_acceptance.rs (frozen, read-only, NOT modified)"
+  ],
+  "files": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/graph.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs",
+    "crates/pony-agent-core/src/agent/control_plane/history_commands.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    ".dev-team/receipts/core-recon.json",
+    ".dev-team/receipts/core-green.json"
+  ],
+  "commands": [
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit": 0,
+      "result": "11 passed; 0 failed"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_resume_e2e",
+      "exit": 0,
+      "result": "5 passed; 0 failed (冻结 e2e，sha256 760e0e3d…b2c80 未变)"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test tui_batch3_regression",
+      "exit": 0,
+      "result": "26 passed; 0 failed"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_pending_contract",
+      "exit": 0,
+      "result": "6 passed"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_pending_adversarial",
+      "exit": 0,
+      "result": "4 passed"
+    },
+    {
+      "cmd": "cargo check -p pony-agent-core --all-targets",
+      "exit": 0,
+      "result": "0 errors"
+    },
+    {
+      "cmd": "cargo build -p pony-agent-core --bin pony",
+      "exit": 0
+    },
+    {
+      "cmd": "bash /tmp/ask_rebuild_smoke.sh t4b",
+      "exit": 0,
+      "result": "RESULT s1=1 s2=1 s3_closed=1 s3_english=0 (workdir /tmp/ask-smoke-t4b.9UsfW3)"
+    },
+    {
+      "cmd": "bash /tmp/t4_ask_injection_probe.sh t4b",
+      "exit": 0,
+      "result": "RESULT a1=1 a2=1 a3=1 (workdir /tmp/t4-inject-t4b.Cqs33R)"
+    }
+  ],
+  "migration": {
+    "storage": "sessions.db 新表 pending_asks：request_id TEXT PRIMARY KEY, session_id, version, nonce, run_id, turn_id, call_id, kind, prompt, options_json, state, created_at_ms, answered_at_ms；索引 (session_id,state) 与 (session_id,created_at_ms)。与 sessions/normalized_* 同库同文件。",
+    "forward_migration": "open_ask_store() 每次打开执行 CREATE TABLE/INDEX IF NOT EXISTS —— 旧库（无该表）直接可开并就地补齐；不回填历史数据（旧内存态无数据可迁）。所有 serde 字段 #[serde(default)]，旧 blob/JSON store 照旧可读。",
+    "backward": "新库不被旧版本识别（发布说明需点名，见 ADR 0074 不可逆面）。",
+    "construction_surface": "唯一入口 open_ask_store(db_path) / open_in_memory_ask_store()（T2 冻结签名，函数体由本任务实现）；host 侧 SessionStore::new() 打开同库 store，HostControlPlaneBuilder 采纳并注入 dispatcher。"
+  },
+  "decisions": [
+    "CAS 真值源是持久化记录：transition() 用 BEGIN IMMEDIATE 事务先读后写，跨进程并发同一 request 恰好一个赢家（A1 用例）。",
+    "answer/cancel 直接按 request_id 做 CAS，**不再**枚举进程内会话清单（修复重启后 ask_not_found）；成功后按记录 sessionId 水合 dispatcher 镜像（hydrate_persisted_ask）再消费，保证 graph_resume_ask 仍能看到 Consumed。",
+    "墙钟 TTL 退出 Ask 产品语义：can_consume 只对 Approval 保留 now<=expires_at_ms；expire_control_requests 只处理 Approval；ask_expire 退化为 GC（只把归档/删除会话的 Pending 转 Orphaned）。",
+    "生命周期挂点：用户新消息进入会话（run_turn / start_turn_stream / advance_graph_run / begin_graph_run_stream，及并行的 ask-aware 入口）⇒ Superseded；显式忽略 ⇒ Cancelled；会话归档/删除 ⇒ Orphaned。",
+    "回答落点：有 graph ask-wait 绑定 ⇒ 原 graph_resume_ask resume（行为不变）；无绑定 ⇒ answer_ask 写 session 维度一次性注入（GraphRunStore.session_ask_injections），下一轮由 take_pending_ask_injection 消费并注入 provider 上下文，不静默丢弃。",
+    "内存镜像只承担 UI 可见性兜底：list_pending_asks 以持久化记录为主，同一 request_id 持久化优先；镜像不覆盖终态。",
+    "冻结 e2e 兼容（Lead 裁定 a）：answer_ask/cancel_ask 返回对象补顶层 \"state\"（= consumed.request.state），既有 request 嵌套形状与旧断言不变，纯加性。",
+    "持久化 Ask 身份唯一性修复：dispatcher 生成 control-<12> 原为 per-dispatcher 计数器，restart/多 dispatcher 会重复（进程重启、TUI+桌面、同进程并行测试共享 sessions.db 都复现）。改为 process-seeded（nanos ^ pid）全局计数 ⇒ 跨进程/跨实例不再撞 pending_asks 主键；control-<digits> 字符串形状不变（对宿主不透明）。该缺陷曾导致冻结 e2e 的 T1/T4 互相踩到 control-000000000000 而假红。"
+  ],
+  "evidence": {
+    "smoke_cross_process": {
+      "script": "/tmp/ask_rebuild_smoke.sh t4final",
+      "workdir": "/tmp/ask-smoke-t4final.jWSlkj",
+      "result": "s1=1 s2=1 s3_closed=1 s3_english=0",
+      "note": "重启后面板重建 + 作答成功，无 cannot be consumed / replay / expiry 等英文内部串"
+    },
+    "answer_landing_session_injection": {
+      "script": "/tmp/t4_ask_injection_probe.sh t4a",
+      "workdir": "/tmp/t4-inject-t4a.D6uSos",
+      "result": "a1=1 a2=1 a3=1",
+      "log_lines": [
+        "[pony-agent] ask answer landed: source=session session=pa_01a1b049-... request=control-000000000000 call=call-audit-ask-6f3ea81c-...",
+        "[pony-runtime] turn:ask-injection source=session request=control-000000000000 call=call-audit-ask-6f3ea81c-..."
+      ],
+      "provider_request_proof": "下一轮 openai-completions 请求体同时含 assistant tool_call(builtin:ask_user, call-audit-ask-…) 与 role=tool 的终态结果 output.answer.answer=分支 B"
+    },
+    "red_phase_anchor": "test-agent 变异验证（M1 version 不递增 / M2 load_pending 不过滤终态 / M3 supersede 空实现 / M4 CAS 忽略 version）全部按预期转红（exit 101，无编译错误），还原后 sha256=287f93be…c8b8 与改前一致、11/11 稳定绿",
+    "frozen_e2e": {
+      "cmd": "cargo test -p pony-agent-core --test ask_resume_e2e",
+      "result": "5/5 green (T1/T2/T3/T4/T5)；T4 断言 answer_ask 顶层 state=consumed",
+      "test_sha256": "760e0e3d87aa459dbff3d3f56e6ab70447fc78f175947a9571c33998823b2c80",
+      "note": "T3（ask_resume_unavailable）在当前 ask-aware 实现下已由 C3 形态的日志/失败终态满足；该文件不属于 task-4 写域，未修改"
+    }
+  },
+  "risks": [
+    "PersistedAsk 主键为 request_id 单列（契约文本写复合键）：已通过「全局唯一 request id」保证单列主键安全（跨进程/跨 dispatcher 不复用），(session_id,state) 索引保证分区读；若 Lead 要求严格复合键需重开 CAS 身份设计。",
+    "legacy 冻结用例已由 Test Agent 重冻并通过（ask_pending_contract 6/6、ask_pending_adversarial 4/4），旧墙钟断言回归风险已关闭。",
+    "PendingControlRequest.expires_at_ms 字段保留（Approval 仍用），只是 Ask 不再以其判活；wire 上 PersistedAsk 无 expiresAtMs（P6 用例断言）。",
+    "无 SQLite 会话后端（File/Memory backend 的测试/降级路径）没有 durable store：list 退化到 dispatcher 镜像，不谎称已持久化（SessionStore::ask_store() = None）。",
+    "src-tauri 命令面未改（T5 scope）：ask_expire 现在返回 {expired, orphaned, nowMs}，expired 仅统计 Approval；桌面端如展示 expired 语义需 T5 对齐。",
+    "并行会话/其他 agent 也在改 control_plane/mod.rs、runtime/turn_control.rs、新增 ask_resume_commands.rs；我未触碰这些新增文件，但 mod.rs 为共享写域，最终合并需 Lead 统一复核。",
+    "旧库若曾被旧版本以 WAL 模式打开并残留 -wal/-shm，open_ask_store 的 PRAGMA journal_mode=WAL 会在首次连接时正常接管；未做额外校验。",
+    "control_plane/mod.rs 的 start_turn_stream 已被第五作者委派给 start_ask_aware_turn_stream（契约偏差 C1）；按 Lead 指示暂不回退，等待其裁决（回退需 TUI 显式改调 task-7 入口）。"
+  ]
+}

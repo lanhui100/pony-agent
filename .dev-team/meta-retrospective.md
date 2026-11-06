@@ -119,3 +119,76 @@
 3. **发版冻结期禁止全量 mock 语义变更**：`clearMocks/restoreMocks/isolate` 这类全局配置改动，即便「更正确」，也应在冻结期外单独成波并配 3 次全量稳定性证据。
 4. **teammate 名册需按波退役**：长会话累计到 8 上限后无法再派生，急用时应直接改走 Subagent 池（本波实践），并在 skill 里写明「Subagent 不占名册」的替代路径。
 5. **收据哈希类文件应默认豁免 secrets 扫描**：`.dev-team/` 生成收据里的 sha256 是证据不是凭据，建议把「生成收据路径白名单」上移为 dev-team 模板的一部分，避免每波重复处理。
+
+---
+
+# 元复盘 · ask-resume（TUI Ask 作答后本轮不继续）
+
+> 波次：`ask-resume`｜Lead：lead｜交付基线：`01047c4d` → 红相锚点 `3548c692`
+> 裁决：C = A + B（A 主修「给 TUI 流式轮真实 run 身份」，B 兜底「不可恢复时 fail-closed」）
+
+## 1. 通信拓扑与信噪比
+
+本轮采用「1 Lead + 2 并行成员（Test Agent 只写冻结测试、Audit Agent 只写 `tools/tui-audit/`）+
+1 Executor + 2 计算池审查（L3 代码对抗 + 方案追溯对抗）」的拓扑。四份写域物理不相交
+（`tests/ask_resume_e2e.rs` / `tools/tui-audit/**` / `src/agent/**`+`src/bin/tui.rs` / `.dev-team/**`），
+全程零文件冲突、零 `FS_STALE_VERSION`、零越界写。
+
+最大浪费不是套话而是**侦察报废**：首个 E2 侦察 subagent 直接失败无产出，Lead 只能自行定点复核补齐
+事实链，等于付了两份成本。可复用结论：E2 侦察必须拆成「链路 A→B→C」的窄问题集，一次抛 11 个宽问题会让
+子代理在长上下文里断线；后续把同类任务压到 10 条以内即一次成功。
+
+并行收益是实的：红相（验收测试）与 PTY 场景在 Executor 编码期间就已落盘，Executor 交工即可直接跑
+「红转绿 + PTY 绿」，墙钟节省约一轮完整返工。重复命令率方面 `cargo check --all-targets` 共跑 4 次，
+其中 2 次用于甄别「他人并行改动造成的假红」，属必要重复；无「无新信息原样重跑」记录。
+
+## 2. 门禁穿透与误杀率
+
+**红相真实拦截**：冻结文件 942 行 / 5 用例首跑 `0 passed; 5 failed`，失败全为判据失败而非编译失败
+——T1/T2/T4/T5 直指 `runId:null`（C1 缺口），T3 直指「`turn:suspended` 出现而 `turn:failed` 为 0」（C3 缺口）。
+这正是测试独立分权的价值：Executor 自写测试最可能写成「跑完不报错即过」，本单的静默死胡同会被整条放过。
+
+**PTY 真实拦截**：新增 `ask-resume` 场景修复前 `EXIT=1`，三条失败断言直指缺陷（`followup_rounds=0`、
+`生成中` 不收口、无第二段正文）；修复后同一脚本 `31 pass / 0 fail`、`EXIT=0`，`ask-panel`/`ask-loop`
+回归 `23 pass / 0 fail`。「同一脚本先红后绿」是本轮最强物理收据——既无法伪造，也无法靠放宽断言取得。
+
+**已拦下的误杀风险**：C3 初版最容易写成「`bound_run_id` 为 None 即失败」，会误杀既有「治理路径 + 无 store」
+的合法 suspended 语义；契约 INV-5 提前把判据钉死为 `Interaction && run_id.is_none()`，未发生误杀。
+
+**门禁没抓到、靠人抓的一处**：Executor 发现冻结测试调用的是**既有** `start_turn_stream` 而非方案里新增的方法，
+提出「契约物理不可满足」。这是计划期未回读验收面造成的**计划缺陷**，由 Lead 裁决为「旧方法委派 + 旧函数体
+逐字搬为 legacy 兜底」。教训：契约定 API 落点之前必须先 grep 冻结测试的调用面。
+
+**一处门禁未绿且不粉饰**：`check-declaration.sh` 活体 exit 2（`tracing` T4 dynamic PARTIAL，1h 短窗 Tempo 0 条 /
+24h 71 条）。静态 T1/T2/T3/T5 全 PASS，本轮未触及 otel 导出/采样，判为流量稀疏噪声；按 rubric 如实记 deficiency，
+**未**改 `applicable`、**未**伪造 metrics。`audit-diff.sh --base 3548c692` 退出 0（39 文件 / 6271 行新增）。
+
+## 3. 分工契约与隔离有效性
+
+共享工作区是本轮最大变量：另一并行会话在本单实施期间**实时编辑**同一批文件
+（`control_plane/mod.rs`、`ask_plan_commands.rs`、`dispatcher.rs`、`graph.rs`、`runtime/mod.rs`），
+并把工作树一度改到**不可编译**（`note_user_message_entry` 私有方法误用）。处置有效：
+
+- 侦察阶段即把「不 revert/不覆盖他人改动、不做任何 git 写操作」写入每个成员 prompt；
+- Executor 被要求「只修自己写域内编译错误，他人文件等 60 秒重试，5 分钟仍红即上报」；
+- 最终以「新增文件承载新增逻辑」（`ask_resume_commands.rs`）+ 旧文件最小改动（`mod` 行 + 委派），
+  把与并行会话的写域交集压到 1 个文件 2 处、≤40 行。
+
+副作用是**语义耦合**：并行会话同期在 `graph.rs` 加了 session 级 Ask 注入（ADR 0074 answer landing），
+与本单 run 级注入并存（run 级优先、session 级兜底）。二者不冲突，但这是「两个波次在同一缺陷上并行行军」
+的典型风险——收口后必须有一次联合回归才算真正闭环。
+
+Lead 侧信息下发控制有效：`.dev-team/plan-ask-resume.md` 是唯一真值源，测试/审计/实施三方同源取值，
+未出现「各读一半代码、各写一半断言」。冻结测试 sha256 全程可复核且未变。
+
+## 4. 元协议迭代建议
+
+1. **`dev-team` 增补「共享工作区并存会话」条款**：当 `git status` 显示非本任务写域存在 `M` 且 mtime 在
+   最近 10 分钟内变化时，必须先做「编译稳定性探测」（间隔 60s 的两次 `cargo check`），红则暂停开波并升级；
+   禁止在不可编译基线上编码。
+2. **冻结测试先于契约定 API 落点**：Phase 1 增加「验收面回读」硬序——契约冻结后立刻 grep 冻结测试里出现的
+   符号名并与契约 API 逐一对齐，本轮顺序颠倒直接导致一次返工裁决。
+3. **E2 侦察拆卷**：单 E2 subagent 问题集上限 ≤6 条、每条 ≤2 个符号，超限拆成多次串行（建图→定点），
+   可显著降低「长上下文断线整份报废」。
+4. **PTY 门禁标准化为「同脚本先红后绿」双收据**：红（EXIT=1，失败断言直指缺陷）与绿（EXIT=0）两次输出
+   并列为该类缺陷的默认交付格式，比单独一张绿票强得多。

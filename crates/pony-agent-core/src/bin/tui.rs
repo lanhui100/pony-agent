@@ -36,11 +36,11 @@ use pony_agent_core::agent::runtime::{
     compact_outcome_message, AgentRuntimeBuilder, ManualCompactionOutcome, TurnInput,
     TurnStreamEvent,
 };
-use pony_agent_core::agent::session::SessionStore;
+use pony_agent_core::agent::session::{is_main_session_id, new_session_id, SessionStore};
 use pony_agent_core::agent::stop_escalation::StopReason;
 // wave-60 §C8：双击 Esc 的纯判定状态机（与桌面端 `src/lib/runtime/stop-sequence.ts` 同判据）。
 use pony_agent_core::agent::stop_sequence::{StopIdentity, StopSequenceState, STOP_SEQUENCE_MS};
-use pony_agent_core::agent::turn_flow::TurnEventSink;
+use pony_agent_core::agent::turn_flow::{TurnEventSink, TurnSpeedBasis};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Rect},
@@ -467,9 +467,17 @@ pub fn restore_terminal_modes() {
 /// `TerminalGuard` 的 Drop 覆盖不到 abort / hook 侧 abort 的路径；panic hook 在 unwind 最外层
 /// 之前运行，是"进程要死了也要把终端交还"的最后一道闸。与 guard 的还原互为幂等。
 fn install_panic_restore_hook() {
+    // 终端属主是主线程：只有主线程 panic 才代表「这个进程要带着终端一起死了」。
+    // 轮次线程 / 输入线程等 worker 的 panic 由 `catch_unwind` 兜底，TUI 仍在运行；
+    // 若此处无条件还原，会把 raw mode / 备用屏 / kitty 键盘协议栈提前拆掉，
+    // 界面还活着但按键已被 tty 回显成 `^[[13u`、`^[[99;5u` 这类字面垃圾
+    // （herdr/tmux 下 `\x1b[<1u` 弹栈还可能不被识别，协议残留更久）。
+    let terminal_owner = std::thread::current().id();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_modes();
+        if std::thread::current().id() == terminal_owner {
+            restore_terminal_modes();
+        }
         previous(info);
     }));
 }
@@ -546,6 +554,11 @@ pub enum UiEvent {
     AskUserPrompt { request_id: String, questions: Vec<AskUserQuestion> },
     /// 用户提交 AskUser 回答
     AskUserAnswered { request_id: String, answers: Vec<(String, Vec<String>)> },
+    /// C2（ask-resume）：Ask 作答成功 ⇒ **需要续轮**。
+    ///
+    /// `run_id` = 刚被 `graph_resume_ask` 恢复为可续的 graph run。续轮只能由**事件循环**
+    /// 用既有轮次线程基建发起；按键分支只负责投递本事件（绝不在按键分支里同步跑 turn）。
+    AskResumeTurn { run_id: String },
     /// Plan 计划更新通知
     PlanUpdated(PlanState),
     /// 任务看板更新通知
@@ -1137,6 +1150,11 @@ pub struct PendingUiRequest {
     pub version: u64,
     /// 审批/问答请求绑定的图运行 id；`None` 表示不经过图运行、只能消费不能 resume。
     pub run_id: Option<String>,
+    /// 宿主快照里的 `expiresAtMs`（Unix 毫秒），**仅留痕，不参与任何判定**。
+    ///
+    /// ADR 0074 / 契约 §6.1：墙钟 TTL 已退出产品语义，能否作答只由宿主生命周期
+    /// （列表里仍为 `Pending`）决定。字段保留是为了不破坏既有构造方与排障打印。
+    pub expires_at_ms: Option<u64>,
     /// `true` = 审批类（approval_required），`false` = 问答类（interaction）。
     pub is_approval: bool,
 }
@@ -1367,6 +1385,11 @@ pub fn pending_ui_request_from_value(value: &serde_json::Value) -> Option<Pendin
             .get("runId")
             .and_then(|run_id| run_id.as_str())
             .map(str::to_string),
+        // `expiresAtMs` 缺失/null 表示无 TTL；`0` 同样按无 TTL 处理（不是「立刻过期」）。
+        expires_at_ms: value
+            .get("expiresAtMs")
+            .and_then(|ms| ms.as_u64())
+            .filter(|ms| *ms > 0),
         is_approval,
     })
 }
@@ -1896,6 +1919,67 @@ pub fn ask_submit_verdict(
         None => AskSubmitVerdict::Reject("请选择一个选项，或输入自定义回答后再提交"),
     }
 }
+
+/// 提问/审批面板的**唯一**失效文案（ADR 0074 / 契约 §6.5）。
+///
+/// 宿主不再有「墙钟过期」这条路：面板消失只有两种原因 —— 请求已被处理（Answered）、
+/// 被显式忽略（Cancelled）、被新消息取代（Superseded）或会话归档（Orphaned）。
+/// 用户可见文案统一走中文，宿主的英文内部串（含历史上的 `cannot be consumed …`）只进
+/// 运行时日志（stderr → `tui-runtime.log`），**绝不上屏**。
+pub const ASK_STALE_NOTICE: &str = "该提问已失效，已同步最新待处理请求";
+
+/// 未决快照里是否仍包含该 `request_id`。
+///
+/// 生命周期判定的**唯一真值**：宿主列表只列 `Pending`，因此「不在列表里」即意味着
+/// 已被作答/忽略/取代/归档 —— 客户端据此收面板，而不是拿本地时钟猜。
+pub fn snapshot_contains_request(items: &[serde_json::Value], request_id: &str) -> bool {
+    items.iter().any(|item| {
+        item.get("requestId").and_then(|value| value.as_str()) == Some(request_id)
+    })
+}
+
+/// 已开的面板是否必须收口：句柄还在，但请求已不在未决快照里。
+///
+/// 这是取代原「本地 TTL 守卫」的生命周期判据（契约 §6.4：新消息 ⇒ `Superseded` ⇒
+/// 旧面板必须消失）。反向不成立：句柄为 `None` 时本函数恒 `false`（没面板可收）。
+pub fn pending_panel_should_close(
+    items: &[serde_json::Value],
+    handle: Option<&PendingUiRequest>,
+) -> bool {
+    match handle {
+        Some(handle) => !snapshot_contains_request(items, &handle.request_id),
+        None => false,
+    }
+}
+
+/// 判断宿主错误串是否属于「控制请求已不可消费」家族（与 `ponysentry` 的证据过滤表同源）。
+pub fn is_stale_control_request_error(message: &str) -> bool {
+    let msg = message.to_lowercase();
+    // 持久化 CAS 的稳定错误码（契约 §4）是**唯一**可归因面：只认码，不认英文散文。
+    if STALE_CONTROL_REQUEST_CODES
+        .iter()
+        .any(|code| msg.contains(code))
+    {
+        return true;
+    }
+    // 兼容期：dispatcher 时代的自由文案（旧宿主）。
+    msg.contains("cannot be consumed")
+        || msg.contains("stale mutation rejected")
+        || msg.contains("unknown control request")
+        || msg.contains("cannot resume")
+}
+
+/// 持久化 CAS 家族的稳定错误码（与桌面端 `ASK_STALE_ERROR_CODES` 同集合）。
+///
+/// 五码全部是**终态冲突/作用域缺失**：重试永远不会成功，因此一律转成统一中文失效文案，
+/// 不得落到「请重试」分支（那会让用户对着一个已经终结的提问反复点）。
+pub const STALE_CONTROL_REQUEST_CODES: [&str; 5] = [
+    "ask_state_conflict",
+    "ask_version_mismatch",
+    "ask_not_found",
+    "ask_nonce_mismatch",
+    "ask_scope_required",
+];
 
 /// 契约 F-L：网关地址的用户可见展示（**必须剥离凭据**）。
 ///
@@ -2502,7 +2586,7 @@ impl Default for TuiState {
             input_cursor: 0,
             is_streaming: false,
             spinner_tick: 0,
-            session_id: format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            session_id: new_session_id(),
             model: "gemini-3.8-flash".to_string(),
             current_provider_id: "ponyllm".to_string(),
             gateway_url: env_gateway,
@@ -3596,7 +3680,7 @@ impl TuiState {
 
     pub fn clear_messages(&mut self) {
         self.messages.clear();
-        self.session_id = format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        self.session_id = new_session_id();
         self.status_text = "Context cleared".to_string();
         // C13/C23（换 session 的另一个入口）：排队消息与队列反馈同属会话作用域，必须一并清空。
         // 否则旧会话排的队会被派发进新 session（正文污染 + 与新会话 turn 交叠）。
@@ -5418,7 +5502,13 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             segments.push(format!("上下文 {:.0}%", (ratio * 100.0).round()));
         }
         if let Some(speed) = metrics.turn_speed_tokens_per_second {
-            segments.push(format!("{:.0} t/s", speed.round()));
+            // I9/I10：口径只从快照读，TUI 侧禁止另算；`end_to_end`（含排队+prefill，
+            // 跨调用不可比）必须带 `≈` 前缀，`stream_decode` 才是可比的解码速度。
+            let prefix = match metrics.turn_speed_basis {
+                Some(TurnSpeedBasis::EndToEnd) => "≈",
+                _ => "",
+            };
+            segments.push(format!("{prefix}{:.0} t/s", speed.round()));
         }
         if let Some(ttft_ms) = metrics.first_token_latency_ms {
             segments.push(format!("首token {ttft_ms}ms"));
@@ -7401,14 +7491,16 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
             .current_question()
             .map(|question| !question.options.is_empty())
             .unwrap_or(false);
+        // 键位语义（ADR 0074 / 契约 §6.3）：esc = **忽略此提问**（宿主 `Cancelled`），
+        // 不是「过期」也不是「取消本次运行」。此处只放一行最短提示，无倒计时、无期限暗示。
         let hint = if !has_options {
-            "输入回答 · ↵ 提交 · esc 取消"
+            "输入回答 · ↵ 提交 · esc 忽略此提问"
         } else if custom_focused {
-            "输入自定义回答 · ↵ 提交 · esc 取消"
+            "输入自定义回答 · ↵ 提交 · esc 忽略此提问"
         } else if multi {
-            "↑↓ 移动 · space 勾选 · ↵ 提交 · esc 取消"
+            "↑↓ 移动 · space 勾选 · ↵ 提交 · esc 忽略此提问"
         } else {
-            "↑↓ 移动 · ↵ 确认 · esc 取消"
+            "↑↓ 移动 · ↵ 确认 · esc 忽略此提问"
         };
         lines.push(Line::from(vec![
             Span::raw(" ".repeat(RAIL + 1)),
@@ -8067,6 +8159,10 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
         }
     }
 
+    // ADR 0074 / 契约 §6.2「恢复即重建」：启动（含 `pony resume <id>`）后立刻按持久化记录
+    // 重建未决 Ask 面板，不等 500ms 轮询 —— 否则重启后用户会先看到一屏空对话，以为提问丢了。
+    let _ = sync_pending_control_request(&mut state, &control_plane);
+
     let (tx, rx): (Sender<UiEvent>, Receiver<UiEvent>) = channel();
 
     // T2c：无论主循环以何种方式退出（Ctrl-C、/quit、错误 `?` 传播、panic），
@@ -8354,27 +8450,166 @@ fn ask_answer_json(answers: &[(String, Vec<String>)]) -> serde_json::Value {
     })
 }
 
+/// 把已失效的待决控制请求收口：清句柄 + 上屏**中文**失效文案。
+///
+/// ADR 0074：客户端不再对宿主做「过期对账」（`expire_asks` 已退化为 GC，不是作答裁决），
+/// 面板消失只由宿主生命周期驱动 —— 请求不在 `Pending` 列表里即已收口，客户端只需呈现结论。
+///
+/// **不收面板**：收口统一由调用点做一次，避免 `end_overlay()` 被重复调用把覆盖层栈多弹一层
+/// （会静默丢掉进入面板前的模式，例如 Plan）。
+fn close_stale_pending_request(state: &mut TuiState) {
+    state.pending_request = None;
+    state.set_status_notice(ASK_STALE_NOTICE.to_string());
+    state.messages.push(ChatMessage {
+        role: MessageRole::System,
+        content: ASK_STALE_NOTICE.to_string(),
+        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+    });
+}
+
+/// 关闭当前控制请求覆盖层（仅当确实处于该覆盖层：`end_overlay()` 会从栈里回弹）。
+fn close_pending_request_overlay(state: &mut TuiState) {
+    match state.mode {
+        InteractionMode::PermissionApproval => state.cancel_permission_approval(),
+        InteractionMode::AskUserQuestion => state.cancel_ask_user(),
+        _ => {}
+    }
+}
+
+/// 同步当前会话的待决宿主控制请求（Ask / Approval）→ 面板：**生命周期驱动，无墙钟判定**。
+///
+/// 这是「恢复即重建」（ADR 0074 / 契约 §6.2）的**唯一**入口 —— 启动、`pony resume <id>`、
+/// `/resume`、队友会话切换、返回主会话、`turn:suspended` 事件与 500ms 轮询都调它。判定全部
+/// 来自宿主快照（只列 `Pending`）：
+///
+/// * 句柄对应请求仍在快照里 ⇒ 保持不动（同一 `request_id` 只允许一个面板，绝不重复 `start_*`，
+///   否则覆盖层栈会被多压一层、Esc 一次退不干净）；
+/// * 句柄对应请求已不在快照里 ⇒ 生命周期已收口（Answered / Cancelled / Superseded / Orphaned）
+///   ⇒ 收面板 + 中文提示。客户端**不再**自行 `expire_asks` 判死；
+/// * 无句柄且不在面板态 ⇒ 用快照首项重建面板（重启后未决 Ask 就是靠这条路径重新出现）。
+///
+/// 返回 `true` 表示界面状态发生变化（调用方据此置脏重绘）。
+fn sync_pending_control_request(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+) -> bool {
+    let snapshot = control_plane.list_pending_asks(Some(state.session_id.as_str()));
+    let items: &[serde_json::Value] = snapshot.as_array().map(Vec::as_slice).unwrap_or(&[]);
+
+    // 1) 已有面板：请求仍在待决集合里 ⇒ 保持；已被宿主收口 ⇒ 收面板 + 中文提示。
+    if pending_panel_should_close(items, state.pending_request.as_ref()) {
+        close_stale_pending_request(state);
+        close_pending_request_overlay(state);
+        return true;
+    }
+    if state.pending_request.is_some() {
+        return false;
+    }
+    // 2) 覆盖层已被其它模态占用（审批弹窗、`--demo-ask-user` 演示面板、无句柄的问答面板）：
+    //    不抢、不重复建 —— 演示面板本就没有宿主句柄，抢开会让它闪断。
+    if state.mode == InteractionMode::PermissionApproval
+        || state.mode == InteractionMode::AskUserQuestion
+    {
+        return false;
+    }
+    // 3) 从宿主快照重建面板。
+    let Some(first) = items.first() else {
+        return false;
+    };
+    let Some(handle) = pending_ui_request_from_value(first) else {
+        return false;
+    };
+    state.pending_request = Some(handle.clone());
+    if handle.is_approval {
+        let request = permission_request_from_pending(first, &state.session_id);
+        state.start_permission_approval(request);
+    } else {
+        let question = ask_question_from_pending(first);
+        state.start_ask_user(handle.request_id, vec![question]);
+    }
+    true
+}
+
+/// 把控制面错误转成用户可见文案：一律中文，宿主英文内部串只进运行时日志
+/// （stderr → `tui-runtime.log`）供排障，**绝不上屏**（契约 §6.5）。
+///
+/// 与 [`close_stale_pending_request`] 一样**不收面板**：调用点各自收口一次。
+fn report_control_request_error(
+    state: &mut TuiState,
+    action: &str,
+    error: &str,
+) {
+    eprintln!("[pony-tui] {action}: {error}");
+    // CAS 家族（已被处理/忽略/取代、版本或 nonce 不符）⇒ 统一失效文案；
+    // 其余（序列化/IO 等）也只给中文结论，原始串仅进运行时日志。
+    let content = if is_stale_control_request_error(error) {
+        // 同一族错误都源于「请求已不在 Pending」：客户端不再自行 expire，只清句柄。
+        state.pending_request = None;
+        ASK_STALE_NOTICE.to_string()
+    } else {
+        format!("{action}，请重试（详情见 tui-runtime.log）")
+    };
+    state.set_status_notice(content.clone());
+    state.messages.push(ChatMessage {
+        role: MessageRole::System,
+        content,
+        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+    });
+}
+
+/// C2（ask-resume）：作答成功后的**宿主续轮提示**——固定非空文案。
+///
+/// 为什么必须非空：`runtime.prepare_turn` 的 `reject_empty` 会直接拒绝空 message。
+/// 为什么是常量而不是用户输入：续轮不是新的用户发言，**不得** `add_user_message` 到界面
+/// （否则会在消息区凭空多出一个用户气泡）。
+const ASK_RESUME_CONTINUATION_PROMPT: &str = "（已作答，继续上一轮未完成的步骤）";
+
+/// C2：挂起请求**没有 run 身份**时的可读提示（C3 已在运行时侧 fail-closed，这里只是兜底上屏，
+/// 绝不允许出现「作答了但界面上什么都不发生」的静默态）。
+const ASK_RESUME_UNAVAILABLE_NOTICE: &str =
+    "该提问缺少可恢复的执行上下文，本轮无法自动继续；请重新发起该操作（详情见 tui-runtime.log）。";
+
 /// 契约 F-M：**全部问题答完后**一次性提交答案并恢复任务流。
 ///
 /// 中途推进（`NextQuestion::Advance`）不得走到这里 —— 否则控制面会拿着半份答案继续执行。
+///
+/// C2 返回值语义：`Some(run_id)` = `answer_ask` 与 `graph_resume_ask` 均成功，**需要续轮**，
+/// 由调用方把续轮派发到事件循环（见 `UiEvent::AskResumeTurn`）；`None` = 不需要/不能续轮
+/// （作答失败或无 run 身份，两种情形都已上屏可读提示）。按键分支**绝不**同步跑 turn。
 fn submit_ask_answers(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     tx: &Sender<UiEvent>,
     answers: Vec<(String, Vec<String>)>,
-) {
+) -> Option<String> {
     let Some((request_id, version, run_id)) = state
         .pending_request
         .as_ref()
         .filter(|handle| !handle.is_approval)
-        .map(|handle| (handle.request_id.clone(), handle.version, handle.run_id.clone()))
+        .map(|handle| {
+            (
+                handle.request_id.clone(),
+                handle.version,
+                handle.run_id.clone(),
+            )
+        })
     else {
-        return;
+        return None;
     };
+    // ADR 0074：无本地墙钟守卫。可否作答只由宿主生命周期决定（仍为 `Pending` 就能提交）。
+    // 契约 §4：CAS 是**作用域**四元组，作用域由 `answer_ask_in_session(state.session_id, ..)`
+    // 直接透传 —— 客户端不再自行预判（那会与宿主真值双份维护并可能误拒合法作答）；
+    // 冲突/越权一律由宿主以稳定错误码拒绝，再由 `report_control_request_error` 转成中文文案。
     let answer_json = ask_answer_json(&answers);
-    match control_plane.answer_ask(&request_id, version, answer_json.clone()) {
-        Ok(_) => {
-            if let Some(run_id) = run_id {
+    let mut resume_target: Option<String> = None;
+    match control_plane.answer_ask_in_session(
+        &state.session_id,
+        &request_id,
+        version,
+        answer_json.clone(),
+    ) {
+        Ok(_) => match run_id {
+            Some(run_id) => {
                 // 查找该 ask wait 当前绑定的期望版本；缺失时回退到提交时的版本。
                 let waits_val = control_plane.graph_list_ask_waits(&run_id);
                 let resume_version = waits_val
@@ -8393,34 +8628,39 @@ fn submit_ask_answers(
                     resume_version,
                     answer_json,
                 ) {
-                    Ok(_) => {
-                        state.is_streaming = true;
-                        state.status_text = "Thinking...".to_string();
-                    }
+                    // 作答成功 ≠ 本轮已继续：这里只登记「需要续轮」，由事件循环发起。
+                    Ok(_) => resume_target = Some(run_id),
                     Err(error) => {
-                        state.set_status_notice(format!("恢复任务流失败: {error}"));
-                        state.messages.push(ChatMessage {
-                            role: MessageRole::System,
-                            content: format!("恢复任务流失败: {error}"),
-                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                        });
+                        report_control_request_error(state, "恢复任务流失败", &error);
                     }
                 }
             }
-        }
+            None => {
+                // 挂起请求没有 run 身份 ⇒ 没有 ask-wait 可恢复（C3 的不可恢复形态）：
+                // 必须上屏可读提示 + 结构化日志，绝不静默。
+                // F4：错误码单一定义点 —— 引用 runtime 的常量拼文案，禁止在 TUI 再写一份字面量
+                // （`docs/observability.yaml` 的 error_classifier 收口点靠这条纪律成立）。
+                eprintln!(
+                    "[pony-tui] {}: request={request_id} reason=no_run_identity",
+                    pony_agent_core::agent::runtime::ASK_RESUME_UNAVAILABLE_CODE
+                );
+                state.set_status_notice(ASK_RESUME_UNAVAILABLE_NOTICE.to_string());
+                state.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: ASK_RESUME_UNAVAILABLE_NOTICE.to_string(),
+                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                });
+            }
+        },
         Err(error) => {
-            state.set_status_notice(format!("提交回答失败: {error}"));
-            state.messages.push(ChatMessage {
-                role: MessageRole::System,
-                content: format!("提交回答失败: {error}"),
-                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-            });
+            report_control_request_error(state, "提交回答失败", &error);
         }
     }
     let _ = tx.send(UiEvent::AskUserAnswered {
         request_id,
         answers,
     });
+    resume_target
 }
 
 /// W3：目标会话能否从 SessionStore 加载（`/agents` Enter 的硬前置）。
@@ -8470,6 +8710,8 @@ fn enter_teammate_session(
     state.reset_session_scope();
     state.return_session_id = Some(main_session_id);
     hydrate_state_from_session(state, control_plane, &session_id);
+    // 契约 §6.2：换会话即重建面板 —— 旧会话的面板必须收掉，新会话的未决 Ask 必须立刻出现。
+    let _ = sync_pending_control_request(state, control_plane);
     let notice = format!("已进入队友 {target} 的会话（r 返回主会话）");
     state.status_text = format!("队友 {target} · {session_id}");
     state.status_notice = Some((notice, std::time::Instant::now()));
@@ -8500,6 +8742,8 @@ fn return_to_main_session(
     state.session_id = main_session_id.clone();
     state.reset_session_scope();
     hydrate_state_from_session(state, control_plane, &main_session_id);
+    // 契约 §6.2：回到主会话同样重建面板（主会话可能仍有未决 Ask）。
+    let _ = sync_pending_control_request(state, control_plane);
     state.status_text = format!("已返回主会话 {main_session_id}");
     state.status_notice = Some((
         "已返回主会话".to_string(),
@@ -8838,37 +9082,6 @@ fn tui_event_loop(
     let mut queue_dispatch_payload: Option<QueuedUserMessage> = None;
     // 信号处理器已在 run_tui 进入 raw mode 之前安装（启动期 SIGHUP 也要能还原终端）。
 
-    // 辅助闭包：检查并同步当前 session 的待决宿主控制请求（Ask / Approval）
-    let check_pending_asks = |st: &mut TuiState, cp: &HostControlPlane| -> bool {
-        // 如果当前已处于审批或问答模式，暂不覆盖当前操作
-        if st.mode == InteractionMode::PermissionApproval || st.mode == InteractionMode::AskUserQuestion {
-            return false;
-        }
-        let pending = cp.list_pending_asks(Some(st.session_id.as_str()));
-        let items = match pending.as_array() {
-            Some(arr) if !arr.is_empty() => arr,
-            _ => {
-                st.pending_request = None;
-                return false;
-            }
-        };
-
-        if let Some(first) = items.first() {
-            if let Some(handle) = pending_ui_request_from_value(first) {
-                st.pending_request = Some(handle.clone());
-                if handle.is_approval {
-                    let req = permission_request_from_pending(first, &st.session_id);
-                    st.start_permission_approval(req);
-                } else {
-                    let q = ask_question_from_pending(first);
-                    st.start_ask_user(handle.request_id, vec![q]);
-                }
-                return true;
-            }
-        }
-        false
-    };
-
     // wave-60 §C8：流式中双击 Esc 的判定状态机（窗口 `stop_sequence_ms`=500，与桌面端同判据）。
     // generation 承载「同一 turn_id 的一次出现」：turn_id 变化 ⇒ 身份变化 ⇒ 上膛失效。
     let mut stop_sequence = StopSequenceState::new(STOP_SEQUENCE_MS);
@@ -8898,7 +9111,7 @@ fn tui_event_loop(
 
         // 空闲或间隔约 500ms 时，轮询一次待决的宿主请求
         if last_poll_instant.elapsed() >= Duration::from_millis(500) {
-            if check_pending_asks(&mut state, &control_plane) {
+            if sync_pending_control_request(&mut state, &control_plane) {
                 dirty = true;
             }
             last_poll_instant = std::time::Instant::now();
@@ -9133,6 +9346,9 @@ fn tui_event_loop(
                                     state.reset_session_scope();
                                     hydrate_state_from_session(&mut state, &control_plane, &chosen.id);
                                     state.mode = InteractionMode::Normal;
+                                    // 契约 §6.2：`/resume` 切到目标会话后立刻重建未决 Ask 面板
+                                    // （旧会话的面板在此一并收口，同一 request_id 只留一个面板）。
+                                    let _ = sync_pending_control_request(&mut state, &control_plane);
                                 } else {
                                     state.cancel_session_selector();
                                 }
@@ -9353,7 +9569,11 @@ fn tui_event_loop(
                             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                                 if let Some(ref handle) = state.pending_request {
                                     if handle.is_approval {
-                                        if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
+                                        if let Err(e) = control_plane.cancel_ask_in_session(
+                                            &state.session_id,
+                                            &handle.request_id,
+                                            handle.version,
+                                        ) {
                                             state.set_status_notice(format!("取消审批失败: {e}"));
                                             state.messages.push(ChatMessage {
                                                 role: MessageRole::System,
@@ -9429,7 +9649,11 @@ fn tui_event_loop(
                                                 }
                                             }
                                             PermissionChoice::Deny => {
-                                                if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
+                                                if let Err(e) = control_plane.cancel_ask_in_session(
+                                            &state.session_id,
+                                            &handle.request_id,
+                                            handle.version,
+                                        ) {
                                                     state.set_status_notice(format!("审批拒绝失败: {e}"));
                                                     state.messages.push(ChatMessage {
                                                         role: MessageRole::System,
@@ -9460,20 +9684,46 @@ fn tui_event_loop(
                     if state.mode == InteractionMode::AskUserQuestion {
                         match key.code {
                             KeyCode::Esc => {
-                                if let Some(ref handle) = state.pending_request {
-                                    if !handle.is_approval {
-                                        if let Err(e) = control_plane.cancel_ask(&handle.request_id, handle.version) {
-                                            state.set_status_notice(format!("取消提问失败: {e}"));
-                                            state.messages.push(ChatMessage {
-                                                role: MessageRole::System,
-                                                content: format!("取消提问失败: {e}"),
-                                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                            });
+                                // 契约 §6.3：Esc = **显式忽略此提问** ⇒ 宿主 `Cancelled`
+                                // （与「新消息取代 → Superseded」是两种不同终态，不可混同）。
+                                // 无本地墙钟判定：能否 cancel 由宿主 CAS 决定，冲突文案已中文化。
+                                let Some(handle) = state
+                                    .pending_request
+                                    .clone()
+                                    .filter(|handle| !handle.is_approval)
+                                else {
+                                    // 无宿主句柄（如 `--demo-ask-user` 演示面板）⇒ 直接关，不臆造 CAS。
+                                    state.cancel_ask_user();
+                                    continue;
+                                };
+                                match control_plane.cancel_ask_in_session(
+                                    &state.session_id,
+                                    &handle.request_id,
+                                    handle.version,
+                                ) {
+                                    Ok(_) => {
+                                        state.pending_request = None;
+                                        state.cancel_ask_user();
+                                    }
+                                    Err(e) => {
+                                        // 忽略失败**不得**关闭面板后让它再自己弹回来（"复活"）：
+                                        // 立刻按宿主真值重拉一次，宿主仍 Pending 就如实保留面板
+                                        // （用户可重试忽略或改为作答），已收口才真正关掉。
+                                        report_control_request_error(&mut state, "忽略提问失败", &e);
+                                        let snapshot = control_plane
+                                            .list_pending_asks(Some(state.session_id.as_str()));
+                                        let items: &[serde_json::Value] = snapshot
+                                            .as_array()
+                                            .map(Vec::as_slice)
+                                            .unwrap_or(&[]);
+                                        if snapshot_contains_request(items, &handle.request_id) {
+                                            state.pending_request = Some(handle);
+                                        } else {
+                                            state.pending_request = None;
+                                            state.cancel_ask_user();
                                         }
                                     }
                                 }
-                                state.pending_request = None;
-                                state.cancel_ask_user();
                             }
                             KeyCode::Down => {
                                 if let Some(ref mut ask) = state.ask_user_state {
@@ -9560,9 +9810,15 @@ fn tui_event_loop(
                                 }
                                 if let Some(answers) = finish_with {
                                     // 全部问题答完 ⇒ 一次性提交（answer_ask + graph_resume_ask）。
-                                    submit_ask_answers(&mut state, &control_plane, &tx, answers);
+                                    let resume_run_id =
+                                        submit_ask_answers(&mut state, &control_plane, &tx, answers);
                                     state.pending_request = None;
                                     state.cancel_ask_user();
+                                    // C2（ask-resume）：作答成功后**必须**继续本轮。续轮经事件循环派发
+                                    // （绝不在此按键分支里同步跑 turn，否则会卡住整个输入循环）。
+                                    if let Some(run_id) = resume_run_id {
+                                        let _ = tx.send(UiEvent::AskResumeTurn { run_id });
+                                    }
                                 }
                                 dirty = true;
                                 continue;
@@ -10060,9 +10316,12 @@ fn tui_event_loop(
                                 }
                                 if known_command == Some("/clear") {
                                     // 契约 P-2：/clear = 复位会话作用域 + 换新 session_id。
+                                    // ADR 0074：旧会话的 Ask 面板不得跟到新会话（先收口再复位）。
+                                    state.pending_request = None;
+                                    close_pending_request_overlay(&mut state);
                                     state.reset_session_scope();
-                                    state.session_id =
-                                        format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                                    state.session_id = new_session_id();
+                                    let _ = sync_pending_control_request(&mut state, &control_plane);
                                     state.set_status_notice("上下文已清空");
                                     continue;
                                 }
@@ -10649,6 +10908,99 @@ fn tui_event_loop(
                     state.start_ask_user(request_id, questions);
                 }
                 UiEvent::AskUserAnswered { .. } => {}
+                UiEvent::AskResumeTurn { run_id } => {
+                    // C2（ask-resume）：作答后的续轮由**事件循环**发起（按键分支只投递事件）。
+                    // 复用既有轮次线程基建：TuiTurnSink + TuiTurnSinkGuard + current_turn_id +
+                    // turn_loop_in_flight + inflight_turns；界面进入流式态。
+                    // **不** add_user_message：续轮提示是宿主文案，不得新增用户气泡。
+                    state.begin_turn_usage();
+                    state.status_notice = None;
+                    state.context_window_tokens = resolve_context_window_tokens(&state);
+                    state.is_streaming = true;
+                    state.status_text = "Thinking...".to_string();
+                    state.auto_scroll = true;
+                    state.transition_runtime_mode(RuntimeMode::Connecting);
+                    state.turn_started_at = Some(std::time::Instant::now());
+
+                    let resume_provider_id = resolve_active_provider_id(&state)
+                        .unwrap_or_else(|| state.current_provider_id.clone());
+                    let resume_model_id = state.model.clone();
+                    let mut turn_input = build_turn_input(
+                        &state,
+                        ASK_RESUME_CONTINUATION_PROMPT.to_string(),
+                        resume_provider_id,
+                        resume_model_id,
+                    );
+                    // 固定宿主续轮文案：非空（`prepare_turn` 的 reject_empty）+ 与展示一致。
+                    turn_input.message = ASK_RESUME_CONTINUATION_PROMPT.to_string();
+                    turn_input.display_message = Some(ASK_RESUME_CONTINUATION_PROMPT.to_string());
+
+                    let turn_id_str = format!("turn-ask-resume-{}", uuid::Uuid::new_v4());
+                    let turn_id_for_log = turn_id_str.clone();
+                    let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
+                    let resume_sink_guard =
+                        TuiTurnSinkGuard::new(&control_plane, &turn_id_str, Arc::clone(&sink));
+                    let turn_control_plane = Arc::clone(&control_plane);
+                    // 先注册 sink，再向事件循环发布当前 turn id（与 composer 提交同序）。
+                    *current_turn_id.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(turn_id_str.clone());
+                    state.stopping_turn_id = None;
+                    state.streaming_turn_id = Some(turn_id_str.clone());
+
+                    let inflight_for_turn = Arc::clone(&inflight_turns);
+                    let turn_loop_in_flight_for_thread = Arc::clone(&turn_loop_in_flight);
+                    let tx_turn = tx.clone();
+                    let resume_run_id = run_id.clone();
+                    let resume_run_for_turn = resume_run_id.clone();
+                    let turn_thread = std::thread::spawn(move || {
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            let _in_flight_guard =
+                                TurnLoopInFlightGuard::enter(turn_loop_in_flight_for_thread);
+                            let _guard =
+                                pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+                            let _turn_sink_guard = resume_sink_guard;
+                            let cmd = StartTurnStreamCommand {
+                                turn_id: turn_id_str,
+                                input: turn_input,
+                            };
+                            // F1：续轮**钉死在这个 run 上**——一次性 Ask 注入
+                            // （`take_pending_ask_injection`）只存在于刚被 `resume_ask_wait` 恢复的
+                            // 那个 run；重新按「最近可续 run」挑选会落到别的 run，答案被静默丢弃。
+                            turn_control_plane.continue_ask_resume_turn_stream(
+                                sink.as_ref(),
+                                &resume_run_for_turn,
+                                cmd,
+                            )
+                        }));
+                        // F2：无论 panic 还是「无终态事件」的 Err，都必须补发一条终态 ⇒ 否则
+                        // `is_streaming` 永久为真，输入与排队派发彻底卡死（sink guard 只 unregister）。
+                        let failure = match outcome {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(format!(
+                                "续轮未产出终态（run={resume_run_id}）: {error}"
+                            )),
+                            Err(payload) => Some(format!(
+                                "续轮线程 panic（run={resume_run_id}）: {}",
+                                panic_payload_message(payload.as_ref())
+                            )),
+                        };
+                        if let Some(reason) = failure {
+                            eprintln!(
+                                "[pony-tui] ask_resume_turn_failed: run={resume_run_id} reason={reason}"
+                            );
+                            let _ = tx_turn.send(UiEvent::StreamFailed(reason));
+                        }
+                    });
+                    let mut turns = inflight_for_turn.lock().unwrap_or_else(|e| e.into_inner());
+                    turns.push(turn_thread);
+                    drop(turns);
+
+                    eprintln!(
+                        "[pony-tui] ask_resume_turn_started: run={} turn={} session={}",
+                        run_id, turn_id_for_log, state.session_id
+                    );
+                    dirty = true;
+                }
                 UiEvent::PlanUpdated(plan) => {
                     state.update_plan(plan);
                 }
@@ -10661,7 +11013,7 @@ fn tui_event_loop(
                 UiEvent::TurnSuspended { .. } => {
                     state.is_streaming = false;
                     state.status_text = "等待用户输入确认...".to_string();
-                    let _ = check_pending_asks(&mut state, &control_plane);
+                    let _ = sync_pending_control_request(&mut state, &control_plane);
                 }
                 }
             }
@@ -10866,10 +11218,8 @@ fn resolve_resume_target(requested: Option<&str>) -> Result<ResumeTarget, String
     }
 }
 
-/// W3b：主会话 id 判定（队友/子代理会话只经 `/agents` 进入，不混入 `/resume` 默认列表）。
-pub fn is_main_session_id(session_id: &str) -> bool {
-    !session_id.starts_with("subagent-") && !session_id.starts_with("teammate-")
-}
+// W3b：主会话 id 判定统一走 `pony_agent_core::agent::session::is_main_session_id`
+// （队友/子代理会话只经 `/agents` 进入，不混入 `/resume` 默认列表）。
 
 
 
@@ -11183,6 +11533,120 @@ mod wave43_unit_tests {
         });
         let handle_appr_req = pending_ui_request_from_value(&val_appr_req).expect("must parse handle");
         assert!(handle_appr_req.is_approval);
+    }
+
+    #[test]
+    fn test_pending_ui_request_reads_expiry() {
+        // `expiresAtMs` 只是宿主快照的留痕字段：解析出来可以，但**不参与任何判定**
+        // （ADR 0074：墙钟 TTL 已退出产品语义，能否作答只由宿主生命周期决定）。
+        let with_ttl = json!({
+            "requestId": "control-000000000000",
+            "version": 1,
+            "requestKind": "interaction",
+            "expiresAtMs": 1_700_000_060_000u64
+        });
+        let handle = pending_ui_request_from_value(&with_ttl).expect("must parse handle");
+        assert_eq!(handle.expires_at_ms, Some(1_700_000_060_000));
+
+        let without_ttl = json!({
+            "requestId": "control-000000000001",
+            "version": 1,
+            "requestKind": "interaction"
+        });
+        assert_eq!(
+            pending_ui_request_from_value(&without_ttl).expect("must parse handle").expires_at_ms,
+            None
+        );
+
+        // 0 只表示「宿主没给期限」，不是「此刻过期」。
+        let zero_ttl = json!({
+            "requestId": "control-000000000002",
+            "version": 1,
+            "requestKind": "interaction",
+            "expiresAtMs": 0
+        });
+        assert_eq!(
+            pending_ui_request_from_value(&zero_ttl).expect("must parse handle").expires_at_ms,
+            None
+        );
+    }
+
+    fn handle_for(request_id: &str) -> PendingUiRequest {
+        PendingUiRequest {
+            request_id: request_id.to_string(),
+            version: 3,
+            run_id: Some("run-1".to_string()),
+            // 刻意给一个**早已过去**的期限：新判定必须完全忽略它。
+            expires_at_ms: Some(1),
+            is_approval: false,
+        }
+    }
+
+    #[test]
+    fn test_snapshot_contains_request_matches_request_id_only() {
+        let items = vec![
+            json!({ "requestId": "control-a", "version": 1 }),
+            json!({ "requestId": "control-b", "version": 2 }),
+        ];
+        assert!(snapshot_contains_request(&items, "control-a"));
+        assert!(snapshot_contains_request(&items, "control-b"));
+        assert!(!snapshot_contains_request(&items, "control-c"));
+    }
+
+    #[test]
+    fn test_pending_panel_should_close_is_lifecycle_driven_not_wall_clock() {
+        // 契约 §6.4：宿主列表即真值 —— 句柄仍出现在待决列表里就**不许**关，
+        // 哪怕它的 `expiresAtMs` 早已过去（旧实现会在这里误判为过期）。
+        let stale_ttl_but_pending = vec![json!({
+            "requestId": "control-000000000000",
+            "version": 3,
+            "requestKind": "interaction",
+            "expiresAtMs": 1
+        })];
+        let handle = handle_for("control-000000000000");
+        assert!(!pending_panel_should_close(&stale_ttl_but_pending, Some(&handle)));
+
+        // 请求已不在列表（Answered / Cancelled / Superseded / Orphaned）⇒ 必须收面板。
+        let empty: Vec<serde_json::Value> = Vec::new();
+        assert!(pending_panel_should_close(&empty, Some(&handle)));
+
+        // 列表里是**别的** request：本面板同样必须消失（同一会话只应挂当前未决项）。
+        let other = vec![json!({ "requestId": "control-other", "version": 1 })];
+        assert!(pending_panel_should_close(&other, Some(&handle)));
+
+        // 没有句柄就无面板可收。
+        assert!(!pending_panel_should_close(&empty, None));
+    }
+
+    #[test]
+    fn test_is_stale_control_request_error() {
+        // 复现原缺陷时宿主原样回给用户的英文串必须被识别为「已失效」家族。
+        assert!(is_stale_control_request_error(
+            "control request `control-000000000000` cannot be consumed: replay, expiry, cross-session, or version/nonce mismatch"
+        ));
+        assert!(is_stale_control_request_error(
+            "Ask `control-1` expected version 1 but current version is 2; stale mutation rejected."
+        ));
+        assert!(is_stale_control_request_error("unknown control request `control-9`"));
+        assert!(!is_stale_control_request_error("failed to serialize ask resume outcome: io"));
+    }
+
+    #[test]
+    fn test_is_stale_control_request_error_recognises_persisted_cas_codes() {
+        // 契约 §4 的五个稳定错误码是终态冲突/作用域缺失：重试永远不会成功，
+        // 必须归入「已失效」家族（统一中文文案），不得落到「请重试」分支。
+        for code in STALE_CONTROL_REQUEST_CODES {
+            let message = format!("{code}: whatever the host says afterwards");
+            assert!(
+                is_stale_control_request_error(&message),
+                "稳定错误码 `{code}` 必须被认定为已失效家族"
+            );
+            // 大小写不敏感：宿主偶有替换大小写的实现差异。
+            assert!(is_stale_control_request_error(&message.to_uppercase()));
+        }
+        // 反例：普通网络/IO 故障不得被误判为终态冲突（否则会丢掉一个仍可作答的面板）。
+        assert!(!is_stale_control_request_error("network down"));
+        assert!(!is_stale_control_request_error("failed to serialize ask answer: io"));
     }
 
     #[test]

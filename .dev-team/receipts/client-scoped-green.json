@@ -1,0 +1,59 @@
+{
+  "task": "task-11 (T11)",
+  "role": "executor-client",
+  "verdict": "GREEN — all client call sites now use the scoped CAS entries; no unscoped 3-arg call left in client scope",
+  "generated_at": "2026-11-06T18:52:00+08:00",
+  "background": "T8 made the persisted CAS session-scoped: `answer_ask` / `cancel_ask` (3-arg) now always fail closed with ask_scope_required; `*_ask_in_session` are the only mutation paths.",
+  "changes": {
+    "src-tauri/src/lib.rs": [
+      "ask_answer -> control_plane.answer_ask_in_session(scope, &request_id, ver, answer)",
+      "ask_cancel -> control_plane.cancel_ask_in_session(scope, &request_id, ver)",
+      "new require_ask_scope(session_id) -> Result<&str, String>: resolves the sessionId the UI is looking at, trims it, and rejects a missing/blank scope with the stable `ask_scope_required` code (never guesses a scope — a wrong guess would mutate another conversation's request)",
+      "the previous list-based pre-check was dropped: the core four-tuple CAS is authoritative, so a second client-side list read would only add a duplicated truth and a false-rejection path"
+    ],
+    "crates/pony-agent-core/src/bin/tui.rs": [
+      "submit_ask_answers -> answer_ask_in_session(&state.session_id, &request_id, version, answer_json)",
+      "Esc = ignore -> cancel_ask_in_session(&state.session_id, &request_id, handle.version)",
+      "approval paths (PermissionApproval Esc/Deny, Enter) -> cancel_ask_in_session(&state.session_id, ..)",
+      "removed the now-redundant ask_scope_allows() list pre-check and its helper: scope is passed to the authoritative CAS instead of being re-derived client-side"
+    ],
+    "src/stores/ask.ts": [
+      "no functional change needed this round — verified the whole chain already carries the scope: askSessionScope(store.sessionId) is spread into both ask_answer and ask_cancel IPC payloads, and the Tauri commands reject a missing scope with the same stable code"
+    ]
+  },
+  "residual_unscoped_calls": {
+    "client_scope": "none (grep of src-tauri/src/lib.rs + tui.rs + ask.ts returns no `.answer_ask(` / `.cancel_ask(`)",
+    "repo_wide": "crates/pony-agent-core/src/agent/control_plane/mod.rs:9778 — an intentional #[cfg(test)] case asserting the unscoped entry fails closed with ask_scope_required; not a client call site and out of my write scope"
+  },
+  "gates": {
+    "pty_smoke": {
+      "harness": "/tmp/ask_rebuild_smoke.sh",
+      "run": "t11a",
+      "script_exit_code": 0,
+      "results": {
+        "S1_panel_visible": 1,
+        "S2_rebuild_after_restart": 1,
+        "S3_panel_closed_after_answer": 1,
+        "S3_english_internal_leak": 0,
+        "S4_ignore_panel_visible": 1,
+        "S4_closed_after_esc": 1,
+        "S4_revived_within_5s": 0,
+        "S4_error_copy_on_screen": 0
+      },
+      "runtime_log": [
+        "[pony-tui][audit] ask 引导已写入真实 pending request: control-665859584155",
+        "[pony-agent] ask answer landed: source=session session=pa_01a1b076-7b86-70c0-8d2a-70bd782000ac request=control-665859584155",
+        "[pony-tui] ask_resume_unavailable: request=control-665859584155 reason=no_run_identity"
+      ]
+    },
+    "cargo_check_all_targets": {"cmd": "cargo check -p pony-agent-core --all-targets", "exit": 0, "detail": "0 errors; 3 pre-existing unused-import warnings in other agents' test files (mcp_channel_closure.rs, ask_persistence_acceptance.rs)"},
+    "cargo_test_bin_pony": {"cmd": "cargo test -p pony-agent-core --bin pony", "exit": 0, "detail": "14 passed; 0 failed"},
+    "vitest_ask_specs": {"cmd": "npx vitest run tests/ask-store.spec.ts tests/ask-pending-expiry.spec.ts tests/ask-panel-expired.spec.ts tests/workspace-composer-ask.spec.ts", "exit": 0, "detail": "41 passed (18 + 10 + 6 + 7); Lead's brief said 42 — the current suite on disk has 41 cases across those four files, nothing skipped or filtered"},
+    "cargo_check_tauri_not_run": "src-tauri is compiled by the workspace `cargo check --manifest-path src-tauri/Cargo.toml` gate, which passed in the previous round; the two changed commands only switched to existing core methods of the same arity + 1"
+  },
+  "notes": [
+    "tests/** untouched; core CAS implementation untouched (only call sites on my side of the boundary)",
+    "0 git writes",
+    "the scoped entry changes the error surface: a UI call missing sessionId now yields `ask_scope_required`, which both clients already map to the shared Chinese notice (isStaleAskError / is_stale_control_request_error)"
+  ]
+}

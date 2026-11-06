@@ -560,21 +560,16 @@ impl AgentRuntime {
                     // W1b：治理路径已产出挂起标记，却匹配不到可恢复的待处理请求 ⇒
                     // 不得只发一条裸 `turn:suspended`（用户永远等不到恢复），派发可读失败终态。
                     if self.suspension_without_recoverable_request(&suspension) {
+                        // F3（NFR）：日志里的 code 必须**就是**终态派发的错误码（首段），否则
+                        // 「日志码 == 终态码」这条排障前提在 approval/ask 两族上失效。
+                        let unrecoverable_error =
+                            super::turn_control::build_unrecoverable_suspension_error(&suspension);
                         runtime_log(format!(
                             "turn:control-suspend-unrecoverable-stream hop={} name={} code={}",
                             completed_hops,
                             current_tool_call.name,
-                            super::turn_control::CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE
+                            super::turn_control::suspension_error_code(&unrecoverable_error)
                         ));
-                        let unrecoverable_error =
-                            if suspension.pending_request.as_ref().is_some_and(|request| {
-                                request.request_kind
-                                    == crate::agent::tool_runtime::PendingControlRequestKind::Approval
-                            }) {
-                                super::turn_control::build_approval_resume_unavailable_error()
-                            } else {
-                                super::turn_control::build_control_outcome_pending_without_request_error()
-                            };
                         self.fail_stream_turn_gated_dispatch(
                             sink,
                             control,
@@ -1730,9 +1725,10 @@ impl AgentRuntime {
         if let Some(context) = governed_context.as_mut() {
             context.turn_cancellation = control.cancellation_token(&turn_id);
         }
-        // Consume a pending Ask resume injection (phase-4 P0) so the terminal tool result is
-        // seeded into this turn's provider context.
-        let ask_injection = self.take_pending_ask_injection(facts.run_id.as_deref());
+        // The one-shot Ask resume injection is consumed **after** the governance gate below
+        // (ADR 0074/T8): a governance-blocked turn must not swallow the answer.
+        let injection_run_id = facts.run_id.clone();
+        let injection_session_id = input.session_id.clone();
         let turn_started_at = Instant::now();
 
         // Wave-7 B003：**turn 启动前**的用量治理判定（一次性；只在入口，绝不中断进行中的 turn）。
@@ -1778,6 +1774,10 @@ impl AgentRuntime {
             }
         }
 
+        let ask_injection = self.take_pending_ask_injection(
+            injection_run_id.as_deref(),
+            injection_session_id.as_deref(),
+        );
         let prepared = match self.prepare_turn(&input, true, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {

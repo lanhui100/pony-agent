@@ -102,6 +102,9 @@ mod turn_stream;
 mod types;
 
 pub use builder::{AgentRuntimeBuilder, DesktopRuntimePreset};
+// F4：错误码单一定义点。宿主（bin/tui.rs 是同包独立 crate root）必须引用该常量拼文案，
+// 不得再手写字面量（否则 `docs/observability.yaml` 的 error_classifier 收口点会出现第二定义点）。
+pub use turn_control::ASK_RESUME_UNAVAILABLE_CODE;
 pub use compaction_ops::{compact_outcome_message, ManualCompactionOutcome};
 pub(crate) use compaction_ops::compact_session_with_sessions;
 pub use types::{PlannerGraphDecisionDispatchOutcome, RunTurnFacts, SUSPENDED_TURN_PHASE, TurnInput, TurnResult, TurnStreamEvent};
@@ -267,14 +270,32 @@ impl AgentRuntime {
     /// `graph_resume_ask` (which persists the injection), and the next graph-run turn consumes it
     /// exactly once here — before the provider request is built — so the terminal tool result is
     /// seeded into the turn's provider context.
-    fn take_pending_ask_injection(&self, run_id: Option<&str>) -> Option<GraphAskResumeInjection> {
-        let run_id = run_id?;
+    fn take_pending_ask_injection(
+        &self,
+        run_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Option<GraphAskResumeInjection> {
         let store_arc = self.graph_run_store()?;
         let mut store = store_arc.lock().unwrap_or_else(|e| {
             eprintln!("[pony-agent] graph run store poisoned: {e}, recovering");
             e.into_inner()
         });
-        store.take_ask_injection(run_id)
+        // Run-scoped injection first (answered Ask bound to a graph run): unchanged behavior.
+        if let Some(run_id) = run_id {
+            if let Some(injection) = store.take_ask_injection(run_id) {
+                return Some(injection);
+            }
+        }
+        // ADR 0074 answer landing: an answered Ask without a graph binding is queued per session,
+        // so a plain turn (no run id at all) still consumes it exactly once instead of dropping
+        // the answer.
+        let session_id = session_id?;
+        let injection = store.take_ask_injection_for_session(session_id)?;
+        runtime_log(format!(
+            "turn:ask-injection source=session request={} call={}",
+            injection.request_id, injection.call_id
+        ));
+        Some(injection)
     }
 
     /// The governed dispatcher the default tool executor executes through, if the runtime's

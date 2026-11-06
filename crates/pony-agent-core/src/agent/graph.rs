@@ -22,6 +22,11 @@ struct PersistedGraphRunStore {
     ask_waits: BTreeMap<String, Vec<GraphAskWaitBinding>>,
     #[serde(default)]
     ask_injections: BTreeMap<String, GraphAskResumeInjection>,
+    /// ADR 0074: one-shot Ask resume injections keyed by **session** id, for answers that land
+    /// outside a graph run (no `run_id` to consume a per-run injection). `#[serde(default)]`
+    /// keeps older persisted stores readable.
+    #[serde(default)]
+    session_ask_injections: BTreeMap<String, GraphAskResumeInjection>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,6 +321,10 @@ pub struct GraphRunStore {
     /// One-shot Ask resume injections keyed by run id (design.md Decision 5, phase-4 P0). Set by
     /// `resume_ask_wait` when the host answers, consumed by the runtime on the next turn.
     ask_injections: BTreeMap<String, GraphAskResumeInjection>,
+    /// One-shot Ask resume injections keyed by **session** id (ADR 0074 answer landing). Used when
+    /// an answered Ask has no graph wait binding, so the answer still reaches the next turn's
+    /// provider context instead of being silently dropped.
+    session_ask_injections: BTreeMap<String, GraphAskResumeInjection>,
     storage_path: Option<PathBuf>,
 }
 
@@ -488,6 +497,7 @@ impl GraphRunStore {
             runs: HashMap::new(),
             ask_waits: BTreeMap::new(),
             ask_injections: BTreeMap::new(),
+            session_ask_injections: BTreeMap::new(),
             storage_path: None,
         }
     }
@@ -501,6 +511,7 @@ impl GraphRunStore {
             runs,
             ask_waits: persisted.ask_waits,
             ask_injections: persisted.ask_injections,
+            session_ask_injections: persisted.session_ask_injections,
             storage_path: Some(storage_path),
         };
         if modified {
@@ -539,6 +550,40 @@ impl GraphRunStore {
         self.ask_injections.get(run_id).cloned()
     }
 
+    /// Queue a one-shot Ask answer injection keyed by **session** (ADR 0074 answer landing).
+    ///
+    /// Used when the answered Ask has no graph wait binding: the next turn of that session —
+    /// including a turn with no `run_id` at all — consumes it exactly once and seeds the provider
+    /// context with the original tool-call + terminal result, so the answer is never dropped.
+    pub fn queue_ask_injection_for_session(
+        &mut self,
+        session_id: &str,
+        injection: GraphAskResumeInjection,
+    ) {
+        self.session_ask_injections
+            .insert(session_id.to_string(), injection);
+        self.persist_runs();
+    }
+
+    /// Consume the one-shot session-scoped Ask injection, if one is queued (cleared on read).
+    pub fn take_ask_injection_for_session(
+        &mut self,
+        session_id: &str,
+    ) -> Option<GraphAskResumeInjection> {
+        let injection = self.session_ask_injections.remove(session_id)?;
+        self.persist_runs();
+        Some(injection)
+    }
+
+    /// Read the pending session-scoped Ask injection without consuming it (observability).
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn peek_ask_injection_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<GraphAskResumeInjection> {
+        self.session_ask_injections.get(session_id).cloned()
+    }
+
     fn save_run(&mut self, run: GraphRun) -> GraphRun {
         self.runs.insert(run.id.clone(), run.clone());
         self.persist_runs();
@@ -559,6 +604,7 @@ impl GraphRunStore {
             runs: self.runs.clone(),
             ask_waits: self.ask_waits.clone(),
             ask_injections: self.ask_injections.clone(),
+            session_ask_injections: self.session_ask_injections.clone(),
         }) else {
             return;
         };

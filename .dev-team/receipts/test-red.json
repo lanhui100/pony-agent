@@ -233,5 +233,41 @@
       "rust": "cargo test -p pony-agent-core --test ask_pending_contract --test ask_pending_adversarial → 6 + 4 passed, exit 0",
       "python": "python3 -m py_compile tools/tui-audit/checks.py → exit 0"
     }
+  },
+  "segment_t10": {
+    "status": "RED（新增安全红相全部按断言失败；既有断言零删除、仍绿）",
+    "receipt": ".dev-team/receipts/test-security-red.json",
+    "rust_new_tests": [
+      "security_cross_session_upsert_must_not_overwrite_another_sessions_pending_ask",
+      "security_unscoped_list_pending_must_not_leak_other_sessions_credentials",
+      "security_ask_projection_must_not_expose_nonce",
+      "security_answer_without_session_scope_must_fail_closed",
+      "security_missing_durable_record_must_not_fall_back_to_memory_mirror"
+    ],
+    "desktop_new_tests": [
+      "tests/ask-store.spec.ts > detects the persisted-CAS error family (ask_state_conflict / ask_version_mismatch / ask_not_found / ask_nonce_mismatch / ask_scope_required)",
+      "tests/ask-store.spec.ts > reconciles the snapshot when a stale-version answer is rejected (new error family)"
+    ],
+    "red": {
+      "cargo": "11 passed / 5 failed, exit 101",
+      "vitest": "2 failed / 16 passed, exit 1"
+    }
+  },
+  "segment_t12": {
+    "status": "GREEN（作用域契约迁移完成）",
+    "receipt": ".dev-team/receipts/test-refreeze-scoped.json",
+    "changed": [
+      "crates/pony-agent-core/tests/ask_pending_contract.rs::c1_6_host_control_plane_projection_excludes_terminal_requests"
+    ],
+    "unchanged": [
+      "crates/pony-agent-core/tests/ask_resume_e2e.rs（已符合新契约，5/5 绿）"
+    ],
+    "verification": {
+      "contract": "6/6",
+      "resume_e2e": "5/5",
+      "acceptance": "16/16",
+      "adversarial": "4/4",
+      "desktop": "48/48"
+    }
   }
 }

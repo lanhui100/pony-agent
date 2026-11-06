@@ -1,0 +1,102 @@
+{
+  "task": "task-8",
+  "role": "executor-core",
+  "phase": "green (with two frozen-suite conflicts reported to Lead, not modified)",
+  "generated_at": "2026-11-06T18:52:00+08:00",
+  "contract": [
+    ".dev-team/contract-matrix-ask-persistence.md §2 (复合主键) / §4 (四元组 CAS + 作用域) / §5 (list 作用域与投影) / §7 (fail-closed)",
+    "crates/pony-agent-core/tests/ask_persistence_acceptance.rs（T10 冻结，16 用例；只读，未修改）",
+    "Lead T8 冻结口径：三参 answer_ask/cancel_ask 改为 fail-closed；新增 *_in_session；list 去 nonce；list(None) 空数组；无持久化记录 ⇒ ask_not_found，不回落内存镜像"
+  ],
+  "files": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs",
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs (仅 in-source 测试适配：作用域化 list/answer/cancel)",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs (仅 in-source 测试适配：ask_store 注入 + 作用域化 answer)",
+    ".dev-team/receipts/core-security-green.json"
+  ],
+  "commands": [
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit": 0,
+      "result": "16 passed; 0 failed（含 T10 五条 security_*）"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_resume_e2e",
+      "exit": 0,
+      "result": "5 passed; 0 failed（Test Agent 已于 18:42 重冻为 scoped API）"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --lib ask",
+      "exit": 0,
+      "result": "37 passed; 0 failed"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test tui_batch3_regression",
+      "exit": 0,
+      "result": "27 passed; 0 failed"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_pending_adversarial",
+      "exit": 0,
+      "result": "4 passed"
+    },
+    {
+      "cmd": "cargo check -p pony-agent-core --all-targets",
+      "exit": 0,
+      "result": "0 error"
+    },
+    {
+      "cmd": "cargo build -p pony-agent-core --bin pony",
+      "exit": 0
+    },
+    {
+      "cmd": "bash /tmp/ask_rebuild_smoke.sh t8",
+      "exit": 0,
+      "result": "RESULT s1=1 s2=1 s3_closed=1 s3_english=0 s4_closed=1 s4_revived=0 s4_errors=0（workdir /tmp/ask-smoke-t8.eAI8NQ）"
+    },
+    {
+      "cmd": "bash /tmp/t4_ask_injection_probe.sh t8",
+      "exit": 0,
+      "result": "RESULT a1=1 a2=1 a3=1（workdir /tmp/t4-inject-t8.jE0rTD）"
+    }
+  ],
+  "t8_items": {
+    "1_composite_pk": "pending_asks 主键改为 (session_id, request_id)；旧表（单列 request_id 主键）在打开时自动迁移：ALTER RENAME → 建 v2（复合主键）→ INSERT OR IGNORE 逐行拷贝 → DROP → RENAME（PRAGMA table_info 探测主键列，幂等；全新库直接建）",
+    "2_nonce_in_cas": "transition_scoped(session_id, request_id, expected_version, expected_nonce, from, to)：同一 BEGIN IMMEDIATE 事务内比对 state/version/nonce；nonce 不符 ⇒ ask_nonce_mismatch（错误码真实引用）",
+    "3_terminal_never_pending": "transition/transition_scoped 对 to==Pending 或当前非 Pending 一律 ask_state_conflict（终态最终）",
+    "4_fail_closed": "answer/cancel 必须命中持久化记录：无 store ⇒ ask_scope_required；无记录 ⇒ ask_not_found（不消费内存镜像、不改状态/版本）",
+    "5_durable_first_compensation": "磁盘 CAS 先提交；随后 dispatcher 镜像 CAS 若失败 ⇒ 以终态水合镜像 + 返回 ask_mirror_sync_failed（不谎报成功、不再重试写入）",
+    "6_gc_call_points": "会话归档/删除仍调用 gc_orphan_asks；ask_expire 仍为 GC（expired 仅 Approval，orphaned=归档会话）",
+    "7_wal_order": "open 时先 PRAGMA journal_mode=WAL / busy_timeout，再 ensure schema/migration（迁移在 WAL 下执行）",
+    "8_session_scope_default": "list/answer/cancel 缺省或空作用域统一 fail-closed：list ⇒ 空数组 + ask_scope_required 日志；answer/cancel ⇒ Err(ask_scope_required)（或包含该码的稳定错误）",
+    "9_injection_queue_after_governance": "answer 落点：有 graph wait 绑定 ⇒ 原 resume；无绑定 ⇒ GraphRunStore 的 session 维度一次性注入队列；runtime 改为**治理闸门之后**才 take（turn_sync/turn_stream），治理阻断的轮次不会吞掉答案",
+    "10_landed_truth": "graph_resume_ask 的 landed 判定改为真实：要求该 session 队列中的注入 request_id 与实际 request_id 相同，而非「存在任意注入」"
+  },
+  "conflicts_for_lead_adjudication": [
+    {
+      "suite": "crates/pony-agent-core/tests/ask_pending_contract.rs",
+      "case": "c1_6_host_control_plane_projection_excludes_terminal_requests",
+      "status": "FAILED（5 passed / 1 failed）",
+      "cause": "该冻结用例仍以 list_pending_asks(None) 读取宿主投影；按 T8 契约（无作用域 ⇒ 空数组）必然为空。需 Test Agent 重冻为带 session 作用域。我未修改该文件。"
+    }
+  ],
+  "downstream_impact": {
+    "tui_desktop": "TUI/桌面仍调用三参 answer_ask / cancel_ask（现恒 fail-closed）⇒ 需 task-5/task-7 客户端切到 answer_ask_in_session / cancel_ask_in_session；我的真机脚本 S3 在客户端切换前会红（本次未复跑，避免假证据）。",
+    "tauri_commands": "src-tauri 的 ask_answer/ask_cancel 需新增 session 作用域参数（客户端任务 scope）。"
+  },
+  "risks": [
+    "旧库迁移不可逆（单列主键表被重建）；迁移只保留原有行，重复 (session_id, request_id) 用 INSERT OR IGNORE 去重。",
+    "dispatcher request_id 仍为全局唯一（缓解项）；复合主键才是隔离保证。",
+    "answer_ask_in_session 的 dispatcher 镜像水合使用占位 descriptor 事实；真正 CAS 权威是持久化四元组，镜像只用于 graph_resume_ask 状态判断。",
+    "ask_list_pending 的 Tauri 命令签名未改（session_id 参数已存在）；客户端若传 null 将得到空数组（契约预期行为）。",
+    "ask_pending_contract.rs c1_6 仍红：该冻结用例用 list_pending_asks(None)，与 T8 §5 契约冲突，等 Test Agent 重冻；我未改该文件。"
+  ],
+  "evidence": {
+    "real_machine": "TUI 已切 scoped API（tui.rs 18:41），S1/S2/S3/S4 全绿且零英文内部串；session 注入仍被下一轮消费（a3=1，provider 请求体含原 call_id 的终态 tool result）",
+    "store_migration": "旧单列主键表在 open_ask_store 时自动迁移到复合主键；SEC-PK 用例覆盖「同 request_id 跨会话共存 + 重启后仍在」"
+  }
+}

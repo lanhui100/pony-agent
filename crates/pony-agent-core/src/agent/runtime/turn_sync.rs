@@ -188,21 +188,15 @@ impl AgentRuntime {
                     // W1b：治理路径已产出挂起标记，却匹配不到可恢复的待处理请求 ⇒
                     // 不得只发一条裸 `suspended`（用户永远等不到恢复），以可读失败终态收口。
                     if self.suspension_without_recoverable_request(&suspension) {
+                        // F3（NFR）：日志 code 必须与终态错误码一致（首段），见 turn_control。
+                        let unrecoverable_error =
+                            super::turn_control::build_unrecoverable_suspension_error(&suspension);
                         runtime_log(format!(
                             "turn:control-suspend-unrecoverable hop={} name={} code={}",
                             completed_hops,
                             tool_call.name,
-                            super::turn_control::CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE
+                            super::turn_control::suspension_error_code(&unrecoverable_error)
                         ));
-                        let unrecoverable_error =
-                            if suspension.pending_request.as_ref().is_some_and(|request| {
-                                request.request_kind
-                                    == crate::agent::tool_runtime::PendingControlRequestKind::Approval
-                            }) {
-                                super::turn_control::build_approval_resume_unavailable_error()
-                            } else {
-                                super::turn_control::build_control_outcome_pending_without_request_error()
-                            };
                         return Err(self.fail_sync_turn_result(
                             Some(provider_meta),
                             display_message,
@@ -682,15 +676,15 @@ impl AgentRuntime {
     pub(crate) fn run_turn_with_facts(&self, input: TurnInput, facts: RunTurnFacts) -> TurnResult {
         // T2-1：turn 事实在**本 turn 内部**解析并随每次工具调用下传（不再写进 executor 共享槽位）。
         let governed_context = self.resolve_governed_turn_context(&input, &facts);
-        let ask_injection = self.take_pending_ask_injection(facts.run_id.as_deref());
-        self.run_turn_inner(input, ask_injection, governed_context)
+        let injection_source = (facts.run_id.clone(), input.session_id.clone());
+        self.run_turn_inner(input, injection_source, governed_context)
     }
 
 
     fn run_turn_inner(
         &self,
         input: TurnInput,
-        ask_injection: Option<GraphAskResumeInjection>,
+        injection_source: (Option<String>, Option<String>),
         governed_context: Option<DispatchContext>,
     ) -> TurnResult {
         let turn_started_at = Instant::now();
@@ -742,6 +736,13 @@ impl AgentRuntime {
             }
         }
 
+        // ADR 0074/T8: consume the one-shot Ask injection **after** the governance gate, so a
+        // turn blocked before execution cannot swallow the answer (it stays queued for a turn
+        // that actually runs).
+        let ask_injection = self.take_pending_ask_injection(
+            injection_source.0.as_deref(),
+            injection_source.1.as_deref(),
+        );
         let prepared = match self.prepare_turn(&input, false, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {

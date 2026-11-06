@@ -49,6 +49,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 mod ask_plan_commands;
+mod ask_resume_commands;
 mod capability_commands;
 mod compaction_commands;
 mod graph_projection;
@@ -925,6 +926,11 @@ pub struct HostControlPlane {
     /// control surface (design.md Decision 5). Shared as `Arc` so the runtime executor and the
     /// host adapter can observe the same store.
     pub ask_dispatcher: Arc<GovernedDispatcher>,
+    /// ADR 0074: durable Ask (`Interaction`) store (`sessions.db` `pending_asks` table). The
+    /// pending Ask list/answer/cancel/GC surface reads and CASes against this store; `None` means
+    /// the host wired a non-SQLite session backend and the dispatcher in-memory mirror is the only
+    /// source (degraded, never silently claimed as persisted).
+    ask_store: Option<Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>>,
     /// Session-owned revisioned plan store backing the Plan control surface (Decision 6).
     plan_store: PlanStore,
     /// PA-095 #3：本控制面的事件持久化通道句柄（会话绑定路由用）。
@@ -963,6 +969,7 @@ pub struct HostControlPlaneBuilder {
     graph_runner: Option<GraphRunner>,
     graph_planner: Option<Box<dyn GraphPlanner>>,
     ask_dispatcher: Option<Arc<GovernedDispatcher>>,
+    ask_store: Option<Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>>,
     plan_store: Option<PlanStore>,
     /// wave-60 C5：宽限期收口参数/监督者注入（缺省 2000/250 ms + 共享 registry）。
     stop_escalation: Option<Arc<crate::agent::stop_escalation::StopEscalation>>,
@@ -977,6 +984,7 @@ impl HostControlPlaneBuilder {
             graph_runner: None,
             graph_planner: None,
             ask_dispatcher: None,
+            ask_store: None,
             plan_store: None,
             stop_escalation: None,
         }
@@ -1018,6 +1026,17 @@ impl HostControlPlaneBuilder {
 
     pub fn ask_dispatcher(mut self, ask_dispatcher: Arc<GovernedDispatcher>) -> Self {
         self.ask_dispatcher = Some(ask_dispatcher);
+        self
+    }
+
+    /// ADR 0074: inject the durable Ask store. Left unset, the builder adopts the store opened by
+    /// the runtime's SQLite session store (`SessionStore::new()`), so pending Asks are recovered
+    /// from the same `sessions.db` after a restart.
+    pub fn ask_store(
+        mut self,
+        ask_store: Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>,
+    ) -> Self {
+        self.ask_store = Some(ask_store);
         self
     }
 
@@ -1189,6 +1208,22 @@ impl HostControlPlaneBuilder {
             .ask_dispatcher
             .or_else(|| runtime.governed_dispatcher())
             .unwrap_or_else(default_ask_dispatcher);
+        // ADR 0074: one durable Ask store shared by the host surface and the dispatcher, so an Ask
+        // created during a turn is persisted (version + nonce included) and recoverable after a
+        // restart. Without a SQLite session store (in-memory/file test backends) the dispatcher
+        // mirror is the only source and the host reports "not persisted" rather than pretending.
+        let ask_store = self.ask_store.or_else(|| {
+            sessions_rwlock
+                .read()
+                .unwrap_or_else(|e| {
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    e.into_inner()
+                })
+                .ask_store()
+        });
+        if let Some(store) = ask_store.as_ref() {
+            ask_dispatcher.set_ask_store(Arc::clone(store));
+        }
         let execution_control = self
             .execution_control
             .unwrap_or_else(ExecutionControlRegistry::new);
@@ -1206,6 +1241,7 @@ impl HostControlPlaneBuilder {
                 default_frontend_diagnostics_sqlite_path(),
             ),
             ask_dispatcher,
+            ask_store,
             plan_store,
             // PA-095 #3：块内必然赋值（通道注册无条件执行）。
             event_persist_channel,
@@ -1395,6 +1431,10 @@ impl HostControlPlane {
             .session_id
             .clone()
             .unwrap_or_else(|| crate::agent::session::DEFAULT_SESSION_ID.to_string());
+        // ADR 0074: a new user message supersedes the session's still-pending Ask — conversation
+        // order, not the wall clock, is the staleness signal. Runs before the turn so the message
+        // that makes the old question moot is the one that retires it.
+        self.note_user_message_entry(&command.input);
         let result = runtime.run_turn(command.input);
         drop(runtime);
         let _ = crate::agent::turn_flow::flush_session_buffered_events(&session_id_for_flush);
@@ -1986,52 +2026,12 @@ impl HostControlPlane {
     }
 
     pub fn start_turn_stream<S: TurnEventSink>(&self, sink: &S, command: StartTurnStreamCommand) {
-        self.execution_control.register_turn(
-            &command.turn_id,
-            command.input.session_id.as_deref(),
-            None,
-        );
-
-        let runtime = self.runtime.read().expect("runtime lock poisoned");
-        // PA-095 #3：入口返回前补提交缓冲事件（终态发射时 sessions 锁可能被
-        // trace 持久化 worker 占用而被 try_write 保留；此时锁已释放）。
-        let session_id_for_flush = command
-            .input
-            .session_id
-            .clone()
-            .unwrap_or_else(|| crate::agent::session::DEFAULT_SESSION_ID.to_string());
-        // 审核 P0：普通 streaming 路径补 terminal trace annotation（与 graph
-        // streaming 路径一致）——终态信封（event_id/sequence 等）写回 trace 记录，
-        // 否则 trace 缓存行 watermark 停留 0，无法可靠判断缓存是否覆盖事件流。
-        let recording_sink = RecordingTurnEventSink::new(sink);
-        runtime.start_turn_stream_with_control(
-            &recording_sink,
-            &self.execution_control,
-            command.turn_id,
-            command.input,
-        );
-        if let Some((
-            session_id,
-            turn_id,
-            event_id,
-            event_type,
-            event_version,
-            sequence,
-            emitted_at_ms,
-        )) = recording_sink.terminal_trace_annotation()
-        {
-            let _ = runtime.annotate_turn_trace_terminal_event(
-                session_id.as_deref(),
-                &turn_id,
-                event_id,
-                event_type,
-                event_version,
-                sequence,
-                emitted_at_ms,
-            );
-        }
-        drop(runtime);
-        let _ = crate::agent::turn_flow::flush_session_buffered_events(&session_id_for_flush);
+        // C1（ask-resume）：宿主流式轮现在在**真实 graph run** 内执行，从而挂起的 Ask 持有
+        // run 身份、作答后可续轮。实现与"准备失败 ⇒ 回落旧无 run 事实路径"的兜底语义见
+        // `ask_resume_commands.rs`（`start_ask_aware_turn_stream` / `start_turn_stream_legacy`）。
+        // 本入口签名不变（无返回值）：错误由 ask-aware 实现自己落结构化日志；需要拿到 Result 的
+        // 宿主（TUI 续轮）走 `continue_ask_resume_turn_stream`。
+        let _ = self.start_ask_aware_turn_stream(sink, command);
     }
 
     /// wave-60 C2：注册某 turn 的**即时事件出口**（宿主角色的唯一注入点）。
@@ -2430,6 +2430,8 @@ impl HostControlPlane {
         input: TurnInput,
         control_boundary_evidence: Option<GraphRunControlBoundaryEvidence>,
     ) -> Result<(GraphRunStreamStartResponse, PreparedGraphRunStream), String> {
+        // ADR 0074: user message in a streaming graph turn supersedes pending Asks of the session.
+        self.note_user_message_entry(&input);
         self.execution_control
             .register_turn(&turn_id, input.session_id.as_deref(), Some(&run_id));
 
@@ -2492,6 +2494,10 @@ impl HostControlPlane {
         run_id: String,
         mut input: TurnInput,
     ) -> Result<GraphRunTurnResponse, String> {
+        // ADR 0074: entry point for a user-driven graph turn — a user message supersedes pending
+        // Asks of the session. Deliberately outside the auto-continue loop below, whose synthetic
+        // goal-round messages are not user messages.
+        self.note_user_message_entry(&input);
         // T7：同上——续轮/推进继承原会话授权事实（无事实时按 read_only 兜底）。
         let inherited_authorization_mode = input.tool_authorization_mode.clone();
         let mut consecutive_continues = 0;
@@ -9722,13 +9728,14 @@ mod tests {
 
         let request_id = dispatch("call-1", "first");
 
-        // list_pending_asks returns the Interaction request, filterable by session.
+        // ask_list_pending requires a session scope (contract §5): unscoped is fail-closed.
         assert_eq!(
             control_plane
                 .list_pending_asks(None)
                 .as_array()
                 .map(Vec::len),
-            Some(1)
+            Some(0),
+            "unscoped listing must not leak other sessions' pending asks"
         );
         assert_eq!(
             control_plane
@@ -9744,7 +9751,7 @@ mod tests {
                 .map(Vec::len),
             Some(0)
         );
-        let listed = control_plane.list_pending_asks(None);
+        let listed = control_plane.list_pending_asks(Some("session-1"));
         assert_eq!(listed[0]["requestId"].as_str(), Some(request_id.as_str()));
         assert_eq!(listed[0]["requestKind"].as_str(), Some("interaction"));
         assert_eq!(listed[0]["version"].as_u64(), Some(1));
@@ -9752,27 +9759,58 @@ mod tests {
 
         // Answer with the current version consumes the request.
         let answered = control_plane
-            .answer_ask(&request_id, 1, json!("continue"))
+            .answer_ask_in_session("session-1", &request_id, 1, json!("continue"))
             .expect("answer");
         assert_eq!(answered["request"]["state"].as_str(), Some("consumed"));
         assert_eq!(answered["answer"].as_str(), Some("continue"));
 
         // A stale version is rejected after consumption.
         let stale = control_plane
-            .answer_ask(&request_id, 1, json!("again"))
+            .answer_ask_in_session("session-1", &request_id, 1, json!("again"))
             .expect_err("stale answer must fail closed");
-        assert!(stale.contains("stale"), "{stale}");
+        assert!(
+            stale.contains("ask_state_conflict") || stale.contains("ask_version_mismatch"),
+            "stale answers must carry a stable CAS code: {stale}"
+        );
+
+        // Unscoped legacy entries fail closed without touching the record.
+        let unscoped = control_plane
+            .answer_ask(&request_id, 1, json!("again"))
+            .expect_err("unscoped answer must fail closed");
+        assert!(unscoped.contains("ask_scope_required"), "{unscoped}");
 
         // Cancel path.
         let cancel_id = dispatch("call-2", "second");
-        let cancelled = control_plane.cancel_ask(&cancel_id, 1).expect("cancel");
+        let cancelled = control_plane
+            .cancel_ask_in_session("session-1", &cancel_id, 1)
+            .expect("cancel");
         assert_eq!(cancelled["request"]["state"].as_str(), Some("cancelled"));
 
-        // Expire path (explicit now_ms past the pending request expiry).
+        // Expire path is GC only (ADR 0074): advancing wall-clock time must never expire a
+        // pending Ask — it stays answerable until the user ignores it, a new user message
+        // supersedes it, or the owning session is archived.
         let expire_id = dispatch("call-3", "third");
         let pending = dispatcher.pending_request(&expire_id).expect("pending ask");
-        let expired = control_plane.expire_asks(Some(pending.expires_at_ms + 1));
-        assert_eq!(expired["expired"].as_u64(), Some(1));
+        let reconciled = control_plane.expire_asks(Some(pending.expires_at_ms + 1));
+        assert_eq!(
+            reconciled["expired"].as_u64(),
+            Some(0),
+            "an Ask must never be expired by wall clock"
+        );
+        assert_eq!(reconciled["orphaned"].as_u64(), Some(0));
+        assert_eq!(
+            control_plane
+                .list_pending_asks(Some("session-1"))
+                .as_array()
+                .map(Vec::len),
+            Some(1),
+            "time alone must not remove the still-pending Ask"
+        );
+        assert_eq!(
+            dispatcher.pending_request(&expire_id).expect("stored ask").state,
+            PendingControlRequestState::Pending,
+            "the retired expiry path must leave the request pending"
+        );
     }
 
     #[test]

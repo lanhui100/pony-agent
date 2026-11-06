@@ -1,0 +1,66 @@
+{
+  "task": "task-10 (T9)",
+  "role": "executor-client",
+  "verdict": "GREEN — all four client-side ADVISORY items fixed; gates green; PTY S1-S4 pass on an independent run",
+  "generated_at": "2026-11-06T18:33:00+08:00",
+  "context": "L3 双审 ADVISORY 客户端侧：错误族收敛 / 作用域透传 / 跨会话渲染隔离 / 忽略失败不得复活",
+  "files_changed": [
+    "src/stores/ask.ts",
+    "src/components/chat/WorkspaceComposer.vue",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src-tauri/src/lib.rs"
+  ],
+  "items": {
+    "1_error_family_convergence": {
+      "desktop": "src/stores/ask.ts: new ASK_STALE_ERROR_CODES = [ask_state_conflict, ask_version_mismatch, ask_not_found, ask_nonce_mismatch, ask_scope_required]; isStaleAskError() checks those codes first, keeps dispatcher-era prose only as a compatibility fallback; both answer() and cancel() surface exactly ASK_STALE_MESSAGE after re-listing (no '请重试' branch, no host English); resumeGraphAsk() no longer leaks String(error)",
+      "tui": "crates/pony-agent-core/src/bin/tui.rs: new pub STALE_CONTROL_REQUEST_CODES (same 5 codes) consulted first by is_stale_control_request_error(); covered by a new unit test asserting each code (and its uppercase form) is recognised while 'network down' / io failures are not"
+    },
+    "2_session_scope_passthrough": {
+      "desktop_store": "askSessionScope(store.sessionId) is spread into both ask_answer and ask_cancel payloads; the key is omitted when no session is open so the frozen payload-shape assertions (and the host's legacy default) keep working",
+      "tauri": "src-tauri/src/lib.rs: ask_answer / ask_cancel gained `session_id: Option<String>` (camelCase `sessionId` from the UI) and a shared require_ask_scope() guard that fails closed with the stable `ask_scope_required` code when the request is not pending in that session; no scope => legacy pass-through",
+      "tui": "new ask_scope_allows(control_plane, state.session_id, request_id) gate in submit_ask_answers(); the Esc path re-lists with Some(state.session_id). This is the client half of §4 — when the core `*_in_session` entry lands the same check moves server-side and this becomes a pre-check"
+    },
+    "3_no_cross_session_rendering": {
+      "file": "src/components/chat/WorkspaceComposer.vue",
+      "change": "activeAsk no longer falls back to pendingAsks[0]; it returns null without an open session and otherwise requires a strict `ask.sessionId === runtimeStore.sessionId` match"
+    },
+    "4_ignore_failure_must_not_revive": {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "change": "Esc = ignore now branches on the CAS result: success closes the panel; failure shows the Chinese notice and immediately re-lists the host truth — if the request is still Pending the panel is kept (user can retry/answer), otherwise it is closed for good. The old unconditional close-then-reopen flicker is gone."
+    }
+  },
+  "gates": {
+    "vitest_ask_store": {"cmd": "npx vitest run tests/ask-store.spec.ts", "before": "2 failed | 16 passed", "exit": 0, "detail": "18 passed"},
+    "vitest_ask_family": {"cmd": "npx vitest run tests/ask-store.spec.ts tests/ask-pending-expiry.spec.ts tests/ask-panel-expired.spec.ts tests/workspace-composer-ask.spec.ts", "exit": 0, "detail": "41 passed"},
+    "vitest_full": {"cmd": "npx vitest run", "exit": 1, "detail": "Test Files 2 failed | 147 passed (149); Tests 2 failed | 1379 passed | 12 skipped — the same two known reds: wave47-ob2 (Lead-waived pre-existing) and its v10-baseline-freeze V10-3 cascade"},
+    "cargo_test_bin_pony": {"cmd": "cargo test -p pony-agent-core --bin pony", "exit": 0, "detail": "14 passed; 0 failed (13 before + new persisted-CAS error-family test)"},
+    "cargo_check_tauri": {"cmd": "cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check", "exit": 0},
+    "typecheck": {"cmd": "npx vue-tsc --noEmit", "exit": 0}
+  },
+  "pty_smoke": {
+    "harness": "/tmp/ask_rebuild_smoke.sh (extended with S4)",
+    "run": "t9b (independent; binary rebuilt from the shared worktree)",
+    "script_exit_code": 0,
+    "results": {
+      "S1_panel_visible": 1,
+      "S2_rebuild_after_restart": 1,
+      "S3_panel_closed_after_answer": 1,
+      "S3_english_internal_leak": 0,
+      "S4_ignore_panel_visible": 1,
+      "S4_closed_after_esc": 1,
+      "S4_revived_within_5s": 0,
+      "S4_error_copy_on_screen": 0
+    },
+    "s4_note": "S4 is new for T9: a fresh bootstrap Ask, Down then Esc (explicit ignore => Cancelled) — the panel closes and stays closed across >4 poll periods, with no failure/English copy on screen",
+    "capture_tail_after_ignore": ["(panel gone)", "   › 写下任务，或输入 / 查看命令", "   /home/dm/pony-agent"],
+    "runtime_log": [
+      "[pony-tui][audit] ask 引导已写入真实 pending request: control-137651170773",
+      "[pony-agent] ask answer landed: source=session session=pa_01a1b069-... request=control-337016164703"
+    ]
+  },
+  "notes": [
+    "tests/** untouched; core control_plane untouched (the scoped *_in_session entry is task-8's; the client is already sending the scope and fail-closed guard so no second client change is needed when it lands)",
+    "0 git writes",
+    "the frozen ask-store payload-shape assertions drove a deliberate design choice: the sessionId key is omitted rather than sent as null when no session is open"
+  ]
+}

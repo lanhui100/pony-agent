@@ -539,26 +539,37 @@ function handleClickOutside(event: MouseEvent) {
 const askStore = useAskStore();
 
 const activeAsk = computed<PendingAsk | null>(() => {
-  const currentSessionId = runtimeStore.sessionId;
-  if (!askStore.pendingAsks || askStore.pendingAsks.length === 0) {
+  const currentSessionId = runtimeStore.sessionId?.trim();
+  // 契约 §6：面板只服务**当前会话**。
+  // 没有会话作用域、或列表里没有本会话的未决请求 ⇒ 不渲染；**禁止**用 `pendingAsks[0]`
+  // 跨会话回退 —— 那会把 A 会话的提问渲染在 B 会话里，用户还会把答案提交到错误的会话。
+  if (!currentSessionId) {
     return null;
   }
-  if (!currentSessionId) {
-    return askStore.pendingAsks[0] ?? null;
-  }
   return (
-    askStore.pendingAsks.find(
-      (ask) => !ask.sessionId || ask.sessionId === currentSessionId
-    ) ?? askStore.pendingAsks[0] ?? null
+    askStore.pendingAsks.find((ask) => ask.sessionId === currentSessionId) ?? null
   );
 });
+
+/**
+ * 契约 §6.2/§6.6「恢复即重建」：打开/切换会话时必须重新拉取未决 Ask。
+ *
+ * 轮询会在列表为空时自停（省电），若只依赖它，重启后「会话里还有未决提问」这件事就永远不会
+ * 被重新发现。这里把「会话作用域变化」当作强制重拉的信号，并把作用域交给 store 记住。
+ */
+watch(
+  () => runtimeStore.sessionId,
+  (sessionId) => {
+    void askStore.openSession(sessionId ?? null);
+  },
+  { immediate: true }
+);
 
 export type ResolvedAskOption = {
   raw: unknown;
   label: string;
   description: string;
 };
-
 function fallbackOptionDescription(label: string, index: number): string {
   const normalized = label.trim().toLowerCase();
   if (["继续", "确认", "确定", "是", "yes", "ok", "confirm", "continue"].includes(normalized)) {
@@ -789,16 +800,21 @@ async function submitAskAnswer() {
   }
 }
 
-async function cancelActiveAsk() {
+/**
+ * 「忽略此提问」（契约 §6.3）：复用既有 `ask_cancel` 命令，宿主把请求迁到 `Cancelled`
+ * （显式忽略，与会话里的新消息导致的 `Superseded` 是两种不同终态）。卡片乐观移除并因
+ * 宿主持久化状态不再为 `Pending` 而永不重现。
+ */
+async function ignoreActiveAsk() {
   const ask = activeAsk.value;
   if (!ask || askIsBusy.value) return;
   try {
-    const result = await askStore.cancel(ask);
+    const result = await askStore.ignore(ask);
     if (!result && askStore.error) {
       recordAskErrorToTrace(ask, askStore.error);
     }
   } catch (error) {
-    const message = `取消异常：${String(error)}`;
+    const message = `忽略异常：${String(error)}`;
     recordAskErrorToTrace(ask, message);
   }
 }
@@ -807,7 +823,8 @@ onMounted(() => {
   window.addEventListener("click", handleClickOutside);
   window.addEventListener("resize", updateFloatingMenuPosition);
   window.addEventListener("scroll", updateFloatingMenuPosition, true);
-  void askStore.refresh();
+  // 首屏的未决 Ask 由上面的 `runtimeStore.sessionId` watcher（immediate）经 `openSession` 拉取，
+  // 这里只负责把轮询与事件监听武装起来，避免同一次挂载发两遍 `ask_list_pending`。
   askStore.startPolling();
   void askStore.startWatchingEvents();
 });
@@ -934,18 +951,18 @@ onBeforeUnmount(() => {
           />
         </div>
 
-        <!-- 底部栏：极简风格，取消与复用原对话框发送键 -->
+        <!-- 底部栏：忽略此提问 + 复用原对话框发送键 -->
         <div class="mt-3 flex items-center justify-between">
           <div class="flex items-center gap-2">
             <button
               type="button"
-              data-testid="composer-ask-cancel"
+              data-testid="composer-ask-ignore"
               class="text-[12px] text-stone-400 transition hover:text-stone-600 disabled:opacity-40"
               :disabled="askIsBusy"
-              @click="cancelActiveAsk"
+              @click="ignoreActiveAsk"
             >
               <LoaderCircle v-if="askStore.cancellingRequestId === activeAsk.requestId" class="mr-1 inline h-3 w-3 animate-spin" />
-              取消
+              忽略此提问
             </button>
             <span v-if="askStore.error" class="text-[11px] text-rose-600">
               {{ askStore.error }}

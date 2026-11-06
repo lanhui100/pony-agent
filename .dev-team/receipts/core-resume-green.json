@@ -1,0 +1,34 @@
+{
+  "task": "task-6",
+  "role": "executor-core",
+  "phase": "green",
+  "generated_at": "2026-11-06T18:58:00+08:00",
+  "scope_note": "原实现由并行会话落盘；本回执只覆盖 Lead 交办的 T6 收口两项：① 两分支单测补全 ② desktop 零回归确认。未回退 start_turn_stream 委派（Lead 已按契约修订追认）。",
+  "commands": [
+    {"cmd": "cargo test -p pony-agent-core --lib ask_resume", "exit": 0, "result": "4 passed; 0 failed"},
+    {"cmd": "cargo test -p pony-agent-core --test ask_resume_e2e", "exit": 0, "result": "5 passed; 0 failed"},
+    {"cmd": "cargo test -p pony-agent-core --test ask_persistence_acceptance", "exit": 0, "result": "16 passed; 0 failed"},
+    {"cmd": "cargo test -p pony-agent-core --test ask_pending_contract", "exit": 0, "result": "6 passed; 0 failed"},
+    {"cmd": "cargo test -p pony-agent-core --test tui_batch3_regression", "exit": 0, "result": "27 passed; 0 failed"},
+    {"cmd": "cargo check -p pony-agent-core --all-targets", "exit": 0, "result": "0 error"}
+  ],
+  "branch_coverage": {
+    "test_module": "crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs::ask_resume_fallback_tests（#[cfg(test)]，src 内单测，未动 tests/**）",
+    "run_reuse": "prepare_reuses_the_latest_continuable_run_of_the_session：seed 一个 Ready/无 active turn/无 ask wait 的 run → prepare_ask_aware_graph_run_stream 返回同一 run_id，且 store 中 run 数仍为 1（证明复用而非新建）",
+    "new_run": "prepare_creates_a_fresh_run_when_none_is_continuable：空 store + 具名会话 ⇒ 新建；session_id=None 连续两次 ⇒ 两个不同 run id（一律新建），并顺带覆盖同毫秒 id 冲突的消歧逻辑",
+    "fallback": "continue_falls_back_when_bound_run_is_not_continuable（既有）：指定不可续 run ⇒ 回落 legacy 且返回 Ok，sink 收到终态事件"
+  },
+  "implementation_fix": {
+    "defect": "next_graph_run_id() 仅毫秒时间戳（run-<ms>），同一毫秒内连续新建 run 会撞 id，prepare_start_graph_run_stream 直接 Err（测试与真实并发均可能命中）",
+    "fix": "ask-aware 新建分支在 live run store 内消歧：base 冲突时追加 -N 后缀，保证新建 run id 唯一；不改 next_graph_run_id 本身（其他调用面零影响）"
+  },
+  "desktop_zero_regression": {
+    "signatures": "git diff 证明本次改动未触及 prepare_start_graph_run_stream / execute_graph_run_stream（含 _step）/ start_graph_run_stream / resume_graph_run_stream / graph_resume_ask 的签名或实现骨架；graph_resume_ask 仍为 (run_id, request_id, expected_version, answer) 五参",
+    "semantics": "desktop 链路（prepare_* → execute_graph_run_stream）实现未改；仅在 graph_resume_ask 内新增「无绑定 + 已落 session 注入 ⇒ 返回 {resumed:false, landed:session_injection}」的兼容分支（原先必然 Err），对既有绑定 resume 行为不变",
+    "tauri": "src-tauri/src/lib.rs 的改动来自客户端任务（+32 行，session 作用域化），非本任务；core 侧命令面签名未变"
+  },
+  "risks": [
+    "ask_resume_commands.rs 的原作者为并行会话；本任务只做只读复核 + 两个单测 + 新建 run id 唯一性修复，若原作者继续改动该文件需 Lead 统一复核。",
+    "start_turn_stream 委派（CLI/harness 也进入 graph run 路径）是 Lead 已追认的契约修订，回归锚点为 ask_resume_e2e。"
+  ]
+}

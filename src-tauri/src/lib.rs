@@ -234,20 +234,46 @@ fn ask_list_pending(
     control_plane.list_pending_asks(session_id.as_deref())
 }
 
+/// Normalized session scope: trimmed, empty ⇒ `None` (host default = all sessions).
+fn session_scope(session_id: Option<&str>) -> Option<&str> {
+    session_id.map(str::trim).filter(|scope| !scope.is_empty())
+}
+
+/// Resolve the session scope a mutating Ask call must carry.
+///
+/// ADR 0074 / contract §4: the persisted CAS is a scoped four-tuple
+/// `(session, request, version, nonce)`. The core `*_ask_in_session` entries are the only mutation
+/// path — the three-argument variants fail closed with `ask_scope_required`. A missing scope is
+/// therefore rejected here with the same stable code instead of being guessed (a wrong guess would
+/// mutate another conversation's request).
+fn require_ask_scope(session_id: Option<&str>) -> Result<&str, String> {
+    session_scope(session_id).ok_or_else(|| {
+        "ask_scope_required: the calling UI must pass the session scope it is looking at".to_string()
+    })
+}
+
 /// Answer a pending Ask by stable `request_id` and compare-and-swap `version` (or `expected_version`),
 /// carrying the user's answer payload.
+///
+/// `session_id` is the conversation the caller is looking at (ADR 0074 / contract §4). The persisted
+/// CAS is session-scoped: a mutation without scope fails closed with `ask_scope_required`, because
+/// `request_id` alone cannot prove both sides are talking about the same conversation. The desktop
+/// store always sends it (`openSession` scope). A call without it is rejected with the stable
+/// `ask_scope_required` code (mapped to the shared Chinese notice by `isStaleAskError`).
 #[tauri::command]
 fn ask_answer(
     control_plane: State<'_, HostControlPlane>,
     request_id: String,
     version: Option<u64>,
     expected_version: Option<u64>,
+    session_id: Option<String>,
     answer: Value,
 ) -> Result<Value, String> {
     let ver = expected_version
         .or(version)
         .ok_or_else(|| "missing required key `expected_version` or `version`".to_string())?;
-    control_plane.answer_ask(&request_id, ver, answer)
+    let scope = require_ask_scope(session_id.as_deref())?;
+    control_plane.answer_ask_in_session(scope, &request_id, ver, answer)
 }
 
 /// Approve an Approval control request by stable `request_id` and compare-and-swap `version` (or `expected_version`).
@@ -265,17 +291,21 @@ fn control_approve_request(
 }
 
 /// Cancel a pending Ask by stable `request_id` and compare-and-swap `version` (or `expected_version`).
+///
+/// Same session-scope rule as [`ask_answer`]: the scope the UI is looking at must own the request.
 #[tauri::command]
 fn ask_cancel(
     control_plane: State<'_, HostControlPlane>,
     request_id: String,
     version: Option<u64>,
     expected_version: Option<u64>,
+    session_id: Option<String>,
 ) -> Result<Value, String> {
     let ver = expected_version
         .or(version)
         .ok_or_else(|| "missing required key `expected_version` or `version`".to_string())?;
-    control_plane.cancel_ask(&request_id, ver)
+    let scope = require_ask_scope(session_id.as_deref())?;
+    control_plane.cancel_ask_in_session(scope, &request_id, ver)
 }
 
 /// Transition every expired pending request to `Expired`. `now_ms` defaults to the dispatcher

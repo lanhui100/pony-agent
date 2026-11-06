@@ -557,13 +557,25 @@ impl HostControlPlane {
     }
 
     pub fn delete_session(&self, command: DeleteSessionCommand) -> Vec<SessionOverview> {
-        self.sessions_rwlock
+        let remaining = self
+            .sessions_rwlock
             .write()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .remove_session(&command.session_id)
+            .remove_session(&command.session_id);
+        // ADR 0074: a deleted session's pending Asks are orphaned by GC, so a restart cannot
+        // resurrect a panel for a conversation that no longer exists.
+        let now_ms = self.ask_dispatcher.clock().now_ms();
+        let reclaimed = self.gc_orphan_asks(&[command.session_id.clone()], now_ms);
+        if reclaimed > 0 {
+            eprintln!(
+                "[pony-agent] deleted session `{}` orphaned {reclaimed} pending Ask(s)",
+                command.session_id
+            );
+        }
+        remaining
     }
 
     pub fn inspect(&self, query: HostInspectionQuery) -> HostInspectionSnapshot {

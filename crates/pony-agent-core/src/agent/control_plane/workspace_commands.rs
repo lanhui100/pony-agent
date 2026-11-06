@@ -78,13 +78,26 @@ impl HostControlPlane {
     }
 
     pub fn archive_session(&self, session_id: &str) -> Result<(), String> {
-        self.sessions_rwlock
+        let outcome = self
+            .sessions_rwlock
             .write()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .archive_session(session_id)
+            .archive_session(session_id);
+        // ADR 0074: archiving the owning session orphans its pending Asks — reclaimed by GC, never
+        // turned into an "expired" product state.
+        if outcome.is_ok() {
+            let now_ms = self.ask_dispatcher.clock().now_ms();
+            let reclaimed = self.gc_orphan_asks(&[session_id.to_string()], now_ms);
+            if reclaimed > 0 {
+                eprintln!(
+                    "[pony-agent] archived session `{session_id}` orphaned {reclaimed} pending Ask(s)"
+                );
+            }
+        }
+        outcome
     }
 
     pub fn unarchive_session(&self, session_id: &str) -> Result<(), String> {

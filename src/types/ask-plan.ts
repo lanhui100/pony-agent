@@ -24,6 +24,56 @@ export type PendingAsk = {
   options?: unknown[] | null;
 };
 
+/**
+ * Ask lifecycle disposition (ADR 0074). Mirrors the backend `AskLifecycleState` snake_case
+ * serde projection (crates/pony-agent-core/src/agent/ask_persistence.rs): only `pending`
+ * requests may be surfaced to the user, and the four terminal states are not interchangeable
+ * (`cancelled` = explicit ignore, `superseded` = a newer user message made it moot,
+ * `orphaned` = owning session was archived and GC reclaimed the record).
+ */
+export type AskLifecycleState =
+  | "pending"
+  | "answered"
+  | "cancelled"
+  | "superseded"
+  | "orphaned";
+
+/** Control-request kind: an Ask (`interaction`) or an Approval request. */
+export type AskKind = "interaction" | "approval";
+
+/**
+ * Durable Ask record (ADR 0074). Mirrors the backend `PersistedAsk` camelCase serde projection
+ * (crates/pony-agent-core/src/agent/ask_persistence.rs). Unlike `PendingAsk` this record carries
+ * no `expiresAtMs`: wall-clock TTL is no longer product semantics. `version` + `nonce` are
+ * persisted so an answer is a cross-process compare-and-swap, and `sessionId` is mandatory
+ * because it is the recovery key used to rebuild the Ask panel after a restart.
+ */
+export type PersistedAsk = {
+  requestId: string;
+  version: number;
+  nonce: string;
+  sessionId: string;
+  runId?: string | null;
+  turnId: string;
+  callId: string;
+  kind: AskKind;
+  prompt: string;
+  options: string[];
+  state: AskLifecycleState;
+  createdAtMs: number;
+  answeredAtMs?: number | null;
+};
+
+/**
+ * Stable Ask rejection codes (contract §4). The host must map these to the Chinese user-facing
+ * copy and keep the raw code in runtime logs only — never render it in a panel.
+ */
+export type AskPersistenceErrorCode =
+  | "ask_state_conflict"
+  | "ask_version_mismatch"
+  | "ask_nonce_mismatch"
+  | "ask_not_found";
+
 export type TodoItemStatus = "pending" | "in_progress" | "completed";
 
 export type TodoItem = {

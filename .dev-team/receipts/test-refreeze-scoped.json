@@ -1,0 +1,65 @@
+{
+  "wave": "T12",
+  "task": "task-12",
+  "owner": "test-agent",
+  "generated_at": "2026-11-06T18:46:21+08:00",
+  "status": "GREEN（两个冻结面已按 T8 作用域契约迁移；未放宽其它断言）",
+  "contract": "`.dev-team/contract-matrix-ask-persistence.md` §4/§5（answer/cancel 校验 (request_id, version, session_id)，nonce 服务端自持；list_pending_asks 无作用域 ⇒ 空数组 + ask_scope_required；投影不含 nonce）",
+  "files": [
+    {
+      "file": "crates/pony-agent-core/tests/ask_pending_contract.rs",
+      "changed_tests": [
+        "c1_6_host_control_plane_projection_excludes_terminal_requests"
+      ],
+      "changes": [
+        "给 dispatcher 装真实持久化 store（open_ask_store + set_ask_store），Ask 真正落盘；宿主平面注入同一 store",
+        "「无作用域 list」断言 → 改为『无作用域 ⇒ 空数组（fail-closed）』反向断言 + 新增『三参 answer_ask ⇒ Err(ask_scope_required) 且不消费记录』反向断言",
+        "「有作用域 list」断言保留语义（只列 Pending、不含终态），并新增投影不含 nonce、作答改走 answer_ask_in_session(session_id, request_id, version)"
+      ],
+      "assertions_weakened": false,
+      "sha256": "1678e07e91af92c310fd1d34b92a6f25a745d5762f1494110d732745a0ea93c4"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/ask_resume_e2e.rs",
+      "changed_tests": [],
+      "changes": [
+        "零改动：该文件已按新契约使用 `list_pending_asks(Some(session))` 与 `answer_ask_in_session(...)`，且 5/5 全绿；无『三参入口必须成功』的冲突断言需要改写"
+      ],
+      "assertions_weakened": false,
+      "sha256": "e9e6e5de248d1207c059c75fbc967f783c9f71af295e70c64139ac34344ed8d8"
+    }
+  ],
+  "verification": [
+    {
+      "command": "cargo test -p pony-agent-core --test ask_pending_contract",
+      "result": "6 passed; 0 failed",
+      "exit": 0
+    },
+    {
+      "command": "cargo test -p pony-agent-core --test ask_resume_e2e",
+      "result": "5 passed; 0 failed",
+      "exit": 0
+    },
+    {
+      "command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "result": "16 passed; 0 failed",
+      "exit": 0
+    },
+    {
+      "command": "cargo test -p pony-agent-core --test ask_pending_adversarial",
+      "result": "4 passed; 0 failed",
+      "exit": 0
+    },
+    {
+      "command": "npx vitest run tests/ask-store.spec.ts tests/ask-pending-expiry.spec.ts tests/ask-panel-expired.spec.ts tests/AskPlanPanel.spec.ts tests/acceptance/wave17/tabular-nums-contract.spec.ts",
+      "result": "5 files / 48 tests passed",
+      "exit": 0
+    }
+  ],
+  "notes": [
+    "c1_6 的迁移方向由契约定向：作用域是唯一合法入口，无作用域一律 fail-closed 空数组/ask_scope_required；因此本文件不再存在『无作用域清单返回全部』的旧断言。",
+    "c1_1~c1_5 未改动（仍全绿）。",
+    "T10 安全红相位（security_* 5 条 + 桌面 2 条）在 T8/T9 落地后已转绿：acceptance 16/16、ask-store 18/18。"
+  ],
+  "git_write_operations": false
+}

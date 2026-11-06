@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "executed_by": "a147fced-67ff-47a4-9668-725358299698",
+  "reviewed_commit": "3548c692",
+  "reviewer": { "kind": "subagent", "session_id": "a147fced-67ff-47a4-9668-725358299698", "fresh_context": true },
+  "attestation": { "self_signed": false },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "docs/observability.yaml",
+    "crates/pony-agent-core/tests/ask_resume_e2e.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/graph.rs",
+      "line": 914,
+      "rule": "LEAK",
+      "counterexample_cmd": "grep -n 'waits.remove(position)' crates/pony-agent-core/src/agent/graph.rs; grep -n 'cancel_ask_in_session' crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 10924,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '10916,10930p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 567,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE' crates/pony-agent-core/src/agent/runtime/turn_stream.rs crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+      "line": 79,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "rustfmt --edition 2021 --check crates/pony-agent-core/src/agent/runtime/turn_control.rs crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/plan-ask-resume.md",
+      "line": 59,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n '契约修订 R1\\|契约修订 R2\\|契约修订 R3' .dev-team/plan-ask-resume.md",
+      "severity": "ADVISORY"
+    }
+  ]
+}

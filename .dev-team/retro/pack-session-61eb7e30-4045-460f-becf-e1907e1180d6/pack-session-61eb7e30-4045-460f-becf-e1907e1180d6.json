@@ -1,0 +1,535 @@
+{
+ "applicability": {
+  "acceptance_tests_present": true,
+  "note": "无验收测试时 red/drift 规则判 not-applicable，绝不静默通过"
+ },
+ "repo_profile": {
+  "acceptance_dirs": [
+   "tests/acceptance"
+  ],
+  "has_acceptance": true,
+  "top_exts": [
+   [
+    "md",
+    1120
+   ],
+   [
+    "json",
+    463
+   ],
+   [
+    "rs",
+    295
+   ],
+   [
+    "png",
+    287
+   ],
+   [
+    "ts",
+    234
+   ],
+   [
+    "txt",
+    203
+   ]
+  ],
+  "test_scripts": {
+   "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
+   "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+   "cargo:test:regression": "cargo test --manifest-path src-tauri/Cargo.toml --test session_regression --test provider_registry_regression --test tool_router_regression --target-dir target-test",
+   "cargo:test:shared": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 test test",
+   "cargo:test:exact": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-a test",
+   "cargo:test:exact:b": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-b test",
+   "cargo:test:exact:c": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-c test",
+   "test": "npm run test:unit",
+   "test:unit": "vitest run",
+   "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
+   "test:e2e": "npm run build && playwright test",
+   "test:tauri:smoke": "node scripts/tauri-smoke.js",
+   "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
+   "conformance:test": "cargo test -p pony-agent-core --test conformance"
+  }
+ },
+ "run_id": "session-61eb7e30-4045-460f-becf-e1907e1180d6",
+ "task": "TUI ask overlay visibility, stop sink registration and JSON log leak fixes",
+ "tier": "B",
+ "base": "d710bb34",
+ "head": "7a5269ed0c36112fc01b10d97c70ece4dcb8db5d",
+ "work": {
+  "L": 206,
+  "files": 3,
+  "board_tasks": [
+   "冻结 TUI 悬浮与取消契约",
+   "编写 TUI 缺陷独立红相验收",
+   "实施 TUI 悬浮与取消消息修复"
+  ],
+  "gates_seen_in_session": {
+   "unit": 13,
+   "accept": 13,
+   "browser": 6
+  }
+ },
+ "commits": [
+  {
+   "sha": "dd8159200872",
+   "full": "dd81592008725bd722b187e94e5207202cd2ba23",
+   "subject": "test(tui): freeze ask overlay and stop-cancel acceptance",
+   "files": [
+    ".dev-team/contract-matrix-tui-overlay-cancel.md",
+    ".dev-team/l2at-done-tui-overlay-cancel.json",
+    ".dev-team/nfr-baseline-tui-overlay-cancel.json",
+    ".dev-team/observability-tui-overlay-cancel.json",
+    ".dev-team/regression-baseline-tui-overlay-cancel.json",
+    ".dev-team/review-plan-tui-overlay-cancel.json",
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md",
+    "docs/decisions/README.md",
+    "tests/acceptance/l2at-tui-overlay-cancel.sh",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/failed-assertions.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-meta.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-pty-meta.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/red-pty.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/red.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-2-ask-cancelled.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-2-ask-cancelled.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-2-ask-cancelled.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-2-ask-cancelled.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/summary.json"
+   ],
+   "stat": "51 files changed, 2299 insertions(+)"
+  },
+  {
+   "sha": "450d804cb9a4",
+   "full": "450d804cb9a4076aff1da17121d98f258cc24c31",
+   "subject": "test(tui): correct O1 metrics fixture and CJK assertions",
+   "files": [
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/failed-assertions.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/green.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/o1-fixture-defect-evidence.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/s3-1-resume.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/summary.json"
+   ],
+   "stat": "35 files changed, 211 insertions(+), 106 deletions(-)"
+  },
+  {
+   "sha": "4b9e241af205",
+   "full": "4b9e241af205aee2e3ccbc85034c173ac96391ca",
+   "subject": "test(tui): assert PTY screen has no structured log JSON leak",
+   "files": [
+    "tests/acceptance/l2at-tui-overlay-cancel.sh",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/o8-structured-log-leak-evidence.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-prefix-structured-log-screen-red-phase.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-2-stopped.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/summary.json"
+   ],
+   "stat": "29 files changed, 107 insertions(+), 43 deletions(-)"
+  },
+  {
+   "sha": "818cf22e3e8b",
+   "full": "818cf22e3e8bb5cc5fc52f78842ad06846c0c43d",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback",
+   "files": [
+    ".dev-team/contract-matrix-tui-overlay-cancel.md",
+    ".dev-team/l2at-done-tui-overlay-cancel.json",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md",
+    "docs/observability.yaml",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/stream.raw"
+   ],
+   "stat": "18 files changed, 228 insertions(+), 53 deletions(-)"
+  },
+  {
+   "sha": "9ba49b4ce3f4",
+   "full": "9ba49b4ce3f48aa4ad05382609bac695afc66111",
+   "subject": "test(tui): judge C9 sink registration on the runtime log surface",
+   "files": [
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "tests/acceptance/l2at-tui-overlay-cancel.sh",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/c9-runtime-log-red-direction-evidence.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/green.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-stream.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/sink-warning-sample.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/stream.raw"
+   ],
+   "stat": "22 files changed, 192 insertions(+), 53 deletions(-)"
+  },
+  {
+   "sha": "b477c090a1c3",
+   "full": "b477c090a1c3cd760b66859040b5bb84c1ebf562",
+   "subject": "docs(tui): ratify ask overlay contract revision 2 [decl-change-approved]",
+   "files": [
+    ".dev-team/contract-matrix-tui-overlay-cancel.md",
+    ".dev-team/nfr-baseline-tui-overlay-cancel.json",
+    "docs/decisions/0063-tui-ask-user-overlay-and-cancel-feedback.md",
+    "docs/observability.yaml"
+   ],
+   "stat": "4 files changed, 19 insertions(+), 10 deletions(-)"
+  },
+  {
+   "sha": "3c6823100d79",
+   "full": "3c6823100d790b2f6bd3275c49523cb6b8cc5631",
+   "subject": "test(tui): cover history_tool_detail contract and relabel log-leak judge as C10",
+   "files": [
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "tests/acceptance/l2at-tui-overlay-cancel.sh",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/green.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/o8-structured-log-leak-evidence.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/stream.raw"
+   ],
+   "stat": "20 files changed, 181 insertions(+), 35 deletions(-)"
+  },
+  {
+   "sha": "8d18d15700f6",
+   "full": "8d18d15700f651e25ccb257cd4e3f23c59996e58",
+   "subject": "fix(tui): tighten stop sink lifecycle and suppress structured payloads",
+   "files": [
+    "crates/pony-agent-core/src/agent/otel/log.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/bin/tui.rs"
+   ],
+   "stat": "3 files changed, 54 insertions(+), 20 deletions(-)"
+  },
+  {
+   "sha": "a6756d8410b9",
+   "full": "a6756d8410b96ef775516797c6d0a8f20508421c",
+   "subject": "test(tui): refresh l2at receipts for 8d18d157 verification",
+   "files": [
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-0-streaming.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/s1-1-stopping.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/stream.raw",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.ansi",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.squeezed.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.txt",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock-requests.jsonl",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock.out",
+    "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/stream.raw"
+   ],
+   "stat": "21 files changed, 31 insertions(+), 28 deletions(-)"
+  },
+  {
+   "sha": "7a5269ed0c36",
+   "full": "7a5269ed0c36112fc01b10d97c70ece4dcb8db5d",
+   "subject": "chore(tui): archive green evidence and independent reviews",
+   "files": [
+    ".dev-team/l2at-done-tui-overlay-cancel.json",
+    ".dev-team/meta-retrospective-tui-overlay-cancel.md",
+    ".dev-team/review-l3a-tui-overlay-cancel.json",
+    ".dev-team/review-l3p-tui-overlay-cancel.json"
+   ],
+   "stat": "4 files changed, 229 insertions(+), 4 deletions(-)"
+  }
+ ],
+ "post_run_commits": [],
+ "foreign_commits": [],
+ "frozen_test_drift": [
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock.out",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/stream.raw",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/mock.out",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.ansi",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.png",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.squeezed.txt",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s2-ask-overlay/s2-1-ask-open.txt",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock-requests.jsonl",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/mock.out",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  },
+  {
+   "path": "tests/acceptance/receipts/l2at-tui-overlay-cancel/s3-resume-summary/stream.raw",
+   "anchor": "dd8159200872",
+   "modified_by": "818cf22e3e8b",
+   "subject": "fix(tui): keep ask context visible and surface stop feedback"
+  }
+ ],
+ "review_receipts": [
+  {
+   "file": ".dev-team/review-l3a-tui-overlay-cancel.json",
+   "schema_version": 2,
+   "executed_by": "tui-test2-review-8d18d157",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "tui-test2-review-8d18d157",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "8d18d157",
+   "verdict": "PASS",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-l3p-tui-overlay-cancel.json",
+   "schema_version": 2,
+   "executed_by": "tui-protocol-review-8d18d157",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "tui-protocol-review-8d18d157",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "8d18d157",
+   "verdict": "PASS",
+   "independent": true
+  },
+  {
+   "file": ".dev-team/review-plan-tui-overlay-cancel.json",
+   "schema_version": 2,
+   "executed_by": "f7200285-df05-471f-a36e-949cd6f85809",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "f7200285-df05-471f-a36e-949cd6f85809",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "d710bb34",
+   "verdict": "PASS",
+   "independent": true
+  }
+ ],
+ "mechanical_red_flags": [
+  "frozen_test_drift:tests/acceptance/receipts/l2at-tui-overlay-cancel/bin.log,tests/acceptance/receipts/l2at-tui-overlay-cancel/run.log,tests/acceptance/receipts/l2at-tui-overlay-cancel/s1-stop-esc/mock-requests.jsonl,te",
+  "self_signed_review:review-join-a.json",
+  "self_signed_review:review-join-a2.json",
+  "self_signed_review:review-join-b.json",
+  "self_signed_review:review-join-b2.json",
+  "self_signed_review:review-join-pds3.json",
+  "self_signed_review:review-join-wave59-r2.json",
+  "self_signed_review:review-join-wave59.json",
+  "self_signed_review:review-join-wave61-a.json",
+  "self_signed_review:review-join-wave61-b.json",
+  "self_signed_review:review-join.json",
+  "self_signed_review:review-l3-concurrency.json",
+  "self_signed_review:review-l3-security.json",
+  "self_signed_review:review-l3a-tui-overlay-cancel.json",
+  "self_signed_review:review-l3p-tui-overlay-cancel.json",
+  "self_signed_review:review-l3p-wave60.json",
+  "self_signed_review:review-l3p.json",
+  "self_signed_review:review-plan-extensibility.json",
+  "self_signed_review:review-plan-pds3.json",
+  "self_signed_review:review-plan-tui-overlay-cancel.json",
+  "self_signed_review:review-plan-wave58.json",
+  "self_signed_review:review-plan-wave59.json",
+  "self_signed_review:review-plan-wave61-a.json",
+  "self_signed_review:review-plan-wave61-b.json",
+  "self_signed_review:review-plan-wave61-team.json",
+  "self_signed_review:review-plan.json",
+  "self_signed_review:review-promote-A.json",
+  "self_signed_review:review-promote-B.json",
+  "self_signed_review:review-tool-timeout.json",
+  "self_signed_review:review-wave60-a.json",
+  "self_signed_review:review-wave60-b.json",
+  "self_signed_review:review-wave60-recheck.json",
+  "self_signed_review:review-wave61-a.json",
+  "self_signed_review:review-wave61-fa.json",
+  "self_signed_review:review-wave61-fp.json",
+  "self_signed_review:review-wave61-fr.json",
+  "self_signed_review:review-wave61-fv.json",
+  "self_signed_review:review-wave61-l3p.json",
+  "self_signed_review:review-wave61-recheck.json",
+  "self_signed_review:review-wave62-concurrency.json",
+  "self_signed_review:review-wave62-contract.json",
+  "self_signed_review:review-wave62-recheck.json",
+  "self_signed_review:review-wave64-a.json",
+  "self_signed_review:review-wave64-b.json",
+  "self_signed_review:review-wave64-l3p.json",
+  "self_signed_review:review-wave64-recheck.json"
+ ],
+ "unknowns": [
+  "每个门禁实际抓到多少缺陷（gate_caught）需从 review JSON/测试日志判定",
+  "用户是否口头授权了自扩范围（scope）需读会话原文"
+ ],
+ "pack_hash": "53fb96df57408171"
+}

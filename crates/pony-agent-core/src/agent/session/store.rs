@@ -110,6 +110,9 @@ pub struct SessionStore {
     /// PA-095：事件流 degraded 会话集合——`load_turn_events_checked` 遇坏 payload /
     /// 版本不匹配时标记（fail loud 不静默跳过）；内存态，重启后随首次读取重建。
     event_stream_degraded: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// ADR 0074：未决 Ask 的持久化 store（与 `sessions.db` 同库）。`None` = 本 store 不是
+    /// SQLite 会话库（内存/文件后端的测试路径），宿主侧退化为 dispatcher 内存镜像。
+    ask_store: Option<Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -186,10 +189,29 @@ impl SessionStore {
             let _ = std::fs::create_dir_all(parent);
         }
         let backend: Box<dyn SessionBackend> = Box::new(SqliteSessionBackend::new_with_trace_mode(
-            sqlite_path,
+            sqlite_path.clone(),
             SeparateTraceTableMode::WriteSeparate,
         ));
-        Self::with_backend(backend)
+        let mut store = Self::with_backend(backend);
+        // ADR 0074：未决 Ask 与会话同库持久化（`pending_asks` 表，打开即向前建表）。
+        store.ask_store = match crate::agent::ask_persistence::open_ask_store(&sqlite_path) {
+            Ok(ask_store) => Some(Arc::from(ask_store)),
+            Err(error) => {
+                eprintln!(
+                    "[pony-agent][session] ask store unavailable at {}: {error}",
+                    sqlite_path.display()
+                );
+                None
+            }
+        };
+        store
+    }
+
+    /// ADR 0074：本会话库上的未决 Ask 持久化 store（`SessionStore::new()` 的 SQLite 库）。
+    pub fn ask_store(
+        &self,
+    ) -> Option<Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>> {
+        self.ask_store.clone()
     }
 
     #[cfg(test)]
@@ -301,6 +323,7 @@ impl SessionStore {
             event_stream_degraded: std::sync::Mutex::new(std::collections::HashSet::new()),
             history_state_hook_executor: Arc::new(NoopHistoryStateHookExecutor),
             projection_cache: HashMap::new(),
+            ask_store: None,
         };
         if should_save {
             store.save_to_backend();

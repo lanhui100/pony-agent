@@ -1,0 +1,75 @@
+{
+  "task": "task-7 (T7)",
+  "role": "executor-client",
+  "verdict": "GREEN — continuation evidence captured from a real PTY run: answering the Ask continues the same turn and renders the second assistant text with no further user input",
+  "generated_at": "2026-11-06T18:58:00+08:00",
+  "code_state": {
+    "tui_turn_entry": "crates/pony-agent-core/src/bin/tui.rs:10505 + 10550 call `turn_control_plane.start_turn_stream(..)`; core now makes that the ask-aware entry (crates/pony-agent-core/src/agent/control_plane/mod.rs:2034 delegates to `start_ask_aware_turn_stream` in ask_resume_commands.rs). No TUI edit was needed for this item.",
+    "answer_to_continuation_wiring": "submit_ask_answers -> (run_id present) graph_resume_ask -> returns resume_target -> UiEvent::AskResumeTurn (tui.rs:10969) -> `continue_ask_resume_turn_stream`, so the turn continues inside the event loop instead of blocking the input loop",
+    "no_run_identity_path": "when the pending Ask carries no run identity the TUI prints the structured `ask_resume_unavailable: reason=no_run_identity` log and the Chinese notice 「该提问缺少可恢复的执行上下文，本轮…」, never a silent drop",
+    "changes_this_task": "none (evidence-only task; TUI/CAS wiring already landed and verified by task-11)"
+  },
+  "pty_audit": {
+    "command": "PONY_AUDIT_EVIDENCE_ROOT=/tmp/tui-audit-t7 tools/tui-audit/run_audit.sh --phase after --bin target/debug/pony --only ask-resume",
+    "exit_code": 0,
+    "summary": {"scenarios": 1, "pass": 31, "fail": 0, "skipped": 0, "failed_scenarios": []},
+    "binary": {
+      "version": "pony 0.1.154 · linux-x86_64",
+      "sha256": "06f6c5aba189e50067a7892f4373bee6aeca741d1deaedbfe26ace45e112d84a",
+      "mtime": "2026-11-06T18:43:53+08:00"
+    },
+    "evidence_root": "/tmp/tui-audit-t7/after/ask-resume/ (deliberately outside the repo so the committed evidence tree is untouched)",
+    "evidence_files": [
+      "/tmp/tui-audit-t7/after/report.json",
+      "/tmp/tui-audit-t7/after/report.md",
+      "/tmp/tui-audit-t7/after/ask-resume/assertions.json",
+      "/tmp/tui-audit-t7/after/ask-resume/panel.txt | panel.png",
+      "/tmp/tui-audit-t7/after/ask-resume/answered.txt | answered.png",
+      "/tmp/tui-audit-t7/after/ask-resume/resumed.txt | resumed.png",
+      "/tmp/tui-audit-t7/after/ask-resume/exit.txt | exit.png",
+      "/tmp/tui-audit-t7/after/ask-resume/tui-runtime.log"
+    ],
+    "key_assertions": {
+      "askresume.continuation_assistant_text": {
+        "result": "PASS",
+        "evidence": "markers_resumed=['0.1.125', '包管理器：npm'] markers_before_answer=[] tail=['如果需要，我可以继续列出依赖清单。', '› 写下任务，或输入 / 查看命令', '/home/dm/pony-agent ↑32 ↓64 · 上下文 0% · 187 t/s · 首token 59ms']"
+      },
+      "askresume.answer_reaches_provider": {
+        "result": "PASS",
+        "evidence": "followup_rounds=1 tool_msgs=['{\"output\":{\"answer\":{\"answer\":\"继续\"},\"kind\":\"waiting_user\",\"ok\":true,\"requestId\":\"control-…'] answer_present=True pending_marker_hits=0"
+      },
+      "askresume.ask_originated_from_model": {"result": "PASS", "evidence": "chat_requests=2 first_tools=38 first_tool_msgs=0 first_scenario='ask'"},
+      "askresume.panel_visible": {"result": "PASS", "evidence": "◇ 提问 继续吗？"},
+      "askresume.answer_closes_panel": {"result": "PASS", "evidence": "panel closed"},
+      "askresume.streaming_settled": {"result": "PASS", "evidence": "residue=[] footer=… ↑32 ↓64 · 187 t/s · 首token 59ms"},
+      "askresume.no_error_copy": {"result": "PASS", "evidence": "no error/stale copy on the answered/resumed frames"},
+      "askresume.exit_code_reported": {"result": "PASS", "evidence": "code=0"}
+    },
+    "capture_excerpt_resumed_txt": [
+      "帮我确认一下下一步的方向",
+      "先看一下项目",
+      "我先读取 package.json，确认项目名称和版本号，再给你结论。",
+      "  · 工作区：当前目录",
+      "  · 目标文件：package.json",
+      "✓ 提问 (Ask) · audit ask-resume",
+      "结论",
+      "package.json 显示这是 pony-agent，版本 0.1.125。",
+      "  · 包管理器：npm",
+      "如果需要，我可以继续列出依赖清单。",
+      "› 写下任务，或输入 / 查看命令",
+      "/home/dm/pony-agent                            ↑32 ↓64 · 上下文 0% · 187 t/s · 首token 59ms"
+    ],
+    "why_this_proves_the_requirement": "the resumed capture appears in the same turn *after* Enter answered the panel and before any further keystroke: the mock's FINAL_TEXT fingerprint (0.1.125 / 包管理器：npm) is absent before the answer and present afterwards, and the footer carries non-zero turn usage, so the continuation really produced assistant output rather than replaying old text"
+  },
+  "regression_gates_from_previous_round": {
+    "pty_smoke_s1_s4": "t11a: S1=1 S2=1 S3_closed=1 s3_english=0 S4_closed=1 s4_revived=0 s4_errors=0 (script exit 0)",
+    "cargo_test_bin_pony": "14 passed; 0 failed",
+    "cargo_check_all_targets": "exit 0",
+    "vitest_ask_specs": "41 passed (18+10+6+7)"
+  },
+  "notes": [
+    "no source files were modified for this task; only evidence was produced",
+    "tools/tui-audit/** was executed read-only (not modified); evidence root redirected to /tmp",
+    "0 git writes"
+  ]
+}

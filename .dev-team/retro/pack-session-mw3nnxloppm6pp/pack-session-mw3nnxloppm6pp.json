@@ -1,0 +1,216 @@
+{
+ "applicability": {
+  "acceptance_tests_present": true,
+  "note": "无验收测试时 red/drift 规则判 not-applicable，绝不静默通过"
+ },
+ "repo_profile": {
+  "acceptance_dirs": [
+   "tests/acceptance"
+  ],
+  "has_acceptance": true,
+  "top_exts": [
+   [
+    "md",
+    1120
+   ],
+   [
+    "json",
+    463
+   ],
+   [
+    "rs",
+    295
+   ],
+   [
+    "png",
+    287
+   ],
+   [
+    "ts",
+    234
+   ],
+   [
+    "txt",
+    203
+   ]
+  ],
+  "test_scripts": {
+   "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
+   "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",
+   "cargo:test:regression": "cargo test --manifest-path src-tauri/Cargo.toml --test session_regression --test provider_registry_regression --test tool_router_regression --target-dir target-test",
+   "cargo:test:shared": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 test test",
+   "cargo:test:exact": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-a test",
+   "cargo:test:exact:b": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-b test",
+   "cargo:test:exact:c": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/invoke-rust-target.ps1 exact-c test",
+   "test": "npm run test:unit",
+   "test:unit": "vitest run",
+   "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
+   "test:e2e": "npm run build && playwright test",
+   "test:tauri:smoke": "node scripts/tauri-smoke.js",
+   "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
+   "conformance:test": "cargo test -p pony-agent-core --test conformance"
+  }
+ },
+ "run_id": "session-mw3nnxloppm6pp",
+ "task": "Rust harness 可扩展性五 ADR + T1-T4 实施",
+ "tier": "B",
+ "base": "7a5269ed",
+ "head": "adad39ad",
+ "work": {
+  "L": 7402,
+  "files": 23,
+  "board_tasks": [
+   "T1 工具面单一真值闭合与外部工具通道（ADR 0065）",
+   "T3 进程外插件宿主协议 v1 与 hooks 沙箱加固（ADR 0067）",
+   "T2 MCP 通道闭合（ADR 0066）",
+   "T4 契约版本化 + conformance kit + 扩展点归属表（ADR 0068）"
+  ],
+  "gates_seen_in_session": {
+   "accept": 1,
+   "unit": 1
+  }
+ },
+ "commits": [
+  {
+   "sha": "adad39ade2f7",
+   "full": "adad39ade2f74b7e1ff80d81c10a69c7d02d95f8",
+   "subject": "feat(extensibility): 三层扩展模型 + 工具面单一真值 + MCP 通道闭合 + 插件宿主 v1 + 契约门禁",
+   "files": [
+    ".dev-team/contract-matrix-extensibility.md",
+    ".dev-team/meta-retrospective-extensibility.md",
+    ".dev-team/nfr-baseline.json",
+    ".dev-team/nfr-baseline.schema.json",
+    ".dev-team/review-join-extensibility.json",
+    ".dev-team/review-plan-extensibility.json",
+    "backlog/backlog.md",
+    "crates/pony-agent-core/src/agent/capability_bridge.rs",
+    "crates/pony-agent-core/src/agent/control_plane/capability_commands.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/error_code.rs",
+    "crates/pony-agent-core/src/agent/governed_executor.rs",
+    "crates/pony-agent-core/src/agent/hook_commands.rs",
+    "crates/pony-agent-core/src/agent/mcp_client.rs",
+    "crates/pony-agent-core/src/agent/mcp_config.rs",
+    "crates/pony-agent-core/src/agent/mcp_resources.rs",
+    "crates/pony-agent-core/src/agent/mod.rs",
+    "crates/pony-agent-core/src/agent/plugin_host/capability.rs",
+    "crates/pony-agent-core/src/agent/plugin_host/manifest.rs",
+    "crates/pony-agent-core/src/agent/plugin_host/mod.rs",
+    "crates/pony-agent-core/src/agent/plugin_host/supervisor.rs",
+    "crates/pony-agent-core/src/agent/plugin_host/transport.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/provider/responses_api.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/src/bin/conformance.rs",
+    "crates/pony-agent-core/tests/conformance.rs",
+    "crates/pony-agent-core/tests/fixtures/plugin/README.md",
+    "crates/pony-agent-core/tests/fixtures/plugin/echo-plugin.py",
+    "crates/pony-agent-core/tests/fixtures/plugin/plugin.json",
+    "crates/pony-agent-core/tests/mcp_channel_closure.rs",
+    "crates/pony-agent-core/tests/plugin_host_contract.rs",
+    "crates/pony-agent-core/tests/tool_surface_singularity.rs",
+    "docs/architecture/extension-points.md",
+    "docs/contracts/hooks.v1.schema.json",
+    "docs/contracts/mcp-config.v1.schema.json",
+    "docs/contracts/plugin.v1.schema.json",
+    "docs/contracts/skill-manifest.v1.schema.json",
+    "docs/contracts/tool-descriptor.v1.schema.json",
+    "docs/decisions/0064-extensibility-three-layer-model.md",
+    "docs/decisions/0065-tool-surface-single-truth.md",
+    "docs/decisions/0066-mcp-channel-closure.md",
+    "docs/decisions/0067-plugin-host-protocol-and-hooks-sandbox.md",
+    "docs/decisions/0068-contract-versioning-and-conformance-kit.md",
+    "docs/decisions/README.md",
+    "docs/observability.yaml",
+    "package.json",
+    "scripts/gen-extension-points.mjs",
+    "src-tauri/src/lib.rs"
+   ],
+   "stat": "52 files changed, 13601 insertions(+), 313 deletions(-)"
+  }
+ ],
+ "post_run_commits": [],
+ "foreign_commits": [],
+ "frozen_test_drift": [],
+ "review_receipts": [
+  {
+   "file": ".dev-team/review-join-extensibility.json",
+   "schema_version": 2,
+   "executed_by": "unknown",
+   "reviewer_kind": null,
+   "reviewer_session": null,
+   "fresh_context": false,
+   "self_signed": false,
+   "reviewed_commit": "working-tree@7a5269ed+",
+   "verdict": "PASS",
+   "independent": false
+  },
+  {
+   "file": ".dev-team/review-plan-extensibility.json",
+   "schema_version": 2,
+   "executed_by": "lead",
+   "reviewer_kind": "subagent",
+   "reviewer_session": "phase0-three-views",
+   "fresh_context": true,
+   "self_signed": false,
+   "reviewed_commit": "7a5269ed",
+   "verdict": "PASS",
+   "independent": true
+  }
+ ],
+ "mechanical_red_flags": [
+  "self_signed_review:review-join-a.json",
+  "self_signed_review:review-join-a2.json",
+  "self_signed_review:review-join-b.json",
+  "self_signed_review:review-join-b2.json",
+  "self_signed_review:review-join-pds3.json",
+  "self_signed_review:review-join-wave59-r2.json",
+  "self_signed_review:review-join-wave59.json",
+  "self_signed_review:review-join-wave61-a.json",
+  "self_signed_review:review-join-wave61-b.json",
+  "self_signed_review:review-join.json",
+  "self_signed_review:review-l3-concurrency.json",
+  "self_signed_review:review-l3-security.json",
+  "self_signed_review:review-l3a-tui-overlay-cancel.json",
+  "self_signed_review:review-l3p-tui-overlay-cancel.json",
+  "self_signed_review:review-l3p-wave60.json",
+  "self_signed_review:review-l3p.json",
+  "self_signed_review:review-plan-extensibility.json",
+  "self_signed_review:review-plan-pds3.json",
+  "self_signed_review:review-plan-tui-overlay-cancel.json",
+  "self_signed_review:review-plan-wave58.json",
+  "self_signed_review:review-plan-wave59.json",
+  "self_signed_review:review-plan-wave61-a.json",
+  "self_signed_review:review-plan-wave61-b.json",
+  "self_signed_review:review-plan-wave61-team.json",
+  "self_signed_review:review-plan.json",
+  "self_signed_review:review-promote-A.json",
+  "self_signed_review:review-promote-B.json",
+  "self_signed_review:review-tool-timeout.json",
+  "self_signed_review:review-wave60-a.json",
+  "self_signed_review:review-wave60-b.json",
+  "self_signed_review:review-wave60-recheck.json",
+  "self_signed_review:review-wave61-a.json",
+  "self_signed_review:review-wave61-fa.json",
+  "self_signed_review:review-wave61-fp.json",
+  "self_signed_review:review-wave61-fr.json",
+  "self_signed_review:review-wave61-fv.json",
+  "self_signed_review:review-wave61-l3p.json",
+  "self_signed_review:review-wave61-recheck.json",
+  "self_signed_review:review-wave62-concurrency.json",
+  "self_signed_review:review-wave62-contract.json",
+  "self_signed_review:review-wave62-recheck.json",
+  "self_signed_review:review-wave64-a.json",
+  "self_signed_review:review-wave64-b.json",
+  "self_signed_review:review-wave64-l3p.json",
+  "self_signed_review:review-wave64-recheck.json"
+ ],
+ "unknowns": [
+  "每个门禁实际抓到多少缺陷（gate_caught）需从 review JSON/测试日志判定",
+  "用户是否口头授权了自扩范围（scope）需读会话原文"
+ ],
+ "pack_hash": "6bc70c5b910c76c5"
+}

@@ -1,0 +1,25 @@
+{
+  "task": "task-8 (pending red-phase freeze; read-only plan)",
+  "role": "executor-core",
+  "generated_at": "2026-11-06T18:30:00+08:00",
+  "gate": "等 T10 红相冻结（Test Agent 正在写）；此前不动 ask_persistence.rs / ask_plan_commands.rs 的 CAS 路径",
+  "incoming_defects_from_L3B": [
+    "D1 复合主键：(session_id, request_id) 是防御性隔离，当前实现为 request_id 单列主键 + 全局唯一 id（缓解，不是修复）",
+    "D2 answer/cancel 缺四元组校验：现有 transition(request_id, from, to, expected_version) 未校验 nonce 与 session_id",
+    "D3 ask_list_pending(null) 可能跨会话泄露（投影里带 nonce，且枚举所有会话的 pending 记录）"
+  ],
+  "planned_approach": {
+    "D1_schema": "pending_asks 改 PRIMARY KEY (session_id, request_id)。SQLite 不能改主键 ⇒ 迁移：检测旧表结构 → CREATE TABLE pending_asks_v2(..., PRIMARY KEY(session_id, request_id)) → INSERT OR IGNORE SELECT（同 id 跨会话不再互相覆盖）→ DROP 旧表 → RENAME。旧库打开即迁移；新建库直接建 v2。索引 (session_id, state)、(session_id, created_at_ms) 保留。",
+    "D2_cas": "transition 增加 session_id + nonce 前置校验（以 T10 冻结签名为准）；CAS 谓词 = 状态 Pending && version 匹配 && session_id 匹配 && nonce 匹配。错误码沿用 ask_state_conflict / ask_version_mismatch / ask_nonce_mismatch / ask_not_found（契约 §4）。",
+    "D3_list_scope": "list_pending_asks(None) 不再返回 nonce（去凭据化投影）；会话过滤语义与是否允许 unfiltered 读取以 T10 冻结契约为准（候选：unfiltered 只返回 {requestId, sessionId, version, createdAtMs...} 去敏字段，或直接要求 session_id）。",
+    "compat": "host 侧 answer/cancel 需能从持久化记录推出 session_id（按 request_id 查时可能跨会话命中 ⇒ 以四元组消歧；TUI/桌面已有 session 上下文，必要时从面板句柄传入）"
+  },
+  "carryover": {
+    "request_id_global_uniqueness": "已在 task-4 实现（dispatcher process-seeded 全局计数），在 T8 回执中记为「缓解项」；契约要求的真正隔离是复合主键。"
+  },
+  "risks": [
+    "T10 冻结后签名可能与本计划的 transition(session_id, request_id, version, nonce, ...) 不同 —— 以冻结文件为准，先读后写。",
+    "迁移必须覆盖「已存在的旧表（单列主键）」与「不存在表」两种库；迁移失败需 fail-closed 而非静默回退内存态。",
+    "四元组校验升级会改变 ask_pending_contract / ask_pending_adversarial / ask_resume_e2e 的现有断言路径（均为冻结文件，只读；若红等 Test Agent 重冻）。"
+  ]
+}

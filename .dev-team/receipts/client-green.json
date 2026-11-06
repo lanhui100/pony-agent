@@ -1,7 +1,7 @@
 {
   "task": "task-5",
   "role": "executor-client",
-  "verdict": "GREEN (client scope) — PTY S1/S2/S3 all pass on my own re-run; remaining reds are the 17 items owned by Test Agent refreeze + 2 pre-existing/waived",
+  "verdict": "GREEN (client scope) — cargo check/test + vue-tsc all exit 0; PTY S1/S2/S3 all pass on independent re-runs (t5c/t5d); all 17 refrozen specs green; only the Lead-waived ob2 red and its v10-3 cascade remain",
   "generated_at": "2026-11-06T17:52:00+08:00",
   "contract": ".dev-team/contract-matrix-ask-persistence.md §6 (P5 客户端行为) / §9 (C2-* 重冻)",
   "files_changed": [
@@ -36,20 +36,19 @@
     "cargo_check_bin_pony": {"cmd": "cargo check -p pony-agent-core --bin pony", "exit": 0},
     "cargo_test_bin_pony": {"cmd": "cargo test -p pony-agent-core --bin pony", "exit": 0, "detail": "13 passed; 0 failed (includes new test_snapshot_contains_request_matches_request_id_only / test_pending_panel_should_close_is_lifecycle_driven_not_wall_clock)"},
     "typecheck": {"cmd": "npx vue-tsc --noEmit", "exit": 0},
-    "npm_test": {"cmd": "npx vitest run", "exit": 1, "detail": "Test Files 6 failed | 143 passed (149); Tests 19 failed | 1363 passed | 12 skipped (1394)"}
+    "npm_test": {"cmd": "npx vitest run", "exit": 1, "detail": "FINAL after Test Agent B-segment refreeze: Test Files 2 failed | 147 passed (149); Tests 2 failed | 1378 passed | 12 skipped (1392)"}
   },
   "npm_test_failures": {
-    "awaiting_test_agent_refreeze": [
-      "tests/ask-pending-expiry.spec.ts (9) — C2-1..C2-9 TTL semantics deleted by contract",
-      "tests/ask-panel-expired.spec.ts (4) — C2-4 / C2-10 expired lock + render clock",
-      "tests/acceptance/wave17/tabular-nums-contract.spec.ts (2) — C2-4 formatExpiry countdown span",
-      "tests/AskPlanPanel.spec.ts (2) — ask-cancel-submit renamed to ask-ignore-submit (Lead added to B-segment scope)"
-    ],
+    "awaiting_test_agent_refreeze": [],
     "unrelated_to_this_task": [
-      "tests/acceptance/wave47-ob2-enforcement.spec.ts T7 — external `ponygo observe audit --level ob2` gate returns 1 (infra, no relation to ask/TUI/Vue changes)",
-      "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts V10-3 — meta test that re-runs the whole suite, cascades while the refreeze is pending"
+      "tests/acceptance/wave47-ob2-enforcement.spec.ts T7 — external `ponygo observe audit --level ob2` gate returns 1; Lead adjudicated this as a PRE-EXISTING red on a clean HEAD worktree (tracing dynamic T4 PARTIAL) and recorded a waiver in state.json",
+      "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts V10-3 — meta test that spawns a real full vitest over pre-existing dirs and requires exit 0; it therefore cascades from the waived ob2 red above (its own contract note says the Lead covers the whole-package run)"
     ],
-    "green_without_refreeze": [
+    "green_after_refreeze": [
+      "tests/ask-pending-expiry.spec.ts (re-frozen to lifecycle semantics)",
+      "tests/ask-panel-expired.spec.ts (re-frozen)",
+      "tests/acceptance/wave17/tabular-nums-contract.spec.ts (C2-4 countdown assertions removed by Test Agent)",
+      "tests/AskPlanPanel.spec.ts (re-anchored to ask-ignore-submit)",
       "tests/ask-store.spec.ts 17/17",
       "tests/workspace-composer-ask.spec.ts 7/7",
       "tests/workspace-width-alignment.spec.ts 2/2"
@@ -80,7 +79,8 @@
     "runs": [
       {"tag": "t5a", "s1_panel_visible": 1, "s2_rebuild_after_restart": 0, "s3_panel_closed": 1, "s3_english_internal_leak": 0, "note": "restart used bare `pony resume` (no main session row yet) so nothing was resumed"},
       {"tag": "t5b", "s1_panel_visible": 1, "s2_rebuild_after_restart": 1, "s3_panel_closed": 0, "s3_english_internal_leak": 0, "note": "restart used `pony resume <session-id from pending_asks>`; answer after restart still failed with ask_not_found at that time (core T4 gap)"},
-      {"tag": "t5c", "s1_panel_visible": 1, "s2_rebuild_after_restart": 1, "s3_panel_closed": 1, "s3_english_internal_leak": 0, "note": "same harness after the core cross-process answer fix — all three assertions pass"}
+      {"tag": "t5c", "s1_panel_visible": 1, "s2_rebuild_after_restart": 1, "s3_panel_closed": 1, "s3_english_internal_leak": 0, "note": "same harness after the core cross-process answer fix — all three assertions pass"},
+      {"tag": "t5d", "s1_panel_visible": 1, "s2_rebuild_after_restart": 1, "s3_panel_closed": 1, "s3_english_internal_leak": 0, "note": "re-run after a concurrent in-flight edit to tui.rs (task-7 AskResumeTurn / submit_ask_answers return value) landed and `cargo check --bin pony` returned 0 again; assertions unchanged, log now also shows `ask answer landed: source=session` and `ask_resume_unavailable: reason=no_run_identity` (audit bootstrap has no run identity, surfaced in Chinese on screen)"}
     ],
     "capture_excerpts": {
       "s1_panel": [

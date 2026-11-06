@@ -202,6 +202,12 @@ pub struct PendingControlRequest {
 }
 
 impl PendingControlRequest {
+    /// Compare-and-swap predicate for consuming a pending control request.
+    ///
+    /// **Ask (`Interaction`) is not time-bound** (ADR 0074): an unanswered Ask is session state,
+    /// so a wall-clock deadline must never turn a valid answer into a failure. `now_ms` still
+    /// gates `Approval` requests, whose TTL semantics are unchanged by this wave (approvals stay
+    /// a timer resource; Ask leaves product-level expiry entirely).
     pub fn can_consume(
         &self,
         session_id: Option<&str>,
@@ -209,11 +215,15 @@ impl PendingControlRequest {
         nonce: &str,
         now_ms: u64,
     ) -> bool {
+        let time_bound = match self.request_kind {
+            PendingControlRequestKind::Interaction => true,
+            PendingControlRequestKind::Approval => now_ms <= self.expires_at_ms,
+        };
         self.state == PendingControlRequestState::Pending
             && self.session_id.as_deref() == session_id
             && self.version == expected_version
             && self.nonce == nonce
-            && now_ms <= self.expires_at_ms
+            && time_bound
     }
 }
 
@@ -643,7 +653,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn pending_request_requires_matching_session_version_nonce_and_expiry() {
+    fn pending_request_requires_matching_session_version_and_nonce() {
         let request = PendingControlRequest {
             request_id: "request-1".to_string(),
             request_kind: PendingControlRequestKind::Interaction,
@@ -667,7 +677,22 @@ mod tests {
         assert!(!request.can_consume(Some("session-2"), 3, "nonce", 100));
         assert!(!request.can_consume(Some("session-1"), 2, "nonce", 100));
         assert!(!request.can_consume(Some("session-1"), 3, "wrong", 100));
-        assert!(!request.can_consume(Some("session-1"), 3, "nonce", 101));
+        // ADR 0074: Ask (`Interaction`) is not time-bound — a past deadline never blocks the
+        // answer; wall-clock TTL left product semantics for the Ask path.
+        assert!(
+            request.can_consume(Some("session-1"), 3, "nonce", 101),
+            "an Interaction request must stay consumable past its legacy expires_at_ms"
+        );
+        assert!(
+            request.can_consume(Some("session-1"), 3, "nonce", u64::MAX),
+            "no wall-clock instant may turn a pending Ask into an unconsumable request"
+        );
+
+        // Approval keeps its TTL semantics (non-goal of ADR 0074: approvals are another wave).
+        let mut approval = request.clone();
+        approval.request_kind = PendingControlRequestKind::Approval;
+        assert!(approval.can_consume(Some("session-1"), 3, "nonce", 100));
+        assert!(!approval.can_consume(Some("session-1"), 3, "nonce", 101));
     }
 
     #[test]

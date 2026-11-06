@@ -1,5 +1,6 @@
 pub mod app_settings;
 pub mod ask_control;
+pub mod ask_persistence;
 pub mod attachment_import;
 pub mod budget;
 pub mod capability_bridge;

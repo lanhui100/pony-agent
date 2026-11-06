@@ -1310,7 +1310,7 @@
       "tier": "C",
       "tier_basis": "跨模块（会话存储 schema/迁移 + 控制面 CAS + TUI + 桌面 + 契约重冻）；命中 blast keywords: session-store/schema-migration/persistence",
       "baseline_commit": "4e4fedc",
-      "status": "rework-required",
+      "status": "green-pending-review",
       "observed_at": "2026-11-06T17:20:00+08:00",
       "red_phase": {
         "status": "satisfied-by-equivalent",
@@ -1428,6 +1428,26 @@
             "注入在用量治理/prepare 闸门之前被消费，blocked 轮丢答案"
           ]
         }
+      },
+      "lead_gate_evidence_update": {
+        "ask_persistence_acceptance": "16 passed",
+        "ask_pending_contract": "6 passed",
+        "ask_resume_e2e": "5 passed",
+        "ask_pending_adversarial": "4 passed",
+        "vitest_ask_specs": "48 passed（5 files）",
+        "bin_pony_tests": "14 passed",
+        "cargo_check_all_targets": "0 error",
+        "real_machine": "S1/S2/S3/S4 全 1（s3_english=0, s4_revived=0）；注入探针 a1=a2=a3=1",
+        "verified_at": "2026-11-06T18:50:00+08:00"
+      },
+      "barrier": {
+        "write_scope_audit": {
+          "in_scope_changed": 79,
+          "outside_scope_changed": 27,
+          "attribution": "27 项全部属并行 token-speed 会话（mtime 16:26–17:10，早于本波 17:14 起点；含 metrics_snapshot/otel/telemetry/turn_flow/cli.rs/token-metrics.ts/wave15-54 spec/ADR0072-0073/observability.yaml/.pony-agent 运行目录）",
+          "verdict": "PASS（本波 0 越界）"
+        },
+        "status": "in_progress"
       }
     }
   ],

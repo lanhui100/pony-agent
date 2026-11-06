@@ -9775,8 +9775,17 @@ fn governed_ask_host_and_runtime_share_same_dispatcher() {
         .expect("runtime must have a governed dispatcher");
 
     // Control plane built with this runtime shares its dispatcher (no explicit
-    // ask_dispatcher → auto-wired via build()).
-    let control_plane = HostControlPlaneBuilder::new().runtime(runtime).build();
+    // ask_dispatcher → auto-wired via build()). The durable Ask store is injected explicitly:
+    // this runtime's session store is memory-only, and the scoped CAS surface requires a
+    // persisted record (ADR 0074 contract §4 — no memory-mirror fallback).
+    let ask_store: Arc<dyn crate::agent::ask_persistence::AskPersistenceStore> = Arc::from(
+        crate::agent::ask_persistence::open_in_memory_ask_store()
+            .expect("in-memory ask store must open"),
+    );
+    let control_plane = HostControlPlaneBuilder::new()
+        .runtime(runtime)
+        .ask_store(Arc::clone(&ask_store))
+        .build();
 
     // Same Arc pointer → host answer hits the runtime's store.
     assert!(Arc::ptr_eq(
@@ -9807,9 +9816,9 @@ fn governed_ask_host_and_runtime_share_same_dispatcher() {
     );
     let request_id = outcome.control_outcome.unwrap().request_id;
 
-    // Host answers through the control-plane surface — same dispatcher → CAS succeeds.
+    // Host answers through the scoped control-plane surface — same dispatcher → CAS succeeds.
     let consumed = control_plane
-        .answer_ask(&request_id, 1, json!("是的"))
+        .answer_ask_in_session("session-shared", &request_id, 1, json!("是的"))
         .expect("answer must hit the same pending request");
     let consumed_request = serde_json::from_value::<ControlRequestConsumed>(consumed)
         .expect("consumed request projection");

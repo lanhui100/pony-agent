@@ -55,17 +55,65 @@ pub(super) fn build_approval_resume_unavailable_error() -> String {
     )
 }
 
+/// C3：Ask 挂起**没有可恢复的 run 身份**时的错误码（ask-resume 工单，与 W1b 同族）。
+///
+/// 语义：`Interaction`（Ask）本应经宿主应答 + `graph_resume_ask` 恢复，但恢复的前提是挂起
+/// 请求持久化了真实 `run_id`（`bind_ask_wait` 需要它才能把 Ask 绑到 graph ask-wait）。判据
+/// 只有「`Interaction` 且 `run_id == None`」这一种形态 —— **不得**扩大成「无绑定即失败」，
+/// 否则既有 `AgentRuntime` 单测里「治理路径 + 无 store」的合法 suspended 语义会被误杀。
+pub const ASK_RESUME_UNAVAILABLE_CODE: &str = "ask_resume_unavailable";
+
+/// C3：构造「Ask 挂起但没有 run 身份」的失败终态文案（首行 `ask_resume_unavailable: <中文说明>`）。
+pub(super) fn build_ask_resume_unavailable_error() -> String {
+    format!(
+        "{ASK_RESUME_UNAVAILABLE_CODE}: 本轮向用户提问（Ask）时没有可恢复的 graph run 身份，作答后无法自动继续本轮；本轮已按失败收口。请重新发起该请求。"
+    )
+}
+
+/// F3：从「不可恢复挂起」的失败终态文案里取出**机器可判的错误码**（首段 = 冒号前）。
+///
+/// 存在的理由：流式/非流式两处的结构化日志必须打印**与终态派发完全一致**的 code。此前日志硬编码
+/// `control_outcome_pending_without_request`，而实际派发可能是 `approval_resume_unavailable` 或
+/// `ask_resume_unavailable` ⇒ 排障时「日志码 → 上报码」对不上。本函数只截首段，不改终态文案本身。
+pub(super) fn suspension_error_code(message: &str) -> &str {
+    message.split(':').next().unwrap_or(message).trim()
+}
+
 /// W1b：挂起结果是否**没有可恢复通道**。
 ///
 /// - `None`：治理路径已产出 `control_outcome_pending`，但匹配不到待处理请求（call_id 丢失/被消费）；
 /// - `Some(Approval)`：审批请求存在，但当前没有重放实现（见 [`APPROVAL_RESUME_UNAVAILABLE_CODE`]）；
-/// - `Some(Interaction)`：Ask 可经宿主应答恢复，保持 suspended。
+/// - `Some(Interaction)`：Ask 可经宿主应答恢复，保持 suspended —— **除非**该请求没有 run 身份
+///   （见 [`ASK_RESUME_UNAVAILABLE_CODE`]）：没有 run 就没有 ask-wait 可绑定，作答后必然死等。
 pub(super) fn suspension_is_unrecoverable(
     suspension: &ToolTurnSuspension,
 ) -> bool {
     match &suspension.pending_request {
         None => true,
-        Some(request) => request.request_kind == PendingControlRequestKind::Approval,
+        Some(request) => match request.request_kind {
+            PendingControlRequestKind::Approval => true,
+            PendingControlRequestKind::Interaction => request.run_id.is_none(),
+        },
+    }
+}
+
+/// C3：按挂起请求的 kind/run 身份选择**可读失败终态**的错误文案（唯一判据，流式与非流式共用）。
+///
+/// - `Approval` ⇒ [`build_approval_resume_unavailable_error`]（既有语义不动）；
+/// - `Interaction` 且无 run 身份 ⇒ [`build_ask_resume_unavailable_error`]（本次新增收口点）；
+/// - 其余（含 `pending_request == None`）⇒ 既有 `control_outcome_pending_without_request`（逐字不变）。
+pub(super) fn build_unrecoverable_suspension_error(
+    suspension: &ToolTurnSuspension,
+) -> String {
+    match suspension.pending_request.as_ref() {
+        Some(request) => match request.request_kind {
+            PendingControlRequestKind::Approval => build_approval_resume_unavailable_error(),
+            PendingControlRequestKind::Interaction if request.run_id.is_none() => {
+                build_ask_resume_unavailable_error()
+            }
+            _ => build_control_outcome_pending_without_request_error(),
+        },
+        None => build_control_outcome_pending_without_request_error(),
     }
 }
 
@@ -536,6 +584,85 @@ mod w1_approval_unrecoverable_tests {
         assert!(!suspension_is_unrecoverable(&ToolTurnSuspension {
             pending_request: Some(request(PendingControlRequestKind::Interaction)),
             bound_run_id: None,
+        }));
+    }
+}
+
+#[cfg(test)]
+mod w1_unrecoverable_code_tests {
+    use super::*;
+    use crate::agent::tool_runtime::{
+        PendingControlRequest, PendingControlRequestKind, PendingControlRequestState,
+    };
+
+    fn request(kind: PendingControlRequestKind, run_id: Option<&str>) -> PendingControlRequest {
+        PendingControlRequest {
+            request_id: "req-w1".to_string(),
+            request_kind: kind,
+            session_id: Some("sess-w1".to_string()),
+            run_id: run_id.map(str::to_string),
+            turn_id: "turn-w1".to_string(),
+            call_id: "call-w1".to_string(),
+            descriptor_snapshot_id: "snap".to_string(),
+            descriptor_id: "desc".to_string(),
+            final_args_digest: "digest".to_string(),
+            policy_digest: "policy".to_string(),
+            nonce: "nonce".to_string(),
+            version: 1,
+            expires_at_ms: u64::MAX,
+            state: PendingControlRequestState::Pending,
+            prompt: Some("approve?".to_string()),
+            options: None,
+        }
+    }
+
+    /// F3：日志 code 必须等于终态文案的首段 —— 三族各断言一次（真实字符串，不是自证）。
+    #[test]
+    fn log_code_equals_terminal_code_for_every_unrecoverable_family() {
+        let cases = [
+            (
+                ToolTurnSuspension {
+                    pending_request: Some(request(PendingControlRequestKind::Approval, Some("run-w1"))),
+                    bound_run_id: None,
+                },
+                APPROVAL_RESUME_UNAVAILABLE_CODE,
+            ),
+            (
+                ToolTurnSuspension {
+                    pending_request: Some(request(PendingControlRequestKind::Interaction, None)),
+                    bound_run_id: None,
+                },
+                ASK_RESUME_UNAVAILABLE_CODE,
+            ),
+            (
+                ToolTurnSuspension {
+                    pending_request: None,
+                    bound_run_id: None,
+                },
+                CONTROL_OUTCOME_PENDING_WITHOUT_REQUEST_CODE,
+            ),
+        ];
+        for (suspension, expected) in cases {
+            assert!(suspension_is_unrecoverable(&suspension), "该形态必须判为不可恢复");
+            let message = build_unrecoverable_suspension_error(&suspension);
+            assert_eq!(
+                suspension_error_code(&message),
+                expected,
+                "日志 code 必须与终态派发的错误码逐字一致，实际文案 = {message}"
+            );
+            assert!(
+                message.starts_with(&format!("{expected}: ")),
+                "终态文案必须保持 `<code>: <中文说明>` 形态，实际 = {message}"
+            );
+        }
+    }
+
+    /// F4/C3 回归：`Interaction` **有** run 身份时仍可恢复（不得被误判为失败）。
+    #[test]
+    fn interaction_with_run_identity_is_still_recoverable() {
+        assert!(!suspension_is_unrecoverable(&ToolTurnSuspension {
+            pending_request: Some(request(PendingControlRequestKind::Interaction, Some("run-w1"))),
+            bound_run_id: Some("run-w1".to_string()),
         }));
     }
 }
