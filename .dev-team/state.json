@@ -1310,7 +1310,7 @@
       "tier": "C",
       "tier_basis": "跨模块（会话存储 schema/迁移 + 控制面 CAS + TUI + 桌面 + 契约重冻）；命中 blast keywords: session-store/schema-migration/persistence",
       "baseline_commit": "4e4fedc",
-      "status": "green-pending-review",
+      "status": "rework-required-2",
       "observed_at": "2026-11-06T17:20:00+08:00",
       "red_phase": {
         "status": "satisfied-by-equivalent",
@@ -1427,6 +1427,41 @@
             "graph_resume_ask 以槽位非空判 landed（假成功）",
             "注入在用量治理/prepare 闸门之前被消费，blocked 轮丢答案"
           ]
+        },
+        "l3p_security": {
+          "verdict": "FAIL",
+          "file": ".dev-team/review-l3p-security.json",
+          "closed": "原 2 条 BLOCKING 确认闭合（复合主键+迁移、nonce 真值、无作用域 fail-closed）",
+          "new_blocking": "turn_stream.rs:1777 / turn_sync.rs:742 会话注入在 prepare/模型调用前一次性取走且失败不回滚 ⇒ 续轮失败即永久丢答案",
+          "advisories": [
+            "graph.rs:563 注入用 insert 覆盖而非队列（同会话第二条答案覆盖第一条）",
+            "graph.rs:611 整文件快照写 → 双进程 lost update",
+            "ask_persistence.rs:604 trait 仍留无 session/nonce 的 transition（建议 cfg(test) 或 fail-closed）"
+          ],
+          "followups": [
+            "T13 核心修复（blocked_by T14）",
+            "T14 红相扩展"
+          ]
+        },
+        "l3p_concurrency": {
+          "verdict": "FAIL",
+          "file": ".dev-team/review-l3p-concurrency.json",
+          "blocking": [
+            "graph.rs:564 注入单槽 map（run 维度同缺陷）",
+            "turn_sync.rs:742 / turn_stream.rs:1777 破坏性 take 早于 provider 调用",
+            "ask_plan_commands.rs:388 supersede/GC 两阶段非原子 + 落盘失败仅打日志 ⇒ disk Pending/mirror Cancelled 且无落地、重试恒 conflict"
+          ],
+          "advisory": [
+            "补偿不可重试且跳过 land_answered_ask",
+            "dispatcher 创建时持久化失败被吞",
+            "终态镜像/持久化行永不回收(64/64)"
+          ],
+          "verified_pass": [
+            "双 store 并发 answer 唯一赢家",
+            "list→answer TOCTOU fail-closed",
+            "锁序无环"
+          ],
+          "followups": "并入 T13（注入队列 + peek-ack + durable landing 账本）与 T14 红相"
         }
       },
       "lead_gate_evidence_update": {
@@ -1447,7 +1482,16 @@
           "attribution": "27 项全部属并行 token-speed 会话（mtime 16:26–17:10，早于本波 17:14 起点；含 metrics_snapshot/otel/telemetry/turn_flow/cli.rs/token-metrics.ts/wave15-54 spec/ADR0072-0073/observability.yaml/.pony-agent 运行目录）",
           "verdict": "PASS（本波 0 越界）"
         },
-        "status": "in_progress"
+        "status": "in_progress",
+        "lead_tui_drift_review": {
+          "reason": "tui.rs 被多方并发编辑（T5/T6/T7）",
+          "points": {
+            "submit_ask_answers(tui.rs:8579)": "用 answer_ask_in_session + 作用域；无本地 TTL 守卫；run 绑定走 graph_resume_ask，无 run 身份走 ASK_RESUME_UNAVAILABLE_NOTICE；无误",
+            "ask Esc 忽略(tui.rs:9687-9705)": "cancel_ask_in_session(Cancelled) + 失败走 report_control_request_error；未吞全局 Esc（其他模式 Esc 分支独立）",
+            "sync_pending_control_request(tui.rs:8492)": "以宿主列表为唯一判据，同 request_id 单面板；无漂移"
+          },
+          "verdict": "PASS（未发现语义漂移）"
+        }
       }
     }
   ],

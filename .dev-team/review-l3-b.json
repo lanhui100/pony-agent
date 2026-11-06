@@ -72,5 +72,18 @@
       "counterexample_cmd": "cd /tmp && rm -f lock.db && python3 - <<'PY'\nimport sqlite3\na=sqlite3.connect('lock.db',isolation_level=None); a.execute('PRAGMA journal_mode=DELETE'); a.execute('CREATE TABLE t(x)'); a.execute('BEGIN IMMEDIATE'); a.execute('INSERT INTO t VALUES(1)')\nb=sqlite3.connect('lock.db',isolation_level=None)\ntry: print(b.execute('PRAGMA journal_mode=WAL').fetchone())\nexcept sqlite3.OperationalError as e: print('open_ask_store would fail ->',e)\nPY\n# 输出 'open_ask_store would fail -> database is locked'\n# 批量语句把 journal_mode=WAL 放在 busy_timeout 之前（第 190-194 行），另一宿主（TUI+desktop 共用 sessions.db）持写事务时\n# 首次 WAL 升级立即 SQLITE_BUSY -> open_ask_store Err -> SessionStore 只打日志置 None -> 整个进程内存态（见第 3 条 finding 的 fail-open）。",
       "severity": "ADVISORY"
     }
-  ]
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "8ec9c42f-7aff-40f5-919c-97f6e78f648a",
+    "fresh_context": true
+  },
+  "executed_by": "8ec9c42f-7aff-40f5-919c-97f6e78f648a",
+  "reviewed_commit": "4203b863",
+  "attestation": {
+    "self_signed": false,
+    "scope": "reviewed working tree at review time; commit anchor is the nearest ancestor of delivery head",
+    "reviewed_at": "2026-11-06"
+  },
+  "schema_version": 2
 }

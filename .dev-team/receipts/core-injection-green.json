@@ -1,0 +1,57 @@
+{
+  "task": "task-14 (T13)",
+  "role": "executor-core",
+  "phase": "green",
+  "generated_at": "2026-11-06T19:20:00+08:00",
+  "contract": [
+    ".dev-team/contract-matrix-ask-persistence.md §5（注入队列 + peek→ack + landed_at_ms + sweep + 无作用域 transition fail-closed + 终态 GC）",
+    "crates/pony-agent-core/tests/ask_resume_e2e.rs（T14 冻结，sha256 523b0ebe…；未修改）",
+    "crates/pony-agent-core/tests/ask_persistence_acceptance.rs（T14 冻结，sha256 b110b44e…；未修改）",
+    "Lead 裁决：ack 边界 = 成功终态（completed/suspended）；failed/cancelled 保留；ack 日志 `turn:ask-injection-acked request=<id> call=<id> reason=<...>`"
+  ],
+  "files": [
+    "crates/pony-agent-core/src/agent/graph.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/ask_persistence.rs",
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs (仅既有 in-source 单测适配 ack 语义)",
+    ".dev-team/receipts/core-injection-green.json"
+  ],
+  "commands": [
+    {"cmd": "cargo test -p pony-agent-core --test ask_persistence_acceptance", "exit": 0, "result": "18 passed; 0 failed（含 T14 新增 security_unscoped_transition / supersede-mirror）"},
+    {"cmd": "cargo test -p pony-agent-core --test ask_resume_e2e", "exit": 0, "result": "8 passed; 0 failed; 1 ignored（t8 多进程竞态已按裁决 #[ignore] 登记 backlog）"},
+    {"cmd": "cargo test -p pony-agent-core --test ask_pending_contract", "exit": 0, "result": "6 passed"},
+    {"cmd": "cargo test -p pony-agent-core --test ask_pending_adversarial", "exit": 0, "result": "4 passed"},
+    {"cmd": "cargo test -p pony-agent-core --test tui_batch3_regression", "exit": 0, "result": "27 passed"},
+    {"cmd": "cargo test -p pony-agent-core --lib", "exit": 0, "result": "1314 passed; 0 failed"},
+    {"cmd": "cargo check -p pony-agent-core --all-targets", "exit": 0, "result": "0 error"},
+    {"cmd": "cargo build -p pony-agent-core --bin pony", "exit": 0},
+    {"cmd": "bash /tmp/ask_rebuild_smoke.sh t13", "exit": 0, "result": "RESULT s1=1 s2=1 s3_closed=1 s3_english=0 s4_closed=1 s4_revived=0 s4_errors=0（workdir /tmp/ask-smoke-t13.iy2nMq）"},
+    {"cmd": "bash /tmp/t4_ask_injection_probe.sh t13", "exit": 0, "result": "RESULT a1=1 a2=1 a3=1；日志含 turn:ask-injection-acked request=control-919155230067 call=call-audit-ask-… reason=completed（workdir /tmp/t4-inject-t13.WXAGII）"}
+  ],
+  "t13_items": {
+    "1_queue_not_overwrite": "ask_injections / session_ask_injections 改为 BTreeMap<String, VecDeque<GraphAskResumeInjection>>；queue_* 追加队尾并按 request_id 去重（连续失败不重复入队），t7 两条答案同时可消费",
+    "2_peek_ack": "新增 peek_ask_injection(_for_session) / ack_ask_injection(_for_session)（ack 只弹队首且校验 request_id）；runtime 改 peek → prepare/provider → 成功终态 ack，failed/cancelled 保留；ack 成功打 `turn:ask-injection-acked request call reason`",
+    "3_ack_sites": "stream：handle_stream_tool_turn 的 turn:suspended/turn:completed 与外层单调用 turn:completed；sync：run_turn_with_facts 按终态阶段判定（failed/cancelled 不 ack，suspended→suspended，其余成功→completed）",
+    "4_old_store_compat": "persisted `askInjections` / `sessionAskInjections` 自定义 serde：写出为 `<key>\\u{1f}<requestId>` → injection 对象的扁平 map（测试读取 values.requestId）；读入兼容旧单对象、队列数组与新扁平 map 三种形状，均去重保序",
+    "5_landed_ledger": "pending_asks 新增 landed_at_ms（CREATE 内建；旧表 ALTER TABLE ADD COLUMN 前向迁移）；trait 新增 mark_landed / load_unlanded_answered / gc_terminal_records（默认 fail-safe 空实现）；answer 落点后 mark_landed，落点失败留 NULL 供 sweep",
+    "6_sweep_self_heal": "HostControlPlane::sweep_unlanded_answer_landings(session)：从 durable Answered(landed_at_ms IS NULL) 重建 session 注入并补账；list_pending_asks(scoped) 每次触发（通常 0 行）",
+    "7_terminal_gc": "ask_expire 增加 `reclaimed`：删除终态（state<>'pending'）且 COALESCE(landed_at_ms, answered_at_ms, created_at_ms) < now-7d 的记录；SQL 硬守卫永不回收 Pending",
+    "8_unscoped_transition": "生产 trait 的 4 参 transition 改为默认实现 fail-closed（ask_scope_required），SqliteAskStore 不再覆盖；生产路径只有 transition_scoped",
+    "9_dispatcher_creation_fail_closed": "persist_pending_request 的 store.upsert 失败 ⇒ 返回 DispatchError(code=ask_persist_failed)，不再宣布可作答的 pending",
+    "10_supersede_mirror_guard": "supersede_pending_asks_for_session：落盘失败（FailOnWriteStore）时返回 0 且**不**关闭内存镜像（磁盘 Pending + 镜像终态的分叉被消除）"
+  },
+  "backlog_not_fixed": {
+    "item": "GraphRunStore::persistent 整文件快照在多进程下后写覆盖前写（graph-runs.json lost update）",
+    "status": "按 Lead 裁决不在本任务修；ask_resume_e2e::t8 以 #[ignore] 登记，等待跨进程锁/单写者模型立项"
+  },
+  "risks": [
+    "队列持久化以 `<key>+US+requestId` 为 map key，重开后的顺序由 key 字典序决定而非严格入队序（测试只要求两条都可消费）；如需严格 FIFO，需在 injection 中持久化序号字段（会改 PersistedAsk 之外的 wire 形状，需 Lead 决策）。",
+    "landed_at_ms 为纯持久化账本列，未进入 PersistedAsk 结构（冻结测试以完整字面量构造记录，新增结构字段会破坏编译）；sweep 重建时 answer 载荷标记为 {rebuiltFromDurable:true}（原答案值已在 Answered 记录中不可得，队列注入仅用于让模型知道已作答）。",
+    "ack 语义下，若成功终态已 ack 但进程随后在持久化终态前崩溃，注入不复活（answer 已落盘 Answered，sweep 不会重建，因为 landed_at_ms 已置位）——符合「只结算一次」。",
+    "graph-runs.json 多进程覆盖仍是已知风险（t8 ignored）。"
+  ]
+}

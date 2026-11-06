@@ -102,6 +102,14 @@ Pending ──answer──▶ Answered
 回答落点（`Pending → Answered` 之后）：存在 graph ask wait 绑定 ⇒ resume；否则把答案作为 tool result
 注入该会话下一轮（复用 `take_pending_ask_injection`），**禁止**静默丢弃。
 
+**注入队列与 ack（L3-P 双审裁决，2026-11-06）**：会话/run 维度的 ask 注入是
+`BTreeMap<key, VecDeque<Injection>>`（旧单对象持久化兼容读）；消费流程为
+`peek → provider 请求使用 → 成功终态（completed/suspended）才 ack 移除`，
+failed/cancelled 必须保留供下次续轮；ack 只弹队首且校验 `request_id`。
+`Answered` 记录需落 `landed_at_ms`（landing 账本），镜像/注入落地失败时由 sweep 从 durable 重建，
+使 `ask_mirror_sync_failed` 可自愈；disk 是唯一真值，镜像失败不得回滚 disk。
+无作用域 `transition` 入口在生产 API **fail-closed**（`ask_scope_required`），测试改用 `transition_scoped`。
+
 宿主轮次入口（L3 复核后追认）：`HostControlPlane::start_turn_stream` 委派
 `start_ask_aware_turn_stream`（TUI/CLI/harness 共用），使每轮都在真实 graph run 内执行；
 `start_turn_stream_legacy` 保留为回落路径。该委派改变 CLI/harness 的 run 身份行为，
@@ -123,6 +131,7 @@ TUI（`crates/pony-agent-core/src/bin/tui.rs`）与桌面（`src/stores/ask.ts` 
 
 - 旧库（无 `pending_asks` 表）打开即建表；旧内存态无数据可迁，不做回填。
 - 兼容期：`list_pending_asks` 若持久化层不可用（表损坏/写失败）必须 fail-closed 并给出结构化错误，**不得**静默回退内存态。
+- **测试替身例外**：允许在测试文件内实现 `AskPersistenceStore` 装饰器（如 `FailOnWriteStore`）以注入写失败；仅限测试、必须注释声明、不得进入生产路径。
 - 版本四处同步（`package.json` / `Cargo.toml` / `tauri.conf.json` / `.version.json`）由发布流程负责，本波不 bump。
 
 ## 8. 验收映射（P7，Test Agent 冻结）

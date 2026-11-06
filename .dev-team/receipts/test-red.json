@@ -269,5 +269,19 @@
       "adversarial": "4/4",
       "desktop": "48/48"
     }
+  },
+  "segment_t14": {
+    "status": "RED（t6/t7/unscoped 三条红相；t9 为 ack 边界对照组；t8 多进程竞态 #[ignore] 登记）",
+    "receipt": ".dev-team/receipts/test-injection-red.json",
+    "changed": [
+      "crates/pony-agent-core/tests/ask_resume_e2e.rs（+4：t6/t7/t8-ignored/t9）",
+      "crates/pony-agent-core/tests/ask_persistence_acceptance.rs（25 处 transition→transition_scoped；+2：unscoped fail-closed、落盘-镜像分叉）"
+    ],
+    "verification": {
+      "ask_resume_e2e": "6 passed / 2 failed / 1 ignored",
+      "ask_persistence_acceptance": "16 passed / 2 failed"
+    },
+    "blocked": "已解除（Lead 裁决 a：测试内 FailOnWriteStore 装饰器）",
+    "refreeze_note": "【无作用域 CAS 重冻】所有冻结用例已迁移到 `transition_scoped(session_id, request_id, expected_version, expected_nonce, from, to)`；无作用域 4 参 `transition` 由 `security_unscoped_transition_must_fail_closed` 冻结为 fail-closed（ask_scope_required）。core 修复后该入口**不得**回退为可用，否则本条红相与 §4 四元组语义同时失效；如需改名/删除该入口，须先报 Test Agent 改锚点。"
   }
 }

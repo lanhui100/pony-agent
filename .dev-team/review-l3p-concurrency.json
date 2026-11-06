@@ -1,0 +1,79 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs",
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+    "crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs",
+    "crates/pony-agent-core/src/agent/dispatcher.rs",
+    "crates/pony-agent-core/src/agent/graph.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/session/",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/graph.rs",
+      "line": 564,
+      "rule": "CONCURRENCY",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "test -f /tmp/l3p-conc-2/tests/probe.rs && cd /tmp/l3p-conc-2 && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test --offline --test probe p1_ -- --test-threads=1 --nocapture",
+      "detail": "作答落地队列是**单槽 BTreeMap**（session 见 564，run 见 934），不是队列：同一会话第二个无 graph 绑定的作答直接覆盖第一个，无去重告警、无 FIFO。探针 P1（真实 dispatcher 抛两条 Ask，同会话 runId=None，逐条作答）实测：answer#1 与 answer#2 均返回 answered，但 graph_resume_ask(req1) = Err(\"Graph run `run-p1` not found.\")（说明 req1 的注入已不在队列，落到 resume_ask_wait 兜底），graph_resume_ask(req2) = Ok({landed:session_injection, requestId:...204})。对照 P1b（单条作答、同形状调用）返回 Ok({landed:session_injection})，证明失败只源于覆盖。后果：req1 的 terminal tool result 永不可达，模型上下文里永远缺一条 Ask 结果；若一条 assistant 消息含两个并行 ask 工具调用，后续请求只带一个 tool_result，OpenAI 兼容协议会直接 400。run 维度同缺陷：P6（GraphRunStore 直连，同 run 绑两个 wait，逐条 resume_ask_wait 均 Ok）peek_ask_injection(\"run-p6\") 最终只剩 req-p6-b。修法：每 session/run 用 VecDeque<GraphAskResumeInjection>，take 取队首（FIFO）+ 按 request_id 去重 + 记录丢弃日志；或作答时若该槽已有未消费注入则拒绝并回滚。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "line": 742,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "test -f /tmp/l3p-conc-2/tests/probe.rs && cd /tmp/l3p-conc-2 && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test --offline --test probe p8_ -- --test-threads=1 --nocapture",
+      "detail": "一次性注入在**真正发 provider 请求之前**就被破坏性取走（turn_sync.rs:742-745 / turn_stream.rs:1777-1780 均先 take_pending_ask_injection，再 prepare_turn + provider_decision_*）。T8 注释只把「治理门禁」放在 take 之前，之后的 **provider 解析/网络/鉴权/compaction 失败**路径只发 turn:failed，从不把注入放回，也不留任何 durable 标记。探针 P8（runtime 无 API key，最普通的失败）实测：`[pony-runtime] turn:ask-injection source=session request=req-p8` → `[pony-provider] decision:error ... missing API key` → `turn phase=\"failed\"`，`injection still queued after failed turn = false`。即：用户作答成功、磁盘 Answered，但答案在下一轮的 provider 失败中被静默吞掉，且没有任何重试入口（注入已从 store 删除）。修法：take 改成 peek + 成功后 ack（两阶段），或在 turn 失败分支把注入原样放回（take 时记录 request_id/run/session，失败 re-queue 幂等）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 388,
+      "rule": "CONCURRENCY",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "test -f /tmp/l3p-conc-2/tests/probe.rs && cd /tmp/l3p-conc-2 && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test --offline --test probe p7_ -- --test-threads=1 --nocapture",
+      "detail": "supersede（377-391）与 GC（395-411）是**两阶段非原子写**：先 store 落盘、再 close_pending_asks_of_session 关镜像，二者之间没有事务/补偿；且 381-386 对落盘失败只 eprintln，镜像照关、返回值仍为 0（宿主无法感知）。一旦磁盘写失败（共享 sessions.db 上 SessionBackend 侧 busy_timeout=5000 / ask store busy_timeout=10000，长时间会话写事务下 SQLITE_BUSY 属真实错误类，非逻辑桩），磁盘记录停在 Pending、镜像已 Cancelled。探针 P7 用只让 supersede 落盘失败的 store 包装（注入错误即 `ask_store_write_failed: database is locked`）确定性复现：`P7 supersede moved=0 disk=Pending v1`、`P7 list_pending=[{state:pending, version:1}]`（面板仍展示这道题）→ 用户作答 → `P7 answer = Err(ask_mirror_sync_failed: answer was persisted (Answered) ...)`、`P7 disk after answer = Answered v2`、`P7 retry = Err(ask_state_conflict: ... terminal states are final)`、`P7 resume = Err(...)`。此题此后既不在 list 里（不再 Pending）、也无法作答、也不会进任何 provider 上下文——永久悬挂。同形状竞态（supersede 磁盘 UPDATE 与 answer CAS 之间）在 P3 的 400 轮双线程压测中未命中（mirror_sync_failures=0），故本条的可执行反例走「落盘失败」而非竞速窗口；但两阶段本身仍应改成单事务/失败回滚。修法：supersede/gc 落盘失败时**不得**关镜像（或关镜像失败时不推进磁盘），并让 store 层提供 (state,version) 原子的批量迁移。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 134,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "test -f /tmp/l3p-conc-2/tests/probe.rs && cd /tmp/l3p-conc-2 && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test --offline --test probe p2_ -- --test-threads=1 --nocapture",
+      "detail": "`ask_mirror_sync_failed` 补偿**不可重试**：121-140 在磁盘 transition_scoped 成功后才做镜像 CAS，失败时只 hydrate_persisted_ask(updated, Consumed) 并 return Err，**跳过 land_answered_ask**（即不排注入）；而 durable 记录已是终态 Answered，ask_persistence.rs:446-457 的 validate_transition 要求 state==Pending，任何重试都只会得到 state_conflict。探针 P2：磁盘 Answered v2、retry(v1)=retry(v2)=Err(ask_state_conflict)、list_pending=[]、resume=Err（队列里没有注入）。补偿把镜像置 Consumed 反而**关掉了客户端唯一的救赎路径判断**（graph_resume_ask:570 的 Consumed 闸门通过后，无绑定时只能落到 resume_ask_wait 报错）。当前唯一能触发它的现实路径是上一条 finding 的分叉，故记 ADVISORY；但契约要求「作答永不静默丢弃」，应补一个幂等的 re-land 入口（如 answer 失败时按 (session,request) 从磁盘 Answered 记录重建注入，或 land_answered_ask 在 hydrate 前先执行）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 1716,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "test -f /tmp/l3p-conc-2/tests/probe.rs && cd /tmp/l3p-conc-2 && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test --offline --test probe p9_ -- --test-threads=1 --nocapture",
+      "detail": "Ask 创建时持久化失败被吞（1714-1729 只 eprintln，dispatch 照常返回 WaitingHost）：该 Ask 只存在于进程内镜像。此后 list_pending_asks 只读持久化 store（ask_plan_commands.rs:40）→ 面板看不到这道题；answer_ask_in_session 要求 durable 记录（94-99）→ 恒 ask_not_found；挂起轮（有 run_id）保持 suspended 永久等待。探针 P9（upsert 恒失败的 store 包装）实测：`P9 durable list = []`、`P9 mirror = Some((Pending, 1))`、`P9 answer = Err(ask_not_found: no persisted Ask ... in session sess-p9)`。ADR 0074 的口径是 fail-closed，这里实际是 fail-open 的内存幽灵 Ask。修法：Interaction 的 upsert 失败必须让 dispatch 失败（或至少给 host 一个 degraded 标记并在 list 面暴露），不得返回 WaitingHost 让整轮挂起。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "line": 493,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "test -f /tmp/l3p-conc-2/tests/probe.rs && cd /tmp/l3p-conc-2 && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo test --offline --test probe p10_ -- --test-threads=1 --nocapture",
+      "detail": "终态控制请求永不回收：pending_requests: Mutex<BTreeMap<String, PendingControlRequest>> 只在 consume/cancel 时改 state，从不移除；hydrate_persisted_ask(1053-1087) 还会为每个持久化记录 insert 一条。探针 P10：同一会话 64 次作答后镜像仍持有 64 条终态记录（含 prompt/options 副本）。持久化侧同样没有回收：`grep -rn \"DELETE FROM pending_asks\" crates` 只命中迁移里的 `DROP TABLE pending_asks_legacy`，answer_persistence.rs:126 的「retained (not deleted) for audit/GC」并没有 GC 实现，长生命周期会话库单调增长。两份都是小对象/小行，但无上界；建议加显式上限或按终态时间戳的清理通道（不得用时间做作答裁决）。"
+    }
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "b3075722-40b6-4ab9-9abe-027ec1fd86fb",
+    "fresh_context": true
+  },
+  "executed_by": "b3075722-40b6-4ab9-9abe-027ec1fd86fb",
+  "reviewed_commit": "56265df2",
+  "attestation": {
+    "self_signed": false,
+    "scope": "reviewed working tree at review time; commit anchor is the nearest ancestor of delivery head",
+    "reviewed_at": "2026-11-06"
+  },
+  "schema_version": 2
+}

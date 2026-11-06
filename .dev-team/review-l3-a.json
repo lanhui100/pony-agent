@@ -69,5 +69,18 @@
       "counterexample_cmd": "static read: turn_stream.rs:1729（turn_sync.rs:679 同形）在用量治理闸门（:1733-1774 的 Block 分支会提前 return）与 prepare_turn 失败分支之前就 take（remove+persist）了注入。最小反例：把 usage governance 限额设为已超出并保留一条待消费的 session 注入 → 起一轮 ⇒ governance Block 直接 return，注入已被删除且无重排队；durable 记录是 Answered，用户既拿不到答案也无法重试。session 版注入是新加路径，等于把原来 run 版注入的 at-most-once 丢包窗口扩到了『无 run 事实』的普通轮。",
       "severity": "ADVISORY"
     }
-  ]
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "abdfc654-596c-40c4-8f1f-cafc9a3148c3",
+    "fresh_context": true
+  },
+  "executed_by": "abdfc654-596c-40c4-8f1f-cafc9a3148c3",
+  "reviewed_commit": "4203b863",
+  "attestation": {
+    "self_signed": false,
+    "scope": "reviewed working tree at review time; commit anchor is the nearest ancestor of delivery head",
+    "reviewed_at": "2026-11-06"
+  },
+  "schema_version": 2
 }

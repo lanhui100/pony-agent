@@ -1,0 +1,120 @@
+{
+  "wave": "T14",
+  "task": "task-13",
+  "owner": "test-agent",
+  "generated_at": "2026-11-06T19:01:30+08:00",
+  "status": "RED（4 条红相：注入失败丢答案 / 队列覆盖 / 无作用域 transition / 落盘-镜像分叉；1 条 ack 对照组；1 条 #[ignore] 多进程竞态登记）",
+  "contract": "Lead 2026-11-06 裁决：注入 ack 边界 = 成功终态（completed/suspended）；失败/取消后注入必须仍在；所有冻结用例迁移到 `transition_scoped`，无作用域 4 参 `transition` 必须 fail-closed（ask_scope_required）",
+  "test_files": [
+    {
+      "file": "crates/pony-agent-core/tests/ask_resume_e2e.rs",
+      "sha256": "523b0ebe5a7cce26004cf40d88f348b735e278066280592d5eea849dc74e7760",
+      "added": [
+        {
+          "test": "t6_failed_continuation_turn_must_not_drop_the_session_injection",
+          "expected": "RED（BLOCKING inject-drop）",
+          "assertion": "失败轮之后会话注入必须仍在，连续失败仍恰好一条（不丢、不重复）"
+        },
+        {
+          "test": "t7_two_answered_asks_in_one_session_must_both_stay_consumable",
+          "expected": "RED（inject-overwrite 队列覆盖）",
+          "assertion": "同会话两条已作答 Ask 必须都在注入队列，第二条不得覆盖第一条"
+        },
+        {
+          "test": "t9_successful_turn_acks_the_session_injection_exactly_once",
+          "expected": "GREEN（ack 边界对照组，冻结既有正确面）",
+          "assertion": "成功终态后注入被 ack 清空，后续轮次不得复活"
+        },
+        {
+          "test": "t8_two_persistent_graph_store_handles_must_not_lose_each_others_session_injections",
+          "expected": "#[ignore]",
+          "assertion": "两个 persistent 句柄写同一 JSON 不得互相覆盖（既有多进程文件竞态，超 T14 范围，已登记待单独立项）"
+        }
+      ],
+      "not_weakened": true
+    },
+    {
+      "file": "crates/pony-agent-core/tests/ask_persistence_acceptance.rs",
+      "sha256": "b110b44ec0f12c56c15072eff44f2cf5105be44a098fc809b6903b5958447244",
+      "migration": {
+        "what": "25 处 4 参无作用域 `transition(...)` → `transition_scoped(session_id, request_id, expected_version, expected_nonce, from, to)`",
+        "effect": "迁移后 16 条既有断言全部仍绿，语义未放宽"
+      },
+      "added": [
+        {
+          "test": "security_unscoped_transition_must_fail_closed",
+          "expected": "RED（/tmp/ask-audit `unscoped`）",
+          "assertion": "无 session/nonce 的 4 参 transition 必须 Err(ask_scope_required)，且两个会话的记录都不得被结算"
+        }
+      ],
+      "not_weakened": true
+    }
+  ],
+  "red_commands": [
+    {
+      "command": "cargo test -p pony-agent-core --test ask_resume_e2e",
+      "exit": 101,
+      "summary": "6 passed; 2 failed; 1 ignored"
+    },
+    {
+      "command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit": 101,
+      "summary": "16 passed; 2 failed"
+    }
+  ],
+  "failures": [
+    {
+      "test": "t6_failed_continuation_turn_must_not_drop_the_session_injection",
+      "assertion": "失败/取消路径不得吞掉会话注入（take 早于 provider 且失败不回滚）",
+      "observed": "turn:failed 之后 sessionAskInjections 已空——注入被破坏性取走且未回滚",
+      "counterexample": "/tmp/ask-audit `inject-drop`"
+    },
+    {
+      "test": "t7_two_answered_asks_in_one_session_must_both_stay_consumable",
+      "assertion": "同会话两条已作答 Ask 必须都能被消费（第二条不得覆盖第一条）",
+      "observed": "队列只剩第二条 requestId，第一条被覆盖丢失（单槽 HashMap）",
+      "counterexample": "/tmp/ask-audit `inject-overwrite`"
+    },
+    {
+      "test": "security_unscoped_transition_must_fail_closed",
+      "assertion": "无作用域 4 参 transition 必须 fail-closed（ask_scope_required）",
+      "observed": "按存储顺序结算了 session-A（跨会话结算面）",
+      "counterexample": "/tmp/ask-audit `unscoped`"
+    },
+    {
+      "test": "security_failed_durable_supersede_must_not_advance_the_mirror",
+      "assertion": "落盘失败不得让内存镜像单向推进（磁盘 Pending + 镜像终态 = §7 禁止的分叉）",
+      "observed": "supersede 落盘 Err 后 close_pending_asks_of_session 仍把镜像置 Cancelled",
+      "counterexample": "L3-P 并发复审（supersede/GC 落盘 vs 镜像）"
+    }
+  ],
+  "blocked_facet": {
+    "item": "supersede/GC 落盘与内存镜像分叉（可控失败 store 注入）",
+    "status": "RESOLVED（Lead 裁决 a：授权测试内 decorator）",
+    "ruling": "Lead 2026-11-06：允许测试内 `FailOnWriteStore`；约束 ① 命名+注释明示测试替身/禁止生产路径+仅本测试文件定义 ② 只包装 open_in_memory_ask_store() 得到的实例（读转发、写失败）③ 断言只能是『磁盘 Pending + 镜像未推进』"
+  },
+  "git_write_operations": false,
+  "segment_t14_supersede": {
+    "file": "crates/pony-agent-core/tests/ask_persistence_acceptance.rs",
+    "sha256": "383d7355f8b627780504172ad714a61e2aa808737d6bcc8055cfc574f302cc95",
+    "added": [
+      {
+        "test": "security_failed_durable_supersede_must_not_advance_the_mirror",
+        "expected": "RED",
+        "assertion": "supersede 落盘失败时：磁盘记录仍 Pending、镜像仍 Pending（不得单向推进到终态）",
+        "现状": "落盘失败仅打日志，随后 close_pending_asks_of_session 无条件把镜像置终态 ⇒ 分叉"
+      },
+      {
+        "test": "security_unscoped_transition_must_fail_closed",
+        "expected": "RED",
+        "assertion": "无 session/nonce 的 4 参 transition 必须 Err(ask_scope_required)，两会话记录都不得被结算"
+      }
+    ],
+    "test_double": {
+      "type": "FailOnWriteStore",
+      "location": "crates/pony-agent-core/tests/ask_persistence_acceptance.rs（集成测试二进制内，生产 crate 不编译）",
+      "behavior": "包装 open_in_memory_ask_store()；load_pending/load_ask 转发，upsert/transition/transition_scoped/supersede/gc_orphans 一律 Err"
+    }
+  },
+  "refreeze_note": "【无作用域 CAS 重冻】所有冻结用例已迁移到 `transition_scoped(session_id, request_id, expected_version, expected_nonce, from, to)`；无作用域 4 参 `transition` 由 `security_unscoped_transition_must_fail_closed` 冻结为 fail-closed（ask_scope_required）。core 修复后该入口**不得**回退为可用，否则本条红相与 §4 四元组语义同时失效；如需改名/删除该入口，须先报 Test Agent 改锚点。"
+}

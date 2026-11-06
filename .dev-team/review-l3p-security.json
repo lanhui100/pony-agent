@@ -1,0 +1,54 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs: 复合主键 (session_id, request_id) + v2 迁移 + transition_scoped 事务内 CAS",
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs: 作用域作答/取消、无作用域 fail-closed、投影去 nonce、durable-first 补偿",
+    "src-tauri/src/lib.rs: ask_answer/ask_cancel/ask_list_pending 的 require_ask_scope 门",
+    "crates/pony-agent-core/src/agent/graph.rs: 会话级 Ask 注入队列（queue/peek/take）",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs + turn_sync.rs: 注入消费时序与治理闸门",
+    "crates/pony-agent-core/src/agent/dispatcher.rs: 内存镜像 CAS/hydrate/close_pending_asks_of_session"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 1777,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /tmp/ask-audit && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run -q -- inject-drop 2>/dev/null | grep -E '^\\[C5\\.' # 证据：answer=Ok(answered)；injections_before_turn=['control-…']；turn_events=['turn:failed']；injection_count_after_turn=0；durable_state=(2,Answered)；pending=[]；retry_answer=ask_state_conflict；recovery_graph_resume=Err(Graph run `run-1` not found.) # 语义：`take_pending_ask_injection` 在 prepare/模型调用之前一次性取走（turn_sync.rs:742 同构），任何失败（缺 key/网络/取消）都不回滚；durable 已是 Answered、list 为空、无 pending，答案永久丢失。（同一缺陷的上一行注释只防住了 usage-governance 闸门，未防住闸门之后的失败。）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/graph.rs",
+      "line": 563,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /tmp/ask-audit && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run -q -- inject-overwrite 2>/dev/null | grep -E '^\\[C4\\.' # 证据：同一会话 pending=2；answer first ⇒ injections_after_first=['control-…940']；answer second ⇒ injections_after_second=['control-…941']、injection_count=1；两条 durable 记录都是 (2,Answered)。 # 语义：`session_ask_injections` 是 BTreeMap 且用 `.insert()` 覆盖，不是队列；同一会话两个已作答 Ask 时第一个答案被静默覆盖（durable 已 Answered、无 pending），与 queue_ask_injection_for_session 文档『so the answer is never dropped』相矛盾。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/graph.rs",
+      "line": 611,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /tmp/ask-audit && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run -q -- store-race # 证据：进程1 queue(req-A) ⇒ 文件 ['req-A']；进程2 queue(req-B) ⇒ 文件 ['req-B']；重开 store ⇒ session-A=None、session-B=Some('req-B')。 # 语义：graph-runs.json 是整文件快照写（persist_runs / fs::write，无锁无 merge），TUI 与桌面两个进程共享同一 data_dir 时后写者覆盖先写者的待投递答案（lost update），与 ask_persistence.rs『two processes may hold the same session open』的多进程假设冲突。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ask_persistence.rs",
+      "line": 604,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /tmp/ask-audit && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run -q -- unscoped # 证据：两个会话各有同 request_id 的 Pending 记录；`transition(request_id, Pending→Cancelled, 1)`（无 session、无 nonce）⇒ Ok(('session-A',2,Cancelled))，session-B 仍 (1,Pending)。 # 语义：trait 上仍保留无作用域的 CAS 变更入口（生产无调用者，grep 仅测试引用），但它在复合主键下会结算『按 session_id 排序第一条』——正是本轮 BLOCKING 要消灭的跨会话结算面；建议标 #[cfg(test)] 或直接 fail-closed。"
+    }
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "7af9646c-da3f-4f02-a789-90bf57f08a96",
+    "fresh_context": true
+  },
+  "executed_by": "7af9646c-da3f-4f02-a789-90bf57f08a96",
+  "reviewed_commit": "56265df2",
+  "attestation": {
+    "self_signed": false,
+    "scope": "reviewed working tree at review time; commit anchor is the nearest ancestor of delivery head",
+    "reviewed_at": "2026-11-06"
+  },
+  "schema_version": 2
+}

@@ -1,0 +1,44 @@
+{
+  "task": "task-14 (T13) — read-only recon",
+  "role": "executor-core",
+  "generated_at": "2026-11-06T19:00:00+08:00",
+  "gate": "等 T14 红相冻结（task-13）；此前**不写** graph.rs / runtime / ask_persistence.rs 生产路径",
+  "l3p_findings_mapped": {
+    "B1_injection_drop": {
+      "counter_example": "/tmp/ask-audit/src/main.rs:428 probe_injection_drop（C5）",
+      "mechanism": "answer 落 session 注入 → runtime 在 prepare 闸门后 `take_ask_injection_for_session` 立即 remove → 本轮 prepare/provider 失败（无 provider key 等）后注入永久丢失，durable 记录已是 Answered，无法二次作答",
+      "code": [
+        "crates/pony-agent-core/src/agent/runtime/mod.rs:273-296 take_pending_ask_injection（直接 take）",
+        "crates/pony-agent-core/src/agent/runtime/turn_sync.rs:742-745 消费点",
+        "crates/pony-agent-core/src/agent/runtime/turn_stream.rs:1777-1780 消费点",
+        "crates/pony-agent-core/src/agent/graph.rs:569-576 take_ask_injection_for_session（remove 即结算）"
+      ]
+    },
+    "A1_overwrite_map": {
+      "code": "crates/pony-agent-core/src/agent/graph.rs:327 session_ask_injections: BTreeMap<String, GraphAskResumeInjection>；:558-565 queue_ask_injection_for_session 用 .insert() ⇒ 同会话第二条答案覆盖第一条（C4 反例）",
+      "fix": "BTreeMap<String, VecDeque<GraphAskResumeInjection>>；run 维度 ask_injections 同样改 VecDeque（保持 serde default 兼容旧持久化）"
+    },
+    "A2_unscoped_transition": {
+      "code": "crates/pony-agent-core/src/agent/ask_persistence.rs trait `transition`（无 session/nonce）仍在生产 trait 上；实现见 impl SqliteAskStore",
+      "constraint": "冻结验收测试 tests/ask_persistence_acceptance.rs:273/311/315/346/377/397/453/468/512/522/542/555 等以 4 参 `transition` 调用（集成测试链接非 cfg(test) 库）⇒ 若直接改 #[cfg(test)] 会让这些用例编译失败。需 T14 同步迁移为 transition_scoped，或保留但 fail-closed 并标注 deprecated + 新增断言「生产入口只有 transition_scoped」。**待 T14 冻结文本确认**"
+    },
+    "A3_graph_runs_lost_update": {
+      "code": "crates/pony-agent-core/src/agent/graph.rs persist_runs 整文件快照 fs::write（:598-612）",
+      "decision": "按 Lead 指示登记 backlog，不在本任务修"
+    }
+  },
+  "planned_implementation": {
+    "1_queue_storage": "graph.rs：GraphRunStore.session_ask_injections / ask_injections 改 BTreeMap<String, VecDeque<GraphAskResumeInjection>>；PersistedGraphRunStore 保持 `#[serde(default)]`，并提供旧 map→队列的兼容读取（serde 反序列化 BTreeMap<String, GraphAskResumeInjection> 的旧文件：用自定义 deserialize 或同时接受两种形状）",
+    "2_apis": "queue_* 追加到队尾；peek_* 返回队首；ack_*(key, request_id) 只在队首 request_id 匹配时 pop（防误删），返回 bool；保留旧 take_* 为 #[cfg(test)] 或删除（待红相）",
+    "3_consumption": "runtime：peek → 注入 prepare_turn → 仅在**成功终态**（turn:completed / turn:suspended，即 provider 已看到结果）ack；任何 failed/cancelled（含治理闸门拒绝、prepare 失败）保留注入；turn_sync 成功终态在 turn_sync.rs:1207-1214，turn_stream 成功/挂起终态在 turn_stream.rs:1635 与 suspended 发射点",
+    "4_durable_rebuild": "可选兜底：若注入缺失但存在 durable Answered 记录，可由 control plane 侧重建（runtime 无 ask_store 句柄）。优先方案 3（peek-ack）即可消除丢答案；重建是否必需看 T14 断言",
+    "5_multi_answer": "同会话多条 Answered ⇒ 队列 FIFO，逐轮各消费一次；ack 只弹队首且校验 request_id",
+    "6_unscoped_transition": "按 T14 冻结口径执行（cfg(test) 限定 / 删除 / fail-closed），并同步迁移受影响的 in-source 单测"
+  },
+  "open_questions_for_lead": [
+    "ack 边界：建议「成功终态（completed/suspended）ack，failed/cancelled 保留」；若 T14 要求「provider 请求成功即 ack」，需在 provider 决策成功点另加 ack（turn_stream decision:success 分支 / turn_sync 同名分支），请以冻结断言为准。",
+    "unscoped transition：若 T14 不迁移 ask_persistence_acceptance 中的 4 参调用，则不能 #[cfg(test)]（会编译失败）；请 Test Agent 在 T14 一并迁移或明确保留并 fail-closed。",
+    "旧 graph-runs.json 兼容形状（session_ask_injections 为单对象而非数组）必须能读，否则旧持久化在升级后会让注入全部丢失。"
+  ],
+  "no_writes_made": true
+}
