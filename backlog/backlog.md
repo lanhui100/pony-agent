@@ -225,3 +225,15 @@
   - 机器反例（L3-B 实测）：A 0.000040 vs 0.000039（取整累积）；B output=0 被过滤 0.1575 vs 0.3075（差 ~2×）；C openai cache>input 0.004125 vs 0.003125。
   - 验收：三处择一为唯一口径（建议轮级聚合为「账单真值」、逐调用为「诊断明细」并在字段名/文档显式区分），补三条反例回归用例；span 缺 usage 改为不记 `$0`（与 C5「未知不伪造」对齐）。
   - 登记来源：`.dev-team/review-cost-l3a.json` ADVISORY 1/2、`.dev-team/review-cost-l3b.json` ADVISORY 1（2026-11-06）。
+
+- [ ] `B037` - P3: 测试诊断噪声与隔离基线（GATE-C 副产物）
+  - 路径：`vitest.config.ts`、`tests/update-signed-store.spec.ts`、`src/stores/__tests__/plan-goal-refresh.spec.ts`
+  - 描述：全量运行时 `console.warn(error)` 会把**创建栈**打到 stderr，`❯ tests/xxx.spec.ts:118:62` 这类帧极易被误读成「该文件失败」（本波即因此误判两个从未失败的文件）；建议 ① 在 `vitest.config.ts` 显式声明 `isolate/clearMocks/restoreMocks/unstubGlobals` 抗污染基线；② 对预期告警用 `vi.spyOn(console,'warn')` 静音并**显式断言**（只增不减断言强度）。已在 GATE-C 中验证可行（4 次全量：3 次 149/149 绿、1 次仅 T7 环境性红），但因**发版冻结期不引入全量 mock 语义变更**而回退。
+  - 验收：全量 149/149 稳定；两个 spec 断言数不减且新增告警断言。
+  - 登记来源：task-8 执行结论（2026-11-06）。
+
+- [ ] `B038` - P2: `wave47-ob2-enforcement` T7 依赖实时工作树，脏树即红
+  - 路径：`tests/acceptance/wave47-ob2-enforcement.spec.ts:223`
+  - 描述：T7 调用 `ponygo observe audit --level ob2`，该命令扫描**实时工作树变更集**（实测「扫描 N 个变更文件」）⇒ 本地有未提交改动（尤其 `crates/**`、`scripts/**`）时会翻红；且经 `execSync` 默认 60s 上限，机器负载高时可能超时。CI 在干净树 + 提交后运行，故不阻塞发版；但本地/并发开发期会制造假红。
+  - 验收：T7 对「工作树脏」有明确判定（要么固定到 base commit 的 diff，要么在脏树下跳过并标注），并把超时显式抬到与实测匹配的值。
+  - 登记来源：task-8 执行结论（2026-11-06），本波实测 run2 唯一失败项。
