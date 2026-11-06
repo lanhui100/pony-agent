@@ -1,0 +1,95 @@
+{
+  "wave": "T15",
+  "task": "task-15",
+  "owner": "test-agent",
+  "generated_at": "2026-11-06T19:34:59+08:00",
+  "status": "RED→GREEN（红相证据已取证；core 的 T16 实现落地后全部转绿，冻结断言未放宽）",
+  "contract": "Lead L3-final 裁决：答案载荷与 CAS 同事务（transition_scoped_with_answer）；幂等 resume（answer_ask_in_session 返回 landed=resume|queue；已 landed 再次 graph_resume_ask 必须 Ok {resumed:false, landed:\"already_landed\"}）；sweep 只重放不得发明载荷；落盘失败不得推进镜像；保留期 GC 不得回收 unlanded Answered",
+  "test_file": {
+    "path": "crates/pony-agent-core/tests/ask_persistence_acceptance.rs",
+    "sha256": "7c1498eebd1f5759306c0da51a9d15220f2c60b89f93a184728e9deec6114a96"
+  },
+  "added": [
+    {
+      "test": "security_sweep_rebuild_must_restore_the_real_answer",
+      "covers": "L3-final ① + Lead 追加 1（答案载荷与 CAS 同事务）",
+      "assertion": "空队列宿主 sweep 重建出的注入必须携带用户真实答案，且不得出现 rebuiltFromDurable/rebuilt/placeholder/stub 任一占位标记",
+      "observed": "实际载荷 output.answer = {\"rebuiltFromDurable\": true}（durable 未存答案，sweep 自造占位）",
+      "red_reason": "占位载荷"
+    },
+    {
+      "test": "security_graph_bound_answer_must_not_be_marked_landed_before_resume",
+      "covers": "L3-final ② + Lead 追加 2（幂等 resume）",
+      "assertion": "① answer_ask_in_session 必须回带 landed=\"resume\"；② resume 未成功前记录必须仍在 unlanded 集合；③ resume 成功后离开 unlanded；④ 再次 graph_resume_ask 必须 Ok 且 {resumed:false, landed:\"already_landed\"}",
+      "observed": "返回体无 landed 字段（当前先 mark_landed 再交给客户端 resume）",
+      "red_reason": "landed 契约缺失 / 提前记账"
+    },
+    {
+      "test": "security_failed_durable_gc_must_not_advance_the_mirror",
+      "covers": "L3-final ③",
+      "assertion": "gc_orphans 落盘 Err 时：磁盘仍 Pending，且 dispatcher 镜像仍 Pending",
+      "observed": "gc_orphans 报错仅打日志，随后无条件 close_pending_asks_of_session ⇒ 镜像终态（分叉）",
+      "red_reason": "落盘失败推进镜像"
+    },
+    {
+      "test": "security_retention_gc_must_not_reclaim_unlanded_answered_records",
+      "covers": "L3-final ④（ADVISORY）",
+      "assertion": "保留期 GC 后：Answered 且 landed_at_ms IS NULL 的记录必须保留；已 landed 的旧终态记录必须被回收（正向对照，防空转）",
+      "observed": "unlanded Answered 记录被 gc_terminal_records 的 COALESCE(landed_at_ms, answered_at_ms, created_at_ms) 删除",
+      "red_reason": "未落点答案被时间静默删除"
+    }
+  ],
+  "test_doubles": [
+    {
+      "type": "FailMarkLandedStore",
+      "scope": "仅本测试文件；读转发（含 load_unlanded_answered_payloads / is_landed）、mark_landed 失败、其余写转发；已按 Lead 裁决补 `transition_scoped_with_answer` 一行转发到 inner（不得旁路 upsert）"
+    },
+    {
+      "type": "FailOnWriteStore",
+      "scope": "仅本测试文件；读转发、写一律失败（含 transition_scoped_with_answer）；用于 GC 镜像分叉注入"
+    }
+  ],
+  "red_commands": [
+    {
+      "command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit": 101,
+      "summary": "红相期取证：18 passed; 4 failed（→ 后续迭代 20 passed/2 failed → 22 passed/0 failed）"
+    },
+    {
+      "command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit": 0,
+      "summary": "当前（core T16 落地后）：22 passed; 0 failed"
+    }
+  ],
+  "freeze_notes": [
+    "只加不删：既有断言（含 T14 的 t6/t7/t9/t8-ignored 与 security_* 系列）全部保留。",
+    "未改实现文件（src/** 零改动）；两个测试替身仅在集成测试二进制内定义，文档注释明示禁止出现在生产路径。",
+    "载荷同事务口径：`transition_scoped_with_answer` 尚未存在，故以『sweep 重建载荷 == 用户真实答案』作为黑盒锚点（不引用未冻结签名，避免编译级红相）；若 core 采用别的签名，本锚点仍成立。",
+    "幂等 resume 口径：已 landed 的二次 resume 必须 Ok 且 landed=\"already_landed\"；客户端不得因此弹错。"
+  ],
+  "git_write_operations": false,
+  "fixture_correction": "security_graph_bound_answer_must_not_be_marked_landed_before_resume：派发必须携带真实 run 身份（run_id=run-t15，与绑定一致），否则 landing 判定不到 graph 绑定会误走 session 队列（夹具错误，不是断言放宽）；已改夹具。",
+  "red_evidence_captured": [
+    {
+      "test": "security_sweep_rebuild_must_restore_the_real_answer",
+      "evidence": "重建载荷 output.answer = {\"rebuiltFromDurable\": true}（后变为 null：答案未随 CAS 同事务落盘）"
+    },
+    {
+      "test": "security_graph_bound_answer_must_not_be_marked_landed_before_resume",
+      "evidence": "answer_ask_in_session 返回体缺 landed 字段（提前 mark_landed）"
+    },
+    {
+      "test": "security_failed_durable_gc_must_not_advance_the_mirror",
+      "evidence": "gc_orphans 落盘 Err 后镜像仍被 close ⇒ 磁盘 Pending + 镜像终态分叉"
+    },
+    {
+      "test": "security_retention_gc_must_not_reclaim_unlanded_answered_records",
+      "evidence": "保留期 GC 删除了 Answered 且 landed_at_ms IS NULL 的记录"
+    }
+  ],
+  "final_state": {
+    "command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+    "result": "22 passed; 0 failed",
+    "exit": 0
+  }
+}

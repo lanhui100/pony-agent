@@ -676,15 +676,34 @@ impl AgentRuntime {
     pub(crate) fn run_turn_with_facts(&self, input: TurnInput, facts: RunTurnFacts) -> TurnResult {
         // T2-1：turn 事实在**本 turn 内部**解析并随每次工具调用下传（不再写进 executor 共享槽位）。
         let governed_context = self.resolve_governed_turn_context(&input, &facts);
-        let injection_source = (facts.run_id.clone(), input.session_id.clone());
-        self.run_turn_inner(input, injection_source, governed_context)
+        let injection_lease = self.peek_pending_ask_injection(
+            facts.run_id.as_deref(),
+            input.session_id.as_deref(),
+        );
+        let ask_injection = injection_lease
+            .as_ref()
+            .map(|lease| lease.injection.clone());
+        let result = self.run_turn_inner(input, ask_injection, governed_context);
+        // Contract §5 ack boundary: only a successful terminal state settles the injection
+        // (`completed` / `suspended`). The sync success path leaves `phase` at its initial
+        // `ready` marker (the terminal envelope carries the `turn:completed` fact), while the
+        // failure/suspend paths set `failed` / `cancelled` / `suspended` explicitly.
+        let ack_reason = match result.phase.as_str() {
+            "failed" | "cancelled" => None,
+            crate::agent::runtime::SUSPENDED_TURN_PHASE => Some("suspended"),
+            _ => Some("completed"),
+        };
+        if let (Some(reason), Some(lease)) = (ack_reason, injection_lease.as_ref()) {
+            self.ack_pending_ask_injection(lease, reason);
+        }
+        result
     }
 
 
     fn run_turn_inner(
         &self,
         input: TurnInput,
-        injection_source: (Option<String>, Option<String>),
+        ask_injection: Option<GraphAskResumeInjection>,
         governed_context: Option<DispatchContext>,
     ) -> TurnResult {
         let turn_started_at = Instant::now();
@@ -736,13 +755,6 @@ impl AgentRuntime {
             }
         }
 
-        // ADR 0074/T8: consume the one-shot Ask injection **after** the governance gate, so a
-        // turn blocked before execution cannot swallow the answer (it stays queued for a turn
-        // that actually runs).
-        let ask_injection = self.take_pending_ask_injection(
-            injection_source.0.as_deref(),
-            injection_source.1.as_deref(),
-        );
         let prepared = match self.prepare_turn(&input, false, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {

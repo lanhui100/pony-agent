@@ -44,7 +44,7 @@
       "desc": "png artifact exists for screenshot review",
       "ok": true,
       "status": "pass",
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/panel.png size=134562"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/panel.png size=134526"
     },
     {
       "id": "answered.no_panic",
@@ -128,7 +128,7 @@
       "desc": "png artifact exists for screenshot review",
       "ok": true,
       "status": "pass",
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/resumed.png size=176094"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/resumed.png size=176326"
     },
     {
       "id": "askresume.panel_visible",
@@ -156,14 +156,14 @@
       "desc": "after answering, the same turn continues and renders the second assistant text (mock FINAL_TEXT fingerprint becomes visible)",
       "ok": true,
       "status": "pass",
-      "evidence": "markers_resumed=['0.1.125', '包管理器：npm'] markers_before_answer=[] tail=['如果需要，我可以继续列出依赖清单。', '› 写下任务，或输入 / 查看命令', '/home/dm/pony-agent ↑32 ↓64 · 上下文 0% · 188 t/s · 首token 64ms']"
+      "evidence": "markers_resumed=['0.1.125', '包管理器：npm'] markers_before_answer=[] tail=['如果需要，我可以继续列出依赖清单。', '› 写下任务，或输入 / 查看命令', '/home/dm/pony-agent ↑32 ↓64 · 上下文 0% · 187 t/s · 首token 63ms']"
     },
     {
       "id": "askresume.streaming_settled",
       "desc": "the resumed turn settles: no Thinking.../思考中/生成中 residue and the footer shows non-zero turn usage",
       "ok": true,
       "status": "pass",
-      "evidence": "residue=[] footer=/home/dm/pony-agent ↑32 ↓64 · 上下文 0% · 188 t/s · 首token 64ms"
+      "evidence": "residue=[] footer=/home/dm/pony-agent ↑32 ↓64 · 上下文 0% · 187 t/s · 首token 63ms"
     },
     {
       "id": "askresume.answer_reaches_provider",
@@ -198,7 +198,7 @@
       "desc": "every captured row display width <= 120 cols",
       "ok": true,
       "status": "pass",
-      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.jYM7NP/iso-ask-resume/xdg-config XDG_DATA_HOME=/tmp/tui-audit.jYM7NP/iso-ask-"
+      "evidence": "widest row 1 width=120 cols=120 :: -u NO_COLOR XDG_CONFIG_HOME=/tmp/tui-audit.snQsWL/iso-ask-resume/xdg-config XDG_DATA_HOME=/tmp/tui-audit.snQsWL/iso-ask-"
     },
     {
       "id": "exit.capture_rows",
@@ -219,7 +219,7 @@
       "desc": "png artifact exists for screenshot review",
       "ok": true,
       "status": "pass",
-      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/exit.png size=166738"
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-resume/exit.png size=166612"
     }
   ]
 }

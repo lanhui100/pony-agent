@@ -31,4 +31,4 @@
 
    › 写下任务，或输入 / 查看命令
 
-     /home/dm/pony-agent                                                 ↑32 ↓64 · 上下文 0% · 188 t/s · 首token 64ms
+     /home/dm/pony-agent                                                 ↑32 ↓64 · 上下文 0% · 187 t/s · 首token 63ms

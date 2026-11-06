@@ -1,0 +1,39 @@
+{
+  "task": "task-16 (T16) — read-only recon",
+  "role": "executor-core",
+  "generated_at": "2026-11-06T19:34:00+08:00",
+  "gate": "等 T15 红相冻结；此前不动 graph.rs / runtime / ask_persistence.rs / control_plane（本次仅只读定位）",
+  "defects_located": {
+    "B1_sweep_placeholder_answer": {
+      "evidence": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs:346-380（sweep_unlanded_answer_landings），:368 用 `json!({\"rebuiltFromDurable\": true})` 作为重建答案占位",
+      "root_cause": "durable `Answered` 记录不存答案载荷（persisted_ask/`pending_asks` 无 answer 列）⇒ sweep 只能造占位，模型看到的 tool result 不含真实答案",
+      "planned": "① pending_asks 新增 `answer_json TEXT`（CREATE 内建 + 旧表 ALTER TABLE ADD COLUMN 前向迁移，逻辑同 landed_at_ms）；② 新增跨 trait 入口 `transition_scoped_with_answer(session, request, version, nonce, answer, from, to)`：在同一 BEGIN IMMEDIATE 事务内完成 CAS + 写 answer_json（保持冻结的 6 参 transition_scoped 与新写方法并存）；③ answer_json 只在 Answered 写入；④ sweep 改为读真实载荷重建，删除占位；⑤ 为不破坏冻结测试的字面量构造，PersistedAsk 结构体**不新增字段**，载荷经新 trait 方法 `load_unlanded_answered_payloads(session) -> Vec<(PersistedAsk, Value)>` 返回"
+    },
+    "B2_mark_landed_on_bound_early_return": {
+      "evidence": "ask_plan_commands.rs:292-345 `land_answered_ask`：bound 分支 `return;`（无返回值）后，调用点 :153 `/ :271 mark_answer_landed(&updated)` 无条件记账 ⇒ 有 graph 绑定时未真正 resume 也把 landed_at_ms 置位，sweep 永不重试",
+      "planned": "`land_answered_ask` 改返回 `bool`（landed）：无绑定 ⇒ 入队成功= true；有绑定 ⇒ 先在同一 graph_runs 锁内尝试 `graph_runner.resume_ask_wait(run_id, request_id, expected_version, answer)`，成功= true，失败（无 binding/版本不符/run 丢失）⇒ 降级入队 session 队列并记日志，入队成功= true；只有 true 才 mark_landed。sweep 对 bound run 同样先试 resume、失败降级入队"
+    },
+    "B3_gc_orphan_closes_mirror_on_error": {
+      "evidence": "ask_plan_commands.rs:488-507 `gc_orphan_asks`：store.gc_orphans 返回 Err 时仅打印日志，随后无条件 `close_pending_asks_of_session` ⇒ 磁盘仍 Pending 而镜像终态（与 T14 supersede 反例同族分叉）",
+      "planned": "与 supersede 一致：仅当 store 调用成功（或 store 为 None 的降级路径）才关闭镜像；Err 时不推镜像并保留记录供重试"
+    },
+    "B4_retention_gc_deletes_unlanded_answered": {
+      "evidence": "ask_persistence.rs:737-751 `gc_terminal_records` SQL：`DELETE ... WHERE state <> 'pending' AND COALESCE(landed_at_ms, answered_at_ms, created_at_ms) < ?1` —— 未落地 Answered（landed_at_ms IS NULL）超过保留期会被删除，sweep 再也无法自愈",
+      "planned": "SQL 增加守卫：`AND NOT (state = 'answered' AND landed_at_ms IS NULL)`（未落地 Answered 永不按时限删除，直到 landed 或人工处置）；其余终态按保留期回收，Pending 永不回收"
+    },
+    "A1_graph_runs_lost_update": {
+      "evidence": "graph.rs persist_runs 整文件快照写",
+      "status": "ADVISORY，按 Lead 裁决登记 backlog，不在 T16 修"
+    }
+  },
+  "verification_plan_after_freeze": [
+    "T15 红相（预计 4 条）逐条转绿；每完成一条跑一次子集",
+    "回归：ask_persistence_acceptance / ask_resume_e2e / ask_pending_contract / ask_pending_adversarial / tui_batch3 / cargo test --lib / cargo check --all-targets / 真机 S1–S4",
+    "回执 core-landing-green.json（含前向迁移、答案载荷证据、sweep 重试日志、真机）"
+  ],
+  "open_questions_for_lead": [
+    "answer_json 的落盘时机：建议与 CAS 同事务（transition_scoped_with_answer），若 T15 红相另定（例如先 CAS 再补写）以冻结为准。",
+    "bound 路径自动 resume 会改变客户端行为（TUI 仍会再调 graph_resume_ask）：若 resume 已成功，客户端二次调用会得到「无 binding」；建议客户端按既有 landed 分支容错，或 T16 在返回体加 `landed=resume|queue` 供客户端判断（待 T15 断言确认）。"
+  ],
+  "no_writes_made": true
+}

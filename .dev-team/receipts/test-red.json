@@ -283,5 +283,15 @@
     },
     "blocked": "已解除（Lead 裁决 a：测试内 FailOnWriteStore 装饰器）",
     "refreeze_note": "【无作用域 CAS 重冻】所有冻结用例已迁移到 `transition_scoped(session_id, request_id, expected_version, expected_nonce, from, to)`；无作用域 4 参 `transition` 由 `security_unscoped_transition_must_fail_closed` 冻结为 fail-closed（ask_scope_required）。core 修复后该入口**不得**回退为可用，否则本条红相与 §4 四元组语义同时失效；如需改名/删除该入口，须先报 Test Agent 改锚点。"
+  },
+  "segment_t15": {
+    "status": "RED→GREEN（4 条红相已取证；core 落地后 22/22 全绿）",
+    "receipt": ".dev-team/receipts/test-landing-red.json",
+    "changed": [
+      "crates/pony-agent-core/tests/ask_persistence_acceptance.rs（+4 测试 + FailMarkLandedStore 替身）"
+    ],
+    "verification": {
+      "ask_persistence_acceptance": "22 passed / 0 failed（红相期 18 passed / 4 failed, exit 101）"
+    }
   }
 }

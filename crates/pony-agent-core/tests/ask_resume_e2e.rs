@@ -969,3 +969,313 @@ fn t5_control_outcome_pending_never_reaches_provider() {
          实际请求体 = {second}"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// T14 / L3-P 注入队列语义（红相）：失败不丢答案 / 同会话多条队列 / ack 边界
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// 契约依据（Lead 2026-11-06 裁决）：会话注入的 **ack 边界 = 成功终态（completed / suspended）**。
+// provider 调用失败 / 取消时注入必须仍在（下一次续轮能取走）；成功终态后才 ack，且只结算一次。
+// 反例来源：`/tmp/ask-audit` 的 `inject-drop`（BLOCKING）与 `inject-overwrite`（队列覆盖）。
+
+/// 无 provider 的控制面：prepare 阶段必然失败（无可用 provider），用于复现「失败轮」。
+fn plane_without_provider(graph_path: &Path, workspace: &Path) -> HostControlPlane {
+    let runtime = AgentRuntimeBuilder::new()
+        .session_store(isolated_session_store())
+        .workspace_root(workspace)
+        .build();
+    HostControlPlaneBuilder::new()
+        .runtime(runtime)
+        .graph_run_store(GraphRunStore::persistent(graph_path))
+        .build()
+}
+
+/// 有 mock provider 但 graph store **落盘**的控制面（便于观察会话注入的进出）。
+fn plane_with_mock_provider_and_graph_path(
+    base_url: String,
+    workspace: &Path,
+    graph_path: &Path,
+) -> HostControlPlane {
+    let runtime = AgentRuntimeBuilder::new()
+        .session_store(isolated_session_store())
+        .provider_resolver(Box::new(StaticProviderResolver {
+            selection: provider_selection(base_url),
+        }))
+        .workspace_root(workspace)
+        .build();
+    HostControlPlaneBuilder::new()
+        .runtime(runtime)
+        .graph_run_store(GraphRunStore::persistent(graph_path))
+        .build()
+}
+
+/// 直接经真实受管派发路径抛出一个 Ask（不依赖图谱绑定），返回 request_id。
+fn dispatch_probe_ask(control_plane: &HostControlPlane, session_id: &str, call_id: &str) -> String {
+    use pony_agent_core::agent::dispatcher::DispatchContext;
+    use pony_agent_core::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
+
+    let outcome = control_plane.ask_dispatcher.dispatch_governed(
+        ToolDispatchRequest {
+            origin: InvocationOrigin::Model,
+            descriptor_id: "builtin:ask_user".to_string(),
+            call_id: call_id.to_string(),
+            arguments: json!({
+                "question": ASK_QUESTION,
+                "options": ["是", "否"],
+                "description": "T14 注入队列红相"
+            }),
+        },
+        &DispatchContext {
+            session_id: Some(session_id.to_string()),
+            run_id: None,
+            turn_id: Some(format!("turn-{call_id}")),
+            host_control_available: true,
+            ..Default::default()
+        },
+    );
+    outcome
+        .control_outcome
+        .expect("T14：host-mediated ask 必须返回 control outcome")
+        .request_id
+}
+
+/// 读取落盘 graph store 里的**会话注入队列**（`sessionAskInjections`）的 requestId 列表。
+fn session_injection_ids(graph_path: &Path) -> Vec<String> {
+    let raw = std::fs::read_to_string(graph_path).unwrap_or_else(|_| "{}".to_string());
+    let parsed: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+    let Some(object) = parsed.get("sessionAskInjections").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    object
+        .values()
+        .filter_map(|entry| entry.get("requestId").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+/// T14 ①（BLOCKING，`inject-drop`）：续轮**失败**不得吞掉会话注入。
+///
+/// 现状缺陷：注入在 prepare / 模型调用**之前**被一次性 `take`（破坏性读），失败路径不回滚 ⇒
+/// 答案永久丢失。契约：ack 边界是成功终态；失败/取消后注入必须仍在，下一次续轮仍能取走。
+#[test]
+fn t6_failed_continuation_turn_must_not_drop_the_session_injection() {
+    let _serial = serial_guard();
+    let workspace = isolated_workspace("t6-inject-drop");
+    let graph_path = workspace.join("graph-runs.json");
+    let control_plane = plane_without_provider(&graph_path, &workspace);
+    let session_id = "session-ask-e2e-t6";
+
+    // Arrange：派发 + 作答 ⇒ 会话注入入队（无 run 绑定 ⇒ 走 session 队列）。
+    let request_id = dispatch_probe_ask(&control_plane, session_id, "call-t6");
+    expect_ok(
+        control_plane.answer_ask_in_session(session_id, &request_id, 1, json!("是")),
+        "T14：作答必须成功（持久化 CAS）",
+    );
+    assert_eq!(
+        session_injection_ids(&graph_path),
+        vec![request_id.clone()],
+        "T14 前置：作答后必须恰好一条会话注入入队，实际 = {:?}",
+        session_injection_ids(&graph_path)
+    );
+
+    // Act ①：跑一轮（无 provider ⇒ 必然 turn:failed）。
+    let sink = RecordingSink::new();
+    control_plane.start_turn_stream(
+        &sink,
+        StartTurnStreamCommand {
+            turn_id: "turn-t6-fail-1".to_string(),
+            input: test_turn_input(session_id, "继续"),
+        },
+    );
+    let names = sink.names();
+    assert!(
+        names.iter().any(|name| name == "turn:failed"),
+        "T14 前置：无 provider 时本轮必须以 turn:failed 收口，实际事件序列 = {names:?}"
+    );
+
+    // Assert（BLOCKING）：失败轮之后注入必须仍在（不得因破坏性 take 丢失）。
+    assert_eq!(
+        session_injection_ids(&graph_path),
+        vec![request_id.clone()],
+        "T14：失败/取消路径不得吞掉会话注入（take 早于 provider 且失败不回滚）；\
+         契约要求 ack 边界=成功终态，失败后答案必须仍可被下一次续轮取走"
+    );
+
+    // Act ②：再失败一次。
+    let sink_again = RecordingSink::new();
+    control_plane.start_turn_stream(
+        &sink_again,
+        StartTurnStreamCommand {
+            turn_id: "turn-t6-fail-2".to_string(),
+            input: test_turn_input(session_id, "继续"),
+        },
+    );
+
+    // Assert：多次失败仍**恰好一条**注入（不重复入队、不丢失 ⇒ 只结算一次）。
+    assert_eq!(
+        session_injection_ids(&graph_path),
+        vec![request_id.clone()],
+        "T14：连续失败轮不得重复入队也不得丢失，必须稳定保持恰好一条待结算注入"
+    );
+
+    // 持久化面：记录仍为 Answered（可据此重建注入，不依赖进程内存）。
+    assert!(
+        pending_asks(&control_plane, session_id).is_empty(),
+        "T14：已作答记录不得回到待决列表"
+    );
+}
+
+/// T14 ②（`inject-overwrite`）：同会话**两条**已作答 Ask 必须都在注入队列里（队列语义）。
+///
+/// 现状缺陷：`session_ask_injections: HashMap<session_id, injection>` 单槽 ⇒ 第二条覆盖第一条，
+/// 第一条答案永久丢失。
+#[test]
+fn t7_two_answered_asks_in_one_session_must_both_stay_consumable() {
+    let _serial = serial_guard();
+    let workspace = isolated_workspace("t7-inject-overwrite");
+    let graph_path = workspace.join("graph-runs.json");
+    let control_plane = plane_without_provider(&graph_path, &workspace);
+    let session_id = "session-ask-e2e-t7";
+
+    let first = dispatch_probe_ask(&control_plane, session_id, "call-t7-1");
+    let second = dispatch_probe_ask(&control_plane, session_id, "call-t7-2");
+    expect_ok(
+        control_plane.answer_ask_in_session(session_id, &first, 1, json!("第一条答案")),
+        "T14：第一条作答必须成功",
+    );
+    expect_ok(
+        control_plane.answer_ask_in_session(session_id, &second, 1, json!("第二条答案")),
+        "T14：第二条作答必须成功",
+    );
+
+    let ids = session_injection_ids(&graph_path);
+    assert!(
+        ids.contains(&first) && ids.contains(&second),
+        "T14：同会话两条已作答 Ask 必须都能被消费（第二条不得覆盖第一条）；\
+         实际队列 = {ids:?}，缺失 = {:?}",
+        [&first, &second]
+            .into_iter()
+            .filter(|id| !ids.contains(*id))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// T14 ④（ack 边界对照组）：**成功终态**才 ack，且只结算一次（不得残留导致重复注入）。
+///
+/// 该条是既有正确面的冻结钉子（成功路径已实现），与 t6 的失败路径构成 ack 边界的两侧。
+#[test]
+fn t9_successful_turn_acks_the_session_injection_exactly_once() {
+    let _serial = serial_guard();
+    let server = MockProviderServer::start(vec![
+        MockReply::Text("续轮完成：已按回答继续。".to_string()),
+        MockReply::Text("第二轮正文".to_string()),
+    ]);
+    let workspace = isolated_workspace("t9-ack");
+    let graph_path = workspace.join("graph-runs.json");
+    let control_plane =
+        plane_with_mock_provider_and_graph_path(server.base_url.clone(), &workspace, &graph_path);
+    let session_id = "session-ask-e2e-t9";
+
+    let request_id = dispatch_probe_ask(&control_plane, session_id, "call-t9");
+    expect_ok(
+        control_plane.answer_ask_in_session(session_id, &request_id, 1, json!("是")),
+        "T14：作答必须成功",
+    );
+    assert_eq!(
+        session_injection_ids(&graph_path),
+        vec![request_id.clone()],
+        "T14 前置：作答后必须入队"
+    );
+
+    // Act ①：成功轮。
+    let sink = RecordingSink::new();
+    control_plane.start_turn_stream(
+        &sink,
+        StartTurnStreamCommand {
+            turn_id: "turn-t9-ok-1".to_string(),
+            input: test_turn_input(session_id, "继续"),
+        },
+    );
+    let names = sink.names();
+    assert!(
+        names.iter().any(|name| name == "turn:completed"),
+        "T14 前置：有 provider 时本轮必须成功收口，实际事件序列 = {names:?}"
+    );
+    assert!(server.wait_request_count(1), "T14 前置：provider 必须收到请求");
+
+    // Assert：成功终态 ⇒ ack，注入不得残留。
+    assert!(
+        session_injection_ids(&graph_path).is_empty(),
+        "T14：成功终态后会话注入必须被 ack 清空（否则会在后续每一轮重复注入同一个答案）"
+    );
+
+    // Act ②：再跑一轮（不得再次注入）。
+    let sink_again = RecordingSink::new();
+    control_plane.start_turn_stream(
+        &sink_again,
+        StartTurnStreamCommand {
+            turn_id: "turn-t9-ok-2".to_string(),
+            input: test_turn_input(session_id, "再来一轮"),
+        },
+    );
+    assert!(
+        session_injection_ids(&graph_path).is_empty(),
+        "T14：已 ack 的注入不得复活（只结算一次）"
+    );
+}
+
+/// T14 ⑤（多进程文件竞态，`store-race`）：**暂不修复**，按 Lead 裁决标 `#[ignore]` 并登记。
+///
+/// 反例：两个 `GraphRunStore::persistent` 句柄各自持内存快照，先后写入同一 JSON 文件 ⇒ 后写
+/// 覆盖前写，另一会话的注入丢失（`/tmp/ask-audit` `store-race`：after_second_process 只剩 B）。
+/// 归因：这是 `GraphRunStore` 的**既有多进程文件竞态**（与 ask_persistence 的 CAS 面正交），
+/// 修复需跨进程文件锁 / 单写者模型，超出 T14「注入队列语义」范围；已报 Lead 待单独立项。
+#[test]
+#[ignore = "既有多进程 GraphRunStore 文件竞态（后写覆盖前写），需跨进程锁/单写者模型，超出 T14 范围，已报 Lead"]
+fn t8_two_persistent_graph_store_handles_must_not_lose_each_others_session_injections() {
+    let _serial = serial_guard();
+    let workspace = isolated_workspace("t8-store-race");
+    let graph_path = workspace.join("graph-runs.json");
+
+    let mut first_process = GraphRunStore::persistent(&graph_path);
+    let mut second_process = GraphRunStore::persistent(&graph_path);
+
+    first_process.queue_ask_injection_for_session(
+        "session-A",
+        pony_agent_core::agent::graph::GraphAskResumeInjection {
+            request_id: "req-A".to_string(),
+            run_id: "run-A".to_string(),
+            turn_id: "turn-A".to_string(),
+            call_id: "call-A".to_string(),
+            tool_name: "Ask".to_string(),
+            assistant_transcript: json!({ "callId": "call-A" }),
+            terminal_result: json!({ "answer": "A" }),
+        },
+    );
+    second_process.queue_ask_injection_for_session(
+        "session-B",
+        pony_agent_core::agent::graph::GraphAskResumeInjection {
+            request_id: "req-B".to_string(),
+            run_id: "run-B".to_string(),
+            turn_id: "turn-B".to_string(),
+            call_id: "call-B".to_string(),
+            tool_name: "Ask".to_string(),
+            assistant_transcript: json!({ "callId": "call-B" }),
+            terminal_result: json!({ "answer": "B" }),
+        },
+    );
+
+    let reopened = GraphRunStore::persistent(&graph_path);
+    assert!(
+        reopened
+            .peek_ask_injection_for_session("session-A")
+            .is_some(),
+        "T14：第二个句柄写入不得覆盖第一个句柄已落盘的会话注入（多进程文件竞态）"
+    );
+    assert!(
+        reopened
+            .peek_ask_injection_for_session("session-B")
+            .is_some(),
+        "T14：两个会话的注入必须都能在重开后读到"
+    );
+}

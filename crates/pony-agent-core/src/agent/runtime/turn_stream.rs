@@ -123,6 +123,7 @@ impl AgentRuntime {
         control: &ExecutionControlRegistry,
         turn_id: &str,
         input: &TurnInput,
+        injection_lease: Option<&AskInjectionLease>,
         user_message: &str,
         display_message: &str,
         provider: &ProviderManager,
@@ -610,6 +611,9 @@ impl AgentRuntime {
                         .unwrap_or_else(|| SUSPENDED_TURN_PHASE.to_string());
                     let suspended_trace_steps =
                         self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
+                    if let Some(lease) = injection_lease {
+                        self.ack_pending_ask_injection(lease, "suspended");
+                    }
                     emit_stream_event(
                         sink,
                         "turn:suspended",
@@ -1630,6 +1634,9 @@ impl AgentRuntime {
                 // Wave-15 R2：per-call 记录按调用序号写入各 call_model 条目。
                 provider_call_records.as_slice(),
             );
+            if let Some(lease) = injection_lease {
+                self.ack_pending_ask_injection(lease, "completed");
+            }
             emit_stream_event(
                 sink,
                 "turn:completed",
@@ -1774,10 +1781,14 @@ impl AgentRuntime {
             }
         }
 
-        let ask_injection = self.take_pending_ask_injection(
+        // Contract §5: peek (do not consume) — ack happens only on a successful terminal state.
+        let injection_lease = self.peek_pending_ask_injection(
             injection_run_id.as_deref(),
             injection_session_id.as_deref(),
         );
+        let ask_injection = injection_lease
+            .as_ref()
+            .map(|lease| lease.injection.clone());
         let prepared = match self.prepare_turn(&input, true, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -2909,6 +2920,7 @@ impl AgentRuntime {
                 control,
                 &turn_id,
                 &input,
+                injection_lease.as_ref(),
                 &user_message,
                 &display_message,
                 &provider,
@@ -3355,6 +3367,9 @@ impl AgentRuntime {
             &provider_call_records,
             turn_duration_ms,
         );
+        if let Some(lease) = injection_lease.as_ref() {
+            self.ack_pending_ask_injection(lease, "completed");
+        }
         emit_stream_event(
             sink,
             "turn:completed",

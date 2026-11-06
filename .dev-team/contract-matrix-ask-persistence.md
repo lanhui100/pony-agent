@@ -78,6 +78,7 @@ Pending ──answer──▶ Answered
 
 ## 4. CAS 语义（P3，跨进程仍成立）
 
+- **`transition_scoped_with_answer`（L3-final 追加，冻结签名）**：`fn transition_scoped_with_answer(&self, session_id: &str, request_id: &str, expected_version: u64, expected_nonce: &str, from: AskLifecycleState, to: AskLifecycleState, answer: &serde_json::Value) -> AskPersistenceResult<PersistedAsk>`；状态迁移与 `answer_json` 必须同一事务提交，默认实现 fail-closed。测试替身（如 `FailMarkLandedStore`）必须转发该新方法，不得返回伪成功。
 - **`transition` 签名必须携带 `(request_id, session_id, expected_version, expected_nonce)`**，并在同一事务内与存储中的 `version`/`nonce`/`state` 逐项比对；nonce 不符 ⇒ `ask_nonce_mismatch`（该错误码必须被真实引用，禁止只定义不使用）。L3-A/L3-B 双审均以可跑反例判定「nonce 无持久化真值」为 BLOCKING，本行即修复判据。
 - `answer/cancel` 必须校验 `(request_id, version, session_id)` 三元组 **+ 服务端自持 nonce**：
   - 客户端**不传** nonce（nonce 只存在于存储，服务端从记录派生，客户端无法伪造）；
@@ -109,6 +110,12 @@ failed/cancelled 必须保留供下次续轮；ack 只弹队首且校验 `reques
 `Answered` 记录需落 `landed_at_ms`（landing 账本），镜像/注入落地失败时由 sweep 从 durable 重建，
 使 `ask_mirror_sync_failed` 可自愈；disk 是唯一真值，镜像失败不得回滚 disk。
 无作用域 `transition` 入口在生产 API **fail-closed**（`ask_scope_required`），测试改用 `transition_scoped`。
+**答案载荷与 landed 真值（L3-final 裁决，2026-11-06）**：`pending_asks` 必须持久化
+`answer_json`（真实用户答案，旧表 ALTER 前向迁移）；sweep 重建注入只能用该真实载荷，
+禁止任何占位/伪载荷。`landed_at_ms` **只在**「graph resume 成功」或「已入队会话注入」后写入；
+resume 失败必须保持 unlanded 并由 sweep 重试（bound run 先试 resume、失败降级入队）。
+GC 报错时**不得**推进镜像；保留期 GC 不得删除 `Answered` 且 `landed_at_ms IS NULL` 的记录。
+
 
 宿主轮次入口（L3 复核后追认）：`HostControlPlane::start_turn_stream` 委派
 `start_ask_aware_turn_stream`（TUI/CLI/harness 共用），使每轮都在真实 graph run 内执行；

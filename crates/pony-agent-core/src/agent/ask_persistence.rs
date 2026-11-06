@@ -138,14 +138,17 @@ pub trait AskPersistenceStore: Send + Sync {
         from: AskLifecycleState,
         to: AskLifecycleState,
         expected_version: u64,
-    ) -> AskPersistenceResult<PersistedAsk>;
+    ) -> AskPersistenceResult<PersistedAsk> {
+        // Contract §4/§5: production CAS requires an explicit `(session_id, nonce)` scope. This
+        // 4-argument entry survives only for API compatibility and is fail-closed: accepting it
+        // would let a host settle another session's record (L3-P `unscoped` counter-example).
+        let _ = (from, to, expected_version);
+        Err(format!(
+            "ask_scope_required: unscoped `transition` for `{request_id}` is not a production CAS entry (use transition_scoped with session_id + nonce)"
+        ))
+    }
 
-    /// Read one record by its composite identity `(session_id, request_id)`, whatever its
-    /// lifecycle state.
-    ///
-    /// The host derives the **server-held** `nonce` from this record (clients never supply a
-    /// nonce) and fails closed with `ask_not_found` when no durable record exists — it must not
-    /// fall back to a process-local mirror.
+    /// Read one record by its composite identity `(session_id, request_id)`, whatever its state.
     fn load_ask(
         &self,
         session_id: &str,
@@ -155,21 +158,13 @@ pub trait AskPersistenceStore: Send + Sync {
         Err("ask_not_found: this store does not support scoped Ask reads".to_string())
     }
 
-    /// Diagnostic lookup across sessions: the latest record carrying `request_id`, whatever its
-    /// session. Used only to produce a stable fail-closed error for **unscoped** legacy calls
-    /// (`ask_state_conflict` when such a record exists, `ask_not_found` when none does); it never
-    /// authorises a mutation.
+    /// Diagnostic lookup across sessions (never authorises a mutation): used only to produce a
+    /// stable fail-closed error for unscoped legacy calls.
     fn find_ask(&self, request_id: &str) -> AskPersistenceResult<Option<PersistedAsk>> {
         let _ = request_id;
         Err("ask_not_found: this store does not support unscoped lookups".to_string())
     }
 
-    /// Scoped compare-and-swap over the full CAS tuple
-    /// `(session_id, request_id, expected_version, expected_nonce, state)`.
-    ///
-    /// Contract §4: `nonce` is a persisted fact and must be compared inside the same transaction
-    /// as `version`/`state`; a mismatch is `ask_nonce_mismatch`. A record owned by another session
-    /// is never updated. Defaults fail closed so an implementation cannot silently skip the check.
     fn transition_scoped(
         &self,
         session_id: &str,
@@ -181,6 +176,71 @@ pub trait AskPersistenceStore: Send + Sync {
     ) -> AskPersistenceResult<PersistedAsk> {
         let _ = (session_id, request_id, expected_version, expected_nonce, from, to);
         Err("ask_scope_required: this store does not support scoped CAS".to_string())
+    }
+
+    /// Scoped CAS **with the durable answer payload in the same transaction** (contract §4/§5).
+    fn transition_scoped_with_answer(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        expected_version: u64,
+        expected_nonce: &str,
+        from: AskLifecycleState,
+        to: AskLifecycleState,
+        answer: &serde_json::Value,
+    ) -> AskPersistenceResult<PersistedAsk> {
+        let _ = (
+            session_id,
+            request_id,
+            expected_version,
+            expected_nonce,
+            from,
+            to,
+            answer,
+        );
+        Err("ask_scope_required: this store does not support answer-payload CAS".to_string())
+    }
+
+    /// Unlanded `Answered` records **with their durable answer payload** (oldest first).
+    fn load_unlanded_answered_payloads(
+        &self,
+        session_id: &str,
+    ) -> AskPersistenceResult<Vec<(PersistedAsk, Value)>> {
+        let _ = session_id;
+        Ok(Vec::new())
+    }
+
+    /// Whether the durable record already served its answer (landing ledger set).
+    fn is_landed(&self, session_id: &str, request_id: &str) -> AskPersistenceResult<bool> {
+        let _ = (session_id, request_id);
+        Ok(false)
+    }
+
+    fn mark_landed(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        at_ms: u64,
+    ) -> AskPersistenceResult<()> {
+        let _ = (session_id, request_id, at_ms);
+        Err("ask_not_found: this store does not support landing bookkeeping".to_string())
+    }
+
+    /// `Answered` records whose landing never completed (crash / mirror-sync failure), oldest
+    /// first. The sweep path re-queues their injection instead of losing the answer.
+    fn load_unlanded_answered(
+        &self,
+        session_id: &str,
+    ) -> AskPersistenceResult<Vec<PersistedAsk>> {
+        let _ = session_id;
+        Ok(Vec::new())
+    }
+
+    /// Retention GC for **terminal** records only (contract §5: GC must never reclaim `Pending`).
+    /// Deletes terminal rows whose landing/answer/creation timestamp is older than `before_ms`.
+    fn gc_terminal_records(&self, before_ms: u64) -> AskPersistenceResult<usize> {
+        let _ = before_ms;
+        Ok(0)
     }
 
     /// Supersede every `Pending` Ask of the session because a new user message arrived at
@@ -271,6 +331,8 @@ CREATE TABLE IF NOT EXISTS pending_asks (
     state TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     answered_at_ms INTEGER,
+    landed_at_ms INTEGER,
+    answer_json TEXT,
     PRIMARY KEY (session_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pending_asks_session_state
@@ -287,7 +349,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_asks_session_created
 ";
 
 const ASK_COLUMNS: &str = "request_id, session_id, version, nonce, run_id, turn_id, call_id, \
-     kind, prompt, options_json, state, created_at_ms, answered_at_ms";
+     kind, prompt, options_json, state, created_at_ms, answered_at_ms, landed_at_ms";
 
 /// SQLite-backed [`AskPersistenceStore`] over the session database (`sessions.db` family).
 ///
@@ -305,13 +367,72 @@ impl SqliteAskStore {
             None => connection
                 .execute_batch(ASK_STORE_SCHEMA)
                 .map_err(|error| format!("ask_store_migration_failed: {error}")),
-            Some(primary_key) if primary_key == COMPOSITE_PRIMARY_KEY.to_vec() => connection
-                .execute_batch(ASK_INDEXES)
-                .map_err(|error| format!("ask_store_migration_failed: {error}")),
+            Some(primary_key) if primary_key == COMPOSITE_PRIMARY_KEY.to_vec() => {
+                ensure_ask_columns(connection)?;
+                connection
+                    .execute_batch(ASK_INDEXES)
+                    .map_err(|error| format!("ask_store_migration_failed: {error}"))
+            }
             // Legacy single-column (`request_id`) primary key: `(session_id, request_id)` is the
             // frozen isolation key (contract §2), so rebuild the table and copy surviving rows.
             Some(_) => migrate_legacy_pending_asks(connection),
         }
+    }
+
+    /// Shared scoped CAS. When `answer` is provided it is committed **in the same transaction**
+    /// (contract §4/§5), so the payload can never be missing for an `Answered` record.
+    fn transition_scoped_inner(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        expected_version: u64,
+        expected_nonce: &str,
+        from: AskLifecycleState,
+        to: AskLifecycleState,
+        answer: Option<&Value>,
+    ) -> AskPersistenceResult<PersistedAsk> {
+        if to == AskLifecycleState::Pending {
+            return Err(format!(
+                "ask_state_conflict: `{request_id}` cannot transition back to `pending` (terminal states are final)"
+            ));
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| format!("ask_store_write_failed: {error}"))?;
+        let stored = transaction
+            .query_row(
+                &format!(
+                    "SELECT {ASK_COLUMNS} FROM pending_asks \
+                     WHERE session_id = ?1 AND request_id = ?2"
+                ),
+                rusqlite::params![session_id, request_id],
+                ask_row_to_record,
+            )
+            .optional()
+            .map_err(|error| format!("ask_store_read_failed: {error}"))?;
+        let Some(stored) = stored else {
+            return Err(format!(
+                "ask_not_found: no persisted Ask `{request_id}` in session `{session_id}`"
+            ));
+        };
+        validate_transition(&stored, from, expected_version, Some(expected_nonce))?;
+        let updated = apply_transition(&transaction, &stored, to)?;
+        if let Some(answer) = answer {
+            let encoded = serde_json::to_string(answer)
+                .map_err(|error| format!("ask_store_encode_failed: {error}"))?;
+            transaction
+                .execute(
+                    "UPDATE pending_asks SET answer_json = ?1 \
+                     WHERE session_id = ?2 AND request_id = ?3",
+                    rusqlite::params![encoded, session_id, request_id],
+                )
+                .map_err(|error| format!("ask_store_write_failed: {error}"))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("ask_store_write_failed: {error}"))?;
+        Ok(updated)
     }
 
     fn lock(&self) -> AskPersistenceResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
@@ -404,7 +525,32 @@ fn pending_asks_primary_key(
     Ok(Some(keyed.into_iter().map(|(name, _)| name).collect()))
 }
 
-/// Rebuild a legacy `pending_asks` (single-column `request_id` primary key) into the frozen
+/// Landing/payload columns (contract §5). Both are forward-migrated on older stores:
+/// `landed_at_ms` is the landing ledger, `answer_json` is the durable answer payload that makes a
+/// sweep rebuild factual instead of invented.
+fn ensure_ask_columns(connection: &rusqlite::Connection) -> AskPersistenceResult<()> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(pending_asks)")
+        .map_err(|error| format!("ask_store_migration_failed: {error}"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("ask_store_migration_failed: {error}"))?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(|error| format!("ask_store_migration_failed: {error}"))?;
+    if !columns.iter().any(|column| column == "landed_at_ms") {
+        connection
+            .execute_batch("ALTER TABLE pending_asks ADD COLUMN landed_at_ms INTEGER;")
+            .map_err(|error| format!("ask_store_migration_failed: {error}"))?;
+    }
+    if !columns.iter().any(|column| column == "answer_json") {
+        connection
+            .execute_batch("ALTER TABLE pending_asks ADD COLUMN answer_json TEXT;")
+            .map_err(|error| format!("ask_store_migration_failed: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Rebuild a legacy `pending_asks`/// Rebuild a legacy `pending_asks` (single-column `request_id` primary key) into the frozen
 /// `(session_id, request_id)` composite key. Rows are copied verbatim; `INSERT OR IGNORE` keeps
 /// the migration total when a legacy db somehow already holds composite duplicates.
 fn migrate_legacy_pending_asks(connection: &rusqlite::Connection) -> AskPersistenceResult<()> {
@@ -425,6 +571,8 @@ fn migrate_legacy_pending_asks(connection: &rusqlite::Connection) -> AskPersiste
                  state TEXT NOT NULL,
                  created_at_ms INTEGER NOT NULL,
                  answered_at_ms INTEGER,
+                 landed_at_ms INTEGER,
+                 answer_json TEXT,
                  PRIMARY KEY (session_id, request_id)
              );
              INSERT OR IGNORE INTO pending_asks_v2 (
@@ -601,47 +749,6 @@ impl AskPersistenceStore for SqliteAskStore {
             .map_err(|error| format!("ask_store_read_failed: {error}"))
     }
 
-    fn transition(
-        &self,
-        request_id: &str,
-        from: AskLifecycleState,
-        to: AskLifecycleState,
-        expected_version: u64,
-    ) -> AskPersistenceResult<PersistedAsk> {
-        // Unscoped CAS used by the store-level contract tests: the identity is `request_id`
-        // alone. It still honours every lifecycle and version rule; the scope-carrying host path
-        // goes through `transition_scoped` (session + nonce).
-        if to == AskLifecycleState::Pending {
-            return Err(format!(
-                "ask_state_conflict: `{request_id}` cannot transition back to `pending` (terminal states are final)"
-            ));
-        }
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|error| format!("ask_store_write_failed: {error}"))?;
-        let stored = transaction
-            .query_row(
-                &format!(
-                    "SELECT {ASK_COLUMNS} FROM pending_asks WHERE request_id = ?1 \
-                     ORDER BY session_id ASC LIMIT 1"
-                ),
-                rusqlite::params![request_id],
-                ask_row_to_record,
-            )
-            .optional()
-            .map_err(|error| format!("ask_store_read_failed: {error}"))?;
-        let Some(stored) = stored else {
-            return Err(format!("ask_not_found: no persisted Ask `{request_id}`"));
-        };
-        validate_transition(&stored, from, expected_version, None)?;
-        let updated = apply_transition(&transaction, &stored, to)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("ask_store_write_failed: {error}"))?;
-        Ok(updated)
-    }
-
     fn transition_scoped(
         &self,
         session_id: &str,
@@ -651,40 +758,127 @@ impl AskPersistenceStore for SqliteAskStore {
         from: AskLifecycleState,
         to: AskLifecycleState,
     ) -> AskPersistenceResult<PersistedAsk> {
-        // Contract §4: the full CAS tuple is compared inside one `BEGIN IMMEDIATE` transaction —
-        // `(session_id, request_id, version, nonce, state)`. A record owned by another session is
-        // never touched (the lookup is scoped), so a colliding id in another session is invisible.
-        if to == AskLifecycleState::Pending {
-            return Err(format!(
-                "ask_state_conflict: `{request_id}` cannot transition back to `pending` (terminal states are final)"
-            ));
-        }
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|error| format!("ask_store_write_failed: {error}"))?;
-        let stored = transaction
+        self.transition_scoped_inner(
+            session_id,
+            request_id,
+            expected_version,
+            expected_nonce,
+            from,
+            to,
+            None,
+        )
+    }
+
+    fn transition_scoped_with_answer(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        expected_version: u64,
+        expected_nonce: &str,
+        from: AskLifecycleState,
+        to: AskLifecycleState,
+        answer: &serde_json::Value,
+    ) -> AskPersistenceResult<PersistedAsk> {
+        self.transition_scoped_inner(
+            session_id,
+            request_id,
+            expected_version,
+            expected_nonce,
+            from,
+            to,
+            Some(answer),
+        )
+    }
+
+    fn load_unlanded_answered_payloads(
+        &self,
+        session_id: &str,
+    ) -> AskPersistenceResult<Vec<(PersistedAsk, Value)>> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {ASK_COLUMNS}, answer_json FROM pending_asks \
+                 WHERE session_id = ?1 AND state = 'answered' AND landed_at_ms IS NULL \
+                 ORDER BY answered_at_ms ASC, request_id ASC"
+            ))
+            .map_err(|error| format!("ask_store_read_failed: {error}"))?;
+        let rows = statement
+            .query_map(rusqlite::params![session_id], |row| {
+                let record = ask_row_to_record(row)?;
+                let payload: Option<String> = row.get(14)?;
+                let answer = payload
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .unwrap_or(Value::Null);
+                Ok((record, answer))
+            })
+            .map_err(|error| format!("ask_store_read_failed: {error}"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("ask_store_read_failed: {error}"))
+    }
+
+    fn is_landed(&self, session_id: &str, request_id: &str) -> AskPersistenceResult<bool> {
+        let connection = self.lock()?;
+        let landed: Option<Option<i64>> = connection
             .query_row(
-                &format!(
-                    "SELECT {ASK_COLUMNS} FROM pending_asks \
-                     WHERE session_id = ?1 AND request_id = ?2"
-                ),
+                "SELECT landed_at_ms FROM pending_asks \
+                 WHERE session_id = ?1 AND request_id = ?2",
                 rusqlite::params![session_id, request_id],
-                ask_row_to_record,
+                |row| row.get::<_, Option<i64>>(0),
             )
             .optional()
             .map_err(|error| format!("ask_store_read_failed: {error}"))?;
-        let Some(stored) = stored else {
-            return Err(format!(
-                "ask_not_found: no persisted Ask `{request_id}` in session `{session_id}`"
-            ));
-        };
-        validate_transition(&stored, from, expected_version, Some(expected_nonce))?;
-        let updated = apply_transition(&transaction, &stored, to)?;
-        transaction
-            .commit()
+        Ok(matches!(landed, Some(Some(_))))
+    }
+
+    fn mark_landed(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        at_ms: u64,
+    ) -> AskPersistenceResult<()> {
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "UPDATE pending_asks SET landed_at_ms = ?1 \
+                 WHERE session_id = ?2 AND request_id = ?3 AND state = 'answered'",
+                rusqlite::params![at_ms, session_id, request_id],
+            )
             .map_err(|error| format!("ask_store_write_failed: {error}"))?;
-        Ok(updated)
+        Ok(())
+    }
+
+    fn load_unlanded_answered(
+        &self,
+        session_id: &str,
+    ) -> AskPersistenceResult<Vec<PersistedAsk>> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {ASK_COLUMNS} FROM pending_asks \
+                 WHERE session_id = ?1 AND state = 'answered' AND landed_at_ms IS NULL \
+                 ORDER BY answered_at_ms ASC, request_id ASC"
+            ))
+            .map_err(|error| format!("ask_store_read_failed: {error}"))?;
+        let rows = statement
+            .query_map(rusqlite::params![session_id], ask_row_to_record)
+            .map_err(|error| format!("ask_store_read_failed: {error}"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("ask_store_read_failed: {error}"))
+    }
+
+    fn gc_terminal_records(&self, before_ms: u64) -> AskPersistenceResult<usize> {
+        // Terminal-only retention GC. `state <> 'pending'` is the hard guard: a pending Ask is
+        // session state and must never be reclaimed by time (contract §5).
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "DELETE FROM pending_asks \
+                 WHERE state <> 'pending' \
+                   AND NOT (state = 'answered' AND landed_at_ms IS NULL) \
+                   AND COALESCE(landed_at_ms, answered_at_ms, created_at_ms) < ?1",
+                rusqlite::params![before_ms],
+            )
+            .map_err(|error| format!("ask_store_write_failed: {error}"))
     }
 
     fn supersede_pending_on_user_message(

@@ -4,7 +4,7 @@ use crate::agent::planner::{GraphPlanner, GraphPlanningContext};
 use crate::agent::runtime::TurnResult;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
@@ -13,6 +13,90 @@ const GRAPH_STEP_TITLE_MAX_CHARS: usize = 48;
 
 type GraphRunMap = HashMap<String, GraphRun>;
 
+/// Ask injection queues keyed by run id / session id (contract §5: a queue, never a single slot).
+/// The persisted representation flattens every queued injection into one map entry so a legacy
+/// store (which held a single object per key) stays readable.
+type AskInjectionQueues = BTreeMap<String, VecDeque<GraphAskResumeInjection>>;
+
+const ASK_INJECTION_KEY_SEP: char = '\u{1f}';
+
+fn serialize_ask_injection_queues<S>(
+    queues: &AskInjectionQueues,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(None)?;
+    for (key, queue) in queues {
+        for injection in queue {
+            map.serialize_entry(
+                &format!("{key}{ASK_INJECTION_KEY_SEP}{}", injection.request_id),
+                injection,
+            )?;
+        }
+    }
+    map.end()
+}
+
+fn deserialize_ask_injection_queues<'de, D>(deserializer: D) -> Result<AskInjectionQueues, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    struct QueuesVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for QueuesVisitor {
+        type Value = AskInjectionQueues;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map of ask injections (legacy single object or a queue array)")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut queues: AskInjectionQueues = BTreeMap::new();
+            while let Some((key, value)) = access.next_entry::<String, Value>()? {
+                let outer = key
+                    .split_once(ASK_INJECTION_KEY_SEP)
+                    .map(|(outer, _)| outer.to_string())
+                    .unwrap_or_else(|| key.clone());
+                let injections: Vec<GraphAskResumeInjection> = match value {
+                    Value::Array(items) => items
+                        .into_iter()
+                        .map(serde_json::from_value)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(A::Error::custom)?,
+                    Value::Object(_) => vec![
+                        serde_json::from_value(value).map_err(A::Error::custom)?,
+                    ],
+                    other => {
+                        return Err(A::Error::custom(format!(
+                            "unsupported ask injection entry: {other}"
+                        )))
+                    }
+                };
+                let queue = queues.entry(outer).or_default();
+                for injection in injections {
+                    if !queue
+                        .iter()
+                        .any(|queued| queued.request_id == injection.request_id)
+                    {
+                        queue.push_back(injection);
+                    }
+                }
+            }
+            Ok(queues)
+        }
+    }
+
+    deserializer.deserialize_map(QueuesVisitor)
+}
+
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedGraphRunStore {
@@ -20,13 +104,21 @@ struct PersistedGraphRunStore {
     runs: GraphRunMap,
     #[serde(default)]
     ask_waits: BTreeMap<String, Vec<GraphAskWaitBinding>>,
-    #[serde(default)]
-    ask_injections: BTreeMap<String, GraphAskResumeInjection>,
+    #[serde(
+        default,
+        serialize_with = "serialize_ask_injection_queues",
+        deserialize_with = "deserialize_ask_injection_queues"
+    )]
+    ask_injections: AskInjectionQueues,
     /// ADR 0074: one-shot Ask resume injections keyed by **session** id, for answers that land
     /// outside a graph run (no `run_id` to consume a per-run injection). `#[serde(default)]`
     /// keeps older persisted stores readable.
-    #[serde(default)]
-    session_ask_injections: BTreeMap<String, GraphAskResumeInjection>,
+    #[serde(
+        default,
+        serialize_with = "serialize_ask_injection_queues",
+        deserialize_with = "deserialize_ask_injection_queues"
+    )]
+    session_ask_injections: AskInjectionQueues,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -320,11 +412,11 @@ pub struct GraphRunStore {
     ask_waits: BTreeMap<String, Vec<GraphAskWaitBinding>>,
     /// One-shot Ask resume injections keyed by run id (design.md Decision 5, phase-4 P0). Set by
     /// `resume_ask_wait` when the host answers, consumed by the runtime on the next turn.
-    ask_injections: BTreeMap<String, GraphAskResumeInjection>,
+    ask_injections: AskInjectionQueues,
     /// One-shot Ask resume injections keyed by **session** id (ADR 0074 answer landing). Used when
     /// an answered Ask has no graph wait binding, so the answer still reaches the next turn's
     /// provider context instead of being silently dropped.
-    session_ask_injections: BTreeMap<String, GraphAskResumeInjection>,
+    session_ask_injections: AskInjectionQueues,
     storage_path: Option<PathBuf>,
 }
 
@@ -535,19 +627,51 @@ impl GraphRunStore {
         runs
     }
 
-    /// Consume the one-shot Ask resume injection for a run, if present (design.md Decision 5,
-    /// phase-4 P0). Called by the runtime at the start of the next turn so the pending terminal
-    /// result is injected exactly once; the sidecar is cleared on read.
-    pub fn take_ask_injection(&mut self, run_id: &str) -> Option<GraphAskResumeInjection> {
-        let injection = self.ask_injections.remove(run_id)?;
+    /// Queue a one-shot Ask resume injection for a run (contract §5: queue, never a single slot).
+    pub fn queue_ask_injection_for_run(
+        &mut self,
+        run_id: &str,
+        injection: GraphAskResumeInjection,
+    ) {
+        let queue = self.ask_injections.entry(run_id.to_string()).or_default();
+        if !queue
+            .iter()
+            .any(|queued| queued.request_id == injection.request_id)
+        {
+            queue.push_back(injection);
+        }
         self.persist_runs();
-        Some(injection)
     }
 
-    /// Read the pending Ask resume injection for a run without consuming it (observability).
+    /// Peek the head of a run's Ask injection queue **without consuming it** (contract §5:
+    /// peek → provider turn → ack only on a successful terminal state).
     #[cfg_attr(test, allow(dead_code))]
     pub fn peek_ask_injection(&self, run_id: &str) -> Option<GraphAskResumeInjection> {
-        self.ask_injections.get(run_id).cloned()
+        self.ask_injections
+            .get(run_id)
+            .and_then(|queue| queue.front())
+            .cloned()
+    }
+
+    /// Ack the head of a run's injection queue: removes it only when the head matches
+    /// `request_id` (a stale/other ack never silently drops a different answer).
+    pub fn ack_ask_injection(&mut self, run_id: &str, request_id: &str) -> bool {
+        let Some(queue) = self.ask_injections.get_mut(run_id) else {
+            return false;
+        };
+        let matches = queue
+            .front()
+            .map(|queued| queued.request_id == request_id)
+            .unwrap_or(false);
+        if !matches {
+            return false;
+        }
+        queue.pop_front();
+        if queue.is_empty() {
+            self.ask_injections.remove(run_id);
+        }
+        self.persist_runs();
+        true
     }
 
     /// Queue a one-shot Ask answer injection keyed by **session** (ADR 0074 answer landing).
@@ -555,33 +679,55 @@ impl GraphRunStore {
     /// Used when the answered Ask has no graph wait binding: the next turn of that session —
     /// including a turn with no `run_id` at all — consumes it exactly once and seeds the provider
     /// context with the original tool-call + terminal result, so the answer is never dropped.
+    /// Multiple answers for one session are queued in order (never overwritten).
     pub fn queue_ask_injection_for_session(
         &mut self,
         session_id: &str,
         injection: GraphAskResumeInjection,
     ) {
-        self.session_ask_injections
-            .insert(session_id.to_string(), injection);
+        let queue = self
+            .session_ask_injections
+            .entry(session_id.to_string())
+            .or_default();
+        if !queue
+            .iter()
+            .any(|queued| queued.request_id == injection.request_id)
+        {
+            queue.push_back(injection);
+        }
         self.persist_runs();
     }
 
-    /// Consume the one-shot session-scoped Ask injection, if one is queued (cleared on read).
-    pub fn take_ask_injection_for_session(
-        &mut self,
-        session_id: &str,
-    ) -> Option<GraphAskResumeInjection> {
-        let injection = self.session_ask_injections.remove(session_id)?;
-        self.persist_runs();
-        Some(injection)
-    }
-
-    /// Read the pending session-scoped Ask injection without consuming it (observability).
+    /// Peek the head of a session's injection queue without consuming it.
     #[cfg_attr(test, allow(dead_code))]
     pub fn peek_ask_injection_for_session(
         &self,
         session_id: &str,
     ) -> Option<GraphAskResumeInjection> {
-        self.session_ask_injections.get(session_id).cloned()
+        self.session_ask_injections
+            .get(session_id)
+            .and_then(|queue| queue.front())
+            .cloned()
+    }
+
+    /// Ack the head of a session's injection queue (removes only when the head matches).
+    pub fn ack_ask_injection_for_session(&mut self, session_id: &str, request_id: &str) -> bool {
+        let Some(queue) = self.session_ask_injections.get_mut(session_id) else {
+            return false;
+        };
+        let matches = queue
+            .front()
+            .map(|queued| queued.request_id == request_id)
+            .unwrap_or(false);
+        if !matches {
+            return false;
+        }
+        queue.pop_front();
+        if queue.is_empty() {
+            self.session_ask_injections.remove(session_id);
+        }
+        self.persist_runs();
+        true
     }
 
     fn save_run(&mut self, run: GraphRun) -> GraphRun {
@@ -934,8 +1080,8 @@ impl GraphRunner {
         });
         // Persist the one-shot injection the next turn consumes so the model sees the terminal
         // result for the original tool-call id and continues (design.md Decision 5, phase-4 P0).
-        store.ask_injections.insert(
-            run_id.to_string(),
+        store.queue_ask_injection_for_run(
+            run_id,
             GraphAskResumeInjection {
                 request_id: binding.request_id.clone(),
                 run_id: binding.run_id.clone(),

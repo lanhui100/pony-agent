@@ -1,0 +1,69 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs（answer/cancel 落点、landing 账本、sweep、supersede、gc_orphan_asks、expire_asks、无作用域 fail-closed）",
+    "crates/pony-agent-core/src/agent/ask_persistence.rs（复合主键、transition_scoped CAS、mark_landed、load_unlanded_answered、gc_terminal_records、gc_orphans、upsert）",
+    "crates/pony-agent-core/src/agent/graph.rs（AskInjectionQueues=BTreeMap<String,VecDeque<..>>、queue/peek/ack、持久化与兼容读、resume_ask_wait）",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs（peek_pending_ask_injection / ack_pending_ask_injection / lease）",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs（run_turn_with_facts 的 ack 终态映射）",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs（peek 位置、completed/suspended ack 点）",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs（interject 注入进 provider 上下文）",
+    "crates/pony-agent-core/src/agent/control_plane/ask_resume_commands.rs + mod.rs（宿主轮入口、supersede 调用点）",
+    "crates/pony-agent-core/src/agent/dispatcher.rs（close_pending_asks_of_session / expire_control_requests / PendingControlRequest 无 answer 字段）",
+    "src-tauri/src/lib.rs（ask_list_pending/ask_answer/ask_cancel/ask_expire 的 require_ask_scope 门）",
+    "crates/pony-agent-core/src/bin/tui.rs（submit_ask_answers：answer→graph_resume_ask 双调用语义）",
+    "crates/pony-agent-core/tests/ask_persistence_acceptance.rs（T14 仅覆盖 supersede 失败，未覆盖 GC 失败）"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 368,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/l3f3-ask && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run -q --offline -- rebuild 2>/dev/null | grep -E '^\\[Q5\\.'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 153,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/l3f3-ask && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run -q --offline -- land-bound 2>/dev/null | grep -E '^\\[Q4\\.'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 503,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/l3f3-ask && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run -q --offline -- gc-fail 2>/dev/null | grep -E '^\\[Q6\\.'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ask_persistence.rs",
+      "line": 745,
+      "rule": "LEAK",
+      "counterexample_cmd": "cd /tmp/l3f3-ask && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run -q --offline -- failclosed 2>/dev/null | grep -E '^\\[Q9\\.(unlanded|gc_unlanded)'",
+      "severity": "ADVISORY"
+    }
+  ],
+  "falsification_attempts": [
+    {
+      "claim": 1,
+      "result": "closed",
+      "evidence": "队列语义：`/tmp/l3f3-ask -- fifo` ⇒ session：queue(req-b)→queue(req-a) 后 peek=req-b；ack(req-a 非队首)=false 且队列不变；ack(req-b)=true 后 peek=req-a；run 维度同构（peek=run-req-b，ack 非队首=false，ack 队首后=run-req-a）；落盘写入后重开 store 仍 peek=req-b（文件键序=队列序，无重排）。真机消费：`-- consume` ⇒ 同会话两条已作答 Ask 的队列依次为 [control-…011, control-…012]（不再相互覆盖）；turn-1 completed 后剩 [control-…012]，turn-2 completed 后空，provider 请求 2 次。run 维度真机：`-- land-bound` ⇒ graph_resume_ask 后 askInjections=[control-…]，续轮 completed 后 askInjections=[]。反例尝试（重启后按 request_id 排序重排队列）未能成立。"
+    },
+    {
+      "claim": 2,
+      "result": "closed",
+      "evidence": "`-- ack` ⇒ 作答后队列=[control-…020]；无 provider 的一轮：stderr 有 `turn:ask-injection source=session request=…`（peek 发生）、终态 turn:failed、队列仍=[control-…020]（无 ack 日志）；随后同 journal + 可用 provider 的续轮：`turn:ask-injection-acked … reason=completed`、队列=[]。终止态 suspended：`-- ack-suspended` ⇒ `turn:ask-injection-acked … reason=suspended`、队列=[]。ack 只弹队首：`-- fifo` 中 ack(非队首)=false。sync 路径（turn_sync.rs:691-697）按 phase 映射 failed/cancelled⇒不 ack，SUSPENDED⇒suspended，其余⇒completed；`build_failed_turn_result` 与 handle_sync_tool_turn 的失败/挂起出口 phase 分别为 `failed`/`suspended`，未发现「失败却被判 completed」的出口。"
+    },
+    {
+      "claim": 3,
+      "result": "counterexample",
+      "evidence": "① 重建内容造假：`-- rebuild`（模拟 durable CAS 已提交、进程在落盘后崩溃）⇒ `Q5.durable_fields` 无任何 answer 字段（PersistedAsk/表结构都不存答案）；sweep 后 `Q5.queue_after_sweep=[control-…]`，注入载荷 `terminalResult.output.answer = {\"rebuiltFromDurable\": true}`，即模型收到的是伪造答案而不是用户的「是」；`Q5.unlanded_after_sweep=0` 意味一次性且不可再重建。该路径正是契约 §5 点名的 `ask_mirror_sync_failed` 自愈路径。② 有 graph 绑定的 Ask：`-- land-bound` ⇒ answer=Ok(answered) 后 `Q4.queue_after_answer=[]`（land_answered_ask 因 bound 提前 return，什么都没落地）、`Q4.unlanded_answered_after_answer=Ok([])`（账本已被 mark_answer_landed 置 landed，ask_plan_commands.rs:153）、`Q4.sweep_rebuilds=0`、`Q4.pending_after_answer=[]`、`Q4.run_phase_after_answer=waiting_user` 且 ask wait 绑定仍在 ⇒ 客户端在 answer 与 graph_resume_ask 之间崩溃/重启/续轮失败（TUI 只上屏错误文案，tui.rs:8626）时，durable Answered + 零落点 + sweep 永不重建 = 本轮声称消灭的「durable Answered 但无落点且不可重试」原样存在。sweep 自身也会把 bound 记录 mark_landed（ask_plan_commands.rs:371），制造同样的假落地。"
+    },
+    {
+      "claim": 4,
+      "result": "counterexample",
+      "evidence": "已闭合的部分：supersede 落盘失败⇒镜像不动（`-- supersede-fail`：superseded=0、durable=(1,Pending)、mirror=(1,Pending)）；无作用域 transition fail-closed（`-- failclosed`：Err(\"ask_scope_required: unscoped `transition`…\")）；GC 绝不回收 Pending（`-- failclosed`：before_ms=u64::MAX/2 后 pending 仍 (1,Pending) 且 list_pending=1，Answered 被回收）；健康 store 的归档 GC 正确（`-- gc-real`：durable=(2,Orphaned) / mirror=(2,Cancelled)）。未闭合的部分（GC 半边）：`-- gc-fail`（仅让 gc_orphans 返回 Err）⇒ durable 仍是 (1,Pending)，镜像却被无条件推进到 (2,Cancelled)（ask_plan_commands.rs:501-504 的错误分支只打日志，close_pending_asks_of_session 在 if 之外）；后果链可见：`Q6.list_after_failed_gc=1`（disk 仍可答），随后 `Q6.answer_after_failed_gc=Err(\"ask_mirror_sync_failed: answer was persisted (Answered) but the runtime mirror rejected the CAS…\")`，durable 变 (2,Answered) 而落点被跳过，`Q6.unlanded_after_answer_attempt=1` ⇒ 交给 claim 3 的 sweep 用占位答案重建。即「disk 为唯一真值」在 GC 路径上不成立。"
+    }
+  ]
+}

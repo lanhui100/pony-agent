@@ -37,6 +37,9 @@ impl HostControlPlane {
             );
             return Value::Array(Vec::new());
         };
+        // Landing self-heal (contract §5): a crashed/partial answer is rebuilt from the durable
+        // `Answered` record instead of being lost. Cheap (indexed, usually zero rows).
+        let _ = self.sweep_unlanded_answer_landings(session_id);
         match store.load_pending(session_id) {
             Ok(records) => Value::Array(
                 records
@@ -97,13 +100,16 @@ impl HostControlPlane {
             .ok_or_else(|| {
                 format!("ask_not_found: no persisted Ask `{request_id}` in session `{session_id}`")
             })?;
-        let updated = store.transition_scoped(
+        // Contract §4/§5: the user's answer is committed **in the same transaction** as the
+        // `Pending → Answered` transition, so a sweep can replay the real payload later.
+        let updated = store.transition_scoped_with_answer(
             session_id,
             request_id,
             expected_version,
             &record.nonce,
             AskLifecycleState::Pending,
             AskLifecycleState::Answered,
+            &answer,
         )?;
         let mut pre_transition = updated.clone();
         pre_transition.version = expected_version;
@@ -138,7 +144,7 @@ impl HostControlPlane {
                 ));
             }
         };
-        self.land_answered_ask(
+        let landing = self.land_answered_ask(
             &updated.session_id,
             &updated.request_id,
             updated.run_id.as_deref(),
@@ -147,6 +153,11 @@ impl HostControlPlane {
             expected_version,
             &answer,
         );
+        // A bound answer is landed by the client's `graph_resume_ask`; only a queued answer is
+        // landed here. Anything else stays unlanded so the sweep retries it.
+        if landing == AskLanding::Queue {
+            self.mark_answer_landed(&updated);
+        }
         let mut value = serde_json::to_value(&consumed)
             .map_err(|error| format!("failed to serialize answer result: {error}"))?;
         if let Some(object) = value.as_object_mut() {
@@ -157,6 +168,7 @@ impl HostControlPlane {
             object.insert("lifecycleState".to_string(), json!("answered"));
             object.insert("answeredAtMs".to_string(), json!(updated.answered_at_ms));
             object.insert("sessionId".to_string(), json!(updated.session_id));
+            object.insert("landed".to_string(), json!(landing.as_str()));
         }
         Ok(value)
     }
@@ -262,6 +274,24 @@ impl HostControlPlane {
         Ok(value)
     }
 
+    /// Record the landing in the durable ledger (contract §5). Failure is contained: the record
+    /// stays `Answered` with `landed_at_ms = NULL`, so the next sweep rebuilds the landing.
+    fn mark_answer_landed(&self, record: &PersistedAsk) {
+        let Some(store) = self.ask_store.as_ref() else {
+            return;
+        };
+        if let Err(error) = store.mark_landed(
+            &record.session_id,
+            &record.request_id,
+            self.ask_dispatcher.clock().now_ms(),
+        ) {
+            eprintln!(
+                "[pony-agent] answer landing ledger write failed for `{}`: {error}",
+                record.request_id
+            );
+        }
+    }
+
     /// Answer landing (ADR 0074 §5): with a graph ask-wait binding the client's
     /// `graph_resume_ask` resumes the run; **without** one the answer is queued as a one-shot
     /// session injection that the next turn consumes via `take_pending_ask_injection`, so an
@@ -276,46 +306,139 @@ impl HostControlPlane {
         call_id: &str,
         answered_version: u64,
         answer: &Value,
-    ) {
+    ) -> AskLanding {
         let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
             eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
             e.into_inner()
         });
-        let bound = run_id
-            .map(|run_id| {
-                self.graph_runner
-                    .list_ask_waits(&graph_runs, run_id)
-                    .iter()
-                    .any(|wait| wait.request_id == request_id)
-            })
-            .unwrap_or(false);
+        // The durable record's `run_id` may be the turn's run context, not the run that owns the
+        // ask-wait binding — scan the live bindings instead of trusting one id.
+        let bound = self
+            .find_ask_wait_binding(&graph_runs, request_id)
+            .is_some();
         if bound {
-            return;
+            // The bound run is resumed by the host (`graph_resume_ask`), which records the
+            // landing then. Do **not** mark it landed here (T15: unlanded until resume).
+            return AskLanding::Resume;
         }
-        let injection = GraphAskResumeInjection {
-            request_id: request_id.to_string(),
-            run_id: run_id.unwrap_or_default().to_string(),
-            turn_id: turn_id.to_string(),
-            call_id: call_id.to_string(),
-            tool_name: "builtin:ask_user".to_string(),
-            assistant_transcript: Value::Null,
-            terminal_result: json!({
-                "toolCallId": call_id,
-                "toolName": "builtin:ask_user",
-                "status": "ok",
-                "output": {
-                    "ok": true,
-                    "requestId": request_id,
-                    "version": answered_version,
-                    "kind": "waiting_user",
-                    "answer": answer,
-                },
-            }),
-        };
+        let injection = build_session_injection(
+            session_id,
+            request_id,
+            run_id,
+            turn_id,
+            call_id,
+            answered_version,
+            answer,
+        );
         graph_runs.queue_ask_injection_for_session(session_id, injection);
         eprintln!(
             "[pony-agent] ask answer landed: source=session session={session_id} request={request_id} call={call_id}"
         );
+        AskLanding::Queue
+    }
+
+    /// Sweep the durable landing ledger (contract §5): `Answered` records whose injection was
+    /// never queued (crash between disk CAS and landing, or a mirror-sync failure) are rebuilt
+    /// from disk and marked landed. Pending records are never touched.
+    pub fn sweep_unlanded_answer_landings(&self, session_id: &str) -> usize {
+        let Some(store) = self.ask_store.as_ref() else {
+            return 0;
+        };
+        let payloads = match store.load_unlanded_answered_payloads(session_id) {
+            Ok(payloads) => payloads,
+            Err(error) => {
+                eprintln!(
+                    "[pony-agent] answer landing sweep read failed for `{session_id}`: {error}"
+                );
+                return 0;
+            }
+        };
+        let mut rebuilt = 0;
+        for (record, answer) in payloads {
+            if answer.is_null() {
+                // Never invent a payload: a record without a durable answer (legacy/partial write)
+                // stays unlanded and is reported instead of being rebuilt with a null answer.
+                eprintln!(
+                    "[pony-agent] answer landing sweep skipped request={} reason=missing_durable_answer",
+                    record.request_id
+                );
+                continue;
+            }
+            let landing = {
+                let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
+                let binding = self.find_ask_wait_binding(&graph_runs, &record.request_id);
+                match (record.run_id.as_deref(), binding) {
+                    (_, Some((run_id, expected_version))) => {
+                        match self.graph_runner.resume_ask_wait(
+                            &mut graph_runs,
+                            &run_id,
+                            &record.request_id,
+                            expected_version,
+                            answer.clone(),
+                        ) {
+                            Ok(_) => AskLanding::Resume,
+                            Err(error) => {
+                                // Bound resume failed (run gone / stale binding): degrade to the
+                                // session queue so the answer still reaches the next turn.
+                                eprintln!(
+                                    "[pony-agent] answer landing sweep: bound resume failed for \
+                                     `{}` ({error}); degrading to session queue",
+                                    record.request_id
+                                );
+                                let injection = build_session_injection(
+                                    &record.session_id,
+                                    &record.request_id,
+                                    record.run_id.as_deref(),
+                                    &record.turn_id,
+                                    &record.call_id,
+                                    record.version,
+                                    &answer,
+                                );
+                                graph_runs.queue_ask_injection_for_session(
+                                    &record.session_id,
+                                    injection,
+                                );
+                                AskLanding::Queue
+                            }
+                        }
+                    }
+                    _ => {
+                        let injection = build_session_injection(
+                            &record.session_id,
+                            &record.request_id,
+                            record.run_id.as_deref(),
+                            &record.turn_id,
+                            &record.call_id,
+                            record.version,
+                            &answer,
+                        );
+                        graph_runs
+                            .queue_ask_injection_for_session(&record.session_id, injection);
+                        AskLanding::Queue
+                    }
+                }
+            };
+            if let Err(error) = store.mark_landed(
+                &record.session_id,
+                &record.request_id,
+                self.ask_dispatcher.clock().now_ms(),
+            ) {
+                eprintln!(
+                    "[pony-agent] answer landing sweep could not mark `{}` landed: {error}",
+                    record.request_id
+                );
+            }
+            eprintln!(
+                "[pony-agent] answer landing sweep rebuilt request={} landed={}",
+                record.request_id,
+                landing.as_str()
+            );
+            rebuilt += 1;
+        }
+        rebuilt
     }
 
     /// Stable fail-closed error for an unscoped legacy mutation.
@@ -355,7 +478,27 @@ impl HostControlPlane {
         let archived = self.archived_session_ids();
         let orphaned = self.gc_orphan_asks(&archived, now);
         let expired = ask_control::expire_asks(&self.ask_dispatcher, now);
-        json!({ "expired": expired, "orphaned": orphaned, "nowMs": now })
+        // Retention GC for **terminal** records only (never Pending — a pending Ask is session
+        // state, not a timer resource).
+        let reclaimed = match self.ask_store.as_ref() {
+            Some(store) => {
+                let before_ms = now.saturating_sub(ASK_TERMINAL_RETENTION_MS);
+                match store.gc_terminal_records(before_ms) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        eprintln!("[pony-agent] ask terminal GC failed: {error}");
+                        0
+                    }
+                }
+            }
+            None => 0,
+        };
+        json!({
+            "expired": expired,
+            "orphaned": orphaned,
+            "reclaimed": reclaimed,
+            "nowMs": now
+        })
     }
 
     /// Record that a user message entered a session: every still-pending Ask of that session is
@@ -377,17 +520,50 @@ impl HostControlPlane {
     pub fn supersede_pending_asks_for_session(&self, session_id: &str) -> usize {
         let at_ms = self.ask_dispatcher.clock().now_ms();
         let mut superseded = 0;
-        if let Some(store) = self.ask_store.as_ref() {
-            match store.supersede_pending_on_user_message(session_id, at_ms) {
-                Ok(moved) => superseded = moved,
-                Err(error) => eprintln!(
-                    "[pony-agent] supersede_pending_asks_for_session `{session_id}` failed: {error}"
-                ),
+        let durable_written = match self.ask_store.as_ref() {
+            Some(store) => match store.supersede_pending_on_user_message(session_id, at_ms) {
+                Ok(moved) => {
+                    superseded = moved;
+                    true
+                }
+                Err(error) => {
+                    // Disk is the single truth (contract §7): a failed durable write must not
+                    // advance the in-memory mirror to a terminal state (that divergence would
+                    // close the panel while the record is still answerable).
+                    eprintln!(
+                        "[pony-agent] supersede_pending_asks_for_session `{session_id}` failed; \
+                         mirror left untouched: {error}"
+                    );
+                    false
+                }
+            },
+            None => true,
+        };
+        if durable_written {
+            self.ask_dispatcher
+                .close_pending_asks_of_session(session_id);
+        }
+        superseded
+    }
+
+    /// Find the live ask-wait binding for a request across all graph runs (the binding's run id
+    /// may differ from the durable record's `run_id`).
+    fn find_ask_wait_binding(
+        &self,
+        graph_runs: &crate::agent::graph::GraphRunStore,
+        request_id: &str,
+    ) -> Option<(String, u64)> {
+        for run in graph_runs.list_runs() {
+            if let Some(wait) = self
+                .graph_runner
+                .list_ask_waits(graph_runs, &run.id)
+                .into_iter()
+                .find(|wait| wait.request_id == request_id)
+            {
+                return Some((wait.run_id, wait.expected_version));
             }
         }
-        self.ask_dispatcher
-            .close_pending_asks_of_session(session_id);
-        superseded
+        None
     }
 
     /// GC pass for archived/deleted sessions: their pending Asks become `Orphaned` (never
@@ -397,15 +573,28 @@ impl HostControlPlane {
             return 0;
         }
         let mut orphaned = 0;
-        if let Some(store) = self.ask_store.as_ref() {
-            match store.gc_orphans(session_ids, now_ms) {
-                Ok(moved) => orphaned = moved,
-                Err(error) => eprintln!("[pony-agent] gc_orphan_asks failed: {error}"),
+        let durable_written = match self.ask_store.as_ref() {
+            Some(store) => match store.gc_orphans(session_ids, now_ms) {
+                Ok(moved) => {
+                    orphaned = moved;
+                    true
+                }
+                Err(error) => {
+                    // Disk is the single truth (contract §7): a failed GC must not close the
+                    // in-memory mirror (that would hide a still-answerable record).
+                    eprintln!(
+                        "[pony-agent] gc_orphan_asks failed; mirror left untouched: {error}"
+                    );
+                    false
+                }
+            },
+            None => true,
+        };
+        if durable_written {
+            for session_id in session_ids {
+                self.ask_dispatcher
+                    .close_pending_asks_of_session(session_id);
             }
-        }
-        for session_id in session_ids {
-            self.ask_dispatcher
-                .close_pending_asks_of_session(session_id);
         }
         orphaned
     }
@@ -567,6 +756,20 @@ impl HostControlPlane {
             .ask_dispatcher
             .pending_request(request_id)
             .ok_or_else(|| format!("unknown control request `{request_id}`"))?;
+        // Idempotent resume (contract §5): an already-landed answer is a successful no-op, never
+        // an error — the client may call resume after the landing already happened.
+        if let (Some(store), Some(session_id)) =
+            (self.ask_store.as_ref(), pending.session_id.as_deref())
+        {
+            if matches!(store.is_landed(session_id, request_id), Ok(true)) {
+                return Ok(json!({
+                    "requestId": request_id,
+                    "runId": run_id,
+                    "resumed": false,
+                    "landed": "already_landed",
+                }));
+            }
+        }
         if pending.state != crate::agent::tool_runtime::PendingControlRequestState::Consumed {
             return Err(format!(
                 "Ask `{request_id}` cannot resume: the pending control request has not been \
@@ -613,8 +816,29 @@ impl HostControlPlane {
             expected_version,
             answer,
         )?;
-        serde_json::to_value(&outcome)
-            .map_err(|error| format!("failed to serialize ask resume outcome: {error}"))
+        drop(graph_runs);
+        // The bound answer is landed only now: mark the durable ledger so the sweep stops
+        // retrying and a second resume is idempotent.
+        if let (Some(store), Some(session_id)) =
+            (self.ask_store.as_ref(), pending.session_id.as_deref())
+        {
+            if let Err(error) = store.mark_landed(
+                session_id,
+                request_id,
+                self.ask_dispatcher.clock().now_ms(),
+            ) {
+                eprintln!(
+                    "[pony-agent] graph_resume_ask: landing ledger write failed for `{request_id}`: \
+                     {error}"
+                );
+            }
+        }
+        let mut value = serde_json::to_value(&outcome)
+            .map_err(|error| format!("failed to serialize ask resume outcome: {error}"))?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("landed".to_string(), json!("resume"));
+        }
+        Ok(value)
     }
 }
 
@@ -660,4 +884,59 @@ fn persisted_ask_projection(record: &PersistedAsk) -> Value {
         "answeredAtMs": record.answered_at_ms,
         "persisted": true,
     })
+}
+
+/// Terminal-record retention before `ask_expire` reclaims it (7 days). Pending records are never
+/// reclaimed by time — only explicit answer/ignore/supersede/archive moves them.
+const ASK_TERMINAL_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+
+/// Where an answered Ask was landed (contract §5). `Resume` means the durable record stays
+/// unlanded until the host's `graph_resume_ask` succeeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AskLanding {
+    Resume,
+    Queue,
+}
+
+impl AskLanding {
+    fn as_str(self) -> &'static str {
+        match self {
+            AskLanding::Resume => "resume",
+            AskLanding::Queue => "queue",
+        }
+    }
+}
+
+/// Build the one-shot session injection for an answered Ask (the answer payload is the durable
+/// user answer, never a placeholder).
+fn build_session_injection(
+    session_id: &str,
+    request_id: &str,
+    run_id: Option<&str>,
+    turn_id: &str,
+    call_id: &str,
+    answered_version: u64,
+    answer: &Value,
+) -> GraphAskResumeInjection {
+    let _ = session_id;
+    GraphAskResumeInjection {
+        request_id: request_id.to_string(),
+        run_id: run_id.unwrap_or_default().to_string(),
+        turn_id: turn_id.to_string(),
+        call_id: call_id.to_string(),
+        tool_name: "builtin:ask_user".to_string(),
+        assistant_transcript: Value::Null,
+        terminal_result: json!({
+            "toolCallId": call_id,
+            "toolName": "builtin:ask_user",
+            "status": "ok",
+            "output": {
+                "ok": true,
+                "requestId": request_id,
+                "version": answered_version,
+                "kind": "waiting_user",
+                "answer": answer,
+            },
+        }),
+    }
 }

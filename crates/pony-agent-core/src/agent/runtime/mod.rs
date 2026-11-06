@@ -109,6 +109,23 @@ pub use compaction_ops::{compact_outcome_message, ManualCompactionOutcome};
 pub(crate) use compaction_ops::compact_session_with_sessions;
 pub use types::{PlannerGraphDecisionDispatchOutcome, RunTurnFacts, SUSPENDED_TURN_PHASE, TurnInput, TurnResult, TurnStreamEvent};
 
+/// Which store key a peeked Ask injection came from (run-scoped vs session-scoped).
+#[derive(Clone, Debug)]
+pub(crate) enum AskInjectionKey {
+    Run(String),
+    Session(String),
+}
+
+/// A peeked (not yet consumed) Ask injection lease. The runtime acks it only after a successful
+/// terminal state; dropping the lease without ack leaves the injection queued (contract §5).
+#[derive(Clone, Debug)]
+pub(crate) struct AskInjectionLease {
+    key: AskInjectionKey,
+    pub(crate) request_id: String,
+    pub(crate) call_id: String,
+    pub(crate) injection: GraphAskResumeInjection,
+}
+
 use batch_plan::*;
 use blocked_records::*;
 use limits::*;
@@ -265,37 +282,69 @@ impl AgentRuntime {
         self.graph_runs.clone()
     }
 
-    /// Consume the one-shot Ask resume injection for a run from the shared graph run store, if
-    /// one is pending (design.md Decision 5, phase-4 P0). The host answers through
-    /// `graph_resume_ask` (which persists the injection), and the next graph-run turn consumes it
-    /// exactly once here — before the provider request is built — so the terminal tool result is
-    /// seeded into the turn's provider context.
-    fn take_pending_ask_injection(
+    /// Peek (do **not** consume) the one-shot Ask resume injection for this turn.
+    ///
+    /// Contract §5: injection consumption is `peek → provider turn → ack on a successful terminal
+    /// state`. A destructive take here would lose the answer whenever prepare/provider fails
+    /// (L3-P `inject-drop`). Run-scoped injections (bound graph wait) win over session-scoped ones.
+    fn peek_pending_ask_injection(
         &self,
         run_id: Option<&str>,
         session_id: Option<&str>,
-    ) -> Option<GraphAskResumeInjection> {
+    ) -> Option<AskInjectionLease> {
         let store_arc = self.graph_run_store()?;
-        let mut store = store_arc.lock().unwrap_or_else(|e| {
+        let store = store_arc.lock().unwrap_or_else(|e| {
             eprintln!("[pony-agent] graph run store poisoned: {e}, recovering");
             e.into_inner()
         });
-        // Run-scoped injection first (answered Ask bound to a graph run): unchanged behavior.
         if let Some(run_id) = run_id {
-            if let Some(injection) = store.take_ask_injection(run_id) {
-                return Some(injection);
+            if let Some(injection) = store.peek_ask_injection(run_id) {
+                return Some(AskInjectionLease {
+                    key: AskInjectionKey::Run(run_id.to_string()),
+                    request_id: injection.request_id.clone(),
+                    call_id: injection.call_id.clone(),
+                    injection,
+                });
             }
         }
-        // ADR 0074 answer landing: an answered Ask without a graph binding is queued per session,
-        // so a plain turn (no run id at all) still consumes it exactly once instead of dropping
-        // the answer.
         let session_id = session_id?;
-        let injection = store.take_ask_injection_for_session(session_id)?;
+        let injection = store.peek_ask_injection_for_session(session_id)?;
         runtime_log(format!(
             "turn:ask-injection source=session request={} call={}",
             injection.request_id, injection.call_id
         ));
-        Some(injection)
+        Some(AskInjectionLease {
+            key: AskInjectionKey::Session(session_id.to_string()),
+            request_id: injection.request_id.clone(),
+            call_id: injection.call_id.clone(),
+            injection,
+        })
+    }
+
+    /// Ack a peeked Ask injection: only called on a **successful terminal** state
+    /// (`completed` / `suspended`). Failed/cancelled turns keep the injection for the next turn.
+    fn ack_pending_ask_injection(&self, lease: &AskInjectionLease, reason: &str) {
+        let Some(store_arc) = self.graph_run_store() else {
+            return;
+        };
+        let mut store = store_arc.lock().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] graph run store poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        let acked = match &lease.key {
+            AskInjectionKey::Run(run_id) => {
+                store.ack_ask_injection(run_id, &lease.request_id)
+            }
+            AskInjectionKey::Session(session_id) => {
+                store.ack_ask_injection_for_session(session_id, &lease.request_id)
+            }
+        };
+        if acked {
+            runtime_log(format!(
+                "turn:ask-injection-acked request={} call={} reason={reason}",
+                lease.request_id, lease.call_id
+            ));
+        }
     }
 
     /// The governed dispatcher the default tool executor executes through, if the runtime's

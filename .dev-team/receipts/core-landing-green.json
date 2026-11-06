@@ -1,0 +1,105 @@
+{
+  "task": "task-16 (T16)",
+  "role": "executor-core",
+  "phase": "green",
+  "generated_at": "2026-11-06T19:53:00+08:00",
+  "contract": [
+    ".dev-team/contract-matrix-ask-persistence.md §4/§5（answer_json 与 CAS 同事务、landing 账本、幂等 resume、保留期 GC 守卫）",
+    "crates/pony-agent-core/tests/ask_persistence_acceptance.rs（T15 冻结，sha256 2806af11…；未修改）",
+    "Lead 裁决：签名 `transition_scoped_with_answer(..., answer: &Value)` 冻结；返回体 landed=resume|queue；已 landed 的二次 graph_resume_ask 必须 Ok {resumed:false, landed:\"already_landed\"}"
+  ],
+  "files": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs",
+    "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+    ".dev-team/receipts/core-landing-green.json"
+  ],
+  "commands": [
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit": 0,
+      "result": "22 passed; 0 failed（T15 四条：sweep-real-answer / bound-not-landed+idempotent-resume / gc-fail-no-mirror / retention-guard）"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_resume_e2e",
+      "exit": 0,
+      "result": "8 passed; 0 failed; 1 ignored"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_pending_contract",
+      "exit": 0,
+      "result": "6 passed"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_pending_adversarial",
+      "exit": 0,
+      "result": "4 passed"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test tui_batch3_regression",
+      "exit": 0,
+      "result": "27 passed"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --lib",
+      "exit": 0,
+      "result": "1314 passed; 0 failed"
+    },
+    {
+      "cmd": "cargo check -p pony-agent-core --all-targets",
+      "exit": 0,
+      "result": "0 error"
+    },
+    {
+      "cmd": "cargo build -p pony-agent-core --bin pony",
+      "exit": 0
+    },
+    {
+      "cmd": "bash /tmp/ask_rebuild_smoke.sh t16b",
+      "exit": 0,
+      "result": "RESULT s1=1 s2=1 s3_closed=1 s3_english=0 s4_closed=1 s4_revived=0 s4_errors=0（workdir /tmp/ask-smoke-t16b.LJoM35）"
+    },
+    {
+      "cmd": "bash /tmp/t4_ask_injection_probe.sh t16b",
+      "exit": 0,
+      "result": "RESULT a1=1 a2=1 a3=1；`ask answer landed source=session` → `turn:ask-injection source=session` → `turn:ask-injection-acked reason=completed`（workdir /tmp/t4-inject-t16b.*）"
+    }
+  ],
+  "t16_items": {
+    "1_answer_payload_same_transaction": "pending_asks 新增 `answer_json`（CREATE 内建 + 旧表 ALTER 前向迁移，与 landed_at_ms 同一 ensure_ask_columns）；trait 新增冻结签名 `transition_scoped_with_answer(..., answer)`：SQLite 实现在同一 BEGIN IMMEDIATE 事务内完成 CAS 状态迁移 + 写 answer_json；默认实现 fail-closed（ask_scope_required），不静默成功。answer_ask_in_session 改走该入口，PersistedAsk 结构体未加字段",
+    "2_sweep_real_payload": "新增 `load_unlanded_answered_payloads(session) -> Vec<(PersistedAsk, Value)>`（读 answer_json）；sweep 删除 rebuiltFromDurable 占位，按真实载荷重建：bound run 先试 `resume_ask_wait`，失败降级入 session 队列；成功后 mark_landed；日志 `answer landing sweep rebuilt request=… landed=resume|queue`",
+    "3_landed_only_on_real_landing": "`land_answered_ask` 返回 AskLanding::{Resume,Queue}；bound（跨所有 run 扫描 binding，不盲信记录 run_id）⇒ 不记账、返回 landed=\"resume\"；queue ⇒ 入队后记账、返回 landed=\"queue\"；answer 响应体带 landed",
+    "4_idempotent_resume": "graph_resume_ask 先查 durable `is_landed`：已 landed ⇒ Ok {resumed:false, landed:\"already_landed\"}（不报错）；首次 resume 成功后写 mark_landed 并在响应带 landed=\"resume\"",
+    "5_gc_mirror_guard": "gc_orphan_asks 落盘 Err 时返回 0 且不关闭 dispatcher 镜像（与 supersede 同口径，磁盘为唯一真值）",
+    "6_retention_gc_guard": "gc_terminal_records SQL 增加 `AND NOT (state='answered' AND landed_at_ms IS NULL)`：未落点 Answered 永不按时限删除；已 landed 终态仍按 7 天保留期回收（T15 正向对照通过）"
+  },
+  "incidental_fix": "land binding 查找从「记录 run_id 单点」改为「跨 run 扫描 live ask-waits」（dispatcher 记录的 run_id 可能是 turn 上下文 run，而非绑定 run；T15 bound 用例由此暴露）",
+  "risks": [
+    "answer_json 列为 TEXT 存储 serde JSON；极端大答案会增加行宽（Ask 答案通常是短字符串，可接受）。",
+    "sweep 在同一会话有多条 unlanded Answered 时逐条重建（各自 bound→resume 或降级入队），顺序按 answered_at_ms；如未来需要严格 FIFO 的跨请求顺序，可再引入显式序号列。",
+    "graph_resume_ask 现在会写 mark_landed：客户端在 resume 成功后若再调用一次得到 Ok（already_landed），不再报错（T15 要求）；TUI 旧逻辑把 Err 当异常的分支不会再触发。"
+  ],
+  "git_write_operations": false,
+  "acceptance_evidence": {
+    "answer_json_same_transaction": {
+      "how": "trait `transition_scoped_with_answer`（冻结签名，answer 为末参）SQLite 实现在同一 BEGIN IMMEDIATE 事务内 apply_transition + UPDATE answer_json；默认实现 fail-closed",
+      "machine": "cargo test -p pony-agent-core --test ask_persistence_acceptance security_sweep_rebuild_must_restore_the_real_answer → ok（exit 0 全文件）；断言载荷含 `真实选择·继续执行`，且不含 rebuiltFromDurable/rebuilt/placeholder/stub",
+      "extra": "sweep 对 answer_json 为 NULL 的遗留记录改为 skip + `reason=missing_durable_answer` 日志，绝不重建 null 答案"
+    },
+    "landed_return_body": {
+      "how": "answer_ask_in_session 返回体 `landed: \"resume\" | \"queue\"`；bound 判定改为跨 run 扫描 live ask-waits（不盲信记录 run_id）",
+      "machine": "security_graph_bound_answer_must_not_be_marked_landed_before_resume → ok：answer 返回 landed=resume；resume 前记录仍在 unlanded 集合"
+    },
+    "idempotent_resume": {
+      "how": "graph_resume_ask 先查 durable `is_landed`：已 landed ⇒ Ok {resumed:false, landed:\"already_landed\"}；首次成功 resume 后 mark_landed 并返回 landed:\"resume\"",
+      "machine": "同一 T15 用例断言：首次 resume Ok → 记录离开 unlanded；二次 resume Ok 且 resumed=false / landed=already_landed"
+    },
+    "gc_guard_mirror": {
+      "how": "gc_orphan_asks 仅落盘成功才 close 镜像",
+      "machine": "security_failed_durable_gc_must_not_advance_the_mirror → ok（FailOnWriteStore.gc_orphans 返回 Err ⇒ 磁盘 Pending + 镜像 Pending）"
+    },
+    "gc_guard_retention": {
+      "how": "gc_terminal_records SQL: `AND NOT (state='answered' AND landed_at_ms IS NULL)`",
+      "machine": "security_retention_gc_must_not_reclaim_unlanded_answered_records → ok（unlanded Answered 30 天后仍可读；已 landed 旧记录被回收，正向对照通过）"
+    }
+  }
+}

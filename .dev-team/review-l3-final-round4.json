@@ -1,0 +1,83 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "adba2f6a-66c5-4a18-8fb5-fd555fc57ecf",
+    "fresh_context": true
+  },
+  "executed_by": "adba2f6a-66c5-4a18-8fb5-fd555fc57ecf",
+  "reviewed_commit": "38db0ffd9e0f08b95eba0467bfde68c5d2e2a0ec",
+  "review_target": {
+    "commit": "38db0ffd9e0f08b95eba0467bfde68c5d2e2a0ec",
+    "worktree_dirty": true,
+    "note": "The four fixes under review are UNCOMMITTED working-tree changes on top of the recorded HEAD: `git show HEAD:...ask_plan_commands.rs | grep -c is_landed` = 0 and `git show HEAD:...ask_persistence.rs | grep -c answer_json` = 0, while the worktree has both (ask_persistence.rs +364/-?, ask_plan_commands.rs +383/-?, graph.rs +208/-? lines vs HEAD). All probes were compiled against this working tree, i.e. the tree the fixes live in; they were NOT run against a clean checkout of the recorded sha."
+  },
+  "attestation": {
+    "self_signed": false,
+    "normalized_by": "lead: 补齐 findings 机械字段（file/line/rule/counterexample_cmd），未改 verdict 与内容"
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs",
+    "crates/pony-agent-core/src/agent/control_plane/",
+    "crates/pony-agent-core/src/agent/graph.rs",
+    "crates/pony-agent-core/src/agent/runtime/"
+  ],
+  "findings": [
+    {
+      "id": "R4-ADV-1",
+      "severity": "ADVISORY",
+      "title": "graph_resume_ask idempotency is process-local: a landed request replayed from a fresh host (empty dispatcher mirror) returns Err",
+      "detail": "The is_landed early-return lives behind `ask_dispatcher.pending_request(request_id)`, so it only fires when this process still holds the (Consumed) mirror entry. A second host process/restart sharing the same sessions.db + graph store gets `Err(\"unknown control request\")` for the same already-landed request instead of `{resumed:false, landed:\"already_landed\"}`. No data loss: the durable record is landed, the run is Ready and the injection is queued; only the retry-after-restart response shape differs. Out of the round-3 counter-example scope (same-process double resume), so non-blocking.",
+      "evidence": "cd /tmp/l3f4-ask && cargo run -q -- r4-landed  ->  [R2.resume_after_landed] Ok({resumed:false, landed:\"already_landed\"}); [R2.resume_after_landed_second_call] Ok(...already_landed...); [R2.resume_from_fresh_host] Err(\"unknown control request `control-638233321120`\")",
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 769,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/l3f4-ask && cargo run -q -- r4-landed  ->  [R2.resume_after_landed] Ok({resumed:false, landed:\"already_landed\"}); [R2.resume_after_landed_second_call] Ok(...already_landed...); [R2.resume_from_fresh_host] Err(\"unknown control request `control-638233321120`\")"
+    },
+    {
+      "id": "R4-ADV-2",
+      "severity": "ADVISORY",
+      "title": "Sweep-rebuilt injection stamps post-transition version, live answer path stamps pre-transition version",
+      "detail": "answer_ask_in_session -> build_session_injection(answered_version = expected_version); sweep_unlanded_answer_landings -> build_session_injection(record.version) where record.version is already expected+1. terminalResult.output.version is therefore 1 on the live path and 2 on the rebuilt path for the same request. Display-only field, no consumer validates it, but the two landings are not byte-identical.",
+      "evidence": "r4-payload: [R1.rebuilt_serialized] = {\"output\":{\"answer\":\"继续执行-REAL-4F9C\",...,\"version\":2},...} vs land-bound live resume body containing \"{\\\"output\\\":{\\\"answer\\\":\\\"是\\\",...,\\\"version\\\":1}\" (ask_plan_commands.rs:324-332 answer path, :391-420 sweep path)",
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 343,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "r4-payload: [R1.rebuilt_serialized] = {\"output\":{\"answer\":\"继续执行-REAL-4F9C\",...,\"version\":2},...} vs land-bound live resume body containing \"{\\\"output\\\":{\\\"answer\\\":\\\"是\\\",...,\\\"version\\\":1}\" (ask_plan_commands.rs:324-332 answer path, :391-420 sweep path)"
+    },
+    {
+      "id": "R4-ADV-3",
+      "severity": "ADVISORY",
+      "title": "A JSON-null answer is delivered live but is indistinguishable from a missing payload for the sweep (would strand the record unlanded)",
+      "detail": "answer_json stores the literal `null`, and load_unlanded_answered_payloads maps it to Value::Null, which the sweep treats as `missing_durable_answer` and skips. Live path: answer_ask_in_session(json!(null)) queues an injection with answer:null and marks it landed, so the failure only surfaces if that landing write fails (or the bound resume never happens): the record then stays unlanded forever and the answer is never delivered. Fail-closed is consistent with the 'never rebuild with null' rule, but the entry accepts an answer payload it cannot replay.",
+      "evidence": "cd /tmp/l3f4-ask && cargo run -q -- r4-null  ->  [R5.answer_null] Ok((answered, queue)); [R5.durable_payload] Ok([]) (landed already); sweep path (answer_json=\"null\") hits ask_plan_commands.rs:358 `if answer.is_null() { skipped ... continue }`",
+      "file": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs",
+      "line": 362,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/l3f4-ask && cargo run -q -- r4-null  ->  [R5.answer_null] Ok((answered, queue)); [R5.durable_payload] Ok([]) (landed already); sweep path (answer_json=\"null\") hits ask_plan_commands.rs:358 `if answer.is_null() { skipped ... continue }`"
+    }
+  ],
+  "falsification_attempts": [
+    {
+      "claim": 1,
+      "result": "closed",
+      "evidence": "Fresh probe crate /tmp/l3f4-ask (links pony-agent-core by path, no repo writes). `cargo run -q -- r4-payload`: real entry `answer_ask_in_session(\"session-A\", req, 1, \"继续执行-REAL-4F9C\")` on a graph-bound Ask returned Ok(lifecycleState=answered, landed=resume); [R1.durable_payload] = Ok([(PersistedAsk{state:Answered, version:2, ...}, String(\"继续执行-REAL-4F9C\"))]) i.e. answer_json already durable while landed_at_ms is still NULL; a fresh host with an EMPTY injection queue rebuilt exactly 1 record: [R1.sweep_rebuilt] 1, [R1.rebuilt_terminal_result] output.answer = \"继续执行-REAL-4F9C\", [R1.rebuilt_answer_equals_user_choice] Some(true), [R1.rebuilt_serialized] contains no rebuiltFromDurable/placeholder/stub/null, [R1.landed_after_sweep] Ok(true). End-to-end: next turn's provider body carries the same real answer ([R1.provider_body_carries_real_answer] Some(true), [R1.provider_body_has_placeholder] Some([])). Atomicity is code-verified: transition_scoped_inner opens BEGIN IMMEDIATE, applies the state UPDATE and the answer_json UPDATE, then commits (ask_persistence.rs:399-435) — no window where Answered exists without its payload. A direct-CAS (no payload) record is skipped rather than rebuilt from a placeholder (`r4` precursor `cargo run -q -- rebuild` -> 'answer landing sweep skipped request=... reason=missing_durable_answer', queue stays empty)."
+    },
+    {
+      "claim": 2,
+      "result": "closed",
+      "evidence": "`cargo run -q -- r4-landed` (real graph run + mock provider + file-backed sessions.db): bound Ask answered -> [R2.answer_landing] Ok(landed=\"resume\"), [R2.landed_after_answer] Ok(false), [R2.unlanded_after_answer] Ok(1), [R2.queue_after_answer] [] (nothing marked landed, nothing queued before resume). Stale resume -> [R2.stale_resume] Err(\"bound at version 1 but resume presented version 6\"), [R2.landed_after_failed_resume] Ok(false), [R2.unlanded_after_failed_resume] Ok(1), [R2.run_phase_after_failed_resume] Some(\"waiting_user\") — failure keeps it retryable. Sweep retried with the binding's own version: [R2.sweep] 1, [R2.landed_after_sweep] Ok(true), [R2.run_phase_after_sweep] Some(\"ready\"), binding consumed. Idempotent replay: [R2.resume_after_landed] Ok({resumed:false, landed:\"already_landed\"}) and again on the second call — no Err. Non-bound landing reports the queue variant ([R3.answer_after_failed_gc] Ok((answered, landed=\"queue\"))). Residual scope gap recorded as ADVISORY R4-ADV-1 (fresh-host replay hits the missing mirror before the is_landed check)."
+    },
+    {
+      "claim": 3,
+      "result": "closed",
+      "evidence": "`cargo run -q -- r4-gc-fail` (full-delegation FailGcStore whose only failure is gc_orphans; archived session owns one pending Ask): [R3.expire] {orphaned:0, reclaimed:0} + log 'gc_orphan_asks failed; mirror left untouched'; [R3.disk_after_failed_gc] Some((1, Pending)) AND [R3.mirror_after_failed_gc] Some((1, Pending)), [R3.list_after_failed_gc] Some(1). Functional consequence probe: the still-pending record is answerable through the real entry ([R3.answer_after_failed_gc] Ok((answered, queue)), disk (2,Answered), mirror (2,Consumed)) — i.e. the round-3 fork (mirror terminally closed on disk failure) is gone. Mirror close is gated on `durable_written` (ask_plan_commands.rs:571-600); expire_asks' second half only reconciles Approval TTL (dispatcher.rs:1003-1022), so it cannot fork an Interaction."
+    },
+    {
+      "claim": 4,
+      "result": "closed",
+      "evidence": "`cargo run -q -- r4-retention` (file-backed store): direct guard — [R4.gc_direct_reclaimed] Ok(3) deleting only answered+landed / cancelled / superseded; survivors: req-pending Some(Pending), req-unlanded Some(Answered) (state=answered, landed_at_ms IS NULL) — never reclaimed, while req-landed/req-cancelled/req-superseded are None. Real host entry — seeded an Answered row landed 8 days ago plus an old unlanded Answered and a 30-day-old Pending, then `plane.expire_asks(Some(now))`: [R4.expire_first] reclaimed=1, [R4.expire_second] reclaimed=0 (no spin, no repeat), [R4.plane_survivor_req-old-landed] None / req-old-unlanded Some((2,Answered)) / req-old-pending Some((1,Pending)). Matches ask_persistence.rs:869-882 (`state <> 'pending' AND NOT (state='answered' AND landed_at_ms IS NULL) AND COALESCE(landed_at_ms, answered_at_ms, created_at_ms) < ?1`)."
+    }
+  ]
+}

@@ -1310,7 +1310,7 @@
       "tier": "C",
       "tier_basis": "跨模块（会话存储 schema/迁移 + 控制面 CAS + TUI + 桌面 + 契约重冻）；命中 blast keywords: session-store/schema-migration/persistence",
       "baseline_commit": "4e4fedc",
-      "status": "rework-required-2",
+      "status": "rework-required-3",
       "observed_at": "2026-11-06T17:20:00+08:00",
       "red_phase": {
         "status": "satisfied-by-equivalent",
@@ -1462,6 +1462,19 @@
             "锁序无环"
           ],
           "followups": "并入 T13（注入队列 + peek-ack + durable landing 账本）与 T14 红相"
+        },
+        "l3_final": {
+          "verdict": "FAIL",
+          "file": ".dev-team/review-l3-final-ask.json",
+          "claim1": "closed（队列 FIFO/不覆盖/run 维度/重启保序）",
+          "claim2": "closed（peek→成功终态 ack；失败保留；suspended 也 ack）",
+          "claim3": "counterexample：① sweep 用占位载荷 {rebuiltFromDurable:true} 喂伪答案；② 有 graph 绑定路径 mark_landed 无条件（Answered 零落点、run 仍 waiting_user、崩溃即永久不可重试）",
+          "claim4": "counterexample：gc_orphans 报错仍 close 镜像 ⇒ disk Pending/mirror Cancelled",
+          "advisory": "保留期 GC 会删除 Answered-but-unlanded 的唯一真相；sweep 仅由 list 触发",
+          "followups": [
+            "T15 红相",
+            "T16 核心修复"
+          ]
         }
       },
       "lead_gate_evidence_update": {
