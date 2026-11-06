@@ -1296,6 +1296,71 @@
         "l3p": "round2 PASS",
         "plan_gate": "FAIL→Lead closure PASS"
       }
+    },
+    {
+      "wave": 65,
+      "name": "ask-persistence",
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4",
+        "task-5"
+      ],
+      "tier": "C",
+      "tier_basis": "跨模块（会话存储 schema/迁移 + 控制面 CAS + TUI + 桌面 + 契约重冻）；命中 blast keywords: session-store/schema-migration/persistence",
+      "baseline_commit": "4e4fedc",
+      "status": "in_progress",
+      "observed_at": "2026-11-06T17:20:00+08:00",
+      "red_phase": {
+        "status": "satisfied-by-equivalent",
+        "detail": "T4 exec-core 在 Lead 红相锚定前即开始实现(impl mtime 17:28 > test mtime 17:27)，导致红相无法以时间序取证",
+        "mitigation": "冻结测试哈希 + 变异测试(mutation)证明测试对实现敏感；偏离记入 meta-retrospective",
+        "frozen_test_sha256": "287f93be…c8b8 (ask_persistence_acceptance.rs, per test-red.json)",
+        "mutation_evidence": {
+          "time_ordered": "17:26 对 T2 空桩运行 ask_persistence_acceptance = 11/11 failed, exit 101",
+          "M1": "transition 不递增 version → 7 红",
+          "M2": "load_pending 不过滤终态 → 8 红",
+          "M3": "supersede 空实现 → 1 红",
+          "M4": "CAS 忽略 version → 2 红",
+          "restore": "cp 还原后 sha256 一致，11/11 复绿"
+        },
+        "mutation_count": 5,
+        "lead_verification": {
+          "vitest_refrozen_specs": "5 files / 47 tests passed",
+          "cargo_ask_persistence_acceptance": "11 passed",
+          "cargo_ask_pending_contract": "6 passed",
+          "cargo_ask_pending_adversarial": "4 passed",
+          "verified_at": "2026-11-06T18:00:00+08:00"
+        }
+      },
+      "preexisting_red": [
+        {
+          "spec": "tests/acceptance/wave47-ob2-enforcement.spec.ts::T7-PONYGO-OB2-GATE",
+          "evidence": "干净 worktree 检出 HEAD 01047c4d 后运行 `ponygo observe audit --level ob2` = exit 1（tracing dynamic T4 PARTIAL，与本波 diff 无关）",
+          "disposition": "预存红，登记豁免；不阻塞本波，交 Phase 4 可观测性门禁统一处理"
+        }
+      ],
+      "adopted_contracts": [
+        {
+          "doc": ".dev-team/plan-ask-resume.md",
+          "provenance": "teammate 起草（自述裁决人=Lead），Lead 复核后采纳；裁决归属以本条为准",
+          "decision": "方案 A 主修（TUI turn 获得真实 run 身份）+ 方案 B fail-closed 兜底；拆为 task-6(核心) / task-7(TUI 接线)，独立波次，不并入 task-4",
+          "adopted_at": "2026-11-06T18:05:00+08:00"
+        }
+      ],
+      "scope_expansions": [
+        {
+          "task": "task-3",
+          "added": [
+            "tools/tui-audit/run_audit.sh",
+            "tools/tui-audit/mock_llm.py",
+            ".dev-team/evidence/tui-polish/"
+          ],
+          "reason": "test-agent 为 ask-resume 场景化取证改造审计 harness；executor-client 明确否认作者身份，已核实归属并改挂",
+          "corrected_at": "2026-11-06T18:12:00+08:00"
+        }
+      ]
     }
   ],
   "counters": {

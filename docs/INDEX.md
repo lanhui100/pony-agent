@@ -79,6 +79,7 @@
 - [0052 可观测性语义轨补全（成本明细、未计价标记、枚举收敛、降级标记、可读 trace 名、工具调用 id）](decisions/0052-observability-semantic-completeness-fixes.md)
 - [0053 token / 速度口径真值契约（wave-54）](decisions/0053-token-speed-truth-contract.md)
 - [0056 流式正文渲染收敛（stale-while-render）与运行状态 hop 级判定](decisions/0056-streaming-render-stale-while-render-and-hop-status.md)
+- [0074 Ask 控制请求：会话持久化 + 生命周期收口（墙钟 TTL 退出产品语义）](decisions/proposed/0074-ask-persistence-lifecycle.md)
 
 ## 3.1 交付证据归档
 

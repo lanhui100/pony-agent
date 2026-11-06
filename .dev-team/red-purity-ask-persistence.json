@@ -1,0 +1,216 @@
+{
+  "wave": "T3",
+  "task": "task-3",
+  "owner": "test-agent",
+  "generated_at": "2026-11-06T17:48:00+08:00",
+  "sut_file": "crates/pony-agent-core/src/agent/ask_persistence.rs",
+  "test_file": "crates/pony-agent-core/tests/ask_persistence_acceptance.rs",
+  "contract": ".dev-team/contract-matrix-ask-persistence.md §8 (P1–P6) + §3/§4 + tests/acceptance/adversarial/ask_persistence/README.md (A1–A4)",
+  "status": "RED",
+  "verdict": "EQUIVALENT_RED_VIA_MUTATION",
+  "why_equivalent_red": "T2 空桩落地后、Lead 红相锚定提交之前，T4 实现已开写并让 11 条冻结用例全绿 ⇒ 时间序红相无法取证（Lead 裁决 2026-11-06，记入 .dev-team/state.json）。以**变异验证**作等效红相证据：对实现注入 4 个契约违背变异，每次均让**预期用例**变红（exit 101，无编译错误），随后 cp 还原并以 sha256 校验文件与原始一致；测试文件自身自 17:27 起冻结未再改动断言。",
+  "frozen_test_file_sha256": "306efa425e93dfef05e9d30c48670db5ec9ae690f3f01b7b8ff85c10d61fedb6",
+  "sut_sha256_before": "287f93bee0b751199d56465b9bd17f6246e61c99ab90354594aad7803c74c8b8",
+  "sut_sha256_after": "287f93bee0b751199d56465b9bd17f6246e61c99ab90354594aad7803c74c8b8",
+  "sut_restored_identical": true,
+  "no_git_write_operations": true,
+  "baseline_red_on_stub": {
+    "note": "17:26 对 T2 空桩（open_ask_store/open_in_memory_ask_store = unimplemented!()）运行时：11/11 全部失败，exit 101，无编译错误；失败原语为 SUT panic(NotImplementedError) 被 catch_stub_panic 收敛后由 assert! 断言呈现（Lead 允许 panic 作为原生失败原语，此处仍为断言失败形态）。",
+    "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+    "red_exit": 101,
+    "summary": "test result: FAILED. 0 passed; 11 failed; 0 ignored; 0 measured; 0 filtered out",
+    "failed_assertions": {
+      "persisted_ask_roundtrip_survives_process_restart": "P1：`open_ask_store(db)` 必须返回可用的持久化 store（空桩期未实现）",
+      "state_machine_rejects_terminal_transitions": "P2：必须能打开持久化 store",
+      "explicit_ignore_transitions_to_cancelled": "P2：必须能打开持久化 store",
+      "cas_rejects_replay_after_restart": "P3：必须能打开持久化 store",
+      "cas_rejects_version_mismatch_after_restart": "P3：必须能打开持久化 store",
+      "new_user_message_supersedes_pending_ask": "P4：必须能打开持久化 store",
+      "no_wall_clock_expiry_path": "P6：必须能打开持久化 store",
+      "adversarial_concurrent_double_answer_yields_exactly_one_winner": "A1：必须能打开持久化 store",
+      "adversarial_replay_stale_version_after_restart_rejected": "A2：必须能打开持久化 store",
+      "adversarial_terminal_state_cannot_be_reverted_to_pending": "A3：必须能打开持久化 store",
+      "adversarial_orphaned_ask_cannot_be_answered_after_restart": "A4：必须能打开持久化 store"
+    }
+  },
+  "mutations": [
+    {
+      "mutation": "M1_transition_does_not_bump_version",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::transition — UPDATE 写回 `version` 时不再 `saturating_add(1)`（`stored.version.saturating_add(1)` → `stored.version`）",
+      "contract": "§3 状态机副作用：每次合法迁移 version+1（CAS 单调性）",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "summary": "test result: FAILED. 4 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+      "killed_tests": [
+        "adversarial_concurrent_double_answer_yields_exactly_one_winner",
+        "adversarial_replay_stale_version_after_restart_rejected",
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "cas_rejects_replay_after_restart",
+        "cas_rejects_version_mismatch_after_restart",
+        "explicit_ignore_transitions_to_cancelled",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "sha256_mutated": null,
+      "restored_ok": true
+    },
+    {
+      "mutation": "M2_load_pending_does_not_filter_terminal",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::load_pending — 去掉 `AND state = 'pending'` 过滤，终态记录会被当成待决返回",
+      "contract": "§3「`Superseded`/`Orphaned` 不再参与 load_pending；只有 Pending 可被宿主呈现」",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "summary": "test result: FAILED. 3 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+      "killed_tests": [
+        "adversarial_concurrent_double_answer_yields_exactly_one_winner",
+        "adversarial_orphaned_ask_cannot_be_answered_after_restart",
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "cas_rejects_replay_after_restart",
+        "explicit_ignore_transitions_to_cancelled",
+        "new_user_message_supersedes_pending_ask",
+        "no_wall_clock_expiry_path",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "sha256_mutated": null,
+      "restored_ok": true
+    },
+    {
+      "mutation": "M3_supersede_is_a_noop",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::supersede_pending_on_user_message — 入口即 `return Ok(0)`（新用户消息不再取代 Pending Ask）",
+      "contract": "§3「用户新消息进入会话 ⇒ Pending→Superseded 且不再出现在待决列表」",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "summary": "test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s",
+      "killed_tests": [
+        "new_user_message_supersedes_pending_ask"
+      ],
+      "sha256_mutated": null,
+      "restored_ok": true
+    },
+    {
+      "mutation": "M4_cas_ignores_version",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::transition — 删除 `stored.version != expected_version` 校验（CAS 不再看版本）",
+      "contract": "§4 CAS 四元组校验：`(request_id, version, nonce, session_id)` 任一不符即拒绝",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "summary": "test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s",
+      "killed_tests": [
+        "adversarial_replay_stale_version_after_restart_rejected",
+        "cas_rejects_version_mismatch_after_restart"
+      ],
+      "sha256_mutated": null,
+      "restored_ok": true
+    },
+    {
+      "mutation": "M5_terminal_transition_allowed",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::transition — 去掉 `|| stored.state != AskLifecycleState::Pending` 守卫（终态可再迁移）",
+      "contract": "§3「终态 → 任意 = 拒绝」+ §4 稳定错误码",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "killed_tests": [
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "explicit_ignore_transitions_to_cancelled",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "restored_ok": true
+    }
+  ],
+  "failures": [
+    {
+      "mutation": "M1_transition_does_not_bump_version",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::transition — UPDATE 写回 `version` 时不再 `saturating_add(1)`（`stored.version.saturating_add(1)` → `stored.version`）",
+      "contract": "§3 状态机副作用：每次合法迁移 version+1（CAS 单调性）",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "summary": "test result: FAILED. 4 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+      "killed_tests": [
+        "adversarial_concurrent_double_answer_yields_exactly_one_winner",
+        "adversarial_replay_stale_version_after_restart_rejected",
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "cas_rejects_replay_after_restart",
+        "cas_rejects_version_mismatch_after_restart",
+        "explicit_ignore_transitions_to_cancelled",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "sha256_mutated": null,
+      "restored_ok": true
+    },
+    {
+      "mutation": "M2_load_pending_does_not_filter_terminal",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::load_pending — 去掉 `AND state = 'pending'` 过滤，终态记录会被当成待决返回",
+      "contract": "§3「`Superseded`/`Orphaned` 不再参与 load_pending；只有 Pending 可被宿主呈现」",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "summary": "test result: FAILED. 3 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+      "killed_tests": [
+        "adversarial_concurrent_double_answer_yields_exactly_one_winner",
+        "adversarial_orphaned_ask_cannot_be_answered_after_restart",
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "cas_rejects_replay_after_restart",
+        "explicit_ignore_transitions_to_cancelled",
+        "new_user_message_supersedes_pending_ask",
+        "no_wall_clock_expiry_path",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "sha256_mutated": null,
+      "restored_ok": true
+    },
+    {
+      "mutation": "M3_supersede_is_a_noop",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::supersede_pending_on_user_message — 入口即 `return Ok(0)`（新用户消息不再取代 Pending Ask）",
+      "contract": "§3「用户新消息进入会话 ⇒ Pending→Superseded 且不再出现在待决列表」",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "summary": "test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s",
+      "killed_tests": [
+        "new_user_message_supersedes_pending_ask"
+      ],
+      "sha256_mutated": null,
+      "restored_ok": true
+    },
+    {
+      "mutation": "M4_cas_ignores_version",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::transition — 删除 `stored.version != expected_version` 校验（CAS 不再看版本）",
+      "contract": "§4 CAS 四元组校验：`(request_id, version, nonce, session_id)` 任一不符即拒绝",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "summary": "test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s",
+      "killed_tests": [
+        "adversarial_replay_stale_version_after_restart_rejected",
+        "cas_rejects_version_mismatch_after_restart"
+      ],
+      "sha256_mutated": null,
+      "restored_ok": true
+    },
+    {
+      "mutation": "M5_terminal_transition_allowed",
+      "mutation_point": "crates/pony-agent-core/src/agent/ask_persistence.rs::SqliteAskStore::transition — 去掉 `|| stored.state != AskLifecycleState::Pending` 守卫（终态可再迁移）",
+      "contract": "§3「终态 → 任意 = 拒绝」+ §4 稳定错误码",
+      "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+      "exit_code": 101,
+      "compile_error": false,
+      "killed_tests": [
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "explicit_ignore_transitions_to_cancelled",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "restored_ok": true
+    }
+  ],
+  "green_after_restore": {
+    "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+    "red_exit": 0,
+    "summary": "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+    "note": "还原后复跑（3 次并行 + 1 次 --test-threads=1）均 11/11 通过，无 Flaky。"
+  },
+  "lead_ruling_2026_11_06": "Lead 裁决：GC 只允许回收终态记录，永不按 created_at_ms 回收 Pending；load(request_id) 读面本波不加，Cancelled/Superseded 区分用 transition 返回态 + load_pending 排除 + 终态再迁移稳定错误码三重锚定（已加断言并由 M5 证明可杀死）。",
+  "mutations_count": 5
+}

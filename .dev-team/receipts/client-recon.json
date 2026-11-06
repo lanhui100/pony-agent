@@ -1,0 +1,68 @@
+{
+  "task": "task-5",
+  "role": "executor-client",
+  "phase": "recon (read-only)",
+  "generated_at": "2026-11-06T17:30:00+08:00",
+  "blocked_by": "task-3",
+  "gate_observed": {
+    "crates/pony-agent-core/tests/ask_persistence_acceptance.rs": "absent",
+    "note": "waiting for red-phase acceptance contract before any edit"
+  },
+  "contract_sources": {
+    ".dev-team/contract-matrix-ask-persistence.md": "frozen (untracked working-tree file), §6 client behavior P5, §9 C2-* re-freeze list",
+    "src/types/ask-plan.ts": "already carries AskLifecycleState + PersistedAsk (T2 protocol freeze landed)",
+    "crates/pony-agent-core/src/agent/ask_persistence.rs": "protocol-freeze trait, no impl yet (T4 pending)"
+  },
+  "write_scope": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src/stores/ask.ts",
+    "src/components/AskPanel.vue",
+    "src-tauri/src/lib.rs",
+    ".dev-team/receipts"
+  ],
+  "tui_change_points": [
+    {"loc": "tui.rs:1149,1381", "symbol": "PendingUiRequest.expires_at_ms / pending_ui_request_from_value", "action": "drop TTL field from the handle (record has no expires_at_ms per contract §2)"},
+    {"loc": "tui.rs:1916-1929", "symbol": "ASK_EXPIRED_NOTICE / ASK_STALE_NOTICE", "action": "collapse to one Chinese notice: 该提问已失效，已同步最新待处理请求 (contract §6.5); no English host internals"},
+    {"loc": "tui.rs:1933,1941", "symbol": "pending_request_expired / ask_deadline_hint", "action": "delete wall-clock TTL helpers (and their unit tests at 11396/11407)"},
+    {"loc": "tui.rs:7483-7492", "symbol": "render_ask_inline countdown span", "action": "remove ⏳ 剩余 Ns deadline span entirely"},
+    {"loc": "tui.rs:7480-7487", "symbol": "render_ask_inline key hints", "action": "esc 取消 -> esc 忽略此提问 (explicit ignore => Cancelled)"},
+    {"loc": "tui.rs:8440-8458", "symbol": "expire_pending_request_now", "action": "replace with lifecycle reconcile: re-list, close panel if request no longer Pending; no expire_asks as product verdict"},
+    {"loc": "tui.rs:8467-8496", "symbol": "report_control_request_error", "action": "keep Chinese-only mapping + raw string to runtime log only"},
+    {"loc": "tui.rs:8516-8523", "symbol": "submit_ask_answers local TTL guard", "action": "delete guard; submit always goes through CAS"},
+    {"loc": "tui.rs:8991-9019", "symbol": "check_pending_asks TTL pre-checks", "action": "delete both TTL branches; keep single panel per request_id; only Pending list drives the panel"},
+    {"loc": "tui.rs:9626-9648", "symbol": "AskUserQuestion Esc branch", "action": "delete expired pre-check; Esc => cancel_ask (explicit ignore => Cancelled)"},
+    {"loc": "tui.rs:4660-4680(rebuild helper)", "symbol": "new fn rebuild_pending_ask_panel(state, cp)", "action": "one list_pending_asks(Some(session_id)) call, idempotent per request_id"},
+    {"loc": "tui.rs:8126-8132,8617,8647,9296", "symbol": "startup resume / enter_teammate_session / clear / /resume", "action": "call rebuild_pending_ask_panel after hydrate so the panel reappears on session entry"}
+  ],
+  "desktop_change_points": [
+    {"loc": "src/stores/ask.ts:8,25-31", "symbol": "ASK_EXPIRED_MESSAGE / isAskExpired", "action": "delete (contract §9)"},
+    {"loc": "src/stores/ask.ts:144-146,193-197,281-284", "symbol": "refresh self-heal + answer/cancel TTL guards", "action": "delete all wall-clock guards"},
+    {"loc": "src/stores/ask.ts:326-368", "symbol": "reconcileExpiredAsks / reconcileExpiredAsk", "action": "delete TTL semantics; replace with ignore() => ask_cancel => Cancelled"},
+    {"loc": "src/stores/ask.ts:371-384", "symbol": "expire()", "action": "keep command but demote to GC only per contract §5 (must not flip Pending->Expired)"},
+    {"loc": "src/stores/ask.ts:131-157", "symbol": "refresh()", "action": "add openSession(sessionId) entry that always re-lists on session open (contract §6.6); dedupe by requestId"},
+    {"loc": "src/components/AskPanel.vue:4,22-40,74-86,130-133,141-148", "symbol": "askIsExpired/askIsLocked/formatExpiry/Clock3/已过期 hint", "action": "delete countdown + expired disabled state"},
+    {"loc": "src/components/AskPanel.vue:111-191", "symbol": "card template", "action": "add createdAtMs question-time label + 忽略此提问 button (data-testid=ask-ignore-submit); keep :key=requestId (single panel per request_id)"},
+    {"loc": "src-tauri/src/lib.rs:226-286", "symbol": "ask_list_pending/ask_answer/ask_cancel/ask_expire", "action": "no new command needed: ignore == ask_cancel (contract §5 keeps names); revisit only if T4 adds ask_ignore"}
+  ],
+  "frozen_acceptance_conflicts": {
+    "status": "REPORTED_TO_LEAD",
+    "note": "task-5 requires deleting TTL semantics; these committed frozen specs still assert the old C2 TTL contract. Executor is read-only on them.",
+    "files": [
+      {"path": "tests/ask-pending-expiry.spec.ts", "lines": 594, "why": "imports isAskExpired directly (compile failure if removed); asserts C2-1..C2-3 expiry reconcile"},
+      {"path": "tests/ask-panel-expired.spec.ts", "lines": 206, "why": "C2-4 asserts every control disabled + text 过期 for an expired card; C2-10 render-clock assertion"},
+      {"path": "tests/acceptance/wave17/tabular-nums-contract.spec.ts", "line": 325, "why": "C2-4 requires exactly 1 inline-flex countdown span matching /N(s|m) 后过期/"},
+      {"path": "tests/ask-store.spec.ts", "line": 338, "why": "calls ask_expire and reconciles the list -- survives only if expire() is kept as GC"}
+    ],
+    "contract_gap": ".dev-team/contract-matrix-ask-persistence.md §9 only names tests/ask-store.spec.ts; the real breakage set is 4 files (above)."
+  },
+  "additional_findings": [
+    "src/components/AskPanel.vue is NOT mounted anywhere in src/ -- the live in-app ask card lives in src/components/chat/WorkspaceComposer.vue (outside this task's write scope). 'Open session => rebuild panel' therefore has no real mount point yet; WorkspaceComposer.vue would need the same 忽略 button + no-countdown treatment, or AskPanel must be mounted.",
+    "WorkspaceComposer.vue contains no expiresAtMs/countdown/已过期 text today (verified), so no de-TTL edit is needed there -- only a possible mount/ignore-button gap.",
+    "PONY_AUDIT_ASK_BOOTSTRAP exists (tui.rs:7893-7967, debug-only, fail-closed) and dispatches through the real governed pipeline -- usable for the PTY smoke test; /tmp/repro_ask_expiry.sh is a working harness template.",
+    "src-tauri/src/lib.rs ask_* commands already forward to HostControlPlane; T4's persisted load_pending should surface automatically with no IPC change."
+  ],
+  "git_discipline": {
+    "git_writes_performed": 0,
+    "note": "parallel session holds uncommitted changes including tui.rs; recon was read-only"
+  }
+}

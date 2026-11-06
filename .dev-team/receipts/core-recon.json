@@ -1,0 +1,70 @@
+{
+  "task": "task-4",
+  "role": "executor-core",
+  "phase": "recon (read-only)",
+  "generated_at": "2026-11-06T17:25:00+08:00",
+  "blocked_by": "task-3",
+  "gate_observed": {
+    "crates/pony-agent-core/tests/ask_persistence_acceptance.rs": "absent (polling every 5s, hard stop ~25min)",
+    "note": "no implementation edit before the frozen red test exists (red-first discipline)"
+  },
+  "contract_sources": {
+    "docs/decisions/proposed/0074-ask-persistence-lifecycle.md": "Status: proposed; decision C = persistence + lifecycle closure; TTL leaves product semantics",
+    ".dev-team/contract-matrix-ask-persistence.md": "frozen: §2 data model + sessions.db pending_asks table + forward migration; §3 state machine; §4 CAS; §5 control API; §8 acceptance mapping",
+    "crates/pony-agent-core/src/agent/ask_persistence.rs": "protocol freeze only: PersistedAsk / AskLifecycleState / AskPersistenceStore trait; zero impl, zero I/O",
+    "src/types/ask-plan.ts": "TS mirror already present (AskLifecycleState + PersistedAsk)"
+  },
+  "current_state_facts": [
+    {"loc": "crates/pony-agent-core/src/agent/dispatcher.rs:492", "fact": "pending control requests live only in Inner.pending_requests: Mutex<BTreeMap<String, PendingControlRequest>> (process memory, lost on exit)"},
+    {"loc": "crates/pony-agent-core/src/agent/dispatcher.rs:1582-1604", "fact": "persist_pending_request builds PendingControlRequest (version=1, nonce, expires_at_ms=now+config.control_request_expiry_ms) and inserts into the in-memory map; Interaction kind derives from PermissionVerdict::WaitingHost"},
+    {"loc": "crates/pony-agent-core/src/agent/dispatcher.rs:1610-1671", "fact": "consume_control_request = the only CAS consumer; calls request.can_consume(...) then kind/descriptor/digest match, bumps version, returns ControlRequestConsumed"},
+    {"loc": "crates/pony-agent-core/src/agent/tool_runtime.rs:181-218", "fact": "PendingControlRequest (incl. expires_at_ms) + can_consume(): line 216 `now_ms <= self.expires_at_ms` is the current expiry gate"},
+    {"loc": "crates/pony-agent-core/src/agent/dispatcher.rs:995-1011", "fact": "expire_control_requests(now_ms): Pending -> Expired on wall clock, version+1; this is the product expiry today"},
+    {"loc": "crates/pony-agent-core/src/agent/budget.rs:85", "fact": "control_request_expiry_ms = 60_000 default; single TTL source for Ask and Approval"},
+    {"loc": "crates/pony-agent-core/src/agent/ask_control.rs:26-42", "fact": "list_pending_asks(dispatcher) reads dispatcher.pending_requests(); filter = Interaction kind + Pending state"},
+    {"loc": "crates/pony-agent-core/src/agent/ask_control.rs:66-68", "fact": "expire_asks delegates to dispatcher.expire_control_requests"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs:20-32", "fact": "HostControlPlane::list_pending_asks(session_id) -> Value; in-memory source only"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs:37-52", "fact": "answer_ask: pending_request(request_id) -> require_current_version -> ControlRequestAuthorization::for_request -> dispatcher CAS"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs:74-88", "fact": "cancel_ask: same shape (explicit ignore path for the client)"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs:92-96", "fact": "expire_asks(now_ms?) -> dispatcher expiry (must degrade to GC/Orphaned only)"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs:229-260", "fact": "graph_resume_ask: requires pending request already Consumed, then graph_runner.resume_ask_wait (answer landing point #1)"},
+    {"loc": "crates/pony-agent-core/src/agent/runtime/mod.rs:270-278", "fact": "take_pending_ask_injection(run_id) consumes one-shot GraphAskResumeInjection from graph run store (answer landing point #2); called from runtime/turn_sync.rs:685 and runtime/turn_stream.rs:1735"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/mod.rs:927", "fact": "HostControlPlane.ask_dispatcher: Arc<GovernedDispatcher> (shared with runtime via governed_dispatcher())"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/mod.rs:1188-1208", "fact": "builder resolves ask_dispatcher (injected | runtime.governed_dispatcher() | default_ask_dispatcher)"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/mod.rs:1389-1401", "fact": "run_turn entry (non-stream); graph entries 1419/1459/1502 + prepare_*_stream 1565/1615/1680 funnel through advance_graph_run / begin_graph_run_stream -> supersede hooks must sit on these user-message entries"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs:559", "fact": "delete_session -> SessionStore::remove_session"},
+    {"loc": "crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs:80", "fact": "archive_session -> SessionStore::archive_session (archive hook for Orphaned GC)"},
+    {"loc": "crates/pony-agent-core/src/agent/session/store.rs:92-113", "fact": "SessionStore struct: in-memory SessionMap + workspaces + Box<dyn SessionBackend> + Arc<AuthorizeStore>"},
+    {"loc": "crates/pony-agent-core/src/agent/session/store.rs:180-205", "fact": "SessionStore::new() builds SqliteSessionBackend(default_sqlite_path(), WriteSeparate); with_backend(Box<dyn SessionBackend>) is the test/replay seam"},
+    {"loc": "crates/pony-agent-core/src/agent/session/store.rs:2356-2390", "fact": "save_to_backend() serializes PersistedStore (sessions blob + workspace/authorization/attachment metadata) via backend.save_store"},
+    {"loc": "crates/pony-agent-core/src/agent/session/backend.rs:214-378", "fact": "SessionBackend trait: load_store/save_store/persist_command/upsert_session/remove_session/load_turn_events/attachment_root; default impls make new methods backward compatible"},
+    {"loc": "crates/pony-agent-core/src/agent/session/types.rs:312-365", "fact": "SessionState is the per-session persisted blob (serde default on every optional field => old DBs open)"},
+    {"loc": "crates/pony-agent-core/src/agent/sqlite_session.rs:254-560", "fact": "ensure_schema(): CREATE TABLE IF NOT EXISTS + explicit ALTER TABLE migrations (PA-093 pattern); connection opened lazily with WAL + busy_timeout; note: OUTSIDE task-4 write scope"},
+    {"loc": "crates/pony-agent-core/src/agent/sqlite_session.rs:3450", "fact": "default_sqlite_path(); #[cfg(test)] redirects to unique_test_sqlite_path()"},
+    {"loc": "src-tauri/src/lib.rs:230-286", "fact": "ask_list_pending / ask_answer / control_approve_request / ask_cancel / ask_expire command bodies (registered 1483-1487) — T5 scope, not task-4"},
+    {"loc": "crates/pony-agent-core/tests/ask_pending_contract.rs:243-320", "fact": "legacy tests still assert wall-clock expiry semantics (expire => Expired, answer rejected after TTL) — these encode the semantics this wave removes; re-freeze decision belongs to Lead/Test Agent"},
+    {"loc": "crates/pony-agent-core/tests/ask_pending_adversarial.rs:176,280-340", "fact": "legacy adversarial test asserts 'cannot be consumed' + expiry reconciliation; same re-freeze note"}
+  ],
+  "change_points": [
+    {"path_line": "crates/pony-agent-core/src/agent/ask_persistence.rs:98-146", "change": "keep frozen trait signatures; add the concrete persistent implementation (types may gain impl blocks only)"},
+    {"path_line": "crates/pony-agent-core/src/agent/session/", "change": "new pending-ask persistence module + schema/forward migration + backend seam; recovery read path load_pending"},
+    {"path_line": "crates/pony-agent-core/src/agent/dispatcher.rs:492,1582,1610,995", "change": "persist on create (version/nonce), CAS via store, drop wall-clock gate from consume, expire => GC/Orphaned only"},
+    {"path_line": "crates/pony-agent-core/src/agent/ask_control.rs:26,66", "change": "list_pending_asks reads store; expire_asks becomes GC"},
+    {"path_line": "crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs:20,37,74,92", "change": "read/write through the store; answer => Answered + answer landing"},
+    {"path_line": "crates/pony-agent-core/src/agent/control_plane/mod.rs:1389,1419,1459,1502,1988", "change": "new user message => supersede pending asks of that session"},
+    {"path_line": "crates/pony-agent-core/src/agent/control_plane/history_commands.rs:559 / workspace_commands.rs:80", "change": "session delete/archive => Orphaned + GC"},
+    {"path_line": "crates/pony-agent-core/src/agent/runtime/mod.rs:270", "change": "answer landing: graph binding resume else tool-result injection into next turn (reuse take_pending_ask_injection)"}
+  ],
+  "migration_strategy": {
+    "target": "pending ask records persist in the session store (sessions.db family) keyed (session_id, request_id)",
+    "old_db_compat": "forward migration: create the ask table/metadata on open when missing; no backfill from process memory (nothing to migrate); all serde fields #[serde(default)] so an old blob/DB opens unchanged",
+    "open_question": "the frozen protocol declares only a trait (no concrete constructor). The red test must be able to compile: it needs a named concrete implementor. Candidate: `impl AskPersistenceStore for SessionStore` backed by the sqlite backend, constructed via SessionStore::new()/with_backend(). Exact concrete type is taken from the frozen test when it lands (no impl written before red)."
+  },
+  "open_risks": [
+    "T2 freeze has no concrete store type/constructor => red test compile risk (assertion-failure requirement); do not pre-implement before red",
+    "legacy expiry tests (ask_pending_contract / ask_pending_adversarial) will go red by design once TTL leaves product semantics; they are outside task-4 write scope",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs is NOT in task-4 write scope although contract §2 names sessions.db; any table-in-sessions.db approach must live under src/agent/session/**",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs (PendingControlRequest / can_consume) is NOT in task-4 write scope; TTL gate must be dropped from dispatcher-side CAS instead",
+    "parallel session has uncommitted edits in the same crates (session/mod.rs, session/id.rs, tui_batch3_regression.rs, metrics files); no git writes, no reformatting"
+  ]
+}

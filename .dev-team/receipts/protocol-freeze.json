@@ -1,0 +1,94 @@
+{
+  "task": "task-2 (wave T2) — Ask persistence protocol freeze",
+  "agent": "protocol-agent",
+  "frozenContract": ".dev-team/contract-matrix-ask-persistence.md §2/§4 (Lead task-1; §2 updated in place by me 17:36 for the Send + Sync ruling)",
+  "files": [
+    "crates/pony-agent-core/src/agent/ask_persistence.rs",
+    "crates/pony-agent-core/src/agent/mod.rs",
+    "src/types/ask-plan.ts",
+    ".dev-team/contract-matrix-ask-persistence.md"
+  ],
+  "filesNotes": {
+    "crates/pony-agent-core/src/agent/ask_persistence.rs": "created by me as the pure stub (types + trait + factory stubs + error consts). TAKEN OVER by the T4 implementer at 17:28 (now 489 lines with SqliteAskStore/rusqlite bodies); I did not re-edit it in round 2 because the ruled `Send + Sync` supertrait was already applied there (line 116).",
+    "crates/pony-agent-core/src/agent/mod.rs": "one-line addition only: `pub mod ask_persistence;` (Lead explicitly authorized; file untouched by the parallel session)",
+    "src/types/ask-plan.ts": "appended PersistedAsk / AskLifecycleState / AskKind / AskPersistenceErrorCode; existing exports unchanged",
+    ".dev-team/contract-matrix-ask-persistence.md": "§2 API bullet rewritten in place: `pub trait AskPersistenceStore: Send + Sync` + Box<dyn …> Send+Sync rationale (Lead ruling ①)"
+  },
+  "rounds": [
+    {
+      "round": "round1 — freeze (stub tree, before T4/T5 started)",
+      "commands": [
+        { "cmd": "python3 ~/.agents/skills/dev-team/scripts/dev-stub-lint.py crates/pony-agent-core/src/agent/ask_persistence.rs src/types/ask-plan.ts", "exit": 0 },
+        { "cmd": "rustfmt --edition 2021 --check crates/pony-agent-core/src/agent/ask_persistence.rs", "exit": 0 },
+        { "cmd": "cargo check -p pony-agent-core", "exit": 0 },
+        { "cmd": "npx vue-tsc --noEmit", "exit": 0 },
+        { "cmd": "node scripts/check-ts-contract.mjs", "exit": 0 }
+      ]
+    },
+    {
+      "round": "round2 — Send + Sync ruling re-run on the live tree (T4 impl + T5 client edits already present at 17:28-17:36)",
+      "commands": [
+        { "cmd": "python3 ~/.agents/skills/dev-team/scripts/dev-stub-lint.py crates/pony-agent-core/src/agent/ask_persistence.rs", "exit": 0 },
+        { "cmd": "rustfmt --edition 2021 --check crates/pony-agent-core/src/agent/ask_persistence.rs", "exit": 1 },
+        { "cmd": "cargo check -p pony-agent-core", "exit": 0 },
+        { "cmd": "npx vue-tsc --noEmit", "exit": 2 },
+        { "cmd": "node scripts/check-ts-contract.mjs", "exit": 0 }
+      ]
+    }
+  ],
+  "commands": [
+    { "cmd": "python3 ~/.agents/skills/dev-team/scripts/dev-stub-lint.py crates/pony-agent-core/src/agent/ask_persistence.rs", "exit": 0, "round": 2 },
+    { "cmd": "cargo check -p pony-agent-core", "exit": 0, "round": 2, "note": "0 error / 0 warning; tree already contains the T4 SqliteAskStore implementation" },
+    { "cmd": "node scripts/check-ts-contract.mjs", "exit": 0, "round": 2 },
+    { "cmd": "npx vue-tsc --noEmit", "exit": 2, "round": 2, "note": "8 errors, ALL in src/stores/ask.ts (T5 mid-edit: isAskExpired / ASK_EXPIRED_MESSAGE / reconcilingExpired). Zero errors in src/types/ask-plan.ts; ask.ts imports only GraphAskWait+PendingAsk, so the protocol-freeze types cannot be the cause. Round-1 run on the same ask-plan.ts was exit 0." },
+    { "cmd": "rustfmt --edition 2021 --check crates/pony-agent-core/src/agent/ask_persistence.rs", "exit": 1, "round": 2, "note": "T4 implementation is not rustfmt-clean (2 chains); rustfmt is not an acceptance gate here and the file no longer belongs to T2 — reported to Lead, not edited by me." }
+  ],
+  "verifiedTraitDeclaration": "crates/pony-agent-core/src/agent/ask_persistence.rs:116  pub trait AskPersistenceStore: Send + Sync  (factory returns unchanged: AskPersistenceResult<Box<dyn AskPersistenceStore>>)",
+  "stubs": [
+    "AskPersistenceStore::load_pending",
+    "AskPersistenceStore::upsert",
+    "AskPersistenceStore::transition",
+    "AskPersistenceStore::supersede_pending_on_user_message",
+    "AskPersistenceStore::gc_orphans",
+    "open_ask_store",
+    "open_in_memory_ask_store"
+  ],
+  "frozenInterface": {
+    "rust": {
+      "resultAlias": "AskPersistenceResult<T> = Result<T, String>",
+      "trait": "pub trait AskPersistenceStore: Send + Sync",
+      "structPersistedAsk": "request_id, version, nonce, session_id, run_id: Option<String>, turn_id, call_id, kind: PendingControlRequestKind, prompt: String, options: Vec<String>, state, created_at_ms, answered_at_ms: Option<u64>",
+      "enumAskLifecycleState": "Pending | Answered | Cancelled | Superseded | Orphaned (snake_case)",
+      "serde": "PersistedAsk camelCase; no expires_at_ms field by design",
+      "errorCodes": ["ask_state_conflict", "ask_version_mismatch", "ask_nonce_mismatch", "ask_not_found"],
+      "constructors": {
+        "open_ask_store": "fn(db_path: &std::path::Path) -> AskPersistenceResult<Box<dyn AskPersistenceStore>>",
+        "open_in_memory_ask_store": "fn() -> AskPersistenceResult<Box<dyn AskPersistenceStore>>"
+      },
+      "signatures": {
+        "load_pending": "fn(&self, session_id: &str) -> AskPersistenceResult<Vec<PersistedAsk>>",
+        "upsert": "fn(&self, ask: &PersistedAsk) -> AskPersistenceResult<()>",
+        "transition": "fn(&self, request_id: &str, from: AskLifecycleState, to: AskLifecycleState, expected_version: u64) -> AskPersistenceResult<PersistedAsk>",
+        "supersede_pending_on_user_message": "fn(&self, session_id: &str, at_ms: u64) -> AskPersistenceResult<usize>",
+        "gc_orphans": "fn(&self, archived_session_ids: &[String], now_ms: u64) -> AskPersistenceResult<usize>"
+      }
+    },
+    "ts": {
+      "PersistedAsk": "camelCase mirror, required prompt: string / options: string[]",
+      "AskLifecycleState": "strict snake_case union",
+      "AskKind": "interaction | approval",
+      "AskPersistenceErrorCode": "stable rejection-code union mirroring the Rust consts"
+    }
+  },
+  "risks": [
+    "写域冲突（已发生）：ask_persistence.rs 在 T2 冻结后被 T4 实现方接管（17:28 起含 rusqlite 实现）。我方 round2 未再改该文件，只核验 trait 声明；后续若 Lead 需要空桩纯度，需要 T4/T2 重新划界。",
+    "round2 的 vue-tsc Exit 2 与本冻结无因果：全部 8 条错误落在 src/stores/ask.ts（T5 编辑中），ask-plan.ts 零错误；T5 完成时该门禁应自行回绿，但其通过不能归因于本波协议文件。",
+    "round2 的 rustfmt Exit 1 来自 T4 实现（非 T2 空桩）；本波验收未把 rustfmt 列为门禁，故不影响 T2 结论。",
+    "对象安全：trait 现带 Send + Sync supertrait，仍无泛型/Self 返回，Box<dyn AskPersistenceStore> 合法且跨线程可注入 Tauri State（cargo check 已验证）。",
+    "返回值形态：五方法统一 Result<T, String>；T3 测试与 T4 实现须按 Result 调用。",
+    "字段形态以 §2 为准：prompt: String、options: Vec<String>，无 options 的 Ask 落盘为空数组，不得用 null 判定缺失。",
+    "kind 复用 tool_runtime::PendingControlRequestKind（serde interaction/approval），改名会波及存储格式。",
+    "构造器 unimplemented!() 的红相形态已被 Lead 确认保留（语言原生原语）；T4 已将其实现化，故红相语义现由测试侧承担。",
+    "并行会话 cargo test 长占用共享 target 目录锁，round2 cargo check 含等待时间（7m45s），退出码 0、0 warning。"
+  ]
+}

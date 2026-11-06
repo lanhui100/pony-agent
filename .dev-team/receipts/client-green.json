@@ -1,0 +1,119 @@
+{
+  "task": "task-5",
+  "role": "executor-client",
+  "verdict": "GREEN (client scope) — PTY S1/S2/S3 all pass on my own re-run; remaining reds are the 17 items owned by Test Agent refreeze + 2 pre-existing/waived",
+  "generated_at": "2026-11-06T17:52:00+08:00",
+  "contract": ".dev-team/contract-matrix-ask-persistence.md §6 (P5 客户端行为) / §9 (C2-* 重冻)",
+  "files_changed": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "src/stores/ask.ts",
+    "src/components/AskPanel.vue",
+    "src/components/chat/WorkspaceComposer.vue"
+  ],
+  "files_intentionally_untouched": {
+    "src-tauri/src/lib.rs": "no change needed: ignore reuses ask_cancel (contract §5); ask_list_pending already forwards the host JSON, so persisted records (incl. createdAtMs) surface without IPC changes"
+  },
+  "changes": {
+    "tui": [
+      "deleted wall-clock TTL helpers pending_request_expired / ask_deadline_hint and their unit tests",
+      "PendingUiRequest.expires_at_ms kept as a display-only field (never judged) so frozen constructor callers still compile",
+      "new pure helpers snapshot_contains_request / pending_panel_should_close = lifecycle truth from the host list",
+      "check_pending_asks closure -> module fn sync_pending_control_request(state, cp): keep-or-close by request_id, rebuild from snapshot, one panel per request_id",
+      "rebuild wired at: startup (incl. pony resume <id>), /resume Enter, enter teammate session, return to main session, /clear, turn:suspended, 500ms poll",
+      "Esc in the Ask panel = explicit ignore (ask_cancel => Cancelled); hint now 'esc 忽略此提问'; no countdown span",
+      "expire_pending_request_now removed (no more client-side expire_asks verdict); report_control_request_error now surfaces Chinese only, raw host text goes to tui-runtime.log"
+    ],
+    "desktop": [
+      "src/stores/ask.ts: removed isAskExpired / ASK_EXPIRED_MESSAGE / reconcileExpiredAsks / reconcileExpiredAsk / reconcilingExpired",
+      "added ASK_STALE_MESSAGE ('该提问已失效，已同步最新待处理请求'), ignore(request), openSession(sessionId); refresh() now scoped by the stored session scope and no longer self-heals",
+      "expire() kept under the same IPC name, demoted to GC/orphan reclamation only",
+      "answer/cancel conflict paths show Chinese only; ordering fixed so refresh()'s error reset cannot swallow the notice",
+      "AskPanel.vue: countdown + 已过期 disabled state removed; createdAt display added; ignore button data-testid=ask-ignore-submit",
+      "WorkspaceComposer.vue (real in-app ask card): ignore button data-testid=composer-ask-ignore ('忽略此提问'), session watcher -> openSession() rebuild, no duplicate initial list"
+    ]
+  },
+  "gates": {
+    "cargo_check_bin_pony": {"cmd": "cargo check -p pony-agent-core --bin pony", "exit": 0},
+    "cargo_test_bin_pony": {"cmd": "cargo test -p pony-agent-core --bin pony", "exit": 0, "detail": "13 passed; 0 failed (includes new test_snapshot_contains_request_matches_request_id_only / test_pending_panel_should_close_is_lifecycle_driven_not_wall_clock)"},
+    "typecheck": {"cmd": "npx vue-tsc --noEmit", "exit": 0},
+    "npm_test": {"cmd": "npx vitest run", "exit": 1, "detail": "Test Files 6 failed | 143 passed (149); Tests 19 failed | 1363 passed | 12 skipped (1394)"}
+  },
+  "npm_test_failures": {
+    "awaiting_test_agent_refreeze": [
+      "tests/ask-pending-expiry.spec.ts (9) — C2-1..C2-9 TTL semantics deleted by contract",
+      "tests/ask-panel-expired.spec.ts (4) — C2-4 / C2-10 expired lock + render clock",
+      "tests/acceptance/wave17/tabular-nums-contract.spec.ts (2) — C2-4 formatExpiry countdown span",
+      "tests/AskPlanPanel.spec.ts (2) — ask-cancel-submit renamed to ask-ignore-submit (Lead added to B-segment scope)"
+    ],
+    "unrelated_to_this_task": [
+      "tests/acceptance/wave47-ob2-enforcement.spec.ts T7 — external `ponygo observe audit --level ob2` gate returns 1 (infra, no relation to ask/TUI/Vue changes)",
+      "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts V10-3 — meta test that re-runs the whole suite, cascades while the refreeze is pending"
+    ],
+    "green_without_refreeze": [
+      "tests/ask-store.spec.ts 17/17",
+      "tests/workspace-composer-ask.spec.ts 7/7",
+      "tests/workspace-width-alignment.spec.ts 2/2"
+    ]
+  },
+  "pty_smoke": {
+    "harness": "/tmp/ask_rebuild_smoke.sh (tmux + isolated HOME/XDG + target/debug/pony + tools/tui-audit/mock_llm.py)",
+    "method": "PONY_AUDIT_ASK_BOOTSTRAP creates a real WaitingHost request through the governed dispatcher; the restart run starts with bootstrap DISABLED so a re-appearing panel can only come from the persisted record",
+    "independent_rerun": {
+      "tag": "t5c",
+      "when": "2026-11-06T18:0x+08:00, after executor-core landed the cross-process answer fix (hydrate_persisted_ask)",
+      "binary": "target/debug/pony rebuilt by me from the shared worktree (cargo build -p pony-agent-core --bin pony, exit 0)",
+      "s1_panel_visible": 1,
+      "s2_rebuild_after_restart": 1,
+      "s3_panel_closed": 1,
+      "s3_english_internal_leak": 0,
+      "script_exit_code": 0,
+      "runtime_log": [
+        "[pony-agent][session] loading sessions from SQLite <iso>/xdg-data/PonyAgent/sessions.db",
+        "[pony-tui][audit] ask 引导已写入真实 pending request: control-000000000000",
+        "(=== restart ===)",
+        "[pony-agent][session] loading sessions from SQLite <iso>/xdg-data/PonyAgent/sessions.db",
+        "no ask_not_found / cannot be consumed on the answer path"
+      ],
+      "s3_capture_tail": ["(panel gone)", "", "   › 写下任务，或输入 / 查看命令", "", "   /home/dm/pony-agent"],
+      "note": "independently reproduced; not copied from executor-core's capture"
+    },
+    "runs": [
+      {"tag": "t5a", "s1_panel_visible": 1, "s2_rebuild_after_restart": 0, "s3_panel_closed": 1, "s3_english_internal_leak": 0, "note": "restart used bare `pony resume` (no main session row yet) so nothing was resumed"},
+      {"tag": "t5b", "s1_panel_visible": 1, "s2_rebuild_after_restart": 1, "s3_panel_closed": 0, "s3_english_internal_leak": 0, "note": "restart used `pony resume <session-id from pending_asks>`; answer after restart still failed with ask_not_found at that time (core T4 gap)"},
+      {"tag": "t5c", "s1_panel_visible": 1, "s2_rebuild_after_restart": 1, "s3_panel_closed": 1, "s3_english_internal_leak": 0, "note": "same harness after the core cross-process answer fix — all three assertions pass"}
+    ],
+    "capture_excerpts": {
+      "s1_panel": [
+        "◆ 提问 请选择本次交付的重建验证分支：",
+        "▌ ● 分支 A · 重建",
+        "  ○ 分支 B · 忽略",
+        "  > 自定义输入…",
+        "  ↑↓ 移动 · ↵ 确认 · esc 忽略此提问",
+        "◆ › 等待你的选择…"
+      ],
+      "s2_after_restart": "identical panel rebuilt with bootstrap disabled (persistence-driven)",
+      "s3_after_answer_after_restart": [
+        "◇ 提问 请选择本次交付的重建验证分支：",
+        "  该提问已失效，已同步最新待处理请求"
+      ],
+      "runtime_log": [
+        "[pony-tui][audit] ask 引导已写入真实 pending request: control-000000000000",
+        "[pony-tui] 提交回答失败: ask_not_found: unknown control request `control-000000000000`"
+      ]
+    },
+    "blocking_finding": {
+      "status": "RESOLVED (t5c)",
+      "symptom": "was: after a process restart, answering the rebuilt Ask failed with `ask_not_found: unknown control request`, so the panel stayed up",
+      "fix": "executor-core: answer_ask now commits Pending→Answered on the durable record first and rehydrates the dispatcher mirror (hydrate_persisted_ask) before consuming it",
+      "verification": "t5c: restart + answer closes the panel (s3=1), zero English internals"
+    }
+  },
+  "behaviour_checks": {
+    "no_wall_clock_expiry": "grep: no isAskExpired / pending_request_expired / ask_deadline_hint / 倒计时 / 已过期 left in the four changed files",
+    "single_panel_per_request_id": "sync_pending_control_request returns early when the handle is still listed; rebuild only happens with no handle and no panel-mode overlay",
+    "rebuild_on_session_entry": "startup, /resume, teammate session, return-to-main and /clear all call sync_pending_control_request after hydrate",
+    "explicit_ignore": "TUI Esc + AskPanel ask-ignore-submit + composer composer-ask-ignore all route to the existing ask_cancel command (Cancelled); no new IPC command added",
+    "old_panel_disappears_on_new_message": "host Superseded => request leaves the pending list => pending_panel_should_close closes the panel; desktop drops it on the next list"
+  },
+  "git_discipline": {"git_writes": 0, "out_of_scope_edits": 0, "note": "tui.rs already carried another session's uncommitted changes; my hunks are additive and none of their work was reverted"}
+}

@@ -1,0 +1,237 @@
+{
+  "wave": "T3",
+  "task": "task-3",
+  "segment": "A（Rust 冻结验收测试 + 对抗注入）",
+  "owner": "test-agent",
+  "generated_at": "2026-11-06T17:50:00+08:00",
+  "tests": [
+    "persisted_ask_roundtrip_survives_process_restart",
+    "state_machine_rejects_terminal_transitions",
+    "explicit_ignore_transitions_to_cancelled",
+    "cas_rejects_replay_after_restart",
+    "cas_rejects_version_mismatch_after_restart",
+    "new_user_message_supersedes_pending_ask",
+    "no_wall_clock_expiry_path",
+    "adversarial_concurrent_double_answer_yields_exactly_one_winner",
+    "adversarial_replay_stale_version_after_restart_rejected",
+    "adversarial_terminal_state_cannot_be_reverted_to_pending",
+    "adversarial_orphaned_ask_cannot_be_answered_after_restart"
+  ],
+  "test_file": "crates/pony-agent-core/tests/ask_persistence_acceptance.rs",
+  "test_file_sha256": "306efa425e93dfef05e9d30c48670db5ec9ae690f3f01b7b8ff85c10d61fedb6",
+  "adversarial_matrix": "tests/acceptance/adversarial/ask_persistence/README.md",
+  "red_command": "cargo test -p pony-agent-core --test ask_persistence_acceptance",
+  "red_exit": 101,
+  "red_basis": "mutation-equivalent-red（5 个变异，每个均让预期用例变红）；另有 17:26 空桩期原生红相 11/11 失败证据",
+  "red_purity_report": ".dev-team/red-purity-ask-persistence.json",
+  "red_purity_tool_exit": 0,
+  "failed_assertions": [
+    {
+      "test": "persisted_ask_roundtrip_survives_process_restart",
+      "assertion": "P1：`open_ask_store(db)` 必须返回可用的持久化 store（空桩期未实现）",
+      "killed_by": [
+        "M2_load_pending_does_not_filter_terminal"
+      ]
+    },
+    {
+      "test": "state_machine_rejects_terminal_transitions",
+      "assertion": "P2：迁移后状态必须为 answered / version 必须提升到 2 / 已作答记录不得出现在待决列表",
+      "killed_by": [
+        "M1_transition_does_not_bump_version",
+        "M2_load_pending_does_not_filter_terminal"
+      ]
+    },
+    {
+      "test": "explicit_ignore_transitions_to_cancelled",
+      "assertion": "P2：忽略后终态必须是 Cancelled 且 version 提升到 2；终态互斥（不得再被 Supersede）；终态再迁移 `Cancelled → Answered(最新 version)` 必须拒绝且错误含 ask_state_conflict / ask_version_mismatch",
+      "killed_by": [
+        "M1_transition_does_not_bump_version",
+        "M2_load_pending_does_not_filter_terminal",
+        "M5_terminal_transition_allowed"
+      ]
+    },
+    {
+      "test": "cas_rejects_replay_after_restart",
+      "assertion": "P3：重启后新实例必须拒绝重放（version/nonce 随记录落盘）；重放被拒后不得复活",
+      "killed_by": [
+        "M1_transition_does_not_bump_version",
+        "M2_load_pending_does_not_filter_terminal"
+      ]
+    },
+    {
+      "test": "cas_rejects_version_mismatch_after_restart",
+      "assertion": "P3：expected_version 与磁盘记录不符必须拒绝；正确版本必须成功（因果对照）；重启后旧版本仍拒绝",
+      "killed_by": [
+        "M1_transition_does_not_bump_version",
+        "M4_cas_ignores_version"
+      ]
+    },
+    {
+      "test": "new_user_message_supersedes_pending_ask",
+      "assertion": "P4：新用户消息必须把该会话全部 Pending 转 Superseded（返回条数 2）且从待决列表消失，跨会话不误伤",
+      "killed_by": [
+        "M3_supersede_is_a_noop",
+        "M2_load_pending_does_not_filter_terminal"
+      ]
+    },
+    {
+      "test": "no_wall_clock_expiry_path",
+      "assertion": "P6：记录不得携带 expiresAtMs；纯时间 gc 不得回收 Pending；十年后仍可作答；仅归档会话产生 Orphaned",
+      "killed_by": [
+        "M2_load_pending_does_not_filter_terminal"
+      ]
+    },
+    {
+      "test": "adversarial_concurrent_double_answer_yields_exactly_one_winner",
+      "assertion": "A1：并发双提交必须恰好一个成功（version→2）、恰好一个被 CAS 拒绝",
+      "killed_by": [
+        "M1_transition_does_not_bump_version",
+        "M2_load_pending_does_not_filter_terminal"
+      ]
+    },
+    {
+      "test": "adversarial_replay_stale_version_after_restart_rejected",
+      "assertion": "A2：陈旧 version=1/2 重放必须全部拒绝；当前 version=3 必须成功（因果对照）；重启后重放已消费版本仍拒绝",
+      "killed_by": [
+        "M1_transition_does_not_bump_version",
+        "M4_cas_ignores_version"
+      ]
+    },
+    {
+      "test": "adversarial_terminal_state_cannot_be_reverted_to_pending",
+      "assertion": "A3：Answered→任意（重点 Pending）越迁一律拒绝，记录不得复活，终态不得污染新待决列表",
+      "killed_by": [
+        "M1_transition_does_not_bump_version",
+        "M2_load_pending_does_not_filter_terminal"
+      ]
+    },
+    {
+      "test": "adversarial_orphaned_ask_cannot_be_answered_after_restart",
+      "assertion": "A4：Orphaned 记录重启后作答必须拒绝且不出现在待决列表",
+      "killed_by": [
+        "M2_load_pending_does_not_filter_terminal"
+      ]
+    }
+  ],
+  "test_quality": {
+    "no_vacuous_assertions": "每条用例均断言具体状态/版本/列表内容/迁移计数；无 is_ok()-only 断言",
+    "determinism": "无 sleep、无随机、无概率；并发用例仅用 std::sync::Barrier 固定会合点；并行 3 次 + --test-threads=1 复跑均稳定",
+    "data_lifecycle": "全部数据落 std::env::temp_dir() 独立目录，TempDir::Drop 清理，不污染真实会话库",
+    "panic_discipline": "空桩 panic 由 catch_stub_panic 收敛为 Err 后以 assert! 呈现；无 unwrap/expect 作用在 SUT 返回值上"
+  },
+  "notes": [
+    "变异验证经 Lead 授权：cp 备份 → 注入变异 → cargo test → cp 还原 + sha256 校验（原始 287f93be…c8b8，还原后一致），全程无 git 写操作。",
+    "测试文件自 2026-11-06 17:27 起冻结（sha256 见上），A 段此后未再改断言。",
+    "契约冲突已消解：PersistedAsk.prompt/options 由 T2 空桩按契约 §2 修订为 String / Vec<String>，测试按修订后签名断言。",
+    "2026-11-06 19:0x（Lead 裁决 a/b）：补 `explicit_ignore_transitions_to_cancelled` 终态再迁移稳定错误码断言；M5 变异（去掉 Pending 守卫）使其变红，证明该断言有效；其余断言未放宽。",
+    "B 段 8 个冻结面迁移完成（2026-11-06 18:0x）；只改过期/倒计时/忽略动作相关断言，未触碰其它断言语义。"
+  ],
+  "mutations": [
+    {
+      "mutation": "M1_transition_does_not_bump_version",
+      "exit_code": 101,
+      "killed_tests": [
+        "adversarial_concurrent_double_answer_yields_exactly_one_winner",
+        "adversarial_replay_stale_version_after_restart_rejected",
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "cas_rejects_replay_after_restart",
+        "cas_rejects_version_mismatch_after_restart",
+        "explicit_ignore_transitions_to_cancelled",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "restored_ok": true
+    },
+    {
+      "mutation": "M2_load_pending_does_not_filter_terminal",
+      "exit_code": 101,
+      "killed_tests": [
+        "adversarial_concurrent_double_answer_yields_exactly_one_winner",
+        "adversarial_orphaned_ask_cannot_be_answered_after_restart",
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "cas_rejects_replay_after_restart",
+        "explicit_ignore_transitions_to_cancelled",
+        "new_user_message_supersedes_pending_ask",
+        "no_wall_clock_expiry_path",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "restored_ok": true
+    },
+    {
+      "mutation": "M3_supersede_is_a_noop",
+      "exit_code": 101,
+      "killed_tests": [
+        "new_user_message_supersedes_pending_ask"
+      ],
+      "restored_ok": true
+    },
+    {
+      "mutation": "M4_cas_ignores_version",
+      "exit_code": 101,
+      "killed_tests": [
+        "adversarial_replay_stale_version_after_restart_rejected",
+        "cas_rejects_version_mismatch_after_restart"
+      ],
+      "restored_ok": true
+    },
+    {
+      "mutation": "M5_terminal_transition_allowed",
+      "exit_code": 101,
+      "killed_tests": [
+        "adversarial_terminal_state_cannot_be_reverted_to_pending",
+        "explicit_ignore_transitions_to_cancelled",
+        "state_machine_rejects_terminal_transitions"
+      ],
+      "restored_ok": true
+    }
+  ],
+  "segment_b": {
+    "status": "GREEN（8 个冻结面全部迁移并通过；语义按 ADR 0074 重冻）",
+    "files": [
+      {
+        "file": "tests/ask-pending-expiry.spec.ts",
+        "changed": "删除 isAskExpired 导入与 C2-5 TTL 边界用例；C2-1/C2-2/C2-7「本地过期⇒不提交+ask_expire 对账+过期文案」→「时间不参与判定，照常提交 CAS + 陈旧 CAS 走 ASK_STALE_MESSAGE」；C2-6「refresh 自动 expire 对账」→「refresh 不得调 ask_expire」；C2-9「双击只发一次 ask_expire」→「双击只发一次 ask_cancel」；新增「store 不得导出 isAskExpired」",
+        "why": "ADR 0074：墙钟 TTL 退出产品语义；ask_expire 退化为 GC"
+      },
+      {
+        "file": "tests/ask-panel-expired.spec.ts",
+        "changed": "C2-4/C2-10「过期⇒禁用控件 + 已过期文案」→「无过期态、控件始终可用」；新增「提问时间位 createdAtMs + tabular-nums」「ask-ignore-submit ⇒ ask_cancel(Cancelled) 且卡片消失不再出现」",
+        "why": "契约 §6.1/§6.3：无倒计时无过期态；显式忽略 ⇒ Cancelled"
+      },
+      {
+        "file": "tests/ask-store.spec.ts",
+        "changed": "「calls ask_expire and reconciles the list」→「ask_expire 作为 GC 房管：返回 0 且不得清掉仍 Pending 的卡片」",
+        "why": "契约 §5：ask_expire 只做 Orphaned/保留期回收，不得把 Pending 变死"
+      },
+      {
+        "file": "tests/acceptance/wave17/tabular-nums-contract.spec.ts",
+        "changed": "两条 C2-4「倒计时 span 含 tabular-nums / 已过期文案」→「ask-card 内不得存在倒计时位」+「提问时间位 ask-created-at 承载 tabular-nums」",
+        "why": "契约 §6.1：倒计时位消失，等宽数字契约迁移到时间位"
+      },
+      {
+        "file": "tests/AskPlanPanel.spec.ts",
+        "changed": "ask-cancel-submit → ask-ignore-submit（L103/L164）",
+        "why": "契约 §6.3：动作语义由“取消”改为“忽略此提问”"
+      },
+      {
+        "file": "crates/pony-agent-core/tests/ask_pending_contract.rs",
+        "changed": "C1-4「TTL 到期 ⇒ Expired ⇒ 不再列出」→「新用户消息 ⇒ 不再列出；时钟越过旧 TTL 仍可列出」；C1-5 过期腿改为 supersede 腿（session-2）",
+        "why": "契约 §3：取代是唯一“失格”信号；时间不杀 Ask"
+      },
+      {
+        "file": "crates/pony-agent-core/tests/ask_pending_adversarial.rs",
+        "changed": "C4-3「时钟超期 ⇒ 作答/取消 fail-closed ⇒ expire 对账」→「版本不符/nonce 伪造 ⇒ fail-closed；时钟越过旧 TTL 仍必须作答成功；重放 fail-closed」",
+        "why": "契约 §4：CAS 事实是唯一拒绝理由"
+      },
+      {
+        "file": "tools/tui-audit/checks.py",
+        "changed": "仅 L1622 ask.panel_visible / L1683 askloop.panel_visible 的 hint 由「esc 取消」→「esc 忽略此提问」（负向断言未动）",
+        "why": "TUI 提示词随生命周期动作改为“忽略此提问”"
+      }
+    ],
+    "verification": {
+      "vitest": "npx vitest run tests/ask-pending-expiry.spec.ts tests/ask-panel-expired.spec.ts tests/ask-store.spec.ts tests/acceptance/wave17/tabular-nums-contract.spec.ts tests/AskPlanPanel.spec.ts → 5 files / 47 tests passed, exit 0",
+      "rust": "cargo test -p pony-agent-core --test ask_pending_contract --test ask_pending_adversarial → 6 + 4 passed, exit 0",
+      "python": "python3 -m py_compile tools/tui-audit/checks.py → exit 0"
+    }
+  }
+}
