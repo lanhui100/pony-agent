@@ -36,7 +36,7 @@ globset = "0.4"
 ignore = "0.4"
 regex = "1"
 url = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 sha2 = "0.10"
 # Wave43：Agent Trace 上报（OTLP/HTTP protobuf）。三件套版本必须锁步一致，
 # 版本依据 .dev-team/wave43-dep-probe.md（隔离 crate 实编译 Exit 0）。

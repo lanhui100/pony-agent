@@ -1,5 +1,6 @@
 mod backend;
 mod file_backend;
+mod id;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,10 @@ pub use backend::{
     SessionTraceMutation, TraceMigrationState, TraceTerminalPatch, TurnStateRecord,
 };
 pub use file_backend::FileSessionBackend;
+pub use id::{
+    classify_session_id, is_canonical_session_id, is_main_session_id, new_session_id,
+    new_session_id_unless, SessionIdKind, MAX_UNIQUE_ATTEMPTS, SESSION_ID_PREFIX,
+};
 pub use store::{
     build_missing_run_control_audit_summary, interrupted_turn_checkpoint_text, PersistedStore,
     SessionStore,
