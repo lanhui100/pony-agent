@@ -1356,6 +1356,33 @@ impl HostControlPlane {
         HostControlPlaneBuilder::new().runtime(runtime).build()
     }
 
+    // ── wave-65 C3：审批（`Approval`）宿主面（本次仅落空桩，业务逻辑由执行波次补齐）───────
+    //
+    // 契约：.dev-team/contract-matrix-approval-resume.md §2 C3。空桩纯度约束：函数体只允许
+    // `Value::Array(Vec::new())` / `Err("not_implemented")`，禁止业务分支。
+
+    /// 列出某会话内**待决**的审批请求（投影 `{requestId,version,requestKind:"approval",
+    /// sessionId,runId,turnId,callId,descriptorId,prompt,options,expiresAtMs}`，**不含 nonce**）。
+    ///
+    /// 空桩：当前恒返回空数组（审批面板接线前的占位；空/空白 scope 亦 fail-closed 返回空数组）。
+    pub fn list_pending_approvals(&self, _session_id: &str) -> serde_json::Value {
+        // TODO(approval-resume): 过滤 Approval + Pending + 同 session_id 后投影（无 nonce）。
+        serde_json::Value::Array(Vec::new())
+    }
+
+    /// 拒绝（取消）一条审批请求：`ControlRequestAuthorization::for_request` +
+    /// `dispatcher.cancel_control_request` ⇒ 状态转 `Cancelled`。
+    ///
+    /// 空桩：尚未实现，恒返回 `Err("not_implemented")`。
+    pub fn cancel_approval_request(
+        &self,
+        _request_id: &str,
+        _expected_version: u64,
+    ) -> Result<serde_json::Value, String> {
+        // TODO(approval-resume)
+        Err("not_implemented".to_string())
+    }
+
     /// 当前 workspace root（PA-078 附件导入/前端获取根路径；PA-079 注册表落地后改由
     /// 会话 `workspace_id` 解析，此处保留为默认回退）。
     /// 优先读注册表 default（`sessions.resolve_workspace_root(None)`），失败才回退

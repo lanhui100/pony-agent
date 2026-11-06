@@ -173,6 +173,12 @@ pub struct AgentRuntime {
     /// P1-1). Computed from the tool executor at first use; `None` when the executor is not the
     /// governed adapter.
     governed_dispatcher: OnceLock<Option<Arc<GovernedDispatcher>>>,
+    /// wave-65 C1：宿主是否具备「审批（`Approval`）挂起可恢复」能力（唯一开关）。
+    ///
+    /// 默认 `false` ⇒ 桌面（`src-tauri`）/ CLI 行为逐字不变（仍 fail-fast
+    /// `approval_resume_unavailable`）。只有 TUI 侧经
+    /// `AgentRuntimeBuilder::host_approval_resume(true)` 打开。
+    host_approval_resume: bool,
 }
 
 impl AgentRuntime {
@@ -255,6 +261,7 @@ impl AgentRuntime {
             workspace_root: None,
             parent_traceparent: None,
             governed_dispatcher: OnceLock::new(),
+            host_approval_resume: false,
         }
     }
 

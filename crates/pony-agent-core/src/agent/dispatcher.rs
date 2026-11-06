@@ -1637,6 +1637,13 @@ impl Inner {
         let (kind, prompt) = match ready.decision.verdict {
             PermissionVerdict::ApprovalRequired => (
                 ToolControlKind::ApprovalRequired,
+                // TODO(approval-resume) C2 接缝：审批请求的**结构化上下文**在此产出。
+                // 本波（协议空桩）保持既有 prompt 逐字不变（digest 文案）；执行波次在此改为
+                // 中文可读文案（含工具名与路径），并在下方 `options:` 处改为
+                // `{"approvalKind":"path_authorization","tool":<model 名>,"path":<原始 path>,
+                //  "scope":"read"}`（无 path ⇒ `"approvalKind":"approval"`）。
+                // 不改变现有行为 = 本次不实现，只留接缝；Interaction(Ask) 的
+                // `ask_options_from_arguments` 语义不受影响。
                 format!(
                     "Tool `{}` ({}) requires approval. Final arguments digest: {}.",
                     ready.descriptor.identity.descriptor_id,
@@ -1698,6 +1705,8 @@ impl Inner {
             expires_at_ms: now.saturating_add(config.control_request_expiry_ms),
             state: PendingControlRequestState::Pending,
             prompt: Some(prompt),
+            // TODO(approval-resume) C2 接缝：`Approval` 时 options 应写入结构化审批上下文
+            // （见上方 ApprovalRequired 分支注释）；本波保持既有 Ask options 解析不变。
             options: ask_options_from_arguments(&ready.final_arguments),
         };
         // ADR 0074: an Ask is persisted state, not process memory. Persist the full CAS facts

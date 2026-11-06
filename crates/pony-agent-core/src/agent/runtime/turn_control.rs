@@ -82,16 +82,22 @@ pub(super) fn suspension_error_code(message: &str) -> &str {
 /// W1b：挂起结果是否**没有可恢复通道**。
 ///
 /// - `None`：治理路径已产出 `control_outcome_pending`，但匹配不到待处理请求（call_id 丢失/被消费）；
-/// - `Some(Approval)`：审批请求存在，但当前没有重放实现（见 [`APPROVAL_RESUME_UNAVAILABLE_CODE`]）；
+/// - `Some(Approval)`：**wave-65 C1** 起按运行时能力位判定 —— 宿主具备「审批挂起可恢复」
+///   （`host_approval_resume == true`）**且**该请求带会话身份（`session_id.is_some()`）时为
+///   **可恢复**（宿主可列出审批 → 批准/拒绝 → 续轮）；否则保持既有不可恢复语义
+///   （见 [`APPROVAL_RESUME_UNAVAILABLE_CODE`]）；
 /// - `Some(Interaction)`：Ask 可经宿主应答恢复，保持 suspended —— **除非**该请求没有 run 身份
 ///   （见 [`ASK_RESUME_UNAVAILABLE_CODE`]）：没有 run 就没有 ask-wait 可绑定，作答后必然死等。
 pub(super) fn suspension_is_unrecoverable(
     suspension: &ToolTurnSuspension,
+    host_approval_resume: bool,
 ) -> bool {
     match &suspension.pending_request {
         None => true,
         Some(request) => match request.request_kind {
-            PendingControlRequestKind::Approval => true,
+            PendingControlRequestKind::Approval => {
+                !(host_approval_resume && request.session_id.is_some())
+            }
             PendingControlRequestKind::Interaction => request.run_id.is_none(),
         },
     }
@@ -363,7 +369,8 @@ impl AgentRuntime {
         &self,
         suspension: &ToolTurnSuspension,
     ) -> bool {
-        self.governed_dispatcher().is_some() && suspension_is_unrecoverable(suspension)
+        self.governed_dispatcher().is_some()
+            && suspension_is_unrecoverable(suspension, self.host_approval_resume)
     }
 
 
@@ -543,10 +550,17 @@ mod w1_approval_unrecoverable_tests {
     };
 
     fn request(kind: PendingControlRequestKind) -> PendingControlRequest {
+        request_with_session(kind, Some("sess-w1"))
+    }
+
+    fn request_with_session(
+        kind: PendingControlRequestKind,
+        session_id: Option<&str>,
+    ) -> PendingControlRequest {
         PendingControlRequest {
             request_id: "req-w1".to_string(),
             request_kind: kind,
-            session_id: Some("sess-w1".to_string()),
+            session_id: session_id.map(str::to_string),
             run_id: Some("run-w1".to_string()),
             turn_id: "turn-w1".to_string(),
             call_id: "call-w1".to_string(),
@@ -565,26 +579,70 @@ mod w1_approval_unrecoverable_tests {
 
     #[test]
     fn suspension_without_request_is_unrecoverable() {
-        assert!(suspension_is_unrecoverable(&ToolTurnSuspension {
-            pending_request: None,
-            bound_run_id: None,
-        }));
+        // 无待处理请求 ⇒ 无论能力位开关都是不可恢复（既有语义逐字不变）。
+        for capability in [false, true] {
+            assert!(suspension_is_unrecoverable(
+                &ToolTurnSuspension {
+                    pending_request: None,
+                    bound_run_id: None,
+                },
+                capability
+            ));
+        }
     }
 
+    /// wave-65 C1 语义迁移：审批挂起在**能力位关闭**（桌面/CLI 默认）时仍不可恢复。
     #[test]
-    fn approval_suspension_is_unrecoverable_until_replay_exists() {
-        assert!(suspension_is_unrecoverable(&ToolTurnSuspension {
-            pending_request: Some(request(PendingControlRequestKind::Approval)),
-            bound_run_id: None,
-        }));
+    fn approval_suspension_unrecoverable_when_capability_disabled() {
+        assert!(suspension_is_unrecoverable(
+            &ToolTurnSuspension {
+                pending_request: Some(request(PendingControlRequestKind::Approval)),
+                bound_run_id: None,
+            },
+            false
+        ));
+    }
+
+    /// wave-65 C1：能力位开启 **且** 请求带会话身份 ⇒ 可恢复（宿主可列出/批准/拒绝后由
+    /// 续轮重放该工具调用）。
+    #[test]
+    fn approval_suspension_recoverable_when_capability_enabled_with_session_identity() {
+        assert!(!suspension_is_unrecoverable(
+            &ToolTurnSuspension {
+                pending_request: Some(request(PendingControlRequestKind::Approval)),
+                bound_run_id: None,
+            },
+            true
+        ));
+    }
+
+    /// wave-65 C1：能力位开启但**无会话身份** ⇒ 无法作用域化列出/CAS，仍判不可恢复（fail-closed）。
+    #[test]
+    fn approval_suspension_unrecoverable_when_capability_enabled_without_session_identity() {
+        assert!(suspension_is_unrecoverable(
+            &ToolTurnSuspension {
+                pending_request: Some(request_with_session(
+                    PendingControlRequestKind::Approval,
+                    None
+                )),
+                bound_run_id: None,
+            },
+            true
+        ));
     }
 
     #[test]
     fn interaction_suspension_stays_recoverable() {
-        assert!(!suspension_is_unrecoverable(&ToolTurnSuspension {
-            pending_request: Some(request(PendingControlRequestKind::Interaction)),
-            bound_run_id: None,
-        }));
+        // Ask 分支不受能力位影响（逐字不变）。
+        for capability in [false, true] {
+            assert!(!suspension_is_unrecoverable(
+                &ToolTurnSuspension {
+                    pending_request: Some(request(PendingControlRequestKind::Interaction)),
+                    bound_run_id: None,
+                },
+                capability
+            ));
+        }
     }
 }
 
@@ -643,7 +701,11 @@ mod w1_unrecoverable_code_tests {
             ),
         ];
         for (suspension, expected) in cases {
-            assert!(suspension_is_unrecoverable(&suspension), "该形态必须判为不可恢复");
+            // wave-65 C1：能力位关闭（桌面/CLI 默认）时三族判据逐字不变。
+            assert!(
+                suspension_is_unrecoverable(&suspension, false),
+                "该形态必须判为不可恢复"
+            );
             let message = build_unrecoverable_suspension_error(&suspension);
             assert_eq!(
                 suspension_error_code(&message),
@@ -660,9 +722,12 @@ mod w1_unrecoverable_code_tests {
     /// F4/C3 回归：`Interaction` **有** run 身份时仍可恢复（不得被误判为失败）。
     #[test]
     fn interaction_with_run_identity_is_still_recoverable() {
-        assert!(!suspension_is_unrecoverable(&ToolTurnSuspension {
-            pending_request: Some(request(PendingControlRequestKind::Interaction, Some("run-w1"))),
-            bound_run_id: Some("run-w1".to_string()),
-        }));
+        assert!(!suspension_is_unrecoverable(
+            &ToolTurnSuspension {
+                pending_request: Some(request(PendingControlRequestKind::Interaction, Some("run-w1"))),
+                bound_run_id: Some("run-w1".to_string()),
+            },
+            false
+        ));
     }
 }

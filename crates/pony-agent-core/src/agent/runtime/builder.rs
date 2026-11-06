@@ -12,6 +12,8 @@ pub struct AgentRuntimeBuilder {
     context_builder: Option<Box<dyn TurnContextBuilder>>,
     telemetry_builder: Option<Box<dyn TurnTelemetryBuilder>>,
     plan_store: Option<crate::agent::plan_state::PlanStore>,
+    /// wave-65 C1：审批挂起可恢复能力位（默认 `false`，仅 TUI 宿主打开）。
+    host_approval_resume: bool,
 }
 
 
@@ -27,6 +29,7 @@ impl AgentRuntimeBuilder {
             context_builder: None,
             telemetry_builder: None,
             plan_store: None,
+            host_approval_resume: false,
         }
     }
 
@@ -93,6 +96,15 @@ impl AgentRuntimeBuilder {
         self
     }
 
+    /// wave-65 C1：打开/关闭「审批（`Approval`）挂起可恢复」能力位。
+    ///
+    /// 默认 `false` —— 桌面（`src-tauri`）与 CLI 不调用本方法，行为逐字不变（挂起仍
+    /// fail-fast `approval_resume_unavailable`）。唯一消费点是 TUI 宿主建栈。
+    pub fn host_approval_resume(mut self, enabled: bool) -> Self {
+        self.host_approval_resume = enabled;
+        self
+    }
+
     pub fn build(self) -> AgentRuntime {
         // Wave-61 C2：宿主子代理引擎的**唯一**注册点（三条宿主 tauri / non-tauri harness / tui
         // 以及 cli 全部经由本函数建栈，见契约 C2.1）。把注册收敛在这里，宿主侧零改动。
@@ -141,6 +153,8 @@ impl AgentRuntimeBuilder {
         runtime.workspace_root = self
             .workspace_root
             .map(|path| path.display().to_string());
+        // wave-65 C1：能力位透传（默认 `false` ⇒ 既有宿主行为逐字不变）。
+        runtime.host_approval_resume = self.host_approval_resume;
         runtime
     }
 }

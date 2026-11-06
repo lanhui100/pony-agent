@@ -1,0 +1,173 @@
+{
+  "wave": 65,
+  "stage": "Stage-1 Protocol (compilable stubs only)",
+  "baseline_ref": ".dev-team/nfr-baseline.json",
+  "contract": ".dev-team/contract-matrix-approval-resume.md",
+  "delta_scope": "审批（Approval）挂起可恢复的**协议空桩**波次：Runtime 能力位 + 判定分支、control plane 两个审批面方法签名、dispatcher 结构化上下文接缝注释、TUI 纯决策接缝签名。函数体仅为 `Value::Array(Vec::new())` / `Err(\"not_implemented\")` / `None`，无业务逻辑、无新增 IO、无新增外部调用、无新增锁、无 schema 迁移。五项必填 NFR 全量重述（沿用 .dev-team/nfr-baseline.json 冻结值，不新增/不放宽任何预算），本波仅新增 wave65_approval_resume 增量声明。既有 .dev-team/nfr-baseline.json 不修改。",
+  "external_call_timeout_ms": 3000,
+  "external_call_timeout_scope": "仅约束外部往返；本波**零新增**外部调用（空桩不发起任何网络/进程/文件 IO），故不新增用例、不放宽既有预算；provider 流式读空闲预算与 30min 总时长上界见 .dev-team/nfr-baseline.json 的 external_call_timeout_exceptions（逐字不变）",
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 500,
+    "backoff_cap_ms": 1000
+  },
+  "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "lock_acquisition_timeout_ms": 2000,
+  "deadlock_watchdog_timeout_ms": 5000,
+  "lock_forbidden_calls": [
+    "resolve_graph_run_for_retrieval",
+    "load_graph_run",
+    "load_execution_checkpoint",
+    "load_active_graph_run_for_session"
+  ],
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "logging_scope": "new_structured_logging_surface_only",
+  "logging_legacy_eprintln_exempt": true,
+  "logging_debt_ref": "PA-119",
+  "logging_eprintln_exempt_scope": "existing_style_non_json_lock_poison_recovery_diagnostics",
+  "logging_eprintln_exempt_covers_new_lines": 0,
+  "logging_eprintln_exempt_note": "本波为纯空桩：新增 eprintln 诊断行数 = 0（故 covers_new_lines 声明 0，不按波次口径虚报 >=1）；既有非 JSON 锁中毒恢复诊断的豁免仍绑定 PA-119。logging{format=json,trace_id_required} 沿用 .dev-team/nfr-baseline.json 的约束，本波不新增结构化日志面，logging_compliance_claimed 保持 false（PA-119 债务未清）。",
+  "logging_compliance_claimed": false,
+  "resource_release": [
+    "bounded_queue",
+    "max_queue_capacity_1024",
+    "wave65_stub_only_no_new_thread_no_new_channel",
+    "wave65_no_new_file_or_network_handle",
+    "wave65_pending_request_store_unchanged_dispatcher_lifetime",
+    "wave65_host_approval_resume_defaults_false_no_resource_activation"
+  ],
+  "wave65_approval_resume": {
+    "applicable": true,
+    "phase": "protocol_stub_unimplemented_bodies",
+    "stub_purity_rule": "函数体 <=3 行；只允许 `Value::Array(Vec::new())` / `Err(\"not_implemented\".to_string())` / `None`；禁止业务分支与 IO",
+    "stub_purity_self_check": {
+      "list_pending_approvals_body_lines": 2,
+      "cancel_approval_request_body_lines": 2,
+      "apply_approval_decision_body_lines": 2,
+      "business_branches_in_stubs": 0
+    },
+    "capability_bit": {
+      "field": "AgentRuntime.host_approval_resume",
+      "default": false,
+      "builder_seam": "AgentRuntimeBuilder::host_approval_resume(bool)",
+      "literal_construction_sites": 1,
+      "literal_construction_site_ref": "crates/pony-agent-core/src/agent/runtime/mod.rs::with_shared_sessions",
+      "inert_this_wave": true,
+      "inert_this_wave_reason": "TUI 未接线（不存在续轮实现）。若提前置 true，审批挂起将停在 `turn:suspended` 且无人恢复 = 比现状更糟的死等；故契约 C1 的唯一消费点在执行波次启用"
+    },
+    "unrecoverable_predicate": {
+      "fn": "crates/pony-agent-core/src/agent/runtime/turn_control.rs::suspension_is_unrecoverable",
+      "approval_branch": "!(host_approval_resume && request.session_id.is_some())",
+      "interaction_branch_unchanged": true,
+      "none_branch_unchanged": true,
+      "single_call_site": "AgentRuntime::suspension_without_recoverable_request",
+      "default_off_behaviour_unchanged": true
+    },
+    "host_surface_stubs": [
+      {
+        "symbol": "HostControlPlane::list_pending_approvals(session_id: &str) -> serde_json::Value",
+        "stub_returns": "[]",
+        "contract_projection_fields": [
+          "requestId",
+          "version",
+          "requestKind",
+          "sessionId",
+          "runId",
+          "turnId",
+          "callId",
+          "descriptorId",
+          "prompt",
+          "options",
+          "expiresAtMs"
+        ],
+        "nonce_excluded": true,
+        "fail_closed_on_blank_scope": true,
+        "implemented": false
+      },
+      {
+        "symbol": "HostControlPlane::cancel_approval_request(request_id: &str, expected_version: u64) -> Result<serde_json::Value, String>",
+        "stub_returns": "Err(\"not_implemented\")",
+        "implemented": false
+      }
+    ],
+    "existing_semantics_untouched": [
+      "HostControlPlane::list_pending_asks",
+      "HostControlPlane::approve_control_request",
+      "HostControlPlane::cancel_ask_in_session",
+      "GovernedDispatcher::can_consume",
+      "GovernedDispatcher::persist_pending_request 的 runtime 行为（仅新增注释接缝）"
+    ],
+    "dispatcher_seam": {
+      "fn": "GovernedDispatcher::persist_pending_request",
+      "approval_required_prompt_unchanged": true,
+      "approval_required_options_unchanged": true,
+      "ask_options_semantics_unchanged": true,
+      "todo_marker": "TODO(approval-resume)"
+    },
+    "tui_seam": {
+      "fn": "crates/pony-agent-core/src/bin/tui.rs::apply_approval_decision",
+      "signature": "pub fn apply_approval_decision(state: &mut TuiState, control_plane: &HostControlPlane, choice: PermissionChoice) -> Option<String>",
+      "stub_returns": "None",
+      "wired": false,
+      "dead_code_exemption": "本波显式 #[allow(dead_code)]（消费点在下一波接线），执行波次移除"
+    },
+    "security_invariants": {
+      "inv1_no_execution_before_approval": "本波不新增任何执行路径；批准只写 read 作用域 path 授权（执行波次实现）",
+      "inv2_desktop_cli_zero_regression": "能力位默认 false ⇒ 桌面/CLI 仍 fail-fast approval_resume_unavailable；src-tauri/src/** 未改动",
+      "inv3_no_credential_leak": "空桩不返回任何字段，nonce 从未出宿主（契约投影列表亦排除 nonce）",
+      "inv4_cas_not_relaxed": "can_consume 逐字未改",
+      "inv5_frozen_tests_untouched": "crates/pony-agent-core/tests/** 未改动；仅 turn_control.rs 内单测随语义迁移（contract §1 INV-5 允许）"
+    },
+    "gate_receipts": {
+      "cargo_check": "cargo check -p pony-agent-core --bins => Exit 0",
+      "cargo_test_lib_turn_control": "cargo test -p pony-agent-core --lib turn_control => 8 passed; 0 failed (Exit 0)",
+      "nfr_lint": "python3 ~/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline-approval-resume.json => Exit 0"
+    },
+    "no_fabricated_metrics": true,
+    "measured_metrics": {
+      "note": "本波（空桩）无性能/延迟类可测量产物；为避免伪造，未声明任何 ms/p95/吞吐指标。以下为机械可复算项。",
+      "files_changed": 6,
+      "stub_functions": 3,
+      "new_external_calls": 0,
+      "new_locks": 0,
+      "new_threads": 0
+    }
+  },
+  "deferred": [
+    {
+      "id": "wave65-A1",
+      "item": "control plane 审批读取/拒绝的真实实现（list_pending_approvals 投影 + cancel_approval_request CAS→Cancelled）",
+      "owner": "Executor（wave-65 执行波次）",
+      "expiry": "wave-65 执行波次",
+      "evidence": ".dev-team/contract-matrix-approval-resume.md §2 C3"
+    },
+    {
+      "id": "wave65-A2",
+      "item": "dispatcher ApprovalRequired 结构化 options/prompt（C2）",
+      "owner": "Executor（wave-65 执行波次）",
+      "expiry": "wave-65 执行波次",
+      "evidence": ".dev-team/contract-matrix-approval-resume.md §2 C2"
+    },
+    {
+      "id": "wave65-A3",
+      "item": "TUI 审批闭环接线（AgentRuntimeBuilder::desktop().host_approval_resume(true) + sync_pending_control_request 合并 + ApprovalResumeTurn 续轮 + apply_approval_decision 实现）",
+      "owner": "Executor（wave-65 执行波次）",
+      "expiry": "wave-65 执行波次",
+      "evidence": ".dev-team/contract-matrix-approval-resume.md §2 C1/C4"
+    },
+    {
+      "id": "wave65-A4",
+      "item": "红相验收 tests/approval_resume_e2e.rs（T1-T4）",
+      "owner": "Test Agent（唯一写权）",
+      "expiry": "wave-65 验收波次",
+      "evidence": ".dev-team/contract-matrix-approval-resume.md §2 C5"
+    }
+  ]
+}

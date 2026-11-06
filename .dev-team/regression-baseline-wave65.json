@@ -1,0 +1,34 @@
+{
+  "wave": 65,
+  "theme": "approval-resume: 审批类控制请求可恢复（挂起可恢复 + 宿主列表 + 批准/拒绝续轮）",
+  "tier": "B",
+  "baseline_commit": "ebf50d64",
+  "captured_at": "2026-11-06T22:45:00+08:00",
+  "purpose": "实现前存量测试回归基线（红相锚定前与收口时逐项对照，'基线绿→现红' 判 IMPL-DEFECT）",
+  "commands": [
+    {
+      "cmd": "cargo test -p pony-agent-core --lib",
+      "exit_code": 0,
+      "summary": "test result: ok. 1316 passed; 0 failed; 0 ignored",
+      "duration_s": 45.81
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test ask_resume_e2e --test permission_fail_closed_contract",
+      "exit_code": 0,
+      "summary": "ask_resume_e2e: 8 passed / 0 failed / 1 ignored; permission_fail_closed_contract: 3 passed / 0 failed"
+    }
+  ],
+  "exemptions": [
+    "cargo check --all-targets 当前不可用：并行会话的未提交文件 crates/pony-agent-core/tests/tui_terminal_restore.rs 引用尚不存在的符号（13 处 E0425），与本波无因果关系；本波门禁改用 --bins 与 --test <target> 定向目标。"
+  ],
+  "red_phase": {
+    "cmd": "cargo test -p pony-agent-core --test approval_resume_e2e",
+    "exit_code": 101,
+    "summary": "1 passed (T4 INV-2 回归); 3 failed (T1/T2/T3 停在 list_pending_approvals 空桩)",
+    "receipt": ".dev-team/red-phase-approval-resume.log",
+    "frozen_sha256": {
+      "test_file": "b5571f73dc35733333f9e716dacfd37431532aef47c4d8b629d995bf0b794cb5",
+      "log_file": "41b3d50fa4e12b7a57d49f02ceda4e97613b58a5c9e5a20a949835a2c4820f23"
+    }
+  }
+}
