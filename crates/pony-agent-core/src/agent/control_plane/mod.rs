@@ -2183,6 +2183,7 @@ impl HostControlPlane {
             provider_name: checkpoint.provider_name.clone().unwrap_or_default(),
             protocol: checkpoint.provider_protocol.clone().unwrap_or_default(),
             model: checkpoint.provider_model.clone().unwrap_or_default(),
+            context_window_tokens: None,
         });
         let trace_steps = checkpoint
             .as_ref()
@@ -4138,6 +4139,7 @@ mod tests {
                 session_summary: None,
                 step: None,
                 stop_reason: None,
+                metrics: None,
             },
         );
 

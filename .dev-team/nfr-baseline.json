@@ -101,5 +101,29 @@
   "team_policy_prompt_injected_when_wired": true,
   "subagent_max_concurrent": 2,
   "subagent_turn_timeout_ms": 120000,
-  "subagent_max_prompt_bytes": 200000
+  "subagent_max_prompt_bytes": 200000,
+  "metrics_snapshot": {
+    "contract": ".dev-team/contract-matrix-metrics-snapshot.md",
+    "single_source_of_truth": "TurnMetricsSnapshot",
+    "wire_field": "TurnStreamEvent.metrics (additive, #[serde(default, skip_serializing_if = \"Option::is_none\")])",
+    "internal_field": "ProviderEventMeta.context_window_tokens (additive, 不上 wire)",
+    "frozen_invariants": [
+      "I1",
+      "I2",
+      "I3",
+      "I4",
+      "I5",
+      "I6",
+      "I7"
+    ],
+    "ratio_unit": "fraction_0_to_1",
+    "percent_render": "round(cacheHitRatio * 100)",
+    "clamp_forbidden": true,
+    "turn_speed_single_source": "crates/pony-agent-core/src/agent/turn_flow.rs::weighted_turn_speed",
+    "external_call": "none: 纯内存结算，无网络 IO / 无子进程 / 无磁盘 IO",
+    "external_call_timeout_ms_for_builder": "n/a (no external call)",
+    "resource_release": "n/a: 纯值对象，无持有资源（无句柄/无锁/无后台任务）",
+    "logging": "沿用上方全局 logging 约定（format=json + trace_id）；本轮不新增日志面",
+    "frozen_by": "task-1 / protocol agent"
+  }
 }

@@ -34,6 +34,7 @@ pub mod pipeline;
 pub mod mcp_client;
 pub mod mcp_config;
 pub mod mcp_resources;
+pub mod metrics_snapshot;
 pub mod model_preferences;
 pub mod orchestration;
 pub mod otel;

@@ -920,6 +920,7 @@ mod usage_ledger_entry_tests {
             provider_name: "openai".to_string(),
             protocol: "openai-completions".to_string(),
             model: "gpt-4o".to_string(),
+            context_window_tokens: None,
         }
     }
 

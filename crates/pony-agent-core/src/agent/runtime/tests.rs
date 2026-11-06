@@ -4563,6 +4563,7 @@ fn turn_stream_event_step_serde_roundtrip() {
         session_summary: None,
         step: Some(2),
         stop_reason: None,
+        metrics: None,
     };
     let json = serde_json::to_string(&payload).expect("serialize");
     assert!(json.contains(r#""step":2"#), "step serializes: {json}");
@@ -7860,6 +7861,7 @@ fn persisted_trace_timeline_uses_canonical_monitor_semantics() {
         provider_name: "OpenAI".to_string(),
         protocol: "openai".to_string(),
         model: "gpt-5".to_string(),
+        context_window_tokens: None,
     };
     let build_context_observation = BuildContextObservation {
         request_format: "responses".to_string(),
@@ -7991,6 +7993,7 @@ fn pa100_build_timeline(
         provider_name: "商汤Token Plan".to_string(),
         protocol: "openai-completions".to_string(),
         model: "deepseek-v4-flash".to_string(),
+        context_window_tokens: None,
     };
     let observation = BuildContextObservation {
         request_format: "openai-completions".to_string(),
@@ -8281,6 +8284,7 @@ fn progress_timeline_records_real_tool_error_like_persisted_builder() {
         provider_name: "商汤Token Plan".to_string(),
         protocol: "openai-completions".to_string(),
         model: "deepseek-v4-flash".to_string(),
+        context_window_tokens: None,
     };
     let observation = BuildContextObservation {
         request_format: "openai-completions".to_string(),
@@ -8349,6 +8353,7 @@ fn stream_trace_keeps_each_model_hop_before_its_tool() {
         provider_name: "OpenAI".to_string(),
         protocol: "openai".to_string(),
         model: "gpt-5".to_string(),
+        context_window_tokens: None,
     };
     let observation = BuildContextObservation {
         request_format: "responses".to_string(),

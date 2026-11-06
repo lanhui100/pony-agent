@@ -171,6 +171,7 @@ fn k2_event_cost_usd_camel_case_and_skip_serializing_none() {
         step: None,
         stop_reason: None,
         cost_usd: Some(0.012345),
+        metrics: None,
     };
 
     let serialized = serde_json::to_string(&event).expect("序列化必须成功");

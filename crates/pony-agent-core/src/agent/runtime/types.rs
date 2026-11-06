@@ -196,6 +196,10 @@ pub struct TurnStreamEvent {
     /// `turn:cancelled` 携带该轮原因（无记录 ⇒ `"legacy"`），`turn:completed`/`turn:failed` ⇒ `None`。
     #[serde(default)]
     pub stop_reason: Option<String>,
+    /// P0：per-call 指标结算快照（单一真值）。仅当事件携带 provider_call_records 时存在。
+    /// 旧消费者不读即行为不变（wire additive）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<crate::agent::metrics_snapshot::TurnMetricsSnapshot>,
 }
 
 

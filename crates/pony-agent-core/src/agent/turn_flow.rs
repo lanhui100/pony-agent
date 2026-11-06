@@ -401,6 +401,10 @@ pub struct ProviderEventMeta {
     pub provider_name: String,
     pub protocol: String,
     pub model: String,
+    /// P0：该 provider 的上下文窗口容量（tokens）。**additive** 字段：
+    /// `None` ⇒ 未知窗口，消费者须回退既有路径（契约矩阵 I3）。
+    /// 由 Executor 在 task-3 于 [`provider_event_meta`] 填真实取值。
+    pub context_window_tokens: Option<u64>,
 }
 
 pub fn build_failed_turn_result(
@@ -475,6 +479,7 @@ pub fn provider_event_meta(provider: &ProviderManager) -> ProviderEventMeta {
         provider_name: provider.name().to_string(),
         protocol: provider.protocol_label().to_string(),
         model: provider.model().to_string(),
+        context_window_tokens: None,
     }
 }
 
@@ -590,6 +595,7 @@ pub fn emit_stream_failed(
             session_summary: None,
             step: None,
             stop_reason: None,
+            metrics: None,
         },
     )
 }
@@ -661,6 +667,7 @@ pub fn emit_stream_cancelled(
                     .as_str()
                     .to_string()
             })),
+            metrics: None,
         },
     );
 }
@@ -718,6 +725,7 @@ pub fn emit_stream_stop_requested(
             session_summary: None,
             step: None,
             stop_reason: Some(stop_reason.as_str().to_string()),
+            metrics: None,
         },
     )
 }
@@ -775,6 +783,7 @@ pub fn emit_supervisor_cancelled(
             session_summary: None,
             step: None,
             stop_reason: Some(stop_reason.as_str().to_string()),
+            metrics: None,
         },
     );
 }
@@ -963,6 +972,7 @@ pub fn emit_stream_event_with_step(
             session_summary,
             step,
             stop_reason: None,
+            metrics: None,
         },
     )
 }
@@ -1090,6 +1100,7 @@ pub fn emit_turn_failed(
                 provider_name,
                 protocol,
                 model,
+                context_window_tokens: None,
             })
         }
         _ => None,
@@ -1758,6 +1769,7 @@ mod tests {
             session_summary: None,
             step: None,
             stop_reason: None,
+            metrics: None,
         }
     }
 
