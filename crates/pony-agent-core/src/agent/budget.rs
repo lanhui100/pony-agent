@@ -237,7 +237,7 @@ impl Drop for ConcurrencyGuard {
 /// 模型定价矩阵（每百万 Token 的 USD 价格）。
 ///
 /// **唯一真源说明（Wave-5 FIX-3）**：单价与计价公式的真源在
-/// [`crate::agent::cost`]（`cost::ModelPricing` / `cost::calculate_cost_with_pricing`）。
+/// [`crate::agent::cost`]（`cost::ModelPricing` / `cost::calculate_cost_with_protocol`）。
 /// 本结构保留**仅为兼容既有预算 DTO 的字段命名**（`*_per_million_usd`），
 /// 通过 [`From`] 转换后委托 `cost` 计算 —— 不再是第二份价格真源。
 ///
@@ -292,7 +292,15 @@ impl CostTracker {
         }
     }
 
-    /// 记录单次回合的 Token 用量，更新累计金额并在超限时触发熔断
+    /// 记录单次回合的 Token 用量，更新累计金额并在超限时触发熔断。
+    ///
+    /// B027 口径（契约 `C1`–`C4`）：
+    /// - 未缓存输入取自 [`crate::agent::cost::normalized_uncached_input_tokens`]（单一真值，协议归一）；
+    /// - 计价委托 [`crate::agent::cost::calculate_cost_with_protocol`]（协议感知，禁止固定 OpenAI）；
+    /// - `total_tokens = uncached + cached + output`，保证
+    ///   `total_tokens == total_input_tokens + total_cached_tokens + total_output_tokens`（C4 自洽）。
+    ///
+    /// 顺序不变：**先累加四项与成本，再判预算**（保证熔断时台账仍是完整事实）。
     pub fn record_usage(
         &mut self,
         _model: &str,
@@ -300,14 +308,20 @@ impl CostTracker {
         input_tokens: u64,
         output_tokens: u64,
         cached_tokens: u64,
+        protocol: crate::agent::cost::ProviderCostProtocol,
     ) -> Result<f64, String> {
-        let uncached_input = input_tokens.saturating_sub(cached_tokens);
-        // FIX-3：计价委托 `cost` 唯一真源（含 6 位小数取整与非法值 None 语义），此处不再二次实现公式。
-        let estimate = crate::agent::cost::calculate_cost_with_pricing(
+        let uncached_input = crate::agent::cost::normalized_uncached_input_tokens(
+            input_tokens,
+            Some(cached_tokens),
+            protocol,
+        );
+        // FIX-3 / B027：计价委托 `cost` 唯一真源（含 6 位小数取整与非法值 None 语义），此处不再二次实现公式。
+        let estimate = crate::agent::cost::calculate_cost_with_protocol(
             &crate::agent::cost::ModelPricing::from(pricing),
             input_tokens,
             output_tokens,
             Some(cached_tokens),
+            protocol,
         )
         .ok_or_else(|| "invalid_pricing: 单价矩阵非法（NaN/Inf/负值），拒绝计入成本".to_string())?;
         let call_cost = estimate.total_cost_usd;
@@ -315,7 +329,8 @@ impl CostTracker {
         self.summary.total_input_tokens += uncached_input;
         self.summary.total_cached_tokens += cached_tokens;
         self.summary.total_output_tokens += output_tokens;
-        self.summary.total_tokens += input_tokens + output_tokens;
+        // B027 C4：total 必须与三项分项同源（`input + output` 会漏缓存且与分项不同源）。
+        self.summary.total_tokens += uncached_input + cached_tokens + output_tokens;
         self.summary.total_cost_usd += call_cost;
 
         if let Some(limit) = self.max_budget_usd {

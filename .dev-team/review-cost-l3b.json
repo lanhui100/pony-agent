@@ -1,0 +1,62 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3b-cost-cross-surface",
+    "fresh_context": true
+  },
+  "executed_by": "l3b-cost-cross-surface",
+  "attestation": {
+    "self_signed": false,
+    "note": "审查 wave-cost-protocol 未提交工作树（git status：7 改动 + 新增 tests/cost_protocol_parity.rs）；reviewed_commit 填当前 HEAD 09c0d926（diff 相对 HEAD 评审，HEAD 本身未变）；未修改仓库任何文件，唯一写入 .dev-team/review-cost-l3b.json；所有门禁为本地实测 exit code（cargo test ts_contract_snapshot=0、contract:check=0、vitest 3 档 16 tests=0、audit-diff=0、check-declaration=0；wave33/parity/wave5/metrics_snapshot 系列全绿）。跨面反例探针在 /tmp 编译自 target/debug 的 libpony_agent_core rlib，未写入仓库。另注意基线事实：HEAD 干净副本（git archive）上 lib 套件同样 1299 passed / 1 failed（见 ADVISORY #4），非本波引入。"
+  },
+  "reviewed_commit": "09c0d926",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/cost.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/budget.rs",
+    "crates/pony-agent-core/tests/wave33_platform_cost_test.rs",
+    "crates/pony-agent-core/tests/cost_protocol_parity.rs",
+    "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+    "crates/pony-agent-core/src/agent/usage_governance.rs",
+    "src/stores/runtime.ts",
+    "docs/observability.yaml",
+    "backlog/backlog.md"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+      "line": 89,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && RLIB=$(ls target/debug/deps/libpony_agent_core-*.rlib -t|head -1) && rustc --edition 2021 -L dependency=target/debug/deps --extern pony_agent_core=\"$RLIB\" /tmp/l3b_probe2.rs -o /tmp/l3b_probe2 && /tmp/l3b_probe2  # 输出 A snapshot=0.00004 trace=0.000039 / B snapshot=0.1575 trace=0.3075（探针源 12 行，仅用公开 API：build_turn_metrics_snapshot + turn_flow::estimate_call_cost_usd）",
+      "detail": "同帧同轮存在两套成本口径：TurnMetricsSnapshot.costUsd 是「逐调用计价后求和」（metrics_snapshot.rs:97-125，先各自 round_usd 到 6 位再累加，且只累加 is_countable= dur>0 && out>0 的记录），而本波统一后的 TurnStreamEvent.costUsd / TurnTraceRecord.costUsd 是「轮聚合 usage 单次计价」（turn_flow.rs:938 → estimate_call_cost_usd:2711 → turn_persist.rs:275）。两者不保证相等，实测三类反例：(A) 普通 anthropic 两通调用，逐调用 6 位取整后求和 0.00004 vs 聚合后取整 0.000039（确定性差异，随调用数线性放大，最多 n×0.5e-6 USD）；(B) 第二通 output_tokens=Some(0)（已计费 input 但被 is_countable 过滤）⇒ 0.1575 vs 0.3075，差 $0.15（生产可达性未证，按纪律降级）；(C) 代理网关报 cache_read>input 时，逐通 saturating_sub 与「先聚合再相减」不等价 ⇒ openai 口径下 0.004125 vs 0.003125。本波未登记该面：契约矩阵 §6 只列 cache-write 与 usage_ledger/OTel，backlog B033/B034/B035 均未覆盖；.dev-team/contract-matrix-metrics-snapshot.md A8 只承诺「量级一致、消除同帧两个轮成本」，而 B 类反例下同帧两个轮成本仍可差近 2 倍。建议登记 B036（metrics.costUsd 与落库 costUsd 的 parity 用例或删除该字段）。该文件本波未改动，属暴露而非引入，故不判 BLOCKING。"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 351,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n \"estimate_cost_with_protocol(\\|calculate_cost_with_protocol(\" crates/pony-agent-core/src/agent/turn_flow.rs crates/pony-agent-core/src/agent/budget.rs crates/pony-agent-core/src/agent/runtime/turn_persist.rs  # 只有 turn_flow.rs:2722(estimate_call_cost_usd) 与 turn_persist.rs:24/275 走同一出口；span 在 turn_flow.rs:2667、budget 在 budget.rs:319 走 primitive",
+      "detail": "新增段（observability.yaml:349-354）称落库 costUsd「与既有 wire costUsd、llm.chat span gen_ai.cost.usd 收敛到同一出口 turn_flow::estimate_call_cost_usd」，并称「只把落库/budget 两个衍生面」对齐到同一函数。实现事实：只有 wire（turn_flow.rs:938/2736）与落库（turn_persist.rs:275）调用 estimate_call_cost_usd；llm.chat span 走 record_llm_span_cost → cost::estimate_cost_with_protocol（turn_flow.rs:2667），budget 走 cost::calculate_cost_with_protocol（budget.rs:319）。三者共用同一 primitive 与同一 from_label 映射，故数值等价、无第二真值，只是「同一出口/同一函数」的表述不准确（把 primitive 与 wrapper 混为一谈）。声明方向性结论（不新增出口、四维不变、无新增 enforcement_point）经 audit-diff.sh（exit 0，扫描 13 文件/1391 行）与 check-declaration.sh（exit 0，四维 PASS）验证成立，故仅声明精度问题。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/cost.rs",
+      "line": 5,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1,8p' crates/pony-agent-core/src/agent/cost.rs && sed -n '336,366p' crates/pony-agent-core/src/agent/cost.rs",
+      "detail": "本波把协议归一抽成 normalized_uncached_input_tokens（cost.rs:346-360，anthropic 不减），但模块头注释第 5 行仍把 `input_tokens_uncached = max(input_tokens − cache_read_tokens, 0)` 写成模块唯一口径，与同文件新函数及 C2 直接矛盾（正是本波要修的 bug 描述）。同批改动的函数级文档已更新，模块级未同步 ⇒ 后续读者/实现者可能据头部注释回退到固定 OpenAI 减法。纯文档债，无运行时影响。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "line": 6184,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git archive HEAD | tar -x -C /tmp/l3b_head && CARGO_TARGET_DIR=/tmp/l3b_head_target cargo test --manifest-path /tmp/l3b_head/crates/pony-agent-core/Cargo.toml --lib start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_requested_during_tool_execution  # 干净 HEAD 上同样失败：left=Some(\"[中断轮次检查点]\\n已执行的工具步骤：…\") right=Some(\"用户终止，发送消息可继续。\")",
+      "detail": "基线披露（非本波缺陷）：`cargo test -p pony-agent-core --lib` = 1299 passed / 1 failed，失败于 start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_requested_during_tool_execution 的 history.last() 断言；同一用例在 git-archive 出来的 HEAD 干净副本（无本波改动）上逐字复现，且本波 diff 未触及 session/store.rs::interrupted_turn_checkpoint_text（该文案来源，store.rs:62-95）与 cancel 路径，因果上不可能由成本口径引起。缺口属 wave-tui-session-resilience C5 引入检查点文案后该断言未同步（expect CANCELLED_TURN_MESSAGE）。影响：任何人以「lib 全绿」作为本波收尾凭证都会失真，需在验收口径中显式排除或用例修复。"
+    }
+  ]
+}

@@ -2,7 +2,10 @@
 //!
 //! 口径（契约 `.dev-team/contracts/wave-5-cost.md` K1）：
 //! - 价格以**每 1M token 的 USD 单价**表达，三维阶梯：未缓存输入 / 输出 / 缓存读取；
-//! - `input_tokens_uncached = max(input_tokens − cache_read_tokens, 0)`（严禁双重计费）；
+//! - 未缓存输入**按协议归一**（B027 / wave-cost-protocol）：`Anthropic` ⇒ `uncached = input_tokens`
+//!   （其 `input` 不含 cache_read，相减会把输入费变成 0）；`OpenAi` / `Unknown` ⇒
+//!   `uncached = max(input_tokens − cache_read_tokens, 0)`。唯一实现见
+//!   [`normalized_uncached_input_tokens`]——**禁止在别处再写一遍该减法**；
 //! - 结果四舍五入保留 [`COST_PRECISION_DECIMALS`] 位小数；
 //! - **未知模型返回 `None`**：严禁兜底价、插值或猜测；
 //! - `NaN` / `±Infinity` / 负单价 ⇒ `None`。
@@ -333,11 +336,36 @@ pub fn calculate_cost_with_pricing(
     )
 }
 
-/// 按**协议语义**归一未缓存输入后计价（Wave-6 K1.1 唯一公式实现）。
+/// 按**协议语义**归一后的「未缓存输入 token 数」（B027 C2 单一真值）。
 ///
 /// 语义：
-/// - `Anthropic` ⇒ `uncached = input_tokens`（input 不含 cache，缓存部分另按缓存单价计）；
-/// - `OpenAi` / `Unknown` ⇒ `uncached = max(input_tokens − cache_read_tokens, 0)`；
+/// - `Anthropic` ⇒ `uncached = input_tokens`：其 `input_tokens` **不含**缓存读取 token，
+///   严禁相减（否则 `input < cache_read` 时输入费被清零 ⇒ 低估）；
+/// - `OpenAi` / `Unknown` ⇒ `uncached = max(input_tokens − cache_read_tokens, 0)`：
+///   其 `prompt_tokens` **已包含**缓存命中 token，必须剔除以免双重计费（未知协议保守同 OpenAI）。
+///
+/// 所有计价与汇总入口（`calculate_cost_with_protocol` / `budget::CostTracker::record_usage`）
+/// 都必须经此函数取未缓存输入，禁止各自实现减法。
+pub fn normalized_uncached_input_tokens(
+    input_tokens: u64,
+    cache_read_tokens: Option<u64>,
+    protocol: ProviderCostProtocol,
+) -> u64 {
+    let cache_read = cache_read_tokens.unwrap_or(0);
+    match protocol {
+        // Anthropic：input 不含 cache_read，严禁相减（否则 input<cache 时输入费被清零）。
+        ProviderCostProtocol::Anthropic => input_tokens,
+        // OpenAI / Unknown：prompt_tokens 已含 cached，需剔除（未知协议保守按 OpenAI）。
+        ProviderCostProtocol::OpenAi | ProviderCostProtocol::Unknown => {
+            input_tokens.saturating_sub(cache_read)
+        }
+    }
+}
+
+/// 按**协议语义**归一未缓存输入后计价（Wave-6 K1.1 / B027 唯一公式实现）。
+///
+/// 语义：
+/// - 未缓存输入一律取自 [`normalized_uncached_input_tokens`]（C2 单一真值，不在本函数内重写分支）；
 /// - 其余校验（单价非法 / 非有限结果 ⇒ `None`）与 [`calculate_cost_with_pricing`] 完全一致。
 pub fn calculate_cost_with_protocol(
     pricing: &ModelPricing,
@@ -350,14 +378,8 @@ pub fn calculate_cost_with_protocol(
         return None;
     }
     let cache_read = cache_read_tokens.unwrap_or(0);
-    let uncached_input = match protocol {
-        // Anthropic：input 不含 cache_read，严禁相减（否则 input<cache 时输入费被清零）。
-        ProviderCostProtocol::Anthropic => input_tokens,
-        // OpenAI / Unknown：prompt_tokens 已含 cached，需剔除（未知协议保守按 OpenAI）。
-        ProviderCostProtocol::OpenAi | ProviderCostProtocol::Unknown => {
-            input_tokens.saturating_sub(cache_read)
-        }
-    };
+    let uncached_input =
+        normalized_uncached_input_tokens(input_tokens, cache_read_tokens, protocol);
 
     let input_cost_raw = (uncached_input as f64 * pricing.input_per_mtok
         + cache_read as f64 * pricing.cache_read_per_mtok)

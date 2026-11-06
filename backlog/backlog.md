@@ -200,3 +200,28 @@
   - 描述：本波实测 `TurnStreamEvent` 517 B/帧基线，3-record 帧 +36.5%（快照 22 字段）。已入 NFR 预算 700 B/帧但**无机器门禁**，后续再加字段会静默膨胀（IPC/SSE 带宽与前端解析成本）。
   - 验收：CI 对代表性事件帧做体积断言，超预算即红。
   - 登记来源：契约 §7.2；方案对抗审查 ADVISORY Q6
+
+- [ ] `B033` - P2: cache 写入（`cache_creation_input_tokens`）计价维度缺失
+  - 路径：`crates/pony-agent-core/src/agent/cost.rs`（`ModelPricing` / `PRICING_TABLE`）、`crates/pony-agent-core/src/agent/telemetry.rs`（`ProviderCallCacheRecord`）
+  - 描述：`ModelPricing` 只有 `input_per_mtok` / `output_per_mtok` / `cache_read_per_mtok`，**无 cache write 单价**；`calculate_cost_with_protocol` 完全不读 `TokenUsage.cache_creation_input_tokens` ⇒ anthropic 的缓存写入成本当前**完全未计价**（Anthropic 缓存写入通常为 input 的 1.25×，属系统性低估）。`ProviderCallCacheRecord` 亦无该字段，故 per-call 成本（含 `TurnMetricsSnapshot.costUsd`）无法纳入。
+  - 验收：价格表增 cache-write 维度；anthropic 单次调用的 cache 写入费可被计价并与官方账单口径对齐；`ProviderCallCacheRecord` 增字段（wire additive）并贯通快照。
+  - 登记来源：B027 实施期识别的**不同根因**缺口（口径统一 ≠ 计价维度补全），见 `.dev-team/contract-matrix-cost-protocol.md` §6。
+
+- [ ] `B034` - P2: 治理汇总前端永不拉取（`fetchUsageGovernanceSummary` 零调用点）⇒ UI 数据面永远走 trace fallback
+  - 路径：`src/stores/runtime.ts:844`、`src-tauri/src/lib.rs:715-720`、`crates/pony-agent-core/src/agent/usage_governance.rs:437-480`
+  - 描述：后端有权威治理汇总（读 `usage_ledger` SQL），命令也已暴露，但前端 action 无任何调用点 ⇒ 前端 `usageGovernanceSummary` 恒为本地兜底空壳，与后端权威值可能长期背离。属 B027 同类「双口径」缺陷（一个是成本，一个是治理汇总）。
+  - 验收：UI 改走后端权威汇总（或明确删除前端兜底，二选一），并补一条一致性用例。
+  - 登记来源：B027 侦察（E2 explorer，2026-11-06）；**非本波修复**（超出 B027 写域与验收面）。
+
+- [ ] `B035` - P3: 预算熔断阈值语义不一致（`>` vs `>=`）
+  - 路径：`crates/pony-agent-core/src/agent/budget.rs:337`、`crates/pony-agent-core/src/agent/cost.rs:444-458`
+  - 描述：`CostTracker` 用 `total_cost_usd > limit` 才熔断，`cost::is_budget_exceeded` 用 `>=` ⇒ 「恰好等于上限」时两处判定相反。`CostTracker` 当前零生产调用方，故影响仅在启用时暴露。
+  - 验收：二选一并写进契约（建议 `>=`，与「达到上限即不可再用」的产品语义一致），补边界用例。
+  - 登记来源：B027 侦察（E2 explorer，2026-11-06）。
+
+- [ ] `B036` - P1: 成本聚合粒度统一（同帧 `metrics.costUsd` ≠ `trace/wire costUsd`）
+  - 路径：`crates/pony-agent-core/src/agent/metrics_snapshot.rs:87-130`（逐调用 Σ + countable 过滤）、`crates/pony-agent-core/src/agent/turn_flow.rs:2711`（轮级聚合一次计价）、`crates/pony-agent-core/src/agent/otel/mod.rs`（span 逐调用，缺 usage 记 `unwrap_or(0)`）
+  - 描述：同一帧存在三种成本聚合粒度：① wire/trace/ledger = **轮级聚合 usage 一次计价**（B027 已统一到同函数）；② `TurnMetricsSnapshot.costUsd` = **逐调用计价后求和**且过滤不可计数记录；③ `llm.chat` span = 逐调用且缺 usage 按 0 计。三者协议口径已一致，但**聚合粒度不同**，在「逐调用 6 位取整误差」「output=0 记录被过滤」「openai cache>input 饱和」等场景会给出不同数值。
+  - 机器反例（L3-B 实测）：A 0.000040 vs 0.000039（取整累积）；B output=0 被过滤 0.1575 vs 0.3075（差 ~2×）；C openai cache>input 0.004125 vs 0.003125。
+  - 验收：三处择一为唯一口径（建议轮级聚合为「账单真值」、逐调用为「诊断明细」并在字段名/文档显式区分），补三条反例回归用例；span 缺 usage 改为不记 `$0`（与 C5「未知不伪造」对齐）。
+  - 登记来源：`.dev-team/review-cost-l3a.json` ADVISORY 1/2、`.dev-team/review-cost-l3b.json` ADVISORY 1（2026-11-06）。

@@ -342,3 +342,15 @@ note: >-
       快照与 span 属性**同源同函数**（`turn_flow::weighted_turn_speed`），不构成第二真值源。
   (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；
       既有 `error_boundary` / `http_client` 两个收口点本次未改动。
+  【wave-cost-protocol 归属登记｜成本协议口径统一（B027）】
+  (1) 四维归属不变：tracing/issues 仍 applicable（落点不变 `agent/otel/mod.rs`、
+      `agent/ponysentry/client.rs`），metrics/logs 维持结构性 N-A（理由同本文档维度声明）。
+      无新增网络端点、依赖、环境变量、指标、Loki 上送或日志出口。
+  (2) 变更性质：**计算口径修正**（非新增观测面）。落库 `TurnTraceRecord.costUsd` 由固定 OpenAI
+      口径改为 `ProviderEventMeta.protocol` 感知口径，与既有 wire `costUsd` **收敛到同一出口函数**
+      `turn_flow::estimate_call_cost_usd`；`llm.chat` span（逐调用）与 `budget::CostTracker` 汇总
+      则走**同一计价原语** `cost::calculate_cost_with_protocol`（函数不同、数值等价，非第二公式）；
+      `budget` 分项和同时改为自洽（`total = input + cached + output`）。
+  (3) 与 tracing 的关系：成本真值仍以既有 `llm.chat` span 属性为准（ADR 0053 / wave-53 C1），
+      本次只把「落库/budget 两个衍生面」对齐到同一函数，不产生第二真值源。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 未改动。

@@ -1,0 +1,64 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a-cost-protocol-correctness",
+    "fresh_context": true
+  },
+  "executed_by": "l3a-cost-protocol-correctness",
+  "attestation": {
+    "self_signed": false,
+    "note": "审查 wave-cost-protocol 未提交工作树；reviewed_commit 填当前 HEAD 09c0d926。机器收据（工作树含本次 diff）：(1) cargo test -p pony-agent-core --test cost_protocol_parity --test wave33_platform_cost_test --test wave5_cost_test --test wave6_observability_polish_test => 9+1+9+4 passed / 0 failed，EXIT=0；(2) cargo test -p pony-agent-core --lib agent::cost => 8 passed，EXIT=0（含 0.0018/0.0015/0.15/0.0 断言零改动）；(3) cargo test -p pony-agent-core --lib agent::budget => 4 passed，EXIT=0。未修改仓库任何文件，仅写本 JSON。"
+  },
+  "reviewed_commit": "09c0d926",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/cost.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/budget.rs",
+    "crates/pony-agent-core/tests/wave33_platform_cost_test.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/metrics_snapshot.rs",
+      "line": 97,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -rn \"metrics\" crates/pony-agent-core/tests/cost_protocol_parity.rs; sed -n '87,129p' crates/pony-agent-core/src/agent/metrics_snapshot.rs; sed -n '2705,2732p' crates/pony-agent-core/src/agent/turn_flow.rs; grep -n \"accumulate_active_turn_cost(cost)\" crates/pony-agent-core/src/agent/otel/mod.rs",
+      "detail": "同一轮的 costUsd 存在两套聚合口径：wire/trace/usage_ledger 是『轮级聚合 usage 一次计价』（turn_flow.rs:2711 estimate_call_cost_usd ← turn_persist.rs:76；turn_stream.rs:1651 与 :1604 同传 persisted.*），而 metrics 快照与 agent.turn 根 span 是『逐调用计价后求和』（metrics_snapshot.rs:97-128 逐条 estimate_cost_with_protocol 相加；otel/mod.rs:2592 accumulate_active_turn_cost，根 span 取 2355 take_active_turn_cost；外层 wire 信封在 turn_flow.rs:992 同帧挂 metrics）。metrics_snapshot.rs:87 注释自称『与同帧顶层轮聚合 cost_usd 保持一致』，实际仅在每跳 input>=cache 且取整无进位时成立。数值反例（gpt-4.1-mini，$0.40/$1.60/$0.10 per Mtok，openai 协议，两跳且第 1 跳上游误报 cache>input）：hop1(in=1000,cache=8000,out=500)=0.0016，hop2(in=20000,cache=0,out=500)=0.0088 ⇒ Σ=0.0104；轮级聚合(in=21000,cache=8000,out=1000) uncached=13000 ⇒ 0.006+0.0016=0.0076。同一 turn 两个 costUsd 差 0.0028（约 −27%）。纯取整差（gpt-4.1-nano，3 跳各 in=1/out=1）：逐条 Σ=3e-6 vs 聚合=2e-6。本项不违反 C1/C3（两者都经 estimate_cost_with_protocol，且 C3 只锁 wire 与落库），故 ADVISORY；建议 costUsd 统一描述为『协议归一后的轮级聚合用量 × 单价（单次 6 位取整）』，非『各调用成本之和』，并明确与 metrics.costUsd / agent.turn.cost.usd 可能不等。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/turn_flow.rs",
+      "line": 2669,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '2654,2682p' crates/pony-agent-core/src/agent/turn_flow.rs; grep -n \"k4_otel_spans_do_not_export_cost\" crates/pony-agent-core/tests/wave5_cost_test.rs",
+      "detail": "record_llm_span_cost 以 usage.input_tokens.unwrap_or(0)/output_tokens.unwrap_or(0) 调 estimate_cost_with_protocol（turn_flow.rs:2669-2670）：provider 未上报 usage（Option=None）且模型命中价格表时返回 Some(0.0)，于是 llm.chat span 写 gen_ai.cost.usd=0、cost_details 0/0/0 并置 pony.cost.priced=true，等同『把未知记成 $0』——与 C5『缺 usage ⇒ None，禁止 0 顶替』字面冲突，且它是第四面唯一仍绕过新出口 estimate_call_cost_usd 的成本点（该出口对缺 usage 天然返回 None）。§6 已把 OTel span 面划出本波，故按纪律降为 ADVISORY；触发条件为 span 门禁开启 + 模型已收录 + 本次调用缺 input/output（流式缺 message_start 等）。wave5 k4 仅覆盖『未知模型/门禁关』，未覆盖此路径。建议 span 侧改调 estimate_call_cost_usd 或先判 Option。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/budget.rs",
+      "line": 337,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n \"total_cost_usd > limit\" crates/pony-agent-core/src/agent/budget.rs; grep -n \"total_cost_usd >= budget\" crates/pony-agent-core/src/agent/cost.rs; grep -n \"sessionTotalCostUsd > budget\" src/stores/runtime.ts",
+      "detail": "熔断阈值语义三处不一致：cost::is_budget_exceeded 用 >=（cost.rs:459，K3.1『触及或超过』，单测 budget_threshold_is_inclusive 锁定等值告警）；CostTracker::record_usage 用 >（budget.rs:337）；前端 isCostBudgetExceeded 亦用 >（src/stores/runtime.ts:760）。恰等预算时 core 单轮 warn 会触发而 tracker/前端不告警。本次改动未触碰任一处比较符、也未改变边界语义（唯一变化是 Anthropic 成本上升，属预期修复），判定：未被本次改动放大，属契约外历史不一致；建议单独立项统一为 >=（与 K3.1 对齐）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/cost.rs",
+      "line": 35,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n \"cache_creation_input_tokens\" crates/pony-agent-core/src/agent/cost.rs; grep -c \"cache_write\" crates/pony-agent-core/src/agent/cost.rs; sed -n '5455,5465p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "detail": "ModelPricing 仅有 input/output/cache_read 三维（cost.rs:29-36），Anthropic 的 cache_creation_input_tokens 只参与 context 归一（provider/mod.rs:5457-5463），任何成本公式都不消费它 ⇒ 缓存写入仍全线未计价（Anthropic 写入价约为输入价 1.25×）。本波基准用例已把 anthropic 用例从 0.0099 修正到 0.0129，但含 cache 写入的真实账单仍高于该值。§6 已登记 B033，按纪律不判 BLOCKING；仅提示 anthropic 成本仍应视为下限。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/cost.rs",
+      "line": 314,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n \"唯一公式实现\" crates/pony-agent-core/src/agent/cost.rs; grep -rn \"calculate_cost_with_pricing(\\|estimate_cost(\" crates/pony-agent-core/src src-tauri/src",
+      "detail": "运行期无分叉（grep 证实 calculate_cost_with_pricing / estimate_cost 生产零调用方，仅 cost.rs 自身与单测），C1/C2 成立；但文档与 API 面仍有二义性：compat 入口 calculate_cost_with_pricing 在 cost.rs:314 仍自称『K1 唯一公式实现』并固定 OpenAI 口径（内部委托 calculate_cost_with_protocol(..., OpenAi)），而 B027 在 cost.rs:366 给协议感知原语同样标注『唯一公式实现』，两处『唯一』互斥；legacy estimate_cost（cost.rs:412）同理。建议把两处 legacy 入口显式标注『仅兼容 / deprecated』并修正措辞，避免后续调用方绕过协议归一。"
+    }
+  ]
+}

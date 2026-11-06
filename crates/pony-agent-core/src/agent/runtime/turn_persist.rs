@@ -61,20 +61,24 @@ pub(crate) fn build_usage_ledger_entry(
     }
 }
 
-/// Wave-5 K2：持久化 trace 的成本（未知模型 / 缺真实 usage ⇒ `None`）。
+/// Wave-5 K2 / B027 C1+C3：持久化 trace 的成本（未知模型 / 缺真实 usage / 无 meta ⇒ `None`）。
 ///
 /// 只基于 provider 真实返回的 usage 计算，禁止本地 token 猜测（契约 K1.3）。
+/// B027：改为**委托**单一出口 [`crate::agent::turn_flow::estimate_call_cost_usd`]，
+/// 从而按 `provider_meta.protocol` 归一（Anthropic 的 input 不含 cache，不再被减法清空），
+/// 并与 wire 侧逐位同值；禁再用固定 OpenAI 口径的 `cost::estimate_cost`。
 fn estimate_trace_cost(
     provider_meta: Option<&ProviderEventMeta>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_hit_input_tokens: Option<u64>,
 ) -> Option<f64> {
-    let model = provider_meta.map(|meta| meta.model.as_str())?;
-    let input = input_tokens?;
-    let output = output_tokens?;
-    crate::agent::cost::estimate_cost(model, input, output, cache_hit_input_tokens)
-        .map(|estimate| estimate.total_cost_usd)
+    crate::agent::turn_flow::estimate_call_cost_usd(
+        provider_meta,
+        input_tokens,
+        output_tokens,
+        cache_hit_input_tokens,
+    )
 }
 
 impl AgentRuntime {

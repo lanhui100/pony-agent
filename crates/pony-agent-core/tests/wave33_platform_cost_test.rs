@@ -7,6 +7,12 @@
 //! 4. 提供结构化 `/cost` 或会话成本摘要，包含总 token 数、缓存节省以及 USD 金额。
 
 use pony_agent_core::agent::budget::{CostTracker, ModelPricing};
+use pony_agent_core::agent::cost::ProviderCostProtocol;
+
+// B027（wave-cost-protocol，2026-11-06）契约演进：`record_usage` 新增 `protocol` 形参
+// （成本口径必须协议感知，禁止固定 OpenAI）。本档历史断言按**OpenAI 兼容语义**冻结，
+// 故迁移为显式传 `Unknown`（`calculate_cost_with_protocol` 对 Unknown 与 OpenAi 等价）。
+// 迁移由 Test 方（Lead）执行，既有数值断言逐字未改。
 
 #[test]
 fn test_cost_tracker_calculation_and_budget_breaker() {
@@ -18,14 +24,32 @@ fn test_cost_tracker_calculation_and_budget_breaker() {
     };
 
     // 1. 记录第一次调用：未超预算
-    let cost1 = tracker.record_usage("claude-3-7-sonnet", &pricing, 10_000, 1_000, 5_000).expect("within budget");
+    let cost1 = tracker
+        .record_usage(
+            "claude-3-7-sonnet",
+            &pricing,
+            10_000,
+            1_000,
+            5_000,
+            ProviderCostProtocol::Unknown,
+        )
+        .expect("within budget");
     // input: 5000 * 3.0 / 1M = 0.015, cached: 5000 * 0.75 / 1M = 0.00375, output: 1000 * 15.0 / 1M = 0.015
     // cost1 approx = 0.03375
     assert!(cost1 > 0.03 && cost1 < 0.04);
     assert!(!tracker.is_budget_exceeded());
 
     // 2. 记录第二次调用：累加后触发 0.05 USD 硬熔断
-    let err = tracker.record_usage("claude-3-7-sonnet", &pricing, 10_000, 2_000, 0).expect_err("should exceed budget");
+    let err = tracker
+        .record_usage(
+            "claude-3-7-sonnet",
+            &pricing,
+            10_000,
+            2_000,
+            0,
+            ProviderCostProtocol::Unknown,
+        )
+        .expect_err("should exceed budget");
     assert!(err.contains("budget_exceeded") || err.contains("Budget exceeded"));
     assert!(tracker.is_budget_exceeded());
 

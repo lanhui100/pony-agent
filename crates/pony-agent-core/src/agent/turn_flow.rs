@@ -2697,27 +2697,54 @@ fn cache_reportable_input_tokens(protocol_label: &str, usage: &TokenUsage) -> Op
     }
 }
 
-/// Wave-5 K2：turn 事件成本（未知模型或缺真实 usage ⇒ `None`）。
-fn turn_event_cost_usd(
+/// B027 C1/C3：**wire 与落库共享的唯一成本出口**。
+///
+/// 语义（契约 `.dev-team/contract-matrix-cost-protocol.md`）：
+/// - `protocol` 由 `ProviderEventMeta.protocol` → [`ProviderCostProtocol::from_label`] 映射，
+///   再交 [`crate::agent::cost::estimate_cost_with_protocol`] 计价（C1 单一出口）；
+/// - 无 `provider_meta`（无法判定协议）/ 缺 input / 缺 output / 未收录模型 ⇒ `None`（C5 未知不伪造，
+///   禁止以 0 顶替）；
+/// - wire（[`turn_event_cost_usd`]）与落库（`runtime::turn_persist::estimate_trace_cost`）
+///   必须都由本函数产出，保证同一 turn 两侧逐位相等（C3）。
+///
+/// [`ProviderCostProtocol::from_label`]: crate::agent::cost::ProviderCostProtocol::from_label
+pub fn estimate_call_cost_usd(
     provider_meta: Option<&ProviderEventMeta>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_hit_input_tokens: Option<u64>,
 ) -> Option<f64> {
     let meta = provider_meta?;
-    let model = meta.model.as_str();
     let input = input_tokens?;
     let output = output_tokens?;
-    // Wave-6 K1.1：协议语义归一（Anthropic input 不含 cache；未知协议保守按 OpenAI）。
+    // Wave-6 K1.1 / B027 C2：协议语义归一（Anthropic input 不含 cache；未知协议保守按 OpenAI）。
     let protocol = crate::agent::cost::ProviderCostProtocol::from_label(meta.protocol.as_str());
     crate::agent::cost::estimate_cost_with_protocol(
-        model,
+        meta.model.as_str(),
         input,
         output,
         cache_hit_input_tokens,
         protocol,
     )
     .map(|estimate| estimate.total_cost_usd)
+}
+
+/// Wave-5 K2：turn 事件成本（未知模型或缺真实 usage ⇒ `None`）。
+///
+/// B027：本函数退化为 [`estimate_call_cost_usd`] 的**同名适配层**（wire 数值不变），
+/// 使 wire 与落库共享同一出口，避免两面对口径漂移。
+fn turn_event_cost_usd(
+    provider_meta: Option<&ProviderEventMeta>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+) -> Option<f64> {
+    estimate_call_cost_usd(
+        provider_meta,
+        input_tokens,
+        output_tokens,
+        cache_hit_input_tokens,
+    )
 }
 
 /// `llm.chat` 请求的组装模式（写入 span 属性 `llm.request.mode`）。
