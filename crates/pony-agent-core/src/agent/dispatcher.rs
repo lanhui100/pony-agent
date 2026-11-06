@@ -1714,10 +1714,21 @@ impl Inner {
             if let Some(store) = store {
                 let record = persisted_ask_from_pending(&pending, now);
                 if let Err(error) = store.upsert(&record) {
+                    // Fail closed (contract §5/§7): an Ask that could not be persisted must not
+                    // be announced as pending — the host would expose a question that no restart
+                    // can recover. The caller sees a structured error instead.
                     eprintln!(
-                        "[pony-agent] ask persistence: upsert of `{}` failed: {error}",
+                        "[pony-agent] ask persistence: upsert of `{}` failed; failing the dispatch: \
+                         {error}",
                         pending.request_id
                     );
+                    return Err(DispatchError::new(
+                        "ask_persist_failed",
+                        format!(
+                            "Ask `{}` could not be persisted to the session store: {error}",
+                            pending.request_id
+                        ),
+                    ));
                 }
             }
         }
