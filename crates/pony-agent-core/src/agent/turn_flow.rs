@@ -7,6 +7,7 @@ use crate::agent::provider::{
 use crate::agent::session::TraceTimelineEntry;
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -2535,52 +2536,90 @@ pub fn preview_text(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn calculate_call_generation_speed(
-    output_tokens: Option<u64>,
-    elapsed_ms: u64,
-    ttft_ms: Option<u64>,
-) -> Option<f64> {
-    let output = output_tokens?;
-    if output == 0 || elapsed_ms == 0 {
-        return None;
-    }
+/// 解码窗口物理下限：绝对下限（毫秒）。
+///
+/// 突发包（SSE 被上游代理攒成一包）与计时抖动下的 `gen` 只有 1–2ms，不能代表生成速率；
+/// 该下限是物理事实约束，不是数值美化（契约 I3）。
+pub const DECODE_FLOOR_MIN_MS: u64 = 200;
 
-    let mut generation_ms = elapsed_ms;
-    if let Some(ttft) = ttft_ms {
-        if elapsed_ms > ttft {
-            generation_ms = elapsed_ms - ttft;
+/// 解码窗口物理下限：相对下限（百分比）。`floor(dur) = max(200ms, 5% * dur)`。
+pub const DECODE_FLOOR_RATIO_PCT: u64 = 5;
+
+/// turn / 单调用速度的**口径**（契约 I10 线缆自描述）。
+///
+/// `StreamDecode` = 分母只含真实解码窗口（已扣 TTFT 且过物理下限）；
+/// `EndToEnd` = 端到端吞吐（含排队 + prefill），与解码速度**不可比**，消费面须加 `≈` 前缀。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnSpeedBasis {
+    /// I4：`Σ(out-1) / (Σgen/1000)`。
+    StreamDecode,
+    /// I5：`Σout / (Σdur/1000)`。
+    EndToEnd,
+}
+
+impl TurnSpeedBasis {
+    /// wire 取值：`stream_decode` | `end_to_end`。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StreamDecode => "stream_decode",
+            Self::EndToEnd => "end_to_end",
         }
     }
+}
 
-    if generation_ms == 0 {
+/// I3：解码窗口物理下限 `floor(dur) = max(200ms, 5% * dur)`。
+pub fn decode_floor_ms(duration_ms: u64) -> u64 {
+    (duration_ms * DECODE_FLOOR_RATIO_PCT / 100).max(DECODE_FLOOR_MIN_MS)
+}
+
+/// I1：per-call 有效性 `dur > 0 && out > 0`。
+///
+/// 缺失或为 0 的记录不参与任何速度计算，也不计入 calls（禁止把「未知」当 0 计入）。
+pub fn call_valid(duration_ms: Option<u64>, output_tokens: Option<u64>) -> bool {
+    duration_ms.unwrap_or(0) > 0 && output_tokens.unwrap_or(0) > 0
+}
+
+/// I3：解码样本判据（**唯一出处**，消费面禁止各写一份）。
+///
+/// `call_valid && ttft 存在 && dur > ttft && out >= 2 && gen >= floor(dur)`：
+/// 无 TTFT 观测（批量同步 followup / 非流式决策）、单 token 调用、突发包一律不合格，
+/// 只能进 I5 的端到端回退。
+pub fn decode_eligible(
+    duration_ms: Option<u64>,
+    ttft_ms: Option<u64>,
+    output_tokens: Option<u64>,
+) -> bool {
+    if !call_valid(duration_ms, output_tokens) {
+        return false;
+    }
+    let duration = duration_ms.unwrap_or(0);
+    let output = output_tokens.unwrap_or(0);
+    let Some(ttft) = ttft_ms else {
+        return false;
+    };
+    if duration <= ttft || output < 2 {
+        return false;
+    }
+    call_generation_ms(Some(duration), Some(ttft)) >= decode_floor_ms(duration)
+}
+
+/// 比值 → 速度（A5 浮点卫生）：分子/分母为 0、非有限、非正 ⇒ `None`（禁止 0/NaN 上线缆）。
+fn speed_from_ratio(numerator: u64, denominator_ms: u64) -> Option<f64> {
+    if numerator == 0 || denominator_ms == 0 {
         return None;
     }
-
-    let speed = (output as f64) / ((generation_ms as f64) / 1000.0);
-    if speed.is_finite() && speed > 0.0 {
-        Some(speed)
-    } else {
-        None
-    }
+    let candidate = (numerator as f64) / ((denominator_ms as f64) / 1_000.0);
+    (candidate.is_finite() && candidate > 0.0).then_some(candidate)
 }
 
-/// wave-54 C2：turn 加权生成速度真值（单一口径，UI 与根 span 共用）。
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct TurnSpeedTruth {
-    /// `Σout / (Σgen / 1000)`；`Σgen == 0` 或 `Σout == 0` ⇒ `None`（无值，禁止 0 占位）。
-    pub speed: Option<f64>,
-    /// `Σout`（各 per-call `output_tokens` 之和）。
-    pub output_tokens: u64,
-    /// `Σgen`（各 per-call 生成耗时之和，毫秒）。
-    pub generation_ms: u64,
-    /// 首个带 ttft 的 per-call 值（**不**跨 hop 采样，不是 turn elapsed 内首包）。
-    pub ttft_ms: Option<u64>,
-    /// 参与计算的已完成调用数。
-    pub calls: u32,
-}
-
-/// 单次调用生成耗时（C1/C2 同一公式）：
+/// 单次调用生成窗口（**分母候选，不等于有效生成窗口**）。
+///
 /// `gen = (ttft 存在且 dur > ttft) ? dur - ttft : dur`（`ttft > dur` 退化，不出负值）。
+///
+/// ⚠️ 本函数只按 I2 定义**窗口**，不定义「合格性」：能否作为解码样本必须走
+/// [`decode_eligible`]（I3）。历史上把 `gen` 直接当分母用过，导致无 TTFT 调用与突发包
+/// 污染速度（契约 §0 根因 1/2），不要重犯。
 pub fn call_generation_ms(duration_ms: Option<u64>, ttft_ms: Option<u64>) -> u64 {
     let duration = duration_ms.unwrap_or(0);
     match ttft_ms {
@@ -2589,61 +2628,171 @@ pub fn call_generation_ms(duration_ms: Option<u64>, ttft_ms: Option<u64>) -> u64
     }
 }
 
-/// wave-54 C2：由 per-call 记录求 turn 加权生成速度真值。
+/// I4 累加器：`decode_eligible` 侧的 `Σout` / `Σgen` / 调用数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecodeTotals {
+    pub output_tokens: u64,
+    pub generation_ms: u64,
+    pub calls: u32,
+}
+
+/// I5 累加器：`valid` 侧的 `Σout` / `Σdur` / 调用数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ValidTotals {
+    pub output_tokens: u64,
+    pub duration_ms: u64,
+    pub calls: u32,
+}
+
+/// 速度真值（I4–I7 同源恒等式 + I10 自描述；UI / 快照 / 根 span 共用）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TurnSpeedTruth {
+    /// 参与计算集合的 `Σout / (分母/1000)`；无参与计算调用 ⇒ `None`（禁止 0 占位）。
+    pub speed: Option<f64>,
+    /// 口径（I10）：`stream_decode` | `end_to_end`；`None` ⇔ 无值。
+    pub basis: Option<TurnSpeedBasis>,
+    /// 参与计算集合的 Σout（`stream_decode` ⇒ Σeligible out；`end_to_end` ⇒ Σvalid out），I7。
+    pub output_tokens: u64,
+    /// 分母时长（`stream_decode` ⇒ Σgen；`end_to_end` ⇒ Σdur），毫秒，I7。
+    pub generation_ms: u64,
+    /// 首个带 ttft 的 valid per-call 值（**不**跨 hop 采样，不是 turn elapsed 内首包）。
+    pub ttft_ms: Option<u64>,
+    /// 参与计算集合的调用数（按 basis 口径，I7）。
+    pub calls: u32,
+}
+
+/// I4/I5/I6：由两路累加器择一结算速度（**唯一公式出口**，禁止复制粘贴后独立演化）。
 ///
-/// 公式：`gen_i = call_generation_ms(dur_i, ttft_i)`；`speed = Σout_i / (Σgen_i / 1000)`，
-/// 仅当 `Σgen_i > 0` 且 `Σout_i > 0`。**不含** TTFT（端到端吞吐是另一指标，本波不输出）。
+/// - `decode.calls > 0` ⇒ `Σ(out-1) / (Σgen/1000)`，`basis = stream_decode`（I4）；
+/// - 否则 `valid.calls > 0` ⇒ `Σout / (Σdur/1000)`，`basis = end_to_end`（I5）；
+/// - 否则全 `None` / `0`（I6：既无 eligible 也无 valid ⇒ 无值，禁止伪造）。
+///
+/// 禁止把两路口径混进同一个 Σ。`otel::read_active_turn_call_truth` 与
+/// `metrics_snapshot::build_turn_metrics_snapshot` 都经此函数结算，保证同源（I9）。
+pub fn resolve_turn_speed(
+    decode: DecodeTotals,
+    valid: ValidTotals,
+    ttft_ms: Option<u64>,
+) -> TurnSpeedTruth {
+    if decode.calls > 0 {
+        return TurnSpeedTruth {
+            // 分子扣 1/token：首 token 已计入 TTFT，解码窗口只新增 `out - 1` 个 token。
+            speed: speed_from_ratio(
+                decode.output_tokens.saturating_sub(u64::from(decode.calls)),
+                decode.generation_ms,
+            ),
+            basis: Some(TurnSpeedBasis::StreamDecode),
+            output_tokens: decode.output_tokens,
+            generation_ms: decode.generation_ms,
+            ttft_ms,
+            calls: decode.calls,
+        };
+    }
+    if valid.calls > 0 {
+        return TurnSpeedTruth {
+            speed: speed_from_ratio(valid.output_tokens, valid.duration_ms),
+            basis: Some(TurnSpeedBasis::EndToEnd),
+            output_tokens: valid.output_tokens,
+            generation_ms: valid.duration_ms,
+            ttft_ms,
+            calls: valid.calls,
+        };
+    }
+    TurnSpeedTruth::default()
+}
+
+/// 由原始观测求单调用速度与口径（I8，**唯一出处**）。
+///
+/// eligible ⇒ `(out-1) / (gen/1000)`，`stream_decode`；valid 但不可解码 ⇒
+/// `out / (dur/1000)`，`end_to_end`；无效 ⇒ `(None, None)`。
+pub fn call_speed_from_raw(
+    duration_ms: Option<u64>,
+    ttft_ms: Option<u64>,
+    output_tokens: Option<u64>,
+) -> (Option<f64>, Option<TurnSpeedBasis>) {
+    if !call_valid(duration_ms, output_tokens) {
+        return (None, None);
+    }
+    let duration = duration_ms.unwrap_or(0);
+    let output = output_tokens.unwrap_or(0);
+    if decode_eligible(Some(duration), ttft_ms, Some(output)) {
+        return (
+            speed_from_ratio(
+                output.saturating_sub(1),
+                call_generation_ms(Some(duration), ttft_ms),
+            ),
+            Some(TurnSpeedBasis::StreamDecode),
+        );
+    }
+    (
+        speed_from_ratio(output, duration),
+        Some(TurnSpeedBasis::EndToEnd),
+    )
+}
+
+/// 单条 per-call 记录的速度与口径（I8；快照 `callSpeed*` 用）。
+pub fn call_speed(record: &ProviderCallCacheRecord) -> (Option<f64>, Option<TurnSpeedBasis>) {
+    call_speed_from_raw(
+        record.turn_duration_ms,
+        record.first_token_latency_ms,
+        record.output_tokens,
+    )
+}
+
+/// per-hop `llm.chat` span 的单调用速度（I8/I9：与快照 per-call 同一公式，不另写一份）。
+fn calculate_call_generation_speed(
+    output_tokens: Option<u64>,
+    elapsed_ms: u64,
+    ttft_ms: Option<u64>,
+) -> Option<f64> {
+    call_speed_from_raw(Some(elapsed_ms), ttft_ms, output_tokens).0
+}
+
+/// I4/I5/I6：由 per-call 记录求 turn 速度真值。
+///
+/// 先一次遍历把记录分成 `decode_eligible` 与 `valid` 两路累加，再由
+/// [`resolve_turn_speed`] 择一结算；**禁止**在一次 Σ 中混两种口径。
 pub fn weighted_turn_speed(records: &[ProviderCallCacheRecord]) -> TurnSpeedTruth {
-    let mut output_tokens: u64 = 0;
-    let mut generation_ms: u64 = 0;
+    let mut decode = DecodeTotals::default();
+    let mut valid = ValidTotals::default();
     let mut ttft_ms: Option<u64> = None;
-    let mut calls: u32 = 0;
     for record in records {
-        // 有效调用判据（与 UI `isCountableCall` 完全一致）：`dur > 0 && out > 0`。
-        // planner-only 伪记录（dur/out 为 None）不计入 Σ、也不计入 calls。
-        let duration = record.turn_duration_ms.unwrap_or(0);
-        let output = record.output_tokens.unwrap_or(0);
-        if duration == 0 || output == 0 {
+        if !call_valid(record.turn_duration_ms, record.output_tokens) {
+            // I1：planner-only 伪记录（dur/out 为 None）与 0 值记录不进任何 Σ、不计 calls。
             continue;
         }
-        output_tokens = output_tokens.saturating_add(output);
-        generation_ms = generation_ms
-            .saturating_add(call_generation_ms(Some(duration), record.first_token_latency_ms));
-        calls = calls.saturating_add(1);
+        let duration = record.turn_duration_ms.unwrap_or(0);
+        let output = record.output_tokens.unwrap_or(0);
+        valid.output_tokens = valid.output_tokens.saturating_add(output);
+        valid.duration_ms = valid.duration_ms.saturating_add(duration);
+        valid.calls = valid.calls.saturating_add(1);
         if ttft_ms.is_none() {
             ttft_ms = record.first_token_latency_ms;
         }
-    }
-    let speed = if generation_ms > 0 && output_tokens > 0 {
-        let candidate = (output_tokens as f64) / ((generation_ms as f64) / 1_000.0);
-        if candidate.is_finite() && candidate > 0.0 {
-            Some(candidate)
-        } else {
-            None
+        if decode_eligible(Some(duration), record.first_token_latency_ms, Some(output)) {
+            decode.output_tokens = decode.output_tokens.saturating_add(output);
+            decode.generation_ms = decode.generation_ms.saturating_add(call_generation_ms(
+                Some(duration),
+                record.first_token_latency_ms,
+            ));
+            decode.calls = decode.calls.saturating_add(1);
         }
-    } else {
-        None
-    };
-    TurnSpeedTruth {
-        speed,
-        output_tokens,
-        generation_ms,
-        ttft_ms,
-        calls,
     }
+    resolve_turn_speed(decode, valid, ttft_ms)
 }
 
-/// wave-54 C2：把加权速度与 turn 级 timing 落到根 `agent.turn` span。
+/// 把速度真值与 turn 级 timing 落到根 `agent.turn` span。
 ///
 /// 生产路径（`runtime/turn_stream.rs` / `runtime/turn_sync.rs` 的终态收尾）唯一出口：
-/// 速度、`basis=turn_weighted`、duration/ttft/calls 必须同源同帧写入，禁止各写各的。
+/// 速度、`basis`（`stream_decode` | `end_to_end`）、duration/ttft/calls 必须同源同帧写入，
+/// 禁止各写各的（I10）。
 pub fn record_turn_speed_truth(
     scope: &mut crate::agent::otel::TurnTraceGuard,
     records: &[ProviderCallCacheRecord],
     turn_duration_ms: Option<u64>,
 ) {
     let truth = weighted_turn_speed(records);
-    scope.record_turn_speed(truth.speed);
+    scope.record_turn_speed_with_basis(truth.speed, truth.basis);
     scope.record_turn_timing(turn_duration_ms, truth.ttft_ms, Some(truth.calls));
 }
 

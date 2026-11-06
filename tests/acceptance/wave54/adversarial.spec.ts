@@ -28,7 +28,8 @@ type TokenSpeedCalculationMode = "turn_weighted" | "call_only" | "none";
 interface TurnWeightedSpeedDetail {
   speed: number | null;
   mode: TokenSpeedCalculationMode;
-  basis: "turn_weighted" | "call_only" | "none";
+  /** 口径域（token 速度口径 v2 / I10）：测的是什么，与 mode 的聚合范围不同域。 */
+  basis: "stream_decode" | "end_to_end" | "none";
   calls: number;
   outputTokens: number | null;
   genMs: number | null;
@@ -191,7 +192,7 @@ describe("wave-54 A1：病态输入（dur<=0 / usage 全空 / ttft>dur）", () =
     expect(noRecordsDetail.mode).toBe("none");
   });
 
-  it("A1-3: ttft(1500) > dur(1000)、out=100 ⇒ 按 C2 退化 gen=dur ⇒ speed=100（有限正值，不是 null）", () => {
+  it("A1-3: ttft(1500) > dur(1000)、out=100 ⇒ 不可解码 ⇒ 回退端到端口径 speed=100（有限正值，不是 null）", () => {
     // Arrange：Lead 裁决 2026-10-27 20:40 —— ttft 不可信时退化为不抵扣
     const untrustedTtft = buildTurn("wave54-a1-ttft-gt-dur", [
       {
@@ -208,12 +209,12 @@ describe("wave-54 A1：病态输入（dur<=0 / usage 全空 / ttft>dur）", () =
     // Act
     const detail = resolveTurnWeightedSpeedDetail(untrustedTtft);
 
-    // Assert
+    // Assert：ttft > dur 不具备可观测解码窗口 ⇒ I3 不判为解码样本，按 I5 回退端到端
     expect(detail.speed).not.toBeNull();
     expect(detail.speed).toBe(100);
     expect(Number.isFinite(detail.speed as number)).toBe(true);
     expect(detail.mode).toBe("turn_weighted");
-    expect(detail.basis).toBe("turn_weighted");
+    expect(detail.basis).toBe("end_to_end");
     expect(detail.genMs).toBe(1000);
     expect(detail.calls).toBe(1);
   });
@@ -280,12 +281,13 @@ describe("wave-54 A2：estimated_chars 与 provider 混合", () => {
     // Act
     const detail = resolveTurnWeightedSpeedDetail(mixedTurn);
 
-    // Assert：数值方向不变（仍是 Σout/Σgen = 107.14），但溯源必须降级为估算
+    // Assert：数值方向不变（解码口径 (100−1)/1.0 = 99），但溯源必须降级为估算
     expect(detail.speed).not.toBeNull();
     expect(Number.isFinite(detail.speed as number)).toBe(true);
     expect(detail.speed as number).toBeGreaterThan(0);
-    expect(Math.abs((detail.speed as number) - 107.142857)).toBeLessThanOrEqual(0.01);
-    expect(detail.calls).toBe(2);
+    expect(Math.abs((detail.speed as number) - 99)).toBeLessThanOrEqual(0.01);
+    expect(detail.basis).toBe("stream_decode");
+    expect(detail.calls).toBe(1);
     expect(detail.origin).toBe("estimated_chars");
   });
 

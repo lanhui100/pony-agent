@@ -204,7 +204,8 @@ describe("useTraceProjection - contextDisplayTokens computation", () => {
       liveTurnEnabled: ref(true)
     });
 
-    // 100 tokens / ((1200 - 200) / 1000)s = 100 tokens / 1s = 100 t/s
-    expect(projection.sessionTokenGenerationSpeed.value).toBe(100);
+    // 速度口径 v2（ADR 0073 / I4）：out=100 / dur=1200 / ttft=200 ⇒ gen=1000 ≥ floor(200)
+    //   ⇒ (100−1) / 1.0s = 99 t/s（首 token 已计入 TTFT；旧口径 100/1.0 = 100 已废止）
+    expect(projection.sessionTokenGenerationSpeed.value).toBe(99);
   });
 });

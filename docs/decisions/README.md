@@ -72,7 +72,7 @@
 - [0047 Agent Trace 迁移至 OpenTelemetry → Langfuse（PonySentry Trace 下线 + 全局上报开关）](0047-agent-trace-otel-langfuse-migration.md)
 - [0050 配置页「全局轨迹上报」选项收敛为单行标签 + 右端开关](0050-trace-reporting-switch-ui-simplification.md)
 - [0051 可观测性上报三项修正（版本单一来源、治理 span 会话归属、思考/缓存 token 出口）](0051-observability-version-session-and-thinking-token-fixes.md)
-- [0053 token / 速度口径真值契约（wave-54）](0053-token-speed-truth-contract.md)
+- [0053 token / 速度口径真值契约（wave-54）](0053-token-speed-truth-contract.md) —— 其中「速度 = Σout/Σgen」的公式定义已被 [0073](0073-token-speed-decode-basis.md) 修订；上下文归一、usage 来源与显示纪律部分仍现行
 - [0054 渲染层外泄通道收口：启用 CSP、markdown 外部资源 fail-closed 与密钥不回显](0054-render-layer-exfil-csp-and-secret-masking.md)
 - [0057 流式动效抽象为框架无关规范（五层契约 + 纯 reducer + 机器门禁）](0057-streaming-motion-framework-agnostic-spec.md)
 - [0058 流式释放与视口阈值接入 PDS-SM reducer（等价重构 + 常量单源化）](0058-pds-budget-reducer-adoption.md)
@@ -83,6 +83,8 @@
 - [0063 TUI Ask 覆盖层与取消反馈的用户可见边界](0063-tui-ask-user-overlay-and-cancel-feedback.md)
 - [0070 TUI 会话韧性：DSML 折叠、错误摘要、中断检查点与退出回收](0070-tui-session-resilience.md)
 - [0071 TUI 流式期可输入、面板可开、用户消息排队](0071-tui-streaming-input-queue-and-panels.md)
+- [0072 会话 id 生成规范统一为 `pa_<uuidv7>`](0072-session-id-unification.md)
+- [0073 token 速度口径 v2：解码窗口分母 + 物理下限 + basis 自描述](0073-token-speed-decode-basis.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

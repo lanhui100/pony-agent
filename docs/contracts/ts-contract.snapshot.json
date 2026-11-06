@@ -36,6 +36,7 @@
         "cacheHitInputTokens",
         "cacheHitRatio",
         "cacheMissInputTokens",
+        "callSpeedBasis",
         "callSpeedTokensPerSecond",
         "contextInputTokens",
         "contextRatio",
@@ -54,6 +55,7 @@
         "turnCalls",
         "turnGenerationMs",
         "turnOutputTokens",
+        "turnSpeedBasis",
         "turnSpeedTokensPerSecond"
       ]
     },

@@ -38,7 +38,8 @@ type TokenSpeedCalculationMode = "turn_weighted" | "call_only" | "none";
 interface TurnWeightedSpeedDetail {
   speed: number | null;
   mode: TokenSpeedCalculationMode;
-  basis: "turn_weighted" | "call_only" | "none";
+  /** 口径域（token 速度口径 v2 / I10）：测的是什么，与 mode 的聚合范围不同域。 */
+  basis: "stream_decode" | "end_to_end" | "none";
   calls: number;
   outputTokens: number | null;
   genMs: number | null;
@@ -150,9 +151,9 @@ function buildTurn(
 
 // ── T4 前端单口径（turn 加权生成速度）────────────────────────────────────────
 
-describe("wave-54 T4：resolveTurnWeightedSpeedDetail 单口径（Σout / Σgen）", () => {
-  it("T4-1: 两调用 (out100,dur1200,ttft200) + (out200,dur1800,ttft=null) ⇒ speed=107.142857、mode/basis=turn_weighted、calls=2、genMs=2800、outputTokens=300", () => {
-    // Arrange：两条 per-call 记录（第二条无 ttft ⇒ C2 退化 gen=dur=1800）
+describe("wave-54 T4：resolveTurnWeightedSpeedDetail 单口径（解码口径 Σ(out−1) / Σgen，无合格样本回退 Σout / Σdur）", () => {
+  it("T4-1: 两调用 (out100,dur1200,ttft200) + (out200,dur1800,ttft=null) ⇒ speed=99、mode=turn_weighted/basis=stream_decode、calls=1、genMs=1000、outputTokens=100", () => {
+    // Arrange：两条 per-call 记录（第二条无 ttft ⇒ 不可解码，I3 排除出分母）
     const turn = buildTurn("wave54-t4-two-calls", [
       {
         requestKind: "tool_followup",
@@ -177,14 +178,14 @@ describe("wave-54 T4：resolveTurnWeightedSpeedDetail 单口径（Σout / Σgen�
     // Act
     const detail = resolveTurnWeightedSpeedDetail(turn);
 
-    // Assert：300 / ((1000 + 1800) / 1000) = 107.142857…（旧口径末条 per-call 值为 111.11，故本断言可判别口径）
+    // Assert：(100 − 1) / (1000 / 1000) = 99（旧口径 300/2800 = 107.142857 已废止）
     expect(detail.speed).not.toBeNull();
-    expect(Math.abs((detail.speed as number) - 107.142857)).toBeLessThanOrEqual(0.01);
+    expect(Math.abs((detail.speed as number) - 99)).toBeLessThanOrEqual(0.01);
     expect(detail.mode).toBe("turn_weighted");
-    expect(detail.basis).toBe("turn_weighted");
-    expect(detail.calls).toBe(2);
-    expect(detail.genMs).toBe(2800);
-    expect(detail.outputTokens).toBe(300);
+    expect(detail.basis).toBe("stream_decode");
+    expect(detail.calls).toBe(1);
+    expect(detail.genMs).toBe(1000);
+    expect(detail.outputTokens).toBe(100);
     // §4：ttftMs = 首次调用 TTFT（不跨 hop 采样）
     expect(detail.ttftMs).toBe(200);
   });
@@ -208,11 +209,11 @@ describe("wave-54 T4：resolveTurnWeightedSpeedDetail 单口径（Σout / Σgen�
     // Act
     const detail = resolveTurnWeightedSpeedDetail(turn);
 
-    // Assert：gen = 1500 - 500 = 1000ms ⇒ 250 / 1s = 250 t/s
+    // Assert：gen = 1500 - 500 = 1000ms ⇒ (250 − 1) / 1s = 249 t/s（分子扣 1：首 token 已计入 TTFT）
     expect(detail.speed).not.toBeNull();
-    expect(Math.abs((detail.speed as number) - 250)).toBeLessThanOrEqual(1e-9);
+    expect(Math.abs((detail.speed as number) - 249)).toBeLessThanOrEqual(1e-9);
     expect(detail.mode).toBe("turn_weighted");
-    expect(detail.basis).toBe("turn_weighted");
+    expect(detail.basis).toBe("stream_decode");
     expect(detail.calls).toBe(1);
     expect(detail.genMs).toBe(1000);
     expect(detail.outputTokens).toBe(250);
@@ -263,11 +264,11 @@ describe("wave-54 T4：resolveTurnWeightedSpeedDetail 单口径（Σout / Σgen�
     // Act
     const detail = resolveTurnWeightedSpeedDetail(activeCallTurn, { isActiveTurn: true });
 
-    // Assert：gen = 2000 − 500 = 1500ms ⇒ 150 / 1.5s = 100 t/s（该 per-call 值，而非 Σ 加权）
+    // Assert：gen = 2000 − 500 = 1500ms ⇒ (150 − 1) / 1.5s ≈ 99.333 t/s（该 per-call 值，而非 Σ 加权）
     expect(detail.speed).not.toBeNull();
-    expect(detail.speed).toBe(100);
+    expect(Math.abs((detail.speed as number) - 149 / 1.5)).toBeLessThanOrEqual(1e-9);
     expect(detail.mode).toBe("call_only");
-    expect(detail.basis).toBe("call_only");
+    expect(detail.basis).toBe("stream_decode");
     expect(detail.calls).toBe(0);
     expect(detail.outputTokens).toBe(150);
     expect(detail.genMs).toBe(1500);
@@ -494,10 +495,13 @@ describe("wave-54 T5：缓存比与可见输入同源（C4/C6，projection harne
 
 describe("wave-54 T6：golden replay eed9ba47（20 次调用）", () => {
   /**
-   * 口径区分（契约 §2 T6 强制注释）：
-   *   - 95.46 t/s 是「**生成速度**」= Σout / Σgen，Σgen **不含** TTFT（每调用 `dur - ttft`）。
-   *   - 端到端吞吐 = Σout / 整轮时长 = 4542 / 98.47s ≈ 46.13 属另一指标，
-   *     本波**不**作为 turn.speed 输出（若实现误用整轮时长，本用例 speed 断言必失败）。
+   * 口径区分（token 速度口径 v2 / ADR 0073 强制注释）：
+   *   - 「解码速度」= Σ_eligible(out−1) / Σ_eligible gen，gen **不含** TTFT，分子扣 1/token
+   *     （首 token 已计入 TTFT）。本 fixture 20 条全部 `decode_eligible`
+   *     ⇒ (4542 − 20) / 47.579s ≈ 95.042 t/s。
+   *   - 端到端吞吐 = Σout / Σdur（含排队 + prefill）≈ 48.758 t/s 属另一量纲，
+   *     basis=end_to_end 时消费面必须加 `≈`；本用例不得退化为该值。
+   *   - 旧口径 Σout / Σgen = 95.46 t/s（分母混入不可解码调用、分子未扣首 token）已废止。
    */
   it("T6-0: fixture 完整性 —— Σout=4542、Σin=358633、Σcache=327808 由 fixture 直接求和", () => {
     // Act
@@ -525,7 +529,7 @@ describe("wave-54 T6：golden replay eed9ba47（20 次调用）", () => {
     expect(sumReasoning).toBe(FIXTURE_TOTALS.reasoningTokens);
   });
 
-  it("T6-2: 20 次调用 replay ⇒ speed=95.46±1.0、basis=turn_weighted、outputTokens=4542、genMs=47579±60", () => {
+  it("T6-2: 20 次调用 replay ⇒ speed=(4542−20)/47.579≈95.042、basis=stream_decode、outputTokens=4542、genMs=47579", () => {
     // Arrange
     const turn = buildGoldenTurn("wave54-t6-golden");
 
@@ -536,8 +540,8 @@ describe("wave-54 T6：golden replay eed9ba47（20 次调用）", () => {
     expect(detail.speed).not.toBeNull();
     const speed = detail.speed as number;
     expect(Number.isFinite(speed)).toBe(true);
-    expect(Math.abs(speed - 95.46)).toBeLessThanOrEqual(1.0);
-    expect(detail.basis).toBe("turn_weighted");
+    expect(Math.abs(speed - 95.04193026335147)).toBeLessThanOrEqual(1e-6);
+    expect(detail.basis).toBe("stream_decode");
     expect(detail.mode).toBe("turn_weighted");
     expect(detail.calls).toBe(FIXTURE_TOTALS.calls);
     expect(detail.outputTokens).toBe(FIXTURE_TOTALS.outputTokens);
@@ -545,7 +549,9 @@ describe("wave-54 T6：golden replay eed9ba47（20 次调用）", () => {
     expect(Math.abs((detail.genMs as number) - 47579)).toBeLessThanOrEqual(60);
     // §1 C2：turn 级 TTFT = 首个带 ttft 的 per-call 值（不跨 hop 采样）
     expect(detail.ttftMs).toBe(FIXTURE_TOTALS.firstCallTtftMs);
-    // 判别：不得退化为端到端吞吐 4542/98.469s ≈ 46.13
-    expect(Math.abs(speed - 46.13)).toBeGreaterThan(1.0);
+    // 判别：不得退化为端到端吞吐 4542/Σdur ≈ 48.758
+    expect(Math.abs(speed - 48.7580)).toBeGreaterThan(1.0);
+    // 判别：不得退化为旧口径 Σout/Σgen = 95.46（分子未扣首 token）
+    expect(Math.abs(speed - 95.46)).toBeGreaterThan(0.1);
   });
 });

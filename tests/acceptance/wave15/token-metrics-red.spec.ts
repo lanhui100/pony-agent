@@ -11,20 +11,23 @@
  *     2) 否则 → 最后一条「带 inputTokens」的 call_model 条目
  *     3) 否则 → countTurnProviderCalls <= 1 时允许 turn.inputTokens
  *     4) 否则 → null（严禁放行聚合值）
- *   S3 resolveCallGenerationSpeed(record)（仅步骤 1 + 守卫；步骤 2–4 属调用方 useTraceProjection）:
+ *   S3 resolveCallGenerationSpeed(record)（**速度口径 v2 / I8**：= resolveCallSpeedDetail(record).speed）:
  *     output = record.outputTokens；duration = record.turnDurationMs（本次调用耗时，含 TTFT）
- *     TTFT 仅当 record.latencyKind === "provider_stream" 时参与抵扣（§7.2 门控）
- *     守卫：duration <= 0 或 output == null → null；返回值必须 Number.isFinite
+ *     gen = (ttft 存在 且 duration > ttft) ? duration − ttft : duration
+ *     decode_eligible := out >= 2 && ttft 存在 && duration > ttft && gen >= max(200ms, 5% × duration)
+ *     eligible ⇒ (out − 1) / (gen / 1000)；valid（out > 0 && dur > 0）但不可解码 ⇒ out / (duration / 1000)
+ *     守卫：duration <= 0 或 output <= 0 → null；返回值必须 Number.isFinite（I1/I6）
  *
  * 红相纪律：本文件所有失败必须来自 SUT（src/lib/runtime/token-metrics.ts 空桩 throw，
  * 或 SUT 计算/投影断言不成立）。禁止因缺文件 / import 失败 / 语法错误而红。
  * 测试基建（mock、fixture、flush）不得成为红相来源。
  *
- * wave-54 契约演进（ADR 0053）：速度口径由 per-call/整轮聚合改为 Σout/Σgen
+ * 速度口径 v2（ADR 0073 取代 ADR 0053）：turn 加权速度 = Σ_eligible(out − 1) / Σ_eligible gen
  *   `gen_i = (ttft_i 存在 且 dur_i > ttft_i) ? dur_i − ttft_i : dur_i`
- * 本文件的投影速度断言已随之迁移：三跳夹具 Σout = 500 + 600 + 100 = 1200、
+ *   `eligible_i` 还需 `out_i >= 2` 且 `gen_i >= max(200ms, 5% × dur_i)`。
+ * 本文件的投影速度断言已随之迁移：三跳夹具 Σ(out−1) = 1197、
  *   Σgen = (1000−150) + (1100−180) + (1200−200) = 850 + 920 + 1000 = 2770ms
- *   ⇒ turn 加权速度 = 1200 / 2.77 = 433.2129963898917 t/s（不再是末跳 per-call 的 100 t/s）。
+ *   ⇒ turn 加权速度 = 1197 / 2.77 = 432.12996389891697 t/s（不再是末跳 per-call 的 100 t/s）。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
@@ -67,12 +70,13 @@ const TURN_ACCUMULATED_OUTPUT = 1_800;
 const TURN_ELAPSED_MS = 5_000;
 
 /**
- * wave-54 契约演进（ADR 0053）：三跳夹具的 turn 加权速度真值（C2 唯一口径）。
- *   Σout = 500 + 600 + 100 = 1200
+ * 速度口径 v2（ADR 0073 / I4）：三跳夹具的 turn 加权解码速度真值。
+ *   eligible 三条（gen 均 ≥ floor）：Σ(out−1) = (500−1) + (600−1) + (100−1) = 1197
  *   Σgen = (1000−150) + (1100−180) + (1200−200) = 850 + 920 + 1000 = 2770ms
- *   ⇒ speed = 1200 / 2.77 = 433.2129963898917 t/s（不再是末跳 per-call 的 100 t/s）。
+ *   ⇒ speed = 1197 / 2.77 = 432.12996389891697 t/s
+ *   （wave-54 旧口径 Σout/Σgen = 1200/2.77 = 433.2129963898917 已废止；末跳 per-call 100 t/s 亦不得出现）
  */
-const WAVE54_THREE_HOP_WEIGHTED_SPEED = 433.2129963898917;
+const WAVE54_THREE_HOP_WEIGHTED_SPEED = 432.12996389891697;
 
 function record(partial: Partial<ProviderCallCacheRecord> = {}): ProviderCallCacheRecord {
   return {
@@ -315,7 +319,7 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
     setActivePinia(createPinia());
   });
 
-  it("T3：output=100 / duration=1200 / TTFT=200（provider_stream）→ 100 t/s；退化与守卫分支正确", () => {
+  it("T3：output=100 / duration=1200 / TTFT=200（provider_stream）→ 99 t/s；退化与守卫分支正确", () => {
     const speedRecord = record({
       inputTokens: 370_000,
       outputTokens: 100,
@@ -324,13 +328,15 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
       latencyKind: "provider_stream"
     });
 
-    // (a) 主路径：100 / ((1200-200)/1000) = 100 t/s
-    expect(resolveCallGenerationSpeed(speedRecord)).toBe(100);
+    // (a) 主路径（I8 解码口径）：(100 − 1) / ((1200 − 200)/1000) = 99 t/s
+    expect(resolveCallGenerationSpeed(speedRecord)).toBe(99);
+    // 旧口径 out/gen = 100 已废止（首 token 已计入 TTFT）
+    expect(resolveCallGenerationSpeed(speedRecord)).not.toBe(100);
     // 严禁由整轮累加值/整轮 elapsed 得出 360 t/s 或 1800/((5000-200)/1000)
     expect(resolveCallGenerationSpeed(speedRecord)).not.toBe(360);
     expect(resolveCallGenerationSpeed(speedRecord)).not.toBeCloseTo(375, 5);
 
-    // (b) TTFT >= duration → 退化 duration 不抵扣：100 / (1200/1000) = 83.33
+    // (b) TTFT >= duration ⇒ 不可解码 ⇒ 端到端回退：100 / (1200/1000) = 83.33
     expect(
       resolveCallGenerationSpeed(record({ outputTokens: 100, turnDurationMs: 1_200, firstTokenLatencyMs: 2_000 }))
     ).toBeCloseTo(83.33, 2);
@@ -343,11 +349,11 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
     expect(resolveCallGenerationSpeed(record({ outputTokens: null, turnDurationMs: 1_200 }))).toBeNull();
     // (f) 空记录 → null
     expect(resolveCallGenerationSpeed(null)).toBeNull();
-    // (g) output = 0 是合法值（非 null）→ 0 t/s
-    expect(resolveCallGenerationSpeed(record({ outputTokens: 0, turnDurationMs: 1_000 }))).toBe(0);
+    // (g) output = 0 属无效调用（I1：`out > 0`）→ null（旧口径曾返回 0 t/s，已废止）
+    expect(resolveCallGenerationSpeed(record({ outputTokens: 0, turnDurationMs: 1_000 }))).toBeNull();
   });
 
-  it("T3-投影：已完成三跳轮状态栏速度为 turn 加权口径 433.213 t/s（Σout/Σgen；不得用末跳 per-call 或整轮 elapsed）", () => {
+  it("T3-投影：已完成三跳轮状态栏速度为 turn 加权解码口径 432.13 t/s（Σ(out−1)/Σgen；不得用末跳 per-call 或整轮 elapsed）", () => {
     const turn = completedTurn({
       turnId: "turn-t3-speed",
       inputTokens: TURN_ACCUMULATED_INPUT,
@@ -367,7 +373,7 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
     });
 
     const view = projection();
-    // wave-54 C2 / ADR 0053：速度 = Σout/Σgen = 1200 / 2.77
+    // 速度口径 v2（ADR 0073 / I4）：Σ(out−1)/Σgen = 1197 / 2.77
     expect(view.sessionTokenGenerationSpeed.value).toBe(WAVE54_THREE_HOP_WEIGHTED_SPEED);
     expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
     // 判别式：整轮 elapsed 口径（1800/5.0 = 360）与末跳 per-call（100）都不得出现
@@ -375,7 +381,7 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
     expect(view.sessionTokenGenerationSpeed.value).not.toBe(100);
   });
 
-  it("T4：活跃轮仅收到中间 hop_complete（无 turn:completed）即产出 turn 加权速度 433.213（Σout/Σgen），不得为 null 或整轮值", async () => {
+  it("T4：活跃轮仅收到中间 hop_complete（无 turn:completed）即产出 turn 加权解码速度 432.13（Σ(out−1)/Σgen），不得为 null 或整轮值", async () => {
     const { store, handlers } = await installTurnEventIngress();
     seedActiveTurn(store, liveTimelineWithoutMetrics());
     const view = projection();
@@ -388,7 +394,7 @@ describe("Wave-15 T3/T4 — S3 单次调用生成速度（该次调用完成即�
     await flushMicrotasks();
 
     expect(store.isSubmitting).toBe(true);
-    // wave-54 C2 / ADR 0053：活跃轮同样走 Σout/Σgen（1200 / 2.77），不是末跳 per-call 值
+    // 速度口径 v2（I4）：活跃轮同样走 Σ(out−1)/Σgen（1197 / 2.77），不是末跳 per-call 值
     expect(view.sessionTokenGenerationSpeed.value).toBe(WAVE54_THREE_HOP_WEIGHTED_SPEED);
     expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
     expect(view.sessionTokenGenerationSpeed.value).not.toBeNull();
@@ -462,7 +468,7 @@ describe("Wave-15 T5/T6 — S4 降级纪律与 R2 载荷", () => {
     store.$patch({ turnTraceHistory: [turn], traceTimeline: timeline, activeTurnId: null, isSubmitting: false });
     const view = projection();
     expect(view.contextDisplayTokens.value).toBe(370_000);
-    // wave-54 C2 / ADR 0053：持久化 timeline 的 per-call 分量参与 Σout/Σgen 加权
+    // 速度口径 v2（I4）：持久化 timeline 的 per-call 分量参与 Σ(out−1)/Σgen 加权
     expect(view.sessionTokenGenerationSpeed.value).toBe(WAVE54_THREE_HOP_WEIGHTED_SPEED);
     expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
   });
@@ -508,7 +514,7 @@ describe("Wave-15 A1–A5 — 对抗（红相纯度：失败必须落在 SUT 栈
       record({ outputTokens: 100, turnDurationMs: -5, firstTokenLatencyMs: 10, latencyKind: "provider_stream" }),
       record({ outputTokens: 100, turnDurationMs: null, firstTokenLatencyMs: 200, latencyKind: "provider_stream" }),
       record({ outputTokens: 100, turnDurationMs: 1_200, firstTokenLatencyMs: null, latencyKind: "provider_stream" }),
-      // §7.2 TTFT 门控：非 provider_stream 时 TTFT 不可信，必须按 duration 全量计算（83.33，不得抵扣成 100）。
+      // 速度口径 v2（I3）：判据不再看 latencyKind —— 只要观测到 ttft 且 gen ≥ floor 即可解码。
       record({ outputTokens: 100, turnDurationMs: 1_200, firstTokenLatencyMs: 200, latencyKind: "buffered_response" }),
       record({ outputTokens: 100, turnDurationMs: 1_200, firstTokenLatencyMs: 200, latencyKind: "unknown" })
     ];
@@ -524,10 +530,10 @@ describe("Wave-15 A1–A5 — 对抗（红相纯度：失败必须落在 SUT 栈
     expect(results[2]).toBeNull(); // duration < 0
     expect(results[3]).toBeNull(); // duration = None
     expect(results[4]).toBeCloseTo(83.33, 2); // TTFT = None → 不抵扣
-    expect(results[5]).toBeCloseTo(83.33, 2); // buffered_response → TTFT 不可信（门控）
-    expect(results[5]).not.toBe(100);
-    expect(results[6]).toBeCloseTo(83.33, 2); // unknown → TTFT 不可信（门控）
-    expect(results[6]).not.toBe(100);
+    expect(results[5]).toBe(99); // buffered_response：v2 不再门控 latencyKind ⇒ (100−1)/1.0
+    expect(results[5]).not.toBeCloseTo(83.33, 2); // 旧口径（非 stream ⇒ 不抵扣）已废止
+    expect(results[6]).toBe(99); // unknown：同上
+    expect(results[6]).not.toBeCloseTo(83.33, 2);
   });
 
   it("A3：重复/乱序同 step hop_complete 重放 → per-call 值幂等稳定，不重复计数", async () => {

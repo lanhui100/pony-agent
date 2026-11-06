@@ -703,7 +703,11 @@ describe("TraceInspector", () => {
     expect(turnBtnText).toContain("150");
     expect(turnBtnText).toContain("70");
     expect(turnBtnText).toContain("60");
-    expect(turnBtnText).toContain("20.7 t/s");
+    // 速度口径 v2（ADR 0073 / I4）：两条调用均 decode_eligible ⇒ Σ(out−1)/Σgen
+    //   = ((45−1) + (15−1)) / (((2400−210) + (800−90))/1000) = 58 / 2.9 = 20.0 t/s
+    //   （旧口径 Σout/Σgen = 60/2.9 = 20.7 已废止）
+    expect(turnBtnText).toContain("20.0 t/s");
+    expect(turnBtnText).not.toContain("20.7 t/s");
     expect(turnBtnText).not.toContain("18.8 t/s");
     expect(turnBtnText).toContain("150 ms");
     expect(turnBtnText).not.toContain("思考链");
@@ -920,7 +924,10 @@ describe("TraceInspector", () => {
     expect(modelBtnText).toContain("120");
     expect(modelBtnText).toContain("80");
     expect(modelBtnText).toContain("40");
-    expect(modelBtnText).toContain("16.1 t/s");
+    // 速度口径 v2（I8）：out=40 / dur=2800 / ttft=321 ⇒ gen=2479 ≥ floor(200) ⇒
+    //   (40−1)/2.479 = 15.7 t/s（旧口径 40/2.479 = 16.1 已废止）
+    expect(modelBtnText).toContain("15.7 t/s");
+    expect(modelBtnText).not.toContain("16.1 t/s");
     expect(modelBtnText).not.toContain("14.3 t/s");
     expect(modelBtnText).toContain("321 ms");
     expect(modelBtnText).toContain("2.80 s");
@@ -943,7 +950,7 @@ describe("TraceInspector", () => {
     expect(modelSectionText).not.toContain("摘要");
     expect(modelSectionText).toContain("OpenAI/gpt-5");
     expect(modelSectionText).toContain("2.80 s");
-    expect(modelSectionText).toContain("16.1 t/s");
+    expect(modelSectionText).toContain("15.7 t/s");
     expect(modelSectionText).not.toContain("Provider");
     expect(modelSectionText).not.toContain("输出详情");
     expect(modelSectionText).not.toContain("对应一次独立的模型调用，不与其他 hop 合并。");
@@ -1085,7 +1092,7 @@ describe("TraceInspector", () => {
     expect(modelButton.text()).toContain("1.91 s");
   });
 
-  it("CALL MODEL 首 token 延时接近耗时时按真实生成耗时计算速度", async () => {
+  it("CALL MODEL 首 token 延时接近耗时（突发包）时不得用抖动分母爆速，回退端到端速度", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       turnTraceHistory: [
@@ -1132,10 +1139,19 @@ describe("TraceInspector", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
-    expect(modelButton.text()).toContain("4000.0 t/s");
-    expect(modelButton.text()).not.toContain("36.7 t/s");
+    // 速度口径 v2（ADR 0073 / I3）：out=72 / dur=1964 / ttft=1946 ⇒ gen=18ms < floor(200ms)
+    //   ⇒ 不可解码（突发包，18ms 是计时抖动）⇒ 回退端到端 72/1.964 = 36.7 t/s。
+    //   旧口径用 18ms 作分母得 4000.0 t/s（out/gen），已废止。
+    expect(modelButton.text()).toContain("36.7 t/s");
+    expect(modelButton.text()).not.toContain("4000.0 t/s");
     expect(modelButton.text()).not.toContain("3960.");
     expect(modelButton.text()).toContain("1.96 s");
+    // 口径自描述（I10）：不可解码 ⇒ 标签必须是「整体速度」，不得伪装成生成速度。
+    const burstTooltipTexts = Array.from(
+      modelButton.element.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]")
+    ).map((el) => el.getAttribute("data-tooltip"));
+    expect(burstTooltipTexts).toContain("整体速度");
+    expect(burstTooltipTexts).not.toContain("生成速度");
   });
 
   it("多次 CALL MODEL 时最后一跳不使用整轮 token 兜底，避免混用整轮输出和单跳耗时", async () => {
@@ -1288,7 +1304,10 @@ describe("TraceInspector", () => {
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
     expect(modelButton.text()).toContain("68");
-    expect(modelButton.text()).toContain("269.8 t/s");
+    // 速度口径 v2（I8）：out=68 / dur=1699 / ttft=1447 ⇒ gen=252 ≥ floor(200) ⇒
+    //   (68−1)/0.252 = 265.9 t/s（旧口径 68/0.252 = 269.8 已废止）
+    expect(modelButton.text()).toContain("265.9 t/s");
+    expect(modelButton.text()).not.toContain("269.8 t/s");
     expect(modelButton.text()).not.toContain("40.0 t/s");
     expect(modelButton.text()).not.toContain("587.4 t/s");
     expect(modelButton.text()).toContain("1447 ms");

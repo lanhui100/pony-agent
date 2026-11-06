@@ -29,8 +29,11 @@ use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::runtime::{
     compact_outcome_message, AgentRuntimeBuilder, TurnInput, TurnStreamEvent,
 };
-use pony_agent_core::agent::session::{FileSessionBackend, SessionStore};
+use pony_agent_core::agent::session::{
+    new_session_id, new_session_id_unless, FileSessionBackend, SessionStore,
+};
 use pony_agent_core::agent::turn_flow::TurnEventSink;
+use std::collections::HashSet;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -918,6 +921,20 @@ impl SessionTracker {
     }
 }
 
+/// CLI 会话 id：格式与桌面端 / TUI 一致（`pa_<uuidv7>`，真值源
+/// [`pony_agent_core::agent::session::new_session_id`]）。
+///
+/// CLI 用独立的 `cli-sessions.json` 存储，键即 session id；生成前按已有会话键去重，
+/// 避免历史格式（32 bit 随机段）那种「新会话覆盖旧会话」的键碰撞风险。
+fn new_cli_session_id(control_plane: &HostControlPlane) -> String {
+    let existing: HashSet<String> = control_plane
+        .list_sessions()
+        .into_iter()
+        .map(|overview| overview.conversation_id)
+        .collect();
+    new_session_id_unless(|candidate| existing.contains(candidate)).unwrap_or_else(new_session_id)
+}
+
 fn build_control_plane(args: &CliArgs) -> (HostControlPlane, PathBuf) {
     let state_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -1144,7 +1161,7 @@ fn main() {
             human!(format, "  Session:     Continuing {}", last);
             last
         } else {
-            let fresh = format!("cli-session-{}", uuid::Uuid::new_v4());
+            let fresh = new_cli_session_id(&control_plane);
             human!(
                 format,
                 "  Session:     No previous session found, created {}",
@@ -1153,7 +1170,7 @@ fn main() {
             fresh
         }
     } else {
-        let fresh = format!("cli-session-{}", uuid::Uuid::new_v4());
+        let fresh = new_cli_session_id(&control_plane);
         fresh
     };
 
@@ -1220,7 +1237,7 @@ fn main() {
                     continue;
                 }
                 SlashCommand::Clear => {
-                    session_id = format!("cli-session-{}", uuid::Uuid::new_v4());
+                    session_id = new_cli_session_id(&control_plane);
                     tracker.record(&session_id);
                     human!(
                         format,

@@ -37,6 +37,11 @@ import {
 } from "@/lib/runtime/trace-virtual-scroll";
 import { loadBuildContextObservation } from "@/lib/runtime/trace";
 import {
+  resolveCallSpeedDetail,
+  resolveTurnWeightedSpeedDetail,
+  type CallSpeedSample
+} from "@/lib/runtime/token-metrics";
+import {
   deriveTrajectoryTimeline,
   type TrajectoryTimelineSpan
 } from "@/lib/runtime/trajectory-core";
@@ -597,16 +602,6 @@ function reasoningTokens(turn: TurnTraceRecord) {
   ]);
 }
 
-function tokenSpeed(turn: TurnTraceRecord) {
-  if (turn.outputTokens == null || turn.turnDurationMs == null) {
-    return null;
-  }
-
-  const durationMs = Math.max(turn.turnDurationMs, 1);
-  const tokensPerSecond = turn.outputTokens / (durationMs / 1000);
-  return Number.isFinite(tokensPerSecond) ? tokensPerSecond : null;
-}
-
 function hasTrueFirstTokenLatency(record: ProviderCallCacheRecord | null | undefined, entry: TraceTimelineEntry) {
   if (record) {
     return record.latencyKind === "provider_stream";
@@ -632,34 +627,34 @@ function effectiveFirstTokenLatencyMs(entry: TraceTimelineEntry, record: Provide
   return latency;
 }
 
-function activeGenerationDurationMs(entry: TraceTimelineEntry, _record: ProviderCallCacheRecord | null | undefined) {
-  if (entry.turnDurationMs == null) {
-    return null;
-  }
-
-  if (entry.firstTokenLatencyMs == null) {
-    return Math.max(entry.turnDurationMs, 1);
-  }
-
-  const generationDurationMs = entry.turnDurationMs - entry.firstTokenLatencyMs;
-  return generationDurationMs > 0 ? generationDurationMs : null;
+/** per-hop 速度样本（I1/I3 判据输入）。 */
+function entrySpeedSample(entry: TraceTimelineEntry): CallSpeedSample {
+  return {
+    outputTokens: entry.outputTokens ?? 0,
+    durationMs: entry.turnDurationMs ?? 0,
+    firstTokenLatencyMs: entry.firstTokenLatencyMs ?? null
+  };
 }
 
+/**
+ * per-hop 速度（I8/I9）：唯一实现是 `resolveCallSpeedDetail`（内部即 `isDecodeEligible` +
+ * 同一 `decodeFloorMs`）。组件内禁止再写第三种公式或第二个 floor。
+ */
+function formatEntryTokenSpeed(entry: TraceTimelineEntry) {
+  const { speed } = resolveCallSpeedDetail(entrySpeedSample(entry));
+  return speed == null ? "" : `${speed.toFixed(1)} t/s`;
+}
+
+/** 标签（I3）：eligible ⇒ 生成速度；有效但不可解码 ⇒ 整体速度；无效 ⇒ 空（位点不渲染）。 */
 function formatTokenSpeedLabel(entry: TraceTimelineEntry) {
-  return entry.firstTokenLatencyMs == null ? "整体速度" : "生成速度";
-}
-
-function formatEntryTokenSpeed(entry: TraceTimelineEntry, record?: ProviderCallCacheRecord | null) {
-  if (entry.outputTokens == null || entry.turnDurationMs == null) {
-    return "";
+  const { basis } = resolveCallSpeedDetail(entrySpeedSample(entry));
+  if (basis === "stream_decode") {
+    return "生成速度";
   }
-
-  const activeGenerationMs = activeGenerationDurationMs(entry, record);
-  if (activeGenerationMs == null) {
-    return "";
+  if (basis === "end_to_end") {
+    return "整体速度";
   }
-  const value = entry.outputTokens / (activeGenerationMs / 1000);
-  return Number.isFinite(value) ? `${value.toFixed(1)} t/s` : "";
+  return "";
 }
 
 function average(values: number[]) {
@@ -757,22 +752,18 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
   const caches = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.cacheHitInputTokens).filter((value): value is number => value != null) : [];
   const outputs = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.outputTokens).filter((value): value is number => value != null) : [];
   const latencies = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.firstTokenLatencyMs).filter((value): value is number => value != null) : [];
-  const generationDurations = hasPerCallMetrics
-    ? callModelEntries
-      .map((entry, index) => activeGenerationDurationMs(perCallMetrics[index]!, timelineProviderCallRecord(turn, entry)))
-      .filter((value): value is number => value != null)
-    : [];
 
   const metrics: string[] = [];
   const inputTotal = inputs.length ? inputs.reduce((sum, value) => sum + value, 0) : turn.inputTokens ?? null;
   const cacheTotal = caches.length ? caches.reduce((sum, value) => sum + value, 0) : props.providerReturnedCacheHitInputTokens(turn);
   const outputTotal = outputs.length ? outputs.reduce((sum, value) => sum + value, 0) : turn.outputTokens ?? null;
-  const speedAverage = outputTotal != null && generationDurations.length
-    ? outputTotal / (generationDurations.reduce((sum, value) => sum + value, 0) / 1000)
-    : tokenSpeed(turn);
-  const speedLabel = latencies.length === generationDurations.length && generationDurations.length > 0
+  // 速度口径唯一来源：`resolveTurnWeightedSpeedDetail`（I4→I5→I6）。
+  // 旧实现按 per-call 窗口做混合平均（无 ttft 的记录也被计入分母），属 I9 禁止的第二套口径，已移除。
+  const turnSpeed = resolveTurnWeightedSpeedDetail(turn);
+  const speedValue = turnSpeed.speed;
+  const speedLabel = turnSpeed.basis === "stream_decode"
     ? "生成速度"
-    : latencies.length === 0
+    : turnSpeed.basis === "end_to_end"
       ? "整体速度"
       : "速度";
   const latencyAverage = latencies.length ? average(latencies) : turn.firstTokenLatencyMs ?? null;
@@ -783,8 +774,8 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
   if (outputTotal != null) {
     metrics.push(`输出 ${formatInteger(outputTotal)}`);
   }
-  if (speedAverage != null) {
-    metrics.push(`${speedLabel} ${speedAverage.toFixed(1)} t/s`);
+  if (speedValue != null) {
+    metrics.push(`${speedLabel} ${speedValue.toFixed(1)} t/s`);
   }
   if (cacheTotal != null) {
     metrics.push(`缓存 ${formatInteger(cacheTotal)}`);
@@ -811,22 +802,18 @@ function buildTurnMetricItems(turn: TurnTraceRecord) {
   const caches = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.cacheHitInputTokens).filter((value): value is number => value != null) : [];
   const outputs = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.outputTokens).filter((value): value is number => value != null) : [];
   const latencies = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.firstTokenLatencyMs).filter((value): value is number => value != null) : [];
-  const generationDurations = hasPerCallMetrics
-    ? callModelEntries
-      .map((entry, index) => activeGenerationDurationMs(perCallMetrics[index]!, timelineProviderCallRecord(turn, entry)))
-      .filter((value): value is number => value != null)
-    : [];
 
   const items: MetricDisplayItem[] = [];
   const inputTotal = inputs.length ? inputs.reduce((sum, value) => sum + value, 0) : turn.inputTokens ?? null;
   const cacheTotal = caches.length ? caches.reduce((sum, value) => sum + value, 0) : props.providerReturnedCacheHitInputTokens(turn);
   const outputTotal = outputs.length ? outputs.reduce((sum, value) => sum + value, 0) : turn.outputTokens ?? null;
-  const speedAverage = outputTotal != null && generationDurations.length
-    ? outputTotal / (generationDurations.reduce((sum, value) => sum + value, 0) / 1000)
-    : tokenSpeed(turn);
-  const speedLabel = latencies.length === generationDurations.length && generationDurations.length > 0
+  // 速度口径唯一来源：`resolveTurnWeightedSpeedDetail`（I4→I5→I6）。
+  // 旧实现按 per-call 窗口做混合平均（无 ttft 的记录也被计入分母），属 I9 禁止的第二套口径，已移除。
+  const turnSpeed = resolveTurnWeightedSpeedDetail(turn);
+  const speedValue = turnSpeed.speed;
+  const speedLabel = turnSpeed.basis === "stream_decode"
     ? "生成速度"
-    : latencies.length === 0
+    : turnSpeed.basis === "end_to_end"
       ? "整体速度"
       : "速度";
   const latencyAverage = latencies.length ? average(latencies) : turn.firstTokenLatencyMs ?? null;
@@ -837,8 +824,8 @@ function buildTurnMetricItems(turn: TurnTraceRecord) {
   if (outputTotal != null) {
     items.push({ icon: ArrowDown, tooltip: "输出", value: formatInteger(outputTotal) });
   }
-  if (speedAverage != null) {
-    items.push({ icon: Gauge, tooltip: speedLabel, value: `${speedAverage.toFixed(1)} t/s` });
+  if (speedValue != null) {
+    items.push({ icon: Gauge, tooltip: speedLabel, value: `${speedValue.toFixed(1)} t/s` });
   }
   if (cacheTotal != null) {
     items.push({ icon: Zap, tooltip: "缓存读取", value: formatInteger(cacheTotal) });

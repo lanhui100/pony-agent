@@ -15,7 +15,7 @@ use pony_agent_core::agent::runtime::TurnStreamEvent;
 use pony_agent_core::agent::telemetry::{
     ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
 };
-use pony_agent_core::agent::turn_flow::{weighted_turn_speed, ProviderEventMeta};
+use pony_agent_core::agent::turn_flow::{weighted_turn_speed, ProviderEventMeta, TurnSpeedBasis};
 
 // ---------------------------------------------------------------------------
 // 夹具（fixture）
@@ -279,20 +279,38 @@ fn i5_turn_speed_is_same_source_as_weighted_turn_speed() {
     );
     assert_eq!(
         snapshot.turn_generation_ms, truth.generation_ms,
-        "I5：turnGenerationMs 必须与 weighted_turn_speed 的 Σgen 同源"
+        "I5：turnGenerationMs 必须与 weighted_turn_speed 的分母同源"
     );
     assert_eq!(
         snapshot.turn_calls, truth.calls,
-        "I5：turnCalls 必须是 weighted_turn_speed 的有效调用数"
+        "I5：turnCalls 必须是 weighted_turn_speed 的参与计算调用数"
     );
     assert_eq!(
         snapshot.turn_output_tokens, truth.output_tokens,
-        "I5：turnOutputTokens 必须是有效调用的 Σout"
+        "I5：turnOutputTokens 必须是参与计算集合的 Σout"
+    );
+    assert_eq!(
+        snapshot.turn_speed_basis, truth.basis,
+        "I10：turnSpeedBasis 必须与 weighted_turn_speed 同源（缺席 ⇔ 无值）"
     );
     // 夹具自检（真实值，防止「同源但两者都算错」蒙混）：
     assert_eq!(truth.calls, 2, "夹具自检：两条有效调用");
     assert_eq!(truth.output_tokens, 130, "夹具自检：Σout = 50 + 80");
     assert_eq!(truth.generation_ms, 1_900, "夹具自检：Σgen = 600 + 1300");
+    assert_eq!(
+        truth.basis,
+        Some(TurnSpeedBasis::StreamDecode),
+        "夹具自检：两条调用均有 TTFT 且过物理下限 ⇒ 解码口径"
+    );
+    // I7 恒等式：同一集合的 Σ 必须能复算出同一个 speed（分子扣 1/token）。
+    let recomputed = (130.0 - 2.0) / (1_900.0 / 1_000.0);
+    let speed = snapshot
+        .turn_speed_tokens_per_second
+        .expect("解码口径下轮速度必须有值");
+    assert!(
+        (speed - recomputed).abs() < 1e-9,
+        "I7：speed 必须等于 (Σout − calls) / (Σgen/1000) = {recomputed}，实际 {speed}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -378,17 +396,19 @@ fn field_mapping_uses_last_callable_record_and_provider_meta() {
 
 #[test]
 fn wire_keys_are_camel_case_and_roundtrip() {
-    // Arrange
+    // Arrange：速度口径字段填 Some（带 `skip_serializing_if`，只有 Some 才上线缆）
     let snapshot = TurnMetricsSnapshot {
         provider: "fixture-provider".to_string(),
         model: "fixture-model-unpriced".to_string(),
+        call_speed_basis: Some(TurnSpeedBasis::StreamDecode),
+        turn_speed_basis: Some(TurnSpeedBasis::EndToEnd),
         ..Default::default()
     };
 
     // Act
     let value = serde_json::to_value(&snapshot).expect("TurnMetricsSnapshot 必须可序列化");
 
-    // Assert：22 个 camelCase 键（字段表逐条）
+    // Assert：24 个 camelCase 键（字段表逐条）
     let mut actual: Vec<String> = value
         .as_object()
         .expect("序列化结果必须是 JSON 对象")
@@ -408,7 +428,9 @@ fn wire_keys_are_camel_case_and_roundtrip() {
         "firstTokenLatencyMs",
         "durationMs",
         "callSpeedTokensPerSecond",
+        "callSpeedBasis",
         "turnSpeedTokensPerSecond",
+        "turnSpeedBasis",
         "turnOutputTokens",
         "turnGenerationMs",
         "turnCalls",
@@ -427,6 +449,25 @@ fn wire_keys_are_camel_case_and_roundtrip() {
     assert_eq!(
         actual, expected,
         "§4：wire 键名必须与冻结字段表的 camelCase 名逐字一致"
+    );
+
+    // I10 缺席语义：basis 为 None ⇒ 两个口径键**不出现**（不是 null），
+    // 消费面据此区分「有值（可比较）」与「无值（禁止猜口径）」。
+    let absent = serde_json::to_value(TurnMetricsSnapshot::default())
+        .expect("TurnMetricsSnapshot 必须可序列化");
+    let absent_keys: Vec<String> = absent
+        .as_object()
+        .expect("序列化结果必须是 JSON 对象")
+        .keys()
+        .cloned()
+        .collect();
+    assert!(
+        !absent_keys.iter().any(|key| key == "turnSpeedBasis"),
+        "I10：turnSpeedBasis 为 None 时不得上线缆（禁止 null 占位），实际键：{absent_keys:?}"
+    );
+    assert!(
+        !absent_keys.iter().any(|key| key == "callSpeedBasis"),
+        "I10：callSpeedBasis 为 None 时不得上线缆（禁止 null 占位），实际键：{absent_keys:?}"
     );
 
     // 往返无损（TUI/前端反序列化同一结构）

@@ -269,6 +269,8 @@ fn dirty_state() -> tui::TuiState {
         request_id: "req-1".to_string(),
         version: 1,
         run_id: None,
+        // 无 TTL：本用例只关心 reset_session_scope 的清场契约，不涉及过期语义。
+        expires_at_ms: None,
         is_approval: true,
     });
     state.scroll_offset = 9;

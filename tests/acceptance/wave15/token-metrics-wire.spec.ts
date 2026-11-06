@@ -109,16 +109,23 @@ function turnFrom(records: ProviderCallCacheRecord[]): TurnTraceRecord {
 }
 
 /** S3 契约的期望值（与冻结解析序一致：TTFT 可信时抵扣，否则退化）。 */
+/**
+ * 速度口径 v2（ADR 0073 / I4/I8）的**独立**算式（测试侧第二实现，用于判别 SUT 是否正确）：
+ * eligible ⇒ (out − 1)/(gen/1000)；valid 但不可解码 ⇒ out/(dur/1000)；无效 ⇒ null。
+ */
 function expectedSpeed(record: ProviderCallCacheRecord | null): number | null {
   const output = record?.outputTokens ?? null;
   const duration = record?.turnDurationMs ?? null;
-  if (output == null || duration == null || duration <= 0) {
+  if (output == null || duration == null || duration <= 0 || output <= 0) {
     return null;
   }
-  const ttft = record?.latencyKind === "provider_stream" ? record?.firstTokenLatencyMs ?? null : null;
-  const generative = ttft != null ? duration - ttft : 0;
-  const denominator = generative > 0 ? generative : duration;
-  return output / (denominator / 1000);
+  const ttft = record?.firstTokenLatencyMs ?? null;
+  const generative = ttft != null && duration > ttft ? duration - ttft : duration;
+  const floor = Math.max(200, Math.floor(duration * 0.05));
+  if (ttft != null && duration > ttft && output >= 2 && generative >= floor) {
+    return (output - 1) / (generative / 1000);
+  }
+  return output / (duration / 1000);
 }
 
 describe("Wave-15 wire-replay（Rust 真实捕获 → 前端 S1/S3 投影）", () => {
@@ -261,14 +268,14 @@ describe("Wave-15 wire-replay（Rust 真实捕获 → 前端 S1/S3 投影）", (
     const store = useRuntimeStore();
     store.$patch({ turnTraceHistory: [turn], traceTimeline: turn.traceTimeline ?? [], activeTurnId: null, isSubmitting: false });
     const view = useTraceProjection({ liveTurnEnabled: ref(true) });
-    // wave-54 契约演进（ADR 0053）口径来源：投影速度不再是末跳 per-call（100000 t/s），
-    // 而是 wire 三条已完成调用的 turn 加权值：
-    //   Σout = 50 + 60 + 100 = 210
-    //   Σgen = 55 + (48−47) + (49−48) = 57ms  ← 第 1 条 ttft 55 === dur 55 ⇒ 不抵扣，gen = dur
-    //   ⇒ speed = 210 / 0.057 = 3684.210526315789 t/s
-    expect(view.sessionTokenGenerationSpeed.value).toBe(3684.210526315789);
+    // 速度口径 v2（ADR 0073 / I3–I5）：三条 wire 调用的 gen 分别为
+    //   55（ttft 55 === dur 55 ⇒ 不抵扣，gen = dur）、48−47 = 1、49−48 = 1
+    //   全部 < floor(dur) = max(200ms, 5%×dur) ⇒ 无 decode_eligible 记录
+    //   ⇒ 回退端到端：Σout / Σdur = 210 / (55 + 48 + 49)/1000 = 210 / 0.152 = 1381.578947368421 t/s
+    //   （旧口径 Σout/Σgen = 210/0.057 = 3684.21 已废止：1ms 分母是计时抖动）
+    expect(view.sessionTokenGenerationSpeed.value).toBe(1381.578947368421);
     expect(view.tokenSpeedCalculationMode.value).toBe("turn_weighted");
-    // 判别式：不得等于末跳 per-call 值（100000）或整轮 elapsed 口径（1257.49）
+    // 判别式：不得等于末跳 per-call 值（2040.816…）或整轮 elapsed 口径（1257.49）
     expect(view.sessionTokenGenerationSpeed.value).not.toBeCloseTo(expected as number, 6);
     expect(view.sessionTokenGenerationSpeed.value).not.toBeCloseTo(accumulatedSpeed, 6);
   });

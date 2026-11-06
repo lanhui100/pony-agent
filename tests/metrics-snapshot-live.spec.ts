@@ -94,6 +94,8 @@ function snapshotFixture(
     durationMs: 5000,
     callSpeedTokensPerSecond: 1190.47,
     turnSpeedTokensPerSecond: 120,
+    // I10 线缆自描述：速度口径必须随快照下发，消费面禁止自行推断。
+    turnSpeedBasis: "stream_decode",
     turnOutputTokens: 5000,
     turnGenerationMs: 4200,
     turnCalls: 1,
@@ -127,6 +129,7 @@ describe("D1 resolveMetricsSnapshotDisplay 纯函数映射", () => {
       contextTokens: 25000,
       contextWindow: 100000,
       speed: 120,
+      speedBasis: "stream_decode",
       ttftMs: 800,
       cacheRatioPercent: "60%",
       contextPercent: 25,

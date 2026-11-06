@@ -4,7 +4,7 @@
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
 service: pony-agent
 kind: desktop
-reviewed_at: "2026-11-01"
+reviewed_at: "2026-11-06"
 
 dimensions:
   tracing:
@@ -47,6 +47,20 @@ enforcement_points:
     forbidden_in_other_files:
       - pattern: "\\bheader\\s*\\(\\s*[\"']traceparent[\"']"
         hint: 出网 HTTP 请求必须通过 otel::with_current_traceparent / traceparent_header_map_from 统一注入 traceparent，禁止手写硬编码请求头
+
+  error_classifier:
+    # ask-resume 收口点（只覆盖「Ask 不可恢复挂起」这一族，不宣称全仓唯一分类器）：
+    # 判据 `suspension_is_unrecoverable`（Interaction + run_id 缺失 ⇒ 不可恢复）、
+    # 文案构造 `build_ask_resume_unavailable_error`、以及流式/非流式共用的
+    # `build_unrecoverable_suspension_error` 都只在这个文件里。
+    path: crates/pony-agent-core/src/agent/runtime/turn_control.rs
+    guarantees:
+      - classify
+    forbidden_in_other_files:
+      - pattern: "(const\\s+ASK_RESUME_UNAVAILABLE_CODE|ASK_RESUME_UNAVAILABLE_CODE\\s*:)"
+        hint: 'Ask 不可恢复挂起的错误码常量只允许在 crates/pony-agent-core/src/agent/runtime/turn_control.rs 定义、文案只允许由 build_ask_resume_unavailable_error() 构造；别处禁止复制该常量或用 `{CODE}:` 自拼文案（错误码分裂会让宿主提示、断言与告警同时失效）。判据：宿主经 runtime 的 pub 再导出引用 ASK_RESUME_UNAVAILABLE_CODE（tui.rs 即如此），全仓 grep -c "const ASK_RESUME_UNAVAILABLE_CODE" 期望 1'
+      - pattern: "(=\\s*\"ask_resume_unavailable\"|\"ask_resume_unavailable\"\\s*\\.to_string\\(\\))"
+        hint: 'wire-code 字面量不得在第二处被**定义/赋值**（改码时会漏改，宿主提示与断言随即分裂）。判据：全仓（排除 tests/、docs/、.dev-team/）`grep -rn "= \"ask_resume_unavailable\""` 期望 1，且仅出现在收口点 turn_control.rs 的 const 行；宿主的日志/提示必须引用 ASK_RESUME_UNAVAILABLE_CODE 常量拼接。说明：tools/tui-audit/checks.py 的 `"ask_resume_unavailable",` 是**审计探针的期望值**（断言目标，不是定义点），按本 pattern 不构成命中'
 
 note: >-
   【收口点落地说明（Stage-1 Protocol）】
@@ -354,3 +368,70 @@ note: >-
   (3) 与 tracing 的关系：成本真值仍以既有 `llm.chat` span 属性为准（ADR 0053 / wave-53 C1），
       本次只把「落库/budget 两个衍生面」对齐到同一函数，不产生第二真值源。
   (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 未改动。
+  【wave-token-speed-v2 归属登记（2026-11-06）｜速度口径 v2：解码窗口分母 + 物理下限 + basis 自描述（ADR 0073）】
+  (1) tracing｜**修改既有属性取值域（非新增维度、非新增出口）**：根 `agent.turn` 的
+      `agent.turn.speed.basis` 取值由单一 `turn_weighted` 收敛为 `stream_decode` | `end_to_end`
+      （`stream_decode` = Σ(out−1)/Σ(dur−ttft)，样本限定流式且 `gen >= max(200ms, 5%·dur)`；
+      `end_to_end` = Σout/Σdur，仅在无合格解码样本时回退），无 speed 时不出该键。
+      `agent.turn.speed.tokens_per_second` / `agent.turn.calls` / `llm.call.generation_ms` 语义随之改为
+      「与 basis 同源的结算值」，仍由 `turn_flow::resolve_turn_speed` 单一出口产出（非第二真值源）。
+      落点不变：`crates/pony-agent-core/src/agent/otel/mod.rs`。
+  (2) 对外契约（additive）｜`TurnMetricsSnapshot` 追加 `turnSpeedBasis` / `callSpeedBasis`
+      （`stream_decode` | `end_to_end`，缺席 ⇔ 无值），随既有 `TurnStreamEvent.metrics` 下发；
+      TUI / 桌面端快照与回放分支 / 未来 HTTP 消费面一律复用 `turn_flow::resolve_turn_speed` 与
+      `src/lib/runtime/token-metrics.ts::resolveTurnWeightedSpeedDetail` 的同式实现（I9 唯一口径）。
+      属**展示与线缆自描述的正确性修正**，不是新增遥测出口：无新增网络 IO、后台任务、端点、依赖或环境变量。
+  (3) 修正动因（可对账）：旧口径把无 TTFT 观测的调用整段 `dur` 计入分母（真实库 1998 条 per-call 中
+      69.9% 的 Σgen 来自此类），且无物理下限（61 条 `gen<=5ms` 的突发包令单调用速度跨 5 个数量级）。
+      同库实测：旧口径 50.0 / 有效流式解码 141.5 / 端到端 27.6 t/s，即用户观感「与平时速度差巨大」的成因。
+  (4) metrics / logs｜仍为结构性 N-A，理由与本文档维度声明同源（无常驻 /metrics 前提、桌面端不在容器内），
+      本波不改变该结论；issues 落点不变（`agent/ponysentry/client.rs`），无新增异常码。
+  (5) 与 wave-54 (1) 的关系：本条**修订**该条中 `agent.turn.speed.basis=turn_weighted` 的取值域与
+      `Σoutput / Σ(duration−ttft)` 的公式描述，其余键集合与落点继承不变。
+  (6) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 未改动。
+  【ask-resume 归属登记（2026-11-06）｜TUI Ask 作答后本轮不继续（C1/C2/C3/C4）】
+  根因：TUI 每轮流式轮走无 run 事实的入口 ⇒ 挂起的 `PendingControlRequest.run_id = None`
+  ⇒ `bind_ask_wait` 无 run 可绑 ⇒ 作答后本轮永久停住。修法：宿主轮次在真实 graph run 内执行（C1）、
+  作答后续轮由事件循环发起（C2）、无 run 身份的挂起 fail-closed 为可读失败终态（C3）。
+  (1) tracing｜**适用，落点不变**（`crates/pony-agent-core/src/agent/otel/mod.rs`），无新增 span 名、
+      无新增属性键：`agent.turn` 根 span 与 `llm.chat` 子 span 的产生时机与键集合零变化（C1 只是把同一
+      runtime 调用换成携带 `RunTurnFacts{run_id}` 的同一个 `start_turn_stream_with_control_and_facts`）。
+      语义修正的附带收益：不可恢复挂起从「无终态 suspended」改为失败终态 ⇒ `agent.turn.outcome=error`
+      与既有 `failed_reason` 口径**首次覆盖该形态**（不新增字段）。
+  (2) issues｜**适用，落点不变**（`crates/pony-agent-core/src/agent/ponysentry/client.rs`）：
+      `ask_resume_unavailable` 是一条 **turn 失败终态**的错误码，经既有 turn 失败上报通道进入既有窗口，
+      不新增 ingest 出口、不新增异常码族、不改上报门禁。
+  (3) metrics｜**结构性 N/A，理由与本文档 metrics 维度声明同源**：桌面端无常驻监听地址、无 Service、
+      不进集群，Prometheus pull 模型的前提（稳定可达的 /metrics）结构上不成立。「作答后续轮成功率」
+      也不需要进程内计数器 —— 它的唯一真值源是会话事件流（`turn:suspended` / `turn:completed` /
+      `turn:failed`），再建一份计数即第二真值源。为让巡检变绿而伪造 /metrics 已被明确拒绝。
+  (4) logs｜**结构性 N/A，理由与本文档 logs 维度声明同源**：节点侧 fluentd 只按容器日志路径
+      （/var/log/containers/*.log）tail，桌面端进程不在容器内、不产生该路径。本波新增的观测面全部是
+      **本地面**单行 JSON：`runtime_log` 落 `<app_data_dir>/logs/pony-agent.log`；
+      `[pony-tui] ask_resume_*` 等 eprintln 走 TUI 的 stderr 改道，落
+      `~/.pony-agent/tui-logs/tui-runtime.log`（优先级：`PONY_TUI_RUNTIME_LOG` 显式覆盖 > 该默认路径，
+      见 `bin/tui.rs` 的运行时日志路径解析）。字段只含 run_id / turn_id / session_id / request_id / error，
+      **不含**用户答题正文；不上送 Loki 仍是结构性选择而非缺口。
+  (5) 收口点：新增 `error_classifier` 收口点 = `crates/pony-agent-core/src/agent/runtime/turn_control.rs`
+      （该族判据与文案的唯一落点，forbidden pattern 见上）。措辞刻意收窄：它**不**宣称"全仓唯一错误分类器"
+      （`agent/error_code.rs` 与各 provider 的错误分类仍在别处，见本节历史条目 (3)），只约束
+      `ask_resume_unavailable` 这一族不得出现第二份定义。`error_boundary` / `http_client` 未改动。
+  (6) 非遥测变更（仅登记）：`control_plane/mod.rs` 的 `start_turn_stream` 改为委派 ask-aware 实现
+      （旧实现逐字保留为兜底 `start_turn_stream_legacy`）；`bin/tui.rs` 新增 `UiEvent::AskResumeTurn`，
+      由事件循环用既有轮次线程基建跑续轮。无新增网络端点、依赖、环境变量或持久化 schema 变更。
+  (7) R3 追加登记（同批，归属结论不变）：
+      (7.1) 公共入口：`HostControlPlane::continue_ask_resume_turn_stream(sink, run_id, command)`
+            把 Ask 作答后的续轮**钉死在指定 run** 上（一次性 Ask 注入只存在于该 run；重选 run 会让答案
+            被静默丢弃）。出货路径唯一：`bin/tui.rs` 的 `UiEvent::AskResumeTurn` 分支。返回
+            `Result<(), String>`：`prepare_continue_*` 失败 ⇒ 回落 `start_ask_aware_turn_stream` 并返回
+            `Ok`；单步执行失败 ⇒ 回传 `Err`，宿主补发终态（避免 `is_streaming` 永真）。
+      (7.2) 新增本地日志点（均为 stderr → `~/.pony-agent/tui-logs/tui-runtime.log`，字段无正文/凭据）：
+            `ask_resume_turn_started`（run/turn/session）、`ask_resume_turn_failed`（run/reason，
+            覆盖 panic 与「无终态事件」两种失败）、`ask_resume_unavailable: … reason=no_run_identity`
+            （宿主没有 run 身份时的可读提示路径）；加上 core 侧既有 JSON 行
+            `ask-aware turn finished inside a real graph run` / `ask-resume continuation finished on the
+            bound run` / `ask-aware graph run step failed after turn execution; not retried` /
+            `ask-resume bound run is no longer continuable; falling back to the generic ask-aware entry`。
+      (7.3) 宿主契约对齐（ADR 0074 新 Ask 契约）：TUI 的 4 处 legacy 调用迁到 scoped 入口
+            （`answer_ask_in_session` ×1、`cancel_ask_in_session` ×3，session 取当前会话 id）；
+            `graph_resume_ask` 与续轮派发逻辑不变。四维归属不变。

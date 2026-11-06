@@ -202,3 +202,57 @@ fn c3_legacy_path_without_snapshot_is_unchanged() {
         "I7：旧路径上下文百分比必须仍为 25000/100000 = 25%，实际：{last:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// C4：速度口径自描述（token 速度口径 v2 / I9 / I10）
+// ---------------------------------------------------------------------------
+
+/// 口径夹具：速度 120 t/s + 指定 basis。
+fn speed_fixture(basis: Option<pony_agent_core::agent::turn_flow::TurnSpeedBasis>) -> TurnMetricsSnapshot {
+    TurnMetricsSnapshot {
+        turn_speed_tokens_per_second: Some(120.0),
+        turn_speed_basis: basis,
+        turn_output_tokens: 240,
+        turn_generation_ms: 2_000,
+        turn_calls: 1,
+        provider: "fixture-provider".to_string(),
+        model: "fixture-model-unpriced".to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn c4_speed_segment_renders_basis_prefix() {
+    use pony_agent_core::agent::turn_flow::TurnSpeedBasis;
+
+    // ① stream_decode（可比解码速度）⇒ 裸值，不带 `≈`（避免把可比速度标成估计值）。
+    let mut decoded = tui::TuiState::default();
+    decoded.apply_live_metrics(speed_fixture(Some(TurnSpeedBasis::StreamDecode)));
+    let decoded_row = metrics_row(&mut decoded);
+    assert!(
+        decoded_row.contains("120 t/s"),
+        "I9：stream_decode 必须渲染裸速度 120 t/s，实际：{decoded_row:?}"
+    );
+    assert!(
+        !decoded_row.contains("≈"),
+        "I9：stream_decode 是可比口径，不得加 `≈`（否则与端到端混为一谈），实际：{decoded_row:?}"
+    );
+
+    // ② end_to_end（含排队+prefill，跨调用不可比）⇒ 必须带 `≈` 前缀。
+    let mut end_to_end = tui::TuiState::default();
+    end_to_end.apply_live_metrics(speed_fixture(Some(TurnSpeedBasis::EndToEnd)));
+    let e2e_row = metrics_row(&mut end_to_end);
+    assert!(
+        e2e_row.contains("≈120 t/s"),
+        "I10：end_to_end 必须渲染为 `≈120 t/s`（口径不可与前直接比较），实际：{e2e_row:?}"
+    );
+
+    // ③ basis 缺席（旧快照/legacy wire）⇒ 仍渲染原值（向后兼容，不伪造口径）。
+    let mut legacy = tui::TuiState::default();
+    legacy.apply_live_metrics(speed_fixture(None));
+    let legacy_row = metrics_row(&mut legacy);
+    assert!(
+        legacy_row.contains("120 t/s"),
+        "向后兼容：basis 缺席的旧快照仍必须显示速度 120 t/s，实际：{legacy_row:?}"
+    );
+}

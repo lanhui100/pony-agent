@@ -9,13 +9,15 @@
 //! - `cache_hit_ratio` / `context_ratio` 为 **0.0..=1.0 单位分数**（非百分数；I2/I3）；
 //!   越界（> 1.0，分子分母不同量纲或上游数据自相矛盾）⇒ `None` fail-closed，
 //!   **禁止 clamp 成 100%**（I6 精神：clamp 只是把错误藏起来）。
-//! - `call_speed_tokens_per_second` = `output_tokens / (gen / 1000)`，其中
-//!   `gen = turn_flow::call_generation_ms(duration_ms, first_token_latency_ms)`（已扣 TTFT，
-//!   裁决 A2）；`turn_speed_tokens_per_second` 必须与
-//!   `turn_flow::weighted_turn_speed(records).speed` 同源（同一函数产出，I5）。
+//! - `call_speed_tokens_per_second` 一律取自 `turn_flow::call_speed(last)`，口径
+//!   （`call_speed_basis`）同源（token 速度口径 v2 / I8）：可解码 ⇒ `(out-1)/(gen/1000)`，
+//!   valid 但不可解码 ⇒ `out/(dur/1000)`，无效 ⇒ 两键皆无。
+//! - `turn_speed_tokens_per_second` / `turn_output_tokens` / `turn_generation_ms` / `turn_calls`
+//!   一律取自 `turn_flow::weighted_turn_speed(records)`（I4–I7 同源恒等式），
+//!   `turn_speed_basis` 与速度同源（I10：缺席 ⇔ 无值）。
 use crate::agent::cost::{estimate_cost_with_protocol, ProviderCostProtocol};
 use crate::agent::telemetry::ProviderCallCacheRecord;
-use crate::agent::turn_flow::{call_generation_ms, weighted_turn_speed, ProviderEventMeta};
+use crate::agent::turn_flow::{call_speed, weighted_turn_speed, ProviderEventMeta, TurnSpeedBasis};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -32,7 +34,14 @@ pub struct TurnMetricsSnapshot {
     pub first_token_latency_ms: Option<u64>,
     pub duration_ms: Option<u64>,
     pub call_speed_tokens_per_second: Option<f64>,
+    /// I8/I10：单调用口径（`stream_decode` | `end_to_end`）；缺席 ⇔ 无
+    /// `callSpeedTokensPerSecond`（禁止自写第三种公式）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_speed_basis: Option<TurnSpeedBasis>,
     pub turn_speed_tokens_per_second: Option<f64>,
+    /// I10：轮速度口径；缺席 ⇔ 无 `turnSpeedTokensPerSecond`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_speed_basis: Option<TurnSpeedBasis>,
     pub turn_output_tokens: u64,
     pub turn_generation_ms: u64,
     pub turn_calls: u32,
@@ -68,13 +77,12 @@ fn unit_ratio(numerator: u64, denominator: u64) -> Option<f64> {
     Some(candidate.max(0.0))
 }
 
-/// 「可计数」调用判据（与 [`crate::agent::turn_flow::weighted_turn_speed`] 的有效调用一致）：
-/// `dur > 0 && out > 0`。
+/// 「可计数」调用判据：与 [`crate::agent::turn_flow::call_valid`]（I1）同一判据 `dur > 0 && out > 0`。
 fn is_countable(record: &ProviderCallCacheRecord) -> bool {
     record.turn_duration_ms.unwrap_or(0) > 0 && record.output_tokens.unwrap_or(0) > 0
 }
 
-/// 末条「可计数」记录（`dur > 0 && out > 0`，与 `weighted_turn_speed` 有效调用判据一致）；
+/// 末条「可计数」记录（`dur > 0 && out > 0`，与 `turn_flow::call_valid` 同一判据）；
 /// 无可计数记录时回退末条记录（含全 `None` 伪记录：由字段层 `Option` 自然表达未知）。
 fn last_record(records: &[ProviderCallCacheRecord]) -> Option<&ProviderCallCacheRecord> {
     records
@@ -140,19 +148,12 @@ pub fn build_turn_metrics_snapshot(
     // 缺失回退裸 input；**禁止重算、禁止跨记录求和**。
     let context_input_tokens = last.context_input_tokens.or(last.input_tokens);
 
-    // A2：单次调用速度分母为 `gen`（已扣 TTFT），与加权轮速度同源；
-    // `gen <= 0 || output <= 0` ⇒ 无定义（ADR 0035 有效调用判据），不得 Infinity。
-    let call_generation = call_generation_ms(last.turn_duration_ms, last.first_token_latency_ms);
-    let last_output = last.output_tokens.unwrap_or(0);
-    let call_speed_tokens_per_second = if call_generation > 0 && last_output > 0 {
-        sanitize_f64(Some(
-            (last_output as f64) / ((call_generation as f64) / 1_000.0),
-        ))
-    } else {
-        None
-    };
+    // I8：单调用速度与口径**同源同帧**取自 `turn_flow::call_speed`（唯一出处），
+    // 本模块禁止自算；无效调用（`dur <= 0 || out <= 0`）⇒ 两键皆无（I1/I6）。
+    let (call_speed_value, call_speed_basis) = call_speed(last);
+    let call_speed_tokens_per_second = sanitize_f64(call_speed_value);
 
-    // A4/I5：轮级四项一律取自 `weighted_turn_speed`，禁止自算。
+    // A4/I4-I7：轮级四项 + 口径一律取自 `weighted_turn_speed`，禁止自算。
     let turn = weighted_turn_speed(records);
 
     // I2：分子分母必须同源（末次调用的 cache_hit 与 context_input），禁止混量纲。
@@ -190,7 +191,9 @@ pub fn build_turn_metrics_snapshot(
         first_token_latency_ms: last.first_token_latency_ms,
         duration_ms: last.turn_duration_ms,
         call_speed_tokens_per_second,
+        call_speed_basis,
         turn_speed_tokens_per_second: sanitize_f64(turn.speed),
+        turn_speed_basis: turn.basis,
         turn_output_tokens: turn.output_tokens,
         turn_generation_ms: turn.generation_ms,
         turn_calls: turn.calls,

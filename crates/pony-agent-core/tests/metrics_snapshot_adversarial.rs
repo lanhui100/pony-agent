@@ -13,7 +13,7 @@ use pony_agent_core::agent::metrics_snapshot::{build_turn_metrics_snapshot, Turn
 use pony_agent_core::agent::telemetry::{
     ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
 };
-use pony_agent_core::agent::turn_flow::{weighted_turn_speed, ProviderEventMeta};
+use pony_agent_core::agent::turn_flow::{weighted_turn_speed, ProviderEventMeta, TurnSpeedBasis};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 // ---------------------------------------------------------------------------
@@ -105,7 +105,8 @@ fn assert_sanitized(snapshot: &TurnMetricsSnapshot, case: &str) {
     }
 }
 
-/// 同源断言（I5）：凡产出快照，轮速度/生成时长/调用数/输出都必须与 `weighted_turn_speed` 一致。
+/// 同源断言（I5/I7/I10）：凡产出快照，轮速度/生成时长/调用数/输出与 `basis` 都必须与
+/// `weighted_turn_speed` 一致，且满足 I7 恒等式（同一集合的 Σ 与 speed 自洽）。
 fn assert_same_source(
     records: &[ProviderCallCacheRecord],
     snapshot: &TurnMetricsSnapshot,
@@ -117,17 +118,56 @@ fn assert_same_source(
         "[{case}] I5：轮速度必须与 weighted_turn_speed 完全同源"
     );
     assert_eq!(
+        snapshot.turn_speed_basis, truth.basis,
+        "[{case}] I10：turnSpeedBasis 必须与 weighted_turn_speed 同源"
+    );
+    assert_eq!(
         snapshot.turn_generation_ms, truth.generation_ms,
-        "[{case}] I5：turnGenerationMs 必须与 weighted_turn_speed 的 Σgen 同源"
+        "[{case}] I5：turnGenerationMs 必须与 weighted_turn_speed 的 Σ 同源"
     );
     assert_eq!(
         snapshot.turn_calls, truth.calls,
-        "[{case}] I5：turnCalls 必须等于有效调用数"
+        "[{case}] I5：turnCalls 必须等于参与计算集合的调用数"
     );
     assert_eq!(
         snapshot.turn_output_tokens, truth.output_tokens,
-        "[{case}] I5：turnOutputTokens 必须等于 Σout"
+        "[{case}] I5：turnOutputTokens 必须等于参与计算集合的 Σout"
     );
+
+    // I7：参与计算集合的 Σ 必须能复算出同一个 speed（口径不同，分子不同）。
+    match truth.basis {
+        Some(TurnSpeedBasis::StreamDecode) => {
+            let numerator = truth
+                .output_tokens
+                .saturating_sub(u64::from(truth.calls)) as f64;
+            let recomputed = numerator / (truth.generation_ms as f64 / 1_000.0);
+            let speed = snapshot
+                .turn_speed_tokens_per_second
+                .expect("stream_decode ⇒ 必须有轮速度");
+            assert!(
+                (speed - recomputed).abs() < 1e-9,
+                "[{case}] I7：Σ(out−1)/Σgen 必须复算出 speed，期望 {recomputed}，实际 {speed}"
+            );
+        }
+        Some(TurnSpeedBasis::EndToEnd) => {
+            let recomputed = truth.output_tokens as f64 / (truth.generation_ms as f64 / 1_000.0);
+            let speed = snapshot
+                .turn_speed_tokens_per_second
+                .expect("end_to_end ⇒ 必须有轮速度");
+            assert!(
+                (speed - recomputed).abs() < 1e-9,
+                "[{case}] I7：Σout/Σdur 必须复算出 speed，期望 {recomputed}，实际 {speed}"
+            );
+        }
+        None => {
+            assert_eq!(
+                snapshot.turn_speed_tokens_per_second, None,
+                "[{case}] I6：无参与计算调用时 speed 必须缺席（禁止 0 占位）"
+            );
+            assert_eq!(truth.output_tokens, 0, "[{case}] I6：无参与计算集合 ⇒ Σout = 0");
+            assert_eq!(truth.generation_ms, 0, "[{case}] I6：无参与计算集合 ⇒ 分母 = 0");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,17 +231,22 @@ fn a2_ttft_greater_than_duration_never_goes_negative() {
     let snapshot = build_guarded(&records, Some(200_000), Some(&meta))
         .expect("含可计数调用的记录必须产出快照");
 
-    // Assert：退化口径 gen = dur（不得出现负值/NaN）
+    // Assert：ttft>dur ⇒ 不可解码（I3），只能走端到端回退（I5），不得出现负值/NaN
     assert_sanitized(&snapshot, "ttft>dur");
     assert_same_source(&records, &snapshot, "ttft>dur");
     assert_eq!(
+        snapshot.turn_speed_basis,
+        Some(TurnSpeedBasis::EndToEnd),
+        "ttft>dur ⇒ 无有效解码窗口，必须回退 end_to_end（不得混入解码口径）"
+    );
+    assert_eq!(
         snapshot.turn_generation_ms, 1_000,
-        "ttft>dur 必须退化为 gen = dur = 1000（不得出现 u64 下溢或负值）"
+        "end_to_end 口径下分母 = Σdur = 1000（不得出现 u64 下溢或负值）"
     );
     assert_eq!(
         snapshot.turn_speed_tokens_per_second,
         Some(100.0),
-        "ttft>dur ⇒ 轮速度 = 100 / (1000/1000) = 100，实际：{:?}",
+        "ttft>dur ⇒ 端到端速度 = 100 / (1000/1000) = 100，实际：{:?}",
         snapshot.turn_speed_tokens_per_second
     );
 }
@@ -310,26 +355,37 @@ fn a5_mixed_records_count_only_valid_calls() {
     let snapshot = build_guarded(&records, Some(200_000), Some(&meta))
         .expect("混合记录中含有效调用，必须产出快照");
 
-    // Assert：只计有效调用（全 None 记录被过滤），速度有限且 > 0
-    assert_eq!(truth.calls, 2, "夹具自检：有效调用 = 2（全 None 记录不计）");
+    // Assert：只有可解码调用进入分母（全 None 记录与 ttft>dur 记录均被排除）
     assert_eq!(
-        snapshot.turn_calls, 2,
-        "turnCalls 必须只计有效调用（dur>0 && out>0），实际：{}",
+        truth.calls, 1,
+        "夹具自检：可解码调用 = 1（全 None 记录无效、ttft>dur 不可解码）"
+    );
+    assert_eq!(
+        snapshot.turn_calls, 1,
+        "turnCalls 必须是参与计算集合的调用数（I7），实际：{}",
         snapshot.turn_calls
     );
-    assert_eq!(snapshot.turn_output_tokens, 150, "Σout = 100 + 50");
     assert_eq!(
-        snapshot.turn_generation_ms, 2_500,
-        "Σgen = 1500 + 1000（倒挂退化）"
+        snapshot.turn_output_tokens, 100,
+        "Σout = 100（只含可解码调用）"
+    );
+    assert_eq!(
+        snapshot.turn_generation_ms, 1_500,
+        "Σgen = 2000 − 500 = 1500（只含真实解码窗口）"
+    );
+    assert_eq!(
+        snapshot.turn_speed_basis,
+        Some(TurnSpeedBasis::StreamDecode),
+        "存在可解码调用 ⇒ 必须走 stream_decode 口径"
     );
     let speed = snapshot
         .turn_speed_tokens_per_second
-        .expect("存在有效调用 ⇒ 轮速度必须有值");
+        .expect("存在可解码调用 ⇒ 轮速度必须有值");
     assert!(speed.is_finite(), "轮速度必须有限，实际：{speed}");
     assert!(speed > 0.0, "轮速度必须为正，实际：{speed}");
     assert!(
-        (speed - 150.0 / 2.5).abs() < 1e-9,
-        "轮速度 = 150 / (2500/1000) = 60，实际：{speed}"
+        (speed - 99.0 / 1.5).abs() < 1e-9,
+        "轮速度 = (100−1) / (1500/1000) = 66，实际：{speed}"
     );
     assert_sanitized(&snapshot, "mixed");
     assert_same_source(&records, &snapshot, "mixed");

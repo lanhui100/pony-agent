@@ -31,8 +31,9 @@ const props = defineProps<{
   tokenGenerationSpeed: number | null;
   tokenSpeedCalculationMode?: string;
   speedDebugInfo?: {
+    /** 聚合范围（`turn_weighted` | `call_only` | `none`）。 */
     mode?: string;
-    /** wave-54 C2/C6：`turn_weighted` | `call_only` | `none`。 */
+    /** 速度口径（v2 I10）：`stream_decode` | `end_to_end` | `none`。 */
     basis?: string;
     /** 参与求和的已完成调用数。 */
     calls?: number;
@@ -66,21 +67,30 @@ const blockDetail = computed(() => resolveRuntimeStoreSafe()?.governanceBlockDet
 
 const debugAttrsEnabled = computed(() => isDebugLoggingEnabled());
 
-/** wave-54 C6：速度位基准（`turn_weighted` = 加权 N 次调用；`call_only` = 当前调用）。 */
-const speedBasis = computed(() => props.speedDebugInfo?.basis ?? props.tokenSpeedCalculationMode ?? "none");
+/**
+ * 速度口径（v2 I10）：`stream_decode` = 解码窗口 `Σ(out−1)/Σgen`；`end_to_end` = 端到端
+ * `Σout/Σdur`；`none` = 无值。口径与聚合范围（`tokenSpeedCalculationMode`）不同域，
+ * 禁止用 mode 兜底推导 basis。
+ */
+const speedBasis = computed(() => props.speedDebugInfo?.basis ?? "none");
 
 /** wave-54 C3：估算来源必须显式降级（`≈`），不得冒充真值。 */
 const isEstimatedUsage = computed(() => props.speedDebugInfo?.origin === "estimated_chars");
 
 const speedTooltip = computed(() => {
   const calls = props.speedDebugInfo?.calls;
-  if (speedBasis.value === "call_only") {
-    return "当前调用的生成速度（单次调用，含生成耗时口径）";
+  const callScope = props.speedDebugInfo?.mode === "call_only";
+  if (speedBasis.value === "stream_decode") {
+    return callScope
+      ? "当前调用的生成速度（解码口径：首 token 已计入 TTFT）"
+      : `生成速度（${calls ?? 0} 次调用，Σ(out−1)/Σ生成耗时）`;
   }
-  if (speedBasis.value === "turn_weighted" && typeof calls === "number" && calls > 0) {
-    return `加权生成速度（${calls} 次调用，Σoutput/Σ生成耗时）`;
+  if (speedBasis.value === "end_to_end") {
+    return callScope
+      ? "当前调用的整体速度（端到端口径，含排队与 prefill）"
+      : `整体速度（${calls ?? 0} 次调用，Σoutput/Σ端到端耗时，含排队与 prefill）`;
   }
-  return "生成速度（加权，暂无已完成调用）";
+  return "速度（暂无已完成调用）";
 });
 
 /**
@@ -208,11 +218,14 @@ function formatCompactInteger(value: number) {
   return String(value);
 }
 
-/** 速度显示：估算来源加 `≈` 前缀（C3）；无值时位点不渲染（§2 E-2）。 */
+/**
+ * 速度显示（v2 §2.6）：`≈` 前缀 = 估算来源**或**端到端口径，两者同时成立只出现一次 `≈`；
+ * 无值时位点不渲染（§2 E-2）。
+ */
 function formatTokenSpeed(value: number | null | undefined) {
   if (!isPositiveFiniteNumber(value)) { return ""; }
   const text = `${Math.round(value)} t/s`;
-  return isEstimatedUsage.value ? `≈${text}` : text;
+  return isEstimatedUsage.value || speedBasis.value === "end_to_end" ? `≈${text}` : text;
 }
 
 /**

@@ -20,10 +20,10 @@
 //!     但 `generation == duration`（**不**抵扣、**不**产出负值）；
 //!   - 未记录 usage 来源（`record_usage_origin(None)`）：**无** `agent.usage.origin` 键。
 //!   每条「键不存在」断言都配同 span 的正向对照键（证明 span 确实导出了）。
-//! - **T2**（C2/C4）根 `agent.turn` 速度唯一口径：
-//!   `agent.turn.speed.tokens_per_second == Σout / (Σgen / 1000)`（±1e-6，
-//!   Σ 由**同 trace 的 `llm.chat` 线级属性**反解，而非复用本地常量 ⇒ 两侧任一处口径漂移都会红）、
-//!   `agent.turn.speed.basis == "turn_weighted"`、
+//! - **T2**（C2/C4）根 `agent.turn` 速度唯一口径（token 速度口径 v2 / ADR 0073）：
+//!   `agent.turn.speed.tokens_per_second == Σ_eligible(out−1) / (Σ_eligible gen / 1000)`（±1e-6，
+//!   参与集合由**同 trace 的 `llm.chat` 线级属性**反解，而非复用本地常量 ⇒ 两侧任一处口径漂移都会红）、
+//!   `agent.turn.speed.basis == "stream_decode"`（无合格解码样本时回退 `end_to_end`）、
 //!   `agent.turn.duration_ms` / `agent.turn.ttft_ms` / `agent.turn.calls` 存在；
 //!   有窗口能力 ⇒ `llm.context.window_tokens` + `llm.context.ratio ≈ in/win` 存在（ADR 0055 改键名）；
 //!   无窗口能力 ⇒ 两键**都不存在**（禁止 0 占位）。
@@ -57,6 +57,7 @@ use pony_agent_core::agent::projection::{fold_all, MetricsProjectionState, Trace
 use pony_agent_core::agent::provider::TokenUsage;
 use pony_agent_core::agent::telemetry::{ProviderLatencyKind, ProviderRequestKind};
 use pony_agent_core::agent::turn_event::{TurnEndReason, TurnEvent};
+use pony_agent_core::agent::turn_flow::TurnSpeedBasis;
 
 // ---------------------------------------------------------------- 门禁串行锁
 //
@@ -793,21 +794,24 @@ const T2_SECOND_GENERATION_MS: f64 = 1_800.0;
 const T2_WINDOW_TOKENS: i64 = 10_000;
 const T2_WINDOW_INPUT_TOKENS: i64 = 1_000;
 
-/// T2（C2/C4）：根 `agent.turn` 的加权生成速度必须等于 `Σout / (Σgen / 1000)`，
-/// 其中 Σ 由**同 trace 的 `llm.chat` 线级属性**反解（cross-span 一致，非本地常量自证）。
+/// T2（C2/C4）：根 `agent.turn` 的速度必须等于**解码口径** `Σ_eligible(out−1) / (Σ_eligible gen / 1000)`，
+/// 参与集合由 `llm.chat` 线级属性反解（cross-span 一致，非本地常量自证）。
 #[test]
 fn t2_turn_weighted_speed_wire() {
     let _guard = gate_lock();
 
     // 两次调用的真值（与下方 record_* 入参一一对应）：
-    //   call1: out=100, dur=1200, ttft=200 ⇒ gen=1000
-    //   call2: out=200, dur=1800, 无 ttft   ⇒ gen=1800
-    // ⇒ Σout=300, Σgen=2800ms ⇒ speed = 300 / 2.8 = 107.142857… t/s
-    let expected_speed = (T2_FIRST_OUTPUT + T2_SECOND_OUTPUT)
+    //   call1: out=100, dur=1200, ttft=200 ⇒ gen=1000，过物理下限 ⇒ **decode_eligible**
+    //   call2: out=200, dur=1800, 无 ttft   ⇒ 不可解码（无 TTFT 观测）⇒ 只进 valid 集合
+    // ⇒ 解码口径：Σ_eligible(out−1)=99、Σ_eligible gen=1000ms ⇒ speed = 99 t/s
+    //   （旧口径把无 TTFT 的 1800ms 计入分母，得 107.142857 t/s：口径 v2 已废止该算法）
+    let expected_speed = (T2_FIRST_OUTPUT - 1.0) / (T2_FIRST_GENERATION_MS / 1_000.0);
+    // 判别力常量：旧（错误）口径 Σout/Σgen = 300/2.8 —— 新口径必须与之不同。
+    let legacy_polluted_speed = (T2_FIRST_OUTPUT + T2_SECOND_OUTPUT)
         / ((T2_FIRST_GENERATION_MS + T2_SECOND_GENERATION_MS) / 1_000.0);
     let turn_duration_ms = 3_000u64; // per-call 耗时之和（本用例最小 turn 装配）
     let turn_ttft_ms = 200u64; // 首个带 ttft 的 per-call 值
-    let turn_calls = 2u32;
+    let turn_calls = 1u32; // 参与解码计算的调用数（call2 不可解码，不计入，I7）
 
     let spans = run_export(Duration::from_millis(2_500), || {
         let mut turn = otel::begin_turn_trace("sess-wave54-t2", "turn-wave54-t2", 2);
@@ -838,8 +842,8 @@ fn t2_turn_weighted_speed_wire() {
         second.record_speed_and_context(Some(200.0 / 1.8), None);
         drop(second);
 
-        // 根 span：速度口径 + turn 级真值。
-        turn.record_turn_speed(Some(expected_speed));
+        // 根 span：速度口径 + turn 级真值（I10：速度与 basis 必须同源同帧写入）。
+        turn.record_turn_speed_with_basis(Some(expected_speed), Some(TurnSpeedBasis::StreamDecode));
         turn.record_turn_timing(
             Some(turn_duration_ms),
             Some(turn_ttft_ms),
@@ -879,12 +883,12 @@ fn t2_turn_weighted_speed_wire() {
     }
     assert_eq!(
         sum_output_tokens, T2_FIRST_OUTPUT + T2_SECOND_OUTPUT,
-        "T2：Σout 必须由两次调用线级 `gen_ai.usage.output_tokens` 相加得到（300）"
+        "T2：两条调用线级 `gen_ai.usage.output_tokens` 之和必须是 300（原始观测自洽）"
     );
     assert_eq!(
         sum_generation_ms,
         T2_FIRST_GENERATION_MS + T2_SECOND_GENERATION_MS,
-        "T2：Σgen 必须由两次调用线级 `llm.call.generation_ms` 相加得到（2800ms）"
+        "T2：两条调用线级 `llm.call.generation_ms` 之和必须是 2800ms（原始观测自洽）"
     );
 
     let wire_speed = wire_f64(root, KEY_TURN_SPEED).unwrap_or_else(|| {
@@ -893,18 +897,15 @@ fn t2_turn_weighted_speed_wire() {
             span_keys(root)
         )
     });
-    let recomputed_speed = sum_output_tokens / (sum_generation_ms / 1_000.0);
-    assert_close(
-        wire_speed,
-        recomputed_speed,
-        &format!(
-            "T2（C2 核心）：`{KEY_TURN_SPEED}` 必须等于 Σout/(Σgen/1000) = {recomputed_speed} t/s"
-        ),
-    );
+    // 口径 v2（契约 §1 I4/I3）：只有 call1 可解码 ⇒ 分母只含其 1000ms 解码窗口，分子扣 1。
     assert_close(
         wire_speed,
         expected_speed,
-        "T2：加权生成速度必须等于 107.142857 t/s（非整轮吞吐 300/3.0=100）",
+        "T2（C2 核心）：`agent.turn.speed` 必须等于 Σ_eligible(out−1)/(Σ_eligible gen/1000) = 99 t/s",
+    );
+    assert!(
+        (wire_speed - legacy_polluted_speed).abs() > 1e-6,
+        "T2：无 TTFT 的 call2 不得把 1800ms 计入分母（否则退化为旧口径 {legacy_polluted_speed} t/s），实际 {wire_speed}"
     );
     assert!(
         wire_speed.is_finite() && wire_speed > 0.0,
@@ -914,8 +915,8 @@ fn t2_turn_weighted_speed_wire() {
     // ---------- C2：basis / duration / ttft / calls ----------
     assert_eq!(
         require_str(root, KEY_TURN_SPEED_BASIS, "T2（C2）"),
-        "turn_weighted",
-        "T2（C2）：速度口径标记必须为 `turn_weighted`（单一口径）"
+        "stream_decode",
+        "T2（C2）：口径标记必须是 `stream_decode`（分母只含真实解码窗口）"
     );
     assert_eq!(
         require_i64(root, KEY_TURN_DURATION, "T2（C2）"),
@@ -930,7 +931,7 @@ fn t2_turn_weighted_speed_wire() {
     assert_eq!(
         require_i64(root, KEY_TURN_CALLS, "T2（C2）"),
         turn_calls as i64,
-        "T2（C2）：`agent.turn.calls` 必须是已完成调用数 {turn_calls}"
+        "T2（C2）：`agent.turn.calls` 必须是参与计算集合的调用数 {turn_calls}（I7）"
     );
 
     // ---------- C4：有窗口能力 ⇒ window + ratio ≈ in/win ----------
@@ -1328,22 +1329,27 @@ const T7_INVALID_DURATION_MS: u64 = 2_000;
 /// - 叠加一条无效调用（`record_usage(None, None)` + `record_call_timing(Some(2000), None)`）
 ///   确认 `calls` 仍为 2、速度不变（无效调用不得污染 Σ）。
 ///
-/// 真值：① gen = 1200 − 200 = 1000ms；② 无 ttft ⇒ gen = 1800ms
-/// ⇒ Σout = 300、Σgen = 2800ms ⇒ speed = 300 / 2.8 = 107.142857… t/s；turn ttft = 首跳 200ms。
+/// 真值（口径 v2）：① gen = 1200 − 200 = 1000ms ⇒ **decode_eligible**；
+/// ② 无 ttft ⇒ 不可解码（只进 valid 集合，不参与解码分母）
+/// ⇒ Σ_eligible(out−1) = 99、Σ_eligible gen = 1000ms ⇒ speed = 99 t/s；turn ttft = 首跳 200ms。
 #[test]
 fn t7_root_span_accumulates_without_explicit_turn_calls() {
     let _guard = gate_lock();
 
-    let expected_speed = (T7_FIRST_OUTPUT_TOKENS + T7_SECOND_OUTPUT_TOKENS) as f64
+    // 解码口径：只有首跳可解码 ⇒ 分母只含其解码窗口，分子扣 1/token。
+    let expected_speed = (T7_FIRST_OUTPUT_TOKENS - 1) as f64
+        / ((T7_FIRST_DURATION_MS - T7_FIRST_TTFT_MS) as f64 / 1_000.0);
+    // 判别力常量：旧口径 Σout/Σgen（把无 TTFT 的 1800ms 计入分母）= 107.142857 t/s。
+    let legacy_polluted_speed = (T7_FIRST_OUTPUT_TOKENS + T7_SECOND_OUTPUT_TOKENS) as f64
         / (((T7_FIRST_DURATION_MS - T7_FIRST_TTFT_MS) + T7_SECOND_DURATION_MS) as f64 / 1_000.0);
-    // 若无效调用被误计入 Σ（Σgen = 1000 + 1800 + 2000），速度会掉到 62.5 t/s。
-    let polluted_speed = (T7_FIRST_OUTPUT_TOKENS + T7_SECOND_OUTPUT_TOKENS) as f64
+    // 若无效调用被误计入 Σ（Σgen 再加 2000），速度会进一步掉到 300 / 4.8 = 62.5 t/s。
+    let invalid_polluted_speed = (T7_FIRST_OUTPUT_TOKENS + T7_SECOND_OUTPUT_TOKENS) as f64
         / (((T7_FIRST_DURATION_MS - T7_FIRST_TTFT_MS) + T7_SECOND_DURATION_MS + T7_INVALID_DURATION_MS)
             as f64
             / 1_000.0);
     assert!(
-        (expected_speed - 107.14285714285714).abs() <= 1e-6,
-        "T7 夹具自检：两跳加权速度必须是 107.14285714285714 t/s，实际 {expected_speed}"
+        (expected_speed - 99.0).abs() <= 1e-9,
+        "T7 夹具自检：解码口径速度必须是 99 t/s，实际 {expected_speed}"
     );
 
     let spans = run_export(Duration::from_millis(2_500), || {
@@ -1417,8 +1423,12 @@ fn t7_root_span_accumulates_without_explicit_turn_calls() {
         &format!("T7（C2）：`{KEY_TURN_SPEED}` 必须等于两层 per-call 累加的 Σout/(Σgen/1000)"),
     );
     assert!(
-        (wire_speed - polluted_speed).abs() > 1e-6,
-        "T7：无效调用（dur=2000 无输出）不得进入 Σ，速度不得被稀释成 {polluted_speed}，实际 {wire_speed}"
+        (wire_speed - legacy_polluted_speed).abs() > 1e-6,
+        "T7：无 TTFT 的第二跳不得把 1800ms 计入解码分母（否则退化为旧口径 {legacy_polluted_speed} t/s），实际 {wire_speed}"
+    );
+    assert!(
+        (wire_speed - invalid_polluted_speed).abs() > 1e-6,
+        "T7：无效调用（dur=2000 无输出）不得进入 Σ，速度不得被稀释成 {invalid_polluted_speed}，实际 {wire_speed}"
     );
     assert!(
         wire_speed.is_finite() && wire_speed > 0.0,
@@ -1428,13 +1438,13 @@ fn t7_root_span_accumulates_without_explicit_turn_calls() {
     // ---------- C2：basis / calls / ttft / duration ----------
     assert_eq!(
         require_str(root, KEY_TURN_SPEED_BASIS, "T7（C2）"),
-        "turn_weighted",
-        "T7（C2）：累加口径必须自带 `turn_weighted` 标记"
+        "stream_decode",
+        "T7（C2）：累加口径必须自带 `stream_decode` 标记（分母只含真实解码窗口）"
     );
     assert_eq!(
         require_i64(root, KEY_TURN_CALLS, "T7（C2）"),
-        2,
-        "T7（C2）：`agent.turn.calls` 必须是两条**有效**已完成调用（无效调用不得计入）"
+        1,
+        "T7（C2）：`agent.turn.calls` 必须是参与解码计算的调用数（只有首跳可解码）"
     );
     assert_eq!(
         require_i64(root, KEY_TURN_TTFT, "T7（C2）"),

@@ -2,6 +2,9 @@
 
 Status: implemented
 
+> 速度公式（`Σout / Σgen`）已由 [0073](0073-token-speed-decode-basis.md) 修订为解码口径 v2；
+> 本文件中上下文归一（C4）、usage 来源（C3）与显示纪律（C6）仍然现行。
+
 ## 背景
 
 桌面端右侧栏「状态」面板的 token 与速度长期被报「不准」。三路审计（Tempo 实测 / 前端口径链 /

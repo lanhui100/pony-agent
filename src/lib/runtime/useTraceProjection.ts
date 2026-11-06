@@ -354,8 +354,10 @@ export function useTraceProjection(options: {
 
   const traceSessionTokenGenerationSpeed = computed<number | null>(() => sessionTokenSpeedState.value.speed);
   /**
-   * 速度位（契约 §0 / I5）：快照存在 ⇒ `turnSpeedTokensPerSecond` 直取（与 Rust
-   * `weighted_turn_speed` 同源，口径恒为 `turn_weighted`）；无快照 ⇒ 既有 trace 反推路径（I7）。
+   * 速度位（契约 §0 / I4–I6）：快照存在 ⇒ `turnSpeedTokensPerSecond` 直取（与 Rust
+   * `weighted_turn_speed` 同源）；无快照 ⇒ 既有 trace 反推路径（`resolveTurnWeightedSpeedDetail`）。
+   * 口径由 `data-speed-basis` 自描述：快照分支取 `snapshot.turnSpeedBasis`（缺失 ⇒ `none`），
+   * trace 分支取 `detail.basis`。DOM 属性名不变，取值域为 `stream_decode | end_to_end | none`。
    */
   const sessionTokenGenerationSpeed = computed<number | null>(() => {
     const display = liveMetricsDisplay.value;
@@ -369,7 +371,7 @@ export function useTraceProjection(options: {
    * C6 调试/`≈` 通道（§5 裁决 4：由 `origin` 子字段驱动，不新增 prop）：
    * `data-speed-debug` = `basis=…;calls=…;in=…;out=…;dur=…;ttft=…;gen=…;win=…;ratio=…;origin=…`。
    *
-   * 快照分支：`calls`/`outputTokens`/`genMs`/`ttftMs`/`origin`/`ratio`/`win` 全部快照直取（禁止重算）；
+   * 快照分支：`basis`/`calls`/`outputTokens`/`genMs`/`ttftMs`/`origin`/`ratio`/`win` 全部快照直取（禁止重算）；
    * 其中 `win` 只认 `snapshot.contextWindowTokens`（L3-A ADVISORY：不得用 trace 回退窗口当分母），
    * 窗口缺失 ⇒ `win=null`、`ratio=null`（面板渲染既有 `-` 占位，字面量格式不变）。
    */
@@ -385,7 +387,8 @@ export function useTraceProjection(options: {
           : null;
       return {
         mode: "turn_weighted",
-        basis: "turn_weighted",
+        // I10：口径直取快照（缺失 ⇒ "none"），禁止按 mode 推导或当作 stream_decode。
+        basis: snapshot.turnSpeedBasis ?? "none",
         calls: snapshot.turnCalls,
         speed: display.speed,
         inputTokens: display.contextTokens,

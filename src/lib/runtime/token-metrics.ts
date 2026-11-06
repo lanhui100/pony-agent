@@ -1,10 +1,12 @@
 /**
- * Wave-54 Token 指标口径纯函数（C2 速度唯一口径 / C4 上下文归一）。
+ * Token 指标口径纯函数（速度口径 v2 唯一真值 / C4 上下文归一）。
  *
- * 契约：`.dev-team/contract-matrix-wave54.md`
- * - §1 C2：`turn.speed = Σout_i / (Σgen_i / 1000)`，`gen_i = (ttft_i 存在且 dur_i > ttft_i)
- *   ? dur_i - ttft_i : dur_i`；`mode ∈ {turn_weighted, call_only, none}`，旧的
- *   `call_active_stream` / `call_fallback` / `turn_completed_aggregate` 三分叉已删除。
+ * 契约：`.dev-team/contract-matrix-token-speed-v2.md`（v2 取代 wave54 §1 C2 的速度定义）
+ * - §1 I1–I6：`valid` = `dur > 0 && out > 0`；`decode_eligible` = valid 且 ttft 存在且
+ *   `dur > ttft` 且 `out >= 2` 且 `gen >= max(200ms, 5% × dur)`；
+ *   轮级 `speed = Σ(out−1) / (Σgen / 1000)`（`basis = stream_decode`），
+ *   无 eligible 时回退 `Σout / (Σdur / 1000)`（`basis = end_to_end`），两者皆无 ⇒ `null`（I6，禁止 0 占位）。
+ *   `mode ∈ {turn_weighted, call_only, none}` 表示**聚合范围**；`basis` 表示**测的是什么**（不同域）。
  * - §1 C4：「输入」位取值序 `contextInputTokens` → `resolveCurrentContextInputTokens()` → `—`。
  * - §4：`resolveTurnWeightedSpeedDetail` 为唯一速度解析器；旧导出仅为薄委托别名。
  * - §5 歧义裁决：末次调用取 `contextInputTokens`（缺失回退该记录 inputTokens）；
@@ -12,14 +14,15 @@
  *   `ttft>dur` 退化 `gen=dur`。
  *
  * 兼容：`tests/acceptance/wave15/*` 与既有回归测试仍消费 `countTurnProviderCalls` /
- * `resolveCurrentContextInputTokens` / `resolveCallGenerationSpeed`，语义保持不变
- * （`resolveCallGenerationSpeed` 即 C2 的 per-call 分量公式 out_i/gen_i）。
+ * `resolveCurrentContextInputTokens`（语义不变）；`resolveCallGenerationSpeed` 只保留旧签名，
+ * 数值已收敛到 I8（= `resolveCallSpeedDetail(record).speed`），不再有独立的 per-call 公式。
  */
 import { canonicalTraceTimelineKind } from "@/lib/runtime/trace-projection";
 import type {
   ProviderCallCacheRecord,
   TraceTimelineEntry,
   TurnMetricsSnapshot,
+  TurnSpeedBasis,
   TurnTraceRecord
 } from "@/types/runtime";
 
@@ -150,11 +153,16 @@ export function resolveLastCallCacheInputTokens(
 }
 
 /**
- * 单次调用生成速度（C2 per-call 分量）：`out_i / (gen_i / 1000)`。
+ * 单次调用速度（**数值兼容别名**，语义已随速度口径 v2 收敛到 I8）：
+ * 等价于 `resolveCallSpeedDetail(record).speed` ——
+ * decode_eligible ⇒ `(out − 1) / (gen / 1000)`；有效但不可解码 ⇒ `out / (dur / 1000)`；
+ * 无效（`dur <= 0` 或 `out <= 0`）⇒ null。
  *
- * 守卫：`duration <= 0` 或 `output == null` → null；返回前必须 `Number.isFinite`。
- * TTFT 门控（wave-15 §7.2）：仅 `latencyKind === "provider_stream"` 时参与抵扣；
- * `duration <= ttft` 时退化为不抵扣。
+ * 旧实现（`out_i / gen_i`、无物理下限、仅 `provider_stream` 抵扣 TTFT）已删除：
+ * 它会把突发包（`gen ≈ 1ms`）放大到百万级 t/s，是 I9 禁止的第二种 per-call 公式。
+ *
+ * @deprecated 速度口径 v2（ADR 0073）：新消费面请用 `resolveCallSpeedDetail`
+ * 取 `{ speed, basis }`（basis 自描述口径）；本函数只保留「数值 + null」旧签名。
  */
 export function resolveCallGenerationSpeed(
   record: ProviderCallCacheRecord | null | undefined
@@ -162,46 +170,32 @@ export function resolveCallGenerationSpeed(
   if (!record) {
     return null;
   }
-
-  const outputTokens = record.outputTokens;
-  const durationMs = record.turnDurationMs;
-  if (outputTokens == null || durationMs == null || !(durationMs > 0)) {
-    return null;
-  }
-
-  let generationMs = durationMs;
-  if (record.latencyKind === "provider_stream") {
-    const firstTokenLatencyMs = record.firstTokenLatencyMs;
-    if (firstTokenLatencyMs != null && durationMs - firstTokenLatencyMs > 0) {
-      generationMs = durationMs - firstTokenLatencyMs;
-    }
-  }
-
-  const speed = outputTokens / (generationMs / 1000);
-  if (!Number.isFinite(speed) || speed < 0) {
-    return null;
-  }
-  return speed;
+  return resolveCallSpeedDetail(componentFromRecord(record)).speed;
 }
 
-/** C2 单口径计算模式（旧三分叉已删除）。 */
+/** 聚合范围（`turn_weighted` = 轮级加权；`call_only` = 当前单调用；`none` = 无值）。 */
 export type TokenSpeedCalculationMode = "turn_weighted" | "call_only" | "none";
 
-/** C6 速度位 `data-speed-basis` 取值（与 mode 同域）。 */
-export type TokenSpeedBasis = "turn_weighted" | "call_only" | "none";
+/**
+ * C6 速度位 `data-speed-basis` 取值（I10：**测的是什么**，与 `mode` 的聚合范围不同域）。
+ * - `stream_decode` = 解码窗口口径 `Σ(out−1) / Σgen`（可比）；
+ * - `end_to_end` = 端到端口径 `Σout / Σdur`（含排队与 prefill，不可与前直接比较）；
+ * - `none` = 无值（禁止 0 占位）。
+ */
+export type TokenSpeedBasis = TurnSpeedBasis;
 
 /** §4 冻结 API 的返回结构。 */
 export interface TurnWeightedSpeedDetail {
   speed: number | null;
   mode: TokenSpeedCalculationMode;
   basis: TokenSpeedBasis;
-  /** 参与计算的已完成调用数。 */
+  /** 参与计算集合的调用数（I7：`stream_decode` ⇒ |eligible|；`end_to_end` ⇒ |valid|）。 */
   calls: number;
-  /** Σout（有效调用）。 */
+  /** 参与计算集合的 Σout（I7）。 */
   outputTokens: number | null;
-  /** Σgen（有效调用，毫秒）。 */
+  /** 分母时长（毫秒，I7）：`stream_decode` ⇒ Σgen；`end_to_end` ⇒ Σdur。 */
   genMs: number | null;
-  /** Σdur（有效调用，毫秒）——C6 调试串 `dur` 位。 */
+  /** 参与计算集合的 Σdur（毫秒）——C6 调试串 `dur` 位。 */
   durationMs: number | null;
   /** 末次已完成调用的上下文输入（C4 归一值，缺失回退 per-call input）。 */
   inputTokens: number | null;
@@ -228,6 +222,16 @@ interface CallComponent {
   origin: string | null;
   /** 条目态（record 来源恒 null）：`active`/`running` 表示调用尚未完成。 */
   state: string | null;
+}
+
+/**
+ * 速度判据所需的最小结构（I1/I3）：`CallComponent` 天然满足；展示层 per-hop 样本可直接
+ * 构造该结构复用判据与公式，禁止各自复写（I9）。
+ */
+export interface CallSpeedSample {
+  outputTokens: number;
+  durationMs: number;
+  firstTokenLatencyMs: number | null;
 }
 
 function componentFromRecord(record: ProviderCallCacheRecord): CallComponent {
@@ -278,17 +282,87 @@ function isActiveCallComponent(component: CallComponent): boolean {
   return component.state != null && component.state !== "completed";
 }
 
-/** C2 `gen_i`：ttft 存在且 dur > ttft ⇒ dur - ttft；否则 dur。 */
-function generationMsOf(component: CallComponent): number {
+/** I2 `gen(r)`：ttft 存在且 dur > ttft ⇒ dur − ttft；否则 dur（ttft > dur 畸形不出负值）。 */
+function generationMsOf(component: CallSpeedSample): number {
   if (component.firstTokenLatencyMs != null && component.durationMs > component.firstTokenLatencyMs) {
     return component.durationMs - component.firstTokenLatencyMs;
   }
   return component.durationMs;
 }
 
-/** 有效调用：dur > 0 且 out > 0（§5 裁决 3：只累计有效调用）。 */
-function isCountableCall(component: CallComponent): boolean {
-  return component.durationMs > 0 && component.outputTokens > 0;
+/** I3 解码下限：绝对下限（毫秒）。 */
+export const DECODE_FLOOR_MIN_MS = 200;
+
+/** I3 解码下限：相对下限（`5% × dur`）。 */
+export const DECODE_FLOOR_RATIO = 0.05;
+
+/**
+ * I3 物理下限 `max(200ms, 5% × dur)`。
+ *
+ * 与 Rust `turn_flow::decode_floor_ms` 同式：Rust 侧为整数运算 `dur * 5 / 100`，
+ * 此处用 `Math.floor` 对齐截断，避免浮点边界（如 `20000 * 0.05`）产生分歧。
+ */
+export function decodeFloorMs(durationMs: number): number {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return DECODE_FLOOR_MIN_MS;
+  }
+  return Math.max(DECODE_FLOOR_MIN_MS, Math.floor(durationMs * DECODE_FLOOR_RATIO));
+}
+
+/** I1 有效调用判据：`dur > 0 && out > 0`（无效记录不参与速度计算，也不计入 calls）。 */
+function isValidCall(sample: CallSpeedSample): boolean {
+  return sample.durationMs > 0 && sample.outputTokens > 0;
+}
+
+/**
+ * I3 解码样本判据（**唯一实现**，展示层与聚合层禁止再写一份）：
+ * `valid && ttft 存在 && dur > ttft && out >= 2 && gen >= max(200ms, 5% × dur)`。
+ */
+export function isDecodeEligible(component: CallSpeedSample): boolean {
+  if (!isValidCall(component)) {
+    return false;
+  }
+  const firstTokenLatencyMs = component.firstTokenLatencyMs;
+  if (firstTokenLatencyMs == null || !(component.durationMs > firstTokenLatencyMs)) {
+    return false;
+  }
+  if (component.outputTokens < 2) {
+    return false;
+  }
+  return generationMsOf(component) >= decodeFloorMs(component.durationMs);
+}
+
+/** 单调用速度结果（I8）：`basis` 自描述口径。 */
+export interface CallSpeedDetail {
+  speed: number | null;
+  basis: TokenSpeedBasis;
+}
+
+/**
+ * I8 单调用速度（**唯一实现**）：
+ * `decode_eligible ⇒ (out − 1) / (gen / 1000)`；有效但不可解码 ⇒ `out / (dur / 1000)`；
+ * 其余 ⇒ `{ speed: null, basis: "none" }`。`speed` 必须有限且 > 0，否则降级。
+ */
+export function resolveCallSpeedDetail(sample: CallSpeedSample | null | undefined): CallSpeedDetail {
+  if (!sample) {
+    return { speed: null, basis: "none" };
+  }
+
+  if (isDecodeEligible(sample)) {
+    const speed = (sample.outputTokens - 1) / (generationMsOf(sample) / 1000);
+    if (Number.isFinite(speed) && speed > 0) {
+      return { speed, basis: "stream_decode" };
+    }
+  }
+
+  if (isValidCall(sample)) {
+    const speed = sample.outputTokens / (sample.durationMs / 1000);
+    if (Number.isFinite(speed) && speed > 0) {
+      return { speed, basis: "end_to_end" };
+    }
+  }
+
+  return { speed: null, basis: "none" };
 }
 
 function emptyDetail(): TurnWeightedSpeedDetail {
@@ -334,20 +408,15 @@ function resolveAggregateOrigin(
   return null;
 }
 
-function resolveComponentSpeed(component: CallComponent): number | null {
-  if (!(component.durationMs > 0) || component.outputTokens <= 0) {
-    return null;
-  }
-  const speed = component.outputTokens / (generationMsOf(component) / 1000);
-  return Number.isFinite(speed) && speed > 0 ? speed : null;
-}
-
 /**
- * §4 冻结 API：turn 加权生成速度（C2 唯一口径）。
+ * §4 冻结 API：轮级速度（速度口径 v2 唯一解析器，I4 → I5 → I6）。
  *
- * - `turn_weighted`：`calls >= 1` 且 `Σgen > 0` 且 `Σout > 0` ⇒ `speed = Σout / (Σgen / 1000)`；
- * - `call_only`：`calls === 0` 且轮次活跃且存在可用的当前调用 per-call 值；
- * - `none`：其余（`speed = null`）。
+ * - `turn_weighted` + `basis = stream_decode`：存在 >=1 条 decode_eligible 记录 ⇒
+ *   `speed = Σ_eligible(out − 1) / (Σ_eligible gen / 1000)`；`calls/outputTokens/genMs` 为 eligible 集合；
+ * - `turn_weighted` + `basis = end_to_end`：无 eligible 但有 >=1 条 valid 记录 ⇒
+ *   `speed = Σ_valid out / (Σ_valid dur / 1000)`；`calls/outputTokens/genMs` 为 valid 集合；
+ * - `call_only`：无已完成有效调用且轮次活跃 ⇒ I8 单调用口径（eligible ⇒ 解码速度，否则端到端）；
+ * - `none`：其余（`speed = null`，禁止 0 占位）。
  */
 export function resolveTurnWeightedSpeedDetail(
   turn: TurnTraceRecord | null | undefined,
@@ -376,12 +445,16 @@ export function resolveTurnWeightedSpeedDetail(
     : isActive
       ? []
       : timelineComponents;
-  const countable = completedComponents.filter(isCountableCall);
+  const validCalls = completedComponents.filter(isValidCall);
+  const decodeEligible = validCalls.filter(isDecodeEligible);
+  // I7：`calls / outputTokens / genMs / durationMs` 均为**参与计算集合**
+  // （decode ⇒ eligible 集合；e2e ⇒ valid 集合）。禁止一次 Σ 混两种口径。
+  const participants = decodeEligible.length > 0 ? decodeEligible : validCalls;
 
   let sumOutput = 0;
   let sumGenerationMs = 0;
   let sumDurationMs = 0;
-  for (const component of countable) {
+  for (const component of participants) {
     sumOutput += component.outputTokens;
     sumGenerationMs += generationMsOf(component);
     sumDurationMs += component.durationMs;
@@ -406,14 +479,15 @@ export function resolveTurnWeightedSpeedDetail(
 
   const origin = resolveAggregateOrigin(completedComponents, turn);
 
-  if (countable.length >= 1 && sumGenerationMs > 0 && sumOutput > 0) {
-    const speed = sumOutput / (sumGenerationMs / 1000);
+  // I4 解码口径：分子扣 1（首 token 已计入 TTFT），分母只含真实解码窗口。
+  if (decodeEligible.length >= 1 && sumGenerationMs > 0 && sumOutput > 0) {
+    const speed = (sumOutput - decodeEligible.length) / (sumGenerationMs / 1000);
     if (Number.isFinite(speed) && speed > 0) {
       return {
         speed,
         mode: "turn_weighted",
-        basis: "turn_weighted",
-        calls: countable.length,
+        basis: "stream_decode",
+        calls: decodeEligible.length,
         outputTokens: sumOutput,
         genMs: sumGenerationMs,
         durationMs: sumDurationMs,
@@ -425,18 +499,42 @@ export function resolveTurnWeightedSpeedDetail(
     }
   }
 
-  // call_only（§4 / BLOCKING 7）：`calls === 0` 且存在「活跃调用」的 per-call 值
-  // ⇒ speed = out/(dur−ttft|dur)，`calls` 仍为 0（该调用尚未完成，不被计为已完成分量）。
-  if (countable.length === 0 && isActive && activeCallCandidate) {
-    const componentSpeed = resolveComponentSpeed(activeCallCandidate);
-    if (componentSpeed != null) {
+  // I5 端到端回退：无 decode_eligible 但有 valid 记录 ⇒ 分母为 Σdur（I7：genMs = Σdur）。
+  if (validCalls.length >= 1 && sumDurationMs > 0 && sumOutput > 0) {
+    const speed = sumOutput / (sumDurationMs / 1000);
+    if (Number.isFinite(speed) && speed > 0) {
       return {
-        speed: componentSpeed,
+        speed,
+        mode: "turn_weighted",
+        basis: "end_to_end",
+        calls: validCalls.length,
+        outputTokens: sumOutput,
+        genMs: sumDurationMs,
+        durationMs: sumDurationMs,
+        inputTokens,
+        cacheInputTokens,
+        ttftMs: firstTtft,
+        origin,
+      };
+    }
+  }
+
+  // call_only（§4 / BLOCKING 7）：`calls === 0` 且存在「活跃调用」的 per-call 值
+  // ⇒ I8 单调用口径（eligible ⇒ 解码速度，否则端到端）；`calls` 仍为 0（该调用尚未完成，
+  // 不被计为已完成分量），`genMs` 随 basis 取 gen / dur（与 I7 同一语义位）。
+  if (validCalls.length === 0 && isActive && activeCallCandidate) {
+    const callSpeed = resolveCallSpeedDetail(activeCallCandidate);
+    if (callSpeed.speed != null) {
+      return {
+        speed: callSpeed.speed,
         mode: "call_only",
-        basis: "call_only",
+        basis: callSpeed.basis,
         calls: 0,
         outputTokens: activeCallCandidate.outputTokens,
-        genMs: generationMsOf(activeCallCandidate),
+        genMs:
+          callSpeed.basis === "stream_decode"
+            ? generationMsOf(activeCallCandidate)
+            : activeCallCandidate.durationMs,
         durationMs: activeCallCandidate.durationMs,
         inputTokens: activeCallCandidate.contextInputTokens ?? activeCallCandidate.inputTokens ?? inputTokens,
         cacheInputTokens: activeCallCandidate.cacheInputTokens ?? cacheInputTokens,
@@ -469,7 +567,7 @@ function pickActiveCallCandidate(
 
   for (let i = timelineComponents.length - 1; i >= 0; i--) {
     const component = timelineComponents[i]!;
-    if (isActiveCallComponent(component) && isCountableCall(component)) {
+    if (isActiveCallComponent(component) && isValidCall(component)) {
       return component;
     }
   }
@@ -598,6 +696,8 @@ export interface MetricsSnapshotDisplay {
   contextTokens: number | null;
   contextWindow: number | null;
   speed: number | null;
+  /** 速度口径（I10）：直取 `turnSpeedBasis`，缺失 ⇒ null（禁止当 `stream_decode` 用）。 */
+  speedBasis: TokenSpeedBasis | null;
   ttftMs: number | null;
   cacheRatioPercent: string;
   contextPercent: number | null;
@@ -635,6 +735,7 @@ export function resolveMetricsSnapshotDisplay(
     contextTokens: finiteNumberOrNull(source?.contextInputTokens),
     contextWindow: finiteNumberOrNull(source?.contextWindowTokens),
     speed: finiteNumberOrNull(source?.turnSpeedTokensPerSecond),
+    speedBasis: source?.turnSpeedBasis ?? null,
     ttftMs: finiteNumberOrNull(source?.firstTokenLatencyMs),
     cacheRatioPercent: cacheHitRatio == null ? "" : `${Math.round(cacheHitRatio * 100)}%`,
     contextPercent: contextRatio == null ? null : Math.round(contextRatio * 100),

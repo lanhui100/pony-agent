@@ -351,6 +351,14 @@ export type ConversationCarryMode =
 export type ProviderRequestKind = "initial_request" | "tool_followup";
 export type ProviderLatencyKind = "provider_stream" | "buffered_response" | "unknown";
 
+/**
+ * 速度口径标记（`.dev-team/contract-matrix-token-speed-v2.md` I10）：描述**测的是什么**。
+ * - `stream_decode`：解码窗口口径 `Σ(out−1) / Σgen`（可比）；
+ * - `end_to_end`：端到端口径 `Σout / Σdur`（含排队与 prefill，不可与前直接比较）；
+ * - `none`：无值哨兵（wire 上缺席 ⇔ 无值，禁止 0 占位）。
+ */
+export type TurnSpeedBasis = "stream_decode" | "end_to_end" | "none";
+
 export type ProviderCallCacheRecord = {
   requestKind: ProviderRequestKind;
   providerSource?: string | null;
@@ -1137,13 +1145,17 @@ export interface TurnMetricsSnapshot {
   firstTokenLatencyMs: number | null;
   durationMs: number | null;
   callSpeedTokensPerSecond: number | null;
-  /** 与 `weighted_turn_speed` 同源（I5）。 */
+  /** 单调用速度口径（I8/I10）；wire 缺席 ⇔ 无值。 */
+  callSpeedBasis?: TurnSpeedBasis | null;
+  /** 与 Rust `weighted_turn_speed` 同源（I4/I5）。 */
   turnSpeedTokensPerSecond: number | null;
-  /** 轮累计输出（有效调用 Σ）。 */
+  /** 轮级速度口径（I10）：`stream_decode` | `end_to_end`；缺席 ⇔ 无 speed。 */
+  turnSpeedBasis?: TurnSpeedBasis | null;
+  /** 轮累计输出（**参与计算集合** Σout，I7）。 */
   turnOutputTokens: number;
-  /** 轮累计生成时长（毫秒）。 */
+  /** 轮累计时长（毫秒，**参与计算集合**）：`stream_decode` ⇒ Σgen；`end_to_end` ⇒ Σdur（I7）。 */
   turnGenerationMs: number;
-  /** 有效调用数。 */
+  /** 参与计算的调用数（I7：`stream_decode` ⇒ |eligible|；`end_to_end` ⇒ |valid|）。 */
   turnCalls: number;
   /** `0..=1` 单位分数（I2）。 */
   cacheHitRatio: number | null;

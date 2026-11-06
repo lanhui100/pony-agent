@@ -19,6 +19,7 @@
 
 use pony_agent_core::agent::metrics_snapshot::TurnMetricsSnapshot;
 use pony_agent_core::agent::runtime::{TurnInput, TurnResult, TurnStreamEvent};
+use pony_agent_core::agent::turn_flow::TurnSpeedBasis;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -90,10 +91,11 @@ fn turn_stream_event_sample() -> Value {
     serde_json::to_value(&event).expect("TurnStreamEvent must serialize")
 }
 
-/// `TurnMetricsSnapshot` 的代表性样本：22 个字段全部给固定字面量。
+/// `TurnMetricsSnapshot` 的代表性样本：24 个字段全部给固定字面量。
 ///
 /// 禁止 `Default::default()`：那会让全部 `Option` 退化为 `None`，与真实线缆形状不符
-/// （本类型的字段均无 `skip_serializing_if`，键不会缺席，但值必须真实可断言）。
+/// （token 速度口径 v2 的 `callSpeedBasis` / `turnSpeedBasis` 带
+/// `skip_serializing_if = "Option::is_none"`，只有填 `Some` 才真正上线缆）。
 fn turn_metrics_snapshot_sample() -> TurnMetricsSnapshot {
     TurnMetricsSnapshot {
         step: 1,
@@ -107,7 +109,9 @@ fn turn_metrics_snapshot_sample() -> TurnMetricsSnapshot {
         first_token_latency_ms: Some(320),
         duration_ms: Some(2_400),
         call_speed_tokens_per_second: Some(721.15),
+        call_speed_basis: Some(TurnSpeedBasis::StreamDecode),
         turn_speed_tokens_per_second: Some(689.32),
+        turn_speed_basis: Some(TurnSpeedBasis::StreamDecode),
         turn_output_tokens: 1_500,
         turn_generation_ms: 2_176,
         turn_calls: 1,

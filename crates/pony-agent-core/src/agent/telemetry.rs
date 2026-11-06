@@ -17,7 +17,15 @@ fn truncate_tool_result_text(text: String) -> String {
         return text;
     }
     let mut truncated = text;
-    truncated.truncate(TOOL_RESULT_TEXT_MAX_CHARS);
+    // `String::truncate` 要求切线落在 UTF-8 字符边界上，否则 panic
+    // （assertion failed: self.is_char_boundary(new_len)）。工具结果里中文/emoji 很常见，
+    // 按字节直切必然会在 3 字节字符中间翻车，并把整轮 turn 线程带崩
+    // （用户侧只看到“本轮请求未能完成”）。故先回退到最近的字界再切。
+    let mut cut = TOOL_RESULT_TEXT_MAX_CHARS;
+    while cut > 0 && !truncated.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    truncated.truncate(cut);
     truncated.push_str("\n...[truncated by pony-agent]");
     truncated
 }
@@ -894,6 +902,20 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("resultCount"));
+    }
+
+    #[test]
+    fn multibyte_tool_result_text_truncates_on_char_boundary() {
+        // 回归：旧实现按字节直切，多字节字符（中文/emoji）会让 String::truncate
+        // 触发 is_char_boundary 断言 ⇒ 整轮 turn 线程 panic ⇒ 用户只看到“本轮请求未能完成”。
+        let text = "中".repeat(TOOL_RESULT_TEXT_MAX_CHARS / 3 + 2);
+        let truncated = truncate_tool_result_text(text);
+        const MARKER: &str = "\n...[truncated by pony-agent]";
+        assert!(truncated.ends_with(MARKER), "超限结果必须追加截断标记");
+        let body_len = truncated.len() - MARKER.len();
+        assert!(body_len <= TOOL_RESULT_TEXT_MAX_CHARS, "截断体不得超过预算");
+        assert!(truncated.is_char_boundary(body_len), "切线必须落在字符边界");
+        assert!(body_len > TOOL_RESULT_TEXT_MAX_CHARS - 4, "只允许为字界回退少量字节");
     }
 
     #[test]

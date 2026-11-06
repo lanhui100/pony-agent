@@ -9,7 +9,7 @@ import type { ProviderCallCacheRecord, TurnTraceRecord } from "@/types/runtime";
 
 describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
   describe("1. S3 速度双模计算契约 (L2-T)", () => {
-    it("模式 A：生成中/活跃调用存在时，优先按最近一次调用计算生成速度 (output / (duration - TTFT))", () => {
+    it("模式 A：生成中/活跃调用存在时，优先按最近一次调用计算生成速度 ((output − 1) / (duration − TTFT))", () => {
       const record: ProviderCallCacheRecord = {
         requestKind: "initial_request",
         providerSource: "primary",
@@ -22,13 +22,15 @@ describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
       };
 
       const speed = resolveCallGenerationSpeed(record);
-      // 100 tokens / 1.0s = 100 tokens/s
-      expect(speed).toBeCloseTo(100, 2);
+      // 速度口径 v2（ADR 0073 / I8）：gen=1000 ≥ floor(200) ⇒ (100 − 1) / 1.0s = 99 tokens/s
+      // （旧口径 out/gen = 100 已废止：首 token 已计入 TTFT）
+      expect(speed).toBeCloseTo(99, 2);
+      expect(speed).not.toBeCloseTo(100, 2);
     });
 
     // wave-54 契约演进（ADR 0053）：整轮聚合口径（turn.outputTokens / turn.turnDurationMs）作废，
     // 终态轮同样走 C2 唯一口径 Σout / Σgen（gen = dur − ttft）。
-    it("模式 B：轮次完成（isSubmitting=false 或处于终态）时，速度计算为 turn 加权口径 250/((2500−500)/1000) = 125 t/s", () => {
+    it("模式 B：轮次完成（isSubmitting=false 或处于终态）时，速度计算为解码口径 (250−1)/((2500−500)/1000) = 124.5 t/s", () => {
       const completedTurn: TurnTraceRecord = {
         turnId: "turn-completed-1",
         status: "completed",
@@ -51,8 +53,10 @@ describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
 
       // 处于终态 (isSubmitting = false)
       const speed = resolveTurnGenerationSpeed(completedTurn, { isSubmitting: false });
-      // wave-54 C2：Σgen = 2500 − 500 = 2000ms ⇒ 250 / 2.0s = 125 t/s（不再是整轮 250/2.5 = 100）
-      expect(speed).toBeCloseTo(125, 2);
+      // 速度口径 v2（ADR 0073）：Σgen = 2500 − 500 = 2000ms，分子扣 1（首 token 已计入 TTFT）
+      // ⇒ (250 − 1) / 2.0s = 124.5 t/s（旧口径 250/2.0 = 125 已废止）。
+      expect(speed).toBeCloseTo(124.5, 2);
+      expect(speed).not.toBeCloseTo(125, 2);
       expect(speed).not.toBeCloseTo(100, 2);
     });
 
@@ -72,13 +76,13 @@ describe("Token Speed & Context Usage Metrics Suite (task-7)", () => {
             inputTokens: 3000,
             outputTokens: 150,
             turnDurationMs: 2000,
-            firstTokenLatencyMs: 500, // 2000 - 500 = 1500ms = 1.5s -> 150 / 1.5 = 100 t/s
+            firstTokenLatencyMs: 500, // 2000 - 500 = 1500ms = 1.5s -> (150-1) / 1.5 ≈ 99.333 t/s
           },
         ],
       };
 
       const speed = resolveTurnGenerationSpeed(activeTurn, { isSubmitting: true });
-      expect(speed).toBeCloseTo(100, 2);
+      expect(speed).toBeCloseTo(149 / 1.5, 2);
     });
   });
 
