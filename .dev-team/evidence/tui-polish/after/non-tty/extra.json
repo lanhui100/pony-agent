@@ -1,0 +1,6 @@
+{
+  "output_file": "nontty.out",
+  "exit_code": 1,
+  "runtime_log": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/contrast/tui-runtime.log",
+  "runtime_log_offset": 0
+}

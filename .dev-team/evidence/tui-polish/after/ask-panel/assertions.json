@@ -1,0 +1,85 @@
+{
+  "scenario": "ask-panel",
+  "pass": 11,
+  "fail": 0,
+  "skipped": 0,
+  "checks": [
+    {
+      "id": "panel.no_panic",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-panel/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
+    },
+    {
+      "id": "panel.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "panel.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "status": "pass",
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent gemini-3.8-flash"
+    },
+    {
+      "id": "panel.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "panel.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-panel/panel.ansi size=2700"
+    },
+    {
+      "id": "panel.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/ask-panel/panel.png size=160349"
+    },
+    {
+      "id": "ask.panel_visible",
+      "desc": "ask panel shows the question, at least one option and the key hint",
+      "ok": true,
+      "status": "pass",
+      "evidence": "◇ 提问 架构与模块选择 请选择本次交付的执行架构与部署策略："
+    },
+    {
+      "id": "ask.custom_input_hint",
+      "desc": "ask panel offers the free-text (custom input) row",
+      "ok": true,
+      "status": "pass",
+      "evidence": "> 自定义输入…"
+    },
+    {
+      "id": "ask.option_navigation",
+      "desc": "Down moves the focus marker from the first to the second option",
+      "ok": true,
+      "status": "pass",
+      "evidence": "before='▌ ● 单体轻量架构 (Standalone) 快速轻量启动，无需外部服务依赖' after='▌ ● 微服务分布式架构 (Microservices) 高可用集群部署，支持横向弹性扩展'"
+    },
+    {
+      "id": "ask.submit_closes_panel",
+      "desc": "Enter submits and closes the panel (question/hints gone)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "panel closed"
+    },
+    {
+      "id": "ask.not_reopened_after_5s",
+      "desc": "panel stays closed 5s after submit (no re-poll reopen)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "still closed after 5s"
+    }
+  ]
+}

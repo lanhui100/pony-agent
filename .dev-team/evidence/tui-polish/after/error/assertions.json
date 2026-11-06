@@ -1,0 +1,106 @@
+{
+  "scenario": "error",
+  "pass": 14,
+  "fail": 0,
+  "skipped": 0,
+  "checks": [
+    {
+      "id": "main.no_panic",
+      "desc": "capture and tui runtime log (/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/tui-runtime.log from byte 0) contain no Rust panic/backtrace",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no panic tokens in capture or tui runtime log"
+    },
+    {
+      "id": "main.no_standalone_role_label",
+      "desc": "no standalone role label line \"你\" (role shown by material, not label)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no line equals \"你\""
+    },
+    {
+      "id": "main.within_terminal_width",
+      "desc": "every captured row display width <= 120 cols",
+      "ok": true,
+      "status": "pass",
+      "evidence": "widest row 0 width=117 cols=120 :: pony · pony-agent mock-alpha"
+    },
+    {
+      "id": "main.capture_rows",
+      "desc": "capture has exactly pane height rows (34)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "rows=34 pane_rows=34"
+    },
+    {
+      "id": "main.artifact_ansi",
+      "desc": "ansi artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.ansi size=2101"
+    },
+    {
+      "id": "main.artifact_png",
+      "desc": "png artifact exists for screenshot review",
+      "ok": true,
+      "status": "pass",
+      "evidence": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/error/main.png size=67625"
+    },
+    {
+      "id": "main.input_padded_from_left_edge",
+      "desc": "input prompt has left padding (>0 cols from terminal edge)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "row 31 prompt_col=3 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "main.input_placeholder",
+      "desc": "composer shows placeholder guidance when empty",
+      "ok": true,
+      "status": "pass",
+      "evidence": "row 31 :: › 写下任务，或输入 / 查看命令"
+    },
+    {
+      "id": "error.message_visible",
+      "desc": "provider 401 is surfaced as a visible error message",
+      "ok": true,
+      "status": "pass",
+      "evidence": "row 6 :: ✕ Error: {\"error\": {\"message\": \"mock 401 unauthorized: invalid api key (audit scenario)\", \"type\": \"invalid_request"
+    },
+    {
+      "id": "error.error_glyph",
+      "desc": "error row carries the failure glyph",
+      "ok": true,
+      "status": "pass",
+      "evidence": "row 6 :: ✕ Error: {\"error\": {\"message\": \"mock 401 unauthorized: invalid api key (audit scenario)\", \"type\": \"invalid_request"
+    },
+    {
+      "id": "error.reason_included",
+      "desc": "error text names the 401/unauthorized cause",
+      "ok": true,
+      "status": "pass",
+      "evidence": "▌ 401 认证测试"
+    },
+    {
+      "id": "error.footer_metrics",
+      "desc": "footer stays the metrics row during a failed turn (no usage -> 上下文 only; failure in transcript)",
+      "ok": true,
+      "status": "pass",
+      "evidence": "footer :: /home/dm/pony-agent 上下文 0%"
+    },
+    {
+      "id": "error.no_fake_answer",
+      "desc": "no assistant answer is fabricated for the failed turn",
+      "ok": true,
+      "status": "pass",
+      "evidence": "no 结论 row in failed capture"
+    },
+    {
+      "id": "error.mock_401_receipt",
+      "desc": "mock receipt proves the 401 scenario was requested",
+      "ok": true,
+      "status": "pass",
+      "evidence": "scenarios=['401', '401']"
+    }
+  ]
+}

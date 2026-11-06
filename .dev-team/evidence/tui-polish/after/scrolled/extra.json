@@ -1,0 +1,5 @@
+{
+  "mock_log": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/mock-requests.jsonl",
+  "runtime_log": "/home/dm/pony-agent/.dev-team/evidence/tui-polish/after/scrolled/tui-runtime.log",
+  "runtime_log_offset": 0
+}
