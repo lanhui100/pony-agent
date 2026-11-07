@@ -1,0 +1,214 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "join-cli-update-subagent",
+    "fresh_context": true,
+    "lens": "join-独立汇总：收据一致性 + BLOCKING 闭合复核 + 写域闭合"
+  },
+  "executed_by": "join-cli-update-subagent",
+  "reviewed_commit": "3236d331",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "独立汇总：逐条回读四份收据 + 亲自复核 4 条 BLOCKING 闭合 + 写域闭合核验"
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/updater.rs",
+    "crates/pony-agent-core/src/agent/mod.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/tests/slash_commands_acceptance.rs",
+    ".github/workflows/release.yml",
+    "docs/decisions/0087-cli-self-update.md",
+    "docs/decisions/README.md",
+    "docs/observability.yaml",
+    ".agents/notes/implemented/feature/2026-11-07-cli-self-update.md",
+    ".dev-team/contract-matrix-cli-self-update.md",
+    ".dev-team/e2e-receipt-cli-self-update.txt",
+    ".dev-team/red-phase-cli-self-update.txt",
+    ".dev-team/nfr-baseline-wave67.json",
+    ".dev-team/regression-baseline-wave67.json",
+    ".dev-team/explore-cli-surface.md",
+    ".dev-team/explore-http-substrate.md",
+    ".dev-team/explore-release-pipeline.md",
+    ".dev-team/review-l3a-cli-update-raw.json",
+    ".dev-team/review-l3b-cli-update-raw.json",
+    ".dev-team/review-l3p-cli-update-raw.json"
+  ],
+  "write_domain_closure": {
+    "range": "67e656c9..3236d331",
+    "changed_files": 19,
+    "covered_by_component_receipts": [
+      "crates/pony-agent-core/src/agent/updater.rs (l3a/l3b/l3p/rereview)",
+      "crates/pony-agent-core/src/bin/tui.rs (l3a/l3b/l3p/rereview)",
+      "crates/pony-agent-core/tests/slash_commands_acceptance.rs (l3b/rereview)",
+      ".github/workflows/release.yml (l3b)",
+      "docs/decisions/0087-cli-self-update.md (l3b/l3p/rereview)",
+      "docs/decisions/README.md (l3b)",
+      "docs/observability.yaml (l3b/l3p/rereview)",
+      ".agents/notes/implemented/feature/2026-11-07-cli-self-update.md (l3b)"
+    ],
+    "accounting_only": [
+      ".dev-team/contract-matrix-cli-self-update.md",
+      ".dev-team/e2e-receipt-cli-self-update.txt",
+      ".dev-team/red-phase-cli-self-update.txt",
+      ".dev-team/nfr-baseline-wave67.json",
+      ".dev-team/regression-baseline-wave67.json",
+      ".dev-team/explore-cli-surface.md",
+      ".dev-team/explore-http-substrate.md",
+      ".dev-team/explore-release-pipeline.md",
+      ".dev-team/review-l3a-cli-update-raw.json",
+      ".dev-team/review-l3b-cli-update-raw.json",
+      ".dev-team/review-l3p-cli-update-raw.json"
+    ],
+    "uncovered_substantive_files": [],
+    "note": "19 个变更文件全部闭合：8 个实质交付文件各有至少一份组件收据 audited_scopes 覆盖，11 个 .dev-team/* 属记账。唯一未在四份收据里**逐字点名**的实质文件是 crates/pony-agent-core/src/agent/updater.rs 的模块注册点 crates/pony-agent-core/src/agent/mod.rs，实测 `git diff 67e656c9..3236d331 -- crates/pony-agent-core/src/agent/mod.rs` 仅 +1 行 `pub mod updater;`（无逻辑、被所有 updater 测试与三份收据的 updater.rs 审计隐式覆盖），故不计为未覆盖实质交付文件；本收据已亲自复核并纳入 audited_scopes。无 src-tauri/、无 team_history.rs 触碰。"
+  },
+  "component_reviews": [
+    {
+      "file": ".dev-team/review-l3a-cli-update.json",
+      "verdict": "PASS",
+      "blocking": 0,
+      "expected": "PASS / 3 ADVISORY",
+      "status": "核对一致：3 条 ADVISORY（锁无 stale 判定=已在 3236d331 修；.part 无 RAII 守卫=登记不修；verify_installed 无超时=已修）。其 reviewed_commit=f53476cd，三条均已被后续修复或显式登记。"
+    },
+    {
+      "file": ".dev-team/review-l3b-cli-update.json",
+      "verdict": "FAIL",
+      "blocking": 2,
+      "expected": "FAIL / 2 BLOCKING + 4 ADVISORY",
+      "status": "核对一致：2 BLOCKING（tui.rs:50 pub 面撤除导致 slash_commands_acceptance 不可编译；tui.rs:2112 /update 文案未落地）+ 4 ADVISORY（超限用例无区分力 / UnsupportedPlatform 未登记退出码 / release.yml 无 RUSTFLAGS / observability 日志落点声明错）。"
+    },
+    {
+      "file": ".dev-team/review-l3p-cli-update.json",
+      "verdict": "FAIL",
+      "blocking": 2,
+      "expected": "FAIL / 2 BLOCKING + 4 ADVISORY",
+      "status": "核对一致：2 BLOCKING（verify_installed 无 deadline，实测 exit 124；--pin 不隐含 force 导致 ADR 回滚口径不可执行，实测 exit 2）+ 4 ADVISORY（锁陈旧/回滚错误被 let _ 吞/observability 缺 trace_id 豁免//update 文案漂移/--help 自检入口缺失）。"
+    },
+    {
+      "file": ".dev-team/review-rereview-cli-update.json",
+      "verdict": "PASS",
+      "blocking": 0,
+      "expected": "PASS / 2 ADVISORY",
+      "status": "核对一致：reviewed_commit=3236d331；2 条 ADVISORY（回验超时只 kill 直接子进程、陈旧锁接管三步非原子）均属实且我独立回读代码确认仍未修（见本收据 findings[0][1]）。"
+    }
+  ],
+  "blocking_closure": [
+    {
+      "id": "B-a",
+      "item": "pub use 恢复 + slash_commands_acceptance 通过",
+      "verdict": "CLOSED",
+      "evidence": "tui.rs:53 = `pub use pony_agent_core::agent::updater::{is_newer_semver, parse_semver_triple};`；我亲自跑 `cargo test -p pony-agent-core --test slash_commands_acceptance` ⇒ `test result: ok. 69 passed; 0 failed`（f53476cd 上该 target 为 E0425×3+E0603×4 / EXIT=101）。"
+    },
+    {
+      "id": "B-b",
+      "item": "/update 文案含「本机升级（CLI 二进制）：pony update」且 perform_update_check 零改动",
+      "verdict": "CLOSED",
+      "evidence": "`grep -n 本机升级 crates/pony-agent-core/src/bin/tui.rs` ⇒ 2116 行 `- 本机升级（CLI 二进制）：pony update`（format_update_feedback 的 has_update 分支）；`git diff 67e656c9..3236d331 -- .../tui.rs | grep perform_update_check` ⇒ 零命中（该函数未被触碰）。ADR 0087:29-31 已同步为「保持只读 + 文案追加」，与实现一致。"
+    },
+    {
+      "id": "B-c",
+      "item": "verify_installed 有 10s deadline（try_wait 轮询 + kill）",
+      "verdict": "CLOSED",
+      "evidence": "updater.rs:1100 `const VERIFY_INSTALLED_TIMEOUT: Duration = Duration::from_secs(10);`；updater.rs:1102 `run_version_with_deadline`：spawn + `Instant::now()+VERIFY_INSTALLED_TIMEOUT` 循环 `child.try_wait()`（20ms 间隔），到期 `child.kill(); child.wait()` 后返回 Signature（超时走既有一致回滚路径，exit_code 1）；verify_installed 主体改为调用该 helper，不再有无 deadline 的 `Command::output()`。"
+    },
+    {
+      "id": "B-d",
+      "item": "--pin 仍不隐含 force，文案统一为 `--pin <版本> --force`",
+      "verdict": "CLOSED",
+      "evidence": "parse_cli_action 中 force 仅由 `--force` 置位（tui.rs:13045），plan_update 的 `is_downgrade && !force ⇒ Downgrade` 闸原样保留；updater.rs:183/189/195 三处文案与 ADR 0087:84-88 全部为 ``pony update --pin <版本> --force``，并明确「只给 --pin 仍会被降级闸拦下」。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 1123,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "evidence": "回验 deadline 只终止**直接子进程**：`child.kill(); child.wait()`（updater.rs:1123）不建 process group、不发 killpg。若新制品自身 fork（最小模型 `#!/bin/sh\\nsleep 600`），超时后孙进程被孤儿化并继续驻留（bystander 实测 PPID=1 存活）。直接子进程已 wait 回收、无 defunct，锁与临时文件按既有回滚路径清理，故仅列 ADVISORY；建议 setsid/process_group + killpg，或在 ADR 声明「deadline 只约束直接子进程」。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1119,1132p' crates/pony-agent-core/src/agent/updater.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 1180,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "evidence": "陈旧锁接管是「create 失败 → is_stale 读旧内容 → remove_file → create_new」三步非原子（updater.rs:1176-1199，无 rename 式 CAS）。A 判 stale 后删除、B 在 A create_new 成功后再次 remove_file，即可删掉 A 的**新鲜**锁并自建，两实例同时进入安装段。窗口极窄（仅陈旧锁 + 两实例毫秒级同启），且 .part/.old/.new 按 pid 唯一、安装为 rename 原子，最坏是重复下载/回滚竞态而非装坏；建议接管改为先 rename 到 `.stale-<pid>`（只有一方成功）再 create。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1176,1199p' crates/pony-agent-core/src/agent/updater.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 532,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "evidence": "`<exe>.part` 全生命周期依赖显式 `remove_file`（532 创建、546/558/567/575 清理），无 Drop/RAII 守卫（对比 UpdateLock Drop）；SIGTERM/SIGKILL 或下载期 panic 会漏半个包。危害有限：File::create 默认 0644 无可执行位、下次运行截断覆盖，只损失磁盘与目录洁净。AMEND-4 §9 已显式登记「不入本波」，故不阻断。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'part_path' crates/pony-agent-core/src/agent/updater.rs | sed -n '1,6p'; grep -c 'impl Drop for PartFile' crates/pony-agent-core/src/agent/updater.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 13059,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "自检入口仍缺：`pony update --help` 落到 Invalid 分支（仅提示 `仅支持 --check / --force / --pin <ver> / --json`，退出 2），`pony --help` 与 `.env.example` 都没有 update 子命令与 6 个 `PONY_UPDATE_*` 变量说明；AMEND-4 §9 已登记为后续条，不阻断本波。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '13055,13062p' crates/pony-agent-core/src/bin/tui.rs; grep -c PONY_UPDATE .env.example"
+    },
+    {
+      "file": ".dev-team/contract-matrix-cli-self-update.md",
+      "line": 63,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "evidence": "记账口径残留：C2 正文仍写「/update 改为复用 updater 的检查实现」，与 AMEND-4 §5 裁决（不复用、保持只读 + 文案追加）相反，也与 Adr 0087:29-31 相反。AMEND 已覆盖，但按 F 型阅读只读 C2 的实施者会被误导；建议在 C2 行内加「已被 AMEND-4 §5 取代」指针。属文档-记账漂移，不影响已发布行为。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '63p' .dev-team/contract-matrix-cli-self-update.md; grep -n '不复用' .dev-team/contract-matrix-cli-self-update.md"
+    }
+  ],
+  "closed_findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 50,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "original_evidence": "semver 迁移撤掉 tui::parse_semver_triple / tui::is_newer_semver 的 pub 面（改私有 use），既有验收 target crates/pony-agent-core/tests/slash_commands_acceptance.rs:795-802 编译失败 E0425×3 + E0603×4（--no-run EXIT=101，共 7 errors），契约 C1「tui.rs 既有测试保持通过」被打破。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && cargo test -p pony-agent-core --test slash_commands_acceptance 2>&1 | grep -E '^test result' | tail -1",
+      "resolution": "tui.rs:53 恢复 `pub use pony_agent_core::agent::updater::{is_newer_semver, parse_semver_triple};` 再导出；tests/slash_commands_acceptance.rs 的 CONTRACT_COMMANDS 同步为 14 条（仅 1 行 doc 注释 + 常量本体，未放宽断言）。",
+      "verified_by": "join-cli-update-subagent 实测：test result: ok. 69 passed; 0 failed（exit 0）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2116,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "original_evidence": "契约 C2:63、ADR 0087:28/77、note:23 三处声明「/update 文案追加一行『本机升级：pony update』」，实际 format_update_feedback（旧行号 :2112）仍为「源码开发环境：git pull && npm run cli:build / 桌面端：设置里一键升级」，`.rs` 内「本机升级」命中 0 —— 声明说了、代码没做。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n '本机升级' crates/pony-agent-core/src/bin/tui.rs",
+      "resolution": "tui.rs:2116 文案追加「- 本机升级（CLI 二进制）：pony update」；同时 Lead 裁决（AMEND-4 §5）改为「/update 保持只读、不复用 updater 检查口径」，ADR 0087:29-31 与 note 同步为该口径，perform_update_check 零改动（不再有「已声明未实现」的复用承诺）。",
+      "verified_by": "join-cli-update-subagent 实测：grep 命中 2116；`git diff 67e656c9..3236d331 -- .../tui.rs | grep perform_update_check` 零命中；cargo test --bin pony ⇒ ok. 54 passed"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 1102,
+      "rule": "TIMEOUT",
+      "severity": "BLOCKING",
+      "original_evidence": "verify_installed（旧行号 :1053-1054）用阻塞 `Command::output()` 跑新二进制，零 timeout/可杀路径；新产物不响应 `--version` 时在二进制已被替换之后无限挂起、锁不释放（L3-P 实机 mock `#!/bin/sh sleep 600`，25s 未退出 exit 124，锁残留）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'VERIFY_INSTALLED_TIMEOUT\\|try_wait' crates/pony-agent-core/src/agent/updater.rs",
+      "resolution": "新增 `run_version_with_deadline`（updater.rs:1102）+ `VERIFY_INSTALLED_TIMEOUT = 10s`（:1100）：spawn + try_wait 20ms 轮询，超时 `kill()+wait()` 后返回 Signature（走既有回滚路径、exit 1），verify_installed 主体改为调用它。",
+      "verified_by": "join-cli-update-subagent 读码逐行确认（1100/1102/1117/1119/1123/1133）；rereview 另附实机收据（10.14s 超时、原二进制 sha256 前后一致、目录无 .old/.part/.new/.lock）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 195,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "original_evidence": "ADR 0087 影响节与契约 C5 给出的唯一回滚口径 `pony update --pin <旧版本>` 不可执行：plan_update 对 candidate<current 一律 Downgrade 拒绝（旧 :312-319，pin 不隐含 force），错误文案（旧 :195）还把 `--pin` 写成降级替代路径，同被该闸拦住 —— 用户按 ADR 复制回滚命令必然 exit 2。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '195p' crates/pony-agent-core/src/agent/updater.rs; sed -n '84,88p' docs/decisions/0087-cli-self-update.md",
+      "resolution": "保留 safety 闸（parse_cli_action 中 force 仅由 --force 置位、plan_update 降级闸不变），把 ADR 0087:84-88、note、三处错误文案（updater.rs:183/189/195）统一为 ``pony update --pin <版本> --force``，并点明「只给 --pin 仍会被降级闸拦下」。",
+      "verified_by": "join-cli-update-subagent 实测：grep 三处文案与 ADR 一致；plan_update 降级闸 diff 中仍为 `is_downgrade && !force ⇒ Downgrade`；rereview 实机 --pin exit=2 / --pin --force exit=0"
+    }
+  ],
+  "machine_receipts": {
+    "cargo_test_lib": "cargo test -p pony-agent-core --lib ⇒ test result: ok. 1362 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.85s（join 实测 @3236d331）",
+    "cargo_test_bin": "cargo test -p pony-agent-core --bin pony ⇒ test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.41s（join 实测 @3236d331）",
+    "slash_acceptance": "cargo test -p pony-agent-core --test slash_commands_acceptance ⇒ test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.47s（join 实测 @3236d331）",
+    "e2e": ".dev-team/e2e-receipt-cli-self-update.txt"
+  }
+}

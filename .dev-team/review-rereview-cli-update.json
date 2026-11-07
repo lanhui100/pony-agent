@@ -1,0 +1,84 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/updater.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/tests/slash_commands_acceptance.rs",
+    "docs/decisions/0087-cli-self-update.md",
+    "docs/observability.yaml",
+    ".dev-team/contract-matrix-cli-self-update.md"
+  ],
+  "answers": [
+    {
+      "id": "R1",
+      "verdict": "PASS",
+      "evidence": "tui.rs:53 恢复 `pub use pony_agent_core::agent::updater::{is_newer_semver, parse_semver_triple};`，tests/slash_commands_acceptance.rs:796-803 的 `tui::parse_semver_triple`/`tui::is_newer_semver` 重新可见；实测 `cargo test -p pony-agent-core --test slash_commands_acceptance` ⇒ `test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.24s`；CONTRACT_COMMANDS 同步的 diff 只有 1 行文档注释 + 常量本体（12→14，插入 /settings、/teams，顺序与 AVAILABLE_COMMANDS 一致），该文件无其它 hunk，未放宽任何断言。"
+    },
+    {
+      "id": "R2",
+      "verdict": "PASS",
+      "evidence": "`grep -n \"本机升级\" crates/pony-agent-core/src/bin/tui.rs` ⇒ `2116: ...\\n- 本机升级（CLI 二进制）：pony update`（format_update_feedback 的 has_update 分支）；`git diff f53476cd 3236d331 -- .../tui.rs | grep perform_update_check` ⇒ 空，perform_update_check 零改动；bin 门禁 54 passed 证明文案断言未被打破。"
+    },
+    {
+      "id": "R3",
+      "verdict": "PASS",
+      "evidence": "自建 mock（制品 `#!/bin/sh\\nsleep 600`，清单 version=0.9.9/sha/size 合法，escape hatch 本地 http）实跑：`exit=1 elapsed=10.14s`，stdout `{\"error\":{\"code\":\"signature\",\"message\":\"...回验超时：新二进制 10s 内未返回 --version（/tmp/l3r3-mock/inst/pony），已按既有回滚路径恢复旧版本...\"},\"exit_code\":1,\"ok\":false}`，stderr `phase=verify_installed status=fail code=signature`；原二进制 sha256 c594df1c… 前后逐字节相同（BYTES_IDENTICAL=yes），inst/ 只剩 `pony`（无 .old/.part/.new/.update.lock），无 defunct（直接子进程已 wait 回收）；deadline 由 Instant 比较决定并 `child.kill()+wait()`，成功路径同样实测（0.1.100 --force ⇒ `phase=verify_installed status=ok version=0.1.100`）。"
+    },
+    {
+      "id": "R4",
+      "verdict": "PASS",
+      "evidence": "plan_update 在 diff 中零 hunk（降级闸 `is_downgrade && !force ⇒ Downgrade` 原样），实机 `--pin 0.1.100`（当前 0.1.156）⇒ `{\"error\":{\"code\":\"downgrade\",...}}` exit=2 且旧二进制未变；`--pin 0.1.100 --force` ⇒ `{\"ok\":true,\"previous\":\"0.1.156\",\"latest\":\"0.1.100\",\"updated\":true}` exit=0；三处文案 updater.rs:183/189/195 全部为 `pony update --pin <CLI 版本|版本> --force`，ADR 0087:85 同步为 `--pin <旧版本> --force`。"
+    },
+    {
+      "id": "R5",
+      "verdict": "PASS",
+      "evidence": "is_stale（updater.rs:1227）对「读不到 / 无 started= 行 / 非数字 / 时钟异常」一律 return false ⇒ 不删他人锁（fail-closed，实测两进程并发时后到者读不到锁 ⇒ exit 4 而非删除）；2700s = 1.5 × MAX_ALLOWED_DOWNLOAD_BUDGET_SECS(1800)，活跃实例（下载≤1800 + 回验≤10 + 安装）不可能被判陈旧；但接管是 `is_stale(旧内容) → remove_file(path) → create_new` 三步非原子，第二个进程若在第一个 create 之后执行 remove_file，会删掉对方的**新鲜**锁并自建 ⇒ 存在「互删锁」窗口（低概率、后果有界：.part/.old/.new 按 pid 唯一 + rename 原子），判为 ADVISORY 而非 BLOCKING（详见 findings[1]）。"
+    },
+    {
+      "id": "R6",
+      "verdict": "PASS",
+      "evidence": "`git diff --stat f53476cd 3236d331` 只覆盖 updater.rs / tui.rs / slash_commands_acceptance.rs / ADR 0087 / observability.yaml / contract-matrix + spec + .dev-team 审查件，无 src-tauri/、无 team_history.rs；冻结区安全：updater.rs 的 `mod tests` 从 :1298 起、最后一个 hunk 结束于 :1247，tui.rs 的 `mod cli_self_update_tests`（:14277 起）唯一 hunk 就是 AMEND-4 授权的 update_rejects_oversized_artifact_without_writing；超出声明范围的只有 3 处 `phase_log(<discover|manifest|download>, \"fail\", ...)` 的 stderr 新增与 observability.yaml/ADR 同步（纯增量、不写文件、已文档化，非缺陷）。"
+    },
+    {
+      "id": "R7",
+      "verdict": "PASS",
+      "evidence": "--lib ⇒ `test result: ok. 1362 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 44.65s`；--bin pony ⇒ `test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.08s`；--test slash_commands_acceptance ⇒ `test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.24s`（三条全 exit 0）。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 1123,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "evidence": "回验超时只 `child.kill(); child.wait()` 直接子进程；若制品自身 fork（mock 的 `#!/bin/sh` + `sleep 600` 即为最小模型），孙进程被孤儿化后继续运行。直接子进程已 wait 回收（无 defunct），但进程树未被 deadline 约束。建议 setsid/process_group + killpg，或在文档中声明只约束直接子进程。",
+      "counterexample_cmd": "PONY_UPDATE_MANIFEST_URL=http://127.0.0.1:18742/pony-cli-latest.json PONY_UPDATE_ALLOW_INSECURE=1 PONY_UPDATE_INSTALL_PATH=/tmp/l3r3-mock/inst/pony ./target/debug/pony update --json; ps -o pid,ppid,stat,lstart,cmd -p 2097525",
+      "cmd_exit": 1,
+      "cmd_tail": "exit=1 elapsed=10.14s；inst/ 仅 pony（无 .old/.part/.new/.lock），sha 未变；但 `ps` ⇒ `2097525 1 S Sat Nov 7 19:59:36 2026 sleep 600`（PPID=1 存活，为被 kill 的 sh 的孙进程）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 1192,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "evidence": "陈旧锁接管是「读旧内容判 stale → remove_file(path) → create_new」三步非原子（无 rename 式 CAS、无 O_EXCL 复核）：进程 A 判 stale 后删除，进程 B 在 A create 成功之后再 remove_file，就会删掉 A 刚建的新鲜锁并自建，两实例同时进入安装段。窗口极窄（仅陈旧锁 + 两实例毫秒级同启），且 .part/.old/.new 按 pid 唯一、安装为 rename 原子，最坏是重复下载/回滚竞态而非装坏，故判 ADVISORY；建议接管改为先 rename 到 `.stale-<pid>`（只有一方 rename 成功）再 create。",
+      "counterexample_cmd": "预置 `started=$((now-3000))` 的 pony.update.lock 后并发起两个 `pony update --json`（mock 制品 sleep 600）",
+      "cmd_exit": 0,
+      "cmd_tail": "A_exit=4（读不到锁 ⇒ fail-closed，未接管）/ B_exit=1（`phase=lock status=ok takeover stale lock=... (held=not_writable)` 后走完下载安装）；本次未复现双接管（窗口窄），互删锁由 remove_file+create_new 非原子性给出"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "f2fac0db-6fb8-405f-b18e-911727f198a6",
+    "fresh_context": true,
+    "lens": "l3-修复后定向复审"
+  },
+  "executed_by": "f2fac0db-6fb8-405f-b18e-911727f198a6",
+  "reviewed_commit": "3236d331",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "Subagent 独立上下文执行；Lead 原样转录 answers/findings；本复审确认 4 条 BLOCKING 已闭合"
+  }
+}

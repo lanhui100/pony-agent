@@ -60,7 +60,7 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 - 语义：`pony update` = 检查→下载→校验→安装→**回验**（新二进制 `--version` 必须等于 manifest.version，否则回滚失败退出）；`--check` 只检查不安装；`--force` 允许降级/重装；`--pin <ver>` 指定版本（需该 release 含 CLI 清单，找不到即 MissingAsset）；`--json` stdout 只出行 JSON 收据。
 - 成功收据（人类可读）：`已更新 pony: v<old> → v<new>，sha256=<前12位>…，路径 <path>`；已最新：`当前已是最新版本（v<ver>）`。
 - **退出码**：`0` 成功（含「已是最新」）；`1` 校验失败（sha256/size/回验不符）；`2` 用法错误；`3` 网络/HTTP/清单失败；`4` 安装失败（不可写/rename 失败）。与 `tui.rs` 既有 `exit` 口径共存，不改变其它子命令行为。
-- `/update` 斜杠命令：改为复用 `updater` 的检查实现，文案追加一行「本机升级：pony update」（**不自动替换用户的二进制**）。
+- `/update` 斜杠命令：**保持既有 tag 口径的只读检查实现不变**（`perform_update_check` 零改动），仅升级指引追加一行「本机升级（CLI 二进制）：`pony update`」（**不自动替换用户的二进制**）。〔本条已被收口时裁决取代：见 §AMEND-4 第 5 条——`/update` 答「有没有新发布」，`pony update` 答「CLI 能否升」，强行复用会让其中一个说假话。〕
 
 ## C3 发布侧：`.github/workflows/release.yml` 新增 job
 

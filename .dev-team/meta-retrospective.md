@@ -268,3 +268,45 @@ Lead 侧信息下发控制有效：`.dev-team/plan-ask-resume.md` 是唯一真�
 3. **契约冻结清单加一条硬动作**：「对提案中每个记账点/闸点做一次『双重计数』独立验算，并给出能证伪的实例序列」。本波这条动作救了整整一轮返工。
 4. **Explorer 返回契约改为「落盘 + 返回路径」**：低思考快模型 1/3 概率无 closing message 直接结束；应要求 Explorer 写入 `.dev-team/explore-<topic>.md`，最终消息只回路径 + ≤5 行摘要。
 5. **共享工作区多会话需要显式协议**：波次开始时记录 `git status` 快照与 `git worktree list`；收口时把非本波文件标注「外部变更，不审计不修复」，并把 `--all-targets` 这类全仓门禁降级为「本波影响面 + 记录外部阻塞」（本波外部会话的 merge 残留 `41e13297` 在 `src/bin/tui.rs` 留了 5 个重复测试定义 ⇒ E0428，与本次交付无关）。
+
+---
+
+# 元复盘 · wave-67 cli-self-update（`pony update` 自更新）
+
+- 提交链：基线 `67e656c9` → 红相+空桩 `c81640f0` → 绿相 `f53476cd` → 审查修复 `3236d331`
+- 名册：Lead + protocol-agent / test-agent / executor（Roster=4）；侦察 3 路 + 审查 4 路（L3-A/L3-B/L3-P + 修复后定向复审）+ Join 汇总 1 路，全部 Subagent 池。
+- 用户裁决：更新对象 = `pony`(TUI 二进制)；源 = GitHub Releases + 强制 sha256；同批扩发布流水线。
+
+## 1. 通信拓扑与信噪比
+
+- **侦察先行是对的**：3 路 E1（CLI 面 / 发布管道 / 出网底座）全部按「落盘 + 回路径」交付，0 丢失（对比 wave-66 有 1/3 空回执）。关键事实都是侦察带出来的：`pony --version` 报 **core 版本**（0.1.156）而 tag 是 tauri 版本（0.1.183）——这条直接决定了「清单版本为准、绝不用 tag_name」以及 CI 只比 core 的断言。
+- **我自己补的网络实测更值钱**：`curl` 实测 GitHub 资产是 `github.com → 302 → release-assets.githubusercontent.com`，而仓库约定「禁止自动跟随重定向」；这条把契约从「白名单 2 个 host」改成「4 个 host + 手动 ≤5 跳逐跳校验」。
+- **噪声**：一次 `pkill -f "http.server 18787"` 把自己的 shell 也杀了（模式匹配到自身命令行），损失一条 e2e 收据写入——重做即可，但记录进教训：**按端口/pid 精确 kill，不要按命令行子串 pkill**。
+
+## 2. 门禁穿透与误杀率
+
+初审 4 路共抓 4 BLOCKING + 11 ADVISORY，全部**复核后成立**（Lead 逐条亲验或读码确认）：
+
+1. **L3-B 抓回归（最高价值）**：semver 迁移撤掉 `tui::` 的 pub 面，`tests/slash_commands_acceptance.rs` 直接不可编译（`--no-run` EXIT=101）。这个 target 不在我的验收清单里——**教训**：改「被 `#[path] mod` 引入的 bin」时，必须把 `cargo test --no-run` 全 target 跑一遍，而不是只跑 `--lib` 与本波 6 个验收 target。
+2. **L3-P 抓「回验无超时」**：`Command::output()` 无 deadline，制品不返回 `--version` 就永久挂起，而此时用户二进制**已被替换**、锁未释放（实测 25s 未退、exit 124）。修后 10s deadline + kill + 回滚，我复验 elapsed=10s、sha 未变、无残留。
+3. **L3-P 抓「回滚口径是半条命令」**：ADR 写「回滚用 `pony update --pin <旧版本>`」，但 `--pin` 不隐含 `--force`，实测直接 exit 2 ⇒ 发布说明照抄就是一条必然失败的救援命令。修法不是放宽安全闸，而是把口径改成 `--pin <ver> --force` 并同步三处错误文案——**这是「文档承诺 vs 可执行性」的典型陷阱**。
+4. **L3-B 抓「声明了没做」**：`/update` 文案改造写在契约/ADR/note 三处，代码没动。
+5. **L3-A/L3-B 变异测试抓两处测试假绿**：超限用例对 `MAX_ARTIFACT_BYTES` 分支零区分力（删掉判断仍绿，被截断路径兜住）；`requests.len()` 类「数字对但语义不对」的断言同源。
+6. **飞出来的历史债**：修好编译后，`slash_commands_acceptance` 首次真跑就暴露**基线即存在**的跨波漂移（`/settings`、`/teams` 已进命令表、契约表仍 12 条）；另修了 HEAD 上 `bin/tui.rs` 的 merge 残留（5 个测试各定义 2 次 ⇒ E0425/E0428，bin 目标在 HEAD 就编译不过）。
+
+误杀率：11 条 ADVISORY 里**采纳 4 条**（/update 文案、退出码文档、超限用例断言、锁 staleness），**有理由登记 7 条**（`.part` 无 RAII、`--help` 缺自检入口、陈锁接管非原子窗口、回验只杀直接子进程会孤儿化孙进程、`build-cli-linux` 的 deny-warnings 实为 action 默认已注入、`UnsupportedPlatform→3` 属文档口径、批内命令表同步）。复审新增 2 条 ADVISORY 也按「后果有界」登记。
+
+## 3. 分工契约与隔离有效性
+
+- 三权分立照常有效：协议只落签名（`unimplemented!()` 空桩，`cargo check` 过），测试冻结 30 条（lib 14 + bin 16），实施填实现；实施者两次收到「冻结测试区只读」红线，全程零改测试（git 比对证明）。
+- **契约自身的两个洞被实施/审查补上**：① C1 未冻结 pub 编排入口（bin 只能调 lib 的 pub 面 ⇒ 不加就成死代码，`-D warnings` 直接红）；② C3 写「上传 4 files」而实际产物 3 件。两条都进了 AMEND-3。
+- **最大的流程风险**：契约「内部函数」与「可测面」之间存在缝——发现/下载被标「内部」，于是 bin 侧集成测试只能经 `run_update_action` + 环境变量逃生舱驱动，发现流程没有冻结签名。这波靠「真实网络 `--check` 逐条打 GitHub 并枚举 20 个 release」补上了行为证据，但**契约应在冻结时就把「编排入口必须 pub 可测」写成硬约束**。
+- Lead 自身失误：门禁数字写错（lib 期望 1372，实际上限 1362 = 1348+14，bin 16 条不在 lib）；一次提交信息里用了反引号导致 shell 展开，用 `git commit --amend -F` 修正。
+
+## 4. 元协议迭代建议（对 dev-team skill）
+
+1. **「被 `#[path] mod` 引入的 bin」必须纳入红相/绿相门禁清单**：这类文件同时属于 bin 目标与若干集成 test crate，改可见性会静默打坏别的 target。建议 skill 在门禁清单里加一条固定项：`cargo test -p <crate> --no-run`（全 target 可编译）。
+2. **契约冻结清单加「可执行性验算」**：凡文档里出现的**救援/回滚命令**，冻结时必须真跑一次并贴退出码（本波 `--pin` 半条命令若早跑一次就零成本发现）。
+3. **「内部实现」与「可测面」的冲突需显式裁决**：契约里标「内部」的网络编排，如果 bin 侧只能经环境变量驱动，就要么给 pub 可测入口（并在 C1 冻结）、要么明确接受「只能真网络验收」。不要让实施者在最后一刻补 pub 面。
+4. **变异的测试必须做到「删掉判据仍绿」自检**：L3-B 的变异实测（删 MAX_ARTIFACT_BYTES 判断）比任何断言清单都更能证明测试真假，建议把「至少 2 条变异实测」写进 L3 模板的硬要求。
+5. **并行会话的「已提交但 CI 红的空桩」需要一个检测动作**：本波 `-D warnings` 全仓红出在他人已推送到 origin/main 的空桩文件（`team_history.rs`），我们只能登记外部阻塞。建议波次开始时跑一次 `RUSTFLAGS=-D warnings cargo check` 记录基线红/绿，避免把「本来就红」误判成自己引入。

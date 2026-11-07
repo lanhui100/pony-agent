@@ -1,0 +1,93 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/updater.rs",
+    "crates/pony-agent-core/src/bin/tui.rs (CliAction/run_update_action/cli_self_update_tests)",
+    ".dev-team/contract-matrix-cli-self-update.md",
+    ".dev-team/e2e-receipt-cli-self-update.txt",
+    "commit f53476cd (git show --stat / git diff c81640f0 f53476cd -- updater.rs tui.rs)"
+  ],
+  "answers": [
+    {
+      "id": "A1",
+      "verdict": "PASS",
+      "evidence": "校验与安装严格串行且校验在安装前：verify_sha256(&part) 失败即删 .part 并 return（updater.rs:528-533），摘要不符当场丢弃（:350-356）；声明 size 与硬上限 128MiB 在下载前拦（:512-515），实际流字节同时拦 written>MAX||written>plan.size 且逐块写盘（:1026-1030），末尾 written!=plan.size 截断判定（:1042-1048）。失败/panic 删除责任：错误路径全部显式 remove_file；.part 无 Drop 守卫而 lock 有（:1137-1141），SIGKILL 下两者均残留（见 findings[1]）。"
+    },
+    {
+      "id": "A2",
+      "verdict": "PASS",
+      "evidence": "两个 client 均 redirect::Policy::none()（updater.rs:713、:725）；手动 for _hop in 0..=MAX_REDIRECT_HOPS 最多跟 5 跳（:746、:777-779）；起跳 url 与每跳 next 都过 url_allowed（scheme+host，:741、:767-771）；相对 Location 用 current.join 解析（:764）；301|302|303|307|308 全部识别（:755），方法恒为 GET，307/308 无方法降级问题。"
+    },
+    {
+      "id": "A3",
+      "verdict": "PASS",
+      "evidence": "临时件 <exe>.new-<pid> 用 sibling_path 落在目标同目录（updater.rs:383、:1153-1159），.part/.old 亦同目录（:1162-1164、:536），copy→chmod 0o755→rename 顺序正确（:385-393），同目录 rename 天然无 EXDEV；失败分支删 .new（:395-398）。三种收尾：成功删 .old+.part（:557、:562-564）、回验失败 rename(.old→target)（:580）、install 失败删 .old+.part（:549-552）；进程被 kill 时留 .part+.update.lock（实测），若 kill 落在 copy(.old) 与清理之间还留 .old-<pid>。"
+    },
+    {
+      "id": "A4",
+      "verdict": "PASS",
+      "evidence": "锁用 OpenOptions::create_new(true) 原子互斥（updater.rs:1117-1121），Drop 只删自己 path（:1137-1141），他人 lock 不被覆盖已由 C7-14 断言（tui.rs:14940-14975 实测 exit 4 且 foreign lock 原样保留）。但无 staleness/pid 存活判定（:1123 只写 pid 不校验）：Ctrl+C/kill 后锁永久残留，后续每次 pony update 都 exit 4 直至手工删锁——实测见 findings[0]（ADVISORY，契约 C5 未要求 staleness）。"
+    },
+    {
+      "id": "A5",
+      "verdict": "PASS",
+      "evidence": "白名单四 host 含 302 落点 release-assets.githubusercontent.com/objects.githubusercontent.com（updater.rs:58-63），下载起跳与每一跳都过 url_allowed（:692-709、:741、:767）。逃生舱 fail-closed：allow_insecure 先要求 MANIFEST_URL 已设（:619），再要求 manifest_url 存活（:623），escape_hatch() 同时判两项（:653-655）；只设 ALLOW_INSECURE 或只设 http://非 loopback 的 MANIFEST_URL 都回落到生产规则（:620-622）。--pin 只做版本匹配、不拼 URL（:900-956），资产 URL 恒取自同一 release 的 browser_download_url（:959-970）并下发前二次校验，无法指向任意 URL。"
+    },
+    {
+      "id": "A6",
+      "verdict": "PASS",
+      "evidence": "回验失败分支 = rename(.old-<pid>→target)（updater.rs:578-588）；冻结测试集 20 条无任何用例触达该分支（全仓 grep verify_installed 仅命中 updater.rs 实现处，tui.rs 测试模块零引用）。我独立构造「sha/size 都对但新二进制自报 0.1.999、清单 0.1.184」实跑：exit=1、stdout code=signature、目录只剩 pony（内容逐字节等于 ORIGINAL 哨兵，无 .old/.part/.new/.lock），分支行为正确。可接受理由：该路径不可由网络单点触发（必须先通过 sha+size 双校验），回滚实现仅 6 行且已被我物理取证；仍建议补一条 rollback 用例防回归。"
+    },
+    {
+      "id": "A7",
+      "verdict": "PASS",
+      "evidence": "timeout 边界：制品下载被 tokio::time::timeout(download_budget) 整体包裹并在超时分支删 .part（updater.rs:992-1001）；控制面用 client 级 total 5s/connect 5s（:711-718）而非外层 timeout，故 discover 最坏 ≈2×5s+500ms，--pin 逐个 release 拉清单时可累计（:931-947）；bytes_stream 逐块写盘、按块累计上限即中止（:1020-1030），不整包入内存；自建 current_thread runtime 同步 block_on 后在 run_self_update 返回前 drop（:451-456），无遗留线程/句柄。遗漏：verify_installed 的 Command::output() 无超时（:1054），见 findings[2]。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 1140,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "evidence": "锁只靠 Drop 删除、且写进文件的 pid 从未被校验：`kill -TERM`/Ctrl+C/断电使析构不执行时 <exe>.update.lock 永久残留，之后每次 pony update 都在 create_new 处失败并 exit 4（NotWritable），自更新被永久自锁，只能人工 rm。实测：下载停滞期发 SIGTERM，残留 pony.part + pony.update.lock(pid=1894953)；随后同一 install path 重跑 → exit 4「另一个 pony update 正在运行」。契约 C5 未要求 staleness，故列 ADVISORY，建议加 pid 存活判定或 `--force-unlock`。",
+      "counterexample_cmd": "env PONY_UPDATE_MANIFEST_URL=http://127.0.0.1:18795/manifest PONY_UPDATE_ALLOW_INSECURE=1 PONY_UPDATE_INSTALL_PATH=/tmp/l3zz/kill/bin/pony ./target/release/pony update --json & P=$!; sleep 2; kill -TERM $P; sleep 1; ls -a /tmp/l3zz/kill/bin; env PONY_UPDATE_MANIFEST_URL=http://127.0.0.1:18796/manifest PONY_UPDATE_ALLOW_INSECURE=1 PONY_UPDATE_INSTALL_PATH=/tmp/l3zz/kill/bin/pony ./target/release/pony update --json",
+      "cmd_exit": 4,
+      "cmd_tail": "[pony-update] phase=manifest status=ok version=0.1.184 asset=pony-tui_0.1.184_linux-x86_64 size=10000000\n{\"error\":{\"code\":\"not_writable\",\"message\":\"安装失败（目标不可写）：另一个 pony update 正在运行（锁文件 /tmp/l3zz/kill/bin/pony.update.lock 已存在）...\"},\"exit_code\":4,\"ok\":false}\nRERUN_EXIT=4"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 1017,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "evidence": ".part 的生命周期全赖显式 remove_file，没有任何 Drop/RAII 守卫（对比 UpdateLock 有 :1137-1141），因此『进程被信号杀死』与『下载期 panic(unwind)』两条路径都会漏掉半包文件；实测 SIGTERM 后 pony.part 留在目标目录。影响有限：File::create 默认 0644（无可执行位，满足 C5「不得留下可执行位残留」），下次运行会截断覆盖，只损失磁盘空间与目录洁净；建议加一个 PartFile 守卫（或安装前清理同目录 *.part）。",
+      "counterexample_cmd": "kill -TERM <stalled pony update pid>; ls -a /tmp/l3zz/kill/bin",
+      "cmd_exit": 143,
+      "cmd_tail": "RUNNING_FILES: . .. pony pony.part pony.update.lock\nAFTER_FILES: . .. pony pony.part pony.update.lock\nLOCK_BODY: pid=1894953"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 1054,
+      "rule": "TIMEOUT",
+      "severity": "ADVISORY",
+      "evidence": "verify_installed 用 std::process::Command::new(target).arg(\"--version\").output() 同步等待，无任何超时/可杀路径：若新二进制卡死（或半坏 ELF 在慢盘上长时间挂起），pony update 会永久 hang，此时锁仍被持有（:518 的 _lock 直到函数返回才 Drop），用户只能强杀 → 又落入 findings[0] 的锁残留。sha256 已把制品钉死在受信清单上，故非外部可触发，列 ADVISORY；建议 output() 外包 5s 超时 + kill_on_drop。",
+      "counterexample_cmd": "sed -n '1053,1062p' crates/pony-agent-core/src/agent/updater.rs",
+      "cmd_exit": 0,
+      "cmd_tail": "fn verify_installed(target: &Path, expected_version: &str) -> Result<(), UpdateError> {\n    let output = std::process::Command::new(target)\n        .arg(\"--version\")\n        .output()"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "e221747b-44da-4878-83b7-b030c5082ee7",
+    "fresh_context": true,
+    "lens": "l3-网络/文件/原子性/并发/安全"
+  },
+  "executed_by": "e221747b-44da-4878-83b7-b030c5082ee7",
+  "reviewed_commit": "f53476cd",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "Subagent 独立上下文执行；Lead 仅原样转录 verdict/findings/answers，未增删条目；本收据的 BLOCKING 已在 commit 3236d331 修复，闭合情况见 review-rereview-cli-update.json"
+  }
+}
