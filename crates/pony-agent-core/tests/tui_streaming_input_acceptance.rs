@@ -1076,6 +1076,14 @@ fn a22_requeue_front_restores_fifo_and_never_stalls() {
 /// bin 源码原文（结构契约断言用；这是**源码结构断言**，不是行为断言）。
 const TUI_SRC: &str = include_str!("../src/bin/tui.rs");
 
+/// `tui/input.rs` 源码原文：`99b3adce` 把输入层从 `tui.rs` 原地拆出，`key_class_label` 随之外移。
+/// 结构契约断言的扫描范围必须显式覆盖被拆出的模块文件，否则函数搬家后断言会静默失配；
+/// 读不到即 panic（fail-closed，模块再次搬家时用例立刻红，而不是去测一段空字符串）。
+fn tui_input_src() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/tui/input.rs");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("必须能读取 {}: {e}", path.display()))
+}
+
 /// 取 `signature_prefix` 起、到该函数体结束（列 0 的 `}`）为止的源码切片。
 fn fn_body<'a>(src: &'a str, signature_prefix: &str) -> &'a str {
     let start = src
@@ -1146,7 +1154,9 @@ fn a23_dispatch_and_rejection_logs_carry_depth_and_key_class() {
     );
 
     // ④ 按键分类函数口径：Char 只记类别不记正文（防把用户输入写进日志）。
-    let classifier = fn_body(TUI_SRC, "fn key_class_label");
+    // 该函数已随 `99b3adce` 从 `tui.rs` 外移到 `tui/input.rs`，扫描范围同步覆盖该模块文件。
+    let input_src = tui_input_src();
+    let classifier = fn_body(&input_src, "fn key_class_label");
     assert!(
         classifier.contains("\"Char\""),
         "C25：key_class_label 对字符键必须只记类别 \"Char\": {classifier:?}"
