@@ -9165,6 +9165,11 @@ pub fn render_plan_panel_stub(f: &mut Frame, state: &TuiState) {
     );
 }
 
+/// W3：`/tasks`（及 Ctrl+T）的 Team 共享任务看板。
+///
+/// 每行：`<状态符号> <subject> · ⛔n · 写域n`，右列 `@owner`；状态符号
+/// Completed `✔` / InProgress `●` / Pending `○` / Blocked `✕`。
+/// 只展示状态符号与标题，不展示内部 task_id（`TuiTask.id` 仅用于内部排障）。
 pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
     let board = match &state.task_board_state {
         Some(b) => b,
@@ -9228,10 +9233,10 @@ pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
         for (idx, task) in board.tasks.iter().enumerate().take(end).skip(start) {
             let is_focused = idx == selected;
             let status_mark = match task.status {
-                TuiTaskStatus::Completed => "[✔]",
-                TuiTaskStatus::InProgress => "[●]",
-                TuiTaskStatus::Pending => "[○]",
-                TuiTaskStatus::Blocked => "[✕]",
+                TuiTaskStatus::Completed => "✔",
+                TuiTaskStatus::InProgress => "●",
+                TuiTaskStatus::Pending => "○",
+                TuiTaskStatus::Blocked => "✕",
             };
 
             let owner_str = task.owner.as_deref().unwrap_or("unassigned");
@@ -9247,9 +9252,10 @@ pub fn render_task_board_stub(f: &mut Frame, state: &TuiState) {
             } else {
                 format!(" · 写域{}", task.write_scopes.len())
             };
+            // 只展示状态符号与标题，不展示内部 task_id（uuid 对使用者是纯噪音）。
             let left = format!(
-                "  {} {} · {}{}{}",
-                status_mark, task.id, task.subject, blocked_suffix, scopes_suffix
+                "  {} {}{}{}",
+                status_mark, task.subject, blocked_suffix, scopes_suffix
             );
             let right = format!("@{}", owner_str);
             lines.push(list_row(is_focused, &left, &right, inner_w));
@@ -14192,6 +14198,49 @@ mod w3b_sub_session_tests {
             "徽标必须紧贴状态行上方（输入区正下方 1 行）"
         );
         assert!(find_row(&sub, "◆").is_some(), "徽标必须有 `◆ ` 标记");
+    }
+
+    /// 任务看板只展示状态符号与标题：内部 uuid 不得上屏，状态不用 `[x]` 方括号形态。
+    #[test]
+    fn task_board_hides_uuid_and_uses_status_marks() {
+        let mut state = TuiState::default();
+        state.mode = InteractionMode::TaskBoard;
+        state.task_board_state = Some(TaskBoardState::new(vec![
+            TuiTask {
+                id: "task-0000-1111-2222".into(),
+                subject: "已完成项".into(),
+                status: TuiTaskStatus::Completed,
+                owner: Some("worker-1".into()),
+                blocked_by: vec![],
+                write_scopes: vec![],
+            },
+            TuiTask {
+                id: "task-3333-4444-5555".into(),
+                subject: "待办项".into(),
+                status: TuiTaskStatus::Pending,
+                owner: Some("worker-2".into()),
+                blocked_by: vec!["task-0000-1111-2222".into()],
+                write_scopes: vec![],
+            },
+        ]));
+
+        let buf = render_ui(&mut state, 100, 30);
+        assert!(
+            find_row(&buf, "task-").is_none(),
+            "任务看板不得渲染内部 task_id/uuid"
+        );
+        assert!(find_row(&buf, "✔").is_some(), "Completed 必须用 `✔` 标记");
+        assert!(find_row(&buf, "○").is_some(), "Pending 必须用 `○` 标记");
+        assert!(
+            find_row(&buf, "[✔]").is_none(),
+            "状态标记不得保留 `[ ]` 方括号形态"
+        );
+        assert!(
+            find_row(&buf, "worker-1").is_some(),
+            "@owner 右列必须保留"
+        );
+        assert!(find_row(&buf, "⛔1").is_some(), "blocked_by 计数后缀必须保留");
+        assert!(find_row(&buf, "已完成项").is_some(), "标题必须保留");
     }
 }
 
