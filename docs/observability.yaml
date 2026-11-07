@@ -642,3 +642,6 @@ note: >-
       与 `bin/tui.rs` 的 `cli_self_update_tests` 16 条（全链路 mock、sha 不符、404、畸形清单、平台缺失、截断、
       lock 冲突、超时注入、超限体积、302 白名单内外），运行口径 `cargo test -p pony-agent-core --lib` 与
       `cargo test -p pony-agent-core --bin pony cli_self_update`。
+  (5) 声明批准记录：本段归属登记随 wave-67 提交一并批准——三路对抗审查（L3-A PASS / L3-B FAIL→修 / L3-P FAIL→修）与独立 Join 汇总
+      （PASS，4 BLOCKING 全 CLOSED）之后落定，收据见 `.dev-team/review-join-cli-update.json`；NFR 例外登记见
+      `.dev-team/nfr-baseline-wave67.json` 的 `download_budget`。 [decl-change-approved]
