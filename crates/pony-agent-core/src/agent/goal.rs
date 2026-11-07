@@ -316,6 +316,38 @@ pub fn build_goal_round_message(objective: &str, round: u32, max_rounds: u32) ->
     )
 }
 
+/// 契约 C3：判定一段 user 轮文本是否为宿主生成的 goal 续轮文案。
+///
+/// 真值源是本模块的 [`build_goal_round_message`]：
+/// `<goal_round round="N" max="M">继续推进目标：…</goal_round>`。会话层
+/// （`is_host_continuation_prompt`）据此把宿主注入的续轮文案与真人消息分开——二者混同会让
+/// 「新一轮用户消息」把仍然待作答的 Ask 判为过期（自锁循环），也会把续轮文案当会话标题。
+pub fn is_goal_round_prompt(text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("<goal_round ") else {
+        return false;
+    };
+    let Some((attrs, body)) = rest.split_once('>') else {
+        return false;
+    };
+    let Some(body) = body.strip_suffix("</goal_round>") else {
+        return false;
+    };
+    if !body.starts_with("继续推进目标：") {
+        return false;
+    }
+    let is_uint_attr = |name: &str| {
+        attrs.split_whitespace().any(|attr| {
+            attr.strip_prefix(name)
+                .and_then(|value| value.strip_prefix("=\""))
+                .and_then(|value| value.strip_suffix('"'))
+                .map(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+                .unwrap_or(false)
+        })
+    };
+    is_uint_attr("round") && is_uint_attr("max")
+}
+
 /// 契约 C2：测试接缝——清空进程内缓存并从 `goal_store_path()` 重新懒加载。
 pub fn reset_goal_store_for_test() {
     let mut guard = goal_store_guard();

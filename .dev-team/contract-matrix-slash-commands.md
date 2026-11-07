@@ -84,15 +84,20 @@ fn compact_session(
 
 ### C-4 TUI 命令表（唯一真值源）
 
-`crates/pony-agent-core/src/bin/tui.rs::AVAILABLE_COMMANDS` 变更后**必须**为（顺序固定，共 10 条）：
+`crates/pony-agent-core/src/bin/tui.rs::AVAILABLE_COMMANDS` 变更后**必须**为（顺序固定，共 15 条）：
 
 ```
-/resume  /provider  /models  /thinking  /plan  /tasks  /agents  /clear  /compact  /help  /quit
+/resume  /provider  /models  /thinking  /settings  /plan  /approve  /tasks  /agents  /teams  /clear  /compact  /help  /update  /quit
 ```
 - `/cost` 从命令表与分发分支**移除**。
 - `/cost` 从 `bin/cli.rs` 移除（CLI 与 TUI 口径统一，`SlashCommand::Cost` 枚举、`parse` 分支、help 文案、`cli_acceptance.rs` 同步一并处理）。
 - `/compact` 描述文案：`压缩当前会话上下文`。
 - `/quit` 描述保持 `安全退出 TUI 界面`。
+- `/settings`（显示偏好面板）、`/update`（自更新）、`/teams`（`/agents` 别名）为收口时既存条目，
+  2026-11-08 一并补齐（此前契约表漏同步，冻结测试已按真值表先行）。
+- `/approve`：宿主盖章入口（ADR 0092 / PA-141）。语义仅为
+  「对当前会话最早的 `Draft` 计划调用既有 `plan_execution_approve`」，
+  **不得**接受任何来自对话文本或模型工具参数的批准输入；无 `Draft` 时必须如实回「无可批准的计划」。
 
 ### C-5 TUI 命令解析（修复）
 
@@ -229,3 +234,4 @@ TS：`tests/slash-commands.spec.ts`
   (b) **新审计场景 `ask-loop`**（真终端 tmux）：`PONY_AUDIT_ASK_BOOTSTRAP` 注入 → 面板出现（prompt/选项/esc 取消提示）→ Down 换焦点 → Enter 提交 → **面板关闭** → **5s 内不重开** → 状态区**无** CAS/版本/提交失败类文案（负向断言）。原 `ask-panel`（`--demo-ask-user`）保留为纯 UI 形态场景，`ask.documented_gap` 从 `ask-panel` 移除并改由 `ask-loop` 的真实断言覆盖。
   (c) **Rust 级闭环证据**（不依赖终端）：`dispatcher.dispatch_governed(builtin:ask)` → `list_pending_asks()` 恰 1 条且 kind=Interaction → `answer_ask(authorization)` 成功 → 再 `list_pending_asks()` 为空（CAS 消费生效）。
   (d) **fail-closed 证据**：无 env 时 `audit_ask_bootstrap_enabled() == false` 且不产生 pending ask；并静态断言引导代码位于 `cfg(debug_assertions)` 守卫内（release 不编译）。
+- 2026-11-08 ADR 0092 修订14（Lead 批准·Ask 自锁收口）：C-4 原地改写为 15 条真值：补齐此前漏同步的 `/settings`、`/update`、`/teams`（`/agents` 别名），并新增 `/approve`——它是宿主对 `Draft` 计划的盖章入口（调既有 `plan_execution_approve` 推进 `Draft→Executing`），模型工具参数与对话文本一律不构成批准来源（C-141-3）。冻结测试 `tests/slash_commands_acceptance.rs::CONTRACT_COMMANDS` 同提交同步，断言未放宽。

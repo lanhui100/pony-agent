@@ -670,3 +670,30 @@ note: >-
       循环层 hops 1024 / followups 500 / 同指纹 3 次 / 同工具连续失败 4 次 / 同签名计数 2 次。
   (3) 验收（机械收口）：`cargo check -p pony-agent-core --all-targets` 0 error；
       `cargo test -p pony-agent-core --lib` 全绿；`rg -n "turn_wall|TURN_WALL|墙钟预算" crates` 为 0 命中。
+  【ADR 0092 归属登记（2026-11-07）｜Ask 自锁循环三处收口：续轮让位 / 续轮文案识别 / Draft 出口与 `/approve`】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地调度判定、会话库投影与 Tool 面参数**，
+  无新增对外接口、网络 IO、后台任务、LLM 调用或依赖；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （理由与本文档维度声明同源：桌面与终端进程随用户启停、无常驻监听地址、无 Service，
+      Prometheus pull 与节点侧日志采集的结构前提不成立）。
+  (2) 本轮 N-A 的结构性理由：三处改动分别是 goal 续轮的**轮次边界判定**
+      （`bin/tui.rs::goal_rounds_must_yield_to_pending_requests`，读既有 `list_pending_asks` /
+      `list_pending_approvals`）、**会话库投影口径**（`is_host_continuation_prompt` 认识
+      `<goal_round …>`，`note_user_message_entry` 不再把宿主续轮当真人消息 supersede 待答 Ask）、
+      以及 **Plan 工具的 op 面**（新增 `abort`；`start_execution` 审批门禁仅在 Draft 生效）。
+      三者都不产生新的遥测事实，不新增指标/日志字段/Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：新增纯函数 `goal::is_goal_round_prompt`、
+      `tui::goal_rounds_must_yield_to_pending_requests`、`tui::approve_earliest_draft_plan`；
+      `PlanControlOperation` 新增 `abort { session_id, plan_id?, revision? }`；
+      TUI 新增 `/approve` 斜杠命令（宿主盖章，调既有 `plan_execution_approve`）；持久化 schema 不变。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层而非遥测层——
+      `agent/session/host_continuation_goal_round_tests.rs::host_continuation_prompt_recognizes_goal_round_envelope`、
+      `agent/control_plane/ask_plan_commands/goal_round_prompt_tests.rs::goal_round_continuation_does_not_supersede_pending_ask`、
+      `agent/plan_state.rs::handler_abort_retires_draft_without_plan_id_and_unblocks_the_draft_gate`、
+      `tests/wave36_draft_gate_session.rs::draft_gate_is_released_by_plan_control_abort_without_host_approval`、
+      `tests/tui_batch2_regression.rs::n5b_goal_rounds_yield_to_pending_host_requests`，
+      且 `tests/wave36_plan_execution_approval.rs::c141_*` 保持全绿（审批门禁语义未放宽）。
+      注：上述两个单测单列文件，是因 `session/tests.rs`、`control_plane/mod.rs` 已触代码规模门禁棘轮；
+      续轮循环抽出 `tui::run_goal_rounds` 同理（`tui_event_loop` 本身已 grandfathered 于 2320 行）。

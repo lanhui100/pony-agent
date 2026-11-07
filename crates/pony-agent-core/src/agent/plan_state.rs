@@ -15,9 +15,11 @@
 //!   mutating a `Completed`/`Aborted` plan — fails with [`PlanError::IllegalTransition`].
 //!
 //! [`PlanControlHandler`] adapts a [`PlanStore`] to `PrimitiveToolHandler` so the Plan tool's
-//! input schema is exactly `{ create | replace | merge | complete_step }` operations. There is no
-//! generic `calls` array and no child execution. `abort` remains a store-level API so the
-//! runtime/graph can terminate a plan directly without exposing extra tool surface.
+//! input schema is exactly `{ create | replace | merge | complete_step | start_execution | abort }`
+//! operations. There is no generic `calls` array and no child execution. `abort` is exposed on the
+//! tool surface as well as the store: a `Draft` plan blocks every write/execute tool, and when the
+//! host withholds execution approval the model must be able to retire its own draft instead of
+//! looping on a question the host can no longer answer.
 
 use crate::agent::tool_runtime::{PrimitiveToolHandler, PrimitiveToolHandlerRequest};
 use serde::{Deserialize, Serialize};
@@ -492,7 +494,8 @@ impl PlanStore {
     }
 }
 
-/// One Plan-tool operation. The schema is exactly `{ create | replace | merge | complete_step | start_execution }`
+/// One Plan-tool operation. The schema is exactly
+/// `{ create | replace | merge | complete_step | start_execution | abort }`
 /// — there is deliberately no generic `calls` array and no child execution.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -520,6 +523,22 @@ pub enum PlanControlOperation {
         session_id: String,
         plan_id: String,
         revision: u64,
+    },
+    /// Retire a `Draft`/`Executing` plan without executing it.
+    ///
+    /// This is the model-visible escape hatch for the Draft write gate: a plan left in Draft
+    /// blocks every write/execute tool, and only `start_execution` (host approval) or `abort`
+    /// can leave that state. Without `abort` a refused approval strands the session.
+    ///
+    /// `plan_id`/`revision` are optional on purpose: `{"op":"abort","session_id":"…"}` aborts the
+    /// oldest `Draft` plan of that session (revision read from the store), so a model that lost
+    /// track of the plan id can still unlock the session.
+    Abort {
+        session_id: String,
+        #[serde(default)]
+        plan_id: Option<String>,
+        #[serde(default)]
+        revision: Option<u64>,
     },
 }
 
@@ -580,6 +599,31 @@ impl PlanControlHandler {
                 plan_id,
                 revision,
             } => self.store.start_execution(&session_id, &plan_id, revision),
+            PlanControlOperation::Abort {
+                session_id,
+                plan_id,
+                revision,
+            } => {
+                let target_id = match plan_id {
+                    Some(plan_id) => plan_id,
+                    None => self
+                        .store
+                        .plans_for_session(&session_id)
+                        .into_iter()
+                        .find(|plan| plan.lifecycle == PlanLifecycleState::Draft)
+                        .map(|plan| plan.plan_id)
+                        .ok_or_else(|| {
+                            PlanError::NotFound(format!(
+                                "no Draft plan to abort in session `{session_id}`"
+                            ))
+                        })?,
+                };
+                let expected = match revision {
+                    Some(revision) => revision,
+                    None => self.store.plan(&session_id, &target_id)?.revision,
+                };
+                self.store.abort(&session_id, &target_id, expected)
+            }
         }
     }
 
@@ -607,6 +651,18 @@ impl PlanControlHandler {
             } => {
                 self.require_claimed_session(authoritative, &session_id)?;
                 Ok(PlanControlOperation::StartExecution {
+                    session_id: authoritative.to_string(),
+                    plan_id,
+                    revision,
+                })
+            }
+            PlanControlOperation::Abort {
+                session_id,
+                plan_id,
+                revision,
+            } => {
+                self.require_claimed_session(authoritative, &session_id)?;
+                Ok(PlanControlOperation::Abort {
                     session_id: authoritative.to_string(),
                     plan_id,
                     revision,
@@ -1006,6 +1062,48 @@ mod tests {
     }
 
     // ── PlanControlHandler ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn handler_abort_retires_draft_without_plan_id_and_unblocks_the_draft_gate() {
+        let handler = PlanControlHandler::new(PlanStore::new());
+
+        let created: Value = handler
+            .execute(&handler_request(json!({
+                "op": "create",
+                "session_id": "session-1",
+                "payload": { "kind": "task", "summary": "draft", "steps": [] }
+            })))
+            .expect("create");
+        let plan_id = created["planId"].as_str().expect("planId").to_string();
+        assert_eq!(created["lifecycle"], "draft");
+        assert!(handler.store().has_active_draft_plan("session-1"));
+
+        // 省略 plan_id / revision 也必须能一键解锁：模型常常已经丢失 plan_id，
+        // 而 Draft 会锁死所有写/执行工具（自锁的死结之一）。
+        let aborted: Value = handler
+            .execute(&handler_request(json!({
+                "op": "abort",
+                "session_id": "session-1"
+            })))
+            .expect("abort");
+        assert_eq!(aborted["planId"], plan_id.as_str());
+        assert_eq!(aborted["lifecycle"], "aborted");
+        assert!(
+            !handler.store().has_active_draft_plan("session-1"),
+            "abort must release the Draft write gate"
+        );
+
+        // 终态稳定：已撤销的计划不能再撤销一次。
+        let err = handler
+            .execute(&handler_request(json!({
+                "op": "abort",
+                "session_id": "session-1",
+                "plan_id": plan_id,
+                "revision": 2
+            })))
+            .expect_err("double abort must fail closed");
+        assert!(err.contains("illegal_transition"), "{err}");
+    }
 
     #[test]
     fn handler_maps_create_replace_merge_and_complete_step_arguments() {

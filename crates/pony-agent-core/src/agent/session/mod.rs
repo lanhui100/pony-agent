@@ -4,6 +4,9 @@ mod id;
 mod store;
 #[cfg(test)]
 mod tests;
+// ADR 0092 回归：goal 续轮文案识别（单独成文件，避免撑大已触棘轮的 `tests.rs`）。
+#[cfg(test)]
+mod host_continuation_goal_round_tests;
 mod types;
 pub mod usage;
 pub mod workspace_snapshot;

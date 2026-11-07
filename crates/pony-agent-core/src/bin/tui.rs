@@ -540,6 +540,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
     ("/settings", "设置 TUI 显示与交互偏好"),
     ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
+    ("/approve", "批准当前会话的草稿计划（解除写保护）"),
     ("/tasks", "切换/查看 Team 任务看板（Ctrl+T）"),
     ("/agents", "查看 Team 角色与状态"),
     ("/teams", "查看 Team 角色与状态（同 /agents）"),
@@ -739,6 +740,18 @@ impl GoalRoundCancelToken {
 /// `cancelled`（用户已按 Esc）或已用满预算（`consecutive >= max`）都必须中止下一轮。
 pub fn should_abort_goal_rounds(cancelled: bool, consecutive: u32, max: u32) -> bool {
     cancelled || consecutive >= max
+}
+
+/// 契约 F-G3：会话里仍有**待作答**的 Ask / 审批请求时，goal 续轮必须让位给人。
+///
+/// 为什么必须停：续轮会立刻开新 turn（携带宿主续轮文案），而新一轮入口会按「对话顺序」
+/// 把旧提问判为过期——挂在 Ask 上等待人类输入的模型因此永远收不到答案，只能重复提问
+/// （实测 16 轮自转、17 条 Ask 连续 superseded）。
+pub fn goal_rounds_must_yield_to_pending_requests(
+    pending_asks: usize,
+    pending_approvals: usize,
+) -> bool {
+    pending_asks > 0 || pending_approvals > 0
 }
 
 /// 契约 P-1：解析「当前生效 provider id」的优先级（纯函数，可单测）。
@@ -3126,6 +3139,60 @@ fn sync_state_with_registry(state: &mut TuiState) {
                 state.model = sel.clone();
             }
         }
+    }
+}
+
+/// PA-141 / C-141-3 宿主盖章面（TUI 侧唯一合法入口）：把会话内最早的 `draft` 计划推进到
+/// `executing`。
+///
+/// 为什么需要它：`draft` 计划存在时，所有写类/执行类工具都会被 `plan_draft_gate` 拒绝，而
+/// 解锁只有两条路——`start_execution`（需要宿主注入 `PlanExecutionApproval`）或 `abort`。
+/// TUI 此前把 `plan_execution_approval` 写死为 `None`，于是用户只能看着模型反复请求批准，
+/// 永远解不开锁。`/approve` 就是那句"宿主盖章"：只有用户显式执行它才会发生，
+/// 模型工具参数永远无法伪造（C-141-3）。
+///
+/// 返回写入状态行的一次性提示文案（失败也不 panic：面板照常可用）。
+pub fn approve_earliest_draft_plan(control_plane: &HostControlPlane, session_id: &str) -> String {
+    let plans_value = control_plane.plan_list(session_id);
+    let Some(draft) = plans_value.as_array().and_then(|plans| {
+        plans.iter().find(|plan| {
+            plan.get("lifecycle").and_then(|value| value.as_str()) == Some("draft")
+        })
+    }) else {
+        return "当前会话没有待批准的草稿计划（/plan 查看）".to_string();
+    };
+    let plan_id = draft
+        .get("planId")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let revision = draft
+        .get("revision")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    if plan_id.is_empty() {
+        return "计划投影缺少 planId，无法批准".to_string();
+    }
+    match control_plane.plan_execution_approve(session_id, plan_id, revision) {
+        Ok(approved) => {
+            let next_revision = approved
+                .get("revision")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(revision);
+            format!(
+                "已批准执行计划 {plan_id}（revision {revision} → {next_revision}）：写文件/跑命令已解锁"
+            )
+        }
+        Err(error) => format!("批准计划失败：{error}"),
+    }
+}
+
+/// `/approve` 的落地实现：先盖宿主章，再把最新计划投影推给面板（失败也不 panic）。
+fn handle_approve_command(control_plane: &HostControlPlane, state: &mut TuiState) {
+    let notice = approve_earliest_draft_plan(control_plane, &state.session_id);
+    state.set_status_notice(notice);
+    let plans_val = control_plane.plan_list(&state.session_id);
+    if let Some(plan_state) = tui_plan_from_value(&plans_val) {
+        state.update_plan(plan_state);
     }
 }
 
@@ -7809,6 +7876,80 @@ fn tui_queue_log(
     );
 }
 
+/// 契约 F-G3（ADR 0092）：会话内是否仍有**待作答**的 Ask / 审批请求。
+///
+/// 有未作答宿主请求时，goal 自动续轮必须让位：续轮会立刻开新 turn，而新 turn 入口会把仍
+/// 等待作答的提问判为过期（面板上屏「该提问已失效」），模型只能重复提问。
+pub fn session_has_pending_host_requests(
+    control_plane: &HostControlPlane,
+    session_id: &str,
+) -> bool {
+    let asks = control_plane.list_pending_asks(Some(session_id));
+    let approvals = control_plane.list_pending_approvals(session_id);
+    goal_rounds_must_yield_to_pending_requests(
+        asks.as_array().map_or(0, Vec::len),
+        approvals.as_array().map_or(0, Vec::len),
+    )
+}
+
+/// 契约 F-G①/F-G3（ADR 0092）：goal 自动续轮主循环。
+///
+/// 停止判据：Esc 取消 / 连续轮次预算 / 仍有待作答宿主请求（让位给人）。
+/// 独立成函数，避免继续把 `tui_event_loop` 撑大（规模门禁是只许降不许升的棘轮）。
+fn run_goal_rounds(
+    turn_control_plane: &Arc<HostControlPlane>,
+    sink: &Arc<TuiTurnSink>,
+    turn_input: &TurnInput,
+    session_id: &str,
+    cancel: &GoalRoundCancelToken,
+    current_turn: &std::sync::Mutex<Option<String>>,
+) {
+    let mut consecutive: u32 = 0;
+    while !should_abort_goal_rounds(
+        cancel.is_cancelled(),
+        consecutive,
+        pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
+    ) && !session_has_pending_host_requests(turn_control_plane, session_id)
+    {
+        let active_goal = match pony_agent_core::agent::goal::active_goal_for_session(session_id) {
+            Some(g) => g,
+            None => break,
+        };
+        if active_goal.rounds_started >= active_goal.max_goal_rounds {
+            break;
+        }
+        let updated_goal = match pony_agent_core::agent::goal::advance_goal_round(&active_goal.id) {
+            Ok(g) => g,
+            Err(_) => break,
+        };
+        consecutive += 1;
+        let round = updated_goal.rounds_started;
+        let msg = pony_agent_core::agent::goal::build_goal_round_message(
+            &updated_goal.objective,
+            round,
+            updated_goal.max_goal_rounds,
+        );
+        let next_turn_id = format!("turn-goal-{round}-{}", uuid::Uuid::new_v4());
+        // 契约 F-G②：先注册 sink，再回写本轮 turn_id；续轮与首轮同一停止生命周期。
+        let _next_turn_sink_guard =
+            TuiTurnSinkGuard::new(turn_control_plane, &next_turn_id, Arc::clone(sink));
+        *current_turn
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(next_turn_id.clone());
+        let mut next_input = turn_input.clone();
+        next_input.message = msg;
+        next_input.display_message = Some(format!(
+            "[goal round {round}] 推进目标：{}",
+            updated_goal.objective
+        ));
+        let next_cmd = StartTurnStreamCommand {
+            turn_id: next_turn_id,
+            input: next_input,
+        };
+        turn_control_plane.start_turn_stream(sink.as_ref(), next_cmd);
+    }
+}
+
 fn tui_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut state: TuiState,
@@ -9181,6 +9322,11 @@ fn tui_event_loop(
                                     state.toggle_plan_mode();
                                     continue;
                                 }
+                                // `/approve`：宿主盖章入口（PA-141），无 Draft 时如实汇报。
+                                if known_command == Some("/approve") {
+                                    handle_approve_command(&control_plane, &mut state);
+                                    continue;
+                                }
                                 if known_command == Some("/tasks") {
                                     // W3：真实 Team 共享看板（team_task_list）。
                                     sync_tasks_from_store(&mut state);
@@ -9390,50 +9536,16 @@ fn tui_event_loop(
                                     turn_control_plane.start_turn_stream(sink.as_ref(), cmd);
                                     drop(initial_turn_sink_guard);
 
-                                    let mut consecutive: u32 = 0;
-                                    // 契约 F-G①：每轮开始前检查取消令牌（Esc）与预算，二者任一即停。
-                                    while !should_abort_goal_rounds(
-                                        cancel_for_rounds.is_cancelled(),
-                                        consecutive,
-                                        pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
-                                    ) {
-                                        let active_goal = match pony_agent_core::agent::goal::active_goal_for_session(&session_id) {
-                                            Some(g) => g,
-                                            None => break,
-                                        };
-                                        if active_goal.rounds_started >= active_goal.max_goal_rounds {
-                                            break;
-                                        }
-                                        let updated_goal = match pony_agent_core::agent::goal::advance_goal_round(&active_goal.id) {
-                                            Ok(g) => g,
-                                            Err(_) => break,
-                                        };
-                                        consecutive += 1;
-                                        let round = updated_goal.rounds_started;
-                                        let msg = pony_agent_core::agent::goal::build_goal_round_message(
-                                            &updated_goal.objective,
-                                            round,
-                                            updated_goal.max_goal_rounds,
-                                        );
-                                        let next_turn_id = format!("turn-goal-{round}-{}", uuid::Uuid::new_v4());
-                                        let _next_turn_sink_guard = TuiTurnSinkGuard::new(
-                                            &turn_control_plane,
-                                            &next_turn_id,
-                                            Arc::clone(&sink),
-                                        );
-                                        // 契约 F-G②：先注册 sink，再回写本轮 turn_id；续轮与首轮同一停止生命周期。
-                                        *current_turn_for_rounds
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner()) = Some(next_turn_id.clone());
-                                        let mut next_input = turn_input.clone();
-                                        next_input.message = msg;
-                                        next_input.display_message = Some(format!("[goal round {round}] 推进目标：{}", updated_goal.objective));
-                                        let next_cmd = StartTurnStreamCommand {
-                                            turn_id: next_turn_id,
-                                            input: next_input,
-                                        };
-                                        turn_control_plane.start_turn_stream(sink.as_ref(), next_cmd);
-                                    }
+                                    // 契约 F-G①/F-G3（ADR 0092）：Esc / 轮次预算 / 待作答宿主请求，任一即停止续轮。
+                                    run_goal_rounds(
+                                        &turn_control_plane,
+                                        &sink,
+                                        &turn_input,
+                                        &session_id,
+                                        &cancel_for_rounds,
+                                        &current_turn_for_rounds,
+                                    );
+
                                   }));
                                   if let Err(payload) = outcome {
                                       // panic 也是「终态」：必须让事件循环退出流式态（C11）。
@@ -10688,3 +10800,11 @@ mod transient_error_terminal_tests;
 #[cfg(test)]
 #[path = "tui/tests/cli_self_update_tests.rs"]
 mod cli_self_update_tests;
+
+/// ADR 0092 单测：`/approve` 宿主盖章入口（Draft 计划解锁的 TUI 侧唯一合法通道）。
+///
+/// 纪律：用**真实** `HostControlPlane` + 真实 `PlanStore` 驱动（不 mock 成功），
+/// 并先把 HOME/XDG 重定向到临时沙箱，保证单测不读写用户的 `sessions.db`。
+#[cfg(test)]
+#[path = "tui/tests/plan_approve_tests.rs"]
+mod plan_approve_tests;

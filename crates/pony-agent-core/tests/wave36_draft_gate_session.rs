@@ -367,3 +367,60 @@ fn build_turn_scoped_executor(
 ) -> TurnScopedExecutor {
     TurnScopedExecutor::new(build_governed_executor(workspace_root, authorize_store))
 }
+
+/// 自锁回归（Ask 死循环事件）：Draft 计划锁死写工具时，模型必须能**自行**撤回草稿
+/// （`plan_control abort`，无需宿主审批），否则一旦宿主不盖章，会话就永久卡死在
+/// 「反复请求批准 + 写工具全被拒」的循环里。
+#[test]
+fn draft_gate_is_released_by_plan_control_abort_without_host_approval() {
+    let workspace = temp_workspace();
+    let executor = build_turn_scoped_executor(Some(workspace.clone()), None);
+    executor.set_context(DispatchContext {
+        session_id: Some(SESSION.to_string()),
+        ..Default::default()
+    });
+
+    let plan = create_draft_plan(&executor);
+    let plan_id = plan["planId"].as_str().expect("planId").to_string();
+
+    // 模型侧 `abort`：不带 plan_id / revision 也要能撤销本会话的 Draft（不需要任何审批）。
+    let aborted = executor.execute(&call(
+        "plan_control",
+        json!({
+            "op": "abort",
+            "session_id": SESSION,
+            "description": "self-lock recovery: retire the draft"
+        }),
+    ));
+    assert_eq!(
+        aborted.status, "ok",
+        "abort must be reachable without host approval: {}",
+        aborted.output
+    );
+    let aborted_plan = parse_output(&aborted.output);
+    assert_eq!(aborted_plan["planId"], plan_id.as_str());
+    assert_eq!(aborted_plan["lifecycle"], "aborted");
+    assert!(
+        !aborted.output.contains("plan_execution_approval_required"),
+        "abort must stay exempt from the execution-approval gate: {}",
+        aborted.output
+    );
+
+    // 撤销后写工具恢复可用（Draft 写保护随生命周期解除）。
+    let write = executor.execute(&call(
+        "Write",
+        json!({
+            "path": "post-abort-write.txt",
+            "content": "write allowed after abort",
+            "description": "self-lock regression probe"
+        }),
+    ));
+    assert_eq!(
+        write.status, "ok",
+        "writes must be unblocked once the draft is aborted: {}",
+        write.output
+    );
+    assert!(workspace.join("post-abort-write.txt").exists());
+
+    let _ = fs::remove_dir_all(workspace);
+}

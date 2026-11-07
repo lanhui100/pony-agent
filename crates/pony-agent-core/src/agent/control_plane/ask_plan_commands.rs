@@ -15,6 +15,10 @@ use crate::agent::plan_state::{Plan, PlanPayload, PlanStepSpec};
 use crate::agent::tool_runtime::PendingControlRequestState;
 use serde_json::{json, Value};
 
+// ADR 0092 回归：宿主续轮文案不得让仍在等待作答的 Ask 过期（见同目录子模块）。
+#[cfg(test)]
+mod goal_round_prompt_tests;
+
 impl HostControlPlane {
     // ── Ask control surface (design.md Decision 5 / ADR 0074) ────────────────────────────
 
@@ -506,6 +510,18 @@ impl HostControlPlane {
     /// before the turn runs, so the message that makes an older question moot retires it.
     pub(crate) fn note_user_message_entry(&self, input: &crate::agent::runtime::TurnInput) {
         if input.message.trim().is_empty() {
+            return;
+        }
+        // 只有「人」的消息才让旧提问过期（ADR 0074 §3：对话顺序而非墙钟是陈旧信号）。
+        // 宿主注入的续轮文案（goal 续轮 / Ask 恢复 / 审批恢复）不是人类新输入：它们同样经过
+        // turn 入口，若被当成新消息，正在等待作答的 Ask 会在下一轮开始前被 supersede ——
+        // 面板随后显示「该提问已失效」并进入自锁循环（用户永远抢不到可作答的那个提问）。
+        if crate::agent::session::is_host_continuation_prompt(&input.message)
+            || input
+                .display_message
+                .as_deref()
+                .is_some_and(crate::agent::session::is_host_continuation_prompt)
+        {
             return;
         }
         let session_id = input

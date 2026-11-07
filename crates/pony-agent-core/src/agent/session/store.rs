@@ -5041,12 +5041,11 @@ const GOAL_ROUND_CONTINUATION_SUFFIX: &str = " 推进目标：";
 /// 判定一段 user 轮文本是否为宿主续轮提示（逐字匹配 + goal 轮次结构匹配）。
 pub fn is_host_continuation_prompt(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
     if trimmed == ASK_RESUME_CONTINUATION_PROMPT
         || trimmed == APPROVAL_APPROVED_CONTINUATION_PROMPT
         || trimmed == APPROVAL_DENIED_CONTINUATION_PROMPT
+        // ADR 0092：goal 续轮真正下发的是 `<goal_round round="N" max="M">…`。
+        || crate::agent::goal::is_goal_round_prompt(trimmed)
     {
         return true;
     }

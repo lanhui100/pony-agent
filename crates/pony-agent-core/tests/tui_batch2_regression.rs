@@ -328,3 +328,27 @@ fn n9_input_pump_failure_event_carries_readable_error() {
         _ => panic!("N9: 构造出的变体必须是 InputPumpFailed"),
     }
 }
+
+/// 契约 F-G3：会话里仍有待作答的 Ask / 审批请求时，goal 续轮必须让位给人。
+///
+/// 回归面：旧实现只看「取消 / 轮次上限」，于是模型 Ask 挂起后立刻开下一轮，新一轮入口把
+/// 该提问判为过期（面板「该提问已失效」），模型只能重复提问 —— 实测连续 16 轮空转。
+#[test]
+fn n5b_goal_rounds_yield_to_pending_host_requests() {
+    assert!(
+        !tui::goal_rounds_must_yield_to_pending_requests(0, 0),
+        "N5b: 没有待作答请求时续轮照常推进"
+    );
+    assert!(
+        tui::goal_rounds_must_yield_to_pending_requests(1, 0),
+        "N5b: 存在待作答 Ask 时必须停止续轮"
+    );
+    assert!(
+        tui::goal_rounds_must_yield_to_pending_requests(0, 1),
+        "N5b: 存在待决审批时必须停止续轮"
+    );
+    assert!(
+        tui::goal_rounds_must_yield_to_pending_requests(3, 2),
+        "N5b: 多请求同样必须停止续轮"
+    );
+}

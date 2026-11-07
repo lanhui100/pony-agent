@@ -6359,13 +6359,13 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         // so the stable prefix invariant (design Decision 10) is preserved. ──
         ToolDefinition {
             name: TOOL_PLAN_CONTROL,
-            description: "控制会话级 Plan 状态：create / replace / merge / complete_step / start_execution，不执行任意子调用。",
+            description: "控制会话级 Plan 状态：create / replace / merge / complete_step / start_execution / abort，不执行任意子调用。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "op": {
                         "type": "string",
-                        "description": "plan 控制操作：create / replace / merge / complete_step / start_execution"
+                        "description": "plan 控制操作：create / replace / merge / complete_step / start_execution / abort"
                     },
                     "session_id": {
                         "type": "string",
@@ -6373,11 +6373,11 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     },
                     "plan_id": {
                         "type": "string",
-                        "description": "要修改的 plan id（replace / merge / complete_step 需要）"
+                        "description": "要修改的 plan id（replace / merge / complete_step / start_execution / abort 需要；abort 省略时撤销本会话最早的 Draft 计划）"
                     },
                     "revision": {
                         "type": "integer",
-                        "description": "期望的 plan revision，用于 CAS 冲突检测（replace / merge / complete_step 需要）"
+                        "description": "期望的 plan revision，用于 CAS 冲突检测（replace / merge / complete_step / start_execution 需要；abort 省略时取当前 revision）"
                     },
                     "step_id": {
                         "type": "string",

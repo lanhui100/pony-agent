@@ -179,7 +179,8 @@ impl GovernedPolicyEvaluator {
                 //（complete_step 是第二条 Draft→Executing 迁移路径）。仅该迁移面需要审批；
                 // 其余 plan_control op（create/merge/replace/abort…）与 Executing 态的
                 // complete_step 不受影响（C-141-8）。审批证据只来自宿主注入的
-                // DispatchContext，模型工具参数不是来源（C-141-3）。
+                // DispatchContext，模型工具参数不是来源（C-141-3）。ADR 0092：判据是「plan 仍为
+                // Draft」——宿主已用 plan_execution_approve 推进到 Executing 时不再索要审批。
                 let requires_execution_approval = || -> Option<bool> {
                     let op = json_arguments
                         .get("op")
@@ -189,8 +190,7 @@ impl GovernedPolicyEvaluator {
                         json_arguments.get("session_id").and_then(Value::as_str)?;
                     let plan_id = json_arguments.get("plan_id").and_then(Value::as_str)?;
                     match op {
-                        "start_execution" => Some(true),
-                        "complete_step" => {
+                        "start_execution" | "complete_step" => {
                             let plan = plan_store.plan(session, plan_id).ok()?;
                             Some(plan.lifecycle == PlanLifecycleState::Draft)
                         }
