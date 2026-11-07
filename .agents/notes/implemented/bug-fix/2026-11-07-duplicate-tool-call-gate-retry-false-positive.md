@@ -90,7 +90,13 @@ Status: implemented
   ④ 纯只读轮询（`team_task_list` / `list_agents` / `JobOutput`）的 30% 误杀只被「上限 2」缓解、未被根治，
   根治需先补注册表标记（见 Alternatives 末条）；
   ⑤ 清空触发集只含 `ToolKind::Write`：`Run`（Execute）与 `workspace_batch`（Composite）成功执行不清空，
-  方向是**偏多拦**（保守）而不是漏放行；若要覆盖批内写，需先给注册表补 `Composite` 细分；
+  方向是**偏多拦**（保守）而不是漏放行；若要覆盖批内写，需先给注册表补 `Composite` 细分。由此还有两个已知残余：
+  ⑤a **shell-only 修改路径不获益**——若「改 + 测」都由 `Run` 完成（`Run(fix) → Run(test)`，中间无 Write），
+  第 3 次同参 `Run` 仍被拦（偏误杀、非漏杀，相对旧 `BTreeSet` 仍更宽松）；
+  ⑤b **Write 类「洗计数」同构残余**——`Plan` / `team_task_create|update` / `TodoWrite` 也属 `ToolKind::Write`，
+  `Read(A) ↔ TodoWrite(T, ok)` 交替可把读计数永久归零（受 hop 1024 / 墙钟 900s 约束）。
+  两者都源于「写 = 任务已推进」这条契约裁决，根治需在工具注册表里再分「内容写 / 状态标记写 / 写域 Run」，
+  登记为后续条（同一诉求即上文延后的「poll/写域语义标记」）；
   ⑥ 「闸点只读」这条不变量目前**没有机器锁**——命中即收尾，被拒调用即使被误记账在结构上也观测不到（审查实测：
   在闸点插一行 `record_executed` 后 10 个相关用例全绿），只能靠 code review 守；
   ⑦ 批内（同 hop 多个同参调用）记账可越过上限，此时文案「最多允许 L 次」与实际执行次数不符——属既有

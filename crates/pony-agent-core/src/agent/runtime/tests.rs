@@ -5599,7 +5599,10 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
 /// 第 2 次 `Read` 也只把计数推到 2（未超上限、不熔断）⇒ 用例照样绿 = 零区分力 = 假绿。
 /// 新序列先用两次同参 `Read` 把计数顶到上限（=2），再由 `Edit` 成功清空：一旦 `record_executed`
 /// 的 `retain`（写类成功清空其它签名）被删/退化，第 3 次 `Read` 就是第 3 次记账 ⇒
-/// `is_exhausted(_, 2)` 命中 ⇒ 少执行一次 + 多出一次恢复式收尾请求，断言立刻变红。
+/// `is_exhausted(_, 2)` 命中 ⇒ **少一次真实执行**（`executed_names` / `tool_activities.len()` 立刻变红）
+/// 且请求体出现合成 tool result（`blocked_redundant_followup` 断言红）。
+/// 注意：**请求总数不变**（命中闸时 = 3 次执行 + 1 次被拦决策 + 1 次恢复式收尾 = 5，与未命中时
+/// 4 次决策 + 1 次最终作答相同），故 `requests.len()` 只锁上限，区分「是否命中闸」靠执行序断言。
 #[test]
 fn run_turn_write_success_clears_same_signature_counts_end_to_end() {
     // Arrange：会记录真实执行序的「永远成功」executor（反向照抄 AlwaysFailingExecutor 的写法，
@@ -5698,7 +5701,7 @@ fn run_turn_write_success_clears_same_signature_counts_end_to_end() {
     assert_eq!(
         requests.len(),
         5,
-        "4 次决策请求 + 1 次最终作答 = 5；命中重复闸会多出一次恢复式收尾请求"
+        "4 次决策请求 + 1 次最终作答 = 5（注：命中闸同样是 5，故本断言只锁上限；区分是否命中靠上面两条执行序断言）"
     );
     assert!(
         requests

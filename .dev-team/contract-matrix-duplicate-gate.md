@@ -77,8 +77,13 @@ Gate-1 方案对抗审查判 BLOCKING（Lead 已按 `stream_support.rs:692` + `t
    - 文案用例补锁语义位置：`contains("已第 3 次")` 且 `contains("最多允许 2 次")`（L3-B：原 `contains('3')`/`contains('2')` 杀不掉参数错位变异）；
    - 端到端用例改序列 **`Read(A) → Read(A) → Edit(B, ok) → Read(A)`**：4 次执行、5 次请求（L3-B：原 `Read→Edit→Read` 在 limit=2 下对 `retain` 变异零区分力 ⇒ 假绿）；
    - 删除 `clear()` 相关断言（保留「不同签名互不影响」断言）。
-5. 不采纳但登记：`BatchExecute`/`Composite` 写类不清空（偏多拦，保守；需注册表细分）；闸点只读不变量无机器锁（结构不可观测：命中即收尾）；
-   批内同参 >limit 时文案「最多允许 L 次」失真（旧「只判批首」口径既有局限）。
+5. 不采纳但登记（**定向复审 R1~R5 PASS 后补**）：
+   - `BatchExecute`/`Composite` 写类不清空（偏多拦，保守；需注册表细分）；
+   - **Write 类「洗计数」同构残余**：`Plan` / `team_task_create|update` / `TodoWrite` 同属 `ToolKind::Write`（`tools.rs:7963/7972/7974`），
+     `Read(A) ↔ TodoWrite(T, ok)` 交替可把 read 计数永久归零、恒为 1（与 Gate-1 BLOCKING 同机制，弹药换成 Write）。
+     这是「写 = 任务已推进」这条契约裁决的固有代价，受 hop 1024 / 墙钟 900s 约束；根治需按 `execution_policy` 再分「内容写」与「状态标记写」，登记为后续条。
+   - **shell-only 修改路径不获益**：若「改 + 测」都由 `Run` 完成（`Run(fix) → Run(test)`，中间无 Write），Execute 不清空 ⇒ 第 3 次同参 `Run` 仍被拦（偏误杀、非漏杀，相对基线 `BTreeSet` 仍更宽松）。登记为后续条（该场景正是第 3 项后半 / poll 语义标记之外的另一个注册表细分诉求）。
+   - 闸点只读不变量无机器锁（结构不可观测：命中即收尾）；批内同参 >limit 时文案「最多允许 L 次」失真（旧「只判批首」口径既有局限）。
 
 ## C5 测试契约（tests.rs 归 Test Agent 独占，Executor 只读）
 
