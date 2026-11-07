@@ -334,7 +334,9 @@ const BUILTIN_GOLDEN: &[(&str, &str, &str, &str, u64)] = &[
     ("builtin:workspace_write_file", "Write", "write", "model_visible", 0x5196db9d3c2fc7be),
     ("builtin:workspace_edit_file", "Edit", "write", "model_visible", 0x5247515e4c7ae95b),
     ("builtin:workspace_batch", "BatchExecute", "composite", "model_visible", 0x8c3195523121c376),
-    ("builtin:plan_control", "Plan", "write", "model_visible", 0x3893b63f527c20ae),
+    // `abort` op 由 b6fd928d（[decl-change-approved]）加入模型可见输入面，schema 逐字节变化属**已批准**变更，
+    // golden 随之同步；日后再变必须重新走 decl-change 评审，不得照抄实测值。
+    ("builtin:plan_control", "Plan", "write", "model_visible", 0x1e6b65963cc9549a),
     ("builtin:view_image", "ViewImage", "read", "model_visible", 0x2e5e324a17a5cab2),
     ("builtin:subagent", "subagent", "composite", "model_visible", 0xc9f3f6ae8f81c76a),
     ("builtin:spawn_teammate", "spawn_teammate", "interactive", "model_visible", 0xf884da9528ced99b),
