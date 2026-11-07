@@ -27,8 +27,8 @@
     "summary": "1 passed (T4 INV-2 回归); 3 failed (T1/T2/T3 停在 list_pending_approvals 空桩)",
     "receipt": ".dev-team/red-phase-approval-resume.log",
     "frozen_sha256": {
-      "test_file": "b5571f73dc35733333f9e716dacfd37431532aef47c4d8b629d995bf0b794cb5",
-      "log_file": "41b3d50fa4e12b7a57d49f02ceda4e97613b58a5c9e5a20a949835a2c4820f23"
+      "test_file_sha256": "b5571f73dc35733333f9e716dacfd37431532aef47c4d8b629d995bf0b794cb5",
+      "log_file_sha256": "41b3d50fa4e12b7a57d49f02ceda4e97613b58a5c9e5a20a949835a2c4820f23"
     }
   }
 }
