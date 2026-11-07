@@ -1,5 +1,7 @@
 use super::*;
 
+use std::collections::BTreeMap;
+
 pub(super) const STREAM_REASONING_BATCH_CHARS: usize = 96;
 
 /// 工具参数别名归一（P1-2，真实 trace 实证 9 次无谓失败）。
@@ -648,6 +650,58 @@ pub(super) struct ConsecutiveFailureTracker {
     /// 工具级连续失败：只看工具名，忽略入参与错误码（P1-3 第二道闸）。
     pub(super) tool_name: Option<String>,
     pub(super) tool_count: usize,
+}
+
+/// 同一 turn 内的「同签名执行次数」计数器（契约矩阵 C2）：把既有的 `BTreeSet` 判重升级为
+/// 计数判重，使同一工具 + 同一归一化参数可以**有限次**执行，而不是第 2 次即被拒。
+///
+/// 关键不变量：
+/// - **闸点只读、执行点才记账**：`is_exhausted` / `occurrence_count` 纯读，`record_executed`
+///   是唯一记账点；被闸拦下的调用不得记账，否则恢复式收尾后的重试会被自己推高计数。
+/// - **不预置首批计数**：turn 起始一律用 `new()` 建空计数。若按首批调用预置（note 最初的
+///   `from_batch`），预置 1 次 + 执行点再记 1 次构成双重计数，默认 limit=2 时第 2 次即熔断。
+/// - **写类成功只清空其它签名计数、保留自身**：`record_executed(.., changed_world = true)` 时，
+///   若该工具确实改变了世界，则证明模型已推进任务，其它签名的历史计数不再代表打转；自身计数
+///   必须保留，否则「同一读法反复写同一处」会被自己清空而无限放行。
+#[derive(Default, Clone, Debug)]
+pub(super) struct SameSignatureTracker {
+    pub(super) counts: BTreeMap<String, usize>,
+}
+
+impl SameSignatureTracker {
+    pub(super) fn new() -> Self {
+        unimplemented!()
+    }
+
+    /// 只读：该签名在本 turn 内已执行成功放行的次数。
+    pub(super) fn occurrence_count(&self, signature: &str) -> usize {
+        unimplemented!()
+    }
+
+    /// 只读闸点：`count >= limit` 即视为耗尽（不记账、不改状态）。
+    pub(super) fn is_exhausted(&self, signature: &str, limit: usize) -> bool {
+        unimplemented!()
+    }
+
+    /// 唯一记账点：仅在工具调用真正被放行执行时调用。
+    /// `changed_world` = 本次执行是否改变了世界（见 `tool_execution_changed_world`）。
+    pub(super) fn record_executed(&mut self, signature: String, changed_world: bool) {
+        unimplemented!()
+    }
+
+    /// 清空全部计数（留给后续需要整轮重置的场景）。
+    pub(super) fn clear(&mut self) {
+        unimplemented!()
+    }
+}
+
+/// 判定一次工具执行是否「改变了世界」（写类成功清空其它签名计数的输入事实）。
+///
+/// 语义：工具执行成功（`tool_result.status != "error"`）且
+/// `tool_kind_for_name(&tool_call.name)` ∈ {`ToolKind::Write`, `ToolKind::Execute`}。
+/// 失败、只读/搜索类一律视为未改变世界（不得据此清空别人的计数）。
+pub(super) fn tool_execution_changed_world(tool_call: &ToolCall, tool_result: &ToolResult) -> bool {
+    unimplemented!()
 }
 
 /// Match the dispatcher's persisted `PendingControlRequest` to the originating tool call. The

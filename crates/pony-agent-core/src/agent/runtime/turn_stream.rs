@@ -1334,7 +1334,8 @@ impl AgentRuntime {
                             &hop_records,
                             &next_tool_call,
                             response.assistant_message.as_ref(),
-                            &build_duplicate_tool_call_error(&next_tool_call),
+                            // 临时编译桥：occurrences/limit 由 Executor 按契约矩阵 C4 改写。
+                            &build_duplicate_tool_call_error(&next_tool_call, 0, 0),
                             &context_observation,
                             turn_id,
                             input.session_id.clone(),

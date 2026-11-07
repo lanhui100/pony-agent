@@ -1,0 +1,65 @@
+# 红相收据：同签名重复工具调用闸（BTreeSet 判重 → 计数判重）
+# 生成者：test-agent（L2-T 独立测试者）；写域：crates/pony-agent-core/src/agent/runtime/tests.rs
+# 契约真值源：.dev-team/contract-matrix-duplicate-gate.md（C1/C2/C4/C5 + AMEND-1）
+#
+# 门禁命令（原始）：
+#   cd /home/dm/pony-agent && cargo test -p pony-agent-core --lib
+# Exit code: 101（= 测试失败；编译阶段通过，非编译错误）
+#
+# ── test result 行原文 ──────────────────────────────────────────────────────
+test result: FAILED. 1336 passed; 11 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.47s
+#
+# ── 失败用例清单（逐条 = 新增/改写的红相用例，全部因 src 空桩 unimplemented!() panic）──
+# 1) agent::runtime::tests::duplicate_tool_call_error_states_exact_match_with_actual_counts
+#      tests.rs:5785  契约 C4 文案（完全相同/不含近似/含次数 3/含上限 2/含工具名）
+#      panic at crates/pony-agent-core/src/agent/runtime/limits.rs:232:5  (build_duplicate_tool_call_error 空桩)
+# 2) agent::runtime::tests::same_signature_tracker_allows_limit_executions_then_exhausts
+#      tests.rs:5824  契约 C2（前 2 次放行、两次记账后耗尽、is_exhausted 只读）
+#      panic at crates/pony-agent-core/src/agent/runtime/stream_support.rs:673:9  (SameSignatureTracker::new 空桩)
+# 3) agent::runtime::tests::same_signature_tracker_isolates_signatures_and_clears
+#      tests.rs:5878  契约 C2（不同签名互不影响 / clear() 归零）
+#      panic at stream_support.rs:673:9
+# 4) agent::runtime::tests::same_signature_tracker_write_success_clears_other_signatures_only
+#      tests.rs:5913  契约 C5-6 / AMEND-1（写类成功清空其它签名、保留自身）
+#      panic at stream_support.rs:673:9
+# 5) agent::runtime::tests::tool_execution_changed_world_requires_successful_write_or_execute_kind
+#      tests.rs:5962  契约 C5-7（edit+ok=true / edit+error=false / read+ok=false / run+ok=true）
+#      panic at crates/pony-agent-core/src/agent/runtime/stream_support.rs:704:5  (tool_execution_changed_world 空桩)
+# 6) agent::runtime::tests::same_signature_occurrence_limit_parse_falls_back_to_default_on_malformed_input
+#      tests.rs:6003  契约 C1（None/""/0/9/abc/空白/-1/"2 " ⇒ 2；1⇒1；8⇒8；禁止静默取 0）
+#      panic at crates/pony-agent-core/src/agent/runtime/limits.rs:188:5  (parse_max_same_signature_occurrences_per_turn 空桩)
+# 7) agent::runtime::tests::same_signature_occurrence_limit_getter_honours_test_override
+#      tests.rs:6070  契约 C1 getter + #[cfg(test)] 覆写槽
+#      panic at crates/pony-agent-core/src/agent/runtime/limits.rs:184:5  (max_same_signature_occurrences_per_turn 空桩)
+# 8) agent::runtime::tests::run_turn_stops_followup_after_consecutive_identical_tool_failures（改写）
+#      tests.rs:5512  契约 C5-4（3 次同参失败 ⇒ 前 2 次执行、第 3 次恢复式收尾 ⇒ 4 次请求）
+#      panic at limits.rs:232:5（旧闸点仍在第 2 次命中并调用空桩 builder）
+# 9) agent::runtime::tests::start_turn_stream_streams_duplicate_tool_recovery_answer（改写）
+#      tests.rs:7238  契约 C5-5（补第 3 个同参 tool_call 响应；断言 4 次请求）
+#      panic at limits.rs:232:5
+# 10) agent::runtime::tests::duplicate_tool_recovery_request_keeps_full_context（契约同步改写）
+#      tests.rs:7398  新口径下需第 3 个同参 tool_call 才命中闸；前缀比对基准改为 requests[2]
+#      panic at limits.rs:232:5
+# 11) agent::runtime::tests::run_turn_write_success_clears_same_signature_counts_end_to_end（新增）
+#      tests.rs:5598  契约 C5-8 端到端 Read(A)→Edit(B 成功)→Read(A) 不得触发重复闸
+#      panic at limits.rs:232:5（实测 Read/Edit 均 status=ok 真实执行，第 3 次同参 Read 被旧闸拦下）
+#
+# ── 失败性质判定 ───────────────────────────────────────────────────────────
+# 11/11 全部为 `unimplemented!()` panic（src 空桩），无编译错误、无 ignored/skip、无吞异常。
+# 其中 8/9/10/11 四个整轮用例目前被旧闸点路径里的空桩 builder 提前 panic；待 Executor 实现
+# 文案函数后，这些用例会转为断言失败（requests==4 / executed 序列 / 无 blocked_redundant_followup），
+# 再待 tracker 实现后转绿。
+#
+# ── 基线口径 ───────────────────────────────────────────────────────────────
+# 基线（.dev-team/regression-baseline-wave0-duplicate-gate.json，commit ae9312f5）：1336 passed / 0 failed。
+# 本次运行总用例 1347，账目：
+#   1336 基线
+#   + 8 本任务新增（tests.rs 内 7 个单测 + 1 个端到端整轮用例）
+#   + 3 他人并行改动 crates/pony-agent-core/src/agent/retry.rs 新增的单测（非本任务写域，未触碰）
+#   = 1347（1336 passed + 11 failed）
+# 结论：本任务 8 个新增用例全部失败 + 3 个改写用例全部失败；1336 条既有用例仍全绿（零回归）。
+#
+# ── 覆盖声明 ───────────────────────────────────────────────────────────────
+# 契约矩阵 C5 第 1~8 条全部有对应用例；第 8 条（端到端写类清空）已**真实覆盖**（未降级为
+# 「由 tracker 级用例 3 覆盖」）：自定义成功 executor 下 workspace_edit_file 经 capability registry
+# 解析并真实执行（status=ok），无需真实沙箱写盘。

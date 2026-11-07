@@ -42,6 +42,15 @@ pub(super) const MAX_ALLOWED_CONSECUTIVE_SAME_TOOL_FAILURES: usize = 16;
 pub(super) const MAX_CONSECUTIVE_SAME_TOOL_FAILURES_ENV: &str =
     "PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES";
 
+/// 同签名重复工具调用闸（集合 → 计数）：同一 turn 内「同一工具 + 同一归一化参数」允许执行的
+/// 次数，第 N+1 次触发闸。默认 2 ⇒ 前 2 次放行、第 3 次熔断并恢复式收尾。
+pub(super) const DEFAULT_MAX_SAME_SIGNATURE_OCCURRENCES_PER_TURN: usize = 2;
+
+pub(super) const MAX_ALLOWED_SAME_SIGNATURE_OCCURRENCES_PER_TURN: usize = 8;
+
+pub(super) const MAX_SAME_SIGNATURE_OCCURRENCES_ENV: &str =
+    "PONY_AGENT_MAX_SAME_TOOL_SIGNATURE_OCCURRENCES_PER_TURN";
+
 /// 批内并发执行开关（D4 / W28b）：`PONY_AGENT_PARALLEL_TOOLS`。
 ///
 /// **默认关**（fail-safe）：只有显式 `1/true/on/yes`（大小写不敏感、允许首尾空白）才开启；
@@ -74,6 +83,8 @@ pub(super) fn build_same_tool_consecutive_failure_error(
 thread_local! {
     static TURN_WALL_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SAME_TOOL_FAILURE_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SAME_SIGNATURE_OCCURRENCES_OVERRIDE: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
     /// `Some(bool)` ⇒ 用例显式覆写并发开关（`None` = 未覆写，回落 env）。
     static PARALLEL_TOOLS_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
@@ -86,6 +97,12 @@ pub(super) fn set_turn_wall_override(value: usize) -> usize {
 #[cfg(test)]
 pub(super) fn set_same_tool_failure_override(value: usize) -> usize {
     SAME_TOOL_FAILURE_OVERRIDE.with(|slot| slot.replace(value))
+}
+
+/// 测试专用：设置同签名重复调用闸的允许次数覆写，返回先前的覆写值（便于用例收尾还原）。
+#[cfg(test)]
+pub(super) fn set_same_signature_occurrences_override(value: usize) -> usize {
+    unimplemented!()
 }
 
 /// 测试专用：设置并发开关覆写，返回先前的覆写值（便于用例收尾还原）。
@@ -163,6 +180,14 @@ pub(super) fn parse_max_consecutive_same_tool_failures(raw: Option<&str>) -> usi
         .unwrap_or(DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES)
 }
 
+pub(super) fn max_same_signature_occurrences_per_turn() -> usize {
+    unimplemented!()
+}
+
+pub(super) fn parse_max_same_signature_occurrences_per_turn(raw: Option<&str>) -> usize {
+    unimplemented!()
+}
+
 pub(super) fn build_consecutive_tool_failure_error(limit: usize, tool_name: &str, code: &str, output: &str) -> String {
     format!(
         "工具 `{tool_name}` 连续 {limit} 次以同一错误 `{code}` 失败，已停止继续 follow-up 以避免无效重试；最后一次错误详情：{}。如属误判，可提高 PONY_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN。",
@@ -196,11 +221,15 @@ pub(super) fn build_tool_followup_limit_error(limit: usize) -> String {
 }
 
 
-pub(super) fn build_duplicate_tool_call_error(tool_call: &ToolCall) -> String {
-    format!(
-        "工具 `{}` 在同一 turn 内重复调用了近似相同的参数，已停止继续 follow-up 以避免重复探索。",
-        tool_call.name
-    )
+/// 同签名重复工具调用闸的文案（契约矩阵 C4）。
+///
+/// `occurrences` = 本次被拦的是「第几次」（= 已执行次数 + 1）；`limit` = 允许执行次数上限。
+pub(super) fn build_duplicate_tool_call_error(
+    tool_call: &ToolCall,
+    occurrences: usize,
+    limit: usize,
+) -> String {
+    unimplemented!()
 }
 
 

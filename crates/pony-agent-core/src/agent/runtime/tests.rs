@@ -5534,6 +5534,11 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
     // wave-13：连续失败指纹 = (tool, 参数归一化, error_code)（43706da「指纹化」），
     // 三次调用必须**同参**才会被计为「连续相同失败」并触发止损；此前用不同路径导致
     // 指纹逐次变化、计数恒为 1，止损永不触发（phase 停留在 ready）。
+    //
+    // 计数闸契约（契约矩阵 C1/C2，2026-11-07 修订）：同签名重复闸已从 `BTreeSet` 判重升级为
+    // `SameSignatureTracker` 计数判重，默认**允许 2 次执行**、第 N+1 次（= 第 3 次）才熔断。
+    // 因此 3 个同参决策 = 前 2 次真实执行（工具永远失败）+ 第 3 次命中闸转「恢复式收尾」，
+    // 故 mock 队列需要 4 个响应：3 个决策响应 + 1 个恢复式收尾拿到的最终作答。
     let server = MockHttpServer::start(vec![
         json_response(decision_tool_call(
             "workspace_read_file",
@@ -5547,6 +5552,7 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
             "workspace_read_file",
             json!({ "path": "missing-a.txt", "description": "读取文件" }),
         )),
+        json_completion("两次读取都失败，停止重试并给出结论。"),
     ]);
     let runtime = build_runtime_for_test_with_tool_executor(
         test_provider_selection(server.base_url.clone()),
@@ -5570,13 +5576,125 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
     });
 
     assert_eq!(result.phase, "ready");
-    // Wave-13 契约修订（Lead 复核 + 已发布基线 bd33ed5 确认）：
-    // 「重复工具调用恢复」（turn_stream.rs seen_tool_signatures → blocked_redundant_followup）
-    // 先于「连续失败止损」触发——同参重复调用在第二次即被优雅拦截、不硬失败；
-    // 止损仅覆盖「参数不同但失败指纹相同」的场景（tracker 逻辑由单测锁定）。
-    // 本用例锁定当前契约：followup 有界（共 3 次请求，无第 4 次），回合正常完成。
+    // 契约修订（2026-11-07，计数闸）：旧口径「重复工具调用恢复在第二次即拦、共 3 次请求」已失真。
+    // 现行口径 = `SameSignatureTracker::is_exhausted`（count >= limit，默认 limit=2）：
+    // 同参第 1、2 次真实执行（本用例工具永远失败，故执行后仍 `phase == ready`，
+    // 未被「连续失败止损」命中——同指纹失败仅 2 次 < 阈值 3），第 3 次同参调用命中闸后走
+    // 恢复式收尾；请求数 = 3 个决策响应 + 1 个恢复响应 = 4，且不得出现第 5 次。
     let requests = server.finish();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests.len(),
+        4,
+        "计数闸口径：前 2 次同参执行 + 第 3 次命中闸的恢复式收尾 = 4 次请求（5 次即 follow-up 失控）"
+    );
+}
+
+/// 契约矩阵 C5-8（item 3 端到端）：写类成功执行 ⇒ 清空其它签名计数。
+///
+/// 整轮 `Read(A) → Edit(B, 成功) → Read(A)`（两次读同参；`description` 不同也被签名归一化忽略）：
+/// 第 2 次 `Read(A)` 之前发生过一次**真正改变世界**的写入 ⇒ 不得命中同签名重复闸，
+/// 即不得出现 `blocked_redundant_followup` 式恢复收尾，也不得少执行一次调用。
+#[test]
+fn run_turn_write_success_clears_same_signature_counts_end_to_end() {
+    // Arrange：会记录真实执行序的「永远成功」executor（反向照抄 AlwaysFailingExecutor 的写法，
+    // 避免真实工具执行器受沙箱/读前写观察门约束而无法稳定让 Edit 成功）。
+    struct RecordingSuccessExecutor {
+        executed: Arc<Mutex<Vec<String>>>,
+    }
+    impl crate::agent::tools::ToolExecutor for RecordingSuccessExecutor {
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            self.executed
+                .lock()
+                .expect("executed log poisoned")
+                .push(call.name.clone());
+            crate::agent::tools::ToolResult {
+                tool_name: call.name.clone(),
+                status: "ok".to_string(),
+                output: json!({ "ok": true, "tool": call.name }).to_string(),
+                duration_ms: 1,
+            }
+        }
+    }
+
+    let final_text = "写后回读内容一致，任务完成。";
+    let server = MockHttpServer::start(vec![
+        json_response(decision_tool_call(
+            "workspace_read_file",
+            json!({ "path": "notes/a.txt", "description": "先读取基线" }),
+        )),
+        json_response(decision_tool_call(
+            "workspace_edit_file",
+            json!({
+                "path": "notes/b.txt",
+                "oldString": "旧内容",
+                "newString": "新内容",
+                "description": "落地修改"
+            }),
+        )),
+        json_response(decision_tool_call(
+            "workspace_read_file",
+            json!({ "path": "notes/a.txt", "description": "写后回读校验" }),
+        )),
+        json_completion(final_text),
+    ]);
+    let executed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let runtime = build_runtime_for_test_with_tool_executor(
+        test_provider_selection(server.base_url.clone()),
+        Box::new(RecordingSuccessExecutor {
+            executed: Arc::clone(&executed),
+        }),
+    );
+
+    // Act
+    let result = runtime.run_turn(TurnInput {
+        message: "先读基线，改完再回读确认".to_string(),
+        display_message: None,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        workspace_mode: None,
+        tool_authorization_mode: None,
+        session_id: Some("write-success-clears-duplicate-gate".to_string()),
+        node_id: None,
+        history: Vec::new(),
+        images: Vec::new(),
+        workspace_id: None,
+        plan_execution_approval: None,
+    });
+
+    // Assert
+    let requests = server.finish();
+    let executed_names = executed.lock().expect("executed log poisoned").clone();
+    assert_eq!(result.phase, "ready");
+    assert_eq!(
+        result.assistant_message, final_text,
+        "正常 follow-up 收尾（而非恢复式收尾）必须拿到最后一次作答"
+    );
+    assert_eq!(
+        executed_names,
+        vec![
+            "workspace_read_file".to_string(),
+            "workspace_edit_file".to_string(),
+            "workspace_read_file".to_string(),
+        ],
+        "写类成功必须清空其它签名计数：写后回读必须真实执行，不得被同签名重复闸拦下"
+    );
+    assert_eq!(
+        result.tool_activities.len(),
+        3,
+        "三次工具调用必须全部执行（命中闸会少一次执行）"
+    );
+    assert_eq!(
+        requests.len(),
+        4,
+        "3 次决策请求 + 1 次最终作答 = 4；命中重复闸会多出一次恢复式收尾请求"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|body| !body.contains("blocked_redundant_followup")),
+        "写后回读不得触发重复闸的恢复式收尾（任何请求体都不得含 blocked_redundant_followup）"
+    );
 }
 
 #[test]
@@ -5652,6 +5770,324 @@ fn tool_call_signature_normalizes_object_key_order() {
     };
 
     assert_eq!(tool_call_signature(&left), tool_call_signature(&right));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 同签名重复工具调用闸（`BTreeSet` 判重 → 计数判重）：契约矩阵 C1/C2/C4/C5 的单元锁定。
+//
+// 这些用例是**红相冻结**用例：src 侧此刻是空桩（`unimplemented!()`），必须真实失败；
+// Executor 填实现后必须全部转绿，且**不得**修改本文件（测试分权底线）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// C4 文案契约：事实陈述（「完全相同」+ 精确比较口径）、不再出现「近似」、
+/// 含实际次数与上限文本、且指明是哪个工具被拦。
+#[test]
+fn duplicate_tool_call_error_states_exact_match_with_actual_counts() {
+    // Arrange：一个同参被拦下的读类调用。occurrences=3（本次是第 3 次）、limit=2（允许 2 次）。
+    let call = ToolCall {
+        call_id: Some("call_duplicate".to_string()),
+        name: "workspace_read_file".to_string(),
+        arguments: json!({ "path": "tauri.conf.json", "description": "读取文件" }),
+        plan: None,
+    };
+
+    // Act
+    let message = build_duplicate_tool_call_error(&call, 3, 2);
+
+    // Assert：四条硬项 + 工具名。出路段落的措辞不锁死（由 Executor 润色），
+    // 只锁契约矩阵 C4 的①②③④四条可判定事实。
+    assert!(
+        message.contains("完全相同"),
+        "文案必须声明比较口径是「完全相同」，实际={message}"
+    );
+    assert!(
+        !message.contains("近似"),
+        "文案不得再出现「近似」：判定是归一化参数的精确相等，实际={message}"
+    );
+    assert!(
+        message.contains("workspace_read_file"),
+        "文案必须指明是哪个工具被拦，实际={message}"
+    );
+    assert!(
+        message.contains('3'),
+        "文案必须给出本次是第几次调用（occurrences=3），实际={message}"
+    );
+    assert!(
+        message.contains('2'),
+        "文案必须给出允许次数上限（limit=2），实际={message}"
+    );
+}
+
+/// C2 tracker 语义：默认 limit=2 ⇒ 前 2 次 `is_exhausted == false`，两次记账后为 true；
+/// 闸点只读（连调多次不改变计数）。
+#[test]
+fn same_signature_tracker_allows_limit_executions_then_exhausts() {
+    let signature = "workspace_read_file:{\"path\":\"tauri.conf.json\"}";
+    let mut tracker = SameSignatureTracker::new();
+
+    assert_eq!(
+        tracker.occurrence_count(signature),
+        0,
+        "新建 tracker 的同签名计数必须为 0"
+    );
+    assert!(
+        !tracker.is_exhausted(signature, 2),
+        "零次执行不得判为耗尽"
+    );
+
+    // 第 1 次执行：放行，计数 1。
+    tracker.record_executed(signature.to_string(), false);
+    assert_eq!(
+        tracker.occurrence_count(signature),
+        1,
+        "第 1 次记账后计数必须为 1"
+    );
+    assert!(
+        !tracker.is_exhausted(signature, 2),
+        "第 1 次执行后仍必须放行（第 2 次不允许被拦）"
+    );
+
+    // 第 2 次执行：放行，计数 2；此时第 3 次必须被拦。
+    tracker.record_executed(signature.to_string(), false);
+    assert_eq!(
+        tracker.occurrence_count(signature),
+        2,
+        "第 2 次记账后计数必须为 2"
+    );
+    assert!(
+        tracker.is_exhausted(signature, 2),
+        "第 2 次执行后，第 3 次同参调用必须熔断"
+    );
+
+    // 只读性：闸点连调 3 次不得记账（否则恢复式收尾后的重试会把自己推高计数）。
+    for probe in 0..3 {
+        assert!(
+            tracker.is_exhausted(signature, 2),
+            "第 {probe} 次重复探测必须保持耗尽态稳定"
+        );
+    }
+    assert_eq!(
+        tracker.occurrence_count(signature),
+        2,
+        "is_exhausted 必须只读，连续探测不得改变计数"
+    );
+}
+
+/// C2 tracker 语义：不同签名互不影响；`clear()` 归零。
+#[test]
+fn same_signature_tracker_isolates_signatures_and_clears() {
+    let read_signature = "workspace_read_file:{\"path\":\"a.txt\"}";
+    let search_signature = "workspace_search_text:{\"query\":\"needle\"}";
+    let mut tracker = SameSignatureTracker::new();
+
+    tracker.record_executed(read_signature.to_string(), false);
+    tracker.record_executed(read_signature.to_string(), false);
+    assert!(
+        tracker.is_exhausted(read_signature, 2),
+        "同一签名两次记账后必须耗尽"
+    );
+    assert_eq!(
+        tracker.occurrence_count(search_signature),
+        0,
+        "其它签名不得被连带计数"
+    );
+    assert!(
+        !tracker.is_exhausted(search_signature, 2),
+        "其它签名不得被连带熔断"
+    );
+
+    tracker.clear();
+    assert_eq!(
+        tracker.occurrence_count(read_signature),
+        0,
+        "clear() 后所有签名计数必须归零"
+    );
+    assert!(
+        !tracker.is_exhausted(read_signature, 2),
+        "clear() 后必须重新放行"
+    );
+}
+
+/// AMEND-1 写类清空语义：写类**成功**执行后清空**其它**签名计数，但保留自身计数。
+#[test]
+fn same_signature_tracker_write_success_clears_other_signatures_only() {
+    let read_signature = "workspace_read_file:{\"path\":\"notes.md\"}";
+    let write_signature = "workspace_edit_file:{\"path\":\"notes.md\"}";
+    let mut tracker = SameSignatureTracker::new();
+
+    // Arrange：先积累一次读类计数（模拟 Read(A) 已执行过一次）。
+    tracker.record_executed(read_signature.to_string(), false);
+    assert_eq!(tracker.occurrence_count(read_signature), 1);
+
+    // Act：写类成功执行一次（模拟 Edit(B, 成功)）。
+    tracker.record_executed(write_signature.to_string(), true);
+
+    // Assert：读类计数被清空（写后回读不是冗余），写类自身计数保留为 1。
+    assert_eq!(
+        tracker.occurrence_count(read_signature),
+        0,
+        "写类成功必须清空其它签名计数（否则写后回读会被误判为重复）"
+    );
+    assert_eq!(
+        tracker.occurrence_count(write_signature),
+        1,
+        "写类成功必须把自身计入 1 次"
+    );
+
+    // 再次写类成功：自身计数递增（不得把自己清掉，否则「反复写同一处」无限放行）。
+    tracker.record_executed(write_signature.to_string(), true);
+    assert_eq!(
+        tracker.occurrence_count(write_signature),
+        2,
+        "写类成功不得清空自身计数，必须递增"
+    );
+    assert_eq!(
+        tracker.occurrence_count(read_signature),
+        0,
+        "写类成功后已清空的其它签名不得被凭空写回"
+    );
+}
+
+fn tool_result_stub(tool_name: &str, status: &str) -> crate::agent::tools::ToolResult {
+    crate::agent::tools::ToolResult {
+        tool_name: tool_name.to_string(),
+        status: status.to_string(),
+        output: json!({ "ok": status != "error" }).to_string(),
+        duration_ms: 1,
+    }
+}
+
+/// C2「改变世界」判定：成功 + 写类/执行类 ⇒ true；失败或只读/搜索类 ⇒ false。
+#[test]
+fn tool_execution_changed_world_requires_successful_write_or_execute_kind() {
+    let call = |name: &str| ToolCall {
+        call_id: Some(format!("call_{name}")),
+        name: name.to_string(),
+        arguments: json!({ "path": "notes.md" }),
+        plan: None,
+    };
+
+    assert!(
+        tool_execution_changed_world(
+            &call("workspace_edit_file"),
+            &tool_result_stub("workspace_edit_file", "ok")
+        ),
+        "写类 + 成功必须判为改变世界"
+    );
+    assert!(
+        !tool_execution_changed_world(
+            &call("workspace_edit_file"),
+            &tool_result_stub("workspace_edit_file", "error")
+        ),
+        "写类 + 失败不得判为改变世界（失败重试正是本闸要放行的场景）"
+    );
+    assert!(
+        !tool_execution_changed_world(
+            &call("workspace_read_file"),
+            &tool_result_stub("workspace_read_file", "ok")
+        ),
+        "只读 + 成功不得判为改变世界（否则纯检索打转会被自己清空计数）"
+    );
+    assert!(
+        tool_execution_changed_world(
+            &call("workspace_run_command"),
+            &tool_result_stub("workspace_run_command", "ok")
+        ),
+        "执行类 + 成功必须判为改变世界"
+    );
+}
+
+/// L2-AT 畸形/边界注入：同签名允许次数解析必须对非法取值**回退默认**，
+/// 尤其**不得静默取 0**（0 ⇒ 每轮第一次调用后立刻熔断，等于把闸焊死）。
+#[test]
+fn same_signature_occurrence_limit_parse_falls_back_to_default_on_malformed_input() {
+    // 默认值锁定：契约矩阵 C1 声明「允许执行 2 次、第 3 次拦」。
+    assert_eq!(
+        DEFAULT_MAX_SAME_SIGNATURE_OCCURRENCES_PER_TURN, 2,
+        "默认允许执行次数必须是 2（前 2 次放行、第 3 次触发闸）"
+    );
+
+    // 畸形/边界注入：空、零、越界（>8）、非数字、纯空白、负数、带尾随空白。
+    for raw in [
+        None,
+        Some(""),
+        Some("0"),
+        Some("9"),
+        Some("abc"),
+        Some("  "),
+        Some("-1"),
+        Some("2 "),
+    ] {
+        let parsed = parse_max_same_signature_occurrences_per_turn(raw);
+        assert_eq!(
+            parsed, DEFAULT_MAX_SAME_SIGNATURE_OCCURRENCES_PER_TURN,
+            "非法/越界取值 {raw:?} 必须回退默认值"
+        );
+        assert_ne!(
+            parsed, 0,
+            "非法取值 {raw:?} 严禁静默取 0（0 = 每轮第一次调用后立即熔断）"
+        );
+    }
+
+    // 合法取值必须逐字生效（下界与上界各取一个）。
+    assert_eq!(
+        parse_max_same_signature_occurrences_per_turn(Some("1")),
+        1,
+        "合法取值 1 必须生效"
+    );
+    assert_eq!(
+        parse_max_same_signature_occurrences_per_turn(Some("8")),
+        8,
+        "合法取值 8（MAX_ALLOWED 上界）必须生效"
+    );
+    assert_eq!(
+        parse_max_same_signature_occurrences_per_turn(Some(" 3 ")),
+        3,
+        "合法取值必须允许首尾空白"
+    );
+}
+
+struct SameSignatureOccurrenceOverrideGuard {
+    previous: usize,
+}
+
+impl SameSignatureOccurrenceOverrideGuard {
+    fn set(limit: usize) -> Self {
+        Self {
+            previous: set_same_signature_occurrences_override(limit),
+        }
+    }
+}
+
+impl Drop for SameSignatureOccurrenceOverrideGuard {
+    fn drop(&mut self) {
+        set_same_signature_occurrences_override(self.previous);
+    }
+}
+
+/// C1 getter + `#[cfg(test)]` 覆写槽：未覆写时回落默认，覆写生效、收尾后还原。
+#[test]
+fn same_signature_occurrence_limit_getter_honours_test_override() {
+    assert_eq!(
+        max_same_signature_occurrences_per_turn(),
+        DEFAULT_MAX_SAME_SIGNATURE_OCCURRENCES_PER_TURN,
+        "无覆写时必须回落默认值（env 未设置）"
+    );
+
+    {
+        let _guard = SameSignatureOccurrenceOverrideGuard::set(5);
+        assert_eq!(
+            max_same_signature_occurrences_per_turn(),
+            5,
+            "用例覆写必须立刻生效"
+        );
+    }
+
+    assert_eq!(
+        max_same_signature_occurrences_per_turn(),
+        DEFAULT_MAX_SAME_SIGNATURE_OCCURRENCES_PER_TURN,
+        "覆写还原后必须重新回落默认值"
+    );
 }
 
 #[test]
@@ -6802,6 +7238,8 @@ fn start_turn_stream_uses_live_stream_for_deepseek_tool_followup() {
 fn start_turn_stream_streams_duplicate_tool_recovery_answer() {
     let final_text = "根据已读取的内容，tauri.conf.json 中 productName 是 Pony Agent。";
     let duplicate_args = "{\"path\":\"tauri.conf.json\"}";
+    // 计数闸契约（契约矩阵 C1/C5-5）：默认允许 2 次执行 ⇒ 第 3 个同参 tool_call 才触发闸，
+    // 故队列 = 3 个同参决策响应 + 1 个恢复式收尾的总结响应 = 4 个响应、4 次请求。
     let server = MockHttpServer::start(vec![
         sse_response(&[json!({
             "choices": [
@@ -6832,6 +7270,26 @@ fn start_turn_stream_streams_duplicate_tool_recovery_answer() {
                             {
                                 "index": 0,
                                 "id": "call_workspace_read_file_again",
+                                "type": "function",
+                                "function": {
+                                    "name": "workspace_read_file",
+                                    "arguments": duplicate_args
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        })]),
+        sse_response(&[json!({
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "第三次同参读取同一文件。",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_workspace_read_file_third",
                                 "type": "function",
                                 "function": {
                                     "name": "workspace_read_file",
@@ -6899,7 +7357,13 @@ fn start_turn_stream_streams_duplicate_tool_recovery_answer() {
         .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
         .expect("completed event");
 
-    assert_eq!(requests.len(), 3);
+    // 计数闸口径（契约矩阵 C5-5）：3 个同参决策响应全部被消费（前 2 次放行执行、
+    // 第 3 次命中闸），第 4 次请求是恢复式收尾的总结请求。
+    assert_eq!(
+        requests.len(),
+        4,
+        "同签名计数闸：3 个同参 tool_call + 1 次恢复式收尾 = 4 次请求"
+    );
     assert!(text_delta.trace_timeline.is_none());
     assert_eq!(completed.text.as_deref(), Some(final_text));
     assert_eq!(
@@ -6926,6 +7390,10 @@ fn start_turn_stream_streams_duplicate_tool_recovery_answer() {
 /// 旧实现把 `native_messages` 整体替换为 transcript 前缀，而 native 流程下 provider 直接
 /// 把该字段当 messages ⇒ 末轮回答丢失 system prompt 与全部历史（实测 input 18896 → 2311、
 /// cache_read=0）。本用例锁定「恢复请求前缀 == 正常 follow-up 前缀」这一不变量。
+///
+/// 计数闸适配（契约矩阵 C1/C2）：默认允许 2 次执行 ⇒ 需要**第 3 个**同参 tool_call 才命中闸，
+/// 故队列为 3 个同参决策响应 + 1 个恢复作答；前缀比对基准随之为第 3 次请求（= 产出被拦调用的
+/// 那次 follow-up 请求，其 messages 与本轮累计上下文逐字一致）。
 #[test]
 fn duplicate_tool_recovery_request_keeps_full_context() {
     let duplicate_args = "{\"path\":\"tauri.conf.json\"}";
@@ -6974,6 +7442,26 @@ fn duplicate_tool_recovery_request_keeps_full_context() {
             "choices": [
                 {
                     "delta": {
+                        "reasoning_content": "第三次同参读取同一文件。",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_workspace_read_file_third",
+                                "type": "function",
+                                "function": {
+                                    "name": "workspace_read_file",
+                                    "arguments": duplicate_args
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        })]),
+        sse_response(&[json!({
+            "choices": [
+                {
+                    "delta": {
                         "content": "根据已读取的内容，tauri.conf.json 中 productName 是 Pony Agent。"
                     }
                 }
@@ -7006,8 +7494,8 @@ fn duplicate_tool_recovery_request_keeps_full_context() {
     let requests = server.finish();
     assert_eq!(
         requests.len(),
-        3,
-        "expected decision + followup + recovery requests"
+        4,
+        "计数闸口径：decision + 2 次放行执行的 follow-up + recovery 请求"
     );
 
     let messages_of = |raw: &str, label: &str| -> Vec<Value> {
@@ -7019,8 +7507,8 @@ fn duplicate_tool_recovery_request_keeps_full_context() {
             .unwrap_or_else(|| panic!("{label} request should carry messages"))
     };
     let decision_messages = messages_of(&requests[0], "decision");
-    let followup_messages = messages_of(&requests[1], "followup");
-    let recovery_messages = messages_of(&requests[2], "recovery");
+    let followup_messages = messages_of(&requests[2], "followup");
+    let recovery_messages = messages_of(&requests[3], "recovery");
 
     assert_eq!(
         decision_messages
