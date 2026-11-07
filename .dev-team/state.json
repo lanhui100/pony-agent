@@ -1573,6 +1573,85 @@
         "round3_fix": "R3 已修 approvalKind→decision_source、列表只列路径授权类、审批专属失效文案"
       },
       "parallel_session_note": "同仓库并行会话（thinking-bottom-gap / tui-terminal-restore / ask-persistence）持有 bin/tui.rs、docs/decisions/README.md、tests/tui_terminal_restore.rs 等未提交改动；本波以 hunk 定向暂存，未触碰其写域"
+    },
+    {
+      "wave": 66,
+      "name": "duplicate-tool-call-gate",
+      "theme": "同签名重复工具调用闸：集合判重 → 计数闸（前 2 次放行 / 第 3 次收尾）+ 文案事实化 + 写类成功清空其它签名计数",
+      "tier": "B",
+      "tier_basis": "跨 4 个 runtime 源文件 + 冻结测试文件；触及 LLM 工具调用轮次状态机（B017/D3b 相邻），但无网络 IO / 无锁 / 无 serialization 契约变更；union diff 942 行（含测试 510 行）> 100 触发 2 路互补 L3",
+      "baseline_commit": "ae9312f5",
+      "protocol_commit": "2e2a8d22",
+      "red_commit": "2e2a8d22",
+      "green_commit": "4ed85bdd",
+      "status": "green-r2",
+      "note": "协议空桩与红相测试合并在同一提交 2e2a8d22（共享工作区，避免在 main 上留两个含 unimplemented!() 的中间提交）；已在红相收据与提交信息登记；Gate-1 审查判 BLOCKING（Job*↔Run 成功交替互清计数）后追加 AMEND-2：changed_world 收窄为 ToolKind::Write only + 成功判据改负向列表 + 移除 clear()；测试侧迁移重锚红相于 652cd447",
+      "tasks": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4",
+        "task-5"
+      ],
+      "branches": {
+        "protocol": {
+          "owner": "protocol-agent",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/runtime/limits.rs",
+            "crates/pony-agent-core/src/agent/runtime/stream_support.rs"
+          ],
+          "commit": "2e2a8d22"
+        },
+        "test": {
+          "owner": "test-agent",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/runtime/tests.rs"
+          ],
+          "commit": "2e2a8d22"
+        },
+        "impl": {
+          "owner": "executor",
+          "write_scopes": [
+            "crates/pony-agent-core/src/agent/runtime/limits.rs",
+            "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+            "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+            "crates/pony-agent-core/src/agent/runtime/turn_sync.rs"
+          ],
+          "allow_derivative_scopes": [
+            "crates/pony-agent-core/src/agent/runtime/mod.rs"
+          ],
+          "commit": "4ed85bdd"
+        },
+        "docs": {
+          "owner": "lead",
+          "write_scopes": [
+            ".agents/notes/implemented/bug-fix/",
+            "docs/decisions/0060-turn-context-integrity-and-loop-guards.md"
+          ],
+          "commit": "4ed85bdd"
+        }
+      },
+      "gates": {
+        "regression_baseline": ".dev-team/regression-baseline-wave0-duplicate-gate.json（1336 passed / 0 failed @ae9312f5）",
+        "red_phase": "FAILED. 1336 passed; 11 failed（全部 unimplemented!() panic，0 编译错误）Exit 101；收据 .dev-team/red-phase-duplicate-gate.txt",
+        "green_phase": "ok. 1347 passed; 0 failed（cargo test -p pony-agent-core --lib）",
+        "acceptance_targets": "pa109 3 / pa110 6 / pa112 2 / tool_surface_singularity 23 / wave61_team_activation 16 / harness_optimizations_test 12，全部 ok 0 failed",
+        "warnings": "cargo check --all-targets: 0 error；lib warnings 16 → 15（净减 1、零新增）",
+        "write_scope_audit": "git diff --name-only ae9312f5..4ed85bdd = 11 文件，全部命中声明写域（mod.rs 为 Lead 授权的编译衍生豁免）",
+        "blast_radius": "union diff 942 行 > 100 阈值 → 触发 2 路互补 L3（视角 A 调度/状态流转、视角 B 契约/回归面）+ 1 路 Gate-1 方案对抗",
+        "audit_diff": "audit-diff.sh --base ae9312f5 EXIT 0（无越界实现、收口点完整）",
+        "observability": "check-declaration.sh 基线即 FAIL（tracing T4 dynamic 预存缺口，已在 ae9312f5 临时 worktree 复现同一 FAIL），本波无退化；本次未改 observability.yaml、未新增遥测面",
+        "red_phase_amend2": "FAILED. 1346 passed; 2 failed（真实断言失败，对应 AMEND-2 两个修复点）",
+        "green_phase_r2": "ok. 1348 passed; 0 failed（cargo test -p pony-agent-core --lib，Lead 独立复跑）",
+        "acceptance_targets_r2": "pa109 3 / pa110 6 / pa112 2 / tool_surface_singularity 23 / wave61_team_activation 16 / harness_optimizations_test 12（Lead 独立复跑，全部 ok）",
+        "reviews": "Gate-1 方案对抗：FAIL(1 BLOCKING)→AMEND-2 修复；L3-A 调度/状态流转：PASS(5 ADVISORY)；L3-B 契约/回归面：PASS(4 ADVISORY)；收据 review-plan-dup-gate.json / review-l3a-dup-gate.json / review-l3b-dup-gate.json（wave 后缀名，避免覆盖历史波次收据） 均过 dev-review-lint",
+        "warnings_after_amend2": "cargo check --lib: 0 error；lib warnings 15 → 14（净减 1，零新增）",
+        "foreign_blocker": "cargo check --all-targets 的 5 条 E0428 全部落在 crates/pony-agent-core/src/bin/tui.rs（merge commit 41e13297 两父各 1 份、合并结果 2 份 = 合并残留），非本任务写域、未触碰；连带 3 个 tui 集成 target 不可编译，与本次交付门禁口径（--lib + 6 验收 target）无关",
+        "observability_r2": "audit-diff.sh --base ae9312f5 EXIT 0；check-declaration.sh EXIT 0 PASS（并行会话 57e69993 修好 tracing T4 后转真绿）"
+      },
+      "parallel_session_note": "同工作区并行会话正在做 provider 传输层/边缘 5xx 重试分类（ADR 0086，retry.rs + docs/observability.yaml + docs/decisions/README.md + 0070 修改，未提交）。本波提交全程按定向路径 git add，未纳入其任何文件；提交 receipt 见各提交 message",
+      "amend_red_commit": "652cd447",
+      "amend_green_commit": "HEAD-after-r2"
     }
   ],
   "counters": {
@@ -1590,6 +1669,12 @@
       "adversarial_failures": 0,
       "impl_defect": 0,
       "note": "三轮实施返工均源于契约缺陷而非实现缺陷（见 ADR 0059 追加记录）"
+    },
+    "wave66": {
+      "functional_failures": 0,
+      "adversarial_failures": 0,
+      "impl_defect": 0,
+      "note": "零熔断：契约缺陷（提案 from_batch 双重计数）在 Lead 冻结契约阶段被识别并按验收口径改判，未进入实施返工"
     }
   }
 }

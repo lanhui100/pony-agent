@@ -693,28 +693,35 @@ impl SameSignatureTracker {
         }
         *self.counts.entry(signature).or_insert(0) += 1;
     }
-
-    /// 清空全部计数（留给后续需要整轮重置的场景）。
-    pub(super) fn clear(&mut self) {
-        self.counts.clear();
-    }
 }
 
 /// 判定一次工具执行是否「改变了世界」（写类成功清空其它签名计数的输入事实）。
 ///
-/// 语义：工具执行成功（`tool_result.status != "error"`）且
-/// `tool_kind_for_name(&tool_call.name)` ∈ {`ToolKind::Write`, `ToolKind::Execute`}。
-/// 失败、只读/搜索类一律视为未改变世界（不得据此清空别人的计数）。
+/// 语义（AMEND-2）：`tool_result.status ∉ {"error", "aborted", "cancelled"}` **且**
+/// `tool_kind_for_name(&tool_call.name) == ToolKind::Write`。失败/中止/取消、只读/搜索/执行类
+/// 一律视为未改变世界（不得据此清空别人的计数）。
+///
+/// 为什么成功判据是**负向列表**而不是 `status != "error"`：`aborted`（用户中止）与 `cancelled`
+/// 的写类调用并没有落地任何变更，却会被 `!= "error"` 误判为成功并清空他人计数 —— 等于把
+/// 「被中止的写」当成任务推进。
+///
+/// 为什么**只认 `Write`、移除 `Execute`**（Gate-1 BLOCKING）：`Execute` 覆盖
+/// `workspace_run_command` 与全部 `Job*`（`JobOutput`/`JobList`/`JobKill`，
+/// `crates/pony-agent-core/src/agent/tools.rs:7980`），静态分类无法区分「写域 Run」「纯查询（如
+/// `ls`）」「job 轮询」。若 Execute 也清空，`JobOutput(A)` 与 `Run(X)` 的成功**交替**会互相清空，
+/// 两签名计数恒为 1、永不达上限 —— 旧 `BTreeSet`（第 2 次即拦）反而更严，本闸就成了新的绕闸面。
+/// 且 `retain` 恒保留自身，Execute 清空对「同参重试」**零收益**；「改完重跑同一条命令」的真实
+/// 受益路径是中间的 `Edit`（Write）触发清空，不依赖 `Run` 自身清空。
 pub(super) fn tool_execution_changed_world(tool_call: &ToolCall, tool_result: &ToolResult) -> bool {
     use crate::agent::tools::{tool_kind_for_name, ToolKind};
 
-    if tool_result.status == "error" {
+    if matches!(
+        tool_result.status.as_str(),
+        "error" | "aborted" | "cancelled"
+    ) {
         return false;
     }
-    matches!(
-        tool_kind_for_name(&tool_call.name),
-        ToolKind::Write | ToolKind::Execute
-    )
+    matches!(tool_kind_for_name(&tool_call.name), ToolKind::Write)
 }
 
 /// Match the dispatcher's persisted `PendingControlRequest` to the originating tool call. The

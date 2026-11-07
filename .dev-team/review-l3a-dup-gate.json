@@ -1,0 +1,80 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/limits.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/batch_plan.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_recovery.rs",
+    "crates/pony-agent-core/src/agent/tools.rs"
+  ],
+  "attack_verdicts": {
+    "A1": "PASS: 两处闸点分支只有 occurrence_count/is_exhausted + build_duplicate_tool_call_error，无 record_executed（turn_stream.rs:1335-1345、turn_sync.rs:555-565）；全仓 record_executed 仅 753/294 两个执行点。",
+    "A2": "PASS: 除执行点外零记账；turn 起始 turn_stream.rs:160 / turn_sync.rs:49 均为 new()（空计数），无 from_batch、无批次预置；生产侧 ConsecutiveFailureTracker::new() 仅这两处 ⇒ 不存在第三条未接闸的工具循环。",
+    "A3": "PASS(附 1 处分叉): 六处改法逐字同构（new()/record_executed(sig, changed_world)/count+1/同一 if-else 位置: 墙钟→followups→hops→同签名）；唯一语义分叉在 aborted 状态（turn_stream.rs:655 仅 turn 级取消才 return，否则落 753 记账；turn_sync.rs:223 无条件 Err），该分叉使流式路径可把 aborted 写类判为 changed_world=true，见 finding 2。",
+    "A4": "PASS: 被拦时 occurrences=已执行次数+1=本次将执行的第几次；limit=2⇒3/2，limit=1⇒2/1，limit=8⇒9/8，数字单调且与上限自洽（parse 只接受 1..=8，0/非法回退 2，永不取 0）；唯一失真场景为批内同参 >limit 次执行后可出现的 count>limit（见 finding 3）。",
+    "A5": "PASS: 并行段产物按段内原序返回（batch_plan.rs:84 + turn_sync.rs:330-364/turn_stream.rs:795-830），记账顺序=调用序，与并发完成序无关；批内自身重复仍不拦（闸点只在 hop 边界且只看 next_tool_calls.first()，turn_stream.rs:1255/1335、turn_sync.rs:497/555）；批终止符（Interactive）不进并发段（batch_plan.rs:75-80），且 sync_tool_call_post!/stream_tool_call_post! 在终止符处只记已执行者、后续调用 break 未执行未记账（turn_sync.rs:305-313、turn_stream.rs:757-767）。自身签名计数只增不减；其它签名计数会被写类成功显式清零（Decision 4 设计，非缺陷）。",
+    "A6": "PASS: 命中闸后 response=recovery.response 即跳出 if-else 链、不 continue，直接落到循环内的 completed_text/persist 收尾，无后续 hop 复用同一 next_tool_call；同一 turn 内不可能二次命中（recovery 响应不再执行工具）。",
+    "A7": "PASS(附后果): 两路径判定顺序一致（墙钟→followups→hops→同签名→执行点连续失败闸），恢复式收尾与硬失败不冲突；但同签名闸（软收尾）位于执行点之前，会在同参失败重试上先于「连续失败」硬闸命中，导致真实错误码不再被 surfaced（见 finding 5）。"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 1337,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "契约 C3 不变量「闸点只读、被拒调用不得被记账」没有任何机器锁：在 turn_stream.rs:1338 与 turn_sync.rs:558 各插入一行 same_signatures.record_executed(next_signature.clone(), false) 后，同签名/重复闸/整轮用例 10 个全绿（结构上无法观测——命中即收尾，被拒调用记账后无第二次闸点）。",
+      "counterexample_cmd": "python3 - <<'PY' (在 turn_stream.rs:1338 与 turn_sync.rs:558 后插入 'same_signatures.record_executed(next_signature.clone(), false); // MUTATION-A1') PY; cargo test -p pony-agent-core --lib -- run_turn_stops_followup_after_consecutive_identical_tool_failures start_turn_stream_streams_duplicate_tool_recovery_answer same_signature duplicate_tool (已跑，跑完已 git checkout -- turn_stream.rs turn_sync.rs 还原，git diff --stat 为空、grep -c MUTATION-A1 = 0/0)",
+      "cmd_exit": 0,
+      "cmd_tail": "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1337 filtered out; finished in 1.25s"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 711,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "changed_world 只排除 status==\"error\"，于是 status==\"aborted\"（timeout/interrupt，世界未变）在流式路径被记为「已执行且改变了世界」：turn_stream.rs:655 的 aborted 仅在 should_cancel_turn 为真时 return，否则继续到 :753 记账并 retain 掉其它全部签名计数——与 Decision 4「失败一律视为未改变世界」相反；同步路径 turn_sync.rs:223 对 aborted 无条件硬失败，故两路径对同一结果分叉。",
+      "counterexample_cmd": "grep -n 'status == \"aborted\"' crates/pony-agent-core/src/agent/runtime/turn_stream.rs crates/pony-agent-core/src/agent/runtime/turn_sync.rs && sed -n 705,720p crates/pony-agent-core/src/agent/runtime/stream_support.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 1335,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "evidence": "闸点只检查 next_tool_calls.first()，而批内每个调用都在 :753 记账 ⇒ 一个批内含 >limit 个同参调用时可执行到 count>limit，下一跳被拦时 occurrences=count+1 且文案仍宣称「同一 turn 内最多允许 {limit} 次」（limits.rs:249-258），该句在批内同参 ≥3 且 limit=2 时是事实错误（实际已执行 3+ 次）。",
+      "counterexample_cmd": "grep -n 'next_tool_calls.first().cloned()' crates/pony-agent-core/src/agent/runtime/turn_stream.rs && sed -n 1333,1346p crates/pony-agent-core/src/agent/runtime/turn_stream.rs && sed -n 246,258p crates/pony-agent-core/src/agent/runtime/limits.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 698,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "evidence": "SameSignatureTracker::clear() 在生产路径零消费者（仅 tests.rs 使用），属「以后可能用得上」式预留 API（宪法常载命约第 3 条）；record_executed 的 retain 已覆盖其唯一设想场景。",
+      "counterexample_cmd": "grep -rn 'same_signatures.clear()\\|tracker.clear()' --include=*.rs crates/ | wc -l"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 1337,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "同签名闸（limit=2，软恢复收尾）位于执行点连续失败闸（阈值 3/4，硬失败并 surfaced 错误码）之前，故「同参失败重试」第 3 次在闸处被拦，连续失败计数永远停在 2 ⇒ 真实错误码/输出不再进入终态文案，而是给出「请改参数/直接作答」的通用建议（turn_sync.rs:557 同构）。",
+      "counterexample_cmd": "cargo test -p pony-agent-core --lib -- run_turn_stops_followup_after_consecutive_identical_tool_failures -- --nocapture"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "35eb51bf-dff7-4857-aa80-3ff3db22a078",
+    "fresh_context": true
+  },
+  "executed_by": "35eb51bf-dff7-4857-aa80-3ff3db22a078",
+  "reviewed_commit": "4ed85bdd",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "Subagent 独立上下文执行；Lead 仅原样转录其 findings/verdict，未增删条目"
+  }
+}

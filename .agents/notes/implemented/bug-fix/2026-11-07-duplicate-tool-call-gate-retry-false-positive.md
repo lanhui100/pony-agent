@@ -37,10 +37,14 @@ Status: implemented
    `PONY_AGENT_MAX_SAME_TOOL_SIGNATURE_OCCURRENCES_PER_TURN`；非法/越界/`0` 一律**回退默认**，
    禁止静默取 0（0 等于每轮第一次调用后立即熔断）。另补 `#[cfg(test)]` thread_local 覆写槽。
 4. **写类成功清空其它签名计数**（世界变化信号）：`tool_execution_changed_world` 判定
-   「执行成功（`status != "error"`）且 `tool_kind_for_name(name)` ∈ {`ToolKind::Write`, `ToolKind::Execute`}」，
-   命中时 `record_executed(.., true)` 先 `retain` 掉**其它**签名再给自身 +1。工具分类的唯一真值源是
-   工具注册表（`agent/tools.rs:7944 tool_kind_for_name`，内部已做别名归一），闸内**不建**任何工具名白名单。
-   于是 `Read → Edit → Read`、`Run test → Edit → Run test` 天然放行，纯重复检索仍被计数拦。
+   「执行未失败/未取消（`status ∉ {"error","aborted","cancelled"}`）且 `tool_kind_for_name(name)` ==
+   `ToolKind::Write`」，命中时 `record_executed(.., true)` 先 `retain` 掉**其它**签名再给自身 +1。
+   工具分类的唯一真值源是工具注册表（`agent/tools.rs:7944 tool_kind_for_name`，内部已做别名归一），
+   闸内**不建**任何工具名白名单。于是 `Read → Edit → Read`、`Run test → Edit → Run test` 天然放行，
+   纯重复检索仍被计数拦。**只认 `Write` 而不含 `Execute`** 是 Gate-1 审查后的收窄：`Job*` 全部是
+   `Execute`（`tools.rs:7980`），若 `Execute` 也清空，`JobOutput(A)` 与 `Run(X)` 成功交替会互相清空、
+   两签名计数恒为 1 而永不熔断（旧 `BTreeSet` 第 2 次即拦）——那是本方案新引入的绕闸面；且 `retain`
+   恒保留自身，`Execute` 清空对「同参重试」零收益，「改完重跑同一条命令」的受益路径本来就是中间的 `Edit`。
 5. **文案改为事实陈述 + 可执行出路**：`build_duplicate_tool_call_error(&call, occurrences, limit)` 产出
    「已第 N 次以**完全相同**的参数被调用（同名 + 同参数，仅忽略 `description` 与 key 顺序；同一 turn 内
    最多允许 L 次）……若上次调用失败或结果已失效，请改变参数、先确认当前状态与已有证据，或直接基于
@@ -70,9 +74,11 @@ Status: implemented
   不再诱导「换个措辞再试」，而是给出改参数 / 先确认状态 / 直接作答三条出路。
 - **可调**：`PONY_AGENT_MAX_SAME_TOOL_SIGNATURE_OCCURRENCES_PER_TURN`（1~8，默认 2，非法回退默认）。
 - **验收（物理收据）**：`cargo test -p pony-agent-core --lib` 1347 passed / 0 failed（基线 1336 + 本任务
-  新增 8 例 + 并行会话 `retry.rs` 新增 3 例）；本任务 11 个新旧用例在同一提交内同时改写（含
+  新增 8 例 + 并行会话 `retry.rs` 新增 3 例）；本任务 11 个新旧用例在**红相提交 `2e2a8d22`** 内同时冻结
+  （新增 8 + 改写 3，含
   `run_turn_stops_followup_after_consecutive_identical_tool_failures`、`start_turn_stream_streams_duplicate_tool_recovery_answer`、
-  `duplicate_tool_recovery_request_keeps_full_context`），杜绝「代码改了但测试仍绿」的假绿；
+  `duplicate_tool_recovery_request_keeps_full_context`），绿相提交 `4ed85bdd` 不改测试文件，
+  从而杜绝「代码改了但测试仍绿」的假绿；
   另跑 `pa109_goal_acceptance` / `pa110_teams_acceptance` / `pa112_todo_acceptance` /
   `tool_surface_singularity` / `wave61_team_activation` / `harness_optimizations_test` 全绿。
   契约矩阵与红相收据：`.dev-team/contract-matrix-duplicate-gate.md`、`.dev-team/red-phase-duplicate-gate.txt`。
@@ -82,5 +88,13 @@ Status: implemented
   ③ 批内（`PONY_AGENT_PARALLEL_TOOLS`）自身重复**不拦**的口径逐字保留——闸点只在 hop 边界，批内并发
   记账顺序不影响计数正确性（只增不减）；
   ④ 纯只读轮询（`team_task_list` / `list_agents` / `JobOutput`）的 30% 误杀只被「上限 2」缓解、未被根治，
-  根治需先补注册表标记（见 Alternatives 末条）。
+  根治需先补注册表标记（见 Alternatives 末条）；
+  ⑤ 清空触发集只含 `ToolKind::Write`：`Run`（Execute）与 `workspace_batch`（Composite）成功执行不清空，
+  方向是**偏多拦**（保守）而不是漏放行；若要覆盖批内写，需先给注册表补 `Composite` 细分；
+  ⑥ 「闸点只读」这条不变量目前**没有机器锁**——命中即收尾，被拒调用即使被误记账在结构上也观测不到（审查实测：
+  在闸点插一行 `record_executed` 后 10 个相关用例全绿），只能靠 code review 守；
+  ⑦ 批内（同 hop 多个同参调用）记账可越过上限，此时文案「最多允许 L 次」与实际执行次数不符——属既有
+  「闸点只判批首」口径的局限，未在本轮改动。
+- **审查**：Gate-1 方案对抗 1 路（FAIL→修 AMEND-2 后放行）+ 实施后 L3 两路互补（视角 A 调度/状态流转、
+  视角 B 契约/回归面，均 PASS）。收据：`.dev-team/review-plan-dup-gate.json`、`review-l3a-dup-gate.json`、`review-l3b-dup-gate.json`。
 - **文档链**：ADR 0060 决策 5「止损三道」已补入第四道（同签名重复计数闸）。
