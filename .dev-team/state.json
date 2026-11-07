@@ -1667,7 +1667,7 @@
       "red_commit": "c81640f0",
       "green_commit": "f53476cd",
       "fix_commit": "3236d331",
-      "status": "green-r2",
+      "status": "closed",
       "note": "协议空桩+红相测试与跨波契约表修复合并在 c81640f0（共享工作区，少留在飞中间态）；初审 4 BLOCKING 全部在 3236d331 修复：① semver pub 面回归（既有 slash_commands_acceptance 不可编译）② /update 文案未落地 ③ verify_installed 无超时（25s 挂起 exit 124）④ 回滚口径 --pin 不可执行（降级闸拦）；另修锁 staleness（45min 接管一次）。顺带发现并修复**基线即存在**的跨波漂移：/settings、/teams 已进命令表而 slash 契约表仍 12 条",
       "tasks": [
         "task-7",
@@ -1720,12 +1720,17 @@
         "green_phase": "--lib ok.1362 passed / --bin pony ok.54（cli_self_update 16）/ slash_commands_acceptance ok.69",
         "e2e": ".dev-team/e2e-receipt-cli-self-update.txt（成功升级 / --check 幂等 / 回验超时 10s 回滚 / sha 不符不动 / 真实网络发现 exit 3）+ 锁陈旧接管与未过期锁两条物理复验（executor 回执）",
         "nfr": ".dev-team/nfr-baseline-wave67.json 过 dev-nfr-lint Exit 0；download_budget 300s/1800s/128MiB/不重试 为 external_call_timeout_ms=3000 的显式例外（L3-P 裁决 PASS：单一路径+有上限+有理由）",
-        "observability": "audit-diff.sh --base c81640f0 EXIT 0；check-declaration.sh EXIT 0 PASS",
+        "observability": "check-declaration.sh EXIT 0 PASS",
         "reviews": "L3-A PASS(3 ADVISORY) / L3-B FAIL(2 BLOCKING) / L3-P FAIL(2 BLOCKING) / 修复后定向复审（见 review-rereview-cli-update.json）",
         "deny_warnings": "本波两文件 0 warning；`-D warnings` 全仓仍被他人并行会话的空桩 crates/pony-agent-core/src/agent/team_history.rs（14 条 unused variable，commit 45b3f363 已在 origin/main）卡红 —— 外部阻塞，未触碰",
-        "foreign_defect_fixed": "顺带修：HEAD 上 bin/tui.rs 的 41e13297 merge 残留（mod wave43_unit_tests 5 个测试定义各 2 份 ⇒ E0428，bin 测试目标在 HEAD 即不可编译）；以及 slash 契约表 12→14 的跨波漂移（基线即红）"
+        "foreign_defect_fixed": "顺带修：HEAD 上 bin/tui.rs 的 41e13297 merge 残留（mod wave43_unit_tests 5 个测试定义各 2 份 ⇒ E0428，bin 测试目标在 HEAD 即不可编译）；以及 slash 契约表 12→14 的跨波漂移（基线即红）",
+        "join_barrier": "独立 Join 汇总 PASS（review-join-cli-update.json，4 BLOCKING 全 CLOSED，19 变更文件全覆盖，dev-review-lint Exit 0）",
+        "audit_diff": "audit-diff.sh --base 67e656c9 EXIT 0（D1 声明批准已由 3319c0c2 的 [decl-change-approved] 机械满足）",
+        "meta_retrospective": ".dev-team/meta-retrospective.md 追加 wave-67 章节，dev-meta-lint Exit 0"
       },
-      "parallel_session_note": "本波期间并行会话在 team_history.rs / slash 命令表 / ADR 0086 上持续提交；双方均按定向 git add，互不纳管对方文件"
+      "parallel_session_note": "本波期间并行会话在 team_history.rs / slash 命令表 / ADR 0086 上持续提交；双方均按定向 git add，互不纳管对方文件",
+      "final_head": "3319c0c2",
+      "pushed": "67e656c9..3319c0c2 main -> main（pre-push 门禁 check-secrets + typecheck 通过）"
     }
   ],
   "counters": {
