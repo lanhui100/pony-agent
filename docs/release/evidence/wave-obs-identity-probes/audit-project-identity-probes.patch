@@ -1,0 +1,35 @@
+--- a/scripts/audit-project.sh
++++ b/scripts/audit-project.sh
+@@ -410,21 +410,23 @@
+       _p="$(tcount_traceql "{ resource.client.service.name=\"${DECLARED_SVC}\" }" "$_lb" 2>/dev/null || true)"
+       [[ -n "$_p" ]] && PROBE_LINES+="${_p}"$'\n'
+     fi
+     # 声明侧补充检索键：与上面的内置探针**并列**，同样逐窗（--since 与 7d）各跑一遍。
+     # 探针失败时 tcount_* 返回的 JSON 带 error:true（raw_count=null）⇒ 由汇总层计入 probes_failed，
+     # 绝不当成「0 条」，所以这里不做任何吞错处理。
+-#    for _ip in "${IDENTITY_PROBES[@]}"; do
+-#      IFS=$'\t' read -r _ipid _iptype _ipq <<<"${_ip}"
+-#      case "${_iptype:-}" in
+-#        traceql) _p="$(tcount_traceql "${_ipq}" "$_lb" 2>/dev/null || true)" ;;
+-#        tags)    _p="$(tcount_tags "${_ipq}" "$_lb" 2>/dev/null || true)" ;;
+-#        *)       continue ;;
+-#      esac
+-#      [[ -n "${_p:-}" ]] && PROBE_LINES+="${_p}"$'\n'
+-#    done
++    if (( ${#IDENTITY_PROBES[@]} )); then
++      for _ip in "${IDENTITY_PROBES[@]}"; do
++        IFS=$'\t' read -r _ipid _iptype _ipq <<<"${_ip}"
++        case "${_iptype:-}" in
++          traceql) _p="$(tcount_traceql "${_ipq}" "$_lb" 2>/dev/null || true)" ;;
++          tags)    _p="$(tcount_tags "${_ipq}" "$_lb" 2>/dev/null || true)" ;;
++          *)       continue ;;
++        esac
++        [[ -n "${_p:-}" ]] && PROBE_LINES+="${_p}"$'\n'
++      done
++    fi
+   done
+   # 探针结果落文件再由 python 读取：heredoc 已占用 stdin，管道喂不进去（踩过一次：probes 恒空）。
+   printf '%s' "$PROBE_LINES" >"$WORK/probes.jsonl"
+   TRACE_JSON="$(python3 - "$WORK/probes.jsonl" "$SVC" "$KIND" "$DECLARED_SVC" "$IDENTITY_PROBES_TSV" <<'PY' 2>/dev/null || true
+ import json, sys
+ probes_path, svc, kind, declared, id_spec = sys.argv[1:6]
