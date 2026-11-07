@@ -46,6 +46,8 @@ use pony_agent_core::agent::stop_escalation::StopReason;
 // wave-60 §C8：双击 Esc 的纯判定状态机（与桌面端 `src/lib/runtime/stop-sequence.ts` 同判据）。
 use pony_agent_core::agent::stop_sequence::{StopIdentity, StopSequenceState, STOP_SEQUENCE_MS};
 use pony_agent_core::agent::turn_flow::{TurnEventSink, TurnSpeedBasis};
+// wave-67：semver 解析/比较的唯一真值源迁入 `agent::updater`（`pony update` 与 `/update` 共用）。
+use pony_agent_core::agent::updater::is_newer_semver;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Rect},
@@ -2025,27 +2027,6 @@ pub struct UpdateCheckOutcome {
     pub has_update: bool,
     pub release_notes: Option<String>,
     pub release_url: Option<String>,
-}
-
-/// 解析语义化三元组版本号 `vX.Y.Z` 或 `X.Y.Z`
-pub fn parse_semver_triple(v: &str) -> Option<(u64, u64, u64)> {
-    let clean = v.trim().trim_start_matches(|c| c == 'v' || c == 'V');
-    let mut parts = clean.split('.');
-    let major = parts.next()?.parse::<u64>().ok()?;
-    let minor = parts.next()?.parse::<u64>().ok()?;
-    let patch = parts.next()?.parse::<u64>().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((major, minor, patch))
-}
-
-/// 比较候选版本是否严格高于当前版本
-pub fn is_newer_semver(candidate: &str, current: &str) -> bool {
-    match (parse_semver_triple(candidate), parse_semver_triple(current)) {
-        (Some(c), Some(cur)) => c > cur,
-        _ => false,
-    }
 }
 
 /// 执行远端发布检查（支持 GitHub Releases API，失败时回退 MinIO/S3）
@@ -13357,7 +13338,62 @@ impl Drop for ObservabilityBootstrap {
 /// 返回进程退出码：0 成功（含「已是最新」）/ 1 校验失败 / 2 用法错误 / 3 网络·HTTP·清单失败 /
 /// 4 安装失败。
 fn run_update_action(check: bool, force: bool, pin: Option<String>, json: bool) -> i32 {
-    unimplemented!()
+    use pony_agent_core::agent::updater::{run_self_update, UpdateOptions};
+
+    let options = UpdateOptions { check, force, pin };
+    match run_self_update(&options) {
+        Ok(outcome) => {
+            if json {
+                // `--json`：stdout 只出一行收据（阶段日志一律走 stderr）。
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "previous": outcome.previous_version,
+                        "latest": outcome.latest_version,
+                        "updated": outcome.updated,
+                        "path": outcome.install_path.display().to_string(),
+                        "sha256": outcome.sha256,
+                    })
+                );
+            } else if outcome.updated {
+                let short_sha: String = outcome.sha256.chars().take(12).collect();
+                println!(
+                    "已更新 pony: v{} → v{}，sha256={short_sha}…，路径 {}",
+                    outcome.previous_version,
+                    outcome.latest_version,
+                    outcome.install_path.display()
+                );
+            } else if is_newer_semver(&outcome.latest_version, &outcome.previous_version) {
+                println!(
+                    "发现新版本 v{}（当前 v{}），运行 pony update 安装",
+                    outcome.latest_version, outcome.previous_version
+                );
+            } else {
+                println!("当前已是最新版本（v{}）", outcome.latest_version);
+            }
+            0
+        }
+        Err(error) => {
+            // 所有错误面统一走 `UpdateError` 的文案与退出码（契约 C2：1/2/3/4）。
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": false,
+                        "error": {
+                            "code": error.code(),
+                            "message": error.user_message(),
+                        },
+                        "exit_code": error.exit_code(),
+                    })
+                );
+            } else {
+                eprintln!("pony update 失败：{}", error.user_message());
+            }
+            error.exit_code()
+        }
+    }
 }
 
 fn main() {
@@ -13410,7 +13446,9 @@ fn main() {
             }
         }
         CliAction::Invalid(arg) => {
-            eprintln!("pony: 未知参数 {arg}\n用法: pony [--version | --help | --doctor | resume [<session-id>]]");
+            eprintln!(
+                "pony: 未知参数 {arg}\n用法: pony [--version | --help | --doctor | resume [<session-id>] | update [--check] [--force] [--pin <ver>] [--json]]"
+            );
             std::process::exit(2);
         }
         CliAction::RunTui => {

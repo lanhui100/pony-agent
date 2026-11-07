@@ -620,3 +620,23 @@ note: >-
       `transport_flags_map_to_network_after_status_code_judgement` /
       `adr_0086_regression_classify_retryability`，以及既有 R1 八分组锁定用例
       `stage2_upstream_code_for_hints_covers_r1_groups`。
+  【wave-cli-self-update 归属登记（2026-11-07）｜`pony update` CLI 自更新：GitHub Releases 发现 + 制品下载 + 原子替换（ADR 0087）】
+  一行结论：**本次确实新增一条出网路径与一个新的 CLI 子命令接口面**，故 tracing / issues 维持 applicable（落点不变），
+  metrics / logs 仍结构性 N-A；新增**一个可审计的必经点** `cli_update_artifact`（制品字节的唯一通路，非新增 enforcement_point 正则规则），不伪造 /metrics。
+  (1) 四维归属：tracing applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`；更新链路的阶段日志
+      走既有 `[pony-update] phase=… status=…` 单行 stderr，最终落既有 `~/.pony-agent/tui-logs/tui-runtime.log`，
+      不新增日志出口）；issues applicable（落点不变 `crates/pony-agent-core/src/agent/ponysentry/client.rs`，
+      本次不新增上报面）；metrics N-A 与 logs N-A 的结构性理由同本文档维度声明——桌面/终端进程随用户启停、
+      无常驻监听地址、无 Service、不进集群，Prometheus pull 与节点侧容器日志采集的前提均不成立。
+  (2) 新增出网路径（**这是与既往「仅改本地逻辑」波次的区别**）：① 发现 `GET {api_base}/repos/{repo}/releases?per_page=20`
+      与清单/制品下载（`github.com` → 302 → `release-assets.githubusercontent.com`）；② 全部走 `agent/updater.rs` 的
+      单一客户端构造（`redirect::Policy::none()` + 手动 ≤5 跳逐跳校验 scheme/host），控制面 5s + 1 次重试，
+      制品下载独立预算 300s（上限 1800s）、体积上限 128MiB、不重试（依据 `.dev-team/nfr-baseline-wave67.json` 的
+      `download_budget`，是 `external_call_timeout_ms=3000` 的**显式例外**）。
+  (3) 可审计必经点 `cli_update_artifact`（不登记为 enforcement_points 规则，理由：唯一可机械化的是『清单名/下载链路只出现在 updater.rs』，而冻结测试与 CI 生成脚本需正当引用该名字，硬正则会把合法用例判红）：所有制品字节都必须经 `updater` 的下载 → sha256+size 校验 → 同目录原子安装
+      三段，任一段失败即不触碰用户二进制；该点是**可机械拦截的异常/信任边界**（校验失败、超限、白名单外重定向、
+      lock 冲突都在此收口），也是 audit-diff 的落点。既有 `error_boundary` / `http_client` 未改动。
+  (4) 行为门（机械收口在测试层）：`agent::updater::tests` 的 14 条（semver/清单/资产选择/plan_update/sha256/只读目录）
+      与 `bin/tui.rs` 的 `cli_self_update_tests` 16 条（全链路 mock、sha 不符、404、畸形清单、平台缺失、截断、
+      lock 冲突、超时注入、超限体积、302 白名单内外），运行口径 `cargo test -p pony-agent-core --lib` 与
+      `cargo test -p pony-agent-core --bin pony cli_self_update`。

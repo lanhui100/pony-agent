@@ -262,3 +262,111 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node scripts/send-wecom-notification.mjs "${{ github.ref_name }}"
 
+  # wave-67：CLI（`pony`）自更新发布 job。契约真值源 .dev-team/contract-matrix-cli-self-update.md C3。
+  #
+  # 为什么挂在桌面 job 之后：`build-and-release` 内部完成 publish（draft → published），CLI 资产只能在
+  # 发布后用 `gh release upload --clobber` 追加。
+  #
+  # 【已知风险·显式登记】若本 job 失败，发布已发生但缺少 `pony-cli-latest.json`：客户端发现逻辑会
+  # 回落到更旧的“含清单”release（优雅降级），不会把坏版本推给用户；但新 CLI 版本在一段时间内不可见。
+  # 因此本 job 只做“追加资产 + 收尾断言”，任何一步失败都让 job 红，由人补跑，绝不静默。
+  build-cli-linux:
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build pony CLI binary (linux-x86_64)
+        run: cargo build --release --bin pony
+
+      # 版本链 fail-closed：CLI 二进制只承载 `pony-agent-core` 的版本（两条版本线：core / tauri-app），
+      # 因此**只与 core Cargo.toml 比对**，不与 package.json 比对。
+      - name: Assert CLI version matches core version
+        run: |
+          set -euo pipefail
+          ver="$(./target/release/pony --version | head -1 | sed -E 's/.* ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+          core="$(grep -m1 '^version' crates/pony-agent-core/Cargo.toml | cut -d'"' -f2)"
+          echo "cli_version=$ver core_version=$core"
+          if [ -z "$ver" ] || [ "$ver" != "$core" ]; then
+            echo "::error::CLI 版本 ($ver) 与 crates/pony-agent-core/Cargo.toml ($core) 不一致（core 版本链 fail-closed）"
+            exit 1
+          fi
+          echo "PONY_CLI_VERSION=$ver" >> "$GITHUB_ENV"
+
+      # 产物三件套：资产本体 + sha256sum 原生格式摘要 + `pony-cli-latest.json` 清单。
+      - name: Build CLI assets and manifest
+        run: |
+          set -euo pipefail
+          ver="$PONY_CLI_VERSION"
+          asset="pony-tui_${ver}_linux-x86_64"
+          cp target/release/pony "$asset"
+          sha="$(sha256sum "$asset" | awk '{print $1}')"
+          size="$(stat -c%s "$asset")"
+          sha256sum "$asset" > "${asset}.sha256"
+          PONY_CLI_ASSET="$asset" PONY_CLI_SHA="$sha" PONY_CLI_SIZE="$size" python3 - <<'PY'
+          import datetime
+          import json
+          import os
+
+          manifest = {
+              "schema": "pony-cli-manifest",
+              "version": os.environ["PONY_CLI_VERSION"],
+              "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+                  "%Y-%m-%dT%H:%M:%SZ"
+              ),
+              "platforms": {
+                  "linux-x86_64": {
+                      "asset": os.environ["PONY_CLI_ASSET"],
+                      "sha256": os.environ["PONY_CLI_SHA"],
+                      "size": int(os.environ["PONY_CLI_SIZE"]),
+                  }
+              },
+          }
+          with open("pony-cli-latest.json", "w", encoding="utf-8") as handle:
+              json.dump(manifest, handle, ensure_ascii=False, indent=2)
+              handle.write("\n")
+          print(json.dumps(manifest, ensure_ascii=False))
+          PY
+
+      - name: Upload CLI assets to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          ver="$PONY_CLI_VERSION"
+          asset="pony-tui_${ver}_linux-x86_64"
+          gh release upload "$tag" "$asset" "${asset}.sha256" "pony-cli-latest.json" --clobber
+
+      # 收尾断言：清单必须真的挂在该 tag 上，且清单 version == 本轮构建的 core 版本。
+      - name: Verify CLI manifest on published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          repo="${{ github.repository }}"
+          ver="$PONY_CLI_VERSION"
+          names="$(gh api "repos/$repo/releases/tags/$tag" --jq '.assets[].name')"
+          echo "assets on $tag:"
+          echo "$names"
+          echo "$names" | grep -qx "pony-cli-latest.json" || {
+            echo "::error::release $tag 缺少 pony-cli-latest.json（客户端发现会回落到更旧 release）"
+            exit 1
+          }
+          gh release download "$tag" --pattern pony-cli-latest.json --output /tmp/pony-cli-latest.json --clobber
+          manifest_ver="$(python3 -c 'import json;print(json.load(open("/tmp/pony-cli-latest.json"))["version"])')"
+          echo "manifest_version=$manifest_ver expected=$ver"
+          if [ "$manifest_ver" != "$ver" ]; then
+            echo "::error::清单 version ($manifest_ver) 与本轮 CLI 版本 ($ver) 不一致"
+            exit 1
+          fi

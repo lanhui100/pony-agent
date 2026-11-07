@@ -138,3 +138,15 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 - 绿相：`cargo test -p pony-agent-core --lib` 全绿（≥1348 + 新增）；`pa109/pa110/pa112/tool_surface_singularity/wave61_team_activation/harness_optimizations_test` 全绿。
 - 审查：Gate-1 方案对抗 1 路 + L3 两路（A：网络/文件/并发/原子性；B：契约/安全/回归面）+ L3-P 六问（含 NFR 例外与不可逆面）。
 - 真实冒烟：本机 e2e（mock 清单全链路）+ `pony update --check --json` 真网络收据。
+
+## AMEND-3（Lead 裁决，实施回执后）
+
+1. **C1 增补 4 个 pub 项（接受）**：`UpdateOptions{check,force,pin}`、`UpdateOutcome{previous_version,latest_version,updated,install_path,sha256}`、`run_self_update(...)`、`UpdateError::code()`。
+   理由：`pony update` 的实现在 **bin 目标**里，只能触达 `pony_agent_core` 的 `pub` 面；若把发现/下载留在私有 fn，`-D warnings` 下必成死代码。这是 C1 的一处洞，按「最保守语义」补齐。
+2. **`verify_sha256` 语义收紧（接受）**：摘要不符时**当场删除待安装产物**（只删 `.part`/待装临时件，绝不碰既有二进制）。依据：冻结用例 `sha_mismatch_leaves_existing_binary_untouched_without_residue` 在只调 `verify_sha256` 后即断言「无 `.part` 残留」。
+3. **回滚备份移到编排层（接受）**：`install_atomically` 保持「`rename` 直接覆盖、目标永不缺失」；`<exe>.old-<pid>` 由 `run_self_update` 在安装前 `copy` 生成、回验成功即删、失败即 `rename(.old→target)` 恢复。
+   理由：C1（rename 覆盖）+ C5（临时文件必删）+ C6-5（回验失败恢复）三者只有在编排层持有备份时才同时成立。
+4. **C3 产物件数勘误**：实际 3 件（`pony-tui_<ver>_linux-x86_64`、`.sha256`、`pony-cli-latest.json`），原写「4 files」为笔误。
+5. **门禁数字勘误**：`--lib` 上限 = 基线 1348 + A 组 14 = **1362**（B 组 16 条落在 bin 目标，`--lib` 看不到）；bin 目标 = 54（含既有 38）。
+6. **`-D warnings` 门禁的当前阻塞（外部，不属本写域）**：`crates/pony-agent-core/src/agent/team_history.rs`（另一路并行会话的协议空桩，10 处 `todo!("NotImplemented")`、参数未使用）在 HEAD 即产生 14 条 `unused variable` error。
+   物理证据：`RUSTFLAGS="-D warnings" cargo check -p pony-agent-core --lib` 的 error 落点 100% 在该文件；本波两个文件的 warning 数为 **0**。处置：**不修**（不碰他人未完成实现），登记为外部阻塞，等该 owner 填实现后自然转绿；`node scripts/check-rust-test-lints.mjs` 同因失败。
