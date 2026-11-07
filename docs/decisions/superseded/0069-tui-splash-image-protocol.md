@@ -1,6 +1,6 @@
 # 0069 TUI 初始化页品牌标走终端图形协议，字符画降级为回退
 
-Status: proposed
+Status: superseded by [0080](../0080-tui-splash-protocol-env-only-detection.md)（决策 3 的 `Picker::from_query_stdio()` 启动期探测被证为启动吃键与 raw mode 被关的真实缺陷源；协议判定改为零 I/O 环境判定。其余决定——图形协议 + 位图资产 + 字符画回退 + 显式覆盖入口——由 0080 承接重述）
 
 ## 背景
 

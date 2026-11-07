@@ -5,24 +5,26 @@ Harness overview
 ----------------
 1. Fork a PTY, run the TUI binary with an isolated HOME/XDG and TERM=xterm-256color
    (window size 120x34 so the app does not hit the "terminal too small" fallback).
-2. crossterm probes the terminal with `CSI ? u` + `CSI c`; we answer like kitty would:
-   `CSI ? 1 u` (keyboard enhancement flags = 1, disambiguate) followed by
-   `CSI ? 1 ; 2 c` (primary device attributes RESPONSE).  Order matters: crossterm
-   treats the DA1 response as "protocol unsupported" if it arrives before the flags
-   response.  NOTE: bare `ESC [ c` is the DA1 *query*, not a response - crossterm's
-   parser only accepts `CSI ? ... c`; sending the query back loops/errors.
-3. Assert the app pushes keyboard enhancement flags: `CSI > N u` with the
-   DISAMBIGUATE bit set.  NOTE: crossterm 0.28.1 serializes
-   `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` (bits = 1) as `CSI > 1 u`
-   (`PushKeyboardEnhancementFlags` in crossterm/src/event.rs), not `CSI > 2 u`;
-   the contract's `>2u` literal is off by one flag bit.  We assert the actual
-   protocol value (disambiguate bit set) and record the exact bytes.
+   The splash brand mark no longer probes the terminal: it is resolved from env
+   only (`init_splash_image`), so the session performs zero stdin reads and cannot
+   swallow the keystrokes typed below. Assertion a2.6 enforces exactly that: no
+   capability-query byte may appear on the wire.
+2. ADR 0075: the app no longer probes the terminal with `CSI ? u`; it pushes
+   keyboard enhancement flags unconditionally whenever TERM is not `dumb`.
+   Multiplexer env vars (HERDR/TMUX/ZELLIJ/STY/ABDUCO) are stripped from the child
+   env, so this session models a **direct** terminal.
+3. Assert no `CSI ? u` probe was emitted and that the push carries both
+   DISAMBIGUATE_ESCAPE_CODES (1) and REPORT_ALL_KEYS_AS_ESCAPE_CODES (8):
+   crossterm 0.28.1 serializes flags 9 as `CSI > 9 u` (direct tier).  A second PTY
+   session with `HERDR=0.7.5` must push `CSI > 1 u` (DISAMBIGUATE only, multiplexer
+   tier) - ADR 0075's tiering rule.
 4. Type `abc`, then send kitty `CSI 13;2u` (Shift+Enter): the composer must still
    hold `abc` and must NOT submit (no thinking/writing state).
 5. Send bare CR (plain Enter): the composer must submit/clear (`abc` leaves the
    input row; a provider error is allowed because HOME/XDG are isolated).
 6. Ctrl-C twice: the process must exit, print no panic, and leave the alternate
-   screen (terminal restored).  If flags were pushed, a pop (`CSI < u`) is required.
+   screen (terminal restored).  Flags are always pushed on a non-`dumb` TERM, so a
+   pop (`CSI < u`) is required.
 
 Exit codes: 0 = all assertions passed, 1 = at least one assertion failed,
 2 = harness error (PTY/startup/evidence problem).
@@ -52,14 +54,34 @@ import unicodedata
 
 COLS, ROWS = 120, 34
 
+# ADR 0075：`CSI ? u`（kitty flags query）是**已废弃**的探测；它一旦出现即回归。
 PROBE = b"\x1b[?u"
-# kitty flags response first, then primary device attributes RESPONSE (DA1).
-# (bare `ESC [ c` is the DA1 query, not a response; crossterm expects `CSI ? ... c`)
-PROBE_REPLY = b"\x1b[?1u\x1b[?1;2c"
 PUSH_RE = re.compile(rb"\x1b\[>([0-9]+)u")
 # crossterm 0.28.1 serializes PopKeyboardEnhancementFlags as `CSI < 1 u`
 # (event.rs:533 `csi!("<1u")`), not a bare `CSI < u`; accept any flag value.
 POP_RE = re.compile(rb"\x1b\[<[0-9]*u")
+# crossterm 0.28.1 的 flag 位：DISAMBIGUATE=1、REPORT_ALL_KEYS_AS_ESCAPE_CODES=8。
+DISAMBIGUATE = 0b0001
+REPORT_ALL_KEYS = 0b1000
+# 直连终端 = 全键位上报（`CSI > 9 u`）；复用器 = 仅消歧（`CSI > 1 u`，见 ADR 0075）。
+EXPECTED_DIRECT_FLAGS = DISAMBIGUATE | REPORT_ALL_KEYS
+EXPECTED_MULTIPLEXER_FLAGS = DISAMBIGUATE
+# 与 `tui::TERMINAL_MULTIPLEXER_ENV_KEYS` 同口径（任一非空即视为复用器）。
+MULTIPLEXER_ENV_KEYS = ("HERDR", "TMUX", "ZELLIJ", "STY", "ABDUCO")
+# 与 `tui::splash_protocol_for_env` 的探测输入同口径：剥离后固定为「无图形协议」。
+IMAGE_ENV_KEYS = ("KITTY_WINDOW_ID", "TERM_PROGRAM", "LC_TERMINAL")
+# 品牌标图形协议探测曾直接读 stdin 并吞掉用户按键（已改为纯环境判定，见
+# `tui::init_splash_image`）；这里仍把该 env 从子进程环境剥离，避免外部取值干扰判定。
+SPLASH_PROBE_ENV = "PONY_TUI_SPLASH_IMAGE_PROTOCOL"
+# 终端能力查询序列：出现任何一条都说明又走回了 stdio 探测（会读 stdin、可能吞键）。
+# 不把 kitty `ESC _ G` 计入：品牌标**渲染**也会发它；而 stdio 探测必然同帧带 DA1 `CSI c`。
+CAPABILITY_QUERIES = (
+    b"\x1b[c",       # DA1（六位图/kitty 能力位）
+    b"\x1b[5n",      # DSR，探测兜底
+    b"\x1b[16t",     # 字符格像素尺寸
+    b"\x1b[14t",     # 文本区像素尺寸
+    b"\x1b[1337n",   # iTerm2 私有能力查询
+)
 SHIFT_ENTER = b"\x1b[13;2u"  # kitty CSI u: codepoint 13 (Enter), modifier 2 (Shift)
 PLAIN_ENTER = b"\r"
 CTRL_C = b"\x03"
@@ -383,6 +405,11 @@ def run(bin_path: str, evidence_dir: str) -> int:
             "NODE_USE_ENV_PROXY",
             "PONY_KEYBOARD_ENHANCEMENT",
             "NO_COLOR",
+            SPLASH_PROBE_ENV,
+            *MULTIPLEXER_ENV_KEYS,
+            # 固定为「不支持图形协议」：否则开发者本机的 kitty/ghostty/iTerm2 会
+            # 唤醒品牌标位图路径，输出与断言无关的图形字节。
+            *IMAGE_ENV_KEYS,
         )
     }
     env.update(iso)
@@ -393,35 +420,51 @@ def run(bin_path: str, evidence_dir: str) -> int:
     try:
         session = PtySession([bin_path], env, repo_root)
 
-        # ---- Assertion 1: probe is answered like kitty, then app pushes flags -----
-        probe_ok = session.wait_for(lambda: PROBE in session.buf, timeout=8.0)
-        sequences["probe"] = hexs(PROBE) if probe_ok else ""
-        if probe_ok:
-            session.write(PROBE_REPLY)
-            sequences["reply"] = hexs(PROBE_REPLY)
-        else:
-            notes.append(
-                "no CSI ? u probe observed within 8s: the binary does not call "
-                "supports_keyboard_enhancement() (R3 not wired)"
-            )
-        push_ok = session.wait_for(lambda: PUSH_RE.search(bytes(session.buf)) is not None, timeout=4.0)
-        push_flags = None
+        # ---- Assertion 1: no probe, unconditional push (ADR 0075 direct tier) ----
+        push_ok = session.wait_for(lambda: PUSH_RE.search(bytes(session.buf)) is not None, timeout=8.0)
         match = PUSH_RE.search(bytes(session.buf))
+        push_flags = int(match.group(1)) if match else None
         if match:
-            push_flags = int(match.group(1))
             sequences["push"] = hexs(match.group(0))
+        probe_seen = PROBE in session.buf
+        sequences["probe"] = hexs(PROBE) if probe_seen else ""
         report.add(
-            "a2.1_probe_answered_and_flags_pushed",
-            probe_ok and push_ok and push_flags is not None and (push_flags & 0b1) == 1,
+            "a2.1_no_probe_and_unconditional_push_direct_tier",
+            push_ok and not probe_seen and push_flags == EXPECTED_DIRECT_FLAGS,
             (
-                f"probe_seen={probe_ok} push_seen={push_ok} push_flags={push_flags} "
+                f"push_seen={push_ok} push_flags={push_flags} "
+                f"expected_flags={EXPECTED_DIRECT_FLAGS}(DISAMBIGUATE|REPORT_ALL_KEYS) "
                 f"raw_push={match.group(0).hex() if match else ''} "
-                f"expected_push_flags_bit=DISAMBIGUATE(1) "
-                f"[contract literal '>2u' == REPORT_EVENT_TYPES bit; crossterm writes '>1u' for R2 flags]"
+                f"probe_seen={probe_seen} (must be False: ADR 0075 removed the CSI ? u probe)"
             ),
         )
-        if not probe_ok:
-            notes.append("assertion 1 failed before the app can receive Shift+Enter (expected red phase)")
+        if not push_ok:
+            notes.append(
+                "no keyboard-enhancement push observed: Shift+Enter cannot be disambiguated"
+            )
+        if probe_seen:
+            notes.append("legacy `CSI ? u` probe regressed: ADR 0075 removed it on purpose")
+
+        # ---- Assertion 1b: no capability query at all (zero stdin reads) --------
+        # 品牌标探测曾用 stdio 能力查询（会阻塞读 stdin 并吞掉用户按键）。现在改为纯环境
+        # 判定：线上不应再出现任何查询字节；出现即意味着可能又有了吃键窗口。
+        startup_raw = bytes(session.buf)
+        capability_probes = [query for query in CAPABILITY_QUERIES if query in startup_raw]
+        report.add(
+            "a2.6_startup_sends_no_capability_query",
+            not capability_probes,
+            (
+                f"capability_probe_bytes={[query.hex() for query in capability_probes]} "
+                "(must be empty: splash 探测已改为零 stdin 读的环境判定)"
+            ),
+        )
+        sequences["capability_probes"] = (
+            hexs(b"|".join(capability_probes)) if capability_probes else ""
+        )
+        if capability_probes:
+            notes.append(
+                "startup emitted terminal capability queries: these read stdin and can eat keystrokes"
+            )
 
         # ---- Wait for the composer to be ready -----------------------------------
         ready = session.wait_for(lambda: "›" in bytes(session.buf).decode("utf-8", "replace"), 10.0)
@@ -534,8 +577,36 @@ def run(bin_path: str, evidence_dir: str) -> int:
         if not push_ok:
             notes.append(
                 "pop flags not required in this run: no push was observed "
-                "(red phase / unsupported terminal path)"
+                "(TERM=dumb path or unsupported terminal)"
             )
+
+        # ---- Assertion 5: multiplexer tier pushes DISAMBIGUATE only (ADR 0075) ---
+        # 同一二进制、同一 PTY，仅加 `HERDR`：复用器下只发消歧位，pop 丢失时
+        # 代价从「全键盘乱码」降为「修饰键异常」。
+        mux_session: PtySession | None = None
+        try:
+            mux_env = dict(env)
+            mux_env["HERDR"] = "0.7.5"
+            mux_session = PtySession([bin_path], mux_env, repo_root)
+            mux_push_ok = mux_session.wait_for(
+                lambda: PUSH_RE.search(bytes(mux_session.buf)) is not None, timeout=8.0
+            )
+            mux_match = PUSH_RE.search(bytes(mux_session.buf))
+            mux_flags = int(mux_match.group(1)) if mux_match else None
+            if mux_match:
+                sequences["push_multiplexer"] = hexs(mux_match.group(0))
+            report.add(
+                "a2.5_multiplexer_tier_pushes_disambiguate_only",
+                mux_push_ok and mux_flags == EXPECTED_MULTIPLEXER_FLAGS,
+                (
+                    f"herdr_push_seen={mux_push_ok} push_flags={mux_flags} "
+                    f"expected_flags={EXPECTED_MULTIPLEXER_FLAGS}(DISAMBIGUATE) "
+                    f"raw_push={mux_match.group(0).hex() if mux_match else ''}"
+                ),
+            )
+        finally:
+            if mux_session is not None:
+                mux_session.close()
 
         exit_code = 0 if report.failures == 0 else 1
     except RuntimeError as error:

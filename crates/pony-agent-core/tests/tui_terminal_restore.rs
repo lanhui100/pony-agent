@@ -111,3 +111,181 @@ fn c5_restore_entry_point_is_a_plain_fn_usable_as_the_guard_closure() {
         "C5: 还原入口必须永不 panic（它在 Drop / panic hook 里执行，再 panic 会 abort 进程）"
     );
 }
+
+/// 返回 `needle` 首次出现的字节偏移（用于断言"置零在弹栈之后"这类顺序契约）。
+fn position_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+// ── C6：kitty 键盘协议必须被「显式置零」，且弹栈要有重复兜底 ───────────────────────
+
+#[test]
+fn c6_keyboard_flags_are_explicitly_zeroed_after_repeated_pops() {
+    let seq = tui::TERMINAL_INPUT_MODES_RESET;
+    let first_pop = position_of(seq, b"\x1b[<1u")
+        .expect("C6: 缺少 crossterm 弹栈 ESC[<1u");
+    let zero_at = position_of(seq, b"\x1b[=0u").expect(
+        "C6: 必须显式置零 kitty 键盘标志（ESC[=0u）——栈深与代理层转发错位时，弹栈是相对操作，永远清不干净",
+    );
+    assert!(
+        first_pop < zero_at,
+        "C6: 置零必须排在弹栈之后（弹栈会把栈里保存的旧标志写回终端，顺序反了等于没清）"
+    );
+    let pop_form = b"\x1b[<1u";
+    let pops = seq
+        .windows(pop_form.len())
+        .filter(|window| *window == pop_form)
+        .count();
+    assert_eq!(
+        pops, 3,
+        "C6: 弹栈必须重复三次兜底（复用器可能吞掉或错配一次 pop，只发一次会留下残栈），实际 = {pops}"
+    );
+}
+
+// ── C7：复用器/代理层下只 push DISAMBIGUATE；直连终端保持全键位上报 ────────────────
+
+#[test]
+fn c7_multiplexer_pushes_only_disambiguate_while_direct_terminal_keeps_all_keys() {
+    use crossterm::event::KeyboardEnhancementFlags as Flags;
+
+    let direct = tui::keyboard_enhancement_push_flags_for(Some("xterm-256color"), None)
+        .expect("C7: 直连终端必须 push 键盘增强标志");
+    assert!(
+        direct.contains(Flags::DISAMBIGUATE_ESCAPE_CODES),
+        "C7: 直连终端必须带 DISAMBIGUATE_ESCAPE_CODES（Shift+Enter 依赖它），实际 = {direct:?}"
+    );
+    assert!(
+        direct.contains(Flags::REPORT_ALL_KEYS_AS_ESCAPE_CODES),
+        "C7: 直连终端保持既有全键位上报能力，实际 = {direct:?}"
+    );
+
+    let multiplexed = tui::keyboard_enhancement_push_flags_for(Some("xterm-256color"), Some("HERDR"))
+        .expect("C7: 复用器下仍要 push（否则 Shift+Enter 退化）");
+    assert_eq!(
+        multiplexed,
+        Flags::DISAMBIGUATE_ESCAPE_CODES,
+        "C7: 复用器下只许发 DISAMBIGUATE(1)：REPORT_ALL_KEYS(8) 会把每个键都编码成 CSI 序列，\
+         pop 一旦被代理层吞掉，用户退出后敲任何键都吐出 `u`/`3u`/`7u`"
+    );
+    assert!(
+        !multiplexed.contains(Flags::REPORT_ALL_KEYS_AS_ESCAPE_CODES),
+        "C7: 复用器下不得带 REPORT_ALL_KEYS_AS_ESCAPE_CODES，实际 = {multiplexed:?}"
+    );
+
+    assert_eq!(
+        tui::keyboard_enhancement_push_flags_for(Some("dumb"), None),
+        None,
+        "C7: TERM=dumb 不得 push"
+    );
+    assert_eq!(
+        tui::keyboard_enhancement_push_flags_for(None, None),
+        None,
+        "C7: TERM 缺失不得 push"
+    );
+}
+
+// ── C8：复用器环境探测（纯函数内核，不读全局环境） ─────────────────────────────────
+
+#[test]
+fn c8_multiplexer_detection_reads_known_env_keys() {
+    let tmux_only = |key: &str| (key == "TMUX").then(|| "/tmp/tmux-1000/default,4242,0".to_string());
+    assert_eq!(
+        tui::terminal_multiplexer_for_env(tmux_only).as_deref(),
+        Some("TMUX"),
+        "C8: TMUX 环境变量存在时必须识别为复用器"
+    );
+
+    let herdr_only = |key: &str| (key == "HERDR").then(|| "0.7.5".to_string());
+    assert_eq!(
+        tui::terminal_multiplexer_for_env(herdr_only).as_deref(),
+        Some("HERDR"),
+        "C8: herdr pane 必须被识别（本缺陷的实际现场）"
+    );
+
+    // 复用器退出后环境变量仍可能残留为空值：空白值不得判成复用器（否则无谓降级键位）。
+    let blank = |_: &str| Some("   ".to_string());
+    assert_eq!(
+        tui::terminal_multiplexer_for_env(blank),
+        None,
+        "C8: 空白值不得判定为复用器"
+    );
+
+    let absent = |_: &str| None;
+    assert_eq!(tui::terminal_multiplexer_for_env(absent), None);
+}
+
+// ── C9：还原不完整时，退出提示必须附带可直接执行的手工恢复命令 ─────────────────────
+
+#[test]
+fn c9_recovery_hint_is_single_line_and_copy_pastable() {
+    let line = tui::terminal_recovery_hint_line();
+    assert!(
+        !line.contains('\n'),
+        "C9: 恢复提示必须单行（多行会被终端还原序列打散），实际 = {line:?}"
+    );
+    assert!(
+        line.contains("reset"),
+        "C9: 首选手段必须是 `reset`（同时复位 raw mode 与终端私有模式），实际 = {line:?}"
+    );
+    assert!(
+        line.contains("printf") && line.contains("=0u"),
+        "C9: 应急串必须用 POSIX printf 且含显式置零 ESC[=0u，实际 = {line:?}"
+    );
+    assert!(
+        !line.contains("$'"),
+        "C9: 不得使用 `$'...'`（bash/zsh 扩展，dash/sh 不认），实际 = {line:?}"
+    );
+}
+
+#[test]
+fn c9_hint_block_appends_recovery_line_only_when_restore_incomplete() {
+    let complete = tui::resume_hint_block("session-abcd1234", false);
+    assert!(
+        complete.contains("pony resume session-abcd1234"),
+        "C9: 续接行必须恒在，实际 = {complete:?}"
+    );
+    assert!(
+        !complete.contains("reset"),
+        "C9: 还原成功时不得多印恢复命令（会误导用户怀疑终端坏了），实际 = {complete:?}"
+    );
+
+    let incomplete = tui::resume_hint_block("session-abcd1234", true);
+    let lines: Vec<&str> = incomplete
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "C9: 还原不完整时必须恰好两行（续接 + 恢复），实际 = {lines:?}"
+    );
+    assert!(
+        lines[0].contains("pony resume session-abcd1234"),
+        "C9: 续接行必须在首行（用户最先看到可复制的入口），实际 = {:?}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("reset"),
+        "C9: 第二行必须是手工恢复命令，实际 = {:?}",
+        lines[1]
+    );
+}
+
+// ── C10：还原状态可观测且幂等（重复还原不得让标记漂移） ────────────────────────────
+
+#[test]
+fn c10_restore_reports_completeness_idempotently() {
+    tui::restore_terminal_modes();
+    let first = tui::terminal_restore_incomplete();
+    tui::restore_terminal_modes();
+    let second = tui::terminal_restore_incomplete();
+    assert_eq!(
+        first, second,
+        "C10: 还原必须幂等——重复调用不得让「还原是否完整」标记漂移（退出提示据此决定是否附恢复命令）"
+    );
+}

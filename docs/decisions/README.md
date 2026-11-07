@@ -85,7 +85,12 @@
 - [0071 TUI 流式期可输入、面板可开、用户消息排队](0071-tui-streaming-input-queue-and-panels.md)
 - [0072 会话 id 生成规范统一为 `pa_<uuidv7>`](0072-session-id-unification.md)
 - [0073 token 速度口径 v2：解码窗口分母 + 物理下限 + basis 自描述](0073-token-speed-decode-basis.md)
+- [0075 TUI 键盘协议还原加固：显式置零、复用器最小化 push、失败可告知](0075-tui-kitty-keyboard-protocol-restore-hardening.md)
 - [0076 TUI 思考（reasoning）消息可见与消息区底部呼吸间距](0076-tui-thinking-message-and-chat-bottom-gap.md)
+- [0078 TUI header 承载工作区标签与数值指标，底面行回归模型身份](0078-tui-header-workspace-and-metrics-layering.md)
+- [0079 TUI 右侧滚动条、思考折叠、`/settings` 面板与 Agent 过程默认隐藏](0079-tui-process-fold-scroll-settings.md)
+- [0080 TUI 品牌标图形协议改为零 I/O 环境判定：禁止启动期 stdio 能力查询](0080-tui-splash-protocol-env-only-detection.md)
+- [0081 Ask 内联面板高度随问题换行增长，硬上限按终端宽度分档（40 / 24）](0081-tui-inline-ask-height-adaptive.md)
 - [0082 会话投影剔除宿主续轮提示：标题、轮次与 `/resume` 列表只认真实用户轮](0082-session-projection-excludes-host-continuation.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
@@ -93,7 +98,6 @@
 - [0066 MCP 通道闭合（T2）](0066-mcp-channel-closure.md)
 - [0067 进程外插件宿主协议 v1 与 hooks 沙箱加固（T3）](0067-plugin-host-protocol-and-hooks-sandbox.md)
 - [0068 五份契约版本化、conformance kit 与扩展点归属表（T4）](0068-contract-versioning-and-conformance-kit.md)
-- [0069 初始化页品牌标走终端图形协议（sixel/kitty/iTerm2），字符画降级为回退](proposed/0069-tui-splash-image-protocol.md)
 - [0077 审批类控制请求可恢复：宿主面板 + 批准后授权并续轮](0077-approval-resume-host-panel-and-continuation.md)
 
 ### 已接替
@@ -103,6 +107,7 @@
 - [0004 前端工作台先采用原生 TypeScript + Vite 壳层](superseded/0004-frontend-shell-workbench-direction.md) —— 被 [0003](0003-frontend-stack-vue-pinia-no-router.md) 接替
 - [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](superseded/0009-workbench-ia-telemetry-page-and-config-tabs.md) —— 被 [0013](0013-workbench-nav-observation-entry-and-provider-hierarchy.md) 部分接替（入口决定修订，其余承接重述）
 - [0012 应用内更新检测：前端直连 GitHub Releases 与构造式发布页跳转](superseded/0012-app-update-check-via-github-releases.md) —— 被 [0017](0017-release-tag-convention-and-tauri-version-sync.md) 接替
+- [0069 初始化页品牌标走终端图形协议（sixel/kitty/iTerm2），字符画降级为回退](superseded/0069-tui-splash-image-protocol.md) —— 被 [0080](0080-tui-splash-protocol-env-only-detection.md) 接替（启动期 stdio 能力探测改为零 I/O 环境判定；图形协议 + 位图资产 + 字符画回退其余决定承接重述）
 
 ### 已拒绝
 

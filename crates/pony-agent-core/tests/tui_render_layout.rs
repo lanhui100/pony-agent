@@ -181,7 +181,13 @@ fn layout_invariants_hold_on_standard_terminal() {
     // ADR 0042 §决策 1/3/4「composer 色带几何 + 移除右下角状态词 + 色带下方 1 行指标行」。
     // 断言漂移说明：本用例此前断言 `─`（旧实现字符）与 footer 状态词「就绪」——后者已被
     // ADR 0042 显式删除（`status_word()` 只服务正文流式活动行），故改为断言指标行。
-    assert!(row_text(&buf, 0).contains("pony"), "header 必须包含 wordmark");
+    let header = row_text(&buf, 0);
+    assert!(header.contains("PONY"), "header 必须包含大写 wordmark");
+    // 工作区标签形如 `~/<文件夹名称>`：header 与品牌词之间以 `·` 分隔。
+    assert!(
+        header.contains("  ·  "),
+        "header 必须保留品牌与工作区的分隔符，实际 {header:?}"
+    );
 
     // 发丝线：header 正下方一行由**同一字符**连续铺开、横贯内容列，且不得退化成方框边框。
     let rule_row = row_text(&buf, 1);
@@ -204,9 +210,10 @@ fn layout_invariants_hold_on_standard_terminal() {
 
     assert!(text.contains("›"), "输入区必须渲染提示符");
 
-    // composer 几何与指标行（wave-39 v4 R13 + ADR 0042 R5/R7）：
-    // 提示符在输入行；其下 1 行呼吸行（色带末行，必须全空）；再下一行是**最后一行**指标行，
-    // 左侧为折叠成 `~` 的 cwd，右侧为 token/缓存/上下文簇（默认无用量时只有左侧）。
+    // composer 几何与底部行（wave-39 v4 R13 + ADR 0042 R5/R7 + ADR 0078）：
+    // 提示符在输入行；其下 1 行呼吸行（色带末行，必须全空）；再下一行是**最后一行**。
+    // ADR 0078 起该行不再是「左侧 cwd + 右侧指标」：工作区只在 header 出现一次
+    // （`~/<文件夹名称>`），数值指标上移 header 右槽，底面行改为右对齐的模型身份。
     let prompt_row = (0..buf.area.height)
         .find(|y| row_text(&buf, *y).contains('›'))
         .expect("未找到输入行");
@@ -220,21 +227,47 @@ fn layout_invariants_hold_on_standard_terminal() {
         "输入行与指标行之间必须是 1 行空白呼吸行，实际 {:?}",
         row_text(&buf, prompt_row + 1)
     );
-    let metrics_row = row_text(&buf, buf.area.height - 1);
-    // 平台无关判据替代 Unix-only 的 `starts_with('~') || starts_with('/')`（见 helper 注释）。
+    // ADR 0078：工作区路径全屏只出现在 header 一次（`~/<文件夹名称>`），
+    // 底部最后一行改为右对齐的模型身份；原「末尾行左侧必须是折叠 cwd」的判据随之作废。
+    let header_row = row_text(&buf, 0);
+    let workspace_name = state
+        .workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
     assert!(
-        starts_with_folded_or_absolute_path(&metrics_row),
-        "指标行左侧必须是折叠后的 cwd 或绝对路径（ADR 0042 R7），实际 {metrics_row:?}"
+        !workspace_name.is_empty() && header_row.contains(&workspace_name),
+        "header 必须包含工作区标签（ADR 0078），期望含 {workspace_name:?}，实际 {header_row:?}"
     );
     assert!(
-        !metrics_row.contains('›'),
-        "指标行不得混入 composer 提示符，实际 {metrics_row:?}"
+        !header_row.contains('›'),
+        "header 不得混入 composer 提示符，实际 {header_row:?}"
+    );
+    // ADR 0078：底面行只承载模型身份，且右对齐到**内容列**右边缘；内容列右侧仍有
+    // `GUTTER` 列画布留白（与左右沟槽同源），故行尾留白是契约的一部分，
+    // 判据必须用 `trim()` 取「唯一内容」，再用行尾留白列数证明「右对齐」。
+    let identity_row = row_text(&buf, buf.area.height - 1);
+    assert_eq!(
+        identity_row.trim(),
+        state.model.trim(),
+        "最后一行只能承载模型身份（ADR 0078），实际 {identity_row:?}"
+    );
+    let trailing_blanks = identity_row.len() - identity_row.trim_end().len();
+    assert!(
+        trailing_blanks <= 4,
+        "模型身份必须右对齐到内容列右边缘（行尾留白仅允许外沟槽），\
+         实际行尾留白 {trailing_blanks} 列：{identity_row:?}"
+    );
+    assert!(
+        !identity_row.contains('›'),
+        "最后一行不得混入 composer 提示符，实际 {identity_row:?}"
     );
     let canvas_bg = buf[(0, 2)].bg;
     assert_eq!(
         buf[(0, buf.area.height - 1)].bg,
         canvas_bg,
-        "指标行必须落在画布底上（不在 composer 色带内，ADR 0042 R7），实际底色与内容区不一致"
+        "底面行必须落在画布底上（不在 composer 色带内，ADR 0042 R7），实际底色与内容区不一致"
     );
 
     // 左右沟槽：任何一行都不允许贴边渲染内容
@@ -381,11 +414,13 @@ fn panel_renders_inside_screen_and_keeps_footer() {
             id: "session-aaaa".into(),
             title: "First session".into(),
             updated_at: "0".into(),
+            turn_count: 0,
         },
         tui::SessionItem {
             id: "session-bbbb".into(),
             title: "Second session".into(),
             updated_at: "0".into(),
+            turn_count: 0,
         },
     ]);
     let mut buf = screen(&mut state, 90, 24);
@@ -423,16 +458,15 @@ fn panel_renders_inside_screen_and_keeps_footer() {
         buf.area.width
     );
     assert!(panel_top > 0 && panel_bottom < buf.area.height - 1, "浮层不得贴屏幕上下边缘");
-    // 浮层态指标行必须收起：最后一行不得出现折叠 cwd（ADR 0042 R7 的左侧簇）。
-    // 原断言只查 `starts_with('~')`：cwd 不在 HOME 下时（Windows 上永远是 `C:\...`）
-    // 该断言恒真 → 反向断言空转。改用平台无关判据后，绝对路径也会被抓到。
+    // 浮层态：composer 与底部行整体收起（ADR 0042 §决策 3），因此最后一行必须是
+    // **空画布行**——既不得残留 cwd，也不得残留模型身份（ADR 0078 的底面行契约）。
     let modal_last_row = row_text(&buf, buf.area.height - 1);
     assert!(
-        !starts_with_folded_or_absolute_path(&modal_last_row),
-        "浮层态必须收起指标行，实际最后一行 {modal_last_row:?}"
+        modal_last_row.trim().is_empty(),
+        "浮层态必须收起底部行（不得残留 cwd / 模型身份），实际最后一行 {modal_last_row:?}"
     );
 
-    // 反向断言（防「面板卡死 / 永久吞掉输入区」）：关闭浮层后 composer 与指标行必须恢复。
+    // 反向断言（防「面板卡死 / 永久吞掉输入区」）：关闭浮层后 composer 与底部行必须恢复。
     state.cancel_session_selector();
     buf = screen(&mut state, 90, 24);
     let restored = all_text(&buf);
@@ -441,10 +475,18 @@ fn panel_renders_inside_screen_and_keeps_footer() {
         !restored.contains("First session"),
         "关闭浮层后面板必须消失，实际屏幕: {restored:?}"
     );
+    // 判据同 `layout_invariants_hold_on_standard_terminal`：`trim()` 取唯一内容，
+    // 行尾留白列数证明右对齐（外沟槽留白属契约）。
     let restored_last_row = row_text(&buf, buf.area.height - 1);
+    assert_eq!(
+        restored_last_row.trim(),
+        state.model.trim(),
+        "关闭浮层后底部模型身份行必须恢复（ADR 0078），实际 {restored_last_row:?}"
+    );
+    let restored_trailing = restored_last_row.len() - restored_last_row.trim_end().len();
     assert!(
-        starts_with_folded_or_absolute_path(&restored_last_row),
-        "关闭浮层后指标行必须恢复（ADR 0042 R7），实际 {restored_last_row:?}"
+        restored_trailing <= 4,
+        "恢复后的模型身份必须右对齐到内容列右边缘，实际行尾留白 {restored_trailing} 列：{restored_last_row:?}"
     );
 }
 
@@ -639,4 +681,43 @@ fn command_menu_and_provider_panel_render() {
     dump_if_requested("05-provider-panel", &buf);
     assert!(squeezed(&buf).contains("提供商"), "提供商面板标题缺失");
     assert!(all_text(&buf).contains("DeepSeek"));
+}
+
+#[test]
+fn header_workspace_label_is_home_folded_folder_name() {
+    use std::path::Path;
+
+    // 家目录下的直接子目录 → `~/<文件夹名称>`。
+    assert_eq!(
+        tui::workspace_header_label_with_home(Path::new("/home/u/pony-agent"), Some("/home/u")),
+        "~/pony-agent"
+    );
+    // 家目录带尾部分隔符同样折叠；家目录本身显示 `~`。
+    assert_eq!(
+        tui::workspace_header_label_with_home(Path::new("/home/u/pony-agent"), Some("/home/u/")),
+        "~/pony-agent"
+    );
+    assert_eq!(
+        tui::workspace_header_label_with_home(Path::new("/home/u"), Some("/home/u")),
+        "~"
+    );
+    // 深层目录只保留最后一级（完整路径由底部指标行承担）。
+    assert_eq!(
+        tui::workspace_header_label_with_home(Path::new("/home/u/work/proj"), Some("/home/u")),
+        "~/proj"
+    );
+    // 家目录之外不伪造 `~/`，无 home 时退回文件夹名。
+    assert_eq!(
+        tui::workspace_header_label_with_home(Path::new("/tmp/x"), Some("/home/u")),
+        "x"
+    );
+    assert_eq!(
+        tui::workspace_header_label_with_home(Path::new("/tmp/x"), None),
+        "x"
+    );
+    // 前缀只是字符串相似（`/home/user2` 不属于 `/home/user`）时不得折叠。
+    assert_eq!(
+        tui::workspace_header_label_with_home(Path::new("/home/user2/x"), Some("/home/user")),
+        "x"
+    );
 }

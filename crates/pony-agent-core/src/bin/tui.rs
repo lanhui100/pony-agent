@@ -26,6 +26,8 @@ use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalDa
 // W3：Team 可见性数据源（全部来自真实运行时，不造数据）。
 use pony_agent_core::agent::metrics_snapshot::TurnMetricsSnapshot;
 use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
+// 显示偏好（/settings 与 Ctrl+O 的唯一真值）：独立文件持久化，与桌面端 settings.json 契约解耦。
+use pony_agent_core::agent::tui_preferences::{TuiPreferences, TuiPreferencesStore};
 use pony_agent_core::agent::orchestration::{
     inbox_pending_len, is_driving, list_agents, team_task_list, teammate_session_id, TeamTaskItem,
     TeammateStatus,
@@ -67,16 +69,23 @@ use std::sync::Arc;
 // 主循环每个 tick（≤16ms）检测后正常 break，走统一的终端恢复保证器。
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// ADR 0075：最近一次终端还原是否**未能完整送达**输入侧/屏幕侧还原串（幂等标记）。
+/// 退出提示据此决定是否附加一条可复制执行的手工恢复命令（见 `resume_hint_block`）。
+static TERMINAL_RESTORE_INCOMPLETE: AtomicBool = AtomicBool::new(false);
+
 /// 终端**输入侧**协议还原串（收到后终端不再把按键编码成转义序列）。
 ///
 /// 残留这些模式时的现象：退出 TUI 后敲任何键都变成 `ESC[117u` / `ESC[9;5u` 这类
 /// kitty 键盘协议编码，被 shell 当正文回显，终端看起来"输入全是乱码"。
-/// - `<1u` / `<u`：弹掉 kitty 键盘增强协议栈（crossterm 的弹栈写作 `<1u`，部分终端只认 `<u`）
+/// - `<1u`×3 / `<u`：弹掉 kitty 键盘增强协议栈（crossterm 的弹栈写作 `<1u`，部分终端只认 `<u`）；
+///   重复三次兜底「代理层吞掉或错配一次 pop」的情形（ADR 0075）
+/// - `=0u`：与栈无关地显式把键盘协议标志置零（唯一绝对还原，**必须排在弹栈之后**：
+///   弹栈会把栈里保存的旧标志写回终端，顺序反了等于没清）
 /// - `>4;0m`：关 xterm modifyOtherKeys
 /// - `?1000l` `?1002l` `?1003l` `?1006l` `?1015l`：关各级鼠标追踪（含 any-motion 与 SGR）
 /// - `?2004l`：关 bracketed paste
 pub const TERMINAL_INPUT_MODES_RESET: &[u8] =
-    b"\x1b[<1u\x1b[<u\x1b[>4;0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l";
+    b"\x1b[<1u\x1b[<1u\x1b[<1u\x1b[<u\x1b[=0u\x1b[>4;0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l";
 
 /// 终端**输出侧**还原串：退出备用屏 + 显示光标。
 pub const TERMINAL_SCREEN_RESET: &[u8] = b"\x1b[?1049l\x1b[?25h";
@@ -244,11 +253,36 @@ pub fn resume_hint_line(session_id: &str) -> String {
     format!("继续该会话请运行：pony resume {session_id}")
 }
 
+/// ADR 0075 C9：还原不完整时追加的手工恢复提示（单行、可直接复制执行）。
+///
+/// 首选 `reset`（同时复位 raw mode 与终端私有模式）；应急串用 POSIX `printf`，而不是
+/// `$'...'`（后者是 bash/zsh 扩展，dash/sh 不认）；显式置零 `ESC[=0u` 与栈无关。
+pub fn terminal_recovery_hint_line() -> String {
+    "终端按键异常时可执行 `reset` 复位；应急：printf '\\033[<1u\\033[=0u\\033[>4;0m'".to_string()
+}
+
+/// ADR 0075 C9：续接提示块 —— 续接行恒在，**仅当**还原不完整时才追加手工恢复命令。
+pub fn resume_hint_block(session_id: &str, restore_incomplete: bool) -> String {
+    let mut block = resume_hint_line(session_id);
+    if restore_incomplete {
+        block.push('\n');
+        block.push_str(&terminal_recovery_hint_line());
+    }
+    block
+}
+
+/// ADR 0075 C10：读取「最近一次还原是否不完整」（幂等，默认 false）。
+pub fn terminal_restore_incomplete() -> bool {
+    TERMINAL_RESTORE_INCOMPLETE.load(Ordering::SeqCst)
+}
+
 /// 把续接提示写到真实终端（stdout 被重定向时仍能送达）。
 ///
 /// 调用时机：**终端还原之后**。提前写会落进备用屏，用户退出后根本看不到。
+/// ADR 0075：还原不完整时在续接行后追加手工恢复命令，给出可自行执行的自救路径。
 fn print_resume_hint(session_id: &str) {
-    let line = format!("\n{}\n", resume_hint_line(session_id));
+    let block = resume_hint_block(session_id, terminal_restore_incomplete());
+    let line = format!("\n{block}\n");
     let _ = io::stdout().flush();
     if let Err(error) = write_restore_bytes(line.as_bytes()) {
         eprintln!("[pony-tui] 退出提示写入失败：{error}");
@@ -434,20 +468,32 @@ pub fn exit_cleanup_plan(inflight_turn: bool, timeout_ms: u64) -> Vec<&'static s
 pub fn restore_terminal_modes() {
     // stdout 可能仍有未刷出的帧：先刷干净，避免还原串被后续帧覆盖。
     let _ = io::stdout().flush();
-    if let Err(error) = write_restore_bytes(TERMINAL_INPUT_MODES_RESET) {
-        eprintln!("[pony-tui] 终端还原（输入模式）失败：{error}");
-    }
+    let input_ok = match write_restore_bytes(TERMINAL_INPUT_MODES_RESET) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("[pony-tui] 终端还原（输入模式）失败：{error}");
+            false
+        }
+    };
     if let Err(error) = disable_raw_mode() {
         eprintln!("[pony-tui] disable_raw_mode 失败：{error}");
     }
-    if let Err(error) = write_restore_bytes(TERMINAL_SCREEN_RESET) {
-        eprintln!("[pony-tui] 终端还原（备用屏/光标）失败：{error}");
-    }
+    let screen_ok = match write_restore_bytes(TERMINAL_SCREEN_RESET) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("[pony-tui] 终端还原（备用屏/光标）失败：{error}");
+            false
+        }
+    };
+    // ADR 0075：输入侧与屏幕侧还原串都送达才算完整；否则退出提示附手工恢复命令。
+    TERMINAL_RESTORE_INCOMPLETE.store(!(input_ok && screen_ok), Ordering::SeqCst);
 }
 
 /// Windows 走 crossterm 命令（老 conhost 下 ANSI 直写不可靠，需走其 WinAPI 分支）。
 #[cfg(not(unix))]
 pub fn restore_terminal_modes() {
+    // Windows 分支逐条 crossterm 命令无可靠失败回传，统一标记「已完整还原」（不附恢复命令）。
+    TERMINAL_RESTORE_INCOMPLETE.store(false, Ordering::SeqCst);
     let mut out = io::stdout();
     let _ = execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
     let _ = execute!(out, crossterm::event::DisableBracketedPaste);
@@ -987,10 +1033,11 @@ fn key_class_label(key: &crossterm::event::KeyEvent) -> String {
 }
 
 /// 面板类斜杠命令（只读快照类；流式期允许打开，不排队、不拒绝）：
-/// `/agents` `/tasks` `/plan` `/models` `/thinking` `/provider` `/help` `/update`。
+/// `/agents` `/tasks` `/plan` `/models` `/thinking` `/settings` `/provider` `/help` `/update`。
 pub fn is_panel_command(command: &str) -> bool {
     const PANEL_COMMANDS: &[&str] = &[
-        "/agents", "/tasks", "/plan", "/models", "/thinking", "/provider", "/help", "/update",
+        "/agents", "/tasks", "/plan", "/models", "/thinking", "/settings", "/provider", "/help",
+        "/update",
     ];
     let trimmed = command.trim();
     PANEL_COMMANDS
@@ -1077,6 +1124,7 @@ fn is_modal_mode(mode: &InteractionMode) -> bool {
             | InteractionMode::AskUserQuestion
             | InteractionMode::TaskBoard
             | InteractionMode::AgentRoster
+            | InteractionMode::Settings
     )
 }
 
@@ -1106,6 +1154,64 @@ pub fn keyboard_enhancement_should_push_for(term: Option<&str>) -> bool {
     !matches!(
         term.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
         "" | "dumb"
+    )
+}
+
+/// ADR 0075：已知复用器 / pty 代理层的环境变量名（任一非空即视为复用器）。
+/// `herdr` 是本缺陷的实际现场（其不解析 kitty 协议，只把字节转发给外层真实终端）。
+pub const TERMINAL_MULTIPLEXER_ENV_KEYS: [&str; 5] = ["HERDR", "TMUX", "ZELLIJ", "STY", "ABDUCO"];
+
+/// ADR 0075：探测当前进程是否运行在复用器 / pty 代理层下（读真实环境变量）。
+pub fn terminal_multiplexer() -> Option<String> {
+    terminal_multiplexer_for_env(|key| std::env::var(key).ok())
+}
+
+/// [`terminal_multiplexer`] 的纯函数内核：注入式读取环境变量，便于单测不改全局 `env`。
+/// 命中第一个**非空白**值即返回该变量名；全空 / 缺失返回 `None`（空白值不算复用器）。
+pub fn terminal_multiplexer_for_env<F>(get: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    TERMINAL_MULTIPLEXER_ENV_KEYS
+        .iter()
+        .find(|key| {
+            get(key)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .map(|key| key.to_string())
+}
+
+/// ADR 0075：push 键盘增强标志的**唯一决策点**（按终端拓扑分级）。
+///
+/// - `TERM` 缺失 / `dumb` ⇒ 不 push；
+/// - 复用器 / pty 代理层（`HERDR`/`TMUX`/`ZELLIJ`/`STY`/`ABDUCO`）⇒ **只** `DISAMBIGUATE`：
+///   Shift+Enter 照常可用，而「pop 丢失」的后果从「全键盘乱码」降级为「修饰键异常」；
+/// - 直连终端 ⇒ `DISAMBIGUATE | REPORT_ALL_KEYS`（保留既有全键位上报能力）。
+pub fn keyboard_enhancement_push_flags() -> Option<KeyboardEnhancementFlags> {
+    keyboard_enhancement_push_flags_for(
+        std::env::var("TERM").ok().as_deref(),
+        terminal_multiplexer().as_deref(),
+    )
+}
+
+/// [`keyboard_enhancement_push_flags`] 的纯函数内核（可注入 TERM 与复用器视图）。
+pub fn keyboard_enhancement_push_flags_for(
+    term: Option<&str>,
+    multiplexer: Option<&str>,
+) -> Option<KeyboardEnhancementFlags> {
+    if !keyboard_enhancement_should_push_for(term) {
+        return None;
+    }
+    if multiplexer
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Some(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES);
+    }
+    Some(
+        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
     )
 }
 
@@ -1525,6 +1631,8 @@ pub enum InteractionMode {
     TaskBoard,
     /// W3：`/agents` Team 角色与状态花名册（↑↓ 选择 · Enter 进入队友子会话 · r 返回主会话 · Esc 关闭）。
     AgentRoster,
+    /// 本轮：`/settings` 显示偏好面板（↑↓ 选择 · Space/Enter 切换 · Esc 关闭）。
+    Settings,
 }
 
 pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
@@ -1532,6 +1640,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/provider", "管理与切换模型提供商"),
     ("/models", "切换当前活跃模型"),
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
+    ("/settings", "设置 TUI 显示与交互偏好"),
     ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
     ("/tasks", "切换/查看 Team 任务看板（Ctrl+T）"),
     ("/agents", "查看 Team 角色与状态"),
@@ -2458,12 +2567,16 @@ pub struct RenderCacheStats {
 ///
 /// 失效条件：终端宽度变化、消息条数变化、显式 `invalidate_render_cache()`
 /// （`/clear`、`/resume`、`reset_session_scope`、`Event::Resize`）。
+/// 本轮新增：`hide_process` / `thinking_collapsed` 也参与失效判据 —— 开关翻转必须
+/// 让**所有**消息块按新口径重排（只重算末条会让历史仍停在旧可见性上）。
 /// 其余每帧只重算**最后一条** —— 流式追加、工具动效帧、「最后一条 = 执行中」都只影响它。
 #[derive(Debug, Clone)]
 pub struct RenderCache {
     cache_width: u16,
     cache_msg_count: usize,
     cache_lines: Vec<Vec<Line<'static>>>,
+    cache_hide_process: bool,
+    cache_thinking_collapsed: bool,
     stats: RenderCacheStats,
 }
 
@@ -2473,6 +2586,8 @@ impl Default for RenderCache {
             cache_width: 0,
             cache_msg_count: usize::MAX,
             cache_lines: Vec::new(),
+            cache_hide_process: false,
+            cache_thinking_collapsed: false,
             stats: RenderCacheStats::default(),
         }
     }
@@ -2526,6 +2641,11 @@ pub struct TuiState {
     pub current_provider_id: String,
     pub gateway_url: String,
     pub workspace: PathBuf,
+    /// 家目录快照（ADR 0078）：header 的 `~/<文件夹名称>` 折叠判据。
+    ///
+    /// 必须**在 `TuiState` 构造时冻结**，不得每帧重读环境变量——否则同进程内
+    /// 任何 `set_var("HOME")`（测试隔离、嵌入运行）都会让 header 在帧间抖动。
+    pub home_dir: Option<String>,
     /// wave-38 R1.4：启动目录登记后的活跃 workspace id；`None` = 沿用注册表默认工作区。
     /// `main` 在 `control_plane` 构造后用 `ensure_workspace_for_root` 填充，并作为
     /// `TurnInput.workspace_id` 的唯一来源。
@@ -2558,6 +2678,15 @@ pub struct TuiState {
     /// 不再续写上一轮的思考块（宿主续轮不得把两轮思考糊成一条）；`apply_stream_reasoning`
     /// 消费一次后复位为 `false`。
     reasoning_turn_closed: bool,
+    /// 本轮（`/settings` + Ctrl+O 唯一真值）：`true` ⇒ 轮次间的思考与工具调用全部隐藏，
+    /// 消息区只留状态消息；`false` ⇒ 按 `thinking_collapsed` 正常渲染过程。
+    /// 默认值语义见契约 C11：`Default` 保持旧行为（可见），产品默认「隐藏」由
+    /// `TuiPreferences::default()` 在启动时 apply 体现。
+    pub hide_process: bool,
+    /// 思考块折叠：`true` ⇒ `MessageRole::Thinking` 只渲染一行摘要（行数 + 已折叠）。
+    pub thinking_collapsed: bool,
+    /// `/settings` 面板当前选中项下标（0 起，越界由渲染钳制）。
+    pub settings_selected_index: usize,
     pub status_text: String,
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
@@ -2658,6 +2787,10 @@ impl Default for TuiState {
             current_provider_id: "ponyllm".to_string(),
             gateway_url: env_gateway,
             workspace: canonical_workspace.clone(),
+            // ADR 0078：`Default` 保持既有渲染基线、不额外读环境变量（与 `hide_process`
+            // 同口径）。真实家目录由 `run_tui` 启动时注入，避免同进程内 HOME 变化
+            // 让两帧 header 折叠结果不一致。
+            home_dir: None,
             active_workspace_id: None,
             startup_workspace_path: canonical_workspace,
             startup_workspace_id: None,
@@ -2671,6 +2804,11 @@ impl Default for TuiState {
             context_window_tokens: 0,
             turn_usage: None,
             reasoning_turn_closed: false,
+            // 契约 C11：Default 不做 IO、保持既有渲染基线（过程可见 + 思考展开）；
+            // 产品默认（隐藏 + 折叠）由 `TuiPreferences::default()` 在 run_tui 启动时覆盖。
+            hide_process: false,
+            thinking_collapsed: false,
+            settings_selected_index: 0,
             status_text: "Ready".to_string(),
             mouse_capture: true,
             mouse_selection: MouseSelectionState::default(),
@@ -2914,11 +3052,15 @@ impl TuiState {
         let width_u16 = u16::try_from(width).unwrap_or(u16::MAX);
         let must_rebuild = self.render_cache.cache_width != width_u16
             || self.render_cache.cache_msg_count != message_count
-            || self.render_cache.cache_lines.len() != message_count;
+            || self.render_cache.cache_lines.len() != message_count
+            || self.render_cache.cache_hide_process != self.hide_process
+            || self.render_cache.cache_thinking_collapsed != self.thinking_collapsed;
 
         if must_rebuild {
             self.render_cache.cache_width = width_u16;
             self.render_cache.cache_msg_count = message_count;
+            self.render_cache.cache_hide_process = self.hide_process;
+            self.render_cache.cache_thinking_collapsed = self.thinking_collapsed;
             self.render_cache.cache_lines = Vec::with_capacity(message_count);
             let mut rebuilt_lines = 0usize;
             let mut prev_role: Option<MessageRole> = None;
@@ -2932,6 +3074,8 @@ impl TuiState {
                         is_last: idx + 1 == message_count,
                         has_preceding_lines,
                         spinner_tick,
+                        hide_process: self.hide_process,
+                        thinking_collapsed: self.thinking_collapsed,
                     },
                 );
                 has_preceding_lines = has_preceding_lines || !block.is_empty();
@@ -2960,6 +3104,8 @@ impl TuiState {
                     is_last: true,
                     has_preceding_lines,
                     spinner_tick,
+                    hide_process: self.hide_process,
+                    thinking_collapsed: self.thinking_collapsed,
                 },
             );
             let laid_out_lines = block.len();
@@ -3306,6 +3452,125 @@ impl TuiState {
             .unwrap_or(0);
         self.selected_reasoning_effort_index = pos;
         self.mode = InteractionMode::SelectingReasoningEffort;
+    }
+
+    /// 契约 C11/C12：显示偏好加载点（`run_tui` 启动时调用；让渲染缓存整体失效）。
+    pub fn apply_tui_preferences(&mut self, prefs: &TuiPreferences) {
+        self.hide_process = prefs.hide_process;
+        self.thinking_collapsed = prefs.thinking_collapsed;
+        self.invalidate_render_cache();
+    }
+
+    /// 契约 C8：只改内存（写盘由事件循环负责），并让历史按新口径整体重排。
+    pub fn set_hide_process(&mut self, value: bool) {
+        if self.hide_process != value {
+            self.hide_process = value;
+            self.invalidate_render_cache();
+        }
+    }
+
+    /// 契约 C8：思考折叠开关（同上，只改内存）。
+    pub fn set_thinking_collapsed(&mut self, value: bool) {
+        if self.thinking_collapsed != value {
+            self.thinking_collapsed = value;
+            self.invalidate_render_cache();
+        }
+    }
+
+    /// 契约 C12：`Ctrl+O` 快捷开关，返回切换后的值。
+    pub fn toggle_hide_process(&mut self) -> bool {
+        self.set_hide_process(!self.hide_process);
+        self.hide_process
+    }
+
+    /// 契约 C6：打开 `/settings` 面板（只读快照，流式期同样允许）。
+    pub fn open_settings(&mut self) {
+        self.mode = InteractionMode::Settings;
+        let last = self.settings_rows().len().saturating_sub(1);
+        self.settings_selected_index = self.settings_selected_index.min(last);
+    }
+
+    /// 契约 C7：关闭面板回到普通输入态。
+    pub fn close_settings(&mut self) {
+        self.mode = InteractionMode::Normal;
+    }
+
+    /// 契约 C7：面板行（固定顺序，`(key, label, enabled, desc)`）。
+    ///
+    /// 单一行表即「设置项清单」真值：渲染、选中下标钳制、切换动作都从它派生，
+    /// 新增设置项时只需在这里加一行并补 `toggle_selected_setting` 的分支。
+    pub fn settings_rows(&self) -> Vec<(&'static str, &'static str, bool, &'static str)> {
+        vec![
+            (
+                "hide_process",
+                "隐藏 Agent 过程",
+                self.hide_process,
+                "轮次间只保留状态消息（思考与工具调用全部隐藏）",
+            ),
+            (
+                "thinking_collapsed",
+                "折叠思考",
+                self.thinking_collapsed,
+                "思考块折叠为一行摘要（原文仍保留在会话历史）",
+            ),
+        ]
+    }
+
+    /// 契约 C7：↑↓ 移动选中项（首尾不环绕）。
+    pub fn move_settings_selection(&mut self, delta: i32) {
+        let last = self.settings_rows().len().saturating_sub(1) as i64;
+        let next = self.settings_selected_index as i64 + delta as i64;
+        self.settings_selected_index = next.clamp(0, last) as usize;
+    }
+
+    /// 契约 C8：切换选中项，返回 `(key, 新值)`。面板与快捷键共写同一字段。
+    pub fn toggle_selected_setting(&mut self) -> Option<(&'static str, bool)> {
+        let key = self
+            .settings_rows()
+            .get(self.settings_selected_index)
+            .map(|row| row.0)?;
+        match key {
+            "hide_process" => {
+                self.set_hide_process(!self.hide_process);
+                Some(("hide_process", self.hide_process))
+            }
+            "thinking_collapsed" => {
+                self.set_thinking_collapsed(!self.thinking_collapsed);
+                Some(("thinking_collapsed", self.thinking_collapsed))
+            }
+            _ => None,
+        }
+    }
+
+    /// 契约 C7：`/settings` 面板的**唯一按键入口**（纯状态机：不读终端、不写盘）。
+    ///
+    /// 返回值：切换类按键（`Space`/`Enter`）⇒ `Some((key, 新值))`，由事件循环负责落盘；
+    /// 其余一律 `None`。面板态下所有按键都视为被面板吸收 —— 事件循环据此 `continue`，
+    /// 因此 `j`/`k` 与任意字符键都不会漏进 Composer（这是「面板打开时打字不污染输入框」的
+    /// 可测接缝：把分支从事件循环搬到这里，测试无需真实终端即可断言）。
+    pub fn handle_settings_key(&mut self, code: KeyCode) -> Option<(&'static str, bool)> {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.close_settings(),
+            KeyCode::Up | KeyCode::Char('k') => self.move_settings_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_settings_selection(1),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some((key_name, enabled)) = self.toggle_selected_setting() {
+                    let label = if key_name == "hide_process" {
+                        "隐藏 Agent 过程"
+                    } else {
+                        "折叠思考"
+                    };
+                    self.set_status_notice(format!(
+                        "{}：{}",
+                        label,
+                        if enabled { "已开启" } else { "已关闭" }
+                    ));
+                    return Some((key_name, enabled));
+                }
+            }
+            _ => {}
+        }
+        None
     }
 
     pub fn cancel_reasoning_effort_selector(&mut self) {
@@ -4151,46 +4416,130 @@ fn init_splash_image() -> Option<SplashImage> {
     })
 }
 
-fn splash_picker() -> Option<Picker> {
-    // PONY_TUI_SPLASH_IMAGE_PROTOCOL 为测试/手动覆盖入口：
-    // auto（默认）走终端能力探测；kitty/sixel/iterm2 强制协议；off 禁用图形路径。
-    match std::env::var("PONY_TUI_SPLASH_IMAGE_PROTOCOL").as_deref() {
-        Ok("off") | Ok("halfblocks") => None,
-        Ok("kitty") => Some(forced_splash_picker(ProtocolType::Kitty)),
-        Ok("sixel") => Some(forced_splash_picker(ProtocolType::Sixel)),
-        Ok("iterm2") => Some(forced_splash_picker(ProtocolType::Iterm2)),
-        _ => {
-            // 终端复用器内的图形协议直通依赖额外开关（tmux 的 allow-passthrough 等），
-            // 且能力探测会经复用器转发而误判（实测 DA 回包让 picker 选了协议，但图片
-            // 实际不显示 → 品牌标消失）。未显式指定协议时不冒险：回退字符画。
-            // 复用器用户可用 env 强制开启：PONY_TUI_SPLASH_IMAGE_PROTOCOL=kitty|sixel|iterm2
-            if ["TMUX", "STY", "ZELLIJ"]
-                .iter()
-                .any(|key| std::env::var_os(key).is_some())
-            {
-                return None;
-            }
-            let picker = Picker::from_query_stdio().ok()?;
-            if picker.protocol_type() == ProtocolType::Halfblocks {
-                return None;
-            }
-            Some(picker)
+/// 启动期图形协议判定的输入快照：只含环境变量与终端拓扑，**不触碰 stdin**。
+///
+/// 缺陷背景：`ratatui-image` 的 stdio 能力查询会另起线程对 stdin 做
+/// 阻塞 `read`（1s 超时后线程不回收、继续吃后续按键），并自行调用 `disable_raw_mode()`
+/// 把上层刚建立的 raw mode 关掉。结果是「启动期敲的字被吞」+「事件循环被降级到行缓冲」。
+/// 品牌标是装饰性内容，不值得拿输入可靠性去换，因此这里改为纯环境判定（零 I/O）；
+/// 回归守卫见 `splash_gradient_tests::splash_probe_never_reads_stdin`。
+#[derive(Debug, Default, Clone)]
+pub struct SplashEnv {
+    pub term: Option<String>,
+    pub term_program: Option<String>,
+    pub lc_terminal: Option<String>,
+    pub kitty_window_id: Option<String>,
+    /// 命中的复用器 / pty 代理层环境变量名（见 [`terminal_multiplexer`]）。
+    pub multiplexer: Option<String>,
+}
+
+impl SplashEnv {
+    /// 读取真实进程环境（纯读取，无 I/O 副作用、不会消费任何输入）。
+    pub fn from_process() -> Self {
+        fn get(key: &str) -> Option<String> {
+            std::env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        }
+        Self {
+            term: get("TERM"),
+            term_program: get("TERM_PROGRAM"),
+            lc_terminal: get("LC_TERMINAL"),
+            kitty_window_id: get("KITTY_WINDOW_ID"),
+            multiplexer: terminal_multiplexer(),
         }
     }
 }
 
-fn forced_splash_picker(protocol: ProtocolType) -> Picker {
-    // 强制路径没有终端查询结果，用环境变量给出字符格像素尺寸（默认 8×16）。
-    let font_size = std::env::var("PONY_TUI_SPLASH_FONT_PX")
-        .ok()
-        .and_then(|raw| {
-            let (width, height) = raw.split_once('x')?;
-            Some((width.parse().ok()?, height.parse().ok()?))
-        })
-        .unwrap_or((8, 16));
-    let mut picker = Picker::from_fontsize(font_size);
+/// **唯一决策点**：启动期品牌标走哪种图形协议；`None` ⇒ 回退自绘字符画（fail-closed）。
+///
+/// 判定顺序即风险排序：kitty 的 APC 序列在不支持的终端上会被静默忽略（最坏情况只是
+/// 保留下方字符画），而 sixel 一旦误判会往屏幕喷像素乱码，因此 kitty 优先命中、
+/// sixel 只认明确声明支持的终端。
+pub fn splash_protocol_for_env(env: &SplashEnv) -> Option<ProtocolType> {
+    // 复用器 / pty 代理层的图形直通依赖额外开关（如 tmux 的 allow-passthrough）且探测易误判；
+    // 用户可用 PONY_TUI_SPLASH_IMAGE_PROTOCOL=kitty|sixel|iterm2 显式强制开启。
+    if env.multiplexer.is_some() {
+        return None;
+    }
+    let lower = |value: &Option<String>| value.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let term = lower(&env.term);
+    let term_program = lower(&env.term_program);
+    let lc_terminal = lower(&env.lc_terminal);
+
+    let kitty = env.kitty_window_id.is_some()
+        || term.contains("kitty")
+        // Ghostty 与 WezTerm 均实现 kitty 图形协议（不兼容时 APC 被忽略，风险可控）。
+        || term_program.contains("ghostty")
+        || term_program.contains("wezterm");
+    if kitty {
+        return Some(ProtocolType::Kitty);
+    }
+    if term_program.contains("iterm") || lc_terminal.contains("iterm") {
+        return Some(ProtocolType::Iterm2);
+    }
+    let sixel = term.contains("sixel")
+        || ["foot", "contour", "mlterm", "yaft", "mintty"]
+            .iter()
+            .any(|name| term.contains(name));
+    if sixel {
+        return Some(ProtocolType::Sixel);
+    }
+    None
+}
+
+fn splash_picker() -> Option<Picker> {
+    // PONY_TUI_SPLASH_IMAGE_PROTOCOL 为手动/测试覆盖入口：
+    // auto（默认）走上面的无 I/O 环境判定；kitty/sixel/iterm2 强制协议；off 禁用图形路径。
+    match std::env::var("PONY_TUI_SPLASH_IMAGE_PROTOCOL").as_deref() {
+        Ok("off") | Ok("halfblocks") => None,
+        Ok("kitty") => Some(splash_picker_for_protocol(ProtocolType::Kitty)),
+        Ok("sixel") => Some(splash_picker_for_protocol(ProtocolType::Sixel)),
+        Ok("iterm2") => Some(splash_picker_for_protocol(ProtocolType::Iterm2)),
+        _ => Some(splash_picker_for_protocol(splash_protocol_for_env(
+            &SplashEnv::from_process(),
+        )?)),
+    }
+}
+
+/// 由协议 + 字符格像素尺寸构造 picker：不查询终端，拿不到回包也不会吞输入。
+fn splash_picker_for_protocol(protocol: ProtocolType) -> Picker {
+    let mut picker = Picker::from_fontsize(splash_font_px());
     picker.set_protocol_type(protocol);
     picker
+}
+
+/// 字符格像素尺寸：env 覆盖 > `TIOCGWINSZ` 像素字段 > 8×16 默认值。
+fn splash_font_px() -> (u16, u16) {
+    let from_env = std::env::var("PONY_TUI_SPLASH_FONT_PX").ok().and_then(|raw| {
+        let (width, height) = raw.split_once('x')?;
+        Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+    });
+    from_env.or_else(tty_cell_pixel_size).unwrap_or((8, 16))
+}
+
+/// 从终端窗口尺寸反推字符格像素大小（纯 ioctl，不读输入）。
+/// 多数终端不上报 `ws_xpixel/ws_ypixel`，此时返回 `None` 由调用方回落默认值。
+#[cfg(unix)]
+fn tty_cell_pixel_size() -> Option<(u16, u16)> {
+    use std::os::unix::io::AsRawFd;
+    let stdout = std::io::stdout();
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::ioctl(stdout.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+    if rc != 0 {
+        return None;
+    }
+    if size.ws_xpixel == 0 || size.ws_ypixel == 0 || size.ws_col == 0 || size.ws_row == 0 {
+        return None;
+    }
+    let cell = (size.ws_xpixel / size.ws_col, size.ws_ypixel / size.ws_row);
+    (cell.0 > 0 && cell.1 > 0).then_some(cell)
+}
+
+#[cfg(not(unix))]
+fn tty_cell_pixel_size() -> Option<(u16, u16)> {
+    None
 }
 
 #[cfg(test)]
@@ -4224,6 +4573,129 @@ mod splash_gradient_tests {
     fn splash_image_placeholder_matches_banner_grid() {
         assert_eq!(SPLASH_IMAGE_COLS, SPLASH_LOGO_COLS as u16);
         assert_eq!(SPLASH_IMAGE_ROWS, (SPLASH_LOGO_ROWS / 2) as u16);
+    }
+
+    fn probe_env(
+        term: Option<&str>,
+        term_program: Option<&str>,
+        lc_terminal: Option<&str>,
+        kitty_window_id: Option<&str>,
+        multiplexer: Option<&str>,
+    ) -> SplashEnv {
+        SplashEnv {
+            term: term.map(str::to_string),
+            term_program: term_program.map(str::to_string),
+            lc_terminal: lc_terminal.map(str::to_string),
+            kitty_window_id: kitty_window_id.map(str::to_string),
+            multiplexer: multiplexer.map(str::to_string),
+        }
+    }
+
+    /// 启动期协议判定必须是**纯环境表**（零 stdin 读）且 fail-closed：
+    /// 拿不到强信号一律 `None`（自绘字符画），sixel 只认明确声明支持的终端。
+    #[test]
+    fn splash_protocol_detection_is_env_only_and_fail_closed() {
+        use ProtocolType::{Iterm2, Kitty, Sixel};
+        let cases: [(&str, SplashEnv, Option<ProtocolType>); 13] = [
+            (
+                "裸 xterm 无任何图形能力信号 → 字符画",
+                probe_env(Some("xterm-256color"), None, None, None, None),
+                None,
+            ),
+            (
+                "TERM 缺失 → 字符画",
+                probe_env(None, None, None, None, None),
+                None,
+            ),
+            (
+                "KITTY_WINDOW_ID 命中 kitty 档",
+                probe_env(Some("xterm-256color"), None, None, Some("1"), None),
+                Some(Kitty),
+            ),
+            (
+                "TERM=xterm-kitty",
+                probe_env(Some("xterm-kitty"), None, None, None, None),
+                Some(Kitty),
+            ),
+            (
+                "TERM_PROGRAM=ghostty",
+                probe_env(
+                    Some("xterm-ghostty"),
+                    Some("ghostty"),
+                    None,
+                    None,
+                    None,
+                ),
+                Some(Kitty),
+            ),
+            (
+                "TERM_PROGRAM=WezTerm",
+                probe_env(Some("xterm-256color"), Some("WezTerm"), None, None, None),
+                Some(Kitty),
+            ),
+            (
+                "TERM_PROGRAM=iTerm.app",
+                probe_env(
+                    Some("xterm-256color"),
+                    Some("iTerm.app"),
+                    None,
+                    None,
+                    None,
+                ),
+                Some(Iterm2),
+            ),
+            (
+                "LC_TERMINAL=iTerm2",
+                probe_env(Some("xterm-256color"), None, Some("iTerm2"), None, None),
+                Some(Iterm2),
+            ),
+            (
+                "TERM=foot（明确 sixel）",
+                probe_env(Some("foot"), None, None, None, None),
+                Some(Sixel),
+            ),
+            (
+                "TERM 显式含 sixel",
+                probe_env(Some("xterm-256color-sixel"), None, None, None, None),
+                Some(Sixel),
+            ),
+            (
+                "复用器压制 kitty 强信号",
+                probe_env(Some("xterm-kitty"), None, None, Some("1"), Some("TMUX")),
+                None,
+            ),
+            (
+                "herdr 压制 sixel",
+                probe_env(Some("foot"), None, None, None, Some("HERDR")),
+                None,
+            ),
+            (
+                "大小写不敏感",
+                probe_env(Some("XTERM-KITTY"), None, None, None, None),
+                Some(Kitty),
+            ),
+        ];
+        for (label, env, expected) in cases {
+            assert_eq!(
+                splash_protocol_for_env(&env),
+                expected,
+                "用例 `{label}` 判定不符"
+            );
+        }
+    }
+
+    /// 探测链路不得再调用终端能力查询（它会阻塞读 stdin 并自行关掉 raw mode，是启动期
+    /// 吃键的根因）。断言禁止的是**调用形态**，故 needle 在运行时拼接，避免与本测试自身的
+    /// 说明文字互相命中。
+    #[test]
+    fn splash_probe_never_reads_stdin() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/tui.rs");
+        let source = std::fs::read_to_string(path).expect("读取 tui.rs 源码");
+        let forbidden = ["from_query", "_stdio("].concat();
+        assert!(
+            !source.contains(&forbidden),
+            "启动期品牌标探测必须保持零 stdin 读：`{forbidden}` 会吞用户按键并关闭 raw mode"
+        );
     }
 
     #[test]
@@ -5554,31 +6026,57 @@ fn fmt_token_count(n: u64) -> String {
     format!("{}M", one_decimal(n as f64 / 1_000_000.0))
 }
 
-/// wave-39 R7：workspace 路径标签 —— `display()` 全路径，`$HOME` 前缀折叠为 `~`。
-fn workspace_label(workspace: &std::path::Path) -> String {
-    let full = workspace.display().to_string();
-    let home = std::env::var("HOME")
+/// 家目录绝对路径快照（`$HOME` 优先，Windows 退回 `$USERPROFILE`），已去掉尾部路径分隔符。
+///
+/// 只允许在 `TuiState` 构造时调用一次（ADR 0078：header 折叠判据必须帧间稳定）。
+fn detect_home_dir() -> Option<String> {
+    std::env::var("HOME")
         .ok()
         .filter(|h| !h.trim().is_empty())
         .or_else(|| {
             std::env::var("USERPROFILE")
                 .ok()
                 .filter(|h| !h.trim().is_empty())
-        });
-    if let Some(home) = home {
-        let home = home.trim_end_matches(['/', '\\']);
-        if !home.is_empty() {
-            if full == home {
-                return "~".to_string();
-            }
-            if let Some(rest) = full.strip_prefix(home) {
-                if rest.starts_with('/') || rest.starts_with('\\') {
-                    return format!("~{}", rest);
-                }
-            }
-        }
+        })
+        .map(|home| home.trim_end_matches(['/', '\\']).to_string())
+        .filter(|home| !home.is_empty())
+}
+
+/// Header 工作区标签：`~/<文件夹名称>`（ADR 0078）。
+///
+/// header 是紧凑品牌锚点，只保留最后一级目录名；位于家目录下时加 `~/` 前缀，
+/// 家目录本身显示 `~`，家目录之外仍退回裸文件夹名，不伪造 `~/`。
+/// 工作区路径**只在 header 出现一次**（输入框下方不再重复展示路径）。
+/// `home` 由调用方传入（`TuiState::home_dir` 快照），本函数保持纯函数。
+pub(crate) fn workspace_header_label_with_home(
+    workspace: &std::path::Path,
+    home: Option<&str>,
+) -> String {
+    let display = workspace.display().to_string();
+    let Some(name) = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+    else {
+        return display;
+    };
+    let Some(home) = home
+        .map(|h| h.trim_end_matches(['/', '\\']))
+        .filter(|h| !h.is_empty())
+    else {
+        return name.to_string();
+    };
+    let full = display.trim_end_matches(['/', '\\']);
+    if full == home {
+        return "~".to_string();
     }
-    full
+    if full
+        .strip_prefix(home)
+        .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
+    {
+        return format!("~/{name}");
+    }
+    name.to_string()
 }
 
 /// wave-39 v3 §6 R7/R10/R11 / wave-41 S1：色带下方指标行 —— 左侧 workspace 路径（整行 GHOST），
@@ -5627,8 +6125,11 @@ fn goal_banner_parts(goal: &TuiGoal) -> (String, String) {
     )
 }
 
-fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
-    let ghost = || Style::default().fg(theme::GHOST);
+/// 数值指标段（快照优先 / legacy 回落），只产出 `↑in ↓out`、缓存、上下文、速度、首 token。
+///
+/// 交互反馈（排队、一次性提示）**不属于**本函数：它们由输入框下方的状态行
+/// [`status_line`] 承担。header 右侧渲染本簇，见 [`header_metrics_text`]。
+fn metrics_segments(state: &TuiState) -> Vec<String> {
     let mut segments: Vec<String> = Vec::new();
     // P0：快照为唯一来源。`live_metrics` 为 `Some` ⇒ **只**渲染快照段，与 legacy 计量字段
     // 完全隔离（两者不得混排）；比率一律直取快照字段，此处**禁止**任何 clamp（I6）。
@@ -5695,10 +6196,32 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             segments.push(format!("上下文 {pct:.0}%"));
         }
     }
-    // C7/C18③/C23：排队指示器**唯一渲染点**就是本指标行（每帧都渲染，与 `mode`/`runtime_mode`
+    segments
+}
+
+/// header 右侧：数值指标簇文本（`↑in ↓out · 缓存 x% · 上下文 y% · ≈t/s · 首token`）。
+///
+/// 无任何数值时返回**空串**（v3 R11：无值不显示，也不出占位符），header 只剩品牌 + 工作区。
+fn header_metrics_text(state: &TuiState) -> String {
+    metrics_segments(state).join(" · ")
+}
+
+/// 输入框下方状态行：左槽 = 一次性提示 / 计划模式横幅 / 排队反馈，右槽 = 当前模型身份。
+///
+/// 与 header 的分工（ADR 0078）：header 左 = 品牌 + 工作区（`~/<文件夹名称>`），header 右 = 数值指标；
+/// 本行不再重复工作区路径，改为右对齐展示模型（含思考强度）。排队/提示留在本行，
+/// 因为它们紧贴输入动作，且必须在**每一帧**都有渲染点（C7/C18③/C23）。
+fn status_line(state: &TuiState, width: usize) -> Line<'static> {
+    let ghost = || Style::default().fg(theme::GHOST);
+    // 右槽：模型身份 —— 沿用 header 原先口径（模型 + 思考强度，不含 provider）。
+    let model_text = match state.reasoning_effort {
+        Some(_) => format!("{} · 思考:{}", state.model, state.reasoning_effort_label()),
+        None => state.model.clone(),
+    };
+    // C7/C18③/C23：排队指示器**唯一渲染点**就是本行（每帧都渲染，与 `mode`/`runtime_mode`
     // 无关），故 `status_word` 不再重复输出。`queue_indicator_line` 保证流式期 / 工具执行期
-    // 都有输出；宽度受限时按 34 列截断，避免挤掉左侧 workspace 标签。
-    if let Some(indicator) = queue_indicator_line(
+    // 都有输出；宽度受限时按 34 列截断，避免挤掉右槽的模型身份。
+    let queue_left = queue_indicator_line(
         state.queued_count(),
         state
             .queue_notice
@@ -5707,11 +6230,10 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             .map(|(text, _)| text.as_str()),
         state.is_streaming,
         matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)),
-    ) {
-        segments.push(truncate_width(&indicator, 34));
-    }
-    // 契约 P-5 / F-N：一次性提示（非流式 + TTL 内）与非流式的计划模式横幅占左侧，
-    // 数值指标仍在右侧；两者都没有时走既有布局（workspace 左 + 指标右）。
+    )
+    .map(|indicator| (truncate_width(&indicator, 34), ghost()));
+    // 契约 P-5 / F-N：一次性提示（非流式 + TTL 内）与非流式的计划模式横幅优先占左槽，
+    // 其次排队反馈；两者都没有时左槽留空，右槽始终是模型身份。
     let transient_left: Option<(String, Style)> = state
         .status_notice
         .as_ref()
@@ -5737,8 +6259,8 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             plan_mode_banner(state.mode == InteractionMode::PlanMode)
                 .map(|banner| (banner.to_string(), muted()))
         });
-    if let Some((left_text, left_style)) = transient_left {
-        let right = segments.join(" · ");
+    if let Some((left_text, left_style)) = transient_left.or(queue_left) {
+        let right = model_text.clone();
         let right_w = str_width(&right);
         if right.is_empty() || RAIL + 2 + str_width(&left_text) + right_w > width {
             return Line::from(vec![
@@ -5760,25 +6282,19 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
         ]);
     }
 
-    // 波次 44：Goal 与指标行按时间片交替（见 goal_banner_phase），
-    // 且 Goal 相位**左对齐**成横幅，不与右对齐的数值指标混在同一排版里。
-    let label_text = workspace_label(&state.workspace);
+    // 波次 44：Goal 横幅与状态行其余内容按时间片交替（见 goal_banner_phase），
+    // 且 Goal 相位**左对齐**成横幅，不与右对齐的模型身份混在同一排版里。
     if matches!(goal_banner_phase(state), Some((true, _))) {
         if let Some(goal) = state.goal_state.as_ref() {
             let (tag, body) = goal_banner_parts(goal);
-            let left_budget = (width.saturating_sub(RAIL + 2)) / 3;
-            let label = ellipsize_width(&label_text, left_budget.max(8));
-            let used = RAIL + str_width(&label) + 2;
+            let used = RAIL;
             let budget = width.saturating_sub(used).max(12);
-            // 标签固定完整显示（最多 4 列），正文按剩余宽度省略。
+            // 「Goal」标记固定完整显示（最多 4 列），正文按剩余宽度省略。
             let body_budget = budget.saturating_sub(str_width(&tag)).max(6);
             let body = ellipsize_width(&body, body_budget);
-            let pad = width
-                .saturating_sub(used + str_width(&tag) + str_width(&body));
+            let pad = width.saturating_sub(used + str_width(&tag) + str_width(&body));
             return Line::from(vec![
                 Span::raw(" ".repeat(RAIL)),
-                Span::styled(label, ghost()),
-                Span::raw("  "),
                 // 「Goal」标记加重：BOLD + 比正文亮一档，作为横幅唯一的强调点。
                 Span::styled(
                     tag,
@@ -5791,34 +6307,17 @@ fn metrics_line(state: &TuiState, width: usize) -> Line<'static> {
             ]);
         }
     }
-    let right = segments.join(" · ");
-    let right_w = str_width(&right);
-    // 契约 F-I：workspace_label 每帧只算一次（含 env::var 加锁 + 分配），本函数两处共用。
-    let label = &label_text;
 
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    if right_w == 0 {
-        // v3 R11：全无值 → 只显示左侧 workspace，不产生孤立分隔符。
-        spans.push(Span::raw(" ".repeat(RAIL)));
-        spans.push(Span::styled(
-            ellipsize_width(label, width.saturating_sub(RAIL)),
-            ghost(),
-        ));
-    } else if width > RAIL + 1 + right_w {
-        let label = ellipsize_width(label, width - RAIL - 1 - right_w);
-        let used = RAIL + str_width(&label);
-        spans.push(Span::raw(" ".repeat(RAIL)));
-        spans.push(Span::styled(label, ghost()));
-        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + right_w))));
-        spans.push(Span::styled(right, ghost()));
-    } else if right_w <= width {
-        // 左路径放不下：只渲染右簇，仍然严格右对齐到内容列最后一列。
-        spans.push(Span::raw(" ".repeat(width - right_w)));
-        spans.push(Span::styled(right, ghost()));
+    // 默认态：左槽留空（工作区已在 header 展示一次），模型身份右对齐到内容列最后一列。
+    let right_w = str_width(&model_text);
+    if right_w <= width {
+        Line::from(vec![
+            Span::raw(" ".repeat(width - right_w)),
+            Span::styled(model_text, ghost()),
+        ])
     } else {
-        spans.push(Span::styled(truncate_width(&right, width), ghost()));
+        Line::from(Span::styled(ellipsize_width(&model_text, width), ghost()))
     }
-    Line::from(spans)
 }
 
 /// 按「字符」截断（绝不按字节切分，避免 CJK 边界 panic），超长时补省略号。
@@ -6176,6 +6675,46 @@ fn status_word_base(state: &TuiState) -> (String, Style) {
     }
 }
 
+/// 契约 C10：隐藏过程态的「当前工具信息」。
+///
+/// 工具执行期取**最近一条 `ToolCall`** 的展示内容（`format_tool_display` 产出：工具名 +
+/// 参数摘要）压成一行；消息里取不到时回落运行态里的工具名。非工具执行期返回 `None`
+/// （状态行保持既有「思考中/生成中 · 秒数」口径）。
+pub fn hidden_tool_status_text(state: &TuiState, width: usize) -> Option<String> {
+    let tool_name = match &state.runtime_mode {
+        RuntimeMode::ExecutingTool(name) => clean_tool_name_display(name),
+        _ => return None,
+    };
+    let detail = state
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::ToolCall)
+        .map(|message| message.content.replace('\n', " "))
+        .map(|content| content.trim().to_string())
+        .filter(|content| !content.is_empty());
+    let text = match detail {
+        Some(content) => format!("执行 · {}", content),
+        None => format!("执行 · {}", tool_name),
+    };
+    Some(truncate_width(&text, width.max(8)))
+}
+
+/// 契约 C8：把当前显示偏好落盘（`/settings` 与 `Ctrl+O` 共用同一写入点）。
+///
+/// 写盘失败**不打断交互**：偏好丢失只影响下次启动的默认外观，不应让按键路径 panic 或阻塞；
+/// 因此只记一行 stderr（TUI 已把它改道到运行日志）后继续。
+fn persist_tui_preferences(state: &TuiState) {
+    let store = TuiPreferencesStore::new();
+    let prefs = TuiPreferences {
+        hide_process: state.hide_process,
+        thinking_collapsed: state.thinking_collapsed,
+    };
+    if let Err(error) = store.save(&prefs) {
+        eprintln!("[pony-tui] 显示偏好落盘失败：{error}");
+    }
+}
+
 fn elapsed_label(state: &TuiState) -> String {
     state
         .turn_started_at
@@ -6193,6 +6732,10 @@ struct MessageRenderCtx {
     is_last: bool,
     has_preceding_lines: bool,
     spinner_tick: usize,
+    /// 契约 C9：`true` ⇒ 思考 / 工具调用 / 工具结果三类消息整块不渲染。
+    hide_process: bool,
+    /// 契约 C4：`true` ⇒ 思考块折叠成一行摘要（只影响 `Thinking` 块自身）。
+    thinking_collapsed: bool,
 }
 
 /// 把一条消息渲染成行（内部实现，带跨消息上下文）。
@@ -6203,6 +6746,11 @@ fn message_lines_with_ctx(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let rail_blank = || blank_rail(Style::default());
+    // 契约 C9：过程隐藏只作用于**渲染层**（`messages` 与持久化历史保持完整），
+    // 因此这里直接返回空块：布局缓存仍与消息一一对齐，窗口切片/选区映射不受影响。
+    if should_hide_message(&message.role, ctx.hide_process) {
+        return lines;
+    }
             let prev_is_tool = matches!(
                 ctx.prev_role,
                 Some(MessageRole::ToolCall) | Some(MessageRole::ToolResult)
@@ -6316,6 +6864,29 @@ fn message_lines_with_ctx(
                     );
                 }
                 MessageRole::Thinking => {
+                    // 契约 C4（本轮）：折叠态只留一行摘要 —— 思考不再占满视口。
+                    // 呼吸口径沿用 C6/C7（前驱侧 1 行、本块尾部 1 行），折叠不改变轮间距。
+                    if ctx.thinking_collapsed {
+                        if ctx.prev_role.is_some()
+                            && !matches!(
+                                ctx.prev_role,
+                                Some(MessageRole::Thinking) | Some(MessageRole::User)
+                            )
+                        {
+                            lines.push(blank());
+                        }
+                        let label = thinking_fold_label(&message.content);
+                        let body = label.strip_prefix("✻ ").unwrap_or(&label).to_string();
+                        push_prefixed(
+                            &mut lines,
+                            vec![Span::styled("✻ ", Style::default().fg(theme::ACCENT_DIM))],
+                            rail_blank(),
+                            Line::from(Span::styled(body, faint())),
+                            width.saturating_sub(RAIL),
+                        );
+                        lines.push(blank());
+                        return lines;
+                    }
                     // 契约 C6（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：
                     // 思考块从属于正文（`✻` 前缀 + FAINT/ITALIC 正文 + RAIL 续行），
                     // 与前后消息之间只留 1 行呼吸（禁止 2 行轮间距）。
@@ -6411,6 +6982,17 @@ fn message_lines_with_ctx(
 /// 与 `ui()` 的逐帧渲染共用**同一份**实现；差异仅在于没有跨消息上下文（无前序角色、
 /// 不是最后一条、spinner 帧取 0），因此同一消息在会话中首次出现与单独渲染的行内容一致。
 pub fn message_lines_for(message: &ChatMessage, width: usize) -> Vec<Line<'static>> {
+    // 既有公开入口保持旧行为（过程可见 + 思考展开），供虚拟化测试做参考路径。
+    message_lines_for_with_flags(message, width, false, false)
+}
+
+/// 契约 C4/C9：带可见性开关的渲染入口（测试与渲染缓存共用同一实现）。
+pub fn message_lines_for_with_flags(
+    message: &ChatMessage,
+    width: usize,
+    hide_process: bool,
+    thinking_collapsed: bool,
+) -> Vec<Line<'static>> {
     message_lines_with_ctx(
         message,
         width,
@@ -6419,8 +7001,46 @@ pub fn message_lines_for(message: &ChatMessage, width: usize) -> Vec<Line<'stati
             is_last: false,
             has_preceding_lines: false,
             spinner_tick: 0,
+            hide_process,
+            thinking_collapsed,
         },
     )
+}
+
+/// 契约 C9：过程隐藏的唯一判据（纯函数）。
+pub fn should_hide_message(role: &MessageRole, hide_process: bool) -> bool {
+    hide_process
+        && matches!(
+            role,
+            MessageRole::Thinking | MessageRole::ToolCall | MessageRole::ToolResult
+        )
+}
+
+/// 契约 C4：折叠态摘要文案（含 `✻ ` 前缀字形；渲染层拆出 `${RAIL}` 缩进与样式）。
+pub fn thinking_fold_label(content: &str) -> String {
+    format!("✻ 思考 · {} 行 · 已折叠", content.lines().count())
+}
+
+/// 契约 C1：滚动条几何（相对消息视口行号）。`None` ⇒ 内容未溢出，不绘制滚动条。
+///
+/// 口径：滑块长度按可见比例取整且至少 1 行；起点按 `offset / max_offset` 线性映射到
+/// 剩余轨道（`visible - thumb_len`），末帧恰好落底（不出现「永远差一行」）。
+pub fn scrollbar_thumb(total: usize, visible: usize, offset: usize) -> Option<(u16, u16)> {
+    if visible == 0 || total <= visible {
+        return None;
+    }
+    let thumb_len = ((visible * visible + total / 2) / total).clamp(1, visible);
+    let track = visible - thumb_len;
+    let denom = total - visible;
+    let start = if denom == 0 {
+        0
+    } else {
+        ((offset.min(denom) * track + denom / 2) / denom).min(track)
+    };
+    Some((
+        u16::try_from(start).unwrap_or(u16::MAX),
+        u16::try_from(thumb_len).unwrap_or(u16::MAX),
+    ))
 }
 
 /// 契约（修订11 步骤3）：从按消息分块的布局缓存里取出 `[start, end)` 行。
@@ -6572,6 +7192,79 @@ fn snap_hit_col(state: &TuiState, line: usize, raw_col: usize) -> usize {
     }
 }
 
+/// 契约 C2/C3：右侧滚动条。
+///
+/// 位置固定在**终端最右列**（不侵占正文列：内容列在超宽终端里居中，左右恒有 `GUTTER` 留白），
+/// 纵向只覆盖消息区 `chat_rect`。内容未溢出（`max_scroll_offset == 0`）或空态时不绘制，
+/// 该列保持画布背景 —— 与「无滚动条时视觉零变化」的诉求一致。
+fn render_scrollbar(f: &mut Frame, chat_rect: Rect, state: &TuiState) {
+    if state.messages.is_empty() || state.max_scroll_offset == 0 {
+        return;
+    }
+    let visible = chat_rect.height as usize;
+    let total = state.max_scroll_offset as usize + visible;
+    let Some((thumb_start, thumb_len)) =
+        scrollbar_thumb(total, visible, state.effective_scroll_offset as usize)
+    else {
+        return;
+    };
+    let screen = f.area();
+    let x = screen.x.saturating_add(screen.width).saturating_sub(1);
+    let thumb_start = thumb_start as usize;
+    let thumb_end = thumb_start + thumb_len as usize;
+    let buffer = f.buffer_mut();
+    for row in 0..chat_rect.height {
+        let y = chat_rect.y.saturating_add(row);
+        if y >= screen.y.saturating_add(screen.height) || x >= screen.x.saturating_add(screen.width)
+        {
+            continue;
+        }
+        let cell = &mut buffer[(x, y)];
+        if (row as usize) >= thumb_start && (row as usize) < thumb_end {
+            cell.set_symbol("█").set_fg(theme::ACCENT_DIM);
+        } else {
+            cell.set_symbol("│").set_fg(theme::GHOST);
+        }
+    }
+}
+
+/// 契约 C6/C7：`/settings` 面板（居中面板，`[开]/[关]` + 名称 + 状态与说明）。
+///
+/// 面板尺寸口径与其它模态面板一致（宽 72、高 = 行数 + 4，均按终端尺寸饱和裁剪）。
+fn render_settings_panel(f: &mut Frame, state: &TuiState) {
+    let rows = state.settings_rows();
+    let total = rows.len().max(1);
+    let area = f.area();
+    let pw = 72u16.min(area.width.saturating_sub(4)).max(20);
+    let ph = (total as u16 + 4)
+        .min(area.height.saturating_sub(2))
+        .max(6);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(pw)) / 2,
+        y: area.y + (area.height.saturating_sub(ph)) / 2,
+        width: pw,
+        height: ph,
+    };
+    let body = draw_panel(f, rect, "设置", "↑↓ 选择 · Space/Enter 切换 · esc 关闭");
+    let inner_w = body.width as usize;
+    let selected = state.settings_selected_index.min(total.saturating_sub(1));
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (idx, (_key, label, enabled, desc)) in rows.iter().enumerate() {
+        let mark = if *enabled { "[开]" } else { "[关]" };
+        // 名称优先：先按名称实际宽度锁定左列，再让说明只用剩余预算。
+        // 若把完整说明先塞进右侧（`list_row` 只按 width-8 截断），长说明会把左列压到
+        // 「隐藏」两个字，契约 C7 的「名称 + 说明」同时可见即失效。
+        let left = format!("{} {}", mark, label);
+        let left_min = str_width(&left).min(inner_w.saturating_sub(8));
+        let right = ellipsize_width(desc, inner_w.saturating_sub(3 + left_min));
+        lines.push(list_row(idx == selected, &left, &right, inner_w));
+    }
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        body,
+    );
+}
+
 pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let area = f.area();
     fill(f, area, theme::CANVAS);
@@ -6607,43 +7300,47 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     };
 
     // ── Header：一行、无底色带、无徽章 ─────────────────────────────────────
-    let ws_name = state
-        .workspace
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("~");
-    // header 保留「模型」与当前非默认思考强度信息；session hash 属于 /resume 的上下文。
-    let right_meta = match state.reasoning_effort {
-        Some(_) => format!("{} · 思考:{}", state.model, state.reasoning_effort_label()),
-        None => state.model.clone(),
-    };
-    let left_w = 4 + 5 + str_width(ws_name);
+    // 品牌锚点统一大写；工作区只显示 `~/<文件夹名称>`（全屏仅此一处，ADR 0078）；
+    // 右槽是最新数值指标（token / 缓存 / 上下文 / 速度 / 首 token），无值时留空。
+    const HEADER_BRAND: &str = "PONY";
+    let ws_name = workspace_header_label_with_home(&state.workspace, state.home_dir.as_deref());
+    let right_meta = header_metrics_text(state);
+    let left_w = HEADER_BRAND.len() + 5 + str_width(&ws_name);
     let right_w = str_width(&right_meta);
     let pad = content.width as usize;
     let header_line = if pad > left_w + right_w {
         Line::from(vec![
-            Span::styled("pony", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                HEADER_BRAND,
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  ·  ", faint()),
-            Span::styled(ws_name.to_string(), muted()),
+            Span::styled(ws_name.clone(), muted()),
             Span::raw(" ".repeat(pad - left_w - right_w)),
             Span::styled(right_meta, faint()),
         ])
     } else if pad > left_w + 12 {
-        // 中等宽度：保留右侧模型/会话，截断而不是整块丢弃。
+        // 中等宽度：保留右侧指标簇，截断而不是整块丢弃。
         let meta = ellipsize_width(&right_meta, pad - left_w - 1);
         let gap = pad.saturating_sub(left_w + str_width(&meta));
         Line::from(vec![
-            Span::styled("pony", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                HEADER_BRAND,
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  ·  ", faint()),
-            Span::styled(ws_name.to_string(), muted()),
+            Span::styled(ws_name, muted()),
             Span::raw(" ".repeat(gap)),
             Span::styled(meta, faint()),
         ])
     } else {
         Line::from(vec![
-            Span::styled("pony", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                HEADER_BRAND,
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  ·  ", faint()),
-            Span::styled(ws_name.to_string(), muted()),
+            Span::styled(ws_name, muted()),
         ])
     };
     let header_rect = Rect { height: 1, ..content };
@@ -6779,8 +7476,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         // 进行中的一行极简状态（不打断阅读节奏，紧凑规整，不晃动）
         // wave-60 §C9：stopping 是用户此刻唯一关心的进行中态 ⇒ 即便正处于工具执行也保留该行，
         // 否则「正在停止…」在工具执行期不可见（终态由 turn:cancelled 驱动，见 apply_stop_terminal）。
+        // wave-60 §C9：stopping 是用户此刻唯一关心的进行中态 ⇒ 即便正处于工具执行也保留该行，
+        // 否则「正在停止…」在工具执行期不可见（终态由 turn:cancelled 驱动，见 apply_stop_terminal）。
+        // 本轮 C10：过程隐藏后工具行不再占位，工具执行期必须恢复状态行，否则用户看不到任何进行中反馈。
         if state.is_streaming
             && (state.stopping_turn_id.is_some()
+                || state.hide_process
                 || !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)))
         {
             let need_blank = state
@@ -6797,6 +7498,15 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 push_blank(&mut trailing_status_lines);
             }
             let (word, style) = status_word(state);
+            // 契约 C10：隐藏过程时，状态行承担「当前工具信息」展示（工具名 + 参数摘要）。
+            let (word, style) = match if state.hide_process {
+                hidden_tool_status_text(state, width.saturating_sub(16))
+            } else {
+                None
+            } {
+                Some(text) => (text, faint()),
+                None => (word, style),
+            };
             let elapsed = elapsed_label(state);
             let text = if elapsed.is_empty() {
                 word
@@ -6923,6 +7633,15 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         chat_rect,
     );
 
+    // 契约 C2/C3：右侧滚动条只覆盖消息区。全屏模态面板会整体清场（见下方 Clear），
+    // 故只在消息区真实可见的模式下绘制；面板本身是居中矩形，不依赖该列。
+    if matches!(
+        state.mode,
+        InteractionMode::Normal | InteractionMode::PlanMode
+    ) {
+        render_scrollbar(f, chat_rect, state);
+    }
+
     // 图形协议品牌标：铺在字符画占位矩形上（位图画布底色不透明，可完整覆盖占位）。
     if let Some(banner_line) = splash_banner_line {
         let scroll = state.effective_scroll_offset as i32;
@@ -7003,18 +7722,18 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             render_input(f, input_rect, state);
         }
 
-        // wave-39 v4 R13：指标行紧贴色带下方（删除 v3 独立 CANVAS 间距行）；
-        // 指标行不在色带内：整行 GHOST 前景 + CANVAS 背景，绝不写出内容列。
-        let metrics_rect = Rect {
+        // wave-39 v4 R13：状态行紧贴色带下方（删除 v3 独立 CANVAS 间距行）；
+        // 状态行不在色带内：整行 GHOST 前景 + CANVAS 背景，绝不写出内容列。
+        let status_rect = Rect {
             x: content.x,
             y: bottom_top.saturating_add(band_h),
             width: content.width,
             height: 1,
         };
         f.render_widget(
-            Paragraph::new(metrics_line(state, content.width as usize))
+            Paragraph::new(status_line(state, content.width as usize))
                 .style(Style::default().bg(theme::CANVAS).fg(theme::GHOST)),
-            metrics_rect,
+            status_rect,
         );
     }
 
@@ -7393,6 +8112,10 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     if state.mode == InteractionMode::AgentRoster {
         render_agent_roster_panel(f, state);
     }
+    // 契约 C6/C7：`/settings` 显示偏好面板。
+    if state.mode == InteractionMode::Settings {
+        render_settings_panel(f, state);
+    }
 }
 
 /// 面板在无数据时的统一空状态：不允许整屏空白（那会让用户误判 TUI 挂了）。
@@ -7510,6 +8233,31 @@ fn ask_pulse_glyph(tick: usize) -> &'static str {
 }
 
 /// 内联 Ask 面板高度：分隔线 + 标题 + 选项(含自定义输入) + 键位提示；无问答时为 0。
+/// Ask 面板问题正文换行：首行 `first_width`、续行 `rest_width`（CJK 宽度感知）。
+///
+/// 与 `wrap_line` 同一套行首避让规则（标点不落行首）；**绝不**用省略号截断 ——
+/// 问题必须完整可读。空问题返回单条空串，保证调用方至少有一行可渲染。
+pub fn wrap_ask_question(question: &str, first_width: usize, rest_width: usize) -> Vec<String> {
+    let first_limit = first_width.max(1);
+    let rest_limit = rest_width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut col = 0usize;
+    let mut limit = first_limit;
+    for ch in question.chars() {
+        let w = char_width(ch);
+        if col + w > limit && col > 0 && !is_no_line_start(ch) {
+            out.push(std::mem::take(&mut current));
+            col = 0;
+            limit = rest_limit;
+        }
+        current.push(ch);
+        col += w;
+    }
+    out.push(current);
+    out
+}
+
 pub fn inline_ask_height(state: &TuiState, width: usize) -> u16 {
     if state.mode != InteractionMode::AskUserQuestion {
         return 0;
@@ -7521,8 +8269,30 @@ pub fn inline_ask_height(state: &TuiState, width: usize) -> u16 {
         .current_question()
         .map(|q| q.options.len() + 1) // +1 自定义输入项
         .unwrap_or(0);
-    let cap = if width >= 60 { 12 } else { 8 };
-    (2 + option_rows as u16 + 1).min(cap).max(4)
+    // 问题换行后可能占多行：面板高度必须随之增长，否则完整问题会被面板裁掉。
+    // 宽度口径与 `render_ask_inline` 一致（前缀 = RAIL + 呼吸 + 提问 chip + 分组 chip）。
+    let question_rows = ask
+        .current_question()
+        .map(|q| {
+            let prompt = q.question.trim().replace('\n', " ");
+            let header_width = q
+                .header
+                .as_ref()
+                .map(|header| header.trim())
+                .filter(|header| !header.is_empty())
+                .filter(|header| !header.contains(':') && !header.starts_with("builtin"))
+                .map(|header| str_width(header) + 1)
+                .unwrap_or(0);
+            let prefix = RAIL + 2 + 1 + 4 + 1 + header_width;
+            let limit = width.saturating_sub(prefix).max(8);
+            wrap_ask_question(&prompt, limit, limit).len()
+        })
+        .unwrap_or(1)
+        .max(1);
+    let needed = 2 + option_rows + 1 + (question_rows - 1);
+    // 上限只防极端长文本吞掉整屏：ui() 仍会按消息区几何二次收缩。
+    let cap = if width >= 60 { 40 } else { 24 };
+    (needed as u16).min(cap).max(4)
 }
 
 /// 单行选项：`▏ ● 标签   说明`。焦点行整行 SURFACE_SEL + INK BOLD，
@@ -7653,17 +8423,26 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
         .as_ref()
         .map(|counter| format!("  {counter}"))
         .unwrap_or_default();
-    let question_budget = width.saturating_sub(used + str_width(&tail)).max(8);
-    title_spans.push(Span::styled(
-        ellipsize_width(&question, question_budget),
-        Style::default()
-            .fg(theme::TERRACOTTA_BRIGHT)
-            .add_modifier(Modifier::BOLD),
-    ));
+    // 契约（2026-11-07 修订）：问题正文**必须完整显示** —— 超宽时按显示宽度换行，
+    // 禁止用省略号截断（用户无法读到完整问题就等于没问）。
+    let question_style = Style::default()
+        .fg(theme::TERRACOTTA_BRIGHT)
+        .add_modifier(Modifier::BOLD);
+    let first_width = width.saturating_sub(used + str_width(&tail)).max(8);
+    let rest_width = width.saturating_sub(used).max(8);
+    let mut wrapped = wrap_ask_question(&question, first_width, rest_width).into_iter();
+    title_spans.push(Span::styled(wrapped.next().unwrap_or_default(), question_style));
     if !tail.is_empty() {
         title_spans.push(Span::styled(tail, faint()));
     }
     lines.push(Line::from(title_spans));
+    let question_indent = " ".repeat(used);
+    for segment in wrapped {
+        lines.push(Line::from(vec![
+            Span::raw(question_indent.clone()),
+            Span::styled(segment, question_style),
+        ]));
+    }
 
     // ── 选项 + 自定义输入 ───────────────────────────────────────────────────
     let mut custom_focused = false;
@@ -8330,14 +9109,8 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     install_panic_restore_hook();
     let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
     let mut stdout = io::stdout();
-    if keyboard_enhancement_should_push() {
-        if let Err(error) = execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
-        ) {
+    if let Some(flags) = keyboard_enhancement_push_flags() {
+        if let Err(error) = execute!(stdout, PushKeyboardEnhancementFlags(flags)) {
             eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
         }
     }
@@ -8354,6 +9127,8 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = TuiState::default();
+    // ADR 0078：header 折叠判据在启动时冻结一次。
+    state.home_dir = detect_home_dir();
     // 初始化页品牌标：终端支持 sixel / kitty / iTerm2 时用真实位图，否则回退字符画。
     // 必须在进入 alternate screen 之后、读取键盘事件之前调用（picker 会瞬时读写 stdio）。
     state.splash_image = init_splash_image();
@@ -8362,6 +9137,8 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     sync_state_with_registry(&mut state);
     // Ctrl+D 的默认模型优先于注册表默认：偏好文件缺失时保持注册表口径不变。
     state.model_preferences = ModelPreferencesStore::new().load();
+    // 本轮 C11：显示偏好（产品默认「隐藏 + 折叠」）在启动时应用；缺失/损坏回落默认值。
+    state.apply_tui_preferences(&TuiPreferencesStore::new().load());
     if let Some(default_model) = state.model_preferences.default_model.clone() {
         state.model = default_model;
     }
@@ -8483,14 +9260,8 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
     install_panic_restore_hook();
     let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
     let mut stdout = io::stdout();
-    if keyboard_enhancement_should_push() {
-        if let Err(error) = execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
-        ) {
+    if let Some(flags) = keyboard_enhancement_push_flags() {
+        if let Err(error) = execute!(stdout, PushKeyboardEnhancementFlags(flags)) {
             eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
         }
     }
@@ -8507,6 +9278,8 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = TuiState::default();
+    // ADR 0078：与 `run_tui` 同口径，header 折叠判据启动即冻结。
+    state.home_dir = detect_home_dir();
     let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
 
     // 预注入 Ask 问题供打磨验证与截图
@@ -9859,6 +10632,16 @@ fn tui_event_loop(
                         continue;
                     }
 
+                    // 1c3. Settings 显示偏好面板（本轮）：↑↓ 选择 · Space/Enter 切换 · Esc 关闭。
+                    // 按键分支统一收敛到 `handle_settings_key`（唯一入口，面板态吸收所有按键 ⇒
+                    // 字符键不会漏进 Composer）；返回 `Some` 才落盘，状态机层保持纯内存（契约 C8）。
+                    if state.mode == InteractionMode::Settings {
+                        if state.handle_settings_key(key.code).is_some() {
+                            persist_tui_preferences(&state);
+                        }
+                        continue;
+                    }
+
                     // 1d. AddingProvider 模式下的按键处理
                     if state.mode == InteractionMode::AddingProvider {
                         match key.code {
@@ -10507,6 +11290,17 @@ fn tui_event_loop(
                                 }
                                 continue;
                             }
+                            // 本轮 C12：Ctrl+O 切换「隐藏 Agent 过程」（与 /settings 同字段、同落盘）。
+                            KeyCode::Char('o') => {
+                                let hidden = state.toggle_hide_process();
+                                persist_tui_preferences(&state);
+                                state.set_status_notice(if hidden {
+                                    "已隐藏 Agent 过程（仅显示状态消息）".to_string()
+                                } else {
+                                    "已显示 Agent 过程（思考与工具调用）".to_string()
+                                });
+                                continue;
+                            }
                             _ => {}
                         }
                     }
@@ -10629,6 +11423,11 @@ fn tui_event_loop(
                                 if known_command == Some("/quit") || input_is_alias(&input, "/exit") {
                                     break;
                                 }
+                                // 本轮：`/settings` 显示偏好面板（面板类命令，流式期也允许打开）。
+                                if known_command == Some("/settings") {
+                                    state.open_settings();
+                                    continue;
+                                }
                                 // `/effort` 是 `/thinking` 的历史别名（不在命令表内，同样整串匹配）。
                                 if known_command == Some("/thinking")
                                     || input_is_alias(&input, "/effort")
@@ -10672,8 +11471,9 @@ fn tui_event_loop(
                                         help.push_str(&format!("\n{:<11}{}", cmd, desc));
                                     }
                                     // C18②：流式期可用性说明（旧文案让人以为生成中键盘全失效）。
+                                    // 本轮：补 Ctrl+O（过程显示/隐藏），与 /settings 同字段。
                                     help.push_str(
-                                        "\n流式期仍可输入 · Enter 排队（本轮结束后自动发送） · Ctrl+T/Ctrl+R 可用",
+                                        "\n流式期仍可输入 · Enter 排队（本轮结束后自动发送） · Ctrl+T/Ctrl+R 可用 · Ctrl+O 过程显示/隐藏",
                                     );
                                     // 契约 F-L：/cost 移除后网关需要可见入口；只展示剥离凭据后的
                                     // scheme://host[:port]/path（userinfo/query/fragment 全丢弃）。
@@ -11935,6 +12735,100 @@ fn main() {
 mod wave43_unit_tests {
     use super::*;
     use serde_json::json;
+
+    fn long_question() -> &'static str {
+        "请确认是否需要把当前的会话状态、未落地的回答以及图运行绑定一并迁移到新的存储层，并说明迁移期间的回滚策略与验收口径，以及失败后的补偿方式与用户可见提示。"
+    }
+
+    #[test]
+    fn test_wrap_ask_question_keeps_full_text_and_never_ellipsizes() {
+        let wrapped = wrap_ask_question(long_question(), 32, 32);
+        assert!(wrapped.len() > 1, "long question must wrap, got {wrapped:?}");
+        assert_eq!(wrapped.concat(), long_question(), "换行不得丢字");
+        assert!(
+            !wrapped.iter().any(|line| line.contains('…')),
+            "问题正文禁止省略号截断: {wrapped:?}"
+        );
+        for line in &wrapped {
+            assert!(
+                str_width(line) <= 32,
+                "line exceeds width 32 ({}): {line}",
+                str_width(line)
+            );
+        }
+    }
+
+    #[test]
+    fn test_wrap_ask_question_short_stays_single_line() {
+        assert_eq!(
+            wrap_ask_question("继续吗？", 60, 60),
+            vec!["继续吗？".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_wrap_ask_question_keeps_punctuation_off_line_start() {
+        let wrapped = wrap_ask_question(
+            "请选择本次交付的执行架构与部署策略，然后确认是否继续执行后续步骤。",
+            20,
+            20,
+        );
+        assert!(wrapped.len() > 1);
+        for line in &wrapped {
+            let first = line.chars().next().unwrap_or(' ');
+            assert!(!is_no_line_start(first), "行首不得是避让标点: {line}");
+        }
+    }
+
+    #[test]
+    fn test_inline_ask_height_grows_with_wrapped_question() {
+        let mut long_state = TuiState::default();
+        long_state.mode = InteractionMode::AskUserQuestion;
+        long_state.ask_user_state = Some(AskUserState::new(
+            "req-long".to_string(),
+            vec![AskUserQuestion {
+                id: "q1".to_string(),
+                header: None,
+                question: long_question().to_string(),
+                multi_select: false,
+                options: vec![
+                    QuestionOption {
+                        label: "是".to_string(),
+                        description: None,
+                    },
+                    QuestionOption {
+                        label: "否".to_string(),
+                        description: None,
+                    },
+                ],
+            }],
+        ));
+
+        let mut short_state = TuiState::default();
+        short_state.mode = InteractionMode::AskUserQuestion;
+        short_state.ask_user_state = Some(AskUserState::new(
+            "req-short".to_string(),
+            vec![AskUserQuestion {
+                id: "q1".to_string(),
+                header: None,
+                question: "继续吗？".to_string(),
+                multi_select: false,
+                options: vec![QuestionOption {
+                    label: "是".to_string(),
+                    description: None,
+                }],
+            }],
+        ));
+
+        let long_h = inline_ask_height(&long_state, 80);
+        let short_h = inline_ask_height(&short_state, 80);
+        assert!(
+            long_h > short_h,
+            "换行后的问题必须让面板增高: long={long_h} short={short_h}"
+        );
+        // 窄终端下同样成立（换行更多）
+        assert!(inline_ask_height(&long_state, 48) >= long_h);
+    }
 
     #[test]
     fn test_pending_ui_request_from_value() {

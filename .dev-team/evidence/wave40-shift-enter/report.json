@@ -2,22 +2,27 @@
   "scenario": "shift-enter",
   "wave": 40,
   "bin": "/home/dm/pony-agent/target/debug/pony",
-  "bin_sha256": "1453608da67c6fb3ff2bc05bbc260ba5bf58a9b3af89c02072c1d2642ba0e3ae",
+  "bin_sha256": "86d68169082ceb5c50caaaef69a6cbb8007905f33f7cf849bcba04e28ffdbe71",
   "pty": {
     "cols": 120,
     "rows": 34,
     "term": "xterm-256color",
     "isolated_home": true
   },
-  "generated_at": "2026-10-19T22:58:32+0800",
+  "generated_at": "2026-11-07T13:19:43+0800",
   "exit_code": 0,
-  "pass": 4,
+  "pass": 6,
   "fail": 0,
   "assertions": [
     {
-      "id": "a2.1_probe_answered_and_flags_pushed",
+      "id": "a2.1_no_probe_and_unconditional_push_direct_tier",
       "ok": true,
-      "detail": "probe_seen=True push_seen=True push_flags=1 raw_push=1b5b3e3175 expected_push_flags_bit=DISAMBIGUATE(1) [contract literal '>2u' == REPORT_EVENT_TYPES bit; crossterm writes '>1u' for R2 flags]"
+      "detail": "push_seen=True push_flags=9 expected_flags=9(DISAMBIGUATE|REPORT_ALL_KEYS) raw_push=1b5b3e3975 probe_seen=False (must be False: ADR 0075 removed the CSI ? u probe)"
+    },
+    {
+      "id": "a2.6_startup_sends_no_capability_query",
+      "ok": true,
+      "detail": "capability_probe_bytes=[] (must be empty: splash 探测已改为零 stdin 读的环境判定)"
     },
     {
       "id": "a2.2_shift_enter_inserts_newline_without_submit",
@@ -33,16 +38,22 @@
       "id": "a2.4_ctrl_c_exits_without_panic_and_restores_terminal",
       "ok": true,
       "detail": "exited=True child_exit=0 panic=False leave_alt_screen=True pop_seen=True pop_raw=1b5b3c3175 pop_required=True"
+    },
+    {
+      "id": "a2.5_multiplexer_tier_pushes_disambiguate_only",
+      "ok": true,
+      "detail": "herdr_push_seen=True push_flags=1 expected_flags=1(DISAMBIGUATE) raw_push=1b5b3e3175"
     }
   ],
   "sequences": {
-    "probe": "1b5b3f75",
-    "reply": "1b5b3f31751b5b3f313b3263",
-    "push": "1b5b3e3175",
+    "push": "1b5b3e3975",
+    "probe": "",
+    "capability_probes": "",
     "shift_enter": "1b5b31333b3275",
     "plain_enter": "0d",
     "ctrl_c": "03",
-    "pop": "1b5b3c3175"
+    "pop": "1b5b3c3175",
+    "push_multiplexer": "1b5b3e3175"
   },
   "screens": {
     "before": "screen-before.txt",

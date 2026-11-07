@@ -1,11 +1,11 @@
-   pony  ·  pony-agent                                                                              model-ppx-default
+   PONY  ·  pony-agent
    ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
 
-   ▌
-   ▌ abc
-   ▌
 
-   ✕ Error: provider ppx missing API key; please save a key in the model config page (field: PPX_API_KEY).
+     abc
+
+   · 当前提供商 [ppx] 未配置 API Key，请在 /provider 中配置或设置环境变量 [PPX_API_KEY]
+
 
 
 
@@ -31,4 +31,4 @@
 
    › 写下任务，或输入 / 查看命令
 
-     /home/dm/pony-agent                                                                                    上下文 0%
+                                                                                                    model-ppx-default

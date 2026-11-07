@@ -520,7 +520,7 @@ def input_region_line_count(cap: Capture) -> int:
 
 def header_checks(c: Checks, cap: Capture) -> None:
     line = cap.lines[0] if cap.lines else ""
-    ok = "pony" in line and "pony-agent" in line
+    ok = "PONY" in line and "pony-agent" in line
     c.add(
         f"{cap.name}.header",
         "header shows brand + workspace",

@@ -141,9 +141,12 @@ fn last_assistant(state: &TuiState) -> &str {
 // O1：历史与问题同帧可见，Ask 不覆盖 header / Composer / 指标行
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// O1 夹具前置条件（缺陷证据入口）：**没有 Ask** 的正常帧，指标行也必须已经渲染出
+/// O1 夹具前置条件（缺陷证据入口）：**没有 Ask** 的正常帧，header 右槽也必须已经渲染出
 /// 数值指标（`上下文` 段）。若这里失败，说明是夹具没有设置 `context_window_tokens`，
-/// 而不是「Ask 遮挡指标行」——两种失败必须可区分，否则 O1 的判据会把夹具缺陷误报成实现回归。
+/// 而不是「Ask 遮挡指标」——两种失败必须可区分，否则 O1 的判据会把夹具缺陷误报成实现回归。
+///
+/// ADR 0078：数值指标簇位于 header（row0）右槽，底部最后一行改为模型身份，
+/// 故本前置条件与遮挡判据都锚定 row0。
 #[test]
 fn o1_metrics_fixture_precondition_closed_frame_has_token_metrics() {
     // Arrange
@@ -151,13 +154,13 @@ fn o1_metrics_fixture_precondition_closed_frame_has_token_metrics() {
 
     // Act：与 O1 同尺寸、同状态，只是不打开 Ask
     let buf = render(&mut state, 120, 34);
-    let metrics_row = row_text(&buf, 33);
+    let header_row = row_text(&buf, 0);
 
     // Assert
     assert!(
-        squeeze_text(&metrics_row).contains("上下文"),
-        "O1 夹具前置条件：正常（无 Ask）帧的指标行必须含「上下文」数值段，\
-         实际 row33 = {metrics_row:?}。若此处失败 = 夹具未设置 context_window_tokens（测试缺陷），\
+        squeeze_text(&header_row).contains("上下文"),
+        "O1 夹具前置条件：正常（无 Ask）帧的 header 右槽必须含「上下文」数值段，\
+         实际 row0 = {header_row:?}。若此处失败 = 夹具未设置 context_window_tokens（测试缺陷），\
          不是被测实现的遮挡回归。"
     );
 }
@@ -169,9 +172,9 @@ fn o1_history_and_question_share_one_frame_without_wiping_scrollback() {
     let mut baseline_state = history_state();
     let baseline = render(&mut baseline_state, 120, 34);
     assert!(
-        squeeze_text(&row_text(&baseline, 33)).contains("上下文"),
-        "O1 夹具前置条件：基线帧指标行必须含数值指标，实际 row33 = {:?}",
-        row_text(&baseline, 33)
+        squeeze_text(&row_text(&baseline, 0)).contains("上下文"),
+        "O1 夹具前置条件：基线帧 header 右槽必须含数值指标（ADR 0078），实际 row0 = {:?}",
+        row_text(&baseline, 0)
     );
 
     let mut state = ask_state(QUESTION_SENTINEL);
@@ -212,11 +215,11 @@ fn o1_history_and_question_share_one_frame_without_wiping_scrollback() {
         (composer_top(34)..33).map(|y| row_text(&buf, y)).collect::<Vec<_>>()
     );
 
-    // Assert 4：指标行必须与基线逐字一致（Ask 不得遮挡、不得改写）
+    // Assert 4：底面行（右对齐模型身份，ADR 0078）必须与基线逐字一致（Ask 不得遮挡、不得改写）
     assert_eq!(
         row_text(&buf, 33),
         row_text(&baseline, 33),
-        "O1：Ask 打开后指标行与基线帧必须逐字一致（实际 = {:?}，基线 = {:?}）",
+        "O1：Ask 打开后底面行与基线帧必须逐字一致（实际 = {:?}，基线 = {:?}）",
         row_text(&buf, 33),
         row_text(&baseline, 33)
     );
@@ -299,12 +302,17 @@ fn long_ask_state() -> TuiState {
 
 #[test]
 fn o3_ask_panel_survives_wide_narrow_and_tiny_terminals() {
-    // Arrange：宽终端 120x34（≥60 列 ⇒ 上限 12 行）
+    // Arrange：宽终端 120x34（≥60 列 ⇒ 硬上限 40 行，ADR 0081）
     let mut wide = long_ask_state();
     let wide_height = tui::inline_ask_height(&wide, 120);
     assert!(
-        (4..=12).contains(&wide_height),
-        "O3：宽终端面板高度必须保留既有 4..=12 行上限，实际 {wide_height}"
+        (4..=40).contains(&wide_height),
+        "O3：宽终端面板高度必须落在 4..=40 行硬上限内（ADR 0081），实际 {wide_height}"
+    );
+    assert!(
+        wide_height > 12,
+        "O3：长问题换行后必须突破旧的 12 行上限，否则完整问题会被面板裁掉（ADR 0081），\
+         实际 {wide_height}"
     );
     let wide_buf = render(&mut wide, 120, 34); // 不 panic 即通过
     assert!(
@@ -312,12 +320,12 @@ fn o3_ask_panel_survives_wide_narrow_and_tiny_terminals() {
         "O3：宽终端长问题必须仍可见（允许省略尾部）"
     );
 
-    // Arrange：窄终端 56x20（<60 列 ⇒ 上限 8 行）
+    // Arrange：窄终端 56x20（<60 列 ⇒ 硬上限 24 行，ADR 0081）
     let mut narrow = ask_state(QUESTION_SENTINEL);
     let narrow_height = tui::inline_ask_height(&narrow, 56);
     assert!(
-        (4..=8).contains(&narrow_height),
-        "O3：窄终端面板高度必须保留既有 4..=8 行上限，实际 {narrow_height}"
+        (4..=24).contains(&narrow_height),
+        "O3：窄终端面板高度必须落在 4..=24 行硬上限内（ADR 0081），实际 {narrow_height}"
     );
     let narrow_buf = render(&mut narrow, 56, 20);
     let narrow_text = all_text(&narrow_buf);
@@ -925,7 +933,14 @@ def main():
             seed.close()
         resumed = Pty(args.bin, ["resume"], env, args.root)
         result["resume_ready"] = resumed.wait_for("›", 40)
-        resumed.pump(2.5)
+        resumed.pump(1.5)
+        # 产品默认隐藏 Agent 过程（ADR 0079 显示偏好：hide_process=true）。
+        # J1 校验的是「恢复视图的摘要选择优先级」（description 优先、结构化参数不得反显），
+        # 不是折叠默认值，故先按 Ctrl+O 展开过程，再对展开态抓屏断言。
+        resumed.send("\x0f")
+        resumed.pump(1.5)
+        # `norm()` 已剥掉全部空白，故按无空白形态匹配状态提示。
+        result["resume_process_expanded"] = "已显示Agent过程" in norm(resumed.buf)
         screen = norm(resumed.buf)
         result["resume_screen"] = screen[-4000:]
         result["resume_history_visible"] = "结论" in screen
@@ -1119,6 +1134,11 @@ fn j1_resume_summary_prefers_description_and_hides_structured_json() {
         "J1 HARNESS：`pony resume` 未恢复出历史（ready={} history={}），屏幕 = {:?}",
         flow.flag("resume_ready"),
         flow.flag("resume_history_visible"),
+        flow.text("resume_screen")
+    );
+    assert!(
+        flow.flag("resume_process_expanded"),
+        "J1 HARNESS：Ctrl+O 未能展开 Agent 过程（ADR 0079 默认折叠），屏幕 = {:?}",
         flow.text("resume_screen")
     );
     assert!(

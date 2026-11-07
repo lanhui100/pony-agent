@@ -435,6 +435,39 @@ note: >-
       (7.3) 宿主契约对齐（ADR 0074 新 Ask 契约）：TUI 的 4 处 legacy 调用迁到 scoped 入口
             （`answer_ask_in_session` ×1、`cancel_ask_in_session` ×3，session 取当前会话 id）；
             `graph_resume_ask` 与续轮派发逻辑不变。四维归属不变。
+  【wave-tui-process-fold 归属登记（2026-11-07）｜TUI 右侧滚动条 + 思考折叠 + `/settings` 面板 + Agent 过程默认隐藏（ADR 0079）】
+  一行结论：四维归属不变，metrics/logs 结构性 N-A —— TUI 随进程启停、无对外接口/网络 IO/后台任务/LLM 调用新增，
+  只改本地渲染层与本地偏好文件 `tui-preferences.json`；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing/issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：TUI 是**随进程启停的终端渲染面**——无常驻监听地址、无 Service、不进集群，
+      Prometheus pull 模型的前提（稳定可达的 `/metrics`）与节点侧 fluentd 的容器日志路径前提结构上均不成立；
+      本波亦无新增网络 IO、后台任务、LLM 调用、依赖、环境变量、指标或 Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：滚动条几何 `scrollbar_thumb` 与最右列绘制、思考折叠文案
+      `thinking_fold_label`、过程过滤判据 `should_hide_message`（**渲染层早退，不删会话数据**）、
+      隐藏态状态行 `hidden_tool_status_text`、`InteractionMode::Settings` 面板与 `Ctrl+O` 快捷开关
+      （两者读写同一偏好字段）；持久化只新增**本地**偏好文件
+      `<config_dir>/pony-agent/tui-preferences.json`（原子写，缺失/损坏回落默认），不改变既有持久化 schema。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。为让巡检变绿而伪造 `/metrics` 或把 applicable 翻成 true 已被明确拒绝。
+  【wave-tui-splash-no-probe 归属登记（2026-11-07）｜品牌标图形协议改为零 I/O 环境判定（ADR 0080，取代 0069 的 stdio 探测）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次是**删除**一条启动期探测路径（没有新增接口、网络 IO、
+  后台任务或 LLM 调用），不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更发生在 TUI 启动的**终端渲染选择**上——`init_splash_image()` 从
+      `Picker::from_query_stdio()`（内部线程阻塞读 stdin + 自行 `disable_raw_mode()`）改为纯函数
+      `splash_protocol_for_env()` / `splash_font_px()`（只读环境变量与 `TIOCGWINSZ` 像素字段）。
+      进程仍是随用户启停的终端面：无常驻监听地址、无 Service、不进集群，Prometheus pull 与节点侧
+      fluentd 采集的结构前提均不成立；本波无新增依赖、env 契约、指标或 Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：删除启动期终端能力查询（`CSI ? u` / `CSI c`）与探测线程；
+      保留 `PONY_TUI_SPLASH_IMAGE_PROTOCOL` / `PONY_TUI_SPLASH_FONT_PX` 两个既有覆盖入口语义，
+      协议判定改为 kitty → iTerm2 → sixel 白名单的 fail-closed 顺序，复用器一律回退字符画。
+      **可观测性上是净减少**：启动期不再有对外字节、不再有会被吞掉的用户输入。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 未改动。行为门的机械收口落在
+      测试与审计层而非遥测层——`crates/pony-agent-core/tests/tui_startup_input_guard.rs`（g0/g1/g2 黑盒）、
+      源码级守卫 `splash_probe_never_reads_stdin`、`tools/tui-audit/check_shift_enter.py` 的
+      `a2.6_startup_sends_no_capability_query`（回执 `capability_probe_bytes` 必须为空）。
   【wave-tui-session-continuation-projection 归属登记（2026-11-07）｜会话标题/轮次/`/resume` 列表投影剔除宿主续轮提示】
   一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地会话投影与终端渲染**（标题、轮次数、
   `/resume` 行内容），无新增对外接口、网络 IO、后台任务、LLM 调用或依赖；不新增收口点，不伪造 /metrics。
@@ -454,3 +487,32 @@ note: >-
       `crates/pony-agent-core/src/agent/session/tests.rs` 的
       `host_continuation_prompt_recognizes_all_host_injected_turns` 与
       `continuation_only_turns_do_not_pollute_title_turn_count_or_resume_list`。
+  【wave-tui-header-layering 归属登记（2026-11-07）｜TUI header 承载工作区标签与数值指标，底面行回归模型身份（ADR 0078）】
+  一行结论：四维归属不变，metrics/logs 结构性 N-A —— 本次只改**终端行内布局分配**与家目录快照的取值时机，
+  无新增对外接口、网络 IO、后台任务、LLM 调用、依赖或 env 契约；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更完全发生在 `bin/tui.rs` 的 ratatui 行内几何（`workspace_header_label_with_home` /
+      `metrics_line` 的行归属），进程仍是随用户启停的终端面——无常驻监听地址、无 Service、不进集群，
+      Prometheus pull 与节点侧 fluentd 采集的结构前提均不成立；本波无新增指标、日志字段或 Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：指标行从 composer 下底面行迁入 header 右侧、底面行改承载模型身份，
+      工作区路径折叠为 `~/<文件夹名称>` 且全屏只出现一次；顺带修掉真实缺陷——header 原先**每帧**重读
+      `std::env::var("HOME")`，同进程内 `set_var("HOME")`（测试隔离沙箱）会让相邻帧「`~/x` ↔ `x`」跳变，
+      改为 `TuiState::home_dir` 构造期冻结（`Default` 不读 env，`run_tui` / 预览入口注入 `detect_home_dir()`）。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——`crates/pony-agent-core/tests/tui_render_layout.rs`
+      （`layout_invariants_hold_on_standard_terminal`、`panel_renders_inside_screen_and_keeps_footer`、
+      `header_workspace_label_is_home_folded_folder_name`）与 `tests/tui_overlay_cancel_acceptance.rs` 的 `o1_*`。
+  【wave-tui-inline-ask-height 归属登记（2026-11-07）｜Ask 内联面板高度随问题换行增长，硬上限按终端宽度分档（ADR 0081）】
+  一行结论：四维归属不变，metrics/logs 结构性 N-A —— 本次只改**覆盖层高度计算**，无新增对外接口、网络 IO、
+  后台任务、LLM 调用或依赖；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：`inline_ask_height` / `wrap_ask_question` 是纯几何计算（输入为问题文本与终端宽度），
+      不产生任何遥测事实；TUI 覆盖层不参与消息区几何，也无网络/调度路径。进程仍随用户启停，
+      Prometheus pull 与节点侧日志采集的结构前提不成立。
+  (3) 变更性质（仅登记，非遥测变更）：高度从「只由选项条数决定 + cap 12/8」改为「计入问题换行行数 + cap 40/24」，
+      上限按终端宽度分档（≥60 列 40 行、<60 列 24 行），二次收缩仍由 `ui()` 兜底（不得越过 header / composer）。
+      面板被放大的风险是吞屏，已由该二次收缩承担，因此不需要新的运行时守卫。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 未改动。行为门的机械收口落在测试层——
+      `crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs::o3_ask_panel_survives_wide_narrow_and_tiny_terminals`
+      与 `bin/tui.rs` 的 `test_inline_ask_height_grows_with_wrapped_question` / `test_wrap_ask_question_*`。
