@@ -430,8 +430,68 @@ pub fn is_transient_provider_error(error: &str) -> bool {
 }
 
 const ERROR_SUMMARY_GENERIC: &str = "本轮请求未能完成，请稍后再试。";
-const ERROR_SUMMARY_TRANSIENT: &str = "上游服务暂时不可用，正在按既有预算重试。";
+/// 瞬态上游错误的**终态**文案。
+///
+/// 历史缺陷：此处曾写「正在按既有预算重试」，而本常量唯一的消费点是
+/// `UiEvent::StreamFailed` 臂 —— 该事件由 `emit_stream_failed` 在 provider 重试预算
+/// **终止之后**发出。文案与语义脱节：用户看到「正在重试」，但该轮已无任何重试在跑。
+const ERROR_SUMMARY_TRANSIENT: &str = "上游服务暂时不可用，重试已用尽。";
 const ERROR_SUMMARY_AUTH: &str = "凭据不可用，请检查提供商配置。";
+
+/// 系统消息的严重级：渲染样式（图标 / 颜色）的唯一判据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemMessageSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// 纯函数：由系统消息正文判定严重级。
+///
+/// 为什么不是 `ChatMessage` 的结构字段：`ChatMessage` 被多个验收测试直接构造
+/// （`tests/tui_*_acceptance.rs`），加字段会连带改动冻结用例。故把判据收敛为本函数，
+/// 消息区渲染与状态栏共用同一真值源，替代此前散落在三处的 `contains("失败")` 关键词
+/// 判定 —— `ERROR_SUMMARY_*` 文案不含任何既有关键词，导致真实的终态错误反而被渲染成
+/// 灰色 Info 样式（这就是「错误信息不醒目」的根因）。
+pub fn system_message_severity(content: &str) -> SystemMessageSeverity {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return SystemMessageSeverity::Info;
+    }
+    // 面向用户的错误摘要是**受控文案**：逐字命中即 Error，不依赖正文用词。
+    if matches!(
+        trimmed,
+        ERROR_SUMMARY_GENERIC | ERROR_SUMMARY_TRANSIENT | ERROR_SUMMARY_AUTH
+    ) {
+        return SystemMessageSeverity::Error;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let error_hints = [
+        "error", "fail", "panic", "失败", "错误", "异常", "不可用", "未产出终态",
+    ];
+    if error_hints.iter().any(|hint| lower.contains(hint)) {
+        return SystemMessageSeverity::Error;
+    }
+    let warning_hints = ["warn", "警告", "已过期", "已失效"];
+    if warning_hints.iter().any(|hint| lower.contains(hint)) {
+        return SystemMessageSeverity::Warning;
+    }
+    SystemMessageSeverity::Info
+}
+
+/// 严重级 → 文本样式（消息区与状态栏共用，避免两处配色漂移）。
+///
+/// `fallback` 供调用方保留原有「无严重级」配色（如消息区 Info 用 `muted()`、
+/// 状态栏 Info 用 `muted()`/`faint()`）。
+fn severity_style(severity: SystemMessageSeverity, fallback: Style) -> Style {
+    match severity {
+        SystemMessageSeverity::Error => {
+            Style::default().fg(theme::DANGER).add_modifier(Modifier::BOLD)
+        }
+        SystemMessageSeverity::Warning => Style::default().fg(theme::WARN),
+        SystemMessageSeverity::Info => fallback,
+    }
+}
 
 /// C4：把原始错误详情收敛为面向用户的一句话摘要（详情默认折叠，不入消息区）。
 #[allow(unused_variables)]
@@ -6575,15 +6635,8 @@ fn status_line(state: &TuiState, width: usize) -> Line<'static> {
             )
         })
         .map(|(notice, _)| {
-            let danger = notice.contains("失败") || notice.contains("错误");
-            (
-                truncate_width(notice, 34),
-                if danger {
-                    Style::default().fg(theme::DANGER)
-                } else {
-                    muted()
-                },
-            )
+            let style = severity_style(system_message_severity(notice), muted());
+            (truncate_width(notice, 34), style)
         })
         .or_else(|| {
             plan_mode_banner(state.mode == InteractionMode::PlanMode)
@@ -7034,8 +7087,10 @@ fn status_word_base(state: &TuiState) -> (String, Style) {
             if transient.is_empty() {
                 ("就绪".to_string(), faint())
             } else {
-                let danger = transient.contains("失败") || transient.contains("错误");
-                (transient, if danger { Style::default().fg(theme::DANGER) } else { muted() })
+                // 判据与消息区同一真值源：`status_text` 在 StreamFailed 臂写入受控错误摘要，
+                // 该文案不含「失败/错误」字样，旧关键词判定会把它渲染成 muted 灰。
+                let style = severity_style(system_message_severity(&transient), muted());
+                (transient, style)
             }
         }
         RuntimeMode::Connecting => ("连接中".to_string(), muted()),
@@ -7307,18 +7362,14 @@ fn message_lines_with_ctx(
                     lines.push(blank());
                 }
                 MessageRole::System => {
-                    let is_error = message.content.contains("Error")
-                        || message.content.contains("fail")
-                        || message.content.contains("失败");
-                    let (glyph, glyph_style) = if is_error {
-                        (GLYPH_FAIL, Style::default().fg(theme::DANGER))
-                    } else {
-                        ("·", faint())
-                    };
-                    let text_style = if is_error {
-                        Style::default().fg(theme::DANGER)
-                    } else {
-                        muted()
+                    // 判据收敛到 `system_message_severity`（结构化严重级），不再用关键词散判：
+                    // 受控错误摘要（ERROR_SUMMARY_*）此前不含任何关键词 ⇒ 真实终态错误被渲染成灰色。
+                    let severity = system_message_severity(&message.content);
+                    let text_style = severity_style(severity, muted());
+                    let (glyph, glyph_style) = match severity {
+                        SystemMessageSeverity::Error => (GLYPH_FAIL, text_style),
+                        SystemMessageSeverity::Warning => ("!", text_style),
+                        SystemMessageSeverity::Info => ("·", faint()),
                     };
                     if ctx.has_preceding_lines && !prev_is_tool {
                         push_blank(&mut lines);
@@ -12499,15 +12550,17 @@ fn tui_event_loop(
                     stop_sequence.reset();
                     // wave-tui-session-resilience C3/C4：消息区只显示一句话摘要，
                     // 原始 400 字符响应体/堆栈默认折叠，仅留运行日志与 issue 上报通道。
+                    //
+                    // 语义澄清：本事件由 `emit_stream_failed` 在 provider 重试预算**终止之后**
+                    // 发出 ⇒ 此处是终态，不存在任何进行中的重试。历史实现曾在此伪造
+                    // 「重试中（1/5）」，既误导用户（永不恢复），又是硬编码的假进度。
                     let summary = user_facing_error_summary(&err);
                     let folded = should_fold_error_detail(&err);
                     eprintln!("[pony-tui] turn failed detail (folded={folded}): {err}");
                     state.transition_runtime_mode(RuntimeMode::Failed(summary.clone()));
-                    state.status_text = if is_transient_provider_error(&err) {
-                        format!("重试中（1/5）· {}", summary)
-                    } else {
-                        summary.clone()
-                    };
+                    state.status_text = summary.clone();
+                    // 终态错误必须持续可见：走消息区（不受 `status_notice` 的 TTL 抑制），
+                    // 由 `system_message_severity` 判为 Error ⇒ DANGER + BOLD。
                     state.messages.push(ChatMessage {
                         role: MessageRole::System,
                         content: summary,
@@ -14003,5 +14056,94 @@ mod w3b_sub_session_tests {
             "徽标必须紧贴状态行上方（输入区正下方 1 行）"
         );
         assert!(find_row(&sub, "◆").is_some(), "徽标必须有 `◆ ` 标记");
+    }
+}
+
+/// 上游瞬态错误终态呈现：文案不得自称「正在重试」，且必须被判为醒目 Error 级。
+#[cfg(test)]
+mod transient_error_terminal_tests {
+    use super::*;
+
+    /// 真实 trace 里的 45s 超时错误正文（来自 provider `operation timed out` 分类路径）。
+    const TIMEOUT_ERROR: &str =
+        "followup_sync:attempt=1/5 failed class=TransientRetryable timeout after 45001ms";
+
+    #[test]
+    fn transient_summary_no_longer_claims_retry_is_running() {
+        let summary = user_facing_error_summary(TIMEOUT_ERROR);
+        assert_eq!(
+            summary, ERROR_SUMMARY_TRANSIENT,
+            "瞬态错误必须收敛到受控终态摘要，实际 = {summary:?}"
+        );
+        assert!(
+            !summary.contains("正在"),
+            "StreamFailed 是重试预算终止后的终态，文案不得自称「正在重试」，实际 = {summary:?}"
+        );
+        assert!(
+            summary.contains("重试已用尽"),
+            "终态文案必须如实说明重试已结束，实际 = {summary:?}"
+        );
+    }
+
+    #[test]
+    fn transient_summary_renders_as_bold_danger() {
+        let severity = system_message_severity(ERROR_SUMMARY_TRANSIENT);
+        assert_eq!(
+            severity,
+            SystemMessageSeverity::Error,
+            "受控错误摘要必须判为 Error（旧关键词判定全不命中 ⇒ 曾被渲染成灰色 Info）"
+        );
+        let style = severity_style(severity, muted());
+        assert_eq!(
+            style.fg,
+            Some(theme::DANGER),
+            "终态错误必须用 DANGER 前景色"
+        );
+        assert!(
+            style.add_modifier.contains(Modifier::BOLD),
+            "终态错误必须加粗，与普通 System 提示区分"
+        );
+    }
+
+    #[test]
+    fn severity_covers_auth_and_generic_summaries() {
+        for summary in [ERROR_SUMMARY_GENERIC, ERROR_SUMMARY_AUTH] {
+            assert_eq!(
+                system_message_severity(summary),
+                SystemMessageSeverity::Error,
+                "全部受控错误摘要都必须判为 Error：{summary:?}"
+            );
+        }
+        assert_eq!(
+            system_message_severity("已切换提供商 · workbuddy"),
+            SystemMessageSeverity::Info,
+            "普通提示不得被判为错误（避免满屏红）"
+        );
+        assert_eq!(
+            system_message_severity(ASK_STALE_NOTICE),
+            SystemMessageSeverity::Warning,
+            "失效类提示应为 Warning 而非 Error"
+        );
+    }
+
+    #[test]
+    fn system_message_render_uses_danger_style_for_terminal_error() {
+        let message = ChatMessage {
+            role: MessageRole::System,
+            content: ERROR_SUMMARY_TRANSIENT.to_string(),
+            timestamp_ms: 0,
+        };
+        let lines = message_lines_for(&message, 80);
+        let styled = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("上游服务"))
+            .expect("终态错误正文必须被渲染");
+        assert_eq!(
+            styled.style.fg,
+            Some(theme::DANGER),
+            "消息区终态错误必须醒目着色，实际 = {:?}",
+            styled.style
+        );
     }
 }
