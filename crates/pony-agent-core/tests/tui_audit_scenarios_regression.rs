@@ -276,10 +276,19 @@ runner=[{listed:?}]\nscenarios=[{registered:?}]"
 #[test]
 fn a2_contrast_ratio_matches_wcag_and_theme_colors_are_readable() {
     // 主题色值先与源码对账：颜色若被改动，本用例要明确要求同步基线，而不是悄悄测旧值。
-    let tui_source = std::fs::read_to_string(
-        repo_root().join("crates/pony-agent-core/src/bin/tui.rs"),
-    )
-    .expect("必须能读取 tui.rs");
+    // 主题常量已单独成模块（`tui/theme.rs`）：对账范围必须覆盖该模块文件，
+    // 否则拆模块会让本用例静默失去校验对象（只剩「找不到色值」的假红）。
+    let mut tui_source = String::new();
+    for relative in [
+        "crates/pony-agent-core/src/bin/tui.rs",
+        "crates/pony-agent-core/src/bin/tui/theme.rs",
+    ] {
+        tui_source.push_str(
+            &std::fs::read_to_string(repo_root().join(relative))
+                .unwrap_or_else(|err| panic!("必须能读取 {relative}：{err}")),
+        );
+        tui_source.push('\n');
+    }
     let expect_rgb = |label: &str, (r, g, b): (u8, u8, u8)| {
         assert!(
             tui_source.contains(&format!("Color::Rgb({r}, {g}, {b})")),
