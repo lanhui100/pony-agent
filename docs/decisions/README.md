@@ -94,6 +94,7 @@
 - [0082 会话投影剔除宿主续轮提示：标题、轮次与 `/resume` 列表只认真实用户轮](0082-session-projection-excludes-host-continuation.md)
 - [0083 TUI 子会话导航：Ctrl+↑ 返回主会话、Ctrl+←/→ 切换队友、输入区身份徽标](0083-tui-sub-session-navigation-and-badge.md)
 - [0084 TUI header 指标双口径：`↑in` 当前上下文、`↓out` 与缓存命中率会话累计](0084-tui-metrics-dual-caliber-session-cumulative.md)
+- [0085 TUI 启动页品牌标改为官方轮廓覆盖率重采样 + 双色 alpha 合成](0085-tui-splash-logo-fidelity-and-antialiasing.md)
 - [0086 provider 上游失败分类补齐：边缘 5xx 与传输层标志纳入可重试](0086-provider-transport-and-edge-5xx-retry-classification.md)
 - [0087 CLI 自更新：`pony update` 走 GitHub Releases + 强制 sha256 + POSIX 原子替换](0087-cli-self-update.md)
 - [0088 TUI 用户消息上下各留 1 行页面底色间距](0088-tui-user-message-vertical-gap.md)
