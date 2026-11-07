@@ -58,6 +58,7 @@ pub mod secret_store;
 pub mod session;
 pub mod skill_body;
 pub mod sqlite_session;
+pub mod team_history;
 pub mod spill;
 pub mod subagent_runtime;
 pub mod sse_adapter;

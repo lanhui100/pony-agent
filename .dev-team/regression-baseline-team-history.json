@@ -1,0 +1,43 @@
+{
+  "wave": "team-history",
+  "baseline_commit": "63079008487ba0555edb37c3653e27f6ec0a3f31",
+  "commands": {
+    "slash_commands_acceptance": {
+      "exit_code": 0,
+      "passed": 36,
+      "failed": 0,
+      "log": "/tmp/regression-team-history-slash_commands_acceptance.log"
+    },
+    "w3_team_visibility_test": {
+      "exit_code": 0,
+      "passed": 31,
+      "failed": 0,
+      "log": "/tmp/regression-team-history-w3_team_visibility_test.log"
+    },
+    "tui_batch3_regression": {
+      "exit_code": 0,
+      "passed": 34,
+      "failed": 0,
+      "log": "/tmp/regression-team-history-tui_batch3_regression.log"
+    },
+    "team_task_order_contract": {
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "log": "/tmp/regression-team-history-team_task_order_contract.log"
+    },
+    "wave61_team_activation": {
+      "exit_code": 0,
+      "passed": 16,
+      "failed": 0,
+      "log": "/tmp/regression-team-history-wave61_team_activation.log"
+    }
+  },
+  "fmt_check": {
+    "exit_code": 1,
+    "classification": "PRE_EXISTING_BASELINE_DEFECT",
+    "diff_line_count": 212703,
+    "log": "/tmp/fmt-baseline-team-history.log",
+    "note": "全仓既有格式漂移；本波仅对变更文件做增量格式核验，不扩大范围修复"
+  }
+}
