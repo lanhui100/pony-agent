@@ -68,23 +68,26 @@ pub struct TeamHistoryCacheState {
     pub snapshot: TeamHistorySnapshot,
 }
 
+// 注意（2026-11-07 wave-release-unblock）：本模块除 `team_history_snapshot_from_events` 外仍是 `todo!()` 空桩，
+// 生产路径无调用点（已 grep 全仓确认），仅 `tests/team_history_acceptance.rs` 引用；为让 `-D warnings`
+// （CI/发版同口径）转绿，这里把未使用形参统一加 `_` 前缀——**纯告警修复，零语义改动**，实现仍归原 owner。
 /// Read-only schema probe: no DDL, no version backfill, no `ensure_schema`.
-pub fn team_history_schema_probe(db_path: &Path) -> bool {
+pub fn team_history_schema_probe(_db_path: &Path) -> bool {
     todo!("NotImplemented")
 }
 
 /// Full session discovery union: `sessions` table + distinct `turn_events.session_id`.
-pub fn team_history_discover_sessions(db_path: &Path) -> Vec<TeamHistorySession> {
+pub fn team_history_discover_sessions(_db_path: &Path) -> Vec<TeamHistorySession> {
     todo!("NotImplemented")
 }
 
 /// Production aggregate entry used by the async refresh job; opens `?mode=ro`.
-pub fn team_history_snapshot_from_db_path(db_path: &Path) -> TeamHistorySnapshot {
+pub fn team_history_snapshot_from_db_path(_db_path: &Path) -> TeamHistorySnapshot {
     todo!("NotImplemented")
 }
 
 /// Compatibility seam over an already-loaded store; not used to open SQLite.
-pub fn team_history_snapshot_from_store(store: &SessionStore) -> TeamHistorySnapshot {
+pub fn team_history_snapshot_from_store(_store: &SessionStore) -> TeamHistorySnapshot {
     todo!("NotImplemented")
 }
 
@@ -137,37 +140,37 @@ where
 
 /// 可注入 live 合并：live 参数由调用方显式获取，便于同 id 覆盖与并行测试隔离。
 pub fn merge_team_history(
-    history: &TeamHistorySnapshot,
-    live_tasks: &[TeamTaskItem],
-    live_agents: &[TeammateMember],
+    _history: &TeamHistorySnapshot,
+    _live_tasks: &[TeamTaskItem],
+    _live_agents: &[TeammateMember],
 ) -> TeamHistorySnapshot {
     todo!("NotImplemented")
 }
 
 pub fn team_history_tasks_for_tui(
-    snapshot: &TeamHistorySnapshot,
-    live: &[TeamTaskItem],
+    _snapshot: &TeamHistorySnapshot,
+    _live: &[TeamTaskItem],
 ) -> Vec<TeamHistoryTaskRow> {
     todo!("NotImplemented")
 }
 
 pub fn team_history_members_for_tui(
-    snapshot: &TeamHistorySnapshot,
-    live: &[TeammateMember],
+    _snapshot: &TeamHistorySnapshot,
+    _live: &[TeammateMember],
 ) -> Vec<TeamHistoryMemberRow> {
     todo!("NotImplemented")
 }
 
 pub fn team_history_cache_from_job_result(
-    result: Option<TeamHistorySnapshot>,
+    _result: Option<TeamHistorySnapshot>,
 ) -> TeamHistoryCacheState {
     todo!("NotImplemented")
 }
 
-pub fn team_history_task_action_allowed(row: &TeamHistoryTaskRow) -> bool {
+pub fn team_history_task_action_allowed(_row: &TeamHistoryTaskRow) -> bool {
     todo!("NotImplemented")
 }
 
-pub fn team_history_member_action_allowed(row: &TeamHistoryMemberRow) -> bool {
+pub fn team_history_member_action_allowed(_row: &TeamHistoryMemberRow) -> bool {
     todo!("NotImplemented")
 }

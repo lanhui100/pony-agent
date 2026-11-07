@@ -1,5 +1,7 @@
 use pony_agent_core::agent::team_history::*;
-use pony_agent_core::agent::orchestration::{TeamTaskItem, TeammateMember, TeammateStatus};
+// 2026-11-07 wave-release-unblock：本波团队模块仅 `team_history_snapshot_from_events` 已实现，
+// 该用例只用到 ToolResult/TeamTaskItem 的 serde 反序列化路径，上述三个类型未在文件内显式引用 ⇒
+// 删掉该未使用导入（纯告警修复，零断言改动；模块实现仍归原 owner）。
 use pony_agent_core::agent::session::SessionOverview;
 use pony_agent_core::agent::turn_event::TurnEvent;
 

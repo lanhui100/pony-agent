@@ -50,6 +50,9 @@ use pony_agent_core::agent::turn_flow::{TurnEventSink, TurnSpeedBasis};
 // 为什么是 `pub use`：本模块原先对外暴露 `tui::parse_semver_triple` / `tui::is_newer_semver`
 //（`tests/slash_commands_acceptance.rs` 的 T6 /update 契约仍在直接调用），重导出保持该可见性，
 // 内部继续使用同一实现（不产生两份 semver 逻辑）。
+#[allow(unused_imports)] // bin-as-module 固有产物：本文件被 tests/*.rs 以 #[path] mod tui; 引入，
+// 各 test crate 用到的符号不同（slash_commands_acceptance 用这两个，其它 crate 不用）⇒ 最小 allow，
+// 不放宽其它 lint（契约 C3：禁止 #![allow(warnings)] 全局放水）。
 pub use pony_agent_core::agent::updater::{is_newer_semver, parse_semver_triple};
 use ratatui::{
     backend::CrosstermBackend,

@@ -1216,8 +1216,6 @@ fn security_cross_session_upsert_must_not_overwrite_another_sessions_pending_ask
 /// requestId/version 泄露给无作用域宿主调用。
 #[test]
 fn security_unscoped_list_pending_must_not_leak_other_sessions_credentials() {
-    use pony_agent_core::agent::ask_persistence::AskPersistenceStore as _;
-
     let dir = TempDir::new("sec-list-leak");
     let db = dir.db();
     let store: Arc<dyn AskPersistenceStore> =
@@ -1336,7 +1334,6 @@ fn security_answer_without_session_scope_must_fail_closed() {
 /// L3-B ③：**持久化记录缺失时必须 fail-closed**，禁止回落内存镜像并返回 `Ok`（否则答案永不落盘）。
 #[test]
 fn security_missing_durable_record_must_not_fall_back_to_memory_mirror() {
-    use pony_agent_core::agent::ask_persistence::AskPersistenceStore as _;
     use pony_agent_core::agent::tool_runtime::PendingControlRequestState;
 
     let store: Arc<dyn AskPersistenceStore> = Arc::from(expect_ok(

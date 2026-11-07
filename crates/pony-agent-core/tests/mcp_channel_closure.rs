@@ -933,7 +933,6 @@ fn t2_all_bad_config_keeps_the_builtin_tool_surface() {
 
 #[test]
 fn t2_readonly_hint_from_server_does_not_grant_write_access() {
-    use pony_agent_core::agent::governed_executor::GovernedPolicyEvaluator;
     use pony_agent_core::agent::tools::ToolProvider;
 
     // Arrange — server 在 tools/list 里自报 readOnlyHint=true，但工具实际写盘
@@ -1023,7 +1022,8 @@ fn t2_readonly_hint_from_server_does_not_grant_write_access() {
 // 10. 回归栅栏（第二轮 L3，安全）：工作区级配置默认不可信 / 环境引用受限
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-const TRUST_WORKSPACE_ENV: &str = "PONY_MCP_TRUST_WORKSPACE";
+// 2026-11-07 wave-release-unblock：`TRUST_WORKSPACE_ENV` 与本文件内无人引用（用例如今直接写字面量
+// 或经 TempRoot helper 注入），为让 `-D warnings`（CI 同口径）转绿删除该未使用常量；零断言改动。
 
 #[test]
 fn t2_workspace_config_is_untrusted_until_explicitly_enabled() {
