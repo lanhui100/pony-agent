@@ -22,15 +22,6 @@ pub(super) const MAX_ALLOWED_CONSECUTIVE_TOOL_FAILURES_PER_TURN: usize = 16;
 pub(super) const MAX_CONSECUTIVE_TOOL_FAILURES_ENV: &str =
     "PONY_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN";
 
-/// 单轮墙钟预算（秒，P1-3）：超预算后不再继续 follow-up，而是在下一个工具调用边界
-/// 走「恢复式收尾」给出可读结论。默认 900s（15min）——真实长轮 trace `dab6a42e…`
-/// 跑了 942s / 71 次调用；预算是兜底，不是主止损手段（主止损见同工具连续失败）。
-pub(super) const DEFAULT_MAX_TURN_WALL_SECONDS: usize = 900;
-
-pub(super) const MAX_ALLOWED_TURN_WALL_SECONDS: usize = 7_200;
-
-pub(super) const MAX_TURN_WALL_SECONDS_ENV: &str = "PONY_AGENT_MAX_TURN_WALL_SECONDS";
-
 /// 同一工具「连续失败」上限（P1-3）：只看工具名，不看入参与错误码。
 ///
 /// 为什么需要第二道闸：既有指纹闸是 `(工具, 入参指纹, 错误码)` 三元组，模型只要换参数或
@@ -58,13 +49,6 @@ pub(super) const MAX_SAME_SIGNATURE_OCCURRENCES_ENV: &str =
 /// 的语义级变更，绝不能因为一个环境变量写错而被动开启。
 pub(super) const PARALLEL_TOOLS_ENV: &str = "PONY_AGENT_PARALLEL_TOOLS";
 
-pub(super) fn build_turn_wall_budget_error(limit_seconds: usize) -> String {
-    format!(
-        "本轮已运行超过 {limit_seconds} 秒（墙钟预算），已停止继续调用工具以避免长时间占用；\
-请基于已经获得的证据给出结论，并明确仍未完成的部分。如确需更长时限，可提高 PONY_AGENT_MAX_TURN_WALL_SECONDS。"
-    )
-}
-
 pub(super) fn build_same_tool_consecutive_failure_error(
     limit: usize,
     tool_name: &str,
@@ -81,17 +65,11 @@ pub(super) fn build_same_tool_consecutive_failure_error(
 // 既能让用例精确注入预算，又不会污染并行跑的其他用例（进程级覆写会让并发用例误触预算）。
 #[cfg(test)]
 thread_local! {
-    static TURN_WALL_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SAME_TOOL_FAILURE_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SAME_SIGNATURE_OCCURRENCES_OVERRIDE: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     /// `Some(bool)` ⇒ 用例显式覆写并发开关（`None` = 未覆写，回落 env）。
     static PARALLEL_TOOLS_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-pub(super) fn set_turn_wall_override(value: usize) -> usize {
-    TURN_WALL_OVERRIDE.with(|slot| slot.replace(value))
 }
 
 #[cfg(test)]
@@ -132,27 +110,6 @@ pub(super) fn parse_parallel_tools_enabled(raw: Option<&str>) -> bool {
         raw.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
         Some("1") | Some("true") | Some("on") | Some("yes")
     )
-}
-
-pub(super) fn max_turn_wall_seconds() -> usize {
-    #[cfg(test)]
-    {
-        let override_limit = TURN_WALL_OVERRIDE.with(|slot| slot.get());
-        if override_limit > 0 {
-            return override_limit;
-        }
-    }
-
-    static MAX_TURN_WALL_SECONDS: OnceLock<usize> = OnceLock::new();
-    *MAX_TURN_WALL_SECONDS.get_or_init(|| {
-        parse_max_turn_wall_seconds(std::env::var(MAX_TURN_WALL_SECONDS_ENV).ok().as_deref())
-    })
-}
-
-pub(super) fn parse_max_turn_wall_seconds(raw: Option<&str>) -> usize {
-    raw.and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| (1..=MAX_ALLOWED_TURN_WALL_SECONDS).contains(value))
-        .unwrap_or(DEFAULT_MAX_TURN_WALL_SECONDS)
 }
 
 pub(super) fn max_consecutive_same_tool_failures_per_turn() -> usize {

@@ -1253,36 +1253,7 @@ impl AgentRuntime {
             }
 
             if let Some(next_tool_call) = next_tool_calls.first().cloned() {
-                if turn_started_at.elapsed()
-                    >= std::time::Duration::from_secs(max_turn_wall_seconds() as u64)
-                {
-                    // P1-3：墙钟预算兜底——不再继续 follow-up，而是走恢复式收尾给出可读结论。
-                    let recovery = recover_tool_followup_completion_stream(
-                        sink,
-                        provider,
-                        planning_request,
-                        &mut accumulated_messages,
-                        &hop_records,
-                        &next_tool_call,
-                        response.assistant_message.as_ref(),
-                        &build_turn_wall_budget_error(max_turn_wall_seconds()),
-                        &context_observation,
-                        turn_id,
-                        input.session_id.clone(),
-                        &first_token_latency,
-                        turn_started_at,
-                    );
-                    provider_call_records.push(recovery.provider_call_record);
-                    accumulated_token_usage = merge_token_usage(
-                        accumulated_token_usage,
-                        recovery.response.token_usage.as_ref(),
-                    );
-                    accumulated_fallback_reason = merge_fallback_reason(
-                        accumulated_fallback_reason,
-                        recovery.response.fallback_reason.clone(),
-                    );
-                    response = recovery.response;
-                } else if completed_hops >= max_tool_followups_per_turn() {
+                if completed_hops >= max_tool_followups_per_turn() {
                     let recovery = recover_tool_followup_completion_stream(
                         sink,
                         provider,

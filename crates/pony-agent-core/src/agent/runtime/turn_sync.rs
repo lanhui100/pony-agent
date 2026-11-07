@@ -25,7 +25,6 @@ impl AgentRuntime {
         tool_calls: Vec<ToolCall>,
         initial_model_hook_trace_records: Vec<HookTraceRecord>,
         first_token_latency_ms: Option<u64>,
-        turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
         governed_context: Option<&DispatchContext>,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
@@ -495,31 +494,7 @@ impl AgentRuntime {
             }
 
             if let Some(next_tool_call) = next_tool_calls.first().cloned() {
-                if turn_started_at.elapsed()
-                    >= std::time::Duration::from_secs(max_turn_wall_seconds() as u64)
-                {
-                    // P1-3：墙钟预算兜底——不硬失败，走恢复式收尾给出可读结论。
-                    let recovery = recover_tool_followup_completion(
-                        provider,
-                        planning_request,
-                        &mut accumulated_messages,
-                        &hop_records,
-                        &next_tool_call,
-                        response.assistant_message.as_ref(),
-                        &build_turn_wall_budget_error(max_turn_wall_seconds()),
-                        &context_observation,
-                    );
-                    provider_call_records.push(recovery.provider_call_record);
-                    accumulated_token_usage = merge_token_usage(
-                        accumulated_token_usage,
-                        recovery.response.token_usage.as_ref(),
-                    );
-                    accumulated_fallback_reason = merge_fallback_reason(
-                        accumulated_fallback_reason,
-                        recovery.response.fallback_reason.clone(),
-                    );
-                    response = recovery.response;
-                } else if completed_hops >= max_tool_followups_per_turn() {
+                if completed_hops >= max_tool_followups_per_turn() {
                     let recovery = recover_tool_followup_completion(
                         provider,
                         planning_request,
@@ -965,7 +940,6 @@ impl AgentRuntime {
                 tool_calls,
                 planning_hook_trace_records.clone(),
                 initial_visible_first_token_latency_ms,
-                &turn_started_at,
                 &mut provider_call_records,
                 governed_context.as_ref(),
             ) {

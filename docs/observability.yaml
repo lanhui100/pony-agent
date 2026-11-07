@@ -289,8 +289,8 @@ note: >-
       无新增日志出口、无端点/依赖变更）。新增键均为「有值才输出」，缺失不占位。
   (3) 非遥测变更（仅登记，不新增观测面）：job 系列工具参数别名归一（`job_id`↔`jobId`、
       `timeout_ms`↔`timeoutMs`）、环境事实补 `shell` 与平台命令语法口径、
-      单轮墙钟预算（`PONY_AGENT_MAX_TURN_WALL_SECONDS`，默认 900s）与同工具连续失败闸
-      （`PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES`，默认 4）。
+      单轮墙钟预算（`PONY_AGENT_MAX_TURN_WALL_SECONDS`，默认 900s，**已于 2026-11-07 删除，见下方 ADR 0091 段**）
+      与同工具连续失败闸（`PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES`，默认 4）。
 
   【2026-11-04 归属登记｜wave-64 停止终态呈现（UI 交互 + 取消归类）】
   (1) 四维归属结论：**不变**。本波不改对外接口/端点/环境变量/依赖，不新增异常码，
@@ -656,3 +656,17 @@ note: >-
   (5) 声明批准记录：本段归属登记随 wave-67 提交一并批准——三路对抗审查（L3-A PASS / L3-B FAIL→修 / L3-P FAIL→修）与独立 Join 汇总
       （PASS，4 BLOCKING 全 CLOSED）之后落定，收据见 `.dev-team/review-join-cli-update.json`；NFR 例外登记见
       `.dev-team/nfr-baseline-wave67.json` 的 `download_budget`。 [decl-change-approved]
+  【ADR 0091 归属登记（2026-11-07）｜删除单轮累计 900s 墙钟，止损下沉能力层】
+  一行结论：**本次只做减法（删除一个纯本地计时闸与其 env），不新增接口、出网、后台任务或观测面**，
+  故四维归属维持不变：tracing applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`，
+  无新增键、无删除键）；issues / metrics / logs 仍结构性 N-A（理由同本文档维度声明：桌面与终端进程
+  随用户启停、无常驻监听地址、无 Service，Prometheus pull 与节点侧日志采集前提不成立）。
+  (1) 行为变更（非遥测，仅登记）：`agent/runtime/limits.rs` 的 `max_turn_wall_seconds()`、
+      `build_turn_wall_budget_error()` 与 `PONY_AGENT_MAX_TURN_WALL_SECONDS` 环境变量全部删除；
+      `turn_sync.rs` / `turn_stream.rs` 的「墙钟 → 恢复式收尾」分支退化为单分支 follow-up 限额判定。
+      恢复式收尾本身保留，仍可经既有 `llm.request.mode = tool_recovery` 检索（理由集合少了「墙钟」一项）。
+  (2) 卡死兜底的责任归属（删除后）：LLM 读空闲 180s（无总 deadline）；工具层 `Run` 默认 120s / 上限
+      600s（到期 promote 后台 job）、通用工具 10s、web 15s、MCP connect 20s / request 5s；
+      循环层 hops 1024 / followups 500 / 同指纹 3 次 / 同工具连续失败 4 次 / 同签名计数 2 次。
+  (3) 验收（机械收口）：`cargo check -p pony-agent-core --all-targets` 0 error；
+      `cargo test -p pony-agent-core --lib` 全绿；`rg -n "turn_wall|TURN_WALL|墙钟预算" crates` 为 0 命中。

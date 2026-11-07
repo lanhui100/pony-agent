@@ -2907,7 +2907,7 @@ pub enum LlmRequestMode {
     Initial,
     /// 工具执行结果续跑（正常 follow-up）。
     ToolFollowup,
-    /// 拦截式收尾（重复调用 / follow-up 超限 / 墙钟预算耗尽）后的恢复请求。
+    /// 拦截式收尾（重复调用 / follow-up 超限 / 同工具连续失败）后的恢复请求。
     ToolRecovery,
 }
 

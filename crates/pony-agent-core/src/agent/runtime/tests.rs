@@ -613,7 +613,7 @@ impl crate::agent::tools::ToolExecutor for ErrorToolExecutor {
 struct MockHttpResponse {
     content_type: &'static str,
     body: String,
-    /// 响应前的确定性延迟（毫秒）——用于锁定「墙钟预算」类时序行为；默认 0。
+    /// 响应前的确定性延迟（毫秒）——用于锁定时序敏感的用例；默认 0。
     delay_ms: u64,
 }
 
@@ -7797,22 +7797,9 @@ fn job_args_accept_both_snake_and_camel_spellings() {
     assert_eq!(start.timeout_ms, Some(1000));
 }
 
-/// P1-3：两个新闸门的环境变量解析（非法值一律回退默认，禁止静默取 0 造成「永不触发」）。
+/// 同工具连续失败闸的环境变量解析（非法值一律回退默认，禁止静默取 0 造成「永不触发」）。
 #[test]
-fn turn_budget_and_same_tool_failure_limits_parse_env() {
-    assert_eq!(parse_max_turn_wall_seconds(Some("600")), 600);
-    assert_eq!(
-        parse_max_turn_wall_seconds(Some("0")),
-        DEFAULT_MAX_TURN_WALL_SECONDS
-    );
-    assert_eq!(
-        parse_max_turn_wall_seconds(Some("999999")),
-        DEFAULT_MAX_TURN_WALL_SECONDS
-    );
-    assert_eq!(
-        parse_max_turn_wall_seconds(Some("abc")),
-        DEFAULT_MAX_TURN_WALL_SECONDS
-    );
+fn same_tool_failure_limit_parses_env() {
     assert_eq!(parse_max_consecutive_same_tool_failures(Some("5")), 5);
     assert_eq!(
         parse_max_consecutive_same_tool_failures(Some("-1")),
@@ -7822,24 +7809,6 @@ fn turn_budget_and_same_tool_failure_limits_parse_env() {
         parse_max_consecutive_same_tool_failures(None),
         DEFAULT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES
     );
-}
-
-struct TurnWallOverrideGuard {
-    previous: usize,
-}
-
-impl TurnWallOverrideGuard {
-    fn set(seconds: usize) -> Self {
-        Self {
-            previous: set_turn_wall_override(seconds),
-        }
-    }
-}
-
-impl Drop for TurnWallOverrideGuard {
-    fn drop(&mut self) {
-        set_turn_wall_override(self.previous);
-    }
 }
 
 struct SameToolFailureOverrideGuard {
@@ -7946,110 +7915,6 @@ fn same_tool_consecutive_failures_stop_turn_even_with_different_arguments() {
             || result.assistant_message.contains("连续失败"),
         "错误文案必须指明是同一工具连续失败：{}",
         result.assistant_message
-    );
-}
-
-/// P1-3：墙钟预算耗尽后不再 follow-up，而是走恢复式收尾（保留完整上下文）。
-#[test]
-fn turn_wall_budget_wraps_up_with_recovery_answer() {
-    let _budget = TurnWallOverrideGuard::set(1);
-    let final_text = "预算用尽，基于已获得的证据收尾。";
-    let mut slow_first = sse_response(&[json!({
-        "choices": [
-            {
-                "delta": {
-                    "reasoning_content": "先读配置。",
-                    "tool_calls": [
-                        {
-                            "index": 0,
-                            "id": "call_slow",
-                            "type": "function",
-                            "function": {
-                                "name": "workspace_read_file",
-                                "arguments": "{\"path\":\"tauri.conf.json\"}"
-                            }
-                        }
-                    ]
-                }
-            }
-        ]
-    })]);
-    slow_first.delay_ms = 1200;
-
-    let server = MockHttpServer::start(vec![
-        slow_first,
-        sse_response(&[json!({
-            "choices": [
-                {
-                    "delta": {
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": "call_after_budget",
-                                "type": "function",
-                                "function": {
-                                    "name": "workspace_read_file",
-                                    "arguments": "{\"path\":\"package.json\"}"
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        })]),
-        sse_response(&[json!({
-            "choices": [{ "delta": { "content": final_text } }]
-        })]),
-    ]);
-    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
-    let sink = RecordingTurnEventSink::new();
-
-    runtime.start_turn_stream(
-        &sink,
-        "turn-wall-budget".to_string(),
-        TurnInput {
-            message: "读取两个配置文件".to_string(),
-            display_message: None,
-            provider_id: None,
-            model_id: None,
-            reasoning_effort: None,
-            workspace_mode: None,
-            tool_authorization_mode: None,
-            session_id: Some("stream-turn-wall-budget".to_string()),
-            node_id: None,
-            history: Vec::new(),
-            images: Vec::new(),
-            workspace_id: None,
-            plan_execution_approval: None,
-        },
-    );
-
-    let requests = server.finish();
-    assert_eq!(
-        requests.len(),
-        3,
-        "决策 + 一次 follow-up + 预算恢复请求（不得继续第二次 follow-up）"
-    );
-    let recovery: Value = serde_json::from_str(&requests[2]).expect("recovery request json");
-    let recovery_messages = recovery
-        .get("messages")
-        .and_then(Value::as_array)
-        .expect("recovery messages");
-    assert!(
-        recovery_messages.iter().any(|message| {
-            message
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .contains("墙钟预算")
-        }),
-        "收尾请求必须携带墙钟预算原因（否则模型不知道为何停止）"
-    );
-    let events = sink.events.borrow();
-    assert!(
-        events.iter().any(|(name, payload)| name == "turn:delta"
-            && payload.text.as_deref() == Some(final_text)),
-        "预算收尾答案必须送达 UI"
     );
 }
 

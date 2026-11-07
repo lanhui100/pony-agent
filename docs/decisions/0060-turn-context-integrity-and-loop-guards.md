@@ -25,13 +25,13 @@ Status: implemented
 2. **请求形状进 span**：新增 `LlmRequestMode`（`initial` / `tool_followup` / `tool_recovery`）与 `llm_request_shape()`（消息条数、首条是否 system，native transcript 优先、回退分层 input），落 `llm.request.mode` / `llm.request.messages` / `llm.request.system_prefix` 三键。既有 `provider_decision*` / `provider_followup*` 公开签名保留为兼容包装（转调 `*_with_mode`），验收用例零改动。
 3. **job 参数双拼法**：模型来源的 tool call 在 schema 预检前把 snake_case 别名改写成 schema 口径（仅目标键缺席时），serde 侧同时加 `alias`，host/direct 调用同样吃得住；schema 语义不变。
 4. **环境事实补口径**：`Environment:` 行新增 `shell=` 与平台命令语法口径（Windows 明确 dir/where/type/findstr、禁用 ls/cat/grep 与 `VAR=value cmd`），对应 trace 里 exit 9009 的重复失败。
-5. **止损四道**：既有指纹闸（3 次同指纹）保留；新增「同一工具连续失败」闸（默认 4 次，忽略入参与错误码）；新增单轮墙钟预算（默认 900s），超预算走恢复式收尾给出可读结论而非硬失败；**（2026-11-07 增补）同签名重复闸从 `BTreeSet` 判重改为计数闸**——同一 turn 内「同一工具 + 同一归一化参数」默认允许 2 次、第 3 次才熔断，写类工具成功执行后清空其它签名计数，提示文案改为「完全相同」的事实陈述；阈值 `PONY_AGENT_MAX_SAME_TOOL_SIGNATURE_OCCURRENCES_PER_TURN`（1~8，非法回退默认）。背景与备选见
+5. **止损四道**：既有指纹闸（3 次同指纹）保留；新增「同一工具连续失败」闸（默认 4 次，忽略入参与错误码）；新增单轮墙钟预算（默认 900s），超预算走恢复式收尾给出可读结论而非硬失败——**（2026-11-07 接替）该墙钟已删除，止损改为全部下沉能力层，见 [ADR 0091](0091-turn-wall-clock-removal.md)**；**（2026-11-07 增补）同签名重复闸从 `BTreeSet` 判重改为计数闸**——同一 turn 内「同一工具 + 同一归一化参数」默认允许 2 次、第 3 次才熔断，写类工具成功执行后清空其它签名计数，提示文案改为「完全相同」的事实陈述；阈值 `PONY_AGENT_MAX_SAME_TOOL_SIGNATURE_OCCURRENCES_PER_TURN`（1~8，非法回退默认）。背景与备选见
    [`.agents/notes/implemented/bug-fix/2026-11-07-duplicate-tool-call-gate-retry-false-positive.md`](../../.agents/notes/implemented/bug-fix/2026-11-07-duplicate-tool-call-gate-retry-false-positive.md)。
-6. **新增三个环境变量**：`PONY_AGENT_MAX_TURN_WALL_SECONDS`、`PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES`、`PONY_AGENT_MAX_SAME_TOOL_SIGNATURE_OCCURRENCES_PER_TURN`（2026-11-07 增补，见决策 5）；非法/越界值一律回退默认，禁止静默取 0 导致闸门失效。
+6. **环境变量**：`PONY_AGENT_MAX_CONSECUTIVE_SAME_TOOL_FAILURES`、`PONY_AGENT_MAX_SAME_TOOL_SIGNATURE_OCCURRENCES_PER_TURN`（2026-11-07 增补，见决策 5）；`PONY_AGENT_MAX_TURN_WALL_SECONDS` **已随 [ADR 0091](0091-turn-wall-clock-removal.md) 删除并失效**（墙钟本身不再存在，不保留别名）；非法/越界值一律回退默认，禁止静默取 0 导致闸门失效。
 
 ## 影响
 
-- **用户可见行为**：末轮答案恢复完整上下文与系统约束；Windows 会话中工具参数/命令语法失败显著减少；单轮超过墙钟预算或同一工具连续失败时会**提前收尾并给出可读结论**（有意的行为变化，而非静默截断）。
+- **用户可见行为**：末轮答案恢复完整上下文与系统约束；Windows 会话中工具参数/命令语法失败显著减少；单轮 follow-up 步数用尽或同一工具连续失败时会**提前收尾并给出可读结论**（有意的行为变化，而非静默截断）。单轮累计墙钟已按 [ADR 0091](0091-turn-wall-clock-removal.md) 删除——长任务不再被时间截断，卡死风险由 LLM 读空闲（180s）与工具 deadline 各自兜底。
 - **遥测**：`llm.chat` 新增三条键（有值才输出，不做空占位）；归属仍在 tracing 唯一落点 `agent/otel/mod.rs`，`docs/observability.yaml` 已登记，`check-declaration.sh --project` PASS。
 - **兼容性**：`provider_*` 旧签名保留，`crates/pony-agent-core/tests/` 内既有验收用例未改动即通过。
 - **验收**：`cargo test --lib` 1209 passed；新增 6 例真实断言（请求形状纯函数、模式/属性单源、job 别名归一、双拼法解析、同工具止损、墙钟收尾含「预算原因随消息下发 + 答案送达 UI」）。证伪：把恢复逻辑退回旧实现后，新用例以「恢复请求 7 条消息塌成 5 条」失败，与线上 18896→2311 同因。
