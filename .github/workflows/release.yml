@@ -285,6 +285,11 @@ jobs:
         with:
           workspaces: . -> target
 
+      # CI verify 作业同款依赖（.github/workflows/ci.yml:84）：keyring 的 linux 后端经 libdbus-sys
+      # 需要 dbus-1.pc，native-tls 需要 openssl 头文件；缺失时 cargo build 会直接 panic（v0.1.184 首跑实证）。
+      - name: Install Linux build deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libssl-dev pkg-config
+
       - name: Build pony CLI binary (linux-x86_64)
         run: cargo build --release --bin pony
 
