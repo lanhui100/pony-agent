@@ -5,8 +5,13 @@ mod store;
 #[cfg(test)]
 mod tests;
 mod types;
+pub mod usage;
 pub mod workspace_snapshot;
 
+pub use usage::{
+    last_context_input_tokens, session_usage_totals, turn_usage_totals,
+    turn_usage_totals_from_snapshot, SessionUsageLedger, SessionUsageTotals,
+};
 pub use workspace_snapshot::WorkspaceSnapshotManager;
 
 pub use backend::{

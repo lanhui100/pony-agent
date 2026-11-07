@@ -24,7 +24,7 @@ use pony_agent_core::agent::control_plane::{
 };
 use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalData};
 // W3：Team 可见性数据源（全部来自真实运行时，不造数据）。
-use pony_agent_core::agent::metrics_snapshot::TurnMetricsSnapshot;
+use pony_agent_core::agent::metrics_snapshot::{context_ratio_for_window, TurnMetricsSnapshot};
 use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
 // 显示偏好（/settings 与 Ctrl+O 的唯一真值）：独立文件持久化，与桌面端 settings.json 契约解耦。
 use pony_agent_core::agent::tui_preferences::{TuiPreferences, TuiPreferencesStore};
@@ -38,7 +38,10 @@ use pony_agent_core::agent::runtime::{
     compact_outcome_message, AgentRuntimeBuilder, ManualCompactionOutcome, TurnInput,
     TurnStreamEvent,
 };
-use pony_agent_core::agent::session::{is_main_session_id, new_session_id, SessionStore};
+use pony_agent_core::agent::session::{
+    is_main_session_id, last_context_input_tokens, new_session_id, session_usage_totals,
+    turn_usage_totals_from_snapshot, SessionStore, SessionUsageLedger,
+};
 use pony_agent_core::agent::stop_escalation::StopReason;
 // wave-60 §C8：双击 Esc 的纯判定状态机（与桌面端 `src/lib/runtime/stop-sequence.ts` 同判据）。
 use pony_agent_core::agent::stop_sequence::{StopIdentity, StopSequenceState, STOP_SEQUENCE_MS};
@@ -1036,8 +1039,8 @@ fn key_class_label(key: &crossterm::event::KeyEvent) -> String {
 /// `/agents` `/tasks` `/plan` `/models` `/thinking` `/settings` `/provider` `/help` `/update`。
 pub fn is_panel_command(command: &str) -> bool {
     const PANEL_COMMANDS: &[&str] = &[
-        "/agents", "/tasks", "/plan", "/models", "/thinking", "/settings", "/provider", "/help",
-        "/update",
+        "/agents", "/teams", "/tasks", "/plan", "/models", "/thinking", "/settings", "/provider",
+        "/help", "/update",
     ];
     let trimmed = command.trim();
     PANEL_COMMANDS
@@ -1408,6 +1411,90 @@ pub fn agent_roster_state_from_runtime() -> AgentRosterState {
     AgentRosterState::new(entries)
 }
 
+/// W3b：子会话内 Ctrl+↑/←/→ 的裁决（纯函数，可单测）。
+///
+/// 只认 **Ctrl + 方向键**：裸方向键是光标移动、Ctrl+Char 是编辑动作、Alt+Up 等一律
+/// `None` —— 调用方据此**不消费**这些键（主会话里 Ctrl+←/→ 仍是原光标行为）。
+pub fn sub_session_shortcut(key: &crossterm::event::KeyEvent) -> Option<SubSessionShortcut> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Up => Some(SubSessionShortcut::ReturnToMain),
+        KeyCode::Right => Some(SubSessionShortcut::Switch(SubSessionStep::Next)),
+        KeyCode::Left => Some(SubSessionShortcut::Switch(SubSessionStep::Prev)),
+        _ => None,
+    }
+}
+
+/// W3b：名册快照 → 可切换的子会话候选（顺序与输入一致，不重排、不去重）。
+///
+/// 剔除三类条目：`lead`（即宿主主会话，无需进入）、尚无会话（未成功运行过）、
+/// 会话不可由宿主存储加载（hydrate 只会得到空会话）。`loadable` 由调用方注入真实判据。
+pub fn sub_session_candidates(
+    entries: &[AgentRosterEntry],
+    loadable: impl Fn(&str) -> bool,
+) -> Vec<SubSessionCandidate> {
+    entries
+        .iter()
+        .filter(|entry| entry.target != "lead")
+        .filter_map(|entry| {
+            let session_id = entry.session_id.as_deref()?;
+            if !loadable(session_id) {
+                return None;
+            }
+            Some(SubSessionCandidate {
+                target: entry.target.clone(),
+                name: entry.name.clone(),
+                role: entry.role.clone(),
+                session_id: session_id.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// W3b：在候选序列里按方向取下一个目标（命中则循环，未命中/None 取首/末）。
+pub fn step_sub_session_target<'a>(
+    candidates: &'a [SubSessionCandidate],
+    current: Option<&str>,
+    step: SubSessionStep,
+) -> Option<&'a SubSessionCandidate> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let position =
+        current.and_then(|target| candidates.iter().position(|item| item.target == target));
+    match (position, step) {
+        (Some(index), SubSessionStep::Next) => Some(&candidates[(index + 1) % candidates.len()]),
+        (Some(index), SubSessionStep::Prev) => {
+            let last = candidates.len() - 1;
+            Some(&candidates[(index + last) % candidates.len()])
+        }
+        (None, SubSessionStep::Next) => candidates.first(),
+        (None, SubSessionStep::Prev) => candidates.last(),
+    }
+}
+
+/// W3b：子会话身份徽标文案（**唯一真值**；渲染层只负责样式与截断）。
+pub fn sub_session_badge_text(context: &SubSessionContext) -> String {
+    let seq = match context.position {
+        Some((index, total)) => format!(" {index}/{total}"),
+        None => String::new(),
+    };
+    format!(
+        "子智能体 · {}（{}）{} · Ctrl+↑ 返回主会话 · Ctrl+←/→ 切换",
+        context.name, context.role, seq
+    )
+}
+
+/// W3b：`/agents` 及其别名 `/teams` 的判定（`trim()` 后大小写不敏感）。
+pub fn is_agent_roster_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    ["/agents", "/teams"]
+        .iter()
+        .any(|cmd| cmd.eq_ignore_ascii_case(trimmed))
+}
+
 /// 真实 goal 存储 → TUI goal 投影。phase 用现有字符串契约，未知值降级为 `Active`。
 pub fn tui_goal_from_goal(goal: &GoalData) -> TuiGoal {
     TuiGoal {
@@ -1629,7 +1716,8 @@ pub enum InteractionMode {
     AskUserQuestion,
     PlanMode,
     TaskBoard,
-    /// W3：`/agents` Team 角色与状态花名册（↑↓ 选择 · Enter 进入队友子会话 · r 返回主会话 · Esc 关闭）。
+    /// W3：`/agents`（别名 `/teams`）Team 角色与状态花名册
+    /// （↑↓ 选择 · Enter 进入队友子会话 · Ctrl+↑/r 返回主会话 · Esc 关闭）。
     AgentRoster,
     /// 本轮：`/settings` 显示偏好面板（↑↓ 选择 · Space/Enter 切换 · Esc 关闭）。
     Settings,
@@ -1644,6 +1732,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
     ("/tasks", "切换/查看 Team 任务看板（Ctrl+T）"),
     ("/agents", "查看 Team 角色与状态"),
+    ("/teams", "查看 Team 角色与状态（同 /agents）"),
     ("/clear", "清空当前消息上下文"),
     ("/compact", "压缩当前会话上下文"),
     ("/help", "查看所有支持的快捷指令"),
@@ -2667,6 +2756,16 @@ pub struct TuiState {
     /// `Some` ⇒ 指标行完全以快照字段渲染（I6，不再读 legacy 计量字段）；
     /// `None` ⇒ 旧事件 / 历史回放路径，回退既有渲染（I7）。新轮开始与会话复位时清空。
     pub live_metrics: Option<TurnMetricsSnapshot>,
+    /// P1：`live_metrics` 是否为**上一轮**末值（轮首保留、新快照未到）。
+    ///
+    /// 轮次起点只把旧快照标 stale，不清空 —— 清空会让整行指标在轮首瞬间消失（抖动）。
+    /// 渲染期据此追加「（上轮）」标注，避免把旧数字当成当前轮读数。
+    pub live_metrics_stale: bool,
+    /// P0：**会话**用量台账（`↓out` 与会话缓存命中率的唯一来源）。
+    ///
+    /// per-call 快照只描述末次调用，不得直接冒充会话累计；台账把「已结算轮次 Σ + 本轮 Σ」
+    /// 合成为会话累计，`/resume` 时用历史真值 `restore`（与桌面端会话累计同口径）。
+    pub session_usage: SessionUsageLedger,
     /// wave-39 R2 / wave-41 S1：最近一次调用的上下文占用 token，用于上下文百分比分子（对齐 ADR 0035 S1）。
     pub last_context_tokens: u64,
     /// wave-39 R2：当前模型上下文窗口；`0` = 未知（指标行渲染 `—`）。
@@ -2754,6 +2853,9 @@ pub struct TuiState {
     pub agent_roster_state: Option<AgentRosterState>,
     /// W3：进入 teammate 子会话前保存的主会话 id（`r` 返回用；`None` = 当前不在队友会话）。
     pub return_session_id: Option<String>,
+    /// W3b：当前所处的子智能体会话身份（`None` = **主会话**；`Some` = 输入框下方显示身份徽标）。
+    /// 与 `return_session_id` 同属会话作用域，`reset_session_scope` 一并清空。
+    pub sub_session: Option<SubSessionContext>,
     /// 初始化页品牌标：图形协议可用时以真实位图替换字符画（`None` = 字符画路径）。
     pub splash_image: Option<SplashImage>,
     /// 契约（流式期输入）：流式期间提交的消息排队快照（FIFO）；`Vec::new()` = 空队列。
@@ -2800,6 +2902,8 @@ impl Default for TuiState {
             total_cache_hit_tokens: 0,
             turn_cache_hit_tokens: 0,
             live_metrics: None,
+            live_metrics_stale: false,
+            session_usage: SessionUsageLedger::default(),
             last_context_tokens: 0,
             context_window_tokens: 0,
             turn_usage: None,
@@ -2852,6 +2956,7 @@ impl Default for TuiState {
             streaming_turn_id: None,
             agent_roster_state: None,
             return_session_id: None,
+            sub_session: None,
             splash_image: None,
             queued_user_messages: Vec::new(),
             queue_notice: None,
@@ -2963,8 +3068,11 @@ impl TuiState {
         self.total_output_tokens = 0;
         self.total_cache_hit_tokens = 0;
         self.turn_cache_hit_tokens = 0;
-        // P0：会话作用域复位 ⇒ 指标快照同属会话瞬时态，必须清空（否则跨会话残留旧轮数字）。
+        // P0：会话作用域复位 ⇒ 指标快照与会话台账同属会话瞬时态，必须清空
+        //（否则跨会话残留旧轮/旧会话数字）。
         self.live_metrics = None;
+        self.live_metrics_stale = false;
+        self.session_usage.reset();
         self.last_context_tokens = 0;
         self.context_window_tokens = 0;
         self.plan_state = None;
@@ -2996,6 +3104,7 @@ impl TuiState {
         //（调用方若需要保留 return_session_id，必须在 reset 之后再写入）。
         self.agent_roster_state = None;
         self.return_session_id = None;
+        self.sub_session = None;
         // 会话作用域复位 ⇒ 布局缓存必须失效（/clear 与 /resume 共用本方法）。
         self.invalidate_render_cache();
     }
@@ -3163,8 +3272,11 @@ impl TuiState {
     pub fn begin_turn_usage(&mut self) {
         self.turn_usage = None;
         self.turn_cache_hit_tokens = 0;
-        // P0：新轮开始 ⇒ 上一轮快照必须失效，否则指标行会继续显示旧轮数字。
-        self.live_metrics = None;
+        // P0/P1：新轮开始**不清空**快照，只标 stale —— 轮首整行指标消失会造成视觉抖动，
+        // 且上一轮末值是有信息量的参考；会话台账在此结算上一轮（`↓out` 继续累计）。
+        // 新快照到达（`apply_live_metrics`）即复位 stale。
+        self.session_usage.begin_turn();
+        self.live_metrics_stale = true;
         // 契约 C4a：`turn:started` 是本轮起点（用户提交 / Ask 回填 / 审批恢复 / goal 续轮都经此），
         // 上一轮的思考块在此封口，本轮思考增量必须新起一块，不得续写进去。
         self.reasoning_turn_closed = true;
@@ -3174,7 +3286,11 @@ impl TuiState {
     ///
     /// 快照是唯一来源：本方法**不**做任何二次换算（I6），只保存；渲染期按字段直出。
     pub fn apply_live_metrics(&mut self, metrics: TurnMetricsSnapshot) {
+        // P0：会话台账吸收本轮的**轮级 Σ**（幂等覆盖，多跳不重复累加）。
+        self.session_usage
+            .set_turn(turn_usage_totals_from_snapshot(&metrics));
         self.live_metrics = Some(metrics);
+        self.live_metrics_stale = false;
     }
 
     /// wave-39 R3 / wave-41 S1：输入 token 与上下文按单次调用口径（ADR 0035 S1），
@@ -6125,31 +6241,88 @@ fn goal_banner_parts(goal: &TuiGoal) -> (String, String) {
     )
 }
 
-/// 数值指标段（快照优先 / legacy 回落），只产出 `↑in ↓out`、缓存、上下文、速度、首 token。
+/// 数值指标段（**双口径**）：`↑in` = 当前上下文输入，`↓out` / 缓存 = 会话累计。
+///
+/// 口径矩阵（P0，与桌面端 `HomeSidebar.vue` 同源）：
+/// - `↑in`：**当前上下文**（ADR 0035 S1：最近一次调用的上下文输入，禁止跨轮累加）；
+/// - `↓out`：**会话累计** Σ per-call 输出（`SessionUsageLedger`，缺失时回退 legacy 累计字段）；
+/// - `缓存 x%`：**会话累计**命中率 = Σ命中 / Σ上下文输入（`SessionUsageTotals::cache_hit_ratio`，
+///   fail-closed；无会话台账时回退快照的单次调用比 / legacy 单轮比）；
+/// - `上下文 x%`：当前上下文 / 窗口；快照缺窗口时用调用方解析出的注册表真实窗口回退
+///   （比例仍由 core 的 `context_ratio_for_window` 算出，TUI 不自写公式）；
+/// - `t/s`、`首token`：per-call / 轮级快照段（设计如此，不参与会话累计）。
 ///
 /// 交互反馈（排队、一次性提示）**不属于**本函数：它们由输入框下方的状态行
 /// [`status_line`] 承担。header 右侧渲染本簇，见 [`header_metrics_text`]。
 fn metrics_segments(state: &TuiState) -> Vec<String> {
     let mut segments: Vec<String> = Vec::new();
-    // P0：快照为唯一来源。`live_metrics` 为 `Some` ⇒ **只**渲染快照段，与 legacy 计量字段
-    // 完全隔离（两者不得混排）；比率一律直取快照字段，此处**禁止**任何 clamp（I6）。
-    if let Some(metrics) = state.live_metrics.as_ref() {
-        let mut token_parts: Vec<String> = Vec::new();
-        if let Some(context_input) = metrics.context_input_tokens {
-            token_parts.push(format!("↑{}", fmt_token_count(context_input)));
-        }
-        if let Some(output) = metrics.output_tokens {
-            token_parts.push(format!("↓{}", fmt_token_count(output)));
-        }
-        if !token_parts.is_empty() {
-            segments.push(token_parts.join(" "));
-        }
-        if let Some(ratio) = metrics.cache_hit_ratio {
-            segments.push(format!("缓存 {:.0}%", (ratio * 100.0).round()));
-        }
-        if let Some(ratio) = metrics.context_ratio {
-            segments.push(format!("上下文 {:.0}%", (ratio * 100.0).round()));
-        }
+    let snapshot = state.live_metrics.as_ref();
+    let session = state.session_usage.totals();
+
+    // ---- ↑in：当前上下文输入（快照优先；无快照回退 legacy 当前输入）----
+    let current_context = snapshot
+        .and_then(|metrics| metrics.context_input_tokens)
+        .unwrap_or(state.total_input_tokens);
+
+    // ---- ↓out：会话累计输出（台账优先 → legacy 会话累计 → 本轮 Σ）----
+    let session_output = if !session.is_empty() {
+        session.output_tokens
+    } else if state.total_output_tokens > 0 {
+        state.total_output_tokens
+    } else {
+        snapshot.map_or(0, |metrics| metrics.turn_output_tokens)
+    };
+
+    // 有值才显示（v3 R11：无值不显示、不出占位符）；↑/↓ 成对渲染保持既有版式。
+    if current_context > 0 || session_output > 0 {
+        segments.push(format!(
+            "↑{} ↓{}",
+            fmt_token_count(current_context),
+            fmt_token_count(session_output)
+        ));
+    }
+
+    // ---- 缓存命中率：会话累计优先（Σ命中 / Σ上下文输入，fail-closed）----
+    let cache_ratio = session.cache_hit_ratio().or_else(|| {
+        snapshot
+            .and_then(|metrics| metrics.cache_hit_ratio)
+            .or_else(|| {
+                // legacy 字段：单轮命中 / 当前上下文输入（旧语义；越界 clamp 保留以兼容旧事件）。
+                (state.total_input_tokens > 0).then(|| {
+                    let cache_hits = if state.turn_cache_hit_tokens > 0 {
+                        state.turn_cache_hit_tokens
+                    } else {
+                        state.total_cache_hit_tokens
+                    };
+                    (cache_hits as f64 / state.total_input_tokens as f64).clamp(0.0, 1.0)
+                })
+            })
+    });
+    if let Some(ratio) = cache_ratio {
+        segments.push(format!("缓存 {:.0}%", (ratio * 100.0).round()));
+    }
+
+    // ---- 上下文占用：快照比 → 快照缺窗口时用解析窗口回退 → legacy 计算 ----
+    let window_tokens = snapshot
+        .and_then(|metrics| metrics.context_window_tokens)
+        .filter(|window| *window > 0)
+        .or_else(|| (state.context_window_tokens > 0).then_some(u64::from(state.context_window_tokens)));
+    let context_ratio = snapshot.and_then(|metrics| metrics.context_ratio).or_else(|| {
+        // P2：快照缺窗口（provider_meta 未注册能力）或走 legacy 事件 ⇒ 用调用方解析出的
+        // 注册表真实窗口回退；比例仍由 core `context_ratio_for_window` 算出（同源 fail-closed，
+        // 越界 ⇒ 无值，不得 clamp 成 100%）。分子取**当前上下文**：快照优先 → 最近一次调用 → 当前输入。
+        let context_tokens = snapshot
+            .and_then(|metrics| metrics.context_input_tokens)
+            .or_else(|| (state.last_context_tokens > 0).then_some(state.last_context_tokens))
+            .or_else(|| (state.total_input_tokens > 0).then_some(state.total_input_tokens))?;
+        context_ratio_for_window(context_tokens, window_tokens?)
+    });
+    if let Some(ratio) = context_ratio {
+        segments.push(format!("上下文 {:.0}%", (ratio * 100.0).round()));
+    }
+
+    // ---- per-call / 轮级快照段（设计上不参与会话累计）----
+    if let Some(metrics) = snapshot {
         if let Some(speed) = metrics.turn_speed_tokens_per_second {
             // I9/I10：口径只从快照读，TUI 侧禁止另算；`end_to_end`（含排队+prefill，
             // 跨调用不可比）必须带 `≈` 前缀，`stream_decode` 才是可比的解码速度。
@@ -6162,39 +6335,11 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
         if let Some(ttft_ms) = metrics.first_token_latency_ms {
             segments.push(format!("首token {ttft_ms}ms"));
         }
-    } else {
-        if state.total_input_tokens > 0 || state.total_output_tokens > 0 {
-            segments.push(format!(
-                "↑{} ↓{}",
-                fmt_token_count(state.total_input_tokens),
-                fmt_token_count(state.total_output_tokens)
-            ));
-        }
-        // 缓存比只在输入已知时可算（0% 也是有效值，故键控于 in>0 而非 cache>0）。
-        // 单轮次计算缓存命中率：turn_cache_hit_tokens / total_input_tokens，并限制在 0.0..=100.0% 避免跨轮或数据异常导致越界。
-        if state.total_input_tokens > 0 {
-            let cache_hits = if state.turn_cache_hit_tokens > 0 {
-                state.turn_cache_hit_tokens
-            } else {
-                state.total_cache_hit_tokens
-            };
-            let pct = (cache_hits as f64 / state.total_input_tokens as f64 * 100.0)
-                .round()
-                .clamp(0.0, 100.0);
-            segments.push(format!("缓存 {pct:.0}%"));
-        }
-        if state.context_window_tokens > 0 {
-            // ADR 0035 S1：若显式设置了 last_context_tokens（或单次调用的输入 token），以此为分子计算上下文占用
-            let context_tokens = if state.last_context_tokens > 0 {
-                state.last_context_tokens
-            } else {
-                state.total_input_tokens
-            };
-            let pct = (context_tokens as f64 / state.context_window_tokens as f64 * 100.0)
-                .round()
-                .clamp(0.0, 100.0);
-            segments.push(format!("上下文 {pct:.0}%"));
-        }
+    }
+
+    // P1：轮首沿用上一轮末值时必须自描述 —— 否则读者会把它当成当前轮读数。
+    if state.live_metrics_stale && snapshot.is_some() {
+        segments.push("（上轮）".to_string());
     }
     segments
 }
@@ -6478,6 +6623,51 @@ fn fill(f: &mut Frame, area: Rect, color: ratatui::style::Color) {
 /// 正文（chat）用 0 起始的绝对渲染行号；输入框行用 `INPUT_LINE_BASE + 逻辑行号`，
 /// 二者共享同一个 `TextCoord` 空间，复制时按基址拆分，避免拼接出百万级空行。
 pub const INPUT_LINE_BASE: usize = 1_000_000;
+
+/// W3b：子会话身份徽标行（输入区正下方 1 行）。
+///
+/// 文案真值来自 [`sub_session_badge_text`]，这里只负责分段配色与按内容宽截断：
+/// 极限窄终端先截断 `◆ ` 标记、再吃身份段、最后给快捷键段 `…` 收尾，绝不越界、不 panic。
+fn render_sub_session_badge(f: &mut Frame, area: Rect, context: &SubSessionContext) {
+    const MARKER: &str = "◆ ";
+    // 快捷键段固定以 ` · Ctrl+` 起（与 `sub_session_badge_text` 的格式契约一一对应）；
+    // 这里只借它分段配色，身份文案仍以徽标文案为唯一真值。
+    const HINT_MARK: &str = " · Ctrl+";
+    if area.width == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    let marker = truncate_width(MARKER, width);
+    let identity = sub_session_badge_text(context);
+    let (head, hint) = match identity.split_once(HINT_MARK) {
+        Some((head, tail)) => (head.to_string(), format!("{HINT_MARK}{tail}")),
+        None => (identity, String::new()),
+    };
+    let head = truncate_width(&head, width.saturating_sub(str_width(&marker)));
+    let hint = ellipsize_width(
+        &hint,
+        width.saturating_sub(str_width(&marker) + str_width(&head)),
+    );
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if !marker.is_empty() {
+        spans.push(Span::styled(
+            marker,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !head.is_empty() {
+        spans.push(Span::styled(head, ink()));
+    }
+    if !hint.is_empty() {
+        spans.push(Span::styled(hint, faint()));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::SURFACE)),
+        area,
+    );
+}
 
 /// 渲染带光标的多行输入区（⌘ 提示符 + 软折行 + 细竖线光标）。
 fn render_input(f: &mut Frame, area: Rect, state: &mut TuiState) {
@@ -7369,9 +7559,18 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     } else {
         target_input_h
     };
-    let band_h = input_h + 1;
+    // W3b：子会话身份徽标占 1 行（主会话 `badge_h = 0`，几何与改动前完全一致）。
+    // 只在真正绘制徽标的模式（Normal / Ask）占行，面板态不预留空行。
+    let badge_h = u16::from(
+        state.sub_session.is_some()
+            && matches!(
+                state.mode,
+                InteractionMode::Normal | InteractionMode::AskUserQuestion
+            ),
+    );
+    let band_h = input_h + 1 + badge_h;
     // 底部固定基座 = 色带 + 指标行；内联 Ask 面板插在基座之上（信息流底部）。
-    let bottom_h = input_h + 2;
+    let bottom_h = input_h + 2 + badge_h;
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
     let ask_inline_h = inline_ask_height(state, content.width as usize);
 
@@ -7720,6 +7919,20 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             render_ask_band_hint(f, input_rect, state);
         } else {
             render_input(f, input_rect, state);
+        }
+
+        // W3b：子会话身份徽标（输入区正下方 1 行，与色带同一门）。
+        // 主会话 `badge_h = 0` ⇒ 不出现空行。
+        if badge_h > 0 {
+            if let Some(context) = state.sub_session.as_ref() {
+                let badge_rect = Rect {
+                    x: content.x,
+                    y: bottom_top.saturating_add(1).saturating_add(input_h),
+                    width: content.width,
+                    height: 1,
+                };
+                render_sub_session_badge(f, badge_rect, context);
+            }
         }
 
         // wave-39 v4 R13：状态行紧贴色带下方（删除 v3 独立 CANVAS 间距行）；
@@ -8861,7 +9074,7 @@ pub fn render_agent_roster_panel(f: &mut Frame, state: &TuiState) {
         f,
         rect,
         "Team 角色与状态 (/agents)",
-        "↑↓ 选择 · Enter 进入队友会话 · r 返回主会话 · Esc 关闭",
+        "↑↓ 选择 · Enter 进入队友会话 · Ctrl+↑ 返回主会话 · Ctrl+←/→ 切换 · Esc 关闭",
     );
     let inner_w = body.width as usize;
 
@@ -9823,62 +10036,162 @@ fn session_is_loadable(
         .any(|session| session.conversation_id == session_id)
 }
 
-/// W3：`/agents` Enter —— 进入选中 teammate 的子会话。
+/// W3b：真实运行时 → 可切换子会话候选（复用花名册快照 + 宿主可加载判据）。
+fn sub_session_candidates_from_runtime(
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+) -> Vec<SubSessionCandidate> {
+    let roster = agent_roster_state_from_runtime();
+    sub_session_candidates(&roster.entries, |session_id| {
+        session_is_loadable(control_plane, session_id)
+    })
+}
+
+/// W3b：子会话导航的统一提示出口（`status_text` + 一次性 notice 同写，两处可见性一致）。
+fn sub_session_notice(state: &mut TuiState, message: &str) {
+    state.status_text = message.to_string();
+    state.status_notice = Some((message.to_string(), std::time::Instant::now()));
+}
+
+/// W3b：流式守卫 —— 本轮在飞时不切会话（不动 `session_id`、不 hydrate）。
 ///
-/// 流程（契约）：保存返回目标 → 切 `session_id` → 作用域复位 → hydrate → `mode=Normal`。
-/// 无会话 / 会话不可加载时给出可读提示并**留在花名册**（不静默失败、不进入空会话）。
+/// 返回 `true` 表示已拦下并给出提示，调用方直接返回。
+fn sub_session_switch_blocked(state: &mut TuiState) -> bool {
+    if !state.is_streaming {
+        return false;
+    }
+    sub_session_notice(state, "本轮进行中：先停止或等待结束后再切换会话");
+    true
+}
+
+/// W3b：按候选进入子会话（Enter 与 Ctrl+←/→ 共用的**唯一**进入路径）。
+///
+/// `return_session_id` **只在为 None 时写入**：从主会话第一次进入才记录主会话 id；
+/// 子会话之间切换必须保留最初的主会话 id，否则 Ctrl+↑ 会退回到上一个队友会话。
+fn enter_sub_session_at(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    candidates: &[SubSessionCandidate],
+    index: usize,
+) {
+    let Some(candidate) = candidates.get(index) else {
+        return;
+    };
+    let session_id = candidate.session_id.clone();
+    let main_session_id = state
+        .return_session_id
+        .clone()
+        .unwrap_or_else(|| state.session_id.clone());
+    let context = SubSessionContext {
+        target: candidate.target.clone(),
+        name: candidate.name.clone(),
+        role: candidate.role.clone(),
+        position: Some((index + 1, candidates.len())),
+    };
+
+    state.mode = InteractionMode::Normal;
+    state.agent_roster_state = None;
+    state.session_id = session_id.clone();
+    state.reset_session_scope();
+    // 作用域复位会清空这两个字段，故在其后写回（保留最初的主会话 id）。
+    state.return_session_id = Some(main_session_id);
+    state.sub_session = Some(context);
+    hydrate_state_from_session(state, control_plane, &session_id);
+    // 契约 §6.2：换会话即重建面板 —— 旧会话的面板必须收掉，新会话的未决 Ask 必须立刻出现。
+    let _ = sync_pending_control_request(state, control_plane);
+    let target = candidate.target.clone();
+    let notice = format!("已进入队友 {target} 的会话（Ctrl+↑ 返回主会话）");
+    state.status_text = format!("队友 {target} · {session_id}");
+    state.status_notice = Some((notice, std::time::Instant::now()));
+}
+
+/// W3b：`/agents` Enter —— 进入选中 teammate 的子会话。
+///
+/// 流程（契约）：候选定位 → 保存返回目标（仅首次）→ 切 `session_id` → 作用域复位 → hydrate
+/// → `mode=Normal` + 写 `sub_session` 身份。无会话 / 会话不可加载时给出可读提示并**留在花名册**
+/// （不静默失败、不进入空会话）。
 fn enter_teammate_session(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     target: &str,
 ) {
-    let Some(session_id) = teammate_session_id(target) else {
-        let message = "该 teammate 尚无独立会话（未成功运行）".to_string();
-        state.status_text = message.clone();
-        state.status_notice = Some((message, std::time::Instant::now()));
-        return;
-    };
-    if !session_is_loadable(control_plane, &session_id) {
-        // 说明：队友引擎跑在**独立建栈**里（独立 SessionStore 实例），其会话不会自动出现在
-        // 宿主 control plane 的内存会话表里 —— 这里如实提示"宿主暂不可加载"，绝不 hydrate 空会话。
-        let message = format!("该 teammate 会话暂不可由宿主会话存储加载（{session_id}），无法进入");
-        state.status_text = message.clone();
-        state.status_notice = Some((message, std::time::Instant::now()));
+    if sub_session_switch_blocked(state) {
         return;
     }
-
-    // 先保存返回目标（reset_session_scope 会清空 return_session_id，故在其后写回）。
-    let main_session_id = state.session_id.clone();
-    state.mode = InteractionMode::Normal;
-    state.agent_roster_state = None;
-    state.session_id = session_id.clone();
-    state.reset_session_scope();
-    state.return_session_id = Some(main_session_id);
-    hydrate_state_from_session(state, control_plane, &session_id);
-    // 契约 §6.2：换会话即重建面板 —— 旧会话的面板必须收掉，新会话的未决 Ask 必须立刻出现。
-    let _ = sync_pending_control_request(state, control_plane);
-    let notice = format!("已进入队友 {target} 的会话（r 返回主会话）");
-    state.status_text = format!("队友 {target} · {session_id}");
-    state.status_notice = Some((notice, std::time::Instant::now()));
+    let candidates = sub_session_candidates_from_runtime(control_plane);
+    let Some(index) = candidates
+        .iter()
+        .position(|candidate| candidate.target == target)
+    else {
+        // 候选已剔除不可进入的条目：这里按既有口径还原「为什么进不去」的可读提示。
+        let message = match teammate_session_id(target) {
+            None => "该 teammate 尚无独立会话（未成功运行）".to_string(),
+            // 说明：队友引擎跑在**独立建栈**里（独立 SessionStore 实例），其会话不会自动出现在
+            // 宿主 control plane 的内存会话表里 —— 这里如实提示"宿主暂不可加载"，绝不 hydrate 空会话。
+            Some(session_id) => {
+                format!("该 teammate 会话暂不可由宿主会话存储加载（{session_id}），无法进入")
+            }
+        };
+        sub_session_notice(state, &message);
+        return;
+    };
+    enter_sub_session_at(state, control_plane, &candidates, index);
 }
 
-/// W3：`/agents` r —— 返回进入队友会话前保存的主会话。
+/// W3b：Ctrl+←/→ —— 在当前子智能体之间循环切换（保留最初的主会话返回目标）。
 ///
-/// 无保存目标 / 主会话不可加载时给可读提示；成功则清空返回目标（避免二次 `r` 回到自身）。
+/// 无候选 / 只有一个候选时给出可读提示而不动会话（避免"按了没反应"）。
+fn switch_sub_session(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    step: SubSessionStep,
+) {
+    if sub_session_switch_blocked(state) {
+        return;
+    }
+    let candidates = sub_session_candidates_from_runtime(control_plane);
+    if candidates.is_empty() {
+        sub_session_notice(state, "没有可切换的子智能体会话");
+        return;
+    }
+    let current = state
+        .sub_session
+        .as_ref()
+        .map(|context| context.target.clone());
+    let Some(next) = step_sub_session_target(&candidates, current.as_deref(), step) else {
+        sub_session_notice(state, "没有可切换的子智能体会话");
+        return;
+    };
+    if Some(next.target.as_str()) == current.as_deref() {
+        sub_session_notice(state, "只有一个子智能体会话，无法切换");
+        return;
+    }
+    let target = next.target.clone();
+    let Some(index) = candidates
+        .iter()
+        .position(|candidate| candidate.target == target)
+    else {
+        return;
+    };
+    enter_sub_session_at(state, control_plane, &candidates, index);
+}
+
+/// W3b：Ctrl+↑（花名册内 `r` 同义）—— 返回进入队友会话前保存的主会话。
+///
+/// 无保存目标 / 主会话不可加载时给可读提示；成功则清空返回目标与子会话身份
+/// （避免二次返回回到自身、也避免主会话残留队友徽标）。
 fn return_to_main_session(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
 ) {
+    if sub_session_switch_blocked(state) {
+        return;
+    }
     let Some(main_session_id) = state.return_session_id.clone() else {
-        let message = "没有可返回的主会话（当前不在队友会话）".to_string();
-        state.status_text = message.clone();
-        state.status_notice = Some((message, std::time::Instant::now()));
+        sub_session_notice(state, "没有可返回的主会话（当前不在队友会话）");
         return;
     };
     if !session_is_loadable(control_plane, &main_session_id) {
-        let message = format!("主会话 {main_session_id} 已不可加载");
-        state.status_text = message.clone();
-        state.status_notice = Some((message, std::time::Instant::now()));
+        sub_session_notice(state, &format!("主会话 {main_session_id} 已不可加载"));
         return;
     }
 
@@ -9886,14 +10199,15 @@ fn return_to_main_session(
     state.agent_roster_state = None;
     state.session_id = main_session_id.clone();
     state.reset_session_scope();
+    // 契约：成功则清空返回目标（`reset_session_scope` 已清，这里显式重申唯一真值，
+    // 避免后续改动把两处语义拆散）；子会话身份同属会话作用域一并归 None。
+    state.return_session_id = None;
+    state.sub_session = None;
     hydrate_state_from_session(state, control_plane, &main_session_id);
     // 契约 §6.2：回到主会话同样重建面板（主会话可能仍有未决 Ask）。
     let _ = sync_pending_control_request(state, control_plane);
     state.status_text = format!("已返回主会话 {main_session_id}");
-    state.status_notice = Some((
-        "已返回主会话".to_string(),
-        std::time::Instant::now(),
-    ));
+    state.status_notice = Some(("已返回主会话".to_string(), std::time::Instant::now()));
 }
 
 /// 把目标会话的权威快照装载进 UI 状态（`/resume` 弹窗与启动期 `pony resume <id>` 共用）。
@@ -10062,6 +10376,22 @@ fn hydrate_state_from_session(
             }
         }
     }
+
+    // P1：用量与上下文恢复 —— 历史会话必须与实时会话同口径，否则 `/resume` 后指标整行空白。
+    // 会话累计取权威快照的**per-call Σ**（`session_usage_totals`，不是末次调用）；
+    // 当前上下文占用取末次已结算调用（ADR 0035 S1）；窗口取注册表真实能力（P2 回退同源）。
+    let restored = session_usage_totals(&session_snapshot);
+    state.session_usage.restore(restored);
+    state.total_output_tokens = restored.output_tokens;
+    state.total_cache_hit_tokens = restored.cache_hit_input_tokens;
+    state.turn_cache_hit_tokens = 0;
+    let restored_context = last_context_input_tokens(&session_snapshot).unwrap_or(0);
+    state.total_input_tokens = restored_context;
+    state.last_context_tokens = restored_context;
+    state.context_window_tokens = resolve_context_window_tokens(state);
+    // 历史会话没有「本轮快照」；指标行改由台账 + 恢复的上下文值渲染。
+    state.live_metrics = None;
+    state.live_metrics_stale = false;
 
     state.scroll_offset = u32::MAX;
     state.auto_scroll = true; // 确保加载完毕后消息贴底显示
@@ -10985,6 +11315,10 @@ fn tui_event_loop(
                             KeyCode::Esc => {
                                 state.close_agent_roster();
                             }
+                            // W3b：Ctrl+↑ 与主会话内同一语义（返回主会话）；裸 ↑ 仍是花名册上移。
+                            KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                return_to_main_session(&mut state, &control_plane);
+                            }
                             KeyCode::Up => {
                                 if let Some(ref mut roster) = state.agent_roster_state {
                                     roster.prev();
@@ -11102,6 +11436,24 @@ fn tui_event_loop(
                             state.clear_input();
                         }
                         continue;
+                    }
+
+                    // W3b：子会话内 Ctrl+↑ 返回主会话 / Ctrl+←/→ 切换子智能体。
+                    // 必须排在文本插入、斜杠菜单与光标移动之前，避免「既移动光标又切会话」；
+                    // 不在子会话时**不消费**这些键（主会话里 Ctrl+←/→ 仍是原光标行为）。
+                    if state.sub_session.is_some() {
+                        if let Some(shortcut) = sub_session_shortcut(&key) {
+                            match shortcut {
+                                SubSessionShortcut::ReturnToMain => {
+                                    return_to_main_session(&mut state, &control_plane);
+                                }
+                                SubSessionShortcut::Switch(step) => {
+                                    switch_sub_session(&mut state, &control_plane, step);
+                                }
+                            }
+                            dirty = true;
+                            continue;
+                        }
                     }
 
                     // ── C1–C4 裁决面：流式期按键不再被吞 ─────────────────────────────
@@ -11449,7 +11801,9 @@ fn tui_event_loop(
                                     state.toggle_task_board();
                                     continue;
                                 }
-                                if known_command == Some("/agents") {
+                                // W3b：`/agents` 与其别名 `/teams` 完全等价（同一判定，不写两份字面量）。
+                                if matches!(known_command, Some(cmd) if is_agent_roster_command(cmd))
+                                {
                                     // W3：真实名册快照（list_agents / 收件箱 / 驱动态 / 会话）。
                                     state.toggle_agent_roster();
                                     continue;
@@ -11474,6 +11828,10 @@ fn tui_event_loop(
                                     // 本轮：补 Ctrl+O（过程显示/隐藏），与 /settings 同字段。
                                     help.push_str(
                                         "\n流式期仍可输入 · Enter 排队（本轮结束后自动发送） · Ctrl+T/Ctrl+R 可用 · Ctrl+O 过程显示/隐藏",
+                                    );
+                                    // W3b：子会话语境下的唯一逃逸/切换路径（徽标同文案）。
+                                    help.push_str(
+                                        "\n子智能体会话内：Ctrl+↑ 返回主会话 · Ctrl+←/→ 切换子智能体",
                                     );
                                     // 契约 F-L：/cost 移除后网关需要可见入口；只展示剥离凭据后的
                                     // scheme://host[:port]/path（userinfo/query/fragment 全丢弃）。
@@ -13260,5 +13618,174 @@ mod wave65_r3_approval_stale_notice_tests {
             state.status_notice.as_ref().map(|(text, _)| text.as_str()),
             Some(APPROVAL_STALE_NOTICE)
         );
+    }
+}
+
+/// W3b 单测：子会话导航纯函数 + 身份徽标的窄终端安全性。
+#[cfg(test)]
+mod w3b_sub_session_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn roster_entry(target: &str, session: Option<&str>) -> AgentRosterEntry {
+        AgentRosterEntry {
+            target: target.to_string(),
+            name: format!("{target}-name"),
+            role: "executor".to_string(),
+            status: "inactive".to_string(),
+            pending_inbox: 0,
+            driving: false,
+            session_id: session.map(str::to_string),
+        }
+    }
+
+    fn context(position: Option<(usize, usize)>) -> SubSessionContext {
+        SubSessionContext {
+            target: "worker-1".to_string(),
+            name: "Ada".to_string(),
+            role: "executor".to_string(),
+            position,
+        }
+    }
+
+    #[test]
+    fn shortcut_only_ctrl_arrows() {
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert_eq!(
+            sub_session_shortcut(&key(KeyCode::Up, KeyModifiers::CONTROL)),
+            Some(SubSessionShortcut::ReturnToMain)
+        );
+        assert_eq!(
+            sub_session_shortcut(&key(KeyCode::Right, KeyModifiers::CONTROL)),
+            Some(SubSessionShortcut::Switch(SubSessionStep::Next))
+        );
+        assert_eq!(
+            sub_session_shortcut(&key(KeyCode::Left, KeyModifiers::CONTROL)),
+            Some(SubSessionShortcut::Switch(SubSessionStep::Prev))
+        );
+        // 裸方向键 / Ctrl+Char / Alt+Up 一律不消费（保持原有光标与输入语义）。
+        assert_eq!(sub_session_shortcut(&key(KeyCode::Left, KeyModifiers::NONE)), None);
+        assert_eq!(sub_session_shortcut(&key(KeyCode::Up, KeyModifiers::NONE)), None);
+        assert_eq!(
+            sub_session_shortcut(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(sub_session_shortcut(&key(KeyCode::Up, KeyModifiers::ALT)), None);
+    }
+
+    #[test]
+    fn candidates_drop_lead_sessionless_and_unloadable() {
+        let entries = vec![
+            roster_entry("lead", Some("sess-lead")),
+            roster_entry("worker-1", Some("sess-1")),
+            roster_entry("worker-2", None),
+            roster_entry("worker-3", Some("sess-3")),
+        ];
+        let candidates =
+            sub_session_candidates(&entries, |session_id| session_id != "sess-3");
+        let targets: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.target.as_str())
+            .collect();
+        assert_eq!(targets, vec!["worker-1"], "只保留真实可加载的非 lead 会话");
+        assert_eq!(candidates[0].session_id, "sess-1");
+        assert_eq!(candidates[0].name, "worker-1-name");
+    }
+
+    #[test]
+    fn step_wraps_and_handles_miss() {
+        let entries = vec![
+            roster_entry("worker-1", Some("sess-1")),
+            roster_entry("worker-2", Some("sess-2")),
+            roster_entry("worker-3", Some("sess-3")),
+        ];
+        let candidates = sub_session_candidates(&entries, |_| true);
+        let target = |step, current: Option<&str>| {
+            step_sub_session_target(&candidates, current, step)
+                .map(|candidate| candidate.target.clone())
+        };
+        assert_eq!(target(SubSessionStep::Next, Some("worker-3")), Some("worker-1".into()));
+        assert_eq!(target(SubSessionStep::Prev, Some("worker-1")), Some("worker-3".into()));
+        assert_eq!(target(SubSessionStep::Next, Some("worker-1")), Some("worker-2".into()));
+        assert_eq!(target(SubSessionStep::Next, None), Some("worker-1".into()));
+        assert_eq!(target(SubSessionStep::Prev, None), Some("worker-3".into()));
+        // 当前目标不在候选序列里 ⇒ Next 取首个、Prev 取末个。
+        assert_eq!(target(SubSessionStep::Next, Some("gone")), Some("worker-1".into()));
+        assert_eq!(target(SubSessionStep::Prev, Some("gone")), Some("worker-3".into()));
+        assert!(step_sub_session_target(&[], None, SubSessionStep::Next).is_none());
+    }
+
+    #[test]
+    fn badge_text_formats_position() {
+        assert_eq!(
+            sub_session_badge_text(&context(Some((2, 5)))),
+            "子智能体 · Ada（executor） 2/5 · Ctrl+↑ 返回主会话 · Ctrl+←/→ 切换"
+        );
+        assert_eq!(
+            sub_session_badge_text(&context(None)),
+            "子智能体 · Ada（executor） · Ctrl+↑ 返回主会话 · Ctrl+←/→ 切换"
+        );
+    }
+
+    #[test]
+    fn roster_command_accepts_agents_and_teams() {
+        assert!(is_agent_roster_command("/agents"));
+        assert!(is_agent_roster_command("  /TEAMS "));
+        assert!(!is_agent_roster_command("/tasks"));
+        assert!(!is_agent_roster_command("/agents worker-1"));
+    }
+
+    #[test]
+    fn badge_render_survives_narrow_terminal() {
+        for width in [1u16, 2, 3, 8, 40, 120] {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1))
+                .expect("TestBackend 应可创建");
+            let ctx = context(Some((1, 2)));
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    render_sub_session_badge(f, area, &ctx);
+                })
+                .expect("窄终端徽标渲染不得失败");
+        }
+    }
+
+    fn render_ui(state: &mut TuiState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+            .expect("TestBackend 应可创建");
+        terminal.draw(|f| ui(f, state)).expect("ui 渲染不得失败");
+        terminal.backend().buffer().clone()
+    }
+
+    /// 行内文本匹配：宽字符的右侧占位 cell 是空白，故与断言串比较前先去空白。
+    fn find_row(buf: &ratatui::buffer::Buffer, needle: &str) -> Option<u16> {
+        (0..buf.area.height).find(|y| {
+            let text: String = (0..buf.area.width)
+                .flat_map(|x| buf[(x, *y)].symbol().chars())
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            text.contains(needle)
+        })
+    }
+
+    #[test]
+    fn badge_row_appears_only_in_sub_session() {
+        let mut main_state = TuiState::default();
+        let main = render_ui(&mut main_state, 80, 24);
+        assert!(
+            find_row(&main, "子智能体").is_none(),
+            "主会话不得出现子会话徽标（也不得留出空行）"
+        );
+
+        let mut sub_state = TuiState::default();
+        sub_state.sub_session = Some(context(Some((1, 2))));
+        let sub = render_ui(&mut sub_state, 80, 24);
+        let row = find_row(&sub, "子智能体").expect("子会话必须渲染身份徽标");
+        assert_eq!(
+            row,
+            sub.area.height - 2,
+            "徽标必须紧贴状态行上方（输入区正下方 1 行）"
+        );
+        assert!(find_row(&sub, "◆").is_some(), "徽标必须有 `◆ ` 标记");
     }
 }

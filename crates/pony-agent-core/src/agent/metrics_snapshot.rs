@@ -45,6 +45,18 @@ pub struct TurnMetricsSnapshot {
     pub turn_output_tokens: u64,
     pub turn_generation_ms: u64,
     pub turn_calls: u32,
+    /// 轮级 Σ 上下文输入（逐条取 `context_input_tokens`，缺失回退裸 `input_tokens` 后相加）。
+    ///
+    /// 与 `turn_output_tokens` 同属**轮级聚合**组：per-call 字段只描述末次调用，会话累计
+    /// 必须从这里成型（TUI header 的 `↓out` 与会话缓存命中率分母都取本组，不得用末次调用冒充）。
+    #[serde(default)]
+    pub turn_context_input_tokens: u64,
+    /// 轮级 Σ 缓存命中输入（只累加**上报了** `cache_hit_input_tokens` 的调用）。
+    #[serde(default)]
+    pub turn_cache_hit_input_tokens: u64,
+    /// 轮级**上报了**缓存命中的调用数（会话命中率分母的可信度判据：「未知」不拉低命中率）。
+    #[serde(default)]
+    pub turn_calls_with_cache: u32,
     pub cache_hit_ratio: Option<f64>,
     pub context_window_tokens: Option<u64>,
     pub context_ratio: Option<f64>,
@@ -75,6 +87,17 @@ fn unit_ratio(numerator: u64, denominator: u64) -> Option<f64> {
         return None;
     }
     Some(candidate.max(0.0))
+}
+
+/// 上下文占用比例（`0.0..=1.0`），供 UI 在**快照缺窗口**时用注册表真实窗口回退计算。
+///
+/// 与快照内 `context_ratio` 共用同一 [`unit_ratio`]（I3：越界/窗口未知 ⇒ `None`，禁止 clamp）。
+/// 消费方只传入窗口值，比例仍在 core 侧算出 —— UI 不得自写第三种公式。
+pub fn context_ratio_for_window(context_input_tokens: u64, window_tokens: u64) -> Option<f64> {
+    if window_tokens == 0 {
+        return None;
+    }
+    unit_ratio(context_input_tokens, window_tokens)
 }
 
 /// 「可计数」调用判据：与 [`crate::agent::turn_flow::call_valid`]（I1）同一判据 `dur > 0 && out > 0`。
@@ -172,6 +195,25 @@ pub fn build_turn_metrics_snapshot(
         _ => None,
     };
 
+    // 轮级 Σ（会话累计的唯一原料，TUI 会话台账由此累加）：逐条 per-call 记录相加，
+    // **禁止**用末次调用字段冒充会话累计。缺 `cache_hit_input_tokens` 的调用只计入
+    // `turn_calls`，不计入 `turn_calls_with_cache`（「未知」不得被当成「0 命中」）。
+    let mut turn_context_input_tokens: u64 = 0;
+    let mut turn_cache_hit_input_tokens: u64 = 0;
+    let mut turn_calls_with_cache: u32 = 0;
+    for record in records {
+        turn_context_input_tokens = turn_context_input_tokens.saturating_add(
+            record
+                .context_input_tokens
+                .or(record.input_tokens)
+                .unwrap_or(0),
+        );
+        if let Some(cache_hit) = record.cache_hit_input_tokens {
+            turn_cache_hit_input_tokens = turn_cache_hit_input_tokens.saturating_add(cache_hit);
+            turn_calls_with_cache = turn_calls_with_cache.saturating_add(1);
+        }
+    }
+
     // 身份字段一律取 provider_meta（缺失 ⇒ 空串，不伪造）。
     let (provider, model) = match provider_meta {
         Some(meta) => (meta.provider_name.clone(), meta.model.clone()),
@@ -197,6 +239,9 @@ pub fn build_turn_metrics_snapshot(
         turn_output_tokens: turn.output_tokens,
         turn_generation_ms: turn.generation_ms,
         turn_calls: turn.calls,
+        turn_context_input_tokens,
+        turn_cache_hit_input_tokens,
+        turn_calls_with_cache,
         cache_hit_ratio,
         context_window_tokens,
         context_ratio,

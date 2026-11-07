@@ -443,6 +443,46 @@ impl AgentRosterState {
     }
 }
 
+// -----------------------------------------------------------------------------
+// 7. 子智能体会话导航 (Sub Session / W3b)
+// -----------------------------------------------------------------------------
+
+/// 可切换的子智能体会话候选（只含真实可加载的 teammate 会话）。
+///
+/// 由名册快照过滤而来：`lead`（即宿主主会话）、尚无会话、宿主不可加载的条目都不入选，
+/// 保证「能选中 ⇒ 一定能进入」（不会 hydrate 出空会话）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubSessionCandidate {
+    pub target: String,
+    pub name: String,
+    pub role: String,
+    pub session_id: String,
+}
+
+/// 当前所处子智能体会话的身份上下文（徽标 + 返回目标的唯一真值）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubSessionContext {
+    pub target: String,
+    pub name: String,
+    pub role: String,
+    /// 候选序列中的 1-based 位置与总数；无法定位时 `None`（徽标省略序号）。
+    pub position: Option<(usize, usize)>,
+}
+
+/// 子会话切换方向（Ctrl+←=Prev / Ctrl+→=Next）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubSessionStep {
+    Next,
+    Prev,
+}
+
+/// 子会话内的会话级快捷键（只在处于子会话时消费，主会话里同一按键保持原语义）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubSessionShortcut {
+    ReturnToMain,
+    Switch(SubSessionStep),
+}
+
 impl TuiGoal {
     pub fn new(id: String, objective: String, max_rounds: Option<u32>) -> Self {
         Self {

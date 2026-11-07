@@ -9,6 +9,10 @@
 // 本文件把 `src/bin/tui.rs` 以 bin-as-module 方式 include（与 tui_render_layout.rs 同模式），
 // 用 ratatui TestBackend 做真实渲染后断言字符缓冲；bin 的 main 不会被调用，allow 仅用于
 // 消除 bin-as-module 固有的 dead_code 噪声，不放宽任何断言。
+//
+// ADR 0078（implemented）口径迁移：数值指标簇已从「composer 下方最后一行」上移到
+// **header(row 0) 右槽**，底面最后一行改为右对齐模型身份。故本文件的「指标行」断言一律读
+// `metrics_row()`（= row 0），「最后一行」只用于证明底面不再承载工作区/指标（ADR 0078 §决策 6/8）。
 
 #[path = "../src/bin/tui.rs"]
 #[allow(dead_code, unused_imports, unused_variables, unused_mut)]
@@ -16,19 +20,23 @@ mod tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 
 // 与 tui.rs 保持一致的布局常量（只在断言里复算几何，不参与实现）。
 const GUTTER: u16 = 3;
-const RAIL: usize = 2;
 const MAX_CONTENT_WIDTH: u16 = 120;
 
-// 契约 v3 §6 R9/R10 主题字面值（`tui::theme` 为私有模块，无法从测试引用；按现实现值冻结）。
-// CANVAS = 正文/指标行背景；SURFACE = 色带背景；GHOST = 指标行前景（比 FAINT 更暗一档）。
+// 主题字面值（`tui::theme` 为私有模块，无法从测试引用；按现实现值冻结）。
+// ADR 0078 §决策 1/8：CANVAS = 正文/header/底面行背景；SURFACE = 色带（含呼吸行）背景；
+// ACCENT = header 品牌；MUTED = header 工作区标签；FAINT = header 分隔符与右簇指标；
+// GHOST = 底面模型身份字形（比 FAINT 更暗一档）。
 const CANVAS: Color = Color::Rgb(18, 16, 14);
 const SURFACE: Color = Color::Rgb(27, 25, 22);
 const GHOST: Color = Color::Rgb(104, 98, 90);
+const FAINT: Color = Color::Rgb(124, 118, 110);
+const MUTED: Color = Color::Rgb(162, 155, 146);
+const ACCENT: Color = Color::Rgb(214, 114, 80);
 
 // ---------------------------------------------------------------------------
 // 渲染与取值工具
@@ -107,11 +115,37 @@ fn content_geometry(terminal_width: u16) -> (u16, u16) {
     ((terminal_width - width) / 2, width)
 }
 
-/// 最后一行（wave-39 起 = 指标行）从 `content.x + RAIL` 起的文本；右端 trim。
-fn last_row_left(buf: &Buffer) -> String {
-    let (cx, _) = content_geometry(buf.area.width);
-    let cells = row_cells(buf, buf.area.height - 1);
-    cells[cx as usize + RAIL..].concat().trim_end().to_string()
+/// 数值指标簇所在行 = **header(row 0)**。
+///
+/// ADR 0078（implemented）把「cwd + 指标」的底面行契约修订为：指标簇锚定 header
+/// 右槽，底面最后一行只剩右对齐模型身份。故本文件「指标行」断言一律读 row 0，
+/// 「最后一行」只用于证明底面不再承载指标。
+fn metrics_row(buf: &Buffer) -> String {
+    row_text(buf, 0)
+}
+
+/// header 左槽固定前缀：`<品牌>  ·  ` 之后紧跟工作区标签。
+///
+/// 与 `ui()` 的 header 组装逐字同源（`Span::styled(HEADER_BRAND)` + `"  ·  "`）。
+const HEADER_BRAND_PREFIX: &str = "PONY  ·  ";
+
+/// 品牌前缀的**显示宽度**（列数），把「列偏移」从「UTF-8 字节长度」里救出来。
+///
+/// `HEADER_BRAND_PREFIX.len()` 是字节数：中点 `·`(U+00B7) 占 2 字节，于是
+/// `cx + len()` 会比真实起排列多 1 列，断言便读到 `~` 之后的下一个字符 `/`。
+/// 该常量内所有字符均为单列宽，故列宽 = 字符数。
+fn header_brand_prefix_width() -> usize {
+    HEADER_BRAND_PREFIX.chars().count()
+}
+
+/// header 中「工作区标签 + 右簇指标」片段（剥掉左侧沟槽空白与品牌前缀）。
+fn header_workspace_part(buf: &Buffer) -> String {
+    let header = metrics_row(buf);
+    let header = header.trim_start();
+    header
+        .strip_prefix(HEADER_BRAND_PREFIX)
+        .unwrap_or(header)
+        .to_string()
 }
 
 /// 路径形态（**显式参数**，与宿主平台无关）。
@@ -149,27 +183,6 @@ fn is_absolute_path_in(token: &str, forms: PathForms) -> bool {
 fn is_folded_or_absolute_path_with(text: &str, forms: PathForms) -> bool {
     let token = text.trim_start().split_whitespace().next().unwrap_or("");
     token.starts_with('~') || is_absolute_path_in(token, forms)
-}
-
-/// workspace 标签是否「折叠形态」（`~` / `~\…`）或「绝对路径」。
-///
-/// 原断言写作 `label.starts_with('/') || label.starts_with('~')`，**只在 Unix 成立**：
-/// Windows 绝对路径形如 `C:\Users\...`（盘符 + 反斜杠），既不以 `/` 也不以 `~` 开头，
-/// 于是 Windows CI 恒假红。平台无关判据：折叠形态仍以 `~` 起；其余交给平台各自的
-/// 绝对路径判定（Unix `/x`、Windows `C:\x`）。鉴别力不降：空串、纯数字、
-/// 相对形态（`pony-agent`）仍判假。
-/// 运行时包装：**只有这里**按平台选形态；判定函数本身完全不看宿主。
-fn is_folded_or_absolute_path(text: &str) -> bool {
-    is_folded_or_absolute_path_with(text, host_path_forms())
-}
-
-/// 宿主的路径形态（编译目标决定，仅在运行时选择用哪套字符串规则）。
-fn host_path_forms() -> PathForms {
-    if cfg!(windows) {
-        PathForms::Windows
-    } else {
-        PathForms::Unix
-    }
 }
 
 /// 三条主体沟槽列（左 0/1，右 W-2/W-1）在任何一行都不得出现内容。
@@ -325,7 +338,7 @@ fn a3_metrics_row_never_renders_status_words() {
         for word in FORBIDDEN {
             assert!(
                 !last.contains(word),
-                "[{label}] 最后一行（指标行）不得再出现状态词 {word:?}: {last:?}"
+                "[{label}] 底面最后一行（模型身份行）不得再出现状态词 {word:?}: {last:?}"
             );
         }
     }
@@ -348,19 +361,22 @@ fn a4_metrics_row_left_shows_workspace_label() {
         );
         let mut state = tui::TuiState::default();
         state.workspace = std::path::PathBuf::from(&home).join("pony-agent");
+        // ADR 0078：折叠真值源是 `state.home_dir`（默认 None ⇒ 不折叠），
+        // 故必须显式注入，否则断言的是「无 home 时的裸 basename」而非折叠契约。
+        state.home_dir = Some(home.clone());
 
         let buf = screen(&mut state, 110, 30);
-        let label = last_row_left(&buf);
+        let ws_part = header_workspace_part(&buf);
         assert!(
-            label.starts_with("~/pony-agent"),
-            "HOME 下的 workspace 必须折叠为 \"~/pony-agent\"，实际标签 {label:?}"
+            ws_part.starts_with("~/pony-agent"),
+            "HOME 下的 workspace 必须折叠为 \"~/pony-agent\" 并紧跟 header 品牌前缀，实际 header {ws_part:?}"
         );
-        let cells = row_cells(&buf, 29);
+        let cells = row_cells(&buf, 0);
         assert_eq!(
-            cells[cx as usize + RAIL],
+            cells[cx as usize + header_brand_prefix_width()],
             "~",
-            "路径标签必须从 content.x+RAIL({}) 列起排",
-            cx as usize + RAIL
+            "工作区标签必须从 content.x + 品牌前缀宽度({}) 列起排",
+            cx as usize + header_brand_prefix_width()
         );
     }
 
@@ -387,20 +403,23 @@ fn a4_metrics_row_left_shows_workspace_label() {
         );
         let mut state = tui::TuiState::default();
         state.workspace = std::path::PathBuf::from(&home).join("pony-agent");
+        // ADR 0078：折叠真值源是 `state.home_dir`（默认 None ⇒ 只显示裸 basename），
+        // Windows 分支同样必须显式注入，否则本断言在 Windows 上是结构性假红。
+        state.home_dir = Some(home.clone());
 
         let buf = screen(&mut state, 110, 30);
-        let label = last_row_left(&buf);
+        let ws_part = header_workspace_part(&buf);
         let expected = format!("~{}pony-agent", std::path::MAIN_SEPARATOR);
         assert!(
-            label.starts_with(&expected),
-            "HOME 下的 workspace 必须折叠为 {expected:?}，实际标签 {label:?}"
+            ws_part.starts_with(&expected),
+            "HOME 下的 workspace 必须折叠为 {expected:?} 并紧跟 header 品牌前缀，实际 header {ws_part:?}"
         );
-        let cells = row_cells(&buf, 29);
+        let cells = row_cells(&buf, 0);
         assert_eq!(
-            cells[cx as usize + RAIL],
+            cells[cx as usize + header_brand_prefix_width()],
             "~",
-            "路径标签必须从 content.x+RAIL({}) 列起排",
-            cx as usize + RAIL
+            "工作区标签必须从 content.x + 品牌前缀宽度({}) 列起排",
+            cx as usize + header_brand_prefix_width()
         );
     }
 
@@ -408,31 +427,39 @@ fn a4_metrics_row_left_shows_workspace_label() {
     let mut state = tui::TuiState::default();
     state.workspace = std::env::temp_dir().join("wave39-ws-alpha");
     let buf = screen(&mut state, 110, 30);
-    let label = last_row_left(&buf);
+    let ws_part = header_workspace_part(&buf);
     assert!(
-        label.contains("wave39-ws-alpha"),
-        "指标行左侧必须显示 workspace basename，实际标签 {label:?}"
+        ws_part.contains("wave39-ws-alpha"),
+        "header 左槽必须显示 workspace basename，实际 header 片段 {ws_part:?}"
     );
-    // 原断言 `label.starts_with('/') || label.starts_with('~')` 只在 Unix 成立：
-    // Windows 绝对路径是 `C:\Users\...`，两种前缀都不命中 → Windows CI 假红。
+    // ADR 0078 修订了底面行内容契约：`home_dir=None` 时 `workspace_header_label_with_home`
+    // 在 file_name 可取的情况下**只返回裸 basename**（tui.rs `return name.to_string()` 分支），
+    // 不再回退整条绝对路径。旧断言「必须以绝对路径或折叠形态起排」是 ADR 0078 前的口径，
+    // 在 `TuiState::default()`（home_dir=None）下必然假红。
+    // 保留同等鉴别力：basename 必须紧跟品牌前缀起排，且不得回退为原绝对路径。
     assert!(
-        is_folded_or_absolute_path(&label),
-        "workspace 标签必须以绝对路径或折叠路径起排，实际标签 {label:?}"
+        ws_part.starts_with("wave39-ws-alpha"),
+        "home_dir=None 时 header 左槽必须以裸 basename 起排，实际 header 片段 {ws_part:?}"
     );
-    let cells = row_cells(&buf, 29);
-    let first = cells[cx as usize + RAIL].as_str();
+    let temp_prefix = std::env::temp_dir().display().to_string();
+    assert!(
+        !ws_part.starts_with(&temp_prefix),
+        "home_dir=None 时 header 左槽不得回退为绝对路径（{temp_prefix:?}），实际 header 片段 {ws_part:?}"
+    );
+    let cells = row_cells(&buf, 0);
+    let first = cells[cx as usize + header_brand_prefix_width()].as_str();
     // 原断言 `first == "/" || first == "~"` 同属 Unix-only 形态假设（Windows 首字符是盘符）。
-    // 该断言的真实契约是「标签从 content.x+RAIL 列起排」，故与标签首字符对齐比较：
+    // 该断言的真实契约是「标签紧跟品牌前缀起排」，故与标签首字符对齐比较：
     // 平台无关，且比"首字符必须是根字符"更贴近起排语义（路径根合法性已由上面判据守住）。
-    let expected_first = label
+    let expected_first = ws_part
         .chars()
         .next()
         .map(|c| c.to_string())
         .unwrap_or_default();
     assert_eq!(
         first, expected_first,
-        "路径标签必须从 content.x+RAIL({}) 列起排",
-        cx as usize + RAIL
+        "工作区标签必须从 content.x + 品牌前缀宽度({}) 列起排",
+        cx as usize + header_brand_prefix_width()
     );
 }
 
@@ -506,33 +533,33 @@ fn a5_metrics_row_carries_up_down_cache_and_context() {
 
     // Act
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let last = metrics_row(&buf);
 
-    // Assert 1：四个契约 token 全部在最后一行
+    // Assert 1：四个契约 token 全部在 header(row 0) 右槽（ADR 0078 §决策 1）
     for needle in ["↑", "↓", "缓存", "上下文"] {
-        assert!(last.contains(needle), "指标行缺少 {needle:?}: {last:?}");
+        assert!(last.contains(needle), "header 指标簇缺少 {needle:?}: {last:?}");
     }
 
     // Assert 2：右簇顶到内容列最后一列，且以数字/百分号结尾
     let (cx, cw) = content_geometry(110);
-    let tail = buf[(cx + cw - 1, 29)].symbol();
+    let tail = buf[(cx + cw - 1, 0)].symbol();
     let tail_ch = tail.chars().next().unwrap_or(' ');
     assert!(
         tail_ch.is_ascii_digit() || tail_ch == '%',
-        "指标行必须终止于内容列最后一列（x={}）且以数字/百分号结尾，实际 {tail:?}；行文本 {last:?}",
+        "header 指标簇必须右对齐到内容列最后一列（x={}）且以数字/百分号结尾，实际 {tail:?}；行文本 {last:?}",
         cx + cw - 1
     );
     let trimmed = last.trim_end();
     let end_ch = trimmed.chars().next_back().unwrap_or(' ');
     assert!(
         end_ch.is_ascii_digit() || end_ch == '%',
-        "指标行去尾空白后必须以数字/百分号结尾，实际 {end_ch:?}；行文本 {last:?}"
+        "header 指标簇去尾空白后必须以数字/百分号结尾，实际 {end_ch:?}；行文本 {last:?}"
     );
 
     // Assert 3（v3 R11）：默认全零状态 → 右簇整段为空，只剩左侧 workspace 标签
     let mut zero = tui::TuiState::default();
     let buf = screen(&mut zero, 110, 30);
-    let row = row_text(&buf, 29);
+    let row = metrics_row(&buf);
     for needle in ["↑", "↓", "缓存", "上下文", "—"] {
         assert!(
             !row.contains(needle),
@@ -552,7 +579,7 @@ fn a5_metrics_row_carries_up_down_cache_and_context() {
 }
 
 // ---------------------------------------------------------------------------
-// A6：110×30 单行输入几何 v4 —— bottom_top=26 / 提示符 26..27 / 色带呼吸行 28 SURFACE / 指标行 29
+// A6：110×30 单行输入几何 v4 —— bottom_top=26 / 提示符 26..27 / 色带呼吸行 28 SURFACE / 底面行 29
 // ---------------------------------------------------------------------------
 #[test]
 fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
@@ -620,36 +647,36 @@ fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
         buf[(cx, 28)].bg, SURFACE,
         "y=28 必须是色带内呼吸行（SURFACE）；v4 已删除独立 CANVAS 间距行"
     );
-    // 输入正文行（27）→ 指标行（29）之间只隔 1 行空白（v3 为 2 行）。
+    // 输入正文行（27）→ 底面行（29）之间只隔 1 行空白（v3 为 2 行）。
     assert_eq!(
         prompt_y + 2,
         29,
-        "输入正文行与指标行之间必须只隔 1 行（呼吸行 28），实际 prompt_y={prompt_y}"
+        "输入正文行与底面行之间必须只隔 1 行（呼吸行 28），实际 prompt_y={prompt_y}"
     );
 
-    // Assert 4（R13：指标行 29，紧贴色带）：CANVAS 背景 + GHOST 前景 + workspace 仍在
-    let metrics = row_text(&buf, 29);
+    // Assert 4（ADR 0078）：指标簇已锚定 header(row 0)，底面最后一行只剩模型身份。
+    let metrics = metrics_row(&buf);
     assert!(
         !metrics.trim().is_empty(),
-        "y=29 必须是指标行（至少 workspace 标签），不允许整行空白"
+        "header(row 0) 必须承载指标簇/工作区标签，不允许整行空白"
     );
     assert!(
         metrics.contains(&ws),
-        "y=29 指标行必须显示 workspace basename {ws:?}，实际 {metrics:?}"
+        "header 左槽必须显示 workspace basename {ws:?}，实际 {metrics:?}"
     );
     assert_eq!(
         buf[(cx, 29)].bg, CANVAS,
-        "y=29 指标行必须是 CANVAS 背景（非色带 SURFACE）"
+        "y=29 模型身份行必须是 CANVAS 背景（非色带 SURFACE）"
     );
     assert_eq!(
         buf[(cx, 29)].fg, GHOST,
-        "y=29 指标行字形前景必须是 GHOST Rgb(104,98,90)"
+        "y=29 模型身份行字形前景必须是 GHOST Rgb(104,98,90)"
     );
 
     // Assert 5：三条主体沟槽列无内容
     assert_gutters_blank(&buf, 110);
 
-    // Assert 6：输入行右侧（指标行之外）不得贴到内容列最后一列
+    // Assert 6：输入行右侧（除底面行之外）不得贴到内容列最后一列
     let input_row = row_text(&buf, prompt_y);
     let input_cells = row_cells(&buf, prompt_y);
     assert!(
@@ -675,7 +702,7 @@ fn a7_metrics_row_formats_compact_numbers_and_ratios() {
 
     // Act
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let last = metrics_row(&buf);
 
     // Assert
     assert!(
@@ -711,7 +738,7 @@ fn a8_metrics_row_hides_segments_without_values() {
     // 用例 1：全零（in=0 / out=0 / window=0）→ 右簇整段为空，只剩 workspace
     let mut state = tui::TuiState::default();
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let last = metrics_row(&buf);
     for needle in ["↑", "↓", "缓存", "上下文", "—"] {
         assert!(
             !last.contains(needle),
@@ -731,7 +758,7 @@ fn a8_metrics_row_hides_segments_without_values() {
     state.last_context_tokens = 50_000;
     state.context_window_tokens = 200_000;
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let last = metrics_row(&buf);
     assert!(
         last.contains("上下文 25%"),
         "window>0 时上下文段必须显示（50000/200000=25%）：{last:?}"
@@ -751,7 +778,7 @@ fn a8_metrics_row_hides_segments_without_values() {
     state.last_context_tokens = 12_345;
     state.context_window_tokens = 0;
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let last = metrics_row(&buf);
     assert!(
         !last.contains("上下文"),
         "window=0 时上下文段不得显示：{last:?}"
@@ -836,7 +863,7 @@ fn a9_apply_turn_usage_is_idempotent_per_turn_and_accumulates_across_turns() {
 // ---------------------------------------------------------------------------
 #[test]
 fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
-    // 用例 1/2：窄终端仍渲染指标行且不越沟槽
+    // 用例 1/2：窄终端 header 仍渲染指标簇，且不越沟槽/不越过内容列
     // （v3 R11：无值不显示，故注入有值状态，右簇才有 ↑/↓ 段可断言）
     for (w, h) in [(60u16, 20u16), (80u16, 24u16)] {
         let mut state = tui::TuiState::default();
@@ -851,22 +878,22 @@ fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
         assert_eq!(buf.area.height, h, "{w}×{h} 渲染高度不符");
         assert_gutters_blank(&buf, w);
 
-        let last = row_text(&buf, h - 1);
+        let last = metrics_row(&buf);
         assert!(
             last.contains("↑") && last.contains("↓"),
-            "{w}×{h} 最后一行必须仍是指标行（↑/↓），实际 {last:?}"
+            "{w}×{h} header(row 0) 必须仍承载指标簇（↑/↓），实际 {last:?}"
         );
-        // 窄终端不得把指标行挤到内容列外（右端必须收在内容列内）
+        // 窄终端不得把 header 指标簇挤到内容列外（右端必须收在内容列内）
         let (cx, cw) = content_geometry(w);
-        let right_edge = row_cells(&buf, h - 1);
+        let right_edge = row_cells(&buf, 0);
         assert!(
             right_edge[(cx + cw) as usize].trim().is_empty(),
-            "{w}×{h} 指标行越过内容列右边界（x={}）",
+            "{w}×{h} header 指标簇越过内容列右边界（x={}）",
             cx + cw
         );
     }
 
-    // 用例 3：浮层态（mode != Normal）composer + 指标行必须整体收起
+    // 用例 3：浮层态（mode != Normal）composer + 底面行必须整体收起（指标簇留在 header，不落到底面）
     let mut state = tui::TuiState::default();
     state.total_input_tokens = 1200;
     state.total_output_tokens = 345;
@@ -886,10 +913,11 @@ fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
     );
 
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    // ADR 0078：指标簇在 header，底面最后一行不得残留指标（浮层态同样成立）。
+    let bottom = row_text(&buf, 29);
     assert!(
-        !last.contains("缓存") && !last.contains("上下文") && !last.contains("↑"),
-        "浮层态最后一行不得渲染指标簇，实际 {last:?}"
+        !bottom.contains("缓存") && !bottom.contains("上下文") && !bottom.contains("↑"),
+        "浮层态底面最后一行不得渲染指标簇，实际 {bottom:?}"
     );
     let text = all_text(&buf);
     assert!(
@@ -900,7 +928,8 @@ fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// A12（v3 §6 R9/R10）：指标行 = GHOST 前景 + CANVAS 背景；间距行 28 全空白 + CANVAS
+// A12（ADR 0078 §决策 1/6/8）：header 右簇 = FAINT 前景（品牌 ACCENT+BOLD、工作区 MUTED）；
+// 底面行 = GHOST 模型身份 on CANVAS；呼吸行 28 = 色带内 SURFACE 空白。
 // ---------------------------------------------------------------------------
 
 /// v3 R11：段间分隔符必须恰好是 `" · "`；只检测**真正的孤立分隔符**。
@@ -959,13 +988,12 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
     // Act
     let buf = screen(&mut state, 110, 30);
 
-    // Assert 1（R10）：指标行**仅在内容列内**断言 —— 非续格 bg=CANVAS、字形 fg=GHOST。
+    // Assert 1（ADR 0078 §决策 6/8）：底面行单一职责 = 右对齐模型身份（GHOST on CANVAS），
+    // 不再承载工作区标签或数值指标（二者分别迁到 header 左槽 / 右槽）。
     //
-    // 用例缺陷修正（v4b）：原实现遍历终端整行，迫使实现把呼吸行 SURFACE 铺满整行，
-    // 会在对话框底部形成比对话框更宽的横条，破坏 ADR 0038 的沟槽纪律。指标行/呼吸行
-    // 始终与内容列同宽，故只断言 `content.x..content.x+content.width`。
-    // （v3 test-fix 的宽字符续格跳过逻辑保留：ratatui 0.29 `Buffer::diff` 对续格置 to_skip，
-    // TestBackend 首帧该格为 `Cell::default`，不承载独立 fg/bg 契约。）
+    // 只断言内容列（`content.x..content.x+content.width`）：沟槽纪律见 Assert 3；
+    // 宽字符续格跳过逻辑保留（ratatui 0.29 `Buffer::diff` 对续格置 to_skip，
+    // TestBackend 首帧该格为 `Cell::default`，不承载独立 fg/bg 契约）。
     let mut glyph_cells = 0usize;
     let mut skip_continuation = false;
     for x in cx..cx + cw {
@@ -976,7 +1004,7 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
         let cell = &buf[(x, 29)];
         assert_eq!(
             cell.bg, CANVAS,
-            "指标行内容列第 {x} 列背景必须是 CANVAS（非色带 SURFACE），实际 {:?}",
+            "底面行内容列第 {x} 列背景必须是 CANVAS（ADR 0078 §决策 8：不在色带内），实际 {:?}",
             cell.bg
         );
         let symbol = cell.symbol();
@@ -985,7 +1013,7 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
             assert_eq!(
                 cell.fg,
                 GHOST,
-                "指标行内容列第 {x} 列字形前景必须是 GHOST Rgb(104,98,90)，实际 {:?}（symbol={:?}）",
+                "底面行内容列第 {x} 列字形前景必须是 GHOST Rgb(104,98,90)，实际 {:?}（symbol={:?}）",
                 cell.fg,
                 symbol
             );
@@ -997,9 +1025,74 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
             }
         }
     }
+    assert!(glyph_cells > 0, "底面行必须至少渲染一个字形（模型身份）");
+    let bottom = row_text(&buf, 29);
+    assert_eq!(
+        bottom.trim(),
+        state.model.trim(),
+        "底面行只能承载模型身份（ADR 0078 §决策 6），实际 {bottom:?}"
+    );
+    for needle in ["↑", "↓", "缓存", "上下文", "—"] {
+        assert!(
+            !bottom.contains(needle),
+            "底面行不得残留指标段/占位符 {needle:?}（指标簇已上移 header）：{bottom:?}"
+        );
+    }
+
+    // Assert 1b（ADR 0078 §决策 1）：header(row 0) 单行双区配色 ——
+    // 品牌 ACCENT+BOLD、分隔符与右簇 FAINT、工作区标签 MUTED；指标簇右对齐到内容列最后一列。
+    let header = row_text(&buf, 0);
+    assert_eq!(buf[(cx, 0)].symbol(), "P", "header 必须从内容列起点以品牌起排");
+    assert_eq!(
+        buf[(cx, 0)].fg,
+        ACCENT,
+        "header 品牌必须用 ACCENT Rgb(214,114,80)，实际 {:?}",
+        buf[(cx, 0)].fg
+    );
     assert!(
-        glyph_cells > 0,
-        "指标行必须至少渲染一个字形（workspace 标签 / 指标段）"
+        buf[(cx, 0)].modifier.contains(Modifier::BOLD),
+        "header 品牌必须加粗（ADR 0078 §决策 1）"
+    );
+    let dot_x = cx + 6;
+    assert_eq!(buf[(dot_x, 0)].symbol(), "·", "品牌与工作区之间必须有 `·` 分隔符");
+    assert_eq!(
+        buf[(dot_x, 0)].fg,
+        FAINT,
+        "header 分隔符必须用 FAINT，实际 {:?}",
+        buf[(dot_x, 0)].fg
+    );
+    let ws_x = cx + header_brand_prefix_width() as u16;
+    assert_eq!(
+        buf[(ws_x, 0)].fg,
+        MUTED,
+        "header 工作区标签必须用 MUTED，实际 {:?}",
+        buf[(ws_x, 0)].fg
+    );
+    let metrics_start = header
+        .find('↑')
+        .map(|byte| byte as u16)
+        .expect("header 右槽必须渲染指标簇（↑ 段）");
+    assert!(
+        metrics_start > ws_x,
+        "指标簇必须位于工作区标签右侧（左区→右区），实际 x={metrics_start} vs ws_x={ws_x}"
+    );
+    for x in metrics_start..cx + cw {
+        let cell = &buf[(x, 0)];
+        if cell.symbol().trim().is_empty() {
+            continue;
+        }
+        assert_eq!(
+            cell.fg,
+            FAINT,
+            "header 右簇字形必须用 FAINT（x={x}，symbol={:?}），实际 {:?}",
+            cell.symbol(),
+            cell.fg
+        );
+    }
+    assert!(
+        !buf[(cx + cw - 1, 0)].symbol().trim().is_empty(),
+        "header 指标簇必须右对齐到内容列最后一列 x={}（不留行尾空白）",
+        cx + cw - 1
     );
 
     // Assert 2（R13/R14）：y=28 是**色带内**呼吸行 —— **内容列**逐格空白且 bg=SURFACE。
@@ -1018,8 +1111,8 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
         );
     }
 
-    // Assert 3（ADR 0038 沟槽纪律）：沟槽列（0/1/W-2/W-1）在呼吸行（28）与指标行（29）
-    // 必须保持 CANVAS 背景且无字形 —— 色带/指标不得越出内容列。
+    // Assert 3（ADR 0038 沟槽纪律）：沟槽列（0/1/W-2/W-1）在呼吸行（28）与底面行（29）
+    // 必须保持 CANVAS 背景且无字形 —— 色带/底面不得越出内容列。
     assert_eq!(cx, 3, "110×30 的内容列起点应为 3（GUTTER=3）");
     for x in [0u16, 1, buf.area.width - 2, buf.area.width - 1] {
         for y in [28u16, 29u16] {
@@ -1031,7 +1124,7 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
             );
             assert_eq!(
                 cell.bg, CANVAS,
-                "沟槽列 x={x}（y={y}）背景必须是 CANVAS（呼吸行/指标行不得铺满整行），实际 {:?}",
+                "沟槽列 x={x}（y={y}）背景必须是 CANVAS（呼吸行/底面行不得铺满整行），实际 {:?}",
                 cell.bg
             );
         }
@@ -1051,7 +1144,7 @@ fn a13_metrics_segments_hide_independently() {
     state.last_context_tokens = 0;
     state.context_window_tokens = 0;
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let last = metrics_row(&buf);
     assert!(
         last.contains("↑500") && last.contains("↓0"),
         "in>0 时 ↑/↓ 段必须显示：{last:?}"
@@ -1075,7 +1168,7 @@ fn a13_metrics_segments_hide_independently() {
     state.last_context_tokens = 50_000;
     state.context_window_tokens = 200_000;
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let last = metrics_row(&buf);
     assert!(
         last.contains("上下文 25%"),
         "window>0 时上下文段必须显示（50000/200000=25%）：{last:?}"
@@ -1096,7 +1189,7 @@ fn a13_metrics_segments_hide_independently() {
     state.last_context_tokens = 0;
     state.context_window_tokens = 0;
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let last = metrics_row(&buf);
     assert!(
         last.contains("↑0") && last.contains("↓250"),
         "out>0 时 ↑/↓ 段必须显示：{last:?}"

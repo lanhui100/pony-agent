@@ -85,13 +85,13 @@ fn turn_stream_event_sample() -> Value {
         // 但按本夹具「必须给值，否则快照漏键」的约定填 Some，覆盖线缆键 stopReason）。
         stop_reason: Some("user".to_string()),
         // P0 metrics-snapshot：`#[serde(default, skip_serializing_if = "Option::is_none")]`，
-        // 必须填 Some 才真正上线缆 —— 否则 `metrics` 及其 22 个子键完全落在契约门禁之外。
+        // 必须填 Some 才真正上线缆 —— 否则 `metrics` 及其 25 个子键完全落在契约门禁之外。
         metrics: Some(turn_metrics_snapshot_sample()),
     };
     serde_json::to_value(&event).expect("TurnStreamEvent must serialize")
 }
 
-/// `TurnMetricsSnapshot` 的代表性样本：24 个字段全部给固定字面量。
+/// `TurnMetricsSnapshot` 的代表性样本：27 个字段全部给固定字面量。
 ///
 /// 禁止 `Default::default()`：那会让全部 `Option` 退化为 `None`，与真实线缆形状不符
 /// （token 速度口径 v2 的 `callSpeedBasis` / `turnSpeedBasis` 带
@@ -115,6 +115,9 @@ fn turn_metrics_snapshot_sample() -> TurnMetricsSnapshot {
         turn_output_tokens: 1_500,
         turn_generation_ms: 2_176,
         turn_calls: 1,
+        turn_context_input_tokens: 42_000,
+        turn_cache_hit_input_tokens: 9_000,
+        turn_calls_with_cache: 1,
         cache_hit_ratio: Some(0.214),
         context_window_tokens: Some(200_000),
         context_ratio: Some(0.21),
@@ -125,7 +128,7 @@ fn turn_metrics_snapshot_sample() -> TurnMetricsSnapshot {
     }
 }
 
-/// `TurnMetricsSnapshot` 的真实 serde 线缆键（22 个 camelCase 子键由此进入门禁）。
+/// `TurnMetricsSnapshot` 的真实 serde 线缆键（25 个 camelCase 子键由此进入门禁）。
 fn turn_metrics_snapshot_wire_sample() -> Value {
     serde_json::to_value(turn_metrics_snapshot_sample())
         .expect("TurnMetricsSnapshot must serialize")
@@ -192,7 +195,7 @@ fn build_snapshot() -> Value {
         ("TurnStreamEvent", turn_stream_event_sample()),
         ("TurnResult", turn_result_sample()),
         ("TurnInput", turn_input_sample()),
-        // P0 metrics-snapshot：22 个子键必须逐个进入门禁（顶层 `metrics` 键只覆盖附着关系）。
+        // P0 metrics-snapshot：25 个子键必须逐个进入门禁（顶层 `metrics` 键只覆盖附着关系）。
         ("TurnMetricsSnapshot", turn_metrics_snapshot_wire_sample()),
     ] {
         types.insert(

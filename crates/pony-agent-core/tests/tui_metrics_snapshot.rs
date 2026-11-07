@@ -1,4 +1,9 @@
-//! [W2 / task-2] TUI 消费验收：指标行必须取自 `TurnMetricsSnapshot`（快照为唯一来源）。
+//! [W2 / task-2] TUI 消费验收：指标簇必须取自 `TurnMetricsSnapshot`（快照为唯一来源）。
+//!
+//! 行位置契约（ADR 0078，implemented）：数值指标簇 `metrics_segments`
+//! （`↑in ↓out · 缓存 x% · 上下文 y% · ≈t/s · 首token`）锚定 **header 行（row 0）右槽**；
+//! 底面最后一行只剩右对齐模型身份（`model [· 思考:<档位>]`，不含 provider）。
+//! 旧「最后一行 = cwd + 指标」判据随 ADR 0078 §影响 作废，本文件断言一律取 header 行。
 //!
 //! 契约源（只读）：`.dev-team/contract-matrix-metrics-snapshot.md` §1 I6 / I7，§0「两端消费约束」。
 //! 冻结 API 面（Lead 裁决，不得改名）：`TuiState::live_metrics` / `TuiState::apply_live_metrics`。
@@ -65,8 +70,14 @@ fn row_text(buf: &Buffer, y: u16) -> String {
     out
 }
 
-/// 底部指标行（既有回归测试 tui_token_context_wave41 / tui_dialog_wave39 的同一取行位置）。
-fn metrics_row(state: &mut tui::TuiState) -> String {
+/// 指标簇所在行：ADR 0078 起锚定 header(row 0) 右槽（左槽为 `PONY  ·  ~/<目录名>`）。
+fn header_row(state: &mut tui::TuiState) -> String {
+    let buf = screen(state, 110, 30);
+    row_text(&buf, 0)
+}
+
+/// 底面最后一行：ADR 0078 起只承载右对齐模型身份，不得残留任何指标。
+fn bottom_row(state: &mut tui::TuiState) -> String {
     let buf = screen(state, 110, 30);
     row_text(&buf, 29)
 }
@@ -110,18 +121,25 @@ fn c1_metrics_line_renders_percentages_from_snapshot() {
         state.live_metrics.is_some(),
         "apply_live_metrics 必须把快照写入 live_metrics"
     );
-    let last = metrics_row(&mut state);
+    // ADR 0078：数值指标簇在 header(row 0) 右槽；底面最后一行只剩模型身份。
+    let header = header_row(&mut state);
     assert!(
-        last.contains("缓存 60%"),
-        "I6：缓存百分比必须 = round(cacheHitRatio * 100) = 60%，实际：{last:?}"
+        header.contains("缓存 60%"),
+        "I6：缓存百分比必须 = round(cacheHitRatio * 100) = 60%，实际：{header:?}"
     );
     assert!(
-        last.contains("上下文 25%"),
-        "I3/I6：上下文百分比必须 = round(contextRatio * 100) = 25%，实际：{last:?}"
+        header.contains("上下文 25%"),
+        "I3/I6：上下文百分比必须 = round(contextRatio * 100) = 25%，实际：{header:?}"
     );
     assert!(
-        !last.contains("100%"),
-        "I6：0.6 的缓存比绝不能被渲染成 100%（clamp 掩盖），实际：{last:?}"
+        !header.contains("100%"),
+        "I6：0.6 的缓存比绝不能被渲染成 100%（clamp 掩盖），实际：{header:?}"
+    );
+    // 分层守卫（ADR 0078 §决策 6）：底面行不得再承载指标，避免「一行两义」回归。
+    let bottom = bottom_row(&mut state);
+    assert!(
+        !bottom.contains("缓存") && !bottom.contains("上下文") && !bottom.contains('↑'),
+        "ADR 0078：底面最后一行只能承载模型身份，不得残留指标簇，实际：{bottom:?}"
     );
 }
 
@@ -154,23 +172,24 @@ fn c2_tui_never_recomputes_cache_ratio_from_raw_tokens() {
     state.apply_live_metrics(snapshot);
 
     // Assert：只认快照字段，不对原始 token 做任何二次运算
-    let last = metrics_row(&mut state);
+    // ADR 0078：指标簇在 header(row 0)。
+    let header = header_row(&mut state);
     assert!(
-        last.contains("缓存 60%"),
-        "I6：缓存百分比必须直接取自快照的 cacheHitRatio = 0.6 ⇒ 60%，实际：{last:?}"
+        header.contains("缓存 60%"),
+        "I6：缓存百分比必须直接取自快照的 cacheHitRatio = 0.6 ⇒ 60%，实际：{header:?}"
     );
     assert!(
-        !last.contains("9900%"),
+        !header.contains("9900%"),
         "I6：禁止用 cache_hit_input_tokens / context_input_tokens 现场重算（99000/1000 = 9900%），\
-         实际：{last:?}"
+         实际：{header:?}"
     );
     assert!(
-        !last.contains("6000%"),
-        "I6：禁止任何把比值当百分数的重复换算（0.6 被再乘 100），实际：{last:?}"
+        !header.contains("6000%"),
+        "I6：禁止任何把比值当百分数的重复换算（0.6 被再乘 100），实际：{header:?}"
     );
     assert!(
-        !last.contains("缓存 100%"),
-        "I6：禁止用 clamp(0,100) 把越界值掩盖成恒 100%，实际：{last:?}"
+        !header.contains("缓存 100%"),
+        "I6：禁止用 clamp(0,100) 把越界值掩盖成恒 100%，实际：{header:?}"
     );
 }
 
@@ -189,17 +208,17 @@ fn c3_legacy_path_without_snapshot_is_unchanged() {
         "I7：旧路径下 live_metrics 必须保持 None"
     );
 
-    // Act
-    let last = metrics_row(&mut state);
+    // Act（ADR 0078：指标簇已上移 header(row 0)，取行位置随之迁移，语义不变）
+    let header = header_row(&mut state);
 
     // Assert：既有语义（↑25k / 上下文 25%）逐字不变
     assert!(
-        last.contains("↑25k"),
-        "I7：旧路径输入指标必须仍显示当前上下文占用 ↑25k，实际：{last:?}"
+        header.contains("↑25k"),
+        "I7：旧路径输入指标必须仍显示当前上下文占用 ↑25k，实际：{header:?}"
     );
     assert!(
-        last.contains("上下文 25%"),
-        "I7：旧路径上下文百分比必须仍为 25000/100000 = 25%，实际：{last:?}"
+        header.contains("上下文 25%"),
+        "I7：旧路径上下文百分比必须仍为 25000/100000 = 25%，实际：{header:?}"
     );
 }
 
@@ -228,7 +247,8 @@ fn c4_speed_segment_renders_basis_prefix() {
     // ① stream_decode（可比解码速度）⇒ 裸值，不带 `≈`（避免把可比速度标成估计值）。
     let mut decoded = tui::TuiState::default();
     decoded.apply_live_metrics(speed_fixture(Some(TurnSpeedBasis::StreamDecode)));
-    let decoded_row = metrics_row(&mut decoded);
+    // ADR 0078：指标簇在 header(row 0)。
+    let decoded_row = header_row(&mut decoded);
     assert!(
         decoded_row.contains("120 t/s"),
         "I9：stream_decode 必须渲染裸速度 120 t/s，实际：{decoded_row:?}"
@@ -241,7 +261,7 @@ fn c4_speed_segment_renders_basis_prefix() {
     // ② end_to_end（含排队+prefill，跨调用不可比）⇒ 必须带 `≈` 前缀。
     let mut end_to_end = tui::TuiState::default();
     end_to_end.apply_live_metrics(speed_fixture(Some(TurnSpeedBasis::EndToEnd)));
-    let e2e_row = metrics_row(&mut end_to_end);
+    let e2e_row = header_row(&mut end_to_end);
     assert!(
         e2e_row.contains("≈120 t/s"),
         "I10：end_to_end 必须渲染为 `≈120 t/s`（口径不可与前直接比较），实际：{e2e_row:?}"
@@ -250,7 +270,7 @@ fn c4_speed_segment_renders_basis_prefix() {
     // ③ basis 缺席（旧快照/legacy wire）⇒ 仍渲染原值（向后兼容，不伪造口径）。
     let mut legacy = tui::TuiState::default();
     legacy.apply_live_metrics(speed_fixture(None));
-    let legacy_row = metrics_row(&mut legacy);
+    let legacy_row = header_row(&mut legacy);
     assert!(
         legacy_row.contains("120 t/s"),
         "向后兼容：basis 缺席的旧快照仍必须显示速度 120 t/s，实际：{legacy_row:?}"

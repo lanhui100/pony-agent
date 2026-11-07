@@ -1,5 +1,7 @@
 // wave-41: TUI 输入 token 与上下文计算口径验收测试
 // 契约：.dev-team/contract-matrix-tui-token-context-wave41.md 对齐 ADR 0035 S1 规范
+// 行位置：ADR 0078（implemented）起数值指标簇锚定 header 行（row 0）右槽，
+// 底面最后一行只剩右对齐模型身份；旧「最后一行 = cwd + 指标」判据已作废。
 
 #[path = "../src/bin/tui.rs"]
 #[allow(dead_code, unused_imports, unused_variables, unused_mut)]
@@ -176,16 +178,17 @@ fn a4_context_percentage_is_based_on_current_context_input() {
     state.context_window_tokens = 100_000;
 
     // 断言分子是 25_000 (25%)，而非 30_000 (30%)
+    // ADR 0078：指标簇在 header(row 0) 右槽（底面最后一行只剩模型身份）。
     let buf = screen(&mut state, 110, 30);
-    let last = row_text(&buf, 29);
+    let header = row_text(&buf, 0);
 
     assert!(
-        last.contains("上下文 25%"),
-        "上下文百分比必须是当前上下文输入 25000 / 100000 = 25%，而非包含输出后的 30%，实际：{last}"
+        header.contains("上下文 25%"),
+        "上下文百分比必须是当前上下文输入 25000 / 100000 = 25%，而非包含输出后的 30%，实际：{header}"
     );
     assert!(
-        last.contains("↑25k"),
-        "输入指标必须显示当前上下文占用 25k，实际：{last}"
+        header.contains("↑25k"),
+        "输入指标必须显示当前上下文占用 25k，实际：{header}"
     );
 }
 
@@ -200,11 +203,12 @@ fn a5_cache_hit_percentage_is_calculated_per_turn_and_clamped() {
     state.apply_turn_usage(1000, 100, 800, 1100);
     assert_eq!(state.turn_cache_hit_tokens, 800, "第 1 轮单轮缓存命中为 800");
 
+    // ADR 0078：指标簇在 header(row 0)。
     let buf1 = screen(&mut state, 110, 30);
-    let last1 = row_text(&buf1, 29);
+    let header1 = row_text(&buf1, 0);
     assert!(
-        last1.contains("缓存 80%"),
-        "第 1 轮缓存命中率必须是 800/1000 = 80%，实际：{last1}"
+        header1.contains("缓存 80%"),
+        "第 1 轮缓存命中率必须是 800/1000 = 80%，实际：{header1}"
     );
 
     // 第 2 轮：新一轮开始清空本轮 usage
@@ -219,14 +223,14 @@ fn a5_cache_hit_percentage_is_calculated_per_turn_and_clamped() {
     assert_eq!(state.turn_cache_hit_tokens, 600, "第 2 轮单轮缓存命中必须为 600");
 
     let buf2 = screen(&mut state, 110, 30);
-    let last2 = row_text(&buf2, 29);
+    let header2 = row_text(&buf2, 0);
     assert!(
-        last2.contains("缓存 60%"),
-        "第 2 轮缓存命中率必须是单轮次计算 600/1000 = 60%，绝不能是 1400/1000 = 140%！实际：{last2}"
+        header2.contains("缓存 60%"),
+        "第 2 轮缓存命中率必须是单轮次计算 600/1000 = 60%，绝不能是 1400/1000 = 140%！实际：{header2}"
     );
     assert!(
-        !last2.contains("140%"),
-        "缓存命中率绝不得超过 100%，实际：{last2}"
+        !header2.contains("140%"),
+        "缓存命中率绝不得超过 100%，实际：{header2}"
     );
 }
 

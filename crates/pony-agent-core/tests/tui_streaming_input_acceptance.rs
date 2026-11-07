@@ -1159,19 +1159,22 @@ fn a23_dispatch_and_rejection_logs_carry_depth_and_key_class() {
 fn a24_metrics_line_wires_queue_indicator_rendering() {
     // L3-B ADVISORY：A16/A19–A21 只锁纯函数，接线无护栏（把 metrics_line 里的渲染块删掉仍全绿）。
     // 本用例用源码结构断言锁住「渲染函数体 → queue_indicator_line」这条接线，删块即红。
-    let metrics_body = fn_body(TUI_SRC, "fn metrics_line");
+    // ADR 0078 把底面行契约从「工作区 + 指标」改为「一次性提示/排队反馈 + 模型身份」，
+    // 渲染函数同步由 `metrics_line` 更名为 `status_line`（tui.rs `fn status_line`）。
+    // 断言目标仍是同一个**每帧渲染**的输入框下方行，接线护栏不变。
+    let status_body = fn_body(TUI_SRC, "fn status_line");
     assert!(
-        metrics_body.contains("queue_indicator_line("),
-        "C23/C16：metrics_line 渲染函数体必须调用 queue_indicator_line（删掉渲染块会让流式期排队不可见）"
+        status_body.contains("queue_indicator_line("),
+        "C23/C16：status_line 渲染函数体必须调用 queue_indicator_line（删掉渲染块会让流式期排队不可见）"
     );
     // 指示器必须由 state 的实时队列/notice 驱动，而不是常量或其他字段。
     assert!(
-        metrics_body.contains("queued_count()"),
-        "C23：metrics_line 必须以 state.queued_count() 作为排队计数来源"
+        status_body.contains("queued_count()"),
+        "C23：status_line 必须以 state.queued_count() 作为排队计数来源"
     );
     assert!(
-        metrics_body.contains("queue_notice"),
-        "C23：metrics_line 必须读取 state.queue_notice（C4/C6 反馈的流式渲染点）"
+        status_body.contains("queue_notice"),
+        "C23：status_line 必须读取 state.queue_notice（C4/C6 反馈的流式渲染点）"
     );
     // status_word 不得重复渲染排队指示器（C18 ③ 去重要求）。
     let status_word_body = fn_body(TUI_SRC, "fn status_word");

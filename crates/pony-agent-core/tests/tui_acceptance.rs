@@ -993,37 +993,98 @@ fn test_resolver_registry_first_for_ponyllm() {
 }
 
 /// 跨平台等价契约（Windows 上替代被 ignore 的三分支用例）：
-/// `resolve_active_provider_id` 必须读取**默认注册表**——返回的 id 必须出自默认注册表
-/// 的 provider 列表；注册表为空时必须返回 `None`，不得凭空造 id。
+/// `resolve_active_provider_id` 必须读取**注册表**——返回的 id 必须出自注册表 provider 列表，
+/// 已持久化的选中项优先；选中项不在列表时回落首个 provider（不得凭空造 id）。
 ///
-/// 为什么这样写：Windows 无法把默认注册表重定向到临时目录（known folder API 不读环境），
-/// 但本契约不需要隔离——它把函数结果与同一份默认注册表视图对照，读错配置根/读空/造 id
-/// 都会被抓到。不做"复制一份 5 行实现再对比"的镜像断言，避免自证。
+/// 为什么不再读「环境变量指向的默认配置根」：
+/// 1. Windows 上 `dirs::config_dir()` 走 known folder API，不接受 `XDG_CONFIG_HOME` 重定向；
+/// 2. Linux 上 `XDG_CONFIG_HOME` 未设时 `dirs::config_dir()` 回落 `$HOME/.config`，而同一测试
+///    二进制内的并行用例（`tui.rs` 内嵌测试）会改写 `HOME` 做沙箱隔离 —— 于是本用例中
+///    视图读取与函数内部读取可能落在**不同配置根**，读到「本机真实注册表」与「空注册表」各
+///    一次，表现为机器状态相关的偶发假红（本机曾读到真实 `provider-ppx`）。
+/// 故改走产品既有接缝 `TuiState::provider_registry_path`（与 `registry_store()` 同源）：
+/// 注入临时注册表后读侧位置完全确定、零环境依赖，鉴别力更强（读错根/读空/造 id 都会红）。
 #[test]
 fn test_resolve_active_provider_id_reads_default_registry() {
-    use pony_agent_core::agent::config::ProviderRegistryStore;
+    use pony_agent_core::agent::config::{ProviderConfigView, ProviderRegistryStore};
+    use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 
-    let id = {
-        let _g = registry_env_lock();
-        let view = ProviderRegistryStore::new().load_view();
-        let resolved = tui::resolve_active_provider_id(&tui::TuiState::default());
-        let ids: Vec<String> = view.providers.iter().map(|p| p.id.clone()).collect();
-        (resolved, ids)
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("tui-active-provider-{pid}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let registry_path = dir.join("providers.json");
+
+    let provider = |id: &str| ProviderConfigView {
+        id: id.to_string(),
+        name: id.to_string(),
+        protocol: ProviderProtocol::OpenAiCompletions,
+        base_url: "http://127.0.0.1:1/v1".to_string(),
+        auth_type: ProviderAuthType::Bearer,
+        api_key_env_var: format!("{}_API_KEY", id.to_uppercase()),
+        api_key_value: String::new(),
+        api_key_present: true,
+        supported_protocols: vec![],
+        endpoints: vec![],
+        models: vec![],
+        selected_model_id: None,
     };
-    let (resolved, ids) = id;
 
-    if ids.is_empty() {
-        assert!(
-            resolved.is_none(),
-            "默认注册表为空时 resolve_active_provider_id 必须返回 None，实际 {resolved:?}"
-        );
-        return;
-    }
-    let resolved = resolved.expect("默认注册表非空时必须返回某个 provider id");
+    let write_registry = |ids: &[&str], selected: Option<&str>| {
+        let store = ProviderRegistryStore::with_path(registry_path.clone());
+        let mut view = store.load_view();
+        view.providers = ids.iter().map(|id| provider(id)).collect();
+        view.selected_provider_id = selected.map(|s| s.to_string());
+        store.save_view(view).expect("save isolated registry");
+    };
+
+    let resolve = |state_id: Option<&str>| {
+        let mut state = tui::TuiState::default();
+        state.provider_registry_path = Some(registry_path.clone());
+        if let Some(id) = state_id {
+            state.current_provider_id = id.to_string();
+        }
+        tui::resolve_active_provider_id(&state)
+    };
+
+    // ① 注册表选中的 provider 必须被采用（返回 id 出自注册表列表）。
+    write_registry(&["alpha", "beta"], Some("beta"));
+    assert_eq!(
+        resolve(None).as_deref(),
+        Some("beta"),
+        "必须采用注册表持久化的选中 provider"
+    );
+
+    // ② 选中项不在列表 ⇒ 回落首个 provider，不得返回幽灵 id。
+    write_registry(&["alpha", "beta"], Some("ghost"));
+    assert_eq!(
+        resolve(None).as_deref(),
+        Some("alpha"),
+        "选中项不存在时必须回落首个 provider"
+    );
+
+    // ③ state 内的显式选择优先于注册表选中项。
+    write_registry(&["alpha", "beta"], Some("beta"));
+    assert_eq!(
+        resolve(Some("alpha")).as_deref(),
+        Some("alpha"),
+        "state.current_provider_id 命中列表时必须优先"
+    );
+
+    // ④ 返回值恒为注册表列表成员（读错配置根时 ⇒ 为空或他处 id，两者都会红）。
+    let ids: Vec<String> = ProviderRegistryStore::with_path(registry_path.clone())
+        .load_view()
+        .providers
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
+    let resolved = resolve(None).expect("注册表非空时必须返回某个 provider id");
     assert!(
         ids.iter().any(|id| id == &resolved),
-        "返回的 id `{resolved}` 不在默认注册表的 provider 列表 {ids:?} 中（读错了配置根？）"
+        "返回的 id `{resolved}` 不在注册表 provider 列表 {ids:?} 中（读错了配置根？）"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // wave-36b：mouse_capture 默认关 + 切换取反（纯状态层）。

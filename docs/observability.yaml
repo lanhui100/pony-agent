@@ -516,3 +516,43 @@ note: >-
   (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 未改动。行为门的机械收口落在测试层——
       `crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs::o3_ask_panel_survives_wide_narrow_and_tiny_terminals`
       与 `bin/tui.rs` 的 `test_inline_ask_height_grows_with_wrapped_question` / `test_wrap_ask_question_*`。
+  【wave-tui-sub-session-nav 归属登记（2026-11-07）｜TUI 子会话导航：Ctrl+↑ 返回主会话 / Ctrl+←/→ 切换队友 / 输入区身份徽标（ADR 0083）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地按键裁决、内存状态迁移与终端渲染**，
+  无新增对外接口、网络 IO、后台任务、LLM 调用或依赖；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更是 `bin/tui.rs` 的 `sub_session_shortcut` / `sub_session_candidates` /
+      `step_sub_session_target` / `sub_session_badge_text` 四个纯函数 + `enter_sub_session_at` /
+      `switch_sub_session` / `return_to_main_session` 三条本地状态迁移路径 + 输入区下方 1 行徽标渲染；
+      全部输入为「本地按键事件 + 花名册内存快照」，不产生任何遥测事实。进程仍随用户启停的终端面，
+      无常驻监听地址、无 Service、不进集群，Prometheus pull 与节点侧日志采集的结构前提均不成立。
+  (3) 变更性质（仅登记，非遥测变更）：新增子会话导航快捷键面（仅子会话内消费，主会话 `Ctrl+←/→` 保持光标语义）、
+      候选过滤（剔除 `lead` / 无会话 / 宿主不可加载）、取模循环步进、流式期只提示不切会话、
+      身份徽标（`子智能体 · 名称（角色） i/n · 快捷键提示`）、`reset_session_scope` 一并清空
+      `agent_roster_state` / `return_session_id` / `sub_session`、`/teams` 作为 `/agents` 别名。
+      队友引擎仍在独立建栈（独立 SessionStore），本次不改其会话持久化与派发链路。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层而非遥测层——
+      `crates/pony-agent-core/tests/w3_sub_session_nav_test.rs` 的 a1–a4 / b1–b3 / c1–c3 / d1–d2 / e1 / f1
+      共 14 个用例，以及 `bin/tui.rs` 的 `tui::w3b_sub_session_tests::shortcut_only_ctrl_arrows` /
+      `badge_row_appears_only_in_sub_session`。
+  【wave-metrics-dual-caliber 归属登记（2026-11-07）｜TUI header 指标双口径：↑in 当前上下文、↓out 与缓存会话累计（ADR 0084）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地计量合成与终端渲染**，
+  无新增对外接口、网络 IO、后台任务、LLM 调用或依赖；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更面是 `agent/session/usage.rs`（`SessionUsageTotals` / `SessionUsageLedger` 纯计算）、
+      `agent/metrics_snapshot.rs`（轮级 Σ 三字段与 `context_ratio_for_window` 纯函数）、
+      `bin/tui.rs` 的 `metrics_segments` 渲染与 `begin_turn_usage` / `apply_live_metrics` /
+      `hydrate_state_from_session` 三处内存状态迁移；输入全部来自已存在的 per-call 记录与本地会话快照，
+      不产生任何新的遥测事实。进程仍随用户启停的终端面，无常驻监听地址、无 Service、不进集群，
+      Prometheus pull 与节点侧日志采集的结构前提均不成立。
+  (3) 变更性质（仅登记，非遥测变更）：header 双口径（`↑in` 当前上下文 / `↓out`、缓存命中率会话累计）、
+      会话台账幂等覆盖与轮首 stale 标记、`/resume` 用量回填、快照缺窗口时用注册表真实窗口回退比例计算；
+      `TurnMetricsSnapshot` 新增 3 个 additive wire 键（`turnContextInputTokens` /
+      `turnCacheHitInputTokens` / `turnCallsWithCache`），旧消费方不读取即不受影响。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——
+      `crates/pony-agent-core/tests/tui_metrics_dual_caliber.rs` 的 7 个用例（P0-1…P0-4 / P1-1 / P1-2 / P2）、
+      `agent::session::usage::tests` 的 5 个用例，以及 `metrics_snapshot_contract` / `ts_contract_snapshot`
+      的线缆键表门禁。

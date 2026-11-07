@@ -1157,6 +1157,12 @@ export interface TurnMetricsSnapshot {
   turnGenerationMs: number;
   /** 参与计算的调用数（I7：`stream_decode` ⇒ |eligible|；`end_to_end` ⇒ |valid|）。 */
   turnCalls: number;
+  /** 轮级 Σ 上下文输入（逐条 per-call 归一值相加；会话累计的唯一原料，禁止用末次调用冒充）。 */
+  turnContextInputTokens: number;
+  /** 轮级 Σ 缓存命中输入（只累加**上报了**命中字段的调用）。 */
+  turnCacheHitInputTokens: number;
+  /** 轮级上报了缓存命中的调用数（会话命中率分母可信度判据）。 */
+  turnCallsWithCache: number;
   /** `0..=1` 单位分数（I2）。 */
   cacheHitRatio: number | null;
   contextWindowTokens: number | null;

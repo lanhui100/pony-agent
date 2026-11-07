@@ -92,6 +92,8 @@
 - [0080 TUI 品牌标图形协议改为零 I/O 环境判定：禁止启动期 stdio 能力查询](0080-tui-splash-protocol-env-only-detection.md)
 - [0081 Ask 内联面板高度随问题换行增长，硬上限按终端宽度分档（40 / 24）](0081-tui-inline-ask-height-adaptive.md)
 - [0082 会话投影剔除宿主续轮提示：标题、轮次与 `/resume` 列表只认真实用户轮](0082-session-projection-excludes-host-continuation.md)
+- [0083 TUI 子会话导航：Ctrl+↑ 返回主会话、Ctrl+←/→ 切换队友、输入区身份徽标](0083-tui-sub-session-navigation-and-badge.md)
+- [0084 TUI header 指标双口径：`↑in` 当前上下文、`↓out` 与缓存命中率会话累计](0084-tui-metrics-dual-caliber-session-cumulative.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

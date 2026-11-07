@@ -408,7 +408,7 @@ fn wire_keys_are_camel_case_and_roundtrip() {
     // Act
     let value = serde_json::to_value(&snapshot).expect("TurnMetricsSnapshot 必须可序列化");
 
-    // Assert：24 个 camelCase 键（字段表逐条）
+    // Assert：27 个 camelCase 键（字段表逐条）
     let mut actual: Vec<String> = value
         .as_object()
         .expect("序列化结果必须是 JSON 对象")
@@ -434,6 +434,9 @@ fn wire_keys_are_camel_case_and_roundtrip() {
         "turnOutputTokens",
         "turnGenerationMs",
         "turnCalls",
+        "turnContextInputTokens",
+        "turnCacheHitInputTokens",
+        "turnCallsWithCache",
         "cacheHitRatio",
         "contextWindowTokens",
         "contextRatio",
