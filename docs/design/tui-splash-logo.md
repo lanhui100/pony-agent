@@ -2,6 +2,7 @@
 
 > 状态：已实施（ADR 0085 implemented）。配套决策：[ADR 0085](../decisions/0085-tui-splash-logo-fidelity-and-antialiasing.md)。
 > 对比图：[tui-splash-options.png](tui-splash-options.png)
+> 落地验收图：[tui-splash-receipt.png](tui-splash-receipt.png)（官方 master / 实机 tmux 字符画 / 同源位图 三联）
 
 ## 1. 现象
 
@@ -100,6 +101,12 @@
 | 品牌画行数 | ≤ 15 行 | RICH 15 行、COMPACT 11 行，不压底部呼吸行 |
 | 非真彩 | 不产生 AA 色 | `COLORTERM` 缺省 → 硬阈值路径，13 例 env 门禁测试全绿 |
 | 生成物漂移 | `--check` 幂等 | `splash-logo: 一致` |
+| 实机 IoU | ≥ 0.85 | **1.00**（tmux 捕获 27×30 反解 alpha vs master） |
+| 实机软边 | ≥ 40% | **0.989**（覆盖率非 0/1 的边界子像素中，捕获值同样为中间值） |
+| 合成残差 | ≤ 1/256 | 单通道 ≤ 1（反解 alpha 与 master 覆盖率平均绝对差 0.0004） |
+
+捕获方式：`tmux new-session -x 110 -y 40` 内跑 `COLORTERM=truecolor target/release/pony`，
+`capture-pane -e` 取带 SGR 的 40 行，按 8×16 单元格重绘（`docs/design/tui-splash-receipt.png` 左中右三联）。
 
 ## 6. 风险
 
