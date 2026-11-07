@@ -1,0 +1,66 @@
+# wave-67 `pony update` 端到端物理收据（Lead 亲跑，2026-11-07 19:27-19:31）
+
+## 1) 成功路径（本地 mock 清单 + 本地制品；逃生舱 MANIFEST_URL + ALLOW_INSECURE）
+环境：PONY_UPDATE_MANIFEST_URL=http://127.0.0.1:18787/pony-cli-latest.json
+      PONY_UPDATE_ALLOW_INSECURE=1
+      PONY_UPDATE_INSTALL_PATH=/tmp/pony-update-e2e/bin/pony
+清单：schema=pony-cli-manifest, version=0.1.199,
+      platforms.linux-x86_64={asset=pony-tui_0.1.199_linux-x86_64, sha256=e843547a…, size=64}
+更新前：--version = pony 0.1.156 · linux-x86_64 ；sha256 d4d0316a4a7e319a…
+命令：./target/release/pony update --json
+stdout：{"latest":"0.1.199","ok":true,"path":"/tmp/pony-update-e2e/bin/pony","previous":"0.1.156",
+         "sha256":"e843547a34fd8e85984b4c23b7b80b79198e91f4b3330cf2bae806e8c6917f54","updated":true}
+EXIT=0
+stderr：phase=discover ok manifest=… / phase=manifest ok version=0.1.199 asset=… size=64 /
+        phase=download ok bytes=64 / phase=verify ok sha256=e843547a… / phase=install ok path=… /
+        phase=verify_installed ok version=0.1.199
+更新后：--version = pony 0.1.199 · linux-x86_64 ；sha256 e843547a34fd8e85…（== 清单 sha）
+目录残留：仅 pony（无 .part/.new/.old/.lock）
+
+## 2) --check 幂等
+命令：… pony update --check --json ⇒ {"latest":"0.1.199","updated":false,"ok":true,…} EXIT=0（不下载制品）
+
+## 3) 失败路径（清单 sha256 故意错误）
+更新前 sha：e843547a34fd8e85
+stdout：{"error":{"code":"signature","message":"校验失败，已放弃安装（原有二进制未改动）：sha256 不符…"},
+         "exit_code":1,"ok":false}
+EXIT=1；更新后 sha：e843547a34fd8e85 ⇒ PASS：目标二进制逐字节未变；目录无残留
+
+## 4) 真实网络发现（生产口径，无 env）
+命令：./target/release/pony update --check --json
+stdout：{"error":{"code":"missing_asset","message":"未找到可用的发布资产：最近 20 个发布中没有一个包含
+         pony-cli-latest.json…"},"exit_code":3,"ok":false}
+EXIT=3
+含义：发现流程真实打到 api.github.com 并枚举了最近 20 个 release；当前仓库还没有含 pony-cli-latest.json 的
+release（本波新增的 build-cli-linux job 要等下一次打 tag 才产出），故按设计给出可读失败。
+
+## 5) 已知观测缺口（已派单修复）
+discover / manifest / download 三阶段的**失败**目前只返回错误与 JSON 收据，未打 phase=<x> status=fail 行；
+observability 声明写的是每阶段 ok|fail 都有 ⇒ 已要求 Executor 补齐后重新取证。
+
+# ═══ 第二轮（三路审查修复后，重建二进制复验；2026-11-07 19:57）═══════════════════════
+
+## 6) 回验超时（新增 10s deadline 的物理验证，此前会永久挂起）
+制品：`pony-tui_0.1.188_linux-x86_64` = `#!/bin/sh\nsleep 600`（sha256/size 均合法，只让 --version 不返回）
+清单声明 version=0.1.188
+命令：env … ./target/release/pony update --json
+stdout：{"error":{"code":"signature","message":"校验失败，已放弃安装（原有二进制未改动）：回验超时：新二进制 10s 内未返回
+        --version（/tmp/e2e2/bin/pony），已按既有回滚路径恢复旧版本 …"},"exit_code":1,"ok":false}
+EXIT=1，**elapsed=10s**（修前：L3-P 实测 25s 仍未退出 exit 124）
+stderr：phase=install ok → **phase=verify_installed status=fail code=signature**
+sha 前后一致（逐字节回滚）；目录只剩 pony（无 .old/.part/.new/.lock）
+
+## 7) 成功路径（修后复验）
+清单 version=0.1.199，制品 `#!/bin/sh; echo "pony 0.1.199 · linux-x86_64"`（sha ed5c94fba1d535f1…）
+stdout：{"latest":"0.1.199","ok":true,"path":"/tmp/e2e2/bin/pony","previous":"0.1.156",
+         "sha256":"ed5c94fba1d535f1d3cafb7b1e131bf65df3890377b25116265935b146dede50","updated":true}
+EXIT=0；替换后 --version = pony 0.1.199；sha 一致；目录只剩 pony；六个 phase 全 ok
+
+## 8) --check 幂等（修后）
+⇒ {"latest":"0.1.199","updated":false,"ok":true,…} EXIT=0（未下载制品）
+
+## 9) 回归修复与跨波契约表同步（Lead 亲验）
+- `cargo test -p pony-agent-core --test slash_commands_acceptance --no-run` 修前 EXIT=101（E0425×3 + E0603×4）；
+  加回 `pub use … {is_newer_semver, parse_semver_triple}` 后编译通过；
+- 该 target 随后暴露**基线即存在**的跨波漂移（`/settings`、`/teams` 已入命令表但 CONTRACT_COMMANDS 仍 12 条），
+  由 Test Agent 同步为 14 条 ⇒ `test result: ok. 69 passed; 0 failed`

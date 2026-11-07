@@ -1,0 +1,141 @@
+{
+ "verdict": "FAIL",
+ "audited_scopes": [
+  "commit f53476cd（wave-67 pony update CLI 自更新）",
+  "crates/pony-agent-core/src/agent/updater.rs（f53476cd 版本，工作树另有未提交 21+/3- 改动，行号一律以提交 blob 为准）",
+  "crates/pony-agent-core/src/bin/tui.rs::run_update_action / parse_cli_action / format_update_feedback / cli_help_string",
+  ".dev-team/nfr-baseline-wave67.json（download_budget/retry/logging/resource_release/concurrency_lock）",
+  ".dev-team/nfr-baseline.json（external_call_timeout_ms=3000 + 例外表）",
+  ".dev-team/contract-matrix-cli-self-update.md（C1/C2/C5/C6/AMEND-3）",
+  "docs/observability.yaml:623-642（wave-cli-self-update 段）",
+  "docs/decisions/0087-cli-self-update.md",
+  ".github/workflows/release.yml（build-cli-linux，仅核对不判）",
+  "实机反例：target/release/pony（19:21 构建）在 127.0.0.1 mock 更新源上的 4 组 run（hang/重跑/字面回滚口径/pin+force）"
+ ],
+ "six_questions": [
+  {
+   "id": "Q1",
+   "baseline_field": "external_call_timeout_ms=3000；download_budget.control_plane_timeout_ms=5000 / total_budget_ms=300000 / max_allowed_ms=1800000 / connect_timeout_ms=10000 / max_artifact_bytes=134217728 / retry_attempts=0",
+   "code_evidence": "updater.rs:711-718（控制面 connect 5s + total 5s，reqwest timeout 覆盖响应体读取）；updater.rs:783-811（get_with_retry 2 次尝试 + 500ms 退避 = 与 control_plane_retry_attempts=1 一致，逐次 5s）；updater.rs:637-642（PONY_UPDATE_DOWNLOAD_BUDGET_SECS parse→filter(1..=1800)→unwrap_or(300)，非法/0/1801/负值全回退）；updater.rs:984-1002（tokio::time::timeout(budget, download_to_file)，超预算删 .part）；updater.rs:723-729（下载客户端仅 connect 10s，无 total —— 已登记例外的唯一载体）；updater.rs:1053-1054（**回验子进程 Command::output() 无任何 deadline**）",
+   "verdict": "FAIL",
+   "note": "网络面全绿：控制面 5s、重试 1 次、下载预算生效且非法值回退 300（上限 1800 硬夹）；无未设超时的**网络**调用。否决点在安装后回验：verify_installed 用阻塞 Command::output() 跑新二进制且无超时，制品 `--version` 不返回即无限挂起（实测 25s 未退出，退出码 124），且挂起发生在二进制已被替换之后。NFR 例外裁决（见 hard_items）：只作用于 download 客户端（唯一构造点 updater.rs:520），有 1800s+128MiB 上限，有登记理由 ⇒ 三条满足 PASS。"
+  },
+  {
+   "id": "Q2",
+   "baseline_field": "logging.format=json / trace_id_required=true / trace_id_field=trace_id / logging_scope=new_structured_logging_surface_only / logging_legacy_eprintln_exempt=true",
+   "code_evidence": "updater.rs:593-595（phase_log = 单行非 JSON eprintln，无 trace_id）；docs/observability.yaml:623-642（`grep -c trace_id` = 0，未显式声明 CLI 无 tracer 的豁免）；updater.rs:580（`let _ = std::fs::rename(&backup_path, &install_path)` 回滚失败被吞且无 phase 日志）；updater.rs:188-190（Signature 文案断言「原有二进制未改动」）vs :560-580（回验失败路径已替换目标再尝试恢复）；updater.rs:529/540/549/557/867（清理类 let _ = 与 published_at unwrap_or_default）",
+   "verdict": "FAIL",
+   "note": "阶段日志上下文充足（phase/status/code/url/bytes/sha/path 齐全，--json 时 stdout 单行、日志走 stderr），但三处不达标：① 唯一回滚动作的错误被裸 `let _ =` 吞掉，用户二进制可能停在未通过回验的新版本而文案仍说「未改动」；② observability 段未写 trace_id 豁免（仅 ADR 写了），基准 trace_id_required=true 下缺显式声明；③ 非 JSON 单行格式按 logging_legacy_eprintln_exempt/PA-119 债务口径可接受。已知外部项（discover/manifest/download 失败无 phase=fail）不计入本报告：工作树已存在对应未提交修复。"
+  },
+  {
+   "id": "Q3",
+   "baseline_field": "resource_release（成功/失败/panic/kill 四路临时文件、lock、HTTP 连接、自建 runtime 必清）",
+   "code_evidence": "成功路：updater.rs:557 删 .part、:558-583 删 .old（回验成功分支）、UpdateLock Drop :1136-1140、reqwest Client 随栈 drop、run_self_update :432-437 自建 current_thread runtime 在函数末尾 drop；失败路：:529/:540/:549 显式删 .part、:546-555 install 失败删 .part+backup、:560-580 verify_installed 失败 rename(.old→target)；panic 路：仅 lock 有 Drop（:1136），.part(:519)/.old(:536) **无 Drop 守卫**；kill 路：无任何守卫（实测残留 pony.part 4096B + pony.update.lock 12B）",
+   "verdict": "FAIL",
+   "note": "成功/失败路径清理完整、runtime 与 HTTP 连接无泄漏（PASS）；panic 路 .part/.old 残留但随下次同名覆盖、危害低（ADVISORY）；被 kill/Ctrl-C 路 lock **永久残留**且无 pid 存活校验，.part 亦残留（实测），是唯一有运维后果的缺口。自建 runtime 每次更新一条（current_thread），无常驻线程，PASS。"
+  },
+  {
+   "id": "Q4",
+   "baseline_field": "concurrency_lock=mutex / lock_scope_bounded=true / lock_reentrancy_forbidden=true / lock_acquisition_timeout_ms=2000",
+   "code_evidence": "updater.rs:1113-1134（OpenOptions::create_new(true) 原子创建；AlreadyExists ⇒ NotWritable 并提示手工删锁）；updater.rs:1136-1140（Drop 只删 self.path，未自建锁不构造 Self ⇒ 不删他人锁）；updater.rs:1123（写 pid= 但全文件**从不读取**，无陈旧锁回收）；updater.rs:494 + :497-502（is_same 在取锁与下载之前判定 ⇒ 重复执行幂等、无写盘）",
+   "verdict": "FAIL",
+   "note": "并发互斥 PASS（两实例必有一方 exit 4，且不误删他人锁）；幂等 PASS（已是最新 exit 0、不建锁不写盘；--check 同样早退）。崩溃恢复 FAIL：kill -9/SIGTERM 后锁永久存在，实测无任何并发进程时下一次 update 直接 exit 4「另一个 pony update 正在运行」；无 lock_acquisition_timeout 的等待语义（基线 2000ms 在此实现为「立即失败」而非等待），也未做 pid liveness 探测，恢复只能手工 rm（文案已给出该出路，故非静默）。"
+  },
+  {
+   "id": "Q5",
+   "baseline_field": "契约 C1 环境变量表（6 项，非法值回退默认，禁止静默取 0）+ 自检入口",
+   "code_evidence": "PONY_UPDATE_ALLOW_INSECURE updater.rs:615-623（==\"1\" 且设置 MANIFEST_URL 才生效，否则 false）；PONY_UPDATE_MANIFEST_URL :620-621（非 https 或非本地 http ⇒ 过滤为 None = 回退「走发现」）；PONY_UPDATE_API_BASE :624-631（非 https ⇒ 默认 api.github.com，去尾 /）；PONY_UPDATE_REPO :632-636（slug 正则 :665-676 ⇒ 默认 lanhui100/pony-agent）；PONY_UPDATE_DOWNLOAD_BUDGET_SECS :637-642（1..=1800 ⇒ 否则 300）；PONY_UPDATE_INSTALL_PATH :411-417（空 ⇒ current_exe）",
+   "verdict": "FAIL",
+   "note": "6 项全部「非法即回退默认真值」，无一处静默取 0（PASS，逐项 path:line 见 code_evidence）。自检入口 FAIL：`pony update --help` 走 Invalid 分支退出 2（实测），`pony --help`(:13127-13136) 与 `.env.example`（grep PONY_UPDATE 命中 0）均无这 6 个变量的说明；变量仅存在于 .dev-team 契约矩阵与 ADR。附注：MANIFEST_URL 写错协议时静默回落生产 GitHub 发现（合契约「回退默认」，但在 CI 逃生舱场景下会误触真网络）。"
+  },
+  {
+   "id": "Q6",
+   "baseline_field": "契约矩阵变更登记（CLI 参数/退出码/`/update` 行为/manifest schema）",
+   "code_evidence": "tui.rs:13028-13066（update 子命令解析，纯新增分支，既有子命令分支未改）；tui.rs:13340-13397（退出码 0/1/2/3/4 由 UpdateError::exit_code :214-225 单一出码，未改动既有子命令退出码）；tui.rs:13448-13452（仅 usage 串追加 `| update [...]`）；tui.rs:2112（/update 文案**未**按 ADR 变更）；updater.rs:233-268（pony-cli-latest.json 为新 schema，无退役字段）",
+   "verdict": "PASS",
+   "note": "无已发布契约被删改：CLI 参数为新增子命令；既有 `--version/--help/--doctor/resume` 行为与退出码未动；`/update` 保持只读、判定逻辑未动；manifest schema 为本次新增文件，不存在退役字段，故无 reserved 需求。唯一瑕疵是「声明了但没做」的文档漂移：ADR 0087 与 note 都写 `/update` 文案追加「本机升级：pony update」，实际 :2112 仍为旧文案（见 advisory finding）。"
+  }
+ ],
+ "hard_items": {
+  "irreversible_surface": {
+   "verdict": "FAIL",
+   "reason": "ADR 0087 影响节确实写了三要素：无逐字节回滚承诺（「升级不可回滚到旧的字节」）、回滚口径 = `pony update --pin <旧版本>`、并要求「该口径必须写进发布说明」。但该口径**不可执行**：plan_update updater.rs:314 对降级一律 Downgrade 拒绝，实测 `--pin 0.1.100`（当前 0.1.156）→ exit 2；必须 `--pin <ver> --force` 才 exit 0 安装成功。更糟的是错误文案自身（updater.rs:195）把 `--pin` 列为降级的替代方案，而它同样被同一道闸拦住。发布说明若照抄 ADR，用户拿到唯一的安全网命令会直接失败。裁决：口径结构正确、执行路径错误 ⇒ 需把 ADR/契约矩阵/错误文案统一为 `pony update --pin <ver> --force`（并在发布说明点名）后方可放行。"
+  },
+  "nfr_exception": {
+   "verdict": "PASS",
+   "reason": "三条同时满足：① 单一已知路径 —— download 客户端仅在 updater.rs:723 构造、仅在 :520 注入、其唯一使用点 :1004 的 GET 全部位于 :992 的 timeout 内，控制面另有 5s 客户端（:711-718），未污染其它出网面；② 有上限 —— 默认 300s、硬上限 1800s（:637-642 夹紧，非法回退 300）、connect 10s、体积 128MiB（:36）且下载中逐块比对 written>plan.size 即中止；③ 有理由 —— 28MB 级制品不可能 3s 内完成，理由在 nfr-baseline-wave67.json download_budget.exception_rationale、ADR 影响节、observability(2) 三处一致登记。"
+  }
+ },
+ "findings": [
+  {
+   "file": "crates/pony-agent-core/src/agent/updater.rs",
+   "line": 1053,
+   "rule": "TIMEOUT",
+   "severity": "BLOCKING",
+   "evidence": "verify_installed 用阻塞 std::process::Command::output() 执行刚安装的新二进制，无 timeout / wait_timeout / tokio::time::timeout；且它在 install 完成之后（updater.rs:560），一旦新产物不响应 `--version` 就无限挂起，用户二进制已被替换、未回验、锁未释放。实机：mock 清单 version=9.9.9 + sha256/size 合法的可执行制品（`#!/bin/sh sleep 600`），25s 后仍未退出，stderr 停在 `phase=install status=ok`，无 verify_installed 行，/tmp/l3p/pony.update.lock 残留。",
+   "counterexample_cmd": "cd /home/dm/pony-agent && PONY_UPDATE_MANIFEST_URL=http://127.0.0.1:18767/manifest.json PONY_UPDATE_ALLOW_INSECURE=1 PONY_UPDATE_INSTALL_PATH=/tmp/l3p/pony timeout 25 ./target/release/pony update --json",
+   "cmd_exit": 124,
+   "cmd_tail": "phase=discover ok / phase=manifest ok version=9.9.9 / phase=download ok bytes=20 / phase=verify ok sha256=d16f9bda... / phase=install ok path=/tmp/l3p/pony —— 此后 20s 无任何输出（挂起），ls 可见 pony.update.lock"
+  },
+  {
+   "file": "crates/pony-agent-core/src/agent/updater.rs",
+   "line": 314,
+   "rule": "CONTRACT_BREAK",
+   "severity": "BLOCKING",
+   "evidence": "ADR 0087「影响·不可逆面」与契约矩阵 C5「不可逆面」给出的唯一回滚口径 `pony update --pin <旧版本>` 不成立：plan_update 对 candidate<current 一律 Downgrade 拒绝（:312-319），pin 不隐含 force；错误文案（:195）反而把 `--pin` 写成降级的替代路径，同被该闸拦住。实机：mock 清单 version=0.1.100、当前 0.1.156 ⇒ `--pin 0.1.100` exit 2 downgrade；`--pin 0.1.100 --force` exit 0 且 updated=true。发布说明若按 ADR 措辞写，用户回滚命令必然失败。",
+   "counterexample_cmd": "cd /home/dm/pony-agent && PONY_UPDATE_MANIFEST_URL=http://127.0.0.1:18769/manifest.json PONY_UPDATE_ALLOW_INSECURE=1 PONY_UPDATE_INSTALL_PATH=/tmp/l3p3/pony ./target/release/pony update --pin 0.1.100 --json ; echo exit=$? ; ./target/release/pony update --pin 0.1.100 --force --json ; echo exit=$?",
+   "cmd_exit": 2,
+   "cmd_tail": "{\"error\":{\"code\":\"downgrade\",\"message\":\"拒绝降级：清单版本 v0.1.100 低于当前版本 v0.1.156\\n如确认要降级，请加 `--force`；或用 `pony update --pin <版本>` 明确指定。\"},\"exit_code\":2,\"ok\":false} exit=2；随后 --pin 0.1.100 --force → {\"ok\":true,\"updated\":true} exit=0"
+  },
+  {
+   "file": "crates/pony-agent-core/src/agent/updater.rs",
+   "line": 1119,
+   "rule": "CONCURRENCY",
+   "severity": "ADVISORY",
+   "evidence": "lock 以 create_new 原子创建（互斥正确、Drop 只删自建锁），但 :1123 写入的 pid 从不被读取，acquire 只在 AlreadyExists 时直接失败（:1126-1131），无 pid liveness/时效探测；被 kill（Ctrl-C 下 300s 下载很常见）后锁永久存在，之后每次 update 都 exit 4 并误报「另一个 pony update 正在运行」。实机：kill -9 后 pony.update.lock(12B)+pony.part(4096B) 残留；无任何并发进程时重跑 exit 4。文案已给出「可删除该文件后重试」，故非静默、降级为 ADVISORY。",
+   "counterexample_cmd": "kill -9 <pony update pid>; ls -la /tmp/l3p2 | grep pony; ./target/release/pony update --json",
+   "cmd_exit": 4,
+   "cmd_tail": "-rw-r--r-- pony.part 4096；-rw-r--r-- pony.update.lock 12；重跑 {\"error\":{\"code\":\"not_writable\",\"message\":\"安装失败（目标不可写）：另一个 pony update 正在运行（锁文件 /tmp/l3p/pony.update.lock 已存在）…\"},\"exit_code\":4}"
+  },
+  {
+   "file": "crates/pony-agent-core/src/agent/updater.rs",
+   "line": 580,
+   "rule": "LEAK",
+   "severity": "ADVISORY",
+   "evidence": "唯一回滚动作 `let _ = std::fs::rename(&backup_path, &install_path)` 的错误被裸 let _ 丢弃且无 phase 日志：回验失败路径（:560-582）若恢复失败，目标停留在未通过回验的新二进制，而 CLI 只输出 Signature 文案「校验失败，已放弃安装（原有二进制未改动）」（:188-190）——文案与真实状态可能相反，且 .old-<pid> 备份残留无人知晓。",
+   "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'let _ = std::fs::rename' crates/pony-agent-core/src/agent/updater.rs && sed -n '188,190p' crates/pony-agent-core/src/agent/updater.rs",
+   "cmd_exit": 0,
+   "cmd_tail": "580:                let _ = std::fs::rename(&backup_path, &install_path);\n188: \"校验失败，已放弃安装（原有二进制未改动）：{detail}\""
+  },
+  {
+   "file": "docs/observability.yaml",
+   "line": 623,
+   "rule": "NFR_VIOLATION",
+   "severity": "ADVISORY",
+   "evidence": "wave-cli-self-update 段（623-642）未显式声明 CLI 进程无 tracer 的 trace_id 豁免：全段 grep trace_id 命中 0；基准 logging.trace_id_required=true / trace_id_field=trace_id，Q2 要求豁免须「在 observability 里显式声明」，目前只写在 ADR 0087。",
+   "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '623,642p' docs/observability.yaml | grep -c trace_id",
+   "cmd_exit": 1,
+   "cmd_tail": "0"
+  },
+  {
+   "file": "crates/pony-agent-core/src/bin/tui.rs",
+   "line": 2112,
+   "rule": "CONTRACT_BREAK",
+   "severity": "ADVISORY",
+   "evidence": "ADR 0087 决策 1 与「影响·用户可见」声明 `/update` 文案从「请自行构建」改为「本机升级：pony update」，note 同步照抄；实际 format_update_feedback 仍为旧文案（源码内「本机升级」命中 0），也无 AMEND 登记该偏差。属声明已实现但未落地的文档-代码漂移（不改变已发布行为，故非兼容性破坏）。",
+   "counterexample_cmd": "cd /home/dm/pony-agent && grep -c '本机升级' crates/pony-agent-core/src/bin/tui.rs ; sed -n '2112p' crates/pony-agent-core/src/bin/tui.rs",
+   "cmd_exit": 0,
+   "cmd_tail": "0\n2112:        msg.push_str(\"\\n\\n💡 升级指引：\\n- 源码开发环境：git pull && npm run cli:build\\n- 桌面端：在设置中点击「检查更新」并一键升级\");"
+  },
+  {
+   "file": "crates/pony-agent-core/src/bin/tui.rs",
+   "line": 13127,
+   "rule": "CORRECTNESS",
+   "severity": "ADVISORY",
+   "evidence": "自检入口缺失：parse_cli_action 的 update 分支只接受 --check/--force/--pin/--json，`pony update --help` 落到 Invalid 退出 2（实测）；cli_help_string(13127-13136) 与 `.env.example`（PONY_UPDATE 命中 0）都没有 update 子命令或 6 个 PONY_UPDATE_* 变量的说明，用户只能从 .dev-team 契约矩阵/ADR 得知逃生舱与预算配置。",
+   "counterexample_cmd": "cd /home/dm/pony-agent && ./target/release/pony update --help; echo exit=$?; ./target/release/pony --help | grep -c update; grep -c PONY_UPDATE .env.example",
+   "cmd_exit": 2,
+   "cmd_tail": "pony: 未知参数 --help（pony update 仅支持 --check / --force / --pin <ver> / --json）\nexit=2；pony --help | grep -c update → 0；.env.example → 0"
+  }
+ ]
+}

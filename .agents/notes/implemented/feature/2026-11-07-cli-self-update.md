@@ -19,15 +19,17 @@ Status: implemented
 1. 新增 `crates/pony-agent-core/src/agent/updater.rs`（纯函数 + 网络编排分离）：清单解析、平台资产选择、
    `plan_update`（升级/已最新/降级/平台缺失）、流式下载 + sha256 校验、同目录原子安装（`install_atomically`）、
    `UpdateError` 与退出码映射。semver 解析/比较从 `bin/tui.rs` 迁入，成为 `/update` 与 `pony update` 的单一真值。
-2. 命令面：`pony update [--check] [--force] [--pin <ver>] [--json]`，退出码 `0` 成功（含已最新）/ `1` 校验失败 /
-   `2` 用法错误 / `3` 网络·HTTP·清单失败 / `4` 安装失败；`/update` 保持只读，文案追加「本机升级：`pony update`」。
+2. 命令面：`pony update [--check] [--force] [--pin <ver>] [--json]`，退出码 `0` 成功（含已最新）/ `1` 校验失败
+   （含回验失败与 10s 回验超时）/ `2` 用法错误（含拒绝降级）/ `3` 网络·HTTP·清单·无平台资产 / `4` 安装失败；
+   `/update` 保持只读（tag 口径，面向整体发布），文案追加一行「本机升级（CLI 二进制）：`pony update`」。
+   两条命令不共享版本口径是有意的：一个回答「有没有新发布」，一个回答「CLI 能不能升」。
 3. 发现只看 **release 里的 CLI 清单**（`pony-cli-latest.json`），版本以清单 `version` 为准、**绝不用 `tag_name`**；
    `--pin` 指 core 版本，按清单版本扫 release，不按 tag 拼 URL。
 4. 完整性：sha256 必填（64 hex）+ 字节数校验；下载流式写盘、超 128MiB 或超预算即中止；校验失败**不触碰原二进制**。
 5. 网络：`redirect::Policy::none()` 手动跟随 ≤5 跳、逐跳校验 scheme 与 host（`api.github.com` / `github.com` /
    `release-assets.githubusercontent.com` / `objects.githubusercontent.com`）；控制面 5s、制品下载独立预算 300s。
-6. 安装：同目录 lock（`create_new`）→ 下载到临时名 → `chmod 0755` → `rename` 覆盖 → 跑新二进制 `--version` 回验，
-   不符即恢复旧文件并退出 `1`；临时文件与 lock 在成功/失败路径都清理。Windows 上运行中 exe 不可替换 ⇒ 明确报
+6. 安装：同目录 lock（`create_new` + `pid`/`started`；`started` 超 45 分钟判陈旧并接管一次）→ 下载到临时名 → `chmod 0755` → `rename` 覆盖 → 跑新二进制 `--version` 回验，
+   不符或 10s 内不返回即回滚并退出 `1`；临时文件与 lock 在成功/失败路径都清理。Windows 上运行中 exe 不可替换 ⇒ 明确报
    `UnsupportedPlatform` 并指引桌面端安装包。
 7. 发布侧同批补齐：`release.yml` 新增 `build-cli-linux`（`needs: build-and-release`），用**构建出来的二进制自报版本**
    做一致性断言（只比 core），产出 `pony-tui_<ver>_linux-x86_64` + `.sha256` + `pony-cli-latest.json` 并上传，
@@ -47,8 +49,8 @@ Status: implemented
 
 - 用户一条命令即可升级本机二进制；`--check` 只读预检、`--json` 可供脚本消费。
 - **不可逆面**：写的是用户自己的可执行文件。逐字节回滚没有承诺——失败即不动、成功即覆盖、有 sha256 与回验两道闸、
-  并发有 lock；要回到旧版本用 `pony update --pin <旧 core 版本>`（前提是该版本仍在最近 release 携带清单里），
-  这条口径必须进发布说明，不能当「已支持回滚」宣传。
+  并发有 lock；要回到旧版本用 **`pony update --pin <旧 core 版本> --force`**（`--pin` 选目标、`--force` 放行降级，
+  缺一不可；前提是该版本仍在最近 release 携带清单里），这条命令必须逐字进发布说明，不能当「已支持回滚」宣传。
 - **NFR 例外**：制品下载对 `external_call_timeout_ms=3000` 是显式例外（28MB 不可能 3s 下完），预算 300s/上限 1800s/
   128MiB 上限/不重试，记在 `.dev-team/nfr-baseline-wave67.json` 的 `download_budget`；控制面仍 5s + 1 次重试。
 - **可观测性**：新增一条出网路径与一个 CLI 子命令接口面，四维归属落 `docs/observability.yaml`；CLI 进程无内置 tracer，

@@ -150,3 +150,22 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 5. **门禁数字勘误**：`--lib` 上限 = 基线 1348 + A 组 14 = **1362**（B 组 16 条落在 bin 目标，`--lib` 看不到）；bin 目标 = 54（含既有 38）。
 6. **`-D warnings` 门禁的当前阻塞（外部，不属本写域）**：`crates/pony-agent-core/src/agent/team_history.rs`（另一路并行会话的协议空桩，10 处 `todo!("NotImplemented")`、参数未使用）在 HEAD 即产生 14 条 `unused variable` error。
    物理证据：`RUSTFLAGS="-D warnings" cargo check -p pony-agent-core --lib` 的 error 落点 100% 在该文件；本波两个文件的 warning 数为 **0**。处置：**不修**（不碰他人未完成实现），登记为外部阻塞，等该 owner 填实现后自然转绿；`node scripts/check-rust-test-lints.mjs` 同因失败。
+
+## AMEND-4（Lead 裁决，三路审查回执后）
+
+审查结论：L3-A PASS(3 ADVISORY) / L3-B FAIL(2 BLOCKING + 4 ADVISORY) / L3-P FAIL(2 BLOCKING + 4 ADVISORY)。逐条裁决：
+
+### 必修（已派单，Lead 亲验 BLOCKING）
+1. **回归**：semver 迁移撤掉 `tui::parse_semver_triple` / `tui::is_newer_semver` 的 pub 面，导致既有验收 target
+   `crates/pony-agent-core/tests/slash_commands_acceptance.rs:795-802`（T6 `/update` 契约）不可编译
+   （Lead 实测 `--no-run` EXIT=101，E0425×3 + E0603×4）。⇒ 恢复 `pub use` 再导出，目标必须回绿。
+2. **回验无超时**：`verify_installed` 用 `Command::output()` 零 deadline（L3-P 实测 25s 挂起、exit 124、锁残留）⇒ 加 10s deadline（`try_wait` 轮询 + kill），超时回滚并 `1` 退出。
+3. **锁无陈旧判定**：kill 后 lock 永久残留、后续每次 `exit 4` 误报并发 ⇒ lock 写 `pid`/`started`，`started` 超 45min（1.5× 最大预算）判陈旧并**接管一次**；未过期不删。
+4. **回滚口径不可执行**：`--pin` 不隐含 force，`--pin <旧版本>` 会被降级闸拦（L3-P 实测 exit 2）⇒ **保留安全闸**，把 ADR/note/错误文案统一为 `--pin <ver> --force`。
+
+### 口径修正（Lead 裁决，非代码缺陷）
+5. **`/update` 不复用 `pony update` 的版本口径**：`/update` 面向整体发布（tag 口径），`pony update` 面向 CLI 二进制（core 口径）；强行合并会让一个说假话。改为「保持只读 + 文案追加一行『本机升级（CLI 二进制）：pony update』」，ADR/note/C2 已同步。
+6. **退出码表补登记**：`UnsupportedPlatform` 归 `3`（平台无可用资产），不改代码，改文档。
+7. **`build-cli-linux` 的 `-D warnings`**：该 job 与 verify 作业同用 `actions-rust-lang/setup-rust-toolchain@v1`，该 action 默认注入 `RUSTFLAGS=-D warnings`（见 `scripts/check-rust-test-lints.mjs` 头注），故 advisory「未设 deny-warnings」**不成立**，不新增 env。
+8. **超限用例区分力**：L3-B 变异证明 `update_rejects_oversized_artifact_without_writing` 对 `MAX_ARTIFACT_BYTES` 分支零区分力 ⇒ 由 Test Agent 补 `error.code == "too_large"` 断言。
+9. **不入本波（登记后续条）**：`<exe>.part` 无 RAII 守卫（kill 后残留半包，危害低、下次覆盖）；`pony update --help`/`.env.example` 缺 6 个 `PONY_UPDATE_*` 自检入口（当前走 `Invalid` 退出 2 并给出取值口径）。

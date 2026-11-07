@@ -47,7 +47,10 @@ use pony_agent_core::agent::stop_escalation::StopReason;
 use pony_agent_core::agent::stop_sequence::{StopIdentity, StopSequenceState, STOP_SEQUENCE_MS};
 use pony_agent_core::agent::turn_flow::{TurnEventSink, TurnSpeedBasis};
 // wave-67：semver 解析/比较的唯一真值源迁入 `agent::updater`（`pony update` 与 `/update` 共用）。
-use pony_agent_core::agent::updater::is_newer_semver;
+// 为什么是 `pub use`：本模块原先对外暴露 `tui::parse_semver_triple` / `tui::is_newer_semver`
+//（`tests/slash_commands_acceptance.rs` 的 T6 /update 契约仍在直接调用），重导出保持该可见性，
+// 内部继续使用同一实现（不产生两份 semver 逻辑）。
+pub use pony_agent_core::agent::updater::{is_newer_semver, parse_semver_triple};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Rect},
@@ -2109,7 +2112,9 @@ pub fn format_update_feedback(outcome: &UpdateCheckOutcome) -> String {
         if let Some(url) = &outcome.release_url {
             msg.push_str(&format!("\n🔗 发布页面：{}", url));
         }
-        msg.push_str("\n\n💡 升级指引：\n- 源码开发环境：git pull && npm run cli:build\n- 桌面端：在设置中点击「检查更新」并一键升级");
+        msg.push_str(
+            "\n\n💡 升级指引：\n- 源码开发环境：git pull && npm run cli:build\n- 桌面端：在设置中点击「检查更新」并一键升级\n- 本机升级（CLI 二进制）：pony update",
+        );
         msg
     } else {
         format!(
@@ -15095,10 +15100,52 @@ mod cli_self_update_tests {
         ]);
         let _env = update_env(&mock, &install_path, "/manifest", 30);
 
-        let code = run_update_action(false, false, None, false);
+        // Act（① CLI 面）：用 `--json` 跑整条命令，锁退出码与「绝不落盘」。
+        let code = run_update_action(false, false, None, true);
 
-        // 契约 C2 未给 TooLarge 专属退出码，故只锁「非零 + 绝不落盘」这两条硬不变量。
+        // Act（② 错误码真值面）：直接调 CLI 内部同一个入口 `run_self_update`，拿到 `UpdateError`
+        // 本体 —— `run_update_action` 的 JSON 收据就是 `error.code()` 的序列化结果。
+        //
+        // 为什么不在进程内解析 stdout：libtest 用 thread-local 捕获「测试线程」的 stdout，
+        // `println!` 被吞进用例缓冲、根本不落 fd 1（本轮实测：dup2 重定向 + 子线程 println 后
+        // 捕获文件仍为空串），因此**在门禁命令下无法从 stdout 取 JSON**；改用与 CLI 完全同源的
+        // `run_self_update` + `UpdateError::code()`（契约 C1 的真值方法），断言面等价且不依赖
+        // `--nocapture`。
+        let api_error = pony_agent_core::agent::updater::run_self_update(
+            &pony_agent_core::agent::updater::UpdateOptions {
+                check: false,
+                force: false,
+                pin: None,
+            },
+        )
+        .expect_err("超限制品必须被拒绝（run_self_update 不得返回 Ok）");
+
+        // Assert
         assert_ne!(code, 0, "超限制品必须失败（不得以 0 收尾）");
+        assert!(
+            matches!(
+                api_error,
+                pony_agent_core::agent::updater::UpdateError::TooLarge(_)
+            ),
+            "超限制品必须映射为 UpdateError::TooLarge，实际={api_error:?}"
+        );
+        // 错误码级断言（本用例的区分力来源）：`TooLarge ⇒ code() == "too_large"`（契约 C1，
+        // 实测 JSON 收据的 error.code 逐字为 "too_large"）。
+        // 该断言用于**杀死「删除 updater.rs 两处 MAX_ARTIFACT_BYTES 判断」这一变异**：
+        // 收紧前只锁「非零退出 + 不落盘 + 无残留」时，L3-B 变异实测证明删除判断后本用例仍绿
+        // （超限被后续 size/sha 校验路径兜住）⇒ 对「超限」分支零区分力；变异后错误会落到
+        // size/sha 校验分支并给出别的 error.code（或直接 Ok），两条断言立即变红。
+        assert_eq!(
+            api_error.code(),
+            "too_large",
+            "超限制品必须给出 too_large 错误码（契约 C1：UpdateError::TooLarge ⇒ code()），\
+             本断言用于杀死『删除 MAX_ARTIFACT_BYTES 判断』这一变异"
+        );
+        assert!(
+            api_error.exit_code() > 0,
+            "TooLarge 必须映射为非零退出码（契约 C2），实际={}",
+            api_error.exit_code()
+        );
         assert!(
             !install_path.exists(),
             "超限制品不得写盘（必须在写入前按声明 size 拒绝）"

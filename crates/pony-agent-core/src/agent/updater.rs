@@ -180,19 +180,19 @@ impl UpdateError {
                 "网络请求失败：{detail}\n请检查网络 / 代理后重试；若在企业网络内，可先配置 HTTPS_PROXY。"
             ),
             UpdateError::HttpStatus(status) => format!(
-                "更新源返回 HTTP {status}（发布资产或清单缺失）。\n请稍后重试；若持续 404，可用 `pony update --pin <CLI 版本>` 指定已发布的 CLI 版本（注意：--pin 指 CLI 版本，不是 release tag）。"
+                "更新源返回 HTTP {status}（发布资产或清单缺失）。\n请稍后重试；若持续 404，可用 `pony update --pin <CLI 版本> --force` 指定已发布的 CLI 版本（注意：--pin 指 CLI 版本，不是 release tag；指定更旧版本需同时给 --force，否则会被降级闸拦下）。"
             ),
             UpdateError::Manifest(detail) => format!(
                 "更新清单不可用：{detail}\n请稍后重试；若清单持续损坏，请改用桌面端安装包，或从 Releases 页面手动下载。"
             ),
             UpdateError::Signature(detail) => format!(
-                "校验失败，已放弃安装（原有二进制未改动）：{detail}\n请重试；若仍失败，可用 `pony update --pin <CLI 版本>` 指定其它已发布版本。"
+                "校验失败，已放弃安装（原有二进制未改动）：{detail}\n请重试；若仍失败，可用 `pony update --pin <CLI 版本> --force` 指定其它已发布版本（指定更旧版本必须同时给 --force）。"
             ),
             UpdateError::NotWritable(detail) => format!(
                 "安装失败（目标不可写）：{detail}\n可尝试：① 用 `sudo pony update` 重跑；② 设置 PONY_UPDATE_INSTALL_PATH 指向可写目录；③ 改用桌面端安装包。"
             ),
             UpdateError::Downgrade(detail) => format!(
-                "拒绝降级：{detail}\n如确认要降级，请加 `--force`；或用 `pony update --pin <版本>` 明确指定。"
+                "拒绝降级：{detail}\n如确认要降级，请加 `--force`；若要指定更旧的 CLI 版本，必须写成 `pony update --pin <版本> --force`（只给 --pin 仍会被降级闸拦下）。"
             ),
             UpdateError::UnsupportedPlatform(detail) => format!(
                 "当前平台不支持 CLI 自更新：{detail}\nWindows 请改用桌面端安装包（Pony.Agent_*_setup.exe）。"
@@ -473,13 +473,26 @@ async fn run_self_update_async(options: &UpdateOptions) -> Result<UpdateOutcome,
     })?;
 
     let control_client = build_control_plane_client(&config)?;
-    let resolved = resolve_manifest(&control_client, &config, options.pin.as_deref()).await?;
+    let resolved = match resolve_manifest(&control_client, &config, options.pin.as_deref()).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            // 失败路径同样打一行（observability 声明：status=fail 对所有阶段生效）。
+            phase_log("discover", "fail", &format!("code={}", error.code()));
+            return Err(error);
+        }
+    };
     phase_log(
         "discover",
         "ok",
         &format!("manifest={}", resolved.manifest_url),
     );
-    let plan = plan_update(&resolved.manifest, platform, &current_version, options.force)?;
+    let plan = match plan_update(&resolved.manifest, platform, &current_version, options.force) {
+        Ok(plan) => plan,
+        Err(error) => {
+            phase_log("manifest", "fail", &format!("code={}", error.code()));
+            return Err(error);
+        }
+    };
     phase_log(
         "manifest",
         "ok",
@@ -518,7 +531,12 @@ async fn run_self_update_async(options: &UpdateOptions) -> Result<UpdateOutcome,
     let _lock = UpdateLock::acquire(&install_path)?;
     let part_path = part_path(&install_path);
     let download_client = build_download_client(&config)?;
-    download_artifact(&download_client, &asset_url, &part_path, &plan, &config).await?;
+    if let Err(error) =
+        download_artifact(&download_client, &asset_url, &part_path, &plan, &config).await
+    {
+        phase_log("download", "fail", &format!("code={}", error.code()));
+        return Err(error);
+    }
     phase_log(
         "download",
         "ok",
@@ -1051,15 +1069,7 @@ async fn download_to_file(
 
 /// 回验：安装后的新二进制 `--version` 必须报告清单版本，否则整轮失败（调用方负责回滚）。
 fn verify_installed(target: &Path, expected_version: &str) -> Result<(), UpdateError> {
-    let output = std::process::Command::new(target)
-        .arg("--version")
-        .output()
-        .map_err(|error| {
-            UpdateError::Signature(format!(
-                "回验失败：无法执行新二进制 {}（{error}）",
-                target.display()
-            ))
-        })?;
+    let output = run_version_with_deadline(target)?;
     if !output.status.success() {
         return Err(UpdateError::Signature(format!(
             "回验失败：新二进制 `--version` 退出码 {}",
@@ -1083,6 +1093,54 @@ fn verify_installed(target: &Path, expected_version: &str) -> Result<(), UpdateE
         )));
     }
     Ok(())
+}
+
+/// 回验脚本的硬截止：新二进制 `--version` 必须在 10s 内退出（坏二进制可能挂死 ⇒ 整轮无法收尾、
+/// 锁与临时文件残留）。用 `try_wait` 轮询而不是 `output()`，后者在子进程不退出时**无限阻塞**。
+const VERIFY_INSTALLED_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn run_version_with_deadline(target: &Path) -> Result<std::process::Output, UpdateError> {
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(target)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            UpdateError::Signature(format!(
+                "回验失败：无法执行新二进制 {}（{error}）",
+                target.display()
+            ))
+        })?;
+    let deadline = std::time::Instant::now() + VERIFY_INSTALLED_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(UpdateError::Signature(format!(
+                        "回验超时：新二进制 10s 内未返回 --version（{}），已按既有回滚路径恢复旧版本",
+                        target.display()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(UpdateError::Signature(format!(
+                    "回验失败：等待新二进制退出出错（{error}）"
+                )));
+            }
+        }
+    }
+    child.wait_with_output().map_err(|error| {
+        UpdateError::Signature(format!("回验失败：读取新二进制输出出错（{error}）"))
+    })
 }
 
 /// 取一行文本里第一个 `X.Y.Z` 形态的版本号（`pony 0.1.184 · linux-x86_64` ⇒ (0,1,184)）。
@@ -1111,17 +1169,49 @@ struct UpdateLock {
     path: PathBuf,
 }
 
+/// 陈旧锁阈值：45min = 1.5 × 最大下载预算（1800s）。超过即认定上一个 update 已被强杀。
+const LOCK_STALE_AFTER_SECS: u64 = 2_700;
+
 impl UpdateLock {
     fn acquire(target: &Path) -> Result<Self, UpdateError> {
         let path = with_extension_tag(target, "update.lock");
+        match Self::create(&path) {
+            Ok(lock) => Ok(lock),
+            // 只有**确认陈旧**（`started` 可解析且已超时）才接管；解析失败一律按「不陈旧」fail-closed，
+            // 绝不删除未过期的他人锁（否则两个实例会同时进入安装段）。
+            Err(error) if Self::is_stale(&path) => {
+                phase_log(
+                    "lock",
+                    "ok",
+                    &format!(
+                        "takeover stale lock={} (held={})",
+                        path.display(),
+                        error.code()
+                    ),
+                );
+                let _ = std::fs::remove_file(&path);
+                Self::create(&path)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn create(path: &Path) -> Result<Self, UpdateError> {
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&path)
+            .open(path)
         {
             Ok(mut file) => {
-                let _ = writeln!(file, "pid={}", std::process::id());
-                Ok(Self { path })
+                let started = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or(0);
+                // `started` 供下一代进程判断本锁是否陈旧（被 kill -9 / 断电时无人删锁）。
+                let _ = writeln!(file, "pid={}\nstarted={started}", std::process::id());
+                Ok(Self {
+                    path: path.to_path_buf(),
+                })
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(UpdateError::NotWritable(format!(
@@ -1129,8 +1219,31 @@ impl UpdateLock {
                     path.display()
                 )))
             }
-            Err(error) => Err(write_error(&path, error)),
+            Err(error) => Err(write_error(path, error)),
         }
+    }
+
+    /// 锁内容 `started=<unix_secs>` 是否已超过 45min（缺字段 / 非数字 / 读不到 ⇒ 不陈旧）。
+    fn is_stale(path: &Path) -> bool {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let Some(started) = content
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("started="))
+        else {
+            return false;
+        };
+        let Ok(started) = started.trim().parse::<u64>() else {
+            return false;
+        };
+        let Ok(now) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+        else {
+            return false;
+        };
+        now.saturating_sub(started) > LOCK_STALE_AFTER_SECS
     }
 }
 

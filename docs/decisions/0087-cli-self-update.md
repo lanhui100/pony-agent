@@ -24,9 +24,12 @@ Status: implemented
 1. **命令面**：`pony update [--check] [--force] [--pin <ver>] [--json]`。
    默认「检查 → 下载 → 校验 → 安装 → 回验」；`--check` 只检查；`--force` 允许降级/同版本重装；
    `--json` 让 stdout 只输出一行 JSON 收据（供脚本消费）。退出码：`0` 成功（含「已是最新」）、
-   `1` 校验失败、`2` 用法错误、`3` 网络/HTTP/清单失败、`4` 安装失败。
-   `/update` 斜杠命令保持**只读**语义，文案追加一行「本机升级：`pony update`」——不在交互界面里
-   悄悄替换用户的可执行文件。
+   `1` 校验失败（含回验失败/回验超时）、`2` 用法错误（含拒绝降级）、`3` 网络/HTTP/清单/无可用平台资产失败、
+   `4` 安装失败。
+   `/update` 斜杠命令保持**只读**语义（它面向「整体发布/桌面端」用 tag 口径），文案追加一行
+   「本机升级（CLI 二进制）：`pony update`」——不在交互界面里悄悄替换用户的可执行文件。
+   两条命令**刻意不共享版本口径**：`/update` 回答「有没有新发布」，`pony update` 回答「CLI 二进制能不能升」
+   （core 版本线）；强行合并会让其中一个说假话。
 2. **更新源唯一**：GitHub Releases（仓库公开，可匿名访问）。发现流程 =
    `GET /repos/{owner}/{repo}/releases?per_page=20` → 过滤 draft/prerelease → 按 `published_at` 降序取
    **第一个含 `pony-cli-latest.json` 资产**的 release。**版本以清单里的 `version` 为准，绝不使用 `tag_name`**
@@ -45,8 +48,10 @@ Status: implemented
    因此 updater 用 `redirect::Policy::none()` 手动跟随 ≤5 跳，每跳校验 scheme + host，最终落点也必须在
    白名单（`api.github.com` / `github.com` / `release-assets.githubusercontent.com` / `objects.githubusercontent.com`）内。
 6. **替换是原子的、可观测的**：下载到目标同目录的临时文件 → `chmod 0o755` → POSIX `rename` 覆盖（目标永不缺失）
-   → 回验：跑新二进制 `--version` 必须等于清单版本，否则恢复旧文件并以 `1` 退出。同目录 `<exe>.update.lock`
-   （`create_new`）防两个 `pony update` 并发互踩；临时文件与锁在成功/失败路径都必须清理。
+   → 回验：跑新二进制 `--version`（**10 秒 deadline**，超时即 kill 并回滚，否则不响应的制品会让命令永久挂起）
+   必须等于清单版本，否则恢复旧文件并以 `1` 退出。同目录 `<exe>.update.lock`（`create_new` + `pid`/`started`
+   两行）防两个 `pony update` 并发互踩；`started` 超过 45 分钟（1.5× 最大下载预算）即判陈旧锁并接管一次，
+   其余情形绝不删除他人锁。临时文件与锁在成功/失败路径都必须清理；信号强杀路径无法清理锁，靠上述陈旧判定自愈。
 7. **不支持的环境明确拒绝**：Windows 上运行中的 `.exe` 无法被替换 ⇒ `UnsupportedPlatform`，指引用户用桌面端
    安装包（`Pony.Agent_<ver>_x64-setup.exe`）；目标目录不可写 ⇒ `NotWritable` 并给出 `sudo` / 换目录提示，
    **不静默改写到用户目录**。
@@ -77,8 +82,9 @@ Status: implemented
   给脚本化升级入口。`/update` 文案从「请自行构建」变为「本机升级：`pony update`」。
 - **不可逆面（本变更最需要留意的部分）**：写入的是**用户自己的可执行文件**。约束：失败即不动、成功即覆盖、
   覆盖前有 sha256 与回验两道闸、并发有 lock、临时文件必清。**没有自动备份**：升级不可回滚到旧的**字节**，
-  但可用 `pony update --pin <旧版本>` 装回指定版本（前提是该版本仍在最近的 release 里带清单）；该口径必须
-  写进发布说明，不把「可回滚」当成已承诺能力。
+  但可用 **`pony update --pin <旧版本> --force`** 装回指定版本（`--pin` 是**目标选择**、`--force` 是**放行降级**，
+  两者必须同时给；前提是该版本仍在最近的 release 里带清单）——这条命令必须逐字写进发布说明，
+  不把「可回滚」当成已承诺能力，也不写成半条命令。
 - **CI 面**：`release.yml` 新增 ubuntu job（`needs: build-and-release`）。桌面 job 先发布、CLI job 后补传资产：
   若 CLI job 失败，会出现「本次 release 没有 CLI 清单」，此时客户端会自然落到更旧的含清单 release（不会装坏版本），
   属**优雅降级**而非隐蔽故障——job 里显式打印该风险。
@@ -86,7 +92,8 @@ Status: implemented
   1 次重试，制品下载单独预算 300s（上限 1800s，非法回退 300）、连接 10s、体积上限 128MiB、**不重试**
   （避免半包累积），落在 `.dev-team/nfr-baseline-wave67.json` 的 `download_budget`。
 - **可观测性**：新增一条出网路径（发现 + 下载）与一个新的 CLI 子命令接口面，四维归属见 `docs/observability.yaml`
-  的本条登记；CLI 进程无内置 tracer，`trace_id` 按既有 `logging_legacy_exempt` 口径豁免并显式声明。
+  的本条登记（含 `trace_id` 缺省豁免的显式声明）。阶段日志是 **stderr 上的单行 `[pony-update] phase=… status=…`**
+   （六个阶段 ok/fail 都有），不写工作区日志文件；`--json` 时 stdout 只有一行收据，日志绝不污染 stdout。
 - **验收**：红相在空桩上真红（`unimplemented!()` panic / 断言失败），绿相 `cargo test -p pony-agent-core --lib`
   全绿；另有本机 e2e（本地 mock 清单 → 下载 → 校验 → 替换 → 回验）与真实网络 `pony update --check --json`
   两条物理收据。

@@ -102,3 +102,44 @@ test result: FAILED. 41 passed; 13 failed; 0 ignored; 0 measured; 0 filtered out
 # 由 TempDir 的 Drop 整目录删除；只读目录用例另带 RestorePerms Drop 守卫恢复 0o755。
 # env 注入由 EnvGuard 串行化（进程级 Mutex）并在 Drop 逐项还原（含 panic 路径）。
 # mock HTTP 服务由 MockServer 的 Drop 置 shutdown 后 join，无遗留线程/端口。
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AMEND（第二轮 · L3-B 变异反馈）：收紧超限用例的错误码区分力
+# ═══════════════════════════════════════════════════════════════════════════
+# 背景：L3-B 变异实测 —— 删除 updater.rs 两处 `MAX_ARTIFACT_BYTES` 判断后
+#       `update_rejects_oversized_artifact_without_writing` 仍绿（超限被后续 size 校验路径兜住），
+#       即该用例对「超限」分支零区分力；契约 C7 要求超限 ⇒ TooLarge。
+# 改动范围：**只改这一条用例**（tui.rs cli_self_update_tests，净 +51/-4），其余 15 条未动。
+#   · 新增错误码级断言：`matches!(err, UpdateError::TooLarge(_))` + `err.code() == "too_large"`
+#     + `err.exit_code() > 0`（契约 C1 真值方法；实测当前实现的 JSON 收据 error.code 逐字为
+#     "too_large"，与 C1 一致）。
+#   · 保留原有三条硬不变量：非零退出 / 绝不落盘 / 无 .new·.part·lock 残留。
+#
+# 为什么不是「解析 stdout 的单行 JSON」（实测依据，非折衷）：
+#   libtest 用 thread-local 捕获**测试线程**的 stdout，`println!` 被吞进用例缓冲、不落 fd 1。
+#   本轮实测：dup2(1 → 捕获文件) + 在子线程里执行 run_update_action(..., json=true) 之后，
+#   捕获文件仍为空串（`实际 stdout=""`），说明门禁命令下无法从 stdout 取 JSON。
+#   故改用 CLI 内部**同一个入口** `run_self_update(&UpdateOptions{..})` 取得 `UpdateError` 本体：
+#   `run_update_action` 的 JSON 收据就是 `error.code()` 的序列化结果 ⇒ 断言面等价，且不依赖
+#   `--nocapture`（依赖 `--nocapture` 的用例在给定门禁命令下会假失败）。
+#
+# 变异静态推理（**未做经验变异**：`crates/pony-agent-core/src/agent/updater.rs` 当前有 executor 的
+# 未提交改动（+132/-19），按 Lead 指令不做就地变异，只回传静态推理）：
+#   · 现路径：`plan.size (MAX_ARTIFACT_BYTES+1) > MAX_ARTIFACT_BYTES`（updater.rs:525）
+#     ⇒ `Err(UpdateError::TooLarge(plan.size))` ⇒ code()=="too_large" ⇒ 本用例绿。
+#   · 删除 :525 的预检（或连同 :1044 流式判断一起删）：mock 实际只发 ~90 字节脚本，
+#     `written > MAX_ARTIFACT_BYTES` 与 `written > plan.size` 均不成立 ⇒ 落到
+#     `written != plan.size` 分支（updater.rs:1060）返回 `UpdateError::Signature(...)`
+#     ⇒ `matches!(TooLarge)` 为 false 且 `code()=="signature"` ⇒ **两条断言立即红**。
+#     这正是 L3-B 观察到的「被 size 校验路径兜住」的同一分支，故本断言可杀死该变异。
+#   · 残余局限（诚实登记）：若只删 :1044 的流式判断而保留 :525 预检，本用例仍绿 ——
+#     该分支只有「实发流量超过 128MiB」才能触发，无法在测试里廉价造出；若需覆盖，建议
+#     另立条「declared size 小于实际流量 ⇒ 早停」的用例（会走 TooLarge(written) 分支）。
+#
+# 门禁原文：
+# 1) cargo test -p pony-agent-core --bin pony cli_self_update
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 3.44s
+# 2) cargo test -p pony-agent-core --bin pony（全量 bin 目标）
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.32s
+# 3) cargo test -p pony-agent-core --lib（全量 lib，确认零回归）
+test result: ok. 1362 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.66s

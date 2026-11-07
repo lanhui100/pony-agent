@@ -1,0 +1,110 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/updater.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    ".github/workflows/release.yml",
+    "docs/decisions/0087-cli-self-update.md",
+    "docs/decisions/README.md",
+    ".agents/notes/implemented/feature/2026-11-07-cli-self-update.md",
+    "docs/observability.yaml (wave-cli-self-update)",
+    ".dev-team/contract-matrix-cli-self-update.md",
+    ".dev-team/e2e-receipt-cli-self-update.txt",
+    "crates/pony-agent-core/tests/slash_commands_acceptance.rs",
+    "crates/pony-agent-core/Cargo.toml"
+  ],
+  "answers": [
+    {
+      "id": "B1",
+      "verdict": "PASS",
+      "evidence": "自更新链路全程只用 core 版本：current_version=env!(\"CARGO_PKG_VERSION\")（updater.rs:466，该 crate 版本 0.1.156）、清单版本以 manifest.version 为准、--pin 只匹配清单 version（updater.rs:918-942）、资产 URL 只取同 release 的 browser_download_url（updater.rs:977-999）；updater.rs 内无 tag_name/package.json 读取（tag 仅出现在错误文案里）。apply：tui.rs:13120 的 --version 报的也是 core 版本。唯一 tag 使用者是未改动的旧 /update 检查（tui.rs:2052），见 B3/B6。"
+    },
+    {
+      "id": "B2",
+      "verdict": "PASS",
+      "evidence": "release.yml 为纯追加（单 hunk @@ -262,3 +262,111 @@，windows job 零改动）；build-cli-linux needs: build-and-release（python yaml 解析确认）；版本断言只比 core（`grep -m1 '^version' crates/pony-agent-core/Cargo.toml`），`sed` 实测把 `pony 0.1.156 · linux-x86_64` 解析成 0.1.156；空值/不符均 exit 1（fail-closed）；上传与收尾断言都用 `${{ github.ref_name }}`（= push tag），`gh api repos/$repo/releases/tags/$tag --jq .assets[].name` + `grep -qx` + 下载回读 version 比对，任一步失败 job 红；`python3 -c 'import yaml;yaml.safe_load(...)'` 通过（jobs=[build-and-release, build-cli-linux]）。"
+    },
+    {
+      "id": "B3",
+      "verdict": "FAIL",
+      "evidence": "退出码映射逐项对齐（updater.rs:214-225：Signature|TooLarge=1、Downgrade=2、Network|HttpStatus|Manifest|MissingAsset|UnsupportedPlatform=3、NotWritable|Io=4）；--json 两路径各只一次 println!（tui.rs:13347/13384）且阶段日志全走 eprintln（updater.rs:612）；--check 在下载前 return（updater.rs:496-504，无 download_artifact 调用）；--force 允许同版本重装与降级（plan_update updater.rs:288-330）。但契约 C2:63「/update 改为复用 updater 的检查实现 + 文案追加一行『本机升级：pony update』」未实现（tui.rs:2112 仍是旧文案，perform_update_check 仍用 releases/latest 的 tag_name 对 core 版本比较）。"
+    },
+    {
+      "id": "B4",
+      "verdict": "FAIL",
+      "evidence": "变异①（verify_sha256 恒 Ok）真红：2 条用例 FAILED（verify_sha256_accepts_match_and_rejects_tampered_or_missing_file、sha_mismatch_leaves_existing_binary_untouched_without_residue，TEST_EXIT=101），还原后 sha256 与基线逐字节一致；变异②（删 MAX_ARTIFACT_BYTES 检查）**存活**：先删流式上限、再连 plan.size 声明上限一并删除，update_rejects_oversized_artifact_without_writing 仍 ok（exit 0）——该用例只锁「非零 + 无残留」，未按 C7 断言 TooLarge，实际由「截断字节数不符」路径兜住；且流式 `written > MAX_ARTIFACT_BYTES` 分支在 plan.size>128MiB 已被前置拒绝的前提下不可达。"
+    },
+    {
+      "id": "B5",
+      "verdict": "FAIL",
+      "evidence": "NFR 数字全对：控制面 5s+1 次重试（updater.rs:54-60、801-845）、下载 connect 10s/预算 300s/上限 1800s/128MiB/不重试（updater.rs:62-64、1002-1050）、≤5 跳（updater.rs:751-800，0..=5）、白名单 4 host（updater.rs:65-70）、只发 linux-x86_64（release.yml manifest 段）。但三处声明与代码不符：①ADR 0087:28/77、note:23、契约 C2:63 声明的 /update 文案「本机升级：pony update」在 .rs 中零出现；②observability.yaml:626-627 声明 phase 日志「最终落 ~/.pony-agent/tui-logs/tui-runtime.log」，实际 phase_log 用裸 eprintln!（updater.rs:612），`pony update` 路径不经过 set_log_file_path（tui.rs:13287）；③observability.yaml:640 把「超限体积」列为已覆盖的 16 条行为门，但该用例不断言 TooLarge（见 B4②）。"
+    },
+    {
+      "id": "B6",
+      "verdict": "FAIL",
+      "evidence": "semver 迁移（tui.rs 删除 pub fn parse_semver_triple / pub fn is_newer_semver，改为私有 `use ...::is_newer_semver`，tui.rs:50）打断了既有验收 target：crates/pony-agent-core/tests/slash_commands_acceptance.rs:795-802 的 T6（/update 语义化版本契约）编译失败（E0425 ×3 + E0603 ×4，共 7 errors）。既有 lib/bin 目标未见行为回归：bin 目标 54 passed / 0 failed；但 T6 这条 /update 既有测试已无法执行，且本波验收清单（契约「门禁」段）未包含该 target，故未被发现。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 50,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "evidence": "semver 迁移把 tui::parse_semver_triple / tui::is_newer_semver 从 pub 面撤走（tui.rs:2031-2052 删除，改私有 use 引入 is_newer_semver），但既有验收 target 仍在按 `tui::parse_semver_triple`、`tui::is_newer_semver` 调用（tests/slash_commands_acceptance.rs:795-802），导致该 /update 验收 target 在 f53476cd 上完全不可编译；契约 C1 明确要求「tui.rs 改为 use 引用，其既有测试保持通过」。",
+      "counterexample_cmd": "cargo test -p pony-agent-core --test slash_commands_acceptance --no-run",
+      "cmd_exit": 101,
+      "cmd_tail": "error[E0425]: cannot find function `parse_semver_triple` in module `tui` --> crates/pony-agent-core/tests/slash_commands_acceptance.rs:795:21 (x795/796/797); error[E0603]: function import `is_newer_semver` is private --> tests/slash_commands_acceptance.rs:799-802; error: could not compile `pony-agent-core` (test \"slash_commands_acceptance\") due to 7 previous errors"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2112,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "evidence": "契约 C2:63、ADR docs/decisions/0087-cli-self-update.md:28/:77、note .agents/notes/implemented/feature/2026-11-07-cli-self-update.md:23 三处都声明「/update 保持只读，文案追加一行『本机升级：pony update』」，并把 C2 的「复用 updater 的检查实现」列为已交付；实际 format_update_feedback 仍是旧文案（`源码开发环境：git pull && npm run cli:build` / `桌面端：设置里一键升级`），perform_update_check（tui.rs:2033-2092）也完全未复用 updater（仍用 releases/latest 的 tag_name 与 core 版本比较，即本波 ADR 自己判定为错位的那条路径）。声明说了、代码没做。",
+      "counterexample_cmd": "grep -rn \"本机升级\" --include=*.rs crates/ ; echo \"hits=$?\" ; sed -n '2112p' crates/pony-agent-core/src/bin/tui.rs",
+      "cmd_exit": 1,
+      "cmd_tail": "(无任何 .rs 命中，grep 退出 1)；2007-2112 行仍为 \"💡 升级指引：\\n- 源码开发环境：git pull && npm run cli:build\\n- 桌面端：在设置中点击「检查更新」并一键升级\""
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 15100,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "evidence": "C7 的 L2-AT 要求「>128MiB 声明 ⇒ TooLarge 且不落盘」，但 update_rejects_oversized_artifact_without_writing 只断言「退出码非零 + 无残留 + 目标未创建」，未断言 UpdateError::TooLarge；实测把 updater.rs:525 与 updater.rs:1044 两处 MAX_ARTIFACT_BYTES 检查全部删除后该用例仍 ok（由 download_to_file 的 `written != plan.size` 截断路径兜住非零退出码），说明它锁不住体积上限这条不变量；同时流式 `written > MAX_ARTIFACT_BYTES` 分支在 plan.size 已前置拒绝的前提下不可达（死分支）。",
+      "counterexample_cmd": "（临时删除 updater.rs:525 与 :1044 的 MAX_ARTIFACT_BYTES 判断后）cargo test -p pony-agent-core --bin pony update_rejects_oversized_artifact_without_writing",
+      "cmd_exit": 0,
+      "cmd_tail": "test cli_self_update_tests::update_rejects_oversized_artifact_without_writing ... ok / test result: ok. 1 passed; 0 failed（已 `cp /tmp/l3b-updater.base.rs` 还原，sha256 与基线一致 0c13316d…）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/updater.rs",
+      "line": 214,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "evidence": "exit_code 把 UnsupportedPlatform 归入 `3`，而 C2/ADR 的 `3` 定义是「网络/HTTP/清单失败」，退出码表里没有平台不支持这一档；Windows 用户（C6-6 明确支持该分支）拿到的 `pony update` 退出码 3 会被脚本解读为网络故障。Downgrade→2（用法）与 TooLarge→1（校验）同理未被文档显式覆盖。",
+      "counterexample_cmd": "grep -n \"UnsupportedPlatform(_) => 3\" -n crates/pony-agent-core/src/agent/updater.rs ; grep -n \"退出码\" docs/decisions/0087-cli-self-update.md",
+      "cmd_exit": 0,
+      "cmd_tail": "updater.rs:214-225 中 UnsupportedPlatform 与 Network/HttpStatus/Manifest/MissingAsset 同归 3；ADR 0087:25-26 仅定义 0/1/2/3/4 五档且 3 只写「网络/HTTP/清单失败」。"
+    },
+    {
+      "file": ".github/workflows/release.yml",
+      "line": 273,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "evidence": "契约「门禁」段要求 deny-warnings 与 CI 同口径（ci.yml:59/87/93 用 RUSTFLAGS=-D warnings），但新增的 build-cli-linux 未设 RUSTFLAGS（父 job build-and-release 的 job 级 RUSTFLAGS 不跨 job 继承），因此「会在 release 上真正分发出去的 linux CLI 产物」可以来自一个 `-D warnings` 会红的提交；已知 team_history.rs 外部阻塞可解释当前取舍，但应显式登记为豁免而非静默缺失。",
+      "counterexample_cmd": "python3 -c \"import yaml;d=yaml.safe_load(open('.github/workflows/release.yml'));print(d['jobs']['build-cli-linux'].get('env'), [s.get('env') for s in d['jobs']['build-cli-linux']['steps']])\"",
+      "cmd_exit": 0,
+      "cmd_tail": "None [None, None, None, None, {'GH_TOKEN': '${{ secrets.GITHUB_TOKEN }}'}, {'GH_TOKEN': '${{ secrets.GITHUB_TOKEN }}'}]（无 RUSTFLAGS）"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 626,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "evidence": "声明写「阶段日志走既有 [pony-update] phase=… status=… 单行 stderr，最终落既有 ~/.pony-agent/tui-logs/tui-runtime.log」，但 phase_log 是裸 eprintln!（updater.rs:612），日志文件落点是 otel::log::set_log_file_path（tui.rs:13287，只在 TUI 运行期设置），`pony update` 子命令路径既不进 TUI 也不改向 stderr，故这些阶段行只到调用方终端、不进 tui-runtime.log——排障时按声明去翻日志会扑空。",
+      "counterexample_cmd": "grep -n \"fn phase_log\" -A 3 crates/pony-agent-core/src/agent/updater.rs ; grep -n \"set_log_file_path\" crates/pony-agent-core/src/bin/tui.rs",
+      "cmd_exit": 0,
+      "cmd_tail": "updater.rs:612 `eprintln!(\"[pony-update] phase={phase} status={status} {detail}\")`；tui.rs:13287 `log::set_log_file_path(log_path)` 仅在 bin 引导（TUI）路径调用。"
+    }
+  ]
+}
