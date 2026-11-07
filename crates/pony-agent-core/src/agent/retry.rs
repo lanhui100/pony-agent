@@ -300,8 +300,10 @@ impl RetryAfter {
 ///
 /// 分组→注册表映射（R1）：
 /// ① timeout 四词 → [`ErrorCode::UpstreamTimeout`]；② 429 三词 → `UpstreamRateLimited`；
-/// ③ 5xx/408 四码 → `UpstreamServerError`；④ 连接三词 → `UpstreamNetwork`
-/// （禁扩 `connect` 泛词）；⑤ 400 系七码 → `UpstreamBadRequest`/`UpstreamAuth`
+/// ③ 5xx/408 四码 → `UpstreamServerError`；③′ 边缘 5xx（520–524/527/530，
+/// 实证驱动，ADR-0086）→ 同上；④ 连接三词 → `UpstreamNetwork`
+/// （禁扩 `connect` 泛词）；④′ 传输层标志 `type=connect|request` → `UpstreamNetwork`
+/// （无状态码，置于所有状态码判据之后）；⑤ 400 系七码 → `UpstreamBadRequest`/`UpstreamAuth`
 /// （401 与 400 不区分冻结，同落 NonRetryable）；⑥ context 四词 → `UpstreamContextOverflow`；
 /// ⑦ 其余默认 Abort；⑧ decide/budget/RetryAfter/StreamState 语义冻结（本 Stage 不动）。
 ///
@@ -317,8 +319,20 @@ pub(crate) const UPSTREAM_TIMEOUT_HINTS: &[&str] = &[
 pub(crate) const UPSTREAM_RATE_LIMITED_HINTS: &[&str] =
     &["429", "rate limit", "rate_limit", "too many requests", "tpm"];
 pub(crate) const UPSTREAM_SERVER_ERROR_HINTS: &[&str] = &["502", "503", "504", "408"];
+/// ③′ 边缘 5xx（ADR-0086）：语义与 502/503/504 同为「暂时性上游不可用」，但码值
+/// 不在 RFC 标准表内（reqwest 显示为 `<unknown status code>`），原码表一条都不命中
+/// ⇒ 一律 `NonRetryable` 直接 Abort，退避预算从未启动。
+/// 525/526 明确**排除**：源站 TLS 握手/证书配置错误，重试不能改变结果，保持 Abort。
+/// 500 亦维持既有冻结（NonRetryable，见 `stage2_upstream_code_for_hints_covers_r1_groups`）。
+pub(crate) const UPSTREAM_EDGE_SERVER_ERROR_HINTS: &[&str] =
+    &["520", "521", "522", "523", "524", "527", "530"];
 pub(crate) const UPSTREAM_NETWORK_HINTS: &[&str] =
     &["connection reset", "connection refused", "dns"];
+/// ④′ 传输层阶段标志（ADR-0086）：`type=connect` / `type=request` /
+/// `type=connect+request`。这类失败**没有 HTTP 状态码**（Connect/SendRequest 阶段即终止），
+/// 码表按状态码与措辞匹配全部落空 ⇒ 直接 Abort。判据用结构化标志而非裸 `connect`
+/// 泛词（`connect` 单独出现仍不命中，沿用 R1④ 禁扩约束）。
+pub(crate) const UPSTREAM_TRANSPORT_HINTS: &[&str] = &["type=connect", "type=request"];
 pub(crate) const UPSTREAM_BAD_REQUEST_HINTS: &[&str] =
     &["400", "401", "403", "404", "422", "407", "413"];
 pub(crate) const UPSTREAM_CONTEXT_OVERFLOW_HINTS: &[&str] = &[
@@ -560,6 +574,9 @@ pub(crate) fn upstream_code_for_hints(lower: &str) -> Option<ErrorCode> {
     if hints_match(lower, UPSTREAM_SERVER_ERROR_HINTS) {
         return Some(ErrorCode::UpstreamServerError);
     }
+    if hints_match(lower, UPSTREAM_EDGE_SERVER_ERROR_HINTS) {
+        return Some(ErrorCode::UpstreamServerError);
+    }
     if hints_match(lower, UPSTREAM_NETWORK_HINTS) {
         return Some(ErrorCode::UpstreamNetwork);
     }
@@ -572,6 +589,11 @@ pub(crate) fn upstream_code_for_hints(lower: &str) -> Option<ErrorCode> {
     }
     if hints_match(lower, UPSTREAM_CONTEXT_OVERFLOW_HINTS) {
         return Some(ErrorCode::UpstreamContextOverflow);
+    }
+    // ④′ 传输层标志置于**所有状态码判据之后**（ADR-0086）：报文同时含真实 4xx 时
+    // 仍按状态码落 NonRetryable，避免把「服务端明确拒绝」误升为可重试。
+    if hints_match(lower, UPSTREAM_TRANSPORT_HINTS) {
+        return Some(ErrorCode::UpstreamNetwork);
     }
     None
 }
@@ -1358,6 +1380,74 @@ mod tests {
         }
         // ⑦ 其余默认 None
         assert_eq!(upstream_code_for_hints("provider returned 500"), None);
+    }
+
+    // ── ADR-0086：边缘 5xx + 传输层标志（实证驱动的分类补齐） ──
+
+    #[test]
+    fn edge_5xx_maps_to_server_error_but_origin_tls_stays_abort() {
+        use crate::agent::error_code::ErrorCode::*;
+        // ③′ 边缘 5xx：全部落 UpstreamServerError（可重试）
+        for code in ["520", "521", "522", "523", "524", "527", "530"] {
+            let probe = format!(
+                "provider 返回错误状态：{code} <unknown status code>；耗时=6401ms；响应正文："
+            );
+            assert_eq!(
+                upstream_code_for_hints(&probe),
+                Some(UpstreamServerError),
+                "{code}"
+            );
+        }
+        // 525/526 源站 TLS 配置错误：保持 NonRetryable（码表不命中 → None）
+        for code in ["525", "526"] {
+            let probe = format!(
+                "provider 返回错误状态：{code} <unknown status code>；耗时=6097ms；响应正文："
+            );
+            assert_eq!(upstream_code_for_hints(&probe), None, "{code}");
+        }
+        // 500 冻结不变；码值粘在更长数字里仍不得命中
+        assert_eq!(upstream_code_for_hints("elapsed=52201ms"), None);
+        assert_eq!(upstream_code_for_hints("token id 1522"), None);
+    }
+
+    #[test]
+    fn transport_flags_map_to_network_after_status_code_judgement() {
+        use crate::agent::error_code::ErrorCode::*;
+        // ④′ 无状态码的传输阶段失败 → UpstreamNetwork（可重试）
+        let connect = "调用 provider 流式接口失败：error sending request for url (http://10.42.0.67:8080/v1/chat/completions)；type=connect+request；elapsed=3108ms；source=client error (Connect refused)";
+        assert_eq!(upstream_code_for_hints(connect), Some(UpstreamNetwork));
+        let send = "调用 provider 失败：error sending request for url (https://tokens.ponyjob.top/v1/chat/completions)；type=request；elapsed=30996ms；source=client error (SendRequest)";
+        assert_eq!(upstream_code_for_hints(send), Some(UpstreamNetwork));
+        // 既有约束不变：裸 `connect` 泛词不命中
+        assert_eq!(upstream_code_for_hints("connect"), None);
+        // 传输标志含真实 400 → 状态码判据优先，仍是 NonRetryable
+        let bad_request =
+            "provider 返回错误状态：400；type=request；elapsed=1200ms；响应正文：invalid model";
+        assert_eq!(
+            upstream_code_for_hints(bad_request),
+            Some(UpstreamBadRequest)
+        );
+        // type=decode（SSE 解析）不属于传输阶段，不得被误升为可重试
+        assert_eq!(upstream_code_for_hints("type=decode；sse 解析失败"), None);
+    }
+
+    #[test]
+    fn adr_0086_regression_classify_retryability() {
+        let policy = ProviderRetryPolicy::new(BackoffConfig::default());
+        for probe in [
+            "provider 返回错误状态：522 <unknown status code>；耗时=6401ms；响应正文：",
+            "provider 返回错误状态：520 <unknown status code>",
+            "error sending request for url (https://tokens.ponyjob.top/v1/chat/completions)；type=request；elapsed=30996ms",
+        ] {
+            assert!(policy.classify(probe).is_retryable(), "{probe}");
+        }
+        for probe in [
+            "provider 返回错误状态：525 <unknown status code>；耗时=6097ms；响应正文：",
+            "provider 返回错误状态：400；响应正文：invalid model",
+            "provider returned 500",
+        ] {
+            assert!(!policy.classify(probe).is_retryable(), "{probe}");
+        }
     }
 
     #[test]
