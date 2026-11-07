@@ -55,6 +55,11 @@ Status: implemented
   128MiB 上限/不重试，记在 `.dev-team/nfr-baseline-wave67.json` 的 `download_budget`；控制面仍 5s + 1 次重试。
 - **可观测性**：新增一条出网路径与一个 CLI 子命令接口面，四维归属落 `docs/observability.yaml`；CLI 进程无内置 tracer，
   `trace_id` 按既有 `logging_legacy_exempt` 口径豁免并显式声明。
+- **顺带发现的既有缺陷（本轮不改，登记）**：`pony` 的 `ObservabilityBootstrap` 在解析参数前就 `log_json` 打一条
+  `otel::init` 警告，而该 logger 走 **stdout** ⇒ `pony --version` / `pony update --json` 的「机器可读输出」
+  在「OTel 已启用但缺 token」的环境里会被一行 JSON 警告占位（v0.1.184 的 CI 首次实证：版本断言把警告行当成版本）。
+  CI 侧已改为按版本号模式提取（fail-closed）；**产品侧的正确修法是把该 logger 的默认 sink 改成 stderr**，
+  属跨模块行为变更（TUI 的 tui-runtime.log 抓取依赖它），另立条目处理。
 - **残余风险**：CLI job 失败时该 release 没有 CLI 清单 ⇒ 客户端回落到更旧的含清单 release（不会装坏版本，属优雅降级）；
   当前只发布 `linux-x86_64`，其它平台会得到 `UnsupportedPlatform`/`MissingAsset` 的明确指引。
 - 顺带修复：HEAD 上 `bin/tui.rs` 里 `41e13297` merge 残留的 `mod wave43_unit_tests` 重复粘贴（5 个测试各定义 2 次 ⇒ E0428，

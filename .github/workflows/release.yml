@@ -298,7 +298,9 @@ jobs:
       - name: Assert CLI version matches core version
         run: |
           set -euo pipefail
-          ver="$(./target/release/pony --version | head -1 | sed -E 's/.* ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+          # v0.1.184 二跑实证：`pony --version` 首行可能被日志行（otel::init warn 走 stdout 的 JSON）占位，
+          # 因此不能取 head -1，必须按版本号模式提取（仍 fail-closed：提不到就报错退出）。
+          ver="$(./target/release/pony --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
           core="$(grep -m1 '^version' crates/pony-agent-core/Cargo.toml | cut -d'"' -f2)"
           echo "cli_version=$ver core_version=$core"
           if [ -z "$ver" ] || [ "$ver" != "$core" ]; then
