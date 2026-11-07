@@ -7176,9 +7176,18 @@ fn message_lines_with_ctx(
             );
             match message.role {
                 MessageRole::User => {
-                    // 轮间距 2 行：长会话里一眼能扫到「新一轮提问」的节拍
-                    push_gap(&mut lines, 2);
+                    // 用户轮上下各留 1 行页面底色空白（ADR 0088）：与 agent 正文 / 思考 /
+                    // 工具行 / 状态行之间不再只靠气泡内衬贴边。
+                    // 每条消息各自返回独立 `Vec`，块首 `push_gap` / `push_blank` 在空 Vec 上是
+                    // no-op（`lines.last() == None`），故间距必须由用户块自己承载。
+                    // 上方：仅当前面已有可见内容时才加，会话首条用户消息顶上不得凭空多一行。
+                    if ctx.has_preceding_lines {
+                        lines.push(blank());
+                    }
                     push_user_block(&mut lines, &message.content, width);
+                    // 下方：无条件加 1 行。若它恰好是会话最后一行，`ui()` 的 `scroll_total`
+                    // 尾部空白剔除（ADR 0076）会让它不参与滚动锚定，不产生悬空留白。
+                    lines.push(blank());
                 }
                 MessageRole::Assistant => {
                     // 助手正文不再打 "pony" 字标：角色由轨道与留白承担，避免每轮都有一段品牌噪音。

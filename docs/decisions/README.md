@@ -96,6 +96,7 @@
 - [0084 TUI header 指标双口径：`↑in` 当前上下文、`↓out` 与缓存命中率会话累计](0084-tui-metrics-dual-caliber-session-cumulative.md)
 - [0086 provider 上游失败分类补齐：边缘 5xx 与传输层标志纳入可重试](0086-provider-transport-and-edge-5xx-retry-classification.md)
 - [0087 CLI 自更新：`pony update` 走 GitHub Releases + 强制 sha256 + POSIX 原子替换](0087-cli-self-update.md)
+- [0088 TUI 用户消息上下各留 1 行页面底色间距](0088-tui-user-message-vertical-gap.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

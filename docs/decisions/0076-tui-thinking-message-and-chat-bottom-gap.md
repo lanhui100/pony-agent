@@ -95,5 +95,8 @@ Status: implemented
 ## 关联
 
 - 承接 ADR 0038（TUI 设计系统的发丝线与弱化层级）、0042（composer 几何与指标行）、0043（消息区层级）；
+- 用户消息块自身两侧各 1 行页面底色间距由 [ADR 0088](0088-tui-user-message-vertical-gap.md) 承接
+  （2026-11-07）：思考块呼吸行数不变，但 A12 的 User 侧行差随之上调
+  （User→Thinking 2→3、Thinking→User 3→4）；「排除 User 前驱另加呼吸」的结论仍然成立。
 - 与 ADR 0056 / 0059（桌面端流式状态与视觉层）为不同交付形态的同一语义，互不替代；
 - 事件来源：`turn:delta` 的 `reasoningContent`（`agent/runtime/turn_stream.rs`、`StreamReasoningBatcher`）。

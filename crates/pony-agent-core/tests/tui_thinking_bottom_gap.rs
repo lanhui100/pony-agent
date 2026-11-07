@@ -736,7 +736,8 @@ fn a12_thinking_keeps_one_breath_against_previous_non_user_blocks() {
         "契约 C6(R1)：ToolResult → Thinking 前驱侧必须恰好 1 行呼吸（行差 2），不得 0 行粘连",
     );
 
-    // 序列 3：User → Thinking。User 块自带 1 行内边距 ⇒ 行差 2；思考块不得再叠加成 3。
+    // 序列 3：User → Thinking。ADR 0088（2026-11-07）给用户块下方新增 1 行页面底色空白
+    // ⇒ 行差 = 内边距 1 + 新增空白 1 + 1 = 3；思考块仍不得额外叠加。
     let buf = screen_sequence(&[
         (tui::MessageRole::User, "USERQ"),
         (tui::MessageRole::Thinking, "THINKT"),
@@ -745,11 +746,11 @@ fn a12_thinking_keeps_one_breath_against_previous_non_user_blocks() {
         &buf,
         "USERQ",
         "THINKT",
-        2,
-        "契约 C6(R1)：User → Thinking 沿用既有轮间距（行差 2），思考块不得额外叠加成 3",
+        3,
+        "ADR 0088：User → Thinking 行差 3（内边距 1 + 用户块下间距 1），思考块不得额外叠加成 4",
     );
 
-    // 序列 4：Thinking → User。跨轮既定节奏：思考块尾 1 行 + User 块首内边距 1 行 ⇒ 行差 3。
+    // 序列 4：Thinking → User。思考块尾 1 行 + User 块上间距 1 行（ADR 0088）+ 内边距 1 行 ⇒ 行差 4。
     let buf = screen_sequence(&[
         (tui::MessageRole::Thinking, "THINKT"),
         (tui::MessageRole::User, "USERQ"),
@@ -758,9 +759,9 @@ fn a12_thinking_keeps_one_breath_against_previous_non_user_blocks() {
         &buf,
         "THINKT",
         "USERQ",
-        3,
-        "契约 C6(R1)：Thinking → User 跨轮必须沿用既有节奏（行差 3 = 恰好 2 行空白），\
-         思考块不得把轮间距撑成 3 行空白（行差 4）",
+        4,
+        "ADR 0088：Thinking → User 行差 4（思考尾 1 + 用户块上间距 1 + 内边距 1），\
+         思考块不得把轮间距撑成 5",
     );
 }
 
