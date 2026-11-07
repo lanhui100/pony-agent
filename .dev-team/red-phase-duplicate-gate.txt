@@ -63,3 +63,49 @@ test result: FAILED. 1336 passed; 11 failed; 0 ignored; 0 measured; 0 filtered o
 # 契约矩阵 C5 第 1~8 条全部有对应用例；第 8 条（端到端写类清空）已**真实覆盖**（未降级为
 # 「由 tracker 级用例 3 覆盖」）：自定义成功 executor 下 workspace_edit_file 经 capability registry
 # 解析并真实执行（status=ok），无需真实沙箱写盘。
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AMEND-2 重锚（Gate-1 BLOCKING 修复后的测试迁移；Test Agent 二次冻结）
+# ═══════════════════════════════════════════════════════════════════════════
+# 背景：Gate-1 判 BLOCKING —— `ToolKind::Execute` 含全部 Job*，与 Run 成功交替会互清计数
+#       ⇒ 新绕闸面。裁决：changed_world 只认 ToolKind::Write + 负向成功列表 + 移除 clear()。
+# 迁移范围（仅 crates/pony-agent-core/src/agent/runtime/tests.rs）：
+#   · :5796 duplicate_tool_call_error_states_exact_match_with_actual_counts
+#       补两条语义位置断言：contains("已第 3 次") / contains("最多允许 2 次")
+#       （L3-B：只锁 contains('3')/contains('2') 杀不掉 occurrences↔limit 参数互换变异）
+#   · :5903 same_signature_tracker_isolates_signatures（原 ..._and_clears 改名）
+#       删除 clear() 断言（clear() 按 AMEND-2-3 移除），保留「不同签名互不影响」并加一条
+#       「另一签名记账不得改变既有签名计数」断言
+#   · :5993 tool_execution_changed_world_is_write_only（原 ..._requires_successful_write_or_execute_kind 改名）
+#       Write 类状态矩阵：ok=true / error=false / **aborted=false** / **cancelled=false** / read+ok=false
+#   · :6054 tool_execution_changed_world_excludes_execute_kind（**拆分新增**）
+#       workspace_run_command + ok ⇒ false（Execute 不得清空；避免与 Job* 互清）
+#       拆分理由：单测里先命中的 panic 会掩盖另一条修复点，拆开后两条 AMEND-2 修复各有独立红相信号
+#   · :5604 run_turn_write_success_clears_same_signature_counts_end_to_end（序列重锚）
+#       Read(A) → Read(A) → Edit(B, ok) → Read(A) → 最终作答；mock 队列 5 个响应
+#       断言：executed_names == [read, read, edit, read]（4 个）/ tool_activities.len()==4 /
+#             requests.len()==5 / assistant_message == final_text / 无请求体含 blocked_redundant_followup
+#       换序列理由：旧 Read→Edit→Read 在 limit=2 下 Read 只执行 1 次，不清空也不会命中闸 ⇒
+#       「retain 被删」变异零区分力 = 假绿；新序列先把 Read 计数顶到 2 再靠 Edit 清空，变异必红。
+#
+# 门禁命令（原始）：cargo test -p pony-agent-core --lib
+# Exit code: 101（编译通过；测试失败）
+# test result 行原文：
+test result: FAILED. 1346 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.74s
+#
+# 失败清单（2 条，均为 AMEND-2 待修项导致的**真实断言失败**，非 panic 空桩、非编译错误）：
+#  1) agent::runtime::tests::tool_execution_changed_world_excludes_execute_kind
+#       tests.rs:6062  "执行类 + 成功不得判为改变世界：Execute 静态无法区分写域 Run / 纯查询 /
+#                        job 轮询，纳入清空会与 Job* 形成互清绕闸面，故保守只认 Write"
+#       ⇒ 现状 src 仍 `matches!(kind, Write | Execute)`，AMEND-2-1 未落地。
+#  2) agent::runtime::tests::tool_execution_changed_world_is_write_only
+#       tests.rs:6019  "写类 + aborted 不得判为改变世界（负向状态列表：error/aborted/cancelled 一律不算成功）"
+#       ⇒ 现状 src 仍 `if status == "error" { return false }`，AMEND-2-2 未落地。
+#
+# 实测口径提示（与 Lead 预期不同的两点，已回传）：
+#  · `run_turn_write_success_clears_same_signature_counts_end_to_end` 在当前（AMEND-1）src 下**是绿的**：
+#    AMEND-1 的写类清空已含 Write，故 Edit 成功清 Read 计数的行为已成立；本用例定位是
+#    「retain/清空逻辑被删」的变异杀手，而非 AMEND-2 的红相标记。AMEND-2 的真实红相标记是上述 2 条。
+#  · 文案用例在 (occurrences=3, limit=2) 下当前即含「已第 3 次」「最多允许 2 次」⇒ 绿；新增断言用于杀参数错位变异。
+#
+# 用例总数账目：1348 = 1347（上一轮）+ 1（changed_world 用例拆分新增）。

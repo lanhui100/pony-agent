@@ -31,9 +31,8 @@ new() -> Self
 occurrence_count(&self, signature: &str) -> usize       // 只读
 is_exhausted(&self, signature: &str, limit: usize) -> bool   // count >= limit；只读、不记账
 record_executed(&mut self, signature: String, changed_world: bool)  // 唯一记账点
-clear(&mut self)                                        // 归零
 pub(super) fn tool_execution_changed_world(tool_call: &ToolCall, tool_result: &ToolResult) -> bool
-// = tool_result.status != "error" && tool_kind_for_name(&tool_call.name) ∈ {Write, Execute}
+// AMEND-2 = tool_result.status ∉ {"error","aborted","cancelled"} && tool_kind_for_name(...) == ToolKind::Write
 ```
 `record_executed(sig, true)` 语义：**先清空除 `sig` 外的所有签名计数，再把 `sig` 自身 +1**；`record_executed(sig, false)` 只 +1。
 **偏离 note 的裁决（Lead）**：**不实现 `from_batch` 预置计数**。note 的 `from_batch` 让首批调用先记 1 次、执行点再记 1 次（双重计数）⇒ 默认 limit=2 时**第 2 次**即熔断，直接违反验收第 3 条（前 2 次执行、第 3 次触发）。故：turn 起始用 `new()`（空计数），计数**只在执行点**发生。
@@ -61,6 +60,25 @@ pub(super) fn build_duplicate_tool_call_error(
 ) -> String
 ```
 产物必须：① 含「完全相同」；② **不含**「近似」；③ 含实际次数与上限；④ 显式给出比较口径（同名 + 同参数，仅忽略 `description` 与 key 顺序）；⑤ 给三条出路（改参数 / 先确认当前状态 / 直接基于已有证据作答）。
+
+## AMEND-2（Lead 裁决，2026-11-07 Gate-1 审查后）
+
+Gate-1 方案对抗审查判 BLOCKING（Lead 已按 `stream_support.rs:692` + `tools.rs:7980` 亲验成立）：
+`Execute` 类全含 `Job*`（`JobOutput`/`JobList`/`JobKill`），而清空只保留自身 ⇒ **`JobOutput(A)` 与 `Run(X)` 成功交替会互相清空**，
+两签名计数恒为 1、永不达上限，旧 `BTreeSet`（第 2 次即拦）反而更严 ⇒ 本方案新引入绕闸面。故收窄：
+
+1. `tool_execution_changed_world` **只认 `ToolKind::Write`**（移除 `Execute`）。理由：① `Execute` 静态无法区分「写域 Run」与纯查询（`ls`）与 job 轮询，
+   纳入即引入上述互清绕闸；② `retain` 恒保留自身 ⇒ `Execute` 清空对「同参重试」**零收益**（自身计数不受清空影响）；
+   ③ 「改完重跑同一条命令」的真实受益路径是中间的 `Edit`（Write）触发清空，不依赖 `Run` 自身清空。
+2. 成功判据改为**负向列表**：`status ∉ {"error","aborted","cancelled"}`（L3-A：原 `!= "error"` 会把 `aborted` 写类误判为「已改变世界」并清空他人计数）。
+3. **移除 `SameSignatureTracker::clear()`**：生产零消费者（L3-A ADVISORY④），宪法常载命约 3「拒绝『以后可能用得上』式怀旧」。
+4. 测试迁移（Test Agent，契约演化后重锚红相）：
+   - `tool_execution_changed_world_...` 中 `workspace_run_command + ok` 断言 **true → false**（附注释：保守口径，Execute 不清空）；
+   - 文案用例补锁语义位置：`contains("已第 3 次")` 且 `contains("最多允许 2 次")`（L3-B：原 `contains('3')`/`contains('2')` 杀不掉参数错位变异）；
+   - 端到端用例改序列 **`Read(A) → Read(A) → Edit(B, ok) → Read(A)`**：4 次执行、5 次请求（L3-B：原 `Read→Edit→Read` 在 limit=2 下对 `retain` 变异零区分力 ⇒ 假绿）；
+   - 删除 `clear()` 相关断言（保留「不同签名互不影响」断言）。
+5. 不采纳但登记：`BatchExecute`/`Composite` 写类不清空（偏多拦，保守；需注册表细分）；闸点只读不变量无机器锁（结构不可观测：命中即收尾）；
+   批内同参 >limit 时文案「最多允许 L 次」失真（旧「只判批首」口径既有局限）。
 
 ## C5 测试契约（tests.rs 归 Test Agent 独占，Executor 只读）
 

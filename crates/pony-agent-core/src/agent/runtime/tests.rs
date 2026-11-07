@@ -5589,11 +5589,17 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
     );
 }
 
-/// 契约矩阵 C5-8（item 3 端到端）：写类成功执行 ⇒ 清空其它签名计数。
+/// 契约矩阵 C5-8（item 3 端到端，AMEND-2-4 重锚）：写类成功执行 ⇒ 清空其它签名计数。
 ///
-/// 整轮 `Read(A) → Edit(B, 成功) → Read(A)`（两次读同参；`description` 不同也被签名归一化忽略）：
-/// 第 2 次 `Read(A)` 之前发生过一次**真正改变世界**的写入 ⇒ 不得命中同签名重复闸，
-/// 即不得出现 `blocked_redundant_followup` 式恢复收尾，也不得少执行一次调用。
+/// 整轮 `Read(A) → Read(A) → Edit(B, 成功) → Read(A)` → 最终作答（三次读同参；`description`
+/// 不同也被签名归一化忽略）⇒ `Edit` 成功后第 3 次 `Read(A)` **不得**命中同签名重复闸。
+///
+/// 为什么必须换成这个序列（L3-B 变异实证）：旧序列 `Read(A) → Edit(B) → Read(A)` 在默认
+/// `limit=2` 下，`Read(A)` 在被清空前只执行过 **1** 次；即便实现里**根本没有清空逻辑**，
+/// 第 2 次 `Read` 也只把计数推到 2（未超上限、不熔断）⇒ 用例照样绿 = 零区分力 = 假绿。
+/// 新序列先用两次同参 `Read` 把计数顶到上限（=2），再由 `Edit` 成功清空：一旦 `record_executed`
+/// 的 `retain`（写类成功清空其它签名）被删/退化，第 3 次 `Read` 就是第 3 次记账 ⇒
+/// `is_exhausted(_, 2)` 命中 ⇒ 少执行一次 + 多出一次恢复式收尾请求，断言立刻变红。
 #[test]
 fn run_turn_write_success_clears_same_signature_counts_end_to_end() {
     // Arrange：会记录真实执行序的「永远成功」executor（反向照抄 AlwaysFailingExecutor 的写法，
@@ -5617,11 +5623,16 @@ fn run_turn_write_success_clears_same_signature_counts_end_to_end() {
     }
 
     let final_text = "写后回读内容一致，任务完成。";
-    let server = MockHttpServer::start(vec![
+    let read_a = |description: &str| {
         json_response(decision_tool_call(
             "workspace_read_file",
-            json!({ "path": "notes/a.txt", "description": "先读取基线" }),
-        )),
+            json!({ "path": "notes/a.txt", "description": description }),
+        ))
+    };
+    let server = MockHttpServer::start(vec![
+        // 同参读两次（description 不同不会改变签名）⇒ 计数顶到 limit=2。
+        read_a("先读取基线"),
+        read_a("再确认一次基线"),
         json_response(decision_tool_call(
             "workspace_edit_file",
             json!({
@@ -5631,10 +5642,8 @@ fn run_turn_write_success_clears_same_signature_counts_end_to_end() {
                 "description": "落地修改"
             }),
         )),
-        json_response(decision_tool_call(
-            "workspace_read_file",
-            json!({ "path": "notes/a.txt", "description": "写后回读校验" }),
-        )),
+        // 写类成功 ⇒ 清空其它签名计数 ⇒ 这次同参回读必须放行。
+        read_a("写后回读校验"),
         json_completion(final_text),
     ]);
     let executed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -5647,7 +5656,7 @@ fn run_turn_write_success_clears_same_signature_counts_end_to_end() {
 
     // Act
     let result = runtime.run_turn(TurnInput {
-        message: "先读基线，改完再回读确认".to_string(),
+        message: "先读两次基线，改完再回读确认".to_string(),
         display_message: None,
         provider_id: None,
         model_id: None,
@@ -5674,20 +5683,22 @@ fn run_turn_write_success_clears_same_signature_counts_end_to_end() {
         executed_names,
         vec![
             "workspace_read_file".to_string(),
+            "workspace_read_file".to_string(),
             "workspace_edit_file".to_string(),
             "workspace_read_file".to_string(),
         ],
-        "写类成功必须清空其它签名计数：写后回读必须真实执行，不得被同签名重复闸拦下"
+        "写类成功必须清空其它签名计数：写后回读（第 3 次同参 Read）必须真实执行，\
+         不得被同签名重复闸拦下"
     );
     assert_eq!(
         result.tool_activities.len(),
-        3,
-        "三次工具调用必须全部执行（命中闸会少一次执行）"
+        4,
+        "四次工具调用必须全部执行（命中闸会少一次执行 ⇒ 3）"
     );
     assert_eq!(
         requests.len(),
-        4,
-        "3 次决策请求 + 1 次最终作答 = 4；命中重复闸会多出一次恢复式收尾请求"
+        5,
+        "4 次决策请求 + 1 次最终作答 = 5；命中重复闸会多出一次恢复式收尾请求"
     );
     assert!(
         requests
@@ -5794,7 +5805,7 @@ fn duplicate_tool_call_error_states_exact_match_with_actual_counts() {
     // Act
     let message = build_duplicate_tool_call_error(&call, 3, 2);
 
-    // Assert：四条硬项 + 工具名。出路段落的措辞不锁死（由 Executor 润色），
+    // Assert：四条硬项 + 工具名 + 两条**语义位置**断言。出路段落的措辞不锁死（由 Executor 润色），
     // 只锁契约矩阵 C4 的①②③④四条可判定事实。
     assert!(
         message.contains("完全相同"),
@@ -5815,6 +5826,17 @@ fn duplicate_tool_call_error_states_exact_match_with_actual_counts() {
     assert!(
         message.contains('2'),
         "文案必须给出允许次数上限（limit=2），实际={message}"
+    );
+    // AMEND-2-4（L3-B 变异实证）：只锁 `contains('3')`/`contains('2')` 时，把
+    // occurrences 与 limit 两个入参**互换**的变异仍能通过（两个数字都在文案里）。
+    // 因此必须锁住数字的**语义位置**：次数落在「已第 N 次」、上限落在「最多允许 L 次」。
+    assert!(
+        message.contains("已第 3 次"),
+        "本次是第几次必须落在「已第 N 次」的语义位置（occurrences=3），实际={message}"
+    );
+    assert!(
+        message.contains("最多允许 2 次"),
+        "允许上限必须落在「最多允许 L 次」的语义位置（limit=2），实际={message}"
     );
 }
 
@@ -5873,9 +5895,12 @@ fn same_signature_tracker_allows_limit_executions_then_exhausts() {
     );
 }
 
-/// C2 tracker 语义：不同签名互不影响；`clear()` 归零。
+/// C2 tracker 语义：不同签名互不影响（各自独立计数、各自独立熔断）。
+///
+/// AMEND-2-3：`SameSignatureTracker::clear()` 已按「生产零消费者」移除（宪法常载命约 3），
+/// 故本用例不再断言 `clear()`，仅保留签名隔离不变量。
 #[test]
-fn same_signature_tracker_isolates_signatures_and_clears() {
+fn same_signature_tracker_isolates_signatures() {
     let read_signature = "workspace_read_file:{\"path\":\"a.txt\"}";
     let search_signature = "workspace_search_text:{\"query\":\"needle\"}";
     let mut tracker = SameSignatureTracker::new();
@@ -5896,15 +5921,17 @@ fn same_signature_tracker_isolates_signatures_and_clears() {
         "其它签名不得被连带熔断"
     );
 
-    tracker.clear();
+    // 另一签名各自独立累积：只增自己的计数，不得回头影响已耗尽的签名。
+    tracker.record_executed(search_signature.to_string(), false);
+    assert_eq!(
+        tracker.occurrence_count(search_signature),
+        1,
+        "其它签名必须独立累计到 1（互不影响）"
+    );
     assert_eq!(
         tracker.occurrence_count(read_signature),
-        0,
-        "clear() 后所有签名计数必须归零"
-    );
-    assert!(
-        !tracker.is_exhausted(read_signature, 2),
-        "clear() 后必须重新放行"
+        2,
+        "另一签名记账不得改变既有签名的计数"
     );
 }
 
@@ -5952,14 +5979,79 @@ fn tool_result_stub(tool_name: &str, status: &str) -> crate::agent::tools::ToolR
     crate::agent::tools::ToolResult {
         tool_name: tool_name.to_string(),
         status: status.to_string(),
-        output: json!({ "ok": status != "error" }).to_string(),
+        output: json!({ "ok": status == "ok" }).to_string(),
         duration_ms: 1,
     }
 }
 
-/// C2「改变世界」判定：成功 + 写类/执行类 ⇒ true；失败或只读/搜索类 ⇒ false。
+/// C2「改变世界」判定之一（AMEND-2-2：写类 + **负向状态列表** `status ∉ {"error","aborted","cancelled"}`）。
+///
+/// 对照组见 `tool_execution_changed_world_excludes_execute_kind`（AMEND-2-1：Execute 不计入）。
+/// 负向列表的由来（L3-A）：原判据 `status != "error"` 会把 `aborted` **写类**误判为「已改变世界」
+/// 并清空他人计数，等于把「被中止的写」当成任务推进。
 #[test]
-fn tool_execution_changed_world_requires_successful_write_or_execute_kind() {
+fn tool_execution_changed_world_is_write_only() {
+    let call = |name: &str| ToolCall {
+        call_id: Some(format!("call_{name}")),
+        name: name.to_string(),
+        arguments: json!({ "path": "notes.md" }),
+        plan: None,
+    };
+
+    // ① 写类 + 成功 ⇒ 改变世界（唯一 true 分支）。
+    assert!(
+        tool_execution_changed_world(
+            &call("workspace_edit_file"),
+            &tool_result_stub("workspace_edit_file", "ok")
+        ),
+        "写类 + 成功必须判为改变世界"
+    );
+    // ② 写类 + 失败 ⇒ 不得清空（失败重试正是本闸要放行的场景）。
+    assert!(
+        !tool_execution_changed_world(
+            &call("workspace_edit_file"),
+            &tool_result_stub("workspace_edit_file", "error")
+        ),
+        "写类 + 失败不得判为改变世界（失败重试正是本闸要放行的场景）"
+    );
+    // ③ AMEND-2-2：负向成功列表 —— `aborted` 的写类不算改变世界（原 `!= "error"` 会误判为成功
+    //    并清空他人计数，等于把「被中止的写」当成任务推进）。
+    assert!(
+        !tool_execution_changed_world(
+            &call("workspace_edit_file"),
+            &tool_result_stub("workspace_edit_file", "aborted")
+        ),
+        "写类 + aborted 不得判为改变世界（负向状态列表：error/aborted/cancelled 一律不算成功）"
+    );
+    assert!(
+        !tool_execution_changed_world(
+            &call("workspace_edit_file"),
+            &tool_result_stub("workspace_edit_file", "cancelled")
+        ),
+        "写类 + cancelled 不得判为改变世界（负向状态列表）"
+    );
+    // ④ 只读 + 成功 ⇒ 不得清空（否则纯检索打转会被自己清空计数）。
+    assert!(
+        !tool_execution_changed_world(
+            &call("workspace_read_file"),
+            &tool_result_stub("workspace_read_file", "ok")
+        ),
+        "只读 + 成功不得判为改变世界（否则纯检索打转会被自己清空计数）"
+    );
+}
+
+/// AMEND-2-1（Gate-1 BLOCKING）：`ToolKind::Execute` **不得**计入「改变世界」。
+///
+/// `Execute` 覆盖 `workspace_run_command` 与全部 `Job*`（`JobOutput`/`JobList`/`JobKill`，
+/// `tools.rs:7980`），静态无法区分「写域 Run」「纯查询（ls）」「job 轮询」；若纳入清空，
+/// 则 `JobOutput(A)` 与 `Run(X)` 成功**交替**会互相清空、两签名计数恒为 1、永不达上限 ⇒
+/// 本方案反而新引入绕闸面（旧 `BTreeSet` 第 2 次即拦）。且 `retain` 恒保留自身，Execute 清空
+/// 对「同参重试」零收益；「改完重跑同一条命令」的真实受益路径是中间的 `Edit`（Write）触发清空。
+///
+/// 本断言独立成用例（而非并入 `..._is_write_only`）：两条 AMEND-2 修复点各自给出独立的红相信号，
+/// 避免「负向状态列表未改」的 panic 掩盖「Execute 未收窄」的缺陷。
+#[test]
+fn tool_execution_changed_world_excludes_execute_kind() {
     let call = |name: &str| ToolCall {
         call_id: Some(format!("call_{name}")),
         name: name.to_string(),
@@ -5968,32 +6060,12 @@ fn tool_execution_changed_world_requires_successful_write_or_execute_kind() {
     };
 
     assert!(
-        tool_execution_changed_world(
-            &call("workspace_edit_file"),
-            &tool_result_stub("workspace_edit_file", "ok")
-        ),
-        "写类 + 成功必须判为改变世界"
-    );
-    assert!(
         !tool_execution_changed_world(
-            &call("workspace_edit_file"),
-            &tool_result_stub("workspace_edit_file", "error")
-        ),
-        "写类 + 失败不得判为改变世界（失败重试正是本闸要放行的场景）"
-    );
-    assert!(
-        !tool_execution_changed_world(
-            &call("workspace_read_file"),
-            &tool_result_stub("workspace_read_file", "ok")
-        ),
-        "只读 + 成功不得判为改变世界（否则纯检索打转会被自己清空计数）"
-    );
-    assert!(
-        tool_execution_changed_world(
             &call("workspace_run_command"),
             &tool_result_stub("workspace_run_command", "ok")
         ),
-        "执行类 + 成功必须判为改变世界"
+        "执行类 + 成功不得判为改变世界：Execute 静态无法区分写域 Run / 纯查询 / job 轮询，\
+         纳入清空会与 Job* 形成互清绕闸面，故保守只认 Write"
     );
 }
 
