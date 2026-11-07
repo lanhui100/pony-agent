@@ -1,0 +1,104 @@
+# 红相收据：wave-67 `pony update` CLI 自更新（Test Agent 冻结）
+# 契约真值源：.dev-team/contract-matrix-cli-self-update.md（C1 API / C2 命令面 / C5 NFR / C6 安全 / C7 测试清单）
+# 写域：crates/pony-agent-core/src/agent/updater.rs（末尾 tests mod）、
+#       crates/pony-agent-core/src/bin/tui.rs（末尾 cli_self_update_tests mod）、本收据。
+#
+# 分级判定：L3（含网络 IO + 文件系统原子替换 + 锁 + 超时/体积对抗注入 + 安全白名单）
+
+## 一、门禁命令与原始输出
+# 命令 1：cargo test -p pony-agent-core --lib updater
+test result: FAILED. 0 passed; 14 failed; 0 ignored; 0 measured; 1348 filtered out; finished in 0.00s
+# 全部 14 条均 panic `not implemented`（空桩 unimplemented!()），落点：
+#   parse_semver_triple / is_newer_semver / parse_cli_manifest / select_platform_asset / plan_update /
+#   verify_sha256 / install_atomically / current_platform → updater.rs:118/134/151/162/177…
+#
+# 命令 2：cargo test -p pony-agent-core --lib update
+test result: FAILED. 14 passed; 14 failed; 0 ignored; 0 measured; 1334 filtered out; finished in 0.15s
+#
+# 命令 3（全量 lib，确认基线未破）：cargo test -p pony-agent-core --lib
+test result: FAILED. 1348 passed; 14 failed; 0 ignored; 0 measured; 0 filtered out; finished in 44.85s
+#
+# 命令 4（bin 目标：CLI 解析 + 整链路集成/对抗）：cargo test -p pony-agent-core --bin pony
+test result: FAILED. 41 passed; 13 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+## 二、失败用例清单（27 条：14 lib + 13 bin，全部为空桩 panic，无断言放宽、无 skip）
+### A 组（lib，updater.rs tests mod）
+#  1 parse_semver_triple_accepts_v_prefix_and_rejects_malformed            (:257)
+#  2 is_newer_semver_compares_triples_strictly                            (:287)
+#  3 parse_cli_manifest_accepts_valid_manifest_and_normalizes_uppercase_hex (:314)
+#  4 parse_cli_manifest_rejects_bad_schema_sha_version_and_empty_platforms (:350)
+#  5 select_platform_asset_hits_and_misses                                (:439)
+#  6 plan_update_plans_upgrade                                            (:458)
+#  7 plan_update_marks_same_version_and_allows_reinstall_only_with_force   (:477)
+#  8 plan_update_rejects_downgrade_without_force_but_allows_with_force     (:496)
+#  9 plan_update_unsupported_platform_lists_known_platforms               (:523)
+# 10 verify_sha256_accepts_match_and_rejects_tampered_or_missing_file      (:560)
+# 11 sha_mismatch_leaves_existing_binary_untouched_without_residue        (:593)
+# 12 current_platform_matches_os_arch_whitelist                          (:629)
+# 13 install_atomically_replaces_target_with_identical_executable_bytes   (:650)
+# 14 install_atomically_reports_not_writable_for_read_only_directory      (:700)
+### B/C 组（bin `pony`，tui.rs cli_self_update_tests mod）
+# 15 update_installs_verified_artifact_end_to_end                         (:14644)  [C7-8]
+# 16 update_rejects_sha256_mismatch_without_touching_existing_binary       (:14698)  [C7-9]
+# 17 update_reports_http_status_when_manifest_is_missing                   (:14747)  [C7-10]
+# 18 update_reports_http_status_when_asset_is_missing                     (:14768)  [C7-10]
+# 19 update_rejects_malformed_manifest_json_without_writing               (:14802)  [C7-11]
+# 20 update_reports_unsupported_platform_for_missing_entry                 (:14824)  [C7-12]
+# 21 update_fails_on_truncated_download_without_writing                    (:14861)  [C7-13]
+# 22 update_refuses_concurrent_instance_and_preserves_foreign_lock         (:14903)  [C7-14]
+# 23 update_reports_not_writable_for_read_only_install_directory           (:14943)  [C7-15]
+# 24 update_aborts_stalled_download_within_budget                          (:14994)  [C7-16]
+# 25 update_rejects_oversized_artifact_without_writing                     (:15039)  [C7-17]
+# 26 update_follows_same_host_redirect_when_signed_in_escape_hatch         (:15078)  [C7-18]
+# 27 update_rejects_redirect_to_host_outside_allow_list                    (:15130)  [C7-18]
+# 落点：run_update_action 空桩（tui.rs:13360）panic `not implemented`。
+#
+## 三、红相即绿的用例（协议已实现，属预期）
+# C7-19 parse_cli_action_update_defaults_to_check_install_mode（:14559）
+# C7-19 parse_cli_action_update_recognises_each_flag（:14577）
+# C7-20 parse_cli_action_update_rejects_missing_pin_value_and_unknown_flag（:14613）
+# 理由：`CliAction::Update` 与 `parse_cli_action` 已由协议特派员真实实现（承诺「解析已实现」），
+# 这 3 条在红相即绿是**正确**的，不是假绿；它们锁定的是字段级取舍（check/force/pin/json）
+# 与两条非法用法（缺值 / 未知选项）的消息口径。
+
+## 四、基线口径
+# 基线：commit 67e656c9，cargo test -p pony-agent-core --lib = 1348 passed
+#      （收据 .dev-team/regression-baseline-wave67.json）
+# 本次：1348 passed + 14 failed（A 组新增）⇒ 既有 1348 条零回归；
+#       新增用例数 = 14（lib）+ 16（bin：3 解析 + 13 集成）= 30。
+# bin 基线：本波之前 bin 测试目标**编译失败**（见第五节），去重后 38 条既有 bin 用例恢复可运行且全绿
+#      （41 passed = 38 既有 + 3 解析），13 failed = 本波新增集成用例。
+
+## 五、必须向 Lead 披露的越界修复（非本任务业务改动）
+# 现状：commit 67e656c9 的 `mod wave43_unit_tests` 内部存在**自我重复粘贴**（`fn long_question`
+#   等 4 个测试定义两次），导致 `cargo test --bin pony` 在 HEAD 上就编译失败（E0428 ×5）。
+#   若不修复，B 组（C7-8~18）无法编译/无法产出红相物理收据。
+# 处置：在 tui.rs 的该测试模块内删除**重复的第二份副本（57 行）**，不改变任何测试语义；
+#   去重后 38 条既有 bin 用例全部通过（41 passed 含新增 3 条解析用例）。
+# 状态：已在本任务内最小修复并如实登记；如需由他人复核/改判，可整体回滚这 57 行删除（不影响 A 组）。
+
+## 六、覆盖缺口与口径说明（诚实申报）
+1. **B 组落点**：`run_update_action` 是 bin 内私有函数，且 updater.rs 冻结 API 不含任何网络入口
+   （下载编排标为「内部」，未冻结签名）⇒ 集成/对抗用例只能放在 bin 目标，运行方式：
+   `cargo test -p pony-agent-core --bin pony cli_self_update`。`--lib` 门禁**看不到** B 组。
+2. **发现流程（C4-1~3，releases 列表 → 取第一个含清单的 release）未覆盖**：逃生舱
+   `PONY_UPDATE_MANIFEST_URL` 按契约跳过发现；冻结 API 无 release 列表入口。
+3. **错误变体/消息级断言不可达**：CLI 路径只返回退出码且无法在进程内捕获 stdout/stderr，
+   故 B 组以「C2 退出码 + 文件系统不变量」为断言面；
+   `UpdateError::user_message()` 的消息内容（如 `sudo`/`PONY_UPDATE_INSTALL_PATH` 出路、
+   「另一个 pony update 正在运行」）与「重定向错误串含 host / 不允许」只能在 lib 层断言，
+   当前无冻结入口 ⇒ 登记为缺口。
+4. **TooLarge 无专属退出码**：契约 C2 只定义 1/2/3/4 的语义分桶，TooLarge 归桶未明示，
+   故第 25 条只锁「退出码非 0 + 绝不落盘 + 无残留」三条硬不变量（不放宽核心安全不变量）。
+5. **Windows 平台**：自更新在 Windows 不支持（C6-6），B 组以 `#[cfg(unix)]` 编译期裁剪，
+   非运行期 skip；`UnsupportedPlatform` 的 Windows 引导文案（改桌面安装包）当前无冻结可测入口 ⇒ 缺口。
+6. **并发双实例（C7「两个实例同时 create_new，必有一个失败」）**：本波以「预置他人 lock ⇒
+   退出码 4 且不删他人 lock」覆盖该不变量（第 22 条）；真并发双实例需两个进程各自注入 env，
+   进程内测试无法稳定复现，登记为缺口。
+7. **真实 GitHub 冒烟（C7 端到端第 2 条）属绿相/preprod**，不在红相范围。
+
+## 七、清理保证
+# 所有用例的临时目录 = std::env::temp_dir()/pony-update-test-<pid>-<seq>-<label>，
+# 由 TempDir 的 Drop 整目录删除；只读目录用例另带 RestorePerms Drop 守卫恢复 0o755。
+# env 注入由 EnvGuard 串行化（进程级 Mutex）并在 Drop 逐项还原（含 panic 路径）。
+# mock HTTP 服务由 MockServer 的 Drop 置 shutdown 后 join，无遗留线程/端口。

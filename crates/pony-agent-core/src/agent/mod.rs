@@ -74,6 +74,7 @@ pub mod trace_persistence;
 pub mod tui_preferences;
 pub mod turn_event;
 pub mod turn_flow;
+pub mod updater;
 pub mod usage_governance;
 pub mod usage_ledger;
 pub mod web_access;
