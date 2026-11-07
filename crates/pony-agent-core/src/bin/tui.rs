@@ -72,6 +72,9 @@ use std::sync::Arc;
 // 主循环每个 tick（≤16ms）检测后正常 break，走统一的终端恢复保证器。
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// SIGCONT 唤醒或终端重置请求：进程从后台唤回或收到继续信号时，要求主循环重新初始化 raw 模式并全量清屏重绘。
+static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 /// ADR 0075：最近一次终端还原是否**未能完整送达**输入侧/屏幕侧还原串（幂等标记）。
 /// 退出提示据此决定是否附加一条可复制执行的手工恢复命令（见 `resume_hint_block`）。
 static TERMINAL_RESTORE_INCOMPLETE: AtomicBool = AtomicBool::new(false);
@@ -130,6 +133,7 @@ fn capture_terminal_state() {}
 
 /// 信号上下文里的最佳努力还原：只调用 async-signal-safe 的 `write(2)` / `tcsetattr(3)`。
 #[cfg(unix)]
+#[allow(dead_code)]
 fn restore_terminal_for_signal() {
     unsafe {
         let tty_fd = RESTORE_TTY_FD.load(Ordering::SeqCst);
@@ -191,11 +195,13 @@ fn write_signal_notice(sig: libc::c_int) {
 
 #[cfg(unix)]
 extern "C" fn handle_shutdown_signal(sig: libc::c_int) {
-    // 先做一次 async-signal-safe 的还原：主循环此刻可能正卡在长耗时调用里，
-    // 只等下一次 tick 的话，用户的终端会继续停在 raw + kitty 键盘协议态。
-    restore_terminal_for_signal();
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     write_signal_notice(sig);
+}
+
+#[cfg(unix)]
+extern "C" fn handle_sigcont_signal(_sig: libc::c_int) {
+    REFRESH_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 /// `libc` 是 `[target.'cfg(unix)'.dependencies]` 依赖，Windows 目标不存在该 crate，
@@ -205,12 +211,15 @@ fn install_shutdown_signal_handlers() {
     unsafe {
         // Rust 禁止把函数项直接 cast 成整数（"direct cast of function item into an integer"），
         // 必须先经 `*const ()` 中转再转成 sighandler_t。
-        let handler = handle_shutdown_signal as *const () as libc::sighandler_t;
-        libc::signal(libc::SIGINT, handler);
-        libc::signal(libc::SIGTERM, handler);
+        let shutdown_handler = handle_shutdown_signal as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGINT, shutdown_handler);
+        libc::signal(libc::SIGTERM, shutdown_handler);
         // pty 会话被关闭（如 `script` 收到 SIGINT 后退出）时，TUI 进程会收到 SIGHUP；
         // 同样走优雅退出路径以执行终端恢复，而不是默认终止并留下 alternate screen。
-        libc::signal(libc::SIGHUP, handler);
+        libc::signal(libc::SIGHUP, shutdown_handler);
+
+        let cont_handler = handle_sigcont_signal as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGCONT, cont_handler);
     }
 }
 
@@ -10569,6 +10578,14 @@ fn tui_event_loop(
         // T2c：SIGINT/SIGTERM 置位后优雅退出主循环，走统一的终端恢复路径。
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             break;
+        }
+
+        // SIGCONT 唤醒或终端重置请求：恢复 raw 模式并清空物理终端强制重绘
+        if REFRESH_REQUESTED.swap(false, Ordering::SeqCst) {
+            let _ = enable_raw_mode();
+            state.invalidate_render_cache();
+            let _ = terminal.clear();
+            dirty = true;
         }
         // 流式态 160ms 驱动动效；问答等待期用 450ms 的低频呼吸提醒（不闪、不抢注意力）。
         let awaiting_answer = matches!(
