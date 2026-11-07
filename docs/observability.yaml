@@ -4,13 +4,36 @@
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
 service: pony-agent
 kind: desktop
-reviewed_at: "2026-11-06"
+reviewed_at: "2026-11-07"
 
 dimensions:
   tracing:
     applicable: true
     # OTel 初始化/导出/资源属性的唯一落点（span 与 resource 构造、配置解析、traceparent 注入器都在这个模块）
     anchor: crates/pony-agent-core/src/agent/otel/mod.rs
+    # 检索口径补充（declaration-rubric §7 / 方案 C）：只扩大检索面，不改变 applicable 的判定。
+    # 事实依据：公网 OTLP edge 把 service.name 改写成 desktop-client（原名挪到 client.service.name），
+    # dev 机自报名带环境后缀（pony-agent → pony-agent-dev）；内置两键
+    # （service.name=pony-agent / client.service.name=pony-agent）在 24h 窗皆为 0 ⇒ 假缺口。
+    # 下面两条键于 2026-11-07 实测（exact 游标，非采样外推）：24h 窗各 117 条，7d 窗各自撞 200 条查询上限。
+    # 数字随时间漂移，判定只依赖「>0 且有量级」，不要把上面的具体值当断言基线。
+    query:
+      identity_probes:
+        - id: env-suffix-client-service-name
+          query_type: traceql
+          query: '{ resource.client.service.name=~"pony-agent.*" }'
+          note: >-
+            dev/测试机自报 service.name 带 -dev 后缀，edge 又把 service.name 统一改成 desktop-client，
+            原值只落在 client.service.name。前缀通配收敛在本项目命名空间内（不是 .* 全通配），
+            故不会命中他人服务。
+        - id: stable-pony-app-name
+          query_type: traceql
+          query: '{ resource.pony.app.name="pony-agent" }'
+          note: >-
+            pony.app.name 由 otel/mod.rs 的 RESOURCE_PONY_APP_NAME 写入，带 pony. 前缀故不参与 edge
+            改写，是两条接入路径（内网直连 collector / 公网 edge）唯一一致的跨路径检索键。
+            实测 tags 形态（resource.pony.app.name=pony-agent）返回 0，traceql 形态 24h=115，
+            故此处用 traceql。
   issues:
     applicable: true
     # PonySentry ingest 客户端（事件上报/幂等键 event_id/trace_id 回填/重试都在这里）
@@ -576,3 +599,24 @@ note: >-
       `http_client` 本次未改动。行为门的机械收口落在测试层——
       `crates/pony-agent-core/tests/tui_signal_reentry.rs` 的 R1–R6（一次性消费、多次置位合并、计划顺序、
       鼠标开关尊重、还原串与计划互逆、Ctrl+Z 只认裸组合）与 `tests/tui_terminal_restore.rs` 的既有 45 例。
+  【wave-provider-transport-classification 归属登记（2026-11-07）｜provider 上游失败分类补齐：边缘 5xx 与传输层标志纳入可重试（ADR 0086）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**失败分类判据**（`agent/retry.rs` 的码表与
+  `upstream_code_for_hints` 分支顺序），不新增对外接口、网络 IO、后台任务或 LLM 调用；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更面是**已存在的 provider 出网错误在分类器上的归属**——新增
+      `UPSTREAM_EDGE_SERVER_ERROR_HINTS`（520/521/522/523/524/527/530 → `UpstreamServerError`）与
+      `UPSTREAM_TRANSPORT_HINTS`（`type=connect` / `type=request` → `UpstreamNetwork`，判据置于所有状态码判据之后）。
+      它不产生新的遥测事实：同一批错误原本就经既有 `[pony-provider] … attempt=n/5 failed class=…` 本地日志行与
+      既有 turn 失败上报通道出现，本次只改变「是否进入既有重试预算」。进程仍随用户启停的终端/桌面面，
+      无常驻监听地址、无 Service、不进集群，Prometheus pull 与节点侧日志采集的结构前提均不成立。
+  (3) 变更性质（仅登记，非遥测变更）：522 类（实测 36 次）与传输层失败（实测 144 次）由「一次都不重试」
+      变为进入既有 5 次预算 + 指数退避（500→1000→2000→4000ms，cap 8s，预算 30s）；525/526（源站 TLS 配置错误）
+      与 500/400/401/429/408 的分组结论逐项不变。退避参数、jitter、`SingleHopRetryReport` 与
+      `continue_with_tool_results` 的重试包装均未改动（另案）。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——`agent::retry::tests` 的
+      `edge_5xx_maps_to_server_error_but_origin_tls_stays_abort` /
+      `transport_flags_map_to_network_after_status_code_judgement` /
+      `adr_0086_regression_classify_retryability`，以及既有 R1 八分组锁定用例
+      `stage2_upstream_code_for_hints_covers_r1_groups`。
