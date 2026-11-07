@@ -244,7 +244,14 @@ impl SessionStore {
             should_save = true;
         }
         for session in sessions.values_mut() {
+            // 续轮提示判定口径上线后，历史里被污染成续轮文案的标题/轮次会被
+            // 重算为真实值；检出差异即回写，避免每次启动重算。
+            let previous_title = session.title.clone();
+            let previous_turn_count = session.turn_count;
             refresh_session_metadata(session, false);
+            if session.title != previous_title || session.turn_count != previous_turn_count {
+                should_save = true;
+            }
             if ensure_history_graph(session) {
                 should_save = true;
             }
@@ -1705,6 +1712,7 @@ impl SessionStore {
                 updated_at_ms: session.updated_at_ms,
                 workspace_id: session.workspace_id.clone(),
                 archived: session.archived,
+                continuation_only: session_is_continuation_fragment(session),
             })
             .collect::<Vec<_>>();
 
@@ -4089,10 +4097,12 @@ fn new_history_branch_id(session: &SessionState, ordinal: usize) -> String {
 /// 直接驱动两个派生分支；生产调用方均在 store 内部。
 pub(in crate::agent::session) fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) {
     normalize_trace_timeline_entries(&mut session.turn_trace_history);
+    // 宿主续轮提示（Ask 恢复/审批恢复/goal 轮次）虽以 user 角色落库，但不代表
+    // 真实用户轮，不得进入标题与轮次统计，否则会话标题会被续轮文案覆盖。
     session.turn_count = session
         .history
         .iter()
-        .filter(|message| message.role == "user")
+        .filter(|message| message.role == "user" && !is_host_continuation_prompt(&message.content))
         .count();
     session.last_referenced_file = session
         .history
@@ -4104,16 +4114,30 @@ pub(in crate::agent::session) fn refresh_session_metadata(session: &mut SessionS
     // effective_title()。派生链路的其他产物（summary 等）不受影响。
     let title_overridden = session.title_override.is_some();
     if session.history.is_empty() && !session.turn_trace_history.is_empty() {
-        if let Some(trace) = session.turn_trace_history.last() {
-            if !title_overridden {
-                session.title = trace.title.clone();
+        // 纯 trace 会话（history 未落库）同样要跳过续轮轮次标题。
+        let trace = session
+            .turn_trace_history
+            .iter()
+            .rev()
+            .find(|trace| !is_host_continuation_prompt(&trace.title));
+        match trace {
+            Some(trace) => {
+                if !title_overridden {
+                    session.title = trace.title.clone();
+                }
+                session.summary = trace
+                    .session_summary
+                    .clone()
+                    .or(trace.error.clone())
+                    .or(trace.fallback_reason.clone())
+                    .unwrap_or_else(|| DEFAULT_SESSION_SUMMARY.to_string());
             }
-            session.summary = trace
-                .session_summary
-                .clone()
-                .or(trace.error.clone())
-                .or(trace.fallback_reason.clone())
-                .unwrap_or_else(|| DEFAULT_SESSION_SUMMARY.to_string());
+            None => {
+                if !title_overridden {
+                    session.title = DEFAULT_SESSION_TITLE.to_string();
+                }
+                session.summary = DEFAULT_SESSION_SUMMARY.to_string();
+            }
         }
     } else {
         if !title_overridden {
@@ -5002,12 +5026,76 @@ fn session_is_persistable(session: &SessionState) -> bool {
         || !session.history_nodes.is_empty()
 }
 
+/// 宿主续轮提示的唯一真值源。TUI 在 Ask 恢复、工具审批恢复、goal 轮次推进时
+/// 把这几段固定文案作为 `display_message` 派发，随即以 `user` 角色落库。
+/// 它们不是用户真实输入：既不能当会话标题，也不能计入轮次。
+pub const ASK_RESUME_CONTINUATION_PROMPT: &str = "（已作答，继续上一轮未完成的步骤）";
+pub const APPROVAL_APPROVED_CONTINUATION_PROMPT: &str =
+    "（已批准该工具调用，请重试刚才的操作并继续任务）";
+pub const APPROVAL_DENIED_CONTINUATION_PROMPT: &str =
+    "（用户拒绝了该工具调用，请改用其它方式或先询问用户）";
+/// goal 轮次续轮文案前缀：`[goal round N] 推进目标：<objective>`。
+const GOAL_ROUND_CONTINUATION_PREFIX: &str = "[goal round ";
+const GOAL_ROUND_CONTINUATION_SUFFIX: &str = " 推进目标：";
+
+/// 判定一段 user 轮文本是否为宿主续轮提示（逐字匹配 + goal 轮次结构匹配）。
+pub fn is_host_continuation_prompt(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed == ASK_RESUME_CONTINUATION_PROMPT
+        || trimmed == APPROVAL_APPROVED_CONTINUATION_PROMPT
+        || trimmed == APPROVAL_DENIED_CONTINUATION_PROMPT
+    {
+        return true;
+    }
+    let Some(rest) = trimmed.strip_prefix(GOAL_ROUND_CONTINUATION_PREFIX) else {
+        return false;
+    };
+    let Some((round, tail)) = rest.split_once(']') else {
+        return false;
+    };
+    !round.is_empty()
+        && round.chars().all(|ch| ch.is_ascii_digit())
+        && tail.starts_with(GOAL_ROUND_CONTINUATION_SUFFIX)
+}
+
 fn build_title(history: &[TurnHistoryMessage]) -> String {
     history
         .iter()
-        .find(|message| message.role == "user")
-        .and_then(|message| normalize_title_candidate(&message.content))
+        .filter(|message| message.role == "user" && !is_host_continuation_prompt(&message.content))
+        .find_map(|message| normalize_title_candidate(&message.content))
         .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string())
+}
+
+/// 会话是否只由宿主续轮提示构成（没有任何真实用户轮）——这类碎片会话不应
+/// 出现在 `/resume` 列表里。
+pub fn session_is_continuation_fragment(session: &SessionState) -> bool {
+    let (mut saw_continuation, mut saw_real) = (false, false);
+    for message in &session.history {
+        if message.role != "user" {
+            continue;
+        }
+        if is_host_continuation_prompt(&message.content) {
+            saw_continuation = true;
+        } else {
+            saw_real = true;
+        }
+    }
+    if !saw_real {
+        for trace in &session.turn_trace_history {
+            if trace.title.trim().is_empty() {
+                continue;
+            }
+            if is_host_continuation_prompt(&trace.title) {
+                saw_continuation = true;
+            } else {
+                saw_real = true;
+            }
+        }
+    }
+    saw_continuation && !saw_real
 }
 
 fn build_summary(_turn_count: usize, last_referenced_file: Option<&str>) -> String {

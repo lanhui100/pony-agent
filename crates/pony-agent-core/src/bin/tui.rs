@@ -2087,7 +2087,33 @@ pub const REASONING_EFFORT_OPTIONS: &[(Option<ProviderReasoningEffort>, &str, &s
 pub struct SessionItem {
     pub id: String,
     pub title: String,
+    /// 已格式化的最近活动时间（同日 `HH:MM` / 同年 `MM-DD HH:MM` / 跨年 `YYYY-MM-DD`）。
     pub updated_at: String,
+    /// 真实用户轮数（已剔除宿主续轮提示）。
+    pub turn_count: usize,
+}
+
+/// `/resume` 列表的最近活动时间显示口径：同日只显示时刻，同年显示月日+时刻，
+/// 跨年显示日期。时间戳缺失/越界时回退为 `—`，绝不 panic。
+fn format_session_row_time(updated_at_ms: u64) -> String {
+    use chrono::{Datelike, Local, TimeZone};
+    if updated_at_ms == 0 {
+        return "—".to_string();
+    }
+    let Ok(updated_at_ms) = i64::try_from(updated_at_ms) else {
+        return "—".to_string();
+    };
+    let Some(dt) = Local.timestamp_millis_opt(updated_at_ms).single() else {
+        return "—".to_string();
+    };
+    let now = Local::now();
+    if dt.date_naive() == now.date_naive() {
+        dt.format("%H:%M").to_string()
+    } else if dt.year() == now.year() {
+        dt.format("%m-%d %H:%M").to_string()
+    } else {
+        dt.format("%Y-%m-%d").to_string()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7138,12 +7164,16 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                     .take(8)
                     .collect();
                 let active = item.id == state.session_id;
-                let right = if active {
-                    format!("{} · 当前", id_short)
-                } else {
-                    id_short
-                };
-                let title = truncate_width(&item.title, inner_w.saturating_sub(18));
+                let mut right = format!(
+                    "{} 轮 · {} · {}",
+                    item.turn_count, item.updated_at, id_short
+                );
+                if active {
+                    right.push_str(" · 当前");
+                }
+                // 左列让位给右侧元信息（轮次/时间/短 id），避免长标题挤掉可读性。
+                let right_w = str_width(&right) + 1;
+                let title = truncate_width(&item.title, inner_w.saturating_sub(right_w));
                 lines_out.push(list_row(selected_row, &title, &right, inner_w));
             }
         }
@@ -8788,7 +8818,10 @@ fn report_control_request_error(
 /// 为什么必须非空：`runtime.prepare_turn` 的 `reject_empty` 会直接拒绝空 message。
 /// 为什么是常量而不是用户输入：续轮不是新的用户发言，**不得** `add_user_message` 到界面
 /// （否则会在消息区凭空多出一个用户气泡）。
-const ASK_RESUME_CONTINUATION_PROMPT: &str = "（已作答，继续上一轮未完成的步骤）";
+/// 续轮文案的**唯一真值源在会话库**（`is_host_continuation_prompt` 据此判定标题/轮次
+/// 污染），此处直接引用库常量，避免两处文案漂移。
+const ASK_RESUME_CONTINUATION_PROMPT: &str =
+    pony_agent_core::agent::session::ASK_RESUME_CONTINUATION_PROMPT;
 
 /// C2：挂起请求**没有 run 身份**时的可读提示（C3 已在运行时侧 fail-closed，这里只是兜底上屏，
 /// 绝不允许出现「作答了但界面上什么都不发生」的静默态）。
@@ -8799,10 +8832,12 @@ const ASK_RESUME_UNAVAILABLE_NOTICE: &str =
 ///
 /// 为什么必须非空：`runtime.prepare_turn` 的 `reject_empty` 会拒绝空 message。
 /// 为什么是常量：续轮不是新的用户发言，**不得** `add_user_message`（否则凭空多一个用户气泡）。
-const APPROVAL_APPROVED_CONTINUATION_PROMPT: &str = "（已批准该工具调用，请重试刚才的操作并继续任务）";
+const APPROVAL_APPROVED_CONTINUATION_PROMPT: &str =
+    pony_agent_core::agent::session::APPROVAL_APPROVED_CONTINUATION_PROMPT;
 
 /// wave-65 C4：审批**拒绝**后的固定宿主续轮文案（让模型换条路，而不是静默停住）。
-const APPROVAL_DENIED_CONTINUATION_PROMPT: &str = "（用户拒绝了该工具调用，请改用其它方式或先询问用户）";
+const APPROVAL_DENIED_CONTINUATION_PROMPT: &str =
+    pony_agent_core::agent::session::APPROVAL_DENIED_CONTINUATION_PROMPT;
 
 /// wave-65 C4：`PermissionChoice` → 续轮文案（纯函数，可单测：两文案非空且互不相同）。
 pub fn approval_continuation_prompt(choice: PermissionChoice) -> &'static str {
@@ -10528,11 +10563,17 @@ fn tui_event_loop(
                                         .into_iter()
                                         // W3b：队友子会话只经 `/agents` 进入；主会话列表不混入
                                         // `subagent-*`，否则用户会在 /resume 里看到一堆无名会话。
-                                        .filter(|s| is_main_session_id(&s.conversation_id))
+                                        .filter(|s| {
+                                            is_main_session_id(&s.conversation_id)
+                                                // 只由续轮提示构成的碎片会话不是「历史会话」，
+                                                // 不进 /resume，否则列表会被无意义标题刷屏。
+                                                && !s.continuation_only
+                                        })
                                         .map(|s| SessionItem {
                                             id: s.conversation_id,
                                             title: s.title,
-                                            updated_at: s.updated_at_ms.to_string(),
+                                            updated_at: format_session_row_time(s.updated_at_ms),
+                                            turn_count: s.turn_count,
                                         })
                                         .collect();
                                     state.open_session_selector(items);

@@ -639,6 +639,10 @@ pub struct SessionOverview {
     /// 归档标记投影（侧边栏三级树）：分组面前端据此过滤；后端不过滤，
     /// 为后续恢复入口保留数据面。
     pub archived: bool,
+    /// 该会话是否只由宿主续轮提示构成（无任何真实用户轮）。`/resume` 等
+    /// 以「用户会话」为语义的入口据此过滤，避免把续轮碎片当历史会话。
+    #[serde(default)]
+    pub continuation_only: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

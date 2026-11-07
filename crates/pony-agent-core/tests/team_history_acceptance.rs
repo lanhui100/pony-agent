@@ -14,6 +14,7 @@ fn test_history_snapshot_from_events_logic() {
         updated_at_ms: 1000,
         workspace_id: None,
         archived: false,
+        continuation_only: false,
     };
     
     let fake_events = vec![

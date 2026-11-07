@@ -877,6 +877,7 @@ fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
         id: "session-wave39".into(),
         title: "Wave 39".into(),
         updated_at: "0".into(),
+        turn_count: 0,
     }]);
     assert_ne!(
         state.mode,

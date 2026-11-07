@@ -20,8 +20,10 @@ pub use id::{
     new_session_id_unless, SessionIdKind, MAX_UNIQUE_ATTEMPTS, SESSION_ID_PREFIX,
 };
 pub use store::{
-    build_missing_run_control_audit_summary, interrupted_turn_checkpoint_text, PersistedStore,
-    SessionStore,
+    build_missing_run_control_audit_summary, interrupted_turn_checkpoint_text,
+    is_host_continuation_prompt, session_is_continuation_fragment, PersistedStore, SessionStore,
+    APPROVAL_APPROVED_CONTINUATION_PROMPT, APPROVAL_DENIED_CONTINUATION_PROMPT,
+    ASK_RESUME_CONTINUATION_PROMPT,
 };
 pub use types::{
     collect_env_info, AttachmentAsset, AttachmentAssetQuery, AttachmentCleanupRequest,
@@ -58,7 +60,7 @@ use std::path::PathBuf;
 use store::{
     attachment_asset_id, collect_trace_union, enrich_history_from_traces, fold_session_views,
     load_store_from_path, materialize_last_turn_messages, now_timestamp_ms,
-    session_state_for_backend,
+    refresh_session_metadata, session_state_for_backend,
 };
 #[cfg(test)]
 use types::{

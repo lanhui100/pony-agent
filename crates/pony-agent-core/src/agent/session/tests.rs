@@ -6795,3 +6795,87 @@ fn blank_session_non_persistence_r3_truncated_state_stays_persistable() {
         "R3b：截断到初始态（history/trace 为空、history graph 非空）仍须可持久化"
     );
 }
+
+fn user_history_message(content: &str) -> TurnHistoryMessage {
+    TurnHistoryMessage {
+        role: "user".to_string(),
+        content: content.to_string(),
+        ..TurnHistoryMessage::default()
+    }
+}
+
+#[test]
+fn host_continuation_prompt_recognizes_all_host_injected_turns() {
+    // 三条固定文案 + goal 轮次结构：宿主注入的续轮一律命中。
+    assert!(is_host_continuation_prompt(ASK_RESUME_CONTINUATION_PROMPT));
+    assert!(is_host_continuation_prompt(
+        APPROVAL_APPROVED_CONTINUATION_PROMPT
+    ));
+    assert!(is_host_continuation_prompt(
+        APPROVAL_DENIED_CONTINUATION_PROMPT
+    ));
+    assert!(is_host_continuation_prompt(
+        "  （已作答，继续上一轮未完成的步骤）\n"
+    ));
+    assert!(is_host_continuation_prompt(
+        "[goal round 1] 推进目标：把会话标题修好"
+    ));
+
+    // 真实用户输入不得误判（含形似但结构不符的文本）。
+    assert!(!is_host_continuation_prompt("是的"));
+    assert!(!is_host_continuation_prompt(""));
+    assert!(!is_host_continuation_prompt("[goal round x] 推进目标：非法轮次"));
+    assert!(!is_host_continuation_prompt("[goal round 1] 随便说说"));
+    assert!(!is_host_continuation_prompt("继续上一轮未完成的步骤"));
+}
+
+#[test]
+fn continuation_only_turns_do_not_pollute_title_turn_count_or_resume_list() {
+    let mut store = SessionStore::memory_only();
+    let session_id = DEFAULT_SESSION_ID.to_string();
+    {
+        let session = store.sessions.get_mut(&session_id).expect("默认会话应存在");
+        session.turn_trace_history.clear();
+        session.history = vec![
+            user_history_message(ASK_RESUME_CONTINUATION_PROMPT),
+            TurnHistoryMessage {
+                role: "assistant".to_string(),
+                content: "好的".to_string(),
+                ..TurnHistoryMessage::default()
+            },
+        ];
+        session.title = ASK_RESUME_CONTINUATION_PROMPT.to_string();
+        refresh_session_metadata(session, false);
+
+        assert_eq!(
+            session.title, DEFAULT_SESSION_TITLE,
+            "只有续轮提示的会话不得把宿主文案当标题"
+        );
+        assert_eq!(session.turn_count, 0, "续轮提示不得计入真实用户轮");
+    }
+    let overview = store
+        .list_sessions()
+        .into_iter()
+        .find(|item| item.conversation_id == session_id)
+        .expect("会话应出现在列表");
+    assert!(
+        overview.continuation_only,
+        "仅由续轮提示构成的会话必须被标记为碎片，供 /resume 过滤"
+    );
+
+    // 追加真实用户轮后：标题回落到真实首轮、轮次计 1、碎片标记消失。
+    {
+        let session = store.sessions.get_mut(&session_id).expect("默认会话应存在");
+        session.history.insert(0, user_history_message("是的"));
+        refresh_session_metadata(session, false);
+
+        assert_eq!(session.title, "是的");
+        assert_eq!(session.turn_count, 1);
+    }
+    let overview = store
+        .list_sessions()
+        .into_iter()
+        .find(|item| item.conversation_id == session_id)
+        .expect("会话应出现在列表");
+    assert!(!overview.continuation_only);
+}

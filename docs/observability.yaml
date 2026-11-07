@@ -435,3 +435,22 @@ note: >-
       (7.3) 宿主契约对齐（ADR 0074 新 Ask 契约）：TUI 的 4 处 legacy 调用迁到 scoped 入口
             （`answer_ask_in_session` ×1、`cancel_ask_in_session` ×3，session 取当前会话 id）；
             `graph_resume_ask` 与续轮派发逻辑不变。四维归属不变。
+  【wave-tui-session-continuation-projection 归属登记（2026-11-07）｜会话标题/轮次/`/resume` 列表投影剔除宿主续轮提示】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地会话投影与终端渲染**（标题、轮次数、
+  `/resume` 行内容），无新增对外接口、网络 IO、后台任务、LLM 调用或依赖；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更是 **SQLite 会话库的内存投影**（`SessionStore::list_sessions` 增加
+      `continuation_only` 字段、`refresh_session_metadata` 的标题/轮次口径）与 `bin/tui.rs` 的列表渲染；
+      进程仍随用户启停、无常驻监听地址/Service/集群归属，Prometheus pull 与节点侧日志采集的结构前提不成立。
+  (3) 变更性质（仅登记，非遥测变更）：新增宿主续轮文案判定 `is_host_continuation_prompt`
+      （Ask 恢复 / 审批批准·拒绝 / `[goal round N] 推进目标：` 三类），会话标题与轮次统计跳过续轮；
+      `/resume` 过滤 `continuation_only` 碎片会话；列表行右侧改为「N 轮 · 时间 · 短 id」；
+      启动加载时把纠正后的标题/轮次回写（持久化 schema 不变，仅更正既有列内取值）；TUI 三条续轮文案常量
+      改为引用库常量（单一真值源，防文案漂移）。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层而非遥测层——
+      `crates/pony-agent-core/src/agent/session/tests.rs` 的
+      `host_continuation_prompt_recognizes_all_host_injected_turns` 与
+      `continuation_only_turns_do_not_pollute_title_turn_count_or_resume_list`。
