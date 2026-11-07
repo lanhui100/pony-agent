@@ -13361,6 +13361,64 @@ fn main() {
 #[cfg(test)]
 mod wave43_unit_tests {
     use super::*;
+
+    fn long_question() -> &'static str {
+        "请确认是否需要把当前的会话状态、未落地的回答以及图运行绑定一并迁移到新的存储层，并说明迁移期间的回滚策略与验收口径，以及失败后的补偿方式与用户可见提示。"
+    }
+
+    #[test]
+    fn test_wrap_ask_question_keeps_full_text_and_never_ellipsizes() {
+        let wrapped = wrap_ask_question(long_question(), 32, 32);
+        assert!(wrapped.len() > 1, "long question must wrap, got {wrapped:?}");
+        assert_eq!(wrapped.concat(), long_question(), "换行不得丢字");
+        assert!(!wrapped.iter().any(|line| line.contains('…')), "禁止省略号截断");
+        for line in &wrapped {
+            assert!(str_width(line) <= 32, "line exceeds 32: {line}");
+        }
+    }
+
+    #[test]
+    fn test_wrap_ask_question_short_stays_single_line() {
+        assert_eq!(wrap_ask_question("继续吗？", 60, 60), vec!["继续吗？".to_string()]);
+    }
+
+    #[test]
+    fn test_wrap_ask_question_keeps_punctuation_off_line_start() {
+        let wrapped = wrap_ask_question("请选择本次交付的执行架构与部署策略，然后确认是否继续执行后续步骤。", 20, 20);
+        assert!(wrapped.len() > 1);
+        for line in &wrapped {
+            let first = line.chars().next().unwrap_or(' ');
+            assert!(!is_no_line_start(first), "行首不得是避让标点: {line}");
+        }
+    }
+
+    #[test]
+    fn test_inline_ask_height_grows_with_wrapped_question() {
+        fn state_with_question(question: &str) -> TuiState {
+            let mut state = TuiState::default();
+            state.mode = InteractionMode::AskUserQuestion;
+            state.ask_user_state = Some(AskUserState::new(
+                "req-1".to_string(),
+                vec![AskUserQuestion {
+                    id: "q1".to_string(),
+                    header: None,
+                    question: question.to_string(),
+                    multi_select: false,
+                    options: vec![
+                        QuestionOption { label: "是".to_string(), description: None },
+                        QuestionOption { label: "否".to_string(), description: None },
+                    ],
+                }],
+            ));
+            state
+        }
+        let long_state = state_with_question(long_question());
+        let short_state = state_with_question("继续吗？");
+        let long_h = inline_ask_height(&long_state, 80);
+        let short_h = inline_ask_height(&short_state, 80);
+        assert!(long_h > short_h, "换行后必须增高: long={long_h} short={short_h}");
+        assert!(inline_ask_height(&long_state, 48) >= long_h);
+    }
     use serde_json::json;
 
     fn long_question() -> &'static str {
