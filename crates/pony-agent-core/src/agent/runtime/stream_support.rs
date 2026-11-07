@@ -670,28 +670,33 @@ pub(super) struct SameSignatureTracker {
 
 impl SameSignatureTracker {
     pub(super) fn new() -> Self {
-        unimplemented!()
+        Self::default()
     }
 
     /// 只读：该签名在本 turn 内已执行成功放行的次数。
     pub(super) fn occurrence_count(&self, signature: &str) -> usize {
-        unimplemented!()
+        self.counts.get(signature).copied().unwrap_or(0)
     }
 
     /// 只读闸点：`count >= limit` 即视为耗尽（不记账、不改状态）。
     pub(super) fn is_exhausted(&self, signature: &str, limit: usize) -> bool {
-        unimplemented!()
+        self.occurrence_count(signature) >= limit
     }
 
     /// 唯一记账点：仅在工具调用真正被放行执行时调用。
     /// `changed_world` = 本次执行是否改变了世界（见 `tool_execution_changed_world`）。
     pub(super) fn record_executed(&mut self, signature: String, changed_world: bool) {
-        unimplemented!()
+        // 写类成功 ⇒ 任务已被推进，其它签名的历史计数不再代表「打转」，整体清空；
+        // 但**保留自身**（`retain` 只留 `signature`），否则「反复写同一处」会自我清空而无限放行。
+        if changed_world {
+            self.counts.retain(|key, _| key == &signature);
+        }
+        *self.counts.entry(signature).or_insert(0) += 1;
     }
 
     /// 清空全部计数（留给后续需要整轮重置的场景）。
     pub(super) fn clear(&mut self) {
-        unimplemented!()
+        self.counts.clear();
     }
 }
 
@@ -701,7 +706,15 @@ impl SameSignatureTracker {
 /// `tool_kind_for_name(&tool_call.name)` ∈ {`ToolKind::Write`, `ToolKind::Execute`}。
 /// 失败、只读/搜索类一律视为未改变世界（不得据此清空别人的计数）。
 pub(super) fn tool_execution_changed_world(tool_call: &ToolCall, tool_result: &ToolResult) -> bool {
-    unimplemented!()
+    use crate::agent::tools::{tool_kind_for_name, ToolKind};
+
+    if tool_result.status == "error" {
+        return false;
+    }
+    matches!(
+        tool_kind_for_name(&tool_call.name),
+        ToolKind::Write | ToolKind::Execute
+    )
 }
 
 /// Match the dispatcher's persisted `PendingControlRequest` to the originating tool call. The

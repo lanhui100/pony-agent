@@ -102,7 +102,7 @@ pub(super) fn set_same_tool_failure_override(value: usize) -> usize {
 /// 测试专用：设置同签名重复调用闸的允许次数覆写，返回先前的覆写值（便于用例收尾还原）。
 #[cfg(test)]
 pub(super) fn set_same_signature_occurrences_override(value: usize) -> usize {
-    unimplemented!()
+    SAME_SIGNATURE_OCCURRENCES_OVERRIDE.with(|slot| slot.replace(value))
 }
 
 /// 测试专用：设置并发开关覆写，返回先前的覆写值（便于用例收尾还原）。
@@ -181,11 +181,28 @@ pub(super) fn parse_max_consecutive_same_tool_failures(raw: Option<&str>) -> usi
 }
 
 pub(super) fn max_same_signature_occurrences_per_turn() -> usize {
-    unimplemented!()
+    #[cfg(test)]
+    {
+        let override_limit = SAME_SIGNATURE_OCCURRENCES_OVERRIDE.with(|slot| slot.get());
+        if override_limit > 0 {
+            return override_limit;
+        }
+    }
+
+    static MAX_SAME_SIGNATURE_OCCURRENCES: OnceLock<usize> = OnceLock::new();
+    *MAX_SAME_SIGNATURE_OCCURRENCES.get_or_init(|| {
+        parse_max_same_signature_occurrences_per_turn(
+            std::env::var(MAX_SAME_SIGNATURE_OCCURRENCES_ENV)
+                .ok()
+                .as_deref(),
+        )
+    })
 }
 
 pub(super) fn parse_max_same_signature_occurrences_per_turn(raw: Option<&str>) -> usize {
-    unimplemented!()
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (1..=MAX_ALLOWED_SAME_SIGNATURE_OCCURRENCES_PER_TURN).contains(value))
+        .unwrap_or(DEFAULT_MAX_SAME_SIGNATURE_OCCURRENCES_PER_TURN)
 }
 
 pub(super) fn build_consecutive_tool_failure_error(limit: usize, tool_name: &str, code: &str, output: &str) -> String {
@@ -229,7 +246,13 @@ pub(super) fn build_duplicate_tool_call_error(
     occurrences: usize,
     limit: usize,
 ) -> String {
-    unimplemented!()
+    format!(
+        "工具 `{}` 在同一 turn 内已第 {occurrences} 次以完全相同的参数被调用\
+（同签名判定口径：同名 + 同参数，仅忽略 `description` 与 key 顺序；同一 turn 内最多允许 {limit} 次），\
+已停止继续 follow-up 以避免重复探索。若上次调用失败或结果已失效，请改变参数、先确认当前状态与已有证据，\
+或直接基于已有证据作答。",
+        tool_call.name
+    )
 }
 
 

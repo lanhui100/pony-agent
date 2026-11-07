@@ -42,11 +42,11 @@ impl AgentRuntime {
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
         let mut accumulated_token_usage = first_decision.token_usage.clone();
         let mut hook_trace_records = initial_model_hook_trace_records;
-        // 批内每个调用的签名都入集：跨 hop 的「同调用重放」判定口径不变（per-call）。
-        let mut seen_tool_signatures: BTreeSet<String> = current_tool_calls
-            .iter()
-            .map(tool_call_signature)
-            .collect();
+        // 同签名重复调用闸（契约矩阵 C2/C3）：同一工具 + 同一归一化参数允许**有限次**执行，
+        // 第 `limit + 1` 次命中闸后走恢复式收尾。**本 turn 起始一律建空计数（`new()`）**——
+        // 若按首批调用预置计数（note 最初的 `from_batch`），预置 1 次 + 执行点再记 1 次构成
+        // 双重计数，默认 limit=2 时第 2 次即熔断，直接违反「前 2 次放行」契约。
+        let mut same_signatures = SameSignatureTracker::new();
         let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
         // D4（W28b / B018 后续）：批内执行段规划见 `batch_plan`；开关 `PONY_AGENT_PARALLEL_TOOLS`
@@ -289,8 +289,12 @@ impl AgentRuntime {
                         error,
                     ));
                 }
-                // 逐调用记录（供批后一次性回填）+ 跨 hop 重放签名（per-call 口径不变）。
-                seen_tool_signatures.insert(tool_call_signature(tool_call));
+                // 逐调用记录（供批后一次性回填）+ 同签名计数在**执行点**记账（闸点只读；
+                // 被拦下的调用不记账，否则收尾后的重试会被自己推高计数）。
+                same_signatures.record_executed(
+                    tool_call_signature(tool_call),
+                    tool_execution_changed_world(tool_call, &tool_result),
+                );
                 executed_results.push(tool_result.clone());
                 executed_calls.push(tool_call.clone());
                 // 批终止符：交互类工具（Ask / Permission…）执行完即停批，后续调用不执行。
@@ -546,9 +550,12 @@ impl AgentRuntime {
                         build_tool_hop_limit_error(max_tool_hops_per_turn()),
                     ));
                 } else {
-                    // 重复调用闸：按**调用**判定（批内首个）；命中则恢复式收尾，不整批重放。
+                    // 重复调用闸：按**调用**判定（批内首个）、**只读**（不记账、不改状态）；
+                    // 命中则恢复式收尾，不整批重放。
                     let next_signature = tool_call_signature(&next_tool_call);
-                    if !seen_tool_signatures.insert(next_signature) {
+                    let same_signature_limit = max_same_signature_occurrences_per_turn();
+                    if same_signatures.is_exhausted(&next_signature, same_signature_limit) {
+                        let occurrences = same_signatures.occurrence_count(&next_signature) + 1;
                         let recovery = recover_tool_followup_completion(
                             provider,
                             planning_request,
@@ -556,8 +563,11 @@ impl AgentRuntime {
                             &hop_records,
                             &next_tool_call,
                             response.assistant_message.as_ref(),
-                            // 临时编译桥：occurrences/limit 由 Executor 按契约矩阵 C4 改写。
-                            &build_duplicate_tool_call_error(&next_tool_call, 0, 0),
+                            &build_duplicate_tool_call_error(
+                                &next_tool_call,
+                                occurrences,
+                                same_signature_limit,
+                            ),
                             &context_observation,
                         );
                         provider_call_records.push(recovery.provider_call_record);
