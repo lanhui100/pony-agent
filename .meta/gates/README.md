@@ -62,8 +62,16 @@
      只读档案，新决策一律进 `.agents/notes/`，见
      `implemented/process/2026-11-01-alt-governance-adaptation.md`）。
 
-## 负样本 spec 的两种形态
+### 代码规模（跨平台，已接入 `npm run verify`）
 
+10. **规模门禁（基线棘轮）**：`scripts/check-file-size.mjs` + 基线 `scripts/file-size-baseline.json`
+    - 阈值：单文件 ≤3000 行 / 单函数 ≤200 行 / 单函数花括号嵌套 ≤8 层。
+    - 判定：违规值 ≤ 基线值 → 放过（grandfathered）；超基线或基线无此条目 → exit 1。
+      `exempt-*`（围栏过期/缺理由/日期非法）永不进基线，一律失败。
+    - 接入：`npm run size:check`（`verify` 内）；接受新债用 `npm run size:check:update`，
+      必须在同提交说明理由。决定见 ADR 0090。
+
+## 负样本 spec 的两种形态
 - **自包含**：从自身路径解析仓库根，不依赖调用者 cwd；样本一律建在 `mktemp -d` 临时目录，退出时清理；
   不改仓库任何文件；自包裹 `timeout 30`；不调用自身（防递归）。
 - **诚实条款**：spec 只证明「门会响」，证明不了「抽样无偏」；抽样设计靠 review。`PONYGO_IN_SPEC=1`

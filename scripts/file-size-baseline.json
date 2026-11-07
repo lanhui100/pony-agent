@@ -1,0 +1,501 @@
+{
+  "version": 1,
+  "note": "存量规模债基线（棘轮）：只许删条目/下调 value，新增违规由 size:check 判失败；本文件由 --update-baseline 生成。",
+  "thresholds": {
+    "maxFileLines": 3000,
+    "maxFnLines": 200,
+    "maxDepth": 8
+  },
+  "entries": [
+    {
+      "path": "crates/pony-agent-core/examples/w61_e2e_probe.rs",
+      "kind": "fn-lines",
+      "name": "main",
+      "occurrence": 0,
+      "value": 230
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/context.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 3065
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/context.rs",
+      "kind": "fn-lines",
+      "name": "build_layered_turn_context",
+      "occurrence": 0,
+      "value": 259
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 10615
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "kind": "fn-lines",
+      "name": "build",
+      "occurrence": 0,
+      "value": 202
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "kind": "fn-lines",
+      "name": "execute_graph_run_stream_step",
+      "occurrence": 0,
+      "value": 208
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "kind": "fn-lines",
+      "name": "history_commands_and_runtime_view_follow_persisted_history_graph",
+      "occurrence": 0,
+      "value": 214
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "kind": "fn-lines",
+      "name": "load_model_monitor_summary_aggregates_capability_usage_dimensions",
+      "occurrence": 0,
+      "value": 248
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "kind": "fn-lines",
+      "name": "model_monitor_session_drilldown_preserves_failed_and_cancelled_terminal_evidence",
+      "occurrence": 0,
+      "value": 261
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/control_plane/query_commands.rs",
+      "kind": "fn-lines",
+      "name": "load_model_monitor_summary",
+      "occurrence": 0,
+      "value": 236
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/dispatcher_composites.rs",
+      "kind": "fn-lines",
+      "name": "gather_single_path",
+      "occurrence": 0,
+      "value": 228
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/dispatcher.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 4223
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/governed_executor.rs",
+      "kind": "fn-lines",
+      "name": "decide_with_context",
+      "occurrence": 0,
+      "value": 209
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/hook_commands.rs",
+      "kind": "fn-lines",
+      "name": "run_hook",
+      "occurrence": 0,
+      "value": 231
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 5509
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "kind": "fn-depth",
+      "name": "spawn_local_otlp_sink",
+      "occurrence": 0,
+      "value": 11
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/process.rs",
+      "kind": "fn-lines",
+      "name": "start_inner",
+      "occurrence": 0,
+      "value": 275
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/projection.rs",
+      "kind": "fn-lines",
+      "name": "apply",
+      "occurrence": 0,
+      "value": 388
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/projection.rs",
+      "kind": "fn-lines",
+      "name": "apply",
+      "occurrence": 1,
+      "value": 223
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 8589
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "kind": "fn-lines",
+      "name": "collect_anthropic_sse_message_from_response",
+      "occurrence": 0,
+      "value": 311
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/provider/responses_api.rs",
+      "kind": "fn-depth",
+      "name": "read_sse_data_lines_core",
+      "occurrence": 0,
+      "value": 9
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 13890
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "kind": "fn-lines",
+      "name": "d2_batch_tool_results_wire_shape_openai_and_anthropic",
+      "occurrence": 0,
+      "value": 223
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "kind": "fn-lines",
+      "name": "multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries",
+      "occurrence": 0,
+      "value": 210
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "kind": "fn-lines",
+      "name": "run_turn_and_start_turn_stream_produce_equivalent_event_sequences",
+      "occurrence": 0,
+      "value": 201
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "kind": "fn-lines",
+      "name": "start_turn_stream_completes_after_multi_hop_followup_stream",
+      "occurrence": 0,
+      "value": 313
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "kind": "fn-lines",
+      "name": "wave15_multihop_stream_exposes_per_call_metrics_in_hop_events_and_persisted_timeline",
+      "occurrence": 0,
+      "value": 465
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/tool_recovery.rs",
+      "kind": "fn-lines",
+      "name": "recover_tool_followup_completion_stream",
+      "occurrence": 0,
+      "value": 249
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/trace_timeline.rs",
+      "kind": "fn-lines",
+      "name": "build_persisted_trace_timeline_with_provider_calls",
+      "occurrence": 0,
+      "value": 287
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/trace_timeline.rs",
+      "kind": "fn-lines",
+      "name": "build_stream_progress_trace_timeline",
+      "occurrence": 0,
+      "value": 222
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 3440
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "kind": "fn-lines",
+      "name": "handle_stream_tool_turn",
+      "occurrence": 0,
+      "value": 1565
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "kind": "fn-lines",
+      "name": "start_turn_stream_with_control_and_facts",
+      "occurrence": 0,
+      "value": 1695
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "kind": "fn-lines",
+      "name": "handle_sync_tool_turn",
+      "occurrence": 0,
+      "value": 603
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "kind": "fn-lines",
+      "name": "run_turn_inner",
+      "occurrence": 0,
+      "value": 621
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/session/store.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 5683
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/session/store.rs",
+      "kind": "fn-lines",
+      "name": "ensure_history_graph",
+      "occurrence": 0,
+      "value": 275
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/session/tests.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 6881
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/session/tests.rs",
+      "kind": "fn-lines",
+      "name": "file_backend_roundtrip_restores_turn_trace_history",
+      "occurrence": 0,
+      "value": 213
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 6276
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "kind": "fn-lines",
+      "name": "apply_persist_command_tx",
+      "occurrence": 0,
+      "value": 410
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "kind": "fn-lines",
+      "name": "ensure_normalized_schema",
+      "occurrence": 0,
+      "value": 247
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "kind": "fn-lines",
+      "name": "load_store_normalized",
+      "occurrence": 0,
+      "value": 494
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "kind": "fn-lines",
+      "name": "pa095_ref_only_trace_rows_backfill_and_legacy_reads",
+      "occurrence": 0,
+      "value": 203
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/team_history.rs",
+      "kind": "fn-depth",
+      "name": "team_history_snapshot_from_events",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 14816
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "fn-depth",
+      "name": "builtin_tools",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "fn-depth",
+      "name": "edit_file",
+      "occurrence": 0,
+      "value": 9
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "fn-depth",
+      "name": "run_command",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "fn-depth",
+      "name": "write_file",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "fn-lines",
+      "name": "builtin_tools",
+      "occurrence": 0,
+      "value": 1070
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "fn-lines",
+      "name": "gather_context",
+      "occurrence": 0,
+      "value": 479
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "fn-lines",
+      "name": "run_command",
+      "occurrence": 0,
+      "value": 631
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "kind": "fn-lines",
+      "name": "write_file",
+      "occurrence": 0,
+      "value": 206
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 3489
+    },
+    {
+      "path": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "kind": "fn-lines",
+      "name": "scan_skills_internal",
+      "occurrence": 0,
+      "value": 292
+    },
+    {
+      "path": "crates/pony-agent-core/src/bin/conformance.rs",
+      "kind": "fn-lines",
+      "name": "validate",
+      "occurrence": 0,
+      "value": 286
+    },
+    {
+      "path": "crates/pony-agent-core/src/bin/tui.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 11095
+    },
+    {
+      "path": "crates/pony-agent-core/src/bin/tui.rs",
+      "kind": "fn-depth",
+      "name": "hydrate_state_from_session",
+      "occurrence": 0,
+      "value": 9
+    },
+    {
+      "path": "crates/pony-agent-core/src/bin/tui.rs",
+      "kind": "fn-depth",
+      "name": "tui_event_loop",
+      "occurrence": 0,
+      "value": 16
+    },
+    {
+      "path": "crates/pony-agent-core/src/bin/tui.rs",
+      "kind": "fn-lines",
+      "name": "message_lines_with_ctx",
+      "occurrence": 0,
+      "value": 258
+    },
+    {
+      "path": "crates/pony-agent-core/src/bin/tui.rs",
+      "kind": "fn-lines",
+      "name": "tui_event_loop",
+      "occurrence": 0,
+      "value": 2320
+    },
+    {
+      "path": "crates/pony-agent-core/src/bin/tui.rs",
+      "kind": "fn-lines",
+      "name": "ui",
+      "occurrence": 0,
+      "value": 875
+    },
+    {
+      "path": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+      "kind": "fn-depth",
+      "name": "decode_spans",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-agent-core/tests/observability_reporting_wave53_test.rs",
+      "kind": "fn-depth",
+      "name": "decode_spans",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-agent-core/tests/otel_user_id_acceptance_test.rs",
+      "kind": "fn-depth",
+      "name": "spawn_otlp_sink",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-agent-core/tests/wave48_otel_export_diagnostics.rs",
+      "kind": "fn-depth",
+      "name": "spawn_otlp_sink",
+      "occurrence": 0,
+      "value": 11
+    },
+    {
+      "path": "crates/pony-agent-core/tests/wave49_observability_gaps.rs",
+      "kind": "fn-depth",
+      "name": "spawn_otlp_sink",
+      "occurrence": 0,
+      "value": 11
+    },
+    {
+      "path": "crates/pony-agent-core/tests/wave54_metric_truth.rs",
+      "kind": "fn-depth",
+      "name": "decode_spans",
+      "occurrence": 0,
+      "value": 10
+    }
+  ]
+}

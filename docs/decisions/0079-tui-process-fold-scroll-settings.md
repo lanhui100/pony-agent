@@ -72,9 +72,10 @@ Status: implemented
    `run_tui` 启动时经 `state.apply_tui_preferences(&store.load())` 落地；
    `TuiState::default()` 保持**旧行为**（可见 + 展开，不做 IO），沿用 `model_preferences`
    「Default 可复现、不做 IO」的约定，以免破坏已冻结的 `TuiState::default()` 断言。
-10. **`Ctrl+O` 快捷开关**：`InteractionMode::Normal` 下切换 `hide_process` 并落盘，
-    状态栏给一次性提示（`set_status_notice`）；与 `/settings` **读写同一字段**，
-    不存在第二份真值。
+10. **`Ctrl+O` 快捷开关（R2：全局生效）**：**任意 `InteractionMode`** 下均可切换 `hide_process`
+    并落盘（判定纯函数 `is_hide_process_shortcut` 位于 `tui/input.rs`，事件循环在**所有模态分支
+    之前**消费该键，故设置面板/各选择器/审批/问答打开时同样生效），状态栏给一次性提示
+    （`set_status_notice`）；与 `/settings` **读写同一字段**，不存在第二份真值。
 
 ## 影响
 
@@ -108,7 +109,7 @@ Status: implemented
 | C9 | A10 / A11（三类块 0 行；User/Assistant/System 不受影响） |
 | C10 | A12（隐藏态状态行含 `执行 · ` 与工具名，且无工具行字形） |
 | C11 | A13 + A9（`TuiPreferences::default()` 隐藏+折叠；`TuiState::default()` 仍可见+展开） |
-| C12 | A14（`Ctrl+O` 切换 + 落盘 + 一次性提示，与面板同字段） |
+| C12 | A14 + `tui_ctrl_o_global_shortcut.rs`（`Ctrl+O` **全局**切换 + 落盘 + 一次性提示，与面板同字段；源码顺序护栏证明消费点早于所有模态分支） |
 
 回归：`tui_thinking_bottom_gap.rs`（ADR 0076 的 A1–A14 冻结断言）、`tui_render_layout.rs`、
 `tui_batch6_virtualization.rs`（`message_lines_for` 旧行为）、`tui_terminal_restore.rs`。

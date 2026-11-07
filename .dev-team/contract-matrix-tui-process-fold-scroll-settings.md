@@ -29,7 +29,7 @@
 | **C9** | 隐藏过程：`hide_process == true` 时 `MessageRole::{Thinking, ToolCall, ToolResult}` 的渲染块**行数为 0**；`User` / `Assistant` / `System` 不受影响。判据纯函数 `should_hide_message(role, hide_process)`。 | A10/A11 |
 | **C10** | 隐藏态流式状态行必须显示当前工具信息：`is_streaming && hide_process && runtime_mode == ExecutingTool(_)` 时，消息区末尾状态行**照常渲染**（HEAD 在该态整行不渲染），文案形如 `执行 · <工具名>[ · <摘要>]`，其中工具信息取自最近一条 `ToolCall` 消息内容（`truncate` 到可用宽度）；`stopping` 分支优先级不变。 | A12（TestBackend 断言含 `执行 · ` 与工具名，且不含工具行字形 `◦/✓/✕`） |
 | **C11** | 默认为隐藏：`TuiPreferences::default().hide_process == true`、`thinking_collapsed == true`；`run_tui` 启动时 `state.apply_tui_preferences(&store.load())` ⇒ 用户侧默认隐藏 + 折叠。**修订 R1（2026-11-07，Lead）**：`TuiState::default()` 保持**旧行为**（`hide_process = false`、`thinking_collapsed = false`，与 `model_preferences` 同一约定「Default 不做 IO、保持可复现基线」），理由：已冻结的 `tui_thinking_bottom_gap` A6/A11 直接以 `TuiState::default()` 断言思考块可见，若把产品默认塞进 `Default` 会破坏只读契约测试；产品默认由偏好加载点体现。 | A13 + A9 |
-| **C12** | 快捷开关：`Ctrl+O`（`InteractionMode::Normal`）切换 `hide_process` 并落盘，状态栏给出一次性提示（`set_status_notice`）。`/settings` 与快捷键必须读写**同一**字段。 | A14 |
+| **C12** | 快捷开关：`Ctrl+O` 切换 `hide_process` 并落盘，状态栏给出一次性提示（`set_status_notice`）。**修订 R2（2026-11-07，全局化）**：由「仅 `InteractionMode::Normal`」升级为**全局生效**——纯函数判定 `is_hide_process_shortcut(code, modifiers)`（`tui/input.rs`），事件循环在**所有模态分支之前**（F2/F3 同级）消费该键，故设置面板 / 各选择器 / 审批 / 问答等模态打开时同样生效。`/settings` 与快捷键必须读写**同一**字段。 | A14 + `tests/tui_ctrl_o_global_shortcut.rs`（纯函数表 + 源码顺序护栏 + settings 不吞键 + 字段同源） |
 
 ## 2. 契约冻结符号（Lead 唯一写主；Test Agent 只读引用）
 
@@ -99,6 +99,7 @@ fn render_scrollbar(f: &mut Frame, area: Rect, state: &TuiState);
 
 - 2026-11-07：冻结首版（C1–C12）。
 - 2026-11-07：T-C 文档与观测性归属登记完成。
+- 2026-11-07：修订 R2 —— C12 由「Normal 态」升级为「全局生效」（设置面板/选择器/审批/问答打开时亦可切换），实现为输入分发表中位于所有模态分支之前的 `is_hide_process_shortcut` 纯函数判定。
 
 ## 5. 交付状态（T-C 追加；不改写 C1–C12 断言）
 

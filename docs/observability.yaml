@@ -474,6 +474,17 @@ note: >-
       `<config_dir>/pony-agent/tui-preferences.json`（原子写，缺失/损坏回落默认），不改变既有持久化 schema。
   (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
       `http_client` 本次未改动。为让巡检变绿而伪造 `/metrics` 或把 applicable 翻成 true 已被明确拒绝。
+  【wave-tui-ctrl-o-global 归属登记（2026-11-07）｜`Ctrl+O`「隐藏 Agent 过程」升级为全局快捷键（契约 C12 修订 R2）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 仅调整 TUI 进程内的按键路由（前置纯函数判定），
+  无新增对外接口/网络 IO/后台任务/LLM 调用，不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更只在 TUI 的按键分发层——把 `Ctrl+O` 的判定从「面板快捷键块」前移到
+      「所有模态分支之前」，使设置面板 / 各选择器 / 审批 / 问答打开时也可切换显示偏好；仍是随用户启停的
+      终端渲染面，无对外接口、网络 IO、后台任务、LLM 调用新增。
+  (3) 变更性质（仅登记，非遥测变更）：新增纯判定 `is_hide_process_shortcut`（`tui/input.rs`），
+      写盘仍复用既有 `persist_tui_preferences` → 本地 `tui-preferences.json`，不改变持久化 schema。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
   【wave-tui-splash-no-probe 归属登记（2026-11-07）｜品牌标图形协议改为零 I/O 环境判定（ADR 0080，取代 0069 的 stdio 探测）】
   一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次是**删除**一条启动期探测路径（没有新增接口、网络 IO、
   后台任务或 LLM 调用），不新增收口点，不伪造 /metrics。
