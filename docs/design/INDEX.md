@@ -4,6 +4,7 @@
 
 - [产品 UI 设计规范](product-ui-spec.md)
 - [应用图标](app-icon.md)
+- [TUI 启动页品牌标优化方案](tui-splash-logo.md)（提案，配套 ADR 0085）
 
 ## 2. 使用方式
 
