@@ -13020,6 +13020,8 @@ pub enum CliAction {
         pin: Option<String>,
         json: bool,
     },
+    /// `pony update --help`：打印自更新子命令的说明后退出（0）。
+    UpdateHelp,
     DemoAskUser,
     Invalid(String),
 }
@@ -13044,6 +13046,8 @@ pub fn parse_cli_action(args: &[String]) -> CliAction {
             let mut rest = args.iter().skip(1);
             while let Some(flag) = rest.next() {
                 match flag.as_str() {
+                    // 子命令级帮助：不进 TUI、不触发下载，直接给本子命令的口径与退出码。
+                    "--help" | "-h" => return CliAction::UpdateHelp,
                     "--check" => check = true,
                     "--force" => force = true,
                     "--json" => json = true,
@@ -13135,10 +13139,24 @@ fn cli_version_string() -> String {
 fn cli_help_string() -> String {
     format!(
         "pony {} — 交互式 TUI Agent\n\n\
-用法: pony [选项]\n       pony resume [<session-id>]   恢复会话（缺省 = 最近一次）\n\n\
+用法: pony [选项]\n       pony resume [<session-id>]   恢复会话（缺省 = 最近一次）\n       pony update [选项]          升级本机 pony 二进制到最新 CLI 版本（详见 `pony update --help`）\n\n\
 选项:\n  --version, -V   显示版本与二进制路径后退出\n  --help, -h      显示本帮助后退出\n  --doctor        终端环境自检（TTY/颜色/尺寸/locale/日志目录/PATH 冲突）\n\n\
 退出 TUI 后会打印 `pony resume <session-id>`，复制即可以同一会话继续。\n\n\
 交互键位:\n  Enter           发送输入\n  Alt+Enter       输入内换行\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  F2              切换鼠标捕获（默认开；关闭后可用鼠标选择文本）\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// `pony update --help` 的说明（取值口径、退出码与全部 PONY_UPDATE_* 环境变量）。
+fn update_help_string() -> String {
+    format!(
+        "pony update {} — 把本机 pony 二进制升级到最新 CLI 版本\n\n\
+用法: pony update [选项]\n\n\
+选项:\n  --check                只检查是否有更新，不下载、不安装\n  --force                允许降级 / 同版本重装（默认拒绝降级）\n  --pin <版本>           指定目标 CLI 版本（core 版本线，如 0.1.157；降级需同时给 --force）\n  --json                 stdout 只输出一行 JSON 收据（日志一律走 stderr）\n  --help, -h             显示本帮助后退出\n\n\
+退出码: 0 成功（含「已是最新」）· 1 校验失败（sha256 / 回验 / 回验超时）· 2 用法错误（含拒绝降级）\n        3 网络 / HTTP / 清单 / 无可用平台资产 · 4 安装失败（目标不可写 / 并发锁 / rename 失败）\n\n\
+环境变量（非法值一律回退默认）:\n  PONY_UPDATE_API_BASE               默认 https://api.github.com\n  PONY_UPDATE_REPO                   默认 lanhui100/pony-agent\n  PONY_UPDATE_MANIFEST_URL           指定清单地址（镜像/测试；http 需同时设 ALLOW_INSECURE）\n  PONY_UPDATE_ALLOW_INSECURE=1       仅与 MANIFEST_URL 同时设置时放开 http/localhost\n  PONY_UPDATE_DOWNLOAD_BUDGET_SECS   制品下载预算，默认 300，范围 1..=1800\n  PONY_UPDATE_INSTALL_PATH           指定安装目标（测试/CI 用；默认当前可执行文件）\n\n\
+完整性: 强制校验清单 sha256 与字节数，失败不触碰现有二进制；安装后跑新二进制 --version 回验（10s 超时即回滚）。\n\
+平台: 当前仅发布 linux-x86_64；Windows 运行中 exe 无法替换，请用桌面端安装包。",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -13419,6 +13437,10 @@ fn main() {
         }
         CliAction::Doctor => {
             std::process::exit(run_doctor());
+        }
+        CliAction::UpdateHelp => {
+            println!("{}", update_help_string());
+            std::process::exit(0);
         }
         CliAction::Update {
             check,
