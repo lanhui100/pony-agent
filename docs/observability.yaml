@@ -556,3 +556,23 @@ note: >-
       `crates/pony-agent-core/tests/tui_metrics_dual_caliber.rs` 的 7 个用例（P0-1…P0-4 / P1-1 / P1-2 / P2）、
       `agent::session::usage::tests` 的 5 个用例，以及 `metrics_snapshot_contract` / `ts_contract_snapshot`
       的线缆键表门禁。
+  【wave-tui-suspend-handover 归属登记（2026-11-07）｜Ctrl+Z 挂起前交还终端 + `fg` 后按计划重建能力】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地终端模式与信号处置**，
+  无新增对外接口、网络 IO、后台任务、LLM 调用或依赖；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更面是进程与**自身控制终端**的 termios / 转义序列交互
+      （`restore_terminal_for_signal` 的 `tcsetattr` + `write(/dev/tty)`、`suspend_tui` 的
+      `raise(SIGSTOP)`、`reenter_raw_mode` / `apply_terminal_reentry` 的 crossterm 命令序列）。
+      这类事实没有可外送的结构性载体：它不产生 span 属性、不是错误事件、也不是可聚合的计数，
+      进程仍随用户启停的终端面，Prometheus pull 与节点侧日志采集的结构前提均不成立。
+  (3) 变更性质（仅登记，非遥测变更）：接管 SIGTSTP（处理器内 async-signal-safe 还原后 `raise(SIGSTOP)`）、
+      按键路径 `Ctrl+Z → suspend_tui()`（raw mode 清掉 `ISIG`，按键不产生信号）、
+      SIGCONT 置位一次性重建请求并由主循环按 `terminal_reentry_plan` 重建
+      raw / kitty 键盘协议 / 备用屏 / 鼠标 / bracketed paste 后清屏重绘；F2 关过鼠标时跳过鼠标重建。
+      新增诊断输出只有既有的 `eprintln!(\"[pony-tui] 终端重入重建失败…\")`，落 stderr 改道后的
+      `~/.pony-agent/tui-logs/tui-runtime.log`，字段不含正文与凭据，不新增日志出口。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——
+      `crates/pony-agent-core/tests/tui_signal_reentry.rs` 的 R1–R6（一次性消费、多次置位合并、计划顺序、
+      鼠标开关尊重、还原串与计划互逆、Ctrl+Z 只认裸组合）与 `tests/tui_terminal_restore.rs` 的既有 45 例。

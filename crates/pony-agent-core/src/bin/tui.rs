@@ -72,8 +72,25 @@ use std::sync::Arc;
 // 主循环每个 tick（≤16ms）检测后正常 break，走统一的终端恢复保证器。
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// SIGCONT 唤醒或终端重置请求：进程从后台唤回或收到继续信号时，要求主循环重新初始化 raw 模式并全量清屏重绘。
+/// 终端重入请求：进程被 `fg` 唤回（SIGCONT）或终端被外部重置时置位。
+///
+/// 置位方是信号处理器 [`handle_sigcont_signal`]；消费方是主循环每 tick 的
+/// [`take_refresh_request`]，取走后按 [`terminal_reentry_plan`] 重建 raw mode /
+/// 备用屏 / 鼠标 / bracketed paste / kitty 键盘增强协议。
 static REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 置位「终端需要重建」请求。
+pub fn request_terminal_refresh() {
+    REFRESH_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// 一次性取走「终端需要重建」请求：`true` 表示自上次取走后被置位过。
+///
+/// 必须是单次 `swap` 而不是「先 load 再 store」：两次读之间可能再来一个信号，
+/// 拆开会把那一次请求吞掉（多次信号合并成一次重建可接受，丢请求不可接受）。
+pub fn take_refresh_request() -> bool {
+    REFRESH_REQUESTED.swap(false, Ordering::SeqCst)
+}
 
 /// ADR 0075：最近一次终端还原是否**未能完整送达**输入侧/屏幕侧还原串（幂等标记）。
 /// 退出提示据此决定是否附加一条可复制执行的手工恢复命令（见 `resume_hint_block`）。
@@ -132,8 +149,11 @@ fn capture_terminal_state() {
 fn capture_terminal_state() {}
 
 /// 信号上下文里的最佳努力还原：只调用 async-signal-safe 的 `write(2)` / `tcsetattr(3)`。
+///
+/// 唯一调用点是 [`handle_sigtstp_signal`]：Ctrl+Z 挂起前必须先把终端交还 shell，
+/// 否则进程停住时终端留在 raw + 备用屏 + kitty 协议态（恢复执行前 shell 全乱）。
+/// 正常退出/panic 路径走 [`restore_terminal_modes`]（可分配、可报错），不复用本函数。
 #[cfg(unix)]
-#[allow(dead_code)]
 fn restore_terminal_for_signal() {
     unsafe {
         let tty_fd = RESTORE_TTY_FD.load(Ordering::SeqCst);
@@ -201,7 +221,38 @@ extern "C" fn handle_shutdown_signal(sig: libc::c_int) {
 
 #[cfg(unix)]
 extern "C" fn handle_sigcont_signal(_sig: libc::c_int) {
-    REFRESH_REQUESTED.store(true, Ordering::SeqCst);
+    // SIGCONT 之前终端能力已被 SIGTSTP 处理器拆掉（raw / 备用屏 / 鼠标 / paste / kitty 栈），
+    // 这里只置位，真正的重建由主循环消费 —— 信号上下文里不能分配内存、不能画帧。
+    request_terminal_refresh();
+    // 重新武装 SIGTSTP：挂起前处理器把自己复位成了默认处置（见 handle_sigtstp_signal），
+    // 恢复执行后必须重新接管，否则第二次 Ctrl+Z 又会把终端留在 raw + 备用屏。
+    install_suspend_signal_handler();
+}
+
+/// SIGTSTP（Ctrl+Z）：先把终端交还用户 shell，再真正挂起进程。
+///
+/// 顺序不可交换：默认处置直接停进程，终端会留在 raw + 备用屏 + kitty 协议态，
+/// 用户回到 shell 后每个按键都变成 `ESC[117u` 这类转义序列被当正文回显。
+/// 故先做 async-signal-safe 还原（`write` + `tcsetattr`，见 [`restore_terminal_for_signal`]），
+/// 再把 SIGTSTP 复位为默认处置并 `raise(SIGSTOP)`——SIGSTOP 不可被捕获，必定停住进程。
+#[cfg(unix)]
+extern "C" fn handle_sigtstp_signal(_sig: libc::c_int) {
+    restore_terminal_for_signal();
+    unsafe {
+        libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+        libc::raise(libc::SIGSTOP);
+    }
+}
+
+/// 安装 SIGTSTP 接管。
+///
+/// `signal(2)` 属 async-signal-safe，故 SIGCONT 处理器内也可安全调用（用于重新武装）。
+#[cfg(unix)]
+fn install_suspend_signal_handler() {
+    unsafe {
+        let suspend_handler = handle_sigtstp_signal as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGTSTP, suspend_handler);
+    }
 }
 
 /// `libc` 是 `[target.'cfg(unix)'.dependencies]` 依赖，Windows 目标不存在该 crate，
@@ -220,6 +271,9 @@ fn install_shutdown_signal_handlers() {
 
         let cont_handler = handle_sigcont_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGCONT, cont_handler);
+
+        // Ctrl+Z：接管 SIGTSTP 以便挂起前还原终端（默认处置会把终端留在 raw + 备用屏）。
+        install_suspend_signal_handler();
     }
 }
 
@@ -518,6 +572,128 @@ pub fn restore_terminal_modes() {
         crossterm::event::DisableMouseCapture,
         crossterm::cursor::Show
     );
+}
+
+/// 主线程上下文里的挂起：完整还原终端后 `raise(SIGSTOP)`。
+///
+/// 为什么必须由按键路径主动触发：raw mode 由 `cfmakeraw` 建立，它清掉了 `ISIG`，
+/// 于是 Ctrl+Z **不会**产生 SIGTSTP 信号，而是作为 `Char('z')+CONTROL` 从 crossterm
+/// 送到事件循环。[`handle_sigtstp_signal`] 只覆盖「外部 `kill -TSTP` / 未进 raw 的窗口」；
+/// 用户真正按 Ctrl+Z 的路径是这里。
+///
+/// 这里用 [`restore_terminal_modes`] 而非信号版还原：主线程上下文可 flush、可报错、
+/// 能清 crossterm 的 raw mode 缓存（否则重入时 `enable_raw_mode` 会静默 no-op）。
+/// 恢复执行由 SIGCONT → `REFRESH_REQUESTED` → [`terminal_reentry_plan`] 完成。
+#[cfg(unix)]
+fn suspend_tui() {
+    restore_terminal_modes();
+    unsafe {
+        libc::raise(libc::SIGSTOP);
+    }
+}
+
+/// 非 unix（Windows）无 POSIX 作业控制：Ctrl+Z 不挂起（保持原行为，按键照常插入）。
+#[cfg(not(unix))]
+fn suspend_tui() {}
+
+/// Ctrl+Z 是否为「挂起 TUI」快捷键（纯函数，便于在无 TTY 环境断言）。
+///
+/// 只认「恰好 CONTROL + `Char('z')`」：带 Shift 时字符会变成 `Char('Z')`，
+/// 带 Alt 时 modifiers 不等，故重做类组合（Ctrl+Shift+Z）不会被误判为挂起。
+/// 非 unix 无 POSIX 作业控制，恒 `false` —— Ctrl+Z 必须保持原样插入输入框。
+pub fn is_suspend_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if !cfg!(unix) {
+        return false;
+    }
+    modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('z')
+}
+
+/// 终端重入（SIGCONT 唤醒 / Ctrl+Z 后 `fg`）必须按序重建的终端能力。
+///
+/// 挂起时 [`restore_terminal_for_signal`] 拆掉了 raw mode、备用屏与全部输入侧协议；
+/// 恢复执行时若只 `enable_raw_mode` 就接着画帧，画面会落进用户 shell 的主屏滚屏区。
+/// 因此把「装回哪些能力、什么顺序」表达成显式清单：顺序本身是契约（与启动初始化同序），
+/// 且可在无 TTY 环境直接断言，不必伪造终端。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalReentryStep {
+    /// 重进 raw mode（挂起时 `tcsetattr` 已回原 termios）。
+    RawMode,
+    /// 重建 kitty 键盘增强协议栈（还原串弹栈三次后栈已空，必须重新 push）。
+    KeyboardEnhancement,
+    /// 重进备用屏（挂起时已发 `ESC[?1049l`）。
+    AlternateScreen,
+    /// 重新开启鼠标捕获（仅当用户未用 F2 主动关闭）。
+    MouseCapture,
+    /// 重新开启 bracketed paste。
+    BracketedPaste,
+    /// 清空物理终端 + 失效渲染缓存，强制整屏重绘（备用屏内容已随挂起丢失）。
+    ClearAndRedraw,
+}
+
+/// 终端重入计划。顺序与启动初始化一致，`ClearAndRedraw` 恒在末尾。
+///
+/// `mouse_capture=false`（用户按 F2 关过）时跳过鼠标重建：恢复执行不得悄悄改回用户选择。
+pub fn terminal_reentry_plan(mouse_capture: bool) -> Vec<TerminalReentryStep> {
+    let mut plan = vec![
+        TerminalReentryStep::RawMode,
+        TerminalReentryStep::KeyboardEnhancement,
+        TerminalReentryStep::AlternateScreen,
+    ];
+    if mouse_capture {
+        plan.push(TerminalReentryStep::MouseCapture);
+    }
+    plan.push(TerminalReentryStep::BracketedPaste);
+    plan.push(TerminalReentryStep::ClearAndRedraw);
+    plan
+}
+
+/// 重入时**强制**重进 raw mode。
+///
+/// 为什么不能直接 `enable_raw_mode()`：crossterm 在「它自认为已处于 raw mode」时
+/// 直接返回 `Ok(())`（`TERMINAL_MODE_PRIOR_RAW_MODE` 有值即早退）。而 SIGTSTP 处理器
+/// 是用 `tcsetattr` 直接把 termios 改回原值的（信号上下文里不能用 crossterm 的
+/// 带锁实现），于是 crossterm 的缓存与真实状态分叉：`fg` 之后单发 `enable_raw_mode`
+/// 会静默 no-op，终端停在 cooked mode 而 TUI 继续画帧 —— 按键全被 tty 回显成正文。
+///
+/// 故先 `disable_raw_mode()` 让 crossterm 清掉缓存（对已被处理器还原的 termios 是幂等的），
+/// 再真正 `enable_raw_mode()`。
+fn reenter_raw_mode() -> io::Result<()> {
+    let _ = disable_raw_mode();
+    enable_raw_mode()
+}
+
+/// 按 [`terminal_reentry_plan`] 逐项重建终端。
+///
+/// 键盘增强协议 push 失败不返回错误：部分终端不支持，降级为传统键码是既有约定
+/// （与启动路径同口径），不应因此中断整个重建。
+pub fn apply_terminal_reentry<B>(
+    terminal: &mut Terminal<B>,
+    steps: &[TerminalReentryStep],
+) -> io::Result<()>
+where
+    B: ratatui::backend::Backend + io::Write,
+{
+    for step in steps {
+        match step {
+            TerminalReentryStep::RawMode => reenter_raw_mode()?,
+            TerminalReentryStep::KeyboardEnhancement => {
+                if let Some(flags) = keyboard_enhancement_push_flags() {
+                    let _ = execute!(terminal.backend_mut(), PushKeyboardEnhancementFlags(flags));
+                }
+            }
+            TerminalReentryStep::AlternateScreen => {
+                execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            }
+            TerminalReentryStep::MouseCapture => {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            }
+            TerminalReentryStep::BracketedPaste => {
+                execute!(terminal.backend_mut(), EnableBracketedPaste)?;
+            }
+            TerminalReentryStep::ClearAndRedraw => terminal.clear()?,
+        }
+    }
+    Ok(())
 }
 
 /// 契约 F-D 加固：panic 也先还原终端。
@@ -10565,6 +10741,11 @@ fn tui_event_loop(
     // `input_buffer`）—— 用户可能在窗口内改过输入框，读字节会把已派发正文静默丢掉。
     let mut queue_dispatch_payload: Option<QueuedUserMessage> = None;
     // 信号处理器已在 run_tui 进入 raw mode 之前安装（启动期 SIGHUP 也要能还原终端）。
+    // SIGINT/SIGTERM/SIGHUP 只置 SHUTDOWN_REQUESTED 交给主循环。
+    // 挂起有两条路径，二者都必须先还原终端再停进程：
+    //   1) 外部 `kill -TSTP` / 未进 raw 的窗口 → SIGTSTP 处理器内就地还原（async-signal-safe）；
+    //   2) 用户按 Ctrl+Z → raw mode 清掉了 ISIG，**不产生信号**，由按键分支调 suspend_tui。
+    // SIGCONT 只置 REFRESH_REQUESTED，由本循环按 terminal_reentry_plan 重建终端。
 
     // wave-60 §C8：流式中双击 Esc 的判定状态机（窗口 `stop_sequence_ms`=500，与桌面端同判据）。
     // generation 承载「同一 turn_id 的一次出现」：turn_id 变化 ⇒ 身份变化 ⇒ 上膛失效。
@@ -10580,11 +10761,16 @@ fn tui_event_loop(
             break;
         }
 
-        // SIGCONT 唤醒或终端重置请求：恢复 raw 模式并清空物理终端强制重绘
-        if REFRESH_REQUESTED.swap(false, Ordering::SeqCst) {
-            let _ = enable_raw_mode();
+        // SIGCONT 唤醒 / Ctrl+Z 后 `fg`：按计划重建 raw mode、备用屏与输入侧协议。
+        // 挂起时 SIGTSTP 处理器已把终端交还 shell（含退出备用屏），只 enable_raw_mode
+        // 会让后续帧直接画到主屏滚屏区，故必须走完整计划再置 dirty。
+        if take_refresh_request() {
+            if let Err(error) =
+                apply_terminal_reentry(terminal, &terminal_reentry_plan(state.mouse_capture))
+            {
+                eprintln!("[pony-tui] 终端重入重建失败（继续尝试重绘）：{error}");
+            }
             state.invalidate_render_cache();
-            let _ = terminal.clear();
             dirty = true;
         }
         // 流式态 160ms 驱动动效；问答等待期用 450ms 的低频呼吸提醒（不闪、不抢注意力）。
@@ -10614,7 +10800,9 @@ fn tui_event_loop(
             dirty = true;
         }
 
-        // 信号处理器已就地还原终端：此刻绝不能再画帧，否则会把画面涂到用户 shell 上。
+        // 信号处理器只置位、不就地还原终端：退出前必须在**画帧之前**再查一次，
+        // 否则退出信号可能在上面的耗时分支（轮询/动画）期间到达，这一帧就会画到
+        // 即将被 Drop 还原的备用屏上（用户看到闪一下再消失）。
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
@@ -10776,6 +10964,17 @@ fn tui_event_loop(
                             content: format!("已设置思考强度为: {}", state.reasoning_effort_display()),
                             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                         });
+                        dirty = true;
+                        continue;
+                    }
+
+                    // Ctrl+Z 挂起：raw mode 清掉了 ISIG，Ctrl+Z 不会产生 SIGTSTP，
+                    // 只能由按键路径主动交还终端再 raise(SIGSTOP)（见 suspend_tui）。
+                    if is_suspend_shortcut(key.code, key.modifiers) {
+                        suspend_tui();
+                        // `fg` 之后从这里继续：SIGCONT 处理器已置位重建请求；这里再置一次
+                        // 兜住「SIGCONT 处理器被外部替换 / 信号被吞」的情形（重建幂等）。
+                        request_terminal_refresh();
                         dirty = true;
                         continue;
                     }
