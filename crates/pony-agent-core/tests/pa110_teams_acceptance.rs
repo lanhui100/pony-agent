@@ -242,3 +242,38 @@ fn test_ac05_message_queuing_and_steering() {
     assert!(int_res.success);
     assert_eq!(int_res.new_status, TeammateStatus::Inactive);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave-61 C1.7：团队/子代理工具的中文展示名（工具消息行中文映射）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// C1.7：9 项团队/子代理工具的 `display_name_zh` 必须全部非空且为约定中文名。
+///
+/// 回归背景：`tool_display_metadata_for_name` 原按 CamelCase 产品名匹配，而团队工具的产品名
+/// 是小写原名透传（`model_visible_tool_name_opt` 的 C1.6 分支），导致工具消息行
+/// `display_name_zh == None`，只能回落显示英文 `canonicalToolName`/`toolName`。
+#[test]
+fn test_ac06_team_tool_display_name_zh() {
+    use pony_agent_core::agent::tools::tool_display_metadata_for_name;
+
+    let expected = [
+        ("subagent", "子代理"),
+        ("spawn_teammate", "派生队友"),
+        ("list_agents", "队友列表"),
+        ("send_message", "发消息"),
+        ("interrupt_agent", "中断队友"),
+        ("drain_inbox", "读信箱"),
+        ("team_task_create", "建任务"),
+        ("team_task_update", "更新任务"),
+        ("team_task_list", "任务板"),
+    ];
+
+    for (name, zh) in expected {
+        let display = tool_display_metadata_for_name(name);
+        assert_eq!(
+            display.display_name_zh.as_deref(),
+            Some(zh),
+            "{name} 的工具消息中文展示名必须为 {zh}"
+        );
+    }
+}

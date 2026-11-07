@@ -7029,7 +7029,8 @@ mod contract_view_tests {
     use super::{
         builtin_tools, builtin_turn_tool_contract_views, canonical_tool_name,
         default_permission_facts_for_name, model_visible_tool_name, primitive_dispatch_table,
-        product_canonical_tool_name, ToolDescriptor, ToolDescriptorSource, ToolExposure,
+        product_canonical_tool_name, tool_display_metadata_for_name, tool_exposure_for_name,
+        ToolDescriptor, ToolDescriptorSource, ToolExposure,
         ToolHandlerProvenance, ToolIdentity, ToolKind, ToolRegistrySnapshot,
         TOOL_WORKSPACE_PATH_INFO, TOOL_WORKSPACE_RUN_COMMAND,
     };
@@ -7472,6 +7473,28 @@ mod contract_view_tests {
     }
 
     #[test]
+    fn every_model_visible_builtin_tool_has_a_chinese_display_name() {
+        // 不变量：模型可见面的每个内建工具都必须有中文展示名，否则工具消息行会回落英文
+        // `canonicalToolName`/`toolName`（`WorkspaceTurnItem.vue` 的兜底分支）。
+        // 历史事故：Wave-61 团队工具、W20 goal 工具族、PA-112 todo 工具因产品名与
+        // `tool_display_metadata_for_name` 的匹配键不一致而全部缺失中文名。
+        let missing: Vec<&str> = builtin_tools()
+            .into_iter()
+            .filter(|definition| tool_exposure_for_name(definition.name) != ToolExposure::Internal)
+            .filter(|definition| {
+                tool_display_metadata_for_name(definition.name)
+                    .display_name_zh
+                    .is_none()
+            })
+            .map(|definition| definition.name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "以下模型可见工具缺少中文展示名（工具消息行会回落英文）：{missing:?}"
+        );
+    }
+
+    #[test]
     fn registry_rejects_ambiguous_aliases() {
         let registry = ToolRegistrySnapshot::builtin().expect("builtin registry should build");
         let mut first = registry.descriptors[0].clone();
@@ -7888,6 +7911,13 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_TEAM_TASK_CREATE => TOOL_TEAM_TASK_CREATE,
         TOOL_TEAM_TASK_UPDATE => TOOL_TEAM_TASK_UPDATE,
         TOOL_TEAM_TASK_LIST => TOOL_TEAM_TASK_LIST,
+        // W20 goal 工具族同样「小写原名透传」：`product_visible_tool_name()` 本就把未知名原样
+        // 返回，但 telemetry 记录点（telemetry.rs:314/340/516/584）走的是
+        // `model_visible_tool_name()`，不登记会回落字面量 "Run"——trace 里目标工具被记成 `Run`，
+        // 工具消息行再经 `tool_display_metadata_for_name` 反查成「运行」，双重失真。
+        TOOL_CREATE_GOAL => TOOL_CREATE_GOAL,
+        TOOL_GET_GOAL => TOOL_GET_GOAL,
+        TOOL_UPDATE_GOAL => TOOL_UPDATE_GOAL,
         _ => return None,
     };
     Some(mapped)
@@ -8067,6 +8097,28 @@ pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
         "JobList" => Some("任务列表".to_string()),
         // W42/PA-149：技能正文加载的中文展示名。
         TOOL_SKILL_LOAD => Some("载技能".to_string()),
+        // Wave-61 C1.7：团队/子代理工具的产品名是小写原名透传（见 `model_visible_tool_name_opt`
+        // 的 C1.6 分支），因此这里必须用同一常量匹配；否则 `display_name_zh` 恒为 `None`，
+        // 工具消息行只能回落到英文 `canonicalToolName`/`toolName` 展示。
+        TOOL_SUBAGENT => Some("子代理".to_string()),
+        TOOL_SPAWN_TEAMMATE => Some("派生队友".to_string()),
+        TOOL_LIST_AGENTS => Some("队友列表".to_string()),
+        TOOL_SEND_MESSAGE => Some("发消息".to_string()),
+        TOOL_INTERRUPT_AGENT => Some("中断队友".to_string()),
+        TOOL_DRAIN_INBOX => Some("读信箱".to_string()),
+        TOOL_TEAM_TASK_CREATE => Some("建任务".to_string()),
+        TOOL_TEAM_TASK_UPDATE => Some("更新任务".to_string()),
+        TOOL_TEAM_TASK_LIST => Some("任务板".to_string()),
+        // PA-112 / W20：`todo_write` / `todo_list` 与 goal 工具族同样走「小写原名透传」，
+        // 但注意本函数的匹配对象是 **产品名**（`model_visible_tool_name(name)` 的输出）：
+        // todo 工具的 `canonical_tool_name` 归一后仍是小写 primitive，而 `model_visible_tool_name_opt`
+        // 把二者映射回 CamelCase 产品名 `TodoWrite`/`TodoList`，故此处必须按产品名匹配；
+        // goal 工具族没有 CamelCase 产品名，按小写常量匹配即可。
+        "TodoWrite" => Some("记待办".to_string()),
+        "TodoList" => Some("待办列表".to_string()),
+        TOOL_CREATE_GOAL => Some("建目标".to_string()),
+        TOOL_GET_GOAL => Some("看目标".to_string()),
+        TOOL_UPDATE_GOAL => Some("更新目标".to_string()),
         _ => None,
     };
     ToolDisplayMetadata { display_name_zh }
