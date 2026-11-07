@@ -10,7 +10,7 @@
     "crates/pony-agent-core/src/agent/runtime/tests.rs",
     "crates/pony-agent-core/src/agent/tools.rs",
     "crates/pony-agent-core/tests/tool_surface_singularity.rs",
-    "docs/decisions/0060-governed-tool-loop-stop-loss.md",
+    "docs/decisions/0060-turn-context-integrity-and-loop-guards.md",
     "git show 2e2a8d22 --stat && git diff ae9312f5 4ed85bdd -- runtime/{limits,stream_support,turn_stream,turn_sync}.rs"
   ],
   "decisions": [
@@ -123,6 +123,6 @@
   "attestation": {
     "self_signed": false,
     "degraded": false,
-    "note": "Subagent 独立上下文执行；Lead 仅原样转录其 findings/verdict，未增删条目"
+    "note": "Subagent 独立上下文执行；Lead 仅原样转录其 findings/verdict，未增删条目；Lead 转录勘误：原 scope 列表中的 `docs/decisions/0060-governed-tool-loop-stop-loss.md` 为审查员误写的文件名（实际审的是 `docs/decisions/0060-turn-context-integrity-and-loop-guards.md`，Join 汇总审查已发现并由 Lead 就地更正，未增删任何 finding）"
   }
 }

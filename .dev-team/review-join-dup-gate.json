@@ -1,0 +1,126 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "join-dup-gate-subagent",
+    "fresh_context": true
+  },
+  "executed_by": "join-dup-gate-subagent",
+  "reviewed_commit": "63696433",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "独立汇总：不采信作者叙述，逐条回读收据与代码/命令实测（四份组件收据原文、git diff 652cd447 ff3f9e8d、当前 stream_support.rs 判据、tools.rs kind 映射行号、两处 record_executed 调用点、ae9312f5..HEAD 写域清单、cargo test 全量回跑）"
+  },
+  "audited_scopes": [
+    ".agents/notes/implemented/bug-fix/2026-11-07-duplicate-tool-call-gate-retry-false-positive.md",
+    ".dev-team/contract-matrix-duplicate-gate.md",
+    ".dev-team/meta-retrospective.md",
+    ".dev-team/red-phase-duplicate-gate.txt",
+    ".dev-team/regression-baseline-wave0-duplicate-gate.json",
+    ".dev-team/state.json",
+    ".dev-team/review-plan-dup-gate.json",
+    ".dev-team/review-l3a-dup-gate.json",
+    ".dev-team/review-l3b-dup-gate.json",
+    ".dev-team/review-amend2-dup-gate.json",
+    "crates/pony-agent-core/src/agent/runtime/limits.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "docs/decisions/0060-turn-context-integrity-and-loop-guards.md"
+  ],
+  "component_reviews": [
+    {
+      "file": "review-plan-dup-gate.json",
+      "verdict": "FAIL",
+      "blocking": 1,
+      "status": "BLOCKING CLOSED by AMEND-2 + 定向复审 R1（本收据 closed_findings[0]，含 3 项独立复核）"
+    },
+    {
+      "file": "review-l3a-dup-gate.json",
+      "verdict": "PASS",
+      "blocking": 0,
+      "status": "PASS（5 条 ADVISORY 开放：闸点无只读机器锁、aborted 状态分叉、批内超限文案、clear() 预留 API、同签名闸早于连续失败闸；均非 BLOCKING）"
+    },
+    {
+      "file": "review-l3b-dup-gate.json",
+      "verdict": "PASS",
+      "blocking": 0,
+      "status": "PASS（4 条 ADVISORY 开放：BatchExecute=Composite 覆盖面缺口、C5-8 用例区分力、C4 文案断言位置、note 与提交事实不符）"
+    },
+    {
+      "file": "review-amend2-dup-gate.json",
+      "verdict": "PASS",
+      "blocking": 0,
+      "status": "PASS（R1~R5 全 PASS；3 条 ADVISORY 开放：Write 类洗计数同构残余、Execute 不清空导致的同参 Run 误杀、tests.rs:5701 计数断言文案）"
+    }
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/review-plan-dup-gate.json",
+      "line": 13,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "evidence": "Gate-1 收据的 audited_scopes 登记了不存在的路径 `docs/decisions/0060-governed-tool-loop-stop-loss.md`（该路径在 ae9312f5 与当前 HEAD 均不存在，仓库内实际文件为 docs/decisions/0060-turn-context-integrity-and-loop-guards.md，且真实 ADR 由 L3-B 收据覆盖）⇒ 属收据记账瑕疵，不造成实质覆盖缺口；建议改为实名或删除该条。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git cat-file -e ae9312f5:docs/decisions/0060-governed-tool-loop-stop-loss.md; echo BASE_EXIT=$?; ls docs/decisions/0060-governed-tool-loop-stop-loss.md; echo LS_EXIT=$?",
+      "cmd_exit": 1
+    }
+  ],
+  "closed_findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 692,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "original_evidence": "Gate-1 BLOCKING（review-plan-dup-gate.json findings[0]）：changed_world=true 时 retain 只留自身签名，而 JobOutput/JobStart/JobKill/JobList（tools.rs:7980）与 Run（tools.rs:7962）均判为 Execute ⇒ JobOutput(A) 与 Run(X) 成功交替时互清计数，两者恒为 1，同参重复永不熔断（旧 BTreeSet 第 2 次即拦）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git diff 652cd447 ff3f9e8d -- crates/pony-agent-core/src/agent/runtime/stream_support.rs | grep -E '^[-+].*(ToolKind::Write|ToolKind::Execute|aborted|cancelled)'; grep -rn 'record_executed(' crates/pony-agent-core/src --include=*.rs; sed -n '753,756p' crates/pony-agent-core/src/agent/runtime/turn_stream.rs; sed -n '294,297p' crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "resolution": "ff3f9e8d 将判据收窄为「status ∉ {error, aborted, cancelled} 且 tool_kind_for_name == ToolKind::Write」（stream_support.rs:713-724），Execute 不再清空他人计数；同时删除 SameSignatureTracker::clear()。独立复核三项全成立：① 当前实现 matches!(kind, ToolKind::Write)（stream_support.rs:724）只认 Write；② Run/workspace_run_command => Execute（tools.rs:7962）、TOOL_JOB_START|OUTPUT|KILL|LIST => Execute（tools.rs:7980），并由冻结快照 tool_surface_singularity.rs:323/357-360 kind=\"execute\" 机器锁；③ 全仓生产侧 record_executed 仅两处（turn_stream.rs:753、turn_sync.rs:294），第二实参均为 tool_execution_changed_world(...) 的返回值，无硬编码 true；retain 仍仅 stream_support.rs:692 一处，tracker.clear 调用 0。",
+      "verified_by": "join-dup-gate-subagent（本收据直读 git diff 652cd447 ff3f9e8d + 当前文件 + 全仓 grep 调用点）；另有 review-amend2-dup-gate.json R1 反向机器锁 tool_execution_changed_world_excludes_execute_kind"
+    }
+  ],
+  "write_domain_closure": {
+    "range": "ae9312f5..63696433",
+    "delivery_commits": ["2e2a8d22", "4ed85bdd", "652cd447", "ff3f9e8d", "63696433"],
+    "covered_by_component_reviews": [
+      ".agents/notes/implemented/bug-fix/2026-11-07-duplicate-tool-call-gate-retry-false-positive.md",
+      ".dev-team/contract-matrix-duplicate-gate.md",
+      "crates/pony-agent-core/src/agent/runtime/limits.rs",
+      "crates/pony-agent-core/src/agent/runtime/mod.rs",
+      "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "docs/decisions/0060-turn-context-integrity-and-loop-guards.md"
+    ],
+    "accounting_files_uncovered_by_component_reviews": [
+      ".dev-team/meta-retrospective.md",
+      ".dev-team/red-phase-duplicate-gate.txt",
+      ".dev-team/regression-baseline-wave0-duplicate-gate.json",
+      ".dev-team/state.json",
+      ".dev-team/review-plan-dup-gate.json",
+      ".dev-team/review-l3a-dup-gate.json",
+      ".dev-team/review-l3b-dup-gate.json",
+      ".dev-team/review-amend2-dup-gate.json"
+    ],
+    "out_of_delivery_other_sessions": [
+      "crates/pony-agent-core/src/agent/retry.rs",
+      "crates/pony-agent-core/src/bin/tui.rs",
+      ".meta/constitution/constitution.md",
+      "AGENTS.md",
+      "docs/decisions/0070-tui-session-resilience.md",
+      "docs/decisions/0086-provider-transport-and-edge-5xx-retry-classification.md",
+      "docs/decisions/README.md",
+      "docs/observability.yaml",
+      "docs/release/evidence/wave-obs-identity-probes/VERIFICATION.md",
+      "docs/release/evidence/wave-obs-identity-probes/audit-project-identity-probes.patch"
+    ],
+    "conclusion": "本交付的实质交付文件（6 个 runtime 源码 + 1 份 bug-fix note + 1 份契约矩阵 + 1 份 ADR-0060）全部被至少一份组件收据覆盖；未被覆盖的 8 个 .dev-team 文件均为收据/红相证据/回归基线/编排台账/meta 复盘等记账类产物，不构成实质交付缺口。out_of_delivery_other_sessions 与本次交付无归属关系（按 git log 逐文件归属：64a5fd0c / 9774857b / 842be0bb / 41e13297 / 34f39ca8 / 57e69993 / fbdcb5b1），不在本次写域内。"
+  },
+  "machine_receipts": {
+    "cargo_test_lib": "test result: ok. 1348 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.27s",
+    "cmd_exit": 0
+  }
+}

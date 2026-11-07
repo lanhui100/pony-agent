@@ -1,0 +1,115 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-duplicate-gate.md",
+    ".agents/notes/implemented/bug-fix/2026-11-07-duplicate-tool-call-gate-retry-false-positive.md",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/limits.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "crates/pony-agent-core/tests/tool_surface_singularity.rs",
+    "docs/decisions/0060-governed-tool-loop-stop-loss.md",
+    "git show 2e2a8d22 --stat && git diff ae9312f5 4ed85bdd -- runtime/{limits,stream_support,turn_stream,turn_sync}.rs"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "verdict": "FAIL",
+      "evidence": "阈值 2 在「失败重试」类里仍整轮熔断：3 次同参失败读只执行 2 次、第 3 次命中闸即恢复式收尾（实测 run_turn_stops_followup_after_consecutive_identical_tool_failures 通过，日志 tools=2、请求数 4），且同签名闸（2）先于专用失败闸（同指纹 3、同工具 4，limits.rs:18/38）触发，使后者对同参重试成为死代码；文案给出的「先确认当前状态」重读同参本身不会重置计数（只有 Write/Execute 成功才 retain 清空，stream_support.rs:692），note Consequences「失败重试不再被误杀」对 ≥3 次重试不成立。"
+    },
+    {
+      "id": "D2",
+      "verdict": "PASS",
+      "evidence": "双重计数论断独立验算成立：turn 起始 new() 空计数（turn_stream.rs:160）→ 执行点 record_executed 对一次执行 +1（turn_stream.rs:753）→ 闸点 is_exhausted = count >= 2（stream_support.rs:684）⇒ 若 from_batch 预置 1（首批）再执行 +1 = 2 即耗尽，第 2 次即熔断，确实违反「前 2 次放行」；不预置未引入新漏杀：闸点只看 next_tool_calls.first()（turn_stream.rs:1255/1335、turn_sync.rs:497/555），该「只判批首」口径在 ae9312f5 的 !insert 版本里完全相同，属既有口径。"
+    },
+    {
+      "id": "D3",
+      "verdict": "FAIL",
+      "evidence": "绕闸面真实存在：Job* 归 Execute（tools.rs:7980），tool_execution_changed_world 对 Execute+成功返回 true（stream_support.rs:713），record_executed(changed_world=true) 只 retain 自身签名（stream_support.rs:692）⇒ JobOutput(A) 成功与 Run(X) 成功交替时互相清空，两者计数恒为 1，永不达到 limit=2，直到 hop 上限 1024 / 墙钟 900s；旧 BTreeSet 版本第 2 次同参即 instance 已见而被拦，故这是本方案（采纳 item 3「写类成功清空」）新引入的浇闸。"
+    },
+    {
+      "id": "D4",
+      "verdict": "PASS",
+      "evidence": "workspace_batch 归 Composite（tools.rs:7956），批内写成功不清空计数，方向不是「漏放行」而是偏保守（可能多拦一次后续同参读/写）；且 Composite 同时覆盖 subagent/workflow（tools.rs:7972-7973），旧分类无法区分「批写」与「子代理委派」，故属既有注册表粒度局限，非本方案可局部修复项。"
+    },
+    {
+      "id": "D5",
+      "verdict": "PASS",
+      "evidence": "延后可接受但残余明确：注册表确无 poll 语义（team_task_list=Read、list_agents=Interactive、JobOutput=Execute，tools.rs:7969/7973/7980），按「先补标记再改闸」纪律属独立变更；代价是线上 73 条命中里约 30% 纯只读轮询仅被「上限 2」从「第 2 次熔断」缓解为「第 3 次熔断」，误杀未根治。"
+    },
+    {
+      "id": "D6",
+      "verdict": "PASS",
+      "evidence": "批内自身重复不拦沿用旧口径且未新增漏洞：闸点只取 next_tool_calls.first().cloned()（turn_stream.rs:1255、turn_sync.rs:497），批内 K 个同参调用全部执行、执行点各记 1 次（turn_stream.rs:753 在逐调用循环内）⇒ 计数变 K，下一 hop 批首同签名即被拦；ae9312f5 的 BTreeSet 版本同样只在 hop 边界检查批首，批内重复也从不被拦，故非本方案引入。"
+    },
+    {
+      "id": "D7",
+      "verdict": "PASS",
+      "evidence": "漂移风险 LOW 且有机器门禁：未登记名回落 `_ => ToolKind::External`（tools.rs:7983），方向是保守（External 不清空计数 ⇒ 偏多拦，不构成浇闸）；45 个内建工具的 kind 已冻结在 tool_surface_singularity.rs:317/320/414 快照断言，新增工具漏登记会先撞该门禁；插件工具本就要求 External（tool_surface_singularity.rs:1374-1376）。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 692,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "evidence": "本方案引入的浇闸：changed_world=true 时 retain 只留自身签名，而 JobOutput/JobStart/JobKill/JobList（tools.rs:7980）均判为 Execute ⇒ JobOutput(A) 与 Run(X) 成功交替时互清计数，两者恒为 1，同参重复永不熔断（旧 BTreeSet 第 2 次即拦）；机制由两项冻结用例复合可复现：tracker 里 (read,false) 后 (write,true) 使 read 计数归 0（tests.rs:5916-5950），Run+ok 判为 changed_world（tests.rs:5962-6000）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && cargo test -p pony-agent-core --lib same_signature_tracker_write_success_clears_other_signatures_only -- --nocapture 2>&1 | tail -2; cargo test -p pony-agent-core --lib tool_execution_changed_world_requires_successful_write_or_execute_kind -- --nocapture 2>&1 | tail -2",
+      "cmd_exit": 0,
+      "cmd_tail": "test agent::runtime::tests::same_signature_tracker_write_success_clears_other_signatures_only ... ok | test agent::runtime::tests::tool_execution_changed_world_requires_successful_write_or_execute_kind ... ok | test result: ok. 1 passed; 0 failed"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/limits.rs",
+      "line": 47,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "evidence": "残留（非新引入）：DEFAULT=2 使「同参失败重试」在第 3 次即整轮恢复式收尾，早于专用同指纹失败闸（3，limits.rs:18）与同工具连续失败闸（4，limits.rs:38）；文案「先确认当前状态」的重读不重置计数，故 note 里「失败重试不再被误杀」对本类只成立于 2 次以内。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && cargo test -p pony-agent-core --lib run_turn_stops_followup_after_consecutive_identical_tool_failures -- --nocapture 2>&1 | tail -3",
+      "cmd_exit": 0,
+      "cmd_tail": "tools=2 | test agent::runtime::tests::run_turn_stops_followup_after_consecutive_identical_tool_failures ... ok | test result: ok. 1 passed; 0 failed; 1346 filtered out"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 7956,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "既有分类粒度局限：workspace_batch=Composite、subagent/workflow 同为 Composite（tools.rs:7972-7973），批内写成功不清空其它签名计数 ⇒ 与逐次写语义不一致（方向保守/偏误杀），但无法在闸内细分而不新建工具名白名单。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'TOOL_WORKSPACE_BATCH => ToolKind::Composite\\|TOOL_SUBAGENT | TOOL_WORKFLOW => ToolKind::Composite' crates/pony-agent-core/src/agent/tools.rs",
+      "cmd_exit": 0,
+      "cmd_tail": "7956:        TOOL_WORKSPACE_BATCH => ToolKind::Composite"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 7980,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "evidence": "既有局限 + 登记延后：JobOutput/team_task_list/list_agents 无「轮询」语义标记（Execute/Read/Interactive），约 30% 只读轮询误杀只被上限 2 缓解未根治，契约矩阵「延后」与 note Alternatives 末条已如实登记，不越界判 BLOCKING。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'TOOL_JOB_START | TOOL_JOB_OUTPUT\\|TOOL_TEAM_TASK_LIST => ToolKind::Read' crates/pony-agent-core/src/agent/tools.rs",
+      "cmd_exit": 0,
+      "cmd_tail": "7970:        TOOL_TEAM_TASK_LIST => ToolKind::Read | 7980:        TOOL_JOB_START | TOOL_JOB_OUTPUT | TOOL_JOB_KILL | TOOL_JOB_LIST => ToolKind::Execute"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 7983,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "漂移风险 LOW：未登记名回落 External（不清计数 ⇒ 偏多拦，非浇闸），且 45 内建工具 kind 已冻结在 tool_surface_singularity.rs:317/414 快照断言，新增工具漏登记先撞门禁；插件工具按契约必须是 External（tool_surface_singularity.rs:1374-1376）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'kind 变化\\|45 内建工具面冻结' crates/pony-agent-core/tests/tool_surface_singularity.rs",
+      "cmd_exit": 0,
+      "cmd_tail": "317:// 1. 45 内建工具面冻结（名称 / 顺序 / schema / kind / exposure） | 414:        assert_eq!(observed.2, expected.2, \"`{}` 的 kind 变化\", expected.0);"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 692,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "审查期间工作区被并行会话注入 'MUTATION-L3B: retain disabled'，使冻结用例 tests.rs:5926 短暂失败（left:1/right:0），复核时已自动回滚、用例恢复通过；非方案缺陷，但证明该 retain 是有效的变异靶点，也说明审查取证要按 commit 4ed85bdd 读而非工作区快照。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'MUTATION-L3B' crates/pony-agent-core/src; cargo test -p pony-agent-core --lib same_signature_tracker_write_success_clears_other_signatures_only -- --nocapture 2>&1 | tail -2",
+      "cmd_exit": 0,
+      "cmd_tail": "test agent::runtime::tests::same_signature_tracker_write_success_clears_other_signatures_only ... ok | test result: ok. 1 passed; 0 failed; 1346 filtered out"
+    }
+  ]
+}

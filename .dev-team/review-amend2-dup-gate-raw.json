@@ -1,0 +1,59 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    ".dev-team/contract-matrix-duplicate-gate.md",
+    "crates/pony-agent-core/src/agent/tools.rs"
+  ],
+  "answers": [
+    {
+      "id": "R1",
+      "verdict": "PASS",
+      "evidence": "四类工具全部落在 Execute、与 Write 判据不相交：tools.rs:7980 `TOOL_JOB_START|TOOL_JOB_OUTPUT|TOOL_JOB_KILL|TOOL_JOB_LIST => ToolKind::Execute`、tools.rs:7962 `TOOL_WORKSPACE_RUN_COMMAND => ToolKind::Execute`，并由冻结快照 tool_surface_singularity.rs:323/356/357/358/359（Run/JobStart/JobOutput/JobKill/JobList 的 kind 字符串均为 \"execute\"）机器锁死；判据 stream_support.rs:715-723 只 `matches!(kind, ToolKind::Write)` 且 status 负向列表，故 JobOutput(A) 与 Run(X) 无论成功多少次 changed_world 恒为 false；全仓唯一清空点仍只有 stream_support.rs:692 的 `counts.retain(...)`，其两个调用点 turn_stream.rs:753 与 turn_sync.rs:294 均传 `tool_execution_changed_world(...)` 的返回值（无硬编码 true），`SameSignatureTracker::clear()` 已整段删除（grep 全仓 tracker clear 调用 = 0）；故互清路径不可达：两者计数只增不减，到第 3 次同参即 count>=2 命中 is_exhausted（stream_support.rs:682）。实测 `cargo test -p pony-agent-core --lib tool_execution_changed_world` ⇒ `tool_execution_changed_world_excludes_execute_kind ... ok`（Run+ok 判 false，即该互清机制的最小复现已被反向锁死）。"
+    },
+    {
+      "id": "R2",
+      "verdict": "PASS",
+      "evidence": "机制：`retain(|key,_| key==&signature)` 只在 changed_world=true 时执行、且恒保留自身 ⇒ 任何 Write+成功把「除自己外」的计数归零。推演（limit=2，闸点 is_exhausted=count>=2 只读、在执行前判）：①写后回读 `Read(A)[c=1] → Edit(B,ok)[retain 清空 → read=0,edit=1] → Read(A)` 闸点 c=0<2 放行，实测绿（`run_turn_write_success_clears_same_signature_counts_end_to_end` ok，executed=[Read,Read,Edit,Read]、tool_activities=4、无 blocked_redundant_followup）；②改完重跑 `Run(t)[c=1] → Edit(B,ok)[清空 → run=0] → Run(t)` 闸点 c=0<2 放行，与 ① 同理（清空与工具种类无关，只要求中间是 Write 成功）。新增误杀方向仅为相反一侧（Execute 不再清空 ⇒ 同参 Run 第 3 次被拦），方向是保守、且相对基线 BTreeSet（第 2 次即拦）仍是放宽，见 findings 第 2 条对「中间修改也由 shell 完成」场景的登记建议。"
+    },
+    {
+      "id": "R3",
+      "verdict": "PASS",
+      "evidence": "stream_support.rs:718-723 `matches!(status, \"error\" | \"aborted\" | \"cancelled\") => false`，先于 kind 判定返回，故写类 + aborted/cancelled 一律不算改变世界；aborted 是真实产出的状态（tools.rs:9621 构造 `status:\"aborted\"`、tools.rs:9692 判定、tools.rs:992 `Cancelled => \"aborted\"`，turn_stream.rs:655/turn_sync.rs:223 消费），测试锚点 tests.rs:6022-6033（edit+aborted ⇒ false、edit+cancelled ⇒ false，实测 ok）。附注（非缺陷）：`\"cancelled\"` 目前没有 ToolResult 生产者（Cancelled 枚举回写为 \"aborted\"），该分支是负向列表的防御性超集，只会更保守，不会误放行。"
+    },
+    {
+      "id": "R4",
+      "verdict": "PASS",
+      "evidence": "`grep -rn \"\\.clear()\" crates/pony-agent-core/src/agent/runtime/` 命中 6 处，全部为 Vec 清空（turn_sync.rs:316/317/487、turn_stream.rs:776/777/1245），属于 tracker 的 0 处；SameSignatureTracker impl 内已无 clear 方法（stream_support.rs:672-694 只剩 new/occurrence_count/is_exhausted/record_executed），全仓 `tracker.clear`/`same_signatures.clear` 调用 0、`fn clear(&mut self)` 仅剩 bin/tui.rs:2639（他人文件，无关）；`cargo check -p pony-agent-core --lib` exit=0，`Finished dev profile`，14 条告警均为既有 unused variable，无一来自 stream_support.rs（无未使用导入/未使用函数）。"
+    },
+    {
+      "id": "R5",
+      "verdict": "PASS",
+      "evidence": "四条用例均有变异杀伤力且实测全绿（5 passed）：①`tool_execution_changed_world_is_write_only`（tests.rs:5993）同时锚 Write+ok=true、Write+error=false、Write+aborted/cancelled=false、Read+ok=false ⇒ 杀掉「回退成 `!= \\\"error\\\"`」「把 Read 也算世界变化」「把 error 当成功」三类变异；②`..._excludes_execute_kind`（tests.rs:6054）单独锚 Run+ok=false ⇒ 唯一能杀掉本题 BLOCKING 变异（Write|Execute）的断言，且刻意独立成用例以免被 ① 的 panic 掩盖；③`run_turn_write_success_clears_same_signature_counts_end_to_end`（tests.rs:5604）用 Read,Read 把计数顶到 2 再 Edit 换清空，删/退化 retain 后第 3 次 Read 即被拦 ⇒ executed_names 少一项、tool_activities=3、请求体出现 blocked_redundant_followup，三重断言必红，具真实区分力；④`duplicate_tool_call_error_states_exact_match_with_actual_counts`（tests.rs:5796）以「已第 3 次」「最多允许 2 次」锁语义位置（limits.rs:250-251 实际文案匹配），杀掉 occurrences↔limit 互换变异。仅有 1 处注释措辞过强（见 findings 第 3 条），四条用例本体无「断言说一套、实现做另一套」的假绿。"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 692,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "同构残余（非本次修复引入、也未被 AMEND-2 登记）：清空判据换成 Write 后，模型可见的廉价写类工具成了新的「洗计数弹药」——`Plan`(plan_control, tools.rs:7963)、`team_task_create`/`team_task_update`(tools.rs:7972)、`TodoWrite`(tools.rs:7974) 全为 ToolKind::Write（冻结快照 tool_surface_singularity.rs:337/345/346/348 kind=\"write\"）。`Read(A) → TodoWrite(T, ok) → Read(A) → TodoWrite(T, ok) …` 时每次写成功把 read 计数 retain 归零，Read(A) 恒为 1、永不达 limit=2 ⇒ 与 Gate-1 所判 BLOCKING 同一机制，只是弹药从 Execute 换成 Write。是否成立取决于「写=任务已推进」这一契约裁决（矩阵 item 3 已采纳），故不判 BLOCKING；建议在矩阵 AMEND-2「不采纳但登记」段落补登记，或后续按 execution_policy 区分「内容写」与「状态标记写」，并给该序列加一条机器锁用例（当前无任何用例覆盖 Write 类互清）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 713,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "evidence": "AMEND-2 理由③「『改完重跑同一条命令』的真实受益路径是中间的 Edit（Write）触发清空」只对「用 Edit/Write 工具改文件」成立；若修改本身也由 shell 完成（`Run(echo>/sed -i/python -c)` + `Run(test)`），两端都是 Execute、中间无 Write ⇒ 两者计数齐涨，第 3 次同参 Run 被拦（`Run(t)→Edit…` 有清空故放行，`Run(t)→Run(fix)→Run(t)` 无清空故被拦）。方向是误杀而非漏杀、相对基线 BTreeSet 仍更宽松，属可接受的保守取舍，但该残余场景未在契约矩阵登记（矩阵只登记了 BatchExecute/Composite 与「批内超限」两项），建议补一行显式登记，避免后续把「Execute 不清空」误读为已完全覆盖重跑场景。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "line": 5701,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "断言文案与实际区分力不符（弱项，非假绿）：`assert_eq!(requests.len(), 5, \"…命中重复闸会多出一次恢复式收尾请求\")` —— 命中闸时序列同样是 5 个请求（3 个真实执行 + 第 4 个被拦 ⇒ 1 次恢复式收尾），与未命中时（4 决策 + 1 最终作答）数量相同，故该断言对「是否命中闸」零区分力，注释里的「多出一次」也不成立；真正杀掉 retain 变异的是同用例的 executed_names/tool_activities/blocked_redundant_followup 三条（见 R5），因此不构成假绿，仅建议把该计数断言或注释二选一修正为「两种路径同为 5，故本断言只锁上限、不区分路径」。tests.rs:5602 的 doc 注释（「少执行一次 + 多出一次恢复式收尾请求，断言立刻变红」）同样建议只保留「少执行一次」。"
+    }
+  ]
+}

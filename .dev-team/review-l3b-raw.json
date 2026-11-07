@@ -1,0 +1,57 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".dev-team/contract-matrix-duplicate-gate.md",
+    ".agents/notes/implemented/bug-fix/2026-11-07-duplicate-tool-call-gate-retry-false-positive.md",
+    "crates/pony-agent-core/src/agent/runtime/limits.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/tests.rs",
+    "crates/pony-agent-core/src/agent/tools.rs",
+    "docs/decisions/0060-turn-context-integrity-and-loop-guards.md"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "line": 714,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "实测 tool_kind_for_name: Edit/Write/workspace_write_file=>write, Run/workspace_run_command=>execute（别名归一无误判），但 BatchExecute/workspace_batch=>composite，而 tool_execution_changed_world 只认 {Write,Execute} ⇒ 通过 BatchExecute 成功完成的批内写入（含 workspace_edit_file）不清空其它签名计数，与 note 第 4 条「写类成功清空其它签名计数」在批内路径上不一致（C2 原文只写 {Write,Execute}，故实现未违约，属契约覆盖面缺口）",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'TOOL_WORKSPACE_BATCH => ToolKind::Composite' crates/pony-agent-core/src/agent/tools.rs; grep -n '\"BatchExecute\" => Some(TOOL_WORKSPACE_BATCH)' crates/pony-agent-core/src/agent/tools.rs; echo \"GREP_EXIT=$?\"",
+      "cmd_exit": 0,
+      "cmd_tail": "7956:        TOOL_WORKSPACE_BATCH => ToolKind::Composite,\n7639:        \"BatchExecute\" => Some(TOOL_WORKSPACE_BATCH),\nGREP_EXIT=0"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "line": 5673,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "C5-8 端到端用例注释声称锁定「写类成功必须清空其它签名计数：写后回读必须真实执行，命中闸会少一次执行」，但变异掉 record_executed 的 retain（写类清空）后该用例仍 ok：limit=2 下 Read(A) 只执行过 1 次（1 < 2），不清空也不会命中闸，用例对该行为零区分力（仅 tracker 单测能杀掉此变异）",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -i 's/self\\.counts\\.retain(|key, _| key == &signature);/\\/\\/MUT/' crates/pony-agent-core/src/agent/runtime/stream_support.rs && cargo test -p pony-agent-core --lib -- same_signature duplicate_tool stops_followup write_success_clears; echo TEST_EXIT=$?; git checkout -- crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+      "cmd_exit": 101,
+      "cmd_tail": "test agent::runtime::tests::run_turn_write_success_clears_same_signature_counts_end_to_end ... ok\ntest result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 1337 filtered out; finished in 1.16s\nMUT2_TEST_EXIT=101"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "line": 5811,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "C4 文案用例只用 contains('3') / contains('2') 锁数字，未锁语义位置：把 build_duplicate_tool_call_error 的 occurrences 与 limit 互换（渲染成「已第 2 次…最多允许 3 次」，事实完全相反）后该用例仍 ok ⇒ 断言无法杀掉参数错位变异",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"p='crates/pony-agent-core/src/agent/runtime/limits.rs';s=open(p).read();s=s.replace('第 {occurrences} 次以完全相同的参数被调用','第 {limit} 次以完全相同的参数被调用').replace('最多允许 {limit} 次','最多允许 {occurrences} 次');open(p,'w').write(s)\" && cargo test -p pony-agent-core --lib -- duplicate_tool_call_error_states_exact_match; echo TEST_EXIT=$?; git checkout -- crates/pony-agent-core/src/agent/runtime/limits.rs",
+      "cmd_exit": 0,
+      "cmd_tail": "test agent::runtime::tests::duplicate_tool_call_error_states_exact_match_with_actual_counts ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1346 filtered out; finished in 0.00s\nMUT3_TEST_EXIT=0"
+    },
+    {
+      "file": ".agents/notes/implemented/bug-fix/2026-11-07-duplicate-tool-call-gate-retry-false-positive.md",
+      "line": 74,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "evidence": "note 声称「本任务 11 个新旧用例在同一提交内同时改写」，但 4ed85bdd 变更清单不含 runtime/tests.rs（11 条用例实际在父提交 2e2a8d22 红相冻结），绿相提交未触碰测试文件，该物理收据表述与提交事实不符",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show --name-only --pretty=format: 4ed85bdd | grep -c 'runtime/tests.rs'; sed -n '73,74p' .agents/notes/implemented/bug-fix/2026-11-07-duplicate-tool-call-gate-retry-false-positive.md",
+      "cmd_exit": 1,
+      "cmd_tail": "0\n  新增 8 例 + 并行会话 `retry.rs` 新增 3 例）；本任务 11 个新旧用例在同一提交内同时改写（含"
+    }
+  ]
+}
