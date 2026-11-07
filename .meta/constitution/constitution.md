@@ -14,3 +14,12 @@
 4. **决策与规范先导**：
    - 非平凡功能改动必须有 OpenSpec 规范与对应 ADR 架构决策支持。
    - 弃用或被替代的设计必须移入 `superseded/` 或 `archive/`。
+
+<!-- sync-body -->
+
+## 常载命约（Standing Orders）
+
+1. 任何非平凡变更都要落为 `.agents/notes/` 下一条带 `## Alternatives considered` 的决策记录（程序与校准样例见 `.agents/skills/write-adr/SKILL.md`）。
+2. 凡机械可查的承诺，配一条非零退出的命令；机器到不了的，显式标注「靠 review」。
+3. 删除代码前先搜消费者；恢复条件立法，拒绝「以后可能用得上」式怀旧。
+4. 每个事实一个家：文档治理规则的家是 `docs/AGENTS.md`（agent 自动加载），人读契约是 README；改行为/契约的那次提交同步更新对应文档。

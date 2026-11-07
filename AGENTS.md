@@ -44,3 +44,13 @@
 - **Rust 编译检查**：`npm run cargo:check:shared`
 - **可观测性归属先决**：新增/修改对外接口、网络 IO、后台任务、LLM 调用或 UI 交互前，先更新 `docs/observability.yaml` 的四维归属（适用 / N-A + 结构性理由）与收口点；验收跑
   `~/.agents/skills/observability-onboarding/scripts/audit-diff.sh` 与 `check-declaration.sh`（判定口径见该 skill 的 `references/declaration-rubric.md`）。N-A 必须写结构性理由，不得为让门禁变绿而伪造 `/metrics` 或改 `applicable`。
+<!-- BEGIN constitution -->
+
+## 常载命约（Standing Orders）
+
+1. 任何非平凡变更都要落为 `.agents/notes/` 下一条带 `## Alternatives considered` 的决策记录（程序与校准样例见 `.agents/skills/write-adr/SKILL.md`）。
+2. 凡机械可查的承诺，配一条非零退出的命令；机器到不了的，显式标注「靠 review」。
+3. 删除代码前先搜消费者；恢复条件立法，拒绝「以后可能用得上」式怀旧。
+4. 每个事实一个家：文档治理规则的家是 `docs/AGENTS.md`（agent 自动加载），人读契约是 README；改行为/契约的那次提交同步更新对应文档。
+<!-- END constitution -->
+
