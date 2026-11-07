@@ -7480,6 +7480,31 @@ fn ask_pulse_glyph(tick: usize) -> &'static str {
 }
 
 /// 内联 Ask 面板高度：分隔线 + 标题 + 选项(含自定义输入) + 键位提示；无问答时为 0。
+/// Ask 面板问题正文换行：首行 `first_width`、续行 `rest_width`（CJK 宽度感知）。
+///
+/// 与 `wrap_line` 同一套行首避让规则（标点不落行首）；**绝不**用省略号截断 ——
+/// 问题必须完整可读。空问题返回单条空串，保证调用方至少有一行可渲染。
+pub fn wrap_ask_question(question: &str, first_width: usize, rest_width: usize) -> Vec<String> {
+    let first_limit = first_width.max(1);
+    let rest_limit = rest_width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut col = 0usize;
+    let mut limit = first_limit;
+    for ch in question.chars() {
+        let w = char_width(ch);
+        if col + w > limit && col > 0 && !is_no_line_start(ch) {
+            out.push(std::mem::take(&mut current));
+            col = 0;
+            limit = rest_limit;
+        }
+        current.push(ch);
+        col += w;
+    }
+    out.push(current);
+    out
+}
+
 pub fn inline_ask_height(state: &TuiState, width: usize) -> u16 {
     if state.mode != InteractionMode::AskUserQuestion {
         return 0;
@@ -7491,8 +7516,29 @@ pub fn inline_ask_height(state: &TuiState, width: usize) -> u16 {
         .current_question()
         .map(|q| q.options.len() + 1) // +1 自定义输入项
         .unwrap_or(0);
-    let cap = if width >= 60 { 12 } else { 8 };
-    (2 + option_rows as u16 + 1).min(cap).max(4)
+    // 问题换行后可能占多行：面板高度必须随之增长，否则完整问题会被面板裁掉。
+    let question_rows = ask
+        .current_question()
+        .map(|q| {
+            let prompt = q.question.trim().replace('\n', " ");
+            let header_width = q
+                .header
+                .as_ref()
+                .map(|header| header.trim())
+                .filter(|header| !header.is_empty())
+                .filter(|header| !header.contains(':') && !header.starts_with("builtin"))
+                .map(|header| str_width(header) + 1)
+                .unwrap_or(0);
+            let prefix = RAIL + 2 + 1 + 4 + 1 + header_width;
+            let limit = width.saturating_sub(prefix).max(8);
+            wrap_ask_question(&prompt, limit, limit).len()
+        })
+        .unwrap_or(1)
+        .max(1);
+    let needed = 2 + option_rows + 1 + (question_rows - 1);
+    // 上限只防极端长文本吞掉整屏：ui() 仍会按消息区几何二次收缩。
+    let cap = if width >= 60 { 40 } else { 24 };
+    (needed as u16).min(cap).max(4)
 }
 
 /// 单行选项：`▏ ● 标签   说明`。焦点行整行 SURFACE_SEL + INK BOLD，
@@ -7623,17 +7669,26 @@ pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
         .as_ref()
         .map(|counter| format!("  {counter}"))
         .unwrap_or_default();
-    let question_budget = width.saturating_sub(used + str_width(&tail)).max(8);
-    title_spans.push(Span::styled(
-        ellipsize_width(&question, question_budget),
-        Style::default()
-            .fg(theme::TERRACOTTA_BRIGHT)
-            .add_modifier(Modifier::BOLD),
-    ));
+    // 契约（2026-11-07 修订）：问题正文**必须完整显示** —— 超宽时按显示宽度换行，
+    // 禁止用省略号截断（用户无法读到完整问题就等于没问）。
+    let question_style = Style::default()
+        .fg(theme::TERRACOTTA_BRIGHT)
+        .add_modifier(Modifier::BOLD);
+    let first_width = width.saturating_sub(used + str_width(&tail)).max(8);
+    let rest_width = width.saturating_sub(used).max(8);
+    let mut wrapped = wrap_ask_question(&question, first_width, rest_width).into_iter();
+    title_spans.push(Span::styled(wrapped.next().unwrap_or_default(), question_style));
     if !tail.is_empty() {
         title_spans.push(Span::styled(tail, faint()));
     }
     lines.push(Line::from(title_spans));
+    let question_indent = " ".repeat(used);
+    for segment in wrapped {
+        lines.push(Line::from(vec![
+            Span::raw(question_indent.clone()),
+            Span::styled(segment, question_style),
+        ]));
+    }
 
     // ── 选项 + 自定义输入 ───────────────────────────────────────────────────
     let mut custom_focused = false;
@@ -11893,6 +11948,64 @@ fn main() {
 #[cfg(test)]
 mod wave43_unit_tests {
     use super::*;
+
+    fn long_question() -> &'static str {
+        "请确认是否需要把当前的会话状态、未落地的回答以及图运行绑定一并迁移到新的存储层，并说明迁移期间的回滚策略与验收口径，以及失败后的补偿方式与用户可见提示。"
+    }
+
+    #[test]
+    fn test_wrap_ask_question_keeps_full_text_and_never_ellipsizes() {
+        let wrapped = wrap_ask_question(long_question(), 32, 32);
+        assert!(wrapped.len() > 1, "long question must wrap, got {wrapped:?}");
+        assert_eq!(wrapped.concat(), long_question(), "换行不得丢字");
+        assert!(!wrapped.iter().any(|line| line.contains('…')), "禁止省略号截断");
+        for line in &wrapped {
+            assert!(str_width(line) <= 32, "line exceeds 32: {line}");
+        }
+    }
+
+    #[test]
+    fn test_wrap_ask_question_short_stays_single_line() {
+        assert_eq!(wrap_ask_question("继续吗？", 60, 60), vec!["继续吗？".to_string()]);
+    }
+
+    #[test]
+    fn test_wrap_ask_question_keeps_punctuation_off_line_start() {
+        let wrapped = wrap_ask_question("请选择本次交付的执行架构与部署策略，然后确认是否继续执行后续步骤。", 20, 20);
+        assert!(wrapped.len() > 1);
+        for line in &wrapped {
+            let first = line.chars().next().unwrap_or(' ');
+            assert!(!is_no_line_start(first), "行首不得是避让标点: {line}");
+        }
+    }
+
+    #[test]
+    fn test_inline_ask_height_grows_with_wrapped_question() {
+        fn state_with_question(question: &str) -> TuiState {
+            let mut state = TuiState::default();
+            state.mode = InteractionMode::AskUserQuestion;
+            state.ask_user_state = Some(AskUserState::new(
+                "req-1".to_string(),
+                vec![AskUserQuestion {
+                    id: "q1".to_string(),
+                    header: None,
+                    question: question.to_string(),
+                    multi_select: false,
+                    options: vec![
+                        QuestionOption { label: "是".to_string(), description: None },
+                        QuestionOption { label: "否".to_string(), description: None },
+                    ],
+                }],
+            ));
+            state
+        }
+        let long_state = state_with_question(long_question());
+        let short_state = state_with_question("继续吗？");
+        let long_h = inline_ask_height(&long_state, 80);
+        let short_h = inline_ask_height(&short_state, 80);
+        assert!(long_h > short_h, "换行后必须增高: long={long_h} short={short_h}");
+        assert!(inline_ask_height(&long_state, 48) >= long_h);
+    }
     use serde_json::json;
 
     #[test]
