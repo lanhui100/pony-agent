@@ -403,11 +403,28 @@ fn set_teammate_session(target: &str, session_id: &str) {
 ///
 /// `lead` 永无独立会话（`None`）—— 它本身就是宿主主会话。
 pub fn teammate_session_id(target: &str) -> Option<String> {
+    let target = normalize_target(target);
     if target == LEAD_TARGET {
         return None;
     }
     let lock = TEAMMATE_SESSIONS.lock().unwrap();
-    lock.as_ref()?.get(target).cloned()
+    lock.as_ref()?.get(&target).cloned()
+}
+
+/// D2 修复：由会话 id 反查其归属 teammate target（宿主会话 / 未登记 ⇒ `None`）。
+///
+/// 供工具层判定 `drain_inbox` 的调用者身份：队友成功 turn 的会话 id 由
+/// [`set_teammate_session`] 登记；宿主会话从不登记 ⇒ 调用者回落 `lead`。
+pub fn teammate_target_for_session(session_id: &str) -> Option<String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    let lock = TEAMMATE_SESSIONS.lock().ok()?;
+    let map = lock.as_ref()?;
+    map.iter()
+        .find(|(_, registered)| registered.as_str() == session_id)
+        .map(|(target, _)| target.clone())
 }
 
 /// W3 trace：每个 teammate target 派发时捕获的**宿主 turn traceparent**。
@@ -698,10 +715,19 @@ pub fn spawn_teammate_in_workspace_with_provider(
     Ok(result)
 }
 
+/// D1 修复：teammate target 的**唯一归一化规则**（trim + 小写 + 空格转连字符）。
+///
+/// 登记（`register_teammate`）与所有查找（send / interrupt / drain）必须逐字共用本函数：
+/// 此前只有登记侧归一化，`list_agents` 又同时暴露 `name="Lead"` 与 `target="lead"`，
+/// 模型拿 name 当 target 发送即 `Teammate target not found`（2026-11-07 trace 实证）。
+pub fn normalize_target(raw: &str) -> String {
+    raw.trim().to_lowercase().replace(' ', "-")
+}
+
 /// 登记队友（成员表 + 独立收件箱）并返回 (结果, target, 初始 prompt)。
 fn register_teammate(args: SpawnTeammateArgs) -> Result<(SpawnTeammateResult, String, String), String> {
     let initial_prompt = args.prompt.clone();
-    let target = args.name.to_lowercase().replace(' ', "-");
+    let target = normalize_target(&args.name);
     let member = TeammateMember {
         target: target.clone(),
         name: args.name,
@@ -846,6 +872,9 @@ fn drive_loop_in(
 /// - 需要「入队即真实驱动」的调用方用 `send_message_in_workspace`。
 /// 返回 `(入队结果, 目标 target)`，便于驱动方复用同一 target 文本。
 pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, String), String> {
+    // D1 修复：查找前按登记侧同一规则归一化（"Lead"/"Probe Agent" 等 name 写法亦可命中）。
+    let mut args = args;
+    args.target = normalize_target(&args.target);
     let mode = args.mode.unwrap_or(MessageDeliveryMode::Queue);
     let msg_id = format!("msg-{}", Uuid::new_v4());
 
@@ -923,6 +952,9 @@ fn set_teammate_status(target: &str, status: TeammateStatus) {
 
 /// 打断正在运行的智能体（保留其信箱队列）
 pub fn interrupt_agent(args: InterruptAgentArgs) -> Result<InterruptAgentResult, String> {
+    // D1 修复：与登记侧同一归一化（is_driving / 成员表 / 中断标记三处共用同一 target）。
+    let mut args = args;
+    args.target = normalize_target(&args.target);
     // Wave-61 C10-A2 回归修正：先读「是否真有驱动在跑」。
     // - 在跑：置一次性中断标记，驱动循环会在下一次 drain 边界前停下（C7.4）；
     // - 空闲：**只**翻状态位，不写标记 —— 否则残留标记会被下一次 `send_message` 派生的
@@ -955,6 +987,9 @@ pub fn interrupt_agent(args: InterruptAgentArgs) -> Result<InterruptAgentResult,
 
 /// 读取并消费目标智能体收件箱的消息
 pub fn drain_inbox(args: ReadInboxArgs) -> Result<ReadInboxResult, String> {
+    // D1 修复：与登记侧同一归一化（成员判定与信箱键共用同一 target）。
+    let mut args = args;
+    args.target = normalize_target(&args.target);
     // Wave-61 C7：`lead` 等**已存在成员**可能还没有独立信箱（历史上只有 spawn 的 target 才会
     // 建箱），此时惰性建空箱并返回空结果，而不是把「团队健在但某人还没收过信」误报成错误。
     // 完全不认识的 target 仍保持原错误语义（fail-closed，不放宽到任意字符串）。
@@ -1254,8 +1289,14 @@ pub fn drive_teammate_turn_in(
 
 pub fn team_task_list() -> Result<TeamTaskListResult, String> {
     let lock = TEAM_TASKS.lock().unwrap();
+    // D3 修复：软删除（delete ⇒ status="deleted"）任务不得再出现在看板 ——
+    // TUI 投影对未知状态一律降级 Pending，泄漏的 deleted 任务会伪装成待办
+    //（2026-11-08 live 实证：两条已删除探针任务仍列在 /tasks）。
     let mut tasks: Vec<TeamTaskItem> = if let Some(ref map) = *lock {
-        map.values().cloned().collect()
+        map.values()
+            .filter(|task| task.status != "deleted")
+            .cloned()
+            .collect()
     } else {
         Vec::new()
     };
