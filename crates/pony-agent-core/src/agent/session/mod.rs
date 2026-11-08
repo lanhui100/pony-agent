@@ -6,6 +6,8 @@ mod log_store;
 // ADR 0099 阶段 1-B：命令流编码 + 日志写入接线（真源优先，SQLite 作索引）。
 mod log_command;
 mod log_sink;
+// ADR 0099 阶段 2-A：日志命令流 → SessionState 的 fold 重建器 + SQLite 索引重建。
+pub(crate) mod fold;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -27,6 +29,13 @@ pub use log_store::{
 pub use log_sink::{
     current_log_cwd, session_log_path_for_db, session_log_root_for_db, SessionLogSink,
     SESSION_LOG_ROOT_DIR_NAME,
+};
+
+// ADR 0099 阶段 2-A：additive 导出（fold 重建器 / 索引重建 / 逐字段对拍口径）。
+pub use fold::{
+    fold_session, read_log_events, read_session_state, rebuild_index, rebuild_index_at_root,
+    session_parity_diff, session_parity_issues, FoldError, FoldedSession, LogEvent, RebuildOptions,
+    RebuildReport, INDEX_ONLY_STATE_FIELDS,
 };
 
 pub use usage::{

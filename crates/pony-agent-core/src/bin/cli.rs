@@ -1173,6 +1173,76 @@ fn run_sessions_backfill_if_requested() -> Option<i32> {
     }
 }
 
+/// `ponycli sessions rebuild-index [--dry-run] [--db <path>]`
+///
+/// ADR 0099 阶段 2：**从会话日志（真源）fold 出状态并重建 SQLite 索引**。
+/// - 只覆盖「有日志文件」的会话；索引里有、日志里没有的会话**原封不动**（计入
+///   `skipped_no_log`）——存量库的会话都还没有日志文件，误当成空会话会清空真实历史；
+/// - 墓碑（`RemoveSession`）不重建：删除单调不可复活；
+/// - `--dry-run` 只报告影响面（含 `mismatched` 双读差异），**不写库**；
+/// - `--db` 复用 `sessions backfill` 的同一条校验（不存在/非 .db/缺 sessions 表 ⇒ EXIT=2）。
+fn run_sessions_rebuild_index_if_requested() -> Option<i32> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("sessions")
+        || args.get(2).map(String::as_str) != Some("rebuild-index")
+    {
+        return None;
+    }
+    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    let db_path = args
+        .iter()
+        .position(|arg| arg == "--db")
+        .and_then(|index| args.get(index + 1))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(pony_agent_core::agent::sqlite_session::default_sqlite_path);
+    if let Err(error) = validate_backfill_db(&db_path) {
+        eprintln!("[ponycli] sessions rebuild-index 参数错误：{error}");
+        return Some(2);
+    }
+    let backend = if dry_run {
+        pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_read_only(db_path.clone())
+    } else {
+        pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            pony_agent_core::agent::session::SeparateTraceTableMode::WriteSeparate,
+        )
+    };
+    let options = pony_agent_core::agent::session::RebuildOptions { dry_run };
+    match pony_agent_core::agent::session::rebuild_index(&backend, options) {
+        Ok(report) => {
+            println!("db: {}", db_path.display());
+            println!(
+                "log-root: {}",
+                pony_agent_core::agent::session::session_log_root_for_db(&db_path).display()
+            );
+            println!(
+                "mode: {}",
+                if dry_run {
+                    "dry-run（只报告，不写索引）"
+                } else {
+                    "apply（用 fold 结果覆盖索引）"
+                }
+            );
+            println!("summary: {}", report.summary_line(dry_run));
+            println!("scanned: {}", report.scanned);
+            println!("rebuilt({}): {:?}", report.rebuilt.len(), report.rebuilt);
+            println!("skipped_no_log: {}", report.skipped_no_log);
+            println!(
+                "skipped_deleted({}): {:?}",
+                report.skipped_deleted.len(),
+                report.skipped_deleted
+            );
+            println!("failed({}): {:?}", report.failed.len(), report.failed);
+            println!("mismatched({}): {:?}", report.mismatched.len(), report.mismatched);
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("[ponycli] sessions rebuild-index 失败：{error}");
+            Some(1)
+        }
+    }
+}
+
 /// ADR 0099 阶段 0（E8）：回填目标的路径/结构自检。
 ///
 /// 拒绝：不存在、非普通文件、非 `.db` 后缀、缺 `sessions` 表（不是 PonyAgent 会话库）。
@@ -1214,6 +1284,9 @@ fn validate_backfill_db(path: &std::path::Path) -> Result<(), String> {
 fn main() {
     // ADR 0099 阶段 0（E8）：维护子命令必须在常规参数解析之前拦截（否则会被当成非法参数）。
     if let Some(code) = run_sessions_backfill_if_requested() {
+        std::process::exit(code);
+    }
+    if let Some(code) = run_sessions_rebuild_index_if_requested() {
         std::process::exit(code);
     }
     let _runtime_guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();

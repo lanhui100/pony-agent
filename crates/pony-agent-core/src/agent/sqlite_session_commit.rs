@@ -826,3 +826,116 @@ impl SqliteSessionBackend {
         Ok(report)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR 0099 阶段 2-A：索引重建（日志 = 真源 → fold 结果覆盖索引）
+// ---------------------------------------------------------------------------
+
+impl SqliteSessionBackend {
+    /// 会话日志根目录（`<db 目录>/session-logs/`）。
+    pub(crate) fn session_log_root(&self) -> std::path::PathBuf {
+        self.session_log_sink.root().to_path_buf()
+    }
+
+    /// 索引里现有的会话 id（`sessions` blob ∪ `normalized_sessions`）——「无日志会话」的计数源。
+    pub(crate) fn session_index_ids(&self) -> Result<Vec<String>, String> {
+        let slot = self.connection()?;
+        let conn = slot
+            .as_ref()
+            .ok_or_else(|| "connection not initialized".to_string())?;
+        let mut ids = std::collections::BTreeSet::new();
+        for sql in [
+            "SELECT conversation_id FROM sessions",
+            "SELECT session_id FROM normalized_sessions",
+        ] {
+            let mut statement = conn.prepare(sql).map_err(|e| format!("prepare `{sql}`: {e}"))?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("query `{sql}`: {e}"))?;
+            for row in rows {
+                ids.insert(row.map_err(|e| format!("read `{sql}` row: {e}"))?);
+            }
+        }
+        Ok(ids.into_iter().collect())
+    }
+
+    /// 用 fold 结果**覆盖**某会话的索引行（单事务）。
+    pub(crate) fn rebuild_folded_session_index(&self, state: &SessionState) -> Result<(), String> {
+        self.try_recover_instance_lock();
+        let slot = self.connection()?;
+        let conn = slot
+            .as_ref()
+            .ok_or_else(|| "connection not initialized".to_string())?;
+        let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("begin rebuild tx: {e}"))?;
+        let session_id = state.conversation_id.as_str();
+        // 覆盖语义：先清本会话的索引行（否则日志里已删掉的内容会残留在索引里）。
+        for table in [
+            "normalized_messages",
+            "normalized_turns",
+            "normalized_turn_traces",
+            "normalized_trace_steps",
+            "normalized_trace_timeline",
+            "normalized_tool_activities",
+            "normalized_history_nodes",
+            "normalized_history_cursor",
+            "normalized_history_branches",
+            "session_turn_traces",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE session_id = ?1"),
+                params![session_id],
+            )
+            .map_err(|e| format!("clear index table `{table}`: {e}"))?;
+        }
+        tx.execute(
+            "DELETE FROM normalized_sessions WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| format!("clear normalized session: {e}"))?;
+        // 重放 fold 出的规范命令：与 live 写路径**同一套**索引语义（不另写一套 SQL）。
+        let epoch = rebuild_epoch_floor(&tx);
+        for command in crate::agent::session::fold::canonical_commands(state, epoch) {
+            self.apply_persist_command_tx(&tx, &command)?;
+        }
+        // 没有对应命令的会话级派生字段：同事务补写，避免两条读路径分叉。
+        tx.execute(
+            "UPDATE normalized_sessions SET provider_native_transcript_json = ?2,
+                turn_trace_refs_json = ?3, memory_json = ?4, history_state_evidence_json = ?5,
+                workspace_id = ?6
+             WHERE session_id = ?1",
+            params![
+                session_id,
+                derived_json(&state.provider_native_transcript)?,
+                derived_json(&state.turn_trace_refs)?,
+                derived_json(&serde_json::json!({
+                    "longTermMemoryEntries": state.long_term_memory_entries,
+                    "memoryWriteEvidence": state.memory_write_evidence,
+                    "memoryWriteHookTraceRecords": state.memory_write_hook_trace_records,
+                }))?,
+                derived_json(&state.history_state_evidence)?,
+                state.workspace_id,
+            ],
+        )
+        .map_err(|e| format!("update normalized session derivations: {e}"))?;
+        upsert_session_row_bump(&tx, session_id, state)?;
+        tx.commit().map_err(|e| format!("commit rebuild tx: {e}"))
+    }
+}
+
+/// 重建重放命令的 epoch 下界：不得低于库内迁移 barrier（否则 `apply_persist_command_tx` 拒收）。
+fn rebuild_epoch_floor(tx: &rusqlite::Transaction<'_>) -> u64 {
+    tx.query_row(
+        "SELECT value FROM store_metadata WHERE key = 'storage.normalized.v1.epoch'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|raw| raw.parse::<u64>().ok())
+    .unwrap_or(0)
+    .max(1)
+}
+
+fn derived_json<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|e| format!("serialize derived field: {e}"))
+}
