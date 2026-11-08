@@ -4,7 +4,11 @@
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
 service: pony-agent
 kind: desktop
-reviewed_at: "2026-11-07"
+reviewed_at: "2026-11-08"
+# Trace 审核 loop（ADR 0101 / PA-168..170）归属说明：loop 会话复用 ponycli headless 既有 OTel 出口
+# （tracing anchor 不变，仍 agent/otel/mod.rs），自身即维度 6 的审计对象（自举）；scripts/audit/* 确定性
+# 节点只产本地回执，无新增网络遥测面；fetch 查询 Tempo/Langfuse 复用 check-langfuse.sh 凭据纪律
+# （只走管道/env，UNKNOWN ≠ PASS）。不新增 applicable 判定，不新增 enforcement_point。
 
 dimensions:
   tracing:
@@ -870,3 +874,17 @@ note: >-
       `start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_requested_during_tool_execution`
       （断言检查点含被中断 hop 正文）与 `start_turn_stream_can_emit_cancelled_when_stop_requested_before_plan`
       （断言无正文时仍是占位文案）。
+
+  【归属登记（2026-11-08）｜ADR 0099 阶段 2-B：读路径切到日志真源】
+  一行结论：四维归属不变，metrics / logs 维持结构性 N-A —— 变更在**本地读路径**
+  （`load_store()` 合并日志 fold），无新增对外接口、网络 IO、后台任务、LLM 调用；
+  不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`）。
+  (2) 本轮 N-A 的结构性理由：读折叠在调用线程内同步完成，不新增长命任务、不新增遥测事实。
+  (3) **新增的可观测事实（已有承载，故不新增维度）**：读折叠超 800ms 预算时记
+      `session_fold_slow` 并整轮降级为读索引；`load_index_store()` 仅供 `rebuild_index` 双读比对与维护诊断，
+      运行时业务路径不得调用（有源码调用点守卫测试）。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
+      行为门的机械收口在测试层——`crates/pony-agent-core/tests/session_read_from_log.rs`（8 用例，
+      含核心证明「删索引行后仍可读」）。
