@@ -152,8 +152,11 @@ pub fn child_env(extra: &[(String, String)]) -> Vec<(OsString, OsString)> {
             } else {
                 value
             };
-            // 白名单变量名统一用大写形态落库，便于调用方/审计做集合比较。
-            vars.push((OsString::from(name.to_ascii_uppercase()), value));
+            // 白名单键名按平台语义原样透传（与 MCP 侧 F8a 一致，B040）：POSIX 环境键
+            // 大小写敏感，`var_os(name)` 命中的就是名单里的原始形态——小写代理键
+            // （curl 等工具链只认小写 `http_proxy`）不得强制大写，否则子进程丢失代理
+            // 配置；Windows 侧 `var_os` 大小写不敏感，键名形态不影响匹配。
+            vars.push((OsString::from(*name), value));
         }
     }
     for (key, value) in extra {
@@ -380,6 +383,18 @@ mod tests {
             "子进程环境必须严格等于白名单子集"
         );
         std::env::remove_var("PONY_PLUGIN_SECRET_PROBE");
+    }
+
+    /// B040：键名原样透传后，小写代理键仍必须被识别为代理变量并走 userinfo 脱敏
+    /// （`is_proxy_env_name` 大小写不敏感），安全面不因键名形态改变而松动。
+    #[test]
+    fn proxy_name_detection_covers_lowercase_keys() {
+        for name in ["http_proxy", "https_proxy", "no_proxy", "all_proxy"] {
+            assert!(
+                is_proxy_env_name(name),
+                "{name} 必须被判为代理变量并走 userinfo 脱敏"
+            );
+        }
     }
 
     #[test]

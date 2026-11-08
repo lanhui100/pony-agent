@@ -244,8 +244,11 @@
   - 验收：快照首 token 取「本轮第一个到达 delta 的 hop 的 TTFT」（无则 `None`），桌面端 / TUI / 未来 HTTP 面同源；补多 hop 断言（首 hop 早期 + 末 hop 晚期可区分）。
   - 登记来源：ADR 0073 `## 影响` 末条；诊断见 `.dev-team/contract-matrix-token-speed-v2.md`。
 
-- [ ] `B040` - P2: 插件子进程 env 白名单键名被强制大写，小写代理键白名单语义失效
+- [x] `B040` - P2: 插件子进程 env 白名单键名被强制大写，小写代理键白名单语义失效
   - 路径：`crates/pony-agent-core/src/agent/plugin_host/capability.rs:156`（`OsString::from(name.to_ascii_uppercase())`）、`crates/pony-agent-core/src/agent/plugin_host/capability.rs:65`；用例 `crates/pony-agent-core/tests/plugin_host_contract.rs:365`
   - 描述：`child_env()` 对白名单变量名统一 `to_ascii_uppercase()` 落库，而 Linux 上 `ENV_ALLOWLIST` 含小写代理键（`http_proxy` / `https_proxy` / `no_proxy`）⇒ 子进程实际收到 `HTTP_PROXY` 等大写键；`t3_plugin_child_env_is_exactly_the_allowlist` 实测 `left={HOME,HTTPS_PROXY,HTTP_PROXY,LANG,NO_PROXY,PATH}` vs `right=…+{http_proxy,https_proxy,no_proxy}`（`cargo test -p pony-agent-core --test plugin_host_contract` exit 101，10 passed / 1 failed）。大小写敏感平台上「白名单精确等于」的契约因此不成立，且小写变量丢失可能让插件绕过/失去代理配置。
   - 验收：白名单按平台语义保留原始键名（大小写敏感平台原样透传，Windows 保留大小写不敏感行为）；该用例转绿；顺带确认 `is_proxy_env_name` 对小写键的 userinfo 脱敏仍然生效。
   - 登记来源：本轮 gate 实测（2026-11-06），与 token 速度口径无共享代码路径。
+  - 完成（2026-11-08）：白名单键名按平台语义原样透传（与 MCP 侧 F8a 对齐），
+    `plugin_host::capability` 8 passed、`plugin_host_contract` 11 passed（t3 转绿）。
+    决策记录：`.agents/notes/implemented/bug-fix/2026-11-08-plugin-env-allowlist-key-case.md`。
