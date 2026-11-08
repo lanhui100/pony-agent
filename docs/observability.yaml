@@ -815,3 +815,21 @@ note: >-
       行为门的机械收口在测试层——`crates/pony-agent-core/tests/tui_process_toggle_scroll_snap.rs`
       （展开/收起单帧贴底 + 手动上翻不被强拉）。
 
+
+  【归属登记（2026-11-08）｜ADR 0099 阶段 1：会话日志文件切为写入真源】
+  一行结论：四维归属不变，metrics / logs 维持结构性 N-A —— 新增的是**本地持久化写路径**
+  （每会话一份 append-only 日志文件 + fsync），无新增对外接口、网络 IO、后台任务、LLM 调用；
+  不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`）。
+  (2) 本轮 N-A 的结构性理由：变更发生在**本地磁盘持久化层**——`agent/session/log_store.rs` 只有
+      `open/append/read/list/delete` 与 `fsync`，进程随用户窗口启停，不产生指标端点、不上送日志到
+      Loki、也不新增 trace 出口。按其 rubric，持久化路径的观测事实由既有 tracing span 覆盖，
+      无需新维度。
+  (3) 需要追加锚点的时机（提前声明，避免将来漏）：阶段 2 若落地「索引重建器」这一**后台任务**
+      （`rebuild_index` 可能移出主线程或周期性运行），则本声明必须同时补
+      `dimensions.tracing` 的 anchor 追加（指向重建器入口）与一次 dry-run 声明校验；
+      在此之前不得以「已接线」为由跳过登记。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
+      行为门的机械收口在测试层——`crates/pony-agent-core/tests/session_log_store.rs`（6 类，含 32 例
+      撕裂尾行与 10 例目录逃逸）与 `crates/pony-agent-core/tests/session_log_wiring.rs`。
