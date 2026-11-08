@@ -1744,6 +1744,28 @@ impl SessionStore {
             .unwrap_or_default()
     }
 
+    /// ADR 0094：按 id 从规范化表把「legacy blob 行已丢失」的会话重建回内存并回写。
+    ///
+    /// 只在显式恢复（`pony resume <id>`）时调用：不做启动期全量合并，避免复活用户已删除、
+    /// 仅规范化行残留的会话（显式删除现在会连规范化行一起删）。返回 `true` = 会话可用。
+    pub fn recover_session_from_normalized(&mut self, session_id: &str) -> bool {
+        if self.sessions.contains_key(session_id) {
+            return true;
+        }
+        let Some(session) = self.backend.load_normalized_session(session_id) else {
+            return false;
+        };
+        // 只有真正带历史的会话才值得重建：空壳既不是「可继续的对话」，也会污染列表。
+        if !session_is_persistable(&session) {
+            return false;
+        }
+        self.sessions
+            .insert(session_id.to_string(), session.clone());
+        // 顺手把 legacy row 补回去（自愈）：否则下次启动又是"缺失"状态。
+        self.save_session_state_to_backend(session_id, &session);
+        true
+    }
+
     pub fn remove_session(&mut self, session_id: &str) -> Vec<SessionOverview> {
         if self.sessions.remove(session_id).is_some() {
             delete_session_attachment_dir(&self.attachment_root, session_id);

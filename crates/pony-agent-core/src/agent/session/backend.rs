@@ -256,6 +256,16 @@ pub trait SessionBackend: Send + Sync {
         SessionBackendTraceLoadResult::Unsupported
     }
 
+    /// ADR 0094：按 id 从**规范化表**重建单个会话（`normalized_sessions` +
+    /// `normalized_messages` + trace/node/cursor 子表）。
+    ///
+    /// 用途：legacy `sessions` blob 行丢失（历史整包写盘误删 / 迁移半途）时，
+    /// `pony resume <id>` 仍能恢复出真实历史，而不是谎称「没有该会话」。
+    /// 默认 `None`：内存/文件后端没有规范化表，无从重建。
+    fn load_normalized_session(&self, _session_id: &str) -> Option<SessionState> {
+        None
+    }
+
     /// Wave-7 B001：写入一条用量账本记录（幂等 UPSERT）。
     ///
     /// 默认实现：非 SQLite 后端无独立账本表 ⇒ 静默成功（fail-open，不阻断 turn）。

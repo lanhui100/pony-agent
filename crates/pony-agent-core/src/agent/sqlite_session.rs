@@ -604,16 +604,6 @@ impl SqliteSessionBackend {
             .unchecked_transaction()
             .map_err(|e| format!("begin tx: {e}"))?;
 
-        let existing_session_ids: Vec<String> = {
-            let mut stmt = tx
-                .prepare("SELECT conversation_id FROM sessions")
-                .map_err(|e| format!("prepare session scan: {e}"))?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| format!("query session scan: {e}"))?;
-            rows.filter_map(Result::ok).collect()
-        };
-
         // Upsert current sessions — scoped to drop the statement before commit
         {
             let mut stmt = tx
@@ -660,29 +650,13 @@ impl SqliteSessionBackend {
             }
         }
 
-        // Remove sessions that are no longer present in the store.
-        {
-            let removed_ids = existing_session_ids
-                .into_iter()
-                .filter(|id| !store.sessions.contains_key(id))
-                .collect::<Vec<_>>();
-            if !removed_ids.is_empty() {
-                let mut delete_stmt = tx
-                    .prepare("DELETE FROM sessions WHERE conversation_id = ?1")
-                    .map_err(|e| format!("prepare session delete: {e}"))?;
-                let mut delete_trace_stmt = tx
-                    .prepare("DELETE FROM session_turn_traces WHERE session_id = ?1")
-                    .map_err(|e| format!("prepare trace delete: {e}"))?;
-                for id in removed_ids {
-                    delete_stmt
-                        .execute(params![id])
-                        .map_err(|e| format!("delete session: {e}"))?;
-                    delete_trace_stmt
-                        .execute(params![id])
-                        .map_err(|e| format!("delete session traces: {e}"))?;
-                }
-            }
-        }
+        // ADR 0094：**不再**在这里删除「内存快照里没有」的会话。
+        //
+        // 整包写盘的语义是「把我知道的写下去」，不是「把库对齐成我知道的样子」：
+        // 一份启动时装载的快照不包含别的进程/实例（第二个 TUI、桌面端、`ponycli`）
+        // 之后新建的会话，旧实现在这里把那些行直接 DELETE 掉 —— 退出提示里的
+        // `pony resume <id>` 于是变成「没有该会话」，而它的事件与规范化行其实都还在。
+        // 显式删除只走 `remove_session`（同一个事务里删 legacy 行 + trace + 规范化行）。
 
         // Upsert metadata — scoped to drop the statement before commit
         {
@@ -2924,6 +2898,21 @@ impl SessionBackend for SqliteSessionBackend {
         true
     }
 
+    fn load_normalized_session(&self, session_id: &str) -> Option<SessionState> {
+        let slot = match self.connection() {
+            Ok(slot) => slot,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                return None;
+            }
+        };
+        let conn = slot.as_ref().expect("connection initialized");
+        // 复用整包重建：规范化表规模由会话/消息行数决定（生产库 ~10² sessions、~10³
+        // messages），一次只为一个显式 resume 服务，代价可控；不为单会话复制 6 份查询。
+        let mut sessions = self.load_store_normalized(conn)?.sessions;
+        sessions.remove(session_id)
+    }
+
     fn remove_session(
         &self,
         session_id: &str,
@@ -2960,6 +2949,15 @@ impl SessionBackend for SqliteSessionBackend {
             params![session_id],
         ) {
             eprintln!("[pony-agent][session] SQLite delete session traces error: {error}");
+            return false;
+        }
+        // ADR 0094：显式删除必须连规范化行一起删，否则 `load_normalized_session`
+        // 会把用户已经删掉的会话在下次 `pony resume <id>` 时"复活"。
+        if let Err(error) = tx.execute(
+            "DELETE FROM normalized_sessions WHERE session_id = ?1",
+            params![session_id],
+        ) {
+            eprintln!("[pony-agent][session] SQLite delete normalized session error: {error}");
             return false;
         }
 
@@ -3691,30 +3689,32 @@ mod tests {
         }
     }
 
+    /// ADR 0094：整包写盘只写不删，替代旧 `removes_sessions_missing_from_latest_store_snapshot`（那条把缺陷写成了契约）。
     #[test]
-    fn removes_sessions_missing_from_latest_store_snapshot() {
+    fn full_store_write_keeps_sessions_dropped_from_latest_snapshot() {
         let dir = unique_dir("delete");
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("delete.db");
-
         let backend =
             SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::DualWrite);
 
         let mut store = PersistedStore::default();
-        store
-            .sessions
-            .insert("s1".to_string(), minimal_session("s1", "first", 1000));
-        store
-            .sessions
-            .insert("s2".to_string(), minimal_session("s2", "second", 2000));
+        for (id, title, at) in [("s1", "first", 1000), ("s2", "second", 2000)] {
+            store
+                .sessions
+                .insert(id.to_string(), minimal_session(id, title, at));
+        }
         let _ = backend.save_store(&store);
-
         store.sessions.remove("s1");
         let _ = backend.save_store(&store);
 
         let loaded = backend.load_store().unwrap();
-        assert_eq!(loaded.sessions.len(), 1);
-        assert!(!loaded.sessions.contains_key("s1"));
+        assert_eq!(
+            loaded.sessions.len(),
+            2,
+            "ADR 0094：整包写盘不得删除快照外的会话"
+        );
+        assert!(loaded.sessions.contains_key("s1"));
         assert_eq!(loaded.sessions["s2"].title, "second");
 
         fs::remove_dir_all(&dir).ok();

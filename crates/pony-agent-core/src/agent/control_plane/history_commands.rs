@@ -47,6 +47,19 @@ impl HostControlPlane {
         snapshot
     }
 
+    /// ADR 0094：`pony resume <id>` 的按需恢复入口 —— legacy blob 行丢失但规范化表
+    /// 仍有数据时，把该会话重建回内存并回写，后面的 `load_session_runtime_view`
+    /// 才有历史可hydrate。返回 `true` = 会话可用。
+    pub fn recover_session_from_normalized(&self, session_id: &str) -> bool {
+        self.sessions_rwlock
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .recover_session_from_normalized(session_id)
+    }
+
     pub fn load_history_graph(&self, query: HistoryGraphQuery) -> HistoryGraphView {
         let session_id = self.normalize_history_session_id(query.session_id);
         let (nodes, branches, cursor) = self

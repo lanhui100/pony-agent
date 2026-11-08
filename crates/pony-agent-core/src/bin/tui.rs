@@ -6812,8 +6812,25 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     if let Some(resume) = resume_session.as_ref() {
         state.session_id = resume.session_id.clone();
         state.reset_session_scope();
-        if resume.existed {
+        // ADR 0094：`existed` 只反映 legacy `sessions` blob 行。整包写盘曾把「别的实例
+        // 建的会话」整行删掉（旧实现对齐内存快照），而规范化表里的轮次/消息仍在——
+        // 于是提示里的 id 反而恢复不了。这里先按 id 从规范化表重建，再决定走向。
+        let recovered = !resume.existed
+            && control_plane.recover_session_from_normalized(&resume.session_id);
+        if resume.existed || recovered {
             hydrate_state_from_session(&mut state, &control_plane, &resume.session_id);
+            if recovered {
+                // 索引行丢失属于「数据自愈」，必须让用户看见，否则会怀疑历史被篡改。
+                state.status_text = format!("已恢复会话（索引行曾丢失，已重建）{}", resume.session_id);
+                state.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "会话 {} 的索引行曾丢失，已按事件表重建历史并回写。",
+                        resume.session_id
+                    ),
+                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                });
+            }
         } else {
             // 显式 id 尚无落库记录：沿用该 id 开新会话，并在界面上如实说明。
             state.status_text = format!("新会话（沿用 id）{}", resume.session_id);
