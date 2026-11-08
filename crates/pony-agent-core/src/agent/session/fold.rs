@@ -40,13 +40,20 @@
 //! （存量 grandfather），墓碑从视图移除。**索引可删可建**由此兑现——删掉 `sessions`
 //! 行之后会话照旧读得出来（`tests/session_read_from_log.rs` 的核心用例）。
 //!
-//! 两条必须写明的过渡期事实：
+//! 两条必须写明的现状事实：
 //!
-//! 1. **写路径还有第二条通道**：整包/状态写（`save_store` / `commit_boundary`）不走命令流，
-//!    日志因此可能落后于索引。两边都有内容时按 `updated_at_ms` 定序（日志胜平局）；
-//!    ADR 阶段 2 第 4 项「停写 blob」落地后可改为「日志无条件为准」。
+//! 1. **写路径在阶段 2-D 之后只有一条内容通道**：`sessions.session_data` 对有日志的会话
+//!    只写轻量索引行（`__index_only`），状态写（`save_store` / `commit_boundary`）不再产生
+//!    完整内容。因此有日志的会话**日志无条件为准**——2-B 那条 `updated_at_ms` 定序已删除：
+//!    轻量行的时间戳会随写路径前进，若仍按时间戳定序，日志会被「更新的空壳行」盖掉。
 //! 2. **索引独有的投影产物**（`trace_migration_state` / `turn_trace_refs` / 光标节点快照）
-//!    仍从索引行继承：日志没有承载它们的命令，丢掉等于凭空丢状态。
+//!    仍从索引行继承：日志没有承载它们的命令，丢掉等于凭空丢状态。轻量索引行不写
+//!    `turn_trace_refs`（它随轮次增长），故这条继承在 2-D 之后只剩 `trace_migration_state`
+//!    与 `workspace_id`（见 [`apply_index_projection`]）。
+//!
+//! 索引侧内容来源（2-D）：轻量行 + 索引自己的 `normalized_*` 投影由
+//! `SqliteSessionBackend::fill_index_only_rows_from_index_projection` 补全，
+//! **该补全不读日志**，所以「日志 vs 索引」的双读比对仍然有意义。
 //!
 //! 启动耗时保护：折叠总耗时超预算（[`DEFAULT_READ_FOLD_BUDGET`]）⇒ 记 `session_fold_slow`
 //! 并整轮降级为读索引（不阻塞启动、不读半态），下轮再补。
@@ -64,7 +71,9 @@ use std::path::Path;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::backend::{PersistCommand, SessionMetaPatch, TraceTerminalPatch, TurnStateRecord};
+use super::backend::{
+    PersistCommand, SessionBackend, SessionMetaPatch, TraceTerminalPatch, TurnStateRecord,
+};
 use super::log_store::{SessionLogMeta, SessionLogStore};
 use super::types::{
     HistoryBranch, HistoryCursor, HistoryNode, SessionState, TurnHistoryMessage, TurnTraceRecord,
@@ -1021,8 +1030,11 @@ pub fn fold_read_view(
 
 /// 把**日志真源**合并进索引视图（`load_store` 的读切换）。
 ///
-/// 合并规则（ADR 0099 D1 / 阶段 2）：
-/// 1. 有日志的会话 ⇒ **日志为准**（同 id 覆盖索引行）；
+/// 合并规则（ADR 0099 D1 / 阶段 2 / 2-D）：
+/// 1. 有日志的会话 ⇒ **日志无条件为准**（同 id 覆盖索引行）。阶段 2-D 停写整包 blob 后，
+///    索引行只剩索引字段（`__index_only` 轻量行），日志是唯一内容来源；原先那条
+///    「索引 `updated_at_ms` 更新就保留索引」的过渡定序已删除——留着它会把轻量行
+///    （内容为空、时间戳却随写路径前进）当成比日志更新，从而把会话读成空壳；
 /// 2. 无日志的会话 ⇒ 保持索引视图（存量会话，grandfather，不得丢失）；
 /// 3. 墓碑（`RemoveSession`）⇒ 从视图里移除（D3：删除不复活）；
 /// 4. 折叠失败的会话 ⇒ 保持索引视图（不丢会话，下一轮再补）；
@@ -1049,16 +1061,6 @@ pub fn merge_log_truth_into_sessions_with_budget(
                 sessions.insert(session_id, state);
             }
             Some(indexed) => {
-                if indexed.updated_at_ms > state.updated_at_ms {
-                    // **过渡期规则（写路径双通道）**：整包/状态通道写（`save_store` /
-                    // `commit_boundary`）不走命令流，日志因此天然落后于索引。两边都有内容
-                    // 时按 `updated_at_ms` 定序、日志胜平局：
-                    // - 索引更旧（命令流的正常形态）⇒ 日志为准；
-                    // - 索引更新（刚发生过整包写，日志还没跟上）⇒ 保留索引，避免读回旧态。
-                    // ADR 阶段 2 第 4 项「停写 blob」落地后这条分支会自然消失（索引时间戳
-                    // 不再前进），届时可删除并改为「日志无条件为准」。
-                    continue;
-                }
                 sessions.insert(session_id, apply_index_projection(indexed, state));
             }
         }
@@ -1071,12 +1073,13 @@ pub fn merge_log_truth_into_sessions_with_budget(
 
 /// 把**索引独有的投影产物**套到日志 fold 出的状态上（日志里没有承载它们的命令）。
 ///
-/// 1. `trace_migration_state` / `turn_trace_refs` / `workspace_id`：见
-///    [`INDEX_ONLY_STATE_FIELDS`]——日志里没有任何命令携带它们，丢掉即凭空丢状态；
-/// 2. 顶层 `turn_trace_history` 的**投影形状**：`TraceTableAuthoritative` 会话的顶层
-///    trace 只显示当前分支（按 `turn_trace_refs` 过滤），与索引 loader 的
-///    `merge_trace_history` 同一条口径。fold 拿到的是全量 trace，不套这层投影就会
-///    把 fork 分支的 trace 泄漏到顶层显示里；
+/// 1. `workspace_id` / `trace_migration_state`：见 [`INDEX_ONLY_STATE_FIELDS`]——日志里没有
+///    任何命令携带它们，丢掉即凭空丢状态（`turn_trace_refs` 自 2-D 起**不再**继承，理由见
+///    函数内注释）；
+/// 2. 顶层 `turn_trace_history` 的**投影形状**：只显示**当前分支**（可见节点祖先链上的
+///    turn）。阶段 2-D 之前这条过滤按索引行的 `turn_trace_refs` 做；停写 blob 后索引行
+///    不带 refs，故改为从日志自己的 DAG（节点 `parent_node_id` + `turn_id`）推导——
+///    不套这层投影就会把 fork 分支的 trace 泄漏到顶层显示里；
 /// 3. `history` 的**可见分支视图**：由光标所指节点的快照派生（见函数内注释）。
 fn apply_index_projection(indexed: &SessionState, mut state: SessionState) -> SessionState {
     if state.workspace_id.is_none() {
@@ -1084,23 +1087,11 @@ fn apply_index_projection(indexed: &SessionState, mut state: SessionState) -> Se
     }
     state.trace_migration_state = indexed.trace_migration_state.clone();
     if state.turn_trace_refs.is_none() {
+        // 字段继承保留（索引行是它唯一的载体）；但**不再用它过滤 trace**：ADR 0099
+        // 阶段 2-D 停写 blob 后，这份 refs 可能来自陈旧整包行（或轻量行根本没有），
+        // 拿它过滤会把日志这一轮新增的 trace 静默抹掉（2-A 记录过的既有缺口反过来咬到
+        // 读路径）。顶层 trace 的「可见分支视图」改由**可见节点祖先链**推导（见本函数末尾）。
         state.turn_trace_refs = indexed.turn_trace_refs.clone();
-    }
-    if matches!(
-        state.trace_migration_state,
-        super::backend::TraceMigrationState::TraceTableAuthoritative
-    ) {
-        if let Some(refs) = state.turn_trace_refs.clone() {
-            let by_turn: HashMap<&str, &TurnTraceRecord> = state
-                .turn_trace_history
-                .iter()
-                .map(|trace| (trace.turn_id.as_str(), trace))
-                .collect();
-            state.turn_trace_history = refs
-                .iter()
-                .filter_map(|reference| by_turn.get(reference.turn_id.as_str()).copied().cloned())
-                .collect();
-        }
     }
     // **可见视图投影**：`history` 的「当前分支视图」由光标所指节点的快照承载
     // （写路径在切分支 / 每轮同步时把整份可见视图写进 `UpdateHistoryNode` 的快照）。
@@ -1111,6 +1102,14 @@ fn apply_index_projection(indexed: &SessionState, mut state: SessionState) -> Se
         .visible_node_id
         .clone()
         .or_else(|| state.history_cursor.branch_head_node_id.clone());
+    // 日志侧「当前分支的 trace 集合」的等价推导：**可见节点祖先链**上的 turn。
+    // 阶段 2-D 停写 blob 后索引行不再携带 `turn_trace_refs`（它随轮次增长），若只认 refs，
+    // 重启后顶层 trace 会退化成「全部分支的并集」（fork 的 trace 泄漏）或被节点空快照抹掉。
+    let branch_turn_ids: std::collections::BTreeSet<String> = visible_node_id
+        .as_deref()
+        .map(|node_id| ancestor_turn_ids(&state.history_nodes, node_id))
+        .unwrap_or_default();
+    let full_traces = state.turn_trace_history.clone();
     if let Some(node_id) = visible_node_id {
         let node = state
             .history_nodes
@@ -1120,11 +1119,69 @@ fn apply_index_projection(indexed: &SessionState, mut state: SessionState) -> Se
         if let Some(node) = node {
             if !node.history.is_empty() {
                 // 复用写路径同一份 hydrate 语义（同模块可见），不另造一套投影规则。
-                super::store::hydrate_session_from_node(&mut state, &node);
+                hydrate_session_from_node(&mut state, &node);
             }
         }
     }
+    if !branch_turn_ids.is_empty() {
+        let visible_traces: Vec<TurnTraceRecord> = full_traces
+            .iter()
+            .filter(|trace| branch_turn_ids.contains(trace.turn_id.as_str()))
+            .cloned()
+            .collect();
+        if !visible_traces.is_empty() {
+            state.turn_trace_history = visible_traces;
+        }
+    }
     state
+}
+
+/// 节点快照 → 会话内存态（history / transcript / trace / memory / turn_count 全覆盖）。
+///
+/// 逐字段拷贝语义与写路径一致；`fold.rs::apply_index_projection` 与 `store` 的
+/// 分支切换 / 恢复路径共用它，避免两套 hydrate 规则分叉。
+pub(in crate::agent::session) fn hydrate_session_from_node(
+    session: &mut SessionState,
+    node: &HistoryNode,
+) {
+    session.title = node.title.clone();
+    session.summary = node.summary.clone();
+    session.history = node.history.clone();
+    session.provider_native_transcript = node.provider_native_transcript.clone();
+    session.turn_trace_history = node.turn_trace_history.clone();
+    session.long_term_memory_entries = node.long_term_memory_entries.clone();
+    session.memory_write_evidence = node.memory_write_evidence.clone();
+    session.memory_write_hook_trace_records = node.memory_write_hook_trace_records.clone();
+    session.turn_count = node.turn_count;
+    session.last_referenced_file = node.last_referenced_file.clone();
+}
+
+/// 可见节点的**祖先链**上出现过的 turn id 集合（含自身）。
+///
+/// 用途见 [`apply_index_projection`]：日志里没有「会话级 trace 引用」这条命令，
+/// 但节点命令带 `parent_node_id` + `turn_id`，因此「当前分支有哪些 turn」是可推导的。
+/// 断环保护：`visited` 保证环状 `parent_node_id`（坏日志）不会死循环。
+fn ancestor_turn_ids(nodes: &[HistoryNode], node_id: &str) -> std::collections::BTreeSet<String> {
+    let mut by_id: HashMap<&str, &HistoryNode> = HashMap::new();
+    for node in nodes {
+        by_id.insert(node.node_id.as_str(), node);
+    }
+    let mut turns = std::collections::BTreeSet::new();
+    let mut visited: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut cursor = Some(node_id);
+    while let Some(current) = cursor {
+        if !visited.insert(current) {
+            break;
+        }
+        let Some(node) = by_id.get(current) else {
+            break;
+        };
+        if let Some(turn_id) = &node.turn_id {
+            turns.insert(turn_id.clone());
+        }
+        cursor = node.parent_node_id.as_deref();
+    }
+    turns
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,7 +1419,7 @@ pub fn rebuild_index_at_root(
     // grandfather），若拿它当比对基准，`mismatched` 会退化成「fold 与 fold 比」的恒零，
     // 双读比对（阶段 2 第 3 项）就此失去意义。故基准固定为索引原样视图；这也正是
     // 「索引可重建 / 可校验」这条承诺的观测面。
-    let index_view: HashMap<String, SessionState> = match backend.load_index_store() {
+    let mut index_view: HashMap<String, SessionState> = match backend.load_index_store() {
         Some(store) => store.sessions_view().clone(),
         None => {
             // 读不出现有索引 ⇒ 比对基准缺失。重建本身仍可进行（真源不依赖索引），
@@ -1374,6 +1431,14 @@ pub fn rebuild_index_at_root(
             HashMap::new()
         }
     };
+    // ADR 0099 阶段 2-D：停写 blob 后，有日志会话的索引行只有索引字段。若直接拿它当基准，
+    // 每个会话都会被记成 mismatch（内容侧全空），比对列等于永久噪声。
+    // 因此把轻量行按**索引自己的** `normalized_*` 投影补全（不读日志 ⇒ 仍是独立观察者），
+    // 基准才回到「索引内容 vs 日志 fold」的正确语义。
+    backend.fill_index_only_rows_from_index_projection(
+        &mut index_view,
+        &std::collections::HashSet::new(),
+    );
     let metas = store
         .list_sessions()
         .map_err(|error| format!("scan session log root `{}`: {error}", log_root.display()))?;
@@ -1435,6 +1500,94 @@ pub fn rebuild_index_at_root(
         report.summary_line(options.dry_run)
     );
     Ok(report)
+}
+
+/// 把**整份图投影**（trace 行 + 节点 + 分支 + 光标）作为命令流追加进真源日志。
+///
+/// ADR 0099 阶段 2-D：`ReplaceAll` 突变（fork / switch / checkout / restore / trace 全量重写）
+/// 以前只写 blob + trace 表。停写 blob 之后，图状态若仍不落日志，重启会读回旧分支、
+/// trace 变空 —— 那不是「SQLite 退为索引」，而是真数据丢失。故这些路径改走命令流。
+///
+/// 返回 `true` = 命令流已提交（调用方不必再走整包路径）；`false` = 回退全量写（不丢数据）。
+pub(crate) fn persist_graph_projection_commands(
+    backend: &dyn SessionBackend,
+    session_id: &str,
+    session: &SessionState,
+    mutation: &super::backend::SessionTraceMutation,
+) -> bool {
+    const EPOCH: u64 = 1;
+    let traces = match mutation {
+        super::backend::SessionTraceMutation::ReplaceAll { traces } => traces.as_slice(),
+        _ => &[],
+    };
+    let mut commands: Vec<PersistCommand> =
+        Vec::with_capacity(traces.len() + session.history_nodes.len() + session.history_branches.len() + 1);
+    for (trace_order, trace) in traces.iter().enumerate() {
+        commands.push(PersistCommand::AppendTrace {
+            epoch: EPOCH,
+            session_id: session_id.to_string(),
+            trace: trace.clone(),
+            trace_order,
+        });
+    }
+    for node in &session.history_nodes {
+        commands.push(PersistCommand::UpdateHistoryNode {
+            epoch: EPOCH,
+            session_id: session_id.to_string(),
+            node: node.clone(),
+        });
+    }
+    for branch in &session.history_branches {
+        commands.push(PersistCommand::UpdateBranch {
+            epoch: EPOCH,
+            session_id: session_id.to_string(),
+            branch: branch.clone(),
+        });
+    }
+    commands.push(PersistCommand::UpdateCursor {
+        epoch: EPOCH,
+        session_id: session_id.to_string(),
+        cursor: session.history_cursor.clone(),
+    });
+    matches!(
+        backend.persist_commands_batch(commands),
+        super::backend::PersistCommandOutcome::Succeeded
+    )
+}
+
+/// 会话级元数据的**真源追加**（ADR 0099 阶段 2-D）。
+///
+/// 标题 / 归档位 / 摘要 / 轮次 / 时间以前只随整包 blob 落盘。停写 blob 后索引行只剩索引
+/// 字段、读路径又以日志为准 ⇒ 这些元数据必须同样进日志命令流，否则重命名 / 归档在重启后
+/// 会读回旧值（真用户可见的回归）。后端不支持命令流（Memory / File）时返回 `false`，
+/// 调用方仍靠整包写兜底。
+pub(crate) fn persist_session_meta_command(
+    backend: &dyn SessionBackend,
+    session_id: &str,
+    sessions: &HashMap<String, SessionState>,
+) {
+    let Some(session) = sessions.get(session_id) else {
+        return;
+    };
+    let meta_patch = SessionMetaPatch {
+        title: Some(session.title.clone()),
+        title_override: Some(session.title_override.clone()),
+        archived: Some(session.archived),
+        summary: Some(session.summary.clone()),
+        turn_count: Some(session.turn_count),
+        last_referenced_file: session.last_referenced_file.clone(),
+        updated_at_ms: Some(session.updated_at_ms),
+    };
+    let outcome = backend.persist_command(PersistCommand::UpdateSessionMeta {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        meta_patch,
+    });
+    if !matches!(outcome, super::backend::PersistCommandOutcome::Succeeded) {
+        eprintln!(
+            "[pony-agent][session] session_meta_command_not_persisted: session={session_id} outcome={outcome:?}（回退整包写）"
+        );
+    }
 }
 
 /// fold 结果的会话键（`conversation_id` 即索引行键）。
@@ -1908,8 +2061,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// ADR 0099 阶段 2-D：2-B 的「索引 `updated_at_ms` 更新就保留索引」过渡定序**已删除**。
+    ///
+    /// 用例方向随之反转（断言更强，不是放宽）：索引时间戳更新时，日志依旧无条件为准。
+    /// 理由：停写 blob 后索引行只剩索引字段（内容为空），若仍按时间戳定序，一个「更新的
+    /// 空壳行」会把会话读成空；而索引时间戳本来就是每条写路径都会前进的噪声。
     #[test]
-    fn read_path_merge_keeps_the_index_when_the_state_lane_is_newer() {
+    fn read_path_merge_prefers_the_log_even_when_the_index_timestamp_is_newer() {
         let root = temp_log_root("index_newer");
         let session_id = "pa_2b_fold_index_newer";
         write_log(
@@ -1928,7 +2086,7 @@ mod tests {
                 },
             ],
         );
-        // 索引侧更新（整包/状态通道写过、日志还没跟上）⇒ 过渡期按索引读，不得读回旧态。
+        // 索引侧时间戳更新（写路径每轮都会前进）⇒ 仍然是日志为准，不得读回索引里的旧内容。
         let mut sessions = HashMap::new();
         sessions.insert(
             session_id.to_string(),
@@ -1939,9 +2097,10 @@ mod tests {
 
         assert_eq!(outcome.folded, vec![session_id.to_string()], "日志侧确实 fold 成功");
         assert_eq!(
-            sessions[session_id].history[0].content, "更新的索引内容",
-            "索引更新的会话必须保持索引态（过渡期规则，见 merge_log_truth_into_sessions_with_budget）"
+            sessions[session_id].history[0].content, "日志内容",
+            "日志无条件为准：索引时间戳更新也不得把日志内容盖回去（2-D 删除过渡定序）"
         );
+        assert_eq!(sessions[session_id].title, "日志标题");
         let _ = std::fs::remove_dir_all(&root);
     }
 

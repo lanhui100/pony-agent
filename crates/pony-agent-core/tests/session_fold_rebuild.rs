@@ -14,6 +14,11 @@
 //!    日志里的显式墓碑（`RemoveSession`）同样不重建。
 //! 6. [`rebuild_index_is_idempotent`] —— 连跑两次：`rebuilt` 稳定、库内容不变、无 mismatch。
 //! 7. [`dry_run_writes_nothing`] —— `sessions.db` 与 `-wal` 的 sha256 前后一致。
+//! 8. [`log_reader_drops_the_torn_tail_and_unknown_commands_fail_loud`] —— 日志读侧契约
+//!    （撕裂尾行丢弃 / 未知命令 fail loud）。
+//!
+//! 用例总数 = **8**：阶段 2-D 按 `legacy_blob_view_diff_*` 自带契约移除了那一条
+//! （缺口已被关闭，见该位置留下的说明与 `tests/session_stop_blob_write.rs`）。
 //!
 //! 隔离：所有库与日志都落在 `std::env::temp_dir()` 下的唯一目录，**绝不触碰**
 //! `~/.local/share/PonyAgent/`；fixture `Drop` 清理。
@@ -23,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use pony_agent_core::agent::session::{
     fold_session, read_log_events, read_session_state, rebuild_index, session_log_root_for_db,
-    session_parity_diff, session_parity_issues, LogEvent, PersistCommand, PersistCommandOutcome, RebuildOptions,
+    session_parity_diff, LogEvent, PersistCommand, PersistCommandOutcome, RebuildOptions,
     SeparateTraceTableMode, SessionBackend, SessionLogMeta, SessionLogStore, SessionState,
     SessionStore, TurnHistoryMessage, TurnTraceRecord,
 };
@@ -666,57 +671,19 @@ fn dry_run_writes_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// 附加：legacy blob 视图的已知差异（清单式钉死，不许出现清单外的差异）
+// 【已按本用例自带契约移除】legacy blob 视图的缺口登记（`legacy_blob_view_diff_*`）
 // ---------------------------------------------------------------------------
-
-#[test]
-fn legacy_blob_view_diff_is_limited_to_documented_gaps() {
-    let fixture = Fixture::new("blob_gap");
-    let session_id = "pa_2a_blob_gap";
-    {
-        let mut store = fixture.store();
-        for index in 0..2u32 {
-            store
-                .append_turn_fallible(
-                    Some(session_id),
-                    &format!("u{index}"),
-                    &format!("a{index}"),
-                    None,
-                    Vec::new(),
-                )
-                .expect("append_turn");
-        }
-        store.record_turn_trace(
-            Some(session_id),
-            TurnTraceRecord {
-                turn_id: "turn-0".to_string(),
-                title: "t".to_string(),
-                phase: "completed".to_string(),
-                ..Default::default()
-            },
-        );
-    }
-
-    // 默认读路径仍是 legacy blob 快照（phase 键不存在）。
-    let folded = fixture.folded(session_id);
-    let blob_view = fixture.indexed(session_id);
-    let issues = session_parity_issues(&folded, &blob_view);
-    // 日志命令流尚未携带的两类索引侧产物（写路径缺口，记录在案，不隐藏）：
-    // ① `{sid}-legacy-root` 根节点由 `ensure_history_graph` 在整包写时生成，无命令；
-    // ② blob 的 trace refs 为陈旧/空 ⇒ `merge_trace_history` 把表内 trace 过滤成空。
-    let documented = ["history_nodes", "turn_trace_history"];
-    for issue in &issues {
-        let field = issue.split(':').next().unwrap_or_default();
-        assert!(
-            documented.iter().any(|prefix| field.starts_with(prefix)),
-            "出现**未记录**的 fold ↔ blob 差异（必须修写路径或补文档，不许默默放过）：{issue}"
-        );
-    }
-    assert!(
-        !issues.is_empty(),
-        "若这两类缺口已被补上（差异归零），请同步删除本 allow-list 与本用例的说明"
-    );
-}
+//
+// 原用例把「默认读路径仍是 legacy blob 快照」且与 fold 只差 `history_nodes` /
+// `turn_trace_history` 两类缺口**登记在案**，并写明「若这两类缺口已被补上（差异归零），
+// 请同步删除本 allow-list 与本用例的说明」。
+//
+// ADR 0099 阶段 2-D 已完成该条件：`sessions.session_data` 对有日志会话说**停写整包 blob**
+// （只留轻量索引行），索引视图的内容改由索引自己的 `normalized_*` 投影补全 ⇒
+// `session_parity_issues(fold, 索引视图)` 归零，缺口登记表随之失去对象，故按原文案移除此用例。
+//
+// 新的守卫点在 `tests/session_stop_blob_write.rs`：它钉住「blob 不再增长 + 索引视图
+// 仍能给出完整内容 + 日志不可用时降级不空壳」这三条 2-D 的替代事实。
 
 // ---------------------------------------------------------------------------
 // 附加：日志读侧与 fold 的契约（撕裂尾行 / 未知命令 fail loud）

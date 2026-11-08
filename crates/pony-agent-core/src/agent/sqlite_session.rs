@@ -939,7 +939,7 @@ impl SqliteSessionBackend {
         session: &SessionState,
     ) -> Result<(), String> {
         // ADR 0099 阶段 0（E3）：单行写顺带把 `version` 单调 +1（CAS 版本前进点）。
-        commit::upsert_session_row_bump(tx, session_id, session)
+        self.upsert_session_row_bump(tx, session_id, session)
     }
 
     /// PA-095 #7（实施后审核 P1）：读侧水合——ref-only 行按引用还原 observation
@@ -1797,6 +1797,14 @@ impl SqliteSessionBackend {
                 .map_err(|e| format!("read blob {session_id}: {e}"))?;
             let session: crate::agent::session::SessionState =
                 serde_json::from_str(&data).map_err(|e| format!("parse blob {session_id}: {e}"))?;
+            // 阶段 2-D：轻量索引行没有历史内容，反推只会得到零条却写 "done" 标记（伪装成
+            // 「回填完成」）⇒ 显式跳过且不落标记（真源是日志，不在本函数职责内）。
+            if commit::is_index_only_row(&data) {
+                eprintln!(
+                    "[pony-agent][session] turn_event_backfill_skip: session={session_id} 是轻量索引行（blob 已停写），跳过"
+                );
+                continue;
+            }
             let events = derive_events_from_session(&session);
             let tx = conn
                 .unchecked_transaction()
@@ -1857,7 +1865,7 @@ impl SqliteSessionBackend {
                 event_watermark: 0,
                 last_commit_watermark: 0,
             };
-            commit::upsert_session_row_bump(tx, session_id, &session)
+            self.upsert_session_row_bump(tx, session_id, &session)
                 .map_err(|e| format!("insert blob: {e}"))?;
             return Ok(());
         }
@@ -2546,6 +2554,11 @@ impl SqliteSessionBackend {
     /// 运行时读路径一律走 `SessionBackend::load_store`：它在本函数之上叠加
     /// 「日志 fold ∪ 索引 grandfather」（ADR 0099 D1）。把索引当真相正是本阶段要消灭的东西，
     /// 所以这里刻意**不**叫 `load_store`，也不给它加日志合并逻辑。
+    ///
+    /// **阶段 2-D 的已知形态（不是缺陷）**：停写 blob 后，有日志会话的行是「轻量索引行」，
+    /// 本函数对它们只给出索引字段；完整内容由调用方用
+    /// [`SqliteSessionBackend::fill_index_only_rows_from_index_projection`] 从索引自己的
+    /// `normalized_*` 投影补全（**依旧不读日志**——本函数是「索引原样」的最窄定义）。
     pub fn load_index_store(&self) -> Option<PersistedStore> {
         eprintln!(
             "[pony-agent][session] loading sessions from SQLite index only {}",
@@ -2773,26 +2786,34 @@ impl SessionBackend for SqliteSessionBackend {
         }
     }
 
-    /// **运行时读路径**（ADR 0099 D1 / 阶段 2-B）：**日志为真源**。
+    /// **运行时读路径**（ADR 0099 D1 / 阶段 2-B / 2-D）：**日志为真源**。
     ///
     /// 层次（顺序有意义）：
     /// 1. 取索引原样视图（`load_index_store`）——存量会话（无日志）由它 grandfather 出来；
-    /// 2. 叠加日志 fold：有日志的会话以日志为准（同 id 覆盖索引行），日志墓碑则从视图移除；
-    /// 3. 折叠超预算 ⇒ 降级为「只读索引」（记 `session_fold_slow`，下轮再补）。
+    /// 2. 叠加日志 fold：有日志的会话**日志无条件为准**（阶段 2-D 删除 `updated_at_ms` 定序）；
+    /// 3. 折叠超预算 / 日志根不可读 / 单会话 fold 失败 ⇒ 回落索引侧 `normalized_*` 投影。
     ///
     /// **存储级只读句柄不合并日志**（`new_read_only`：维护 / `--dry-run` / 双读比对基准）：
-    /// 那条口径必须面对「索引原样」，否则 `rebuild_index` 的 `mismatched` 会退化成
-    /// 「fold 与 fold 比」的恒零。
+    /// 否则 `rebuild_index` 的 `mismatched` 会退化成「fold 与 fold 比」的恒零。
+    /// 停写 blob 后它同样需要投影补全（否则只读句柄只能看到索引字段），补全**不读日志**，
+    /// 独立观察者语义不变。
     fn load_store(&self) -> Option<PersistedStore> {
-        // 运行时读路径：**日志为真源**。存储级只读句柄（维护 / `--dry-run` / 双读比对基准）
-        // 保持索引原样，见 `load_index_store`。
         let mut store = self.load_index_store()?;
-        if !self.storage_read_only {
-            crate::agent::session::fold::merge_log_truth_into_sessions(
-                &self.session_log_root(),
-                &mut store.sessions,
-            );
+        if self.storage_read_only {
+            let covered = std::collections::HashSet::new();
+            self.fill_index_only_rows_from_index_projection(&mut store.sessions, &covered);
+            return Some(store);
         }
+        let outcome = crate::agent::session::fold::merge_log_truth_into_sessions(
+            &self.session_log_root(),
+            &mut store.sessions,
+        );
+        // 索引侧内容补全：**凡日志没有给出的轻量索引行**（降级 / fold 失败 / 日志不可读）回落
+        // 到索引自己的 `normalized_*` 投影；正常路径 `covered` 覆盖全部轻量行 ⇒ 提前返回。
+        let covered: std::collections::HashSet<String> = outcome.folded.iter().cloned().collect();
+        self.fill_index_only_rows_from_index_projection(&mut store.sessions, &covered);
+        // 索引独有的 trace 投影（observation 外置载荷/引用）日志没有载体 ⇒ 从索引补回。
+        self.attach_index_trace_projections(&mut store.sessions, &covered);
         Some(store)
     }
 
@@ -2853,7 +2874,7 @@ impl SessionBackend for SqliteSessionBackend {
         // ADR 0099 阶段 0（I2 / BLOCKING-1）：必须走带 `version` 的写路径。此前的
         // 4 列 `INSERT OR REPLACE` 会把 version 重置为 DEFAULT 0（ABA），使
         // expected=0 的旧快照在单行写之后**再次通过 CAS** 并覆盖新 turn。
-        if let Err(e) = commit::upsert_session_row_bump(&tx, session_id, session) {
+        if let Err(e) = self.upsert_session_row_bump(&tx, session_id, session) {
             eprintln!("[pony-agent][session] SQLite upsert session error: {e}");
             return false;
         }

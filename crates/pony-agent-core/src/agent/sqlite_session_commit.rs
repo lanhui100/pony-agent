@@ -142,37 +142,360 @@ pub(crate) fn read_session_version(
     .map_err(|error| format!("read session version: {error}"))
 }
 
-/// 单会话 blob 行写入：内容按 `session` 覆盖，`version` 单调 +1（CAS 的版本前进点）。
+// ---------------------------------------------------------------------------
+// ADR 0099 阶段 2-D：停写整包 blob（有日志的会话只写「轻量索引行」）
+// ---------------------------------------------------------------------------
+//
+// ## 契约（本文件是唯一落地点，所有 `sessions` 行写入口都经 `upsert_session_row_bump`）
+//
+// - **有日志文件**的会话：`sessions.session_data` 只写**索引字段**（会话标识 + 标题 +
+//   时间 + `list_sessions` 真正消费的派生字段），不再写整包 `SessionState`。真源是日志，
+//   blob 每轮重写 5 MB 的写放大由此消失。
+// - **无日志文件**的会话（存量 grandfather）：**原样写整包 blob**，行为零变化。
+//
+// ## `session_data NOT NULL` 的处置：选择「哨兵值」而不是「放宽为可空」
+//
+// - `ALTER TABLE … ALTER COLUMN` 在 SQLite 里**不可用**（只能靠表重建），而表重建要复制
+//   `sessions` 全表并重挂视图（PA-089 6a 的 `sessions` 是视图形态），迁移失败面远大于收益；
+// - 更关键的是**旧读者安全**：放宽为 `NULL` 后，既有 `SELECT session_data` 路径会在运行中
+//   撞上 `row.get::<_, String>(1)` 的类型错误（`InvalidColumnType`），那是真崩溃；
+// - 哨兵方案写的是**一条合法 JSON**，且额外只加一个**未知键**
+//   `"__index_only": true`（`SessionState` 未声明该字段，serde 默认忽略未知字段）⇒
+//   任何既有「读 blob 反序列化」的路径都照常解析成功，只是拿到一份**只有索引字段**的状态，
+//   不会 panic、不会 `Err`、不会把会话从列表里弄丢。
+//
+// 因此本阶段**不改 DDL**（`NOT NULL` 保留），迁移兼容性问题归零：老库（`NOT NULL` 形态）
+// 打开后写入新会话不报错，新库也不存在「列可空」这一分叉。
+
+/// 轻量索引行的标记键（`session_data` JSON 里额外的一个**未知字段**）。
+pub(crate) const INDEX_ONLY_ROW_MARKER: &str = "__index_only";
+
+/// 该 `session_data` 是否是「已停写 blob 的轻量索引行」。
 ///
-/// `sessions` 无 `version` 列（PA-089 6a 视图形态）时退化为既有 4 列 `INSERT OR REPLACE`。
-pub(crate) fn upsert_session_row_bump(
-    conn: &Connection,
-    session_id: &str,
-    session: &SessionState,
-) -> Result<(), String> {
-    let data = serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
-    let title = session.title.as_str();
-    let updated_at_ms = session.updated_at_ms as i64;
-    if version_column_state(conn)? {
-        let updated = conn
-            .execute(
-                "UPDATE sessions
-                    SET title = ?2, updated_at_ms = ?3, session_data = ?4, version = version + 1
-                  WHERE conversation_id = ?1",
-                params![session_id, title, updated_at_ms, data],
-            )
-            .map_err(|e| format!("upsert session row: {e}"))?;
-        if updated > 0 {
-            return Ok(());
+/// 只看标记键（不整份反序列化）：索引行本身的解析开销要留在读路径之外。
+pub(crate) fn is_index_only_row(raw: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => value
+            .get(INDEX_ONLY_ROW_MARKER)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        // 解析不了的行不是「轻量索引行」——它是坏行（另一类问题，交给既有路径处理）。
+        Err(_) => false,
+    }
+}
+
+/// 轻量索引行的 payload：**只保留索引字段**，内容字段全部清空。
+///
+/// 字段取舍＝「谁真的在消费」：
+/// - `title` / `title_override` / `summary` / `turn_count` / `last_referenced_file` /
+///   `updated_at_ms` / `archived` / `workspace_id`：`list_sessions()`（侧边栏）逐字段消费；
+/// - `trace_migration_state`：读路径的**投影形态**（日志里没有承载它的命令），
+///   `fold::apply_index_projection` 会从索引行继承；
+/// - 其余（history / traces / nodes / branches / cursor / memory / transcript）**一律不写**：
+///   它们随轮次增长，正是本阶段要消灭的增长源，且日志真源已经承载。
+fn index_only_row_payload(session: &SessionState) -> Result<String, String> {
+    let row = SessionState {
+        conversation_id: session.conversation_id.clone(),
+        title: session.title.clone(),
+        summary: session.summary.clone(),
+        // 内容字段一律清空（见函数 doc：它们随轮次增长，日志真源已承载）。
+        history: Vec::new(),
+        provider_native_transcript: Vec::new(),
+        turn_trace_history: Vec::new(),
+        trace_migration_state: session.trace_migration_state.clone(),
+        turn_trace_refs: None,
+        long_term_memory_entries: Vec::new(),
+        memory_write_evidence: Vec::new(),
+        memory_write_hook_trace_records: Vec::new(),
+        history_state_evidence: Vec::new(),
+        turn_count: session.turn_count,
+        last_referenced_file: session.last_referenced_file.clone(),
+        updated_at_ms: session.updated_at_ms,
+        history_nodes: Vec::new(),
+        history_branches: Vec::new(),
+        history_cursor: Default::default(),
+        event_watermark: 0,
+        last_commit_watermark: 0,
+        workspace_id: session.workspace_id.clone(),
+        title_override: session.title_override.clone(),
+        archived: session.archived,
+    };
+    // 标记键刻意放在**未知字段**位（`SessionState` 没有它）：老读者 serde 忽略，
+    // 新读者用它区分「整包 blob」与「轻量索引行」。
+    let mut value =
+        serde_json::to_value(&row).map_err(|e| format!("serialize index row: {e}"))?;
+    match &mut value {
+        serde_json::Value::Object(map) => {
+            map.insert(
+                INDEX_ONLY_ROW_MARKER.to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        _ => return Err("index row is not a JSON object".to_string()),
+    }
+    serde_json::to_string(&value).map_err(|e| format!("encode index row: {e}"))
+}
+
+impl SqliteSessionBackend {
+    /// 该会话是否**已有真源日志文件**（决定索引行写整包 blob 还是轻量索引行）。
+    ///
+    /// 直接看文件存在性，而不是看内存里的写者缓存：**跨进程/重启后**日志是否已存在
+    /// 只能由磁盘回答；本批 `persist_commands_batch` 也是「先写日志（含 fsync）、
+    /// 后写 SQLite 索引」，所以索引写入时点文件一定已经落盘。
+    pub(crate) fn session_has_log(&self, session_id: &str) -> bool {
+        self.session_log_sink
+            .log_path(session_id)
+            .map(|path| path.is_file())
+            .unwrap_or(false)
+    }
+
+    /// 单会话索引行写入：内容按 `session` 覆盖，`version` 单调 +1（CAS 的版本前进点）。
+    ///
+    /// 内容形态见模块顶部「阶段 2-D」段：有日志 ⇒ 轻量索引行；无日志 ⇒ 整包 blob
+    /// （grandfather，行为与停写前逐字节一致）。
+    ///
+    /// `sessions` 无 `version` 列（PA-089 6a 视图形态）时退化为既有 4 列 `INSERT OR REPLACE`。
+    pub(crate) fn upsert_session_row_bump(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        session: &SessionState,
+    ) -> Result<(), String> {
+        if self.session_has_log(session_id) {
+            let payload = index_only_row_payload(session)?;
+            return self.write_session_row(conn, session_id, session, &payload);
+        }
+        let payload =
+            serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
+        self.write_session_row(conn, session_id, session, &payload)
+    }
+
+    /// **显式整包 blob** 写行：只给「一次性迁移 / 回填」入口用（目前是
+    /// `backfill_orphan_sessions`，契约 I4 要求回填后的 blob 行与 `normalized_*` 一致）。
+    ///
+    /// 常规写路径**不得**调用它：停写 blob 的意义就是不让每轮 turn 重写整包快照；
+    /// 回填是「把旧数据搬进索引」的维护动作，不是热路径，故显式保留整包语义。
+    pub(crate) fn upsert_session_row_bump_with_full_blob(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        session: &SessionState,
+    ) -> Result<(), String> {
+        let payload =
+            serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
+        self.write_session_row(conn, session_id, session, &payload)
+    }
+
+    /// 行写入本体（`version` CAS 前进点 + 4 列退化路径）。payload 由调用方决定。
+    fn write_session_row(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        session: &SessionState,
+        payload: &str,
+    ) -> Result<(), String> {
+        let data = payload;
+        let title = session.title.as_str();
+        let updated_at_ms = session.updated_at_ms as i64;
+        if version_column_state(conn)? {
+            let updated = conn
+                .execute(
+                    "UPDATE sessions
+                        SET title = ?2, updated_at_ms = ?3, session_data = ?4, version = version + 1
+                      WHERE conversation_id = ?1",
+                    params![session_id, title, updated_at_ms, data],
+                )
+                .map_err(|e| format!("upsert session row: {e}"))?;
+            if updated > 0 {
+                return Ok(());
+            }
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, title, updated_at_ms, data],
+        )
+        .map_err(|e| format!("insert session row: {e}"))?;
+        Ok(())
+    }
+
+    /// 与 [`Self::upsert_session_row_bump`] 同义（行写入本体见 `write_session_row`）。
+
+    /// 把索引侧的 **observation 投影**补到日志 fold 出的 trace 行上（PA-095 #7 / 阶段 2-D）。
+    ///
+    /// 背景：`buildContextObservation` 的外置是「flush 与回填同事务」写在**索引行**上的
+    /// （`buildContextObservations` 表 + trace 行的 `buildContextObservationRef`），
+    /// 日志命令流里没有承载它的命令。停写 blob 之后，日志 fold 出的 trace 行不带 ref，
+    /// 重启后 trace 面板会读不到这次调用的上下文载荷 —— 那是真数据丢失，不是「索引退为索引」。
+    ///
+    /// 注意方向：这里**只补索引独有的投影字段**（`buildContextObservationRef` /
+    /// `buildContextObservation`），内容字段一个都不覆盖（trace 内容仍以日志为准）。
+    pub(crate) fn attach_index_trace_projections(
+        &self,
+        sessions: &mut HashMap<String, SessionState>,
+        targets: &HashSet<String>,
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        let slot = match self.connection() {
+            Ok(slot) => slot,
+            Err(error) => {
+                eprintln!(
+                    "[pony-agent][session] trace_projection_skipped: 连接不可用（{error}）"
+                );
+                return;
+            }
+        };
+        let Some(conn) = slot.as_ref() else {
+            return;
+        };
+        for session_id in targets {
+            let Some(session) = sessions.get_mut(session_id.as_str()) else {
+                continue;
+            };
+            let needs_projection = session
+                .turn_trace_history
+                .iter()
+                .any(|trace| {
+                    trace.build_context_observation_ref.is_none()
+                        && trace.build_context_observation.is_none()
+                });
+            if !needs_projection {
+                continue;
+            }
+            let Ok(index_traces) = self.read_session_traces(conn, session_id) else {
+                continue;
+            };
+            if index_traces.is_empty() {
+                continue;
+            }
+            let by_turn: HashMap<&str, &TurnTraceRecord> = index_traces
+                .iter()
+                .map(|trace| (trace.turn_id.as_str(), trace))
+                .collect();
+            for trace in &mut session.turn_trace_history {
+                let Some(indexed) = by_turn.get(trace.turn_id.as_str()) else {
+                    continue;
+                };
+                if trace.build_context_observation_ref.is_none() {
+                    trace.build_context_observation_ref =
+                        indexed.build_context_observation_ref.clone();
+                }
+                if trace.build_context_observation.is_none() {
+                    trace.build_context_observation =
+                        indexed.build_context_observation.clone();
+                }
+            }
         }
     }
-    conn.execute(
-        "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![session_id, title, updated_at_ms, data],
-    )
-    .map_err(|e| format!("insert session row: {e}"))?;
-    Ok(())
+
+    /// 索引里「已停写 blob 的轻量行」的会话 id（`instr` 前缀过滤，不整份反序列化）。
+    fn index_only_row_ids(conn: &Connection) -> Result<Vec<String>, String> {
+        let mut statement = conn
+            .prepare(
+                "SELECT conversation_id FROM sessions WHERE instr(session_data, ?1) > 0",
+            )
+            .map_err(|e| format!("prepare index-only row scan: {e}"))?;
+        let needle = format!("\"{INDEX_ONLY_ROW_MARKER}\"");
+        let rows = statement
+            .query_map(params![needle], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("query index-only rows: {e}"))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|e| format!("read index-only row id: {e}"))?);
+        }
+        Ok(ids)
+    }
+
+    /// 用**索引自己的 `normalized_*` 投影**补全轻量索引行的内容。
+    ///
+    /// ## 不变量（硬约束，改动前先读）
+    ///
+    /// 本函数**只读 SQLite 索引**：不打开日志、不 fold、不碰 `session_log_root()`。
+    /// 「索引原样视图」必须保持**独立观察者**语义——否则 `rebuild_index` 的双读比对会退化成
+    /// 「fold 与 fold 比」的恒零，`load_store` 的日志合并也失去可证伪性。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// 停写 blob 之后，有日志会话的索引行只剩索引字段；但索引侧**本来就有一份完整投影**
+    /// （`persist_commands_batch` 的 `apply_persist_command_tx` 写 `normalized_*`）。
+    /// 因此「索引可读」这条承诺仍然成立：轻量行 + 规范化投影 = 完整会话。
+    ///
+    /// ## 何时调用（调用点决定语义，改动时同步核对）
+    ///
+    /// - `load_store` 的**维护/只读句柄**（`new_read_only`：诊断、`--dry-run`、测试夹具）；
+    /// - `load_store` 的**降级分支**（日志根不可读 / 折叠超预算 / 单会话 fold 失败）——
+    ///   「日志读不到」必须回落到一份**有内容**的索引，而不是回落到空壳行；
+    /// - `rebuild_index` 的双读比对基准（`fold.rs`）。
+    ///
+    /// `covered` = 本轮**已由日志 fold 提供**的会话（内容以日志为准，不得被索引覆盖）；
+    /// 投影里没有内容（无 `normalized_*` 行）的会话**保持轻量行**，不回退成空会话。
+    pub(crate) fn fill_index_only_rows_from_index_projection(
+        &self,
+        sessions: &mut HashMap<String, SessionState>,
+        covered: &HashSet<String>,
+    ) {
+        if sessions.is_empty() {
+            return;
+        }
+        let slot = match self.connection() {
+            Ok(slot) => slot,
+            Err(error) => {
+                eprintln!(
+                    "[pony-agent][session] index_projection_skipped: 连接不可用（{error}）；轻量索引行保持原样"
+                );
+                return;
+            }
+        };
+        let Some(conn) = slot.as_ref() else {
+            return;
+        };
+        let ids = match Self::index_only_row_ids(conn) {
+            Ok(ids) => ids,
+            Err(error) => {
+                eprintln!(
+                    "[pony-agent][session] index_projection_skipped: 轻量行扫描失败（{error}）"
+                );
+                return;
+            }
+        };
+        let targets: Vec<String> = ids
+            .into_iter()
+            .filter(|session_id| sessions.contains_key(session_id) && !covered.contains(session_id))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let Some(projection) = self.load_store_normalized(conn) else {
+            eprintln!(
+                "[pony-agent][session] index_projection_skipped: 规范化投影不可读；{} 个轻量索引行保持原样",
+                targets.len()
+            );
+            return;
+        };
+        let mut filled = 0usize;
+        for session_id in targets {
+            let Some(state) = projection.sessions.get(&session_id) else {
+                continue;
+            };
+            // 投影侧是空会话（没有任何 normalized 行）⇒ 保留轻量行（它有标题/时间，
+            // 比一条空会话更有用；空会话会让侧边栏多出一条「新对话」）。
+            if state.history.is_empty()
+                && state.history_nodes.is_empty()
+                && state.turn_trace_history.is_empty()
+            {
+                continue;
+            }
+            sessions.insert(session_id, state.clone());
+            filled += 1;
+        }
+        if filled > 0 {
+            eprintln!(
+                "[pony-agent][session] index_projection_filled: {filled} 个轻量索引行由 normalized_* 投影补全"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -559,7 +882,8 @@ impl SqliteSessionBackend {
                 continue;
             }
             let prepared = prepare_session_for_row(session_id, session);
-            upsert_session_row_bump(&tx, session_id, &prepared).map_err(CommitFailure::other)?;
+            self.upsert_session_row_bump(&tx, session_id, &prepared)
+                .map_err(CommitFailure::other)?;
         }
         self.write_traces_and_metadata_tx(&tx, store, &tombstoned)
             .map_err(CommitFailure::other)?;
@@ -583,7 +907,7 @@ impl SqliteSessionBackend {
                 continue;
             }
             let prepared = prepare_session_for_row(session_id, session);
-            upsert_session_row_bump(tx, session_id, &prepared)?;
+            self.upsert_session_row_bump(tx, session_id, &prepared)?;
         }
         self.write_traces_and_metadata_tx(tx, store, skip)
     }
@@ -809,7 +1133,7 @@ impl SqliteSessionBackend {
                 let mut session = session.clone();
                 session.conversation_id = session_id.clone();
                 // 走统一单行写：新行 version 从 0 起，且绝不让既有行版本回退。
-                upsert_session_row_bump(&tx, session_id, &session)?;
+                self.upsert_session_row_bump_with_full_blob(&tx, session_id, &session)?;
             }
             tx.commit().map_err(|e| format!("commit: {e}"))?;
         }
@@ -918,7 +1242,7 @@ impl SqliteSessionBackend {
             ],
         )
         .map_err(|e| format!("update normalized session derivations: {e}"))?;
-        upsert_session_row_bump(&tx, session_id, state)?;
+        self.upsert_session_row_bump(&tx, session_id, state)?;
         tx.commit().map_err(|e| format!("commit rebuild tx: {e}"))
     }
 }

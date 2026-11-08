@@ -2125,6 +2125,11 @@ impl SessionStore {
     /// 会话重命名：写入独立 override 字段（每轮派生刷新不再冲掉）。
     /// 校验：trim 后非空、≤64 字符；会话必须已存在（不隐式创建）；同值重命名
     /// 视为成功 no-op。
+    /// 元数据真源追加（阶段 2-D）：见 `fold::persist_session_meta_command`。
+    fn persist_session_meta_command(&self, session_id: &str) {
+        super::fold::persist_session_meta_command(self.backend.as_ref(), session_id, &self.sessions);
+    }
+
     pub fn rename_session(&mut self, session_id: &str, title: &str) -> Result<(), String> {
         let trimmed = crate::agent::workspace::validate_display_name(title)
             .map_err(|error| format!("会话重命名非法：{error}"))?;
@@ -2134,6 +2139,7 @@ impl SessionStore {
             .ok_or_else(|| format!("会话不存在：{session_id}"))?;
         if session.title_override.as_deref() != Some(trimmed.as_str()) {
             session.title_override = Some(trimmed);
+            self.persist_session_meta_command(session_id);
             self.save_to_backend();
         }
         Ok(())
@@ -2148,6 +2154,7 @@ impl SessionStore {
             .ok_or_else(|| format!("会话不存在：{session_id}"))?;
         if !session.archived {
             session.archived = true;
+            self.persist_session_meta_command(session_id);
             self.save_to_backend();
         }
         Ok(())
@@ -2161,6 +2168,7 @@ impl SessionStore {
             .ok_or_else(|| format!("会话不存在：{session_id}"))?;
         if session.archived {
             session.archived = false;
+            self.persist_session_meta_command(session_id);
             self.save_to_backend();
         }
         Ok(())
@@ -2582,6 +2590,14 @@ impl SessionStore {
                     return;
                 }
                 // 命令失败 → 回退全量路径（不丢数据）
+            }
+            // 阶段 2-D：`ReplaceAll` 改走日志命令流（以前只写 blob ⇒ 停写 blob 后图状态会丢）。
+            if matches!(mutation, SessionTraceMutation::ReplaceAll { .. })
+                && super::fold::persist_graph_projection_commands(
+                    self.backend.as_ref(), session_id, session, &effective_mutation,
+                )
+            {
+                return;
             }
         }
         let result = if session_is_persistable(session) {
@@ -3592,18 +3608,8 @@ fn bind_unanchored_memory_write_evidence_to_history_node(
     node.memory_write_evidence = evidence;
 }
 
-pub(in crate::agent::session) fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
-    session.title = node.title.clone();
-    session.summary = node.summary.clone();
-    session.history = node.history.clone();
-    session.provider_native_transcript = node.provider_native_transcript.clone();
-    session.turn_trace_history = node.turn_trace_history.clone();
-    session.long_term_memory_entries = node.long_term_memory_entries.clone();
-    session.memory_write_evidence = node.memory_write_evidence.clone();
-    session.memory_write_hook_trace_records = node.memory_write_hook_trace_records.clone();
-    session.turn_count = node.turn_count;
-    session.last_referenced_file = node.last_referenced_file.clone();
-}
+/// 节点快照 → 会话内存态（**投影规则**，实作在 `fold`：读路径与写路径共用同一份语义）。
+pub(in crate::agent::session) use super::fold::hydrate_session_from_node;
 
 /// PA-093：引用化节点 → 会话内存态（history/transcript/trace 由事件折叠提供，
 /// memory/摘要等节点元数据仍从节点拷贝；transcript 事件流不覆盖 → 引用化后为空，
