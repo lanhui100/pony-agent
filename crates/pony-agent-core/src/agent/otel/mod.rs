@@ -250,9 +250,21 @@ pub const ATTR_AGENT_TURN_PHASE: &str = "agent.turn.phase";
 /// [`crate::agent::ponysentry::sanitize`]；成功/取消轮不输出该键。
 pub const ATTR_AGENT_TURN_FAILED_REASON: &str = "agent.turn.failed_reason";
 
-/// turn 终态错误聚合结论（PA-154）：**仅**本轮聚合到子 span 错误时输出（值固定 `error`）；
+/// turn 终态错误聚合结论（PA-154 / r1-dim6 F3）：**仅**本轮聚合到子 span 错误时输出。
+///
+/// 值域（r1-dim6 F3 起为单值语义，同一轮只出一个结局）：
+/// - `error`：轮次未正常收尾（`phase != completed` 且聚合到子 span 错误）；
+/// - `degraded`：`phase == completed` 但存在工具失败（降级完成，与
+///   [`ATTR_AGENT_TURN_DEGRADED`] 同源同值域；根 span `Status` 仍为 error）。
+///
 /// 全成功轮次**不输出该键**（保持「有 = 有错」的单义语义，避免污染失败率看板）。
 pub const ATTR_AGENT_TURN_OUTCOME: &str = "agent.turn.outcome";
+
+/// [`ATTR_AGENT_TURN_OUTCOME`] 取值：轮次失败（未正常收尾）。
+pub(crate) const TURN_OUTCOME_ERROR: &str = "error";
+
+/// [`ATTR_AGENT_TURN_OUTCOME`] 取值：降级完成（正常收尾但有工具失败）。
+pub(crate) const TURN_OUTCOME_DEGRADED: &str = "degraded";
 
 /// 工具执行状态（如 `success` / `failed`）。
 pub const ATTR_AGENT_TOOL_STATUS: &str = "agent.tool.status";
@@ -778,9 +790,15 @@ pub(crate) fn resolve_resource_attributes(
     let environment = override_value(ENV_PONY_OTEL_ENVIRONMENT)
         .unwrap_or_else(|| default_deployment_environment(cfg!(debug_assertions)).to_string());
     let mut attrs = vec![
-        (RESOURCE_SERVICE_VERSION.to_string(), service_version),
+        (RESOURCE_SERVICE_VERSION.to_string(), service_version.clone()),
         (RESOURCE_DEPLOYMENT_ENVIRONMENT.to_string(), environment),
         (RESOURCE_PONY_APP_NAME.to_string(), PONY_APP_NAME.to_string()),
+        // r1-dim6 F2：`langfuse.release` 此前只写在 span 属性。Langfuse 的
+        // `OtelIngestionProcessor.createTraceEvent` 取 `spanAttributes[RELEASE] ??
+        // resourceAttributes[RELEASE]`；浅 trace（由子 span 先到触发）不含该 span 属性，
+        // 后到的浅 trace 会把 trace.release 覆写为 null（实测 9/9）。resource 侧同值补齐后
+        // 两条路径都能取到；与 `service.version` 同源（ADR 0055 已定该语义）。
+        (ATTR_LANGFUSE_RELEASE.to_string(), service_version),
     ];
     let mut is_probe = false;
     if let Some(probe) = override_value(ENV_PONY_OTEL_PROBE) {
@@ -2286,6 +2304,12 @@ impl Drop for TurnTraceGuard {
         // 否则「completed + 工具失败」永远判不出来。
         let phase_snapshot = self.phase.clone();
         let phase_failed = self.phase.as_deref() == Some("failed");
+        // r1-dim6 F3：outcome 判定需要与 `degraded` 同源的失败计数（只读不清零 ⇒
+        // 下方 2416 行的读取仍取到同一值）。判定必须在 `self.phase.take()` 之前完成，
+        // 否则「completed + 工具失败」判不出来。
+        let tool_failures_snapshot = take_active_turn_tool_failures();
+        let completed_with_failures =
+            phase_snapshot.as_deref() == Some("completed") && tool_failures_snapshot > 0;
         if let Some(phase) = self.phase.take() {
             if let Some(span) = self.span.as_mut() {
                 if phase == "failed" {
@@ -2300,7 +2324,7 @@ impl Drop for TurnTraceGuard {
         if let Some(span) = self.span.as_mut() {
             match (phase_failed, aggregated_error) {
                 (true, reason) => {
-                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, "error"));
+                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, TURN_OUTCOME_ERROR));
                     // P0-3：失败轮把归因写到根 span —— 复用同一映射（含脱敏），不另写文案。
                     if let Some(value) = turn_failed_reason_value(reason.as_deref()) {
                         span.set_attribute(KeyValue::new(
@@ -2313,7 +2337,15 @@ impl Drop for TurnTraceGuard {
                     span.set_status(opentelemetry::trace::Status::error(
                         turn_error_status_message(&reason),
                     ));
-                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, "error"));
+                    // r1-dim6 F3：`phase=completed` 且有工具失败 ⇒ outcome 写「降级完成」，
+                    // 不再与 `degraded=true` 并存地写 `error`（同一轮一个结局单值）。
+                    // `Status` 仍置 error，Tempo 侧按根状态告警的能力不变。
+                    let outcome = if completed_with_failures {
+                        TURN_OUTCOME_DEGRADED
+                    } else {
+                        TURN_OUTCOME_ERROR
+                    };
+                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, outcome));
                 }
                 (false, None) => {}
             }
@@ -5049,11 +5081,12 @@ mod tests {
 
     // ------------------------------------------------ PA-153 · resource 归因（实现期单测）
 
-    /// PA-153：默认值 = crate 版本 + debug 构建 `development` + 稳定产品名 + 默认 client.kind=device。
+    /// PA-153：默认值 = crate 版本 + debug 构建 `development` + 稳定产品名 + 默认 client.kind=device
+    /// + r1-dim6 F2 的 `langfuse.release`（与 `service.version` 同源同值）。
     #[test]
     fn resource_attributes_default_to_crate_version_and_build_environment() {
         let attrs = resolve_resource_attributes(|_| None, None);
-        assert_eq!(attrs.len(), 4, "resource 归因包含四键：{attrs:?}");
+        assert_eq!(attrs.len(), 5, "resource 归因包含五键：{attrs:?}");
         assert_eq!(attrs[0].0, "service.version");
         assert_eq!(attrs[0].1, env!("CARGO_PKG_VERSION"));
         assert_eq!(attrs[1].0, "deployment.environment");
@@ -5063,8 +5096,11 @@ mod tests {
         );
         assert_eq!(attrs[2].0, "pony.app.name");
         assert_eq!(attrs[2].1, "pony-agent");
-        assert_eq!(attrs[3].0, "ingest.client.kind");
-        assert_eq!(attrs[3].1, INGEST_CLIENT_KIND_DEVICE);
+        // r1-dim6 F2：resource 侧必须携带 `langfuse.release`，且与 `service.version` 同源同值。
+        assert_eq!(attrs[3].0, ATTR_LANGFUSE_RELEASE);
+        assert_eq!(attrs[3].1, attrs[0].1);
+        assert_eq!(attrs[4].0, "ingest.client.kind");
+        assert_eq!(attrs[4].1, INGEST_CLIENT_KIND_DEVICE);
     }
 
     /// PA-153：两个 env（trim 后非空）各自覆盖默认，且互不影响。
@@ -5153,8 +5189,10 @@ mod tests {
             turn_error_status_message(TURN_ERROR_PREFIX_QUOTA_BLOCKED),
             "turn_error: quota_blocked"
         );
-        // 值契约：`agent.turn.outcome` 恒定取值 `error`（键名/值均须与冻结字面量一致）。
+        // 值契约：`agent.turn.outcome` 键名冻结；值域为单值结局（error / degraded，r1-dim6 F3）。
         assert_eq!(ATTR_AGENT_TURN_OUTCOME, "agent.turn.outcome");
+        assert_eq!(TURN_OUTCOME_ERROR, "error");
+        assert_eq!(TURN_OUTCOME_DEGRADED, "degraded");
         assert_eq!(TURN_ERROR_PREFIX_TOOL_FAILED, "tool_failed");
         assert_eq!(TURN_ERROR_PREFIX_QUOTA_BLOCKED, "quota_blocked");
     }

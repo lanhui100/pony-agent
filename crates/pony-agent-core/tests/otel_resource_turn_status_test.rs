@@ -15,7 +15,8 @@
 //!   避免 `set_var` 串味污染本文件的 resource 断言）。本文件不写进程 env，id 不重复声明。
 //! - **PA154-T1**（§2 T1 + Gate-1 A 契约演进）：failed tool span + `phase="completed"` ⇒
 //!   根 span `status.message` = `turn_error: tool_failed`（唯一前缀 + 归因标签），该前缀子串
-//!   **恰好 1 次**（子 span 既有文案不得含 `turn_error`）；`agent.turn.outcome` 值必须为 `error`。
+//!   **恰好 1 次**（子 span 既有文案不得含 `turn_error`）；`agent.turn.outcome` 值必须为
+//!   `degraded`（r1-dim6 F3：completed + 工具失败 = 降级完成，单值结局）。
 //! - **PA154-T2**（§2 T2 + Gate-1 A）：治理 block（`record_verdict(..., "block", ...)`）+
 //!   `phase="completed"` ⇒ 根 span `status.message` = `turn_error: quota_blocked`
 //!   （不得只靠裸 `quota_blocked`，那与 HEAD 既有 governance 子 span 混淆）；outcome 值 = `error`。
@@ -226,12 +227,17 @@ fn drain_wire(sink: JoinHandle<Vec<CapturedRequest>>) -> String {
 /// 与子 span 既有文案（`tool_failed` / `quota_blocked` 原始错误串）区分开。
 const TURN_ERROR_PREFIX: &str = "turn_error:";
 
-/// 定位 `agent.turn.outcome` 键并在其后的字节窗口内断言值字面量为 `error`。
+/// 定位 `agent.turn.outcome` 键并在其后的字节窗口内断言值字面量等于 `expected`。
 ///
 /// 为什么需要窗口断言（Gate-1 A [BLOCKING] #3）：只断言「键存在」无法证伪「值写错」
 ///（例如值写成 `success` / `tool_failed`）；protobuf 里 key 与 value 相邻落盘，
 /// 故取键后 16 字节窗口做值断言。窗口内还要求不出现 `success`，防止值被写成成功态。
-fn assert_turn_outcome_value_is_error(wire: &str, context: &str) {
+///
+/// r1-dim6 F3 契约演进（Lead 批准，见 `docs/audit/rounds/r1-dim6/proposals/r1-dim6.pa01a1ba70.md`）：
+/// 值域由「恒 `error`」扩为单值结局 `error` / `degraded` —— 「completed + 工具失败」
+/// 写 `degraded`，其余失败路径仍是 `error`。断言因此改为按用例传期望值，
+/// 语义强度不降：键仍须恰好一次、值仍须精确匹配、仍禁 `success`。
+fn assert_turn_outcome_value(wire: &str, context: &str, expected: &str) {
     let key = "agent.turn.outcome";
     let hits = wire.matches(key).count();
     assert_eq!(
@@ -243,8 +249,8 @@ fn assert_turn_outcome_value_is_error(wire: &str, context: &str) {
     let after = key_at + key.len();
     let window: String = wire[after..].chars().take(16).collect();
     assert!(
-        window.contains("error"),
-        "PA154[{context}]：`{key}` 的值必须是 `error`（键后 16 字节窗口 = `{window}`），body 片段：{}",
+        window.contains(expected),
+        "PA154[{context}]：`{key}` 的值必须是 `{expected}`（键后 16 字节窗口 = `{window}`），body 片段：{}",
         truncate_for_message(wire)
     );
     assert!(
@@ -410,8 +416,9 @@ fn pa154_t1_failed_tool_span_marks_turn_error() {
         truncate_for_message(&wire)
     );
 
-    // Assert 3：`agent.turn.outcome` 存在且**值 = error**（键存在不等于值正确）。
-    assert_turn_outcome_value_is_error(&wire, "T1");
+    // Assert 3：`agent.turn.outcome` 存在且**值 = degraded**（r1-dim6 F3：completed + 工具失败
+    // 是「降级完成」，不再是 error；键存在不等于值正确）。
+    assert_turn_outcome_value(&wire, "T1", "degraded");
 }
 
 #[test]
@@ -463,7 +470,7 @@ fn pa154_t2_governance_block_marks_turn_error() {
     );
 
     // Assert 3：`agent.turn.outcome` 存在且值 = error。
-    assert_turn_outcome_value_is_error(&wire, "T2");
+    assert_turn_outcome_value(&wire, "T2", "error");
 }
 
 #[test]
@@ -560,7 +567,7 @@ fn pa154_adv_failed_phase_without_child_error_keeps_semantics() {
     );
 
     // Assert 3：根 span 仍必须输出 `agent.turn.outcome` 且值 = error（phase=failed 也是错误轮次）。
-    assert_turn_outcome_value_is_error(&wire, "ADV");
+    assert_turn_outcome_value(&wire, "ADV", "error");
 
     // Assert 4：本轮没有任何工具失败，不得虚构工具失败归因。
     assert!(

@@ -611,12 +611,36 @@ fn host_timeout_marker(turn_id: &str, session_id: &str) -> Option<TurnStreamEven
 }
 
 /// 执行一轮 turn（有界），返回终态、退出码、结果封套与待写事件。
+/// 把 `-w` 绑定成会话的 workspace 归属（r1-dim6 F1 修复）。
+///
+/// 根因：`run_single_turn` 此前恒传 `workspace_id: None`，会话不盖章 ⇒
+/// `resolve_session_workspace_root` 回落注册表 `default`，宿主 `-w` 被覆盖
+/// （重放实测 9/9 会话 env cwd = 注册表 default，而非臂 worktree）。
+///
+/// 语义与 TUI 启动路径同构（`tui.rs:6995-6999`）：先 `ensure_workspace_for_root`
+/// 幂等登记 `-w` 指向的目录，再把返回的 `record.id` 作为 `TurnInput.workspace_id`
+/// 的唯一来源。登记失败 ⇒ 返回 `None` 并保持旧行为（不 panic，不静默换根）。
+fn bind_workspace_id(
+    control_plane: &HostControlPlane,
+    workspace: &std::path::Path,
+) -> Option<String> {
+    let root = workspace.display().to_string();
+    match control_plane.ensure_workspace_for_root(&root) {
+        Ok(record) => Some(record.id),
+        Err(error) => {
+            eprintln!("[ponycli] 工作区登记失败（沿用默认归属）：{error}");
+            None
+        }
+    }
+}
+
 fn run_single_turn(
     control_plane: &Arc<HostControlPlane>,
     args: &CliArgs,
     options: &HeadlessOptions,
     session_id: &str,
     prompt: &str,
+    workspace_id: Option<&str>,
 ) -> TurnExecution {
     let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
     let sink = Arc::new(CliTurnSink::new(options.output_format));
@@ -648,7 +672,7 @@ fn run_single_turn(
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
-            workspace_id: None,
+            workspace_id: workspace_id.map(str::to_string),
             plan_execution_approval: None,
             tool_authorization_mode: authorization,
         },
@@ -1516,6 +1540,8 @@ fn main() {
 
     let (control_plane, state_dir) = build_control_plane(&args);
     let control_plane = Arc::new(control_plane);
+    // r1-dim6 F1：把 `-w` 登记为 workspace 并作为会话归属的唯一来源（与 TUI 同构）。
+    let bound_workspace_id = bind_workspace_id(&control_plane, &args.workspace);
     let tracker = SessionTracker::new(&state_dir);
 
     let mut session_id = if let Some(res) = &args.resume_session_id {
@@ -1552,7 +1578,14 @@ fn main() {
 
     if let Some(prompt) = final_prompt {
         // 单发（无头）路径：退出码＝终态映射（契约 C2）。
-        let execution = run_single_turn(&control_plane, &args, &options, &session_id, &prompt);
+        let execution = run_single_turn(
+            &control_plane,
+            &args,
+            &options,
+            &session_id,
+            &prompt,
+            bound_workspace_id.as_deref(),
+        );
         flush_events(&execution.events);
         let exit_code = persist_turn_result(&execution, &options);
         finish(exit_code, observability);
@@ -1635,11 +1668,63 @@ fn main() {
             }
         }
 
-        let execution = run_single_turn(&control_plane, &args, &options, &session_id, trimmed);
+        let execution = run_single_turn(
+            &control_plane,
+            &args,
+            &options,
+            &session_id,
+            trimmed,
+            bound_workspace_id.as_deref(),
+        );
         flush_events(&execution.events);
         let _ = persist_turn_result(&execution, &options);
         // 交互式多轮：单轮失败不终止 REPL（退出码沿用基线语义 = 0）。
     }
 
     finish(ExitCode::Success, observability);
+}
+
+#[cfg(test)]
+mod workspace_binding_tests {
+    use super::*;
+
+    /// r1-dim6 F1 回归：`-w` 必须被登记成 workspace，且返回的 id 解析出的 root
+    /// 就是 `-w` 本身 —— 而不是注册表 `default`（缺陷形态：会话不盖章 ⇒ 回落 default，
+    /// 重放 9/9 会话的 env cwd 落在 `/home/dm/pony_agent`）。
+    #[test]
+    fn bind_workspace_id_maps_workspace_root_to_its_own_record() {
+        let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+        let raw = std::env::temp_dir().join(format!("ponycli-ws-bind-{}", std::process::id()));
+        std::fs::create_dir_all(&raw).expect("temp workspace");
+        let root = std::fs::canonicalize(&raw).unwrap_or(raw);
+
+        let runtime = AgentRuntimeBuilder::new()
+            .session_store(SessionStore::with_backend(Box::new(
+                FileSessionBackend::new(root.join("cli-sessions.json")),
+            )))
+            .workspace_root(root.clone())
+            .build();
+        let control_plane = HostControlPlaneBuilder::new().runtime(runtime).build();
+
+        let bound = bind_workspace_id(&control_plane, &root)
+            .expect("`-w` 必须能登记为 workspace（失败即 F1 未修复）");
+
+        let resolved = control_plane
+            .list_workspaces()
+            .into_iter()
+            .find(|record| record.id == bound)
+            .map(|record| record.root_path)
+            .expect("绑定 id 必须命中注册表记录");
+        assert_eq!(
+            std::fs::canonicalize(&resolved).unwrap_or_else(|_| PathBuf::from(&resolved)),
+            root,
+            "绑定 id 解析出的 root 必须是 `-w` 本身，不得是注册表 default"
+        );
+
+        // 幂等：同一 root 再绑定一次必须得到同一个 id（不新增记录）。
+        let again = bind_workspace_id(&control_plane, &root).expect("重复绑定必须成功");
+        assert_eq!(again, bound, "同一 root 的绑定必须幂等");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
