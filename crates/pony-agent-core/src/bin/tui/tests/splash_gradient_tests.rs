@@ -1,19 +1,20 @@
 //! 原 `tui.rs` 内联测试模块 `mod splash_gradient_tests`（Step1 机械外移）。
-//! ADR 0085 落地后扩为「生成物来源/尺寸 + AA 合成 + 真彩门禁 + 尺寸阶梯」一组门禁。
+//! ADR 0098 后扩为「生成物来源/尺寸 + 母版真色表 + AA 合成 + 真彩门禁 + 尺寸阶梯」一组门禁。
 
 use super::*;
 
-fn rgb_at(t: f32) -> [u8; 3] {
-    splash_gradient_rgb(t)
+/// 取覆盖率表里某个子像素的母版真色（越界返回画布色，便于断言不 panic）。
+fn master_rgb_at(cols: usize, rows: usize, rgb: &[u8], x: usize, y: usize) -> [u8; 3] {
+    assert!(x < cols && y < rows, "子像素坐标越界");
+    let base = (y * cols + x) * 3;
+    [rgb[base], rgb[base + 1], rgb[base + 2]]
 }
-
-// ── 生成物来源与尺寸（覆盖率表）──────────────────────────────────────────────
 
 /// 覆盖率表必须与生成脚本声明的档位尺寸严格一致，且带「禁止手改 / 来源 master」头注释。
 /// 这是「单一真值源 = 官方母版重采样」的编译期 + 运行期双重锚点。
 #[test]
 fn splash_coverage_tables_match_declared_dims() {
-    assert_eq!(splash_coverage::RICH_COLS, 27, "Rich 档列数");
+    assert_eq!(splash_coverage::RICH_COLS, 26, "Rich 档列数");
     assert_eq!(splash_coverage::RICH_ROWS, 30, "Rich 档子像素行数");
     assert_eq!(splash_coverage::COMPACT_COLS, 20, "Compact 档列数");
     assert_eq!(splash_coverage::COMPACT_ROWS, 22, "Compact 档子像素行数");
@@ -27,6 +28,17 @@ fn splash_coverage_tables_match_declared_dims() {
         splash_coverage::COMPACT_COVERAGE.len(),
         splash_coverage::COMPACT_COLS * splash_coverage::COMPACT_ROWS,
         "Compact 覆盖率表长度必须 = 列 × 子像素行"
+    );
+    // 真色表与覆盖率表同序、同基数：每子像素 3 字节。
+    assert_eq!(
+        splash_coverage::RICH_RGB.len(),
+        splash_coverage::RICH_COLS * splash_coverage::RICH_ROWS * 3,
+        "Rich 真色表长度必须 = 子像素数 × 3"
+    );
+    assert_eq!(
+        splash_coverage::COMPACT_RGB.len(),
+        splash_coverage::COMPACT_COLS * splash_coverage::COMPACT_ROWS * 3,
+        "Compact 真色表长度必须 = 子像素数 × 3"
     );
     // 子像素行必须为偶数（一个半块字符 = 上下 2 行）。
     assert_eq!(splash_coverage::RICH_ROWS % 2, 0);
@@ -46,13 +58,17 @@ fn splash_coverage_tables_match_declared_dims() {
         source.contains("RICH_COVERAGE") && source.contains("COMPACT_COVERAGE"),
         "覆盖率表必须同时导出 Rich / Compact 两档"
     );
+    assert!(
+        source.contains("RICH_RGB") && source.contains("COMPACT_RGB"),
+        "真色表必须同时导出 Rich / Compact 两档"
+    );
 }
 
 #[test]
 fn splash_logo_asset_decodes_for_image_protocol() {
-    // 位图由同一 master 生成，铺满 Rich 档字符矩形（27×15 格 × 8×16 像素 × 4 超采样）。
+    // 位图由同一 master 生成，铺满 Rich 档字符矩形（26×15 格 × 8×16 像素 × 4 超采样）。
     let img = image::load_from_memory(SPLASH_LOGO_PNG).expect("内嵌品牌标必须可解码");
-    assert_eq!((img.width(), img.height()), (864, 960));
+    assert_eq!((img.width(), img.height()), (832, 960));
 }
 
 #[test]
@@ -189,66 +205,147 @@ fn splash_probe_never_reads_stdin() {
     );
 }
 
-// ── 渐变投影 / 色标 / 平滑 ──────────────────────────────────────────────────
+// ── 母版真色表：配色即母版，不再走自造渐变 ─────────────────────────────────
 
+/// 真色表必须真的携带母版的彩色信息（而不是被画布色/单色渐变抹平）：
+/// 覆盖率 ≥50% 的子像素里，绝大多数必须有明显彩度，且色相分布同时覆盖紫系与暖金系。
 #[test]
-fn splash_diagonal_projection_spans_bbox() {
-    // `t` 为标记 bbox 的 45° 轴投影：左上角 = 0（暖金端），右下角 = 1（紫端）。
+fn splash_master_rgb_table_keeps_master_colors() {
     let cols = splash_coverage::RICH_COLS;
     let rows = splash_coverage::RICH_ROWS;
-    assert!((splash_diagonal_t(0, 0, cols, rows) - 0.0).abs() < 1e-6);
-    assert!((splash_diagonal_t(cols - 1, rows - 1, cols, rows) - 1.0).abs() < 1e-6);
-    // x、y 各自单调递增。
-    let mut prev = -1.0f32;
-    for x in 0..cols {
-        let t = splash_diagonal_t(x, 0, cols, rows);
-        assert!(t >= prev, "沿 x 必须单调不减");
-        prev = t;
-    }
-    let mut prev = -1.0f32;
+    let mut covered = 0usize;
+    let mut chromatic = 0usize;
+    let mut purple = 0usize;
+    let mut warm = 0usize;
+    let mut chroma_sum = 0usize;
+    let mut max_chroma = 0u8;
     for y in 0..rows {
-        let t = splash_diagonal_t(0, y, cols, rows);
-        assert!(t >= prev, "沿 y 必须单调不减");
-        prev = t;
+        for x in 0..cols {
+            let cov = splash_coverage::RICH_COVERAGE[y * cols + x];
+            if cov < 128 {
+                continue;
+            }
+            covered += 1;
+            let rgb = master_rgb_at(cols, rows, &splash_coverage::RICH_RGB, x, y);
+            let chroma = rgb.iter().max().unwrap() - rgb.iter().min().unwrap();
+            chroma_sum += chroma as usize;
+            max_chroma = max_chroma.max(chroma);
+            if chroma > 40 {
+                chromatic += 1;
+            }
+            if rgb[2] > rgb[0] {
+                purple += 1;
+            }
+            if rgb[0] > rgb[2] && rgb[1] > rgb[2] {
+                warm += 1;
+            }
+        }
     }
-}
-
-#[test]
-fn splash_gradient_uses_c2_endpoints() {
-    // C2 克制暖色三档：暖金 #ffc478 → 赤陶 #e96e54 → 紫 #965cdc。
-    assert_eq!(rgb_at(0.0), [255, 196, 120], "起点必须是暖金高光色标");
-    assert_eq!(rgb_at(1.0), [150, 92, 220], "终点必须是紫色标");
-    let start = srgb_to_oklab(rgb_at(0.0));
-    assert!(start[0] >= 0.85, "暖金高光亮度不足: {start:?}");
-    let end = srgb_to_oklab(rgb_at(1.0));
-    assert!(end[0] > 0.55, "紫色收尾过暗: {end:?}");
-    // 全程保持彩度，暖金→赤陶→紫中段不塌成发灰暗带。
-    let mut min_chroma = f32::MAX;
-    for step in 0..=256 {
-        let lab = srgb_to_oklab(rgb_at(step as f32 / 256.0));
-        min_chroma = min_chroma.min((lab[1] * lab[1] + lab[2] * lab[2]).sqrt());
-    }
+    assert!(covered > 200, "Rich 档有效子像素过少：{covered}");
+    let ratio = chromatic as f64 / covered as f64;
     assert!(
-        min_chroma >= 0.11,
-        "渐变出现低彩度灰带: min_chroma={min_chroma:.3}"
+        ratio >= 0.9,
+        "母版真色被抹平：彩度 >40 的比例仅 {ratio:.3}（{chromatic}/{covered}）"
+    );
+    let mean_chroma = chroma_sum as f64 / covered as f64;
+    assert!(
+        mean_chroma >= 90.0,
+        "母版真色平均彩度偏低：{mean_chroma:.1}（期望 ≥90，实测母版 124.7）"
+    );
+    assert!(max_chroma >= 150, "母版真色最高彩度偏低：{max_chroma}");
+    // 母版是「紫红丝带 + 暖金高光」，两个色系都必须占到可见份额。
+    let purple_ratio = purple as f64 / covered as f64;
+    let warm_ratio = warm as f64 / covered as f64;
+    assert!(
+        purple_ratio >= 0.15,
+        "紫系占比过低：{purple_ratio:.3}（母版实测 ≈0.30）"
+    );
+    assert!(
+        warm_ratio >= 0.15,
+        "暖金系占比过低：{warm_ratio:.3}（母版实测 ≈0.31）"
     );
 }
 
+/// 真色表必须与覆盖率表同源同序：完全未覆盖的子像素取画布色（不留脏数据），
+/// 且整表不得出现「覆盖率 0 却带彩度」的错位。
 #[test]
-fn splash_gradient_steps_are_smooth() {
-    // 1/256 采样下每通道跳变 ≤ 6/255：逐行过渡，不出现硬色带。
-    let mut prev = rgb_at(0.0);
-    for step in 1..=256 {
-        let t = step as f32 / 256.0;
-        let cur = rgb_at(t);
-        for (channel, (a, b)) in prev.iter().zip(cur.iter()).enumerate() {
-            let delta = (*a as i32 - *b as i32).abs();
-            assert!(
-                delta <= 6,
-                "t={t:.4} 通道 {channel} 跳变 {delta}: {prev:?} -> {cur:?}"
-            );
+fn splash_master_rgb_aligns_with_coverage() {
+    for (cols, rows, cov, rgb) in [
+        (
+            splash_coverage::RICH_COLS,
+            splash_coverage::RICH_ROWS,
+            &splash_coverage::RICH_COVERAGE[..],
+            &splash_coverage::RICH_RGB[..],
+        ),
+        (
+            splash_coverage::COMPACT_COLS,
+            splash_coverage::COMPACT_ROWS,
+            &splash_coverage::COMPACT_COVERAGE[..],
+            &splash_coverage::COMPACT_RGB[..],
+        ),
+    ] {
+        let mut empty = 0usize;
+        for y in 0..rows {
+            for x in 0..cols {
+                let idx = y * cols + x;
+                let color = master_rgb_at(cols, rows, rgb, x, y);
+                if cov[idx] == 0 {
+                    empty += 1;
+                    let chroma = color.iter().max().unwrap() - color.iter().min().unwrap();
+                    assert!(
+                        chroma <= 4,
+                        "覆盖率 0 的子像素 ({x},{y}) 却带彩度 {chroma}: {color:?}"
+                    );
+                }
+            }
         }
-        prev = cur;
+        assert!(
+            empty * 100 / cov.len() >= 30,
+            "轮廓外空白过少（覆盖率 0 仅 {empty}/{}），真色表可能错位",
+            cov.len()
+        );
+    }
+}
+
+/// 两个档位的真色表都必须与画布色有足够区分：合成后品牌画不能被画布吞掉。
+#[test]
+fn splash_master_rgb_differs_from_canvas() {
+    let canvas = SPLASH_CANVAS_RGB;
+    for (cols, rows, cov, rgb) in [
+        (
+            splash_coverage::RICH_COLS,
+            splash_coverage::RICH_ROWS,
+            &splash_coverage::RICH_COVERAGE[..],
+            &splash_coverage::RICH_RGB[..],
+        ),
+        (
+            splash_coverage::COMPACT_COLS,
+            splash_coverage::COMPACT_ROWS,
+            &splash_coverage::COMPACT_COVERAGE[..],
+            &splash_coverage::COMPACT_RGB[..],
+        ),
+    ] {
+        let mut distinct = 0usize;
+        for y in 0..rows {
+            for x in 0..cols {
+                if cov[y * cols + x] < 128 {
+                    continue;
+                }
+                let color = master_rgb_at(cols, rows, rgb, x, y);
+                let delta: i32 = color
+                    .iter()
+                    .zip(canvas.iter())
+                    .map(|(a, b)| (*a as i32 - *b as i32).abs())
+                    .sum();
+                if delta > 30 {
+                    distinct += 1;
+                }
+            }
+        }
+        assert!(
+            distinct >= 100,
+            "与画布色几乎无差别的子像素过多（仅 {distinct} 个有效色）"
+        );
     }
 }
 
@@ -299,12 +396,77 @@ fn splash_composite_soft_edges_exist() {
         "软边子像素过少：{partial} / {}",
         splash_coverage::RICH_COVERAGE.len()
     );
-    // 取一个真实的半覆盖值做合成，结果必须既不是画布色也不是满色。
-    let canvas = [18u8, 16, 14];
-    let grad = splash_gradient_rgb(0.5);
-    let mid = splash_composite_color(grad, 128, true);
-    assert_ne!(mid, canvas);
-    assert_ne!(mid, grad);
+    // 取一个真实的半覆盖值 + 真实母版色做合成，结果必须既不是画布色也不是满色。
+    let canvas = SPLASH_CANVAS_RGB;
+    let (idx, cov) = splash_coverage::RICH_COVERAGE
+        .iter()
+        .enumerate()
+        .find(|(_, &c)| c > 100 && c < 160)
+        .map(|(i, &c)| (i, c))
+        .expect("Rich 覆盖率表必须含半覆盖子像素");
+    let ink = [
+        splash_coverage::RICH_RGB[idx * 3],
+        splash_coverage::RICH_RGB[idx * 3 + 1],
+        splash_coverage::RICH_RGB[idx * 3 + 2],
+    ];
+    let mid = splash_composite_color(ink, cov, true);
+    assert_ne!(mid, canvas, "软边合成塌成画布色");
+    assert_ne!(mid, ink, "软边合成未向画布渐隐");
+    for channel in 0..3 {
+        let (m, i, c) = (mid[channel], ink[channel], canvas[channel]);
+        let lo = i.min(c);
+        let hi = i.max(c);
+        assert!(
+            m >= lo && m <= hi,
+            "通道 {channel} 的软边值 {m} 未落在 [{lo},{hi}] 区间"
+        );
+    }
+}
+
+// ── 位图路径：四种协议同源，halfblocks 不再被排除 ──────────────────────────
+
+/// `PONY_TUI_SPLASH_IMAGE_PROTOCOL` 必须把 `halfblocks` 映射为**启用半块位图协议**，
+/// 只有 `off` 关闭位图路径（ADR 0098：母版真色 + 满宽构图，普通终端同样受益）。
+#[test]
+fn splash_protocol_override_keeps_halfblocks_bitmap() {
+    assert_eq!(splash_protocol_override(Some("off")), Some(None));
+    assert_eq!(
+        splash_protocol_override(Some("halfblocks")),
+        Some(Some(ProtocolType::Halfblocks))
+    );
+    assert_eq!(
+        splash_protocol_override(Some("kitty")),
+        Some(Some(ProtocolType::Kitty))
+    );
+    assert_eq!(
+        splash_protocol_override(Some("sixel")),
+        Some(Some(ProtocolType::Sixel))
+    );
+    assert_eq!(
+        splash_protocol_override(Some("iterm2")),
+        Some(Some(ProtocolType::Iterm2))
+    );
+    // auto / 未知值一律交给无 I/O 环境判定。
+    assert_eq!(splash_protocol_override(None), None);
+    assert_eq!(splash_protocol_override(Some("auto")), None);
+    assert_eq!(splash_protocol_override(Some("")), None);
+}
+
+/// 位图构建不得再按协议类型提前放弃：halfblocks 与 kitty/sixel 共享同一张母版位图。
+/// 断言的是源码形态（`init_splash_image` 内不再出现按协议早退的分支）。
+#[test]
+fn splash_image_init_has_no_protocol_early_return() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/tui/splash.rs");
+    let source = std::fs::read_to_string(path).expect("读取 splash.rs 源码");
+    let start = source.find("pub fn init_splash_image").expect("必须存在 init_splash_image");
+    let body = &source[start..];
+    let end = body.find("\n}\n").expect("init_splash_image 必须有结束大括号");
+    let body = &body[..end];
+    let forbidden = ["protocol_type() ==", "Halfblocks {"].concat();
+    assert!(
+        !body.contains(&forbidden),
+        "init_splash_image 不得按协议早退（halfblocks 必须走位图）：命中 `{forbidden}`"
+    );
 }
 
 // ── 渲染栅格：行数 / 行宽不越界 ─────────────────────────────────────────────

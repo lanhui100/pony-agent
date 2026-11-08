@@ -1,6 +1,6 @@
 # ADR 0085：TUI 启动页品牌标改为「官方轮廓覆盖率重采样 + 双色 alpha 合成」
 
-Status: implemented
+Status: superseded by [0098](../0098-tui-splash-master-truecolor-bitmap-first.md)（配色真值源从自造 OKLab C2 渐变改为母版真色派生表；位图路径不再排除 halfblocks；Rich 档 27 列收为 26 列。轮廓覆盖率重采样、`▀` 双色合成、`COLORTERM` 真彩门禁、尺寸阶梯与 `--check` 幂等由 0098 承接）
 
 日期：2026-11-07
 真值源：`src-tauri/icons/icon-master-approved.png`（1024²，与 `icons/512x512.png`、`icons/icon.png` 同源）；

@@ -777,3 +777,27 @@ note: >-
       `http_client` 本次未改动。行为门的机械收口落在测试层——`tui/status_dwell.rs` 的 9 条单测
       （假时间驱动）与 `crates/pony-agent-core/tests/tui_process_fold_acceptance.rs::a15_folded_generation_keeps_tool_activity`。
 
+  【ADR 0098 归属登记（2026-11-08）｜启动页品牌标改用母版真色派生表 + 位图优先（含 halfblocks）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**终端渲染用的编译期常量与协议选择**，
+  无新增对外接口、网络 IO、后台任务、LLM 调用、依赖、env 契约或持久化 schema；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （理由与本文档维度声明同源：终端进程随用户启停、无常驻监听地址、无 Service，Prometheus pull 与
+      节点侧日志采集的结构前提不成立）。
+  (2) 本轮 N-A 的结构性理由：变更发生在**启动页一屏的静态绘制**——生成物
+      `crates/pony-agent-core/src/bin/tui/splash_coverage.rs` 只是编译期嵌入的覆盖率表与母版真色表，
+      `assets/splash-logo.png` 只是内嵌位图；`init_splash_image()` 仍是零 I/O 的纯环境判定
+      （ADR 0080 约束不变），不产生新的遥测事实、不新增指标/日志字段/Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：真值源从「自造 OKLab C2 渐变」改为官方母版图标派生的
+      「覆盖率表 + 逐子像素真色表」；`scripts/generate-splash-logo.py` 同步产出两份表与 832×960 位图，
+      `--check` 做漂移检测；`tui/splash.rs` 删除 `splash_gradient_rgb` / `srgb_to_oklab` / `splash_diagonal_t`；
+      `init_splash_image()` 删除 `ProtocolType::Halfblocks` 早退，`PONY_TUI_SPLASH_IMAGE_PROTOCOL`
+      的 `halfblocks` 语义由「关闭位图」改为「强制半块位图」，映射收敛为纯函数 `splash_protocol_override`；
+      品牌画矩形 28×11 → 26×15，Rich 档行阈值仍为 28。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——`cargo test --bin pony splash` 的 15 项，
+      含源码级守卫 `splash_probe_never_reads_stdin`、`splash_protocol_override_keeps_halfblocks_bitmap`、
+      `splash_image_init_has_no_protocol_early_return`、真色表与覆盖率表同序对齐
+      `splash_master_rgb_aligns_with_coverage`、母版色相分布 `splash_master_rgb_keeps_master_colors`、
+      生成物幂等 `generate_script_check_is_idempotent`。
+

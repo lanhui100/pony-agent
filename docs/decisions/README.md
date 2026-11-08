@@ -94,7 +94,6 @@
 - [0082 会话投影剔除宿主续轮提示：标题、轮次与 `/resume` 列表只认真实用户轮](0082-session-projection-excludes-host-continuation.md)
 - [0083 TUI 子会话导航：Ctrl+↑ 返回主会话、Ctrl+←/→ 切换队友、输入区身份徽标](0083-tui-sub-session-navigation-and-badge.md)
 - [0084 TUI header 指标双口径：`↑in` 当前上下文、`↓out` 与缓存命中率会话累计](0084-tui-metrics-dual-caliber-session-cumulative.md)
-- [0085 TUI 启动页品牌标改为官方轮廓覆盖率重采样 + 双色 alpha 合成](0085-tui-splash-logo-fidelity-and-antialiasing.md)
 - [0086 provider 上游失败分类补齐：边缘 5xx 与传输层标志纳入可重试](0086-provider-transport-and-edge-5xx-retry-classification.md)
 - [0087 CLI 自更新：`pony update` 走 GitHub Releases + 强制 sha256 + POSIX 原子替换](0087-cli-self-update.md)
 - [0088 TUI 用户消息上下各留 1 行页面底色间距](0088-tui-user-message-vertical-gap.md)
@@ -105,6 +104,7 @@
 - [0095 `pony update` 控制面改用空闲读超时 + 30s 总预算，body 读取纳入重试](0095-cli-update-control-plane-timeout.md)
 - [0096 TUI 状态行 min-dwell + 轮内工具活动聚合（折叠态「生成中」不再吞掉过程信息）](0096-tui-status-line-min-dwell-and-tool-activity.md)
 - [0097 `pony update` 同号不同内容不得谎报「已是最新」，发布侧清单版本必须严格递增](0097-cli-update-same-version-content-mismatch.md)
+- [0098 TUI 启动页品牌标改用母版真色派生表 + 位图优先（含 halfblocks）](0098-tui-splash-master-truecolor-bitmap-first.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)
@@ -121,6 +121,7 @@
 - [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](superseded/0009-workbench-ia-telemetry-page-and-config-tabs.md) —— 被 [0013](0013-workbench-nav-observation-entry-and-provider-hierarchy.md) 部分接替（入口决定修订，其余承接重述）
 - [0012 应用内更新检测：前端直连 GitHub Releases 与构造式发布页跳转](superseded/0012-app-update-check-via-github-releases.md) —— 被 [0017](0017-release-tag-convention-and-tauri-version-sync.md) 接替
 - [0069 初始化页品牌标走终端图形协议（sixel/kitty/iTerm2），字符画降级为回退](superseded/0069-tui-splash-image-protocol.md) —— 被 [0080](0080-tui-splash-protocol-env-only-detection.md) 接替（启动期 stdio 能力探测改为零 I/O 环境判定；图形协议 + 位图资产 + 字符画回退其余决定承接重述）
+- [0085 TUI 启动页品牌标改为官方轮廓覆盖率重采样 + 双色 alpha 合成](superseded/0085-tui-splash-logo-fidelity-and-antialiasing.md) —— 被 [0098](0098-tui-splash-master-truecolor-bitmap-first.md) 接替（配色真值源从自造 OKLab C2 渐变改为母版真色派生表；位图路径不再排除 halfblocks；Rich 档 27 列收为 26 列）
 
 ### 已拒绝
 

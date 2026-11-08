@@ -1,102 +1,14 @@
 //! 初始化页品牌标（原 `tui.rs` 内联实现，机械外移）。
-//! 三件事：轮廓数据（`splash_coverage.rs` 生成物）、OKLab 渐变 + 覆盖率抗锯齿、
-//! 终端图形协议判定（纯环境判定，**不触碰 stdin**）。全部无状态、可独立单测。
+//! 三件事：轮廓与配色数据（`splash_coverage.rs` 生成物：覆盖率表 + 母版真色表）、
+//! 覆盖率抗锯齿、终端图形协议判定（纯环境判定，**不触碰 stdin**）。全部无状态、可独立单测。
 
 use super::*;
 
 #[path = "splash_coverage.rs"]
 mod splash_coverage;
 
-/// sRGB 8bit 分量 → 线性光分量（IEC 61966-2-1 传输函数）。
-fn srgb_channel_to_linear(channel: u8) -> f32 {
-    let v = channel as f32 / 255.0;
-    if v <= 0.040_45 {
-        v / 12.92
-    } else {
-        ((v + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// 线性光分量 → sRGB 8bit 分量（夹取到 [0,255]，越界插值不会写坏终端色）。
-fn linear_channel_to_srgb(value: f32) -> u8 {
-    let v = value.clamp(0.0, 1.0);
-    let encoded = if v <= 0.003_130_8 {
-        v * 12.92
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
-}
-
-/// sRGB → OKLab（Björn Ottosson, 2020）：感知均匀空间，插值不经过发灰的暗带。
-fn srgb_to_oklab(rgb: [u8; 3]) -> [f32; 3] {
-    let r = srgb_channel_to_linear(rgb[0]);
-    let g = srgb_channel_to_linear(rgb[1]);
-    let b = srgb_channel_to_linear(rgb[2]);
-    let l = 0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_99 * b;
-    let m = 0.211_903_5 * r + 0.680_699_54 * g + 0.107_396_96 * b;
-    let s = 0.088_302_46 * r + 0.281_718_84 * g + 0.629_978_7 * b;
-    let (l_, m_, s_) = (l.cbrt(), m.cbrt(), s.cbrt());
-    [
-        0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_,
-        1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_,
-        0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_8 * s_,
-    ]
-}
-
-/// OKLab → sRGB（越界分量由 [`linear_channel_to_srgb`] 夹取）。
-fn oklab_to_srgb(lab: [f32; 3]) -> [u8; 3] {
-    let [l, a, b] = lab;
-    let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
-    let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
-    let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
-    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
-    [
-        linear_channel_to_srgb(4.076_741_7 * l3 - 3.307_711_6 * m3 + 0.230_969_93 * s3),
-        linear_channel_to_srgb(-1.268_438 * l3 + 2.609_757_4 * m3 - 0.341_319_4 * s3),
-        linear_channel_to_srgb(-0.004_196_086_3 * l3 - 0.703_418_6 * m3 + 1.707_614_7 * s3),
-    ]
-}
-
-/// 启动页品牌标渐变（C2 克制暖色，与 `mod theme`「单色为骨 + 单一强调色」一致）：
-/// 暖金 → 赤陶 → 紫。色标与 `scripts/generate-splash-logo.py` 的 `STOPS` 严格同源，禁止手改。
-const SPLASH_GRADIENT_STOPS: [(f32, [u8; 3]); 3] = [
-    (0.00, [255, 196, 120]), // #ffc478 暖金高光
-    (0.45, [233, 110, 84]),  // #e96e54 赤陶
-    (1.00, [150, 92, 220]),  // #965cdc 紫
-];
-
 /// 画布底色（必须等于 `theme::CANVAS`；既是 AA 合成的底色，也是位图底色）。
 const SPLASH_CANVAS_RGB: [u8; 3] = [18, 16, 14];
-
-/// 主对角线渐变采样：`t` 已归一化到掩码实际覆盖的 [0,1]。
-/// 段内用 smoothstep 缓动 + OKLab 线性插值，色标接缝处一阶连续，不会出现硬色带。
-fn splash_gradient_rgb(t: f32) -> [u8; 3] {
-    let t = t.clamp(0.0, 1.0);
-    let mut idx = 0usize;
-    while idx + 2 < SPLASH_GRADIENT_STOPS.len() && t > SPLASH_GRADIENT_STOPS[idx + 1].0 {
-        idx += 1;
-    }
-    let (t0, c0) = SPLASH_GRADIENT_STOPS[idx];
-    let (t1, c1) = SPLASH_GRADIENT_STOPS[idx + 1];
-    let k = ((t - t0) / (t1 - t0).max(1e-6)).clamp(0.0, 1.0);
-    let k = k * k * (3.0 - 2.0 * k);
-    let a = srgb_to_oklab(c0);
-    let b = srgb_to_oklab(c1);
-    oklab_to_srgb([
-        a[0] + (b[0] - a[0]) * k,
-        a[1] + (b[1] - a[1]) * k,
-        a[2] + (b[2] - a[2]) * k,
-    ])
-}
-
-/// 标记 bbox 的 45° 对角投影：`0.4·(x/(cols-1)) + 0.6·(y/(rows-1))`。
-/// `(0,0)` → 0（暖金高光端），`(cols-1, rows-1)` → 1（紫收尾端），与生成脚本同口径。
-fn splash_diagonal_t(x: usize, y: usize, cols: usize, rows: usize) -> f32 {
-    let fx = x as f32 / (cols.max(2) - 1) as f32;
-    let fy = y as f32 / (rows.max(2) - 1) as f32;
-    (0.4 * fx + 0.6 * fy).clamp(0.0, 1.0)
-}
 
 /// 真彩门禁：`COLORTERM` 含 `truecolor` / `24bit` 才启用 alpha 抗锯齿（纯函数、零 I/O）。
 fn colorterm_supports_truecolor(raw: Option<&str>) -> bool {
@@ -112,18 +24,18 @@ fn splash_truecolor_enabled() -> bool {
     colorterm_supports_truecolor(std::env::var("COLORTERM").ok().as_deref())
 }
 
-/// 覆盖率 → 绘制色：真彩把 `grad` 按 `cov` 向画布色混合（边缘向画布渐隐＝终端里的抗锯齿）；
+/// 覆盖率 → 绘制色：真彩把母版真色 `ink` 按 `cov` 向画布色混合（边缘向画布渐隐＝终端里的抗锯齿）；
 /// 非真彩退化为硬阈值（≥50% 才上色），保证不劣于旧版。
-fn splash_composite_color(grad: [u8; 3], cov: u8, truecolor: bool) -> [u8; 3] {
+fn splash_composite_color(ink: [u8; 3], cov: u8, truecolor: bool) -> [u8; 3] {
     if !truecolor {
-        return if cov >= 128 { grad } else { SPLASH_CANVAS_RGB };
+        return if cov >= 128 { ink } else { SPLASH_CANVAS_RGB };
     }
     let a = cov as f32 / 255.0;
     let mix = |c: u8, base: u8| -> u8 { (base as f32 + (c as f32 - base as f32) * a).round() as u8 };
     [
-        mix(grad[0], SPLASH_CANVAS_RGB[0]),
-        mix(grad[1], SPLASH_CANVAS_RGB[1]),
-        mix(grad[2], SPLASH_CANVAS_RGB[2]),
+        mix(ink[0], SPLASH_CANVAS_RGB[0]),
+        mix(ink[1], SPLASH_CANVAS_RGB[1]),
+        mix(ink[2], SPLASH_CANVAS_RGB[2]),
     ]
 }
 
@@ -153,6 +65,13 @@ impl SplashTier {
             SplashTier::Compact => &splash_coverage::COMPACT_COVERAGE,
         }
     }
+    /// 每个子像素的母版真色（RGB 三连字节，行优先，与 `coverage()` 同序）。
+    fn master_rgb(self) -> &'static [u8] {
+        match self {
+            SplashTier::Rich => &splash_coverage::RICH_RGB,
+            SplashTier::Compact => &splash_coverage::COMPACT_RGB,
+        }
+    }
 }
 
 /// 图形协议品牌标的字符占位（与 Rich 档字符画同尺寸：RICH_COLS 列 × RICH_ROWS/2 行）。
@@ -162,13 +81,11 @@ pub const SPLASH_IMAGE_ROWS: u16 = (splash_coverage::RICH_ROWS / 2) as u16;
 /// 用以完整覆盖其下方的字符画占位）。
 pub const SPLASH_LOGO_PNG: &[u8] = include_bytes!("../../../assets/splash-logo.png");
 
-/// 初始化页品牌标的图形协议路径：仅在终端支持 sixel / kitty / iTerm2 时构建。
+/// 初始化页品牌标的位图路径：sixel / kitty / iTerm2 / halfblocks 四种协议都走同一张位图。
+/// halfblocks 是纯 Rust 的 24bit 前后景半块渲染，与 kitty/sixel 共享同一像素源，
+/// 因此在没有图形协议的普通终端里也能拿到母版真色观感（ADR 0098）。
 pub fn init_splash_image() -> Option<SplashImage> {
     let mut picker = splash_picker()?;
-    if picker.protocol_type() == ProtocolType::Halfblocks {
-        // halfblocks 即自绘半块字符，字符画版本的边缘与配色更可控，保留现路径。
-        return None;
-    }
     // 透明像素按画布底色合成，位图矩形与周围 Canvas 无缝衔接。
     picker.set_background_color(image::Rgba([
         SPLASH_CANVAS_RGB[0],
@@ -258,18 +175,29 @@ pub fn splash_protocol_for_env(env: &SplashEnv) -> Option<ProtocolType> {
     None
 }
 
-fn splash_picker() -> Option<Picker> {
-    // PONY_TUI_SPLASH_IMAGE_PROTOCOL 为手动/测试覆盖入口：
-    // auto（默认）走上面的无 I/O 环境判定；kitty/sixel/iterm2 强制协议；off 禁用图形路径。
-    match std::env::var("PONY_TUI_SPLASH_IMAGE_PROTOCOL").as_deref() {
-        Ok("off") | Ok("halfblocks") => None,
-        Ok("kitty") => Some(splash_picker_for_protocol(ProtocolType::Kitty)),
-        Ok("sixel") => Some(splash_picker_for_protocol(ProtocolType::Sixel)),
-        Ok("iterm2") => Some(splash_picker_for_protocol(ProtocolType::Iterm2)),
-        _ => Some(splash_picker_for_protocol(splash_protocol_for_env(
-            &SplashEnv::from_process(),
-        )?)),
+/// `PONY_TUI_SPLASH_IMAGE_PROTOCOL` 的纯映射（零 I/O，可独立单测）：
+/// `Some(Some(protocol))` 强制协议；`Some(None)` 关闭位图路径；`None` 回落环境判定。
+/// 注意 `halfblocks` 是**强制半块位图协议**（母版真色渲染），不是关闭位图。
+fn splash_protocol_override(raw: Option<&str>) -> Option<Option<ProtocolType>> {
+    match raw {
+        Some("off") => Some(None),
+        Some("halfblocks") => Some(Some(ProtocolType::Halfblocks)),
+        Some("kitty") => Some(Some(ProtocolType::Kitty)),
+        Some("sixel") => Some(Some(ProtocolType::Sixel)),
+        Some("iterm2") => Some(Some(ProtocolType::Iterm2)),
+        _ => None,
     }
+}
+
+fn splash_picker() -> Option<Picker> {
+    // auto（默认）走上面的无 I/O 环境判定；其余见 `splash_protocol_override`。
+    let override_protocol =
+        splash_protocol_override(std::env::var("PONY_TUI_SPLASH_IMAGE_PROTOCOL").ok().as_deref());
+    let protocol = match override_protocol {
+        Some(protocol) => protocol?,
+        None => splash_protocol_for_env(&SplashEnv::from_process())?,
+    };
+    Some(splash_picker_for_protocol(protocol))
 }
 
 /// 由协议 + 字符格像素尺寸构造 picker：不查询终端，拿不到回包也不会吞输入。
@@ -311,15 +239,16 @@ fn tty_cell_pixel_size() -> Option<(u16, u16)> {
     None
 }
 
-/// 彩色 init 头部品牌画：轮廓来自官方母版的覆盖率重采样（见 `splash_coverage.rs`），
-/// 每格固定写半块字符 `▀`，上半格取 `fg`、下半格取 `bg`，两者都是
-/// `mix(CANVAS, gradient(t), coverage)` —— 覆盖率让边缘向画布色渐隐，这是终端里能做到的
-/// 真实抗锯齿（真彩门禁失效时退化为硬阈值，观感不劣于旧版）。右侧对齐品牌控制台信息列。
-/// `draw_logo = false` 时只保留占位空白（由图形协议位图覆盖该矩形）。
+/// 彩色 init 头部品牌画：轮廓与配色都来自官方母版的派生表（见 `splash_coverage.rs`）——
+/// 覆盖率表给每个子像素的抗锯齿权重，真色表给母版在该子像素的平均 RGB。每格固定写半块字符
+/// `▀`，上半格取 `fg`、下半格取 `bg`，两者都是 `mix(CANVAS, master_rgb, coverage)`：
+/// 覆盖率让边缘向画布色渐隐，这是终端里能做到的真实抗锯齿（真彩门禁失效时退化为硬阈值）。
+/// 右侧对齐品牌控制台信息列。`draw_logo = false` 时只保留占位空白（由位图覆盖该矩形）。
 fn pony_banner_lines(state: &TuiState, tier: SplashTier, draw_logo: bool) -> Vec<Line<'static>> {
     let cols = tier.cols();
     let rows = tier.rows();
     let coverage = tier.coverage();
+    let master_rgb = tier.master_rgb();
     let line_count = rows / 2;
     let truecolor = splash_truecolor_enabled();
     let canvas = ratatui::style::Color::Rgb(
@@ -328,11 +257,15 @@ fn pony_banner_lines(state: &TuiState, tier: SplashTier, draw_logo: bool) -> Vec
         SPLASH_CANVAS_RGB[2],
     );
 
-    // 覆盖率合成：`t` 取标记 bbox 的 45° 轴投影，边缘按覆盖率向画布色渐隐。
+    // 母版真色 + 覆盖率合成：边缘按覆盖率向画布色渐隐。
     let cell_color = |x: usize, y: usize| -> ratatui::style::Color {
-        let grad = splash_gradient_rgb(splash_diagonal_t(x, y, cols, rows));
-        let cov = coverage.get(y * cols + x).copied().unwrap_or(0);
-        let rgb = splash_composite_color(grad, cov, truecolor);
+        let idx = y * cols + x;
+        let cov = coverage.get(idx).copied().unwrap_or(0);
+        let base = idx * 3;
+        let rgb = match (master_rgb.get(base), master_rgb.get(base + 1), master_rgb.get(base + 2)) {
+            (Some(&r), Some(&g), Some(&b)) => splash_composite_color([r, g, b], cov, truecolor),
+            _ => SPLASH_CANVAS_RGB,
+        };
         ratatui::style::Color::Rgb(rgb[0], rgb[1], rgb[2])
     };
 
@@ -406,15 +339,16 @@ fn pony_banner_lines(state: &TuiState, tier: SplashTier, draw_logo: bool) -> Vec
 }
 
 /// 空态品牌画选档（`None` = 终端太矮，隐藏品牌画）：
-/// 高度阶梯 → 宽度降档 → 图形协议位图仅在 Rich 档且宽度足够时铺。
+/// 高度阶梯 → 宽度降档 → 位图仅在 Rich 档且宽度足够时铺。
 ///
 /// 尺寸阶梯（`avail` 已把底部呼吸行加回）：
-///   富余 ≥ 28 行 → Rich（27 列 × 30 子像素 = 15 行品牌画）
+///   富余 ≥ 28 行 → Rich（26 列 × 30 子像素 = 15 行品牌画）
 ///   紧凑 ≥ 24 行 → Compact（20 列 × 22 子像素 = 11 行品牌画）
 ///   更矮 → 隐藏品牌画，只留定位语 + 命令入口。
 /// 构图（含引导块）= 1 空行 + 品牌画 + 1 空行 + 定位语 + 1 空行 + 引导块 8 行；
 /// Rich 共 27 行、Compact 共 23 行，各留 1 行余量，故阈值分别取 28 / 24。
-/// 返回值第二项为「是否走图形协议位图」（此时 `lines` 是等宽占位空白）。
+/// 返回值第二项为「是否走位图」（此时 `lines` 是等宽占位空白）。位图矩形固定 26×15，
+/// 与 Compact 的 20×11 占位不重合，故仅在 Rich 档启用。
 pub fn splash_banner(
     state: &TuiState,
     width: usize,

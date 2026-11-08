@@ -2,7 +2,7 @@
 
 Status: implemented
 
-配套决策：[ADR 0085](../../../docs/decisions/0085-tui-splash-logo-fidelity-and-antialiasing.md)；
+配套决策：[ADR 0085](../../../docs/decisions/superseded/0085-tui-splash-logo-fidelity-and-antialiasing.md)（已由 [ADR 0098](../../../docs/decisions/0098-tui-splash-master-truecolor-bitmap-first.md) 接替）；
 方案与对比图：[docs/design/tui-splash-logo.md](../../../docs/design/tui-splash-logo.md)。
 
 ## Context

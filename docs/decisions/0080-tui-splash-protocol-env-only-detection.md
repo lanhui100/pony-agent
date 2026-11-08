@@ -44,12 +44,13 @@ Status: implemented
    - 其余 ⇒ `None`。
    顺序即风险排序：kitty 的 APC 序列在不支持的终端上被静默忽略（最坏只保留字符画），sixel 误判会喷像素乱码，
    故 kitty 先命中、sixel 只认明确声明支持的终端。
-3. **显式覆盖入口**（优先级高于自动判定）：`PONY_TUI_SPLASH_IMAGE_PROTOCOL=kitty|sixel|iterm2|off`。
-   `off` 与 `halfblocks` 关闭图形路径；`auto`/缺省走决策 2。
+3. **显式覆盖入口**（优先级高于自动判定）：`PONY_TUI_SPLASH_IMAGE_PROTOCOL=kitty|sixel|iterm2|halfblocks|off`。
+   `off` 关闭图形路径；`halfblocks` 强制半块位图协议（母版真色渲染，ADR 0098 起不再等同 `off`）；
+   `auto`/缺省走决策 2。映射实现为纯函数 `splash_protocol_override`（零 I/O，可独立单测）。
 4. **字符格像素尺寸零 I/O 获取** `splash_font_px()`：`PONY_TUI_SPLASH_FONT_PX=WxH` > `TIOCGWINSZ`
    的 `ws_xpixel/ws_ypixel` 换算 > 默认 8×16。`Picker::from_fontsize()` 不发送任何查询序列。
-5. **布局不变**：图形路径仍占 28×11 字符矩形（`SPLASH_IMAGE_COLS × SPLASH_IMAGE_ROWS`），
-   位图矩形与周围 Canvas 无缝衔接；字符串位置与引导块布局沿用 0069。
+5. **布局不变**：图形路径占 26×15 字符矩形（`SPLASH_IMAGE_COLS × SPLASH_IMAGE_ROWS`，ADR 0098 起
+   由 28×11 改为 26×15 以对齐母版宽高比），位图矩形与周围 Canvas 无缝衔接；字符串位置与引导块布局沿用 0069。
 6. **验收契约**：
    - 单测 `splash_protocol_detection_is_env_only_and_fail_closed`（13 例表驱动）+ 源码级守卫
      `splash_probe_never_reads_stdin`；
