@@ -6,8 +6,12 @@
 //! 已经删掉的会话重新 `INSERT` 回去。
 //!
 //! 冻结契约（`.dev-team/contracts/stage0-write-model.md`，I3）：显式删除后，任何持有旧
-//! 快照的实例提交都必须**跳过**该会话（墓碑优先于快照），`sessions` 表与
-//! `list_sessions()` 都不得再出现它。
+//! 快照的实例提交都必须**跳过**该会话（墓碑优先于快照），`sessions` / `normalized_sessions`
+//! 表与 `list_sessions()` 都不得再出现它。
+//!
+//! 边界语义（契约已冻结，防误判）：墓碑/已删除会话在 `commit_boundary` 内是「跳过且永不
+//! INSERT」，**不改变整包 outcome** —— 因此「删除后旧快照再 commit」的期望是
+//! `CommitOutcome::Committed`（跳过该会话），**不是** `StaleVersion`、也不是 `Failed`。
 //!
 //! 本用例走**真实公开路径**复现现场：
 //! 1. store A 写入会话 `s-ghost`；
@@ -166,5 +170,68 @@ fn deleted_session_is_not_resurrected_by_stale_second_instance_commit() {
             .iter()
             .all(|overview| overview.conversation_id != "s-ghost"),
         "ADR 0099 阶段 0 / I3：已删会话不得在 list_sessions() 里复活"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 契约 3-b：`commit_boundary` 对已删会话「跳过且永不 INSERT」，整包 outcome 保持 Committed
+// ---------------------------------------------------------------------------
+
+/// 删除后旧快照提交：必须 `Committed`（跳过该会话），而不是 `StaleVersion` / `Failed`。
+///
+/// 红相（交付时）：`commit_boundary` 仍是默认 `Unsupported`，且底层 `write_full_store`
+/// 无条件 `INSERT OR REPLACE` ⇒ 既拿不到 `Committed`，会话也会被复活。
+#[test]
+fn commit_skips_deleted_session_and_reports_committed() {
+    use pony_agent_core::agent::session::{CommitOutcome, SessionBackend};
+
+    // Arrange：A 端建会话；B 端（独立连接）在删除前读走快照。
+    let dir = TempDir::new("tombstone-boundary");
+    let db = dir.db();
+    let mut store_a = SessionStore::with_backend(Box::new(open_sqlite(&db)));
+    store_a.append_turn(
+        Some("s-tomb"),
+        "墓碑用例：用户消息",
+        "墓碑用例：助手回复",
+        None,
+        Vec::new(),
+    );
+    assert_eq!(session_row_count(&db, "s-tomb"), 1, "前提：会话已落盘");
+
+    let reader = open_sqlite(&db);
+    let stale = reader.load_store().expect("旧快照必须可装载");
+
+    // A 端显式删除。
+    store_a.remove_session("s-tomb");
+    assert_eq!(session_row_count(&db, "s-tomb"), 0, "前提：删除已落库");
+
+    // Act：旧快照提交。
+    let outcome = reader.commit_boundary(&stale);
+
+    // Assert ①：跳过语义 ⇒ 整包 outcome 仍是 Committed（墓碑不把整包变成 Stale/Failed）。
+    assert_eq!(
+        outcome,
+        CommitOutcome::Committed,
+        "ADR 0099 阶段 0 / I3：删除后旧快照提交必须返回 Committed（墓碑会话被跳过、永不 INSERT），\
+         实际 {outcome:?}"
+    );
+
+    // Assert ②：会话在两表里都不存在（跳过 = 零 INSERT）。
+    assert_eq!(
+        session_row_count(&db, "s-tomb"),
+        0,
+        "ADR 0099 阶段 0 / I3：跳过语义下 sessions 行不得被重建"
+    );
+    let normalized_rows: i64 = rusqlite::Connection::open(&db)
+        .expect("open sqlite read-back")
+        .query_row(
+            "SELECT COUNT(*) FROM normalized_sessions WHERE session_id = ?1",
+            ["s-tomb"],
+            |row| row.get(0),
+        )
+        .expect("count normalized_sessions row");
+    assert_eq!(
+        normalized_rows, 0,
+        "ADR 0099 阶段 0 / I3：跳过语义下 normalized_sessions 行不得被重建"
     );
 }
