@@ -355,4 +355,142 @@ fn model_panel_lists_preferred_section_before_full_list() {
     );
 }
 
+// ── ADR 0100：优选行参与统一导航 + 优选/全部模型之间 1 行间距 ─────────────────
+
+#[test]
+fn model_panel_preferred_rows_are_navigable_and_selectable() {
+    let mut state = tui::TuiState::default();
+    state.model_list = vec![model("alpha", "Model Alpha"), model("beta", "Model Beta")];
+    state.model_preferences.preferred = vec!["beta".to_string()];
+    state.mode = tui::InteractionMode::SelectingModel;
+
+    // ↑ 能进入优选行，↵ 确认优选模型（回归：旧实现优选行仅展示、不可选中）。
+    // 统一索引空间：0 = 优选行 beta，1 = 全部模型 alpha，2 = 全部模型 beta。
+    state.selected_model_index = 1;
+    state.prev_model();
+    assert_eq!(state.selected_model_index, 0);
+    state.prev_model(); // 到顶不越界
+    assert_eq!(state.selected_model_index, 0);
+    state.select_current_model();
+    assert_eq!(state.model, "beta", "优选行回车必须切换到该优选模型");
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+
+    // 全部模型栏偏移映射：索引 1 命中 alpha。
+    state.mode = tui::InteractionMode::SelectingModel;
+    state.selected_model_index = 1;
+    state.select_current_model();
+    assert_eq!(state.model, "alpha");
+
+    // 底边界含全部模型栏的重复行：索引 2 到底不越界，回车仍命中 beta。
+    state.mode = tui::InteractionMode::SelectingModel;
+    state.selected_model_index = 2;
+    state.next_model();
+    assert_eq!(state.selected_model_index, 2);
+    state.select_current_model();
+    assert_eq!(state.model, "beta");
+}
+
+#[test]
+fn model_panel_preferred_row_highlight_follows_selection() {
+    let mut state = tui::TuiState::default();
+    state.add_user_message("x");
+    state.mode = tui::InteractionMode::SelectingModel;
+    state.model_list = vec![model("alpha", "Model Alpha"), model("beta", "Model Beta")];
+    state.model_preferences.preferred = vec!["beta".to_string()];
+    state.selected_model_index = 0; // 优选行 beta
+
+    let buf = screen(&mut state, 120, 40);
+    let lines = line_texts(&buf);
+    let pref_idx = lines
+        .iter()
+        .position(|line| line.contains("优选"))
+        .expect("面板缺少「优选」栏");
+    let all_idx = lines
+        .iter()
+        .position(|line| line.contains("全部模型"))
+        .expect("面板缺少「全部模型」栏");
+    let beta_rows: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("Model Beta"))
+        .map(|(idx, _)| idx)
+        .collect();
+    assert_eq!(beta_rows.len(), 2, "同一模型在两栏各出现一次");
+    assert!(
+        beta_rows[0] > pref_idx && beta_rows[0] < all_idx,
+        "首个 beta 行必须落在优选栏内"
+    );
+    // 选中态行首有 ▏ 强调竖条（list_row 契约）：优选行高亮、全部模型重复行不高亮。
+    assert!(
+        lines[beta_rows[0]].contains('▏'),
+        "选中的优选行必须高亮: {:?}",
+        lines[beta_rows[0]]
+    );
+    assert!(
+        !lines[beta_rows[1]].contains('▏'),
+        "全部模型栏的重复行不得同时高亮: {:?}",
+        lines[beta_rows[1]]
+    );
+}
+
+#[test]
+fn model_panel_preferred_and_full_list_have_one_blank_row_between() {
+    let mut state = tui::TuiState::default();
+    state.add_user_message("x");
+    state.mode = tui::InteractionMode::SelectingModel;
+    state.model_list = vec![model("alpha", "Model Alpha"), model("beta", "Model Beta")];
+    state.model_preferences.preferred = vec!["beta".to_string()];
+
+    let buf = screen(&mut state, 120, 40);
+    let lines = line_texts(&buf);
+    let beta_idx = lines
+        .iter()
+        .position(|line| line.contains("Model Beta"))
+        .expect("优选模型未出现在面板");
+    assert!(
+        lines[beta_idx + 1].replace('│', "").trim().is_empty(),
+        "优选栏与全部模型之间必须有 1 行间距: {:?}",
+        lines[beta_idx + 1]
+    );
+    assert!(
+        lines[beta_idx + 2].contains("全部模型"),
+        "间距之后必须紧跟「全部模型」栏: {:?}",
+        lines[beta_idx + 2]
+    );
+}
+
+#[test]
+fn model_panel_ctrl_f_reanchors_selection_to_same_model() {
+    let dir = std::env::temp_dir().join(format!("pony-model-panel-reanchor-{}", std::process::id()));
+    let path = dir.join("model-preferences.json");
+    let store = ModelPreferencesStore::with_path(&path);
+
+    let mut state = tui::TuiState::default();
+    state.model_list = vec![model("alpha", "Model Alpha"), model("beta", "Model Beta")];
+    state.selected_model_index = 1; // 无优选时命中全部模型栏 beta
+
+    // Ctrl+F 加入优选：优选栏 +1 行平移索引空间，选中必须重锚回同一模型（优选行 0）。
+    assert!(tui::apply_model_panel_shortcut(
+        &mut state,
+        &key(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        &store
+    ));
+    assert_eq!(state.selected_model_index, 0);
+    state.select_current_model();
+    assert_eq!(state.model, "beta", "重锚后回车必须仍命中同一模型");
+
+    // 再按一次移出优选：回到全部模型栏索引 1，身份仍不漂移。
+    state.mode = tui::InteractionMode::SelectingModel;
+    assert!(tui::apply_model_panel_shortcut(
+        &mut state,
+        &key(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        &store
+    ));
+    assert_eq!(state.selected_model_index, 1);
+    state.select_current_model();
+    assert_eq!(state.model, "beta", "移出优选后回车必须仍命中同一模型");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 

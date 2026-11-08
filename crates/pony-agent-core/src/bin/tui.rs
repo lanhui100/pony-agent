@@ -494,6 +494,10 @@ mod table;
 #[path = "tui/splash.rs"]
 mod splash;
 pub use self::splash::*;
+// 模型面板统一导航空间（ADR 0100）：优选栏前置 + 全部模型，索引 ↔ 渲染行。
+#[path = "tui/model_panel.rs"]
+mod model_panel;
+pub use self::model_panel::*;
 
 pub use protocol::*;
 
@@ -2024,11 +2028,12 @@ impl TuiState {
         self.model_list = list;
         // 每次打开都与磁盘对齐：Ctrl+D / Ctrl+F 之外的外部改动（手改文件、其他实例）也能看到。
         self.model_preferences = ModelPreferencesStore::new().load();
+        // 初始选中锚定统一导航空间（优选栏前置）：默认模型若已优选则落在其优选行。
         self.selected_model_index = self
             .model_preferences
             .default_model
             .as_ref()
-            .and_then(|id| self.model_list.iter().position(|item| &item.id == id))
+            .and_then(|id| model_panel_index_of(self, id))
             .unwrap_or(0);
         // 覆盖层：进入前模式入栈，关闭时按栈恢复（PlanMode 等非 Normal 模式不被静默丢弃）。
         self.begin_overlay(InteractionMode::SelectingModel);
@@ -2040,7 +2045,8 @@ impl TuiState {
     }
 
     pub fn next_model(&mut self) {
-        if !self.model_list.is_empty() && self.selected_model_index + 1 < self.model_list.len() {
+        let total = model_panel_len(self);
+        if total > 0 && self.selected_model_index + 1 < total {
             self.selected_model_index += 1;
         }
     }
@@ -2052,8 +2058,7 @@ impl TuiState {
     }
 
     pub fn select_current_model(&mut self) {
-        if !self.model_list.is_empty() && self.selected_model_index < self.model_list.len() {
-            let m = &self.model_list[self.selected_model_index];
+        if let Some(m) = model_panel_item_at(self, self.selected_model_index) {
             self.model = m.id.clone();
             self.status_text = format!("Switched model to {}", m.name);
         }
@@ -4112,7 +4117,7 @@ pub fn apply_model_panel_shortcut(
         return false;
     }
     // 列表为空时仍然消费该按键，避免掉进通用分支产生意外输入。
-    let Some(item) = state.model_list.get(state.selected_model_index).cloned() else {
+    let Some(item) = model_panel_item_at(state, state.selected_model_index) else {
         return true;
     };
     if is_set_default {
@@ -4129,6 +4134,10 @@ pub fn apply_model_panel_shortcut(
     match store.toggle_preferred(&item.id) {
         Ok((prefs, now_preferred)) => {
             state.model_preferences = prefs;
+            // 优选栏行数 ±1 会平移统一索引空间：把选中重锚回同一模型，避免快捷键连按时漂移。
+            if let Some(index) = model_panel_index_of(state, &item.id) {
+                state.selected_model_index = index;
+            }
             state.status_text = if now_preferred {
                 format!("已加入优选：{}", model_display_name(&item))
             } else {
@@ -5758,12 +5767,21 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 
     if state.mode == InteractionMode::SelectingModel {
-        let total = state.model_list.len();
-        let shown = total.min(12.min(max_rows)).max(1);
+        // Ctrl+F 优选项整体前置于列表之上，并参与统一导航（ADR 0100）：
+        // 索引空间 = 优选栏行数 + 全部模型行数，高亮 / 确认 / 快捷键共用 model_panel_item_at 映射。
+        let preferred_items = model_preferred_items(&state);
+        let pref_count = preferred_items.len();
+        let total = pref_count + state.model_list.len();
+        let shown = state.model_list.len().min(12.min(max_rows)).max(1);
         let selected = state
             .selected_model_index
             .min(total.saturating_sub(1));
-        let (start, end) = panel_window(total, selected, shown);
+        // 选中落在优选栏时全部模型窗口回顶；否则按偏移锚定滚动窗口。
+        let (start, end) = panel_window(
+            state.model_list.len(),
+            selected.saturating_sub(pref_count),
+            shown,
+        );
         let title = if total > shown {
             format!(
                 "模型 · {}/{} · 优选 {}",
@@ -5774,13 +5792,11 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         } else {
             format!("模型 · 优选 {}", state.model_preferences.preferred.len())
         };
-        // Ctrl+F 优选项整体前置于列表之上：跨 provider 的快捷集合，且不改变键盘导航索引空间
-        //（↑↓ 仍遍历完整列表，避免同一模型在两个栏位重复出现导致选中映射错乱）。
-        let preferred_items = model_preferred_items(&state);
+        // 优选 caption + 优选行 + 1 行分区间距 + 全部模型 caption。
         let pref_rows = if preferred_items.is_empty() {
             0
         } else {
-            preferred_items.len() + 2
+            preferred_items.len() + 3
         };
         let rect = panel_rect(84, (shown + pref_rows) as u16 + 4);
         let body = draw_panel(
@@ -5793,14 +5809,16 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         let mut lines_out: Vec<Line<'static>> = Vec::new();
         if !preferred_items.is_empty() {
             lines_out.push(Line::from(Span::styled(" 优选", faint())));
-            for item in &preferred_items {
+            for (idx, item) in preferred_items.iter().enumerate() {
                 lines_out.push(list_row(
-                    false,
+                    idx == selected,
                     &model_display_name(item),
                     &model_badges(&state, item),
                     inner_w,
                 ));
             }
+            // 优选栏与全部模型之间留 1 行页面底色间距（ADR 0100）。
+            lines_out.push(Line::from(""));
             lines_out.push(Line::from(Span::styled(" 全部模型", faint())));
         }
         if state.model_list.is_empty() {
@@ -5810,7 +5828,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             )));
         } else {
             for (idx, item) in state.model_list.iter().enumerate().take(end).skip(start) {
-                let selected_row = idx == selected;
+                let selected_row = pref_count + idx == selected;
                 let right = model_badges(&state, item);
                 lines_out.push(list_row(
                     selected_row,
@@ -10056,14 +10074,14 @@ fn tui_event_loop(
                                 .unwrap_or_default();
                             let n = items.len();
                             if state.mode == InteractionMode::SelectingModel {
-                                // 面板已开：刷新列表，保留当前命中项选择，否则回到 0。
-                                let prev = state.model_list.get(state.selected_model_index).map(|m| m.id.clone())
+                                // 面板已开：刷新列表，保留当前命中项选择（统一索引空间），否则回到 0。
+                                let prev = model_panel_item_at(&state, state.selected_model_index)
+                                    .map(|m| m.id.clone())
                                     .or_else(|| Some(state.model.clone()));
                                 state.model_list = items;
-                                state.selected_model_index = state
-                                    .model_list
-                                    .iter()
-                                    .position(|m| Some(&m.id) == prev.as_ref())
+                                state.selected_model_index = prev
+                                    .as_ref()
+                                    .and_then(|id| model_panel_index_of(&state, id))
                                     .unwrap_or(0);
                             }
                             // 面板未打开：仅刷新注册表与状态，不强行弹面板。

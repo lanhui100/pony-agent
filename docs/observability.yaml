@@ -833,3 +833,20 @@ note: >-
   (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
       行为门的机械收口在测试层——`crates/pony-agent-core/tests/session_log_store.rs`（6 类，含 32 例
       撕裂尾行与 10 例目录逃逸）与 `crates/pony-agent-core/tests/session_log_wiring.rs`。
+
+  【归属登记（2026-11-08）｜ADR 0100：TUI 模型面板优选行可选 + 分区间距】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 只改 TUI 模型面板的进程内导航索引空间
+  与渲染行布局，无新增对外接口、网络 IO、后台任务、LLM 调用、依赖、env 契约或持久化 schema；
+  不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由同维度声明）。
+  (2) 本轮 N-A 的结构性理由：变更发生在**终端渲染面的面板导航状态机**——`selected_model_index`
+      改为「优选栏 + 全部模型」统一行号，经 `model_panel_len` / `model_panel_item_at` /
+      `model_panel_index_of` 单点闭合（`crates/pony-agent-core/src/bin/tui/model_panel.rs`，
+      ADR 0089 拆分口径）；Ctrl+F 写盘仍走既有 `ModelPreferencesStore`（格式不变），
+      不产生新的遥测事实、指标/日志字段或 Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：优选行由仅展示改为可导航可确认；优选栏与「全部模型」
+      caption 之间增加 1 行页面底色间距；面板标题计数改统一空间口径。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
+      行为门的机械收口在测试层——`crates/pony-agent-core/tests/tui_six_fixes_acceptance.rs`
+      （优选行导航/确认、高亮随选中、分区间空行、Ctrl+F 重锚不漂移）。

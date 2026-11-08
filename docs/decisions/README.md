@@ -105,6 +105,7 @@
 - [0096 TUI 状态行 min-dwell + 轮内工具活动聚合（折叠态「生成中」不再吞掉过程信息）](0096-tui-status-line-min-dwell-and-tool-activity.md)
 - [0097 `pony update` 同号不同内容不得谎报「已是最新」，发布侧清单版本必须严格递增](0097-cli-update-same-version-content-mismatch.md)
 - [0098 TUI 启动页品牌标改用母版真色派生表 + 位图优先（含 halfblocks）](0098-tui-splash-master-truecolor-bitmap-first.md)
+- [0100 TUI 模型面板：优选行参与统一导航与分区间 1 行间距](0100-tui-model-panel-preferred-selectable-and-section-gap.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)
