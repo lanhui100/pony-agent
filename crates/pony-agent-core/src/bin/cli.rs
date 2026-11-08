@@ -1011,6 +1011,19 @@ fn print_usage(format: OutputFormat) {
     human!(format, "`deny` (read_only) has an enforced branch. A WARN is printed to stderr only when one of");
     human!(format, "the two non-enforcing tiers is passed EXPLICITLY (text mode default passes None).");
     human!(format, "");
+    human!(format, "Maintenance subcommands (ADR 0099):");
+    human!(format, "  ponycli sessions backfill [--dry-run] [--db <path>]");
+    human!(format, "  ponycli sessions rebuild-index [--dry-run] [--db <path>]");
+    human!(format, "  ponycli sessions export <session-id> --out <path> [--db <path>] [--format dir|tar]");
+    human!(format, "                             Bundle = manifest.json + events.jsonl + attachments/;");
+    human!(format, "                             `tar` is uncompressed ustar (single file, no zstd yet)");
+    human!(format, "  ponycli sessions import <path> [--db <path>] [--dry-run] [--force]");
+    human!(format, "                             Import writes ONLY the session log + attachments:");
+    human!(format, "                             SQLite index is rebuilt by `sessions rebuild-index`.");
+    human!(format, "                             manifest is not self-hashed; the event stream is");
+    human!(format, "                             structurally re-validated (header/seq/eventCount)");
+    human!(format, "Sessions subcommand exit codes: 0 ok / 2 invalid bundle / 3 target exists / 4 degraded");
+    human!(format, "");
     human!(format, "Exit codes: 0 success / 1 internal / 2 usage / 3 config / 4 provider-network");
     human!(format, "            5 tool-failure / 6 permission-denied (incl. suspended) / 7 timeout");
 }
@@ -1243,6 +1256,176 @@ fn run_sessions_rebuild_index_if_requested() -> Option<i32> {
     }
 }
 
+/// 会话维护子命令的统一入口（`main` 里只留一行拦截，避免主函数继续膨胀）。
+///
+/// 顺序即优先级，互斥（命令行只能命中其中一个），返回值 = 进程退出码：
+/// `backfill`（阶段 0）、`rebuild-index`（阶段 2-A）、`export` / `import`（阶段 3-A）。
+fn run_maintenance_subcommand_if_requested() -> Option<i32> {
+    run_sessions_backfill_if_requested()
+        .or_else(run_sessions_rebuild_index_if_requested)
+        .or_else(run_sessions_export_if_requested)
+        .or_else(run_sessions_import_if_requested)
+}
+
+/// `ponycli sessions export <session-id> --out <path> [--db <path>] [--format dir|tar]`
+///
+/// ADR 0099 阶段 3-A（D5 传输格式的第一块）：把会话日志导出成**目录包**
+/// （`manifest.json` + `events.jsonl` + `attachments/`）或**单文件包**（最小 ustar `.tar`，
+/// 不压缩；压缩形态需要新增依赖，留作后续 ADR）。
+///
+/// 退出码：`0` 全成功 / `2` 参数或校验失败（会话不存在、目标已存在）/ `4` 包已产出但
+/// 附件降级（附件实体缺失等，报告逐条列出）/ `1` IO 失败。
+fn run_sessions_export_if_requested() -> Option<i32> {
+    use pony_agent_core::agent::session::{
+        export_session, session_log_root_for_db, BundleFormat,
+    };
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("sessions")
+        || args.get(2).map(String::as_str) != Some("export")
+    {
+        return None;
+    }
+    let Some(session_id) = args.get(3).filter(|arg| !arg.starts_with("--")).cloned() else {
+        eprintln!("[ponycli] sessions export 用法：ponycli sessions export <session-id> --out <path> [--db <path>] [--format dir|tar]");
+        return Some(2);
+    };
+    let Some(out_raw) = flag_value(&args, "--out") else {
+        eprintln!("[ponycli] sessions export 缺 `--out <path>`（目录形态指向目录，tar 形态指向 .tar 文件）");
+        return Some(2);
+    };
+    if out_raw == "-" {
+        eprintln!("[ponycli] sessions export 暂不支持 `--out -`（stdout 字节流）：请指定文件路径；单文件形态用 `--format tar`");
+        return Some(2);
+    }
+    let format_raw = flag_value(&args, "--format").unwrap_or_else(|| "dir".to_string());
+    let Some(format) = BundleFormat::parse(&format_raw) else {
+        eprintln!("[ponycli] sessions export 不支持的 `--format {format_raw}`（可选 `dir` / `tar`）");
+        return Some(2);
+    };
+    let db_path = flag_value(&args, "--db")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(pony_agent_core::agent::sqlite_session::default_sqlite_path);
+    let log_root = session_log_root_for_db(&db_path);
+    let out_path = std::path::PathBuf::from(&out_raw);
+    let attachment_source = db_path.is_file().then_some(db_path.as_path());
+    match export_session(
+        &log_root,
+        &session_id,
+        &out_path,
+        format,
+        env!("CARGO_PKG_VERSION"),
+        attachment_source,
+    ) {
+        Ok(report) => {
+            println!("db: {}", db_path.display());
+            println!("log-root: {}", log_root.display());
+            println!("session: {}", report.session_id);
+            println!("cwd: {}", report.cwd);
+            println!("out: {}", report.out.display());
+            println!("format: {}", report.format_label);
+            println!("events: {}", report.event_count);
+            println!("lastSeq: {:?}", report.last_seq);
+            println!("attachments({}): {:?}", report.attachments.len(), report.attachments);
+            println!("bytes: {}", report.total_bytes);
+            println!("files({}): {:?}", report.files.len(), report.files);
+            if report.warnings.is_empty() {
+                println!("warnings: 0");
+            } else {
+                println!("warnings({}):", report.warnings.len());
+                for warning in &report.warnings {
+                    println!("  - {warning}");
+                }
+                println!("注意：附件降级（EXIT=4）——事件已完整入包，附件缺失/不可读项见上表");
+            }
+            Some(report.exit_code())
+        }
+        Err(error) => {
+            eprintln!("[ponycli] sessions export 失败（EXIT={}）：{error}", error.exit_code());
+            Some(error.exit_code())
+        }
+    }
+}
+
+/// `ponycli sessions import <path> [--db <path>] [--dry-run] [--force]`
+///
+/// ADR 0099 阶段 3-A：把会话包导入日志根（`<db 目录>/session-logs/`）。
+///
+/// **只落日志文件与附件，不写 SQLite 索引** —— 索引是派生视图，导入后请运行
+/// `ponycli sessions rebuild-index` 补齐（这正是「索引可删可建」的兑现路径）。
+///
+/// 退出码：`0` 全成功 / `2` 包校验失败（manifest/format/version/sha256/header/seq，
+/// **零落盘**）/ `3` 目标会话已存在且未加 `--force` / `4` 事件导入成功但附件降级 /
+/// `1` IO 失败。
+fn run_sessions_import_if_requested() -> Option<i32> {
+    use pony_agent_core::agent::session::{import_bundle, session_log_root_for_db, ImportOptions};
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("sessions")
+        || args.get(2).map(String::as_str) != Some("import")
+    {
+        return None;
+    }
+    let Some(bundle_path) = args.get(3).filter(|arg| !arg.starts_with("--")).cloned() else {
+        eprintln!("[ponycli] sessions import 用法：ponycli sessions import <path> [--db <path>] [--dry-run] [--force]");
+        return Some(2);
+    };
+    let db_path = flag_value(&args, "--db")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(pony_agent_core::agent::sqlite_session::default_sqlite_path);
+    let log_root = session_log_root_for_db(&db_path);
+    let options = ImportOptions {
+        dry_run: args.iter().any(|arg| arg == "--dry-run"),
+        force: args.iter().any(|arg| arg == "--force"),
+    };
+    match import_bundle(&log_root, std::path::Path::new(&bundle_path), options) {
+        Ok(report) => {
+            println!("db: {}", db_path.display());
+            println!("log-root: {}", log_root.display());
+            println!("session: {}", report.session_id);
+            println!("cwd: {}", report.cwd);
+            println!("target: {}", report.target_dir.display());
+            println!("mode: {}", if report.dry_run { "dry-run（只校验，零写入）" } else { "apply（写日志与附件）" });
+            println!("events: {}", report.event_count);
+            println!("lastSeq: {:?}", report.last_seq);
+            println!("attachments({}): {:?}", report.attachments.len(), report.attachments);
+            if let Some(backup) = &report.backup {
+                println!("backup: {}", backup.display());
+            }
+            if report.warnings.is_empty() {
+                println!("warnings: 0");
+            } else {
+                println!("warnings({}):", report.warnings.len());
+                for warning in &report.warnings {
+                    println!("  - {warning}");
+                }
+                println!("注意：附件降级（EXIT=4）——事件已完整导入，附件缺失/损坏项见上表");
+            }
+            println!(
+                "note: manifest 不参与 sha256 自校验，故导入时对事件流做了结构性校验兜底（header/seq/eventCount）"
+            );
+            if !report.dry_run {
+                println!(
+                    "note: 导入只落日志与附件，**不写 SQLite 索引**；请运行 `ponycli sessions rebuild-index` 补齐索引"
+                );
+            }
+            Some(report.exit_code())
+        }
+        Err(error) => {
+            eprintln!("[ponycli] sessions import 失败（EXIT={}）：{error}", error.exit_code());
+            Some(error.exit_code())
+        }
+    }
+}
+
+/// 取 `--flag <value>` 的值（缺失或后面又是另一个 flag ⇒ None）。
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    let index = args.iter().position(|arg| arg == flag)?;
+    let value = args.get(index + 1)?;
+    if value.starts_with("--") {
+        return None;
+    }
+    Some(value.clone())
+}
+
 /// ADR 0099 阶段 0（E8）：回填目标的路径/结构自检。
 ///
 /// 拒绝：不存在、非普通文件、非 `.db` 后缀、缺 `sessions` 表（不是 PonyAgent 会话库）。
@@ -1282,11 +1465,8 @@ fn validate_backfill_db(path: &std::path::Path) -> Result<(), String> {
 }
 
 fn main() {
-    // ADR 0099 阶段 0（E8）：维护子命令必须在常规参数解析之前拦截（否则会被当成非法参数）。
-    if let Some(code) = run_sessions_backfill_if_requested() {
-        std::process::exit(code);
-    }
-    if let Some(code) = run_sessions_rebuild_index_if_requested() {
+    // ADR 0099 维护子命令必须在常规参数解析之前拦截（否则会被当成非法参数）。
+    if let Some(code) = run_maintenance_subcommand_if_requested() {
         std::process::exit(code);
     }
     let _runtime_guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();

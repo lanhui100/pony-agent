@@ -8,6 +8,8 @@ mod log_command;
 mod log_sink;
 // ADR 0099 阶段 2-A：日志命令流 → SessionState 的 fold 重建器 + SQLite 索引重建。
 pub(crate) mod fold;
+// ADR 0099 阶段 3-A：会话目录包（`manifest.json` + `events.jsonl` + `attachments/`）导出/导入。
+pub mod bundle;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -36,6 +38,13 @@ pub use fold::{
     fold_session, read_log_events, read_session_state, rebuild_index, rebuild_index_at_root,
     session_parity_diff, session_parity_issues, FoldError, FoldedSession, LogEvent, RebuildOptions,
     RebuildReport, INDEX_ONLY_STATE_FIELDS,
+};
+
+// ADR 0099 阶段 3-A：additive 导出（CLI 与验收测试共用同一套打包/校验口径）。
+pub use bundle::{
+    export_session, import_bundle, BundleError, BundleFileEntry, BundleFormat, BundleManifest,
+    BundleSource, ExportReport, ImportOptions, ImportReport, BUNDLE_ATTACHMENTS_DIR_NAME,
+    BUNDLE_EVENTS_FILE_NAME, BUNDLE_FORMAT, BUNDLE_MANIFEST_FILE_NAME, BUNDLE_VERSION,
 };
 
 pub use usage::{
