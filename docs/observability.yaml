@@ -925,3 +925,18 @@ note: >-
   (3) 收口点：不新增 enforcement_point。行为门机械收口在
       `crates/pony-agent-core/tests/session_stop_blob_write.rs`（7 用例，含「blob 字节数不随轮次增长」
       与「重启前后逐会话 serde 逐字节相等」）。
+
+  【归属登记（2026-11-08）｜ADR 0099 阶段 3-A：会话目录包导出/导入】
+  一行结论：四维归属不变，metrics / logs 维持结构性 N-A —— 变更是**本地文件的打包/解包**
+  （读日志目录、写包、校验 sha256），无新增对外接口、网络 IO、后台任务、LLM 调用；
+  不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变）。
+  (2) 本轮 N-A 的结构性理由：导出/导入是 CLI 一次性同步操作，不常驻、不监听、不上送。
+      代码位于 `crates/pony-agent-core/src/agent/session/bundle.rs`，由维护子命令
+      `ponycli sessions export|import` 调用。
+  (3) **将来若加 HTTP 端点必须回来补登记**：本条只覆盖本地打包/解包。一旦实现阶段 3 的
+      远程拉取（`GET /v1/sessions/{id}/events`）或任何出网客户端，必须重新登记 tracing
+      （span 与收口点）与 http_client enforcement_point，不得沿用本条的 N-A 结论。
+  (4) 收口点：不新增 enforcement_point。行为门机械收口在
+      `crates/pony-agent-core/tests/session_bundle_export_import.rs`（9 用例，含篡改/截断/版本不支持/
+      重复导入/降级 EXIT=4）。

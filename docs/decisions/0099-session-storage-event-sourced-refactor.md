@@ -208,6 +208,25 @@ Status: accepted
 
 实现 D5。本地优先；切换到「远程为真源」需四项同时成立：① 多设备同写占比 >5%；② ≥2 个必须服务端做的能力；③ 冲突率 <0.1% 且 RTT p95 <150 ms；④ 离线不再是产品硬需求。
 
+**阶段 3-A 实施状态（2026-11-08，已交付，commit `b7792e8f`）**
+
+会话目录包（传输单元）已落地，格式即将来 HTTP 端点要复用的线格式：
+
+| 项 | 结果 |
+| :--- | :--- |
+| 包格式 | `manifest.json`（format/version/sessionId/cwd/createdAtMs/eventCount/lastSeq/files[].sha256+bytes/source）+ `events.jsonl` + `attachments/` |
+| 单文件形态 | 手写最小 ustar `.tar`（不压缩；未接 zstd、未改 Cargo.toml）；>100B 路径用 ustar `prefix`；遇 GNU 长名 `L` 明确报错 |
+| 退出码 | 0 成功 / 2 硬失败（零落盘）/ 3 目标已存在 / 4 事件成功但附件降级 / 1 IO·tar 失败 |
+| 严格度分层 | `events.jsonl` 严格（sha256/bytes/header/seq/eventCount）；`attachments/*` 可降级（警告 + EXIT=4） |
+| 导入边界 | 只落日志目录与附件，**不写 SQLite 索引**（由 `ponycli sessions rebuild-index` 补）；`--force` 前把旧目录改名 `.bak-<ts>` |
+| 硬验收 | 目录包与 `.tar` 往返后 `fold_session` 的 `SessionState` 与源端**逐字段一致**（history 4 / nodes 2 / traces 1，整份 JSON 相等） |
+
+决策记录：[.agents/notes/implemented/architecture/2026-11-08-session-bundle-transfer-format.md](../../.agents/notes/implemented/architecture/2026-11-08-session-bundle-transfer-format.md)
+
+**两个已知限制（未隐藏）**：① 压缩（`.tar.zst`）需新增依赖，按约束降级为不压缩，留独立 ADR；② 附件导出目前「规范位置 + 尽力从 SQLite 元数据拷」双源，待附件写入路径迁移到会话目录后收口。
+
+**阶段 3-B 未做**：真正的远程拉取（`GET /v1/sessions/{id}/events?after_seq=`）与写入侧幂等上传。触发条件不变——出现「桌面连远端 Linux agent 并需要拉取会话」的真实需求时再做，届时必须同时补 tracing 与 http_client 的 enforcement_point（已在 observability.yaml 预约）。
+
 ## 验收阈值（阶段 2 起生效）
 
 | 指标 | 阈值 |
