@@ -149,6 +149,23 @@ session_events(
 
 > **更正（2026-11-08，Lead 复核）**：参谋评审曾报「`size:check` exit=1、70 条全部『基线无此条目』⇒ 棘轮失效、重构无护栏」。复核结论为**误判**：该次调用了 `node scripts/check-file-size.mjs` 却漏传 `--baseline scripts/file-size-baseline.json`。按 `package.json` 的正确调用实测 `exit=0`，`0 new / 70 over limit / 70 grandfathered / 0 shrunken`；`session/store.rs` 5704 行 = 基线 5704（正好卡线未恶化）。**棘轮健康，不构成阶段 0 的前置阻塞。**
 
+**阶段 0 实施状态（2026-11-08，已交付，commit `a5c269c7`）**
+
+| 项 | 状态 | 证据 |
+| :--- | :--- | :--- |
+| 全库入口收敛为 `commit_boundary`（单次 `BEGIN IMMEDIATE` 整包事务） | ✅ 完成 | 23 个入口全部经边界；`storage_stage0_write_amplification` 2/2 绿 |
+| 单实例 flock + 降级只读 + 恢复 | ✅ 完成 | `storage_stage0_*` 相关用例；降级实例零写入（行级 sha256 不变） |
+| busy 判定 `ErrorCode::DatabaseBusy\|DatabaseLocked` | ✅ 完成 | `busy_classification` 4/4、`busy_locked_retry` 1/1 绿；`contains("busy")` 全仓 0 处 |
+| trace 源切 `normalized_turn_traces` | ✅ 完成 | `recover_trace` 1/1 绿 |
+| 孤儿回填 + CLI 入口 | ✅ 能力完成 | 副本实测 80→128 行、orphan 48→0、`checksum_mismatch=0`；`--dry-run` sha256 前后一致 |
+| 整包提交路径墓碑跳过 | ✅ 完成 | `tombstone_no_resurrect` 2/2 绿 |
+| 版本 CAS | ⏭ 移交阶段 1 | 见上文修订段 |
+| **真实库孤儿归零** | ⏳ 待执行 | 真实库正被运行中实例持 flock；操作步骤见 `task-3` |
+
+门禁实测（Lead 独立复跑）：6 套件 11 用例全绿；`cargo check` exit 0（0 warning）；`npm run size:check` exit 0（0 new / 70 grandfathered）；`cargo test -p pony-agent-core --lib` 1367 passed / 0 failed。
+
+> 运维注意：备份会话库必须**三件套一起复制**（`sessions.db` + `-wal` + `-shm`）。只复制 `.db` 会得到不一致快照，回填会报 `database disk image is malformed`（已实测）。
+
 ### 阶段 1 · 单写者 + 墓碑（多端一致性）
 
 `session_writers` 租约表 + `fence_token` 守护 + 删除墓碑事件。目标：G2、G3 成立。
