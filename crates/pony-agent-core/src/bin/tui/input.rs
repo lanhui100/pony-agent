@@ -53,6 +53,24 @@ pub fn composer_control_action(key: &crossterm::event::KeyEvent) -> Option<Compo
     }
 }
 
+/// 壳层历史回填判据：**仅当输入框为空 + 裸 Up** 才命中（shell 风格）。
+///
+/// 口径：
+/// - 输入框非空 ⇒ 一律 `false`：Up 保持原生（桌面=光标移动 / TUI=滚动消息），
+///   多行编辑与历史翻页互不干扰；
+/// - 带任何修饰键（Shift/Alt/Ctrl）⇒ `false`：Shift+Up 选中等原生行为优先；
+/// - 仅「空输入框 + 裸 Up」⇒ `true`：调用方回填最近一条用户消息，**不再**滚动消息区
+///   （在 TUI 中即覆盖原有的「Up=上翻消息」行为）。
+///
+/// 纯函数，便于在无 TTY 环境断言（见 `tui/tests/composer_history_recall_tests.rs`）。
+pub fn composer_history_recall(key: &crossterm::event::KeyEvent, composer_is_empty: bool) -> bool {
+    composer_is_empty
+        && key.code == KeyCode::Up
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL)
+}
+
 /// 流式期该按键是否应被丢弃：只有**会话控制**类按键要等本轮结束，
 /// 输入框编辑类快捷键不等（回归护栏见 `tests/tui_six_fixes_acceptance.rs`）。
 ///

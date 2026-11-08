@@ -2892,6 +2892,66 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(submitTurnSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("recalls the latest user message on ArrowUp only when the composer is empty", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      messages: [
+        createMessage({ id: "user-1", turnId: "t1", role: "user", content: "第一条用户消息" }),
+        createMessage({ id: "assistant-1", turnId: "t1", role: "assistant", content: "回复一" }),
+        createMessage({ id: "user-2", turnId: "t2", role: "user", content: "最近一条用户消息" }),
+        createMessage({ id: "assistant-2", turnId: "t2", role: "assistant", content: "回复二" })
+      ],
+      draftMessage: ""
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+    const textarea = wrapper.get('[data-testid="workspace-composer-input"]');
+
+    // 空输入框 + 裸 ArrowUp：回填最近一条用户消息并阻止原生默认行为。
+    const preventDefault = vi.fn();
+    await textarea.trigger("keydown", {
+      key: "ArrowUp",
+      shiftKey: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      preventDefault
+    });
+    await nextTick();
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(runtimeStore.draftMessage).toBe("最近一条用户消息");
+    expect((textarea.element as HTMLTextAreaElement).value).toBe("最近一条用户消息");
+
+    // 输入框非空：Up 保持原生（光标移动），不回填、不 preventDefault。
+    runtimeStore.setDraftMessage("已有草稿");
+    await nextTick();
+    const preventDefaultNonEmpty = vi.fn();
+    await textarea.trigger("keydown", {
+      key: "ArrowUp",
+      shiftKey: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      preventDefault: preventDefaultNonEmpty
+    });
+    expect(preventDefaultNonEmpty).not.toHaveBeenCalled();
+    expect(runtimeStore.draftMessage).toBe("已有草稿");
+
+    // 带修饰键（Shift+Up）：即使输入为空也不触发回填。
+    runtimeStore.setDraftMessage("");
+    await nextTick();
+    const preventDefaultShift = vi.fn();
+    await textarea.trigger("keydown", {
+      key: "ArrowUp",
+      shiftKey: true,
+      preventDefault: preventDefaultShift
+    });
+    expect(preventDefaultShift).not.toHaveBeenCalled();
+    expect(runtimeStore.draftMessage).toBe("");
+  });
+
   it("renders assistant tone, reasoning blocks, and tool status badges", async () => {
     window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
 

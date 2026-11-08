@@ -3546,6 +3546,24 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     setDraftMessage(message: string) {
       this.draftMessage = message;
     },
+    /**
+     * 历史回填（shell 风格）：返回最近一条用户消息正文；无用户消息时返回 `null`。
+     *
+     * 只读，不改动 `draftMessage` —— 由调用方在「输入框为空 + ArrowUp」时取用，
+     * 以守住「仅当输入框为空才触发」的守卫（见 `HomeWorkspace.handleComposerKeydown`）。
+     */
+    recallLastUserMessage(): string | null {
+      for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+        const message = this.messages[index];
+        if (message?.role === "user") {
+          const content = message.content ?? "";
+          if (content.trim().length > 0) {
+            return content;
+          }
+        }
+      }
+      return null;
+    },
     setPendingAttachments(attachments: PendingAttachment[]) {
       this.pendingAttachments = attachments;
     },

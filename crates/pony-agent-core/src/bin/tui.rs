@@ -2609,6 +2609,27 @@ impl TuiState {
         });
     }
 
+    /// 壳层历史回填：把最近一条非空 `User` 消息正文回填到输入框，光标移到末尾。
+    ///
+    /// 只读 `messages`，**不**改动消息列表、**不**写入新气泡；无可用用户消息时返回 `false`
+    /// （调用方据此回退到原生 Up 行为，例如上翻消息）。仅供「输入框为空 + 裸 Up」调用，
+    /// 判据见 [`composer_history_recall`]。
+    pub fn recall_last_user_message(&mut self) -> bool {
+        let last = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User && !message.content.trim().is_empty());
+        match last {
+            Some(message) => {
+                let text = message.content.clone();
+                self.set_input(&text);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn append_assistant_chunk(&mut self, chunk: &str) {
         if let Some(last) = self.messages.last_mut() {
             if last.role == MessageRole::Assistant {
@@ -9635,6 +9656,12 @@ fn tui_event_loop(
                                 if state.selected_command_index > 0 {
                                     state.selected_command_index -= 1;
                                 }
+                            } else if composer_history_recall(&key, state.input_buffer.is_empty()) {
+                                // 空输入框 + 裸 Up：回填最近一条用户消息（shell 风格），
+                                // 覆盖原有「Up=上翻消息」；无历史可回填时回退到滚动，避免空按丢功能。
+                                if !state.recall_last_user_message() {
+                                    state.scroll_up(2);
+                                }
                             } else {
                                 state.scroll_up(2);
                             }
@@ -10774,6 +10801,10 @@ fn main() {
 #[cfg(test)]
 #[path = "tui/tests/wave43_unit_tests.rs"]
 mod wave43_unit_tests;
+
+#[cfg(test)]
+#[path = "tui/tests/composer_history_recall_tests.rs"]
+mod composer_history_recall_tests;
 
 #[cfg(test)]
 #[path = "tui/tests/table_wiring_tests.rs"]

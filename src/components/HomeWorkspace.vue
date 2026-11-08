@@ -1518,6 +1518,37 @@ function handleComposerKeydown(event: KeyboardEvent) {
     return;
   }
 
+  // 壳层历史回填：仅当输入框为空 + 裸 ArrowUp 时，回填最近一条用户消息。
+  // 输入框非空 / 带修饰键时一律放行，保持原生（桌面=光标移动、多行编辑不受影响）。
+  if (
+    event.key === "ArrowUp" &&
+    !event.shiftKey &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey
+  ) {
+    if (
+      runtimeStore.draftMessage.length === 0 &&
+      !event.isComposing &&
+      event.keyCode !== 229
+    ) {
+      const recalled = runtimeStore.recallLastUserMessage();
+      if (recalled !== null) {
+        event.preventDefault();
+        runtimeStore.setDraftMessage(recalled);
+        // 受控 textarea 更新后把光标移到末尾，便于继续编辑或直接发送。
+        const target = event.target as HTMLTextAreaElement | null;
+        void nextTick(() => {
+          if (target && typeof target.setSelectionRange === "function") {
+            const end = target.value.length;
+            target.setSelectionRange(end, end);
+          }
+        });
+      }
+    }
+    return;
+  }
+
   if (event.key === "Enter" && !event.shiftKey) {
     // IME 组合中（中文候选确认等）不提交，避免误发送；
     // 旧式 IME 只给 keyCode=229，与 isComposing 同权拦截。
