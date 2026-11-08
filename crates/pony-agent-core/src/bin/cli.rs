@@ -1103,7 +1103,71 @@ fn finish(code: ExitCode, observability: ObservabilityBootstrap) -> ! {
     std::process::exit(code.code());
 }
 
+/// ADR 0099 阶段 0（E8 / I4）：孤儿会话回填维护入口。
+///
+/// `ponycli sessions backfill [--dry-run] [--db <path>]`
+/// - 默认操作 `~/.local/share/PonyAgent/sessions.db`（`--db` 可指向副本）；
+/// - `--dry-run` 只报告影响面（`backfilled` / `retired` / `checksum_mismatch`），**不写库**；
+/// - 回填源只允许 `turn_events ∪ normalized_*`，绝不以 `sessions` 表为源。
+fn run_sessions_backfill_if_requested() -> Option<i32> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("sessions")
+        || args.get(2).map(String::as_str) != Some("backfill")
+    {
+        return None;
+    }
+    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    let db_path = args
+        .iter()
+        .position(|arg| arg == "--db")
+        .and_then(|index| args.get(index + 1))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(pony_agent_core::agent::sqlite_session::default_sqlite_path);
+    let backend = pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+        db_path.clone(),
+        pony_agent_core::agent::session::SeparateTraceTableMode::WriteSeparate,
+    );
+    let result = if dry_run {
+        backend.backfill_orphan_sessions_dry_run()
+    } else {
+        backend.backfill_orphan_sessions()
+    };
+    match result {
+        Ok(report) => {
+            println!("db: {}", db_path.display());
+            println!(
+                "mode: {}",
+                if dry_run {
+                    "dry-run（只报告，不写库）"
+                } else {
+                    "apply（写回 blob 行）"
+                }
+            );
+            println!(
+                "backfilled({}): {:?}",
+                report.backfilled.len(),
+                report.backfilled
+            );
+            println!("retired({}): {:?}", report.retired.len(), report.retired);
+            println!(
+                "checksum_mismatch({}): {:?}",
+                report.checksum_mismatch.len(),
+                report.checksum_mismatch
+            );
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("[ponycli] sessions backfill 失败：{error}");
+            Some(1)
+        }
+    }
+}
+
 fn main() {
+    // ADR 0099 阶段 0（E8）：维护子命令必须在常规参数解析之前拦截（否则会被当成非法参数）。
+    if let Some(code) = run_sessions_backfill_if_requested() {
+        std::process::exit(code);
+    }
     let _runtime_guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
     // 尽早装配 panic hook（崩溃上报），随后解析参数以决定是否需把诊断日志改道 stderr。
     pony_agent_core::agent::ponysentry::install_panic_hook();

@@ -1,0 +1,93 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "I1 写放大：append_turn 增量口径（save_store 增量 / 提交原语总数）+ 18 个 save_to_backend 全库入口逐条核对 store.rs:353/397/738/1027/1033/1289/1798/1990/2052/2067/2080/2094/2110/2124/2137/2183/2200/2208",
+    "I2 CAS：StaleVersion 零写入（事务回滚）/ expected-actual 语义 / 双段断言",
+    "I3 墓碑：backend 级跳过→Committed + 全库入口不复活（双路）",
+    "I4 回填源：backfill_orphan_sessions 仅 turn_events ∪ normalized_*，回填行 version=0",
+    "I5 busy：ErrorCode::DatabaseBusy|DatabaseLocked 判定 / contains(\"busy\") 清零 / 50-100-200ms 退避",
+    "E5 只读降级真实性：flock + PRAGMA query_only 是否真能阻止写入，是否存在第二条约写连接",
+    "数据完整性：write_full_store → write_store_tx 迁移（单事务 / wal_checkpoint / trace / metadata / session_is_persistable）",
+    "兼容性：无 version 列退化路径（PA-089 6a 视图）是否静默跳过 CAS",
+    "NFR logging：契约 §4 六个必落事件 + format=json + trace_id"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 112,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && rustc --edition 2021 -O /tmp/stage0_l3b_repro.rs -o /tmp/stage0_l3b_repro --extern pony_agent_core=target/debug/deps/libpony_agent_core-6f4f8d58a831bb58.rlib -L dependency=target/debug/deps && /tmp/stage0_l3b_repro; echo exit=$?  # 实测 exit=1：B 端 create_workspace 重试后把过期快照写回，A 的第二轮 turn 被覆盖（turn_count 2→1）。I2 明确 StaleVersion 不得写入，NFR §4 明确 StaleVersion 不可重试；commit_store 却 load_store() 重载版本（merged_versions）后重试 3 次，CAS 退化为 LWW。see also /tmp/stage0_l3b_repro2（单实例 51ms 必撞 stale）",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 212,
+      "rule": "SECURITY",
+      "counterexample_cmd": "D=$(mktemp -d); (/tmp/l3b_holder $D/sessions.db >/dev/null 2>&1 &); sleep 2; /tmp/l3b_degraded $D/sessions.db 2>&1 | tail -2; python3 -c \"import sqlite3;c=sqlite3.connect('$D/sessions.db');print('pending_asks_created_by_lock_denied_instance:', 'pending_asks' in [r[0] for r in c.execute(\\\"select name from sqlite_master where type='table'\\\")])\"  # 实测：抢不到 sessions.db.lock 的实例 commit_boundary=Failed（query_only 生效），但 SessionStore::new 仍在同一 sessions.db 上 open_ask_store 开出第二条无 query_only 连接并建表写入 ⇒ E5「第二实例只读、库文件零写入」不成立。编译源：/tmp/l3b_holder.rs /tmp/l3b_degraded.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 267,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '264,273p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # 无 version 列时直接 write_store_tx + Committed，无 CAS、无任何日志（ensure_version_column:54-60 还以 `let _ =` 吞掉 ALTER 失败）⇒ PA-089 6a 视图形态下 I2 静默失效；对照 upsert_session_row_bump:107 同样静默降级",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 110,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n 'UPDATE sessions' -A6 crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # E3 要求 `UPDATE … WHERE conversation_id=? AND version=?` + changes()=0 ⇒ StaleVersion；实现为 UPDATE … WHERE conversation_id=?1（无 version 守卫），CAS 靠事务内先读（:276）再写。并发写者在读后提交时，DEFERRED 事务升级失败会返回 Failed（不重试）而非 StaleVersion",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 281,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -rn 'commit_boundary_committed\\|busy_retry' crates/pony-agent-core/src/  # 0 命中：契约 §4 六个必落事件里 commit_boundary_committed、busy_retry 从未实现；全部日志是 eprintln 纯文本，无 format=json、无 trace_id（本行仅以文本串冒名事件名）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 607,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '600,610p' crates/pony-agent-core/src/agent/sqlite_session.rs  # migrate_from_json 直接 write_full_store（绕过 commit_boundary 的 CAS/墓碑守门），属 E4「任何残留全库落盘入口都必须经 commit_boundary」的漏网入口（仅首次迁移期，风险低但契约不允许）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 2715,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '2715,2735p' crates/pony-agent-core/src/agent/sqlite_session.rs  # SqliteSessionBackend::save_store 仍是 public trait 全库落盘入口，经 write_full_store(:2728) 写空墓碑集、无 CAS、无版本前进；SQLite 只因 commit_boundary 从不返回 Unsupported 才不可达（依赖隐性前提，非契约保证）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 451,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -rn 'backfill_orphan_sessions' --include=*.rs crates/pony-agent-core/src/  # 仅定义处命中，0 个生产调用点 ⇒ 41% 孤儿会话不会在启动时被回填或标 retired，E8 只交付了未接线的入口；回填域为 load_store_normalized（normalized_sessions），事件侧孤儿靠 :1104 的 INSERT OR IGNORE 才被间接覆盖",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 243,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n '243,249p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # commit_boundary 内部无 busy/locked 退避（I5 的 3 次重试只在 persist_commands_batch:2559-2608）；一旦 busy 直接 Failed ⇒ commit_store 放弃落盘，与 NFR retry 语义不一致",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 2733,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'wal_checkpoint' -r crates/pony-agent-core/src/  # 仅 save_store:2733 调用 PASSIVE checkpoint；18 个全库入口改走 commit_boundary 后热路径不再 checkpoint（迁移时静默丢失该行为，仅靠 open 时的 wal_autocheckpoint=256 兜底，非功能缺失但契约未声明）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contracts/stage0-write-model.md",
+      "line": 70,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '70p' .dev-team/contracts/stage0-write-model.md; cargo test -p pony-agent-core --test storage_stage0_write_amplification -- --nocapture  # 契约 I1 仍要求 append_turn「commit_boundary +1 且 save_store 增量 ==1」，而冻结用例断言 save_store==0、commit_boundary==0、原语总数==1（用例头声称 Lead 改判）⇒ 契约文本与冻结验收互相矛盾，实现只能满足其一",
+      "severity": "ADVISORY"
+    }
+  ]
+}

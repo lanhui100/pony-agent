@@ -19,7 +19,7 @@ use super::session::{
 #[path = "sqlite_session_commit.rs"]
 mod commit;
 
-pub use commit::is_busy_error;
+pub use commit::{is_busy_error, version_guard_degraded};
 
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
 
@@ -206,6 +206,11 @@ pub struct SqliteSessionBackend {
     legacy_json_path: Option<PathBuf>,
     /// Lazily opened, then reused for the lifetime of the backend.
     connection: Mutex<Option<Connection>>,
+    /// ADR 0099 阶段 0（E5）：`sessions.db.lock` 的独占 guard——持到 backend drop 才释放
+    /// （进程内登记表用 Weak 记账，故这里必须把 Arc 存住）。
+    instance_lock: Mutex<Option<std::sync::Arc<std::fs::File>>>,
+    /// ADR 0099 阶段 0（E5）：抢不到单实例锁 ⇒ 降级只读（连接 `query_only=ON`）。
+    read_only: std::sync::atomic::AtomicBool,
 }
 
 impl SqliteSessionBackend {
@@ -231,6 +236,8 @@ impl SqliteSessionBackend {
             trace_mode,
             legacy_json_path,
             connection: Mutex::new(None),
+            instance_lock: Mutex::new(None),
+            read_only: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -245,12 +252,18 @@ impl SqliteSessionBackend {
         if slot.is_none() {
             // ADR 0099 阶段 0（E5）：单实例独占锁。抢不到 ⇒ 明确降级只读
             // （`query_only` + 结构化日志），不 panic、不静默继续写。
-            let read_only = !commit::acquire_single_instance_lock(&self.db_path)?;
+            let lock_guard = commit::acquire_single_instance_lock(&self.db_path)?;
+            let read_only = lock_guard.is_none();
+            if let Ok(mut held) = self.instance_lock.lock() {
+                *held = lock_guard;
+            }
+            self.read_only
+                .store(read_only, std::sync::atomic::Ordering::SeqCst);
             let conn = Connection::open(&self.db_path).map_err(|e| format!("open db: {e}"))?;
             conn.execute_batch(
                 "PRAGMA journal_mode=WAL;
                  PRAGMA synchronous=NORMAL;
-                 PRAGMA busy_timeout=5000;
+                 PRAGMA busy_timeout=3000;
                  PRAGMA wal_autocheckpoint=256;",
             )
             .map_err(|e| format!("pragma: {e}"))?;
@@ -1802,18 +1815,16 @@ impl SqliteSessionBackend {
                 event_watermark: 0,
                 last_commit_watermark: 0,
             };
-            let initial =
-                serde_json::to_string(&session).map_err(|e| format!("serialize blob: {e}"))?;
-            tx.execute(
-                "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
-                 VALUES (?1, '', ?2, ?3)",
-                params![session_id, trace.updated_at as i64, initial],
-            )
-            .map_err(|e| format!("insert blob: {e}"))?;
+            commit::upsert_session_row_bump(tx, session_id, &session)
+                .map_err(|e| format!("insert blob: {e}"))?;
             return Ok(());
         }
         // 剥离语义：blob 不存 trace（WriteSeparate + Authoritative），只更新 updated_at_ms。
         // trace 数据在 session_turn_traces / normalized_turn_traces 表（load_store 表优先）。
+        // 注意：这里**不**推进 `version`——trace 投影的时间戳触碰不是会话内容写入，
+        // 推进它只会让 `SessionStore` 的 CAS 期望版本与库内版本无端失同步
+        // （表现为 next commit 被自己刚写的 trace 判成 StaleVersion）。会话内容写入
+        // 一律走 `upsert_session_row_bump`（版本单调 +1）。
         tx.execute(
             "UPDATE sessions SET updated_at_ms = ?2 WHERE conversation_id = ?1",
             params![session_id, trace.updated_at as i64],
@@ -2491,6 +2502,23 @@ impl SessionBackend for SqliteSessionBackend {
         self.commit_boundary_stage0(store)
     }
 
+    /// ADR 0099 阶段 0（I2）：读单会话版本（CAS 期望版本的来源；`None` = 行不存在/无 version 列）。
+    fn session_version(&self, session_id: &str) -> Option<u64> {
+        let slot = self.connection().ok()?;
+        let conn = slot.as_ref()?;
+        if !commit::version_column_state(conn).ok()? {
+            return None;
+        }
+        commit::read_session_version(conn, session_id)
+            .ok()
+            .flatten()
+    }
+
+    /// ADR 0099 阶段 0（E5）：抢不到单实例锁 ⇒ 本后端为降级只读。
+    fn is_read_only(&self) -> bool {
+        self.read_only.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// PA-095：事件 schema 版本校验（trait 入口）。
     fn validate_event_schema(&self) -> Result<u64, String> {
         let slot = self.connection().map_err(|e| format!("sqlite open: {e}"))?;
@@ -2549,6 +2577,9 @@ impl SessionBackend for SqliteSessionBackend {
         if commands.is_empty() {
             return PersistCommandOutcome::Succeeded;
         }
+        // ADR 0099 阶段 0（E5）：降级只读实例在每次写入口重试一次 flock（非阻塞），
+        // 持锁进程退出后自动恢复可写（query_only 本身不可逆）。
+        self.try_recover_instance_lock();
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
@@ -2713,6 +2744,7 @@ impl SessionBackend for SqliteSessionBackend {
     /// history_nodes/branches/cursor 直接读表。
 
     fn save_store(&self, store: &PersistedStore) -> Result<(), String> {
+        self.try_recover_instance_lock();
         // Borrow the pooled connection; never panic the caller on a write error
         // — the turn loop must stay alive even if persistence hiccups. 但失败必须**返回**给
         // 调用方（T2-3）：此前只 eprintln 后返回 `()`，调用方无从得知会话根本没落盘。
@@ -2758,13 +2790,6 @@ impl SessionBackend for SqliteSessionBackend {
             }
         };
         let conn = slot.as_ref().expect("connection initialized");
-        let data = match serde_json::to_string(session) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!("[pony-agent][session] SQLite session serialize error: {e}");
-                return false;
-            }
-        };
         let tx = match conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(e) => {
@@ -2772,16 +2797,10 @@ impl SessionBackend for SqliteSessionBackend {
                 return false;
             }
         };
-        if let Err(e) = tx.execute(
-            "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                session_id,
-                session.title,
-                session.updated_at_ms as i64,
-                data
-            ],
-        ) {
+        // ADR 0099 阶段 0（I2 / BLOCKING-1）：必须走带 `version` 的写路径。此前的
+        // 4 列 `INSERT OR REPLACE` 会把 version 重置为 DEFAULT 0（ABA），使
+        // expected=0 的旧快照在单行写之后**再次通过 CAS** 并覆盖新 turn。
+        if let Err(e) = commit::upsert_session_row_bump(&tx, session_id, session) {
             eprintln!("[pony-agent][session] SQLite upsert session error: {e}");
             return false;
         }

@@ -1,0 +1,81 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+    "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 265,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cat > /tmp/stage0_l3a/repro.rs <<'RS'\n//! ADR 0099 stage-0 L3-A concurrency repro harness (read-only audit artifact).\n//! Usage: repro <off-by-one|retry-clobber|version-reset|deferred|hold|write>\nuse pony_agent_core::agent::session::{\n    SeparateTraceTableMode, SessionBackend, SessionState, SessionStore,\n};\nuse pony_agent_core::agent::sqlite_session::SqliteSessionBackend;\nuse std::path::PathBuf;\n\nfn backend(db: &PathBuf) -> SqliteSessionBackend {\n    SqliteSessionBackend::new_with_trace_mode(db.clone(), SeparateTraceTableMode::WriteSeparate)\n}\n\nfn hist_ver(db: &PathBuf, id: &str) -> (usize, i64) {\n    let conn = rusqlite::Connection::open(db).unwrap();\n    let data: String = conn\n        .query_row(\"SELECT session_data FROM sessions WHERE conversation_id=?1\", [id], |r| r.get(0))\n        .unwrap();\n    let v: serde_json::Value = serde_json::from_str(&data).unwrap();\n    let ver: i64 = conn\n        .query_row(\"SELECT version FROM sessions WHERE conversation_id=?1\", [id], |r| r.get(0))\n        .unwrap();\n    (v.get(\"history\").and_then(|h| h.as_array()).map(|a| a.len()).unwrap_or(0), ver)\n}\n\nfn tmp(tag: &str) -> PathBuf {\n    let d = std::env::temp_dir().join(format!(\"l3a-{tag}-{}\", std::process::id()));\n    std::fs::create_dir_all(&d).unwrap();\n    d\n}\n\nfn main() {\n    let mode = std::env::args().nth(1).unwrap_or_default();\n    match mode.as_str() {\n        // F3: advance_versions() uses the stale `known` map -> every later full commit is StaleVersion.\n        \"off-by-one\" => {\n            let dir = tmp(\"oob\");\n            let db = dir.join(\"sessions.db\");\n            let mut s = SessionStore::with_backend(Box::new(backend(&db)));\n            s.append_turn(Some(\"s1\"), \"q\", \"a\", None, Vec::new());\n            for i in 0..3 {\n                let ws = dir.join(format!(\"ws{i}\"));\n                std::fs::create_dir_all(&ws).unwrap();\n                eprintln!(\"--- full commit #{i} ---\");\n                s.create_workspace(&format!(\"w{i}\"), ws.to_str().unwrap()).unwrap();\n                eprintln!(\"after #{i}: (history,version)={:?}\", hist_ver(&db, \"s1\"));\n            }\n        }\n        // F2: CAS detects the conflict, then the retry re-submits the stale snapshot and clobbers it.\n        \"retry-clobber\" => {\n            let dir = tmp(\"clobber\");\n            let db = dir.join(\"sessions.db\");\n            let mut a = SessionStore::with_backend(Box::new(backend(&db)));\n            a.append_turn(Some(\"s1\"), \"q1\", \"a1\", None, Vec::new());\n            let mut b = SessionStore::with_backend(Box::new(backend(&db)));\n            eprintln!(\"B snapshot = {:?}\", hist_ver(&db, \"s1\"));\n            a.append_turn(Some(\"s1\"), \"q2\", \"a2\", None, Vec::new());\n            eprintln!(\"after A turn2 = {:?}\", hist_ver(&db, \"s1\"));\n            let ws = dir.join(\"ws\");\n            std::fs::create_dir_all(&ws).unwrap();\n            b.create_workspace(\"w\", ws.to_str().unwrap()).unwrap();\n            eprintln!(\"AFTER B full commit = {:?} (2 == A turn2 silently lost)\", hist_ver(&db, \"s1\"));\n        }\n        // F4: the production upsert_session fallback resets sessions.version to 0 (INSERT OR REPLACE\n        // without the version column) -> an old snapshot with expected=0 passes CAS.\n        \"version-reset\" => {\n            let dir = tmp(\"reset\");\n            let db = dir.join(\"sessions.db\");\n            let mut a = SessionStore::with_backend(Box::new(backend(&db)));\n            a.append_turn(Some(\"s1\"), \"q1\", \"a1\", None, Vec::new());\n            let r = backend(&db);\n            let stale = r.load_store().expect(\"snapshot with expected version 0\");\n            let ws = dir.join(\"ws\");\n            std::fs::create_dir_all(&ws).unwrap();\n            a.create_workspace(\"w\", ws.to_str().unwrap()).unwrap();\n            a.append_turn(Some(\"s1\"), \"q2\", \"a2\", None, Vec::new());\n            eprintln!(\"before fallback = {:?}\", hist_ver(&db, \"s1\"));\n            let u = backend(&db);\n            let st: SessionState = serde_json::from_str(\n                r#\"{\"conversationId\":\"s1\",\"summary\":\"\",\"history\":[],\"turnCount\":0,\"lastReferencedFile\":null}\"#,\n            ).unwrap();\n            assert!(u.upsert_session(\"s1\", &st));\n            eprintln!(\"after upsert_session fallback = {:?}\", hist_ver(&db, \"s1\"));\n            eprintln!(\"stale snapshot => {:?}\", r.commit_boundary(&stale));\n            eprintln!(\"FINAL = {:?} (2 == stale snapshot overwrote 4 msgs)\", hist_ver(&db, \"s1\"));\n        }\n        // F1: BEGIN DEFERRED read-then-write; a concurrent commit between read and write => Failed.\n        \"deferred\" => {\n            let dir = tmp(\"deferred\");\n            let db = dir.join(\"sessions.db\");\n            let mut s = SessionStore::with_backend(Box::new(backend(&db)));\n            s.append_turn(Some(\"s1\"), \"q1\", \"a1\", None, Vec::new());\n            drop(s);\n            let reader = backend(&db);\n            let snapshot = reader.load_store().expect(\"snapshot\");\n            let db2 = db.clone();\n            let w = std::thread::spawn(move || {\n                let c = rusqlite::Connection::open(&db2).unwrap();\n                c.execute_batch(\"PRAGMA busy_timeout=5000; BEGIN IMMEDIATE;\").unwrap();\n                c.execute(\"UPDATE sessions SET title=title WHERE conversation_id='s1'\", []).unwrap();\n                std::thread::sleep(std::time::Duration::from_millis(300));\n                c.execute_batch(\"COMMIT;\").unwrap();\n            });\n            std::thread::sleep(std::time::Duration::from_millis(100));\n            eprintln!(\"commit_boundary => {:?}\", reader.commit_boundary(&snapshot));\n            w.join().unwrap();\n        }\n        // F9: cross-process single-instance lock -> second process silently becomes read-only.\n        \"hold\" => {\n            let db = PathBuf::from(\"/tmp/l3a-ro/sessions.db\");\n            std::fs::create_dir_all(\"/tmp/l3a-ro\").unwrap();\n            let _s = SessionStore::with_backend(Box::new(backend(&db)));\n            eprintln!(\"[hold] store opened (flock held), sleeping 4s\");\n            std::thread::sleep(std::time::Duration::from_secs(4));\n        }\n        \"write\" => {\n            let db = PathBuf::from(\"/tmp/l3a-ro/sessions.db\");\n            let mut s = SessionStore::with_backend(Box::new(backend(&db)));\n            s.append_turn(Some(\"s1\"), \"q\", \"a\", None, Vec::new());\n            let conn = rusqlite::Connection::open(&db).unwrap();\n            let n: i64 = conn\n                .query_row(\"SELECT COUNT(*) FROM sessions WHERE conversation_id='s1'\", [], |r| r.get(0))\n                .unwrap();\n            eprintln!(\"[write] rows for s1 = {n} (1 == persisted, 0 == silently lost)\");\n        }\n        other => panic!(\"unknown mode {other}\"),\n    }\n}\n\nRS\ncd /home/dm/pony-agent && SQLITE=$(ls -t target/debug/deps/librusqlite-*.rlib | head -1); ok=0; for CORE in $(ls -t target/debug/deps/libpony_agent_core-*.rlib); do for JSON in $(ls -t target/debug/deps/libserde_json-*.rlib); do if rustc --edition 2021 /tmp/stage0_l3a/repro.rs --extern pony_agent_core=$CORE --extern rusqlite=$SQLITE --extern serde_json=$JSON -L dependency=target/debug/deps -o /tmp/stage0_l3a/repro 2>/dev/null; then ok=1; break 2; fi; done; done; [ $ok = 1 ] && /tmp/stage0_l3a/repro deferred\n   # 基线=commit fcf09daa（复跑请在 fcf09daa 干净检出上执行）\n   # 实际输出：commit_boundary_failed: upsert session row: database is locked；commit_boundary => Failed\n   # 期望（I5+E2）：BEGIN IMMEDIATE 覆盖读-判-写；实际 unchecked_transaction()=BEGIN DEFERRED，读快照过期后写升级返回 SQLITE_BUSY_SNAPSHOT(517)，被映射成 Failed（commit_boundary 路径不调用 is_busy_error、不重试、无 StaleVersion），整包静默放弃。\n   # 纯 SQL 最小复现：python3 - <<'P'\n   # import sqlite3,os,tempfile; p=os.path.join(tempfile.mkdtemp(),'s.db')\n   # a=sqlite3.connect(p,isolation_level=None); a.execute('PRAGMA journal_mode=WAL')\n   # a.execute('CREATE TABLE sessions(id TEXT PRIMARY KEY, version INTEGER, d TEXT)'); a.execute(\"INSERT INTO sessions VALUES('s',5,'A')\")\n   # b=sqlite3.connect(p,isolation_level=None); b.execute('PRAGMA busy_timeout=5000')\n   # a.execute('BEGIN DEFERRED'); a.execute(\"SELECT version FROM sessions WHERE id='s'\").fetchone()\n   # b.execute('BEGIN IMMEDIATE'); b.execute(\"UPDATE sessions SET version=version+1 WHERE id='s'\"); b.execute('COMMIT')\n   # a.execute(\"UPDATE sessions SET d='A' WHERE id='s'\")\n   # P\n   # 输出：err: database is locked code= 517（SQLITE_BUSY_SNAPSHOT）",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 112,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && /tmp/stage0_l3a/repro retry-clobber\n   # 输出 B snapshot=(2,1) / after A turn2=(4,2) / AFTER B full commit=(2,3)：CAS 命中冲突后重试只刷新 store.versions、不刷新 store.sessions 内容，B 的旧 2 条消息被强行写回并 +1，A 的第 2 轮 turn 静默丢失，outcome 仍是 Committed。\n   # 基线=commit fcf09daa（本审查期间工作树已被并发修改，复跑请在 fcf09daa 的干净检出上执行）；harness 源由 findings[0] 命令写入并编译，此处换 mode 参数\n",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 133,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && /tmp/stage0_l3a/repro off-by-one\n   # 输出：full commit #1/#2 每次 commit_boundary_stale_version expected=0 actual=1（再 expected=1 actual=2），并 50ms sleep + 全库 load_store + 重试；单进程零并发下版本永远差一。根因：advance_versions 用陈旧 known+1，而非本次实际写入的 store.versions+1。\n   # 基线=commit fcf09daa（本审查期间工作树已被并发修改，复跑请在 fcf09daa 的干净检出上执行）；harness 源由 findings[0] 命令写入并编译，此处换 mode 参数\n",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 2776,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && /tmp/stage0_l3a/repro version-reset\n   # 输出 before fallback=(4,2) / after upsert_session fallback=(0,0) / stale snapshot => Committed / FINAL=(2,1)：upsert_session 的 INSERT OR REPLACE 不带 version 列，version 由 2 重置为 0；期望版本 0 的旧快照随即 CAS 假通过并覆盖 4 条为前 2 条。该方法是 store.rs:2462 save_session_state_to_backend 第二级降级（生产路径，非 Authoritative 会话每次单行写都走它）。\n   # 基线=commit fcf09daa（本审查期间工作树已被并发修改，复跑请在 fcf09daa 的干净检出上执行）；harness 源由 findings[0] 命令写入并编译，此处换 mode 参数\n",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 108,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show fcf09daa:crates/pony-agent-core/src/agent/session/store_stage0.rs | sed -n '86,125p' && git show fcf09daa:crates/pony-agent-core/src/agent/sqlite_session.rs | sed -n '2566,2582p' && git show fcf09daa:crates/pony-agent-core/src/agent/control_plane/mod.rs | sed -n '1317,1336p'\n   # save_to_backend 在持有 Arc<RwLock<SessionStore>> 写锁时执行（control_plane flush_events 取 sessions.write()），CAS 退避 50/100/200ms 与全库 load_store 全在写锁内；persist_commands_batch 的 busy 退避（sqlite_session.rs:2575/2604）在持有 backend 连接 Mutex 内 sleep。最坏约 700ms 写锁占用 + 3 次全库装载，期间所有会话读/快照阻塞；叠加 findings[2] 的恒定差一，退避成为每次全库提交的常付成本。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 295,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show fcf09daa:crates/pony-agent-core/src/agent/sqlite_session_commit.rs | sed -n '273,296p' && git show fcf09daa:crates/pony-agent-core/src/agent/session/store_stage0.rs | sed -n '88,96p' && git show fcf09daa:crates/pony-agent-core/tests/storage_stage0_tombstone_no_resurrect.rs | sed -n '180,218p'\n   # 墓碑跳过只体现在内部 HashSet，CommitOutcome 无 per-session 通道：同批次里既有已删会话又有新会话时一律返回 Committed，调用方/UI 无从得知某会话被丢弃，其后续编辑永不落盘（advance_versions 还继续给它 +1）。且墓碑判定要求 store.versions 有期望版本（本文件:287），本实例新建、只经单行写落盘、未进 versions 的会话被其他实例删除后会被盲写 INSERT 复活（I3 破口）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 147,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show fcf09daa:crates/pony-agent-core/src/agent/sqlite_session_commit.rs | sed -n '133,168p' && git show fcf09daa:crates/pony-agent-core/src/agent/ask_persistence.rs | sed -n '278,302p' && /tmp/stage0_l3a/repro retry-clobber\n   # 同进程第二个 SqliteSessionBackend 命中 LOCK_REGISTRY 直接 Ok(true)（retry-clobber 即两个 SessionStore 同进程并发写同一 db 的成功复现）；open_ask_store 用独立连接打开同一 sessions.db 且从不取 .lock；旧版本进程/外部 sqlite 工具同样旁路。单实例锁是建议性的，'单写者'前提不可强制，配合 findings[0] 的 DEFERRED 事务即产生 Failed 丢写。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 64,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show fcf09daa:crates/pony-agent-core/src/agent/sqlite_session_commit.rs | sed -n '54,65p'\n   # has_version_column 把任何 prepare 失败（busy/locked/schema 锁，例如另一实例正在 ALTER ADD COLUMN）判为'无 version 列'，随后 write_store_tx(&tx, store, &HashSet::new())（同文件 267-272）：既无 CAS 也无墓碑跳过，仍返回 Committed（fail-open）。ensure_version_column 亦以 let _ = 吞掉 ALTER 错误并返回 Ok，迁移失败会永久静默降级。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 258,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "rm -rf /tmp/l3a-ro; /tmp/stage0_l3a/repro hold & sleep 1; /tmp/stage0_l3a/repro write; wait\n   # 实际输出：single_instance_lock_denied / append_turn error: Backend persistence failure / [write] rows for s1 = 0\n   # query_only=ON（sqlite_session.rs:258）只在首次 open 设定，永不撤销、也不再重试 flock：持锁进程退出后本实例仍永久只读，用户编辑与 remove_session 只落内存，重启全部回滚，且只有 eprintln 无结构化用户信号。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 527,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show fcf09daa:crates/pony-agent-core/src/agent/sqlite_session_commit.rs | sed -n '456,501p;517,531p'\n   # 回填 INSERT OR REPLACE ... VALUES(...,0)（第 527 行硬置 0）把 version 重置；'blob_rows>0 就跳过'的判定（456-466）在事务外，回填事务到 493 才开启，两者之间若有并发 commit 写入该行，回填会以规范化重建内容覆盖并重置 version → 旧快照 expected=0 又可假通过。当前仅测试调用，故 ADVISORY。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

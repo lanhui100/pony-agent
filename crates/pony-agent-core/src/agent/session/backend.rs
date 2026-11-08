@@ -272,6 +272,23 @@ pub trait SessionBackend: Send + Sync {
     fn trace_storage_mode(&self) -> SeparateTraceTableMode {
         SeparateTraceTableMode::Off
     }
+
+    /// ADR 0099 阶段 0（E5）：后端是否处于**降级只读**（例如抢不到 `sessions.db.lock`）。
+    ///
+    /// 默认 `false`。宿主据此关闭同一库上的**旁路写连接**（`pending_asks` 等）——否则
+    /// 「第二实例只读、库文件零写入」会被第二条连接击穿，单实例锁形同虚设。
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    /// ADR 0099 阶段 0（I2）：读某个会话的库内版本（`sessions.version`）。
+    ///
+    /// `SessionStore` 在用**单行写**（`upsert_session` / `persist_session_with_trace_mutation`）
+    /// 落盘后，用它把 CAS 期望版本刷新成库内真实值——否则「自己刚写的那一版」会在下一次
+    /// 整包提交时被判成 `StaleVersion`。默认 `None`（非 SQLite 后端无版本概念）。
+    fn session_version(&self, _session_id: &str) -> Option<u64> {
+        None
+    }
     /// PA-089 阶段 3：规范化双写命令（blob + normalized_* 表统一事务）。
     /// 默认 Unsupported——File/Memory backend 无需实现；SqliteSessionBackend 实现。
     fn persist_command(&self, _command: PersistCommand) -> PersistCommandOutcome {

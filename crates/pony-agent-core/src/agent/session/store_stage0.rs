@@ -1,4 +1,4 @@
-//! ADR 0099 阶段 0：`SessionStore` 侧的**提交边界编排**（CAS 重试 / 版本前进 / 快照构造）。
+//! ADR 0099 阶段 0：`SessionStore` 侧的**提交边界编排**（CAS 收口 / 版本前进 / 快照构造）。
 //!
 //! 契约真源：`.dev-team/contracts/stage0-write-model.md` §3（I1–I3）与 §5（E1/E4）。
 //!
@@ -13,7 +13,8 @@ use super::{
     SessionMap, SessionStore,
 };
 use crate::agent::session::{
-    CommitOutcome, SeparateTraceTableMode, SessionVersion, SessionVersionMap, TraceMigrationState,
+    CommitOutcome, SeparateTraceTableMode, SessionBackendMutationResult, SessionVersion,
+    SessionVersionMap, TraceMigrationState,
 };
 
 impl SessionStore {
@@ -32,7 +33,16 @@ impl SessionStore {
                 TraceMigrationState::TraceTableAuthoritative
             ) {
                 let union = collect_trace_union(session);
-                let _ = self.backend.replace_session_traces(session_id, &union);
+                // 失败不得静默：authoritative 会话的 blob 已剥离 trace，表写不进去就等于
+                // 永久丢 trace（可观测、可排障，而不是 `let _ =` 吞掉）。
+                if let SessionBackendMutationResult::Failed =
+                    self.backend.replace_session_traces(session_id, &union)
+                {
+                    eprintln!(
+                        "[pony-agent][session] trace 表写入失败（session={session_id}）：\
+                         blob 已剥离 trace，权威 trace 可能永久丢失"
+                    );
+                }
             }
         }
     }
@@ -77,78 +87,65 @@ impl SessionStore {
             .collect()
     }
 
-    /// ADR 0099 阶段 0（I1/I2/I3）：单一提交边界编排。
+    /// ADR 0099 阶段 0（I1/I2/I3）：单一提交边界编排（**StaleVersion 不可重试**）。
     ///
     /// - `Committed` ⇒ 版本前进，本次落盘结束；
     /// - `Unsupported`（File / Memory / 计数代理）⇒ 回退 `save_store`，保持旧语义；
-    /// - `StaleVersion` ⇒ 重载库内最新版本后**有界重试**（≤3 次，50→200ms 退避）；
-    /// - `Failed` / 重试耗尽 ⇒ fail loud（结构化日志，不静默成功）。
+    /// - `StaleVersion` ⇒ **放弃本次整包提交**并 fail loud：契约把版本冲突列为不可重试
+    ///   结果——重投旧快照（哪怕换上新版本号）就是 LWW 覆盖，比不重试更糟。需要重试时必须
+    ///   由调用方**重新装载最新状态**后再构造新的 `PersistedStore`；
+    /// - `Failed` ⇒ fail loud（不静默成功）。
     pub(super) fn commit_store(&self, sessions: &SessionMap, label: &str) {
-        let mut store = self.to_persisted_store(sessions);
-        for attempt in 0..3u32 {
-            match self.backend.commit_boundary(&store) {
-                CommitOutcome::Committed => {
-                    self.advance_versions(&store);
-                    return;
-                }
-                CommitOutcome::Unsupported => {
-                    if let Err(error) = self.backend.save_store(&store) {
-                        eprintln!(
-                            "[pony-agent][session] {label} 失败：会话库未落盘（数据可能丢失）：{error}"
-                        );
-                    }
-                    return;
-                }
-                CommitOutcome::StaleVersion { expected, actual } => {
+        let store = self.to_persisted_store(sessions);
+        match self.backend.commit_boundary(&store) {
+            CommitOutcome::Committed => self.advance_versions(&store),
+            CommitOutcome::Unsupported => {
+                if let Err(error) = self.backend.save_store(&store) {
                     eprintln!(
-                        "[pony-agent][session] {label} CAS 冲突 expected={expected} actual={actual}，\
-                         重载版本后第 {} 次重试",
-                        attempt + 1
+                        "[pony-agent][session] {label} 失败：会话库未落盘（数据可能丢失）：{error}"
                     );
-                    std::thread::sleep(std::time::Duration::from_millis(50u64 << attempt.min(2)));
-                    let Some(fresh) = self.backend.load_store() else {
-                        break;
-                    };
-                    store.versions = merged_versions(&store.versions, &fresh.versions);
-                }
-                CommitOutcome::Failed => {
-                    eprintln!(
-                        "[pony-agent][session] {label} 失败：提交边界返回 Failed（数据可能丢失）"
-                    );
-                    return;
                 }
             }
+            CommitOutcome::StaleVersion { expected, actual } => eprintln!(
+                "[pony-agent][session] {label} 放弃本次整包提交：commit_boundary_stale_version \
+                 （不可重试）expected={expected} actual={actual} sessions={}；\
+                 旧快照不得覆盖库内新版本，须重新装载最新状态后重投",
+                store.sessions.len()
+            ),
+            CommitOutcome::Failed => eprintln!(
+                "[pony-agent][session] {label} 失败：commit_boundary_failed（数据可能丢失）"
+            ),
         }
-        eprintln!(
-            "[pony-agent][session] {label} 放弃：CAS 冲突重试 3 次仍失败（未静默成功，请排查并发写）"
-        );
     }
 
-    /// 提交成功后版本前进：已装载的会话 +1；本实例新建的会话（提交时建行 version=0）记 0。
+    /// 单行写成功后**同步 CAS 期望版本**（取库内真实值）。
+    ///
+    /// 单行写路径（`upsert_session` / `persist_session_with_trace_mutation`）都会让
+    /// `sessions.version` +1；缓存若不跟上，下一次整包提交会被自己刚写的那一版判成
+    /// `StaleVersion`（"重启→聊天→建工作区必撞 stale" 的根因）。这里只在自己写入成功后
+    /// 刷新，因此**不会**掩盖别的实例造成的过期快照。
+    pub(super) fn note_version_from_backend(&self, session_id: &str) {
+        let Some(version) = self.backend.session_version(session_id) else {
+            return;
+        };
+        if let Ok(mut known) = self.versions.lock() {
+            known.insert(session_id.to_string(), SessionVersion(version));
+        }
+    }
+
+    /// 提交成功后刷新 CAS 期望版本——**取库内实际写入值**（`session_version` PK 读）。
+    ///
+    /// 不用 `known + 1` 推算：那会在"本次提交写了别的会话/别的实例也写过"时恒定差一，
+    /// 让下一次整包提交永远 `StaleVersion`（L3-A 复现的 off-by-one）。
+    /// 墓碑会话（本次跳过、行已不在）返回 `None` ⇒ 保留旧期望版本，下次继续判墓碑（I3）。
     fn advance_versions(&self, store: &PersistedStore) {
         let Ok(mut known) = self.versions.lock() else {
             return;
         };
         for session_id in store.sessions.keys() {
-            let next = known
-                .get(session_id)
-                .map(|version| version.0 + 1)
-                .unwrap_or(0);
-            known.insert(session_id.clone(), SessionVersion(next));
+            if let Some(version) = self.backend.session_version(session_id) {
+                known.insert(session_id.clone(), SessionVersion(version));
+            }
         }
     }
-}
-
-/// ADR 0099 阶段 0（I2/I3）：CAS 重试时的版本合并。
-///
-/// 库内最新版本优先；快照里存在但**库里已无行**的会话保留旧期望版本 ⇒ 再次提交时被
-/// 判为墓碑并跳过（而不是被当成新会话 INSERT 回去，I3 不复活）。
-fn merged_versions(snapshot: &SessionVersionMap, fresh: &SessionVersionMap) -> SessionVersionMap {
-    let mut merged = fresh.clone();
-    for (session_id, version) in snapshot {
-        if !merged.contains_key(session_id) {
-            merged.insert(session_id.clone(), *version);
-        }
-    }
-    merged
 }

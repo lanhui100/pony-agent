@@ -208,6 +208,16 @@ impl SessionStore {
             SeparateTraceTableMode::WriteSeparate,
         ));
         let mut store = Self::with_backend(backend);
+        // ADR 0099 阶段 0（E5 / BLOCKING-5）：降级只读实例**不得**在同一个库上再开第二条
+        // 写连接（`open_ask_store` 会建表/写 `pending_asks`，直接击穿「第二实例只读、
+        // 库文件零写入」），退化为内存 dispatcher 镜像。
+        if store.backend.is_read_only() {
+            eprintln!(
+                "[pony-agent][session] single_instance_lock_denied：{} 降级只读，跳过 ask store（避免旁路连接击穿单实例锁）",
+                sqlite_path.display()
+            );
+            return store;
+        }
         // ADR 0074：未决 Ask 与会话同库持久化（`pending_asks` 表，打开即向前建表）。
         store.ask_store = match crate::agent::ask_persistence::open_ask_store(&sqlite_path) {
             Ok(ask_store) => Some(Arc::from(ask_store)),
@@ -2457,9 +2467,11 @@ impl SessionStore {
                 SessionBackendMutationResult::Succeeded
             )
         {
+            self.note_version_from_backend(session_id);
             return;
         }
         if session_is_persistable(session) && self.backend.upsert_session(session_id, &prepared) {
+            self.note_version_from_backend(session_id);
             return;
         }
         let mut sessions_map = self.sessions.clone();
@@ -2583,6 +2595,7 @@ impl SessionStore {
                     };
                 }
             }
+            self.note_version_from_backend(session_id);
             return;
         }
 
@@ -2604,6 +2617,7 @@ impl SessionStore {
                 ),
                 SessionBackendMutationResult::Succeeded
             ) {
+                self.note_version_from_backend(session_id);
                 return;
             }
         }

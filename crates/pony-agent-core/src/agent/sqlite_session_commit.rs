@@ -11,7 +11,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -47,34 +48,91 @@ pub(crate) fn busy_backoff_ms(attempt: u32) -> u64 {
 // E3：`sessions.version` 列（存量库幂等迁移）
 // ---------------------------------------------------------------------------
 
+/// 版本守门是否因迁移失败而**降级关闭**（`true` = CAS 不可用，只能无版本整包写）。
+///
+/// 只在迁移真的失败时置位（如 `sessions` 已是视图），并由 `ensure_version_column` 落
+/// 结构化日志；供 `version_guard_degraded()` 查询，避免"CAS 静默关闭"。
+static VERSION_GUARD_DEGRADED: AtomicBool = AtomicBool::new(false);
+
+/// E3：CAS 守门当前是否已降级关闭（迁移失败后为 `true`；观测/排障入口）。
+pub fn version_guard_degraded() -> bool {
+    VERSION_GUARD_DEGRADED.load(Ordering::SeqCst)
+}
+
 /// E3 / I2：`sessions` 表新增 `version INTEGER NOT NULL DEFAULT 0`。
 ///
 /// `CREATE TABLE IF NOT EXISTS` 不补列（同 PA-093 既有做法），存量库走
 /// `ALTER TABLE ... ADD COLUMN`，列已存在时忽略错误 ⇒ 迁移幂等（重复执行 0 报错）。
+/// 迁移失败（视图库等无法加列）**不得静默吞掉**：落日志 + 置降级标记，CAS 明确关闭。
 pub(crate) fn ensure_version_column(conn: &Connection) -> Result<(), String> {
-    let _ = conn.execute(
+    match version_column_state(conn) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        // 查询本身失败（busy/locked/schema 锁）≠ 列不存在：上抛，由调用方 fail loud。
+        Err(error) => return Err(error),
+    }
+    match conn.execute(
         "ALTER TABLE sessions ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
         [],
-    );
-    Ok(())
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            VERSION_GUARD_DEGRADED.store(true, Ordering::SeqCst);
+            eprintln!(
+                "[pony-agent][session] commit_boundary_degraded：sessions.version 迁移失败，\
+                 CAS 守门降级关闭（StaleVersion 永不触发，仅剩无版本整包写）：{error}"
+            );
+            Ok(())
+        }
+    }
 }
 
-/// `sessions` 是否带 `version` 列。PA-089 6a 的 `sessions` 视图只有 4 列，写/读路径需降级。
-fn has_version_column(conn: &Connection) -> bool {
-    conn.prepare("SELECT version FROM sessions LIMIT 0").is_ok()
+/// `sessions` 是否带 `version` 列——**结构判定**（`PRAGMA table_info`），不靠错误文本。
+///
+/// 三态语义（关键，BLOCKING-5）：
+/// - `Ok(true)`：有列，CAS 可用；
+/// - `Ok(false)`：列**确实不存在**（PA-089 6a 的 `sessions` 视图形态 / 空表）⇒ 允许显式降级；
+/// - `Err(..)`：查询本身失败（`SQLITE_BUSY` / `SQLITE_LOCKED` / schema 锁）⇒ 调用方必须
+///   fail loud，**不得**当成"没有 version 列"然后无 CAS 假装成功。
+pub(crate) fn version_column_state(conn: &Connection) -> Result<bool, String> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(sessions)")
+        .map_err(|error| format!("prepare table_info(sessions): {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("query table_info(sessions): {error}"))?;
+    for row in rows {
+        let name = row.map_err(|error| format!("read table_info(sessions): {error}"))?;
+        if name == "version" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// E1：读取版本侧表（`sessions.version`）——`load_store` / `load_store_normalized` 用它
 /// 填充 `PersistedStore.versions`，`commit_boundary` 用它作**期望版本**。
 pub(crate) fn load_session_versions(conn: &Connection) -> SessionVersionMap {
     let mut versions = SessionVersionMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT conversation_id, version FROM sessions") else {
-        return versions;
+    let mut stmt = match conn.prepare("SELECT conversation_id, version FROM sessions") {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            eprintln!(
+                "[pony-agent][session] commit_boundary_degraded：版本侧表读取失败（本次快照无期望版本）：{error}"
+            );
+            return versions;
+        }
     };
-    let Ok(rows) = stmt.query_map([], |row| {
+    let rows = match stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    }) else {
-        return versions;
+    }) {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!(
+                "[pony-agent][session] commit_boundary_degraded：版本侧表查询失败（本次快照无期望版本）：{error}"
+            );
+            return versions;
+        }
     };
     for (session_id, version) in rows.flatten() {
         versions.insert(session_id, SessionVersion(version.max(0) as u64));
@@ -82,7 +140,10 @@ pub(crate) fn load_session_versions(conn: &Connection) -> SessionVersionMap {
     versions
 }
 
-fn read_session_version(conn: &Connection, session_id: &str) -> Result<Option<u64>, String> {
+pub(crate) fn read_session_version(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<u64>, String> {
     conn.query_row(
         "SELECT version FROM sessions WHERE conversation_id = ?1",
         params![session_id],
@@ -104,7 +165,7 @@ pub(crate) fn upsert_session_row_bump(
     let data = serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
     let title = session.title.as_str();
     let updated_at_ms = session.updated_at_ms as i64;
-    if has_version_column(conn) {
+    if version_column_state(conn)? {
         let updated = conn
             .execute(
                 "UPDATE sessions
@@ -132,20 +193,28 @@ pub(crate) fn upsert_session_row_bump(
 
 /// 进程内锁登记表：`flock` 按 open file description 记账，同进程重复 `open` 会自锁，
 /// 故同一 db 路径在本进程内共享同一把锁（一个进程 = 一个 writer 实例语义）。
-static LOCK_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<std::fs::File>>>> = OnceLock::new();
+///
+/// 用 `Weak` 持有：锁的存活由 `SqliteSessionBackend` 侧持有的 `Arc` 决定（backend drop
+/// ⇒ 锁释放 ⇒ 登记项自然失效），登记表因此**有界**（每条 acquire 顺带 prune 死项）。
+static LOCK_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<std::fs::File>>>> = OnceLock::new();
 
 /// E5 / NFR `concurrency_lock`：尝试独占 `<db>.lock`。
 ///
-/// 返回 `Ok(true)` = 已持有（本进程）；`Ok(false)` = 其他进程独占 ⇒ 调用方**必须**明确
-/// 降级只读（`PRAGMA query_only=ON` + 结构化日志），不得忙等、不得 panic，也不得继续写。
-pub(crate) fn acquire_single_instance_lock(db_path: &Path) -> Result<bool, String> {
+/// - `Ok(Some(guard))`：已持有（本进程），调用方必须把 `guard` 存住直到 backend drop；
+/// - `Ok(None)`：其他进程独占（或锁文件不可独占）⇒ 调用方**必须**明确降级只读
+///   （`PRAGMA query_only=ON` + 结构化日志），不得忙等、不得 panic，也不得继续写；
+/// - `Err`：连锁文件都建不出来（路径不可写）⇒ 同样按降级处理由调用方决定。
+pub(crate) fn acquire_single_instance_lock(
+    db_path: &Path,
+) -> Result<Option<Arc<std::fs::File>>, String> {
     let registry = LOCK_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
     let key = db_path.to_path_buf();
     let mut held = registry
         .lock()
         .map_err(|error| format!("lock registry poisoned: {error}"))?;
-    if held.contains_key(&key) {
-        return Ok(true);
+    held.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(existing) = held.get(&key).and_then(Weak::upgrade) {
+        return Ok(Some(existing));
     }
     let lock_path = PathBuf::from(format!("{}.lock", db_path.display()));
     let file = std::fs::OpenOptions::new()
@@ -155,34 +224,81 @@ pub(crate) fn acquire_single_instance_lock(db_path: &Path) -> Result<bool, Strin
         .truncate(false)
         .open(&lock_path)
         .map_err(|error| format!("open lock file {}: {error}", lock_path.display()))?;
-    if try_lock_exclusive(&file)? {
-        held.insert(key, Arc::new(file));
-        return Ok(true);
+    if try_lock_exclusive(&file) {
+        let guard = Arc::new(file);
+        held.insert(key, Arc::downgrade(&guard));
+        return Ok(Some(guard));
     }
     eprintln!(
         "[pony-agent][session] single_instance_lock_denied: {} 已被其他进程独占；\
          本实例降级只读（不并发写、不静默覆盖）",
         lock_path.display()
     );
-    Ok(false)
+    Ok(None)
+}
+
+/// 尝试非阻塞独占锁。返回 `true` = 已持有；`false` = 抢不到（含非 EWOULDBLOCK 的异常
+/// 错误——一律降级只读并落日志，硬失败会让用户连"只读看历史"都做不到）。
+impl SqliteSessionBackend {
+    /// E5：降级只读后**重新尝试**拿实例锁（非阻塞一次）。成功 ⇒ 恢复可写。
+    ///
+    /// `PRAGMA query_only` 本身不可逆，因此恢复必须显式 `OFF`——否则持锁进程退出后本实例
+    /// 会永久只读（BLOCKING-6 的第二个洞）。
+    pub(crate) fn try_recover_instance_lock(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.read_only.load(Ordering::SeqCst) {
+            return;
+        }
+        let guard = match acquire_single_instance_lock(&self.db_path) {
+            Ok(Some(guard)) => guard,
+            _ => return,
+        };
+        {
+            let Ok(mut held) = self.instance_lock.lock() else {
+                return;
+            };
+            *held = Some(guard);
+        }
+        self.read_only.store(false, Ordering::SeqCst);
+        // 连接锁单独取，避免与 `connection()` 的锁顺序交叉。
+        if let Ok(slot) = self.connection.lock() {
+            if let Some(conn) = slot.as_ref() {
+                match conn.execute_batch("PRAGMA query_only=OFF;") {
+                    Ok(()) => eprintln!(
+                        "[pony-agent][session] single_instance_lock_recovered：{} 已恢复可写",
+                        self.db_path.display()
+                    ),
+                    Err(error) => {
+                        self.read_only.store(true, Ordering::SeqCst);
+                        eprintln!(
+                            "[pony-agent][session] single_instance_lock_recover_failed：{} 仍只读：{error}",
+                            self.db_path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
-fn try_lock_exclusive(file: &std::fs::File) -> Result<bool, String> {
+fn try_lock_exclusive(file: &std::fs::File) -> bool {
     use std::os::unix::io::AsRawFd;
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result == 0 {
-        return Ok(true);
+        return true;
     }
     let error = std::io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK) {
-        return Ok(false);
+    if !matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK) {
+        eprintln!(
+            "[pony-agent][session] single_instance_lock_error：flock 异常，按抢不到处理并降级只读：{error}"
+        );
     }
-    Err(format!("flock failed: {error}"))
+    false
 }
 
 #[cfg(windows)]
-fn try_lock_exclusive(file: &std::fs::File) -> Result<bool, String> {
+fn try_lock_exclusive(file: &std::fs::File) -> bool {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -195,23 +311,51 @@ fn try_lock_exclusive(file: &std::fs::File) -> Result<bool, String> {
     // 锁住全部字节区间（0xFFFFFFFF/0xFFFFFFFF = 整个文件）。
     let locked = unsafe { LockFileEx(handle, flags, 0, u32::MAX, u32::MAX, &mut overlapped) };
     if locked != 0 {
-        return Ok(true);
+        return true;
     }
     let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
-        return Ok(false);
+    if error.raw_os_error() != Some(ERROR_LOCK_VIOLATION as i32) {
+        eprintln!(
+            "[pony-agent][session] single_instance_lock_error：LockFileEx 异常，按抢不到处理并降级只读：{error}"
+        );
     }
-    Err(format!("LockFileEx failed: {error}"))
+    false
 }
 
 #[cfg(not(any(unix, windows)))]
-fn try_lock_exclusive(_file: &std::fs::File) -> Result<bool, String> {
-    Ok(true)
+fn try_lock_exclusive(_file: &std::fs::File) -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
-// E2 / E3 / E4：提交边界（单事务 + 逐会话 CAS + 墓碑跳过 + 版本自增）
+// E2 / E3 / E4：提交边界（BEGIN IMMEDIATE + 逐行真 CAS + 墓碑跳过 + 版本自增）
 // ---------------------------------------------------------------------------
+
+/// 提交边界内部失败：区分「锁冲突（busy，可退避重试）」与「其他（不可重试）」。
+struct CommitFailure {
+    message: String,
+    busy: bool,
+}
+
+impl CommitFailure {
+    fn other(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            busy: false,
+        }
+    }
+}
+
+/// 单行 CAS 结果。
+enum CasOutcome {
+    Written(u64),
+    /// 期望版本在、库内行已不存在 ⇒ 墓碑（其他实例已显式删除）：跳过、永不 INSERT（I3）。
+    Tombstone,
+    Conflict {
+        expected: u64,
+        actual: u64,
+    },
+}
 
 impl SqliteSessionBackend {
     /// E1：快照的「元数据尾巴」（6 个 `store_metadata` 读 + 版本侧表）。两个 loader
@@ -231,75 +375,137 @@ impl SqliteSessionBackend {
     }
 
     /// E2：`SessionBackend::commit_boundary` 的实作（薄壳在 trait impl 内调用它）。
+    ///
+    /// busy 退避在**不持连接锁**的前提下进行：每次尝试单独取连接、失败即释放，再 sleep。
     pub(crate) fn commit_boundary_stage0(&self, store: &PersistedStore) -> CommitOutcome {
-        let slot = match self.connection() {
-            Ok(slot) => slot,
-            Err(error) => {
-                eprintln!("[pony-agent][session] commit_boundary_failed: open error: {error}");
-                return CommitOutcome::Failed;
-            }
-        };
-        let conn = slot.as_ref().expect("connection initialized");
-        match self.commit_store_tx(conn, store) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                eprintln!("[pony-agent][session] commit_boundary_failed: {error}");
-                CommitOutcome::Failed
+        self.try_recover_instance_lock();
+        // NFR `external_call_timeout_ms`：跨进程写等待总预算 ≤3000ms（含 busy 退避累计）。
+        const WAIT_BUDGET_MS: u64 = 3000;
+        let started = std::time::Instant::now();
+        let mut attempt = 0u32;
+        loop {
+            let attempt_result = {
+                let slot = match self.connection() {
+                    Ok(slot) => slot,
+                    Err(error) => {
+                        eprintln!(
+                            "[pony-agent][session] commit_boundary_failed: open error: {error}"
+                        );
+                        return CommitOutcome::Failed;
+                    }
+                };
+                let conn = slot.as_ref().expect("connection initialized");
+                self.commit_store_once(conn, store)
+            };
+            match attempt_result {
+                Ok(outcome) => return outcome,
+                Err(failure) if failure.busy => {
+                    let backoff = busy_backoff_ms(attempt);
+                    let spent = started.elapsed().as_millis() as u64;
+                    if attempt >= 2 || spent + backoff > WAIT_BUDGET_MS {
+                        eprintln!(
+                            "[pony-agent][session] commit_boundary_failed: busy 重试耗尽/超预算（{}ms）：{}",
+                            spent, failure.message
+                        );
+                        return CommitOutcome::Failed;
+                    }
+                    eprintln!(
+                        "[pony-agent][session] busy_retry: commit_boundary 第 {} 次重试（{backoff}ms 退避）：{}",
+                        attempt + 1,
+                        failure.message
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff));
+                    attempt += 1;
+                }
+                Err(failure) => {
+                    eprintln!(
+                        "[pony-agent][session] commit_boundary_failed: {}",
+                        failure.message
+                    );
+                    return CommitOutcome::Failed;
+                }
             }
         }
     }
 
-    /// 单一提交边界主体。
+    /// 一次提交尝试：`BEGIN IMMEDIATE` + 逐行真 CAS（`UPDATE … WHERE version = ?expected
+    /// RETURNING version`），全部成功才 `COMMIT`。
     ///
-    /// 逐会话比对 `sessions.version` 与 `store.versions`：
-    /// - 不匹配 ⇒ 直接返回 `StaleVersion`，事务 `drop` 即回滚 ⇒ **整包零写入**（I2）；
-    /// - 期望版本存在而库内**行已不存在** ⇒ 墓碑（其他实例已显式删除）⇒ 跳过、永不
-    ///   INSERT（I3），且不改变整包 outcome（仍是 `Committed`）；
-    /// - 匹配 / 无期望版本 ⇒ 写入并 `version + 1`。
-    pub(crate) fn commit_store_tx(
+    /// DEFERRED 事务在这里是**错的**：先读版本再写会跨在"读"与"升级为写锁"之间，
+    /// 并发写者一插入就 `SQLITE_BUSY_SNAPSHOT`，整包被静默判 `Failed`。
+    fn commit_store_once(
         &self,
         conn: &Connection,
         store: &PersistedStore,
-    ) -> Result<CommitOutcome, String> {
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| format!("begin tx: {e}"))?;
-        if !has_version_column(&tx) {
-            // PA-089 6a 的 sessions 视图形态无 version 列：无 CAS 能力，退化为旧整包语义。
-            self.write_store_tx(&tx, store, &HashSet::new())?;
-            tx.commit().map_err(|e| format!("commit: {e}"))?;
+    ) -> Result<CommitOutcome, CommitFailure> {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| CommitFailure {
+                    message: format!("begin immediate tx: {error}"),
+                    busy: is_busy_error(&error),
+                })?;
+        let has_version = version_column_state(&tx).map_err(CommitFailure::other)?;
+        if !has_version {
+            // 列**确实不存在**（PA-089 6a 的 sessions 视图形态）：无 CAS 能力，退化为旧整包写。
+            // 必须留痕——否则等于 CAS 静默关闭。
+            eprintln!(
+                "[pony-agent][session] commit_boundary_degraded：sessions 无 version 列（视图形态），\
+                 本次整包写无 CAS 守门、无 StaleVersion 判定"
+            );
+            self.write_store_tx(&tx, store, &HashSet::new())
+                .map_err(CommitFailure::other)?;
+            tx.commit().map_err(|error| CommitFailure {
+                message: format!("commit: {error}"),
+                busy: is_busy_error(&error),
+            })?;
             return Ok(CommitOutcome::Committed);
         }
         let mut tombstoned: HashSet<String> = HashSet::new();
-        for session_id in store.sessions.keys() {
+        for (session_id, session) in &store.sessions {
+            let prepared = prepare_session_for_row(session_id, session);
             let expected = store.versions.get(session_id).map(|version| version.0);
-            let actual = read_session_version(&tx, session_id)?;
-            match (expected, actual) {
-                (Some(expected), Some(actual)) if expected != actual => {
-                    // I2：整包零写入——不覆盖新 turn、不删除、不复活。
+            match cas_write_row(&tx, session_id, &prepared, expected)
+                .map_err(CommitFailure::other)?
+            {
+                CasOutcome::Written(version) => {
+                    // 版本单调性哨兵：CAS 命中后实际写入值必须恰好是 expected + 1。
+                    if let Some(expected) = expected {
+                        if version != expected.saturating_add(1) {
+                            eprintln!(
+                                "[pony-agent][session] commit_boundary_version_anomaly: \
+                                 session={session_id} expected_next={} actual_written={version}",
+                                expected + 1
+                            );
+                        }
+                    }
+                }
+                CasOutcome::Tombstone => {
+                    tombstoned.insert(session_id.clone());
+                }
+                CasOutcome::Conflict { expected, actual } => {
+                    // I2：整包零写入（事务 drop = rollback）。冲突**不可重试**——重投旧快照
+                    // 就是 LWW 覆盖，必须由调用方重新装载后重来。
                     drop(tx);
                     eprintln!(
-                        "[pony-agent][session] commit_boundary_stale_version: \
-                         session={session_id} expected={expected} actual={actual}"
+                        "[pony-agent][session] commit_boundary_stale_version: session={session_id} \
+                         expected={expected} actual={actual} sessions_submitted={}",
+                        store.sessions.len()
                     );
                     return Ok(CommitOutcome::StaleVersion { expected, actual });
                 }
-                (Some(_), None) => {
-                    tombstoned.insert(session_id.clone());
-                }
-                _ => {}
             }
         }
-        self.write_store_tx(&tx, store, &tombstoned)?;
-        tx.commit().map_err(|e| format!("commit: {e}"))?;
+        self.write_traces_and_metadata_tx(&tx, store, &tombstoned)
+            .map_err(CommitFailure::other)?;
+        tx.commit().map_err(|error| CommitFailure {
+            message: format!("commit: {error}"),
+            busy: is_busy_error(&error),
+        })?;
         Ok(CommitOutcome::Committed)
     }
 
     /// 全库落盘主体（原 `write_full_store` 函数体；ADR 0099 阶段 0 迁入本文件以守住
-    /// `sqlite_session.rs` 的文件行数棘轮，语义不变）。
-    ///
-    /// `skip` = 墓碑/已删会话集合（I3：跳过、永不 INSERT）。会话行按
-    /// [`upsert_session_row_bump`] 写入 ⇒ `version` 单调 +1。
+    /// `sqlite_session.rs` 的文件行数棘轮）。**无版本守门**：`skip` = 墓碑/已删会话集合。
     pub(crate) fn write_store_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -310,30 +516,31 @@ impl SqliteSessionBackend {
             if skip.contains(session_id) {
                 continue;
             }
-            let mut normalized_session = session.clone();
-            if normalized_session.conversation_id != *session_id {
-                eprintln!(
-                    "[pony-agent][session] SQLite save_store normalizing conversation_id: key={} payload={}",
-                    session_id, normalized_session.conversation_id
-                );
-                normalized_session.conversation_id = session_id.clone();
+            let prepared = prepare_session_for_row(session_id, session);
+            upsert_session_row_bump(tx, session_id, &prepared)?;
+        }
+        self.write_traces_and_metadata_tx(tx, store, skip)
+    }
+
+    /// trace 表 + `store_metadata` 写入（`write_store_tx` 与 CAS 提交路径共用）。
+    fn write_traces_and_metadata_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        store: &PersistedStore,
+        skip: &HashSet<String>,
+    ) -> Result<(), String> {
+        for (session_id, session) in &store.sessions {
+            if skip.contains(session_id) {
+                continue;
             }
-            upsert_session_row_bump(tx, session_id, &normalized_session)?;
             // 始终写 trace 表，保持 blob 与 trace 表同步（PA-088：authoritative 会话跳过
             // ——其 blob 已被 `session_state_for_backend` 剥离 trace，此处若用剥离后的空
             // trace 替换表会清空数据；表已由 `save_to_backend` 在剥离前写入）。
-            if normalized_session.trace_migration_state
-                != TraceMigrationState::TraceTableAuthoritative
-            {
-                self.replace_session_traces_tx(
-                    tx,
-                    session_id,
-                    &normalized_session.turn_trace_history,
-                )?;
+            if session.trace_migration_state != TraceMigrationState::TraceTableAuthoritative {
+                self.replace_session_traces_tx(tx, session_id, &session.turn_trace_history)?;
             }
         }
-        // ADR 0094：**不再**在这里删除「快照里没有」的会话（整包写盘的语义是「把我知道的
-        // 写下去」，不是「把库对齐成我知道的样子」）。显式删除只走 `remove_session`。
+        // ADR 0094：**不再**在这里删除「快照里没有」的会话（显式删除只走 `remove_session`）。
         self.write_store_metadata_tx(tx, store)
     }
 
@@ -376,6 +583,94 @@ impl SqliteSessionBackend {
             }
         }
         Ok(())
+    }
+}
+
+/// blob 写前的 id 归一（行键 = `conversation_id`），与既有 `write_full_store` 行为一致。
+fn prepare_session_for_row(session_id: &str, session: &SessionState) -> SessionState {
+    let mut normalized = session.clone();
+    if normalized.conversation_id != session_id {
+        eprintln!(
+            "[pony-agent][session] SQLite save_store normalizing conversation_id: key={} payload={}",
+            session_id, normalized.conversation_id
+        );
+        normalized.conversation_id = session_id.to_string();
+    }
+    normalized
+}
+
+/// 逐行**真 CAS**：`UPDATE … WHERE conversation_id = ?1 AND version = ?5 RETURNING version`。
+///
+/// - `expected = Some(v)`：命中 ⇒ `Written(新版本)`；`WHERE` 不命中且行存在 ⇒ `Conflict`；
+///   `WHERE` 不命中且行不存在 ⇒ 墓碑（跳过、永不 INSERT，I3）。
+/// - `expected = None`（本实例新建/未跟踪）：库内已有 ⇒ 版本 +1；无行 ⇒ `INSERT`（版本 0），
+///   撞唯一约束 ⇒ `Conflict { expected: 0, actual }`。
+fn cas_write_row(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    session: &SessionState,
+    expected: Option<u64>,
+) -> Result<CasOutcome, String> {
+    let data = serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
+    let title = session.title.as_str();
+    let updated_at_ms = session.updated_at_ms as i64;
+    match expected {
+        Some(expected) => {
+            let written = tx
+                .query_row(
+                    "UPDATE sessions
+                        SET title = ?2, updated_at_ms = ?3, session_data = ?4, version = version + 1
+                      WHERE conversation_id = ?1 AND version = ?5
+                      RETURNING version",
+                    params![session_id, title, updated_at_ms, data, expected as i64],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(|e| format!("cas update session: {e}"))?;
+            match written {
+                Some(version) => Ok(CasOutcome::Written(version.max(0) as u64)),
+                None => match read_session_version(tx, session_id)? {
+                    Some(actual) => Ok(CasOutcome::Conflict { expected, actual }),
+                    None => Ok(CasOutcome::Tombstone),
+                },
+            }
+        }
+        None => {
+            let bumped = tx
+                .query_row(
+                    "UPDATE sessions
+                        SET title = ?2, updated_at_ms = ?3, session_data = ?4, version = version + 1
+                      WHERE conversation_id = ?1
+                      RETURNING version",
+                    params![session_id, title, updated_at_ms, data],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(|e| format!("unversioned update session: {e}"))?;
+            if let Some(version) = bumped {
+                return Ok(CasOutcome::Written(version.max(0) as u64));
+            }
+            match tx.query_row(
+                "INSERT INTO sessions (conversation_id, title, updated_at_ms, session_data)
+                 VALUES (?1, ?2, ?3, ?4)
+                 RETURNING version",
+                params![session_id, title, updated_at_ms, data],
+                |row| row.get::<_, i64>(0),
+            ) {
+                Ok(version) => Ok(CasOutcome::Written(version.max(0) as u64)),
+                Err(rusqlite::Error::SqliteFailure(inner, _))
+                    if inner.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    // 竞争者在读判之后插入：无期望版本只能退化为"版本已前进"的冲突事实。
+                    let actual = read_session_version(tx, session_id)?.unwrap_or(1);
+                    Ok(CasOutcome::Conflict {
+                        expected: 0,
+                        actual,
+                    })
+                }
+                Err(error) => Err(format!("insert session: {error}")),
+            }
+        }
     }
 }
 
@@ -443,6 +738,18 @@ impl SqliteSessionBackend {
     /// 硬约束：回填源**只能**是规范化表与事件流，**绝不**以 `sessions` 表为源（blob 是待
     /// 废弃的快照，用它回填等于把残缺固化为权威）。无法回填者只标 `retired`，不删行。
     pub fn backfill_orphan_sessions(&self) -> Result<BackfillReport, String> {
+        self.backfill_orphans(false)
+    }
+
+    /// E8 的**只读预演**：与 [`Self::backfill_orphan_sessions`] 同判定口径，但**不写库**。
+    ///
+    /// 维护入口 `ponycli sessions backfill --dry-run` 用它先给影响面（回填/退役/校验和
+    /// 不一致清单），人工确认后再执行写回。
+    pub fn backfill_orphan_sessions_dry_run(&self) -> Result<BackfillReport, String> {
+        self.backfill_orphans(true)
+    }
+
+    fn backfill_orphans(&self, dry_run: bool) -> Result<BackfillReport, String> {
         let slot = self.connection()?;
         let conn = slot
             .as_ref()
@@ -489,14 +796,15 @@ impl SqliteSessionBackend {
             }
             rebuilt.push((session_id.clone(), session.clone()));
         }
-        if !rebuilt.is_empty() {
+        if !dry_run && !rebuilt.is_empty() {
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|e| format!("begin tx: {e}"))?;
             for (session_id, session) in &rebuilt {
                 let mut session = session.clone();
                 session.conversation_id = session_id.clone();
-                insert_backfilled_blob_row(&tx, session_id, &session)?;
+                // 走统一单行写：新行 version 从 0 起，且绝不让既有行版本回退。
+                upsert_session_row_bump(&tx, session_id, &session)?;
             }
             tx.commit().map_err(|e| format!("commit: {e}"))?;
         }
@@ -505,39 +813,11 @@ impl SqliteSessionBackend {
             .map(|(session_id, _)| session_id)
             .collect();
         eprintln!(
-            "[pony-agent][session] orphan_backfill_summary: backfilled={} retired={} checksum_mismatch={}",
+            "[pony-agent][session] orphan_backfill_summary: dry_run={dry_run} backfilled={} retired={} checksum_mismatch={}",
             report.backfilled.len(),
             report.retired.len(),
             report.checksum_mismatch.len()
         );
         Ok(report)
     }
-}
-
-/// 回填写回：版本从 0 起（重建产物不继承任何已死版本），`sessions` 无 version 列时降级。
-fn insert_backfilled_blob_row(
-    conn: &Connection,
-    session_id: &str,
-    session: &SessionState,
-) -> Result<(), String> {
-    let data = serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
-    let sql = if has_version_column(conn) {
-        "INSERT OR REPLACE INTO sessions
-            (conversation_id, title, updated_at_ms, session_data, version)
-         VALUES (?1, ?2, ?3, ?4, 0)"
-    } else {
-        "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
-         VALUES (?1, ?2, ?3, ?4)"
-    };
-    conn.execute(
-        sql,
-        params![
-            session_id,
-            session.title,
-            session.updated_at_ms as i64,
-            data
-        ],
-    )
-    .map_err(|e| format!("insert backfilled blob row: {e}"))?;
-    Ok(())
 }

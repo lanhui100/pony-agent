@@ -1,0 +1,120 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "commit fcf09daa (ADR 0099 stage 0)",
+    "NFR:external_call_timeout_ms",
+    "NFR:retry",
+    "NFR:concurrency_lock",
+    "NFR:logging",
+    "NFR:resource_release",
+    "CONTRACT:.dev-team/contracts/stage0-write-model.md I1-I5 / E1-E8 / v1.1",
+    "CODE:crates/pony-agent-core/src/agent/sqlite_session_commit.rs (new, 543L)",
+    "CODE:crates/pony-agent-core/src/agent/session/store_stage0.rs (new, 154L)",
+    "CODE:crates/pony-agent-core/src/agent/sqlite_session.rs (diff)",
+    "CODE:crates/pony-agent-core/src/agent/session/store.rs (diff)",
+    "GATE:cargo check -p pony-agent-core (exit 0)",
+    "GATE:node scripts/check-file-size.mjs --baseline scripts/file-size-baseline.json (exit 0)",
+    "GATE:cargo test -p pony-agent-core --lib (1367 passed, exit 0)",
+    "GATE:cargo test storage_stage0_cas_stale_write / tombstone_no_resurrect / write_amplification / orphan_backfill (7 passed, exit 0)"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 2776,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "grep -n 'INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)' -A 6 crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 102,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "python3 -c \"import json;print(json.load(open('.dev-team/nfr-baseline-stage0-write-model.json'))['retry']['non_retryable_outcomes'])\"; sed -n 102,113p crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 112,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n 102,113p crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 253,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "grep -n 'busy_timeout=5000' crates/pony-agent-core/src/agent/sqlite_session.rs; python3 -c \"import json;print('baseline_external_call_timeout_ms=',json.load(open('.dev-team/nfr-baseline-stage0-write-model.json'))['external_call_timeout_ms'])\"",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 55,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'fn ensure_version_column' -A 7 crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 267,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n 267,272p crates/pony-agent-core/src/agent/sqlite_session_commit.rs; grep -n 'PA-089 6a' crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 35,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'let _ = self.backend.replace_session_traces' crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 162,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -rn 'commit_boundary_committed\\|busy_retry' --include=*.rs crates/pony-agent-core/src | wc -l; grep -c 'trace_id' crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 135,
+      "rule": "LEAK",
+      "counterexample_cmd": "grep -n 'LOCK_REGISTRY' crates/pony-agent-core/src/agent/sqlite_session_commit.rs; grep -rn 'LOCK_REGISTRY' --include=*.rs crates/pony-agent-core/src | grep -c 'remove('",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 181,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n 174,182p crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 445,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn 'backfill_orphan_sessions' --include=*.rs crates/ | grep -v 'tests/'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 275,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n 274,296p crates/pony-agent-core/src/agent/sqlite_session_commit.rs; grep -n 'WHERE conversation_id=? AND version=?' .dev-team/contracts/stage0-write-model.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 108,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n 86,113p crates/pony-agent-core/src/agent/session/store_stage0.rs; grep -n 'fn upsert_session\\b' -A 6 crates/pony-agent-core/src/agent/session/backend.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 348,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "sed -n 345,367p crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}
