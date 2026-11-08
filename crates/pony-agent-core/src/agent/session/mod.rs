@@ -1,6 +1,8 @@
 mod backend;
 mod file_backend;
 mod id;
+// ADR 0099 阶段 1-A：会话日志文件真源（独立新模块，暂不接线）。
+mod log_store;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -10,6 +12,13 @@ mod host_continuation_goal_round_tests;
 mod types;
 pub mod usage;
 pub mod workspace_snapshot;
+
+// ADR 0099 阶段 1-A：仅 additive 导出，未接入任何现有写路径。
+pub use log_store::{
+    encode_session_id_segment, normalize_cwd_segment, read_header, HeaderClass, LogReader,
+    LogStoreError, LogWriter, NewSessionLogEvent, SessionLogEvent, SessionLogHeader, SessionLogMeta,
+    SessionLogStore, SESSION_LOG_FILE_NAME, SESSION_LOG_FORMAT_VERSION,
+};
 
 pub use usage::{
     last_context_input_tokens, session_usage_totals, turn_usage_totals,
