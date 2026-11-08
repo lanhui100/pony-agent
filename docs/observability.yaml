@@ -801,3 +801,17 @@ note: >-
       `splash_master_rgb_aligns_with_coverage`、母版色相分布 `splash_master_rgb_keeps_master_colors`、
       生成物幂等 `generate_script_check_is_idempotent`。
 
+  【归属登记（2026-11-08）｜`Ctrl+O` / `/settings` 切换过程可见性后**当帧贴底**（滚动阻尼只服务增量追加）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 只改 TUI 进程内的滚动偏移赋值时机，
+  无新增对外接口、网络 IO、后台任务、LLM 调用、依赖、env 契约或持久化 schema；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由同维度声明）。
+  (2) 本轮 N-A 的结构性理由：变更发生在**终端渲染面的滚动状态机**——`TuiState::snap_to_bottom_if_following()`
+      在 `set_hide_process` / `set_thinking_collapsed` 整体重排后把偏移置为末尾哨兵，仍随用户启停进程，
+      不产生新的遥测事实、不新增指标/日志字段/Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：阻尼跟随（`ui()` 每帧最多推进 3 行）保留给流式增量追加；
+      整体重排（历史行数一次性跃增/缩减）改为当帧吸附底部；用户手动上翻时不强制拉回。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
+      行为门的机械收口在测试层——`crates/pony-agent-core/tests/tui_process_toggle_scroll_snap.rs`
+      （展开/收起单帧贴底 + 手动上翻不被强拉）。
+

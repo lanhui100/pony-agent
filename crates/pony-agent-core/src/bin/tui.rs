@@ -2115,6 +2115,8 @@ impl TuiState {
         if self.hide_process != value {
             self.hide_process = value;
             self.invalidate_render_cache();
+            // 历史整体重排 ⇒ 非增量变化，禁止阻尼跟随逐帧追赶（否则表现为「从头滚到底」）。
+            self.snap_to_bottom_if_following();
         }
     }
 
@@ -2123,6 +2125,8 @@ impl TuiState {
         if self.thinking_collapsed != value {
             self.thinking_collapsed = value;
             self.invalidate_render_cache();
+            // 折叠/展开同样整体重排行数 ⇒ 同口径瞬时贴底。
+            self.snap_to_bottom_if_following();
         }
     }
 
@@ -2413,6 +2417,21 @@ impl TuiState {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = self.max_scroll_offset;
         self.auto_scroll = true;
+    }
+
+    /// 内容**整体重排**后的贴底吸附：仍在自动贴底跟踪时，本帧即落到底部。
+    ///
+    /// 阻尼跟随（`ui()` 每帧最多推进 3 行）只服务于**增量**追加（流式新行 / 状态行下移）；
+    /// 可见性翻转（`Ctrl+O`、`/settings` 的 `hide_process` / `thinking_collapsed`）会让历史
+    /// 整体重排、`max_scroll_offset` 一次性跃增，复用阻尼就表现为「从顶部逐帧滚到底」的动画
+    /// （用户报告的缺陷）。这里写「末尾哨兵」`u32::MAX`：本帧渲染会把它钳制到当帧真实的
+    /// `max_scroll_offset`（与 `/resume` 恢复同一写法），因此**非增量**场景当帧贴底。
+    ///
+    /// 用户手动上翻（`auto_scroll == false`）时不动偏移：开关不得把阅读位置强行拉回底部。
+    pub fn snap_to_bottom_if_following(&mut self) {
+        if self.auto_scroll {
+            self.scroll_offset = u32::MAX;
+        }
     }
 }
 
