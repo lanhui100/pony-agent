@@ -7720,8 +7720,9 @@ fn llm_request_mode_labels_and_attributes_stay_in_sync() {
         crate::agent::turn_flow::LlmRequestMode::ToolRecovery.as_str(),
         4,
         false,
+        crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM,
     );
-    assert_eq!(attributes.len(), 3, "{attributes:?}");
+    assert_eq!(attributes.len(), 4, "{attributes:?}");
     assert_eq!(attributes[0].0, "llm.request.mode");
     assert_eq!(
         attributes[0].1,
@@ -7731,6 +7732,12 @@ fn llm_request_mode_labels_and_attributes_stay_in_sync() {
     assert_eq!(attributes[1].1, crate::agent::otel::AttrValue::I64(4));
     assert_eq!(attributes[2].0, "llm.request.system_prefix");
     assert_eq!(attributes[2].1, crate::agent::otel::AttrValue::Bool(false));
+    // r2-dim1 L3：无首包调用必须自带传输口径，否则「批量无首包」与「流式丢包」不可区分。
+    assert_eq!(attributes[3].0, "llm.request.transport");
+    assert_eq!(
+        attributes[3].1,
+        crate::agent::otel::AttrValue::Str("stream".to_string())
+    );
 }
 
 /// P1-2a：job 系列工具的 snake_case 别名在 schema 预检前被改写成 schema 口径。

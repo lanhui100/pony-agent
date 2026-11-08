@@ -7064,6 +7064,7 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
             // wave-tui-session-resilience C8：还原与提示之后进程真正退出，
             // 杜绝「主循环已返回、在飞 provider 线程仍持有 /dev/tty」的残留进程。
             if inner.is_ok() {
+                pony_agent_core::agent::otel::flush_on_exit("tui-main-loop");
                 pony_agent_core::agent::otel::shutdown();
                 std::process::exit(0);
             }
@@ -10843,12 +10844,13 @@ impl ObservabilityBootstrap {
 }
 
 impl Drop for ObservabilityBootstrap {
-    /// 退出清理（正常 return / 主循环结束 / Ctrl-C 交由 TUI 循环返回后）：有界 shutdown，
-    /// 内部会先 drain 批量队列再关 provider（上限 1000ms，幂等，不因网络悬挂卡死退出）。
+    /// 退出清理（正常 return / 主循环结束 / Ctrl-C 交由 TUI 循环返回后）：先有界 flush，
+    /// 再有界 shutdown（各 1000ms，合计 ≤3000ms，幂等，不因网络悬挂卡死退出）。
     fn drop(&mut self) {
         // 先排空 issue 上报队列（有界 1500ms，避免 `--prompt` 这类「报错即退出」丢 issue），
-        // 再关闭 OTel provider（有界 1000ms，内部先 drain span 队列）。
+        // 再有界 flush 未到调度周期的尾批 span（r2-dim1 F1），最后关闭 OTel provider。
         pony_agent_core::agent::ponysentry::flush();
+        pony_agent_core::agent::otel::flush_on_exit("tui-drop");
         pony_agent_core::agent::otel::shutdown();
     }
 }
@@ -10971,7 +10973,8 @@ fn main() {
             let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
             if let Err(e) = run_tui_demo_ask() {
                 eprintln!("TUI Error: {e}");
-                // `process::exit` 不跑 Drop ⇒ 显式有界 shutdown，保证末批 span 不丢。
+                // `process::exit` 不跑 Drop ⇒ 显式有界 flush + shutdown，保证末批 span 不丢。
+                pony_agent_core::agent::otel::flush_on_exit("tui-error-exit");
                 pony_agent_core::agent::otel::shutdown();
                 std::process::exit(1);
             }
@@ -10988,6 +10991,8 @@ fn main() {
             let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
             if let Err(e) = run_tui(Some(resume_target)) {
                 eprintln!("TUI Error: {e}");
+                // `process::exit` 不跑 Drop ⇒ 显式有界 flush + shutdown，保证末批 span 不丢。
+                pony_agent_core::agent::otel::flush_on_exit("tui-resume-error");
                 pony_agent_core::agent::otel::shutdown();
                 std::process::exit(1);
             }
@@ -11002,7 +11007,8 @@ fn main() {
             let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
             if let Err(e) = run_tui(None) {
                 eprintln!("TUI Error: {e}");
-                // `process::exit` 不跑 Drop ⇒ 显式有界 shutdown，保证末批 span 不丢。
+                // `process::exit` 不跑 Drop ⇒ 显式有界 flush + shutdown，保证末批 span 不丢。
+                pony_agent_core::agent::otel::flush_on_exit("tui-error-exit");
                 pony_agent_core::agent::otel::shutdown();
                 std::process::exit(1);
             }

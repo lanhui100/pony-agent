@@ -1121,12 +1121,13 @@ impl ObservabilityBootstrap {
 }
 
 impl Drop for ObservabilityBootstrap {
-    /// 退出清理（正常 return / 主循环结束 / Ctrl-C 交由 TUI 循环返回后）：有界 shutdown，
-    /// 内部会先 drain 批量队列再关 provider（上限 1000ms，幂等，不因网络悬挂卡死退出）。
+    /// 退出清理（正常 return / 主循环结束 / Ctrl-C 交由 TUI 循环返回后）：先有界 flush，
+    /// 再有界 shutdown（各 1000ms，合计 ≤3000ms，幂等，不因网络悬挂卡死退出）。
     fn drop(&mut self) {
         // 先排空 issue 上报队列（有界 1500ms，避免 `--prompt` 这类「报错即退出」丢 issue），
-        // 再关闭 OTel provider（有界 1000ms，内部先 drain span 队列）。
+        // 再有界 flush 未到调度周期的尾批 span（r2-dim1 F1），最后关闭 OTel provider。
         pony_agent_core::agent::ponysentry::flush();
+        pony_agent_core::agent::otel::flush_on_exit("cli-drop");
         pony_agent_core::agent::otel::shutdown();
     }
 }

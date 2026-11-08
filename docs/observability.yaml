@@ -940,3 +940,37 @@ note: >-
   (4) 收口点：不新增 enforcement_point。行为门机械收口在
       `crates/pony-agent-core/tests/session_bundle_export_import.rs`（9 用例，含篡改/截断/版本不支持/
       重复导入/降级 EXIT=4）。
+
+  【归属登记（2026-11-08）｜r2-dim1：时延结构（先修测量，再谈优化）】
+  一行结论：四维归属不变，metrics / logs 维持结构性 N-A —— 三处改动都在**既有 OTLP 导出路径**
+  与**既有退出路径**上做属性级/时序级增量，无新增对外接口、无新增网络出口、无新增后台任务；
+  不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing 仍 applicable（唯一落点仍是 `crates/pony-agent-core/src/agent/otel/mod.rs`
+  与 `turn_flow.rs` 的既有 6 个 `llm.chat` span 调用点）；issues 未改动。
+  (2) 本轮 N-A 的结构性理由：新增键 `llm.request.transport` 复用既有 request-shape 出口
+  （四键同生同灭），退出前置 flush 复用既有 `otel::force_flush` API（桌面端已固化），
+  两者都不产生新的遥测事实类型，也不产生新的采集端点。
+  (3) **属性契约变更（按 ADR 0068 登记为 additive）**：
+      - `llm.request.transport`（字符串，`stream` | `buffered`）：与 `llm.request.mode` /
+        `llm.request.messages` / `llm.request.system_prefix` 同生同灭，恒输出。
+        动因：`llm.request.mode` 对「流式」与「缓冲」请求都写 `tool_followup`，而缓冲请求本就
+        没有首包（`record_call_timing(Some(dur), None)`）⇒ 18/18 会话的无首包调用在 trace 上
+        无法与「流式首包测量丢包」区分（r2-dim1 L3）。纯新增键，旧消费方零影响。
+      - `agent.turn.calls` **文档措辞校正（值域与实现均不变）**：实现写的是「参与速度计算的
+        合格调用数」（`turn_flow::resolve_turn_speed` 的 `truth.calls`，要求 `dur > 0 && out > 0`，
+        优先 `decode_calls`），本文件 wave-54 段原措辞「已完成调用数」易被读成「provider 调用总数」。
+        实测 base `s1-t02`：5 次 provider 调用 / 5 个 `GENERATION` span，而 `agent.turn.calls=3`。
+        **真实调用总数以 `GENERATION` span 计数为准**（r2-dim1 L2 断言口径），
+        `agent.turn.calls` 只用于速度分母。
+  (4) 退出路径时序变更（非属性契约）：CLI / TUI 的 `ObservabilityBootstrap::drop` 与
+      `process::exit` 前的 5 个显式退出点，均在 `otel::shutdown()` 之前增加
+      `otel::force_flush(EXIT_FLUSH_BUDGET_MS=1000)`，与 `src-tauri/src/lib.rs::flush_otel_on_exit`
+      同构（幂等 + 未装配跳过 + 失败只降级 warn）。退出总预算 1000 + 1000 = 2000ms ≤ NFR
+      `observability.exporter_flush_timeout_ms=3000`。动因：`BATCH_SCHEDULED_DELAY_MS=5000` 远大于
+      关闭等待上限 1000ms 且单次导出网络超时 3000ms ⇒ 尾批 span 必然在关闭窗口内导出未完成，
+      `shutdown` 走 `mem::forget` 后进程退出（重放实测 3 会话关闭超时 warn，其中 2 个根 span 缺失）。
+  (5) 收口点：不新增 enforcement_point。行为门机械收口在
+      `crates/pony-agent-core/tests/otel_request_transport_test.rs`（2 用例：四键齐备 + 首包事实
+      只属流式 + 常量字面量冻结），以及 `crates/pony-agent-core/src/agent/runtime/tests.rs` 的
+      `llm_request_mode_labels_and_attributes_stay_in_sync`（四键出口一致性）。
+      端到端裁决由 `scripts/audit/assertions/dim1.sh` 退出码承担。

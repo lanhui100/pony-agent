@@ -2968,7 +2968,7 @@ pub fn provider_decision_with_mode<P: ProviderClient>(
     llm_span.record_request_shape(
         request_mode.as_str(),
         request_messages,
-        request_has_system_prefix,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED,
     );
     let start = std::time::Instant::now();
     let result = provider.decide_with_tools(request, tools);
@@ -3087,7 +3087,7 @@ where
     llm_span.record_request_shape(
         request_mode.as_str(),
         request_messages,
-        request_has_system_prefix,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM,
     );
     let start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;
@@ -3174,7 +3174,7 @@ pub fn provider_followup_with_mode<P: ProviderClient>(
     llm_span.record_request_shape(
         request_mode.as_str(),
         request_messages,
-        request_has_system_prefix,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED,
     );
     let start = std::time::Instant::now();
     let result = provider.continue_with_tool_result(
@@ -3248,7 +3248,7 @@ pub fn provider_followup_with_calls(
     llm_span.record_request_shape(
         request_mode.as_str(),
         request_messages,
-        request_has_system_prefix,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED,
     );
     let start = std::time::Instant::now();
     let result = provider.continue_with_tool_results(
@@ -3339,7 +3339,7 @@ where
     llm_span.record_request_shape(
         request_mode.as_str(),
         request_messages,
-        request_has_system_prefix,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM,
     );
     let start = std::time::Instant::now();
     let result = provider.continue_with_tool_results_stream(
@@ -3436,7 +3436,7 @@ where
     llm_span.record_request_shape(
         request_mode.as_str(),
         request_messages,
-        request_has_system_prefix,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM,
     );
     let start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;

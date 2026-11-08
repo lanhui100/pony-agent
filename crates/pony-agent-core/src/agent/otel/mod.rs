@@ -162,6 +162,20 @@ pub const ATTR_LLM_REQUEST_MESSAGES: &str = "llm.request.messages";
 /// （历史缺陷 `38590d52…` 的最终回答正是如此）。
 pub const ATTR_LLM_REQUEST_SYSTEM_PREFIX: &str = "llm.request.system_prefix";
 
+/// 单次 `llm.chat` 的实际传输方式（字符串，`stream` | `buffered`）。
+///
+/// 为什么需要它：`llm.request.mode` 只表达「请求在轮次里的角色」（initial / tool_followup /
+/// tool_recovery），对流式与缓冲请求都写 `tool_followup` ⇒ 下游无法区分「批量请求本就
+/// 没有首包」与「流式首包测量丢包」（r2-dim1 L3：18/18 无首包调用全部无口径）。
+/// 本键让「无 `llm.call.ttft_ms`」成为可归因事实，而不是测量空洞。
+pub const ATTR_LLM_REQUEST_TRANSPORT: &str = "llm.request.transport";
+
+/// 传输方式取值：流式（SSE/chunked，有首包）。
+pub const LLM_REQUEST_TRANSPORT_STREAM: &str = "stream";
+
+/// 传输方式取值：缓冲（一次性 HTTP 响应，无首包语义）。
+pub const LLM_REQUEST_TRANSPORT_BUFFERED: &str = "buffered";
+
 /// turn 速度口径标记（字符串）；取值 `stream_decode` | `end_to_end`
 /// （[`crate::agent::turn_flow::TurnSpeedBasis::as_str`]，I10）。无速度 ⇒ 该键**不输出**。
 pub const ATTR_AGENT_TURN_SPEED_BASIS: &str = "agent.turn.speed.basis";
@@ -1020,6 +1034,28 @@ pub fn force_flush(timeout_ms: u64) -> Result<(), String> {
     flush_state(&state, timeout_ms)
 }
 
+/// 退出 flush 预算（毫秒）：与 `shutdown()` 的 1000ms 合计 ≤3000ms（NFR 导出预算）。
+pub const EXIT_FLUSH_BUDGET_MS: u64 = 1_000;
+
+/// 退出 flush 幂等标记（`process::exit` 前的显式调用与 `Drop` 共享短路）。
+static EXIT_FLUSH_DONE: AtomicBool = AtomicBool::new(false);
+
+/// 进程退出路径的有界 flush 出口（CLI / TUI / 桌面端共用，唯一实现）。
+///
+/// r2-dim1 F1：批量调度周期 `BATCH_SCHEDULED_DELAY_MS`=5000ms 远大于关闭等待上限
+/// `SHUTDOWN_TIMEOUT_MS`=1000ms，而单次导出网络超时 3000ms ⇒ 尾批 span 在关闭窗口内
+/// 必然导出未完成，`shutdown()` 走 `mem::forget` 后进程退出（实测 3 会话关闭超时 warn，
+/// 其中 2 个 `agent.turn` 根 span 整条缺失）。契约：有界／幂等／未装配静默跳过／
+/// 失败只降级 warn，绝不 panic，也不阻断退出。
+pub fn flush_on_exit(stage: &str) {
+    if config().is_none() || EXIT_FLUSH_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Err(message) = force_flush(EXIT_FLUSH_BUDGET_MS) {
+        degraded_warn(&format!("退出 flush（{stage}）未在预算内完成：{message}"), None);
+    }
+}
+
 /// 翻转全局上报开关。
 ///
 /// 调用方：宿主设置读取/保存路径（启动时按持久化值回填 + 用户改开关即时生效）。
@@ -1568,11 +1604,13 @@ pub fn llm_usage_detail_attributes(
 /// `llm.chat` 请求形状属性映射（纯函数，无网络、无全局态）。
 ///
 /// 调用方：[`LlmSpanGuard::record_request_shape`]（落 span）与单测断言（同一出口）。
-/// 三键同生同灭：调用方必须给出真实的消息条数与前缀判定，禁止用 `false` 占位「未知」。
+/// 四键同生同灭：调用方必须给出真实的消息条数、前缀判定与传输方式，
+/// 禁止用 `false` / `buffered` 占位「未知」。
 pub fn llm_request_shape_attributes(
     mode: &'static str,
     messages: usize,
     has_system_prefix: bool,
+    transport: &'static str,
 ) -> Vec<(String, AttrValue)> {
     vec![
         (
@@ -1586,6 +1624,10 @@ pub fn llm_request_shape_attributes(
         (
             ATTR_LLM_REQUEST_SYSTEM_PREFIX.to_string(),
             AttrValue::Bool(has_system_prefix),
+        ),
+        (
+            ATTR_LLM_REQUEST_TRANSPORT.to_string(),
+            AttrValue::Str(transport.to_string()),
         ),
     ]
 }
@@ -2722,19 +2764,22 @@ impl LlmSpanGuard {
         self.usage_origin = origin;
     }
 
-    /// 记录本次请求的组装形状（模式 / 消息条数 / 是否带 system 前缀）。
+    /// 记录本次请求的组装形状（模式 / 消息条数 / 是否带 system 前缀 / 传输方式）。
     ///
-    /// 语义：三键同生同灭，映射见 [`llm_request_shape_attributes`]；门禁关闭时为空操作。
+    /// 语义：四键同生同灭，映射见 [`llm_request_shape_attributes`]；门禁关闭时为空操作。
     /// `messages` 必须是**实际发出的**消息条数（native transcript 优先），`has_system_prefix`
-    /// 必须是对同一消息序列首条 role 的真实判定——两者都不得用占位值。
+    /// 必须是对同一消息序列首条 role 的真实判定，`transport` 必须是实际传输方式
+    /// （[`LLM_REQUEST_TRANSPORT_STREAM`] / [`LLM_REQUEST_TRANSPORT_BUFFERED`]）——
+    /// 三者都不得用占位值。
     pub fn record_request_shape(
         &mut self,
         mode: &'static str,
         messages: usize,
         has_system_prefix: bool,
+        transport: &'static str,
     ) {
         self.request_shape_attributes =
-            llm_request_shape_attributes(mode, messages, has_system_prefix);
+            llm_request_shape_attributes(mode, messages, has_system_prefix, transport);
     }
 }
 
