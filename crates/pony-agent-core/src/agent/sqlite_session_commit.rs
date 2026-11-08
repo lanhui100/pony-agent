@@ -317,6 +317,60 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// ADR 0099 阶段 1-B：日志文件真源（写入先行 / 删除后置）
+// ---------------------------------------------------------------------------
+
+/// 真源优先：把本批命令追加进会话日志文件（含 `fsync`）。
+///
+/// 放在 commit 边界旁边而不是 `sqlite_session.rs` 里：后者已计入 file-size 棘轮。
+///
+/// - 成功 ⇒ 调用方才允许写 SQLite 索引；
+/// - 失败 ⇒ 调用方整批判 `Failed`，**SQLite 一行都不改**（真源不允许「部分成功」）；
+/// - 降级只读实例（阶段 0 E5：抢不到单实例锁）**不写日志**——它本来就不可能提交
+///   SQLite，真源与索引必须一起不动，否则回放会把只读实例的意图当成事实。
+pub(crate) fn append_session_log_to_file(
+    backend: &super::SqliteSessionBackend,
+    commands: &[crate::agent::session::PersistCommand],
+) -> Result<(), String> {
+    use crate::agent::session::SessionBackend;
+    if backend.is_read_only() {
+        return Ok(());
+    }
+    backend.session_log_sink.append_commands(commands)
+}
+
+/// `RemoveSession` 的日志目录清理：**只在 SQLite 提交成功之后**执行。
+///
+/// 顺序有意义：先删索引行、再删目录 ⇒ 最坏情况剩「日志还在但索引已删」；反过来
+/// 则会留下「索引行还在、真源已丢」的复活源（比脏文件更危险）。
+pub(crate) fn delete_session_logs_after_commit(
+    backend: &super::SqliteSessionBackend,
+    commands: &[crate::agent::session::PersistCommand],
+    outcome: &crate::agent::session::PersistCommandOutcome,
+) {
+    if !matches!(
+        outcome,
+        crate::agent::session::PersistCommandOutcome::Succeeded
+    ) {
+        return;
+    }
+    for command in commands {
+        if let crate::agent::session::PersistCommand::RemoveSession { session_id, .. } = command {
+            delete_session_log_dir(backend, session_id);
+        }
+    }
+}
+
+/// 删除一个会话的日志目录；失败只记日志（不制造二次回滚）。
+pub(crate) fn delete_session_log_dir(backend: &super::SqliteSessionBackend, session_id: &str) {
+    if let Err(error) = backend.session_log_sink.delete_session(session_id) {
+        eprintln!(
+            "[pony-agent][session] session log 目录删除失败（session={session_id}）：{error}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // E2 / E3 / E4：提交边界（BEGIN IMMEDIATE + 逐行真 CAS + 墓碑跳过 + 版本自增）
 // ---------------------------------------------------------------------------
 

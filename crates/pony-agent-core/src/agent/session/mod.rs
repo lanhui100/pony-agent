@@ -1,8 +1,11 @@
 mod backend;
 mod file_backend;
 mod id;
-// ADR 0099 阶段 1-A：会话日志文件真源（独立新模块，暂不接线）。
+// ADR 0099 阶段 1-A：会话日志文件真源。
 mod log_store;
+// ADR 0099 阶段 1-B：命令流编码 + 日志写入接线（真源优先，SQLite 作索引）。
+mod log_command;
+mod log_sink;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -13,11 +16,17 @@ mod types;
 pub mod usage;
 pub mod workspace_snapshot;
 
-// ADR 0099 阶段 1-A：仅 additive 导出，未接入任何现有写路径。
+// ADR 0099 阶段 1-A：仅 additive 导出。
 pub use log_store::{
     encode_session_id_segment, normalize_cwd_segment, read_header, HeaderClass, LogReader,
     LogStoreError, LogWriter, NewSessionLogEvent, SessionLogEvent, SessionLogHeader, SessionLogMeta,
     SessionLogStore, SESSION_LOG_FILE_NAME, SESSION_LOG_FORMAT_VERSION,
+};
+
+// ADR 0099 阶段 1-B：additive 导出（`sqlite_session` 接线与验收测试共用同一路径解析）。
+pub use log_sink::{
+    current_log_cwd, session_log_path_for_db, session_log_root_for_db, SessionLogSink,
+    SESSION_LOG_ROOT_DIR_NAME,
 };
 
 pub use usage::{

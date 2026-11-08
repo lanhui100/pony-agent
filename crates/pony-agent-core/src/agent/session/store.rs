@@ -150,6 +150,16 @@ pub struct PersistedStore {
     #[serde(default)]
     pub(crate) versions: SessionVersionMap,
 }
+
+impl PersistedStore {
+    /// ADR 0099 阶段 1-B：**索引侧只读视图**（`session_id -> SessionState`）。
+    ///
+    /// 只读、不搬移所有权：日志（真源）与 SQLite 索引的一致性校验需要一个不改库、
+    /// 不加锁的观察面，`PersistedStore` 其余字段仍保持 crate 内可见。
+    pub fn sessions_view(&self) -> &HashMap<String, SessionState> {
+        &self.sessions
+    }
+}
 /// PA-095 #2：从事件流物化"最近一个 turn"的消息文本（append_turn 事件源）。
 /// 返回 `(Option<user 文本>, Option<(assistant 文本, reasoning)>)`；外层 None =
 /// 事件流无 turn 归属事件（直连 store 的 legacy 用法，调用方整体回退）；

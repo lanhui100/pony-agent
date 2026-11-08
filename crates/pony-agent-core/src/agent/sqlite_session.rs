@@ -202,6 +202,9 @@ pub struct SqliteSessionBackend {
     db_path: PathBuf,
     attachment_root: PathBuf,
     trace_mode: SeparateTraceTableMode,
+    /// ADR 0099 阶段 1-B：**写入真源**——会话日志文件（`persist_commands_batch` 先写它，
+    /// 成功后才写 SQLite 索引；日志写失败 ⇒ 整批 `Failed` 且 SQLite 一行不改）。
+    session_log_sink: super::session::SessionLogSink,
     /// Path to the legacy JSON file, used for one-time migration.
     legacy_json_path: Option<PathBuf>,
     /// Lazily opened, then reused for the lifetime of the backend.
@@ -249,10 +252,15 @@ impl SqliteSessionBackend {
             .map(|dir| dir.join("sessions.json"))
             .filter(|path| path.exists());
 
+        // ADR 0099 阶段 1-B：日志根目录与 `attachments/` 同款派生（库文件所在目录即应用
+        // 数据目录），不硬编码路径。
+        let session_log_sink = super::session::SessionLogSink::for_db(&db_path);
+
         Self {
             db_path,
             attachment_root,
             trace_mode,
+            session_log_sink,
             legacy_json_path,
             connection: Mutex::new(None),
             instance_lock: Mutex::new(None),
@@ -2617,6 +2625,12 @@ impl SessionBackend for SqliteSessionBackend {
         // ADR 0099 阶段 0（E5）：降级只读实例在每次写入口重试一次 flock（非阻塞），
         // 持锁进程退出后自动恢复可写（query_only 本身不可逆）。
         self.try_recover_instance_lock();
+        // ADR 0099 阶段 1-B（真源优先）：先把命令流追加进会话日志（含 fsync），成功后才写
+        // SQLite 索引。日志写失败 ⇒ 整批 `Failed`，**SQLite 一行都不改**（无静默成功）。
+        if let Err(error) = commit::append_session_log_to_file(self, &commands) {
+            eprintln!("[pony-agent][session] 会话日志（真源）写入失败，SQLite 索引未改动：{error}");
+            return PersistCommandOutcome::Failed;
+        }
         // NFR（契约 §4 结构性理由）：`external_call_timeout_ms=3000` 只约束**外部调用**
         // （网络/HTTP/跨进程 RPC）。SQLite 的 `busy_timeout` 是**本地写锁等待**，不在其域内
         // ——无网络 IO、失败可恢复；压到 3000 会把"慢盘 / 备份进程占锁"变成用户可见的保存
@@ -2639,7 +2653,12 @@ impl SessionBackend for SqliteSessionBackend {
                 commit::persist_commands_once(self, conn, &commands)
             };
             match attempt_result {
-                commit::BatchAttempt::Done(outcome) => return outcome,
+                commit::BatchAttempt::Done(outcome) => {
+                    // ADR 0099 阶段 1-B：SQLite 提交成功后才删 `RemoveSession` 的日志目录
+                    // （先删索引行、再删目录，不留「索引已删但日志还在」的半态）。
+                    commit::delete_session_logs_after_commit(self, &commands, &outcome);
+                    return outcome;
+                }
                 commit::BatchAttempt::Busy(message) => {
                     // NFR `retry.max_attempts=3`：最多 3 次尝试（attempt 0..=2）。
                     if attempt >= 2 {
@@ -2946,6 +2965,8 @@ impl SessionBackend for SqliteSessionBackend {
             eprintln!("[pony-agent][session] SQLite delete commit error: {error}");
             return false;
         }
+        // ADR 0099 阶段 1-B：索引行已删成功，再删该会话的日志目录（真源同步清理）。
+        commit::delete_session_log_dir(self, session_id);
         true
     }
 

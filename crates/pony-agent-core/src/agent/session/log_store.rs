@@ -1,7 +1,7 @@
-//! ADR 0099 阶段 1-A：**每会话一份 append-only 日志文件**（未来真源）。
+//! ADR 0099 **阶段 1-A/1-B**：**每会话一份 append-only 日志文件**（写入真源）。
 //!
-//! 本模块是**独立新模块，尚未接线**：不实现也不调用 `SessionStore` /
-//! `SessionBackend` / `sqlite_session`，现有运行时读写路径零变化。接线属阶段 2。
+//! 阶段 1-A 交付本模块（未接线）；阶段 1-B 起由 [`super::log_sink::SessionLogSink`]
+//! 接线到 `SqliteSessionBackend::persist_commands_batch`：**日志先落、SQLite 后写**。
 //!
 //! 契约（ADR 0099 修订后的 D1 / D2 / 阶段 1）：
 //!
@@ -9,9 +9,10 @@
 //! <root>/--<normalized-cwd>--/<encoded-session-id>/session.jsonl
 //! ```
 //!
-//! 1. **单写者**：文件级独占锁（Unix `flock(LOCK_EX|LOCK_NB)`，Windows
-//!    `std::fs::File::try_lock`，内部即 `LockFileEx`）。抢不到锁 ⇒
-//!    [`LogStoreError::Locked`]，**绝不静默降级为写**。
+//! 1. **单写者**：文件级独占锁统一走 `std::fs::File::try_lock`（跨平台：Unix 即
+//!    `flock(LOCK_EX|LOCK_NB)`，Windows 即 `LockFileEx`）。**只有一条代码路径**：
+//!    不存在「非 Unix 分支未编译验证」的死角，也不再直接调用 `libc`。
+//!    抢不到锁 ⇒ [`LogStoreError::Locked`]，**绝不静默降级为写**。
 //! 2. **append-only**：每批 `append` = 追加若干 JSONL 行 + `fsync`；失败回滚到
 //!    先前字节长度（`set_len`）；已提交事件永不重写。
 //! 3. **seq 单调**：`seq` 从 0 起连续，只由该文件的唯一写者分配。
@@ -22,6 +23,12 @@
 //!    截断掉，保证后续 append 从行边界继续。
 //! 6. **原子创建**：目录 `create_dir_all`、文件 `create_new`；`id` 单射转义为安全
 //!    路径段，`../` / 绝对路径 / `..` / 盘符 / 控制字符一律**拒绝**（不是转义后放行）。
+//! 7. **两种已提交行形态**（阶段 1-B 新增第二种）：
+//!    - 通用事件 [`SessionLogEvent`]：`{"seq","type","ts","payload"}`；
+//!    - 持久化命令信封 **`{"seq","ts","cmd"}`**（[`LogWriter::append_commands`] 写，
+//!      `cmd` 是序列化后的 `PersistCommand`）——写入真源实际用的是这一种。
+//!    判「已提交」只看行内 `seq`（[`SeqProbe`]），两种形态因此可以共存且 `seq`
+//!    严格连续、单调追加。
 //!
 //! 本期不做（阶段后续）：`manifest.json`、附件、zstd 帧、远程 HTTP 实现、fold 投影。
 
@@ -351,7 +358,7 @@ impl SessionLogMeta {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -473,30 +480,11 @@ pub fn normalize_cwd_segment(cwd: &str) -> String {
 
 /// 尝试对已打开的文件取得**独占、非阻塞**锁。
 ///
-/// Unix 用 `flock(LOCK_EX|LOCK_NB)`（语义按打开文件描述计，故同一进程内另开一个 fd
-/// 也会互斥，正好是「同会话第二个 writer 必须被拒」要的语义）；非 Unix 用
-/// `std::fs::File::try_lock`（内部 `LockFileEx`）。锁随文件句柄关闭释放。
-#[cfg(unix)]
-fn try_lock_exclusive(file: &File, path: &Path) -> Result<(), LogStoreError> {
-    use std::os::unix::io::AsRawFd;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        return Ok(());
-    }
-    let source = std::io::Error::last_os_error();
-    let would_block = matches!(
-        source.raw_os_error(),
-        Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
-    );
-    if would_block {
-        return Err(LogStoreError::Locked {
-            path: path.to_path_buf(),
-        });
-    }
-    Err(io_err(format!("flock `{}`", path.display()), source))
-}
-
-#[cfg(not(unix))]
+/// **统一为 `std::fs::File::try_lock`**（阶段 1-B 收口 Windows 遗留）：Unix 下它就是
+/// `flock(LOCK_EX|LOCK_NB)`（语义按打开文件描述计，故同一进程内另开一个 fd 也会互斥，
+/// 正好是「同会话第二个 writer 必须被拒」要的语义）；Windows 下是 `LockFileEx`。
+/// 一条代码路径 ⇒ 两个平台都经过编译验证，不再有「等 Windows CI」的死角；本模块
+/// 也不再直接调用 `libc`。锁随文件句柄关闭释放。
 fn try_lock_exclusive(file: &File, path: &Path) -> Result<(), LogStoreError> {
     match file.try_lock() {
         Ok(()) => Ok(()),
@@ -504,24 +492,34 @@ fn try_lock_exclusive(file: &File, path: &Path) -> Result<(), LogStoreError> {
             path: path.to_path_buf(),
         }),
         Err(std::fs::TryLockError::Error(source)) => {
-            Err(io_err(format!("LockFileEx `{}`", path.display()), source))
+            Err(io_err(format!("try_lock `{}`", path.display()), source))
         }
     }
 }
 
-/// 扫一片日志文件，返回「最后一个完整且可解析行的结束偏移」与「最后一条事件」。
+/// 一行已提交日志的最小探针：**只认 `seq`**。
+///
+/// 阶段 1-B 起同一文件可能承载两种已提交行形态（通用事件 [`SessionLogEvent`] /
+/// 命令信封 `{"seq","ts","cmd"}`），故「这一行是否已提交」的判据收敛为
+/// 「合法 JSON 对象 + 无符号整数 `seq`」，不绑定某一行的完整 schema。
+#[derive(Deserialize)]
+struct SeqProbe {
+    seq: u64,
+}
+
+/// 扫一片日志文件，返回「最后一个完整且可解析行的结束偏移」与「最后一个已提交 `seq`」。
 ///
 /// 用于 `open_write` 的崩溃恢复：撕裂尾行（不完整 / 解析失败）被识别为不可提交后缀，
 /// 由调用方 `set_len` 截断，保证后续 append 从行边界继续，且 `seq` 接着已提交前缀。
 fn scan_committed_tail(
     file: &mut File,
     expect_session_id: &str,
-) -> Result<(u64, Option<SessionLogEvent>), LogStoreError> {
+) -> Result<(u64, Option<u64>), LogStoreError> {
     file.seek(SeekFrom::Start(0))
         .map_err(|e| io_err("rewind session log", e))?;
     let mut reader = BufReader::new(&*file);
     let mut committed: u64 = 0;
-    let mut last: Option<SessionLogEvent> = None;
+    let mut last_seq: Option<u64> = None;
     let mut header_seen = false;
     let mut line = String::new();
     loop {
@@ -569,16 +567,16 @@ fn scan_committed_tail(
                 }
             }
         }
-        match serde_json::from_str::<SessionLogEvent>(line.trim()) {
-            Ok(event) => {
+        match serde_json::from_str::<SeqProbe>(line.trim()) {
+            Ok(probe) => {
                 committed += read as u64;
-                last = Some(event);
+                last_seq = Some(probe.seq);
             }
             // 解析失败 ⇒ 该行及之后都不可提交（阶段 1 恢复语义：保留前缀）。
             Err(_) => break,
         }
     }
-    Ok((committed, last))
+    Ok((committed, last_seq))
 }
 
 // ---------------------------------------------------------------------------
@@ -834,7 +832,7 @@ fn open_or_create(path: &Path) -> Result<File, LogStoreError> {
 
 /// 已拿锁的 writer 收尾：校验 header 为 current、截断撕裂尾行、算下一个 seq。
 fn finish_writer(path: &Path, session_id: &str, mut file: File) -> Result<LogWriter, LogStoreError> {
-    let (committed, last) = scan_committed_tail(&mut file, session_id)?;
+    let (committed, last_seq) = scan_committed_tail(&mut file, session_id)?;
     let file_len = file
         .metadata()
         .map_err(|e| io_err(format!("stat `{}`", path.display()), e))?
@@ -850,13 +848,24 @@ fn finish_writer(path: &Path, session_id: &str, mut file: File) -> Result<LogWri
         path: path.to_path_buf(),
         file,
         committed_len: committed,
-        next_seq: last.map(|event| event.seq + 1).unwrap_or(0),
+        next_seq: last_seq.map(|seq| seq + 1).unwrap_or(0),
     })
 }
 
 // ---------------------------------------------------------------------------
 // 写者
 // ---------------------------------------------------------------------------
+
+/// 阶段 1-B：持久化命令的日志信封行 `{"seq":N,"ts":ms,"cmd":{…}}`。
+///
+/// `cmd` 是**序列化后的 `PersistCommand`**（由 `log_command` 编码），日志因此无损
+/// 保存现有命令流，可据此重建状态。
+#[derive(Serialize)]
+struct CommandEnvelope<'a> {
+    seq: u64,
+    ts: i64,
+    cmd: &'a serde_json::Value,
+}
 
 /// 独占写句柄：持有文件级独占锁，`seq` 由它单调分配。
 ///
@@ -901,7 +910,6 @@ impl LogWriter {
         if events.is_empty() {
             return Ok(Vec::new());
         }
-        let previous_len = self.committed_len;
         let start_seq = self.next_seq;
         let mut buf: Vec<u8> = Vec::new();
         let mut seqs = Vec::with_capacity(events.len());
@@ -920,12 +928,50 @@ impl LogWriter {
             buf.push(b'\n');
             seqs.push(seq);
         }
-        let written = self.write_batch(&buf, previous_len);
-        match written {
+        self.commit(&buf, events.len())?;
+        Ok(seqs)
+    }
+
+    /// 追加一批**持久化命令**（阶段 1-B 写入真源的形态），返回分配的 `seq` 列表。
+    ///
+    /// 每行是一个自描述信封 `{"seq":N,"ts":ms,"cmd":{…PersistCommand…}}`：`cmd` 无损
+    /// 承载命令本身，故日志可据此重建状态。与 [`Self::append`] 共用同一提交原语
+    /// （一次 `write_all` + 一次 `fsync`，失败回滚到先前长度）。
+    pub fn append_commands(
+        &mut self,
+        ts: i64,
+        commands: &[serde_json::Value],
+    ) -> Result<Vec<u64>, LogStoreError> {
+        if commands.is_empty() {
+            return Ok(Vec::new());
+        }
+        let start_seq = self.next_seq;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut seqs = Vec::with_capacity(commands.len());
+        for (offset, cmd) in commands.iter().enumerate() {
+            let seq = start_seq + offset as u64;
+            let line = serde_json::to_string(&CommandEnvelope { seq, ts, cmd }).map_err(|e| {
+                LogStoreError::Serialize {
+                    reason: e.to_string(),
+                }
+            })?;
+            buf.extend_from_slice(line.as_bytes());
+            buf.push(b'\n');
+            seqs.push(seq);
+        }
+        self.commit(&buf, commands.len())?;
+        Ok(seqs)
+    }
+
+    /// 单一提交原语：写入 + `fsync`，成功则推进 `committed_len` / `next_seq`，
+    /// 失败回滚到先前字节长度。
+    fn commit(&mut self, buf: &[u8], count: usize) -> Result<(), LogStoreError> {
+        let previous_len = self.committed_len;
+        match self.write_batch(buf, previous_len) {
             Ok(len) => {
                 self.committed_len = len;
-                self.next_seq = start_seq + events.len() as u64;
-                Ok(seqs)
+                self.next_seq += count as u64;
+                Ok(())
             }
             Err(err) => {
                 self.rollback(previous_len);
@@ -963,6 +1009,11 @@ impl LogWriter {
 /// 只读事件流：**丢弃撕裂尾行**（不完整或解析失败的最后一行），保留已提交前缀。
 ///
 /// 只读不加锁：日志 append-only，读到的永远是一个已提交前缀的镜像。
+///
+/// 注意：本读取器只解出[`SessionLogEvent`] 形态的行。阶段 1-B 写进真源的命令信封
+/// （`{"seq","ts","cmd"}`）不是 `SessionLogEvent`，会像撕裂尾行一样终止读取——命令流的
+/// 折叠投影（`fold`）按 ADR 0099 是**后续阶段**的交付，本阶段不做，也不在这里
+/// 「猜」一个投影出来。
 #[derive(Debug)]
 pub struct LogReader {
     path: PathBuf,
