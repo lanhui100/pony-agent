@@ -129,11 +129,21 @@ session_events(
 
 ### 阶段 0 · 止血与收口（1–2 周，不改真源）
 
-1. 19 个 `save_to_backend` 调用点收敛为单一 `commit_boundary()`，把「每 turn 20 次全量快照」降到 1 次：**102 MB/turn → ~5 MB/turn**。
-2. `sessions` 写加 session 级 `version` + CAS 守门（`UPDATE … WHERE version = ?`），消灭旧快照复活与新 turn 覆盖。
+1. 23 个全库落盘调用点（18 处 `save_to_backend()` + 5 处 `save_session_state_to_backend(…)`）收敛为单一 `commit_boundary()`（单次 `BEGIN IMMEDIATE` 全库事务）。
+2. ~~`sessions` 写加 session 级 `version` + CAS 守门~~ → **移交阶段 1**（见下「修订」）。
 3. 引入文件锁 / 单实例，终结桌面端与 TUI 同写。
 4. 处置 50 个孤儿：回填源**只能是 `turn_events ∪ normalized_*`**，绝不能以 `sessions` 表为源；无法回填的显式标记 `retired` 并在 UI 明示。
 5. `busy` 重试改按 `ErrorCode::DatabaseBusy/DatabaseLocked` 判定（现 `contains("busy")` 对 `database is locked` 永不匹配）。
+
+> **修订（2026-11-08，Lead 裁决，用户批准）：第 2 项（版本 CAS）整体移交阶段 1。**
+>
+> 两轮三路对抗审查（`.dev-team/review-stage0-l3{a,b,p}{,-r2}.json`）证明：CAS 在当前写模型里没有结构性前提——**单行写 API（`upsert_session(&SessionState)`）不携带写者身份与期望版本**，因此每条落盘路径都要单独补守门，而审查每轮都能找到新的未守门路径：
+> - R1 六条 BLOCKING：DEFERRED 事务致 `BUSY_SNAPSHOT` 静默丢弃、`advance_versions` 恒定差一、`StaleVersion` 重试退化为 LWW、`INSERT OR REPLACE` 重置 version 的 ABA、`let _ =` 吞错致无 CAS 仍报 `Committed`、降级实例被 ask store 击穿。
+> - R2 又四条：热路径单行写无 `WHERE version` 静默覆盖并发 turn、单行写 `INSERT OR REPLACE` 复活墓碑并把 version 归零、`StaleVersion` 前已写 trace、锁恢复后陈旧快照写。
+>
+> 结论：**CAS 与写者身份必须同批交付**——这正是阶段 1 `session_writers.fence_token` 提供的东西。阶段 0 只保留与 CAS 无关、且已被独立验证坚实的能力：单次 IMMEDIATE 整包提交（原子性）、单实例 flock、busy 判定与总预算 ≤3000ms、trace 源切换、孤儿回填与 `ponycli sessions backfill`、整包提交路径上的墓碑跳过（`versions` 侧表仅用于「判定会话已删除」，不做拒绝语义）。
+>
+> 已知遗留（阶段 1 前维持现状，**不新增回归**）：单行写路径仍为「最后写入者胜」；已删会话仍可能被旧快照复活。与 ADR 现状描述一致，不因本次重构恶化。
 
 **门禁**：孤儿归零（双向集合差 = 0）；`npm run size:check` exit 0（见下「更正」）；逐会话回填校验和一致。
 

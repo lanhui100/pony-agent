@@ -306,12 +306,19 @@ impl SessionStore {
                             let mut cache_trace = trace.clone();
                             cache_trace.sequence =
                                 Some(events.last().map(|(seq, _, _)| *seq).unwrap_or(0));
-                            let _ = backend.persist_command(PersistCommand::AppendTrace {
+                            // 投影缓存回写失败不得静默（只影响缓存重建，但必须可排障）。
+                            let outcome = backend.persist_command(PersistCommand::AppendTrace {
                                 epoch: 1,
                                 session_id: session.conversation_id.clone(),
                                 trace: cache_trace,
                                 trace_order: order,
                             });
+                            if matches!(outcome, PersistCommandOutcome::Failed) {
+                                eprintln!(
+                                    "[pony-agent][session] trace 投影缓存回写失败（session={} order={order}）：事件流可重建，但本次启动缓存不完整",
+                                    session.conversation_id
+                                );
+                            }
                         }
                         session.turn_trace_history = traces;
                         should_save = true;

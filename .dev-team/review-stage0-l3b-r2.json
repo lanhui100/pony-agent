@@ -1,0 +1,102 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "A1 复验 I2：commit_boundary 路径（create_workspace）实测 A 的 turn2 仍在 / append_turn 热路径实测被覆盖 / 锁恢复后实测被覆盖（三组独立复现）",
+    "A2 复验 E5 降级零写入：全表逐行 dump 前后 diff + sha256 + pending_asks/usage_ledger/store_metadata/sqlite_master + 生产构造器 SessionStore::new（XDG_DATA_HOME 重定向）",
+    "I1 写放大：18 个 save_to_backend 全库入口 -> commit_store -> commit_boundary；append_turn 增量口径（save_store==0、原语==1）",
+    "I2 CAS：WHERE version + RETURNING / 冲突 drop(tx) 回滚 / 双段断言 / pre-CAS write_trace_tables 泄漏",
+    "I3 墓碑：commit_boundary 跳过与 Committed 语义 / 单行写 INSERT 回落复活 / sync_blob_trace_tx 最小 stub 行",
+    "I4 回填：源域（normalized_* 并 turn_events）/ 活跃行 version 不被重置 / 回填行 version=0 / checksum 口径 / CLI 入口",
+    "I5 busy：is_busy_error(ErrorCode) / 50-100-200ms 退避 3 次 / busy_timeout 3000 / contains(busy) 清零",
+    "三态 version_column_state：PRAGMA table_info 空结果（缺表）/ 视图形态 / VERSION_GUARD_DEGRADED 可观测性（全仓消费者 grep）",
+    "新 CLI：ponycli sessions backfill --dry-run 零写入（sha256 实测）/ --db 任意路径越界写 / 遗留 sessions.json 迁移副作用",
+    "8 套冻结测试实跑（17 用例全绿，prebuilt 二进制实跑）",
+    "NFR logging：六必落事件命中数 / format=json / trace_id"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 171,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && RL=$(ls -t target/debug/deps/libpony_agent_core-*.rlib|head -1) && rustc --edition 2021 -O /tmp/l3b2/probe.rs -o /tmp/l3b2/probe --extern pony_agent_core=$RL -L dependency=target/debug/deps && D=$(mktemp -d) && /tmp/l3b2/probe lww_turn $D/sessions.db >/dev/null 2>&1; python3 -c \"import sqlite3,json;c=sqlite3.connect('$D/sessions.db');d=json.loads(c.execute(\\\"select session_data from sessions where conversation_id='s'\\\").fetchone()[0]);print('users =', [m['content'] for m in d['history'] if m['role']=='user'], 'turnCount =', d['turnCount'])\"  # 实测 users=['q1','q3'] turnCount=2：A 已写 q2（库内 4 条），B 持 turn1 旧快照后走 append_turn（生产热路径）仍无条件 UPDATE ... WHERE conversation_id=?1（无 version 守卫），A 的 q2 被静默覆盖 => I2「旧快照覆盖新 turn（LWW）」在单行写路径仍成立；commit_boundary 路径已修（同 probe 的 lww_ws 模式实测 users=['q1','q2'] + commit_boundary_stale_version）",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 182,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && RL=$(ls -t target/debug/deps/libpony_agent_core-*.rlib|head -1) && rustc --edition 2021 -O /tmp/l3b2/probe.rs -o /tmp/l3b2/probe --extern pony_agent_core=$RL -L dependency=target/debug/deps && D=$(mktemp -d) && /tmp/l3b2/probe resurrect_turn $D/sessions.db >/dev/null 2>&1; python3 -c \"import sqlite3;c=sqlite3.connect('$D/sessions.db');print('ghost sessions=', list(c.execute(\\\"select conversation_id,version from sessions where conversation_id='ghost'\\\")), 'ghost normalized=', list(c.execute(\\\"select session_id from normalized_sessions where session_id='ghost'\\\")))\"  # 实测 sessions=[('ghost',0)]、normalized_sessions=[('ghost',)]：A 显式 remove_session 后，B 的旧快照走 append_turn => upsert_session_row_bump 的 INSERT OR REPLACE 回落把已删会话复活（version 重置为 0）=> I3「显式删除后不得复活」在单行写路径不成立；冻结用例只覆盖 create_workspace",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 2439,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && RL=$(ls -t target/debug/deps/libpony_agent_core-*.rlib|head -1) && rustc --edition 2021 -O /tmp/l3b2/probe.rs -o /tmp/l3b2/probe --extern pony_agent_core=$RL -L dependency=target/debug/deps && D=$(mktemp -d) && mkdir -p $D/ws && /tmp/l3b2/probe trace_setup $D/setup.db >/dev/null 2>&1 && python3 -c \"import sqlite3;print('setup traces=', list(sqlite3.connect('$D/setup.db').execute('select session_id,turn_id from session_turn_traces')))\" && /tmp/l3b2/probe trace_leak $D/leak.db $D/ws 2>&1 | grep commit_boundary_stale_version; python3 -c \"import sqlite3;print('after-stale traces=', list(sqlite3.connect('$D/leak.db').execute('select session_id,turn_id from session_turn_traces')))\"  # 实测 setup=[('s','t2')] -> after-stale=[]：save_to_backend 先跑 write_trace_tables（store_stage0.rs:23-48，独立事务 DELETE+INSERT）再 commit_store，故返回 StaleVersion 的旧快照仍删掉了新版本写入的 trace 行 => I2「StaleVersion 整包零写入（不删除）」不成立（normalized_turn_traces 未删，故冻结用例无感）",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 247,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && RL=$(ls -t target/debug/deps/libpony_agent_core-*.rlib|head -1) && rustc --edition 2021 -O /tmp/l3b2/probe.rs -o /tmp/l3b2/probe --extern pony_agent_core=$RL -L dependency=target/debug/deps && D=$(mktemp -d) && /tmp/l3b2/probe recover_lww $D/sessions.db 2>&1 | grep single_instance_lock_recovered; python3 -c \"import sqlite3,json;c=sqlite3.connect('$D/sessions.db');d=json.loads(c.execute(\\\"select session_data from sessions where conversation_id='s'\\\").fetchone()[0]);print('users =', [m['content'] for m in d['history'] if m['role']=='user'])\"  # 实测 single_instance_lock_recovered + users=['q1','q3']：降级实例在持锁进程退出后 try_recover_instance_lock 直接恢复可写，但不重载快照/不重算 versions，随后 append_turn 用陈旧快照覆盖 q2（跨进程可达的 LWW；恢复路径是新引入的写窗口）",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 1141,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "D=$(mktemp -d) && python3 -c \"import sqlite3;c=sqlite3.connect('$D/sessions.db');c.execute('PRAGMA journal_mode=WAL');c.execute(\\\"CREATE TABLE sessions (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', updated_at_ms INTEGER NOT NULL DEFAULT 0, session_data TEXT NOT NULL)\\\");c.execute('CREATE TABLE store_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)');c.commit()\" && sha256sum $D/sessions.db && /home/dm/pony-agent/target/debug/ponycli sessions backfill --dry-run --db $D/sessions.db >/dev/null 2>&1; sha256sum $D/sessions.db; python3 -c \"import sqlite3;print('version col added:', any(r[1]=='version' for r in sqlite3.connect('$D/sessions.db').execute('pragma table_info(sessions)')))\"  # 实测两个 sha256 不同 + version col added: True：--dry-run 仍执行 ensure_schema/ensure_version_column（15 张表 + ALTER TABLE 落盘）；若目录里有遗留 sessions.json，dry-run 还会跑完整迁移（cp /tmp/l3b2/t6/sessions.json 到空目录后实测打印 migration complete + sessions 行 [('s',0)]），而屏幕同时打「dry-run（只报告，不写库）」=> 零写入承诺为假",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 1120,
+      "rule": "SECURITY",
+      "counterexample_cmd": "D=$(mktemp -d) && python3 -c \"import sqlite3;c=sqlite3.connect('$D/other.db');c.execute('create table customers(id integer primary key,name text)');c.commit()\" && /home/dm/pony-agent/target/debug/ponycli sessions backfill --db $D/other.db >/dev/null 2>&1; python3 -c \"import sqlite3;t=[r[0] for r in sqlite3.connect('$D/other.db').execute(\\\"select name from sqlite_master where type='table'\\\")];print('pony tables injected:', sorted(x for x in t if x in ('sessions','store_metadata','turn_events','normalized_sessions','usage_ledger')))\"  # 实测注入 ['normalized_sessions','sessions','store_metadata','turn_events','usage_ledger']：--db 只做 PathBuf::from，无路径校验/无“这是不是 PonyAgent 库”指纹校验，apply 模式可对任意 SQLite 库建表并写 blob 行（误伤其他应用库）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 58,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'version_guard_degraded\\|VERSION_GUARD_DEGRADED' --include=*.rs .  # 仅 4 处：静态定义 :55、getter :58、置位 :80、re-export sqlite_session.rs:22；全仓 0 个消费者（无 CLI/无 /metrics/无日志字段），且是进程全局 AtomicBool、只置 true 永不复位 => 迁移失败后无法被上层观测/复位，'避免 CAS 静默关闭' 只落了一句 eprintln",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 97,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "python3 -c \"import sqlite3;print('table_info(缺表)=', list(sqlite3.connect(':memory:').execute('pragma table_info(sessions)')))\" && sed -n '67,88p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # 缺表与无列都返回空结果 => version_column_state 返回 Ok(false)（归为「列不存在」态），不 panic、不误判为「有列」；但 ensure_version_column 对任何 ALTER 失败（含 busy/locked/schema 锁）一律 VERSION_GUARD_DEGRADED=true + Ok(()) 放行，后续 commit 静默退化为无 CAS 整包写 => 「三态」实为两态+错误，迁移路径仍是 fail-open 且不可复位",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 264,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "D=$(mktemp -d) && cp /tmp/l3b2/t2/baseline.db $D/sessions.db && python3 -c \"import sqlite3;c=sqlite3.connect('$D/sessions.db');print('journal_mode:', c.execute('pragma journal_mode=delete').fetchone())\" && sha256sum $D/sessions.db && /tmp/l3b2/probe degraded $D/sessions.db $D >/dev/null 2>&1; sha256sum $D/sessions.db; python3 -c \"import sqlite3;print('journal_mode now:', sqlite3.connect('$D/sessions.db').execute('pragma journal_mode').fetchone())\"  # 实测 sha256 54d4583b... -> 4ed675b4...、delete -> wal：降级实例在 query_only=ON 之前执行 PRAGMA journal_mode=WAL（:263-271），对非 WAL 存量库仍改写库文件头 => E5「第二实例库文件零写入」在字节层不成立（行级确为零写入）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 413,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'commit_boundary_committed' --include=*.rs crates/pony-agent-core/ | wc -l  # 实测 0：契约 §4 六个必落事件里 commit_boundary_committed 仍从未实现；六事件全部是 eprintln 文本串，无 format=json、无 trace_id（grep -rn trace_id sqlite_session_commit.rs => 0 命中）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 793,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '788,798p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # checksum_mismatch 判据是 session.history.len() != normalized_messages 条数（长度比较，非校验和）：条数相同但内容不同的孤儿不会被标记，且仍以规范化行为准静默覆盖 blob（I4 要求「校验和一致」）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 620,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '597,627p' crates/pony-agent-core/src/agent/sqlite_session.rs; sed -n '2744,2768p' crates/pony-agent-core/src/agent/sqlite_session.rs; sed -n '1806,1822p' crates/pony-agent-core/src/agent/sqlite_session.rs  # 残留未守门全库入口：migrate_from_json 直连 write_full_store（:620，绕过 commit_boundary/CAS）、trait save_store 仍是无版本整包写（:2744）、sync_blob_trace_tx 对不存在行插最小 stub 行（:1818，可为已删会话重建空壳）；E4「任何残留全库落盘入口都必须经 commit_boundary」仍未满足（前两者仅迁移期/不可达，第三者异步 trace 可达）",
+      "severity": "ADVISORY"
+    }
+  ]
+}

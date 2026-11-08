@@ -87,18 +87,26 @@ impl SessionStore {
             .collect()
     }
 
-    /// ADR 0099 阶段 0（I1/I2/I3）：单一提交边界编排（**StaleVersion 不可重试**）。
+    /// ADR 0099 阶段 0（I1/I3）：单一提交边界编排。
     ///
-    /// - `Committed` ⇒ 版本前进，本次落盘结束；
+    /// - `Committed` ⇒ 落一条 `commit_boundary_committed` 事件（label / session_count /
+    ///   elapsed_ms），并刷新版本侧表缓存；
     /// - `Unsupported`（File / Memory / 计数代理）⇒ 回退 `save_store`，保持旧语义；
-    /// - `StaleVersion` ⇒ **放弃本次整包提交**并 fail loud：契约把版本冲突列为不可重试
-    ///   结果——重投旧快照（哪怕换上新版本号）就是 LWW 覆盖，比不重试更糟。需要重试时必须
-    ///   由调用方**重新装载最新状态**后再构造新的 `PersistedStore`；
-    /// - `Failed` ⇒ fail loud（不静默成功）。
+    /// - `Failed` ⇒ fail loud（不静默成功）；
+    /// - `StaleVersion` ⇒ **阶段 0 不再产生**（版本 CAS 整体移交阶段 1），保留分支仅为
+    ///   类型穷尽；真出现即视为契约漂移，按 fail loud 记日志。
     pub(super) fn commit_store(&self, sessions: &SessionMap, label: &str) {
         let store = self.to_persisted_store(sessions);
+        let started = std::time::Instant::now();
         match self.backend.commit_boundary(&store) {
-            CommitOutcome::Committed => self.advance_versions(&store),
+            CommitOutcome::Committed => {
+                eprintln!(
+                    "[pony-agent][session] commit_boundary_committed: label={label} session_count={} elapsed_ms={}",
+                    store.sessions.len(),
+                    started.elapsed().as_millis()
+                );
+                self.advance_versions(&store);
+            }
             CommitOutcome::Unsupported => {
                 if let Err(error) = self.backend.save_store(&store) {
                     eprintln!(
@@ -107,9 +115,8 @@ impl SessionStore {
                 }
             }
             CommitOutcome::StaleVersion { expected, actual } => eprintln!(
-                "[pony-agent][session] {label} 放弃本次整包提交：commit_boundary_stale_version \
-                 （不可重试）expected={expected} actual={actual} sessions={}；\
-                 旧快照不得覆盖库内新版本，须重新装载最新状态后重投",
+                "[pony-agent][session] {label} commit_boundary_stale_version（阶段 0 不应产生，\
+                 版本 CAS 已移交阶段 1）expected={expected} actual={actual} sessions={}",
                 store.sessions.len()
             ),
             CommitOutcome::Failed => eprintln!(
@@ -133,11 +140,10 @@ impl SessionStore {
         }
     }
 
-    /// 提交成功后刷新 CAS 期望版本——**取库内实际写入值**（`session_version` PK 读）。
+    /// 提交成功后同步版本侧表（取库内实际值，`session_version` PK 读）。
     ///
-    /// 不用 `known + 1` 推算：那会在"本次提交写了别的会话/别的实例也写过"时恒定差一，
-    /// 让下一次整包提交永远 `StaleVersion`（L3-A 复现的 off-by-one）。
-    /// 墓碑会话（本次跳过、行已不在）返回 `None` ⇒ 保留旧期望版本，下次继续判墓碑（I3）。
+    /// 阶段 0 的版本号只用于**墓碑判定**（「装载时存在、现在行已不在」⇒ 跳过、永不 INSERT）。
+    /// 墓碑会话返回 `None` ⇒ 保留旧条目，下次提交继续判墓碑（I3）。
     fn advance_versions(&self, store: &PersistedStore) {
         let Ok(mut known) = self.versions.lock() else {
             return;

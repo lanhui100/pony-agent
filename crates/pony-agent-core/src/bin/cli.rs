@@ -1123,10 +1123,20 @@ fn run_sessions_backfill_if_requested() -> Option<i32> {
         .and_then(|index| args.get(index + 1))
         .map(std::path::PathBuf::from)
         .unwrap_or_else(pony_agent_core::agent::sqlite_session::default_sqlite_path);
-    let backend = pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
-        db_path.clone(),
-        pony_agent_core::agent::session::SeparateTraceTableMode::WriteSeparate,
-    );
+    // `--db` 只接受「已存在 + .db 后缀 + 会话库结构自检通过」的路径，拒绝任意路径注入。
+    if let Err(error) = validate_backfill_db(&db_path) {
+        eprintln!("[ponycli] sessions backfill 参数错误：{error}");
+        return Some(2);
+    }
+    let backend = if dry_run {
+        // 预演必须零写入：`mode=ro` + `query_only`，不建表、不迁移、不改 journal_mode。
+        pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_read_only(db_path.clone())
+    } else {
+        pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            pony_agent_core::agent::session::SeparateTraceTableMode::WriteSeparate,
+        )
+    };
     let result = if dry_run {
         backend.backfill_orphan_sessions_dry_run()
     } else {
@@ -1161,6 +1171,44 @@ fn run_sessions_backfill_if_requested() -> Option<i32> {
             Some(1)
         }
     }
+}
+
+/// ADR 0099 阶段 0（E8）：回填目标的路径/结构自检。
+///
+/// 拒绝：不存在、非普通文件、非 `.db` 后缀、缺 `sessions` 表（不是 PonyAgent 会话库）。
+/// 自检本身用**只读**连接，不产生任何写入。
+fn validate_backfill_db(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("数据库不存在：{}", path.display()));
+    }
+    if !path.is_file() {
+        return Err(format!("不是普通文件：{}", path.display()));
+    }
+    let is_db_suffix = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("db"))
+        .unwrap_or(false);
+    if !is_db_suffix {
+        return Err(format!("拒绝非 .db 文件（防路径注入）：{}", path.display()));
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("无法以只读方式打开 {}：{error}", path.display()))?;
+    let has_sessions: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view') AND name = 'sessions'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("{} 结构自检失败：{error}", path.display()))?;
+    if has_sessions == 0 {
+        return Err(format!(
+            "{} 不是 PonyAgent 会话库（缺 sessions 表）",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn main() {

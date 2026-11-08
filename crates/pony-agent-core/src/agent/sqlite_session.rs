@@ -19,7 +19,7 @@ use super::session::{
 #[path = "sqlite_session_commit.rs"]
 mod commit;
 
-pub use commit::{is_busy_error, version_guard_degraded};
+pub use commit::is_busy_error;
 
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
 
@@ -211,6 +211,9 @@ pub struct SqliteSessionBackend {
     instance_lock: Mutex<Option<std::sync::Arc<std::fs::File>>>,
     /// ADR 0099 阶段 0（E5）：抢不到单实例锁 ⇒ 降级只读（连接 `query_only=ON`）。
     read_only: std::sync::atomic::AtomicBool,
+    /// ADR 0099 阶段 0（E8）：维护入口的**存储级只读**——以 `mode=ro` 打开，不建表、不迁移、
+    /// 不改 `journal_mode`（否则打开即改库文件头，`--dry-run` 就不是零写入了）。
+    storage_read_only: bool,
 }
 
 impl SqliteSessionBackend {
@@ -218,7 +221,23 @@ impl SqliteSessionBackend {
         Self::new_with_trace_mode(db_path, SeparateTraceTableMode::Off)
     }
 
+    /// ADR 0099 阶段 0（E8 维护入口）：存储级**只读**打开。
+    ///
+    /// `ponycli sessions backfill --dry-run` 用它：`mode=ro` + `query_only=ON`，且跳过
+    /// `journal_mode`/建表/迁移——保证「预演」对库文件零写入（sha256 不变）。
+    pub fn new_read_only(db_path: PathBuf) -> Self {
+        Self::build(db_path, SeparateTraceTableMode::Off, true)
+    }
+
     pub fn new_with_trace_mode(db_path: PathBuf, trace_mode: SeparateTraceTableMode) -> Self {
+        Self::build(db_path, trace_mode, false)
+    }
+
+    fn build(
+        db_path: PathBuf,
+        trace_mode: SeparateTraceTableMode,
+        storage_read_only: bool,
+    ) -> Self {
         let attachment_root = db_path
             .parent()
             .map(|parent| parent.join("attachments"))
@@ -237,7 +256,8 @@ impl SqliteSessionBackend {
             legacy_json_path,
             connection: Mutex::new(None),
             instance_lock: Mutex::new(None),
-            read_only: std::sync::atomic::AtomicBool::new(false),
+            read_only: std::sync::atomic::AtomicBool::new(storage_read_only),
+            storage_read_only,
         }
     }
 
@@ -250,6 +270,18 @@ impl SqliteSessionBackend {
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Option<Connection>>, String> {
         let mut slot = self.connection.lock().map_err(|e| format!("lock: {e}"))?;
         if slot.is_none() {
+            // ADR 0099 阶段 0（E8）：存储级只读维护入口——`mode=ro`，且**不**执行任何会改
+            // 库文件头 / 建表 / 迁移的语句（否则 `--dry-run` 就不是零写入）。
+            if self.storage_read_only {
+                let conn = Connection::open_with_flags(
+                    &self.db_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(|e| format!("open db (read-only): {e}"))?;
+                conn.execute_batch("PRAGMA query_only=ON;").ok();
+                *slot = Some(conn);
+                return Ok(slot);
+            }
             // ADR 0099 阶段 0（E5）：单实例独占锁。抢不到 ⇒ 明确降级只读
             // （`query_only` + 结构化日志），不 panic、不静默继续写。
             let lock_guard = commit::acquire_single_instance_lock(&self.db_path)?;
@@ -260,16 +292,21 @@ impl SqliteSessionBackend {
             self.read_only
                 .store(read_only, std::sync::atomic::Ordering::SeqCst);
             let conn = Connection::open(&self.db_path).map_err(|e| format!("open db: {e}"))?;
-            conn.execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 PRAGMA synchronous=NORMAL;
-                 PRAGMA busy_timeout=3000;
-                 PRAGMA wal_autocheckpoint=256;",
-            )
-            .map_err(|e| format!("pragma: {e}"))?;
             if read_only {
+                // 降级只读：**不刷 `journal_mode`/`synchronous`**（会改库文件头），
+                // 也不建表/迁移；只把连接钉成 query_only。
                 conn.execute_batch("PRAGMA query_only=ON;").ok();
             } else {
+                // `busy_timeout` 是**本地写锁等待**，不属 NFR `external_call_timeout_ms=3000`
+                // 的外部调用域（无网络 IO、失败可恢复）；压到 3000 会让慢盘 / 备份进程占锁
+                // 变成用户可见的"保存失败"，故保持 5000ms。
+                conn.execute_batch(
+                    "PRAGMA journal_mode=WAL;
+                     PRAGMA synchronous=NORMAL;
+                     PRAGMA busy_timeout=5000;
+                     PRAGMA wal_autocheckpoint=256;",
+                )
+                .map_err(|e| format!("pragma: {e}"))?;
                 self.ensure_schema(&conn)?;
                 self.migrate_from_json(&conn)?;
             }
@@ -2580,65 +2617,45 @@ impl SessionBackend for SqliteSessionBackend {
         // ADR 0099 阶段 0（E5）：降级只读实例在每次写入口重试一次 flock（非阻塞），
         // 持锁进程退出后自动恢复可写（query_only 本身不可逆）。
         self.try_recover_instance_lock();
-        let slot = match self.connection() {
-            Ok(slot) => slot,
-            Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
-                return PersistCommandOutcome::Failed;
-            }
-        };
-        let conn = slot.as_ref().expect("connection initialized");
-
-        let mut retries = 3;
+        // NFR（契约 §4 结构性理由）：`external_call_timeout_ms=3000` 只约束**外部调用**
+        // （网络/HTTP/跨进程 RPC）。SQLite 的 `busy_timeout` 是**本地写锁等待**，不在其域内
+        // ——无网络 IO、失败可恢复；压到 3000 会把"慢盘 / 备份进程占锁"变成用户可见的保存
+        // 失败。故单次尝试的本地锁等待预算 = 5000ms，重试上限 3 次（backoff 50→200ms）。
+        // 另一条硬约束保留：每次尝试单独取连接，**失败即释放连接 Mutex 再 sleep**。
+        const LOCK_WAIT_BUDGET_MS: u64 = 5000;
+        let started = std::time::Instant::now();
+        let mut attempt = 0u32;
         loop {
-            // `save_store`/`persist_command` 拿的是 `&self`（不是 `&mut self`），
-            // 因此用 `Transaction::new_unchecked` 显式指定 IMMEDIATE 行为。
-            let tx = match rusqlite::Transaction::new_unchecked(
-                conn,
-                rusqlite::TransactionBehavior::Immediate,
-            ) {
-                Ok(tx) => tx,
-                Err(error) => {
-                    // ADR 0099 阶段 0 / I5：按 `ErrorCode::DatabaseBusy|DatabaseLocked`
-                    // 判定（SQLite 实际消息是 `database is locked`），退避 50→200ms。
-                    if retries > 0 && is_busy_error(&error) {
-                        retries -= 1;
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            commit::busy_backoff_ms(2 - retries),
-                        ));
-                        continue;
+            let attempt_result = {
+                let slot = match self.connection() {
+                    Ok(slot) => slot,
+                    Err(error) => {
+                        eprintln!("[pony-agent][session] SQLite open error: {error}");
+                        return PersistCommandOutcome::Failed;
                     }
-                    eprintln!("[pony-agent][session] SQLite batch command begin tx error: {error}");
-                    return PersistCommandOutcome::Failed;
-                }
+                };
+                let conn = slot.as_ref().expect("connection initialized");
+                let _ = conn.busy_timeout(std::time::Duration::from_millis(LOCK_WAIT_BUDGET_MS));
+                commit::persist_commands_once(self, conn, &commands)
             };
-
-            let mut all_ok = true;
-            for command in &commands {
-                if let Err(error) = self.apply_persist_command_tx(&tx, command) {
-                    eprintln!("[pony-agent][session] SQLite batch command error: {error}");
-                    all_ok = false;
-                    break;
-                }
-            }
-
-            if !all_ok {
-                return PersistCommandOutcome::Failed;
-            }
-
-            match tx.commit() {
-                Ok(()) => return PersistCommandOutcome::Succeeded,
-                Err(error) => {
-                    // 同上（I5：ErrorCode 判定 + 50→200ms 退避）。
-                    if retries > 0 && is_busy_error(&error) {
-                        retries -= 1;
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            commit::busy_backoff_ms(2 - retries),
-                        ));
-                        continue;
+            match attempt_result {
+                commit::BatchAttempt::Done(outcome) => return outcome,
+                commit::BatchAttempt::Busy(message) => {
+                    // NFR `retry.max_attempts=3`：最多 3 次尝试（attempt 0..=2）。
+                    if attempt >= 2 {
+                        eprintln!(
+                            "[pony-agent][session] SQLite batch command busy 重试耗尽（attempt={attempt}，共 {}ms）：{message}",
+                            started.elapsed().as_millis()
+                        );
+                        return PersistCommandOutcome::Failed;
                     }
-                    eprintln!("[pony-agent][session] SQLite batch command commit error: {error}");
-                    return PersistCommandOutcome::Failed;
+                    let backoff = commit::busy_backoff_ms(attempt);
+                    eprintln!(
+                        "[pony-agent][session] busy_retry: persist_commands_batch 第 {} 次重试（{backoff}ms 退避）：{message}",
+                        attempt + 1
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff));
+                    attempt += 1;
                 }
             }
         }

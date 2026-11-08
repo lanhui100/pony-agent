@@ -1,0 +1,104 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "commit a93601a5 (fix(stage0): rewrite CAS on BEGIN IMMEDIATE + real per-row WHERE version guard)",
+    "NFR:external_call_timeout_ms (baseline 3000)",
+    "NFR:retry (max_attempts=3 / 50-100-200ms / StaleVersion+Failed non-retryable)",
+    "NFR:concurrency_lock (single-instance flock + session CAS + lock_scope_bounded)",
+    "NFR:logging (format=json + trace_id + required_events)",
+    "NFR:resource_release (6 items)",
+    "CONTRACT:.dev-team/contracts/stage0-write-model.md I1-I5 / E1-E8 / v1.1",
+    "CODE:crates/pony-agent-core/src/agent/sqlite_session_commit.rs (823L)",
+    "CODE:crates/pony-agent-core/src/agent/session/store_stage0.rs (151L)",
+    "CODE:crates/pony-agent-core/src/agent/session/store.rs (diff)",
+    "CODE:crates/pony-agent-core/src/agent/sqlite_session.rs (diff)",
+    "CODE:crates/pony-agent-core/src/agent/session/backend.rs (diff)",
+    "CODE:crates/pony-agent-core/src/bin/cli.rs (diff, backfill entry)",
+    "GATE:cargo check -p pony-agent-core (exit 0)",
+    "GATE:node scripts/check-file-size.mjs --baseline scripts/file-size-baseline.json (exit 0)",
+    "GATE:cargo test -p pony-agent-core --lib (1367 passed, exit 0)",
+    "GATE:cargo test -p pony-agent-core --test storage_stage0_version_monotonic (4 passed, exit 0)",
+    "EVIDENCE:ponycli sessions backfill dry-run/apply/apply twice on /tmp/bf/sessions.db (idempotent, 0 change on 2nd apply)",
+    "EVIDENCE:old-schema db /tmp/bf2/sessions.db ALTER ADD COLUMN version twice (idempotent, old row version=0)",
+    "EVIDENCE:cargo test storage_stage0_busy_locked_retry measured 5.71s wall for one persist_commands_batch call"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 2607,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "/usr/bin/time -f 'WALL=%es' cargo test -p pony-agent-core --test storage_stage0_busy_locked_retry 2>&1 | tail -3  # 实测 'finished in 5.71s' / WALL=6.03s：单次 persist_commands_batch 等待 >3000ms；代码 retries=3（:2592）=> 4 次 attempt，每次 busy_timeout=3000（:266）+ backoff 50/100/200=350 => 上界 12350ms，且全程无总预算校验 => 违反 external_call_timeout_ms=3000 与 retry.max_attempts=3（实为 4 次尝试）",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "line": 2583,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '2583,2640p' crates/pony-agent-core/src/agent/sqlite_session.rs  # slot = self.connection() 在 :2583 取得 MutexGuard 并活到函数末尾，thread::sleep 在 :2606 / :2635 仍处于该 guard 作用域 => 退避期持连接锁（最长 ~12.3s），同进程所有读/提交（commit_boundary、load_store）被串行阻塞；作者声称的『先释放连接 Mutex 再 sleep』只落在 sqlite_session_commit.rs:387-417，未覆盖主写路径",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 109,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '98,120p' crates/pony-agent-core/src/agent/session/store_stage0.rs; grep -n 'versions' crates/pony-agent-core/src/agent/session/store_stage0.rs  # StaleVersion 分支只 eprintln，不刷新 self.versions、无 reload 路径（versions_of:76 继续返回旧期望）=> 该 store 之后每次整包提交（create_workspace/rename/archive/授权）都继续 StaleVersion 并静默丢弃用户操作，只有单行写（append_turn）偶然刷新才能恢复；契约要求『由调用方重新装载最新状态后重投』，但 commit_store 返回 ()，调用方拿不到裁定结果",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 504,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -rn 'commit_boundary_committed' --include=*.rs crates/ | wc -l  # -> 0，但 .dev-team/nfr-baseline-stage0-write-model.json logging.required_events[0] = 'commit_boundary_committed'；成功路径（:504 Ok(Committed)）无任何日志 => 只有失败/冲突可观测，正常提交不可计数、不可定位",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 405,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "sed -n '400,418p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # 只校验 spent+backoff>3000，未计入『下一次 attempt 自身的 busy_timeout(3000)』；两次各 ~1400ms 的 busy 等待后仍会 sleep 并开第三次 attempt => 上界 ~6000ms（python3: 2900+100+3000）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 115,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '115,141p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs; sed -n '617,675p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # load_session_versions 读失败 -> 返回空 map（仅 eprintln），于是 store.versions 空 -> expected=None -> cas_write_row 走『无 WHERE version』的无条件 UPDATE（:638-652）=> 整包 CAS 静默旁路、StaleVersion 永不触发，且 VERSION_GUARD_DEGRADED 未被置位（降级标记谎报正常）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 413,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -c 'trace_id' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # -> 0；grep -n 'eprintln!' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # 全部为纯文本 stderr；busy_retry 无 session_id/attempt 字段，commit_boundary_failed 无统一 elapsed_ms/session_id => logging.format=json + trace_id 未满足（债务 PA-119 仍 open）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 309,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'let _ = backend.persist_command' crates/pony-agent-core/src/agent/session/store.rs  # AppendTrace 写结果仍被丢弃：事件流 refold 重建 trace 缓存失败时零日志零降级标记（本轮只修了 store_stage0.rs:35 与 ensure_version_column 两处）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 55,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn 'version_guard_degraded' --include=*.rs crates/ src-tauri/src  # 仅 :58 定义 + sqlite_session.rs:22 pub use，零消费点 => 『显式降级标记』没有任何 UI/telemetry/启动自检读取，迁移失败（如 PA-089 6a 视图形态）用户侧不可见；且 static 为进程全局、一次失败永久置位不复位",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 448,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '447,462p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs; python3 -c \"import sqlite3;c=sqlite3.connect(':memory:');c.execute('create table t(x)');c.execute('create view sessions as select x as conversation_id from t');print(list(c.execute('pragma table_info(sessions)')))\"  # 视图形态 version_column_state=Ok(false) -> write_store_tx 无 CAS 无墓碑跳过但仍返回 Committed（仅 eprintln）；三态判定已落，但 I2 在该形态下是『日志化失效』而非 Failed",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 801,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "sed -n '799,810p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs  # 回填用 conn.unchecked_transaction()=DEFERRED（与本次修复『DEFERRED 先读后写会 SQLITE_BUSY_SNAPSHOT』的理由冲突），无 busy 重试；与在线写者并发时回填可能整批失败（fail loud，但维护入口无提示重试）",
+      "severity": "ADVISORY"
+    }
+  ]
+}

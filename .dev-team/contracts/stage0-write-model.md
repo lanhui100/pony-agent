@@ -89,6 +89,8 @@
 | `logging` | `format=json` + `trace_id`（字段名 `trace_id`） | 必落事件：`commit_boundary_committed` / `commit_boundary_stale_version` / `commit_boundary_failed` / `busy_retry` / `single_instance_lock_denied` / `orphan_backfill_summary`；`compliance_claimed=false`（沿用 PA-119 债务口径，不主张已满足） |
 | `resource_release` | 见 JSON 6 条 | 写事务 ≤50 ms 且不含 fold/全量读；锁 guard 在所有 early-return 路径 drop；busy 重试有界且失败不得静默；`retired` 只标记不删行 |
 
+**`external_call_timeout_ms` 的域边界（v1.2 裁决）**：`external_call_timeout_ms=3000` 仅约束**外部调用**（网络 / HTTP / 跨进程 RPC）；SQLite 的本地写锁等待（`busy_timeout`）不在其域内，故实现取 `busy_timeout=5000` + 重试总预算 5000ms——依据：无网络 IO、失败可恢复、压缩到 3000ms 会在慢盘 / 备份进程占锁时引入用户可见的保存失败。
+
 **与全局基准的关系**：`.dev-team/nfr-baseline.json`（全仓累积基准，root `additionalProperties=false`）**保持不动**。阶段 0 的 `retry.max_attempts=3` / `concurrency_lock` 与全局既有条目（`max_attempts=1`、`concurrency_lock="mutex"`）冲突，改写全局会破坏既有 wave 声明与 `.dev-team/nfr-lint.py` 门禁，故独立成文件、独立严格 schema。
 
 ## 5. 阶段 0 Executor 残留落码点（anchor 精确）

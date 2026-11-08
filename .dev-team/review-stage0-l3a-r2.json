@@ -1,0 +1,61 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+    "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/bin/cli.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 181,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /tmp/stage0_l3a_r2 && CARGO_TARGET_DIR=/tmp/stage0_l3a/target cargo build --offline -q && /tmp/stage0_l3a/target/debug/stage0-l3a-r2 resurrect 2>&1 | grep '^\\[resurrect\\]'\n   # 实测输出（HEAD=a93601a5）：\n   # [resurrect] after turn1 = history=2 version=0\n   # [resurrect] after external delete = ROW-ABSENT          # 等价于另一实例 remove_session（sqlite_session.rs:2864 DELETE FROM sessions）\n   # [resurrect] after full commit (tombstone) = ROW-ABSENT  # 整包路径确实墓碑跳过，未 INSERT（I3 在此路径成立）\n   # [resurrect] after single-row write = history=4 version=0 # 单行路径把墓碑复活，且 version 回到 0\n   # [resurrect] stale(expected=0) => Committed             # 删除前取的旧快照（expected=0）CAS 再次命中\n   # [resurrect] FINAL = history=2 version=1                # 旧快照覆盖复活行：4 条消息退回 2 条\n   # 根因：upsert_session_row_bump（:169-179）先无条件 UPDATE version=version+1，changes()=0 时不是「墓碑拒绝」而是落到\n   # :181 INSERT OR REPLACE（不含 version 列 → DEFAULT 0）。该方法没有 expected 版本参数，无法区分「新会话」与「已删会话」，\n   # 修 2 只在 commit_boundary 的 cas_write_row 里消灭了该歧义，单行写路径仍是 ABA 后门。\n   # harness 源码：/tmp/stage0_l3a_r2/src/main.rs（mode=resurrect）",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 172,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/stage0_l3a_r2 && CARGO_TARGET_DIR=/tmp/stage0_l3a/target cargo build --offline -q && /tmp/stage0_l3a/target/debug/stage0-l3a-r2 single-row-lww 2>&1 | grep '^\\[single-row-lww\\]'\n   # 实测输出：\n   # [single-row-lww] B snapshot = history=2 version=1\n   # [single-row-lww] after A turn2 = history=4 version=2\n   # [single-row-lww] after B turn3 = history=4 version=3 content=[user:q1|assistant:a1|user:q3|assistant:a3]\n   # A 的 turn2（q2/a2）被 B 的旧快照静默覆盖；B 的写还把 version 2→3（外观合法），无 StaleVersion、无任何日志。\n   # 该 UPDATE 没有 WHERE version=?expected（:169-176），而 save_session_state_to_backend（store.rs:2473）是每轮 turn 的\n   # 首选落盘路径；整包路径判 StaleVersion 后「放弃本次整包提交」，紧接着的下一次 turn 写又通过这条无 CAS 路径把库覆盖成\n   # 本实例旧状态——StaleVersion 的裁决在两个写路径之间自相矛盾。原 4 号 BLOCKING（version 重置 ABA）只修掉了「版本回退」，\n   # 「无版本守门的盲写」仍在，属表面修补。harness 源码：/tmp/stage0_l3a_r2/src/main.rs（mode=single-row-lww）",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store_stage0.rs",
+      "line": 146,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '141,150p' crates/pony-agent-core/src/agent/session/store_stage0.rs && sed -n '496,505p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs\n   # advance_versions 在 tx.commit() 返回、连接 Mutex 释放**之后**才逐会话 session_version() 读库。COMMIT 与读之间有窗口：\n   # 另一实例在这段时间推进了该会话版本，本实例会把**别人的版本号**写进自己 versions 缓存（versions_of :76-88 下次就以它为\n   # expected），下一轮整包 CAS 因此恰好命中别人的版本并把别人内容覆盖——即本 ADR 要消灭的 LWW。修复只把「known+1 推算」\n   # 换成「读库内值」，没有把读放进同一个事务（RETURNING 已经返回了本行实际写入值，却没被用于刷新缓存）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 482,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '463,497p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs\n   # CasOutcome::Tombstone 只 insert 本地 HashSet（:482-484），既无日志、也无 per-session 结果通道，最终返回 Committed。\n   # resurrect 复现里同一进程对同一会话：整包写 = 静默跳过（用户看不到），单行写 = 复活（下一条 finding 的 BLOCKING），\n   # 调用方（store_stage0.rs:98 commit_store 返回 ()）无法区分「已提交」与「被墓碑丢弃」。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 133,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '115,141p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs\n   # load_session_versions 仍 fail-open：prepare/query 任一失败（busy/locked/schema 锁）→ eprintln + 返回空 SessionVersionMap。\n   # 空 map 经 versions_of 让该快照内所有会话 expected=None ⇒ cas_write_row（:638-652）走「无条件 UPDATE version=version+1」\n   # 分支，且该分支的约束冲突只用于 INSERT 竞争——整包写因此**完全无 CAS**。这与本次修掉的 version_column_state 三态判定\n   # （:97-111）是同一类 fail-open，只是换了个入口；一次瞬时错误即可让该 store 的下一轮整包写变成盲写。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 264,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /tmp/stage0_l3a_r2 && CARGO_TARGET_DIR=/tmp/stage0_l3a/target cargo build --offline -q && /tmp/stage0_l3a/target/debug/stage0-l3a-r2 recover-empty 2>&1 | tail -6\n   # 实测：lock 被外部占用 + 库尚未初始化（无任何表）→ 实例降级只读（connection() :270-275 跳过 ensure_schema）；\n   # 释放锁后 try_recover_instance_lock 只执行 PRAGMA query_only=OFF（:266），**不补跑 ensure_schema / migrate_from_json**：\n   # single_instance_lock_recovered 之后 create_workspace => true，但 commit_boundary_failed: prepare meta insert: no such table:\n   # store_metadata，最终 tables=0 —— 恢复可写后所有写入永久失败，且调用方拿到的是 Ok。\n   # 另：无表被日志写成「sessions 无 version 列（视图形态）」（:451-454），排障会被误导。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/sqlite_session_commit.rs",
+      "line": 168,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '160,180p;509,523p' crates/pony-agent-core/src/agent/sqlite_session_commit.rs\n   # upsert_session_row_bump 每行都调 version_column_state（PRAGMA table_info 的 prepare+query）。write_store_tx 对全库每会话\n   # 调它 ⇒ 降级/无 version 列路径下每次全库提交 = N 次 PRAGMA 解析；单行写路径（每轮 turn）也固定多一次 PRAGMA。\n   # 建议每次提交只判定一次并传参（判据已在 commit_store_once :447 取得）。",
+      "severity": "ADVISORY"
+    }
+  ]
+}
