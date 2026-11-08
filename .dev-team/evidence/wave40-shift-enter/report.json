@@ -1,15 +1,15 @@
 {
   "scenario": "shift-enter",
   "wave": 40,
-  "bin": "/home/dm/pony-agent/target/debug/pony",
-  "bin_sha256": "86d68169082ceb5c50caaaef69a6cbb8007905f33f7cf849bcba04e28ffdbe71",
+  "bin": "/home/dm/.local/bin/pony",
+  "bin_sha256": "212aaa1f954659af226cd202847738f3f3221e89a53a5cf44ff0f8978e78dcb8",
   "pty": {
     "cols": 120,
     "rows": 34,
     "term": "xterm-256color",
     "isolated_home": true
   },
-  "generated_at": "2026-11-07T13:19:43+0800",
+  "generated_at": "2026-11-08T10:48:26+0800",
   "exit_code": 0,
   "pass": 6,
   "fail": 0,
