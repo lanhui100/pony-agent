@@ -330,63 +330,56 @@
       "value": 10
     },
     {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 14816
-    },
-    {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "path": "crates/pony-agent-core/src/agent/tools/schema.rs",
       "kind": "fn-depth",
       "name": "builtin_tools",
       "occurrence": 0,
       "value": 10
     },
     {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "path": "crates/pony-agent-core/src/agent/tools/workspace.rs",
       "kind": "fn-depth",
       "name": "edit_file",
       "occurrence": 0,
       "value": 9
     },
     {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "path": "crates/pony-agent-core/src/agent/tools/run.rs",
       "kind": "fn-depth",
       "name": "run_command",
       "occurrence": 0,
       "value": 10
     },
     {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "path": "crates/pony-agent-core/src/agent/tools/workspace.rs",
       "kind": "fn-depth",
       "name": "write_file",
       "occurrence": 0,
       "value": 10
     },
     {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "path": "crates/pony-agent-core/src/agent/tools/schema.rs",
       "kind": "fn-lines",
       "name": "builtin_tools",
       "occurrence": 0,
       "value": 1070
     },
     {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "path": "crates/pony-agent-core/src/agent/tools/composite.rs",
       "kind": "fn-lines",
       "name": "gather_context",
       "occurrence": 0,
       "value": 479
     },
     {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "path": "crates/pony-agent-core/src/agent/tools/run.rs",
       "kind": "fn-lines",
       "name": "run_command",
       "occurrence": 0,
       "value": 631
     },
     {
-      "path": "crates/pony-agent-core/src/agent/tools.rs",
+      "path": "crates/pony-agent-core/src/agent/tools/workspace.rs",
       "kind": "fn-lines",
       "name": "write_file",
       "occurrence": 0,

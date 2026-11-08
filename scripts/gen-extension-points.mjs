@@ -7,7 +7,7 @@
  * `docs/architecture/extension-points.md` 的**唯一真值来源**。
  *
  * 事实源（全部读源码，不读人工维护的第二份清单）：
- *   - crates/pony-agent-core/src/agent/tools.rs        → `ToolDescriptorSource` 枚举变体
+ *   - crates/pony-agent-core/src/agent/tools/contract.rs → `ToolDescriptorSource` 枚举变体
  *   - crates/pony-agent-core/src/agent/tool_runtime.rs → 已定义的运行期端口 trait
  *   - crates/pony-agent-core/src/agent/hooks.rs        → `TurnHookPoint` 钩子点数量
  *   - docs/contracts/*.v1.schema.json                  → 五份契约版本串
@@ -94,7 +94,7 @@ function main() {
     return;
   }
 
-  const tools = read(`${SRC}/tools.rs`);
+  const tools = read(`${SRC}/tools/contract.rs`);
   const runtime = read(`${SRC}/tool_runtime.rs`);
   const hooks = read(`${SRC}/hooks.rs`);
 
@@ -162,7 +162,7 @@ function main() {
   lines.push('');
   lines.push('> 本文件由 `scripts/gen-extension-points.mjs` 从源码事实生成，**禁止手改**（手写副本即第二真值源，ADR 0068 决策 3 已否决）。');
   lines.push('> 重生成：`node scripts/gen-extension-points.mjs --write`；一致性校验：`node scripts/gen-extension-points.mjs --check`。');
-  lines.push('> 事实源：`tools.rs`（registry source 枚举）、`tool_runtime.rs`（已定义 trait 端口）、`hooks.rs`（钩子点）、`docs/contracts/*.v1.schema.json`（契约版本）、各载体文件是否存在。');
+  lines.push('> 事实源：`agent/tools/contract.rs`（registry source 枚举）、`tool_runtime.rs`（已定义 trait 端口）、`hooks.rs`（钩子点）、`docs/contracts/*.v1.schema.json`（契约版本）、各载体文件是否存在。');
   lines.push('');
   lines.push('## 1. 想加什么，该挂哪（ADR 0064 三层模型）');
   lines.push('');
