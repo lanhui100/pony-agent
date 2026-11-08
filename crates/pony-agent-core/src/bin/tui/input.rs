@@ -160,7 +160,8 @@ where
 /// ADR 0075：push 键盘增强标志的**唯一决策点**（按终端拓扑分级）。
 ///
 /// - `TERM` 缺失 / `dumb` ⇒ 不 push；
-/// - 复用器 / pty 代理层（`HERDR`/`TMUX`/`ZELLIJ`/`STY`/`ABDUCO`）⇒ **只** `DISAMBIGUATE`：
+/// - 复用器 / pty 代理层（`HERDR_*`/`TMUX`/`ZELLIJ`/`STY`/`ABDUCO`，见
+///   [`TERMINAL_MULTIPLEXER_ENV_KEYS`]）⇒ **只** `DISAMBIGUATE`：
 ///   Shift+Enter 照常可用，而「pop 丢失」的后果从「全键盘乱码」降级为「修饰键异常」；
 /// - 直连终端 ⇒ `DISAMBIGUATE | REPORT_ALL_KEYS`（保留既有全键位上报能力）。
 pub fn keyboard_enhancement_push_flags() -> Option<KeyboardEnhancementFlags> {

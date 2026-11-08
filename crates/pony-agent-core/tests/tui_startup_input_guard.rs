@@ -138,7 +138,7 @@ import argparse, fcntl, json, os, pty, re, select, signal, struct, subprocess, s
 # 终端能力查询序列：出现任何一条都说明又走了 stdio 探测（会读 stdin，可能吞键）。
 # 不把 kitty `ESC _ G` 计入：品牌标**渲染**也会发它，而 stdio 探测必然同帧带 DA1 `CSI c`。
 QUERIES = [b"\x1b[c", b"\x1b[5n", b"\x1b[16t", b"\x1b[14t", b"\x1b[1337n"]
-MULTIPLEXER_ENV_KEYS = ("HERDR", "TMUX", "ZELLIJ", "STY", "ABDUCO")
+MULTIPLEXER_ENV_KEYS = ("HERDR", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "TMUX", "ZELLIJ", "STY", "ABDUCO")
 # 图形协议探测相关环境：剥离后固定为「不支持图形协议」，使判定与开发者终端无关。
 IMAGE_ENV_KEYS = ("KITTY_WINDOW_ID", "TERM_PROGRAM", "LC_TERMINAL")
 

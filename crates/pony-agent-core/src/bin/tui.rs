@@ -418,7 +418,25 @@ impl TuiState {
 
 /// ADR 0075：已知复用器 / pty 代理层的环境变量名（任一非空即视为复用器）。
 /// `herdr` 是本缺陷的实际现场（其不解析 kitty 协议，只把字节转发给外层真实终端）。
-pub const TERMINAL_MULTIPLEXER_ENV_KEYS: [&str; 5] = ["HERDR", "TMUX", "ZELLIJ", "STY", "ABDUCO"];
+///
+/// ADR 0094：清单必须覆盖 herdr 的**真实**变量名。herdr 0.7.5 拉起的 shell 里只有
+/// `HERDR_ENV=1` / `HERDR_PANE_ID` / `HERDR_SOCKET_PATH` / `HERDR_TAB_ID` /
+/// `HERDR_WORKSPACE_ID`，**没有**名为 `HERDR` 的变量（2026-11-08 在 `herdr server`
+/// 拉起的 shell 中实测 `/proc/<pid>/environ`）。旧清单只认 `HERDR` ⇒ herdr 被误判成
+/// 直连终端 ⇒ push `REPORT_ALL_KEYS`(8) ⇒ 退出后 Enter 被编码成 `CSI 13u`，
+/// shell 把它回显成 `u` 且不提交。
+pub const TERMINAL_MULTIPLEXER_ENV_KEYS: &[&str] = &[
+    "HERDR",
+    "HERDR_ENV",
+    "HERDR_PANE_ID",
+    "HERDR_SOCKET_PATH",
+    "HERDR_TAB_ID",
+    "HERDR_WORKSPACE_ID",
+    "TMUX",
+    "ZELLIJ",
+    "STY",
+    "ABDUCO",
+];
 
 
 

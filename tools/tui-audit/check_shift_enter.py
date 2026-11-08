@@ -11,13 +11,14 @@ Harness overview
    capability-query byte may appear on the wire.
 2. ADR 0075: the app no longer probes the terminal with `CSI ? u`; it pushes
    keyboard enhancement flags unconditionally whenever TERM is not `dumb`.
-   Multiplexer env vars (HERDR/TMUX/ZELLIJ/STY/ABDUCO) are stripped from the child
+   Multiplexer env vars (HERDR_*/TMUX/ZELLIJ/STY/ABDUCO) are stripped from the child
    env, so this session models a **direct** terminal.
 3. Assert no `CSI ? u` probe was emitted and that the push carries both
    DISAMBIGUATE_ESCAPE_CODES (1) and REPORT_ALL_KEYS_AS_ESCAPE_CODES (8):
    crossterm 0.28.1 serializes flags 9 as `CSI > 9 u` (direct tier).  A second PTY
-   session with `HERDR=0.7.5` must push `CSI > 1 u` (DISAMBIGUATE only, multiplexer
-   tier) - ADR 0075's tiering rule.
+   session with herdr's **real** env shape (`HERDR_ENV=1`, no bare `HERDR`) must push
+   `CSI > 1 u` (DISAMBIGUATE only, multiplexer tier) - ADR 0075's tiering rule,
+   regression-guarded by ADR 0094.
 4. Type `abc`, then send kitty `CSI 13;2u` (Shift+Enter): the composer must still
    hold `abc` and must NOT submit (no thinking/writing state).
 5. Send bare CR (plain Enter): the composer must submit/clear (`abc` leaves the
@@ -67,7 +68,21 @@ REPORT_ALL_KEYS = 0b1000
 EXPECTED_DIRECT_FLAGS = DISAMBIGUATE | REPORT_ALL_KEYS
 EXPECTED_MULTIPLEXER_FLAGS = DISAMBIGUATE
 # 与 `tui::TERMINAL_MULTIPLEXER_ENV_KEYS` 同口径（任一非空即视为复用器）。
-MULTIPLEXER_ENV_KEYS = ("HERDR", "TMUX", "ZELLIJ", "STY", "ABDUCO")
+# ADR 0094：herdr 0.7.5 只导出 `HERDR_ENV` / `HERDR_PANE_ID` / `HERDR_SOCKET_PATH` /
+# `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`，没有裸 `HERDR`；旧清单会让本脚本在 herdr 里
+# 误判成「直连终端」，从而按 9 号 flag 期望值报假失败。
+MULTIPLEXER_ENV_KEYS = (
+    "HERDR",
+    "HERDR_ENV",
+    "HERDR_PANE_ID",
+    "HERDR_SOCKET_PATH",
+    "HERDR_TAB_ID",
+    "HERDR_WORKSPACE_ID",
+    "TMUX",
+    "ZELLIJ",
+    "STY",
+    "ABDUCO",
+)
 # 与 `tui::splash_protocol_for_env` 的探测输入同口径：剥离后固定为「无图形协议」。
 IMAGE_ENV_KEYS = ("KITTY_WINDOW_ID", "TERM_PROGRAM", "LC_TERMINAL")
 # 品牌标图形协议探测曾直接读 stdin 并吞掉用户按键（已改为纯环境判定，见
@@ -581,12 +596,15 @@ def run(bin_path: str, evidence_dir: str) -> int:
             )
 
         # ---- Assertion 5: multiplexer tier pushes DISAMBIGUATE only (ADR 0075) ---
-        # 同一二进制、同一 PTY，仅加 `HERDR`：复用器下只发消歧位，pop 丢失时
+        # 同一二进制、同一 PTY，只改环境：复用器下只发消歧位，pop 丢失时
         # 代价从「全键盘乱码」降为「修饰键异常」。
+        # ADR 0094：必须用 herdr 的**真实**形状（只有 `HERDR_ENV` 等，没有裸 `HERDR`）——
+        # 旧断言只注入 `HERDR`，于是清单漏了真实变量名也照样变绿，缺陷从噪声里溜过去。
         mux_session: PtySession | None = None
         try:
             mux_env = dict(env)
-            mux_env["HERDR"] = "0.7.5"
+            mux_env["HERDR_ENV"] = "1"
+            mux_env["HERDR_PANE_ID"] = "w1:p1"
             mux_session = PtySession([bin_path], mux_env, repo_root)
             mux_push_ok = mux_session.wait_for(
                 lambda: PUSH_RE.search(bytes(mux_session.buf)) is not None, timeout=8.0

@@ -219,6 +219,39 @@ fn c8_multiplexer_detection_reads_known_env_keys() {
     assert_eq!(tui::terminal_multiplexer_for_env(absent), None);
 }
 
+/// ADR 0094：herdr 0.7.5 只导出 `HERDR_*`，**没有**名为 `HERDR` 的变量。
+///
+/// 旧清单只认 `HERDR` ⇒ herdr pane 被误判成直连终端 ⇒ push
+/// `DISAMBIGUATE | REPORT_ALL_KEYS`(9) ⇒ pop 若被代理层吞掉，退出后 Enter 被编码成
+/// `CSI 13u`，bash 把它回显成 `u` 且不提交（实测 `\x07u`，本缺陷的用户现场）。
+#[test]
+fn c8_herdr_real_env_shape_is_detected_and_tiered_as_multiplexer() {
+    use crossterm::event::KeyboardEnhancementFlags as Flags;
+
+    let herdr_env_only = |key: &str| match key {
+        "HERDR_ENV" => Some("1".to_string()),
+        "HERDR_PANE_ID" => Some("w4N:p1".to_string()),
+        "HERDR_SOCKET_PATH" => Some("/home/dm/.config/herdr/herdr.sock".to_string()),
+        "HERDR_TAB_ID" => Some("w4N:t1".to_string()),
+        "HERDR_WORKSPACE_ID" => Some("w4N".to_string()),
+        _ => None,
+    };
+    assert_eq!(
+        tui::terminal_multiplexer_for_env(herdr_env_only).as_deref(),
+        Some("HERDR_ENV"),
+        "C8/ADR0090: herdr 的真实变量是 HERDR_ENV（历史清单里那个裸 `HERDR` 从未出现）"
+    );
+
+    let flags =
+        tui::keyboard_enhancement_push_flags_for(Some("xterm-256color"), Some("HERDR_ENV"))
+            .expect("C8/ADR0090: 复用器下仍要 push（否则 Shift+Enter 退化为裸 Enter）");
+    assert_eq!(
+        flags,
+        Flags::DISAMBIGUATE_ESCAPE_CODES,
+        "C8/ADR0090: herdr 下只许 DISAMBIGUATE —— pop 丢失时 Enter 仍是 `\\r`，不会变成 `CSI 13u`"
+    );
+}
+
 // ── C9：还原不完整时，退出提示必须附带可直接执行的手工恢复命令 ─────────────────────
 
 #[test]
