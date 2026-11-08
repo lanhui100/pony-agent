@@ -16,6 +16,10 @@
 //! 这是「依赖但尚不存在的 API」的显式登记，不是测试自身缺陷；单独成文件以免连带打断
 //! 其余 5 个可运行用例。入口落码后本文件应直接由红转绿，无需改动断言。
 //!
+//! 夹具口径：会话消息用**多轮**（不同 turn_id）写入 —— `AppendMessage` 的
+//! `message_id = {turn_id}-{role}` 会在同 turn 内 REPLACE 同角色消息，单 turn 多角色
+//! 写法无法表达"N 条消息"（原夹具的缺陷，已按 Lead 复核修正）。
+//!
 //! 隔离：临时目录 + 临时 db；绝不触碰 `~/.local/share/PonyAgent/sessions.db`。
 
 use pony_agent_core::agent::session::{
@@ -129,6 +133,9 @@ fn flush_events(backend: &SqliteSessionBackend, session_id: &str, turn_id: &str)
 
 /// 只有 `normalized_*` + `turn_events`、没有 `sessions` blob 行的孤儿会话，回填后
 /// `sessions` 表必须出现该行，且消息条数与 `normalized_messages` 一致；门禁是孤儿归零。
+///
+/// 夹具用**多轮**（不同 turn_id）表达真实对话；单 turn 内重复角色会被
+/// `message_id = {turn_id}-{role}` 的 REPLACE 语义去重，不能代表"3 条消息"。
 #[test]
 fn orphan_sessions_are_backfilled_from_normalized_rows_and_events() {
     // Arrange：两个孤儿会话（AppendMessage 只写规范化表；FlushEvents 只写事件表）。
@@ -139,13 +146,43 @@ fn orphan_sessions_are_backfilled_from_normalized_rows_and_events() {
         SeparateTraceTableMode::WriteSeparate,
     );
 
-    append_message(&backend, "s-orphan-a", "t-a", 0, "user", "规范化-问-A");
-    append_message(&backend, "s-orphan-a", "t-a", 1, "assistant", "规范化-答-A");
-    flush_events(&backend, "s-orphan-a", "t-a");
+    // 夹具 note（去重语义）：生产侧 `AppendMessage` 的 message_id = `{turn_id}-{role}`
+    // （`sqlite_session.rs` 的 AppendMessage 分支），同一 turn_id 内同角色消息会被
+    // `INSERT OR REPLACE` 覆盖。因此**多轮夹具必须用不同 turn_id**；期望消息条数由
+    // 夹具内的计数变量给出，不写死魔法数。
+    let mut expected_by_session: Vec<(&str, i64)> = Vec::new();
 
-    append_message(&backend, "s-orphan-b", "t-b", 0, "user", "规范化-问-B");
-    append_message(&backend, "s-orphan-b", "t-b", 1, "assistant", "规范化-答-B");
-    append_message(&backend, "s-orphan-b", "t-b", 2, "user", "规范化-再问-B");
+    // s-orphan-a：单轮（user + assistant）。
+    let mut a_messages = 0i64;
+    for (ordinal, (role, content)) in [("user", "规范化-问-A"), ("assistant", "规范化-答-A")]
+        .into_iter()
+        .enumerate()
+    {
+        append_message(&backend, "s-orphan-a", "t-a", ordinal, role, content);
+        a_messages += 1;
+    }
+    flush_events(&backend, "s-orphan-a", "t-a");
+    expected_by_session.push(("s-orphan-a", a_messages));
+
+    // s-orphan-b：三轮（t-b1 / t-b2 / t-b3），每轮 user + assistant。
+    let mut b_messages = 0i64;
+    for (turn_index, turn_id) in ["t-b1", "t-b2", "t-b3"].into_iter().enumerate() {
+        for (role, content) in [
+            ("user", format!("规范化-问-B{turn_index}")),
+            ("assistant", format!("规范化-答-B{turn_index}")),
+        ] {
+            append_message(
+                &backend,
+                "s-orphan-b",
+                turn_id,
+                b_messages as usize,
+                role,
+                &content,
+            );
+            b_messages += 1;
+        }
+    }
+    expected_by_session.push(("s-orphan-b", b_messages));
 
     // 前提：两个会话都没有 legacy blob 行（真实孤儿形态）。
     for session_id in ["s-orphan-a", "s-orphan-b"] {
@@ -186,7 +223,7 @@ fn orphan_sessions_are_backfilled_from_normalized_rows_and_events() {
     );
 
     // Assert ②：sessions 表出现该行，消息条数 == normalized_messages 条数。
-    for (session_id, expected_messages) in [("s-orphan-a", 2i64), ("s-orphan-b", 3i64)] {
+    for (session_id, expected_messages) in expected_by_session {
         let normalized = scalar_count(
             &db,
             "SELECT COUNT(*) FROM normalized_messages WHERE session_id = ?1",
@@ -194,7 +231,8 @@ fn orphan_sessions_are_backfilled_from_normalized_rows_and_events() {
         );
         assert_eq!(
             normalized, expected_messages,
-            "前提：{session_id} 规范化消息条数"
+            "夹具：{session_id} 规范化消息条数必须等于夹具实际写入数（message_id = \
+             `{{turn_id}}-{{role}}` 的去重语义下，多轮必须用不同 turn_id）"
         );
 
         let blob_rows = scalar_count(
