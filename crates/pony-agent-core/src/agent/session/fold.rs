@@ -33,6 +33,24 @@
 //! （`types.rs` 不在本阶段写域内，也不该为读侧投影加字段）。故 [`FoldedSession`]
 //! 把「状态 + 是否已删除」一并返回：删除语义是第一等结果，不是错误、也不该被猜。
 //!
+//! ## 阶段 2-B：这份 fold 就是**读路径的真源**
+//!
+//! `SqliteSessionBackend::load_store()`（运行时读路径）在索引原样视图之上叠加
+//! [`merge_log_truth_into_sessions`]：有日志的会话以日志为准，无日志的会话保持索引
+//! （存量 grandfather），墓碑从视图移除。**索引可删可建**由此兑现——删掉 `sessions`
+//! 行之后会话照旧读得出来（`tests/session_read_from_log.rs` 的核心用例）。
+//!
+//! 两条必须写明的过渡期事实：
+//!
+//! 1. **写路径还有第二条通道**：整包/状态写（`save_store` / `commit_boundary`）不走命令流，
+//!    日志因此可能落后于索引。两边都有内容时按 `updated_at_ms` 定序（日志胜平局）；
+//!    ADR 阶段 2 第 4 项「停写 blob」落地后可改为「日志无条件为准」。
+//! 2. **索引独有的投影产物**（`trace_migration_state` / `turn_trace_refs` / 光标节点快照）
+//!    仍从索引行继承：日志没有承载它们的命令，丢掉等于凭空丢状态。
+//!
+//! 启动耗时保护：折叠总耗时超预算（[`DEFAULT_READ_FOLD_BUDGET`]）⇒ 记 `session_fold_slow`
+//! 并整轮降级为读索引（不阻塞启动、不读半态），下轮再补。
+//!
 //! ## 索引重建的两条安全边界
 //!
 //! - [`rebuild_index`] **只覆盖「有日志文件」的会话**；索引里有、日志里没有的会话
@@ -46,7 +64,7 @@ use std::path::Path;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::backend::{PersistCommand, SessionBackend, SessionMetaPatch, TraceTerminalPatch, TurnStateRecord};
+use super::backend::{PersistCommand, SessionMetaPatch, TraceTerminalPatch, TurnStateRecord};
 use super::log_store::{SessionLogMeta, SessionLogStore};
 use super::types::{
     HistoryBranch, HistoryCursor, HistoryNode, SessionState, TurnHistoryMessage, TurnTraceRecord,
@@ -890,6 +908,226 @@ pub fn read_session_state(
 }
 
 // ---------------------------------------------------------------------------
+// ADR 0099 阶段 2-B：读路径切到日志真源
+// ---------------------------------------------------------------------------
+
+/// 读路径折叠的**耗时预算**（ADR 0099 阶段 2 门禁：启动装载 ≤800ms）。
+///
+/// 超预算不是错误，是**降级信号**：本轮保持索引视图（grandfather），记
+/// `session_fold_slow` 日志，下轮再补。绝不因为「快了才可信」而在读路径上阻塞启动。
+pub const DEFAULT_READ_FOLD_BUDGET: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// 读路径折叠报告（供调用方记录 `session_fold_slow` 与装载耗时）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReadFoldOutcome {
+    /// 成功 fold 且**有已提交命令**的会话（日志真源侧）。
+    pub folded: Vec<String>,
+    /// 折叠出 `RemoveSession` 墓碑的会话（D3：读路径视其为不存在）。
+    pub deleted: Vec<String>,
+    /// fold / 读日志失败的会话（`(session_id, 原因)`）：**保留索引视图**，不丢会话。
+    pub failed: Vec<(String, String)>,
+    /// 因预算耗尽而**跳过折叠**的会话（`degraded()` 为真 ⇔ 非空）。
+    pub skipped_due_to_budget: Vec<String>,
+    /// 日志文件存在但没有任何已提交命令（只有 header）的会话：**不覆盖索引行**。
+    pub empty_log: Vec<String>,
+    /// 本轮折叠总耗时（毫秒）。
+    pub elapsed_ms: u128,
+}
+
+impl ReadFoldOutcome {
+    /// 是否触发了「超预算 ⇒ 降级为读索引」。
+    pub fn degraded(&self) -> bool {
+        !self.skipped_due_to_budget.is_empty()
+    }
+}
+
+/// 读路径的**日志侧视图**：扫日志根，逐会话 fold 出 `SessionState`。
+///
+/// 与 [`rebuild_index`] 的区别：这里**只读**、不写索引、单会话失败不中断整轮
+/// （该会话保留索引视图，等价于「下轮再补」）。
+///
+/// 超预算时返回**空视图**并把名单记进 `skipped_due_to_budget`——降级语义是「本轮按索引
+/// 读」，不是「读一半日志 + 一半索引」：半态会让 `load_store` 的同一份结果在两次调用
+/// 之间跳变，而启动路径只需要「可读且完整」。
+pub fn fold_read_view(
+    log_root: &Path,
+    budget: std::time::Duration,
+) -> (HashMap<String, SessionState>, ReadFoldOutcome) {
+    let started = std::time::Instant::now();
+    let store = SessionLogStore::new(log_root.to_path_buf());
+    let mut outcome = ReadFoldOutcome::default();
+    let metas = match store.list_sessions() {
+        Ok(metas) => metas,
+        Err(error) => {
+            // 扫不动日志根（权限 / IO）⇒ 整轮降级为读索引，不阻塞启动。
+            outcome.skipped_due_to_budget.push(format!("<log-root: {error}>"));
+            return (HashMap::new(), outcome);
+        }
+    };
+    // 预算为 0 ⇒ 立即降级（测试与「极端保护」入口用同一条判定，不做特殊分支）。
+    let mut over_budget = budget.is_zero();
+    let mut folded: HashMap<String, SessionState> = HashMap::new();
+    for meta in metas {
+        if over_budget || started.elapsed() > budget {
+            over_budget = true;
+            outcome.skipped_due_to_budget.push(meta.session_id.clone());
+            continue;
+        }
+        let session_id = meta.session_id.clone();
+        let events = match read_log_events(&store, &meta) {
+            Ok(events) => events,
+            Err(error) => {
+                outcome
+                    .failed
+                    .push((session_id, format!("read log: {error}")));
+                continue;
+            }
+        };
+        if events.is_empty() {
+            // 只有 header：日志还没有任何已提交命令。用它覆盖索引行会把真实历史读成空。
+            outcome.empty_log.push(session_id);
+            continue;
+        }
+        match fold_session(&events) {
+            Ok(result) if result.deleted => outcome.deleted.push(session_id),
+            Ok(result) => {
+                let mut state = result.state;
+                if state.conversation_id.is_empty() {
+                    state.conversation_id = session_id.clone();
+                }
+                outcome.folded.push(session_id.clone());
+                folded.insert(session_id, state);
+            }
+            Err(error) => outcome
+                .failed
+                .push((session_id, format!("fold: {error}"))),
+        }
+    }
+    outcome.elapsed_ms = started.elapsed().as_millis();
+    if outcome.degraded() {
+        eprintln!(
+            "[pony-agent][session] session_fold_slow: elapsed={}ms budget={}ms folded={} skipped={} — 降级为读索引（下轮再补）",
+            outcome.elapsed_ms,
+            budget.as_millis(),
+            outcome.folded.len(),
+            outcome.skipped_due_to_budget.len()
+        );
+        // 降级即整轮回落索引视图（见上方「半态」说明）。
+        outcome.folded.clear();
+        return (HashMap::new(), outcome);
+    }
+    (folded, outcome)
+}
+
+/// 把**日志真源**合并进索引视图（`load_store` 的读切换）。
+///
+/// 合并规则（ADR 0099 D1 / 阶段 2）：
+/// 1. 有日志的会话 ⇒ **日志为准**（同 id 覆盖索引行）；
+/// 2. 无日志的会话 ⇒ 保持索引视图（存量会话，grandfather，不得丢失）；
+/// 3. 墓碑（`RemoveSession`）⇒ 从视图里移除（D3：删除不复活）；
+/// 4. 折叠失败的会话 ⇒ 保持索引视图（不丢会话，下一轮再补）；
+/// 5. fold 无法推导的索引侧字段（`INDEX_ONLY_STATE_FIELDS` + `workspace_id`）从索引行继承，
+///    否则读切换会凭空丢掉「日志不承载」的真实状态。
+pub fn merge_log_truth_into_sessions(
+    log_root: &Path,
+    sessions: &mut HashMap<String, SessionState>,
+) -> ReadFoldOutcome {
+    merge_log_truth_into_sessions_with_budget(log_root, sessions, DEFAULT_READ_FOLD_BUDGET)
+}
+
+/// 与 [`merge_log_truth_into_sessions`] 同语义，但预算由调用方给出（测试/维护入口用）。
+pub fn merge_log_truth_into_sessions_with_budget(
+    log_root: &Path,
+    sessions: &mut HashMap<String, SessionState>,
+    budget: std::time::Duration,
+) -> ReadFoldOutcome {
+    let (folded, outcome) = fold_read_view(log_root, budget);
+    for (session_id, state) in folded {
+        match sessions.get(&session_id) {
+            None => {
+                // 索引里没有这一行 ⇒ 日志是唯一来源（阶段 2-B 的核心兑现点）。
+                sessions.insert(session_id, state);
+            }
+            Some(indexed) => {
+                if indexed.updated_at_ms > state.updated_at_ms {
+                    // **过渡期规则（写路径双通道）**：整包/状态通道写（`save_store` /
+                    // `commit_boundary`）不走命令流，日志因此天然落后于索引。两边都有内容
+                    // 时按 `updated_at_ms` 定序、日志胜平局：
+                    // - 索引更旧（命令流的正常形态）⇒ 日志为准；
+                    // - 索引更新（刚发生过整包写，日志还没跟上）⇒ 保留索引，避免读回旧态。
+                    // ADR 阶段 2 第 4 项「停写 blob」落地后这条分支会自然消失（索引时间戳
+                    // 不再前进），届时可删除并改为「日志无条件为准」。
+                    continue;
+                }
+                sessions.insert(session_id, apply_index_projection(indexed, state));
+            }
+        }
+    }
+    for session_id in &outcome.deleted {
+        sessions.remove(session_id);
+    }
+    outcome
+}
+
+/// 把**索引独有的投影产物**套到日志 fold 出的状态上（日志里没有承载它们的命令）。
+///
+/// 1. `trace_migration_state` / `turn_trace_refs` / `workspace_id`：见
+///    [`INDEX_ONLY_STATE_FIELDS`]——日志里没有任何命令携带它们，丢掉即凭空丢状态；
+/// 2. 顶层 `turn_trace_history` 的**投影形状**：`TraceTableAuthoritative` 会话的顶层
+///    trace 只显示当前分支（按 `turn_trace_refs` 过滤），与索引 loader 的
+///    `merge_trace_history` 同一条口径。fold 拿到的是全量 trace，不套这层投影就会
+///    把 fork 分支的 trace 泄漏到顶层显示里；
+/// 3. `history` 的**可见分支视图**：由光标所指节点的快照派生（见函数内注释）。
+fn apply_index_projection(indexed: &SessionState, mut state: SessionState) -> SessionState {
+    if state.workspace_id.is_none() {
+        state.workspace_id = indexed.workspace_id.clone();
+    }
+    state.trace_migration_state = indexed.trace_migration_state.clone();
+    if state.turn_trace_refs.is_none() {
+        state.turn_trace_refs = indexed.turn_trace_refs.clone();
+    }
+    if matches!(
+        state.trace_migration_state,
+        super::backend::TraceMigrationState::TraceTableAuthoritative
+    ) {
+        if let Some(refs) = state.turn_trace_refs.clone() {
+            let by_turn: HashMap<&str, &TurnTraceRecord> = state
+                .turn_trace_history
+                .iter()
+                .map(|trace| (trace.turn_id.as_str(), trace))
+                .collect();
+            state.turn_trace_history = refs
+                .iter()
+                .filter_map(|reference| by_turn.get(reference.turn_id.as_str()).copied().cloned())
+                .collect();
+        }
+    }
+    // **可见视图投影**：`history` 的「当前分支视图」由光标所指节点的快照承载
+    // （写路径在切分支 / 每轮同步时把整份可见视图写进 `UpdateHistoryNode` 的快照）。
+    // fold 累加的 `messages` 是**全部分支的并集**，不套这层投影就会把 fork 分支的
+    // 消息泄漏到顶层（`refresh_session_metadata` 还会据此把 turn_count 算错）。
+    let visible_node_id = state
+        .history_cursor
+        .visible_node_id
+        .clone()
+        .or_else(|| state.history_cursor.branch_head_node_id.clone());
+    if let Some(node_id) = visible_node_id {
+        let node = state
+            .history_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .cloned();
+        if let Some(node) = node {
+            if !node.history.is_empty() {
+                // 复用写路径同一份 hydrate 语义（同模块可见），不另造一套投影规则。
+                super::store::hydrate_session_from_node(&mut state, &node);
+            }
+        }
+    }
+    state
+}
+
+// ---------------------------------------------------------------------------
 // 逐字段对拍（测试与 rebuild 的 mismatched 判定共用同一口径）
 // ---------------------------------------------------------------------------
 
@@ -1117,16 +1355,20 @@ pub fn rebuild_index_at_root(
     options: RebuildOptions,
 ) -> Result<RebuildReport, String> {
     let store = SessionLogStore::new(log_root.to_path_buf());
-    // 索引现有视图：**只加载一次**，且与读路径同一条分派（`load_store` 内部按
-    // `storage.normalized.v1.phase` 在 blob / 规范化投影之间切换）。双读比对必须
-    // 面对「产品实际读到的那份视图」，而不是另造一份口径。
-    let index_view: HashMap<String, SessionState> = match backend.load_store() {
+    // 索引现有视图：**只加载一次**，且必须取**索引原样**（`load_index_store`），
+    // 不能取运行时的 `load_store()`。
+    //
+    // ADR 0099 阶段 2-B 把运行时读路径切到了日志真源（`load_store` = 日志 fold ∪ 索引
+    // grandfather），若拿它当比对基准，`mismatched` 会退化成「fold 与 fold 比」的恒零，
+    // 双读比对（阶段 2 第 3 项）就此失去意义。故基准固定为索引原样视图；这也正是
+    // 「索引可重建 / 可校验」这条承诺的观测面。
+    let index_view: HashMap<String, SessionState> = match backend.load_index_store() {
         Some(store) => store.sessions_view().clone(),
         None => {
             // 读不出现有索引 ⇒ 比对基准缺失。重建本身仍可进行（真源不依赖索引），
             // 但必须显式说清楚「mismatched 这一列不可信」，不许静默当成零差异。
             eprintln!(
-                "[pony-agent][session] rebuild_index: load_store() 返回 None，\
+                "[pony-agent][session] rebuild_index: load_index_store() 返回 None，\
                  双读比对（mismatched）本轮不可用"
             );
             HashMap::new()
@@ -1264,6 +1506,20 @@ mod tests {
     use crate::agent::session::log_command::command_to_value;
     use crate::agent::session::PersistCommand;
     use serde_json::json;
+    use std::time::Duration;
+
+    fn append_text_command(session_id: &str, role: &str, content: &str, ordinal: usize) -> PersistCommand {
+        PersistCommand::AppendMessage {
+            epoch: 1,
+            session_id: session_id.to_string(),
+            message: TurnHistoryMessage {
+                role: role.to_string(),
+                content: content.to_string(),
+                ..Default::default()
+            },
+            ordinal,
+        }
+    }
 
     fn envelope(seq: u64, command: &PersistCommand) -> LogEvent {
         LogEvent {
@@ -1543,5 +1799,235 @@ mod tests {
         assert_eq!(folded.state.event_watermark, 7);
         assert_eq!(folded.state.last_commit_watermark, 7);
         assert_eq!(folded.event_rows, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR 0099 阶段 2-B：读路径日志真源合并
+    // -----------------------------------------------------------------------
+
+    fn temp_log_root(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "pony-0099-2b-fold-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temp log root");
+        root
+    }
+
+    fn write_log(log_root: &Path, session_id: &str, commands: &[PersistCommand]) {
+        let store = SessionLogStore::new(log_root.to_path_buf());
+        let meta = SessionLogMeta::new(session_id, crate::agent::session::current_log_cwd());
+        let mut writer = store.open_write(session_id, &meta).expect("open log writer");
+        let values: Vec<Value> = commands
+            .iter()
+            .map(|command| command_to_value(command).expect("encode command"))
+            .collect();
+        writer
+            .append_commands(1_760_000_000_000, &values)
+            .expect("append commands");
+    }
+
+    fn index_state(session_id: &str, content: &str, updated_at_ms: u64) -> SessionState {
+        SessionState {
+            conversation_id: session_id.to_string(),
+            title: "索引标题".to_string(),
+            summary: String::new(),
+            history: vec![TurnHistoryMessage {
+                role: "user".to_string(),
+                content: content.to_string(),
+                ..Default::default()
+            }],
+            provider_native_transcript: Vec::new(),
+            turn_trace_history: Vec::new(),
+            trace_migration_state: crate::agent::session::TraceMigrationState::TraceTableAuthoritative,
+            turn_trace_refs: Some(Vec::new()),
+            long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            turn_count: 1,
+            last_referenced_file: None,
+            updated_at_ms,
+            history_nodes: Vec::new(),
+            history_branches: Vec::new(),
+            history_cursor: HistoryCursor::default(),
+            event_watermark: 0,
+            last_commit_watermark: 0,
+            workspace_id: Some("ws-index-only".to_string()),
+            title_override: None,
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn read_path_merge_prefers_the_log_and_inherits_index_only_fields() {
+        let root = temp_log_root("prefer_log");
+        let session_id = "pa_2b_fold_prefer";
+        write_log(
+            &root,
+            session_id,
+            &[
+                append_text_command(session_id, "user", "日志内容", 0),
+                PersistCommand::UpdateSessionMeta {
+                    epoch: 1,
+                    session_id: session_id.to_string(),
+                    meta_patch: SessionMetaPatch {
+                        title: Some("日志标题".to_string()),
+                        updated_at_ms: Some(1_760_000_000_000),
+                        ..Default::default()
+                    },
+                },
+            ],
+        );
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            session_id.to_string(),
+            index_state(session_id, "索引内容", 1_759_000_000_000),
+        );
+
+        let outcome = merge_log_truth_into_sessions(&root, &mut sessions);
+
+        assert!(!outcome.degraded(), "预算充足时不得降级");
+        assert_eq!(outcome.folded, vec![session_id.to_string()]);
+        let merged = &sessions[session_id];
+        assert_eq!(merged.title, "日志标题", "同 id 以日志为准");
+        assert_eq!(merged.history.len(), 1);
+        assert_eq!(merged.history[0].content, "日志内容");
+        // 日志里没有承载它们的命令 ⇒ 从索引行继承（否则读切换会凭空丢状态）。
+        assert_eq!(merged.workspace_id.as_deref(), Some("ws-index-only"));
+        assert_eq!(
+            merged.trace_migration_state,
+            crate::agent::session::TraceMigrationState::TraceTableAuthoritative
+        );
+        assert_eq!(merged.turn_trace_refs, Some(Vec::new()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_path_merge_keeps_the_index_when_the_state_lane_is_newer() {
+        let root = temp_log_root("index_newer");
+        let session_id = "pa_2b_fold_index_newer";
+        write_log(
+            &root,
+            session_id,
+            &[
+                append_text_command(session_id, "user", "日志内容", 0),
+                PersistCommand::UpdateSessionMeta {
+                    epoch: 1,
+                    session_id: session_id.to_string(),
+                    meta_patch: SessionMetaPatch {
+                        title: Some("日志标题".to_string()),
+                        updated_at_ms: Some(1_760_000_000_000),
+                        ..Default::default()
+                    },
+                },
+            ],
+        );
+        // 索引侧更新（整包/状态通道写过、日志还没跟上）⇒ 过渡期按索引读，不得读回旧态。
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            session_id.to_string(),
+            index_state(session_id, "更新的索引内容", 1_760_000_000_500),
+        );
+
+        let outcome = merge_log_truth_into_sessions(&root, &mut sessions);
+
+        assert_eq!(outcome.folded, vec![session_id.to_string()], "日志侧确实 fold 成功");
+        assert_eq!(
+            sessions[session_id].history[0].content, "更新的索引内容",
+            "索引更新的会话必须保持索引态（过渡期规则，见 merge_log_truth_into_sessions_with_budget）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_path_merge_with_zero_budget_degrades_to_the_index_view() {
+        let root = temp_log_root("degrade");
+        let session_id = "pa_2b_fold_degrade";
+        write_log(
+            &root,
+            session_id,
+            &[append_text_command(session_id, "user", "日志内容", 0)],
+        );
+        let mut sessions = HashMap::new();
+        sessions.insert(session_id.to_string(), index_state(session_id, "索引内容", 1));
+
+        let outcome = merge_log_truth_into_sessions_with_budget(&root, &mut sessions, Duration::ZERO);
+
+        assert!(outcome.degraded(), "预算为 0 必须触发降级");
+        assert_eq!(outcome.skipped_due_to_budget.len(), 1);
+        assert!(outcome.folded.is_empty(), "降级 = 整轮回落索引，不读半态");
+        assert_eq!(
+            sessions[session_id].history[0].content, "索引内容",
+            "降级后必须保持索引视图（不得被半折叠结果污染）"
+        );
+        assert_eq!(sessions.len(), 1, "降级不得丢会话");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_path_merge_drops_tombstones_and_keeps_unlogged_sessions() {
+        let root = temp_log_root("tombstone");
+        let tomb = "pa_2b_fold_tombstone";
+        let index_only = "pa_2b_fold_index_only";
+        write_log(
+            &root,
+            tomb,
+            &[
+                append_text_command(tomb, "user", "写了再删", 0),
+                PersistCommand::RemoveSession {
+                    epoch: 1,
+                    session_id: tomb.to_string(),
+                },
+            ],
+        );
+        let mut sessions = HashMap::new();
+        sessions.insert(tomb.to_string(), index_state(tomb, "残留索引行", 1));
+        sessions.insert(index_only.to_string(), index_state(index_only, "索引内容", 1));
+
+        let outcome = merge_log_truth_into_sessions(&root, &mut sessions);
+
+        assert_eq!(outcome.deleted, vec![tomb.to_string()]);
+        assert!(
+            !sessions.contains_key(tomb),
+            "日志墓碑必须让读路径视其不存在（D3：删除单调不可复活）"
+        );
+        assert!(
+            sessions.contains_key(index_only),
+            "无日志的存量会话必须原样保留（grandfather）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_path_merge_does_not_let_a_header_only_log_wipe_the_index() {
+        let root = temp_log_root("empty_log");
+        let session_id = "pa_2b_fold_empty_log";
+        // 只有 header（写者打开文件后崩溃）⇒ 日志还没有任何已提交命令。
+        let store = SessionLogStore::new(root.clone());
+        drop(
+            store
+                .open_write(
+                    session_id,
+                    &SessionLogMeta::new(session_id, crate::agent::session::current_log_cwd()),
+                )
+                .expect("create header-only log"),
+        );
+        let mut sessions = HashMap::new();
+        sessions.insert(session_id.to_string(), index_state(session_id, "索引内容", 1));
+
+        let outcome = merge_log_truth_into_sessions(&root, &mut sessions);
+
+        assert_eq!(outcome.empty_log, vec![session_id.to_string()]);
+        assert_eq!(
+            sessions[session_id].history[0].content, "索引内容",
+            "空日志不得把真实历史读成空会话"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

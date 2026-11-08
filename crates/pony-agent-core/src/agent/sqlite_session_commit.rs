@@ -939,3 +939,89 @@ fn rebuild_epoch_floor(tx: &rusqlite::Transaction<'_>) -> u64 {
 fn derived_json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string(value).map_err(|e| format!("serialize derived field: {e}"))
 }
+
+// ---------------------------------------------------------------------------
+// ADR 0099 阶段 2-B（A）：`AppendHookRecords` 的**追加**口径
+// ---------------------------------------------------------------------------
+
+impl SqliteSessionBackend {
+    /// 把一批 hook 记录**追加**进 legacy `session_turn_traces.trace_data` 的
+    /// `hookTraceRecords` 数组。
+    ///
+    /// ## 为什么必须追加（不能再用 `sync_legacy_trace_update_tx` 的逐键替换）
+    ///
+    /// 同一条命令在三个地方落位，语义必须一致：
+    /// - **日志命令流**（真源）：`append_hook_records` 逐条追加，fold 后累加；
+    /// - **内存态**（`SessionStore`）：`trace.hook_trace_records.extend(...)`；
+    /// - **索引**：`normalized_turn_traces.extension_json` 已是追加。
+    ///
+    /// 只有 legacy `trace_data` 走的是「按键替换」：两批命令之后 fold 得 2 条、索引得 1 条
+    /// （只剩最后一批）。裁决以日志为准 ⇒ 索引侧改成追加，`session_parsed` 的
+    /// 「hook 口径一致性」用例才可能真绿。
+    ///
+    /// 行缺失时与 [`Self::sync_legacy_trace_update_tx`] 同口径：从
+    /// `normalized_turn_traces.raw_json` 修起；两边都没有 ⇒ no-op（不凭空造 trace 行，
+    /// 与 fold「找不到 trace 行则跳过」一致）。
+    pub(crate) fn append_legacy_hook_records_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        turn_id: &str,
+        hook_trace_records: &[crate::agent::hooks::HookTraceRecord],
+        updated_at: u64,
+    ) -> Result<(), String> {
+        let legacy: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT trace_data, trace_order FROM session_turn_traces
+                 WHERE session_id = ?1 AND turn_id = ?2",
+                params![session_id, turn_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .ok();
+        let (raw, trace_order) = match legacy {
+            Some(row) => row,
+            None => {
+                let repaired: Option<(String, i64)> = tx
+                    .query_row(
+                        "SELECT raw_json, trace_order FROM normalized_turn_traces
+                         WHERE session_id = ?1 AND turn_id = ?2",
+                        params![session_id, turn_id],
+                        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .ok()
+                    .and_then(|(raw, order)| raw.map(|raw| (raw, order)));
+                // 两边都没有 trace 行 ⇒ 无可追加（fold 侧同样是 no-op）。
+                let Some(row) = repaired else {
+                    return Ok(());
+                };
+                row
+            }
+        };
+        let mut trace: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("parse legacy trace: {e}"))?;
+        let mut records = trace
+            .get("hookTraceRecords")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for record in hook_trace_records {
+            records.push(serde_json::to_value(record).map_err(|e| format!("encode hook record: {e}"))?);
+        }
+        trace["hookTraceRecords"] = serde_json::Value::Array(records);
+        trace["updatedAt"] = serde_json::json!(updated_at);
+        tx.execute(
+            "INSERT OR REPLACE INTO session_turn_traces
+             (session_id, turn_id, updated_at_ms, trace_order, trace_data)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                turn_id,
+                updated_at as i64,
+                trace_order,
+                serde_json::to_string(&trace).map_err(|e| format!("serialize legacy trace: {e}"))?,
+            ],
+        )
+        .map_err(|e| format!("append legacy hook records: {e}"))?;
+        Ok(())
+    }
+}

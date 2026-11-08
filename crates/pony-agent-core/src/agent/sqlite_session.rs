@@ -1378,13 +1378,10 @@ impl SqliteSessionBackend {
                     ],
                 )
                 .map_err(|e| format!("append hook records: {e}"))?;
-                // 同步旧 session_turn_traces 表
-                self.sync_legacy_trace_update_tx(
-                    tx,
-                    session_id,
-                    turn_id,
-                    &serde_json::json!({ "hookTraceRecords": hook_trace_records }),
-                    *updated_at,
+                // 同步旧 session_turn_traces 表——**追加**语义（ADR 0099 阶段 2-B A；
+                // 原实现按键替换 ⇒ 两批命令后 fold 得 2 条、索引只得 1 条）。
+                self.append_legacy_hook_records_tx(
+                    tx, session_id, turn_id, hook_trace_records, *updated_at,
                 )?;
             }
             PersistCommand::UpdateHistoryNode {
@@ -2538,6 +2535,102 @@ impl SqliteSessionBackend {
         }
         Ok(events)
     }
+
+    /// 索引原样视图（**不看日志**）：`sessions` blob ∪ `normalized_*` 投影，按
+    /// `storage.normalized.v1.phase` 分派，与阶段 2-B 之前的读路径逐字节一致。
+    ///
+    /// **消费者只有两个，任何运行时业务路径都不得调用它**：
+    /// 1. `rebuild_index` 的双读比对基准（`mismatched` 只有在「日志 fold vs 索引」之间才有意义）；
+    /// 2. 维护 / 诊断入口（`new_read_only` + `--dry-run`、排障脚本、测试夹具）。
+    ///
+    /// 运行时读路径一律走 `SessionBackend::load_store`：它在本函数之上叠加
+    /// 「日志 fold ∪ 索引 grandfather」（ADR 0099 D1）。把索引当真相正是本阶段要消灭的东西，
+    /// 所以这里刻意**不**叫 `load_store`，也不给它加日志合并逻辑。
+    pub fn load_index_store(&self) -> Option<PersistedStore> {
+        eprintln!(
+            "[pony-agent][session] loading sessions from SQLite index only {}",
+            self.db_path.display()
+        );
+        let slot = self.connection().ok()?;
+        let conn = slot.as_ref().expect("connection initialized");
+        // PA-089 阶段 5：切读——若迁移 phase 为 observing/retired，从规范化表重建。
+        let phase: String = conn
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = 'storage.normalized.v1.phase'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| "legacy".to_string());
+        if phase == "observing" || phase == "retired" {
+            return self.load_store_normalized(conn);
+        }
+
+        let mut stmt = conn
+            .prepare("SELECT conversation_id, session_data FROM sessions")
+            .ok()?;
+
+        let sessions: HashMap<String, SessionState> = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let data: String = row.get(1)?;
+                Ok((id, data))
+            })
+            .ok()?
+            .filter_map(|result| {
+                let (id, data) = result.ok()?;
+                let mut session: SessionState = serde_json::from_str(&data).ok()?;
+                if session.conversation_id != id {
+                    session.conversation_id = id.clone();
+                }
+                let table_traces = self.read_session_traces(conn, &id).ok()?;
+                session.turn_trace_history = self.merge_trace_history(&session, table_traces.clone());
+                // PA-088/PA-090：节点 materialize——按 refs 从**全量表**恢复节点 trace。
+                // 注意：by_id 必须从 table_traces（全量 Union）构建，而非顶层过滤后的
+                // session.turn_trace_history——否则 fork 分支/超 24 轮节点的 refs 会
+                // 解析不到（顶层只显示当前分支），且后续 union 重写会永久删除这些 trace。
+                // Some([]) = authoritative 且确实无 trace（清空不兜底）；
+                // Some(v) = 按 refs 查表组装（缺失的 turn 降级为空并告警）；
+                // None = legacy 旧数据（反序列化已带内嵌 trace，保持）。
+                let full_table_by_id: HashMap<&str, &TurnTraceRecord> = table_traces
+                    .iter()
+                    .map(|trace| (trace.turn_id.as_str(), trace))
+                    .collect();
+                for node in &mut session.history_nodes {
+                    if let Some(refs) = &node.turn_trace_refs {
+                        if refs.is_empty() {
+                            node.turn_trace_history.clear();
+                        } else {
+                            let mut missing = 0usize;
+                            node.turn_trace_history = refs
+                                .iter()
+                                .filter_map(|reference| {
+                                    match full_table_by_id.get(reference.turn_id.as_str()) {
+                                        Some(trace) => Some((*trace).clone()),
+                                        None => {
+                                            missing += 1;
+                                            None
+                                        }
+                                    }
+                                })
+                                .collect();
+                            if missing > 0 {
+                                eprintln!(
+                                    "[pony-agent][session] materialize node {}: {} ref(s) missing from trace table",
+                                    node.node_id, missing
+                                );
+                            }
+                        }
+                    }
+                }
+                Some((id, session))
+            })
+            .collect();
+
+        Some(PersistedStore {
+            sessions,
+            ..self.persisted_store_tail(conn)
+        })
+    }
 }
 
 impl SessionBackend for SqliteSessionBackend {
@@ -2680,104 +2773,28 @@ impl SessionBackend for SqliteSessionBackend {
         }
     }
 
-    /// PA-089 阶段 3：双写——同步旧 session_turn_traces 表（load_store 读它）。
-    /// 读 trace_data JSON → 合并 patch → 写回。
-
-    /// PA-089 阶段 3：双写——同步更新旧 sessions 表 blob 的 turn_trace_history。
-    /// 读 blob → upsert trace（按 turn_id）→ 写回。与规范化表写入同一事务。
+    /// **运行时读路径**（ADR 0099 D1 / 阶段 2-B）：**日志为真源**。
+    ///
+    /// 层次（顺序有意义）：
+    /// 1. 取索引原样视图（`load_index_store`）——存量会话（无日志）由它 grandfather 出来；
+    /// 2. 叠加日志 fold：有日志的会话以日志为准（同 id 覆盖索引行），日志墓碑则从视图移除；
+    /// 3. 折叠超预算 ⇒ 降级为「只读索引」（记 `session_fold_slow`，下轮再补）。
+    ///
+    /// **存储级只读句柄不合并日志**（`new_read_only`：维护 / `--dry-run` / 双读比对基准）：
+    /// 那条口径必须面对「索引原样」，否则 `rebuild_index` 的 `mismatched` 会退化成
+    /// 「fold 与 fold 比」的恒零。
     fn load_store(&self) -> Option<PersistedStore> {
-        eprintln!(
-            "[pony-agent][session] loading sessions from SQLite {}",
-            self.db_path.display()
-        );
-
-        // Initialize (and migrate) the pooled connection, then borrow it.
-        let mut slot = self.connection().ok()?;
-        let conn = slot.as_mut().expect("connection initialized");
-
-        // PA-089 阶段 5：切读——若迁移 phase 为 observing/retired，从规范化表重建。
-        let phase: String = conn
-            .query_row(
-                "SELECT value FROM store_metadata WHERE key = 'storage.normalized.v1.phase'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_else(|_| "legacy".to_string());
-        if phase == "observing" || phase == "retired" {
-            return self.load_store_normalized(conn);
+        // 运行时读路径：**日志为真源**。存储级只读句柄（维护 / `--dry-run` / 双读比对基准）
+        // 保持索引原样，见 `load_index_store`。
+        let mut store = self.load_index_store()?;
+        if !self.storage_read_only {
+            crate::agent::session::fold::merge_log_truth_into_sessions(
+                &self.session_log_root(),
+                &mut store.sessions,
+            );
         }
-
-        // Read all sessions
-        let mut stmt = conn
-            .prepare("SELECT conversation_id, session_data FROM sessions")
-            .ok()?;
-
-        let sessions: HashMap<String, SessionState> = stmt
-            .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let data: String = row.get(1)?;
-                Ok((id, data))
-            })
-            .ok()?
-            .filter_map(|result| {
-                let (id, data) = result.ok()?;
-                let mut session: SessionState = serde_json::from_str(&data).ok()?;
-                if session.conversation_id != id {
-                    session.conversation_id = id.clone();
-                }
-                let table_traces = self.read_session_traces(conn, &id).ok()?;
-                session.turn_trace_history = self.merge_trace_history(&session, table_traces.clone());
-                // PA-088/PA-090：节点 materialize——按 refs 从**全量表**恢复节点 trace。
-                // 注意：by_id 必须从 table_traces（全量 Union）构建，而非顶层过滤后的
-                // session.turn_trace_history——否则 fork 分支/超 24 轮节点的 refs 会
-                // 解析不到（顶层只显示当前分支），且后续 union 重写会永久删除这些 trace。
-                // Some([]) = authoritative 且确实无 trace（清空不兜底）；
-                // Some(v) = 按 refs 查表组装（缺失的 turn 降级为空并告警）；
-                // None = legacy 旧数据（反序列化已带内嵌 trace，保持）。
-                let full_table_by_id: HashMap<&str, &TurnTraceRecord> = table_traces
-                    .iter()
-                    .map(|trace| (trace.turn_id.as_str(), trace))
-                    .collect();
-                for node in &mut session.history_nodes {
-                    if let Some(refs) = &node.turn_trace_refs {
-                        if refs.is_empty() {
-                            node.turn_trace_history.clear();
-                        } else {
-                            let mut missing = 0usize;
-                            node.turn_trace_history = refs
-                                .iter()
-                                .filter_map(|reference| {
-                                    match full_table_by_id.get(reference.turn_id.as_str()) {
-                                        Some(trace) => Some((*trace).clone()),
-                                        None => {
-                                            missing += 1;
-                                            None
-                                        }
-                                    }
-                                })
-                                .collect();
-                            if missing > 0 {
-                                eprintln!(
-                                    "[pony-agent][session] materialize node {}: {} ref(s) missing from trace table",
-                                    node.node_id, missing
-                                );
-                            }
-                        }
-                    }
-                }
-                Some((id, session))
-            })
-            .collect();
-
-        Some(PersistedStore {
-            sessions,
-            ..self.persisted_store_tail(conn)
-        })
+        Some(store)
     }
-
-    /// PA-089 阶段 5：规范化 loader——从 normalized_* 表重建 SessionState（切读）。
-    /// 消息 → history；trace 表 → turn_trace_history + 节点 materialize；
-    /// history_nodes/branches/cursor 直接读表。
 
     fn save_store(&self, store: &PersistedStore) -> Result<(), String> {
         self.try_recover_instance_lock();
