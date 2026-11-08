@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "adr": "0099",
+  "stage": 0,
+  "scope": "session write model stop-gap: single commit boundary, session-level CAS, single-instance file lock, busy/locked retry, orphan backfill, resume trace source",
+  "contract_doc": ".dev-team/contracts/stage0-write-model.md",
+  "external_call_timeout_ms": 3000,
+  "external_call_scope": "跨进程/跨实例写等待的总预算：文件锁获取 + busy/locked 退避累计 + SQLite busy_timeout。本地单次 SQLite 写不算外部调用；provider 流式与子进程超时豁免沿用 .dev-team/nfr-baseline.json 既有条目，本文件不改写全局基准。",
+  "retry": {
+    "max_attempts": 3,
+    "backoff_ms": 50,
+    "backoff_cap_ms": 200,
+    "backoff_strategy": "exponential",
+    "backoff_sequence_ms": [
+      50,
+      100,
+      200
+    ],
+    "retry_on": [
+      "DatabaseBusy",
+      "DatabaseLocked"
+    ],
+    "retry_on_source": "rusqlite::Error::SqliteFailure(err, _) where err.code in {rusqlite::ErrorCode::DatabaseBusy, rusqlite::ErrorCode::DatabaseLocked} (rusqlite 0.31 / libsqlite3-sys 0.30，实测 SQLITE_BUSY | SQLITE_LOCKED)",
+    "forbidden_heuristic": "error.to_string().contains(\"busy\")  —— 对 \"database is locked\" 永不匹配，现为死分支（sqlite_session.rs:2661 / :2687）",
+    "non_retryable_outcomes": [
+      "StaleVersion",
+      "Failed"
+    ]
+  },
+  "concurrency_lock": {
+    "single_instance_file_lock": {
+      "required": true,
+      "target_db": "~/.local/share/PonyAgent/sessions.db",
+      "lock_file": "sessions.db.lock",
+      "semantics": "独占非阻塞获取：Unix flock(LOCK_EX|LOCK_NB) / Windows LockFileEx 独占；获取失败即降级只读并在 UI 明示，禁止忙等或抢占",
+      "on_denied": "只读态 + 结构化日志 single_instance_lock_denied，禁止写库"
+    },
+    "session_cas": {
+      "required": true,
+      "granularity": "session_id",
+      "guard": "UPDATE ... WHERE version = ?expected（changes() = 1 才算提交成功）",
+      "expected_version_source": "PersistedStore.versions[b]（SessionVersionMap）中的期望值，由读取侧携带到提交侧",
+      "on_mismatch": "CommitOutcome::StaleVersion { expected, actual } 且零写入（不覆盖、不删除、不复活）"
+    },
+    "reentrancy_forbidden": true,
+    "lock_scope_bounded": true,
+    "lock_acquisition_timeout_ms": 2000,
+    "deadlock_watchdog_timeout_ms": 5000,
+    "forbidden_inside_write_tx": [
+      "fold",
+      "load_store",
+      "load_normalized_session",
+      "read_all_session_traces"
+    ]
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_field": "trace_id",
+    "required_events": [
+      "commit_boundary_committed",
+      "commit_boundary_stale_version",
+      "commit_boundary_failed",
+      "busy_retry",
+      "single_instance_lock_denied",
+      "orphan_backfill_summary"
+    ],
+    "field_rules": {
+      "session_id": "required",
+      "expected_version": "required on commit_boundary_*",
+      "actual_version": "required on stale_version",
+      "attempt": "required on busy_retry",
+      "elapsed_ms": "required on commit_boundary_failed"
+    },
+    "compliance_claimed": false,
+    "debt_ref": "PA-119"
+  },
+  "resource_release": [
+    "write_tx_bounded_50ms_no_fold_no_full_read_inside",
+    "exclusive_lock_guard_dropped_on_all_early_return_paths",
+    "write_full_store_legacy_delete_removed_adr0094",
+    "busy_retry_bounded_3_attempts_then_fail_loud_no_silent_swallow",
+    "single_instance_lock_file_not_deleted_on_exit_only_released",
+    "orphan_backfill_no_source_rows_deleted_retired_flag_only"
+  ]
+}

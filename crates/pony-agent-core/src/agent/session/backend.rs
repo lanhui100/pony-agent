@@ -182,6 +182,41 @@ pub struct SessionMetaPatch {
     pub updated_at_ms: Option<u64>,
 }
 
+/// ADR 0099 阶段 0：提交边界结果（唯一提交入口
+/// [`SessionBackend::commit_boundary`] 的返回）。
+///
+/// 语义真源：`.dev-team/contracts/stage0-write-model.md`（不变量 I1–I5）。
+///
+/// - `Committed`：本次快照已作为**新版本**落盘（且本 turn 只落这一次）。
+/// - `StaleVersion { expected, actual }`：`store` 携带的**期望版本**落后于库内实际
+///   版本 ⇒ **必须零写入**（不覆盖、不删除、不复活），调用方以重载 / 只读收场。
+/// - `Failed`：写盘失败（I/O、序列化、事务回滚）；调用方必须可观测上报，
+///   禁止用 `let _ =` 静默吞掉。
+/// - `Unsupported`：后端无版本守门能力（File / Memory），语义退化到 `save_store`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitOutcome {
+    Committed,
+    StaleVersion { expected: u64, actual: u64 },
+    Failed,
+    Unsupported,
+}
+
+/// ADR 0099 阶段 0：孤儿会话回填报告（契约类型，阶段 0 实作任务填充产出）。
+///
+/// 契约（`.dev-team/contracts/stage0-write-model.md` 不变量 I4）：
+/// 回填源只允许 `turn_events ∪ normalized_*`，**禁止**以 legacy `sessions` blob 为源；
+/// 无法回填的会话显式标 `retired`（UI 明示），不得物理删除。
+///
+/// 字段语义：`backfilled` = 已从规范化表 / 事件流重建并写回 blob 的会话；
+/// `retired` = 源数据不足、显式退役的会话；`checksum_mismatch` = 重建后校验和
+/// 与规范化行不一致的会话（进 quarantine 式报告，不静默覆盖）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BackfillReport {
+    pub backfilled: Vec<String>,
+    pub retired: Vec<String>,
+    pub checksum_mismatch: Vec<String>,
+}
+
 /// 命令执行结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PersistCommandOutcome {
@@ -218,6 +253,22 @@ pub trait SessionBackend: Send + Sync {
     /// "会话丢失"当成"保存成功"。返回 `Err` 的调用方必须至少落一条可观测日志，
     /// 不得用 `let _ =` 再吞一次。
     fn save_store(&self, store: &PersistedStore) -> Result<(), String>;
+
+    /// ADR 0099 阶段 0：**单一提交边界**（契约空桩，阶段 0 实作任务填充）。
+    ///
+    /// 不变量（真源：`.dev-team/contracts/stage0-write-model.md`）：
+    /// ① 每 turn 全库提交 ≤1 次——19 个 `save_to_backend` /
+    /// `save_session_state_to_backend` 调用点收敛到本入口；
+    /// ② `store` 携带的期望版本与库内实际版本不匹配 ⇒ 返回
+    /// [`CommitOutcome::StaleVersion`] 且**零写入**（不覆盖新 turn）；
+    /// ③ 显式删除后任何旧版本快照不得复活该会话（墓碑优先于快照）。
+    ///
+    /// 默认 `Unsupported`：File / Memory 后端无版本守门，保持可编译并把语义退化到
+    /// [`Self::save_store`]；生产路径（`SqliteSessionBackend`）必须在阶段 0 覆写。
+    fn commit_boundary(&self, _store: &PersistedStore) -> CommitOutcome {
+        CommitOutcome::Unsupported
+    }
+
     fn trace_storage_mode(&self) -> SeparateTraceTableMode {
         SeparateTraceTableMode::Off
     }

@@ -1,6 +1,6 @@
-# ADR 0093：会话存储改为「事件溯真源 + 单写者 + 墓碑删除」四阶段重构
+# ADR 0099：会话存储改为「事件溯真源 + 单写者 + 墓碑删除」四阶段重构
 
-Status: proposed
+Status: accepted
 
 ## 背景：当前存储模型已是现网缺陷源
 
@@ -135,7 +135,9 @@ session_events(
 4. 处置 50 个孤儿：回填源**只能是 `turn_events ∪ normalized_*`**，绝不能以 `sessions` 表为源；无法回填的显式标记 `retired` 并在 UI 明示。
 5. `busy` 重试改按 `ErrorCode::DatabaseBusy/DatabaseLocked` 判定（现 `contains("busy")` 对 `database is locked` 永不匹配）。
 
-**门禁**：孤儿归零（双向集合差 = 0）；`size:check` 棘轮修复为真退出码；逐会话回填校验和一致。
+**门禁**：孤儿归零（双向集合差 = 0）；`npm run size:check` exit 0（见下「更正」）；逐会话回填校验和一致。
+
+> **更正（2026-11-08，Lead 复核）**：参谋评审曾报「`size:check` exit=1、70 条全部『基线无此条目』⇒ 棘轮失效、重构无护栏」。复核结论为**误判**：该次调用了 `node scripts/check-file-size.mjs` 却漏传 `--baseline scripts/file-size-baseline.json`。按 `package.json` 的正确调用实测 `exit=0`，`0 new / 70 over limit / 70 grandfathered / 0 shrunken`；`session/store.rs` 5704 行 = 基线 5704（正好卡线未恶化）。**棘轮健康，不构成阶段 0 的前置阻塞。**
 
 ### 阶段 1 · 单写者 + 墓碑（多端一致性）
 

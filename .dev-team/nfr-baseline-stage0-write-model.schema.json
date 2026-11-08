@@ -1,0 +1,170 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NFRBaselineStage0WriteModel",
+  "description": "ADR 0099 阶段 0 写模型 NFR 基准（严格：逐层 additionalProperties=false，未知字段拒绝）。全局基准仍为 .dev-team/nfr-baseline.json，本文件是阶段 0 的独立增量，不改写全局条目。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "adr",
+    "stage",
+    "scope",
+    "contract_doc",
+    "external_call_timeout_ms",
+    "external_call_scope",
+    "retry",
+    "concurrency_lock",
+    "logging",
+    "resource_release"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "adr": { "type": "string", "const": "0099" },
+    "stage": { "type": "integer", "const": 0 },
+    "scope": { "type": "string", "minLength": 1 },
+    "contract_doc": { "type": "string", "const": ".dev-team/contracts/stage0-write-model.md" },
+    "external_call_timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3000
+    },
+    "external_call_scope": { "type": "string", "minLength": 1 },
+    "retry": {
+      "type": "object",
+      "required": [
+        "max_attempts",
+        "backoff_ms",
+        "backoff_cap_ms",
+        "backoff_strategy",
+        "backoff_sequence_ms",
+        "retry_on",
+        "retry_on_source",
+        "forbidden_heuristic",
+        "non_retryable_outcomes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "backoff_ms": { "type": "integer", "minimum": 0 },
+        "backoff_cap_ms": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "backoff_strategy": { "type": "string", "enum": ["exponential"] },
+        "backoff_sequence_ms": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "integer", "minimum": 0, "maximum": 200 }
+        },
+        "retry_on": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["DatabaseBusy", "DatabaseLocked"] }
+        },
+        "retry_on_source": { "type": "string", "minLength": 1 },
+        "forbidden_heuristic": { "type": "string", "minLength": 1 },
+        "non_retryable_outcomes": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["StaleVersion", "Failed"] }
+        }
+      }
+    },
+    "concurrency_lock": {
+      "type": "object",
+      "required": [
+        "single_instance_file_lock",
+        "session_cas",
+        "reentrancy_forbidden",
+        "lock_scope_bounded",
+        "lock_acquisition_timeout_ms",
+        "deadlock_watchdog_timeout_ms",
+        "forbidden_inside_write_tx"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "single_instance_file_lock": {
+          "type": "object",
+          "required": ["required", "target_db", "lock_file", "semantics", "on_denied"],
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean", "const": true },
+            "target_db": { "type": "string", "minLength": 1 },
+            "lock_file": { "type": "string", "minLength": 1 },
+            "semantics": { "type": "string", "minLength": 1 },
+            "on_denied": { "type": "string", "minLength": 1 }
+          }
+        },
+        "session_cas": {
+          "type": "object",
+          "required": [
+            "required",
+            "granularity",
+            "guard",
+            "expected_version_source",
+            "on_mismatch"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean", "const": true },
+            "granularity": { "type": "string", "const": "session_id" },
+            "guard": { "type": "string", "minLength": 1 },
+            "expected_version_source": { "type": "string", "minLength": 1 },
+            "on_mismatch": {
+              "type": "string",
+              "pattern": "CommitOutcome::StaleVersion"
+            }
+          }
+        },
+        "reentrancy_forbidden": { "type": "boolean", "const": true },
+        "lock_scope_bounded": { "type": "boolean", "const": true },
+        "lock_acquisition_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 5000 },
+        "deadlock_watchdog_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 5000 },
+        "forbidden_inside_write_tx": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "required": [
+        "format",
+        "trace_id",
+        "trace_id_field",
+        "required_events",
+        "field_rules",
+        "compliance_claimed",
+        "debt_ref"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "format": { "type": "string", "enum": ["json"] },
+        "trace_id": { "type": "boolean", "const": true },
+        "trace_id_field": { "type": "string", "const": "trace_id" },
+        "required_events": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "field_rules": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "compliance_claimed": { "type": "boolean", "const": false },
+        "debt_ref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "resource_release": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

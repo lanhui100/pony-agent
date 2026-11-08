@@ -23,6 +23,30 @@ pub(super) const DEFAULT_HISTORY_BRANCH_ID: &str = "branch-main";
 pub(super) type SessionMap = HashMap<String, SessionState>;
 pub(crate) type AttachmentAssetMap = HashMap<String, AttachmentAsset>;
 pub(crate) type SessionAttachmentIndex = HashMap<String, Vec<String>>;
+
+/// ADR 0099 阶段 0：会话状态版本号（session 级 CAS 的期望版本载体）。
+///
+/// 语义：每个会话一个单调递增 `u64`。写入方以自己读到的版本作为**期望版本**提交，
+/// 版本不匹配 ⇒ 拒绝写入并返回 [`super::backend::CommitOutcome::StaleVersion`]
+/// （契约：`.dev-team/contracts/stage0-write-model.md` 不变量 I2）。
+///
+/// 物理位置裁决（阶段 0 契约，理由见该文档 §2）：版本以 **`PersistedStore` 侧表**
+/// [`SessionVersionMap`] 承载，**不**加到 [`SessionState`] —— 后者有 15+ 处结构体字面量
+/// 构造点（`store.rs` / `sqlite_session.rs` / `tests.rs`），加字段会同时污染会话 blob
+/// 的序列化面；版本属于**存储层元数据**，不是会话内容。
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(transparent)]
+pub struct SessionVersion(pub u64);
+
+/// 会话版本侧表：`session_id -> SessionVersion`。
+///
+/// 阶段 0 实作任务（Executor）在 `PersistedStore` 上引入字段
+/// `pub(crate) versions: SessionVersionMap`（`#[serde(default)]`），
+/// 由 [`super::backend::SessionBackend::commit_boundary`] 读取其期望版本。
+pub type SessionVersionMap = HashMap<String, SessionVersion>;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryNodeKind {
