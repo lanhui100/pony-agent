@@ -1,6 +1,7 @@
-# 契约：ADR 0099 阶段 0 · 写模型收口（stage0-write-model）· v1
+# 契约：ADR 0099 阶段 0 · 写模型收口（stage0-write-model）· v1.1
 
 > 状态：**协议冻结**（Protocol Agent / L2-P，2026-11-08）
+> v1.1 修订（Lead 授权，2026-11-08，仅文本口径，**零 API 形态变化**）：① I1 验收改为**增量口径**（`with_backend` 装载期自带一次 `save_store`，绝对计数会假绿/假红）；② I3/E4 显式覆盖 `save_to_backend` **全库落盘**路径（含 `create_workspace` → `store.rs:2035`），不得只覆盖 `save_session_state_to_backend`。
 > 真源：`docs/decisions/0099-session-storage-event-sourced-refactor.md` §「阶段 0 · 止血与收口」
 > 本文件是阶段 0 的**唯一契约真源**：实现（Executor）与验收（Tester）以本文件为准，不以口头约定为准。
 > NFR 基准：`.dev-team/nfr-baseline-stage0-write-model.json`（严格 schema + 校验器，见 §4）。
@@ -66,9 +67,9 @@
 
 | ID | 不变量 | 判定语义 | 机器验收 | 违反后果 |
 | :--- | :--- | :--- | :--- | :--- |
-| **I1** | 每 turn 全库提交 **≤1 次** | 一个 turn 的全部状态变更（消息/trace/事件/节点）在**一个**提交边界内落盘；19/23 个 `save_to_backend` / `save_session_state_to_backend` 调用点收敛到该边界，禁止 turn 内多次整包写 | CountingBackend 断言：一次 `append_turn` 后 `save_store` 调用计数 == 1（`commit_boundary` 返回 `Unsupported` 时回退 `save_store`） | 写放大 790×（102 MB/turn）、跨会话事务互相拖住 |
+| **I1** | 每 turn 全库提交 **≤1 次** | 一个 turn 的全部状态变更（消息/trace/事件/节点）在**一个**提交边界内落盘；23 个 `save_to_backend` / `save_session_state_to_backend` 调用点收敛到该边界，禁止 turn 内多次整包写 | **增量口径**（不是绝对计数）：一次 `append_turn` **前后增量** —— `commit_boundary` 穿越次数 +1 且 `save_store` 增量 ==1（`commit_boundary` 返回 `Unsupported` 时回退 `save_store`）。底线依据：`SessionStore::with_backend`（`store.rs:224`）装载期会因 `default_sessions()` / `bootstrap_default_workspace` / `refresh_session_metadata` 置 `should_save` ⇒ 自带 1 次 `save_store`，故绝对计数必然假绿/假红 | 写放大 790×（102 MB/turn）、跨会话事务互相拖住 |
 | **I2** | `version` 不匹配 ⇒ 返回 `StaleVersion` 且**不得写入** | 提交前对每个受限会话做 `UPDATE … WHERE version = ?expected`；`changes() = 0` ⇒ 整包零写入并返回 `StaleVersion { expected, actual }` | 双段断言：fresh `load_store()` → commit ⇒ `Committed`；同一旧 store 再 commit ⇒ `StaleVersion`（防「永远 Committed」与「永远 StaleVersion」两种假绿） | 旧快照覆盖新 turn（跨进程 LWW） |
-| **I3** | 显式删除后任何旧版本快照**不得复活**该会话 | 提交时对「库内已墓碑 / 已显式删除」的会话**跳过、永不 INSERT**；删除只走 `remove_session`（legacy 行 + trace + 规范化行同事务） | 删除后喂入删除前快照 ⇒ 该 `session_id` 在 `sessions` / `normalized_sessions` 中仍不存在 | 会话「诈尸」：退出提示的 `pony resume <id>` 时有时无 |
+| **I3** | 显式删除后任何旧版本快照**不得复活**该会话 | 提交时对「库内已墓碑 / 已显式删除」的会话**跳过、永不 INSERT**；删除只走 `remove_session`（legacy 行 + trace + 规范化行同事务）。**守门范围必须覆盖 `save_to_backend` 全库落盘路径**（`write_full_store` 的 `INSERT OR REPLACE` 正是复活的实际触发点），不得只在 `save_session_state_to_backend` 上做 | 双路断言（二者都不得复活）：① backend 级——删除后旧快照 `commit_boundary` ⇒ `Committed`（跳过该会话），且 `sessions` / `normalized_sessions` 两表均无该行；② store 级——删除后执行任意**全库落盘**入口（实测 `create_workspace` → `store.rs:2035` `save_to_backend()`，另一处 `:2050` 同形）⇒ 该 `session_id` 仍不存在 | 会话「诈尸」：退出提示的 `pony resume <id>` 时有时无 |
 | **I4** | 孤儿回填源只允许 `turn_events ∪ normalized_*` | 回填判据 = 规范化行（`normalized_messages` 条数 / 校验和）与事件流一致；**禁止**以 legacy `sessions` blob 为源（blob 是待废弃的快照，用它回填等于把残缺固化为权威） | 回填后：`normalized_sessions` 与 `sessions` 双向集合差 == 0；逐会话校验和一致；无法回填者进 `BackfillReport.retired` 并在 UI 明示 | 50 个孤儿会话（41%）永久不可见，或把半残数据升格为权威 |
 | **I5** | busy/locked 必须按 `rusqlite::ErrorCode::DatabaseBusy / DatabaseLocked` 判定并退避 | `matches!(err, rusqlite::Error::SqliteFailure(e, _) if matches!(e.code, DatabaseBusy | DatabaseLocked))`；退避 50→100→200 ms，最多 3 次，超限 fail loud | `is_busy_error(&rusqlite::Error)` 单测（构造 `SqliteFailure`）；**禁止** `to_string().contains("busy")`（对 `database is locked` 永不匹配） | 现有死分支（`sqlite_session.rs:2661/:2687`）：锁冲突零重试、直接失败 |
 
@@ -95,9 +96,9 @@
 | ID | 落点 | 交付形态 | 验收 |
 | :--- | :--- | :--- | :--- |
 | E1 | `session/store.rs:120`（`PersistedStore` 定义） | `#[serde(default)] pub(crate) versions: SessionVersionMap`；同步 4 处显式构造点（`store.rs:2428` / `:2489`、`sqlite_session.rs:2393` / `:2795`；`:3925` 走 `..Default::default()` 免改）与 `load_store` / `load_store_normalized` 的填充 | `cargo check` 通过；`load_store()` 后 `versions` 与 `sessions` 表版本列一致 |
-| E2 | `sqlite_session.rs:2583`（`impl SessionBackend for SqliteSessionBackend`） | 覆写 `commit_boundary`：单事务 + 逐会话 CAS + 墓碑跳过 + 版本自增 | I1/I2/I3 断言；`Committed` / `StaleVersion` 双段 |
+| E2 | `sqlite_session.rs:2583`（`impl SessionBackend for SqliteSessionBackend`） | 覆写 `commit_boundary`：单事务 + 逐会话 CAS + 墓碑跳过 + 版本自增；守门必须同时覆盖 **`save_to_backend` 全库落盘路径**（`write_full_store` 的 `INSERT OR REPLACE` 是复活的实际触发点），不只 `save_session_state_to_backend` | I1/I2/I3 断言；`Committed` / `StaleVersion` 双段 |
 | E3 | `sessions` 表 DDL + `write_full_store`（`sqlite_session.rs:599`） | 新增 `version INTEGER NOT NULL DEFAULT 0` 列（`ALTER TABLE` 幂等迁移）；`UPDATE … WHERE conversation_id=? AND version=?` | 旧库幂等升级；重复迁移 0 报错 |
-| E4 | `session/store.rs:2409` / `:2462` 及 23 个调用点 | 收敛为每 turn 一次 `commit_boundary`；其余调用点改为同边界内合并（或改走 `persist_commands_batch`） | I1：CountingBackend `save_store` 计数 == 1 |
+| E4 | `session/store.rs:2409` / `:2462` 及 23 个调用点；**全库落盘入口必须含 `create_workspace`（`store.rs:2028` → `:2035` / `:2050` `save_to_backend()`）一类路径** | 收敛为每 turn 一次 `commit_boundary`；其余调用点改为同边界内合并（或改走 `persist_commands_batch`）；任何残留全库落盘入口都必须经 `commit_boundary`，不得直连 `save_store` | I1 **增量口径**：一次 `append_turn` 前后 `commit_boundary` 穿越 +1 且 `save_store` 增量 ==1（装载期自带 1 次，禁止绝对计数） |
 | E5 | 新进程启动路径（`SqliteSessionBackend::new` 一侧） | `sessions.db.lock` 独占锁；抢不到 ⇒ 只读 + `single_instance_lock_denied` | 双进程并发：第二实例只读，库文件零写入 |
 | E6 | `sqlite_session.rs:2661` / `:2687` | `pub fn is_busy_error(error: &rusqlite::Error) -> bool`（`pub mod sqlite_session` 内），两处死分支改调用它 + 50→200 ms 退避 3 次 | I5 单测；`contains("busy")` 全库 0 处 |
 | E7 | `sqlite_session.rs:2901`（`load_normalized_session`），trace 源 `:1960` | trace 改读 `normalized_turn_traces`（表 DDL `:370`，写入 `:1266`）；legacy `read_all_session_traces` 不再参与 resume 路径 | `load_normalized_session(id).turn_trace_history.len()` == `normalized_turn_traces` 行数（legacy 表为空也能恢复） |

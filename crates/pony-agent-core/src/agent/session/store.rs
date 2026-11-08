@@ -7,17 +7,17 @@ use super::backend::{
 use super::file_backend::MemorySessionBackend;
 use super::types::{
     collect_env_info, collect_env_info_for_workspace, session_workspace_cwd, AttachmentAsset,
-    AttachmentAssetMap, AttachmentAssetQuery,
-    AttachmentCleanupRequest, AttachmentCleanupResult, AttachmentLifecycleStatus, EnvironmentInfo,
-    HistoryBranch,
-    HistoryCheckoutMode, HistoryCheckoutStatus, HistoryCursor, HistoryCursorMode, HistoryNode,
-    HistoryNodeKind, HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext,
-    HistoryStateAuditSummary, LongTermMemoryRecord, MessageStatus, RunControlAuditActionSummary,
+    AttachmentAssetMap, AttachmentAssetQuery, AttachmentCleanupRequest, AttachmentCleanupResult,
+    AttachmentLifecycleStatus, EnvironmentInfo, HistoryBranch, HistoryCheckoutMode,
+    HistoryCheckoutStatus, HistoryCursor, HistoryCursorMode, HistoryNode, HistoryNodeKind,
+    HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext, HistoryStateAuditSummary,
+    LongTermMemoryRecord, MessageStatus, RunControlAuditActionSummary,
     RunControlAuditCurrentContext, RunControlAuditSummary, SessionAttachment,
-    SessionAttachmentIndex, SessionError, SessionMap, SessionOverview, SessionSnapshot, SessionState,
-    TurnHistoryMessage, TurnTraceRecord, TurnTraceRef, WorkspaceRef,
-    DEFAULT_ATTACHMENT_RECLAIM_TTL_MS, DEFAULT_HISTORY_BRANCH_ID, DEFAULT_HISTORY_LIMIT,
-    DEFAULT_SESSION_ID, DEFAULT_SESSION_SUMMARY, DEFAULT_SESSION_TITLE, TITLE_MAX_CHARS,
+    SessionAttachmentIndex, SessionError, SessionMap, SessionOverview, SessionSnapshot,
+    SessionState, SessionVersionMap, TurnHistoryMessage, TurnTraceRecord, TurnTraceRef,
+    WorkspaceRef, DEFAULT_ATTACHMENT_RECLAIM_TTL_MS, DEFAULT_HISTORY_BRANCH_ID,
+    DEFAULT_HISTORY_LIMIT, DEFAULT_SESSION_ID, DEFAULT_SESSION_SUMMARY, DEFAULT_SESSION_TITLE,
+    TITLE_MAX_CHARS,
 };
 use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 use crate::agent::hooks::{
@@ -36,6 +36,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+// ADR 0099 阶段 0：提交边界编排（CAS 重试 / 版本前进 / 快照构造）独立成文件——
+// `store.rs` 已计入 file-size 基线条目，净值不得增长。
+#[path = "store_stage0.rs"]
+mod stage0;
 
 /// PA-095 #6：cursor_version 退役——乐观锁改水位比较。seq 水位本身单调递增
 /// （checkout/fork/restore/switch 发射 history-control 事件使日志水位只增不减，
@@ -113,6 +118,9 @@ pub struct SessionStore {
     /// ADR 0074：未决 Ask 的持久化 store（与 `sessions.db` 同库）。`None` = 本 store 不是
     /// SQLite 会话库（内存/文件后端的测试路径），宿主侧退化为 dispatcher 内存镜像。
     ask_store: Option<Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>>,
+    /// ADR 0099 阶段 0（I2）：本实例**装载到的**会话版本（`sessions.version` 快照）。
+    /// 它是 `commit_boundary` 的期望版本来源——「装载时存在、现在行没了」即墓碑（I3）。
+    versions: std::sync::Mutex<SessionVersionMap>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -134,6 +142,13 @@ pub struct PersistedStore {
     /// key=`path_authorizations.v1`）；重启后生效。
     #[serde(default)]
     pub(crate) path_authorizations: Vec<crate::agent::path_permission::AuthorizedPathEntry>,
+    /// ADR 0099 阶段 0（I2 / 契约 §2）：会话版本侧表 `session_id -> SessionVersion`。
+    ///
+    /// 存储层元数据，**不是**会话内容（不进 blob，故 `#[serde(default)]` 且不参与
+    /// SessionState 序列化面）；由 `load_store` 从 `sessions.version` 读入，
+    /// [`SessionBackend::commit_boundary`] 以它作期望版本做 CAS。
+    #[serde(default)]
+    pub(crate) versions: SessionVersionMap,
 }
 /// PA-095 #2：从事件流物化"最近一个 turn"的消息文本（append_turn 事件源）。
 /// 返回 `(Option<user 文本>, Option<(assistant 文本, reasoning)>)`；外层 None =
@@ -331,6 +346,8 @@ impl SessionStore {
             history_state_hook_executor: Arc::new(NoopHistoryStateHookExecutor),
             projection_cache: HashMap::new(),
             ask_store: None,
+            // ADR 0099 阶段 0（I2）：装载期版本快照——本实例之后的 CAS 以它为期望值。
+            versions: std::sync::Mutex::new(persisted.versions),
         };
         if should_save {
             store.save_to_backend();
@@ -2406,51 +2423,13 @@ impl SessionStore {
         }
     }
 
+    /// ADR 0099 阶段 0（I1 / E4）：**全库落盘入口**——本文件所有全库提交点（建/改/删
+    /// 工作区、授权、改名、归档、事件重放等）统一经由它收敛到单一提交边界。
     pub(super) fn save_to_backend(&self) {
-        if matches!(
-            self.backend.trace_storage_mode(),
-            SeparateTraceTableMode::WriteSeparate
-        ) {
-            for (session_id, session) in &self.sessions {
-                if matches!(
-                    session.trace_migration_state,
-                    TraceMigrationState::TraceTableAuthoritative
-                ) {
-                    // PA-088：写表用全量 Union（顶层 ∪ 全部节点 trace，按 turn_id 去重取最新）。
-                    // 仅写顶层会导致 >24 轮会话的旧节点 refs 在重启 materialize 时解析不到
-                    // （表被 prune 到 24 行），节点 trace 丢失。
-                    let union = collect_trace_union(session);
-                    let _ = self.backend.replace_session_traces(session_id, &union);
-                }
-            }
-        }
-        let trace_mode = self.backend.trace_storage_mode();
-        let store = PersistedStore {
-            sessions: self
-                .sessions
-                .iter()
-                .filter(|(_, session)| session_is_persistable(session))
-                .map(|(session_id, session)| {
-                    (
-                        session_id.clone(),
-                        session_state_for_backend(session, trace_mode),
-                    )
-                })
-                .collect::<SessionMap>(),
-            attachment_assets: self.attachment_assets.clone(),
-            session_attachment_index: self.session_attachment_index.clone(),
-            mcp_source_snapshots: self.mcp_source_snapshots.clone(),
-            skill_source_snapshots: self.skill_source_snapshots.clone(),
-            workspaces: self.workspaces.clone(),
-            path_authorizations: self.path_authorizations.entries(),
-        };
-        // T2-3：整包写盘失败必须可观测——否则"会话丢失"会被上层当成"保存成功"。
-        if let Err(error) = self.backend.save_store(&store) {
-            eprintln!(
-                "[pony-agent][session] save_to_backend 失败：会话库未落盘（数据可能丢失）：{error}"
-            );
-        }
+        self.write_trace_tables(&self.sessions);
+        self.commit_store(&self.sessions, "save_to_backend");
     }
+
 
     fn save_session_to_backend(&self, session_id: &str) {
         let Some(session) = self.sessions.get(session_id) else {
@@ -2485,31 +2464,9 @@ impl SessionStore {
         }
         let mut sessions_map = self.sessions.clone();
         sessions_map.insert(session_id.to_string(), session.clone());
-        let trace_mode = self.backend.trace_storage_mode();
-        let store = PersistedStore {
-            sessions: sessions_map
-                .into_iter()
-                .filter(|(_, session)| session_is_persistable(session))
-                .map(|(session_id, session)| {
-                    (
-                        session_id,
-                        session_state_for_backend(&session, trace_mode),
-                    )
-                })
-                .collect::<SessionMap>(),
-            attachment_assets: self.attachment_assets.clone(),
-            session_attachment_index: self.session_attachment_index.clone(),
-            mcp_source_snapshots: self.mcp_source_snapshots.clone(),
-            skill_source_snapshots: self.skill_source_snapshots.clone(),
-            workspaces: self.workspaces.clone(),
-            path_authorizations: self.path_authorizations.entries(),
-        };
-        // T2-3：同上——单会话回退整包写盘路径，失败不得静默。
-        if let Err(error) = self.backend.save_store(&store) {
-            eprintln!(
-                "[pony-agent][session] save_session_state_to_backend 失败：会话库未落盘（数据可能丢失）：{error}"
-            );
-        }
+        // T2-3：单行写全部失败 ⇒ 回退整包路径；回退同样必须经**单一提交边界**
+        // （禁止直连 `save_store` 造成不可观测的写放大），失败不得静默。
+        self.commit_store(&sessions_map, "save_session_state_to_backend");
     }
 
     fn persist_session_and_trace_change(

@@ -14,6 +14,13 @@ use super::session::{
     SessionTraceMutation, TraceMigrationState, TurnHistoryMessage, TurnTraceRecord,
 };
 
+// ADR 0099 阶段 0：提交边界实作（CAS / 单实例锁 / busy 判定 / 孤儿回填 / 规范化 trace 源）
+// 独立成文件——`sqlite_session.rs` 已计入 file-size 基线条目，净值不得增长。
+#[path = "sqlite_session_commit.rs"]
+mod commit;
+
+pub use commit::is_busy_error;
+
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
 
 /// 测试注入开关：flush_events_tx 在事件行写入后、计数器更新前强制失败，
@@ -236,6 +243,9 @@ impl SqliteSessionBackend {
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Option<Connection>>, String> {
         let mut slot = self.connection.lock().map_err(|e| format!("lock: {e}"))?;
         if slot.is_none() {
+            // ADR 0099 阶段 0（E5）：单实例独占锁。抢不到 ⇒ 明确降级只读
+            // （`query_only` + 结构化日志），不 panic、不静默继续写。
+            let read_only = !commit::acquire_single_instance_lock(&self.db_path)?;
             let conn = Connection::open(&self.db_path).map_err(|e| format!("open db: {e}"))?;
             conn.execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -244,8 +254,12 @@ impl SqliteSessionBackend {
                  PRAGMA wal_autocheckpoint=256;",
             )
             .map_err(|e| format!("pragma: {e}"))?;
-            self.ensure_schema(&conn)?;
-            self.migrate_from_json(&conn)?;
+            if read_only {
+                conn.execute_batch("PRAGMA query_only=ON;").ok();
+            } else {
+                self.ensure_schema(&conn)?;
+                self.migrate_from_json(&conn)?;
+            }
             *slot = Some(conn);
         }
         Ok(slot)
@@ -257,7 +271,8 @@ impl SqliteSessionBackend {
                 conversation_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL DEFAULT '',
                 updated_at_ms INTEGER NOT NULL DEFAULT 0,
-                session_data TEXT NOT NULL
+                session_data TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE IF NOT EXISTS store_metadata (
                 key TEXT PRIMARY KEY,
@@ -306,6 +321,8 @@ impl SqliteSessionBackend {
             params![crate::agent::turn_event::EVENT_SCHEMA_VERSION.to_string()],
         )
         .map_err(|e| format!("schema version seed: {e}"))?;
+        // ADR 0099 阶段 0（E3）：存量库补 `version` 列（幂等 ALTER，列已存在即忽略）。
+        commit::ensure_version_column(conn)?;
         self.ensure_normalized_schema(conn)?;
         Ok(())
     }
@@ -603,100 +620,9 @@ impl SqliteSessionBackend {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| format!("begin tx: {e}"))?;
-
-        // Upsert current sessions — scoped to drop the statement before commit
-        {
-            let mut stmt = tx
-                .prepare(
-                    "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
-                     VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(|e| format!("prepare session insert: {e}"))?;
-
-            for (id, session) in &store.sessions {
-                let mut normalized_session = session.clone();
-                if normalized_session.conversation_id != *id {
-                    eprintln!(
-                        "[pony-agent][session] SQLite save_store normalizing conversation_id: key={} payload={}",
-                        id, normalized_session.conversation_id
-                    );
-                    normalized_session.conversation_id = id.clone();
-                }
-                let data = serde_json::to_string(&normalized_session)
-                    .map_err(|e| format!("serialize session: {e}"))?;
-                stmt.execute(params![
-                    id,
-                    normalized_session.title,
-                    normalized_session.updated_at_ms as i64,
-                    data
-                ])
-                .map_err(|e| format!("insert session: {e}"))?;
-                // Always write traces to keep session blob and trace table in sync,
-                // regardless of trace_migration_state. This prevents stale traces
-                // from lingering in the trace table after checkout/rollback
-                // when the fallback persist path is taken.
-                // PA-088：authoritative 会话跳过——其 blob 已被 session_state_for_backend
-                // 剥离 trace（只剩 refs），此处若用剥离后的空 trace 替换表会清空数据；
-                // 表已由 save_to_backend 的 replace_session_traces 在剥离前写入。
-                if normalized_session.trace_migration_state
-                    != TraceMigrationState::TraceTableAuthoritative
-                {
-                    self.replace_session_traces_tx(
-                        &tx,
-                        id,
-                        &normalized_session.turn_trace_history,
-                    )?;
-                }
-            }
-        }
-
-        // ADR 0094：**不再**在这里删除「内存快照里没有」的会话。
-        //
-        // 整包写盘的语义是「把我知道的写下去」，不是「把库对齐成我知道的样子」：
-        // 一份启动时装载的快照不包含别的进程/实例（第二个 TUI、桌面端、`ponycli`）
-        // 之后新建的会话，旧实现在这里把那些行直接 DELETE 掉 —— 退出提示里的
-        // `pony resume <id>` 于是变成「没有该会话」，而它的事件与规范化行其实都还在。
-        // 显式删除只走 `remove_session`（同一个事务里删 legacy 行 + trace + 规范化行）。
-
-        // Upsert metadata — scoped to drop the statement before commit
-        {
-            let metadata_entries: [(&str, Option<String>); 6] = [
-                (
-                    "attachment_assets",
-                    serde_json::to_string(&store.attachment_assets).ok(),
-                ),
-                (
-                    "session_attachment_index",
-                    serde_json::to_string(&store.session_attachment_index).ok(),
-                ),
-                (
-                    "mcp_source_snapshots",
-                    serde_json::to_string(&store.mcp_source_snapshots).ok(),
-                ),
-                (
-                    "skill_source_snapshots",
-                    serde_json::to_string(&store.skill_source_snapshots).ok(),
-                ),
-                ("workspaces", serde_json::to_string(&store.workspaces).ok()),
-                (
-                    "path_authorizations.v1",
-                    serde_json::to_string(&store.path_authorizations).ok(),
-                ),
-            ];
-
-            let mut meta_stmt = tx
-                .prepare("INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)")
-                .map_err(|e| format!("prepare meta insert: {e}"))?;
-
-            for (key, value) in &metadata_entries {
-                if let Some(val) = value {
-                    meta_stmt
-                        .execute(params![key, val])
-                        .map_err(|e| format!("insert metadata: {e}"))?;
-                }
-            }
-        }
-
+        // ADR 0099 阶段 0：落盘主体迁至 `sqlite_session_commit.rs`（行数额度）；
+        // 本入口保持 `save_store` 的**无版本守门**旧语义（空墓碑集 = 不跳过任何会话）。
+        self.write_store_tx(&tx, store, &std::collections::HashSet::new())?;
         tx.commit().map_err(|e| format!("commit: {e}"))?;
         Ok(())
     }
@@ -954,19 +880,8 @@ impl SqliteSessionBackend {
         session_id: &str,
         session: &SessionState,
     ) -> Result<(), String> {
-        let data = serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
-        tx.execute(
-            "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                session_id,
-                session.title,
-                session.updated_at_ms as i64,
-                data
-            ],
-        )
-        .map_err(|e| format!("upsert session row: {e}"))?;
-        Ok(())
+        // ADR 0099 阶段 0（E3）：单行写顺带把 `version` 单调 +1（CAS 版本前进点）。
+        commit::upsert_session_row_bump(tx, session_id, session)
     }
 
     /// PA-095 #7（实施后审核 P1）：读侧水合——ref-only 行按引用还原 observation
@@ -1957,7 +1872,8 @@ impl SqliteSessionBackend {
             .ok()?
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
-        let all_traces = self.read_all_session_traces(conn).unwrap_or_default();
+        // ADR 0099 阶段 0（E7）：trace 主源 = `normalized_turn_traces`（legacy 表仅兜底）。
+        let all_traces = self.read_traces_normalized(conn).unwrap_or_default();
         let all_nodes = conn
             .prepare("SELECT session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json FROM normalized_history_nodes ORDER BY session_id")
             .ok()?
@@ -2383,21 +2299,9 @@ impl SqliteSessionBackend {
             sessions.insert(session_id, session);
         }
 
-        let attachment_assets = self.read_metadata(conn, "attachment_assets");
-        let session_attachment_index = self.read_metadata(conn, "session_attachment_index");
-        let mcp_source_snapshots = self.read_metadata(conn, "mcp_source_snapshots");
-        let skill_source_snapshots = self.read_metadata(conn, "skill_source_snapshots");
-        let workspaces = self.read_metadata(conn, "workspaces");
-        let path_authorizations = self.read_metadata(conn, "path_authorizations.v1");
-
         Some(PersistedStore {
             sessions,
-            attachment_assets,
-            session_attachment_index,
-            mcp_source_snapshots,
-            skill_source_snapshots,
-            workspaces,
-            path_authorizations,
+            ..self.persisted_store_tail(conn)
         })
     }
     fn sync_legacy_trace_update_tx(
@@ -2581,6 +2485,12 @@ impl SqliteSessionBackend {
 }
 
 impl SessionBackend for SqliteSessionBackend {
+    /// ADR 0099 阶段 0（E2/E4）：**单一提交边界**（唯一整包提交入口）。
+    /// 实作在 `sqlite_session_commit.rs`（单事务 + 逐会话 CAS + 墓碑跳过 + 版本自增）。
+    fn commit_boundary(&self, store: &PersistedStore) -> crate::agent::session::CommitOutcome {
+        self.commit_boundary_stage0(store)
+    }
+
     /// PA-095：事件 schema 版本校验（trait 入口）。
     fn validate_event_schema(&self) -> Result<u64, String> {
         let slot = self.connection().map_err(|e| format!("sqlite open: {e}"))?;
@@ -2658,9 +2568,13 @@ impl SessionBackend for SqliteSessionBackend {
             ) {
                 Ok(tx) => tx,
                 Err(error) => {
-                    if retries > 0 && error.to_string().contains("busy") {
+                    // ADR 0099 阶段 0 / I5：按 `ErrorCode::DatabaseBusy|DatabaseLocked`
+                    // 判定（SQLite 实际消息是 `database is locked`），退避 50→200ms。
+                    if retries > 0 && is_busy_error(&error) {
                         retries -= 1;
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            commit::busy_backoff_ms(2 - retries),
+                        ));
                         continue;
                     }
                     eprintln!("[pony-agent][session] SQLite batch command begin tx error: {error}");
@@ -2684,9 +2598,12 @@ impl SessionBackend for SqliteSessionBackend {
             match tx.commit() {
                 Ok(()) => return PersistCommandOutcome::Succeeded,
                 Err(error) => {
-                    if retries > 0 && error.to_string().contains("busy") {
+                    // 同上（I5：ErrorCode 判定 + 50→200ms 退避）。
+                    if retries > 0 && is_busy_error(&error) {
                         retries -= 1;
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            commit::busy_backoff_ms(2 - retries),
+                        ));
                         continue;
                     }
                     eprintln!("[pony-agent][session] SQLite batch command commit error: {error}");
@@ -2785,21 +2702,9 @@ impl SessionBackend for SqliteSessionBackend {
             })
             .collect();
 
-        let attachment_assets = self.read_metadata(conn, "attachment_assets");
-        let session_attachment_index = self.read_metadata(conn, "session_attachment_index");
-        let mcp_source_snapshots = self.read_metadata(conn, "mcp_source_snapshots");
-        let skill_source_snapshots = self.read_metadata(conn, "skill_source_snapshots");
-        let workspaces = self.read_metadata(conn, "workspaces");
-        let path_authorizations = self.read_metadata(conn, "path_authorizations.v1");
-
         Some(PersistedStore {
             sessions,
-            attachment_assets,
-            session_attachment_index,
-            mcp_source_snapshots,
-            skill_source_snapshots,
-            workspaces,
-            path_authorizations,
+            ..self.persisted_store_tail(conn)
         })
     }
 
