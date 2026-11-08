@@ -758,3 +758,22 @@ note: >-
       `crates/pony-agent-core/src/agent/sqlite_session.rs::tests::full_store_write_keeps_sessions_dropped_from_latest_snapshot`、
       `crates/pony-agent-core/tests/tui_terminal_restore.rs::c8_herdr_real_env_shape_is_detected_and_tiered_as_multiplexer`，
       外加 `tools/tui-audit/check_shift_enter.py` 的 `a2.5`（改为 herdr 真实环境 `HERDR_ENV=1` 注入）。
+  【ADR 0096 归属登记（2026-11-08）｜TUI 状态行 min-dwell + 轮内工具活动聚合（折叠态不再只剩「生成中」）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**终端渲染层**的状态行可见文本与纯逻辑
+  状态机，无新增对外接口、网络 IO、后台任务、LLM 调用、依赖或持久化 schema；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （理由与本文档维度声明同源：终端进程随用户启停、无常驻监听地址、无 Service，Prometheus pull 与
+      节点侧日志采集的结构前提不成立）。
+  (2) 本轮 N-A 的结构性理由：变更发生在**同一进程内的状态行可见性**——`StatusDwell` 只做内存里的
+      「可见文本 + 最小驻留」判定，`ToolActivity` 只聚合既有 `UiEvent::StreamToolCall/StreamToolResult`
+      已携带的展示文案；不产生新的遥测事实、不新增指标/日志字段/Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：新增纯逻辑模块 `crates/pony-agent-core/src/bin/tui/status_dwell.rs`
+      （`StatusDwell` / `ToolActivity` / `now_ms`）；状态行候选组装与刷新收敛到
+      `status_line_candidate` / `status_line_now`；写点复用既有工具事件，复位点复用既有
+      `begin_turn_usage` / `reset_session_scope` / `clear_messages` / 终态分支；主循环唤醒并入既有
+      `cap_poll_ms`，不新增定时线程、env 契约或持久化 schema。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——`tui/status_dwell.rs` 的 9 条单测
+      （假时间驱动）与 `crates/pony-agent-core/tests/tui_process_fold_acceptance.rs::a15_folded_generation_keeps_tool_activity`。
+

@@ -481,6 +481,10 @@ pub use self::errors::*;
 #[path = "tui/text.rs"]
 mod text;
 pub use self::text::*;
+// 状态行可见性：min-dwell（防工具态一闪而过）+ 轮内工具活动聚合。
+#[path = "tui/status_dwell.rs"]
+mod status_dwell;
+pub use self::status_dwell::*;
 #[path = "tui/markdown.rs"]
 mod markdown;
 pub use self::markdown::*;
@@ -1326,6 +1330,10 @@ pub struct TuiState {
     pub add_provider_form: AddProviderForm,
     pub runtime_mode: RuntimeMode,
     pub turn_started_at: Option<std::time::Instant>,
+    /// 状态行可见性状态机（min-dwell）：`ui()` 是唯一刷新点，写入点只喂候选。
+    pub status_dwell: StatusDwell,
+    /// 轮内工具活动聚合（调用计数 + 当前/最近工具）：折叠态下状态行的信息补充。
+    pub tool_activity: ToolActivity,
     /// Composer 高度平滑收拢过渡（每帧衰减 1 行直至 target_input_h）
     pub anim_composer_h: Option<u16>,
     /// 最近一次计算的正文渲染区域 chat_rect
@@ -1450,6 +1458,8 @@ impl Default for TuiState {
             add_provider_form: AddProviderForm::default(),
             runtime_mode: RuntimeMode::Ready,
             turn_started_at: None,
+            status_dwell: StatusDwell::new(),
+            tool_activity: ToolActivity::default(),
             anim_composer_h: None,
             last_chat_rect: None,
             last_input_rect: None,
@@ -1557,6 +1567,8 @@ impl TuiState {
         self.stopping_turn_id = None;
         self.streaming_turn_id = None;
         self.is_streaming = false;
+        // 终态不再渲染流式状态行：驻留态一并清空，避免下一轮首帧闪出旧工具文案。
+        self.status_dwell.reset();
         self.transition_runtime_mode(RuntimeMode::Ready);
         self.status_text = match stop_reason {
             Some("user") => "已停止（用户中断）".to_string(),
@@ -1615,6 +1627,9 @@ impl TuiState {
         // wave-60 §C8/C9：会话作用域复位 ⇒ 停止请求态、当前流式轮与双击上膛一并失效。
         self.stopping_turn_id = None;
         self.streaming_turn_id = None;
+        // 状态行：工具活动与驻留文本同属会话作用域（跨会话不得残留旧工具文案）。
+        self.tool_activity.reset();
+        self.status_dwell.reset();
         // W3：花名册面板与"返回主会话"目标都绑定会话作用域，复位时一并清空
         //（调用方若需要保留 return_session_id，必须在 reset 之后再写入）。
         self.agent_roster_state = None;
@@ -1795,6 +1810,9 @@ impl TuiState {
         // 契约 C4a：`turn:started` 是本轮起点（用户提交 / Ask 回填 / 审批恢复 / goal 续轮都经此），
         // 上一轮的思考块在此封口，本轮思考增量必须新起一块，不得续写进去。
         self.reasoning_turn_closed = true;
+        // 状态行：轮内工具活动与可见文本同属轮次作用域（跨轮不得残留计数 / 旧工具文案）。
+        self.tool_activity.reset();
+        self.status_dwell.reset();
     }
 
     /// P0：应用一条指标结算快照（`TurnStreamEvent.metrics` → `UiEvent::StreamMetrics`）。
@@ -2710,6 +2728,9 @@ impl TuiState {
         // 否则旧会话排的队会被派发进新 session（正文污染 + 与新会话 turn 交叠）。
         self.queued_user_messages.clear();
         self.queue_notice = None;
+        // 状态行聚合文本同属会话作用域（旧会话的工具计数不得带进新会话）。
+        self.tool_activity.reset();
+        self.status_dwell.reset();
     }
 }
 
@@ -4353,6 +4374,17 @@ fn compact_status(st: &str) -> String {
     truncate_width(st, 34)
 }
 
+/// 状态词语义色 → 终端样式（`StatusTone` 与 `theme` 的唯一映射点）。
+fn status_tone_style(tone: StatusTone) -> Style {
+    match tone {
+        StatusTone::Muted => muted(),
+        StatusTone::Faint => faint(),
+        StatusTone::Warn => Style::default().fg(theme::WARN),
+        StatusTone::Success => Style::default().fg(theme::SUCCESS),
+        StatusTone::Danger => Style::default().fg(theme::DANGER),
+    }
+}
+
 /// 底部状态词：克制到只有一个短语（耗时与动画只在正文活动行出现一次）。
 ///
 /// C7（`tui-streaming-input`）：队列非空时把「排队 N 条」追加在同一行 —— 流式期的
@@ -4360,10 +4392,28 @@ fn compact_status(st: &str) -> String {
 fn status_word(state: &TuiState) -> (String, Style) {
     // C23：排队/反馈指示器统一由 `metrics_line` 经 `queue_indicator_line` 渲染
     //（流式 + 工具执行期 `status_word` 整行不渲染，挂在这里会出现「零渲染点」）。
-    status_word_base(state)
+    let candidate = status_line_candidate(state, usize::MAX);
+    (candidate.text, status_tone_style(candidate.tone))
 }
 
-fn status_word_base(state: &TuiState) -> (String, Style) {
+/// 状态候选的抢占级别：终态 / 用户动作反馈立即抢占，过程态受 min-dwell 约束。
+fn status_urgency(state: &TuiState) -> StatusUrgency {
+    if state.stopping_turn_id.is_some() {
+        return StatusUrgency::Immediate;
+    }
+    match state.runtime_mode {
+        RuntimeMode::Ready
+        | RuntimeMode::WaitingApproval
+        | RuntimeMode::Completed
+        | RuntimeMode::Failed(_) => StatusUrgency::Immediate,
+        RuntimeMode::Connecting
+        | RuntimeMode::Thinking
+        | RuntimeMode::Responding
+        | RuntimeMode::ExecutingTool(_) => StatusUrgency::Normal,
+    }
+}
+
+fn status_word_base(state: &TuiState) -> (String, StatusTone) {
     // wave-60 §C9：停止请求受理后，**流式行**优先呈现「正在停止…」（终态未到前不得伪造）。
     // 走本通道而非 `status_notice`：后者被 `should_render_status_notice` 在流式期抑制（P-5 契约）。
     if state.stopping_turn_id.is_some() {
@@ -4375,7 +4425,7 @@ fn status_word_base(state: &TuiState) -> (String, Style) {
         } else {
             "正在停止…".to_string()
         };
-        return (word, Style::default().fg(theme::WARN));
+        return (word, StatusTone::Warn);
     }
     // 说明：一次性提示（status_notice）与非流式横幅由 `metrics_line` 渲染 —— 本函数只服务
     // 「流式进行中的那一行状态」，流式期按契约让位给进度短语，故这里不重复判定。
@@ -4383,44 +4433,132 @@ fn status_word_base(state: &TuiState) -> (String, Style) {
     match &state.runtime_mode {
         RuntimeMode::Ready => {
             if transient.is_empty() {
-                ("就绪".to_string(), faint())
+                ("就绪".to_string(), StatusTone::Faint)
             } else {
                 // 判据与消息区同一真值源：`status_text` 在 StreamFailed 臂写入受控错误摘要，
                 // 该文案不含「失败/错误」字样，旧关键词判定会把它渲染成 muted 灰。
-                let style = severity_style(system_message_severity(&transient), muted());
-                (transient, style)
+                let tone = match system_message_severity(&transient) {
+                    SystemMessageSeverity::Error => StatusTone::Danger,
+                    SystemMessageSeverity::Warning => StatusTone::Warn,
+                    SystemMessageSeverity::Info => StatusTone::Muted,
+                };
+                (transient, tone)
             }
         }
-        RuntimeMode::Connecting => ("连接中".to_string(), muted()),
-        RuntimeMode::Thinking => ("思考中".to_string(), faint()),
-        RuntimeMode::Responding => ("生成中".to_string(), muted()),
-        RuntimeMode::ExecutingTool(name) => {
-            (format!("执行 · {}", truncate_chars(&clean_tool_name_display(name), 20)), faint())
-        }
-        RuntimeMode::WaitingApproval => ("待确认".to_string(), Style::default().fg(theme::WARN)),
-        RuntimeMode::Completed => ("完成".to_string(), Style::default().fg(theme::SUCCESS)),
-        RuntimeMode::Failed(_) => ("失败".to_string(), Style::default().fg(theme::DANGER)),
+        RuntimeMode::Connecting => ("连接中".to_string(), StatusTone::Muted),
+        RuntimeMode::Thinking => ("思考中".to_string(), StatusTone::Faint),
+        RuntimeMode::Responding => ("生成中".to_string(), StatusTone::Muted),
+        RuntimeMode::ExecutingTool(name) => (
+            format!("执行 · {}", truncate_chars(&clean_tool_name_display(name), 20)),
+            StatusTone::Faint,
+        ),
+        RuntimeMode::WaitingApproval => ("待确认".to_string(), StatusTone::Warn),
+        RuntimeMode::Completed => ("完成".to_string(), StatusTone::Success),
+        RuntimeMode::Failed(_) => ("失败".to_string(), StatusTone::Danger),
+    }
+}
+
+/// 装配状态行候选（**唯一**候选组装点）。
+///
+/// 折叠态（`hide_process`）下工具行不渲染，状态行必须承担「在跑什么 / 刚跑完什么」：
+/// - 工具执行期：`执行 · {工具名} · {参数摘要}`；
+/// - 生成 / 思考期：`{状态词} · {N 个工具 · 最近 {工具}}`（宽度不足时按档位截短）。
+///
+/// 非折叠态：正文里已有工具行，状态行保持「一个短语」的克制口径（ADR 0043 §决策 3）。
+fn status_line_candidate(state: &TuiState, budget: usize) -> StatusCandidate {
+    let (base, tone) = status_word_base(state);
+    let urgency = status_urgency(state);
+    if !state.hide_process {
+        return StatusCandidate {
+            text: base,
+            urgency,
+            tone,
+        };
+    }
+    let text = match state.runtime_mode {
+        RuntimeMode::ExecutingTool(_) => state
+            .tool_activity
+            .running_label()
+            .or_else(|| hidden_tool_status_text(state, budget))
+            .unwrap_or(base),
+        RuntimeMode::Thinking | RuntimeMode::Responding => match state.tool_activity.summary() {
+            Some(summary) => {
+                status_with_tool_context(&base, &summary, &state.tool_activity, budget)
+            }
+            None => base,
+        },
+        _ => base,
+    };
+    StatusCandidate {
+        text: truncate_width(&text, budget.max(8)),
+        urgency,
+        tone,
+    }
+}
+
+/// 状态行宽度降档：优先保留「最近工具」，其次保留聚合计数，最后只剩状态词。
+fn status_with_tool_context(
+    base: &str,
+    summary: &str,
+    activity: &ToolActivity,
+    budget: usize,
+) -> String {
+    let label = activity.running().or_else(|| activity.last());
+    let count = activity
+        .call_count()
+        .max(if label.is_some() { 1 } else { 0 });
+    let mut variants = vec![format!("{base} · {summary}")];
+    if let Some(label) = label {
+        variants.push(format!("{base} · {label}"));
+    }
+    if count > 0 {
+        variants.push(format!("{base} · {count} 个工具"));
+    }
+    variants.push(base.to_string());
+    variants
+        .into_iter()
+        .find(|text| str_width(text) <= budget)
+        .unwrap_or_else(|| base.to_string())
+}
+
+/// 状态行唯一刷新点：喂候选 → 取受 min-dwell 约束的可见文本。
+///
+/// 每帧一次；工具事件**不**直接改可见文本，全部经这里收敛，避免「事件驱动即时覆盖」
+/// 把毫秒级的工具态压成一闪而过。
+fn status_line_now(state: &mut TuiState, budget: usize) -> (String, Style) {
+    let candidate = status_line_candidate(state, budget);
+    state.status_dwell.observe(now_ms(), candidate);
+    match (
+        state.status_dwell.visible_text(),
+        state.status_dwell.visible_tone(),
+    ) {
+        (Some(text), Some(tone)) => (text.to_string(), status_tone_style(tone)),
+        // 防御性回落：`observe` 之后可见文本必然存在。
+        _ => status_word(state),
     }
 }
 
 /// 契约 C10：隐藏过程态的「当前工具信息」。
 ///
-/// 工具执行期取**最近一条 `ToolCall`** 的展示内容（`format_tool_display` 产出：工具名 +
-/// 参数摘要）压成一行；消息里取不到时回落运行态里的工具名。非工具执行期返回 `None`
+/// 工具执行期取**最近一次工具调用**的展示内容（`format_tool_display` 产出：工具名 +
+/// 参数摘要）压成一行；事件层已把该产物写进 `tool_activity`（单点真值），
+/// 旧路径（直接 `add_tool_event` 写消息）回落末条 `ToolCall`。非工具执行期返回 `None`
 /// （状态行保持既有「思考中/生成中 · 秒数」口径）。
 pub fn hidden_tool_status_text(state: &TuiState, width: usize) -> Option<String> {
     let tool_name = match &state.runtime_mode {
         RuntimeMode::ExecutingTool(name) => clean_tool_name_display(name),
         _ => return None,
     };
-    let detail = state
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == MessageRole::ToolCall)
-        .map(|message| message.content.replace('\n', " "))
-        .map(|content| content.trim().to_string())
-        .filter(|content| !content.is_empty());
+    let detail = state.tool_activity.running().map(str::to_string).or_else(|| {
+        state
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::ToolCall)
+            .map(|message| message.content.replace('\n', " "))
+            .map(|content| content.trim().to_string())
+            .filter(|content| !content.is_empty())
+    });
     let text = match detail {
         Some(content) => format!("执行 · {}", content),
         None => format!("执行 · {}", tool_name),
@@ -5146,17 +5284,13 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             if need_blank {
                 push_blank(&mut trailing_status_lines);
             }
-            let (word, style) = status_word(state);
-            // 契约 C10：隐藏过程时，状态行承担「当前工具信息」展示（工具名 + 参数摘要）。
-            let (word, style) = match if state.hide_process {
-                hidden_tool_status_text(state, width.saturating_sub(16))
-            } else {
-                None
-            } {
-                Some(text) => (text, faint()),
-                None => (word, style),
-            };
+            // 状态行唯一刷新点：受 min-dwell 约束（工具态不再一闪而过），折叠态下
+            // 生成/思考期携带轮内工具活动（「刚做了什么」是折叠后唯一的过程信息）。
             let elapsed = elapsed_label(state);
+            let budget = width
+                .saturating_sub(16)
+                .saturating_sub(str_width(&elapsed));
+            let (word, style) = status_line_now(state, budget);
             let text = if elapsed.is_empty() {
                 word
             } else {
@@ -8168,6 +8302,15 @@ fn tui_event_loop(
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
+        // 状态行有被 min-dwell 压制的候选 ⇒ 到点必须重绘：否则只能等下一次 spinner tick，
+        // 切换最多迟 160ms（工具态可见时长的下界会被刷新精度吃掉）。
+        if state
+            .status_dwell
+            .next_wake_ms()
+            .is_some_and(|wake| now_ms() >= wake)
+        {
+            dirty = true;
+        }
         if dirty {
             terminal.draw(|f| ui(f, &mut state))?;
             dirty = false;
@@ -8218,6 +8361,12 @@ fn tui_event_loop(
             cap_poll_ms = Some(remaining.saturating_add(1));
         } else {
             last_goal_phase = None;
+        }
+
+        // 状态行驻留到点唤醒：与 goal 相位共用 `cap_poll_ms`（取最小，互不吞掉）。
+        if let Some(wake) = state.status_dwell.next_wake_ms() {
+            let remaining = wake.saturating_sub(now_ms()).saturating_add(1);
+            cap_poll_ms = Some(cap_poll_ms.map_or(remaining, |cap| cap.min(remaining)));
         }
 
         let mut poll_ms = if state.is_streaming || state.has_pending_animation() { 16 } else { 120 };
@@ -9775,15 +9924,21 @@ fn tui_event_loop(
                     let tool_name = clean_tool_name_display(&call);
                     state.transition_runtime_mode(RuntimeMode::ExecutingTool(tool_name));
                     state.add_or_update_tool_event(&call, false);
+                    // 状态行聚合的唯一写入点①：记录本轮工具调用（折叠态下「刚做了什么」）。
+                    state.tool_activity.record_call(&call);
                 }
                 UiEvent::StreamToolResult(res) => {
                     state.add_or_update_tool_event(&res, true);
+                    // 状态行聚合的唯一写入点②：工具收口为「最近完成」，不重置轮内计数。
+                    state.tool_activity.complete(&res);
                     state.transition_runtime_mode(RuntimeMode::Responding);
                 }
                 UiEvent::StreamCompleted => {
                     state.is_streaming = false;
                     state.stopping_turn_id = None;
                     state.streaming_turn_id = None;
+                    // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
+                    state.status_dwell.reset();
                     // wave-60 §C8：本轮结束 ⇒ 双击 Esc 的上膛失效。
                     stop_sequence.reset();
                     state.transition_runtime_mode(RuntimeMode::Completed);
@@ -9840,6 +9995,8 @@ fn tui_event_loop(
                     // wave-60 §C7/C9：失败是终态之一 ⇒ 必须清 stopping 兜底态（不得卡在「正在停止…」）。
                     state.stopping_turn_id = None;
                     state.streaming_turn_id = None;
+                    // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
+                    state.status_dwell.reset();
                     stop_sequence.reset();
                     // wave-tui-session-resilience C3/C4：消息区只显示一句话摘要，
                     // 原始 400 字符响应体/堆栈默认折叠，仅留运行日志与 issue 上报通道。

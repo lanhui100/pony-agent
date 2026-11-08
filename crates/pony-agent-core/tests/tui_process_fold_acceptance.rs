@@ -819,3 +819,65 @@ fn a14_toggle_shortcut_shares_same_field() {
         "C12：快捷开关后思考块必须同样隐藏，实际屏幕 = {hidden}"
     );
 }
+
+// ── A15：折叠态「生成中」必须延续工具活动（状态行 min-dwell + 聚合）──────────
+
+/// 工具跑完后进入生成期：状态行不能退回一句空洞的「生成中」。
+///
+/// 这里只验证**候选组装**；min-dwell 的时长语义由 `tui/status_dwell.rs` 单测覆盖
+///（真实时钟下的 1200ms 驻留不属于无 sleep 的验收范畴）。
+#[test]
+fn a15_folded_generation_keeps_tool_activity() {
+    let mut state = process_state(true);
+    state.is_streaming = true;
+    state.turn_started_at = Some(std::time::Instant::now());
+    state.begin_turn_usage();
+    state.tool_activity.record_call("shell · git status --short");
+    state.tool_activity.complete("shell · git status --short");
+    state.transition_runtime_mode(tui::RuntimeMode::Responding);
+    // 复位驻留态 ⇒ 渲染「此刻的候选」，不受上一帧可见文本影响。
+    state.status_dwell.reset();
+
+    let buf = screen_until_settled(&mut state, 110, 30);
+    let text = all_text(&buf);
+    assert!(
+        squeeze(&text).contains(&squeeze("生成中 · 1 个工具 · shell · git status --short")),
+        "折叠态生成期状态行必须携带本轮工具活动，实际屏幕 = {text}"
+    );
+    // ADR 0043 §决策 3：三态词互斥——生成期不得出现「执行 ·」。
+    assert!(
+        !squeeze(&text).contains(&squeeze("执行 ·")),
+        "生成期状态行不得混入「执行 ·」词，实际屏幕 = {text}"
+    );
+    // 过程仍处于折叠：工具行字形不得因状态行聚合而回流正文。
+    for glyph in ["◦", "✓", "✕"] {
+        assert!(
+            !text.contains(glyph),
+            "折叠态不得渲染工具行字形 `{glyph}`，实际屏幕 = {text}"
+        );
+    }
+
+    // 第二次工具调用后：计数聚合为 2，且「最近」指向最新工具。
+    state.tool_activity.record_call("read_file · src/main.rs");
+    state.tool_activity.complete("read_file · src/main.rs");
+    state.status_dwell.reset();
+    let buf = screen_until_settled(&mut state, 110, 30);
+    let text = all_text(&buf);
+    assert!(
+        squeeze(&text).contains(&squeeze("生成中 · 2 个工具 · 最近 read_file · src/main.rs")),
+        "折叠态生成期必须聚合本轮工具计数与最近工具，实际屏幕 = {text}"
+    );
+
+    // 窄屏降档：优先保住「最近工具」，先丢计数。
+    state.status_dwell.reset();
+    let buf = screen(&mut state, 60, 30);
+    let text = all_text(&buf);
+    assert!(
+        squeeze(&text).contains(&squeeze("生成中 · read_file · src/main.rs")),
+        "窄屏必须降档为「状态词 · 最近工具」，实际屏幕 = {text}"
+    );
+    assert!(
+        !squeeze(&text).contains(&squeeze("2 个工具")),
+        "窄屏降档后不得再挤入计数，实际屏幕 = {text}"
+    );
+}
