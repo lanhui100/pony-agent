@@ -101,6 +101,7 @@
 - [0089 tui.rs 原地模块化拆分，保留 bin 入口与 `tui::` 可见性](0089-tui-module-decomposition.md)
 - [0090 代码规模门禁采用「基线棘轮」，只判新增超限](0090-code-size-gate-ratchet.md)
 - [0091 删除单轮累计墙钟预算，止损下沉到能力层](0091-turn-wall-clock-removal.md)
+- [0094 herdr 复用器变量名对齐 与 会话索引行丢失自愈](0094-tui-multiplexer-env-and-session-row-heal.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

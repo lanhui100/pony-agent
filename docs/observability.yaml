@@ -697,3 +697,27 @@ note: >-
       且 `tests/wave36_plan_execution_approval.rs::c141_*` 保持全绿（审批门禁语义未放宽）。
       注：上述两个单测单列文件，是因 `session/tests.rs`、`control_plane/mod.rs` 已触代码规模门禁棘轮；
       续轮循环抽出 `tui::run_goal_rounds` 同理（`tui_event_loop` 本身已 grandfathered 于 2320 行）。
+  【ADR 0094 归属登记（2026-11-08）｜herdr 复用器变量名对齐 + 会话索引行丢失自愈】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**终端能力分级的环境清单**与
+  **会话读取路径（legacy 行缺失时的按需重建）**，无新增对外接口、网络 IO、后台任务、LLM 调用或依赖；
+  不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （理由与本文档维度声明同源：桌面与终端进程随用户启停、无常驻监听地址、无 Service，
+      Prometheus pull 与节点侧日志采集的结构前提不成立）。
+  (2) 本轮 N-A 的结构性理由：改动分别是 `tui::TERMINAL_MULTIPLEXER_ENV_KEYS` 的**清单取值**
+      （纯环境变量判定，无 I/O、无探测字节）、`write_full_store` 去掉一条**隐式 DELETE**（写盘面收窄），
+      以及 `pony resume <id>` 在 `existed=false` 时按 id 调一次既有 SQLite 连接上的只读重建
+      （`SessionBackend::load_normalized_session`，同步调用、复用既有连接，不引入新任务/新出口）。
+      三者都不产生新的遥测事实，不新增指标/日志字段/Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：新增 `SessionBackend::load_normalized_session`（默认 `None`）、
+      `SessionStore::recover_session_from_normalized`、`HostControlPlane::recover_session_from_normalized`；
+      `TERMINAL_MULTIPLEXER_ENV_KEYS` 由 `[&str; 5]` 改 `&[&str]`；`remove_session` 事务内多删一行
+      `normalized_sessions`（schema 不变）。多开实例互删的根因由**删除该 DELETE**消除，非新增上报面。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——
+      `crates/pony-agent-core/tests/session_row_heal.rs::resume_recovers_session_from_normalized_rows_when_legacy_row_is_missing`、
+      `crates/pony-agent-core/tests/session_row_heal.rs::explicit_delete_removes_normalized_rows_so_resume_cannot_resurrect`、
+      `crates/pony-agent-core/src/agent/sqlite_session.rs::tests::full_store_write_keeps_sessions_dropped_from_latest_snapshot`、
+      `crates/pony-agent-core/tests/tui_terminal_restore.rs::c8_herdr_real_env_shape_is_detected_and_tiered_as_multiplexer`，
+      外加 `tools/tui-audit/check_shift_enter.py` 的 `a2.5`（改为 herdr 真实环境 `HERDR_ENV=1` 注入）。
