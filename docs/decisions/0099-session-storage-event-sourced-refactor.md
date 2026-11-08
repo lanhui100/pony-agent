@@ -46,27 +46,40 @@ Status: accepted
 
 ## 决策
 
-### D1 真源：SQLite 追加表，而非每会话 JSONL 文件
+### D1 真源：每会话一份 append-only 日志文件；SQLite 降级为可重建索引（2026-11-08 修订）
 
-真源为 `turn_events` 升格后的 `session_events`：
+> **修订理由（原 D1 判「SQLite 追加表为真源」已推翻）**：原判断基于「单机单用户」前提，用「跨会话事务 / Windows 锁语义 / torn-tail 解析器成本」三条否掉了文件真源。但产品目标形态是**多端 + 远程分派 + 混版本共存 + 多 agent 并行**，这三条理由的权重整体反转——尤其「整库单值 `events.schema_version`，旧版本遇新版直接拒开整库」在混版本部署下是硬伤。
+>
+> 根本问题不是介质，而是**写单元粒度**：只要真源是「一个库装所有会话」，就必然存在「全库只有一支笔，笔归谁」的争用，于是被迫引入 daemon / 租约 / CAS 一整套机制，而阶段 0 两轮对抗审查证明这套机制极易漏。把写单元从「全库」降到「单会话」后，该争用**结构性消失**。
+
+**真源 = 每个会话一份 append-only 事件日志文件**：
 
 ```
-session_events(
-  session_id, seq,             -- PK(session_id, seq)
-  writer_id, writer_seq,       -- UNIQUE(session_id, writer_id, writer_seq) 幂等键
-  hlc_ts, branch_id, event_type, schema_ver, payload, created_at_ms
-)
+<root>/--<normalized-cwd>--/<encoded-session-id>/
+  session.jsonl[.zst]        # 当前代际；append-only，逐批 fsync
+  session.vN.jsonl[.zst]     # 格式升级后的不可变后继代际（旧文件逐字节不变）
+  manifest.json              # 会话自描述：格式版本 / 来源端 / 分支头 / 附件清单
+  attachments/               # 实体文件
 ```
 
-- 幂等写入：`INSERT OR IGNORE`，重放安全，无需 dedupe 表。
-- `seq` **只能由唯一写者**在提交事务内分配；废止 `store_metadata['turn_event_seq:*']` 与 `MAX(seq)+1`。
-- 真源记录**事件**，不记录状态；状态一律由 fold 派生。
+- 文件头部自描述格式版本（`{"type":"session","version":N,"id":...}`）；读方按版本分类为 `current | migration-required | unsupported | malformed`，**不再是布尔化拒绝**。
+- 追加语义：每批 append 后 `fsync`；崩溃只丢「撕裂尾行」，已提交前缀必保留；**永不重写已提交事件**。
+- 事件记录携带 `(seq, type, payload, ts)`；`seq` 由**该文件的唯一写者**单调分配（文件级独占即单写者，无需全库协调）。
 
-### D2 写者模型：单写者（租约过渡 → 单 daemon 终局）
+**SQLite 的位置改为「可重建索引 / 查询缓存」**：
 
-- 过渡期：`session_writers(session_id PK, writer_id, pid, host, fence_token, lease_expires_at_ms, heartbeat_at_ms)`，单条 CAS 抢租约（`UPDATE … WHERE lease_expires_at_ms < now`，`changes()=1`），所有写语句带 `fence_token` 守护；ttl 15s，5s 续约；抢不到降级只读 + UI 明示，`--takeover` 强夺并写审计事件。
-- 终局：本地核心（daemon / 单一进程）持写权，TUI、桌面端、CLI 均为客户端；这也是未来远程同步的唯一写入点与 seq 分配者。
-- 判活只用 DB 侧时间（`unixepoch('subsec')*1000`），HLC 不参与租约，规避时钟漂移。
+- 索引内容：会话列表、标题、workspace、路径授权、用量账本、全文检索等**派生视图**。
+- 索引可随时删除并从文件全量重建；索引损坏 ≠ 数据丢失。
+- 这解决原 D1 反对文件真源的唯一硬理由（「跨会话查询需要 SQL」）：查询照旧走 SQL，只是它不再承担「唯一真相」的责任。
+
+### D2 写者模型：写权随会话归属，不做全库租约（2026-11-08 修订）
+
+- **一个会话的写者 = 创建它的那个 agent 进程**，且只有它写该会话文件（文件级独占锁 `flock`/`LockFileEx` 作为实现手段，而非架构机制）。
+- **跨会话零争用**：不同会话是不同文件，多 agent 并行天然成立。
+- **跨节点**：会话跟着 agent 走。远端 Linux 上的 agent 写远端文件；桌面端作为客户端**按需拉取**该会话日志（增量、从 `after_seq` 起），不做整库同步、不共享文件系统。
+- **不需要 daemon 作为「唯一写者」**：daemon 从「架构必需品」降级为「可选的远程访问端点」（阶段 3 视需要再加）。
+- **不需要 CAS / fence_token**：同一会话的并发写在结构上不存在。
+- **混版本部署**：只影响单个会话文件的格式兼容，不波及全库。
 
 ### D3 删除语义：墓碑事件，不删行
 
@@ -166,19 +179,30 @@ session_events(
 
 > 运维注意：备份会话库必须**三件套一起复制**（`sessions.db` + `-wal` + `-shm`）。只复制 `.db` 会得到不一致快照，回填会报 `database disk image is malformed`（已实测）。
 
-### 阶段 1 · 单写者 + 墓碑（多端一致性）
+### 阶段 1 · 会话日志文件真源（写入侧，2026-11-08 重新定义）
 
-`session_writers` 租约表 + `fence_token` 守护 + 删除墓碑事件。目标：G2、G3 成立。
+取代原「单写者租约 + 墓碑」设计（该设计要解决的问题已被 D1 修订消解）。
 
-**门禁**：双进程并发写压测 p99 ≤100 ms、busy 重试 ≤3 次；删除在 2 端传播 <1 s；写者崩溃后 15 s 内可接管。
+1. **端口**：新增 `SessionLogStore` trait —— `open_write(session_id, meta) -> LogWriter` / `open_read(session_id, after_seq) -> LogReader` / `list_sessions()` / `delete(session_id)`。本地实现写文件，远程实现走 HTTP（阶段 3），同一契约。
+2. **目录布局**：`<root>/--<normalized-cwd>--/<encoded-session-id>/`，会话 id 单射转义为安全路径段；规范化 cwd 让项目目录可读、可 rsync/git 审计。
+3. **写入**：`append(batch)` 追加 + `fsync`；失败回滚到先前字节长度；**已提交事件永不重写**。`seq` 由该文件唯一写者单调分配。
+4. **崩溃恢复**：重启时丢弃不完整的最终行/撕裂的压缩尾帧，保留已提交前缀；读方补写合成 closer。
+5. **格式自描述 + 四态分类**：header 携带 `{type, version, id, cwd, createdAt}`；`read_header` 返回 `current | migration-required | unsupported | malformed`，取代现在的 `version == current` 布尔拒绝。
+6. **写者归属**：文件级独占锁（Unix `flock` / Windows `LockFileEx`）；抢不到 ⇒ 明确降级只读 + 日志，不静默写。
+7. **Windows 硬成本专项**：原子发布用「临时文件 + `create_new` + rename」，`fsync` 后 rename 保证不产生半写文件；需在 Windows 上实测 rename 语义与杀毒软件干扰。
+8. **压缩**：默认 `zstd` 帧 + 校验和；可配置 `none` 便于外部工具直接消费。
 
-### 阶段 2 · 事件升格为真源（读投影）
+**门禁**：kill -9 演练后重启，已提交前缀 100% 可读且无重复；并发 8 个 agent 各写自己会话零冲突；单会话追加 p95 ≤10ms；撕裂尾行注入 100 例全部正确丢弃。
 
-`turn_events` → `session_events`（补 `writer_id/writer_seq/hlc_ts` 与幂等键）；`AssistantChunk` 在持久化层按 200 ms / 4 KB 合批（现 5,702 行流式片段）；启用 archive + retention；补齐缺失事件类型（title/archived/delete/workspace/auth 变更）；blob 降级为导出产物。
+### 阶段 2 · 读路径切换 + SQLite 降为索引（2026-11-08 重新定义）
 
-同步落地 D7 格式契约治理：版本三元分离、相邻迁移链骨架、四态 header 分类、`strict/recoverable` 双模式 + 防静默截断规则、`session-format` 单一真源模块与生成器。
+1. **fold**：从会话日志重建 `SessionState`，纯函数 `fold(events) -> SessionState`，可 off-thread。
+2. **索引重建器**：`rebuild_index()` 扫全部会话文件，重建 `sessions`/`normalized_*`/`workspace`/`usage_ledger` 等派生视图；索引可删可建，删除不丢数据。
+3. **读切换灰度**：先双读比对（文件 fold vs SQLite 现有路径逐字段 diff），diff=0 连续 7 天后切读；SQLite 仍写但降级为缓存。
+4. **停写 blob**：`sessions.session_data` 停写，仅索引字段保留。
+5. **孤儿处置**：不再需要「孤儿回填」概念——文件即真相；SQLite 侧缺行由索引重建自动补齐。
 
-**门禁**：`fold-verify --all --fail-on-diff` 连续 7 天 diff=0；全量重建 0 错误；`kill -9` 演练后重启状态一致；旧二进制可读新库（回滚窗口）；迁移链构建期校验无缺口；事件类型目录与 fixture 快照一致。
+**门禁**：`fold-verify --all --fail-on-diff` 连续 7 天 diff=0；索引删除后重建，会话列表与逐会话内容 100% 一致；启动装载 ≤800ms。
 
 ### 阶段 3 · 远程与传输
 
@@ -212,7 +236,9 @@ session_events(
 4. **每条写入各自加锁 + 时间戳 LWW（不动模型）**：只能把 5 MB × 20 次变成 5 MB × N 次，不解决覆盖与复活。否决。
 5. **远程为真源、本地为缓存**：当前无远程服务、离线是硬需求。延后至阶段 3 转折条件成立。
 
-## 附：为什么是 SQLite 而不是 JSONL（一个需要记录的历史事实）
+## 附：为什么是 SQLite 而不是 JSONL（历史事实，结论已被 D1 修订推翻）
+
+> **注意（2026-11-08）**：本节记录的是修订前的判断依据，仅作历史留存。当前决策见 D1——真源改为每会话一份 append-only 日志文件，SQLite 降级为可重建索引。本节「介质不是根因」的判断仍然成立，但「因此继续用单库 SQLite」的结论已不适用：单库才是争用根源。
 
 **本项目从未真正「选择」过 SQLite 而不是 JSONL。** ADR 0008 的三个候选方案（A 状态更新 / B 全量事件溯源 / C 混合演进）讨论的全是**数据模型**，存储介质一次都没有进入决策；`docs/analysis/deepseek-harness-architecture-comparison-2026-08-14.md` 同样只提「快照式存储」，未比较介质。SQLite 是继承来的既成事实，事件溯源改造是在它的**内部**做的。
 
@@ -231,7 +257,9 @@ session_events(
 
 因此本 ADR 只抄 DSH 的**结构性优势**——「每会话一个物理单元 ⇒ 天然单写者边界与局部性」，用 `session_writers` 租约 + 追加表在 SQLite 内等价实现，而不搬它的介质。
 
-## 介质边界：SQLite 在哪里会让路
+## 介质边界：SQLite 在哪里会让路（修订后：SQLite 已退出真源位置）
+
+> 本节讨论的是「单库 SQLite 作真源」时的容量边界，属修订前语境。D1 修订后 SQLite 只做索引，容量与争用问题随之降级为「索引重建耗时」问题。
 
 结论：**对「本地 + 远程 + 多会话并行」这条路线，SQLite 不是阻碍——前提是介质被藏在端口后面，且三条护栏成立。**
 
