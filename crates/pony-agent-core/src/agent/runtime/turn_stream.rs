@@ -89,6 +89,8 @@ impl AgentRuntime {
         first_token_latency_ms: Option<u64>,
         turn_started_at: &Instant,
         build_context_observation: Option<BuildContextObservation>,
+        // 同 [`AgentRuntime::cancel_stream_turn`]：本轮已渲染给用户的正文（可为空）。
+        partial_assistant_text: &str,
     ) {
         self.cancel_stream_turn(
             sink,
@@ -103,6 +105,7 @@ impl AgentRuntime {
             first_token_latency_ms,
             Some(turn_started_at.elapsed().as_millis() as u64),
             build_context_observation,
+            partial_assistant_text,
         );
     }
 
@@ -235,7 +238,7 @@ impl AgentRuntime {
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
-                    );
+                        accumulated_turn_text.as_str());
                     return;
                 }
                 emit_stream_event(
@@ -438,7 +441,7 @@ impl AgentRuntime {
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
-                    );
+                        accumulated_turn_text.as_str());
                     return;
                 }
 
@@ -1160,6 +1163,7 @@ impl AgentRuntime {
                     first_token_latency.get(),
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(context_observation.clone()),
+                    accumulated_turn_text.as_str(),
                 );
                 return;
             }
@@ -1871,6 +1875,7 @@ impl AgentRuntime {
                 None,
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(prepared.build_context_observation.clone()),
+                "",
             );
             otel_turn_scope.set_phase("cancelled");
             return;
@@ -2031,6 +2036,10 @@ impl AgentRuntime {
         let pending_model_call_fail_turn =
             Rc::new(RefCell::new(None::<(Vec<HookTraceRecord>, String)>));
         let pending_model_call_fail_turn_for_stream = Rc::clone(&pending_model_call_fail_turn);
+        // 用户中止时的上下文保全：真流式决策期间**已渲染给用户**的正文 delta 在此累积。
+        // 取消收口（`cancel_stream_turn`）把它落成中断检查点正文；否则被中断那轮已经出现在
+        // 界面上的内容不会进入下一轮会话历史（只剩占位文案）。
+        let streamed_assistant_text = Rc::new(RefCell::new(String::new()));
         let stream_initial_decision = || -> Result<
             (
                 ProviderDecision,
@@ -2098,6 +2107,7 @@ impl AgentRuntime {
             let stream_guard = crate::agent::provider::ProviderStreamGuard::with_cancel_check(
                 &stream_cancel_check,
             );
+            let streamed_assistant_text_for_delta = Rc::clone(&streamed_assistant_text);
             let decision = provider_decision_stream_guarded_with_mode(
                 &prepared.provider,
                 &prepared.planning_request,
@@ -2166,6 +2176,9 @@ impl AgentRuntime {
                             {
                                 flush_delta(None, Some(reasoning));
                             }
+                            streamed_assistant_text_for_delta
+                                .borrow_mut()
+                                .push_str(&text);
                             flush_delta(Some(text), None);
                             did_emit = true;
                         }
@@ -2348,7 +2361,7 @@ impl AgentRuntime {
                                 None,
                                 &turn_started_at,
                                 Some(prepared.build_context_observation.clone()),
-                            );
+                                streamed_assistant_text.borrow().as_str());
                             return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
                         }
                         // 仅诊断：不改变控制流（失败仍然 fallback 到同步决策），
@@ -2395,7 +2408,7 @@ impl AgentRuntime {
                                         None,
                                         &turn_started_at,
                                         Some(prepared.build_context_observation.clone()),
-                                    );
+                                        streamed_assistant_text.borrow().as_str());
                                     return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
                                 }
                                 // 同 1855 处：仅记录根因，控制流不变（失败即 fallback）。
@@ -2477,6 +2490,7 @@ impl AgentRuntime {
                         None,
                         &turn_started_at,
                         Some(prepared.build_context_observation.clone()),
+                        streamed_assistant_text.borrow().as_str(),
                     );
                     otel_turn_scope.set_phase("cancelled");
                     return;
@@ -2892,6 +2906,7 @@ impl AgentRuntime {
                 None,
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
+                first_decision.output_text.as_str(),
             );
             otel_turn_scope.set_phase("cancelled");
             return;
@@ -2992,6 +3007,7 @@ impl AgentRuntime {
                 None,
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
+                first_decision.output_text.as_str(),
             );
             // wave-54 C2：取消轮同样落已发生调用的加权速度真值（records 为空 ⇒ 仅 calls=0）。
             crate::agent::turn_flow::record_turn_speed_truth(

@@ -216,6 +216,10 @@ impl AgentRuntime {
         first_token_latency_ms: Option<u64>,
         turn_duration_ms: Option<u64>,
         build_context_observation: Option<BuildContextObservation>,
+        // 用户中止时本轮**已产出**的 assistant 正文（已渲染给用户的部分 / 已完成 hop 的
+        // 累积正文）。它是取消轮检查点的正文来源：硬编码空串会让中断轮只剩占位文案，
+        // 被中断那轮的真实产出随之从下一轮上下文里消失（与失败路径 B017 同口径）。
+        partial_assistant_text: &str,
     ) {
         // wave-64 R1（BLOCKING，terminal-once）：C5 宽限监督可能已先行收口并派发了一条
         // `turn:cancelled`；此时 in-band 循环再命中停止位必须**静默退出**，禁止第二条终态、
@@ -245,7 +249,7 @@ impl AgentRuntime {
             provider_meta,
             attachments,
             None,
-            "",
+            partial_assistant_text,
             checkpoint_tools,
         );
         self.update_execution_checkpoint(

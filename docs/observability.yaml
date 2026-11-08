@@ -850,3 +850,23 @@ note: >-
   (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
       行为门的机械收口在测试层——`crates/pony-agent-core/tests/tui_six_fixes_acceptance.rs`
       （优选行导航/确认、高亮随选中、分区间空行、Ctrl+F 重锚不漂移）。
+
+  【归属登记（2026-11-08）｜中断轮次正文进入下一轮上下文（取消路径补齐）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 只改取消收口写入**既有会话历史**的
+  assistant 文本来源，无新增对外接口、网络 IO、后台任务、LLM 调用、依赖、env 契约或持久化 schema；
+  不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由同维度声明）。
+  (2) 本轮 N-A 的结构性理由：变更发生在**轮次取消的收口参数装配**——
+      `runtime/turn_control.rs::cancel_stream_turn` 把本轮已产出的 assistant 正文（hop 正文累积器
+      `accumulated_turn_text` / 首轮真流式 delta 累积器 `streamed_assistant_text` /
+      决策完成后的 `first_decision.output_text`）而不是空串交给 `persist_cancelled_turn_outcome`，
+      落点仍是既有 `SessionStore::append_turn`（会话历史，格式不变）。不产生新的遥测事实、
+      指标/日志字段或 Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：`turn:cancelled` 事件的 `text` 与 `stopReason` 语义逐字不变，
+      只改变落库的 assistant 正文；无正文的取消点（决策发起前）仍沿用占位文案。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
+      行为门的机械收口在测试层——`crates/pony-agent-core/src/agent/runtime/tests.rs` 中的
+      `start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_requested_during_tool_execution`
+      （断言检查点含被中断 hop 正文）与 `start_turn_stream_can_emit_cancelled_when_stop_requested_before_plan`
+      （断言无正文时仍是占位文案）。

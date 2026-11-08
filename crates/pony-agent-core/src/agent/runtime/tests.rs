@@ -6714,6 +6714,12 @@ fn start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_reque
         cancelled_history_text.contains("List Tool call finished with status: ok."),
         "检查点必须记录被中断前已完成的工具活动，实际：{cancelled_history_text:?}"
     );
+    // 取消路径不再硬编码空正文：被中断轮**已产出**的 assistant 正文必须随检查点落盘，
+    // 否则下一轮会话历史里只剩占位文案，被中断那轮的真实产出（结论所在）直接丢失。
+    assert!(
+        cancelled_history_text.contains("先调用 workspace_list_files。"),
+        "检查点必须保留被中断轮已产出的 assistant 正文，实际：{cancelled_history_text:?}"
+    );
     let persisted_trace = snapshot
         .turn_trace_history
         .last()
