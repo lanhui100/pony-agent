@@ -279,6 +279,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # 门禁脚本 `scripts/check-cli-manifest-advances.mjs` 用 node 跑；显式钉版本，不赌 runner 预装。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - uses: Swatinem/rust-cache@v2
@@ -308,6 +313,36 @@ jobs:
             exit 1
           fi
           echo "PONY_CLI_VERSION=$ver" >> "$GITHUB_ENV"
+
+      # 发布侧 fail-closed 门禁（2026-11-08 遗留项）：清单 version 必须**严格大于**上一个已发布清单
+      # 的 version。清单里的 version = 该 tag 的 core 版本，而客户端发现口径是「版本以清单为准」——
+      # 若某次发版只 bump tauri 不 bump core（`release.mjs --target tauri` / `bump-version.ps1
+      # -Target tauri` 都允许），清单 version 与上一版相同，所有机器都会一直判定「已是最新」，本次
+      # CLI 构建永远不会被下载，且客户端侧无任何报错可看（只能靠这里拦）。
+      - name: Assert CLI version advances over previous release manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          repo="${{ github.repository }}"
+          cur="$PONY_CLI_VERSION"
+          prev="none"
+          # 与客户端发现同一口径回看：published 且非 draft，最多 20 条，取第一个含清单的 release。
+          for candidate in $(gh api "repos/$repo/releases?per_page=20" \
+              --jq '.[] | select(.draft == false) | .tag_name'); do
+            if [ "$candidate" = "$tag" ]; then
+              continue
+            fi
+            if gh release download "$candidate" --repo "$repo" \
+                 --pattern pony-cli-latest.json \
+                 --output /tmp/prev-cli-manifest.json --clobber 2>/dev/null; then
+              prev="$(python3 -c 'import json;print(json.load(open("/tmp/prev-cli-manifest.json"))["version"])')"
+              echo "previous manifest: $candidate -> $prev"
+              break
+            fi
+          done
+          node scripts/check-cli-manifest-advances.mjs --current "$cur" --previous "$prev"
 
       # 产物三件套：资产本体 + sha256sum 原生格式摘要 + `pony-cli-latest.json` 清单。
       - name: Build CLI assets and manifest

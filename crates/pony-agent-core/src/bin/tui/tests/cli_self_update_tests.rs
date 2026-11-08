@@ -801,6 +801,53 @@
         assert!(!install_path.exists(), "停滞下载不得写盘");
     }
 
+    // ── C7-16b：控制面 body 读取失败必须进重试闭环，且错误文案带底层原因 ─────────
+    //
+    // 现场缺口（2026-11-08）：body 读到一半被打断时，reqwest 对 body 流错误统一包成
+    // `error decoding response body`。旧实现先取响应头、再单独 `.text()`，这段失败既不在
+    // 重试闭环内，`{error}` 又只回显外层摘要 ⇒ 用户只看到一句与网络无关的结论。
+    #[test]
+    fn update_retries_when_manifest_body_read_fails_and_surfaces_the_cause() {
+        let dir = TempDir::new("e2e-body-read-fail");
+        let install_path = dir.join("pony");
+        // 声明 4096 字节、实发 12 字节后关连接 ⇒ 两次尝试都在 body 阶段失败。
+        let mock = MockServer::start(vec![(
+            "/manifest".to_string(),
+            Route::Truncated {
+                declared: 4096,
+                actual: b"{\"schema\":{".to_vec(),
+            },
+        )]);
+        let _env = update_env(&mock, &install_path, "/manifest", 30);
+
+        let error = pony_agent_core::agent::updater::run_self_update(
+            &pony_agent_core::agent::updater::UpdateOptions::default(),
+        )
+        .expect_err("body 截断必须失败");
+
+        let message = error.user_message();
+        let first_line = message.lines().next().unwrap_or_default();
+        assert_eq!(
+            error.code(),
+            "network",
+            "body 读失败属网络面（契约 C2 ⇒ 退出码 3）"
+        );
+        assert!(
+            first_line.contains("读取清单失败"),
+            "错误必须指明读取的是哪一份控制面文档，实际={first_line}"
+        );
+        assert_ne!(
+            first_line, "网络请求失败：读取清单失败：error decoding response body",
+            "错误必须连带展开 source 链（超时/对端提前关连接等原因），实际={first_line}"
+        );
+        let paths = mock.requests_snapshot();
+        assert!(
+            paths.len() >= 2,
+            "body 读失败必须走重试（≥2 次请求），实际={paths:?}"
+        );
+        assert!(!install_path.exists(), "失败路径不得写盘");
+    }
+
     // ── C7-17：体积上限（声明超限） ─────────────────────────────────────────
 
     #[test]
@@ -973,5 +1020,108 @@
                 .iter()
                 .any(|path| path.ends_with("/steal")),
             "不得真的去请求白名单外 host"
+        );
+    }
+
+    // ── 同号不同内容：不得谎报「已是最新」，也不得自动覆盖本机定制件 ────────────
+
+    /// 现场遗留项回归（2026-11-08）：本机装的是**同号但不同字节**的二进制（本地构建/补丁版），
+    /// 官方清单声明的也是同号。旧实现直接回「当前已是最新」= 谎报，且本地补丁版永远无法被
+    /// `pony update` 发现/纠正。现口径：如实报告内容不一致，**不下载、不覆盖**（覆盖需 --force）。
+    #[test]
+    fn update_same_version_with_different_bytes_reports_mismatch_without_overwriting() {
+        // Arrange：本机二进制 = 与本进程同号的伪造脚本；官方声明同号但字节不同。
+        let dir = TempDir::new("same-version-mismatch");
+        let install_path = dir.join("pony");
+        let local_bytes = fake_binary_script(env!("CARGO_PKG_VERSION"), &install_path);
+        std::fs::write(&install_path, &local_bytes).expect("必须能写入本机二进制");
+        let platform = test_platform();
+        let asset_name = format!("pony-tui_{}_test", env!("CARGO_PKG_VERSION"));
+        let official_bytes = b"OFFICIAL-RELEASE-BYTES-DIFFERENT-FROM-LOCAL".to_vec();
+        let manifest = manifest_json(
+            env!("CARGO_PKG_VERSION"),
+            platform,
+            &asset_name,
+            &sha256_hex(&official_bytes),
+            official_bytes.len() as u64,
+        );
+        let mock = MockServer::start(vec![
+            (
+                format!("/{asset_name}"),
+                Route::Bytes(official_bytes.clone()),
+            ),
+            ("/manifest".to_string(), Route::Json(manifest)),
+        ]);
+        let _env = update_env(&mock, &install_path, "/manifest", 30);
+
+        // Act
+        let code = run_update_action(false, false, None, false);
+
+        // Assert
+        assert_eq!(code, 0, "同号不同内容属「如实报告」而非错误面（契约 C2）");
+        assert_eq!(
+            std::fs::read(&install_path).expect("目标必须仍可读"),
+            local_bytes,
+            "不得自动覆盖本机定制件（覆盖必须显式 --force）"
+        );
+        let paths = mock.requests_snapshot();
+        assert!(
+            paths.iter().any(|path| path.ends_with("/manifest")),
+            "必须请求清单，实际请求序列={paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.ends_with(&asset_name)),
+            "同号不同内容时不得发起下载，实际请求序列={paths:?}"
+        );
+        let leftovers = dir.leftover_artifacts();
+        assert!(
+            leftovers.is_empty(),
+            "该路径不得残留临时文件/锁，实际残留={leftovers:?}"
+        );
+    }
+
+    /// 渲染单点：同一个版本号，必须能区分「内容不一致」与「已是最新」，且 `--json` 收据带
+    /// 机器可读字段 `content_mismatch`（下游据此判定，而不是靠中文文案）。
+    #[test]
+    fn same_version_receipt_distinguishes_content_mismatch_from_up_to_date() {
+        use pony_agent_core::agent::updater::UpdateOutcome;
+
+        let base = UpdateOutcome {
+            previous_version: "0.1.158".to_string(),
+            latest_version: "0.1.158".to_string(),
+            updated: false,
+            content_mismatch: true,
+            install_path: PathBuf::from("/home/u/.local/bin/pony"),
+            sha256: "a".repeat(64),
+        };
+
+        let mismatch_text = format_update_outcome(&base, false);
+        assert!(
+            mismatch_text.contains("内容不一致"),
+            "必须如实报告内容不一致，实际={mismatch_text}"
+        );
+        assert!(
+            mismatch_text.contains("pony update --force"),
+            "必须给出可执行的出路（--force），实际={mismatch_text}"
+        );
+        assert!(
+            !mismatch_text.contains("已是最新"),
+            "同号但内容不同绝不能报「已是最新」，实际={mismatch_text}"
+        );
+
+        let up_to_date = UpdateOutcome {
+            content_mismatch: false,
+            ..base.clone()
+        };
+        assert_eq!(
+            format_update_outcome(&up_to_date, false),
+            "当前已是最新版本（v0.1.158）",
+            "内容一致时保持原有「已是最新」文案不变"
+        );
+
+        let receipt = format_update_outcome(&base, true);
+        assert!(
+            receipt.contains("\"content_mismatch\":true"),
+            "`--json` 收据必须带 content_mismatch 字段，实际={receipt}"
         );
     }

@@ -59,6 +59,11 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 - `CliAction::Update { check: bool, force: bool, pin: Option<String>, json: bool }`，解析点：`CliAction` 枚举（tui.rs:13017-13026）+ `parse_cli_action`（:13028-13045）+ `main` 派发（:13308-13358）。
 - 语义：`pony update` = 检查→下载→校验→安装→**回验**（新二进制 `--version` 必须等于 manifest.version，否则回滚失败退出）；`--check` 只检查不安装；`--force` 允许降级/重装；`--pin <ver>` 指定版本（需该 release 含 CLI 清单，找不到即 MissingAsset）；`--json` stdout 只出行 JSON 收据。
 - 成功收据（人类可读）：`已更新 pony: v<old> → v<new>，sha256=<前12位>…，路径 <path>`；已最新：`当前已是最新版本（v<ver>）`。
+- **同号不同内容口径（2026-11-08，[ADR 0097](../docs/decisions/0097-cli-update-same-version-content-mismatch.md)）**：`manifest.version` 与当前版本**相等**时，必须再比对「本机目标文件的 sha256」与清单声明（`installed_matches_artifact`：只读、只有「读到且逐字相等」才算一致，缺失/不可读一律不一致 = fail-closed）：
+  - 一致 ⇒ `当前已是最新版本（v<ver>）`，退出码 0；
+  - 不一致（本地构建/补丁版、被替换过、或目标缺失）⇒ **不下载、不覆盖**，输出「本机 v<ver> 与官方发布件内容不一致…；如需覆盖为官方发布件：`pony update --force`」，退出码仍为 0；
+  - `--json` 收据新增字段 `content_mismatch: bool`，判定必须读该字段，**不得**靠中文字面量。
+  「版本号相同 ⇒ 同一份二进制」是被明令禁止的假设（实测：本地补丁版 0.1.158 与官方 0.1.158 同号，旧实现谎报「已是最新」）。
 - **退出码**：`0` 成功（含「已是最新」）；`1` 校验失败（sha256/size/回验不符）；`2` 用法错误；`3` 网络/HTTP/清单失败；`4` 安装失败（不可写/rename 失败）。与 `tui.rs` 既有 `exit` 口径共存，不改变其它子命令行为。
 - `/update` 斜杠命令：**保持既有 tag 口径的只读检查实现不变**（`perform_update_check` 零改动），仅升级指引追加一行「本机升级（CLI 二进制）：`pony update`」（**不自动替换用户的二进制**）。〔本条已被收口时裁决取代：见 §AMEND-4 第 5 条——`/update` 答「有没有新发布」，`pony update` 答「CLI 能否升」，强行复用会让其中一个说假话。〕
 
@@ -71,6 +76,7 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 4. 生成 `pony-cli-latest.json`：`{"schema":"pony-cli-manifest","version":"<ver>","generated_at":"<RFC3339 UTC>","platforms":{"linux-x86_64":{"asset":"pony-tui_<ver>_linux-x86_64","sha256":"<hex>","size":<bytes>}}}`；
 5. 在 release 已发布后 `gh release upload "$tag" <4 files> --clobber`；
 6. **收尾断言**：`gh api repos/$repo/releases/tags/$tag` 中必须出现 `pony-cli-latest.json` 且其 `version` == `$ver`，否则 job 失败。
+7. **清单版本递增门禁（2026-11-08，[ADR 0097](../docs/decisions/0097-cli-update-same-version-content-mismatch.md)）**：在**生成清单之前**，用与客户端发现同一口径回看（`published && !draft`，最多 20 条，第一个含 `pony-cli-latest.json` 的 release）取上游 `version`，跑 `node scripts/check-cli-manifest-advances.mjs --current "$PONY_CLI_VERSION" --previous "$prev"`；未**严格递增**（相等或回退）⇒ job 失败。理由：清单 `version` = 该 tag 的 core 版本，而 `release.mjs --target tauri` 这类只 bump tauri 的发版会让清单版本恒定 ⇒ 所有客户端永远判「已是最新」，本次 CLI 构建永远不会被下载，且**客户端侧没有任何报错可看**。上游无历史清单（首个清单）时放行。该 job 需 `actions/setup-node@v4`（node 22），不赌 runner 预装。
 - 不改动既有 Windows 桌面打包/`latest.json` 组装逻辑；`ponycli` 本次**不发布**（用户裁决 A）。
 
 ## C4 发现逻辑（客户端）
@@ -93,10 +99,10 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 
 | 维度 | 契约 |
 |---|---|
-| 控制面超时 | connect 5s / total 5s（沿用 `perform_update_check` 现有 5s 口径） |
-| 下载预算 | connect 10s、总预算 300s（`PONY_UPDATE_DOWNLOAD_BUDGET_SECS` 1..=1800，非法回退 300）；**这是对 `external_call_timeout_ms=3000` 的显式例外**，理由：28MB 级二进制不可能 3s 内下完；例外只作用于「制品下载」这一条路径，控制面仍受 5s 约束 |
+| 控制面超时 | connect 5s / **空闲读 10s** / 总预算 30s（2026-11-08 由 [ADR 0095](../docs/decisions/0095-cli-update-control-plane-timeout.md) 修订；旧口径 connect 5s / total 5s 会把代理链路上 175KB 的 releases 列表判成故障） |
+| 下载预算 | connect 10s、总预算 300s（`PONY_UPDATE_DOWNLOAD_BUDGET_SECS` 1..=1800，非法回退 300）；**这是对 `external_call_timeout_ms=3000` 的显式例外**，理由：28MB 级二进制不可能 3s 内下完；例外只作用于「制品下载」这一条路径，控制面仍受 30s 总预算约束 |
 | 体积上限 | `MAX_ARTIFACT_BYTES = 128MiB`；超限即 `TooLarge` 并删临时文件 |
-| 重试 | 清单/列表请求最多 2 次尝试（1 次重试，退避 500ms）；**制品下载不重试**（避免半包累积），失败即整轮失败 |
+| 重试 | 清单/列表请求最多 2 次尝试（1 次重试，退避 500ms），**覆盖网络错误、body 读取失败与 5xx**（4xx 直接判 HTTP 状态，不重试）；**制品下载不重试**（避免半包累积），失败即整轮失败 |
 | 并发 | 同目录 lock 文件 `<exe>.update.lock`（`OpenOptions::create_new`）；已存在 ⇒ `NotWritable("另一个 pony update 正在运行")`；无论成败都删除（含 panic 场景用 `Drop` 守卫） |
 | 资源释放 | 所有临时文件（`.new-<pid>`、`.part`、lock）在成功与失败路径都必须删除；下载失败不得留下可执行位残留 |
 | 日志 | 关键阶段单行：`[pony-update] phase=<discover|manifest|download|verify|install|verify_installed> status=<ok|fail> ...`；CLI 进程无内置 tracer，trace_id 缺失按既有 `logging_legacy_exempt` 口径处理并在 observability 声明里说明 |
@@ -113,7 +119,8 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 
 ## C7 测试契约（Test Agent 冻结；`updater.rs` 内 `#[cfg(test)] mod` + tui.rs 内 CLI 解析测试）
 
-- 单测（真断言，禁 skip）：semver 解析/比较边界（`v1.2.3`/`1.2.3`/`1.2`/`1.2.3.4`/空/非数字）；manifest 解析（合法、schema 错、sha 非 64hex、version 非法、空 platforms）；`select_platform_asset`/`plan_update`（有更新 / 已最新 / 降级拒绝 / force 降级 / 平台缺失错误串含已有平台 / pin 语义）；`verify_sha256`（对 / 错一字节 / 文件不存在）。
+- 单测（真断言，禁 skip）：semver 解析/比较边界（`v1.2.3`/`1.2.3`/`1.2`/`1.2.3.4`/空/非数字）；manifest 解析（合法、schema 错、sha 非 64hex、version 非法、空 platforms）；`select_platform_asset`/`plan_update`（有更新 / 已最新 / 降级拒绝 / force 降级 / 平台缺失错误串含已有平台 / pin 语义）；`verify_sha256`（对 / 错一字节 / 文件不存在）；`installed_matches_artifact`（一致 / 同号不同字节 / 大小写摘要 / 文件缺失，且**只读不删**——删除口径只属于下载件）。
+- 同号回归（ADR 0097）：`cli_self_update_tests::update_same_version_with_different_bytes_reports_mismatch_without_overwriting`（不下载、不覆盖、退出码 0）与 `same_version_receipt_distinguishes_content_mismatch_from_up_to_date`（渲染与 `--json` 的 `content_mismatch`）；发布侧门禁 `tests/cli-manifest-advances.spec.ts`（`npm run test:unit` 覆盖：递增 / 相等 / 回退 / 上游非法 / 首个清单）。
 - 集成（自建极简 HTTP mock：`std::net::TcpListener` 单线程、固定响应，**不得**复用 runtime 的私有 `MockHttpServer`）：
   1. 正常路径：清单→下载→校验→`install_atomically` 到临时目录 → 新文件内容与 sha 一致且具备可执行位；
   2. sha256 不匹配 ⇒ 目标文件**逐字节未变**且临时文件已清理；

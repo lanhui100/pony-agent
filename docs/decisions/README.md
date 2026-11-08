@@ -102,6 +102,8 @@
 - [0090 代码规模门禁采用「基线棘轮」，只判新增超限](0090-code-size-gate-ratchet.md)
 - [0091 删除单轮累计墙钟预算，止损下沉到能力层](0091-turn-wall-clock-removal.md)
 - [0094 herdr 复用器变量名对齐 与 会话索引行丢失自愈](0094-tui-multiplexer-env-and-session-row-heal.md)
+- [0095 `pony update` 控制面改用空闲读超时 + 30s 总预算，body 读取纳入重试](0095-cli-update-control-plane-timeout.md)
+- [0097 `pony update` 同号不同内容不得谎报「已是最新」，发布侧清单版本必须严格递增](0097-cli-update-same-version-content-mismatch.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

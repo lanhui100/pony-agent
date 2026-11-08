@@ -10456,7 +10456,7 @@ fn update_help_string() -> String {
     format!(
         "pony update {} — 把本机 pony 二进制升级到最新 CLI 版本\n\n\
 用法: pony update [选项]\n\n\
-选项:\n  --check                只检查是否有更新，不下载、不安装\n  --force                允许降级 / 同版本重装（默认拒绝降级）\n  --pin <版本>           指定目标 CLI 版本（core 版本线，如 0.1.157；降级需同时给 --force）\n  --json                 stdout 只输出一行 JSON 收据（日志一律走 stderr）\n  --help, -h             显示本帮助后退出\n\n\
+选项:\n  --check                只检查是否有更新，不下载、不安装\n  --force                允许降级 / 同版本重装（默认拒绝降级）；版本相同但本机内容与官方件不同时，也要给 --force 才会覆盖\n  --pin <版本>           指定目标 CLI 版本（core 版本线，如 0.1.157；降级需同时给 --force）\n  --json                 stdout 只输出一行 JSON 收据（日志一律走 stderr）\n  --help, -h             显示本帮助后退出\n\n\
 退出码: 0 成功（含「已是最新」）· 1 校验失败（sha256 / 回验 / 回验超时）· 2 用法错误（含拒绝降级）\n        3 网络 / HTTP / 清单 / 无可用平台资产 · 4 安装失败（目标不可写 / 并发锁 / rename 失败）\n\n\
 环境变量（非法值一律回退默认）:\n  PONY_UPDATE_API_BASE               默认 https://api.github.com\n  PONY_UPDATE_REPO                   默认 lanhui100/pony-agent\n  PONY_UPDATE_MANIFEST_URL           指定清单地址（镜像/测试；http 需同时设 ALLOW_INSECURE）\n  PONY_UPDATE_ALLOW_INSECURE=1       仅与 MANIFEST_URL 同时设置时放开 http/localhost\n  PONY_UPDATE_DOWNLOAD_BUDGET_SECS   制品下载预算，默认 300，范围 1..=1800\n  PONY_UPDATE_INSTALL_PATH           指定安装目标（测试/CI 用；默认当前可执行文件）\n\n\
 完整性: 强制校验清单 sha256 与字节数，失败不触碰现有二进制；安装后跑新二进制 --version 回验（10s 超时即回滚）。\n\
@@ -10667,41 +10667,60 @@ impl Drop for ObservabilityBootstrap {
 ///
 /// 返回进程退出码：0 成功（含「已是最新」）/ 1 校验失败 / 2 用法错误 / 3 网络·HTTP·清单失败 /
 /// 4 安装失败。
+///
+/// 成功收据的渲染单点：三种状态（已安装 / 同号但内容不一致 / 已是最新或发现新版）只在这里
+/// 出文案，`run_update_action` 只负责打印 —— 否则「同号不同内容」这条新判定无法被用例断言。
+fn format_update_outcome(
+    outcome: &pony_agent_core::agent::updater::UpdateOutcome,
+    json: bool,
+) -> String {
+    if json {
+        // `--json`：stdout 只出一行收据（阶段日志一律走 stderr）。
+        return serde_json::json!({
+            "ok": true,
+            "previous": outcome.previous_version,
+            "latest": outcome.latest_version,
+            "updated": outcome.updated,
+            "content_mismatch": outcome.content_mismatch,
+            "path": outcome.install_path.display().to_string(),
+            "sha256": outcome.sha256,
+        })
+        .to_string();
+    }
+    if outcome.updated {
+        let short_sha: String = outcome.sha256.chars().take(12).collect();
+        return format!(
+            "已更新 pony: v{} → v{}，sha256={short_sha}…，路径 {}",
+            outcome.previous_version,
+            outcome.latest_version,
+            outcome.install_path.display()
+        );
+    }
+    if outcome.content_mismatch {
+        // 版本同号 ≠ 同一份二进制：本地构建/补丁版、被手工替换过的二进制都同号。
+        // 这里既不能报「已是最新」（谎报），也不自动覆盖（毁用户本机定制件）。
+        return format!(
+            "本机 v{} 与官方发布件内容不一致（本地构建/补丁版，或被替换过）：{}\n未自动覆盖；如需覆盖为官方发布件：pony update --force",
+            outcome.latest_version,
+            outcome.install_path.display()
+        );
+    }
+    if is_newer_semver(&outcome.latest_version, &outcome.previous_version) {
+        return format!(
+            "发现新版本 v{}（当前 v{}），运行 pony update 安装",
+            outcome.latest_version, outcome.previous_version
+        );
+    }
+    format!("当前已是最新版本（v{}）", outcome.latest_version)
+}
+
 fn run_update_action(check: bool, force: bool, pin: Option<String>, json: bool) -> i32 {
     use pony_agent_core::agent::updater::{run_self_update, UpdateOptions};
 
     let options = UpdateOptions { check, force, pin };
     match run_self_update(&options) {
         Ok(outcome) => {
-            if json {
-                // `--json`：stdout 只出一行收据（阶段日志一律走 stderr）。
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "ok": true,
-                        "previous": outcome.previous_version,
-                        "latest": outcome.latest_version,
-                        "updated": outcome.updated,
-                        "path": outcome.install_path.display().to_string(),
-                        "sha256": outcome.sha256,
-                    })
-                );
-            } else if outcome.updated {
-                let short_sha: String = outcome.sha256.chars().take(12).collect();
-                println!(
-                    "已更新 pony: v{} → v{}，sha256={short_sha}…，路径 {}",
-                    outcome.previous_version,
-                    outcome.latest_version,
-                    outcome.install_path.display()
-                );
-            } else if is_newer_semver(&outcome.latest_version, &outcome.previous_version) {
-                println!(
-                    "发现新版本 v{}（当前 v{}），运行 pony update 安装",
-                    outcome.latest_version, outcome.previous_version
-                );
-            } else {
-                println!("当前已是最新版本（v{}）", outcome.latest_version);
-            }
+            println!("{}", format_update_outcome(&outcome, json));
             0
         }
         Err(error) => {

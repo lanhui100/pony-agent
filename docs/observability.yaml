@@ -656,6 +656,43 @@ note: >-
   (5) 声明批准记录：本段归属登记随 wave-67 提交一并批准——三路对抗审查（L3-A PASS / L3-B FAIL→修 / L3-P FAIL→修）与独立 Join 汇总
       （PASS，4 BLOCKING 全 CLOSED）之后落定，收据见 `.dev-team/review-join-cli-update.json`；NFR 例外登记见
       `.dev-team/nfr-baseline-wave67.json` 的 `download_budget`。 [decl-change-approved]
+  【fix-cli-update-timeout 归属登记（2026-11-08）｜控制面改为「空闲读超时 + 30s 总预算」，body 读取纳入重试（ADR 0095）】
+  一行结论：**本次只改既有出网路径的时限与失败分类，不新增接口、出网、后台任务或观测面**，四维归属维持不变。
+  (1) 四维归属：tracing applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`）；issues applicable
+      （落点不变 `crates/pony-agent-core/src/agent/ponysentry/client.rs`，本次不新增上报面）；metrics / logs 仍结构性 N-A
+      （理由同本文档维度声明：桌面与终端进程随用户启停、无常驻监听地址、无 Service，Prometheus pull 与节点侧采集前提不成立）。
+  (2) 变更事实：控制面（`GET {api_base}/repos/{repo}/releases` 与清单）由「connect 5s / total 5s」改为
+      「connect 5s / 空闲读 10s / 总预算 30s」；重试闭环由「只包发送」扩大到「发送 + body 读取 + 5xx」；
+      `UpdateError` 文案按 reqwest 的 `source` 链展开（旧文案只剩 `error decoding response body`，现场不可诊断）。
+      阶段日志的格式与出口不变（仍是 stderr 单行 `[pony-update] phase=… status=…`）。
+  (3) 收口点：不新增 enforcement_point（无新的网络出口或异常边界）；`cli_update_artifact` 必经点不变。
+  (4) 行为门：`agent::updater::tests::control_plane_budget_is_read_idle_based_not_five_second_total`、
+      `error_chain_flattens_nested_sources_into_one_line`，以及
+      `cli_self_update_tests::update_retries_when_manifest_body_read_fails_and_surfaces_the_cause`
+      （截断 body ⇒ 请求 ≥2 次且文案必须带 source 链），运行口径同本段上一区块。
+  (5) 声明变更批准：本段随修复同提交落定；按 D1 规则，该提交的提交信息必须携带 `[decl-change-approved]`，
+      并需一名评审确认（本段尚未经三路对抗审查）。
+  【cli-update-same-version-mismatch 归属登记（2026-11-08）｜同号内容比对 + 发布侧清单版本递增门禁（ADR 0097）】
+  一行结论：**只改既有 `pony update` 的判定口径与发布侧 CI 门禁，不新增接口面之外的出网、后台任务或观测面**，四维归属维持不变。
+  (1) 四维归属：tracing applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`，本次无新增键）；
+      issues applicable（落点不变 `crates/pony-agent-core/src/agent/ponysentry/client.rs`，本次不新增上报面）；
+      metrics / logs 仍结构性 N-A（理由同本文档维度声明：桌面与终端进程随用户启停、无常驻监听地址、无 Service，
+      Prometheus pull 与节点侧日志采集的结构前提均不成立）。
+  (2) 变更事实：`is_same` 分支内新增**本机目标文件只读 sha256 比对**（`installed_matches_artifact`，绝不删文件）：
+      同号且内容逐字一致才判「已是最新」；不一致（本地构建/补丁版/目标被替换/目标缺失）如实报告，并经
+      `--json` 收据新增字段 `content_mismatch` 暴露，**不下载、不覆盖**（覆盖需显式 `--force`）。
+      阶段日志的格式、出口与六个阶段名**不变**（仍是 stderr 单行 `[pony-update] phase=… status=…`），
+      故不新增日志出口、不改度量面。发布侧新增 CI 步骤只跑 `gh api` 读 release 列表/资产与仓库内 node 脚本，
+      **不产生产品运行时的新增出网路径**。
+  (3) 收口点：不新增 enforcement_point（产品运行时无新的网络出口或异常边界）；`cli_update_artifact` 必经点不变；
+      新增发布侧门禁 `scripts/check-cli-manifest-advances.mjs`（退出码 0 通过 / 1 未递增或版本非法 / 2 用法错误），
+      失败即 release job 红（拦住「清单 version 未递增 ⇒ 客户端永远已是最新」这种客户端不可观测的失败）。
+  (4) 行为门：`agent::updater::tests::installed_matches_artifact_is_read_only_and_fails_closed`、
+      `cli_self_update_tests::update_same_version_with_different_bytes_reports_mismatch_without_overwriting`、
+      `same_version_receipt_distinguishes_content_mismatch_from_up_to_date`，以及 `tests/cli-manifest-advances.spec.ts`；
+      运行口径同本段上一区块（`cargo test -p pony-agent-core --lib` / `--bin pony cli_self_update` / `npm run test:unit`）。
+  (5) 声明变更批准：本段随修复同提交落定；按 D1 规则，该提交的提交信息必须携带 `[decl-change-approved]`，
+      并需一名评审确认（本段尚未经三路对抗审查）。
   【ADR 0091 归属登记（2026-11-07）｜删除单轮累计 900s 墙钟，止损下沉能力层】
   一行结论：**本次只做减法（删除一个纯本地计时闸与其 env），不新增接口、出网、后台任务或观测面**，
   故四维归属维持不变：tracing applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`，

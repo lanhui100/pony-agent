@@ -46,8 +46,13 @@ const ALLOW_INSECURE_ENV: &str = "PONY_UPDATE_ALLOW_INSECURE";
 // ── 网络与重定向常量（契约 C4 / C5） ───────────────────────────────────────
 /// 控制面（列表 / 清单）连接超时：沿用 `/update` 既有 5s 口径。
 const CONTROL_PLANE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// 控制面整体超时：5s。
-const CONTROL_PLANE_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
+/// 控制面空闲读超时：10s。判据是「任意 10s 内没有字节到达」，而不是整段 body 的累计耗时
+/// —— 反代/代理链路上 175KB 的 releases 列表实测要 1.7~3.4s，只看累计耗时必然误杀。
+const CONTROL_PLANE_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// 控制面整体预算：30s（连接 + ≤5 跳重定向 + body 全量）。旧值 5s 会把「慢」误判成「错」：
+/// body 读到一半被总超时打断后，reqwest 对 body 流错误统一走 `error::decode`，只报
+/// `error decoding response body`（与网络/代理毫无字面关联），用户拿到的是不可诊断的结论。
+const CONTROL_PLANE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// 制品下载连接超时：10s（总预算由 `tokio::time::timeout` 包裹整段，见 C5 例外说明）。
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 手动跟随即的最多重定向跳数（契约 C4：>5 跳即失败）。
@@ -136,6 +141,10 @@ pub struct UpdateOutcome {
     pub latest_version: String,
     /// `false` = 未安装（`--check`、或当前已是最新）；`true` = 已下载并安装成功。
     pub updated: bool,
+    /// 仅当「版本相同但本机字节 ≠ 清单声明」时为 `true`：这是**本地构建/补丁版或被替换过的
+    /// 二进制**，既不能算「已是最新」（旧实现会在此谎报 up-to-date，导致补丁版永远无法被
+    /// `pony update` 发现），也不允许自动覆盖（不自作主张毁掉用户本机定制件）。出路是 `--force`。
+    pub content_mismatch: bool,
     pub install_path: PathBuf,
     pub sha256: String,
 }
@@ -327,10 +336,10 @@ pub fn plan_update(
     })
 }
 
-/// 流式校验文件 sha256（64KiB 块读，禁止整文件进内存）。
+/// 流式计算文件 sha256（64KiB 块读，禁止整文件进内存；**只读，不改动任何文件**）。
 ///
-/// 失败条件：文件不存在/不可读 ⇒ `Io`；摘要不符 ⇒ `Signature`（此时调用方**不得**触碰原二进制）。
-pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), UpdateError> {
+/// 失败条件：文件不存在/不可读 ⇒ `Io`。
+pub fn hash_file_sha256(path: &Path) -> Result<String, UpdateError> {
     let mut file = std::fs::File::open(path).map_err(|error| {
         UpdateError::Io(format!("无法打开待校验文件 {}：{error}", path.display()))
     })?;
@@ -345,7 +354,25 @@ pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), UpdateError>
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// 判定「本机目标文件内容 == 清单声明的制品」：只读哈希，**绝不改动目标**。
+///
+/// 口径（调用方必须按此处理）：**只有**读到文件且摘要逐字相等才算一致；文件缺失 / 不可读 /
+/// 摘要不等一律视为「不一致」——自更新里「无法证明一致」绝不能当成「已是最新」。
+pub fn installed_matches_artifact(install_path: &Path, expected_hex: &str) -> bool {
+    match hash_file_sha256(install_path) {
+        Ok(actual) => actual == expected_hex.trim().to_ascii_lowercase(),
+        Err(_) => false,
+    }
+}
+
+/// 流式校验文件 sha256（64KiB 块读，禁止整文件进内存）。
+///
+/// 失败条件：文件不存在/不可读 ⇒ `Io`；摘要不符 ⇒ `Signature`（此时调用方**不得**触碰原二进制）。
+pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), UpdateError> {
+    let actual = hash_file_sha256(path)?;
     let expected = expected_hex.trim().to_ascii_lowercase();
     if actual != expected {
         // 冻结契约：摘要不符的下载产物必须当场丢弃（防空壳「校验失败却把坏制品留在盘上」
@@ -505,10 +532,17 @@ async fn run_self_update_async(options: &UpdateOptions) -> Result<UpdateOutcome,
     let asset_url = asset_download_url(&resolved, &config, &plan.asset)?;
 
     if plan.is_same && !options.force {
+        // 「版本相同」只说明 semver 同号，不说明本机跑的就是官方发布件：本地 `cargo build` 装的
+        // 补丁版、被手工替换过的二进制都同号。旧实现直接回「已是最新」= 谎报，且把自愈通路掐断
+        // （实测：装了我们补丁版的 0.1.158 永远拿不到官方 0.1.158，也无从发现差异）。故同号必须
+        // 再用**内容哈希**判定；不一致时**不自动覆盖**（不自作主张毁掉本机定制件），只如实报告，
+        // 出路是 `--force`。
+        let content_mismatch = !installed_matches_artifact(&install_path, &plan.sha256);
         return Ok(UpdateOutcome {
             previous_version: current_version,
             latest_version: plan.version,
             updated: false,
+            content_mismatch,
             install_path,
             sha256: plan.sha256,
         });
@@ -518,6 +552,7 @@ async fn run_self_update_async(options: &UpdateOptions) -> Result<UpdateOutcome,
             previous_version: current_version,
             latest_version: plan.version,
             updated: false,
+            content_mismatch: false,
             install_path,
             sha256: plan.sha256,
         });
@@ -589,6 +624,7 @@ async fn run_self_update_async(options: &UpdateOptions) -> Result<UpdateOutcome,
                 previous_version: current_version,
                 latest_version: plan.version,
                 updated: true,
+                content_mismatch: false,
                 install_path,
                 sha256: plan.sha256,
             })
@@ -731,6 +767,7 @@ fn build_control_plane_client(config: &UpdateConfig) -> Result<reqwest::Client, 
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(config.user_agent.clone())
         .connect_timeout(CONTROL_PLANE_CONNECT_TIMEOUT)
+        .read_timeout(CONTROL_PLANE_READ_TIMEOUT)
         .timeout(CONTROL_PLANE_TOTAL_TIMEOUT)
         .build()
         .map_err(|error| UpdateError::Network(format!("HTTP 客户端初始化失败：{error}")))
@@ -766,10 +803,12 @@ async fn get_following_redirects(
         if let Some(accept) = accept {
             request = request.header(reqwest::header::ACCEPT, accept);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| UpdateError::Network(format!("请求 {current} 失败：{error}")))?;
+        let response = request.send().await.map_err(|error| {
+            UpdateError::Network(format!(
+                "请求 {current} 失败：{}",
+                describe_error_chain(&error)
+            ))
+        })?;
         if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             let location = response
                 .headers()
@@ -797,25 +836,81 @@ async fn get_following_redirects(
     )))
 }
 
-/// 列表 / 清单 GET：网络错误与 5xx 各重试 1 次（退避 500ms）；4xx 直接返回给调用方判 HTTP 状态。
-async fn get_with_retry(
+/// 把错误本体与 `source` 链拼成一行：reqwest 的 `Display` 只给最外层摘要
+/// （body 流错误统一是 `error decoding response body`），真正的「operation timed out」
+/// / 对端提前关连接等原因全在 source 里 —— 不展开等于把诊断信息扔掉。
+fn describe_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut segments: Vec<String> = Vec::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = current {
+        let text = cause.to_string();
+        if !text.is_empty() && segments.last() != Some(&text) {
+            segments.push(text);
+        }
+        current = cause.source();
+    }
+    if segments.is_empty() {
+        "未知错误".to_string()
+    } else {
+        segments.join("：")
+    }
+}
+
+/// 一次控制面尝试的失败分类：`Retryable` = 网络 / body 读失败与 5xx（可重试一次），
+/// `Fatal` = 4xx（HTTP 状态本身即结论，重试无意义）。
+enum ControlPlaneAttemptError {
+    Retryable(UpdateError),
+    Fatal(UpdateError),
+}
+
+/// 单次控制面 GET，并在这里读完 body —— body 读取放进重试闭环内，才能被 `get_control_plane_body`
+/// 的第二次尝试覆盖。
+async fn read_control_plane_body_once(
     client: &reqwest::Client,
     url: &str,
+    label: &str,
     config: &UpdateConfig,
     accept: Option<&str>,
-) -> Result<reqwest::Response, UpdateError> {
+) -> Result<String, ControlPlaneAttemptError> {
+    let response = get_following_redirects(client, url, config, accept)
+        .await
+        .map_err(ControlPlaneAttemptError::Retryable)?;
+    let status = response.status();
+    if status.is_server_error() {
+        return Err(ControlPlaneAttemptError::Retryable(
+            UpdateError::HttpStatus(status.as_u16()),
+        ));
+    }
+    if !status.is_success() {
+        return Err(ControlPlaneAttemptError::Fatal(UpdateError::HttpStatus(
+            status.as_u16(),
+        )));
+    }
+    response.text().await.map_err(|error| {
+        ControlPlaneAttemptError::Retryable(UpdateError::Network(format!(
+            "读取{label}失败：{}",
+            describe_error_chain(&error)
+        )))
+    })
+}
+
+/// 列表 / 清单 GET：网络错误、body 读失败与 5xx 各重试 1 次（退避 500ms）；4xx 直接判 HTTP 状态。
+///
+/// body 读取必须留在重试闭环内：否则「响应头到了、body 中途被打断」会绕过重试，且用户只剩
+/// reqwest 的 `error decoding response body` 摘要（现场工单即此形态）。
+async fn get_control_plane_body(
+    client: &reqwest::Client,
+    url: &str,
+    label: &str,
+    config: &UpdateConfig,
+    accept: Option<&str>,
+) -> Result<String, UpdateError> {
     let mut last_error: Option<UpdateError> = None;
     for attempt in 0..2 {
-        match get_following_redirects(client, url, config, accept).await {
-            Ok(response) => {
-                if response.status().is_server_error() && attempt == 0 {
-                    last_error = Some(UpdateError::HttpStatus(response.status().as_u16()));
-                    tokio::time::sleep(RETRY_BACKOFF).await;
-                    continue;
-                }
-                return Ok(response);
-            }
-            Err(error) => {
+        match read_control_plane_body_once(client, url, label, config, accept).await {
+            Ok(body) => return Ok(body),
+            Err(ControlPlaneAttemptError::Fatal(error)) => return Err(error),
+            Err(ControlPlaneAttemptError::Retryable(error)) => {
                 if attempt == 0 {
                     last_error = Some(error);
                     tokio::time::sleep(RETRY_BACKOFF).await;
@@ -848,14 +943,14 @@ async fn fetch_releases(
     config: &UpdateConfig,
 ) -> Result<Vec<ReleaseInfo>, UpdateError> {
     let url = format!("{}/repos/{}/releases?per_page=20", config.api_base, config.repo);
-    let response = get_with_retry(client, &url, config, Some("application/vnd.github+json")).await?;
-    if !response.status().is_success() {
-        return Err(UpdateError::HttpStatus(response.status().as_u16()));
-    }
-    let body = response
-        .text()
-        .await
-        .map_err(|error| UpdateError::Network(format!("读取发布列表失败：{error}")))?;
+    let body = get_control_plane_body(
+        client,
+        &url,
+        "发布列表",
+        config,
+        Some("application/vnd.github+json"),
+    )
+    .await?;
     let value: Value = serde_json::from_str(&body)
         .map_err(|error| UpdateError::Manifest(format!("发布列表 JSON 解析失败：{error}")))?;
     let entries = value
@@ -898,20 +993,14 @@ async fn fetch_manifest(
     config: &UpdateConfig,
     manifest_url: &str,
 ) -> Result<CliManifest, UpdateError> {
-    let response = get_with_retry(
+    let body = get_control_plane_body(
         client,
         manifest_url,
+        "清单",
         config,
         Some("application/vnd.github+json"),
     )
     .await?;
-    if !response.status().is_success() {
-        return Err(UpdateError::HttpStatus(response.status().as_u16()));
-    }
-    let body = response
-        .text()
-        .await
-        .map_err(|error| UpdateError::Network(format!("读取清单失败：{error}")))?;
     parse_cli_manifest(&body)
 }
 
@@ -1038,7 +1127,7 @@ async fn download_to_file(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| {
             let _ = std::fs::remove_file(dest);
-            UpdateError::Network(format!("下载流中断：{error}"))
+            UpdateError::Network(format!("下载流中断：{}", describe_error_chain(&error)))
         })?;
         written = written.saturating_add(chunk.len() as u64);
         if written > MAX_ARTIFACT_BYTES || written > plan.size {
@@ -1691,6 +1780,53 @@ mod tests {
         );
     }
 
+    /// 同号不同内容判定（`installed_matches_artifact`）：**只读**、绝不删文件，且
+    /// 「无法证明一致」（缺失/不可读）必须判为不一致 —— 自更新里它决定能不能说「已是最新」。
+    #[test]
+    fn installed_matches_artifact_is_read_only_and_fails_closed() {
+        // Arrange：本机二进制（模拟本地构建/补丁版）与官方声明摘要。
+        let dir = TempDir::new("installed-match");
+        let path = dir.join("pony");
+        let payload = b"LOCAL-PATCHED-BINARY";
+        std::fs::write(&path, payload).expect("必须能写入本机二进制");
+        let official = sha256_hex(payload);
+
+        // ① 内容与声明逐字相同 ⇒ true，且文件原样保留。
+        assert!(
+            installed_matches_artifact(&path, &official),
+            "内容与声明逐字节相同时必须判为一致"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("目标必须仍可读"),
+            payload.to_vec(),
+            "判定必须只读，不得改动本机二进制"
+        );
+
+        // ② 同号但内容不同 ⇒ false，且**不得**删文件。这是与 `verify_sha256` 的关键差异：
+        //    后者为丢弃坏下载件而删文件，前者面对的是用户正在运行的二进制，删掉就是灾难。
+        let other = sha256_hex(b"OFFICIAL-RELEASE-BINARY");
+        assert!(
+            !installed_matches_artifact(&path, &other),
+            "内容与声明不同时必须判为不一致（不得谎报已是最新）"
+        );
+        assert!(
+            path.exists(),
+            "判定过程绝不允许删除本机二进制（删除口径只属于 verify_sha256 的下载件）"
+        );
+
+        // ③ 摘要大小写不敏感（与 parse_cli_manifest 的规范化口径一致）。
+        assert!(
+            installed_matches_artifact(&path, &official.to_uppercase()),
+            "大写摘要必须规范化后比较"
+        );
+
+        // ④ 文件缺失 ⇒ 不一致（fail-closed：无法证明一致就不能说「已是最新」）。
+        assert!(
+            !installed_matches_artifact(&dir.join("missing-pony"), &official),
+            "文件缺失必须判为不一致"
+        );
+    }
+
     /// 不可逆面保护（C6-1/C6-5）：摘要不符时**绝不触碰**既有二进制，且不残留任何
     /// `.new*` / `.part` 临时文件。
     #[test]
@@ -1843,6 +1979,55 @@ mod tests {
         assert!(
             entries.is_empty(),
             "只读目录内不得产生任何新文件（含临时文件），实际={entries:?}"
+        );
+    }
+
+    // ── 控制面预算与错误链（ADR 0095 的机械收口） ───────────────────────────
+
+    #[test]
+    fn control_plane_budget_is_read_idle_based_not_five_second_total() {
+        // 只锁「不许退回 5s 总预算」这一条：代理链路上 175KB 的 releases 列表实测 1.7~3.4s，
+        // 5s 总预算会把「慢」误判成「错」（现场工单即此形态）。
+        assert_eq!(CONTROL_PLANE_CONNECT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(CONTROL_PLANE_READ_TIMEOUT, Duration::from_secs(10));
+        assert!(
+            CONTROL_PLANE_TOTAL_TIMEOUT >= Duration::from_secs(30),
+            "控制面总预算不得低于 30s，实际={CONTROL_PLANE_TOTAL_TIMEOUT:?}"
+        );
+        assert!(
+            CONTROL_PLANE_TOTAL_TIMEOUT > CONTROL_PLANE_READ_TIMEOUT,
+            "总预算必须严格大于空闲读超时，否则读超时永远不生效"
+        );
+    }
+
+    #[test]
+    fn error_chain_flattens_nested_sources_into_one_line() {
+        #[derive(Debug)]
+        struct Cause;
+        impl std::fmt::Display for Cause {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("operation timed out")
+            }
+        }
+        impl std::error::Error for Cause {}
+
+        #[derive(Debug)]
+        struct Outer(Cause);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("error decoding response body")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        assert_eq!(
+            describe_error_chain(&Outer(Cause)),
+            "error decoding response body：operation timed out",
+            "外层摘要必须带上 source 链，否则用户拿不到可诊断结论"
         );
     }
 }

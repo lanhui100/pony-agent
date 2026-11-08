@@ -142,8 +142,10 @@
     "connect_timeout_ms": 10000,
     "max_artifact_bytes": 134217728,
     "retry_attempts": 0,
-    "control_plane_timeout_ms": 5000,
+    "control_plane_timeout_ms": 30000,
+    "control_plane_connect_timeout_ms": 5000,
+    "control_plane_read_timeout_ms": 10000,
     "control_plane_retry_attempts": 1,
-    "exception_rationale": "28MB 制品不可能 3s 内下完，例外只作用于制品下载路径，控制面仍受 5s 约束"
+    "exception_rationale": "28MB 制品不可能 3s 内下完，例外只作用于制品下载路径；控制面受 connect 5s / 空闲读 10s / 总预算 30s 约束（2026-11-08 由 ADR 0095 修订：旧值 5s 总预算会把代理链路上 175KB 的 releases 列表判成故障）"
   }
 }

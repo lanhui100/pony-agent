@@ -91,6 +91,8 @@ Status: implemented
 - **NFR**：制品下载对 `external_call_timeout_ms=3000` 是**显式例外**（28MB 不可能 3s 下完）：控制面仍 5s +
   1 次重试，制品下载单独预算 300s（上限 1800s，非法回退 300）、连接 10s、体积上限 128MiB、**不重试**
   （避免半包累积），落在 `.dev-team/nfr-baseline-wave67.json` 的 `download_budget`。
+  *（事实指针：控制面的「5s 总预算」已于 2026-11-08 由 [ADR 0095](0095-cli-update-control-plane-timeout.md)
+  修订为 connect 5s / 空闲读 10s / 总预算 30s，并把 body 读取纳入重试；本句保留为制定时的记录，不作现行口径。）*
 - **可观测性**：新增一条出网路径（发现 + 下载）与一个新的 CLI 子命令接口面，四维归属见 `docs/observability.yaml`
   的本条登记（含 `trace_id` 缺省豁免的显式声明）。阶段日志是 **stderr 上的单行 `[pony-update] phase=… status=…`**
    （六个阶段 ok/fail 都有），不写工作区日志文件；`--json` 时 stdout 只有一行收据，日志绝不污染 stdout。
