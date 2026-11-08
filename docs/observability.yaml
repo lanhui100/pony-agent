@@ -888,3 +888,40 @@ note: >-
   (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 本次未改动。
       行为门的机械收口在测试层——`crates/pony-agent-core/tests/session_read_from_log.rs`（8 用例，
       含核心证明「删索引行后仍可读」）。
+
+  【归属登记（2026-11-08）｜r1-dim6 维度 6 修复：F1/F2/F3（ADR 0101 首个审计 round）】
+  一行结论：四维归属不变，metrics / logs 维持结构性 N-A —— 变更只改**既有 tracing 出口的属性值域
+  与 resource 属性集**，不新增对外接口、网络 IO、后台任务或 LLM 调用；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing 仍 applicable（唯一落点仍是 `crates/pony-agent-core/src/agent/otel/mod.rs`）；
+      issues 未改动（落点仍 `agent/ponysentry/client.rs`）。
+  (2) 本轮 N-A 的结构性理由：三处修复都在既有 OTLP 导出路径上做属性级增量 ——
+      `resolve_resource_attributes` 多推一个 resource 键、`TurnTraceGuard::drop` 的值域多一个取值、
+      CLI 启动多一次本地注册表幂等登记。不产生新的遥测事实类型，也不产生新的采集端点。
+  (3) **属性契约变更（按 ADR 0068 登记为 additive）**：
+      - `langfuse.release` 由「仅 span 属性」扩为「span 属性 + resource 属性」（同源同值 = `service.version`）。
+        动因：Langfuse `createTraceEvent` 取 `spanAttributes[RELEASE] ?? resourceAttributes[RELEASE]`，
+        浅 trace 先到时 span 属性缺失 ⇒ trace.release 被覆写为 null（重放实测 9/9）。纯新增键，旧消费方零影响。
+      - `agent.turn.outcome` 值域由 `{error}` 扩为 `{error, degraded}`（**新增值**，不改变既有值的语义）：
+        `phase=completed` 且工具失败计数 > 0 ⇒ `degraded`（与既有 `agent.turn.degraded=true` 同源同域）；
+        其余失败路径逐字仍写 `error`；全成功轮次仍完全不输出该键。根 span `Status` 仍置 error，
+        Tempo 侧按根状态告警能力不变。动因：同一轮曾同时出现 `phase=completed` 与 `outcome=error`，
+        消费方无法用单键判结局（r1-dim6 A3）。
+      - CLI 侧 `workspace_id` 由恒 `None` 改为 `-w` 登记的注册表 id（与 TUI 启动路径同构）。
+        这不改任何属性契约，只修正「模型实际看到的 cwd」与宿主声明的一致性（r1-dim6 A1）。
+  (4) 收口点：不新增 enforcement_point；行为门的机械收口在测试层 ——
+      `crates/pony-agent-core/src/agent/otel/mod.rs` 的
+      `resource_attributes_default_to_crate_version_and_build_environment`（五键含 langfuse.release）、
+      `turn_error_status_message_uses_turn_error_prefix`（outcome 值域常量），
+      以及 `crates/pony-agent-core/tests/otel_resource_turn_status_test.rs`（PA154-T1 期望 degraded）。
+      端到端裁决由 `docs/audit/rounds/r1-dim6/tools/assert-dim6.sh` 退出码承担。
+
+  【归属登记（2026-11-08）｜ADR 0099 阶段 2-D：停写整包 blob，SQLite 退为纯索引】
+  一行结论：四维归属不变，metrics / logs 维持结构性 N-A —— 变更在**本地写路径形态**
+  （blob → 轻量索引行 + 日志命令流），无新增对外接口、网络 IO、后台任务、LLM 调用；
+  不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变）。
+  (2) 本轮 N-A 的结构性理由：写形态收窄不产生新的遥测事实；`session_fold_slow` 降级事实
+      沿用 2-B 的登记，未新增维度。
+  (3) 收口点：不新增 enforcement_point。行为门机械收口在
+      `crates/pony-agent-core/tests/session_stop_blob_write.rs`（7 用例，含「blob 字节数不随轮次增长」
+      与「重启前后逐会话 serde 逐字节相等」）。

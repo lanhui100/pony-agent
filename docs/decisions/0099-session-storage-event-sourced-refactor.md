@@ -199,7 +199,7 @@ Status: accepted
 1. **fold**：从会话日志重建 `SessionState`，纯函数 `fold(events) -> SessionState`，可 off-thread。
 2. **索引重建器**：`rebuild_index()` 扫全部会话文件，重建 `sessions`/`normalized_*`/`workspace`/`usage_ledger` 等派生视图；索引可删可建，删除不丢数据。
 3. **读切换灰度**：先双读比对（文件 fold vs SQLite 现有路径逐字段 diff），diff=0 连续 7 天后切读；SQLite 仍写但降级为缓存。
-4. **停写 blob**：`sessions.session_data` 停写，仅索引字段保留。
+4. ✅ **停写 blob（已完成，commit `e1249b5c`）**：有日志会话的 `sessions.session_data` 改为固定长度轻量索引行（763B，1 轮与 3 轮字节相等），仅保留索引字段 + 哨兵 `__index_only`；无日志存量会话继续走老路径（grandfather）。迁移策略保持 `NOT NULL`（不放宽为可空，避免 `row.get::<String>` 撞 `InvalidColumnType`）。2-B 的 `updated_at_ms` 过渡定序已删除——有日志会话**日志无条件为准**。同批闭合了因停写 blob 才暴露的写路径缺口（ReplaceAll/rename/archive 改走命令流、索引视图从 `normalized_*` 补全、observation 载荷回填、顶层 trace 改由日志 DAG 推导）。详见 [.agents/notes/implemented/architecture/2026-11-08-stop-writing-whole-store-blob.md](../../.agents/notes/implemented/architecture/2026-11-08-stop-writing-whole-store-blob.md)。
 5. **孤儿处置**：不再需要「孤儿回填」概念——文件即真相；SQLite 侧缺行由索引重建自动补齐。
 
 **门禁**：`fold-verify --all --fail-on-diff` 连续 7 天 diff=0；索引删除后重建，会话列表与逐会话内容 100% 一致；启动装载 ≤800ms。
