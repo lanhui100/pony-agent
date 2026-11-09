@@ -544,8 +544,14 @@ pub fn aggregate_sync_call_budget_ms(policy: &UpstreamPolicy) -> u64 {
 /// - `effective_policy`：`ProviderRegistryStore::upstream_policy()` 钳制后的生效值；
 /// - `clamped_fields`：逐字段列出 disk ≠ effective 的项，顺序固定为
 ///   `request_timeout_ms` → `decision_max_attempts` → `retry_budget_ms`；合法配置为 `[]`。
+///   **只表示「磁盘 vs 生效策略」的差异**，不表达聚合上限（见下两项）。
+/// - `aggregate_budget_ms`：`aggregate_sync_call_budget_ms(effective)` —— 整次同步调用跨
+///   attempt 的总时长上限（封顶 [`UPSTREAM_AGGREGATE_DEADLINE_MS_MAX`]）；
+/// - `per_attempt_effective_timeout_ms`：`min(effective.request_timeout_ms, aggregate_budget_ms)`
+///   —— 单次 attempt 真正可用的超时。审查 A3：缺这两项时，配置 `request_timeout_ms: 300000`
+///   会被报成「生效值」而与本进程实际被收紧到 180s 的事实不自洽。
 ///
-/// 只含三个策略字段，**不含任何密钥**（可安全打印到 stdout）。
+/// 只含策略字段，**不含任何密钥**（可安全打印到 stdout）。
 pub fn upstream_policy_report(
     raw: &UpstreamPolicy,
     effective: &UpstreamPolicy,
@@ -560,6 +566,8 @@ pub fn upstream_policy_report(
     if raw.retry_budget_ms != effective.retry_budget_ms {
         clamped_fields.push("retry_budget_ms");
     }
+    let aggregate_budget_ms = aggregate_sync_call_budget_ms(effective);
+    let per_attempt_effective_timeout_ms = effective.request_timeout_ms.min(aggregate_budget_ms);
     let policy_json = |policy: &UpstreamPolicy| {
         serde_json::json!({
             "request_timeout_ms": policy.request_timeout_ms,
@@ -571,6 +579,8 @@ pub fn upstream_policy_report(
         "disk_policy": policy_json(raw),
         "effective_policy": policy_json(effective),
         "clamped_fields": clamped_fields,
+        "aggregate_budget_ms": aggregate_budget_ms,
+        "per_attempt_effective_timeout_ms": per_attempt_effective_timeout_ms,
     })
 }
 

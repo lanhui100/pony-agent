@@ -511,6 +511,12 @@ impl SqliteSessionBackend {
     /// - `turn_events` 无消息事件 ⇒ 保持空（不造消息、不伪造成功）；
     /// - 事件读取复用后端 `load_turn_events`（seq 升序；坏 payload 降级为墓碑；IO 失败
     ///   contained 空），本函数只做「空壳 → 重建」这一步。
+    ///
+    /// PA-174 B1（审查整改）：重建按**活动血缘**过滤，不得合并全分支。`turn_events` 同时
+    /// 容纳 main 与 forsaken fork 的事件；全量取会把被放弃的 fork 轮次复活，而
+    /// `refresh_session_metadata` 会把结果写回索引（错误被持久化）。血缘判据复用
+    /// `history_from_branch_events`（内部即 `projection::fold_all_with_branches`）。
+    /// **拿不到血缘信息时宁可不重建**（保持空 + 结构化 warn），不猜测、不并集。
     pub(crate) fn rebuild_history_from_turn_events_when_projection_empty(
         &self,
         sessions: &mut HashMap<String, SessionState>,
@@ -528,12 +534,71 @@ impl SqliteSessionBackend {
         }
         let mut rebuilt = 0usize;
         for session_id in empty_ids {
-            let events: Vec<crate::agent::turn_event::TurnEvent> = self
-                .load_turn_events(session_id.as_str(), None)
-                .into_iter()
-                .map(|(_seq, _branch_id, event)| event)
+            let Some(state) = sessions.get(session_id.as_str()) else {
+                continue;
+            };
+            // 血缘信息：cursor 的活动分支 + 分支表 + 节点→分支映射（均来自索引行/投影）。
+            let active_branch = state.history_cursor.active_branch_id.clone();
+            let has_lineage = active_branch.is_some() || !state.history_branches.is_empty();
+            let initial_branch = active_branch.clone().unwrap_or_else(|| "main".to_string());
+            let branches = state.history_branches.clone();
+            let node_branch: HashMap<&str, &str> = state
+                .history_nodes
+                .iter()
+                .map(|node| (node.node_id.as_str(), node.branch_id.as_str()))
                 .collect();
-            let history = crate::agent::session::history_from_turn_events(&events);
+            // 有元数据却解析不出活动分支 ⇒ 血缘不可判定（宁可不重建）。
+            if let Some(active) = active_branch.as_deref() {
+                if !branches.is_empty() && !branches.iter().any(|b| b.branch_id == active) {
+                    eprintln!(
+                        "[pony-agent][session] history_rebuild_skipped: session={session_id} reason=unknown_active_branch active_branch={active}"
+                    );
+                    continue;
+                }
+            }
+            let raw_events = self.load_turn_events(session_id.as_str(), None);
+            if raw_events.is_empty() {
+                continue;
+            }
+            let history = if has_lineage {
+                // 空 branch_id 是旧形态（无分支概念）⇒ 归入活动血缘。
+                let events: Vec<(u64, String, crate::agent::turn_event::TurnEvent)> = raw_events
+                    .into_iter()
+                    .map(|(seq, branch_id, event)| {
+                        let branch_id = if branch_id.is_empty() {
+                            initial_branch.clone()
+                        } else {
+                            branch_id
+                        };
+                        (seq, branch_id, event)
+                    })
+                    .collect();
+                crate::agent::session::history_from_branch_events(
+                    &events,
+                    &initial_branch,
+                    &node_branch,
+                    &branches,
+                )
+            } else {
+                // 无血缘元数据：单分支（旧形态）照常重建；**多分支事件流无法判定**活动血缘
+                // ⇒ 保持空 + warn（绝不合并全分支）。
+                let distinct: std::collections::HashSet<&str> = raw_events
+                    .iter()
+                    .map(|(_seq, branch_id, _event)| branch_id.as_str())
+                    .filter(|branch_id| !branch_id.is_empty())
+                    .collect();
+                if distinct.len() > 1 {
+                    eprintln!(
+                        "[pony-agent][session] history_rebuild_skipped: session={session_id} reason=no_branch_lineage branches={distinct:?}"
+                    );
+                    continue;
+                }
+                let events: Vec<crate::agent::turn_event::TurnEvent> = raw_events
+                    .into_iter()
+                    .map(|(_seq, _branch_id, event)| event)
+                    .collect();
+                crate::agent::session::history_from_turn_events(&events)
+            };
             if history.is_empty() {
                 continue;
             }

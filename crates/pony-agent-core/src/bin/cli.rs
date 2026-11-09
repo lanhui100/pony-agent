@@ -1074,6 +1074,9 @@ fn print_usage(format: OutputFormat) {
     human!(format, "                             SQLite index is rebuilt by `sessions rebuild-index`.");
     human!(format, "                             manifest is not self-hashed; the event stream is");
     human!(format, "                             structurally re-validated (header/seq/eventCount)");
+    human!(format, "  ponycli config effective   One-line JSON: disk_policy vs effective_policy");
+    human!(format, "                             (+ clamped_fields, aggregate_budget_ms,");
+    human!(format, "                             per_attempt_effective_timeout_ms); no secrets");
     human!(format, "Sessions subcommand exit codes: 0 ok / 2 invalid bundle / 3 target exists / 4 degraded");
     human!(format, "");
     human!(format, "Exit codes: 0 success / 1 internal / 2 usage / 3 config / 4 provider-network");

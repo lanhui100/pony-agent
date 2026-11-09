@@ -67,6 +67,8 @@ pub use workspace_snapshot::WorkspaceSnapshotManager;
 // PA-174 P1：投影侧全空（`__index_only` + 零 `normalized_*` 行）时，装载侧用它与
 // `turn_events` 重建历史，避免重启后历史为零（空壳）。
 pub use history::history_from_turn_events;
+// PA-174 B1：按活动血缘过滤的重建入口（装载侧专用，不对外承诺）。
+pub(crate) use history::history_from_branch_events;
 
 pub use backend::{
     BackfillReport, CommitOutcome, PersistCommand, PersistCommandOutcome, SeparateTraceTableMode,

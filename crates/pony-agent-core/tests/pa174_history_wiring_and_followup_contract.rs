@@ -44,8 +44,8 @@ use pony_agent_core::agent::config::{
     UPSTREAM_AGGREGATE_DEADLINE_MS_MAX,
 };
 use pony_agent_core::agent::provider::{
-    ProviderAuthType, ProviderManager, ProviderMessage, ProviderProtocol, ProviderRequest,
-    ProviderRole,
+    ProviderAuthType, ProviderFailoverChain, ProviderManager, ProviderMessage, ProviderProtocol,
+    ProviderRequest, ProviderRole,
 };
 use pony_agent_core::agent::context::{
     ContextStateQuery, ContextStateRetriever, DefaultContextStateRetriever, DefaultTurnContextBuilder,
@@ -414,61 +414,54 @@ impl Drop for TempDbDir {
 /// ⚠ 契约盲点（Lead 已核验）：既有夹具总是写 `normalized_*` 行，掩盖了
 /// 「轻量索引行 + 零 normalized 行」这个态；本夹具**刻意只写 `sessions` + `turn_events`**。
 fn seed_index_only_session_with_turn_events(db_path: &std::path::Path) {
+    // 索引侧带**血缘信息**（activeBranchId = main）：真实事故会话是带 cursor 的
+    // `__index_only` 轻量行，不是「裸空行」——B1 的「无血缘信息」用例另有独立夹具。
+    let session_data = format!(
+        r#"{{"__index_only":true,"conversationId":"{P1_SESSION}","title":"P1 会话","summary":"","history":[],"turnCount":0,"lastReferencedFile":null,"historyCursor":{{"sessionId":"{P1_SESSION}","activeBranchId":"main","cursorVersion":0,"eventWatermark":6}},"historyBranches":[{{"branchId":"main","sessionId":"{P1_SESSION}","label":"main","createdAtMs":0,"updatedAtMs":0}}]}}"#
+    );
+    let events: Vec<(i64, &str, &str, &str)> = vec![
+        (1, "main", "user/message", r#"{"type":"user_message","turn_id":"turn-1","text":"上一轮问题"}"#),
+        (2, "main", "assistant/chunk", r#"{"type":"assistant_chunk","turn_id":"turn-1","step":1,"text":"半截增量"}"#),
+        (3, "main", "tool_result", r#"{"type":"tool_result","turn_id":"turn-1","step":1,"call_id":"call-1","status":"ok"}"#),
+        (4, "main", "assistant/message", r#"{"type":"assistant_message","turn_id":"turn-1","step":1,"text":"上一轮回答"}"#),
+        (5, "main", "turn_start", r#"{"type":"turn_start","turn_id":"turn-2"}"#),
+        (6, "main", "user/message", r#"{"type":"user_message","turn_id":"turn-2","text":"   "}"#),
+    ];
+    seed_session_with_events(db_path, P1_SESSION, &session_data, &events);
+}
+
+/// 通用夹具：`sessions` 轻量索引行（给定 `session_data`）+ 指定 `turn_events`。
+///
+/// `events` = `(seq, branch_id, event_type, payload)`，按给定顺序写入（seq 唯一）。
+fn seed_session_with_events(
+    db_path: &std::path::Path,
+    session_id: &str,
+    session_data: &str,
+    events: &[(i64, &str, &str, &str)],
+) {
     let conn = rusqlite::Connection::open(db_path)
-        .expect("PA-174 P1：必须能打开临时会话库");
+        .expect("PA-174：必须能打开临时会话库");
     conn.execute(
         "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data, version)
          VALUES (?1, ?2, ?3, ?4, 0)",
-        rusqlite::params![
-            P1_SESSION,
-            "P1 会话",
-            1_700_000_000_000_i64,
-            r#"{"__index_only":true,"conversationId":"pa174-p1-session","title":"P1 会话","summary":"","history":[],"turnCount":0,"lastReferencedFile":null}"#
-        ],
+        rusqlite::params![session_id, "夹具会话", 1_700_000_000_000_i64, session_data],
     )
-    .expect("PA-174 P1：必须能写入轻量索引行");
-
-    // 事件剧本：user/message → assistant/message，外加工具结果 / trace / 空文本干扰项。
-    let events: Vec<(&str, &str, i64)> = vec![
-        (
-            "user/message",
-            r#"{"type":"user_message","turn_id":"turn-1","text":"上一轮问题"}"#,
-            1,
-        ),
-        (
-            "assistant/chunk",
-            r#"{"type":"assistant_chunk","turn_id":"turn-1","step":1,"text":"半截增量"}"#,
-            2,
-        ),
-        (
-            "tool_result",
-            r#"{"type":"tool_result","turn_id":"turn-1","step":1,"call_id":"call-1","status":"ok"}"#,
-            3,
-        ),
-        (
-            "assistant/message",
-            r#"{"type":"assistant_message","turn_id":"turn-1","step":1,"text":"上一轮回答"}"#,
-            4,
-        ),
-        (
-            "turn_start",
-            r#"{"type":"turn_start","turn_id":"turn-2"}"#,
-            5,
-        ),
-        (
-            "user/message",
-            r#"{"type":"user_message","turn_id":"turn-2","text":"   "}"#,
-            6,
-        ),
-    ];
-    for (event_type, payload, seq) in events {
+    .expect("PA-174：必须能写入轻量索引行");
+    for (seq, branch_id, event_type, payload) in events {
         conn.execute(
             "INSERT OR REPLACE INTO turn_events
                 (session_id, turn_id, branch_id, seq, event_type, payload, created_at_ms)
-             VALUES (?1, 'turn-1', 'main', ?2, ?3, ?4, ?5)",
-            rusqlite::params![P1_SESSION, seq, event_type, payload, 1_700_000_000_000_i64],
+             VALUES (?1, 'turn-1', ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                session_id,
+                branch_id,
+                seq,
+                event_type,
+                payload,
+                1_700_000_000_000_i64
+            ],
         )
-        .expect("PA-174 P1：必须能写入 turn_events");
+        .expect("PA-174：必须能写入 turn_events");
     }
 }
 
@@ -709,6 +702,111 @@ fn p1_rebuilt_history_reaches_request() {
     );
 }
 
+// ── B1：重建历史必须尊重**分支血缘**（两位审查 BLOCKING） ────────────────────────────
+
+const B1_SESSION: &str = "pa174-b1-session";
+
+/// B1 夹具：索引里明确「当前血缘 = main」，`turn_events` 混入已放弃的 `fork-2` 分支。
+fn seed_branch_lineage_fixture(db_path: &std::path::Path) {
+    let session_data = format!(
+        r#"{{"__index_only":true,"conversationId":"{B1_SESSION}","title":"B1 会话","summary":"","history":[],"turnCount":0,"lastReferencedFile":null,"historyCursor":{{"sessionId":"{B1_SESSION}","visibleNodeId":"node-main-3","activeBranchId":"main","branchHeadNodeId":"node-main-3","cursorVersion":0,"eventWatermark":6}},"historyBranches":[{{"branchId":"main","sessionId":"{B1_SESSION}","headNodeId":"node-main-3","label":"main","createdAtMs":0,"updatedAtMs":0}},{{"branchId":"fork-2","sessionId":"{B1_SESSION}","baseNodeId":"node-main-1","headNodeId":"node-fork-2","forkedFromBranchId":"main","forkedFromNodeId":"node-main-1","label":"fork-2","createdAtMs":0,"updatedAtMs":0}}]}}"#
+    );
+    let events: Vec<(i64, &str, &str, &str)> = vec![
+        (1, "main", "user/message", r#"{"type":"user_message","turn_id":"turn-m1","text":"Q1"}"#),
+        (2, "main", "assistant/message", r#"{"type":"assistant_message","turn_id":"turn-m1","step":1,"text":"A1"}"#),
+        (3, "fork-2", "user/message", r#"{"type":"user_message","turn_id":"turn-f2","text":"Q2"}"#),
+        (4, "fork-2", "assistant/message", r#"{"type":"assistant_message","turn_id":"turn-f2","step":1,"text":"A2"}"#),
+        (5, "main", "user/message", r#"{"type":"user_message","turn_id":"turn-m3","text":"Q3"}"#),
+        (6, "main", "assistant/message", r#"{"type":"assistant_message","turn_id":"turn-m3","step":1,"text":"A3"}"#),
+    ];
+    seed_session_with_events(db_path, B1_SESSION, &session_data, &events);
+}
+
+/// B1-1（BLOCKING）：重建只能取**当前血缘（main）**的事件；已放弃的 `fork-2` 分支
+/// （Q2/A2）不得混入——否则用户会看到一条自己已经切走的分支的对话。
+#[test]
+fn b1_rebuild_respects_branch_lineage() {
+    // ── Arrange ────────────────────────────────────────────────────────────────
+    let temp = TempDbDir::new("b1-lineage");
+    let db_path = temp.db_path();
+    let backend = SqliteSessionBackend::new(db_path.clone());
+    assert!(
+        backend.load_store().is_some(),
+        "PA-174 B1 前置：临时库首读必须成功（schema 初始化）"
+    );
+    seed_branch_lineage_fixture(&db_path);
+
+    // ── Act ────────────────────────────────────────────────────────────────────
+    let loaded = backend.load_store().expect("PA-174 B1：临时库必须可装载");
+    let view = loaded.sessions_view();
+    let state = view.get(B1_SESSION).unwrap_or_else(|| {
+        panic!(
+            "PA-174 B1：装载后必须仍有该会话，实际 {:?}",
+            view.keys().collect::<Vec<_>>()
+        )
+    });
+
+    // ── Assert：只含 main 的 Q1/A1/Q3/A3（4 条），且顺序不变。 ─────────────────────
+    let triples: Vec<(String, String)> = state
+        .history
+        .iter()
+        .map(|message| (message.role.clone(), message.content.clone()))
+        .collect();
+    assert_eq!(
+        triples,
+        vec![
+            ("user".to_string(), "Q1".to_string()),
+            ("assistant".to_string(), "A1".to_string()),
+            ("user".to_string(), "Q3".to_string()),
+            ("assistant".to_string(), "A3".to_string()),
+        ],
+        "PA-174 B1：重建必须只取当前血缘 main 的消息（放弃分支 fork-2 的 Q2/A2 不得混入），\
+         实际 {} 条：{triples:?}",
+        triples.len()
+    );
+}
+
+/// B1-2：索引**完全无血缘信息**（无 `historyCursor`/无分支表）⇒ 宁可**不重建**
+/// （历史为空、且不报错），也**不得**把全部分支合并成一条历史。
+#[test]
+fn b1_rebuild_without_lineage_info_yields_empty_history() {
+    // ── Arrange：裸 `__index_only` 行（没有 cursor / branches）。 ─────────────────
+    let temp = TempDbDir::new("b1-no-lineage");
+    let db_path = temp.db_path();
+    let backend = SqliteSessionBackend::new(db_path.clone());
+    assert!(
+        backend.load_store().is_some(),
+        "PA-174 B1 前置：临时库首读必须成功（schema 初始化）"
+    );
+    let session_data = format!(
+        r#"{{"__index_only":true,"conversationId":"{B1_SESSION}","title":"B1 会话","summary":"","history":[],"turnCount":0,"lastReferencedFile":null}}"#
+    );
+    let events: Vec<(i64, &str, &str, &str)> = vec![
+        (1, "main", "user/message", r#"{"type":"user_message","turn_id":"turn-m1","text":"Q1"}"#),
+        (2, "fork-2", "user/message", r#"{"type":"user_message","turn_id":"turn-f2","text":"Q2"}"#),
+    ];
+    seed_session_with_events(&db_path, B1_SESSION, &session_data, &events);
+
+    // ── Act ────────────────────────────────────────────────────────────────────
+    let loaded = backend.load_store().expect("PA-174 B1：无血缘信息时装载也不得失败");
+    let view = loaded.sessions_view();
+    let state = view
+        .get(B1_SESSION)
+        .unwrap_or_else(|| panic!("PA-174 B1：装载后必须仍有该会话（不得丢弃轻量行）"));
+
+    // ── Assert：空历史（不合并全分支），且装载不 panic / 会话仍在。 ──────────────────
+    assert!(
+        state.history.is_empty(),
+        "PA-174 B1：索引无血缘信息 ⇒ 历史必须为空（宁可不重建，不得合并全分支），\
+         实际 {} 条：{:?}",
+        state.history.len(),
+        state
+            .history
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+    );
+}
 // ── F4：历史接线——上一轮 assistant 回复不得降级成 system 文本 ─────────────────────
 
 /// F4（最高优先）：`openai_request_messages` 必须把「历史 assistant 轮」
@@ -938,6 +1036,78 @@ fn f1_anthropic_exhausted_error_keeps_status_code() {
     }
 }
 
+// ── B2：聚合预算耗尽不得丢失真实错误、也不得阻断换手（审查 BLOCKING） ─────────────────
+
+/// B2（BLOCKING）：聚合 deadline 耗尽时，终态错误必须保留真实原因（状态码/超时），
+/// 且**不得阻断换手**（候选链必须被真实尝试）。
+///
+/// 缺陷机制：`with_aggregate_sync_deadline` 让预算耗尽后的下一次 attempt 返回内部文案
+/// `"failover budget exhausted before attempt; remaining=0ms; no request sent"`；
+/// 该文案不命中 `failover_eligible` 码表 ⇒ 换手直接放弃（候选 0 次 HTTP），
+/// 且用户看到的终态错误完全不含真实失败原因。
+#[test]
+fn b2_aggregate_exhaustion_keeps_real_error_and_allows_failover() {
+    let policy = UpstreamPolicy {
+        request_timeout_ms: 1_000,
+        decision_max_attempts: 5,
+        retry_budget_ms: 3_600,
+    };
+    // 每次 attempt 都「慢 503」（900ms < 1000ms 单次超时 ⇒ 真实收到 503，而非客户端超时）。
+    let slow_503 = MockReply {
+        status: 503,
+        reason: "Service Unavailable",
+        body: SERVER_ERROR_BODY,
+        content_type: "application/json",
+        delay: Duration::from_millis(900),
+    };
+
+    // ── Act 1：带候选链 —— 耗尽后必须仍尝试候选。 ────────────────────────────────
+    let primary = MockProvider::script(vec![slow_503]);
+    let candidate = MockProvider::script(vec![openai_ok_reply()]);
+    let manager = ProviderManager::new(
+        primary.selection("pa174-b2-primary", ProviderProtocol::OpenAiCompletions),
+    )
+    .with_policy(policy.clone())
+    .with_failover(ProviderFailoverChain::new(vec![candidate.selection(
+        "pa174-b2-candidate",
+        ProviderProtocol::OpenAiCompletions,
+    )]));
+    let with_chain = manager.decide_with_tools(&request_probe(), &[]);
+    let candidate_hits = candidate.request_count();
+
+    // ── Assert 1：候选必须收到 ≥1 次真实请求（内部预算耗尽不得阻断换手）。 ──────────
+    assert!(
+        candidate_hits >= 1,
+        "PA-174 B2：聚合预算耗尽后仍必须尝试候选（换手不得被内部预算文案短路），\
+         实际候选收到 {candidate_hits} 次真实 HTTP"
+    );
+    assert!(
+        with_chain.is_ok(),
+        "PA-174 B2：候选健康 ⇒ 换手成功必须返回 Ok，实际 {:?}",
+        with_chain.as_ref().err()
+    );
+
+    // ── Act 2：去掉候选链 —— 终态错误必须保留真实原因。 ───────────────────────────
+    let primary_only = MockProvider::script(vec![slow_503]);
+    let manager = ProviderManager::new(
+        primary_only.selection("pa174-b2-primary-only", ProviderProtocol::OpenAiCompletions),
+    )
+    .with_policy(policy);
+    let error = manager
+        .decide_with_tools(&request_probe(), &[])
+        .expect_err("PA-174 B2：恒 503 ⇒ 无候选链时必须返回 Err（禁止伪造成功）");
+
+    // ── Assert 2：真实失败事实保留，且不得是内部预算文案。 ──────────────────────────
+    let lowered = error.to_ascii_lowercase();
+    assert!(
+        error.contains("503") || lowered.contains("timeout") || lowered.contains("timed out"),
+        "PA-174 B2：终态错误必须保留真实失败原因（状态码 503 / 超时），实际：{error}"
+    );
+    assert!(
+        !lowered.contains("failover budget exhausted"),
+        "PA-174 B2：终态错误不得退化成内部预算文案（用户看不到真实原因），实际：{error}"
+    );
+}
 // ── F2：同步路径必须有跨 attempt 总 deadline ─────────────────────────────────────────
 
 /// F2 纯函数面：`aggregate_sync_call_budget_ms(policy)` =

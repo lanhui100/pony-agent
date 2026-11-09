@@ -809,6 +809,13 @@ pub const MAX_FAILOVER_HOPS: usize = 2;
 /// backoff_upper(7.5s) + FAILOVER_BUDGET_MS`，默认值 = `45s×5 + 7.5s + 120s = 352.5s`。
 pub const FAILOVER_BUDGET_MS: u64 = 120_000;
 
+/// PA-174 B2：预算耗尽时**唯一允许**的合成错误文案（仅当一次 HTTP 都没发出时使用）。
+///
+/// 该文案不得出现在「有真实失败」的终态错误里（真实错误优先），因此它同时是
+/// `record_provider_error` 的排除标记。
+const FAILOVER_BUDGET_EXHAUSTED_MSG: &str =
+    "failover budget exhausted before attempt; remaining=0ms; no request sent";
+
 /// PA-172 §3.1：显式有序候选链（`ProviderManager::new` 时为空 ⇒ 换手关闭）。
 ///
 /// `new` 截断到 [`MAX_FAILOVER_HOPS`]：即使装配侧给了更长的链（`providers.json` 上限 8），
@@ -849,6 +856,10 @@ pub struct ProviderManager {
     /// 与既有调度逐字一致。换手候选只带 `attempt_deadline`、不带本字段 ⇒
     /// `FAILOVER_BUDGET_MS` 的既有行为零改动。
     sleep_deadline: Option<Instant>,
+    /// PA-174 B2：最近一次**真实** provider 失败（PA-173 的 `last_provider_error` 同构）。
+    /// 预算耗尽时用它收口，绝不让合成错误顶替真实失败。`Arc<Mutex>` 是为了让
+    /// `#[derive(Clone)]` 派生的执行体与本体共享同一份记录（`post_*` 走 `&self`）。
+    last_provider_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl ProviderManager {
@@ -859,6 +870,7 @@ impl ProviderManager {
             failover: None,
             attempt_deadline: None,
             sleep_deadline: None,
+            last_provider_error: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -912,8 +924,35 @@ impl ProviderManager {
     }
 
     /// F-c：预算耗尽的结构化错误（必须**不可重试** ⇒ 重试编排立即 Abort、不再白睡）。
+    ///
+    /// PA-174 B2：本错误**只允许**在「一次 HTTP 都没发出」（无任何真实失败可交付）时使用；
+    /// 有真实失败时必须返回 [`Self::budget_exhausted_error`]（真实错误优先），否则用户会看到
+    /// 一句与上游无关的预算文案，且换手判据（`failover_eligible`）永远不成立。
     fn failover_budget_exhausted_error() -> String {
-        "failover budget exhausted before attempt; remaining=0ms; no request sent".to_string()
+        FAILOVER_BUDGET_EXHAUSTED_MSG.to_string()
+    }
+
+    /// PA-174 B2：聚合/换手预算耗尽时的收口错误——**最后一次真实 provider 错误优先**。
+    ///
+    /// 沿用 PA-173 的 `last_provider_error` 模式：真实错误（超时 / 5xx …）原样返回后，重试
+    /// 内核与换手层仍按既有分类处理（超时/5xx 仍 eligible ⇒ 候选用自己的 deadline 继续）；
+    /// 仅当从未发出任何 HTTP（无真实错误）时才退回合成错误。
+    fn budget_exhausted_error(&self) -> String {
+        self.last_provider_error
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_else(Self::failover_budget_exhausted_error)
+    }
+
+    /// PA-174 B2：记录最近一次**真实** provider 失败（合成预算错误不覆盖）。
+    fn record_provider_error(&self, error: &str) {
+        if error == FAILOVER_BUDGET_EXHAUSTED_MSG {
+            return;
+        }
+        if let Ok(mut slot) = self.last_provider_error.lock() {
+            *slot = Some(error.to_string());
+        }
     }
 
     /// PA-172 §3.1 builder：注入上游调用策略（超时/尝试次数/退避预算）。
@@ -1148,10 +1187,13 @@ impl ProviderManager {
         request: &ProviderRequest,
         tools: &[ToolDefinition],
     ) -> Result<ProviderDecision, String> {
-        // 未装链 ⇒ 与基线逐字一致（G2：默认零行为变更），仍返回既有
+        // 未装链 ⇒ 与基线逐字一致（G2：默认零行为变更），返回既有
         // `extract_provider_error_detail` 处理后的文本。
+        //
+        // PA-174 B2：但**原始错误优先**——聚合预算耗尽时若只剩正文预览，用户就看不到
+        // 真实状态码（503/timeout），且「预算耗尽」的合成错误会顶替真实失败。
         let Some(chain) = self.failover.as_ref() else {
-            return Err(primary_detail);
+            return Err(primary_raw.unwrap_or(primary_detail));
         };
         // 装链后：**不换手**的路径必须"原样上抛"主 provider 的错误（§3.2 反向钉子：
         // 400/500 不得被换手层改写，也不得只剩响应正文）。主 provider 无 key 属配置
@@ -1628,6 +1670,10 @@ impl ProviderManager {
     where
         F: FnMut(ProviderStreamChunk),
     {
+        // PA-174 A2：流式失败后的 stream→sync 回退同样是**同步调用**（生产入口
+        // `turn_flow.rs:3555`），必须与其它同步入口共享同一聚合 deadline，否则最坏
+        // `5 × 45s ≈ 235s` 突破 180s 上限。流式 attempt 本身不注入（沿用 guard 的预算）。
+        let sync_fallback = self.with_aggregate_sync_deadline();
         let request_cow = self.sanitize_request(request);
         let request = request_cow.as_ref();
         if !self.config.capabilities.supports_streaming {
@@ -1729,11 +1775,12 @@ impl ProviderManager {
                             protocol_label, self.config.provider_name, request.model, stream_error
                         ));
                         // stream→sync 回退与本地 fallback 语义对齐 completions 分支。
-                        let response = match retry_provider_followup_timeout_with_policy(
+                        let response = match retry_provider_followup_timeout_with_policy_deadline(
                             "followup_sync_fallback",
                             &self.policy,
+                            sync_fallback.sleep_deadline,
                             || match self.config.protocol {
-                                ProviderProtocol::OpenAiResponses => self
+                                ProviderProtocol::OpenAiResponses => sync_fallback
                                     .send_responses_tool_followup_request(
                                         request,
                                         tools,
@@ -1742,7 +1789,7 @@ impl ProviderManager {
                                         tool_call,
                                         tool_result,
                                     ),
-                                _ => self.send_openai_tool_followup_request(
+                                _ => sync_fallback.send_openai_tool_followup_request(
                                     request,
                                     tools,
                                     accumulated_messages,
@@ -3242,14 +3289,24 @@ impl ProviderManager {
         })
     }
 
+    /// PA-174 B2：`post_openai_json` 的收口包装——真实失败逐次记录（合成预算错误除外），
+    /// 预算耗尽时由 [`Self::budget_exhausted_error`] 交付最后一次真实错误。
     fn post_openai_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
+        let result = self.post_openai_json_impl(endpoint, body);
+        if let Err(error) = &result {
+            self.record_provider_error(error);
+        }
+        result
+    }
+
+    fn post_openai_json_impl(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
         // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
         self.ensure_not_cooling()?;
         // PA-172 §2.1/§3.3：单次 attempt 总超时配置化（默认 45s，与基线逐字节等价）；
         // 换手候选再按**逐 attempt deadline** 收紧（剩余为 0 ⇒ 立即 Abort，0 次 HTTP）。
         let attempt_timeout_ms = self.effective_attempt_timeout_ms();
         if attempt_timeout_ms == 0 {
-            return Err(Self::failover_budget_exhausted_error());
+            return Err(self.budget_exhausted_error());
         }
         let client = build_http_client(Duration::from_millis(attempt_timeout_ms), endpoint)?;
         let started_at = Instant::now();
@@ -3299,14 +3356,24 @@ impl ProviderManager {
         })
     }
 
+    /// PA-174 B2：`post_anthropic_json` 的收口包装——真实失败逐次记录（合成预算错误除外），
+    /// 预算耗尽时由 [`Self::budget_exhausted_error`] 交付最后一次真实错误。
     fn post_anthropic_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
+        let result = self.post_anthropic_json_impl(endpoint, body);
+        if let Err(error) = &result {
+            self.record_provider_error(error);
+        }
+        result
+    }
+
+    fn post_anthropic_json_impl(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
         // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
         self.ensure_not_cooling()?;
         // PA-172 §2.1/§3.3：单次 attempt 总超时配置化（默认 45s，与基线逐字节等价）；
         // 换手候选再按**逐 attempt deadline** 收紧（剩余为 0 ⇒ 立即 Abort，0 次 HTTP）。
         let attempt_timeout_ms = self.effective_attempt_timeout_ms();
         if attempt_timeout_ms == 0 {
-            return Err(Self::failover_budget_exhausted_error());
+            return Err(self.budget_exhausted_error());
         }
         let client = build_http_client(Duration::from_millis(attempt_timeout_ms), endpoint)?;
         let started_at = Instant::now();
