@@ -139,6 +139,41 @@ impl Drop for Fixture {
     }
 }
 
+/// C1/C6：用 **std 文件锁**（不是 backend 的进程内 `LOCK_REGISTRY`）占住 `<db>.lock`，
+/// 等价于「另一个进程持有单实例锁」⇒ 新建 backend 首次 `connection()` 抢锁必失败、降级只读。
+///
+/// 为什么不能用 `new_read_only` 当降级实例：那是**维护句柄**（`storage_read_only=true`，
+/// `--dry-run`/诊断），按 R4/E8 必须零写入、连日志都不写；锁降级实例
+/// （`storage_read_only=false`）才必须写日志（日志先行）。drop 即解锁。
+struct LockHolder(std::fs::File);
+
+impl LockHolder {
+    fn acquire(lock_path: &Path) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap_or_else(|error| {
+                panic!("打开单实例锁文件 `{}` 失败：{error}", lock_path.display())
+            });
+        match file.try_lock() {
+            Ok(()) => Self(file),
+            Err(error) => panic!(
+                "占住单实例锁 `{}` 失败（前置不成立）：{error:?}",
+                lock_path.display()
+            ),
+        }
+    }
+}
+
+impl Drop for LockHolder {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 断言辅助（行为级读法）
 // ---------------------------------------------------------------------------
@@ -214,33 +249,28 @@ fn c1_read_only_backend_still_writes_session_log() {
     let assistant = "c1 索引写不了不等于历史不存在";
 
     // —— Arrange ——
-    // 1) 先用正常可写句柄把库建出来（`mode=ro` 的只读句柄要求库文件已存在）。
+    // 1) 先用正常可写句柄把库建出来，并让建库实例释放单实例锁（drop ⇒ 登记项失效）。
     {
         let writable = fixture.backend();
         let _ = writable.load_store();
     }
-    // 2) 让只读实例无法"恢复"成可写：把单实例锁文件路径占成**目录**
-    //    ⇒ `acquire_single_instance_lock` 必然返回 `Err`（EISDIR）
-    //    ⇒ `try_recover_instance_lock` 提前返回，`is_read_only()` 稳定为 true。
-    //    这不是 mock 文件系统，而是真实模拟「锁文件不可用」的降级前提。
-    let lock_path = fixture.lock_path();
-    if lock_path.is_file() {
-        std::fs::remove_file(&lock_path).expect("移除建库遗留的锁文件");
-    }
-    std::fs::create_dir_all(&lock_path).expect("用目录占住锁路径（模拟锁不可获取）");
-
-    let read_only = SqliteSessionBackend::new_read_only(fixture.db());
-    assert!(
-        read_only.is_read_only(),
-        "前置：`new_read_only` 构造的句柄必须 `is_read_only()==true`"
-    );
+    // 2) 测试自己用 std 文件锁**排他占住** `<db>.lock`（模拟「另一个进程已持有单实例锁」；
+    //    不走 backend 的进程内登记表，否则会被同进程共享锁逻辑复用掉、根本抢不到）。
+    //    随后用**正常构造器** `new()`（`storage_read_only=false`）建实例：
+    //    首次 `connection()` 抢锁失败 ⇒ 运行时**锁降级只读**（必须写日志）。
+    let lock_holder = LockHolder::acquire(&fixture.lock_path());
+    let read_only = fixture.backend();
     assert!(
         read_only.load_store().is_some(),
         "前置：只读句柄必须能读到已存在的库（否则本用例证明不了「只读仍写日志」）"
     );
     assert!(
         read_only.is_read_only(),
-        "前置：装载后仍必须是只读降级（不得被「恢复成可写」逻辑翻转）"
+        "前置：抢不到 `<db>.lock` 时必须降级只读（`is_read_only()==true`）"
+    );
+    assert!(
+        !read_only.storage_read_only(),
+        "前置：锁降级实例 ≠ 维护句柄（`storage_read_only()` 必须为 false，否则日志被 E8 短路）"
     );
 
     let commands = vec![
@@ -297,6 +327,7 @@ fn c1_read_only_backend_still_writes_session_log() {
         !matches!(outcome, PersistCommandOutcome::Succeeded),
         "只读实例的索引写必然失败，批次不得返回 Succeeded，实际 outcome={outcome:?}"
     );
+    drop(lock_holder);
 }
 
 // ---------------------------------------------------------------------------
@@ -508,4 +539,164 @@ fn c4_writable_path_unchanged() {
         expected,
         logged
     );
+}
+
+// ---------------------------------------------------------------------------
+// C5：维护句柄（`new_read_only` / `--dry-run` / 诊断）必须保持 E8 零写入（R4 + R5）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c5_maintenance_handle_stays_zero_write() {
+    let fixture = Fixture::new("c5");
+    let session_id = "p0_c5_maintenance";
+    let user = "c5 维护句柄不得写任何字节";
+
+    // —— Arrange ——：先建出库（维护句柄要求库文件已存在）。
+    {
+        let writable = fixture.backend();
+        let _ = writable.load_store();
+    }
+    let maintenance = SqliteSessionBackend::new_read_only(fixture.db());
+    assert!(
+        maintenance.storage_read_only(),
+        "前置：`new_read_only` 必须是存储级只读（维护句柄，`storage_read_only()==true`）"
+    );
+    assert!(maintenance.load_store().is_some(), "前置：维护句柄必须能读库");
+
+    // —— Act ——：维护句柄收到一批**写入类**命令。
+    let outcome = maintenance.persist_commands_batch(vec![PersistCommand::AppendMessage {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        message: message("user", user),
+        ordinal: 0,
+    }]);
+
+    // —— Assert ——
+    // (1) R4 / E8：维护句柄零写入——连日志目录都不许建出来。
+    let log_root = fixture.log_root();
+    assert!(
+        !log_root.exists(),
+        "E8 零写入被击穿：维护句柄不得创建日志根目录，实际 `{}` 存在",
+        log_root.display()
+    );
+    let log_path = fixture.log_path(session_id);
+    assert!(
+        !log_path.is_file(),
+        "E8 零写入被击穿：维护句柄不得产出 session.jsonl，实际 `{}` 存在",
+        log_path.display()
+    );
+    assert!(
+        fixture.index_messages(session_id).is_empty(),
+        "维护句柄（`mode=ro`）不得写索引，实际有行"
+    );
+
+    // (2) R5：日志层零写入 ⇒ 索引失败必须判 `Failed`，不得自称「日志已落盘」。
+    assert_eq!(
+        outcome,
+        PersistCommandOutcome::Failed,
+        "日志零写入时索引失败必须是 Failed（`LogPersisted` 的前提是日志真写入了字节）"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C6：锁降级实例的日志 writer 必须**按批释放** flock（R3）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c6_degraded_instance_releases_session_log_lock_after_batch() {
+    let fixture = Fixture::new("c6");
+    let session_id = "p0_c6_lock_handoff";
+    let degraded_user = "c6 降级实例写入";
+    let main_user = "c6 主实例用户消息";
+    let main_assistant = "c6 主实例助手消息";
+
+    // —— Arrange ——
+    { let writable = fixture.backend(); let _ = writable.load_store(); }
+    // 占住单实例锁 ⇒ 第二个实例是**锁降级只读**（`storage_read_only=false`）。
+    let lock_holder = LockHolder::acquire(&fixture.lock_path());
+    let degraded = fixture.backend();
+    let _ = degraded.load_store();
+    assert!(degraded.is_read_only(), "前置：第二个实例必须锁降级只读");
+
+    // —— Act 1 ——：降级实例写一批（日志成功、索引失败）。
+    let outcome = degraded.persist_commands_batch(vec![PersistCommand::AppendMessage {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        message: message("user", degraded_user),
+        ordinal: 0,
+    }]);
+    assert_eq!(
+        outcome,
+        PersistCommandOutcome::LogPersisted,
+        "日志已落盘、索引失败 ⇒ 必须是 LogPersisted，实际 {outcome:?}"
+    );
+    assert_eq!(
+        pairs(&log_append_messages(&fixture.log_path(session_id))),
+        vec![("user".to_string(), degraded_user.to_string())],
+        "降级实例必须把命令写进真源日志"
+    );
+
+    // —— Act 2 ——：主（可写）实例接手同一会话。降级实例若仍缓存 writer 持 flock，
+    // 这里会被 `Locked` 挡成整批失败（R3 的回归点）。
+    drop(lock_holder);
+    let mut writable_store = SessionStore::with_backend(Box::new(fixture.backend()));
+    let result = writable_store.append_turn_fallible(
+        Some(session_id),
+        main_user,
+        main_assistant,
+        None,
+        Vec::new(),
+    );
+
+    // —— Assert ——
+    assert!(
+        result.is_ok(),
+        "R3 被破坏：降级实例必须按批释放 session log flock，否则主可写实例同会话 append 被 Locked 挡住：{result:?}"
+    );
+    assert_eq!(
+        pairs(&log_append_messages(&fixture.log_path(session_id))),
+        vec![
+            ("user".to_string(), degraded_user.to_string()),
+            ("user".to_string(), main_user.to_string()),
+            ("assistant".to_string(), main_assistant.to_string()),
+        ],
+        "主实例的两条消息必须追加进同一份真源日志"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C7：零字节写入批（`RemoveSession`-only）不得自称「日志已落盘」（R5）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c7_remove_session_only_batch_never_claims_log_persisted() {
+    let fixture = Fixture::new("c7");
+    let session_id = "p0_c7_remove_only";
+
+    // —— Arrange ——：锁降级实例（索引必失败）+ 一批**完全无日志字节**的命令。
+    // `RemoveSession` 按既有语义不进日志（删除由 `delete_session` 在索引提交后承担）
+    // ⇒ 日志层 `grouped.is_empty()` ⇒ 零写入。
+    { let writable = fixture.backend(); let _ = writable.load_store(); }
+    let lock_holder = LockHolder::acquire(&fixture.lock_path());
+    let degraded = fixture.backend();
+    let _ = degraded.load_store();
+    assert!(degraded.is_read_only(), "前置：必须锁降级只读（索引必失败）");
+
+    // —— Act ——
+    let outcome = degraded.persist_commands_batch(vec![PersistCommand::RemoveSession {
+        epoch: 1,
+        session_id: session_id.to_string(),
+    }]);
+
+    // —— Assert ——
+    assert_ne!(
+        outcome,
+        PersistCommandOutcome::LogPersisted,
+        "R5 被击穿：日志层零字节写入的批不得判 `LogPersisted`（该变体的前提是日志真写入了字节），实际 {outcome:?}"
+    );
+    assert!(
+        !fixture.log_path(session_id).is_file(),
+        "`RemoveSession` 不进日志：不得产出 session.jsonl"
+    );
+    drop(lock_holder);
 }

@@ -143,8 +143,29 @@ impl SessionLogSink {
     /// - `PublishMetadata` 无会话归属 ⇒ 不进日志（全局元数据，日志按会话分文件）；
     /// - `RemoveSession` ⇒ 不进日志：删除语义由 [`Self::delete_session`] 在 SQLite 提交后
     ///   执行（把事件写进正要被删掉的文件没有意义）；
-    /// - 任一会话失败即整体 `Err`：调用方必须把整个批次判失败，不得部分成功。
-    pub fn append_commands(&self, commands: &[PersistCommand]) -> Result<(), String> {
+    /// - 任一会话失败即整体 `Err`：调用方必须把整个批次判失败，不得部分成功；
+    /// - 返回 `true` = **实际写入了字节**（ADR 0107 P0.1 / R5：零写入批不得被判
+    ///   `LogPersisted`——否则「日志已落盘」的前提是假的）。
+    pub fn append_commands(&self, commands: &[PersistCommand]) -> Result<bool, String> {
+        self.append_commands_with(commands, false)
+    }
+
+    /// ADR 0107 P0.1 / R3：**锁降级实例**按批开/放 writer——append 完立即 `drop`
+    /// （释放文件级独占锁），不长期缓存句柄。
+    ///
+    /// 为什么必须区分：降级实例若长期持有同一会话的 writer 句柄，主（可写）实例写该会话会
+    /// 被挡成 `Locked → append 失败 → 整批 Failed → 整轮回滚`，破坏「可写实例零回归」。
+    /// 可写实例仍走 [`Self::append_commands`]（长命缓存句柄，避免每批重开重扫）。
+    pub fn append_commands_releasing(&self, commands: &[PersistCommand]) -> Result<bool, String> {
+        self.append_commands_with(commands, true)
+    }
+
+    /// 公共实现：`release` = 按批开/放 writer（不复用缓存句柄）。
+    fn append_commands_with(
+        &self,
+        commands: &[PersistCommand],
+        release: bool,
+    ) -> Result<bool, String> {
         let mut grouped: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
         for command in commands {
             if matches!(command, PersistCommand::RemoveSession { .. }) {
@@ -158,7 +179,7 @@ impl SessionLogSink {
             grouped.entry(session_id).or_default().push(value);
         }
         if grouped.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let mut writers = self
             .writers
@@ -166,6 +187,17 @@ impl SessionLogSink {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let ts = now_ms();
         for (session_id, values) in grouped {
+            if release {
+                // 先丢弃可能存在的缓存句柄（释放锁），再按批开/放。
+                writers.remove(session_id);
+                let meta = SessionLogMeta::new(session_id, self.cwd.clone());
+                let mut writer = self.open_writer(session_id, &meta)?;
+                writer
+                    .append_commands(ts, &values)
+                    .map_err(|error| format!("append session log for `{session_id}`: {error}"))?;
+                drop(writer); // 立即释放 flock（不缓存）
+                continue;
+            }
             if !writers.contains_key(session_id) {
                 let meta = SessionLogMeta::new(session_id, self.cwd.clone());
                 let writer = self.open_writer(session_id, &meta)?;
@@ -180,7 +212,7 @@ impl SessionLogSink {
                 return Err(format!("append session log for `{session_id}`: {error}"));
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// 删除某会话的整个日志目录（已在 SQLite 提交之后调用；幂等）。
@@ -266,7 +298,9 @@ mod tests {
             key: "k".to_string(),
             value: "v".to_string(),
         };
-        sink.append_commands(&[command]).expect("no-op append");
+        // R5：零写入批必须回报 `false`（否则上层会把索引失败误判成 `LogPersisted`）。
+        let written = sink.append_commands(&[command]).expect("no-op append");
+        assert!(!written, "无会话归属的命令 ⇒ 零字节写入");
         assert!(
             !sink.root().exists(),
             "no session-scoped command ⇒ 不创建任何日志目录"

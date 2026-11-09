@@ -1127,7 +1127,7 @@ impl SqliteSessionBackend {
         &self,
         tx: &rusqlite::Transaction<'_>,
         command: &PersistCommand,
-    ) -> Result<(), String> {
+    ) -> Result<(), commit::ApplyFailure> {
         let epoch = command.epoch();
         let current_epoch: i64 = tx
             .query_row(
@@ -1138,7 +1138,7 @@ impl SqliteSessionBackend {
             .map(|raw| raw.parse::<i64>().unwrap_or(0))
             .unwrap_or(0);
         if epoch < current_epoch as u64 {
-            return Err(format!("stale epoch: {epoch} < {current_epoch}"));
+            return Err(commit::ApplyFailure::stale_epoch(epoch, current_epoch));
         }
 
         // 确保 normalized_sessions 行存在（FK 依赖）：命令可能来自未回填的会话
@@ -2732,13 +2732,12 @@ impl SessionBackend for SqliteSessionBackend {
         // ADR 0099 阶段 0（E5）：降级只读实例在每次写入口重试一次 flock（非阻塞），
         // 持锁进程退出后自动恢复可写（query_only 本身不可逆）。
         self.try_recover_instance_lock();
-        // ADR 0099 阶段 1-B + ADR 0107 §5 P0（日志先行）：先把命令流追加进会话日志（含 fsync，
-        // 只读降级实例同样写）；日志写失败 ⇒ `Failed`（SQLite 一行不改）；日志已落盘后的索引
-        // 失败 ⇒ `LogPersisted`（索引滞后，不是历史丢失）。
-        if let Err(error) = commit::append_session_log_to_file(self, &commands) {
-            eprintln!("[pony-agent][session] 会话日志（真源）写入失败，SQLite 索引未改动：{error}");
-            return PersistCommandOutcome::Failed;
-        }
+        // ADR 0107 §5 P0 + P0.1（R3/R4/R5）：日志先行；`log_written` = 本批**实际写入字节**，
+        // 零写入批与维护句柄（`storage_read_only`）不得把索引失败判成 `LogPersisted`。
+        let log_written = match commit::append_session_log_to_file(self, &commands) {
+            Ok(written) => written,
+            Err(error) => return commit::log_write_failure(error),
+        };
         // NFR（契约 §4 结构性理由）：`external_call_timeout_ms=3000` 只约束**外部调用**
         // （网络/HTTP/跨进程 RPC）。SQLite 的 `busy_timeout` 是**本地写锁等待**，不在其域内
         // ——无网络 IO、失败可恢复；压到 3000 会把"慢盘 / 备份进程占锁"变成用户可见的保存
@@ -2753,7 +2752,7 @@ impl SessionBackend for SqliteSessionBackend {
                     Ok(slot) => slot,
                     Err(error) => {
                         eprintln!("[pony-agent][session] SQLite open error: {error}");
-                        return PersistCommandOutcome::LogPersisted;
+                        return commit::index_failure_after_log(PersistCommandOutcome::Failed, log_written);
                     }
                 };
                 let conn = slot.as_ref().expect("connection initialized");
@@ -2766,7 +2765,7 @@ impl SessionBackend for SqliteSessionBackend {
                     // （先删索引行、再删目录，不留「索引已删但日志还在」的半态）。
                     commit::delete_session_logs_after_commit(self, &commands, &outcome);
                     // ADR 0107 §5 P0：日志已落盘 ⇒ 索引侧失败退化为「索引滞后」（`LogPersisted`）。
-                    return commit::index_failure_after_log(outcome);
+                    return commit::index_failure_after_log(outcome, log_written);
                 }
                 commit::BatchAttempt::Busy(message) => {
                     // NFR `retry.max_attempts=3`：最多 3 次尝试（attempt 0..=2）。
@@ -2775,7 +2774,7 @@ impl SessionBackend for SqliteSessionBackend {
                             "[pony-agent][session] SQLite batch command busy 重试耗尽（attempt={attempt}，共 {}ms）：{message}",
                             started.elapsed().as_millis()
                         );
-                        return PersistCommandOutcome::LogPersisted;
+                        return commit::index_failure_after_log(PersistCommandOutcome::Failed, log_written);
                     }
                     let backoff = commit::busy_backoff_ms(attempt);
                     eprintln!(
@@ -4735,10 +4734,11 @@ mod tests {
             },
             ordinal: 1,
         });
+        // ADR 0107 P0.1 / R2② 已声明语义变更：旧 epoch 被拒 ≠ 索引故障 ⇒ StaleEpoch（仍 Err）。
         assert_eq!(
             outcome,
-            PersistCommandOutcome::Failed,
-            "old epoch should fail"
+            PersistCommandOutcome::StaleEpoch,
+            "old epoch should be rejected as StaleEpoch"
         );
 
         let outcome = backend.persist_command(PersistCommand::AppendMessage {
@@ -5078,7 +5078,8 @@ mod tests {
             .lock()
             .expect("inject lock")
             .take();
-        assert_eq!(outcome, PersistCommandOutcome::Failed, "injected failure");
+        // ADR 0107 P0.1 / R2② 已声明语义变更：日志已先行落盘 ⇒ 注入的**索引**失败为 `LogPersisted`
+        assert_eq!(outcome, PersistCommandOutcome::LogPersisted, "injected index failure");
 
         // 事务回滚：事件行与计数器均无残留
         let conn = backend.connection().expect("connection");

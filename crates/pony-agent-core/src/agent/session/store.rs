@@ -543,7 +543,6 @@ impl SessionStore {
         let mut appended_user: Option<TurnHistoryMessage>;
         let mut appended_assistant: Option<TurnHistoryMessage>;
         let meta_patch: Option<SessionMetaPatch>;
-
         // 两阶段暂存提交（Staging Commit）：在克隆状态上计算新 turn，持久化成功后才提交到 live
         let before_state = self.ensure_session(&session_key).clone();
         let mut staged_session = before_state.clone();
@@ -640,7 +639,6 @@ impl SessionStore {
                     branch: branch.clone(),
                 });
             }
-
             let outcome = self.backend.persist_commands_batch(commands);
             if matches!(outcome, PersistCommandOutcome::Failed | PersistCommandOutcome::StaleEpoch) {
                 return Err(SessionError::BackendFailure(format!(
@@ -727,14 +725,13 @@ impl SessionStore {
                 None,
             );
         }
-
         self.sessions.insert(session_key.clone(), staged_session.clone());
         let mutation = SessionTraceMutation::ReplaceAll {
             traces: staged_session.turn_trace_history.clone(),
         };
         self.save_session_state_to_backend(&session_key, &staged_session);
+        // ADR 0107 P0.1 / R6：索引失败（含 `LogPersisted`）在此打 `index_deferred` 告警。
         self.persist_session_and_trace_change(&session_key, mutation);
-
         Ok(self.snapshot_for_session(&session_key))
     }
 
@@ -2598,12 +2595,15 @@ impl SessionStore {
                 report_index_deferred(session_id, &outcome);
             }
             // 2-D：`ReplaceAll` 走日志命令流（以前只写 blob ⇒ 停写后图状态会丢）。
-            if matches!(mutation, SessionTraceMutation::ReplaceAll { .. })
-                && super::fold::persist_graph_projection_commands(
+            if matches!(mutation, SessionTraceMutation::ReplaceAll { .. }) {
+                let outcome = super::fold::persist_graph_projection_commands(
                     self.backend.as_ref(), session_id, session, &effective_mutation,
-                )
-            {
-                return;
+                );
+                if matches!(outcome, PersistCommandOutcome::Succeeded) {
+                    return;
+                }
+                // ADR 0107 P0.1 / R6：`ReplaceAll`（失败轮 replace-all 亦经此）的索引失败同样告警。
+                report_index_deferred(session_id, &outcome);
             }
         }
         let result = if session_is_persistable(session) {

@@ -781,34 +781,63 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 // ADR 0099 阶段 1-B：日志文件真源（写入先行 / 删除后置）
 // ---------------------------------------------------------------------------
 
-/// 真源优先：把本批命令追加进会话日志文件（含 `fsync`）。
+/// 真源优先：把本批命令追加进会话日志文件（含 `fsync`）。返回 `true` = **实际写入了字节**。
 ///
 /// 放在 commit 边界旁边而不是 `sqlite_session.rs` 里：后者已计入 file-size 棘轮。
 ///
 /// - 成功 ⇒ 调用方才允许写 SQLite 索引；
 /// - 失败 ⇒ 调用方整批判 `Failed`，**SQLite 一行都不改**（真源不允许「部分成功」）；
-/// - 降级只读实例（阶段 0 E5：抢不到单实例锁）**同样写日志**（ADR 0107 §5 P0 日志先行）：
-///   索引写不了不等于本轮历史不存在。真源（每会话单写者）不依赖单实例锁——锁只保护
-///   **索引**的排他写，故只读实例追加 JSONL 是安全的；索引侧失败由调用方判
-///   `LogPersisted`（索引滞后），日志失败仍是 `Failed`。
+/// - 零写入批（`RemoveSession` / 无会话归属的 `PublishMetadata`）⇒ `Ok(false)`：日志层没
+///   写任何字节，调用方**不得**把随之而来的索引失败判成 `LogPersisted`（R5）；
+/// - **维护句柄**（`new_read_only`：`--dry-run` / 诊断 / 测试夹具，E8 零写入）⇒ `Ok(false)`
+///   且连日志都不写（R4）；
+/// - **锁降级实例**（抢不到 `sessions.db.lock`，`is_read_only() && !storage_read_only()`）
+///   同样写日志（ADR 0107 §5 P0 日志先行），但 writer 按批开/放（R3）——不长期持有 flock。
 pub(crate) fn append_session_log_to_file(
     backend: &super::SqliteSessionBackend,
     commands: &[crate::agent::session::PersistCommand],
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    use crate::agent::session::SessionBackend;
+    // R4 / E8：维护句柄零写入（连日志也不写——否则 `--dry-run` 会产出 session.jsonl）。
+    if backend.storage_read_only {
+        return Ok(false);
+    }
+    // R3：锁降级实例按批开/放 writer（append 完立刻 drop ⇒ 释放 flock），
+    // 否则主可写实例写同一会话会被挡成 `Locked`（可写实例零回归被破坏）。
+    if backend.is_read_only() {
+        return backend.session_log_sink.append_commands_releasing(commands);
+    }
     backend.session_log_sink.append_commands(commands)
+}
+
+/// 日志（真源）写入失败：统一打印并整批判 `Failed`（SQLite 一行都不改）。
+pub(crate) fn log_write_failure(error: String) -> crate::agent::session::PersistCommandOutcome {
+    eprintln!("[pony-agent][session] 会话日志（真源）写入失败，SQLite 索引未改动：{error}");
+    crate::agent::session::PersistCommandOutcome::Failed
 }
 
 /// ADR 0107 §5 P0（失败域隔离）：把**日志已落盘之后**的索引失败归一为 `LogPersisted`。
 ///
-/// `Succeeded` / `Unsupported` / `StaleEpoch` 原样透传（语义不变）；只有 `Failed` 在
-/// 「日志先行已成功」的上下文里才等价于「索引滞后」（可恢复，不是历史丢失）。
+/// `Succeeded` / `Unsupported` / `StaleEpoch` 原样透传（语义不变，R1：命令被拒 ≠ 索引故障）；
+/// 只有 `Failed` **且日志确实写入了字节**（`log_written`，R5）时才等价于「索引滞后」。
 pub(crate) fn index_failure_after_log(
     outcome: crate::agent::session::PersistCommandOutcome,
+    log_written: bool,
 ) -> crate::agent::session::PersistCommandOutcome {
     use crate::agent::session::PersistCommandOutcome;
     match outcome {
-        PersistCommandOutcome::Failed => PersistCommandOutcome::LogPersisted,
+        PersistCommandOutcome::Failed if log_written => PersistCommandOutcome::LogPersisted,
         other => other,
+    }
+}
+
+impl super::SqliteSessionBackend {
+    /// ADR 0107 P0.1 / R4：构造期**存储级只读**标志（维护 / `--dry-run` / 诊断句柄）。
+    ///
+    /// 与运行时的**锁降级只读**（`is_read_only()`）是两种不同语义：前者必须零写入，
+    /// 后者必须写会话日志（日志先行）。
+    pub fn storage_read_only(&self) -> bool {
+        self.storage_read_only
     }
 }
 
@@ -853,6 +882,47 @@ pub(crate) enum BatchAttempt {
     Busy(String),
 }
 
+/// 应用单条命令失败的**语义分类**（ADR 0107 P0.1 / R1）。
+///
+/// 必须区分：`StaleEpoch`（materialize barrier 拒收旧 epoch——**不是**索引故障，
+/// 不可当「索引滞后」）与 `Other`（约束/注入/IO 等真实应用错误，日志已落盘时即
+/// `LogPersisted`）。把两者混成 `String` 会让 stale-epoch 被吞成 `LogPersisted`
+/// ⇒ 调用方误认为「日志已落盘、可前进内存」。
+pub(crate) enum ApplyFailure {
+    /// 旧 epoch 命令被拒绝（materialize barrier 之后）。
+    StaleEpoch(String),
+    /// 其它应用错误（约束失败 / 注入失败 / IO）。
+    Other(String),
+}
+
+impl ApplyFailure {
+    /// 旧 epoch 拒收（materialize barrier 语义的唯一构造点）。
+    pub(crate) fn stale_epoch(epoch: u64, current: i64) -> Self {
+        Self::StaleEpoch(format!("stale epoch: {epoch} < {current}"))
+    }
+
+    /// 失败原文（诊断用，不改判定语义）。
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::StaleEpoch(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+/// 既有 `map_err(|e| format!(…))` / `?` 站点统一落 `Other`（应用错误）。
+impl From<String> for ApplyFailure {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+/// 重建重放等以 `String` 为错误类型的既有调用方保持可用（失败原文透传）。
+impl From<ApplyFailure> for String {
+    fn from(failure: ApplyFailure) -> Self {
+        failure.message().to_string()
+    }
+}
+
 /// 单次 `persist_commands_batch` 尝试（`BEGIN IMMEDIATE` 内）。busy 与致命错误分开上报。
 ///
 /// 放在本文件（而非 trait impl 里）是为了不撑大 `sqlite_session.rs` 的行数额度。
@@ -876,9 +946,16 @@ pub(crate) fn persist_commands_once(
         }
     };
     for command in commands {
-        if let Err(error) = backend.apply_persist_command_tx(&tx, command) {
-            eprintln!("[pony-agent][session] SQLite batch command error: {error}");
-            return BatchAttempt::Done(PersistCommandOutcome::Failed);
+        if let Err(failure) = backend.apply_persist_command_tx(&tx, command) {
+            eprintln!(
+                "[pony-agent][session] SQLite batch command error: {}",
+                failure.message()
+            );
+            // R1：stale-epoch 必须类型化透传（调用方据此判 Err 且不入内存）。
+            return BatchAttempt::Done(match failure {
+                ApplyFailure::StaleEpoch(_) => PersistCommandOutcome::StaleEpoch,
+                ApplyFailure::Other(_) => PersistCommandOutcome::Failed,
+            });
         }
     }
     match tx.commit() {
