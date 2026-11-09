@@ -114,9 +114,22 @@ impl SessionLogSink {
         &self.cwd
     }
 
-    /// 某会话的日志文件路径（session id 不安全时 `None`）。
+    /// 某会话的日志文件路径（**仅当前 cwd 分组**；session id 不安全时 `None`）。
+    ///
+    /// 判「有没有日志」请用 [`Self::find_log_path`]：分组是创建时的 cwd 标签，跨工作区
+    /// 会漏判。
     pub fn log_path(&self, session_id: &str) -> Option<PathBuf> {
         self.store.log_path(session_id, &self.cwd).ok()
+    }
+
+    /// **跨 cwd 分组**查找某会话的日志文件（判「有没有日志」的唯一正确入口）。
+    pub fn find_log_path(&self, session_id: &str) -> Option<PathBuf> {
+        self.store.find_log_path(session_id)
+    }
+
+    /// 跨分组查找某会话的摘要（迁移解析归属 cwd 用）。
+    pub fn find_session_meta(&self, session_id: &str) -> Option<SessionLogMeta> {
+        self.store.find_session_meta(session_id)
     }
 
     /// 某会话的日志目录（session id 不安全时 `None`）。

@@ -736,3 +736,258 @@ fn migrated_log_is_readable_by_old_readers_and_exportable() {
         export.event_count
     );
 }
+
+// ---------------------------------------------------------------------------
+// 9. 跨 cwd 判定（D1）：日志在别的分组里也必须算「有日志」
+// ---------------------------------------------------------------------------
+
+/// 在指定 cwd 分组下写一条**最小**日志（模拟「会话在别的工作目录里创建」）。
+fn write_log_in_cwd(fixture: &Fixture, app: &Path, session_id: &str, cwd: &str) {
+    use pony_agent_core::agent::session::{SessionLogMeta, SessionLogStore};
+    let store = SessionLogStore::new(fixture.log_root(app));
+    let meta = SessionLogMeta::new(session_id, cwd);
+    let mut writer = store
+        .open_write(session_id, &meta)
+        .unwrap_or_else(|error| panic!("open_write({session_id}@{cwd}): {error}"));
+    writer
+        .append_commands(
+            1_700_000_000_000,
+            &[serde_json::json!({
+                "type": "append_message",
+                "encodingVersion": 1,
+                "epoch": 1,
+                "sessionId": session_id,
+                "message": {"role": "user", "content": "别的工作区里写的"},
+                "ordinal": 0,
+            })],
+        )
+        .expect("append");
+}
+
+fn group_dir(fixture: &Fixture, app: &Path, cwd: &str) -> PathBuf {
+    fixture
+        .log_root(app)
+        .join(pony_agent_core::agent::session::normalize_cwd_segment(cwd))
+}
+
+#[test]
+fn session_has_log_is_cross_cwd_so_blob_writes_become_light_rows() {
+    let fixture = Fixture::new("cross_cwd");
+    let app = fixture.app_dir("app");
+    let session_id = "pa_3b_cross_cwd";
+    // 会话的日志建在**另一个** cwd 分组里（进程 cwd 是仓库根，两者必然不同）。
+    let foreign_cwd = "/cwd/foreign/project";
+    assert_ne!(
+        foreign_cwd,
+        pony_agent_core::agent::session::current_log_cwd(),
+        "前置：外部分组必须与进程 cwd 不同，否则本用例证明不了跨分组查找"
+    );
+    write_log_in_cwd(&fixture, &app, session_id, foreign_cwd);
+    let foreign_log = group_dir(&fixture, &app, foreign_cwd)
+        .join(pony_agent_core::agent::session::encode_session_id_segment(session_id).expect("seg"))
+        .join(SESSION_LOG_FILE_NAME);
+    assert!(foreign_log.is_file(), "前置：外部分组日志必须存在");
+
+    let backend = fixture.backend(&app);
+    assert!(
+        backend.has_session_log(session_id),
+        "D1：日志在别的 cwd 分组里也必须判为「有日志」（否则会被当 grandfather 继续写整包 blob）"
+    );
+
+    // 2-D 写路径的后果：该会话的索引行必须是**轻量索引行**（不再写整包 blob）。
+    let mut state = legacy_state(session_id, "跨工作区会话", None);
+    state.history = vec![user_message("一", Some("t1")), user_message("二", Some("t2"))];
+    assert!(backend.upsert_session(session_id, &state), "upsert 必须成功");
+    let blob = fixture.blob(&app, session_id);
+    let value: serde_json::Value = serde_json::from_str(&blob).expect("blob json");
+    assert_eq!(
+        value["__index_only"], serde_json::json!(true),
+        "跨 cwd 有日志 ⇒ 2-D 必须写轻量索引行（修复前会写整包 blob）：{blob}"
+    );
+    assert_eq!(
+        value["history"].as_array().map(Vec::len),
+        Some(0),
+        "轻量行不得携带 history"
+    );
+    eprintln!("[9] 跨 cwd：has_session_log=true，索引行=轻量行（历史 0 条）");
+}
+
+// ---------------------------------------------------------------------------
+// 10. 迁移不制造重复分组（D2）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn migration_never_creates_a_duplicate_group_for_sessions_that_already_have_logs() {
+    use pony_agent_core::agent::session::bundle::sha256_hex;
+    use pony_agent_core::agent::session::{encode_session_id_segment, SessionLogStore};
+    let fixture = Fixture::new("no_dup_group");
+    let app = fixture.app_dir("app");
+    let session_id = "pa_3b_dup_group";
+    let foreign_cwd = "/cwd/foreign/group-a";
+    write_log_in_cwd(&fixture, &app, session_id, foreign_cwd);
+    let segment = encode_session_id_segment(session_id).expect("segment");
+    let foreign_log = group_dir(&fixture, &app, foreign_cwd)
+        .join(&segment)
+        .join(SESSION_LOG_FILE_NAME);
+    let before = sha256_hex(&std::fs::read(&foreign_log).expect("read foreign log"));
+    // 再放一个真的要迁移的 grandfather 会话，证明迁移循环确实跑过。
+    seed_legacy(&fixture, &app, "pa_3b_dup_group_legacy", "要迁移的", None);
+
+    let backend = fixture.backend(&app);
+    let report = migrate_grandfathered_sessions(&backend, MigrateOptions::apply()).expect("migrate");
+    assert_eq!(report.skipped_has_log, 1, "已有日志的会话必须计入 skipped：{report:?}");
+    assert_eq!(report.migrated, vec!["pa_3b_dup_group_legacy".to_string()]);
+
+    // 进程 cwd 分组里**不得**为它新建目录，也不得有任何新日志。
+    let process_cwd = pony_agent_core::agent::session::current_log_cwd();
+    let process_group = group_dir(&fixture, &app, &process_cwd);
+    let duplicated = process_group.join(&segment);
+    assert!(
+        !duplicated.exists(),
+        "D2：迁移不得在进程 cwd 分组里为已有日志的会话再造一份：{}",
+        duplicated.display()
+    );
+    assert!(
+        SessionLogStore::new(fixture.log_root(&app))
+            .find_log_path(session_id)
+            .is_some_and(|path| path.starts_with(group_dir(&fixture, &app, foreign_cwd))),
+        "该会话的日志必须仍在原分组里"
+    );
+    assert_eq!(
+        sha256_hex(&std::fs::read(&foreign_log).expect("read foreign log")),
+        before,
+        "原分组里的日志字节不得被改动"
+    );
+    eprintln!(
+        "[10] 迁移后分组：{:?}（无 --{}-- 重复）",
+        list_groups(&fixture, &app),
+        pony_agent_core::agent::session::normalize_cwd_segment(&process_cwd)
+    );
+}
+
+/// 日志根下的分组目录名（排序）。
+fn list_groups(fixture: &Fixture, app: &Path) -> Vec<String> {
+    let root = fixture.log_root(app);
+    let mut groups = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                groups.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    groups.sort();
+    groups
+}
+
+// ---------------------------------------------------------------------------
+// 11. 迁移 cwd 归属（D2）：workspace 能解析就落到 workspace root 分组
+// ---------------------------------------------------------------------------
+
+#[test]
+fn migration_attributes_cwd_by_workspace_and_records_fallbacks() {
+    use pony_agent_core::agent::session::{encode_session_id_segment, SessionStore};
+    let fixture = Fixture::new("cwd_attribution");
+    let app = fixture.app_dir("app");
+    let workspace_root = fixture.root.join("ws-root");
+    std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+
+    let workspace_id = {
+        let mut store = SessionStore::with_backend(Box::new(fixture.backend(&app)));
+        let record = store
+            .create_workspace("归属测试", workspace_root.to_string_lossy().as_ref())
+            .expect("create_workspace");
+        record.id
+    };
+
+    let attributed = "pa_3b_ws_attributed";
+    let orphan = "pa_3b_ws_orphan";
+    {
+        let backend = fixture.backend(&app);
+        let mut attributed_state = legacy_state(attributed, "有 workspace", Some(&workspace_id));
+        attributed_state.workspace_id = Some(workspace_id.clone());
+        assert!(backend.upsert_session(attributed, &attributed_state));
+        // 死 workspace id（注册表里没有）⇒ 必须走 cwd_fallback（None 视为默认工作区，
+        // 不属异常，见 resolve_session_cwd 的口径说明）。
+        let mut dead_state = legacy_state(orphan, "死 workspace id", Some("ws-dead-unknown"));
+        dead_state.workspace_id = Some("ws-dead-unknown".to_string());
+        assert!(backend.upsert_session(orphan, &dead_state));
+    }
+
+    let backend = fixture.backend(&app);
+    let report = migrate_grandfathered_sessions(&backend, MigrateOptions::apply()).expect("migrate");
+    assert_eq!(report.migrated.len(), 2, "{report:?}");
+    assert_eq!(
+        report.cwd_fallback,
+        vec![orphan.to_string()],
+        "workspace id 在注册表里解析不到 ⇒ 必须逐条记入 cwd_fallback（不得静默）：{report:?}"
+    );
+
+    let ws_group = group_dir(&fixture, &app, &workspace_root.to_string_lossy());
+    let attributed_segment = encode_session_id_segment(attributed).expect("segment");
+    assert!(
+        ws_group
+            .join(&attributed_segment)
+            .join(SESSION_LOG_FILE_NAME)
+            .is_file(),
+        "D2：能解析 workspace 的会话必须落在 workspace root 对应的分组（{}）",
+        ws_group.display()
+    );
+    let process_cwd = pony_agent_core::agent::session::current_log_cwd();
+    let orphan_segment = encode_session_id_segment(orphan).expect("segment");
+    assert!(
+        group_dir(&fixture, &app, &process_cwd)
+            .join(&orphan_segment)
+            .join(SESSION_LOG_FILE_NAME)
+            .is_file(),
+        "解析不到归属的会话退回进程 cwd 分组"
+    );
+    eprintln!(
+        "[11] 分组归属：{} → {}；{} → 进程 cwd（cwd_fallback={:?}）",
+        attributed,
+        ws_group.file_name().unwrap().to_string_lossy(),
+        orphan,
+        report.cwd_fallback
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. 计数稳定（D3）：同一快照连续两次 dry-run 结果完全一致
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dry_run_counts_are_stable_across_runs() {
+    let fixture = Fixture::new("count_stable");
+    let app = fixture.app_dir("app");
+    seed_legacy(&fixture, &app, "pa_3b_cnt_a", "可迁移 A", None);
+    seed_legacy(&fixture, &app, "pa_3b_cnt_b", "可迁移 B", None);
+    // 一个无法忠实合成的会话 + 一个已有日志的会话，让三类计数都非零。
+    let mut unfaithful = legacy_state("pa_3b_cnt_bad", "不忠实", None);
+    unfaithful
+        .history
+        .insert(1, user_message("重复同轮消息", Some("turn-a")));
+    {
+        let backend = fixture.backend(&app);
+        assert!(backend.upsert_session("pa_3b_cnt_bad", &unfaithful));
+    }
+    write_log_in_cwd(&fixture, &app, "pa_3b_cnt_haslog", "/cwd/elsewhere");
+
+    let backend = fixture.backend(&app);
+    let first = migrate_grandfathered_sessions(&backend, MigrateOptions::dry_run()).expect("dry 1");
+    let second = migrate_grandfathered_sessions(&backend, MigrateOptions::dry_run()).expect("dry 2");
+
+    assert_eq!(first.migrated, second.migrated, "两次 dry-run 的 migrated 必须一致");
+    assert_eq!(first.mismatched, second.mismatched, "两次 dry-run 的 mismatched 必须一致");
+    assert_eq!(first.skipped_has_log, second.skipped_has_log);
+    assert_eq!(first.scanned, second.scanned);
+    assert_eq!(first.cwd_fallback, second.cwd_fallback);
+    assert_eq!(first.summary_line(), second.summary_line());
+    assert_eq!(first.migrated.len(), 2, "{first:?}");
+    assert_eq!(first.mismatched.len(), 1, "{first:?}");
+    assert_eq!(first.skipped_has_log, 1, "{first:?}");
+    assert!(
+        fixture.log_path(&app, "pa_3b_cnt_a").is_none(),
+        "dry-run 不得落盘"
+    );
+    eprintln!("[12] 两次 dry-run 完全一致：{}", second.summary_line());
+}

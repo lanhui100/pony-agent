@@ -725,6 +725,54 @@ impl SessionLogStore {
         Ok(self.session_dir(session_id, cwd)?.join(SESSION_LOG_FILE_NAME))
     }
 
+    /// **跨 cwd 分组**按会话 id 查找日志文件（不看进程 cwd）。
+    ///
+    /// 为什么需要：会话的 cwd 分组是**创建时**的目录标签，进程换个工作目录启动后
+    /// `open_write`/`log_path(id, current_cwd())` 会指向另一个分组 ⇒ 用进程 cwd 判
+    /// 「有没有日志」必然误判（ADR 0099 阶段 3-B 实测：跨工作区会话被判成 grandfather，
+    /// 于是 2-D 写路径继续给它写整包 blob、迁移也会重复造分组）。
+    ///
+    /// 快路径：先按**当前进程 cwd** 直接 stat（绝大多数情况一次命中，不扫目录）；
+    /// 冷路径：遍历 `cwd_groups()`（分组数很少，线性扫可接受）返回第一个命中。
+    /// 返回 `None` = 该 id 在任何分组下都没有日志文件。
+    pub fn find_log_path(&self, session_id: &str) -> Option<PathBuf> {
+        let encoded = encode_session_id_segment(session_id).ok()?;
+        // 快路径：进程 cwd 分组（写路径的常态）。
+        if let Some(cwd) = std::env::current_dir().ok() {
+            let candidate = self
+                .root
+                .join(normalize_cwd_segment(&cwd.to_string_lossy()))
+                .join(&encoded)
+                .join(SESSION_LOG_FILE_NAME);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        // 冷路径：跨分组线性扫。
+        for group in self.cwd_groups().ok()? {
+            let candidate = group.join(&encoded).join(SESSION_LOG_FILE_NAME);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// **跨 cwd 分组**查找会话摘要（`current` header 的第一个命中）。
+    ///
+    /// 迁移用它解析「该会话已有日志时属于哪个 cwd 分组」，从而把产物写回**原分组**，
+    /// 不制造重复分组（见 `log_migrate` 的 cwd 归属解析）。
+    pub fn find_session_meta(&self, session_id: &str) -> Option<SessionLogMeta> {
+        let encoded = encode_session_id_segment(session_id).ok()?;
+        for group in self.cwd_groups().ok()? {
+            let path = group.join(&encoded).join(SESSION_LOG_FILE_NAME);
+            if let Ok(HeaderClass::Current(header)) = read_header(&path) {
+                return Some(SessionLogMeta::from_header(&header));
+            }
+        }
+        None
+    }
+
     /// 读取某个会话的 header 分类。
     pub fn read_session_header(&self, session_id: &str) -> Result<HeaderClass, LogStoreError> {
         let dir = self.resolve_session_dir(session_id)?;

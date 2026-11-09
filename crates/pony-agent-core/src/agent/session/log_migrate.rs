@@ -96,6 +96,8 @@ pub struct MigrateReport {
     pub skipped_has_log: usize,
     /// `force` 下被覆盖重写的**迁移产物**会话（原始过程流不计入此表）。
     pub remigrated: Vec<String>,
+    /// 无法解析归属 cwd、退回**进程 cwd** 的会话（逐条记录，不静默）。
+    pub cwd_fallback: Vec<String>,
     /// 无法忠实合成、因此**未落盘**的会话：`(session_id, 差异说明)`。
     pub mismatched: Vec<(String, String)>,
     /// 其它失败（IO / 锁 / 会话 id 非法等）：`(session_id, 原因)`。
@@ -108,12 +110,13 @@ impl MigrateReport {
     /// 汇总一行（CLI 与日志共用）。
     pub fn summary_line(&self) -> String {
         format!(
-            "mode={} scanned={} migrated={} skipped_has_log={} remigrated={} mismatched={} failed={}",
+            "mode={} scanned={} migrated={} skipped_has_log={} remigrated={} cwd_fallback={} mismatched={} failed={}",
             if self.dry_run { "dry-run" } else { "apply" },
             self.scanned,
             self.migrated.len(),
             self.skipped_has_log,
             self.remigrated.len(),
+            self.cwd_fallback.len(),
             self.mismatched.len(),
             self.failed.len()
         )
@@ -250,19 +253,27 @@ pub fn migrate_grandfathered_sessions(
     // 刻意**不**用 `load_index_store`：那是「索引原样视图」的诊断口径，`session_read_from_log`
     // 有一条守卫用例钉死它只允许出现在 `sqlite_session.rs` 与 `fold.rs`（防止运行时路径
     // 误用索引视图），迁移属于运行时维护路径，必须走 `load_store`。
+    //
+    // **只做一次快照**（ADR 0099 阶段 3-B 缺陷 3）：循环中途再调 `load_store` 会把刚写好的
+    // 日志合并进来，`skipped_has_log` / `migrated` 计数随写入顺序漂移（实测 dry-run 50 /
+    // apply 52）。这里进循环前一次性取定 `(id, state)` 与 workspace 注册表。
     let source_store = backend
         .load_store()
         .ok_or_else(|| "load_store() 返回 None（会话库不可读）".to_string())?;
-    let index_store = &source_store;
+    let workspaces = source_store.workspaces.clone();
+    let mut snapshot: Vec<(String, SessionState)> = source_store
+        .sessions_view()
+        .iter()
+        .map(|(session_id, state)| (session_id.clone(), state.clone()))
+        .collect();
+    // 按 id 排序：报告与落盘顺序稳定（幂等断言与人工核对都靠它）。
+    snapshot.sort_by(|left, right| left.0.cmp(&right.0));
     let log_root = backend.session_log_root();
     let mut report = MigrateReport {
-        scanned: index_store.sessions_view().len(),
+        scanned: snapshot.len(),
         dry_run: options.dry_run,
         ..Default::default()
     };
-    // 按 id 排序：报告与落盘顺序稳定（幂等断言与人工核对都靠它）。
-    let mut session_ids: Vec<&String> = index_store.sessions_view().keys().collect();
-    session_ids.sort();
     let app_version = env!("CARGO_PKG_VERSION");
     let migrated_at_ms = now_ms();
 
@@ -279,12 +290,8 @@ pub fn migrate_grandfathered_sessions(
     };
     let mut staging_guard = StagingGuard::new(staging_root.clone(), options.dry_run);
 
-    for session_id in session_ids {
-        let state = index_store
-            .sessions_view()
-            .get(session_id)
-            .expect("id 来自同一张表")
-            .clone();
+    for (session_id, state) in &snapshot {
+        let session_id = session_id.as_str();
         // 已有日志 ⇒ 跳过（幂等）；force 只允许重跑自己的迁移产物。
         if backend.session_has_log(session_id) {
             match existing_log_source(&log_root, session_id) {
@@ -297,9 +304,18 @@ pub fn migrate_grandfathered_sessions(
                 }
             }
         }
-        match migrate_one(
-            &state,
+        // 产物归属（缺陷 2）：按会话自身归属解析 cwd，而不是运行时的进程 cwd。
+        let cwd = resolve_session_cwd(
+            &state.workspace_id,
             session_id,
+            &workspaces,
+            &log_root,
+            &mut report.cwd_fallback,
+        );
+        match migrate_one(
+            state,
+            session_id,
+            &cwd,
             &staging_root,
             &log_root,
             app_version,
@@ -309,24 +325,24 @@ pub fn migrate_grandfathered_sessions(
             Ok(outcome) => match outcome {
                 MigrationOutcome::Migrated { replaced } => {
                     if replaced {
-                        report.remigrated.push(session_id.clone());
+                        report.remigrated.push(session_id.to_string());
                     } else {
-                        report.migrated.push(session_id.clone());
+                        report.migrated.push(session_id.to_string());
                     }
                 }
                 MigrationOutcome::DryRunVerified { replaced } => {
                     if replaced {
-                        report.remigrated.push(session_id.clone());
+                        report.remigrated.push(session_id.to_string());
                     } else {
-                        report.migrated.push(session_id.clone());
+                        report.migrated.push(session_id.to_string());
                     }
                 }
             },
             Err(MigrationError::Mismatched { detail }) => {
-                report.mismatched.push((session_id.clone(), detail));
+                report.mismatched.push((session_id.to_string(), detail));
             }
             Err(MigrationError::Failed { detail }) => {
-                report.failed.push((session_id.clone(), detail));
+                report.failed.push((session_id.to_string(), detail));
             }
         }
     }
@@ -358,16 +374,17 @@ enum MigrationError {
 }
 
 /// 迁移一个会话：合成 → 暂存写 → fold 比对 → （非 dry-run）原子发布。
+#[allow(clippy::too_many_arguments)]
 fn migrate_one(
     state: &SessionState,
     session_id: &str,
+    cwd: &str,
     staging_root: &Path,
     log_root: &Path,
     app_version: &str,
     migrated_at_ms: i64,
     options: MigrateOptions,
 ) -> Result<MigrationOutcome, MigrationError> {
-    let cwd = super::log_sink::current_log_cwd();
     let already_present = log_root
         .join(super::log_store::normalize_cwd_segment(&cwd))
         .join(
@@ -386,7 +403,7 @@ fn migrate_one(
     ));
     let _ = std::fs::remove_dir_all(&staging_dir);
 
-    let meta = SessionLogMeta::new(session_id, cwd.clone())
+    let meta = SessionLogMeta::new(session_id, cwd.to_string())
         .with_created_at(state.updated_at_ms as i64)
         .with_source(SessionLogSource::migrated_from_blob(
             app_version,
@@ -450,14 +467,14 @@ fn migrate_one(
 
     // —— 原子发布：把校验通过的日志文件 rename 到正式路径 ——
     let target_dir = SessionLogStore::new(log_root.to_path_buf())
-        .session_dir(session_id, &cwd)
+        .session_dir(session_id, cwd)
         .map_err(|error| MigrationError::Failed {
             detail: format!("目标路径解析失败：{error}"),
         })?;
     std::fs::create_dir_all(&target_dir).map_err(|error| MigrationError::Failed {
         detail: format!("创建目标目录失败：{error}"),
     })?;
-    let staged_log = staging_store.session_dir(session_id, &cwd).map_err(|error| {
+    let staged_log = staging_store.session_dir(session_id, cwd).map_err(|error| {
         MigrationError::Failed {
             detail: format!("暂存路径解析失败：{error}"),
         }
@@ -517,12 +534,46 @@ fn normalize_for_parity(state: &SessionState, session_id: &str) -> SessionState 
     normalized
 }
 
+/// 解析会话的**归属 cwd**（决定产物落在哪个 `--<cwd>--` 分组）。
+///
+/// 优先级（找不到就降级，且降级必须留痕）：
+/// 1. 会话的 workspace → 注册表（`store_metadata.workspaces`）的 `root_path`。
+///    **`workspace_id == None` 按产品既有归一化视为默认工作区**（与
+///    `workspace::normalize_session_workspace_id` 同一口径：None → `default`），
+///    否则真实库里 91 个未盖章的老会话会全部退化成进程 cwd（实测会产生 `--tmp--`）；
+/// 2. 该 id **已有日志**的分组（`SessionLogStore::find_session_meta`）——保证重跑/迁移
+///    不会把它挪到别的分组（缺陷 2 的核心：不得按运行时进程 cwd 伪造归属）；
+/// 3. 退回进程 cwd，并把会话 id 记进 `cwd_fallback`（不静默）。
+fn resolve_session_cwd(
+    workspace_id: &Option<String>,
+    session_id: &str,
+    workspaces: &[crate::agent::workspace::WorkspaceRecord],
+    log_root: &Path,
+    cwd_fallback: &mut Vec<String>,
+) -> String {
+    let resolved_workspace_id = workspace_id
+        .as_deref()
+        .unwrap_or(crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+    if let Some(record) = workspaces
+        .iter()
+        .find(|record| record.id == resolved_workspace_id)
+    {
+        if !record.root_path.trim().is_empty() {
+            return record.root_path.clone();
+        }
+    }
+    if let Some(meta) = SessionLogStore::new(log_root.to_path_buf()).find_session_meta(session_id) {
+        return meta.cwd;
+    }
+    cwd_fallback.push(session_id.to_string());
+    super::log_sink::current_log_cwd()
+}
+
 /// 读某会话已有日志的 `source` 标记（无日志 / 读取失败 ⇒ `None`）。
 fn existing_log_source(log_root: &Path, session_id: &str) -> Option<SessionLogSource> {
     let store = SessionLogStore::new(log_root.to_path_buf());
-    let metas = store.list_sessions().ok()?;
-    let meta = metas.into_iter().find(|meta| meta.session_id == session_id)?;
-    let path = store.log_path(session_id, &meta.cwd).ok()?;
+    // 跨分组查找（同 `session_has_log` 口径），避免进程 cwd 与创建分组不一致时漏判。
+    let path = store.find_log_path(session_id)?;
     super::log_store::read_header_source(&path).ok().flatten()
 }
 
@@ -564,7 +615,7 @@ pub fn migrated_session_ids(log_root: &Path) -> Vec<String> {
     let store = SessionLogStore::new(log_root.to_path_buf());
     let mut ids = BTreeSet::new();
     for meta in store.list_sessions().unwrap_or_default() {
-        let Ok(path) = store.log_path(&meta.session_id, &meta.cwd) else {
+        let Some(path) = store.find_log_path(&meta.session_id) else {
             continue;
         };
         if super::log_store::read_header_source(&path)

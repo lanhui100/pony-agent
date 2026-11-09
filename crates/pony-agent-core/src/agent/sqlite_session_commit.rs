@@ -243,10 +243,15 @@ impl SqliteSessionBackend {
     /// 只能由磁盘回答；本批 `persist_commands_batch` 也是「先写日志（含 fsync）、
     /// 后写 SQLite 索引」，所以索引写入时点文件一定已经落盘。
     pub(crate) fn session_has_log(&self, session_id: &str) -> bool {
-        self.session_log_sink
-            .log_path(session_id)
-            .map(|path| path.is_file())
-            .unwrap_or(false)
+        // **必须跨 cwd 分组查**：分组是创建时的目录标签，用进程 cwd 会把「别的分组里
+        // 已有日志」的会话误判成 grandfather，进而给它继续写整包 blob（阶段 2-D 的
+        // 停写 blob 就此在跨工作区会话上失效）——ADR 0099 阶段 3-B 实测缺陷。
+        self.session_log_sink.find_log_path(session_id).is_some()
+    }
+
+    /// `session_has_log` 的**公开只读**形态（运维/测试断言用；判据同上，跨 cwd 分组）。
+    pub fn has_session_log(&self, session_id: &str) -> bool {
+        self.session_has_log(session_id)
     }
 
     /// 单会话索引行写入：内容按 `session` 覆盖，`version` 单调 +1（CAS 的版本前进点）。
