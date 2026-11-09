@@ -981,3 +981,17 @@ note: >-
       只属流式 + 常量字面量冻结），以及 `crates/pony-agent-core/src/agent/runtime/tests.rs` 的
       `llm_request_mode_labels_and_attributes_stay_in_sync`（四键出口一致性）。
       端到端裁决由 `scripts/audit/assertions/dim1.sh` 退出码承担。
+
+  【归属登记（2026-11-09）｜PA-171 / ADR 0102：失败语义归因 additive 字段】
+  一行结论：tracing 维度 applicable 与 anchor 均不变（仍 `agent/otel/mod.rs`），不新增 metrics / logs / issues 面，
+  也不新增 enforcement_point；变更只是把失败轮的归因字段从「硬编码缺席」改为「有值」，让维度 3（失败语义）可机判。
+  (1) additive 属性：失败事件与落盘 `TurnTraceRecord` 增 `errorClass`
+      （取值 `timeout|rate_limited|quota|network|auth|bad_request|other`，唯一来源
+      `retry::classify_error_class`）；`None` ⇒ 键缺席，旧读取端不读即行为不变。
+  (2) 归因真值：`providerSource` 由 `null` 改为 `provider_attempt_failed:{requested_name}`；
+      `providerMode` 仍为 `failed`（与既有失败 `TurnResult` 同值，如实保留）；
+      `fallbackReason` 记录触发方（`provider_decision_failed` / `provider_followup_failed`），
+      使「首跳 decision 失败」与「工具 followup 失败」可机判。
+  (3) 收口点：不新增 enforcement_point。行为门机械收口在
+      `crates/pony-agent-core/tests/pa171_failed_turn_attribution_contract.rs`（wire 键常驻 + 三字段非占位 + 六条真值表）
+      与 `pa171_provider_rate_limit_cooldown_contract.rs`（限流单次调用 1 次 HTTP / 冷却期 0 次 HTTP / 503 仍重试）。
