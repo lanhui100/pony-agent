@@ -85,3 +85,11 @@ G3 lib **1408 passed**、G4 会话套件全绿、G5 check 0 warning，全部 exi
   - 独立 target（`/tmp/p1-own-target`）全门禁：G1 5 passed / G2 7 passed+2 ignored /
     G3 lib 1408 passed / G4 会话套件全绿 / G5 check 0 warning，全部 exit 0。
 - 结论：**P1 已达可合并状态**；建议合并前补一次第三方终审（或由维护者按上述收据抽查）。
+
+## 九、目标 ④ 可观测（已补）
+
+- `index_deferred` 从「仅日志行」升级为**可机读计数**：`backend::index_deferred_total()`
+  （进程级 atomic，只统计 `LogPersisted`），日志行同时带 `total=`。
+- 单测：`index_deferred_counter_tracks_log_persisted_only`（`backend.rs` 末尾）。
+- 未做：`projection_lag`（按会话的索引滞后时长/条数指标）——需要正式 metrics 出口与
+  `docs/observability.yaml` 四维归属变更，留给 P1.1，避免在止血波次里夹带观测面重构。
