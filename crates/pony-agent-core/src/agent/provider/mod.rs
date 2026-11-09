@@ -609,6 +609,100 @@ impl<'a> ProviderStreamGuard<'a> {
     }
 }
 
+// ── PA-171 C3：provider 限流冷却（进程级注册表，跨轮/跨 ProviderManager 存活） ──────────
+
+/// 无 `Retry-After` 指示时的默认冷却窗口（C3-P5）。
+const COOLDOWN_DEFAULT_MS: u64 = 60_000;
+/// 冷却窗口硬上界（C3-P5）：覆盖 Kimi 5 小时窗口，同时防止异常头把 provider 永久冻结。
+const COOLDOWN_MAX_MS: u64 = 6 * 60 * 60 * 1_000;
+/// 注册表条目容量硬上限（C3-P4）：过期即淘汰，超限按最早到期淘汰。
+const COOLDOWN_REGISTRY_CAPACITY: usize = 64;
+
+/// 单条 provider 冷却记录（纯内存态，无 wire 语义）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCooldownEntry {
+    pub until_unix_ms: u64,
+    /// `retry::classify_error_class` 的返回值（`rate_limited` / `quota`）。
+    pub class: &'static str,
+    pub retry_after_s: Option<u64>,
+}
+
+/// 进程级冷却注册表（`ProviderManager` 每轮新建且只含 config ⇒ 冷却必须脱离实例存活）。
+/// 锁只用于 get/insert/evict，**绝不**持锁跨 HTTP/`block_on`/sleep（C3-P4）；
+/// poison 恢复沿用既有写法 `lock().unwrap_or_else(|e| e.into_inner())`。
+pub struct ProviderCooldownRegistry {
+    entries: std::sync::Mutex<std::collections::HashMap<String, ProviderCooldownEntry>>,
+}
+
+impl ProviderCooldownRegistry {
+    pub fn global() -> &'static Self {
+        static REGISTRY: std::sync::OnceLock<ProviderCooldownRegistry> = std::sync::OnceLock::new();
+        REGISTRY.get_or_init(|| Self {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// 剩余冷却时长；已到期即淘汰并返回 `None`。
+    pub fn remaining(&self, key: &str) -> Option<Duration> {
+        let mut guard = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = guard.get(key)?;
+        let now = now_unix_ms();
+        if entry.until_unix_ms <= now {
+            guard.remove(key);
+            return None;
+        }
+        Some(Duration::from_millis(entry.until_unix_ms - now))
+    }
+
+    /// 冷却条目的类别（供冷却失败文案取 `class`）。
+    pub fn class_for(&self, key: &str) -> Option<&'static str> {
+        let guard = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.get(key).map(|entry| entry.class)
+    }
+
+    /// 登记/覆盖冷却；写入前淘汰过期条目，容量超限按最早到期淘汰。
+    pub fn enter(&self, key: &str, entry: ProviderCooldownEntry) {
+        let mut guard = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = now_unix_ms();
+        guard.retain(|_, entry| entry.until_unix_ms > now);
+        if guard.len() >= COOLDOWN_REGISTRY_CAPACITY && !guard.contains_key(key) {
+            if let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, entry)| entry.until_unix_ms)
+                .map(|(key, _)| key.clone())
+            {
+                guard.remove(&oldest);
+            }
+        }
+        guard.insert(key.to_string(), entry);
+    }
+
+    /// 显式解除冷却（恢复开关/测试复位）。
+    pub fn clear(&self, key: &str) {
+        let mut guard = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.remove(key);
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 pub struct ProviderManager {
     config: ResolvedProviderSelection,
 }
@@ -616,6 +710,70 @@ pub struct ProviderManager {
 impl ProviderManager {
     pub fn new(config: ResolvedProviderSelection) -> Self {
         Self { config }
+    }
+
+    /// PA-171 C3：冷却键四段格式 `requested_name|provider_name|model|base_url`。
+    ///
+    /// 第四段 `base_url` 是**含 base_url 防止跨 endpoint 误杀**（裁决 D68-7）：同一
+    /// provider 名/模型在不同 endpoint（回环 mock、多环境网关）各有独立配额窗口，
+    /// 共享冷却会把 A 环境的 429 误伤到 B 环境（红相 503 反向钉子实测被短路）。
+    /// 生产语义不退化：同一选择的 base_url 固定，跨轮冷却仍生效。
+    fn cooldown_key(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.config.requested_name,
+            self.config.provider_name,
+            self.config.model,
+            self.config.base_url
+        )
+    }
+
+    /// PA-171 C3：当前 provider 的剩余冷却时长（宿主/测试可观测）。
+    pub fn cooldown_remaining(&self) -> Option<Duration> {
+        ProviderCooldownRegistry::global().remaining(&self.cooldown_key())
+    }
+
+    /// PA-171 C3：显式解除冷却（恢复开关/测试复位）。
+    pub fn clear_cooldown(&self) {
+        ProviderCooldownRegistry::global().clear(&self.cooldown_key())
+    }
+
+    /// PA-171 C3-P1：冷却期内**发送前**短路（0 次 HTTP），文案含类别 + 恢复时间。
+    fn ensure_not_cooling(&self) -> Result<(), String> {
+        let Some(remaining) = self.cooldown_remaining() else {
+            return Ok(());
+        };
+        let secs = remaining.as_secs().max(1);
+        let class = ProviderCooldownRegistry::global()
+            .class_for(&self.cooldown_key())
+            .unwrap_or("rate_limited");
+        Err(format!(
+            "provider {} 处于限流冷却中（{class}），预计 {secs}s 后恢复；本次未发起请求；retry_after={secs}",
+            self.config.provider_name
+        ))
+    }
+
+    /// PA-171 C3-P1/C3-P6：命中限流/配额才登记冷却（其余类别保留既有重试语义）。
+    fn enter_cooldown(&self, error: &str) {
+        let class = crate::agent::retry::classify_error_class(error);
+        if !matches!(class, "rate_limited" | "quota") {
+            return;
+        }
+        let retry_after_s = crate::agent::retry::parse_retry_after_marker(error);
+        let window_ms = crate::agent::retry::rate_limit_window_ms(
+            error,
+            crate::agent::retry::utc_now_hm(),
+        )
+        .unwrap_or(COOLDOWN_DEFAULT_MS)
+        .clamp(1_000, COOLDOWN_MAX_MS);
+        ProviderCooldownRegistry::global().enter(
+            &self.cooldown_key(),
+            ProviderCooldownEntry {
+                until_unix_ms: now_unix_ms() + window_ms,
+                class,
+                retry_after_s,
+            },
+        );
     }
 
     /// W2（additive）：当前生效的 provider 选择真值（宿主继承源）。
@@ -2108,6 +2266,8 @@ impl ProviderManager {
         endpoint: &str,
         body: &Value,
     ) -> Result<reqwest::Response, String> {
+        // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
+        self.ensure_not_cooling()?;
         // F7：15s 建连预算 + 180s **读空闲**预算；不设总 deadline，长推理流不再被 180s 截断。
         let client = build_streaming_http_client(
             Duration::from_secs(15),
@@ -2130,16 +2290,20 @@ impl ProviderManager {
 
         let status = response.status();
         if !status.is_success() {
+            // PA-171 C3-P1：`Retry-After` 在 `text()` 之前读取。
+            let retry_after = response_retry_after_header(&response);
             let text = block_on(async move { response.text().await }).map_err(|error| {
                 format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
             })?;
 
-            return Err(format!(
-                "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
+            let error = provider_status_error(
                 status,
                 started_at.elapsed().as_millis(),
-                text
-            ));
+                &text,
+                retry_after.as_deref(),
+            );
+            self.enter_cooldown(&error);
+            return Err(error);
         }
 
         Ok(response)
@@ -2150,6 +2314,8 @@ impl ProviderManager {
         endpoint: &str,
         body: &Value,
     ) -> Result<reqwest::Response, String> {
+        // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
+        self.ensure_not_cooling()?;
         // F7：15s 建连预算 + 180s **读空闲**预算；不设总 deadline，长推理流不再被 180s 截断。
         let client = build_streaming_http_client(
             Duration::from_secs(15),
@@ -2183,16 +2349,20 @@ impl ProviderManager {
 
         let status = response.status();
         if !status.is_success() {
+            // PA-171 C3-P1：`Retry-After` 在 `text()` 之前读取。
+            let retry_after = response_retry_after_header(&response);
             let text = block_on(async move { response.text().await }).map_err(|error| {
                 format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
             })?;
 
-            return Err(format!(
-                "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
+            let error = provider_status_error(
                 status,
                 started_at.elapsed().as_millis(),
-                text
-            ));
+                &text,
+                retry_after.as_deref(),
+            );
+            self.enter_cooldown(&error);
+            return Err(error);
         }
 
         Ok(response)
@@ -2518,6 +2688,8 @@ impl ProviderManager {
     }
 
     fn post_openai_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
+        // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
+        self.ensure_not_cooling()?;
         let client = build_http_client(Duration::from_secs(45), endpoint)?;
         let started_at = Instant::now();
 
@@ -2535,17 +2707,21 @@ impl ProviderManager {
         })?;
 
         let status = response.status();
+        // PA-171 C3-P1：`Retry-After` 在 `text()` 之前读取。
+        let retry_after = response_retry_after_header(&response);
         let text = block_on(async move { response.text().await }).map_err(|error| {
             format_request_error("读取 provider 返回失败", &error, started_at.elapsed())
         })?;
 
         if !status.is_success() {
-            return Err(format!(
-                "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
+            let error = provider_status_error(
                 status,
                 started_at.elapsed().as_millis(),
-                text
-            ));
+                &text,
+                retry_after.as_deref(),
+            );
+            self.enter_cooldown(&error);
+            return Err(error);
         }
 
         serde_json::from_str::<Value>(&text).map_err(|error| {
@@ -2559,6 +2735,8 @@ impl ProviderManager {
     }
 
     fn post_anthropic_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
+        // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
+        self.ensure_not_cooling()?;
         let client = build_http_client(Duration::from_secs(45), endpoint)?;
         let started_at = Instant::now();
 
@@ -2586,17 +2764,21 @@ impl ProviderManager {
         })?;
 
         let status = response.status();
+        // PA-171 C3-P1：`Retry-After` 在 `text()` 之前读取。
+        let retry_after = response_retry_after_header(&response);
         let text = block_on(async move { response.text().await }).map_err(|error| {
             format_request_error("读取 provider 返回失败", &error, started_at.elapsed())
         })?;
 
         if !status.is_success() {
-            return Err(format!(
-                "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
+            let error = provider_status_error(
                 status,
                 started_at.elapsed().as_millis(),
-                text
-            ));
+                &text,
+                retry_after.as_deref(),
+            );
+            self.enter_cooldown(&error);
+            return Err(error);
         }
 
         serde_json::from_str::<Value>(&text).map_err(|error| {
@@ -4400,6 +4582,37 @@ const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
 const TOOL_CALL_REASONING_PLACEHOLDER: &str = "工具调用前的思考过程已省略。";
 const PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 5;
 
+/// PA-171 C3-S4/C3-P1：非 2xx 错误文本的**唯一装配点**。
+///
+/// `Retry-After` 以 [`crate::agent::retry::RETRY_AFTER_MARKER`] 结构化后缀承载（解析同源，
+/// 禁止第二处拼装）；冷却窗口与 TUI 文案都只消费这一份结构化时间。
+fn provider_status_error(
+    status: reqwest::StatusCode,
+    elapsed_ms: u128,
+    body: &str,
+    retry_after: Option<&str>,
+) -> String {
+    let base = format!("provider 返回错误状态：{status}；耗时={elapsed_ms}ms；响应正文：{body}");
+    match retry_after.and_then(parse_retry_after_header_seconds) {
+        Some(secs) => crate::agent::retry::append_retry_after_marker(&base, secs),
+        None => base,
+    }
+}
+
+/// `Retry-After` 头只接受秒数形态（HTTP-date 形态推迟，不影响冷却默认窗口）。
+fn parse_retry_after_header_seconds(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+/// PA-171 C3-P1：`Retry-After` 必须在 `response.text()` **之前**读取（text 消费响应体）。
+fn response_retry_after_header(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
 fn extract_provider_error_detail(err: &str) -> String {
     // 透传错误响应正文给前端，由前端根据 JSON 结构自适应展示
     if let Some(body_start) = err.find("响应正文：") {
@@ -4493,9 +4706,10 @@ pub fn sanitize_dsml_protocol_text(text: &str) -> String {
     cleaned
 }
 
-/// PA-100：重试作用域。rate-limit 长退避只对 followup 生效——对话首跳
-/// （decision/decision_stream）保持短退避快败进既有 fallback，避免用户在看到
-/// 任何输出前先白等一分钟。
+/// PA-100/PA-171：重试作用域。rate-limit 长退避只对 followup 生效——对话首跳
+/// （decision/decision_stream）命中限流/配额时**首跳即 Abort**（C3-P2：0 次 sleep，
+/// 冷却由 HTTP 出口登记），非限流瞬时错误仍走短退避快败进既有 fallback，
+/// 避免用户在看到任何输出前先白等一分钟。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderRetryScope {
     Decision,
@@ -4674,6 +4888,15 @@ where
                 let last_error = extract_provider_error_detail(&err);
                 last_failure = Some(err.clone());
                 let failure = policy.classify(&err);
+                // PA-171 C3-P2：Decision（对话首跳）作用域首跳限流/配额即 Abort——
+                // 冷却已在 4 个 HTTP 出口登记，重试循环不得再 sleep（否则
+                // 0.5+1+2+4=7.5s 违反 "限流快速失败(<3s)" 契约）。
+                if scope == ProviderRetryScope::Decision
+                    && crate::agent::retry::is_rate_limit_cooldown_error(&err)
+                {
+                    let outcome = report(&budget, attempts_total, slept_ms, rl_active);
+                    return (Err(last_error), outcome);
+                }
                 let use_rate_limit = scope == ProviderRetryScope::Followup
                     && failure.is_retryable()
                     && is_rate_limit_error(&err)
@@ -7890,7 +8113,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_scope_keeps_short_backoff_for_rate_limit_errors() {
+    fn decision_scope_aborts_immediately_on_rate_limit_errors() {
         let sleeper = crate::agent::retry::FakeSleeper::new();
         let attempts = std::cell::Cell::new(0);
         let (result, report): (Result<(), String>, SingleHopRetryReport) =
@@ -7906,7 +8129,40 @@ mod tests {
             );
 
         assert!(result.is_err());
-        // 对话首跳不启用长退避：维持原短退避（≤7.5s sleep、5 次尝试）快败进 fallback。
+        // PA-171 C3-P2（反转 PA-100 的「首跳短退避」）：限流/配额首跳即 Abort——
+        // 只 1 次尝试、0 次 sleep（冷却窗口由 provider HTTP 出口登记，不再白烧 7.5s）。
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        // T2-B：Decision 作用域从不切换 RL 配置。
+        assert_eq!(report.attempts_total, 1);
+        assert_eq!(report.slept_ms, 0);
+        assert!(!report.switched_to_rl);
+        assert_eq!(report.scope, "decision");
+    }
+
+    /// PA-171 C3-P6 反向钉子：Decision 作用域的非限流瞬时错误（503）必须保留既有重试。
+    #[test]
+    fn decision_scope_keeps_retries_for_non_rate_limit_transient_errors() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "decision",
+            ProviderRetryScope::Decision,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err("provider 返回错误状态：503 Service Unavailable".to_string())
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(result.is_err());
+        // 503 不是限流 ⇒ 维持既有 5 次短退避（0.5+1+2+4=7.5s）。
         assert_eq!(attempts.get(), 5);
         assert_eq!(
             sleeper
@@ -7914,11 +8170,6 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             7_500
         );
-        // T2-B：Decision 作用域从不切换 RL。
-        assert_eq!(report.attempts_total, 5);
-        assert_eq!(report.slept_ms, 7_500);
-        assert!(!report.switched_to_rl);
-        assert_eq!(report.scope, "decision");
     }
 
     #[test]

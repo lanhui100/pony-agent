@@ -307,9 +307,12 @@ impl RetryAfter {
 /// （401 与 400 不区分冻结，同落 NonRetryable）；⑥ context 四词 → `UpstreamContextOverflow`；
 /// ⑦ 其余默认 Abort；⑧ decide/budget/RetryAfter/StreamState 语义冻结（本 Stage 不动）。
 ///
-/// R2.4 七词（`is_rate_limit_error` 冻结）：429/rate limit/rate_limit/ratelimit/
-/// too many requests/tpm/quota → `UpstreamRateLimited` 候选（quota-only 因 classify
-/// 先判 NonRetryable 而 Abort，quota+429 混合才切 RL 长退避；PA-100 残余原样保留）。
+/// R2.4 七词（`is_rate_limit_error`，PA-171 增补后为九词）：429/rate limit/rate_limit/
+/// ratelimit/too many requests/tpm/quota + usage limit/allowance → 限流类（冷却）候选。
+/// PA-171 C3 反转 PA-100 的 quota-only 残余：quota-only 措辞（无 429 特征）现经
+/// [`UPSTREAM_QUOTA_HINTS`] 落 [`ErrorCode::UpstreamQuota`] ⇒ `classify` 判 NonRetryable
+/// 立即 Abort（不再打 5 次短退避），由 provider 侧登记冷却窗口；429+quota 混合报文仍先命中
+/// 限流表（`UpstreamRateLimited`），按 `Retry-After`/恢复时间冷却。
 pub(crate) const UPSTREAM_TIMEOUT_HINTS: &[&str] = &[
     "type=timeout",
     "timeout",
@@ -318,6 +321,16 @@ pub(crate) const UPSTREAM_TIMEOUT_HINTS: &[&str] = &[
 ];
 pub(crate) const UPSTREAM_RATE_LIMITED_HINTS: &[&str] =
     &["429", "rate limit", "rate_limit", "too many requests", "tpm"];
+/// PA-171 C3：quota-only 措辞（**不含** 429/rate-limit 特征）→ [`ErrorCode::UpstreamQuota`]。
+/// 判定置于限流表**之后**：`429 + quota` 混合报文仍按限流处理（既有语义不变），
+/// 纯配额/用量上限/额度耗尽文案则走"立即 Abort + 冷却"，不再白烧 5 次短退避。
+pub(crate) const UPSTREAM_QUOTA_HINTS: &[&str] = &[
+    "quota",
+    "exceeded_current_quota_error",
+    "usage limit",
+    "allowance",
+    "billing window",
+];
 pub(crate) const UPSTREAM_SERVER_ERROR_HINTS: &[&str] = &["502", "503", "504", "408"];
 /// ③′ 边缘 5xx（ADR-0086）：语义与 502/503/504 同为「暂时性上游不可用」，但码值
 /// 不在 RFC 标准表内（reqwest 显示为 `<unknown status code>`），原码表一条都不命中
@@ -342,6 +355,11 @@ pub(crate) const UPSTREAM_CONTEXT_OVERFLOW_HINTS: &[&str] = &[
     "payload too large",
 ];
 pub(crate) const UPSTREAM_AUTH_HINTS: &[&str] = &["401", "403"];
+/// PA-171 C3-S1：`classify_error_class` 的 auth 措辞补充（与 `UPSTREAM_AUTH_HINTS` 同一
+/// 注册表出口；仅供审计/文案分类消费，不改 `classify` 的重试结论）。
+pub(crate) const UPSTREAM_AUTH_WORDING_HINTS: &[&str] = &["api key", "invalid_api_key"];
+/// PA-171 C3-S1：`classify_error_class` 的 bad_request 措辞补充（同上，单一注册表）。
+pub(crate) const UPSTREAM_BAD_REQUEST_WORDING_HINTS: &[&str] = &["invalid request", "missing field"];
 pub(crate) const RATE_LIMIT_LONG_BACKOFF_HINTS: &[&str] = &[
     "429",
     "rate limit",
@@ -350,6 +368,11 @@ pub(crate) const RATE_LIMIT_LONG_BACKOFF_HINTS: &[&str] = &[
     "too many requests",
     "tpm",
     "quota",
+    // PA-171 C3：两条真实可达的限流/配额措辞（诊断报文
+    // `You've reached your 5-hour usage limit` / `out of its allowance`），
+    // 历史漏判 ⇒ 走 500ms→8s 短退避打满后 Abort。
+    "usage limit",
+    "allowance",
 ];
 
 /// wave-35/C3(生产判据修复):分类只允许看**原因文本**,不得看 URL/endpoint 片段。
@@ -571,6 +594,11 @@ pub(crate) fn upstream_code_for_hints(lower: &str) -> Option<ErrorCode> {
     if hints_match(lower, UPSTREAM_RATE_LIMITED_HINTS) {
         return Some(ErrorCode::UpstreamRateLimited);
     }
+    // PA-171 C3：quota-only（配额/用量上限/额度耗尽）→ UpstreamQuota。
+    // 置于限流判据之后、5xx 判据之前：429+quota 混合报文仍先落 UpstreamRateLimited。
+    if hints_match(lower, UPSTREAM_QUOTA_HINTS) {
+        return Some(ErrorCode::UpstreamQuota);
+    }
     if hints_match(lower, UPSTREAM_SERVER_ERROR_HINTS) {
         return Some(ErrorCode::UpstreamServerError);
     }
@@ -637,8 +665,11 @@ impl ProviderRetryPolicy {
                 details: err.to_string(),
             },
             // ⑤⑦ → NonRetryable（R1⑤⑦；401/403 同落此分支，不区分冻结）。
+            // PA-171 C3：quota-only（UpstreamQuota）同样 NonRetryable ⇒ 立即 Abort，
+            // 由 provider 侧按恢复窗口登记冷却（不再 5 次短退避打满）。
             Some(ErrorCode::UpstreamAuth)
             | Some(ErrorCode::UpstreamBadRequest)
+            | Some(ErrorCode::UpstreamQuota)
             | None => FailureKind::NonRetryable {
                 details: err.to_string(),
             },
@@ -728,27 +759,161 @@ impl FailureKind {
     }
 }
 
-/// PA-100：rate-limit 特征判定（单一来源）。`classify` 仍把这类错误统一归为
-/// `TransientRetryable`（可重试）；本函数供重试调度方进一步区分"应使用长退避
-/// 覆盖分钟级限流窗口"的子类，避免在调用侧各自维护关键词列表造成漂移。
+/// PA-100/PA-171：rate-limit 特征判定（单一来源）。`classify` 仍把这类错误统一归为
+/// `TransientRetryable`（可重试）；本函数供重试调度方/文案层进一步区分"应使用冷却窗口
+/// 覆盖分钟级限流"的子类，避免在调用侧各自维护关键词列表造成漂移。
 ///
-/// 消费前提（PA-100 code-review A P2-2；T2-B F2 已明确混合策略）：
-/// 仅当 `classify` 先判为可重试时本判定才会被调度方消费——
-/// - quota-only（报文仅含 quota/tpm 等措辞，不含 "429"/"rate limit"/timeout 特征）：
-///   `classify` 落默认 NonRetryable 分支直接 Abort，不烧退避；
+/// 消费前提（PA-171 C3 反转 PA-100 残余）：
+/// - quota-only（报文仅含 quota/usage limit/allowance 等措辞，不含 "429"/"rate limit"）：
+///   `classify` 落 [`ErrorCode::UpstreamQuota`] ⇒ NonRetryable 立即 Abort；provider 侧按
+///   本判定登记冷却窗口，本判定同时是 TUI 文案的"限流/配额"单一判据；
 /// - quota+429 混合（报文同时含 quota 与 "429"/"rate limit" 特征）：
-///   `classify` 先判 TransientRetryable，本判定再命中 → Followup 下切换 RL 长退避。
-///   已接受残余：若底层实为永久配额耗尽而非瞬时限流，会白烧约 60s（20s+40s）退避。
+///   `classify` 先判 TransientRetryable，调度方再按 `Retry-After`/恢复时间决定：
+///   窗口超出本次预算 ⇒ 立即失败（冷却），否则沿用既有 RL 长退避；
 ///
 /// 判定优先于措辞细节：报文同时含 timeout 与 rate-limit 特征时（如网关把上游
-/// 429 包装成超时文案），按 rate-limit 处理——长退避对两类瞬时故障都安全，
+/// 429 包装成超时文案），按 rate-limit 处理——冷却对两类瞬时故障都安全，
 /// 反向（短退避撞限流窗口）则必然失败。
 pub fn is_rate_limit_error(err: &str) -> bool {
-    // R2.4 七词冻结：唯一来源 RATE_LIMIT_LONG_BACKOFF_HINTS。
+    // R2.4 九词（PA-171 增补 usage limit / allowance）：唯一来源 RATE_LIMIT_LONG_BACKOFF_HINTS。
     let lower = err.to_ascii_lowercase();
     // wave-35/C3: same as classify -- endpoint/URL fragments (ports can contain 429)
     // must not drive the decision. R2.4 wording table itself is unchanged.
     hints_match(&strip_endpoint_fragments(&lower), RATE_LIMIT_LONG_BACKOFF_HINTS)
+}
+
+// ── PA-171 C3/C4/C5：限流冷却窗口与失败归因（单一出口，调用方只消费此处） ──────────────
+
+/// C3-S4：`Retry-After` 在错误文本里的唯一结构化后缀（两段解析同源，禁止第二处拼装）。
+pub const RETRY_AFTER_MARKER: &str = "retry_after=";
+
+/// C3-S4：把 `Retry-After` 秒数追加为结构化后缀（幂等：已有标记则不重复追加）。
+pub fn append_retry_after_marker(err: &str, seconds: u64) -> String {
+    if err.contains(RETRY_AFTER_MARKER) {
+        return err.to_string();
+    }
+    format!("{err}；{RETRY_AFTER_MARKER}{seconds}")
+}
+
+/// C3-S4：从错误文本解析 `Retry-After` 秒数（唯一解析点）。
+pub fn parse_retry_after_marker(err: &str) -> Option<u64> {
+    let index = err.find(RETRY_AFTER_MARKER)?;
+    let digits: String = err[index + RETRY_AFTER_MARKER.len()..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse::<u64>().ok()
+}
+
+/// C4：错误文本 → 审计可判的 `error_class`（`turn_flow` 失败事件消费）。
+///
+/// 取值冻结为 `timeout|rate_limited|quota|network|auth|bad_request|other`，判定优先级
+/// 按 C3-S1 冻结：`quota` → `rate_limited` → `timeout` → `auth` → `network` →
+/// `bad_request` → `other`。只消费本文件既有码表常量（+ 同文件措辞补充），
+/// 经 [`strip_endpoint_fragments`]/[`hints_match`] 判定（禁止裸 `contains` 与第二套表）。
+pub fn classify_error_class(err: &str) -> &'static str {
+    let lower = err.to_ascii_lowercase();
+    let stripped = strip_endpoint_fragments(&lower);
+    let text = stripped.as_str();
+    if hints_match(text, UPSTREAM_QUOTA_HINTS) {
+        return "quota";
+    }
+    if hints_match(text, RATE_LIMIT_LONG_BACKOFF_HINTS) {
+        return "rate_limited";
+    }
+    if hints_match(text, UPSTREAM_TIMEOUT_HINTS) {
+        return "timeout";
+    }
+    if hints_match(text, UPSTREAM_AUTH_HINTS) || hints_match(text, UPSTREAM_AUTH_WORDING_HINTS) {
+        return "auth";
+    }
+    if hints_match(text, UPSTREAM_NETWORK_HINTS) || hints_match(text, UPSTREAM_TRANSPORT_HINTS) {
+        return "network";
+    }
+    if hints_match(text, UPSTREAM_BAD_REQUEST_HINTS)
+        || hints_match(text, UPSTREAM_BAD_REQUEST_WORDING_HINTS)
+    {
+        return "bad_request";
+    }
+    "other"
+}
+
+/// 当前 UTC 时刻（时, 分）：`rate_limit_window_ms` 的注入点（纯函数便于真值表测试）。
+pub fn utc_now_hm() -> (u8, u8) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let day_secs = secs % 86_400;
+    ((day_secs / 3_600) as u8, ((day_secs % 3_600) / 60) as u8)
+}
+
+/// 是否属于「应冷却 provider」的类别（`rate_limited` | `quota`）。
+///
+/// 唯一判据是 [`classify_error_class`]（禁止第二套关键词判定）；冷却短路文案本身含
+/// `rate_limited`/`quota` 类名 ⇒ 同样命中，保证重试编排在冷却期内不再重放。
+pub fn is_rate_limit_cooldown_error(err: &str) -> bool {
+    matches!(classify_error_class(err), "rate_limited" | "quota")
+}
+
+/// 从错误文本解析限流恢复窗口（毫秒）。来源优先级：
+/// 1. `Retry-After` 结构化后缀（[`parse_retry_after_marker`]，唯一解析点）；
+/// 2. UTC 重置时刻（`not asked again before 06:01 UTC` / `resets at 06:01 UTC`），
+///    按 `now_utc_hm` 求到下一次该时刻的距离（跨日由取模覆盖）。
+/// 返回 `None` = 文本无任何窗口指示（调用方使用默认窗口/既有退避）。
+pub fn rate_limit_window_ms(err: &str, now_utc_hm: (u8, u8)) -> Option<u64> {
+    if let Some(secs) = parse_retry_after_marker(err) {
+        return Some(secs.saturating_mul(1_000));
+    }
+    let lower = err.to_ascii_lowercase();
+    let (hour, minute) = utc_reset_hint(&lower)?;
+    let now_minutes = u32::from(now_utc_hm.0) * 60 + u32::from(now_utc_hm.1);
+    let target = u32::from(hour) * 60 + u32::from(minute);
+    let mut delta = (target + 24 * 60 - now_minutes) % (24 * 60);
+    if delta == 0 {
+        // 恰在当前分钟：给 1 分钟（不按整天处理），让调度方走默认窗口/既有退避。
+        delta = 1;
+    }
+    Some(u64::from(delta) * 60_000)
+}
+
+/// 从错误文本提取人读的恢复时间（TUI 文案与冷却文案共用，单一格式化出口）。
+/// 形态冻结：`预计 3600s 后恢复` / `预计 06:01 UTC 恢复`；`None` = 文本无可解析恢复时间。
+pub fn rate_limit_recovery_hint(err: &str) -> Option<String> {
+    if let Some(secs) = parse_retry_after_marker(err) {
+        return Some(format!("预计 {secs}s 后恢复"));
+    }
+    let lower = err.to_ascii_lowercase();
+    utc_reset_hint(&lower).map(|(hour, minute)| format!("预计 {hour:02}:{minute:02} UTC 恢复"))
+}
+
+/// UTC 重置时刻（`06:01 UTC` / `before 06:01 UTC` / `resets at 06:01 UTC`）→ (时, 分)。
+/// 只按字符边界回看 `utc` 前 12 个字符，禁止按字节偏移切片（入参含上游可控文本）。
+fn utc_reset_hint(lower: &str) -> Option<(u8, u8)> {
+    for (index, _) in lower.match_indices("utc") {
+        let mut window: Vec<char> = lower[..index].chars().rev().take(12).collect();
+        window.reverse();
+        if window.len() < 5 {
+            continue;
+        }
+        for start in 0..=window.len() - 5 {
+            let candidate = &window[start..start + 5];
+            let is_clock = candidate[0].is_ascii_digit()
+                && candidate[1].is_ascii_digit()
+                && candidate[2] == ':'
+                && candidate[3].is_ascii_digit()
+                && candidate[4].is_ascii_digit();
+            if !is_clock {
+                continue;
+            }
+            let hour = (candidate[0] as u8 - b'0') * 10 + (candidate[1] as u8 - b'0');
+            let minute = (candidate[3] as u8 - b'0') * 10 + (candidate[4] as u8 - b'0');
+            if hour < 24 && minute < 60 {
+                return Some((hour, minute));
+            }
+        }
+    }
+    None
 }
 
 /// Convenience function: run a full retry loop with the given policy.
@@ -1474,8 +1639,8 @@ mod tests {
     }
 
     #[test]
-    fn stage2_rate_limit_hints_are_frozen_seven() {
-        // R2.4 七词冻结：常量即断言。
+    fn stage2_rate_limit_hints_registry_matches_contract() {
+        // R2.4 九词（PA-171 C3-S2：只扩展 usage limit / allowance）：常量即断言。
         assert_eq!(
             RATE_LIMIT_LONG_BACKOFF_HINTS,
             &[
@@ -1485,12 +1650,85 @@ mod tests {
                 "ratelimit",
                 "too many requests",
                 "tpm",
-                "quota"
+                "quota",
+                "usage limit",
+                "allowance"
             ]
         );
         assert!(is_rate_limit_error("HTTP 429 quota exceeded"));
         assert!(is_rate_limit_error("monthly quota exhausted"));
+        assert!(is_rate_limit_error(
+            "{\"error\":{\"message\":\"You've reached your 5-hour usage limit\"}}"
+        ));
+        assert!(is_rate_limit_error(
+            "Request denied: the model is out of its allowance for this billing window"
+        ));
         assert!(!is_rate_limit_error("operation timed out"));
+    }
+
+    // ── PA-171 C3：限流/配额分类与冷却窗口（单一出口） ──────────────────────────────
+
+    #[test]
+    fn pa171_classify_error_class_follows_frozen_priority() {
+        // C3-S1 优先级：quota → rate_limited → timeout → auth → network → bad_request → other。
+        assert_eq!(
+            classify_error_class("{\"error\":{\"type\":\"exceeded_current_quota_error\"}}"),
+            "quota"
+        );
+        assert_eq!(
+            classify_error_class("HTTP 429 quota exceeded for org"),
+            "quota",
+            "quota 优先级高于 rate_limited（C3-S1 冻结顺序）"
+        );
+        assert_eq!(classify_error_class("HTTP 429 Too Many Requests"), "rate_limited");
+        assert_eq!(
+            classify_error_class("调用 provider 失败：operation timed out after 45002ms"),
+            "timeout"
+        );
+        assert_eq!(classify_error_class("provider 返回错误状态：401 Unauthorized"), "auth");
+        assert_eq!(classify_error_class("connection reset by peer"), "network");
+        assert_eq!(classify_error_class("HTTP 400 Bad Request"), "bad_request");
+        assert_eq!(classify_error_class("boom: unexpected local invariant violation"), "other");
+        // 冷却类别判据复用同一分类器。
+        assert!(is_rate_limit_cooldown_error("HTTP 429 Too Many Requests"));
+        assert!(is_rate_limit_cooldown_error("monthly quota exhausted"));
+        assert!(!is_rate_limit_cooldown_error("operation timed out"));
+        assert!(!is_rate_limit_cooldown_error("HTTP 503 Service Unavailable"));
+    }
+
+    #[test]
+    fn pa171_retry_after_marker_round_trips_and_drives_window() {
+        let base = "provider 返回错误状态：429 Too Many Requests；响应正文：slow down";
+        let with_marker = append_retry_after_marker(base, 3600);
+        assert!(with_marker.contains(RETRY_AFTER_MARKER));
+        assert_eq!(append_retry_after_marker(&with_marker, 60), with_marker, "幂等");
+        assert_eq!(parse_retry_after_marker(&with_marker), Some(3600));
+        assert_eq!(parse_retry_after_marker(base), None);
+        assert_eq!(
+            rate_limit_window_ms(&with_marker, (0, 0)),
+            Some(3_600_000),
+            "Retry-After 后缀是窗口的第一来源"
+        );
+        assert_eq!(
+            rate_limit_recovery_hint(&with_marker).as_deref(),
+            Some("预计 3600s 后恢复")
+        );
+    }
+
+    #[test]
+    fn pa171_utc_reset_hint_is_parsed_and_bounded_by_next_occurrence() {
+        let text = "{\"error\":{\"type\":\"exceeded_current_quota_error\",\"message\":\"You've reached your 5-hour usage limit, resets at 06:01 UTC\"}}";
+        // 05:00 UTC ⇒ 61 分钟；07:00 UTC ⇒ 23 小时 1 分（跨日取模）。
+        assert_eq!(rate_limit_window_ms(text, (5, 0)), Some(61 * 60_000));
+        assert_eq!(
+            rate_limit_window_ms(text, (7, 0)),
+            Some((23 * 60 + 1) * 60_000)
+        );
+        assert_eq!(
+            rate_limit_recovery_hint(text).as_deref(),
+            Some("预计 06:01 UTC 恢复")
+        );
+        assert_eq!(rate_limit_window_ms("no window marker here", (5, 0)), None);
     }
 
     /// wave-35/C3:SSE 错误文本把 `响应预览/endpoint`(含**随机端口**)拼进 message

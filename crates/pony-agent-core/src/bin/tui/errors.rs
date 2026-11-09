@@ -77,6 +77,31 @@ pub const ERROR_SUMMARY_TRANSIENT: &str = "上游服务暂时不可用，重试�
 
 pub const ERROR_SUMMARY_AUTH: &str = "凭据不可用，请检查提供商配置。";
 
+/// PA-171 C5：限流/配额类终态摘要的**固定开头**（动态文案以前缀判定严重级）。
+pub const ERROR_SUMMARY_RATE_LIMITED: &str = "上游限流/配额受限";
+
+/// PA-171 C5：无可用恢复窗口时的完整文案。
+pub const ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW: &str =
+    "上游限流/配额受限，恢复时间未知，请稍后重试。";
+
+/// PA-171 C5-S2：限流/配额命中时的可读摘要（含恢复时间）。
+///
+/// 恢复时间与冷却窗口同源（`retry::rate_limit_recovery_hint`，唯一解析点）；
+/// 解析不到时如实说明"恢复时间未知"，**不得**折叠为 `ERROR_SUMMARY_TRANSIENT`。
+pub fn rate_limited_error_summary(error: &str) -> String {
+    match pony_agent_core::agent::retry::rate_limit_recovery_hint(error) {
+        Some(hint) => format!("{ERROR_SUMMARY_RATE_LIMITED}，{hint}。"),
+        None => ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW.to_string(),
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 系统消息的严重级：渲染样式（图标 / 颜色）的唯一判据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemMessageSeverity {
@@ -100,8 +125,16 @@ pub fn system_message_severity(content: &str) -> SystemMessageSeverity {
     // 面向用户的错误摘要是**受控文案**：逐字命中即 Error，不依赖正文用词。
     if matches!(
         trimmed,
-        ERROR_SUMMARY_GENERIC | ERROR_SUMMARY_TRANSIENT | ERROR_SUMMARY_AUTH
+        ERROR_SUMMARY_GENERIC
+            | ERROR_SUMMARY_TRANSIENT
+            | ERROR_SUMMARY_AUTH
+            | ERROR_SUMMARY_RATE_LIMITED
+            | ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW
     ) {
+        return SystemMessageSeverity::Error;
+    }
+    // PA-171 C5-S4：限流/配额摘要是动态文案（含恢复时间）⇒ 按固定开头判定。
+    if trimmed.starts_with(ERROR_SUMMARY_RATE_LIMITED) {
         return SystemMessageSeverity::Error;
     }
     let lower = trimmed.to_ascii_lowercase();
@@ -133,8 +166,17 @@ pub fn severity_style(severity: SystemMessageSeverity, fallback: Style) -> Style
 }
 
 /// C4：把原始错误详情收敛为面向用户的一句话摘要（详情默认折叠，不入消息区）。
-#[allow(unused_variables)]
 pub fn user_facing_error_summary(error: &str) -> String {
+    user_facing_error_summary_at(error, now_unix_ms())
+}
+
+/// PA-171 C5-S1：注入 `now` 的同一摘要入口（时钟可注入，避免测试等待真实窗口）。
+///
+/// 判定顺序冻结：`auth` → 限流/配额（`retry::classify_error_class` ∈
+/// {`rate_limited`,`quota`}）→ `is_transient_provider_error` → 通用文案。
+/// 限流分支必须早于 transient：否则 429 会被折叠成「重试已用尽」（历史缺陷 F13）。
+pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String {
+    let _ = now_unix_ms;
     let lower = error.to_ascii_lowercase();
     if lower.contains("401")
         || lower.contains("403")
@@ -142,8 +184,15 @@ pub fn user_facing_error_summary(error: &str) -> String {
         || lower.contains("unauthorized")
         || lower.contains("forbidden")
     {
-        ERROR_SUMMARY_AUTH.to_string()
-    } else if is_transient_provider_error(error) {
+        return ERROR_SUMMARY_AUTH.to_string();
+    }
+    if matches!(
+        pony_agent_core::agent::retry::classify_error_class(error),
+        "rate_limited" | "quota"
+    ) {
+        return rate_limited_error_summary(error);
+    }
+    if is_transient_provider_error(error) {
         ERROR_SUMMARY_TRANSIENT.to_string()
     } else {
         ERROR_SUMMARY_GENERIC.to_string()
@@ -156,8 +205,16 @@ pub fn should_fold_error_detail(error: &str) -> bool {
     let trimmed = error.trim();
     if matches!(
         trimmed,
-        ERROR_SUMMARY_GENERIC | ERROR_SUMMARY_TRANSIENT | ERROR_SUMMARY_AUTH
+        ERROR_SUMMARY_GENERIC
+            | ERROR_SUMMARY_TRANSIENT
+            | ERROR_SUMMARY_AUTH
+            | ERROR_SUMMARY_RATE_LIMITED
+            | ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW
     ) {
+        return false;
+    }
+    // PA-171 C5：限流/配额摘要是动态文案（固定开头 + 恢复时间）⇒ 从不折叠。
+    if trimmed.starts_with(ERROR_SUMMARY_RATE_LIMITED) {
         return false;
     }
     let lower = trimmed.to_ascii_lowercase();
