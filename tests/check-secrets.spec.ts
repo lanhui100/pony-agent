@@ -604,4 +604,93 @@ MIIEowIBAAKCAQEA0Y1+xyz...
       expect(elapsed).toBeLessThanOrEqual(5000);
     }, 900_000);
   });
+
+  // ADR 0111：64-hex 规则对 snake_case `*_hash` 键系统性误报的修复。
+  // 修复前（`\bhash\b`）本节 S1–S10 全部 = 1 命中；修复后必须 0 命中。
+  describe("ADR 0111: snake_case 摘要键与结构化摘要槽", () => {
+    const hex64 = (seed: string): string => seed.repeat(4);
+    const LOW = hex64("0123456789abcdef");
+    const ALT = hex64("fedcba9876543210");
+    const show = (content: string): string => redactHexes(content, [LOW, ALT]);
+
+    /** 必须 0 命中：snake_case 摘要键（`\bhash\b` 对 `_hash` 无词边界 => 修复前系统性误报）。 */
+    it("S1–S6 必须 0 命中：snake_case `*_hash` 键与中文摘要标签", () => {
+      const cases: Array<[string, string]> = [
+        ["S1 corpus_hash", `    "corpus_hash": "${LOW}",`],
+        ["S2 expected_hash", `    "expected_hash": "${LOW}",`],
+        ["S3 new_hash", `    "new_hash": "${LOW}"`],
+        ["S4 frozen_expected", `  frozen_expected = ${LOW}   // 完全一致`],
+        ["S5 冻结值/现值中文标签", `  冻结值 ${LOW}\n  现值   ${ALT}`],
+        ["S6 detail 内嵌摘要", `  "detail": "rebuilt=${LOW} = 冻结值 ⇒ 可逆"`],
+      ];
+      const offenders = cases
+        .filter(([, content]) => scanTextContent(content, "").length !== 0)
+        .map(([label, content]) => `${label} :: ${show(content)}`);
+      expect(offenders).toEqual([]);
+    });
+
+    /** 必须 0 命中：非凭证键的 JSON 值槽（旧实现按整行良性词判定，无良性词即误报）。 */
+    it("S7–S10 必须 0 命中：非凭证键的结构化摘要槽", () => {
+      const cases: Array<[string, string]> = [
+        ["S7 文件名键 -> 摘要值", `    "scripts_assertions_dim6.sh": "${LOW}",`],
+        ["S8 before/after", `  "before": "${LOW}",\n  "after": "${ALT}"`],
+        ["S9 用例名键 -> 摘要值", `  "t01-list-summarize.md": "${LOW}",`],
+        ["S10 普通键（无良性词）", `  "detail": "${LOW}"`],
+      ];
+      const offenders = cases
+        .filter(([, content]) => scanTextContent(content, "").length !== 0)
+        .map(([label, content]) => `${label} :: ${show(content)}`);
+      expect(offenders).toEqual([]);
+    });
+
+    /** 防过度豁免：凭证键即使处于 JSON 值槽也必须命中，含连写形态（wave18 §4.5 B3 窄口）。 */
+    it("T1–T6 必须 ≥1 命中：凭证键的结构化值槽不得被豁免 5 击穿", () => {
+      const cases: Array<[string, string]> = [
+        ["T1 client_token", `  "client_token": "${LOW}",`],
+        ["T2 api_key", `  "api_key": "${LOW}",`],
+        ["T3 apikey（连写）", `  "apikey": "${LOW}",`],
+        ["T4 secretkey（连写）", `  "secretkey": "${LOW}",`],
+        ["T5 passphrase", `  "passphrase": "${LOW}",`],
+        ["T6 signature", `  "signature": "${LOW}",`],
+      ];
+      for (const [label, content] of cases) {
+        // 意图断言：命中的必须是行内那个 hex，且来自 64-hex 规则
+        expectCaughtSecret(scanTextContent(content, ""), [LOW], `${label} :: ${show(content)}`);
+      }
+    });
+
+    /** 词边界收紧的回归面：`hashtag`/`hashed` 不构成良性摘要上下文（不得被豁免）。 */
+    it("S11–S12 必须 ≥1 命中：`hashtag`/`hashed` 不是摘要上下文（词边界收紧不得反向放水）", () => {
+      const cases: Array<[string, string]> = [
+        ["S11 hashtag", `hashtag = "${LOW}"`],
+        ["S12 hashed", `hashed = "${LOW}"`],
+      ];
+      for (const [label, content] of cases) {
+        expectCaughtSecret(scanTextContent(content, ""), [LOW], `${label} :: ${show(content)}`);
+      }
+    });
+
+    /** 端到端：审计取证目录（r1-dim6 / r2-dim1 / r3-dim3）必须全绿，否则历史取证无法入库。 */
+    it("S13 端到端：docs/audit/rounds 取证文件 0 违规（修复前 65 条误报）", () => {
+      // vitest 在 jsdom 环境下改写 import.meta.url，故用 process.cwd()（仓库根）
+      const root = path.resolve(process.cwd(), "docs/audit/rounds");
+      if (!fs.existsSync(root)) return; // 取证目录未落地时跳过（不掩盖其它失败）
+      const offenders: string[] = [];
+      const walk = (dir: string): void => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            walk(full);
+            continue;
+          }
+          if (!/\.(json|md|tsv|txt|stderr)$/i.test(entry.name)) continue;
+          if (fs.statSync(full).size > 1024 * 1024) continue;
+          const found = scanTextContent(fs.readFileSync(full, "utf8"), full);
+          if (found.length > 0) offenders.push(`${path.relative(root, full)}:${found[0].line}`);
+        }
+      };
+      walk(root);
+      expect(offenders).toEqual([]);
+    });
+  });
 });

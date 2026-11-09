@@ -144,6 +144,11 @@ import { scanTextContent, checkBlockedFilename, isSafeFilename, SECRET_RULES } f
 
 ### 4.2 冻结规则实现（**wave18-r4 修订版**，逐字交付给 Executor）
 
+> **〔已修订〕** 本节 `BENIGN_RE` 与豁免面已被文末 **§AMEND-6** 修订
+> （[ADR 0111](../docs/decisions/0111-secret-gate-snake-case-digest-keys.md)）：`\bhash\b` → `(?<![a-z0-9])hash(?![a-z0-9])`，
+> 词表追加 `frozen_expected`/`冻结值`/`现值`，新增豁免 5「结构化摘要槽」。下文逐字保留为 r4 当时事实的收据，
+> **现行实现以 §AMEND-6 + `scripts/check-secrets.mjs` 为准**。长度窗口、hex 边界、G1–G16 反例面均未改动。
+
 > r3 → r4 的四条精确化（依据 `.dev-team/review-wave18b-scanner.json` findings#1–#4）：**R1′** credWord 守卫改**位置敏感**（消除新误报回归）；**R2′** 豁免 2/3 改**位置锚定**（槽位相等，取代值锚定）；**R3′** 消除 `isSafe` 内每 match 的 `context.split("\n").pop()`（真达 O(行长)）；**R4** 凭证语义词正则扩面（空格/驼峰/连字符/裸 `token`）。调用侧同步新增两个实参（`match.index` / `lineNum`，见 §7.3）。
 
 **调用侧（`scanTextContent`，替换 r3 的 `:195`）**
@@ -728,3 +733,38 @@ const INGEST_TIMEOUT_MS = 3000; // ≤ NFR external_call_timeout_ms
   - 依据：Lead 在同一裁定中把「消除新误报回归」与「零误报为**绑定约束**（跑在 `npm run verify` 上）」并列；字面语义无法同时满足该绑定约束（FP2/FP3 仍误报），故按**裁定目标**作最小细化。
 - **代价（已登记，不隐藏）**：该细化引入 §4.5 B1 的窄口漏报（同一行既有良性关键词在前、又有具名凭证在前时，后一个 hex 被豁免 1 放行）。
 - **复审请求**：若 Lead 认为该细化超出裁定边界，可回退为字面语义（`credIdx < matchIndex` 即违规），但需接受 FP2/FP3 残余误报 —— 与"零误报为绑定约束"冲突，故本特派员**建议维持细化**。
+
+---
+
+## AMEND-6（Lead 裁决，2026-11-09：密钥门 snake_case 摘要键与结构化摘要槽 — [ADR 0111](../docs/decisions/0111-secret-gate-snake-case-digest-keys.md)）
+
+> 触发：trace 审核的历史取证轮（`docs/audit/rounds/r1-dim6`、`r2-dim1`）无法入库 ——
+> 272 个未跟踪取证文件在 `npm run secrets:check:all` 下报 **65 条违规，全部为误报，零真阳性**。
+> 取证产物是**摘要收据**（`corpus_hash`、`assertion_hashes`、`freeze_impact.before/after`），不是凭证。
+
+1. **`BENIGN_RE` 的 `\bhash\b` 改为 `(?<![a-z0-9])hash(?![a-z0-9])`**。`_` 属 `\b` 的 word 字符，
+   故 `corpus_hash` / `expected_hash` / `new_hash` 里 `hash` 两侧都没有词边界 ⇒ 豁免 1 对
+   snake_case `*_hash` 键**系统性失明**。此条与 §4.3 自己给出的理由（「`_` 是 `\b` 的 word 字符，
+   `\b` 会漏」）同源：那条论证此前只被用在 hex 边界上，未用在良性词边界上。
+   `hashtag` / `hashed` 仍不构成豁免（回归用例 S11/S12）。
+2. **良性词表追加 `frozen_expected`、`冻结值`、`现值`**。三者与 `sha256`/`指纹` 同类，是
+   「值即摘要」的显式声明，不是新概念。
+3. **新增豁免 5「结构化摘要槽」**：`hexLineFacts` 按行预计算 `digestSlots`（
+   `"键": "` 的值起始下标 → 键名），`matchIndex` 命中槽位即豁免。**凭证键永不入表**，
+   判据用**正向黑名单** `CRED_KEY_STEM_RE = /token|secret|pass(?:word|wd|phrase)|pwd|key|cred|auth|bearer|cookie|session|signature/i`，
+   而非反向「键名不匹配 `CRED_WORD_RE`」——后者会漏 `apikey`/`secretkey`/`passphrase` 连写形态
+   （正是 §4.5 **B3** 登记的既有窄口）。正向黑名单顺手关闭 B3：`"apikey": "<64hex>"` 现判违规。
+4. **判定顺序不变**：`R1′ 位置敏感 → 豁免 1 → 豁免 2/3 位置锚定 → 豁免 4 反引号 → 豁免 5 结构化槽`。
+   `"client_token": "<64hex>"` 中凭证词在 hex 之前且其前无良性词 ⇒ 直接判违规，走不到豁免 5。
+5. **未改动的冻结面（逐条点名，防「顺手放宽」误读）**：严格 64 位长度窗口、
+   `(?<![0-9a-fA-F])`/`(?![0-9a-fA-F])` hex 边界、`SECRET_RULES` 条数与导出面、
+   §4.7 的 G1–G16 必须命中面、§4.8 的 FP1–FP14 零误报面、`.env.example` 与
+   `check-secrets.spec.ts` 的文件名豁免链路、§4.6 的 O(行长) 与 5MB/10MB 性能判据。
+6. **新增机器验收面**：`tests/check-secrets.spec.ts` 的 `ADR 0111` 描述块 ——
+   S1–S10（修复前 10/10 命中，修复后必须 0）、T1–T6（凭证键值槽必须命中，含连写形态）、
+   S11–S12（`hashtag`/`hashed` 不得被豁免）、S13（`docs/audit/rounds/**` 端到端 0 违规）。
+7. **实测收据（同机，HEAD 版 vs 修复版）**：单行 1MB `35ms → 39ms`、5MB `148ms → 132ms`、
+   10MB `258ms → 273ms`（判据 ≤2000ms / ≤5000ms）；149KB 单行 JSON/2000 键 `3ms → 3ms`；
+   全库 `--all` Exit 0；取证目录违规 `65 → 0`。
+8. **为何不改写历史**：§4.2 的冻结实现逐字交付过 Executor，改写它等于篡改当时的契约事实。
+   故保留原文并在本节追记，与 §AMEND-5 同惯例。

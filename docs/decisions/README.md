@@ -144,6 +144,7 @@
 - [0104 上游调用时限/重试配置化与跨 provider 有界故障转移](0104-provider-failover-and-upstream-policy.md)
 - [0109 决策记录门禁单一判据与撞号消解规则](0109-decisions-gate-single-source-and-collision-rule.md)
 - [0110 wave-35 测试套件修复：全量挂起真死锁、plan 草稿门禁自锁死与读前写契约漂移](0110-wave35-suite-remediation.md)
+- [0111 密钥门 64-hex 规则：snake_case 摘要键与结构化摘要槽的误报收口](0111-secret-gate-snake-case-digest-keys.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

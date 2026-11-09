@@ -23,7 +23,15 @@ const HEX64 = "[0-9a-fA-F]{64}";
 // C4-R4（r4）：覆盖 client_token / client-token / client token / clienttoken / ClientToken
 // 与 access token / api key 等空格、连字符、下划线、驼峰形态；含裸 `token`（词尾边界防 tokenizer）。
 const CRED_WORD_RE = /(?:(?:client|access|refresh|id|auth)[\s_-]*)?token\b|api[\s_-]*key\b|secret|password|passwd|credential|authorization|bearer/i;
-const BENIGN_RE = /(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|\bhash\b|校验和|指纹)/i;
+// ADR 0111：`\bhash\b` 改为 `(?<![a-z0-9])hash(?![a-z0-9])`。
+// `_` 属 \b 的 word 字符，故 `corpus_hash` / `expected_hash` / `new_hash` 中 `hash` 无词边界 =>
+// 旧写法对 snake_case `*_hash` 键系统性失明（造成误报）。新写法保持 `hashtag`/`hashed` 不误豁免。
+const BENIGN_RE = /(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fingerprint|pristine_proof|(?<![a-z0-9])hash(?![a-z0-9])|frozen_expected|校验和|指纹|冻结值|现值)/i;
+// ADR 0111 豁免 5（结构化摘要槽）的凭证词干黑名单：键名命中任一即**不得**豁免。
+// 采用正向「键名不含凭证词干」而非反向「键名不匹配 CRED_WORD_RE」：前者能覆盖 `apikey` /
+// `secretkey` / `passphrase` 等连写形态（wave18 §4.5 B3 登记的窄口）。
+const CRED_KEY_STEM_RE = /token|secret|pass(?:word|wd|phrase)|pwd|key|cred|auth|bearer|cookie|session|signature/i;
+const JSON_MEMBER_RE = /"([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*"/g;
 const SUMPREFIX_RE = new RegExp(`^\\s*(${HEX64})\\s+\\S`);
 const CELL_RE = new RegExp(`\\|\\s*(${HEX64})\\s*\\|`);
 const BACKTICK_RE = new RegExp("`(" + HEX64 + ")`", "g");
@@ -47,6 +55,16 @@ function hexLineFacts(line) {
     prefixSlot: slotStart(SUMPREFIX_RE, line), // sha256sum 前缀槽起始下标（-1 = 无）
     cellSlot: slotStart(CELL_RE, line),        // Markdown 单元格槽起始下标（-1 = 无）
     backtickHexes: new Set([...line.matchAll(BACKTICK_RE)].map((x) => x[1].toLowerCase())),
+    // 豁免 5（ADR 0111）：JSON/对象成员「值槽」起始下标 -> 键名。
+    // 键名含凭证词干的**不入表**，故凭证键的值永远走不到豁免 5。
+    digestSlots: (() => {
+      const slots = new Map();
+      for (const m of line.matchAll(JSON_MEMBER_RE)) {
+        if (CRED_KEY_STEM_RE.test(m[1])) continue;
+        slots.set(m.index + m[0].length, m[1]);
+      }
+      return slots;
+    })(),
   };
 }
 
@@ -146,6 +164,9 @@ export const SECRET_RULES = [
       if (matchIndex === facts.prefixSlot) return true;  // 豁免 2：sha256sum 前缀槽
       if (matchIndex === facts.cellSlot) return true;    // 豁免 3：Markdown 独立单元格槽
       if (facts.backtickHexes.has(m)) return true;       // 豁免 4：反引号独占包裹
+      // 豁免 5（ADR 0111，结构化摘要槽）：hex 是「非凭证键」JSON/对象成员的值。
+      // 凭证键在 facts 构建期即被排除，故 apikey / secretkey 等连写形态仍判违规。
+      if (facts.digestSlots.has(matchIndex)) return true;
       return false;
     }
   }
