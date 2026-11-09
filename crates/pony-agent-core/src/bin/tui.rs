@@ -8152,7 +8152,7 @@ fn run_goal_rounds(
     session_id: &str,
     cancel: &GoalRoundCancelToken,
     current_turn: &std::sync::Mutex<Option<String>>,
-    loop_lease: &Arc<AtomicBool>,
+    loop_lease: &GoalRoundLoopLeaseRegistry,
 ) {
     use pony_agent_core::agent::goal::{
         advance_goal_round_for_outcome, build_goal_round_message, goal_round_stop_reason,
@@ -8162,6 +8162,19 @@ fn run_goal_rounds(
     // C1-T2：单循环所有权。抢不到租约 ⇒ 另一个轮次线程正在推进 goal 轮，本线程直接返回
     // （幂等让位，不新增轮次），这正是「16 = 2×8」多循环叠加的正面消除点。
     let Some(_lease) = GoalRoundLoopLease::try_acquire(loop_lease, session_id) else {
+        // 不得静默 return（矩阵 G7）：同一会话的另一循环已在推进本轮，本线程让位并**可见上报**。
+        let (rounds_started, max_rounds) =
+            pony_agent_core::agent::goal::active_goal_for_session(session_id)
+                .map(|goal| (goal.rounds_started, goal.max_goal_rounds))
+                .unwrap_or((0, 0));
+        report_goal_rounds_stopped(
+            sink,
+            session_id,
+            GoalRoundStopReason::LoopAlreadyOwned,
+            0,
+            rounds_started,
+            max_rounds,
+        );
         return;
     };
 
@@ -8312,33 +8325,47 @@ fn run_goal_rounds(
 ///
 /// 为什么需要：每个用户提交都会各起一个轮次线程（`F14`），两个线程各自的 `run_goal_rounds`
 /// 叠加成「2×8=16 轮」，正是 429 被重放的放大面。租约保证同一时刻只有一个续轮循环。
+/// 租约**按 `session_id` 分区**（NFR `concurrency_lock` 与 ADR 0103：按会话互斥，跨会话互不阻塞）：
+/// 同会话只允许一个续轮循环（消除 16=2×8 叠加），切换会话后 B 的续轮不会被 A 卡住。
 /// RAII：`Drop` 必释（正常返回 / panic 展开 / 提前 `return` 三条路径）。
+type GoalRoundLoopLeaseRegistry = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+
 struct GoalRoundLoopLease {
-    flag: Arc<AtomicBool>,
+    registry: GoalRoundLoopLeaseRegistry,
+    session_id: String,
 }
 
 impl GoalRoundLoopLease {
-    fn try_acquire(flag: &Arc<AtomicBool>, session_id: &str) -> Option<Self> {
-        match flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => Some(Self {
-                flag: Arc::clone(flag),
-            }),
-            Err(_) => {
-                pony_agent_core::agent::otel::log::log_json_with_fields(
-                    "warn",
-                    "goal_rounds_loop_already_owned",
-                    None,
-                    &[("session_id", serde_json::json!(session_id))],
-                );
-                None
-            }
+    fn try_acquire(registry: &GoalRoundLoopLeaseRegistry, session_id: &str) -> Option<Self> {
+        let acquired = {
+            let mut held = registry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            held.insert(session_id.to_string())
+        };
+        if acquired {
+            return Some(Self {
+                registry: Arc::clone(registry),
+                session_id: session_id.to_string(),
+            });
         }
+        pony_agent_core::agent::otel::log::log_json_with_fields(
+            "warn",
+            "goal_rounds_loop_already_owned",
+            None,
+            &[("session_id", serde_json::json!(session_id))],
+        );
+        None
     }
 }
 
 impl Drop for GoalRoundLoopLease {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
+        let mut held = self
+            .registry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        held.remove(&self.session_id);
     }
 }
 
@@ -8398,6 +8425,7 @@ fn goal_round_stop_reason_tag(
         GoalRoundStopReason::AutoContinueBudget => "auto_continue_budget",
         GoalRoundStopReason::TurnSuspended => "turn_suspended",
         GoalRoundStopReason::TurnUnclassified => "turn_unclassified",
+        GoalRoundStopReason::LoopAlreadyOwned => "loop_already_owned",
     }
 }
 
@@ -8443,7 +8471,8 @@ fn tui_event_loop(
     // PA-171 C1-T2：goal 续轮**单循环租约**（与 cancel token 同级持有，跨轮次线程共享）。
     // 每个用户提交各起一个轮次线程（F14），两个线程各自的续轮循环会叠加成「2×8=16 轮」——
     // 租约保证同一时刻只有一个续轮循环真正推进 goal 轮。
-    let goal_round_loop_lease: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let goal_round_loop_lease: GoalRoundLoopLeaseRegistry =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     // C10：轮次线程存活标志（派发闸门第 4 判据）。轮次线程进入时置位、线程体结束（含 panic
     // 展开）时由 `TurnLoopInFlightGuard::drop` 复位；判据是「有没有在飞轮次线程」而非
     // 「有没有 armed goal」，避免 armed-but-idle 的会话把排队消息永久卡住。

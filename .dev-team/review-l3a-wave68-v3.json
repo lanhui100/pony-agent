@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "c1446788-4d64-4dcf-aee5-68475c0a2ff0",
+    "fresh_context": true
+  },
+  "executed_by": "c1446788-4d64-4dcf-aee5-68475c0a2ff0",
+  "reviewed_commit": "d8f08e8d",
+  "attestation": {
+    "self_signed": false,
+    "independent_of_executor": true
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/goal.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 2263,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '778,814p' crates/pony-agent-core/src/agent/graph.rs | grep -c last_decision",
+      "note": "turn_graph_decision_for 以 last_completed_turn_id==turn_id 或 active_turn_id==turn_id 定位 run 后读 run.last_decision；但 GraphRunner::begin_turn 只清 stop_reason、不清 last_decision（上列命令输出 0），而 turn 收口失败（bind_ask_wait 失败 ⇒ 挂起分支在 mod.rs:2140-2177 提前返回、不执行 apply_turn_result）时 active_turn_id 仍停在 turn_id。该 disjunct 因此是「读到上一轮决策」的通道：上一轮 Fail ⇒ 本轮挂起被判 Failed（多计一次失败，可能进而以 ConsecutiveFailures 结束、掩盖真实挂起原因），上一轮 Cancel/Pause ⇒ 被判 Cancelled（文案称用户取消）。当前 bind 成功路径不受影响（bind_ask_wait 清 active，phase=suspended 正确落到 Suspended），故非 BLOCKING；建议只认 last_completed_turn_id，或在 begin_turn 清 last_decision。另 C1-A4 要求取本次 GraphRunTurnResponse.decision.kind，此处改为事后回读可变共享状态，属机制偏离（验收等价但多一个 TOCTOU 面）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8286,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -rn \"TurnStreamOutcome\\|turn_stream_outcome_from_terminal\\|goal_round_stop_reason_for_outcome\" crates/pony-agent-core/tests/ | wc -l",
+      "note": "零回归锚：上列命令输出 0，`cargo test -p pony-agent-core --bin pony -- --list | grep goal_round` 也无用例。本次新增的三条状态流转语义（Err 不 break 时计失败的历史缺陷、decision Fail/Cancel/WaitUser 优先于 phase、Suspended/Unknown 可见停止）没有任何可执行断言，只有 pa171_goal_round_failure_contract 的纯函数真值表（7 例，已跑 PASS）覆盖 goal_round_stop_reason。任何日后把 Ok(outcome) 臂调到 Completed 之前、或给 Err 臂恢复 failures+=1，都会被全绿吞掉，直接复现 PA-171 的多开轮缺陷。建议补最小单测（对 turn_stream_outcome_from_terminal 的 4 条判据 + goal_round_stop_reason_for_outcome 的 5 条映射）。"
+    }
+  ]
+}

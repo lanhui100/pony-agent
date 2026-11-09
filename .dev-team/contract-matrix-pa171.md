@@ -8,6 +8,13 @@ Amendment: wave-68-a1（2026-11-09）
 > - **a1-4** §3.3 / C3-P7：冷却键改为**四段** `requested_name|provider_name|model|base_url`（**D68-7**，Lead 批准；理由：同进程内不同 endpoint 各有独立配额窗口，三段键会把 C3-d 的 503 反向钉子用例短路成「冷却中」，生产上造成跨环境误杀）。
 > - **a1-5 已知限制（ADVISORY，如实登记，未接线）**：`clear_cooldown()`（`crates/pony-agent-core/src/agent/provider/mod.rs:737`）与 `cooldown_remaining()`（`:732`，仅被 `ensure_not_cooling` 在 `:743` 内部消费）**当前零生产调用点** ⇒ 冷却期内没有任何用户/宿主可操作的复位入口，**复位只能靠进程重启**；单条冷却由 6h 冻结上界兜底（§3.3 C3-P5）。本项**不**作为「已接线」宣称。
 
+Amendment: wave-68-a2（2026-11-09，Phase-1 计划审查整改）
+
+> - **a2-1** `nfr-baseline-wave68.json` → `retry` **分层化**：删除歧义的顶层 `backoff_cap_ms` / `backoff_ms`，改为 `decision_rate_limited_max_attempts=1`（限流/配额首次即 Abort）、`decision_other_transient_max_attempts=5`、`decision_timeout_backoff{500,×2,8000,30000}`、`followup_rate_limit{3 次,20s/40s,90000}`；保留 `max_attempts`（门禁 schema 需要）+ `max_attempts_note` 声明「仅供旧消费者，真值见分层字段」。
+> - **a2-2** `nfr-baseline-wave68.json` → 新增 `wave68_constants`：冷却键**四段**（D68-7）、`default_window_ms=60000`、`max_window_ms=21600000`、`registry_max_entries=64`、`goal_round_failure_stop.max_consecutive_failures=2`、`fallback_reason` 封闭值域 —— 使**矩阵 / NFR / 代码三处同源**（`provider/mod.rs:615,617,619,721-729`、`goal.rs:404`）。
+> - **a2-3** §4.2 / C4-S5：明确 `fallbackReason` 属**既有字段语义变更（向后兼容但非 additive，`None` → 三字面量）**，C4 不再套用「additive only」；并补优先级真值表示例 E1–E5（含附件保存失败走默认值的例外）。
+> - **a2-4** §2.2 / C1-S3 + 新增 C1-S5：`GoalRoundStopReason` 实际六变体，补 `TurnSuspended` / `TurnUnclassified` 的逐字文案与触发映射（含 **`Ok(Cancelled) = Cancelled`**、`Err(_) ⇒ TurnUnclassified`，不计失败不烧预算）；另加 C1-T3′ 要求**每个非成功 `break` 都带可见原因**。
+
 > **批准声明（Protocol Agent, 2026-11-09）**：本矩阵**批准** Test Agent 已冻结并锚定的红相面
 > （`crates/pony-agent-core/tests/pa171_goal_round_failure_contract.rs`、
 > `pa171_provider_rate_limit_cooldown_contract.rs`、
@@ -105,19 +112,36 @@ impl GoalRoundStopReason {
   红相 `:154-162` 断言 `failures: 7`）。
 - **C1-S2 阈值来源**：`consecutive_failures >= MAX_CONSECUTIVE_GOAL_ROUND_FAILURES`（`=2`）。
   阈值只允许该常量表达，禁止散落字面量 `2`（红相 `:117-123` 锁常量值）。
-- **C1-S3 `visible_line()` 逐字冻结**（三条；红相只锁 `已停止`/原因词/不含 `进行中`/含轮次用量，
-  实现必须逐字取值以消除歧义）：
-  | 变体 | `visible_line()` |
-  |---|---|
-  | `Cancelled` | `goal 续轮已停止（用户取消）` |
-  | `ConsecutiveFailures { failures }` | `format!("goal 续轮已停止（连续 {failures} 轮失败）")` |
-  | `BudgetExhausted { rounds_started, max_rounds }` | `format!("goal 续轮已停止（目标轮次预算已用尽：{rounds_started}/{max_rounds}）")` |
-  | `AutoContinueBudget`（见 C1-S4，additive 第四变体） | `goal 续轮已停止（自动续轮次数用尽）` |
+- **C1-S3 `visible_line()` 逐字冻结（wave-68-a2：由三条扩为**六条**，覆盖枚举全部变体；红相只锁
+  `已停止`/原因词/不含 `进行中`/含轮次用量，实现必须逐字取值以消除歧义）**：
+  | 变体 | `visible_line()` | 变体性质 |
+  |---|---|---|
+  | `Cancelled` | `goal 续轮已停止（用户取消）` | 冻结（红相） |
+  | `ConsecutiveFailures { failures }` | `format!("goal 续轮已停止（连续 {failures} 轮失败）")` | 冻结（红相） |
+  | `BudgetExhausted { rounds_started, max_rounds }` | `format!("goal 续轮已停止（目标轮次预算已用尽：{rounds_started}/{max_rounds}）")` | 冻结（红相） |
+  | `AutoContinueBudget` | `goal 续轮已停止（自动续轮次数用尽）` | additive（C1-S4） |
+  | `TurnSuspended` | `goal 续轮已停止（本轮挂起：等待用户作答/审批）` | additive（C1-S5） |
+  | `TurnUnclassified` | `goal 续轮已停止（本轮无可用终态，已暂停自动续轮）` | additive（C1-S5） |
+  实现取证（wave-68-a2 实测）：`crates/pony-agent-core/src/agent/goal.rs:450-468`。
 - **C1-S4（additive 变体）**：为保持 F1 的「8 轮自动续轮预算」（`should_abort_goal_rounds`）**既有语义
-  不变**，`GoalRoundStopReason` 追加第四变体 `AutoContinueBudget`。该变体**不由**
+  不变**，`GoalRoundStopReason` 追加第四个变体 `AutoContinueBudget`。该变体**不由**
   `goal_round_stop_reason` 产出（其入参不含自动续轮计数），由 TUI 侧在
   `should_abort_goal_rounds(cancelled, consecutive, MAX_CONSECUTIVE_AUTO_CONTINUES)` 命中时构造。
-  追加变体不破坏红相（其 `matches!` 只命中具体变体）。
+  追加变体不破坏红相（其 `matches!` 只命中具体变体）；另两个 additive 变体见 C1-S5。
+- **C1-S5（additive 变体 + 触发条件，wave-68-a2 补登）**：`TurnSuspended` / `TurnUnclassified`
+  同样**不由** `goal_round_stop_reason` 产出（§C1-S1 的三值真值表**不变**），而由宿主按轮次结果映射：
+  | 轮次结果（`start_turn_stream_checked`） | 宿主动作 | 停止原因变体 |
+  |---|---|---|
+  | `Ok(Completed)` | 推进一轮预算后继续 | 无（不停止） |
+  | `Ok(Failed { .. })` | `failures += 1`，**不推进预算**（C2） | 达阈值时由 `goal_round_stop_reason` 产出 `ConsecutiveFailures` |
+  | `Ok(Cancelled)` | 立即停止 | **`Cancelled`（映射 `Ok(Cancelled) = Cancelled`）** |
+  | `Ok(Suspended)` | 立即停止（模型挂起等用户） | `TurnSuspended` |
+  | `Ok(Unknown)` | 立即停止（不知成没成） | `TurnUnclassified` |
+  | `Err(_)`（收口失败 / 无终态） | 立即停止：不重跑、**不计失败、不烧预算** | `TurnUnclassified` |
+  为什么必须区分两变体（`[DERIVED]`）：`Suspended` 若被当成功 ⇒「模型挂起等用户时仍多开一轮」，
+  正是 ADR 0092 的 16 轮自转面；`Unknown`/`Err` 若被当失败 ⇒ 伪造失败轮并误触 C1 止损阈值。
+  证据：`crates/pony-agent-core/src/bin/tui.rs:8230-8305`（主循环分支）、`:8374-8385`（outcome→reason
+  映射函数）、`goal.rs:421-443`（变体定义）、`:463-466`（两条文案）。
 - **C2-S1 `advance_goal_round_for_outcome` 语义（冻结）**：
   - `Succeeded` ⇒ 复用既有 `advance_goal_round(goal_id)` 语义（`rounds_started +1` + 原子持久化 +
     失败回滚），**不得改 CAS/持久化**（G3）；返回更新后快照。
@@ -186,6 +210,11 @@ impl GoalRoundStopReason {
   ```
   说明：`pending` 分支保持既有「让位即 break」语义（`tui.rs:8140`），状态行仍由既有
   Ask/审批面板承担，本卡不新增变体（避免过度约束实现）。
+- **C1-T3′（wave-68-a2 补登）每个 `break` 都必须带可见原因**：上述循环体内**全部**非成功出口
+  （`Ok(Cancelled)` / `Ok(Suspended)` / `Ok(Unknown)` / `Err(_)`）都不得裸 `break`，必须经
+  `GoalRoundStopReason`（§C1-S5 映射）→ `report_goal_rounds_stopped` → 结构化日志
+  `goal_rounds_stopped` + `UiEvent::GoalRoundsStopped`。实现取证：
+  `crates/pony-agent-core/src/bin/tui.rs:8230-8305`、`:8341-8361`、`:8395-8414`。
 - **C1-T4 事件与状态字段（additive）**：
   - `UiEvent::GoalRoundsStopped { reason: GoalRoundStopReason, status_line: String }`
     （加入 `UiEvent`，`tui.rs:198-292`；事件循环 arm 置 `state.status_text = status_line.clone()`
@@ -434,9 +463,15 @@ pub fn emit_stream_failed_attributed(/* 上述 14 参原序 */, attribution: Fai
   `#[serde(default, skip_serializing_if = "Option::is_none")]`，键 `errorClass`）。
 - **C4-S4 单一分类器**（G1）：`error_class` 值只能来自 `retry::classify_error_class`（§3.2），
   禁止在 `turn_flow.rs` 内写第二套映射。
-- **C4-S5（wave-68-a1 补登）`fallback_reason` 封闭值域 + 判定优先级 + 例外**：
+- **C4-S5（wave-68-a1 补登 / wave-68-a2 定级）`fallback_reason` 封闭值域 + 判定优先级 + 例外**：
   L3-P 指出原矩阵只登记了默认值、与实现（按**触发方标签**落值）不一致。此处把实现取值**全部登记**为
-  **封闭值域**（3 个字面量 + 1 个缺席态），任何第 4 个字面量都属契约违规：
+  **封闭值域**（3 个字面量 + 1 个缺席态），任何第 4 个字面量都属契约违规。
+  **⚠ 字段性质（wave-68-a2 明确，防误标）**：这是**既有字段的语义变更**（`fallback_reason` 早已存在于
+  `TurnStreamEvent` / `TurnTraceRecord` / checkpoint，字段名/类型/serde 形状都不变），取值由
+  `None`（历史硬编码，`turn_flow.rs:583`）→ 三个字面量 —— **向后兼容但非 additive**：
+  旧消费者不会报错，但**读到的值会变**（`null` → 语义字符串）。故本卡对 C4 **不得**沿用
+  「additive only」表述（G2 仅适用于 `error_class` 这个真正新增的键）；
+  审计机若按「`fallbackReason == null` ⇒ 未发生降级」的旧口径判断，必须同步改为按本次封闭值域判读。
 
   | # | 取值（逐字） | 触发方 | 判定优先级 | 证据 |
   |---|---|---|---|---|
@@ -448,6 +483,14 @@ pub fn emit_stream_failed_attributed(/* 上述 14 参原序 */, attribution: Fai
   **判定优先级（冻结）**：`触发方标签 1/2` → `默认值 3` → （`provider_meta == None` 时）`缺席 4`。
   即「有标签用标签、无标签用默认值、无 provider 则缺席」，**禁止**用默认值掩盖已识别的触发方
   （否则审计机无法区分「首跳失败」与「工具 followup 失败」）。
+  **优先级真值表 · 示例（wave-68-a2 补登，逐场景冻结）**：
+  | 例 | 场景 | `provider_meta` | 触发方标签 | `fallbackReason` 落值 |
+  |---|---|---|---|---|
+  | E1 | **首跳 decision** 遇 429 配额耗尽（诊断会话 10:28:51 同形态） | `Some(magpie/kimi)` | `provider_decision_failed` | `provider_decision_failed` |
+  | E2 | **工具 followup** 模型调用遇 429/5xx | `Some(magpie/kimi)` | `provider_followup_failed` | `provider_followup_failed` |
+  | E3 | 首跳成功、随后**工具执行**失败（非 provider 失败） | `Some(…)` | 无 | `turn_failed_no_fallback`（默认值） |
+  | E4 | **附件保存失败**（provider 已选出） | `Some(…)` | 无（例外：不得塞 provider 标签） | `turn_failed_no_fallback`（默认值） |
+  | E5 | provider 未选出（缺 key/配置）即失败 | `None` | 无 | 键缺席（`null`） |
   **落地约束**：标签只能由 `runtime/turn_stream.rs` 的上述两个 provider 失败入口写入；
   非 provider 失败**必须**走不带标签的同名入口（`turn_persist.rs:493-495` 注释即为该纪律的原文）。
   **例外（明确登记）**：**附件保存失败**（以及工具/钩子类失败）即使发生在 provider_meta 存在的轮次，

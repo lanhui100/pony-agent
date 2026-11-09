@@ -440,6 +440,9 @@ pub enum GoalRoundStopReason {
     /// additive 变体，由宿主按 `TurnStreamOutcome::Unknown` 或派发 `Err` 构造；
     /// 语义是「不知道成没成」⇒ 停止续轮，且**不计失败、不烧预算**（不得冒充失败轮）。
     TurnUnclassified,
+    /// PA-171 C1-T2：**同一会话**已有另一个续轮循环持租约（NFR `concurrency_lock` 声明按会话
+    /// 互斥）。本线程不推进任何 goal 轮，但必须可见（不得静默 return）。
+    LoopAlreadyOwned,
 }
 
 impl GoalRoundStopReason {
@@ -463,6 +466,9 @@ impl GoalRoundStopReason {
             Self::TurnSuspended => "goal 续轮已停止（本轮挂起：等待用户作答/审批）".to_string(),
             Self::TurnUnclassified => {
                 "goal 续轮已停止（本轮无可用终态，已暂停自动续轮）".to_string()
+            }
+            Self::LoopAlreadyOwned => {
+                "goal 续轮已停止（本会话已有续轮循环在运行，本线程让位）".to_string()
             }
         }
     }

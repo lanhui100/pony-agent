@@ -3,7 +3,7 @@
  "task": "PA-171",
  "theme": "TUI 连环错误根因修复（goal 续轮失败止损 / provider 限流冷却 / 失败轮归因）",
  "baseline_commit": "d9425a70",
- "status": "implemented-pending-reviews",
+ "status": "implemented-a1-closed-pending-final-reviews",
  "note": "共享 .dev-team/state.json 由他会话并发使用，本波次账本单列于本文件（沿用 wave16/17/61 先例），避免格式级整文件改写污染共享账本。",
  "contract_matrix": ".dev-team/contract-matrix-pa171.md",
  "nfr_baseline": ".dev-team/nfr-baseline-wave68.json",
@@ -111,7 +111,16 @@
   "join_machine": "cargo check --all-targets exit 0; pa171 4 文件 89/3/7/5 passed; tui 96/98; lib 1400 passed",
   "smoke": "ponycli build exit 0 / --help exit 0（--version 未支持，属 PA-164 既有）",
   "observability": "audit-diff exit 0; check-declaration PASS exit 0",
-  "reviews": "round1 无效（越界审计，已作废）；round2 进行中"
+  "reviews": "round1 无效（越界审计，已作废）；round2 进行中",
+  "final_machine": {
+   "cargo check --all-targets": "exit 0",
+   "pa171_5_files": "89/89, 89/89, 3/3, 7/7, 5/5 all passed",
+   "tui": "96 + 98 passed",
+   "lib": "1404 passed",
+   "ts_contract_snapshot": "1 passed",
+   "smoke": "ponycli build exit0 / --help exit0",
+   "observability": "audit-diff exit0 / check-declaration PASS"
+  }
  },
  "commits": {
   "red": "e8c460ab",
@@ -119,7 +128,9 @@
   "t_w2": "d04d543c",
   "docs": "59ec6797",
   "adr_renumber": "1f5610d6",
-  "t_w1_t_w3": "12a155b5"
+  "t_w1_t_w3": "12a155b5",
+  "a1_test": "414c276e",
+  "a1_fix": "d8f08e8d"
  },
  "reviews": {
   "round1": "invalid（三个审查员越界审计 wave-54/59 主题；收据改名 review-l3{a,b,p}-round1-invalid.json）",
@@ -135,6 +146,9 @@
     "findings": "1 BLOCKING(logging 未落) / 3 ADVISORY"
    },
    "l3b": "round2 未回收（将重跑）"
+  },
+  "round3": {
+   "note": "只审 d8f08e8d delta（/tmp/pa171-a1.diff）：A/B/P 三路 + Phase1 计划对抗补齐"
   }
  }
 }

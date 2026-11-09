@@ -1,0 +1,89 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "d85f8195-54f5-4265-91d8-9a067fde7920",
+    "fresh_context": true
+  },
+  "executed_by": "d85f8195-54f5-4265-91d8-9a067fde7920",
+  "reviewed_commit": "d8f08e8d",
+  "attestation": {
+    "self_signed": false,
+    "independent_of_executor": true
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/retry.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/errors.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/goal.rs",
+    "crates/pony-agent-core/src/agent/session/log_migrate.rs",
+    "crates/pony-agent-core/src/agent/session/log_sink.rs",
+    "crates/pony-agent-core/src/agent/session/log_store.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session_commit.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 2255,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git diff 12a155b5..d8f08e8d -- crates/pony-agent-core/src | grep -c '^+.*eprintln!'",
+      "detail": "新增 1 行裸 eprintln（turn_graph_decision_for 的 graph_runs 锁毒化恢复），文案与该文件已有 9 处同款逐字一致；落在 baseline logging_eprintln_exempt_scope=existing_style_non_json_lock_poison_recovery_diagnostics 的 5 行配额内（1/5），不打印正文/密钥。与 baseline logging_eprintln_exempt_note『本波次不新增生产 eprintln』存在表述张力，故登记不改码，建议收敛为 log_json_with_fields 或更新 note。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 650,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '646,700p' crates/pony-agent-core/src/agent/provider/mod.rs | grep -c 'into_inner()'",
+      "detail": "冷却注册表仍为 fail-open（650/665/674/694 共 4 处 unwrap_or_else(|poisoned| poisoned.into_inner())）；本轮 delta 未触及该区（新增的唯一 into_inner 在 control_plane:2256 的 graph_runs），语义未被悄悄改动，遗留登记。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 737,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'manager.clear_cooldown()' crates --include=*.rs",
+      "detail": "clear_cooldown 仍无生产调用点：全仓唯一调用在新增测试 crates/pony-agent-core/src/agent/provider/mod.rs:9010。未恶化（生产零调用），且本轮新测试使用它做隔离清理。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 721,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '721,729p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "detail": "冷却键仍是 format!(\"{}|{}|{}|{}\", requested_name, provider_name, model, base_url)：未转义未归一（别名/尾斜杠会产生不同键）；本轮 delta 未改该函数，语义未变。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/errors.rs",
+      "line": 179,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'let _ = now_unix_ms;' crates/pony-agent-core/src/bin/tui/errors.rs",
+      "detail": "user_facing_error_summary_at 的 now_unix_ms 仍是死参（`let _ = now_unix_ms;`），本轮只替换 auth 判据为 retry::is_auth_error，未消费该参数、未改签名。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/types.rs",
+      "line": 203,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'errorClass' src/ --include=*.ts | wc -l",
+      "detail": "errorClass 仍只在 Rust emit 侧（runtime/types.rs:203、session/types.rs:757）出现，TS 契约快照仍为 0 命中；本轮 delta 未改任何 .ts（git diff --name-only 12a155b5..d8f08e8d | grep -c '\\.ts$' = 0），遗留未恶化。"
+    }
+  ],
+  "blocking_recheck": {
+    "previous_blocking": "NFR logging 声明未落（wave68_logging_events）",
+    "status": "CLOSED",
+    "evidence": {
+      "provider_cooldown_entered": "crates/pony-agent-core/src/agent/provider/mod.rs:789 经 otel::log::log_json_with_fields 发出；extras={provider_name,model,error_class,retry_after_s,until_unix_ms}+自动 trace_id；事件名逐字命中 1 处",
+      "provider_cooldown_short_circuit": "crates/pony-agent-core/src/agent/provider/mod.rs:752 经 log_json_with_fields 发出；extras={provider_name,model,remaining_ms}+自动 trace_id；事件名逐字命中 1 处",
+      "goal_rounds_stopped": "crates/pony-agent-core/src/bin/tui.rs:8416（log_goal_rounds_stopped，唯一出口，report_goal_rounds_stopped 全部 4 条停止路径汇聚）经 log_json_with_fields 发出；extras={session_id,reason,consecutive_failures,rounds_started,max_rounds}+自动 trace_id；事件名逐字命中 1 处",
+      "trace_id_auto": "crates/pony-agent-core/src/agent/otel/log.rs build_json_line 始终插入 trace_id 键（None 时回落活跃 turn）",
+      "new_bare_eprintln": "diff 新增 1 行 / 删除 3 行（净 -2）；新增行属 baseline 豁免 scope，配额 5 内",
+      "no_body_or_secret": "三个事件的 extras 仅 provider_name/model/error_class/retry_after_s/until_unix_ms/remaining_ms/session_id/reason/计数；无响应正文、无 api key；goal_round_turn_failed 的 error 字段为派发错误（原 eprintln 同一内容），未新增暴露面"
+    }
+  }
+}

@@ -8,26 +8,28 @@
   "external_call_timeout_scope": "单次外部（网络）往返预算；本波次不新增任何外部调用面（冷却判定为纯内存）",
   "retry": {
     "max_attempts": 1,
-    "backoff_cap_ms": 1000,
-    "backoff_ms": 500,
-    "wave68_change": "C3：Decision 作用域命中 rate_limited|quota ⇒ 首次失败即 Abort（max_attempts=1，禁 500ms→8s 短退避 ×5）",
-    "provider_decision_rate_limit_max_attempts": 1,
-    "provider_decision_other_transient_max_attempts": 5,
-    "provider_decision_timeout_backoff": {
+    "max_attempts_note": "仅供旧消费者与门禁 schema（dev-nfr-lint 要求该键存在）；本波次真值一律看下列分层字段——Decision 限流/配额=1、Decision 其它瞬态=5、Followup 限流=3。禁止用本字段推导任何「全局重试次数」。wave-68-a2 已移除歧义的顶层 backoff_cap_ms/backoff_ms。",
+    "decision_rate_limited_max_attempts": 1,
+    "decision_rate_limited_note": "限流/配额（rate_limited|quota）**首次失败即 Abort**：0 次退避 sleep、只发 1 次 HTTP；证据 crates/pony-agent-core/src/agent/provider/mod.rs:4676-4690（scope 门禁）与契约矩阵 §3.2 C3-P2",
+    "decision_other_transient_max_attempts": 5,
+    "decision_other_transient_note": "timeout / server_error（5xx/408/520-524/527/530）/ network 保留既有短退避重试（C3-d 反向钉子：503 ⇒ >=2 次 HTTP）",
+    "decision_timeout_backoff": {
       "initial_delay_ms": 500,
       "multiplier": 2.0,
       "max_delay_ms": 8000,
       "total_budget_ms": 30000,
+      "applies_to": "timeout / server_error / network（不含 rate_limited|quota）",
       "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:4505-4514",
       "frozen": true
     },
-    "provider_followup_rate_limit_max_attempts": 3,
-    "provider_followup_rate_limit_backoff": {
+    "followup_rate_limit": {
+      "max_attempts": 3,
       "initial_delay_ms": 20000,
+      "multiplier": 2.0,
       "max_delay_ms": 40000,
       "total_budget_ms": 90000,
       "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:4516-4531",
-      "wave68_change": "无代码改动；仅 is_rate_limit_error 码表追加 usage limit / allowance 后覆盖面扩大",
+      "wave68_change": "无代码改动；is_rate_limit_error 码表追加 usage limit / allowance 后覆盖面扩大（矩阵 §3.2 C3-S2 的 [DERIVED] 副作用，Lead 已接受）",
       "frozen": true
     },
     "non_rate_limit_transient_retry_preserved": true,
@@ -129,10 +131,55 @@
   "goal_round_failure_stop": {
     "max_consecutive_failures": 2,
     "constant": "agent::goal::MAX_CONSECUTIVE_GOAL_ROUND_FAILURES",
+    "code_line": "crates/pony-agent-core/src/agent/goal.rs:404",
     "evidence": "crates/pony-agent-core/tests/pa171_goal_round_failure_contract.rs:16-39,117-123",
     "failed_round_consumes_round_budget": false,
     "visible_stop_line_required": true,
-    "single_loop_owner_required": true
+    "single_loop_owner_required": true,
+    "visible_stop_reason_variants": [
+      "Cancelled",
+      "ConsecutiveFailures",
+      "BudgetExhausted",
+      "AutoContinueBudget",
+      "TurnSuspended",
+      "TurnUnclassified"
+    ]
+  },
+  "wave68_constants": {
+    "contract": ".dev-team/contract-matrix-pa171.md",
+    "single_source_note": "矩阵 / 本 NFR / 代码三处同源；改任一常量必须三处同改（矩阵 §2.2 C1-S2、§3.3 C3-P7）",
+    "provider_cooldown": {
+      "key_segments": ["requested_name", "provider_name", "model", "base_url"],
+      "key_segment_count": 4,
+      "key_format": "{requested_name}|{provider_name}|{model}|{base_url}",
+      "key_decision": "D68-7（Lead 批准）",
+      "key_reason": "同进程内不同 endpoint 各有独立配额窗口；三段键会把 C3-d 的 503 反向钉子用例短路成「冷却中」，并在生产上造成跨环境误杀",
+      "default_window_ms": 60000,
+      "max_window_ms": 21600000,
+      "clamp_min_ms": 1000,
+      "registry_max_entries": 64,
+      "max_window_note": "6h 上界（COOLDOWN_MAX_MS = 6*60*60*1000），覆盖 Kimi 5 小时配额窗口，防异常 Retry-After 把 provider 永久冻结",
+      "reset_entrypoint_wired": false,
+      "reset_note": "ADVISORY（矩阵 a1-5）：clear_cooldown()/cooldown_remaining() 当前零生产调用点 ⇒ 复位只能靠进程重启，6h 冻结上界兜底；不得宣称已接线",
+      "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:615,617,619,721-729,732,737"
+    },
+    "goal_round_failure_stop": {
+      "max_consecutive_failures": 2,
+      "constant": "agent::goal::MAX_CONSECUTIVE_GOAL_ROUND_FAILURES",
+      "evidence": "crates/pony-agent-core/src/agent/goal.rs:404（常量）、:450-468（六变体文案）、:475-495（真值表）",
+      "failed_round_consumes_round_budget": false,
+      "auto_continue_max": 8
+    },
+    "failed_turn_attribution": {
+      "fallback_reason_closed_domain": [
+        "provider_decision_failed",
+        "provider_followup_failed",
+        "turn_failed_no_fallback"
+      ],
+      "fallback_reason_absent_when": "provider_meta == None（键缺席）",
+      "change_nature": "既有字段语义变更（向后兼容但非 additive）：None → 三字面量；error_class 才是真正的 additive 新键",
+      "evidence": "契约矩阵 §4.2 C4-S5；runtime/turn_stream.rs:1226-1246,2928-2931；agent/turn_flow.rs:552-564"
+    }
   },
   "observability": {
     "exporter_flush_timeout_ms": 3000,
