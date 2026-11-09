@@ -96,6 +96,11 @@ Status: implemented
 
 **转正率 90/140**；其余 50 个因日志格式缺载体被如实拒绝（见上文）。
 
+**第二轮（补齐载体后，同日）**：ADR 0102 落地 `AppendProviderTranscript` / `UpdateSessionMemory` 后，
+真实库 `dry-run` 变为 `migrated=50 skipped_has_log=90 mismatched=0`，apply 后
+**140/140 会话全部转正**；二次 dry-run `migrated=0 skipped_has_log=140`（幂等），
+`sessions` 行数仍 140（blob 未改，回滚面完好）。
+
 ### 应用后发现的一处待办：34 个会话「日志 vs 索引视图」不一致
 
 在真实库上跑 `ponycli sessions rebuild-index --dry-run` → `mismatched=34`（占 90 个有日志会话的 38%）。
