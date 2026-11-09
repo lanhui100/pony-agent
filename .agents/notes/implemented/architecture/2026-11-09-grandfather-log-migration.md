@@ -52,22 +52,39 @@ Status: implemented
 
 ## 真实库实测结果与未完成部分
 
-副本 dry-run：`scanned=139 migrated=86 skipped_has_log=2 mismatched=51 failed=0`。
+### 干净副本上的完整实测（2026-11-09，应用运行中故用副本）
 
-51 例的根因不是迁移器缺陷，而是**日志格式缺载体**：
+用 `git worktree` 在 HEAD 构建 CLI 后，对**已 checkpoint 的干净副本**执行：
+
+| 步骤 | 结果 |
+| :--- | :--- |
+| dry-run ×2 | `scanned=140 migrated=90 mismatched=50 failed=0` —— **两次完全一致（确定性）** |
+| apply #1 | `migrated=90 skipped_has_log=0` ⇒ 生成 90 个会话日志 |
+| apply #2 | `migrated=0 skipped_has_log=90 mismatched=50` —— **幂等成立** |
+
+### 一条实测陷阱（值得记录）
+
+对**运行中实例的热库**直接 `cp` 三件套得到的副本**不可用**：同样的 dry-run/apply 在一次拷贝上
+依次给出 `migrated=90 → 88 → 2` 的不稳定计数。原因是被拷贝的 WAL 未完成恢复，首次写入过程会
+改变后续读取所见。**结论：迁移必须在应用退出后的库上执行，或对已 checkpoint 的副本执行**；
+计数不稳定是拷贝口径问题，不是迁移器缺陷（干净副本上两次 dry-run 完全一致）。
+
+### 50 例 blocked 的根因：日志格式缺载体（非迁移器缺陷）
+
 `provider_native_transcript`(50) / `long_term_memory_entries`(1) / `history_state_evidence`
 在 `PersistCommand` 里**没有对应命令**。
 
-这同时暴露了一条**潜在数据丢失路径**（由阶段 2-D 引入）：有日志的会话，索引行把这些字段清空
-（`index_only_row_payload` 全部 `Vec::new()`），而日志又没有承载它们 ⇒ 一旦某会话产生 provider
-transcript，重启后即丢。今日未丢属侥幸——实测 49 个有 transcript 的会话中**0 个有日志**。
+这同时暴露一条**由阶段 2-D 引入的潜在数据丢失路径**：有日志的会话，索引行把这些字段清空
+（`index_only_row_payload` 全 `Vec::new()`），日志又未承载 ⇒ 一旦某会话产生 provider transcript，
+重启后即丢。今日未丢属侥幸——实测 49 个有 transcript 的会话中 **0 个有日志**。
 
-修复方向（需单独 ADR 与契约变更）：新增事件载体承载 transcript / 记忆四件套 /
-`history_state_evidence`，改 `backend.rs` + `fold.rs` + `sqlite_session.rs` + `log_command.rs`。
-完成后这 51 例可迁移，136 个全部转正。
+修复方向已立提案：[ADR 0102（proposed）](../../../docs/decisions/proposed/0102-session-log-event-carriers-for-transcript-and-memory.md)。
+完成后 50 例可迁、140 个全部转正。
 
-真实库**尚未应用迁移**：写操作会碰只读面与运行中实例的并发，实测 `sessions.db.lock` 被持
-（应用正在运行），须退出应用后再执行 apply。
+### 真实库尚未应用
+
+应用正在运行且持有 `sessions.db.lock`（实测 PID 3969145 的交互式 `pony`，`/dev/pts/7`）。
+写操作须避开运行实例，**待退出后**在真实库执行 apply；回滚面 = 删除对应日志目录（blob 未改动）。
 
 ## Alternatives considered
 
