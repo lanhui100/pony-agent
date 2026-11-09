@@ -64,7 +64,8 @@ Status: implemented
 <一条约束或后续动作>
 ```
 
-编号取现有最大号加一，四位零填充。
+编号取现有最大号加一，四位零填充；取号后先验一次未被占用（`npm run decisions:check` 的 R6），
+撞号的消解规则（谁保留原号、封存引用不回改）见 README「撞号消解」条与 [ADR 0109](../../../docs/decisions/0109-decisions-gate-single-source-and-collision-rule.md)。
 
 ## 校准样例
 
@@ -76,16 +77,16 @@ Status: implemented
 
 ## 验证与报告
 
-提交前做两项机械检查（注意：GNU grep 的 `-L` 在全部合规时以**退出码 1** 结束，表示"没有缺失文件"，勿当作失败）：
+提交前跑一次门禁（判定真源 `scripts/check-decisions.mjs`，pre-commit 调的也是它）：
 
 ```sh
-# ① Status 行存在性：期望输出为空
-grep -L "^Status:" docs/decisions/[0-9]*.md docs/decisions/*/[0-9]*.md
-
-# ② 主目录纯 implemented：期望输出为空（其他状态的文件不应留在主目录）
-grep -L "^Status: implemented" docs/decisions/[0-9]*.md
+npm run decisions:check
 ```
 
-目录一致性（文件位于与状态同名的子目录）目前靠人工核对；完整机械化校验待门禁建设后补充。
+退出码 0 = 通过；1 = 违规并逐条打印规则号（R1 状态行 / R2 目录即状态 / R3 supersede 指向真实编号 /
+R4 索引完整 / R5 索引无悬挂 / R6 编号唯一 / R7 索引不重复）。索引缺行可先 `npm run decisions:fix`
+机械回填，但它只搬 H1 标题、不代写摘要。
+
+门禁只做文本级判定：候选方案是否真的比较过、索引行摘要是否名副其实，仍**靠 review**。
 
 完成后报告：本次新增或更新的篇目、选定状态及理由、出现的边界情况（如是否触发的犹豫点）及处理方式。

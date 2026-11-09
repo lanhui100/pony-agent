@@ -15,7 +15,10 @@
 
 - 主目录存放活跃的 implemented ADR；
 - `superseded/`、`rejected/`、`proposed/` 子目录在对应状态的首个文件出现时创建，此后同状态的文件移入同名目录——**目录即状态**；
-- 编号一经分配永不复用、永不修改。
+- 编号一经分配永不复用、永不修改；同一编号只允许对应一个文件；
+- **撞号消解**：若同一编号被发现对应两个文件（并发写入产物），保留被外部引用更多的一篇的原号，另一篇顺延到下一个空闲号——只改文件名与 H1，slug 不变，正文一字不改，旧号永不回用；历史封存件（`management/task-system/99_LOGS/`、`.dev-team/` 内的 wave 契约与 state-archive）里的旧引用**不回改**，对照关系写进被改号那篇顶部的「编号修订」块（裁定见 [ADR 0109](0109-decisions-gate-single-source-and-collision-rule.md)）；
+- 状态取值只有上面四种（`proposed` / `implemented` / `superseded` / `rejected`），不引入 `accepted` 之类同义词——「决定已采纳但工程未完工」仍写 `implemented`，进度归任务系统；
+- 机械校验：`npm run decisions:check`（判定真源 `scripts/check-decisions.mjs`，跨平台，pre-commit 直接调它）。索引缺行可用 `npm run decisions:fix` 机械回填，但该脚本只搬 H1 标题、不代写摘要。
 
 ## 何时必须写 ADR
 
@@ -40,6 +43,15 @@
 
 ## 索引
 
+分节与状态一一对应：`### 提案中`(proposed) / `### 活跃`(implemented) / `### 已接替`(superseded) / `### 已拒绝`(rejected)。
+每篇 ADR 必须在**自己状态对应的分节**里有且仅有一行，且该行的**第一个链接**指向自己（行尾的修订互链不参与判定）；
+索引区不得出现指向不存在文件的链接。以上四条由 `npm run decisions:check` 把守。
+
+### 提案中
+
+- [0021 Agent 运行时统一错误码注册表：上游与协议不匹配可扩展治理](proposed/0021-unified-error-code-registry.md)
+- [0074 Ask 控制请求：会话持久化 + 生命周期收口（墙钟 TTL 退出产品语义）](proposed/0074-ask-persistence-lifecycle.md)
+
 ### 活跃
 
 - [0001 双轨重构：保留 Hermes 作为参考实现](0001-dual-track-rebuild-with-hermes-reference.md)
@@ -60,18 +72,36 @@
 - [0020 侧边栏工作区会话折叠与选中高亮浅色化](0020-workspace-sidebar-collapsible-and-selection-tone.md)
 - [0022 桌面端默认工作区基座保持与兜底收敛注册表 default](0022-desktop-default-workspace-registry-convergence.md)
 - [0023 Windows 控制台子进程隐藏窗口与输出代码页解码回退](0023-windows-console-hidden-and-codepage-decode-fallback.md)
+- [0025 基于 Conventional Commits 的发布说明生成器](0025-release-notes-from-conventional-commits.md)
+- [0026 基础工具体系加固（CAS 乐观并发写守卫与富语义错误自愈协议）](0026-tool-cas-and-recovery-hint.md)
+- [0027 端到端全链路 EventBus 架构设计](0027-end-to-end-event-bus-architecture.md)
+- [0028 将 Sentry 问题收集下沉至 Harness 宿主层与 Agent Trace 解耦](0028-decouple-sentry-issues-to-harness.md)
+- [0029 工作区外部访问提权机制（基于 DSH 的升权引导与受控授权协议）](0029-workspace-permission-escalation.md)
+- [0030 对话框面板内聚 Ask 提问交互优化](0030-composer-integrated-ask-interaction.md)
+- [0031 多模态附件统一受控接入与模型能力按需投影](0031-multimodal-attachment-ingress-and-model-projection.md)
+- [0032 graph_runs 非重入锁作用域纪律与桌面端会话页卡死修复](0032-graph-runs-lock-scope-discipline.md)
 - [0033 运行状态条移出滚动内容流：composer 上沿常驻覆盖层与 streaming 期隐藏](0033-runtime-status-bar-out-of-scroll-flow.md)
 - [0034 删除/归档当前对话后一律进入全新空白会话](0034-fresh-session-after-delete-or-archive.md)
 - [0035 Token 指标口径：输入上下文取单次调用、生成速度按调用级即时产出](0035-token-metrics-per-call-semantics.md)
 - [0036 IME 组合态回车守卫与动态数字位宽稳定](0036-ime-composition-enter-guard-and-numeric-width-stability.md)
 - [0037 废除 PONYSENTRY_ENABLED：开关恒开，门禁由凭证承担](0037-remove-ponysentry-enabled-switch.md)
+- [0039 wave-37 工具面扩展、write_file 读前写观察门与子代理真实执行引擎](0039-wave37-tool-surface-write-gate-subagent-engine.md)
 - [0040 TUI /models 远程模型发现与回环地址代理旁路](0040-tui-model-discovery-and-loopback-proxy-bypass.md)
 - [0038 TUI 设计系统：单色为骨、单一骨色强调、发丝线与 2 列沟槽](0038-tui-design-system-monochrome-restraint.md)
+- [0041 Agent Team 端到端协作体系与全双工任务板架构](0041-agent-team-end-to-end-architecture.md)
+- [0042 TUI Composer 收边与底部指标行（弱化 cwd / token / 缓存 / 上下文）](0042-tui-composer-metrics-line.md)
+- [0043 TUI 消息区层级弱化、代码块材质与三态状态词](0043-tui-message-hierarchy-and-tri-state-status.md)
+- [0044 系统提示词 v2——收据化、注入防线、阈值收敛与层序守卫](0044-system-prompt-v2-receipts-injection-and-layer-order.md)
 - [0045 用户级（全局）指令与 Skills 分层加载](0045-global-instructions-and-skills-layering.md)
 - [0046 全局配置加载四项能力：技能正文按需加载 / 指令预算 / 层级发现 / 触达即载](0046-global-config-loading-wave42.md)
 - [0047 Agent Trace 迁移至 OpenTelemetry → Langfuse（PonySentry Trace 下线 + 全局上报开关）](0047-agent-trace-otel-langfuse-migration.md)
+- [0048 用量治理硬限流的判定落点与 fail-open 策略](0048-usage-governance-enforcement.md)
+- [0049 OTel 准入 token 改为构建期烧录（用户零配置）](0049-otel-build-time-token-distribution.md)
 - [0050 配置页「全局轨迹上报」选项收敛为单行标签 + 右端开关](0050-trace-reporting-switch-ui-simplification.md)
 - [0051 可观测性上报三项修正（版本单一来源、治理 span 会话归属、思考/缓存 token 出口）](0051-observability-version-session-and-thinking-token-fixes.md)
+- [0052 可观测性语义轨补全（成本明细、未计价标记、枚举收敛、降级标记、可读 trace 名、工具调用 id）](0052-observability-semantic-completeness-fixes.md)
+- [0055 真实 trace 审计驱动的四项语义缺陷与三项可观测性优化](0055-trace-audit-fixes-usage-ttft-sequence-error-rate.md)
+- [0056 流式正文渲染收敛（stale-while-render）与运行状态 hop 级判定](0056-streaming-render-stale-while-render-and-hop-status.md)
 - [0053 token / 速度口径真值契约（wave-54）](0053-token-speed-truth-contract.md) —— 其中「速度 = Σout/Σgen」的公式定义已被 [0073](0073-token-speed-decode-basis.md) 修订；上下文归一、usage 来源与显示纪律部分仍现行
 - [0054 渲染层外泄通道收口：启用 CSP、markdown 外部资源 fail-closed 与密钥不回显](0054-render-layer-exfil-csp-and-secret-masking.md)
 - [0057 流式动效抽象为框架无关规范（五层契约 + 纯 reducer + 机器门禁）](0057-streaming-motion-framework-agnostic-spec.md)
@@ -100,14 +130,19 @@
 - [0089 tui.rs 原地模块化拆分，保留 bin 入口与 `tui::` 可见性](0089-tui-module-decomposition.md)
 - [0090 代码规模门禁采用「基线棘轮」，只判新增超限](0090-code-size-gate-ratchet.md)
 - [0091 删除单轮累计墙钟预算，止损下沉到能力层](0091-turn-wall-clock-removal.md)
+- [0092 Ask 自锁循环的三处收口（续轮让位 / 续轮文案识别 / Draft 撤销与宿主批准）](0092-plan-draft-self-lock-recovery.md)
 - [0094 herdr 复用器变量名对齐 与 会话索引行丢失自愈](0094-tui-multiplexer-env-and-session-row-heal.md)
 - [0095 `pony update` 控制面改用空闲读超时 + 30s 总预算，body 读取纳入重试](0095-cli-update-control-plane-timeout.md)
 - [0096 TUI 状态行 min-dwell + 轮内工具活动聚合（折叠态「生成中」不再吞掉过程信息）](0096-tui-status-line-min-dwell-and-tool-activity.md)
 - [0097 `pony update` 同号不同内容不得谎报「已是最新」，发布侧清单版本必须严格递增](0097-cli-update-same-version-content-mismatch.md)
-- [0098 TUI 启动页品牌标改用母版真色派生表 + 位图优先（含 halfblocks）](0098-tui-splash-master-truecolor-bitmap-first.md)
+- [0098 TUI 启动页品牌标改用母版真色派生表 + 位图优先（含 halfblocks）](0098-tui-splash-master-truecolor-bitmap-first.md) —— 其中档位尺寸（Rich 26×30 / Compact 20×22、位图 832×960）已被 [0105) 修订为原 1/3（9×10 / 7×8、位图 288×320）；真色表与位图优先部分仍现行
+- [0099 会话存储改为「事件溯真源 + 单写者 + 墓碑删除」四阶段重构](0099-session-storage-event-sourced-refactor.md)
 - [0100 TUI 模型面板：优选行参与统一导航与分区间 1 行间距](0100-tui-model-panel-preferred-selectable-and-section-gap.md)
+- [0102 为日志格式补齐事件载体（provider transcript / 长期记忆 / history_state_evidence）](0102-session-log-event-carriers-for-transcript-and-memory.md)
 - [0103 goal 续轮失败止损、失败轮不烧预算与上游限流冷却](0103-goal-round-failure-and-rate-limit-cooldown.md)
 - [0104 上游调用时限/重试配置化与跨 provider 有界故障转移](0104-provider-failover-and-upstream-policy.md)
+- [0109 决策记录门禁单一判据与撞号消解规则](0109-decisions-gate-single-source-and-collision-rule.md)
+- [0110 wave-35 测试套件修复：全量挂起真死锁、plan 草稿门禁自锁死与读前写契约漂移](0110-wave35-suite-remediation.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)

@@ -1,7 +1,7 @@
 # Plan Execution Approval（宿主执行审批，W36 / PA-141，方案 (b)）
 
 状态：已实施（wave-36，契约 `.dev-team/contracts/wave-36-pa138-145.md` §4，C-141-1..9）。
-关联决策：`docs/decisions/0038-wave35-suite-remediation.md` F-7（已裁决条目）。
+关联决策：`docs/decisions/0110-wave35-suite-remediation.md` F-7（已裁决条目；该篇原占 0038，2026-11-09 撞号消解改号，见 ADR 0109）。
 
 ## 1. 问题
 

@@ -1,6 +1,6 @@
 # ADR 0104：上游调用时限/重试配置化与跨 provider 有界故障转移
 
-Status: proposed
+Status: implemented
 
 ## 背景
 

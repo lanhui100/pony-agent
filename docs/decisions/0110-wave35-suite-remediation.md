@@ -1,6 +1,13 @@
-# 0038 wave-35 测试套件修复：全量挂起真死锁、plan 草稿门禁自锁死与读前写契约漂移
+# 0110 wave-35 测试套件修复：全量挂起真死锁、plan 草稿门禁自锁死与读前写契约漂移
 
 Status: implemented
+
+> **编号修订（2026-11-09）**：本篇原占 `0038`，与 [ADR 0038 TUI 设计系统](0038-tui-design-system-monochrome-restraint.md)
+> 撞号（同一编号对应两个文件，由 `scripts/check-decisions.mjs` R6 首次查出）。决定内容与正文一字未改；
+> 改号裁定与撞号消解规则见 [ADR 0109](0109-decisions-gate-single-source-and-collision-rule.md)。
+> slug `wave35-suite-remediation` 保持不变；封存件（`management/task-system/99_LOGS/`、
+> `.dev-team/contracts/wave-36-pa138-145.md`、`.dev-team/state-archive-through-wave41.json`）中写作
+> `0038-wave35-suite-remediation.md` 的历史引用**不回改**，按本块指针对照新号。
 
 ## 背景
 

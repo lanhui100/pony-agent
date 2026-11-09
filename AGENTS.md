@@ -38,7 +38,8 @@
 
 ## 3. 本地与 CI 门禁命令速查
 
-- **全量合规自检**：`npm run verify`（依次校验版本同步、前端单测、构建、Rust 检查）
+- **全量合规自检**：`npm run verify`（依次校验版本同步、决策记录、前端单测、构建、Rust 检查）
+- **决策记录校验**：`npm run decisions:check`（判定真源 `scripts/check-decisions.mjs`，pre-commit 调同一入口）
 - **版本同步校验**：`npm run version:check`
 - **前端测试**：`npm test`
 - **Rust 编译检查**：`npm run cargo:check:shared`

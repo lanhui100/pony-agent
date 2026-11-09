@@ -1,6 +1,6 @@
 # ADR 0099：会话存储改为「事件溯真源 + 单写者 + 墓碑删除」四阶段重构
 
-Status: accepted
+Status: implemented
 
 ## 背景：当前存储模型已是现网缺陷源
 
