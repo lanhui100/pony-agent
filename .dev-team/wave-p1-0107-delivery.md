@@ -72,3 +72,16 @@ G3 lib **1408 passed**、G4 会话套件全绿、G5 check 0 warning，全部 exi
 
 `wave/p1-session-lease` 最新提交 `2393e95e`；工作区干净。
 合并顺序：先 `wave/p0-0107-log-first`（`e043f32f`），再本分支。
+
+## 八、终审状态（诚实登记）
+
+- L3 v3 终审 subagent **两次启动均静默失败**（未产出 `/tmp/diag/review-p1-0107-v3.json`），故**无第三方终审结论**。
+- 替代证据（Lead 自查，可复算）：
+  - 代码核实：`migrate_from_json` 事务为 `TransactionBehavior::Immediate`（`sqlite_session.rs:666-670`）；
+    `upsert_session` 经 `begin_immediate_with_busy_retry`（`:2712-2743`），仅对
+    `DatabaseBusy|DatabaseLocked` 重试且有界（`attempt >= 2` 即返回 `Err`，不吞异常）。
+  - 并发冷启探针（3 进程 × 6 轮）：`concurrent sessions in index = 3`、`migration marker = 1`，
+    **0 次 `database is locked`**（修复前 6 轮中出现 1 次）。
+  - 独立 target（`/tmp/p1-own-target`）全门禁：G1 5 passed / G2 7 passed+2 ignored /
+    G3 lib 1408 passed / G4 会话套件全绿 / G5 check 0 warning，全部 exit 0。
+- 结论：**P1 已达可合并状态**；建议合并前补一次第三方终审（或由维护者按上述收据抽查）。
