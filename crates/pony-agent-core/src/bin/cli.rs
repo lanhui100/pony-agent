@@ -1060,7 +1060,9 @@ fn print_usage(format: OutputFormat) {
     human!(format, "");
     human!(format, "Maintenance subcommands (ADR 0099):");
     human!(format, "  ponycli sessions backfill [--dry-run] [--db <path>]");
-    human!(format, "  ponycli sessions rebuild-index [--dry-run] [--db <path>]");
+    human!(format, "  ponycli sessions rebuild-index [--dry-run | --explain <session-id>] [--db <path>]");
+    human!(format, "                             --explain: per-field diff summary (counts + first 80 chars),");
+    human!(format, "                             prints `no difference` when the log fold matches the index");
     human!(format, "  ponycli sessions export <session-id> --out <path> [--db <path>] [--format dir|tar]");
     human!(format, "                             Bundle = manifest.json + events.jsonl + attachments/;");
     human!(format, "                             `tar` is uncompressed ustar (single file, no zstd yet)");
@@ -1237,13 +1239,16 @@ fn run_sessions_backfill_if_requested() -> Option<i32> {
     }
 }
 
-/// `ponycli sessions rebuild-index [--dry-run] [--db <path>]`
+/// `ponycli sessions rebuild-index [--dry-run | --explain <session-id>] [--db <path>]`
 ///
 /// ADR 0099 阶段 2：**从会话日志（真源）fold 出状态并重建 SQLite 索引**。
 /// - 只覆盖「有日志文件」的会话；索引里有、日志里没有的会话**原封不动**（计入
 ///   `skipped_no_log`）——存量库的会话都还没有日志文件，误当成空会话会清空真实历史；
 /// - 墓碑（`RemoveSession`）不重建：删除单调不可复活；
 /// - `--dry-run` 只报告影响面（含 `mismatched` 双读差异），**不写库**；
+/// - `--explain <session-id>`（阶段 3-D）：只读诊断，逐字段打印差异摘要
+///   （`字段 | fold: … | index: …`，只有条数 + 首条前 80 字符，**不打印大字段全文**），
+///   无差异打印 `no difference`；与 `--dry-run` **互斥**（explain 本身零写入）；
 /// - `--db` 复用 `sessions backfill` 的同一条校验（不存在/非 .db/缺 sessions 表 ⇒ EXIT=2）。
 fn run_sessions_rebuild_index_if_requested() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
@@ -1253,6 +1258,7 @@ fn run_sessions_rebuild_index_if_requested() -> Option<i32> {
         return None;
     }
     let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    let explain_target = flag_value(&args, "--explain");
     let db_path = args
         .iter()
         .position(|arg| arg == "--db")
@@ -1262,6 +1268,36 @@ fn run_sessions_rebuild_index_if_requested() -> Option<i32> {
     if let Err(error) = validate_backfill_db(&db_path) {
         eprintln!("[ponycli] sessions rebuild-index 参数错误：{error}");
         return Some(2);
+    }
+    // 阶段 3-D：`--explain <id>` 与 `--dry-run` 互斥（explain 只读诊断、本就零写入）。
+    if explain_target.is_some() && dry_run {
+        eprintln!("[ponycli] `--explain <session-id>` 与 `--dry-run` 互斥：explain 已是零写入诊断");
+        return Some(2);
+    }
+    if let Some(session_id) = explain_target {
+        let backend = pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_read_only(
+            db_path.clone(),
+        );
+        let log_root = pony_agent_core::agent::session::session_log_root_for_db(&db_path);
+        match backend.explain_session_parity(&session_id) {
+            Ok(lines) => {
+                println!("db: {}", db_path.display());
+                println!("log-root: {}", log_root.display());
+                println!("mode: explain（只读诊断，不写库）");
+                println!("session: {session_id}");
+                for line in &lines {
+                    println!("{line}");
+                }
+                println!(
+                    "note: 摘要只含条数与首条前 80 字符；比较口径与 rebuild-index 的 mismatched 同源"
+                );
+                return Some(0);
+            }
+            Err(error) => {
+                eprintln!("[ponycli] sessions rebuild-index --explain 失败：{error}");
+                return Some(1);
+            }
+        }
     }
     let backend = if dry_run {
         pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_read_only(db_path.clone())

@@ -1244,16 +1244,76 @@ fn ancestor_turn_ids(nodes: &[HistoryNode], node_id: &str) -> std::collections::
 /// 除这两项外，本函数比对 `SessionState` 的**每一个字段**。
 pub const INDEX_ONLY_STATE_FIELDS: [&str; 2] = ["trace_migration_state", "turn_trace_refs"];
 
+/// 比对用的 trace 投影：**剔除 observation 载荷**（只留 ref）。
+///
+/// 为什么剔除：PA-095 把 `buildContextObservation` 外置到索引侧 `build_context_observations`
+/// 表，日志行只承载 `buildContextObservationRef`；索引 loader 读时按 ref 水合payload。
+/// 于是 fold 侧是 `null + ref`、索引侧是「ref + 载荷」——这是**读侧派生投影**的差异，
+/// 不是状态差异（载荷本体仍在索引表里、按 ref 可取回）。把它算进 mismatch 会让
+/// `rebuild-index` 永远带着一批假阳性。
+///
+/// 反向约束：只剔除载荷，**ref 与其余字段照旧逐字节比对**（`buildContextObservationRef`
+/// 的漂移仍然是真差异）。
+fn parity_json_traces(traces: &[TurnTraceRecord]) -> String {
+    let normalized: Vec<TurnTraceRecord> = traces
+        .iter()
+        .map(|trace| {
+            let mut trace = trace.clone();
+            trace.build_context_observation = None;
+            trace
+        })
+        .collect();
+    json_of(&normalized)
+}
+
+/// 比对用的节点投影：节点内嵌 trace 同样剔除 observation 载荷（理由见
+/// [`parity_json_traces`]）。
+fn parity_json_nodes(nodes: &[HistoryNode]) -> String {
+    let normalized: Vec<HistoryNode> = nodes
+        .iter()
+        .map(|node| {
+            let mut node = node.clone();
+            for trace in &mut node.turn_trace_history {
+                trace.build_context_observation = None;
+            }
+            node
+        })
+        .collect();
+    json_of(&normalized)
+}
+
+/// 一个字段级差异：`fold` 侧与索引侧的**原样值**（已是 JSON 串）。
+///
+/// 这是「什么算差异」的**唯一定义**：[`session_parity_issues`]（比对/迁移报错文本）、
+/// [`session_parity_diff`]、[`session_parity_explain`]（`--explain` 诊断）全部从
+/// [`session_parity_differences`] 派生，禁止另写第二套规则。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParityDifference {
+    /// 字段名（如 `history` / `history_nodes` / `event_watermark`）。
+    pub field: &'static str,
+    /// `fold` 侧原样值（JSON 串；仅内部使用，不直接打印给用户）。
+    pub folded: String,
+    /// 索引侧原样值（JSON 串）。
+    pub indexed: String,
+}
+
 /// 逐字段对拍：返回**全部**差异（空 = 完全一致）。
 ///
 /// 字段是逐个显式列出的（不是整体 JSON 比对）：任何一侧新增字段都会在这份清单上
 /// 显式缺项，而不是被「整体相等」蒙过去。`trace_migration_state` / `turn_trace_refs`
 /// 见 [`INDEX_ONLY_STATE_FIELDS`]。
-pub fn session_parity_issues(folded: &SessionState, indexed: &SessionState) -> Vec<String> {
-    let mut issues = Vec::new();
-    let mut check = |field: &str, left: String, right: String| {
+pub fn session_parity_differences(
+    folded: &SessionState,
+    indexed: &SessionState,
+) -> Vec<ParityDifference> {
+    let mut differences = Vec::new();
+    let mut check = |field: &'static str, left: String, right: String| {
         if left != right {
-            issues.push(format!("{field}: fold={left} index={right}"));
+            differences.push(ParityDifference {
+                field,
+                folded: left,
+                indexed: right,
+            });
         }
     };
     check(
@@ -1341,8 +1401,8 @@ pub fn session_parity_issues(folded: &SessionState, indexed: &SessionState) -> V
     );
     check(
         "turn_trace_history",
-        json_of(&folded.turn_trace_history),
-        json_of(&indexed.turn_trace_history),
+        parity_json_traces(&folded.turn_trace_history),
+        parity_json_traces(&indexed.turn_trace_history),
     );
     check(
         "history_nodes.len",
@@ -1351,8 +1411,8 @@ pub fn session_parity_issues(folded: &SessionState, indexed: &SessionState) -> V
     );
     check(
         "history_nodes",
-        json_of(&folded.history_nodes),
-        json_of(&indexed.history_nodes),
+        parity_json_nodes(&folded.history_nodes),
+        parity_json_nodes(&indexed.history_nodes),
     );
     check(
         "history_branches",
@@ -1364,10 +1424,170 @@ pub fn session_parity_issues(folded: &SessionState, indexed: &SessionState) -> V
         json_of(&folded.history_cursor),
         json_of(&indexed.history_cursor),
     );
-    issues
+    differences
 }
 
-/// 逐字段对拍的单串结果（`None` = 完全一致）。
+/// 逐字段对拍（文本形态，`field: fold=X index=Y`）——比对与报错的既有口径。
+///
+/// `X`/`Y` 是**原样值**，故文本可能很长；面向用户的诊断请用 [`session_parity_explain`]
+/// （摘要制，不打印大字段全文）。
+pub fn session_parity_issues(folded: &SessionState, indexed: &SessionState) -> Vec<String> {
+    session_parity_differences(folded, indexed)
+        .into_iter()
+        .map(|difference| {
+            format!(
+                "{}: fold={} index={}",
+                difference.field, difference.folded, difference.indexed
+            )
+        })
+        .collect()
+}
+
+/// **日志不承载**的字段（跨真源比对时必须忽略，否则会产生永久假差异）。
+///
+/// 这是「什么算差异」的**唯一豁免清单**，`rebuild-index` 的 `mismatched` 与
+/// `migrate-logs` 的 `mismatched` 都读它（`log_migrate::MIGRATION_PARITY_EXEMPTIONS`
+/// 只是本常量的别名，不再各留一份）：
+///
+/// - `workspace_id`：日志格式没有承载它的命令（ADR 0099 阶段 2-D 把它定为索引独有投影，
+///   读路径从索引行继承）⇒ fold 侧恒为 `None`，与索引行比必假阳性；
+/// - `last_commit_watermark`：日志里唯一的水位载体是 `cursor.event_watermark`，而 fold
+///   会把它同时用于 `event_watermark` 与 `last_commit_watermark` ⇒ 该派生字段不可比。
+///
+/// 注意 `trace_migration_state` / `turn_trace_refs` 不在本清单里——它们由
+/// [`INDEX_ONLY_STATE_FIELDS`] 在比对函数内部直接跳过。
+pub const LOG_UNCARRIED_STATE_FIELDS: [&str; 2] = ["workspace_id", "last_commit_watermark"];
+
+/// 跨真源比对（fold vs 索引/blob）：**忽略日志不承载的字段**，返回全部其余差异。
+///
+/// 与 [`session_parity_issues`] 唯一区别就是过滤 [`LOG_UNCARRIED_STATE_FIELDS`]；
+/// 字段清单与逐字段取值仍来自 [`session_parity_differences`]（唯一定义）。
+pub fn session_parity_issues_ignoring_uncarried(
+    folded: &SessionState,
+    indexed: &SessionState,
+) -> Vec<String> {
+    session_parity_differences(folded, indexed)
+        .into_iter()
+        .filter(|difference| !LOG_UNCARRIED_STATE_FIELDS.contains(&difference.field))
+        .map(|difference| {
+            format!(
+                "{}: fold={} index={}",
+                difference.field, difference.folded, difference.indexed
+            )
+        })
+        .collect()
+}
+
+/// 跨真源比对的一致/不一致判定（`None` = 一致）——`rebuild-index` 的 `mismatched` 用它。
+pub fn session_parity_diff_for_cross_source(
+    folded: &SessionState,
+    indexed: &SessionState,
+) -> Option<String> {
+    let issues = session_parity_issues_ignoring_uncarried(folded, indexed);
+    if issues.is_empty() {
+        None
+    } else {
+        Some(issues.join("; "))
+    }
+}
+
+/// `--explain` 用的**逐字段摘要**（稳定可 diff，绝不打印大字段全文）。
+///
+/// 摘要规则：
+/// - 数组字段（history / transcript / 节点 / 分支 / trace / 记忆 / 证据）⇒ `N 条` + 首条
+///   的前 [`PARITY_SUMMARY_PREVIEW_CHARS`] 字符；
+/// - 标量字段 ⇒ 值本身（同样截断）；
+/// - 每行形如 `字段 | fold: <摘要> | index: <摘要>`。
+pub fn session_parity_explain(folded: &SessionState, indexed: &SessionState) -> Vec<String> {
+    session_parity_differences(folded, indexed)
+        .into_iter()
+        .map(|difference| {
+            let (left, right) = summarize_parity_pair(
+                &difference.folded,
+                &difference.indexed,
+            );
+            format!(
+                "{} | fold: {} | index: {}",
+                difference.field, left, right
+            )
+        })
+        .collect()
+}
+
+/// 两侧摘要 + **首处差异定位**（同长度数组时给出元素序号与不同的键名）。
+///
+/// 只报「第几个元素、哪些字段不同」——不打印值，既满足「不得打印大字段全文」，
+/// 又让 `--explain` 能回答「到底差在哪」，而不是含糊的「有差异」。
+fn summarize_parity_pair(left: &str, right: &str) -> (String, String) {
+    let mut left_summary = summarize_parity_value(left);
+    let mut right_summary = summarize_parity_value(right);
+    let (Ok(serde_json::Value::Array(left_items)), Ok(serde_json::Value::Array(right_items))) = (
+        serde_json::from_str::<serde_json::Value>(left),
+        serde_json::from_str::<serde_json::Value>(right),
+    ) else {
+        return (left_summary, right_summary);
+    };
+    if left_items.len() != right_items.len() {
+        return (left_summary, right_summary);
+    }
+    let Some(index) = (0..left_items.len()).find(|index| left_items[*index] != right_items[*index])
+    else {
+        return (left_summary, right_summary);
+    };
+    let hint = match (
+        left_items[index].as_object(),
+        right_items[index].as_object(),
+    ) {
+        (Some(left_object), Some(right_object)) => {
+            let mut keys: Vec<&str> = Vec::new();
+            for (key, value) in left_object {
+                if right_object.get(key) != Some(value) {
+                    keys.push(key.as_str());
+                }
+            }
+            for key in right_object.keys() {
+                if !left_object.contains_key(key) {
+                    keys.push(key.as_str());
+                }
+            }
+            keys.sort_unstable();
+            keys.truncate(5);
+            format!("；首处差异 #{index}（字段 {}）", keys.join(","))
+        }
+        _ => format!("；首处差异 #{index}"),
+    };
+    left_summary.push_str(&hint);
+    right_summary.push_str(&hint);
+    (left_summary, right_summary)
+}
+
+/// 摘要里的单值预览长度（字符）。80 是 task-13 明确要求的「首条前 80 字符」。
+const PARITY_SUMMARY_PREVIEW_CHARS: usize = 80;
+
+/// 把一个字段值压成一行摘要（数组 ⇒ `N 条，首条 …`；其它 ⇒ 截断值）。
+fn summarize_parity_value(raw: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Array(items)) => {
+            let first = items
+                .first()
+                .map(|item| truncate_preview(&item.to_string()))
+                .unwrap_or_else(|| "-".to_string());
+            format!("{} 条，首条 {}", items.len(), first)
+        }
+        Ok(value) => truncate_preview(&value.to_string()),
+        Err(_) => truncate_preview(raw),
+    }
+}
+
+fn truncate_preview(value: &str) -> String {
+    let mut preview: String = value.chars().take(PARITY_SUMMARY_PREVIEW_CHARS).collect();
+    if value.chars().count() > PARITY_SUMMARY_PREVIEW_CHARS {
+        preview.push('…');
+    }
+    preview
+}
+
+/// 逐字段对拍的单串结果（`None` = 完全一致）。/// 逐字段对拍的单串结果（`None` = 完全一致）。
 pub fn session_parity_diff(folded: &SessionState, indexed: &SessionState) -> Option<String> {
     let issues = session_parity_issues(folded, indexed);
     if issues.is_empty() {
@@ -1437,6 +1657,82 @@ impl RebuildReport {
     }
 }
 
+/// 索引侧**基线**（双读比对与 `--explain` 的**唯一来源**）。
+///
+/// 组成：`load_index_store()`（索引原样视图）+ 轻量索引行的 `normalized_*` 投影补全。
+/// 为什么要抽出来：一旦「rebuild 的结论」和「explain 的解释」用两份基线，就会再次出现
+/// 「数字说 49 个不一致、解释却说没差异」这类自相矛盾（正是本任务要消灭的那类分叉）。
+pub fn load_index_baseline(
+    backend: &SqliteSessionBackend,
+) -> Option<HashMap<String, SessionState>> {
+    let store = backend.load_index_store()?;
+    let mut sessions = store.sessions_view().clone();
+    // 停写 blob 后，有日志会话的索引行只有索引字段；按索引自己的投影补全（**不读日志**）。
+    backend.fill_index_only_rows_from_index_projection(
+        &mut sessions,
+        &std::collections::HashSet::new(),
+    );
+    Some(sessions)
+}
+
+/// `--explain <session-id>` 的文本报告（逐字段**摘要**，稳定可 diff）。
+///
+/// 输出契约（CLI 直接逐行打印）：
+/// - 无日志 ⇒ 一行说明「rebuild-index 不覆盖无日志会话」；
+/// - 索引里没有该行 ⇒ 一行说明「重建后会新增」；
+/// - 有差异 ⇒ 每个字段一行 `字段 | fold: <摘要> | index: <摘要>`；
+/// - 无差异 ⇒ 恰好一行 `no difference`。
+pub fn explain_session_parity(
+    backend: &SqliteSessionBackend,
+    session_id: &str,
+) -> Result<Vec<String>, String> {
+    let log_root = backend.session_log_root();
+    let store = SessionLogStore::new(log_root);
+    let meta = store
+        .list_sessions()
+        .map_err(|error| format!("scan log root: {error}"))?
+        .into_iter()
+        .find(|meta| meta.session_id == session_id);
+    let Some(meta) = meta else {
+        return Ok(vec![format!(
+            "no log file: 会话 {session_id} 没有日志，rebuild-index 不会覆盖它（存量 grandfather）"
+        )]);
+    };
+    let folded = read_session_state(&store, session_id)
+        .map_err(|error| format!("fold `{session_id}`: {error}"))?
+        .state;
+    let baseline = load_index_baseline(backend);
+    let Some(indexed) = baseline.as_ref().and_then(|baseline| baseline.get(session_id)) else {
+        return Ok(vec![format!(
+            "no index row: 索引里没有 {session_id}（重建后会出现，无需比对）"
+        )]);
+    };
+    let _ = meta;
+    // 判定口径必须与 `rebuild-index` 的 mismatched 同源（同一个豁免清单）。
+    let mut lines: Vec<String> = session_parity_explain(&folded, indexed)
+        .into_iter()
+        .zip(session_parity_differences(&folded, indexed))
+        .filter(|(_, difference)| !LOG_UNCARRIED_STATE_FIELDS.contains(&difference.field))
+        .map(|(line, _)| line)
+        .collect();
+    // 被忽略的字段**显式列出**（不是静默）：否则「no difference」会让人以为字段也一致。
+    let ignored: Vec<&str> = session_parity_differences(&folded, indexed)
+        .into_iter()
+        .filter(|difference| LOG_UNCARRIED_STATE_FIELDS.contains(&difference.field))
+        .map(|difference| difference.field)
+        .collect();
+    if !ignored.is_empty() {
+        lines.push(format!(
+            "ignored (not carried by log, not a mismatch): {}",
+            ignored.join(", ")
+        ));
+    }
+    if lines.is_empty() {
+        return Ok(vec!["no difference".to_string()]);
+    }
+    Ok(lines)
+}
+
 /// **从会话日志重建 SQLite 索引**（ADR 0099 阶段 2 第 2 项）。
 ///
 /// 硬约束（顺序有意义）：
@@ -1467,8 +1763,10 @@ pub fn rebuild_index_at_root(
     // grandfather），若拿它当比对基准，`mismatched` 会退化成「fold 与 fold 比」的恒零，
     // 双读比对（阶段 2 第 3 项）就此失去意义。故基准固定为索引原样视图；这也正是
     // 「索引可重建 / 可校验」这条承诺的观测面。
-    let mut index_view: HashMap<String, SessionState> = match backend.load_index_store() {
-        Some(store) => store.sessions_view().clone(),
+    // 索引现有视图：与 `--explain` 共用 `load_index_baseline`（唯一来源），避免
+    // 「重建结论」与「诊断解释」各用一套基线而互相矛盾。
+    let index_view: HashMap<String, SessionState> = match load_index_baseline(backend) {
+        Some(view) => view,
         None => {
             // 读不出现有索引 ⇒ 比对基准缺失。重建本身仍可进行（真源不依赖索引），
             // 但必须显式说清楚「mismatched 这一列不可信」，不许静默当成零差异。
@@ -1479,14 +1777,6 @@ pub fn rebuild_index_at_root(
             HashMap::new()
         }
     };
-    // ADR 0099 阶段 2-D：停写 blob 后，有日志会话的索引行只有索引字段。若直接拿它当基准，
-    // 每个会话都会被记成 mismatch（内容侧全空），比对列等于永久噪声。
-    // 因此把轻量行按**索引自己的** `normalized_*` 投影补全（不读日志 ⇒ 仍是独立观察者），
-    // 基准才回到「索引内容 vs 日志 fold」的正确语义。
-    backend.fill_index_only_rows_from_index_projection(
-        &mut index_view,
-        &std::collections::HashSet::new(),
-    );
     let metas = store
         .list_sessions()
         .map_err(|error| format!("scan session log root `{}`: {error}", log_root.display()))?;
@@ -1523,7 +1813,10 @@ pub fn rebuild_index_at_root(
         }
         // 双读比对（阶段 2 第 3 项的落地点）：重建前先记「fold vs 现有索引」的差异。
         if let Some(current) = index_view.get(&session_state_id(&folded.state)) {
-            if session_parity_diff(&folded.state, current).is_some() {
+            // ADR 0099 阶段 3-D：判定与 `--explain`、与迁移比对**同源**（共享豁免清单），
+            // 不再用严格的 `session_parity_diff`（它会把「日志不承载的 workspace_id」
+            // 当成差异 ⇒ 真实库恒有 49 个假 mismatched）。
+            if session_parity_diff_for_cross_source(&folded.state, current).is_some() {
                 report.mismatched.push(session_id.clone());
             }
         }

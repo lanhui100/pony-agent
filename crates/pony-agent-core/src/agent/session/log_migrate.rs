@@ -48,14 +48,17 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::backend::{PersistCommand, SessionBackend, SessionMetaPatch};
-use super::fold::{read_session_state, session_parity_issues};
+use super::fold::read_session_state;
 use super::log_command::command_to_value;
 use super::log_store::{now_ms, SessionLogMeta, SessionLogSource, SessionLogStore};
 use super::types::SessionState;
 use crate::agent::sqlite_session::SqliteSessionBackend;
 
-/// 迁移比对时**显式豁免**的字段前缀（理由见模块文档；其余字段一律严格比对）。
-pub const MIGRATION_PARITY_EXEMPTIONS: [&str; 2] = ["workspace_id", "last_commit_watermark"];
+/// 迁移比对时**显式豁免**的字段（理由见模块文档；其余字段一律严格比对）。
+///
+/// **只是 `fold::LOG_UNCARRIED_STATE_FIELDS` 的别名**：豁免清单只有一个定义，
+/// `rebuild-index` 的 `mismatched` 与迁移共用它（避免「迁移说一致、重建说不一致」）。
+pub const MIGRATION_PARITY_EXEMPTIONS: [&str; 2] = super::fold::LOG_UNCARRIED_STATE_FIELDS;
 
 /// 迁移选项。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -473,15 +476,9 @@ fn migrate_one(
     }
     let expected = normalize_for_parity(state, session_id);
     let actual = normalize_for_parity(&folded.state, session_id);
-    let issues: Vec<String> = session_parity_issues(&expected, &actual)
-        .into_iter()
-        .filter(|issue| {
-            let field = issue.split(':').next().unwrap_or_default();
-            !MIGRATION_PARITY_EXEMPTIONS
-                .iter()
-                .any(|exempt| field == *exempt)
-        })
-        .collect();
+    // 与 `rebuild-index` 的 mismatched **同一个**判定函数（豁免清单只有一处定义）。
+    let issues: Vec<String> =
+        super::fold::session_parity_issues_ignoring_uncarried(&expected, &actual);
     if !issues.is_empty() {
         let _ = std::fs::remove_dir_all(&staging_dir);
         return Err(MigrationError::Mismatched {

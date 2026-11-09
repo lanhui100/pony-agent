@@ -503,6 +503,27 @@ impl SqliteSessionBackend {
     }
 }
 
+impl SqliteSessionBackend {
+    /// ADR 0099 阶段 3-D：`ponycli sessions rebuild-index --explain <id>` 的只读诊断入口。
+    ///
+    /// 返回**逐字段摘要**（`字段 | fold: … | index: …`；摘要 = 条数 + 首条前 80 字符，
+    /// 绝不打印大字段全文）；无差异时返回恰好一行 `no difference`。
+    /// 比较口径与 `rebuild-index` 的 `mismatched` **同源**（`fold::session_parity_differences`），
+    /// 所以「解释」与「结论」不会分叉。
+    pub fn explain_session_parity(&self, session_id: &str) -> Result<Vec<String>, String> {
+        crate::agent::session::fold::explain_session_parity(self, session_id)
+    }
+
+    /// 跨真源比对的**豁免清单**（只读投影；唯一定义仍是
+    /// `fold::LOG_UNCARRIED_STATE_FIELDS`，`migrate-logs` 侧是它的别名）。
+    ///
+    /// 暴露出来的目的：运维/测试可以断言「rebuild-index 与 migrate-logs 用的是同一份清单」，
+    /// 而不是靠读代码相信。
+    pub fn parity_ignored_state_fields() -> [&'static str; 2] {
+        crate::agent::session::fold::LOG_UNCARRIED_STATE_FIELDS
+    }
+}
+
 // ---------------------------------------------------------------------------
 // E5：单实例文件锁（`<db>.lock`，跨进程独占；同进程多实例共享）
 // ---------------------------------------------------------------------------
