@@ -1,0 +1,75 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "bef2b8e5",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3join-wave69",
+    "fresh_context": true
+  },
+  "executed_by": "l3join-wave69",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/provider/",
+    "crates/pony-agent-core/src/agent/config.rs",
+    "crates/pony-agent-core/src/agent/retry.rs",
+    "crates/pony-agent-core/src/agent/goal_lease.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "src/types/runtime.ts"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1158,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "sed -n '1126,1162p' crates/pony-agent-core/src/agent/provider/mod.rs; grep -n 'fn provider_timeout_backoff_config_for' -A12 crates/pony-agent-core/src/agent/provider/mod.rs; grep -n 'worst_sync_ms' .dev-team/nfr-baseline-wave69.json",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa172_provider_failover_contract.rs",
+      "line": 535,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git diff 98730d5d HEAD -- crates/pony-agent-core/tests/pa172_provider_failover_contract.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": ".dev-team/state-wave69.json",
+      "line": 74,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git diff --exit-code 98730d5d HEAD -- 'crates/pony-agent-core/tests/pa171_*.rs'; echo rc=$?; tail -2 .dev-team/evidence-wave69/final-gates.log",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa171_lease_anchor_contract.rs",
+      "line": 173,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git diff 98730d5d HEAD -- crates/pony-agent-core/tests/pa171_lease_anchor_contract.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 732,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'into_inner' crates/pony-agent-core/src/agent/provider/mod.rs; sed -n '730,734p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/state-wave69.json",
+      "line": 35,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -n 'reset_global_cooldowns' crates/pony-agent-core/src/bin/tui.rs; sed -n '35,36p' .dev-team/state-wave69.json",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa172_budget_anchor_contract.rs",
+      "line": 16,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "git log --oneline --diff-filter=A -- crates/pony-agent-core/tests/pa172_budget_anchor_contract.rs; sed -n '16,16p' crates/pony-agent-core/tests/pa172_budget_anchor_contract.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}

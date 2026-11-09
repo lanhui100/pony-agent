@@ -1,0 +1,121 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "98730d5df8fb7940af702885bd41161b9c0734a6",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "plan-review-v2-a-wave69",
+    "fresh_context": true
+  },
+  "executed_by": "plan-review-v2-a-wave69",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    ".dev-team/contract-matrix-pa172.md",
+    ".dev-team/nfr-baseline-wave69.json",
+    ".dev-team/contract-matrix-pa171.md",
+    ".dev-team/review-plan-wave69-a.json",
+    ".dev-team/review-plan-wave69-b.json"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/nfr-baseline-wave69.json",
+      "line": 457,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "summary": "NFR 未同步 v2：failover 外调例外仍写「单个逻辑调用最多 1+2=3 个 provider 各 1 次尝试……总 wall-clock 上限 failover_budget_ms=120000」。这与同文件 worst_sync_ms=352500（:231-233）、matrix:158-163/203-204（每候选独立 RetryBudget ⇒ 候选内部仍可多次尝试）直接互斥；:488 又声称「旧『早停』表述已删除」，但旧表述原样留在 :457。round1 A 的『超时预算爆炸』因此未真正闭环（同一文件两个互斥上界，且小的那个正是被禁的『宣称更小』）。",
+      "counterexample_cmd": "sed -n '454,463p' .dev-team/nfr-baseline-wave69.json; sed -n '229,233p' .dev-team/nfr-baseline-wave69.json; sed -n '486,489p' .dev-team/nfr-baseline-wave69.json; sed -n '158,163p;203,204p' .dev-team/contract-matrix-pa172.md"
+    },
+    {
+      "file": ".dev-team/contract-matrix-pa172.md",
+      "line": 203,
+      "rule": "TIMEOUT",
+      "severity": "BLOCKING",
+      "summary": "F-c 的 per-attempt 钳制 min(requestTimeoutMs, remaining) 没有任何能证伪的锚点，新给的测试配方还自相矛盾：F-c 冻结 FAILOVER_BUDGET_MS 为 const（不提供注入缝），测试用 request_timeout_ms=1000 + decision_max_attempts=1 + 慢 mock。该组合下每候选只有 1 次尝试、单次 ≤1s，3 个 provider 合计 ≤3s，remaining 恒远大于 requestTimeout ⇒ min() 的钳制分支永不执行，只能证明 1s 超时生效。NFR 唯一相关锚点（:296）只覆盖「remaining<=0 后不再发候选请求」，不覆盖单次 attempt 被 remaining 截断。因此『只把 45s 换成 requestTimeoutMs、不做 min 钳制』也能全绿：此时每候选仍可跑 5×45+7.5=232.5s，总 465s > 352.5s。另 45s 超时是硬编码在 post_openai_json/post_anthropic_json（:2737/:2788）内部，契约未冻结把 remaining 送进请求超时的缝。结论：352.5s 契约上界当前不可机判。",
+      "counterexample_cmd": "sed -n '203p' .dev-team/contract-matrix-pa172.md; sed -n '290,299p' .dev-team/nfr-baseline-wave69.json; grep -n 'build_http_client(Duration::from_secs(45)' crates/pony-agent-core/src/agent/provider/mod.rs; sed -n '4894,4897p' crates/pony-agent-core/src/agent/provider/mod.rs"
+    },
+    {
+      "file": ".dev-team/contract-matrix-pa172.md",
+      "line": 186,
+      "rule": "TIMEOUT",
+      "severity": "BLOCKING",
+      "summary": "timeout 被列为换手触发类，但 timeout 永不进入冷却（enter_cooldown 仅 rate_limited|quota，provider/mod.rs:774-777），且契约没有任何跨轮记忆/sticky/主候选降级位：每轮 resolve_provider 都重新从主 provider 开始（tool_prep.rs:22）。主 provider 持续 hang 时每轮（且每个逻辑调用）稳定重付 5×45s+7.5s+120s=352.5s，永不收敛——这正是 round1 A 的 BLOCKING，修订版未处理，§11 偏差 1–10 也未登记该限制。需要二选一：登记为 known limitation，或补『超时换手成功后的跨轮候选记忆/主候选冷却』（不得破坏 PA-171 C3-P6 冻结的重试语义）。",
+      "counterexample_cmd": "sed -n '772,779p' crates/pony-agent-core/src/agent/provider/mod.rs; grep -n '跨轮\\|下一轮\\|sticky\\|记忆' .dev-team/contract-matrix-pa172.md .dev-team/nfr-baseline-wave69.json; sed -n '365,376p' .dev-team/contract-matrix-pa172.md"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 5220,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "summary": "followup 入口被冻结为参与换手（matrix:215-216），但 accumulated_messages 是协议专属的共享可变 transcript，且在 HTTP 之前就被写回（:4287 OpenAI 1:1、:5220 Anthropic 1:1、:5444/:5464 批量）。换手到不同协议的候选（failoverProviderIds 无协议/能力约束）会把 OpenAI 形态的 role=tool/tool_call_id 消息塞进 Anthropic 请求（或反向）；即使同协议，候选也会在同一 tool_call_id 上重复追加 assistant+tool_result 对。候选必然 400（bad_request 按 §3.2 不换手）⇒ 换手把可重试的 timeout 变成不可换手的硬失败，并污染 transcript。契约 F-a..F-h 未冻结『按候选协议重建快照/禁止跨协议候选』。",
+      "counterexample_cmd": "sed -n '1884,1895p;5215,5222p;1545,1552p;5436,5466p' crates/pony-agent-core/src/agent/provider/mod.rs; grep -n 'protocol\\|协议' .dev-team/contract-matrix-pa172.md; sed -n '214,216p' .dev-team/contract-matrix-pa172.md"
+    },
+    {
+      "file": ".dev-team/contract-matrix-pa172.md",
+      "line": 239,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "summary": "W1（生产注入闭环）只覆盖 bin/tui.rs 的 DynamicProviderResolver，但同名生产实现还有 bin/cli.rs:306（ponycli 二进制，注入点 :982）与 subagent_runtime.rs:39（FixedSelectionResolver）⇒ 这两个生产宿主 policy=default、链恒空，换手永不触发，且未在 §11 登记 deferred。另外 :239 的机判 `grep fn resolve_failover_chain tui.rs` 不能证明闭环：tui 覆写后转发到未覆写的 ProviderRegistryStore 默认方法时链仍恒空，grep 照样命中；契约也未给 upstream_policy 的 grep 判据。",
+      "counterexample_cmd": "grep -n 'impl ProviderSelectionResolver for DynamicProviderResolver' crates/pony-agent-core/src/bin/tui.rs crates/pony-agent-core/src/bin/cli.rs; sed -n '978,984p' crates/pony-agent-core/src/bin/cli.rs; sed -n '235,239p' .dev-team/contract-matrix-pa172.md; grep -n 'name = \"ponycli\"' crates/pony-agent-core/Cargo.toml"
+    },
+    {
+      "file": ".dev-team/contract-matrix-pa172.md",
+      "line": 66,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "summary": "逐字段容错只覆盖对象内部字段：`\"upstreamPolicy\": \"abc\"` / null / [] 这类容器级类型错仍让整体 from_str 失败（serde 的 container default 只补缺字段，不接类型错）⇒ config.rs:498-508 backup + default_registry()，用户全部 provider 被顶替，违反 C2-a/NFR:70『不得整体回落』。需 Option<UpstreamPolicy> 或容器级 lenient 反序列化。",
+      "counterexample_cmd": "sed -n '66,82p' .dev-team/contract-matrix-pa172.md; sed -n '67,72p' .dev-team/nfr-baseline-wave69.json; sed -n '497,508p' crates/pony-agent-core/src/agent/config.rs"
+    },
+    {
+      "file": ".dev-team/nfr-baseline-wave69.json",
+      "line": 275,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "summary": "耗尽标记的格式与解析 API 互斥：NFR 冻结 format 为「；failover_exhausted=true；failover_hops={hops}」，而 matrix:149-151 冻结 parse_failover_exhausted_marker(err) -> Option<usize>（应解析 failover_exhausted={hops}）。照 NFR 写法落盘后解析器只能得到 None ⇒『可解析』承诺落空。",
+      "counterexample_cmd": "sed -n '274,281p' .dev-team/nfr-baseline-wave69.json; sed -n '148,151p' .dev-team/contract-matrix-pa172.md"
+    },
+    {
+      "file": ".dev-team/nfr-baseline-wave69.json",
+      "line": 357,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "summary": "状态计数与词表不自洽：#14 实际 status=pending_review_pass，但 closed_with_note_count=1 无对应条目（幻影计数，靠 count_note 打补丁）；matrix:358 又把 #13 写成『closed（部分）』，该值不在 NFR 的五值词表内，同一条目 NFR:354 写 closed；matrix:361 说 impl_status 一律 planned，而 NFR #14 写 n/a。§10 的双状态列也混淆了语义：#14 的 contract_status=pending_review_pass 是评审门状态，不是 matrix:361 定义的『契约层是否已定义闭合判据』。",
+      "counterexample_cmd": "sed -n '355,364p' .dev-team/nfr-baseline-wave69.json; python3 -c \"import json,collections;d=json.load(open('.dev-team/nfr-baseline-wave69.json'));w=d['wave69_legacy_closure'];print(collections.Counter(i['status'] for i in w['items']));print({k:v for k,v in w.items() if k.endswith('_count')})\"; sed -n '354,361p' .dev-team/contract-matrix-pa172.md"
+    },
+    {
+      "file": ".dev-team/contract-matrix-pa172.md",
+      "line": 369,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "summary": "§11.3 写『换手覆盖面 = 4 个同步入口 + 1 个压缩摘要路径』，但 §3.4 标『是』的只有 4 行（decide_with_tools / continue_with_tool_result / continue_with_tool_results / 压缩摘要），即 3 个同步入口 + 1 个压缩摘要。同一覆盖面两处基数不一致。",
+      "counterexample_cmd": "sed -n '212,220p' .dev-team/contract-matrix-pa172.md; sed -n '369p' .dev-team/contract-matrix-pa172.md"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 9873,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "summary": "/clear 是会话级动作，但 R2 把 reset_global_cooldowns()（清空进程级全表，provider/mod.rs:639-645 单例）挂在其上：会话 A 的 /clear 会重新放行会话 B 正在冷却的 provider，与『冷却期 0 次 HTTP』的跨会话语义冲突。契约只用该理由否掉了 reset_session_scope 的另 5 个调用点，未登记 /clear 自身的跨会话副作用。",
+      "counterexample_cmd": "sed -n '9869,9877p' crates/pony-agent-core/src/bin/tui.rs; sed -n '267p' .dev-team/contract-matrix-pa172.md; sed -n '639,645p' crates/pony-agent-core/src/agent/provider/mod.rs"
+    },
+    {
+      "file": ".dev-team/contract-matrix-pa172.md",
+      "line": 163,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "summary": "worst_sync=352.5s 只在默认值下成立，但同一契约允许 requestTimeoutMs=300000、decisionMaxAttempts=10 ⇒ 合法配置下单次逻辑调用上界为 300000×10+7500+120000=3127500ms（≈52min），而 matrix:161/NFR:233 把它表述为『契约上界（禁止宣称更小）』，外部调用预算例外（NFR:457）也没有随配置重算。应声明为 f(config) 或对乘积设上限。",
+      "counterexample_cmd": "python3 -c \"print(300000*10+7500+120000)\"; sed -n '59,63p;161,163p' .dev-team/contract-matrix-pa172.md"
+    },
+    {
+      "file": ".dev-team/contract-matrix-pa172.md",
+      "line": 113,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "summary": "§2.2 要求视图层/前端 src/types/provider.ts 暴露 upstreamPolicy 与 failoverProviderIds，§9 写域表却只把 §2 派给 agent/config.rs，未给 src/types/provider.ts 任何归属；§9 的越界判定（『写域外改动判 FAIL』）会使该必交付项无法落地。另 src/stores/providers.ts:1000 的空注册表兜底构造 {providers:[],selectedProviderId:null} 不含新键，Rust 视图若不加 #[serde(default)] 则保存报缺字段，加了则静默把 policy 复位为默认，C2-d『前端保存后不得被清空』在该路径不成立。",
+      "counterexample_cmd": "sed -n '113,115p;138p;328,338p' .dev-team/contract-matrix-pa172.md; sed -n '998,1005p' src/stores/providers.ts; sed -n '596,601p' src-tauri/src/lib.rs; sed -n '82,86p' src/types/provider.ts"
+    }
+  ],
+  "audit_notes": "【快照】reviewed_commit=98730d5d 是审查时 HEAD（13:29:18 red-phase 测试提交）；契约冻结提交为 65a909ba（13:28:45）。审查期间 .dev-team/contract-matrix-pa172.md 于 13:29:13 被再次改写且**未提交**：工作树 md5=4064e793a8e4fb405f728eec02b84e1d，HEAD 版本 md5=742b0198994024216356ac9fc280e235。未提交 delta 共 4 处：§2.2 D69-17 两层命名（snake_case 存储 + camelCase 视图 + 提及 src/types/provider.ts）、§3.3 F-c 测试配方（request_timeout_ms=1000/decision_max_attempts=1 + 慢 mock）、§4 D69-19 日志 non-machine 声明、§10 #13 由 closed 改 closed（部分）。本收据的行号与引文以**工作树**为准；其中 finding#2 的『配方不可判定钳制』与 finding#8 的 #13 状态分歧只存在于该未提交 delta，HEAD 版本下 finding#2 退化为『钳制无任何锚点』、finding#8 退化为『closed_with_note_count 幻影 + #14 列语义』，结论同为不通过。NFR（md5=7bfb41ab…）与 pa171 amendment（md5=0c763b4f…）与 HEAD 一致。【边界】仅只读命令（sed/grep/python3/git show），未运行 cargo/npm，未改仓库任何文件，只写本收据。"
+}

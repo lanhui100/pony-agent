@@ -226,7 +226,7 @@ pub fn failover_attempt_timeout_ms(policy_timeout_ms: u64, remaining_ms: u64) ->
 | 压缩摘要 `decide_with_tools`（`turn_prep.rs:66`） | **是（继承同一 manager 链）** | 走 decision 方法本体，无 accumulated-messages 语义 ⇒ 安全（审查 A/BLOCKING-8 纠正） |
 | `decide_with_tools_stream_bounded`（`:974`，决策流式） | **否** | F27：无流式总 deadline ⇒ 换手会把最坏 wall-clock 放大到 30min 级；deferred（需先立流式总 deadline） |
 | `continue_with_tool_result_stream_bounded`（`:1169`，followup 流式） | **否** | 同上；该入口 OpenAI 两分支已发 delta 后重发同步请求并吞成 `Ok`（`:1275-1321`），F-g 不可判定 |
-| 同步轮 `plan_turn`（`turn_prep.rs:204/216`） | 否 | deferred（见 §10） |
+| 同步轮 `plan_turn`（`turn_prep.rs:204/216`） | **是（v3 更正）** | L3-A 审查实测：`plan_turn` → `turn_flow.rs:3069` 的 `decide_with_tools` ⇒ 该路径**会**换手（此前登记为「否」与实现相反，已更正）。理由同压缩摘要：走 decision 方法本体，无 accumulated-messages 语义 |
 
 ### 3.5 装配（写域 `runtime/tool_exec.rs`、`runtime/compaction_ops.rs`）
 
@@ -388,7 +388,21 @@ pub fn turn_stream_outcome_from_terminal(terminal: /* 既有入参 */) -> TurnSt
 10. **生产注入只覆盖桌面 TUI 装配**：`DynamicProviderResolver`（`bin/tui.rs` + `bin/cli.rs`）覆写两个新 trait 方法；
    `FixedSelectionResolver`（`subagent_runtime.rs`，子代理继承宿主选择）与其它静态 resolver 保持默认空链 ⇒
    子代理/静态选择路径不换手（deferred，理由：子代理沿用宿主选择即可，换手属宿主职责）。
-11. **装链时"不换手"路径的错误文本与未装链不同**（实施偏差，如实登记）：为满足冻结用例
+11. **L3 合入审查（wave-69）两路 FAIL 的处置登记**：`review-l3a-wave69.json`（3 BLOCKING）与
+    `review-l3p-wave69.json`（3 BLOCKING）共同指出两处真实缺陷，已在修复提交中处置：
+    ①`UpstreamPolicyStorage` 派生 `Default`=0 ⇒ 缺键时策略被钳成 1000/1/1000（G2 崩）——改手写 Default 为 45000/5/30000，
+    并把 policy 归一移到 `providers.is_empty()` 早退之前；
+    ②换手 `remaining` 只在 hop 边界计算 ⇒ 单跳仍可跑 232.5s，总最坏 465s > 352.5s —— 改为**逐 attempt deadline**
+    （绝对截止时刻传入重试包装，每次 attempt 前 `failover_attempt_timeout_ms` 重算）；
+    ③冻结用例 `failover_not_triggered_for_bad_request` 曾被不必要放宽（加 `invalid_request` 析取）——已回退为原两子句。
+    **未跑第三轮独立审查**（预算已用满），以修复 diff 的定向复核 + 机器门禁替代，如实登记。
+12. **冻结测试文件 `pa171_lease_anchor_contract.rs` 有 1 处 TEST-DEFECT 修复**（如实登记，不伪称"零改动"）：
+    该文件在红相冻结提交时自身编译不过（`E0382` 移动后借用），由 Test Agent 以 test-defect 豁免修复
+    （+3/−1 行，仅把决策文本前置格式化，断言语义不变）；`pa172_upstream_policy_config_contract.rs`
+    的夹具 5→9 与 `pa172_provider_failover_contract.rs` 的断言回退同属 TEST-DEFECT/恢复原断言。
+    ⇒ 本波「冻结面零改动」只在**断言强度**意义上成立，**字节级不成立**；判据必须是
+    `git diff --exit-code <红相提交> -- 'tests/pa171_*.rs'` + 人工核对 diff 只含辅助变量/消息调整。
+13. **装链时"不换手"路径的错误文本与未装链不同**（实施偏差，如实登记）：为满足冻结用例
     `failover_not_triggered_for_bad_request`（要求 `bad_request` 原样上抛含 `400`），**配置了候选链**时
     不换手路径返回原始编排错误文本；**未配置链**（默认）时仍返回 `extract_provider_error_detail` 处理文本
     ⇒ **默认路径 G2 零变更**，差异只在"用户显式配置了换手"之后出现。耗尽路径仍为最后候选结构化详情 + `failover_exhausted=`。

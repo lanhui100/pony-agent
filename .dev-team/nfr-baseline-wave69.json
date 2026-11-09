@@ -123,8 +123,8 @@
    "poison_recovery_declared": "explicit",
    "poison_recovery_reason": "临界区只做内存 map 操作，中毒时数据不可能半写；fail-closed 会让一次历史 panic 永久冻结该 provider，而当时没有任何复位入口（D69-6 #3）",
    "poison_recovery_anchor": "planned: 锁中毒注入后仍可读写（poison 注入 → remaining()/enter() 仍返回值，不得 panic/Err）",
-   "poison_into_inner_sites": 4,
-   "poison_into_inner_evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:650 / :665 / :674 / :694（恰 4 处）",
+   "poison_into_inner_sites": 5,
+   "poison_into_inner_evidence": "provider/mod.rs:650 / :665 / :674 / :694 / +clear_all 新增 1 处（L3-P 审查实测 5 处；`:732` doc 的 '4 处' 表述需在下次触碰时校正）",
    "no_await_across_lock": true,
    "hard_cap_entries": 64,
    "capacity_constants_evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:615（COOLDOWN_DEFAULT_MS）/ :617（COOLDOWN_MAX_MS 6h）/ :619（COOLDOWN_REGISTRY_CAPACITY 64）"

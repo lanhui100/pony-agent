@@ -836,6 +836,10 @@ pub struct ProviderManager {
     policy: UpstreamPolicy,
     /// PA-172 §3.1：换手链；`new()` 时为 `None`（语义冻结：既有构造点零改动）。
     failover: Option<ProviderFailoverChain>,
+    /// PA-172 §3.3 F-c（L3-A/L3-P B2）：换手预算的**绝对截止时刻**。只有换手候选的
+    /// manager 会带它 ⇒ 每次 attempt 的 HTTP 超时都在发请求前按 `min(policy, remaining)`
+    /// 重算（逐 attempt deadline），而不是每次 hop 只算一次。
+    attempt_deadline: Option<Instant>,
 }
 
 impl ProviderManager {
@@ -844,7 +848,37 @@ impl ProviderManager {
             config,
             policy: UpstreamPolicy::default(),
             failover: None,
+            attempt_deadline: None,
         }
+    }
+
+    /// PA-172 §3.3 F-c：给换手候选注入绝对截止时刻（主 provider 不带 ⇒ 主跳预算不变）。
+    fn with_attempt_deadline(mut self, deadline: Instant) -> Self {
+        self.attempt_deadline = Some(deadline);
+        self
+    }
+
+    /// PA-172 §3.3 F-c：本次 attempt 的请求超时（毫秒）。
+    ///
+    /// 逐 attempt 重算：`min(policy.requestTimeoutMs, remaining_ms)`，唯一取值出口是
+    /// [`crate::agent::retry::failover_attempt_timeout_ms`]（禁止第二处 `min`）。
+    /// 返回 `0` ⇒ 预算已耗尽，调用方必须**立即** Abort（0 次 HTTP）。
+    fn effective_attempt_timeout_ms(&self) -> u64 {
+        let Some(deadline) = self.attempt_deadline else {
+            return self.policy.request_timeout_ms;
+        };
+        let remaining_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as u64;
+        crate::agent::retry::failover_attempt_timeout_ms(
+            self.policy.request_timeout_ms,
+            remaining_ms,
+        )
+    }
+
+    /// F-c：预算耗尽的结构化错误（必须**不可重试** ⇒ 重试编排立即 Abort、不再白睡）。
+    fn failover_budget_exhausted_error() -> String {
+        "failover budget exhausted before attempt; remaining=0ms; no request sent".to_string()
     }
 
     /// PA-172 §3.1 builder：注入上游调用策略（超时/尝试次数/退避预算）。
@@ -1088,7 +1122,12 @@ impl ProviderManager {
             return Err(verbatim(primary_detail));
         }
         // §3.2 触发类封闭值域：不在码表内（bad_request / other / HTTP 500）一律不换手。
-        if !crate::agent::retry::failover_eligible(&primary_detail) {
+        //
+        // L3-B BLOCKING-2（合入审查）：判定必须喂**原始错误**（含 `provider 返回错误状态：<code>` 状态行），
+        // 不能喂 `extract_provider_error_detail` 的正文预览 —— 后者丢掉了状态码，会让「HTTP 500 不换手」
+        // 变成由上游正文决定（500 正文含 rate limit 即换手），并让真正的 429（正文无关键词）静默不换手。
+        let verdict_source = primary_raw.as_deref().unwrap_or(primary_detail.as_str());
+        if !crate::agent::retry::failover_eligible(verdict_source) {
             return Err(verbatim(primary_detail));
         }
         let primary_error = primary_detail;
@@ -1119,18 +1158,12 @@ impl ProviderManager {
                 );
                 continue;
             }
-            // F-c：每次候选 attempt 前重算 remaining；remaining<=0 ⇒ 立即 exhausted。
-            let remaining_ms = deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis() as u64;
-            if remaining_ms == 0 {
+            // F-c：预算耗尽 ⇒ 立即结束换手（0 次 HTTP）。这里只是"整条链还要不要继续"
+            // 的快速判定；**每次 attempt** 的请求超时由 `effective_attempt_timeout_ms`
+            // 在发请求前重算（逐 attempt deadline，唯一 `min` 出口在 retry 侧）。
+            if deadline.saturating_duration_since(Instant::now()).is_zero() {
                 break;
             }
-            // F-c：per-attempt 超时 = min(policy.requestTimeoutMs, remaining)（唯一取值出口）。
-            let attempt_timeout_ms = crate::agent::retry::failover_attempt_timeout_ms(
-                self.policy.request_timeout_ms,
-                remaining_ms,
-            );
             hops += 1;
             crate::agent::otel::log::log_json_with_fields(
                 "warn",
@@ -1155,13 +1188,12 @@ impl ProviderManager {
                     ),
                 ],
             );
-            let hop_policy = UpstreamPolicy {
-                request_timeout_ms: attempt_timeout_ms,
-                ..self.policy.clone()
-            };
             // F-d：每个候选一个**独立** ProviderManager（独立 RetryBudget），且不带链
-            // （候选自身失败不再递归换手 —— hop 上限由本循环统一控制）。
-            let hop_manager = ProviderManager::new(candidate.clone()).with_policy(hop_policy);
+            // （候选自身失败不再递归换手 —— hop 上限由本循环统一控制）；策略逐字继承，
+            // 只额外带绝对截止时刻（每次 attempt 再按剩余量收紧）。
+            let hop_manager = ProviderManager::new(candidate.clone())
+                .with_policy(self.policy.clone())
+                .with_attempt_deadline(deadline);
             match hop_manager.decide_with_tools_single_hop(request, tools).0 {
                 Ok(decision) => {
                     provider_log(format!(
@@ -1176,6 +1208,13 @@ impl ProviderManager {
                 }
             }
         }
+        if hops == 0 {
+            // 全链候选都在冷却期被跳过 ⇒ 没有发生换手，"耗尽"不成立：只保留逐条
+            // `provider_failover_skipped_cooldown` 留痕，**不**发 `provider_failover_exhausted`
+            // 也不给错误加 `failover_exhausted=` 标记（事件与标记必须同真同假，
+            // 禁止"事件说耗尽、错误说没换手"）。
+            return Err(last_error);
+        }
         crate::agent::otel::log::log_json_with_fields(
             "warn",
             "provider_failover_exhausted",
@@ -1189,10 +1228,6 @@ impl ProviderManager {
                 ("attempted_providers", serde_json::json!(attempted)),
             ],
         );
-        if hops == 0 {
-            // 全链候选都因冷却被跳过 ⇒ 没有发生换手，不宣称"换手耗尽"。
-            return Err(last_error);
-        }
         Err(crate::agent::retry::append_failover_exhausted_marker(
             &last_error, hops,
         ))
@@ -3054,8 +3089,13 @@ impl ProviderManager {
     fn post_openai_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
         // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
         self.ensure_not_cooling()?;
-        // PA-172 §2.1：单次 attempt 总超时改为配置化（默认 45s，与基线逐字节等价）。
-        let client = build_http_client(Duration::from_millis(self.policy.request_timeout_ms), endpoint)?;
+        // PA-172 §2.1/§3.3：单次 attempt 总超时配置化（默认 45s，与基线逐字节等价）；
+        // 换手候选再按**逐 attempt deadline** 收紧（剩余为 0 ⇒ 立即 Abort，0 次 HTTP）。
+        let attempt_timeout_ms = self.effective_attempt_timeout_ms();
+        if attempt_timeout_ms == 0 {
+            return Err(Self::failover_budget_exhausted_error());
+        }
+        let client = build_http_client(Duration::from_millis(attempt_timeout_ms), endpoint)?;
         let started_at = Instant::now();
 
         let request = client.post(endpoint).bearer_auth(
@@ -3106,8 +3146,13 @@ impl ProviderManager {
     fn post_anthropic_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
         // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
         self.ensure_not_cooling()?;
-        // PA-172 §2.1：单次 attempt 总超时改为配置化（默认 45s，与基线逐字节等价）。
-        let client = build_http_client(Duration::from_millis(self.policy.request_timeout_ms), endpoint)?;
+        // PA-172 §2.1/§3.3：单次 attempt 总超时配置化（默认 45s，与基线逐字节等价）；
+        // 换手候选再按**逐 attempt deadline** 收紧（剩余为 0 ⇒ 立即 Abort，0 次 HTTP）。
+        let attempt_timeout_ms = self.effective_attempt_timeout_ms();
+        if attempt_timeout_ms == 0 {
+            return Err(Self::failover_budget_exhausted_error());
+        }
+        let client = build_http_client(Duration::from_millis(attempt_timeout_ms), endpoint)?;
         let started_at = Instant::now();
 
         let api_key = self
@@ -9428,3 +9473,4 @@ mod tests {
         let _ = handle.join();
     }
 }
+

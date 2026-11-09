@@ -1,0 +1,100 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "98730d5d",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3b-wave69",
+    "fresh_context": true
+  },
+  "executed_by": "l3b-wave69",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/provider/",
+    "crates/pony-agent-core/src/agent/config.rs",
+    "crates/pony-agent-core/src/agent/retry.rs",
+    "crates/pony-agent-core/src/bin/tui/errors.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "src/types/runtime.ts",
+    "docs/contracts/ts-contract.snapshot.json",
+    "crates/pony-agent-core/tests/"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/tests/pa172_provider_failover_contract.rs",
+      "line": 533,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "冻结红相验收断言被实施侧放宽：原断言只接受 `400` / `bad request`，交付提交（98730d5d..bef2b8e5）新增 `lower` 分支与正文词 `invalid_request`（上游正文可控 token）。该用例的冻结语义是 §3.2 反向钉子「不换手时必须原样上抛主 provider 的 400」，实现侧已按 §11-11 把不换手路径改为返回 `primary_raw`（含 `provider 返回错误状态：400 Bad Request` 状态行，provider/mod.rs:1086/:1232）⇒ 原断言本可满足，无 TEST-DEFECT 依据。放宽后「不换手路径退化为只剩正文」这一回归不再被任何用例捕获；且 §11-11 的迁就性偏差与该断言修改互为冗余（二者只有一个成立）。须由 Lead 裁决：恢复原断言（推荐）或补红相失败证据并在 §11 登记 TEST-DEFECT。",
+      "counterexample_cmd": "git -C /home/dm/pony-agent diff 98730d5d -- crates/pony-agent-core/tests/pa172_provider_failover_contract.rs; sed -n '1084,1095p;1230,1246p' /home/dm/pony-agent/crates/pony-agent-core/src/agent/provider/mod.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1091,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "detail": "换手触发类（M2/§3.2 封闭值域）在 `extract_provider_error_detail` 的产物上判定，而该函数只返回**响应正文预览**（provider/mod.rs:4997-5003，丢弃 `provider 返回错误状态：<code>` 状态行；`retry_provider_scoped_with_report_config` 在 :5355 把 `last_error` 换成它）。后果：① `HTTP 500 不换手` 由上游正文决定——500 正文若含 `rate limit`/`quota`/`usage limit` 等词即被 classify 成可换手类，多发一次跨 provider HTTP；② 反向更沉默——429/503 正文若不含码表关键词（正文已无 `429`/`503` 字面量，`RATE_LIMIT_LONG_BACKOFF_HINTS` 的 `\"429\"` 在正文上永不命中）⇒ classify 回落 `other` ⇒ **换手根本不触发**。实测同源证据：`provider_failover_exhausted` 日志里 `last_error_class=\"quota\"` 完全来自 mock 429 正文的 `exceeded_current_quota_error`。修法：判定改用原始错误（`raw_error`）或以 `error_head_segment(raw)` 喂 `failover_eligible`。",
+      "counterexample_cmd": "sed -n '4997,5003p;5355p;1086,1092p' /home/dm/pony-agent/crates/pony-agent-core/src/agent/provider/mod.rs; grep -n 'UPSTREAM_QUOTA_HINTS\\|RATE_LIMIT_LONG_BACKOFF_HINTS' -A6 /home/dm/pony-agent/crates/pony-agent-core/src/agent/retry.rs | head -20; cd /home/dm/pony-agent && cargo test -p pony-agent-core --test pa172_provider_failover_contract --target-dir target-test 2>&1 | grep last_error_class | head -3"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1196,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "`failover_exhausted=` 的「头/正文隔离」在耗尽路径失效，上游正文可伪造/抹掉跳数：传给 `append_failover_exhausted_marker` 的 `last_error` 已是正文预览（无 `响应正文` 标记，:5355→:4997），故 retry.rs:930 的 `err.find(\"响应正文\")` 恒为 None，`parse_failover_exhausted_marker`（retry.rs:944）把整串当头部扫描 ⇒ 正文含 `failover_exhausted=9` 时 :927 幂等短路直接返回原文（真实 hops 不落），parse 返回 9；与 retry.rs:918-925 文档声明「只落在头部段，不受上游正文劫持」相反。当前 marker 无生产消费方（仅测试解析），故影响面=审计/文案可伪造。",
+      "counterexample_cmd": "sed -n '918,958p' /home/dm/pony-agent/crates/pony-agent-core/src/agent/retry.rs; sed -n '1190,1200p;4997,5003p;5355p' /home/dm/pony-agent/crates/pony-agent-core/src/agent/provider/mod.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1097,
+      "rule": "TIMEOUT",
+      "severity": "ADVISORY",
+      "detail": "`FAILOVER_BUDGET_MS` 不是候选跳的墙钟 deadline，契约冻结的 352.5s 上界不可达：hop 内的 `RetryBudget` 只累计 sleep（`budget.record_attempt(slept)`，HTTP 耗时不计），且每候选仍跑满 `decision_max_attempts` 次 × `request_timeout_ms`。默认值下主跳 45s×5=225s（+7.5s 退避），单候选最坏 45s×5+30s=255s ⇒ 实测上界 ≈225+7.5+255 ≈ **487.5s**（剩余预算只在候选**起始**重算，起始时 remaining=120s>45s，故钳制不生效）。契约 §3.1/§3.3 F-c 写的是「由此冻结…352.5s（不得宣称更小）」⇒ 声明与实现不符（实现忠于 F-c 的字面规则，是上界推导漏了 hop 内重试）。修法：per-attempt 在 hop 内也按 remaining 重算，或修正契约上界。",
+      "counterexample_cmd": "sed -n '1093,1170p' /home/dm/pony-agent/crates/pony-agent-core/src/agent/provider/mod.rs; grep -n 'budget.record_attempt(\\|total_budget_ms: policy.retry_budget_ms\\|max_retries: policy.decision_max_attempts' /home/dm/pony-agent/crates/pony-agent-core/src/agent/provider/mod.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa171_lease_anchor_contract.rs",
+      "line": 173,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "冻结面**非零改动**（门禁字面不成立；已随交付提交 bef2b8e5 落盘）：`git diff --exit-code -- 'crates/pony-agent-core/tests/pa171_*'` 实测 exit=1（6 个 pa171 文件中 1 个被改）。判定：属 TEST-DEFECT 编译修复而非放宽——原文件把非 Copy 的 `Option<GraphDecisionKind>` move 进被测函数后又用于 `format!`（矩阵 §7.2 冻结签名按值传 decision）⇒ E0382，红相文件本就无法编译；改动只提前取 `decision_debug`，断言集合与强度逐字不变。须在矩阵 §11 登记该例外，否则「pa171 冻结文件零改动」的机判门禁将长期假红。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git diff --exit-code 98730d5d -- 'crates/pony-agent-core/tests/pa171_*'; echo \"exit=$?\"; git diff 98730d5d -- 'crates/pony-agent-core/tests/pa171_*' | head -20"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/config.rs",
+      "line": 109,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "detail": "`upstream_policy_invalid_value` 的 `field` 在 `de_u32_lenient` 三个分支（:109/:113/:117）固定为字面量 `\"u32\"`，不是契约 §4 第 7 行要求的字段名（`decision_max_attempts`），与另两个字段（`requestTimeoutMs`/`retryBudgetMs` 给真名）口径不一致 ⇒ 按 field 聚合的告警会失真、无法机器归因到具体配置项。同段整体回落用 `upstreamPolicy`/`upstream_policy` 两种写法，同样未进封闭字段集。",
+      "counterexample_cmd": "grep -n 'warn_upstream_policy_invalid_value(' /home/dm/pony-agent/crates/pony-agent-core/src/agent/config.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/config.rs",
+      "line": 1309,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "detail": "`upstream_policy_clamped` 挂在 `normalize_storage`，而 `normalize_storage` 由 `load_storage`（:902/:907）每次读取触发，`load_storage` 又被打在热路径上：`upstream_policy()`（:922）、`resolve_failover_chain()`（:931，且每候选再走一次 `resolve_selection`→`load_storage`，:790）、每轮 `resolve_selection`。⇒ 一份越界的 providers.json（用户手改即可）会按「每轮 2+N 次」倍增刷同一告警（只有在发生一次 save 落盘钳制值后才自愈）。建议钳制告警按「文件 mtime/一次性」去重，或只在写盘路径告警。",
+      "counterexample_cmd": "grep -n 'load_storage()' /home/dm/pony-agent/crates/pony-agent-core/src/agent/config.rs | head; sed -n '1304,1312p' /home/dm/pony-agent/crates/pony-agent-core/src/agent/config.rs"
+    },
+    {
+      "file": "src/types/provider.ts",
+      "line": 82,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "契约 §2.2 明写「视图层（Tauri command / 前端 `src/types/provider.ts`）暴露 `upstreamPolicy`（requestTimeoutMs/decisionMaxAttempts/retryBudgetMs）与 `failoverProviderIds`」，但 `ProviderRegistry` 仍只有 `providers`/`selectedProviderId`，全仓 `src/` 对这两个键 0 命中。当前 round-trip 靠 `{...registry}` 的运行时透传侥幸保住字段；一旦前端按类型重建对象（如 `src/stores/providers.ts:1000` 的空注册表分支）就会丢键，Rust 侧 `#[serde(default)]` 静默回落默认值（即「前端保存后策略被清空」的残余面）。Rust 侧 `storage_from_view`/`build_view_from_storage`/`sanitized_storage_for_persistence` 三处已正确透传（config.rs:966-970/:1062-1066/:1142-1147）。",
+      "counterexample_cmd": "grep -n 'export type ProviderRegistry' -A4 /home/dm/pony-agent/src/types/provider.ts; grep -rn 'upstreamPolicy\\|failoverProviderIds' /home/dm/pony-agent/src/ | head; sed -n '996,1006p' /home/dm/pony-agent/src/stores/providers.ts"
+    }
+  ],
+  "notes": [
+    "密钥/凭据面（必查 1）：7 个新 warn 事件（provider_failover_switched / _skipped_cooldown / _exhausted / provider_cooldown_reset / upstream_policy_clamped / failover_candidate_ignored / upstream_policy_invalid_value）字段只含 provider_name / model / error_class / hop / elapsed_ms / remaining_ms / hops / attempted_providers / field / provided / clamped_to / bound / cleared_entries / scope / provider_id / reason，均无 api_key、api_key_env_var、base_url；`cooldown_key_for`（provider/mod.rs:784）产物含 base_url 归一值但**无任何日志/错误文本消费点**（仅 :956 与 :1107 做 map 键），无凭据外泄路径。",
+    "协议一致性（必查 4）：换手只存在于 `decide_with_tools`（:1059 起调用链，编排体 `failover_decide_with_tools` :1071），两个 followup 同步入口与两个流式入口 0 处调用 `failover_decide_with_tools`；候选请求体由 hop_manager 自己的 `self.config.protocol` 重新装配（:1236-1246），未跨协议复用消息体；`ProviderManager::new` 仍 policy=default+空链（:842-848）；W1 判据命中：`grep -n 'fn resolve_failover_chain' bin/tui.rs bin/cli.rs agent/config.rs` → tui.rs:2958 / cli.rs:356 / config.rs:927，两 bin 均转发 `ProviderRegistryStore`（非 trait 默认实现）。",
+    "前端契约（必查 5）：`docs/contracts/ts-contract.snapshot.json` 的 TurnStreamEvent serdeKeys=39 且含 errorClass；`node scripts/check-ts-contract.mjs` Exit 0（TurnInput 13/13、TurnMetricsSnapshot 27/27、TurnResult 29/30、TurnStreamEvent 39/39）；Rust `TurnStreamEvent.error_class`（runtime/types.rs:209）与 `TurnTraceRecord.error_class`（session/types.rs:762）都是 camelCase + `default` + `skip_serializing_if`，与 `src/types/runtime.ts:832/:1208` 的 `errorClass?: string` 一致；快照自 98730d5d 起未再改动（`git log -1 -- docs/contracts/ts-contract.snapshot.json` = 98730d5d），非手改。",
+    "配置面（必查 3）：lenient 反序列化无放大/溢出——`parse_u64_lenient` 对超界浮点饱和后由 `clamped()` 收口到 [1000,300000]，`de_u32_lenient` 先 `min(u32::MAX)` 再钳到 [1,10]；`Value` 物化+clone 只发生在策略段（非整文件），与输入同阶。候选链卫生真实生效：未知→`unknown`、与主同 (provider_name, base_url)→`self`、重复身份→`duplicate`、>8→`truncated`（config.rs:927-963）。storage(snake)/view(camelCase) round-trip 不丢字段（:966-970/:1062-1066/:1142-1147），残留风险仅在前端类型未暴露（见 findings）。",
+    "门禁实测：`cargo check -p pony-agent-core --all-targets --target-dir target-check` Exit 0；`cargo test`（--target-dir target-test）pa172_provider_failover=11 passed、pa172_upstream_policy_config=8 passed、pa172_budget_anchor=6 passed、pa172_legacy_closure=99 passed。",
+    "交付态核对：审查期间交付被提交为 `bef2b8e5`（`git rev-parse --short HEAD`），经同点探针复核（pa172_provider_failover_contract.rs:533 / provider/mod.rs:1091,1196）内容与审查对象逐字一致；本收据以任务指定的 98730d5d 为基线，对 bef2b8e5 同样成立。"
+  ]
+}

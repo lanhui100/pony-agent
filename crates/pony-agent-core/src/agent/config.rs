@@ -518,7 +518,7 @@ fn clamp_upstream_policy_logging(policy: UpstreamPolicy) -> UpstreamPolicy {
 ///
 /// 分层命名（D69-17）：存储文件既有键全是 snake_case（`base_url` / `selected_provider_id`），
 /// 新增键禁止把视图层 camelCase 直接写进存储文件。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct UpstreamPolicyStorage {
     #[serde(
         default = "default_request_timeout_ms",
@@ -535,6 +535,20 @@ struct UpstreamPolicyStorage {
         deserialize_with = "de_retry_budget_ms_lenient"
     )]
     retry_budget_ms: u64,
+}
+
+/// ⚠ 手写而非 `derive(Default)`（L3-A/L3-P B1）：`#[serde(default)]` 对**缺键**走的是
+/// 字段类型的 `Default::default()`，**不会**调用 `deserialize_with` 的 lenient 回落 ⇒ 派生
+/// 的全 0 默认会让所有既有 `providers.json`（无 `upstream_policy` 键）在 `normalize_storage`
+/// 里被钳成 1000ms/1 次/1000ms（G2 崩）。故默认值必须与 §2.1 三个常量同源。
+impl Default for UpstreamPolicyStorage {
+    fn default() -> Self {
+        Self {
+            request_timeout_ms: UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT,
+            decision_max_attempts: UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT,
+            retry_budget_ms: UPSTREAM_RETRY_BUDGET_MS_DEFAULT,
+        }
+    }
 }
 
 impl From<UpstreamPolicy> for UpstreamPolicyStorage {
@@ -2884,4 +2898,5 @@ mod tests {
         assert!(custom_caps.supports_image_input);
     }
 }
+
 

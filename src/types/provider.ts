@@ -82,6 +82,23 @@ export type ProviderConfig = {
 export type ProviderRegistry = {
   providers: ProviderConfig[];
   selectedProviderId: string | null;
+  /**
+   * PA-172 §2.2：上游调用策略（camelCase 与 Rust `ProviderRegistryView.upstreamPolicy` 对齐）。
+   *
+   * 可选：缺省 ⇒ 后端回落 45000/5/30000（G2 默认零行为变更）。声明在此是为了让
+   * 「读入 → 修改 → 保存」整链不丢字段（否则前端保存会把策略静默清空）。
+   */
+  upstreamPolicy?: {
+    requestTimeoutMs: number;
+    decisionMaxAttempts: number;
+    retryBudgetMs: number;
+  };
+  /**
+   * PA-172 §2.2：跨 provider 故障转移候选链（provider id 列表，保序）。
+   *
+   * 可选：缺省/空数组 ⇒ 关闭换手（G2）。链长上限 8，卫生（未知/重复/自身）由后端解析时判定。
+   */
+  failoverProviderIds?: string[];
 };
 
 export type ApiKeyWriteResult = {

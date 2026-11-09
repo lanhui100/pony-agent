@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "98730d5d",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a-wave69",
+    "fresh_context": true
+  },
+  "executed_by": "l3a-wave69",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/provider/",
+    "crates/pony-agent-core/src/agent/config.rs",
+    "crates/pony-agent-core/src/agent/retry.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_exec.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+    "crates/pony-agent-core/src/agent/runtime/compaction_ops.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/errors.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/agent/goal_lease.rs",
+    "crates/pony-agent-core/src/agent/goal.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/tests/pa171_lease_anchor_contract.rs",
+    "crates/pony-agent-core/tests/pa172_provider_failover_contract.rs",
+    "crates/pony-agent-core/tests/pa172_upstream_policy_config_contract.rs",
+    "crates/pony-agent-core/tests/pa172_budget_anchor_contract.rs",
+    "src/types/runtime.ts",
+    "docs/contracts/ts-contract.snapshot.json",
+    ".dev-team/contract-matrix-pa172.md",
+    "docs/decisions/0104-provider-failover-and-upstream-policy.md"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/config.rs",
+      "line": 521,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n \"impl Default for UpstreamPolicyStorage\" crates/pony-agent-core/src/agent/config.rs; sed -n '521,523p;1188,1194p;1304,1312p' crates/pony-agent-core/src/agent/config.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1158,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "sed -n '1122,1133p;1158,1165p;5104,5113p' crates/pony-agent-core/src/agent/provider/mod.rs; sed -n '3055,3059p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa172_provider_failover_contract.rs",
+      "line": 535,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git -C /home/dm/pony-agent diff 98730d5d bef2b8e5 -- crates/pony-agent-core/tests/pa172_provider_failover_contract.rs; sed -n '1083,1093p;4972,4980p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+      "line": 204,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '200,222p' crates/pony-agent-core/src/agent/runtime/turn_prep.rs; sed -n '3049,3071p' crates/pony-agent-core/src/agent/turn_flow.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1179,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '1101,1121p;1178,1199p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa171_lease_anchor_contract.rs",
+      "line": 173,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git -C /home/dm/pony-agent diff 98730d5d bef2b8e5 -- crates/pony-agent-core/tests/pa171_lease_anchor_contract.rs crates/pony-agent-core/tests/pa172_upstream_policy_config_contract.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}

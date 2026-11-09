@@ -1,0 +1,140 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "98730d5d",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3p-wave69",
+    "fresh_context": true
+  },
+  "executed_by": "l3p-wave69",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/provider/",
+    "crates/pony-agent-core/src/agent/config.rs",
+    "crates/pony-agent-core/src/agent/retry.rs",
+    "crates/pony-agent-core/src/agent/goal_lease.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/bin/tui/errors.rs",
+    "src/types/runtime.ts"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/config.rs",
+      "line": 521,
+      "rule": "NFR_VIOLATION",
+      "detail": "默认策略值是 0/0/0 而非 45000/5/30000：`UpstreamPolicyStorage` 用 `#[derive(.., Default)]`（u64/u32 全零）、且 `ProviderRegistryStorage.upstream_policy` 的 `#[serde(default, deserialize_with=\"de_upstream_policy_storage_lenient\")]` 没有 `default = \"...\"` 路径 ⇒ 键缺席时取 `UpstreamPolicyStorage::default()`=0/0/0；`normalize_storage`（:1304-1309）再把 0/0/0 钳到 [1000,1,1000]。全仓无手写 `impl Default for UpstreamPolicyStorage`（grep 计数 0）。后果：任何 providers.json 未写 upstream_policy（=今日全部用户）与 default_registry()（新装）都得到 requestTimeoutMs=1000 / decisionMaxAttempts=1 / retryBudgetMs=1000 ⇒ 同步出口 1s 超时、0 次重试、每次 load 还喷 3 条 upstream_policy_clamped。违反 nfr-baseline-wave69 `retry.wave69_configurable.request_timeout_ms_default=45000`、`decision_max_attempts_default=5`、`retry_budget_ms_default=30000` 与矩阵 G2「未配置时逐项与 458b952e 一致」。红线覆盖不到：唯一相关用例 `upstream_policy_wire_defaults_fill_missing_fields` 直接对 `UpstreamPolicy`（视图层）反序列化，绕过了存储层。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '521,522p;595,596p;1188,1192p;1304,1310p' crates/pony-agent-core/src/agent/config.rs && grep -c 'impl Default for UpstreamPolicyStorage' crates/pony-agent-core/src/agent/config.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa172_provider_failover_contract.rs",
+      "line": 535,
+      "rule": "CONTRACT_BREAK",
+      "detail": "冻结红相验收用例被实施侧改写且断言语义被放宽：基线 98730d5d 冻结的断言是 `error.contains(\"400\") || lower.contains(\"bad request\")`，现在追加了第三个 OR 分支 `|| lower.contains(\"invalid_request\")`。矩阵 §0 与 AGENTS「测试分权底线」均要求冻结验收测试只读、不得让断言语义变弱（§11.11 亦明写实现应满足「原样上抛含 400」）。同一并集 diff 里另有两个冻结红相文件被改：pa172_upstream_policy_config_contract.rs（arrange 5→9 个 synth provider）、pa171_lease_anchor_contract.rs（失败信息 helper 取 decision_debug，断言未变）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git diff 98730d5d -- crates/pony-agent-core/tests/pa172_provider_failover_contract.rs crates/pony-agent-core/tests/pa172_upstream_policy_config_contract.rs crates/pony-agent-core/tests/pa171_lease_anchor_contract.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1158,
+      "rule": "TIMEOUT",
+      "detail": "per-attempt deadline 只在 hop 入口算一次、被整跳的重试循环复用：`attempt_timeout_ms = failover_attempt_timeout_ms(policy.request_timeout_ms, remaining_ms)`（:1130）→ 写进 `hop_policy`（:1156-1161）→ `hop_manager.decide_with_tools_single_hop`（:1170-1172）内部再走 `retry_provider_timeout_with_policy`（:1236），即同一候选最多 decision_max_attempts(5) 次 HTTP，每次都用同一个固定的 attempt_timeout，退避 sleep 也仍吃满 retry_budget_ms(30000)。于是 first hop 起点 remaining≈120000ms 时最坏耗时为 5×45000 + 30000 = 255000ms，加上主 provider 的 45s×5+7.5s：实际最坏 ≈ 487500ms > NFR 契约上界 `worst_sync_ms=352500`（基线 §wave69_failover.worst_sync_ms 明确「该值作为契约上界，禁止宣称更小」）。代码与 F-c 字面「每次候选 attempt 前重算 remaining」也不符——重算只发生在 hop 之间。冻结用例 `failover_budget_stops_handoffs` 用 `decision_max_attempts: 1` 刻意关掉单跳重试（注释：「关掉单跳重试，使『每候选 1 次 attempt』成为确定事实」）⇒ 该超界面机器不可见。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1130,1135p;1156,1172p;5117,5126p' crates/pony-agent-core/src/agent/provider/mod.rs && sed -n '709,718p' crates/pony-agent-core/tests/pa172_provider_failover_contract.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/config.rs",
+      "line": 109,
+      "rule": "CORRECTNESS",
+      "detail": "`de_u32_lenient` 三处 `warn_upstream_policy_invalid_value(\"u32\", ..)` 把「类型名」当配置字段名写进 `upstream_policy_invalid_value.field`（NFR `wave69_logging_events` 的 field 语义是「被回落的配置字段」）。消费方无法从 field 判定是 requestTimeoutMs / decisionMaxAttempts / retryBudgetMs 中的哪一个，与相邻 `upstream_policy_clamped.field`（写 snake_case 字段名）也不一致。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '104,120p' crates/pony-agent-core/src/agent/config.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1179,
+      "rule": "CORRECTNESS",
+      "detail": "`provider_failover_exhausted` 在 `if hops == 0` 判据之前无条件发射（:1179-1191），而 hops==0（全链候选都处于冷却被跳过）分支返回的是**不带** `failover_exhausted=` 标记的原始错误（:1193-1195）。于是日志面宣称「候选链耗尽、hops=0」，错误文本却 `parse_failover_exhausted_marker` 返回 None ⇒ 审计按 NFR `exhausted_error_suffix` 做日志↔错误对账时会出现对不上的孤儿事件。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1179,1196p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/fold.rs",
+      "line": 1683,
+      "rule": "NFR_VIOLATION",
+      "detail": "并集 diff 内新增了一条裸 eprintln 生产日志（`history_state_evidence_prefix_mismatch`），既无 JSON 无 trace_id，又把「证据前缀不匹配」（数据异常）只落在 stderr 上，与 NFR `logging.format=json` / `trace_id=true` 与 `logging_eprintln_exempt_note`「本波次不新增生产 eprintln」冲突。来源是提交 8795d467（ADR 0102 session log carriers），不属 PA-172 写域，但确实在 `git diff 98730d5d -- crates/**` 的审查对象内，需由所属波次定性（结构化日志或显式豁免登记）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1678,1690p' crates/pony-agent-core/src/agent/session/fold.rs && git log --oneline -1 8795d467",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1168,
+      "rule": "NFR_VIOLATION",
+      "detail": "换手成功路径新增了一条**非结构化** stderr 日志 `provider_log(format!(\"decision:failover-success hop=.. from=.. to=..\"))`；`provider_log` 的实现就是 `eprintln!(\"[pony-provider] {}\")`（:6446-6448）。同一事实已由 `provider_failover_switched` 结构化事件覆盖 ⇒ 新增的只是 PA-119 的 eprintln 债面扩张（NFR `logging_scope=new_structured_logging_surface_only`）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '1163,1171p;6446,6448p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/nfr-baseline-wave69.json",
+      "line": 126,
+      "rule": "NFR_VIOLATION",
+      "detail": "基准字段与代码取证漂移：`wave69_locks.provider_cooldown_registry.poison_into_inner_sites=4`，实际注册表内已有 5 处 fail-open（:650/:665/:674/:694 既有 + :703 新增 clear_all），且 `provider/mod.rs:732` 的 doc 仍写「4 处」。四处 all-fail-open 语义未变（并发项 PASS），但数值基准不再与代码逐项一致，需回写为 5（#3 的 closed_with_declaration 判据以该数字为准）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'unwrap_or_else(|poisoned| poisoned.into_inner())' crates/pony-agent-core/src/agent/provider/mod.rs && sed -n '120,132p' .dev-team/nfr-baseline-wave69.json",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "src/types/provider.ts",
+      "line": 83,
+      "rule": "CONTRACT_BREAK",
+      "detail": "矩阵 §2.2 要求视图层「前端 src/types/provider.ts」暴露 `upstreamPolicy` 与 `failoverProviderIds`，实测 `ProviderRegistry` 类型未加这两个字段且该文件本波零改动；`src-tauri/src/lib.rs` 亦无相关键。当前 `src/stores/providers.ts:856/898` 用 `{ ...registry, providers }` 展开，运行期尚不会丢字段（C2-d 暂未破），但类型面缺口使任何按类型重建 registry 的新代码都会把用户 upstreamPolicy 静默打回默认。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '81,86p' src/types/provider.ts && git diff --stat 98730d5d -- src/types/provider.ts",
+      "severity": "ADVISORY"
+    }
+  ],
+  "question_verdicts": {
+    "q1_external_call_timeout": "PARTIAL/FAIL — 两处 45s 内联字面量已改为 `self.policy.request_timeout_ms`（provider/mod.rs:3058、:3110），`ProviderManager::new` 仍给 45000；`failover_attempt_timeout_ms` 是全仓唯一的 min(policy,remaining) 取值口（retry.rs:944 定义、provider/mod.rs:1130 唯一调用）；流式 15s connect/180s read-idle 未被改动（provider/mod.rs:2629-2630、2681-2682，diff 零改动）。但生产默认策略经 config 面解析成 1000/1（findings[0]），且 per-attempt 只在 hop 入口算一次（findings[2]）⇒ 该问 FAIL。",
+    "q2_logging": "PASS（含 2 条 ADVISORY）— 7 个新事件（+provider_cooldown_reset/goal_rounds_yield_pending_requests 两条 info）全部走 `otel::log::log_json_with_fields`，trace_id 由 `build_json_line` 自动回落 `current_trace_id`（log.rs:123-131），无裸 eprintln 出现在 9 个事件面；control_plane 两处预算推进失败（:1949-1968、:2773-2792）均落 `goal_round_advance_failed` warn 且行为仍 `return Ok`；新增 `let _ =` 仅 2 处且均非吞错（trait 默认方法未用形参、debug 测试钩子 join）。裸 eprintln 只有并集 diff 里的 session/fold.rs:1683（非 PA-172，findings[5]）。",
+    "q3_resource_release": "PASS — 冷却注册表仍 `COOLDOWN_REGISTRY_CAPACITY=64`（:619）、`enter` 内 `retain(未过期)` 淘汰（:676-681）、`COOLDOWN_MAX_MS=6h`（:617）、无后台线程/定时器（provider 内 thread::spawn 仅 :740 debug 测试钩子与 :7954/:9234/:9361 的 `mod tests`）；`reset_global_cooldowns` 为同步全表清空。`GoalRoundLoopLease`（goal_lease.rs:66-74）与 `TurnLoopInFlightGuard`（tui.rs:3053-3060 Drop 只 remove 本会话）均 RAII，panic 展开路径由 Drop 保证；`enter` 已挪到 session_id 解析之后（tui.rs:10143-10152）。",
+    "q4_concurrency": "PASS — 冷却 Mutex 临界区仅 get/insert/retain/remove/len/clear 内存操作（:646-707），无 HTTP/block_on/sleep；`reset_global_cooldowns` 的日志在 `clear_all` 释放锁之后发射（provider/mod.rs:717-730）；invalidate 与 enter/reset 共用单锁、无嵌套 ⇒ reset 只承诺清空调用时刻的条目集合，安全。在飞锁按会话分区，enter(insert)/Drop(remove 本会话) 顺序正确且不会误清他会话；事件循环每 tick 取一次该锁（tui.rs:10836-10839）仅 contains 读，无长临界区。",
+    "q5_config_tolerance": "FAIL — 逐字段容错成立（`de_*_lenient` 全部返回 Ok，畸形 upstreamPolicy/failoverProviderIds 不会让整文件落 `backup_invalid_registry_file`，C2-a/C2-c 通过）；边界常量与 NFR 逐项一致（45000/5/30000、[1000,300000]、[1,10]、[1000,300000]、FAILOVER_CHAIN_MAX_LEN=8、MAX_FAILOVER_HOPS=2、FAILOVER_BUDGET_MS=120000）。但「缺省 ⇒ 45000/5/30000」不成立（findings[0]），`worst_sync=352500` 不是实现的真实上界（findings[2]）。",
+    "q6_contract_compat": "PARTIAL/FAIL — 无字段删除/重编号：`ProviderManager::new` 语义冻结为 policy=default+空链（provider/mod.rs:918-925）、`emit_stream_failed` 14 参签名逐字未动（turn_flow.rs 零 diff，:570-587）、`ERROR_SUMMARY_TRANSIENT` 文案逐字未动（tui/errors.rs:76，diff 未触碰）、5 个冻结 `pa171_*.rs` 全部零 diff（唯一 pa171_lease_anchor_contract.rs 是本波新冻结文件，仅改失败信息 helper）、`GoalRoundStopReason` 仅 +2 additive 变体（9 个）、`UiEvent::GoalRoundsStopped` 仅 +session_id。破坏点在「冻结红相验收测试被改写并放宽断言」（findings[1]）。"
+  },
+  "non_machine_items": [
+    {
+      "item": "9 个 wave-69 新增日志事件（upstream_policy_clamped / failover_candidate_ignored / provider_failover_switched / provider_failover_skipped_cooldown / provider_failover_exhausted / provider_cooldown_reset / goal_rounds_yield_pending_requests / goal_round_advance_failed / upstream_policy_invalid_value）的字段面",
+      "status": "non-machine",
+      "basis": "日志走进程级单例 sink（otel::log，stdout/stderr+文件），无隔离 sink 供断言；矩阵 §4 D69-19 已显式声明 non-machine。本审查只能静态核对发射点/字段名（已逐条比对 NFR 字段集，全部一致）。"
+    },
+    {
+      "item": "B1：跨会话 GoalRoundsStopped 不改当前会话状态行/不进消息区（tui.rs:10779-10803）",
+      "status": "non-machine",
+      "basis": "行为在私有 `fn tui_event_loop` 内，`UiEvent` 消费臂无法从 tests/ 触达；`#[path] mod tui;` 只能访问 pub 项，而为测试放开内部类型被矩阵 B1/B3 明令禁止。字段面（session_id: Option<String> 的 additive 形状 + 构造点 :8459）已机判可测，行为面靠 review。"
+    },
+    {
+      "item": "B3：双会话在飞语义（A 会话线程退出不清 B 会话）",
+      "status": "non-machine",
+      "basis": "`TurnLoopInFlightRegistry` 虽为 pub type（tui.rs:3013），但 `TurnLoopInFlightGuard` 及其 `enter` 是私有项（:3021-3050），bin-as-module 不可达；矩阵 B3 允许「不可触达 ⇒ non-machine」且禁止为测试把内部类型改 pub。静态面已核：insert(本会话)/Drop(remove 本会话)，无清表。"
+    },
+    {
+      "item": "真实 FAILOVER_BUDGET_MS=120000ms 预算下的端到端行为",
+      "status": "non-machine",
+      "basis": "FAILOVER_BUDGET_MS 为 const、矩阵 F-c 明确不提供测试注入缝；现有用例只能把 requestTimeoutMs/decisionMaxAttempts 调小来间接观测。本审查对「预算不约束单跳重试」的判断是静态推导（findings[2] 给出代码行），需要真机 120s 观测才能闭环。"
+    },
+    {
+      "item": "遗留 #7/#12（goal_lease doc 首句与实际类型一致）",
+      "status": "non-machine",
+      "basis": "文档陈述性判据；已人工核对 goal_lease.rs:3 写「Arc<Mutex<HashSet<String>>> 按 session_id 分区」，与 :20 type alias 一致（PASS）。"
+    }
+  ],
+  "notes": [
+    "审查对象 = `git diff 98730d5d -- crates/pony-agent-core/src/** src/types/runtime.ts`（含其后提交 8795d467 的 session log carriers 改动）+ 未跟踪 goal_lease.rs / tests/pa172_budget_anchor_contract.rs。",
+    "本轮未执行 cargo/npm（只读审查）；findings[0]/[2] 为静态推导，均已给出逐行可复现的只读取证命令。",
+    "已核对但与 NFR 一致、不构成缺陷的项：钳制真值表边界、候选链卫生四类 reason（unknown/duplicate/self/truncated）、冷却键单射转义顺序（%→%25 先于 |→%7C，空段 ~empty~）、base_url 去尾斜杠+scheme/host 小写、failover 触发类只复用 retry.rs 码表（failover_eligible，未新增第二套关键词表）、流式入口零换手、HTTP 500 不换手。"
+  ]
+}
