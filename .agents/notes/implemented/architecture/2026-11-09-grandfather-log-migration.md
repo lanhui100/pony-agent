@@ -118,6 +118,29 @@ blob 早已是轻量索引行（2-D 所致），真实内容在日志里。因�
 建议在确认无并发放写后执行一次 `ponycli sessions rebuild-index --db …`，
 并以 `mismatched=0` 作为验收。
 
+### 关于 `rebuild-index` 对齐索引：**暂不执行**（2026-11-09 实测结论）
+
+用户同意后先跑 dry-run，结果出乎预期：`scanned=140 rebuilt=140 mismatched=49`。
+进一步核对 mismatched 的索引行形态：**3 个是轻量行、46 个仍是整包 blob**（即刚迁移的那批）。
+
+抽查 `pa_01a1b478…`：
+
+| 侧 | history | nodes | traces | transcript |
+| :--- | ---: | ---: | ---: | ---: |
+| blob（索引行） | 24 | 20 | **0** | 34 |
+| 日志命令流 | 24 append_message | 20 nodes | **19 append_trace** | 1 条命令（携带整份） |
+
+计数在 history/nodes/transcript 上一致，差异集中在 **trace 面**——这与
+`trace_migration_state = legacy_blob` 的既有约定一致（blob 的 `turnTraceHistory` 为空，
+trace 在独立表里）。迁移的 `session_parity_issues` 知道这条豁免，而 `rebuild-index` 的比较器
+显然**没有应用同一套豁免**。
+
+因此：**不能盲目 `rebuild-index --apply`** —— 它会把 46 个仍是整包 blob 的索引行按 fold 结果重写，
+而这些行的 trace 语义（表 vs blob）与 fold 输出并不等价，属于「用比较器缺陷去覆盖数据」。
+
+**下一步（已作为 task-13 提出）**：给 `rebuild-index` 增加 `--explain <session-id>`，
+逐字段打印差异（字段名 / fold 值摘要 / 索引值摘要），先定性再决定是否 apply。
+
 ## Alternatives considered
 
 1. **方案 A 合成日志 + 自证一致** —— 采纳。可审计（header 标记）、可回滚（保 blob）、可幂等，
